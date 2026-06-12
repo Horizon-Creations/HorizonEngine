@@ -1,6 +1,8 @@
 #pragma once
 #include <Renderer/IRenderer.h>
 #include "OpenGLShaderManager.h"
+#include <HorizonRendering/RenderWorld.h>
+#include <HorizonRendering/RenderExtractor.h>
 #include <unordered_map>
 
 struct SDL_Window;
@@ -24,9 +26,28 @@ public:
 	void RenderWindow(HE::Window* window) override;
 
 private:
+	void CreateUnlitPipeline();
+	void CreateCubeMesh();
+	void DrawScene();
+
 	SDL_Window* m_primarySdlWindow = nullptr;   // needed to restore current context
 	void*       m_glContext        = nullptr;   // borrowed — owned by primary HE::Window
 	// Secondary windows: SDL_Window* → shared SDL_GLContext (owned here)
 	std::unordered_map<SDL_Window*, void*> m_secondaryContexts;
 	OpenGLShaderManager m_shaderManager;
+
+	// ── Scene rendering ─────────────────────────────────────────────────────
+	RenderExtractor m_extractor;
+	RenderWorld     m_renderWorld;
+
+	// Unlit pipeline + built-in cube (bootstrap mesh until the
+	// RenderResourceManager uploads real assets)
+	unsigned int m_unlitProgram   = 0;
+	int          m_uMVP           = -1;
+	int          m_uModel         = -1;
+	int          m_uColor         = -1;
+	unsigned int m_cubeVAO        = 0;
+	unsigned int m_cubeVBO        = 0;
+	unsigned int m_cubeEBO        = 0;
+	int          m_cubeIndexCount = 0;
 };

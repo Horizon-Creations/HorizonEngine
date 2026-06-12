@@ -153,9 +153,11 @@ if(APPLE)
     list(APPEND HR_BACKENDS RendererMetal)
 endif()
 
+# HorizonScene is PRIVATE: only RenderExtractor.cpp touches the ECS —
+# the dependency must never leak to consumers of HorizonRendering.
 target_link_libraries(HorizonRendering
     PUBLIC  HorizonCore
-    PRIVATE ${HR_BACKENDS} glm::glm SDL3::SDL3
+    PRIVATE ${HR_BACKENDS} glm::glm SDL3::SDL3 HorizonScene
 )
 target_compile_definitions(HorizonRendering
     PRIVATE HE_RENDERING_BUILD_DLL

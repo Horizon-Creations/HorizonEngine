@@ -5,16 +5,16 @@
 #include <cstdint>
 
 struct CameraData {
-    glm::mat4 view;
-    glm::mat4 projection;
-    glm::vec3 position;
+    glm::mat4 view       = glm::mat4(1.0f);
+    glm::mat4 projection = glm::mat4(1.0f);
+    glm::vec3 position   = glm::vec3(0.0f);
 };
 
 struct LightData {
-    glm::vec3 position;
-    glm::vec3 color;
-    float     intensity;
-    uint8_t   type;
+    glm::vec3 position  = glm::vec3(0.0f);
+    glm::vec3 color     = glm::vec3(1.0f);
+    float     intensity = 1.0f;
+    uint8_t   type      = 0;
 };
 
 class RenderWorld {
