@@ -1,5 +1,6 @@
 #include "ContentManager/ContentManager.h"
 #include "ContentManager/HAsset.h"
+#include "Diagnostics/Logger.h"
 #include <cstring>
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
@@ -8,15 +9,24 @@ static std::vector<uint8_t> buildMetaChunk(const RuntimeAsset& a)
 {
     std::vector<uint8_t> buf;
     HAsset::Writer::appendPOD(buf, static_cast<uint16_t>(a.type));
+    HAsset::Writer::appendPOD(buf, a.id.hi);
+    HAsset::Writer::appendPOD(buf, a.id.lo);
     HAsset::Writer::appendString(buf, a.name);
     HAsset::Writer::appendString(buf, a.path);
     return buf;
 }
 
-static bool readMetaChunk(const HAsset::Reader::Chunk& c,
-                          std::string& nameOut, std::string& pathOut)
+// fileVersion: v1 META has no UUID — idOut stays invalid and the caller
+// must generate (and ideally persist) a fresh one.
+static bool readMetaChunk(const HAsset::Reader::Chunk& c, uint16_t fileVersion,
+                          HE::UUID& idOut, std::string& nameOut, std::string& pathOut)
 {
     size_t off = sizeof(uint16_t); // type already known from file header
+    if (fileVersion >= 2)
+    {
+        if (!HAsset::Reader::readPOD(c.data, off, idOut.hi)) return false;
+        if (!HAsset::Reader::readPOD(c.data, off, idOut.lo)) return false;
+    }
     if (!HAsset::Reader::readString(c.data, off, nameOut)) return false;
     if (!HAsset::Reader::readString(c.data, off, pathOut)) return false;
     return true;
@@ -52,18 +62,27 @@ HE::UUID ContentManager::loadAsset(const std::string& relativePath)
 	const auto* metaChunk = reader.findChunk(HAsset::CHUNK_META);
 	if (!metaChunk) return HE::UUID();
 
+	HE::UUID    id;
 	std::string assetName, assetPath;
-	if (!readMetaChunk(*metaChunk, assetName, assetPath))
+	if (!readMetaChunk(*metaChunk, reader.header().version, id, assetName, assetPath))
 		return HE::UUID();
 
-	HE::UUID   id{HE::UUID::generate()};
+	if (id == HE::UUID{})
+	{
+		// v1 file without persisted UUID — references to this asset will not
+		// survive a restart until the file is re-saved in the new format.
+		id = HE::UUID::generate();
+		Logger::Log(Logger::LogLevel::Warning,
+			("ContentManager: asset has no persisted UUID (pre-v2 file), generated transient id: " + relativePath).c_str());
+	}
+
 	SlotHandle handle{};
 
 	switch (type)
 	{
 	case HE::AssetType::StaticMesh:
 	{
-		StaticMeshAsset a{}; a.type = type; a.name = assetName; a.path = relativePath;
+		StaticMeshAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_MREF)) { size_t o=0; HAsset::Reader::readString(c->data,o,a.materialPath); }
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_VERT)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.vertices); }
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_INDX)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.indices); }
@@ -73,7 +92,7 @@ HE::UUID ContentManager::loadAsset(const std::string& relativePath)
 	}
 	case HE::AssetType::SkeletalMesh:
 	{
-		SkeletalMeshAsset a{}; a.type = type; a.name = assetName; a.path = relativePath;
+		SkeletalMeshAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_MREF)) { size_t o=0; HAsset::Reader::readString(c->data,o,a.materialPath); }
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_VERT)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.vertices); }
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_INDX)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.indices); }
@@ -85,7 +104,7 @@ HE::UUID ContentManager::loadAsset(const std::string& relativePath)
 	}
 	case HE::AssetType::Texture:
 	{
-		TextureAsset a{}; a.type = type; a.name = assetName; a.path = relativePath;
+		TextureAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_TXMI))
 		{
 			size_t o=0;
@@ -98,7 +117,7 @@ HE::UUID ContentManager::loadAsset(const std::string& relativePath)
 	}
 	case HE::AssetType::Material:
 	{
-		MaterialAsset a{}; a.type = type; a.name = assetName; a.path = relativePath;
+		MaterialAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_MTRL))
 		{
 			size_t o=0;
@@ -109,20 +128,20 @@ HE::UUID ContentManager::loadAsset(const std::string& relativePath)
 	}
 	case HE::AssetType::Scene:
 	{
-		SceneAsset a{}; a.type = type; a.name = assetName; a.path = relativePath;
+		SceneAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_SCNE)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.objectPaths); }
 		handle = m_sceneAssets.insert(std::move(a)); break;
 	}
 	case HE::AssetType::Script:
 	{
-		ScriptAsset a{}; a.type = type; a.name = assetName; a.path = relativePath;
+		ScriptAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_SRC))
 			a.sourceCode.assign(reinterpret_cast<const char*>(c->data.data()), c->data.size());
 		handle = m_scriptAssets.insert(std::move(a)); break;
 	}
 	case HE::AssetType::Audio:
 	{
-		AudioAsset a{}; a.type = type; a.name = assetName; a.path = relativePath;
+		AudioAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_AUMI))
 		{ size_t o=0; HAsset::Reader::readPOD(c->data,o,a.sampleRate); HAsset::Reader::readPOD(c->data,o,a.channels); }
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_PCMD)) a.audioData = c->data;
@@ -130,14 +149,14 @@ HE::UUID ContentManager::loadAsset(const std::string& relativePath)
 	}
 	case HE::AssetType::Font:
 	{
-		FontAsset a{}; a.type = type; a.name = assetName; a.path = relativePath;
+		FontAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_FNTI)) { size_t o=0; HAsset::Reader::readPOD(c->data,o,a.size); }
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_FNTD)) a.fontData = c->data;
 		handle = m_fontAssets.insert(std::move(a)); break;
 	}
 	case HE::AssetType::Shader:
 	{
-		ShaderAsset a{}; a.type = type; a.name = assetName; a.path = relativePath;
+		ShaderAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_SRC))
 			a.sourceCode.assign(reinterpret_cast<const char*>(c->data.data()), c->data.size());
 		handle = m_shaderAssets.insert(std::move(a)); break;
@@ -154,6 +173,11 @@ HE::UUID ContentManager::loadAsset(const std::string& relativePath)
 // ─── saveAsset ────────────────────────────────────────────────────────────────
 bool ContentManager::saveAsset(RuntimeAsset& asset)
 {
+	// First save of a fresh asset — mint its permanent identity now so the
+	// META chunk never hits disk without one.
+	if (asset.id == HE::UUID{})
+		asset.id = HE::UUID::generate();
+
 	const std::string fullPath = m_contentRoot + "/" + asset.path;
 	const uint16_t    typeId   = static_cast<uint16_t>(asset.type);
 

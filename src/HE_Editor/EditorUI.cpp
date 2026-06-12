@@ -1912,11 +1912,15 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				).string();
 				std::replace(relative.begin(), relative.end(), '\\', '/');
 
-				// Write a minimal binary asset stub so the file exists on disk
+				// Write a minimal binary asset stub so the file exists on disk.
+				// The UUID minted here is the asset's permanent identity.
 				{
+					const HE::UUID assetId = HE::UUID::generate();
 					HAsset::Writer w;
 					std::vector<uint8_t> meta;
 					HAsset::Writer::appendPOD(meta, static_cast<uint16_t>(type));
+					HAsset::Writer::appendPOD(meta, assetId.hi);
+					HAsset::Writer::appendPOD(meta, assetId.lo);
 					HAsset::Writer::appendString(meta, defaultName);
 					HAsset::Writer::appendString(meta, relative);
 					w.addChunk(HAsset::CHUNK_META, meta.data(), meta.size());

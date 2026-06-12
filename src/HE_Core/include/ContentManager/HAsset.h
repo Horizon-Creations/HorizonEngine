@@ -20,7 +20,8 @@ namespace HAsset
 
 // ── Magic & version ───────────────────────────────────────────────────────────
 inline constexpr char     k_magic[4]  = { 'H', 'A', 'S', 'T' };
-inline constexpr uint16_t k_version   = 1;
+// v2: META chunk carries the asset UUID (16 bytes) between type and name.
+inline constexpr uint16_t k_version   = 2;
 
 // ── File header (32 bytes) ────────────────────────────────────────────────────
 #pragma pack(push, 1)

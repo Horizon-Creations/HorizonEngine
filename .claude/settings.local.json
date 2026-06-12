@@ -8,7 +8,11 @@
       "Bash(echo \"exit: $?\")",
       "Bash(pkill -f HorizonEditor)",
       "Bash(sed -n '40,80p')",
-      "Bash(sed -n '1,50p' src/HE_Scene/src/SceneSerializer.cpp)"
+      "Bash(sed -n '1,50p' src/HE_Scene/src/SceneSerializer.cpp)",
+      "Bash(sed -n '170,260p' src/HE_Core/include/ContentManager/HAsset.h)",
+      "Bash(sed -n '1890,1955p' src/HE_Editor/EditorUI.cpp)",
+      "Bash(git add *)",
+      "Bash(git commit -q -m 'Persist asset UUIDs in HAsset META chunk \\(v2\\) *)"
     ]
   }
 }
