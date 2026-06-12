@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cmake -S . -B cmake-build-release -DCMAKE_BUILD_TYPE=Release)",
+      "Bash(cmake --build cmake-build-release)",
+      "Bash(echo \"Build exit: $?\")",
+      "Bash(git clone *)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(pkill -f HorizonEditor)",
+      "Bash(sed -n '40,80p')",
+      "Bash(sed -n '1,50p' src/HE_Scene/src/SceneSerializer.cpp)"
+    ]
+  }
+}

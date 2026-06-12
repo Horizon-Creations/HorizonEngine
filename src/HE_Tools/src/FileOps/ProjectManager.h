@@ -1,0 +1,48 @@
+#pragma once
+#include "HE_TOOLS_API.h"
+#include <string>
+#include <functional>
+
+enum class ProjectPreset
+{
+	Empty,       // only folder skeleton, no extra content
+	Game,        // Assets, Scenes, Scripts sub-folders + sample scene
+	Simulation,  // Assets, Scenes, Data sub-folders
+	Tool,        // Assets, Source sub-folders
+};
+
+struct ProjectData
+{
+	std::string name;
+	std::string path;
+	std::string startupScene; // absolute path to the startup .hescene file (empty = none)
+};
+
+class HE_TOOLS_API ProjectManager
+{
+public:
+	ProjectManager() = default;
+	~ProjectManager() = default;
+
+	// Creates the folder structure, writes a minimal .heproj file.
+	// projectDir  – absolute path to the new project root folder
+	// projectName – display name (also used as .heproj filename)
+	// preset      – which folder template to apply
+	bool createNewProject(const std::string& projectDir,
+						  const std::string& projectName,
+						  ProjectPreset preset = ProjectPreset::Empty);
+
+	bool loadProject(const std::string& projectPath);
+	bool saveProject(const std::string& projectPath);
+	void closeProject();
+
+	ProjectData& currentProject() { return m_currentProject; }
+
+	// Called after a project is successfully loaded or created.
+	// Receives the absolute path to the startup scene (empty string if none).
+	// Use this to initialise world / scene state without coupling HE_Tools to HorizonScene.
+	void setOnProjectLoaded(std::function<void(const std::string&)> callback) { m_onProjectLoaded = std::move(callback); }
+private:
+	ProjectData m_currentProject;
+	std::function<void(const std::string&)> m_onProjectLoaded;
+};
