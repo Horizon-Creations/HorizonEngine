@@ -19,7 +19,18 @@
       "Bash(rm -f HorizonEngine.log)",
       "Bash(MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 ./HorizonEditor)",
       "Bash(grep -iv \"^$\" /tmp/editor_mtlval.txt)",
-      "Bash(python3 -c ' *)"
+      "Bash(python3 -c ' *)",
+      "Bash(git remote *)",
+      "Bash(git fetch *)",
+      "Bash(git ls-remote *)",
+      "Bash(git ls-tree *)",
+      "Bash(git rebase *)",
+      "Bash(git stash *)",
+      "Bash(GIT_EDITOR=true git rebase --continue)",
+      "Bash(git -c core.editor=true rebase --continue)",
+      "Bash(echo \"rc=$?\")",
+      "Bash(git commit *)",
+      "Bash(git push *)"
     ]
   }
 }
