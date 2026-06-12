@@ -1,3 +1,7 @@
+# CMake build artifacts
+cmake-build-*/
+build/
+out/
 CMakeLists.txt.user
 CMakeCache.txt
 CMakeFiles
@@ -11,9 +15,22 @@ CTestTestfile.cmake
 _deps
 CMakeUserPresets.json
 
-# CLion
-#  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
-#  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
-#  and can be added to the global gitignore or merged into this file.  For a more nuclear
-#  option (not recommended) you can uncomment the following to ignore the entire idea folder.
-#cmake-build-*
+# CLion / JetBrains — project settings (.idea) are shared so VCS mappings,
+# run configs etc. work for everyone; only user-specific state is ignored.
+# See https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
+.idea/workspace.xml
+.idea/usage.statistics.xml
+.idea/tasks.xml
+.idea/shelf/
+.idea/dictionaries/
+
+# Other IDEs / editors
+.vscode/
+*.swp
+
+# macOS
+.DS_Store
+
+# Runtime artifacts
+*.log
+config.json
