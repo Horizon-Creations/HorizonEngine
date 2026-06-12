@@ -3,9 +3,14 @@
 #include <string>
 #include <vector>
 #include "Types/Enums.h"
+#include "Types/UUID.h"
 
 struct ContentAsset
 {
+	// Stable identity — written into the META chunk on save and reused on
+	// load, so scene references (e.g. MeshComponent::meshAssetId) survive
+	// engine restarts. Never regenerate for an asset that already has one.
+	HE::UUID      id;
 	std::string   name;
 	std::string   path;
 	HE::AssetType type = HE::AssetType::Unknown;
