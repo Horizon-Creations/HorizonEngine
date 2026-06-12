@@ -1,6 +1,8 @@
 #pragma once
 #include <Renderer/IRenderer.h>
 #include "MetalShaderManager.h"
+#include <HorizonRendering/RenderWorld.h>
+#include <HorizonRendering/RenderExtractor.h>
 #include <unordered_map>
 
 struct SDL_Window;
@@ -48,13 +50,17 @@ public:
 private:
 	struct WindowTarget
 	{
-		void* metalView  = nullptr; // SDL_MetalView
-		void* metalLayer = nullptr; // CAMetalLayer* (borrowed from the view)
+		void* metalView    = nullptr; // SDL_MetalView
+		void* metalLayer   = nullptr; // CAMetalLayer* (borrowed from the view)
+		void* depthTexture = nullptr; // id<MTLTexture> (retained, resized with drawable)
 	};
 
 	void CreateTarget(SDL_Window* sdlWin, WindowTarget& out);
 	void DestroyTarget(WindowTarget& target);
-	void EncodeClearPass(SDL_Window* sdlWin, WindowTarget& target, bool runOverlay);
+	void EnsureDepthTexture(WindowTarget& target, int width, int height);
+	void CreateScenePipeline();
+	void CreateCubeMesh();
+	void EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool isPrimary);
 
 	SDL_Window* m_primarySdlWindow = nullptr;
 	WindowTarget m_primaryTarget;
@@ -64,6 +70,19 @@ private:
 	void* m_commandQueue = nullptr; // id<MTLCommandQueue>  (retained)
 	void* m_imguiPassDescriptor = nullptr; // MTLRenderPassDescriptor* (retained)
 	bool  m_vsync = true;
+
+	// ── Scene rendering ─────────────────────────────────────────────────────
+	RenderExtractor m_extractor;
+	RenderWorld     m_renderWorld;
+
+	// Unlit pipeline + built-in cube (bootstrap mesh until the
+	// RenderResourceManager uploads real assets). All id<MTL…>, retained.
+	void* m_scenePipeline   = nullptr; // id<MTLRenderPipelineState>
+	void* m_sceneDepthState = nullptr; // id<MTLDepthStencilState> (test+write)
+	void* m_noDepthState    = nullptr; // id<MTLDepthStencilState> (overlay)
+	void* m_cubeVertexBuf   = nullptr; // id<MTLBuffer>
+	void* m_cubeIndexBuf    = nullptr; // id<MTLBuffer>
+	int   m_cubeIndexCount  = 0;
 
 	MetalShaderManager m_shaderManager;
 };

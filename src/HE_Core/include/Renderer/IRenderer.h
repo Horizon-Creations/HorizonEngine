@@ -4,6 +4,7 @@
 #include <memory>
 
 namespace HE { class Window; }
+class HorizonWorld;
 
 // ─── IRenderer ────────────────────────────────────────────────────────────────
 // Pure interface — lives in HorizonCore so Application can hold a renderer
@@ -49,6 +50,10 @@ public:
     // Optional overlay injection — set once after Initialize(), before first Render().
     void SetOverlayCallback(OverlayCallback cb) { m_overlayCallback = std::move(cb); }
 
+    // Scene to render. Set by Application whenever the active world changes.
+    // Opaque to HorizonCore — only HorizonRendering's RenderExtractor reads it.
+    virtual void SetWorld(HorizonWorld* world) { m_world = world; }
+
     // Enable or disable vertical synchronisation.
     // Backends recreate swapchains or change swap intervals as needed.
     virtual void SetVSync(bool enabled) { (void)enabled; }
@@ -63,4 +68,5 @@ public:
 
 protected:
     OverlayCallback m_overlayCallback;
+    HorizonWorld*   m_world = nullptr;
 };

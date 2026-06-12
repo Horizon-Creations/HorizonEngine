@@ -82,7 +82,11 @@ namespace HE
 		GlobalState* m_globalState;
 
 		HorizonWorld* world() const                 { return m_world; }
-		void          setWorld(HorizonWorld* world) { m_world = world; }
+		void          setWorld(HorizonWorld* world)
+		{
+			m_world = world;
+			if (m_renderer) m_renderer->SetWorld(world);
+		}
 
 		bool isRunning() const { return m_running; }
 

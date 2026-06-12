@@ -12,7 +12,14 @@
       "Bash(sed -n '170,260p' src/HE_Core/include/ContentManager/HAsset.h)",
       "Bash(sed -n '1890,1955p' src/HE_Editor/EditorUI.cpp)",
       "Bash(git add *)",
-      "Bash(git commit -q -m 'Persist asset UUIDs in HAsset META chunk \\(v2\\) *)"
+      "Bash(git commit -q -m 'Persist asset UUIDs in HAsset META chunk \\(v2\\) *)",
+      "Bash(rm -f HorizonEngine.log config.json)",
+      "Bash(./HorizonEditor)",
+      "Read(//tmp/**)",
+      "Bash(rm -f HorizonEngine.log)",
+      "Bash(MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 ./HorizonEditor)",
+      "Bash(grep -iv \"^$\" /tmp/editor_mtlval.txt)",
+      "Bash(python3 -c ' *)"
     ]
   }
 }

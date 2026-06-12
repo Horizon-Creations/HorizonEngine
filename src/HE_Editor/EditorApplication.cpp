@@ -593,6 +593,14 @@ void EditorApplication::OnInit()
 	setWorld(m_editorWorld.get());
 	Logger::Log(Logger::LogLevel::Info, "EditorApplication: HorizonWorld created and registered");
 
+	// Bootstrap content: one cube so the render path has something visible.
+	// Goes away once the Outliner can create entities (roadmap M3).
+	{
+		Entity cube = m_editorWorld->createEntity("Default Cube");
+		m_editorWorld->addComponent(cube, TransformComponent{});
+		m_editorWorld->addComponent(cube, MeshComponent{});
+	}
+
 	// Register the project-loaded callback BEFORE the first loadProject call so
 	// the startup scene is already loaded when OnInit returns.
 	m_projectManager.setOnProjectLoaded([this](const std::string& sceneAbsPath)
