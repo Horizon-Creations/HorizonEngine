@@ -1,5 +1,6 @@
 #pragma once
 #include <glm/glm.hpp>
+#include <algorithm>
 #include <limits>
 
 namespace HE

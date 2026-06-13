@@ -370,15 +370,15 @@ struct D3D12RendererImpl
         if (FAILED(D3DCompile(kSceneHLSL, std::strlen(kSceneHLSL), "scene", nullptr, nullptr,
                               "VSMain", "vs_5_0", flags, 0, &vs, &cerr)))
         {
-            Logger::Log(Logger::LogLevel::Error, std::string("D3D12Renderer: VS compile failed: ")
-                + (cerr ? static_cast<const char*>(cerr->GetBufferPointer()) : ""));
+            Logger::Log(Logger::LogLevel::Error, (std::string("D3D12Renderer: VS compile failed: ")
+                + (cerr ? static_cast<const char*>(cerr->GetBufferPointer()) : "")).c_str());
             return false;
         }
         if (FAILED(D3DCompile(kSceneHLSL, std::strlen(kSceneHLSL), "scene", nullptr, nullptr,
                               "PSMain", "ps_5_0", flags, 0, &ps, &cerr)))
         {
-            Logger::Log(Logger::LogLevel::Error, std::string("D3D12Renderer: PS compile failed: ")
-                + (cerr ? static_cast<const char*>(cerr->GetBufferPointer()) : ""));
+            Logger::Log(Logger::LogLevel::Error, (std::string("D3D12Renderer: PS compile failed: ")
+                + (cerr ? static_cast<const char*>(cerr->GetBufferPointer()) : "")).c_str());
             return false;
         }
 

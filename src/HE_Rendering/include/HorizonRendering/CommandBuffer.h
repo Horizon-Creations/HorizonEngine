@@ -1,4 +1,5 @@
 #pragma once
+#include "../HE_RENDERING_API.h"
 #include <Types/Handle.h>
 #include <Types/UUID.h>
 #include <Math/Math.h>
@@ -24,7 +25,7 @@ struct DrawCall {
 // Collects the draw calls produced by the render passes for one frame.
 // The backend replays drawCalls() after binding its pipeline and per-frame
 // state (camera, lights). Cleared and refilled every frame.
-class CommandBuffer {
+class HE_RENDERING_API CommandBuffer {
 public:
     void reset();
     void recordDraw(const DrawCall& call);

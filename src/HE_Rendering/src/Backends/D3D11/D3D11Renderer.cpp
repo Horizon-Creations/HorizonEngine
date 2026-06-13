@@ -248,15 +248,15 @@ struct D3D11RendererImpl
         if (FAILED(D3DCompile(kSceneHLSL, std::strlen(kSceneHLSL), "scene", nullptr, nullptr,
                               "VSMain", "vs_5_0", flags, 0, &vsBlob, &err)))
         {
-            Logger::Log(Logger::LogLevel::Error, std::string("D3D11Renderer: VS compile failed: ")
-                + (err ? static_cast<const char*>(err->GetBufferPointer()) : "")) ;
+            Logger::Log(Logger::LogLevel::Error, (std::string("D3D11Renderer: VS compile failed: ")
+                + (err ? static_cast<const char*>(err->GetBufferPointer()) : "")).c_str());
             return false;
         }
         if (FAILED(D3DCompile(kSceneHLSL, std::strlen(kSceneHLSL), "scene", nullptr, nullptr,
                               "PSMain", "ps_5_0", flags, 0, &psBlob, &err)))
         {
-            Logger::Log(Logger::LogLevel::Error, std::string("D3D11Renderer: PS compile failed: ")
-                + (err ? static_cast<const char*>(err->GetBufferPointer()) : ""));
+            Logger::Log(Logger::LogLevel::Error, (std::string("D3D11Renderer: PS compile failed: ")
+                + (err ? static_cast<const char*>(err->GetBufferPointer()) : "")).c_str());
             return false;
         }
         device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &vs);

@@ -1,4 +1,5 @@
 #pragma once
+#include "Types/Defines.h"
 #include "Types/UUID.h"
 #include "Types/Enums.h"
 #include "../SlotMap.h"
@@ -6,7 +7,7 @@
 #include <string>
 #include <unordered_map>
 
-class ContentManager
+class HE_API ContentManager
 {
 public:
 	ContentManager() = default;
