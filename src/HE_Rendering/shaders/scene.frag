@@ -14,7 +14,24 @@ layout(set = 0, binding = 0) uniform Frame {
     vec4  lightDir[8];      // xyz dir,  w cos(spot half angle)
     vec4  lightColor[8];    // rgb,      w intensity
     vec4  lightParams[8];   // x range
+    mat4  lightVP;          // directional-light view-proj (Vulkan clip)
+    ivec4 shadowEnabled;    // x = 0/1
 } uf;
+
+layout(set = 0, binding = 1) uniform sampler2D uShadowMap;
+
+float shadowFactor(vec3 worldPos, vec3 N, vec3 L)
+{
+    if (uf.shadowEnabled.x == 0) return 1.0;
+    vec4 lp = uf.lightVP * vec4(worldPos, 1.0);
+    vec3 p  = lp.xyz / lp.w;                 // z already [0,1]; xy in Vulkan NDC
+    vec2 uv = p.xy * 0.5 + 0.5;              // clip fix already flipped Y
+    if (p.z > 1.0 || any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0))))
+        return 1.0;
+    float bias    = max(0.0015 * (1.0 - dot(N, L)), 0.0004);
+    float closest = texture(uShadowMap, uv).r;
+    return (p.z - bias > closest) ? 0.35 : 1.0;
+}
 
 void main()
 {
@@ -56,10 +73,11 @@ void main()
                 atten *= smoothstep(cosCone, mix(cosCone, 1.0, 0.2), c);
             }
         }
+        float sh   = (type == 0) ? shadowFactor(vWorldPos, N, L) : 1.0;
         float diff = max(dot(N, L), 0.0);
         vec3  H    = normalize(L + V);
         float spec = pow(max(dot(N, H), 0.0), 32.0) * 0.25;
-        result += (base * diff + vec3(spec)) * uf.lightColor[i].rgb * uf.lightColor[i].w * atten;
+        result += (base * diff + vec3(spec)) * uf.lightColor[i].rgb * uf.lightColor[i].w * atten * sh;
     }
     FragColor = vec4(result, 1.0);
 }

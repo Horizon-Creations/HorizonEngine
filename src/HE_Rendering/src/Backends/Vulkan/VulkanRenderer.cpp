@@ -35,6 +35,8 @@ namespace
         glm::vec4  lightDir[8];
         glm::vec4  lightColor[8];
         glm::vec4  lightParams[8];
+        glm::mat4  lightVP;
+        glm::ivec4 shadowEnabled;
     };
 
     // The camera projection is built by the shared RenderExtractor with GL
@@ -63,6 +65,7 @@ void VulkanRenderer::Initialize(HE::Window* window)
     createFramebuffers();   Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: framebuffers created");
     createCommandBuffers(); Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: command buffers created");
     createSyncObjects();    Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: sync objects created");
+    createShadowResources();Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: shadow resources created");
     createScenePipeline();  Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: scene pipeline created");
     createCube();           Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: initialized successfully");
 	m_shaderManager = VulkanShaderManager();
@@ -98,6 +101,7 @@ void VulkanRenderer::Shutdown()
     m_cube = {};
     destroyScenePipeline();
 
+    destroyShadowResources();
     if (m_cmdPool)     vkDestroyCommandPool(m_device,   m_cmdPool,     nullptr);
     if (m_renderPass)  vkDestroyRenderPass (m_device,   m_renderPass,  nullptr);
     destroySwapchain();
@@ -125,6 +129,9 @@ void VulkanRenderer::Render()
     vkResetCommandBuffer(cmd, 0);
     VkCommandBufferBeginInfo bi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
     vkBeginCommandBuffer(cmd, &bi);
+
+    // Shadow map first, in its own render pass (before the swapchain pass).
+    EncodeShadowMap(cmd);
 
     VkClearValue clears[2]{};
     clears[0].color        = { { 0.18f, 0.18f, 0.20f, 1.0f } };
@@ -736,15 +743,19 @@ VkShaderModule VulkanRenderer::loadShaderModule(const char* spvFileName)
 
 void VulkanRenderer::createScenePipeline()
 {
-    // Per-frame UBO descriptor set layout (binding 0, fragment stage).
-    VkDescriptorSetLayoutBinding b{};
-    b.binding         = 0;
-    b.descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    b.descriptorCount = 1;
-    b.stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
+    // Descriptor set: binding 0 = per-frame UBO, binding 1 = shadow map sampler.
+    VkDescriptorSetLayoutBinding binds[2]{};
+    binds[0].binding         = 0;
+    binds[0].descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    binds[0].descriptorCount = 1;
+    binds[0].stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
+    binds[1].binding         = 1;
+    binds[1].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    binds[1].descriptorCount = 1;
+    binds[1].stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
     VkDescriptorSetLayoutCreateInfo slci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-    slci.bindingCount = 1;
-    slci.pBindings    = &b;
+    slci.bindingCount = 2;
+    slci.pBindings    = binds;
     vkCheck(vkCreateDescriptorSetLayout(m_device, &slci, nullptr, &m_sceneSetLayout), "descriptor set layout");
 
     // Pipeline layout: the set above + per-object push constants (MVP + model).
@@ -760,11 +771,14 @@ void VulkanRenderer::createScenePipeline()
     vkCheck(vkCreatePipelineLayout(m_device, &plci, nullptr, &m_scenePipelineLayout), "pipeline layout");
 
     // Per-frame UBO buffers + descriptor sets (one per frame in flight).
-    VkDescriptorPoolSize ps{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, k_maxFramesInFlight };
+    VkDescriptorPoolSize ps[2] = {
+        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         k_maxFramesInFlight },
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, k_maxFramesInFlight },
+    };
     VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
     dpci.maxSets       = k_maxFramesInFlight;
-    dpci.poolSizeCount = 1;
-    dpci.pPoolSizes    = &ps;
+    dpci.poolSizeCount = 2;
+    dpci.pPoolSizes    = ps;
     vkCheck(vkCreateDescriptorPool(m_device, &dpci, nullptr, &m_descPool), "descriptor pool");
 
     for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
@@ -789,13 +803,22 @@ void VulkanRenderer::createScenePipeline()
         vkCheck(vkAllocateDescriptorSets(m_device, &dsai, &m_frameUBO[i].set), "descriptor set");
 
         VkDescriptorBufferInfo dbi{ m_frameUBO[i].buf, 0, sizeof(FrameUBOData) };
-        VkWriteDescriptorSet w{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-        w.dstSet          = m_frameUBO[i].set;
-        w.dstBinding      = 0;
-        w.descriptorCount = 1;
-        w.descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        w.pBufferInfo     = &dbi;
-        vkUpdateDescriptorSets(m_device, 1, &w, 0, nullptr);
+        VkDescriptorImageInfo  dii{ m_shadowSampler, m_shadowView,
+                                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        VkWriteDescriptorSet w[2]{};
+        w[0].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w[0].dstSet          = m_frameUBO[i].set;
+        w[0].dstBinding      = 0;
+        w[0].descriptorCount = 1;
+        w[0].descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        w[0].pBufferInfo     = &dbi;
+        w[1].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w[1].dstSet          = m_frameUBO[i].set;
+        w[1].dstBinding      = 1;
+        w[1].descriptorCount = 1;
+        w[1].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w[1].pImageInfo      = &dii;
+        vkUpdateDescriptorSets(m_device, m_shadowView ? 2 : 1, w, 0, nullptr);
     }
 
     VkShaderModule vs = loadShaderModule("scene.vert.spv");
@@ -881,6 +904,28 @@ void VulkanRenderer::createScenePipeline()
 
     vkDestroyShaderModule(m_device, vs, nullptr);
     vkDestroyShaderModule(m_device, fs, nullptr);
+
+    // ── Shadow pipeline: depth-only, into the shadow render pass ────────────
+    if (m_shadowPass)
+    {
+        VkShaderModule svs = loadShaderModule("scene_shadow.vert.spv");
+        if (svs != VK_NULL_HANDLE)
+        {
+            VkPipelineShaderStageCreateInfo sstage{ VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO };
+            sstage.stage  = VK_SHADER_STAGE_VERTEX_BIT;
+            sstage.module = svs;
+            sstage.pName  = "main";
+
+            VkGraphicsPipelineCreateInfo spci = pci; // reuse vertex input / depth / dynamic state
+            spci.stageCount      = 1;            // vertex only — depth-only pass
+            spci.pStages         = &sstage;
+            spci.pColorBlendState = nullptr;     // no color attachment
+            spci.renderPass      = m_shadowPass;
+            if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &spci, nullptr, &m_shadowPipeline) != VK_SUCCESS)
+                Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: shadow pipeline creation failed");
+            vkDestroyShaderModule(m_device, svs, nullptr);
+        }
+    }
 }
 
 void VulkanRenderer::destroyScenePipeline()
@@ -892,9 +937,153 @@ void VulkanRenderer::destroyScenePipeline()
         m_frameUBO[i] = {};
     }
     if (m_descPool)            { vkDestroyDescriptorPool(m_device, m_descPool, nullptr);            m_descPool = VK_NULL_HANDLE; }
+    if (m_shadowPipeline)      { vkDestroyPipeline      (m_device, m_shadowPipeline, nullptr);      m_shadowPipeline = VK_NULL_HANDLE; }
     if (m_scenePipeline)       { vkDestroyPipeline      (m_device, m_scenePipeline, nullptr);       m_scenePipeline = VK_NULL_HANDLE; }
     if (m_scenePipelineLayout) { vkDestroyPipelineLayout(m_device, m_scenePipelineLayout, nullptr); m_scenePipelineLayout = VK_NULL_HANDLE; }
     if (m_sceneSetLayout)      { vkDestroyDescriptorSetLayout(m_device, m_sceneSetLayout, nullptr); m_sceneSetLayout = VK_NULL_HANDLE; }
+}
+
+void VulkanRenderer::createShadowResources()
+{
+    // Depth image, sampled by the scene pass.
+    VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+    ici.imageType   = VK_IMAGE_TYPE_2D;
+    ici.format      = m_depthFormat;
+    ici.extent      = { m_shadowSize, m_shadowSize, 1 };
+    ici.mipLevels   = 1;
+    ici.arrayLayers = 1;
+    ici.samples     = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling      = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage       = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    vkCheck(vkCreateImage(m_device, &ici, nullptr, &m_shadowImage), "shadow image");
+
+    VkMemoryRequirements req{};
+    vkGetImageMemoryRequirements(m_device, m_shadowImage, &req);
+    VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    mai.allocationSize  = req.size;
+    mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    vkCheck(vkAllocateMemory(m_device, &mai, nullptr, &m_shadowMemory), "shadow memory");
+    vkBindImageMemory(m_device, m_shadowImage, m_shadowMemory, 0);
+
+    VkImageViewCreateInfo vci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+    vci.image    = m_shadowImage;
+    vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vci.format   = m_depthFormat;
+    vci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    vci.subresourceRange.levelCount = 1;
+    vci.subresourceRange.layerCount = 1;
+    vkCheck(vkCreateImageView(m_device, &vci, nullptr, &m_shadowView), "shadow view");
+
+    VkSamplerCreateInfo sci{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+    sci.magFilter    = VK_FILTER_NEAREST;
+    sci.minFilter    = VK_FILTER_NEAREST;
+    sci.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    sci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    sci.borderColor  = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE; // outside the map = lit
+    vkCheck(vkCreateSampler(m_device, &sci, nullptr, &m_shadowSampler), "shadow sampler");
+
+    // Depth-only render pass; final layout is shader-readable for sampling.
+    VkAttachmentDescription depth{};
+    depth.format         = m_depthFormat;
+    depth.samples        = VK_SAMPLE_COUNT_1_BIT;
+    depth.loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    depth.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
+    depth.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    depth.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depth.initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
+    depth.finalLayout    = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkAttachmentReference depthRef{ 0, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
+    VkSubpassDescription sub{};
+    sub.pipelineBindPoint       = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    sub.pDepthStencilAttachment = &depthRef;
+    VkSubpassDependency deps[2]{};
+    deps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+    deps[0].dstSubpass = 0;
+    deps[0].srcStageMask  = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    deps[0].dstStageMask  = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    deps[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    deps[0].dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    deps[1].srcSubpass = 0;
+    deps[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+    deps[1].srcStageMask  = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+    deps[1].dstStageMask  = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    deps[1].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    deps[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    VkRenderPassCreateInfo rpci{ VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
+    rpci.attachmentCount = 1;
+    rpci.pAttachments    = &depth;
+    rpci.subpassCount    = 1;
+    rpci.pSubpasses      = &sub;
+    rpci.dependencyCount = 2;
+    rpci.pDependencies   = deps;
+    vkCheck(vkCreateRenderPass(m_device, &rpci, nullptr, &m_shadowPass), "shadow render pass");
+
+    VkFramebufferCreateInfo fci{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
+    fci.renderPass      = m_shadowPass;
+    fci.attachmentCount = 1;
+    fci.pAttachments    = &m_shadowView;
+    fci.width           = m_shadowSize;
+    fci.height          = m_shadowSize;
+    fci.layers          = 1;
+    vkCheck(vkCreateFramebuffer(m_device, &fci, nullptr, &m_shadowFB), "shadow framebuffer");
+}
+
+void VulkanRenderer::destroyShadowResources()
+{
+    if (m_shadowFB)      { vkDestroyFramebuffer(m_device, m_shadowFB, nullptr);   m_shadowFB = VK_NULL_HANDLE; }
+    if (m_shadowPass)    { vkDestroyRenderPass (m_device, m_shadowPass, nullptr); m_shadowPass = VK_NULL_HANDLE; }
+    if (m_shadowSampler) { vkDestroySampler    (m_device, m_shadowSampler, nullptr); m_shadowSampler = VK_NULL_HANDLE; }
+    if (m_shadowView)    { vkDestroyImageView  (m_device, m_shadowView, nullptr); m_shadowView = VK_NULL_HANDLE; }
+    if (m_shadowImage)   { vkDestroyImage      (m_device, m_shadowImage, nullptr); m_shadowImage = VK_NULL_HANDLE; }
+    if (m_shadowMemory)  { vkFreeMemory        (m_device, m_shadowMemory, nullptr); m_shadowMemory = VK_NULL_HANDLE; }
+}
+
+void VulkanRenderer::EncodeShadowMap(VkCommandBuffer cmd)
+{
+    if (!m_world || m_shadowPipeline == VK_NULL_HANDLE) return;
+
+    m_extractor.extract(*m_world, m_renderWorld, 1.0f, &m_editorCamera);
+    if (!m_renderWorld.shadow.enabled || m_renderWorld.objects.empty()) return;
+    for (RenderObject& obj : m_renderWorld.objects)
+        if (const GpuMesh* mesh = resolveMesh(obj.meshAssetId); mesh && mesh->localBounds.isValid())
+            obj.worldBounds = mesh->localBounds.transformed(obj.transform);
+    m_culler.cull(m_renderWorld, m_visible);
+    m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
+    if (m_sortedIndices.empty()) return;
+
+    const glm::mat4 lightClip = kVulkanClipFix * m_renderWorld.shadow.viewProj;
+
+    VkClearValue clear{};
+    clear.depthStencil = { 1.0f, 0 };
+    VkRenderPassBeginInfo rpbi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+    rpbi.renderPass        = m_shadowPass;
+    rpbi.framebuffer       = m_shadowFB;
+    rpbi.renderArea.extent = { m_shadowSize, m_shadowSize };
+    rpbi.clearValueCount   = 1;
+    rpbi.pClearValues      = &clear;
+    vkCmdBeginRenderPass(cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_shadowPipeline);
+    VkViewport vp{ 0.0f, 0.0f, (float)m_shadowSize, (float)m_shadowSize, 0.0f, 1.0f };
+    VkRect2D   sc{ { 0, 0 }, { m_shadowSize, m_shadowSize } };
+    vkCmdSetViewport(cmd, 0, 1, &vp);
+    vkCmdSetScissor(cmd, 0, 1, &sc);
+
+    for (uint32_t idx : m_sortedIndices)
+    {
+        const RenderObject& obj = m_renderWorld.objects[idx];
+        const GpuMesh* mesh = resolveMesh(obj.meshAssetId);
+        const GpuMesh& m    = mesh ? *mesh : m_cube;
+        if (!m.indexCount) continue;
+        PushConstants pc{ lightClip * obj.transform, obj.transform };
+        vkCmdPushConstants(cmd, m_scenePipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
+        VkDeviceSize offset = 0;
+        vkCmdBindVertexBuffers(cmd, 0, 1, &m.vbuf, &offset);
+        vkCmdBindIndexBuffer(cmd, m.ibuf, 0, VK_INDEX_TYPE_UINT32);
+        vkCmdDrawIndexed(cmd, m.indexCount, 1, 0, 0, 0);
+    }
+    vkCmdEndRenderPass(cmd);
 }
 
 bool VulkanRenderer::createMeshBuffers(GpuMesh& mesh, const std::vector<float>& interleaved,
@@ -1020,6 +1209,8 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
             f.lightColor[i]  = glm::vec4(l.color,     l.intensity);
             f.lightParams[i] = glm::vec4(l.range, 0.0f, 0.0f, 0.0f);
         }
+        f.lightVP       = kVulkanClipFix * m_renderWorld.shadow.viewProj;
+        f.shadowEnabled = glm::ivec4(m_renderWorld.shadow.enabled ? 1 : 0, 0, 0, 0);
         if (m_frameUBO[m_currentFrame].mapped)
             std::memcpy(m_frameUBO[m_currentFrame].mapped, &f, sizeof(f));
     }
