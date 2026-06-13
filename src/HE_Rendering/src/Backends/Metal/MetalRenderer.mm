@@ -46,6 +46,9 @@ struct SceneUniforms {
 	int      lightCount;
 	int      pad0, pad1, pad2;
 	LightGPU lights[8];
+	float4x4 lightVP;        // directional-light view-proj (already in Metal clip)
+	int      shadowEnabled;
+	int      pad3, pad4, pad5;
 };
 
 struct VSOut {
@@ -73,12 +76,35 @@ vertex VSOut vertexMain(uint vid [[vertex_id]],
 	return out;
 }
 
+// Depth-only vertex shader for the shadow pass: u.mvp carries lightVP * model.
+vertex float4 vertexShadow(uint vid [[vertex_id]],
+                           const device VertexIn* verts [[buffer(0)]],
+                           constant Uniforms&     u     [[buffer(1)]])
+{
+	return u.mvp * float4(float3(verts[vid].position), 1.0);
+}
+
+float shadowFactor(constant SceneUniforms& scene, float3 worldPos, float3 N, float3 L,
+                   texture2d<float> shadowMap, sampler shadowSmp)
+{
+	if (scene.shadowEnabled == 0) return 1.0;
+	float4 lp = scene.lightVP * float4(worldPos, 1.0);
+	float3 p  = lp.xyz / lp.w;            // z already [0,1] (Metal clip); xy in [-1,1]
+	float2 uv = float2(p.x * 0.5 + 0.5, 1.0 - (p.y * 0.5 + 0.5)); // tex origin top-left
+	if (p.z > 1.0 || any(uv < 0.0) || any(uv > 1.0)) return 1.0;
+	float bias    = max(0.0015 * (1.0 - dot(N, L)), 0.0004);
+	float closest = shadowMap.sample(shadowSmp, uv).r;
+	return (p.z - bias > closest) ? 0.35 : 1.0;
+}
+
 // Blinn-Phong over up to 8 scene lights; lightCount == 0 falls back to the
 // fixed "headlight" so unlit scenes don't render black.
 fragment float4 fragmentMain(VSOut in [[stage_in]],
                              constant SceneUniforms& scene [[buffer(0)]],
                              texture2d<float> baseColor [[texture(0)]],
-                             sampler          smp       [[sampler(0)]])
+                             sampler          smp       [[sampler(0)]],
+                             texture2d<float> shadowMap [[texture(1)]],
+                             sampler          shadowSmp [[sampler(1)]])
 {
 	float3 base = (in.hasTexture > 0.5)
 		? baseColor.sample(smp, float2(in.uv.x, 1.0 - in.uv.y)).rgb
@@ -120,11 +146,14 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
 			}
 		}
 
+		// Only the (first) directional light casts shadows.
+		float sh = (type == 0) ? shadowFactor(scene, in.worldPos, N, L, shadowMap, shadowSmp) : 1.0;
+
 		float diff = max(dot(N, L), 0.0);
 		float3 H   = normalize(L + V);
 		float spec = pow(max(dot(N, H), 0.0), 32.0) * 0.25;
 		result += (base * diff + float3(spec))
-		        * l.colorIntensity.rgb * l.colorIntensity.w * atten;
+		        * l.colorIntensity.rgb * l.colorIntensity.w * atten * sh;
 	}
 	return float4(result, 1.0);
 }
@@ -153,7 +182,19 @@ struct SceneUniforms
 	int32_t   lightCount = 0;
 	int32_t   pad0 = 0, pad1 = 0, pad2 = 0;
 	LightGPU  lights[8];
+	glm::mat4 lightVP = glm::mat4(1.0f);
+	int32_t   shadowEnabled = 0;
+	int32_t   pad3 = 0, pad4 = 0, pad5 = 0;
 };
+
+// Remaps the extractor's GL-convention light projection (depth -1..1) to Metal
+// clip space (depth 0..1). Metal NDC y is up like GL, so no y flip here — the
+// flip happens when sampling (texture origin is top-left).
+static const glm::mat4 kMetalClipFix = glm::mat4(
+	1.0f, 0.0f, 0.0f, 0.0f,
+	0.0f, 1.0f, 0.0f, 0.0f,
+	0.0f, 0.0f, 0.5f, 0.0f,
+	0.0f, 0.0f, 0.5f, 1.0f);
 
 MetalRenderer::MetalRenderer()  = default;
 MetalRenderer::~MetalRenderer() = default;
@@ -291,6 +332,97 @@ void MetalRenderer::CreateScenePipeline()
 		sampDesc.minFilter = MTLSamplerMinMagFilterLinear;
 		sampDesc.magFilter = MTLSamplerMinMagFilterLinear;
 		m_linearSampler = (void*)CFBridgingRetain([device newSamplerStateWithDescriptor:sampDesc]);
+	}
+}
+
+void MetalRenderer::EnsureShadowResources()
+{
+	@autoreleasepool
+	{
+		id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+
+		// Depth texture, sampled by the scene pass.
+		MTLTextureDescriptor* td = [MTLTextureDescriptor
+			texture2DDescriptorWithPixelFormat:kDepthFormat
+			width:m_shadowSize height:m_shadowSize mipmapped:NO];
+		td.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+		td.storageMode = MTLStorageModePrivate;
+		m_shadowDepthTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:td]);
+
+		// Depth-only pipeline (no color attachment, depth attachment only).
+		NSError* error = nil;
+		id<MTLLibrary> lib = [device newLibraryWithSource:
+			[NSString stringWithUTF8String:kUnlitMSL] options:nil error:&error];
+		if (!lib) { Logger::Log(Logger::LogLevel::Error, "MetalRenderer: shadow shader compile failed"); return; }
+		MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
+		desc.vertexFunction             = [lib newFunctionWithName:@"vertexShadow"];
+		desc.fragmentFunction           = nil; // depth only
+		desc.depthAttachmentPixelFormat = kDepthFormat;
+		id<MTLRenderPipelineState> pso = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+		if (pso) m_shadowPipeline = (void*)CFBridgingRetain(pso);
+		else     Logger::Log(Logger::LogLevel::Error, "MetalRenderer: shadow pipeline creation failed");
+	}
+}
+
+void MetalRenderer::EncodeShadowMap(void* cmdBufPtr)
+{
+	if (!m_world || !m_shadowPipeline || !m_shadowDepthTex) return;
+
+	// Re-extract (cheap; same data the scene pass uses) to get the light VP and
+	// the visible geometry for the depth pass.
+	m_extractor.extract(*m_world, m_renderWorld, 1.0f, &m_editorCamera);
+	if (!m_renderWorld.shadow.enabled || m_renderWorld.objects.empty()) return;
+	for (RenderObject& obj : m_renderWorld.objects)
+		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId); mesh && mesh->localBounds.isValid())
+			obj.worldBounds = mesh->localBounds.transformed(obj.transform);
+	m_culler.cull(m_renderWorld, m_visible);
+	m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
+	if (m_sortedIndices.empty()) return;
+
+	const glm::mat4 lightClip = kMetalClipFix * m_renderWorld.shadow.viewProj;
+
+	@autoreleasepool
+	{
+		id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
+		MTLRenderPassDescriptor* sp = [MTLRenderPassDescriptor renderPassDescriptor];
+		sp.depthAttachment.texture     = (__bridge id<MTLTexture>)m_shadowDepthTex;
+		sp.depthAttachment.loadAction  = MTLLoadActionClear;
+		sp.depthAttachment.storeAction = MTLStoreActionStore;
+		sp.depthAttachment.clearDepth  = 1.0;
+
+		id<MTLRenderCommandEncoder> enc = [cmdBuf renderCommandEncoderWithDescriptor:sp];
+		[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_shadowPipeline];
+		[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
+		[enc setViewport:(MTLViewport){ 0.0, 0.0, (double)m_shadowSize, (double)m_shadowSize, 0.0, 1.0 }];
+
+		for (uint32_t idx : m_sortedIndices)
+		{
+			const RenderObject& obj = m_renderWorld.objects[idx];
+			UnlitUniforms u;
+			u.mvp = lightClip * obj.transform;
+
+			id<MTLBuffer> vbuf; id<MTLBuffer> ibuf; NSUInteger ic;
+			if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId))
+			{
+				vbuf = (__bridge id<MTLBuffer>)mesh->vertexBuf;
+				ibuf = (__bridge id<MTLBuffer>)mesh->indexBuf;
+				ic   = (NSUInteger)mesh->indexCount;
+			}
+			else
+			{
+				vbuf = (__bridge id<MTLBuffer>)m_cubeVertexBuf;
+				ibuf = (__bridge id<MTLBuffer>)m_cubeIndexBuf;
+				ic   = (NSUInteger)m_cubeIndexCount;
+			}
+			[enc setVertexBuffer:vbuf offset:0 atIndex:0];
+			[enc setVertexBytes:&u length:sizeof(u) atIndex:1];
+			[enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+			                indexCount:ic
+			                 indexType:MTLIndexTypeUInt32
+			               indexBuffer:ibuf
+			         indexBufferOffset:0];
+		}
+		[enc endEncoding];
 	}
 }
 
