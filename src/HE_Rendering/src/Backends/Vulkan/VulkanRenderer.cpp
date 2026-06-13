@@ -120,6 +120,14 @@ void VulkanRenderer::Render()
     uint32_t imageIndex = 0;
     VkResult acq = vkAcquireNextImageKHR(m_device, m_swapchain, UINT64_MAX,
                                          m_imageReady[fi], VK_NULL_HANDLE, &imageIndex);
+    // The swapchain went stale (window resized/minimised). Rebuild it and skip
+    // this frame — the fence is still signalled (not yet reset) and acquire did
+    // not signal m_imageReady on OUT_OF_DATE, so nothing is left dangling.
+    if (acq == VK_ERROR_OUT_OF_DATE_KHR)
+    {
+        recreateSwapchain();
+        return;
+    }
     if (acq != VK_SUCCESS && acq != VK_SUBOPTIMAL_KHR)
         vkCheck(acq, "vkAcquireNextImageKHR");
 
@@ -168,7 +176,13 @@ void VulkanRenderer::Render()
     pi.swapchainCount     = 1;
     pi.pSwapchains        = &m_swapchain;
     pi.pImageIndices      = &imageIndex;
-    vkQueuePresentKHR(m_graphicsQueue, &pi);
+    VkResult pres = vkQueuePresentKHR(m_graphicsQueue, &pi);
+    // OUT_OF_DATE/SUBOPTIMAL after present: the image was still shown, but the
+    // swapchain no longer matches the surface — rebuild for the next frame.
+    if (pres == VK_ERROR_OUT_OF_DATE_KHR || pres == VK_SUBOPTIMAL_KHR)
+        recreateSwapchain();
+    else if (pres != VK_SUCCESS)
+        vkCheck(pres, "vkQueuePresentKHR");
 
     m_currentFrame = (m_currentFrame + 1) % k_maxFramesInFlight;
 }
@@ -196,15 +210,7 @@ void VulkanRenderer::SetVSync(bool enabled)
     m_vsync = enabled;
     if (!m_device || !m_swapchain) return;
 
-    vkDeviceWaitIdle(m_device);
-    destroySwapchain();
-    createSwapchain(m_swapExtent.width, m_swapExtent.height);
-    for (auto fb : m_framebuffers) vkDestroyFramebuffer(m_device, fb, nullptr);
-    m_framebuffers.clear();
-    createFramebuffers();
-    vkResetCommandPool(m_device, m_cmdPool, 0);
-    m_cmdBufs.clear();
-    createCommandBuffers();
+    recreateSwapchain();   // picks up the new present mode via m_vsync
     Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: swapchain recreated");
 }
 
@@ -441,11 +447,23 @@ void VulkanRenderer::createFramebuffers()
 
 void VulkanRenderer::createCommandBuffers()
 {
-    VkCommandPoolCreateInfo cpci{};
-    cpci.sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-    cpci.queueFamilyIndex = m_graphicsFamily;
-    cpci.flags            = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-    vkCheck(vkCreateCommandPool(m_device, &cpci, nullptr, &m_cmdPool), "vkCreateCommandPool");
+    // Idempotent: keep the pool across swapchain recreations (recreating it each
+    // time without destroying the old one leaks a pool per resize). Only the
+    // command buffers are freed and reallocated for the new image count.
+    if (!m_cmdPool)
+    {
+        VkCommandPoolCreateInfo cpci{};
+        cpci.sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        cpci.queueFamilyIndex = m_graphicsFamily;
+        cpci.flags            = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+        vkCheck(vkCreateCommandPool(m_device, &cpci, nullptr, &m_cmdPool), "vkCreateCommandPool");
+    }
+    if (!m_cmdBufs.empty())
+    {
+        vkFreeCommandBuffers(m_device, m_cmdPool,
+                             static_cast<uint32_t>(m_cmdBufs.size()), m_cmdBufs.data());
+        m_cmdBufs.clear();
+    }
     m_cmdBufs.resize(m_framebuffers.size());
     VkCommandBufferAllocateInfo cbai{};
     cbai.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
@@ -477,6 +495,23 @@ void VulkanRenderer::destroySwapchain()
     m_swapViews.clear();
     m_swapImages.clear();
     if (m_swapchain) { vkDestroySwapchainKHR(m_device, m_swapchain, nullptr); m_swapchain = VK_NULL_HANDLE; }
+}
+
+void VulkanRenderer::recreateSwapchain()
+{
+    if (!m_device || !m_sdlWindow) return;
+
+    int w = 0, h = 0;
+    SDL_GetWindowSizeInPixels(m_sdlWindow, &w, &h);
+    // Window minimised — keep the current (out-of-date) swapchain and retry on a
+    // later frame once it has a non-zero size again. Recreating at 0×0 is invalid.
+    if (w <= 0 || h <= 0) return;
+
+    vkDeviceWaitIdle(m_device);
+    destroySwapchain();                                  // also frees depth + framebuffers
+    createSwapchain(static_cast<uint32_t>(w), static_cast<uint32_t>(h));
+    createFramebuffers();
+    createCommandBuffers();                              // pool kept, buffers reallocated
 }
 
 // ─── Multi-window helpers ────────────────────────────────────────────────────

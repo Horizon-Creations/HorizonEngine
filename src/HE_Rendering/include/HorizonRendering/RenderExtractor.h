@@ -1,4 +1,5 @@
 #pragma once
+#include "../HE_RENDERING_API.h"
 
 class HorizonWorld;
 class RenderWorld;
@@ -8,7 +9,7 @@ struct EditorCameraOverride;
 // This is the ONLY class in HorizonRendering that touches HorizonScene —
 // it is compiled into the HorizonRendering DLL; backends only see the
 // resulting RenderWorld.
-class RenderExtractor {
+class HE_RENDERING_API RenderExtractor {
 public:
     // aspectRatio is needed to build the camera projection matrix and comes
     // from the backend's current swapchain size.

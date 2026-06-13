@@ -1,4 +1,5 @@
 #pragma once
+#include "../HE_RENDERING_API.h"
 #include "RenderWorld.h"
 #include <Math/AABB.h>
 #include <vector>
@@ -15,7 +16,7 @@ struct Frustum
     bool intersects(const HE::AABB& box) const;
 };
 
-class FrustumCuller {
+class HE_RENDERING_API FrustumCuller {
 public:
     // outVisible[i] mirrors world.objects[i]. Objects use their world-space
     // bounds; an invalid AABB is treated as always visible.

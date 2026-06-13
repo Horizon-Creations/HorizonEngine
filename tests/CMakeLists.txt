@@ -24,6 +24,12 @@ target_include_directories(he_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/include
     ${CMAKE_SOURCE_DIR}/src/HE_Editor
 )
+# The HorizonRendering sources above are compiled straight into the test exe
+# instead of linking the DLL. Define HE_RENDERING_BUILD_DLL so HE_RENDERING_API
+# resolves to dllexport (definitions are local to this exe) rather than dllimport,
+# which would emit unresolved __imp_ references for those same locally-built symbols.
+target_compile_definitions(he_tests PRIVATE HE_RENDERING_BUILD_DLL)
+
 target_link_libraries(he_tests PRIVATE
     HorizonCore
     HorizonScene

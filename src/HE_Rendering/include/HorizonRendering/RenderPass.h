@@ -1,11 +1,12 @@
 #pragma once
+#include "../HE_RENDERING_API.h"
 #include "RenderWorld.h"
 #include "CommandBuffer.h"
 #include "RenderTarget.h"
 #include <vector>
 #include <cstdint>
 
-class RenderPass {
+class HE_RENDERING_API RenderPass {
 public:
     virtual ~RenderPass() = default;
 
@@ -20,20 +21,20 @@ public:
     virtual RenderPassIO describe() const { return {}; }
 };
 
-class GeometryPass : public RenderPass {
+class HE_RENDERING_API GeometryPass : public RenderPass {
 public:
     void execute(const RenderWorld&, const std::vector<uint32_t>&, CommandBuffer&) override;
     const char* name() const override { return "GeometryPass"; }
 };
 
-class ShadowPass : public RenderPass {
+class HE_RENDERING_API ShadowPass : public RenderPass {
 public:
     void execute(const RenderWorld&, const std::vector<uint32_t>&, CommandBuffer&) override;
     const char* name() const override { return "ShadowPass"; }
     RenderPassIO describe() const override;
 };
 
-class PostProcessPass : public RenderPass {
+class HE_RENDERING_API PostProcessPass : public RenderPass {
 public:
     void execute(const RenderWorld&, const std::vector<uint32_t>&, CommandBuffer&) override;
     const char* name() const override { return "PostProcessPass"; }

@@ -1,9 +1,10 @@
 #pragma once
+#include "../HE_RENDERING_API.h"
 #include "RenderWorld.h"
 #include <vector>
 #include <cstdint>
 
-class RenderSorter {
+class HE_RENDERING_API RenderSorter {
 public:
     void sort(const RenderWorld&       world,
               const std::vector<bool>& visible,

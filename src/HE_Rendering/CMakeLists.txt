@@ -29,7 +29,12 @@ target_link_libraries(RendererOpenGL PRIVATE glad OpenGL::GL glm::glm HorizonCor
 target_compile_definitions(RendererOpenGL PRIVATE HE_RENDERING_BUILD_DLL)
 
 # ─── Vulkan Backend ────────────────────────────────────────────────────────────
-set(HE_VULKAN_ENABLED FALSE)
+# CACHE INTERNAL so the resolved value is visible to sibling subdirectories
+# (notably src/HE_Editor, which links RendererVulkan and compiles the ImGui
+# Vulkan backend). A plain set() here would stay local to this directory scope,
+# leaving HE_Editor with an empty HE_VULKAN_ENABLED → unresolved VulkanRenderer
+# symbols at link time.
+set(HE_VULKAN_ENABLED FALSE CACHE INTERNAL "Vulkan backend available")
 if(DEFINED ENV{VULKAN_SDK})
     set(Vulkan_INCLUDE_DIR "$ENV{VULKAN_SDK}/Include")
     if(WIN32)
@@ -39,12 +44,12 @@ if(DEFINED ENV{VULKAN_SDK})
     endif()
     find_package(Vulkan QUIET)
     if(Vulkan_FOUND)
-        set(HE_VULKAN_ENABLED TRUE)
+        set(HE_VULKAN_ENABLED TRUE CACHE INTERNAL "Vulkan backend available")
     endif()
 else()
     find_package(Vulkan QUIET)
     if(Vulkan_FOUND)
-        set(HE_VULKAN_ENABLED TRUE)
+        set(HE_VULKAN_ENABLED TRUE CACHE INTERNAL "Vulkan backend available")
     endif()
 endif()
 

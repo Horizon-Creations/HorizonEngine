@@ -178,3 +178,20 @@ add_custom_command(TARGET HorizonEditor POST_BUILD
 	COMMENT "Deploying HorizonEditor.exe to ${DEPLOY_EDITOR}"
 	VERBATIM
 )
+
+# The Vulkan backend loads <exe dir>/Shaders/*.spv at runtime. They are compiled
+# to ${CMAKE_BINARY_DIR}/Shaders by the VulkanShaders target (a dependency of
+# RendererVulkan). Without this copy the editor crashes/falls over on the Vulkan
+# RHI ("shader not found"). Deploy them next to the exe and into DEPLOY_EDITOR.
+if(HE_VULKAN_ENABLED)
+	add_custom_command(TARGET HorizonEditor POST_BUILD
+		COMMAND ${CMAKE_COMMAND} -E copy_directory
+			"${CMAKE_BINARY_DIR}/Shaders"
+			"$<TARGET_FILE_DIR:HorizonEditor>/Shaders"
+		COMMAND ${CMAKE_COMMAND} -E copy_directory
+			"${CMAKE_BINARY_DIR}/Shaders"
+			"${DEPLOY_EDITOR}/Shaders"
+		COMMENT "Deploying Vulkan SPIR-V shaders to the editor"
+		VERBATIM
+	)
+endif()

@@ -51,6 +51,10 @@ private:
 	void createCommandBuffers();
 	void createSyncObjects();
 	void destroySwapchain();
+	// Rebuild the swapchain + depth + framebuffers + command buffers for the
+	// window's current size. Called on resize (vkAcquire/Present reports
+	// OUT_OF_DATE/SUBOPTIMAL) and on VSync changes.
+	void recreateSwapchain();
 
 	// ── Scene draw path ─────────────────────────────────────────────────────
 	void           createDepthResources();
