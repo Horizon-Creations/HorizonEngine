@@ -361,17 +361,35 @@ Blinn-Phong (8 Lichter), Editor-Kamera-Override, Tiefenpuffer.
 - **Vulkan** (Push-Constants + per-frame-UBO, GLSL→SPIR-V via glslc, Clip-Fix für
   Y/Tiefe): Flat-Color, Texturen TODO; `.spv` müssen nach `<exe>/Shaders/` deployen.
 
+> **Status 13.06.2026 (Forts.):** Render-Target-Abstraktion im RenderGraph
+> (Seam) steht. ✅
+
+**Render-Target-Abstraktion (Fundament):** `RenderTarget.h` definiert
+backend-agnostisch `RenderTargetDesc`/`RenderPassIO` (Format RGBA8/RGBA16F/Depth,
+Größe Viewport/Fixed, Ein-/Ausgabe-Targets, `kBackbufferTarget = 0`).
+`RenderPass::describe()` deklariert das Ziel eines Passes (GeometryPass →
+Backbuffer; ShadowPass → 2048²-Depth; PostProcessPass → Backbuffer + SceneColor-
+Input). `RenderGraph::execute(world, sorted, PassSink)` ruft pro Pass den Backend-
+Sink `(pass, io, cmds)` — der bindet das Ziel und replayt. **Alle fünf Backends**
+nutzen jetzt den Sink (GL+Metal verifiziert, D3D/Vulkan blind/mechanisch),
+verhaltensneutral: heute rendert nur GeometryPass in den Backbuffer. Die
+eigentliche Offscreen-Target-Allokation (FBO/MTLTexture/RTV-DSV/VkImage-Pool)
+landet mit dem ersten Feature, das sie braucht (ShadowPass/HDR), wo auch die
+Sampling-Shader entstehen. 2 neue Tests (Per-Pass-Dispatch + `describe()`) →
+**33 Cases, alle grün**.
+
 **Nächste Schritte (neue Top 5):**
 
-1. **Render-Target-Abstraktion im RenderGraph** — Passes deklarieren
-   Color/Depth-Targets, die das Backend erzeugt/bindet; Voraussetzung für 3.5/3.6.
-2. **ShadowPass** (3.5) — Directional-Schatten mit einer Cascade auf der neuen
-   Target-Abstraktion.
-3. **HDR + Tonemapping** (3.6) als erster echter PostProcessPass.
-4. **Material-Inspector** — Material-Zuweisung per Drag&Drop aufs
+1. **ShadowPass** (3.5) — Offscreen-Depth-Target-Pool (zuerst GL+Metal) auf dem
+   Sink, Szene aus Directional-Light-POV, GeometryPass sampelt die Shadow-Map.
+2. **HDR + Tonemapping** (3.6) — SceneColor als RGBA16F-Target, PostProcessPass
+   als Fullscreen-Tonemap auf den Backbuffer (nutzt dieselbe Target-Infra).
+3. **Material-Inspector** — Material-Zuweisung per Drag&Drop aufs
    MaterialComponent, Shader-/Textur-Slots editierbar.
-5. **Save-Prompt bei ungesicherten Änderungen** — „Speichern?"-Dialog vor
+4. **Save-Prompt bei ungesicherten Änderungen** — „Speichern?"-Dialog vor
    Szenenwechsel/Projektschließen/Quit, wenn der Dirty-Marker aktiv ist.
+5. **D3D/Vulkan-Validierung** — auf Windows / mit Vulkan-SDK bauen, die
+   blind geschriebenen Szenen-Draw-Pfade verifizieren und korrigieren.
 
 Faustregel für die Parallelisierung danach: eine Person/ein Strang auf dem
 kritischen Pfad P1 → P2 → P5 → P6, Rendering (P3) und je ein P4-Block laufen

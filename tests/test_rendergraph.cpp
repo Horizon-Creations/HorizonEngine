@@ -2,9 +2,12 @@
 #include <HorizonRendering/RenderWorld.h>
 #include <HorizonRendering/RenderGraph.h>
 #include <HorizonRendering/RenderPass.h>
+#include <HorizonRendering/RenderTarget.h>
 #include <HorizonRendering/CommandBuffer.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <memory>
+#include <string>
+#include <vector>
 
 // The pass pipeline is GPU-free: passes turn a RenderWorld + sorted index list
 // into a CommandBuffer of DrawCalls, which the backends replay. That makes the
@@ -104,4 +107,51 @@ TEST_CASE("Inert passes record nothing")
 	ShadowPass{}.execute(world, sorted, cmds);
 	PostProcessPass{}.execute(world, sorted, cmds);
 	CHECK(cmds.drawCalls().empty());
+}
+
+TEST_CASE("RenderPass declares its render-target I/O")
+{
+	CHECK(GeometryPass{}.describe().output.id == kBackbufferTarget);
+	CHECK(GeometryPass{}.describe().inputCount == 0);
+
+	const RenderPassIO shadow = ShadowPass{}.describe();
+	CHECK(shadow.output.format   == RenderTargetFormat::Depth);
+	CHECK(shadow.output.sizeMode == RenderTargetSize::Fixed);
+	CHECK(shadow.output.id       != kBackbufferTarget);
+
+	const RenderPassIO post = PostProcessPass{}.describe();
+	CHECK(post.output.id  == kBackbufferTarget);
+	CHECK(post.inputCount == 1); // samples the scene color target
+}
+
+TEST_CASE("RenderGraph sink dispatches each pass with its declared target")
+{
+	RenderWorld world;
+	world.objects.push_back(makeObj(1, { 0, 0, 0 }));
+	std::vector<uint32_t> sorted = { 0 };
+
+	RenderGraph graph;
+	graph.addPass(std::make_unique<GeometryPass>());
+	graph.addPass(std::make_unique<ShadowPass>());      // inert, declares a depth target
+	graph.addPass(std::make_unique<PostProcessPass>()); // inert, declares backbuffer + input
+
+	struct Rec { std::string name; RenderTargetId out; size_t draws; uint32_t inputs; };
+	std::vector<Rec> recs;
+	graph.execute(world, sorted,
+		[&](const RenderPass& pass, const RenderPassIO& io, const CommandBuffer& cmds)
+		{
+			recs.push_back({ pass.name(), io.output.id, cmds.drawCalls().size(), io.inputCount });
+		});
+
+	REQUIRE(recs.size() == 3);
+	// Order preserved; each pass gets its own freshly-reset command buffer.
+	CHECK(recs[0].name == std::string("GeometryPass"));
+	CHECK(recs[0].out  == kBackbufferTarget);
+	CHECK(recs[0].draws == 1); // geometry recorded the one visible object
+	CHECK(recs[1].name == std::string("ShadowPass"));
+	CHECK(recs[1].out  != kBackbufferTarget);
+	CHECK(recs[1].draws == 0); // inert — and the buffer was reset before it
+	CHECK(recs[2].name == std::string("PostProcessPass"));
+	CHECK(recs[2].out  == kBackbufferTarget);
+	CHECK(recs[2].inputs == 1);
 }
