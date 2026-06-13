@@ -34,3 +34,4 @@ CMakeUserPresets.json
 # Runtime artifacts
 *.log
 config.json
+/.vs
