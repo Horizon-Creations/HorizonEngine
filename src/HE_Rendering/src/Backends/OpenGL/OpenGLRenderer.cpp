@@ -1,5 +1,6 @@
 #include "Backends/OpenGL/OpenGLRenderer.h"
 #include <Window/Window.h>
+#include <ContentManager/ContentManager.h>
 #include <glad/glad.h>
 #include <SDL3/SDL.h>
 #include <stdexcept>
@@ -12,27 +13,89 @@ static const char* kUnlitVS = R"GLSL(
 #version 410 core
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec2 aUV;
 uniform mat4 uMVP;
 uniform mat4 uModel;
 out vec3 vNormal;
+out vec2 vUV;
+out vec3 vWorldPos;
 void main()
 {
+	vWorldPos   = (uModel * vec4(aPos, 1.0)).xyz;
 	vNormal     = mat3(uModel) * aNormal;
+	vUV         = aUV;
 	gl_Position = uMVP * vec4(aPos, 1.0);
 }
 )GLSL";
 
+// Blinn-Phong over up to 8 scene lights. Scenes without lights fall back to
+// the fixed "headlight" so nothing renders black.
 static const char* kUnlitFS = R"GLSL(
 #version 410 core
 in vec3 vNormal;
-uniform vec3 uColor;
+in vec2 vUV;
+in vec3 vWorldPos;
+
+const int MAX_LIGHTS = 8;
+uniform int  uLightCount;
+uniform vec4 uLightPos[MAX_LIGHTS];    // xyz = position,  w = type (0 dir / 1 point / 2 spot)
+uniform vec4 uLightDir[MAX_LIGHTS];    // xyz = direction, w = cos(spot half angle)
+uniform vec4 uLightColor[MAX_LIGHTS];  // rgb = color,     w = intensity
+uniform vec4 uLightParams[MAX_LIGHTS]; // x = range
+uniform vec3 uCameraPos;
+
+uniform vec3      uColor;
+uniform bool      uHasTexture;
+uniform sampler2D uTexture;
 out vec4 FragColor;
+
 void main()
 {
-	vec3  N    = normalize(vNormal);
-	vec3  L    = normalize(vec3(0.5, 0.8, 0.6));
-	float diff = 0.35 + 0.65 * max(dot(N, L), 0.0);
-	FragColor  = vec4(uColor * diff, 1.0);
+	vec3 base = uHasTexture ? texture(uTexture, vUV).rgb : uColor;
+	vec3 N    = normalize(vNormal);
+
+	if (uLightCount == 0)
+	{
+		vec3  L    = normalize(vec3(0.5, 0.8, 0.6));
+		float diff = 0.35 + 0.65 * max(dot(N, L), 0.0);
+		FragColor  = vec4(base * diff, 1.0);
+		return;
+	}
+
+	vec3 V      = normalize(uCameraPos - vWorldPos);
+	vec3 result = 0.08 * base; // ambient floor
+
+	for (int i = 0; i < uLightCount; ++i)
+	{
+		int   type  = int(uLightPos[i].w);
+		vec3  L;
+		float atten = 1.0;
+
+		if (type == 0) // directional
+			L = normalize(-uLightDir[i].xyz);
+		else
+		{
+			vec3  d    = uLightPos[i].xyz - vWorldPos;
+			float dist = max(length(d), 1e-4);
+			L = d / dist;
+			float range = max(uLightParams[i].x, 1e-4);
+			atten = clamp(1.0 - dist / range, 0.0, 1.0);
+			atten *= atten;
+			if (type == 2) // spot cone
+			{
+				float c = dot(-L, normalize(uLightDir[i].xyz));
+				float cosCone = uLightDir[i].w;
+				atten *= smoothstep(cosCone, mix(cosCone, 1.0, 0.2), c);
+			}
+		}
+
+		float diff = max(dot(N, L), 0.0);
+		vec3  H    = normalize(L + V);
+		float spec = pow(max(dot(N, H), 0.0), 32.0) * 0.25;
+		result += (base * diff + vec3(spec))
+		        * uLightColor[i].rgb * uLightColor[i].w * atten;
+	}
+	FragColor = vec4(result, 1.0);
 }
 )GLSL";
 
@@ -96,9 +159,17 @@ void OpenGLRenderer::CreateUnlitPipeline()
 		throw std::runtime_error(std::string("OpenGLRenderer: program link failed: ") + log);
 	}
 
-	m_uMVP   = glGetUniformLocation(m_unlitProgram, "uMVP");
-	m_uModel = glGetUniformLocation(m_unlitProgram, "uModel");
-	m_uColor = glGetUniformLocation(m_unlitProgram, "uColor");
+	m_uMVP         = glGetUniformLocation(m_unlitProgram, "uMVP");
+	m_uModel       = glGetUniformLocation(m_unlitProgram, "uModel");
+	m_uColor       = glGetUniformLocation(m_unlitProgram, "uColor");
+	m_uHasTexture  = glGetUniformLocation(m_unlitProgram, "uHasTexture");
+	m_uTexture     = glGetUniformLocation(m_unlitProgram, "uTexture");
+	m_uLightCount  = glGetUniformLocation(m_unlitProgram, "uLightCount");
+	m_uLightPos    = glGetUniformLocation(m_unlitProgram, "uLightPos");
+	m_uLightDir    = glGetUniformLocation(m_unlitProgram, "uLightDir");
+	m_uLightColor  = glGetUniformLocation(m_unlitProgram, "uLightColor");
+	m_uLightParams = glGetUniformLocation(m_unlitProgram, "uLightParams");
+	m_uCameraPos   = glGetUniformLocation(m_unlitProgram, "uCameraPos");
 }
 
 void OpenGLRenderer::CreateCubeMesh()
@@ -145,12 +216,116 @@ void OpenGLRenderer::CreateCubeMesh()
 	glBindVertexArray(0);
 }
 
+// ─── Asset mesh upload ────────────────────────────────────────────────────────
+const OpenGLRenderer::GpuMesh* OpenGLRenderer::ResolveMesh(const HE::UUID& assetId)
+{
+	if (assetId == HE::UUID{} || !m_contentManager)
+		return nullptr;
+
+	if (auto it = m_meshCache.find(assetId); it != m_meshCache.end())
+		return &it->second;
+
+	const StaticMeshAsset* asset = m_contentManager->getStaticMesh(assetId);
+	if (!asset || asset->vertices.empty() || asset->indices.empty())
+		return nullptr;
+
+	// Interleave position + normal + uv (8 floats per vertex). Missing
+	// normals/uvs are zero-filled so every mesh fits the unlit layout.
+	const size_t vertexCount = asset->vertices.size() / 3;
+	std::vector<float> interleaved;
+	interleaved.reserve(vertexCount * 8);
+	for (size_t v = 0; v < vertexCount; ++v)
+	{
+		interleaved.insert(interleaved.end(),
+			{ asset->vertices[v*3+0], asset->vertices[v*3+1], asset->vertices[v*3+2] });
+		if (v * 3 + 2 < asset->normals.size())
+			interleaved.insert(interleaved.end(),
+				{ asset->normals[v*3+0], asset->normals[v*3+1], asset->normals[v*3+2] });
+		else
+			interleaved.insert(interleaved.end(), { 0.0f, 0.0f, 0.0f });
+		if (v * 2 + 1 < asset->uvs.size())
+			interleaved.insert(interleaved.end(), { asset->uvs[v*2+0], asset->uvs[v*2+1] });
+		else
+			interleaved.insert(interleaved.end(), { 0.0f, 0.0f });
+	}
+
+	GpuMesh mesh;
+	mesh.indexCount  = static_cast<int>(asset->indices.size());
+	mesh.localBounds = HE::AABB::fromPositions(asset->vertices.data(), vertexCount);
+
+	glGenVertexArrays(1, &mesh.vao);
+	glGenBuffers(1, &mesh.vbo);
+	glGenBuffers(1, &mesh.ebo);
+
+	glBindVertexArray(mesh.vao);
+	glBindBuffer(GL_ARRAY_BUFFER, mesh.vbo);
+	glBufferData(GL_ARRAY_BUFFER,
+	             static_cast<GLsizeiptr>(interleaved.size() * sizeof(float)),
+	             interleaved.data(), GL_STATIC_DRAW);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.ebo);
+	glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+	             static_cast<GLsizeiptr>(asset->indices.size() * sizeof(uint32_t)),
+	             asset->indices.data(), GL_STATIC_DRAW);
+	glEnableVertexAttribArray(0);
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
+	glEnableVertexAttribArray(1);
+	glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(3 * sizeof(float)));
+	glEnableVertexAttribArray(2);
+	glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(6 * sizeof(float)));
+	glBindVertexArray(0);
+
+	// Base color texture via the mesh's material (load on demand by path)
+	if (!asset->materialPath.empty())
+	{
+		const HE::UUID matId = m_contentManager->loadAsset(asset->materialPath);
+		if (const MaterialAsset* mat = m_contentManager->getMaterial(matId);
+		    mat && !mat->texturePaths.empty())
+		{
+			const HE::UUID texId = m_contentManager->loadAsset(mat->texturePaths[0]);
+			if (const TextureAsset* tex = m_contentManager->getTexture(texId);
+			    tex && !tex->data.empty() && tex->channels == 4)
+			{
+				glGenTextures(1, &mesh.texture);
+				glBindTexture(GL_TEXTURE_2D, mesh.texture);
+				glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
+				             static_cast<GLsizei>(tex->width), static_cast<GLsizei>(tex->height),
+				             0, GL_RGBA, GL_UNSIGNED_BYTE, tex->data.data());
+				glGenerateMipmap(GL_TEXTURE_2D);
+				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+				glBindTexture(GL_TEXTURE_2D, 0);
+			}
+		}
+	}
+
+	Logger::Log(Logger::LogLevel::Info,
+		("OpenGLRenderer: uploaded mesh '" + asset->name + "' ("
+		 + std::to_string(vertexCount) + " verts"
+		 + (mesh.texture ? ", textured" : "") + ")").c_str());
+
+	return &m_meshCache.emplace(assetId, mesh).first->second;
+}
+
 void OpenGLRenderer::Shutdown()
 {
 	Logger::Log(Logger::LogLevel::Info, "OpenGLRenderer: shutdown");
 
 	if (m_primarySdlWindow && m_glContext)
 		SDL_GL_MakeCurrent(m_primarySdlWindow, static_cast<SDL_GLContext>(m_glContext));
+
+	for (auto& [id, mesh] : m_meshCache)
+	{
+		if (mesh.vao)     glDeleteVertexArrays(1, &mesh.vao);
+		if (mesh.vbo)     glDeleteBuffers(1, &mesh.vbo);
+		if (mesh.ebo)     glDeleteBuffers(1, &mesh.ebo);
+		if (mesh.texture) glDeleteTextures(1, &mesh.texture);
+	}
+	m_meshCache.clear();
+	DestroyViewportTarget();
+	for (auto& r : m_retiredTextures)
+		glDeleteTextures(1, &r.texture);
+	m_retiredTextures.clear();
+
 	if (m_cubeVAO)      { glDeleteVertexArrays(1, &m_cubeVAO); m_cubeVAO = 0; }
 	if (m_cubeVBO)      { glDeleteBuffers(1, &m_cubeVBO);      m_cubeVBO = 0; }
 	if (m_cubeEBO)      { glDeleteBuffers(1, &m_cubeEBO);      m_cubeEBO = 0; }
@@ -164,36 +339,159 @@ void OpenGLRenderer::Shutdown()
 	m_primarySdlWindow = nullptr;
 }
 
-void OpenGLRenderer::DrawScene()
+// ─── Offscreen viewport target ────────────────────────────────────────────────
+
+void OpenGLRenderer::SetViewportSize(uint32_t width, uint32_t height)
+{
+	m_viewportReqW = width;
+	m_viewportReqH = height;
+}
+
+void* OpenGLRenderer::GetViewportTexture()
+{
+	return reinterpret_cast<void*>(static_cast<intptr_t>(m_viewportColor));
+}
+
+void OpenGLRenderer::EnsureViewportTarget()
+{
+	const int w = static_cast<int>(m_viewportReqW);
+	const int h = static_cast<int>(m_viewportReqH);
+	if (m_viewportFBO && w == m_viewportW && h == m_viewportH)
+		return;
+
+	DestroyViewportTarget();
+
+	glGenFramebuffers(1, &m_viewportFBO);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_viewportFBO);
+
+	glGenTextures(1, &m_viewportColor);
+	glBindTexture(GL_TEXTURE_2D, m_viewportColor);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_viewportColor, 0);
+
+	glGenRenderbuffers(1, &m_viewportDepth);
+	glBindRenderbuffer(GL_RENDERBUFFER, m_viewportDepth);
+	glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, w, h);
+	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, m_viewportDepth);
+
+	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+		Logger::Log(Logger::LogLevel::Error, "OpenGLRenderer: viewport FBO incomplete");
+
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glBindTexture(GL_TEXTURE_2D, 0);
+
+	m_viewportW = w;
+	m_viewportH = h;
+}
+
+void OpenGLRenderer::AgeRetiredTextures()
+{
+	for (auto it = m_retiredTextures.begin(); it != m_retiredTextures.end(); )
+	{
+		if (--it->framesLeft <= 0)
+		{
+			glDeleteTextures(1, &it->texture);
+			it = m_retiredTextures.erase(it);
+		}
+		else
+			++it;
+	}
+}
+
+void OpenGLRenderer::DestroyViewportTarget()
+{
+	if (m_viewportFBO)   { glDeleteFramebuffers(1, &m_viewportFBO);   m_viewportFBO = 0; }
+	if (m_viewportColor)
+	{
+		// Deferred — this frame's ImGui draw list still references the id
+		m_retiredTextures.push_back({ m_viewportColor, 3 });
+		m_viewportColor = 0;
+	}
+	if (m_viewportDepth) { glDeleteRenderbuffers(1, &m_viewportDepth);m_viewportDepth = 0; }
+	m_viewportW = m_viewportH = 0;
+}
+
+void OpenGLRenderer::DrawScene(int pw, int ph)
 {
 	if (!m_world) return;
-
-	int pw = 0, ph = 0;
-	SDL_GetWindowSizeInPixels(m_primarySdlWindow, &pw, &ph);
 	if (pw <= 0 || ph <= 0) return;
 	glViewport(0, 0, pw, ph);
 
 	m_extractor.extract(*m_world, m_renderWorld,
-	                    static_cast<float>(pw) / static_cast<float>(ph));
+	                    static_cast<float>(pw) / static_cast<float>(ph),
+	                    &m_editorCamera);
 	if (m_renderWorld.objects.empty()) return;
 
 	const glm::mat4 viewProj = m_renderWorld.camera.projection * m_renderWorld.camera.view;
 
-	glUseProgram(m_unlitProgram);
-	glBindVertexArray(m_cubeVAO);
-	glUniform3f(m_uColor, 0.85f, 0.55f, 0.25f);
+	// ── Refine bounds with real mesh AABBs (also uploads new meshes) ────────
+	for (RenderObject& obj : m_renderWorld.objects)
+		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId);
+		    mesh && mesh->localBounds.isValid())
+			obj.worldBounds = mesh->localBounds.transformed(obj.transform);
 
-	for (const RenderObject& obj : m_renderWorld.objects)
+	// ── Cull → sort → submit ────────────────────────────────────────────────
+	m_culler.cull(m_renderWorld, m_visible);
+	m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
+	if (m_sortedIndices.empty()) return;
+
+	glUseProgram(m_unlitProgram);
+	glUniform3f(m_uColor, 0.85f, 0.55f, 0.25f);
+	glUniform1i(m_uTexture, 0);
+	glActiveTexture(GL_TEXTURE0);
+
+	// ── Lights (clamped to the shader's MAX_LIGHTS) ─────────────────────────
 	{
-		// Every object draws the built-in cube until the
-		// RenderResourceManager can resolve obj.meshAssetId to real geometry.
+		constexpr int kMaxLights = 8;
+		const int count = std::min(static_cast<int>(m_renderWorld.lights.size()), kMaxLights);
+		glm::vec4 pos[kMaxLights], dir[kMaxLights], color[kMaxLights], params[kMaxLights];
+		for (int i = 0; i < count; ++i)
+		{
+			const LightData& l = m_renderWorld.lights[i];
+			pos[i]    = glm::vec4(l.position,  static_cast<float>(l.type));
+			dir[i]    = glm::vec4(l.direction, l.spotAngleCos);
+			color[i]  = glm::vec4(l.color,     l.intensity);
+			params[i] = glm::vec4(l.range, 0.0f, 0.0f, 0.0f);
+		}
+		glUniform1i(m_uLightCount, count);
+		if (count > 0)
+		{
+			glUniform4fv(m_uLightPos,    count, glm::value_ptr(pos[0]));
+			glUniform4fv(m_uLightDir,    count, glm::value_ptr(dir[0]));
+			glUniform4fv(m_uLightColor,  count, glm::value_ptr(color[0]));
+			glUniform4fv(m_uLightParams, count, glm::value_ptr(params[0]));
+		}
+		glUniform3fv(m_uCameraPos, 1, glm::value_ptr(m_renderWorld.camera.position));
+	}
+
+	for (uint32_t idx : m_sortedIndices)
+	{
+		const RenderObject& obj = m_renderWorld.objects[idx];
 		const glm::mat4 mvp = viewProj * obj.transform;
 		glUniformMatrix4fv(m_uMVP,   1, GL_FALSE, glm::value_ptr(mvp));
 		glUniformMatrix4fv(m_uModel, 1, GL_FALSE, glm::value_ptr(obj.transform));
-		glDrawElements(GL_TRIANGLES, m_cubeIndexCount, GL_UNSIGNED_INT, nullptr);
+
+		// Resolve the asset; entities without one fall back to the built-in cube.
+		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId))
+		{
+			glBindVertexArray(mesh->vao);
+			glUniform1i(m_uHasTexture, mesh->texture != 0);
+			glBindTexture(GL_TEXTURE_2D, mesh->texture);
+			glDrawElements(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr);
+		}
+		else
+		{
+			glBindVertexArray(m_cubeVAO);
+			glUniform1i(m_uHasTexture, 0);
+			glBindTexture(GL_TEXTURE_2D, 0);
+			glDrawElements(GL_TRIANGLES, m_cubeIndexCount, GL_UNSIGNED_INT, nullptr);
+		}
 	}
 
 	glBindVertexArray(0);
+	glBindTexture(GL_TEXTURE_2D, 0);
 	glUseProgram(0);
 
 	// One-time sanity check — GL errors are silent otherwise and a broken
@@ -216,9 +514,31 @@ void OpenGLRenderer::Render()
 	if (m_primarySdlWindow && m_glContext)
 		SDL_GL_MakeCurrent(m_primarySdlWindow, static_cast<SDL_GLContext>(m_glContext));
 
+	AgeRetiredTextures();
+
+	const bool offscreen = m_viewportReqW > 0 && m_viewportReqH > 0;
+
+	if (offscreen)
+	{
+		// Scene → offscreen viewport target (shown by the editor as an image)
+		EnsureViewportTarget();
+		glBindFramebuffer(GL_FRAMEBUFFER, m_viewportFBO);
+		glClearColor(0.18f, 0.18f, 0.20f, 1.0f);
+		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+		DrawScene(m_viewportW, m_viewportH);
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	}
+	else if (m_viewportFBO)
+		DestroyViewportTarget();
+
 	glClearColor(0.18f, 0.18f, 0.20f, 1.0f);
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-	DrawScene();
+	if (!offscreen)
+	{
+		int pw = 0, ph = 0;
+		SDL_GetWindowSizeInPixels(m_primarySdlWindow, &pw, &ph);
+		DrawScene(pw, ph);
+	}
 	if (m_overlayCallback) m_overlayCallback(nullptr);
 }
 

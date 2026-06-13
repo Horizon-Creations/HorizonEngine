@@ -30,7 +30,20 @@
       "Bash(git -c core.editor=true rebase --continue)",
       "Bash(echo \"rc=$?\")",
       "Bash(git commit *)",
-      "Bash(git push *)"
+      "Bash(git push *)",
+      "Bash(curl -sL --max-time 20 -o /tmp/cgltf.h https://raw.githubusercontent.com/jkuhlmann/cgltf/master/cgltf.h)",
+      "Bash(curl -sL --max-time 20 -o /tmp/dr_wav.h https://raw.githubusercontent.com/mackron/dr_libs/master/dr_wav.h)",
+      "Bash(cmake --build /Users/connorjansen/VSCode/HorizonEngine/cmake-build-release -j 8)",
+      "Bash(cmake --build cmake-build-release --target asset_compiler -j 8)",
+      "Bash(curl -sL --max-time 30 -o /tmp/he_assets/src/BoxTextured.glb https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Models/main/2.0/BoxTextured/glTF-Binary/BoxTextured.glb)",
+      "Bash(./cmake-build-release/src/HE_Tools/asset_compiler /tmp/he_assets/src /tmp/he_assets/out)",
+      "Bash(md5 -q /tmp/he_assets/out/BoxTextured.hasset)",
+      "Bash(./cmake-build-release/src/HE_Tools/asset_compiler /tmp/he_assets/src /tmp/he_assets/out --force)",
+      "Bash(cmake --build cmake-build-release -j 8)",
+      "Bash(echo \"Exit: $?\")",
+      "Bash(echo \"BUILD_EXIT=$?\")",
+      "Bash(echo \"EXIT=$?\")",
+      "Bash(curl -sL --max-time 30 -o tests/vendor/doctest.h https://raw.githubusercontent.com/doctest/doctest/master/doctest/doctest.h)"
     ]
   }
 }

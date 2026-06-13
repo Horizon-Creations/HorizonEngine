@@ -1,0 +1,29 @@
+add_executable(he_tests
+    main.cpp
+    test_slotmap.cpp
+    test_hasset.cpp
+    test_contentmanager.cpp
+    test_scene_serializer.cpp
+    test_culling.cpp
+    test_undo.cpp
+    test_editorcamera.cpp
+    # Culling/sorting/undo/camera are compiled in directly — pulling in the full
+    # HorizonRendering/Editor targets would drag GPU backends and ImGui in.
+    ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/FrustumCuller.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderSorter.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorUndo.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorCamera.cpp
+)
+
+target_include_directories(he_tests PRIVATE
+    vendor
+    ${CMAKE_SOURCE_DIR}/src/HE_Rendering/include
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor
+)
+target_link_libraries(he_tests PRIVATE
+    HorizonCore
+    HorizonScene
+    nlohmann_json::nlohmann_json
+)
+
+add_test(NAME he_tests COMMAND he_tests)

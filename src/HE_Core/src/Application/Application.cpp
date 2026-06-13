@@ -69,6 +69,7 @@ namespace HE
 		{
 			if (m_renderer)
 			{
+				m_renderer->SetContentManager(&m_contentManager);
 				m_renderer->Initialize(m_window.get());
 				Logger::Log(Logger::LogLevel::Info, "Renderer initialized");
 			}

@@ -47,11 +47,17 @@ if(EXISTS "${IMGUI_DIR}/imgui.cpp")
 			PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 	endif()
 
+	# ImGuizmo (vendored) — gizmo widgets on top of ImGui
+	list(APPEND IMGUI_SOURCES
+		${CMAKE_CURRENT_SOURCE_DIR}/vendor/imguizmo/ImGuizmo.cpp
+	)
+
 	add_library(imgui_editor STATIC ${IMGUI_SOURCES} "EditorUI.h")
 
 	target_include_directories(imgui_editor PUBLIC
 		${IMGUI_DIR}
 		${IMGUI_DIR}/backends
+		${CMAKE_CURRENT_SOURCE_DIR}/vendor/imguizmo
 	)
 	target_link_libraries(imgui_editor PRIVATE SDL3::SDL3)
 
@@ -85,6 +91,8 @@ endif()
 add_executable(HorizonEditor WIN32
 	main.cpp
 	EditorApplication.cpp
+	EditorUndo.cpp
+	EditorCamera.cpp
 	stb_image_impl.cpp
  "EditorUI.h" "EditorUI.cpp")
 
@@ -107,6 +115,7 @@ target_link_libraries(HorizonEditor PRIVATE
 	HorizonScene
 	HorizonRendering
 	HorizonTools
+	HorizonImporters
 	SDL3::SDL3
 	glad
 )

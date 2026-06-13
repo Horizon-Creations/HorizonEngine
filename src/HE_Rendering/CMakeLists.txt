@@ -128,6 +128,8 @@ target_link_libraries(ViewportUI PRIVATE glm::glm HorizonCore)
 add_library(HorizonRendering SHARED
     src/RenderExtractor.cpp
     src/RenderWorld.cpp
+    src/FrustumCuller.cpp
+    src/RenderSorter.cpp
     src/RenderResourceManager.cpp
     src/GPUMemoryAllocator.cpp
     src/RenderGraph.cpp

@@ -511,6 +511,7 @@ void EditorApplication::OnInit()
 	m_editorConfig.KeepCPUAssetsInfoAcknoleged = globalstate.getCustomConfigBool("KeepCPUAssetsInfoAcknoleged", m_editorConfig.KeepCPUAssetsInfoAcknoleged);
 	m_editorConfig.QsRendererOpen              = globalstate.getCustomConfigBool("QsRendererOpen",              m_editorConfig.QsRendererOpen);
 	m_editorConfig.QsEditorOpen                = globalstate.getCustomConfigBool("QsEditorOpen",                m_editorConfig.QsEditorOpen);
+	m_editorConfig.ShowGrid                    = globalstate.getCustomConfigBool("ShowGrid",                    m_editorConfig.ShowGrid);
 	m_editorConfig.CbTreeWidth                 = globalstate.getCustomConfigFloat("CbTreeWidth", m_editorConfig.CbTreeWidth);
 
 #ifdef HE_IMGUI_ENABLED
@@ -591,21 +592,23 @@ void EditorApplication::OnInit()
 	// Create the editor world and register it with the base Application
 	m_editorWorld = std::make_unique<HorizonWorld>();
 	setWorld(m_editorWorld.get());
+	m_undo.setWorld(m_editorWorld.get());
 	Logger::Log(Logger::LogLevel::Info, "EditorApplication: HorizonWorld created and registered");
-
-	// Bootstrap content: one cube so the render path has something visible.
-	// Goes away once the Outliner can create entities (roadmap M3).
-	{
-		Entity cube = m_editorWorld->createEntity("Default Cube");
-		m_editorWorld->addComponent(cube, TransformComponent{});
-		m_editorWorld->addComponent(cube, MeshComponent{});
-	}
 
 	// Register the project-loaded callback BEFORE the first loadProject call so
 	// the startup scene is already loaded when OnInit returns.
 	m_projectManager.setOnProjectLoaded([this](const std::string& sceneAbsPath)
 	{
 		setWorld(m_editorWorld.get());
+
+		// Point the ContentManager at this project's content folder so the
+		// renderer and the content browser can resolve asset references.
+		{
+			std::filesystem::path projectPath = m_projectManager.currentProject().path;
+			if (std::filesystem::is_regular_file(projectPath))
+				projectPath = projectPath.parent_path();
+			contentManager().setContentRoot((projectPath / "Content").string());
+		}
 
 		if (!sceneAbsPath.empty())
 		{
@@ -624,6 +627,7 @@ void EditorApplication::OnInit()
 		}
 
 		m_editorWorld->markHierarchyDirty();
+		m_undo.clearHistory();
 	});
 
 	// If a project was previously opened, load it now (triggers the callback above)
@@ -706,6 +710,14 @@ AppContext EditorApplication::makeContext()
 		.renderer            = renderer(),
 		.window              = window(),
 		.world               = world(),
+		.contentManager      = &contentManager(),
+		.editorCamera        = &m_editorCamera,
+		.selectedEntity      = m_selectedEntity,
+		.isPlaying           = m_isPlaying,
+		.setPlayMode         = [this](bool play){ setPlayMode(play); },
+		.undoSys             = &m_undo,
+		.undo                = [this]{ if (m_undo.undo()) m_selectedEntity = entt::null; },
+		.redo                = [this]{ if (m_undo.redo()) m_selectedEntity = entt::null; },
 		.projectLoaded       = m_projectLoaded,
 		.contentRefreshPending = m_contentRefreshPending,
 		.contentRefreshDone  = m_contentRefreshDone,
@@ -759,6 +771,44 @@ AppContext EditorApplication::makeContext()
 	};
 }
 
+// ─── Play-in-editor ───────────────────────────────────────────────────────────
+// Play: snapshot the editor world to a temp file (binary). Stop: wipe the
+// world and restore the snapshot — any changes made by game systems while
+// playing are discarded.
+void EditorApplication::setPlayMode(bool play)
+{
+	if (play == m_isPlaying || !m_editorWorld)
+		return;
+
+	const std::filesystem::path snapshot =
+		std::filesystem::temp_directory_path() / "he_play_snapshot.hescene_bin";
+	SceneSerializer serializer;
+
+	if (play)
+	{
+		if (!serializer.save(*m_editorWorld, snapshot, SerializeFormat::Binary))
+		{
+			Logger::Log(Logger::LogLevel::Error,
+				"EditorApplication: play-mode snapshot failed — staying in edit mode");
+			return;
+		}
+		m_isPlaying = true;
+		m_undo.clearHistory(); // edits made while playing are not undoable
+		Logger::Log(Logger::LogLevel::Info, "EditorApplication: entering play mode");
+	}
+	else
+	{
+		m_editorWorld->clear();
+		if (!serializer.load(*m_editorWorld, snapshot, SerializeFormat::Binary))
+			Logger::Log(Logger::LogLevel::Error,
+				"EditorApplication: play-mode restore failed — world may be empty");
+		m_selectedEntity = entt::null;
+		m_editorWorld->markHierarchyDirty();
+		m_isPlaying = false;
+		m_undo.clearHistory();
+		Logger::Log(Logger::LogLevel::Info, "EditorApplication: returned to edit mode");
+	}
+}
 
 void EditorApplication::OnShutdown()
 {
@@ -829,6 +879,7 @@ void EditorApplication::OnShutdown()
 	globalstate.setCustomConfigEntry("ContentBrowserRefreshRate",   m_editorConfig.ContentBrowserRefreshRate);
 	globalstate.setCustomConfigEntry("QsRendererOpen",              m_editorConfig.QsRendererOpen);
 	globalstate.setCustomConfigEntry("QsEditorOpen",                m_editorConfig.QsEditorOpen);
+	globalstate.setCustomConfigEntry("ShowGrid",                    m_editorConfig.ShowGrid);
 	globalstate.setCustomConfigEntry("CbTreeWidth",                 m_editorConfig.CbTreeWidth);
 	globalstate.writeConfig();
 }

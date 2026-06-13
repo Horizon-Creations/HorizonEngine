@@ -264,6 +264,23 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 	return w.write(fullPath, typeId);
 }
 
+// ─── Typed getters ───────────────────────────────────────────────────────────
+template<typename T>
+static const T* lookupAsset(const std::unordered_map<HE::UUID, SlotHandle>& index,
+                            const SlotMap<T>& map, HE::UUID id)
+{
+	auto it = index.find(id);
+	return it == index.end() ? nullptr : map.get(it->second);
+}
+
+const StaticMeshAsset*   ContentManager::getStaticMesh(HE::UUID id) const   { return lookupAsset(m_handleToUUID, m_staticMeshAssets, id); }
+const SkeletalMeshAsset* ContentManager::getSkeletalMesh(HE::UUID id) const { return lookupAsset(m_handleToUUID, m_skeletalMeshAssets, id); }
+const TextureAsset*      ContentManager::getTexture(HE::UUID id) const      { return lookupAsset(m_handleToUUID, m_textureAssets, id); }
+const MaterialAsset*     ContentManager::getMaterial(HE::UUID id) const     { return lookupAsset(m_handleToUUID, m_materialAssets, id); }
+const AudioAsset*        ContentManager::getAudio(HE::UUID id) const        { return lookupAsset(m_handleToUUID, m_audioAssets, id); }
+const ScriptAsset*       ContentManager::getScript(HE::UUID id) const       { return lookupAsset(m_handleToUUID, m_scriptAssets, id); }
+const ShaderAsset*       ContentManager::getShader(HE::UUID id) const       { return lookupAsset(m_handleToUUID, m_shaderAssets, id); }
+
 // ─── unloadAsset ─────────────────────────────────────────────────────────────
 bool ContentManager::unloadAsset(HE::UUID id)
 {

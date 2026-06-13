@@ -11,10 +11,13 @@ struct CameraData {
 };
 
 struct LightData {
-    glm::vec3 position  = glm::vec3(0.0f);
-    glm::vec3 color     = glm::vec3(1.0f);
-    float     intensity = 1.0f;
-    uint8_t   type      = 0;
+    glm::vec3 position     = glm::vec3(0.0f);
+    glm::vec3 direction    = glm::vec3(0.0f, -1.0f, 0.0f); // directional/spot: -Z of the light's world matrix
+    glm::vec3 color        = glm::vec3(1.0f);
+    float     intensity    = 1.0f;
+    float     range        = 10.0f;   // point/spot attenuation radius
+    float     spotAngleCos = 0.0f;    // cos(half angle), spot only
+    uint8_t   type         = 0;       // HE::LightType
 };
 
 class RenderWorld {
