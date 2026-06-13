@@ -23,5 +23,8 @@ public:
     void  SetVSync(bool enabled) override;
 
 private:
+    // Extract → cull → sort → RenderGraph → replay into the bound targets.
+    void DrawScene(int width, int height);
+
     D3D11RendererImpl* m_impl = nullptr;
 };
