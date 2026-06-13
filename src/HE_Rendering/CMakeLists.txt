@@ -61,6 +61,38 @@ if(HE_VULKAN_ENABLED)
     target_link_libraries(RendererVulkan PUBLIC Vulkan::Vulkan PRIVATE glm::glm HorizonCore)
     target_compile_definitions(RendererVulkan PRIVATE GLM_FORCE_DEPTH_ZERO_TO_ONE HE_RENDERING_BUILD_DLL)
     message(STATUS "HorizonRendering: Vulkan backend enabled")
+
+    # ── Compile the scene GLSL to SPIR-V (glslc) ─────────────────────────────
+    # The Vulkan backend loads <exe dir>/Shaders/*.spv at runtime. We compile
+    # them here when a shader compiler is available (it ships with the Vulkan
+    # SDK, the same SDK that gates this whole backend). Apps must deploy the
+    # resulting Shaders/ folder next to their executable (alongside the engine
+    # DLLs); the editor/game deploy steps copy it from ${CMAKE_BINARY_DIR}/Shaders.
+    find_program(GLSLC_EXECUTABLE NAMES glslc glslangValidator
+                 HINTS "$ENV{VULKAN_SDK}/bin" "$ENV{VULKAN_SDK}/Bin")
+    if(GLSLC_EXECUTABLE)
+        set(HE_SHADER_OUT_DIR "${CMAKE_BINARY_DIR}/Shaders")
+        file(MAKE_DIRECTORY "${HE_SHADER_OUT_DIR}")
+        set(HE_VULKAN_SPV "")
+        foreach(stage scene.vert scene.frag)
+            set(src "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${stage}")
+            set(dst "${HE_SHADER_OUT_DIR}/${stage}.spv")
+            if(GLSLC_EXECUTABLE MATCHES "glslangValidator")
+                add_custom_command(OUTPUT "${dst}"
+                    COMMAND ${GLSLC_EXECUTABLE} -V "${src}" -o "${dst}"
+                    DEPENDS "${src}" VERBATIM)
+            else()
+                add_custom_command(OUTPUT "${dst}"
+                    COMMAND ${GLSLC_EXECUTABLE} "${src}" -o "${dst}"
+                    DEPENDS "${src}" VERBATIM)
+            endif()
+            list(APPEND HE_VULKAN_SPV "${dst}")
+        endforeach()
+        add_custom_target(VulkanShaders DEPENDS ${HE_VULKAN_SPV})
+        add_dependencies(RendererVulkan VulkanShaders)
+    else()
+        message(WARNING "HorizonRendering: glslc not found — Vulkan scene shaders not compiled")
+    endif()
 else()
     message(STATUS "HorizonRendering: Vulkan backend disabled (SDK not found)")
 endif()
