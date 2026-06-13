@@ -378,10 +378,21 @@ landet mit dem ersten Feature, das sie braucht (ShadowPass/HDR), wo auch die
 Sampling-Shader entstehen. 2 neue Tests (Per-Pass-Dispatch + `describe()`) →
 **33 Cases, alle grün**.
 
+> **Status 13.06.2026 (Forts.):** ShadowPass (3.5) auf **OpenGL** umgesetzt +
+> kompilier-verifiziert (Commit `e7779e0`); Metal/D3D/Vulkan offen. ✅(GL)
+
+**ShadowPass (3.5) — OpenGL:** Directional-Schatten via 2048²-Depth-Map. Shared:
+`RenderWorld.shadow` (lightVP/dir/enabled), Extractor fittet ein Ortho-Frustum um
+die Szene; `ShadowPass` zeichnet die sichtbare Geometrie depth-only, GeometryPass
+sampelt die Map (Slope-Bias). GL rendert ShadowPass → Map → GeometryPass über den
+Sink. **Metal/D3D/Vulkan offen** — konventionssensibel (NDC/Tiefe z 0..1, Y-Flip
+des lightVP) und hier nicht render-testbar; Metal braucht zudem einen eigenen
+Depth-Encoder vor dem Szenen-Encoder.
+
 **Nächste Schritte (neue Top 5):**
 
-1. **ShadowPass** (3.5) — Offscreen-Depth-Target-Pool (zuerst GL+Metal) auf dem
-   Sink, Szene aus Directional-Light-POV, GeometryPass sampelt die Shadow-Map.
+1. **ShadowPass auf Metal/D3D/Vulkan** — lightVP pro NDC anpassen (clipFix z→0..1,
+   Y-Flip); Metal: separater Depth-Encoder. Auf Mac (Metal) zumindest baubar.
 2. **HDR + Tonemapping** (3.6) — SceneColor als RGBA16F-Target, PostProcessPass
    als Fullscreen-Tonemap auf den Backbuffer (nutzt dieselbe Target-Infra).
 3. **Material-Inspector** — Material-Zuweisung per Drag&Drop aufs
