@@ -20,6 +20,14 @@ struct LightData {
     uint8_t   type         = 0;       // HE::LightType
 };
 
+// Directional-light shadow info, computed by the extractor. viewProj transforms
+// world space into the light's clip space (orthographic) for shadow mapping.
+struct ShadowData {
+    glm::mat4 viewProj   = glm::mat4(1.0f);
+    glm::vec3 direction  = glm::vec3(0.0f, -1.0f, 0.0f);
+    bool      enabled    = false; // true when a directional light is present
+};
+
 class RenderWorld {
 public:
     void clear();
@@ -27,4 +35,5 @@ public:
     std::vector<RenderObject> objects;
     std::vector<LightData>    lights;
     CameraData                camera;
+    ShadowData                shadow;
 };

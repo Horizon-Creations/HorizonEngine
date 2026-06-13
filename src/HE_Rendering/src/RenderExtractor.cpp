@@ -7,6 +7,8 @@
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/LightComponent.h>
 #include <glm/gtc/quaternion.hpp>
+#include <algorithm>
+#include <cmath>
 
 namespace
 {
@@ -127,5 +129,32 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 		l.spotAngleCos = std::cos(glm::radians(light.spotAngle * 0.5f));
 		l.type         = static_cast<uint8_t>(light.type);
 		out.lights.push_back(l);
+	}
+
+	// ── Directional-light shadow view-projection ─────────────────────────────
+	// First directional light casts shadows. The ortho frustum is fitted around
+	// the union of the (seeded) object bounds — backends refine bounds elsewhere,
+	// but this rough fit is enough for a single full-scene shadow map.
+	out.shadow.enabled = false;
+	for (const LightData& l : out.lights)
+	{
+		if (l.type != 0) continue; // 0 = directional
+
+		HE::AABB sceneBox;
+		for (const RenderObject& o : out.objects)
+			sceneBox.expand(o.worldBounds);
+		const glm::vec3 center = sceneBox.isValid() ? sceneBox.center() : glm::vec3(0.0f);
+		float radius = sceneBox.isValid() ? glm::length(sceneBox.extents()) : 10.0f;
+		radius = std::max(radius, 1.0f);
+
+		const glm::vec3 dir = glm::normalize(l.direction);
+		const glm::vec3 up  = std::abs(dir.y) > 0.99f ? glm::vec3(0, 0, 1) : glm::vec3(0, 1, 0);
+		const glm::vec3 eye = center - dir * (radius * 2.0f);
+		const glm::mat4 view = glm::lookAt(eye, center, up);
+		const glm::mat4 proj = glm::ortho(-radius, radius, -radius, radius, 0.05f, radius * 4.0f);
+		out.shadow.viewProj  = proj * view;
+		out.shadow.direction = dir;
+		out.shadow.enabled   = true;
+		break;
 	}
 }

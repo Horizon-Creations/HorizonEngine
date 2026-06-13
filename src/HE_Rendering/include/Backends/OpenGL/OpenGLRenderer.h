@@ -86,6 +86,9 @@ private:
 	int          m_uLightColor    = -1;
 	int          m_uLightParams   = -1;
 	int          m_uCameraPos     = -1;
+	int          m_uLightVP       = -1;   // directional-light view-proj (shadow)
+	int          m_uShadowMap     = -1;   // shadow map sampler unit
+	int          m_uShadowEnabled = -1;
 	unsigned int m_cubeVAO        = 0;
 	unsigned int m_cubeVBO        = 0;
 	unsigned int m_cubeEBO        = 0;
@@ -93,6 +96,14 @@ private:
 
 	// Uploaded asset meshes, keyed by asset UUID
 	std::unordered_map<HE::UUID, GpuMesh> m_meshCache;
+
+	// ── Shadow map (single directional light) ───────────────────────────────
+	unsigned int m_shadowFBO      = 0;
+	unsigned int m_shadowDepthTex = 0;
+	int          m_shadowSize     = 2048;
+	unsigned int m_depthProgram   = 0;   // depth-only pass (lightVP * model * pos)
+	int          m_uDepthMVP      = -1;
+	void CreateShadowResources();
 
 	// ── Offscreen viewport (editor scene view) ──────────────────────────────
 	uint32_t     m_viewportReqW  = 0;   // requested by the UI, 0 = direct to window
