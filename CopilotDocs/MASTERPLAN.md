@@ -323,15 +323,36 @@ SceneSerializer (JSON) gelegt:
   einer Szene wird der Play-Mode verlassen, Undo-History geleert, Selektion
   zurückgesetzt; `New Scene` leert die Welt auf den Root.
 
+> **Status 13.06.2026 (Forts.):** RenderGraph-Grundlage (3.4) aktiviert. ✅
+
+**RenderGraph aktivieren (3.4)** — Das Pass-System ist scharf geschaltet und
+beide Backends submitten jetzt darüber (technische Grundlage zuerst, Features
+bauen darauf auf):
+- `CommandBuffer`/`RenderGraph`/`RenderPass` (vorher leere Stubs) implementiert.
+  `DrawCall` trägt jetzt `meshAssetId`/`entityId`/`lod` (+ die künftigen
+  RenderHandle-Felder), sodass das Backend ohne RenderWorld-Zugriff replayen kann.
+- **GeometryPass** wandelt die gecullten + sortierten sichtbaren Objekte in
+  DrawCalls. GL und Metal bauen pro Frame `m_renderGraph.execute(world, sorted,
+  m_cmds)` und replayen `m_cmds.drawCalls()` statt direkt über `sortedIndices`
+  zu iterieren — Mesh-Auflösung per UUID bleibt im Backend, das die Rolle von
+  `IRenderDevice::submit` übernimmt (kein voller RHI-Umbau nötig).
+- **ShadowPass**/**PostProcessPass** sind deklariert, aber bewusst inert: sie
+  brauchen Render-Target-Plumbing (Depth-Target aus Licht-POV für 3.5,
+  Offscreen-HDR-Target + Fullscreen-Pass für 3.6), das der reine CPU-seitige
+  CommandBuffer noch nicht modelliert → Folgeschritt.
+- Tests: 4 neue doctest-Cases (`tests/test_rendergraph.cpp`) für DrawCall-
+  Reihenfolge/Payload, Out-of-range-Skip, Buffer-Reset pro Frame und inerte
+  Passes → jetzt **31 Cases, alle grün**.
+
 **Nächste Schritte (neue Top 5):**
 
-1. **RenderGraph aktivieren** (3.4) — GeometryPass als ersten Knoten, danach
-   ShadowPass (3.5, eine Directional-Cascade).
-2. **HDR + Tonemapping** (3.6) als erster PostProcess-Pass.
-3. **Material-Inspector** — Material-Zuweisung per Drag&Drop aufs
+1. **Render-Target-Abstraktion im RenderGraph** — Passes deklarieren
+   Color/Depth-Targets, die das Backend erzeugt/bindet; Voraussetzung für 3.5/3.6.
+2. **ShadowPass** (3.5) — Directional-Schatten mit einer Cascade auf der neuen
+   Target-Abstraktion.
+3. **HDR + Tonemapping** (3.6) als erster echter PostProcessPass.
+4. **Material-Inspector** — Material-Zuweisung per Drag&Drop aufs
    MaterialComponent, Shader-/Textur-Slots editierbar.
-4. **Editor-Kamera-Feinschliff** — Cursor-Lock/-Wrap im Fly-Modus, persistente
-   Kamera-Position pro Szene, optionaler orthografischer Modus + View-Gizmo.
 5. **Save-Prompt bei ungesicherten Änderungen** — „Speichern?"-Dialog vor
    Szenenwechsel/Projektschließen/Quit, wenn der Dirty-Marker aktiv ist.
 

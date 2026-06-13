@@ -613,12 +613,19 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 		[encoder setFragmentBytes:&scene length:sizeof(scene) atIndex:0];
 	}
 
-	for (uint32_t objIndex : m_sortedIndices)
+	// Build this frame's draw calls through the render graph, then replay them.
+	// GeometryPass turns the sorted visible objects into DrawCalls; the encoder
+	// state (pipeline, lights, camera) is set up above and the meshes are
+	// resolved by UUID here, exactly as the immediate loop used to.
+	if (m_renderGraph.empty())
+		m_renderGraph.addPass(std::make_unique<GeometryPass>());
+	m_renderGraph.execute(m_renderWorld, m_sortedIndices, m_cmds);
+
+	for (const DrawCall& dc : m_cmds.drawCalls())
 	{
-		const RenderObject& obj = m_renderWorld.objects[objIndex];
 		UnlitUniforms u;
-		u.mvp   = viewProj * obj.transform;
-		u.model = obj.transform;
+		u.mvp   = viewProj * dc.transform;
+		u.model = dc.transform;
 		u.color = glm::vec4(0.85f, 0.55f, 0.25f, 1.0f);
 
 		// Resolve the asset; entities without one fall back to the built-in cube.
@@ -626,7 +633,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 		id<MTLBuffer> indexBuf;
 		NSUInteger    indexCount;
 		id<MTLTexture> texture;
-		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId))
+		if (const GpuMesh* mesh = ResolveMesh(dc.meshAssetId))
 		{
 			vertexBuf  = (__bridge id<MTLBuffer>)mesh->vertexBuf;
 			indexBuf   = (__bridge id<MTLBuffer>)mesh->indexBuf;

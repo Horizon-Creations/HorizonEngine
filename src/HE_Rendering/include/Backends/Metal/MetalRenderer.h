@@ -5,6 +5,8 @@
 #include <HorizonRendering/RenderExtractor.h>
 #include <HorizonRendering/FrustumCuller.h>
 #include <HorizonRendering/RenderSorter.h>
+#include <HorizonRendering/RenderGraph.h>
+#include <HorizonRendering/CommandBuffer.h>
 #include <Math/AABB.h>
 #include <Types/UUID.h>
 #include <unordered_map>
@@ -103,6 +105,8 @@ private:
 	RenderWorld     m_renderWorld;
 	FrustumCuller   m_culler;
 	RenderSorter    m_sorter;
+	RenderGraph     m_renderGraph;   // pass pipeline (GeometryPass today)
+	CommandBuffer   m_cmds;          // draw calls produced this frame
 	std::vector<bool>     m_visible;       // per-frame culling results
 	std::vector<uint32_t> m_sortedIndices; // per-frame draw order
 

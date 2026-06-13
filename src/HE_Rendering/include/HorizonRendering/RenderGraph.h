@@ -11,6 +11,8 @@ public:
                  CommandBuffer&               outCmds);
     void clear();
 
+    bool empty() const { return passes_.empty(); }
+
 private:
     std::vector<std::unique_ptr<RenderPass>> passes_;
 };
