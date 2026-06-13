@@ -38,16 +38,19 @@ cbuffer PerObject : register(b0)
 };
 cbuffer PerFrame : register(b1)
 {
-    float4 uCameraPos;        // xyz
-    int4   uLightCount;       // x = count
-    float4 uLightPos[8];      // xyz pos,  w type (0 dir / 1 point / 2 spot)
-    float4 uLightDir[8];      // xyz dir,  w cos(spot half angle)
-    float4 uLightColor[8];    // rgb,      w intensity
-    float4 uLightParams[8];   // x range
+    float4   uCameraPos;        // xyz
+    int4     uLightCount;       // x = count
+    float4   uLightPos[8];      // xyz pos,  w type (0 dir / 1 point / 2 spot)
+    float4   uLightDir[8];      // xyz dir,  w cos(spot half angle)
+    float4   uLightColor[8];    // rgb,      w intensity
+    float4   uLightParams[8];   // x range
+    float4x4 uLightVP;          // directional-light view-proj (D3D clip)
+    int4     uShadowEnabled;    // x = 0/1
 };
 
-Texture2D    uTexture : register(t0);
-SamplerState uSampler : register(s0);
+Texture2D    uTexture   : register(t0);
+Texture2D    uShadowMap : register(t1);
+SamplerState uSampler   : register(s0);
 
 struct VSIn  { float3 pos : POSITION; float3 normal : NORMAL; float2 uv : TEXCOORD0; };
 struct VSOut { float4 clip : SV_POSITION; float3 worldPos : TEXCOORD0; float3 normal : TEXCOORD1; float2 uv : TEXCOORD2; };
@@ -60,6 +63,24 @@ VSOut VSMain(VSIn i)
     o.uv       = i.uv;
     o.clip     = mul(uMVP, float4(i.pos, 1.0));
     return o;
+}
+
+// Depth-only vertex shader for the shadow pass: uMVP carries lightVP * model.
+float4 VSDepth(VSIn i) : SV_POSITION
+{
+    return mul(uMVP, float4(i.pos, 1.0));
+}
+
+float shadowFactor(float3 worldPos, float3 N, float3 L)
+{
+    if (uShadowEnabled.x == 0) return 1.0;
+    float4 lp = mul(uLightVP, float4(worldPos, 1.0));
+    float3 p  = lp.xyz / lp.w;                       // z already [0,1] (D3D clip)
+    float2 uv = float2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5); // top-left origin
+    if (p.z > 1.0 || any(uv < 0.0) || any(uv > 1.0)) return 1.0;
+    float bias    = max(0.0015 * (1.0 - dot(N, L)), 0.0004);
+    float closest = uShadowMap.Sample(uSampler, uv).r;
+    return (p.z - bias > closest) ? 0.35 : 1.0;
 }
 
 float4 PSMain(VSOut i) : SV_TARGET
@@ -101,10 +122,11 @@ float4 PSMain(VSOut i) : SV_TARGET
                 atten *= smoothstep(cosCone, lerp(cosCone, 1.0, 0.2), c);
             }
         }
+        float  sh   = (type == 0) ? shadowFactor(i.worldPos, N, L) : 1.0;
         float  diff = max(dot(N, L), 0.0);
         float3 H    = normalize(L + V);
         float  spec = pow(max(dot(N, H), 0.0), 32.0) * 0.25;
-        result += (base * diff + spec.xxx) * uLightColor[li].rgb * uLightColor[li].w * atten;
+        result += (base * diff + spec.xxx) * uLightColor[li].rgb * uLightColor[li].w * atten * sh;
     }
     return float4(result, 1.0);
 }
@@ -131,13 +153,23 @@ namespace
     };
     struct PerFrameCB
     {
-        glm::vec4 cameraPos;
+        glm::vec4  cameraPos;
         glm::ivec4 lightCount;
-        glm::vec4 lightPos[8];
-        glm::vec4 lightDir[8];
-        glm::vec4 lightColor[8];
-        glm::vec4 lightParams[8];
+        glm::vec4  lightPos[8];
+        glm::vec4  lightDir[8];
+        glm::vec4  lightColor[8];
+        glm::vec4  lightParams[8];
+        glm::mat4  lightVP;
+        glm::ivec4 shadowEnabled;
     };
+
+    // Remaps the extractor's GL-convention light projection (depth -1..1) to D3D
+    // clip space (depth 0..1). D3D NDC y is up; sampling flips V (top-left origin).
+    const glm::mat4 kD3DClipFix(
+        1.0f, 0.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 0.5f, 0.0f,
+        0.0f, 0.0f, 0.5f, 1.0f);
 }
 
 struct D3D11RendererImpl
@@ -161,6 +193,13 @@ struct D3D11RendererImpl
     ComPtr<ID3D11DepthStencilState> depthState;
     ComPtr<ID3D11RasterizerState>   rasterState;
     ComPtr<ID3D11ShaderResourceView> dummyTexture; // 1x1 white, for untextured meshes
+
+    // ── Shadow map ──────────────────────────────────────────────────────────
+    ComPtr<ID3D11VertexShader>       depthVS;    // depth-only pass
+    ComPtr<ID3D11Texture2D>          shadowTex;
+    ComPtr<ID3D11DepthStencilView>   shadowDSV;
+    ComPtr<ID3D11ShaderResourceView> shadowSRV;
+    int shadowSize = 2048;
 
     GpuMesh cube;
 
@@ -229,6 +268,36 @@ struct D3D11RendererImpl
             { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D11_INPUT_PER_VERTEX_DATA, 0 },
         };
         device->CreateInputLayout(layout, 3, vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &inputLayout);
+
+        // Depth-only vertex shader for the shadow pass.
+        ComPtr<ID3DBlob> dvsBlob;
+        if (SUCCEEDED(D3DCompile(kSceneHLSL, std::strlen(kSceneHLSL), "scene", nullptr, nullptr,
+                                 "VSDepth", "vs_5_0", flags, 0, &dvsBlob, &err)))
+            device->CreateVertexShader(dvsBlob->GetBufferPointer(), dvsBlob->GetBufferSize(), nullptr, &depthVS);
+
+        // Shadow map: R32_TYPELESS so it can be both a depth target and an SRV.
+        {
+            D3D11_TEXTURE2D_DESC sd{};
+            sd.Width = sd.Height = static_cast<UINT>(shadowSize);
+            sd.MipLevels = 1; sd.ArraySize = 1;
+            sd.Format = DXGI_FORMAT_R32_TYPELESS;
+            sd.SampleDesc.Count = 1;
+            sd.Usage = D3D11_USAGE_DEFAULT;
+            sd.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
+            if (SUCCEEDED(device->CreateTexture2D(&sd, nullptr, &shadowTex)))
+            {
+                D3D11_DEPTH_STENCIL_VIEW_DESC dvd{};
+                dvd.Format        = DXGI_FORMAT_D32_FLOAT;
+                dvd.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+                device->CreateDepthStencilView(shadowTex.Get(), &dvd, &shadowDSV);
+
+                D3D11_SHADER_RESOURCE_VIEW_DESC svd{};
+                svd.Format              = DXGI_FORMAT_R32_FLOAT;
+                svd.ViewDimension       = D3D11_SRV_DIMENSION_TEXTURE2D;
+                svd.Texture2D.MipLevels = 1;
+                device->CreateShaderResourceView(shadowTex.Get(), &svd, &shadowSRV);
+            }
+        }
 
         auto makeCB = [&](UINT bytes, ComPtr<ID3D11Buffer>& out)
         {
@@ -452,9 +521,14 @@ void D3D11Renderer::DrawScene(int width, int height)
     if (p.m_sortedIndices.empty()) return;
 
     if (p.m_renderGraph.empty())
+    {
+        p.m_renderGraph.addPass(std::make_unique<ShadowPass>());
         p.m_renderGraph.addPass(std::make_unique<GeometryPass>());
+    }
 
-    const glm::mat4 viewProj = p.m_renderWorld.camera.projection * p.m_renderWorld.camera.view;
+    const glm::mat4 viewProj  = p.m_renderWorld.camera.projection * p.m_renderWorld.camera.view;
+    const bool      shadows   = p.m_renderWorld.shadow.enabled && p.shadowDSV && p.depthVS;
+    const glm::mat4 lightClip = kD3DClipFix * p.m_renderWorld.shadow.viewProj;
 
     ID3D11DeviceContext* ctx = p.context.Get();
     ctx->IASetInputLayout(p.inputLayout.Get());
@@ -479,6 +553,8 @@ void D3D11Renderer::DrawScene(int width, int height)
             f.lightColor[i]  = glm::vec4(l.color,     l.intensity);
             f.lightParams[i] = glm::vec4(l.range, 0.0f, 0.0f, 0.0f);
         }
+        f.lightVP       = lightClip;
+        f.shadowEnabled = glm::ivec4(shadows ? 1 : 0, 0, 0, 0);
         D3D11_MAPPED_SUBRESOURCE m{};
         if (SUCCEEDED(ctx->Map(p.perFrameCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m)))
         {
@@ -489,32 +565,73 @@ void D3D11Renderer::DrawScene(int width, int height)
         ctx->PSSetConstantBuffers(1, 1, p.perFrameCB.GetAddressOf());
     }
 
-    // Per-pass sink: today the only pass renders to the backbuffer (the bound
-    // RTV). Offscreen targets (id != backbuffer) arrive with shadows/HDR.
     const UINT stride = 8 * sizeof(float);
     const UINT offset = 0;
+
+    auto uploadObject = [&](const glm::mat4& mvp, const glm::mat4& model, float hasTex)
+    {
+        PerObjectCB o{};
+        o.mvp = mvp; o.model = model;
+        o.color = glm::vec4(0.85f, 0.55f, 0.25f, hasTex);
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        if (SUCCEEDED(ctx->Map(p.perObjectCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+        {
+            std::memcpy(mapped.pData, &o, sizeof(o));
+            ctx->Unmap(p.perObjectCB.Get(), 0);
+        }
+        ctx->VSSetConstantBuffers(0, 1, p.perObjectCB.GetAddressOf());
+        ctx->PSSetConstantBuffers(0, 1, p.perObjectCB.GetAddressOf());
+    };
+
     p.m_renderGraph.execute(p.m_renderWorld, p.m_sortedIndices,
         [&](const RenderPass&, const RenderPassIO& io, const CommandBuffer& cmds)
     {
+        // ── Shadow pass: depth from the light's POV into the shadow map ──────
+        if (io.output.id == kShadowMapTarget)
+        {
+            if (!shadows) return;
+            // Unbind the shadow SRV (t1) so it can be bound as a depth target.
+            ID3D11ShaderResourceView* nullSrv = nullptr;
+            ctx->PSSetShaderResources(1, 1, &nullSrv);
+            ID3D11RenderTargetView* noRTV = nullptr;
+            ctx->OMSetRenderTargets(1, &noRTV, p.shadowDSV.Get());
+            ctx->ClearDepthStencilView(p.shadowDSV.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
+            ctx->VSSetShader(p.depthVS.Get(), nullptr, 0);
+            ctx->PSSetShader(nullptr, nullptr, 0);
+            D3D11_VIEWPORT svp{}; svp.Width = svp.Height = static_cast<float>(p.shadowSize); svp.MaxDepth = 1.0f;
+            ctx->RSSetViewports(1, &svp);
+            for (const DrawCall& dc : cmds.drawCalls())
+            {
+                const GpuMesh* mesh = p.resolveMesh(dc.meshAssetId, m_contentManager);
+                const GpuMesh& m    = mesh ? *mesh : p.cube;
+                if (!m.vbuf || !m.ibuf) continue;
+                uploadObject(lightClip * dc.transform, dc.transform, 0.0f);
+                ctx->IASetVertexBuffers(0, 1, m.vbuf.GetAddressOf(), &stride, &offset);
+                ctx->IASetIndexBuffer(m.ibuf.Get(), DXGI_FORMAT_R32_UINT, 0);
+                ctx->DrawIndexed(m.indexCount, 0, 0);
+            }
+            // Restore the main target + viewport + scene shaders.
+            ctx->OMSetRenderTargets(1, p.rtv.GetAddressOf(), p.dsv.Get());
+            D3D11_VIEWPORT vp{}; vp.Width = static_cast<float>(width); vp.Height = static_cast<float>(height); vp.MaxDepth = 1.0f;
+            ctx->RSSetViewports(1, &vp);
+            ctx->VSSetShader(p.vs.Get(), nullptr, 0);
+            ctx->PSSetShader(p.ps.Get(), nullptr, 0);
+            return;
+        }
+
         if (io.output.id != kBackbufferTarget) return;
+
+        // Shadow map on t1 for sampling.
+        ID3D11ShaderResourceView* shadowSrv = shadows ? p.shadowSRV.Get() : nullptr;
+        ctx->PSSetShaderResources(1, 1, &shadowSrv);
+
         for (const DrawCall& dc : cmds.drawCalls())
         {
             const GpuMesh* mesh = p.resolveMesh(dc.meshAssetId, m_contentManager);
             const GpuMesh& m    = mesh ? *mesh : p.cube;
             if (!m.vbuf || !m.ibuf) continue;
 
-            PerObjectCB o{};
-            o.mvp   = viewProj * dc.transform;
-            o.model = dc.transform;
-            o.color = glm::vec4(0.85f, 0.55f, 0.25f, m.texture ? 1.0f : 0.0f);
-            D3D11_MAPPED_SUBRESOURCE mapped{};
-            if (SUCCEEDED(ctx->Map(p.perObjectCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
-            {
-                std::memcpy(mapped.pData, &o, sizeof(o));
-                ctx->Unmap(p.perObjectCB.Get(), 0);
-            }
-            ctx->VSSetConstantBuffers(0, 1, p.perObjectCB.GetAddressOf());
-            ctx->PSSetConstantBuffers(0, 1, p.perObjectCB.GetAddressOf());
+            uploadObject(viewProj * dc.transform, dc.transform, m.texture ? 1.0f : 0.0f);
 
             ID3D11ShaderResourceView* srv = m.texture ? m.texture.Get() : p.dummyTexture.Get();
             ctx->PSSetShaderResources(0, 1, &srv);
