@@ -26,6 +26,8 @@ enum class RenderTargetSize : uint8_t
 
 using RenderTargetId = uint32_t;
 constexpr RenderTargetId kBackbufferTarget = 0; // the active window / viewport target
+constexpr RenderTargetId kShadowMapTarget  = 1; // directional-light depth map
+constexpr RenderTargetId kSceneColorTarget = 2; // HDR scene color (pre-tonemap)
 
 struct RenderTargetDesc
 {

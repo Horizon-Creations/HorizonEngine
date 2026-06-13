@@ -47,7 +47,26 @@ uniform vec3 uCameraPos;
 uniform vec3      uColor;
 uniform bool      uHasTexture;
 uniform sampler2D uTexture;
+
+// Directional-light shadow map
+uniform mat4      uLightVP;
+uniform sampler2D uShadowMap;
+uniform int       uShadowEnabled;
+
 out vec4 FragColor;
+
+float computeShadow(vec3 worldPos, vec3 N, vec3 L)
+{
+	if (uShadowEnabled == 0) return 1.0;
+	vec4 lp = uLightVP * vec4(worldPos, 1.0);
+	vec3 p  = lp.xyz / lp.w;
+	p = p * 0.5 + 0.5;                       // NDC [-1,1] → [0,1]
+	if (p.z > 1.0 || any(lessThan(p.xy, vec2(0.0))) || any(greaterThan(p.xy, vec2(1.0))))
+		return 1.0;                          // outside the map → lit
+	float bias    = max(0.0015 * (1.0 - dot(N, L)), 0.0004);
+	float closest = texture(uShadowMap, p.xy).r;
+	return (p.z - bias > closest) ? 0.35 : 1.0;
+}
 
 void main()
 {
@@ -89,14 +108,30 @@ void main()
 			}
 		}
 
+		// Only the (first) directional light casts shadows.
+		float sh = (type == 0) ? computeShadow(vWorldPos, N, L) : 1.0;
+
 		float diff = max(dot(N, L), 0.0);
 		vec3  H    = normalize(L + V);
 		float spec = pow(max(dot(N, H), 0.0), 32.0) * 0.25;
 		result += (base * diff + vec3(spec))
-		        * uLightColor[i].rgb * uLightColor[i].w * atten;
+		        * uLightColor[i].rgb * uLightColor[i].w * atten * sh;
 	}
 	FragColor = vec4(result, 1.0);
 }
+)GLSL";
+
+// Depth-only shader for the shadow pass — transforms by the light's view-proj.
+static const char* kDepthVS = R"GLSL(
+#version 410 core
+layout(location = 0) in vec3 aPos;
+uniform mat4 uDepthMVP;
+void main() { gl_Position = uDepthMVP * vec4(aPos, 1.0); }
+)GLSL";
+
+static const char* kDepthFS = R"GLSL(
+#version 410 core
+void main() {}
 )GLSL";
 
 static GLuint CompileStage(GLenum stage, const char* src)
@@ -134,6 +169,7 @@ void OpenGLRenderer::Initialize(HE::Window* window)
 
 	glEnable(GL_DEPTH_TEST);
 	CreateUnlitPipeline();
+	CreateShadowResources();
 	CreateCubeMesh();
 	Logger::Log(Logger::LogLevel::Info, "OpenGLRenderer: initialized successfully");
 }
@@ -170,6 +206,44 @@ void OpenGLRenderer::CreateUnlitPipeline()
 	m_uLightColor  = glGetUniformLocation(m_unlitProgram, "uLightColor");
 	m_uLightParams = glGetUniformLocation(m_unlitProgram, "uLightParams");
 	m_uCameraPos   = glGetUniformLocation(m_unlitProgram, "uCameraPos");
+	m_uLightVP       = glGetUniformLocation(m_unlitProgram, "uLightVP");
+	m_uShadowMap     = glGetUniformLocation(m_unlitProgram, "uShadowMap");
+	m_uShadowEnabled = glGetUniformLocation(m_unlitProgram, "uShadowEnabled");
+}
+
+void OpenGLRenderer::CreateShadowResources()
+{
+	// Depth-only program for the shadow pass.
+	GLuint vs = CompileStage(GL_VERTEX_SHADER,   kDepthVS);
+	GLuint fs = CompileStage(GL_FRAGMENT_SHADER, kDepthFS);
+	m_depthProgram = glCreateProgram();
+	glAttachShader(m_depthProgram, vs);
+	glAttachShader(m_depthProgram, fs);
+	glLinkProgram(m_depthProgram);
+	glDeleteShader(vs);
+	glDeleteShader(fs);
+	m_uDepthMVP = glGetUniformLocation(m_depthProgram, "uDepthMVP");
+
+	// Depth texture + FBO. Border color 1.0 so samples outside the map read as
+	// "fully lit" (depth 1).
+	glGenTextures(1, &m_shadowDepthTex);
+	glBindTexture(GL_TEXTURE_2D, m_shadowDepthTex);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, m_shadowSize, m_shadowSize,
+	             0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+	const float border[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+	glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, border);
+
+	glGenFramebuffers(1, &m_shadowFBO);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_shadowFBO);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, m_shadowDepthTex, 0);
+	glDrawBuffer(GL_NONE);
+	glReadBuffer(GL_NONE);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
 void OpenGLRenderer::CreateCubeMesh()
@@ -330,6 +404,9 @@ void OpenGLRenderer::Shutdown()
 	if (m_cubeVBO)      { glDeleteBuffers(1, &m_cubeVBO);      m_cubeVBO = 0; }
 	if (m_cubeEBO)      { glDeleteBuffers(1, &m_cubeEBO);      m_cubeEBO = 0; }
 	if (m_unlitProgram) { glDeleteProgram(m_unlitProgram);     m_unlitProgram = 0; }
+	if (m_depthProgram) { glDeleteProgram(m_depthProgram);     m_depthProgram = 0; }
+	if (m_shadowFBO)      { glDeleteFramebuffers(1, &m_shadowFBO);   m_shadowFBO = 0; }
+	if (m_shadowDepthTex) { glDeleteTextures(1, &m_shadowDepthTex);  m_shadowDepthTex = 0; }
 
 	// Destroy secondary contexts (secondary windows' SDL_GLContexts are owned by us)
 	for (auto& [sdlWin, ctx] : m_secondaryContexts)
@@ -437,49 +514,86 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
 	if (m_sortedIndices.empty()) return;
 
-	glUseProgram(m_unlitProgram);
-	glUniform3f(m_uColor, 0.85f, 0.55f, 0.25f);
-	glUniform1i(m_uTexture, 0);
-	glActiveTexture(GL_TEXTURE0);
+	// Snapshot the active target (window or editor-viewport FBO) so the shadow
+	// pass can render into the shadow map and then restore it for the main pass.
+	GLint prevFBO = 0;
+	glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
 
-	// ── Lights (clamped to the shader's MAX_LIGHTS) ─────────────────────────
+	const bool      shadows = m_renderWorld.shadow.enabled && m_shadowFBO != 0;
+	const glm::mat4 lightVP = m_renderWorld.shadow.viewProj;
+
+	// ShadowPass renders the depth map first; GeometryPass then shades + samples it.
+	if (m_renderGraph.empty())
 	{
-		constexpr int kMaxLights = 8;
-		const int count = std::min(static_cast<int>(m_renderWorld.lights.size()), kMaxLights);
-		glm::vec4 pos[kMaxLights], dir[kMaxLights], color[kMaxLights], params[kMaxLights];
-		for (int i = 0; i < count; ++i)
-		{
-			const LightData& l = m_renderWorld.lights[i];
-			pos[i]    = glm::vec4(l.position,  static_cast<float>(l.type));
-			dir[i]    = glm::vec4(l.direction, l.spotAngleCos);
-			color[i]  = glm::vec4(l.color,     l.intensity);
-			params[i] = glm::vec4(l.range, 0.0f, 0.0f, 0.0f);
-		}
-		glUniform1i(m_uLightCount, count);
-		if (count > 0)
-		{
-			glUniform4fv(m_uLightPos,    count, glm::value_ptr(pos[0]));
-			glUniform4fv(m_uLightDir,    count, glm::value_ptr(dir[0]));
-			glUniform4fv(m_uLightColor,  count, glm::value_ptr(color[0]));
-			glUniform4fv(m_uLightParams, count, glm::value_ptr(params[0]));
-		}
-		glUniform3fv(m_uCameraPos, 1, glm::value_ptr(m_renderWorld.camera.position));
+		m_renderGraph.addPass(std::make_unique<ShadowPass>());
+		m_renderGraph.addPass(std::make_unique<GeometryPass>());
 	}
 
-	// Build this frame's draw calls through the render graph, then replay them.
-	// GeometryPass turns the sorted visible objects into DrawCalls; the GL state
-	// (program, lights, camera) is set up above and the meshes are resolved by
-	// UUID here, exactly as the immediate loop used to.
-	if (m_renderGraph.empty())
-		m_renderGraph.addPass(std::make_unique<GeometryPass>());
-
-	// Per-pass sink: bind the pass's target, then replay its draws. Today the
-	// only pass renders to the backbuffer (the bound window/viewport FBO);
-	// offscreen targets (id != backbuffer) arrive with shadows/HDR.
 	m_renderGraph.execute(m_renderWorld, m_sortedIndices,
 		[&](const RenderPass&, const RenderPassIO& io, const CommandBuffer& cmds)
 	{
+		// ── Shadow pass: depth from the light's POV into the shadow map ──────
+		if (io.output.id == kShadowMapTarget)
+		{
+			if (!shadows) return;
+			glBindFramebuffer(GL_FRAMEBUFFER, m_shadowFBO);
+			glViewport(0, 0, m_shadowSize, m_shadowSize);
+			glClear(GL_DEPTH_BUFFER_BIT);
+			glUseProgram(m_depthProgram);
+			for (const DrawCall& dc : cmds.drawCalls())
+			{
+				glUniformMatrix4fv(m_uDepthMVP, 1, GL_FALSE, glm::value_ptr(lightVP * dc.transform));
+				const GpuMesh* mesh = ResolveMesh(dc.meshAssetId);
+				glBindVertexArray(mesh ? mesh->vao : m_cubeVAO);
+				glDrawElements(GL_TRIANGLES, mesh ? mesh->indexCount : m_cubeIndexCount,
+				               GL_UNSIGNED_INT, nullptr);
+			}
+			glBindFramebuffer(GL_FRAMEBUFFER, prevFBO);
+			glViewport(0, 0, pw, ph);
+			return;
+		}
+
 		if (io.output.id != kBackbufferTarget) return;
+
+		// ── Geometry pass: scene program + per-frame state ──────────────────
+		// Set here (not before the graph) because the shadow pass switched the
+		// active program.
+		glUseProgram(m_unlitProgram);
+		glUniform3f(m_uColor, 0.85f, 0.55f, 0.25f);
+		glUniform1i(m_uTexture, 0);
+
+		// Lights (clamped to the shader's MAX_LIGHTS)
+		{
+			constexpr int kMaxLights = 8;
+			const int count = std::min(static_cast<int>(m_renderWorld.lights.size()), kMaxLights);
+			glm::vec4 pos[kMaxLights], dir[kMaxLights], color[kMaxLights], params[kMaxLights];
+			for (int i = 0; i < count; ++i)
+			{
+				const LightData& l = m_renderWorld.lights[i];
+				pos[i]    = glm::vec4(l.position,  static_cast<float>(l.type));
+				dir[i]    = glm::vec4(l.direction, l.spotAngleCos);
+				color[i]  = glm::vec4(l.color,     l.intensity);
+				params[i] = glm::vec4(l.range, 0.0f, 0.0f, 0.0f);
+			}
+			glUniform1i(m_uLightCount, count);
+			if (count > 0)
+			{
+				glUniform4fv(m_uLightPos,    count, glm::value_ptr(pos[0]));
+				glUniform4fv(m_uLightDir,    count, glm::value_ptr(dir[0]));
+				glUniform4fv(m_uLightColor,  count, glm::value_ptr(color[0]));
+				glUniform4fv(m_uLightParams, count, glm::value_ptr(params[0]));
+			}
+			glUniform3fv(m_uCameraPos, 1, glm::value_ptr(m_renderWorld.camera.position));
+		}
+
+		// Shadow map bound on texture unit 1.
+		glUniform1i(m_uShadowEnabled, shadows ? 1 : 0);
+		glUniformMatrix4fv(m_uLightVP, 1, GL_FALSE, glm::value_ptr(lightVP));
+		glUniform1i(m_uShadowMap, 1);
+		glActiveTexture(GL_TEXTURE1);
+		glBindTexture(GL_TEXTURE_2D, shadows ? m_shadowDepthTex : 0);
+		glActiveTexture(GL_TEXTURE0); // base color binds here in the loop
+
 		for (const DrawCall& dc : cmds.drawCalls())
 		{
 			const glm::mat4 mvp = viewProj * dc.transform;

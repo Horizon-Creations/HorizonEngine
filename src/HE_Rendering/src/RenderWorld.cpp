@@ -5,4 +5,5 @@ void RenderWorld::clear()
 	objects.clear();
 	lights.clear();
 	camera = CameraData{};
+	shadow = ShadowData{};
 }
