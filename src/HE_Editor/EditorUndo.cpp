@@ -39,6 +39,7 @@ void EditorUndo::pushUndo(Snapshot&& snapshot)
 	if (m_undoStack.size() > kMaxEntries)
 		m_undoStack.erase(m_undoStack.begin());
 	m_redoStack.clear();
+	++m_revision;
 }
 
 void EditorUndo::restore(const Snapshot& snapshot)
@@ -60,6 +61,7 @@ bool EditorUndo::undo()
 
 	restore(m_undoStack.back());
 	m_undoStack.pop_back();
+	++m_revision;
 	return true;
 }
 
@@ -74,6 +76,7 @@ bool EditorUndo::redo()
 
 	restore(m_redoStack.back());
 	m_redoStack.pop_back();
+	++m_revision;
 	return true;
 }
 

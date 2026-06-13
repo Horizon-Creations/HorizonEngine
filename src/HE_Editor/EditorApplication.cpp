@@ -610,13 +610,17 @@ void EditorApplication::OnInit()
 			contentManager().setContentRoot((projectPath / "Content").string());
 		}
 
+		m_currentScenePath.clear();
 		if (!sceneAbsPath.empty())
 		{
 			SceneSerializer serializer;
 			bool ok = serializer.load(*m_editorWorld, sceneAbsPath, SerializeFormat::JSON);
 			if (ok)
+			{
+				m_currentScenePath = sceneAbsPath;
 				Logger::Log(Logger::LogLevel::Info,
 					("EditorApplication: startup scene loaded from " + sceneAbsPath).c_str());
+			}
 			else
 				Logger::Log(Logger::LogLevel::Warning,
 					("EditorApplication: failed to load startup scene from " + sceneAbsPath).c_str());
@@ -628,6 +632,7 @@ void EditorApplication::OnInit()
 
 		m_editorWorld->markHierarchyDirty();
 		m_undo.clearHistory();
+		m_savedRevision = m_undo.revision();
 	});
 
 	// If a project was previously opened, load it now (triggers the callback above)
@@ -646,9 +651,16 @@ void EditorApplication::OnRender(float dt)
 	// ── Window title ─────────────────────────────────────────────────────
 	{
 		const std::string& projName = m_projectManager.currentProject().name;
-		const std::string title = projName.empty()
+		std::string title = projName.empty()
 			? "Horizon Engine"
 			: "Horizon Engine — " + projName;
+
+		// Append the scene name (file stem, or "Untitled") and a dirty marker.
+		const std::string sceneName = m_currentScenePath.empty()
+			? "Untitled"
+			: std::filesystem::path(m_currentScenePath).stem().string();
+		const bool dirty = m_undo.revision() != m_savedRevision;
+		title += " — " + sceneName + (dirty ? " *" : "");
 		window()->SetTitle(title);
 	}
 	// ── Automatischer asynchroner Content-Refresh ─────────────────────────────
@@ -715,6 +727,11 @@ AppContext EditorApplication::makeContext()
 		.selectedEntity      = m_selectedEntity,
 		.isPlaying           = m_isPlaying,
 		.setPlayMode         = [this](bool play){ setPlayMode(play); },
+		.currentScenePath    = m_currentScenePath,
+		.sceneDirty          = m_undo.revision() != m_savedRevision,
+		.saveSceneToPath     = [this](const std::string& p){ saveSceneToPath(p); },
+		.openScene           = [this](const std::string& p){ openScene(p); },
+		.newScene            = [this]{ newScene(); },
 		.undoSys             = &m_undo,
 		.undo                = [this]{ if (m_undo.undo()) m_selectedEntity = entt::null; },
 		.redo                = [this]{ if (m_undo.redo()) m_selectedEntity = entt::null; },
@@ -808,6 +825,64 @@ void EditorApplication::setPlayMode(bool play)
 		m_undo.clearHistory();
 		Logger::Log(Logger::LogLevel::Info, "EditorApplication: returned to edit mode");
 	}
+}
+
+// ─── Scene file management ──────────────────────────────────────────────────────
+void EditorApplication::saveSceneToPath(const std::string& path)
+{
+	if (!m_editorWorld || path.empty()) return;
+
+	SceneSerializer serializer;
+	if (serializer.save(*m_editorWorld, path, SerializeFormat::JSON))
+	{
+		m_currentScenePath = path;
+		m_savedRevision    = m_undo.revision(); // scene is now clean
+		Logger::Log(Logger::LogLevel::Info, ("EditorApplication: scene saved to " + path).c_str());
+	}
+	else
+	{
+		Logger::Log(Logger::LogLevel::Error, ("EditorApplication: failed to save scene to " + path).c_str());
+	}
+}
+
+void EditorApplication::openScene(const std::string& path)
+{
+	if (!m_editorWorld || path.empty()) return;
+
+	if (m_isPlaying) setPlayMode(false); // leave play mode before switching scenes
+
+	SceneSerializer serializer;
+	m_editorWorld->clear();
+	if (serializer.load(*m_editorWorld, path, SerializeFormat::JSON))
+	{
+		m_currentScenePath = path;
+		Logger::Log(Logger::LogLevel::Info, ("EditorApplication: scene opened from " + path).c_str());
+	}
+	else
+	{
+		m_currentScenePath.clear();
+		Logger::Log(Logger::LogLevel::Error, ("EditorApplication: failed to open scene from " + path).c_str());
+	}
+
+	m_selectedEntity = entt::null;
+	m_editorWorld->markHierarchyDirty();
+	m_undo.clearHistory();
+	m_savedRevision = m_undo.revision();
+}
+
+void EditorApplication::newScene()
+{
+	if (!m_editorWorld) return;
+
+	if (m_isPlaying) setPlayMode(false);
+
+	m_editorWorld->clear(); // keeps the root entity, drops all children
+	m_currentScenePath.clear();
+	m_selectedEntity = entt::null;
+	m_editorWorld->markHierarchyDirty();
+	m_undo.clearHistory();
+	m_savedRevision = m_undo.revision();
+	Logger::Log(Logger::LogLevel::Info, "EditorApplication: new empty scene");
 }
 
 void EditorApplication::OnShutdown()

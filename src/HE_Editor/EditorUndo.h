@@ -36,6 +36,11 @@ public:
 	bool canUndo() const { return !m_undoStack.empty(); }
 	bool canRedo() const { return !m_redoStack.empty(); }
 
+	// Monotonically increasing counter, bumped on every world mutation that
+	// passes through undo (push/undo/redo). The editor compares it against the
+	// value at the last save/load to know whether the scene is dirty.
+	uint64_t revision() const { return m_revision; }
+
 	void clearHistory();
 
 private:
@@ -50,6 +55,7 @@ private:
 	Snapshot      m_scratch;
 	Snapshot      m_pending;
 	bool          m_hasPending = false;
+	uint64_t      m_revision   = 0;
 	std::vector<Snapshot> m_undoStack;
 	std::vector<Snapshot> m_redoStack;
 };
