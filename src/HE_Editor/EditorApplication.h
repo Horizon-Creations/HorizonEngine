@@ -4,6 +4,8 @@
 #include <Diagnostics/GlobalState.h>
 #include "Types/Enums.h"
 #include "ProjectManager.h"
+#include "EditorUndo.h"
+#include "EditorCamera.h"
 #include <HorizonScene/HorizonScene.h>
 #include <functional>
 #include <future>
@@ -37,6 +39,9 @@ struct EditorConfig
 	// Quick Settings panel — collapsed state of each section header
 	bool QsRendererOpen = true;
 	bool QsEditorOpen   = true;
+
+	// Scene viewport: draw the world-space ground grid
+	bool ShowGrid = true;
 
 	// Content browser tree-panel width (-1 = auto on first frame)
 	float CbTreeWidth = -1.0f;
@@ -77,6 +82,24 @@ struct AppContext
 	IRenderer*         renderer     = nullptr;
 	HE::Window*        window       = nullptr;
 	HorizonWorld*      world        = nullptr;
+	ContentManager*    contentManager = nullptr;
+
+	// Editor scene-view camera (orbit/fly/focus). Owned by EditorApplication;
+	// the UI drives it from viewport input and pushes it to the renderer.
+	EditorCamera*      editorCamera = nullptr;
+
+	// Entity selected in the outliner/viewport — drives the Details panel
+	Entity& selectedEntity;
+
+	// Play-in-editor: snapshot on play, restore on stop
+	bool isPlaying = false;
+	std::function<void(bool)> setPlayMode;
+
+	// Undo/redo. UI calls undoSys capture/stash/commit around mutations;
+	// undo()/redo() also reset the selection (entity handles are remapped).
+	EditorUndo* undoSys = nullptr;
+	std::function<void()> undo;
+	std::function<void()> redo;
 
 	// Editor/hub flags (mutable)
 	bool& projectLoaded;
@@ -183,6 +206,19 @@ private:
 
 	// Scene world — created once, alive for the entire editor session
 	std::unique_ptr<HorizonWorld> m_editorWorld;
+
+	// Outliner/inspector selection
+	Entity m_selectedEntity = entt::null;
+
+	// Editor scene-view camera
+	EditorCamera m_editorCamera;
+
+	// Play-in-editor
+	bool m_isPlaying = false;
+	void setPlayMode(bool play);
+
+	// Undo/redo
+	EditorUndo m_undo;
 
 	bool  m_vsync     = true;
 

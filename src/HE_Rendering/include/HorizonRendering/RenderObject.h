@@ -2,6 +2,7 @@
 #include <Types/Handle.h>
 #include <Types/UUID.h>
 #include <Math/Math.h>
+#include <Math/AABB.h>
 #include <cstdint>
 
 // One renderable entity extracted from the ECS world each frame.
@@ -13,6 +14,10 @@ struct RenderObject {
     RenderHandle meshHandle     = RenderHandle::invalid();
     RenderHandle materialHandle = RenderHandle::invalid();
     glm::mat4    transform      = glm::mat4(1.0f);
+    // World-space bounds for culling. Seeded by the extractor with the
+    // fallback cube's box; backends refine it with the real mesh AABB once
+    // the asset is resolved. Invalid box = never culled.
+    HE::AABB     worldBounds;
     uint32_t     entityId       = 0;
     uint8_t      lod            = 0;
 };

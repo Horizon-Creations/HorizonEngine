@@ -2,6 +2,14 @@
 #include "EditorApplication.h"
 #include <HorizonScene/HorizonScene.h>
 #include <ContentManager/HAsset.h>
+#include <ContentManager/ContentManager.h>
+#include <HorizonRendering/RenderExtractor.h>
+#include <HorizonRendering/RenderWorld.h>
+#include <Math/AABB.h>
+#include "MeshImporter.h"
+#include "TextureImporter.h"
+#include "MaterialImporter.h"
+#include "AudioImporter.h"
 
 #ifdef _WIN32
 #include <windows.h>  // must come before any header that pulls in rpcdce.h
@@ -35,6 +43,7 @@ std::string getRHIName(HE::RendererBackend backend);
 #include "ImGuiMetalBridge.h"
 #include <Backends/Metal/MetalRenderer.h>
 #endif
+#include <ImGuizmo.h>
 #endif // HE_IMGUI_ENABLED
 
 // ─── render ───────────────────────────────────────────────────────────────────
@@ -85,6 +94,7 @@ void EditorUI::render(AppContext& ctx, float dt)
     }
 
     ImGui::NewFrame();
+    ImGuizmo::BeginFrame();
 
     // ── Content-Refresh Popup ─────────────────────────────────────────────────
     if (ctx.contentRefreshPending || ctx.contentRefreshDone)
@@ -912,17 +922,40 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 			ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1,1,1,0.20f));
 			ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(2.0f, 0.0f));
 
+			const bool canUndo = ctx.undoSys && ctx.undoSys->canUndo();
+			const bool canRedo = ctx.undoSys && ctx.undoSys->canRedo();
+
+			ImGui::BeginDisabled(!canUndo);
+			bool doUndo;
 			if (ctx.toolbarIcons.undo)
-				ImGui::ImageButton("##footerUndo", ctx.toolbarIcons.undo, ImVec2(btnSize, btnSize));
+				doUndo = ImGui::ImageButton("##footerUndo", ctx.toolbarIcons.undo, ImVec2(btnSize, btnSize));
 			else
-				ImGui::Button("Undo");
+				doUndo = ImGui::Button("Undo");
+			ImGui::EndDisabled();
 
 			ImGui::SameLine(0.0f, 4.0f);
 
+			ImGui::BeginDisabled(!canRedo);
+			bool doRedo;
 			if (ctx.toolbarIcons.redo)
-				ImGui::ImageButton("##footerRedo", ctx.toolbarIcons.redo, ImVec2(btnSize, btnSize));
+				doRedo = ImGui::ImageButton("##footerRedo", ctx.toolbarIcons.redo, ImVec2(btnSize, btnSize));
 			else
-				ImGui::Button("Redo");
+				doRedo = ImGui::Button("Redo");
+			ImGui::EndDisabled();
+
+			// Keyboard shortcuts: Cmd/Ctrl+Z, Shift+Cmd/Ctrl+Z (or Ctrl+Y)
+			const ImGuiIO& kio = ImGui::GetIO();
+			const bool mod = kio.KeyCtrl || kio.KeySuper;
+			if (!kio.WantTextInput && mod)
+			{
+				if (ImGui::IsKeyPressed(ImGuiKey_Z, false))
+					(kio.KeyShift ? doRedo : doUndo) = true;
+				if (ImGui::IsKeyPressed(ImGuiKey_Y, false))
+					doRedo = true;
+			}
+
+			if (doUndo && canUndo && ctx.undo) ctx.undo();
+			if (doRedo && canRedo && ctx.redo) ctx.redo();
 
 			ImGui::PopStyleVar();
 			ImGui::PopStyleColor(3);
@@ -1048,6 +1081,270 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
         ImGui::End();
     }
 
+	// ── Scene viewport (offscreen render target as dockable window) ─────────
+	{
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+		ImGui::Begin("Scene", nullptr, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+		ImGui::PopStyleVar();
+
+		ImVec2 avail = ImGui::GetContentRegionAvail();
+
+		// HE_VIEWPORT_RESIZE_STRESS=1 oscillates the viewport size every frame
+		// to stress-test render-target recreation — a crash here means a
+		// texture-lifetime bug in the backend (retired textures must outlive
+		// the ImGui draw list that references them).
+		static const bool kResizeStress = std::getenv("HE_VIEWPORT_RESIZE_STRESS") != nullptr;
+		if (kResizeStress)
+		{
+			static int s_stressFrame = 0;
+			++s_stressFrame;
+			avail.x = std::max(64.0f, avail.x - static_cast<float>((s_stressFrame % 13) * 16));
+			avail.y = std::max(64.0f, avail.y - static_cast<float>((s_stressFrame %  7) * 16));
+		}
+
+		if (ctx.renderer && avail.x >= 1.0f && avail.y >= 1.0f)
+		{
+			// Render at framebuffer resolution (HiDPI aware)
+			const ImVec2 fbScale = ImGui::GetIO().DisplayFramebufferScale;
+			ctx.renderer->SetViewportSize(
+				static_cast<uint32_t>(avail.x * fbScale.x),
+				static_cast<uint32_t>(avail.y * fbScale.y));
+
+			if (void* tex = ctx.renderer->GetViewportTexture())
+			{
+				// OpenGL FBO textures have a bottom-left origin — flip vertically
+				const bool flipY = (ctx.backend == HE::RendererBackend::OpenGL);
+				ImGui::Image(reinterpret_cast<ImTextureID>(tex), avail,
+				             flipY ? ImVec2(0, 1) : ImVec2(0, 0),
+				             flipY ? ImVec2(1, 0) : ImVec2(1, 1));
+
+				const ImVec2 rectMin = ImGui::GetItemRectMin();
+				const ImVec2 rectMax = ImGui::GetItemRectMax();
+				ImGuiIO& io = ImGui::GetIO();
+
+				// ── Editor camera: drive from viewport input ────────────────
+				// In play mode the game's scene camera takes over, so the
+				// override is cleared and editor navigation is disabled.
+				bool navigating = false;
+				if (ctx.editorCamera && ctx.isPlaying)
+				{
+					ctx.renderer->SetEditorCamera(EditorCameraOverride{}); // active=false
+				}
+				else if (ctx.editorCamera)
+				{
+					EditorCamera& cam = *ctx.editorCamera;
+					const bool imageHovered = ImGui::IsItemHovered();
+					const bool rmb    = ImGui::IsMouseDown(ImGuiMouseButton_Right);
+					const bool mmb    = ImGui::IsMouseDown(ImGuiMouseButton_Middle);
+					const bool altLmb = io.KeyAlt && ImGui::IsMouseDown(ImGuiMouseButton_Left);
+					const bool anyNav = rmb || mmb || altLmb;
+
+					// Latch navigation so a drag keeps going if the cursor leaves the image.
+					static bool s_navActive = false;
+					if (imageHovered && anyNav) s_navActive = true;
+					if (!anyNav)                s_navActive = false;
+					navigating = s_navActive;
+
+					EditorCamera::Input cin;
+					cin.dt             = dt;
+					cin.viewportHeight = avail.y;
+					if (navigating)
+					{
+						cin.orbit      = altLmb;
+						cin.pan        = mmb && !altLmb;
+						cin.look       = rmb && !altLmb;
+						cin.mouseDelta = glm::vec2(io.MouseDelta.x, io.MouseDelta.y);
+						if (cin.look)
+						{
+							cin.fast = io.KeyShift;
+							if (ImGui::IsKeyDown(ImGuiKey_D)) cin.moveAxis.x += 1.0f;
+							if (ImGui::IsKeyDown(ImGuiKey_A)) cin.moveAxis.x -= 1.0f;
+							if (ImGui::IsKeyDown(ImGuiKey_E)) cin.moveAxis.y += 1.0f;
+							if (ImGui::IsKeyDown(ImGuiKey_Q)) cin.moveAxis.y -= 1.0f;
+							if (ImGui::IsKeyDown(ImGuiKey_W)) cin.moveAxis.z += 1.0f;
+							if (ImGui::IsKeyDown(ImGuiKey_S)) cin.moveAxis.z -= 1.0f;
+						}
+					}
+					// Wheel zoom works on hover without holding a button.
+					if (imageHovered) cin.wheel = io.MouseWheel;
+
+					// Focus on selection (F) — frame the selected entity.
+					if (imageHovered && !io.WantTextInput && !navigating &&
+					    ImGui::IsKeyPressed(ImGuiKey_F) &&
+					    ctx.world && ctx.selectedEntity != entt::null &&
+					    ctx.world->registry().valid(ctx.selectedEntity))
+					{
+						if (auto* t = ctx.world->registry().try_get<TransformComponent>(ctx.selectedEntity))
+						{
+							const glm::vec3 center = glm::vec3(t->worldMatrix[3]);
+							const float     radius = glm::length(t->scale) * 0.75f + 0.5f;
+							cam.focusOn(center, radius);
+						}
+					}
+
+					cam.update(cin);
+					// Push to the backend so this frame's render uses it.
+					ctx.renderer->SetEditorCamera(cam.makeOverride());
+				}
+
+				// Camera + object snapshot, identical to what the backend
+				// renders with (extractor recomputes world matrices). The
+				// editor camera overrides any scene camera so the gizmo and
+				// picking ray match exactly what is on screen.
+				static RenderExtractor s_extractor;
+				static RenderWorld     s_sceneSnapshot;
+				const EditorCameraOverride camOverride =
+					(ctx.editorCamera && !ctx.isPlaying) ? ctx.editorCamera->makeOverride()
+					                                     : EditorCameraOverride{};
+				if (ctx.world)
+					s_extractor.extract(*ctx.world, s_sceneSnapshot, avail.x / avail.y,
+					                    camOverride.active ? &camOverride : nullptr);
+
+				// ── Ground grid (world XZ plane) ────────────────────────────
+				if (ctx.editorConfig.ShowGrid && !ctx.isPlaying)
+				{
+					ImGuizmo::SetOrthographic(false);
+					ImGuizmo::SetDrawlist();
+					ImGuizmo::SetRect(rectMin.x, rectMin.y,
+					                  rectMax.x - rectMin.x, rectMax.y - rectMin.y);
+					const glm::mat4 gridXform(1.0f);
+					ImGuizmo::DrawGrid(&s_sceneSnapshot.camera.view[0][0],
+					                   &s_sceneSnapshot.camera.projection[0][0],
+					                   &gridXform[0][0], 20.0f);
+				}
+
+				// Suppress the gizmo while the camera is being driven so Alt+LMB
+				// orbit and RMB fly-look don't fight the manipulator.
+				ImGuizmo::Enable(!navigating && !io.KeyAlt);
+
+				// ── Gizmo on the selected entity ────────────────────────────
+				bool gizmoActive = false;
+				if (ctx.world && ctx.selectedEntity != entt::null &&
+				    ctx.world->registry().valid(ctx.selectedEntity))
+				if (auto* t = ctx.world->registry().try_get<TransformComponent>(ctx.selectedEntity))
+				{
+					// W/E/R switch operation while the viewport is hovered
+					// (but not while flying — W/A/S/D drive the camera then).
+					static ImGuizmo::OPERATION s_op = ImGuizmo::TRANSLATE;
+					if (ImGui::IsWindowHovered() && !ImGui::GetIO().WantTextInput && !navigating)
+					{
+						if (ImGui::IsKeyPressed(ImGuiKey_W)) s_op = ImGuizmo::TRANSLATE;
+						if (ImGui::IsKeyPressed(ImGuiKey_E)) s_op = ImGuizmo::ROTATE;
+						if (ImGui::IsKeyPressed(ImGuiKey_R)) s_op = ImGuizmo::SCALE;
+					}
+
+					ImGuizmo::SetOrthographic(false);
+					ImGuizmo::SetDrawlist();
+					ImGuizmo::SetRect(rectMin.x, rectMin.y,
+					                  rectMax.x - rectMin.x, rectMax.y - rectMin.y);
+
+					// Pre-state for undo — captured while hovering, before
+					// the first Manipulate of a drag session mutates anything.
+					if (ctx.undoSys && !ImGuizmo::IsUsing())
+						ctx.undoSys->capturePre();
+
+					glm::mat4 world = t->worldMatrix;
+					ImGuizmo::Manipulate(
+						&s_sceneSnapshot.camera.view[0][0],
+						&s_sceneSnapshot.camera.projection[0][0],
+						s_op, ImGuizmo::LOCAL, &world[0][0]);
+
+					// Undo session: one entry per drag
+					static bool s_gizmoWasUsing = false;
+					if (ctx.undoSys)
+					{
+						if (ImGuizmo::IsUsing() && !s_gizmoWasUsing) ctx.undoSys->stashPre();
+						if (!ImGuizmo::IsUsing() && s_gizmoWasUsing) ctx.undoSys->commitPending();
+					}
+					s_gizmoWasUsing = ImGuizmo::IsUsing();
+
+					gizmoActive = ImGuizmo::IsOver() || ImGuizmo::IsUsing();
+
+					if (ImGuizmo::IsUsing())
+					{
+						// world → local: divide out the parent's world matrix
+						glm::mat4 parentWorld(1.0f);
+						if (auto* h = ctx.world->registry().try_get<HierarchyComponent>(ctx.selectedEntity);
+						    h && h->parent != entt::null)
+							if (auto* pt = ctx.world->registry().try_get<TransformComponent>(h->parent))
+								parentWorld = pt->worldMatrix;
+						glm::mat4 local = glm::inverse(parentWorld) * world;
+
+						float pos[3], rot[3], scale[3];
+						ImGuizmo::DecomposeMatrixToComponents(&local[0][0], pos, rot, scale);
+						t->position = { pos[0],   pos[1],   pos[2]   };
+						t->rotation = { rot[0],   rot[1],   rot[2]   };
+						t->scale    = { scale[0], scale[1], scale[2] };
+						t->dirty    = true;
+					}
+				}
+
+				// ── Picking: click in the viewport selects the hit entity ──
+				if (ctx.world && !gizmoActive && !navigating && !io.KeyAlt &&
+				    ImGui::IsItemClicked(ImGuiMouseButton_Left))
+				{
+					const ImVec2 mouse = ImGui::GetMousePos();
+					const float  u = (mouse.x - rectMin.x) / (rectMax.x - rectMin.x);
+					const float  v = (mouse.y - rectMin.y) / (rectMax.y - rectMin.y);
+
+					// Unproject the click to a world-space ray
+					const glm::mat4 invVP = glm::inverse(
+						s_sceneSnapshot.camera.projection * s_sceneSnapshot.camera.view);
+					const glm::vec4 ndcNear(2.0f * u - 1.0f, 1.0f - 2.0f * v, -1.0f, 1.0f);
+					const glm::vec4 ndcFar (ndcNear.x, ndcNear.y, 1.0f, 1.0f);
+					glm::vec4 pNear = invVP * ndcNear; pNear /= pNear.w;
+					glm::vec4 pFar  = invVP * ndcFar;  pFar  /= pFar.w;
+					const glm::vec3 rayOrigin(pNear);
+					const glm::vec3 rayDir(glm::vec3(pFar) - glm::vec3(pNear));
+
+					// Local-space AABBs per mesh asset, cached. Entities
+					// without an asset use the built-in fallback cube's box.
+					static std::unordered_map<HE::UUID, HE::AABB> s_aabbCache;
+					static const HE::AABB s_cubeBox = []{
+						HE::AABB b; b.expand({-0.5f,-0.5f,-0.5f}); b.expand({0.5f,0.5f,0.5f}); return b;
+					}();
+
+					Entity hit     = entt::null;
+					float  hitDist = std::numeric_limits<float>::max();
+					for (const RenderObject& obj : s_sceneSnapshot.objects)
+					{
+						HE::AABB box = s_cubeBox;
+						if (obj.meshAssetId != HE::UUID{} && ctx.contentManager)
+						{
+							auto it = s_aabbCache.find(obj.meshAssetId);
+							if (it == s_aabbCache.end())
+							{
+								if (const StaticMeshAsset* mesh =
+									ctx.contentManager->getStaticMesh(obj.meshAssetId))
+									it = s_aabbCache.emplace(obj.meshAssetId,
+										HE::AABB::fromPositions(mesh->vertices.data(),
+										                        mesh->vertices.size() / 3)).first;
+							}
+							if (it != s_aabbCache.end() && it->second.isValid())
+								box = it->second;
+						}
+
+						// Ray → object space (exact test for rotated objects)
+						const glm::mat4 invModel = glm::inverse(obj.transform);
+						const glm::vec3 o = glm::vec3(invModel * glm::vec4(rayOrigin, 1.0f));
+						const glm::vec3 d = glm::vec3(invModel * glm::vec4(rayDir,    0.0f));
+
+						float t = 0.0f;
+						if (box.intersectRay(o, d, t) && t < hitDist)
+						{
+							hitDist = t;
+							hit     = static_cast<Entity>(obj.entityId);
+						}
+					}
+					ctx.selectedEntity = hit; // miss = deselect
+				}
+			}
+			else
+				ImGui::TextDisabled("  Viewport not available on this backend yet.");
+		}
+		ImGui::End();
+	}
+
 	// topbar inside viewport (for quick actions) — position set on first use, freely movable after
 	{
 		const ImGuiViewport* vp = ImGui::GetMainViewport();
@@ -1081,13 +1378,13 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 		ImGui::SameLine();
 		// ── Play button centered ────────────────────────────────────────────
 		{
-			static bool s_playing = false;
+			const bool playing = ctx.isPlaying;
 			constexpr float btnSize = 20.0f;
 			const float centerX = (ImGui::GetContentRegionAvail().x - 120 - btnSize) * 0.5f;
 			ImGui::SetCursorPosX(ImGui::GetCursorPosX() + centerX);
 
-			ImTextureID icon = s_playing ? ctx.toolbarIcons.stop : ctx.toolbarIcons.play;
-			ImVec4 tint = s_playing
+			ImTextureID icon = playing ? ctx.toolbarIcons.stop : ctx.toolbarIcons.play;
+			ImVec4 tint = playing
 				? ImVec4(1.0f, 0.35f, 0.35f, 1.0f)
 				: ImVec4(0.35f, 1.0f, 0.55f, 1.0f);
 
@@ -1096,17 +1393,15 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 			ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1,1,1,0.16f));
 			ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(2.0f, 2.0f));
 
+			bool toggled = false;
 			if (icon)
-			{
-				if (ImGui::ImageButton("##tbPlay", icon, ImVec2(btnSize, btnSize),
-					ImVec2(0,0), ImVec2(1,1), ImVec4(0,0,0,0), tint))
-					s_playing = !s_playing;
-			}
+				toggled = ImGui::ImageButton("##tbPlay", icon, ImVec2(btnSize, btnSize),
+					ImVec2(0,0), ImVec2(1,1), ImVec4(0,0,0,0), tint);
 			else
-			{
-				if (ImGui::Button(s_playing ? "Stop" : "Play", ImVec2(btnSize * 2.0f, btnSize)))
-					s_playing = !s_playing;
-			}
+				toggled = ImGui::Button(playing ? "Stop" : "Play", ImVec2(btnSize * 2.0f, btnSize));
+
+			if (toggled && ctx.setPlayMode)
+				ctx.setPlayMode(!playing);
 
 			ImGui::PopStyleVar();
 			ImGui::PopStyleColor(3);
@@ -1170,6 +1465,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
     ctx.editorConfig.QsEditorOpen = ImGui::CollapsingHeader("Editor");
     if (ctx.editorConfig.QsEditorOpen)
     {
+        ImGui::Checkbox("Show Grid", &ctx.editorConfig.ShowGrid);
         ImGui::Checkbox("Keep CPU Asset Cache", &ctx.editorConfig.KeepCPUAssets);
 
         if (ctx.editorConfig.KeepCPUAssets && !ctx.editorConfig.KeepCPUAssetsInfoAcknoleged)
@@ -1321,6 +1617,11 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
             ctx.world->clearHierarchyDirty();
         }
 
+        // ── Entity rename popup state ─────────────────────────────────────
+        static Entity s_renameEntity     = entt::null;
+        static char   s_entityRenameBuf[256] = {};
+        static bool   s_openEntityRename = false;
+
         // ── Render from cache ─────────────────────────────────────────────
         int prevDepth      = -1;
         int skipBelowDepth = INT_MAX; // skip children of closed nodes
@@ -1344,11 +1645,66 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                                      | ImGuiTreeNodeFlags_DefaultOpen;
             if (!node.hasChildren)
                 flags |= ImGuiTreeNodeFlags_Leaf;
+            if (node.entity == ctx.selectedEntity)
+                flags |= ImGuiTreeNodeFlags_Selected;
 
             bool open = ImGui::TreeNodeEx(
                 reinterpret_cast<void*>(static_cast<uintptr_t>(
                     static_cast<uint32_t>(node.entity))),
                 flags, "%s", node.name.c_str());
+
+            // Click (not on the arrow) → select
+            if (ImGui::IsItemClicked(ImGuiMouseButton_Left) && !ImGui::IsItemToggledOpen())
+                ctx.selectedEntity = node.entity;
+
+            // ── Drag & drop reparenting ───────────────────────────────────
+            const bool isRoot = (node.entity == ctx.world->rootEntity());
+            if (!isRoot && ImGui::BeginDragDropSource())
+            {
+                ImGui::SetDragDropPayload("HE_ENTITY", &node.entity, sizeof(Entity));
+                ImGui::TextUnformatted(node.name.c_str());
+                ImGui::EndDragDropSource();
+            }
+            if (ImGui::BeginDragDropTarget())
+            {
+                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("HE_ENTITY"))
+                {
+                    Entity dragged{};
+                    std::memcpy(&dragged, payload->Data, sizeof(Entity));
+                    if (ctx.undoSys) ctx.undoSys->snapshotNow();
+                    ctx.world->reparentEntity(dragged, node.entity);
+                }
+                ImGui::EndDragDropTarget();
+            }
+
+            // ── Per-entity context menu ───────────────────────────────────
+            if (ImGui::BeginPopupContextItem())
+            {
+                ctx.selectedEntity = node.entity;
+                if (ImGui::MenuItem("Create Child Entity"))
+                {
+                    if (ctx.undoSys) ctx.undoSys->snapshotNow();
+                    Entity child = ctx.world->createEntity("Entity");
+                    ctx.world->addComponent(child, TransformComponent{});
+                    ctx.world->reparentEntity(child, node.entity);
+                    ctx.selectedEntity = child;
+                }
+                if (ImGui::MenuItem("Rename"))
+                {
+                    s_renameEntity = node.entity;
+                    std::strncpy(s_entityRenameBuf, node.name.c_str(), sizeof(s_entityRenameBuf) - 1);
+                    s_entityRenameBuf[sizeof(s_entityRenameBuf) - 1] = '\0';
+                    s_openEntityRename = true;
+                }
+                if (!isRoot && ImGui::MenuItem("Delete"))
+                {
+                    if (ctx.selectedEntity == node.entity)
+                        ctx.selectedEntity = entt::null;
+                    if (ctx.undoSys) ctx.undoSys->snapshotNow();
+                    ctx.world->destroyEntity(node.entity);
+                }
+                ImGui::EndPopup();
+            }
 
             if (open)
                 prevDepth = node.depth;
@@ -1361,6 +1717,56 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
             ImGui::TreePop();
             --prevDepth;
         }
+
+        // ── Background context menu: create entity at root level ──────────
+        if (ImGui::BeginPopupContextWindow("##outliner_bg_ctx",
+            ImGuiPopupFlags_MouseButtonRight | ImGuiPopupFlags_NoOpenOverItems))
+        {
+            if (ImGui::MenuItem("Create Entity"))
+            {
+                if (ctx.undoSys) ctx.undoSys->snapshotNow();
+                Entity e = ctx.world->createEntity("Entity");
+                ctx.world->addComponent(e, TransformComponent{});
+                ctx.selectedEntity = e;
+            }
+            ImGui::EndPopup();
+        }
+
+        // ── Entity rename popup ────────────────────────────────────────────
+        if (s_openEntityRename)
+        {
+            ImGui::OpenPopup("##entity_rename_popup");
+            s_openEntityRename = false;
+        }
+        ImGui::SetNextWindowSize(ImVec2(320, 0), ImGuiCond_Always);
+        if (ImGui::BeginPopupModal("##entity_rename_popup", nullptr,
+            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
+        {
+            ImGui::TextUnformatted("Rename Entity");
+            ImGui::Separator();
+            ImGui::SetNextItemWidth(-1.0f);
+            bool confirm = ImGui::InputText("##entity_rename_input",
+                s_entityRenameBuf, sizeof(s_entityRenameBuf),
+                ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
+            if (ImGui::Button("OK", ImVec2(140, 0)) || confirm)
+            {
+                if (s_entityRenameBuf[0] != '\0' &&
+                    ctx.world->registry().valid(s_renameEntity))
+                {
+                    if (ctx.undoSys) ctx.undoSys->snapshotNow();
+                    ctx.world->renameEntity(s_renameEntity, s_entityRenameBuf);
+                }
+                s_renameEntity = entt::null;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(140, 0)))
+            {
+                s_renameEntity = entt::null;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
     }
     else
     {
@@ -1368,6 +1774,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
     }
 
     ImGui::End();
+
+    RenderInspector(ctx);
 
     //Content Browser
 	auto [contentFolder, contentLock] = ctx.globalState->lockContentFolder();
@@ -1785,6 +2193,69 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 			ImGui::TextDisabled("%s", displayName.c_str());
 			ImGui::Separator();
 
+			// ── Import source file → .hasset ─────────────────────────────
+			if (!s_ctxMenuIsFolder)
+			{
+				const std::filesystem::path srcPath(s_ctxMenuItem);
+				std::string ext = srcPath.extension().string();
+				for (auto& c : ext) c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
+
+				const bool isMeshSrc    = (ext == ".gltf" || ext == ".glb");
+				const bool isTextureSrc = (ext == ".png" || ext == ".jpg" || ext == ".jpeg" ||
+				                           ext == ".tga" || ext == ".bmp" || ext == ".hdr");
+				const bool isAudioSrc   = (ext == ".wav");
+				const bool isMatSrc     = (ext == ".hmat");
+
+				if ((isMeshSrc || isTextureSrc || isAudioSrc || isMatSrc) &&
+				    ImGui::MenuItem("Import"))
+				{
+					const std::filesystem::path root = contentFolder.fullPath;
+					std::error_code ec;
+					std::filesystem::path relDir =
+						std::filesystem::relative(srcPath.parent_path(), root, ec);
+					if (ec || relDir == ".") relDir.clear();
+
+					bool ok = false;
+					if      (isMeshSrc)    ok = MeshImporter::import(srcPath, root, relDir)     != nullptr;
+					else if (isTextureSrc) ok = TextureImporter::import(srcPath, root, relDir)  != nullptr;
+					else if (isAudioSrc)   ok = AudioImporter::import(srcPath, root, relDir)    != nullptr;
+					else if (isMatSrc)     ok = MaterialImporter::import(srcPath, root, relDir) != nullptr;
+
+					if (!ok)
+						Logger::Log(Logger::LogLevel::Error,
+							("Editor: import failed for " + srcPath.string()).c_str());
+					ctx.contentRefreshPending = true;
+					ImGui::CloseCurrentPopup();
+				}
+
+				// ── Add a StaticMesh .hasset to the scene ─────────────────
+				if (ext == ".hasset" && ctx.world && ctx.contentManager &&
+				    ImGui::MenuItem("Add to Scene"))
+				{
+					std::error_code ec;
+					std::string rel = std::filesystem::relative(
+						srcPath, std::filesystem::path(contentFolder.fullPath), ec).generic_string();
+					if (!ec)
+					{
+						const HE::UUID id = ctx.contentManager->loadAsset(rel);
+						if (const StaticMeshAsset* mesh = ctx.contentManager->getStaticMesh(id))
+						{
+							if (ctx.undoSys) ctx.undoSys->snapshotNow();
+							Entity e = ctx.world->createEntity(mesh->name);
+							ctx.world->addComponent(e, TransformComponent{});
+							ctx.world->addComponent(e, MeshComponent{ .meshAssetId = id });
+							ctx.world->markHierarchyDirty();
+							Logger::Log(Logger::LogLevel::Info,
+								("Editor: added '" + mesh->name + "' to scene").c_str());
+						}
+						else
+							Logger::Log(Logger::LogLevel::Warning,
+								("Editor: " + rel + " is not a loadable static mesh").c_str());
+					}
+					ImGui::CloseCurrentPopup();
+				}
+			}
+
 			if (ImGui::MenuItem("Rename"))
 			{
 				s_renameTarget   = s_ctxMenuItem;
@@ -1956,5 +2427,243 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
     }
 
     ImGui::End();
+#endif // HE_IMGUI_ENABLED
+}
+
+// ─── Inspector (Details panel) ────────────────────────────────────────────────
+void EditorUI::RenderInspector(AppContext& ctx)
+{
+#ifdef HE_IMGUI_ENABLED
+	if (ctx.fontHeading) ImGui::PushFont(ctx.fontHeading);
+	ImGui::Begin("Details");
+	if (ctx.fontHeading) ImGui::PopFont();
+
+	if (!ctx.world || ctx.selectedEntity == entt::null ||
+	    !ctx.world->registry().valid(ctx.selectedEntity))
+	{
+		ImGui::TextDisabled("(no entity selected)");
+		ImGui::End();
+		return;
+	}
+
+	auto&  registry = ctx.world->registry();
+	Entity entity   = ctx.selectedEntity;
+
+	// Pre-frame world state for undo. Captured once — only one ImGui item
+	// can become active per frame, and its pre-state is this snapshot.
+	// Widgets stash it on activation and commit when the edit session ends.
+	if (ctx.undoSys)
+		ctx.undoSys->capturePre();
+	auto trackEdit = [&]
+	{
+		if (!ctx.undoSys) return;
+		if (ImGui::IsItemActivated())            ctx.undoSys->stashPre();
+		if (ImGui::IsItemDeactivatedAfterEdit()) ctx.undoSys->commitPending();
+	};
+
+	// ── Name ────────────────────────────────────────────────────────────────
+	if (auto* name = registry.try_get<NameComponent>(entity))
+	{
+		char buf[256];
+		std::strncpy(buf, name->name.c_str(), sizeof(buf) - 1);
+		buf[sizeof(buf) - 1] = '\0';
+		ImGui::SetNextItemWidth(-1.0f);
+		if (ImGui::InputText("##entity_name", buf, sizeof(buf),
+		                     ImGuiInputTextFlags_EnterReturnsTrue))
+		{
+			if (ctx.undoSys) ctx.undoSys->snapshotNow();
+			ctx.world->renameEntity(entity, buf);
+		}
+	}
+	ImGui::Separator();
+
+	// Header with a right-click "Remove Component" menu. Returns true when
+	// the section is open; sets `removed` when the user removed the component.
+	auto componentHeader = [&](const char* label, bool removable, bool& removed) -> bool
+	{
+		const bool open = ImGui::CollapsingHeader(label, ImGuiTreeNodeFlags_DefaultOpen);
+		removed = false;
+		if (removable && ImGui::BeginPopupContextItem())
+		{
+			if (ImGui::MenuItem("Remove Component"))
+				removed = true;
+			ImGui::EndPopup();
+		}
+		return open && !removed;
+	};
+	bool removed = false;
+
+	// ── Transform ───────────────────────────────────────────────────────────
+	if (auto* t = registry.try_get<TransformComponent>(entity))
+	{
+		if (componentHeader("Transform", true, removed))
+		{
+			bool changed = false;
+			changed |= ImGui::DragFloat3("Position", &t->position.x, 0.05f); trackEdit();
+			changed |= ImGui::DragFloat3("Rotation", &t->rotation.x, 0.5f);  trackEdit();
+			changed |= ImGui::DragFloat3("Scale",    &t->scale.x,    0.05f); trackEdit();
+			if (changed) t->dirty = true;
+		}
+		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<TransformComponent>(entity); }
+	}
+
+	// ── Transform 2D ────────────────────────────────────────────────────────
+	if (auto* t = registry.try_get<Transform2DComponent>(entity))
+	{
+		if (componentHeader("Transform 2D", true, removed))
+		{
+			bool changed = false;
+			changed |= ImGui::DragFloat2("Position##2d", &t->position.x, 0.05f); trackEdit();
+			changed |= ImGui::DragFloat("Rotation##2d",  &t->rotation,   0.5f);  trackEdit();
+			changed |= ImGui::DragFloat2("Scale##2d",    &t->scale.x,    0.05f); trackEdit();
+			if (changed) t->dirty = true;
+		}
+		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<Transform2DComponent>(entity); }
+	}
+
+	// ── Mesh ────────────────────────────────────────────────────────────────
+	if (auto* m = registry.try_get<MeshComponent>(entity))
+	{
+		if (componentHeader("Mesh", true, removed))
+		{
+			if (m->meshAssetId == HE::UUID{})
+				ImGui::TextDisabled("Asset: (none — renders fallback cube)");
+			else if (ctx.contentManager)
+			{
+				const StaticMeshAsset* asset = ctx.contentManager->getStaticMesh(m->meshAssetId);
+				ImGui::Text("Asset: %s", asset ? asset->name.c_str() : "(not loaded)");
+			}
+			int lod = m->lodBias;
+			if (ImGui::InputInt("LOD Bias", &lod))
+				m->lodBias = static_cast<uint8_t>(std::clamp(lod, 0, 255));
+			ImGui::Checkbox("Casts Shadow",    &m->castsShadow); trackEdit();
+			ImGui::Checkbox("Receives Shadow", &m->receivesShadow); trackEdit();
+		}
+		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<MeshComponent>(entity); }
+	}
+
+	// ── Material ────────────────────────────────────────────────────────────
+	if (auto* m = registry.try_get<MaterialComponent>(entity))
+	{
+		if (componentHeader("Material", true, removed))
+		{
+			if (m->materialAssetId == HE::UUID{})
+				ImGui::TextDisabled("Asset: (none)");
+			else if (ctx.contentManager)
+			{
+				const MaterialAsset* asset = ctx.contentManager->getMaterial(m->materialAssetId);
+				ImGui::Text("Asset: %s", asset ? asset->name.c_str() : "(not loaded)");
+			}
+		}
+		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<MaterialComponent>(entity); }
+	}
+
+	// ── Camera ──────────────────────────────────────────────────────────────
+	if (auto* c = registry.try_get<CameraComponent>(entity))
+	{
+		if (componentHeader("Camera", true, removed))
+		{
+			ImGui::DragFloat("FOV",        &c->fovDegrees, 0.5f, 1.0f, 179.0f); trackEdit();
+			ImGui::DragFloat("Near Plane", &c->nearPlane,  0.01f, 0.001f, 100.0f); trackEdit();
+			ImGui::DragFloat("Far Plane",  &c->farPlane,   1.0f,  0.1f, 100000.0f); trackEdit();
+			ImGui::Checkbox("Main Camera", &c->isMain); trackEdit();
+			ImGui::Checkbox("Orthographic", &c->orthographic); trackEdit();
+		}
+		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<CameraComponent>(entity); }
+	}
+
+	// ── Light ───────────────────────────────────────────────────────────────
+	if (auto* l = registry.try_get<LightComponent>(entity))
+	{
+		if (componentHeader("Light", true, removed))
+		{
+			static const char* kLightTypes[] = { "Directional", "Point", "Spot" };
+			int type = static_cast<int>(l->type);
+			if (ImGui::Combo("Type", &type, kLightTypes, 3))
+			{
+				if (ctx.undoSys) ctx.undoSys->snapshotNow();
+				l->type = static_cast<LightType>(type);
+			}
+			ImGui::ColorEdit3("Color",    &l->color.x); trackEdit();
+			ImGui::DragFloat("Intensity", &l->intensity, 0.05f, 0.0f, 1000.0f); trackEdit();
+			if (l->type != LightType::Directional)
+				ImGui::DragFloat("Range", &l->range, 0.1f, 0.0f, 10000.0f); trackEdit();
+			if (l->type == LightType::Spot)
+				ImGui::DragFloat("Spot Angle", &l->spotAngle, 0.5f, 1.0f, 179.0f); trackEdit();
+			ImGui::Checkbox("Casts Shadow##light", &l->castsShadow); trackEdit();
+		}
+		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<LightComponent>(entity); }
+	}
+
+	// ── Rigid Body ──────────────────────────────────────────────────────────
+	if (auto* r = registry.try_get<RigidBodyComponent>(entity))
+	{
+		if (componentHeader("Rigid Body", true, removed))
+		{
+			static const char* kBodyTypes[] = { "Static", "Dynamic", "Kinematic" };
+			int type = static_cast<int>(r->type);
+			if (ImGui::Combo("Body Type", &type, kBodyTypes, 3))
+			{
+				if (ctx.undoSys) ctx.undoSys->snapshotNow();
+				r->type = static_cast<RigidBodyType>(type);
+			}
+			ImGui::DragFloat("Mass",        &r->mass,        0.1f, 0.0f, 100000.0f); trackEdit();
+			ImGui::DragFloat("Friction",    &r->friction,    0.01f, 0.0f, 1.0f); trackEdit();
+			ImGui::DragFloat("Restitution", &r->restitution, 0.01f, 0.0f, 1.0f); trackEdit();
+			ImGui::Checkbox("2D Physics",   &r->is2D); trackEdit();
+		}
+		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<RigidBodyComponent>(entity); }
+	}
+
+	// ── Script ──────────────────────────────────────────────────────────────
+	if (auto* s = registry.try_get<ScriptComponent>(entity))
+	{
+		if (componentHeader("Script", true, removed))
+		{
+			char buf[256];
+			std::strncpy(buf, s->moduleName.c_str(), sizeof(buf) - 1);
+			buf[sizeof(buf) - 1] = '\0';
+			if (ImGui::InputText("Module", buf, sizeof(buf)))
+				s->moduleName = buf;
+			trackEdit();
+			ImGui::Checkbox("Enabled", &s->enabled); trackEdit();
+		}
+		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<ScriptComponent>(entity); }
+	}
+
+	// ── Add Component ───────────────────────────────────────────────────────
+	ImGui::Spacing();
+	ImGui::Separator();
+	ImGui::Spacing();
+	const float buttonW = 180.0f;
+	ImGui::SetCursorPosX((ImGui::GetContentRegionAvail().x - buttonW) * 0.5f
+	                     + ImGui::GetCursorPosX());
+	if (ImGui::Button("Add Component", ImVec2(buttonW, 0)))
+		ImGui::OpenPopup("##add_component");
+
+	if (ImGui::BeginPopup("##add_component"))
+	{
+		auto addItem = [&]<typename T>(const char* label, T)
+		{
+			if (!registry.all_of<T>(entity) && ImGui::MenuItem(label))
+			{
+				if (ctx.undoSys) ctx.undoSys->snapshotNow();
+				registry.emplace<T>(entity);
+			}
+		};
+		addItem("Transform",    TransformComponent{});
+		addItem("Transform 2D", Transform2DComponent{});
+		addItem("Mesh",         MeshComponent{});
+		addItem("Material",     MaterialComponent{});
+		addItem("Camera",       CameraComponent{});
+		addItem("Light",        LightComponent{});
+		addItem("Rigid Body",   RigidBodyComponent{});
+		addItem("Script",       ScriptComponent{});
+		ImGui::EndPopup();
+	}
+
+	ImGui::End();
+#else
+	(void)ctx;
 #endif // HE_IMGUI_ENABLED
 }

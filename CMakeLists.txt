@@ -78,3 +78,10 @@ add_subdirectory(src/HE_Rendering)
 add_subdirectory(src/HE_Tools)
 add_subdirectory(src/HE_Game)
 add_subdirectory(src/HE_Editor)
+
+# ─── Tests ─────────────────────────────────────────────────────────────────────
+option(HE_BUILD_TESTS "Build the doctest unit tests" ON)
+if(HE_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()

@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            name: macOS
+          - os: windows-latest
+            name: Windows
+
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v5
+
+      - name: Set up MSVC environment (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      # FetchContent checkouts (SDL3, glm, nlohmann_json) are cached on the
+      # configure hash so CI does not re-clone them on every run.
+      - name: Cache FetchContent dependencies
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: deps-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
+
+      - name: Configure
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build -j 4
+
+      - name: Run tests
+        run: ctest --test-dir build --output-on-failure

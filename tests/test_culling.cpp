@@ -1,0 +1,127 @@
+#include "doctest.h"
+#include <Math/AABB.h>
+#include <HorizonRendering/FrustumCuller.h>
+#include <HorizonRendering/RenderSorter.h>
+#include <glm/gtc/matrix_transform.hpp>
+
+TEST_CASE("AABB build and ray intersection")
+{
+	const float verts[] = { -1,-1,-1,  1,1,1,  0,0,0 };
+	HE::AABB box = HE::AABB::fromPositions(verts, 3);
+	REQUIRE(box.isValid());
+	CHECK(box.min == glm::vec3(-1));
+	CHECK(box.max == glm::vec3( 1));
+
+	float t = 0;
+	// Straight-on hit
+	CHECK(box.intersectRay({ 0, 0, -5 }, { 0, 0, 1 }, t));
+	CHECK(t == doctest::Approx(4.0f));
+	// Pointing away
+	CHECK_FALSE(box.intersectRay({ 0, 0, -5 }, { 0, 0, -1 }, t));
+	// Parallel miss
+	CHECK_FALSE(box.intersectRay({ 5, 0, -5 }, { 0, 0, 1 }, t));
+	// Origin inside
+	CHECK(box.intersectRay({ 0, 0, 0 }, { 1, 0, 0 }, t));
+	CHECK(t == doctest::Approx(0.0f));
+}
+
+TEST_CASE("AABB transform")
+{
+	HE::AABB box;
+	box.expand({ -1, -1, -1 });
+	box.expand({  1,  1,  1 });
+
+	const glm::mat4 m = glm::translate(glm::mat4(1.0f), { 10, 0, 0 })
+	                  * glm::scale(glm::mat4(1.0f), { 2, 2, 2 });
+	HE::AABB moved = box.transformed(m);
+	CHECK(moved.min.x == doctest::Approx(8.0f));
+	CHECK(moved.max.x == doctest::Approx(12.0f));
+	CHECK(moved.min.y == doctest::Approx(-2.0f));
+}
+
+TEST_CASE("Frustum culls boxes outside the view")
+{
+	// Camera at origin looking down -Z
+	const glm::mat4 view = glm::lookAt(glm::vec3(0, 0, 0),
+	                                   glm::vec3(0, 0, -1),
+	                                   glm::vec3(0, 1, 0));
+	const glm::mat4 proj = glm::perspective(glm::radians(60.0f), 1.0f, 0.1f, 100.0f);
+	const Frustum frustum = Frustum::fromViewProj(proj * view);
+
+	auto boxAt = [](glm::vec3 center)
+	{
+		HE::AABB b;
+		b.expand(center - glm::vec3(0.5f));
+		b.expand(center + glm::vec3(0.5f));
+		return b;
+	};
+
+	CHECK(frustum.intersects(boxAt({ 0, 0, -10 })));      // straight ahead
+	CHECK_FALSE(frustum.intersects(boxAt({ 0, 0, 10 })));  // behind camera
+	CHECK_FALSE(frustum.intersects(boxAt({ 50, 0, -10 }))); // far off to the right
+	CHECK_FALSE(frustum.intersects(boxAt({ 0, 0, -200 }))); // beyond far plane
+	CHECK(frustum.intersects(boxAt({ 0, 0, -99.9f })));    // straddling far plane
+}
+
+TEST_CASE("FrustumCuller marks objects via world bounds")
+{
+	RenderWorld world;
+	world.camera.view = glm::lookAt(glm::vec3(0, 0, 0), glm::vec3(0, 0, -1), glm::vec3(0, 1, 0));
+	world.camera.projection = glm::perspective(glm::radians(60.0f), 1.0f, 0.1f, 100.0f);
+
+	auto makeObj = [](glm::vec3 pos)
+	{
+		RenderObject o;
+		o.transform = glm::translate(glm::mat4(1.0f), pos);
+		HE::AABB b;
+		b.expand(pos - glm::vec3(0.5f));
+		b.expand(pos + glm::vec3(0.5f));
+		o.worldBounds = b;
+		return o;
+	};
+	world.objects.push_back(makeObj({ 0, 0, -5 }));  // visible
+	world.objects.push_back(makeObj({ 0, 0, 50 }));  // behind camera
+	world.objects.push_back(RenderObject{});         // invalid bounds → never culled
+
+	FrustumCuller culler;
+	std::vector<bool> visible;
+	culler.cull(world, visible);
+	REQUIRE(visible.size() == 3);
+	CHECK(visible[0]);
+	CHECK_FALSE(visible[1]);
+	CHECK(visible[2]);
+}
+
+TEST_CASE("RenderSorter groups by mesh and sorts front-to-back")
+{
+	RenderWorld world;
+	world.camera.position = { 0, 0, 0 };
+
+	HE::UUID meshA; meshA.hi = 1; meshA.lo = 1;
+	HE::UUID meshB; meshB.hi = 2; meshB.lo = 2;
+
+	auto makeObj = [](HE::UUID mesh, float z)
+	{
+		RenderObject o;
+		o.meshAssetId = mesh;
+		o.transform   = glm::translate(glm::mat4(1.0f), { 0, 0, z });
+		return o;
+	};
+	world.objects.push_back(makeObj(meshB, -10)); // 0
+	world.objects.push_back(makeObj(meshA, -20)); // 1
+	world.objects.push_back(makeObj(meshA,  -5)); // 2
+	world.objects.push_back(makeObj(meshB,  -1)); // 3
+
+	std::vector<bool> visible(4, true);
+	visible[0] = false; // culled — must not appear
+
+	RenderSorter sorter;
+	std::vector<uint32_t> order;
+	sorter.sort(world, visible, order);
+
+	REQUIRE(order.size() == 3);
+	// meshA group first (lower id), front-to-back inside the group
+	CHECK(order[0] == 2);
+	CHECK(order[1] == 1);
+	CHECK(order[2] == 3);
+}

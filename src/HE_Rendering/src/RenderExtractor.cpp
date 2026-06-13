@@ -1,5 +1,6 @@
 #include "HorizonRendering/RenderExtractor.h"
 #include "HorizonRendering/RenderWorld.h"
+#include <Renderer/IRenderer.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/MeshComponent.h>
@@ -37,7 +38,8 @@ namespace
 	}
 }
 
-void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspectRatio)
+void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspectRatio,
+                              const EditorCameraOverride* editorCam)
 {
 	out.clear();
 	auto& reg = world.registry();
@@ -52,8 +54,21 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 	}
 
 	// ── Camera ──────────────────────────────────────────────────────────────
-	// Prefer the camera marked isMain, fall back to the first one found,
-	// then to a fixed editor default so an empty scene still renders sanely.
+	// Editor scene view wins when active. Otherwise prefer the camera marked
+	// isMain, fall back to the first one found, then to a fixed editor default
+	// so an empty scene still renders sanely.
+	if (editorCam && editorCam->active)
+	{
+		out.camera.position   = editorCam->position;
+		out.camera.view       = editorCam->view;
+		out.camera.projection = editorCam->orthographic
+			? glm::ortho(-aspectRatio * 5.0f, aspectRatio * 5.0f, -5.0f, 5.0f,
+			             editorCam->nearPlane, editorCam->farPlane)
+			: glm::perspective(glm::radians(editorCam->fovDegrees), aspectRatio,
+			                   editorCam->nearPlane, editorCam->farPlane);
+	}
+	else
+	{
 	bool cameraFound = false;
 	for (auto [e, t, cam] : reg.view<TransformComponent, CameraComponent>().each())
 	{
@@ -76,13 +91,24 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 		out.camera.view       = glm::lookAt(eye, glm::vec3(0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
 		out.camera.projection = glm::perspective(glm::radians(60.0f), aspectRatio, 0.1f, 1000.0f);
 	}
+	}
 
 	// ── Renderables ─────────────────────────────────────────────────────────
+	static const HE::AABB kUnitCube = []{
+		HE::AABB b;
+		b.expand({ -0.5f, -0.5f, -0.5f });
+		b.expand({  0.5f,  0.5f,  0.5f });
+		return b;
+	}();
+
 	for (auto [e, t, mesh] : reg.view<TransformComponent, MeshComponent>().each())
 	{
 		RenderObject obj;
 		obj.meshAssetId = mesh.meshAssetId;
 		obj.transform   = t.worldMatrix;
+		// Seed with the fallback cube's box; backends replace it with the
+		// real mesh AABB once the asset is resolved.
+		obj.worldBounds = kUnitCube.transformed(t.worldMatrix);
 		obj.entityId    = static_cast<uint32_t>(e);
 		obj.lod         = mesh.lodBias;
 		out.objects.push_back(obj);
@@ -92,10 +118,14 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 	for (auto [e, t, light] : reg.view<TransformComponent, LightComponent>().each())
 	{
 		LightData l;
-		l.position  = glm::vec3(t.worldMatrix[3]);
-		l.color     = light.color;
-		l.intensity = light.intensity;
-		l.type      = static_cast<uint8_t>(light.type);
+		l.position     = glm::vec3(t.worldMatrix[3]);
+		// Lights shine along their local -Z (third column of the world matrix)
+		l.direction    = -glm::normalize(glm::vec3(t.worldMatrix[2]));
+		l.color        = light.color;
+		l.intensity    = light.intensity;
+		l.range        = light.range;
+		l.spotAngleCos = std::cos(glm::radians(light.spotAngle * 0.5f));
+		l.type         = static_cast<uint8_t>(light.type);
 		out.lights.push_back(l);
 	}
 }

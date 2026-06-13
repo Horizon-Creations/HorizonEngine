@@ -1,8 +1,10 @@
 #include "Backends/Metal/MetalRenderer.h"
 #include <Window/Window.h>
+#include <ContentManager/ContentManager.h>
 #include <Diagnostics/Logger.h>
 #include <SDL3/SDL.h>
 #include <stdexcept>
+#include <vector>
 #include <glm/glm.hpp>
 
 #import <Metal/Metal.h>
@@ -22,18 +24,37 @@ using namespace metal;
 struct VertexIn {
 	packed_float3 position;
 	packed_float3 normal;
+	packed_float2 uv;
 };
 
 struct Uniforms {
 	float4x4 mvp;
 	float4x4 model;
 	float4   color;
+	float4   flags;   // x: hasTexture
+};
+
+struct LightGPU {
+	float4 posType;        // xyz = position,  w = type (0 dir / 1 point / 2 spot)
+	float4 dirSpot;        // xyz = direction, w = cos(spot half angle)
+	float4 colorIntensity; // rgb = color,     w = intensity
+	float4 params;         // x = range
+};
+
+struct SceneUniforms {
+	float4   cameraPos;    // xyz used
+	int      lightCount;
+	int      pad0, pad1, pad2;
+	LightGPU lights[8];
 };
 
 struct VSOut {
 	float4 position [[position]];
 	float3 normal;
+	float2 uv;
+	float3 worldPos;
 	float3 color;
+	float  hasTexture;
 };
 
 vertex VSOut vertexMain(uint vid [[vertex_id]],
@@ -41,19 +62,71 @@ vertex VSOut vertexMain(uint vid [[vertex_id]],
                         constant Uniforms&     u     [[buffer(1)]])
 {
 	VSOut out;
-	out.position = u.mvp * float4(float3(verts[vid].position), 1.0);
-	float3x3 m3  = float3x3(u.model[0].xyz, u.model[1].xyz, u.model[2].xyz);
-	out.normal   = m3 * float3(verts[vid].normal);
-	out.color    = u.color.rgb;
+	float4 world   = u.model * float4(float3(verts[vid].position), 1.0);
+	out.position   = u.mvp * float4(float3(verts[vid].position), 1.0);
+	out.worldPos   = world.xyz;
+	float3x3 m3    = float3x3(u.model[0].xyz, u.model[1].xyz, u.model[2].xyz);
+	out.normal     = m3 * float3(verts[vid].normal);
+	out.uv         = float2(verts[vid].uv);
+	out.color      = u.color.rgb;
+	out.hasTexture = u.flags.x;
 	return out;
 }
 
-fragment float4 fragmentMain(VSOut in [[stage_in]])
+// Blinn-Phong over up to 8 scene lights; lightCount == 0 falls back to the
+// fixed "headlight" so unlit scenes don't render black.
+fragment float4 fragmentMain(VSOut in [[stage_in]],
+                             constant SceneUniforms& scene [[buffer(0)]],
+                             texture2d<float> baseColor [[texture(0)]],
+                             sampler          smp       [[sampler(0)]])
 {
-	float3 N    = normalize(in.normal);
-	float3 L    = normalize(float3(0.5, 0.8, 0.6));
-	float  diff = 0.35 + 0.65 * max(dot(N, L), 0.0);
-	return float4(in.color * diff, 1.0);
+	float3 base = (in.hasTexture > 0.5)
+		? baseColor.sample(smp, float2(in.uv.x, 1.0 - in.uv.y)).rgb
+		: in.color;
+	float3 N = normalize(in.normal);
+
+	if (scene.lightCount == 0)
+	{
+		float3 L    = normalize(float3(0.5, 0.8, 0.6));
+		float  diff = 0.35 + 0.65 * max(dot(N, L), 0.0);
+		return float4(base * diff, 1.0);
+	}
+
+	float3 V      = normalize(scene.cameraPos.xyz - in.worldPos);
+	float3 result = 0.08 * base; // ambient floor
+
+	for (int i = 0; i < scene.lightCount; ++i)
+	{
+		constant LightGPU& l = scene.lights[i];
+		int    type  = int(l.posType.w);
+		float3 L;
+		float  atten = 1.0;
+
+		if (type == 0) // directional
+			L = normalize(-l.dirSpot.xyz);
+		else
+		{
+			float3 d    = l.posType.xyz - in.worldPos;
+			float  dist = max(length(d), 1e-4);
+			L = d / dist;
+			float range = max(l.params.x, 1e-4);
+			atten = clamp(1.0 - dist / range, 0.0, 1.0);
+			atten *= atten;
+			if (type == 2) // spot cone
+			{
+				float c       = dot(-L, normalize(l.dirSpot.xyz));
+				float cosCone = l.dirSpot.w;
+				atten *= smoothstep(cosCone, mix(cosCone, 1.0, 0.2), c);
+			}
+		}
+
+		float diff = max(dot(N, L), 0.0);
+		float3 H   = normalize(L + V);
+		float spec = pow(max(dot(N, H), 0.0), 32.0) * 0.25;
+		result += (base * diff + float3(spec))
+		        * l.colorIntensity.rgb * l.colorIntensity.w * atten;
+	}
+	return float4(result, 1.0);
 }
 )MSL";
 
@@ -63,6 +136,23 @@ struct UnlitUniforms
 	glm::mat4 mvp;
 	glm::mat4 model;
 	glm::vec4 color;
+	glm::vec4 flags;   // x: hasTexture
+};
+
+// Matches the MSL LightGPU/SceneUniforms structs above.
+struct LightGPU
+{
+	glm::vec4 posType;
+	glm::vec4 dirSpot;
+	glm::vec4 colorIntensity;
+	glm::vec4 params;
+};
+struct SceneUniforms
+{
+	glm::vec4 cameraPos;
+	int32_t   lightCount = 0;
+	int32_t   pad0 = 0, pad1 = 0, pad2 = 0;
+	LightGPU  lights[8];
 };
 
 MetalRenderer::MetalRenderer()  = default;
@@ -125,6 +215,18 @@ void MetalRenderer::Shutdown()
 	m_secondaryTargets.clear();
 	DestroyTarget(m_primaryTarget);
 
+	for (auto& [id, mesh] : m_meshCache)
+	{
+		if (mesh.vertexBuf) CFBridgingRelease(mesh.vertexBuf);
+		if (mesh.indexBuf)  CFBridgingRelease(mesh.indexBuf);
+		if (mesh.texture)   CFBridgingRelease(mesh.texture);
+	}
+	m_meshCache.clear();
+
+	DestroyViewportTarget();
+	DrainRetiredTextures();
+	if (m_dummyTexture)    { CFBridgingRelease(m_dummyTexture);    m_dummyTexture = nullptr; }
+	if (m_linearSampler)   { CFBridgingRelease(m_linearSampler);   m_linearSampler = nullptr; }
 	if (m_cubeVertexBuf)   { CFBridgingRelease(m_cubeVertexBuf);   m_cubeVertexBuf = nullptr; }
 	if (m_cubeIndexBuf)    { CFBridgingRelease(m_cubeIndexBuf);    m_cubeIndexBuf = nullptr; }
 	if (m_scenePipeline)   { CFBridgingRelease(m_scenePipeline);   m_scenePipeline = nullptr; }
@@ -173,6 +275,22 @@ void MetalRenderer::CreateScenePipeline()
 		depthDesc.depthCompareFunction = MTLCompareFunctionAlways;
 		depthDesc.depthWriteEnabled    = NO;
 		m_noDepthState = (void*)CFBridgingRetain([device newDepthStencilStateWithDescriptor:depthDesc]);
+
+		// 1×1 white dummy — always bound so untextured draws never sample an
+		// unbound texture (Metal validation rejects that).
+		MTLTextureDescriptor* dummyDesc = [MTLTextureDescriptor
+			texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:1 height:1 mipmapped:NO];
+		dummyDesc.usage       = MTLTextureUsageShaderRead;
+		dummyDesc.storageMode = MTLStorageModeShared;
+		id<MTLTexture> dummy = [device newTextureWithDescriptor:dummyDesc];
+		const uint32_t white = 0xFFFFFFFF;
+		[dummy replaceRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0 withBytes:&white bytesPerRow:4];
+		m_dummyTexture = (void*)CFBridgingRetain(dummy);
+
+		MTLSamplerDescriptor* sampDesc = [[MTLSamplerDescriptor alloc] init];
+		sampDesc.minFilter = MTLSamplerMinMagFilterLinear;
+		sampDesc.magFilter = MTLSamplerMinMagFilterLinear;
+		m_linearSampler = (void*)CFBridgingRetain([device newSamplerStateWithDescriptor:sampDesc]);
 	}
 }
 
@@ -204,11 +322,108 @@ void MetalRenderer::CreateCubeMesh()
 	};
 	m_cubeIndexCount = static_cast<int>(sizeof(indices) / sizeof(indices[0]));
 
+	// Expand the 6-float (pos+normal) source data to the pipeline's 8-float
+	// vertex layout (pos+normal+uv) with zeroed UVs.
+	const size_t vertexCount = sizeof(verts) / (6 * sizeof(float));
+	std::vector<float> interleaved;
+	interleaved.reserve(vertexCount * 8);
+	for (size_t v = 0; v < vertexCount; ++v)
+	{
+		interleaved.insert(interleaved.end(), &verts[v*6], &verts[v*6] + 6);
+		interleaved.insert(interleaved.end(), { 0.0f, 0.0f });
+	}
+
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
 	m_cubeVertexBuf = (void*)CFBridgingRetain(
-		[device newBufferWithBytes:verts length:sizeof(verts) options:MTLResourceStorageModeShared]);
+		[device newBufferWithBytes:interleaved.data()
+		                    length:interleaved.size() * sizeof(float)
+		                   options:MTLResourceStorageModeShared]);
 	m_cubeIndexBuf = (void*)CFBridgingRetain(
 		[device newBufferWithBytes:indices length:sizeof(indices) options:MTLResourceStorageModeShared]);
+}
+
+// ─── Asset mesh upload ────────────────────────────────────────────────────────
+
+const MetalRenderer::GpuMesh* MetalRenderer::ResolveMesh(const HE::UUID& assetId)
+{
+	if (assetId == HE::UUID{} || !m_contentManager)
+		return nullptr;
+
+	if (auto it = m_meshCache.find(assetId); it != m_meshCache.end())
+		return &it->second;
+
+	const StaticMeshAsset* asset = m_contentManager->getStaticMesh(assetId);
+	if (!asset || asset->vertices.empty() || asset->indices.empty())
+		return nullptr;
+
+	// Interleave position + normal + uv (8 floats per vertex), zero-filling
+	// missing attributes — must match the MSL VertexIn layout.
+	const size_t vertexCount = asset->vertices.size() / 3;
+	std::vector<float> interleaved;
+	interleaved.reserve(vertexCount * 8);
+	for (size_t v = 0; v < vertexCount; ++v)
+	{
+		interleaved.insert(interleaved.end(),
+			{ asset->vertices[v*3+0], asset->vertices[v*3+1], asset->vertices[v*3+2] });
+		if (v * 3 + 2 < asset->normals.size())
+			interleaved.insert(interleaved.end(),
+				{ asset->normals[v*3+0], asset->normals[v*3+1], asset->normals[v*3+2] });
+		else
+			interleaved.insert(interleaved.end(), { 0.0f, 0.0f, 0.0f });
+		if (v * 2 + 1 < asset->uvs.size())
+			interleaved.insert(interleaved.end(), { asset->uvs[v*2+0], asset->uvs[v*2+1] });
+		else
+			interleaved.insert(interleaved.end(), { 0.0f, 0.0f });
+	}
+
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+
+	GpuMesh mesh;
+	mesh.indexCount  = static_cast<int>(asset->indices.size());
+	mesh.localBounds = HE::AABB::fromPositions(asset->vertices.data(), vertexCount);
+	mesh.vertexBuf  = (void*)CFBridgingRetain(
+		[device newBufferWithBytes:interleaved.data()
+		                    length:interleaved.size() * sizeof(float)
+		                   options:MTLResourceStorageModeShared]);
+	mesh.indexBuf   = (void*)CFBridgingRetain(
+		[device newBufferWithBytes:asset->indices.data()
+		                    length:asset->indices.size() * sizeof(uint32_t)
+		                   options:MTLResourceStorageModeShared]);
+
+	// Base color texture via the mesh's material (load on demand by path)
+	if (!asset->materialPath.empty())
+	{
+		const HE::UUID matId = m_contentManager->loadAsset(asset->materialPath);
+		if (const MaterialAsset* mat = m_contentManager->getMaterial(matId);
+		    mat && !mat->texturePaths.empty())
+		{
+			const HE::UUID texId = m_contentManager->loadAsset(mat->texturePaths[0]);
+			if (const TextureAsset* tex = m_contentManager->getTexture(texId);
+			    tex && !tex->data.empty() && tex->channels == 4)
+			{
+				MTLTextureDescriptor* desc = [MTLTextureDescriptor
+					texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+					                             width:tex->width
+					                            height:tex->height
+					                         mipmapped:NO];
+				desc.usage       = MTLTextureUsageShaderRead;
+				desc.storageMode = MTLStorageModeShared;
+				id<MTLTexture> texture = [device newTextureWithDescriptor:desc];
+				[texture replaceRegion:MTLRegionMake2D(0, 0, tex->width, tex->height)
+				           mipmapLevel:0
+				             withBytes:tex->data.data()
+				           bytesPerRow:tex->width * 4];
+				mesh.texture = (void*)CFBridgingRetain(texture);
+			}
+		}
+	}
+
+	Logger::Log(Logger::LogLevel::Info,
+		("MetalRenderer: uploaded mesh '" + asset->name + "' ("
+		 + std::to_string(vertexCount) + " verts"
+		 + (mesh.texture ? ", textured" : "") + ")").c_str());
+
+	return &m_meshCache.emplace(assetId, mesh).first->second;
 }
 
 // ─── Window targets ───────────────────────────────────────────────────────────
@@ -268,12 +483,186 @@ void MetalRenderer::EnsureDepthTexture(WindowTarget& target, int width, int heig
 	target.depthTexture = (void*)CFBridgingRetain([device newTextureWithDescriptor:desc]);
 }
 
+// ─── Offscreen viewport target ────────────────────────────────────────────────
+
+void MetalRenderer::SetViewportSize(uint32_t width, uint32_t height)
+{
+	m_viewportReqW = width;
+	m_viewportReqH = height;
+}
+
+void* MetalRenderer::GetViewportTexture()
+{
+	return m_viewportColor;
+}
+
+void MetalRenderer::RetireTexture(void* texture)
+{
+	if (!texture) return;
+	// 3 frames: current draw list + Metal's in-flight buffers (triple buffering)
+	m_retiredTextures.push_back({ texture, 3 });
+}
+
+void MetalRenderer::AgeRetiredTextures()
+{
+	for (auto it = m_retiredTextures.begin(); it != m_retiredTextures.end(); )
+	{
+		if (--it->framesLeft <= 0)
+		{
+			CFBridgingRelease(it->texture);
+			it = m_retiredTextures.erase(it);
+		}
+		else
+			++it;
+	}
+}
+
+void MetalRenderer::DrainRetiredTextures()
+{
+	for (auto& r : m_retiredTextures)
+		CFBridgingRelease(r.texture);
+	m_retiredTextures.clear();
+}
+
+void MetalRenderer::EnsureViewportTarget()
+{
+	if (m_viewportColor)
+	{
+		id<MTLTexture> existing = (__bridge id<MTLTexture>)m_viewportColor;
+		if (existing.width == m_viewportReqW && existing.height == m_viewportReqH)
+			return;
+	}
+	DestroyViewportTarget();
+
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+
+	MTLTextureDescriptor* colorDesc = [MTLTextureDescriptor
+		texture2DDescriptorWithPixelFormat:kSwapchainFormat
+		                             width:m_viewportReqW
+		                            height:m_viewportReqH
+		                         mipmapped:NO];
+	colorDesc.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+	colorDesc.storageMode = MTLStorageModePrivate;
+	m_viewportColor = (void*)CFBridgingRetain([device newTextureWithDescriptor:colorDesc]);
+
+	MTLTextureDescriptor* depthDesc = [MTLTextureDescriptor
+		texture2DDescriptorWithPixelFormat:kDepthFormat
+		                             width:m_viewportReqW
+		                            height:m_viewportReqH
+		                         mipmapped:NO];
+	depthDesc.usage       = MTLTextureUsageRenderTarget;
+	depthDesc.storageMode = MTLStorageModePrivate;
+	m_viewportDepth = (void*)CFBridgingRetain([device newTextureWithDescriptor:depthDesc]);
+}
+
+void MetalRenderer::DestroyViewportTarget()
+{
+	// Deferred release — the ImGui draw list recorded this frame and the
+	// GPU's in-flight work may still reference these textures.
+	RetireTexture(m_viewportColor); m_viewportColor = nullptr;
+	RetireTexture(m_viewportDepth); m_viewportDepth = nullptr;
+}
+
 // ─── Frame encoding ───────────────────────────────────────────────────────────
+
+void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
+{
+	if (!m_world || !m_scenePipeline || width <= 0 || height <= 0)
+		return;
+
+	id<MTLRenderCommandEncoder> encoder = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
+
+	m_extractor.extract(*m_world, m_renderWorld,
+	                    static_cast<float>(width) / static_cast<float>(height),
+	                    &m_editorCamera);
+	if (m_renderWorld.objects.empty())
+		return;
+
+	// ── Refine bounds with real mesh AABBs (also uploads new meshes) ────────
+	for (RenderObject& obj : m_renderWorld.objects)
+		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId);
+		    mesh && mesh->localBounds.isValid())
+			obj.worldBounds = mesh->localBounds.transformed(obj.transform);
+
+	// ── Cull → sort → submit ────────────────────────────────────────────────
+	m_culler.cull(m_renderWorld, m_visible);
+	m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
+	if (m_sortedIndices.empty())
+		return;
+
+	const glm::mat4 viewProj =
+		m_renderWorld.camera.projection * m_renderWorld.camera.view;
+
+	[encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_scenePipeline];
+	[encoder setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
+	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
+
+	// ── Lights (clamped to the shader's 8) ──────────────────────────────────
+	{
+		SceneUniforms scene;
+		scene.cameraPos  = glm::vec4(m_renderWorld.camera.position, 1.0f);
+		scene.lightCount = std::min(static_cast<int>(m_renderWorld.lights.size()), 8);
+		for (int i = 0; i < scene.lightCount; ++i)
+		{
+			const LightData& l = m_renderWorld.lights[i];
+			scene.lights[i].posType        = glm::vec4(l.position,  static_cast<float>(l.type));
+			scene.lights[i].dirSpot        = glm::vec4(l.direction, l.spotAngleCos);
+			scene.lights[i].colorIntensity = glm::vec4(l.color,     l.intensity);
+			scene.lights[i].params         = glm::vec4(l.range, 0.0f, 0.0f, 0.0f);
+		}
+		[encoder setFragmentBytes:&scene length:sizeof(scene) atIndex:0];
+	}
+
+	for (uint32_t objIndex : m_sortedIndices)
+	{
+		const RenderObject& obj = m_renderWorld.objects[objIndex];
+		UnlitUniforms u;
+		u.mvp   = viewProj * obj.transform;
+		u.model = obj.transform;
+		u.color = glm::vec4(0.85f, 0.55f, 0.25f, 1.0f);
+
+		// Resolve the asset; entities without one fall back to the built-in cube.
+		id<MTLBuffer> vertexBuf;
+		id<MTLBuffer> indexBuf;
+		NSUInteger    indexCount;
+		id<MTLTexture> texture;
+		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId))
+		{
+			vertexBuf  = (__bridge id<MTLBuffer>)mesh->vertexBuf;
+			indexBuf   = (__bridge id<MTLBuffer>)mesh->indexBuf;
+			indexCount = (NSUInteger)mesh->indexCount;
+			texture    = mesh->texture
+				? (__bridge id<MTLTexture>)mesh->texture
+				: (__bridge id<MTLTexture>)m_dummyTexture;
+			u.flags    = glm::vec4(mesh->texture ? 1.0f : 0.0f, 0, 0, 0);
+		}
+		else
+		{
+			vertexBuf  = (__bridge id<MTLBuffer>)m_cubeVertexBuf;
+			indexBuf   = (__bridge id<MTLBuffer>)m_cubeIndexBuf;
+			indexCount = (NSUInteger)m_cubeIndexCount;
+			texture    = (__bridge id<MTLTexture>)m_dummyTexture;
+			u.flags    = glm::vec4(0.0f);
+		}
+
+		[encoder setVertexBuffer:vertexBuf offset:0 atIndex:0];
+		[encoder setVertexBytes:&u length:sizeof(u) atIndex:1];
+		[encoder setFragmentTexture:texture atIndex:0];
+		[encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+		                    indexCount:indexCount
+		                     indexType:MTLIndexTypeUInt32
+		                   indexBuffer:indexBuf
+		             indexBufferOffset:0];
+	}
+}
 
 void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool isPrimary)
 {
 	@autoreleasepool
 	{
+		if (isPrimary)
+			AgeRetiredTextures();
+
 		CAMetalLayer* layer = (__bridge CAMetalLayer*)target.metalLayer;
 
 		// Keep the drawable size in sync with the window's pixel size (HiDPI / resize)
@@ -290,6 +679,35 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 		id<CAMetalDrawable> drawable = [layer nextDrawable];
 		if (!drawable) return; // window hidden/minimized — skip the frame
 
+		id<MTLCommandQueue>  queue   = (__bridge id<MTLCommandQueue>)m_commandQueue;
+		id<MTLCommandBuffer> cmdBuf  = [queue commandBuffer];
+
+		// ── Offscreen scene pass (editor viewport) ──────────────────────────
+		const bool offscreen = isPrimary && m_viewportReqW > 0 && m_viewportReqH > 0;
+		if (offscreen)
+		{
+			EnsureViewportTarget();
+
+			MTLRenderPassDescriptor* scenePass = [MTLRenderPassDescriptor renderPassDescriptor];
+			scenePass.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_viewportColor;
+			scenePass.colorAttachments[0].loadAction  = MTLLoadActionClear;
+			scenePass.colorAttachments[0].storeAction = MTLStoreActionStore;
+			scenePass.colorAttachments[0].clearColor  = MTLClearColorMake(0.18, 0.18, 0.20, 1.0);
+			scenePass.depthAttachment.texture     = (__bridge id<MTLTexture>)m_viewportDepth;
+			scenePass.depthAttachment.loadAction  = MTLLoadActionClear;
+			scenePass.depthAttachment.storeAction = MTLStoreActionDontCare;
+			scenePass.depthAttachment.clearDepth  = 1.0;
+
+			id<MTLRenderCommandEncoder> sceneEncoder =
+				[cmdBuf renderCommandEncoderWithDescriptor:scenePass];
+			EncodeScene((__bridge void*)sceneEncoder,
+			            (int)m_viewportReqW, (int)m_viewportReqH);
+			[sceneEncoder endEncoding];
+		}
+		else if (isPrimary && m_viewportColor)
+			DestroyViewportTarget();
+
+		// ── Swapchain pass (direct scene and/or overlay) ────────────────────
 		MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
 		pass.colorAttachments[0].texture     = drawable.texture;
 		pass.colorAttachments[0].loadAction  = MTLLoadActionClear;
@@ -300,41 +718,11 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 		pass.depthAttachment.storeAction = MTLStoreActionDontCare;
 		pass.depthAttachment.clearDepth  = 1.0;
 
-		id<MTLCommandQueue>  queue   = (__bridge id<MTLCommandQueue>)m_commandQueue;
-		id<MTLCommandBuffer> cmdBuf  = [queue commandBuffer];
 		id<MTLRenderCommandEncoder> encoder = [cmdBuf renderCommandEncoderWithDescriptor:pass];
 
-		// ── Scene (primary window only for now) ─────────────────────────────
-		if (isPrimary && m_world && m_scenePipeline)
-		{
-			m_extractor.extract(*m_world, m_renderWorld,
-			                    static_cast<float>(pw) / static_cast<float>(ph));
-			if (!m_renderWorld.objects.empty())
-			{
-				const glm::mat4 viewProj =
-					m_renderWorld.camera.projection * m_renderWorld.camera.view;
-
-				[encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_scenePipeline];
-				[encoder setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
-				[encoder setVertexBuffer:(__bridge id<MTLBuffer>)m_cubeVertexBuf offset:0 atIndex:0];
-
-				for (const RenderObject& obj : m_renderWorld.objects)
-				{
-					// Every object draws the built-in cube until the
-					// RenderResourceManager resolves obj.meshAssetId.
-					UnlitUniforms u;
-					u.mvp   = viewProj * obj.transform;
-					u.model = obj.transform;
-					u.color = glm::vec4(0.85f, 0.55f, 0.25f, 1.0f);
-					[encoder setVertexBytes:&u length:sizeof(u) atIndex:1];
-					[encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
-					                    indexCount:(NSUInteger)m_cubeIndexCount
-					                     indexType:MTLIndexTypeUInt32
-					                   indexBuffer:(__bridge id<MTLBuffer>)m_cubeIndexBuf
-					             indexBufferOffset:0];
-				}
-			}
-		}
+		// ── Scene direct to window (primary, no offscreen viewport) ─────────
+		if (isPrimary && !offscreen)
+			EncodeScene((__bridge void*)encoder, pw, ph);
 
 		// ── Overlay (ImGui) ─────────────────────────────────────────────────
 		if (isPrimary && m_overlayCallback)

@@ -233,11 +233,90 @@ Kein fester Plan — einzeln ziehen, wenn das Spiel es verlangt:
 
 ## Empfohlene Reihenfolge der nächsten 5 Arbeitsschritte
 
-1. **TextureImporter + MeshImporter** (1.1, 1.2) — der Flaschenhals, alles wartet darauf.
-2. **Offscreen-Viewport** (2.1) — parallel machbar, sofort sichtbarer Editor-Gewinn.
-3. **SceneSerializer vervollständigen** (2.2) — klein, entsperrt Inspector, Play-Mode und alle P4-Blöcke.
-4. **Test-Gerüst + CI** (0.1, 0.2) — bevor die Codebasis weiter wächst.
-5. **Inspector + Outliner-CRUD** (2.3, 2.4) — danach ist der Editor erstmals ein echtes Werkzeug.
+> **Status 12.06.2026:** Alle 5 Schritte sind umgesetzt. ✅
+
+1. ✅ **TextureImporter + MeshImporter** (1.1–1.5) — stb_image + cgltf, dazu Material-
+   und Audio-Importer (dr_wav), asset_compiler-CLI mit mtime-Inkrementalität und
+   UUID-Stabilität bei Re-Imports. Editor: „Import"-Kontextmenü im Content
+   Browser + „Add to Scene" für Mesh-Assets. **Dazu:** GL- und Metal-Backend
+   lösen `meshAssetId` jetzt wirklich auf (Upload on first sight, Basecolor-
+   Textur über Material-Kette); der hartkodierte Würfel ist nur noch Fallback.
+2. ✅ **Offscreen-Viewport** (2.1) — `SetViewportSize`/`GetViewportTexture` in der
+   Renderer-API, GL-FBO + Metal-Offscreen-Pass, andockbares „Scene"-Fenster
+   mit HiDPI-Handling und Resize.
+3. ✅ **SceneSerializer vervollständigt** (2.2) — alle 8 Komponenten, JSON- und
+   Binary-Pfad (CBOR derselben Struktur), Version 1.1, abwärtskompatibel.
+4. ✅ **Test-Gerüst + CI** (0.1, 0.2) — doctest mit 14 Test-Cases (SlotMap,
+   HAsset-Roundtrip, ContentManager-UUID-Persistenz, Serializer-Roundtrips),
+   GitHub-Actions-Matrix macOS + Windows in `.github/workflows/ci.yml`.
+5. ✅ **Inspector + Outliner-CRUD** (2.3, 2.4) — Details-Panel mit allen
+   Komponenten-Editoren + Add/Remove-Component; Outliner mit Selektion,
+   Create/Rename/Delete und Drag&Drop-Reparenting (zyklensicher via
+   `HorizonWorld::reparentEntity`, rekursives `destroyEntity`).
+
+> **Bugfix 13.06.2026:** Editor-Crash beim Viewport-Resize behoben (Use-after-free:
+> `EnsureViewportTarget` gab die alte MTLTexture frei, während die ImGui-Drawlist
+> desselben Frames sie noch referenzierte → SIGSEGV in `setFragmentTexture:`).
+> Fix: Retired-Texture-Graveyard, Freigabe erst 3 Frames später (GL + Metal).
+> Regression-Hook: `HE_VIEWPORT_RESIZE_STRESS=1` ändert die Viewport-Größe
+> jeden Frame — damit verifiziert.
+
+> **Status 13.06.2026:** Auch die zweite Top-5-Runde ist umgesetzt. ✅
+
+1. ✅ **Picking** (2.5) — als CPU-Ray-AABB-Test statt ID-Buffer (bewusste
+   Abweichung: backend-unabhängig, und die AABB-Infrastruktur in
+   `Core/Math/AABB.h` braucht das Culling sowieso). Klick im Scene-Viewport
+   selektiert das nächstgelegene Objekt, Klick ins Leere deselektiert.
+   ID-Buffer-Picking kann später für Pixel-Präzision nachgerüstet werden.
+2. ✅ **Gizmos** (2.6) — ImGuizmo v1.92.5 vendored
+   (`src/HE_Editor/vendor/imguizmo/`). Translate/Rotate/Scale per W/E/R,
+   World→Local-Rückrechnung über die Parent-Matrix.
+3. ✅ **Play-in-Editor** (2.8) — Play/Stop-Button verdrahtet:
+   CBOR-Snapshot bei Play, `HorizonWorld::clear()` + Restore bei Stop.
+4. ✅ **FrustumCuller + RenderSorter** (3.1) und **Blinn-Phong** (3.3) —
+   Gribb/Hartmann-Frustum gegen Welt-AABBs (Backends verfeinern mit echten
+   Mesh-Bounds), Sortierung Mesh-gruppiert + front-to-back; bis zu 8 Lichter
+   (Directional/Point/Spot mit Range-Attenuation und Spot-Kegel) auf GL und
+   Metal, Fallback-Headlight für Szenen ohne Lichter.
+5. ✅ **Undo/Redo** (2.7) — Snapshot-basiert (`EditorUndo`, CBOR-Weltzustand,
+   max. 64 Einträge) statt feingranularer Commands: deckt alle Operationen
+   einheitlich ab (Create/Delete/Reparent/Rename/Komponenten-Edits/Gizmo).
+   Cmd/Ctrl+Z, Shift+Cmd+Z bzw. Ctrl+Y, Footer-Buttons mit Disabled-State.
+   Bekannte Einschränkung: Selektion geht bei Undo verloren (Entity-Handles
+   werden remapped).
+
+Stand der Tests: 23 doctest-Cases (zusätzlich: AABB/Frustum/Sorter, EditorUndo,
+Play-Mode-Zyklus), alle grün.
+
+> **Status 13.06.2026 (Forts.):** Editor-Kamera (2.9) umgesetzt. ✅
+
+**Editor-Kamera (2.9)** — Vollwertige Scene-View-Kamera (`EditorCamera`,
+`src/HE_Editor/EditorCamera.{h,cpp}`) im Unity-Stil:
+- **Alt+LMB** orbit um den Pivot, **MMB** pan, **Mausrad** dolly, **RMB**
+  Fly-Look mit **WASDQE** (Shift = schneller), **F** = Focus-on-Selection.
+- Architektur: `EditorCameraOverride` (view + Position + fov/near/far) liegt in
+  `Renderer/IRenderer.h` (Core). Der Editor schiebt sie pro Frame über
+  `IRenderer::SetEditorCamera`; der `RenderExtractor` nutzt sie statt der
+  Szenen-`CameraComponent` und baut die Projektion mit dem Backend-Aspect, sodass
+  Bild, Gizmo und Picking-Strahl exakt übereinstimmen (GL + Metal verdrahtet).
+- Im Play-Mode wird der Override deaktiviert → die Spiel-Kamera der Szene zählt.
+- **Grid** über `ImGuizmo::DrawGrid` auf der Welt-XZ-Ebene, Toggle „Show Grid"
+  in den Quick Settings (persistiert). Gizmo/Picking sind während Navigation
+  bzw. bei gedrücktem Alt unterdrückt.
+- Tests: 4 neue doctest-Cases (`tests/test_editorcamera.cpp`) für Default-
+  Framing, Dolly, Orbit-Radius-Erhalt und Focus → jetzt **27 Cases, alle grün**.
+
+**Nächste Schritte (neue Top 5):**
+
+1. **Szene speichern/laden im Editor** — Save-Menü/Cmd+S auf den komplettierten
+   Serializer legen, Szenenwechsel über den Content Browser.
+2. **RenderGraph aktivieren** (3.4) — GeometryPass als ersten Knoten, danach
+   ShadowPass (3.5, eine Directional-Cascade).
+3. **HDR + Tonemapping** (3.6) als erster PostProcess-Pass.
+4. **Material-Inspector** — Material-Zuweisung per Drag&Drop aufs
+   MaterialComponent, Shader-/Textur-Slots editierbar.
+5. **Editor-Kamera-Feinschliff** — Cursor-Lock/-Wrap im Fly-Modus, persistente
+   Kamera-Position pro Szene, optionaler orthografischer Modus + View-Gizmo.
 
 Faustregel für die Parallelisierung danach: eine Person/ein Strang auf dem
 kritischen Pfad P1 → P2 → P5 → P6, Rendering (P3) und je ein P4-Block laufen

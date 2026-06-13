@@ -19,6 +19,21 @@ public:
 	bool isLoaded(const std::string& relativePath) const;
 	bool saveAsset(RuntimeAsset& asset);
 
+	// Typed lookup of a loaded asset. Returns nullptr when the UUID is unknown
+	// or refers to an asset of a different type.
+	const StaticMeshAsset*   getStaticMesh(HE::UUID id) const;
+	const SkeletalMeshAsset* getSkeletalMesh(HE::UUID id) const;
+	const TextureAsset*      getTexture(HE::UUID id) const;
+	const MaterialAsset*     getMaterial(HE::UUID id) const;
+	const AudioAsset*        getAudio(HE::UUID id) const;
+	const ScriptAsset*       getScript(HE::UUID id) const;
+	const ShaderAsset*       getShader(HE::UUID id) const;
+
+	const std::string& contentRoot() const { return m_contentRoot; }
+	// Point the manager at a different content directory (e.g. when the
+	// editor opens a project). Previously loaded assets stay registered.
+	void setContentRoot(std::string root) { m_contentRoot = std::move(root); }
+
 private:
 
 	HE::AssetType getAssetType(const std::string path) const;

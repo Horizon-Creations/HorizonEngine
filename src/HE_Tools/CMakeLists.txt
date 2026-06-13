@@ -20,14 +20,31 @@ target_include_directories(HorizonTools PUBLIC src/FileOps)
 
 he_deploy_dll(HorizonTools)
 
+# ─── HorizonImporters (static lib, shared by asset_compiler and the editor) ───
+add_library(HorizonImporters STATIC
+    src/AssetImporter/ImporterCommon.cpp
+    src/AssetImporter/TextureImporter.cpp
+    src/AssetImporter/MeshImporter.cpp
+    src/AssetImporter/MaterialImporter.cpp
+    src/AssetImporter/AudioImporter.cpp
+)
+set_target_properties(HorizonImporters PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_link_libraries(HorizonImporters
+    PUBLIC  HorizonCore
+    PUBLIC  glm::glm
+    PRIVATE nlohmann_json::nlohmann_json
+)
+target_include_directories(HorizonImporters
+    PUBLIC  src/AssetImporter
+    PRIVATE vendor   # stb_image.h, cgltf.h, dr_wav.h
+)
+
 # ─── asset_compiler.exe ────────────────────────────────────────────────────────
 add_executable(asset_compiler
     src/AssetCompiler/main.cpp
 )
 target_link_libraries(asset_compiler
-    PRIVATE HorizonCore
-    # PRIVATE assimp   # FetchContent or vcpkg — add when implementing importers
-    # PRIVATE stb      # header-only — add when implementing TextureImporter
+    PRIVATE HorizonImporters
 )
 target_include_directories(asset_compiler PRIVATE src/AssetCompiler)
 

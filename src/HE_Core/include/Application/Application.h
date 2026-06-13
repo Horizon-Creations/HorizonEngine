@@ -79,6 +79,7 @@ namespace HE
 		GameLogicLoader& logicLoader()        { return m_logicLoader; }
 		IRenderer*       renderer()     const { return m_renderer.get(); }
 		Input&           input()              { return m_input; }
+		ContentManager&  contentManager()     { return m_contentManager; }
 		GlobalState* m_globalState;
 
 		HorizonWorld* world() const                 { return m_world; }

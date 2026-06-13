@@ -14,8 +14,18 @@ public:
 	Entity rootEntity() const { return rootEntity_; }
 
 	Entity createEntity(const std::string& name = "Entity");
+	// Destroys the entity and its entire subtree.
 	void   destroyEntity(Entity entity);
 	void   renameEntity(Entity entity, const std::string& newName);
+
+	// Moves `entity` under `newParent`. Fails (returns false) when the move
+	// would create a cycle, target the root itself, or parent is invalid.
+	bool   reparentEntity(Entity entity, Entity newParent);
+	// Destroys every entity except the root (used by scene load / play-mode
+	// restore).
+	void   clear();
+	// True when `ancestor` appears on `entity`'s parent chain (or is equal).
+	bool   isAncestorOf(Entity ancestor, Entity entity) const;
 
 	bool isHierarchyDirty()  const { return m_hierarchyDirty; }
 	void clearHierarchyDirty()     { m_hierarchyDirty = false; }
