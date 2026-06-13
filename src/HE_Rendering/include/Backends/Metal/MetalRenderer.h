@@ -121,6 +121,13 @@ private:
 	void* m_dummyTexture    = nullptr; // id<MTLTexture>, 1×1 white — bound when a mesh has no texture
 	void* m_linearSampler   = nullptr; // id<MTLSamplerState>
 
+	// ── Shadow map (single directional light) ───────────────────────────────
+	void* m_shadowDepthTex = nullptr;  // id<MTLTexture>, Depth32Float (retained)
+	void* m_shadowPipeline = nullptr;  // id<MTLRenderPipelineState>, depth-only
+	int   m_shadowSize     = 2048;
+	void  EnsureShadowResources();
+	void  EncodeShadowMap(void* cmdBuf); // renders the depth map before the scene
+
 	// Uploaded asset meshes, keyed by asset UUID
 	std::unordered_map<HE::UUID, GpuMesh> m_meshCache;
 
