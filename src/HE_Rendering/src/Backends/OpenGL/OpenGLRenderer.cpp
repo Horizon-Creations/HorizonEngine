@@ -466,15 +466,22 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		glUniform3fv(m_uCameraPos, 1, glm::value_ptr(m_renderWorld.camera.position));
 	}
 
-	for (uint32_t idx : m_sortedIndices)
+	// Build this frame's draw calls through the render graph, then replay them.
+	// GeometryPass turns the sorted visible objects into DrawCalls; the GL state
+	// (program, lights, camera) is set up above and the meshes are resolved by
+	// UUID here, exactly as the immediate loop used to.
+	if (m_renderGraph.empty())
+		m_renderGraph.addPass(std::make_unique<GeometryPass>());
+	m_renderGraph.execute(m_renderWorld, m_sortedIndices, m_cmds);
+
+	for (const DrawCall& dc : m_cmds.drawCalls())
 	{
-		const RenderObject& obj = m_renderWorld.objects[idx];
-		const glm::mat4 mvp = viewProj * obj.transform;
+		const glm::mat4 mvp = viewProj * dc.transform;
 		glUniformMatrix4fv(m_uMVP,   1, GL_FALSE, glm::value_ptr(mvp));
-		glUniformMatrix4fv(m_uModel, 1, GL_FALSE, glm::value_ptr(obj.transform));
+		glUniformMatrix4fv(m_uModel, 1, GL_FALSE, glm::value_ptr(dc.transform));
 
 		// Resolve the asset; entities without one fall back to the built-in cube.
-		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId))
+		if (const GpuMesh* mesh = ResolveMesh(dc.meshAssetId))
 		{
 			glBindVertexArray(mesh->vao);
 			glUniform1i(m_uHasTexture, mesh->texture != 0);
