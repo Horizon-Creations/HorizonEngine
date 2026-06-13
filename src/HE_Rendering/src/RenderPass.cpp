@@ -29,10 +29,33 @@ void GeometryPass::execute(const RenderWorld&           world,
 }
 
 // ─── ShadowPass / PostProcessPass ───────────────────────────────────────────
-// Declared so the graph can reference them, but inert until the render-target
-// plumbing lands: shadows (3.5) need a depth target rendered from the light's
-// POV, HDR post (3.6) needs an offscreen color target + a fullscreen pass.
-// Both require the backends to create and bind per-pass targets, which the
-// current CPU-side command buffer does not yet model — added in a follow-up.
+// Declared so the graph can reference them, and they now declare their target
+// I/O (so backends can wire them up), but they record no draws yet: shadows
+// (3.5) need the geometry re-rendered from the light's POV into the depth
+// target, HDR post (3.6) needs a fullscreen tonemap reading the scene color.
+// Those land with the passes themselves.
 void ShadowPass::execute(const RenderWorld&, const std::vector<uint32_t>&, CommandBuffer&) {}
 void PostProcessPass::execute(const RenderWorld&, const std::vector<uint32_t>&, CommandBuffer&) {}
+
+RenderPassIO ShadowPass::describe() const
+{
+    RenderPassIO io;
+    io.output.id        = 1; // shadow map
+    io.output.format    = RenderTargetFormat::Depth;
+    io.output.sizeMode  = RenderTargetSize::Fixed;
+    io.output.width     = 2048;
+    io.output.height    = 2048;
+    io.output.depth     = true;
+    io.output.debugName = "shadowmap";
+    return io;
+}
+
+RenderPassIO PostProcessPass::describe() const
+{
+    RenderPassIO io;
+    io.output.id        = kBackbufferTarget; // tonemap to the backbuffer
+    io.output.debugName = "backbuffer";
+    io.inputs[0]        = 2; // scene color (HDR)
+    io.inputCount       = 1;
+    return io;
+}

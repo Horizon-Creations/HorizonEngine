@@ -542,7 +542,6 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
 
     if (p.m_renderGraph.empty())
         p.m_renderGraph.addPass(std::make_unique<GeometryPass>());
-    p.m_renderGraph.execute(p.m_renderWorld, p.m_sortedIndices, p.m_cmds);
 
     const glm::mat4 viewProj = p.m_renderWorld.camera.projection * p.m_renderWorld.camera.view;
 
@@ -572,27 +571,34 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     const D3D12_GPU_VIRTUAL_ADDRESS ringBase = p.perObjectRing[p.frameIndex]->GetGPUVirtualAddress();
     uint8_t* ringPtr = p.perObjectPtr[p.frameIndex];
 
+    // Per-pass sink: today the only pass renders to the backbuffer (the bound
+    // RTV). Offscreen targets (id != backbuffer) arrive with shadows/HDR.
     UINT drawIdx = 0;
-    for (const DrawCall& dc : p.m_cmds.drawCalls())
+    p.m_renderGraph.execute(p.m_renderWorld, p.m_sortedIndices,
+        [&](const RenderPass&, const RenderPassIO& io, const CommandBuffer& cmds)
     {
-        if (drawIdx >= k_maxDraws) break;
-        const GpuMesh* mesh = p.resolveMesh(dc.meshAssetId, m_contentManager);
-        const GpuMesh& m    = mesh ? *mesh : p.cube;
-        if (!m.indexCount) continue;
+        if (io.output.id != kBackbufferTarget) return;
+        for (const DrawCall& dc : cmds.drawCalls())
+        {
+            if (drawIdx >= k_maxDraws) break;
+            const GpuMesh* mesh = p.resolveMesh(dc.meshAssetId, m_contentManager);
+            const GpuMesh& m    = mesh ? *mesh : p.cube;
+            if (!m.indexCount) continue;
 
-        PerObjectCB o{};
-        o.mvp   = viewProj * dc.transform;
-        o.model = dc.transform;
-        o.color = glm::vec4(0.85f, 0.55f, 0.25f, 0.0f);
-        if (ringPtr)
-            std::memcpy(ringPtr + static_cast<size_t>(drawIdx) * k_cbSlot, &o, sizeof(o));
-        cl->SetGraphicsRootConstantBufferView(0, ringBase + static_cast<UINT64>(drawIdx) * k_cbSlot);
+            PerObjectCB o{};
+            o.mvp   = viewProj * dc.transform;
+            o.model = dc.transform;
+            o.color = glm::vec4(0.85f, 0.55f, 0.25f, 0.0f);
+            if (ringPtr)
+                std::memcpy(ringPtr + static_cast<size_t>(drawIdx) * k_cbSlot, &o, sizeof(o));
+            cl->SetGraphicsRootConstantBufferView(0, ringBase + static_cast<UINT64>(drawIdx) * k_cbSlot);
 
-        cl->IASetVertexBuffers(0, 1, &m.vbv);
-        cl->IASetIndexBuffer(&m.ibv);
-        cl->DrawIndexedInstanced(m.indexCount, 1, 0, 0, 0);
-        ++drawIdx;
-    }
+            cl->IASetVertexBuffers(0, 1, &m.vbv);
+            cl->IASetIndexBuffer(&m.ibv);
+            cl->DrawIndexedInstanced(m.indexCount, 1, 0, 0, 0);
+            ++drawIdx;
+        }
+    });
 }
 
 void D3D12Renderer::Render()

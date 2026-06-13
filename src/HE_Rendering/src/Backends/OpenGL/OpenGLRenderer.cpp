@@ -472,30 +472,37 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	// UUID here, exactly as the immediate loop used to.
 	if (m_renderGraph.empty())
 		m_renderGraph.addPass(std::make_unique<GeometryPass>());
-	m_renderGraph.execute(m_renderWorld, m_sortedIndices, m_cmds);
 
-	for (const DrawCall& dc : m_cmds.drawCalls())
+	// Per-pass sink: bind the pass's target, then replay its draws. Today the
+	// only pass renders to the backbuffer (the bound window/viewport FBO);
+	// offscreen targets (id != backbuffer) arrive with shadows/HDR.
+	m_renderGraph.execute(m_renderWorld, m_sortedIndices,
+		[&](const RenderPass&, const RenderPassIO& io, const CommandBuffer& cmds)
 	{
-		const glm::mat4 mvp = viewProj * dc.transform;
-		glUniformMatrix4fv(m_uMVP,   1, GL_FALSE, glm::value_ptr(mvp));
-		glUniformMatrix4fv(m_uModel, 1, GL_FALSE, glm::value_ptr(dc.transform));
+		if (io.output.id != kBackbufferTarget) return;
+		for (const DrawCall& dc : cmds.drawCalls())
+		{
+			const glm::mat4 mvp = viewProj * dc.transform;
+			glUniformMatrix4fv(m_uMVP,   1, GL_FALSE, glm::value_ptr(mvp));
+			glUniformMatrix4fv(m_uModel, 1, GL_FALSE, glm::value_ptr(dc.transform));
 
-		// Resolve the asset; entities without one fall back to the built-in cube.
-		if (const GpuMesh* mesh = ResolveMesh(dc.meshAssetId))
-		{
-			glBindVertexArray(mesh->vao);
-			glUniform1i(m_uHasTexture, mesh->texture != 0);
-			glBindTexture(GL_TEXTURE_2D, mesh->texture);
-			glDrawElements(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr);
+			// Resolve the asset; entities without one fall back to the built-in cube.
+			if (const GpuMesh* mesh = ResolveMesh(dc.meshAssetId))
+			{
+				glBindVertexArray(mesh->vao);
+				glUniform1i(m_uHasTexture, mesh->texture != 0);
+				glBindTexture(GL_TEXTURE_2D, mesh->texture);
+				glDrawElements(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr);
+			}
+			else
+			{
+				glBindVertexArray(m_cubeVAO);
+				glUniform1i(m_uHasTexture, 0);
+				glBindTexture(GL_TEXTURE_2D, 0);
+				glDrawElements(GL_TRIANGLES, m_cubeIndexCount, GL_UNSIGNED_INT, nullptr);
+			}
 		}
-		else
-		{
-			glBindVertexArray(m_cubeVAO);
-			glUniform1i(m_uHasTexture, 0);
-			glBindTexture(GL_TEXTURE_2D, 0);
-			glDrawElements(GL_TRIANGLES, m_cubeIndexCount, GL_UNSIGNED_INT, nullptr);
-		}
-	}
+	});
 
 	glBindVertexArray(0);
 	glBindTexture(GL_TEXTURE_2D, 0);

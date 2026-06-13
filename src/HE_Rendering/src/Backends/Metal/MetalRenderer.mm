@@ -619,48 +619,55 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 	// resolved by UUID here, exactly as the immediate loop used to.
 	if (m_renderGraph.empty())
 		m_renderGraph.addPass(std::make_unique<GeometryPass>());
-	m_renderGraph.execute(m_renderWorld, m_sortedIndices, m_cmds);
 
-	for (const DrawCall& dc : m_cmds.drawCalls())
+	// Per-pass sink: bind the pass's target, then replay its draws. Today the
+	// only pass renders to the backbuffer (the active scene encoder); offscreen
+	// targets (id != backbuffer) arrive with shadows/HDR.
+	m_renderGraph.execute(m_renderWorld, m_sortedIndices,
+		[&](const RenderPass&, const RenderPassIO& io, const CommandBuffer& cmds)
 	{
-		UnlitUniforms u;
-		u.mvp   = viewProj * dc.transform;
-		u.model = dc.transform;
-		u.color = glm::vec4(0.85f, 0.55f, 0.25f, 1.0f);
-
-		// Resolve the asset; entities without one fall back to the built-in cube.
-		id<MTLBuffer> vertexBuf;
-		id<MTLBuffer> indexBuf;
-		NSUInteger    indexCount;
-		id<MTLTexture> texture;
-		if (const GpuMesh* mesh = ResolveMesh(dc.meshAssetId))
+		if (io.output.id != kBackbufferTarget) return;
+		for (const DrawCall& dc : cmds.drawCalls())
 		{
-			vertexBuf  = (__bridge id<MTLBuffer>)mesh->vertexBuf;
-			indexBuf   = (__bridge id<MTLBuffer>)mesh->indexBuf;
-			indexCount = (NSUInteger)mesh->indexCount;
-			texture    = mesh->texture
-				? (__bridge id<MTLTexture>)mesh->texture
-				: (__bridge id<MTLTexture>)m_dummyTexture;
-			u.flags    = glm::vec4(mesh->texture ? 1.0f : 0.0f, 0, 0, 0);
-		}
-		else
-		{
-			vertexBuf  = (__bridge id<MTLBuffer>)m_cubeVertexBuf;
-			indexBuf   = (__bridge id<MTLBuffer>)m_cubeIndexBuf;
-			indexCount = (NSUInteger)m_cubeIndexCount;
-			texture    = (__bridge id<MTLTexture>)m_dummyTexture;
-			u.flags    = glm::vec4(0.0f);
-		}
+			UnlitUniforms u;
+			u.mvp   = viewProj * dc.transform;
+			u.model = dc.transform;
+			u.color = glm::vec4(0.85f, 0.55f, 0.25f, 1.0f);
 
-		[encoder setVertexBuffer:vertexBuf offset:0 atIndex:0];
-		[encoder setVertexBytes:&u length:sizeof(u) atIndex:1];
-		[encoder setFragmentTexture:texture atIndex:0];
-		[encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
-		                    indexCount:indexCount
-		                     indexType:MTLIndexTypeUInt32
-		                   indexBuffer:indexBuf
-		             indexBufferOffset:0];
-	}
+			// Resolve the asset; entities without one fall back to the built-in cube.
+			id<MTLBuffer> vertexBuf;
+			id<MTLBuffer> indexBuf;
+			NSUInteger    indexCount;
+			id<MTLTexture> texture;
+			if (const GpuMesh* mesh = ResolveMesh(dc.meshAssetId))
+			{
+				vertexBuf  = (__bridge id<MTLBuffer>)mesh->vertexBuf;
+				indexBuf   = (__bridge id<MTLBuffer>)mesh->indexBuf;
+				indexCount = (NSUInteger)mesh->indexCount;
+				texture    = mesh->texture
+					? (__bridge id<MTLTexture>)mesh->texture
+					: (__bridge id<MTLTexture>)m_dummyTexture;
+				u.flags    = glm::vec4(mesh->texture ? 1.0f : 0.0f, 0, 0, 0);
+			}
+			else
+			{
+				vertexBuf  = (__bridge id<MTLBuffer>)m_cubeVertexBuf;
+				indexBuf   = (__bridge id<MTLBuffer>)m_cubeIndexBuf;
+				indexCount = (NSUInteger)m_cubeIndexCount;
+				texture    = (__bridge id<MTLTexture>)m_dummyTexture;
+				u.flags    = glm::vec4(0.0f);
+			}
+
+			[encoder setVertexBuffer:vertexBuf offset:0 atIndex:0];
+			[encoder setVertexBytes:&u length:sizeof(u) atIndex:1];
+			[encoder setFragmentTexture:texture atIndex:0];
+			[encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+			                    indexCount:indexCount
+			                     indexType:MTLIndexTypeUInt32
+			                   indexBuffer:indexBuf
+			             indexBufferOffset:0];
+		}
+	});
 }
 
 void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool isPrimary)

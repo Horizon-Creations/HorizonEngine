@@ -453,7 +453,6 @@ void D3D11Renderer::DrawScene(int width, int height)
 
     if (p.m_renderGraph.empty())
         p.m_renderGraph.addPass(std::make_unique<GeometryPass>());
-    p.m_renderGraph.execute(p.m_renderWorld, p.m_sortedIndices, p.m_cmds);
 
     const glm::mat4 viewProj = p.m_renderWorld.camera.projection * p.m_renderWorld.camera.view;
 
@@ -490,34 +489,41 @@ void D3D11Renderer::DrawScene(int width, int height)
         ctx->PSSetConstantBuffers(1, 1, p.perFrameCB.GetAddressOf());
     }
 
+    // Per-pass sink: today the only pass renders to the backbuffer (the bound
+    // RTV). Offscreen targets (id != backbuffer) arrive with shadows/HDR.
     const UINT stride = 8 * sizeof(float);
     const UINT offset = 0;
-    for (const DrawCall& dc : p.m_cmds.drawCalls())
+    p.m_renderGraph.execute(p.m_renderWorld, p.m_sortedIndices,
+        [&](const RenderPass&, const RenderPassIO& io, const CommandBuffer& cmds)
     {
-        const GpuMesh* mesh = p.resolveMesh(dc.meshAssetId, m_contentManager);
-        const GpuMesh& m    = mesh ? *mesh : p.cube;
-        if (!m.vbuf || !m.ibuf) continue;
-
-        PerObjectCB o{};
-        o.mvp   = viewProj * dc.transform;
-        o.model = dc.transform;
-        o.color = glm::vec4(0.85f, 0.55f, 0.25f, m.texture ? 1.0f : 0.0f);
-        D3D11_MAPPED_SUBRESOURCE mapped{};
-        if (SUCCEEDED(ctx->Map(p.perObjectCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+        if (io.output.id != kBackbufferTarget) return;
+        for (const DrawCall& dc : cmds.drawCalls())
         {
-            std::memcpy(mapped.pData, &o, sizeof(o));
-            ctx->Unmap(p.perObjectCB.Get(), 0);
+            const GpuMesh* mesh = p.resolveMesh(dc.meshAssetId, m_contentManager);
+            const GpuMesh& m    = mesh ? *mesh : p.cube;
+            if (!m.vbuf || !m.ibuf) continue;
+
+            PerObjectCB o{};
+            o.mvp   = viewProj * dc.transform;
+            o.model = dc.transform;
+            o.color = glm::vec4(0.85f, 0.55f, 0.25f, m.texture ? 1.0f : 0.0f);
+            D3D11_MAPPED_SUBRESOURCE mapped{};
+            if (SUCCEEDED(ctx->Map(p.perObjectCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+            {
+                std::memcpy(mapped.pData, &o, sizeof(o));
+                ctx->Unmap(p.perObjectCB.Get(), 0);
+            }
+            ctx->VSSetConstantBuffers(0, 1, p.perObjectCB.GetAddressOf());
+            ctx->PSSetConstantBuffers(0, 1, p.perObjectCB.GetAddressOf());
+
+            ID3D11ShaderResourceView* srv = m.texture ? m.texture.Get() : p.dummyTexture.Get();
+            ctx->PSSetShaderResources(0, 1, &srv);
+
+            ctx->IASetVertexBuffers(0, 1, m.vbuf.GetAddressOf(), &stride, &offset);
+            ctx->IASetIndexBuffer(m.ibuf.Get(), DXGI_FORMAT_R32_UINT, 0);
+            ctx->DrawIndexed(m.indexCount, 0, 0);
         }
-        ctx->VSSetConstantBuffers(0, 1, p.perObjectCB.GetAddressOf());
-        ctx->PSSetConstantBuffers(0, 1, p.perObjectCB.GetAddressOf());
-
-        ID3D11ShaderResourceView* srv = m.texture ? m.texture.Get() : p.dummyTexture.Get();
-        ctx->PSSetShaderResources(0, 1, &srv);
-
-        ctx->IASetVertexBuffers(0, 1, m.vbuf.GetAddressOf(), &stride, &offset);
-        ctx->IASetIndexBuffer(m.ibuf.Get(), DXGI_FORMAT_R32_UINT, 0);
-        ctx->DrawIndexed(m.indexCount, 0, 0);
-    }
+    });
 }
 
 void D3D11Renderer::Render()

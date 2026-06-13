@@ -1001,7 +1001,6 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
 
     if (m_renderGraph.empty())
         m_renderGraph.addPass(std::make_unique<GeometryPass>());
-    m_renderGraph.execute(m_renderWorld, m_sortedIndices, m_cmds);
 
     // GL-convention projection from the extractor → Vulkan clip space.
     const glm::mat4 viewProj =
@@ -1033,20 +1032,27 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_scenePipelineLayout,
                             0, 1, &m_frameUBO[m_currentFrame].set, 0, nullptr);
 
-    for (const DrawCall& dc : m_cmds.drawCalls())
+    // Per-pass sink: today the only pass renders to the backbuffer (the active
+    // render pass). Offscreen targets (id != backbuffer) arrive with shadows/HDR.
+    m_renderGraph.execute(m_renderWorld, m_sortedIndices,
+        [&](const RenderPass&, const RenderPassIO& io, const CommandBuffer& cmds)
     {
-        const GpuMesh* mesh = resolveMesh(dc.meshAssetId);
-        const GpuMesh& m    = mesh ? *mesh : m_cube;
-        if (!m.indexCount) continue;
+        if (io.output.id != kBackbufferTarget) return;
+        for (const DrawCall& dc : cmds.drawCalls())
+        {
+            const GpuMesh* mesh = resolveMesh(dc.meshAssetId);
+            const GpuMesh& m    = mesh ? *mesh : m_cube;
+            if (!m.indexCount) continue;
 
-        PushConstants pc{ viewProj * dc.transform, dc.transform };
-        vkCmdPushConstants(cmd, m_scenePipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
-                           0, sizeof(pc), &pc);
+            PushConstants pc{ viewProj * dc.transform, dc.transform };
+            vkCmdPushConstants(cmd, m_scenePipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
+                               0, sizeof(pc), &pc);
 
-        VkDeviceSize offset = 0;
-        vkCmdBindVertexBuffers(cmd, 0, 1, &m.vbuf, &offset);
-        vkCmdBindIndexBuffer(cmd, m.ibuf, 0, VK_INDEX_TYPE_UINT32);
-        vkCmdDrawIndexed(cmd, m.indexCount, 1, 0, 0, 0);
-    }
+            VkDeviceSize offset = 0;
+            vkCmdBindVertexBuffers(cmd, 0, 1, &m.vbuf, &offset);
+            vkCmdBindIndexBuffer(cmd, m.ibuf, 0, VK_INDEX_TYPE_UINT32);
+            vkCmdDrawIndexed(cmd, m.indexCount, 1, 0, 0, 0);
+        }
+    });
 }
 
