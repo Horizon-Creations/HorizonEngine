@@ -42,13 +42,18 @@ cbuffer PerObject : register(b0)
 };
 cbuffer PerFrame : register(b1)
 {
-    float4 uCameraPos;
-    int4   uLightCount;
-    float4 uLightPos[8];
-    float4 uLightDir[8];
-    float4 uLightColor[8];
-    float4 uLightParams[8];
+    float4   uCameraPos;
+    int4     uLightCount;
+    float4   uLightPos[8];
+    float4   uLightDir[8];
+    float4   uLightColor[8];
+    float4   uLightParams[8];
+    float4x4 uLightVP;
+    int4     uShadowEnabled;
 };
+Texture2D    uShadowMap : register(t0);
+SamplerState uShadowSamp : register(s0);
+
 struct VSIn  { float3 pos : POSITION; float3 normal : NORMAL; float2 uv : TEXCOORD0; };
 struct VSOut { float4 clip : SV_POSITION; float3 worldPos : TEXCOORD0; float3 normal : TEXCOORD1; };
 
@@ -60,6 +65,21 @@ VSOut VSMain(VSIn i)
     o.clip     = mul(uMVP, float4(i.pos, 1.0));
     return o;
 }
+// Depth-only vertex shader for the shadow pass: uMVP carries lightVP * model.
+float4 VSDepth(VSIn i) : SV_POSITION { return mul(uMVP, float4(i.pos, 1.0)); }
+
+float shadowFactor(float3 worldPos, float3 N, float3 L)
+{
+    if (uShadowEnabled.x == 0) return 1.0;
+    float4 lp = mul(uLightVP, float4(worldPos, 1.0));
+    float3 p  = lp.xyz / lp.w;
+    float2 uv = float2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);
+    if (p.z > 1.0 || any(uv < 0.0) || any(uv > 1.0)) return 1.0;
+    float bias    = max(0.0015 * (1.0 - dot(N, L)), 0.0004);
+    float closest = uShadowMap.Sample(uShadowSamp, uv).r;
+    return (p.z - bias > closest) ? 0.35 : 1.0;
+}
+
 float4 PSMain(VSOut i) : SV_TARGET
 {
     float3 base = uColor.rgb;
@@ -91,10 +111,11 @@ float4 PSMain(VSOut i) : SV_TARGET
                 atten *= smoothstep(cosCone, lerp(cosCone, 1.0, 0.2), c);
             }
         }
+        float sh = (type == 0) ? shadowFactor(i.worldPos, N, L) : 1.0;
         float diff = max(dot(N, L), 0.0);
         float3 H = normalize(L + V);
         float spec = pow(max(dot(N, H), 0.0), 32.0) * 0.25;
-        result += (base * diff + spec.xxx) * uLightColor[li].rgb * uLightColor[li].w * atten;
+        result += (base * diff + spec.xxx) * uLightColor[li].rgb * uLightColor[li].w * atten * sh;
     }
     return float4(result, 1.0);
 }
@@ -111,7 +132,16 @@ namespace
         glm::vec4  lightDir[8];
         glm::vec4  lightColor[8];
         glm::vec4  lightParams[8];
+        glm::mat4  lightVP;
+        glm::ivec4 shadowEnabled;
     };
+
+    // Remaps the extractor's GL-convention light projection to D3D clip (z 0..1).
+    const glm::mat4 kD3DClipFix(
+        1.0f, 0.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 0.5f, 0.0f,
+        0.0f, 0.0f, 0.5f, 1.0f);
 
     struct GpuMesh
     {
@@ -144,8 +174,23 @@ struct D3D12RendererImpl
     int                               width = 0, height = 0;
 
     // ── Depth ───────────────────────────────────────────────────────────────
-    ComPtr<ID3D12DescriptorHeap> dsvHeap;
+    ComPtr<ID3D12DescriptorHeap> dsvHeap; // [0] = scene depth, [1] = shadow depth
     ComPtr<ID3D12Resource>       depthBuffer;
+    UINT                         dsvDescSize = 0;
+
+    // ── Shadow map ──────────────────────────────────────────────────────────
+    ComPtr<ID3D12PipelineState>  depthPSO;        // depth-only pass
+    ComPtr<ID3D12Resource>       shadowDepth;
+    ComPtr<ID3D12DescriptorHeap> shadowSrvHeap;   // shader-visible, 1 SRV
+    int                          shadowSize = 2048;
+    D3D12_RESOURCE_STATES        shadowState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+
+    D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle(UINT index) const
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE h = dsvHeap->GetCPUDescriptorHandleForHeapStart();
+        h.ptr += static_cast<SIZE_T>(index) * dsvDescSize;
+        return h;
+    }
 
     // ── Scene pipeline ──────────────────────────────────────────────────────
     ComPtr<ID3D12RootSignature>  rootSig;
@@ -224,9 +269,10 @@ struct D3D12RendererImpl
     void createDepth(int w, int h)
     {
         D3D12_DESCRIPTOR_HEAP_DESC hd{};
-        hd.NumDescriptors = 1;
+        hd.NumDescriptors = 2; // [0] scene depth, [1] shadow depth
         hd.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
         device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&dsvHeap));
+        dsvDescSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
 
         D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
         D3D12_RESOURCE_DESC rd{};
@@ -241,25 +287,70 @@ struct D3D12RendererImpl
         D3D12_CLEAR_VALUE cv{}; cv.Format = DXGI_FORMAT_D32_FLOAT; cv.DepthStencil.Depth = 1.0f;
         device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
             D3D12_RESOURCE_STATE_DEPTH_WRITE, &cv, IID_PPV_ARGS(&depthBuffer));
-        device->CreateDepthStencilView(depthBuffer.Get(), nullptr,
-            dsvHeap->GetCPUDescriptorHandleForHeapStart());
+        device->CreateDepthStencilView(depthBuffer.Get(), nullptr, dsvHandle(0));
+
+        // ── Shadow depth (R32_TYPELESS so it's both a DSV and an SRV) ────────
+        D3D12_RESOURCE_DESC sr = rd;
+        sr.Width  = static_cast<UINT64>(shadowSize);
+        sr.Height = static_cast<UINT>(shadowSize);
+        sr.Format = DXGI_FORMAT_R32_TYPELESS;
+        if (SUCCEEDED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &sr,
+                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &cv, IID_PPV_ARGS(&shadowDepth))))
+        {
+            D3D12_DEPTH_STENCIL_VIEW_DESC dvd{};
+            dvd.Format        = DXGI_FORMAT_D32_FLOAT;
+            dvd.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+            device->CreateDepthStencilView(shadowDepth.Get(), &dvd, dsvHandle(1));
+
+            D3D12_DESCRIPTOR_HEAP_DESC sh{};
+            sh.NumDescriptors = 1;
+            sh.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+            sh.Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+            device->CreateDescriptorHeap(&sh, IID_PPV_ARGS(&shadowSrvHeap));
+
+            D3D12_SHADER_RESOURCE_VIEW_DESC svd{};
+            svd.Format                  = DXGI_FORMAT_R32_FLOAT;
+            svd.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
+            svd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            svd.Texture2D.MipLevels     = 1;
+            device->CreateShaderResourceView(shadowDepth.Get(), &svd,
+                shadowSrvHeap->GetCPUDescriptorHandleForHeapStart());
+        }
     }
 
     bool createPipeline()
     {
-        // Root signature: two root CBVs (b0 per-object, b1 per-frame).
-        D3D12_ROOT_PARAMETER params[2]{};
+        // Root signature: two root CBVs (b0 per-object, b1 per-frame) + an SRV
+        // table (t0, shadow map) + a static sampler (s0).
+        D3D12_DESCRIPTOR_RANGE srvRange{};
+        srvRange.RangeType          = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        srvRange.NumDescriptors     = 1;
+        srvRange.BaseShaderRegister = 0; // t0
+
+        D3D12_ROOT_PARAMETER params[3]{};
         params[0].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
         params[0].Descriptor       = { 0, 0 }; // b0
         params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
         params[1].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
         params[1].Descriptor       = { 1, 0 }; // b1
         params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        params[2].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        params[2].DescriptorTable.NumDescriptorRanges = 1;
+        params[2].DescriptorTable.pDescriptorRanges   = &srvRange;
+        params[2].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
+
+        D3D12_STATIC_SAMPLER_DESC samp{};
+        samp.Filter         = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+        samp.AddressU = samp.AddressV = samp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        samp.ShaderRegister = 0; // s0
+        samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
         D3D12_ROOT_SIGNATURE_DESC rsd{};
-        rsd.NumParameters = 2;
-        rsd.pParameters   = params;
-        rsd.Flags         = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+        rsd.NumParameters     = 3;
+        rsd.pParameters       = params;
+        rsd.NumStaticSamplers = 1;
+        rsd.pStaticSamplers   = &samp;
+        rsd.Flags             = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
         ComPtr<ID3DBlob> sig, err;
         if (FAILED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err)))
@@ -323,6 +414,21 @@ struct D3D12RendererImpl
         {
             Logger::Log(Logger::LogLevel::Error, "D3D12Renderer: PSO creation failed");
             return false;
+        }
+
+        // Depth-only PSO for the shadow pass (VSDepth, no PS / RTV).
+        {
+            ComPtr<ID3DBlob> dvs;
+            if (SUCCEEDED(D3DCompile(kSceneHLSL, std::strlen(kSceneHLSL), "scene", nullptr, nullptr,
+                                     "VSDepth", "vs_5_0", flags, 0, &dvs, &cerr)))
+            {
+                D3D12_GRAPHICS_PIPELINE_STATE_DESC dp = pd;
+                dp.VS               = { dvs->GetBufferPointer(), dvs->GetBufferSize() };
+                dp.PS               = { nullptr, 0 };
+                dp.NumRenderTargets = 0;
+                dp.RTVFormats[0]    = DXGI_FORMAT_UNKNOWN;
+                device->CreateGraphicsPipelineState(&dp, IID_PPV_ARGS(&depthPSO));
+            }
         }
 
         // Per-frame + per-object upload rings, one set per frame in flight.
@@ -498,6 +604,9 @@ void D3D12Renderer::Shutdown()
     m_impl->meshCache.clear();
     m_impl->cube = {};
     m_impl->pso.Reset();
+    m_impl->depthPSO.Reset();
+    m_impl->shadowDepth.Reset();
+    m_impl->shadowSrvHeap.Reset();
     m_impl->rootSig.Reset();
     m_impl->depthBuffer.Reset();
     m_impl->dsvHeap.Reset();
@@ -541,9 +650,14 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     if (p.m_sortedIndices.empty()) return;
 
     if (p.m_renderGraph.empty())
+    {
+        p.m_renderGraph.addPass(std::make_unique<ShadowPass>());
         p.m_renderGraph.addPass(std::make_unique<GeometryPass>());
+    }
 
-    const glm::mat4 viewProj = p.m_renderWorld.camera.projection * p.m_renderWorld.camera.view;
+    const glm::mat4 viewProj  = p.m_renderWorld.camera.projection * p.m_renderWorld.camera.view;
+    const bool      shadows   = p.m_renderWorld.shadow.enabled && p.shadowDepth && p.depthPSO;
+    const glm::mat4 lightClip = kD3DClipFix * p.m_renderWorld.shadow.viewProj;
 
     // Per-frame constants for this frame slot.
     {
@@ -559,25 +673,90 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             f.lightColor[i]  = glm::vec4(l.color,     l.intensity);
             f.lightParams[i] = glm::vec4(l.range, 0.0f, 0.0f, 0.0f);
         }
+        f.lightVP       = lightClip;
+        f.shadowEnabled = glm::ivec4(shadows ? 1 : 0, 0, 0, 0);
         if (p.perFramePtr[p.frameIndex])
             std::memcpy(p.perFramePtr[p.frameIndex], &f, sizeof(f));
     }
 
     cl->SetGraphicsRootSignature(p.rootSig.Get());
-    cl->SetPipelineState(p.pso.Get());
     cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     cl->SetGraphicsRootConstantBufferView(1, p.perFrameCB[p.frameIndex]->GetGPUVirtualAddress());
 
     const D3D12_GPU_VIRTUAL_ADDRESS ringBase = p.perObjectRing[p.frameIndex]->GetGPUVirtualAddress();
     uint8_t* ringPtr = p.perObjectPtr[p.frameIndex];
 
-    // Per-pass sink: today the only pass renders to the backbuffer (the bound
-    // RTV). Offscreen targets (id != backbuffer) arrive with shadows/HDR.
+    auto transition = [&](ID3D12Resource* res, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after)
+    {
+        D3D12_RESOURCE_BARRIER b{};
+        b.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Transition.pResource   = res;
+        b.Transition.StateBefore = before;
+        b.Transition.StateAfter  = after;
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        cl->ResourceBarrier(1, &b);
+    };
+
+    // One ring slot per draw across BOTH passes (the CPU writes are recorded
+    // now; the GPU reads them at execute time, so shadow and geometry draws
+    // must use distinct slots).
     UINT drawIdx = 0;
     p.m_renderGraph.execute(p.m_renderWorld, p.m_sortedIndices,
         [&](const RenderPass&, const RenderPassIO& io, const CommandBuffer& cmds)
     {
+        // ── Shadow pass: depth from the light's POV ─────────────────────────
+        if (io.output.id == kShadowMapTarget)
+        {
+            if (!shadows) return;
+            transition(p.shadowDepth.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                       D3D12_RESOURCE_STATE_DEPTH_WRITE);
+            D3D12_CPU_DESCRIPTOR_HANDLE sdsv = p.dsvHandle(1);
+            cl->OMSetRenderTargets(0, nullptr, FALSE, &sdsv);
+            cl->ClearDepthStencilView(sdsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+            cl->SetPipelineState(p.depthPSO.Get());
+            D3D12_VIEWPORT svp{ 0, 0, (float)p.shadowSize, (float)p.shadowSize, 0.0f, 1.0f };
+            D3D12_RECT     ssc{ 0, 0, p.shadowSize, p.shadowSize };
+            cl->RSSetViewports(1, &svp);
+            cl->RSSetScissorRects(1, &ssc);
+            for (const DrawCall& dc : cmds.drawCalls())
+            {
+                if (drawIdx >= k_maxDraws) break;
+                const GpuMesh* mesh = p.resolveMesh(dc.meshAssetId, m_contentManager);
+                const GpuMesh& m    = mesh ? *mesh : p.cube;
+                if (!m.indexCount) continue;
+                PerObjectCB o{};
+                o.mvp = lightClip * dc.transform; o.model = dc.transform;
+                if (ringPtr)
+                    std::memcpy(ringPtr + static_cast<size_t>(drawIdx) * k_cbSlot, &o, sizeof(o));
+                cl->SetGraphicsRootConstantBufferView(0, ringBase + static_cast<UINT64>(drawIdx) * k_cbSlot);
+                cl->IASetVertexBuffers(0, 1, &m.vbv);
+                cl->IASetIndexBuffer(&m.ibv);
+                cl->DrawIndexedInstanced(m.indexCount, 1, 0, 0, 0);
+                ++drawIdx;
+            }
+            transition(p.shadowDepth.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE,
+                       D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            // Restore the backbuffer RTV + scene DSV + viewport.
+            auto rtv  = p.rtvHandle(p.frameIndex);
+            auto dsv0 = p.dsvHandle(0);
+            cl->OMSetRenderTargets(1, &rtv, FALSE, &dsv0);
+            D3D12_VIEWPORT vp{ 0, 0, (float)width, (float)height, 0.0f, 1.0f };
+            D3D12_RECT     sc{ 0, 0, width, height };
+            cl->RSSetViewports(1, &vp);
+            cl->RSSetScissorRects(1, &sc);
+            return;
+        }
+
         if (io.output.id != kBackbufferTarget) return;
+
+        // ── Geometry pass: scene PSO + shadow map bound for sampling ────────
+        cl->SetPipelineState(p.pso.Get());
+        if (p.shadowSrvHeap)
+        {
+            ID3D12DescriptorHeap* heaps[] = { p.shadowSrvHeap.Get() };
+            cl->SetDescriptorHeaps(1, heaps);
+            cl->SetGraphicsRootDescriptorTable(2, p.shadowSrvHeap->GetGPUDescriptorHandleForHeapStart());
+        }
         for (const DrawCall& dc : cmds.drawCalls())
         {
             if (drawIdx >= k_maxDraws) break;
