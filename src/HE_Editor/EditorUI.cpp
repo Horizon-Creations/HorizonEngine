@@ -24,6 +24,14 @@
 // Forward declaration — defined in EditorApplication.cpp
 std::string getRHIName(HE::RendererBackend backend);
 
+namespace
+{
+	// The async SDL file slot (pendingFileReady/Result) is shared across project
+	// and scene operations; this records which one is currently in flight so the
+	// single result handler can dispatch correctly.
+	enum class PendingFileOp { OpenProject, OpenScene, SaveScene };
+}
+
 #ifdef HE_IMGUI_ENABLED
 #include <imgui.h>
 #include <imgui_impl_sdl3.h>
@@ -598,6 +606,46 @@ void EditorUI::RenderProjectHub(AppContext& ctx)
 void EditorUI::RenderEditor(AppContext& ctx, float dt)
 {
 #ifdef HE_IMGUI_ENABLED
+	// ── Scene-file dialog helpers ──────────────────────────────────────────
+	static PendingFileOp s_pendingFileOp = PendingFileOp::OpenProject;
+
+	auto sceneDialogDir = [&]() -> std::string
+	{
+		if (!ctx.projectManager) return {};
+		std::filesystem::path p = ctx.projectManager->currentProject().path;
+		if (std::filesystem::is_regular_file(p)) p = p.parent_path();
+		const std::filesystem::path content = p / "Content";
+		return std::filesystem::exists(content) ? content.string() : p.string();
+	};
+	auto fileDialogCb = [](void* userdata, const char* const* filelist, int)
+	{
+		auto* b = static_cast<SDLDialogBridge*>(userdata);
+		if (filelist && filelist[0]) { *b->pendingFileResult = filelist[0]; *b->pendingFileReady = true; }
+	};
+	auto triggerOpenScene = [&]()
+	{
+		s_pendingFileOp = PendingFileOp::OpenScene;
+		SDL_DialogFileFilter filters[] = { { "Horizon Scene", "hescene" } };
+		const std::string dir = sceneDialogDir();
+		SDL_ShowOpenFileDialog(fileDialogCb, ctx.dialogBridge,
+			ctx.window ? ctx.window->GetNativeWindow() : nullptr,
+			filters, 1, dir.empty() ? nullptr : dir.c_str(), false);
+	};
+	auto triggerSaveSceneAs = [&]()
+	{
+		s_pendingFileOp = PendingFileOp::SaveScene;
+		SDL_DialogFileFilter filters[] = { { "Horizon Scene", "hescene" } };
+		const std::string dir = sceneDialogDir();
+		SDL_ShowSaveFileDialog(fileDialogCb, ctx.dialogBridge,
+			ctx.window ? ctx.window->GetNativeWindow() : nullptr,
+			filters, 1, dir.empty() ? nullptr : dir.c_str());
+	};
+	auto doSaveScene = [&]()
+	{
+		if (ctx.currentScenePath.empty()) triggerSaveSceneAs();
+		else if (ctx.saveSceneToPath)     ctx.saveSceneToPath(ctx.currentScenePath);
+	};
+
 	ImGui::PushFont(ctx.fontSubheading);
 	ImGui::BeginMainMenuBar();
 	bool openNewProjectPopup = false;
@@ -614,6 +662,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
         if (ImGui::MenuItem("Open Project", "Ctrl+O"))
         {
             ctx.hubOpenError.clear();
+            s_pendingFileOp = PendingFileOp::OpenProject;
             SDL_DialogFileFilter filters[] = {
                 { "HorizonEngine Project", "heproj" },
             };
@@ -641,8 +690,10 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 			ctx.projectLoaded = false;
 		}
         ImGui::Separator();
-        if (ImGui::MenuItem("Save Selected", "Ctrl+S")) {}
-        if (ImGui::MenuItem("Save all", "Ctrl+Shift+S")) {}
+        if (ImGui::MenuItem("New Scene"))            ctx.newScene();
+        if (ImGui::MenuItem("Open Scene..."))        triggerOpenScene();
+        if (ImGui::MenuItem("Save Scene", "Ctrl+S")) doSaveScene();
+        if (ImGui::MenuItem("Save Scene As...", "Ctrl+Shift+S")) triggerSaveSceneAs();
         ImGui::Separator();
         if (ImGui::MenuItem("Exit", "Alt+F4"))
             ctx.quit();
@@ -688,17 +739,46 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
         ctx.pendingFileReady = false;
         std::string chosen = ctx.pendingFileResult;
         ctx.pendingFileResult.clear();
-        if (ctx.projectManager->loadProject(chosen))
+
+        if (s_pendingFileOp == PendingFileOp::OpenScene)
         {
-            ctx.globalState->addKnownProject(chosen);
-            ctx.globalState->writeConfig();
-            ctx.contentRefreshPending = true;
-            ctx.projectLoaded = true;
+            if (!chosen.empty() && ctx.openScene) ctx.openScene(chosen);
         }
-        else
+        else if (s_pendingFileOp == PendingFileOp::SaveScene)
         {
-            ctx.hubOpenError = "Failed to load project file.";
-            ImGui::OpenPopup("##EditorOpenError");
+            if (!chosen.empty() && ctx.saveSceneToPath)
+            {
+                std::filesystem::path p(chosen);
+                if (p.extension() != ".hescene") p += ".hescene";
+                ctx.saveSceneToPath(p.string());
+            }
+        }
+        else // OpenProject
+        {
+            if (ctx.projectManager->loadProject(chosen))
+            {
+                ctx.globalState->addKnownProject(chosen);
+                ctx.globalState->writeConfig();
+                ctx.contentRefreshPending = true;
+                ctx.projectLoaded = true;
+            }
+            else
+            {
+                ctx.hubOpenError = "Failed to load project file.";
+                ImGui::OpenPopup("##EditorOpenError");
+            }
+        }
+        s_pendingFileOp = PendingFileOp::OpenProject; // reset to default
+    }
+
+    // ── Scene shortcuts: Cmd/Ctrl+S save, Shift+Cmd/Ctrl+S save as ─────────
+    {
+        const ImGuiIO& kio = ImGui::GetIO();
+        const bool mod = kio.KeyCtrl || kio.KeySuper;
+        if (mod && !kio.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_S, false))
+        {
+            if (kio.KeyShift) triggerSaveSceneAs();
+            else              doSaveScene();
         }
     }
 
@@ -2129,6 +2209,12 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 			// Double-click → open tab
 			if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
 			{
+				if (std::filesystem::path(file->fullPath).extension() == ".hescene")
+				{
+					if (ctx.openScene) ctx.openScene(file->fullPath);
+				}
+				else
+				{
 				const std::string tabLabel = std::filesystem::path(file->name).stem().string();
 				auto it = std::find_if(ctx.tabs.begin(), ctx.tabs.end(),
 					[&](const AppContext::EditorTab& t){ return t.assetPath == file->fullPath; });
@@ -2140,6 +2226,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				else
 				{
 					ctx.activeTab = static_cast<int>(std::distance(ctx.tabs.begin(), it));
+				}
 				}
 			}
 			// Right click → select only, open menu after loop

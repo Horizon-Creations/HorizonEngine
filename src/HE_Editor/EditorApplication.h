@@ -95,6 +95,15 @@ struct AppContext
 	bool isPlaying = false;
 	std::function<void(bool)> setPlayMode;
 
+	// ── Scene file management ──────────────────────────────────────────────
+	// currentScenePath is empty for an unsaved/new scene. sceneDirty reflects
+	// unsaved changes since the last save/load (tracked via the undo revision).
+	std::string& currentScenePath;
+	bool         sceneDirty = false;
+	std::function<void(const std::string&)> saveSceneToPath; // write world → .hescene (JSON)
+	std::function<void(const std::string&)> openScene;       // load .hescene, replacing the world
+	std::function<void()>                    newScene;        // clear to an empty scene
+
 	// Undo/redo. UI calls undoSys capture/stash/commit around mutations;
 	// undo()/redo() also reset the selection (entity handles are remapped).
 	EditorUndo* undoSys = nullptr;
@@ -216,6 +225,15 @@ private:
 	// Play-in-editor
 	bool m_isPlaying = false;
 	void setPlayMode(bool play);
+
+	// Scene file management. m_currentScenePath is the .hescene the editor
+	// world was last saved to / loaded from (empty = new/unsaved). m_savedRevision
+	// is the undo revision at that point; the scene is dirty when it differs.
+	std::string m_currentScenePath;
+	uint64_t    m_savedRevision = 0;
+	void saveSceneToPath(const std::string& path);
+	void openScene(const std::string& path);
+	void newScene();
 
 	// Undo/redo
 	EditorUndo m_undo;

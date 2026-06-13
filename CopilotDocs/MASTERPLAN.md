@@ -306,17 +306,34 @@ Play-Mode-Zyklus), alle grün.
 - Tests: 4 neue doctest-Cases (`tests/test_editorcamera.cpp`) für Default-
   Framing, Dolly, Orbit-Radius-Erhalt und Focus → jetzt **27 Cases, alle grün**.
 
+> **Status 13.06.2026 (Forts.):** Szene speichern/laden im Editor umgesetzt. ✅
+
+**Szene speichern/laden im Editor** — Save/Load auf den komplettierten
+SceneSerializer (JSON) gelegt:
+- File-Menü: **New Scene**, **Open Scene…**, **Save Scene** (Cmd/Ctrl+S),
+  **Save Scene As…** (Shift+Cmd/Ctrl+S); SDL-Datei-Dialoge (`.hescene`-Filter,
+  Start im `Content`-Ordner). Tastatur-Shortcuts global im Editor.
+- Szenenwechsel per **Doppelklick** auf eine `.hescene` im Content Browser.
+- Der gemeinsame async-Datei-Slot (`pendingFileReady/Result`) wird über eine
+  `PendingFileOp`-Intent-Enum für Projekt-Öffnen / Szene-Öffnen / Szene-Speichern
+  disambiguiert; bei „Save As" wird die `.hescene`-Endung erzwungen.
+- `EditorApplication` trackt `m_currentScenePath` + `m_savedRevision`; der
+  Fenstertitel zeigt „Projekt — Szene [*]" (Dirty-Marker). Dirty-Erkennung über
+  einen Revisions-Zähler in `EditorUndo` (bumpt bei push/undo/redo). Beim Öffnen
+  einer Szene wird der Play-Mode verlassen, Undo-History geleert, Selektion
+  zurückgesetzt; `New Scene` leert die Welt auf den Root.
+
 **Nächste Schritte (neue Top 5):**
 
-1. **Szene speichern/laden im Editor** — Save-Menü/Cmd+S auf den komplettierten
-   Serializer legen, Szenenwechsel über den Content Browser.
-2. **RenderGraph aktivieren** (3.4) — GeometryPass als ersten Knoten, danach
+1. **RenderGraph aktivieren** (3.4) — GeometryPass als ersten Knoten, danach
    ShadowPass (3.5, eine Directional-Cascade).
-3. **HDR + Tonemapping** (3.6) als erster PostProcess-Pass.
-4. **Material-Inspector** — Material-Zuweisung per Drag&Drop aufs
+2. **HDR + Tonemapping** (3.6) als erster PostProcess-Pass.
+3. **Material-Inspector** — Material-Zuweisung per Drag&Drop aufs
    MaterialComponent, Shader-/Textur-Slots editierbar.
-5. **Editor-Kamera-Feinschliff** — Cursor-Lock/-Wrap im Fly-Modus, persistente
+4. **Editor-Kamera-Feinschliff** — Cursor-Lock/-Wrap im Fly-Modus, persistente
    Kamera-Position pro Szene, optionaler orthografischer Modus + View-Gizmo.
+5. **Save-Prompt bei ungesicherten Änderungen** — „Speichern?"-Dialog vor
+   Szenenwechsel/Projektschließen/Quit, wenn der Dirty-Marker aktiv ist.
 
 Faustregel für die Parallelisierung danach: eine Person/ein Strang auf dem
 kritischen Pfad P1 → P2 → P5 → P6, Rendering (P3) und je ein P4-Block laufen
