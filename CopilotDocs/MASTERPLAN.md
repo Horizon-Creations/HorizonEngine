@@ -14,7 +14,7 @@ Unity/Godot-Featureset, nicht Unreal-AAA).
 | UUID-Persistenz im META-Chunk (v2) | ✅ |
 | Erster Render-Pfad: ECS-Welt → sichtbares Mesh auf GL **und** Metal (CommandBuffer, RenderWorld, RenderExtractor, Kamera) | ✅ |
 | Editor-Shell: Hub, Docking, Outliner, Content Browser | ✅ |
-| Backend-Gerüste GL/Metal/Vulkan/D3D11/D3D12 | 🟡 GL+Metal zeichnen, Rest nur Clear |
+| Backend-Gerüste GL/Metal/Vulkan/D3D11/D3D12 | 🟡 GL+Metal zeichnen (getestet); D3D11/D3D12/Vulkan haben jetzt denselben Szenen-Draw-Pfad, aber **unverifiziert** (nicht auf macOS baubar) |
 | Asset-Importer (Texture/Mesh/Material/Audio), asset_compiler, Packer | 🔴 Stubs |
 | SceneSerializer | 🔴 nur Name + Hierarchie |
 | RenderGraph, RenderPass, RenderResourceManager, GPUMemoryAllocator | 🔴 leer |
@@ -343,6 +343,23 @@ bauen darauf auf):
 - Tests: 4 neue doctest-Cases (`tests/test_rendergraph.cpp`) für DrawCall-
   Reihenfolge/Payload, Out-of-range-Skip, Buffer-Reset pro Frame und inerte
   Passes → jetzt **31 Cases, alle grün**.
+
+> **Status 13.06.2026 (Forts.):** D3D11/D3D12/Vulkan auf Szenen-Draw-Parität
+> gebracht (Option „erst Parität, dann Targets"). ✅ **Achtung: unverifiziert** —
+> keines der drei baut auf dieser macOS-Maschine (D3D = `if(WIN32)`, Vulkan =
+> kein SDK), daher sorgfältig-aber-blind und auf Windows / mit Vulkan-SDK zu
+> validieren. GL+Metal + 31 Tests unverändert grün.
+
+**D3D11/D3D12/Vulkan Szenen-Draw (P6-Parität vorgezogen):** Alle drei nutzen jetzt
+denselben `extractor→cull→sort→RenderGraph→GeometryPass→DrawCall`-Pfad wie GL/Metal,
+zeichnen also beleuchtete Geometrie statt nur Clear. Gemeinsam: interleaved
+pos3+normal3+uv2, Mesh-Upload on first sight aus dem ContentManager, Cube-Fallback,
+Blinn-Phong (8 Lichter), Editor-Kamera-Override, Tiefenpuffer.
+- **D3D11** (`d3dcompiler`, HLSL zur Laufzeit): inkl. Basecolor-Texturen.
+- **D3D12** (Root-CBVs + PSO, Upload-Heaps statt Staging): Flat-Color, Texturen
+  als TODO (DEFAULT-Heap-Upload + Descriptor-Tables zu fehleranfällig blind).
+- **Vulkan** (Push-Constants + per-frame-UBO, GLSL→SPIR-V via glslc, Clip-Fix für
+  Y/Tiefe): Flat-Color, Texturen TODO; `.spv` müssen nach `<exe>/Shaders/` deployen.
 
 **Nächste Schritte (neue Top 5):**
 
