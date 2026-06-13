@@ -216,6 +216,7 @@ void MetalRenderer::Initialize(HE::Window* window)
 
 	CreateTarget(m_primarySdlWindow, m_primaryTarget);
 	CreateScenePipeline();
+	EnsureShadowResources();
 	CreateCubeMesh();
 
 	// Persistent pass descriptor describing the swapchain attachment layout.
@@ -272,6 +273,8 @@ void MetalRenderer::Shutdown()
 	if (m_cubeIndexBuf)    { CFBridgingRelease(m_cubeIndexBuf);    m_cubeIndexBuf = nullptr; }
 	if (m_scenePipeline)   { CFBridgingRelease(m_scenePipeline);   m_scenePipeline = nullptr; }
 	if (m_sceneDepthState) { CFBridgingRelease(m_sceneDepthState); m_sceneDepthState = nullptr; }
+	if (m_shadowPipeline)  { CFBridgingRelease(m_shadowPipeline);  m_shadowPipeline = nullptr; }
+	if (m_shadowDepthTex)  { CFBridgingRelease(m_shadowDepthTex);  m_shadowDepthTex = nullptr; }
 	if (m_noDepthState)    { CFBridgingRelease(m_noDepthState);    m_noDepthState = nullptr; }
 
 	if (m_imguiPassDescriptor) { CFBridgingRelease(m_imguiPassDescriptor); m_imguiPassDescriptor = nullptr; }
@@ -729,6 +732,14 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 	[encoder setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
 
+	// Shadow map on fragment texture/sampler slot 1 (filled by EncodeShadowMap).
+	const bool shadows = m_renderWorld.shadow.enabled && m_shadowDepthTex;
+	if (shadows)
+		[encoder setFragmentTexture:(__bridge id<MTLTexture>)m_shadowDepthTex atIndex:1];
+	else
+		[encoder setFragmentTexture:(__bridge id<MTLTexture>)m_dummyTexture atIndex:1];
+	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:1];
+
 	// ── Lights (clamped to the shader's 8) ──────────────────────────────────
 	{
 		SceneUniforms scene;
@@ -742,6 +753,8 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 			scene.lights[i].colorIntensity = glm::vec4(l.color,     l.intensity);
 			scene.lights[i].params         = glm::vec4(l.range, 0.0f, 0.0f, 0.0f);
 		}
+		scene.lightVP       = kMetalClipFix * m_renderWorld.shadow.viewProj;
+		scene.shadowEnabled = shadows ? 1 : 0;
 		[encoder setFragmentBytes:&scene length:sizeof(scene) atIndex:0];
 	}
 
@@ -827,6 +840,10 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 
 		id<MTLCommandQueue>  queue   = (__bridge id<MTLCommandQueue>)m_commandQueue;
 		id<MTLCommandBuffer> cmdBuf  = [queue commandBuffer];
+
+		// ── Shadow map (directional light) — rendered before the scene ──────
+		if (isPrimary)
+			EncodeShadowMap((__bridge void*)cmdBuf);
 
 		// ── Offscreen scene pass (editor viewport) ──────────────────────────
 		const bool offscreen = isPrimary && m_viewportReqW > 0 && m_viewportReqH > 0;
