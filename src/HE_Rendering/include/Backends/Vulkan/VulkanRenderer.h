@@ -61,6 +61,19 @@ private:
 	VkShaderModule loadShaderModule(const char* spvFileName);
 	uint32_t       findMemoryType(uint32_t typeBits, VkMemoryPropertyFlags props) const;
 
+	// ── Shadow map ──────────────────────────────────────────────────────────
+	void createShadowResources();
+	void destroyShadowResources();
+	void EncodeShadowMap(VkCommandBuffer cmd); // own render pass, before the scene
+	VkImage        m_shadowImage    = VK_NULL_HANDLE;
+	VkDeviceMemory m_shadowMemory   = VK_NULL_HANDLE;
+	VkImageView    m_shadowView     = VK_NULL_HANDLE;
+	VkSampler      m_shadowSampler  = VK_NULL_HANDLE;
+	VkRenderPass   m_shadowPass     = VK_NULL_HANDLE;
+	VkFramebuffer  m_shadowFB       = VK_NULL_HANDLE;
+	VkPipeline     m_shadowPipeline = VK_NULL_HANDLE;
+	uint32_t       m_shadowSize     = 2048;
+
 	VkInstance               m_instance       = VK_NULL_HANDLE;
 	VkPhysicalDevice         m_physDevice     = VK_NULL_HANDLE;
 	VkDevice                 m_device         = VK_NULL_HANDLE;
