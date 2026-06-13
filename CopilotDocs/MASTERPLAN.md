@@ -378,28 +378,29 @@ landet mit dem ersten Feature, das sie braucht (ShadowPass/HDR), wo auch die
 Sampling-Shader entstehen. 2 neue Tests (Per-Pass-Dispatch + `describe()`) →
 **33 Cases, alle grün**.
 
-> **Status 13.06.2026 (Forts.):** ShadowPass (3.5) auf **OpenGL** umgesetzt +
-> kompilier-verifiziert (Commit `e7779e0`); Metal/D3D/Vulkan offen. ✅(GL)
+> **Status 13.06.2026 (Forts.):** ShadowPass (3.5) auf **allen 5 Backends**.
+> GL (`e7779e0`) + Metal (`0387987`) kompilier-verifiziert; D3D11 (`2cff0fe`),
+> D3D12 (`e782dad`), Vulkan (`0d5583f`) blind/unverifiziert. ✅
 
 **ShadowPass (3.5) — OpenGL:** Directional-Schatten via 2048²-Depth-Map. Shared:
 `RenderWorld.shadow` (lightVP/dir/enabled), Extractor fittet ein Ortho-Frustum um
 die Szene; `ShadowPass` zeichnet die sichtbare Geometrie depth-only, GeometryPass
 sampelt die Map (Slope-Bias). GL rendert ShadowPass → Map → GeometryPass über den
-Sink. **Metal/D3D/Vulkan offen** — konventionssensibel (NDC/Tiefe z 0..1, Y-Flip
-des lightVP) und hier nicht render-testbar; Metal braucht zudem einen eigenen
-Depth-Encoder vor dem Szenen-Encoder.
+Sink. Pro Backend ist der lightVP an dessen NDC/Tiefen-Konvention angepasst
+(GL z×0.5+0.5; Metal/D3D clipFix z 0..1 + V-Flip; Vulkan clipFix Y+z). Metal und
+Vulkan rendern die Depth-Map in einem eigenen Pass/Encoder vor der Szene; D3D11/
+D3D12 wechseln das Rendertarget im Sink. **D3D11/D3D12/Vulkan unverifiziert** —
+nicht baubar hier, auf Zielplattform prüfen.
 
 **Nächste Schritte (neue Top 5):**
 
-1. **ShadowPass auf Metal/D3D/Vulkan** — lightVP pro NDC anpassen (clipFix z→0..1,
-   Y-Flip); Metal: separater Depth-Encoder. Auf Mac (Metal) zumindest baubar.
-2. **HDR + Tonemapping** (3.6) — SceneColor als RGBA16F-Target, PostProcessPass
+1. **HDR + Tonemapping** (3.6) — SceneColor als RGBA16F-Target, PostProcessPass
    als Fullscreen-Tonemap auf den Backbuffer (nutzt dieselbe Target-Infra).
-3. **Material-Inspector** — Material-Zuweisung per Drag&Drop aufs
+2. **Material-Inspector** — Material-Zuweisung per Drag&Drop aufs
    MaterialComponent, Shader-/Textur-Slots editierbar.
-4. **Save-Prompt bei ungesicherten Änderungen** — „Speichern?"-Dialog vor
+3. **Save-Prompt bei ungesicherten Änderungen** — „Speichern?"-Dialog vor
    Szenenwechsel/Projektschließen/Quit, wenn der Dirty-Marker aktiv ist.
-5. **D3D/Vulkan-Validierung** — auf Windows / mit Vulkan-SDK bauen, die
+4. **D3D/Vulkan-Validierung** — auf Windows / mit Vulkan-SDK bauen, die
    blind geschriebenen Szenen-Draw-Pfade verifizieren und korrigieren.
 
 Faustregel für die Parallelisierung danach: eine Person/ein Strang auf dem
