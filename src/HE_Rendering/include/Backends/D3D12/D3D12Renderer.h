@@ -20,5 +20,8 @@ public:
     void  SetVSync(bool enabled) override;
 
 private:
+    // Extract → cull → sort → RenderGraph → replay into the bound command list.
+    void DrawScene(void* cmdList, int width, int height);
+
     D3D12RendererImpl* m_impl = nullptr;
 };
