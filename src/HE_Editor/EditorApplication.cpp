@@ -524,6 +524,9 @@ void EditorApplication::OnInit()
 	m_editorConfig.CbTreeWidth                 = globalstate.getCustomConfigFloat("CbTreeWidth", m_editorConfig.CbTreeWidth);
 	m_editorConfig.UiFontScale                 = globalstate.getCustomConfigFloat("UiFontScale",       m_editorConfig.UiFontScale);
 	m_editorConfig.EditorCameraSpeed           = globalstate.getCustomConfigFloat("EditorCameraSpeed", m_editorConfig.EditorCameraSpeed);
+	m_editorConfig.BloomEnabled                = globalstate.getCustomConfigBool("BloomEnabled",        m_editorConfig.BloomEnabled);
+	m_editorConfig.BloomThreshold              = globalstate.getCustomConfigFloat("BloomThreshold",     m_editorConfig.BloomThreshold);
+	m_editorConfig.BloomIntensity              = globalstate.getCustomConfigFloat("BloomIntensity",     m_editorConfig.BloomIntensity);
 	m_editorCamera.setFlySpeed(m_editorConfig.EditorCameraSpeed);
 
 #ifdef HE_IMGUI_ENABLED
@@ -700,6 +703,13 @@ void EditorApplication::OnRender(float dt)
 		}
 	}
 
+	// Push post-process settings (bloom) to the renderer from the editor prefs.
+	if (renderer())
+		renderer()->SetBloomSettings(IRenderer::BloomSettings{
+			m_editorConfig.BloomEnabled,
+			m_editorConfig.BloomThreshold,
+			m_editorConfig.BloomIntensity});
+
 	AppContext ctx = makeContext();
 	EditorUI::render(ctx, dt);
 
@@ -773,6 +783,8 @@ void EditorApplication::dumpFrameHeadless()
 	// macOS — where the normal loop throttles to a near-frozen frame rate and a
 	// loop-driven capture never fires.
 	r->SetOverlayCallback(nullptr);
+	r->SetBloomSettings(IRenderer::BloomSettings{
+		m_editorConfig.BloomEnabled, m_editorConfig.BloomThreshold, m_editorConfig.BloomIntensity});
 	r->SetViewportSize(1280, 720);
 	for (int i = 0; i < 3; ++i)
 		r->Render();
@@ -1053,6 +1065,9 @@ void EditorApplication::OnShutdown()
 	globalstate.setCustomConfigEntry("CbTreeWidth",                 m_editorConfig.CbTreeWidth);
 	globalstate.setCustomConfigEntry("UiFontScale",                m_editorConfig.UiFontScale);
 	globalstate.setCustomConfigEntry("EditorCameraSpeed",          m_editorConfig.EditorCameraSpeed);
+	globalstate.setCustomConfigEntry("BloomEnabled",               m_editorConfig.BloomEnabled);
+	globalstate.setCustomConfigEntry("BloomThreshold",             m_editorConfig.BloomThreshold);
+	globalstate.setCustomConfigEntry("BloomIntensity",             m_editorConfig.BloomIntensity);
 	globalstate.writeConfig();
 }
 

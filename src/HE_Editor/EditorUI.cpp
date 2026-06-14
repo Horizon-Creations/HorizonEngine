@@ -138,6 +138,15 @@ static void DrawPreferencesWindow(AppContext& ctx, bool& open)
 		if (ImGui::Checkbox("VSync", &ctx.vsync) && ctx.window)
 			ctx.window->SetVSync(ctx.vsync);
 
+		// Bloom — pushed to the renderer each frame from these prefs.
+		ImGui::Checkbox("Bloom", &cfg.BloomEnabled);
+		ImGui::BeginDisabled(!cfg.BloomEnabled);
+		ImGui::SetNextItemWidth(220.0f);
+		ImGui::SliderFloat("Bloom Threshold", &cfg.BloomThreshold, 0.0f, 4.0f, "%.2f");
+		ImGui::SetNextItemWidth(220.0f);
+		ImGui::SliderFloat("Bloom Intensity", &cfg.BloomIntensity, 0.0f, 2.0f, "%.2f");
+		ImGui::EndDisabled();
+
 		ImGui::SeparatorText("Content Browser");
 		ImGui::Checkbox("Keep CPU Asset Cache", &cfg.KeepCPUAssets);
 		ImGui::SetNextItemWidth(120.0f);
@@ -153,6 +162,9 @@ static void DrawPreferencesWindow(AppContext& ctx, bool& open)
 			cfg.ShowGrid          = true;
 			cfg.KeepCPUAssets     = false;
 			cfg.ContentBrowserRefreshRate = 60;
+			cfg.BloomEnabled      = true;
+			cfg.BloomThreshold    = 1.0f;
+			cfg.BloomIntensity    = 0.6f;
 			if (ctx.editorCamera) ctx.editorCamera->setFlySpeed(cfg.EditorCameraSpeed);
 		}
 		ImGui::SameLine();
@@ -2992,6 +3004,13 @@ void EditorUI::RenderInspector(AppContext& ctx)
 				sbuf[sizeof(sbuf) - 1] = '\0';
 				if (ImGui::InputText("Shader", sbuf, sizeof(sbuf)))
 					mat->shaderPath = sbuf;
+
+				// Surface (PBR scalars) — applied live (the renderer reads them
+				// from the shared MaterialAsset each frame); "Save Material" persists.
+				ImGui::SeparatorText("Surface");
+				ImGui::ColorEdit3("Base Color", mat->baseColor);
+				ImGui::SliderFloat("Metallic",  &mat->metallic,  0.0f, 1.0f, "%.2f");
+				ImGui::SliderFloat("Roughness", &mat->roughness, 0.0f, 1.0f, "%.2f");
 
 				// Texture slots — editable text + per-slot drop target + remove.
 				ImGui::TextUnformatted("Textures");

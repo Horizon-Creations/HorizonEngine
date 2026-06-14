@@ -472,13 +472,12 @@ config.json.
 
 **Nächste Schritte (Top 5):**
 
-1. **HDR auf D3D11/D3D12/Vulkan** (blind, auf Windows zu validieren) — analog
-   GL/Metal: RGBA16F-SceneColor + Tonemap-PostProcess in den jeweiligen Sinks.
-2. ✅ **Material-Inspector** — erledigt (GL+Metal, s.o.). Folgekandidaten:
-   Material-Override auch in D3D/Vulkan; Asset-Registry für UUID→Pfad-Resolve
-   nach Reload; PBR-Skalare (baseColor/metallic/roughness, → 3.3).
+1. **HDR + Bloom auf D3D11/D3D12/Vulkan** (blind, auf Windows zu validieren) —
+   analog GL/Metal: RGBA16F-SceneColor + Tonemap/Bloom-PostProcess in den Sinks.
+2. ✅ **Material-Inspector** — erledigt (GL+Metal, s.o.).
 3. ✅ **Save-Prompt bei ungesicherten Änderungen** — erledigt (s.u.).
 4. ✅ **Bloom** (3.6 Forts.) — erledigt (GL+Metal, s.u.).
+5. ✅ **PBR-Skalare (3.3)** + **Bloom-Toggle in den Preferences** — erledigt (s.u.).
 
 Faustregel für die Parallelisierung danach: eine Person/ein Strang auf dem
 kritischen Pfad P1 → P2 → P5 → P6, Rendering (P3) und je ein P4-Block laufen
@@ -544,3 +543,36 @@ vor dem Tonemap-Composite:
   **byte-identisch** (md5 `d379dc50…`), sichtbarer warmer Glow an hellen Kanten
   vs. scharfe Kanten ohne Bloom. **D3D/Vulkan = nächster blinder Windows-Port**
   (zusammen mit dem noch offenen HDR-Port dort).
+
+> **Status 14.06.2026 (Forts.):** PBR-Skalare (3.3) + Bloom-Toggle in den
+> Preferences umgesetzt, GL+Metal verifiziert. ✅
+
+**PBR-Material-Skalare (3.3) — GL + Metal:** `MaterialAsset` trägt jetzt
+`baseColor[3]` / `metallic` / `roughness` (an den MTRL-Chunk angehängt,
+rückwärtskompatibel via `readPOD`-Tail; `MaterialImporter` liest optionale
+JSON-Felder). Backend-Auflösung wie bei den Texturen: neue
+`ResolveMaterialParams(uuid,…)` liest die Skalare aus dem ContentManager pro
+Draw (RenderObject/DrawCall/Extractor **unverändert** → D3D/Vulkan kompilieren
+weiter, ignorieren die Skalare). Beleuchtung (GL `kUnlitFS` == Metal
+`fragmentMain`): `albedo = (hasTex ? tex*baseColor : baseColor)`; Metallic-
+Roughness-Split: `diffuse = albedo*(1-metallic)`, `specColor = mix(0.04,albedo,
+metallic)`, `shininess = mix(128,8,roughness)`, `specScale = mix(0.5,0.03,
+roughness)` — billiger PBR-Ersatz für Blinn-Phong, identisch auf beiden Backends.
+Default ohne Material: baseColor = weiß (textiert) bzw. Flat-Tan (untextiert),
+metallic 0 / roughness 0.5 → bestehende Szenen unverändert (Headless-Dump
+**byte-identisch** zum Vor-PBR-Stand). Inspector: „Surface"-Abschnitt mit
+Base-Color-Picker + Metallic/Roughness-Slidern (live, da der Renderer das geteilte
+MaterialAsset pro Frame liest; „Save Material" persistiert). Positiv verifiziert
+über einen Temp-Default (grün + metallic=1 → dunkler grüner Würfel) — Uniform-Pfad
+greift. **D3D/Vulkan = nächster blinder Port.**
+
+**Bloom-Toggle (Preferences):** Neue `IRenderer::BloomSettings`
+(enabled/threshold/intensity) + `SetBloomSettings` (Default-No-op; GL+Metal
+implementiert: setzen `m_bloomEnabled`/`m_bloomThreshold`/`m_bloomStrength`, bei
+disabled wird der Bright-/Blur-Pass übersprungen → Glow aus). `EditorConfig`
+(BloomEnabled/Threshold/Intensity, in config.json persistiert) + Preferences-
+Sektion (Checkbox + 2 Slider, disabled wenn aus). `EditorApplication::OnRender`
+pusht die Settings pro Frame; der Headless-Dump pusht sie ebenfalls (in `OnInit`),
+respektiert also die Pref. **Verifiziert:** BloomEnabled=false reproduziert exakt
+das No-Bloom-Bild (59599 Byte Diff zum Bloom-an, identisch zur No-Bloom-Baseline).
+34 Tests grün.

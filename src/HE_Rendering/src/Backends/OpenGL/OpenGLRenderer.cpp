@@ -45,9 +45,11 @@ uniform vec4 uLightColor[MAX_LIGHTS];  // rgb = color,     w = intensity
 uniform vec4 uLightParams[MAX_LIGHTS]; // x = range
 uniform vec3 uCameraPos;
 
-uniform vec3      uColor;
+uniform vec3      uColor;       // base-color tint (material baseColor, or flat fallback)
 uniform bool      uHasTexture;
 uniform sampler2D uTexture;
+uniform float     uMetallic;    // 0 dielectric … 1 metal
+uniform float     uRoughness;   // 0 mirror … 1 fully rough
 
 // Directional-light shadow map
 uniform mat4      uLightVP;
@@ -71,19 +73,26 @@ float computeShadow(vec3 worldPos, vec3 N, vec3 L)
 
 void main()
 {
-	vec3 base = uHasTexture ? texture(uTexture, vUV).rgb : uColor;
-	vec3 N    = normalize(vNormal);
+	vec3 albedo = uHasTexture ? texture(uTexture, vUV).rgb * uColor : uColor;
+	vec3 N      = normalize(vNormal);
 
 	if (uLightCount == 0)
 	{
 		vec3  L    = normalize(vec3(0.5, 0.8, 0.6));
 		float diff = 0.35 + 0.65 * max(dot(N, L), 0.0);
-		FragColor  = vec4(base * diff, 1.0);
+		FragColor  = vec4(albedo * diff, 1.0);
 		return;
 	}
 
+	// Metallic-roughness split: metals lose diffuse and tint the specular F0;
+	// roughness widens + dims the Blinn-Phong highlight (cheap PBR stand-in).
+	vec3  diffuseColor = albedo * (1.0 - uMetallic);
+	vec3  specColor    = mix(vec3(0.04), albedo, uMetallic);
+	float shininess    = mix(128.0, 8.0, uRoughness);
+	float specScale    = mix(0.5, 0.03, uRoughness);
+
 	vec3 V      = normalize(uCameraPos - vWorldPos);
-	vec3 result = 0.08 * base; // ambient floor
+	vec3 result = 0.08 * albedo; // ambient floor
 
 	for (int i = 0; i < uLightCount; ++i)
 	{
@@ -114,8 +123,8 @@ void main()
 
 		float diff = max(dot(N, L), 0.0);
 		vec3  H    = normalize(L + V);
-		float spec = pow(max(dot(N, H), 0.0), 32.0) * 0.25;
-		result += (base * diff + vec3(spec))
+		float spec = pow(max(dot(N, H), 0.0), shininess) * specScale;
+		result += (diffuseColor * diff + specColor * spec)
 		        * uLightColor[i].rgb * uLightColor[i].w * atten * sh;
 	}
 	FragColor = vec4(result, 1.0);
@@ -287,6 +296,8 @@ void OpenGLRenderer::CreateUnlitPipeline()
 	m_uColor       = glGetUniformLocation(m_unlitProgram, "uColor");
 	m_uHasTexture  = glGetUniformLocation(m_unlitProgram, "uHasTexture");
 	m_uTexture     = glGetUniformLocation(m_unlitProgram, "uTexture");
+	m_uMetallic    = glGetUniformLocation(m_unlitProgram, "uMetallic");
+	m_uRoughness   = glGetUniformLocation(m_unlitProgram, "uRoughness");
 	m_uLightCount  = glGetUniformLocation(m_unlitProgram, "uLightCount");
 	m_uLightPos    = glGetUniformLocation(m_unlitProgram, "uLightPos");
 	m_uLightDir    = glGetUniformLocation(m_unlitProgram, "uLightDir");
@@ -391,6 +402,13 @@ void OpenGLRenderer::CreateBloomPipeline()
 		m_uBlurTexel      = glGetUniformLocation(m_blurProgram, "uTexel");
 		m_uBlurHorizontal = glGetUniformLocation(m_blurProgram, "uHorizontal");
 	}
+}
+
+void OpenGLRenderer::SetBloomSettings(const BloomSettings& s)
+{
+	m_bloomEnabled   = s.enabled;
+	m_bloomThreshold = s.threshold;
+	m_bloomStrength  = s.intensity;
 }
 
 void OpenGLRenderer::EnsureBloomTargets(int width, int height)
@@ -686,6 +704,20 @@ bool OpenGLRenderer::ResolveMaterialTexture(const HE::UUID& materialId, unsigned
 	return true;
 }
 
+bool OpenGLRenderer::ResolveMaterialParams(const HE::UUID& materialId,
+	glm::vec3& outBaseColor, float& outMetallic, float& outRoughness)
+{
+	if (materialId == HE::UUID{} || !m_contentManager)
+		return false;
+	const MaterialAsset* mat = m_contentManager->getMaterial(materialId);
+	if (!mat)
+		return false; // not loaded yet — caller keeps defaults
+	outBaseColor = glm::vec3(mat->baseColor[0], mat->baseColor[1], mat->baseColor[2]);
+	outMetallic  = mat->metallic;
+	outRoughness = mat->roughness;
+	return true;
+}
+
 void OpenGLRenderer::InvalidateMaterial(const HE::UUID& materialId)
 {
 	// Defer the actual glDelete to DrawScene, where the GL context is current.
@@ -926,8 +958,9 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glDisable(GL_DEPTH_TEST);
 			glBindVertexArray(m_fsVAO);
 
-			// Bright-pass + blur the HDR target into the half-res bloom buffer.
-			const unsigned int bloomTex = RenderBloom(pw, ph);
+			// Bright-pass + blur the HDR target into the half-res bloom buffer
+			// (skipped when bloom is disabled → strength 0 below).
+			const unsigned int bloomTex = m_bloomEnabled ? RenderBloom(pw, ph) : 0u;
 
 			// Composite: tonemap HDR scene color + bloom into the output.
 			glBindFramebuffer(GL_FRAMEBUFFER, prevFBO);
@@ -955,8 +988,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		glClearColor(0.18f, 0.18f, 0.20f, 1.0f);
 		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 		glUseProgram(m_unlitProgram);
-		glUniform3f(m_uColor, 0.85f, 0.55f, 0.25f);
-		glUniform1i(m_uTexture, 0);
+		glUniform1i(m_uTexture, 0); // base color tint (uColor) is set per draw below
 
 		// Lights (clamped to the shader's MAX_LIGHTS)
 		{
@@ -1005,6 +1037,19 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			const GpuMesh*     mesh = ResolveMesh(dc.meshAssetId);
 			const unsigned int tex  = hasOverride ? overrideTex
 			                                      : (mesh ? mesh->texture : 0u);
+
+			// PBR scalars from the material override; defaults otherwise. The base
+			// tint is the material baseColor if assigned, else white when textured
+			// (so the texture is unchanged) or the flat fallback color when not.
+			glm::vec3 baseColor(1.0f);
+			float     metallic = 0.0f, roughness = 0.5f;
+			const bool hasMat = ResolveMaterialParams(dc.materialAssetId, baseColor, metallic, roughness);
+			if (!hasMat)
+				baseColor = (tex != 0) ? glm::vec3(1.0f) : glm::vec3(0.85f, 0.55f, 0.25f);
+			glUniform3fv(m_uColor, 1, glm::value_ptr(baseColor));
+			glUniform1f(m_uMetallic,  metallic);
+			glUniform1f(m_uRoughness, roughness);
+
 			glBindVertexArray(mesh ? mesh->vao : m_cubeVAO);
 			glUniform1i(m_uHasTexture, tex != 0);
 			glBindTexture(GL_TEXTURE_2D, tex);

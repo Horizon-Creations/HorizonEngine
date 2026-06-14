@@ -45,6 +45,7 @@ public:
 	void* GetViewportTexture() override;
 	bool  CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& width, uint32_t& height) override;
 	void  InvalidateMaterial(const HE::UUID& materialId) override;
+	void  SetBloomSettings(const BloomSettings& settings) override;
 
 	// Multi-window support
 	void AttachWindow(HE::Window* window) override;
@@ -99,6 +100,11 @@ private:
 	// when the UUID is null or the material is not loaded yet. outTex is an
 	// (unretained, autoreleased) id<MTLTexture> owned by the cache.
 	bool ResolveMaterialTexture(const HE::UUID& materialId, void*& outTex);
+
+	// Resolves a material override's PBR scalars (baseColor/metallic/roughness).
+	// Returns true if the material is loaded; leaves outputs untouched otherwise.
+	bool ResolveMaterialParams(const HE::UUID& materialId,
+	                           glm::vec3& outBaseColor, float& outMetallic, float& outRoughness);
 
 	SDL_Window* m_primarySdlWindow = nullptr;
 	WindowTarget m_primaryTarget;
@@ -156,8 +162,10 @@ private:
 	void* m_bloomBrightPipeline = nullptr; // id<MTLRenderPipelineState>
 	void* m_blurPipeline        = nullptr; // id<MTLRenderPipelineState>
 	void* m_bloomColor[2]       = { nullptr, nullptr }; // id<MTLTexture> RGBA16F half-res
+	void* m_bloomResult         = nullptr; // this frame's blurred bloom (or null = off)
 	int   m_bloomW              = 0;
 	int   m_bloomH              = 0;
+	bool  m_bloomEnabled        = true;
 	float m_bloomThreshold      = 1.0f;
 	float m_bloomKnee           = 0.5f;
 	float m_bloomStrength       = 0.6f;
