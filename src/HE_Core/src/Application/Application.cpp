@@ -57,6 +57,20 @@ namespace HE
 		});
 		Logger::Log(Logger::LogLevel::Info, "Window created");
 
+		// HiDPI diagnostic: logical points vs physical pixels. A ratio > 1 means
+		// the high-pixel-density drawable is active (no blurry OS upscaling).
+		if (SDL_Window* sw = m_window->GetNativeWindow())
+		{
+			int lw = 0, lh = 0, pw = 0, ph = 0;
+			SDL_GetWindowSize(sw, &lw, &lh);
+			SDL_GetWindowSizeInPixels(sw, &pw, &ph);
+			Logger::Log(Logger::LogLevel::Info,
+				("Window size: " + std::to_string(lw) + "x" + std::to_string(lh) +
+				 " logical, " + std::to_string(pw) + "x" + std::to_string(ph) +
+				 " pixels (HiDPI scale " +
+				 std::to_string(lw > 0 ? (float)pw / (float)lw : 1.0f) + ")").c_str());
+		}
+
 		switch (cfg.windowprops.mode)
 		{
 			case WindowMode::Fullscreen: m_window->SetFullscreen(true);  break;

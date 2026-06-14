@@ -257,18 +257,14 @@ void EditorApplication::OnInit()
 		cfg.OversampleV = 2;
 		cfg.PixelSnapH  = false;
 
-		// Scale font sizes by the display's content scale (HiDPI support)
-		float dpiScale = 1.0f;
-		if (SDL_Window* nativeWin = window() ? window()->GetNativeWindow() : nullptr)
-		{
-			SDL_DisplayID disp = SDL_GetDisplayForWindow(nativeWin);
-			float s = SDL_GetDisplayContentScale(disp);
-			if (s > 0.0f) dpiScale = s;
-		}
-
-		const float sizeBody       = 13.0f * dpiScale;
-		const float sizeSubheading = 16.0f * dpiScale;
-		const float sizeHeading    = 19.0f * dpiScale;
+		// Font sizes are in logical points. Since ImGui 1.92 the (1.92+) renderer
+		// backend rasterises glyphs at the viewport's framebuffer scale
+		// automatically, so HiDPI crispness comes from the high-pixel-density
+		// drawable — NOT from pre-scaling the size here (the old DisplayFramebuffer
+		// Scale/FontGlobalScale trick no longer maps to the new font system).
+		const float sizeBody       = 13.0f;
+		const float sizeSubheading = 16.0f;
+		const float sizeHeading    = 19.0f;
 
 		if (std::filesystem::exists(fontPath))
 		{

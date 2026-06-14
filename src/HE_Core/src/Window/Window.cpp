@@ -36,13 +36,17 @@ namespace HE
             SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
             SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
             SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
-            flags |= SDL_WINDOW_OPENGL;
+            // High-DPI: render at the display's true pixel density (Retina) so the
+            // drawable isn't upscaled by the OS (otherwise the whole UI is blurry).
+            // GL/Metal/Vulkan size their drawable from SDL_GetWindowSizeInPixels;
+            // D3D uses the logical size (GetWidth/Height) so it is left unchanged.
+            flags |= SDL_WINDOW_OPENGL | SDL_WINDOW_HIGH_PIXEL_DENSITY;
             break;
         case GraphicsAPI::Vulkan:
-            flags |= SDL_WINDOW_VULKAN;
+            flags |= SDL_WINDOW_VULKAN | SDL_WINDOW_HIGH_PIXEL_DENSITY;
             break;
         case GraphicsAPI::Metal:
-            flags |= SDL_WINDOW_METAL;
+            flags |= SDL_WINDOW_METAL | SDL_WINDOW_HIGH_PIXEL_DENSITY;
             break;
         case GraphicsAPI::D3D11:
         case GraphicsAPI::D3D12:
