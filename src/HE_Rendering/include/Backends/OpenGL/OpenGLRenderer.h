@@ -130,10 +130,37 @@ private:
 	unsigned int m_tonemapProgram = 0;
 	int          m_uHDRTex        = -1;
 	int          m_uExposure      = -1;
+	int          m_uBloomTex      = -1;
+	int          m_uBloomStrength = -1;
 	unsigned int m_fsVAO          = 0;  // empty VAO for the fullscreen triangle
 	void CreateTonemapPipeline();
 	void EnsureHDRTarget(int width, int height);
 	void DestroyHDRTarget();
+
+	// ── Bloom (bright-pass + separable Gaussian blur on the HDR target) ──────
+	// The bright pass extracts highlights above a soft-knee threshold into a
+	// half-res RGBA16F target; two ping-pong buffers blur it; the tonemap pass
+	// adds the result back. Always on, mirrors the GL/Metal HDR convention.
+	unsigned int m_bloomBrightProgram = 0;
+	int          m_uBrightHDR       = -1;
+	int          m_uBrightThreshold = -1;
+	int          m_uBrightKnee      = -1;
+	unsigned int m_blurProgram      = 0;
+	int          m_uBlurImage      = -1;
+	int          m_uBlurTexel      = -1;
+	int          m_uBlurHorizontal = -1;
+	unsigned int m_bloomFBO[2]   = { 0, 0 };
+	unsigned int m_bloomColor[2] = { 0, 0 };   // RGBA16F, half-res
+	int          m_bloomW        = 0;
+	int          m_bloomH        = 0;
+	float        m_bloomThreshold = 1.0f;
+	float        m_bloomKnee      = 0.5f;
+	float        m_bloomStrength  = 0.6f;
+	void CreateBloomPipeline();
+	void EnsureBloomTargets(int width, int height);
+	void DestroyBloomTargets();
+	// Runs bright-pass + blur into m_bloomColor[0]; returns its texture id (or 0).
+	unsigned int RenderBloom(int fullW, int fullH);
 
 	// ── Offscreen viewport (editor scene view) ──────────────────────────────
 	uint32_t     m_viewportReqW  = 0;   // requested by the UI, 0 = direct to window

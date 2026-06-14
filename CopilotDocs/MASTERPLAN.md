@@ -478,7 +478,7 @@ config.json.
    Material-Override auch in D3D/Vulkan; Asset-Registry für UUID→Pfad-Resolve
    nach Reload; PBR-Skalare (baseColor/metallic/roughness, → 3.3).
 3. ✅ **Save-Prompt bei ungesicherten Änderungen** — erledigt (s.u.).
-4. **Bloom** (3.6 Forts.) — Bright-Pass + Blur auf dem HDR-Target vor dem Tonemap.
+4. ✅ **Bloom** (3.6 Forts.) — erledigt (GL+Metal, s.u.).
 
 Faustregel für die Parallelisierung danach: eine Person/ein Strang auf dem
 kritischen Pfad P1 → P2 → P5 → P6, Rendering (P3) und je ein P4-Block laufen
@@ -515,3 +515,32 @@ ist, und zeigt einen modalen **Save / Don't Save / Cancel**-Dialog.
 - **Backend-unabhängig:** reine Editor/Core-Logik, kein Renderer-Touch — D3D/
   Vulkan kompilieren unverändert mit. Das Modal selbst (Interaktion) ist headless
   nicht prüfbar → vom User interaktiv zu bestätigen.
+
+> **Status 14.06.2026 (Forts.):** Bloom (3.6 Forts.) auf GL+Metal umgesetzt und
+> verifiziert. ✅ (GL- und Metal-Headless-Dump **byte-identisch**, md5 gleich;
+> 34 Tests grün.)
+
+**Bloom (3.6 Forts.) — GL + Metal:** Highlights jenseits einer Soft-Knee-Schwelle
+glühen jetzt. Pipeline pro Frame nach der GeometryPass (HDR-SceneColor RGBA16F),
+vor dem Tonemap-Composite:
+1. **Bright-Pass** — extrahiert pro Pixel den Anteil über `threshold` (COD-Soft-
+   Knee, Hue erhalten) in ein **halb aufgelöstes** RGBA16F-Target.
+2. **Separable Gauss-Blur** — 9-Tap, 10 Ping-Pong-Pässe (5 horizontal + 5
+   vertikal) zwischen zwei Half-Res-Targets; gerade Anzahl endet in `bloom[0]`.
+3. **Composite** — der Tonemap-Shader sampelt zusätzlich die Bloom-Textur und
+   addiert sie (`bloomStrength`) **vor** Exposure/ACES/Gamma.
+- Konstanten (backend-lokal identisch): threshold 1.0, knee 0.5, strength 0.6.
+  Immer an (wie HDR/Tonemap, kein Toggle) — Toggle/Preferences später möglich.
+- **GL** (`OpenGLRenderer`): zwei Half-Res-FBOs (`m_bloomFBO/Color[2]`),
+  `kBloomBrightFS`/`kBloomBlurFS` (reusen die Fullscreen-Triangle-VS via
+  `gl_VertexID`), `RenderBloom()` läuft im `PostProcessPass`-Sink, Tonemap-FS um
+  `uBloom`/`uBloomStrength` erweitert (Bloom auf Texture-Unit 1).
+- **Metal** (`MetalRenderer`): zwei Half-Res-Private-RGBA16F-Texturen,
+  `kBloomMSL` (`fsVertex`+`brightFragment`+`blurFragment`), `EncodeBloom(cmdBuf)`
+  (je Pass ein eigener Encoder) **vor** `EncodeTonemap`; `tonemapFragment` um
+  Bloom-Textur (Slot 1) + `float2(exposure,bloomStrength)` erweitert. UV-1:1-
+  Mapping derselben Fullscreen-VS-Konvention wie Tonemap.
+- **Verifiziert:** GL- und Metal-Headless-Dump des ShadowValidation-Würfels sind
+  **byte-identisch** (md5 `d379dc50…`), sichtbarer warmer Glow an hellen Kanten
+  vs. scharfe Kanten ohne Bloom. **D3D/Vulkan = nächster blinder Windows-Port**
+  (zusammen mit dem noch offenen HDR-Port dort).

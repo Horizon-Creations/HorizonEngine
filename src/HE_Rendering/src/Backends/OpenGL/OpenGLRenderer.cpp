@@ -149,13 +149,16 @@ void main()
 }
 )GLSL";
 
-// Samples the RGBA16F scene color, applies exposure, the ACES filmic curve and
-// sRGB gamma, then writes LDR. This is where HDR highlights stop clipping.
+// Samples the RGBA16F scene color, adds the blurred bloom, applies exposure, the
+// ACES filmic curve and sRGB gamma, then writes LDR. This is where HDR highlights
+// stop clipping and where bloom glow is composited back in.
 static const char* kTonemapFS = R"GLSL(
 #version 410 core
 in vec2 vUV;
 uniform sampler2D uHDR;
+uniform sampler2D uBloom;
 uniform float     uExposure;
+uniform float     uBloomStrength;
 out vec4 FragColor;
 vec3 aces(vec3 x)
 {
@@ -164,10 +167,55 @@ vec3 aces(vec3 x)
 }
 void main()
 {
-	vec3 hdr    = texture(uHDR, vUV).rgb * uExposure;
+	vec3 hdr    = texture(uHDR, vUV).rgb;
+	hdr        += texture(uBloom, vUV).rgb * uBloomStrength;
+	hdr        *= uExposure;
 	vec3 mapped = aces(hdr);
 	mapped      = pow(mapped, vec3(1.0 / 2.2));
 	FragColor   = vec4(mapped, 1.0);
+}
+)GLSL";
+
+// Bloom bright-pass: keep only the part of each pixel above a soft-knee
+// threshold (Call-of-Duty-style curve), preserving hue. Feeds the blur chain.
+static const char* kBloomBrightFS = R"GLSL(
+#version 410 core
+in vec2 vUV;
+uniform sampler2D uHDR;
+uniform float     uThreshold;
+uniform float     uKnee;
+out vec4 FragColor;
+void main()
+{
+	vec3  c  = texture(uHDR, vUV).rgb;
+	float br = max(c.r, max(c.g, c.b));
+	float soft = clamp(br - uThreshold + uKnee, 0.0, 2.0 * uKnee);
+	soft = (soft * soft) / (4.0 * uKnee + 1e-4);
+	float contrib = max(soft, br - uThreshold) / max(br, 1e-4);
+	FragColor = vec4(c * contrib, 1.0);
+}
+)GLSL";
+
+// Separable 9-tap Gaussian blur. uHorizontal picks the axis; run as ping-pong
+// horizontal/vertical pairs to approximate a 2D blur.
+static const char* kBloomBlurFS = R"GLSL(
+#version 410 core
+in vec2 vUV;
+uniform sampler2D uImage;
+uniform vec2      uTexel;       // 1 / textureSize
+uniform int       uHorizontal;
+out vec4 FragColor;
+void main()
+{
+	float w[5] = float[](0.227027, 0.1945946, 0.1216216, 0.054054, 0.016216);
+	vec2 dir = (uHorizontal == 1) ? vec2(uTexel.x, 0.0) : vec2(0.0, uTexel.y);
+	vec3 result = texture(uImage, vUV).rgb * w[0];
+	for (int i = 1; i < 5; ++i)
+	{
+		result += texture(uImage, vUV + dir * float(i)).rgb * w[i];
+		result += texture(uImage, vUV - dir * float(i)).rgb * w[i];
+	}
+	FragColor = vec4(result, 1.0);
 }
 )GLSL";
 
@@ -208,6 +256,7 @@ void OpenGLRenderer::Initialize(HE::Window* window)
 	CreateUnlitPipeline();
 	CreateShadowResources();
 	CreateTonemapPipeline();
+	CreateBloomPipeline();
 	CreateCubeMesh();
 	Logger::Log(Logger::LogLevel::Info, "OpenGLRenderer: initialized successfully");
 }
@@ -303,11 +352,123 @@ void OpenGLRenderer::CreateTonemapPipeline()
 		glGetProgramInfoLog(m_tonemapProgram, sizeof(log), nullptr, log);
 		throw std::runtime_error(std::string("OpenGLRenderer: tonemap link failed: ") + log);
 	}
-	m_uHDRTex   = glGetUniformLocation(m_tonemapProgram, "uHDR");
-	m_uExposure = glGetUniformLocation(m_tonemapProgram, "uExposure");
+	m_uHDRTex        = glGetUniformLocation(m_tonemapProgram, "uHDR");
+	m_uExposure      = glGetUniformLocation(m_tonemapProgram, "uExposure");
+	m_uBloomTex      = glGetUniformLocation(m_tonemapProgram, "uBloom");
+	m_uBloomStrength = glGetUniformLocation(m_tonemapProgram, "uBloomStrength");
 
 	// Core profile needs a bound VAO for glDrawArrays even with no attributes.
 	glGenVertexArrays(1, &m_fsVAO);
+}
+
+void OpenGLRenderer::CreateBloomPipeline()
+{
+	// Bright pass (reuses the fullscreen-triangle VS).
+	{
+		GLuint vs = CompileStage(GL_VERTEX_SHADER,   kTonemapVS);
+		GLuint fs = CompileStage(GL_FRAGMENT_SHADER, kBloomBrightFS);
+		m_bloomBrightProgram = glCreateProgram();
+		glAttachShader(m_bloomBrightProgram, vs);
+		glAttachShader(m_bloomBrightProgram, fs);
+		glLinkProgram(m_bloomBrightProgram);
+		glDeleteShader(vs);
+		glDeleteShader(fs);
+		m_uBrightHDR       = glGetUniformLocation(m_bloomBrightProgram, "uHDR");
+		m_uBrightThreshold = glGetUniformLocation(m_bloomBrightProgram, "uThreshold");
+		m_uBrightKnee      = glGetUniformLocation(m_bloomBrightProgram, "uKnee");
+	}
+	// Separable blur.
+	{
+		GLuint vs = CompileStage(GL_VERTEX_SHADER,   kTonemapVS);
+		GLuint fs = CompileStage(GL_FRAGMENT_SHADER, kBloomBlurFS);
+		m_blurProgram = glCreateProgram();
+		glAttachShader(m_blurProgram, vs);
+		glAttachShader(m_blurProgram, fs);
+		glLinkProgram(m_blurProgram);
+		glDeleteShader(vs);
+		glDeleteShader(fs);
+		m_uBlurImage      = glGetUniformLocation(m_blurProgram, "uImage");
+		m_uBlurTexel      = glGetUniformLocation(m_blurProgram, "uTexel");
+		m_uBlurHorizontal = glGetUniformLocation(m_blurProgram, "uHorizontal");
+	}
+}
+
+void OpenGLRenderer::EnsureBloomTargets(int width, int height)
+{
+	width  = std::max(1, width);
+	height = std::max(1, height);
+	if (m_bloomFBO[0] && width == m_bloomW && height == m_bloomH)
+		return;
+	DestroyBloomTargets();
+
+	glGenFramebuffers(2, m_bloomFBO);
+	glGenTextures(2, m_bloomColor);
+	for (int i = 0; i < 2; ++i)
+	{
+		glBindFramebuffer(GL_FRAMEBUFFER, m_bloomFBO[i]);
+		glBindTexture(GL_TEXTURE_2D, m_bloomColor[i]);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_bloomColor[i], 0);
+	}
+	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+		Logger::Log(Logger::LogLevel::Error, "OpenGLRenderer: bloom FBO incomplete");
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	m_bloomW = width;
+	m_bloomH = height;
+}
+
+void OpenGLRenderer::DestroyBloomTargets()
+{
+	if (m_bloomFBO[0])   glDeleteFramebuffers(2, m_bloomFBO);
+	if (m_bloomColor[0]) glDeleteTextures(2, m_bloomColor);
+	m_bloomFBO[0] = m_bloomFBO[1] = 0;
+	m_bloomColor[0] = m_bloomColor[1] = 0;
+	m_bloomW = m_bloomH = 0;
+}
+
+// Bright-pass the HDR color, then ping-pong blur. Leaves the result in
+// m_bloomColor[0] and returns its id. Assumes m_fsVAO is the active VAO and
+// depth test is already disabled. Restores nothing (caller rebinds output).
+unsigned int OpenGLRenderer::RenderBloom(int fullW, int fullH)
+{
+	EnsureBloomTargets(fullW / 2, fullH / 2);
+	if (!m_bloomFBO[0]) return 0;
+
+	glViewport(0, 0, m_bloomW, m_bloomH);
+
+	// Bright pass: HDR scene color → m_bloomColor[0].
+	glBindFramebuffer(GL_FRAMEBUFFER, m_bloomFBO[0]);
+	glUseProgram(m_bloomBrightProgram);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, m_hdrColor);
+	glUniform1i(m_uBrightHDR, 0);
+	glUniform1f(m_uBrightThreshold, m_bloomThreshold);
+	glUniform1f(m_uBrightKnee, m_bloomKnee);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+
+	// Ping-pong Gaussian blur. Even pass count ends back in m_bloomColor[0].
+	glUseProgram(m_blurProgram);
+	glUniform1i(m_uBlurImage, 0);
+	glUniform2f(m_uBlurTexel, 1.0f / static_cast<float>(m_bloomW),
+	                          1.0f / static_cast<float>(m_bloomH));
+	bool horizontal = true;
+	constexpr int kBlurPasses = 10; // 5 horizontal + 5 vertical
+	for (int i = 0; i < kBlurPasses; ++i)
+	{
+		const int dst = horizontal ? 1 : 0;
+		const int src = horizontal ? 0 : 1;
+		glBindFramebuffer(GL_FRAMEBUFFER, m_bloomFBO[dst]);
+		glUniform1i(m_uBlurHorizontal, horizontal ? 1 : 0);
+		glBindTexture(GL_TEXTURE_2D, m_bloomColor[src]);
+		glDrawArrays(GL_TRIANGLES, 0, 3);
+		horizontal = !horizontal;
+	}
+	return m_bloomColor[0];
 }
 
 void OpenGLRenderer::EnsureHDRTarget(int width, int height)
@@ -552,6 +713,7 @@ void OpenGLRenderer::Shutdown()
 	m_materialTexCache.clear();
 	DestroyViewportTarget();
 	DestroyHDRTarget();
+	DestroyBloomTargets();
 	for (auto& r : m_retiredTextures)
 		glDeleteTextures(1, &r.texture);
 	m_retiredTextures.clear();
@@ -562,6 +724,8 @@ void OpenGLRenderer::Shutdown()
 	if (m_unlitProgram) { glDeleteProgram(m_unlitProgram);     m_unlitProgram = 0; }
 	if (m_depthProgram) { glDeleteProgram(m_depthProgram);     m_depthProgram = 0; }
 	if (m_tonemapProgram) { glDeleteProgram(m_tonemapProgram); m_tonemapProgram = 0; }
+	if (m_bloomBrightProgram) { glDeleteProgram(m_bloomBrightProgram); m_bloomBrightProgram = 0; }
+	if (m_blurProgram)    { glDeleteProgram(m_blurProgram);    m_blurProgram = 0; }
 	if (m_fsVAO)          { glDeleteVertexArrays(1, &m_fsVAO);  m_fsVAO = 0; }
 	if (m_shadowFBO)      { glDeleteFramebuffers(1, &m_shadowFBO);   m_shadowFBO = 0; }
 	if (m_shadowDepthTex) { glDeleteTextures(1, &m_shadowDepthTex);  m_shadowDepthTex = 0; }
@@ -756,18 +920,28 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			return;
 		}
 
-		// ── PostProcess pass: tonemap the HDR scene color to the output ─────
+		// ── PostProcess pass: bloom + tonemap the HDR scene color to output ─
 		if (io.inputCount > 0 && io.inputs[0] == kSceneColorTarget)
 		{
+			glDisable(GL_DEPTH_TEST);
+			glBindVertexArray(m_fsVAO);
+
+			// Bright-pass + blur the HDR target into the half-res bloom buffer.
+			const unsigned int bloomTex = RenderBloom(pw, ph);
+
+			// Composite: tonemap HDR scene color + bloom into the output.
 			glBindFramebuffer(GL_FRAMEBUFFER, prevFBO);
 			glViewport(0, 0, pw, ph);
-			glDisable(GL_DEPTH_TEST);
 			glUseProgram(m_tonemapProgram);
 			glActiveTexture(GL_TEXTURE0);
 			glBindTexture(GL_TEXTURE_2D, m_hdrColor);
 			glUniform1i(m_uHDRTex, 0);
+			glActiveTexture(GL_TEXTURE1);
+			glBindTexture(GL_TEXTURE_2D, bloomTex);
+			glUniform1i(m_uBloomTex, 1);
 			glUniform1f(m_uExposure, 1.0f);
-			glBindVertexArray(m_fsVAO);
+			glUniform1f(m_uBloomStrength, bloomTex ? m_bloomStrength : 0.0f);
+			glActiveTexture(GL_TEXTURE0);
 			glDrawArrays(GL_TRIANGLES, 0, 3);
 			glEnable(GL_DEPTH_TEST);
 			return;

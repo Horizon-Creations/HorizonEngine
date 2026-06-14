@@ -5,7 +5,9 @@
 #include <SDL3/SDL.h>
 #include <stdexcept>
 #include <vector>
+#include <algorithm>
 #include <glm/glm.hpp>
+#include <simd/simd.h>
 
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
@@ -186,14 +188,67 @@ float3 aces(float3 v)
 }
 
 fragment float4 tonemapFragment(TMOut in [[stage_in]],
-                                texture2d<float> hdr [[texture(0)]],
-                                constant float& exposure [[buffer(0)]])
+                                texture2d<float> hdr   [[texture(0)]],
+                                texture2d<float> bloom [[texture(1)]],
+                                constant float2& params [[buffer(0)]]) // x: exposure, y: bloomStrength
 {
 	constexpr sampler s(filter::linear);
-	float3 c = hdr.sample(s, in.uv).rgb * exposure;
+	float3 c = hdr.sample(s, in.uv).rgb;
+	c += bloom.sample(s, in.uv).rgb * params.y;
+	c *= params.x;
 	c = aces(c);
 	c = pow(c, float3(1.0 / 2.2));
 	return float4(c, 1.0);
+}
+)MSL";
+
+// Bloom bright-pass + separable Gaussian blur. Reuses the fullscreen-triangle VS
+// (1:1 upright mapping, same convention as the tonemap pass). Mirrors the GL
+// kBloomBrightFS / kBloomBlurFS shaders.
+static const char* kBloomMSL = R"MSL(
+#include <metal_stdlib>
+using namespace metal;
+
+struct FSOut { float4 position [[position]]; float2 uv; };
+
+vertex FSOut fsVertex(uint vid [[vertex_id]])
+{
+	float x = float((vid & 1) << 2) - 1.0;
+	float y = float((vid & 2) << 1) - 1.0;
+	FSOut o;
+	o.position = float4(x, y, 0.0, 1.0);
+	o.uv       = float2(x * 0.5 + 0.5, 1.0 - (y * 0.5 + 0.5));
+	return o;
+}
+
+fragment float4 brightFragment(FSOut in [[stage_in]],
+                               texture2d<float> hdr [[texture(0)]],
+                               constant float2& params [[buffer(0)]]) // x: threshold, y: knee
+{
+	constexpr sampler s(filter::linear);
+	float3 c  = hdr.sample(s, in.uv).rgb;
+	float  br = max(c.r, max(c.g, c.b));
+	float  threshold = params.x, knee = params.y;
+	float  soft = clamp(br - threshold + knee, 0.0, 2.0 * knee);
+	soft = (soft * soft) / (4.0 * knee + 1e-4);
+	float contrib = max(soft, br - threshold) / max(br, 1e-4);
+	return float4(c * contrib, 1.0);
+}
+
+fragment float4 blurFragment(FSOut in [[stage_in]],
+                             texture2d<float> img [[texture(0)]],
+                             constant float4& cfg [[buffer(0)]]) // xy: texel, z: horizontal
+{
+	constexpr sampler s(filter::linear, address::clamp_to_edge);
+	float w[5] = { 0.227027, 0.1945946, 0.1216216, 0.054054, 0.016216 };
+	float2 dir = (cfg.z > 0.5) ? float2(cfg.x, 0.0) : float2(0.0, cfg.y);
+	float3 result = img.sample(s, in.uv).rgb * w[0];
+	for (int i = 1; i < 5; ++i)
+	{
+		result += img.sample(s, in.uv + dir * float(i)).rgb * w[i];
+		result += img.sample(s, in.uv - dir * float(i)).rgb * w[i];
+	}
+	return float4(result, 1.0);
 }
 )MSL";
 
@@ -309,8 +364,11 @@ void MetalRenderer::Shutdown()
 
 	DestroyViewportTarget();
 	DestroyHDRTarget();
+	DestroyBloomTargets();
 	DrainRetiredTextures();
-	if (m_tonemapPipeline) { CFBridgingRelease(m_tonemapPipeline); m_tonemapPipeline = nullptr; }
+	if (m_tonemapPipeline)      { CFBridgingRelease(m_tonemapPipeline);      m_tonemapPipeline = nullptr; }
+	if (m_bloomBrightPipeline)  { CFBridgingRelease(m_bloomBrightPipeline);  m_bloomBrightPipeline = nullptr; }
+	if (m_blurPipeline)         { CFBridgingRelease(m_blurPipeline);         m_blurPipeline = nullptr; }
 	if (m_dummyTexture)    { CFBridgingRelease(m_dummyTexture);    m_dummyTexture = nullptr; }
 	if (m_linearSampler)   { CFBridgingRelease(m_linearSampler);   m_linearSampler = nullptr; }
 	if (m_cubeVertexBuf)   { CFBridgingRelease(m_cubeVertexBuf);   m_cubeVertexBuf = nullptr; }
@@ -373,6 +431,34 @@ void MetalRenderer::CreateScenePipeline()
 			throw std::runtime_error(std::string("MetalRenderer: tonemap pipeline creation failed: ")
 				+ (tmError ? [[tmError localizedDescription] UTF8String] : "unknown"));
 		m_tonemapPipeline = (void*)CFBridgingRetain(tmPso);
+
+		// ── Bloom pipelines (bright-pass + blur, into RGBA16F, no depth) ────
+		NSError* blError = nil;
+		id<MTLLibrary> blLib = [device newLibraryWithSource:
+			[NSString stringWithUTF8String:kBloomMSL] options:nil error:&blError];
+		if (!blLib)
+			throw std::runtime_error(std::string("MetalRenderer: bloom shader compile failed: ")
+				+ (blError ? [[blError localizedDescription] UTF8String] : "unknown"));
+
+		MTLRenderPipelineDescriptor* brDesc = [[MTLRenderPipelineDescriptor alloc] init];
+		brDesc.vertexFunction   = [blLib newFunctionWithName:@"fsVertex"];
+		brDesc.fragmentFunction = [blLib newFunctionWithName:@"brightFragment"];
+		brDesc.colorAttachments[0].pixelFormat = kSceneColorFormat; // half-res HDR
+		id<MTLRenderPipelineState> brPso = [device newRenderPipelineStateWithDescriptor:brDesc error:&blError];
+		if (!brPso)
+			throw std::runtime_error(std::string("MetalRenderer: bloom bright pipeline creation failed: ")
+				+ (blError ? [[blError localizedDescription] UTF8String] : "unknown"));
+		m_bloomBrightPipeline = (void*)CFBridgingRetain(brPso);
+
+		MTLRenderPipelineDescriptor* bdDesc = [[MTLRenderPipelineDescriptor alloc] init];
+		bdDesc.vertexFunction   = [blLib newFunctionWithName:@"fsVertex"];
+		bdDesc.fragmentFunction = [blLib newFunctionWithName:@"blurFragment"];
+		bdDesc.colorAttachments[0].pixelFormat = kSceneColorFormat;
+		id<MTLRenderPipelineState> bdPso = [device newRenderPipelineStateWithDescriptor:bdDesc error:&blError];
+		if (!bdPso)
+			throw std::runtime_error(std::string("MetalRenderer: bloom blur pipeline creation failed: ")
+				+ (blError ? [[blError localizedDescription] UTF8String] : "unknown"));
+		m_blurPipeline = (void*)CFBridgingRetain(bdPso);
 
 		MTLDepthStencilDescriptor* depthDesc = [[MTLDepthStencilDescriptor alloc] init];
 		depthDesc.depthCompareFunction = MTLCompareFunctionLessEqual;
@@ -910,7 +996,82 @@ void MetalRenderer::DestroyHDRTarget()
 	m_hdrW = m_hdrH = 0;
 }
 
-// Fullscreen tonemap of the HDR scene color into the bound render encoder's target.
+void MetalRenderer::EnsureBloomTargets(int width, int height)
+{
+	width  = std::max(1, width);
+	height = std::max(1, height);
+	if (m_bloomColor[0] && width == m_bloomW && height == m_bloomH)
+		return;
+	DestroyBloomTargets();
+
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	MTLTextureDescriptor* desc = [MTLTextureDescriptor
+		texture2DDescriptorWithPixelFormat:kSceneColorFormat width:width height:height mipmapped:NO];
+	desc.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+	desc.storageMode = MTLStorageModePrivate;
+	for (int i = 0; i < 2; ++i)
+		m_bloomColor[i] = (void*)CFBridgingRetain([device newTextureWithDescriptor:desc]);
+	m_bloomW = width;
+	m_bloomH = height;
+}
+
+void MetalRenderer::DestroyBloomTargets()
+{
+	for (int i = 0; i < 2; ++i)
+		if (m_bloomColor[i]) { CFBridgingRelease(m_bloomColor[i]); m_bloomColor[i] = nullptr; }
+	m_bloomW = m_bloomH = 0;
+}
+
+// Bright-pass the HDR color then ping-pong blur (even pass count ends in
+// m_bloomColor[0]). Each fullscreen pass is its own encoder. Returns the result
+// texture, or nullptr if bloom is unavailable.
+void* MetalRenderer::EncodeBloom(void* cmdBufPtr, int fullW, int fullH)
+{
+	if (!m_bloomBrightPipeline || !m_blurPipeline || !m_hdrColor) return nullptr;
+	id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
+	EnsureBloomTargets(fullW / 2, fullH / 2);
+	if (!m_bloomColor[0]) return nullptr;
+
+	auto fullscreenPass = [&](id<MTLTexture> dst, id<MTLRenderPipelineState> pso,
+	                          id<MTLTexture> src, const void* bytes, size_t len)
+	{
+		MTLRenderPassDescriptor* p = [MTLRenderPassDescriptor renderPassDescriptor];
+		p.colorAttachments[0].texture     = dst;
+		p.colorAttachments[0].loadAction  = MTLLoadActionDontCare;
+		p.colorAttachments[0].storeAction = MTLStoreActionStore;
+		id<MTLRenderCommandEncoder> enc = [cmdBuf renderCommandEncoderWithDescriptor:p];
+		[enc setRenderPipelineState:pso];
+		[enc setFragmentTexture:src atIndex:0];
+		[enc setFragmentBytes:bytes length:len atIndex:0];
+		[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+		[enc endEncoding];
+	};
+
+	id<MTLTexture> tex0 = (__bridge id<MTLTexture>)m_bloomColor[0];
+	id<MTLTexture> tex1 = (__bridge id<MTLTexture>)m_bloomColor[1];
+
+	// Bright pass: HDR scene color → m_bloomColor[0].
+	const simd::float2 brightParams = { m_bloomThreshold, m_bloomKnee };
+	fullscreenPass(tex0, (__bridge id<MTLRenderPipelineState>)m_bloomBrightPipeline,
+	               (__bridge id<MTLTexture>)m_hdrColor, &brightParams, sizeof(brightParams));
+
+	// Ping-pong Gaussian blur.
+	const simd::float2 texel = { 1.0f / (float)m_bloomW, 1.0f / (float)m_bloomH };
+	bool horizontal = true;
+	constexpr int kBlurPasses = 10; // 5 horizontal + 5 vertical
+	for (int i = 0; i < kBlurPasses; ++i)
+	{
+		id<MTLTexture> dst = horizontal ? tex1 : tex0;
+		id<MTLTexture> src = horizontal ? tex0 : tex1;
+		const simd::float4 cfg = { texel.x, texel.y, horizontal ? 1.0f : 0.0f, 0.0f };
+		fullscreenPass(dst, (__bridge id<MTLRenderPipelineState>)m_blurPipeline,
+		               src, &cfg, sizeof(cfg));
+		horizontal = !horizontal;
+	}
+	return m_bloomColor[0];
+}
+
+// Fullscreen tonemap of the HDR scene color (+ bloom) into the bound encoder's target.
 void MetalRenderer::EncodeTonemap(void* renderEncoderPtr)
 {
 	if (!m_tonemapPipeline || !m_hdrColor) return;
@@ -918,8 +1079,14 @@ void MetalRenderer::EncodeTonemap(void* renderEncoderPtr)
 	[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_tonemapPipeline];
 	[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_noDepthState];
 	[enc setFragmentTexture:(__bridge id<MTLTexture>)m_hdrColor atIndex:0];
-	float exposure = 1.0f;
-	[enc setFragmentBytes:&exposure length:sizeof(exposure) atIndex:0];
+	// Bloom on texture slot 1 (fall back to the HDR texture with 0 strength so the
+	// shader's sampler always has a valid binding).
+	id<MTLTexture> bloomTex = m_bloomColor[0]
+		? (__bridge id<MTLTexture>)m_bloomColor[0]
+		: (__bridge id<MTLTexture>)m_hdrColor;
+	[enc setFragmentTexture:bloomTex atIndex:1];
+	const simd::float2 params = { 1.0f, m_bloomColor[0] ? m_bloomStrength : 0.0f };
+	[enc setFragmentBytes:&params length:sizeof(params) atIndex:0];
 	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
 }
 
@@ -1098,6 +1265,10 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 				[cmdBuf renderCommandEncoderWithDescriptor:hdrPass];
 			EncodeScene((__bridge void*)sceneEncoder, sceneW, sceneH);
 			[sceneEncoder endEncoding];
+
+			// Bright-pass + blur the HDR target into the half-res bloom buffer;
+			// EncodeTonemap (offscreen or direct below) composites it back in.
+			EncodeBloom((__bridge void*)cmdBuf, sceneW, sceneH);
 
 			// Tonemap HDR → offscreen viewport texture (shown by the editor).
 			if (offscreen)

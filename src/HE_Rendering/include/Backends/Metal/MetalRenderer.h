@@ -150,6 +150,22 @@ private:
 	void  DestroyHDRTarget();
 	void  EncodeTonemap(void* renderEncoder); // fullscreen tonemap of m_hdrColor
 
+	// ── Bloom (bright-pass + separable Gaussian blur on the HDR target) ──────
+	// Mirrors the GL backend: highlights above a soft-knee threshold are blurred
+	// into a half-res target and added back during tonemap.
+	void* m_bloomBrightPipeline = nullptr; // id<MTLRenderPipelineState>
+	void* m_blurPipeline        = nullptr; // id<MTLRenderPipelineState>
+	void* m_bloomColor[2]       = { nullptr, nullptr }; // id<MTLTexture> RGBA16F half-res
+	int   m_bloomW              = 0;
+	int   m_bloomH              = 0;
+	float m_bloomThreshold      = 1.0f;
+	float m_bloomKnee           = 0.5f;
+	float m_bloomStrength       = 0.6f;
+	void  EnsureBloomTargets(int width, int height);
+	void  DestroyBloomTargets();
+	// Bright-pass + blur m_hdrColor into m_bloomColor[0]; returns its texture ptr.
+	void* EncodeBloom(void* cmdBuf, int fullW, int fullH);
+
 	// Uploaded asset meshes, keyed by asset UUID
 	std::unordered_map<HE::UUID, GpuMesh> m_meshCache;
 
