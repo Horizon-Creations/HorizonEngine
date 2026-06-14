@@ -123,6 +123,12 @@ HE::UUID ContentManager::loadAsset(const std::string& relativePath)
 			size_t o=0;
 			HAsset::Reader::readString(c->data,o,a.shaderPath);
 			HAsset::Reader::readVec(c->data,o,a.texturePaths);
+			// PBR scalars — optional tail; older materials keep the defaults.
+			HAsset::Reader::readPOD(c->data,o,a.baseColor[0]);
+			HAsset::Reader::readPOD(c->data,o,a.baseColor[1]);
+			HAsset::Reader::readPOD(c->data,o,a.baseColor[2]);
+			HAsset::Reader::readPOD(c->data,o,a.metallic);
+			HAsset::Reader::readPOD(c->data,o,a.roughness);
 		}
 		handle = m_materialAssets.insert(std::move(a)); break;
 	}
@@ -221,6 +227,8 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 	{
 		auto& a = static_cast<MaterialAsset&>(asset);
 		std::vector<uint8_t> b; HAsset::Writer::appendString(b,a.shaderPath); HAsset::Writer::appendVec(b,a.texturePaths);
+		HAsset::Writer::appendPOD(b,a.baseColor[0]); HAsset::Writer::appendPOD(b,a.baseColor[1]); HAsset::Writer::appendPOD(b,a.baseColor[2]);
+		HAsset::Writer::appendPOD(b,a.metallic); HAsset::Writer::appendPOD(b,a.roughness);
 		w.addChunk(HAsset::CHUNK_MTRL,b.data(),b.size());
 		break;
 	}

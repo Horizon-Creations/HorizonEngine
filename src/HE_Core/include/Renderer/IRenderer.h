@@ -92,6 +92,18 @@ public:
     virtual void SetEditorCamera(const EditorCameraOverride& cam) { m_editorCamera = cam; }
     const EditorCameraOverride& GetEditorCamera() const { return m_editorCamera; }
 
+    // ── Bloom / post-process settings ──────────────────────────────────────
+    // Pushed by the editor from its preferences. Backends that implement bloom
+    // (GL, Metal) honour it; others ignore it. Defaults match the built-in
+    // always-on behaviour.
+    struct BloomSettings
+    {
+        bool  enabled   = true;
+        float threshold = 1.0f;   // luminance above which pixels bloom
+        float intensity = 0.6f;   // how strongly the blurred bloom is added back
+    };
+    virtual void SetBloomSettings(const BloomSettings& /*settings*/) {}
+
     // ── Offscreen viewport (editor scene view) ────────────────────────────
     // When a non-zero size is set, the scene is rendered into an offscreen
     // target instead of the window and GetViewportTexture() returns it as an

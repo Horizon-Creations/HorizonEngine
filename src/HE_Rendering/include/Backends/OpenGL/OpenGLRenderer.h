@@ -30,6 +30,7 @@ public:
 	void* GetViewportTexture() override;
 	bool  CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& width, uint32_t& height) override;
 	void  InvalidateMaterial(const HE::UUID& materialId) override;
+	void  SetBloomSettings(const BloomSettings& settings) override;
 
 	// Multi-window support
 	void AttachWindow(HE::Window* window) override;
@@ -64,6 +65,12 @@ private:
 	// false when the UUID is null or the material is not loaded yet.
 	bool ResolveMaterialTexture(const HE::UUID& materialId, unsigned int& outTex);
 
+	// Resolves a material override's PBR scalars (baseColor/metallic/roughness).
+	// Returns true if the material is loaded; leaves the outputs untouched
+	// otherwise (caller keeps its defaults).
+	bool ResolveMaterialParams(const HE::UUID& materialId,
+	                           glm::vec3& outBaseColor, float& outMetallic, float& outRoughness);
+
 	SDL_Window* m_primarySdlWindow = nullptr;   // needed to restore current context
 	void*       m_glContext        = nullptr;   // borrowed — owned by primary HE::Window
 	// Secondary windows: SDL_Window* → shared SDL_GLContext (owned here)
@@ -88,6 +95,8 @@ private:
 	int          m_uColor         = -1;
 	int          m_uHasTexture    = -1;
 	int          m_uTexture       = -1;
+	int          m_uMetallic      = -1;
+	int          m_uRoughness     = -1;
 	int          m_uLightCount    = -1;
 	int          m_uLightPos      = -1;
 	int          m_uLightDir      = -1;
@@ -153,6 +162,7 @@ private:
 	unsigned int m_bloomColor[2] = { 0, 0 };   // RGBA16F, half-res
 	int          m_bloomW        = 0;
 	int          m_bloomH        = 0;
+	bool         m_bloomEnabled   = true;
 	float        m_bloomThreshold = 1.0f;
 	float        m_bloomKnee      = 0.5f;
 	float        m_bloomStrength  = 0.6f;

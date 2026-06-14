@@ -34,6 +34,13 @@ std::unique_ptr<MaterialAsset> MaterialImporter::import(
 		if (t.is_string())
 			asset->texturePaths.push_back(t.get<std::string>());
 
+	// Optional PBR scalars (metallic-roughness). Default to the asset's own.
+	if (auto bc = j.find("baseColor"); bc != j.end() && bc->is_array() && bc->size() >= 3)
+		for (int i = 0; i < 3; ++i)
+			asset->baseColor[i] = (*bc)[i].get<float>();
+	asset->metallic  = j.value("metallic",  asset->metallic);
+	asset->roughness = j.value("roughness", asset->roughness);
+
 	if (!Importer::writeAsset(*asset, contentRoot))
 		return nullptr;
 

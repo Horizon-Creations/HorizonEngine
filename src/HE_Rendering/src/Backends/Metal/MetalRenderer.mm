@@ -33,8 +33,9 @@ struct VertexIn {
 struct Uniforms {
 	float4x4 mvp;
 	float4x4 model;
-	float4   color;
+	float4   color;   // rgb: base-color tint
 	float4   flags;   // x: hasTexture
+	float4   pbr;     // x: metallic, y: roughness
 };
 
 struct LightGPU {
@@ -61,6 +62,8 @@ struct VSOut {
 	float3 worldPos;
 	float3 color;
 	float  hasTexture;
+	float  metallic;
+	float  roughness;
 };
 
 vertex VSOut vertexMain(uint vid [[vertex_id]],
@@ -76,6 +79,8 @@ vertex VSOut vertexMain(uint vid [[vertex_id]],
 	out.uv         = float2(verts[vid].uv);
 	out.color      = u.color.rgb;
 	out.hasTexture = u.flags.x;
+	out.metallic   = u.pbr.x;
+	out.roughness  = u.pbr.y;
 	return out;
 }
 
@@ -109,8 +114,8 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
                              texture2d<float> shadowMap [[texture(1)]],
                              sampler          shadowSmp [[sampler(1)]])
 {
-	float3 base = (in.hasTexture > 0.5)
-		? baseColor.sample(smp, float2(in.uv.x, 1.0 - in.uv.y)).rgb
+	float3 albedo = (in.hasTexture > 0.5)
+		? baseColor.sample(smp, float2(in.uv.x, 1.0 - in.uv.y)).rgb * in.color
 		: in.color;
 	float3 N = normalize(in.normal);
 
@@ -118,11 +123,17 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
 	{
 		float3 L    = normalize(float3(0.5, 0.8, 0.6));
 		float  diff = 0.35 + 0.65 * max(dot(N, L), 0.0);
-		return float4(base * diff, 1.0);
+		return float4(albedo * diff, 1.0);
 	}
 
+	// Metallic-roughness split (matches the GL backend).
+	float3 diffuseColor = albedo * (1.0 - in.metallic);
+	float3 specColor    = mix(float3(0.04), albedo, in.metallic);
+	float  shininess    = mix(128.0, 8.0, in.roughness);
+	float  specScale    = mix(0.5, 0.03, in.roughness);
+
 	float3 V      = normalize(scene.cameraPos.xyz - in.worldPos);
-	float3 result = 0.08 * base; // ambient floor
+	float3 result = 0.08 * albedo; // ambient floor
 
 	for (int i = 0; i < scene.lightCount; ++i)
 	{
@@ -154,8 +165,8 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
 
 		float diff = max(dot(N, L), 0.0);
 		float3 H   = normalize(L + V);
-		float spec = pow(max(dot(N, H), 0.0), 32.0) * 0.25;
-		result += (base * diff + float3(spec))
+		float spec = pow(max(dot(N, H), 0.0), shininess) * specScale;
+		result += (diffuseColor * diff + specColor * spec)
 		        * l.colorIntensity.rgb * l.colorIntensity.w * atten * sh;
 	}
 	return float4(result, 1.0);
@@ -257,8 +268,9 @@ struct UnlitUniforms
 {
 	glm::mat4 mvp;
 	glm::mat4 model;
-	glm::vec4 color;
+	glm::vec4 color;   // rgb: base-color tint
 	glm::vec4 flags;   // x: hasTexture
+	glm::vec4 pbr;     // x: metallic, y: roughness
 };
 
 // Matches the MSL LightGPU/SceneUniforms structs above.
@@ -757,6 +769,20 @@ bool MetalRenderer::ResolveMaterialTexture(const HE::UUID& materialId, void*& ou
 	return true;
 }
 
+bool MetalRenderer::ResolveMaterialParams(const HE::UUID& materialId,
+	glm::vec3& outBaseColor, float& outMetallic, float& outRoughness)
+{
+	if (materialId == HE::UUID{} || !m_contentManager)
+		return false;
+	const MaterialAsset* mat = m_contentManager->getMaterial(materialId);
+	if (!mat)
+		return false; // not loaded yet — caller keeps defaults
+	outBaseColor = glm::vec3(mat->baseColor[0], mat->baseColor[1], mat->baseColor[2]);
+	outMetallic  = mat->metallic;
+	outRoughness = mat->roughness;
+	return true;
+}
+
 void MetalRenderer::InvalidateMaterial(const HE::UUID& materialId)
 {
 	if (materialId == HE::UUID{}) return;
@@ -1019,7 +1045,15 @@ void MetalRenderer::DestroyBloomTargets()
 {
 	for (int i = 0; i < 2; ++i)
 		if (m_bloomColor[i]) { CFBridgingRelease(m_bloomColor[i]); m_bloomColor[i] = nullptr; }
+	m_bloomResult = nullptr;
 	m_bloomW = m_bloomH = 0;
+}
+
+void MetalRenderer::SetBloomSettings(const BloomSettings& s)
+{
+	m_bloomEnabled   = s.enabled;
+	m_bloomThreshold = s.threshold;
+	m_bloomStrength  = s.intensity;
 }
 
 // Bright-pass the HDR color then ping-pong blur (even pass count ends in
@@ -1080,12 +1114,13 @@ void MetalRenderer::EncodeTonemap(void* renderEncoderPtr)
 	[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_noDepthState];
 	[enc setFragmentTexture:(__bridge id<MTLTexture>)m_hdrColor atIndex:0];
 	// Bloom on texture slot 1 (fall back to the HDR texture with 0 strength so the
-	// shader's sampler always has a valid binding).
-	id<MTLTexture> bloomTex = m_bloomColor[0]
-		? (__bridge id<MTLTexture>)m_bloomColor[0]
+	// shader's sampler always has a valid binding). m_bloomResult is null when
+	// bloom was disabled or unavailable this frame.
+	id<MTLTexture> bloomTex = m_bloomResult
+		? (__bridge id<MTLTexture>)m_bloomResult
 		: (__bridge id<MTLTexture>)m_hdrColor;
 	[enc setFragmentTexture:bloomTex atIndex:1];
-	const simd::float2 params = { 1.0f, m_bloomColor[0] ? m_bloomStrength : 0.0f };
+	const simd::float2 params = { 1.0f, m_bloomResult ? m_bloomStrength : 0.0f };
 	[enc setFragmentBytes:&params length:sizeof(params) atIndex:0];
 	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
 }
@@ -1169,12 +1204,17 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 			UnlitUniforms u;
 			u.mvp   = viewProj * dc.transform;
 			u.model = dc.transform;
-			u.color = glm::vec4(0.85f, 0.55f, 0.25f, 1.0f);
 
 			// An explicit MaterialComponent override wins over the mesh's own
 			// base-color texture when present and resolvable.
 			void*      overrideTex = nullptr;
 			const bool hasOverride = ResolveMaterialTexture(dc.materialAssetId, overrideTex);
+
+			// PBR scalars from the material override; defaults otherwise.
+			glm::vec3 baseColor(1.0f);
+			float     metallic = 0.0f, roughness = 0.5f;
+			const bool hasMat = ResolveMaterialParams(dc.materialAssetId, baseColor, metallic, roughness);
+			u.pbr = glm::vec4(metallic, roughness, 0.0f, 0.0f);
 
 			// Resolve the asset; entities without one fall back to the built-in cube.
 			id<MTLBuffer> vertexBuf;
@@ -1200,6 +1240,12 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 				? (__bridge id<MTLTexture>)effectiveTex
 				: (__bridge id<MTLTexture>)m_dummyTexture;
 			u.flags = glm::vec4(effectiveTex ? 1.0f : 0.0f, 0, 0, 0);
+
+			// Base tint: material baseColor if assigned, else white when textured
+			// (texture unchanged) or the flat fallback color when not.
+			if (!hasMat)
+				baseColor = effectiveTex ? glm::vec3(1.0f) : glm::vec3(0.85f, 0.55f, 0.25f);
+			u.color = glm::vec4(baseColor, 1.0f);
 
 			[encoder setVertexBuffer:vertexBuf offset:0 atIndex:0];
 			[encoder setVertexBytes:&u length:sizeof(u) atIndex:1];
@@ -1268,7 +1314,9 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 
 			// Bright-pass + blur the HDR target into the half-res bloom buffer;
 			// EncodeTonemap (offscreen or direct below) composites it back in.
-			EncodeBloom((__bridge void*)cmdBuf, sceneW, sceneH);
+			// Skipped when bloom is disabled (m_bloomResult stays null → no glow).
+			m_bloomResult = m_bloomEnabled ? EncodeBloom((__bridge void*)cmdBuf, sceneW, sceneH)
+			                               : nullptr;
 
 			// Tonemap HDR → offscreen viewport texture (shown by the editor).
 			if (offscreen)

@@ -42,6 +42,14 @@ struct MaterialAsset : public RuntimeAsset
 {
 	std::string                  shaderPath;
 	std::vector<std::string>     texturePaths;
+
+	// PBR scalars (metallic-roughness workflow). baseColor multiplies the
+	// albedo (texture or flat); metallic/roughness drive the lighting. Appended
+	// to the MTRL chunk after the texture list — materials written before these
+	// existed load with the defaults.
+	float baseColor[3] = { 1.0f, 1.0f, 1.0f };
+	float metallic     = 0.0f;
+	float roughness    = 0.5f;
 };
 
 struct SceneAsset : public RuntimeAsset

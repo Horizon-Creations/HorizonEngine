@@ -50,6 +50,11 @@ struct EditorConfig
 	float UiFontScale       = 1.0f;   // global editor font scale (style.FontScaleMain)
 	float EditorCameraSpeed = 6.0f;   // editor fly-camera speed, world units/second
 
+	// Post-process: bloom (pushed to the renderer each frame via SetBloomSettings)
+	bool  BloomEnabled   = true;
+	float BloomThreshold = 1.0f;
+	float BloomIntensity = 0.6f;
+
 	EditorMode mode = EditorMode::View;
 	std::string modeString() const
 	{
