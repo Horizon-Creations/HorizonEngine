@@ -823,6 +823,7 @@ AppContext EditorApplication::makeContext()
 		.setPlayMode         = [this](bool play){ setPlayMode(play); },
 		.currentScenePath    = m_currentScenePath,
 		.sceneDirty          = m_undo.revision() != m_savedRevision,
+		.exitRequested       = m_exitRequested,
 		.saveSceneToPath     = [this](const std::string& p){ saveSceneToPath(p); },
 		.openScene           = [this](const std::string& p){ openScene(p); },
 		.newScene            = [this]{ newScene(); },
@@ -1084,6 +1085,25 @@ bool EditorApplication::OnEvent(const SDL_Event& event)
 #endif
 	default:
 		break;
+	}
+
+	// ── Unsaved-changes guard for OS-level close (window X / Cmd+Q / app quit) ──
+	// Window::PollEvents() has already flagged the window to close this frame; if
+	// the active scene has unsaved edits, veto that here and ask the UI to raise
+	// the save-prompt instead. The prompt's "quit" path then exits cleanly through
+	// Application::Quit(). Skipped in headless-dump mode, when no project is loaded,
+	// or when the scene is clean (let it close normally). For window-close events
+	// we only react to the *main* window — ImGui's secondary viewport windows
+	// manage their own close.
+	if ((event.type == SDL_EVENT_QUIT ||
+	     (event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED && window() &&
+	      event.window.windowID == SDL_GetWindowID(window()->GetNativeWindow()))) &&
+	    m_dumpPath.empty() && m_projectLoaded &&
+	    m_undo.revision() != m_savedRevision)
+	{
+		if (window()) window()->CancelClose();
+		m_exitRequested = true;
+		return true; // consume — defer the quit until the user resolves the prompt
 	}
 
 	// Only truly consume the event if ImGui wants *exclusive* input —

@@ -45,6 +45,10 @@ namespace HE
         void        SetBorderless(bool borderless);
 
         bool        ShouldClose() const;
+        // Veto a close request that PollEvents() already registered this frame.
+        // Lets the application defer an OS-level quit (X / Cmd+Q / SDL_EVENT_QUIT)
+        // until the user resolves a prompt (e.g. unsaved-changes confirmation).
+        void        CancelClose()       { m_shouldClose = false; }
         bool        IsPrimary()   const { return m_isPrimary; }
         uint32_t    GetWindowId() const;
         uint32_t    GetWidth()    const;

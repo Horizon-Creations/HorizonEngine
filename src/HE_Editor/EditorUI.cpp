@@ -30,6 +30,14 @@ namespace
 	// and scene operations; this records which one is currently in flight so the
 	// single result handler can dispatch correctly.
 	enum class PendingFileOp { OpenProject, OpenScene, SaveScene };
+
+	// A destructive action that would discard the current scene. When requested
+	// while the scene is dirty it is stashed and a "Save changes?" modal is shown;
+	// the action runs once the user resolves the modal.
+	enum class GuardedAction {
+		None, NewScene, OpenSceneDialog, OpenScenePath,
+		OpenProjectDialog, CloseProject, Quit,
+	};
 }
 
 #ifdef HE_IMGUI_ENABLED
@@ -721,6 +729,17 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 	// ── Scene-file dialog helpers ──────────────────────────────────────────
 	static PendingFileOp s_pendingFileOp = PendingFileOp::OpenProject;
 
+	// ── Unsaved-changes guard state ─────────────────────────────────────────
+	// A destructive action requested while the scene is dirty is stashed here and
+	// the "Unsaved Changes" modal is raised; the action runs when the user picks
+	// Save (after the save completes) or Don't Save. s_guardSaveThenAct bridges the
+	// async Save-As dialog: it tells the file-result handler to run s_guardAction
+	// once the freshly chosen path has been written.
+	static GuardedAction s_guardAction      = GuardedAction::None;
+	static std::string   s_guardArg;            // path payload for OpenScenePath
+	static bool          s_openUnsavedModal = false;
+	static bool          s_guardSaveThenAct = false;
+
 	auto sceneDialogDir = [&]() -> std::string
 	{
 		if (!ctx.projectManager) return {};
@@ -745,6 +764,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 	};
 	auto triggerSaveSceneAs = [&]()
 	{
+		s_guardSaveThenAct = false; // a manual Save-As is not part of a guard flow
 		s_pendingFileOp = PendingFileOp::SaveScene;
 		SDL_DialogFileFilter filters[] = { { "Horizon Scene", "hescene" } };
 		const std::string dir = sceneDialogDir();
@@ -757,6 +777,55 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 		if (ctx.currentScenePath.empty()) triggerSaveSceneAs();
 		else if (ctx.saveSceneToPath)     ctx.saveSceneToPath(ctx.currentScenePath);
 	};
+	auto triggerOpenProject = [&]()
+	{
+		ctx.hubOpenError.clear();
+		s_pendingFileOp = PendingFileOp::OpenProject;
+		SDL_DialogFileFilter filters[] = { { "HorizonEngine Project", "heproj" } };
+		SDL_ShowOpenFileDialog(fileDialogCb, ctx.dialogBridge,
+			ctx.window ? ctx.window->GetNativeWindow() : nullptr,
+			filters, 1, nullptr, false);
+	};
+	auto doCloseProject = [&]()
+	{
+		ctx.projectManager->closeProject();
+		ctx.globalState->setLastProjectPath("");
+		ctx.globalState->writeConfig();
+		ctx.projectLoaded = false;
+	};
+
+	// ── Unsaved-changes guard ───────────────────────────────────────────────
+	// runGuardedAction performs a stashed destructive action; requestGuarded gates
+	// it behind the save-prompt when the scene is dirty (else runs it immediately).
+	auto runGuardedAction = [&](GuardedAction a, const std::string& arg)
+	{
+		switch (a)
+		{
+		case GuardedAction::NewScene:          if (ctx.newScene) ctx.newScene();   break;
+		case GuardedAction::OpenSceneDialog:   triggerOpenScene();                 break;
+		case GuardedAction::OpenScenePath:     if (ctx.openScene) ctx.openScene(arg); break;
+		case GuardedAction::OpenProjectDialog: triggerOpenProject();               break;
+		case GuardedAction::CloseProject:      doCloseProject();                   break;
+		case GuardedAction::Quit:              if (ctx.quit) ctx.quit();           break;
+		case GuardedAction::None:                                                  break;
+		}
+	};
+	auto requestGuarded = [&](GuardedAction a, const std::string& arg = std::string{})
+	{
+		if (!ctx.sceneDirty) { runGuardedAction(a, arg); return; }
+		s_guardAction      = a;
+		s_guardArg         = arg;
+		s_guardSaveThenAct = false;
+		s_openUnsavedModal = true;
+	};
+
+	// An OS-level close (window X / Cmd+Q) that EditorApplication vetoed because of
+	// unsaved changes surfaces here as a guarded Quit request.
+	if (ctx.exitRequested)
+	{
+		ctx.exitRequested = false;
+		requestGuarded(GuardedAction::Quit);
+	}
 
 	ImGui::PushFont(ctx.fontSubheading);
 	ImGui::BeginMainMenuBar();
@@ -772,43 +841,17 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 			openNewProjectPopup = true;
 		}
         if (ImGui::MenuItem("Open Project", "Ctrl+O"))
-        {
-            ctx.hubOpenError.clear();
-            s_pendingFileOp = PendingFileOp::OpenProject;
-            SDL_DialogFileFilter filters[] = {
-                { "HorizonEngine Project", "heproj" },
-            };
-			SDL_ShowOpenFileDialog(
-				[](void* userdata, const char* const* filelist, int /*filter*/)
-				{
-					auto* b = static_cast<SDLDialogBridge*>(userdata);
-					if (filelist && filelist[0])
-					{
-						*b->pendingFileResult = filelist[0];
-						*b->pendingFileReady  = true;
-					}
-				},
-				ctx.dialogBridge,
-				ctx.window ? ctx.window->GetNativeWindow() : nullptr,
-				filters, 1,
-				nullptr,
-				false);
-		}
+            requestGuarded(GuardedAction::OpenProjectDialog);
 		if (ImGui::MenuItem("Close Project", "Ctrl+W"))
-		{
-			ctx.projectManager->closeProject();
-			ctx.globalState->setLastProjectPath("");
-			ctx.globalState->writeConfig();
-			ctx.projectLoaded = false;
-		}
+			requestGuarded(GuardedAction::CloseProject);
         ImGui::Separator();
-        if (ImGui::MenuItem("New Scene"))            ctx.newScene();
-        if (ImGui::MenuItem("Open Scene..."))        triggerOpenScene();
+        if (ImGui::MenuItem("New Scene"))            requestGuarded(GuardedAction::NewScene);
+        if (ImGui::MenuItem("Open Scene..."))        requestGuarded(GuardedAction::OpenSceneDialog);
         if (ImGui::MenuItem("Save Scene", "Ctrl+S")) doSaveScene();
         if (ImGui::MenuItem("Save Scene As...", "Ctrl+Shift+S")) triggerSaveSceneAs();
         ImGui::Separator();
         if (ImGui::MenuItem("Exit", "Alt+F4"))
-            ctx.quit();
+            requestGuarded(GuardedAction::Quit);
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Edit"))
@@ -847,6 +890,69 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
     if (openNewProjectPopup)
         ImGui::OpenPopup("##NewProjectPopup");
 
+    // ── Unsaved-changes modal ───────────────────────────────────────────────
+    // Raised by requestGuarded() when a scene-discarding action is attempted with
+    // a dirty scene. Save → write (Save-As if untitled) then run the action;
+    // Don't Save → run it straight away; Cancel → abandon it.
+    if (s_openUnsavedModal)
+    {
+        ImGui::OpenPopup("Unsaved Changes##scene");
+        s_openUnsavedModal = false;
+    }
+    {
+        ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(),
+                                ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+        if (ImGui::BeginPopupModal("Unsaved Changes##scene", nullptr,
+            ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings))
+        {
+            const std::string sceneName = ctx.currentScenePath.empty()
+                ? std::string("Untitled")
+                : std::filesystem::path(ctx.currentScenePath).stem().string();
+            ImGui::Text("Save changes to \"%s\" before continuing?", sceneName.c_str());
+            ImGui::Spacing();
+            ImGui::TextDisabled("Your unsaved changes will be lost otherwise.");
+            ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+
+            // Snapshot the stashed action — the buttons may clear it.
+            const GuardedAction action = s_guardAction;
+            const std::string   arg    = s_guardArg;
+
+            if (ImGui::Button("Save", ImVec2(110, 0)))
+            {
+                const bool hadPath = !ctx.currentScenePath.empty();
+                doSaveScene(); // synchronous if a path exists, else async Save-As
+                if (hadPath)
+                {
+                    runGuardedAction(action, arg);
+                    s_guardAction = GuardedAction::None;
+                }
+                else
+                {
+                    // Save-As dialog is in flight; the file-result handler runs
+                    // the action once a path has been chosen and written.
+                    s_guardSaveThenAct = true;
+                }
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Don't Save", ImVec2(110, 0)))
+            {
+                runGuardedAction(action, arg);
+                s_guardAction = GuardedAction::None;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(110, 0)) ||
+                ImGui::IsKeyPressed(ImGuiKey_Escape))
+            {
+                s_guardAction      = GuardedAction::None;
+                s_guardSaveThenAct = false;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+    }
+
     if (ctx.pendingFileReady)
     {
         ctx.pendingFileReady = false;
@@ -864,7 +970,15 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                 std::filesystem::path p(chosen);
                 if (p.extension() != ".hescene") p += ".hescene";
                 ctx.saveSceneToPath(p.string());
+                // If this Save-As was the guard's "Save" choice, run the deferred
+                // action now that the scene is on disk.
+                if (s_guardSaveThenAct)
+                {
+                    runGuardedAction(s_guardAction, s_guardArg);
+                    s_guardAction = GuardedAction::None;
+                }
             }
+            s_guardSaveThenAct = false;
         }
         else // OpenProject
         {
@@ -2355,7 +2469,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 			{
 				if (std::filesystem::path(file->fullPath).extension() == ".hescene")
 				{
-					if (ctx.openScene) ctx.openScene(file->fullPath);
+					requestGuarded(GuardedAction::OpenScenePath, file->fullPath);
 				}
 				else
 				{

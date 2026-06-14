@@ -477,10 +477,41 @@ config.json.
 2. ✅ **Material-Inspector** — erledigt (GL+Metal, s.o.). Folgekandidaten:
    Material-Override auch in D3D/Vulkan; Asset-Registry für UUID→Pfad-Resolve
    nach Reload; PBR-Skalare (baseColor/metallic/roughness, → 3.3).
-3. **Save-Prompt bei ungesicherten Änderungen** — „Speichern?"-Dialog vor
-   Szenenwechsel/Projektschließen/Quit, wenn der Dirty-Marker aktiv ist.
+3. ✅ **Save-Prompt bei ungesicherten Änderungen** — erledigt (s.u.).
 4. **Bloom** (3.6 Forts.) — Bright-Pass + Blur auf dem HDR-Target vor dem Tonemap.
 
 Faustregel für die Parallelisierung danach: eine Person/ein Strang auf dem
 kritischen Pfad P1 → P2 → P5 → P6, Rendering (P3) und je ein P4-Block laufen
 daneben her.
+
+> **Status 14.06.2026 (Forts.):** Save-Prompt bei ungesicherten Änderungen
+> umgesetzt. ✅ (backend-unabhängig — reine Editor-Logik, hier auf GL+Metal
+> baubar; 34 Tests grün, Headless-Dump unverändert.)
+
+**Save-Prompt („Unsaved Changes") — alle szenenverwerfenden Aktionen gegated:**
+Ein einheitlicher Guard fängt jede Aktion ab, die die aktuelle Szene verwerfen
+würde, solange der Dirty-Marker (`m_undo.revision() != m_savedRevision`) aktiv
+ist, und zeigt einen modalen **Save / Don't Save / Cancel**-Dialog.
+- **Gegatete Aktionen** (`enum GuardedAction` in `EditorUI.cpp`): New Scene,
+  Open Scene… (Menü **und** Content-Browser-Doppelklick auf `.hescene`),
+  Open Project, Close Project, Exit sowie der **OS-Fensterschließen-Pfad**
+  (Fenster-X / Cmd+Q / `SDL_EVENT_QUIT`). Zentrale Helfer `requestGuarded()` /
+  `runGuardedAction()`: bei sauberer Szene läuft die Aktion sofort, bei Dirty
+  wird sie gestasht und das Modal geöffnet.
+- **Save-Logik:** Hat die Szene einen Pfad → synchroner Save, dann läuft die
+  gestashte Aktion sofort. Ist sie *Untitled* → async Save-As-Dialog; das
+  gemeinsame Datei-Ergebnis-Handling (`PendingFileOp::SaveScene`) führt die
+  Aktion nach erfolgreichem Schreiben über `s_guardSaveThenAct` aus. „Don't
+  Save" verwirft, „Cancel"/Escape bricht ab.
+- **OS-Close-Veto (Core-Hook):** `Window::PollEvents` setzt `m_shouldClose`
+  *bevor* die Event-Callback läuft, daher neue `Window::CancelClose()` (inline,
+  setzt das Flag zurück). `EditorApplication::OnEvent` fängt das
+  Schließen des **Hauptfensters** (Window-ID-Check; ImGui-Sekundärviewports
+  bleiben unberührt) bei Dirty + geladenem Projekt ab, ruft `CancelClose()` und
+  setzt `m_exitRequested` (über `AppContext` an die UI gereicht) → die UI macht
+  daraus einen `GuardedAction::Quit`. Im Headless-Dump-Modus (`HE_DUMP_PATH`)
+  ist der Veto deaktiviert. Die „Quit"-Aktion beendet sauber über
+  `Application::Quit()` (`m_running=false`).
+- **Backend-unabhängig:** reine Editor/Core-Logik, kein Renderer-Touch — D3D/
+  Vulkan kompilieren unverändert mit. Das Modal selbst (Interaktion) ist headless
+  nicht prüfbar → vom User interaktiv zu bestätigen.
