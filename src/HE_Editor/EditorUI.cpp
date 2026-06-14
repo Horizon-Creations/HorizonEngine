@@ -34,6 +34,7 @@ namespace
 
 #ifdef HE_IMGUI_ENABLED
 #include <imgui.h>
+#include <imgui_internal.h>   // DockBuilder* for the default dock layout
 #include <imgui_impl_sdl3.h>
 #include <imgui_impl_opengl3.h>
 #ifdef _WIN32
@@ -52,6 +53,34 @@ namespace
 #include <Backends/Metal/MetalRenderer.h>
 #endif
 #include <ImGuizmo.h>
+
+// Builds the editor's default dock layout into the given dockspace node. Only
+// called when the imgui.ini did not already provide a layout (DockBuilderGetNode
+// == nullptr), so a saved arrangement always wins. Windows the ini doesn't place
+// fall into this default instead of floating loose. Mirrors the panel layout in
+// the reference screenshots: thin toolbar floats on top; Quick Settings left,
+// World Outliner + Details stacked right, Content Browser bottom, Scene centre.
+static void BuildDefaultDockLayout(ImGuiID dockspaceId, const ImVec2& size)
+{
+	ImGui::DockBuilderRemoveNode(dockspaceId);
+	ImGui::DockBuilderAddNode(dockspaceId,
+		ImGuiDockNodeFlags_DockSpace | ImGuiDockNodeFlags_PassthruCentralNode);
+	ImGui::DockBuilderSetNodeSize(dockspaceId, size);
+
+	ImGuiID dockMain  = dockspaceId;
+	ImGuiID dockLeft  = ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Left,  0.19f, nullptr, &dockMain);
+	ImGuiID dockRight = ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Right, 0.24f, nullptr, &dockMain);
+	ImGuiID dockDown  = ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Down,  0.30f, nullptr, &dockMain);
+	ImGuiID dockRightBottom =
+		ImGui::DockBuilderSplitNode(dockRight, ImGuiDir_Down, 0.50f, nullptr, &dockRight);
+
+	ImGui::DockBuilderDockWindow("Quick Settings", dockLeft);
+	ImGui::DockBuilderDockWindow("World Outliner", dockRight);
+	ImGui::DockBuilderDockWindow("Details",        dockRightBottom);
+	ImGui::DockBuilderDockWindow("Content Browser", dockDown);
+	ImGui::DockBuilderDockWindow("Scene",          dockMain);
+	ImGui::DockBuilderFinish(dockspaceId);
+}
 #endif // HE_IMGUI_ENABLED
 
 // ─── render ───────────────────────────────────────────────────────────────────
@@ -1155,7 +1184,19 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
         ImGui::PopStyleVar(3);
         ImGui::PopStyleColor(2);
 
-        ImGui::DockSpace(ImGui::GetID("##MainDockSpace"), ImVec2(0.0f, 0.0f),
+        const ImGuiID dockspaceId = ImGui::GetID("##MainDockSpace");
+        // First run (or no saved layout in imgui.ini): lay the panels out sensibly
+        // so nothing floats loose. A layout loaded from imgui.ini always wins.
+        if (ImGui::DockBuilderGetNode(dockspaceId) == nullptr)
+        {
+            BuildDefaultDockLayout(dockspaceId, ImGui::GetContentRegionAvail());
+            // Persist the freshly-built default immediately so it survives an
+            // early exit and becomes the baseline the user then customises.
+            if (const char* ini = ImGui::GetIO().IniFilename)
+                ImGui::SaveIniSettingsToDisk(ini);
+        }
+
+        ImGui::DockSpace(dockspaceId, ImVec2(0.0f, 0.0f),
             ImGuiDockNodeFlags_PassthruCentralNode);
 
         ImGui::End();
