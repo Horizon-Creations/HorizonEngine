@@ -11,6 +11,10 @@ struct RenderObject {
     // RenderResourceManager resolves UUIDs to RenderHandles at extract time,
     // backends use this to look up / lazily upload the GPU mesh.
     HE::UUID     meshAssetId;
+    // Optional material override straight from MaterialComponent. When set, the
+    // backend resolves it instead of the mesh's embedded material. Null UUID =
+    // fall back to the material baked into the mesh asset.
+    HE::UUID     materialAssetId;
     RenderHandle meshHandle     = RenderHandle::invalid();
     RenderHandle materialHandle = RenderHandle::invalid();
     glm::mat4    transform      = glm::mat4(1.0f);

@@ -4,6 +4,7 @@
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/MeshComponent.h>
+#include <HorizonScene/Components/MaterialComponent.h>
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/LightComponent.h>
 #include <glm/gtc/quaternion.hpp>
@@ -107,6 +108,10 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 	{
 		RenderObject obj;
 		obj.meshAssetId = mesh.meshAssetId;
+		// Optional explicit material override (MaterialComponent). Backends use
+		// this in place of the mesh's embedded material when it is set.
+		if (const auto* matComp = reg.try_get<MaterialComponent>(e))
+			obj.materialAssetId = matComp->materialAssetId;
 		obj.transform   = t.worldMatrix;
 		// Seed with the fallback cube's box; backends replace it with the
 		// real mesh AABB once the asset is resolved.

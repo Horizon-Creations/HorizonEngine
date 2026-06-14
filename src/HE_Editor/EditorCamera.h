@@ -41,6 +41,9 @@ public:
 	float     nearPlane()   const { return m_near; }
 	float     farPlane()    const { return m_far; }
 
+	float     flySpeed()    const         { return m_flySpeed; }
+	void      setFlySpeed(float s)        { m_flySpeed = s > 0.0f ? s : m_flySpeed; }
+
 	EditorCameraOverride makeOverride() const;
 
 private:

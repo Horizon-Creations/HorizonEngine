@@ -29,6 +29,7 @@ public:
 	void  SetViewportSize(uint32_t width, uint32_t height) override;
 	void* GetViewportTexture() override;
 	bool  CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& width, uint32_t& height) override;
+	void  InvalidateMaterial(const HE::UUID& materialId) override;
 
 	// Multi-window support
 	void AttachWindow(HE::Window* window) override;
@@ -56,6 +57,12 @@ private:
 	// Returns the GPU mesh for the asset, uploading it on first use.
 	// nullptr when the UUID is invalid or the asset is not loaded.
 	const GpuMesh* ResolveMesh(const HE::UUID& assetId);
+
+	// Resolves the base-color texture of an explicit MaterialComponent override,
+	// uploading it on first sight and caching by material UUID. Returns true if
+	// the material was found (outTex may still be 0 = material has no texture);
+	// false when the UUID is null or the material is not loaded yet.
+	bool ResolveMaterialTexture(const HE::UUID& materialId, unsigned int& outTex);
 
 	SDL_Window* m_primarySdlWindow = nullptr;   // needed to restore current context
 	void*       m_glContext        = nullptr;   // borrowed — owned by primary HE::Window
@@ -97,6 +104,12 @@ private:
 
 	// Uploaded asset meshes, keyed by asset UUID
 	std::unordered_map<HE::UUID, GpuMesh> m_meshCache;
+
+	// Base-color textures for MaterialComponent overrides, keyed by material
+	// UUID. A present entry of 0 means "resolved, no texture". Drained/cleared
+	// by InvalidateMaterial via m_pendingMaterialInvalidations.
+	std::unordered_map<HE::UUID, unsigned int> m_materialTexCache;
+	std::vector<HE::UUID>                       m_pendingMaterialInvalidations;
 
 	// ── Shadow map (single directional light) ───────────────────────────────
 	unsigned int m_shadowFBO      = 0;

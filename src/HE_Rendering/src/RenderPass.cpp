@@ -17,7 +17,8 @@ void GeometryPass::execute(const RenderWorld&           world,
 
 		const RenderObject& obj = world.objects[idx];
 		DrawCall dc;
-		dc.meshAssetId   = obj.meshAssetId;
+		dc.meshAssetId     = obj.meshAssetId;
+		dc.materialAssetId = obj.materialAssetId;
 		dc.mesh          = obj.meshHandle;
 		dc.material      = obj.materialHandle;
 		dc.transform     = obj.transform;

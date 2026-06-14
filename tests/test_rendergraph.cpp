@@ -56,6 +56,26 @@ TEST_CASE("GeometryPass records one draw call per sorted index")
 	CHECK(d1.transform == world.objects[0].transform);
 }
 
+TEST_CASE("GeometryPass carries the material override into the draw call")
+{
+	RenderWorld world;
+	RenderObject withMat = makeObj(42, { 0, 0, 0 });
+	withMat.materialAssetId.hi = 0xABCD;
+	withMat.materialAssetId.lo = 0x1234;
+	RenderObject noMat = makeObj(43, { 1, 0, 0 }); // materialAssetId left null
+	world.objects.push_back(withMat);
+	world.objects.push_back(noMat);
+
+	std::vector<uint32_t> sorted = { 0, 1 };
+	CommandBuffer cmds;
+	GeometryPass{}.execute(world, sorted, cmds);
+
+	REQUIRE(cmds.drawCalls().size() == 2);
+	CHECK(cmds.drawCalls()[0].materialAssetId.hi == 0xABCD);
+	CHECK(cmds.drawCalls()[0].materialAssetId.lo == 0x1234);
+	CHECK(cmds.drawCalls()[1].materialAssetId == HE::UUID{}); // null = mesh's own material
+}
+
 TEST_CASE("GeometryPass skips out-of-range indices")
 {
 	RenderWorld world;
