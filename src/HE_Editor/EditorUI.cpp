@@ -67,6 +67,11 @@ static bool s_resetLayoutRequested = false;
 // Toggled by Edit > Preferences (Ctrl+,); drives the Preferences window.
 static bool s_showPreferences = false;
 
+// Requested by fast local content edits (create/rename) that want the file list
+// updated this frame without the heavyweight "##ContentRefresh" progress modal.
+// Consumed at the top of render(), outside the content-folder shared lock.
+static bool s_quietContentRefresh = false;
+
 static void BuildDefaultDockLayout(ImGuiID dockspaceId, const ImVec2& size)
 {
 	ImGui::DockBuilderRemoveNode(dockspaceId);
@@ -233,6 +238,15 @@ void EditorUI::render(AppContext& ctx, float dt)
         {
             ImGui::OpenPopup("##ContentRefresh");
         }
+    }
+
+    // ── Silent content refresh (create/rename) ───────────────────────────────
+    // Runs here, before RenderEditor acquires the content-folder shared lock, so
+    // refreshContentFolder()'s unique_lock can't deadlock against it.
+    if (s_quietContentRefresh && ctx.globalState)
+    {
+        ctx.globalState->refreshContentFolder();
+        s_quietContentRefresh = false;
     }
 
     // ── Route to either the Project Hub or the full Editor UI ─────────────────
@@ -2181,6 +2195,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 		static bool        s_renameIsFolder   = false;
 		static char        s_renameBuf[256]   = {};
 		static bool        s_openRenamePopup  = false;
+		static bool        s_renameIsCreate   = false; // naming a freshly created item
 		static bool        s_rightClickOnItem = false;
 
 		// ── Folders first ─────────────────────────────────────────────────
@@ -2476,6 +2491,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 			{
 				s_renameTarget   = s_ctxMenuItem;
 				s_renameIsFolder = s_ctxMenuIsFolder;
+				s_renameIsCreate = false;
 				std::strncpy(s_renameBuf, displayName.c_str(), sizeof(s_renameBuf) - 1);
 				s_renameBuf[sizeof(s_renameBuf) - 1] = '\0';
 				s_openRenamePopup = true;
@@ -2495,22 +2511,28 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 			ImGui::EndPopup();
 		}
 
-		// Trigger rename popup outside item context popup
-		if (s_openRenamePopup)
+		// Trigger rename popup outside item context popup. Gated on the content
+		// refresh having settled so it never competes with the ##ContentRefresh
+		// modal (e.g. right after a create, which requests both).
+		if (s_openRenamePopup && !ctx.contentRefreshPending && !ctx.contentRefreshDone)
 		{
 			ImGui::OpenPopup("##cb_rename_popup");
 			s_openRenamePopup = false;
 		}
 
-		// ── Rename popup ──────────────────────────────────────────────────
+		// ── Rename / name-on-create popup ─────────────────────────────────
 		ImGui::SetNextWindowSize(ImVec2(320, 0), ImGuiCond_Always);
 		if (ImGui::BeginPopupModal("##cb_rename_popup", nullptr,
 			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
 		{
-			ImGui::TextUnformatted(s_renameIsFolder ? "Rename Folder" : "Rename Asset");
+			const char* verb = s_renameIsCreate ? "Name" : "Rename";
+			ImGui::Text("%s %s", verb, s_renameIsFolder ? "Folder" : "Asset");
 			ImGui::Separator();
 			ImGui::Spacing();
 
+			// Focus the field as the dialog opens so the user can type at once.
+			if (ImGui::IsWindowAppearing())
+				ImGui::SetKeyboardFocusHere();
 			ImGui::SetNextItemWidth(-1.0f);
 			bool confirm = ImGui::InputText("##rename_input", s_renameBuf, sizeof(s_renameBuf),
 				ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
@@ -2542,16 +2564,20 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 									t.label     = newName;
 								}
 						}
-						ctx.contentRefreshPending = true;
+						s_quietContentRefresh = true;
 					}
 				}
 				s_renameTarget.clear();
+				s_renameIsCreate = false;
 				ImGui::CloseCurrentPopup();
 			}
 			ImGui::SameLine();
 			if (ImGui::Button("Cancel", ImVec2(140, 0)))
 			{
+				// On create, Cancel just keeps the default name — the file already
+				// exists on disk; nothing to undo.
 				s_renameTarget.clear();
+				s_renameIsCreate = false;
 				ImGui::CloseCurrentPopup();
 			}
 
@@ -2613,6 +2639,17 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 					w.addChunk(HAsset::CHUNK_META, meta.data(), meta.size());
 					w.write(path, static_cast<uint16_t>(type));
 				}
+
+				// Show it now (don't wait for the next auto-refresh) and let the
+				// user name it straight away via the rename/name dialog.
+				s_selectedItem    = path;
+				s_renameTarget    = path;
+				s_renameIsFolder  = false;
+				s_renameIsCreate  = true;
+				std::strncpy(s_renameBuf, defaultName, sizeof(s_renameBuf) - 1);
+				s_renameBuf[sizeof(s_renameBuf) - 1] = '\0';
+				s_openRenamePopup = true;
+				s_quietContentRefresh = true;
 				ImGui::CloseCurrentPopup();
 			};
 
@@ -2633,6 +2670,17 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				while (std::filesystem::exists(dir))
 					dir = base + std::to_string(counter++);
 				std::filesystem::create_directory(dir);
+
+				// Show it now and let the user name it straight away.
+				const std::string folderName = std::filesystem::path(dir).filename().string();
+				s_selectedItem    = dir;
+				s_renameTarget    = dir;
+				s_renameIsFolder  = true;
+				s_renameIsCreate  = true;
+				std::strncpy(s_renameBuf, folderName.c_str(), sizeof(s_renameBuf) - 1);
+				s_renameBuf[sizeof(s_renameBuf) - 1] = '\0';
+				s_openRenamePopup = true;
+				s_quietContentRefresh = true;
 				ImGui::CloseCurrentPopup();
 			}
 
