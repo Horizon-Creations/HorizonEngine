@@ -14,6 +14,7 @@
 // pipeline and the ImGui pass descriptor — they must all match.
 static constexpr MTLPixelFormat kSwapchainFormat = MTLPixelFormatBGRA8Unorm;
 static constexpr MTLPixelFormat kDepthFormat     = MTLPixelFormatDepth32Float;
+static constexpr MTLPixelFormat kSceneColorFormat = MTLPixelFormatRGBA16Float; // HDR scene color
 
 // ─── Embedded unlit shader ────────────────────────────────────────────────────
 // Mirrors the OpenGL backend's GLSL unlit shader (same light dir / ambient).
@@ -159,6 +160,43 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
 }
 )MSL";
 
+// ─── HDR tonemap (PostProcessPass) ──────────────────────────────────────────
+// Fullscreen triangle; samples the RGBA16Float scene color, applies the ACES
+// filmic curve + sRGB gamma and writes LDR. Mirrors the GL tonemap shader.
+static const char* kTonemapMSL = R"MSL(
+#include <metal_stdlib>
+using namespace metal;
+
+struct TMOut { float4 position [[position]]; float2 uv; };
+
+vertex TMOut tonemapVertex(uint vid [[vertex_id]])
+{
+	float x = float((vid & 1) << 2) - 1.0;   // 0->-1, 1->3, 2->-1
+	float y = float((vid & 2) << 1) - 1.0;   // 0->-1, 1->-1, 2->3
+	TMOut o;
+	o.position = float4(x, y, 0.0, 1.0);
+	o.uv       = float2(x * 0.5 + 0.5, 1.0 - (y * 0.5 + 0.5)); // texture origin is top-left
+	return o;
+}
+
+float3 aces(float3 v)
+{
+	const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
+	return clamp((v * (a * v + b)) / (v * (c * v + d) + e), 0.0, 1.0);
+}
+
+fragment float4 tonemapFragment(TMOut in [[stage_in]],
+                                texture2d<float> hdr [[texture(0)]],
+                                constant float& exposure [[buffer(0)]])
+{
+	constexpr sampler s(filter::linear);
+	float3 c = hdr.sample(s, in.uv).rgb * exposure;
+	c = aces(c);
+	c = pow(c, float3(1.0 / 2.2));
+	return float4(c, 1.0);
+}
+)MSL";
+
 // Matches the MSL Uniforms struct above (float4x4 is column-major like glm).
 struct UnlitUniforms
 {
@@ -266,7 +304,9 @@ void MetalRenderer::Shutdown()
 	m_meshCache.clear();
 
 	DestroyViewportTarget();
+	DestroyHDRTarget();
 	DrainRetiredTextures();
+	if (m_tonemapPipeline) { CFBridgingRelease(m_tonemapPipeline); m_tonemapPipeline = nullptr; }
 	if (m_dummyTexture)    { CFBridgingRelease(m_dummyTexture);    m_dummyTexture = nullptr; }
 	if (m_linearSampler)   { CFBridgingRelease(m_linearSampler);   m_linearSampler = nullptr; }
 	if (m_cubeVertexBuf)   { CFBridgingRelease(m_cubeVertexBuf);   m_cubeVertexBuf = nullptr; }
@@ -301,7 +341,7 @@ void MetalRenderer::CreateScenePipeline()
 		MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
 		desc.vertexFunction   = [lib newFunctionWithName:@"vertexMain"];
 		desc.fragmentFunction = [lib newFunctionWithName:@"fragmentMain"];
-		desc.colorAttachments[0].pixelFormat = kSwapchainFormat;
+		desc.colorAttachments[0].pixelFormat = kSceneColorFormat; // render into HDR target
 		desc.depthAttachmentPixelFormat      = kDepthFormat;
 
 		id<MTLRenderPipelineState> pso = [device newRenderPipelineStateWithDescriptor:desc error:&error];
@@ -309,6 +349,26 @@ void MetalRenderer::CreateScenePipeline()
 			throw std::runtime_error(std::string("MetalRenderer: pipeline creation failed: ")
 				+ (error ? [[error localizedDescription] UTF8String] : "unknown"));
 		m_scenePipeline = (void*)CFBridgingRetain(pso);
+
+		// ── HDR tonemap pipeline (RGBA16F scene color → swapchain LDR) ──────
+		NSError* tmError = nil;
+		id<MTLLibrary> tmLib = [device newLibraryWithSource:
+			[NSString stringWithUTF8String:kTonemapMSL] options:nil error:&tmError];
+		if (!tmLib)
+			throw std::runtime_error(std::string("MetalRenderer: tonemap shader compile failed: ")
+				+ (tmError ? [[tmError localizedDescription] UTF8String] : "unknown"));
+		MTLRenderPipelineDescriptor* tmDesc = [[MTLRenderPipelineDescriptor alloc] init];
+		tmDesc.vertexFunction   = [tmLib newFunctionWithName:@"tonemapVertex"];
+		tmDesc.fragmentFunction = [tmLib newFunctionWithName:@"tonemapFragment"];
+		tmDesc.colorAttachments[0].pixelFormat = kSwapchainFormat; // LDR output
+		// Both tonemap passes carry a (DontCare) depth attachment so this single
+		// pipeline is valid whether it runs into the viewport or the drawable.
+		tmDesc.depthAttachmentPixelFormat      = kDepthFormat;
+		id<MTLRenderPipelineState> tmPso = [device newRenderPipelineStateWithDescriptor:tmDesc error:&tmError];
+		if (!tmPso)
+			throw std::runtime_error(std::string("MetalRenderer: tonemap pipeline creation failed: ")
+				+ (tmError ? [[tmError localizedDescription] UTF8String] : "unknown"));
+		m_tonemapPipeline = (void*)CFBridgingRetain(tmPso);
 
 		MTLDepthStencilDescriptor* depthDesc = [[MTLDepthStencilDescriptor alloc] init];
 		depthDesc.depthCompareFunction = MTLCompareFunctionLessEqual;
@@ -631,6 +691,65 @@ void* MetalRenderer::GetViewportTexture()
 	return m_viewportColor;
 }
 
+bool MetalRenderer::CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& width, uint32_t& height)
+{
+	if (!m_viewportColor || !m_device || !m_commandQueue) return false;
+
+	@autoreleasepool
+	{
+		id<MTLTexture> src = (__bridge id<MTLTexture>)m_viewportColor;
+		const NSUInteger w = src.width, h = src.height;
+		if (w == 0 || h == 0) return false;
+
+		id<MTLDevice>       device = (__bridge id<MTLDevice>)m_device;
+		id<MTLCommandQueue> queue  = (__bridge id<MTLCommandQueue>)m_commandQueue;
+
+		// Private render-target textures can't be read on the CPU; blit into a
+		// managed staging texture, synchronise it, then read it back.
+		MTLTextureDescriptor* desc = [MTLTextureDescriptor
+			texture2DDescriptorWithPixelFormat:kSwapchainFormat width:w height:h mipmapped:NO];
+		desc.storageMode = MTLStorageModeManaged;
+		desc.usage       = MTLTextureUsageShaderRead;
+		id<MTLTexture> staging = [device newTextureWithDescriptor:desc];
+		if (!staging) return false;
+
+		id<MTLCommandBuffer>      cb   = [queue commandBuffer];
+		id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+		[blit copyFromTexture:src
+		          sourceSlice:0 sourceLevel:0
+		         sourceOrigin:MTLOriginMake(0, 0, 0)
+		           sourceSize:MTLSizeMake(w, h, 1)
+		            toTexture:staging
+		     destinationSlice:0 destinationLevel:0
+		    destinationOrigin:MTLOriginMake(0, 0, 0)];
+		[blit synchronizeTexture:staging slice:0 level:0];
+		[blit endEncoding];
+		[cb commit];
+		[cb waitUntilCompleted];
+
+		const NSUInteger rowBytes = w * 4;
+		std::vector<uint8_t> bgra(static_cast<size_t>(rowBytes) * h);
+		[staging getBytes:bgra.data()
+		      bytesPerRow:rowBytes
+		       fromRegion:MTLRegionMake2D(0, 0, w, h)
+		      mipmapLevel:0];
+
+		// kSwapchainFormat is BGRA8; the caller wants RGBA8. Metal textures are
+		// top-row-first already, so no vertical flip is needed.
+		rgba.resize(static_cast<size_t>(rowBytes) * h);
+		for (size_t i = 0; i < static_cast<size_t>(w) * h; ++i)
+		{
+			rgba[i * 4 + 0] = bgra[i * 4 + 2];
+			rgba[i * 4 + 1] = bgra[i * 4 + 1];
+			rgba[i * 4 + 2] = bgra[i * 4 + 0];
+			rgba[i * 4 + 3] = bgra[i * 4 + 3];
+		}
+		width  = static_cast<uint32_t>(w);
+		height = static_cast<uint32_t>(h);
+		return true;
+	}
+}
+
 void MetalRenderer::RetireTexture(void* texture)
 {
 	if (!texture) return;
@@ -696,6 +815,50 @@ void MetalRenderer::DestroyViewportTarget()
 	// GPU's in-flight work may still reference these textures.
 	RetireTexture(m_viewportColor); m_viewportColor = nullptr;
 	RetireTexture(m_viewportDepth); m_viewportDepth = nullptr;
+}
+
+void MetalRenderer::EnsureHDRTarget(int width, int height)
+{
+	if (m_hdrColor && width == m_hdrW && height == m_hdrH)
+		return;
+	DestroyHDRTarget();
+
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+
+	MTLTextureDescriptor* colorDesc = [MTLTextureDescriptor
+		texture2DDescriptorWithPixelFormat:kSceneColorFormat width:width height:height mipmapped:NO];
+	colorDesc.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+	colorDesc.storageMode = MTLStorageModePrivate;
+	m_hdrColor = (void*)CFBridgingRetain([device newTextureWithDescriptor:colorDesc]);
+
+	MTLTextureDescriptor* depthDesc = [MTLTextureDescriptor
+		texture2DDescriptorWithPixelFormat:kDepthFormat width:width height:height mipmapped:NO];
+	depthDesc.usage       = MTLTextureUsageRenderTarget;
+	depthDesc.storageMode = MTLStorageModePrivate;
+	m_hdrDepth = (void*)CFBridgingRetain([device newTextureWithDescriptor:depthDesc]);
+
+	m_hdrW = width;
+	m_hdrH = height;
+}
+
+void MetalRenderer::DestroyHDRTarget()
+{
+	if (m_hdrColor) { CFBridgingRelease(m_hdrColor); m_hdrColor = nullptr; }
+	if (m_hdrDepth) { CFBridgingRelease(m_hdrDepth); m_hdrDepth = nullptr; }
+	m_hdrW = m_hdrH = 0;
+}
+
+// Fullscreen tonemap of the HDR scene color into the bound render encoder's target.
+void MetalRenderer::EncodeTonemap(void* renderEncoderPtr)
+{
+	if (!m_tonemapPipeline || !m_hdrColor) return;
+	id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoderPtr;
+	[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_tonemapPipeline];
+	[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_noDepthState];
+	[enc setFragmentTexture:(__bridge id<MTLTexture>)m_hdrColor atIndex:0];
+	float exposure = 1.0f;
+	[enc setFragmentBytes:&exposure length:sizeof(exposure) atIndex:0];
+	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
 }
 
 // ─── Frame encoding ───────────────────────────────────────────────────────────
@@ -835,72 +998,96 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 		}
 		EnsureDepthTexture(target, pw, ph);
 
-		id<CAMetalDrawable> drawable = [layer nextDrawable];
-		if (!drawable) return; // window hidden/minimized — skip the frame
-
 		id<MTLCommandQueue>  queue   = (__bridge id<MTLCommandQueue>)m_commandQueue;
 		id<MTLCommandBuffer> cmdBuf  = [queue commandBuffer];
 
-		// ── Shadow map (directional light) — rendered before the scene ──────
+		// ── Shadow map + scene → HDR target + offscreen tonemap ─────────────
+		// Encoded before acquiring the drawable so the editor viewport texture
+		// is produced even when the window has no drawable (occluded/background).
+		// Only the swapchain present below needs the drawable.
 		if (isPrimary)
 			EncodeShadowMap((__bridge void*)cmdBuf);
 
-		// ── Offscreen scene pass (editor viewport) ──────────────────────────
 		const bool offscreen = isPrimary && m_viewportReqW > 0 && m_viewportReqH > 0;
-		if (offscreen)
+		if (isPrimary)
 		{
-			EnsureViewportTarget();
+			const int sceneW = offscreen ? (int)m_viewportReqW : pw;
+			const int sceneH = offscreen ? (int)m_viewportReqH : ph;
+			EnsureHDRTarget(sceneW, sceneH);
 
-			MTLRenderPassDescriptor* scenePass = [MTLRenderPassDescriptor renderPassDescriptor];
-			scenePass.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_viewportColor;
-			scenePass.colorAttachments[0].loadAction  = MTLLoadActionClear;
-			scenePass.colorAttachments[0].storeAction = MTLStoreActionStore;
-			scenePass.colorAttachments[0].clearColor  = MTLClearColorMake(0.18, 0.18, 0.20, 1.0);
-			scenePass.depthAttachment.texture     = (__bridge id<MTLTexture>)m_viewportDepth;
-			scenePass.depthAttachment.loadAction  = MTLLoadActionClear;
-			scenePass.depthAttachment.storeAction = MTLStoreActionDontCare;
-			scenePass.depthAttachment.clearDepth  = 1.0;
+			// Scene → RGBA16Float HDR target.
+			MTLRenderPassDescriptor* hdrPass = [MTLRenderPassDescriptor renderPassDescriptor];
+			hdrPass.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_hdrColor;
+			hdrPass.colorAttachments[0].loadAction  = MTLLoadActionClear;
+			hdrPass.colorAttachments[0].storeAction = MTLStoreActionStore;
+			hdrPass.colorAttachments[0].clearColor  = MTLClearColorMake(0.18, 0.18, 0.20, 1.0);
+			hdrPass.depthAttachment.texture     = (__bridge id<MTLTexture>)m_hdrDepth;
+			hdrPass.depthAttachment.loadAction  = MTLLoadActionClear;
+			hdrPass.depthAttachment.storeAction = MTLStoreActionDontCare;
+			hdrPass.depthAttachment.clearDepth  = 1.0;
 
 			id<MTLRenderCommandEncoder> sceneEncoder =
-				[cmdBuf renderCommandEncoderWithDescriptor:scenePass];
-			EncodeScene((__bridge void*)sceneEncoder,
-			            (int)m_viewportReqW, (int)m_viewportReqH);
+				[cmdBuf renderCommandEncoderWithDescriptor:hdrPass];
+			EncodeScene((__bridge void*)sceneEncoder, sceneW, sceneH);
 			[sceneEncoder endEncoding];
+
+			// Tonemap HDR → offscreen viewport texture (shown by the editor).
+			if (offscreen)
+			{
+				EnsureViewportTarget();
+				MTLRenderPassDescriptor* tmPass = [MTLRenderPassDescriptor renderPassDescriptor];
+				tmPass.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_viewportColor;
+				tmPass.colorAttachments[0].loadAction  = MTLLoadActionDontCare;
+				tmPass.colorAttachments[0].storeAction = MTLStoreActionStore;
+				tmPass.depthAttachment.texture     = (__bridge id<MTLTexture>)m_viewportDepth;
+				tmPass.depthAttachment.loadAction  = MTLLoadActionDontCare;
+				tmPass.depthAttachment.storeAction = MTLStoreActionDontCare;
+
+				id<MTLRenderCommandEncoder> tmEncoder =
+					[cmdBuf renderCommandEncoderWithDescriptor:tmPass];
+				EncodeTonemap((__bridge void*)tmEncoder);
+				[tmEncoder endEncoding];
+			}
+			else if (m_viewportColor)
+				DestroyViewportTarget();
 		}
-		else if (isPrimary && m_viewportColor)
-			DestroyViewportTarget();
 
-		// ── Swapchain pass (direct scene and/or overlay) ────────────────────
-		MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
-		pass.colorAttachments[0].texture     = drawable.texture;
-		pass.colorAttachments[0].loadAction  = MTLLoadActionClear;
-		pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-		pass.colorAttachments[0].clearColor  = MTLClearColorMake(0.18, 0.18, 0.20, 1.0);
-		pass.depthAttachment.texture     = (__bridge id<MTLTexture>)target.depthTexture;
-		pass.depthAttachment.loadAction  = MTLLoadActionClear;
-		pass.depthAttachment.storeAction = MTLStoreActionDontCare;
-		pass.depthAttachment.clearDepth  = 1.0;
-
-		id<MTLRenderCommandEncoder> encoder = [cmdBuf renderCommandEncoderWithDescriptor:pass];
-
-		// ── Scene direct to window (primary, no offscreen viewport) ─────────
-		if (isPrimary && !offscreen)
-			EncodeScene((__bridge void*)encoder, pw, ph);
-
-		// ── Overlay (ImGui) ─────────────────────────────────────────────────
-		if (isPrimary && m_overlayCallback)
+		// ── Swapchain pass (direct-mode tonemap and/or overlay) ─────────────
+		id<CAMetalDrawable> drawable = [layer nextDrawable];
+		if (drawable)
 		{
-			[encoder setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_noDepthState];
-			MetalOverlayContext ctx{
-				(__bridge void*)cmdBuf,
-				(__bridge void*)encoder,
-				(__bridge void*)pass,
-			};
-			m_overlayCallback(&ctx);
+			MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+			pass.colorAttachments[0].texture     = drawable.texture;
+			pass.colorAttachments[0].loadAction  = MTLLoadActionClear;
+			pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+			pass.colorAttachments[0].clearColor  = MTLClearColorMake(0.18, 0.18, 0.20, 1.0);
+			pass.depthAttachment.texture     = (__bridge id<MTLTexture>)target.depthTexture;
+			pass.depthAttachment.loadAction  = MTLLoadActionClear;
+			pass.depthAttachment.storeAction = MTLStoreActionDontCare;
+			pass.depthAttachment.clearDepth  = 1.0;
+
+			id<MTLRenderCommandEncoder> encoder = [cmdBuf renderCommandEncoderWithDescriptor:pass];
+
+			// Direct-to-window (game/no editor viewport): tonemap HDR → drawable.
+			if (isPrimary && !offscreen)
+				EncodeTonemap((__bridge void*)encoder);
+
+			// ── Overlay (ImGui) ─────────────────────────────────────────────
+			if (isPrimary && m_overlayCallback)
+			{
+				[encoder setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_noDepthState];
+				MetalOverlayContext ctx{
+					(__bridge void*)cmdBuf,
+					(__bridge void*)encoder,
+					(__bridge void*)pass,
+				};
+				m_overlayCallback(&ctx);
+			}
+
+			[encoder endEncoding];
+			[cmdBuf presentDrawable:drawable];
 		}
 
-		[encoder endEncoding];
-		[cmdBuf presentDrawable:drawable];
 		[cmdBuf commit];
 	}
 }

@@ -4,6 +4,7 @@
 #include <glad/glad.h>
 #include <SDL3/SDL.h>
 #include <stdexcept>
+#include <cstring>
 #include <Diagnostics/Logger.h>
 #include <glm/gtc/type_ptr.hpp>
 
@@ -134,6 +135,42 @@ static const char* kDepthFS = R"GLSL(
 void main() {}
 )GLSL";
 
+// ─── HDR tonemap (PostProcessPass) ──────────────────────────────────────────
+// Fullscreen triangle generated from gl_VertexID — no vertex buffer needed.
+static const char* kTonemapVS = R"GLSL(
+#version 410 core
+out vec2 vUV;
+void main()
+{
+	vec2 p = vec2(float((gl_VertexID & 1) << 2) - 1.0,
+	              float((gl_VertexID & 2) << 1) - 1.0);
+	vUV = p * 0.5 + 0.5;
+	gl_Position = vec4(p, 0.0, 1.0);
+}
+)GLSL";
+
+// Samples the RGBA16F scene color, applies exposure, the ACES filmic curve and
+// sRGB gamma, then writes LDR. This is where HDR highlights stop clipping.
+static const char* kTonemapFS = R"GLSL(
+#version 410 core
+in vec2 vUV;
+uniform sampler2D uHDR;
+uniform float     uExposure;
+out vec4 FragColor;
+vec3 aces(vec3 x)
+{
+	const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
+	return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+void main()
+{
+	vec3 hdr    = texture(uHDR, vUV).rgb * uExposure;
+	vec3 mapped = aces(hdr);
+	mapped      = pow(mapped, vec3(1.0 / 2.2));
+	FragColor   = vec4(mapped, 1.0);
+}
+)GLSL";
+
 static GLuint CompileStage(GLenum stage, const char* src)
 {
 	GLuint shader = glCreateShader(stage);
@@ -170,6 +207,7 @@ void OpenGLRenderer::Initialize(HE::Window* window)
 	glEnable(GL_DEPTH_TEST);
 	CreateUnlitPipeline();
 	CreateShadowResources();
+	CreateTonemapPipeline();
 	CreateCubeMesh();
 	Logger::Log(Logger::LogLevel::Info, "OpenGLRenderer: initialized successfully");
 }
@@ -244,6 +282,72 @@ void OpenGLRenderer::CreateShadowResources()
 	glReadBuffer(GL_NONE);
 	glBindTexture(GL_TEXTURE_2D, 0);
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+void OpenGLRenderer::CreateTonemapPipeline()
+{
+	GLuint vs = CompileStage(GL_VERTEX_SHADER,   kTonemapVS);
+	GLuint fs = CompileStage(GL_FRAGMENT_SHADER, kTonemapFS);
+	m_tonemapProgram = glCreateProgram();
+	glAttachShader(m_tonemapProgram, vs);
+	glAttachShader(m_tonemapProgram, fs);
+	glLinkProgram(m_tonemapProgram);
+	glDeleteShader(vs);
+	glDeleteShader(fs);
+
+	GLint ok = 0;
+	glGetProgramiv(m_tonemapProgram, GL_LINK_STATUS, &ok);
+	if (!ok)
+	{
+		GLchar log[512];
+		glGetProgramInfoLog(m_tonemapProgram, sizeof(log), nullptr, log);
+		throw std::runtime_error(std::string("OpenGLRenderer: tonemap link failed: ") + log);
+	}
+	m_uHDRTex   = glGetUniformLocation(m_tonemapProgram, "uHDR");
+	m_uExposure = glGetUniformLocation(m_tonemapProgram, "uExposure");
+
+	// Core profile needs a bound VAO for glDrawArrays even with no attributes.
+	glGenVertexArrays(1, &m_fsVAO);
+}
+
+void OpenGLRenderer::EnsureHDRTarget(int width, int height)
+{
+	if (m_hdrFBO && width == m_hdrW && height == m_hdrH)
+		return;
+	DestroyHDRTarget();
+
+	glGenFramebuffers(1, &m_hdrFBO);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_hdrFBO);
+
+	glGenTextures(1, &m_hdrColor);
+	glBindTexture(GL_TEXTURE_2D, m_hdrColor);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_hdrColor, 0);
+
+	glGenRenderbuffers(1, &m_hdrDepth);
+	glBindRenderbuffer(GL_RENDERBUFFER, m_hdrDepth);
+	glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, width, height);
+	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, m_hdrDepth);
+
+	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+		Logger::Log(Logger::LogLevel::Error, "OpenGLRenderer: HDR FBO incomplete");
+
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	m_hdrW = width;
+	m_hdrH = height;
+}
+
+void OpenGLRenderer::DestroyHDRTarget()
+{
+	if (m_hdrFBO)   { glDeleteFramebuffers(1, &m_hdrFBO);   m_hdrFBO = 0; }
+	if (m_hdrColor) { glDeleteTextures(1, &m_hdrColor);     m_hdrColor = 0; }
+	if (m_hdrDepth) { glDeleteRenderbuffers(1, &m_hdrDepth);m_hdrDepth = 0; }
+	m_hdrW = m_hdrH = 0;
 }
 
 void OpenGLRenderer::CreateCubeMesh()
@@ -396,6 +500,7 @@ void OpenGLRenderer::Shutdown()
 	}
 	m_meshCache.clear();
 	DestroyViewportTarget();
+	DestroyHDRTarget();
 	for (auto& r : m_retiredTextures)
 		glDeleteTextures(1, &r.texture);
 	m_retiredTextures.clear();
@@ -405,6 +510,8 @@ void OpenGLRenderer::Shutdown()
 	if (m_cubeEBO)      { glDeleteBuffers(1, &m_cubeEBO);      m_cubeEBO = 0; }
 	if (m_unlitProgram) { glDeleteProgram(m_unlitProgram);     m_unlitProgram = 0; }
 	if (m_depthProgram) { glDeleteProgram(m_depthProgram);     m_depthProgram = 0; }
+	if (m_tonemapProgram) { glDeleteProgram(m_tonemapProgram); m_tonemapProgram = 0; }
+	if (m_fsVAO)          { glDeleteVertexArrays(1, &m_fsVAO);  m_fsVAO = 0; }
 	if (m_shadowFBO)      { glDeleteFramebuffers(1, &m_shadowFBO);   m_shadowFBO = 0; }
 	if (m_shadowDepthTex) { glDeleteTextures(1, &m_shadowDepthTex);  m_shadowDepthTex = 0; }
 
@@ -427,6 +534,37 @@ void OpenGLRenderer::SetViewportSize(uint32_t width, uint32_t height)
 void* OpenGLRenderer::GetViewportTexture()
 {
 	return reinterpret_cast<void*>(static_cast<intptr_t>(m_viewportColor));
+}
+
+bool OpenGLRenderer::CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& width, uint32_t& height)
+{
+	if (!m_viewportFBO || m_viewportW <= 0 || m_viewportH <= 0)
+		return false;
+
+	const int w = m_viewportW;
+	const int h = m_viewportH;
+	rgba.resize(static_cast<size_t>(w) * static_cast<size_t>(h) * 4);
+
+	glBindFramebuffer(GL_FRAMEBUFFER, m_viewportFBO);
+	glPixelStorei(GL_PACK_ALIGNMENT, 1);
+	glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+	// GL returns bottom-row-first; flip to top-row-first for the caller.
+	const size_t rowBytes = static_cast<size_t>(w) * 4;
+	std::vector<uint8_t> tmp(rowBytes);
+	for (int y = 0; y < h / 2; ++y)
+	{
+		uint8_t* top = rgba.data() + static_cast<size_t>(y) * rowBytes;
+		uint8_t* bot = rgba.data() + static_cast<size_t>(h - 1 - y) * rowBytes;
+		std::memcpy(tmp.data(), top, rowBytes);
+		std::memcpy(top, bot, rowBytes);
+		std::memcpy(bot, tmp.data(), rowBytes);
+	}
+
+	width  = static_cast<uint32_t>(w);
+	height = static_cast<uint32_t>(h);
+	return true;
 }
 
 void OpenGLRenderer::EnsureViewportTarget()
@@ -522,12 +660,16 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	const bool      shadows = m_renderWorld.shadow.enabled && m_shadowFBO != 0;
 	const glm::mat4 lightVP = m_renderWorld.shadow.viewProj;
 
-	// ShadowPass renders the depth map first; GeometryPass then shades + samples it.
+	// ShadowPass → depth map; GeometryPass → HDR scene color; PostProcessPass
+	// tonemaps that into the backbuffer/viewport.
 	if (m_renderGraph.empty())
 	{
 		m_renderGraph.addPass(std::make_unique<ShadowPass>());
 		m_renderGraph.addPass(std::make_unique<GeometryPass>());
+		m_renderGraph.addPass(std::make_unique<PostProcessPass>());
 	}
+
+	EnsureHDRTarget(pw, ph);
 
 	m_renderGraph.execute(m_renderWorld, m_sortedIndices,
 		[&](const RenderPass&, const RenderPassIO& io, const CommandBuffer& cmds)
@@ -553,11 +695,30 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			return;
 		}
 
-		if (io.output.id != kBackbufferTarget) return;
+		// ── PostProcess pass: tonemap the HDR scene color to the output ─────
+		if (io.inputCount > 0 && io.inputs[0] == kSceneColorTarget)
+		{
+			glBindFramebuffer(GL_FRAMEBUFFER, prevFBO);
+			glViewport(0, 0, pw, ph);
+			glDisable(GL_DEPTH_TEST);
+			glUseProgram(m_tonemapProgram);
+			glActiveTexture(GL_TEXTURE0);
+			glBindTexture(GL_TEXTURE_2D, m_hdrColor);
+			glUniform1i(m_uHDRTex, 0);
+			glUniform1f(m_uExposure, 1.0f);
+			glBindVertexArray(m_fsVAO);
+			glDrawArrays(GL_TRIANGLES, 0, 3);
+			glEnable(GL_DEPTH_TEST);
+			return;
+		}
 
-		// ── Geometry pass: scene program + per-frame state ──────────────────
+		// ── Geometry pass: scene program + per-frame state, into HDR target ─
 		// Set here (not before the graph) because the shadow pass switched the
 		// active program.
+		glBindFramebuffer(GL_FRAMEBUFFER, m_hdrFBO);
+		glViewport(0, 0, pw, ph);
+		glClearColor(0.18f, 0.18f, 0.20f, 1.0f);
+		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 		glUseProgram(m_unlitProgram);
 		glUniform3f(m_uColor, 0.85f, 0.55f, 0.25f);
 		glUniform1i(m_uTexture, 0);

@@ -255,6 +255,16 @@ private:
 	int   m_dragOffsetX      = 0;
 	int   m_dragOffsetY      = 0;
 
+	// ── Headless frame dump (HE_DUMP_PATH / HE_DUMP_QUIT) ──────────────────
+	// Debug/validation hook: when HE_DUMP_PATH is set, render the scene to an
+	// offscreen target and write it as a .bmp during OnInit, then (unless
+	// HE_DUMP_QUIT=0) quit. Lets the renderer be validated without OS
+	// screen-recording permission. No effect when the env var is unset.
+	std::string   m_dumpPath;
+	bool          m_dumpQuit = true;
+	bool          m_dumpDone = false;
+	void dumpFrameHeadless();
+
 #ifdef HE_IMGUI_ENABLED
 	ImFont* m_fontBody       = nullptr;
 	ImFont* m_fontSubheading = nullptr;

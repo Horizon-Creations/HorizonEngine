@@ -14,7 +14,7 @@ Unity/Godot-Featureset, nicht Unreal-AAA).
 | UUID-Persistenz im META-Chunk (v2) | ✅ |
 | Erster Render-Pfad: ECS-Welt → sichtbares Mesh auf GL **und** Metal (CommandBuffer, RenderWorld, RenderExtractor, Kamera) | ✅ |
 | Editor-Shell: Hub, Docking, Outliner, Content Browser | ✅ |
-| Backend-Gerüste GL/Metal/Vulkan/D3D11/D3D12 | 🟡 GL+Metal zeichnen (getestet); D3D11/D3D12/Vulkan haben jetzt denselben Szenen-Draw-Pfad, aber **unverifiziert** (nicht auf macOS baubar) |
+| Backend-Gerüste GL/Metal/Vulkan/D3D11/D3D12 | ✅ Alle 5 zeichnen Szene + Directional-Schatten; GL+Metal auf macOS verifiziert (inkl. HDR/Tonemapping), D3D11/D3D12/Vulkan auf Windows validiert (HDR dort noch offen) |
 | Asset-Importer (Texture/Mesh/Material/Audio), asset_compiler, Packer | 🔴 Stubs |
 | SceneSerializer | 🔴 nur Name + Hierarchie |
 | RenderGraph, RenderPass, RenderResourceManager, GPUMemoryAllocator | 🔴 leer |
@@ -392,16 +392,52 @@ Vulkan rendern die Depth-Map in einem eigenen Pass/Encoder vor der Szene; D3D11/
 D3D12 wechseln das Rendertarget im Sink. **D3D11/D3D12/Vulkan unverifiziert** —
 nicht baubar hier, auf Zielplattform prüfen.
 
+> **Status 14.06.2026:** D3D11/D3D12/Vulkan auf Windows validiert + HDR/Tonemapping
+> (3.6) auf GL+Metal umgesetzt und visuell verifiziert. ✅
+
+**D3D/Vulkan-Validierung (Windows):** Der User hat die zuvor blind geschriebenen
+D3D11/D3D12/Vulkan-Pfade (Szenen-Draw + ShadowPass) auf seinem Windows-PC gebaut
+und visuell validiert (Commits `b037bbb`, `f96cb82`; Referenz-Screenshots in
+`_shots/{opengl,d3d11,d3d12,vulkan}.png`). Damit sind alle 5 Backends für den
+Stand „Szene + Directional-Schatten" verifiziert.
+
+**Headless-Capture-Harness (Validierungs-Infrastruktur):** Neue
+`IRenderer::CaptureViewport(rgba,w,h)` (RGBA8, top-row-first) — implementiert in
+GL (`glReadPixels` + Flip) und Metal (Blit Private→Managed-Textur + `getBytes`,
+BGRA→RGBA). Der Editor besitzt einen env-gesteuerten Frame-Dump
+(`HE_DUMP_PATH`/`HE_DUMP_QUIT`): rendert die Szene in `OnInit` offscreen in fester
+Größe, schreibt ein BMP und beendet sich — **vor** dem gepacten Main-Loop, der bei
+verdecktem Fenster (macOS Occlusion/App-Nap) sonst einfriert. Umgeht die fehlende
+Screen-Recording-Berechtigung von `screencapture`. Nebenbei: Metal-`EncodeFrame`
+so umgebaut, dass ShadowMap + Offscreen-Szene **vor** `nextDrawable` encodiert
+werden (Offscreen-Viewport rendert jetzt auch ohne verfügbares Drawable).
+
+**HDR + Tonemapping (3.6) — GL + Metal:** GeometryPass rendert in ein RGBA16F-
+SceneColor-Target; ein neuer `PostProcessPass` macht einen Fullscreen-Tonemap
+(ACES filmic + sRGB-Gamma, Exposure 1.0) auf den Backbuffer/Viewport.
+- **GL**: `m_hdrFBO` (RGBA16F + Depth-RBO), Fullscreen-Triangle via `gl_VertexID`
+  (leeres VAO), Tonemap-Programm. Graph = Shadow→Geometry(→HDR)→PostProcess.
+- **Metal**: Scene-Pipeline auf `RGBA16Float` umgestellt, Tonemap-Pipeline
+  (`kTonemapMSL`, Out=BGRA8). Szene→HDR-Target, dann Tonemap→Viewport-Textur
+  (Editor) bzw. →Drawable (Game/Direkt). UV-Flip im Tonemap-VS (Metal top-origin).
+- **Bewusst backend-lokal**: die gemeinsame `GeometryPass::describe()` bleibt
+  unverändert (sonst würden die Windows-validierten D3D/Vulkan-Sinks brechen).
+  GL/Metal hängen `PostProcessPass` nur in ihren eigenen Graphen ein und routen im
+  Sink über `io.inputCount`/`io.inputs[0]==kSceneColorTarget`. D3D/Vulkan
+  unangetastet → **HDR dort = nächster (blinder) Port**, auf Windows zu machen.
+- Visuell verifiziert (GL == Metal, identisches Bild): ausgefressene Highlights
+  rollen jetzt filmisch ab, Gamma hebt die Mitten, Schatten/Struktur erhalten.
+- 33 doctest-Cases weiterhin grün (RenderGraph/Passes unverändert).
+
 **Nächste Schritte (neue Top 5):**
 
-1. **HDR + Tonemapping** (3.6) — SceneColor als RGBA16F-Target, PostProcessPass
-   als Fullscreen-Tonemap auf den Backbuffer (nutzt dieselbe Target-Infra).
+1. **HDR auf D3D11/D3D12/Vulkan** (blind, auf Windows zu validieren) — analog
+   GL/Metal: RGBA16F-SceneColor + Tonemap-PostProcess in den jeweiligen Sinks.
 2. **Material-Inspector** — Material-Zuweisung per Drag&Drop aufs
    MaterialComponent, Shader-/Textur-Slots editierbar.
 3. **Save-Prompt bei ungesicherten Änderungen** — „Speichern?"-Dialog vor
    Szenenwechsel/Projektschließen/Quit, wenn der Dirty-Marker aktiv ist.
-4. **D3D/Vulkan-Validierung** — auf Windows / mit Vulkan-SDK bauen, die
-   blind geschriebenen Szenen-Draw-Pfade verifizieren und korrigieren.
+4. **Bloom** (3.6 Forts.) — Bright-Pass + Blur auf dem HDR-Target vor dem Tonemap.
 
 Faustregel für die Parallelisierung danach: eine Person/ein Strang auf dem
 kritischen Pfad P1 → P2 → P5 → P6, Rendering (P3) und je ein P4-Block laufen

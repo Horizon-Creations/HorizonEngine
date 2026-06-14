@@ -28,6 +28,7 @@ public:
 
 	void  SetViewportSize(uint32_t width, uint32_t height) override;
 	void* GetViewportTexture() override;
+	bool  CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& width, uint32_t& height) override;
 
 	// Multi-window support
 	void AttachWindow(HE::Window* window) override;
@@ -104,6 +105,22 @@ private:
 	unsigned int m_depthProgram   = 0;   // depth-only pass (lightVP * model * pos)
 	int          m_uDepthMVP      = -1;
 	void CreateShadowResources();
+
+	// ── HDR scene color + tonemap (PostProcessPass) ─────────────────────────
+	// GeometryPass renders into an RGBA16F target; PostProcessPass tonemaps it
+	// to the backbuffer/viewport. Sized to the current output, recreated on resize.
+	unsigned int m_hdrFBO        = 0;
+	unsigned int m_hdrColor      = 0;   // RGBA16F
+	unsigned int m_hdrDepth      = 0;   // renderbuffer
+	int          m_hdrW          = 0;
+	int          m_hdrH          = 0;
+	unsigned int m_tonemapProgram = 0;
+	int          m_uHDRTex        = -1;
+	int          m_uExposure      = -1;
+	unsigned int m_fsVAO          = 0;  // empty VAO for the fullscreen triangle
+	void CreateTonemapPipeline();
+	void EnsureHDRTarget(int width, int height);
+	void DestroyHDRTarget();
 
 	// ── Offscreen viewport (editor scene view) ──────────────────────────────
 	uint32_t     m_viewportReqW  = 0;   // requested by the UI, 0 = direct to window
