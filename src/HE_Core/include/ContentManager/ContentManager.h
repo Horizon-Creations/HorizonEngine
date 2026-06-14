@@ -30,6 +30,11 @@ public:
 	const ScriptAsset*       getScript(HE::UUID id) const;
 	const ShaderAsset*       getShader(HE::UUID id) const;
 
+	// Mutable access to a loaded material, for in-editor editing. Edits are
+	// visible immediately to any renderer sharing this manager; persist them to
+	// disk with saveAsset(). Returns nullptr when the UUID is not a material.
+	MaterialAsset*           getMaterialMutable(HE::UUID id);
+
 	const std::string& contentRoot() const { return m_contentRoot; }
 	// Point the manager at a different content directory (e.g. when the
 	// editor opens a project). Previously loaded assets stay registered.

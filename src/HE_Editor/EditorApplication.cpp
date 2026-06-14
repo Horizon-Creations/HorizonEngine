@@ -522,6 +522,9 @@ void EditorApplication::OnInit()
 	m_editorConfig.QsEditorOpen                = globalstate.getCustomConfigBool("QsEditorOpen",                m_editorConfig.QsEditorOpen);
 	m_editorConfig.ShowGrid                    = globalstate.getCustomConfigBool("ShowGrid",                    m_editorConfig.ShowGrid);
 	m_editorConfig.CbTreeWidth                 = globalstate.getCustomConfigFloat("CbTreeWidth", m_editorConfig.CbTreeWidth);
+	m_editorConfig.UiFontScale                 = globalstate.getCustomConfigFloat("UiFontScale",       m_editorConfig.UiFontScale);
+	m_editorConfig.EditorCameraSpeed           = globalstate.getCustomConfigFloat("EditorCameraSpeed", m_editorConfig.EditorCameraSpeed);
+	m_editorCamera.setFlySpeed(m_editorConfig.EditorCameraSpeed);
 
 #ifdef HE_IMGUI_ENABLED
 	// ── Load HC_Logo ──────────────────────────────────────────────────────────
@@ -1047,6 +1050,8 @@ void EditorApplication::OnShutdown()
 	globalstate.setCustomConfigEntry("QsEditorOpen",                m_editorConfig.QsEditorOpen);
 	globalstate.setCustomConfigEntry("ShowGrid",                    m_editorConfig.ShowGrid);
 	globalstate.setCustomConfigEntry("CbTreeWidth",                 m_editorConfig.CbTreeWidth);
+	globalstate.setCustomConfigEntry("UiFontScale",                m_editorConfig.UiFontScale);
+	globalstate.setCustomConfigEntry("EditorCameraSpeed",          m_editorConfig.EditorCameraSpeed);
 	globalstate.writeConfig();
 }
 

@@ -1,5 +1,6 @@
 #pragma once
 #include "Types/Defines.h"
+#include "Types/UUID.h"
 #include <glm/glm.hpp>
 #include <functional>
 #include <memory>
@@ -105,6 +106,13 @@ public:
     // if there is no offscreen target or the backend cannot read it back.
     virtual bool  CaptureViewport(std::vector<uint8_t>& /*rgba*/,
                                   uint32_t& /*width*/, uint32_t& /*height*/) { return false; }
+
+    // ── Material hot-reload ────────────────────────────────────────────────
+    // Drop any GPU state the backend cached for this material (e.g. uploaded
+    // base-color textures) so the next frame re-resolves it from the
+    // ContentManager. Called by the editor after a material asset is edited or
+    // re-assigned. No-op on backends that do not honour MaterialComponent yet.
+    virtual void InvalidateMaterial(const HE::UUID& /*materialId*/) {}
 
     // ── ImGui texture helpers ──────────────────────────────────────────────
     // Upload raw RGBA8 pixel data and return a backend-specific texture handle

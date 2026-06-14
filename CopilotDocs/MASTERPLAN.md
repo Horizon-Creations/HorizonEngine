@@ -429,12 +429,54 @@ SceneColor-Target; ein neuer `PostProcessPass` macht einen Fullscreen-Tonemap
   rollen jetzt filmisch ab, Gamma hebt die Mitten, Schatten/Struktur erhalten.
 - 33 doctest-Cases weiterhin grün (RenderGraph/Passes unverändert).
 
-**Nächste Schritte (neue Top 5):**
+> **Status 14.06.2026 (Forts.):** Material-Inspector (Top-5 #2) auf GL+Metal
+> umgesetzt + Preferences-Fenster fertig verdrahtet. ✅
+
+**Material-Inspector (Top-5 #2) — GL + Metal:** Das `MaterialComponent` wirkt
+jetzt tatsächlich aufs Rendering (vorher ignoriert — der Texturpfad kam allein
+aus dem im Mesh eingebetteten Material). Neuer Datenfluss:
+- **Shared/neutral:** `RenderObject` und `DrawCall` tragen ein `materialAssetId`;
+  der `RenderExtractor` liest das optionale `MaterialComponent` (`try_get`), die
+  `GeometryPass` kopiert es in den DrawCall. Rein additiv → D3D11/D3D12/Vulkan
+  kompilieren unverändert und ignorieren das Feld (noch kein Override dort).
+- **GL + Metal:** neuer per-Material-Texturcache (Key = Material-UUID), eigene
+  `ResolveMaterialTexture`. Im GeometryPass-Loop gewinnt eine gesetzte
+  Material-Override-Textur über die Mesh-eigene; greift auch auf den Fallback-
+  Würfel. Cache-Invalidierung über die neue `IRenderer::InvalidateMaterial(UUID)`
+  (Default-No-op; GL deferred-delete in DrawScene wo der Context current ist,
+  Metal über den Retired-Texture-Friedhof).
+- **ContentManager:** `getMaterialMutable(UUID)` für In-Editor-Bearbeitung;
+  Edits am gemeinsam genutzten Cache-Objekt sind sofort sichtbar, `saveAsset`
+  persistiert sie.
+- **Inspector (Details-Panel):** Material-Slot als Drop-Target (Content-Browser
+  liefert jetzt eine `HE_ASSET_PATH`-Drag-Source für alle `.hasset`), „Clear",
+  editierbarer Shader-Pfad + Textur-Slots (Text + je Drop-Target für Texturen +
+  Entfernen + „+ Texture Slot"), „Save Material". Edits wirken live (Invalidate),
+  Save schreibt auf Platte. Undo-Snapshot bei Zuweisung/Clear.
+- **Verifiziert:** 34 doctest-Cases grün (neuer GeometryPass-Material-Test);
+  GL+Metal-Build sauber; Headless-Dump = Szene rendert unverändert (kein Regress
+  im umgebauten Draw-Loop). Drag&Drop-UI + Textur-Override-Bild = interaktiv vom
+  User zu bestätigen.
+- **KNOWN LIMITATION:** Eine gesetzte `materialAssetId` löst nach **Szenen-
+  Reload** erst wieder auf, wenn das Material in den ContentManager geladen ist
+  (heute nur on-demand beim Drag&Drop). Es gibt noch keinen Bulk-Preload/Asset-
+  Registry (UUID→Pfad) — betrifft genauso Mesh-UUIDs und gehört zu P6 (6.4
+  Asset-Streaming). In-Session funktioniert alles.
+- **HDR auf D3D/Vulkan (Top-5 #1) bleibt offen** (blinder Windows-Port).
+
+**Preferences-Fenster (Edit ▸ Preferences / Ctrl+,):** Das vorhandene, aber nie
+aufgerufene `DrawPreferencesWindow` ist jetzt in `RenderEditor` verdrahtet +
+Ctrl/Cmd+,-Shortcut. Enthält UI-Font-Scale, Show-Grid, Editor-Kamera-Speed,
+VSync, Content-Browser-Optionen; Werte in `EditorConfig`, persistiert in
+config.json.
+
+**Nächste Schritte (Top 5):**
 
 1. **HDR auf D3D11/D3D12/Vulkan** (blind, auf Windows zu validieren) — analog
    GL/Metal: RGBA16F-SceneColor + Tonemap-PostProcess in den jeweiligen Sinks.
-2. **Material-Inspector** — Material-Zuweisung per Drag&Drop aufs
-   MaterialComponent, Shader-/Textur-Slots editierbar.
+2. ✅ **Material-Inspector** — erledigt (GL+Metal, s.o.). Folgekandidaten:
+   Material-Override auch in D3D/Vulkan; Asset-Registry für UUID→Pfad-Resolve
+   nach Reload; PBR-Skalare (baseColor/metallic/roughness, → 3.3).
 3. **Save-Prompt bei ungesicherten Änderungen** — „Speichern?"-Dialog vor
    Szenenwechsel/Projektschließen/Quit, wenn der Dirty-Marker aktiv ist.
 4. **Bloom** (3.6 Forts.) — Bright-Pass + Blur auf dem HDR-Target vor dem Tonemap.

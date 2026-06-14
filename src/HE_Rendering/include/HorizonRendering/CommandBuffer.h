@@ -14,6 +14,7 @@
 // through for the future handle-based device path but are currently invalid.
 struct DrawCall {
     HE::UUID     meshAssetId;                          // backend resolves → GPU mesh
+    HE::UUID     materialAssetId;                       // optional material override (null = mesh's own)
     RenderHandle mesh          = RenderHandle::invalid();
     RenderHandle material      = RenderHandle::invalid();
     glm::mat4    transform     = glm::mat4(1.0f);

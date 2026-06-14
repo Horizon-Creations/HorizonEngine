@@ -46,6 +46,10 @@ struct EditorConfig
 	// Content browser tree-panel width (-1 = auto on first frame)
 	float CbTreeWidth = -1.0f;
 
+	// Preferences (Edit > Preferences)
+	float UiFontScale       = 1.0f;   // global editor font scale (style.FontScaleMain)
+	float EditorCameraSpeed = 6.0f;   // editor fly-camera speed, world units/second
+
 	EditorMode mode = EditorMode::View;
 	std::string modeString() const
 	{

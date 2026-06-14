@@ -484,6 +484,54 @@ const OpenGLRenderer::GpuMesh* OpenGLRenderer::ResolveMesh(const HE::UUID& asset
 	return &m_meshCache.emplace(assetId, mesh).first->second;
 }
 
+// ─── Material override texture ──────────────────────────────────────────────
+bool OpenGLRenderer::ResolveMaterialTexture(const HE::UUID& materialId, unsigned int& outTex)
+{
+	outTex = 0;
+	if (materialId == HE::UUID{} || !m_contentManager)
+		return false;
+
+	if (auto it = m_materialTexCache.find(materialId); it != m_materialTexCache.end())
+	{
+		outTex = it->second;
+		return true;
+	}
+
+	const MaterialAsset* mat = m_contentManager->getMaterial(materialId);
+	if (!mat)
+		return false; // not loaded yet — retry next frame without caching
+
+	unsigned int tex = 0;
+	if (!mat->texturePaths.empty())
+	{
+		const HE::UUID texId = m_contentManager->loadAsset(mat->texturePaths[0]);
+		if (const TextureAsset* t = m_contentManager->getTexture(texId);
+		    t && !t->data.empty() && t->channels == 4)
+		{
+			glGenTextures(1, &tex);
+			glBindTexture(GL_TEXTURE_2D, tex);
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
+			             static_cast<GLsizei>(t->width), static_cast<GLsizei>(t->height),
+			             0, GL_RGBA, GL_UNSIGNED_BYTE, t->data.data());
+			glGenerateMipmap(GL_TEXTURE_2D);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+			glBindTexture(GL_TEXTURE_2D, 0);
+		}
+	}
+
+	m_materialTexCache.emplace(materialId, tex);
+	outTex = tex;
+	return true;
+}
+
+void OpenGLRenderer::InvalidateMaterial(const HE::UUID& materialId)
+{
+	// Defer the actual glDelete to DrawScene, where the GL context is current.
+	if (materialId != HE::UUID{})
+		m_pendingMaterialInvalidations.push_back(materialId);
+}
+
 void OpenGLRenderer::Shutdown()
 {
 	Logger::Log(Logger::LogLevel::Info, "OpenGLRenderer: shutdown");
@@ -499,6 +547,9 @@ void OpenGLRenderer::Shutdown()
 		if (mesh.texture) glDeleteTextures(1, &mesh.texture);
 	}
 	m_meshCache.clear();
+	for (auto& [id, tex] : m_materialTexCache)
+		if (tex) glDeleteTextures(1, &tex);
+	m_materialTexCache.clear();
 	DestroyViewportTarget();
 	DestroyHDRTarget();
 	for (auto& r : m_retiredTextures)
@@ -634,6 +685,16 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	if (pw <= 0 || ph <= 0) return;
 	glViewport(0, 0, pw, ph);
 
+	// Drop GPU textures for materials edited/re-assigned since last frame so the
+	// loop below re-resolves them (deferred here where the GL context is current).
+	for (const HE::UUID& id : m_pendingMaterialInvalidations)
+		if (auto it = m_materialTexCache.find(id); it != m_materialTexCache.end())
+		{
+			if (it->second) glDeleteTextures(1, &it->second);
+			m_materialTexCache.erase(it);
+		}
+	m_pendingMaterialInvalidations.clear();
+
 	m_extractor.extract(*m_world, m_renderWorld,
 	                    static_cast<float>(pw) / static_cast<float>(ph),
 	                    &m_editorCamera);
@@ -761,21 +822,20 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glUniformMatrix4fv(m_uMVP,   1, GL_FALSE, glm::value_ptr(mvp));
 			glUniformMatrix4fv(m_uModel, 1, GL_FALSE, glm::value_ptr(dc.transform));
 
+			// An explicit MaterialComponent override wins over the mesh's own
+			// base-color texture; otherwise fall back to the mesh's (or none).
+			unsigned int overrideTex = 0;
+			const bool   hasOverride = ResolveMaterialTexture(dc.materialAssetId, overrideTex);
+
 			// Resolve the asset; entities without one fall back to the built-in cube.
-			if (const GpuMesh* mesh = ResolveMesh(dc.meshAssetId))
-			{
-				glBindVertexArray(mesh->vao);
-				glUniform1i(m_uHasTexture, mesh->texture != 0);
-				glBindTexture(GL_TEXTURE_2D, mesh->texture);
-				glDrawElements(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr);
-			}
-			else
-			{
-				glBindVertexArray(m_cubeVAO);
-				glUniform1i(m_uHasTexture, 0);
-				glBindTexture(GL_TEXTURE_2D, 0);
-				glDrawElements(GL_TRIANGLES, m_cubeIndexCount, GL_UNSIGNED_INT, nullptr);
-			}
+			const GpuMesh*     mesh = ResolveMesh(dc.meshAssetId);
+			const unsigned int tex  = hasOverride ? overrideTex
+			                                      : (mesh ? mesh->texture : 0u);
+			glBindVertexArray(mesh ? mesh->vao : m_cubeVAO);
+			glUniform1i(m_uHasTexture, tex != 0);
+			glBindTexture(GL_TEXTURE_2D, tex);
+			glDrawElements(GL_TRIANGLES, mesh ? mesh->indexCount : m_cubeIndexCount,
+			               GL_UNSIGNED_INT, nullptr);
 		}
 	});
 

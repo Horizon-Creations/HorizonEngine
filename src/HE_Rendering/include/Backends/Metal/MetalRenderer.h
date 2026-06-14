@@ -44,6 +44,7 @@ public:
 	void  SetViewportSize(uint32_t width, uint32_t height) override;
 	void* GetViewportTexture() override;
 	bool  CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& width, uint32_t& height) override;
+	void  InvalidateMaterial(const HE::UUID& materialId) override;
 
 	// Multi-window support
 	void AttachWindow(HE::Window* window) override;
@@ -91,6 +92,13 @@ private:
 	// Returns the GPU mesh for the asset, uploading it on first use.
 	// nullptr when the UUID is invalid or the asset is not loaded.
 	const GpuMesh* ResolveMesh(const HE::UUID& assetId);
+
+	// Resolves the base-color texture of an explicit MaterialComponent override,
+	// uploading it on first sight and caching by material UUID. Returns true if
+	// the material was found (outTex may still be nullptr = no texture); false
+	// when the UUID is null or the material is not loaded yet. outTex is an
+	// (unretained, autoreleased) id<MTLTexture> owned by the cache.
+	bool ResolveMaterialTexture(const HE::UUID& materialId, void*& outTex);
 
 	SDL_Window* m_primarySdlWindow = nullptr;
 	WindowTarget m_primaryTarget;
@@ -144,6 +152,11 @@ private:
 
 	// Uploaded asset meshes, keyed by asset UUID
 	std::unordered_map<HE::UUID, GpuMesh> m_meshCache;
+
+	// Base-color textures for MaterialComponent overrides, keyed by material
+	// UUID (id<MTLTexture>, retained; nullptr = resolved, no texture).
+	// InvalidateMaterial retires the texture and drops the entry.
+	std::unordered_map<HE::UUID, void*> m_materialTexCache;
 
 	// ── Offscreen viewport (editor scene view) ──────────────────────────────
 	uint32_t m_viewportReqW    = 0;  // requested by the UI, 0 = direct to window

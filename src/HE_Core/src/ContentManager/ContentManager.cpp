@@ -281,6 +281,12 @@ const AudioAsset*        ContentManager::getAudio(HE::UUID id) const        { re
 const ScriptAsset*       ContentManager::getScript(HE::UUID id) const       { return lookupAsset(m_handleToUUID, m_scriptAssets, id); }
 const ShaderAsset*       ContentManager::getShader(HE::UUID id) const       { return lookupAsset(m_handleToUUID, m_shaderAssets, id); }
 
+MaterialAsset* ContentManager::getMaterialMutable(HE::UUID id)
+{
+	auto it = m_handleToUUID.find(id);
+	return it == m_handleToUUID.end() ? nullptr : m_materialAssets.get(it->second);
+}
+
 // ─── unloadAsset ─────────────────────────────────────────────────────────────
 bool ContentManager::unloadAsset(HE::UUID id)
 {

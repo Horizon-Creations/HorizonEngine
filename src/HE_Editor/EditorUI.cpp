@@ -64,6 +64,9 @@ namespace
 // to force a rebuild of the default layout even when a layout is already loaded.
 static bool s_resetLayoutRequested = false;
 
+// Toggled by Edit > Preferences (Ctrl+,); drives the Preferences window.
+static bool s_showPreferences = false;
+
 static void BuildDefaultDockLayout(ImGuiID dockspaceId, const ImVec2& size)
 {
 	ImGui::DockBuilderRemoveNode(dockspaceId);
@@ -87,6 +90,62 @@ static void BuildDefaultDockLayout(ImGuiID dockspaceId, const ImVec2& size)
 	ImGui::DockBuilderDockWindow("Content Browser", dockDown);
 	ImGui::DockBuilderDockWindow("Scene",          dockMain);
 	ImGui::DockBuilderFinish(dockspaceId);
+}
+
+// ─── Preferences window (Edit > Preferences) ────────────────────────────────
+// Central place for editor settings. Values live in EditorConfig (a reference in
+// AppContext) and are persisted to config.json on exit. Changes that need an
+// immediate side effect (camera speed, vsync) are applied here on edit; the font
+// scale is applied every frame from EditorConfig in render().
+static void DrawPreferencesWindow(AppContext& ctx, bool& open)
+{
+	if (!open) return;
+
+	ImGui::SetNextWindowSize(ImVec2(440.0f, 0.0f), ImGuiCond_FirstUseEver);
+	ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(),
+	                        ImGuiCond_FirstUseEver, ImVec2(0.5f, 0.5f));
+	if (ImGui::Begin("Preferences", &open, ImGuiWindowFlags_NoCollapse))
+	{
+		EditorConfig& cfg = ctx.editorConfig;
+
+		ImGui::SeparatorText("Appearance");
+		ImGui::SetNextItemWidth(220.0f);
+		ImGui::SliderFloat("UI Font Scale", &cfg.UiFontScale, 0.5f, 2.0f, "%.2fx");
+		ImGui::SameLine();
+		if (ImGui::SmallButton("Reset##fontscale")) cfg.UiFontScale = 1.0f;
+
+		ImGui::SeparatorText("Viewport");
+		ImGui::Checkbox("Show Grid", &cfg.ShowGrid);
+		ImGui::SetNextItemWidth(220.0f);
+		if (ImGui::SliderFloat("Camera Speed", &cfg.EditorCameraSpeed, 1.0f, 50.0f, "%.1f u/s")
+		    && ctx.editorCamera)
+			ctx.editorCamera->setFlySpeed(cfg.EditorCameraSpeed);
+
+		ImGui::SeparatorText("Rendering");
+		if (ImGui::Checkbox("VSync", &ctx.vsync) && ctx.window)
+			ctx.window->SetVSync(ctx.vsync);
+
+		ImGui::SeparatorText("Content Browser");
+		ImGui::Checkbox("Keep CPU Asset Cache", &cfg.KeepCPUAssets);
+		ImGui::SetNextItemWidth(120.0f);
+		ImGui::InputInt("Refresh Interval (s)", &cfg.ContentBrowserRefreshRate);
+		if (cfg.ContentBrowserRefreshRate < 0) cfg.ContentBrowserRefreshRate = 0;
+
+		ImGui::Separator();
+		ImGui::TextDisabled("Preferences are saved when the editor exits.");
+		if (ImGui::Button("Restore Defaults"))
+		{
+			cfg.UiFontScale       = 1.0f;
+			cfg.EditorCameraSpeed = 6.0f;
+			cfg.ShowGrid          = true;
+			cfg.KeepCPUAssets     = false;
+			cfg.ContentBrowserRefreshRate = 60;
+			if (ctx.editorCamera) ctx.editorCamera->setFlySpeed(cfg.EditorCameraSpeed);
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Close")) open = false;
+	}
+	ImGui::End();
 }
 #endif // HE_IMGUI_ENABLED
 
@@ -139,6 +198,9 @@ void EditorUI::render(AppContext& ctx, float dt)
 
     ImGui::NewFrame();
     ImGuizmo::BeginFrame();
+
+    // Apply the user's UI font scale preference (clamped to a sane range).
+    ImGui::GetStyle().FontScaleMain = std::clamp(ctx.editorConfig.UiFontScale, 0.5f, 3.0f);
 
     // ── Content-Refresh Popup ─────────────────────────────────────────────────
     if (ctx.contentRefreshPending || ctx.contentRefreshDone)
@@ -744,7 +806,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
         if (ImGui::MenuItem("Copy",  "Ctrl+C")) {}
         if (ImGui::MenuItem("Paste", "Ctrl+V")) {}
         ImGui::Separator();
-		if (ImGui::MenuItem("Preferences", "Ctrl+,")) {}
+		if (ImGui::MenuItem("Preferences", "Ctrl+,")) s_showPreferences = true;
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("View"))
@@ -817,6 +879,9 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
             if (kio.KeyShift) triggerSaveSceneAs();
             else              doSaveScene();
         }
+        // Ctrl/Cmd+, opens Preferences (matches the Edit menu shortcut label).
+        if (mod && !kio.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Comma, false))
+            s_showPreferences = true;
     }
 
     if (!ctx.hubOpenError.empty())
@@ -1908,6 +1973,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 
     RenderInspector(ctx);
 
+    DrawPreferencesWindow(ctx, s_showPreferences);
+
     //Content Browser
 	auto [contentFolder, contentLock] = ctx.globalState->lockContentFolder();
     if (ctx.fontHeading) ImGui::PushFont(ctx.fontHeading);
@@ -2250,6 +2317,17 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 
 			ImGui::PopStyleVar();
 			ImGui::PopStyleColor(3);
+
+			// Drag source — carries the asset's absolute path so drop targets
+			// (e.g. the Material slot in the inspector) can load it.
+			if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_None))
+			{
+				ImGui::SetDragDropPayload("HE_ASSET_PATH",
+					file->fullPath.c_str(), file->fullPath.size() + 1);
+				ImGui::TextUnformatted(
+					std::filesystem::path(file->name).stem().string().c_str());
+				ImGui::EndDragDropSource();
+			}
 
 			// Left click → select
 			if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
@@ -2685,12 +2763,124 @@ void EditorUI::RenderInspector(AppContext& ctx)
 	{
 		if (componentHeader("Material", true, removed))
 		{
-			if (m->materialAssetId == HE::UUID{})
-				ImGui::TextDisabled("Asset: (none)");
-			else if (ctx.contentManager)
+			// Resolve a Content-Browser drag (absolute path) to a content-root-
+			// relative path, returning empty if it lives outside the root.
+			auto toRelative = [&](const char* absPath) -> std::string
 			{
-				const MaterialAsset* asset = ctx.contentManager->getMaterial(m->materialAssetId);
-				ImGui::Text("Asset: %s", asset ? asset->name.c_str() : "(not loaded)");
+				if (!ctx.contentManager) return {};
+				std::error_code ec;
+				std::string rel = std::filesystem::relative(
+					absPath, ctx.contentManager->contentRoot(), ec).generic_string();
+				if (ec || rel.empty() || rel.rfind("..", 0) == 0) return {};
+				return rel;
+			};
+
+			// ── Material asset slot — drop a material .hasset here ────────────
+			const MaterialAsset* asset = (m->materialAssetId == HE::UUID{} || !ctx.contentManager)
+				? nullptr : ctx.contentManager->getMaterial(m->materialAssetId);
+			const std::string slotLabel = (m->materialAssetId == HE::UUID{})
+				? std::string("(none — drop a material here)")
+				: (asset ? asset->name : std::string("(not loaded)"));
+
+			ImGui::TextUnformatted("Asset");
+			ImGui::SameLine();
+			ImGui::Button((slotLabel + "##matslot").c_str());
+			if (ImGui::BeginDragDropTarget())
+			{
+				if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_ASSET_PATH"))
+				{
+					const std::string rel = toRelative(static_cast<const char*>(p->Data));
+					const HE::UUID id = rel.empty() ? HE::UUID{}
+					                                : ctx.contentManager->loadAsset(rel);
+					if (id != HE::UUID{} && ctx.contentManager->getMaterial(id))
+					{
+						if (ctx.undoSys) ctx.undoSys->snapshotNow();
+						m->materialAssetId = id;
+						m->dirty = true;
+						if (ctx.renderer) ctx.renderer->InvalidateMaterial(id);
+					}
+					else
+						Logger::Log(Logger::LogLevel::Warning,
+							"Editor: dropped asset is not a material");
+				}
+				ImGui::EndDragDropTarget();
+			}
+			if (m->materialAssetId != HE::UUID{})
+			{
+				ImGui::SameLine();
+				if (ImGui::SmallButton("Clear"))
+				{
+					if (ctx.undoSys) ctx.undoSys->snapshotNow();
+					m->materialAssetId = HE::UUID{};
+					m->dirty = true;
+				}
+			}
+
+			// ── Editable slots of the assigned material ──────────────────────
+			MaterialAsset* mat = (m->materialAssetId == HE::UUID{} || !ctx.contentManager)
+				? nullptr : ctx.contentManager->getMaterialMutable(m->materialAssetId);
+			if (mat)
+			{
+				ImGui::Separator();
+				ImGui::TextDisabled("%s", mat->path.c_str());
+
+				// Shader path
+				char sbuf[260];
+				std::strncpy(sbuf, mat->shaderPath.c_str(), sizeof(sbuf) - 1);
+				sbuf[sizeof(sbuf) - 1] = '\0';
+				if (ImGui::InputText("Shader", sbuf, sizeof(sbuf)))
+					mat->shaderPath = sbuf;
+
+				// Texture slots — editable text + per-slot drop target + remove.
+				ImGui::TextUnformatted("Textures");
+				int removeSlot = -1;
+				for (size_t i = 0; i < mat->texturePaths.size(); ++i)
+				{
+					ImGui::PushID(static_cast<int>(i));
+					char tbuf[260];
+					std::strncpy(tbuf, mat->texturePaths[i].c_str(), sizeof(tbuf) - 1);
+					tbuf[sizeof(tbuf) - 1] = '\0';
+					ImGui::SetNextItemWidth(-30.0f);
+					if (ImGui::InputText("##tex", tbuf, sizeof(tbuf)))
+						mat->texturePaths[i] = tbuf;
+					if (ImGui::IsItemDeactivatedAfterEdit() && ctx.renderer)
+						ctx.renderer->InvalidateMaterial(m->materialAssetId);
+					if (ImGui::BeginDragDropTarget())
+					{
+						if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_ASSET_PATH"))
+						{
+							const std::string rel = toRelative(static_cast<const char*>(p->Data));
+							if (!rel.empty())
+							{
+								mat->texturePaths[i] = rel;
+								if (ctx.renderer) ctx.renderer->InvalidateMaterial(m->materialAssetId);
+							}
+						}
+						ImGui::EndDragDropTarget();
+					}
+					ImGui::SameLine();
+					if (ImGui::SmallButton("X")) removeSlot = static_cast<int>(i);
+					ImGui::PopID();
+				}
+				if (removeSlot >= 0)
+				{
+					mat->texturePaths.erase(mat->texturePaths.begin() + removeSlot);
+					if (ctx.renderer) ctx.renderer->InvalidateMaterial(m->materialAssetId);
+				}
+				if (ImGui::SmallButton("+ Texture Slot"))
+					mat->texturePaths.emplace_back();
+
+				ImGui::Spacing();
+				if (ImGui::Button("Save Material"))
+				{
+					const bool ok = ctx.contentManager->saveAsset(*mat);
+					if (ok && ctx.renderer) ctx.renderer->InvalidateMaterial(m->materialAssetId);
+					Logger::Log(ok ? Logger::LogLevel::Info : Logger::LogLevel::Error,
+						("Editor: " + std::string(ok ? "saved" : "failed to save")
+						 + " material '" + mat->name + "'").c_str());
+				}
+				ImGui::SameLine();
+				ImGui::TextDisabled("(edits apply live; Save writes to disk)");
 			}
 		}
 		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<MaterialComponent>(entity); }

@@ -303,6 +303,10 @@ void MetalRenderer::Shutdown()
 	}
 	m_meshCache.clear();
 
+	for (auto& [id, tex] : m_materialTexCache)
+		if (tex) CFBridgingRelease(tex);
+	m_materialTexCache.clear();
+
 	DestroyViewportTarget();
 	DestroyHDRTarget();
 	DrainRetiredTextures();
@@ -619,6 +623,64 @@ const MetalRenderer::GpuMesh* MetalRenderer::ResolveMesh(const HE::UUID& assetId
 		 + (mesh.texture ? ", textured" : "") + ")").c_str());
 
 	return &m_meshCache.emplace(assetId, mesh).first->second;
+}
+
+// ─── Material override texture ──────────────────────────────────────────────
+bool MetalRenderer::ResolveMaterialTexture(const HE::UUID& materialId, void*& outTex)
+{
+	outTex = nullptr;
+	if (materialId == HE::UUID{} || !m_contentManager)
+		return false;
+
+	if (auto it = m_materialTexCache.find(materialId); it != m_materialTexCache.end())
+	{
+		outTex = it->second;
+		return true;
+	}
+
+	const MaterialAsset* mat = m_contentManager->getMaterial(materialId);
+	if (!mat)
+		return false; // not loaded yet — retry next frame without caching
+
+	void* retained = nullptr;
+	if (!mat->texturePaths.empty())
+	{
+		const HE::UUID texId = m_contentManager->loadAsset(mat->texturePaths[0]);
+		if (const TextureAsset* tex = m_contentManager->getTexture(texId);
+		    tex && !tex->data.empty() && tex->channels == 4)
+		{
+			id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+			MTLTextureDescriptor* desc = [MTLTextureDescriptor
+				texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+				                             width:tex->width
+				                            height:tex->height
+				                         mipmapped:NO];
+			desc.usage       = MTLTextureUsageShaderRead;
+			desc.storageMode = MTLStorageModeShared;
+			id<MTLTexture> texture = [device newTextureWithDescriptor:desc];
+			[texture replaceRegion:MTLRegionMake2D(0, 0, tex->width, tex->height)
+			           mipmapLevel:0
+			             withBytes:tex->data.data()
+			           bytesPerRow:tex->width * 4];
+			retained = (void*)CFBridgingRetain(texture);
+		}
+	}
+
+	m_materialTexCache.emplace(materialId, retained);
+	outTex = retained;
+	return true;
+}
+
+void MetalRenderer::InvalidateMaterial(const HE::UUID& materialId)
+{
+	if (materialId == HE::UUID{}) return;
+	if (auto it = m_materialTexCache.find(materialId); it != m_materialTexCache.end())
+	{
+		// In-flight GPU work may still sample it — retire (released a few frames
+		// later) rather than freeing now.
+		if (it->second) RetireTexture(it->second);
+		m_materialTexCache.erase(it);
+	}
 }
 
 // ─── Window targets ───────────────────────────────────────────────────────────
@@ -942,29 +1004,35 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 			u.model = dc.transform;
 			u.color = glm::vec4(0.85f, 0.55f, 0.25f, 1.0f);
 
+			// An explicit MaterialComponent override wins over the mesh's own
+			// base-color texture when present and resolvable.
+			void*      overrideTex = nullptr;
+			const bool hasOverride = ResolveMaterialTexture(dc.materialAssetId, overrideTex);
+
 			// Resolve the asset; entities without one fall back to the built-in cube.
 			id<MTLBuffer> vertexBuf;
 			id<MTLBuffer> indexBuf;
 			NSUInteger    indexCount;
-			id<MTLTexture> texture;
+			void*         meshTex = nullptr;
 			if (const GpuMesh* mesh = ResolveMesh(dc.meshAssetId))
 			{
 				vertexBuf  = (__bridge id<MTLBuffer>)mesh->vertexBuf;
 				indexBuf   = (__bridge id<MTLBuffer>)mesh->indexBuf;
 				indexCount = (NSUInteger)mesh->indexCount;
-				texture    = mesh->texture
-					? (__bridge id<MTLTexture>)mesh->texture
-					: (__bridge id<MTLTexture>)m_dummyTexture;
-				u.flags    = glm::vec4(mesh->texture ? 1.0f : 0.0f, 0, 0, 0);
+				meshTex    = mesh->texture;
 			}
 			else
 			{
 				vertexBuf  = (__bridge id<MTLBuffer>)m_cubeVertexBuf;
 				indexBuf   = (__bridge id<MTLBuffer>)m_cubeIndexBuf;
 				indexCount = (NSUInteger)m_cubeIndexCount;
-				texture    = (__bridge id<MTLTexture>)m_dummyTexture;
-				u.flags    = glm::vec4(0.0f);
 			}
+
+			void* effectiveTex = hasOverride ? overrideTex : meshTex;
+			id<MTLTexture> texture = effectiveTex
+				? (__bridge id<MTLTexture>)effectiveTex
+				: (__bridge id<MTLTexture>)m_dummyTexture;
+			u.flags = glm::vec4(effectiveTex ? 1.0f : 0.0f, 0, 0, 0);
 
 			[encoder setVertexBuffer:vertexBuf offset:0 atIndex:0];
 			[encoder setVertexBytes:&u length:sizeof(u) atIndex:1];
