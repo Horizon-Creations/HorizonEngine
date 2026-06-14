@@ -60,6 +60,10 @@ namespace
 // fall into this default instead of floating loose. Mirrors the panel layout in
 // the reference screenshots: thin toolbar floats on top; Quick Settings left,
 // World Outliner + Details stacked right, Content Browser bottom, Scene centre.
+// Set by View > Reset Layout; consumed by the dockspace block in RenderEditor()
+// to force a rebuild of the default layout even when a layout is already loaded.
+static bool s_resetLayoutRequested = false;
+
 static void BuildDefaultDockLayout(ImGuiID dockspaceId, const ImVec2& size)
 {
 	ImGui::DockBuilderRemoveNode(dockspaceId);
@@ -67,10 +71,13 @@ static void BuildDefaultDockLayout(ImGuiID dockspaceId, const ImVec2& size)
 		ImGuiDockNodeFlags_DockSpace | ImGuiDockNodeFlags_PassthruCentralNode);
 	ImGui::DockBuilderSetNodeSize(dockspaceId, size);
 
+	// Fractions are relative to the node being split (they compound). Tuned to the
+	// reference layout: Quick Settings ~18% left, World Outliner/Details ~21%
+	// right (split 50/50), Content Browser ~33% of the centre column's height.
 	ImGuiID dockMain  = dockspaceId;
-	ImGuiID dockLeft  = ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Left,  0.19f, nullptr, &dockMain);
-	ImGuiID dockRight = ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Right, 0.24f, nullptr, &dockMain);
-	ImGuiID dockDown  = ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Down,  0.30f, nullptr, &dockMain);
+	ImGuiID dockLeft  = ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Left,  0.18f, nullptr, &dockMain);
+	ImGuiID dockRight = ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Right, 0.26f, nullptr, &dockMain);
+	ImGuiID dockDown  = ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Down,  0.33f, nullptr, &dockMain);
 	ImGuiID dockRightBottom =
 		ImGui::DockBuilderSplitNode(dockRight, ImGuiDir_Down, 0.50f, nullptr, &dockRight);
 
@@ -743,6 +750,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
     if (ImGui::BeginMenu("View"))
     {
         if (ImGui::MenuItem("Toggle Fullscreen", "F11")) {}
+        if (ImGui::MenuItem("Reset Layout")) s_resetLayoutRequested = true;
         ImGui::EndMenu();
     }
 	if (ImGui::BeginMenu("Assets"))
@@ -1185,13 +1193,15 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
         ImGui::PopStyleColor(2);
 
         const ImGuiID dockspaceId = ImGui::GetID("##MainDockSpace");
-        // First run (or no saved layout in imgui.ini): lay the panels out sensibly
-        // so nothing floats loose. A layout loaded from imgui.ini always wins.
-        if (ImGui::DockBuilderGetNode(dockspaceId) == nullptr)
+        // Build the default layout on first run (no saved layout in imgui.ini) or
+        // on demand via View > Reset Layout. A layout loaded from imgui.ini
+        // otherwise always wins, so user customisations persist.
+        if (s_resetLayoutRequested || ImGui::DockBuilderGetNode(dockspaceId) == nullptr)
         {
             BuildDefaultDockLayout(dockspaceId, ImGui::GetContentRegionAvail());
-            // Persist the freshly-built default immediately so it survives an
-            // early exit and becomes the baseline the user then customises.
+            s_resetLayoutRequested = false;
+            // Persist immediately so the layout survives an early exit and becomes
+            // the baseline the user then customises.
             if (const char* ini = ImGui::GetIO().IniFilename)
                 ImGui::SaveIniSettingsToDisk(ini);
         }
