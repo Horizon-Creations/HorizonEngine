@@ -43,6 +43,7 @@ public:
 
 	void  SetViewportSize(uint32_t width, uint32_t height) override;
 	void* GetViewportTexture() override;
+	bool  CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& width, uint32_t& height) override;
 
 	// Multi-window support
 	void AttachWindow(HE::Window* window) override;
@@ -127,6 +128,19 @@ private:
 	int   m_shadowSize     = 2048;
 	void  EnsureShadowResources();
 	void  EncodeShadowMap(void* cmdBuf); // renders the depth map before the scene
+
+	// ── HDR scene color + tonemap (PostProcessPass) ─────────────────────────
+	// The scene is rendered into an RGBA16Float target; EncodeTonemap then maps
+	// it down to the LDR output (viewport texture or drawable). Sized to the
+	// current scene output, recreated on resize.
+	void* m_tonemapPipeline = nullptr; // id<MTLRenderPipelineState>
+	void* m_hdrColor        = nullptr; // id<MTLTexture>, RGBA16Float (retained)
+	void* m_hdrDepth        = nullptr; // id<MTLTexture>, Depth32Float (retained)
+	int   m_hdrW            = 0;
+	int   m_hdrH            = 0;
+	void  EnsureHDRTarget(int width, int height);
+	void  DestroyHDRTarget();
+	void  EncodeTonemap(void* renderEncoder); // fullscreen tonemap of m_hdrColor
 
 	// Uploaded asset meshes, keyed by asset UUID
 	std::unordered_map<HE::UUID, GpuMesh> m_meshCache;

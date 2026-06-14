@@ -3,6 +3,8 @@
 #include <glm/glm.hpp>
 #include <functional>
 #include <memory>
+#include <vector>
+#include <cstdint>
 
 namespace HE { class Window; }
 class HorizonWorld;
@@ -96,6 +98,13 @@ public:
     // Pass 0×0 to return to direct-to-window rendering.
     virtual void  SetViewportSize(uint32_t /*width*/, uint32_t /*height*/) {}
     virtual void* GetViewportTexture() { return nullptr; }
+
+    // ── Offscreen capture (headless screenshot / validation / thumbnails) ───
+    // Read the most recently rendered offscreen viewport color target back into
+    // CPU memory as tightly-packed RGBA8, top row first (y-down). Returns false
+    // if there is no offscreen target or the backend cannot read it back.
+    virtual bool  CaptureViewport(std::vector<uint8_t>& /*rgba*/,
+                                  uint32_t& /*width*/, uint32_t& /*height*/) { return false; }
 
     // ── ImGui texture helpers ──────────────────────────────────────────────
     // Upload raw RGBA8 pixel data and return a backend-specific texture handle

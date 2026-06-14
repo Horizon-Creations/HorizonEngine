@@ -9,6 +9,10 @@
 #include <string>
 #include <array>
 #include <future>
+#include <cstdlib>
+#include <cstdint>
+#include <fstream>
+#include <vector>
 
 // stb_image — declaration only (implementation in stb_image_impl.cpp)
 #include "vendor/stb_image.h"
@@ -222,6 +226,15 @@ std::unique_ptr<IRenderer> EditorApplication::CreateRenderer()
 
 void EditorApplication::OnInit()
 {
+	// ── Headless frame-dump hook (validation / CI screenshots) ──────────────
+	if (const char* p = std::getenv("HE_DUMP_PATH"); p && *p)
+	{
+		m_dumpPath = p;
+		if (const char* q = std::getenv("HE_DUMP_QUIT"); q && *q)
+			m_dumpQuit = (std::atoi(q) != 0);
+		Logger::Log(Logger::LogLevel::Info,
+			("EditorApplication: frame dump armed → " + m_dumpPath).c_str());
+	}
 #ifdef HE_IMGUI_ENABLED
 	Logger::Log(Logger::LogLevel::Info, "EditorApplication::OnInit — initialising ImGui");
 	m_vsync = GetConfig().windowprops.vsync;
@@ -644,6 +657,11 @@ void EditorApplication::OnInit()
 			m_contentRefreshPending = true;
 		}
 	}
+
+	// Headless validation screenshot: render + capture now, before the paced
+	// main loop (which throttles when the window is occluded), then quit.
+	if (!m_dumpPath.empty())
+		dumpFrameHeadless();
 }
 
 void EditorApplication::OnRender(float dt)
@@ -700,6 +718,83 @@ void EditorApplication::OnRender(float dt)
 
 		m_frametimeHistory[m_fpsHistoryOffset] = dt * 1000.0f; // ms
 		m_fpsHistoryOffset = (m_fpsHistoryOffset + 1) % k_fpsHistorySize;
+	}
+}
+
+// ─── Headless frame dump ──────────────────────────────────────────────────────
+namespace
+{
+	// Minimal dependency-free 32-bit BGRA, top-down BMP writer. Input is
+	// tightly-packed RGBA8, top row first. Used by the validation screenshot
+	// path; convert to PNG with `sips` if needed.
+	bool writeBMP(const std::string& path, const std::vector<uint8_t>& rgba,
+	              uint32_t w, uint32_t h)
+	{
+		if (rgba.size() < static_cast<size_t>(w) * h * 4) return false;
+		std::ofstream out(path, std::ios::binary | std::ios::trunc);
+		if (!out.is_open()) return false;
+
+		const uint32_t pixelBytes = w * h * 4;
+		const uint32_t fileSize   = 54 + pixelBytes;
+		auto u16 = [&](uint16_t v){ out.put(char(v & 0xFF)); out.put(char((v >> 8) & 0xFF)); };
+		auto u32 = [&](uint32_t v){ for (int i = 0; i < 4; ++i) out.put(char((v >> (8 * i)) & 0xFF)); };
+		auto i32 = [&](int32_t v){ u32(static_cast<uint32_t>(v)); };
+
+		// BITMAPFILEHEADER
+		out.put('B'); out.put('M');
+		u32(fileSize); u16(0); u16(0); u32(54);
+		// BITMAPINFOHEADER
+		u32(40); i32(static_cast<int32_t>(w)); i32(-static_cast<int32_t>(h)); // negative = top-down
+		u16(1); u16(32); u32(0); u32(pixelBytes); i32(2835); i32(2835); u32(0); u32(0);
+
+		// Pixels: RGBA → BGRA
+		for (uint32_t i = 0; i < w * h; ++i)
+		{
+			const uint8_t* px = &rgba[static_cast<size_t>(i) * 4];
+			out.put(char(px[2])); out.put(char(px[1])); out.put(char(px[0])); out.put(char(px[3]));
+		}
+		return out.good();
+	}
+}
+
+void EditorApplication::dumpFrameHeadless()
+{
+	if (m_dumpPath.empty() || m_dumpDone) return;
+	IRenderer* r = renderer();
+	if (!r)
+	{
+		Logger::Log(Logger::LogLevel::Error, "EditorApplication: no renderer for frame dump");
+		m_dumpDone = true;
+		return;
+	}
+
+	// Render the scene into a fixed offscreen target a few times, bypassing the
+	// ImGui overlay and the window swap. Doing this here (before the paced main
+	// loop) means it works even when the window is occluded / App-Napped on
+	// macOS — where the normal loop throttles to a near-frozen frame rate and a
+	// loop-driven capture never fires.
+	r->SetOverlayCallback(nullptr);
+	r->SetViewportSize(1280, 720);
+	for (int i = 0; i < 3; ++i)
+		r->Render();
+
+	std::vector<uint8_t> rgba;
+	uint32_t w = 0, h = 0;
+	if (r->CaptureViewport(rgba, w, h) && w > 0 && h > 0 && writeBMP(m_dumpPath, rgba, w, h))
+		Logger::Log(Logger::LogLevel::Info,
+			("EditorApplication: frame dumped (" + std::to_string(w) + "x" +
+			 std::to_string(h) + ") → " + m_dumpPath).c_str());
+	else
+		Logger::Log(Logger::LogLevel::Error,
+			("EditorApplication: frame dump failed → " + m_dumpPath).c_str());
+
+	m_dumpDone = true;
+	if (m_dumpQuit)
+	{
+		// Ask the main loop to exit on its first iteration (before any swap).
+		SDL_Event q;
+		q.type = SDL_EVENT_QUIT;
+		SDL_PushEvent(&q);
 	}
 }
 
