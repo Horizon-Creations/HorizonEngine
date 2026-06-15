@@ -400,9 +400,9 @@ float cloudDensity(vec3 pos, float time, float coverage)
 	float morph = time * 0.030;                       // slow in-place forming/dissolving
 	float base  = starFbm3(p + vec3(0.0, morph, 0.0), 4);
 	float detail= starFbm3(p * 3.1 + vec3(morph, 0.0, 0.0), 2);
-	base       -= 0.15 * detail;                       // erode soft edges
+	base       -= 0.08 * detail;                       // gentle erosion (keep edges soft)
 	float lo    = mix(0.95, 0.05, clamp(coverage, 0.0, 1.0));
-	float d     = smoothstep(lo, lo + 0.22, base);
+	float d     = smoothstep(lo, lo + 0.30, base);     // wider ramp = fuller, less torn
 	return d * cloudHeightGrad(pos.y);
 }
 // Cheaper density for the sun light-march (skips the detail octave).
@@ -412,7 +412,7 @@ float cloudShadowDensity(vec3 pos, float time, float coverage)
 	float morph = time * 0.030;
 	float base  = starFbm3(p + vec3(0.0, morph, 0.0), 3);
 	float lo    = mix(0.95, 0.05, clamp(coverage, 0.0, 1.0));
-	float d     = smoothstep(lo, lo + 0.22, base);
+	float d     = smoothstep(lo, lo + 0.30, base);
 	return d * cloudHeightGrad(pos.y);
 }
 vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float time, float coverage, vec3 sunColor)
@@ -456,11 +456,15 @@ vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float time, float coverage
 			vec3 duskTop  = sunColor * vec3(1.25, 0.55, 0.28);
 			cloudCol = mix(cloudCol, duskTop, dusk * lit * 0.85);
 			// Silver/golden lining: thin, back-lit edges toward the sun glow as the
-			// sunlight scatters through them.
+			// sunlight scatters through them (gentle so wisps don't tear).
 			float toSun = max(dot(dir, sunDir), 0.0);
-			cloudCol += sunColor * (pow(toSun, 8.0) * sun * 0.8 * max(day, dusk));
-			// Cool sky-ambient fill so shadowed undersides aren't pitch black.
-			cloudCol += vec3(0.10, 0.14, 0.22) * ((1.0 - sun) * day * 0.35);
+			cloudCol += sunColor * (pow(toSun, 8.0) * sun * 0.45 * max(day, dusk));
+			// Cheap vertical depth: tops catch the light (bright crown), the base
+			// sits in self-shadow (darker, cooler) — fakes the volumetric
+			// "cauliflower" relief from just the sample's height in the slab.
+			float hTone = smoothstep(kCloudBase, kCloudTop, pos.y);
+			cloudCol *= mix(0.55, 1.12, hTone);
+			cloudCol += vec3(0.07, 0.10, 0.17) * ((1.0 - hTone) * day * 0.5);
 
 			float a = clamp(dens * ds * 2.4, 0.0, 1.0);
 			L += T * a * cloudCol;
