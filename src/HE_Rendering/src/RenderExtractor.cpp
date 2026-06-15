@@ -204,12 +204,27 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 		HE::AABB sceneBox;
 		for (const RenderObject& o : out.objects)
 			sceneBox.expand(o.worldBounds);
-		const glm::vec3 center = sceneBox.isValid() ? sceneBox.center() : glm::vec3(0.0f);
+		glm::vec3 center = sceneBox.isValid() ? sceneBox.center() : glm::vec3(0.0f);
 		float radius = sceneBox.isValid() ? glm::length(sceneBox.extents()) : 10.0f;
 		radius = std::max(radius, 1.0f);
 
 		const glm::vec3 dir = glm::normalize(shadowLight->direction);
 		const glm::vec3 up  = std::abs(dir.y) > 0.99f ? glm::vec3(0, 0, 1) : glm::vec3(0, 1, 0);
+
+		// Texel-snap the frustum centre so the shadow-map samples stay on stable
+		// world positions as the day-night light rotates — without this the shadow
+		// edges crawl/flicker frame to frame. Snap the centre along the light's
+		// right/up axes in whole-texel steps (kShadowMapRes must match the
+		// backends' shadow map resolution).
+		constexpr float kShadowMapRes = 2048.0f;
+		const float worldPerTexel = (2.0f * radius) / kShadowMapRes;
+		const glm::vec3 right = glm::normalize(glm::cross(dir, up)); // glm::lookAt side axis
+		const glm::vec3 upL   = glm::cross(right, dir);              // glm::lookAt up axis
+		const float sx = std::floor(glm::dot(center, right) / worldPerTexel) * worldPerTexel;
+		const float sy = std::floor(glm::dot(center, upL)   / worldPerTexel) * worldPerTexel;
+		const float sz = glm::dot(center, dir);
+		center = right * sx + upL * sy + dir * sz;
+
 		const glm::vec3 eye = center - dir * (radius * 2.0f);
 		const glm::mat4 view = glm::lookAt(eye, center, up);
 		const glm::mat4 proj = glm::ortho(-radius, radius, -radius, radius, 0.05f, radius * 4.0f);
