@@ -952,3 +952,27 @@ portierten Shader-Mathematik mit nach oben (Richtung Nord) blickender Nachtkamer
 Aurora-Bänder ziehen quer über den Himmel (grün unten → violett/blau oben) mit vertikalen
 Striationen, dichte Milchstraßen-Sternstraße + geschichteter Weltraumnebel. Aurora bleibt
 atmosphärisch nordfixiert; Sterne + Nebel rotieren über `celestialDir` mit der Time-of-Day.
+
+### Forts. 11b — Nebel als farbige 3D-Flecken statt Streifen
+
+> **Aufgabe:** Der Weltraumnebel soll keine Streifen sein, sondern Flecken/Blobs in verschiedenen
+> ineinander verlaufenden Farben, zusammen mit den Sternen, mit variierender Größe. ✅
+
+- **Ursache der Streifen:** Der Nebel wurde in der 2D-Tangentialebene des galaktischen Bands gesampelt
+  (`cloudFbm` auf `np`). Bei streifenden Blickwinkeln zum Horizont streckt diese Projektion das Rauschen
+  radial → Streifen statt Flecken.
+- **Neu: echtes 3D-Value-Noise** (`starNoise3`/`starFbm3`, beide Shader zeilengleich) auf Basis des
+  vorhandenen `starHash` (trilineare Interpolation + fBm). Der Nebel wird jetzt direkt in 3D auf der
+  Himmelskugel (`cN = normalize(cdir)`, `P = cN·3.4`) gesampelt → isotrope Blobs, keine Projektions-
+  Streifen, rotiert weiterhin mit `celestialDir`.
+- **Flecken variabler Größe:** mehroktaviges fBm (`big` 4-okt, `med` 3-okt, `fine` 2-okt) mit
+  `blob = smoothstep(0.46,0.74, big·0.5+med·0.6)`, feinem `detail`, dunklen Staubbahnen (`dust`) und
+  hellen Kernen (`core`). Breiter, weicher Band-Bias (`exp(-bd²·2.3)·0.85+0.15`) sammelt die Wolken
+  zur Milchstraße, lässt aber auch einzelne Flecken abseits davon zu.
+- **Verschiedene Farben ineinander:** Hue-Wheel blau→magenta→teal, getrieben von einem Noise-Feld und
+  von einem zweiten perturbiert, sodass benachbarte Blobs unterschiedliche Farben annehmen, die
+  ineinander überfließen — alle aus der einstellbaren Nebel-Basisfarbe abgeleitet.
+- **Verifiziert:** Build sauber, `he_tests` grün, Metal kompiliert zur Laufzeit (Night-Dump,
+  `NebulaIntensity=1.0`, keine Log-Fehler), GL/MSL zeilengleich. Validiert per numpy-CPU-Replik der
+  exakten portierten Mathematik (inkl. Sterne): farbige Nebel-Flecken variabler Größe mit
+  eingebetteten Sternen, magenta/blau/teal ineinander verlaufend.
