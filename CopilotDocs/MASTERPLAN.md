@@ -693,3 +693,24 @@ den Himmel — Himmel, Image-Based-Ambient **und** Schatten reagieren zusammen.
   Sonnenscheibe in den Tag-Dumps — interaktiv durch Hochschauen sichtbar). Default
   (Tag) **byte-identisch** zum Vor-Mond-Stand (Mond ist `*night`=0 bei Tag);
   GL==Metal bei Nacht (0,00 % / 20 Byte). 34 Tests grün.
+
+> **Status 15.06.2026 (Forts. 2):** Mond bekommt eine Textur (`moon.png`) und ist
+> jetzt kleiner als die Sonne. ✅ (GL+Metal)
+
+**Texturierter Mond:**
+- **Textur:** `EditorDeps/Images/moon.png` (1024², Graustufe) wird vom Editor
+  (stb, außerhalb des `HE_IMGUI_ENABLED`-Guards → lädt auch headless) via neuer
+  `IRenderer::SetMoonTexture(rgba8,w,h)` an das aktive Backend gepusht. GL lädt sie
+  in eine `GL_TEXTURE_2D` (CLAMP/LINEAR), Metal in eine `MTLTexture` — beide werden
+  im Sky-Pass gebunden. CMake kopiert `EditorDeps` (inkl. `moon.png`) bereits in den
+  Output, keine CMake-Änderung nötig.
+- **Scheibe:** Die getönte Mondscheibe wandert vom geteilten `skyColor` in eine
+  Sky-Pass-eigene `moonDisk()` (so muss der Scene-/Ambient-Shader die Textur **nicht**
+  binden). Lokales Tangenten-Frame um `moonDir` → 2D-UVs; `kRadius = 0.020 rad`
+  (< Sonnenscheibe), sphärisches Limb-Darkening `sqrt(1-r²)` lässt die flache
+  Graustufen-Map als beleuchtete Kugel mit Kratern lesen, `smoothstep`-Rand glättet.
+  Im geteilten `skyColor` bleiben nur Halo (`pow(m,60)*0.05`) + Fill fürs Nacht-Ambient.
+- **Verifiziert:** Metal-Sky-Shader kompiliert zur Laufzeit, `moon.png` lädt
+  (Headless-Log). CPU-Replik der exakten Shader-Mathematik mit echter Textur:
+  Mond-Sichtradius ≈ 0,0202 rad gegen deutlich größere Sonnenscheibe — Krater +
+  Kugel-Shading sichtbar. GL/MSL-Mathematik zeilengleich. Tests grün.

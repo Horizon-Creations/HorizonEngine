@@ -25,6 +25,7 @@ public:
 
 	void* CreateImGuiTexture(const void* rgba8Pixels, int width, int height) override;
 	void  DestroyImGuiTexture(void* handle) override;
+	void  SetMoonTexture(const void* rgba8Pixels, int width, int height) override;
 
 	void  SetViewportSize(uint32_t width, uint32_t height) override;
 	void* GetViewportTexture() override;
@@ -133,6 +134,9 @@ private:
 	unsigned int m_skyProgram     = 0;
 	int          m_uSkyInvVP      = -1;
 	int          m_uSkySunDir     = -1;
+	int          m_uSkyMoonTex    = -1;   // moon texture sampler unit
+	int          m_uSkyHasMoon    = -1;   // 1 when a moon texture is bound
+	unsigned int m_moonTex        = 0;    // night-sky moon texture (or 0)
 	void CreateSkyPipeline();
 
 	// ── HDR scene color + tonemap (PostProcessPass) ─────────────────────────

@@ -147,6 +147,12 @@ public:
     // Release a texture previously created with CreateImGuiTexture.
     virtual void  DestroyImGuiTexture(void* handle);
 
+    // ── Night-sky moon texture (optional) ──────────────────────────────────
+    // Pushed once by the app. The backend uploads the RGBA8, tightly-packed
+    // pixels and samples them on the moon disk in the procedural night sky.
+    // Passing nullptr or a zero size leaves the moon as a plain disk.
+    virtual void  SetMoonTexture(const void* /*rgba8Pixels*/, int /*width*/, int /*height*/) {}
+
 protected:
     OverlayCallback      m_overlayCallback;
     HorizonWorld*        m_world          = nullptr;
