@@ -189,7 +189,7 @@ vec3 moonDisk(vec3 dir, vec3 sunDir)
 	// Local tangent frame so the disk gets 2D UVs for the texture.
 	vec3 right = normalize(cross(vec3(0.0, 1.0, 0.0), moonDir));
 	vec3 up    = cross(moonDir, right);
-	const float kRadius = 0.020;                   // angular radius (< the sun disk)
+	const float kRadius = 0.030;                   // angular radius (< the sun disk)
 	vec2  q = vec2(dot(dir, right), dot(dir, up)) / kRadius;
 	float r = length(q);
 	if (r > 1.0) return vec3(0.0);

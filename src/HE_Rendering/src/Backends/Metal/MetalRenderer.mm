@@ -315,7 +315,7 @@ float3 moonDisk(float3 dir, float3 sunDir, bool hasMoon,
 
 	float3 right = normalize(cross(float3(0.0, 1.0, 0.0), moonDir));
 	float3 up    = cross(moonDir, right);
-	const float kRadius = 0.020;                   // angular radius (< the sun disk)
+	const float kRadius = 0.030;                   // angular radius (< the sun disk)
 	float2 q = float2(dot(dir, right), dot(dir, up)) / kRadius;
 	float  r = length(q);
 	if (r > 1.0) return float3(0.0);
