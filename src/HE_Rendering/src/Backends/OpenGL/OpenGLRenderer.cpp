@@ -322,9 +322,17 @@ vec3 starField(vec3 dir, vec3 cdir, vec3 sunDir, float time, float milkyWay)
 
 	vec3  sp   = vec3(starHash(cell + 1.7), starHash(cell + 4.3), starHash(cell + 8.9));
 	float d    = length(fract(p) - sp);
-	float core = smoothstep(0.25, 0.0, d);
+	// Per-star size class: cubic skew so most stars are tiny pinpoints, a few are
+	// medium, and the rare brightest are larger with a faint halo — a realistic
+	// apparent-magnitude spread instead of one fixed size.
+	float sizeH  = starHash(cell + 5.7);
+	float big    = sizeH * sizeH * sizeH;
+	float radius = mix(0.05, 0.17, big);
+	float core   = smoothstep(radius, 0.0, d);
 	core *= core;                                  // tighten the core, keep a faint glow
-	float mag  = 0.4 + 0.6 * smoothstep(thresh, 1.0, present);          // per-star brightness
+	float halo   = smoothstep(radius * 3.0, radius, d) * (big * big) * 0.35; // only big stars
+	float shape  = core + halo;
+	float mag  = (0.4 + 0.6 * smoothstep(thresh, 1.0, present)) * mix(0.7, 2.7, big); // size→brightness
 	// Random per-star twinkle: each star gets its own phase + frequency so the
 	// field shimmers randomly in real time (wall clock, not the slow time-of-day).
 	float twPhase = starHash(cell + 23.5) * 6.2831;
@@ -335,7 +343,7 @@ vec3 starField(vec3 dir, vec3 cdir, vec3 sunDir, float time, float milkyWay)
 	// The dense band stars sit fainter en masse so the lane reads as many small
 	// stars; the intensity control scales that mass brightness.
 	float bandDim = mix(1.6, mix(0.9, 1.5, mw), band);
-	return tint * (core * mag * tw * horizon * night * bandDim);
+	return tint * (shape * mag * tw * horizon * night * bandDim);
 }
 
 // Procedural volumetric clouds — drawn only in the sky pass (kept out of the
@@ -447,6 +455,12 @@ vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float time, float coverage
 			vec3 cloudCol = mix(nightCol, dayCol, day);
 			vec3 duskTop  = sunColor * vec3(1.25, 0.55, 0.28);
 			cloudCol = mix(cloudCol, duskTop, dusk * lit * 0.85);
+			// Silver/golden lining: thin, back-lit edges toward the sun glow as the
+			// sunlight scatters through them.
+			float toSun = max(dot(dir, sunDir), 0.0);
+			cloudCol += sunColor * (pow(toSun, 8.0) * sun * 0.8 * max(day, dusk));
+			// Cool sky-ambient fill so shadowed undersides aren't pitch black.
+			cloudCol += vec3(0.10, 0.14, 0.22) * ((1.0 - sun) * day * 0.35);
 
 			float a = clamp(dens * ds * 2.4, 0.0, 1.0);
 			L += T * a * cloudCol;
@@ -484,21 +498,34 @@ vec3 nebula(vec3 dir, vec3 cdir, vec3 sunDir, float intensity, vec3 nebColor)
 	float med  = starFbm3(P * 1.7 + 27.0, 3);   // medium clumps
 	float fine = starFbm3(P * 4.0 + 41.0, 2);   // fine mottle / embedded dust
 	float blob   = smoothstep(0.46, 0.74, big * 0.5 + med * 0.6);
-	float detail = 0.30 + 0.70 * smoothstep(0.32, 0.86, fine);
+	// Structural character per region: dense puffy bodies vs. wispy filaments.
+	float charF  = starFbm3(P * 0.4 + 150.0, 2);
+	float wispy  = smoothstep(0.42, 0.70, charF);
+	float fila   = smoothstep(0.55, 0.86, starFbm3(P * 5.5 + 97.0, 2));   // fine filaments
+	float detail = (0.30 + 0.70 * smoothstep(0.32, 0.86, fine)) * mix(1.0, 0.65 + 0.9 * fila, wispy);
 	float dust   = 1.0 - 0.5 * smoothstep(0.50, 0.88, starFbm3(P * 2.6 + 63.0, 3));
 	float density = blob * detail * dust;
 	float core   = smoothstep(0.62, 0.95, big * 0.55 + med * 0.55);   // bright centres
 	float glow   = (band * 0.85 + 0.15) * (density + 0.6 * core);     // baseline -> off-band patches
 	if (glow <= 0.0) return vec3(0.0);
 
+	// Hue wheel across neighbouring blobs: cool blue → teal → green → gold →
+	// magenta so regions differ in colour and bleed together. A large-scale field
+	// biases whole regions warm (emission) vs. cool (reflection) for more variety.
 	float h = clamp(starFbm3(P * 0.5 + 71.0, 3) * 1.7 - 0.35
 	              + 0.25 * (starFbm3(P * 1.1 + 83.0, 2) - 0.5), 0.0, 1.0);
-	vec3  colA = nebColor * vec3(0.45, 0.65, 1.45);   // cool blue
-	vec3  colB = nebColor * vec3(1.80, 0.42, 0.95);   // warm magenta/pink
-	vec3  colC = nebColor * vec3(0.36, 1.45, 1.12);   // teal/cyan
+	float warm = smoothstep(0.40, 0.72, starFbm3(P * 0.32 + 131.0, 2));
+	h = clamp(h + warm * 0.30, 0.0, 1.0);
+	vec3  colA = nebColor * vec3(0.42, 0.62, 1.50);   // cool blue
+	vec3  colB = nebColor * vec3(0.34, 1.42, 1.18);   // teal/cyan
+	vec3  colC = nebColor * vec3(0.55, 1.42, 0.55);   // green
+	vec3  colD = nebColor * vec3(1.75, 1.10, 0.40);   // gold/amber
+	vec3  colE = nebColor * vec3(1.85, 0.42, 0.95);   // magenta/pink
 	vec3  col  = colA;
-	col = mix(col, colB, smoothstep(0.20, 0.50, h));
-	col = mix(col, colC, smoothstep(0.55, 0.85, h));
+	col = mix(col, colB, smoothstep(0.14, 0.36, h));
+	col = mix(col, colC, smoothstep(0.36, 0.54, h));
+	col = mix(col, colD, smoothstep(0.54, 0.72, h));
+	col = mix(col, colE, smoothstep(0.72, 0.92, h));
 	float horizon = smoothstep(0.0, 0.16, dir.y);
 	return col * (glow * 2.1 * horizon * night * intensity);
 }
