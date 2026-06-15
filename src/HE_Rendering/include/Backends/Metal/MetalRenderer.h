@@ -144,6 +144,8 @@ private:
 	int   m_cubeIndexCount  = 0;
 	void* m_dummyTexture    = nullptr; // id<MTLTexture>, 1×1 white — bound when a mesh has no texture
 	void* m_linearSampler   = nullptr; // id<MTLSamplerState>
+	void* m_noiseTexture    = nullptr; // id<MTLTexture>, 3D R16 value noise (sky)
+	void* m_noiseSampler    = nullptr; // id<MTLSamplerState>, linear + repeat
 
 	// ── Shadow map (single directional light) ───────────────────────────────
 	void* m_shadowDepthTex = nullptr;  // id<MTLTexture>, Depth32Float (retained)
