@@ -716,21 +716,23 @@ den Himmel — Himmel, Image-Based-Ambient **und** Schatten reagieren zusammen.
   Kugel-Shading sichtbar. GL/MSL-Mathematik zeilengleich. Tests grün.
 
 > **Status 15.06.2026 (Forts. 3):** Mond etwas größer + jetzt eine Lichtquelle;
-> Sonnen-/Mondlicht wird über den Tagesstand geblendet. ✅ (GL+Metal)
+> Sonne und Mond sind **zwei eigene Lichter**, das jeweils untergegangene wird
+> abgeschaltet (so bleibt jede Lichtfarbe erhalten). ✅ (GL+Metal)
 
-**Mondlicht + Blend:**
+**Mondlicht (zwei Lichter):**
 - **Größe:** `moonDisk()`-`kRadius` 0,020 → 0,030 rad (GL+Metal), weiterhin < Sonne.
-- **Lichtquelle/Blend:** `RenderExtractor` blendet das **primäre** Directional-Light
-  (= „Sonne") über `dayFactor = clamp((sunToward.y+0.10)/0.25, 0, 1)`:
-  Richtung `mix(-moonToward, -sunToward, dayFactor)`, Farbe `mix(kühl-blau, authored,
-  dayFactor)`, Intensität `mix(authored*0.30, authored, dayFactor)`. `moonToward =
-  normalize(-sunToward.x, -sunToward.y, sunToward.z)` deckt sich mit der Sky-Mondscheibe
-  → Schatten zeigen aus der Mondrichtung. Bewusst **ein** Licht: die eine Schattenkarte
-  folgt automatisch dem dominanten Himmelskörper (kein zweiter Shadow-Pass). Bei Dämmerung
-  kippt die Richtung kurz Richtung Horizont (lange Schatten) statt zu degenerieren
-  (z-Anteil bleibt `-sz ≠ 0`). `out.sunDirection` bleibt die echte Sonne (Sky/Ambient
-  unverändert).
-- **Verifiziert:** Headless-Dumps Noon/Dusk/Night — Tag warm + Sonnenschatten
-  (byte-gleich bei `dayFactor=1`), Dämmerung lange Horizont-Schatten, Nacht kühl/gedämpft
-  aus der Gegenrichtung beleuchtet (nicht mehr pechschwarz). Metal-Shader kompiliert,
-  34 Tests grün.
+- **Zwei getrennte Directional-Lights:** `RenderExtractor` hält das authored-Sonnenlicht
+  (warm) und hängt ein **zweites**, kühl-blaues Mondlicht (`(0.55,0.65,0.95)`, Intensität
+  `authored*0.30`) auf dem Gegenbogen an (`moonToward = normalize(-sunToward.x,
+  -sunToward.y, sunToward.z)`, deckt sich mit der Sky-Mondscheibe). Jedes Licht wird über
+  die **eigene** Höhe ein-/ausgeblendet: `sunUp = clamp((sunToward.y+0.10)/0.25, 0, 1)`,
+  `moonUp = clamp((moonToward.y+0.10)/0.25, 0, 1)` (komplementär). Sobald die Sonne
+  untergeht, geht ihr Licht auf 0 und nur das Mondlicht (eigene kühle Farbe) bleibt —
+  **kein Blend zu einer Einheitsfarbe** mehr. Tag (`sunUp=1`) ist byte-gleich wie zuvor.
+- **Schatten:** Die eine Schattenkarte folgt dem **hellsten** Directional-Light (Sonne
+  am Tag, Mond in der Nacht); bei Dämmerung übernimmt das jeweils dominante.
+  `out.sunDirection` bleibt die echte Sonne (Sky/Ambient unverändert).
+- **Verifiziert:** Headless-Dumps Noon/Dusk/Night — Tag warm + Sonnenschatten, Dämmerung
+  lange Horizont-Schatten (beide Lichter teil-an), Nacht kühl/gedämpft aus der
+  Gegenrichtung beleuchtet (Sonne aus, Schatten umgekehrt). Metal-Shader kompiliert,
+  Tests grün.

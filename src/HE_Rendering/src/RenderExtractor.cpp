@@ -8,7 +8,6 @@
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/LightComponent.h>
 #include <glm/gtc/quaternion.hpp>
-#include <glm/common.hpp>
 #include <algorithm>
 #include <cmath>
 
@@ -153,23 +152,33 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 		sunToward = glm::normalize(glm::vec3(std::cos(a), std::sin(a), 0.45f));
 		if (sunLight)
 		{
-			// Crossfade the primary directional light between the sun and the
-			// moon (the opposite arc) by the sun's elevation: full authored
-			// daylight while the sun is up, a dim cool moonlight once it sets,
-			// blended through twilight. Keeping it a single light means the one
-			// shadow map automatically follows whichever luminary dominates.
+			// Two independent directional lights — the warm sun and a cool moon
+			// on the opposite arc. Each one is faded out as its own luminary dips
+			// below the horizon, so the sun lights the scene by day and the moon
+			// by night and both keep their own colour (no blend to a single hue).
 			const glm::vec3 moonToward =
 				glm::normalize(glm::vec3(-sunToward.x, -sunToward.y, sunToward.z));
-			const float dayFactor = std::clamp((sunToward.y + 0.10f) / 0.25f, 0.0f, 1.0f);
+			const float sunUp  = std::clamp((sunToward.y  + 0.10f) / 0.25f, 0.0f, 1.0f);
+			const float moonUp = std::clamp((moonToward.y + 0.10f) / 0.25f, 0.0f, 1.0f);
 
-			const glm::vec3 sunColor  = sunLight->color;                 // authored daylight
-			const glm::vec3 moonColor = glm::vec3(0.55f, 0.65f, 0.95f);  // cool moonlight
-			const float     sunInt    = sunLight->intensity;            // authored intensity
-			const float     moonInt   = sunInt * 0.30f;                 // moon is dimmer
+			const float authoredInt = sunLight->intensity; // authored daylight intensity
 
-			sunLight->direction = glm::normalize(glm::mix(-moonToward, -sunToward, dayFactor));
-			sunLight->color     = glm::mix(moonColor, sunColor, dayFactor);
-			sunLight->intensity = glm::mix(moonInt,  sunInt,   dayFactor);
+			// Sun: authored colour/intensity, switched off once it has set.
+			sunLight->direction = -sunToward; // light travels away from the sun
+			sunLight->intensity = authoredInt * sunUp;
+
+			// Moon: a second, cooler and dimmer directional light, off while down.
+			// (push_back may reallocate out.lights, so sunLight must not be used
+			// after this point.)
+			LightData moon{};
+			moon.type         = 0; // directional
+			moon.direction    = -moonToward; // light travels away from the moon
+			moon.color        = glm::vec3(0.55f, 0.65f, 0.95f);
+			moon.intensity    = authoredInt * 0.30f * moonUp;
+			moon.range        = 0.0f;
+			moon.spotAngleCos = 1.0f;
+			out.lights.push_back(moon);
+			sunLight = nullptr;
 		}
 	}
 	else if (sunLight)
@@ -179,14 +188,20 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 	out.sunDirection = glm::normalize(sunToward);
 
 	// ── Directional-light shadow view-projection ─────────────────────────────
-	// First directional light casts shadows. The ortho frustum is fitted around
-	// the union of the (seeded) object bounds — backends refine bounds elsewhere,
-	// but this rough fit is enough for a single full-scene shadow map.
+	// The brightest directional light casts shadows (so the single shadow map
+	// follows the sun by day and the moon by night). The ortho frustum is fitted
+	// around the union of the (seeded) object bounds — backends refine bounds
+	// elsewhere, but this rough fit is enough for a single full-scene shadow map.
 	out.shadow.enabled = false;
+	const LightData* shadowLight = nullptr;
 	for (const LightData& l : out.lights)
 	{
 		if (l.type != 0) continue; // 0 = directional
-
+		if (!shadowLight || l.intensity > shadowLight->intensity)
+			shadowLight = &l;
+	}
+	if (shadowLight && shadowLight->intensity > 1e-4f)
+	{
 		HE::AABB sceneBox;
 		for (const RenderObject& o : out.objects)
 			sceneBox.expand(o.worldBounds);
@@ -194,7 +209,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 		float radius = sceneBox.isValid() ? glm::length(sceneBox.extents()) : 10.0f;
 		radius = std::max(radius, 1.0f);
 
-		const glm::vec3 dir = glm::normalize(l.direction);
+		const glm::vec3 dir = glm::normalize(shadowLight->direction);
 		const glm::vec3 up  = std::abs(dir.y) > 0.99f ? glm::vec3(0, 0, 1) : glm::vec3(0, 1, 0);
 		const glm::vec3 eye = center - dir * (radius * 2.0f);
 		const glm::mat4 view = glm::lookAt(eye, center, up);
@@ -202,6 +217,5 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 		out.shadow.viewProj  = proj * view;
 		out.shadow.direction = dir;
 		out.shadow.enabled   = true;
-		break;
 	}
 }
