@@ -214,6 +214,18 @@ vec3 skyColor(vec3 dir, vec3 sunDir)
 	float s = max(dot(dir, sunDir), 0.0);
 	sky += sunTint * (pow(s, 1800.0) * 14.0) * day;             // crisp disk (blooms)
 	sky += sunTint * (pow(s, 7.0)    * 0.18) * max(day, dusk);  // soft halo
+
+	// Moon: opposite the sun, fading in at night. Cool pale disk + soft halo;
+	// a faint fill so a moonlit scene isn't pitch black.
+	// Opposite the sun in azimuth + elevation, but kept on the same hemisphere
+	// (z sign) so it rises into the visible sky rather than behind the viewer.
+	float night   = 1.0 - day;
+	vec3  moonDir = normalize(vec3(-sunDir.x, -sunDir.y, sunDir.z));
+	float m       = max(dot(dir, moonDir), 0.0);
+	vec3  moonTint= vec3(0.80, 0.86, 1.00);
+	sky += moonTint * (pow(m, 700.0)  * 4.0)  * night;          // moon disk (blooms)
+	sky += moonTint * (pow(m, 60.0)   * 0.05) * night;          // soft halo
+	sky += vec3(0.04, 0.05, 0.08) * night;                      // faint moonlit fill
 	return sky;
 }
 )GLSL";
