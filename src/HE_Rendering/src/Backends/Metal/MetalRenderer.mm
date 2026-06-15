@@ -297,7 +297,7 @@ static const char* kSkyMSL = R"MSL(
 using namespace metal;
 
 struct SkyOut { float4 position [[position]]; float2 ndc; };
-struct SkyParams { float4x4 invViewProj; float4 sunDir; float4 params; }; // params.x = timeOfDay
+struct SkyParams { float4x4 invViewProj; float4 sunDir; float4 sunColor; float4 params; }; // params: x=timeOfDay y=coverage z=time
 
 vertex SkyOut skyVertex(uint vid [[vertex_id]])
 {
@@ -352,7 +352,7 @@ float starHash(float3 p)
 	p += dot(p, p.zyx + 31.32);
 	return fract((p.x + p.y) * p.z);
 }
-float3 starField(float3 dir, float3 sunDir, float timeOfDay)
+float3 starField(float3 dir, float3 sunDir, float time)
 {
 	dir    = normalize(dir);
 	sunDir = normalize(sunDir);
@@ -369,7 +369,12 @@ float3 starField(float3 dir, float3 sunDir, float timeOfDay)
 	float  core = smoothstep(0.25, 0.0, d);
 	core *= core;                                  // tighten the core, keep a faint glow
 	float  mag  = 0.4 + 0.6 * smoothstep(0.92, 1.0, present);            // per-star brightness
-	float  tw   = 0.75 + 0.25 * sin(timeOfDay * 40.0 + present * 6.2831); // gentle twinkle
+	// Random per-star twinkle: each star gets its own phase + frequency so the
+	// field shimmers randomly in real time (drives off the wall clock, not the
+	// slow time-of-day).
+	float  twPhase = starHash(cell + 23.5) * 6.2831;
+	float  twFreq  = 2.0 + 4.0 * starHash(cell + 47.1);
+	float  tw      = 0.7 + 0.3 * sin(time * twFreq + twPhase);
 	float  horizon = smoothstep(0.0, 0.15, dir.y); // fade into the horizon haze
 	float3 tint = mix(float3(0.80, 0.88, 1.0), float3(1.0, 0.93, 0.82), starHash(cell + 12.1));
 	return tint * (core * mag * tw * horizon * night * 1.6);
@@ -408,7 +413,7 @@ float cloudFbm(float2 p)
 	}
 	return v;
 }
-float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float timeOfDay, float coverage)
+float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float timeOfDay, float coverage, float3 sunColor)
 {
 	dir    = normalize(dir);
 	sunDir = normalize(sunDir);
@@ -428,10 +433,14 @@ float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float timeOfDay, f
 	float day  = smoothstep(-0.10, 0.10, sunY);
 	float dusk = smoothstep(-0.06, 0.05, sunY) * (1.0 - smoothstep(0.05, 0.28, sunY));
 
-	float3 dayCol   = mix(float3(0.55, 0.58, 0.66), float3(1.00, 0.99, 0.96), lit);
+	// Lit cloud tops take the sun's (adjustable) light colour; shaded undersides
+	// stay a neutral grey. Changing the sun colour — or the warm shift at sunset
+	// — therefore tints the clouds.
+	float3 dayCol   = mix(float3(0.55, 0.58, 0.66), sunColor, lit);
 	float3 nightCol = mix(float3(0.05, 0.06, 0.10), float3(0.20, 0.23, 0.32), lit);
 	float3 cloudCol = mix(nightCol, dayCol, day);
-	cloudCol = mix(cloudCol, float3(1.0, 0.62, 0.40), dusk * lit * 0.6); // warm dusk tops
+	float3 duskTop  = sunColor * float3(1.0, 0.55, 0.32);                // reddened sun colour
+	cloudCol = mix(cloudCol, duskTop, dusk * lit * 0.7);                 // warm sunset tops
 
 	return mix(baseSky, cloudCol, cover);
 }
@@ -445,9 +454,9 @@ fragment float4 skyFragment(SkyOut in [[stage_in]],
 	float4 wp0 = p.invViewProj * float4(in.ndc, -1.0, 1.0);
 	float3 dir = wp1.xyz / wp1.w - wp0.xyz / wp0.w;
 	float3 col = skyColor(dir, p.sunDir.xyz);
-	col += starField(dir, p.sunDir.xyz, p.params.x);
+	col += starField(dir, p.sunDir.xyz, p.params.z);
 	col += moonDisk(dir, p.sunDir.xyz, p.sunDir.w > 0.5, moonTex, moonSamp);
-	col = applyClouds(col, dir, p.sunDir.xyz, p.params.x, p.params.y);
+	col = applyClouds(col, dir, p.sunDir.xyz, p.params.x, p.params.y, p.sunColor.xyz);
 	return float4(col, 1.0);
 }
 )MSL";
@@ -544,7 +553,8 @@ struct SkyParams
 {
 	glm::mat4 invViewProj = glm::mat4(1.0f);
 	glm::vec4 sunDir      = glm::vec4(0.0f, 1.0f, 0.0f, 0.0f);
-	glm::vec4 params      = glm::vec4(0.0f); // x = timeOfDay (cloud scroll), y = cloud coverage
+	glm::vec4 sunColor    = glm::vec4(1.0f);
+	glm::vec4 params      = glm::vec4(0.0f); // x = timeOfDay (cloud scroll), y = coverage, z = wall-clock time
 };
 
 // Remaps the extractor's GL-convention light projection (depth -1..1) to Metal
@@ -1403,7 +1413,8 @@ void MetalRenderer::EncodeTonemap(void* renderEncoderPtr)
 // ─── Frame encoding ───────────────────────────────────────────────────────────
 
 void MetalRenderer::EncodeSky(void* renderEncoder, const glm::mat4& invViewProj,
-                             const glm::vec3& sunDir, float timeOfDay, float cloudCoverage)
+                             const glm::vec3& sunDir, const glm::vec3& sunColor,
+                             float timeOfDay, float cloudCoverage, float time)
 {
 	if (!m_skyPipeline) return;
 	id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
@@ -1417,7 +1428,8 @@ void MetalRenderer::EncodeSky(void* renderEncoder, const glm::mat4& invViewProj,
 	SkyParams p;
 	p.invViewProj = invViewProj;
 	p.sunDir      = glm::vec4(sunDir, m_moonTexture ? 1.0f : 0.0f); // w = has-moon flag
-	p.params      = glm::vec4(timeOfDay, cloudCoverage, 0.0f, 0.0f);
+	p.sunColor    = glm::vec4(sunColor, 0.0f);
+	p.params      = glm::vec4(timeOfDay, cloudCoverage, time, 0.0f);
 	[enc setFragmentBytes:&p length:sizeof(p) atIndex:0];
 	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
 }
@@ -1448,8 +1460,9 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 	// Skybox first (into the HDR target, no depth write) so the scene draws over
 	// it. Drawn before any early-out so the background is never a stale gray clear
 	// when the camera looks away from the scene and all objects are culled.
-	EncodeSky(renderEncoder, glm::inverse(viewProj), sunDir,
-	          GetEnvironment().timeOfDay, GetEnvironment().cloudCoverage);
+	EncodeSky(renderEncoder, glm::inverse(viewProj), sunDir, GetEnvironment().sunColor,
+	          GetEnvironment().timeOfDay, GetEnvironment().cloudCoverage,
+	          static_cast<float>(SDL_GetTicks()) / 1000.0f);
 
 	if (m_renderWorld.objects.empty())
 		return;

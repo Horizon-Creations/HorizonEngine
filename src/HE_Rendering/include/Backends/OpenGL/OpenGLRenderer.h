@@ -139,6 +139,8 @@ private:
 	int          m_uSkyHasMoon    = -1;   // 1 when a moon texture is bound
 	int          m_uSkyTime       = -1;   // time of day (cloud scroll phase)
 	int          m_uSkyCoverage   = -1;   // cloud amount (0 clear … 1 overcast)
+	int          m_uSkyClock      = -1;   // wall-clock seconds (star twinkle)
+	int          m_uSkySunColor   = -1;   // sun light colour (cloud tint)
 	unsigned int m_moonTex        = 0;    // night-sky moon texture (or 0)
 	void CreateSkyPipeline();
 
