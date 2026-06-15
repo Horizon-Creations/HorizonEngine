@@ -213,6 +213,7 @@ uniform float     uMilkyWay;    // milky-way star-lane density/brightness
 uniform float     uNebula;      // space-nebula intensity (0 = off)
 uniform vec3      uNebulaColor; // space-nebula base colour
 uniform vec3      uAuroraColor; // aurora base colour
+uniform vec3      uWind;        // cloud drift vector (world units / s, horizontal)
 out vec4 FragColor;
 //#SKYFUNC#
 
@@ -385,7 +386,8 @@ float cloudFbm(vec2 p)
 // Cloud slab heights (arbitrary world units in the sky-ray hemisphere model).
 const float kCloudBase = 1.0;
 const float kCloudTop  = 2.0;
-const vec3  kCloudWind = vec3(0.020, 0.0, 0.006); // horizontal drift / s
+// Cloud drift direction/speed comes from the user wind control (uWind), passed
+// down as a parameter so the noise field scrolls the clouds across the sky.
 // Rounded vertical density taper so the slab reads as puffy bodies, not a sheet.
 float cloudHeightGrad(float y)
 {
@@ -394,9 +396,9 @@ float cloudHeightGrad(float y)
 }
 // Full density at a world point: animated 3D fbm + detail erosion, thresholded by
 // the coverage slider, shaped by the slab height. time = continuous wall clock.
-float cloudDensity(vec3 pos, float time, float coverage)
+float cloudDensity(vec3 pos, float time, float coverage, vec3 wind)
 {
-	vec3  p     = pos * 0.85 + kCloudWind * time;
+	vec3  p     = pos * 0.85 + wind * time;
 	float morph = time * 0.030;                       // slow in-place forming/dissolving
 	float base  = starFbm3(p + vec3(0.0, morph, 0.0), 4);
 	float detail= starFbm3(p * 3.1 + vec3(morph, 0.0, 0.0), 2);
@@ -406,16 +408,16 @@ float cloudDensity(vec3 pos, float time, float coverage)
 	return d * cloudHeightGrad(pos.y);
 }
 // Cheaper density for the sun light-march (skips the detail octave).
-float cloudShadowDensity(vec3 pos, float time, float coverage)
+float cloudShadowDensity(vec3 pos, float time, float coverage, vec3 wind)
 {
-	vec3  p     = pos * 0.85 + kCloudWind * time;
+	vec3  p     = pos * 0.85 + wind * time;
 	float morph = time * 0.030;
 	float base  = starFbm3(p + vec3(0.0, morph, 0.0), 3);
 	float lo    = mix(0.95, 0.05, clamp(coverage, 0.0, 1.0));
 	float d     = smoothstep(lo, lo + 0.30, base);
 	return d * cloudHeightGrad(pos.y);
 }
-vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float time, float coverage, vec3 sunColor)
+vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float time, float coverage, vec3 sunColor, vec3 wind)
 {
 	dir    = normalize(dir);
 	sunDir = normalize(sunDir);
@@ -438,13 +440,13 @@ vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float time, float coverage
 	{
 		float s   = s0 + (float(i) + 0.5) * ds;
 		vec3  pos = dir * s;
-		float dens = cloudDensity(pos, time, coverage);
+		float dens = cloudDensity(pos, time, coverage, wind);
 		if (dens > 0.001)
 		{
 			// Light-march toward the sun: Beer's-law self-shadowing.
 			float shadow = 0.0;
 			for (int j = 1; j <= 2; ++j)
-				shadow += cloudShadowDensity(pos + sunDir * (float(j) * 0.22), time, coverage);
+				shadow += cloudShadowDensity(pos + sunDir * (float(j) * 0.22), time, coverage, wind);
 			float sun    = exp(-shadow * 1.1);
 			float powder = 1.0 - exp(-dens * 3.0); // dark soft edges (powder effect)
 			float lit    = sun * powder;
@@ -580,7 +582,7 @@ void main()
 	col += nebula(dir, cdir, uSunDir, uNebula, uNebulaColor);
 	col += aurora(dir, uSunDir, uTime, uAurora, uAuroraColor);
 	col += moonDisk(dir, uSunDir);
-	col = applyClouds(col, dir, uSunDir, uTime, uCloudCoverage, uSunColor);
+	col = applyClouds(col, dir, uSunDir, uTime, uCloudCoverage, uSunColor, uWind);
 	FragColor = vec4(col, 1.0);
 }
 )GLSL";
@@ -916,6 +918,7 @@ void OpenGLRenderer::CreateSkyPipeline()
 	m_uSkyNebula      = glGetUniformLocation(m_skyProgram, "uNebula");
 	m_uSkyNebulaColor = glGetUniformLocation(m_skyProgram, "uNebulaColor");
 	m_uSkyAuroraColor = glGetUniformLocation(m_skyProgram, "uAuroraColor");
+	m_uSkyWind        = glGetUniformLocation(m_skyProgram, "uWind");
 }
 
 void OpenGLRenderer::CreateTonemapPipeline()
@@ -1600,6 +1603,14 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glUniform1f(m_uSkyNebula, GetEnvironment().nebulaIntensity);
 			glUniform3fv(m_uSkyNebulaColor, 1, glm::value_ptr(GetEnvironment().nebulaColor));
 			glUniform3fv(m_uSkyAuroraColor, 1, glm::value_ptr(GetEnvironment().auroraColor));
+			{
+				// Wind control → horizontal cloud drift vector. Direction 0° drifts
+				// toward -Z (north), increasing clockwise; speed scales the rate.
+				const float wr = glm::radians(GetEnvironment().windDirection);
+				const glm::vec3 wind = glm::vec3(std::sin(wr), 0.0f, -std::cos(wr))
+				                     * (GetEnvironment().windSpeed * 0.025f);
+				glUniform3fv(m_uSkyWind, 1, glm::value_ptr(wind));
+			}
 			glBindVertexArray(m_fsVAO);
 			glDrawArrays(GL_TRIANGLES, 0, 3);
 			glEnable(GL_DEPTH_TEST);

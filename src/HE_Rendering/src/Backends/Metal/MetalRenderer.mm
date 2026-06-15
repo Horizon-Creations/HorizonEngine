@@ -317,7 +317,7 @@ static const char* kSkyMSL = R"MSL(
 using namespace metal;
 
 struct SkyOut { float4 position [[position]]; float2 ndc; };
-struct SkyParams { float4x4 invViewProj; float4 sunDir; float4 sunColor; float4 params; float4 nebulaColor; float4 auroraColor; }; // params: x=timeOfDay y=coverage z=time w=aurora; nebulaColor.w=nebula intensity; auroraColor.w=milkyWay
+struct SkyParams { float4x4 invViewProj; float4 sunDir; float4 sunColor; float4 params; float4 nebulaColor; float4 auroraColor; float4 wind; }; // params: x=timeOfDay y=coverage z=time w=aurora; nebulaColor.w=nebula intensity; auroraColor.w=milkyWay; wind.xyz=cloud drift/s
 
 vertex SkyOut skyVertex(uint vid [[vertex_id]])
 {
@@ -500,7 +500,8 @@ float cloudFbm(float2 p)
 // Cloud slab heights (arbitrary world units in the sky-ray hemisphere model).
 constant float kCloudBase = 1.0;
 constant float kCloudTop  = 2.0;
-constant float3 kCloudWind = float3(0.020, 0.0, 0.006); // horizontal drift / s
+// Cloud drift direction/speed comes from the user wind control (SkyParams.wind),
+// passed down as a parameter so the noise field scrolls the clouds across the sky.
 // Rounded vertical density taper so the slab reads as puffy bodies, not a sheet.
 float cloudHeightGrad(float y)
 {
@@ -509,9 +510,9 @@ float cloudHeightGrad(float y)
 }
 // Full density at a world point: animated 3D fbm + detail erosion, thresholded by
 // the coverage slider, shaped by the slab height. time = continuous wall clock.
-float cloudDensity(float3 pos, float time, float coverage)
+float cloudDensity(float3 pos, float time, float coverage, float3 wind)
 {
-	float3 p     = pos * 0.85 + kCloudWind * time;
+	float3 p     = pos * 0.85 + wind * time;
 	float  morph = time * 0.030;                      // slow in-place forming/dissolving
 	float  base  = starFbm3(p + float3(0.0, morph, 0.0), 4);
 	float  detail= starFbm3(p * 3.1 + float3(morph, 0.0, 0.0), 2);
@@ -521,16 +522,16 @@ float cloudDensity(float3 pos, float time, float coverage)
 	return d * cloudHeightGrad(pos.y);
 }
 // Cheaper density for the sun light-march (skips the detail octave).
-float cloudShadowDensity(float3 pos, float time, float coverage)
+float cloudShadowDensity(float3 pos, float time, float coverage, float3 wind)
 {
-	float3 p     = pos * 0.85 + kCloudWind * time;
+	float3 p     = pos * 0.85 + wind * time;
 	float  morph = time * 0.030;
 	float  base  = starFbm3(p + float3(0.0, morph, 0.0), 3);
 	float  lo    = mix(0.95, 0.05, clamp(coverage, 0.0, 1.0));
 	float  d     = smoothstep(lo, lo + 0.30, base);
 	return d * cloudHeightGrad(pos.y);
 }
-float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float time, float coverage, float3 sunColor)
+float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float time, float coverage, float3 sunColor, float3 wind)
 {
 	dir    = normalize(dir);
 	sunDir = normalize(sunDir);
@@ -553,13 +554,13 @@ float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float time, float 
 	{
 		float  s   = s0 + (float(i) + 0.5) * ds;
 		float3 pos = dir * s;
-		float  dens = cloudDensity(pos, time, coverage);
+		float  dens = cloudDensity(pos, time, coverage, wind);
 		if (dens > 0.001)
 		{
 			// Light-march toward the sun: Beer's-law self-shadowing.
 			float shadow = 0.0;
 			for (int j = 1; j <= 2; ++j)
-				shadow += cloudShadowDensity(pos + sunDir * (float(j) * 0.22), time, coverage);
+				shadow += cloudShadowDensity(pos + sunDir * (float(j) * 0.22), time, coverage, wind);
 			float sun    = exp(-shadow * 1.1);
 			float powder = 1.0 - exp(-dens * 3.0); // dark soft edges (powder effect)
 			float lit    = sun * powder;
@@ -698,7 +699,7 @@ fragment float4 skyFragment(SkyOut in [[stage_in]],
 	col += nebula(dir, cdir, p.sunDir.xyz, p.nebulaColor.w, p.nebulaColor.xyz);
 	col += aurora(dir, p.sunDir.xyz, p.params.z, p.params.w, p.auroraColor.xyz);
 	col += moonDisk(dir, p.sunDir.xyz, p.sunDir.w > 0.5, moonTex, moonSamp);
-	col = applyClouds(col, dir, p.sunDir.xyz, p.params.z, p.params.y, p.sunColor.xyz);
+	col = applyClouds(col, dir, p.sunDir.xyz, p.params.z, p.params.y, p.sunColor.xyz, p.wind.xyz);
 	return float4(col, 1.0);
 }
 )MSL";
@@ -818,6 +819,7 @@ struct SkyParams
 	glm::vec4 params      = glm::vec4(0.0f); // x = timeOfDay (cloud scroll), y = coverage, z = wall-clock time, w = aurora
 	glm::vec4 nebulaColor = glm::vec4(0.42f, 0.45f, 0.92f, 0.5f); // xyz = colour, w = nebula intensity
 	glm::vec4 auroraColor = glm::vec4(0.25f, 0.95f, 0.50f, 0.6f); // xyz = colour, w = milky-way intensity
+	glm::vec4 wind        = glm::vec4(0.0f); // xyz = horizontal cloud drift (world units / s)
 };
 
 // Remaps the extractor's GL-convention light projection (depth -1..1) to Metal
@@ -1684,7 +1686,7 @@ void MetalRenderer::EncodeSky(void* renderEncoder, const glm::mat4& invViewProj,
                              float timeOfDay, float cloudCoverage, float time,
                              float auroraIntensity, const glm::vec3& nebulaColor,
                              float nebulaIntensity, const glm::vec3& auroraColor,
-                             float milkyWayIntensity)
+                             float milkyWayIntensity, const glm::vec3& wind)
 {
 	if (!m_skyPipeline) return;
 	id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
@@ -1702,6 +1704,7 @@ void MetalRenderer::EncodeSky(void* renderEncoder, const glm::mat4& invViewProj,
 	p.params      = glm::vec4(timeOfDay, cloudCoverage, time, auroraIntensity);
 	p.nebulaColor = glm::vec4(nebulaColor, nebulaIntensity);
 	p.auroraColor = glm::vec4(auroraColor, milkyWayIntensity);
+	p.wind        = glm::vec4(wind, 0.0f);
 	[enc setFragmentBytes:&p length:sizeof(p) atIndex:0];
 	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
 }
@@ -1732,12 +1735,15 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 	// Skybox first (into the HDR target, no depth write) so the scene draws over
 	// it. Drawn before any early-out so the background is never a stale gray clear
 	// when the camera looks away from the scene and all objects are culled.
+	const float windRad = glm::radians(GetEnvironment().windDirection);
+	const glm::vec3 windVec = glm::vec3(std::sin(windRad), 0.0f, -std::cos(windRad))
+	                        * (GetEnvironment().windSpeed * 0.025f);
 	EncodeSky(renderEncoder, glm::inverse(viewProj), sunDir, GetEnvironment().sunColor,
 	          GetEnvironment().timeOfDay, GetEnvironment().cloudCoverage,
 	          static_cast<float>(SDL_GetTicks()) / 1000.0f,
 	          GetEnvironment().auroraIntensity, GetEnvironment().nebulaColor,
 	          GetEnvironment().nebulaIntensity, GetEnvironment().auroraColor,
-	          GetEnvironment().milkyWayIntensity);
+	          GetEnvironment().milkyWayIntensity, windVec);
 
 	if (m_renderWorld.objects.empty())
 		return;

@@ -553,6 +553,8 @@ void EditorApplication::OnInit()
 	m_editorConfig.AuroraColor.r               = globalstate.getCustomConfigFloat("AuroraColorR",         m_editorConfig.AuroraColor.r);
 	m_editorConfig.AuroraColor.g               = globalstate.getCustomConfigFloat("AuroraColorG",         m_editorConfig.AuroraColor.g);
 	m_editorConfig.AuroraColor.b               = globalstate.getCustomConfigFloat("AuroraColorB",         m_editorConfig.AuroraColor.b);
+	m_editorConfig.WindDirection               = globalstate.getCustomConfigFloat("WindDirection",        m_editorConfig.WindDirection);
+	m_editorConfig.WindSpeed                   = globalstate.getCustomConfigFloat("WindSpeed",            m_editorConfig.WindSpeed);
 	m_editorCamera.setFlySpeed(m_editorConfig.EditorCameraSpeed);
 
 #ifdef HE_IMGUI_ENABLED
@@ -780,7 +782,8 @@ void EditorApplication::OnRender(float dt)
 			m_editorConfig.MilkyWayIntensity,
 			m_editorConfig.NebulaIntensity,
 			m_editorConfig.NebulaColor,
-			m_editorConfig.AuroraColor});
+			m_editorConfig.AuroraColor,
+			m_editorConfig.WindDirection, m_editorConfig.WindSpeed});
 	}
 
 	AppContext ctx = makeContext();
@@ -866,7 +869,8 @@ void EditorApplication::dumpFrameHeadless()
 		m_editorConfig.FogDensity, m_editorConfig.FogHeightFalloff,
 		m_editorConfig.AuroraIntensity,
 		m_editorConfig.MilkyWayIntensity, m_editorConfig.NebulaIntensity,
-		m_editorConfig.NebulaColor, m_editorConfig.AuroraColor});
+		m_editorConfig.NebulaColor, m_editorConfig.AuroraColor,
+		m_editorConfig.WindDirection, m_editorConfig.WindSpeed});
 	r->SetViewportSize(1280, 720);
 	for (int i = 0; i < 3; ++i)
 		r->Render();
@@ -1174,6 +1178,8 @@ void EditorApplication::OnShutdown()
 	globalstate.setCustomConfigEntry("AuroraColorR",           m_editorConfig.AuroraColor.r);
 	globalstate.setCustomConfigEntry("AuroraColorG",           m_editorConfig.AuroraColor.g);
 	globalstate.setCustomConfigEntry("AuroraColorB",           m_editorConfig.AuroraColor.b);
+	globalstate.setCustomConfigEntry("WindDirection",         m_editorConfig.WindDirection);
+	globalstate.setCustomConfigEntry("WindSpeed",             m_editorConfig.WindSpeed);
 	globalstate.writeConfig();
 }
 

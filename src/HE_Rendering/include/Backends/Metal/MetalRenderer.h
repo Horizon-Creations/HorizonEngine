@@ -94,7 +94,7 @@ private:
 	void  EncodeSky(void* renderEncoder, const glm::mat4& invViewProj, const glm::vec3& sunDir,
 	                const glm::vec3& sunColor, float timeOfDay, float cloudCoverage, float time,
 	                float auroraIntensity, const glm::vec3& nebulaColor, float nebulaIntensity,
-	                const glm::vec3& auroraColor, float milkyWayIntensity);
+	                const glm::vec3& auroraColor, float milkyWayIntensity, const glm::vec3& wind);
 	// (Re)creates the offscreen viewport textures at the requested size.
 	void EnsureViewportTarget();
 	void DestroyViewportTarget();

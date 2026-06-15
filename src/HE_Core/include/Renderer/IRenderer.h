@@ -140,6 +140,11 @@ public:
         float     nebulaIntensity   = 0.5f;
         glm::vec3 nebulaColor       = glm::vec3(0.42f, 0.45f, 0.92f);
         glm::vec3 auroraColor       = glm::vec3(0.25f, 0.95f, 0.50f);
+        // Cloud wind: the compass direction the clouds drift toward (degrees, 0 =
+        // toward -Z/north, increasing clockwise) and a speed multiplier. The
+        // backend turns these into a horizontal drift vector for the cloud noise.
+        float     windDirection = 30.0f;
+        float     windSpeed     = 1.0f;
     };
     virtual void SetEnvironmentSettings(const EnvironmentSettings& e) { m_environment = e; }
     const EnvironmentSettings& GetEnvironment() const { return m_environment; }

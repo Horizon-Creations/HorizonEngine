@@ -80,6 +80,9 @@ struct EditorConfig
 	float     NebulaIntensity   = 0.5f;
 	glm::vec3 NebulaColor       = glm::vec3(0.42f, 0.45f, 0.92f);
 	glm::vec3 AuroraColor       = glm::vec3(0.25f, 0.95f, 0.50f);
+	// Cloud wind: drift direction (degrees, 0 = toward north/-Z) + speed multiplier.
+	float     WindDirection     = 30.0f;
+	float     WindSpeed         = 1.0f;
 
 	EditorMode mode = EditorMode::View;
 	std::string modeString() const
