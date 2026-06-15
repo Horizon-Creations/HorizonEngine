@@ -208,6 +208,7 @@ uniform float     uTimeOfDay;   // cloud scroll phase (0..1)
 uniform float     uCloudCoverage; // cloud amount (0 = clear … 1 = full overcast)
 uniform float     uTime;        // wall-clock seconds (star twinkle)
 uniform vec3      uSunColor;    // sun light colour (tints the clouds)
+uniform float     uAurora;      // aurora intensity (0 = off)
 out vec4 FragColor;
 //#SKYFUNC#
 
@@ -356,6 +357,62 @@ vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float timeOfDay, float cov
 	return mix(baseSky, cloudCol, cover);
 }
 
+// Milky Way — a soft galactic band of unresolved starlight + dust hugging a
+// fixed great circle on the sky dome. Night-only, above the horizon, occluded
+// by clouds (added before applyClouds). Subtle; complements the discrete
+// starField(). Reuses the cloud FBM for the dust mottling. Mirrors Metal.
+vec3 milkyWay(vec3 dir, vec3 sunDir, float time)
+{
+	dir    = normalize(dir);
+	sunDir = normalize(sunDir);
+	float night = 1.0 - smoothstep(-0.10, 0.10, clamp(sunDir.y, -0.2, 1.0));
+	if (night <= 0.0 || dir.y <= 0.0) return vec3(0.0);
+
+	// Brightness peaks where the ray lies on the galactic plane (dot ~ 0).
+	const vec3 galNormal = normalize(vec3(0.46, 0.52, -0.72));
+	float d    = dot(dir, galNormal);
+	float band = exp(-d * d * 9.0);                  // soft gaussian band
+
+	// FBM dust clumping + darker rifts cutting across the band.
+	vec2  fp   = vec2(dir.x + dir.z * 0.7, dir.y) * 4.0;
+	float dust = cloudFbm(fp);
+	float rift = smoothstep(0.22, 0.72, cloudFbm(fp * 0.5 + 9.0));
+	float glow = band * (0.50 + 1.3 * dust * dust) * rift;
+
+	float horizon = smoothstep(0.0, 0.18, dir.y);    // fade into the horizon haze
+	vec3  tint    = vec3(0.74, 0.80, 0.97);          // cool bluish white
+	return tint * (glow * 0.55 * horizon * night);
+}
+
+// Aurora borealis — drifting green/violet light curtains low in the sky. Night
+// only, intensity user-controlled. A wavy lower edge (per azimuth + time) with
+// an upward falloff and fine vertical striations that drift in real time.
+// Mirrors Metal (note: GLSL atan(y,x) ↔ MSL atan2(y,x)).
+vec3 aurora(vec3 dir, vec3 sunDir, float time, float intensity)
+{
+	if (intensity <= 0.0) return vec3(0.0);
+	dir    = normalize(dir);
+	sunDir = normalize(sunDir);
+	float night = 1.0 - smoothstep(-0.10, 0.10, clamp(sunDir.y, -0.2, 1.0));
+	if (night <= 0.0 || dir.y <= 0.02) return vec3(0.0);
+
+	float az = atan(dir.x, dir.z);                   // azimuth around the horizon
+	// Wavy lower edge of the curtain; drifts slowly with the wall clock.
+	float edge = 0.10 + 0.05 * sin(az * 3.0 + time * 0.30)
+	                  + 0.04 * cloudFbm(vec2(az * 2.0, time * 0.10));
+	float h = dir.y - edge;                          // height above the curtain base
+	if (h <= 0.0) return vec3(0.0);
+	float vert = exp(-h * 5.5);                      // fade upward into the sky
+	// Drifting vertical striations give the curtain its rayed structure.
+	float stri = cloudFbm(vec2(az * 9.0 + time * 0.25, dir.y * 3.0));
+	float curtain = vert * smoothstep(0.30, 0.72, stri);
+	float top = 1.0 - smoothstep(0.30, 0.60, dir.y); // thin out high in the sky
+	// Green base rising into violet tips with elevation.
+	vec3 col = mix(vec3(0.12, 0.92, 0.46), vec3(0.48, 0.20, 0.85),
+	               smoothstep(0.06, 0.40, dir.y));
+	return col * (curtain * top * intensity * night * 0.9);
+}
+
 void main()
 {
 	vec4 wp1 = uInvViewProj * vec4(vNDC,  1.0, 1.0);
@@ -363,6 +420,8 @@ void main()
 	vec3 dir = wp1.xyz / wp1.w - wp0.xyz / wp0.w;
 	vec3 col = skyColor(dir, uSunDir);
 	col += starField(dir, uSunDir, uTime);
+	col += milkyWay(dir, uSunDir, uTime);
+	col += aurora(dir, uSunDir, uTime, uAurora);
 	col += moonDisk(dir, uSunDir);
 	col = applyClouds(col, dir, uSunDir, uTimeOfDay, uCloudCoverage, uSunColor);
 	FragColor = vec4(col, 1.0);
@@ -695,6 +754,7 @@ void OpenGLRenderer::CreateSkyPipeline()
 	m_uSkyCoverage = glGetUniformLocation(m_skyProgram, "uCloudCoverage");
 	m_uSkyClock    = glGetUniformLocation(m_skyProgram, "uTime");
 	m_uSkySunColor = glGetUniformLocation(m_skyProgram, "uSunColor");
+	m_uSkyAurora   = glGetUniformLocation(m_skyProgram, "uAurora");
 }
 
 void OpenGLRenderer::CreateTonemapPipeline()
@@ -1374,6 +1434,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glUniform1f(m_uSkyCoverage, GetEnvironment().cloudCoverage);
 			glUniform1f(m_uSkyClock, static_cast<float>(SDL_GetTicks()) / 1000.0f);
 			glUniform3fv(m_uSkySunColor, 1, glm::value_ptr(GetEnvironment().sunColor));
+			glUniform1f(m_uSkyAurora, GetEnvironment().auroraIntensity);
 			glBindVertexArray(m_fsVAO);
 			glDrawArrays(GL_TRIANGLES, 0, 3);
 			glEnable(GL_DEPTH_TEST);

@@ -71,6 +71,9 @@ struct EditorConfig
 	// pools the fog near the ground).
 	float     FogDensity      = 0.0f;
 	float     FogHeightFalloff = 0.1f;
+	// Night-sky aurora borealis intensity (0 = off). The Milky Way band is
+	// always drawn on a clear night and needs no control.
+	float     AuroraIntensity = 0.0f;
 
 	EditorMode mode = EditorMode::View;
 	std::string modeString() const

@@ -92,7 +92,8 @@ private:
 	void* m_skyPipeline = nullptr; // id<MTLRenderPipelineState>
 	void* m_moonTexture = nullptr; // id<MTLTexture>, night-sky moon (or null)
 	void  EncodeSky(void* renderEncoder, const glm::mat4& invViewProj, const glm::vec3& sunDir,
-	                const glm::vec3& sunColor, float timeOfDay, float cloudCoverage, float time);
+	                const glm::vec3& sunColor, float timeOfDay, float cloudCoverage, float time,
+	                float auroraIntensity);
 	// (Re)creates the offscreen viewport textures at the requested size.
 	void EnsureViewportTarget();
 	void DestroyViewportTarget();

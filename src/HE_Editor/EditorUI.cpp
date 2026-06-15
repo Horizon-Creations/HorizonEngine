@@ -1907,6 +1907,14 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                            0.0f, 1.0f, "Ground hugging: %.2f");
         ImGui::EndDisabled();
         ImGui::TextDisabled("Distant objects blend into the horizon (warm at sunset).");
+
+        // Night sky: the Milky Way band is always drawn on a clear night; the
+        // aurora is an opt-in drifting curtain effect (0 = off).
+        ImGui::SeparatorText("Night Sky");
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::SliderFloat("##aurora", &ctx.editorConfig.AuroraIntensity,
+                           0.0f, 1.0f, "Aurora: %.2f");
+        ImGui::TextDisabled("Aurora & Milky Way appear at night (clear sky).");
     }
 
     ImGui::End();

@@ -317,7 +317,7 @@ static const char* kSkyMSL = R"MSL(
 using namespace metal;
 
 struct SkyOut { float4 position [[position]]; float2 ndc; };
-struct SkyParams { float4x4 invViewProj; float4 sunDir; float4 sunColor; float4 params; }; // params: x=timeOfDay y=coverage z=time
+struct SkyParams { float4x4 invViewProj; float4 sunDir; float4 sunColor; float4 params; }; // params: x=timeOfDay y=coverage z=time w=aurora
 
 vertex SkyOut skyVertex(uint vid [[vertex_id]])
 {
@@ -476,6 +476,54 @@ float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float timeOfDay, f
 	return mix(baseSky, cloudCol, cover);
 }
 
+// Milky Way — soft galactic band of unresolved starlight + dust on a fixed
+// great circle. Night-only, occluded by clouds. Mirrors the GL milkyWay().
+float3 milkyWay(float3 dir, float3 sunDir, float time)
+{
+	dir    = normalize(dir);
+	sunDir = normalize(sunDir);
+	float night = 1.0 - smoothstep(-0.10, 0.10, clamp(sunDir.y, -0.2, 1.0));
+	if (night <= 0.0 || dir.y <= 0.0) return float3(0.0);
+
+	const float3 galNormal = normalize(float3(0.46, 0.52, -0.72));
+	float d    = dot(dir, galNormal);
+	float band = exp(-d * d * 9.0);
+
+	float2 fp   = float2(dir.x + dir.z * 0.7, dir.y) * 4.0;
+	float  dust = cloudFbm(fp);
+	float  rift = smoothstep(0.22, 0.72, cloudFbm(fp * 0.5 + 9.0));
+	float  glow = band * (0.50 + 1.3 * dust * dust) * rift;
+
+	float  horizon = smoothstep(0.0, 0.18, dir.y);
+	float3 tint    = float3(0.74, 0.80, 0.97);
+	return tint * (glow * 0.55 * horizon * night);
+}
+
+// Aurora borealis — drifting green/violet curtains low in the sky, night-only,
+// intensity user-controlled. Mirrors the GL aurora() (GLSL atan(y,x) = MSL
+// atan2(y,x)).
+float3 aurora(float3 dir, float3 sunDir, float time, float intensity)
+{
+	if (intensity <= 0.0) return float3(0.0);
+	dir    = normalize(dir);
+	sunDir = normalize(sunDir);
+	float night = 1.0 - smoothstep(-0.10, 0.10, clamp(sunDir.y, -0.2, 1.0));
+	if (night <= 0.0 || dir.y <= 0.02) return float3(0.0);
+
+	float az = atan2(dir.x, dir.z);
+	float edge = 0.10 + 0.05 * sin(az * 3.0 + time * 0.30)
+	                  + 0.04 * cloudFbm(float2(az * 2.0, time * 0.10));
+	float h = dir.y - edge;
+	if (h <= 0.0) return float3(0.0);
+	float vert = exp(-h * 5.5);
+	float stri = cloudFbm(float2(az * 9.0 + time * 0.25, dir.y * 3.0));
+	float curtain = vert * smoothstep(0.30, 0.72, stri);
+	float top = 1.0 - smoothstep(0.30, 0.60, dir.y);
+	float3 col = mix(float3(0.12, 0.92, 0.46), float3(0.48, 0.20, 0.85),
+	                 smoothstep(0.06, 0.40, dir.y));
+	return col * (curtain * top * intensity * night * 0.9);
+}
+
 fragment float4 skyFragment(SkyOut in [[stage_in]],
                             constant SkyParams& p [[buffer(0)]],
                             texture2d<float> moonTex [[texture(0)]],
@@ -486,6 +534,8 @@ fragment float4 skyFragment(SkyOut in [[stage_in]],
 	float3 dir = wp1.xyz / wp1.w - wp0.xyz / wp0.w;
 	float3 col = skyColor(dir, p.sunDir.xyz);
 	col += starField(dir, p.sunDir.xyz, p.params.z);
+	col += milkyWay(dir, p.sunDir.xyz, p.params.z);
+	col += aurora(dir, p.sunDir.xyz, p.params.z, p.params.w);
 	col += moonDisk(dir, p.sunDir.xyz, p.sunDir.w > 0.5, moonTex, moonSamp);
 	col = applyClouds(col, dir, p.sunDir.xyz, p.params.x, p.params.y, p.sunColor.xyz);
 	return float4(col, 1.0);
@@ -1468,7 +1518,8 @@ void MetalRenderer::EncodeTonemap(void* renderEncoderPtr)
 
 void MetalRenderer::EncodeSky(void* renderEncoder, const glm::mat4& invViewProj,
                              const glm::vec3& sunDir, const glm::vec3& sunColor,
-                             float timeOfDay, float cloudCoverage, float time)
+                             float timeOfDay, float cloudCoverage, float time,
+                             float auroraIntensity)
 {
 	if (!m_skyPipeline) return;
 	id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
@@ -1483,7 +1534,7 @@ void MetalRenderer::EncodeSky(void* renderEncoder, const glm::mat4& invViewProj,
 	p.invViewProj = invViewProj;
 	p.sunDir      = glm::vec4(sunDir, m_moonTexture ? 1.0f : 0.0f); // w = has-moon flag
 	p.sunColor    = glm::vec4(sunColor, 0.0f);
-	p.params      = glm::vec4(timeOfDay, cloudCoverage, time, 0.0f);
+	p.params      = glm::vec4(timeOfDay, cloudCoverage, time, auroraIntensity);
 	[enc setFragmentBytes:&p length:sizeof(p) atIndex:0];
 	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
 }
@@ -1516,7 +1567,8 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 	// when the camera looks away from the scene and all objects are culled.
 	EncodeSky(renderEncoder, glm::inverse(viewProj), sunDir, GetEnvironment().sunColor,
 	          GetEnvironment().timeOfDay, GetEnvironment().cloudCoverage,
-	          static_cast<float>(SDL_GetTicks()) / 1000.0f);
+	          static_cast<float>(SDL_GetTicks()) / 1000.0f,
+	          GetEnvironment().auroraIntensity);
 
 	if (m_renderWorld.objects.empty())
 		return;

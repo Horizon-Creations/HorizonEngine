@@ -143,6 +143,7 @@ private:
 	int          m_uSkyCoverage   = -1;   // cloud amount (0 clear … 1 overcast)
 	int          m_uSkyClock      = -1;   // wall-clock seconds (star twinkle)
 	int          m_uSkySunColor   = -1;   // sun light colour (cloud tint)
+	int          m_uSkyAurora     = -1;   // aurora intensity (0 = off)
 	unsigned int m_moonTex        = 0;    // night-sky moon texture (or 0)
 	void CreateSkyPipeline();
 
