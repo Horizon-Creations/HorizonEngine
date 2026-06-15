@@ -41,4 +41,9 @@ public:
     // first directional light, or driven by the day-night cycle when enabled.
     // Backends use it for the procedural sky + image-based ambient.
     glm::vec3 sunDirection = glm::vec3(0.45f, 0.80f, 0.55f);
+
+    // Flat ambient fill added to every lit surface, set by the extractor. A weak
+    // floor is always present (so the scene is never fully black); under heavy
+    // cloud cover it grows to replace the switched-off sun/moon directional light.
+    glm::vec3 ambient = glm::vec3(0.03f, 0.035f, 0.05f);
 };

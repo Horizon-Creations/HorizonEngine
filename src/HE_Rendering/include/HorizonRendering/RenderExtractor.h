@@ -29,21 +29,24 @@ public:
     // modified.
     void setDayNight(bool enabled, float timeOfDay,
                      const glm::vec3& sunColor, float sunIntensity,
-                     const glm::vec3& moonColor, float moonIntensity)
+                     const glm::vec3& moonColor, float moonIntensity,
+                     float cloudCoverage)
     {
-        m_dayNight      = enabled;
-        m_timeOfDay     = timeOfDay;
-        m_sunColor      = sunColor;
-        m_sunIntensity  = sunIntensity;
-        m_moonColor     = moonColor;
-        m_moonIntensity = moonIntensity;
+        m_dayNight       = enabled;
+        m_timeOfDay      = timeOfDay;
+        m_sunColor       = sunColor;
+        m_sunIntensity   = sunIntensity;
+        m_moonColor      = moonColor;
+        m_moonIntensity  = moonIntensity;
+        m_cloudCoverage  = cloudCoverage;
     }
 
 private:
-    bool      m_dayNight      = false;
-    float     m_timeOfDay     = 0.5f;
-    glm::vec3 m_sunColor      = glm::vec3(1.0f, 0.97f, 0.90f);
-    float     m_sunIntensity  = 2.2f;
-    glm::vec3 m_moonColor     = glm::vec3(0.55f, 0.65f, 0.95f);
-    float     m_moonIntensity = 0.66f;
+    bool      m_dayNight       = false;
+    float     m_timeOfDay      = 0.5f;
+    glm::vec3 m_sunColor       = glm::vec3(1.0f, 0.97f, 0.90f);
+    float     m_sunIntensity   = 2.2f;
+    glm::vec3 m_moonColor      = glm::vec3(0.55f, 0.65f, 0.95f);
+    float     m_moonIntensity  = 0.66f;
+    float     m_cloudCoverage  = 0.5f;
 };

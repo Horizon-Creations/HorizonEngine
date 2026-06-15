@@ -119,6 +119,10 @@ public:
         float     sunIntensity  = 2.2f;
         glm::vec3 moonColor     = glm::vec3(0.55f, 0.65f, 0.95f); // cool moonlight
         float     moonIntensity = 0.66f;
+        // Procedural cloud amount (0 = clear sky … 1 = full overcast). At full
+        // overcast the sun/moon directional light is switched off (optimisation)
+        // and replaced by a soft scattered ambient fill.
+        float     cloudCoverage = 0.5f;
     };
     virtual void SetEnvironmentSettings(const EnvironmentSettings& e) { m_environment = e; }
     const EnvironmentSettings& GetEnvironment() const { return m_environment; }

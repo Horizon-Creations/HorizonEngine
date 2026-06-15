@@ -105,6 +105,7 @@ private:
 	int          m_uLightParams   = -1;
 	int          m_uCameraPos     = -1;
 	int          m_uSunDir        = -1;   // toward-sun dir for image-based ambient
+	int          m_uAmbient       = -1;   // flat ambient fill (floor + overcast)
 	int          m_uLightVP       = -1;   // directional-light view-proj (shadow)
 	int          m_uShadowMap     = -1;   // shadow map sampler unit
 	int          m_uShadowEnabled = -1;
@@ -137,6 +138,7 @@ private:
 	int          m_uSkyMoonTex    = -1;   // moon texture sampler unit
 	int          m_uSkyHasMoon    = -1;   // 1 when a moon texture is bound
 	int          m_uSkyTime       = -1;   // time of day (cloud scroll phase)
+	int          m_uSkyCoverage   = -1;   // cloud amount (0 clear … 1 overcast)
 	unsigned int m_moonTex        = 0;    // night-sky moon texture (or 0)
 	void CreateSkyPipeline();
 

@@ -1885,6 +1885,14 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                           ImGuiColorEditFlags_NoInputs);
         ImGui::SliderFloat("Moon Brightness", &ctx.editorConfig.MoonIntensity,
                            0.0f, 10.0f, "%.2f");
+
+        // Cloud amount: 0 = clear sky … 1 = full overcast. At full overcast the
+        // sun/moon directional light is switched off and replaced by ambient.
+        ImGui::SeparatorText("Clouds");
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::SliderFloat("##cloudcoverage", &ctx.editorConfig.CloudCoverage,
+                           0.0f, 1.0f, "Coverage: %.2f");
+        ImGui::TextDisabled("Full overcast dims the sun & fills with ambient light.");
     }
 
     ImGui::End();

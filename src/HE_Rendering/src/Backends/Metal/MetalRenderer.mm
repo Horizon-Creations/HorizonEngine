@@ -54,6 +54,7 @@ struct SceneUniforms {
 	int      shadowEnabled;
 	int      pad3, pad4, pad5;
 	float4   sunDir;         // xyz = direction toward the sun (image-based ambient)
+	float4   ambient;        // xyz = flat ambient fill (floor + overcast); w unused
 };
 
 // shared skyColor() injected at the marker below (newLibraryWithSource)
@@ -158,6 +159,9 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
 	float3 ambDiff = skyColor(N, scene.sunDir.xyz)      * diffuseColor;
 	float3 ambSpec = skyColor(Rrough, scene.sunDir.xyz) * specColor;
 	float3 result  = ambDiff * 0.35 + ambSpec * (1.0 - 0.6 * in.roughness);
+	// Flat ambient fill (never-black floor + overcast replacement for the
+	// switched-off sun/moon light), applied to the diffuse albedo.
+	result += scene.ambient.xyz * diffuseColor;
 
 	for (int i = 0; i < scene.lightCount; ++i)
 	{
@@ -370,7 +374,7 @@ float cloudFbm(float2 p)
 	}
 	return v;
 }
-float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float timeOfDay)
+float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float timeOfDay, float coverage)
 {
 	dir    = normalize(dir);
 	sunDir = normalize(sunDir);
@@ -379,7 +383,9 @@ float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float timeOfDay)
 	// Project the ray onto a flat cloud layer (compresses toward the horizon).
 	float2 uv     = dir.xz / dir.y * 0.5;
 	float2 scroll = float2(timeOfDay * 8.0, timeOfDay * 2.0); // drift across the day
-	float cover = smoothstep(0.50, 0.85, cloudFbm(uv + scroll));
+	// Coverage slider lowers the density threshold: 0 = clear, 1 = full overcast.
+	float lo    = mix(0.95, 0.05, clamp(coverage, 0.0, 1.0));
+	float cover = smoothstep(lo, lo + 0.35, cloudFbm(uv + scroll));
 	cover *= smoothstep(0.02, 0.22, dir.y);       // fade out near the horizon
 
 	// Cheap shading: a sun-offset sample fakes bright tops / darker undersides.
@@ -406,7 +412,7 @@ fragment float4 skyFragment(SkyOut in [[stage_in]],
 	float3 dir = wp1.xyz / wp1.w - wp0.xyz / wp0.w;
 	float3 col = skyColor(dir, p.sunDir.xyz);
 	col += moonDisk(dir, p.sunDir.xyz, p.sunDir.w > 0.5, moonTex, moonSamp);
-	col = applyClouds(col, dir, p.sunDir.xyz, p.params.x);
+	col = applyClouds(col, dir, p.sunDir.xyz, p.params.x, p.params.y);
 	return float4(col, 1.0);
 }
 )MSL";
@@ -495,6 +501,7 @@ struct SceneUniforms
 	int32_t   shadowEnabled = 0;
 	int32_t   pad3 = 0, pad4 = 0, pad5 = 0;
 	glm::vec4 sunDir = glm::vec4(0.0f, 1.0f, 0.0f, 0.0f);
+	glm::vec4 ambient = glm::vec4(0.0f);
 };
 
 // Matches the MSL SkyParams struct.
@@ -502,7 +509,7 @@ struct SkyParams
 {
 	glm::mat4 invViewProj = glm::mat4(1.0f);
 	glm::vec4 sunDir      = glm::vec4(0.0f, 1.0f, 0.0f, 0.0f);
-	glm::vec4 params      = glm::vec4(0.0f); // x = timeOfDay (cloud scroll)
+	glm::vec4 params      = glm::vec4(0.0f); // x = timeOfDay (cloud scroll), y = cloud coverage
 };
 
 // Remaps the extractor's GL-convention light projection (depth -1..1) to Metal
@@ -1361,7 +1368,7 @@ void MetalRenderer::EncodeTonemap(void* renderEncoderPtr)
 // ─── Frame encoding ───────────────────────────────────────────────────────────
 
 void MetalRenderer::EncodeSky(void* renderEncoder, const glm::mat4& invViewProj,
-                             const glm::vec3& sunDir, float timeOfDay)
+                             const glm::vec3& sunDir, float timeOfDay, float cloudCoverage)
 {
 	if (!m_skyPipeline) return;
 	id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
@@ -1375,7 +1382,7 @@ void MetalRenderer::EncodeSky(void* renderEncoder, const glm::mat4& invViewProj,
 	SkyParams p;
 	p.invViewProj = invViewProj;
 	p.sunDir      = glm::vec4(sunDir, m_moonTexture ? 1.0f : 0.0f); // w = has-moon flag
-	p.params      = glm::vec4(timeOfDay, 0.0f, 0.0f, 0.0f);
+	p.params      = glm::vec4(timeOfDay, cloudCoverage, 0.0f, 0.0f);
 	[enc setFragmentBytes:&p length:sizeof(p) atIndex:0];
 	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
 }
@@ -1390,7 +1397,8 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 	const IRenderer::EnvironmentSettings& env = GetEnvironment();
 	m_extractor.setDayNight(env.dayNightCycle, env.timeOfDay,
 	                        env.sunColor, env.sunIntensity,
-	                        env.moonColor, env.moonIntensity);
+	                        env.moonColor, env.moonIntensity,
+	                        env.cloudCoverage);
 	m_extractor.extract(*m_world, m_renderWorld,
 	                    static_cast<float>(width) / static_cast<float>(height),
 	                    &m_editorCamera);
@@ -1405,7 +1413,8 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 	// Skybox first (into the HDR target, no depth write) so the scene draws over
 	// it. Drawn before any early-out so the background is never a stale gray clear
 	// when the camera looks away from the scene and all objects are culled.
-	EncodeSky(renderEncoder, glm::inverse(viewProj), sunDir, GetEnvironment().timeOfDay);
+	EncodeSky(renderEncoder, glm::inverse(viewProj), sunDir,
+	          GetEnvironment().timeOfDay, GetEnvironment().cloudCoverage);
 
 	if (m_renderWorld.objects.empty())
 		return;
@@ -1450,6 +1459,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 		scene.lightVP       = kMetalClipFix * m_renderWorld.shadow.viewProj;
 		scene.shadowEnabled = shadows ? 1 : 0;
 		scene.sunDir        = glm::vec4(sunDir, 0.0f);
+		scene.ambient       = glm::vec4(m_renderWorld.ambient, 0.0f);
 		[encoder setFragmentBytes:&scene length:sizeof(scene) atIndex:0];
 	}
 

@@ -793,3 +793,33 @@ den Himmel — Himmel, Image-Based-Ambient **und** Schatten reagieren zusammen.
   der exakten Shader-Mathematik (nach-oben-Kamera) zeigt: Tag = weiße Wolken/blauer Himmel,
   Dusk = warme Horizont-Wolken, Nacht = gedämpft kühl; t=0,50 vs 0,55 → Wolken sind sichtbar
   weitergewandert. Build sauber, Tests grün.
+
+---
+
+## Forts. 7 — Wolken-Slider + Overcast-Optimierung (Sonne aus → Ambient)
+
+> **Aufgabe:** Slider für die Wolkenmenge; Wolken vor der Sonne rendern; bei voller
+> Bewölkung das Sonnenlicht als Optimierung abschalten und durch ein schwaches Ambient
+> ersetzen — das Ambient soll immer dazugerechnet werden, damit es nie ganz schwarz ist. ✅
+
+**Slider (`cloudCoverage`, 0 = klar … 1 = voll bedeckt):**
+- Neues Feld in `EnvironmentSettings` + `EditorConfig` (Load/Save als `CloudCoverage`), UI-Slider
+  im Environment-Panel, durch beide Backends an den Sky-Shader gereicht (Metal `SkyParams.params.y`,
+  GL `uCloudCoverage`).
+- `applyClouds()` (beide Shader zeilengleich): Deckungsschwelle wird vom Slider gesenkt —
+  `lo = mix(0.95, 0.05, coverage)`, `cover = smoothstep(lo, lo+0.35, fbm)`. CPU-Replik bestätigt
+  monoton: 0,0 → 0 %, 0,5 → 44 %, 0,75 → 82 %, 1,0 → 94 % Wolken (Rest = Horizont-Fade).
+- **Vor der Sonne:** `applyClouds()` läuft als letztes über `skyColor()` (Sonnenscheibe) + `moonDisk()`,
+  blendet also davor — Wolken verdecken Sonne und Mond.
+
+**Overcast-Optimierung + Ambient-Boden (Extractor, `setDayNight()` bekommt `cloudCoverage`):**
+- `overcast = smoothstep(0.5, 1.0, coverage)`. Sonnen- **und** Mond-Directional-Light werden mit
+  `(1-overcast)` skaliert → bei voller Bewölkung aus (spart Direktlicht + Schatten-Lookup).
+- Neuer flacher Ambient-Term `RenderWorld.ambient`: schwacher Boden `(0.03,0.035,0.05)` **immer**
+  dazu (nie ganz schwarz) + Overcast-Füllung `(sunFill+moonFill) * overcast * 0.22`, vom aktiven
+  Gestirn eingefärbt. An beide Scene-Shader gereicht (Metal `SceneUniforms.ambient`, GL `uAmbient`),
+  auf die Diffuse-Albedo angewandt.
+- **Verifiziert:** Headless-Dump Mittag, coverage 0 vs 1 → Sonne an: mean 0,79 / std 0,123 (Schatten);
+  voll bedeckt: mean 0,69 (dunkler, Sonne aus) / std 0,066 (flach, keine Schatten) / min 0,617
+  (nie schwarz, Ambient hebt Schattenbereiche). Metal-Shader kompiliert zur Laufzeit, Build sauber,
+  Tests grün.

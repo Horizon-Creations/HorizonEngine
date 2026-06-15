@@ -51,6 +51,7 @@ uniform sampler2D uTexture;
 uniform float     uMetallic;    // 0 dielectric … 1 metal
 uniform float     uRoughness;   // 0 mirror … 1 fully rough
 uniform vec3      uSunDir;      // direction toward the sun (for image-based ambient)
+uniform vec3      uAmbient;     // flat ambient fill (never-black floor + overcast)
 
 // shared skyColor() is injected at the marker below (CreateUnlitPipeline)
 //#SKYFUNC#
@@ -117,6 +118,9 @@ void main()
 	vec3 ambDiff = skyColor(N, uSunDir)      * diffuseColor;
 	vec3 ambSpec = skyColor(Rrough, uSunDir) * specColor;
 	vec3 result  = ambDiff * 0.35 + ambSpec * (1.0 - 0.6 * uRoughness);
+	// Flat ambient fill (never-black floor + overcast replacement for the
+	// switched-off sun/moon light), applied to the diffuse albedo.
+	result += uAmbient * diffuseColor;
 
 	for (int i = 0; i < uLightCount; ++i)
 	{
@@ -179,6 +183,7 @@ uniform vec3 uSunDir;
 uniform sampler2D uMoonTex;
 uniform bool      uHasMoonTex;
 uniform float     uTimeOfDay;   // cloud scroll phase (0..1)
+uniform float     uCloudCoverage; // cloud amount (0 = clear … 1 = full overcast)
 out vec4 FragColor;
 //#SKYFUNC#
 
@@ -245,7 +250,7 @@ float cloudFbm(vec2 p)
 	}
 	return v;
 }
-vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float timeOfDay)
+vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float timeOfDay, float coverage)
 {
 	dir    = normalize(dir);
 	sunDir = normalize(sunDir);
@@ -254,7 +259,9 @@ vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float timeOfDay)
 	// Project the ray onto a flat cloud layer (compresses toward the horizon).
 	vec2 uv     = dir.xz / dir.y * 0.5;
 	vec2 scroll = vec2(timeOfDay * 8.0, timeOfDay * 2.0); // drift across the day
-	float cover = smoothstep(0.50, 0.85, cloudFbm(uv + scroll));
+	// Coverage slider lowers the density threshold: 0 = clear, 1 = full overcast.
+	float lo    = mix(0.95, 0.05, clamp(coverage, 0.0, 1.0));
+	float cover = smoothstep(lo, lo + 0.35, cloudFbm(uv + scroll));
 	cover *= smoothstep(0.02, 0.22, dir.y);       // fade out near the horizon
 
 	// Cheap shading: a sun-offset sample fakes bright tops / darker undersides.
@@ -278,7 +285,7 @@ void main()
 	vec3 dir = wp1.xyz / wp1.w - wp0.xyz / wp0.w;
 	vec3 col = skyColor(dir, uSunDir);
 	col += moonDisk(dir, uSunDir);
-	col = applyClouds(col, dir, uSunDir, uTimeOfDay);
+	col = applyClouds(col, dir, uSunDir, uTimeOfDay, uCloudCoverage);
 	FragColor = vec4(col, 1.0);
 }
 )GLSL";
@@ -522,6 +529,7 @@ void OpenGLRenderer::CreateUnlitPipeline()
 	m_uLightParams = glGetUniformLocation(m_unlitProgram, "uLightParams");
 	m_uCameraPos   = glGetUniformLocation(m_unlitProgram, "uCameraPos");
 	m_uSunDir      = glGetUniformLocation(m_unlitProgram, "uSunDir");
+	m_uAmbient     = glGetUniformLocation(m_unlitProgram, "uAmbient");
 	m_uLightVP       = glGetUniformLocation(m_unlitProgram, "uLightVP");
 	m_uShadowMap     = glGetUniformLocation(m_unlitProgram, "uShadowMap");
 	m_uShadowEnabled = glGetUniformLocation(m_unlitProgram, "uShadowEnabled");
@@ -586,6 +594,7 @@ void OpenGLRenderer::CreateSkyPipeline()
 	m_uSkyMoonTex = glGetUniformLocation(m_skyProgram, "uMoonTex");
 	m_uSkyHasMoon = glGetUniformLocation(m_skyProgram, "uHasMoonTex");
 	m_uSkyTime    = glGetUniformLocation(m_skyProgram, "uTimeOfDay");
+	m_uSkyCoverage = glGetUniformLocation(m_skyProgram, "uCloudCoverage");
 }
 
 void OpenGLRenderer::CreateTonemapPipeline()
@@ -1140,7 +1149,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	const IRenderer::EnvironmentSettings& env = GetEnvironment();
 	m_extractor.setDayNight(env.dayNightCycle, env.timeOfDay,
 	                        env.sunColor, env.sunIntensity,
-	                        env.moonColor, env.moonIntensity);
+	                        env.moonColor, env.moonIntensity,
+	                        env.cloudCoverage);
 	m_extractor.extract(*m_world, m_renderWorld,
 	                    static_cast<float>(pw) / static_cast<float>(ph),
 	                    &m_editorCamera);
@@ -1261,6 +1271,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glUniform1i(m_uSkyMoonTex, 0);
 			glUniform1i(m_uSkyHasMoon, m_moonTex ? 1 : 0);
 			glUniform1f(m_uSkyTime, GetEnvironment().timeOfDay);
+			glUniform1f(m_uSkyCoverage, GetEnvironment().cloudCoverage);
 			glBindVertexArray(m_fsVAO);
 			glDrawArrays(GL_TRIANGLES, 0, 3);
 			glEnable(GL_DEPTH_TEST);
@@ -1270,6 +1281,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		glUseProgram(m_unlitProgram);
 		glUniform1i(m_uTexture, 0); // base color tint (uColor) is set per draw below
 		glUniform3fv(m_uSunDir, 1, glm::value_ptr(sunDir));
+		glUniform3fv(m_uAmbient, 1, glm::value_ptr(m_renderWorld.ambient));
 
 		// Lights (clamped to the shader's MAX_LIGHTS)
 		{

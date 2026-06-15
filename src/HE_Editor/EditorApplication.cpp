@@ -541,6 +541,7 @@ void EditorApplication::OnInit()
 	m_editorConfig.MoonColor.r                 = globalstate.getCustomConfigFloat("MoonColorR",          m_editorConfig.MoonColor.r);
 	m_editorConfig.MoonColor.g                 = globalstate.getCustomConfigFloat("MoonColorG",          m_editorConfig.MoonColor.g);
 	m_editorConfig.MoonColor.b                 = globalstate.getCustomConfigFloat("MoonColorB",          m_editorConfig.MoonColor.b);
+	m_editorConfig.CloudCoverage               = globalstate.getCustomConfigFloat("CloudCoverage",        m_editorConfig.CloudCoverage);
 	m_editorCamera.setFlySpeed(m_editorConfig.EditorCameraSpeed);
 
 #ifdef HE_IMGUI_ENABLED
@@ -760,7 +761,8 @@ void EditorApplication::OnRender(float dt)
 			m_editorConfig.SunColor,
 			m_editorConfig.SunIntensity,
 			m_editorConfig.MoonColor,
-			m_editorConfig.MoonIntensity});
+			m_editorConfig.MoonIntensity,
+			m_editorConfig.CloudCoverage});
 	}
 
 	AppContext ctx = makeContext();
@@ -841,7 +843,8 @@ void EditorApplication::dumpFrameHeadless()
 	r->SetEnvironmentSettings(IRenderer::EnvironmentSettings{
 		m_editorConfig.DayNightCycle, m_editorConfig.TimeOfDay,
 		m_editorConfig.SunColor, m_editorConfig.SunIntensity,
-		m_editorConfig.MoonColor, m_editorConfig.MoonIntensity});
+		m_editorConfig.MoonColor, m_editorConfig.MoonIntensity,
+		m_editorConfig.CloudCoverage});
 	r->SetViewportSize(1280, 720);
 	for (int i = 0; i < 3; ++i)
 		r->Render();
@@ -1137,6 +1140,7 @@ void EditorApplication::OnShutdown()
 	globalstate.setCustomConfigEntry("MoonColorR",                m_editorConfig.MoonColor.r);
 	globalstate.setCustomConfigEntry("MoonColorG",                m_editorConfig.MoonColor.g);
 	globalstate.setCustomConfigEntry("MoonColorB",                m_editorConfig.MoonColor.b);
+	globalstate.setCustomConfigEntry("CloudCoverage",            m_editorConfig.CloudCoverage);
 	globalstate.writeConfig();
 }
 
