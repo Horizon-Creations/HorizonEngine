@@ -113,6 +113,12 @@ public:
     {
         bool  dayNightCycle = false;
         float timeOfDay     = 0.5f; // noon
+        // Sun & moon directional lights driven by the day-night cycle. Colour and
+        // brightness are user-adjustable; each luminary is faded out as it sets.
+        glm::vec3 sunColor      = glm::vec3(1.0f, 0.97f, 0.90f); // warm daylight
+        float     sunIntensity  = 2.2f;
+        glm::vec3 moonColor     = glm::vec3(0.55f, 0.65f, 0.95f); // cool moonlight
+        float     moonIntensity = 0.66f;
     };
     virtual void SetEnvironmentSettings(const EnvironmentSettings& e) { m_environment = e; }
     const EnvironmentSettings& GetEnvironment() const { return m_environment; }

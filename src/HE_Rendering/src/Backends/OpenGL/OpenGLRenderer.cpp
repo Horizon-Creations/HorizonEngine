@@ -1065,7 +1065,10 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		}
 	m_pendingMaterialInvalidations.clear();
 
-	m_extractor.setDayNight(GetEnvironment().dayNightCycle, GetEnvironment().timeOfDay);
+	const IRenderer::EnvironmentSettings& env = GetEnvironment();
+	m_extractor.setDayNight(env.dayNightCycle, env.timeOfDay,
+	                        env.sunColor, env.sunIntensity,
+	                        env.moonColor, env.moonIntensity);
 	m_extractor.extract(*m_world, m_renderWorld,
 	                    static_cast<float>(pw) / static_cast<float>(ph),
 	                    &m_editorCamera);

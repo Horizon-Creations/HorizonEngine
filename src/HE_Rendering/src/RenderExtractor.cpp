@@ -161,20 +161,19 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 			const float sunUp  = std::clamp((sunToward.y  + 0.10f) / 0.25f, 0.0f, 1.0f);
 			const float moonUp = std::clamp((moonToward.y + 0.10f) / 0.25f, 0.0f, 1.0f);
 
-			const float authoredInt = sunLight->intensity; // authored daylight intensity
-
-			// Sun: authored colour/intensity, switched off once it has set.
+			// Sun: configurable colour/intensity, switched off once it has set.
+			sunLight->color     = m_sunColor;
 			sunLight->direction = -sunToward; // light travels away from the sun
-			sunLight->intensity = authoredInt * sunUp;
+			sunLight->intensity = m_sunIntensity * sunUp;
 
-			// Moon: a second, cooler and dimmer directional light, off while down.
+			// Moon: a second, configurable directional light, off while it is down.
 			// (push_back may reallocate out.lights, so sunLight must not be used
 			// after this point.)
 			LightData moon{};
 			moon.type         = 0; // directional
 			moon.direction    = -moonToward; // light travels away from the moon
-			moon.color        = glm::vec3(0.55f, 0.65f, 0.95f);
-			moon.intensity    = authoredInt * 0.30f * moonUp;
+			moon.color        = m_moonColor;
+			moon.intensity    = m_moonIntensity * moonUp;
 			moon.range        = 0.0f;
 			moon.spotAngleCos = 1.0f;
 			out.lights.push_back(moon);

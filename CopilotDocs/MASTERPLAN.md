@@ -736,3 +736,23 @@ den Himmel — Himmel, Image-Based-Ambient **und** Schatten reagieren zusammen.
   lange Horizont-Schatten (beide Lichter teil-an), Nacht kühl/gedämpft aus der
   Gegenrichtung beleuchtet (Sonne aus, Schatten umgekehrt). Metal-Shader kompiliert,
   Tests grün.
+
+> **Status 15.06.2026 (Forts. 4):** Helligkeit **und** Lichtfarbe von Sonne und Mond
+> sind im Editor einstellbar (Environment-Panel) und werden in der config.json
+> persistiert. ✅ (GL+Metal)
+
+**Sonne/Mond einstellbar:**
+- **EnvironmentSettings** (`IRenderer.h`) um `sunColor`/`sunIntensity` und
+  `moonColor`/`moonIntensity` erweitert (Defaults: Sonne `(1.0,0.97,0.90)` @ 2.2 =
+  bisheriger Look, Mond `(0.55,0.65,0.95)` @ 0.66 = bisheriges `2.2*0.30`).
+- **`RenderExtractor::setDayNight()`** nimmt die vier Werte; das Sonnen- und das
+  Mondlicht beziehen Farbe/Intensität daraus statt aus dem authored ECS-Licht
+  (Ein-/Ausblenden über `sunUp`/`moonUp` bleibt). Der Day-Night-Zyklus „besitzt" damit
+  die Sonne vollständig.
+- **Editor:** `EditorConfig` + Laden/Speichern (`SunColorR/G/B`, `SunIntensity`,
+  `MoonColorR/G/B`, `MoonIntensity`) + UI im *Environment*-Panel (ColorEdit3 +
+  Brightness-Slider 0..10 für Sonne und Mond). Beide Backends reichen die Werte über
+  `GetEnvironment()` an `setDayNight()` weiter.
+- **Verifiziert:** Headless-Nacht-Dump mit rot/hell konfiguriertem Mond → Szene wird
+  klar rot aus der Mondrichtung beleuchtet (config → Settings → Light bestätigt).
+  Build sauber, Tests grün.
