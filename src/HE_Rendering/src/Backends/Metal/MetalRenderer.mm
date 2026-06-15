@@ -108,8 +108,18 @@ float shadowFactor(constant SceneUniforms& scene, float3 worldPos, float3 N, flo
 	// stop shadow acne, clamped so a high sun keeps crisp contact shadows.
 	float ndl     = clamp(dot(N, L), 0.0, 1.0);
 	float bias    = clamp(0.0016 * tan(acos(ndl)), 0.0005, 0.02);
-	float closest = shadowMap.sample(shadowSmp, uv).r;
-	return (p.z - bias > closest) ? 0.35 : 1.0;
+	// 3×3 PCF: averaging neighbouring texels softens the edge and hides the
+	// per-texel flicker the hard test produced as the day-night light rotates.
+	float2 texel = 1.0 / float2(shadowMap.get_width(), shadowMap.get_height());
+	float vis = 0.0;
+	for (int y = -1; y <= 1; ++y)
+		for (int x = -1; x <= 1; ++x)
+		{
+			float c = shadowMap.sample(shadowSmp, uv + float2(x, y) * texel).r;
+			vis += (p.z - bias > c) ? 0.0 : 1.0;
+		}
+	vis /= 9.0;
+	return mix(0.35, 1.0, vis);
 }
 
 // Blinn-Phong over up to 8 scene lights; lightCount == 0 falls back to the

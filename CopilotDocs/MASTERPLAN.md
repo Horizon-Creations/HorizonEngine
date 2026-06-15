@@ -756,3 +756,20 @@ den Himmel — Himmel, Image-Based-Ambient **und** Schatten reagieren zusammen.
 - **Verifiziert:** Headless-Nacht-Dump mit rot/hell konfiguriertem Mond → Szene wird
   klar rot aus der Mondrichtung beleuchtet (config → Settings → Light bestätigt).
   Build sauber, Tests grün.
+
+> **Status 15.06.2026 (Forts. 5):** Schattenflackern behoben — Texel-Snapping +
+> 3×3-PCF. ✅ (GL+Metal)
+
+**Schatten-Flicker-Fix:**
+- **Texel-Snapping (`RenderExtractor`):** Die Ortho-Schattenfrustum-Mitte wird in
+  ganzen Texel-Schritten entlang der Licht-Rechts/​Hoch-Achsen gerastet
+  (`worldPerTexel = 2*radius/2048`, `kShadowMapRes` = Backend-Shadow-Map). Dadurch
+  landen die Shadow-Map-Samples bei drehendem Day-Night-Licht auf stabilen
+  Welt-Positionen → die Schattenkanten „kriechen"/flackern nicht mehr Frame-zu-Frame.
+- **3×3-PCF (beide Shader, zeilengleich):** `computeShadow`/`shadowFactor` mitteln statt
+  einem harten Sample 9 Nachbar-Texel (`textureSize`/`get_width`) und geben
+  `mix(0.35, 1.0, vis)` zurück → weiche Kante, kein Per-Texel-Aliasing. Slope-Bias
+  unverändert.
+- **Verifiziert:** Metal-PCF kompiliert zur Laufzeit (Headless-Noon-Dump), Schatten
+  korrekt platziert mit weicher Penumbra; Texel-Snap bricht Positionierung nicht.
+  Build sauber, Tests grün.
