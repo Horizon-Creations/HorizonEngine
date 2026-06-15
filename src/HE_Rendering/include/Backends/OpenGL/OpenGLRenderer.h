@@ -136,6 +136,7 @@ private:
 	int          m_uSkySunDir     = -1;
 	int          m_uSkyMoonTex    = -1;   // moon texture sampler unit
 	int          m_uSkyHasMoon    = -1;   // 1 when a moon texture is bound
+	int          m_uSkyTime       = -1;   // time of day (cloud scroll phase)
 	unsigned int m_moonTex        = 0;    // night-sky moon texture (or 0)
 	void CreateSkyPipeline();
 

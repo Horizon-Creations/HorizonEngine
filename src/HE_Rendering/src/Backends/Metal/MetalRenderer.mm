@@ -293,7 +293,7 @@ static const char* kSkyMSL = R"MSL(
 using namespace metal;
 
 struct SkyOut { float4 position [[position]]; float2 ndc; };
-struct SkyParams { float4x4 invViewProj; float4 sunDir; };
+struct SkyParams { float4x4 invViewProj; float4 sunDir; float4 params; }; // params.x = timeOfDay
 
 vertex SkyOut skyVertex(uint vid [[vertex_id]])
 {
@@ -337,6 +337,65 @@ float3 moonDisk(float3 dir, float3 sunDir, bool hasMoon,
 	return tint * tex * limb * edge * 3.0 * night;
 }
 
+// Procedural clouds — drawn only in the sky pass (kept out of the shared
+// skyColor() so the scene's image-based ambient stays cheap). A scrolling FBM
+// over a flat cloud layer drifts with the time of day and is lit/tinted by the
+// day-night cycle. Mirrors the GL applyClouds() exactly.
+float cloudHash(float2 p)
+{
+	p  = fract(p * float2(127.1, 311.7));
+	p += dot(p, p + 34.56);
+	return fract(p.x * p.y);
+}
+float cloudNoise(float2 p)
+{
+	float2 i = floor(p);
+	float2 f = fract(p);
+	float2 u = f * f * (3.0 - 2.0 * f);
+	float a = cloudHash(i);
+	float b = cloudHash(i + float2(1.0, 0.0));
+	float c = cloudHash(i + float2(0.0, 1.0));
+	float d = cloudHash(i + float2(1.0, 1.0));
+	return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+float cloudFbm(float2 p)
+{
+	float v = 0.0;
+	float a = 0.5;
+	for (int i = 0; i < 5; ++i)
+	{
+		v += a * cloudNoise(p);
+		p  = p * 2.02;
+		a *= 0.5;
+	}
+	return v;
+}
+float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float timeOfDay)
+{
+	dir    = normalize(dir);
+	sunDir = normalize(sunDir);
+	if (dir.y < 0.02) return baseSky;             // no clouds at/below the horizon
+
+	// Project the ray onto a flat cloud layer (compresses toward the horizon).
+	float2 uv     = dir.xz / dir.y * 0.5;
+	float2 scroll = float2(timeOfDay * 8.0, timeOfDay * 2.0); // drift across the day
+	float cover = smoothstep(0.50, 0.85, cloudFbm(uv + scroll));
+	cover *= smoothstep(0.02, 0.22, dir.y);       // fade out near the horizon
+
+	// Cheap shading: a sun-offset sample fakes bright tops / darker undersides.
+	float lit  = smoothstep(0.45, 0.95, cloudFbm(uv + scroll + sunDir.xz * 0.20));
+	float sunY = clamp(sunDir.y, -0.2, 1.0);
+	float day  = smoothstep(-0.10, 0.10, sunY);
+	float dusk = smoothstep(-0.06, 0.05, sunY) * (1.0 - smoothstep(0.05, 0.28, sunY));
+
+	float3 dayCol   = mix(float3(0.55, 0.58, 0.66), float3(1.00, 0.99, 0.96), lit);
+	float3 nightCol = mix(float3(0.05, 0.06, 0.10), float3(0.20, 0.23, 0.32), lit);
+	float3 cloudCol = mix(nightCol, dayCol, day);
+	cloudCol = mix(cloudCol, float3(1.0, 0.62, 0.40), dusk * lit * 0.6); // warm dusk tops
+
+	return mix(baseSky, cloudCol, cover);
+}
+
 fragment float4 skyFragment(SkyOut in [[stage_in]],
                             constant SkyParams& p [[buffer(0)]],
                             texture2d<float> moonTex [[texture(0)]],
@@ -347,6 +406,7 @@ fragment float4 skyFragment(SkyOut in [[stage_in]],
 	float3 dir = wp1.xyz / wp1.w - wp0.xyz / wp0.w;
 	float3 col = skyColor(dir, p.sunDir.xyz);
 	col += moonDisk(dir, p.sunDir.xyz, p.sunDir.w > 0.5, moonTex, moonSamp);
+	col = applyClouds(col, dir, p.sunDir.xyz, p.params.x);
 	return float4(col, 1.0);
 }
 )MSL";
@@ -442,6 +502,7 @@ struct SkyParams
 {
 	glm::mat4 invViewProj = glm::mat4(1.0f);
 	glm::vec4 sunDir      = glm::vec4(0.0f, 1.0f, 0.0f, 0.0f);
+	glm::vec4 params      = glm::vec4(0.0f); // x = timeOfDay (cloud scroll)
 };
 
 // Remaps the extractor's GL-convention light projection (depth -1..1) to Metal
@@ -1299,7 +1360,8 @@ void MetalRenderer::EncodeTonemap(void* renderEncoderPtr)
 
 // ─── Frame encoding ───────────────────────────────────────────────────────────
 
-void MetalRenderer::EncodeSky(void* renderEncoder, const glm::mat4& invViewProj, const glm::vec3& sunDir)
+void MetalRenderer::EncodeSky(void* renderEncoder, const glm::mat4& invViewProj,
+                             const glm::vec3& sunDir, float timeOfDay)
 {
 	if (!m_skyPipeline) return;
 	id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
@@ -1313,6 +1375,7 @@ void MetalRenderer::EncodeSky(void* renderEncoder, const glm::mat4& invViewProj,
 	SkyParams p;
 	p.invViewProj = invViewProj;
 	p.sunDir      = glm::vec4(sunDir, m_moonTexture ? 1.0f : 0.0f); // w = has-moon flag
+	p.params      = glm::vec4(timeOfDay, 0.0f, 0.0f, 0.0f);
 	[enc setFragmentBytes:&p length:sizeof(p) atIndex:0];
 	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
 }
@@ -1342,7 +1405,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 	// Skybox first (into the HDR target, no depth write) so the scene draws over
 	// it. Drawn before any early-out so the background is never a stale gray clear
 	// when the camera looks away from the scene and all objects are culled.
-	EncodeSky(renderEncoder, glm::inverse(viewProj), sunDir);
+	EncodeSky(renderEncoder, glm::inverse(viewProj), sunDir, GetEnvironment().timeOfDay);
 
 	if (m_renderWorld.objects.empty())
 		return;
