@@ -130,6 +130,10 @@ public:
         // altitude (analytic exponential height fog); 0 = uniform distance fog.
         float     fogDensity      = 0.0f;
         float     fogHeightFalloff = 0.1f;
+        // Night-sky aurora borealis intensity (0 = off). Drifting green/violet
+        // light curtains low in the sky, drawn only at night. The procedural
+        // Milky Way band is always present on a clear night and needs no control.
+        float     auroraIntensity = 0.0f;
     };
     virtual void SetEnvironmentSettings(const EnvironmentSettings& e) { m_environment = e; }
     const EnvironmentSettings& GetEnvironment() const { return m_environment; }
