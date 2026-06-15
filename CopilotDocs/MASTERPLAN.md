@@ -629,3 +629,10 @@ Ambient-Quelle — macht PBR „modern".
   angestrahlt). GL==Metal visuell identisch (0,17 % Byte-Diff, max 43/Mittel 2,71
   = Präzision im nichtlinearen Gradient). 34 Tests grün. **D3D/Vulkan = blinder
   Port.**
+- **Bugfix (15.06.):** Skybox verschwand beim Wegschauen (Hintergrund wurde grau).
+  Ursache: `DrawScene`/`EncodeScene` brachen per `objects.empty()` /
+  `sortedIndices.empty()` **vor** dem Sky-Pass ab, sobald alle Objekte
+  frustum-gecullt waren → kein Sky, nur der graue Clear. Fix: Sky (GL: GeometryPass-
+  Sink; Metal: `EncodeSky` direkt nach `extract`) wird jetzt **immer** gezeichnet,
+  die Early-Outs überspringen nur noch die Objekt-Draws. Verifiziert mit Temp-
+  `sortedIndices.clear()` → Himmel statt Grau (GL+Metal identisch).

@@ -1264,6 +1264,22 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 	m_extractor.extract(*m_world, m_renderWorld,
 	                    static_cast<float>(width) / static_cast<float>(height),
 	                    &m_editorCamera);
+
+	const glm::mat4 viewProj =
+		m_renderWorld.camera.projection * m_renderWorld.camera.view;
+
+	// Direction toward the sun for sky + image-based ambient (first directional
+	// light, else a default high sun). Valid even with no objects.
+	glm::vec3 sunDir(0.45f, 0.80f, 0.55f);
+	for (const LightData& l : m_renderWorld.lights)
+		if (l.type == 0) { sunDir = -l.direction; break; } // 0 = directional
+	if (glm::dot(sunDir, sunDir) > 1e-8f) sunDir = glm::normalize(sunDir);
+
+	// Skybox first (into the HDR target, no depth write) so the scene draws over
+	// it. Drawn before any early-out so the background is never a stale gray clear
+	// when the camera looks away from the scene and all objects are culled.
+	EncodeSky(renderEncoder, glm::inverse(viewProj), sunDir);
+
 	if (m_renderWorld.objects.empty())
 		return;
 
@@ -1277,20 +1293,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 	m_culler.cull(m_renderWorld, m_visible);
 	m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
 	if (m_sortedIndices.empty())
-		return;
-
-	const glm::mat4 viewProj =
-		m_renderWorld.camera.projection * m_renderWorld.camera.view;
-
-	// Direction toward the sun for sky + image-based ambient (first directional
-	// light, else a default high sun).
-	glm::vec3 sunDir(0.45f, 0.80f, 0.55f);
-	for (const LightData& l : m_renderWorld.lights)
-		if (l.type == 0) { sunDir = -l.direction; break; } // 0 = directional
-	if (glm::dot(sunDir, sunDir) > 1e-8f) sunDir = glm::normalize(sunDir);
-
-	// Skybox first (into the HDR target, no depth write) so the scene draws over it.
-	EncodeSky(renderEncoder, glm::inverse(viewProj), sunDir);
+		return; // sky already drawn above — just skip the (empty) object draws
 
 	[encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_scenePipeline];
 	[encoder setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];

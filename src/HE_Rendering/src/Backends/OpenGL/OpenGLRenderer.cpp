@@ -1015,7 +1015,9 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	m_extractor.extract(*m_world, m_renderWorld,
 	                    static_cast<float>(pw) / static_cast<float>(ph),
 	                    &m_editorCamera);
-	if (m_renderWorld.objects.empty()) return;
+	// NB: do NOT early-out when there are no (visible) objects — the skybox is the
+	// background and must still be drawn, or the viewport falls back to a stale
+	// gray clear when the camera looks away from the scene.
 
 	const glm::mat4 viewProj    = m_renderWorld.camera.projection * m_renderWorld.camera.view;
 	const glm::mat4 invViewProj = glm::inverse(viewProj);
@@ -1036,7 +1038,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	// ── Cull → sort → submit ────────────────────────────────────────────────
 	m_culler.cull(m_renderWorld, m_visible);
 	m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
-	if (m_sortedIndices.empty()) return;
+	// (no early-out on empty: the geometry pass still draws the skybox background
+	// and the post-process still tonemaps it, even with zero visible objects.)
 
 	// Snapshot the active target (window or editor-viewport FBO) so the shadow
 	// pass can render into the shadow map and then restore it for the main pass.
