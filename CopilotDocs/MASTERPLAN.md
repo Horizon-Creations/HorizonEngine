@@ -976,3 +976,22 @@ atmosphärisch nordfixiert; Sterne + Nebel rotieren über `celestialDir` mit der
   `NebulaIntensity=1.0`, keine Log-Fehler), GL/MSL zeilengleich. Validiert per numpy-CPU-Replik der
   exakten portierten Mathematik (inkl. Sterne): farbige Nebel-Flecken variabler Größe mit
   eingebetteten Sternen, magenta/blau/teal ineinander verlaufend.
+
+### Forts. 11c — GLSL-Reserved-Word-Fix + Metal-VSync-Toggle
+
+> **Aufgabe:** OpenGL-Shader-Compile-Fehler beheben und sicherstellen, dass der VSync-Switch auch
+> unter Metal funktioniert. ✅
+
+- **GL-Shader-Compile-Fehler** (`ERROR: 0:348: 'patch' : syntax error`): In `aurora()` hieß eine
+  lokale Variable `patch` — das ist ein **reserviertes GLSL-Keyword** (Tessellation). In beiden Shadern
+  (GL + MSL, zeilengleich) zu `patches` umbenannt. Offline mit `glslangValidator` verifiziert
+  (vollständiger injizierter Sky-FS kompiliert fehlerfrei; der Validator reproduziert mit `patch` exakt
+  den gemeldeten Fehler) **und** zur Laufzeit: `OpenGLRenderer: initialized successfully`, Szene
+  gezeichnet mit `glGetError=0x0`.
+- **Metal-VSync-Switch funktionierte nicht:** `Window::SetVSync` behandelt nur OpenGL
+  (`SDL_GL_SetSwapInterval`) und erreicht den Renderer nie — für Metal/Vulkan/D3D blieb der Toggle
+  wirkungslos. Neuer Helper `ApplyVSync(ctx)` in der Editor-UI ruft jetzt **beide** Pfade auf
+  (Window für GL-Swap-Interval, `renderer->SetVSync` für Metal `displaySyncEnabled` / Vulkan-Present-
+  Mode / D3D). Beide UI-Toggles (Preferences + Quick-Settings) nutzen den Helper. Zusätzlich wird der
+  konfigurierte VSync-Wert nach `renderer->Initialize()` einmalig auf den Renderer angewandt, damit
+  Metal im richtigen Present-Mode startet.

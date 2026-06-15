@@ -480,14 +480,14 @@ vec3 aurora(vec3 dir, vec3 sunDir, float time, float intensity, vec3 auroraCol)
 	float ribbon = smoothstep(0.22, 0.48, f);
 	float stri   = cloudFbm(vec2(along * 6.0 + time * 0.25, across * 1.2));
 	float curtain = ribbon * (0.45 + 0.55 * smoothstep(0.30, 0.80, stri));
-	float patch  = 0.55 + 0.45 * smoothstep(0.25, 0.85,
+	float patches = 0.55 + 0.45 * smoothstep(0.25, 0.85,
 	               cloudFbm(vec2(along * 0.45 + time * 0.03, across * 0.4 + 9.0)));
 	// Base colour low, shifting toward violet tips with elevation.
 	float hcol   = smoothstep(0.05, 0.60, dir.y);
 	vec3  topCol = auroraCol * vec3(0.55, 0.40, 1.5);
 	vec3  col    = mix(auroraCol, topCol, hcol);
 	float fade   = smoothstep(0.03, 0.16, dir.y) * (1.0 - smoothstep(0.78, 1.0, dir.y));
-	return col * (curtain * patch * fade * intensity * night * 2.4);
+	return col * (curtain * patches * fade * intensity * night * 2.4);
 }
 
 void main()
