@@ -71,9 +71,15 @@ struct EditorConfig
 	// pools the fog near the ground).
 	float     FogDensity      = 0.0f;
 	float     FogHeightFalloff = 0.1f;
-	// Night-sky aurora borealis intensity (0 = off). The Milky Way band is
-	// always drawn on a clear night and needs no control.
+	// Night-sky aurora borealis intensity (0 = off). Drifting light ribbons that
+	// sweep across the sky, drawn only at night.
 	float     AuroraIntensity = 0.0f;
+	// Milky Way (dense star band) brightness, space-nebula intensity, and the base
+	// colours for the nebula and the aurora ribbons.
+	float     MilkyWayIntensity = 0.6f;
+	float     NebulaIntensity   = 0.5f;
+	glm::vec3 NebulaColor       = glm::vec3(0.42f, 0.45f, 0.92f);
+	glm::vec3 AuroraColor       = glm::vec3(0.25f, 0.95f, 0.50f);
 
 	EditorMode mode = EditorMode::View;
 	std::string modeString() const

@@ -130,10 +130,16 @@ public:
         // altitude (analytic exponential height fog); 0 = uniform distance fog.
         float     fogDensity      = 0.0f;
         float     fogHeightFalloff = 0.1f;
-        // Night-sky aurora borealis intensity (0 = off). Drifting green/violet
-        // light curtains low in the sky, drawn only at night. The procedural
-        // Milky Way band is always present on a clear night and needs no control.
+        // Night-sky aurora borealis intensity (0 = off). Drifting light ribbons
+        // that sweep across the sky, drawn only at night.
         float     auroraIntensity = 0.0f;
+        // Milky Way (dense star band) brightness, space-nebula intensity, and the
+        // base colours for the nebula and the aurora ribbons. Stars + nebula
+        // rotate with time-of-day to mimic Earth's rotation.
+        float     milkyWayIntensity = 0.6f;
+        float     nebulaIntensity   = 0.5f;
+        glm::vec3 nebulaColor       = glm::vec3(0.42f, 0.45f, 0.92f);
+        glm::vec3 auroraColor       = glm::vec3(0.25f, 0.95f, 0.50f);
     };
     virtual void SetEnvironmentSettings(const EnvironmentSettings& e) { m_environment = e; }
     const EnvironmentSettings& GetEnvironment() const { return m_environment; }

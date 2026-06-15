@@ -317,7 +317,7 @@ static const char* kSkyMSL = R"MSL(
 using namespace metal;
 
 struct SkyOut { float4 position [[position]]; float2 ndc; };
-struct SkyParams { float4x4 invViewProj; float4 sunDir; float4 sunColor; float4 params; }; // params: x=timeOfDay y=coverage z=time w=aurora
+struct SkyParams { float4x4 invViewProj; float4 sunDir; float4 sunColor; float4 params; float4 nebulaColor; float4 auroraColor; }; // params: x=timeOfDay y=coverage z=time w=aurora; nebulaColor.w=nebula intensity; auroraColor.w=milkyWay
 
 vertex SkyOut skyVertex(uint vid [[vertex_id]])
 {
@@ -388,7 +388,7 @@ float galacticBand(float3 cdir)
 	float d = dot(normalize(cdir), galN);
 	return exp(-d * d * 7.0);
 }
-float3 starField(float3 dir, float3 cdir, float3 sunDir, float time)
+float3 starField(float3 dir, float3 cdir, float3 sunDir, float time, float milkyWay)
 {
 	dir    = normalize(dir);
 	sunDir = normalize(sunDir);
@@ -397,9 +397,11 @@ float3 starField(float3 dir, float3 cdir, float3 sunDir, float time)
 
 	// Stars cluster densely along the galactic band: the cell-occupancy threshold
 	// is lowered there so the Milky Way reads as a dense lane of stars (not a
-	// smear). Sampled in the rotating celestial frame so the whole field drifts.
+	// smear). The milky-way control drives how dense/bright the lane is. Sampled
+	// in the rotating celestial frame so the whole field drifts.
 	float  band   = galacticBand(cdir);
-	float  thresh = mix(0.92, 0.78, band);
+	float  mw     = clamp(milkyWay, 0.0, 1.0);
+	float  thresh = mix(0.92, mix(0.86, 0.72, mw), band);
 	float3 p       = cdir * 70.0;
 	float3 cell    = floor(p);
 	float  present = starHash(cell);
@@ -417,9 +419,9 @@ float3 starField(float3 dir, float3 cdir, float3 sunDir, float time)
 	float  tw      = 0.7 + 0.3 * sin(time * twFreq + twPhase);
 	float  horizon = smoothstep(0.0, 0.15, dir.y); // fade into the horizon haze
 	float3 tint = mix(float3(0.80, 0.88, 1.0), float3(1.0, 0.93, 0.82), starHash(cell + 12.1));
-	// The dense band stars sit a touch fainter en masse so the lane reads as many
-	// small stars while the rare bright field stars keep their sparkle.
-	float bandDim = mix(1.6, 1.1, band);
+	// The dense band stars sit fainter en masse so the lane reads as many small
+	// stars; the intensity control scales that mass brightness.
+	float bandDim = mix(1.6, mix(0.9, 1.5, mw), band);
 	return tint * (core * mag * tw * horizon * night * bandDim);
 }
 
@@ -503,8 +505,9 @@ float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float timeOfDay, f
 // (blue/magenta/teal), soft and patchy rather than a uniform smear. Sampled in
 // the rotating celestial frame so they drift with the stars; night/horizon gated
 // and occluded by clouds. Mirrors the GL nebula().
-float3 nebula(float3 dir, float3 cdir, float3 sunDir)
+float3 nebula(float3 dir, float3 cdir, float3 sunDir, float intensity, float3 nebColor)
 {
+	if (intensity <= 0.0) return float3(0.0);
 	dir    = normalize(dir);
 	sunDir = normalize(sunDir);
 	float night = 1.0 - smoothstep(-0.10, 0.10, clamp(sunDir.y, -0.2, 1.0));
@@ -513,58 +516,66 @@ float3 nebula(float3 dir, float3 cdir, float3 sunDir)
 	cdir = normalize(cdir);
 	const float3 galN = normalize(float3(0.46, 0.52, -0.72));
 	float bd   = dot(cdir, galN);
-	float band = exp(-bd * bd * 6.0);
+	float band = exp(-bd * bd * 7.0);
 	if (band <= 0.02) return float3(0.0);
 
-	// Parameterise the FBM in the galactic plane's tangent frame so the clusters
-	// distribute along the band without horizon streaking.
+	// Parameterise the FBM in the galactic plane's tangent frame so the clouds
+	// distribute along the band without horizon streaking. Two octaves at
+	// different scales (plus dark dust mottling) give the nebula layered,
+	// volumetric depth instead of a flat smear.
 	float3 tU = normalize(cross(galN, float3(0.0, 1.0, 0.0)));
 	float3 tV = cross(galN, tU);
-	float2 np    = float2(dot(cdir, tU), dot(cdir, tV)) * 3.0;
-	float  clump = smoothstep(0.50, 0.82, cloudFbm(np));
-	float  glow  = band * clump;
+	float2 np = float2(dot(cdir, tU), dot(cdir, tV));
+	float  d1 = cloudFbm(np * 2.5);
+	float  d2 = cloudFbm(np * 6.0 + 11.0);
+	float  density = smoothstep(0.55, 1.05, d1 * 0.75 + d2 * 0.55);
+	float  mottle  = 0.35 + 0.65 * d2;             // dark interstellar dust lanes
+	float  haze    = band * 0.05;                  // faint diffuse milky-way glow
+	float  glow    = band * (density * mottle + haze);
 	if (glow <= 0.0) return float3(0.0);
 
-	// Per-cluster colour from a second low-frequency field (blue↔magenta↔teal).
-	float  hue = cloudFbm(np * 0.4 + 17.0);
-	float3 col = mix(mix(float3(0.25, 0.55, 1.00), float3(0.95, 0.32, 0.72),
-	                     smoothstep(0.25, 0.60, hue)),
-	                 float3(0.20, 0.95, 0.78), smoothstep(0.60, 0.90, hue));
-	float  horizon = smoothstep(0.0, 0.18, dir.y);
-	return col * (glow * glow * 2.0 * horizon * night);
+	// Colour varies around the user nebula colour (cool↔warm) per low-freq field.
+	float  hue  = cloudFbm(np * 0.5 + 17.0);
+	float3 cool = nebColor * float3(0.6, 0.7, 1.2);
+	float3 warm = nebColor * float3(1.4, 0.65, 0.95);
+	float3 col  = mix(cool, warm, smoothstep(0.30, 0.72, hue));
+	float  horizon = smoothstep(0.0, 0.16, dir.y);
+	return col * (glow * 1.6 * horizon * night * intensity);
 }
 
-// Aurora borealis — drifting green/violet curtains low in the sky, night-only,
-// intensity user-controlled. Mirrors the GL aurora() (GLSL atan(y,x) = MSL
-// atan2(y,x)).
-float3 aurora(float3 dir, float3 sunDir, float time, float intensity)
+// Aurora borealis — drifting light curtains, night only, intensity + colour
+// user-controlled. Modelled as wavy ribbons projected onto a high curtain plane
+// that run along one axis and stack along the other, so they sweep across the
+// whole sky from one side to the other (not a single ring around the camera).
+// Fine vertical striations + drift give the rayed, volumetric structure.
+// Mirrors the GL aurora() exactly.
+float3 aurora(float3 dir, float3 sunDir, float time, float intensity, float3 auroraCol)
 {
 	if (intensity <= 0.0) return float3(0.0);
 	dir    = normalize(dir);
 	sunDir = normalize(sunDir);
 	float night = 1.0 - smoothstep(-0.10, 0.10, clamp(sunDir.y, -0.2, 1.0));
-	if (night <= 0.0 || dir.y <= 0.02) return float3(0.0);
+	if (night <= 0.0 || dir.y <= 0.04) return float3(0.0);
 
-	// Concentrate the aurora toward the north (-z) as an arc rather than ringing
-	// the whole horizon. arc peaks due north, fades to the sides, gone behind.
-	float facing = -normalize(dir.xz + float2(1e-5)).y; // 1 toward -z (north), -1 behind
-	float arc    = smoothstep(-0.15, 0.65, facing);
-	if (arc <= 0.0) return float3(0.0);
-
-	float az = atan2(dir.x, dir.z);
-	// Large-scale patchiness so the arc breaks into drifting bands with gaps.
-	float patches = smoothstep(0.28, 0.80, cloudFbm(float2(az * 1.3 + time * 0.05, 5.1)));
-	float edge = 0.12 + 0.05 * sin(az * 3.0 + time * 0.30)
-	                  + 0.04 * cloudFbm(float2(az * 2.0, time * 0.10));
-	float h = dir.y - edge;
-	if (h <= 0.0) return float3(0.0);
-	float vert = exp(-h * 5.0);
-	float stri = cloudFbm(float2(az * 9.0 + time * 0.25, dir.y * 3.0));
-	float curtain = vert * smoothstep(0.30, 0.72, stri);
-	float top = 1.0 - smoothstep(0.35, 0.65, dir.y);
-	float3 col = mix(float3(0.12, 0.92, 0.46), float3(0.48, 0.20, 0.85),
-	                 smoothstep(0.08, 0.42, dir.y));
-	return col * (curtain * top * arc * patches * intensity * night * 0.9);
+	// Project onto a high curtain plane; ribbons run along x and stack along z.
+	float2 P      = dir.xz / (dir.y + 0.45);
+	float  along  = P.x;
+	float  across = P.y;
+	float  wave   = 0.40 * sin(along * 0.7 + time * 0.15)
+	              + 0.30 * cloudFbm(float2(along * 0.35 - time * 0.04, 3.0));
+	float  phase  = across * 0.5 + wave;
+	float  f      = abs(fract(phase) - 0.5);            // distance to the nearest ribbon
+	float  ribbon = smoothstep(0.22, 0.48, f);
+	float  stri   = cloudFbm(float2(along * 6.0 + time * 0.25, across * 1.2));
+	float  curtain = ribbon * (0.45 + 0.55 * smoothstep(0.30, 0.80, stri));
+	float  patch  = 0.55 + 0.45 * smoothstep(0.25, 0.85,
+	                cloudFbm(float2(along * 0.45 + time * 0.03, across * 0.4 + 9.0)));
+	// Base colour low, shifting toward violet tips with elevation.
+	float  hcol   = smoothstep(0.05, 0.60, dir.y);
+	float3 topCol = auroraCol * float3(0.55, 0.40, 1.5);
+	float3 col    = mix(auroraCol, topCol, hcol);
+	float  fade   = smoothstep(0.03, 0.16, dir.y) * (1.0 - smoothstep(0.78, 1.0, dir.y));
+	return col * (curtain * patch * fade * intensity * night * 2.4);
 }
 
 fragment float4 skyFragment(SkyOut in [[stage_in]],
@@ -577,9 +588,9 @@ fragment float4 skyFragment(SkyOut in [[stage_in]],
 	float3 dir = wp1.xyz / wp1.w - wp0.xyz / wp0.w;
 	float3 col  = skyColor(dir, p.sunDir.xyz);
 	float3 cdir = celestialDir(dir, p.params.x);     // turns with the day-night cycle
-	col += starField(dir, cdir, p.sunDir.xyz, p.params.z);
-	col += nebula(dir, cdir, p.sunDir.xyz);
-	col += aurora(dir, p.sunDir.xyz, p.params.z, p.params.w);
+	col += starField(dir, cdir, p.sunDir.xyz, p.params.z, p.auroraColor.w);
+	col += nebula(dir, cdir, p.sunDir.xyz, p.nebulaColor.w, p.nebulaColor.xyz);
+	col += aurora(dir, p.sunDir.xyz, p.params.z, p.params.w, p.auroraColor.xyz);
 	col += moonDisk(dir, p.sunDir.xyz, p.sunDir.w > 0.5, moonTex, moonSamp);
 	col = applyClouds(col, dir, p.sunDir.xyz, p.params.x, p.params.y, p.sunColor.xyz);
 	return float4(col, 1.0);
@@ -698,7 +709,9 @@ struct SkyParams
 	glm::mat4 invViewProj = glm::mat4(1.0f);
 	glm::vec4 sunDir      = glm::vec4(0.0f, 1.0f, 0.0f, 0.0f);
 	glm::vec4 sunColor    = glm::vec4(1.0f);
-	glm::vec4 params      = glm::vec4(0.0f); // x = timeOfDay (cloud scroll), y = coverage, z = wall-clock time
+	glm::vec4 params      = glm::vec4(0.0f); // x = timeOfDay (cloud scroll), y = coverage, z = wall-clock time, w = aurora
+	glm::vec4 nebulaColor = glm::vec4(0.42f, 0.45f, 0.92f, 0.5f); // xyz = colour, w = nebula intensity
+	glm::vec4 auroraColor = glm::vec4(0.25f, 0.95f, 0.50f, 0.6f); // xyz = colour, w = milky-way intensity
 };
 
 // Remaps the extractor's GL-convention light projection (depth -1..1) to Metal
@@ -1563,7 +1576,9 @@ void MetalRenderer::EncodeTonemap(void* renderEncoderPtr)
 void MetalRenderer::EncodeSky(void* renderEncoder, const glm::mat4& invViewProj,
                              const glm::vec3& sunDir, const glm::vec3& sunColor,
                              float timeOfDay, float cloudCoverage, float time,
-                             float auroraIntensity)
+                             float auroraIntensity, const glm::vec3& nebulaColor,
+                             float nebulaIntensity, const glm::vec3& auroraColor,
+                             float milkyWayIntensity)
 {
 	if (!m_skyPipeline) return;
 	id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
@@ -1579,6 +1594,8 @@ void MetalRenderer::EncodeSky(void* renderEncoder, const glm::mat4& invViewProj,
 	p.sunDir      = glm::vec4(sunDir, m_moonTexture ? 1.0f : 0.0f); // w = has-moon flag
 	p.sunColor    = glm::vec4(sunColor, 0.0f);
 	p.params      = glm::vec4(timeOfDay, cloudCoverage, time, auroraIntensity);
+	p.nebulaColor = glm::vec4(nebulaColor, nebulaIntensity);
+	p.auroraColor = glm::vec4(auroraColor, milkyWayIntensity);
 	[enc setFragmentBytes:&p length:sizeof(p) atIndex:0];
 	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
 }
@@ -1612,7 +1629,9 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 	EncodeSky(renderEncoder, glm::inverse(viewProj), sunDir, GetEnvironment().sunColor,
 	          GetEnvironment().timeOfDay, GetEnvironment().cloudCoverage,
 	          static_cast<float>(SDL_GetTicks()) / 1000.0f,
-	          GetEnvironment().auroraIntensity);
+	          GetEnvironment().auroraIntensity, GetEnvironment().nebulaColor,
+	          GetEnvironment().nebulaIntensity, GetEnvironment().auroraColor,
+	          GetEnvironment().milkyWayIntensity);
 
 	if (m_renderWorld.objects.empty())
 		return;

@@ -906,3 +906,49 @@ flach/pastell (= Engine-Screenshot), nachher konzentriertes Goldglühen um die S
 Gold→Magenta→Blau-Verlauf und kontrastreichere, vom Licht eingefärbte Wolken mit Rim — deutlich
 näher an der Unreal-Referenz. Tag- und Nachthimmel bleiben artefaktfrei (warme Terme über `dusk`
 gegated).
+
+## Forts. 11 — Volumetrische Milchstraße, Weltraumnebel & Aurora-Bänder
+
+> **Aufgabe:** Das Milchstraßen-/Aurora-System volumetrischer machen mit Reglern im Environment-Tab.
+> Aurora als Streifen, die von einer Seite zur anderen über den Himmel ziehen (kein einzelner Ring um
+> die Kamera). Milchstraße = verdichtete Sternansammlung + neue Weltraumnebel-Schicht mit
+> einstellbarer Intensität und Farben. Das gesamte „Weltraum"-Ding (Sterne + Nebel) rotiert mit der
+> Time-of-Day, um die Erdrotation zu imitieren. ✅
+
+**Aurora als quer ziehende Bänder (`aurora()`, beide Shader zeilengleich):**
+- Statt eines Nord-Bogens, der den Horizont umrundet, werden die Strahlenvorhänge jetzt auf eine hohe
+  Vorhangsebene projiziert (`P = dir.xz / (dir.y + 0.45)`). Bänder laufen entlang `along = P.x` und
+  stapeln sich entlang `across = P.y` über periodisches `fract(phase)` → mehrere parallele Streifen,
+  die von einer Seite zur anderen über den ganzen Himmel schwingen.
+- Wellenform (`wave = 0.40·sin + 0.30·fbm`) lässt die Bänder fließen; feine vertikale Striationen
+  (`stri`-fbm) und Patches geben die strahlige, volumetrische Struktur. Farbe niedrig (Basisfarbe) →
+  violett an den Spitzen (`hcol`-Übergang). `fade` konzentriert sie in den mittleren Himmel.
+- **Aurora-Basisfarbe** ist jetzt benutzersteuerbar (`uAuroraColor` / `auroraColor.xyz`).
+
+**Dichte Milchstraße (`starField()`, beide Shader zeilengleich):**
+- Neuer Regler `milkyWay`: senkt entlang des galaktischen Bands die Zellenbelegungs-Schwelle
+  (`thresh = mix(0.92, mix(0.86,0.72,mw), band)`) und skaliert die Massenhelligkeit
+  (`bandDim = mix(1.6, mix(0.9,1.5,mw), band)`) → die Milchstraße liest sich als dichte Sternstraße
+  statt als Schmiere. Gesampelt im rotierenden Himmelsrahmen (`celestialDir`) → driftet mit der Zeit.
+
+**Neue Weltraumnebel-Schicht (`nebula()`, beide Shader zeilengleich):**
+- Komplett neu volumetrisch: zweioktavige FBM in der Tangentialebene des galaktischen Bands
+  (`d1 = fbm(np·2.5)`, `d2 = fbm(np·6+11)`), `density = smoothstep(0.55,1.05, d1·0.75+d2·0.55)`,
+  dunkle Staubbahnen (`mottle`), diffuser Schleier (`haze`) → geschichtete, fleckige Tiefe statt
+  flacher Schmiere. Farbe variiert kühl↔warm um eine benutzersteuerbare Nebel-Basisfarbe.
+- Einstellbare **Intensität** (`uNebula` / `nebulaColor.w`) und **Farbe** (`uNebulaColor` /
+  `nebulaColor.xyz`). Ebenfalls im rotierenden Himmelsrahmen → driftet mit den Sternen.
+
+**Controls (Environment-Tab → „Night Sky"):** Milky-Way-Intensität, Space-Nebula-Intensität,
+Nebel-Farbe (`ColorEdit3`), Aurora-Intensität, Aurora-Farbe (`ColorEdit3`). Verkabelt durch
+`EnvironmentSettings` → `EditorConfig` (inkl. config.json Persistenz) → UI → beide Backends
+(GL-Uniforms `uMilkyWay`/`uNebula`/`uNebulaColor`/`uAuroraColor`; Metal `SkyParams.nebulaColor`/
+`.auroraColor` über `EncodeSky`). Defaults: MilkyWay 0.6, Nebula 0.5, Nebel-Farbe (0.42,0.45,0.92),
+Aurora-Farbe (0.25,0.95,0.50) — entspricht etwa dem bisherigen Look.
+
+**Verifiziert:** Build sauber, `he_tests` grün, Metal kompiliert zur Laufzeit (Night-Dump
+TimeOfDay=0.0, keine Log-Fehler), GL/MSL zeilengleich. Validiert über numpy-CPU-Replik der exakten
+portierten Shader-Mathematik mit nach oben (Richtung Nord) blickender Nachtkamera: fließende
+Aurora-Bänder ziehen quer über den Himmel (grün unten → violett/blau oben) mit vertikalen
+Striationen, dichte Milchstraßen-Sternstraße + geschichteter Weltraumnebel. Aurora bleibt
+atmosphärisch nordfixiert; Sterne + Nebel rotieren über `celestialDir` mit der Time-of-Day.

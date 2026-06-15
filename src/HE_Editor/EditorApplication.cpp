@@ -545,6 +545,14 @@ void EditorApplication::OnInit()
 	m_editorConfig.FogDensity                  = globalstate.getCustomConfigFloat("FogDensity",           m_editorConfig.FogDensity);
 	m_editorConfig.FogHeightFalloff            = globalstate.getCustomConfigFloat("FogHeightFalloff",     m_editorConfig.FogHeightFalloff);
 	m_editorConfig.AuroraIntensity             = globalstate.getCustomConfigFloat("AuroraIntensity",      m_editorConfig.AuroraIntensity);
+	m_editorConfig.MilkyWayIntensity           = globalstate.getCustomConfigFloat("MilkyWayIntensity",    m_editorConfig.MilkyWayIntensity);
+	m_editorConfig.NebulaIntensity             = globalstate.getCustomConfigFloat("NebulaIntensity",      m_editorConfig.NebulaIntensity);
+	m_editorConfig.NebulaColor.r               = globalstate.getCustomConfigFloat("NebulaColorR",         m_editorConfig.NebulaColor.r);
+	m_editorConfig.NebulaColor.g               = globalstate.getCustomConfigFloat("NebulaColorG",         m_editorConfig.NebulaColor.g);
+	m_editorConfig.NebulaColor.b               = globalstate.getCustomConfigFloat("NebulaColorB",         m_editorConfig.NebulaColor.b);
+	m_editorConfig.AuroraColor.r               = globalstate.getCustomConfigFloat("AuroraColorR",         m_editorConfig.AuroraColor.r);
+	m_editorConfig.AuroraColor.g               = globalstate.getCustomConfigFloat("AuroraColorG",         m_editorConfig.AuroraColor.g);
+	m_editorConfig.AuroraColor.b               = globalstate.getCustomConfigFloat("AuroraColorB",         m_editorConfig.AuroraColor.b);
 	m_editorCamera.setFlySpeed(m_editorConfig.EditorCameraSpeed);
 
 #ifdef HE_IMGUI_ENABLED
@@ -768,7 +776,11 @@ void EditorApplication::OnRender(float dt)
 			m_editorConfig.CloudCoverage,
 			m_editorConfig.FogDensity,
 			m_editorConfig.FogHeightFalloff,
-			m_editorConfig.AuroraIntensity});
+			m_editorConfig.AuroraIntensity,
+			m_editorConfig.MilkyWayIntensity,
+			m_editorConfig.NebulaIntensity,
+			m_editorConfig.NebulaColor,
+			m_editorConfig.AuroraColor});
 	}
 
 	AppContext ctx = makeContext();
@@ -852,7 +864,9 @@ void EditorApplication::dumpFrameHeadless()
 		m_editorConfig.MoonColor, m_editorConfig.MoonIntensity,
 		m_editorConfig.CloudCoverage,
 		m_editorConfig.FogDensity, m_editorConfig.FogHeightFalloff,
-		m_editorConfig.AuroraIntensity});
+		m_editorConfig.AuroraIntensity,
+		m_editorConfig.MilkyWayIntensity, m_editorConfig.NebulaIntensity,
+		m_editorConfig.NebulaColor, m_editorConfig.AuroraColor});
 	r->SetViewportSize(1280, 720);
 	for (int i = 0; i < 3; ++i)
 		r->Render();
@@ -1152,6 +1166,14 @@ void EditorApplication::OnShutdown()
 	globalstate.setCustomConfigEntry("FogDensity",              m_editorConfig.FogDensity);
 	globalstate.setCustomConfigEntry("FogHeightFalloff",        m_editorConfig.FogHeightFalloff);
 	globalstate.setCustomConfigEntry("AuroraIntensity",        m_editorConfig.AuroraIntensity);
+	globalstate.setCustomConfigEntry("MilkyWayIntensity",      m_editorConfig.MilkyWayIntensity);
+	globalstate.setCustomConfigEntry("NebulaIntensity",        m_editorConfig.NebulaIntensity);
+	globalstate.setCustomConfigEntry("NebulaColorR",           m_editorConfig.NebulaColor.r);
+	globalstate.setCustomConfigEntry("NebulaColorG",           m_editorConfig.NebulaColor.g);
+	globalstate.setCustomConfigEntry("NebulaColorB",           m_editorConfig.NebulaColor.b);
+	globalstate.setCustomConfigEntry("AuroraColorR",           m_editorConfig.AuroraColor.r);
+	globalstate.setCustomConfigEntry("AuroraColorG",           m_editorConfig.AuroraColor.g);
+	globalstate.setCustomConfigEntry("AuroraColorB",           m_editorConfig.AuroraColor.b);
 	globalstate.writeConfig();
 }
 

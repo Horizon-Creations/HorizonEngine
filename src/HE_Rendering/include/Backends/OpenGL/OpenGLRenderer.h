@@ -144,6 +144,10 @@ private:
 	int          m_uSkyClock      = -1;   // wall-clock seconds (star twinkle)
 	int          m_uSkySunColor   = -1;   // sun light colour (cloud tint)
 	int          m_uSkyAurora     = -1;   // aurora intensity (0 = off)
+	int          m_uSkyMilkyWay    = -1;  // milky-way (dense star band) intensity
+	int          m_uSkyNebula      = -1;  // space-nebula intensity
+	int          m_uSkyNebulaColor = -1;  // space-nebula base colour
+	int          m_uSkyAuroraColor = -1;  // aurora base colour
 	unsigned int m_moonTex        = 0;    // night-sky moon texture (or 0)
 	void CreateSkyPipeline();
 
