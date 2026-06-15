@@ -1034,3 +1034,29 @@ atmosphärisch nordfixiert; Sterne + Nebel rotieren über `celestialDir` mit der
   volumetrische Puffs, funktionierenden Coverage-Bereich (klar→bedeckt), Sunset-Tönung und Drift/
   Lifecycle über die Zeit. Build sauber, `he_tests` grün, GL kompiliert live (`glGetError=0x0`), Metal
   kompiliert zur Laufzeit auf Apple M5 (Dump, keine Log-Fehler), `glslangValidator` sauber.
+
+### Forts. 13 — Performance-Optimierungen im Render-Submit-Pfad
+
+> **Aufgabe:** Codebase auf Performance-Optimierungen analysieren und diese umsetzen. ✅
+
+Analyse via zwei Explore-Agents (Render-Pfad + Szene/Extraction) plus manuelle Verifikation jedes
+Befunds direkt im Code. Umgesetzt wurde ein sicheres, verhaltensneutrales High-ROI-Set:
+
+- **RenderSorter — vorberechnete Sort-Keys:** Der Komparator berechnete pro Vergleich die quadrierte
+  Kamera-Distanz neu und folgte dem Draw-Command durch Indirektion. Jetzt werden pro Frame einmal
+  leichte Keys `{meshHi, meshLo, distSq, index}` aufgebaut und nur diese sortiert. Sortier-Semantik
+  unverändert (Mesh-hi → Mesh-lo → Distanz).
+- **RenderExtractor — `reserve`:** Objekt- und Licht-Vektoren werden vor der Extraktion vorreserviert
+  (View-Größe bzw. +1 fürs Sonnenlicht) → keine inkrementellen Reallocations mehr.
+- **Per-Draw-Memoization (GL + Metal):** In den Geometrie- und Shadow-Loops werden das aufgelöste Mesh
+  und Material über aufeinanderfolgende Draws gecacht. Da nach Mesh-ID sortiert wird, teilen sich
+  benachbarte Draws meist Mesh (und oft Material); das spart die redundanten `ResolveMesh`/
+  `ResolveMaterial*`-Lookups (Hashmap-Find + Slotmap-Get) pro Draw. Die Resolver sind innerhalb eines
+  Frames pure → Ausgabe unverändert.
+- **Bewusst NICHT angefasst (Risiko > Nutzen):** Metals `setVertexBytes` (Apple-empfohlener Pfad für
+  kleine Per-Draw-Uniforms < 4 KB), die Transform-Propagation-Dirty-Flags und der GameLoop-Catch-up —
+  als optionale, höher-riskante Folge-Optimierungen vermerkt.
+- **Verifiziert:** Build sauber, `he_tests` grün. Headless-Dumps beider Backends: **Metal pixelgleich**
+  (identische md5 vor/nach), GL nur durch den zeitanimierten Himmel verschieden (zwei aufeinanderfolgende
+  GL-Läufe mit identischem Code unterscheiden sich ebenfalls → Memoization ist nachweislich
+  verhaltensneutral; visueller Vergleich zeigt identische Szene). Commit `514ee20`.
