@@ -138,6 +138,7 @@ private:
 	void* m_scenePipeline   = nullptr; // id<MTLRenderPipelineState>
 	void* m_sceneDepthState = nullptr; // id<MTLDepthStencilState> (test+write)
 	void* m_noDepthState    = nullptr; // id<MTLDepthStencilState> (overlay)
+	void* m_skyDepthState   = nullptr; // id<MTLDepthStencilState> (sky: LessEqual, no write)
 	void* m_cubeVertexBuf   = nullptr; // id<MTLBuffer>
 	void* m_cubeIndexBuf    = nullptr; // id<MTLBuffer>
 	int   m_cubeIndexCount  = 0;

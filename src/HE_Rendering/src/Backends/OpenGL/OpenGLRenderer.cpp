@@ -419,6 +419,7 @@ float cloudShadowDensity(vec3 pos, float time, float coverage, vec3 wind)
 }
 vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float time, float coverage, vec3 sunColor, vec3 wind)
 {
+	if (coverage <= 0.0) return baseSky;          // clear sky → skip the whole raymarch
 	dir    = normalize(dir);
 	sunDir = normalize(sunDir);
 	if (dir.y < 0.02) return baseSky;             // no clouds at/below the horizon
@@ -577,11 +578,18 @@ void main()
 	vec4 wp0 = uInvViewProj * vec4(vNDC, -1.0, 1.0);
 	vec3 dir = wp1.xyz / wp1.w - wp0.xyz / wp0.w;
 	vec3 col  = skyColor(dir, uSunDir);
-	vec3 cdir = celestialDir(dir, uTimeOfDay);       // turns with the day-night cycle
-	col += starField(dir, cdir, uSunDir, uTime, uMilkyWay);
-	col += nebula(dir, cdir, uSunDir, uNebula, uNebulaColor);
-	col += aurora(dir, uSunDir, uTime, uAurora, uAuroraColor);
-	col += moonDisk(dir, uSunDir);
+	// Night-sky elements (stars/Milky Way/nebula/aurora/moon) + the celestial
+	// rotation are skipped entirely by day. The branch is coherent — sunDir is a
+	// uniform, so every pixel in the frame takes the same path — so it is cheap.
+	float nightF = 1.0 - smoothstep(-0.10, 0.10, clamp(normalize(uSunDir).y, -0.2, 1.0));
+	if (nightF > 0.0)
+	{
+		vec3 cdir = celestialDir(dir, uTimeOfDay);   // turns with the day-night cycle
+		col += starField(dir, cdir, uSunDir, uTime, uMilkyWay);
+		col += nebula(dir, cdir, uSunDir, uNebula, uNebulaColor);
+		col += aurora(dir, uSunDir, uTime, uAurora, uAuroraColor);
+		col += moonDisk(dir, uSunDir);
+	}
 	col = applyClouds(col, dir, uSunDir, uTime, uCloudCoverage, uSunColor, uWind);
 	FragColor = vec4(col, 1.0);
 }
@@ -1577,46 +1585,17 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		// active program.
 		glBindFramebuffer(GL_FRAMEBUFFER, m_hdrFBO);
 		glViewport(0, 0, pw, ph);
+		// Explicit depth state for the opaque geometry: test on, write on, LESS, so
+		// the depth clear takes and the sky (drawn last) can test against it.
+		glEnable(GL_DEPTH_TEST);
+		glDepthFunc(GL_LESS);
+		glDepthMask(GL_TRUE);
 		glClearColor(0.18f, 0.18f, 0.20f, 1.0f);
 		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-		// ── Skybox: fill the background with the procedural sky (into the HDR
-		// target so the sun blooms). Drawn first, no depth write, so the scene
-		// draws over it. ──
-		if (m_skyProgram)
-		{
-			glDepthMask(GL_FALSE);
-			glDisable(GL_DEPTH_TEST);
-			glUseProgram(m_skyProgram);
-			glUniformMatrix4fv(m_uSkyInvVP, 1, GL_FALSE, glm::value_ptr(invViewProj));
-			glUniform3fv(m_uSkySunDir, 1, glm::value_ptr(sunDir));
-			glActiveTexture(GL_TEXTURE0);
-			glBindTexture(GL_TEXTURE_2D, m_moonTex);
-			glUniform1i(m_uSkyMoonTex, 0);
-			glUniform1i(m_uSkyHasMoon, m_moonTex ? 1 : 0);
-			glUniform1f(m_uSkyTime, GetEnvironment().timeOfDay);
-			glUniform1f(m_uSkyCoverage, GetEnvironment().cloudCoverage);
-			glUniform1f(m_uSkyClock, static_cast<float>(SDL_GetTicks()) / 1000.0f);
-			glUniform3fv(m_uSkySunColor, 1, glm::value_ptr(GetEnvironment().sunColor));
-			glUniform1f(m_uSkyAurora, GetEnvironment().auroraIntensity);
-			glUniform1f(m_uSkyMilkyWay, GetEnvironment().milkyWayIntensity);
-			glUniform1f(m_uSkyNebula, GetEnvironment().nebulaIntensity);
-			glUniform3fv(m_uSkyNebulaColor, 1, glm::value_ptr(GetEnvironment().nebulaColor));
-			glUniform3fv(m_uSkyAuroraColor, 1, glm::value_ptr(GetEnvironment().auroraColor));
-			{
-				// Wind control → horizontal cloud drift vector. Direction 0° drifts
-				// toward -Z (north), increasing clockwise; speed scales the rate.
-				const float wr = glm::radians(GetEnvironment().windDirection);
-				const glm::vec3 wind = glm::vec3(std::sin(wr), 0.0f, -std::cos(wr))
-				                     * (GetEnvironment().windSpeed * 0.025f);
-				glUniform3fv(m_uSkyWind, 1, glm::value_ptr(wind));
-			}
-			glBindVertexArray(m_fsVAO);
-			glDrawArrays(GL_TRIANGLES, 0, 3);
-			glEnable(GL_DEPTH_TEST);
-			glDepthMask(GL_TRUE);
-		}
-
+		// (The procedural skybox is drawn AFTER the geometry below, with a
+		// depth-test == far, so the heavy sky shader only runs on the background
+		// pixels the scene didn't cover.)
 		glUseProgram(m_unlitProgram);
 		glUniform1i(m_uTexture, 0); // base color tint (uColor) is set per draw below
 		glUniform3fv(m_uSunDir, 1, glm::value_ptr(sunDir));
@@ -1689,6 +1668,45 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glBindTexture(GL_TEXTURE_2D, tex);
 			glDrawElements(GL_TRIANGLES, mesh ? mesh->indexCount : m_cubeIndexCount,
 			               GL_UNSIGNED_INT, nullptr);
+		}
+
+		// ── Skybox (drawn LAST): fill the remaining background with the procedural
+		// sky. The fullscreen triangle sits at z = 1 (far plane); with GL_LEQUAL and
+		// no depth write it passes only where the geometry left depth == 1 (i.e. the
+		// background), so the heavy sky shader is never paid for behind solid
+		// objects. With no geometry the whole frame is background → full sky.
+		if (m_skyProgram)
+		{
+			glUseProgram(m_skyProgram);
+			glDepthFunc(GL_LEQUAL);
+			glDepthMask(GL_FALSE);
+			glUniformMatrix4fv(m_uSkyInvVP, 1, GL_FALSE, glm::value_ptr(invViewProj));
+			glUniform3fv(m_uSkySunDir, 1, glm::value_ptr(sunDir));
+			glActiveTexture(GL_TEXTURE0);
+			glBindTexture(GL_TEXTURE_2D, m_moonTex);
+			glUniform1i(m_uSkyMoonTex, 0);
+			glUniform1i(m_uSkyHasMoon, m_moonTex ? 1 : 0);
+			glUniform1f(m_uSkyTime, GetEnvironment().timeOfDay);
+			glUniform1f(m_uSkyCoverage, GetEnvironment().cloudCoverage);
+			glUniform1f(m_uSkyClock, static_cast<float>(SDL_GetTicks()) / 1000.0f);
+			glUniform3fv(m_uSkySunColor, 1, glm::value_ptr(GetEnvironment().sunColor));
+			glUniform1f(m_uSkyAurora, GetEnvironment().auroraIntensity);
+			glUniform1f(m_uSkyMilkyWay, GetEnvironment().milkyWayIntensity);
+			glUniform1f(m_uSkyNebula, GetEnvironment().nebulaIntensity);
+			glUniform3fv(m_uSkyNebulaColor, 1, glm::value_ptr(GetEnvironment().nebulaColor));
+			glUniform3fv(m_uSkyAuroraColor, 1, glm::value_ptr(GetEnvironment().auroraColor));
+			{
+				// Wind control → horizontal cloud drift vector. Direction 0° drifts
+				// toward -Z (north), increasing clockwise; speed scales the rate.
+				const float wr = glm::radians(GetEnvironment().windDirection);
+				const glm::vec3 wind = glm::vec3(std::sin(wr), 0.0f, -std::cos(wr))
+				                     * (GetEnvironment().windSpeed * 0.025f);
+				glUniform3fv(m_uSkyWind, 1, glm::value_ptr(wind));
+			}
+			glBindVertexArray(m_fsVAO);
+			glDrawArrays(GL_TRIANGLES, 0, 3);
+			glDepthFunc(GL_LESS);   // restore default for the next pass
+			glDepthMask(GL_TRUE);
 		}
 	});
 
