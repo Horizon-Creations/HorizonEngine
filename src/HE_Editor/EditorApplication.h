@@ -56,8 +56,10 @@ struct EditorConfig
 	float BloomIntensity = 0.6f;
 
 	// Environment: day-night cycle (pushed via SetEnvironmentSettings)
-	bool  DayNightCycle = false;
-	float TimeOfDay     = 0.5f; // 0..1 (0.5 = noon)
+	bool  DayNightCycle       = false;
+	float TimeOfDay           = 0.5f;    // 0..1 (0.5 = noon)
+	bool  DayNightAutoAdvance = false;   // advance TimeOfDay automatically
+	float DayNightCycleSeconds = 120.0f; // real seconds for one full day
 
 	EditorMode mode = EditorMode::View;
 	std::string modeString() const

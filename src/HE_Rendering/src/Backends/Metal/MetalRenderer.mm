@@ -339,6 +339,15 @@ float3 skyColor(float3 dir, float3 sunDir)
 	float s = max(dot(dir, sunDir), 0.0);
 	sky += sunTint * (pow(s, 1800.0) * 14.0) * day;
 	sky += sunTint * (pow(s, 7.0)    * 0.18) * max(day, dusk);
+
+	// Moon: opposite the sun, fading in at night (matches the GL backend).
+	float  night    = 1.0 - day;
+	float3 moonDir  = normalize(float3(-sunDir.x, -sunDir.y, sunDir.z));
+	float  m        = max(dot(dir, moonDir), 0.0);
+	float3 moonTint = float3(0.80, 0.86, 1.00);
+	sky += moonTint * (pow(m, 700.0)  * 4.0)  * night;
+	sky += moonTint * (pow(m, 60.0)   * 0.05) * night;
+	sky += float3(0.04, 0.05, 0.08) * night;
 	return sky;
 }
 )MSL";

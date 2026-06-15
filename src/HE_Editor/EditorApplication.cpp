@@ -5,6 +5,8 @@
 #include <SDL3/SDL.h>
 
 #include <chrono>
+#include <cmath>
+#include <algorithm>
 #include <filesystem>
 #include <string>
 #include <array>
@@ -529,6 +531,8 @@ void EditorApplication::OnInit()
 	m_editorConfig.BloomIntensity              = globalstate.getCustomConfigFloat("BloomIntensity",     m_editorConfig.BloomIntensity);
 	m_editorConfig.DayNightCycle               = globalstate.getCustomConfigBool("DayNightCycle",       m_editorConfig.DayNightCycle);
 	m_editorConfig.TimeOfDay                   = globalstate.getCustomConfigFloat("TimeOfDay",          m_editorConfig.TimeOfDay);
+	m_editorConfig.DayNightAutoAdvance         = globalstate.getCustomConfigBool("DayNightAutoAdvance", m_editorConfig.DayNightAutoAdvance);
+	m_editorConfig.DayNightCycleSeconds        = globalstate.getCustomConfigFloat("DayNightCycleSeconds", m_editorConfig.DayNightCycleSeconds);
 	m_editorCamera.setFlySpeed(m_editorConfig.EditorCameraSpeed);
 
 #ifdef HE_IMGUI_ENABLED
@@ -703,6 +707,14 @@ void EditorApplication::OnRender(float dt)
 				});
 			}
 		}
+	}
+
+	// Auto-advance the day-night cycle (time flows with real time).
+	if (m_editorConfig.DayNightCycle && m_editorConfig.DayNightAutoAdvance && dt > 0.0f)
+	{
+		const float secondsPerDay = std::max(m_editorConfig.DayNightCycleSeconds, 1.0f);
+		m_editorConfig.TimeOfDay += dt / secondsPerDay;
+		m_editorConfig.TimeOfDay -= std::floor(m_editorConfig.TimeOfDay); // wrap to [0,1)
 	}
 
 	// Push post-process + environment settings to the renderer from the editor prefs.
@@ -1079,6 +1091,8 @@ void EditorApplication::OnShutdown()
 	globalstate.setCustomConfigEntry("BloomIntensity",             m_editorConfig.BloomIntensity);
 	globalstate.setCustomConfigEntry("DayNightCycle",              m_editorConfig.DayNightCycle);
 	globalstate.setCustomConfigEntry("TimeOfDay",                  m_editorConfig.TimeOfDay);
+	globalstate.setCustomConfigEntry("DayNightAutoAdvance",        m_editorConfig.DayNightAutoAdvance);
+	globalstate.setCustomConfigEntry("DayNightCycleSeconds",       m_editorConfig.DayNightCycleSeconds);
 	globalstate.writeConfig();
 }
 

@@ -1864,6 +1864,16 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
         ImGui::TextDisabled(ctx.editorConfig.DayNightCycle
             ? "Drives the sun, sky & shadows."
             : "Move the slider to start a day-night cycle.");
+
+        // Auto-advance: time flows on its own at an adjustable speed.
+        if (ImGui::Checkbox("Auto-Advance", &ctx.editorConfig.DayNightAutoAdvance)
+            && ctx.editorConfig.DayNightAutoAdvance)
+            ctx.editorConfig.DayNightCycle = true; // animating implies the cycle is on
+        ImGui::BeginDisabled(!ctx.editorConfig.DayNightAutoAdvance);
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::SliderFloat("##cyclelen", &ctx.editorConfig.DayNightCycleSeconds,
+                           5.0f, 600.0f, "Full day: %.0f s", ImGuiSliderFlags_Logarithmic);
+        ImGui::EndDisabled();
     }
 
     ImGui::End();

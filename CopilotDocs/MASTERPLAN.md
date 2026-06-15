@@ -669,3 +669,27 @@ den Himmel — Himmel, Image-Based-Ambient **und** Schatten reagieren zusammen.
   Byte-Diff bei Sonnenuntergang. Default (Zyklus aus) unverändert. 34 Tests grün.
   **D3D/Vulkan:** Sonnen/Schatten-Override läuft mit (shared Extractor), nur der
   Himmel fehlt dort noch (= blinder Port).
+
+> **Status 15.06.2026 (Forts.):** Tag-Nacht-Zyklus erweitert — Auto-Advance mit
+> einstellbarer Geschwindigkeit + Mond bei Nacht. ✅ (GL+Metal)
+
+**Auto-Advance + Mond:**
+- **Auto-Advance:** `EditorConfig` +`DayNightAutoAdvance` / `DayNightCycleSeconds`
+  (echte Sekunden pro voller Tag, 5–600 s). `EditorApplication::OnRender` zählt
+  `TimeOfDay += dt / cycleSeconds` (wrap [0,1)) wenn Zyklus+Auto aktiv. UI: in
+  Quick-Settings „Environment" Checkbox „Auto-Advance" + logarithmischer Slider
+  „Full day: N s". (Headless-Dump rendert in `OnInit`, nicht über `OnRender` →
+  Animation nur interaktiv sichtbar.)
+- **Mond:** im geteilten `skyColor`-Snippet (GL+Metal identisch), eingeblendet per
+  `night = 1-day`. Position `moonDir = normalize(-sunDir.x, -sunDir.y, sunDir.z)`
+  — der Sonne entgegengesetzt in Azimut/Höhe, aber **z-Vorzeichen behalten**, sonst
+  läge der Mond in der Hemisphäre HINTER dem Betrachter. Bleiche Scheibe
+  `pow(m,700)*4` (bloomt) + weicher Halo `pow(m,60)*0.05` + schwacher
+  Mondlicht-Fill `vec3(0.04,0.05,0.08)*night`, damit die Nachtszene nicht
+  pechschwarz ist.
+- **Verifiziert:** Mond-Beitrag per Diagnose-Glow bestätigt (Mond-Richtung tönt
+  die Nachtszene übers IBL); Mondscheibe steht hoch am Himmel und liegt damit
+  **über** dem nach unten blickenden Headless-Validierungs-Cam-Frame (wie auch die
+  Sonnenscheibe in den Tag-Dumps — interaktiv durch Hochschauen sichtbar). Default
+  (Tag) **byte-identisch** zum Vor-Mond-Stand (Mond ist `*night`=0 bei Tag);
+  GL==Metal bei Nacht (0,00 % / 20 Byte). 34 Tests grün.
