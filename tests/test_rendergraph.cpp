@@ -129,6 +129,36 @@ TEST_CASE("Inert passes record nothing")
 	CHECK(cmds.drawCalls().empty());
 }
 
+TEST_CASE("ShadowPass casts from the light frustum, not the camera-culled set")
+{
+	RenderWorld world;
+	world.objects.push_back(makeObj(1, { 0,  0, 0 }));   // inside the light frustum
+	world.objects.push_back(makeObj(2, { 50, 0, 0 }));   // far outside it
+	// Give each object a small valid world AABB so the frustum test is exercised.
+	for (RenderObject& o : world.objects)
+	{
+		const glm::vec3 p = glm::vec3(o.transform[3]);
+		o.worldBounds.expand(p - glm::vec3(0.5f));
+		o.worldBounds.expand(p + glm::vec3(0.5f));
+	}
+	// Directional light looking down -Z with a tight ortho box around the origin:
+	// object 1 is inside, object 2 (x = 50) lies outside.
+	world.shadow.enabled  = true;
+	world.shadow.viewProj = glm::ortho(-2.0f, 2.0f, -2.0f, 2.0f, 0.1f, 100.0f)
+	                      * glm::lookAt(glm::vec3(0, 0, 10), glm::vec3(0), glm::vec3(0, 1, 0));
+
+	// The camera-culled set is empty (both objects off-screen). The shadow pass
+	// must ignore it and decide casters from the light's frustum — otherwise an
+	// off-screen object stops casting into the still-visible scene (the bug this
+	// guards against).
+	const std::vector<uint32_t> cameraCulled = {};
+	CommandBuffer cmds;
+	ShadowPass{}.execute(world, cameraCulled, cmds);
+
+	REQUIRE(cmds.drawCalls().size() == 1);   // only the in-frustum caster
+	CHECK(cmds.drawCalls()[0].entityId == 1);
+}
+
 TEST_CASE("RenderPass declares its render-target I/O")
 {
 	CHECK(GeometryPass{}.describe().output.id == kBackbufferTarget);

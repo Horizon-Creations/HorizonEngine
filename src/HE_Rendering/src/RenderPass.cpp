@@ -1,5 +1,6 @@
 #include "HorizonRendering/RenderPass.h"
 #include "HorizonRendering/RenderObject.h"
+#include "HorizonRendering/FrustumCuller.h"
 
 // ─── GeometryPass ───────────────────────────────────────────────────────────
 // Turns the culled + sorted visible objects into draw calls. It produces no
@@ -30,19 +31,27 @@ void GeometryPass::execute(const RenderWorld&           world,
 }
 
 // ─── ShadowPass ─────────────────────────────────────────────────────────────
-// Records the same visible geometry as GeometryPass; the backend replays it
-// depth-only from the light's POV (world.shadow.viewProj) into the shadow map.
-// Skips everything when no directional light is present.
+// Records the shadow casters and the backend replays them depth-only from the
+// light's POV (world.shadow.viewProj) into the shadow map. Skips everything when
+// no directional light is present.
+//
+// Casters are culled against the LIGHT frustum, not the camera-culled
+// sortedIndices the geometry pass uses: an object outside the camera view still
+// casts a shadow into the visible scene as long as it lies within the shadow
+// map's coverage. (Reusing the camera-culled set made shadows pop out the
+// moment their caster left the screen, even though the caster still influenced
+// the scene.)
 void ShadowPass::execute(const RenderWorld&           world,
-                         const std::vector<uint32_t>& sortedIndices,
+                         const std::vector<uint32_t>& /*sortedIndices*/,
                          CommandBuffer&               outCmds)
 {
 	if (!world.shadow.enabled) return;
-	for (uint32_t idx : sortedIndices)
+	const Frustum lightFrustum = Frustum::fromViewProj(world.shadow.viewProj);
+	for (size_t idx = 0; idx < world.objects.size(); ++idx)
 	{
-		if (idx >= world.objects.size())
-			continue;
 		const RenderObject& obj = world.objects[idx];
+		if (obj.worldBounds.isValid() && !lightFrustum.intersects(obj.worldBounds))
+			continue; // caster lies entirely outside the shadow map's coverage
 		DrawCall dc;
 		dc.meshAssetId   = obj.meshAssetId;
 		dc.transform     = obj.transform;

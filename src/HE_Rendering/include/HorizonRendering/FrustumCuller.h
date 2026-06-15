@@ -19,6 +19,14 @@ struct Frustum
 class HE_RENDERING_API FrustumCuller {
 public:
     // outVisible[i] mirrors world.objects[i]. Objects use their world-space
-    // bounds; an invalid AABB is treated as always visible.
+    // bounds; an invalid AABB is treated as always visible. Culls against the
+    // scene camera.
     void cull(const RenderWorld& world, std::vector<bool>& outVisible);
+
+    // Cull against an explicit view-projection (e.g. a shadow light's frustum)
+    // rather than the scene camera, so a caster outside the camera view but
+    // inside the given frustum is kept. Used by the shadow pass so off-screen
+    // objects keep casting into the visible scene.
+    void cull(const RenderWorld& world, const glm::mat4& viewProj,
+              std::vector<bool>& outVisible);
 };

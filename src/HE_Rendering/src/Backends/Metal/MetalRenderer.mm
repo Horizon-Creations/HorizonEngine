@@ -875,7 +875,11 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr)
 	for (RenderObject& obj : m_renderWorld.objects)
 		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId); mesh && mesh->localBounds.isValid())
 			obj.worldBounds = mesh->localBounds.transformed(obj.transform);
-	m_culler.cull(m_renderWorld, m_visible);
+	// Cull casters against the LIGHT frustum, not the camera — an off-screen
+	// object still casts a shadow into the visible scene while it lies within the
+	// shadow map's coverage. (Camera-culling the casters made shadows pop out as
+	// their caster left the screen.)
+	m_culler.cull(m_renderWorld, m_renderWorld.shadow.viewProj, m_visible);
 	m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
 	if (m_sortedIndices.empty()) return;
 
