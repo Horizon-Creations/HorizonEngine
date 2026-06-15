@@ -44,8 +44,13 @@ bool Frustum::intersects(const HE::AABB& box) const
 
 void FrustumCuller::cull(const RenderWorld& world, std::vector<bool>& outVisible)
 {
-	const Frustum frustum =
-		Frustum::fromViewProj(world.camera.projection * world.camera.view);
+	cull(world, world.camera.projection * world.camera.view, outVisible);
+}
+
+void FrustumCuller::cull(const RenderWorld& world, const glm::mat4& viewProj,
+                         std::vector<bool>& outVisible)
+{
+	const Frustum frustum = Frustum::fromViewProj(viewProj);
 
 	outVisible.assign(world.objects.size(), true);
 	for (size_t i = 0; i < world.objects.size(); ++i)
