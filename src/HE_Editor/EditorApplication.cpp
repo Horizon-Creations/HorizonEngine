@@ -527,6 +527,8 @@ void EditorApplication::OnInit()
 	m_editorConfig.BloomEnabled                = globalstate.getCustomConfigBool("BloomEnabled",        m_editorConfig.BloomEnabled);
 	m_editorConfig.BloomThreshold              = globalstate.getCustomConfigFloat("BloomThreshold",     m_editorConfig.BloomThreshold);
 	m_editorConfig.BloomIntensity              = globalstate.getCustomConfigFloat("BloomIntensity",     m_editorConfig.BloomIntensity);
+	m_editorConfig.DayNightCycle               = globalstate.getCustomConfigBool("DayNightCycle",       m_editorConfig.DayNightCycle);
+	m_editorConfig.TimeOfDay                   = globalstate.getCustomConfigFloat("TimeOfDay",          m_editorConfig.TimeOfDay);
 	m_editorCamera.setFlySpeed(m_editorConfig.EditorCameraSpeed);
 
 #ifdef HE_IMGUI_ENABLED
@@ -703,12 +705,17 @@ void EditorApplication::OnRender(float dt)
 		}
 	}
 
-	// Push post-process settings (bloom) to the renderer from the editor prefs.
+	// Push post-process + environment settings to the renderer from the editor prefs.
 	if (renderer())
+	{
 		renderer()->SetBloomSettings(IRenderer::BloomSettings{
 			m_editorConfig.BloomEnabled,
 			m_editorConfig.BloomThreshold,
 			m_editorConfig.BloomIntensity});
+		renderer()->SetEnvironmentSettings(IRenderer::EnvironmentSettings{
+			m_editorConfig.DayNightCycle,
+			m_editorConfig.TimeOfDay});
+	}
 
 	AppContext ctx = makeContext();
 	EditorUI::render(ctx, dt);
@@ -785,6 +792,8 @@ void EditorApplication::dumpFrameHeadless()
 	r->SetOverlayCallback(nullptr);
 	r->SetBloomSettings(IRenderer::BloomSettings{
 		m_editorConfig.BloomEnabled, m_editorConfig.BloomThreshold, m_editorConfig.BloomIntensity});
+	r->SetEnvironmentSettings(IRenderer::EnvironmentSettings{
+		m_editorConfig.DayNightCycle, m_editorConfig.TimeOfDay});
 	r->SetViewportSize(1280, 720);
 	for (int i = 0; i < 3; ++i)
 		r->Render();
@@ -1068,6 +1077,8 @@ void EditorApplication::OnShutdown()
 	globalstate.setCustomConfigEntry("BloomEnabled",               m_editorConfig.BloomEnabled);
 	globalstate.setCustomConfigEntry("BloomThreshold",             m_editorConfig.BloomThreshold);
 	globalstate.setCustomConfigEntry("BloomIntensity",             m_editorConfig.BloomIntensity);
+	globalstate.setCustomConfigEntry("DayNightCycle",              m_editorConfig.DayNightCycle);
+	globalstate.setCustomConfigEntry("TimeOfDay",                  m_editorConfig.TimeOfDay);
 	globalstate.writeConfig();
 }
 

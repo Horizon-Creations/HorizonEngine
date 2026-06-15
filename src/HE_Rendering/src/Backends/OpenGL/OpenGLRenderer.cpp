@@ -70,7 +70,10 @@ float computeShadow(vec3 worldPos, vec3 N, vec3 L)
 	p = p * 0.5 + 0.5;                       // NDC [-1,1] → [0,1]
 	if (p.z > 1.0 || any(lessThan(p.xy, vec2(0.0))) || any(greaterThan(p.xy, vec2(1.0))))
 		return 1.0;                          // outside the map → lit
-	float bias    = max(0.0015 * (1.0 - dot(N, L)), 0.0004);
+	// Slope-scaled bias: grows toward grazing sun angles (low sun / day-night
+	// sunsets) to stop shadow acne, clamped so high sun keeps crisp contact.
+	float ndl     = clamp(dot(N, L), 0.0, 1.0);
+	float bias    = clamp(0.0016 * tan(acos(ndl)), 0.0005, 0.02);
 	float closest = texture(uShadowMap, p.xy).r;
 	return (p.z - bias > closest) ? 0.35 : 1.0;
 }
@@ -1012,6 +1015,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		}
 	m_pendingMaterialInvalidations.clear();
 
+	m_extractor.setDayNight(GetEnvironment().dayNightCycle, GetEnvironment().timeOfDay);
 	m_extractor.extract(*m_world, m_renderWorld,
 	                    static_cast<float>(pw) / static_cast<float>(ph),
 	                    &m_editorCamera);
@@ -1022,12 +1026,9 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	const glm::mat4 viewProj    = m_renderWorld.camera.projection * m_renderWorld.camera.view;
 	const glm::mat4 invViewProj = glm::inverse(viewProj);
 
-	// Direction toward the sun for the sky + image-based ambient: first
-	// directional light if any, else a default high sun.
-	glm::vec3 sunDir(0.45f, 0.80f, 0.55f);
-	for (const LightData& l : m_renderWorld.lights)
-		if (l.type == 0) { sunDir = -l.direction; break; } // 0 = directional
-	if (glm::dot(sunDir, sunDir) > 1e-8f) sunDir = glm::normalize(sunDir);
+	// Direction toward the sun for the sky + image-based ambient — resolved by the
+	// extractor (scene directional light, or the day-night cycle when enabled).
+	const glm::vec3 sunDir = m_renderWorld.sunDirection;
 
 	// ── Refine bounds with real mesh AABBs (also uploads new meshes) ────────
 	for (RenderObject& obj : m_renderWorld.objects)

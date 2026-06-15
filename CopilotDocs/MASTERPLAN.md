@@ -636,3 +636,36 @@ Ambient-Quelle — macht PBR „modern".
   Sink; Metal: `EncodeSky` direkt nach `extract`) wird jetzt **immer** gezeichnet,
   die Early-Outs überspringen nur noch die Objekt-Draws. Verifiziert mit Temp-
   `sortedIndices.clear()` → Himmel statt Grau (GL+Metal identisch).
+
+> **Status 15.06.2026 (Forts.):** Tag-Nacht-Zyklus-Feature mit Editor-Slider. ✅
+> (GL+Metal; treibt Sonne → Himmel + Ambient + Schatten gemeinsam)
+
+**Tag-Nacht-Zyklus (Environment):** Ein „Time of Day"-Regler bewegt die Sonne über
+den Himmel — Himmel, Image-Based-Ambient **und** Schatten reagieren zusammen.
+- **Shared (Extractor, alle Backends):** Neue `RenderExtractor::setDayNight(bool,
+  float)` + `RenderWorld::sunDirection` (Richtung zur Sonne). Bei aktivem Zyklus
+  treibt `timeOfDay` (0..1: 0.25 Sonnenaufgang, 0.5 Mittag, 0.75 Untergang, 0/1
+  Mitternacht) den Sonnen-Bogen `(cos a, sin a, 0.45)`, **überschreibt zur
+  Render-Zeit** die Richtung des ersten Directional-Lights (→ Shading + Shadow-VP
+  folgen) und dimmt es nahe/unter dem Horizont (Nacht). **Szene-ECS bleibt
+  unangetastet** (nur die transiente `out.lights`-Kopie). Aus → die authored
+  Light-Richtung der Szene zählt wie bisher.
+- **Backends:** GL/Metal forwarden `GetEnvironment()` an `m_extractor.setDayNight`
+  vor `extract` und nehmen die Sonne fürs Sky/IBL jetzt aus
+  `m_renderWorld.sunDirection` (statt selbst aus den Lights zu rechnen).
+- **Plumbing:** `IRenderer::EnvironmentSettings{dayNightCycle,timeOfDay}` +
+  `SetEnvironmentSettings` (Base-Member `m_environment`). `EditorConfig`
+  (DayNightCycle/TimeOfDay, config.json) → `OnRender`/Headless-Dump pushen's.
+- **UI:** Quick-Settings → neuer **„Environment"**-Abschnitt: Checkbox „Day-Night
+  Cycle" + „Time of Day"-Slider, der die Uhrzeit als **HH:MM** im Regler anzeigt.
+- **Shadow-Acne-Fix (Begleitfix):** der nun mögliche flache Sonnenstand
+  (Sonnenuntergang) erzeugte auf GL Shadow-Acne (Streifen) — beide Backends nutzen
+  jetzt **slope-scaled Bias** `clamp(0.0016*tan(acos(N·L)),0.0005,0.02)` statt der
+  alten konstanten Bias. Behebt Acne bei streifendem Licht, Default-Hochsonne
+  unverändert.
+- **Verifiziert (Headless-Dumps):** Mittag = heller Tag + kurze Schatten;
+  TimeOfDay 0.74 = Orange-Sonnenuntergang + lange Schatten + warmes Licht; 0.78+ =
+  Nacht (dunkel, Sonne gedimmt). GL==Metal nach Acne-Fix von 4,89 % auf 0,06 %
+  Byte-Diff bei Sonnenuntergang. Default (Zyklus aus) unverändert. 34 Tests grün.
+  **D3D/Vulkan:** Sonnen/Schatten-Override läuft mit (shared Extractor), nur der
+  Himmel fehlt dort noch (= blinder Port).

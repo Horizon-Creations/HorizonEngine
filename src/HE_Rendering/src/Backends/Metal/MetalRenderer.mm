@@ -104,7 +104,10 @@ float shadowFactor(constant SceneUniforms& scene, float3 worldPos, float3 N, flo
 	float3 p  = lp.xyz / lp.w;            // z already [0,1] (Metal clip); xy in [-1,1]
 	float2 uv = float2(p.x * 0.5 + 0.5, 1.0 - (p.y * 0.5 + 0.5)); // tex origin top-left
 	if (p.z > 1.0 || any(uv < 0.0) || any(uv > 1.0)) return 1.0;
-	float bias    = max(0.0015 * (1.0 - dot(N, L)), 0.0004);
+	// Slope-scaled bias: grows toward grazing sun angles (day-night sunsets) to
+	// stop shadow acne, clamped so a high sun keeps crisp contact shadows.
+	float ndl     = clamp(dot(N, L), 0.0, 1.0);
+	float bias    = clamp(0.0016 * tan(acos(ndl)), 0.0005, 0.02);
 	float closest = shadowMap.sample(shadowSmp, uv).r;
 	return (p.z - bias > closest) ? 0.35 : 1.0;
 }
@@ -1261,6 +1264,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 
 	id<MTLRenderCommandEncoder> encoder = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
 
+	m_extractor.setDayNight(GetEnvironment().dayNightCycle, GetEnvironment().timeOfDay);
 	m_extractor.extract(*m_world, m_renderWorld,
 	                    static_cast<float>(width) / static_cast<float>(height),
 	                    &m_editorCamera);
@@ -1268,12 +1272,9 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 	const glm::mat4 viewProj =
 		m_renderWorld.camera.projection * m_renderWorld.camera.view;
 
-	// Direction toward the sun for sky + image-based ambient (first directional
-	// light, else a default high sun). Valid even with no objects.
-	glm::vec3 sunDir(0.45f, 0.80f, 0.55f);
-	for (const LightData& l : m_renderWorld.lights)
-		if (l.type == 0) { sunDir = -l.direction; break; } // 0 = directional
-	if (glm::dot(sunDir, sunDir) > 1e-8f) sunDir = glm::normalize(sunDir);
+	// Direction toward the sun for sky + image-based ambient — resolved by the
+	// extractor (scene directional light, or the day-night cycle when enabled).
+	const glm::vec3 sunDir = m_renderWorld.sunDirection;
 
 	// Skybox first (into the HDR target, no depth write) so the scene draws over
 	// it. Drawn before any early-out so the background is never a stale gray clear

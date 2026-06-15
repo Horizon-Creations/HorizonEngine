@@ -1839,7 +1839,34 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
         ImGui::SetNextItemWidth(25.0f);
         ImGui::InputInt("Content Browser Refresh interval (Seconds)", &ctx.editorConfig.ContentBrowserRefreshRate, 0, 0);
     }
-    ImGui::End();   
+
+    // ── Environment: day-night cycle ──────────────────────────────────────────
+    if (ImGui::CollapsingHeader("Environment", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+        ImGui::Checkbox("Day-Night Cycle", &ctx.editorConfig.DayNightCycle);
+
+        // Format the 0..1 time as a HH:MM clock shown inside the slider.
+        int minutes = static_cast<int>(ctx.editorConfig.TimeOfDay * 1440.0f) % 1440;
+        if (minutes < 0) minutes += 1440;
+        char clock[8];
+        std::snprintf(clock, sizeof(clock), "%02d:%02d", minutes / 60, minutes % 60);
+
+        // Always draggable; moving it starts the cycle so the change is visible.
+        // NoRoundToFormat is essential here: the HH:MM string is a *display*
+        // format with no numeric specifier, so without this flag ImGui rounds the
+        // value by re-parsing the clock (e.g. "12:00" → 12) and the thumb snaps to
+        // the extremes instead of dragging.
+        ImGui::SetNextItemWidth(-1.0f);
+        if (ImGui::SliderFloat("##timeofday", &ctx.editorConfig.TimeOfDay, 0.0f, 1.0f,
+                               clock, ImGuiSliderFlags_NoRoundToFormat))
+            ctx.editorConfig.DayNightCycle = true;
+
+        ImGui::TextDisabled(ctx.editorConfig.DayNightCycle
+            ? "Drives the sun, sky & shadows."
+            : "Move the slider to start a day-night cycle.");
+    }
+
+    ImGui::End();
 
     // World Outliner
     if (ctx.fontHeading) ImGui::PushFont(ctx.fontHeading);
