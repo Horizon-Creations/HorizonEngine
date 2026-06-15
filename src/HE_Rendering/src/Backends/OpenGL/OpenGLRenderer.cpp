@@ -178,6 +178,7 @@ uniform mat4 uInvViewProj;
 uniform vec3 uSunDir;
 uniform sampler2D uMoonTex;
 uniform bool      uHasMoonTex;
+uniform float     uTimeOfDay;   // cloud scroll phase (0..1)
 out vec4 FragColor;
 //#SKYFUNC#
 
@@ -211,6 +212,65 @@ vec3 moonDisk(vec3 dir, vec3 sunDir)
 	return tint * tex * limb * edge * 3.0 * night;
 }
 
+// Procedural clouds — drawn only in the sky pass (kept out of the shared
+// skyColor() so the scene's image-based ambient stays cheap). A scrolling FBM
+// over a flat cloud layer drifts with the time of day and is lit/tinted by the
+// day-night cycle. Mirrors the Metal applyClouds() exactly.
+float cloudHash(vec2 p)
+{
+	p  = fract(p * vec2(127.1, 311.7));
+	p += dot(p, p + 34.56);
+	return fract(p.x * p.y);
+}
+float cloudNoise(vec2 p)
+{
+	vec2 i = floor(p);
+	vec2 f = fract(p);
+	vec2 u = f * f * (3.0 - 2.0 * f);
+	float a = cloudHash(i);
+	float b = cloudHash(i + vec2(1.0, 0.0));
+	float c = cloudHash(i + vec2(0.0, 1.0));
+	float d = cloudHash(i + vec2(1.0, 1.0));
+	return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+float cloudFbm(vec2 p)
+{
+	float v = 0.0;
+	float a = 0.5;
+	for (int i = 0; i < 5; ++i)
+	{
+		v += a * cloudNoise(p);
+		p  = p * 2.02;
+		a *= 0.5;
+	}
+	return v;
+}
+vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float timeOfDay)
+{
+	dir    = normalize(dir);
+	sunDir = normalize(sunDir);
+	if (dir.y < 0.02) return baseSky;             // no clouds at/below the horizon
+
+	// Project the ray onto a flat cloud layer (compresses toward the horizon).
+	vec2 uv     = dir.xz / dir.y * 0.5;
+	vec2 scroll = vec2(timeOfDay * 8.0, timeOfDay * 2.0); // drift across the day
+	float cover = smoothstep(0.50, 0.85, cloudFbm(uv + scroll));
+	cover *= smoothstep(0.02, 0.22, dir.y);       // fade out near the horizon
+
+	// Cheap shading: a sun-offset sample fakes bright tops / darker undersides.
+	float lit  = smoothstep(0.45, 0.95, cloudFbm(uv + scroll + sunDir.xz * 0.20));
+	float sunY = clamp(sunDir.y, -0.2, 1.0);
+	float day  = smoothstep(-0.10, 0.10, sunY);
+	float dusk = smoothstep(-0.06, 0.05, sunY) * (1.0 - smoothstep(0.05, 0.28, sunY));
+
+	vec3 dayCol   = mix(vec3(0.55, 0.58, 0.66), vec3(1.00, 0.99, 0.96), lit);
+	vec3 nightCol = mix(vec3(0.05, 0.06, 0.10), vec3(0.20, 0.23, 0.32), lit);
+	vec3 cloudCol = mix(nightCol, dayCol, day);
+	cloudCol = mix(cloudCol, vec3(1.0, 0.62, 0.40), dusk * lit * 0.6); // warm dusk tops
+
+	return mix(baseSky, cloudCol, cover);
+}
+
 void main()
 {
 	vec4 wp1 = uInvViewProj * vec4(vNDC,  1.0, 1.0);
@@ -218,6 +278,7 @@ void main()
 	vec3 dir = wp1.xyz / wp1.w - wp0.xyz / wp0.w;
 	vec3 col = skyColor(dir, uSunDir);
 	col += moonDisk(dir, uSunDir);
+	col = applyClouds(col, dir, uSunDir, uTimeOfDay);
 	FragColor = vec4(col, 1.0);
 }
 )GLSL";
@@ -524,6 +585,7 @@ void OpenGLRenderer::CreateSkyPipeline()
 	m_uSkySunDir = glGetUniformLocation(m_skyProgram, "uSunDir");
 	m_uSkyMoonTex = glGetUniformLocation(m_skyProgram, "uMoonTex");
 	m_uSkyHasMoon = glGetUniformLocation(m_skyProgram, "uHasMoonTex");
+	m_uSkyTime    = glGetUniformLocation(m_skyProgram, "uTimeOfDay");
 }
 
 void OpenGLRenderer::CreateTonemapPipeline()
@@ -1198,6 +1260,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glBindTexture(GL_TEXTURE_2D, m_moonTex);
 			glUniform1i(m_uSkyMoonTex, 0);
 			glUniform1i(m_uSkyHasMoon, m_moonTex ? 1 : 0);
+			glUniform1f(m_uSkyTime, GetEnvironment().timeOfDay);
 			glBindVertexArray(m_fsVAO);
 			glDrawArrays(GL_TRIANGLES, 0, 3);
 			glEnable(GL_DEPTH_TEST);

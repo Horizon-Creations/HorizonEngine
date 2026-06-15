@@ -773,3 +773,23 @@ den Himmel — Himmel, Image-Based-Ambient **und** Schatten reagieren zusammen.
 - **Verifiziert:** Metal-PCF kompiliert zur Laufzeit (Headless-Noon-Dump), Schatten
   korrekt platziert mit weicher Penumbra; Texel-Snap bricht Positionierung nicht.
   Build sauber, Tests grün.
+
+> **Status 15.06.2026 (Forts. 6):** Prozedurale Wolken im Himmel, die mit der Time-of-Day
+> driften und vom Day-Night-Zyklus eingefärbt werden. ✅ (GL+Metal)
+
+**Wolken:**
+- **Nur im Sky-Pass** (wie `moonDisk()`, **nicht** in der geteilten `skyColor()`), damit das
+  Image-Based-Ambient/Reflections der Szene günstig bleiben.
+- **Technik (`applyClouds()`, beide Shader zeilengleich):** Value-Noise-Hash → 5-Oktaven-FBM
+  über eine flache Wolkenschicht (`uv = dir.xz/dir.y * 0.5`, staucht zum Horizont). Deckung
+  `smoothstep(0.50,0.85, fbm(uv+scroll))`, Horizont-Fade `smoothstep(0.02,0.22, dir.y)`.
+  Drift: `scroll = (timeOfDay*8, timeOfDay*2)` → Wolken wandern über den Tag (Wrap bei
+  Mitternacht, wo Wolken am dunkelsten sind → kaum sichtbar). Billige Beleuchtung über
+  zweite, sonnenversetzte FBM-Probe (`lit`): heller Tag-Ton, dunkler Nacht-Ton, warme
+  Dusk-Spitzen. Blend über Sky+Sonne+Mond → Wolken verdecken, was dahinter liegt.
+- **Daten:** `timeOfDay` neu an den Sky-Pass durchgereicht — Metal via `SkyParams.params.x`
+  (EncodeSky-Signatur + Struct erweitert), GL via `uTimeOfDay`-Uniform (`m_uSkyTime`).
+- **Verifiziert:** Metal-Wolken-Shader kompiliert zur Laufzeit (Headless-Dump); CPU-Replik
+  der exakten Shader-Mathematik (nach-oben-Kamera) zeigt: Tag = weiße Wolken/blauer Himmel,
+  Dusk = warme Horizont-Wolken, Nacht = gedämpft kühl; t=0,50 vs 0,55 → Wolken sind sichtbar
+  weitergewandert. Build sauber, Tests grün.
