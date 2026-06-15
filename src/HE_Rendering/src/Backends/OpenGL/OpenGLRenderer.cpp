@@ -301,24 +301,35 @@ vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float timeOfDay, float cov
 	vec2 uv     = dir.xz / dir.y * 0.5;
 	vec2 scroll = vec2(timeOfDay * 8.0, timeOfDay * 2.0); // drift across the day
 	// Coverage slider lowers the density threshold: 0 = clear, 1 = full overcast.
-	float lo    = mix(0.95, 0.05, clamp(coverage, 0.0, 1.0));
-	float cover = smoothstep(lo, lo + 0.35, cloudFbm(uv + scroll));
+	float lo      = mix(0.95, 0.05, clamp(coverage, 0.0, 1.0));
+	float density = cloudFbm(uv + scroll);
+	float cover   = smoothstep(lo, lo + 0.30, density);
 	cover *= smoothstep(0.02, 0.22, dir.y);       // fade out near the horizon
 
-	// Cheap shading: a sun-offset sample fakes bright tops / darker undersides.
-	float lit  = smoothstep(0.45, 0.95, cloudFbm(uv + scroll + sunDir.xz * 0.20));
+	// Fake self-shadowing for volume: compare the density here with a sample
+	// toward the sun so cloud tops facing the sun read bright while the deeper
+	// (back-lit) interior and undersides stay shaded.
+	float toSun = cloudFbm(uv + scroll - sunDir.xz * 0.30);
+	float lit   = smoothstep(-0.05, 0.45, density - toSun + 0.15);
 	float sunY = clamp(sunDir.y, -0.2, 1.0);
 	float day  = smoothstep(-0.10, 0.10, sunY);
 	float dusk = smoothstep(-0.06, 0.05, sunY) * (1.0 - smoothstep(0.05, 0.28, sunY));
 
-	// Lit cloud tops take the sun's (adjustable) light colour; shaded undersides
-	// stay a neutral grey. Changing the sun colour — or the warm shift at sunset
-	// — therefore tints the clouds.
-	vec3 dayCol   = mix(vec3(0.55, 0.58, 0.66), sunColor, lit);
-	vec3 nightCol = mix(vec3(0.05, 0.06, 0.10), vec3(0.20, 0.23, 0.32), lit);
+	// Higher-contrast shading: a dark shaded base with sun-coloured lit tops.
+	// Lit tops take the sun's (adjustable) light colour, so changing the sun
+	// colour — or the warm shift at sunset — tints the clouds.
+	vec3 dayCol   = mix(vec3(0.30, 0.33, 0.40), sunColor * 1.15, lit);
+	vec3 nightCol = mix(vec3(0.04, 0.05, 0.09), vec3(0.18, 0.21, 0.30), lit);
 	vec3 cloudCol = mix(nightCol, dayCol, day);
-	vec3 duskTop  = sunColor * vec3(1.0, 0.55, 0.32);                  // reddened sun colour
-	cloudCol = mix(cloudCol, duskTop, dusk * lit * 0.7);              // warm sunset tops
+	vec3 duskTop  = sunColor * vec3(1.25, 0.55, 0.28);                 // reddened sun colour
+	cloudCol = mix(cloudCol, duskTop, dusk * lit * 0.85);            // warm sunset tops
+
+	// Warm rim light along the sun-facing cloud edges (silver/golden lining).
+	vec2  rimAz  = normalize(sunDir.xz + vec2(1e-5));
+	float toward = dot(normalize(dir.xz + vec2(1e-5)), rimAz) * 0.5 + 0.5;
+	float edge   = cover * (1.0 - cover) * 4.0;                      // peaks on cloud edges
+	float rim    = edge * (toward * toward) * max(day, dusk);
+	cloudCol += sunColor * vec3(1.3, 0.7, 0.35) * (rim * 0.6);
 
 	return mix(baseSky, cloudCol, cover);
 }
@@ -356,23 +367,40 @@ vec3 skyColor(vec3 dir, vec3 sunDir)
 	vec3 horizNite  = vec3(0.03, 0.04, 0.10);
 	vec3 zenith  = mix(zenithNite, zenithDay, day);
 	vec3 horizon = mix(horizNite,  horizDay,  day);
-	horizon = mix(horizon, vec3(0.95, 0.45, 0.22), dusk);       // warm sunset band
+
+	// Directional sunset warmth: the warm band is concentrated toward the sun's
+	// azimuth (golden near the sun, cooler magenta away) instead of a flat ring,
+	// and the zenith picks up a touch of dusk purple for atmospheric depth.
+	vec2  sunAz  = normalize(sunDir.xz + vec2(1e-5));
+	float toward = dot(normalize(dir.xz + vec2(1e-5)), sunAz) * 0.5 + 0.5; // 0 away → 1 toward
+	toward = pow(clamp(toward, 0.0, 1.0), 1.5);
+	vec3  duskHoriz = mix(vec3(0.52, 0.30, 0.52), vec3(1.20, 0.50, 0.16), toward);
+	horizon = mix(horizon, duskHoriz, dusk);                    // warm directional sunset band
+	zenith  = mix(zenith,  vec3(0.20, 0.16, 0.40), dusk * 0.6);
 
 	float h    = clamp(dir.y, 0.0, 1.0);
 	float grad = pow(1.0 - h, 2.5);                             // horizon-weighted
 	vec3 sky = mix(zenith, horizon, grad);
+
+	// Concentrated golden scattering band hugging the horizon toward the sun.
+	float band = pow(1.0 - h, 8.0) * toward;
+	sky += vec3(1.25, 0.62, 0.26) * (band * dusk * 0.8);
 
 	// Below the horizon: ease into a soft ground haze over a wide band so the
 	// sky stays atmospheric just under the horizon line.
 	vec3 ground = mix(vec3(0.02, 0.02, 0.03), vec3(0.24, 0.23, 0.21), day);
 	sky = mix(sky, ground, smoothstep(0.0, -0.25, dir.y));
 
-	// Sun disk + glow, tinted warm near the horizon, white when high.
+	// Layered sun aureole — a crisp disk plus tight/mid blooms and a broad warm
+	// scatter that survive through sunset for a cinematic, volumetric glow.
 	vec3  sunTint = mix(vec3(1.0, 0.42, 0.20), vec3(1.0, 0.96, 0.88),
 	                    smoothstep(0.0, 0.25, sunY));
 	float s = max(dot(dir, sunDir), 0.0);
+	float sunVis = max(day, dusk);
 	sky += sunTint * (pow(s, 1800.0) * 14.0) * day;             // crisp disk (blooms)
-	sky += sunTint * (pow(s, 7.0)    * 0.18) * max(day, dusk);  // soft halo
+	sky += sunTint * (pow(s, 180.0)  * 2.2) * sunVis;           // tight bloom
+	sky += sunTint * (pow(s, 22.0)   * 0.7) * sunVis;           // mid aureole
+	sky += vec3(1.0, 0.5, 0.25) * (pow(s, 5.0) * 0.5) * dusk;   // broad warm scatter
 
 	// Moon: opposite the sun, fading in at night. The lit disk itself is drawn
 	// (textured) in the sky pass; here we keep only the soft halo and a faint
