@@ -478,6 +478,7 @@ config.json.
 3. ✅ **Save-Prompt bei ungesicherten Änderungen** — erledigt (s.u.).
 4. ✅ **Bloom** (3.6 Forts.) — erledigt (GL+Metal, s.u.).
 5. ✅ **PBR-Skalare (3.3)** + **Bloom-Toggle in den Preferences** — erledigt (s.u.).
+6. ✅ **Skybox + IBL (3.9)** — erledigt (GL+Metal, prozedurale Sky, s.u.).
 
 Faustregel für die Parallelisierung danach: eine Person/ein Strang auf dem
 kritischen Pfad P1 → P2 → P5 → P6, Rendering (P3) und je ein P4-Block laufen
@@ -576,3 +577,55 @@ pusht die Settings pro Frame; der Headless-Dump pusht sie ebenfalls (in `OnInit`
 respektiert also die Pref. **Verifiziert:** BloomEnabled=false reproduziert exakt
 das No-Bloom-Bild (59599 Byte Diff zum Bloom-an, identisch zur No-Bloom-Baseline).
 34 Tests grün.
+
+> **Status 15.06.2026:** Skybox + IBL (3.9) auf GL+Metal umgesetzt und verifiziert. ✅
+
+**Skybox + Image-Based Lighting (3.9) — GL + Metal:** Prozedurale analytische Sky
+(noch keine Environment-Map/HDR-Asset-Pipeline nötig) als Hintergrund **und** als
+Ambient-Quelle — macht PBR „modern".
+- Geteilte `skyColor(dir, sunDir)`-Funktion (GLSL == MSL): Horizont→Zenit-Gradient
+  + Boden + Sonnenscheibe (`pow(s,350)*6`, blüht im HDR) + Halo. `sunDir` = Richtung
+  zur Sonne (erstes Directional-Light, sonst Default-Hochsonne); im Backend pro
+  Frame berechnet.
+- **Skybox-Pass:** Fullscreen-Dreieck am Far-Plane in das **HDR-Target** (vor der
+  Szene, ohne Depth-Write → Szene zeichnet darüber); rekonstruiert pro Pixel den
+  Welt-Strahl aus `inverse(viewProj)`. Da im HDR-Target, blüht die Sonne über Bloom
+  und durchläuft Tonemapping. GL: `m_skyProgram` (`kSkyVS`/`kSkyFS`), `glDepthMask
+  (FALSE)` + Depth-Test aus. Metal: `m_skyPipeline` (`kSkyMSL`), `EncodeSky` mit
+  `m_noDepthState` vor `EncodeScene`s Objekt-Loop (Scene-Pipeline danach neu gesetzt).
+- **IBL-Ambient** (ersetzt den flachen `0.08*albedo`-Floor, GL `kUnlitFS` == Metal
+  `fragmentMain`): Diffus = `skyColor(N)*diffuseColor`, Specular = `skyColor(reflect
+  (-V,N) → roughness-bent toward N)*specColor`. Metalle spiegeln jetzt sichtbar den
+  Himmel, Schattenseiten bekommen gerichtetes Himmelslicht statt Schwarz. `sunDir`
+  via SceneUniforms (Metal) bzw. `uSunDir` (GL).
+- **Verifiziert:** Headless-Dump zeigt Sky-Hintergrund + IBL-Ambient + intakte
+  Schatten; GL und Metal **visuell identisch** (99,8 % byte-gleich, max Byte-Diff 43
+  / Mittel 2,61 — GPU-Präzision im nichtlinearen Gradient/`pow(350)`, kein Logik-
+  Unterschied; flache Szenen vorher waren byte-identisch, weil ohne diese Mathematik).
+  34 Tests grün. **D3D/Vulkan = nächster blinder Windows-Port.**
+- **Nächste IBL-Stufe (später):** echte Environment-Cubemap/HDR laden + Irradiance/
+  Prefilter-Precompute + BRDF-LUT (statt analytischer Sky); Skybox aus geladener
+  Umgebung.
+
+> **Status 15.06.2026 (Forts.):** Skybox ausgebaut — sonnenstand-getriebene
+> Atmosphäre (Tag↔Sonnenuntergang↔Nacht) + `skyColor`-DRY-Refactor. ✅ (GL+Metal)
+
+**Skybox-Ausbau — atmosphärischer, sonnenstand-getriebener Himmel + DRY:**
+- **DRY-Refactor:** `skyColor()` lag in 4 Shadern dupliziert → jetzt EIN geteilter
+  Snippet pro Backend (`kSkyFuncGLSL` / `kSkyFuncMSL`), via Marker `//#SKYFUNC#`
+  beim Pipeline-Build injiziert (`injectSkyFunc`/`injectSkyMSL`; GL in beide FS,
+  Metal in Scene-/Shadow-/Sky-Library). **Falle:** der Marker muss ALLEIN auf der
+  Zeile stehen (Resttext nach `//#SKYFUNC#` wird nach dem Replace zu ungültigem
+  Shadercode → stiller Crash/Exit-1 ohne Log).
+- **Atmosphäre:** Stimmung folgt der Sonnen-Elevation `sunDir.y`: `day =
+  smoothstep(-0.10,0.10,sunY)`, `dusk` peakt nahe Horizont. Zenit/Horizont aus
+  Tag/Nacht-Paletten geblendet, Horizont bei Dämmerung warm (0.95,0.45,0.22).
+  Horizont-gewichteter Gradient `pow(1-y,2.5)`, weiche Boden-Übergabe über
+  `smoothstep(0,-0.25,dir.y)`, warmer Sonnen-Tint nahe Horizont + scharfe
+  Sonnenscheibe `pow(s,1800)*14` (blüht). Sonne hoch → klarer Blauverlauf; tief
+  → Orange-Sonnenuntergang inkl. warmem IBL-Ambient auf den Schattenseiten.
+- **Verifiziert:** Default-Sonne (sunDir.y≈0.8, via Diagnose-Dump ermittelt) =
+  schöner Tageshimmel; Temp-Tiefsonne = korrekter Sonnenuntergang (Objekte warm
+  angestrahlt). GL==Metal visuell identisch (0,17 % Byte-Diff, max 43/Mittel 2,71
+  = Präzision im nichtlinearen Gradient). 34 Tests grün. **D3D/Vulkan = blinder
+  Port.**

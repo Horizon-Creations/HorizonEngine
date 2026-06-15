@@ -53,7 +53,11 @@ struct SceneUniforms {
 	float4x4 lightVP;        // directional-light view-proj (already in Metal clip)
 	int      shadowEnabled;
 	int      pad3, pad4, pad5;
+	float4   sunDir;         // xyz = direction toward the sun (image-based ambient)
 };
+
+// shared skyColor() injected at the marker below (newLibraryWithSource)
+//#SKYFUNC#
 
 struct VSOut {
 	float4 position [[position]];
@@ -132,8 +136,15 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
 	float  shininess    = mix(128.0, 8.0, in.roughness);
 	float  specScale    = mix(0.5, 0.03, in.roughness);
 
-	float3 V      = normalize(scene.cameraPos.xyz - in.worldPos);
-	float3 result = 0.08 * albedo; // ambient floor
+	float3 V = normalize(scene.cameraPos.xyz - in.worldPos);
+
+	// Image-based ambient from the procedural sky (matches the GL backend):
+	// diffuse from the normal, specular from the reflection (bent toward N by
+	// roughness as a crude prefilter).
+	float3 Rrough  = normalize(mix(reflect(-V, N), N, in.roughness));
+	float3 ambDiff = skyColor(N, scene.sunDir.xyz)      * diffuseColor;
+	float3 ambSpec = skyColor(Rrough, scene.sunDir.xyz) * specColor;
+	float3 result  = ambDiff * 0.35 + ambSpec * (1.0 - 0.6 * in.roughness);
 
 	for (int i = 0; i < scene.lightCount; ++i)
 	{
@@ -263,6 +274,82 @@ fragment float4 blurFragment(FSOut in [[stage_in]],
 }
 )MSL";
 
+// ─── Procedural skybox (drawn into the HDR target behind the scene) ─────────
+static const char* kSkyMSL = R"MSL(
+#include <metal_stdlib>
+using namespace metal;
+
+struct SkyOut { float4 position [[position]]; float2 ndc; };
+struct SkyParams { float4x4 invViewProj; float4 sunDir; };
+
+vertex SkyOut skyVertex(uint vid [[vertex_id]])
+{
+	float x = float((vid & 1) << 2) - 1.0;
+	float y = float((vid & 2) << 1) - 1.0;
+	SkyOut o;
+	o.position = float4(x, y, 1.0, 1.0); // far plane
+	o.ndc      = float2(x, y);
+	return o;
+}
+
+//#SKYFUNC#
+
+fragment float4 skyFragment(SkyOut in [[stage_in]],
+                            constant SkyParams& p [[buffer(0)]])
+{
+	float4 wp1 = p.invViewProj * float4(in.ndc,  1.0, 1.0);
+	float4 wp0 = p.invViewProj * float4(in.ndc, -1.0, 1.0);
+	float3 dir = wp1.xyz / wp1.w - wp0.xyz / wp0.w;
+	return float4(skyColor(dir, p.sunDir.xyz), 1.0);
+}
+)MSL";
+
+// Shared analytic sky, injected (via the //#SKYFUNC# marker) into the scene and
+// skybox MSL so background and image-based ambient match. Mirrors the GL
+// kSkyFuncGLSL exactly: the mood follows the sun's elevation (day↔sunset↔night).
+static const char* kSkyFuncMSL = R"MSL(
+float3 skyColor(float3 dir, float3 sunDir)
+{
+	dir    = normalize(dir);
+	sunDir = normalize(sunDir);
+	float sunY = clamp(sunDir.y, -0.2, 1.0);
+	float day  = smoothstep(-0.10, 0.10, sunY);
+	float dusk = smoothstep(-0.06, 0.05, sunY) * (1.0 - smoothstep(0.05, 0.28, sunY));
+
+	float3 zenithDay  = float3(0.08, 0.28, 0.72);
+	float3 horizDay   = float3(0.42, 0.62, 0.88);
+	float3 zenithNite = float3(0.012, 0.016, 0.05);
+	float3 horizNite  = float3(0.03, 0.04, 0.10);
+	float3 zenith  = mix(zenithNite, zenithDay, day);
+	float3 horizon = mix(horizNite,  horizDay,  day);
+	horizon = mix(horizon, float3(0.95, 0.45, 0.22), dusk);
+
+	float h    = clamp(dir.y, 0.0, 1.0);
+	float grad = pow(1.0 - h, 2.5);
+	float3 sky = mix(zenith, horizon, grad);
+
+	float3 ground = mix(float3(0.02, 0.02, 0.03), float3(0.24, 0.23, 0.21), day);
+	sky = mix(sky, ground, smoothstep(0.0, -0.25, dir.y));
+
+	float3 sunTint = mix(float3(1.0, 0.42, 0.20), float3(1.0, 0.96, 0.88),
+	                     smoothstep(0.0, 0.25, sunY));
+	float s = max(dot(dir, sunDir), 0.0);
+	sky += sunTint * (pow(s, 1800.0) * 14.0) * day;
+	sky += sunTint * (pow(s, 7.0)    * 0.18) * max(day, dusk);
+	return sky;
+}
+)MSL";
+
+// Replaces the //#SKYFUNC# marker with the shared skyColor() MSL.
+static std::string injectSkyMSL(const char* src)
+{
+	std::string s = src;
+	const std::string marker = "//#SKYFUNC#";
+	if (size_t pos = s.find(marker); pos != std::string::npos)
+		s.replace(pos, marker.size(), kSkyFuncMSL);
+	return s;
+}
+
 // Matches the MSL Uniforms struct above (float4x4 is column-major like glm).
 struct UnlitUniforms
 {
@@ -290,6 +377,14 @@ struct SceneUniforms
 	glm::mat4 lightVP = glm::mat4(1.0f);
 	int32_t   shadowEnabled = 0;
 	int32_t   pad3 = 0, pad4 = 0, pad5 = 0;
+	glm::vec4 sunDir = glm::vec4(0.0f, 1.0f, 0.0f, 0.0f);
+};
+
+// Matches the MSL SkyParams struct.
+struct SkyParams
+{
+	glm::mat4 invViewProj = glm::mat4(1.0f);
+	glm::vec4 sunDir      = glm::vec4(0.0f, 1.0f, 0.0f, 0.0f);
 };
 
 // Remaps the extractor's GL-convention light projection (depth -1..1) to Metal
@@ -381,6 +476,7 @@ void MetalRenderer::Shutdown()
 	if (m_tonemapPipeline)      { CFBridgingRelease(m_tonemapPipeline);      m_tonemapPipeline = nullptr; }
 	if (m_bloomBrightPipeline)  { CFBridgingRelease(m_bloomBrightPipeline);  m_bloomBrightPipeline = nullptr; }
 	if (m_blurPipeline)         { CFBridgingRelease(m_blurPipeline);         m_blurPipeline = nullptr; }
+	if (m_skyPipeline)          { CFBridgingRelease(m_skyPipeline);          m_skyPipeline = nullptr; }
 	if (m_dummyTexture)    { CFBridgingRelease(m_dummyTexture);    m_dummyTexture = nullptr; }
 	if (m_linearSampler)   { CFBridgingRelease(m_linearSampler);   m_linearSampler = nullptr; }
 	if (m_cubeVertexBuf)   { CFBridgingRelease(m_cubeVertexBuf);   m_cubeVertexBuf = nullptr; }
@@ -407,7 +503,7 @@ void MetalRenderer::CreateScenePipeline()
 
 		NSError* error = nil;
 		id<MTLLibrary> lib = [device newLibraryWithSource:
-			[NSString stringWithUTF8String:kUnlitMSL] options:nil error:&error];
+			[NSString stringWithUTF8String:injectSkyMSL(kUnlitMSL).c_str()] options:nil error:&error];
 		if (!lib)
 			throw std::runtime_error(std::string("MetalRenderer: unlit shader compile failed: ")
 				+ (error ? [[error localizedDescription] UTF8String] : "unknown"));
@@ -472,6 +568,24 @@ void MetalRenderer::CreateScenePipeline()
 				+ (blError ? [[blError localizedDescription] UTF8String] : "unknown"));
 		m_blurPipeline = (void*)CFBridgingRetain(bdPso);
 
+		// ── Skybox pipeline (into the HDR target; carries the scene depth fmt) ──
+		NSError* skyError = nil;
+		id<MTLLibrary> skyLib = [device newLibraryWithSource:
+			[NSString stringWithUTF8String:injectSkyMSL(kSkyMSL).c_str()] options:nil error:&skyError];
+		if (!skyLib)
+			throw std::runtime_error(std::string("MetalRenderer: sky shader compile failed: ")
+				+ (skyError ? [[skyError localizedDescription] UTF8String] : "unknown"));
+		MTLRenderPipelineDescriptor* skyDesc = [[MTLRenderPipelineDescriptor alloc] init];
+		skyDesc.vertexFunction   = [skyLib newFunctionWithName:@"skyVertex"];
+		skyDesc.fragmentFunction = [skyLib newFunctionWithName:@"skyFragment"];
+		skyDesc.colorAttachments[0].pixelFormat = kSceneColorFormat; // HDR target
+		skyDesc.depthAttachmentPixelFormat      = kDepthFormat;      // pass has depth
+		id<MTLRenderPipelineState> skyPso = [device newRenderPipelineStateWithDescriptor:skyDesc error:&skyError];
+		if (!skyPso)
+			throw std::runtime_error(std::string("MetalRenderer: sky pipeline creation failed: ")
+				+ (skyError ? [[skyError localizedDescription] UTF8String] : "unknown"));
+		m_skyPipeline = (void*)CFBridgingRetain(skyPso);
+
 		MTLDepthStencilDescriptor* depthDesc = [[MTLDepthStencilDescriptor alloc] init];
 		depthDesc.depthCompareFunction = MTLCompareFunctionLessEqual;
 		depthDesc.depthWriteEnabled    = YES;
@@ -517,7 +631,7 @@ void MetalRenderer::EnsureShadowResources()
 		// Depth-only pipeline (no color attachment, depth attachment only).
 		NSError* error = nil;
 		id<MTLLibrary> lib = [device newLibraryWithSource:
-			[NSString stringWithUTF8String:kUnlitMSL] options:nil error:&error];
+			[NSString stringWithUTF8String:injectSkyMSL(kUnlitMSL).c_str()] options:nil error:&error];
 		if (!lib) { Logger::Log(Logger::LogLevel::Error, "MetalRenderer: shadow shader compile failed"); return; }
 		MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
 		desc.vertexFunction             = [lib newFunctionWithName:@"vertexShadow"];
@@ -1127,6 +1241,19 @@ void MetalRenderer::EncodeTonemap(void* renderEncoderPtr)
 
 // ─── Frame encoding ───────────────────────────────────────────────────────────
 
+void MetalRenderer::EncodeSky(void* renderEncoder, const glm::mat4& invViewProj, const glm::vec3& sunDir)
+{
+	if (!m_skyPipeline) return;
+	id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
+	[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_skyPipeline];
+	[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_noDepthState]; // no depth write
+	SkyParams p;
+	p.invViewProj = invViewProj;
+	p.sunDir      = glm::vec4(sunDir, 0.0f);
+	[enc setFragmentBytes:&p length:sizeof(p) atIndex:0];
+	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+}
+
 void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 {
 	if (!m_world || !m_scenePipeline || width <= 0 || height <= 0)
@@ -1155,6 +1282,16 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 	const glm::mat4 viewProj =
 		m_renderWorld.camera.projection * m_renderWorld.camera.view;
 
+	// Direction toward the sun for sky + image-based ambient (first directional
+	// light, else a default high sun).
+	glm::vec3 sunDir(0.45f, 0.80f, 0.55f);
+	for (const LightData& l : m_renderWorld.lights)
+		if (l.type == 0) { sunDir = -l.direction; break; } // 0 = directional
+	if (glm::dot(sunDir, sunDir) > 1e-8f) sunDir = glm::normalize(sunDir);
+
+	// Skybox first (into the HDR target, no depth write) so the scene draws over it.
+	EncodeSky(renderEncoder, glm::inverse(viewProj), sunDir);
+
 	[encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_scenePipeline];
 	[encoder setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
@@ -1182,6 +1319,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 		}
 		scene.lightVP       = kMetalClipFix * m_renderWorld.shadow.viewProj;
 		scene.shadowEnabled = shadows ? 1 : 0;
+		scene.sunDir        = glm::vec4(sunDir, 0.0f);
 		[encoder setFragmentBytes:&scene length:sizeof(scene) atIndex:0];
 	}
 
