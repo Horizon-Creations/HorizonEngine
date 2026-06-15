@@ -388,6 +388,34 @@ float galacticBand(float3 cdir)
 	float d = dot(normalize(cdir), galN);
 	return exp(-d * d * 7.0);
 }
+// 3D value noise (trilinear) from the star hash + a small fBm. The nebula is
+// sampled in 3D on the celestial sphere so it reads as isotropic blobs instead
+// of the radial streaks a 2D plane projection produces at grazing angles.
+float starNoise3(float3 p)
+{
+	float3 i = floor(p);
+	float3 f = fract(p);
+	float3 u = f * f * (3.0 - 2.0 * f);
+	float c000 = starHash(i + float3(0.0, 0.0, 0.0));
+	float c100 = starHash(i + float3(1.0, 0.0, 0.0));
+	float c010 = starHash(i + float3(0.0, 1.0, 0.0));
+	float c110 = starHash(i + float3(1.0, 1.0, 0.0));
+	float c001 = starHash(i + float3(0.0, 0.0, 1.0));
+	float c101 = starHash(i + float3(1.0, 0.0, 1.0));
+	float c011 = starHash(i + float3(0.0, 1.0, 1.0));
+	float c111 = starHash(i + float3(1.0, 1.0, 1.0));
+	float x00 = mix(c000, c100, u.x);
+	float x10 = mix(c010, c110, u.x);
+	float x01 = mix(c001, c101, u.x);
+	float x11 = mix(c011, c111, u.x);
+	return mix(mix(x00, x10, u.y), mix(x01, x11, u.y), u.z);
+}
+float starFbm3(float3 p, int oct)
+{
+	float v = 0.0, amp = 0.5;
+	for (int i = 0; i < oct; ++i) { v += amp * starNoise3(p); p *= 2.03; amp *= 0.5; }
+	return v;
+}
 float3 starField(float3 dir, float3 cdir, float3 sunDir, float time, float milkyWay)
 {
 	dir    = normalize(dir);
@@ -501,10 +529,11 @@ float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float timeOfDay, f
 	return mix(baseSky, cloudCol, cover);
 }
 
-// Space nebulae — a few coloured emission clusters along the galactic band
-// (blue/magenta/teal), soft and patchy rather than a uniform smear. Sampled in
-// the rotating celestial frame so they drift with the stars; night/horizon gated
-// and occluded by clouds. Mirrors the GL nebula().
+// Space nebula — drifting coloured emission clouds gathered toward the galactic
+// band. Sampled as 3D blobs on the celestial sphere (rotates with the stars):
+// isolated rounded patches of varying size with bright cores, dark dust lanes,
+// and a blue->magenta->teal hue wheel so neighbouring blobs differ in colour and
+// bleed into one another. Night/horizon gated, occluded by clouds. Mirrors GL.
 float3 nebula(float3 dir, float3 cdir, float3 sunDir, float intensity, float3 nebColor)
 {
 	if (intensity <= 0.0) return float3(0.0);
@@ -513,34 +542,32 @@ float3 nebula(float3 dir, float3 cdir, float3 sunDir, float intensity, float3 ne
 	float night = 1.0 - smoothstep(-0.10, 0.10, clamp(sunDir.y, -0.2, 1.0));
 	if (night <= 0.0 || dir.y <= 0.0) return float3(0.0);
 
-	cdir = normalize(cdir);
+	float3 cN   = normalize(cdir);
 	const float3 galN = normalize(float3(0.46, 0.52, -0.72));
-	float bd   = dot(cdir, galN);
-	float band = exp(-bd * bd * 7.0);
-	if (band <= 0.02) return float3(0.0);
-
-	// Parameterise the FBM in the galactic plane's tangent frame so the clouds
-	// distribute along the band without horizon streaking. Two octaves at
-	// different scales (plus dark dust mottling) give the nebula layered,
-	// volumetric depth instead of a flat smear.
-	float3 tU = normalize(cross(galN, float3(0.0, 1.0, 0.0)));
-	float3 tV = cross(galN, tU);
-	float2 np = float2(dot(cdir, tU), dot(cdir, tV));
-	float  d1 = cloudFbm(np * 2.5);
-	float  d2 = cloudFbm(np * 6.0 + 11.0);
-	float  density = smoothstep(0.55, 1.05, d1 * 0.75 + d2 * 0.55);
-	float  mottle  = 0.35 + 0.65 * d2;             // dark interstellar dust lanes
-	float  haze    = band * 0.05;                  // faint diffuse milky-way glow
-	float  glow    = band * (density * mottle + haze);
+	float  bd   = dot(cN, galN);
+	float  band = exp(-bd * bd * 2.3);           // wide soft milky-way bias
+	float3 P    = cN * 3.4;
+	float  big  = starFbm3(P * 0.7 + 11.0, 4);   // large clouds
+	float  med  = starFbm3(P * 1.7 + 27.0, 3);   // medium clumps
+	float  fine = starFbm3(P * 4.0 + 41.0, 2);   // fine mottle / embedded dust
+	float  blob   = smoothstep(0.46, 0.74, big * 0.5 + med * 0.6);
+	float  detail = 0.30 + 0.70 * smoothstep(0.32, 0.86, fine);
+	float  dust   = 1.0 - 0.5 * smoothstep(0.50, 0.88, starFbm3(P * 2.6 + 63.0, 3));
+	float  density = blob * detail * dust;
+	float  core   = smoothstep(0.62, 0.95, big * 0.55 + med * 0.55);   // bright centres
+	float  glow   = (band * 0.85 + 0.15) * (density + 0.6 * core);     // baseline -> off-band patches
 	if (glow <= 0.0) return float3(0.0);
 
-	// Colour varies around the user nebula colour (cool↔warm) per low-freq field.
-	float  hue  = cloudFbm(np * 0.5 + 17.0);
-	float3 cool = nebColor * float3(0.6, 0.7, 1.2);
-	float3 warm = nebColor * float3(1.4, 0.65, 0.95);
-	float3 col  = mix(cool, warm, smoothstep(0.30, 0.72, hue));
+	float  h = clamp(starFbm3(P * 0.5 + 71.0, 3) * 1.7 - 0.35
+	               + 0.25 * (starFbm3(P * 1.1 + 83.0, 2) - 0.5), 0.0, 1.0);
+	float3 colA = nebColor * float3(0.45, 0.65, 1.45);   // cool blue
+	float3 colB = nebColor * float3(1.80, 0.42, 0.95);   // warm magenta/pink
+	float3 colC = nebColor * float3(0.36, 1.45, 1.12);   // teal/cyan
+	float3 col  = colA;
+	col = mix(col, colB, smoothstep(0.20, 0.50, h));
+	col = mix(col, colC, smoothstep(0.55, 0.85, h));
 	float  horizon = smoothstep(0.0, 0.16, dir.y);
-	return col * (glow * 1.6 * horizon * night * intensity);
+	return col * (glow * 2.1 * horizon * night * intensity);
 }
 
 // Aurora borealis — drifting light curtains, night only, intensity + colour
