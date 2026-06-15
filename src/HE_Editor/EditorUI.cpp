@@ -1900,6 +1900,13 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
         ImGui::SliderFloat("##cloudcoverage", &ctx.editorConfig.CloudCoverage,
                            0.0f, 1.0f, "Coverage: %.2f");
         ImGui::TextDisabled("Full overcast dims the sun & fills with ambient light.");
+        // Wind: the compass direction the clouds drift toward + how fast.
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::SliderFloat("##winddir", &ctx.editorConfig.WindDirection,
+                           0.0f, 360.0f, "Wind direction: %.0f\xc2\xb0");
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::SliderFloat("##windspeed", &ctx.editorConfig.WindSpeed,
+                           0.0f, 4.0f, "Wind speed: %.2f");
 
         // Atmospheric fog / aerial perspective: distant geometry melts into the
         // sky in its view direction. 0 density = off. Height falloff pools the

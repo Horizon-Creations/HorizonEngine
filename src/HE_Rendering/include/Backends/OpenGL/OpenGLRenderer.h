@@ -148,6 +148,7 @@ private:
 	int          m_uSkyNebula      = -1;  // space-nebula intensity
 	int          m_uSkyNebulaColor = -1;  // space-nebula base colour
 	int          m_uSkyAuroraColor = -1;  // aurora base colour
+	int          m_uSkyWind        = -1;  // cloud drift vector
 	unsigned int m_moonTex        = 0;    // night-sky moon texture (or 0)
 	void CreateSkyPipeline();
 
