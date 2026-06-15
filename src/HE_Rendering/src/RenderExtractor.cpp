@@ -8,6 +8,7 @@
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/LightComponent.h>
 #include <glm/gtc/quaternion.hpp>
+#include <glm/common.hpp>
 #include <algorithm>
 #include <cmath>
 
@@ -152,10 +153,23 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 		sunToward = glm::normalize(glm::vec3(std::cos(a), std::sin(a), 0.45f));
 		if (sunLight)
 		{
-			sunLight->direction = -sunToward; // light travels away from the sun
-			// Fade the direct sun out around/below the horizon (night).
+			// Crossfade the primary directional light between the sun and the
+			// moon (the opposite arc) by the sun's elevation: full authored
+			// daylight while the sun is up, a dim cool moonlight once it sets,
+			// blended through twilight. Keeping it a single light means the one
+			// shadow map automatically follows whichever luminary dominates.
+			const glm::vec3 moonToward =
+				glm::normalize(glm::vec3(-sunToward.x, -sunToward.y, sunToward.z));
 			const float dayFactor = std::clamp((sunToward.y + 0.10f) / 0.25f, 0.0f, 1.0f);
-			sunLight->intensity *= dayFactor;
+
+			const glm::vec3 sunColor  = sunLight->color;                 // authored daylight
+			const glm::vec3 moonColor = glm::vec3(0.55f, 0.65f, 0.95f);  // cool moonlight
+			const float     sunInt    = sunLight->intensity;            // authored intensity
+			const float     moonInt   = sunInt * 0.30f;                 // moon is dimmer
+
+			sunLight->direction = glm::normalize(glm::mix(-moonToward, -sunToward, dayFactor));
+			sunLight->color     = glm::mix(moonColor, sunColor, dayFactor);
+			sunLight->intensity = glm::mix(moonInt,  sunInt,   dayFactor);
 		}
 	}
 	else if (sunLight)

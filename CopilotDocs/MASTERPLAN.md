@@ -714,3 +714,23 @@ den Himmel — Himmel, Image-Based-Ambient **und** Schatten reagieren zusammen.
   (Headless-Log). CPU-Replik der exakten Shader-Mathematik mit echter Textur:
   Mond-Sichtradius ≈ 0,0202 rad gegen deutlich größere Sonnenscheibe — Krater +
   Kugel-Shading sichtbar. GL/MSL-Mathematik zeilengleich. Tests grün.
+
+> **Status 15.06.2026 (Forts. 3):** Mond etwas größer + jetzt eine Lichtquelle;
+> Sonnen-/Mondlicht wird über den Tagesstand geblendet. ✅ (GL+Metal)
+
+**Mondlicht + Blend:**
+- **Größe:** `moonDisk()`-`kRadius` 0,020 → 0,030 rad (GL+Metal), weiterhin < Sonne.
+- **Lichtquelle/Blend:** `RenderExtractor` blendet das **primäre** Directional-Light
+  (= „Sonne") über `dayFactor = clamp((sunToward.y+0.10)/0.25, 0, 1)`:
+  Richtung `mix(-moonToward, -sunToward, dayFactor)`, Farbe `mix(kühl-blau, authored,
+  dayFactor)`, Intensität `mix(authored*0.30, authored, dayFactor)`. `moonToward =
+  normalize(-sunToward.x, -sunToward.y, sunToward.z)` deckt sich mit der Sky-Mondscheibe
+  → Schatten zeigen aus der Mondrichtung. Bewusst **ein** Licht: die eine Schattenkarte
+  folgt automatisch dem dominanten Himmelskörper (kein zweiter Shadow-Pass). Bei Dämmerung
+  kippt die Richtung kurz Richtung Horizont (lange Schatten) statt zu degenerieren
+  (z-Anteil bleibt `-sz ≠ 0`). `out.sunDirection` bleibt die echte Sonne (Sky/Ambient
+  unverändert).
+- **Verifiziert:** Headless-Dumps Noon/Dusk/Night — Tag warm + Sonnenschatten
+  (byte-gleich bei `dayFactor=1`), Dämmerung lange Horizont-Schatten, Nacht kühl/gedämpft
+  aus der Gegenrichtung beleuchtet (nicht mehr pechschwarz). Metal-Shader kompiliert,
+  34 Tests grün.
