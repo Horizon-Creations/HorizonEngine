@@ -341,6 +341,40 @@ float3 moonDisk(float3 dir, float3 sunDir, bool hasMoon,
 	return tint * tex * limb * edge * 3.0 * night;
 }
 
+// Procedural star field — drawn only in the sky pass (like the moon). Fades in
+// at night, sits above the horizon and is occluded by clouds (applied before
+// applyClouds()). Each view ray lands in one cell of a fixed grid on a large
+// sphere shell (stable, pole-skew free); the rarest cells host a small round
+// star at a hashed sub-cell position. Mirrors the GL starField() exactly.
+float starHash(float3 p)
+{
+	p  = fract(p * 0.1031);
+	p += dot(p, p.zyx + 31.32);
+	return fract((p.x + p.y) * p.z);
+}
+float3 starField(float3 dir, float3 sunDir, float timeOfDay)
+{
+	dir    = normalize(dir);
+	sunDir = normalize(sunDir);
+	float night = 1.0 - smoothstep(-0.10, 0.10, clamp(sunDir.y, -0.2, 1.0));
+	if (night <= 0.0 || dir.y <= 0.0) return float3(0.0);
+
+	float3 p       = dir * 70.0;
+	float3 cell    = floor(p);
+	float  present = starHash(cell);
+	if (present < 0.92) return float3(0.0);        // keep only the rarest cells = stars
+
+	float3 sp   = float3(starHash(cell + 1.7), starHash(cell + 4.3), starHash(cell + 8.9));
+	float  d    = length(fract(p) - sp);
+	float  core = smoothstep(0.25, 0.0, d);
+	core *= core;                                  // tighten the core, keep a faint glow
+	float  mag  = 0.4 + 0.6 * smoothstep(0.92, 1.0, present);            // per-star brightness
+	float  tw   = 0.75 + 0.25 * sin(timeOfDay * 40.0 + present * 6.2831); // gentle twinkle
+	float  horizon = smoothstep(0.0, 0.15, dir.y); // fade into the horizon haze
+	float3 tint = mix(float3(0.80, 0.88, 1.0), float3(1.0, 0.93, 0.82), starHash(cell + 12.1));
+	return tint * (core * mag * tw * horizon * night * 1.6);
+}
+
 // Procedural clouds — drawn only in the sky pass (kept out of the shared
 // skyColor() so the scene's image-based ambient stays cheap). A scrolling FBM
 // over a flat cloud layer drifts with the time of day and is lit/tinted by the
@@ -411,6 +445,7 @@ fragment float4 skyFragment(SkyOut in [[stage_in]],
 	float4 wp0 = p.invViewProj * float4(in.ndc, -1.0, 1.0);
 	float3 dir = wp1.xyz / wp1.w - wp0.xyz / wp0.w;
 	float3 col = skyColor(dir, p.sunDir.xyz);
+	col += starField(dir, p.sunDir.xyz, p.params.x);
 	col += moonDisk(dir, p.sunDir.xyz, p.sunDir.w > 0.5, moonTex, moonSamp);
 	col = applyClouds(col, dir, p.sunDir.xyz, p.params.x, p.params.y);
 	return float4(col, 1.0);

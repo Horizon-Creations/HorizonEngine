@@ -823,3 +823,26 @@ den Himmel — Himmel, Image-Based-Ambient **und** Schatten reagieren zusammen.
   voll bedeckt: mean 0,69 (dunkler, Sonne aus) / std 0,066 (flach, keine Schatten) / min 0,617
   (nie schwarz, Ambient hebt Schattenbereiche). Metal-Shader kompiliert zur Laufzeit, Build sauber,
   Tests grün.
+
+---
+
+## Forts. 8 — Sterne im Nachthimmel
+
+> **Aufgabe:** Sterne im Nachthimmel hinzufügen. ✅
+
+**Sterne (`starField()`, beide Shader zeilengleich, nur im Sky-Pass wie `moonDisk()`):**
+- **Technik:** Hash-basiertes Sternenfeld. Jeder View-Ray landet in genau einer Zelle eines
+  festen Gitters auf einer großen Kugelschale (`dir * 70`), dadurch stabil und ohne Pol-Verzerrung.
+  Nur die seltensten Zellen (`starHash(cell) >= 0.92`) tragen einen Stern an einer gehashten
+  Sub-Zellen-Position; `core = smoothstep(0.25,0,d)²` ergibt einen kleinen runden Punkt mit weichem
+  Rand. Helligkeit variiert pro Stern (`mag`), Farbe blau-weiß↔warmweiß gemischt, sanftes Funkeln
+  über `timeOfDay`-Phase.
+- **Nacht-Fade:** `night = 1 - smoothstep(-0.10,0.10, sunDir.y)` (wie `moonDisk()`) → tagsüber aus,
+  nachts an; zusätzlich Horizont-Fade `smoothstep(0,0.15, dir.y)` und nur über dem Horizont.
+- **Reihenfolge:** `skyColor()` → `+ starField()` → `+ moonDisk()` → `applyClouds()`, d. h. Wolken
+  verdecken die Sterne (bei Bewölkung weg). Keine neuen Uniforms — nutzt das bereits durchgereichte
+  `timeOfDay`.
+- **Verifiziert:** Metal-Shader kompiliert zur Laufzeit (Nacht-Dump). CPU-Replik der exakten
+  Shader-Mathematik (nach-oben-Kamera, 1280×720): Tag = 0 Sterne (ausgeblendet), Dämmerung
+  faden ein, Nacht ≈ 121 sauber verteilte Sterne (Median ~6 px, kein Sub-Pixel-Aliasing), dichter
+  zum Zenit, am Horizont ausblendend. Build sauber, Tests grün.

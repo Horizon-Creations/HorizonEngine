@@ -217,6 +217,40 @@ vec3 moonDisk(vec3 dir, vec3 sunDir)
 	return tint * tex * limb * edge * 3.0 * night;
 }
 
+// Procedural star field — drawn only in the sky pass (like the moon). Fades in
+// at night, sits above the horizon and is occluded by clouds (applied before
+// applyClouds()). Each view ray lands in one cell of a fixed grid on a large
+// sphere shell (stable, pole-skew free); the rarest cells host a small round
+// star at a hashed sub-cell position. Mirrors the Metal starField() exactly.
+float starHash(vec3 p)
+{
+	p  = fract(p * 0.1031);
+	p += dot(p, p.zyx + 31.32);
+	return fract((p.x + p.y) * p.z);
+}
+vec3 starField(vec3 dir, vec3 sunDir, float timeOfDay)
+{
+	dir    = normalize(dir);
+	sunDir = normalize(sunDir);
+	float night = 1.0 - smoothstep(-0.10, 0.10, clamp(sunDir.y, -0.2, 1.0));
+	if (night <= 0.0 || dir.y <= 0.0) return vec3(0.0);
+
+	vec3  p       = dir * 70.0;
+	vec3  cell    = floor(p);
+	float present = starHash(cell);
+	if (present < 0.92) return vec3(0.0);          // keep only the rarest cells = stars
+
+	vec3  sp   = vec3(starHash(cell + 1.7), starHash(cell + 4.3), starHash(cell + 8.9));
+	float d    = length(fract(p) - sp);
+	float core = smoothstep(0.25, 0.0, d);
+	core *= core;                                  // tighten the core, keep a faint glow
+	float mag  = 0.4 + 0.6 * smoothstep(0.92, 1.0, present);            // per-star brightness
+	float tw   = 0.75 + 0.25 * sin(timeOfDay * 40.0 + present * 6.2831); // gentle twinkle
+	float horizon = smoothstep(0.0, 0.15, dir.y);  // fade into the horizon haze
+	vec3  tint = mix(vec3(0.80, 0.88, 1.0), vec3(1.0, 0.93, 0.82), starHash(cell + 12.1));
+	return tint * (core * mag * tw * horizon * night * 1.6);
+}
+
 // Procedural clouds — drawn only in the sky pass (kept out of the shared
 // skyColor() so the scene's image-based ambient stays cheap). A scrolling FBM
 // over a flat cloud layer drifts with the time of day and is lit/tinted by the
@@ -284,6 +318,7 @@ void main()
 	vec4 wp0 = uInvViewProj * vec4(vNDC, -1.0, 1.0);
 	vec3 dir = wp1.xyz / wp1.w - wp0.xyz / wp0.w;
 	vec3 col = skyColor(dir, uSunDir);
+	col += starField(dir, uSunDir, uTimeOfDay);
 	col += moonDisk(dir, uSunDir);
 	col = applyClouds(col, dir, uSunDir, uTimeOfDay, uCloudCoverage);
 	FragColor = vec4(col, 1.0);
