@@ -65,6 +65,8 @@ struct EditorConfig
 	float     SunIntensity  = 2.2f;
 	glm::vec3 MoonColor     = glm::vec3(0.55f, 0.65f, 0.95f);
 	float     MoonIntensity = 0.66f;
+	// Procedural cloud amount (0 = clear sky … 1 = full overcast).
+	float     CloudCoverage = 0.5f;
 
 	EditorMode mode = EditorMode::View;
 	std::string modeString() const

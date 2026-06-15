@@ -8,6 +8,7 @@
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/LightComponent.h>
 #include <glm/gtc/quaternion.hpp>
+#include <glm/common.hpp>
 #include <algorithm>
 #include <cmath>
 
@@ -145,6 +146,11 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 		if (l.type == 0) { sunLight = &l; break; } // 0 = directional
 
 	glm::vec3 sunToward(0.45f, 0.80f, 0.55f); // default high sun
+
+	// Weak ambient floor — always added so the scene is never fully black. Under
+	// heavy cloud cover it grows to replace the (switched-off) sun/moon light.
+	glm::vec3 ambient(0.03f, 0.035f, 0.05f);
+
 	if (m_dayNight)
 	{
 		// 0.25 sunrise (+X horizon) → 0.5 noon (up) → 0.75 sunset (-X) → 0/1 night.
@@ -161,19 +167,34 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 			const float sunUp  = std::clamp((sunToward.y  + 0.10f) / 0.25f, 0.0f, 1.0f);
 			const float moonUp = std::clamp((moonToward.y + 0.10f) / 0.25f, 0.0f, 1.0f);
 
-			// Sun: configurable colour/intensity, switched off once it has set.
+			// Cloud-cover optimisation: as the sky fills with cloud the direct
+			// sun/moon light is diffused away, so above a coverage threshold we
+			// fade the directional light to zero (skipping its contribution and
+			// shadow lookup at full overcast) and instead feed its energy into a
+			// soft, scattered ambient fill — the "never fully black" floor plus an
+			// overcast term tinted by whichever luminary is up.
+			const float cov      = std::clamp(m_cloudCoverage, 0.0f, 1.0f);
+			const float overcast = glm::smoothstep(0.5f, 1.0f, cov);
+			const float direct   = 1.0f - overcast;
+
+			const glm::vec3 sunFill  = m_sunColor  * (m_sunIntensity  * sunUp);
+			const glm::vec3 moonFill = m_moonColor * (m_moonIntensity * moonUp);
+			ambient += (sunFill + moonFill) * (overcast * 0.22f);
+
+			// Sun: configurable colour/intensity, off once it has set or the sky
+			// is fully overcast.
 			sunLight->color     = m_sunColor;
 			sunLight->direction = -sunToward; // light travels away from the sun
-			sunLight->intensity = m_sunIntensity * sunUp;
+			sunLight->intensity = m_sunIntensity * sunUp * direct;
 
-			// Moon: a second, configurable directional light, off while it is down.
-			// (push_back may reallocate out.lights, so sunLight must not be used
-			// after this point.)
+			// Moon: a second, configurable directional light, off while it is down
+			// or under full overcast. (push_back may reallocate out.lights, so
+			// sunLight must not be used after this point.)
 			LightData moon{};
 			moon.type         = 0; // directional
 			moon.direction    = -moonToward; // light travels away from the moon
 			moon.color        = m_moonColor;
-			moon.intensity    = m_moonIntensity * moonUp;
+			moon.intensity    = m_moonIntensity * moonUp * direct;
 			moon.range        = 0.0f;
 			moon.spotAngleCos = 1.0f;
 			out.lights.push_back(moon);
@@ -185,6 +206,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 		sunToward = -glm::normalize(sunLight->direction);
 	}
 	out.sunDirection = glm::normalize(sunToward);
+	out.ambient      = ambient;
 
 	// ── Directional-light shadow view-projection ─────────────────────────────
 	// The brightest directional light casts shadows (so the single shadow map
