@@ -67,6 +67,10 @@ struct EditorConfig
 	float     MoonIntensity = 0.66f;
 	// Procedural cloud amount (0 = clear sky … 1 = full overcast).
 	float     CloudCoverage = 0.5f;
+	// Atmospheric fog / aerial perspective (0 density = off; height falloff > 0
+	// pools the fog near the ground).
+	float     FogDensity      = 0.0f;
+	float     FogHeightFalloff = 0.1f;
 
 	EditorMode mode = EditorMode::View;
 	std::string modeString() const
