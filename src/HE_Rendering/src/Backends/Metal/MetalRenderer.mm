@@ -533,6 +533,7 @@ float cloudShadowDensity(float3 pos, float time, float coverage, float3 wind)
 }
 float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float time, float coverage, float3 sunColor, float3 wind)
 {
+	if (coverage <= 0.0) return baseSky;          // clear sky → skip the whole raymarch
 	dir    = normalize(dir);
 	sunDir = normalize(sunDir);
 	if (dir.y < 0.02) return baseSky;             // no clouds at/below the horizon
@@ -694,11 +695,17 @@ fragment float4 skyFragment(SkyOut in [[stage_in]],
 	float4 wp0 = p.invViewProj * float4(in.ndc, -1.0, 1.0);
 	float3 dir = wp1.xyz / wp1.w - wp0.xyz / wp0.w;
 	float3 col  = skyColor(dir, p.sunDir.xyz);
-	float3 cdir = celestialDir(dir, p.params.x);     // turns with the day-night cycle
-	col += starField(dir, cdir, p.sunDir.xyz, p.params.z, p.auroraColor.w);
-	col += nebula(dir, cdir, p.sunDir.xyz, p.nebulaColor.w, p.nebulaColor.xyz);
-	col += aurora(dir, p.sunDir.xyz, p.params.z, p.params.w, p.auroraColor.xyz);
-	col += moonDisk(dir, p.sunDir.xyz, p.sunDir.w > 0.5, moonTex, moonSamp);
+	// Night-sky elements + the celestial rotation are skipped entirely by day. The
+	// branch is coherent (sunDir is uniform → every pixel takes the same path).
+	float nightF = 1.0 - smoothstep(-0.10, 0.10, clamp(normalize(p.sunDir.xyz).y, -0.2, 1.0));
+	if (nightF > 0.0)
+	{
+		float3 cdir = celestialDir(dir, p.params.x); // turns with the day-night cycle
+		col += starField(dir, cdir, p.sunDir.xyz, p.params.z, p.auroraColor.w);
+		col += nebula(dir, cdir, p.sunDir.xyz, p.nebulaColor.w, p.nebulaColor.xyz);
+		col += aurora(dir, p.sunDir.xyz, p.params.z, p.params.w, p.auroraColor.xyz);
+		col += moonDisk(dir, p.sunDir.xyz, p.sunDir.w > 0.5, moonTex, moonSamp);
+	}
 	col = applyClouds(col, dir, p.sunDir.xyz, p.params.z, p.params.y, p.sunColor.xyz, p.wind.xyz);
 	return float4(col, 1.0);
 }
@@ -922,6 +929,7 @@ void MetalRenderer::Shutdown()
 	if (m_shadowPipeline)  { CFBridgingRelease(m_shadowPipeline);  m_shadowPipeline = nullptr; }
 	if (m_shadowDepthTex)  { CFBridgingRelease(m_shadowDepthTex);  m_shadowDepthTex = nullptr; }
 	if (m_noDepthState)    { CFBridgingRelease(m_noDepthState);    m_noDepthState = nullptr; }
+	if (m_skyDepthState)   { CFBridgingRelease(m_skyDepthState);   m_skyDepthState = nullptr; }
 
 	if (m_imguiPassDescriptor) { CFBridgingRelease(m_imguiPassDescriptor); m_imguiPassDescriptor = nullptr; }
 	if (m_commandQueue)        { CFBridgingRelease(m_commandQueue);        m_commandQueue = nullptr; }
@@ -1031,6 +1039,13 @@ void MetalRenderer::CreateScenePipeline()
 		depthDesc.depthCompareFunction = MTLCompareFunctionAlways;
 		depthDesc.depthWriteEnabled    = NO;
 		m_noDepthState = (void*)CFBridgingRetain([device newDepthStencilStateWithDescriptor:depthDesc]);
+
+		// Sky drawn LAST: depth-test == far (LessEqual vs the z=1 fullscreen tri),
+		// no write — the sky shader only runs on the background pixels the scene
+		// didn't cover, not behind solid geometry.
+		depthDesc.depthCompareFunction = MTLCompareFunctionLessEqual;
+		depthDesc.depthWriteEnabled    = NO;
+		m_skyDepthState = (void*)CFBridgingRetain([device newDepthStencilStateWithDescriptor:depthDesc]);
 
 		// 1×1 white dummy — always bound so untextured draws never sample an
 		// unbound texture (Metal validation rejects that).
@@ -1691,7 +1706,8 @@ void MetalRenderer::EncodeSky(void* renderEncoder, const glm::mat4& invViewProj,
 	if (!m_skyPipeline) return;
 	id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
 	[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_skyPipeline];
-	[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_noDepthState]; // no depth write
+	// Depth-test == far, no write — only fills background pixels (drawn after scene).
+	[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_skyDepthState];
 	id<MTLTexture> moon = m_moonTexture
 		? (__bridge id<MTLTexture>)m_moonTexture
 		: (__bridge id<MTLTexture>)m_dummyTexture;
@@ -1732,21 +1748,26 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 	// extractor (scene directional light, or the day-night cycle when enabled).
 	const glm::vec3 sunDir = m_renderWorld.sunDirection;
 
-	// Skybox first (into the HDR target, no depth write) so the scene draws over
-	// it. Drawn before any early-out so the background is never a stale gray clear
-	// when the camera looks away from the scene and all objects are culled.
+	// Skybox is drawn LAST (after the geometry) with a depth-test == far, so the
+	// heavy sky shader only runs on the background pixels the scene didn't cover.
+	// This lambda is invoked at every exit so the background is always filled.
 	const float windRad = glm::radians(GetEnvironment().windDirection);
 	const glm::vec3 windVec = glm::vec3(std::sin(windRad), 0.0f, -std::cos(windRad))
 	                        * (GetEnvironment().windSpeed * 0.025f);
-	EncodeSky(renderEncoder, glm::inverse(viewProj), sunDir, GetEnvironment().sunColor,
-	          GetEnvironment().timeOfDay, GetEnvironment().cloudCoverage,
-	          static_cast<float>(SDL_GetTicks()) / 1000.0f,
-	          GetEnvironment().auroraIntensity, GetEnvironment().nebulaColor,
-	          GetEnvironment().nebulaIntensity, GetEnvironment().auroraColor,
-	          GetEnvironment().milkyWayIntensity, windVec);
+	auto drawSky = [&]() {
+		EncodeSky(renderEncoder, glm::inverse(viewProj), sunDir, GetEnvironment().sunColor,
+		          GetEnvironment().timeOfDay, GetEnvironment().cloudCoverage,
+		          static_cast<float>(SDL_GetTicks()) / 1000.0f,
+		          GetEnvironment().auroraIntensity, GetEnvironment().nebulaColor,
+		          GetEnvironment().nebulaIntensity, GetEnvironment().auroraColor,
+		          GetEnvironment().milkyWayIntensity, windVec);
+	};
 
 	if (m_renderWorld.objects.empty())
+	{
+		drawSky();
 		return;
+	}
 
 	// ── Refine bounds with real mesh AABBs (also uploads new meshes) ────────
 	for (RenderObject& obj : m_renderWorld.objects)
@@ -1758,7 +1779,10 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 	m_culler.cull(m_renderWorld, m_visible);
 	m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
 	if (m_sortedIndices.empty())
-		return; // sky already drawn above — just skip the (empty) object draws
+	{
+		drawSky(); // nothing visible — fill the whole background with sky
+		return;
+	}
 
 	[encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_scenePipeline];
 	[encoder setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
@@ -1866,6 +1890,9 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 			             indexBufferOffset:0];
 		}
 	});
+
+	// Sky LAST — fills the background pixels the geometry didn't cover.
+	drawSky();
 }
 
 void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool isPrimary)
