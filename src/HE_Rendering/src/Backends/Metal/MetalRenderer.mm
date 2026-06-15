@@ -372,32 +372,55 @@ float starHash(float3 p)
 	p += dot(p, p.zyx + 31.32);
 	return fract((p.x + p.y) * p.z);
 }
-float3 starField(float3 dir, float3 sunDir, float time)
+// Rotate a view ray into the slowly turning celestial frame (one full turn per
+// day about a tilted pole) — Rodrigues' rotation. Mirrors GL celestialDir().
+float3 celestialDir(float3 dir, float timeOfDay)
+{
+	float  a    = timeOfDay * 6.2831853;
+	float3 axis = normalize(float3(0.22, 0.92, 0.32));
+	float c = cos(a), s = sin(a);
+	return dir * c + cross(axis, dir) * s + axis * dot(axis, dir) * (1.0 - c);
+}
+// Gaussian galactic band: ~1 on the Milky-Way plane, 0 toward the poles.
+float galacticBand(float3 cdir)
+{
+	const float3 galN = normalize(float3(0.46, 0.52, -0.72));
+	float d = dot(normalize(cdir), galN);
+	return exp(-d * d * 7.0);
+}
+float3 starField(float3 dir, float3 cdir, float3 sunDir, float time)
 {
 	dir    = normalize(dir);
 	sunDir = normalize(sunDir);
 	float night = 1.0 - smoothstep(-0.10, 0.10, clamp(sunDir.y, -0.2, 1.0));
 	if (night <= 0.0 || dir.y <= 0.0) return float3(0.0);
 
-	float3 p       = dir * 70.0;
+	// Stars cluster densely along the galactic band: the cell-occupancy threshold
+	// is lowered there so the Milky Way reads as a dense lane of stars (not a
+	// smear). Sampled in the rotating celestial frame so the whole field drifts.
+	float  band   = galacticBand(cdir);
+	float  thresh = mix(0.92, 0.78, band);
+	float3 p       = cdir * 70.0;
 	float3 cell    = floor(p);
 	float  present = starHash(cell);
-	if (present < 0.92) return float3(0.0);        // keep only the rarest cells = stars
+	if (present < thresh) return float3(0.0);
 
 	float3 sp   = float3(starHash(cell + 1.7), starHash(cell + 4.3), starHash(cell + 8.9));
 	float  d    = length(fract(p) - sp);
 	float  core = smoothstep(0.25, 0.0, d);
 	core *= core;                                  // tighten the core, keep a faint glow
-	float  mag  = 0.4 + 0.6 * smoothstep(0.92, 1.0, present);            // per-star brightness
+	float  mag  = 0.4 + 0.6 * smoothstep(thresh, 1.0, present);          // per-star brightness
 	// Random per-star twinkle: each star gets its own phase + frequency so the
-	// field shimmers randomly in real time (drives off the wall clock, not the
-	// slow time-of-day).
+	// field shimmers randomly in real time (wall clock, not the slow time-of-day).
 	float  twPhase = starHash(cell + 23.5) * 6.2831;
 	float  twFreq  = 2.0 + 4.0 * starHash(cell + 47.1);
 	float  tw      = 0.7 + 0.3 * sin(time * twFreq + twPhase);
 	float  horizon = smoothstep(0.0, 0.15, dir.y); // fade into the horizon haze
 	float3 tint = mix(float3(0.80, 0.88, 1.0), float3(1.0, 0.93, 0.82), starHash(cell + 12.1));
-	return tint * (core * mag * tw * horizon * night * 1.6);
+	// The dense band stars sit a touch fainter en masse so the lane reads as many
+	// small stars while the rare bright field stars keep their sparkle.
+	float bandDim = mix(1.6, 1.1, band);
+	return tint * (core * mag * tw * horizon * night * bandDim);
 }
 
 // Procedural clouds — drawn only in the sky pass (kept out of the shared
@@ -476,27 +499,39 @@ float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float timeOfDay, f
 	return mix(baseSky, cloudCol, cover);
 }
 
-// Milky Way — soft galactic band of unresolved starlight + dust on a fixed
-// great circle. Night-only, occluded by clouds. Mirrors the GL milkyWay().
-float3 milkyWay(float3 dir, float3 sunDir, float time)
+// Space nebulae — a few coloured emission clusters along the galactic band
+// (blue/magenta/teal), soft and patchy rather than a uniform smear. Sampled in
+// the rotating celestial frame so they drift with the stars; night/horizon gated
+// and occluded by clouds. Mirrors the GL nebula().
+float3 nebula(float3 dir, float3 cdir, float3 sunDir)
 {
 	dir    = normalize(dir);
 	sunDir = normalize(sunDir);
 	float night = 1.0 - smoothstep(-0.10, 0.10, clamp(sunDir.y, -0.2, 1.0));
 	if (night <= 0.0 || dir.y <= 0.0) return float3(0.0);
 
-	const float3 galNormal = normalize(float3(0.46, 0.52, -0.72));
-	float d    = dot(dir, galNormal);
-	float band = exp(-d * d * 9.0);
+	cdir = normalize(cdir);
+	const float3 galN = normalize(float3(0.46, 0.52, -0.72));
+	float bd   = dot(cdir, galN);
+	float band = exp(-bd * bd * 6.0);
+	if (band <= 0.02) return float3(0.0);
 
-	float2 fp   = float2(dir.x + dir.z * 0.7, dir.y) * 4.0;
-	float  dust = cloudFbm(fp);
-	float  rift = smoothstep(0.22, 0.72, cloudFbm(fp * 0.5 + 9.0));
-	float  glow = band * (0.50 + 1.3 * dust * dust) * rift;
+	// Parameterise the FBM in the galactic plane's tangent frame so the clusters
+	// distribute along the band without horizon streaking.
+	float3 tU = normalize(cross(galN, float3(0.0, 1.0, 0.0)));
+	float3 tV = cross(galN, tU);
+	float2 np    = float2(dot(cdir, tU), dot(cdir, tV)) * 3.0;
+	float  clump = smoothstep(0.50, 0.82, cloudFbm(np));
+	float  glow  = band * clump;
+	if (glow <= 0.0) return float3(0.0);
 
+	// Per-cluster colour from a second low-frequency field (blue↔magenta↔teal).
+	float  hue = cloudFbm(np * 0.4 + 17.0);
+	float3 col = mix(mix(float3(0.25, 0.55, 1.00), float3(0.95, 0.32, 0.72),
+	                     smoothstep(0.25, 0.60, hue)),
+	                 float3(0.20, 0.95, 0.78), smoothstep(0.60, 0.90, hue));
 	float  horizon = smoothstep(0.0, 0.18, dir.y);
-	float3 tint    = float3(0.74, 0.80, 0.97);
-	return tint * (glow * 0.55 * horizon * night);
+	return col * (glow * glow * 2.0 * horizon * night);
 }
 
 // Aurora borealis — drifting green/violet curtains low in the sky, night-only,
@@ -510,18 +545,26 @@ float3 aurora(float3 dir, float3 sunDir, float time, float intensity)
 	float night = 1.0 - smoothstep(-0.10, 0.10, clamp(sunDir.y, -0.2, 1.0));
 	if (night <= 0.0 || dir.y <= 0.02) return float3(0.0);
 
+	// Concentrate the aurora toward the north (-z) as an arc rather than ringing
+	// the whole horizon. arc peaks due north, fades to the sides, gone behind.
+	float facing = -normalize(dir.xz + float2(1e-5)).y; // 1 toward -z (north), -1 behind
+	float arc    = smoothstep(-0.15, 0.65, facing);
+	if (arc <= 0.0) return float3(0.0);
+
 	float az = atan2(dir.x, dir.z);
-	float edge = 0.10 + 0.05 * sin(az * 3.0 + time * 0.30)
+	// Large-scale patchiness so the arc breaks into drifting bands with gaps.
+	float patches = smoothstep(0.28, 0.80, cloudFbm(float2(az * 1.3 + time * 0.05, 5.1)));
+	float edge = 0.12 + 0.05 * sin(az * 3.0 + time * 0.30)
 	                  + 0.04 * cloudFbm(float2(az * 2.0, time * 0.10));
 	float h = dir.y - edge;
 	if (h <= 0.0) return float3(0.0);
-	float vert = exp(-h * 5.5);
+	float vert = exp(-h * 5.0);
 	float stri = cloudFbm(float2(az * 9.0 + time * 0.25, dir.y * 3.0));
 	float curtain = vert * smoothstep(0.30, 0.72, stri);
-	float top = 1.0 - smoothstep(0.30, 0.60, dir.y);
+	float top = 1.0 - smoothstep(0.35, 0.65, dir.y);
 	float3 col = mix(float3(0.12, 0.92, 0.46), float3(0.48, 0.20, 0.85),
-	                 smoothstep(0.06, 0.40, dir.y));
-	return col * (curtain * top * intensity * night * 0.9);
+	                 smoothstep(0.08, 0.42, dir.y));
+	return col * (curtain * top * arc * patches * intensity * night * 0.9);
 }
 
 fragment float4 skyFragment(SkyOut in [[stage_in]],
@@ -532,9 +575,10 @@ fragment float4 skyFragment(SkyOut in [[stage_in]],
 	float4 wp1 = p.invViewProj * float4(in.ndc,  1.0, 1.0);
 	float4 wp0 = p.invViewProj * float4(in.ndc, -1.0, 1.0);
 	float3 dir = wp1.xyz / wp1.w - wp0.xyz / wp0.w;
-	float3 col = skyColor(dir, p.sunDir.xyz);
-	col += starField(dir, p.sunDir.xyz, p.params.z);
-	col += milkyWay(dir, p.sunDir.xyz, p.params.z);
+	float3 col  = skyColor(dir, p.sunDir.xyz);
+	float3 cdir = celestialDir(dir, p.params.x);     // turns with the day-night cycle
+	col += starField(dir, cdir, p.sunDir.xyz, p.params.z);
+	col += nebula(dir, cdir, p.sunDir.xyz);
 	col += aurora(dir, p.sunDir.xyz, p.params.z, p.params.w);
 	col += moonDisk(dir, p.sunDir.xyz, p.sunDir.w > 0.5, moonTex, moonSamp);
 	col = applyClouds(col, dir, p.sunDir.xyz, p.params.x, p.params.y, p.sunColor.xyz);
