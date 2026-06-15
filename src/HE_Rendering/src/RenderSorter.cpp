@@ -2,33 +2,38 @@
 #include <algorithm>
 
 // Sort key: group by mesh asset (minimises GPU state changes), then
-// front-to-back within a group (early-z friendliness).
+// front-to-back within a group (early-z friendliness). The distance and mesh
+// id are computed once per object into a key array, so the std::sort comparator
+// — invoked O(n log n) times — only compares cheap precomputed scalars instead
+// of re-extracting matrix columns and recomputing squared distances each call.
 void RenderSorter::sort(const RenderWorld&       world,
                         const std::vector<bool>& visible,
                         std::vector<uint32_t>&   outSortedIndices)
 {
-	outSortedIndices.clear();
-	outSortedIndices.reserve(world.objects.size());
-	for (uint32_t i = 0; i < world.objects.size(); ++i)
-		if (i >= visible.size() || visible[i])
-			outSortedIndices.push_back(i);
-
 	const glm::vec3 camPos = world.camera.position;
-	std::sort(outSortedIndices.begin(), outSortedIndices.end(),
-		[&](uint32_t a, uint32_t b)
+
+	m_keys.clear();
+	m_keys.reserve(world.objects.size());
+	for (uint32_t i = 0; i < world.objects.size(); ++i)
+	{
+		if (i < visible.size() && !visible[i])
+			continue;
+		const RenderObject& o = world.objects[i];
+		const glm::vec3     d = glm::vec3(o.transform[3]) - camPos;
+		m_keys.push_back(SortKey{ o.meshAssetId.hi, o.meshAssetId.lo,
+		                          glm::dot(d, d), i });
+	}
+
+	std::sort(m_keys.begin(), m_keys.end(),
+		[](const SortKey& a, const SortKey& b)
 		{
-			const RenderObject& oa = world.objects[a];
-			const RenderObject& ob = world.objects[b];
-			if (!(oa.meshAssetId == ob.meshAssetId))
-			{
-				if (oa.meshAssetId.hi != ob.meshAssetId.hi)
-					return oa.meshAssetId.hi < ob.meshAssetId.hi;
-				return oa.meshAssetId.lo < ob.meshAssetId.lo;
-			}
-			const float da = glm::dot(glm::vec3(oa.transform[3]) - camPos,
-			                          glm::vec3(oa.transform[3]) - camPos);
-			const float db = glm::dot(glm::vec3(ob.transform[3]) - camPos,
-			                          glm::vec3(ob.transform[3]) - camPos);
-			return da < db;
+			if (a.meshHi != b.meshHi) return a.meshHi < b.meshHi;
+			if (a.meshLo != b.meshLo) return a.meshLo < b.meshLo;
+			return a.distSq < b.distSq;
 		});
+
+	outSortedIndices.clear();
+	outSortedIndices.reserve(m_keys.size());
+	for (const SortKey& k : m_keys)
+		outSortedIndices.push_back(k.index);
 }

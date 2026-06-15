@@ -105,6 +105,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 		return b;
 	}();
 
+	out.objects.reserve(reg.view<MeshComponent>().size());
 	for (auto [e, t, mesh] : reg.view<TransformComponent, MeshComponent>().each())
 	{
 		RenderObject obj;
@@ -123,6 +124,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 	}
 
 	// ── Lights ──────────────────────────────────────────────────────────────
+	out.lights.reserve(reg.view<LightComponent>().size() + 1); // +1 for the day-night moon
 	for (auto [e, t, light] : reg.view<TransformComponent, LightComponent>().each())
 	{
 		LightData l;

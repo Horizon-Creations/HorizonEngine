@@ -1574,10 +1574,16 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glViewport(0, 0, m_shadowSize, m_shadowSize);
 			glClear(GL_DEPTH_BUFFER_BIT);
 			glUseProgram(m_depthProgram);
+			HE::UUID shMeshId{}; const GpuMesh* shMesh = nullptr; bool shMeshValid = false;
 			for (const DrawCall& dc : cmds.drawCalls())
 			{
 				glUniformMatrix4fv(m_uDepthMVP, 1, GL_FALSE, glm::value_ptr(lightVP * dc.transform));
-				const GpuMesh* mesh = ResolveMesh(dc.meshAssetId);
+				if (!shMeshValid || dc.meshAssetId != shMeshId)
+				{
+					shMesh      = ResolveMesh(dc.meshAssetId);
+					shMeshId    = dc.meshAssetId; shMeshValid = true;
+				}
+				const GpuMesh* mesh = shMesh;
 				glBindVertexArray(mesh ? mesh->vao : m_cubeVAO);
 				glDrawElements(GL_TRIANGLES, mesh ? mesh->indexCount : m_cubeIndexCount,
 				               GL_UNSIGNED_INT, nullptr);
@@ -1670,6 +1676,17 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		glBindTexture(GL_TEXTURE_2D, shadows ? m_shadowDepthTex : 0);
 		glActiveTexture(GL_TEXTURE0); // base color binds here in the loop
 
+		// Draws arrive sorted by mesh id, so consecutive draws usually share the
+		// same mesh (and often the same material). Memoise the last resolved
+		// mesh/material so repeated draws skip the cache + content-manager
+		// lookups (ResolveMaterialParams in particular re-fetches the material
+		// every call). The resolves are pure functions of the id within a frame,
+		// so reusing the cached result is behaviour-preserving.
+		HE::UUID       lastMeshId{};      const GpuMesh* cMesh = nullptr; bool meshValid = false;
+		HE::UUID       lastMatId{};       bool matValid = false;
+		unsigned int   cOverrideTex = 0;  bool cHasOverride = false;
+		glm::vec3      cBaseColor(1.0f);  float cMetallic = 0.0f, cRoughness = 0.5f; bool cHasMat = false;
+
 		for (const DrawCall& dc : cmds.drawCalls())
 		{
 			const glm::mat4 mvp = viewProj * dc.transform;
@@ -1678,25 +1695,33 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 
 			// An explicit MaterialComponent override wins over the mesh's own
 			// base-color texture; otherwise fall back to the mesh's (or none).
-			unsigned int overrideTex = 0;
-			const bool   hasOverride = ResolveMaterialTexture(dc.materialAssetId, overrideTex);
+			// PBR scalars come from the material override; defaults otherwise.
+			if (!matValid || dc.materialAssetId != lastMatId)
+			{
+				cHasOverride = ResolveMaterialTexture(dc.materialAssetId, cOverrideTex);
+				cBaseColor   = glm::vec3(1.0f); cMetallic = 0.0f; cRoughness = 0.5f;
+				cHasMat      = ResolveMaterialParams(dc.materialAssetId, cBaseColor, cMetallic, cRoughness);
+				lastMatId    = dc.materialAssetId; matValid = true;
+			}
 
 			// Resolve the asset; entities without one fall back to the built-in cube.
-			const GpuMesh*     mesh = ResolveMesh(dc.meshAssetId);
-			const unsigned int tex  = hasOverride ? overrideTex
-			                                      : (mesh ? mesh->texture : 0u);
+			if (!meshValid || dc.meshAssetId != lastMeshId)
+			{
+				cMesh      = ResolveMesh(dc.meshAssetId);
+				lastMeshId = dc.meshAssetId; meshValid = true;
+			}
+			const GpuMesh*     mesh = cMesh;
+			const unsigned int tex  = cHasOverride ? cOverrideTex
+			                                       : (mesh ? mesh->texture : 0u);
 
-			// PBR scalars from the material override; defaults otherwise. The base
-			// tint is the material baseColor if assigned, else white when textured
-			// (so the texture is unchanged) or the flat fallback color when not.
-			glm::vec3 baseColor(1.0f);
-			float     metallic = 0.0f, roughness = 0.5f;
-			const bool hasMat = ResolveMaterialParams(dc.materialAssetId, baseColor, metallic, roughness);
-			if (!hasMat)
+			// The base tint is the material baseColor if assigned, else white when
+			// textured (so the texture is unchanged) or the flat fallback color.
+			glm::vec3 baseColor = cBaseColor;
+			if (!cHasMat)
 				baseColor = (tex != 0) ? glm::vec3(1.0f) : glm::vec3(0.85f, 0.55f, 0.25f);
 			glUniform3fv(m_uColor, 1, glm::value_ptr(baseColor));
-			glUniform1f(m_uMetallic,  metallic);
-			glUniform1f(m_uRoughness, roughness);
+			glUniform1f(m_uMetallic,  cMetallic);
+			glUniform1f(m_uRoughness, cRoughness);
 
 			glBindVertexArray(mesh ? mesh->vao : m_cubeVAO);
 			glUniform1i(m_uHasTexture, tex != 0);

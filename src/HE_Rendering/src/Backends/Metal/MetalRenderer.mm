@@ -1176,14 +1176,20 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr)
 		[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
 		[enc setViewport:(MTLViewport){ 0.0, 0.0, (double)m_shadowSize, (double)m_shadowSize, 0.0, 1.0 }];
 
+		HE::UUID shMeshId{}; const GpuMesh* shMesh = nullptr; bool shMeshValid = false;
 		for (uint32_t idx : m_sortedIndices)
 		{
 			const RenderObject& obj = m_renderWorld.objects[idx];
 			UnlitUniforms u;
 			u.mvp = lightClip * obj.transform;
 
+			if (!shMeshValid || obj.meshAssetId != shMeshId)
+			{
+				shMesh      = ResolveMesh(obj.meshAssetId);
+				shMeshId    = obj.meshAssetId; shMeshValid = true;
+			}
 			id<MTLBuffer> vbuf; id<MTLBuffer> ibuf; NSUInteger ic;
-			if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId))
+			if (const GpuMesh* mesh = shMesh)
 			{
 				vbuf = (__bridge id<MTLBuffer>)mesh->vertexBuf;
 				ibuf = (__bridge id<MTLBuffer>)mesh->indexBuf;
@@ -1881,6 +1887,15 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 		[&](const RenderPass&, const RenderPassIO& io, const CommandBuffer& cmds)
 	{
 		if (io.output.id != kBackbufferTarget) return;
+		// Draws arrive sorted by mesh id, so consecutive draws usually share the
+		// same mesh (and often material). Memoise the last resolved mesh/material
+		// to skip repeated cache + content-manager lookups (ResolveMaterialParams
+		// re-fetches the material every call). Pure per-id resolves → identical
+		// results, so this is behaviour-preserving.
+		HE::UUID  lastMeshId{};       const GpuMesh* cMesh = nullptr; bool meshValid = false;
+		HE::UUID  lastMatId{};        bool matValid = false;
+		void*     cOverrideTex = nullptr; bool cHasOverride = false;
+		glm::vec3 cBaseColor(1.0f);   float cMetallic = 0.0f, cRoughness = 0.5f; bool cHasMat = false;
 		for (const DrawCall& dc : cmds.drawCalls())
 		{
 			UnlitUniforms u;
@@ -1889,21 +1904,28 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 
 			// An explicit MaterialComponent override wins over the mesh's own
 			// base-color texture when present and resolvable.
-			void*      overrideTex = nullptr;
-			const bool hasOverride = ResolveMaterialTexture(dc.materialAssetId, overrideTex);
-
 			// PBR scalars from the material override; defaults otherwise.
-			glm::vec3 baseColor(1.0f);
-			float     metallic = 0.0f, roughness = 0.5f;
-			const bool hasMat = ResolveMaterialParams(dc.materialAssetId, baseColor, metallic, roughness);
-			u.pbr = glm::vec4(metallic, roughness, 0.0f, 0.0f);
+			if (!matValid || dc.materialAssetId != lastMatId)
+			{
+				cOverrideTex = nullptr;
+				cHasOverride = ResolveMaterialTexture(dc.materialAssetId, cOverrideTex);
+				cBaseColor   = glm::vec3(1.0f); cMetallic = 0.0f; cRoughness = 0.5f;
+				cHasMat      = ResolveMaterialParams(dc.materialAssetId, cBaseColor, cMetallic, cRoughness);
+				lastMatId    = dc.materialAssetId; matValid = true;
+			}
+			u.pbr = glm::vec4(cMetallic, cRoughness, 0.0f, 0.0f);
 
 			// Resolve the asset; entities without one fall back to the built-in cube.
+			if (!meshValid || dc.meshAssetId != lastMeshId)
+			{
+				cMesh      = ResolveMesh(dc.meshAssetId);
+				lastMeshId = dc.meshAssetId; meshValid = true;
+			}
 			id<MTLBuffer> vertexBuf;
 			id<MTLBuffer> indexBuf;
 			NSUInteger    indexCount;
 			void*         meshTex = nullptr;
-			if (const GpuMesh* mesh = ResolveMesh(dc.meshAssetId))
+			if (const GpuMesh* mesh = cMesh)
 			{
 				vertexBuf  = (__bridge id<MTLBuffer>)mesh->vertexBuf;
 				indexBuf   = (__bridge id<MTLBuffer>)mesh->indexBuf;
@@ -1917,7 +1939,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 				indexCount = (NSUInteger)m_cubeIndexCount;
 			}
 
-			void* effectiveTex = hasOverride ? overrideTex : meshTex;
+			void* effectiveTex = cHasOverride ? cOverrideTex : meshTex;
 			id<MTLTexture> texture = effectiveTex
 				? (__bridge id<MTLTexture>)effectiveTex
 				: (__bridge id<MTLTexture>)m_dummyTexture;
@@ -1925,7 +1947,8 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 
 			// Base tint: material baseColor if assigned, else white when textured
 			// (texture unchanged) or the flat fallback color when not.
-			if (!hasMat)
+			glm::vec3 baseColor = cBaseColor;
+			if (!cHasMat)
 				baseColor = effectiveTex ? glm::vec3(1.0f) : glm::vec3(0.85f, 0.55f, 0.25f);
 			u.color = glm::vec4(baseColor, 1.0f);
 
