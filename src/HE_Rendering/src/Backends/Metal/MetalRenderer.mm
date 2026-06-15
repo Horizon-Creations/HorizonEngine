@@ -1314,7 +1314,10 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 
 	id<MTLRenderCommandEncoder> encoder = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
 
-	m_extractor.setDayNight(GetEnvironment().dayNightCycle, GetEnvironment().timeOfDay);
+	const IRenderer::EnvironmentSettings& env = GetEnvironment();
+	m_extractor.setDayNight(env.dayNightCycle, env.timeOfDay,
+	                        env.sunColor, env.sunIntensity,
+	                        env.moonColor, env.moonIntensity);
 	m_extractor.extract(*m_world, m_renderWorld,
 	                    static_cast<float>(width) / static_cast<float>(height),
 	                    &m_editorCamera);

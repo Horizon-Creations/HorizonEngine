@@ -60,6 +60,11 @@ struct EditorConfig
 	float TimeOfDay           = 0.5f;    // 0..1 (0.5 = noon)
 	bool  DayNightAutoAdvance = false;   // advance TimeOfDay automatically
 	float DayNightCycleSeconds = 120.0f; // real seconds for one full day
+	// Sun & moon directional lights — user-adjustable colour and brightness.
+	glm::vec3 SunColor      = glm::vec3(1.0f, 0.97f, 0.90f);
+	float     SunIntensity  = 2.2f;
+	glm::vec3 MoonColor     = glm::vec3(0.55f, 0.65f, 0.95f);
+	float     MoonIntensity = 0.66f;
 
 	EditorMode mode = EditorMode::View;
 	std::string modeString() const

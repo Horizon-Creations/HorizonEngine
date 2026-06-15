@@ -1874,6 +1874,17 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
         ImGui::SliderFloat("##cyclelen", &ctx.editorConfig.DayNightCycleSeconds,
                            5.0f, 600.0f, "Full day: %.0f s", ImGuiSliderFlags_Logarithmic);
         ImGui::EndDisabled();
+
+        // Sun & moon light colour + brightness (drive the day-night lights).
+        ImGui::SeparatorText("Sun & Moon Light");
+        ImGui::ColorEdit3("Sun Color",  &ctx.editorConfig.SunColor.x,
+                          ImGuiColorEditFlags_NoInputs);
+        ImGui::SliderFloat("Sun Brightness",  &ctx.editorConfig.SunIntensity,
+                           0.0f, 10.0f, "%.2f");
+        ImGui::ColorEdit3("Moon Color", &ctx.editorConfig.MoonColor.x,
+                          ImGuiColorEditFlags_NoInputs);
+        ImGui::SliderFloat("Moon Brightness", &ctx.editorConfig.MoonIntensity,
+                           0.0f, 10.0f, "%.2f");
     }
 
     ImGui::End();

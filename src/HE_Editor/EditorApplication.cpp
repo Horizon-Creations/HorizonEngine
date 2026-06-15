@@ -533,6 +533,14 @@ void EditorApplication::OnInit()
 	m_editorConfig.TimeOfDay                   = globalstate.getCustomConfigFloat("TimeOfDay",          m_editorConfig.TimeOfDay);
 	m_editorConfig.DayNightAutoAdvance         = globalstate.getCustomConfigBool("DayNightAutoAdvance", m_editorConfig.DayNightAutoAdvance);
 	m_editorConfig.DayNightCycleSeconds        = globalstate.getCustomConfigFloat("DayNightCycleSeconds", m_editorConfig.DayNightCycleSeconds);
+	m_editorConfig.SunIntensity                = globalstate.getCustomConfigFloat("SunIntensity",        m_editorConfig.SunIntensity);
+	m_editorConfig.SunColor.r                  = globalstate.getCustomConfigFloat("SunColorR",           m_editorConfig.SunColor.r);
+	m_editorConfig.SunColor.g                  = globalstate.getCustomConfigFloat("SunColorG",           m_editorConfig.SunColor.g);
+	m_editorConfig.SunColor.b                  = globalstate.getCustomConfigFloat("SunColorB",           m_editorConfig.SunColor.b);
+	m_editorConfig.MoonIntensity               = globalstate.getCustomConfigFloat("MoonIntensity",       m_editorConfig.MoonIntensity);
+	m_editorConfig.MoonColor.r                 = globalstate.getCustomConfigFloat("MoonColorR",          m_editorConfig.MoonColor.r);
+	m_editorConfig.MoonColor.g                 = globalstate.getCustomConfigFloat("MoonColorG",          m_editorConfig.MoonColor.g);
+	m_editorConfig.MoonColor.b                 = globalstate.getCustomConfigFloat("MoonColorB",          m_editorConfig.MoonColor.b);
 	m_editorCamera.setFlySpeed(m_editorConfig.EditorCameraSpeed);
 
 #ifdef HE_IMGUI_ENABLED
@@ -748,7 +756,11 @@ void EditorApplication::OnRender(float dt)
 			m_editorConfig.BloomIntensity});
 		renderer()->SetEnvironmentSettings(IRenderer::EnvironmentSettings{
 			m_editorConfig.DayNightCycle,
-			m_editorConfig.TimeOfDay});
+			m_editorConfig.TimeOfDay,
+			m_editorConfig.SunColor,
+			m_editorConfig.SunIntensity,
+			m_editorConfig.MoonColor,
+			m_editorConfig.MoonIntensity});
 	}
 
 	AppContext ctx = makeContext();
@@ -827,7 +839,9 @@ void EditorApplication::dumpFrameHeadless()
 	r->SetBloomSettings(IRenderer::BloomSettings{
 		m_editorConfig.BloomEnabled, m_editorConfig.BloomThreshold, m_editorConfig.BloomIntensity});
 	r->SetEnvironmentSettings(IRenderer::EnvironmentSettings{
-		m_editorConfig.DayNightCycle, m_editorConfig.TimeOfDay});
+		m_editorConfig.DayNightCycle, m_editorConfig.TimeOfDay,
+		m_editorConfig.SunColor, m_editorConfig.SunIntensity,
+		m_editorConfig.MoonColor, m_editorConfig.MoonIntensity});
 	r->SetViewportSize(1280, 720);
 	for (int i = 0; i < 3; ++i)
 		r->Render();
@@ -1115,6 +1129,14 @@ void EditorApplication::OnShutdown()
 	globalstate.setCustomConfigEntry("TimeOfDay",                  m_editorConfig.TimeOfDay);
 	globalstate.setCustomConfigEntry("DayNightAutoAdvance",        m_editorConfig.DayNightAutoAdvance);
 	globalstate.setCustomConfigEntry("DayNightCycleSeconds",       m_editorConfig.DayNightCycleSeconds);
+	globalstate.setCustomConfigEntry("SunIntensity",              m_editorConfig.SunIntensity);
+	globalstate.setCustomConfigEntry("SunColorR",                 m_editorConfig.SunColor.r);
+	globalstate.setCustomConfigEntry("SunColorG",                 m_editorConfig.SunColor.g);
+	globalstate.setCustomConfigEntry("SunColorB",                 m_editorConfig.SunColor.b);
+	globalstate.setCustomConfigEntry("MoonIntensity",             m_editorConfig.MoonIntensity);
+	globalstate.setCustomConfigEntry("MoonColorR",                m_editorConfig.MoonColor.r);
+	globalstate.setCustomConfigEntry("MoonColorG",                m_editorConfig.MoonColor.g);
+	globalstate.setCustomConfigEntry("MoonColorB",                m_editorConfig.MoonColor.b);
 	globalstate.writeConfig();
 }
 
