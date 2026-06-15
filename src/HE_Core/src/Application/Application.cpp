@@ -85,6 +85,10 @@ namespace HE
 			{
 				m_renderer->SetContentManager(&m_contentManager);
 				m_renderer->Initialize(m_window.get());
+				// Window already set the GL swap interval at creation; apply the
+				// configured VSync to the renderer too so Metal/Vulkan/D3D start in
+				// the right present mode.
+				m_renderer->SetVSync(cfg.windowprops.vsync);
 				Logger::Log(Logger::LogLevel::Info, "Renderer initialized");
 			}
 			else

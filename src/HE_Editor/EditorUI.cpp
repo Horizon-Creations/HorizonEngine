@@ -110,6 +110,16 @@ static void BuildDefaultDockLayout(ImGuiID dockspaceId, const ImVec2& size)
 // AppContext) and are persisted to config.json on exit. Changes that need an
 // immediate side effect (camera speed, vsync) are applied here on edit; the font
 // scale is applied every frame from EditorConfig in render().
+
+// VSync routing: OpenGL toggles the SDL swap interval on the Window, while
+// Metal / Vulkan / D3D switch their present mode in the renderer. Call both so
+// the toggle takes effect on every backend.
+static void ApplyVSync(AppContext& ctx)
+{
+	if (ctx.window)   ctx.window->SetVSync(ctx.vsync);
+	if (ctx.renderer) ctx.renderer->SetVSync(ctx.vsync);
+}
+
 static void DrawPreferencesWindow(AppContext& ctx, bool& open)
 {
 	if (!open) return;
@@ -135,8 +145,8 @@ static void DrawPreferencesWindow(AppContext& ctx, bool& open)
 			ctx.editorCamera->setFlySpeed(cfg.EditorCameraSpeed);
 
 		ImGui::SeparatorText("Rendering");
-		if (ImGui::Checkbox("VSync", &ctx.vsync) && ctx.window)
-			ctx.window->SetVSync(ctx.vsync);
+		if (ImGui::Checkbox("VSync", &ctx.vsync))
+			ApplyVSync(ctx);
 
 		// Bloom — pushed to the renderer each frame from these prefs.
 		ImGui::Checkbox("Bloom", &cfg.BloomEnabled);
@@ -1791,10 +1801,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
         // VSync toggle
         ImGui::Spacing();
         if (ImGui::Checkbox("VSync", &ctx.vsync))
-        {
-            if (ctx.window)
-                ctx.window->SetVSync(ctx.vsync);
-        }
+            ApplyVSync(ctx);
         ImGui::PopFont();
     }
     ImGui::SetNextItemOpen(ctx.editorConfig.QsEditorOpen, ImGuiCond_Always);
