@@ -872,3 +872,37 @@ den Himmel — Himmel, Image-Based-Ambient **und** Schatten reagieren zusammen.
 keine Log-Fehler). CPU-Replik der exakten Shader-Mathematik: Funkeln animiert (15/16 Beispielsterne
 ändern Helligkeit > 0.05 zwischen t=0.0 und t=0.7, Frequenzen zufällig 2.26–5.88 rad/s); Wolken
 folgen `sunColor` (neutral → ~weiß, blaue Sonne → blaue Tops, rote Dämmerungssonne → warme Tops).
+
+## Forts. 10 — Cinematischer, volumetrischer Sonnenuntergang
+
+> **Aufgabe:** Der Himmel beim Sonnenuntergang sah noch flach/pastellig aus (Vergleich: eigene
+> Engine vs. Unreal-Referenz). Cinematischer und volumetrischer gestalten — wie in Unreal. ✅
+
+**Atmosphäre (`skyColor()`, beide Shader zeilengleich):**
+- **Richtungsabhängige Sonnenuntergangs-Wärme:** Statt eines flachen, gleichmäßigen warmen
+  Horizontbands ist die Wärme jetzt zur Sonnen-Azimut konzentriert — golden direkt an der Sonne,
+  kühles Magenta seitlich (`toward = (dot(dir.xz, sunDir.xz)·0.5+0.5)^1.5`,
+  `mix(magenta, gold, toward)`). Der Zenit nimmt bei Dämmerung einen Hauch Violett auf → mehr Tiefe.
+- **Konzentriertes Streulicht-Band** dicht über dem Horizont Richtung Sonne
+  (`pow(1-h, 8)·toward·dusk`).
+- **Geschichtete Sonnen-Aureole:** scharfe Scheibe (Tag) + enger Bloom (`pow(s,180)·2.2`) +
+  mittlere Aureole (`pow(s,22)·0.7`) + breites warmes Streulicht bei Dämmerung (`pow(s,5)·0.5`),
+  über `sunVis = max(day, dusk)` aktiv, sodass das Glühen den Sonnenuntergang überlebt statt
+  abrupt zu verschwinden.
+
+**Volumetrischere Wolken (`applyClouds()`, beide Shader zeilengleich):**
+- **Selbstschattierung:** statt eines reinen Sonnen-Offset-Samples wird die Dichte hier mit einem
+  Sample Richtung Sonne verglichen (`lit = smoothstep(-0.05,0.45, density - toSun + 0.15)`) →
+  der Sonne zugewandte Oberseiten leuchten, das (gegenlicht-) Innere bleibt beschattet.
+- **Mehr Kontrast:** dunklere beschattete Basis (`(0.30,0.33,0.40)`), hellere sonnengefärbte Tops
+  (`sunColor·1.15`); kräftigere warme Dämmerungs-Tops (`sunColor·(1.25,0.55,0.28)`, Faktor 0.85).
+- **Rim-Light (Silber-/Goldrand):** an den sonnenzugewandten Wolkenkanten
+  (`edge = cover·(1-cover)·4`, `rim = edge·toward²·max(day,dusk)`), getönt mit der Sonnenfarbe.
+
+**Verifiziert:** Build sauber, `he_tests` grün, Metal kompiliert zur Laufzeit (Sunset-Dump, keine
+Log-Fehler), GL/MSL-Konstanten zeilengleich. Validiert über numpy-CPU-Replik der exakten
+Shader-Mathematik mit einer zur Sonne blickenden Kamera (5 fbm-Oktaven wie im Shader): vorher
+flach/pastell (= Engine-Screenshot), nachher konzentriertes Goldglühen um die Sonne, warmer
+Gold→Magenta→Blau-Verlauf und kontrastreichere, vom Licht eingefärbte Wolken mit Rim — deutlich
+näher an der Unreal-Referenz. Tag- und Nachthimmel bleiben artefaktfrei (warme Terme über `dusk`
+gegated).
