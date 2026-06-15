@@ -184,6 +184,8 @@ uniform sampler2D uMoonTex;
 uniform bool      uHasMoonTex;
 uniform float     uTimeOfDay;   // cloud scroll phase (0..1)
 uniform float     uCloudCoverage; // cloud amount (0 = clear … 1 = full overcast)
+uniform float     uTime;        // wall-clock seconds (star twinkle)
+uniform vec3      uSunColor;    // sun light colour (tints the clouds)
 out vec4 FragColor;
 //#SKYFUNC#
 
@@ -228,7 +230,7 @@ float starHash(vec3 p)
 	p += dot(p, p.zyx + 31.32);
 	return fract((p.x + p.y) * p.z);
 }
-vec3 starField(vec3 dir, vec3 sunDir, float timeOfDay)
+vec3 starField(vec3 dir, vec3 sunDir, float time)
 {
 	dir    = normalize(dir);
 	sunDir = normalize(sunDir);
@@ -245,7 +247,12 @@ vec3 starField(vec3 dir, vec3 sunDir, float timeOfDay)
 	float core = smoothstep(0.25, 0.0, d);
 	core *= core;                                  // tighten the core, keep a faint glow
 	float mag  = 0.4 + 0.6 * smoothstep(0.92, 1.0, present);            // per-star brightness
-	float tw   = 0.75 + 0.25 * sin(timeOfDay * 40.0 + present * 6.2831); // gentle twinkle
+	// Random per-star twinkle: each star gets its own phase + frequency so the
+	// field shimmers randomly in real time (drives off the wall clock, not the
+	// slow time-of-day).
+	float twPhase = starHash(cell + 23.5) * 6.2831;
+	float twFreq  = 2.0 + 4.0 * starHash(cell + 47.1);
+	float tw      = 0.7 + 0.3 * sin(time * twFreq + twPhase);
 	float horizon = smoothstep(0.0, 0.15, dir.y);  // fade into the horizon haze
 	vec3  tint = mix(vec3(0.80, 0.88, 1.0), vec3(1.0, 0.93, 0.82), starHash(cell + 12.1));
 	return tint * (core * mag * tw * horizon * night * 1.6);
@@ -284,7 +291,7 @@ float cloudFbm(vec2 p)
 	}
 	return v;
 }
-vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float timeOfDay, float coverage)
+vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float timeOfDay, float coverage, vec3 sunColor)
 {
 	dir    = normalize(dir);
 	sunDir = normalize(sunDir);
@@ -304,10 +311,14 @@ vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float timeOfDay, float cov
 	float day  = smoothstep(-0.10, 0.10, sunY);
 	float dusk = smoothstep(-0.06, 0.05, sunY) * (1.0 - smoothstep(0.05, 0.28, sunY));
 
-	vec3 dayCol   = mix(vec3(0.55, 0.58, 0.66), vec3(1.00, 0.99, 0.96), lit);
+	// Lit cloud tops take the sun's (adjustable) light colour; shaded undersides
+	// stay a neutral grey. Changing the sun colour — or the warm shift at sunset
+	// — therefore tints the clouds.
+	vec3 dayCol   = mix(vec3(0.55, 0.58, 0.66), sunColor, lit);
 	vec3 nightCol = mix(vec3(0.05, 0.06, 0.10), vec3(0.20, 0.23, 0.32), lit);
 	vec3 cloudCol = mix(nightCol, dayCol, day);
-	cloudCol = mix(cloudCol, vec3(1.0, 0.62, 0.40), dusk * lit * 0.6); // warm dusk tops
+	vec3 duskTop  = sunColor * vec3(1.0, 0.55, 0.32);                  // reddened sun colour
+	cloudCol = mix(cloudCol, duskTop, dusk * lit * 0.7);              // warm sunset tops
 
 	return mix(baseSky, cloudCol, cover);
 }
@@ -318,9 +329,9 @@ void main()
 	vec4 wp0 = uInvViewProj * vec4(vNDC, -1.0, 1.0);
 	vec3 dir = wp1.xyz / wp1.w - wp0.xyz / wp0.w;
 	vec3 col = skyColor(dir, uSunDir);
-	col += starField(dir, uSunDir, uTimeOfDay);
+	col += starField(dir, uSunDir, uTime);
 	col += moonDisk(dir, uSunDir);
-	col = applyClouds(col, dir, uSunDir, uTimeOfDay, uCloudCoverage);
+	col = applyClouds(col, dir, uSunDir, uTimeOfDay, uCloudCoverage, uSunColor);
 	FragColor = vec4(col, 1.0);
 }
 )GLSL";
@@ -630,6 +641,8 @@ void OpenGLRenderer::CreateSkyPipeline()
 	m_uSkyHasMoon = glGetUniformLocation(m_skyProgram, "uHasMoonTex");
 	m_uSkyTime    = glGetUniformLocation(m_skyProgram, "uTimeOfDay");
 	m_uSkyCoverage = glGetUniformLocation(m_skyProgram, "uCloudCoverage");
+	m_uSkyClock    = glGetUniformLocation(m_skyProgram, "uTime");
+	m_uSkySunColor = glGetUniformLocation(m_skyProgram, "uSunColor");
 }
 
 void OpenGLRenderer::CreateTonemapPipeline()
@@ -1307,6 +1320,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glUniform1i(m_uSkyHasMoon, m_moonTex ? 1 : 0);
 			glUniform1f(m_uSkyTime, GetEnvironment().timeOfDay);
 			glUniform1f(m_uSkyCoverage, GetEnvironment().cloudCoverage);
+			glUniform1f(m_uSkyClock, static_cast<float>(SDL_GetTicks()) / 1000.0f);
+			glUniform3fv(m_uSkySunColor, 1, glm::value_ptr(GetEnvironment().sunColor));
 			glBindVertexArray(m_fsVAO);
 			glDrawArrays(GL_TRIANGLES, 0, 3);
 			glEnable(GL_DEPTH_TEST);

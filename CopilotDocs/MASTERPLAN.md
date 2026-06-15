@@ -846,3 +846,29 @@ den Himmel — Himmel, Image-Based-Ambient **und** Schatten reagieren zusammen.
   Shader-Mathematik (nach-oben-Kamera, 1280×720): Tag = 0 Sterne (ausgeblendet), Dämmerung
   faden ein, Nacht ≈ 121 sauber verteilte Sterne (Median ~6 px, kein Sub-Pixel-Aliasing), dichter
   zum Zenit, am Horizont ausblendend. Build sauber, Tests grün.
+## Forts. 9 — Funkelnde Sterne & sonnengefärbte Wolken
+
+> **Aufgabe:** Sterne sollen leicht und zufällig in Echtzeit funkeln; die Wolken sollen mit der
+> (einstellbaren) Sonnenlichtfarbe eingefärbt werden, besonders wenn sich das Licht beim
+> Sonnenuntergang ändert. ✅
+
+**Echtzeit-Funkeln (`starField()`, beide Shader zeilengleich):**
+- Bisher lief das Funkeln über die langsame `timeOfDay`-Phase und animierte kaum. Jetzt treibt es
+  die echte Wanduhr (`SDL_GetTicks()/1000` als neuer `uTime`/`params.z`), unabhängig vom
+  Tag-Nacht-Auto-Advance.
+- Jeder Stern bekommt eine **zufällige Phase und Frequenz**: `twPhase = starHash(cell+23.5)*2π`,
+  `twFreq = 2 + 4·starHash(cell+47.1)` (≈ 2–6 rad/s, Periode ~1–3 s),
+  `tw = 0.7 + 0.3·sin(time·twFreq + twPhase)` → Bereich 0.4…1.0, jeder Stern flackert eigenständig.
+
+**Sonnengefärbte Wolken (`applyClouds()`, beide Shader zeilengleich):**
+- Neuer `sunColor`-Parameter (Metal `SkyParams.sunColor`, GL `uSunColor`), gespeist aus
+  `GetEnvironment().sunColor`.
+- Beleuchtete Wolkenoberseiten nehmen jetzt die Sonnenlichtfarbe an (`dayCol`-Mix-Ziel = `sunColor`
+  statt fest weiß); die Dämmerungs-Tops sind `sunColor * (1.0,0.55,0.32)` (gerötete Sonnenfarbe).
+  Ändert man die Sonnenfarbe oder verschiebt sie sich beim Sonnenuntergang ins Warme, färben sich
+  die Wolken entsprechend. Nachtwolken bleiben kühl (Aufgabe betraf nur das Sonnenlicht).
+
+**Verifiziert:** Build sauber, `he_tests` grün. Metal-Shader kompiliert zur Laufzeit (Nacht-Dump,
+keine Log-Fehler). CPU-Replik der exakten Shader-Mathematik: Funkeln animiert (15/16 Beispielsterne
+ändern Helligkeit > 0.05 zwischen t=0.0 und t=0.7, Frequenzen zufällig 2.26–5.88 rad/s); Wolken
+folgen `sunColor` (neutral → ~weiß, blaue Sonne → blaue Tops, rote Dämmerungssonne → warme Tops).
