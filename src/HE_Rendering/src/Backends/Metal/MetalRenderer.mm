@@ -11,6 +11,27 @@
 
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
+#include <cstdint>
+
+// Builds a tiling NxNxN value-noise volume whose lattice values are exactly the
+// sky shader's starHash(i,j,k); the shader pre-smoothsteps the sample coordinate
+// so hardware trilinear filtering reproduces the old smoothstep value noise.
+// Identical to the OpenGL backend's BuildSkyNoise3D.
+static std::vector<uint16_t> BuildSkyNoise3D(int n)
+{
+	auto hash = [](glm::vec3 p) {
+		p = glm::fract(p * 0.1031f);
+		p += glm::dot(p, glm::vec3(p.z, p.y, p.x) + 31.32f);
+		return glm::fract((p.x + p.y) * p.z);
+	};
+	std::vector<uint16_t> d(static_cast<size_t>(n) * n * n);
+	for (int z = 0; z < n; ++z)
+		for (int y = 0; y < n; ++y)
+			for (int x = 0; x < n; ++x)
+				d[(static_cast<size_t>(z) * n + y) * n + x] = static_cast<uint16_t>(
+					glm::clamp(hash(glm::vec3(x, y, z)), 0.0f, 1.0f) * 65535.0f + 0.5f);
+	return d;
+}
 
 // Swapchain / depth formats shared by every window target, the scene
 // pipeline and the ImGui pass descriptor — they must all match.
@@ -391,29 +412,20 @@ float galacticBand(float3 cdir)
 // 3D value noise (trilinear) from the star hash + a small fBm. The nebula is
 // sampled in 3D on the celestial sphere so it reads as isotropic blobs instead
 // of the radial streaks a 2D plane projection produces at grazing angles.
-float starNoise3(float3 p)
+// Trilinear value noise from the precomputed 3D volume (texels hold starHash at
+// the integer lattice). Pre-smoothstepping the fractional coordinate makes the
+// hardware filter reproduce the former smoothstep value noise (within the 256
+// tile); +0.5 lands lattice points on texel centres. Mirrors the GL starNoise3.
+float starNoise3(float3 p, texture3d<float> noiseTex, sampler noiseSamp)
 {
-	float3 i = floor(p);
 	float3 f = fract(p);
-	float3 u = f * f * (3.0 - 2.0 * f);
-	float c000 = starHash(i + float3(0.0, 0.0, 0.0));
-	float c100 = starHash(i + float3(1.0, 0.0, 0.0));
-	float c010 = starHash(i + float3(0.0, 1.0, 0.0));
-	float c110 = starHash(i + float3(1.0, 1.0, 0.0));
-	float c001 = starHash(i + float3(0.0, 0.0, 1.0));
-	float c101 = starHash(i + float3(1.0, 0.0, 1.0));
-	float c011 = starHash(i + float3(0.0, 1.0, 1.0));
-	float c111 = starHash(i + float3(1.0, 1.0, 1.0));
-	float x00 = mix(c000, c100, u.x);
-	float x10 = mix(c010, c110, u.x);
-	float x01 = mix(c001, c101, u.x);
-	float x11 = mix(c011, c111, u.x);
-	return mix(mix(x00, x10, u.y), mix(x01, x11, u.y), u.z);
+	float3 q = floor(p) + f * f * (3.0 - 2.0 * f) + 0.5;
+	return noiseTex.sample(noiseSamp, q * (1.0 / 256.0)).r;
 }
-float starFbm3(float3 p, int oct)
+float starFbm3(float3 p, int oct, texture3d<float> noiseTex, sampler noiseSamp)
 {
 	float v = 0.0, amp = 0.5;
-	for (int i = 0; i < oct; ++i) { v += amp * starNoise3(p); p *= 2.03; amp *= 0.5; }
+	for (int i = 0; i < oct; ++i) { v += amp * starNoise3(p, noiseTex, noiseSamp); p *= 2.03; amp *= 0.5; }
 	return v;
 }
 float3 starField(float3 dir, float3 cdir, float3 sunDir, float time, float milkyWay)
@@ -510,28 +522,31 @@ float cloudHeightGrad(float y)
 }
 // Full density at a world point: animated 3D fbm + detail erosion, thresholded by
 // the coverage slider, shaped by the slab height. time = continuous wall clock.
-float cloudDensity(float3 pos, float time, float coverage, float3 wind)
+float cloudDensity(float3 pos, float time, float coverage, float3 wind,
+                   texture3d<float> noiseTex, sampler noiseSamp)
 {
 	float3 p     = pos * 0.85 + wind * time;
 	float  morph = time * 0.030;                      // slow in-place forming/dissolving
-	float  base  = starFbm3(p + float3(0.0, morph, 0.0), 4);
-	float  detail= starFbm3(p * 3.1 + float3(morph, 0.0, 0.0), 2);
+	float  base  = starFbm3(p + float3(0.0, morph, 0.0), 4, noiseTex, noiseSamp);
+	float  detail= starFbm3(p * 3.1 + float3(morph, 0.0, 0.0), 2, noiseTex, noiseSamp);
 	base        -= 0.08 * detail;                      // gentle erosion (keep edges soft)
 	float  lo    = mix(0.95, 0.05, clamp(coverage, 0.0, 1.0));
 	float  d     = smoothstep(lo, lo + 0.30, base);    // wider ramp = fuller, less torn
 	return d * cloudHeightGrad(pos.y);
 }
 // Cheaper density for the sun light-march (skips the detail octave).
-float cloudShadowDensity(float3 pos, float time, float coverage, float3 wind)
+float cloudShadowDensity(float3 pos, float time, float coverage, float3 wind,
+                         texture3d<float> noiseTex, sampler noiseSamp)
 {
 	float3 p     = pos * 0.85 + wind * time;
 	float  morph = time * 0.030;
-	float  base  = starFbm3(p + float3(0.0, morph, 0.0), 3);
+	float  base  = starFbm3(p + float3(0.0, morph, 0.0), 3, noiseTex, noiseSamp);
 	float  lo    = mix(0.95, 0.05, clamp(coverage, 0.0, 1.0));
 	float  d     = smoothstep(lo, lo + 0.30, base);
 	return d * cloudHeightGrad(pos.y);
 }
-float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float time, float coverage, float3 sunColor, float3 wind)
+float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float time, float coverage, float3 sunColor, float3 wind,
+                   texture3d<float> noiseTex, sampler noiseSamp)
 {
 	if (coverage <= 0.0) return baseSky;          // clear sky → skip the whole raymarch
 	dir    = normalize(dir);
@@ -555,13 +570,13 @@ float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float time, float 
 	{
 		float  s   = s0 + (float(i) + 0.5) * ds;
 		float3 pos = dir * s;
-		float  dens = cloudDensity(pos, time, coverage, wind);
+		float  dens = cloudDensity(pos, time, coverage, wind, noiseTex, noiseSamp);
 		if (dens > 0.001)
 		{
 			// Light-march toward the sun: Beer's-law self-shadowing.
 			float shadow = 0.0;
 			for (int j = 1; j <= 2; ++j)
-				shadow += cloudShadowDensity(pos + sunDir * (float(j) * 0.22), time, coverage, wind);
+				shadow += cloudShadowDensity(pos + sunDir * (float(j) * 0.22), time, coverage, wind, noiseTex, noiseSamp);
 			float sun    = exp(-shadow * 1.1);
 			float powder = 1.0 - exp(-dens * 3.0); // dark soft edges (powder effect)
 			float lit    = sun * powder;
@@ -602,7 +617,8 @@ float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float time, float 
 // isolated rounded patches of varying size with bright cores, dark dust lanes,
 // and a blue->magenta->teal hue wheel so neighbouring blobs differ in colour and
 // bleed into one another. Night/horizon gated, occluded by clouds. Mirrors GL.
-float3 nebula(float3 dir, float3 cdir, float3 sunDir, float intensity, float3 nebColor)
+float3 nebula(float3 dir, float3 cdir, float3 sunDir, float intensity, float3 nebColor,
+              texture3d<float> noiseTex, sampler noiseSamp)
 {
 	if (intensity <= 0.0) return float3(0.0);
 	dir    = normalize(dir);
@@ -615,16 +631,16 @@ float3 nebula(float3 dir, float3 cdir, float3 sunDir, float intensity, float3 ne
 	float  bd   = dot(cN, galN);
 	float  band = exp(-bd * bd * 2.3);           // wide soft milky-way bias
 	float3 P    = cN * 3.4;
-	float  big  = starFbm3(P * 0.7 + 11.0, 4);   // large clouds
-	float  med  = starFbm3(P * 1.7 + 27.0, 3);   // medium clumps
-	float  fine = starFbm3(P * 4.0 + 41.0, 2);   // fine mottle / embedded dust
+	float  big  = starFbm3(P * 0.7 + 11.0, 4, noiseTex, noiseSamp);   // large clouds
+	float  med  = starFbm3(P * 1.7 + 27.0, 3, noiseTex, noiseSamp);   // medium clumps
+	float  fine = starFbm3(P * 4.0 + 41.0, 2, noiseTex, noiseSamp);   // fine mottle / embedded dust
 	float  blob   = smoothstep(0.46, 0.74, big * 0.5 + med * 0.6);
 	// Structural character per region: dense puffy bodies vs. wispy filaments.
-	float  charF  = starFbm3(P * 0.4 + 150.0, 2);
+	float  charF  = starFbm3(P * 0.4 + 150.0, 2, noiseTex, noiseSamp);
 	float  wispy  = smoothstep(0.42, 0.70, charF);
-	float  fila   = smoothstep(0.55, 0.86, starFbm3(P * 5.5 + 97.0, 2));   // fine filaments
+	float  fila   = smoothstep(0.55, 0.86, starFbm3(P * 5.5 + 97.0, 2, noiseTex, noiseSamp));   // fine filaments
 	float  detail = (0.30 + 0.70 * smoothstep(0.32, 0.86, fine)) * mix(1.0, 0.65 + 0.9 * fila, wispy);
-	float  dust   = 1.0 - 0.5 * smoothstep(0.50, 0.88, starFbm3(P * 2.6 + 63.0, 3));
+	float  dust   = 1.0 - 0.5 * smoothstep(0.50, 0.88, starFbm3(P * 2.6 + 63.0, 3, noiseTex, noiseSamp));
 	float  density = blob * detail * dust;
 	float  core   = smoothstep(0.62, 0.95, big * 0.55 + med * 0.55);   // bright centres
 	float  glow   = (band * 0.85 + 0.15) * (density + 0.6 * core);     // baseline -> off-band patches
@@ -633,9 +649,9 @@ float3 nebula(float3 dir, float3 cdir, float3 sunDir, float intensity, float3 ne
 	// Hue wheel across neighbouring blobs: cool blue → teal → green → gold →
 	// magenta so regions differ in colour and bleed together. A large-scale field
 	// biases whole regions warm (emission) vs. cool (reflection) for more variety.
-	float  h = clamp(starFbm3(P * 0.5 + 71.0, 3) * 1.7 - 0.35
-	               + 0.25 * (starFbm3(P * 1.1 + 83.0, 2) - 0.5), 0.0, 1.0);
-	float  warm = smoothstep(0.40, 0.72, starFbm3(P * 0.32 + 131.0, 2));
+	float  h = clamp(starFbm3(P * 0.5 + 71.0, 3, noiseTex, noiseSamp) * 1.7 - 0.35
+	               + 0.25 * (starFbm3(P * 1.1 + 83.0, 2, noiseTex, noiseSamp) - 0.5), 0.0, 1.0);
+	float  warm = smoothstep(0.40, 0.72, starFbm3(P * 0.32 + 131.0, 2, noiseTex, noiseSamp));
 	h = clamp(h + warm * 0.30, 0.0, 1.0);
 	float3 colA = nebColor * float3(0.42, 0.62, 1.50);   // cool blue
 	float3 colB = nebColor * float3(0.34, 1.42, 1.18);   // teal/cyan
@@ -689,7 +705,9 @@ float3 aurora(float3 dir, float3 sunDir, float time, float intensity, float3 aur
 fragment float4 skyFragment(SkyOut in [[stage_in]],
                             constant SkyParams& p [[buffer(0)]],
                             texture2d<float> moonTex [[texture(0)]],
-                            sampler moonSamp [[sampler(0)]])
+                            sampler moonSamp [[sampler(0)]],
+                            texture3d<float> noiseTex [[texture(1)]],
+                            sampler noiseSamp [[sampler(1)]])
 {
 	float4 wp1 = p.invViewProj * float4(in.ndc,  1.0, 1.0);
 	float4 wp0 = p.invViewProj * float4(in.ndc, -1.0, 1.0);
@@ -702,11 +720,11 @@ fragment float4 skyFragment(SkyOut in [[stage_in]],
 	{
 		float3 cdir = celestialDir(dir, p.params.x); // turns with the day-night cycle
 		col += starField(dir, cdir, p.sunDir.xyz, p.params.z, p.auroraColor.w);
-		col += nebula(dir, cdir, p.sunDir.xyz, p.nebulaColor.w, p.nebulaColor.xyz);
+		col += nebula(dir, cdir, p.sunDir.xyz, p.nebulaColor.w, p.nebulaColor.xyz, noiseTex, noiseSamp);
 		col += aurora(dir, p.sunDir.xyz, p.params.z, p.params.w, p.auroraColor.xyz);
 		col += moonDisk(dir, p.sunDir.xyz, p.sunDir.w > 0.5, moonTex, moonSamp);
 	}
-	col = applyClouds(col, dir, p.sunDir.xyz, p.params.z, p.params.y, p.sunColor.xyz, p.wind.xyz);
+	col = applyClouds(col, dir, p.sunDir.xyz, p.params.z, p.params.y, p.sunColor.xyz, p.wind.xyz, noiseTex, noiseSamp);
 	return float4(col, 1.0);
 }
 )MSL";
@@ -922,6 +940,8 @@ void MetalRenderer::Shutdown()
 	if (m_moonTexture)          { CFBridgingRelease(m_moonTexture);          m_moonTexture = nullptr; }
 	if (m_dummyTexture)    { CFBridgingRelease(m_dummyTexture);    m_dummyTexture = nullptr; }
 	if (m_linearSampler)   { CFBridgingRelease(m_linearSampler);   m_linearSampler = nullptr; }
+	if (m_noiseTexture)    { CFBridgingRelease(m_noiseTexture);    m_noiseTexture = nullptr; }
+	if (m_noiseSampler)    { CFBridgingRelease(m_noiseSampler);    m_noiseSampler = nullptr; }
 	if (m_cubeVertexBuf)   { CFBridgingRelease(m_cubeVertexBuf);   m_cubeVertexBuf = nullptr; }
 	if (m_cubeIndexBuf)    { CFBridgingRelease(m_cubeIndexBuf);    m_cubeIndexBuf = nullptr; }
 	if (m_scenePipeline)   { CFBridgingRelease(m_scenePipeline);   m_scenePipeline = nullptr; }
@@ -1062,6 +1082,33 @@ void MetalRenderer::CreateScenePipeline()
 		sampDesc.minFilter = MTLSamplerMinMagFilterLinear;
 		sampDesc.magFilter = MTLSamplerMinMagFilterLinear;
 		m_linearSampler = (void*)CFBridgingRetain([device newSamplerStateWithDescriptor:sampDesc]);
+
+		// 3D value-noise volume the sky's starFbm3 samples (clouds + nebula), built
+		// once on the CPU. R16Unorm + linear + repeat so it tiles seamlessly.
+		constexpr int kNoiseN = 256;
+		const std::vector<uint16_t> noise = BuildSkyNoise3D(kNoiseN);
+		MTLTextureDescriptor* noiseDesc = [[MTLTextureDescriptor alloc] init];
+		noiseDesc.textureType = MTLTextureType3D;
+		noiseDesc.pixelFormat = MTLPixelFormatR16Unorm;
+		noiseDesc.width = kNoiseN; noiseDesc.height = kNoiseN; noiseDesc.depth = kNoiseN;
+		noiseDesc.usage = MTLTextureUsageShaderRead;
+		noiseDesc.storageMode = MTLStorageModeShared;
+		id<MTLTexture> noiseTex = [device newTextureWithDescriptor:noiseDesc];
+		[noiseTex replaceRegion:MTLRegionMake3D(0, 0, 0, kNoiseN, kNoiseN, kNoiseN)
+		            mipmapLevel:0
+		                  slice:0
+		              withBytes:noise.data()
+		            bytesPerRow:kNoiseN * sizeof(uint16_t)
+		          bytesPerImage:kNoiseN * kNoiseN * sizeof(uint16_t)];
+		m_noiseTexture = (void*)CFBridgingRetain(noiseTex);
+
+		MTLSamplerDescriptor* noiseSampDesc = [[MTLSamplerDescriptor alloc] init];
+		noiseSampDesc.minFilter = MTLSamplerMinMagFilterLinear;
+		noiseSampDesc.magFilter = MTLSamplerMinMagFilterLinear;
+		noiseSampDesc.sAddressMode = MTLSamplerAddressModeRepeat;
+		noiseSampDesc.tAddressMode = MTLSamplerAddressModeRepeat;
+		noiseSampDesc.rAddressMode = MTLSamplerAddressModeRepeat;
+		m_noiseSampler = (void*)CFBridgingRetain([device newSamplerStateWithDescriptor:noiseSampDesc]);
 	}
 }
 
@@ -1713,6 +1760,8 @@ void MetalRenderer::EncodeSky(void* renderEncoder, const glm::mat4& invViewProj,
 		: (__bridge id<MTLTexture>)m_dummyTexture;
 	[enc setFragmentTexture:moon atIndex:0];
 	[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
+	[enc setFragmentTexture:(__bridge id<MTLTexture>)m_noiseTexture atIndex:1];
+	[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_noiseSampler atIndex:1];
 	SkyParams p;
 	p.invViewProj = invViewProj;
 	p.sunDir      = glm::vec4(sunDir, m_moonTexture ? 1.0f : 0.0f); // w = has-moon flag

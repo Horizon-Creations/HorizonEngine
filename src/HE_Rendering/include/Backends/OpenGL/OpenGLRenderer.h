@@ -149,6 +149,8 @@ private:
 	int          m_uSkyNebulaColor = -1;  // space-nebula base colour
 	int          m_uSkyAuroraColor = -1;  // aurora base colour
 	int          m_uSkyWind        = -1;  // cloud drift vector
+	int          m_uSkyNoise       = -1;  // 3D value-noise sampler
+	unsigned int m_noiseTex        = 0;   // GL_TEXTURE_3D, R16 value noise
 	unsigned int m_moonTex        = 0;    // night-sky moon texture (or 0)
 	void CreateSkyPipeline();
 

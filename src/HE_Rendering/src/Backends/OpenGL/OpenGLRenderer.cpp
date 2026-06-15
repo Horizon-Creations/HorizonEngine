@@ -5,8 +5,33 @@
 #include <SDL3/SDL.h>
 #include <stdexcept>
 #include <cstring>
+#include <cstdint>
+#include <vector>
 #include <Diagnostics/Logger.h>
+#include <glm/glm.hpp>
 #include <glm/gtc/type_ptr.hpp>
+
+// Builds a tiling NxNxN value-noise volume whose lattice values are exactly the
+// sky shader's starHash(i,j,k). With the shader pre-smoothstepping the fractional
+// sample coordinate, the GPU's trilinear filter reproduces the old smoothstep
+// value noise exactly (within one tile) — so starFbm3 becomes a texture fetch
+// instead of recomputing the hash per octave, with no visible change. R16 keeps
+// the threshold ramps band-free. Shared shape with the Metal generator.
+static std::vector<uint16_t> BuildSkyNoise3D(int n)
+{
+	auto hash = [](glm::vec3 p) {
+		p = glm::fract(p * 0.1031f);
+		p += glm::dot(p, glm::vec3(p.z, p.y, p.x) + 31.32f);
+		return glm::fract((p.x + p.y) * p.z);
+	};
+	std::vector<uint16_t> d(static_cast<size_t>(n) * n * n);
+	for (int z = 0; z < n; ++z)
+		for (int y = 0; y < n; ++y)
+			for (int x = 0; x < n; ++x)
+				d[(static_cast<size_t>(z) * n + y) * n + x] = static_cast<uint16_t>(
+					glm::clamp(hash(glm::vec3(x, y, z)), 0.0f, 1.0f) * 65535.0f + 0.5f);
+	return d;
+}
 
 // ─── Embedded unlit shader ────────────────────────────────────────────────────
 // GLSL 410: the macOS Core Profile ceiling — works everywhere we run.
@@ -214,6 +239,7 @@ uniform float     uNebula;      // space-nebula intensity (0 = off)
 uniform vec3      uNebulaColor; // space-nebula base colour
 uniform vec3      uAuroraColor; // aurora base colour
 uniform vec3      uWind;        // cloud drift vector (world units / s, horizontal)
+uniform sampler3D uNoise;       // tiling 3D value-noise (replaces the hash fbm)
 out vec4 FragColor;
 //#SKYFUNC#
 
@@ -277,24 +303,16 @@ float galacticBand(vec3 cdir)
 // 3D value noise (trilinear) from the star hash + a small fBm. The nebula is
 // sampled in 3D on the celestial sphere so it reads as isotropic blobs instead
 // of the radial streaks a 2D plane projection produces at grazing angles.
+// Trilinear value noise sampled from the precomputed uNoise volume (texels hold
+// starHash at the integer lattice). Pre-smoothstepping the fractional coordinate
+// makes the hardware linear filter reproduce the old smoothstep interpolation,
+// and +0.5 lands integer lattice points on texel centres — so the result matches
+// the former hash-based starNoise3 (within the 128-unit tile) at far less ALU.
 float starNoise3(vec3 p)
 {
-	vec3 i = floor(p);
 	vec3 f = fract(p);
-	vec3 u = f * f * (3.0 - 2.0 * f);
-	float c000 = starHash(i + vec3(0.0, 0.0, 0.0));
-	float c100 = starHash(i + vec3(1.0, 0.0, 0.0));
-	float c010 = starHash(i + vec3(0.0, 1.0, 0.0));
-	float c110 = starHash(i + vec3(1.0, 1.0, 0.0));
-	float c001 = starHash(i + vec3(0.0, 0.0, 1.0));
-	float c101 = starHash(i + vec3(1.0, 0.0, 1.0));
-	float c011 = starHash(i + vec3(0.0, 1.0, 1.0));
-	float c111 = starHash(i + vec3(1.0, 1.0, 1.0));
-	float x00 = mix(c000, c100, u.x);
-	float x10 = mix(c010, c110, u.x);
-	float x01 = mix(c001, c101, u.x);
-	float x11 = mix(c011, c111, u.x);
-	return mix(mix(x00, x10, u.y), mix(x01, x11, u.y), u.z);
+	vec3 q = floor(p) + f * f * (3.0 - 2.0 * f) + 0.5;
+	return texture(uNoise, q * (1.0 / 256.0)).r;
 }
 float starFbm3(vec3 p, int oct)
 {
@@ -927,6 +945,22 @@ void OpenGLRenderer::CreateSkyPipeline()
 	m_uSkyNebulaColor = glGetUniformLocation(m_skyProgram, "uNebulaColor");
 	m_uSkyAuroraColor = glGetUniformLocation(m_skyProgram, "uAuroraColor");
 	m_uSkyWind        = glGetUniformLocation(m_skyProgram, "uWind");
+	m_uSkyNoise       = glGetUniformLocation(m_skyProgram, "uNoise");
+
+	// Procedural 3D value-noise volume the sky's starFbm3 samples (clouds + nebula)
+	// — built once on the CPU. R16 + LINEAR + REPEAT so it tiles seamlessly.
+	constexpr int kNoiseN = 256;   // large tile so the sky's offset/octave coords fit
+	const std::vector<uint16_t> noise = BuildSkyNoise3D(kNoiseN);
+	glGenTextures(1, &m_noiseTex);
+	glBindTexture(GL_TEXTURE_3D, m_noiseTex);
+	glTexImage3D(GL_TEXTURE_3D, 0, GL_R16, kNoiseN, kNoiseN, kNoiseN, 0,
+	             GL_RED, GL_UNSIGNED_SHORT, noise.data());
+	glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+	glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+	glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_REPEAT);
+	glBindTexture(GL_TEXTURE_3D, 0);
 }
 
 void OpenGLRenderer::CreateTonemapPipeline()
@@ -1348,6 +1382,7 @@ void OpenGLRenderer::Shutdown()
 	if (m_shadowFBO)      { glDeleteFramebuffers(1, &m_shadowFBO);   m_shadowFBO = 0; }
 	if (m_shadowDepthTex) { glDeleteTextures(1, &m_shadowDepthTex);  m_shadowDepthTex = 0; }
 	if (m_moonTex)        { glDeleteTextures(1, &m_moonTex);         m_moonTex = 0; }
+	if (m_noiseTex)       { glDeleteTextures(1, &m_noiseTex);        m_noiseTex = 0; }
 
 	// Destroy secondary contexts (secondary windows' SDL_GLContexts are owned by us)
 	for (auto& [sdlWin, ctx] : m_secondaryContexts)
@@ -1703,6 +1738,10 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				                     * (GetEnvironment().windSpeed * 0.025f);
 				glUniform3fv(m_uSkyWind, 1, glm::value_ptr(wind));
 			}
+			glActiveTexture(GL_TEXTURE2);             // 3D value-noise on unit 2
+			glBindTexture(GL_TEXTURE_3D, m_noiseTex);
+			glUniform1i(m_uSkyNoise, 2);
+			glActiveTexture(GL_TEXTURE0);
 			glBindVertexArray(m_fsVAO);
 			glDrawArrays(GL_TRIANGLES, 0, 3);
 			glDepthFunc(GL_LESS);   // restore default for the next pass
