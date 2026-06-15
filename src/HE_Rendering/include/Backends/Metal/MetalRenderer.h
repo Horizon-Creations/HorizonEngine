@@ -40,6 +40,7 @@ public:
 
 	void* CreateImGuiTexture(const void* rgba8Pixels, int width, int height) override;
 	void  DestroyImGuiTexture(void* handle) override;
+	void  SetMoonTexture(const void* rgba8Pixels, int width, int height) override;
 
 	void  SetViewportSize(uint32_t width, uint32_t height) override;
 	void* GetViewportTexture() override;
@@ -89,6 +90,7 @@ private:
 	void EncodeScene(void* renderEncoder, int width, int height);
 	// Procedural skybox: fills the HDR target's background before the scene.
 	void* m_skyPipeline = nullptr; // id<MTLRenderPipelineState>
+	void* m_moonTexture = nullptr; // id<MTLTexture>, night-sky moon (or null)
 	void  EncodeSky(void* renderEncoder, const glm::mat4& invViewProj, const glm::vec3& sunDir);
 	// (Re)creates the offscreen viewport textures at the requested size.
 	void EnsureViewportTarget();

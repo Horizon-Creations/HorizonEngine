@@ -610,6 +610,28 @@ void EditorApplication::OnInit()
 	}
 #endif // HE_IMGUI_ENABLED
 
+	// ── Load the night-sky moon texture ───────────────────────────────────────
+	// Pushed to the renderer (not ImGui), so it loads in headless builds too —
+	// before the validation dump below renders.
+	if (renderer())
+	{
+		const char* basePath = SDL_GetBasePath();
+		std::string moonPath = std::string(basePath ? basePath : "") + "Images/moon.png";
+
+		int w = 0, h = 0, ch = 0;
+		unsigned char* pixels = stbi_load(moonPath.c_str(), &w, &h, &ch, 4);
+		if (pixels)
+		{
+			renderer()->SetMoonTexture(pixels, w, h);
+			stbi_image_free(pixels);
+			Logger::Log(Logger::LogLevel::Info, ("EditorApplication: moon texture loaded from " + moonPath).c_str());
+		}
+		else
+		{
+			Logger::Log(Logger::LogLevel::Warning, ("EditorApplication: moon texture not found at " + moonPath).c_str());
+		}
+	}
+
 	// Create the editor world and register it with the base Application
 	m_editorWorld = std::make_unique<HorizonWorld>();
 	setWorld(m_editorWorld.get());

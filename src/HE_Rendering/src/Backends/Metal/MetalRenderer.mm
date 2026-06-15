@@ -297,13 +297,47 @@ vertex SkyOut skyVertex(uint vid [[vertex_id]])
 
 //#SKYFUNC#
 
+// Textured moon disk — drawn only in the sky pass (kept out of the shared
+// skyColor() so the scene's image-based ambient needn't bind the texture).
+// Smaller than the sun and shaded as a sphere so the grayscale map reads as
+// craters on a lit body. Mirrors the GL moonDisk() exactly.
+float3 moonDisk(float3 dir, float3 sunDir, bool hasMoon,
+                texture2d<float> moonTex, sampler moonSamp)
+{
+	dir    = normalize(dir);
+	sunDir = normalize(sunDir);
+	float day   = smoothstep(-0.10, 0.10, clamp(sunDir.y, -0.2, 1.0));
+	float night = 1.0 - day;
+	if (night <= 0.0) return float3(0.0);
+
+	float3 moonDir = normalize(float3(-sunDir.x, -sunDir.y, sunDir.z));
+	if (dot(dir, moonDir) <= 0.0) return float3(0.0);
+
+	float3 right = normalize(cross(float3(0.0, 1.0, 0.0), moonDir));
+	float3 up    = cross(moonDir, right);
+	const float kRadius = 0.020;                   // angular radius (< the sun disk)
+	float2 q = float2(dot(dir, right), dot(dir, up)) / kRadius;
+	float  r = length(q);
+	if (r > 1.0) return float3(0.0);
+
+	float tex  = hasMoon ? moonTex.sample(moonSamp, q * 0.5 + 0.5).r : 1.0;
+	float limb = sqrt(max(1.0 - r * r, 0.0));      // spherical brightness falloff
+	float edge = smoothstep(1.0, 0.90, r);         // soft anti-aliased rim
+	float3 tint = float3(0.92, 0.94, 1.00);
+	return tint * tex * limb * edge * 3.0 * night;
+}
+
 fragment float4 skyFragment(SkyOut in [[stage_in]],
-                            constant SkyParams& p [[buffer(0)]])
+                            constant SkyParams& p [[buffer(0)]],
+                            texture2d<float> moonTex [[texture(0)]],
+                            sampler moonSamp [[sampler(0)]])
 {
 	float4 wp1 = p.invViewProj * float4(in.ndc,  1.0, 1.0);
 	float4 wp0 = p.invViewProj * float4(in.ndc, -1.0, 1.0);
 	float3 dir = wp1.xyz / wp1.w - wp0.xyz / wp0.w;
-	return float4(skyColor(dir, p.sunDir.xyz), 1.0);
+	float3 col = skyColor(dir, p.sunDir.xyz);
+	col += moonDisk(dir, p.sunDir.xyz, p.sunDir.w > 0.5, moonTex, moonSamp);
+	return float4(col, 1.0);
 }
 )MSL";
 
@@ -340,12 +374,13 @@ float3 skyColor(float3 dir, float3 sunDir)
 	sky += sunTint * (pow(s, 1800.0) * 14.0) * day;
 	sky += sunTint * (pow(s, 7.0)    * 0.18) * max(day, dusk);
 
-	// Moon: opposite the sun, fading in at night (matches the GL backend).
+	// Moon: opposite the sun, fading in at night. The lit disk itself is drawn
+	// (textured) in the sky pass; here we keep only the soft halo and a faint
+	// fill so the night ambient/reflections aren't pitch black (matches GL).
 	float  night    = 1.0 - day;
 	float3 moonDir  = normalize(float3(-sunDir.x, -sunDir.y, sunDir.z));
 	float  m        = max(dot(dir, moonDir), 0.0);
 	float3 moonTint = float3(0.80, 0.86, 1.00);
-	sky += moonTint * (pow(m, 700.0)  * 4.0)  * night;
 	sky += moonTint * (pow(m, 60.0)   * 0.05) * night;
 	sky += float3(0.04, 0.05, 0.08) * night;
 	return sky;
@@ -489,6 +524,7 @@ void MetalRenderer::Shutdown()
 	if (m_bloomBrightPipeline)  { CFBridgingRelease(m_bloomBrightPipeline);  m_bloomBrightPipeline = nullptr; }
 	if (m_blurPipeline)         { CFBridgingRelease(m_blurPipeline);         m_blurPipeline = nullptr; }
 	if (m_skyPipeline)          { CFBridgingRelease(m_skyPipeline);          m_skyPipeline = nullptr; }
+	if (m_moonTexture)          { CFBridgingRelease(m_moonTexture);          m_moonTexture = nullptr; }
 	if (m_dummyTexture)    { CFBridgingRelease(m_dummyTexture);    m_dummyTexture = nullptr; }
 	if (m_linearSampler)   { CFBridgingRelease(m_linearSampler);   m_linearSampler = nullptr; }
 	if (m_cubeVertexBuf)   { CFBridgingRelease(m_cubeVertexBuf);   m_cubeVertexBuf = nullptr; }
@@ -1259,9 +1295,14 @@ void MetalRenderer::EncodeSky(void* renderEncoder, const glm::mat4& invViewProj,
 	id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
 	[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_skyPipeline];
 	[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_noDepthState]; // no depth write
+	id<MTLTexture> moon = m_moonTexture
+		? (__bridge id<MTLTexture>)m_moonTexture
+		: (__bridge id<MTLTexture>)m_dummyTexture;
+	[enc setFragmentTexture:moon atIndex:0];
+	[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
 	SkyParams p;
 	p.invViewProj = invViewProj;
-	p.sunDir      = glm::vec4(sunDir, 0.0f);
+	p.sunDir      = glm::vec4(sunDir, m_moonTexture ? 1.0f : 0.0f); // w = has-moon flag
 	[enc setFragmentBytes:&p length:sizeof(p) atIndex:0];
 	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
 }
@@ -1613,6 +1654,34 @@ void* MetalRenderer::CreateImGuiTexture(const void* rgba8Pixels, int width, int 
 void MetalRenderer::DestroyImGuiTexture(void* handle)
 {
 	if (handle) CFBridgingRelease(handle);
+}
+
+void MetalRenderer::SetMoonTexture(const void* rgba8Pixels, int width, int height)
+{
+	if (!m_device || !rgba8Pixels || width <= 0 || height <= 0) return;
+
+	@autoreleasepool
+	{
+		id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+		MTLTextureDescriptor* desc = [MTLTextureDescriptor
+			texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+			                             width:(NSUInteger)width
+			                            height:(NSUInteger)height
+			                         mipmapped:NO];
+		desc.usage       = MTLTextureUsageShaderRead;
+		desc.storageMode = MTLStorageModeShared;
+
+		id<MTLTexture> texture = [device newTextureWithDescriptor:desc];
+		if (!texture) return;
+
+		[texture replaceRegion:MTLRegionMake2D(0, 0, (NSUInteger)width, (NSUInteger)height)
+		           mipmapLevel:0
+		             withBytes:rgba8Pixels
+		           bytesPerRow:(NSUInteger)width * 4];
+
+		if (m_moonTexture) CFBridgingRelease(m_moonTexture);
+		m_moonTexture = (void*)CFBridgingRetain(texture);
+	}
 }
 
 // ─── Accessors ────────────────────────────────────────────────────────────────

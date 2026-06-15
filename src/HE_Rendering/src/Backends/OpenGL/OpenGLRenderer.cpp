@@ -166,14 +166,49 @@ static const char* kSkyFS = R"GLSL(
 in vec2 vNDC;
 uniform mat4 uInvViewProj;
 uniform vec3 uSunDir;
+uniform sampler2D uMoonTex;
+uniform bool      uHasMoonTex;
 out vec4 FragColor;
 //#SKYFUNC#
+
+// Textured moon disk — drawn only in the sky pass (kept out of the shared
+// skyColor() so the scene's image-based ambient needn't bind the texture).
+// Smaller than the sun and shaded as a sphere so the grayscale map reads as
+// craters on a lit body. Falls back to a plain disk when no texture is set.
+vec3 moonDisk(vec3 dir, vec3 sunDir)
+{
+	dir    = normalize(dir);
+	sunDir = normalize(sunDir);
+	float day   = smoothstep(-0.10, 0.10, clamp(sunDir.y, -0.2, 1.0));
+	float night = 1.0 - day;
+	if (night <= 0.0) return vec3(0.0);
+
+	vec3 moonDir = normalize(vec3(-sunDir.x, -sunDir.y, sunDir.z));
+	if (dot(dir, moonDir) <= 0.0) return vec3(0.0);
+
+	// Local tangent frame so the disk gets 2D UVs for the texture.
+	vec3 right = normalize(cross(vec3(0.0, 1.0, 0.0), moonDir));
+	vec3 up    = cross(moonDir, right);
+	const float kRadius = 0.020;                   // angular radius (< the sun disk)
+	vec2  q = vec2(dot(dir, right), dot(dir, up)) / kRadius;
+	float r = length(q);
+	if (r > 1.0) return vec3(0.0);
+
+	float tex  = uHasMoonTex ? texture(uMoonTex, q * 0.5 + 0.5).r : 1.0;
+	float limb = sqrt(max(1.0 - r * r, 0.0));      // spherical brightness falloff
+	float edge = smoothstep(1.0, 0.90, r);         // soft anti-aliased rim
+	vec3  tint = vec3(0.92, 0.94, 1.00);
+	return tint * tex * limb * edge * 3.0 * night;
+}
+
 void main()
 {
 	vec4 wp1 = uInvViewProj * vec4(vNDC,  1.0, 1.0);
 	vec4 wp0 = uInvViewProj * vec4(vNDC, -1.0, 1.0);
 	vec3 dir = wp1.xyz / wp1.w - wp0.xyz / wp0.w;
-	FragColor = vec4(skyColor(dir, uSunDir), 1.0);
+	vec3 col = skyColor(dir, uSunDir);
+	col += moonDisk(dir, uSunDir);
+	FragColor = vec4(col, 1.0);
 }
 )GLSL";
 
@@ -215,15 +250,15 @@ vec3 skyColor(vec3 dir, vec3 sunDir)
 	sky += sunTint * (pow(s, 1800.0) * 14.0) * day;             // crisp disk (blooms)
 	sky += sunTint * (pow(s, 7.0)    * 0.18) * max(day, dusk);  // soft halo
 
-	// Moon: opposite the sun, fading in at night. Cool pale disk + soft halo;
-	// a faint fill so a moonlit scene isn't pitch black.
+	// Moon: opposite the sun, fading in at night. The lit disk itself is drawn
+	// (textured) in the sky pass; here we keep only the soft halo and a faint
+	// fill so the night ambient/reflections aren't pitch black.
 	// Opposite the sun in azimuth + elevation, but kept on the same hemisphere
 	// (z sign) so it rises into the visible sky rather than behind the viewer.
 	float night   = 1.0 - day;
 	vec3  moonDir = normalize(vec3(-sunDir.x, -sunDir.y, sunDir.z));
 	float m       = max(dot(dir, moonDir), 0.0);
 	vec3  moonTint= vec3(0.80, 0.86, 1.00);
-	sky += moonTint * (pow(m, 700.0)  * 4.0)  * night;          // moon disk (blooms)
 	sky += moonTint * (pow(m, 60.0)   * 0.05) * night;          // soft halo
 	sky += vec3(0.04, 0.05, 0.08) * night;                      // faint moonlit fill
 	return sky;
@@ -477,6 +512,8 @@ void OpenGLRenderer::CreateSkyPipeline()
 	}
 	m_uSkyInvVP  = glGetUniformLocation(m_skyProgram, "uInvViewProj");
 	m_uSkySunDir = glGetUniformLocation(m_skyProgram, "uSunDir");
+	m_uSkyMoonTex = glGetUniformLocation(m_skyProgram, "uMoonTex");
+	m_uSkyHasMoon = glGetUniformLocation(m_skyProgram, "uHasMoonTex");
 }
 
 void OpenGLRenderer::CreateTonemapPipeline()
@@ -897,6 +934,7 @@ void OpenGLRenderer::Shutdown()
 	if (m_fsVAO)          { glDeleteVertexArrays(1, &m_fsVAO);  m_fsVAO = 0; }
 	if (m_shadowFBO)      { glDeleteFramebuffers(1, &m_shadowFBO);   m_shadowFBO = 0; }
 	if (m_shadowDepthTex) { glDeleteTextures(1, &m_shadowDepthTex);  m_shadowDepthTex = 0; }
+	if (m_moonTex)        { glDeleteTextures(1, &m_moonTex);         m_moonTex = 0; }
 
 	// Destroy secondary contexts (secondary windows' SDL_GLContexts are owned by us)
 	for (auto& [sdlWin, ctx] : m_secondaryContexts)
@@ -1143,6 +1181,10 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glUseProgram(m_skyProgram);
 			glUniformMatrix4fv(m_uSkyInvVP, 1, GL_FALSE, glm::value_ptr(invViewProj));
 			glUniform3fv(m_uSkySunDir, 1, glm::value_ptr(sunDir));
+			glActiveTexture(GL_TEXTURE0);
+			glBindTexture(GL_TEXTURE_2D, m_moonTex);
+			glUniform1i(m_uSkyMoonTex, 0);
+			glUniform1i(m_uSkyHasMoon, m_moonTex ? 1 : 0);
 			glBindVertexArray(m_fsVAO);
 			glDrawArrays(GL_TRIANGLES, 0, 3);
 			glEnable(GL_DEPTH_TEST);
@@ -1341,4 +1383,18 @@ void OpenGLRenderer::DestroyImGuiTexture(void* handle)
 	if (!handle) return;
 	GLuint texId = static_cast<GLuint>(reinterpret_cast<uintptr_t>(handle));
 	glDeleteTextures(1, &texId);
+}
+
+void OpenGLRenderer::SetMoonTexture(const void* rgba8Pixels, int width, int height)
+{
+	if (!rgba8Pixels || width <= 0 || height <= 0) return;
+	if (m_moonTex) { glDeleteTextures(1, &m_moonTex); m_moonTex = 0; }
+	glGenTextures(1, &m_moonTex);
+	glBindTexture(GL_TEXTURE_2D, m_moonTex);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba8Pixels);
+	glBindTexture(GL_TEXTURE_2D, 0);
 }
