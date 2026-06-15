@@ -136,6 +136,34 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 		out.lights.push_back(l);
 	}
 
+	// ── Sun direction (toward the sun) + optional day-night override ──────────
+	// The sun is the first directional light. When the day-night cycle is on, the
+	// time of day drives the sun's arc (and dims it at night) instead of the
+	// authored light direction — render-time only, the ECS is untouched.
+	LightData* sunLight = nullptr;
+	for (LightData& l : out.lights)
+		if (l.type == 0) { sunLight = &l; break; } // 0 = directional
+
+	glm::vec3 sunToward(0.45f, 0.80f, 0.55f); // default high sun
+	if (m_dayNight)
+	{
+		// 0.25 sunrise (+X horizon) → 0.5 noon (up) → 0.75 sunset (-X) → 0/1 night.
+		const float a = (m_timeOfDay - 0.25f) * 6.28318530718f;
+		sunToward = glm::normalize(glm::vec3(std::cos(a), std::sin(a), 0.45f));
+		if (sunLight)
+		{
+			sunLight->direction = -sunToward; // light travels away from the sun
+			// Fade the direct sun out around/below the horizon (night).
+			const float dayFactor = std::clamp((sunToward.y + 0.10f) / 0.25f, 0.0f, 1.0f);
+			sunLight->intensity *= dayFactor;
+		}
+	}
+	else if (sunLight)
+	{
+		sunToward = -glm::normalize(sunLight->direction);
+	}
+	out.sunDirection = glm::normalize(sunToward);
+
 	// ── Directional-light shadow view-projection ─────────────────────────────
 	// First directional light casts shadows. The ortho frustum is fitted around
 	// the union of the (seeded) object bounds — backends refine bounds elsewhere,

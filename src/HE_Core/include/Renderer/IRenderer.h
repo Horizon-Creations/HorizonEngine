@@ -104,6 +104,19 @@ public:
     };
     virtual void SetBloomSettings(const BloomSettings& /*settings*/) {}
 
+    // ── Environment / day-night cycle ───────────────────────────────────────
+    // Pushed by the editor. When dayNightCycle is on, the renderer's extractor
+    // drives the sun from timeOfDay (0..1: 0.25 sunrise, 0.5 noon, 0.75 sunset,
+    // 0/1 midnight) — moving the sky, the image-based ambient and the shadows
+    // together. Off = the scene's own directional light is used.
+    struct EnvironmentSettings
+    {
+        bool  dayNightCycle = false;
+        float timeOfDay     = 0.5f; // noon
+    };
+    virtual void SetEnvironmentSettings(const EnvironmentSettings& e) { m_environment = e; }
+    const EnvironmentSettings& GetEnvironment() const { return m_environment; }
+
     // ── Offscreen viewport (editor scene view) ────────────────────────────
     // When a non-zero size is set, the scene is rendered into an offscreen
     // target instead of the window and GetViewportTexture() returns it as an
@@ -139,4 +152,5 @@ protected:
     HorizonWorld*        m_world          = nullptr;
     ContentManager*      m_contentManager = nullptr;
     EditorCameraOverride m_editorCamera;
+    EnvironmentSettings  m_environment;
 };

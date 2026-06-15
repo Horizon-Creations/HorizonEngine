@@ -36,4 +36,9 @@ public:
     std::vector<LightData>    lights;
     CameraData                camera;
     ShadowData                shadow;
+
+    // Direction *toward* the sun (normalized), set by the extractor: from the
+    // first directional light, or driven by the day-night cycle when enabled.
+    // Backends use it for the procedural sky + image-based ambient.
+    glm::vec3 sunDirection = glm::vec3(0.45f, 0.80f, 0.55f);
 };
