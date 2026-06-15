@@ -204,7 +204,7 @@ uniform mat4 uInvViewProj;
 uniform vec3 uSunDir;
 uniform sampler2D uMoonTex;
 uniform bool      uHasMoonTex;
-uniform float     uTimeOfDay;   // cloud scroll phase (0..1)
+uniform float     uTimeOfDay;   // day phase 0..1 (celestial rotation)
 uniform float     uCloudCoverage; // cloud amount (0 = clear … 1 = full overcast)
 uniform float     uTime;        // wall-clock seconds (star twinkle)
 uniform vec3      uSunColor;    // sun light colour (tints the clouds)
@@ -338,10 +338,13 @@ vec3 starField(vec3 dir, vec3 cdir, vec3 sunDir, float time, float milkyWay)
 	return tint * (core * mag * tw * horizon * night * bandDim);
 }
 
-// Procedural clouds — drawn only in the sky pass (kept out of the shared
-// skyColor() so the scene's image-based ambient stays cheap). A scrolling FBM
-// over a flat cloud layer drifts with the time of day and is lit/tinted by the
-// day-night cycle. Mirrors the Metal applyClouds() exactly.
+// Procedural volumetric clouds — drawn only in the sky pass (kept out of the
+// shared skyColor() so the scene's image-based ambient stays cheap). Density is
+// a 3D noise field (reusing starNoise3/starFbm3) animated by the continuous wall
+// clock — NOT the looping time-of-day — so clouds drift, form and dissolve with
+// their own lifecycle and never snap at the 0h/24h day wrap. A short raymarch
+// through a cloud slab with Beer's-law transmittance + a sun light-march gives a
+// soft, self-shadowed volumetric look. Mirrors the Metal applyClouds() exactly.
 float cloudHash(vec2 p)
 {
 	p  = fract(p * vec2(127.1, 311.7));
@@ -371,47 +374,92 @@ float cloudFbm(vec2 p)
 	}
 	return v;
 }
-vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float timeOfDay, float coverage, vec3 sunColor)
+// Cloud slab heights (arbitrary world units in the sky-ray hemisphere model).
+const float kCloudBase = 1.0;
+const float kCloudTop  = 2.0;
+const vec3  kCloudWind = vec3(0.020, 0.0, 0.006); // horizontal drift / s
+// Rounded vertical density taper so the slab reads as puffy bodies, not a sheet.
+float cloudHeightGrad(float y)
+{
+	float hf = clamp((y - kCloudBase) / (kCloudTop - kCloudBase), 0.0, 1.0);
+	return smoothstep(0.0, 0.25, hf) * (1.0 - smoothstep(0.65, 1.0, hf));
+}
+// Full density at a world point: animated 3D fbm + detail erosion, thresholded by
+// the coverage slider, shaped by the slab height. time = continuous wall clock.
+float cloudDensity(vec3 pos, float time, float coverage)
+{
+	vec3  p     = pos * 0.85 + kCloudWind * time;
+	float morph = time * 0.030;                       // slow in-place forming/dissolving
+	float base  = starFbm3(p + vec3(0.0, morph, 0.0), 4);
+	float detail= starFbm3(p * 3.1 + vec3(morph, 0.0, 0.0), 2);
+	base       -= 0.15 * detail;                       // erode soft edges
+	float lo    = mix(0.95, 0.05, clamp(coverage, 0.0, 1.0));
+	float d     = smoothstep(lo, lo + 0.22, base);
+	return d * cloudHeightGrad(pos.y);
+}
+// Cheaper density for the sun light-march (skips the detail octave).
+float cloudShadowDensity(vec3 pos, float time, float coverage)
+{
+	vec3  p     = pos * 0.85 + kCloudWind * time;
+	float morph = time * 0.030;
+	float base  = starFbm3(p + vec3(0.0, morph, 0.0), 3);
+	float lo    = mix(0.95, 0.05, clamp(coverage, 0.0, 1.0));
+	float d     = smoothstep(lo, lo + 0.22, base);
+	return d * cloudHeightGrad(pos.y);
+}
+vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float time, float coverage, vec3 sunColor)
 {
 	dir    = normalize(dir);
 	sunDir = normalize(sunDir);
 	if (dir.y < 0.02) return baseSky;             // no clouds at/below the horizon
 
-	// Project the ray onto a flat cloud layer (compresses toward the horizon).
-	vec2 uv     = dir.xz / dir.y * 0.5;
-	vec2 scroll = vec2(timeOfDay * 8.0, timeOfDay * 2.0); // drift across the day
-	// Coverage slider lowers the density threshold: 0 = clear, 1 = full overcast.
-	float lo      = mix(0.95, 0.05, clamp(coverage, 0.0, 1.0));
-	float density = cloudFbm(uv + scroll);
-	float cover   = smoothstep(lo, lo + 0.30, density);
-	cover *= smoothstep(0.02, 0.22, dir.y);       // fade out near the horizon
+	// March the view ray through the cloud slab between base and top heights.
+	float s0 = kCloudBase / max(dir.y, 1e-3);
+	float s1 = kCloudTop  / max(dir.y, 1e-3);
+	const int N = 5;
+	float ds = (s1 - s0) / float(N);
 
-	// Fake self-shadowing for volume: compare the density here with a sample
-	// toward the sun so cloud tops facing the sun read bright while the deeper
-	// (back-lit) interior and undersides stay shaded.
-	float toSun = cloudFbm(uv + scroll - sunDir.xz * 0.30);
-	float lit   = smoothstep(-0.05, 0.45, density - toSun + 0.15);
+	// Day/night/dusk drive the cloud colour (independent of the drift clock).
 	float sunY = clamp(sunDir.y, -0.2, 1.0);
 	float day  = smoothstep(-0.10, 0.10, sunY);
 	float dusk = smoothstep(-0.06, 0.05, sunY) * (1.0 - smoothstep(0.05, 0.28, sunY));
 
-	// Higher-contrast shading: a dark shaded base with sun-coloured lit tops.
-	// Lit tops take the sun's (adjustable) light colour, so changing the sun
-	// colour — or the warm shift at sunset — tints the clouds.
-	vec3 dayCol   = mix(vec3(0.30, 0.33, 0.40), sunColor * 1.15, lit);
-	vec3 nightCol = mix(vec3(0.04, 0.05, 0.09), vec3(0.18, 0.21, 0.30), lit);
-	vec3 cloudCol = mix(nightCol, dayCol, day);
-	vec3 duskTop  = sunColor * vec3(1.25, 0.55, 0.28);                 // reddened sun colour
-	cloudCol = mix(cloudCol, duskTop, dusk * lit * 0.85);            // warm sunset tops
+	float T = 1.0;                                 // transmittance along the view ray
+	vec3  L = vec3(0.0);                           // accumulated in-scattered colour
+	for (int i = 0; i < N; ++i)
+	{
+		float s   = s0 + (float(i) + 0.5) * ds;
+		vec3  pos = dir * s;
+		float dens = cloudDensity(pos, time, coverage);
+		if (dens > 0.001)
+		{
+			// Light-march toward the sun: Beer's-law self-shadowing.
+			float shadow = 0.0;
+			for (int j = 1; j <= 2; ++j)
+				shadow += cloudShadowDensity(pos + sunDir * (float(j) * 0.22), time, coverage);
+			float sun    = exp(-shadow * 1.1);
+			float powder = 1.0 - exp(-dens * 3.0); // dark soft edges (powder effect)
+			float lit    = sun * powder;
 
-	// Warm rim light along the sun-facing cloud edges (silver/golden lining).
-	vec2  rimAz  = normalize(sunDir.xz + vec2(1e-5));
-	float toward = dot(normalize(dir.xz + vec2(1e-5)), rimAz) * 0.5 + 0.5;
-	float edge   = cover * (1.0 - cover) * 4.0;                      // peaks on cloud edges
-	float rim    = edge * (toward * toward) * max(day, dusk);
-	cloudCol += sunColor * vec3(1.3, 0.7, 0.35) * (rim * 0.6);
+			// Higher-contrast shading: dark shaded base, sun-coloured lit tops.
+			vec3 dayCol   = mix(vec3(0.30, 0.33, 0.40), sunColor * 1.15, lit);
+			vec3 nightCol = mix(vec3(0.04, 0.05, 0.09), vec3(0.18, 0.21, 0.30), lit);
+			vec3 cloudCol = mix(nightCol, dayCol, day);
+			vec3 duskTop  = sunColor * vec3(1.25, 0.55, 0.28);
+			cloudCol = mix(cloudCol, duskTop, dusk * lit * 0.85);
 
-	return mix(baseSky, cloudCol, cover);
+			float a = clamp(dens * ds * 2.4, 0.0, 1.0);
+			L += T * a * cloudCol;
+			T *= exp(-a);
+			if (T < 0.02) break;
+		}
+	}
+
+	// Fade the whole cloud layer out into the horizon haze.
+	float horizon = smoothstep(0.02, 0.16, dir.y);
+	T = 1.0 - (1.0 - T) * horizon;
+	L *= horizon;
+	return baseSky * T + L;
 }
 
 // Space nebula — drifting coloured emission clouds gathered toward the galactic
@@ -501,7 +549,7 @@ void main()
 	col += nebula(dir, cdir, uSunDir, uNebula, uNebulaColor);
 	col += aurora(dir, uSunDir, uTime, uAurora, uAuroraColor);
 	col += moonDisk(dir, uSunDir);
-	col = applyClouds(col, dir, uSunDir, uTimeOfDay, uCloudCoverage, uSunColor);
+	col = applyClouds(col, dir, uSunDir, uTime, uCloudCoverage, uSunColor);
 	FragColor = vec4(col, 1.0);
 }
 )GLSL";
