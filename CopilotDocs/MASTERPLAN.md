@@ -995,3 +995,42 @@ atmosphärisch nordfixiert; Sterne + Nebel rotieren über `celestialDir` mit der
   Mode / D3D). Beide UI-Toggles (Preferences + Quick-Settings) nutzen den Helper. Zusätzlich wird der
   konfigurierte VSync-Wert nach `renderer->Initialize()` einmalig auf den Renderer angewandt, damit
   Metal im richtigen Present-Mode startet.
+
+### Forts. 11d — Metal-VSync-Diagnose: 60-Hz-Fenster-Limit (kein Code-Fix)
+
+> **Aufgabe:** Toggle ändert die FPS unter Metal weiterhin nicht (Anzeige bleibt 59–60). ✅ diagnostiziert
+
+- **Empirisch nachgewiesen:** `displaySyncEnabled = NO` schon bei der Layer-Erstellung erzwungen **und**
+  `SetVSync` neutralisiert → trotzdem konstant ~60 FPS (46 Messungen über einen Live-Editor-Lauf).
+- **Hardware:** Eingebautes Display ist **reines 60 Hz** (CoreGraphics `CGDisplayCopyDisplayMode` →
+  `refresh=60.0`, einzige verfügbare Rate). MacBook-Air-Klasse-Panel, kein ProMotion.
+- **Ursache:** macOS komponiert ein **gefenstertes** `CAMetalLayer` über den WindowServer mit der
+  Bildwiederholrate; der Drawable-Pool wird nur mit 60 Hz freigegeben → `nextDrawable` blockt → harte
+  60-FPS-Grenze unabhängig vom VSync-Flag. Plattform-Limit, kein Engine-Bug. Über die Refreshrate
+  hinaus ginge es nur auf einem externen High-Refresh-/ProMotion-Display oder im echten Fullscreen.
+- **Toggle-Verdrahtung verifiziert korrekt:** Checkbox → `ctx.vsync` → `ApplyVSync` → `renderer->SetVSync`
+  erreicht den Metal-Renderer zur Laufzeit; auf einem 60-Hz-Panel ist die Wirkung nur nicht sichtbar.
+  Alle temporären Mess-Hacks zurückgenommen.
+
+### Forts. 12 — Volumetrische Wolken mit eigenem Lifecycle (entkoppelt von Time-of-Day)
+
+> **Aufgabe:** Das Wolken-Ruckeln beim 0h/24h-Wrap beheben; Wolken sollen spawnen, wachsen, über den
+> Himmel ziehen und wieder despawnen — nicht direkt an die Time-of-Day gebunden. Außerdem volumetrische
+> Wolken umsetzen. ✅
+
+- **Ruckeln-Ursache:** `applyClouds` scrollte das 2D-FBM mit `uTimeOfDay` (loopt 0..1). Beim Wrap von
+  1→0 sprang der Scroll-Offset `(8, 2) → (0, 0)` diskontinuierlich → das Wolkenfeld teleportierte.
+- **Fix + Redesign (GL + MSL zeilengleich):** Wolken-Drift/-Evolution läuft jetzt über `uTime`
+  (kontinuierliche Wall-Clock-Sekunden, in Metal `params.z`) statt über die loopende Time-of-Day → kein
+  Wrap mehr. Die Dichte ist ein **animiertes 3D-Noise-Feld** (`starNoise3`/`starFbm3` wiederverwendet):
+  horizontaler Wind-Drift + langsame In-Place-Morph-Achse → Wolken bilden sich, wachsen, ziehen und
+  lösen sich wieder auf (eigener Lifecycle, von der Tageszeit entkoppelt).
+- **Volumetrik:** Statt eines flachen Layers wird der Sichtstrahl durch einen Wolken-Slab geraymarcht
+  (5 Schritte) mit Beer'scher Transmittanz-Akkumulation + kurzem Sonnen-Light-March (2 Schritte) für
+  weiche Selbstverschattung; Powder-Term für dunkle weiche Ränder; Höhen-Gradient für runde Körper.
+  Tag/Nacht/Dämmerungs-Tönung (inkl. Sonnenfarbe am Sunset) bleibt erhalten. Coverage-Slider steuert
+  weiterhin 0 = klar … 1 = bedeckt.
+- **Verifiziert:** numpy-CPU-Replik der exakten Mathematik (up-looking Kamera) zeigt weiche
+  volumetrische Puffs, funktionierenden Coverage-Bereich (klar→bedeckt), Sunset-Tönung und Drift/
+  Lifecycle über die Zeit. Build sauber, `he_tests` grün, GL kompiliert live (`glGetError=0x0`), Metal
+  kompiliert zur Laufzeit auf Apple M5 (Dump, keine Log-Fehler), `glslangValidator` sauber.
