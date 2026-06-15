@@ -52,9 +52,30 @@ uniform float     uMetallic;    // 0 dielectric … 1 metal
 uniform float     uRoughness;   // 0 mirror … 1 fully rough
 uniform vec3      uSunDir;      // direction toward the sun (for image-based ambient)
 uniform vec3      uAmbient;     // flat ambient fill (never-black floor + overcast)
+uniform float     uFogDensity;       // atmospheric fog amount (0 = off)
+uniform float     uFogHeightFalloff; // >0 = fog pools near the ground
 
 // shared skyColor() is injected at the marker below (CreateUnlitPipeline)
 //#SKYFUNC#
+
+// Atmospheric fog / aerial perspective: blend the lit colour toward the sky in
+// the fragment's view direction, so distant geometry melts into the horizon
+// (and warms toward the sun at sunset, since the fog samples the same sky). The
+// opacity is an analytic exponential height-fog integral along the view ray —
+// density*exp(-falloff*y) integrated from the camera to the fragment — so fog
+// pools low and thins with altitude. falloff == 0 → plain exp distance fog.
+vec3 applyFog(vec3 color, vec3 camPos, vec3 worldPos, vec3 sunDir)
+{
+	if (uFogDensity <= 0.0) return color;
+	vec3  ray  = worldPos - camPos;
+	float dist = length(ray);
+	float k    = uFogHeightFalloff * ray.y;
+	float t    = (abs(k) > 1e-4) ? (1.0 - exp(-k)) / k : 1.0; // mean height attenuation
+	float optical = uFogDensity * dist * exp(-uFogHeightFalloff * camPos.y) * t;
+	float f       = 1.0 - exp(-optical);
+	vec3  fogCol  = skyColor(ray / max(dist, 1e-4), sunDir);
+	return mix(color, fogCol, clamp(f, 0.0, 1.0));
+}
 
 // Directional-light shadow map
 uniform mat4      uLightVP;
@@ -155,6 +176,7 @@ void main()
 		result += (diffuseColor * diff + specColor * spec)
 		        * uLightColor[i].rgb * uLightColor[i].w * atten * sh;
 	}
+	result = applyFog(result, uCameraPos, vWorldPos, uSunDir);
 	FragColor = vec4(result, 1.0);
 }
 )GLSL";
@@ -604,6 +626,8 @@ void OpenGLRenderer::CreateUnlitPipeline()
 	m_uCameraPos   = glGetUniformLocation(m_unlitProgram, "uCameraPos");
 	m_uSunDir      = glGetUniformLocation(m_unlitProgram, "uSunDir");
 	m_uAmbient     = glGetUniformLocation(m_unlitProgram, "uAmbient");
+	m_uFogDensity       = glGetUniformLocation(m_unlitProgram, "uFogDensity");
+	m_uFogHeightFalloff = glGetUniformLocation(m_unlitProgram, "uFogHeightFalloff");
 	m_uLightVP       = glGetUniformLocation(m_unlitProgram, "uLightVP");
 	m_uShadowMap     = glGetUniformLocation(m_unlitProgram, "uShadowMap");
 	m_uShadowEnabled = glGetUniformLocation(m_unlitProgram, "uShadowEnabled");
@@ -1360,6 +1384,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		glUniform1i(m_uTexture, 0); // base color tint (uColor) is set per draw below
 		glUniform3fv(m_uSunDir, 1, glm::value_ptr(sunDir));
 		glUniform3fv(m_uAmbient, 1, glm::value_ptr(m_renderWorld.ambient));
+		glUniform1f(m_uFogDensity,       GetEnvironment().fogDensity);
+		glUniform1f(m_uFogHeightFalloff, GetEnvironment().fogHeightFalloff);
 
 		// Lights (clamped to the shader's MAX_LIGHTS)
 		{

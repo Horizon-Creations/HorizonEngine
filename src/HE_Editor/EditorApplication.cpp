@@ -542,6 +542,8 @@ void EditorApplication::OnInit()
 	m_editorConfig.MoonColor.g                 = globalstate.getCustomConfigFloat("MoonColorG",          m_editorConfig.MoonColor.g);
 	m_editorConfig.MoonColor.b                 = globalstate.getCustomConfigFloat("MoonColorB",          m_editorConfig.MoonColor.b);
 	m_editorConfig.CloudCoverage               = globalstate.getCustomConfigFloat("CloudCoverage",        m_editorConfig.CloudCoverage);
+	m_editorConfig.FogDensity                  = globalstate.getCustomConfigFloat("FogDensity",           m_editorConfig.FogDensity);
+	m_editorConfig.FogHeightFalloff            = globalstate.getCustomConfigFloat("FogHeightFalloff",     m_editorConfig.FogHeightFalloff);
 	m_editorCamera.setFlySpeed(m_editorConfig.EditorCameraSpeed);
 
 #ifdef HE_IMGUI_ENABLED
@@ -762,7 +764,9 @@ void EditorApplication::OnRender(float dt)
 			m_editorConfig.SunIntensity,
 			m_editorConfig.MoonColor,
 			m_editorConfig.MoonIntensity,
-			m_editorConfig.CloudCoverage});
+			m_editorConfig.CloudCoverage,
+			m_editorConfig.FogDensity,
+			m_editorConfig.FogHeightFalloff});
 	}
 
 	AppContext ctx = makeContext();
@@ -844,7 +848,8 @@ void EditorApplication::dumpFrameHeadless()
 		m_editorConfig.DayNightCycle, m_editorConfig.TimeOfDay,
 		m_editorConfig.SunColor, m_editorConfig.SunIntensity,
 		m_editorConfig.MoonColor, m_editorConfig.MoonIntensity,
-		m_editorConfig.CloudCoverage});
+		m_editorConfig.CloudCoverage,
+		m_editorConfig.FogDensity, m_editorConfig.FogHeightFalloff});
 	r->SetViewportSize(1280, 720);
 	for (int i = 0; i < 3; ++i)
 		r->Render();
@@ -1141,6 +1146,8 @@ void EditorApplication::OnShutdown()
 	globalstate.setCustomConfigEntry("MoonColorG",                m_editorConfig.MoonColor.g);
 	globalstate.setCustomConfigEntry("MoonColorB",                m_editorConfig.MoonColor.b);
 	globalstate.setCustomConfigEntry("CloudCoverage",            m_editorConfig.CloudCoverage);
+	globalstate.setCustomConfigEntry("FogDensity",              m_editorConfig.FogDensity);
+	globalstate.setCustomConfigEntry("FogHeightFalloff",        m_editorConfig.FogHeightFalloff);
 	globalstate.writeConfig();
 }
 

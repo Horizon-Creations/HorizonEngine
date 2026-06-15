@@ -1893,6 +1893,20 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
         ImGui::SliderFloat("##cloudcoverage", &ctx.editorConfig.CloudCoverage,
                            0.0f, 1.0f, "Coverage: %.2f");
         ImGui::TextDisabled("Full overcast dims the sun & fills with ambient light.");
+
+        // Atmospheric fog / aerial perspective: distant geometry melts into the
+        // sky in its view direction. 0 density = off. Height falloff pools the
+        // fog near the ground (only meaningful when fog is on).
+        ImGui::SeparatorText("Atmospheric Fog");
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::SliderFloat("##fogdensity", &ctx.editorConfig.FogDensity,
+                           0.0f, 0.15f, "Density: %.3f");
+        ImGui::BeginDisabled(ctx.editorConfig.FogDensity <= 0.0f);
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::SliderFloat("##fogheight", &ctx.editorConfig.FogHeightFalloff,
+                           0.0f, 1.0f, "Ground hugging: %.2f");
+        ImGui::EndDisabled();
+        ImGui::TextDisabled("Distant objects blend into the horizon (warm at sunset).");
     }
 
     ImGui::End();

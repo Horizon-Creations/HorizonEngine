@@ -123,6 +123,13 @@ public:
         // overcast the sun/moon directional light is switched off (optimisation)
         // and replaced by a soft scattered ambient fill.
         float     cloudCoverage = 0.5f;
+        // Atmospheric fog / aerial perspective. Distant scene geometry is blended
+        // toward the procedural sky colour in its view direction, so it melts into
+        // the horizon (and warms toward the sun at sunset). 0 density = no fog.
+        // heightFalloff > 0 makes the fog pool near the ground and thin with
+        // altitude (analytic exponential height fog); 0 = uniform distance fog.
+        float     fogDensity      = 0.0f;
+        float     fogHeightFalloff = 0.1f;
     };
     virtual void SetEnvironmentSettings(const EnvironmentSettings& e) { m_environment = e; }
     const EnvironmentSettings& GetEnvironment() const { return m_environment; }

@@ -55,6 +55,7 @@ struct SceneUniforms {
 	int      pad3, pad4, pad5;
 	float4   sunDir;         // xyz = direction toward the sun (image-based ambient)
 	float4   ambient;        // xyz = flat ambient fill (floor + overcast); w unused
+	float4   fog;            // x = density (0 = off), y = height falloff
 };
 
 // shared skyColor() injected at the marker below (newLibraryWithSource)
@@ -121,6 +122,24 @@ float shadowFactor(constant SceneUniforms& scene, float3 worldPos, float3 N, flo
 		}
 	vis /= 9.0;
 	return mix(0.35, 1.0, vis);
+}
+
+// Atmospheric fog / aerial perspective (mirrors the GL applyFog()): blend the
+// lit colour toward the sky in the fragment's view direction so distant geometry
+// melts into the horizon. The opacity is an analytic exponential height-fog
+// integral along the view ray (density*exp(-falloff*y)), so fog pools low and
+// thins with altitude; falloff == 0 → plain exp distance fog.
+float3 applyFog(float3 color, float3 camPos, float3 worldPos, float3 sunDir, float2 fog)
+{
+	if (fog.x <= 0.0) return color;
+	float3 ray  = worldPos - camPos;
+	float  dist = length(ray);
+	float  k    = fog.y * ray.y;
+	float  t    = (abs(k) > 1e-4) ? (1.0 - exp(-k)) / k : 1.0; // mean height attenuation
+	float  optical = fog.x * dist * exp(-fog.y * camPos.y) * t;
+	float  f       = 1.0 - exp(-optical);
+	float3 fogCol  = skyColor(ray / max(dist, 1e-4), sunDir);
+	return mix(color, fogCol, clamp(f, 0.0, 1.0));
 }
 
 // Blinn-Phong over up to 8 scene lights; lightCount == 0 falls back to the
@@ -197,6 +216,7 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
 		result += (diffuseColor * diff + specColor * spec)
 		        * l.colorIntensity.rgb * l.colorIntensity.w * atten * sh;
 	}
+	result = applyFog(result, scene.cameraPos.xyz, in.worldPos, scene.sunDir.xyz, scene.fog.xy);
 	return float4(result, 1.0);
 }
 )MSL";
@@ -575,6 +595,7 @@ struct SceneUniforms
 	int32_t   pad3 = 0, pad4 = 0, pad5 = 0;
 	glm::vec4 sunDir = glm::vec4(0.0f, 1.0f, 0.0f, 0.0f);
 	glm::vec4 ambient = glm::vec4(0.0f);
+	glm::vec4 fog = glm::vec4(0.0f); // x = density (0 = off), y = height falloff
 };
 
 // Matches the MSL SkyParams struct.
@@ -1537,6 +1558,8 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 		scene.shadowEnabled = shadows ? 1 : 0;
 		scene.sunDir        = glm::vec4(sunDir, 0.0f);
 		scene.ambient       = glm::vec4(m_renderWorld.ambient, 0.0f);
+		scene.fog           = glm::vec4(GetEnvironment().fogDensity,
+		                                GetEnvironment().fogHeightFalloff, 0.0f, 0.0f);
 		[encoder setFragmentBytes:&scene length:sizeof(scene) atIndex:0];
 	}
 

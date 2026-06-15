@@ -106,6 +106,8 @@ private:
 	int          m_uCameraPos     = -1;
 	int          m_uSunDir        = -1;   // toward-sun dir for image-based ambient
 	int          m_uAmbient       = -1;   // flat ambient fill (floor + overcast)
+	int          m_uFogDensity       = -1; // atmospheric fog amount (0 = off)
+	int          m_uFogHeightFalloff = -1; // fog height falloff
 	int          m_uLightVP       = -1;   // directional-light view-proj (shadow)
 	int          m_uShadowMap     = -1;   // shadow map sampler unit
 	int          m_uShadowEnabled = -1;
