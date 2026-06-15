@@ -1908,13 +1908,21 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
         ImGui::EndDisabled();
         ImGui::TextDisabled("Distant objects blend into the horizon (warm at sunset).");
 
-        // Night sky: the Milky Way band is always drawn on a clear night; the
-        // aurora is an opt-in drifting curtain effect (0 = off).
+        // Night sky: stars + the dense Milky Way band and the space nebula rotate
+        // with time-of-day; the aurora is drifting ribbons that sweep the sky.
         ImGui::SeparatorText("Night Sky");
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::SliderFloat("##milkyway", &ctx.editorConfig.MilkyWayIntensity,
+                           0.0f, 1.0f, "Milky Way: %.2f");
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::SliderFloat("##nebula", &ctx.editorConfig.NebulaIntensity,
+                           0.0f, 1.0f, "Space Nebula: %.2f");
+        ImGui::ColorEdit3("Nebula Color", &ctx.editorConfig.NebulaColor.x);
         ImGui::SetNextItemWidth(-1.0f);
         ImGui::SliderFloat("##aurora", &ctx.editorConfig.AuroraIntensity,
                            0.0f, 1.0f, "Aurora: %.2f");
-        ImGui::TextDisabled("Aurora & Milky Way appear at night (clear sky).");
+        ImGui::ColorEdit3("Aurora Color", &ctx.editorConfig.AuroraColor.x);
+        ImGui::TextDisabled("Stars, Milky Way & nebula turn with the day; aurora drifts.");
     }
 
     ImGui::End();
