@@ -103,6 +103,7 @@ private:
 	int          m_uLightColor    = -1;
 	int          m_uLightParams   = -1;
 	int          m_uCameraPos     = -1;
+	int          m_uSunDir        = -1;   // toward-sun dir for image-based ambient
 	int          m_uLightVP       = -1;   // directional-light view-proj (shadow)
 	int          m_uShadowMap     = -1;   // shadow map sampler unit
 	int          m_uShadowEnabled = -1;
@@ -127,6 +128,12 @@ private:
 	unsigned int m_depthProgram   = 0;   // depth-only pass (lightVP * model * pos)
 	int          m_uDepthMVP      = -1;
 	void CreateShadowResources();
+
+	// ── Procedural skybox (drawn into the HDR target behind the scene) ───────
+	unsigned int m_skyProgram     = 0;
+	int          m_uSkyInvVP      = -1;
+	int          m_uSkySunDir     = -1;
+	void CreateSkyPipeline();
 
 	// ── HDR scene color + tonemap (PostProcessPass) ─────────────────────────
 	// GeometryPass renders into an RGBA16F target; PostProcessPass tonemaps it

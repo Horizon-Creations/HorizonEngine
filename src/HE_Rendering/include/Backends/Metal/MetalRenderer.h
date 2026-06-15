@@ -87,6 +87,9 @@ private:
 	// Encodes the scene draw calls into the given encoder (any render pass
 	// whose attachments match the scene pipeline formats).
 	void EncodeScene(void* renderEncoder, int width, int height);
+	// Procedural skybox: fills the HDR target's background before the scene.
+	void* m_skyPipeline = nullptr; // id<MTLRenderPipelineState>
+	void  EncodeSky(void* renderEncoder, const glm::mat4& invViewProj, const glm::vec3& sunDir);
 	// (Re)creates the offscreen viewport textures at the requested size.
 	void EnsureViewportTarget();
 	void DestroyViewportTarget();

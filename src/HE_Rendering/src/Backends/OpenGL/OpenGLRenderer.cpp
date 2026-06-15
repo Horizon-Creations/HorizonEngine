@@ -50,6 +50,10 @@ uniform bool      uHasTexture;
 uniform sampler2D uTexture;
 uniform float     uMetallic;    // 0 dielectric … 1 metal
 uniform float     uRoughness;   // 0 mirror … 1 fully rough
+uniform vec3      uSunDir;      // direction toward the sun (for image-based ambient)
+
+// shared skyColor() is injected at the marker below (CreateUnlitPipeline)
+//#SKYFUNC#
 
 // Directional-light shadow map
 uniform mat4      uLightVP;
@@ -91,8 +95,15 @@ void main()
 	float shininess    = mix(128.0, 8.0, uRoughness);
 	float specScale    = mix(0.5, 0.03, uRoughness);
 
-	vec3 V      = normalize(uCameraPos - vWorldPos);
-	vec3 result = 0.08 * albedo; // ambient floor
+	vec3 V = normalize(uCameraPos - vWorldPos);
+
+	// Image-based ambient from the procedural sky (replaces the flat floor):
+	// diffuse from the surface normal, specular from the reflection vector
+	// (bent toward the normal as roughness grows = crude prefilter).
+	vec3 Rrough  = normalize(mix(reflect(-V, N), N, uRoughness));
+	vec3 ambDiff = skyColor(N, uSunDir)      * diffuseColor;
+	vec3 ambSpec = skyColor(Rrough, uSunDir) * specColor;
+	vec3 result  = ambDiff * 0.35 + ambSpec * (1.0 - 0.6 * uRoughness);
 
 	for (int i = 0; i < uLightCount; ++i)
 	{
@@ -128,6 +139,79 @@ void main()
 		        * uLightColor[i].rgb * uLightColor[i].w * atten * sh;
 	}
 	FragColor = vec4(result, 1.0);
+}
+)GLSL";
+
+// ─── Procedural skybox (drawn into the HDR target behind the scene) ─────────
+// Fullscreen triangle at the far plane; reconstructs a world-space ray per
+// pixel from the inverse view-projection and evaluates the same skyColor() the
+// scene shader uses for ambient, so background and reflections match.
+static const char* kSkyVS = R"GLSL(
+#version 410 core
+out vec2 vNDC;
+void main()
+{
+	vec2 p = vec2(float((gl_VertexID & 1) << 2) - 1.0,
+	              float((gl_VertexID & 2) << 1) - 1.0);
+	vNDC = p;
+	gl_Position = vec4(p, 1.0, 1.0); // z = far plane
+}
+)GLSL";
+
+static const char* kSkyFS = R"GLSL(
+#version 410 core
+in vec2 vNDC;
+uniform mat4 uInvViewProj;
+uniform vec3 uSunDir;
+out vec4 FragColor;
+//#SKYFUNC#
+void main()
+{
+	vec4 wp1 = uInvViewProj * vec4(vNDC,  1.0, 1.0);
+	vec4 wp0 = uInvViewProj * vec4(vNDC, -1.0, 1.0);
+	vec3 dir = wp1.xyz / wp1.w - wp0.xyz / wp0.w;
+	FragColor = vec4(skyColor(dir, uSunDir), 1.0);
+}
+)GLSL";
+
+// Shared analytic sky, injected (via the //#SKYFUNC# marker) into both the
+// skybox FS and the scene FS so background and image-based ambient match. The
+// sky's mood is driven by the sun's elevation (sunDir.y): a daytime blue sky
+// warms and reddens at the horizon as the sun sets and dims into night.
+static const char* kSkyFuncGLSL = R"GLSL(
+vec3 skyColor(vec3 dir, vec3 sunDir)
+{
+	dir    = normalize(dir);
+	sunDir = normalize(sunDir);
+	float sunY = clamp(sunDir.y, -0.2, 1.0);
+	float day  = smoothstep(-0.10, 0.10, sunY);                 // 0 night → 1 day
+	float dusk = smoothstep(-0.06, 0.05, sunY)
+	           * (1.0 - smoothstep(0.05, 0.28, sunY));          // peaks near horizon
+
+	vec3 zenithDay  = vec3(0.08, 0.28, 0.72);
+	vec3 horizDay   = vec3(0.42, 0.62, 0.88);
+	vec3 zenithNite = vec3(0.012, 0.016, 0.05);
+	vec3 horizNite  = vec3(0.03, 0.04, 0.10);
+	vec3 zenith  = mix(zenithNite, zenithDay, day);
+	vec3 horizon = mix(horizNite,  horizDay,  day);
+	horizon = mix(horizon, vec3(0.95, 0.45, 0.22), dusk);       // warm sunset band
+
+	float h    = clamp(dir.y, 0.0, 1.0);
+	float grad = pow(1.0 - h, 2.5);                             // horizon-weighted
+	vec3 sky = mix(zenith, horizon, grad);
+
+	// Below the horizon: ease into a soft ground haze over a wide band so the
+	// sky stays atmospheric just under the horizon line.
+	vec3 ground = mix(vec3(0.02, 0.02, 0.03), vec3(0.24, 0.23, 0.21), day);
+	sky = mix(sky, ground, smoothstep(0.0, -0.25, dir.y));
+
+	// Sun disk + glow, tinted warm near the horizon, white when high.
+	vec3  sunTint = mix(vec3(1.0, 0.42, 0.20), vec3(1.0, 0.96, 0.88),
+	                    smoothstep(0.0, 0.25, sunY));
+	float s = max(dot(dir, sunDir), 0.0);
+	sky += sunTint * (pow(s, 1800.0) * 14.0) * day;             // crisp disk (blooms)
+	sky += sunTint * (pow(s, 7.0)    * 0.18) * max(day, dusk);  // soft halo
+	return sky;
 }
 )GLSL";
 
@@ -245,6 +329,17 @@ static GLuint CompileStage(GLenum stage, const char* src)
 	return shader;
 }
 
+// Replaces the //#SKYFUNC# marker with the shared skyColor() so the skybox and
+// scene shaders stay in sync from one source.
+static std::string injectSkyFunc(const char* src)
+{
+	std::string s = src;
+	const std::string marker = "//#SKYFUNC#";
+	if (size_t pos = s.find(marker); pos != std::string::npos)
+		s.replace(pos, marker.size(), kSkyFuncGLSL);
+	return s;
+}
+
 OpenGLRenderer::OpenGLRenderer()  = default;
 OpenGLRenderer::~OpenGLRenderer() = default;
 
@@ -264,6 +359,7 @@ void OpenGLRenderer::Initialize(HE::Window* window)
 	glEnable(GL_DEPTH_TEST);
 	CreateUnlitPipeline();
 	CreateShadowResources();
+	CreateSkyPipeline();
 	CreateTonemapPipeline();
 	CreateBloomPipeline();
 	CreateCubeMesh();
@@ -273,7 +369,7 @@ void OpenGLRenderer::Initialize(HE::Window* window)
 void OpenGLRenderer::CreateUnlitPipeline()
 {
 	GLuint vs = CompileStage(GL_VERTEX_SHADER,   kUnlitVS);
-	GLuint fs = CompileStage(GL_FRAGMENT_SHADER, kUnlitFS);
+	GLuint fs = CompileStage(GL_FRAGMENT_SHADER, injectSkyFunc(kUnlitFS).c_str());
 
 	m_unlitProgram = glCreateProgram();
 	glAttachShader(m_unlitProgram, vs);
@@ -304,6 +400,7 @@ void OpenGLRenderer::CreateUnlitPipeline()
 	m_uLightColor  = glGetUniformLocation(m_unlitProgram, "uLightColor");
 	m_uLightParams = glGetUniformLocation(m_unlitProgram, "uLightParams");
 	m_uCameraPos   = glGetUniformLocation(m_unlitProgram, "uCameraPos");
+	m_uSunDir      = glGetUniformLocation(m_unlitProgram, "uSunDir");
 	m_uLightVP       = glGetUniformLocation(m_unlitProgram, "uLightVP");
 	m_uShadowMap     = glGetUniformLocation(m_unlitProgram, "uShadowMap");
 	m_uShadowEnabled = glGetUniformLocation(m_unlitProgram, "uShadowEnabled");
@@ -342,6 +439,29 @@ void OpenGLRenderer::CreateShadowResources()
 	glReadBuffer(GL_NONE);
 	glBindTexture(GL_TEXTURE_2D, 0);
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+void OpenGLRenderer::CreateSkyPipeline()
+{
+	GLuint vs = CompileStage(GL_VERTEX_SHADER,   kSkyVS);
+	GLuint fs = CompileStage(GL_FRAGMENT_SHADER, injectSkyFunc(kSkyFS).c_str());
+	m_skyProgram = glCreateProgram();
+	glAttachShader(m_skyProgram, vs);
+	glAttachShader(m_skyProgram, fs);
+	glLinkProgram(m_skyProgram);
+	glDeleteShader(vs);
+	glDeleteShader(fs);
+
+	GLint ok = 0;
+	glGetProgramiv(m_skyProgram, GL_LINK_STATUS, &ok);
+	if (!ok)
+	{
+		GLchar log[512];
+		glGetProgramInfoLog(m_skyProgram, sizeof(log), nullptr, log);
+		throw std::runtime_error(std::string("OpenGLRenderer: sky link failed: ") + log);
+	}
+	m_uSkyInvVP  = glGetUniformLocation(m_skyProgram, "uInvViewProj");
+	m_uSkySunDir = glGetUniformLocation(m_skyProgram, "uSunDir");
 }
 
 void OpenGLRenderer::CreateTonemapPipeline()
@@ -755,6 +875,7 @@ void OpenGLRenderer::Shutdown()
 	if (m_cubeEBO)      { glDeleteBuffers(1, &m_cubeEBO);      m_cubeEBO = 0; }
 	if (m_unlitProgram) { glDeleteProgram(m_unlitProgram);     m_unlitProgram = 0; }
 	if (m_depthProgram) { glDeleteProgram(m_depthProgram);     m_depthProgram = 0; }
+	if (m_skyProgram)   { glDeleteProgram(m_skyProgram);       m_skyProgram = 0; }
 	if (m_tonemapProgram) { glDeleteProgram(m_tonemapProgram); m_tonemapProgram = 0; }
 	if (m_bloomBrightProgram) { glDeleteProgram(m_bloomBrightProgram); m_bloomBrightProgram = 0; }
 	if (m_blurProgram)    { glDeleteProgram(m_blurProgram);    m_blurProgram = 0; }
@@ -896,7 +1017,15 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	                    &m_editorCamera);
 	if (m_renderWorld.objects.empty()) return;
 
-	const glm::mat4 viewProj = m_renderWorld.camera.projection * m_renderWorld.camera.view;
+	const glm::mat4 viewProj    = m_renderWorld.camera.projection * m_renderWorld.camera.view;
+	const glm::mat4 invViewProj = glm::inverse(viewProj);
+
+	// Direction toward the sun for the sky + image-based ambient: first
+	// directional light if any, else a default high sun.
+	glm::vec3 sunDir(0.45f, 0.80f, 0.55f);
+	for (const LightData& l : m_renderWorld.lights)
+		if (l.type == 0) { sunDir = -l.direction; break; } // 0 = directional
+	if (glm::dot(sunDir, sunDir) > 1e-8f) sunDir = glm::normalize(sunDir);
 
 	// ── Refine bounds with real mesh AABBs (also uploads new meshes) ────────
 	for (RenderObject& obj : m_renderWorld.objects)
@@ -987,8 +1116,26 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		glViewport(0, 0, pw, ph);
 		glClearColor(0.18f, 0.18f, 0.20f, 1.0f);
 		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+		// ── Skybox: fill the background with the procedural sky (into the HDR
+		// target so the sun blooms). Drawn first, no depth write, so the scene
+		// draws over it. ──
+		if (m_skyProgram)
+		{
+			glDepthMask(GL_FALSE);
+			glDisable(GL_DEPTH_TEST);
+			glUseProgram(m_skyProgram);
+			glUniformMatrix4fv(m_uSkyInvVP, 1, GL_FALSE, glm::value_ptr(invViewProj));
+			glUniform3fv(m_uSkySunDir, 1, glm::value_ptr(sunDir));
+			glBindVertexArray(m_fsVAO);
+			glDrawArrays(GL_TRIANGLES, 0, 3);
+			glEnable(GL_DEPTH_TEST);
+			glDepthMask(GL_TRUE);
+		}
+
 		glUseProgram(m_unlitProgram);
 		glUniform1i(m_uTexture, 0); // base color tint (uColor) is set per draw below
+		glUniform3fv(m_uSunDir, 1, glm::value_ptr(sunDir));
 
 		// Lights (clamped to the shader's MAX_LIGHTS)
 		{
