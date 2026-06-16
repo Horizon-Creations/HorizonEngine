@@ -379,6 +379,58 @@ fragment float4 tonemapFragment(TMOut in [[stage_in]],
 }
 )MSL";
 
+// FXAA (Timothy Lottes' classic edge-blend variant) — mirrors the GL kFxaaFS.
+// Runs on the tonemapped (gamma-space) LDR image; also softens the single-pixel
+// raymarch speckle the clouds leave in near-clear sky. Same fullscreen-tri UV
+// convention as the other post passes (1:1 mapping, no double flip).
+static const char* kFxaaMSL = R"MSL(
+#include <metal_stdlib>
+using namespace metal;
+struct FXOut { float4 position [[position]]; float2 uv; };
+vertex FXOut fxaaVertex(uint vid [[vertex_id]])
+{
+	float x = float((vid & 1) << 2) - 1.0;
+	float y = float((vid & 2) << 1) - 1.0;
+	FXOut o;
+	o.position = float4(x, y, 0.0, 1.0);
+	o.uv       = float2(x * 0.5 + 0.5, 1.0 - (y * 0.5 + 0.5));
+	return o;
+}
+static float fxLuma(float3 c) { return dot(c, float3(0.299, 0.587, 0.114)); }
+fragment float4 fxaaFragment(FXOut in [[stage_in]],
+                             texture2d<float> scene [[texture(0)]],
+                             constant float2& rcpFrame [[buffer(0)]])
+{
+	constexpr sampler s(filter::linear, address::clamp_to_edge);
+	const float EDGE_MIN = 1.0 / 24.0;
+	const float EDGE_MAX = 1.0 / 8.0;
+	const float SPAN_MAX = 8.0;
+	float2 uv  = in.uv;
+	float3 rgbM = scene.sample(s, uv).rgb;
+	float lM  = fxLuma(rgbM);
+	float lNW = fxLuma(scene.sample(s, uv, int2(-1, -1)).rgb);
+	float lNE = fxLuma(scene.sample(s, uv, int2( 1, -1)).rgb);
+	float lSW = fxLuma(scene.sample(s, uv, int2(-1,  1)).rgb);
+	float lSE = fxLuma(scene.sample(s, uv, int2( 1,  1)).rgb);
+	float lMin = min(lM, min(min(lNW, lNE), min(lSW, lSE)));
+	float lMax = max(lM, max(max(lNW, lNE), max(lSW, lSE)));
+	float range = lMax - lMin;
+	if (range < max(EDGE_MIN, lMax * EDGE_MAX)) return float4(rgbM, 1.0);
+	float2 dir;
+	dir.x = -((lNW + lNE) - (lSW + lSE));
+	dir.y =  ((lNW + lSW) - (lNE + lSE));
+	float dirReduce = max((lNW + lNE + lSW + lSE) * 0.25 * (1.0 / 8.0), 1.0 / 128.0);
+	float rcpDirMin = 1.0 / (min(abs(dir.x), abs(dir.y)) + dirReduce);
+	dir = clamp(dir * rcpDirMin, -SPAN_MAX, SPAN_MAX) * rcpFrame;
+	float3 rgbA = 0.5 * (scene.sample(s, uv + dir * (1.0 / 3.0 - 0.5)).rgb
+	                   + scene.sample(s, uv + dir * (2.0 / 3.0 - 0.5)).rgb);
+	float3 rgbB = rgbA * 0.5 + 0.25 * (scene.sample(s, uv + dir * -0.5).rgb
+	                                 + scene.sample(s, uv + dir *  0.5).rgb);
+	float lB = fxLuma(rgbB);
+	return (lB < lMin || lB > lMax) ? float4(rgbA, 1.0) : float4(rgbB, 1.0);
+}
+)MSL";
+
 // Bloom bright-pass + separable Gaussian blur. Reuses the fullscreen-triangle VS
 // (1:1 upright mapping, same convention as the tonemap pass). Mirrors the GL
 // kBloomBrightFS / kBloomBlurFS shaders.
@@ -659,8 +711,9 @@ float cloudDensity(float3 pos, float time, float coverage, float3 wind,
 	float  lo     = mix(0.70, 0.22, clamp(coverage, 0.0, 1.0));
 	return smoothstep(lo, lo + 0.13, base) * hgrad;
 }
-// Cheaper density for the sun light-march: shadows are low-frequency, so one perlin
-// pair + one Worley tap is plenty (and skips the slab miss for free).
+// Density for the sun light-march. Slightly fewer octaves than the view density
+// (shadows are lower-frequency); the slab-height test bails with zero fetches when
+// the sun-ward sample steps out of the slab.
 float cloudShadowDensity(float3 pos, float time, float coverage, float3 wind,
                          texture3d<float> noiseTex, sampler noiseSamp)
 {
@@ -668,8 +721,9 @@ float cloudShadowDensity(float3 pos, float time, float coverage, float3 wind,
 	if (hgrad <= 0.0) return 0.0;
 	float3 p      = pos * kCloudScale + wind * time;
 	float  morph  = time * 0.030;
-	float  perlin = starFbm3(p + float3(0.0, morph, 0.0), 2, noiseTex, noiseSamp); // 2 taps
-	float  billow = worleyNoise3(p * 0.9 + float3(morph, 0.0, 0.0), noiseTex, noiseSamp); // 1 tap
+	float  perlin = starFbm3(p + float3(0.0, morph, 0.0), 3, noiseTex, noiseSamp);
+	float  billow = worleyNoise3(p * 0.9 + float3(morph, 0.0, 0.0), noiseTex, noiseSamp) * 0.7
+	              + worleyNoise3(p * 1.8, noiseTex, noiseSamp) * 0.3;
 	float  base   = perlin * 0.5 + billow * 0.55;
 	float  lo     = mix(0.70, 0.22, clamp(coverage, 0.0, 1.0));
 	return smoothstep(lo, lo + 0.13, base) * hgrad;
@@ -687,7 +741,7 @@ float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float time, float 
 	// that show up as visible horizontal cloud layers near grazing view angles.
 	float s0 = kCloudBase / max(dir.y, 1e-3);
 	float s1 = kCloudTop  / max(dir.y, 1e-3);
-	const int N = 10;
+	const int N = 16;
 	float ds = (s1 - s0) / float(N);
 	float jitter = cloudHash(dir.xz * 173.3 + float2(dir.y * 37.1, dir.y * 19.7));
 
@@ -709,16 +763,12 @@ float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float time, float 
 		float  dens = cloudDensity(pos, time, coverage, wind, noiseTex, noiseSamp);
 		if (dens > 0.001)
 		{
-			// Light-march toward the sun: Beer's-law self-shadowing. Only substantial
-			// cloud needs it — thin wisps (dens <= 0.04) are translucent and read as
-			// lit anyway, so skip the light-march taps there.
-			float sun = 1.0;
-			if (dens > 0.04)
-			{
-				float shadow = cloudShadowDensity(pos + sunDir * 0.35, time, coverage, wind, noiseTex, noiseSamp)
-				             + cloudShadowDensity(pos + sunDir * 0.70, time, coverage, wind, noiseTex, noiseSamp);
-				sun = exp(-shadow * 2.3);
-			}
+			// Light-march toward the sun: Beer's-law self-shadowing (3 steps for a
+			// smooth shadow gradient; fewer steps undersample and flicker).
+			float shadow = 0.0;
+			for (int j = 1; j <= 3; ++j)
+				shadow += cloudShadowDensity(pos + sunDir * (float(j) * 0.25), time, coverage, wind, noiseTex, noiseSamp);
+			float sun    = exp(-shadow * 1.7);
 			float powder = 1.0 - exp(-dens * 3.0); // dark soft edges (powder effect)
 			float lit    = sun * powder;
 
@@ -1074,8 +1124,10 @@ void MetalRenderer::Shutdown()
 	DestroyViewportTarget();
 	DestroyHDRTarget();
 	DestroyBloomTargets();
+	DestroyLdrTarget();
 	DrainRetiredTextures();
 	if (m_tonemapPipeline)      { CFBridgingRelease(m_tonemapPipeline);      m_tonemapPipeline = nullptr; }
+	if (m_fxaaPipeline)         { CFBridgingRelease(m_fxaaPipeline);         m_fxaaPipeline = nullptr; }
 	if (m_bloomBrightPipeline)  { CFBridgingRelease(m_bloomBrightPipeline);  m_bloomBrightPipeline = nullptr; }
 	if (m_blurPipeline)         { CFBridgingRelease(m_blurPipeline);         m_blurPipeline = nullptr; }
 	if (m_skyPipeline)          { CFBridgingRelease(m_skyPipeline);          m_skyPipeline = nullptr; }
@@ -1146,6 +1198,24 @@ void MetalRenderer::CreateScenePipeline()
 			throw std::runtime_error(std::string("MetalRenderer: tonemap pipeline creation failed: ")
 				+ (tmError ? [[tmError localizedDescription] UTF8String] : "unknown"));
 		m_tonemapPipeline = (void*)CFBridgingRetain(tmPso);
+
+		// ── FXAA pipeline (LDR → LDR, same output format + depth as tonemap) ─
+		NSError* fxError = nil;
+		id<MTLLibrary> fxLib = [device newLibraryWithSource:
+			[NSString stringWithUTF8String:kFxaaMSL] options:nil error:&fxError];
+		if (!fxLib)
+			throw std::runtime_error(std::string("MetalRenderer: FXAA shader compile failed: ")
+				+ (fxError ? [[fxError localizedDescription] UTF8String] : "unknown"));
+		MTLRenderPipelineDescriptor* fxDesc = [[MTLRenderPipelineDescriptor alloc] init];
+		fxDesc.vertexFunction   = [fxLib newFunctionWithName:@"fxaaVertex"];
+		fxDesc.fragmentFunction = [fxLib newFunctionWithName:@"fxaaFragment"];
+		fxDesc.colorAttachments[0].pixelFormat = kSwapchainFormat; // LDR output
+		fxDesc.depthAttachmentPixelFormat      = kDepthFormat;     // both targets carry depth
+		id<MTLRenderPipelineState> fxPso = [device newRenderPipelineStateWithDescriptor:fxDesc error:&fxError];
+		if (!fxPso)
+			throw std::runtime_error(std::string("MetalRenderer: FXAA pipeline creation failed: ")
+				+ (fxError ? [[fxError localizedDescription] UTF8String] : "unknown"));
+		m_fxaaPipeline = (void*)CFBridgingRetain(fxPso);
 
 		// ── Bloom pipelines (bright-pass + blur, into RGBA16F, no depth) ────
 		NSError* blError = nil;
@@ -1900,6 +1970,43 @@ void MetalRenderer::EncodeTonemap(void* renderEncoderPtr)
 	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
 }
 
+// LDR intermediate the tonemap writes to and FXAA reads from. kSwapchainFormat so
+// the tonemap pipeline (which targets that format) is valid; recreated on resize.
+void MetalRenderer::EnsureLdrTarget(int width, int height)
+{
+	width  = std::max(1, width);
+	height = std::max(1, height);
+	if (m_ldrColor && width == m_ldrW && height == m_ldrH) return;
+	DestroyLdrTarget();
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	MTLTextureDescriptor* desc = [MTLTextureDescriptor
+		texture2DDescriptorWithPixelFormat:kSwapchainFormat width:width height:height mipmapped:NO];
+	desc.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+	desc.storageMode = MTLStorageModePrivate;
+	m_ldrColor = (void*)CFBridgingRetain([device newTextureWithDescriptor:desc]);
+	m_ldrW = width;
+	m_ldrH = height;
+}
+
+void MetalRenderer::DestroyLdrTarget()
+{
+	if (m_ldrColor) { CFBridgingRelease(m_ldrColor); m_ldrColor = nullptr; }
+	m_ldrW = m_ldrH = 0;
+}
+
+// Fullscreen FXAA of the tonemapped LDR image into the bound encoder's target.
+void MetalRenderer::EncodeFxaa(void* renderEncoderPtr, int width, int height)
+{
+	if (!m_fxaaPipeline || !m_ldrColor) return;
+	id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoderPtr;
+	[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_fxaaPipeline];
+	[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_noDepthState];
+	[enc setFragmentTexture:(__bridge id<MTLTexture>)m_ldrColor atIndex:0];
+	const simd::float2 rcpFrame = { 1.0f / (float)std::max(1, width), 1.0f / (float)std::max(1, height) };
+	[enc setFragmentBytes:&rcpFrame length:sizeof(rcpFrame) atIndex:0];
+	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+}
+
 // ─── Frame encoding ───────────────────────────────────────────────────────────
 
 void MetalRenderer::EncodeSky(void* renderEncoder, const glm::mat4& invViewProj,
@@ -2197,27 +2304,44 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			[sceneEncoder endEncoding];
 
 			// Bright-pass + blur the HDR target into the half-res bloom buffer;
-			// EncodeTonemap (offscreen or direct below) composites it back in.
-			// Skipped when bloom is disabled (m_bloomResult stays null → no glow).
+			// the tonemap below composites it back in. Skipped when bloom is
+			// disabled (m_bloomResult stays null → no glow).
 			m_bloomResult = m_bloomEnabled ? EncodeBloom((__bridge void*)cmdBuf, sceneW, sceneH)
 			                               : nullptr;
 
-			// Tonemap HDR → offscreen viewport texture (shown by the editor).
-			if (offscreen)
+			// Tonemap HDR → LDR intermediate; FXAA reads it next (for both the editor
+			// viewport and the direct-to-drawable path). m_hdrDepth is a DontCare
+			// depth so the (depth-carrying) tonemap pipeline stays valid.
+			EnsureLdrTarget(sceneW, sceneH);
 			{
-				EnsureViewportTarget();
 				MTLRenderPassDescriptor* tmPass = [MTLRenderPassDescriptor renderPassDescriptor];
-				tmPass.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_viewportColor;
+				tmPass.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_ldrColor;
 				tmPass.colorAttachments[0].loadAction  = MTLLoadActionDontCare;
 				tmPass.colorAttachments[0].storeAction = MTLStoreActionStore;
-				tmPass.depthAttachment.texture     = (__bridge id<MTLTexture>)m_viewportDepth;
+				tmPass.depthAttachment.texture     = (__bridge id<MTLTexture>)m_hdrDepth;
 				tmPass.depthAttachment.loadAction  = MTLLoadActionDontCare;
 				tmPass.depthAttachment.storeAction = MTLStoreActionDontCare;
-
 				id<MTLRenderCommandEncoder> tmEncoder =
 					[cmdBuf renderCommandEncoderWithDescriptor:tmPass];
 				EncodeTonemap((__bridge void*)tmEncoder);
 				[tmEncoder endEncoding];
+			}
+
+			// FXAA LDR → offscreen viewport texture (shown by the editor).
+			if (offscreen)
+			{
+				EnsureViewportTarget();
+				MTLRenderPassDescriptor* fxPass = [MTLRenderPassDescriptor renderPassDescriptor];
+				fxPass.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_viewportColor;
+				fxPass.colorAttachments[0].loadAction  = MTLLoadActionDontCare;
+				fxPass.colorAttachments[0].storeAction = MTLStoreActionStore;
+				fxPass.depthAttachment.texture     = (__bridge id<MTLTexture>)m_viewportDepth;
+				fxPass.depthAttachment.loadAction  = MTLLoadActionDontCare;
+				fxPass.depthAttachment.storeAction = MTLStoreActionDontCare;
+				id<MTLRenderCommandEncoder> fxEncoder =
+					[cmdBuf renderCommandEncoderWithDescriptor:fxPass];
+				EncodeFxaa((__bridge void*)fxEncoder, sceneW, sceneH);
+				[fxEncoder endEncoding];
 			}
 			else if (m_viewportColor)
 				DestroyViewportTarget();
@@ -2239,9 +2363,9 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 
 			id<MTLRenderCommandEncoder> encoder = [cmdBuf renderCommandEncoderWithDescriptor:pass];
 
-			// Direct-to-window (game/no editor viewport): tonemap HDR → drawable.
+			// Direct-to-window (game/no editor viewport): FXAA the tonemapped LDR → drawable.
 			if (isPrimary && !offscreen)
-				EncodeTonemap((__bridge void*)encoder);
+				EncodeFxaa((__bridge void*)encoder, pw, ph);
 
 			// ── Overlay (ImGui) ─────────────────────────────────────────────
 			if (isPrimary && m_overlayCallback)

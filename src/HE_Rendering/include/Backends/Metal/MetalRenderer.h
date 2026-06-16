@@ -169,7 +169,18 @@ private:
 	int   m_hdrH            = 0;
 	void  EnsureHDRTarget(int width, int height);
 	void  DestroyHDRTarget();
-	void  EncodeTonemap(void* renderEncoder); // fullscreen tonemap of m_hdrColor
+	void  EncodeTonemap(void* renderEncoder); // fullscreen tonemap of m_hdrColor → LDR
+
+	// ── FXAA (edge antialiasing) ─────────────────────────────────────────────
+	// Tonemap writes to m_ldrColor; this pass reads it, runs FXAA on the gamma-space
+	// luma and writes the antialiased result to the output (viewport or drawable).
+	void* m_fxaaPipeline = nullptr; // id<MTLRenderPipelineState>
+	void* m_ldrColor     = nullptr; // id<MTLTexture> (retained), tonemap out / FXAA in
+	int   m_ldrW         = 0;
+	int   m_ldrH         = 0;
+	void  EnsureLdrTarget(int width, int height);
+	void  DestroyLdrTarget();
+	void  EncodeFxaa(void* renderEncoder, int width, int height); // FXAA of m_ldrColor
 
 	// ── Bloom (bright-pass + separable Gaussian blur on the HDR target) ──────
 	// Mirrors the GL backend: highlights above a soft-knee threshold are blurred
