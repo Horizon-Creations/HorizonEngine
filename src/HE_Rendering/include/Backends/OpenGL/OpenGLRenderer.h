@@ -177,6 +177,20 @@ private:
 	void EnsureHDRTarget(int width, int height);
 	void DestroyHDRTarget();
 
+	// ── FXAA (edge antialiasing) ─────────────────────────────────────────────
+	// The tonemap pass writes its LDR result into m_ldrColor instead of straight
+	// to the output; this pass reads that texture, runs FXAA on the perceptual
+	// (gamma-space) luma and writes the antialiased result to the output. Always on.
+	unsigned int m_fxaaProgram   = 0;
+	int          m_uFxaaScene    = -1;
+	int          m_uFxaaRcpFrame = -1;
+	unsigned int m_ldrFBO        = 0;
+	unsigned int m_ldrColor      = 0;   // RGBA8 tonemap output, FXAA input
+	int          m_ldrW          = 0;
+	int          m_ldrH          = 0;
+	void EnsureLdrTarget(int width, int height);
+	void DestroyLdrTarget();
+
 	// ── Bloom (bright-pass + separable Gaussian blur on the HDR target) ──────
 	// The bright pass extracts highlights above a soft-knee threshold into a
 	// half-res RGBA16F target; two ping-pong buffers blur it; the tonemap pass

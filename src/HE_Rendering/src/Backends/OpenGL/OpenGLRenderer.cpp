@@ -554,16 +554,18 @@ float cloudDensity(vec3 pos, float time, float coverage, vec3 wind)
 	float lo     = mix(0.70, 0.22, clamp(coverage, 0.0, 1.0));
 	return smoothstep(lo, lo + 0.13, base) * hgrad;
 }
-// Cheaper density for the sun light-march: shadows are low-frequency, so one perlin
-// pair + one Worley tap is plenty (and skips the slab miss for free).
+// Density for the sun light-march. Slightly fewer octaves than the view density
+// (shadows are lower-frequency); the slab-height test bails with zero fetches when
+// the sun-ward sample steps out of the slab.
 float cloudShadowDensity(vec3 pos, float time, float coverage, vec3 wind)
 {
 	float hgrad = cloudHeightGrad(pos.y);
 	if (hgrad <= 0.0) return 0.0;
 	vec3  p      = pos * kCloudScale + wind * time;
 	float morph  = time * 0.030;
-	float perlin = starFbm3(p + vec3(0.0, morph, 0.0), 2);        // 2 taps
-	float billow = worleyNoise3(p * 0.9 + vec3(morph, 0.0, 0.0)); // 1 tap
+	float perlin = starFbm3(p + vec3(0.0, morph, 0.0), 3);
+	float billow = worleyNoise3(p * 0.9 + vec3(morph, 0.0, 0.0)) * 0.7
+	             + worleyNoise3(p * 1.8) * 0.3;
 	float base   = perlin * 0.5 + billow * 0.55;
 	float lo     = mix(0.70, 0.22, clamp(coverage, 0.0, 1.0));
 	return smoothstep(lo, lo + 0.13, base) * hgrad;
@@ -580,7 +582,7 @@ vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float time, float coverage
 	// that show up as visible horizontal cloud layers near grazing view angles.
 	float s0 = kCloudBase / max(dir.y, 1e-3);
 	float s1 = kCloudTop  / max(dir.y, 1e-3);
-	const int N = 10;
+	const int N = 16;
 	float ds = (s1 - s0) / float(N);
 	float jitter = cloudHash(dir.xz * 173.3 + vec2(dir.y * 37.1, dir.y * 19.7));
 
@@ -602,16 +604,12 @@ vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float time, float coverage
 		float dens = cloudDensity(pos, time, coverage, wind);
 		if (dens > 0.001)
 		{
-			// Light-march toward the sun: Beer's-law self-shadowing. Only substantial
-			// cloud needs it — thin wisps (dens <= 0.04) are translucent and read as
-			// lit anyway, so skip the light-march taps there.
-			float sun = 1.0;
-			if (dens > 0.04)
-			{
-				float shadow = cloudShadowDensity(pos + sunDir * 0.35, time, coverage, wind)
-				             + cloudShadowDensity(pos + sunDir * 0.70, time, coverage, wind);
-				sun = exp(-shadow * 2.3);
-			}
+			// Light-march toward the sun: Beer's-law self-shadowing (3 steps for a
+			// smooth shadow gradient; fewer steps undersample and flicker).
+			float shadow = 0.0;
+			for (int j = 1; j <= 3; ++j)
+				shadow += cloudShadowDensity(pos + sunDir * (float(j) * 0.25), time, coverage, wind);
+			float sun    = exp(-shadow * 1.7);
 			float powder = 1.0 - exp(-dens * 3.0); // dark soft edges (powder effect)
 			float lit    = sun * powder;
 
@@ -880,6 +878,52 @@ void main()
 	vec3 mapped = aces(hdr);
 	mapped      = pow(mapped, vec3(1.0 / 2.2));
 	FragColor   = vec4(mapped, 1.0);
+}
+)GLSL";
+
+// FXAA (Timothy Lottes' classic edge-blend variant): detect luma edges from the
+// 3x3 neighbourhood and blend along them, leaving flat areas untouched. Run on the
+// tonemapped (gamma-space) LDR image so its luma is perceptual. Also softens the
+// single-pixel raymarch speckle the clouds leave in near-clear sky.
+static const char* kFxaaFS = R"GLSL(
+#version 410 core
+in vec2 vUV;
+uniform sampler2D uScene;
+uniform vec2      uRcpFrame;   // 1.0 / resolution
+out vec4 FragColor;
+float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+void main()
+{
+	const float EDGE_MIN = 1.0 / 24.0;  // ignore tiny luma differences (no edge)
+	const float EDGE_MAX = 1.0 / 8.0;   // relative threshold scaled by local max luma
+	const float SPAN_MAX = 8.0;         // clamp on the blur search length (texels)
+
+	vec3  rgbM = texture(uScene, vUV).rgb;
+	float lM   = luma(rgbM);
+	float lNW  = luma(textureOffset(uScene, vUV, ivec2(-1, -1)).rgb);
+	float lNE  = luma(textureOffset(uScene, vUV, ivec2( 1, -1)).rgb);
+	float lSW  = luma(textureOffset(uScene, vUV, ivec2(-1,  1)).rgb);
+	float lSE  = luma(textureOffset(uScene, vUV, ivec2( 1,  1)).rgb);
+
+	float lMin = min(lM, min(min(lNW, lNE), min(lSW, lSE)));
+	float lMax = max(lM, max(max(lNW, lNE), max(lSW, lSE)));
+	float range = lMax - lMin;
+	if (range < max(EDGE_MIN, lMax * EDGE_MAX)) { FragColor = vec4(rgbM, 1.0); return; }
+
+	// Edge tangent from the diagonal luma gradients.
+	vec2 dir;
+	dir.x = -((lNW + lNE) - (lSW + lSE));
+	dir.y =  ((lNW + lSW) - (lNE + lSE));
+	float dirReduce = max((lNW + lNE + lSW + lSE) * 0.25 * (1.0 / 8.0), 1.0 / 128.0);
+	float rcpDirMin = 1.0 / (min(abs(dir.x), abs(dir.y)) + dirReduce);
+	dir = clamp(dir * rcpDirMin, -SPAN_MAX, SPAN_MAX) * uRcpFrame;
+
+	vec3 rgbA = 0.5 * (texture(uScene, vUV + dir * (1.0 / 3.0 - 0.5)).rgb
+	                 + texture(uScene, vUV + dir * (2.0 / 3.0 - 0.5)).rgb);
+	vec3 rgbB = rgbA * 0.5 + 0.25 * (texture(uScene, vUV + dir * -0.5).rgb
+	                               + texture(uScene, vUV + dir *  0.5).rgb);
+	float lB = luma(rgbB);
+	FragColor = (lB < lMin || lB > lMax) ? vec4(rgbA, 1.0) : vec4(rgbB, 1.0);
 }
 )GLSL";
 
@@ -1169,8 +1213,57 @@ void OpenGLRenderer::CreateTonemapPipeline()
 	m_uBloomTex      = glGetUniformLocation(m_tonemapProgram, "uBloom");
 	m_uBloomStrength = glGetUniformLocation(m_tonemapProgram, "uBloomStrength");
 
+	// FXAA program (shares the fullscreen-triangle VS).
+	{
+		GLuint fvs = CompileStage(GL_VERTEX_SHADER,   kTonemapVS);
+		GLuint ffs = CompileStage(GL_FRAGMENT_SHADER, kFxaaFS);
+		m_fxaaProgram = glCreateProgram();
+		glAttachShader(m_fxaaProgram, fvs);
+		glAttachShader(m_fxaaProgram, ffs);
+		glLinkProgram(m_fxaaProgram);
+		glDeleteShader(fvs);
+		glDeleteShader(ffs);
+		GLint fok = 0;
+		glGetProgramiv(m_fxaaProgram, GL_LINK_STATUS, &fok);
+		if (!fok)
+		{
+			GLchar log[512];
+			glGetProgramInfoLog(m_fxaaProgram, sizeof(log), nullptr, log);
+			throw std::runtime_error(std::string("OpenGLRenderer: FXAA link failed: ") + log);
+		}
+		m_uFxaaScene    = glGetUniformLocation(m_fxaaProgram, "uScene");
+		m_uFxaaRcpFrame = glGetUniformLocation(m_fxaaProgram, "uRcpFrame");
+	}
+
 	// Core profile needs a bound VAO for glDrawArrays even with no attributes.
 	glGenVertexArrays(1, &m_fsVAO);
+}
+
+// LDR intermediate the tonemap writes to and FXAA reads from. RGBA8, sized to the
+// output; recreated on resize like the HDR/bloom targets.
+void OpenGLRenderer::EnsureLdrTarget(int width, int height)
+{
+	if (m_ldrFBO && width == m_ldrW && height == m_ldrH) return;
+	DestroyLdrTarget();
+	m_ldrW = width; m_ldrH = height;
+	glGenFramebuffers(1, &m_ldrFBO);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_ldrFBO);
+	glGenTextures(1, &m_ldrColor);
+	glBindTexture(GL_TEXTURE_2D, m_ldrColor);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_ldrColor, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+void OpenGLRenderer::DestroyLdrTarget()
+{
+	if (m_ldrColor) { glDeleteTextures(1, &m_ldrColor); m_ldrColor = 0; }
+	if (m_ldrFBO)   { glDeleteFramebuffers(1, &m_ldrFBO); m_ldrFBO = 0; }
+	m_ldrW = m_ldrH = 0;
 }
 
 void OpenGLRenderer::CreateBloomPipeline()
@@ -1547,6 +1640,7 @@ void OpenGLRenderer::Shutdown()
 	DestroyViewportTarget();
 	DestroyHDRTarget();
 	DestroyBloomTargets();
+	DestroyLdrTarget();
 	for (auto& r : m_retiredTextures)
 		glDeleteTextures(1, &r.texture);
 	m_retiredTextures.clear();
@@ -1558,6 +1652,7 @@ void OpenGLRenderer::Shutdown()
 	if (m_depthProgram) { glDeleteProgram(m_depthProgram);     m_depthProgram = 0; }
 	if (m_skyProgram)   { glDeleteProgram(m_skyProgram);       m_skyProgram = 0; }
 	if (m_tonemapProgram) { glDeleteProgram(m_tonemapProgram); m_tonemapProgram = 0; }
+	if (m_fxaaProgram)    { glDeleteProgram(m_fxaaProgram);    m_fxaaProgram = 0; }
 	if (m_bloomBrightProgram) { glDeleteProgram(m_bloomBrightProgram); m_bloomBrightProgram = 0; }
 	if (m_blurProgram)    { glDeleteProgram(m_blurProgram);    m_blurProgram = 0; }
 	if (m_fsVAO)          { glDeleteVertexArrays(1, &m_fsVAO);  m_fsVAO = 0; }
@@ -1786,8 +1881,9 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			// (skipped when bloom is disabled → strength 0 below).
 			const unsigned int bloomTex = m_bloomEnabled ? RenderBloom(pw, ph) : 0u;
 
-			// Composite: tonemap HDR scene color + bloom into the output.
-			glBindFramebuffer(GL_FRAMEBUFFER, prevFBO);
+			// Tonemap HDR scene color + bloom into the LDR intermediate (FXAA reads it).
+			EnsureLdrTarget(pw, ph);
+			glBindFramebuffer(GL_FRAMEBUFFER, m_ldrFBO);
 			glViewport(0, 0, pw, ph);
 			glUseProgram(m_tonemapProgram);
 			glActiveTexture(GL_TEXTURE0);
@@ -1800,6 +1896,16 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glUniform1f(m_uBloomStrength, bloomTex ? m_bloomStrength : 0.0f);
 			glActiveTexture(GL_TEXTURE0);
 			glDrawArrays(GL_TRIANGLES, 0, 3);
+
+			// FXAA the tonemapped LDR image into the actual output.
+			glBindFramebuffer(GL_FRAMEBUFFER, prevFBO);
+			glViewport(0, 0, pw, ph);
+			glUseProgram(m_fxaaProgram);
+			glBindTexture(GL_TEXTURE_2D, m_ldrColor);
+			glUniform1i(m_uFxaaScene, 0);
+			glUniform2f(m_uFxaaRcpFrame, 1.0f / float(pw), 1.0f / float(ph));
+			glDrawArrays(GL_TRIANGLES, 0, 3);
+
 			glEnable(GL_DEPTH_TEST);
 			return;
 		}
