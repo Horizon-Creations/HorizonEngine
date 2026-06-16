@@ -11,12 +11,17 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
-// Builds a tiling NxNxN value-noise volume whose lattice values are exactly the
-// sky shader's starHash(i,j,k). With the shader pre-smoothstepping the fractional
-// sample coordinate, the GPU's trilinear filter reproduces the old smoothstep
-// value noise exactly (within one tile) — so starFbm3 becomes a texture fetch
-// instead of recomputing the hash per octave, with no visible change. R16 keeps
-// the threshold ramps band-free. Shared shape with the Metal generator.
+// Builds a tiling NxNxN two-channel noise volume (interleaved RG16):
+//   R = value noise whose lattice values are exactly the sky shader's
+//       starHash(i,j,k). With the shader pre-smoothstepping the fractional sample
+//       coordinate, the GPU's trilinear filter reproduces the old smoothstep value
+//       noise exactly (within one tile) — so starFbm3 stays a texture fetch with no
+//       visible change (nebula/stars unaffected, byte-for-byte).
+//   G = tiling inverted-Worley (cellular) field, bright at the cell feature points.
+//       fBm of this is the billowy "cauliflower" shape that turns the clouds from
+//       wispy value-noise blobs into rounded cumuli. Worley is C0-smooth so plain
+//       trilinear sampling of the bake is fine (no pre-smoothstep trick needed).
+// R16-per-channel keeps the threshold ramps band-free. Shared with the Metal gen.
 static std::vector<uint16_t> BuildSkyNoise3D(int n)
 {
 	auto hash = [](glm::vec3 p) {
@@ -24,12 +29,42 @@ static std::vector<uint16_t> BuildSkyNoise3D(int n)
 		p += glm::dot(p, glm::vec3(p.z, p.y, p.x) + 31.32f);
 		return glm::fract((p.x + p.y) * p.z);
 	};
-	std::vector<uint16_t> d(static_cast<size_t>(n) * n * n);
+	// Decorrelated per-cell jitter for the Worley feature points (sin-free so it is
+	// bit-deterministic across compilers — both backends bake CPU-side).
+	auto hash3 = [](glm::vec3 c) {
+		glm::vec3 p = glm::fract(c * glm::vec3(0.1031f, 0.1030f, 0.0973f));
+		p += glm::dot(p, glm::vec3(p.y, p.z, p.x) + 33.33f);
+		return glm::fract(glm::vec3((p.x + p.y) * p.z, (p.x + p.z) * p.y, (p.y + p.z) * p.x));
+	};
+	const int kWorleyGrid = 48;   // feature cells per axis across the tile
+	auto worley = [&](glm::vec3 uv) {
+		glm::vec3 pc = uv * static_cast<float>(kWorleyGrid);
+		glm::vec3 id = glm::floor(pc);
+		glm::vec3 fp = pc - id;
+		float f1 = 1e9f;
+		for (int k = -1; k <= 1; ++k)
+			for (int j = -1; j <= 1; ++j)
+				for (int i = -1; i <= 1; ++i)
+				{
+					glm::vec3 off(static_cast<float>(i), static_cast<float>(j), static_cast<float>(k));
+					glm::vec3 wrapped = glm::mod(id + off, static_cast<float>(kWorleyGrid)); // seamless tile
+					glm::vec3 d = (off + hash3(wrapped)) - fp;
+					f1 = std::min(f1, glm::dot(d, d));   // nearest feature (squared)
+				}
+		return glm::clamp(1.0f - std::sqrt(f1), 0.0f, 1.0f);
+	};
+	std::vector<uint16_t> d(static_cast<size_t>(n) * n * n * 2);
+	const float inv = 1.0f / static_cast<float>(n);
 	for (int z = 0; z < n; ++z)
 		for (int y = 0; y < n; ++y)
 			for (int x = 0; x < n; ++x)
-				d[(static_cast<size_t>(z) * n + y) * n + x] = static_cast<uint16_t>(
+			{
+				size_t idx = ((static_cast<size_t>(z) * n + y) * n + x) * 2;
+				glm::vec3 uv((x + 0.5f) * inv, (y + 0.5f) * inv, (z + 0.5f) * inv);
+				d[idx + 0] = static_cast<uint16_t>(
 					glm::clamp(hash(glm::vec3(x, y, z)), 0.0f, 1.0f) * 65535.0f + 0.5f);
+				d[idx + 1] = static_cast<uint16_t>(worley(uv) * 65535.0f + 0.5f);
+			}
 	return d;
 }
 
@@ -468,38 +503,70 @@ float cloudFbm(vec2 p)
 	return v;
 }
 // Cloud slab heights (arbitrary world units in the sky-ray hemisphere model).
-const float kCloudBase = 1.0;
-const float kCloudTop  = 2.0;
+// Taller slab than a thin sheet so the billows have vertical room to read as
+// towering cumuli instead of a flat horizon band.
+const float kCloudBase  = 1.0;
+const float kCloudTop   = 2.6;
+const float kCloudScale = 1.2;    // spatial frequency of the cloud field
+// Worley (cellular) lookup from the noise volume's G channel — bright at the cell
+// feature points. fBm of it is the billowy cumulus shape. The bake already tiles,
+// so a plain trilinear fetch is enough (Worley is C0-smooth).
+float worleyNoise3(vec3 p)
+{
+	return texture(uNoise, p * (1.0 / 256.0)).g;
+}
+float worleyFbm(vec3 p)
+{
+	return worleyNoise3(p)        * 0.625
+	     + worleyNoise3(p * 2.03) * 0.25
+	     + worleyNoise3(p * 4.06) * 0.125;
+}
+// Henyey-Greenstein phase: forward-biased scattering so the cloud edges facing the
+// sun glow (the golden sunset rim / silver lining). g>0 peaks toward the light.
+float hgPhase(float cosT, float g)
+{
+	float g2 = g * g;
+	return (1.0 - g2) / (12.566371 * pow(max(1.0 + g2 - 2.0 * g * cosT, 1e-4), 1.5));
+}
 // Cloud drift direction/speed comes from the user wind control (uWind), passed
 // down as a parameter so the noise field scrolls the clouds across the sky.
 // Rounded vertical density taper so the slab reads as puffy bodies, not a sheet.
 float cloudHeightGrad(float y)
 {
 	float hf = clamp((y - kCloudBase) / (kCloudTop - kCloudBase), 0.0, 1.0);
-	return smoothstep(0.0, 0.25, hf) * (1.0 - smoothstep(0.65, 1.0, hf));
+	return smoothstep(0.0, 0.25, hf) * (1.0 - smoothstep(0.6, 1.0, hf));
 }
-// Full density at a world point: animated 3D fbm + detail erosion, thresholded by
-// the coverage slider, shaped by the slab height. time = continuous wall clock.
+// Full density at a world point: billowy Worley (the cauliflower shape) over a
+// large-scale perlin coverage field, thresholded by the coverage slider and shaped
+// by the slab height. time = continuous wall clock. The slab-height taper is a pure
+// analytic function of pos.y, so test it FIRST and bail with zero texture fetches
+// when the sample is outside the slab (matters most for the sun light-march, whose
+// samples step up out of the slab toward the sun).
 float cloudDensity(vec3 pos, float time, float coverage, vec3 wind)
 {
-	vec3  p     = pos * 0.85 + wind * time;
-	float morph = time * 0.030;                       // slow in-place forming/dissolving
-	float base  = starFbm3(p + vec3(0.0, morph, 0.0), 4);
-	float detail= starFbm3(p * 3.1 + vec3(morph, 0.0, 0.0), 2);
-	base       -= 0.08 * detail;                       // gentle erosion (keep edges soft)
-	float lo    = mix(0.95, 0.05, clamp(coverage, 0.0, 1.0));
-	float d     = smoothstep(lo, lo + 0.30, base);     // wider ramp = fuller, less torn
-	return d * cloudHeightGrad(pos.y);
+	float hgrad = cloudHeightGrad(pos.y);
+	if (hgrad <= 0.0) return 0.0;                                  // outside slab → no fetches
+	vec3  p      = pos * kCloudScale + wind * time;
+	float morph  = time * 0.030;                                  // slow forming/dissolving
+	float perlin = starFbm3(p + vec3(0.0, morph, 0.0), 4);        // large-scale coverage
+	float billow = worleyFbm(p * 0.9 + vec3(morph, 0.0, 0.0));    // fine cauliflower detail
+	float base   = perlin * 0.5 + billow * 0.55;
+	float lo     = mix(0.70, 0.22, clamp(coverage, 0.0, 1.0));
+	return smoothstep(lo, lo + 0.13, base) * hgrad;
 }
-// Cheaper density for the sun light-march (skips the detail octave).
+// Cheaper density for the sun light-march: shadows are low-frequency, so one perlin
+// pair + one Worley tap is plenty (and skips the slab miss for free).
 float cloudShadowDensity(vec3 pos, float time, float coverage, vec3 wind)
 {
-	vec3  p     = pos * 0.85 + wind * time;
-	float morph = time * 0.030;
-	float base  = starFbm3(p + vec3(0.0, morph, 0.0), 3);
-	float lo    = mix(0.95, 0.05, clamp(coverage, 0.0, 1.0));
-	float d     = smoothstep(lo, lo + 0.30, base);
-	return d * cloudHeightGrad(pos.y);
+	float hgrad = cloudHeightGrad(pos.y);
+	if (hgrad <= 0.0) return 0.0;
+	vec3  p      = pos * kCloudScale + wind * time;
+	float morph  = time * 0.030;
+	float perlin = starFbm3(p + vec3(0.0, morph, 0.0), 2);        // 2 taps
+	float billow = worleyNoise3(p * 0.9 + vec3(morph, 0.0, 0.0)); // 1 tap
+	float base   = perlin * 0.5 + billow * 0.55;
+	float lo     = mix(0.70, 0.22, clamp(coverage, 0.0, 1.0));
+	return smoothstep(lo, lo + 0.13, base) * hgrad;
 }
 vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float time, float coverage, vec3 sunColor, vec3 wind)
 {
@@ -509,53 +576,66 @@ vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float time, float coverage
 	if (dir.y < 0.02) return baseSky;             // no clouds at/below the horizon
 
 	// March the view ray through the cloud slab between base and top heights.
+	// A deterministic per-ray offset breaks up otherwise coherent sample planes
+	// that show up as visible horizontal cloud layers near grazing view angles.
 	float s0 = kCloudBase / max(dir.y, 1e-3);
 	float s1 = kCloudTop  / max(dir.y, 1e-3);
-	const int N = 5;
+	const int N = 10;
 	float ds = (s1 - s0) / float(N);
+	float jitter = cloudHash(dir.xz * 173.3 + vec2(dir.y * 37.1, dir.y * 19.7));
 
 	// Day/night/dusk drive the cloud colour (independent of the drift clock).
 	float sunY = clamp(sunDir.y, -0.2, 1.0);
 	float day  = smoothstep(-0.10, 0.10, sunY);
 	float dusk = smoothstep(-0.06, 0.05, sunY) * (1.0 - smoothstep(0.05, 0.28, sunY));
 
+	// Forward-scatter phase (view vs. sun) — constant along the ray, so compute once.
+	float costh = max(dot(dir, sunDir), 0.0);
+	float phase = mix(hgPhase(costh, 0.6), hgPhase(costh, -0.3), 0.25);
+
 	float T = 1.0;                                 // transmittance along the view ray
 	vec3  L = vec3(0.0);                           // accumulated in-scattered colour
 	for (int i = 0; i < N; ++i)
 	{
-		float s   = s0 + (float(i) + 0.5) * ds;
+		float s   = s0 + (float(i) + jitter) * ds;
 		vec3  pos = dir * s;
 		float dens = cloudDensity(pos, time, coverage, wind);
 		if (dens > 0.001)
 		{
-			// Light-march toward the sun: Beer's-law self-shadowing.
-			float shadow = 0.0;
-			for (int j = 1; j <= 2; ++j)
-				shadow += cloudShadowDensity(pos + sunDir * (float(j) * 0.22), time, coverage, wind);
-			float sun    = exp(-shadow * 1.1);
+			// Light-march toward the sun: Beer's-law self-shadowing. Only substantial
+			// cloud needs it — thin wisps (dens <= 0.04) are translucent and read as
+			// lit anyway, so skip the light-march taps there.
+			float sun = 1.0;
+			if (dens > 0.04)
+			{
+				float shadow = cloudShadowDensity(pos + sunDir * 0.35, time, coverage, wind)
+				             + cloudShadowDensity(pos + sunDir * 0.70, time, coverage, wind);
+				sun = exp(-shadow * 2.3);
+			}
 			float powder = 1.0 - exp(-dens * 3.0); // dark soft edges (powder effect)
 			float lit    = sun * powder;
 
-			// Higher-contrast shading: dark shaded base, sun-coloured lit tops.
-			vec3 dayCol   = mix(vec3(0.30, 0.33, 0.40), sunColor * 1.15, lit);
+			// Higher-contrast shading: dark cool shaded base, sun-coloured lit tops.
+			vec3 dayCol   = mix(vec3(0.17, 0.20, 0.29), sunColor * 1.12, lit);
 			vec3 nightCol = mix(vec3(0.04, 0.05, 0.09), vec3(0.18, 0.21, 0.30), lit);
 			vec3 cloudCol = mix(nightCol, dayCol, day);
 			vec3 duskTop  = sunColor * vec3(1.25, 0.55, 0.28);
-			cloudCol = mix(cloudCol, duskTop, dusk * lit * 0.85);
-			// Silver/golden lining: thin, back-lit edges toward the sun glow as the
-			// sunlight scatters through them (gentle so wisps don't tear).
-			float toSun = max(dot(dir, sunDir), 0.0);
-			cloudCol += sunColor * (pow(toSun, 8.0) * sun * 0.45 * max(day, dusk));
+			cloudCol = mix(cloudCol, duskTop, dusk * lit * 0.9);
+			// Forward-scatter glow: Henyey-Greenstein-weighted direct sunlight makes
+			// the sun-facing edges flare gold (the silver lining), strongest when
+			// looking toward the sun and where the cloud isn't self-shadowed.
+			cloudCol += sunColor * (phase * sun * 0.9 * max(day, dusk));
 			// Cheap vertical depth: tops catch the light (bright crown), the base
 			// sits in self-shadow (darker, cooler) — fakes the volumetric
 			// "cauliflower" relief from just the sample's height in the slab.
 			float hTone = smoothstep(kCloudBase, kCloudTop, pos.y);
-			cloudCol *= mix(0.55, 1.12, hTone);
-			cloudCol += vec3(0.07, 0.10, 0.17) * ((1.0 - hTone) * day * 0.5);
+			cloudCol *= mix(0.5, 1.15, hTone);
+			cloudCol += vec3(0.07, 0.10, 0.17) * ((1.0 - hTone) * day * 0.25);
 
-			float a = clamp(dens * ds * 2.4, 0.0, 1.0);
+			float opticalDepth = dens * ds * 7.0;
+			float a = 1.0 - exp(-opticalDepth);
 			L += T * a * cloudCol;
-			T *= exp(-a);
+			T *= 1.0 - a;
 			if (T < 0.02) break;
 		}
 	}
@@ -1048,14 +1128,15 @@ void OpenGLRenderer::CreateSkyPipeline()
 	m_uSkyWind        = glGetUniformLocation(m_skyProgram, "uWind");
 	m_uSkyNoise       = glGetUniformLocation(m_skyProgram, "uNoise");
 
-	// Procedural 3D value-noise volume the sky's starFbm3 samples (clouds + nebula)
-	// — built once on the CPU. R16 + LINEAR + REPEAT so it tiles seamlessly.
+	// Procedural 3D noise volume the sky's starFbm3/worleyFbm sample (clouds +
+	// nebula) — built once on the CPU. RG16 (R=value noise, G=Worley billows) +
+	// LINEAR + REPEAT so it tiles seamlessly.
 	constexpr int kNoiseN = 256;   // large tile so the sky's offset/octave coords fit
 	const std::vector<uint16_t> noise = BuildSkyNoise3D(kNoiseN);
 	glGenTextures(1, &m_noiseTex);
 	glBindTexture(GL_TEXTURE_3D, m_noiseTex);
-	glTexImage3D(GL_TEXTURE_3D, 0, GL_R16, kNoiseN, kNoiseN, kNoiseN, 0,
-	             GL_RED, GL_UNSIGNED_SHORT, noise.data());
+	glTexImage3D(GL_TEXTURE_3D, 0, GL_RG16, kNoiseN, kNoiseN, kNoiseN, 0,
+	             GL_RG, GL_UNSIGNED_SHORT, noise.data());
 	glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 	glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 	glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_REPEAT);
