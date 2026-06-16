@@ -1925,9 +1925,9 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
         // Night sky: stars + the dense Milky Way band and the space nebula rotate
         // with time-of-day; the aurora is drifting ribbons that sweep the sky.
         ImGui::SeparatorText("Night Sky");
-        ImGui::SetNextItemWidth(-1.0f);
-        ImGui::SliderFloat("##milkyway", &ctx.editorConfig.MilkyWayIntensity,
-                           0.0f, 1.0f, "Milky Way: %.2f");
+        // (Milky Way intensity slider removed — it read as inert after the band was
+        // reworked into dense stars along the galactic plane; the Milky Way still
+        // renders at EditorConfig::MilkyWayIntensity.)
         ImGui::SetNextItemWidth(-1.0f);
         ImGui::SliderFloat("##nebula", &ctx.editorConfig.NebulaIntensity,
                            0.0f, 1.0f, "Space Nebula: %.2f");
