@@ -51,6 +51,7 @@ private:
 	};
 
 	void CreateUnlitPipeline();
+	void UpdateSkyEnvCube(const glm::vec3& sunDir); // rebuild the IBL cubemap on sun move
 	void CreateCubeMesh();
 	void DrawScene(int width, int height);
 	// (Re)creates the offscreen viewport FBO at the requested size.
@@ -151,6 +152,10 @@ private:
 	int          m_uSkyWind        = -1;  // cloud drift vector
 	int          m_uSkyNoise       = -1;  // 3D value-noise sampler
 	unsigned int m_noiseTex        = 0;   // GL_TEXTURE_3D, R16 value noise
+	int          m_uSkyEnv         = -1;  // image-based-ambient cubemap sampler
+	unsigned int m_skyEnvCube      = 0;   // GL_TEXTURE_CUBE_MAP, baked skyColor
+	glm::vec3    m_skyEnvSunDir    = glm::vec3(0.0f); // sun dir the cubemap was baked for
+	bool         m_skyEnvValid     = false;
 	unsigned int m_moonTex        = 0;    // night-sky moon texture (or 0)
 	void CreateSkyPipeline();
 

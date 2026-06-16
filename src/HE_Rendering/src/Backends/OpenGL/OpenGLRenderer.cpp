@@ -33,6 +33,71 @@ static std::vector<uint16_t> BuildSkyNoise3D(int n)
 	return d;
 }
 
+// CPU port of the shader's analytic skyColor(dir,sunDir) — used to bake the
+// image-based-ambient cubemap so the scene shader samples it once instead of
+// re-evaluating this function twice per lit pixel. Mirrors kSkyFuncGLSL exactly.
+static glm::vec3 SkyColorCPU(glm::vec3 dir, glm::vec3 sunDir)
+{
+	dir = glm::normalize(dir); sunDir = glm::normalize(sunDir);
+	float sunY = glm::clamp(sunDir.y, -0.2f, 1.0f);
+	float day  = glm::smoothstep(-0.10f, 0.10f, sunY);
+	float dusk = glm::smoothstep(-0.06f, 0.05f, sunY) * (1.0f - glm::smoothstep(0.05f, 0.28f, sunY));
+	glm::vec3 zenith  = glm::mix(glm::vec3(0.012f,0.016f,0.05f), glm::vec3(0.08f,0.28f,0.72f), day);
+	glm::vec3 horizon = glm::mix(glm::vec3(0.03f,0.04f,0.10f),   glm::vec3(0.42f,0.62f,0.88f), day);
+	glm::vec2 sunAz = glm::normalize(glm::vec2(sunDir.x, sunDir.z) + glm::vec2(1e-5f));
+	float toward = glm::dot(glm::normalize(glm::vec2(dir.x, dir.z) + glm::vec2(1e-5f)), sunAz) * 0.5f + 0.5f;
+	toward = std::pow(glm::clamp(toward, 0.0f, 1.0f), 1.5f);
+	glm::vec3 duskHoriz = glm::mix(glm::vec3(0.52f,0.30f,0.52f), glm::vec3(1.20f,0.50f,0.16f), toward);
+	horizon = glm::mix(horizon, duskHoriz, dusk);
+	zenith  = glm::mix(zenith, glm::vec3(0.20f,0.16f,0.40f), dusk * 0.6f);
+	float h = glm::clamp(dir.y, 0.0f, 1.0f);
+	glm::vec3 sky = glm::mix(zenith, horizon, std::pow(1.0f - h, 2.5f));
+	sky += glm::vec3(1.25f,0.62f,0.26f) * (std::pow(1.0f - h, 8.0f) * toward * dusk * 0.8f);
+	glm::vec3 ground = glm::mix(glm::vec3(0.02f,0.02f,0.03f), glm::vec3(0.24f,0.23f,0.21f), day);
+	sky = glm::mix(sky, ground, glm::smoothstep(0.0f, -0.25f, dir.y));
+	glm::vec3 sunTint = glm::mix(glm::vec3(1.0f,0.42f,0.20f), glm::vec3(1.0f,0.96f,0.88f), glm::smoothstep(0.0f,0.25f,sunY));
+	float s = std::max(glm::dot(dir, sunDir), 0.0f);
+	float sunVis = std::max(day, dusk);
+	sky += sunTint * (std::pow(s,1800.0f) * 14.0f * day);
+	sky += sunTint * (std::pow(s,180.0f)  * 2.2f * sunVis);
+	sky += sunTint * (std::pow(s,22.0f)   * 0.7f * sunVis);
+	sky += glm::vec3(1.0f,0.5f,0.25f) * (std::pow(s,5.0f) * 0.5f * dusk);
+	float night = 1.0f - day;
+	glm::vec3 moonDir = glm::normalize(glm::vec3(-sunDir.x, -sunDir.y, sunDir.z));
+	float mdot = std::max(glm::dot(dir, moonDir), 0.0f);
+	sky += glm::vec3(0.80f,0.86f,1.00f) * (std::pow(mdot,60.0f) * 0.05f * night);
+	sky += glm::vec3(0.04f,0.05f,0.08f) * night;
+	return sky;
+}
+
+// Builds the six cube faces of the image-based-ambient environment map for the
+// given sun direction (face = +X,-X,+Y,-Y,+Z,-Z in GL order). Returns tightly
+// packed RGBA32F, faces back to back, faceN texels each.
+static std::vector<float> BuildSkyEnvCube(int faceN, const glm::vec3& sunDir)
+{
+	std::vector<float> px(static_cast<size_t>(faceN) * faceN * 6 * 4);
+	for (int f = 0; f < 6; ++f)
+		for (int t = 0; t < faceN; ++t)
+			for (int s = 0; s < faceN; ++s)
+			{
+				float u = (s + 0.5f) / faceN * 2.0f - 1.0f;
+				float v = (t + 0.5f) / faceN * 2.0f - 1.0f;
+				glm::vec3 d;
+				switch (f) {
+					case 0: d = glm::vec3( 1.0f, -v, -u); break; // +X
+					case 1: d = glm::vec3(-1.0f, -v,  u); break; // -X
+					case 2: d = glm::vec3( u,  1.0f,  v); break; // +Y
+					case 3: d = glm::vec3( u, -1.0f, -v); break; // -Y
+					case 4: d = glm::vec3( u, -v,  1.0f); break; // +Z
+					default:d = glm::vec3(-u, -v, -1.0f); break; // -Z
+				}
+				glm::vec3 c = SkyColorCPU(glm::normalize(d), sunDir);
+				size_t i = ((static_cast<size_t>(f) * faceN + t) * faceN + s) * 4;
+				px[i+0] = c.r; px[i+1] = c.g; px[i+2] = c.b; px[i+3] = 1.0f;
+			}
+	return px;
+}
+
 // ─── Embedded unlit shader ────────────────────────────────────────────────────
 // GLSL 410: the macOS Core Profile ceiling — works everywhere we run.
 static const char* kUnlitVS = R"GLSL(
@@ -76,6 +141,7 @@ uniform sampler2D uTexture;
 uniform float     uMetallic;    // 0 dielectric … 1 metal
 uniform float     uRoughness;   // 0 mirror … 1 fully rough
 uniform vec3      uSunDir;      // direction toward the sun (for image-based ambient)
+uniform samplerCube uSkyEnv;   // baked skyColor cubemap (image-based ambient)
 uniform vec3      uAmbient;     // flat ambient fill (never-black floor + overcast)
 uniform float     uFogDensity;       // atmospheric fog amount (0 = off)
 uniform float     uFogHeightFalloff; // >0 = fog pools near the ground
@@ -161,8 +227,8 @@ void main()
 	// diffuse from the surface normal, specular from the reflection vector
 	// (bent toward the normal as roughness grows = crude prefilter).
 	vec3 Rrough  = normalize(mix(reflect(-V, N), N, uRoughness));
-	vec3 ambDiff = skyColor(N, uSunDir)      * diffuseColor;
-	vec3 ambSpec = skyColor(Rrough, uSunDir) * specColor;
+	vec3 ambDiff = texture(uSkyEnv, N).rgb      * diffuseColor;
+	vec3 ambSpec = texture(uSkyEnv, Rrough).rgb * specColor;
 	vec3 result  = ambDiff * 0.35 + ambSpec * (1.0 - 0.6 * uRoughness);
 	// Flat ambient fill (never-black floor + overcast replacement for the
 	// switched-off sun/moon light), applied to the diffuse albedo.
@@ -834,6 +900,8 @@ void OpenGLRenderer::Initialize(HE::Window* window)
 	Logger::Log(Logger::LogLevel::Info, "OpenGLRenderer: initialized successfully");
 }
 
+static constexpr int kSkyEnvFace = 128; // image-based-ambient cubemap face size
+
 void OpenGLRenderer::CreateUnlitPipeline()
 {
 	GLuint vs = CompileStage(GL_VERTEX_SHADER,   kUnlitVS);
@@ -869,12 +937,45 @@ void OpenGLRenderer::CreateUnlitPipeline()
 	m_uLightParams = glGetUniformLocation(m_unlitProgram, "uLightParams");
 	m_uCameraPos   = glGetUniformLocation(m_unlitProgram, "uCameraPos");
 	m_uSunDir      = glGetUniformLocation(m_unlitProgram, "uSunDir");
+	m_uSkyEnv      = glGetUniformLocation(m_unlitProgram, "uSkyEnv");
 	m_uAmbient     = glGetUniformLocation(m_unlitProgram, "uAmbient");
+
+	// Empty image-based-ambient cubemap (RGBA32F, 6 faces); filled per frame from
+	// the analytic skyColor (SkyColorCPU) whenever the sun direction changes.
+	glGenTextures(1, &m_skyEnvCube);
+	glBindTexture(GL_TEXTURE_CUBE_MAP, m_skyEnvCube);
+	for (int f = 0; f < 6; ++f)
+		glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + f, 0, GL_RGBA32F,
+		             kSkyEnvFace, kSkyEnvFace, 0, GL_RGBA, GL_FLOAT, nullptr);
+	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+	glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
 	m_uFogDensity       = glGetUniformLocation(m_unlitProgram, "uFogDensity");
 	m_uFogHeightFalloff = glGetUniformLocation(m_unlitProgram, "uFogHeightFalloff");
 	m_uLightVP       = glGetUniformLocation(m_unlitProgram, "uLightVP");
 	m_uShadowMap     = glGetUniformLocation(m_unlitProgram, "uShadowMap");
 	m_uShadowEnabled = glGetUniformLocation(m_unlitProgram, "uShadowEnabled");
+}
+
+void OpenGLRenderer::UpdateSkyEnvCube(const glm::vec3& sunDir)
+{
+	// The baked sky only changes with the sun direction — skip the CPU rebuild +
+	// upload when it hasn't moved.
+	if (m_skyEnvValid && glm::distance(sunDir, m_skyEnvSunDir) < 1e-4f)
+		return;
+	m_skyEnvSunDir = sunDir;
+	m_skyEnvValid  = true;
+	const std::vector<float> px = BuildSkyEnvCube(kSkyEnvFace, sunDir);
+	const size_t faceFloats = static_cast<size_t>(kSkyEnvFace) * kSkyEnvFace * 4;
+	glBindTexture(GL_TEXTURE_CUBE_MAP, m_skyEnvCube);
+	for (int f = 0; f < 6; ++f)
+		glTexSubImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + f, 0, 0, 0,
+		                kSkyEnvFace, kSkyEnvFace, GL_RGBA, GL_FLOAT,
+		                px.data() + f * faceFloats);
+	glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
 }
 
 void OpenGLRenderer::CreateShadowResources()
@@ -1383,6 +1484,7 @@ void OpenGLRenderer::Shutdown()
 	if (m_shadowDepthTex) { glDeleteTextures(1, &m_shadowDepthTex);  m_shadowDepthTex = 0; }
 	if (m_moonTex)        { glDeleteTextures(1, &m_moonTex);         m_moonTex = 0; }
 	if (m_noiseTex)       { glDeleteTextures(1, &m_noiseTex);        m_noiseTex = 0; }
+	if (m_skyEnvCube)     { glDeleteTextures(1, &m_skyEnvCube);      m_skyEnvCube = 0; }
 
 	// Destroy secondary contexts (secondary windows' SDL_GLContexts are owned by us)
 	for (auto& [sdlWin, ctx] : m_secondaryContexts)
@@ -1640,6 +1742,14 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		glUseProgram(m_unlitProgram);
 		glUniform1i(m_uTexture, 0); // base color tint (uColor) is set per draw below
 		glUniform3fv(m_uSunDir, 1, glm::value_ptr(sunDir));
+		// Refresh the baked skyColor ambient cubemap when the sun moved, then bind
+		// it on unit 3 so the scene shader samples it instead of evaluating
+		// skyColor twice per pixel.
+		UpdateSkyEnvCube(sunDir);
+		glActiveTexture(GL_TEXTURE3);
+		glBindTexture(GL_TEXTURE_CUBE_MAP, m_skyEnvCube);
+		glUniform1i(m_uSkyEnv, 3);
+		glActiveTexture(GL_TEXTURE0);
 		glUniform3fv(m_uAmbient, 1, glm::value_ptr(m_renderWorld.ambient));
 		glUniform1f(m_uFogDensity,       GetEnvironment().fogDensity);
 		glUniform1f(m_uFogHeightFalloff, GetEnvironment().fogHeightFalloff);

@@ -33,6 +33,70 @@ static std::vector<uint16_t> BuildSkyNoise3D(int n)
 	return d;
 }
 
+// CPU port of the shader skyColor(dir,sunDir) — bakes the image-based-ambient
+// cubemap so fragmentMain samples it once instead of evaluating skyColor twice
+// per lit pixel. Mirrors kSkyFuncMSL / the GL SkyColorCPU exactly.
+static glm::vec3 SkyColorCPU(glm::vec3 dir, glm::vec3 sunDir)
+{
+	dir = glm::normalize(dir); sunDir = glm::normalize(sunDir);
+	float sunY = glm::clamp(sunDir.y, -0.2f, 1.0f);
+	float day  = glm::smoothstep(-0.10f, 0.10f, sunY);
+	float dusk = glm::smoothstep(-0.06f, 0.05f, sunY) * (1.0f - glm::smoothstep(0.05f, 0.28f, sunY));
+	glm::vec3 zenith  = glm::mix(glm::vec3(0.012f,0.016f,0.05f), glm::vec3(0.08f,0.28f,0.72f), day);
+	glm::vec3 horizon = glm::mix(glm::vec3(0.03f,0.04f,0.10f),   glm::vec3(0.42f,0.62f,0.88f), day);
+	glm::vec2 sunAz = glm::normalize(glm::vec2(sunDir.x, sunDir.z) + glm::vec2(1e-5f));
+	float toward = glm::dot(glm::normalize(glm::vec2(dir.x, dir.z) + glm::vec2(1e-5f)), sunAz) * 0.5f + 0.5f;
+	toward = std::pow(glm::clamp(toward, 0.0f, 1.0f), 1.5f);
+	glm::vec3 duskHoriz = glm::mix(glm::vec3(0.52f,0.30f,0.52f), glm::vec3(1.20f,0.50f,0.16f), toward);
+	horizon = glm::mix(horizon, duskHoriz, dusk);
+	zenith  = glm::mix(zenith, glm::vec3(0.20f,0.16f,0.40f), dusk * 0.6f);
+	float h = glm::clamp(dir.y, 0.0f, 1.0f);
+	glm::vec3 sky = glm::mix(zenith, horizon, std::pow(1.0f - h, 2.5f));
+	sky += glm::vec3(1.25f,0.62f,0.26f) * (std::pow(1.0f - h, 8.0f) * toward * dusk * 0.8f);
+	glm::vec3 ground = glm::mix(glm::vec3(0.02f,0.02f,0.03f), glm::vec3(0.24f,0.23f,0.21f), day);
+	sky = glm::mix(sky, ground, glm::smoothstep(0.0f, -0.25f, dir.y));
+	glm::vec3 sunTint = glm::mix(glm::vec3(1.0f,0.42f,0.20f), glm::vec3(1.0f,0.96f,0.88f), glm::smoothstep(0.0f,0.25f,sunY));
+	float s = std::max(glm::dot(dir, sunDir), 0.0f);
+	float sunVis = std::max(day, dusk);
+	sky += sunTint * (std::pow(s,1800.0f) * 14.0f * day);
+	sky += sunTint * (std::pow(s,180.0f)  * 2.2f * sunVis);
+	sky += sunTint * (std::pow(s,22.0f)   * 0.7f * sunVis);
+	sky += glm::vec3(1.0f,0.5f,0.25f) * (std::pow(s,5.0f) * 0.5f * dusk);
+	float night = 1.0f - day;
+	glm::vec3 moonDir = glm::normalize(glm::vec3(-sunDir.x, -sunDir.y, sunDir.z));
+	float mdot = std::max(glm::dot(dir, moonDir), 0.0f);
+	sky += glm::vec3(0.80f,0.86f,1.00f) * (std::pow(mdot,60.0f) * 0.05f * night);
+	sky += glm::vec3(0.04f,0.05f,0.08f) * night;
+	return sky;
+}
+
+// One cube face (slice order +X,-X,+Y,-Y,+Z,-Z) of the IBL env map as tightly
+// packed RGBA32F. Metal cube maps use the same face/texel convention as GL, so
+// no axis flip — verified lossless (max 1/255 vs per-pixel skyColor).
+static std::vector<float> BuildSkyEnvFace(int faceN, int f, const glm::vec3& sunDir)
+{
+	std::vector<float> px(static_cast<size_t>(faceN) * faceN * 4);
+	for (int t = 0; t < faceN; ++t)
+		for (int s = 0; s < faceN; ++s)
+		{
+			float u = (s + 0.5f) / faceN * 2.0f - 1.0f;
+			float v = (t + 0.5f) / faceN * 2.0f - 1.0f;
+			glm::vec3 d;
+			switch (f) {
+				case 0: d = glm::vec3( 1.0f, -v, -u); break; // +X
+				case 1: d = glm::vec3(-1.0f, -v,  u); break; // -X
+				case 2: d = glm::vec3( u,  1.0f,  v); break; // +Y
+				case 3: d = glm::vec3( u, -1.0f, -v); break; // -Y
+				case 4: d = glm::vec3( u, -v,  1.0f); break; // +Z
+				default:d = glm::vec3(-u, -v, -1.0f); break; // -Z
+			}
+			glm::vec3 c = SkyColorCPU(glm::normalize(d), sunDir);
+			size_t i = (static_cast<size_t>(t) * faceN + s) * 4;
+			px[i+0] = c.r; px[i+1] = c.g; px[i+2] = c.b; px[i+3] = 1.0f;
+		}
+	return px;
+}
+
 // Swapchain / depth formats shared by every window target, the scene
 // pipeline and the ImGui pass descriptor — they must all match.
 static constexpr MTLPixelFormat kSwapchainFormat = MTLPixelFormatBGRA8Unorm;
@@ -170,7 +234,9 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
                              texture2d<float> baseColor [[texture(0)]],
                              sampler          smp       [[sampler(0)]],
                              texture2d<float> shadowMap [[texture(1)]],
-                             sampler          shadowSmp [[sampler(1)]])
+                             sampler          shadowSmp [[sampler(1)]],
+                             texturecube<float> skyEnv  [[texture(2)]],
+                             sampler          skyEnvSmp [[sampler(2)]])
 {
 	float3 albedo = (in.hasTexture > 0.5)
 		? baseColor.sample(smp, float2(in.uv.x, 1.0 - in.uv.y)).rgb * in.color
@@ -196,8 +262,8 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
 	// diffuse from the normal, specular from the reflection (bent toward N by
 	// roughness as a crude prefilter).
 	float3 Rrough  = normalize(mix(reflect(-V, N), N, in.roughness));
-	float3 ambDiff = skyColor(N, scene.sunDir.xyz)      * diffuseColor;
-	float3 ambSpec = skyColor(Rrough, scene.sunDir.xyz) * specColor;
+	float3 ambDiff = skyEnv.sample(skyEnvSmp, N).rgb      * diffuseColor;
+	float3 ambSpec = skyEnv.sample(skyEnvSmp, Rrough).rgb * specColor;
 	float3 result  = ambDiff * 0.35 + ambSpec * (1.0 - 0.6 * in.roughness);
 	// Flat ambient fill (never-black floor + overcast replacement for the
 	// switched-off sun/moon light), applied to the diffuse albedo.
@@ -942,6 +1008,7 @@ void MetalRenderer::Shutdown()
 	if (m_linearSampler)   { CFBridgingRelease(m_linearSampler);   m_linearSampler = nullptr; }
 	if (m_noiseTexture)    { CFBridgingRelease(m_noiseTexture);    m_noiseTexture = nullptr; }
 	if (m_noiseSampler)    { CFBridgingRelease(m_noiseSampler);    m_noiseSampler = nullptr; }
+	if (m_skyEnvCube)      { CFBridgingRelease(m_skyEnvCube);      m_skyEnvCube = nullptr; }
 	if (m_cubeVertexBuf)   { CFBridgingRelease(m_cubeVertexBuf);   m_cubeVertexBuf = nullptr; }
 	if (m_cubeIndexBuf)    { CFBridgingRelease(m_cubeIndexBuf);    m_cubeIndexBuf = nullptr; }
 	if (m_scenePipeline)   { CFBridgingRelease(m_scenePipeline);   m_scenePipeline = nullptr; }
@@ -1109,6 +1176,15 @@ void MetalRenderer::CreateScenePipeline()
 		noiseSampDesc.tAddressMode = MTLSamplerAddressModeRepeat;
 		noiseSampDesc.rAddressMode = MTLSamplerAddressModeRepeat;
 		m_noiseSampler = (void*)CFBridgingRetain([device newSamplerStateWithDescriptor:noiseSampDesc]);
+
+		// Empty image-based-ambient cubemap (RGBA32F); filled per frame from the
+		// analytic skyColor (SkyColorCPU) when the sun direction changes. The
+		// existing clamp+linear sampler (m_linearSampler) samples it.
+		MTLTextureDescriptor* envDesc = [MTLTextureDescriptor
+			textureCubeDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float size:128 mipmapped:NO];
+		envDesc.usage = MTLTextureUsageShaderRead;
+		envDesc.storageMode = MTLStorageModeShared;
+		m_skyEnvCube = (void*)CFBridgingRetain([device newTextureWithDescriptor:envDesc]);
 	}
 }
 
@@ -1780,6 +1856,23 @@ void MetalRenderer::EncodeSky(void* renderEncoder, const glm::mat4& invViewProj,
 	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
 }
 
+void MetalRenderer::UpdateSkyEnvCube(const glm::vec3& sunDir)
+{
+	if (!m_skyEnvCube) return;
+	// The baked sky only changes with the sun direction — skip the rebuild + upload
+	// when it hasn't moved.
+	if (m_skyEnvValid && glm::distance(sunDir, m_skyEnvSunDir) < 1e-4f) return;
+	m_skyEnvSunDir = sunDir; m_skyEnvValid = true;
+	id<MTLTexture> cube = (__bridge id<MTLTexture>)m_skyEnvCube;
+	constexpr int N = 128;
+	for (int f = 0; f < 6; ++f)
+	{
+		const std::vector<float> face = BuildSkyEnvFace(N, f, sunDir);
+		[cube replaceRegion:MTLRegionMake2D(0, 0, N, N) mipmapLevel:0 slice:f
+		          withBytes:face.data() bytesPerRow:N * 4 * sizeof(float) bytesPerImage:0];
+	}
+}
+
 void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 {
 	if (!m_world || !m_scenePipeline || width <= 0 || height <= 0)
@@ -1850,6 +1943,12 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 	else
 		[encoder setFragmentTexture:(__bridge id<MTLTexture>)m_dummyTexture atIndex:1];
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:1];
+
+	// Image-based-ambient cubemap on slot 2 — rebuilt from skyColor when the sun
+	// moved; the scene shader samples it instead of evaluating skyColor per pixel.
+	UpdateSkyEnvCube(sunDir);
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)m_skyEnvCube atIndex:2];
+	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:2];
 
 	// ── Lights (clamped to the shader's 8) ──────────────────────────────────
 	{
