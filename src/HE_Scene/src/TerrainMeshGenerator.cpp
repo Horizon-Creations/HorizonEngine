@@ -76,9 +76,9 @@ StaticMeshAsset generateTerrainMesh(const TerrainComponent& tc)
     std::vector<float> heights(vertCount);
     if (tc.sculptHeights.size() == static_cast<size_t>(vertCount))
     {
-        heights = tc.sculptHeights; // sculpted data overrides fBm
+        heights = tc.sculptHeights; // sculpted data overrides everything
     }
-    else
+    else if (tc.seed != 0)
     {
         for (uint32_t zi = 0; zi < res; ++zi)
         {
@@ -91,6 +91,7 @@ StaticMeshAsset generateTerrainMesh(const TerrainComponent& tc)
             }
         }
     }
+    // seed == 0 → heights remain zero → flat terrain
 
     StaticMeshAsset mesh;
     mesh.type = HE::AssetType::StaticMesh;

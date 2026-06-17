@@ -8,7 +8,7 @@ struct TerrainComponent {
     float    sizeZ       = 100.0f;
     uint32_t resolution  = 128;
     float    heightScale = 20.0f;
-    int      seed        = 42;
+    int      seed        = 0;   // 0 = flat terrain; non-zero = fBm noise
     int      octaves     = 4;
     float    frequency   = 1.0f;
     float    lacunarity  = 2.0f;
