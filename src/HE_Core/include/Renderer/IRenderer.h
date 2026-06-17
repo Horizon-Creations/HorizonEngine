@@ -104,6 +104,21 @@ public:
     };
     virtual void SetBloomSettings(const BloomSettings& /*settings*/) {}
 
+    // ── SSAO (screen-space ambient occlusion) ───────────────────────────────
+    // Pushed by the editor from its preferences. Backends that implement SSAO
+    // (GL, Metal) honour it; others ignore it. When enabled, a view-space depth
+    // pre-pass feeds a hemisphere-kernel occlusion estimate that darkens only the
+    // image-based ambient term (contact shadows in crevices), leaving the direct
+    // lighting untouched. Disabled = zero cost (the pre-pass is skipped) and the
+    // image is identical to before.
+    struct SSAOSettings
+    {
+        bool  enabled   = true;
+        float radius    = 0.5f;  // hemisphere sampling radius in view-space units
+        float intensity = 1.0f;  // 0 = no darkening … 1 = full occlusion
+    };
+    virtual void SetSSAOSettings(const SSAOSettings& /*settings*/) {}
+
     // ── Environment / day-night cycle ───────────────────────────────────────
     // Pushed by the editor. When dayNightCycle is on, the renderer's extractor
     // drives the sun from timeOfDay (0..1: 0.25 sunrise, 0.5 noon, 0.75 sunset,

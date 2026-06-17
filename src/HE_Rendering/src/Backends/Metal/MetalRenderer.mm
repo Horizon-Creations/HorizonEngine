@@ -172,6 +172,7 @@ struct SceneUniforms {
 	float4   sunDir;         // xyz = direction toward the sun (image-based ambient)
 	float4   ambient;        // xyz = flat ambient fill (floor + overcast); w unused
 	float4   fog;            // x = density (0 = off), y = height falloff
+	float4   viewport;       // xy = output size (screen-space AO lookup), z = ssaoEnabled
 };
 
 // shared skyColor() injected at the marker below (newLibraryWithSource)
@@ -267,7 +268,9 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
                              texture2d<float> shadowMap [[texture(1)]],
                              sampler          shadowSmp [[sampler(1)]],
                              texturecube<float> skyEnv  [[texture(2)]],
-                             sampler          skyEnvSmp [[sampler(2)]])
+                             sampler          skyEnvSmp [[sampler(2)]],
+                             texture2d<float> aoTex     [[texture(3)]],
+                             sampler          aoSmp     [[sampler(3)]])
 {
 	float3 albedo = (in.hasTexture > 0.5)
 		? baseColor.sample(smp, float2(in.uv.x, 1.0 - in.uv.y)).rgb * in.color
@@ -295,10 +298,15 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
 	float3 Rrough  = normalize(mix(reflect(-V, N), N, in.roughness));
 	float3 ambDiff = skyEnv.sample(skyEnvSmp, N).rgb      * diffuseColor;
 	float3 ambSpec = skyEnv.sample(skyEnvSmp, Rrough).rgb * specColor;
-	float3 result  = ambDiff * 0.35 + ambSpec * (1.0 - 0.6 * in.roughness);
+	float3 ambient = ambDiff * 0.35 + ambSpec * (1.0 - 0.6 * in.roughness);
 	// Flat ambient fill (never-black floor + overcast replacement for the
 	// switched-off sun/moon light), applied to the diffuse albedo.
-	result += scene.ambient.xyz * diffuseColor;
+	ambient += scene.ambient.xyz * diffuseColor;
+	// Screen-space ambient occlusion darkens only the ambient/indirect term in
+	// crevices; the direct lighting added below is left untouched. 1.0 = fully lit.
+	float ao = (scene.viewport.z > 0.5)
+		? aoTex.sample(aoSmp, in.position.xy / scene.viewport.xy).r : 1.0;
+	float3 result  = ambient * ao;
 
 	for (int i = 0; i < scene.lightCount; ++i)
 	{
@@ -478,6 +486,110 @@ fragment float4 blurFragment(FSOut in [[stage_in]],
 		result += img.sample(s, in.uv - dir * float(i)).rgb * w[i];
 	}
 	return float4(result, 1.0);
+}
+)MSL";
+
+// ─── SSAO (screen-space ambient occlusion) ──────────────────────────────────
+// Mirrors the GL backend. Working in view space makes the maths identical across
+// backends; the only difference is the NDC→UV y-flip (Metal textures are top-left
+// origin), which exactly compensates the top-left rasterisation, so the sampled
+// view positions match GL's.
+static const char* kSSAOMSL = R"MSL(
+#include <metal_stdlib>
+using namespace metal;
+
+struct VertexIn { packed_float3 position; packed_float3 normal; packed_float2 uv; };
+struct SSAOPosUniforms { float4x4 mvp; float4x4 modelView; };
+struct SSAOPosOut { float4 position [[position]]; float3 viewPos; };
+
+// Pre-pass: rasterise the scene, write the per-pixel view-space position.
+vertex SSAOPosOut ssaoPosVertex(uint vid [[vertex_id]],
+                                const device VertexIn*    verts [[buffer(0)]],
+                                constant SSAOPosUniforms& u     [[buffer(1)]])
+{
+	SSAOPosOut o;
+	float4 p   = float4(float3(verts[vid].position), 1.0);
+	o.position = u.mvp * p;
+	o.viewPos  = (u.modelView * p).xyz;
+	return o;
+}
+fragment float4 ssaoPosFragment(SSAOPosOut in [[stage_in]])
+{
+	return float4(in.viewPos, 1.0); // a = 1 → valid geometry
+}
+
+struct SSAOOut { float4 position [[position]]; float2 uv; };
+vertex SSAOOut ssaoVertex(uint vid [[vertex_id]])
+{
+	float x = float((vid & 1) << 2) - 1.0;
+	float y = float((vid & 2) << 1) - 1.0;
+	SSAOOut o;
+	o.position = float4(x, y, 0.0, 1.0);
+	o.uv       = float2(x * 0.5 + 0.5, 1.0 - (y * 0.5 + 0.5));
+	return o;
+}
+
+struct SSAOParams {
+	float4x4 proj;        // camera projection (GL convention)
+	float4   cfg;         // x,y = noise scale (viewport/4), z = radius, w = bias
+	float4   cfg2;        // x = intensity
+	float4   samples[32]; // hemisphere kernel (xyz)  — 'kernel' is reserved in MSL
+};
+
+fragment float4 ssaoFragment(SSAOOut in [[stage_in]],
+                             texture2d<float> posTex   [[texture(0)]],
+                             sampler          posSmp   [[sampler(0)]],
+                             texture2d<float> noiseTex [[texture(1)]],
+                             sampler          noiseSmp [[sampler(1)]],
+                             constant SSAOParams& P     [[buffer(0)]])
+{
+	float4 pv = posTex.sample(posSmp, in.uv);
+	if (pv.a < 0.5) return float4(1.0);            // background → unoccluded
+	float3 Pp = pv.xyz;
+
+	float2 texel = 1.0 / float2(posTex.get_width(), posTex.get_height());
+	float3 Pr = posTex.sample(posSmp, in.uv + float2(texel.x, 0.0)).xyz;
+	float3 Pl = posTex.sample(posSmp, in.uv - float2(texel.x, 0.0)).xyz;
+	float3 Pu = posTex.sample(posSmp, in.uv + float2(0.0, texel.y)).xyz;
+	float3 Pd = posTex.sample(posSmp, in.uv - float2(0.0, texel.y)).xyz;
+	float3 ddx = (abs(Pr.z - Pp.z) < abs(Pp.z - Pl.z)) ? (Pr - Pp) : (Pp - Pl);
+	float3 ddy = (abs(Pu.z - Pp.z) < abs(Pp.z - Pd.z)) ? (Pu - Pp) : (Pp - Pd);
+	float3 N = normalize(cross(ddx, ddy));
+	if (N.z < 0.0) N = -N;                          // face the camera (+Z view space)
+
+	float3 randv = noiseTex.sample(noiseSmp, in.uv * P.cfg.xy).xyz;
+	float3 T = normalize(randv - N * dot(randv, N));
+	float3 B = cross(N, T);
+	float3x3 TBN = float3x3(T, B, N);
+
+	float occ = 0.0;
+	for (int i = 0; i < 32; ++i)
+	{
+		float3 sp = Pp + (TBN * P.samples[i].xyz) * P.cfg.z;
+		float4 clip = P.proj * float4(sp, 1.0);
+		float2 suv = clip.xy / clip.w;
+		suv = float2(suv.x * 0.5 + 0.5, 1.0 - (suv.y * 0.5 + 0.5)); // Metal: top-left origin
+		if (any(suv < 0.0) || any(suv > 1.0)) continue;
+		float4 sv = posTex.sample(posSmp, suv);
+		if (sv.a < 0.5) continue;                    // sampled the background
+		float rangeCheck = smoothstep(0.0, 1.0, P.cfg.z / max(abs(Pp.z - sv.z), 1e-4));
+		occ += ((sv.z >= sp.z + P.cfg.w) ? 1.0 : 0.0) * rangeCheck;
+	}
+	float ao = 1.0 - (occ / 32.0) * P.cfg2.x;
+	return float4(ao, ao, ao, 1.0);
+}
+
+fragment float4 ssaoBlurFragment(SSAOOut in [[stage_in]],
+                                 texture2d<float> ao [[texture(0)]],
+                                 sampler          s  [[sampler(0)]])
+{
+	float2 texel = 1.0 / float2(ao.get_width(), ao.get_height());
+	float sum = 0.0;
+	for (int x = -2; x < 2; ++x)
+		for (int y = -2; y < 2; ++y)
+			sum += ao.sample(s, in.uv + float2(float(x), float(y)) * texel).r;
+	float v = sum / 16.0;
+	return float4(v, v, v, 1.0);
 }
 )MSL";
 
@@ -1025,6 +1137,21 @@ struct SceneUniforms
 	glm::vec4 sunDir = glm::vec4(0.0f, 1.0f, 0.0f, 0.0f);
 	glm::vec4 ambient = glm::vec4(0.0f);
 	glm::vec4 fog = glm::vec4(0.0f); // x = density (0 = off), y = height falloff
+	glm::vec4 viewport = glm::vec4(0.0f); // xy = output size, z = ssaoEnabled
+};
+
+// Matches the MSL SSAOPosUniforms / SSAOParams structs.
+struct SSAOPosUniforms
+{
+	glm::mat4 mvp;
+	glm::mat4 modelView;
+};
+struct SSAOParamsCPU
+{
+	glm::mat4 proj;
+	glm::vec4 cfg;          // xy = noise scale, z = radius, w = bias
+	glm::vec4 cfg2;         // x = intensity
+	glm::vec4 samples[32];  // hemisphere kernel (xyz)
 };
 
 // Matches the MSL SkyParams struct.
@@ -1125,6 +1252,7 @@ void MetalRenderer::Shutdown()
 	DestroyHDRTarget();
 	DestroyBloomTargets();
 	DestroyLdrTarget();
+	DestroySSAOTargets();
 	DrainRetiredTextures();
 	if (m_tonemapPipeline)      { CFBridgingRelease(m_tonemapPipeline);      m_tonemapPipeline = nullptr; }
 	if (m_fxaaPipeline)         { CFBridgingRelease(m_fxaaPipeline);         m_fxaaPipeline = nullptr; }
@@ -1145,6 +1273,12 @@ void MetalRenderer::Shutdown()
 	if (m_shadowDepthTex)  { CFBridgingRelease(m_shadowDepthTex);  m_shadowDepthTex = nullptr; }
 	if (m_noDepthState)    { CFBridgingRelease(m_noDepthState);    m_noDepthState = nullptr; }
 	if (m_skyDepthState)   { CFBridgingRelease(m_skyDepthState);   m_skyDepthState = nullptr; }
+	if (m_ssaoPosPipeline)  { CFBridgingRelease(m_ssaoPosPipeline);  m_ssaoPosPipeline = nullptr; }
+	if (m_ssaoPipeline)     { CFBridgingRelease(m_ssaoPipeline);     m_ssaoPipeline = nullptr; }
+	if (m_ssaoBlurPipeline) { CFBridgingRelease(m_ssaoBlurPipeline); m_ssaoBlurPipeline = nullptr; }
+	if (m_ssaoNoiseTex)     { CFBridgingRelease(m_ssaoNoiseTex);     m_ssaoNoiseTex = nullptr; }
+	if (m_ssaoPointSampler) { CFBridgingRelease(m_ssaoPointSampler); m_ssaoPointSampler = nullptr; }
+	if (m_ssaoNoiseSampler) { CFBridgingRelease(m_ssaoNoiseSampler); m_ssaoNoiseSampler = nullptr; }
 
 	if (m_imguiPassDescriptor) { CFBridgingRelease(m_imguiPassDescriptor); m_imguiPassDescriptor = nullptr; }
 	if (m_commandQueue)        { CFBridgingRelease(m_commandQueue);        m_commandQueue = nullptr; }
@@ -1153,6 +1287,36 @@ void MetalRenderer::Shutdown()
 }
 
 // ─── Pipeline / mesh setup ────────────────────────────────────────────────────
+
+// Deterministic [0,1) RNG so this backend builds the *identical* SSAO kernel and
+// rotation noise as the GL backend — a prerequisite for GL == Metal parity.
+struct SsaoRng { uint32_t s; float next() { s = s * 1664525u + 1013904223u; return float(s >> 8) * (1.0f / 16777216.0f); } };
+
+// Cosine-ish hemisphere kernel oriented to +Z, packed toward the origin so close
+// occluders dominate. Identical to the OpenGL backend's BuildSSAOKernel.
+static std::vector<glm::vec3> BuildSSAOKernel(int n)
+{
+	SsaoRng rng{ 0x9E3779B9u };
+	std::vector<glm::vec3> k(n);
+	for (int i = 0; i < n; ++i)
+	{
+		glm::vec3 s(rng.next() * 2.0f - 1.0f, rng.next() * 2.0f - 1.0f, rng.next());
+		s = glm::normalize(s) * rng.next();
+		float t = static_cast<float>(i) / static_cast<float>(n);
+		s *= 0.1f + 0.9f * t * t;
+		k[i] = s;
+	}
+	return k;
+}
+// 4×4 tile of random tangent-plane rotation vectors (z = 0). Identical to GL.
+static std::vector<glm::vec3> BuildSSAONoise(int n)
+{
+	SsaoRng rng{ 0x2545F491u };
+	std::vector<glm::vec3> v(n);
+	for (int i = 0; i < n; ++i)
+		v[i] = glm::vec3(rng.next() * 2.0f - 1.0f, rng.next() * 2.0f - 1.0f, 0.0f);
+	return v;
+}
 
 void MetalRenderer::CreateScenePipeline()
 {
@@ -1332,6 +1496,73 @@ void MetalRenderer::CreateScenePipeline()
 		envDesc.usage = MTLTextureUsageShaderRead;
 		envDesc.storageMode = MTLStorageModeShared;
 		m_skyEnvCube = (void*)CFBridgingRetain([device newTextureWithDescriptor:envDesc]);
+
+		// ── SSAO pipelines (position pre-pass + occlusion + blur) ───────────
+		NSError* ssError = nil;
+		id<MTLLibrary> ssLib = [device newLibraryWithSource:
+			[NSString stringWithUTF8String:kSSAOMSL] options:nil error:&ssError];
+		if (!ssLib)
+			throw std::runtime_error(std::string("MetalRenderer: SSAO shader compile failed: ")
+				+ (ssError ? [[ssError localizedDescription] UTF8String] : "unknown"));
+
+		MTLRenderPipelineDescriptor* posDesc = [[MTLRenderPipelineDescriptor alloc] init];
+		posDesc.vertexFunction   = [ssLib newFunctionWithName:@"ssaoPosVertex"];
+		posDesc.fragmentFunction = [ssLib newFunctionWithName:@"ssaoPosFragment"];
+		posDesc.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float; // view position
+		posDesc.depthAttachmentPixelFormat      = kDepthFormat;
+		id<MTLRenderPipelineState> posPso = [device newRenderPipelineStateWithDescriptor:posDesc error:&ssError];
+		if (!posPso)
+			throw std::runtime_error(std::string("MetalRenderer: SSAO pos pipeline failed: ")
+				+ (ssError ? [[ssError localizedDescription] UTF8String] : "unknown"));
+		m_ssaoPosPipeline = (void*)CFBridgingRetain(posPso);
+
+		MTLRenderPipelineDescriptor* occDesc = [[MTLRenderPipelineDescriptor alloc] init];
+		occDesc.vertexFunction   = [ssLib newFunctionWithName:@"ssaoVertex"];
+		occDesc.fragmentFunction = [ssLib newFunctionWithName:@"ssaoFragment"];
+		occDesc.colorAttachments[0].pixelFormat = MTLPixelFormatR8Unorm;
+		id<MTLRenderPipelineState> occPso = [device newRenderPipelineStateWithDescriptor:occDesc error:&ssError];
+		if (!occPso)
+			throw std::runtime_error(std::string("MetalRenderer: SSAO pipeline failed: ")
+				+ (ssError ? [[ssError localizedDescription] UTF8String] : "unknown"));
+		m_ssaoPipeline = (void*)CFBridgingRetain(occPso);
+
+		MTLRenderPipelineDescriptor* sblDesc = [[MTLRenderPipelineDescriptor alloc] init];
+		sblDesc.vertexFunction   = [ssLib newFunctionWithName:@"ssaoVertex"];
+		sblDesc.fragmentFunction = [ssLib newFunctionWithName:@"ssaoBlurFragment"];
+		sblDesc.colorAttachments[0].pixelFormat = MTLPixelFormatR8Unorm;
+		id<MTLRenderPipelineState> sblPso = [device newRenderPipelineStateWithDescriptor:sblDesc error:&ssError];
+		if (!sblPso)
+			throw std::runtime_error(std::string("MetalRenderer: SSAO blur pipeline failed: ")
+				+ (ssError ? [[ssError localizedDescription] UTF8String] : "unknown"));
+		m_ssaoBlurPipeline = (void*)CFBridgingRetain(sblPso);
+
+		// Samplers: nearest+clamp for the position buffer, nearest+repeat for noise.
+		MTLSamplerDescriptor* ptDesc = [[MTLSamplerDescriptor alloc] init];
+		ptDesc.minFilter = MTLSamplerMinMagFilterNearest;
+		ptDesc.magFilter = MTLSamplerMinMagFilterNearest;
+		ptDesc.sAddressMode = MTLSamplerAddressModeClampToEdge;
+		ptDesc.tAddressMode = MTLSamplerAddressModeClampToEdge;
+		m_ssaoPointSampler = (void*)CFBridgingRetain([device newSamplerStateWithDescriptor:ptDesc]);
+		MTLSamplerDescriptor* nsDesc = [[MTLSamplerDescriptor alloc] init];
+		nsDesc.minFilter = MTLSamplerMinMagFilterNearest;
+		nsDesc.magFilter = MTLSamplerMinMagFilterNearest;
+		nsDesc.sAddressMode = MTLSamplerAddressModeRepeat;
+		nsDesc.tAddressMode = MTLSamplerAddressModeRepeat;
+		m_ssaoNoiseSampler = (void*)CFBridgingRetain([device newSamplerStateWithDescriptor:nsDesc]);
+
+		// 4×4 rotation-noise texture (RGBA32F so the values match GL's bit-for-bit).
+		const std::vector<glm::vec3> ssaoNoise = BuildSSAONoise(16);
+		float ssaoNoisePx[16 * 4];
+		for (int i = 0; i < 16; ++i)
+		{ ssaoNoisePx[i*4+0] = ssaoNoise[i].x; ssaoNoisePx[i*4+1] = ssaoNoise[i].y; ssaoNoisePx[i*4+2] = 0.0f; ssaoNoisePx[i*4+3] = 0.0f; }
+		MTLTextureDescriptor* nDesc = [MTLTextureDescriptor
+			texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float width:4 height:4 mipmapped:NO];
+		nDesc.usage = MTLTextureUsageShaderRead;
+		nDesc.storageMode = MTLStorageModeShared;
+		id<MTLTexture> ssaoNoiseTex = [device newTextureWithDescriptor:nDesc];
+		[ssaoNoiseTex replaceRegion:MTLRegionMake2D(0, 0, 4, 4) mipmapLevel:0
+		                  withBytes:ssaoNoisePx bytesPerRow:4 * 4 * sizeof(float)];
+		m_ssaoNoiseTex = (void*)CFBridgingRetain(ssaoNoiseTex);
 	}
 }
 
@@ -1950,6 +2181,160 @@ void* MetalRenderer::EncodeBloom(void* cmdBufPtr, int fullW, int fullH)
 	return m_bloomColor[0];
 }
 
+void MetalRenderer::SetSSAOSettings(const SSAOSettings& s)
+{
+	m_ssaoEnabled   = s.enabled;
+	m_ssaoRadius    = s.radius;
+	m_ssaoIntensity = s.intensity;
+}
+
+void MetalRenderer::EnsureSSAOTargets(int width, int height)
+{
+	width  = std::max(1, width);
+	height = std::max(1, height);
+	if (m_ssaoPosTex && width == m_ssaoW && height == m_ssaoH) return;
+	DestroySSAOTargets();
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+
+	MTLTextureDescriptor* posDesc = [MTLTextureDescriptor
+		texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float width:width height:height mipmapped:NO];
+	posDesc.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+	posDesc.storageMode = MTLStorageModePrivate;
+	m_ssaoPosTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:posDesc]);
+
+	MTLTextureDescriptor* dDesc = [MTLTextureDescriptor
+		texture2DDescriptorWithPixelFormat:kDepthFormat width:width height:height mipmapped:NO];
+	dDesc.usage       = MTLTextureUsageRenderTarget;
+	dDesc.storageMode = MTLStorageModePrivate;
+	m_ssaoPosDepth = (void*)CFBridgingRetain([device newTextureWithDescriptor:dDesc]);
+
+	MTLTextureDescriptor* aoDesc = [MTLTextureDescriptor
+		texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm width:width height:height mipmapped:NO];
+	aoDesc.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+	aoDesc.storageMode = MTLStorageModePrivate;
+	m_ssaoTex     = (void*)CFBridgingRetain([device newTextureWithDescriptor:aoDesc]);
+	m_ssaoBlurTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:aoDesc]);
+
+	m_ssaoW = width; m_ssaoH = height;
+}
+
+void MetalRenderer::DestroySSAOTargets()
+{
+	if (m_ssaoPosTex)   { CFBridgingRelease(m_ssaoPosTex);   m_ssaoPosTex = nullptr; }
+	if (m_ssaoPosDepth) { CFBridgingRelease(m_ssaoPosDepth); m_ssaoPosDepth = nullptr; }
+	if (m_ssaoTex)      { CFBridgingRelease(m_ssaoTex);      m_ssaoTex = nullptr; }
+	if (m_ssaoBlurTex)  { CFBridgingRelease(m_ssaoBlurTex);  m_ssaoBlurTex = nullptr; }
+	m_ssaoResult = nullptr;
+	m_ssaoW = m_ssaoH = 0;
+}
+
+// View-space position pre-pass → occlusion → blur. Runs its own extract/cull/sort
+// (deterministic → matches EncodeScene's draw set) and its own render encoders.
+// Sets m_ssaoResult to the blurred AO texture (or null) for EncodeScene to bind.
+void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
+{
+	m_ssaoResult = nullptr;
+	if (!m_ssaoPosPipeline || !m_ssaoPipeline || !m_ssaoBlurPipeline || !m_world) return;
+	if (width <= 0 || height <= 0) return;
+
+	const IRenderer::EnvironmentSettings& env = GetEnvironment();
+	m_extractor.setDayNight(env.dayNightCycle, env.timeOfDay,
+	                        env.sunColor, env.sunIntensity,
+	                        env.moonColor, env.moonIntensity,
+	                        env.cloudCoverage);
+	m_extractor.extract(*m_world, m_renderWorld,
+	                    static_cast<float>(width) / static_cast<float>(height), &m_editorCamera);
+	if (m_renderWorld.objects.empty()) return;
+	for (RenderObject& obj : m_renderWorld.objects)
+		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId); mesh && mesh->localBounds.isValid())
+			obj.worldBounds = mesh->localBounds.transformed(obj.transform);
+	m_culler.cull(m_renderWorld, m_visible);
+	m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
+	if (m_sortedIndices.empty()) return;
+
+	EnsureSSAOTargets(width, height);
+	const glm::mat4 viewProj = m_renderWorld.camera.projection * m_renderWorld.camera.view;
+	const glm::mat4 view     = m_renderWorld.camera.view;
+
+	@autoreleasepool
+	{
+		id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
+
+		// ── 1. View-space position pre-pass ────────────────────────────────
+		MTLRenderPassDescriptor* pp = [MTLRenderPassDescriptor renderPassDescriptor];
+		pp.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_ssaoPosTex;
+		pp.colorAttachments[0].loadAction  = MTLLoadActionClear;
+		pp.colorAttachments[0].storeAction = MTLStoreActionStore;
+		pp.colorAttachments[0].clearColor  = MTLClearColorMake(0.0, 0.0, 0.0, 0.0); // a = 0 → background
+		pp.depthAttachment.texture     = (__bridge id<MTLTexture>)m_ssaoPosDepth;
+		pp.depthAttachment.loadAction  = MTLLoadActionClear;
+		pp.depthAttachment.storeAction = MTLStoreActionDontCare;
+		pp.depthAttachment.clearDepth  = 1.0;
+		id<MTLRenderCommandEncoder> enc = [cmdBuf renderCommandEncoderWithDescriptor:pp];
+		[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_ssaoPosPipeline];
+		[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
+		HE::UUID lastId{}; const GpuMesh* cMesh = nullptr; bool valid = false;
+		for (uint32_t idx : m_sortedIndices)
+		{
+			const RenderObject& obj = m_renderWorld.objects[idx];
+			SSAOPosUniforms u;
+			u.mvp       = viewProj * obj.transform;
+			u.modelView = view * obj.transform;
+			if (!valid || obj.meshAssetId != lastId)
+			{ cMesh = ResolveMesh(obj.meshAssetId); lastId = obj.meshAssetId; valid = true; }
+			id<MTLBuffer> vbuf, ibuf; NSUInteger ic;
+			if (const GpuMesh* mesh = cMesh)
+			{ vbuf = (__bridge id<MTLBuffer>)mesh->vertexBuf; ibuf = (__bridge id<MTLBuffer>)mesh->indexBuf; ic = (NSUInteger)mesh->indexCount; }
+			else
+			{ vbuf = (__bridge id<MTLBuffer>)m_cubeVertexBuf; ibuf = (__bridge id<MTLBuffer>)m_cubeIndexBuf; ic = (NSUInteger)m_cubeIndexCount; }
+			[enc setVertexBuffer:vbuf offset:0 atIndex:0];
+			[enc setVertexBytes:&u length:sizeof(u) atIndex:1];
+			[enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:ic
+			                 indexType:MTLIndexTypeUInt32 indexBuffer:ibuf indexBufferOffset:0];
+		}
+		[enc endEncoding];
+
+		// ── 2. Occlusion (fullscreen) ──────────────────────────────────────
+		SSAOParamsCPU params;
+		params.proj = m_renderWorld.camera.projection;
+		params.cfg  = glm::vec4(static_cast<float>(width) / 4.0f, static_cast<float>(height) / 4.0f,
+		                        m_ssaoRadius, 0.025f);
+		params.cfg2 = glm::vec4(m_ssaoIntensity, 0.0f, 0.0f, 0.0f);
+		const std::vector<glm::vec3> kernel = BuildSSAOKernel(32);
+		for (int i = 0; i < 32; ++i) params.samples[i] = glm::vec4(kernel[i], 0.0f);
+		{
+			MTLRenderPassDescriptor* sp = [MTLRenderPassDescriptor renderPassDescriptor];
+			sp.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_ssaoTex;
+			sp.colorAttachments[0].loadAction  = MTLLoadActionDontCare;
+			sp.colorAttachments[0].storeAction = MTLStoreActionStore;
+			id<MTLRenderCommandEncoder> e2 = [cmdBuf renderCommandEncoderWithDescriptor:sp];
+			[e2 setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_ssaoPipeline];
+			[e2 setFragmentTexture:(__bridge id<MTLTexture>)m_ssaoPosTex atIndex:0];
+			[e2 setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_ssaoPointSampler atIndex:0];
+			[e2 setFragmentTexture:(__bridge id<MTLTexture>)m_ssaoNoiseTex atIndex:1];
+			[e2 setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_ssaoNoiseSampler atIndex:1];
+			[e2 setFragmentBytes:&params length:sizeof(params) atIndex:0];
+			[e2 drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+			[e2 endEncoding];
+		}
+
+		// ── 3. Box blur (fullscreen) ───────────────────────────────────────
+		{
+			MTLRenderPassDescriptor* bp = [MTLRenderPassDescriptor renderPassDescriptor];
+			bp.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_ssaoBlurTex;
+			bp.colorAttachments[0].loadAction  = MTLLoadActionDontCare;
+			bp.colorAttachments[0].storeAction = MTLStoreActionStore;
+			id<MTLRenderCommandEncoder> e3 = [cmdBuf renderCommandEncoderWithDescriptor:bp];
+			[e3 setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_ssaoBlurPipeline];
+			[e3 setFragmentTexture:(__bridge id<MTLTexture>)m_ssaoTex atIndex:0];
+			[e3 setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
+			[e3 drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+			[e3 endEncoding];
+		}
+	}
+	m_ssaoResult = m_ssaoBlurTex;
+}
+
 // Fullscreen tonemap of the HDR scene color (+ bloom) into the bound encoder's target.
 void MetalRenderer::EncodeTonemap(void* renderEncoderPtr)
 {
@@ -2134,6 +2519,12 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 	[encoder setFragmentTexture:(__bridge id<MTLTexture>)m_skyEnvCube atIndex:2];
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:2];
 
+	// SSAO occlusion on slot 3 (filled by EncodeSSAO before this pass). Bound to the
+	// white dummy when off so the sampler stays valid and ao reads as 1 (no change).
+	const bool ssaoActive = m_ssaoEnabled && m_ssaoResult;
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(ssaoActive ? m_ssaoResult : m_dummyTexture) atIndex:3];
+	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:3];
+
 	// ── Lights (clamped to the shader's 8) ──────────────────────────────────
 	{
 		SceneUniforms scene;
@@ -2153,6 +2544,8 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 		scene.ambient       = glm::vec4(m_renderWorld.ambient, 0.0f);
 		scene.fog           = glm::vec4(GetEnvironment().fogDensity,
 		                                GetEnvironment().fogHeightFalloff, 0.0f, 0.0f);
+		scene.viewport      = glm::vec4(static_cast<float>(width), static_cast<float>(height),
+		                                ssaoActive ? 1.0f : 0.0f, 0.0f);
 		[encoder setFragmentBytes:&scene length:sizeof(scene) atIndex:0];
 	}
 
@@ -2286,6 +2679,11 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			const int sceneW = offscreen ? (int)m_viewportReqW : pw;
 			const int sceneH = offscreen ? (int)m_viewportReqH : ph;
 			EnsureHDRTarget(sceneW, sceneH);
+
+			// SSAO occlusion (its own pre-pass + encoders) before the shading pass,
+			// so the scene shader can darken its ambient. Skipped (zero cost) off.
+			if (m_ssaoEnabled) EncodeSSAO((__bridge void*)cmdBuf, sceneW, sceneH);
+			else               m_ssaoResult = nullptr;
 
 			// Scene → RGBA16Float HDR target.
 			MTLRenderPassDescriptor* hdrPass = [MTLRenderPassDescriptor renderPassDescriptor];

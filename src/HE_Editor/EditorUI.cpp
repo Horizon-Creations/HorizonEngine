@@ -157,6 +157,15 @@ static void DrawPreferencesWindow(AppContext& ctx, bool& open)
 		ImGui::SliderFloat("Bloom Intensity", &cfg.BloomIntensity, 0.0f, 2.0f, "%.2f");
 		ImGui::EndDisabled();
 
+		// SSAO (screen-space ambient occlusion) — darkens the ambient in crevices.
+		ImGui::Checkbox("SSAO", &cfg.SSAOEnabled);
+		ImGui::BeginDisabled(!cfg.SSAOEnabled);
+		ImGui::SetNextItemWidth(220.0f);
+		ImGui::SliderFloat("SSAO Radius", &cfg.SSAORadius, 0.05f, 2.0f, "%.2f");
+		ImGui::SetNextItemWidth(220.0f);
+		ImGui::SliderFloat("SSAO Intensity", &cfg.SSAOIntensity, 0.0f, 2.0f, "%.2f");
+		ImGui::EndDisabled();
+
 		ImGui::SeparatorText("Content Browser");
 		ImGui::Checkbox("Keep CPU Asset Cache", &cfg.KeepCPUAssets);
 		ImGui::SetNextItemWidth(120.0f);
@@ -175,6 +184,9 @@ static void DrawPreferencesWindow(AppContext& ctx, bool& open)
 			cfg.BloomEnabled      = true;
 			cfg.BloomThreshold    = 1.0f;
 			cfg.BloomIntensity    = 0.6f;
+			cfg.SSAOEnabled       = true;
+			cfg.SSAORadius        = 0.5f;
+			cfg.SSAOIntensity     = 1.0f;
 			if (ctx.editorCamera) ctx.editorCamera->setFlySpeed(cfg.EditorCameraSpeed);
 		}
 		ImGui::SameLine();

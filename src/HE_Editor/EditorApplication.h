@@ -55,6 +55,11 @@ struct EditorConfig
 	float BloomThreshold = 1.0f;
 	float BloomIntensity = 0.6f;
 
+	// Post-process: SSAO (pushed to the renderer each frame via SetSSAOSettings)
+	bool  SSAOEnabled   = true;
+	float SSAORadius    = 0.5f;   // hemisphere sampling radius, view-space units
+	float SSAOIntensity = 1.0f;   // 0 = off … 1 = full ambient occlusion
+
 	// Environment: day-night cycle (pushed via SetEnvironmentSettings)
 	bool  DayNightCycle       = false;
 	float TimeOfDay           = 0.5f;    // 0..1 (0.5 = noon)

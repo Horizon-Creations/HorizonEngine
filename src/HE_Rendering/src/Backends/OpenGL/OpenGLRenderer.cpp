@@ -180,6 +180,9 @@ uniform samplerCube uSkyEnv;   // baked skyColor cubemap (image-based ambient)
 uniform vec3      uAmbient;     // flat ambient fill (never-black floor + overcast)
 uniform float     uFogDensity;       // atmospheric fog amount (0 = off)
 uniform float     uFogHeightFalloff; // >0 = fog pools near the ground
+uniform sampler2D uAO;               // SSAO occlusion (screen-space); 1 = unoccluded
+uniform vec2      uViewport;         // output size, for the screen-space AO lookup
+uniform int       uSSAOEnabled;      // 1 = darken the ambient by SSAO
 
 // shared skyColor() is injected at the marker below (CreateUnlitPipeline)
 //#SKYFUNC#
@@ -264,10 +267,14 @@ void main()
 	vec3 Rrough  = normalize(mix(reflect(-V, N), N, uRoughness));
 	vec3 ambDiff = texture(uSkyEnv, N).rgb      * diffuseColor;
 	vec3 ambSpec = texture(uSkyEnv, Rrough).rgb * specColor;
-	vec3 result  = ambDiff * 0.35 + ambSpec * (1.0 - 0.6 * uRoughness);
+	vec3 ambient = ambDiff * 0.35 + ambSpec * (1.0 - 0.6 * uRoughness);
 	// Flat ambient fill (never-black floor + overcast replacement for the
 	// switched-off sun/moon light), applied to the diffuse albedo.
-	result += uAmbient * diffuseColor;
+	ambient += uAmbient * diffuseColor;
+	// Screen-space ambient occlusion darkens only the ambient/indirect term in
+	// crevices; the direct lighting added below is left untouched. 1.0 = fully lit.
+	float ao = (uSSAOEnabled == 1) ? texture(uAO, gl_FragCoord.xy / uViewport).r : 1.0;
+	vec3 result  = ambient * ao;
 
 	for (int i = 0; i < uLightCount; ++i)
 	{
@@ -970,6 +977,110 @@ void main()
 }
 )GLSL";
 
+// ─── SSAO (screen-space ambient occlusion) ──────────────────────────────────
+// Number of hemisphere kernel samples; shared by the C++ kernel and the shader.
+static constexpr int kSSAOKernel = 32;
+
+// Pre-pass: rasterise the scene and write the per-pixel VIEW-SPACE position
+// (xyz, with a = 1 marking valid geometry vs. the cleared background). Working in
+// view space sidesteps every depth-buffer / clip-space convention difference
+// between the backends — the SSAO maths is then identical on GL and Metal.
+static const char* kSSAOPosVS = R"GLSL(
+#version 410 core
+layout(location = 0) in vec3 aPos;
+uniform mat4 uMVP;        // clip-space (viewProj * model) — matches the scene pass
+uniform mat4 uModelView;  // view * model — gives the view-space position
+out vec3 vViewPos;
+void main()
+{
+	vViewPos    = (uModelView * vec4(aPos, 1.0)).xyz;
+	gl_Position = uMVP * vec4(aPos, 1.0);
+}
+)GLSL";
+
+static const char* kSSAOPosFS = R"GLSL(
+#version 410 core
+in vec3 vViewPos;
+out vec4 FragColor;
+void main() { FragColor = vec4(vViewPos, 1.0); } // a = 1 → valid geometry
+)GLSL";
+
+// Occlusion estimate (fullscreen, shares the tonemap fullscreen-triangle VS).
+// For each pixel: reconstruct the view-space normal from neighbouring positions,
+// build a TBN from a tiled random rotation, then sample a hemisphere kernel and
+// count how many samples are occluded by nearer geometry. Mirrors the Metal pass
+// exactly except for the NDC→UV y-flip (GL framebuffers are bottom-up).
+static const char* kSSAOFS = R"GLSL(
+#version 410 core
+in vec2 vUV;
+uniform sampler2D uViewPos;     // RGBA16F: xyz view-space pos, a = valid
+uniform sampler2D uNoise;       // 4×4 random rotation vectors (xy in [-1,1])
+uniform mat4      uProj;        // camera projection (GL convention)
+uniform vec2      uNoiseScale;  // viewport / 4 (tiles the noise across the screen)
+uniform float     uRadius;
+uniform float     uBias;
+uniform float     uIntensity;
+uniform vec3      uKernel[32];
+out vec4 FragColor;
+void main()
+{
+	vec4 pv = texture(uViewPos, vUV);
+	if (pv.a < 0.5) { FragColor = vec4(1.0); return; } // background → unoccluded
+	vec3 P = pv.xyz;
+
+	// View-space normal from neighbouring positions, picking the nearer side on
+	// each axis so silhouettes don't bleed a wrong normal across depth edges.
+	vec2 texel = 1.0 / vec2(textureSize(uViewPos, 0));
+	vec3 Pr = texture(uViewPos, vUV + vec2(texel.x, 0.0)).xyz;
+	vec3 Pl = texture(uViewPos, vUV - vec2(texel.x, 0.0)).xyz;
+	vec3 Pu = texture(uViewPos, vUV + vec2(0.0, texel.y)).xyz;
+	vec3 Pd = texture(uViewPos, vUV - vec2(0.0, texel.y)).xyz;
+	vec3 ddx = (abs(Pr.z - P.z) < abs(P.z - Pl.z)) ? (Pr - P) : (P - Pl);
+	vec3 ddy = (abs(Pu.z - P.z) < abs(P.z - Pd.z)) ? (Pu - P) : (P - Pd);
+	vec3 N = normalize(cross(ddx, ddy));
+	if (N.z < 0.0) N = -N;                       // face the camera (+Z in view space)
+
+	vec3 randv = texture(uNoise, vUV * uNoiseScale).xyz;
+	vec3 T = normalize(randv - N * dot(randv, N)); // Gram-Schmidt
+	vec3 B = cross(N, T);
+	mat3 TBN = mat3(T, B, N);
+
+	float occ = 0.0;
+	for (int i = 0; i < 32; ++i)
+	{
+		vec3 sp = P + (TBN * uKernel[i]) * uRadius;       // view-space sample point
+		vec4 clip = uProj * vec4(sp, 1.0);
+		vec2 suv = (clip.xy / clip.w) * 0.5 + 0.5;        // GL: ndc.y up → uv.y up
+		if (suv.x < 0.0 || suv.x > 1.0 || suv.y < 0.0 || suv.y > 1.0) continue;
+		vec4 sv = texture(uViewPos, suv);
+		if (sv.a < 0.5) continue;                          // sampled the background
+		// View space looks down -Z, so geometry nearer the camera has the larger z.
+		float rangeCheck = smoothstep(0.0, 1.0, uRadius / max(abs(P.z - sv.z), 1e-4));
+		occ += ((sv.z >= sp.z + uBias) ? 1.0 : 0.0) * rangeCheck;
+	}
+	float ao = 1.0 - (occ / 32.0) * uIntensity;
+	FragColor = vec4(ao, ao, ao, 1.0);
+}
+)GLSL";
+
+// 4×4 box blur to remove the noise-rotation pattern. Single channel (R).
+static const char* kSSAOBlurFS = R"GLSL(
+#version 410 core
+in vec2 vUV;
+uniform sampler2D uAOInput;
+out vec4 FragColor;
+void main()
+{
+	vec2 texel = 1.0 / vec2(textureSize(uAOInput, 0));
+	float sum = 0.0;
+	for (int x = -2; x < 2; ++x)
+		for (int y = -2; y < 2; ++y)
+			sum += texture(uAOInput, vUV + vec2(float(x), float(y)) * texel).r;
+	float ao = sum / 16.0;
+	FragColor = vec4(ao, ao, ao, 1.0);
+}
+)GLSL";
+
 static GLuint CompileStage(GLenum stage, const char* src)
 {
 	GLuint shader = glCreateShader(stage);
@@ -1020,6 +1131,7 @@ void OpenGLRenderer::Initialize(HE::Window* window)
 	CreateSkyPipeline();
 	CreateTonemapPipeline();
 	CreateBloomPipeline();
+	CreateSSAOPipeline();
 	CreateCubeMesh();
 	Logger::Log(Logger::LogLevel::Info, "OpenGLRenderer: initialized successfully");
 }
@@ -1082,6 +1194,9 @@ void OpenGLRenderer::CreateUnlitPipeline()
 	m_uLightVP       = glGetUniformLocation(m_unlitProgram, "uLightVP");
 	m_uShadowMap     = glGetUniformLocation(m_unlitProgram, "uShadowMap");
 	m_uShadowEnabled = glGetUniformLocation(m_unlitProgram, "uShadowEnabled");
+	m_uAO            = glGetUniformLocation(m_unlitProgram, "uAO");
+	m_uViewport      = glGetUniformLocation(m_unlitProgram, "uViewport");
+	m_uSSAOEnabled   = glGetUniformLocation(m_unlitProgram, "uSSAOEnabled");
 }
 
 void OpenGLRenderer::UpdateSkyEnvCube(const glm::vec3& sunDir)
@@ -1383,6 +1498,252 @@ unsigned int OpenGLRenderer::RenderBloom(int fullW, int fullH)
 	return m_bloomColor[0];
 }
 
+// ─── SSAO ────────────────────────────────────────────────────────────────────
+// Deterministic [0,1) RNG so the GL and Metal backends build the *identical*
+// hemisphere kernel and rotation noise — a prerequisite for GL == Metal parity.
+struct SsaoRng { uint32_t s; float next() { s = s * 1664525u + 1013904223u; return float(s >> 8) * (1.0f / 16777216.0f); } };
+
+// Cosine-ish hemisphere kernel oriented to +Z, packed toward the origin so close
+// occluders dominate. Shared verbatim with the Metal backend.
+static std::vector<glm::vec3> BuildSSAOKernel(int n)
+{
+	SsaoRng rng{ 0x9E3779B9u };
+	std::vector<glm::vec3> k(n);
+	for (int i = 0; i < n; ++i)
+	{
+		glm::vec3 s(rng.next() * 2.0f - 1.0f, rng.next() * 2.0f - 1.0f, rng.next());
+		s = glm::normalize(s) * rng.next();
+		float t = static_cast<float>(i) / static_cast<float>(n);
+		s *= 0.1f + 0.9f * t * t;   // accelerate the distribution toward the centre
+		k[i] = s;
+	}
+	return k;
+}
+// 4×4 tile of random rotation vectors in the tangent plane (z = 0). Returned as
+// vec3 so the upload matches GL_RGB. Shared verbatim with the Metal backend.
+static std::vector<glm::vec3> BuildSSAONoise(int n)
+{
+	SsaoRng rng{ 0x2545F491u };
+	std::vector<glm::vec3> v(n);
+	for (int i = 0; i < n; ++i)
+		v[i] = glm::vec3(rng.next() * 2.0f - 1.0f, rng.next() * 2.0f - 1.0f, 0.0f);
+	return v;
+}
+
+void OpenGLRenderer::CreateSSAOPipeline()
+{
+	// Pre-pass program (writes view-space position).
+	{
+		GLuint vs = CompileStage(GL_VERTEX_SHADER,   kSSAOPosVS);
+		GLuint fs = CompileStage(GL_FRAGMENT_SHADER, kSSAOPosFS);
+		m_ssaoPosProgram = glCreateProgram();
+		glAttachShader(m_ssaoPosProgram, vs);
+		glAttachShader(m_ssaoPosProgram, fs);
+		glLinkProgram(m_ssaoPosProgram);
+		glDeleteShader(vs); glDeleteShader(fs);
+		m_uPosMVP       = glGetUniformLocation(m_ssaoPosProgram, "uMVP");
+		m_uPosModelView = glGetUniformLocation(m_ssaoPosProgram, "uModelView");
+	}
+	// Occlusion program (reuses the tonemap fullscreen-triangle VS).
+	{
+		GLuint vs = CompileStage(GL_VERTEX_SHADER,   kTonemapVS);
+		GLuint fs = CompileStage(GL_FRAGMENT_SHADER, kSSAOFS);
+		m_ssaoProgram = glCreateProgram();
+		glAttachShader(m_ssaoProgram, vs);
+		glAttachShader(m_ssaoProgram, fs);
+		glLinkProgram(m_ssaoProgram);
+		glDeleteShader(vs); glDeleteShader(fs);
+		GLint ok = 0; glGetProgramiv(m_ssaoProgram, GL_LINK_STATUS, &ok);
+		if (!ok)
+		{
+			GLchar log[512]; glGetProgramInfoLog(m_ssaoProgram, sizeof(log), nullptr, log);
+			throw std::runtime_error(std::string("OpenGLRenderer: SSAO link failed: ") + log);
+		}
+		m_uSsaoViewPos    = glGetUniformLocation(m_ssaoProgram, "uViewPos");
+		m_uSsaoNoise      = glGetUniformLocation(m_ssaoProgram, "uNoise");
+		m_uSsaoProj       = glGetUniformLocation(m_ssaoProgram, "uProj");
+		m_uSsaoNoiseScale = glGetUniformLocation(m_ssaoProgram, "uNoiseScale");
+		m_uSsaoRadius     = glGetUniformLocation(m_ssaoProgram, "uRadius");
+		m_uSsaoBias       = glGetUniformLocation(m_ssaoProgram, "uBias");
+		m_uSsaoIntensity  = glGetUniformLocation(m_ssaoProgram, "uIntensity");
+		m_uSsaoKernel     = glGetUniformLocation(m_ssaoProgram, "uKernel");
+	}
+	// Blur program.
+	{
+		GLuint vs = CompileStage(GL_VERTEX_SHADER,   kTonemapVS);
+		GLuint fs = CompileStage(GL_FRAGMENT_SHADER, kSSAOBlurFS);
+		m_ssaoBlurProgram = glCreateProgram();
+		glAttachShader(m_ssaoBlurProgram, vs);
+		glAttachShader(m_ssaoBlurProgram, fs);
+		glLinkProgram(m_ssaoBlurProgram);
+		glDeleteShader(vs); glDeleteShader(fs);
+		m_uBlurAO = glGetUniformLocation(m_ssaoBlurProgram, "uAOInput");
+	}
+	// Upload the (constant) hemisphere kernel once.
+	{
+		const std::vector<glm::vec3> kernel = BuildSSAOKernel(kSSAOKernel);
+		glUseProgram(m_ssaoProgram);
+		glUniform3fv(m_uSsaoKernel, kSSAOKernel, glm::value_ptr(kernel[0]));
+		glUseProgram(0);
+	}
+	// 4×4 rotation-noise texture (NEAREST + REPEAT so it tiles per 4×4 screen block).
+	{
+		const std::vector<glm::vec3> noise = BuildSSAONoise(16);
+		glGenTextures(1, &m_ssaoNoiseTex);
+		glBindTexture(GL_TEXTURE_2D, m_ssaoNoiseTex);
+		// RGBA32F so the rotation vectors are bit-identical to the Metal backend's.
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 4, 4, 0, GL_RGB, GL_FLOAT, noise.data());
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+		glBindTexture(GL_TEXTURE_2D, 0);
+	}
+	// 1×1 white — bound as the AO source when SSAO is off (keeps the sampler valid).
+	{
+		const uint8_t white[4] = { 255, 255, 255, 255 };
+		glGenTextures(1, &m_whiteTex);
+		glBindTexture(GL_TEXTURE_2D, m_whiteTex);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, white);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glBindTexture(GL_TEXTURE_2D, 0);
+	}
+}
+
+void OpenGLRenderer::SetSSAOSettings(const SSAOSettings& s)
+{
+	m_ssaoEnabled   = s.enabled;
+	m_ssaoRadius    = s.radius;
+	m_ssaoIntensity = s.intensity;
+}
+
+void OpenGLRenderer::EnsureSSAOTargets(int width, int height)
+{
+	width  = std::max(1, width);
+	height = std::max(1, height);
+	if (m_ssaoPosFBO && width == m_ssaoW && height == m_ssaoH)
+		return;
+	DestroySSAOTargets();
+	m_ssaoW = width; m_ssaoH = height;
+
+	// Position pre-pass target (RGBA16F view position) + depth (nearest surface).
+	// NEAREST so the kernel reprojection reads exact stored positions, never an
+	// interpolated value straddling a depth edge.
+	glGenFramebuffers(1, &m_ssaoPosFBO);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_ssaoPosFBO);
+	glGenTextures(1, &m_ssaoPosTex);
+	glBindTexture(GL_TEXTURE_2D, m_ssaoPosTex);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_ssaoPosTex, 0);
+	glGenRenderbuffers(1, &m_ssaoPosDepth);
+	glBindRenderbuffer(GL_RENDERBUFFER, m_ssaoPosDepth);
+	glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, width, height);
+	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, m_ssaoPosDepth);
+
+	// Raw + blurred occlusion (single-channel R8, LINEAR for the scene-shader read).
+	auto makeR8 = [&](unsigned int& fbo, unsigned int& tex)
+	{
+		glGenFramebuffers(1, &fbo);
+		glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+		glGenTextures(1, &tex);
+		glBindTexture(GL_TEXTURE_2D, tex);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, width, height, 0, GL_RED, GL_UNSIGNED_BYTE, nullptr);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+	};
+	makeR8(m_ssaoFBO, m_ssaoTex);
+	makeR8(m_ssaoBlurFBO, m_ssaoBlurTex);
+
+	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+		Logger::Log(Logger::LogLevel::Error, "OpenGLRenderer: SSAO FBO incomplete");
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+void OpenGLRenderer::DestroySSAOTargets()
+{
+	if (m_ssaoPosFBO)   { glDeleteFramebuffers(1, &m_ssaoPosFBO);    m_ssaoPosFBO = 0; }
+	if (m_ssaoPosTex)   { glDeleteTextures(1, &m_ssaoPosTex);        m_ssaoPosTex = 0; }
+	if (m_ssaoPosDepth) { glDeleteRenderbuffers(1, &m_ssaoPosDepth); m_ssaoPosDepth = 0; }
+	if (m_ssaoFBO)      { glDeleteFramebuffers(1, &m_ssaoFBO);       m_ssaoFBO = 0; }
+	if (m_ssaoTex)      { glDeleteTextures(1, &m_ssaoTex);           m_ssaoTex = 0; }
+	if (m_ssaoBlurFBO)  { glDeleteFramebuffers(1, &m_ssaoBlurFBO);   m_ssaoBlurFBO = 0; }
+	if (m_ssaoBlurTex)  { glDeleteTextures(1, &m_ssaoBlurTex);       m_ssaoBlurTex = 0; }
+	m_ssaoW = m_ssaoH = 0;
+}
+
+// Pre-pass (view position) → occlusion → blur. Leaves GL_TEXTURE0 active and the
+// depth test disabled; the caller re-binds its own target + depth state.
+unsigned int OpenGLRenderer::RenderSSAO(const CommandBuffer& cmds, int pw, int ph,
+	const glm::mat4& viewProj, const glm::mat4& view, const glm::mat4& proj)
+{
+	if (!m_ssaoPosProgram || !m_ssaoProgram || !m_ssaoBlurProgram) return 0;
+	EnsureSSAOTargets(pw, ph);
+	if (!m_ssaoPosFBO) return 0;
+
+	// ── 1. View-space position pre-pass ────────────────────────────────────
+	glBindFramebuffer(GL_FRAMEBUFFER, m_ssaoPosFBO);
+	glViewport(0, 0, pw, ph);
+	glEnable(GL_DEPTH_TEST);
+	glDepthFunc(GL_LESS);
+	glDepthMask(GL_TRUE);
+	glClearColor(0.0f, 0.0f, 0.0f, 0.0f); // a = 0 → background
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+	glUseProgram(m_ssaoPosProgram);
+	HE::UUID lastId{}; const GpuMesh* cMesh = nullptr; bool valid = false;
+	for (const DrawCall& dc : cmds.drawCalls())
+	{
+		glUniformMatrix4fv(m_uPosMVP,       1, GL_FALSE, glm::value_ptr(viewProj * dc.transform));
+		glUniformMatrix4fv(m_uPosModelView, 1, GL_FALSE, glm::value_ptr(view * dc.transform));
+		if (!valid || dc.meshAssetId != lastId)
+		{
+			cMesh = ResolveMesh(dc.meshAssetId);
+			lastId = dc.meshAssetId; valid = true;
+		}
+		const GpuMesh* mesh = cMesh;
+		glBindVertexArray(mesh ? mesh->vao : m_cubeVAO);
+		glDrawElements(GL_TRIANGLES, mesh ? mesh->indexCount : m_cubeIndexCount,
+		               GL_UNSIGNED_INT, nullptr);
+	}
+
+	// ── 2. Occlusion (fullscreen) ──────────────────────────────────────────
+	glDisable(GL_DEPTH_TEST);
+	glBindVertexArray(m_fsVAO);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_ssaoFBO);
+	glUseProgram(m_ssaoProgram);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, m_ssaoPosTex);
+	glUniform1i(m_uSsaoViewPos, 0);
+	glActiveTexture(GL_TEXTURE1);
+	glBindTexture(GL_TEXTURE_2D, m_ssaoNoiseTex);
+	glUniform1i(m_uSsaoNoise, 1);
+	glUniformMatrix4fv(m_uSsaoProj, 1, GL_FALSE, glm::value_ptr(proj));
+	glUniform2f(m_uSsaoNoiseScale, static_cast<float>(pw) / 4.0f, static_cast<float>(ph) / 4.0f);
+	glUniform1f(m_uSsaoRadius,    m_ssaoRadius);
+	glUniform1f(m_uSsaoBias,      0.025f);
+	glUniform1f(m_uSsaoIntensity, m_ssaoIntensity);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+
+	// ── 3. Box blur (fullscreen) ───────────────────────────────────────────
+	glBindFramebuffer(GL_FRAMEBUFFER, m_ssaoBlurFBO);
+	glUseProgram(m_ssaoBlurProgram);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, m_ssaoTex);
+	glUniform1i(m_uBlurAO, 0);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+
+	glActiveTexture(GL_TEXTURE0);
+	return m_ssaoBlurTex;
+}
+
 void OpenGLRenderer::EnsureHDRTarget(int width, int height)
 {
 	if (m_hdrFBO && width == m_hdrW && height == m_hdrH)
@@ -1641,6 +2002,7 @@ void OpenGLRenderer::Shutdown()
 	DestroyHDRTarget();
 	DestroyBloomTargets();
 	DestroyLdrTarget();
+	DestroySSAOTargets();
 	for (auto& r : m_retiredTextures)
 		glDeleteTextures(1, &r.texture);
 	m_retiredTextures.clear();
@@ -1661,6 +2023,11 @@ void OpenGLRenderer::Shutdown()
 	if (m_moonTex)        { glDeleteTextures(1, &m_moonTex);         m_moonTex = 0; }
 	if (m_noiseTex)       { glDeleteTextures(1, &m_noiseTex);        m_noiseTex = 0; }
 	if (m_skyEnvCube)     { glDeleteTextures(1, &m_skyEnvCube);      m_skyEnvCube = 0; }
+	if (m_ssaoNoiseTex)   { glDeleteTextures(1, &m_ssaoNoiseTex);    m_ssaoNoiseTex = 0; }
+	if (m_whiteTex)       { glDeleteTextures(1, &m_whiteTex);        m_whiteTex = 0; }
+	if (m_ssaoPosProgram)  { glDeleteProgram(m_ssaoPosProgram);  m_ssaoPosProgram = 0; }
+	if (m_ssaoProgram)     { glDeleteProgram(m_ssaoProgram);     m_ssaoProgram = 0; }
+	if (m_ssaoBlurProgram) { glDeleteProgram(m_ssaoBlurProgram); m_ssaoBlurProgram = 0; }
 
 	// Destroy secondary contexts (secondary windows' SDL_GLContexts are owned by us)
 	for (auto& [sdlWin, ctx] : m_secondaryContexts)
@@ -1910,6 +2277,14 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			return;
 		}
 
+		// ── SSAO: view-space position pre-pass → occlusion → blur ───────────
+		// Computed before shading (using these same geometry draw calls) so the
+		// scene shader can darken its ambient term. Skipped (zero cost) when off.
+		const unsigned int aoTex = m_ssaoEnabled
+			? RenderSSAO(cmds, pw, ph, viewProj, m_renderWorld.camera.view,
+			             m_renderWorld.camera.projection)
+			: 0u;
+
 		// ── Geometry pass: scene program + per-frame state, into HDR target ─
 		// Set here (not before the graph) because the shadow pass switched the
 		// active program.
@@ -1940,6 +2315,14 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		glUniform3fv(m_uAmbient, 1, glm::value_ptr(m_renderWorld.ambient));
 		glUniform1f(m_uFogDensity,       GetEnvironment().fogDensity);
 		glUniform1f(m_uFogHeightFalloff, GetEnvironment().fogHeightFalloff);
+		// SSAO occlusion on unit 4 (white fallback when off → ao = 1, no change).
+		const bool aoActive = m_ssaoEnabled && aoTex != 0;
+		glActiveTexture(GL_TEXTURE4);
+		glBindTexture(GL_TEXTURE_2D, aoActive ? aoTex : m_whiteTex);
+		glUniform1i(m_uAO, 4);
+		glActiveTexture(GL_TEXTURE0);
+		glUniform2f(m_uViewport, static_cast<float>(pw), static_cast<float>(ph));
+		glUniform1i(m_uSSAOEnabled, aoActive ? 1 : 0);
 
 		// Lights (clamped to the shader's MAX_LIGHTS)
 		{
