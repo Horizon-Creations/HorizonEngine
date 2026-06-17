@@ -5,12 +5,14 @@ add_library(HorizonScene SHARED
     src/Components/TransformComponent.cpp
     src/TerrainMeshGenerator.cpp
     src/TerrainSystem.cpp
+    src/ScriptContext.cpp
 )
 
 target_include_directories(HorizonScene
     PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/include
             ${CMAKE_CURRENT_SOURCE_DIR}/vendor
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${lua_SOURCE_DIR}/lua-5.4.7/include
 )
 
 target_compile_definitions(HorizonScene

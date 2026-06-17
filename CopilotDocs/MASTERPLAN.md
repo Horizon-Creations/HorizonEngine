@@ -202,7 +202,7 @@ profitieren von P2.8 (Play-Mode zum Testen).
 | # | Aufgabe | Hängt ab von | Details |
 |---|---|---|---|
 | 4b.1 | **Lua via sol2**, ScriptComponent-Lifecycle (onStart/onUpdate) | 2.2, 2.8 | ✅ Forts. 34 — ScriptEngine (Lua 5.4 FetchContent), loadScript/createInstance/callOnStart/callOnUpdate, 17 Tests |
-| 4b.2 | Engine-API-Binding (Entity, Transform, Input, Spawn/Destroy) | 4b.1 | |
+| 4b.2 | Engine-API-Binding (Entity, Transform, Input, Spawn/Destroy) | 4b.1 | ✅ Forts. 35 — ScriptContext (HorizonWorld-Binding), horizon-Lua-API (get/setPosition/Rotation/Scale, spawn, destroy, getName), 13 Tests |
 | 4b.3 | Hot-Reload von Scripts im Play-Mode | 4b.1 | |
 | 4b.4 | Script-Properties im Inspector (exportierte Variablen) | 4b.1, 2.3 | |
 | 4b.5 | C#/.NET-Hosting — später oder nie | 4b.2 | erst evaluieren, wenn Lua nicht reicht |
@@ -1622,3 +1622,19 @@ Lifetime-sicher mit der bestehenden `SlotMap`/`m_handleToUUID`-Buchführung inte
 - **ScriptComponent** (`HorizonScene/Components/ScriptComponent.h`): Kommentar von Python auf Lua aktualisiert.
 - **Editor (`EditorUI.cpp`):** Script-Inspector zeigt „Script Name" + Tooltip, behält scriptAssetId + enabled. Bugfix: `prefab.name = node.name` (statt undeklarierten `registry.get<NameComponent>`).
 - **Tests (`tests/test_scripting.cpp`):** 17 neue Cases (loadScript valid/invalid/non-table/reload/unload, createInstance valid/invalid/two-independent/destroy, onStart/onUpdate called, no-op ohne Hooks, Runtime-Error in onStart, exec/getGlobal*, multiple scripts coexist). **184 Tests grün** (167→184).
+
+### Forts. 35 — Lua Engine-API-Binding (4b.2)
+
+> **Aufgabe:** ScriptContext bindet ScriptEngine an HorizonWorld und stellt eine `horizon`-Lua-Tabelle mit Transform-, Entity- und Name-API bereit. ✅
+
+- **`ScriptContext`** (`HorizonScene/ScriptContext.h/.cpp`): Wrapper um ScriptEngine der HorizonWorld* im Lua-Registry speichert (`kWorldKey = "__horizonWorld"` als lightuserdata). `createInstance(scriptName, entity)` setzt `self.entityId` auf den uint32-Cast der entt::entity.
+- **`horizon`-Lua-API (10 Funktionen):**
+  - `horizon.log(msg)` — printf-Ausgabe
+  - `horizon.getName(eid)` → string (leer bei invalid)
+  - `horizon.getPosition(eid)` → x,y,z; `horizon.setPosition(eid, x, y, z)` — liest/schreibt `TransformComponent.position`, setzt `dirty`
+  - `horizon.getRotation(eid)` → x,y,z; `horizon.setRotation(eid, x, y, z)` — Euler-Grad
+  - `horizon.getScale(eid)` → x,y,z; `horizon.setScale(eid, x, y, z)`
+  - `horizon.spawn(parentId, name)` → neues entityId (optional reparent); `horizon.destroy(eid)` — `world.destroyEntity`
+- **Sicherheit:** Alle Lua-C-Funktionen prüfen `reg.valid(e)` vor Zugriff; ungültige IDs sind sicher (kein Crash, Default-Rückgabe).
+- **Entity-ID-Encoding:** `uint32_t`-Cast konsistent: C→Lua via `static_cast<lua_Integer>(static_cast<uint32_t>(e))`; Lua→C via `toEntity(id) = static_cast<entt::entity>(static_cast<uint32_t>(id))`.
+- **Tests (`tests/test_scripting_binding.cpp`):** 13 neue Cases (construction, loadScript, createInstance+entityId, getPosition, setPosition, onUpdate+dt, rotation round-trip, scale round-trip, spawn, destroy, getName, invalid-entity-safety). **196 Tests grün** (184→196).

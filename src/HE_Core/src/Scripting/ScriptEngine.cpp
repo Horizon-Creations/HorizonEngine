@@ -208,3 +208,13 @@ bool ScriptEngine::pcall(int nargs, int nresults)
     m_lastError.clear();
     return true;
 }
+
+void ScriptEngine::setInstanceField(InstanceId id, const std::string& key, double value)
+{
+    auto it = m_instances.find(id);
+    if (it == m_instances.end()) return;
+    lua_rawgeti(m_L, LUA_REGISTRYINDEX, it->second.luaRef);
+    lua_pushnumber(m_L, static_cast<lua_Number>(value));
+    lua_setfield(m_L, -2, key.c_str());
+    lua_pop(m_L, 1);
+}

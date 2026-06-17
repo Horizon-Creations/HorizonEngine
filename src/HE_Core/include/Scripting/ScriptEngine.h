@@ -70,6 +70,12 @@ public:
     // Read a global string from the Lua state.
     std::string getGlobalString(const std::string& name) const;
 
+    // Set a number field in the instance table (e.g. entityId).
+    void setInstanceField(InstanceId id, const std::string& key, double value);
+
+    // Direct lua_State access for advanced binding (ScriptContext in HE_Scene uses this).
+    lua_State* state() { return m_L; }
+
 private:
     // Returns false and sets m_lastError on Lua error.
     bool pcall(int nargs, int nresults);
