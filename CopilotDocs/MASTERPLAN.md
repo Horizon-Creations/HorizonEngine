@@ -192,7 +192,7 @@ profitieren von P2.8 (Play-Mode zum Testen).
 ### 4a — Physik
 | # | Aufgabe | Hängt ab von | Details |
 |---|---|---|---|
-| 4a.1 | **Jolt Physics** integrieren (FetchContent) | 2.2, 2.8 | gegen RigidBodyComponent; fixedUpdate-Hook im GameLoop existiert |
+| 4a.1 | **Jolt Physics** integrieren (FetchContent) | 2.2, 2.8 | ✅ Forts. 39 — Jolt v5.5.0 FetchContent (SOURCE_SUBDIR Build); PhysicsWorld (PIMPL, JobSystemSingleThreaded, TempAllocatorImpl); process-globale Init via call_once; Box-Shape aus TransformComponent::scale; RigidBodyType→EMotionType; fixed-rate step + ECS sync-back; Editor: Physik-World on Play/Stop + fixed-timestep-Akkumulator in OnRender; 8 Tests (223 gesamt) |
 | 4a.2 | Collider-Komponenten (Box/Sphere/Capsule/Mesh) + Debug-Draw | 4a.1, 0.7 | |
 | 4a.3 | Raycasts/Queries als Engine-API | 4a.1 | braucht Scripting (4b) später als Konsument |
 | 4a.4 | Character-Controller | 4a.1 | |
@@ -1676,3 +1676,22 @@ Lifetime-sicher mit der bestehenden `SlotMap`/`m_handleToUUID`-Buchführung inte
 - **Tests (5 neue Cases in `test_scripting.cpp`):** `getScriptProperties` unbekanntes Skript → leer; kein `M.properties` → leer; float/int/bool/string-Defaults korrekt gelesen; `injectProperties` setzt Felder (über `getGlobalNumber`/`getGlobalString` nach `onUpdate` verifiziert); `injectProperties` auf ungültige ID ist No-Op.
 - **`test_scene_serializer.cpp` erweitert:** ScriptComponent-Round-Trip prüft jetzt alle 4 Prop-Typen (speed=3.5f float, lives=5 int, visible=true bool, tag="hero" string).
 - **215 Tests grün** (210→215).
+
+---
+
+### Forts. 39 — Jolt Physics 4a.1
+
+> **Aufgabe:** Jolt Physics v5.5.0 via FetchContent integrieren; PhysicsWorld-Wrapper (PIMPL) bauen; im Editor-Play-Mode Physics-Step aktivieren. ✅
+
+- **`CMakeLists.txt`**: `FetchContent_Declare(JoltPhysics … SOURCE_SUBDIR Build GIT_TAG v5.5.0)`. Alle Sample-/Test-Targets (TARGET_HELLO_WORLD, TARGET_SAMPLES, TARGET_VIEWER, TARGET_UNIT_TESTS, TARGET_PERFORMANCE_TEST) deaktiviert. ENABLE_INSTALL OFF. `Jolt`-Target als PRIVATE-Link zu `HorizonScene`.
+- **`src/HE_Scene/include/HorizonScene/PhysicsWorld.h`** (neu): Minimales PIMPL-Interface: `initialize(world)`, `step(world, dt)`, `clear()`. Keine Jolt-Header exponiert.
+- **`src/HE_Scene/src/PhysicsWorld.cpp`** (neu): Komplette Jolt-Implementierung hinter dem PIMPL:
+  - Prozess-globale Init via `std::call_once` (RegisterDefaultAllocator / new Factory / RegisterTypes) — nie heruntergefahren, damit mehrere sequenzielle PhysicsWorld-Instanzen in Tests sicher funktionieren.
+  - Collision-Layer-Setup: NON_MOVING (0) / MOVING (1); `BPLayerInterfaceImpl`, `ObjectVsBPLayerFilterImpl`, `ObjectLayerPairFilterImpl` als Impl-Mitglieder (überleben alle Update-Calls).
+  - `TempAllocatorImpl` (10 MB) + `JobSystemSingleThreaded` als Impl-Mitglieder.
+  - `initialize`: View über `TransformComponent + RigidBodyComponent`; Box-Shape mit half-extents = scale * 0.5 (Minimum 0.01); Euler-Grad → `glm::quat` → `JPH::Quat`; RigidBodyType → EMotionType + Layer; Mass/Friction/Restitution; Entity→BodyID-Map.
+  - `step`: `PhysicsSystem::Update(dt, 1, …)`; sync-back für Dynamic/Kinematic-Bodies: Jolt-Position → `transform.position`, Jolt-Quat → `glm::eulerAngles` → Grad → `transform.rotation`; `dirty = true`.
+  - `clear`: RemoveBody + DestroyBody für alle gemappten Bodies; Map leeren.
+- **`EditorApplication.h/.cpp`**: `std::unique_ptr<PhysicsWorld> m_physicsWorld` + `float m_physicsAccum`. `setPlayMode(true)` → `PhysicsWorld::initialize`; `setPlayMode(false)` → `reset()`. `OnRender`: Fixed-rate-Akkumulator (1/60 s) → `step()` während Play-Mode.
+- **8 neue Tests** in `test_physics.cpp`: init leere Welt (kein Crash); step ohne init (kein Crash); Dynamic fällt unter Schwerkraft (y < 5 nach 2 s aus y=10); Static bleibt (y = 0.0); zwei Körper (Static bleibt, Dynamic fällt, kein Tunneling); Kinematic ignoriert Schwerkraft; `clear()` idempotent; Re-Initialize nach clear.
+- **223 Tests grün** (215→223).
