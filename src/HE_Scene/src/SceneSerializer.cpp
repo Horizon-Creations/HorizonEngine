@@ -12,6 +12,7 @@
 #include "HorizonScene/Components/ScriptComponent.h"
 #include "HorizonScene/Components/EnvironmentComponent.h"
 #include "HorizonScene/Components/EnvironmentLightComponent.h"
+#include "HorizonScene/Components/TerrainComponent.h"
 #include <nlohmann/json.hpp>
 #include <fstream>
 
@@ -94,7 +95,11 @@ namespace
 					{ "scale",    vec2ToJson(t->scale) },
 				};
 			}
-			if (auto* m = registry.try_get<MeshComponent>(entity))
+			// Skip MeshComponent for terrain entities — it is regenerated from
+			// TerrainComponent parameters at load time, so it must not be
+			// serialised (stale meshAssetIds break cross-session UUID stability).
+			if (auto* m = registry.try_get<MeshComponent>(entity);
+			    m != nullptr && !registry.all_of<TerrainComponent>(entity))
 			{
 				comps["mesh"] = {
 					{ "asset",          uuidToJson(m->meshAssetId) },
@@ -169,6 +174,22 @@ namespace
 					{ "nebulaIntensity",   e->nebulaIntensity },
 					{ "nebulaColor",       vec3ToJson(e->nebulaColor) },
 					{ "auroraColor",       vec3ToJson(e->auroraColor) },
+				};
+			}
+
+			if (auto* t = registry.try_get<TerrainComponent>(entity))
+			{
+				// dirty and heightmapTexture are runtime-only; not persisted.
+				comps["terrain"] = {
+					{ "sizeX",      t->sizeX },
+					{ "sizeZ",      t->sizeZ },
+					{ "resolution", t->resolution },
+					{ "heightScale",t->heightScale },
+					{ "seed",       t->seed },
+					{ "octaves",    t->octaves },
+					{ "frequency",  t->frequency },
+					{ "lacunarity", t->lacunarity },
+					{ "gain",       t->gain },
 				};
 			}
 
@@ -284,6 +305,22 @@ namespace
 			e.nebulaColor       = jsonToVec3(c.value("nebulaColor", json()), e.nebulaColor);
 			e.auroraColor       = jsonToVec3(c.value("auroraColor", json()), e.auroraColor);
 			registry.emplace_or_replace<EnvironmentComponent>(entity, e);
+		}
+		if (comps.contains("terrain"))
+		{
+			const json& c = comps["terrain"];
+			TerrainComponent t;
+			t.sizeX       = c.value("sizeX",       t.sizeX);
+			t.sizeZ       = c.value("sizeZ",        t.sizeZ);
+			t.resolution  = c.value("resolution",   t.resolution);
+			t.heightScale = c.value("heightScale",  t.heightScale);
+			t.seed        = c.value("seed",         t.seed);
+			t.octaves     = c.value("octaves",      t.octaves);
+			t.frequency   = c.value("frequency",    t.frequency);
+			t.lacunarity  = c.value("lacunarity",   t.lacunarity);
+			t.gain        = c.value("gain",         t.gain);
+			t.dirty       = true; // always regenerate after load
+			registry.emplace_or_replace<TerrainComponent>(entity, t);
 		}
 	}
 

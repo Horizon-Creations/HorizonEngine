@@ -3,6 +3,8 @@ add_library(HorizonScene SHARED
     src/SceneGraph.cpp
     src/SceneSerializer.cpp
     src/Components/TransformComponent.cpp
+    src/TerrainMeshGenerator.cpp
+    src/TerrainSystem.cpp
 )
 
 target_include_directories(HorizonScene
