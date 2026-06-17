@@ -1939,6 +1939,13 @@ void OpenGLRenderer::InvalidateMaterial(const HE::UUID& materialId)
 		m_pendingMaterialInvalidations.push_back(materialId);
 }
 
+void OpenGLRenderer::InvalidateMesh(const HE::UUID& meshId)
+{
+	// Defer glDelete* to DrawScene where the GL context is guaranteed current.
+	if (meshId != HE::UUID{})
+		m_pendingMeshInvalidations.push_back(meshId);
+}
+
 void OpenGLRenderer::Shutdown()
 {
 	Logger::Log(Logger::LogLevel::Info, "OpenGLRenderer: shutdown");
@@ -2113,6 +2120,17 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			m_materialTexCache.erase(it);
 		}
 	m_pendingMaterialInvalidations.clear();
+
+	for (const HE::UUID& id : m_pendingMeshInvalidations)
+		if (auto it = m_meshCache.find(id); it != m_meshCache.end())
+		{
+			auto& m = it->second;
+			if (m.vao) glDeleteVertexArrays(1, &m.vao);
+			if (m.vbo) glDeleteBuffers(1, &m.vbo);
+			if (m.ebo) glDeleteBuffers(1, &m.ebo);
+			m_meshCache.erase(it);
+		}
+	m_pendingMeshInvalidations.clear();
 
 	const IRenderer::EnvironmentSettings& env = GetEnvironment();
 	m_extractor.setDayNight(env.dayNightCycle, env.timeOfDay,

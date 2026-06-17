@@ -745,7 +745,7 @@ void EditorApplication::OnRender(float dt)
 		// Regenerate terrain meshes for any entity whose TerrainComponent is dirty
 		// (newly created, parameter-edited in the inspector, or just loaded/restored).
 		if (m_editorWorld)
-			TerrainSystem::updateTerrains(*m_editorWorld, contentManager());
+			TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), renderer());
 
 		pushEnvironment(dt); // auto-advances + pushes the World env component
 	}

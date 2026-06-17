@@ -186,6 +186,11 @@ public:
     // re-assigned. No-op on backends that do not honour MaterialComponent yet.
     virtual void InvalidateMaterial(const HE::UUID& /*materialId*/) {}
 
+    // Drop cached GPU buffers for a mesh so ResolveMesh re-uploads from the
+    // ContentManager next frame. Call after replaceStaticMesh so sculpt/edit
+    // changes are not masked by the renderer's VBO cache.
+    virtual void InvalidateMesh(const HE::UUID& /*meshId*/) {}
+
     // ── ImGui texture helpers ──────────────────────────────────────────────
     // Upload raw RGBA8 pixel data and return a backend-specific texture handle
     // that can be cast to ImTextureID at the call site.
