@@ -1258,11 +1258,12 @@ alpha-geblendeten Pass, der über die opake Szene **und** den Himmel composited.
 
 ---
 
-### Forts. 19 — 📋 PLAN: Landscape-Modus (Heightfield-Terrain in vorgegebenen Abmessungen)
+### Forts. 19 — ✅ Landscape-Modus Phase 1 — Heightfield-Terrain implementiert (commit e298bd4)
 
-> **Aufgabe:** Den bestehenden `EditorMode::Landscape`-Stub zu einem echten Modus ausbauen, der ein
-> Terrain in **vom User angegebenen Abmessungen als Heightfield** erzeugt. Dies ist die **Planung** —
-> Implementierung folgt phasenweise.
+> **Erledigt:** Den bestehenden `EditorMode::Landscape`-Stub zu einem echten Modus ausgebaut. Phase 1
+> (MVP) vollständig: `TerrainComponent` + `TerrainMeshGenerator` (fBm Value Noise, zentrale Differenzen)
+> + `TerrainSystem::updateTerrains` + Serialisierung (Parameter, kein Mesh-UUID) + Editor Landscape-Panel
+> + Inspector-Sektion mit Live-Regenerierung. 69→79 Tests, alle grün.
 
 **Ist-Zustand (Recon):** `EditorMode { View, Landscape }` existiert (`EditorApplication.h:27`), wird im
 Toolbar-Combo (`EditorUI.cpp:1838`) ausgewählt, aber **nirgends behandelt** — reiner Stub. Es gibt **kein**
