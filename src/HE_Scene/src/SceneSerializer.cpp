@@ -48,6 +48,145 @@ namespace
 		return id;
 	}
 
+	// ── Per-entity component → JSON ──────────────────────────────────────────
+	json serializeComponents(entt::registry& registry, Entity entity)
+	{
+		json comps;
+		if (auto* t = registry.try_get<TransformComponent>(entity))
+		{
+			comps["transform"] = {
+				{ "position", vec3ToJson(t->position) },
+				{ "rotation", vec3ToJson(t->rotation) },
+				{ "scale",    vec3ToJson(t->scale) },
+			};
+		}
+		if (auto* t = registry.try_get<Transform2DComponent>(entity))
+		{
+			comps["transform2d"] = {
+				{ "position", vec2ToJson(t->position) },
+				{ "rotation", t->rotation },
+				{ "scale",    vec2ToJson(t->scale) },
+			};
+		}
+		// Skip MeshComponent for terrain entities — it is regenerated from
+		// TerrainComponent parameters at load time, so it must not be
+		// serialised (stale meshAssetIds break cross-session UUID stability).
+		if (auto* m = registry.try_get<MeshComponent>(entity);
+		    m != nullptr && !registry.all_of<TerrainComponent>(entity))
+		{
+			comps["mesh"] = {
+				{ "asset",          uuidToJson(m->meshAssetId) },
+				{ "lodBias",        m->lodBias },
+				{ "castsShadow",    m->castsShadow },
+				{ "receivesShadow", m->receivesShadow },
+			};
+		}
+		if (auto* m = registry.try_get<MaterialComponent>(entity))
+		{
+			comps["material"] = {
+				{ "asset", uuidToJson(m->materialAssetId) },
+			};
+		}
+		if (auto* c = registry.try_get<CameraComponent>(entity))
+		{
+			comps["camera"] = {
+				{ "fovDegrees",   c->fovDegrees },
+				{ "nearPlane",    c->nearPlane },
+				{ "farPlane",     c->farPlane },
+				{ "isMain",       c->isMain },
+				{ "orthographic", c->orthographic },
+			};
+		}
+		if (auto* l = registry.try_get<LightComponent>(entity))
+		{
+			comps["light"] = {
+				{ "type",        static_cast<uint8_t>(l->type) },
+				{ "color",       vec3ToJson(l->color) },
+				{ "intensity",   l->intensity },
+				{ "range",       l->range },
+				{ "spotAngle",   l->spotAngle },
+				{ "castsShadow", l->castsShadow },
+			};
+		}
+		if (auto* r = registry.try_get<RigidBodyComponent>(entity))
+		{
+			comps["rigidbody"] = {
+				{ "type",        static_cast<uint8_t>(r->type) },
+				{ "mass",        r->mass },
+				{ "friction",    r->friction },
+				{ "restitution", r->restitution },
+				{ "is2D",        r->is2D },
+			};
+		}
+		if (auto* s = registry.try_get<ScriptComponent>(entity))
+		{
+			comps["script"] = {
+				{ "asset",      uuidToJson(s->scriptAssetId) },
+				{ "moduleName", s->moduleName },
+				{ "enabled",    s->enabled },
+			};
+		}
+		if (auto* e = registry.try_get<EnvironmentComponent>(entity))
+		{
+			comps["environment"] = {
+				{ "dayNightCycle",     e->dayNightCycle },
+				{ "timeOfDay",         e->timeOfDay },
+				{ "autoAdvance",       e->autoAdvance },
+				{ "cycleSeconds",      e->cycleSeconds },
+				{ "sunColor",          vec3ToJson(e->sunColor) },
+				{ "sunIntensity",      e->sunIntensity },
+				{ "moonColor",         vec3ToJson(e->moonColor) },
+				{ "moonIntensity",     e->moonIntensity },
+				{ "cloudCoverage",     e->cloudCoverage },
+				{ "windDirection",     e->windDirection },
+				{ "windSpeed",         e->windSpeed },
+				{ "fogDensity",        e->fogDensity },
+				{ "fogHeightFalloff",  e->fogHeightFalloff },
+				{ "auroraIntensity",   e->auroraIntensity },
+				{ "milkyWayIntensity", e->milkyWayIntensity },
+				{ "nebulaIntensity",   e->nebulaIntensity },
+				{ "nebulaColor",       vec3ToJson(e->nebulaColor) },
+				{ "auroraColor",       vec3ToJson(e->auroraColor) },
+			};
+		}
+		if (auto* t = registry.try_get<TerrainComponent>(entity))
+		{
+			json tc = {
+				{ "sizeX",      t->sizeX },
+				{ "sizeZ",      t->sizeZ },
+				{ "resolution", t->resolution },
+				{ "heightScale",t->heightScale },
+				{ "seed",       t->seed },
+				{ "octaves",    t->octaves },
+				{ "frequency",  t->frequency },
+				{ "lacunarity", t->lacunarity },
+				{ "gain",       t->gain },
+			};
+			if (!t->sculptHeights.empty())
+				tc["sculptHeights"] = t->sculptHeights;
+			comps["terrain"] = tc;
+		}
+		if (auto* a = registry.try_get<AudioSourceComponent>(entity))
+		{
+			comps["audiosource"] = {
+				{ "asset",       uuidToJson(a->assetId) },
+				{ "volume",      a->volume },
+				{ "pitch",       a->pitch },
+				{ "range",       a->range },
+				{ "loop",        a->loop },
+				{ "playOnStart", a->playOnStart },
+				{ "spatial",     a->spatial },
+			};
+		}
+		if (auto* l = registry.try_get<AudioListenerComponent>(entity))
+		{
+			comps["audiolistener"] = {
+				{ "masterVolume", l->masterVolume },
+			};
+		}
+		return comps;
+	}
+
 	// ── Scene → JSON ─────────────────────────────────────────────────────────
 	json buildSceneJson(HorizonWorld& world)
 	{
@@ -80,143 +219,7 @@ namespace
 				eJson["children"] = children;
 			}
 
-			json comps;
-			if (auto* t = registry.try_get<TransformComponent>(entity))
-			{
-				comps["transform"] = {
-					{ "position", vec3ToJson(t->position) },
-					{ "rotation", vec3ToJson(t->rotation) },
-					{ "scale",    vec3ToJson(t->scale) },
-				};
-			}
-			if (auto* t = registry.try_get<Transform2DComponent>(entity))
-			{
-				comps["transform2d"] = {
-					{ "position", vec2ToJson(t->position) },
-					{ "rotation", t->rotation },
-					{ "scale",    vec2ToJson(t->scale) },
-				};
-			}
-			// Skip MeshComponent for terrain entities — it is regenerated from
-			// TerrainComponent parameters at load time, so it must not be
-			// serialised (stale meshAssetIds break cross-session UUID stability).
-			if (auto* m = registry.try_get<MeshComponent>(entity);
-			    m != nullptr && !registry.all_of<TerrainComponent>(entity))
-			{
-				comps["mesh"] = {
-					{ "asset",          uuidToJson(m->meshAssetId) },
-					{ "lodBias",        m->lodBias },
-					{ "castsShadow",    m->castsShadow },
-					{ "receivesShadow", m->receivesShadow },
-				};
-			}
-			if (auto* m = registry.try_get<MaterialComponent>(entity))
-			{
-				comps["material"] = {
-					{ "asset", uuidToJson(m->materialAssetId) },
-				};
-			}
-			if (auto* c = registry.try_get<CameraComponent>(entity))
-			{
-				comps["camera"] = {
-					{ "fovDegrees",   c->fovDegrees },
-					{ "nearPlane",    c->nearPlane },
-					{ "farPlane",     c->farPlane },
-					{ "isMain",       c->isMain },
-					{ "orthographic", c->orthographic },
-				};
-			}
-			if (auto* l = registry.try_get<LightComponent>(entity))
-			{
-				comps["light"] = {
-					{ "type",        static_cast<uint8_t>(l->type) },
-					{ "color",       vec3ToJson(l->color) },
-					{ "intensity",   l->intensity },
-					{ "range",       l->range },
-					{ "spotAngle",   l->spotAngle },
-					{ "castsShadow", l->castsShadow },
-				};
-			}
-			if (auto* r = registry.try_get<RigidBodyComponent>(entity))
-			{
-				comps["rigidbody"] = {
-					{ "type",        static_cast<uint8_t>(r->type) },
-					{ "mass",        r->mass },
-					{ "friction",    r->friction },
-					{ "restitution", r->restitution },
-					{ "is2D",        r->is2D },
-				};
-			}
-			if (auto* s = registry.try_get<ScriptComponent>(entity))
-			{
-				comps["script"] = {
-					{ "asset",      uuidToJson(s->scriptAssetId) },
-					{ "moduleName", s->moduleName },
-					{ "enabled",    s->enabled },
-				};
-			}
-			if (auto* e = registry.try_get<EnvironmentComponent>(entity))
-			{
-				comps["environment"] = {
-					{ "dayNightCycle",     e->dayNightCycle },
-					{ "timeOfDay",         e->timeOfDay },
-					{ "autoAdvance",       e->autoAdvance },
-					{ "cycleSeconds",      e->cycleSeconds },
-					{ "sunColor",          vec3ToJson(e->sunColor) },
-					{ "sunIntensity",      e->sunIntensity },
-					{ "moonColor",         vec3ToJson(e->moonColor) },
-					{ "moonIntensity",     e->moonIntensity },
-					{ "cloudCoverage",     e->cloudCoverage },
-					{ "windDirection",     e->windDirection },
-					{ "windSpeed",         e->windSpeed },
-					{ "fogDensity",        e->fogDensity },
-					{ "fogHeightFalloff",  e->fogHeightFalloff },
-					{ "auroraIntensity",   e->auroraIntensity },
-					{ "milkyWayIntensity", e->milkyWayIntensity },
-					{ "nebulaIntensity",   e->nebulaIntensity },
-					{ "nebulaColor",       vec3ToJson(e->nebulaColor) },
-					{ "auroraColor",       vec3ToJson(e->auroraColor) },
-				};
-			}
-
-			if (auto* t = registry.try_get<TerrainComponent>(entity))
-			{
-				// dirty and heightmapTexture are runtime-only; not persisted.
-				json tc = {
-					{ "sizeX",      t->sizeX },
-					{ "sizeZ",      t->sizeZ },
-					{ "resolution", t->resolution },
-					{ "heightScale",t->heightScale },
-					{ "seed",       t->seed },
-					{ "octaves",    t->octaves },
-					{ "frequency",  t->frequency },
-					{ "lacunarity", t->lacunarity },
-					{ "gain",       t->gain },
-				};
-				if (!t->sculptHeights.empty())
-					tc["sculptHeights"] = t->sculptHeights;
-				comps["terrain"] = tc;
-			}
-
-			if (auto* a = registry.try_get<AudioSourceComponent>(entity))
-			{
-				comps["audiosource"] = {
-					{ "asset",       uuidToJson(a->assetId) },
-					{ "volume",      a->volume },
-					{ "pitch",       a->pitch },
-					{ "range",       a->range },
-					{ "loop",        a->loop },
-					{ "playOnStart", a->playOnStart },
-					{ "spatial",     a->spatial },
-				};
-			}
-			if (auto* l = registry.try_get<AudioListenerComponent>(entity))
-			{
-				comps["audiolistener"] = {
-					{ "masterVolume", l->masterVolume },
-				};
-			}
-
+			json comps = serializeComponents(registry, entity);
 			if (!comps.is_null())
 				eJson["components"] = comps;
 
@@ -444,6 +447,129 @@ namespace
 		world.markHierarchyDirty();
 		return true;
 	}
+
+	// ── Prefab helpers (placed after applyComponents so they can call it) ────
+	void collectSubtree(entt::registry& registry, Entity root,
+	                    std::vector<Entity>& out)
+	{
+		out.push_back(root);
+		if (auto* hier = registry.try_get<HierarchyComponent>(root))
+			for (Entity child : hier->children)
+				collectSubtree(registry, child, out);
+	}
+
+	json buildSubtreeJson(HorizonWorld& world, Entity root)
+	{
+		auto& registry = world.registry();
+
+		std::vector<Entity> entities;
+		collectSubtree(registry, root, entities);
+
+		std::unordered_map<uint32_t, uint32_t> idMap;
+		for (size_t i = 0; i < entities.size(); ++i)
+			idMap[static_cast<uint32_t>(entities[i])] = static_cast<uint32_t>(i);
+
+		json scene;
+		scene["version"] = "1.1";
+
+		json entArray = json::array();
+		for (Entity entity : entities)
+		{
+			uint32_t seqId = idMap.at(static_cast<uint32_t>(entity));
+			std::string name = "Entity";
+			if (auto* n = registry.try_get<NameComponent>(entity))
+				name = n->name;
+
+			json eJson;
+			eJson["id"]   = seqId;
+			eJson["name"] = name;
+
+			if (auto* hier = registry.try_get<HierarchyComponent>(entity))
+			{
+				if (hier->parent != entt::null)
+				{
+					auto pit = idMap.find(static_cast<uint32_t>(hier->parent));
+					if (pit != idMap.end())
+						eJson["parent"] = pit->second;
+				}
+				json children = json::array();
+				for (Entity child : hier->children)
+				{
+					auto cit = idMap.find(static_cast<uint32_t>(child));
+					if (cit != idMap.end())
+						children.push_back(cit->second);
+				}
+				if (!children.empty())
+					eJson["children"] = children;
+			}
+
+			json comps = serializeComponents(registry, entity);
+			if (!comps.is_null())
+				eJson["components"] = comps;
+
+			entArray.push_back(eJson);
+		}
+		scene["entities"] = entArray;
+		return scene;
+	}
+
+	Entity applyPrefabJson(HorizonWorld& world, const json& scene, Entity prefabParent)
+	{
+		if (!scene.contains("entities")) return entt::null;
+
+		constexpr uint32_t kNullId = 0xFFFFFFFFu;
+		std::unordered_map<uint32_t, Entity> idMap;
+		auto& registry = world.registry();
+		Entity prefabRoot = entt::null;
+
+		for (auto& eJson : scene["entities"])
+		{
+			uint32_t    seqId  = eJson.value("id",   0u);
+			std::string name   = eJson.value("name", "Entity");
+			uint32_t    parent = eJson.value("parent", kNullId);
+
+			Entity e = world.createEntity(name);
+			idMap[seqId] = e;
+
+			if (parent == kNullId)
+				prefabRoot = e;
+
+			if (eJson.contains("components"))
+				applyComponents(registry, e, eJson["components"]);
+		}
+
+		if (prefabRoot == entt::null) return entt::null;
+
+		for (auto& eJson : scene["entities"])
+		{
+			if (!eJson.contains("children")) continue;
+
+			uint32_t seqId = eJson.value("id", 0u);
+			auto it = idMap.find(seqId);
+			if (it == idMap.end()) continue;
+
+			Entity parent = it->second;
+			auto* pHier = registry.try_get<HierarchyComponent>(parent);
+			if (!pHier) continue;
+
+			pHier->children.clear();
+			for (auto& childId : eJson["children"])
+			{
+				uint32_t cid = childId.get<uint32_t>();
+				auto cit = idMap.find(cid);
+				if (cit == idMap.end()) continue;
+				Entity child = cit->second;
+				pHier->children.push_back(child);
+				if (auto* cHier = registry.try_get<HierarchyComponent>(child))
+					cHier->parent = parent;
+			}
+		}
+
+		Entity targetParent = (prefabParent != entt::null) ? prefabParent : world.rootEntity();
+		world.reparentEntity(prefabRoot, targetParent);
+		world.markHierarchyDirty();
+		return prefabRoot;
+	}
 } // namespace
 
 bool SceneSerializer::save(const HorizonWorld& world,
@@ -524,4 +650,20 @@ bool SceneSerializer::loadBinary(HorizonWorld& world, const std::filesystem::pat
     if (scene.is_discarded()) return false;
 
     return applySceneJson(world, scene);
+}
+
+// ── Prefab API ────────────────────────────────────────────────────────────────
+std::vector<uint8_t> SceneSerializer::serializeSubtree(const HorizonWorld& world, Entity root)
+{
+    json scene = buildSubtreeJson(const_cast<HorizonWorld&>(world), root);
+    return json::to_cbor(scene);
+}
+
+Entity SceneSerializer::instantiatePrefab(HorizonWorld& world,
+                                          const std::vector<uint8_t>& data,
+                                          Entity parent)
+{
+    json scene = json::from_cbor(data, true, false);
+    if (scene.is_discarded()) return entt::null;
+    return applyPrefabJson(world, scene, parent);
 }

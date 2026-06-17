@@ -15,6 +15,7 @@ add_executable(he_tests
     test_profiler.cpp
     test_audio.cpp
     test_rendermanager.cpp
+    test_prefab.cpp
     # Culling/sorting/undo/camera/graph are compiled in directly — pulling in the
     # full HorizonRendering/Editor targets would drag GPU backends and ImGui in.
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/FrustumCuller.cpp

@@ -91,3 +91,12 @@ struct ShaderAsset : public RuntimeAsset
 {
 	std::string sourceCode;
 };
+
+// A CBOR-encoded snapshot of an entity subtree (root + descendants).
+// Created by SceneSerializer::serializeSubtree and instantiated via
+// SceneSerializer::instantiatePrefab. The format is identical to the
+// full scene binary format but limited to the captured subtree.
+struct PrefabAsset : public RuntimeAsset
+{
+	std::vector<uint8_t> data; // CBOR payload
+};

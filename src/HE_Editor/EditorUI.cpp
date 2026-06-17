@@ -2469,6 +2469,15 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                     s_entityRenameBuf[sizeof(s_entityRenameBuf) - 1] = '\0';
                     s_openEntityRename = true;
                 }
+                if (!isRoot && ImGui::MenuItem("Save as Prefab") && ctx.contentManager)
+                {
+                    SceneSerializer ser;
+                    auto data = ser.serializeSubtree(*ctx.world, node.entity);
+                    PrefabAsset prefab;
+                    prefab.name = registry.get<NameComponent>(node.entity).name;
+                    prefab.data = std::move(data);
+                    ctx.contentManager->registerPrefab(std::move(prefab));
+                }
                 if (!isRoot && ImGui::MenuItem("Delete"))
                 {
                     if (ctx.selectedEntity == node.entity)
