@@ -180,7 +180,7 @@ namespace
 			if (auto* t = registry.try_get<TerrainComponent>(entity))
 			{
 				// dirty and heightmapTexture are runtime-only; not persisted.
-				comps["terrain"] = {
+				json tc = {
 					{ "sizeX",      t->sizeX },
 					{ "sizeZ",      t->sizeZ },
 					{ "resolution", t->resolution },
@@ -191,6 +191,9 @@ namespace
 					{ "lacunarity", t->lacunarity },
 					{ "gain",       t->gain },
 				};
+				if (!t->sculptHeights.empty())
+					tc["sculptHeights"] = t->sculptHeights;
+				comps["terrain"] = tc;
 			}
 
 			if (!comps.is_null())
@@ -319,6 +322,8 @@ namespace
 			t.frequency   = c.value("frequency",    t.frequency);
 			t.lacunarity  = c.value("lacunarity",   t.lacunarity);
 			t.gain        = c.value("gain",         t.gain);
+			if (c.contains("sculptHeights") && c["sculptHeights"].is_array())
+				t.sculptHeights = c["sculptHeights"].get<std::vector<float>>();
 			t.dirty       = true; // always regenerate after load
 			registry.emplace_or_replace<TerrainComponent>(entity, t);
 		}
