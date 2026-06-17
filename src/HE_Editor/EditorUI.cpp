@@ -3642,6 +3642,36 @@ void EditorUI::RenderInspector(AppContext& ctx)
 		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<RigidBodyComponent>(entity); }
 	}
 
+	// ── Collider ──────────────────────────────────────────────────────────────
+	if (auto* col = registry.try_get<ColliderComponent>(entity))
+	{
+		if (componentHeader("Collider", true, removed))
+		{
+			static const char* kShapes[] = { "Box", "Sphere", "Capsule" };
+			int shape = static_cast<int>(col->shape);
+			if (ImGui::Combo("Shape", &shape, kShapes, 3))
+			{
+				if (ctx.undoSys) ctx.undoSys->snapshotNow();
+				col->shape = static_cast<ColliderShape>(shape);
+			}
+			switch (col->shape)
+			{
+			case ColliderShape::Box:
+				ImGui::DragFloat3("Half Extents", &col->halfExtents.x, 0.01f, 0.001f, 100.0f); trackEdit();
+				break;
+			case ColliderShape::Sphere:
+				ImGui::DragFloat("Radius", &col->radius, 0.01f, 0.001f, 100.0f); trackEdit();
+				break;
+			case ColliderShape::Capsule:
+				ImGui::DragFloat("Radius",       &col->radius, 0.01f, 0.001f, 100.0f); trackEdit();
+				ImGui::DragFloat("Total Height", &col->height, 0.01f, 0.001f, 100.0f); trackEdit();
+				break;
+			}
+			ImGui::Checkbox("Is Trigger", &col->isTrigger); trackEdit();
+		}
+		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<ColliderComponent>(entity); }
+	}
+
 	// ── Script (Lua) ────────────────────────────────────────────────────────
 	if (auto* s = registry.try_get<ScriptComponent>(entity))
 	{
@@ -3812,6 +3842,7 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			addItem("Camera",       CameraComponent{});
 			addItem("Light",        LightComponent{});
 			addItem("Rigid Body",     RigidBodyComponent{});
+		addItem("Collider",       ColliderComponent{});
 			addItem("Script",         ScriptComponent{});
 			addItem("Audio Source",   AudioSourceComponent{});
 			addItem("Audio Listener", AudioListenerComponent{});

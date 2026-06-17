@@ -110,6 +110,13 @@ namespace HE
         Kinematic = 2,
     };
 
+    enum class ColliderShape : uint8_t
+    {
+        Box     = 0,
+        Sphere  = 1,
+        Capsule = 2,
+    };
+
     enum class SerializeFormat : uint8_t
     {
         JSON,    // editor — human-readable, versioned

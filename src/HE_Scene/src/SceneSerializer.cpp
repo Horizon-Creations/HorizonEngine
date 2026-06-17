@@ -9,6 +9,7 @@
 #include "HorizonScene/Components/CameraComponent.h"
 #include "HorizonScene/Components/LightComponent.h"
 #include "HorizonScene/Components/RigidBodyComponent.h"
+#include "HorizonScene/Components/ColliderComponent.h"
 #include "HorizonScene/Components/ScriptComponent.h"
 #include "HorizonScene/Components/EnvironmentComponent.h"
 #include "HorizonScene/Components/EnvironmentLightComponent.h"
@@ -139,6 +140,16 @@ namespace
 				{ "friction",    r->friction },
 				{ "restitution", r->restitution },
 				{ "is2D",        r->is2D },
+			};
+		}
+		if (auto* col = registry.try_get<ColliderComponent>(entity))
+		{
+			comps["collider"] = {
+				{ "shape",     static_cast<uint8_t>(col->shape) },
+				{ "halfEx",    { col->halfExtents.x, col->halfExtents.y, col->halfExtents.z } },
+				{ "radius",    col->radius },
+				{ "height",    col->height },
+				{ "isTrigger", col->isTrigger },
 			};
 		}
 		if (auto* s = registry.try_get<ScriptComponent>(entity))
@@ -326,6 +337,18 @@ namespace
 			r.restitution = c.value("restitution", r.restitution);
 			r.is2D        = c.value("is2D",        r.is2D);
 			registry.emplace_or_replace<RigidBodyComponent>(entity, r);
+		}
+		if (comps.contains("collider"))
+		{
+			const json& c = comps["collider"];
+			ColliderComponent col;
+			col.shape     = static_cast<ColliderShape>(c.value("shape", static_cast<uint8_t>(col.shape)));
+			col.radius    = c.value("radius",    col.radius);
+			col.height    = c.value("height",    col.height);
+			col.isTrigger = c.value("isTrigger", col.isTrigger);
+			if (c.contains("halfEx") && c["halfEx"].is_array() && c["halfEx"].size() == 3)
+				col.halfExtents = { c["halfEx"][0], c["halfEx"][1], c["halfEx"][2] };
+			registry.emplace_or_replace<ColliderComponent>(entity, col);
 		}
 		if (comps.contains("script"))
 		{

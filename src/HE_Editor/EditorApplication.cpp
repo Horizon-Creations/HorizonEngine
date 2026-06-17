@@ -822,6 +822,31 @@ void EditorApplication::OnRender(float dt)
 				}
 			}
 
+			// Collider wireframes: cyan for solid, magenta for triggers
+			{
+				auto& reg = m_editorWorld->registry();
+				for (auto [entity, col, transform] :
+				     reg.view<ColliderComponent, TransformComponent>().each())
+				{
+					const glm::vec3 color = col.isTrigger
+					    ? glm::vec3(1.0f, 0.0f, 1.0f)   // trigger: magenta
+					    : glm::vec3(0.0f, 1.0f, 1.0f);  // solid:   cyan
+					const glm::vec3 pos = transform.position;
+					switch (col.shape)
+					{
+					case ColliderShape::Box:
+						dbg.aabb(pos - col.halfExtents, pos + col.halfExtents, color);
+						break;
+					case ColliderShape::Sphere:
+						dbg.sphere(pos, col.radius, color);
+						break;
+					case ColliderShape::Capsule:
+						dbg.capsule(pos, col.radius, col.height, color);
+						break;
+					}
+				}
+			}
+
 			renderer()->SetDebugLines(dbg.lines());
 		}
 		else
