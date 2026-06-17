@@ -280,7 +280,12 @@ static const T* lookupAsset(const std::unordered_map<HE::UUID, SlotHandle>& inde
                             const SlotMap<T>& map, HE::UUID id)
 {
 	auto it = index.find(id);
-	return it == index.end() ? nullptr : map.get(it->second);
+	if (it == index.end()) return nullptr;
+	// SlotHandles are per-SlotMap, so the same {index,generation} can be valid in
+	// several maps. Confirm the stored asset really carries this UUID, otherwise a
+	// wrong-type lookup (e.g. getStaticMesh on a material id) would alias.
+	const T* a = map.get(it->second);
+	return (a && a->id == id) ? a : nullptr;
 }
 
 const StaticMeshAsset*   ContentManager::getStaticMesh(HE::UUID id) const   { return lookupAsset(m_handleToUUID, m_staticMeshAssets, id); }
@@ -294,32 +299,89 @@ const ShaderAsset*       ContentManager::getShader(HE::UUID id) const       { re
 MaterialAsset* ContentManager::getMaterialMutable(HE::UUID id)
 {
 	auto it = m_handleToUUID.find(id);
-	return it == m_handleToUUID.end() ? nullptr : m_materialAssets.get(it->second);
+	if (it == m_handleToUUID.end()) return nullptr;
+	MaterialAsset* a = m_materialAssets.get(it->second);
+	return (a && a->id == id) ? a : nullptr; // reject wrong-type aliasing
 }
+
+// ─── Runtime (in-memory) asset registration ──────────────────────────────────
+template<typename T>
+HE::UUID ContentManager::registerRuntimeAsset(SlotMap<T>& map, T asset, HE::AssetType type)
+{
+	if (asset.id == HE::UUID{})
+		asset.id = HE::UUID::generate();
+	asset.type = type;
+
+	const HE::UUID    id   = asset.id;
+	const std::string path = asset.path;
+
+	SlotHandle handle = map.insert(std::move(asset));
+	m_handleToUUID[id] = handle;
+	if (!path.empty())
+		m_pathToUUID[path] = id; // virtual path, optional
+	return id;
+}
+
+template<typename T>
+bool ContentManager::replaceRuntimeAsset(SlotMap<T>& map, HE::UUID id, T asset)
+{
+	auto it = m_handleToUUID.find(id);
+	if (it == m_handleToUUID.end())
+		return false;
+	T* existing = map.get(it->second);
+	// Guard against a handle that is valid in a different SlotMap (the UUID
+	// belongs to another asset type) — the stored id must match.
+	if (!existing || !(existing->id == id))
+		return false;
+
+	// Only the payload changes; keep the asset's identity + (virtual) path.
+	asset.id   = id;
+	asset.type = existing->type;
+	asset.name = existing->name;
+	asset.path = existing->path;
+	*existing  = std::move(asset);
+	return true;
+}
+
+HE::UUID ContentManager::registerStaticMesh(StaticMeshAsset asset) { return registerRuntimeAsset(m_staticMeshAssets, std::move(asset), HE::AssetType::StaticMesh); }
+HE::UUID ContentManager::registerTexture(TextureAsset asset)       { return registerRuntimeAsset(m_textureAssets,    std::move(asset), HE::AssetType::Texture);    }
+HE::UUID ContentManager::registerMaterial(MaterialAsset asset)     { return registerRuntimeAsset(m_materialAssets,   std::move(asset), HE::AssetType::Material);   }
+
+bool ContentManager::replaceStaticMesh(HE::UUID id, StaticMeshAsset asset) { return replaceRuntimeAsset(m_staticMeshAssets, id, std::move(asset)); }
+bool ContentManager::replaceTexture(HE::UUID id, TextureAsset asset)       { return replaceRuntimeAsset(m_textureAssets,    id, std::move(asset)); }
+bool ContentManager::replaceMaterial(HE::UUID id, MaterialAsset asset)     { return replaceRuntimeAsset(m_materialAssets,   id, std::move(asset)); }
 
 // ─── unloadAsset ─────────────────────────────────────────────────────────────
 bool ContentManager::unloadAsset(HE::UUID id)
 {
-	if (!m_handleToUUID.contains(id))
+	auto it = m_handleToUUID.find(id);
+	if (it == m_handleToUUID.end())
+		return false;
+	const SlotHandle handle = it->second;
+
+	// Remove from whichever map actually holds *this* asset. The id check guards
+	// against the same SlotHandle being valid in another map (see lookupAsset).
+	auto tryRemove = [&](auto& map) -> bool
+	{
+		auto* a = map.get(handle);
+		if (!a || !(a->id == id)) return false;
+		map.remove(handle);
+		return true;
+	};
+
+	const bool removed =
+		tryRemove(m_staticMeshAssets)   || tryRemove(m_skeletalMeshAssets) ||
+		tryRemove(m_textureAssets)      || tryRemove(m_materialAssets)     ||
+		tryRemove(m_sceneAssets)        || tryRemove(m_scriptAssets)       ||
+		tryRemove(m_audioAssets)        || tryRemove(m_fontAssets)         ||
+		tryRemove(m_shaderAssets);
+	if (!removed)
 		return false;
 
-	SlotHandle handle = m_handleToUUID[id];
-
-	for (auto it = m_pathToUUID.begin(); it != m_pathToUUID.end(); ++it)
-		if (it->second == id) { m_pathToUUID.erase(it); break; }
-
+	for (auto pit = m_pathToUUID.begin(); pit != m_pathToUUID.end(); ++pit)
+		if (pit->second == id) { m_pathToUUID.erase(pit); break; }
 	m_handleToUUID.erase(id);
-
-	if (m_staticMeshAssets.isValid(handle))   { m_staticMeshAssets.remove(handle);   return true; }
-	if (m_skeletalMeshAssets.isValid(handle)) { m_skeletalMeshAssets.remove(handle); return true; }
-	if (m_textureAssets.isValid(handle))      { m_textureAssets.remove(handle);      return true; }
-	if (m_materialAssets.isValid(handle))     { m_materialAssets.remove(handle);     return true; }
-	if (m_sceneAssets.isValid(handle))        { m_sceneAssets.remove(handle);        return true; }
-	if (m_scriptAssets.isValid(handle))       { m_scriptAssets.remove(handle);       return true; }
-	if (m_audioAssets.isValid(handle))        { m_audioAssets.remove(handle);        return true; }
-	if (m_fontAssets.isValid(handle))         { m_fontAssets.remove(handle);         return true; }
-	if (m_shaderAssets.isValid(handle))       { m_shaderAssets.remove(handle);       return true; }
-	return false;
+	return true;
 }
 
 // ─── isLoaded ────────────────────────────────────────────────────────────────

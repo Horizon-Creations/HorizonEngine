@@ -111,6 +111,82 @@ TEST_CASE("ContentManager unload removes asset")
 	CHECK(cm.getMaterial(id) == nullptr);
 }
 
+TEST_CASE("ContentManager registers a runtime mesh without a disk file")
+{
+	TempContentDir dir;
+	ContentManager cm(dir.path.string());
+
+	StaticMeshAsset mesh;
+	mesh.name     = "procedural";
+	mesh.vertices = { 0,0,0,  1,0,0,  0,1,0 };
+	mesh.indices  = { 0, 1, 2 };
+
+	HE::UUID id = cm.registerStaticMesh(std::move(mesh));
+	REQUIRE_FALSE(id == HE::UUID{});          // a UUID was minted
+	REQUIRE(cm.isLoaded(id));
+
+	const StaticMeshAsset* got = cm.getStaticMesh(id);
+	REQUIRE(got != nullptr);
+	CHECK(got->name == "procedural");
+	CHECK(got->vertices.size() == 9);
+	CHECK(got->type == HE::AssetType::StaticMesh);
+	CHECK(got->id == id);
+
+	// No file was written, and wrong-type lookups still don't alias.
+	CHECK_FALSE(fs::exists(dir.path / "procedural.hasset"));
+	CHECK(cm.getMaterial(id) == nullptr);
+}
+
+TEST_CASE("ContentManager replaceStaticMesh keeps the UUID, swaps the payload")
+{
+	TempContentDir dir;
+	ContentManager cm(dir.path.string());
+
+	StaticMeshAsset a;
+	a.name    = "terrain";
+	a.path    = "mem://terrain";
+	a.indices = { 0, 1, 2 };
+	HE::UUID id = cm.registerStaticMesh(std::move(a));
+
+	// Regenerate with denser geometry — same identity.
+	StaticMeshAsset b;
+	b.indices = { 0,1,2,  2,3,0 };
+	REQUIRE(cm.replaceStaticMesh(id, std::move(b)));
+
+	const StaticMeshAsset* got = cm.getStaticMesh(id);
+	REQUIRE(got != nullptr);
+	CHECK(got->indices.size() == 6);   // new payload
+	CHECK(got->id == id);              // identity preserved
+	CHECK(got->name == "terrain");     // name preserved
+	CHECK(got->path == "mem://terrain");
+
+	// Replacing a UUID of the wrong type fails and changes nothing.
+	CHECK_FALSE(cm.replaceMaterial(id, MaterialAsset{}));
+	CHECK_FALSE(cm.replaceStaticMesh(HE::UUID::generate(), StaticMeshAsset{}));
+	CHECK(cm.getStaticMesh(id)->indices.size() == 6);
+}
+
+TEST_CASE("ContentManager registers a runtime material and mesh distinctly")
+{
+	TempContentDir dir;
+	ContentManager cm(dir.path.string());
+
+	MaterialAsset mat;
+	mat.name      = "rtMat";
+	mat.baseColor[0] = 0.25f;
+	HE::UUID matId = cm.registerMaterial(std::move(mat));
+
+	StaticMeshAsset mesh;
+	HE::UUID meshId = cm.registerStaticMesh(std::move(mesh));
+
+	CHECK_FALSE(matId == meshId);
+	const MaterialAsset* m = cm.getMaterial(matId);
+	REQUIRE(m != nullptr);
+	CHECK(m->baseColor[0] == doctest::Approx(0.25f));
+	CHECK(cm.getStaticMesh(matId) == nullptr); // material id ≠ mesh
+	CHECK(cm.getMaterial(meshId)  == nullptr); // mesh id ≠ material
+}
+
 TEST_CASE("ContentManager loading same path twice returns same UUID")
 {
 	TempContentDir dir;

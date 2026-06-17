@@ -35,6 +35,27 @@ public:
 	// disk with saveAsset(). Returns nullptr when the UUID is not a material.
 	MaterialAsset*           getMaterialMutable(HE::UUID id);
 
+	// ── Runtime (in-memory) assets ─────────────────────────────────────────
+	// Register a runtime-generated asset that has no .hasset file on disk:
+	// procedural meshes (e.g. terrain), generated/default textures, fallback or
+	// editor-created materials. Mints a UUID if the asset has none, indexes it
+	// exactly like a loaded asset (so getStaticMesh()/the renderer resolve it by
+	// UUID), and returns that UUID. A non-empty asset.path is also registered in
+	// the path index — use a "mem://"-style virtual path to avoid clashing with
+	// real files. The asset is moved in; persist it later with saveAsset() if a
+	// real file is wanted.
+	HE::UUID registerStaticMesh(StaticMeshAsset asset);
+	HE::UUID registerTexture(TextureAsset asset);
+	HE::UUID registerMaterial(MaterialAsset asset);
+
+	// Replace a registered asset's payload in place, keeping its UUID so existing
+	// references stay valid (e.g. regenerating a procedural terrain mesh after a
+	// parameter change). Returns false when the UUID is not a registered asset of
+	// the requested type. The original identity (id/name/path) is preserved.
+	bool replaceStaticMesh(HE::UUID id, StaticMeshAsset asset);
+	bool replaceTexture(HE::UUID id, TextureAsset asset);
+	bool replaceMaterial(HE::UUID id, MaterialAsset asset);
+
 	const std::string& contentRoot() const { return m_contentRoot; }
 	// Point the manager at a different content directory (e.g. when the
 	// editor opens a project). Previously loaded assets stay registered.
@@ -43,6 +64,13 @@ public:
 private:
 
 	HE::AssetType getAssetType(const std::string path) const;
+
+	// Shared indexing for runtime asset registration / in-place replacement.
+	// Defined in the .cpp; only instantiated by the typed wrappers above.
+	template<typename T>
+	HE::UUID registerRuntimeAsset(SlotMap<T>& map, T asset, HE::AssetType type);
+	template<typename T>
+	bool     replaceRuntimeAsset(SlotMap<T>& map, HE::UUID id, T asset);
 
 	std::string m_contentRoot;
 
