@@ -9,6 +9,7 @@ add_library(HorizonCore SHARED
 	src/Diagnostics/CrashHandler.cpp
 	src/Memory/PoolAllocator.cpp
 	src/Memory/Ref.cpp
+	src/JobSystem/JobSystem.cpp
 	src/Types/UUID.cpp
 	src/Types/StringID.cpp
 	src/Platform/FileSystem.cpp
