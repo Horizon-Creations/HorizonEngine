@@ -1442,7 +1442,16 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 	// ── Scene viewport (offscreen render target as dockable window) ─────────
 	{
 		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
-		ImGui::Begin("Scene", nullptr, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+		// NoMove is essential: the viewport content is a plain ImGui::Image (an
+		// id-less item), so a click-drag on it would otherwise be treated as a
+		// click on empty window space and start an ImGui window/dock move. That
+		// move fights the ImGuizmo drag for the same mouse button, so the gizmo
+		// never manipulates the object (translate/rotate/scale all dead). The
+		// docked Scene window is still relocated via its tab, so NoMove costs
+		// nothing here.
+		ImGui::Begin("Scene", nullptr,
+		             ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
+		             ImGuiWindowFlags_NoMove);
 		ImGui::PopStyleVar();
 
 		ImVec2 avail = ImGui::GetContentRegionAvail();
