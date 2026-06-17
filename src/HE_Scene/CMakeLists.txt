@@ -7,6 +7,7 @@ add_library(HorizonScene SHARED
     src/TerrainSystem.cpp
     src/ScriptContext.cpp
     src/AudioEngine.cpp
+    src/PhysicsWorld.cpp
 )
 
 target_include_directories(HorizonScene
@@ -26,6 +27,7 @@ target_compile_features(HorizonScene PUBLIC cxx_std_20)
 target_link_libraries(HorizonScene
     PUBLIC  HorizonCore
     PRIVATE nlohmann_json::nlohmann_json
+            Jolt
 )
 
 if(APPLE)

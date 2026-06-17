@@ -8,6 +8,7 @@
 #include "EditorCamera.h"
 #include <HorizonScene/HorizonScene.h>
 #include <Scripting/ScriptEngine.h>
+#include <HorizonScene/PhysicsWorld.h>
 #include <functional>
 #include <future>
 #include <memory>
@@ -245,6 +246,11 @@ private:
 	// Lightweight ScriptEngine used only for reading M.properties in the inspector.
 	// Never creates instances; only loadScript + getScriptProperties.
 	std::unique_ptr<ScriptEngine> m_propScriptEngine;
+
+	// Physics simulation — active only while in play mode.
+	std::unique_ptr<PhysicsWorld> m_physicsWorld;
+	float m_physicsAccum = 0.0f;
+	static constexpr float kPhysicsFixedDt = 1.0f / 60.0f;
 
 	// Outliner/inspector selection
 	Entity m_selectedEntity = entt::null;

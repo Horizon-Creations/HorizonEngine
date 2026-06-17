@@ -85,6 +85,22 @@ set(LUA_BUILD_SHARED    OFF CACHE BOOL "" FORCE)
 set(LUA_ENABLE_TESTING  OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(lua)
 
+# ─── Jolt Physics ─────────────────────────────────────────────────────────────
+FetchContent_Declare(
+    JoltPhysics
+    GIT_REPOSITORY https://github.com/jrouwe/JoltPhysics.git
+    GIT_TAG        v5.5.0
+    GIT_SHALLOW    TRUE
+    SOURCE_SUBDIR  Build
+)
+set(TARGET_HELLO_WORLD      OFF CACHE BOOL "" FORCE)
+set(TARGET_PERFORMANCE_TEST OFF CACHE BOOL "" FORCE)
+set(TARGET_SAMPLES          OFF CACHE BOOL "" FORCE)
+set(TARGET_VIEWER           OFF CACHE BOOL "" FORCE)
+set(TARGET_UNIT_TESTS       OFF CACHE BOOL "" FORCE)
+set(ENABLE_INSTALL          OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(JoltPhysics)
+
 # ─── Tracy (optional profiling) ────────────────────────────────────────────────
 # Enable with:  cmake -DHE_ENABLE_TRACY=ON ...
 # Default OFF so production/CI builds have zero overhead.
