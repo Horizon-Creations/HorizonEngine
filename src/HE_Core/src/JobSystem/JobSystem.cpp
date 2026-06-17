@@ -1,4 +1,5 @@
 #include "JobSystem/JobSystem.h"
+#include "Diagnostics/Profiler.h"
 #include <algorithm>
 
 // ─── ThreadPool ───────────────────────────────────────────────────────────────
@@ -19,6 +20,7 @@ ThreadPool::ThreadPool(size_t threadCount)
                     task = std::move(m_queue.front());
                     m_queue.pop();
                 }
+                HE_PROFILE_SCOPE_N("Job::Execute");
                 task();
             }
         });

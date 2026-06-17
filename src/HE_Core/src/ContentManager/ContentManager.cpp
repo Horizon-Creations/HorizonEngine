@@ -1,6 +1,7 @@
 #include "ContentManager/ContentManager.h"
 #include "ContentManager/HAsset.h"
 #include "Diagnostics/Logger.h"
+#include "Diagnostics/Profiler.h"
 #include <cstring>
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
@@ -48,6 +49,7 @@ HE::AssetType ContentManager::getAssetType(const std::string path) const
 
 HE::UUID ContentManager::loadAsset(const std::string& relativePath)
 {
+	HE_PROFILE_SCOPE_N("ContentManager::load");
 	if (isLoaded(relativePath))
 		return m_pathToUUID.at(relativePath);
 

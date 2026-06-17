@@ -74,6 +74,25 @@ set(JSON_Install         OFF CACHE BOOL "" FORCE)
 set(JSON_MultipleHeaders OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(nlohmann_json)
 
+# ─── Tracy (optional profiling) ────────────────────────────────────────────────
+# Enable with:  cmake -DHE_ENABLE_TRACY=ON ...
+# Default OFF so production/CI builds have zero overhead.
+option(HE_ENABLE_TRACY "Enable Tracy frame profiler instrumentation" OFF)
+if(HE_ENABLE_TRACY)
+    FetchContent_Declare(
+        Tracy
+        GIT_REPOSITORY https://github.com/wolfpld/tracy.git
+        GIT_TAG        v0.11.1
+        GIT_SHALLOW    TRUE
+    )
+    set(TRACY_ENABLE   ON  CACHE BOOL "" FORCE)
+    set(TRACY_NO_EXIT  ON  CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(Tracy)
+    message(STATUS "HorizonEngine: Tracy profiling ENABLED")
+else()
+    message(STATUS "HorizonEngine: Tracy profiling disabled (pass -DHE_ENABLE_TRACY=ON to enable)")
+endif()
+
 # ─── Deploy directories ────────────────────────────────────────────────────────
 if(WIN32)
     set(DEPLOY_DIR    "C:/Users/conno/source/repos/HorizonEngineBuild")

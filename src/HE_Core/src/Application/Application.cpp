@@ -1,6 +1,7 @@
 #include "Application/Application.h"
 #include "Window/Window.h"
 #include "Diagnostics/Logger.h"
+#include "Diagnostics/Profiler.h"
 #include <SDL3/SDL.h>
 #include <stdexcept>
 #include <string>
@@ -147,6 +148,7 @@ namespace HE
 				m_loop.tick(*m_world, m_logicLoader.logic(), dt);
 
 			m_window->SwapBuffers();
+			HE_PROFILE_FRAME();
 		}
 
 		Logger::Log(Logger::LogLevel::Info, "Main loop exited — shutting down");
