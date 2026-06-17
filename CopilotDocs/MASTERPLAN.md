@@ -1194,3 +1194,99 @@ alpha-geblendeten Pass, der über die opake Szene **und** den Himmel composited.
   populate/verify/play-mode/undo-Counts angepasst); GL+Metal-Dump rendert die Built-in-Sonne (Day-Night),
   **GL == Metal** (0.01 %); saubere Belichtung mit nur der Built-in-Sonne bestätigt. Interaktiv (Undo
   im Editor, versteckte Sun/Moon, kein Add-Component an World) vom User zu bestätigen.
+
+---
+
+### Forts. 18 — Gizmo-Toolbar: Move/Rotate/Scale + Local/World + Screen-Ring
+
+> **Aufgabe:** „Wie kann ich Objekte skalieren/rotieren?" — die W/E/R-Shortcuts existierten, waren aber
+> unauffindbar. Sichtbare Werkzeug-Buttons in der Viewport-Toolbar; den verwirrenden weißen Rotations-Ring
+> abschaltbar machen; Local/World-Umschaltung für die Rotation. ✅
+
+- **Move / Rotate / Scale-Buttons** in der Viewport-Toolbar (`Toolbar##ViewportTopBar`), spiegeln die
+  Tastenkürzel **W/E/R**. Beide Wege teilen sich denselben File-Static `s_gizmoOp` (vorher ein lokaler
+  Static im Gizmo-Block) → Klick und Taste sind äquivalent; das aktive Werkzeug wird hervorgehoben.
+- **Screen-Space-Ring**: Der äußere weiße Ring am Rotate-Gizmo ist ImGuizmos `ROTATE_SCREEN` (Drehung um
+  die Blickachse → viewport-relativ, verwirrend). Standardmäßig **aus** — die Manipulate-Operation für
+  Rotation ist dann `ROTATE_X | ROTATE_Y | ROTATE_Z`. Über eine **Checkbox** („Screen ring") wieder
+  einblendbar (`s_rotateScreen`).
+- **Local/World-Dropdown** steuert die Gizmo-Achsen-Orientierung (ImGuizmo `MODE`, `s_gizmoMode`), gilt für
+  alle drei Werkzeuge. Decompose-/Speicher-Pfad unberührt: egal welcher Mode, die resultierende Weltmatrix
+  wird per `glm::inverse(parentWorld) * world` in lokale Pos/Rot/Scale zerlegt und mit dem Transform
+  gespeichert.
+- **Verifiziert:** Build grün, 37 Tests grün, GL-Headless-Dump rendert sauber. Commits auf `main`.
+
+---
+
+### Forts. 19 — 📋 PLAN: Landscape-Modus (Heightfield-Terrain in vorgegebenen Abmessungen)
+
+> **Aufgabe:** Den bestehenden `EditorMode::Landscape`-Stub zu einem echten Modus ausbauen, der ein
+> Terrain in **vom User angegebenen Abmessungen als Heightfield** erzeugt. Dies ist die **Planung** —
+> Implementierung folgt phasenweise.
+
+**Ist-Zustand (Recon):** `EditorMode { View, Landscape }` existiert (`EditorApplication.h:27`), wird im
+Toolbar-Combo (`EditorUI.cpp:1838`) ausgewählt, aber **nirgends behandelt** — reiner Stub. Es gibt **kein**
+Terrain-/Heightfield-/Heightmap-Code. Die Mesh-Pipeline ist jedoch komplett vorhanden und terrain-tauglich:
+`StaticMeshAsset{vertices,indices,normals,uvs}` (`Assets.h:21`) → `MeshComponent{meshAssetId}` → Extractor
+(`RenderExtractor.cpp`, View `<Transform, Mesh>`) → `ResolveMesh()` lazy-Upload (interleaved pos/normal/uv,
+8 Floats) → Geometrie-Pass (GL `OpenGLRenderer.cpp:2149`, Metal analog) mit PBR-Skalaren + Schatten + SSAO.
+
+**Architektur-Entscheidung — Terrain = parametrisches *Rezept*, nicht gebackenes Mesh:**
+Wie Unreal speichern wir die **Parameter** (Abmessungen, Auflösung, Höhenquelle), nicht die Vertices. Das
+Mesh wird daraus deterministisch generiert und zur Laufzeit registriert. Vorteile: winzige Serialisierung,
+Live-Regenerierung beim Editieren, keine Mesh-Dateien pro Terrain.
+
+**Bausteine:**
+
+1. **`TerrainComponent`** (neue POD-Komponente, `Components/TerrainComponent.h`, in `HorizonScene.h`
+   aggregiert):
+   - `float sizeX, sizeZ` — Weltabmessungen in Metern (die „angegebenen Abmessungen").
+   - `uint32_t resolution` — Vertices pro Seite (Gitter `res × res`, Standard z. B. 128, geklemmt 2…1024).
+   - `float heightScale` — max. Höhe.
+   - Höhenquelle v1 (prozedural): `int seed`, `int octaves`, `float frequency`, `float lacunarity`,
+     `float gain` (fBm-Wert-Noise; das Sky-System hat bereits Noise-Helfer als Vorlage).
+   - `HE::UUID heightmapTexture` — optional (Phase 2: Graustufen-Heightmap statt Noise).
+   - `bool dirty` — markiert Regenerierungsbedarf.
+
+2. **Mesh-Generator** (`HE_Scene` oder `HE_Tools`, frei testbar, keine GPU): `generateTerrainMesh(const
+   TerrainComponent&) -> StaticMeshAsset`. Baut ein `res × res`-Gitter (XZ-Ebene zentriert um den Ursprung),
+   verschiebt jeden Vertex in Y per fBm/Heightmap, berechnet **Normalen** (zentrale Differenzen der
+   Nachbarn → Cross-Product, glatt) und **UVs** (0…1 oder gekachelt). Indices als zwei Dreiecke pro Zelle.
+
+3. **Runtime-Mesh-Registrierung** — kleine `ContentManager`-Erweiterung
+   `registerStaticMesh(StaticMeshAsset&&) -> UUID` (Insert in die `SlotMap`, ohne Disk-I/O); für
+   Re-Registrierung beim Regenerieren `replaceStaticMesh(UUID, StaticMeshAsset&&)`. Das generierte Mesh
+   bekommt eine UUID, die in die `MeshComponent` des Terrain-Entities geschrieben wird → rendert über den
+   **bestehenden** Geometrie-Pass, **null Renderer-Änderungen**, GL == Metal automatisch.
+
+4. **`TerrainSystem` / Regenerierungs-Hook** — analog zu `ensureEnvironmentLights()`:
+   - Beim **Erzeugen** (Landscape-UI „Create") und bei jeder Parameter-Änderung (`dirty`): Mesh neu
+     generieren + (re-)registrieren + `MeshComponent.meshAssetId` setzen.
+   - Beim **Szenen-Load**: für jede Entity mit `TerrainComponent` das Mesh aus den Parametern neu erzeugen
+     (das `meshAssetId` ist Runtime-only und wird **nicht** serialisiert).
+
+5. **Serialisierung** (`SceneSerializer`): nur `TerrainComponent`-Parameter in JSON/CBOR (build/apply,
+   analog `mesh`/`material`); die abgeleitete `MeshComponent` des Terrains wird **übersprungen** und nach
+   dem Load regeneriert. Round-Trip-Test.
+
+6. **Editor-UI — Landscape-Modus aktiv** (`EditorUI.cpp`, Branch auf `EditorMode::Landscape`):
+   - Ein **Landscape-Panel** mit Eingaben: Breite × Tiefe (m), Auflösung, Höhenskala, Noise-Parameter
+     (Seed/Octaves/Frequency) und Button **„Create Landscape"** → spawnt ein Terrain-Entity am Ursprung
+     (Transform + Terrain + Mesh + Default-Material) über die Undo-Schicht (`snapshotNow`).
+   - **Inspector**: bei selektiertem Terrain dieselben Parameter editierbar → Live-Regenerierung
+     (`trackEdit` + `dirty`), in Undo/Redo eingebettet.
+
+7. **Tests** (doctest, `he_tests`): Generator-Vertex-/Index-Anzahl (`res²` / `(res-1)²·6`), AABB passt zu
+   `sizeX/sizeZ/heightScale`, Determinismus (gleicher Seed → gleiche Höhen), Serialisierungs-Round-Trip.
+
+**Phasen:**
+- **Phase 1 (MVP, nächste Implementierung):** Bausteine 1–7 — prozedurales Heightfield in angegebenen
+  Abmessungen, Erzeugung + Inspector-Parameter + Live-Regen + Serialisierung; rendert über den
+  bestehenden Pass (GL + Metal), Tests grün.
+- **Phase 2 (später):** Graustufen-**Heightmap-Import** als Höhenquelle; interaktive **Sculpt-Brushes**
+  (anheben/absenken/glätten/flatten) mit Undo; **Multi-Material-Splatting** (Slope/Höhe); **Chunking + LOD**
+  für große Terrains; optional GPU-**Tessellation/Displacement**; Terrain-**Kollision** (Heightfield-Query).
+
+**Risiken/Notizen:** Normalen an Gitterrändern (Nachbarn fehlen → einseitige Differenzen); große Auflösung
+× Anzahl Terrains = RAM/Upload (Phase-2-Chunking adressiert das); `registerStaticMesh` muss thread-/
+Lifetime-sicher mit der bestehenden `SlotMap`/`m_handleToUUID`-Buchführung interagieren.
