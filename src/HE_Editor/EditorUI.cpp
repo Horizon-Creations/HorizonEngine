@@ -78,6 +78,15 @@ static bool s_resetLayoutRequested = false;
 // Toggled by Edit > Preferences (Ctrl+,); drives the Preferences window.
 static bool s_showPreferences = false;
 
+// Active manipulation tool, shared by the viewport toolbar buttons and the
+// W/E/R shortcuts and consumed by the gizmo (Move / Rotate / Scale).
+static ImGuizmo::OPERATION s_gizmoOp   = ImGuizmo::TRANSLATE;
+// Gizmo orientation: LOCAL (object axes) or WORLD (axis-aligned). Toolbar toggle.
+static ImGuizmo::MODE      s_gizmoMode = ImGuizmo::LOCAL;
+// Show ImGuizmo's outer "screen-space" rotation ring (rotate about the view axis).
+// Off by default — its viewport-relative behaviour is confusing.
+static bool                s_rotateScreen = false;
+
 // Requested by fast local content edits (create/rename) that want the file list
 // updated this frame without the heavyweight "##ContentRefresh" progress modal.
 // Consumed at the top of render(), outside the content-folder shared lock.
@@ -1680,13 +1689,14 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				if (auto* t = ctx.world->registry().try_get<TransformComponent>(ctx.selectedEntity))
 				{
 					// W/E/R switch operation while the viewport is hovered
-					// (but not while flying — W/A/S/D drive the camera then).
-					static ImGuizmo::OPERATION s_op = ImGuizmo::TRANSLATE;
+					// (but not while flying — W/A/S/D drive the camera then). The
+					// viewport toolbar's Move/Rotate/Scale buttons set the same
+					// shared s_gizmoOp.
 					if (ImGui::IsWindowHovered() && !ImGui::GetIO().WantTextInput && !navigating)
 					{
-						if (ImGui::IsKeyPressed(ImGuiKey_W)) s_op = ImGuizmo::TRANSLATE;
-						if (ImGui::IsKeyPressed(ImGuiKey_E)) s_op = ImGuizmo::ROTATE;
-						if (ImGui::IsKeyPressed(ImGuiKey_R)) s_op = ImGuizmo::SCALE;
+						if (ImGui::IsKeyPressed(ImGuiKey_W)) s_gizmoOp = ImGuizmo::TRANSLATE;
+						if (ImGui::IsKeyPressed(ImGuiKey_E)) s_gizmoOp = ImGuizmo::ROTATE;
+						if (ImGui::IsKeyPressed(ImGuiKey_R)) s_gizmoOp = ImGuizmo::SCALE;
 					}
 
 					ImGuizmo::SetOrthographic(false);
@@ -1699,11 +1709,18 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 					if (ctx.undoSys && !ImGuizmo::IsUsing())
 						ctx.undoSys->capturePre();
 
+					// For rotation, optionally drop ImGuizmo's outer screen-space
+					// ring (rotate about the view axis) — it's the confusing white
+					// circle. Toggled from the toolbar.
+					ImGuizmo::OPERATION effectiveOp = s_gizmoOp;
+					if (s_gizmoOp == ImGuizmo::ROTATE && !s_rotateScreen)
+						effectiveOp = ImGuizmo::ROTATE_X | ImGuizmo::ROTATE_Y | ImGuizmo::ROTATE_Z;
+
 					glm::mat4 world = t->worldMatrix;
 					ImGuizmo::Manipulate(
 						&s_sceneSnapshot.camera.view[0][0],
 						&s_sceneSnapshot.camera.projection[0][0],
-						s_op, ImGuizmo::LOCAL, &world[0][0]);
+						effectiveOp, s_gizmoMode, &world[0][0]);
 
 					// Undo session: one entry per drag
 					static bool s_gizmoWasUsing = false;
@@ -1832,6 +1849,52 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
             }
         }
 		ImGui::SameLine();
+
+		// ── Gizmo tools: Move / Rotate / Scale (mirror the W/E/R shortcuts) ──
+		{
+			auto toolBtn = [&](const char* label, ImGuizmo::OPERATION op, const char* tip)
+			{
+				const bool active = (s_gizmoOp == op);
+				if (active)
+					ImGui::PushStyleColor(ImGuiCol_Button,
+						ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+				if (ImGui::Button(label)) s_gizmoOp = op;
+				if (active) ImGui::PopStyleColor();
+				if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
+			};
+			toolBtn("Move",   ImGuizmo::TRANSLATE, "Move (W)");   ImGui::SameLine();
+			toolBtn("Rotate", ImGuizmo::ROTATE,    "Rotate (E)"); ImGui::SameLine();
+			toolBtn("Scale",  ImGuizmo::SCALE,     "Scale (R)");  ImGui::SameLine();
+
+			// Local / World gizmo orientation
+			{
+				const bool isWorld = (s_gizmoMode == ImGuizmo::WORLD);
+				if (ImGui::Button(isWorld ? "World" : "Local"))
+					s_gizmoMode = isWorld ? ImGuizmo::LOCAL : ImGuizmo::WORLD;
+				if (ImGui::IsItemHovered())
+					ImGui::SetTooltip("Gizmo axes: %s\nClick to toggle Local / World",
+						isWorld ? "World" : "Local");
+			}
+			ImGui::SameLine();
+
+			// Outer screen-space rotation ring (the white circle on the rotate
+			// gizmo that spins about the view axis) — off by default.
+			{
+				const bool active = s_rotateScreen;
+				if (active)
+					ImGui::PushStyleColor(ImGuiCol_Button,
+						ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+				if (ImGui::Button("Screen")) s_rotateScreen = !s_rotateScreen;
+				if (active) ImGui::PopStyleColor();
+				if (ImGui::IsItemHovered())
+					ImGui::SetTooltip(
+						"Rotate gizmo: click to %s the outer screen-space ring\n"
+						"(rotates about the view axis)",
+						s_rotateScreen ? "hide" : "show");
+			}
+			ImGui::SameLine();
+		}
+
 		// ── Play button centered ────────────────────────────────────────────
 		{
 			const bool playing = ctx.isPlaying;
