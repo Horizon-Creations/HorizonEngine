@@ -110,10 +110,11 @@ private:
 	// (unretained, autoreleased) id<MTLTexture> owned by the cache.
 	bool ResolveMaterialTexture(const HE::UUID& materialId, void*& outTex);
 
-	// Resolves a material override's PBR scalars (baseColor/metallic/roughness).
-	// Returns true if the material is loaded; leaves outputs untouched otherwise.
+	// Resolves a material override's PBR scalars (baseColor/metallic/roughness/
+	// opacity). Returns true if the material is loaded; leaves outputs untouched.
 	bool ResolveMaterialParams(const HE::UUID& materialId,
-	                           glm::vec3& outBaseColor, float& outMetallic, float& outRoughness);
+	                           glm::vec3& outBaseColor, float& outMetallic, float& outRoughness,
+	                           float& outOpacity);
 
 	SDL_Window* m_primarySdlWindow = nullptr;
 	WindowTarget m_primaryTarget;
@@ -137,6 +138,7 @@ private:
 	// Unlit pipeline + built-in cube (fallback for entities whose mesh asset
 	// is missing or not loaded). All id<MTL…>, retained.
 	void* m_scenePipeline   = nullptr; // id<MTLRenderPipelineState>
+	void* m_sceneBlendPipeline = nullptr; // id<MTLRenderPipelineState> (alpha-blended transparency)
 	void* m_sceneDepthState = nullptr; // id<MTLDepthStencilState> (test+write)
 	void* m_noDepthState    = nullptr; // id<MTLDepthStencilState> (overlay)
 	void* m_skyDepthState   = nullptr; // id<MTLDepthStencilState> (sky: LessEqual, no write)

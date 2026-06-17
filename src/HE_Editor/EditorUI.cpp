@@ -3132,6 +3132,9 @@ void EditorUI::RenderInspector(AppContext& ctx)
 				ImGui::ColorEdit3("Base Color", mat->baseColor);
 				ImGui::SliderFloat("Metallic",  &mat->metallic,  0.0f, 1.0f, "%.2f");
 				ImGui::SliderFloat("Roughness", &mat->roughness, 0.0f, 1.0f, "%.2f");
+				// Opacity < 1 routes the object into the sorted, alpha-blended
+				// transparency pass.
+				ImGui::SliderFloat("Opacity",   &mat->opacity,   0.0f, 1.0f, "%.2f");
 
 				// Texture slots — editable text + per-slot drop target + remove.
 				ImGui::TextUnformatted("Textures");
