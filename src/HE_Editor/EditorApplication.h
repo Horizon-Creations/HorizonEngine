@@ -275,6 +275,9 @@ private:
 	float m_contentRefreshTimer = 0.0f;
 	std::future<void> m_contentRefreshFuture;
 
+	// Hot-reload: disk-asset change detection
+	float m_hotReloadTimer = 0.0f;
+
 	static constexpr int k_fpsHistorySize = 128;
 	float m_frametimeHistory[k_fpsHistorySize] = {};
 	int   m_fpsHistoryOffset = 0;
