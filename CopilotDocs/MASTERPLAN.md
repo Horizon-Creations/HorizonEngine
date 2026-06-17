@@ -173,7 +173,7 @@ Reihenfolge nach Sichtbarkeit pro Aufwand. Braucht P1 für Materialien/Texturen;
 | 3.4 | **RenderGraph + Pass-System aktivieren** | 3.1 | GeometryPass → PostProcessPass als erste Knoten; .cpp sind leer, Header + Design-Doc existieren |
 | 3.5 | **Schatten**: Directional mit einer Cascade → CSM | 3.4 | danach Punkt-/Spotlicht-Schatten |
 | 3.6 | **HDR + Tonemapping** als erster PostProcess-Pass | 3.4 | danach Bloom |
-| 3.7 | **RenderResourceManager + GPUMemoryAllocator** | 0.3 | Budget + LRU-Eviction, `onHandleUsed`-Hook beim Draw |
+| 3.7 | **RenderResourceManager + GPUMemoryAllocator** | 0.3 | ✅ Forts. 30 — Budget-Tracking, LRU-Eviction, UUID→Handle-Index, 13 Tests |
 | 3.8 | **Instancing + parallele Extraction** | 3.1, 0.4 | instanceCount im DrawCall existiert schon |
 | 3.9 | **Skybox + IBL** (Environment-Map, Irradiance/Prefilter) | 3.3 | macht PBR erst „modern aussehend" |
 | 3.10 | **Transparenz-Pass** (sortiertes Alpha-Blending) | 3.1, 3.4 | OIT ist Kür (P7) |
@@ -1546,3 +1546,25 @@ Lifetime-sicher mit der bestehenden `SlotMap`/`m_handleToUUID`-Buchführung inte
 - **Tests (`tests/test_audio.cpp`):** 7 neue Doctest-Cases (Defaults, Attach, Serialisierung-Roundtrip
   für Source + Listener + Null-UUID-Erhalt). **113 Tests grün** (106→113), Build sauber.
 - **Offen (nächster Schritt 4c):** miniaudio.h vendoren + AudioEngine-Wrapper + `playOnStart`-Logic im GameLoop.
+
+### Forts. 30 — RenderResourceManager + GPUMemoryAllocator (3.7)
+
+> **Aufgabe:** CPU-seitiges GPU-Budget-Tracking mit LRU-Eviction als Basis für Async-Asset-Streaming (6.4). ✅
+
+- **`GPUMemoryAllocator`** (`HorizonRendering/GPUMemoryAllocator.h/.cpp`):
+  - Konstruktor: `budgetBytes` = Gesamtbudget.
+  - `requestAllocation(sizeBytes, handle)`: Trägt Bytes + Handle in `m_sizes` + `m_lruList/m_lruIndex` ein.
+    Idempotent bei Re-Registrierung; wirft false, falls `sizeBytes > budget` (Einzel-Allokation > Gesamt-Budget).
+  - `freeAllocation(handle)`: Entfernt aus m_sizes + LRU-Datenstrukturen, reduziert `m_used`.
+  - `onHandleUsed(handle)`: Bewegt den Handle an den Anfang der LRU-Liste (`splice`, O(1)).
+  - `evictLRU()`: Entfernt das Schlusslicht der LRU-Liste; ruft optional den `m_evictCb` auf (für Backend-Aufräumung).
+  - `setEvictCallback(fn)`: Injektion des Backend-Teardown-Lambdas.
+  - Interna: `m_sizes` (encoded handle → bytes), `m_lruList` (MRU-vorn, LRU-hinten), `m_lruIndex` (O(1)-Position).
+- **`RenderResourceManager`** (`HorizonRendering/RenderResourceManager.h/.cpp`):
+  - `uploadMesh/uploadTexture/createMaterial(UUID, Data)` → `RenderHandle` (idempotent, gibt gleichen Handle zurück wenn schon geladen).
+  - `release(handle)`: Deregistriert UUID + Handle + ruft `allocator_.freeAllocation`.
+  - `findHandle/isLoaded(UUID)`, `onHandleUsed(handle)` (Durchleitungs-Shortcut), `loadedCount()`.
+  - Interna: `assetIndex_` (UUID→Handle), `handleToAsset_` (encoded Handle→UUID für release-by-handle), Monoton-Zähler für neue Handles.
+- **Struct-Updates:** `MeshData`, `TextureData`, `MaterialDesc` bekommen Byte-Größen-Helfer (`sizeBytes()`).
+- **Tests (`tests/test_rendermanager.cpp`):** 13 neue Doctest-Cases (Allokator leer/alloc/free/reject-over-budget/evict-LRU/promote; Manager upload/idempotent/texture-footprint/material/release/invalid/shared-budget). **127 Tests grün** (113→127).
+- **Nächster Schritt:** Backends drähten die RenderResourceManager-Calls beim Upload/Draw/Eviction ein (ersetzt die per-Backend-Ad-Hoc-Caches in einer späteren Iteration).
