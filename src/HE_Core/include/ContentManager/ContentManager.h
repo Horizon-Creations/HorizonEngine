@@ -6,6 +6,7 @@
 #include "Assets.h"
 #include "ContentManager/DefaultAssets.h"
 #include <string>
+#include <vector>
 #include <unordered_map>
 
 class HE_API ContentManager
@@ -62,6 +63,14 @@ public:
 	// editor opens a project). Previously loaded assets stay registered.
 	void setContentRoot(std::string root) { m_contentRoot = std::move(root); }
 
+	// ── Asset enumeration ──────────────────────────────────────────────────
+	// Returns the UUIDs of all currently loaded/registered assets.
+	std::vector<HE::UUID> enumerateIds() const;
+	// Returns only UUIDs of assets of the given type.
+	std::vector<HE::UUID> enumerateIds(HE::AssetType type) const;
+	// Total number of loaded/registered assets (all types).
+	size_t assetCount() const { return m_handleToUUID.size(); }
+
 private:
 
 	HE::AssetType getAssetType(const std::string path) const;
@@ -86,6 +95,7 @@ private:
 	SlotMap<FontAsset>         m_fontAssets;
 	SlotMap<ShaderAsset>       m_shaderAssets;
 
-	std::unordered_map<HE::UUID, SlotHandle>    m_handleToUUID;
-	std::unordered_map<std::string, HE::UUID>   m_pathToUUID;
+	std::unordered_map<HE::UUID, SlotHandle>      m_handleToUUID;
+	std::unordered_map<HE::UUID, HE::AssetType>  m_assetTypeIndex; // mirrors m_handleToUUID with type info
+	std::unordered_map<std::string, HE::UUID>    m_pathToUUID;
 };

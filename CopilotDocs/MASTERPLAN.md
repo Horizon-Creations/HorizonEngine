@@ -90,7 +90,7 @@ Diese low-level Bausteine zuerst, in dieser Reihenfolge — jeder schaltet die d
      Assets frei (Terrain, Default-/Fallback-Assets, editor-erzeugte Materialien).
    - ✅ **Default-/Fallback-Assets** mit festen UUIDs (`kDefaultCubeMeshId`/`kDefaultWhiteTextureId`/`kDefaultMaterialId`
      in `ContentManager/DefaultAssets.h`), im Ctor registriert; GL+Metal-Renderer-Fallback-Cube ersetzt (Forts. 21).
-   - 🔜 **Asset-Enumeration** (geladene Assets + Content-Verzeichnis auflisten) für den Content Browser.
+   - ✅ **Asset-Enumeration** `enumerateIds()` / `enumerateIds(AssetType)` / `assetCount()` + `m_assetTypeIndex` (Forts. 22).
    - 🔜 **Reload/Hot-Reload** einer geänderten Datei (mtime-Watch).
 2. **`Ref<T>`** (intrusiver Refcount, Phase 0.3) + Einsatz im ContentManager → sauberes Unloading/Eviction
    statt manuellem `unloadAsset`.
@@ -1385,3 +1385,22 @@ Lifetime-sicher mit der bestehenden `SlotMap`/`m_handleToUUID`-Buchführung inte
 - **Schaltet frei:** Landscape-Terrain kann `kDefaultCubeMeshId` als Platzhalter nutzen bis das Heightfield
   generiert ist; neue Editor-Materialien starten von `kDefaultMaterialId`. **Nächster Fundament-Schritt:**
   Asset-Enumeration (geladene Assets + Content-Verzeichnis auflisten für den Content Browser).
+
+---
+
+### Forts. 22 — ContentManager: Asset-Enumeration
+
+> **Aufgabe:** Dritter Fundament-Schritt der ContentManager-Fertigstellung. ✅
+
+- **`m_assetTypeIndex`** (`unordered_map<UUID, AssetType>`): parallel zu `m_handleToUUID` gepflegt;
+  wird in `registerRuntimeAsset`, `loadAsset` befüllt und in `unloadAsset` geleert.
+- **Neue public API** in `ContentManager.h` und `.cpp`:
+  - `enumerateIds() const` → alle geladenen/registrierten UUIDs (alle Typen)
+  - `enumerateIds(HE::AssetType) const` → nur UUIDs des angegebenen Typs (gefiltert über `m_assetTypeIndex`)
+  - `assetCount() const` → `m_handleToUUID.size()` (Inline, bereits vorhanden)
+- **Tests:** 3 neue Cases (`enumerateIds` gibt alle Assets zurück inkl. Defaults; Typ-Filter liefert nur
+  den jeweiligen Typ + Count wächst korrekt; unload entfernt aus beiden Enumerationen).
+  **48 Tests grün** (45→48), Build sauber.
+- **Schaltet frei:** Content Browser kann geladene Assets auflisten und nach Typ filtern; Landscape/
+  Terrain-Editor kann alle registrierten Meshes aufzählen. **Nächster Fundament-Schritt:** Hot-Reload
+  (mtime-Watch für geänderte Disk-Assets).
