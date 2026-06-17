@@ -1,6 +1,8 @@
 #include "doctest.h"
 #include <ContentManager/HAsset.h>
+#include <Types/UUID.h>
 #include <cstdio>
+#include <fstream>
 #include <filesystem>
 
 TEST_CASE("HAsset writer/reader round-trip")
@@ -80,4 +82,75 @@ TEST_CASE("HAsset string read guards against truncation")
 	size_t off = 0;
 	std::string out;
 	CHECK_FALSE(HAsset::Reader::readString(buf, off, out));
+}
+
+TEST_CASE("HAsset asset_type is preserved in the file header")
+{
+	const std::string file =
+		(std::filesystem::temp_directory_path() / "he_test_assettype.hasset").string();
+	{
+		HAsset::Writer w;
+		REQUIRE(w.write(file, 7)); // type = 7 (arbitrary)
+	}
+	HAsset::Reader r;
+	REQUIRE(r.open(file));
+	CHECK(r.assetType()             == 7);
+	CHECK(r.header().version        == HAsset::k_version);
+	CHECK(r.header().chunk_count    == 0);
+	std::remove(file.c_str());
+}
+
+TEST_CASE("HAsset supports empty-payload chunks")
+{
+	const std::string file =
+		(std::filesystem::temp_directory_path() / "he_test_emptychunk.hasset").string();
+	{
+		HAsset::Writer w;
+		w.addChunk(HAsset::CHUNK_META, nullptr, 0); // zero bytes of data
+		REQUIRE(w.write(file, 1));
+	}
+	HAsset::Reader r;
+	REQUIRE(r.open(file));
+	CHECK(r.header().chunk_count == 1);
+	const auto* c = r.findChunk(HAsset::CHUNK_META);
+	REQUIRE(c != nullptr);
+	CHECK(c->data.empty());
+	std::remove(file.c_str());
+}
+
+TEST_CASE("HAsset UUID round-trip via appendPOD / readPOD")
+{
+	const HE::UUID original = HE::UUID::generate();
+
+	std::vector<uint8_t> buf;
+	HAsset::Writer::appendPOD(buf, original.hi);
+	HAsset::Writer::appendPOD(buf, original.lo);
+
+	size_t off = 0;
+	HE::UUID recovered{};
+	CHECK(HAsset::Reader::readPOD(buf, off, recovered.hi));
+	CHECK(HAsset::Reader::readPOD(buf, off, recovered.lo));
+	CHECK(recovered == original);
+	CHECK(off == buf.size());
+}
+
+TEST_CASE("HAsset readVec guards against a truncated payload")
+{
+	std::vector<uint8_t> buf;
+	std::vector<float> data = { 1.0f, 2.0f, 3.0f };
+	HAsset::Writer::appendVec(buf, data);
+	buf.resize(buf.size() - 4); // chop the last float
+
+	size_t off = 0;
+	std::vector<float> out;
+	CHECK_FALSE(HAsset::Reader::readVec(buf, off, out));
+}
+
+TEST_CASE("HAsset write fails gracefully on an unwritable path")
+{
+	// A path whose parent directory does not exist cannot be opened for writing.
+	const std::string bad = (std::filesystem::temp_directory_path() /
+	                         "nonexistent_dir_he" / "file.hasset").string();
+	HAsset::Writer w;
+	CHECK_FALSE(w.write(bad, 1));
 }
