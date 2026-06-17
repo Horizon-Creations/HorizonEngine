@@ -1134,6 +1134,7 @@ void OpenGLRenderer::Initialize(HE::Window* window)
 	CreateTonemapPipeline();
 	CreateBloomPipeline();
 	CreateSSAOPipeline();
+	CreateDebugLinePipeline();
 	Logger::Log(Logger::LogLevel::Info, "OpenGLRenderer: initialized successfully");
 }
 
@@ -1946,6 +1947,80 @@ void OpenGLRenderer::InvalidateMesh(const HE::UUID& meshId)
 		m_pendingMeshInvalidations.push_back(meshId);
 }
 
+void OpenGLRenderer::SetDebugLines(const std::vector<DebugLine>& lines)
+{
+	m_debugLines = lines;
+}
+
+void OpenGLRenderer::CreateDebugLinePipeline()
+{
+	const char* vs = R"(
+#version 330 core
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec3 aColor;
+uniform mat4 uVP;
+out vec3 vColor;
+void main() { vColor = aColor; gl_Position = uVP * vec4(aPos, 1.0); }
+)";
+	const char* fs = R"(
+#version 330 core
+in vec3 vColor;
+out vec4 fragColor;
+void main() { fragColor = vec4(vColor, 1.0); }
+)";
+	auto compile = [](const char* src, GLenum type) -> unsigned int
+	{
+		unsigned int sh = glCreateShader(type);
+		glShaderSource(sh, 1, &src, nullptr);
+		glCompileShader(sh);
+		return sh;
+	};
+	unsigned int v = compile(vs, GL_VERTEX_SHADER);
+	unsigned int f = compile(fs, GL_FRAGMENT_SHADER);
+	m_debugLineProgram = glCreateProgram();
+	glAttachShader(m_debugLineProgram, v);
+	glAttachShader(m_debugLineProgram, f);
+	glLinkProgram(m_debugLineProgram);
+	glDeleteShader(v); glDeleteShader(f);
+	m_uDebugVP = glGetUniformLocation(m_debugLineProgram, "uVP");
+
+	glGenVertexArrays(1, &m_debugLineVAO);
+	glGenBuffers(1, &m_debugLineVBO);
+	glBindVertexArray(m_debugLineVAO);
+	glBindBuffer(GL_ARRAY_BUFFER, m_debugLineVBO);
+	glEnableVertexAttribArray(0);
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)0);
+	glEnableVertexAttribArray(1);
+	glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
+	glBindVertexArray(0);
+}
+
+void OpenGLRenderer::DrawDebugLines(const glm::mat4& viewProj)
+{
+	if (m_debugLines.empty() || !m_debugLineProgram) return;
+
+	// Pack line endpoints into a flat float buffer: [pos3 color3] per vertex
+	std::vector<float> verts;
+	verts.reserve(m_debugLines.size() * 12); // 2 verts * 6 floats
+	for (const DebugLine& l : m_debugLines)
+	{
+		verts.insert(verts.end(), { l.start.x, l.start.y, l.start.z,
+		                            l.color.r,  l.color.g,  l.color.b });
+		verts.insert(verts.end(), { l.end.x,   l.end.y,   l.end.z,
+		                            l.color.r,  l.color.g,  l.color.b });
+	}
+
+	glBindBuffer(GL_ARRAY_BUFFER, m_debugLineVBO);
+	glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(verts.size() * sizeof(float)),
+	             verts.data(), GL_STREAM_DRAW);
+
+	glUseProgram(m_debugLineProgram);
+	glUniformMatrix4fv(m_uDebugVP, 1, GL_FALSE, glm::value_ptr(viewProj));
+	glBindVertexArray(m_debugLineVAO);
+	glDrawArrays(GL_LINES, 0, (GLsizei)(m_debugLines.size() * 2));
+	glBindVertexArray(0);
+}
+
 void OpenGLRenderer::Shutdown()
 {
 	Logger::Log(Logger::LogLevel::Info, "OpenGLRenderer: shutdown");
@@ -1991,6 +2066,9 @@ void OpenGLRenderer::Shutdown()
 	if (m_ssaoPosProgram)  { glDeleteProgram(m_ssaoPosProgram);  m_ssaoPosProgram = 0; }
 	if (m_ssaoProgram)     { glDeleteProgram(m_ssaoProgram);     m_ssaoProgram = 0; }
 	if (m_ssaoBlurProgram) { glDeleteProgram(m_ssaoBlurProgram); m_ssaoBlurProgram = 0; }
+	if (m_debugLineProgram) { glDeleteProgram(m_debugLineProgram); m_debugLineProgram = 0; }
+	if (m_debugLineVAO)     { glDeleteVertexArrays(1, &m_debugLineVAO); m_debugLineVAO = 0; }
+	if (m_debugLineVBO)     { glDeleteBuffers(1, &m_debugLineVBO);      m_debugLineVBO = 0; }
 
 	// Destroy secondary contexts (secondary windows' SDL_GLContexts are owned by us)
 	for (auto& [sdlWin, ctx] : m_secondaryContexts)
@@ -2478,6 +2556,16 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			}
 			glDepthMask(GL_TRUE);
 			glDisable(GL_BLEND);
+		}
+
+		// ── Debug line overlay: world-space segments over the opaque scene ────
+		// Depth-test on so lines are occluded by geometry; depth-write off so
+		// they don't mask later transparent objects.
+		if (!m_debugLines.empty())
+		{
+			glDepthMask(GL_FALSE);
+			DrawDebugLines(viewProj);
+			glDepthMask(GL_TRUE);
 		}
 	});
 

@@ -1197,6 +1197,7 @@ void MetalRenderer::Initialize(HE::Window* window)
 
 	CreateTarget(m_primarySdlWindow, m_primaryTarget);
 	CreateScenePipeline();
+	CreateDebugLinePipeline();
 	EnsureShadowResources();
 
 	// Persistent pass descriptor describing the swapchain attachment layout.
@@ -1278,7 +1279,8 @@ void MetalRenderer::Shutdown()
 	if (m_ssaoBlurPipeline) { CFBridgingRelease(m_ssaoBlurPipeline); m_ssaoBlurPipeline = nullptr; }
 	if (m_ssaoNoiseTex)     { CFBridgingRelease(m_ssaoNoiseTex);     m_ssaoNoiseTex = nullptr; }
 	if (m_ssaoPointSampler) { CFBridgingRelease(m_ssaoPointSampler); m_ssaoPointSampler = nullptr; }
-	if (m_ssaoNoiseSampler) { CFBridgingRelease(m_ssaoNoiseSampler); m_ssaoNoiseSampler = nullptr; }
+	if (m_ssaoNoiseSampler)  { CFBridgingRelease(m_ssaoNoiseSampler);  m_ssaoNoiseSampler = nullptr; }
+	if (m_debugLinePipeline) { CFBridgingRelease(m_debugLinePipeline); m_debugLinePipeline = nullptr; }
 
 	if (m_imguiPassDescriptor) { CFBridgingRelease(m_imguiPassDescriptor); m_imguiPassDescriptor = nullptr; }
 	if (m_commandQueue)        { CFBridgingRelease(m_commandQueue);        m_commandQueue = nullptr; }
@@ -1316,6 +1318,98 @@ static std::vector<glm::vec3> BuildSSAONoise(int n)
 	for (int i = 0; i < n; ++i)
 		v[i] = glm::vec3(rng.next() * 2.0f - 1.0f, rng.next() * 2.0f - 1.0f, 0.0f);
 	return v;
+}
+
+void MetalRenderer::SetDebugLines(const std::vector<DebugLine>& lines)
+{
+	m_debugLines = lines;
+}
+
+void MetalRenderer::CreateDebugLinePipeline()
+{
+	@autoreleasepool
+	{
+		id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+		NSError* error = nil;
+		// Minimal per-vertex-color line shader targeting the RGBA16F HDR target
+		NSString* src = @R"(
+#include <metal_stdlib>
+using namespace metal;
+struct DebugVIn  { float3 pos   [[attribute(0)]]; float3 color [[attribute(1)]]; };
+struct DebugVOut { float4 pos   [[position]];     float3 color; };
+vertex DebugVOut debugLineVert(DebugVIn in [[stage_in]], constant float4x4& vp [[buffer(1)]])
+{
+    DebugVOut o; o.pos = vp * float4(in.pos, 1.0); o.color = in.color; return o;
+}
+fragment float4 debugLineFrag(DebugVOut in [[stage_in]])
+{
+    return float4(in.color, 1.0);
+}
+)";
+		id<MTLLibrary> lib = [device newLibraryWithSource:src options:nil error:&error];
+		if (!lib)
+		{
+			Logger::Log(Logger::LogLevel::Error, "MetalRenderer: debug line shader compile failed");
+			return;
+		}
+
+		MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
+		desc.vertexFunction   = [lib newFunctionWithName:@"debugLineVert"];
+		desc.fragmentFunction = [lib newFunctionWithName:@"debugLineFrag"];
+		desc.colorAttachments[0].pixelFormat = kSceneColorFormat; // RGBA16F HDR target
+		desc.depthAttachmentPixelFormat      = kDepthFormat;
+
+		// Vertex layout: float3 pos at offset 0, float3 color at offset 12
+		MTLVertexDescriptor* vtxDesc = [[MTLVertexDescriptor alloc] init];
+		vtxDesc.attributes[0].format      = MTLVertexFormatFloat3;
+		vtxDesc.attributes[0].offset      = 0;
+		vtxDesc.attributes[0].bufferIndex = 0;
+		vtxDesc.attributes[1].format      = MTLVertexFormatFloat3;
+		vtxDesc.attributes[1].offset      = 12;
+		vtxDesc.attributes[1].bufferIndex = 0;
+		vtxDesc.layouts[0].stride         = 24; // 6 floats × 4 bytes
+		vtxDesc.layouts[0].stepFunction   = MTLVertexStepFunctionPerVertex;
+		desc.vertexDescriptor = vtxDesc;
+
+		id<MTLRenderPipelineState> pso = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+		if (pso)
+			m_debugLinePipeline = (void*)CFBridgingRetain(pso);
+		else
+			Logger::Log(Logger::LogLevel::Error, "MetalRenderer: debug line pipeline creation failed");
+	}
+}
+
+void MetalRenderer::EncodeDebugLines(void* renderEncoderPtr, const glm::mat4& viewProj)
+{
+	if (m_debugLines.empty() || !m_debugLinePipeline) return;
+
+	@autoreleasepool
+	{
+		id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+		id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoderPtr;
+
+		// Pack line endpoints: [pos3 color3] per vertex
+		const size_t vertCount = m_debugLines.size() * 2;
+		const size_t byteSize  = vertCount * 6 * sizeof(float);
+		id<MTLBuffer> vbuf = [device newBufferWithLength:byteSize options:MTLResourceStorageModeShared];
+		float* ptr = (float*)vbuf.contents;
+		for (const DebugLine& l : m_debugLines)
+		{
+			*ptr++ = l.start.x; *ptr++ = l.start.y; *ptr++ = l.start.z;
+			*ptr++ = l.color.r; *ptr++ = l.color.g; *ptr++ = l.color.b;
+			*ptr++ = l.end.x;   *ptr++ = l.end.y;   *ptr++ = l.end.z;
+			*ptr++ = l.color.r; *ptr++ = l.color.g; *ptr++ = l.color.b;
+		}
+
+		// Apply Metal's NDC fix (same as scene pass)
+		glm::mat4 vp = kMetalClipFix * viewProj;
+
+		[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_debugLinePipeline];
+		[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
+		[enc setVertexBuffer:vbuf offset:0 atIndex:0];
+		[enc setVertexBytes:&vp length:sizeof(vp) atIndex:1];
+		[enc drawPrimitives:MTLPrimitiveTypeLine vertexStart:0 vertexCount:vertCount];
+	}
 }
 
 void MetalRenderer::CreateScenePipeline()
@@ -2714,6 +2808,12 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			id<MTLRenderCommandEncoder> sceneEncoder =
 				[cmdBuf renderCommandEncoderWithDescriptor:hdrPass];
 			EncodeScene((__bridge void*)sceneEncoder, sceneW, sceneH);
+			// Debug lines on top of the opaque scene, still in the HDR pass.
+			if (!m_debugLines.empty())
+			{
+				const glm::mat4 vp = m_renderWorld.camera.projection * m_renderWorld.camera.view;
+				EncodeDebugLines((__bridge void*)sceneEncoder, vp);
+			}
 			[sceneEncoder endEncoding];
 
 			// Bright-pass + blur the HDR target into the half-res bloom buffer;

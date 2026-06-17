@@ -34,6 +34,7 @@ public:
 	void  InvalidateMesh    (const HE::UUID& meshId)     override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
 	void  SetSSAOSettings(const SSAOSettings& settings) override;
+	void  SetDebugLines(const std::vector<DebugLine>& lines) override;
 
 	// Multi-window support
 	void AttachWindow(HE::Window* window) override;
@@ -160,6 +161,15 @@ private:
 	bool         m_skyEnvValid     = false;
 	unsigned int m_moonTex        = 0;    // night-sky moon texture (or 0)
 	void CreateSkyPipeline();
+
+	// ── Debug line overlay ───────────────────────────────────────────────────
+	unsigned int m_debugLineProgram = 0;
+	int          m_uDebugVP         = -1;
+	unsigned int m_debugLineVAO     = 0;
+	unsigned int m_debugLineVBO     = 0;
+	std::vector<DebugLine> m_debugLines;
+	void CreateDebugLinePipeline();
+	void DrawDebugLines(const glm::mat4& viewProj);
 
 	// ── HDR scene color + tonemap (PostProcessPass) ─────────────────────────
 	// GeometryPass renders into an RGBA16F target; PostProcessPass tonemaps it

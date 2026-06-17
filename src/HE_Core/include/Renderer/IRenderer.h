@@ -1,6 +1,7 @@
 #pragma once
 #include "Types/Defines.h"
 #include "Types/UUID.h"
+#include "DebugDraw/DebugDraw.h"
 #include <glm/glm.hpp>
 #include <functional>
 #include <memory>
@@ -204,6 +205,13 @@ public:
     // pixels and samples them on the moon disk in the procedural night sky.
     // Passing nullptr or a zero size leaves the moon as a plain disk.
     virtual void  SetMoonTexture(const void* /*rgba8Pixels*/, int /*width*/, int /*height*/) {}
+
+    // ── Debug line overlay (editor gizmos / visualisations) ────────────────
+    // Uploaded every frame from the editor's DebugDrawBuffer. The backend
+    // draws them as world-space line segments on top of the opaque scene but
+    // before post-process so they participate in tonemap. Passing an empty
+    // vector is a no-op / clears any previously submitted lines.
+    virtual void SetDebugLines(const std::vector<DebugLine>& /*lines*/) {}
 
 protected:
     OverlayCallback      m_overlayCallback;
