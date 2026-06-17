@@ -1060,3 +1060,38 @@ Befunds direkt im Code. Umgesetzt wurde ein sicheres, verhaltensneutrales High-R
   (identische md5 vor/nach), GL nur durch den zeitanimierten Himmel verschieden (zwei aufeinanderfolgende
   GL-Läufe mit identischem Code unterscheiden sich ebenfalls → Memoization ist nachweislich
   verhaltensneutral; visueller Vergleich zeigt identische Szene). Commit `514ee20`.
+
+### Forts. 14 — SSAO (3.12) auf GL + Metal
+
+> **Aufgabe:** Screen-Space Ambient Occlusion als nächster Rendering-Schritt nach FXAA. ✅ (GL+Metal)
+
+**SSAO (3.12) — view-space Position-Prepass → Hemisphären-Occlusion → Blur, moduliert das Ambient.**
+Der Masterplan-Punkt 3.12 ist umgesetzt; das Ambient-Occlusion läuft als eigene Pass-Kette vor der
+Geometrie, sodass der Szenen-Shader **nur den Image-Based-Ambient-Term** in Mulden/Kontaktzonen
+abdunkelt (Direktlicht bleibt unberührt). Toggle + Radius/Intensität in den Preferences.
+
+- **Architektur (bewusst view-space):** Ein **Position-Prepass** rastert die Szene (gleiche
+  `viewProj`/Draw-Calls wie die GeometryPass) und schreibt die **View-Space-Position** (RGBA16F,
+  a=1 = Geometrie). Das umgeht jede Backend-Differenz in Tiefenpuffer-/Clip-Konvention (Metals
+  Szene nutzt die GL-Projektion ohne ClipFix) → die SSAO-Mathematik ist auf beiden Backends
+  identisch. Eine Fullscreen-`ssao`-Pass rekonstruiert pro Pixel die View-Normale aus den
+  Nachbar-Positionen (nähere Seite je Achse, gegen Silhouetten-Bleeding), baut aus einer gekachelten
+  4×4-Rotation eine TBN und summiert die Verdeckung über einen 32-Sample-Hemisphären-Kernel
+  (Range-Check). Ein 4×4-Box-Blur entfernt das Rotationsmuster. Der Szenen-FS sampelt die AO an
+  `fragCoord.xy/viewport` und multipliziert sie auf `ambDiff*0.35 + ambSpec*… + flatAmbient`.
+- **Parität-Trick:** Kernel + Rotations-Noise werden in **beiden** Backends aus demselben
+  deterministischen LCG (`SsaoRng`, gleiche Seeds) gebaut, Noise als RGBA32F (bit-gleich). Der
+  einzige Backend-Unterschied ist der NDC→UV-y-Flip (GL-FBO bottom-up vs. Metal top-left) — der
+  exakt die top-left-Rasterung kompensiert, sodass die gesampelten View-Positionen übereinstimmen.
+- **Kosten = opt-in:** Aus → Prepass/SSAO/Blur werden komplett übersprungen (null Overhead), und das
+  Bild ist **byte-identisch** zum Vor-SSAO-Stand. GL inline im GeometryPass-Sink (nutzt
+  `cmds.drawCalls()`); Metal als `EncodeSSAO` vor dem HDR-Scene-Pass (eigene Encoder, eigener
+  deterministischer extract/cull/sort wie schon `EncodeShadowMap`). D3D/Vulkan ignorieren die
+  neue `SSAOSettings` → **nächster blinder Windows-Port.**
+- **Plumbing:** `IRenderer::SSAOSettings{enabled,radius,intensity}` + `SetSSAOSettings`; EditorConfig
+  (config.json) + Preferences-Sektion (Checkbox + 2 Slider) + Push in OnRender/Headless-Dump.
+- **Verifiziert (Headless-Dumps, ShadowValidation):** SSAO-aus == Baseline auf **beiden** Backends
+  (meanAbs 0.0000, 0 Pixel > 2). SSAO stark = lokalisierter Kontaktschatten in der Spalte zwischen
+  den mittleren Cubes (bis −28, ~2380 Pixel), saubere Flächen (Blur), keine Halos. **GL == Metal**:
+  on 0.02 % / strong 0.04 % der Pixel verändert — kaum über dem vorbestehenden Sky-Präzisions-Floor
+  (0.01 % schon ohne SSAO). 35 Tests grün.

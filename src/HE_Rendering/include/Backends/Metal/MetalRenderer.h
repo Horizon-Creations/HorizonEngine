@@ -47,6 +47,7 @@ public:
 	bool  CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& width, uint32_t& height) override;
 	void  InvalidateMaterial(const HE::UUID& materialId) override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
+	void  SetSSAOSettings(const SSAOSettings& settings) override;
 
 	// Multi-window support
 	void AttachWindow(HE::Window* window) override;
@@ -199,6 +200,34 @@ private:
 	void  DestroyBloomTargets();
 	// Bright-pass + blur m_hdrColor into m_bloomColor[0]; returns its texture ptr.
 	void* EncodeBloom(void* cmdBuf, int fullW, int fullH);
+
+	// ── SSAO (screen-space ambient occlusion) ───────────────────────────────
+	// Mirrors the GL backend: a view-space position pre-pass feeds a hemisphere-
+	// kernel occlusion estimate, blurred and then sampled by the scene shader to
+	// darken the image-based ambient in crevices. Encoded before the HDR scene
+	// pass (it owns its own render encoders); skipped entirely when disabled.
+	void* m_ssaoPosPipeline  = nullptr; // id<MTLRenderPipelineState> (writes view pos)
+	void* m_ssaoPipeline     = nullptr; // fullscreen occlusion estimate
+	void* m_ssaoBlurPipeline = nullptr; // fullscreen box blur
+	void* m_ssaoPosTex       = nullptr; // id<MTLTexture> RGBA16F view position
+	void* m_ssaoPosDepth     = nullptr; // id<MTLTexture> Depth32Float (nearest surface)
+	void* m_ssaoTex          = nullptr; // id<MTLTexture> R8 raw occlusion
+	void* m_ssaoBlurTex      = nullptr; // id<MTLTexture> R8 blurred (scene-shader read)
+	void* m_ssaoNoiseTex     = nullptr; // id<MTLTexture> RGBA32F 4×4 rotation noise
+	void* m_ssaoPointSampler = nullptr; // nearest + clamp (position lookups)
+	void* m_ssaoNoiseSampler = nullptr; // nearest + repeat (tiled noise)
+	void* m_ssaoResult       = nullptr; // this frame's AO texture, or null when off
+	int   m_ssaoW = 0;
+	int   m_ssaoH = 0;
+	bool  m_ssaoEnabled   = true;
+	float m_ssaoRadius    = 0.5f;
+	float m_ssaoIntensity = 1.0f;
+	void  EnsureSSAOTargets(int width, int height);
+	void  DestroySSAOTargets();
+	// Pre-pass + occlusion + blur for the current scene into m_ssaoBlurTex; sets
+	// m_ssaoResult (or null). Runs its own extract/cull/sort (deterministic, so it
+	// matches EncodeScene's draw set) and its own render encoders on cmdBuf.
+	void  EncodeSSAO(void* cmdBuf, int width, int height);
 
 	// Uploaded asset meshes, keyed by asset UUID
 	std::unordered_map<HE::UUID, GpuMesh> m_meshCache;

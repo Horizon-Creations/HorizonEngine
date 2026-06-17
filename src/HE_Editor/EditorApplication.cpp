@@ -529,6 +529,9 @@ void EditorApplication::OnInit()
 	m_editorConfig.BloomEnabled                = globalstate.getCustomConfigBool("BloomEnabled",        m_editorConfig.BloomEnabled);
 	m_editorConfig.BloomThreshold              = globalstate.getCustomConfigFloat("BloomThreshold",     m_editorConfig.BloomThreshold);
 	m_editorConfig.BloomIntensity              = globalstate.getCustomConfigFloat("BloomIntensity",     m_editorConfig.BloomIntensity);
+	m_editorConfig.SSAOEnabled                 = globalstate.getCustomConfigBool("SSAOEnabled",         m_editorConfig.SSAOEnabled);
+	m_editorConfig.SSAORadius                  = globalstate.getCustomConfigFloat("SSAORadius",         m_editorConfig.SSAORadius);
+	m_editorConfig.SSAOIntensity               = globalstate.getCustomConfigFloat("SSAOIntensity",      m_editorConfig.SSAOIntensity);
 	m_editorConfig.DayNightCycle               = globalstate.getCustomConfigBool("DayNightCycle",       m_editorConfig.DayNightCycle);
 	m_editorConfig.TimeOfDay                   = globalstate.getCustomConfigFloat("TimeOfDay",          m_editorConfig.TimeOfDay);
 	m_editorConfig.DayNightAutoAdvance         = globalstate.getCustomConfigBool("DayNightAutoAdvance", m_editorConfig.DayNightAutoAdvance);
@@ -768,6 +771,10 @@ void EditorApplication::OnRender(float dt)
 			m_editorConfig.BloomEnabled,
 			m_editorConfig.BloomThreshold,
 			m_editorConfig.BloomIntensity});
+		renderer()->SetSSAOSettings(IRenderer::SSAOSettings{
+			m_editorConfig.SSAOEnabled,
+			m_editorConfig.SSAORadius,
+			m_editorConfig.SSAOIntensity});
 		renderer()->SetEnvironmentSettings(IRenderer::EnvironmentSettings{
 			m_editorConfig.DayNightCycle,
 			m_editorConfig.TimeOfDay,
@@ -861,6 +868,8 @@ void EditorApplication::dumpFrameHeadless()
 	r->SetOverlayCallback(nullptr);
 	r->SetBloomSettings(IRenderer::BloomSettings{
 		m_editorConfig.BloomEnabled, m_editorConfig.BloomThreshold, m_editorConfig.BloomIntensity});
+	r->SetSSAOSettings(IRenderer::SSAOSettings{
+		m_editorConfig.SSAOEnabled, m_editorConfig.SSAORadius, m_editorConfig.SSAOIntensity});
 	r->SetEnvironmentSettings(IRenderer::EnvironmentSettings{
 		m_editorConfig.DayNightCycle, m_editorConfig.TimeOfDay,
 		m_editorConfig.SunColor, m_editorConfig.SunIntensity,
@@ -1154,6 +1163,9 @@ void EditorApplication::OnShutdown()
 	globalstate.setCustomConfigEntry("BloomEnabled",               m_editorConfig.BloomEnabled);
 	globalstate.setCustomConfigEntry("BloomThreshold",             m_editorConfig.BloomThreshold);
 	globalstate.setCustomConfigEntry("BloomIntensity",             m_editorConfig.BloomIntensity);
+	globalstate.setCustomConfigEntry("SSAOEnabled",                m_editorConfig.SSAOEnabled);
+	globalstate.setCustomConfigEntry("SSAORadius",                 m_editorConfig.SSAORadius);
+	globalstate.setCustomConfigEntry("SSAOIntensity",              m_editorConfig.SSAOIntensity);
 	globalstate.setCustomConfigEntry("DayNightCycle",              m_editorConfig.DayNightCycle);
 	globalstate.setCustomConfigEntry("TimeOfDay",                  m_editorConfig.TimeOfDay);
 	globalstate.setCustomConfigEntry("DayNightAutoAdvance",        m_editorConfig.DayNightAutoAdvance);

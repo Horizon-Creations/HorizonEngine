@@ -32,6 +32,7 @@ public:
 	bool  CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& width, uint32_t& height) override;
 	void  InvalidateMaterial(const HE::UUID& materialId) override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
+	void  SetSSAOSettings(const SSAOSettings& settings) override;
 
 	// Multi-window support
 	void AttachWindow(HE::Window* window) override;
@@ -112,6 +113,9 @@ private:
 	int          m_uLightVP       = -1;   // directional-light view-proj (shadow)
 	int          m_uShadowMap     = -1;   // shadow map sampler unit
 	int          m_uShadowEnabled = -1;
+	int          m_uAO            = -1;   // SSAO occlusion sampler unit
+	int          m_uViewport      = -1;   // viewport size (screen-space AO lookup)
+	int          m_uSSAOEnabled   = -1;   // 1 = modulate ambient by SSAO
 	unsigned int m_cubeVAO        = 0;
 	unsigned int m_cubeVBO        = 0;
 	unsigned int m_cubeEBO        = 0;
@@ -216,6 +220,48 @@ private:
 	void DestroyBloomTargets();
 	// Runs bright-pass + blur into m_bloomColor[0]; returns its texture id (or 0).
 	unsigned int RenderBloom(int fullW, int fullH);
+
+	// ── SSAO (screen-space ambient occlusion) ───────────────────────────────
+	// A view-space position pre-pass (camera POV) feeds a hemisphere-kernel
+	// occlusion estimate, blurred and then sampled by the scene shader to darken
+	// the image-based ambient in crevices. Runs before the geometry pass; skipped
+	// entirely (zero cost) when disabled. Always full-resolution.
+	unsigned int m_ssaoPosProgram = 0;   // pre-pass: writes view-space position
+	int          m_uPosMVP        = -1;   // clip = viewProj * model
+	int          m_uPosModelView  = -1;   // view * model (view-space position out)
+	unsigned int m_ssaoProgram    = 0;   // fullscreen occlusion estimate
+	int          m_uSsaoViewPos   = -1;
+	int          m_uSsaoNoise     = -1;
+	int          m_uSsaoProj      = -1;
+	int          m_uSsaoNoiseScale = -1;
+	int          m_uSsaoRadius    = -1;
+	int          m_uSsaoBias      = -1;
+	int          m_uSsaoIntensity = -1;
+	int          m_uSsaoKernel    = -1;
+	unsigned int m_ssaoBlurProgram = 0;  // fullscreen 4×4 box blur
+	int          m_uBlurAO        = -1;
+	unsigned int m_ssaoPosFBO     = 0;   // view-space position target + depth
+	unsigned int m_ssaoPosTex     = 0;   // RGBA16F: xyz view pos, a = valid
+	unsigned int m_ssaoPosDepth   = 0;   // depth renderbuffer (nearest surface)
+	unsigned int m_ssaoFBO        = 0;   // raw occlusion target
+	unsigned int m_ssaoTex        = 0;   // R8
+	unsigned int m_ssaoBlurFBO    = 0;   // blurred occlusion target
+	unsigned int m_ssaoBlurTex    = 0;   // R8 (sampled by the scene shader)
+	unsigned int m_ssaoNoiseTex   = 0;   // 4×4 random rotation vectors
+	unsigned int m_whiteTex       = 0;   // 1×1 white (bound as AO when disabled)
+	int          m_ssaoW          = 0;
+	int          m_ssaoH          = 0;
+	bool         m_ssaoEnabled    = true;
+	float        m_ssaoRadius     = 0.5f;
+	float        m_ssaoIntensity  = 1.0f;
+	void CreateSSAOPipeline();           // programs + kernel + noise texture
+	void EnsureSSAOTargets(int width, int height);
+	void DestroySSAOTargets();
+	// Pre-pass + occlusion + blur using the geometry draw calls; returns the
+	// blurred AO texture id (or 0 if unavailable). Restores GL_TEXTURE0 active.
+	unsigned int RenderSSAO(const CommandBuffer& cmds, int pw, int ph,
+	                        const glm::mat4& viewProj, const glm::mat4& view,
+	                        const glm::mat4& proj);
 
 	// ── Offscreen viewport (editor scene view) ──────────────────────────────
 	uint32_t     m_viewportReqW  = 0;   // requested by the UI, 0 = direct to window
