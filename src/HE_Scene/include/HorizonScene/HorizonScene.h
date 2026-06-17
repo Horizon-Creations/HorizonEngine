@@ -15,6 +15,7 @@
 #include "Components/RigidBodyComponent.h"
 #include "Components/ScriptComponent.h"
 #include "Components/EnvironmentComponent.h"
+#include "Components/EnvironmentLightComponent.h"
 
 // Re-export EnTT entity type
 #include <entt/entt.hpp>

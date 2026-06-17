@@ -7,6 +7,7 @@
 #include <HorizonScene/Components/MaterialComponent.h>
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/LightComponent.h>
+#include <HorizonScene/Components/EnvironmentLightComponent.h>
 #include <glm/gtc/quaternion.hpp>
 #include <glm/common.hpp>
 #include <algorithm>
@@ -136,19 +137,29 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 		l.range        = light.range;
 		l.spotAngleCos = std::cos(glm::radians(light.spotAngle * 0.5f));
 		l.type         = static_cast<uint8_t>(light.type);
+		if (const auto* env = reg.try_get<EnvironmentLightComponent>(e))
+			l.envRole = (env->role == EnvironmentLightComponent::Role::Sun) ? 1 : 2;
 		out.lights.push_back(l);
 	}
 
-	// ── Sun direction (toward the sun) + optional day-night override ──────────
-	// The sun is the first directional light. When the day-night cycle is on, the
-	// time of day drives the sun's arc (and dims it at night) instead of the
-	// authored light direction — render-time only, the ECS is untouched.
-	LightData* sunLight = nullptr;
+	// ── Environment sun + moon (day-night) ────────────────────────────────────
+	// The sun and moon are the two built-in directional lights tagged by the
+	// EnvironmentComponent (envRole 1/2). The environment drives their colour,
+	// intensity and (day-night) arc direction — render-time only, the authored ECS
+	// transforms are untouched. A legacy fallback uses the first directional light
+	// as the sun (and synthesises the moon) for worlds without the built-ins.
+	LightData* sunLight  = nullptr;
+	LightData* moonLight = nullptr;
 	for (LightData& l : out.lights)
-		if (l.type == 0) { sunLight = &l; break; } // 0 = directional
+	{
+		if      (l.envRole == 1) sunLight  = &l;
+		else if (l.envRole == 2) moonLight = &l;
+	}
+	if (!sunLight)
+		for (LightData& l : out.lights)
+			if (l.type == 0) { sunLight = &l; break; } // legacy: first directional
 
 	glm::vec3 sunToward(0.45f, 0.80f, 0.55f); // default high sun
-
 	// Weak ambient floor — always added so the scene is never fully black. Under
 	// heavy cloud cover it grows to replace the (switched-off) sun/moon light.
 	glm::vec3 ambient(0.03f, 0.035f, 0.05f);
@@ -158,54 +169,60 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 		// 0.25 sunrise (+X horizon) → 0.5 noon (up) → 0.75 sunset (-X) → 0/1 night.
 		const float a = (m_timeOfDay - 0.25f) * 6.28318530718f;
 		sunToward = glm::normalize(glm::vec3(std::cos(a), std::sin(a), 0.45f));
+		// The moon rides the opposite arc (same hemisphere z). The sun lights the
+		// scene by day, the moon by night; each fades out as its own luminary dips
+		// below the horizon, both keeping their own colour (no blend to one hue).
+		const glm::vec3 moonToward =
+			glm::normalize(glm::vec3(-sunToward.x, -sunToward.y, sunToward.z));
+		const float sunUp  = std::clamp((sunToward.y  + 0.10f) / 0.25f, 0.0f, 1.0f);
+		const float moonUp = std::clamp((moonToward.y + 0.10f) / 0.25f, 0.0f, 1.0f);
+
+		// Cloud-cover optimisation: above a coverage threshold the direct sun/moon
+		// light fades to zero (skipping its contribution + shadow lookup) and its
+		// energy feeds a soft scattered ambient fill, tinted by whichever is up.
+		const float cov      = std::clamp(m_cloudCoverage, 0.0f, 1.0f);
+		const float overcast = glm::smoothstep(0.5f, 1.0f, cov);
+		const float direct   = 1.0f - overcast;
+		ambient += (m_sunColor  * (m_sunIntensity  * sunUp)
+		          + m_moonColor * (m_moonIntensity * moonUp)) * (overcast * 0.22f);
+
 		if (sunLight)
 		{
-			// Two independent directional lights — the warm sun and a cool moon
-			// on the opposite arc. Each one is faded out as its own luminary dips
-			// below the horizon, so the sun lights the scene by day and the moon
-			// by night and both keep their own colour (no blend to a single hue).
-			const glm::vec3 moonToward =
-				glm::normalize(glm::vec3(-sunToward.x, -sunToward.y, sunToward.z));
-			const float sunUp  = std::clamp((sunToward.y  + 0.10f) / 0.25f, 0.0f, 1.0f);
-			const float moonUp = std::clamp((moonToward.y + 0.10f) / 0.25f, 0.0f, 1.0f);
-
-			// Cloud-cover optimisation: as the sky fills with cloud the direct
-			// sun/moon light is diffused away, so above a coverage threshold we
-			// fade the directional light to zero (skipping its contribution and
-			// shadow lookup at full overcast) and instead feed its energy into a
-			// soft, scattered ambient fill — the "never fully black" floor plus an
-			// overcast term tinted by whichever luminary is up.
-			const float cov      = std::clamp(m_cloudCoverage, 0.0f, 1.0f);
-			const float overcast = glm::smoothstep(0.5f, 1.0f, cov);
-			const float direct   = 1.0f - overcast;
-
-			const glm::vec3 sunFill  = m_sunColor  * (m_sunIntensity  * sunUp);
-			const glm::vec3 moonFill = m_moonColor * (m_moonIntensity * moonUp);
-			ambient += (sunFill + moonFill) * (overcast * 0.22f);
-
-			// Sun: configurable colour/intensity, off once it has set or the sky
-			// is fully overcast.
 			sunLight->color     = m_sunColor;
 			sunLight->direction = -sunToward; // light travels away from the sun
 			sunLight->intensity = m_sunIntensity * sunUp * direct;
-
-			// Moon: a second, configurable directional light, off while it is down
-			// or under full overcast. (push_back may reallocate out.lights, so
-			// sunLight must not be used after this point.)
+		}
+		if (moonLight)
+		{
+			moonLight->color     = m_moonColor;
+			moonLight->direction = -moonToward;
+			moonLight->intensity = m_moonIntensity * moonUp * direct;
+		}
+		else
+		{
+			// Legacy fallback: no built-in moon → synthesise one. (push_back may
+			// reallocate out.lights, so the light pointers above are now stale.)
 			LightData moon{};
 			moon.type         = 0; // directional
-			moon.direction    = -moonToward; // light travels away from the moon
+			moon.direction    = -moonToward;
 			moon.color        = m_moonColor;
 			moon.intensity    = m_moonIntensity * moonUp * direct;
-			moon.range        = 0.0f;
 			moon.spotAngleCos = 1.0f;
 			out.lights.push_back(moon);
-			sunLight = nullptr;
 		}
 	}
-	else if (sunLight)
+	else
 	{
-		sunToward = -glm::normalize(sunLight->direction);
+		// Day-night cycle off: the sun shines from a fixed default direction with
+		// the environment's sun colour/intensity; the moon is off.
+		if (sunLight)
+		{
+			sunLight->color     = m_sunColor;
+			sunLight->direction = -sunToward;
+			sunLight->intensity = m_sunIntensity;
+		}
+		if (moonLight)
+			moonLight->intensity = 0.0f;
 	}
 	out.sunDirection = glm::normalize(sunToward);
 	out.ambient      = ambient;
