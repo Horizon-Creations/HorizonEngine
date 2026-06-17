@@ -89,7 +89,7 @@ private:
 	RenderSorter    m_sorter;
 	RenderGraph     m_renderGraph;   // pass pipeline (GeometryPass today)
 	CommandBuffer   m_cmds;          // draw calls produced this frame
-	std::vector<bool>     m_visible;       // per-frame culling results
+	std::vector<uint8_t>  m_visible;       // per-frame culling results
 	std::vector<uint32_t> m_sortedIndices; // per-frame draw order
 
 	// Unlit pipeline + built-in cube (fallback for entities whose mesh

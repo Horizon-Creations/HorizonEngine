@@ -1,4 +1,5 @@
 #include "HorizonRendering/FrustumCuller.h"
+#include <JobSystem/JobSystem.h>
 
 Frustum Frustum::fromViewProj(const glm::mat4& vp)
 {
@@ -42,21 +43,21 @@ bool Frustum::intersects(const HE::AABB& box) const
 	return true;
 }
 
-void FrustumCuller::cull(const RenderWorld& world, std::vector<bool>& outVisible)
+void FrustumCuller::cull(const RenderWorld& world, std::vector<uint8_t>& outVisible)
 {
 	cull(world, world.camera.projection * world.camera.view, outVisible);
 }
 
 void FrustumCuller::cull(const RenderWorld& world, const glm::mat4& viewProj,
-                         std::vector<bool>& outVisible)
+                         std::vector<uint8_t>& outVisible)
 {
 	const Frustum frustum = Frustum::fromViewProj(viewProj);
+	const size_t  count   = world.objects.size();
 
-	outVisible.assign(world.objects.size(), true);
-	for (size_t i = 0; i < world.objects.size(); ++i)
-	{
+	outVisible.assign(count, 1u);
+	parallel_for(count, [&](size_t i) {
 		const HE::AABB& bounds = world.objects[i].worldBounds;
 		if (bounds.isValid())
-			outVisible[i] = frustum.intersects(bounds);
-	}
+			outVisible[i] = frustum.intersects(bounds) ? 1u : 0u;
+	});
 }
