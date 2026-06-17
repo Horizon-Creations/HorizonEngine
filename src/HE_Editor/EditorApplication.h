@@ -7,8 +7,10 @@
 #include "EditorUndo.h"
 #include "EditorCamera.h"
 #include <HorizonScene/HorizonScene.h>
+#include <Scripting/ScriptEngine.h>
 #include <functional>
 #include <future>
+#include <memory>
 
 #ifdef HE_IMGUI_ENABLED
 #include <imgui.h>
@@ -102,6 +104,7 @@ struct AppContext
 	HE::Window*        window       = nullptr;
 	HorizonWorld*      world        = nullptr;
 	ContentManager*    contentManager = nullptr;
+	ScriptEngine*      propScriptEngine = nullptr; // read-only, for inspector property reading
 
 	// Editor scene-view camera (orbit/fly/focus). Owned by EditorApplication;
 	// the UI drives it from viewport input and pushes it to the renderer.
@@ -215,6 +218,7 @@ class EditorApplication : public HE::Application
 public:
 	explicit EditorApplication(std::string startupPath)
 		: HE::Application(std::move(startupPath)) {}
+	~EditorApplication() override; // defined in .cpp where ScriptEngine is complete
 
 protected:
 	HE::ApplicationConfig GetConfig()          const override;
@@ -237,6 +241,10 @@ private:
 
 	// Scene world — created once, alive for the entire editor session
 	std::unique_ptr<HorizonWorld> m_editorWorld;
+
+	// Lightweight ScriptEngine used only for reading M.properties in the inspector.
+	// Never creates instances; only loadScript + getScriptProperties.
+	std::unique_ptr<ScriptEngine> m_propScriptEngine;
 
 	// Outliner/inspector selection
 	Entity m_selectedEntity = entt::null;

@@ -1,7 +1,9 @@
 #pragma once
 #include <Scripting/ScriptEngine.h>
+#include <Scripting/ScriptTypes.h>
 #include <entt/entt.hpp>
 #include <string>
+#include <unordered_map>
 
 class HorizonWorld;
 
@@ -49,6 +51,10 @@ public:
     // Hot-reload: recompile script and patch function fields in live instances.
     // Data fields (non-function keys in instance tables) are preserved.
     bool hotReloadScript(const std::string& name, const std::string& source);
+
+    // Inject stored property overrides into a live instance before onStart.
+    void injectProperties(ScriptEngine::InstanceId id,
+                          const std::unordered_map<std::string, ScriptPropValue>& props);
 
     bool   isScriptLoaded(const std::string& name) const;
     size_t loadedScriptCount() const;

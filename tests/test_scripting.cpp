@@ -325,3 +325,100 @@ TEST_CASE("ScriptEngine: hotReloadScript works with multiple instances")
     CHECK(engine.callOnUpdate(id3, 0.0f));
     CHECK(engine.lastError().empty());
 }
+
+// ─── getScriptProperties ─────────────────────────────────────────────────────
+
+static const char* kPropsScript = R"lua(
+local M = {}
+M.properties = {
+    speed   = 5.0,
+    lives   = 3,
+    visible = true,
+    tag     = "hero",
+}
+function M.onUpdate(self, dt) end
+return M
+)lua";
+
+TEST_CASE("ScriptEngine: getScriptProperties on unknown script returns empty")
+{
+    ScriptEngine engine;
+    CHECK(engine.getScriptProperties("none").empty());
+}
+
+TEST_CASE("ScriptEngine: getScriptProperties on script with no properties returns empty")
+{
+    ScriptEngine engine;
+    engine.loadScript("bare", kCounterScript);
+    CHECK(engine.getScriptProperties("bare").empty());
+}
+
+TEST_CASE("ScriptEngine: getScriptProperties reads float/int/bool/string defaults")
+{
+    ScriptEngine engine;
+    engine.loadScript("p", kPropsScript);
+    auto defs = engine.getScriptProperties("p");
+    CHECK(defs.size() == 4);
+
+    std::unordered_map<std::string, const ScriptPropDef*> byName;
+    for (const auto& d : defs) byName[d.name] = &d;
+
+    REQUIRE(byName.count("speed"));
+    CHECK(byName["speed"]->defaultVal.type == ScriptPropType::Float);
+    CHECK(byName["speed"]->defaultVal.f == doctest::Approx(5.0f));
+
+    REQUIRE(byName.count("lives"));
+    CHECK(byName["lives"]->defaultVal.type == ScriptPropType::Int);
+    CHECK(byName["lives"]->defaultVal.i == 3);
+
+    REQUIRE(byName.count("visible"));
+    CHECK(byName["visible"]->defaultVal.type == ScriptPropType::Bool);
+    CHECK(byName["visible"]->defaultVal.b == true);
+
+    REQUIRE(byName.count("tag"));
+    CHECK(byName["tag"]->defaultVal.type == ScriptPropType::String);
+    CHECK(byName["tag"]->defaultVal.s == "hero");
+}
+
+// ─── injectProperties ────────────────────────────────────────────────────────
+
+static const char* kInjectScript = R"lua(
+local M = {}
+M.properties = { hp = 100, name = "enemy" }
+function M.onUpdate(self, dt)
+    _G._hp   = self.hp
+    _G._name = self.name
+end
+return M
+)lua";
+
+TEST_CASE("ScriptEngine: injectProperties sets instance fields before onStart")
+{
+    ScriptEngine engine;
+    engine.loadScript("inj", kInjectScript);
+    auto id = engine.createInstance("inj");
+
+    std::unordered_map<std::string, ScriptPropValue> props;
+    ScriptPropValue hp;  hp.type  = ScriptPropType::Int; hp.i = 250;
+    ScriptPropValue nm;  nm.type  = ScriptPropType::String; nm.s = "boss";
+    props["hp"]   = hp;
+    props["name"] = nm;
+
+    engine.injectProperties(id, props);
+    CHECK(engine.callOnStart(id));
+    CHECK(engine.callOnUpdate(id, 0.0f));
+
+    CHECK(engine.getGlobalNumber("_hp")   == doctest::Approx(250.0));
+    CHECK(engine.getGlobalString("_name") == "boss");
+}
+
+TEST_CASE("ScriptEngine: injectProperties on invalid instance is a no-op")
+{
+    ScriptEngine engine;
+    std::unordered_map<std::string, ScriptPropValue> props;
+    ScriptPropValue v; v.type = ScriptPropType::Float; v.f = 1.0f;
+    props["x"] = v;
+    // Should not crash
+    engine.injectProperties(ScriptEngine::kInvalidInstance, props);
+    CHECK(engine.lastError().empty());
+}
