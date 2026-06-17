@@ -210,7 +210,7 @@ profitieren von P2.8 (Play-Mode zum Testen).
 ### 4c — Audio
 | # | Aufgabe | Hängt ab von | Details |
 |---|---|---|---|
-| 4c.1 | **miniaudio** + AudioSource/AudioListener-Komponenten | 1.7, 2.2 | ✅ Forts. 29 — AudioSourceComponent + AudioListenerComponent + SceneSerializer + Editor-Inspector (miniaudio-Playback noch offen) |
+| 4c.1 | **miniaudio** + AudioSource/AudioListener-Komponenten | 1.7, 2.2 | ✅ Forts. 29, 36 — AudioSourceComponent + AudioListenerComponent + SceneSerializer + Editor-Inspector + AudioEngine (miniaudio noDevice, int16 PCM, handle-based) + AudioSystem::playOnStart + ContentManager::registerAudio |
 | 4c.2 | 3D-Spatialization, Attenuation | 4c.1 | |
 | 4c.3 | Mixer/Bus-System (Music/SFX-Gruppen, Lautstärke) | 4c.1 | |
 
@@ -1638,3 +1638,14 @@ Lifetime-sicher mit der bestehenden `SlotMap`/`m_handleToUUID`-Buchführung inte
 - **Sicherheit:** Alle Lua-C-Funktionen prüfen `reg.valid(e)` vor Zugriff; ungültige IDs sind sicher (kein Crash, Default-Rückgabe).
 - **Entity-ID-Encoding:** `uint32_t`-Cast konsistent: C→Lua via `static_cast<lua_Integer>(static_cast<uint32_t>(e))`; Lua→C via `toEntity(id) = static_cast<entt::entity>(static_cast<uint32_t>(id))`.
 - **Tests (`tests/test_scripting_binding.cpp`):** 13 neue Cases (construction, loadScript, createInstance+entityId, getPosition, setPosition, onUpdate+dt, rotation round-trip, scale round-trip, spawn, destroy, getName, invalid-entity-safety). **196 Tests grün** (184→196).
+
+### Forts. 36 — miniaudio-Playback / AudioEngine (4c.1 Abschluss)
+
+> **Aufgabe:** Vendoring von miniaudio.h + AudioEngine-Wrapper + AudioSystem::playOnStart. Schließt die verbleibende Lücke aus Forts. 29. ✅
+
+- **`miniaudio.h`** (v0.11.25, public domain) in `src/HE_Scene/vendor/` gevendert.
+- **`AudioEngine`** (`HorizonScene/AudioEngine.h/.cpp`): PIMPL-Wrapper um `ma_engine`. Unterstützt `init(noDevice=false/true)` — `noDevice=true` öffnet kein Gerät (headless/Tests). Sounds werden aus `AudioAsset::audioData` (int16 PCM, decoded via dr_wav beim Import) über `ma_audio_buffer` + `ma_sound` abgespielt. Rückgabe eines opaken uint64_t-Handles; `stop(handle)` / `stopAll()` / `isPlaying(handle)`.
+- **`AudioSystem::playOnStart(world, engine, content*)`** (`HorizonScene/AudioSystem.h`): Iteriert alle `AudioSourceComponent`-Entities, spielt diejenigen mit `playOnStart=true` ab (Asset-Lookup via ContentManager). Null-safe für fehlenden ContentManager.
+- **`ContentManager::registerAudio(AudioAsset)`** (HorizonCore): Analog zu `registerStaticMesh/Texture/Material/Prefab`; ermöglicht In-Memory-Audio-Assets (z.B. in Tests).
+- **macOS-Frameworks:** `CoreFoundation`, `CoreAudio`, `AudioToolbox` in HorizonScene CMakeLists under `if(APPLE)`.
+- **Tests (erweitert `tests/test_audio.cpp`):** 9 neue Cases (init/shutdown, double-init, play silence, play empty, stop-handle, stopAll, volume+pitch, AudioSystem::playOnStart-skip, AudioSystem::playOnStart-mit-Asset). **205 Tests grün** (196→205).

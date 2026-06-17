@@ -6,6 +6,7 @@ add_library(HorizonScene SHARED
     src/TerrainMeshGenerator.cpp
     src/TerrainSystem.cpp
     src/ScriptContext.cpp
+    src/AudioEngine.cpp
 )
 
 target_include_directories(HorizonScene
@@ -26,6 +27,14 @@ target_link_libraries(HorizonScene
     PUBLIC  HorizonCore
     PRIVATE nlohmann_json::nlohmann_json
 )
+
+if(APPLE)
+    target_link_libraries(HorizonScene PRIVATE
+        "-framework CoreFoundation"
+        "-framework CoreAudio"
+        "-framework AudioToolbox"
+    )
+endif()
 
 set_target_properties(HorizonScene PROPERTIES
     WINDOWS_EXPORT_ALL_SYMBOLS ON

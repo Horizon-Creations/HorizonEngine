@@ -357,6 +357,7 @@ HE::UUID ContentManager::registerStaticMesh(StaticMeshAsset asset) { return regi
 HE::UUID ContentManager::registerTexture(TextureAsset asset)       { return registerRuntimeAsset(m_textureAssets,    std::move(asset), HE::AssetType::Texture);    }
 HE::UUID ContentManager::registerMaterial(MaterialAsset asset)     { return registerRuntimeAsset(m_materialAssets,   std::move(asset), HE::AssetType::Material);   }
 HE::UUID ContentManager::registerPrefab(PrefabAsset asset)         { return registerRuntimeAsset(m_prefabAssets,     std::move(asset), HE::AssetType::Prefab);     }
+HE::UUID ContentManager::registerAudio(AudioAsset asset)           { return registerRuntimeAsset(m_audioAssets,      std::move(asset), HE::AssetType::Audio);      }
 
 bool ContentManager::replaceStaticMesh(HE::UUID id, StaticMeshAsset asset) { return replaceRuntimeAsset(m_staticMeshAssets, id, std::move(asset)); }
 bool ContentManager::replaceTexture(HE::UUID id, TextureAsset asset)       { return replaceRuntimeAsset(m_textureAssets,    id, std::move(asset)); }

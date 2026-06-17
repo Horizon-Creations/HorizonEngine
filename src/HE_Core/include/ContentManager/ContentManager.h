@@ -55,6 +55,7 @@ public:
 	HE::UUID registerTexture(TextureAsset asset);
 	HE::UUID registerMaterial(MaterialAsset asset);
 	HE::UUID registerPrefab(PrefabAsset asset);
+	HE::UUID registerAudio(AudioAsset asset);
 
 	// Replace a registered asset's payload in place, keeping its UUID so existing
 	// references stay valid (e.g. regenerating a procedural terrain mesh after a
