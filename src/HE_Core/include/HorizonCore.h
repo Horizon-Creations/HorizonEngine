@@ -3,6 +3,7 @@
 #include "Application/Application.h"
 #include "Application/Input.h"
 #include "Application/InputMapping.h"
+#include "Events/EventBus.h"
 
 #include "Types/Defines.h"
 #include "Types/UUID.h"
