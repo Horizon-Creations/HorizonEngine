@@ -1839,14 +1839,43 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 						if (const auto* xf = terrainReg.try_get<TransformComponent>(terrainEnt))
 							terrainWorldY = xf->position.y;
 
-						// Unproject current mouse position to terrain XZ plane
+						// ── Terrain height sampler (bilinear, local space) ────────
+						// Returns the sculpted height at world XZ; 0 if no sculpt data.
+						const uint32_t tcRes   = std::clamp(tc.resolution, 2u, 1024u);
+						const float    tcHalfX = tc.sizeX * 0.5f;
+						const float    tcHalfZ = tc.sizeZ * 0.5f;
+						const float    tcStepX = tc.sizeX / static_cast<float>(tcRes - 1);
+						const float    tcStepZ = tc.sizeZ / static_cast<float>(tcRes - 1);
+
+						auto sampleH = [&](float wx, float wz) -> float
+						{
+							if (tc.sculptHeights.empty()) return 0.0f;
+							const float gx = std::clamp((wx + tcHalfX) / tcStepX,
+							                            0.0f, static_cast<float>(tcRes - 1));
+							const float gz = std::clamp((wz + tcHalfZ) / tcStepZ,
+							                            0.0f, static_cast<float>(tcRes - 1));
+							const int xi0 = static_cast<int>(gx);
+							const int zi0 = static_cast<int>(gz);
+							const int xi1 = std::min(xi0 + 1, static_cast<int>(tcRes) - 1);
+							const int zi1 = std::min(zi0 + 1, static_cast<int>(tcRes) - 1);
+							const float fx = gx - static_cast<float>(xi0);
+							const float fz = gz - static_cast<float>(zi0);
+							const float h00 = tc.sculptHeights[zi0 * tcRes + xi0];
+							const float h10 = tc.sculptHeights[zi0 * tcRes + xi1];
+							const float h01 = tc.sculptHeights[zi1 * tcRes + xi0];
+							const float h11 = tc.sculptHeights[zi1 * tcRes + xi1];
+							return h00*(1-fx)*(1-fz) + h10*fx*(1-fz)
+							     + h01*(1-fx)*fz     + h11*fx*fz;
+						};
+
+						// ── Unproject mouse → refined terrain surface hit ─────────
 						const ImVec2 mouse = ImGui::GetMousePos();
 						const bool mouseInViewport =
 							mouse.x >= rectMin.x && mouse.x <= rectMax.x &&
 							mouse.y >= rectMin.y && mouse.y <= rectMax.y;
 
-						bool       hasHit = false;
-						glm::vec3  hitWS{};
+						bool      hasHit = false;
+						glm::vec3 hitWS{};
 
 						const glm::mat4 VP    = s_sceneSnapshot.camera.projection
 						                      * s_sceneSnapshot.camera.view;
@@ -1856,8 +1885,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 						{
 							const float u = (mouse.x - rectMin.x) / (rectMax.x - rectMin.x);
 							const float v = (mouse.y - rectMin.y) / (rectMax.y - rectMin.y);
-							const glm::vec4 ndcNear(2.0f*u - 1.0f, 1.0f - 2.0f*v, -1.0f, 1.0f);
-							const glm::vec4 ndcFar (ndcNear.x, ndcNear.y, 1.0f, 1.0f);
+							const glm::vec4 ndcNear(2.0f*u-1.0f, 1.0f-2.0f*v, -1.0f, 1.0f);
+							const glm::vec4 ndcFar (ndcNear.x, ndcNear.y,       1.0f, 1.0f);
 							glm::vec4 pNear = invVP * ndcNear; pNear /= pNear.w;
 							glm::vec4 pFar  = invVP * ndcFar;  pFar  /= pFar.w;
 							const glm::vec3 rayOrigin(pNear);
@@ -1865,44 +1894,55 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 							const float denom = rayDir.y;
 							if (std::abs(denom) > 1e-5f)
 							{
-								const float tHit = (terrainWorldY - rayOrigin.y) / denom;
-								if (tHit > 0.0f)
+								// Step 1: intersect with the flat base plane (Y = terrainWorldY)
+								const float t0 = (terrainWorldY - rayOrigin.y) / denom;
+								if (t0 > 0.0f)
 								{
-									hitWS  = rayOrigin + tHit * rayDir;
-									hasHit = true;
+									const glm::vec3 hit0 = rayOrigin + t0 * rayDir;
+									// Step 2: one Newton refinement — intersect with
+									// Y = terrainWorldY + h(hit0.xz).  For gradually
+									// sloped terrain this converges in one step.
+									const float h0 = sampleH(hit0.x, hit0.z);
+									const float t1 = ((terrainWorldY + h0) - rayOrigin.y) / denom;
+									if (t1 > 0.0f)
+									{
+										hitWS  = rayOrigin + t1 * rayDir;
+										hasHit = true;
+									}
 								}
 							}
 						}
 
-						// ── Draw brush circles on the terrain surface ────────────
+						// ── Draw brush circles on the terrain surface ─────────────
 						if (hasHit && !navigating)
 						{
 							ImDrawList* dl    = ImGui::GetWindowDrawList();
 							const float viewW = rectMax.x - rectMin.x;
 							const float viewH = rectMax.y - rectMin.y;
 
-							// Project a world-space XZ point on the terrain plane → screen
+							// Project a world XZ point at its actual terrain height → screen
 							auto projectPt = [&](float wx, float wz, ImVec2& outPt) -> bool
 							{
-								glm::vec4 clip = VP * glm::vec4(wx, terrainWorldY, wz, 1.0f);
+								const float wy = terrainWorldY + sampleH(wx, wz);
+								glm::vec4 clip = VP * glm::vec4(wx, wy, wz, 1.0f);
 								if (clip.w <= 0.0f) return false;
 								clip /= clip.w;
 								if (clip.z < -1.0f || clip.z > 1.0f) return false;
 								outPt = ImVec2(
 									rectMin.x + (clip.x * 0.5f + 0.5f) * viewW,
-									rectMin.y + (0.5f  - clip.y * 0.5f) * viewH);
+									rectMin.y + (0.5f   - clip.y * 0.5f) * viewH);
 								return true;
 							};
 
-							constexpr int kSeg = 48;
+							constexpr int   kSeg = 48;
 							constexpr float kPi2 = 6.28318530f;
-							const float totalR = s_brushRadius + s_falloffRadius;
+							const float totalR   = s_brushRadius + s_falloffRadius;
 
 							for (int ci = 0; ci < 2; ++ci)
 							{
-								const float r    = (ci == 0) ? s_brushRadius : totalR;
-								const ImU32 col  = (ci == 0) ? IM_COL32(255,255,255,210)
-								                             : IM_COL32(180,180,180,120);
+								const float r     = (ci == 0) ? s_brushRadius : totalR;
+								const ImU32 col   = (ci == 0) ? IM_COL32(255,255,255,210)
+								                              : IM_COL32(180,180,180,120);
 								const float thick = (ci == 0) ? 1.5f : 1.0f;
 								if (r < 0.01f) continue;
 
@@ -1920,7 +1960,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 							}
 						}
 
-						// ── Apply brush on LMB drag ──────────────────────────────
+						// ── Apply brush on LMB drag ───────────────────────────────
 						const bool lmbDown =
 							ImGui::IsMouseDown(ImGuiMouseButton_Left) && !io.KeyAlt
 							&& (viewportHovered || s_brushWasDown);
@@ -1928,11 +1968,10 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 						if (lmbDown && !s_brushWasDown)
 						{
 							if (ctx.undoSys) ctx.undoSys->snapshotNow();
-							// Lazy-init sculptHeights from current terrain heights
+							// Lazy-init sculptHeights from current terrain geometry
 							if (tc.sculptHeights.empty())
 							{
-								const uint32_t res    = std::clamp(tc.resolution, 2u, 1024u);
-								const size_t   nVerts = static_cast<size_t>(res) * res;
+								const size_t nVerts = static_cast<size_t>(tcRes) * tcRes;
 								const StaticMeshAsset tmp = generateTerrainMesh(tc);
 								tc.sculptHeights.resize(nVerts);
 								for (size_t vi = 0; vi < nVerts; ++vi)
@@ -1943,14 +1982,9 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 
 						if (lmbDown && hasHit && !tc.sculptHeights.empty())
 						{
-							const uint32_t res   = std::clamp(tc.resolution, 2u, 1024u);
-							const float halfX    = tc.sizeX * 0.5f;
-							const float halfZ    = tc.sizeZ * 0.5f;
-							const float stepX    = tc.sizeX / static_cast<float>(res - 1);
-							const float stepZ    = tc.sizeZ / static_cast<float>(res - 1);
-							const float totalR   = s_brushRadius + s_falloffRadius;
-							const float totalR2  = totalR * totalR;
-							const float delta    = s_brushStrength * static_cast<float>(dt);
+							const float totalR  = s_brushRadius + s_falloffRadius;
+							const float totalR2 = totalR * totalR;
+							const float delta   = s_brushStrength * static_cast<float>(dt);
 							bool anyChange = false;
 
 							auto brushWeight = [&](float dist2) -> float
@@ -1965,12 +1999,12 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 							if (s_terrainTool == TerrainTool::Smooth)
 							{
 								std::vector<float> smoothed = tc.sculptHeights;
-								for (uint32_t zi = 0; zi < res; ++zi)
+								for (uint32_t zi = 0; zi < tcRes; ++zi)
 								{
-									for (uint32_t xi = 0; xi < res; ++xi)
+									for (uint32_t xi = 0; xi < tcRes; ++xi)
 									{
-										const float wx = -halfX + static_cast<float>(xi) * stepX;
-										const float wz = -halfZ + static_cast<float>(zi) * stepZ;
+										const float wx = -tcHalfX + static_cast<float>(xi) * tcStepX;
+										const float wz = -tcHalfZ + static_cast<float>(zi) * tcStepZ;
 										const float d2 = (hitWS.x-wx)*(hitWS.x-wx)
 										               + (hitWS.z-wz)*(hitWS.z-wz);
 										const float w  = brushWeight(d2);
@@ -1981,13 +2015,17 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 											{
 												const int ni = static_cast<int>(zi) + dzi;
 												const int nj = static_cast<int>(xi) + dxi;
-												if (ni >= 0 && ni < static_cast<int>(res) &&
-												    nj >= 0 && nj < static_cast<int>(res))
-												{ sum += tc.sculptHeights[ni*res+nj]; ++cnt; }
+												if (ni >= 0 && ni < static_cast<int>(tcRes) &&
+												    nj >= 0 && nj < static_cast<int>(tcRes))
+												{ sum += tc.sculptHeights[ni*tcRes+nj]; ++cnt; }
 											}
-										const float avg = cnt > 0 ? sum/cnt : tc.sculptHeights[zi*res+xi];
-										smoothed[zi*res+xi] = tc.sculptHeights[zi*res+xi]
-										    + w * (avg - tc.sculptHeights[zi*res+xi]) * std::min(delta, 1.0f);
+										const float avg = cnt > 0 ? sum/cnt
+										                          : tc.sculptHeights[zi*tcRes+xi];
+										// Blend factor: 10× the raise/lower rate so smooth
+										// is visually comparable in speed.
+										const float blend = std::min(w * delta * 10.0f, w);
+										smoothed[zi*tcRes+xi] = tc.sculptHeights[zi*tcRes+xi]
+										    + blend * (avg - tc.sculptHeights[zi*tcRes+xi]);
 										anyChange = true;
 									}
 								}
@@ -1996,17 +2034,17 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 							else
 							{
 								const float sign = (s_terrainTool == TerrainTool::Raise) ? 1.0f : -1.0f;
-								for (uint32_t zi = 0; zi < res; ++zi)
+								for (uint32_t zi = 0; zi < tcRes; ++zi)
 								{
-									for (uint32_t xi = 0; xi < res; ++xi)
+									for (uint32_t xi = 0; xi < tcRes; ++xi)
 									{
-										const float wx = -halfX + static_cast<float>(xi) * stepX;
-										const float wz = -halfZ + static_cast<float>(zi) * stepZ;
+										const float wx = -tcHalfX + static_cast<float>(xi) * tcStepX;
+										const float wz = -tcHalfZ + static_cast<float>(zi) * tcStepZ;
 										const float d2 = (hitWS.x-wx)*(hitWS.x-wx)
 										               + (hitWS.z-wz)*(hitWS.z-wz);
 										const float w  = brushWeight(d2);
 										if (w <= 0.0f) continue;
-										tc.sculptHeights[zi*res+xi] += sign * w * delta;
+										tc.sculptHeights[zi*tcRes+xi] += sign * w * delta;
 										anyChange = true;
 									}
 								}
@@ -2014,19 +2052,11 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 
 							if (anyChange && ctx.contentManager)
 							{
-								// Invalidate AABB cache before regenerating so picking
-								// uses the new geometry next frame.
 								if (const auto* mc = terrainReg.try_get<MeshComponent>(terrainEnt))
 									s_aabbCache.erase(mc->meshAssetId);
-
-								// Regenerate NOW so m_renderer->Render() (called right after
-								// OnRender returns) uploads the updated mesh this frame.
-								// Without this the change is visible 2 frames late: the regular
-								// TerrainSystem call runs at the START of the next OnRender, after
-								// the renderer has already captured its draw list for that frame.
 								tc.dirty = true;
 								TerrainSystem::updateTerrains(*ctx.world, *ctx.contentManager,
-							                              ctx.renderer);
+								                              ctx.renderer);
 							}
 						}
 					}
