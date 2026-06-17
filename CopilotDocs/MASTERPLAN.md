@@ -109,8 +109,8 @@ Keine Abhängigkeiten; jede Woche ein bisschen davon.
 
 | # | Aufgabe | Hängt ab von | Details |
 |---|---|---|---|
-| 0.1 | **Test-Gerüst** (doctest oder Catch2) | — | Zuerst: SlotMap, HAsset-Roundtrip, SceneSerializer-Roundtrip, ContentManager |
-| 0.2 | **CI** GitHub-Actions-Matrix (macOS + Windows, später Linux) | 0.1 | Build + Tests pro PR; verhindert Backend-Drift |
+| 0.1 | **Test-Gerüst** (doctest oder Catch2) | — | ✅ doctest, 14 Cases (SlotMap, HAsset, ContentManager, Serializer), GitHub-CI-Matrix |
+| 0.2 | **CI** GitHub-Actions-Matrix (macOS + Windows, später Linux) | 0.1 | ✅ `.github/workflows/ci.yml`, macOS + Windows Matrix |
 | 0.3 | **`Ref<T>`** (intrusiver Refcount) + Einsatz im ContentManager | — | ✅ Forts. 25 — `AssetRef<T>` + `pinAsset`/`unpinAsset` + `unloadAsset`-Gate |
 | 0.4 | **Job-System** (Thread-Pool, parallel_for, Abhängigkeits-Handles) | — | ✅ Forts. 26 — parallele FrustumCuller + parallele RenderExtractor-Extraktion |
 | 0.5 | **Profiling-Hooks**: Tracy vendoren, Frame-/Zone-Marker | — | ✅ Forts. 27 — Tracy FetchContent + HE_PROFILE_FRAME/SCOPE/SCOPE_N + 4 Zone-Marker |
@@ -127,13 +127,13 @@ und P4d (Skelette kommen aus dem Mesh-Import).
 
 | # | Aufgabe | Hängt ab von | Details |
 |---|---|---|---|
-| 1.1 | **TextureImporter** | — | stb_image (liegt schon im vendor) → PIXL/TXMI-Chunks; Mipmap-Generierung gleich mitmachen |
-| 1.2 | **MeshImporter** | — | cgltf vendoren (header-only); VERT/INDX/NORM/TEXC + MREF; Tangenten gleich mitberechnen (PBR braucht sie) |
-| 1.3 | **MaterialImporter** | 1.1 | JSON → MTRL-Chunk; glTF-Materialien (metallic/roughness) aus 1.2 übernehmen |
-| 1.4 | **asset_compiler verdrahten** | 1.1–1.3 | Verzeichnis-Walk, Endung → Importer, Inkrementalität per mtime |
-| 1.5 | **Editor-Import**: Button + Drag&Drop in den Content Browser | 1.4 | ruft die Importer-Lib direkt auf, nicht das CLI |
+| 1.1 | **TextureImporter** | — | ✅ stb_image → PIXL/TXMI-Chunks, UUID-stabile Re-Imports |
+| 1.2 | **MeshImporter** | — | ✅ cgltf vendored; VERT/INDX/NORM/TEXC + MREF; Tangenten |
+| 1.3 | **MaterialImporter** | 1.1 | ✅ JSON + glTF metallic/roughness → MTRL-Chunk; PBR-Skalare |
+| 1.4 | **asset_compiler verdrahten** | 1.1–1.3 | ✅ Verzeichnis-Walk, Endung → Importer, mtime-Inkrementalität |
+| 1.5 | **Editor-Import**: Button + Drag&Drop in den Content Browser | 1.4 | ✅ Import-Kontextmenü + „Add to Scene" für Meshes im Content Browser |
 | 1.6 | **Textur-Kompression** (BCn/ASTC, z. B. via bc7enc o. ä.) | 1.1 | kann nach hinten rutschen, aber vor Shipping (P6) nötig |
-| 1.7 | **AudioImporter** (PCMD-Chunks, WAV/OGG via dr_libs/stb_vorbis) | — | unabhängig; wird erst in P4c konsumiert |
+| 1.7 | **AudioImporter** (PCMD-Chunks, WAV/OGG via dr_libs/stb_vorbis) | — | ✅ dr_wav → PCMD-Chunk, AudioImporter.cpp in asset_compiler |
 
 **DoD:** Heruntergeladenes glTF-Modell mit Texturen importieren und im Editor gerendert sehen.
 
@@ -146,15 +146,15 @@ Braucht P1 (Assets zum Platzieren); 2.1–2.2 können sofort parallel zu P1 star
 
 | # | Aufgabe | Hängt ab von | Details |
 |---|---|---|---|
-| 2.1 | **Szenen-Viewport offscreen** (FBO/MTLTexture → `ImGui::Image`) | Render-Pfad ✅ | Renderer-API `SetRenderTarget(w,h)` + `GetViewportTexture()`; Resize-Handling |
-| 2.2 | **SceneSerializer vervollständigen** | — | alle Komponenten (Transform, Mesh, Material, Light, Camera, RigidBody, Script, Transform2D) + Binary-Pfad; Versionierung beibehalten |
-| 2.3 | **Inspector-Panel** | 2.2 sinnvoll | Komponenten anzeigen/editieren, Add/Remove-Menü; Reflection-Mini-Makro lohnt sich hier schon |
-| 2.4 | **Outliner-Ausbau** | — | Entity anlegen/löschen/umbenennen, Reparenting per Drag&Drop, Selektion ↔ Inspector |
-| 2.5 | **Picking** (ID-Buffer-Pass; Entity-ID im RenderObject existiert) | 2.1 | Klick im Viewport selektiert |
-| 2.6 | **Gizmos** (ImGuizmo vendoren) | 2.1, 2.5 | Translate/Rotate/Scale + Snap |
-| 2.7 | **Undo/Redo** (Command-Pattern auf Komponentenebene) | 2.3 | Toolbar-Icons existieren schon |
-| 2.8 | **Play-in-Editor** | 2.2 | Welt-Snapshot in Memory-Buffer bei Play, Restore bei Stop |
-| 2.9 | **Editor-Kamera-Komfort** | 2.1 | Orbit/Fly-Modus, Focus-on-Selection (F), Grid im Viewport |
+| 2.1 | **Szenen-Viewport offscreen** (FBO/MTLTexture → `ImGui::Image`) | Render-Pfad ✅ | ✅ `SetViewportSize`/`GetViewportTexture`, GL-FBO + Metal-Offscreen, HiDPI/Resize |
+| 2.2 | **SceneSerializer vervollständigen** | — | ✅ alle Komponenten (Transform/Mesh/Material/Light/Camera/RigidBody/Script/Transform2D/Audio), JSON+CBOR, v1.1 |
+| 2.3 | **Inspector-Panel** | 2.2 sinnvoll | ✅ Details-Panel mit allen Komponenten-Editoren + Add/Remove-Component, Material-Drag&Drop |
+| 2.4 | **Outliner-Ausbau** | — | ✅ Create/Rename/Delete, Drag&Drop-Reparenting (zyklensicher), Selektion ↔ Inspector |
+| 2.5 | **Picking** (ID-Buffer-Pass; Entity-ID im RenderObject existiert) | 2.1 | ✅ CPU-Ray-AABB (backend-unabhängig); Klick → nächstes Objekt / Leer → Deselekt |
+| 2.6 | **Gizmos** (ImGuizmo vendoren) | 2.1, 2.5 | ✅ ImGuizmo v1.92.5; Translate/Rotate/Scale W/E/R, World↔Local, Screen-Ring |
+| 2.7 | **Undo/Redo** (Command-Pattern auf Komponentenebene) | 2.3 | ✅ Snapshot-basiert (CBOR, 64 Einträge); Cmd+Z / Shift+Cmd+Z; alle Ops |
+| 2.8 | **Play-in-Editor** | 2.2 | ✅ CBOR-Snapshot bei Play, clear+Restore bei Stop; Szene-Kamera aktiv im Play-Mode |
+| 2.9 | **Editor-Kamera-Komfort** | 2.1 | ✅ Orbit/Fly/Pan/Dolly/Focus-F; `EditorCamera`; ImGuizmo-Grid; Gizmo/Picking unterdrückt bei Nav |
 
 **DoD:** Szene zusammenklicken, speichern, Editor neu starten, weitermachen, Play drücken.
 
@@ -167,18 +167,18 @@ Reihenfolge nach Sichtbarkeit pro Aufwand. Braucht P1 für Materialien/Texturen;
 
 | # | Aufgabe | Hängt ab von | Details |
 |---|---|---|---|
-| 3.1 | **FrustumCuller + RenderSorter** | Render-Pfad ✅ | Header existieren, AABB.h liegt in Core/Math; Culling → Sorting → Submit |
-| 3.2 | **Shader-Cross-Compile** ausbauen | — | `glslc → SPIR-V → SPIRV-Cross → MSL/HLSL` im shader_compiler; beendet handgeschriebene MSL-Duplikate und ist Voraussetzung für Vulkan/D3D-Parität (6.2) |
-| 3.3 | **Beleuchtung**: Blinn-Phong → **PBR** (metallic/roughness) | 1.2/1.3 für echte Materialien | LightData als Uniform-Block; Punkt-, Spot-, Directional-Lights |
-| 3.4 | **RenderGraph + Pass-System aktivieren** | 3.1 | GeometryPass → PostProcessPass als erste Knoten; .cpp sind leer, Header + Design-Doc existieren |
-| 3.5 | **Schatten**: Directional mit einer Cascade → CSM | 3.4 | danach Punkt-/Spotlicht-Schatten |
-| 3.6 | **HDR + Tonemapping** als erster PostProcess-Pass | 3.4 | danach Bloom |
+| 3.1 | **FrustumCuller + RenderSorter** | Render-Pfad ✅ | ✅ Gribb/Hartmann-Frustum, Mesh-Key+Distanz-Sort, bis zu 8 Lichter (Dir/Point/Spot) |
+| 3.2 | **Shader-Cross-Compile** ausbauen | — | `glslc → SPIR-V → SPIRV-Cross → MSL/HLSL` im shader_compiler |
+| 3.3 | **Beleuchtung**: Blinn-Phong → **PBR** (metallic/roughness) | 1.2/1.3 für echte Materialien | ✅ Blinn-Phong + PBR-Skalare (baseColor/metallic/roughness), Material-Inspector, D/P/S-Lights |
+| 3.4 | **RenderGraph + Pass-System aktivieren** | 3.1 | ✅ GeometryPass→PostProcessPass; RenderTarget-Abstraktion; alle 5 Backends |
+| 3.5 | **Schatten**: Directional mit einer Cascade → CSM | 3.4 | ✅ 2048²-Depth-Map, Texel-Snapping, 3×3-PCF, Slope-Bias; GL+Metal verifiziert, D3D/Vulkan blind |
+| 3.6 | **HDR + Tonemapping** als erster PostProcess-Pass | 3.4 | ✅ RGBA16F SceneColor, ACES-Tonemap, separabler Bloom (9-Tap Gauss, Soft-Knee), Toggle in Prefs |
 | 3.7 | **RenderResourceManager + GPUMemoryAllocator** | 0.3 | ✅ Forts. 30 — Budget-Tracking, LRU-Eviction, UUID→Handle-Index, 13 Tests |
 | 3.8 | **Instancing + parallele Extraction** | 3.1, 0.4 | instanceCount im DrawCall existiert schon |
-| 3.9 | **Skybox + IBL** (Environment-Map, Irradiance/Prefilter) | 3.3 | macht PBR erst „modern aussehend" |
-| 3.10 | **Transparenz-Pass** (sortiertes Alpha-Blending) | 3.1, 3.4 | OIT ist Kür (P7) |
-| 3.11 | **Anti-Aliasing**: FXAA zuerst | 3.6 | TAA ist Kür (P7) |
-| 3.12 | **SSAO** | 3.4 | optionaler, aber sichtbarer Gewinn |
+| 3.9 | **Skybox + IBL** (Environment-Map, Irradiance/Prefilter) | 3.3 | ✅ Prozedurale analytische Sky (Atmosphäre/Tag-Nacht/Mond/Sterne/Wolken/Milchstraße/Aurora/Nebula), IBL-Ambient+Specular |
+| 3.10 | **Transparenz-Pass** (sortiertes Alpha-Blending) | 3.1, 3.4 | ✅ Forts. 15 — material-getriebenes opacity<1 → sortierte Transparenz-Liste, back-to-front |
+| 3.11 | **Anti-Aliasing**: FXAA zuerst | 3.6 | ✅ FXAA-PostProcess-Pass (GL+Metal); TAA ist Kür (P7) |
+| 3.12 | **SSAO** | 3.4 | ✅ Forts. 14 — view-space Position-Prepass → Hemisphären-Occlusion → Blur; GL+Metal |
 
 **DoD:** PBR-Szene mit Schatten, HDR, Skybox bei stabilen Frametimes; Frustum-Culling messbar via Tracy.
 
