@@ -112,7 +112,7 @@ Keine Abhängigkeiten; jede Woche ein bisschen davon.
 | 0.1 | **Test-Gerüst** (doctest oder Catch2) | — | Zuerst: SlotMap, HAsset-Roundtrip, SceneSerializer-Roundtrip, ContentManager |
 | 0.2 | **CI** GitHub-Actions-Matrix (macOS + Windows, später Linux) | 0.1 | Build + Tests pro PR; verhindert Backend-Drift |
 | 0.3 | **`Ref<T>`** (intrusiver Refcount) + Einsatz im ContentManager | — | ✅ Forts. 25 — `AssetRef<T>` + `pinAsset`/`unpinAsset` + `unloadAsset`-Gate |
-| 0.4 | **Job-System** (Thread-Pool, parallel_for, Abhängigkeits-Handles) | — | Voraussetzung für parallele Extraction (3.8), Async-Loading (6.4), Physik-Threading |
+| 0.4 | **Job-System** (Thread-Pool, parallel_for, Abhängigkeits-Handles) | — | ✅ Forts. 26 — parallele FrustumCuller + parallele RenderExtractor-Extraktion |
 | 0.5 | **Profiling-Hooks**: Tracy vendoren, Frame-/Zone-Marker | — | Früh einbauen ist billig, nachrüsten teuer |
 | 0.6 | **Aufräumen**: doppelte glm-Kopie (vendored + FetchContent) auf eine Quelle | — | klein |
 | 0.7 | **Debug-Draw-API** (Linien, Wireframe-AABBs, Text im Viewport) | Render-Pfad ✅ | ✅ Forts. 24 — `DebugDrawBuffer` + GL- und Metal-Backend + Editor-Erdgitter |
@@ -1471,3 +1471,24 @@ Lifetime-sicher mit der bestehenden `SlotMap`/`m_handleToUUID`-Buchführung inte
 - **Schaltet frei:** GPU-Eviction (3.7), Async-Asset-Streaming (6.4) — Renderer kann Assets via
   `AssetRef<T>` pinnen und ist sicher vor Use-after-free bei gleichzeitigem `unloadAsset`.
 - **Nächster Schritt:** 0.4 Job-System → parallele RenderExtractor-Extraktion; dann 0.5 Tracy-Profiling.
+
+### Forts. 26 — Job-System → parallele Extraktion + paralleles Culling (0.4)
+
+> **Aufgabe:** Job-System nicht nur testen, sondern in den heißen Render-Pfad integrieren. ✅
+
+- **`vector<bool>` → `vector<uint8_t>` (Culling-Pipeline):**
+  `vector<bool>` ist als Bit-Feld gepackt; gleichzeitige Schreibzugriffe auf logisch getrennte Elemente,
+  die denselben Storage-Word teilen, sind Data Races. Geändert in `FrustumCuller.h/cpp`, `RenderSorter.h/cpp`,
+  allen Backend-Membern (`OpenGLRenderer`, `MetalRenderer`, `VulkanRenderer`, `D3D11/D3D12`) und Tests.
+- **`FrustumCuller::cull()` parallel** (`FrustumCuller.cpp`):
+  `outVisible.assign(count, 1u)` + `parallel_for(count, ...)` — jedes Element schreibt in einen
+  eigenen `uint8_t`-Slot; Frustum (read-only), RenderWorld (read-only). Kein Lock, kein Race.
+- **`RenderExtractor::extract()` zweistufig** (`RenderExtractor.cpp`):
+  - Stufe 1 (sequenziell): ECS-Iteration → `std::vector<EntityData>` (world-Matrix, Mesh-/Material-UUID, entityId, lod).
+    EnTT macht keine Thread-Safety-Garantien für parallele View-Iteration → bleibt single-threaded.
+  - Stufe 2 (parallel): `out.objects.resize(n)` + `parallel_for(n, ...)` — AABB-Transform + Feld-Kopie.
+    `kUnitCube.transformed(d.world)` ist die nicht-triviale Arbeit (8 Mat-Vec-Muls); kein Registry-Zugriff.
+- **Tests:** 1 neuer Doctest-Case (256-Objekte-Cull, alternierende sichtbar/unsichtbar, verifiziert
+  parallele Korrektheit). **104 Tests grün** (103→104), Build sauber.
+- **Schaltet frei:** Instancing + weitere parallele Extraction (3.8); Basis für Async-Loading (6.4).
+- **Nächster Schritt:** 0.5 Tracy-Profiling.

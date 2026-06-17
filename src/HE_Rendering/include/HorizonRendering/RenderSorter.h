@@ -6,9 +6,9 @@
 
 class HE_RENDERING_API RenderSorter {
 public:
-    void sort(const RenderWorld&       world,
-              const std::vector<bool>& visible,
-              std::vector<uint32_t>&   outSortedIndices);
+    void sort(const RenderWorld&          world,
+              const std::vector<uint8_t>& visible,
+              std::vector<uint32_t>&      outSortedIndices);
 
 private:
     // Precomputed per-object sort key so the O(n log n) comparator never has to

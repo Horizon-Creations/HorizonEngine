@@ -6,9 +6,9 @@
 // id are computed once per object into a key array, so the std::sort comparator
 // — invoked O(n log n) times — only compares cheap precomputed scalars instead
 // of re-extracting matrix columns and recomputing squared distances each call.
-void RenderSorter::sort(const RenderWorld&       world,
-                        const std::vector<bool>& visible,
-                        std::vector<uint32_t>&   outSortedIndices)
+void RenderSorter::sort(const RenderWorld&          world,
+                        const std::vector<uint8_t>& visible,
+                        std::vector<uint32_t>&       outSortedIndices)
 {
 	const glm::vec3 camPos = world.camera.position;
 

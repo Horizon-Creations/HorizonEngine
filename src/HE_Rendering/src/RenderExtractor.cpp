@@ -8,6 +8,7 @@
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/LightComponent.h>
 #include <HorizonScene/Components/EnvironmentLightComponent.h>
+#include <JobSystem/JobSystem.h>
 #include <glm/gtc/quaternion.hpp>
 #include <glm/common.hpp>
 #include <algorithm>
@@ -106,23 +107,42 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 		return b;
 	}();
 
-	out.objects.reserve(reg.view<MeshComponent>().size());
-	for (auto [e, t, mesh] : reg.view<TransformComponent, MeshComponent>().each())
+	// Two-phase build: sequential ECS read (no EnTT concurrency guarantees), then
+	// parallel AABB/transform computation (pure math, no registry access).
+	struct EntityData {
+		glm::mat4 world;
+		HE::UUID  meshId;
+		HE::UUID  matId;
+		uint32_t  entId;
+		int       lod;
+	};
+	auto meshView = reg.view<TransformComponent, MeshComponent>();
+	std::vector<EntityData> items;
+	items.reserve(meshView.size_hint());
+	for (auto [e, t, mesh] : meshView.each())
 	{
-		RenderObject obj;
-		obj.meshAssetId = mesh.meshAssetId;
-		// Optional explicit material override (MaterialComponent). Backends use
-		// this in place of the mesh's embedded material when it is set.
+		EntityData d;
+		d.world  = t.worldMatrix;
+		d.meshId = mesh.meshAssetId;
+		d.matId  = {};
 		if (const auto* matComp = reg.try_get<MaterialComponent>(e))
-			obj.materialAssetId = matComp->materialAssetId;
-		obj.transform   = t.worldMatrix;
-		// Seed with the fallback cube's box; backends replace it with the
-		// real mesh AABB once the asset is resolved.
-		obj.worldBounds = kUnitCube.transformed(t.worldMatrix);
-		obj.entityId    = static_cast<uint32_t>(e);
-		obj.lod         = mesh.lodBias;
-		out.objects.push_back(obj);
+			d.matId = matComp->materialAssetId;
+		d.entId  = static_cast<uint32_t>(e);
+		d.lod    = mesh.lodBias;
+		items.push_back(d);
 	}
+
+	out.objects.resize(items.size());
+	parallel_for(items.size(), [&](size_t i) {
+		const EntityData& d = items[i];
+		RenderObject&   obj = out.objects[i];
+		obj.meshAssetId     = d.meshId;
+		obj.materialAssetId = d.matId;
+		obj.transform       = d.world;
+		obj.worldBounds     = kUnitCube.transformed(d.world);
+		obj.entityId        = d.entId;
+		obj.lod             = d.lod;
+	});
 
 	// ── Lights ──────────────────────────────────────────────────────────────
 	out.lights.reserve(reg.view<LightComponent>().size() + 1); // +1 for the day-night moon

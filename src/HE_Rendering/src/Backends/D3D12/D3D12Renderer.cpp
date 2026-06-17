@@ -208,7 +208,7 @@ struct D3D12RendererImpl
     RenderSorter    m_sorter;
     RenderGraph     m_renderGraph;
     CommandBuffer   m_cmds;
-    std::vector<bool>     m_visible;
+    std::vector<uint8_t>  m_visible;
     std::vector<uint32_t> m_sortedIndices;
     std::unordered_map<HE::UUID, GpuMesh> meshCache;
 

@@ -84,12 +84,48 @@ TEST_CASE("FrustumCuller marks objects via world bounds")
 	world.objects.push_back(RenderObject{});         // invalid bounds → never culled
 
 	FrustumCuller culler;
-	std::vector<bool> visible;
+	std::vector<uint8_t> visible;
 	culler.cull(world, visible);
 	REQUIRE(visible.size() == 3);
 	CHECK(visible[0]);
 	CHECK_FALSE(visible[1]);
 	CHECK(visible[2]);
+}
+
+TEST_CASE("FrustumCuller parallel cull matches sequential for large object counts")
+{
+	// Build a camera frustum looking down -Z
+	RenderWorld world;
+	world.camera.view = glm::lookAt(glm::vec3(0, 0, 0), glm::vec3(0, 0, -1), glm::vec3(0, 1, 0));
+	world.camera.projection = glm::perspective(glm::radians(60.0f), 1.0f, 0.1f, 100.0f);
+
+	// 256 objects: alternating visible (in front) and invisible (behind camera)
+	for (int i = 0; i < 256; ++i)
+	{
+		RenderObject o;
+		const float z = (i % 2 == 0) ? -float(i + 1) : float(i + 1); // negative = visible
+		glm::vec3 pos(0, 0, z);
+		HE::AABB b;
+		b.expand(pos - glm::vec3(0.4f));
+		b.expand(pos + glm::vec3(0.4f));
+		o.worldBounds = b;
+		world.objects.push_back(o);
+	}
+
+	FrustumCuller culler;
+	std::vector<uint8_t> visible;
+	culler.cull(world, visible);
+
+	REQUIRE(visible.size() == 256);
+	for (int i = 0; i < 256; ++i)
+	{
+		const float z = (i % 2 == 0) ? -float(i + 1) : float(i + 1);
+		const bool expectVisible = (z < 0.0f && z > -100.0f);
+		if (expectVisible)
+			CHECK(visible[i] != 0);
+		else
+			CHECK(visible[i] == 0);
+	}
 }
 
 TEST_CASE("RenderSorter groups by mesh and sorts front-to-back")
@@ -112,8 +148,8 @@ TEST_CASE("RenderSorter groups by mesh and sorts front-to-back")
 	world.objects.push_back(makeObj(meshA,  -5)); // 2
 	world.objects.push_back(makeObj(meshB,  -1)); // 3
 
-	std::vector<bool> visible(4, true);
-	visible[0] = false; // culled — must not appear
+	std::vector<uint8_t> visible(4, 1u);
+	visible[0] = 0u; // culled — must not appear
 
 	RenderSorter sorter;
 	std::vector<uint32_t> order;
