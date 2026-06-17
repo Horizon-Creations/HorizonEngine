@@ -17,6 +17,7 @@ add_library(HorizonCore SHARED
 	src/Platform/DynLib.cpp
 	src/Window/Window.cpp
 	src/Renderer/IRenderer.cpp
+	src/Scripting/ScriptEngine.cpp
  "include/ContentManager/ContentManager.h" "src/ContentManager/ContentManager.cpp" "include/ContentManager/Assets.h")
 
 target_include_directories(HorizonCore
@@ -35,6 +36,7 @@ target_link_libraries(HorizonCore
 	PUBLIC  glm::glm
 	PUBLIC  SDL3::SDL3
 	PUBLIC  nlohmann_json::nlohmann_json
+	PUBLIC  lua_static
 )
 
 # Tracy::TracyClient propagates TRACY_ENABLE define + include dir to all
