@@ -232,7 +232,7 @@ Macht aus „Renderer + Systeme" eine Engine, in der man ein Spiel *baut*.
 | # | Aufgabe | Hängt ab von | Details |
 |---|---|---|---|
 | 5.1 | **Prefabs** (Entity-Hierarchie als Asset, Instanzen + Overrides) | 2.2 | ✅ Forts. 31 — serializeSubtree/instantiatePrefab, PrefabAsset, ContentManager-Integration, Editor-Kontextmenü, 9 Tests |
-| 5.2 | **Input-Mapping** (Actions/Axes statt Roh-Keys, Gamepad) | — | Scripting (4b.2) konsumiert es |
+| 5.2 | **Input-Mapping** (Actions/Axes statt Roh-Keys, Gamepad) | — | ✅ Forts. 32 — InputMapping (Actions+Axes, mapAction/mapAxis/tick/isPressed/axisValue), 17 Tests |
 | 5.3 | **Partikelsystem** (CPU-Sim zuerst, instanziertes Rendering) | 3.8 | GPU-Sim ist Kür |
 | 5.4 | **In-Game-UI-Runtime** (Canvas, Text via MSDF/stb_truetype, Buttons, Anchoring) | Render-Pfad ✅ | nicht ImGui — das ist Editor-only |
 | 5.5 | **Navigation**: Recast/Detour-NavMesh-Baking + Agenten | 4a.1 | |
@@ -1580,3 +1580,14 @@ Lifetime-sicher mit der bestehenden `SlotMap`/`m_handleToUUID`-Buchführung inte
 - **ContentManager:** `getPrefab(UUID)`, `registerPrefab(PrefabAsset)`, `acquirePrefab(UUID)`, `SlotMap<PrefabAsset> m_prefabAssets`. Nutzt bestehenden `registerRuntimeAsset`-Template-Pfad.
 - **Editor (`EditorUI.cpp`):** „Save as Prefab" im Hierarchy-Kontextmenü (Per-Entity) → ruft `serializeSubtree` auf und registriert das Ergebnis im ContentManager.
 - **Tests (`tests/test_prefab.cpp`):** 9 neue Doctest-Cases (single-entity round-trip, Hierarchy-Preservation, zwei unabhängige Instanzen, Komponenten-Round-trip, non-empty blob, corrupt-data, ContentManager register/getPrefab/acquirePrefab). **136 Tests grün** (127→136).
+
+### Forts. 32 — Input-Mapping (5.2)
+
+> **Aufgabe:** Logische Actions/Axes statt Roh-Keys direkt im Code — entkoppelt Gameplay-Logik von konkreten Tastenbelegungen. ✅
+
+- **`InputMapping`** (`Application/InputMapping.h/.cpp`, in HorizonCore): Karte von Namen auf `ActionEntry` (Bindings + `InputActionState`) und `AxisEntry` (Bindings + `InputAxisState`).
+- **`mapAction(name, bindings)`**: Ordnet einer Aktion eine oder mehrere `ActionBinding { SDL_Scancode key }` zu. Re-Mapping überschreibt bestehende Bindings.
+- **`mapAxis(name, bindings)`**: Ordnet einer Achse `AxisBinding { positiveKey, negativeKey, scale }` zu (mehrere möglich, Werte summiert).
+- **`tick(const Input& input)`**: Wertet pro Frame `input.IsKeyDown(scancode)` aus; berechnet `isPressed`, `justPressed` (nur Frame der Betätigung), `justReleased` (nur Frame der Loslassung); Achsen via positiveKey/negativeKey/scale → `clamp(sum, -1, 1)`.
+- **Convenience-Methoden**: `isPressed(name)`, `justPressed(name)`, `justReleased(name)`, `axisValue(name)` (null-sicher, default false/0).
+- **Tests (`tests/test_inputmapping.cpp`):** 17 neue Cases (unbekannte Action/Axis, initialer Zustand, justPressed/justReleased-Timing, multi-Binding, Helfer, Achse +/-/0/Clamp/Scale, actionCount/axisCount, clear, Re-Mapping). **153 Tests grün** (136→153).
