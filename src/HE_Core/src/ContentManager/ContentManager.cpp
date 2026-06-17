@@ -394,3 +394,83 @@ bool ContentManager::isLoaded(const std::string& relativePath) const
 {
 	return m_pathToUUID.contains(relativePath);
 }
+
+// ─── initDefaultAssets ───────────────────────────────────────────────────────
+void ContentManager::initDefaultAssets()
+{
+	// ── Default cube mesh (kDefaultCubeMeshId) ────────────────────────────────
+	// Unit cube: 24 vertices (6 faces × 4 verts), each with a unique normal so
+	// that hard-edge face normals are preserved.  Identical geometry to the
+	// OpenGL/Metal backend built-in fallback cubes.
+	// Vertex order: pairs of opposite faces, interleaved per face pair.
+	static const float kCubePos[] = {
+		// +X                           // -X
+		 0.5f,-0.5f,-0.5f,  -0.5f,-0.5f, 0.5f,
+		 0.5f, 0.5f,-0.5f,  -0.5f, 0.5f, 0.5f,
+		 0.5f, 0.5f, 0.5f,  -0.5f, 0.5f,-0.5f,
+		 0.5f,-0.5f, 0.5f,  -0.5f,-0.5f,-0.5f,
+		// +Y                           // -Y
+		-0.5f, 0.5f,-0.5f,  -0.5f,-0.5f, 0.5f,
+		-0.5f, 0.5f, 0.5f,  -0.5f,-0.5f,-0.5f,
+		 0.5f, 0.5f, 0.5f,   0.5f,-0.5f,-0.5f,
+		 0.5f, 0.5f,-0.5f,   0.5f,-0.5f, 0.5f,
+		// +Z                           // -Z
+		-0.5f,-0.5f, 0.5f,   0.5f,-0.5f,-0.5f,
+		 0.5f,-0.5f, 0.5f,  -0.5f,-0.5f,-0.5f,
+		 0.5f, 0.5f, 0.5f,  -0.5f, 0.5f,-0.5f,
+		-0.5f, 0.5f, 0.5f,   0.5f, 0.5f,-0.5f,
+	};
+	static const float kCubeNrm[] = {
+		// +X                     // -X
+		 1,0,0,  -1,0,0,
+		 1,0,0,  -1,0,0,
+		 1,0,0,  -1,0,0,
+		 1,0,0,  -1,0,0,
+		// +Y                     // -Y
+		 0,1,0,   0,-1,0,
+		 0,1,0,   0,-1,0,
+		 0,1,0,   0,-1,0,
+		 0,1,0,   0,-1,0,
+		// +Z                     // -Z
+		 0,0,1,   0,0,-1,
+		 0,0,1,   0,0,-1,
+		 0,0,1,   0,0,-1,
+		 0,0,1,   0,0,-1,
+	};
+	static const uint32_t kCubeIdx[] = {
+		 0, 2, 4,  0, 4, 6,    1, 3, 5,  1, 5, 7,
+		 8,10,12,  8,12,14,    9,11,13,  9,13,15,
+		16,18,20, 16,20,22,   17,19,21, 17,21,23,
+	};
+	static constexpr int kCubeVerts = 24;
+
+	StaticMeshAsset cube;
+	cube.id   = HE::kDefaultCubeMeshId;
+	cube.name = "DefaultCube";
+	cube.path = "mem://default_cube";
+	cube.vertices.assign(kCubePos, kCubePos + kCubeVerts * 3);
+	cube.normals .assign(kCubeNrm, kCubeNrm + kCubeVerts * 3);
+	cube.indices .assign(kCubeIdx, kCubeIdx + sizeof(kCubeIdx)/sizeof(kCubeIdx[0]));
+	registerStaticMesh(std::move(cube));
+
+	// ── Default white texture (kDefaultWhiteTextureId) ────────────────────────
+	// 1×1 RGBA8 opaque white — neutral placeholder; multiplied with any colour
+	// leaves it unchanged.
+	TextureAsset white;
+	white.id       = HE::kDefaultWhiteTextureId;
+	white.name     = "DefaultWhite";
+	white.path     = "mem://default_white";
+	white.data     = { 255, 255, 255, 255 };
+	white.width    = 1;
+	white.height   = 1;
+	white.channels = 4;
+	registerTexture(std::move(white));
+
+	// ── Default material (kDefaultMaterialId) ─────────────────────────────────
+	// PBR defaults: white base colour, non-metallic, mid roughness, fully opaque.
+	MaterialAsset mat;
+	mat.id         = HE::kDefaultMaterialId;
+	mat.name       = "DefaultMaterial";
+	mat.path       = "mem://default_material";
+	registerMaterial(std::move(mat));
+}

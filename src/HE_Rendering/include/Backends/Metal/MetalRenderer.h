@@ -84,7 +84,6 @@ private:
 	void DestroyTarget(WindowTarget& target);
 	void EnsureDepthTexture(WindowTarget& target, int width, int height);
 	void CreateScenePipeline();
-	void CreateCubeMesh();
 	void EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool isPrimary);
 	// Encodes the scene draw calls into the given encoder (any render pass
 	// whose attachments match the scene pipeline formats).
@@ -135,17 +134,13 @@ private:
 	std::vector<bool>     m_visible;       // per-frame culling results
 	std::vector<uint32_t> m_sortedIndices; // per-frame draw order
 
-	// Unlit pipeline + built-in cube (fallback for entities whose mesh asset
-	// is missing or not loaded). All id<MTL…>, retained.
+	// Unlit pipeline. All id<MTL…>, retained.
 	void* m_scenePipeline   = nullptr; // id<MTLRenderPipelineState>
 	void* m_sceneBlendPipeline = nullptr; // id<MTLRenderPipelineState> (alpha-blended transparency)
 	void* m_sceneDepthState = nullptr; // id<MTLDepthStencilState> (test+write)
 	void* m_noDepthState    = nullptr; // id<MTLDepthStencilState> (overlay)
 	void* m_skyDepthState   = nullptr; // id<MTLDepthStencilState> (sky: LessEqual, no write)
-	void* m_cubeVertexBuf   = nullptr; // id<MTLBuffer>
-	void* m_cubeIndexBuf    = nullptr; // id<MTLBuffer>
-	int   m_cubeIndexCount  = 0;
-	void* m_dummyTexture    = nullptr; // id<MTLTexture>, 1×1 white — bound when a mesh has no texture
+	void* m_dummyTexture    = nullptr; // id<MTLTexture>, 1×1 white — bound when shadow/AO/moon texture is absent
 	void* m_linearSampler   = nullptr; // id<MTLSamplerState>
 	void* m_noiseTexture    = nullptr; // id<MTLTexture>, 3D R16 value noise (sky)
 	void* m_noiseSampler    = nullptr; // id<MTLSamplerState>, linear + repeat

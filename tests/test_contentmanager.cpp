@@ -1,5 +1,6 @@
 #include "doctest.h"
 #include <ContentManager/ContentManager.h>
+#include <ContentManager/DefaultAssets.h>
 #include <filesystem>
 
 namespace fs = std::filesystem;
@@ -202,4 +203,67 @@ TEST_CASE("ContentManager loading same path twice returns same UUID")
 	HE::UUID a = cm.loadAsset("boot.hasset");
 	HE::UUID b = cm.loadAsset("boot.hasset");
 	CHECK(a == b);
+}
+
+// ── Default built-in assets ───────────────────────────────────────────────────
+
+TEST_CASE("ContentManager pre-registers the default cube mesh")
+{
+	ContentManager cm;
+	const StaticMeshAsset* cube = cm.getStaticMesh(HE::kDefaultCubeMeshId);
+	REQUIRE(cube != nullptr);
+	CHECK(cube->id == HE::kDefaultCubeMeshId);
+	CHECK(cube->vertices.size() == 24 * 3); // 24 verts × 3 floats (pos)
+	CHECK(cube->normals .size() == 24 * 3);
+	CHECK(cube->indices .size() == 36);
+}
+
+TEST_CASE("ContentManager pre-registers the default white texture")
+{
+	ContentManager cm;
+	const TextureAsset* tex = cm.getTexture(HE::kDefaultWhiteTextureId);
+	REQUIRE(tex != nullptr);
+	CHECK(tex->id      == HE::kDefaultWhiteTextureId);
+	CHECK(tex->width   == 1);
+	CHECK(tex->height  == 1);
+	CHECK(tex->channels == 4);
+	REQUIRE(tex->data.size() == 4);
+	CHECK(tex->data[0] == 255);
+	CHECK(tex->data[1] == 255);
+	CHECK(tex->data[2] == 255);
+	CHECK(tex->data[3] == 255);
+}
+
+TEST_CASE("ContentManager pre-registers the default material")
+{
+	ContentManager cm;
+	const MaterialAsset* mat = cm.getMaterial(HE::kDefaultMaterialId);
+	REQUIRE(mat != nullptr);
+	CHECK(mat->id        == HE::kDefaultMaterialId);
+	CHECK(mat->baseColor[0] == doctest::Approx(1.0f));
+	CHECK(mat->metallic     == doctest::Approx(0.0f));
+	CHECK(mat->roughness    == doctest::Approx(0.5f));
+	CHECK(mat->opacity      == doctest::Approx(1.0f));
+}
+
+TEST_CASE("ContentManager default asset UUIDs are fixed and distinct")
+{
+	// Sentinel UUIDs must not collide with UUID::generate() output (version-4
+	// requires hi & 0xF000 == 0x4000; all sentinels have hi < 0x10).
+	CHECK_FALSE(HE::kDefaultCubeMeshId     == HE::UUID{});
+	CHECK_FALSE(HE::kDefaultWhiteTextureId == HE::UUID{});
+	CHECK_FALSE(HE::kDefaultMaterialId     == HE::UUID{});
+	CHECK_FALSE(HE::kDefaultCubeMeshId     == HE::kDefaultWhiteTextureId);
+	CHECK_FALSE(HE::kDefaultCubeMeshId     == HE::kDefaultMaterialId);
+	CHECK_FALSE(HE::kDefaultWhiteTextureId == HE::kDefaultMaterialId);
+	// Verify they cannot be produced by UUID::generate()
+	CHECK((HE::kDefaultCubeMeshId.hi & 0x000000000000F000ULL) != 0x0000000000004000ULL);
+}
+
+TEST_CASE("ContentManager default assets are addressable by virtual path")
+{
+	ContentManager cm;
+	CHECK(cm.isLoaded("mem://default_cube"));
+	CHECK(cm.isLoaded("mem://default_white"));
+	CHECK(cm.isLoaded("mem://default_material"));
 }

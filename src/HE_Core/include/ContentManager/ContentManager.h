@@ -4,14 +4,15 @@
 #include "Types/Enums.h"
 #include "../SlotMap.h"
 #include "Assets.h"
+#include "ContentManager/DefaultAssets.h"
 #include <string>
 #include <unordered_map>
 
 class HE_API ContentManager
 {
 public:
-	ContentManager() = default;
-	ContentManager(std::string contentPath) : m_contentRoot(std::move(contentPath)) {}
+	ContentManager()                          { initDefaultAssets(); }
+	ContentManager(std::string contentPath) : m_contentRoot(std::move(contentPath)) { initDefaultAssets(); }
 	~ContentManager() = default;
 
 	HE::UUID loadAsset(const std::string& relativePath);
@@ -64,6 +65,7 @@ public:
 private:
 
 	HE::AssetType getAssetType(const std::string path) const;
+	void          initDefaultAssets();
 
 	// Shared indexing for runtime asset registration / in-place replacement.
 	// Defined in the .cpp; only instantiated by the typed wrappers above.

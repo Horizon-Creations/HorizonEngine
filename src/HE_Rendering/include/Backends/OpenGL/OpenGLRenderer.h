@@ -53,7 +53,6 @@ private:
 
 	void CreateUnlitPipeline();
 	void UpdateSkyEnvCube(const glm::vec3& sunDir); // rebuild the IBL cubemap on sun move
-	void CreateCubeMesh();
 	void DrawScene(int width, int height);
 	// (Re)creates the offscreen viewport FBO at the requested size.
 	void EnsureViewportTarget();
@@ -118,11 +117,6 @@ private:
 	int          m_uAO            = -1;   // SSAO occlusion sampler unit
 	int          m_uViewport      = -1;   // viewport size (screen-space AO lookup)
 	int          m_uSSAOEnabled   = -1;   // 1 = modulate ambient by SSAO
-	unsigned int m_cubeVAO        = 0;
-	unsigned int m_cubeVBO        = 0;
-	unsigned int m_cubeEBO        = 0;
-	int          m_cubeIndexCount = 0;
-
 	// Uploaded asset meshes, keyed by asset UUID
 	std::unordered_map<HE::UUID, GpuMesh> m_meshCache;
 

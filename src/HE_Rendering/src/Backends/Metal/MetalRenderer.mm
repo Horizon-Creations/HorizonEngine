@@ -1198,7 +1198,6 @@ void MetalRenderer::Initialize(HE::Window* window)
 	CreateTarget(m_primarySdlWindow, m_primaryTarget);
 	CreateScenePipeline();
 	EnsureShadowResources();
-	CreateCubeMesh();
 
 	// Persistent pass descriptor describing the swapchain attachment layout.
 	// ImGui_ImplMetal_NewFrame() only inspects attachment formats / sample
@@ -1267,8 +1266,6 @@ void MetalRenderer::Shutdown()
 	if (m_noiseTexture)    { CFBridgingRelease(m_noiseTexture);    m_noiseTexture = nullptr; }
 	if (m_noiseSampler)    { CFBridgingRelease(m_noiseSampler);    m_noiseSampler = nullptr; }
 	if (m_skyEnvCube)      { CFBridgingRelease(m_skyEnvCube);      m_skyEnvCube = nullptr; }
-	if (m_cubeVertexBuf)   { CFBridgingRelease(m_cubeVertexBuf);   m_cubeVertexBuf = nullptr; }
-	if (m_cubeIndexBuf)    { CFBridgingRelease(m_cubeIndexBuf);    m_cubeIndexBuf = nullptr; }
 	if (m_scenePipeline)   { CFBridgingRelease(m_scenePipeline);   m_scenePipeline = nullptr; }
 	if (m_sceneBlendPipeline) { CFBridgingRelease(m_sceneBlendPipeline); m_sceneBlendPipeline = nullptr; }
 	if (m_sceneDepthState) { CFBridgingRelease(m_sceneDepthState); m_sceneDepthState = nullptr; }
@@ -1660,19 +1657,11 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr)
 				shMesh      = ResolveMesh(obj.meshAssetId);
 				shMeshId    = obj.meshAssetId; shMeshValid = true;
 			}
-			id<MTLBuffer> vbuf; id<MTLBuffer> ibuf; NSUInteger ic;
-			if (const GpuMesh* mesh = shMesh)
-			{
-				vbuf = (__bridge id<MTLBuffer>)mesh->vertexBuf;
-				ibuf = (__bridge id<MTLBuffer>)mesh->indexBuf;
-				ic   = (NSUInteger)mesh->indexCount;
-			}
-			else
-			{
-				vbuf = (__bridge id<MTLBuffer>)m_cubeVertexBuf;
-				ibuf = (__bridge id<MTLBuffer>)m_cubeIndexBuf;
-				ic   = (NSUInteger)m_cubeIndexCount;
-			}
+			const GpuMesh* drawMesh = shMesh ? shMesh : ResolveMesh(HE::kDefaultCubeMeshId);
+			if (!drawMesh) continue;
+			id<MTLBuffer> vbuf = (__bridge id<MTLBuffer>)drawMesh->vertexBuf;
+			id<MTLBuffer> ibuf = (__bridge id<MTLBuffer>)drawMesh->indexBuf;
+			NSUInteger    ic   = (NSUInteger)drawMesh->indexCount;
 			[enc setVertexBuffer:vbuf offset:0 atIndex:0];
 			[enc setVertexBytes:&u length:sizeof(u) atIndex:1];
 			[enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle
@@ -1683,54 +1672,6 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr)
 		}
 		[enc endEncoding];
 	}
-}
-
-void MetalRenderer::CreateCubeMesh()
-{
-	// Identical geometry to the OpenGL backend's built-in cube:
-	// 24 vertices (position + normal per face), interleaved per face pair.
-	static const float verts[] = {
-		// +X                          // -X
-		 0.5f,-0.5f,-0.5f, 1,0,0,      -0.5f,-0.5f, 0.5f,-1,0,0,
-		 0.5f, 0.5f,-0.5f, 1,0,0,      -0.5f, 0.5f, 0.5f,-1,0,0,
-		 0.5f, 0.5f, 0.5f, 1,0,0,      -0.5f, 0.5f,-0.5f,-1,0,0,
-		 0.5f,-0.5f, 0.5f, 1,0,0,      -0.5f,-0.5f,-0.5f,-1,0,0,
-		// +Y                          // -Y
-		-0.5f, 0.5f,-0.5f, 0,1,0,      -0.5f,-0.5f, 0.5f, 0,-1,0,
-		-0.5f, 0.5f, 0.5f, 0,1,0,      -0.5f,-0.5f,-0.5f, 0,-1,0,
-		 0.5f, 0.5f, 0.5f, 0,1,0,       0.5f,-0.5f,-0.5f, 0,-1,0,
-		 0.5f, 0.5f,-0.5f, 0,1,0,       0.5f,-0.5f, 0.5f, 0,-1,0,
-		// +Z                          // -Z
-		-0.5f,-0.5f, 0.5f, 0,0,1,       0.5f,-0.5f,-0.5f, 0,0,-1,
-		 0.5f,-0.5f, 0.5f, 0,0,1,      -0.5f,-0.5f,-0.5f, 0,0,-1,
-		 0.5f, 0.5f, 0.5f, 0,0,1,      -0.5f, 0.5f,-0.5f, 0,0,-1,
-		-0.5f, 0.5f, 0.5f, 0,0,1,       0.5f, 0.5f,-0.5f, 0,0,-1,
-	};
-	static const uint32_t indices[] = {
-		 0, 2, 4,  0, 4, 6,    1, 3, 5,  1, 5, 7,   // +X -X
-		 8,10,12,  8,12,14,    9,11,13,  9,13,15,   // +Y -Y
-		16,18,20, 16,20,22,   17,19,21, 17,21,23,   // +Z -Z
-	};
-	m_cubeIndexCount = static_cast<int>(sizeof(indices) / sizeof(indices[0]));
-
-	// Expand the 6-float (pos+normal) source data to the pipeline's 8-float
-	// vertex layout (pos+normal+uv) with zeroed UVs.
-	const size_t vertexCount = sizeof(verts) / (6 * sizeof(float));
-	std::vector<float> interleaved;
-	interleaved.reserve(vertexCount * 8);
-	for (size_t v = 0; v < vertexCount; ++v)
-	{
-		interleaved.insert(interleaved.end(), &verts[v*6], &verts[v*6] + 6);
-		interleaved.insert(interleaved.end(), { 0.0f, 0.0f });
-	}
-
-	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
-	m_cubeVertexBuf = (void*)CFBridgingRetain(
-		[device newBufferWithBytes:interleaved.data()
-		                    length:interleaved.size() * sizeof(float)
-		                   options:MTLResourceStorageModeShared]);
-	m_cubeIndexBuf = (void*)CFBridgingRetain(
-		[device newBufferWithBytes:indices length:sizeof(indices) options:MTLResourceStorageModeShared]);
 }
 
 // ─── Asset mesh upload ────────────────────────────────────────────────────────
@@ -2301,11 +2242,11 @@ void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
 			u.modelView = view * obj.transform;
 			if (!valid || obj.meshAssetId != lastId)
 			{ cMesh = ResolveMesh(obj.meshAssetId); lastId = obj.meshAssetId; valid = true; }
-			id<MTLBuffer> vbuf, ibuf; NSUInteger ic;
-			if (const GpuMesh* mesh = cMesh)
-			{ vbuf = (__bridge id<MTLBuffer>)mesh->vertexBuf; ibuf = (__bridge id<MTLBuffer>)mesh->indexBuf; ic = (NSUInteger)mesh->indexCount; }
-			else
-			{ vbuf = (__bridge id<MTLBuffer>)m_cubeVertexBuf; ibuf = (__bridge id<MTLBuffer>)m_cubeIndexBuf; ic = (NSUInteger)m_cubeIndexCount; }
+			const GpuMesh* drawMesh = cMesh ? cMesh : ResolveMesh(HE::kDefaultCubeMeshId);
+			if (!drawMesh) continue;
+			id<MTLBuffer> vbuf = (__bridge id<MTLBuffer>)drawMesh->vertexBuf;
+			id<MTLBuffer> ibuf = (__bridge id<MTLBuffer>)drawMesh->indexBuf;
+			NSUInteger    ic   = (NSUInteger)drawMesh->indexCount;
 			[enc setVertexBuffer:vbuf offset:0 atIndex:0];
 			[enc setVertexBytes:&u length:sizeof(u) atIndex:1];
 			[enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:ic
@@ -2617,29 +2558,18 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 			}
 			u.pbr = glm::vec4(cMetallic, cRoughness, cOpacity, 0.0f);
 
-			// Resolve the asset; entities without one fall back to the built-in cube.
+			// Resolve the mesh; entities without one fall back to the default cube.
 			if (!meshValid || dc.meshAssetId != lastMeshId)
 			{
 				cMesh      = ResolveMesh(dc.meshAssetId);
 				lastMeshId = dc.meshAssetId; meshValid = true;
 			}
-			id<MTLBuffer> vertexBuf;
-			id<MTLBuffer> indexBuf;
-			NSUInteger    indexCount;
-			void*         meshTex = nullptr;
-			if (const GpuMesh* mesh = cMesh)
-			{
-				vertexBuf  = (__bridge id<MTLBuffer>)mesh->vertexBuf;
-				indexBuf   = (__bridge id<MTLBuffer>)mesh->indexBuf;
-				indexCount = (NSUInteger)mesh->indexCount;
-				meshTex    = mesh->texture;
-			}
-			else
-			{
-				vertexBuf  = (__bridge id<MTLBuffer>)m_cubeVertexBuf;
-				indexBuf   = (__bridge id<MTLBuffer>)m_cubeIndexBuf;
-				indexCount = (NSUInteger)m_cubeIndexCount;
-			}
+			const GpuMesh* drawMesh = cMesh ? cMesh : ResolveMesh(HE::kDefaultCubeMeshId);
+			if (!drawMesh) continue;
+			id<MTLBuffer> vertexBuf = (__bridge id<MTLBuffer>)drawMesh->vertexBuf;
+			id<MTLBuffer> indexBuf  = (__bridge id<MTLBuffer>)drawMesh->indexBuf;
+			NSUInteger    indexCount = (NSUInteger)drawMesh->indexCount;
+			void*         meshTex = drawMesh->texture;
 
 			void* effectiveTex = cHasOverride ? cOverrideTex : meshTex;
 			void* texPtr = effectiveTex ? effectiveTex : m_dummyTexture;
