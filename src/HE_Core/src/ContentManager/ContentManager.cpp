@@ -173,6 +173,7 @@ HE::UUID ContentManager::loadAsset(const std::string& relativePath)
 	}
 
 	m_handleToUUID[id]         = handle;
+	m_assetTypeIndex[id]       = type;
 	m_pathToUUID[relativePath] = id;
 	return id;
 }
@@ -316,7 +317,8 @@ HE::UUID ContentManager::registerRuntimeAsset(SlotMap<T>& map, T asset, HE::Asse
 	const std::string path = asset.path;
 
 	SlotHandle handle = map.insert(std::move(asset));
-	m_handleToUUID[id] = handle;
+	m_handleToUUID[id]   = handle;
+	m_assetTypeIndex[id] = type;
 	if (!path.empty())
 		m_pathToUUID[path] = id; // virtual path, optional
 	return id;
@@ -381,6 +383,7 @@ bool ContentManager::unloadAsset(HE::UUID id)
 	for (auto pit = m_pathToUUID.begin(); pit != m_pathToUUID.end(); ++pit)
 		if (pit->second == id) { m_pathToUUID.erase(pit); break; }
 	m_handleToUUID.erase(id);
+	m_assetTypeIndex.erase(id);
 	return true;
 }
 
@@ -393,6 +396,25 @@ bool ContentManager::isLoaded(HE::UUID id) const
 bool ContentManager::isLoaded(const std::string& relativePath) const
 {
 	return m_pathToUUID.contains(relativePath);
+}
+
+// ─── Asset enumeration ───────────────────────────────────────────────────────
+std::vector<HE::UUID> ContentManager::enumerateIds() const
+{
+	std::vector<HE::UUID> out;
+	out.reserve(m_handleToUUID.size());
+	for (const auto& [id, _] : m_handleToUUID)
+		out.push_back(id);
+	return out;
+}
+
+std::vector<HE::UUID> ContentManager::enumerateIds(HE::AssetType type) const
+{
+	std::vector<HE::UUID> out;
+	for (const auto& [id, t] : m_assetTypeIndex)
+		if (t == type)
+			out.push_back(id);
+	return out;
 }
 
 // ─── initDefaultAssets ───────────────────────────────────────────────────────
