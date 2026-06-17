@@ -187,6 +187,7 @@ struct VSOut {
 	float  hasTexture;
 	float  metallic;
 	float  roughness;
+	float  opacity;
 };
 
 vertex VSOut vertexMain(uint vid [[vertex_id]],
@@ -204,6 +205,7 @@ vertex VSOut vertexMain(uint vid [[vertex_id]],
 	out.hasTexture = u.flags.x;
 	out.metallic   = u.pbr.x;
 	out.roughness  = u.pbr.y;
+	out.opacity    = u.pbr.z;
 	return out;
 }
 
@@ -281,7 +283,7 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
 	{
 		float3 L    = normalize(float3(0.5, 0.8, 0.6));
 		float  diff = 0.35 + 0.65 * max(dot(N, L), 0.0);
-		return float4(albedo * diff, 1.0);
+		return float4(albedo * diff, in.opacity);
 	}
 
 	// Metallic-roughness split (matches the GL backend).
@@ -343,7 +345,7 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
 		        * l.colorIntensity.rgb * l.colorIntensity.w * atten * sh;
 	}
 	result = applyFog(result, scene.cameraPos.xyz, in.worldPos, scene.sunDir.xyz, scene.fog.xy);
-	return float4(result, 1.0);
+	return float4(result, in.opacity);
 }
 )MSL";
 
@@ -1268,6 +1270,7 @@ void MetalRenderer::Shutdown()
 	if (m_cubeVertexBuf)   { CFBridgingRelease(m_cubeVertexBuf);   m_cubeVertexBuf = nullptr; }
 	if (m_cubeIndexBuf)    { CFBridgingRelease(m_cubeIndexBuf);    m_cubeIndexBuf = nullptr; }
 	if (m_scenePipeline)   { CFBridgingRelease(m_scenePipeline);   m_scenePipeline = nullptr; }
+	if (m_sceneBlendPipeline) { CFBridgingRelease(m_sceneBlendPipeline); m_sceneBlendPipeline = nullptr; }
 	if (m_sceneDepthState) { CFBridgingRelease(m_sceneDepthState); m_sceneDepthState = nullptr; }
 	if (m_shadowPipeline)  { CFBridgingRelease(m_shadowPipeline);  m_shadowPipeline = nullptr; }
 	if (m_shadowDepthTex)  { CFBridgingRelease(m_shadowDepthTex);  m_shadowDepthTex = nullptr; }
@@ -1342,6 +1345,21 @@ void MetalRenderer::CreateScenePipeline()
 			throw std::runtime_error(std::string("MetalRenderer: pipeline creation failed: ")
 				+ (error ? [[error localizedDescription] UTF8String] : "unknown"));
 		m_scenePipeline = (void*)CFBridgingRetain(pso);
+
+		// Alpha-blended variant of the scene pipeline for the transparency pass
+		// (same shaders, src-alpha / one-minus-src-alpha over the HDR target).
+		desc.colorAttachments[0].blendingEnabled             = YES;
+		desc.colorAttachments[0].rgbBlendOperation           = MTLBlendOperationAdd;
+		desc.colorAttachments[0].alphaBlendOperation         = MTLBlendOperationAdd;
+		desc.colorAttachments[0].sourceRGBBlendFactor        = MTLBlendFactorSourceAlpha;
+		desc.colorAttachments[0].sourceAlphaBlendFactor      = MTLBlendFactorSourceAlpha;
+		desc.colorAttachments[0].destinationRGBBlendFactor   = MTLBlendFactorOneMinusSourceAlpha;
+		desc.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+		id<MTLRenderPipelineState> blendPso = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+		if (!blendPso)
+			throw std::runtime_error(std::string("MetalRenderer: blend pipeline creation failed: ")
+				+ (error ? [[error localizedDescription] UTF8String] : "unknown"));
+		m_sceneBlendPipeline = (void*)CFBridgingRetain(blendPso);
 
 		// ── HDR tonemap pipeline (RGBA16F scene color → swapchain LDR) ──────
 		NSError* tmError = nil;
@@ -1846,7 +1864,7 @@ bool MetalRenderer::ResolveMaterialTexture(const HE::UUID& materialId, void*& ou
 }
 
 bool MetalRenderer::ResolveMaterialParams(const HE::UUID& materialId,
-	glm::vec3& outBaseColor, float& outMetallic, float& outRoughness)
+	glm::vec3& outBaseColor, float& outMetallic, float& outRoughness, float& outOpacity)
 {
 	if (materialId == HE::UUID{} || !m_contentManager)
 		return false;
@@ -1856,6 +1874,7 @@ bool MetalRenderer::ResolveMaterialParams(const HE::UUID& materialId,
 	outBaseColor = glm::vec3(mat->baseColor[0], mat->baseColor[1], mat->baseColor[2]);
 	outMetallic  = mat->metallic;
 	outRoughness = mat->roughness;
+	outOpacity   = mat->opacity;
 	return true;
 }
 
@@ -2526,28 +2545,34 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:3];
 
 	// ── Lights (clamped to the shader's 8) ──────────────────────────────────
+	// Kept at function scope so the transparency pass below can re-bind it after
+	// the sky pass clobbers the fragment buffer.
+	SceneUniforms scene;
+	scene.cameraPos  = glm::vec4(m_renderWorld.camera.position, 1.0f);
+	scene.lightCount = std::min(static_cast<int>(m_renderWorld.lights.size()), 8);
+	for (int i = 0; i < scene.lightCount; ++i)
 	{
-		SceneUniforms scene;
-		scene.cameraPos  = glm::vec4(m_renderWorld.camera.position, 1.0f);
-		scene.lightCount = std::min(static_cast<int>(m_renderWorld.lights.size()), 8);
-		for (int i = 0; i < scene.lightCount; ++i)
-		{
-			const LightData& l = m_renderWorld.lights[i];
-			scene.lights[i].posType        = glm::vec4(l.position,  static_cast<float>(l.type));
-			scene.lights[i].dirSpot        = glm::vec4(l.direction, l.spotAngleCos);
-			scene.lights[i].colorIntensity = glm::vec4(l.color,     l.intensity);
-			scene.lights[i].params         = glm::vec4(l.range, 0.0f, 0.0f, 0.0f);
-		}
-		scene.lightVP       = kMetalClipFix * m_renderWorld.shadow.viewProj;
-		scene.shadowEnabled = shadows ? 1 : 0;
-		scene.sunDir        = glm::vec4(sunDir, 0.0f);
-		scene.ambient       = glm::vec4(m_renderWorld.ambient, 0.0f);
-		scene.fog           = glm::vec4(GetEnvironment().fogDensity,
-		                                GetEnvironment().fogHeightFalloff, 0.0f, 0.0f);
-		scene.viewport      = glm::vec4(static_cast<float>(width), static_cast<float>(height),
-		                                ssaoActive ? 1.0f : 0.0f, 0.0f);
-		[encoder setFragmentBytes:&scene length:sizeof(scene) atIndex:0];
+		const LightData& l = m_renderWorld.lights[i];
+		scene.lights[i].posType        = glm::vec4(l.position,  static_cast<float>(l.type));
+		scene.lights[i].dirSpot        = glm::vec4(l.direction, l.spotAngleCos);
+		scene.lights[i].colorIntensity = glm::vec4(l.color,     l.intensity);
+		scene.lights[i].params         = glm::vec4(l.range, 0.0f, 0.0f, 0.0f);
 	}
+	scene.lightVP       = kMetalClipFix * m_renderWorld.shadow.viewProj;
+	scene.shadowEnabled = shadows ? 1 : 0;
+	scene.sunDir        = glm::vec4(sunDir, 0.0f);
+	scene.ambient       = glm::vec4(m_renderWorld.ambient, 0.0f);
+	scene.fog           = glm::vec4(GetEnvironment().fogDensity,
+	                                GetEnvironment().fogHeightFalloff, 0.0f, 0.0f);
+	scene.viewport      = glm::vec4(static_cast<float>(width), static_cast<float>(height),
+	                                ssaoActive ? 1.0f : 0.0f, 0.0f);
+	[encoder setFragmentBytes:&scene length:sizeof(scene) atIndex:0];
+
+	// Transparent (opacity < 1) draws collected during the opaque loop and replayed
+	// sorted back-to-front, alpha-blended, after the sky.
+	struct TPDraw { UnlitUniforms u; void* vbuf; void* ibuf; NSUInteger indexCount; void* tex; float distSq; };
+	std::vector<TPDraw> transparent;
+	const glm::vec3 camPos = m_renderWorld.camera.position;
 
 	// Build this frame's draw calls through the render graph, then replay them.
 	// GeometryPass turns the sorted visible objects into DrawCalls; the encoder
@@ -2572,6 +2597,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 		HE::UUID  lastMatId{};        bool matValid = false;
 		void*     cOverrideTex = nullptr; bool cHasOverride = false;
 		glm::vec3 cBaseColor(1.0f);   float cMetallic = 0.0f, cRoughness = 0.5f; bool cHasMat = false;
+		float     cOpacity = 1.0f;
 		for (const DrawCall& dc : cmds.drawCalls())
 		{
 			UnlitUniforms u;
@@ -2585,11 +2611,11 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 			{
 				cOverrideTex = nullptr;
 				cHasOverride = ResolveMaterialTexture(dc.materialAssetId, cOverrideTex);
-				cBaseColor   = glm::vec3(1.0f); cMetallic = 0.0f; cRoughness = 0.5f;
-				cHasMat      = ResolveMaterialParams(dc.materialAssetId, cBaseColor, cMetallic, cRoughness);
+				cBaseColor   = glm::vec3(1.0f); cMetallic = 0.0f; cRoughness = 0.5f; cOpacity = 1.0f;
+				cHasMat      = ResolveMaterialParams(dc.materialAssetId, cBaseColor, cMetallic, cRoughness, cOpacity);
 				lastMatId    = dc.materialAssetId; matValid = true;
 			}
-			u.pbr = glm::vec4(cMetallic, cRoughness, 0.0f, 0.0f);
+			u.pbr = glm::vec4(cMetallic, cRoughness, cOpacity, 0.0f);
 
 			// Resolve the asset; entities without one fall back to the built-in cube.
 			if (!meshValid || dc.meshAssetId != lastMeshId)
@@ -2616,9 +2642,8 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 			}
 
 			void* effectiveTex = cHasOverride ? cOverrideTex : meshTex;
-			id<MTLTexture> texture = effectiveTex
-				? (__bridge id<MTLTexture>)effectiveTex
-				: (__bridge id<MTLTexture>)m_dummyTexture;
+			void* texPtr = effectiveTex ? effectiveTex : m_dummyTexture;
+			id<MTLTexture> texture = (__bridge id<MTLTexture>)texPtr;
 			u.flags = glm::vec4(effectiveTex ? 1.0f : 0.0f, 0, 0, 0);
 
 			// Base tint: material baseColor if assigned, else white when textured
@@ -2627,6 +2652,14 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 			if (!cHasMat)
 				baseColor = effectiveTex ? glm::vec3(1.0f) : glm::vec3(0.85f, 0.55f, 0.25f);
 			u.color = glm::vec4(baseColor, 1.0f);
+
+			if (cOpacity < 0.999f)
+			{
+				const glm::vec3 d = glm::vec3(dc.transform[3]) - camPos;
+				transparent.push_back({ u, (__bridge void*)vertexBuf, (__bridge void*)indexBuf,
+				                        indexCount, texPtr, glm::dot(d, d) });
+				continue; // drawn in the transparency pass below
+			}
 
 			[encoder setVertexBuffer:vertexBuf offset:0 atIndex:0];
 			[encoder setVertexBytes:&u length:sizeof(u) atIndex:1];
@@ -2641,6 +2674,37 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 
 	// Sky LAST — fills the background pixels the geometry didn't cover.
 	drawSky();
+
+	// ── Transparency pass: sorted, alpha-blended draws over the opaque scene +
+	// sky. Back-to-front; depth-tested against the opaque geometry but no depth
+	// write (reuses the sky's LessEqual/no-write state). The sky pass clobbered the
+	// fragment bindings, so re-bind the scene's shadow/ambient/AO state + uniforms.
+	if (!transparent.empty())
+	{
+		std::sort(transparent.begin(), transparent.end(),
+		          [](const TPDraw& a, const TPDraw& b) { return a.distSq > b.distSq; });
+		[encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_sceneBlendPipeline];
+		[encoder setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_skyDepthState]; // LessEqual, no write
+		[encoder setFragmentBytes:&scene length:sizeof(scene) atIndex:0];
+		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
+		[encoder setFragmentTexture:(__bridge id<MTLTexture>)(shadows ? m_shadowDepthTex : m_dummyTexture) atIndex:1];
+		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:1];
+		[encoder setFragmentTexture:(__bridge id<MTLTexture>)m_skyEnvCube atIndex:2];
+		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:2];
+		[encoder setFragmentTexture:(__bridge id<MTLTexture>)(ssaoActive ? m_ssaoResult : m_dummyTexture) atIndex:3];
+		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:3];
+		for (const TPDraw& t : transparent)
+		{
+			[encoder setVertexBuffer:(__bridge id<MTLBuffer>)t.vbuf offset:0 atIndex:0];
+			[encoder setVertexBytes:&t.u length:sizeof(t.u) atIndex:1];
+			[encoder setFragmentTexture:(__bridge id<MTLTexture>)t.tex atIndex:0];
+			[encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+			                    indexCount:t.indexCount
+			                     indexType:MTLIndexTypeUInt32
+			                   indexBuffer:(__bridge id<MTLBuffer>)t.ibuf
+			             indexBufferOffset:0];
+		}
+	}
 }
 
 void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool isPrimary)

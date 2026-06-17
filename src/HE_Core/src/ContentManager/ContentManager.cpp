@@ -129,6 +129,7 @@ HE::UUID ContentManager::loadAsset(const std::string& relativePath)
 			HAsset::Reader::readPOD(c->data,o,a.baseColor[2]);
 			HAsset::Reader::readPOD(c->data,o,a.metallic);
 			HAsset::Reader::readPOD(c->data,o,a.roughness);
+			HAsset::Reader::readPOD(c->data,o,a.opacity); // optional tail; defaults to 1.0
 		}
 		handle = m_materialAssets.insert(std::move(a)); break;
 	}
@@ -229,6 +230,7 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 		std::vector<uint8_t> b; HAsset::Writer::appendString(b,a.shaderPath); HAsset::Writer::appendVec(b,a.texturePaths);
 		HAsset::Writer::appendPOD(b,a.baseColor[0]); HAsset::Writer::appendPOD(b,a.baseColor[1]); HAsset::Writer::appendPOD(b,a.baseColor[2]);
 		HAsset::Writer::appendPOD(b,a.metallic); HAsset::Writer::appendPOD(b,a.roughness);
+		HAsset::Writer::appendPOD(b,a.opacity);
 		w.addChunk(HAsset::CHUNK_MTRL,b.data(),b.size());
 		break;
 	}

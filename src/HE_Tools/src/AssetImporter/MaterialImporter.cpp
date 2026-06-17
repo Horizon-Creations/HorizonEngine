@@ -40,6 +40,7 @@ std::unique_ptr<MaterialAsset> MaterialImporter::import(
 			asset->baseColor[i] = (*bc)[i].get<float>();
 	asset->metallic  = j.value("metallic",  asset->metallic);
 	asset->roughness = j.value("roughness", asset->roughness);
+	asset->opacity   = j.value("opacity",   asset->opacity);
 
 	if (!Importer::writeAsset(*asset, contentRoot))
 		return nullptr;

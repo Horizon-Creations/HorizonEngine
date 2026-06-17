@@ -50,6 +50,10 @@ struct MaterialAsset : public RuntimeAsset
 	float baseColor[3] = { 1.0f, 1.0f, 1.0f };
 	float metallic     = 0.0f;
 	float roughness    = 0.5f;
+	// Surface opacity (1 = fully opaque). Below 1 the object is drawn in the
+	// sorted, alpha-blended transparency pass instead of the opaque pass.
+	// Appended after the PBR scalars (same backward-compatible MTRL tail).
+	float opacity      = 1.0f;
 };
 
 struct SceneAsset : public RuntimeAsset

@@ -7,6 +7,7 @@
 #include <cstring>
 #include <cstdint>
 #include <vector>
+#include <algorithm>
 #include <Diagnostics/Logger.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/type_ptr.hpp>
@@ -175,6 +176,7 @@ uniform bool      uHasTexture;
 uniform sampler2D uTexture;
 uniform float     uMetallic;    // 0 dielectric … 1 metal
 uniform float     uRoughness;   // 0 mirror … 1 fully rough
+uniform float     uOpacity;     // surface alpha (1 = opaque; < 1 = blended pass)
 uniform vec3      uSunDir;      // direction toward the sun (for image-based ambient)
 uniform samplerCube uSkyEnv;   // baked skyColor cubemap (image-based ambient)
 uniform vec3      uAmbient;     // flat ambient fill (never-black floor + overcast)
@@ -248,7 +250,7 @@ void main()
 	{
 		vec3  L    = normalize(vec3(0.5, 0.8, 0.6));
 		float diff = 0.35 + 0.65 * max(dot(N, L), 0.0);
-		FragColor  = vec4(albedo * diff, 1.0);
+		FragColor  = vec4(albedo * diff, uOpacity);
 		return;
 	}
 
@@ -310,7 +312,7 @@ void main()
 		        * uLightColor[i].rgb * uLightColor[i].w * atten * sh;
 	}
 	result = applyFog(result, uCameraPos, vWorldPos, uSunDir);
-	FragColor = vec4(result, 1.0);
+	FragColor = vec4(result, uOpacity);
 }
 )GLSL";
 
@@ -1166,6 +1168,7 @@ void OpenGLRenderer::CreateUnlitPipeline()
 	m_uTexture     = glGetUniformLocation(m_unlitProgram, "uTexture");
 	m_uMetallic    = glGetUniformLocation(m_unlitProgram, "uMetallic");
 	m_uRoughness   = glGetUniformLocation(m_unlitProgram, "uRoughness");
+	m_uOpacity     = glGetUniformLocation(m_unlitProgram, "uOpacity");
 	m_uLightCount  = glGetUniformLocation(m_unlitProgram, "uLightCount");
 	m_uLightPos    = glGetUniformLocation(m_unlitProgram, "uLightPos");
 	m_uLightDir    = glGetUniformLocation(m_unlitProgram, "uLightDir");
@@ -1960,7 +1963,7 @@ bool OpenGLRenderer::ResolveMaterialTexture(const HE::UUID& materialId, unsigned
 }
 
 bool OpenGLRenderer::ResolveMaterialParams(const HE::UUID& materialId,
-	glm::vec3& outBaseColor, float& outMetallic, float& outRoughness)
+	glm::vec3& outBaseColor, float& outMetallic, float& outRoughness, float& outOpacity)
 {
 	if (materialId == HE::UUID{} || !m_contentManager)
 		return false;
@@ -1970,6 +1973,7 @@ bool OpenGLRenderer::ResolveMaterialParams(const HE::UUID& materialId,
 	outBaseColor = glm::vec3(mat->baseColor[0], mat->baseColor[1], mat->baseColor[2]);
 	outMetallic  = mat->metallic;
 	outRoughness = mat->roughness;
+	outOpacity   = mat->opacity;
 	return true;
 }
 
@@ -2366,21 +2370,26 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		HE::UUID       lastMatId{};       bool matValid = false;
 		unsigned int   cOverrideTex = 0;  bool cHasOverride = false;
 		glm::vec3      cBaseColor(1.0f);  float cMetallic = 0.0f, cRoughness = 0.5f; bool cHasMat = false;
+		float          cOpacity = 1.0f;
 
+		// Transparent (opacity < 1) draws are deferred to a sorted, alpha-blended
+		// pass after the opaque geometry + sky so they composite correctly.
+		struct TPDraw { glm::mat4 mvp, model; glm::vec3 baseColor; float metallic, roughness, opacity;
+		                unsigned int tex, vao; int indexCount; float distSq; };
+		std::vector<TPDraw> transparent;
+		const glm::vec3 camPos = m_renderWorld.camera.position;
+
+		glUniform1f(m_uOpacity, 1.0f); // opaque pass writes alpha 1
 		for (const DrawCall& dc : cmds.drawCalls())
 		{
-			const glm::mat4 mvp = viewProj * dc.transform;
-			glUniformMatrix4fv(m_uMVP,   1, GL_FALSE, glm::value_ptr(mvp));
-			glUniformMatrix4fv(m_uModel, 1, GL_FALSE, glm::value_ptr(dc.transform));
-
 			// An explicit MaterialComponent override wins over the mesh's own
 			// base-color texture; otherwise fall back to the mesh's (or none).
 			// PBR scalars come from the material override; defaults otherwise.
 			if (!matValid || dc.materialAssetId != lastMatId)
 			{
 				cHasOverride = ResolveMaterialTexture(dc.materialAssetId, cOverrideTex);
-				cBaseColor   = glm::vec3(1.0f); cMetallic = 0.0f; cRoughness = 0.5f;
-				cHasMat      = ResolveMaterialParams(dc.materialAssetId, cBaseColor, cMetallic, cRoughness);
+				cBaseColor   = glm::vec3(1.0f); cMetallic = 0.0f; cRoughness = 0.5f; cOpacity = 1.0f;
+				cHasMat      = ResolveMaterialParams(dc.materialAssetId, cBaseColor, cMetallic, cRoughness, cOpacity);
 				lastMatId    = dc.materialAssetId; matValid = true;
 			}
 
@@ -2399,15 +2408,29 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glm::vec3 baseColor = cBaseColor;
 			if (!cHasMat)
 				baseColor = (tex != 0) ? glm::vec3(1.0f) : glm::vec3(0.85f, 0.55f, 0.25f);
+
+			const unsigned int vao        = mesh ? mesh->vao : m_cubeVAO;
+			const int          indexCount = mesh ? mesh->indexCount : m_cubeIndexCount;
+
+			if (cOpacity < 0.999f)
+			{
+				const glm::vec3 d = glm::vec3(dc.transform[3]) - camPos;
+				transparent.push_back({ viewProj * dc.transform, dc.transform, baseColor,
+				                        cMetallic, cRoughness, cOpacity, tex, vao, indexCount,
+				                        glm::dot(d, d) });
+				continue; // drawn in the transparency pass below
+			}
+
+			glUniformMatrix4fv(m_uMVP,   1, GL_FALSE, glm::value_ptr(viewProj * dc.transform));
+			glUniformMatrix4fv(m_uModel, 1, GL_FALSE, glm::value_ptr(dc.transform));
 			glUniform3fv(m_uColor, 1, glm::value_ptr(baseColor));
 			glUniform1f(m_uMetallic,  cMetallic);
 			glUniform1f(m_uRoughness, cRoughness);
 
-			glBindVertexArray(mesh ? mesh->vao : m_cubeVAO);
+			glBindVertexArray(vao);
 			glUniform1i(m_uHasTexture, tex != 0);
 			glBindTexture(GL_TEXTURE_2D, tex);
-			glDrawElements(GL_TRIANGLES, mesh ? mesh->indexCount : m_cubeIndexCount,
-			               GL_UNSIGNED_INT, nullptr);
+			glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, nullptr);
 		}
 
 		// ── Skybox (drawn LAST): fill the remaining background with the procedural
@@ -2451,6 +2474,38 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glDrawArrays(GL_TRIANGLES, 0, 3);
 			glDepthFunc(GL_LESS);   // restore default for the next pass
 			glDepthMask(GL_TRUE);
+		}
+
+		// ── Transparency pass: sorted alpha-blended draws over the opaque scene +
+		// sky. Back-to-front so the blend order is correct; depth-tested against the
+		// opaque geometry (so transparent surfaces are occluded by closer solids)
+		// but no depth write (so they don't occlude each other). The scene program's
+		// per-frame uniforms (lights, ambient, shadow, AO) persist from the opaque
+		// pass; only the per-draw material + alpha change.
+		if (!transparent.empty())
+		{
+			std::sort(transparent.begin(), transparent.end(),
+			          [](const TPDraw& a, const TPDraw& b) { return a.distSq > b.distSq; });
+			glUseProgram(m_unlitProgram); // sky switched the active program
+			glEnable(GL_BLEND);
+			glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+			glDepthMask(GL_FALSE);
+			glActiveTexture(GL_TEXTURE0);
+			for (const TPDraw& t : transparent)
+			{
+				glUniformMatrix4fv(m_uMVP,   1, GL_FALSE, glm::value_ptr(t.mvp));
+				glUniformMatrix4fv(m_uModel, 1, GL_FALSE, glm::value_ptr(t.model));
+				glUniform3fv(m_uColor, 1, glm::value_ptr(t.baseColor));
+				glUniform1f(m_uMetallic,  t.metallic);
+				glUniform1f(m_uRoughness, t.roughness);
+				glUniform1f(m_uOpacity,   t.opacity);
+				glUniform1i(m_uHasTexture, t.tex != 0);
+				glBindVertexArray(t.vao);
+				glBindTexture(GL_TEXTURE_2D, t.tex);
+				glDrawElements(GL_TRIANGLES, t.indexCount, GL_UNSIGNED_INT, nullptr);
+			}
+			glDepthMask(GL_TRUE);
+			glDisable(GL_BLEND);
 		}
 	});
 

@@ -1095,3 +1095,35 @@ abdunkelt (Direktlicht bleibt unberührt). Toggle + Radius/Intensität in den Pr
   den mittleren Cubes (bis −28, ~2380 Pixel), saubere Flächen (Blur), keine Halos. **GL == Metal**:
   on 0.02 % / strong 0.04 % der Pixel verändert — kaum über dem vorbestehenden Sky-Präzisions-Floor
   (0.01 % schon ohne SSAO). 35 Tests grün.
+
+### Forts. 15 — Transparenz-Pass (3.10) auf GL + Metal
+
+> **Aufgabe:** Sortiertes Alpha-Blending als eigener Pass (autonom als nächster offener Phase-3-Punkt
+> nach FXAA/SSAO gewählt). ✅ (GL+Metal)
+
+**Transparenz (3.10) — material-getriebenes, sortiertes Alpha-Blending nach Opaque + Sky.**
+Material-`opacity` (1 = opak) routet ein Objekt in einen separaten, back-to-front sortierten,
+alpha-geblendeten Pass, der über die opake Szene **und** den Himmel composited.
+
+- **Material-Opacity:** `MaterialAsset.opacity` (Default 1.0) — an den MTRL-Chunk-Tail angehängt
+  (rückwärtskompatibel via `readPOD`, ältere Materialien = 1.0), `MaterialImporter` liest optionales
+  JSON `opacity`. Inspector „Surface" → Opacity-Slider.
+- **Pass-Aufbau:** Während der Geometrie-Schleife wird pro Draw die Opacity aufgelöst (memoized, wie
+  metallic/roughness); `opacity ≥ 1` → sofort opak gezeichnet, `< 1` → in eine Transparenz-Liste
+  (mit Kamera-Distanz²) gestasht. Reihenfolge: **opake Geometrie (Depth-Write an) → Sky → transparente
+  Objekte** back-to-front sortiert, `SRC_ALPHA/ONE_MINUS_SRC_ALPHA`, **Depth-Test an, Depth-Write aus**
+  (transparente Flächen werden von näheren Soliden verdeckt, verdecken sich aber nicht gegenseitig).
+  Transparente liegen im HDR-Target → bekommen Bloom/Tonemap.
+- **Shader:** `uOpacity` (GL) / `pbr.z`→VSOut.opacity (Metal) wird die Fragment-Alpha (beide
+  Light-Pfade). Opaker Pass schreibt Alpha 1.
+- **Backend-Spezifika:** GL — `glEnable(GL_BLEND)` + `glDepthMask(FALSE)` für den zweiten Loop, der
+  die persistenten Scene-Programm-Uniforms wiederverwendet. Metal — **zweite Pipeline-Variante**
+  `m_sceneBlendPipeline` (gleiche Shader, `blendingEnabled`), `m_skyDepthState` (LessEqual/no-write)
+  reused; nach dem Sky-Pass die Fragment-Bindings (SceneUniforms/Shadow/SkyEnv/AO) neu setzen, da der
+  Sky-Pass sie überschrieben hat. `SceneUniforms` dafür in den Funktions-Scope gehoben.
+- **Verifiziert (Headless-Dumps, erzwungene Opacity 0.45 über alle Cubes):** Cubes klar
+  halbtransparent, Himmel scheint durch (korrektes Blending). **GL == Metal** (0.01 % Pixel verändert,
+  121 px — Sky-Präzisions-Floor). Opak-Default (kein transparentes Material) **byte-gleich** zum
+  Vor-Transparenz-Stand (GL 2 / Metal 7 px = Wolken-Drift) → voll opt-in, kein Regress. 35 Tests grün.
+  **OIT bleibt Kür (P7); D3D/Vulkan = nächster blinder Windows-Port** (RenderObject/DrawCall
+  unverändert, ignorieren die Opacity dort).

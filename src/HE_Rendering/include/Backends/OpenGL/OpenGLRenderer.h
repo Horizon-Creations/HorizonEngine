@@ -68,11 +68,12 @@ private:
 	// false when the UUID is null or the material is not loaded yet.
 	bool ResolveMaterialTexture(const HE::UUID& materialId, unsigned int& outTex);
 
-	// Resolves a material override's PBR scalars (baseColor/metallic/roughness).
-	// Returns true if the material is loaded; leaves the outputs untouched
-	// otherwise (caller keeps its defaults).
+	// Resolves a material override's PBR scalars (baseColor/metallic/roughness/
+	// opacity). Returns true if the material is loaded; leaves the outputs
+	// untouched otherwise (caller keeps its defaults).
 	bool ResolveMaterialParams(const HE::UUID& materialId,
-	                           glm::vec3& outBaseColor, float& outMetallic, float& outRoughness);
+	                           glm::vec3& outBaseColor, float& outMetallic, float& outRoughness,
+	                           float& outOpacity);
 
 	SDL_Window* m_primarySdlWindow = nullptr;   // needed to restore current context
 	void*       m_glContext        = nullptr;   // borrowed — owned by primary HE::Window
@@ -100,6 +101,7 @@ private:
 	int          m_uTexture       = -1;
 	int          m_uMetallic      = -1;
 	int          m_uRoughness     = -1;
+	int          m_uOpacity       = -1;   // surface alpha (transparency pass)
 	int          m_uLightCount    = -1;
 	int          m_uLightPos      = -1;
 	int          m_uLightDir      = -1;
