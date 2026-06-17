@@ -196,7 +196,7 @@ endif()
 # the dependency must never leak to consumers of HorizonRendering.
 target_link_libraries(HorizonRendering
     PUBLIC  HorizonCore
-    PRIVATE ${HR_BACKENDS} glm::glm SDL3::SDL3 HorizonScene
+    PRIVATE ${HR_BACKENDS} SDL3::SDL3 HorizonScene
 )
 target_compile_definitions(HorizonRendering
     PRIVATE HE_RENDERING_BUILD_DLL
