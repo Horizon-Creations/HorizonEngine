@@ -10,6 +10,9 @@
 #include <vector>
 #include <unordered_map>
 
+// Forward-declare so ContentManager can use it as a return type.
+template<typename T> class AssetRef;
+
 class HE_API ContentManager
 {
 public:
@@ -70,6 +73,24 @@ public:
 	// editor opens a project). Previously loaded assets stay registered.
 	void setContentRoot(std::string root) { m_contentRoot = std::move(root); }
 
+	// ── Pin-based ref-counted access ──────────────────────────────────────
+	// Returns a handle that keeps the asset pinned in memory for as long as it
+	// is alive (RAII). unloadAsset() returns false while any handle is alive,
+	// preventing use-after-free in the renderer and enabling safe LRU eviction.
+	// The handle is null (operator bool() == false) when the UUID is unknown.
+	AssetRef<StaticMeshAsset>   acquireStaticMesh(HE::UUID id);
+	AssetRef<SkeletalMeshAsset> acquireSkeletalMesh(HE::UUID id);
+	AssetRef<TextureAsset>      acquireTexture(HE::UUID id);
+	AssetRef<MaterialAsset>     acquireMaterial(HE::UUID id);
+	AssetRef<AudioAsset>        acquireAudio(HE::UUID id);
+	AssetRef<ScriptAsset>       acquireScript(HE::UUID id);
+	AssetRef<ShaderAsset>       acquireShader(HE::UUID id);
+
+	// Pin bookkeeping — called by AssetRef; do not call directly.
+	void pinAsset(HE::UUID id);
+	void unpinAsset(HE::UUID id);
+	bool isPinned(HE::UUID id) const;
+
 	// ── Asset enumeration ──────────────────────────────────────────────────
 	// Returns the UUIDs of all currently loaded/registered assets.
 	std::vector<HE::UUID> enumerateIds() const;
@@ -108,4 +129,78 @@ private:
 	std::unordered_map<HE::UUID, HE::AssetType>                          m_assetTypeIndex; // mirrors m_handleToUUID with type info
 	std::unordered_map<std::string, HE::UUID>                            m_pathToUUID;
 	std::unordered_map<std::string, std::filesystem::file_time_type>     m_pathMtime;      // disk mtime at last load
+	std::unordered_map<HE::UUID, int>                                    m_pinCounts;      // active AssetRef handles per asset
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AssetRef<T> — RAII pin handle returned by ContentManager::acquireXxx()
+//
+// Calling acquireXxx() increments an internal pin counter; the counter
+// decrements when the last AssetRef for that UUID is destroyed. While any
+// AssetRef is alive, ContentManager::unloadAsset() returns false for that
+// UUID, preventing use-after-free. The raw pointer is guaranteed stable for
+// the lifetime of the handle (as long as the ContentManager outlives it).
+// ─────────────────────────────────────────────────────────────────────────────
+template<typename T>
+class AssetRef {
+public:
+    AssetRef() = default;
+
+    // Internal constructor — called by ContentManager::acquireXxx().
+    // Pins the asset only when ptr is non-null (null means UUID not found).
+    AssetRef(ContentManager* cm, HE::UUID id, const T* ptr)
+        : m_cm(ptr ? cm : nullptr), m_id(id), m_ptr(ptr)
+    {
+        if (m_cm) m_cm->pinAsset(m_id);
+    }
+
+    AssetRef(const AssetRef& o)
+        : m_cm(o.m_cm), m_id(o.m_id), m_ptr(o.m_ptr)
+    {
+        if (m_cm) m_cm->pinAsset(m_id);
+    }
+
+    AssetRef(AssetRef&& o) noexcept
+        : m_cm(o.m_cm), m_id(o.m_id), m_ptr(o.m_ptr)
+    {
+        o.m_cm  = nullptr;
+        o.m_ptr = nullptr;
+    }
+
+    ~AssetRef() { reset(); }
+
+    AssetRef& operator=(AssetRef o) noexcept
+    {
+        std::swap(m_cm,  o.m_cm);
+        std::swap(m_id,  o.m_id);
+        std::swap(m_ptr, o.m_ptr);
+        return *this;
+    }
+
+    void reset()
+    {
+        if (m_cm) m_cm->unpinAsset(m_id);
+        m_cm  = nullptr;
+        m_ptr = nullptr;
+    }
+
+    const T*  get()          const { return m_ptr; }
+    const T*  operator->()   const { return m_ptr; }
+    const T&  operator*()    const { return *m_ptr; }
+    explicit  operator bool() const { return m_ptr != nullptr; }
+    HE::UUID  id()           const { return m_id; }
+
+private:
+    ContentManager* m_cm  = nullptr;
+    HE::UUID        m_id  = {};
+    const T*        m_ptr = nullptr;
+};
+
+// Inline definitions of acquireXxx — placed here so AssetRef<T> is complete.
+inline AssetRef<StaticMeshAsset>   ContentManager::acquireStaticMesh(HE::UUID id)   { return { this, id, getStaticMesh(id) }; }
+inline AssetRef<SkeletalMeshAsset> ContentManager::acquireSkeletalMesh(HE::UUID id) { return { this, id, getSkeletalMesh(id) }; }
+inline AssetRef<TextureAsset>      ContentManager::acquireTexture(HE::UUID id)      { return { this, id, getTexture(id) }; }
+inline AssetRef<MaterialAsset>     ContentManager::acquireMaterial(HE::UUID id)     { return { this, id, getMaterial(id) }; }
+inline AssetRef<AudioAsset>        ContentManager::acquireAudio(HE::UUID id)        { return { this, id, getAudio(id) }; }
+inline AssetRef<ScriptAsset>       ContentManager::acquireScript(HE::UUID id)       { return { this, id, getScript(id) }; }
+inline AssetRef<ShaderAsset>       ContentManager::acquireShader(HE::UUID id)       { return { this, id, getShader(id) }; }

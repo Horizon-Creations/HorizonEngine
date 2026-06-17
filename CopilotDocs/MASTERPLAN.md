@@ -111,7 +111,7 @@ Keine Abhängigkeiten; jede Woche ein bisschen davon.
 |---|---|---|---|
 | 0.1 | **Test-Gerüst** (doctest oder Catch2) | — | Zuerst: SlotMap, HAsset-Roundtrip, SceneSerializer-Roundtrip, ContentManager |
 | 0.2 | **CI** GitHub-Actions-Matrix (macOS + Windows, später Linux) | 0.1 | Build + Tests pro PR; verhindert Backend-Drift |
-| 0.3 | **`Ref<T>`** (intrusiver Refcount) + Einsatz im ContentManager | — | Voraussetzung für Asset-Unloading (6.4) und GPU-Eviction (3.7) |
+| 0.3 | **`Ref<T>`** (intrusiver Refcount) + Einsatz im ContentManager | — | ✅ Forts. 25 — `AssetRef<T>` + `pinAsset`/`unpinAsset` + `unloadAsset`-Gate |
 | 0.4 | **Job-System** (Thread-Pool, parallel_for, Abhängigkeits-Handles) | — | Voraussetzung für parallele Extraction (3.8), Async-Loading (6.4), Physik-Threading |
 | 0.5 | **Profiling-Hooks**: Tracy vendoren, Frame-/Zone-Marker | — | Früh einbauen ist billig, nachrüsten teuer |
 | 0.6 | **Aufräumen**: doppelte glm-Kopie (vendored + FetchContent) auf eine Quelle | — | klein |
@@ -1446,5 +1446,28 @@ Lifetime-sicher mit der bestehenden `SlotMap`/`m_handleToUUID`-Buchführung inte
   (±10 m, Schritt 1 m, grau) gezeichnet; wenn eine Entität selektiert ist, erscheint eine gelbe 1×1×1-Box
   um ihre Transform-Position.
 - **Tests:** 8 neue Doctest-Cases (`test_debug_draw.cpp`); alle 96 Tests grün (88→96), Build sauber.
-- **Nächster Schritt:** Phase 1 Asset-Pipeline — glTF-Import-Pipeline vervollständigen (Textur-/Material-
-  Serialisierung, asset_compiler), dann Editor-Phase 2 (SceneSerializer, Inspector-Erweiterungen).
+
+### Forts. 25 — `Ref<T>` + ContentManager-Integration (0.3)
+
+> **Aufgabe:** Sechster Fundament-Schritt — ref-gezählte Asset-Handles (`AssetRef<T>`) im ContentManager,
+> damit der Renderer Assets sicher pinnen kann und `unloadAsset` keine Nutzung-nach-Freigabe erzeugt. ✅
+
+- **`AssetRef<T>`** (Header-Only-Template, definiert am Ende von `ContentManager.h`):
+  - RAII-Handle: Konstruktor → `pinAsset(id)`, Destruktor → `unpinAsset(id)`.
+  - Null-sicher: wenn `acquireXxx(unknownUUID)` aufgerufen wird, ist `ptr == nullptr` → kein Pin.
+  - Kopieren erhöht den Pin-Zähler, Verschieben überträgt den Pin ohne Doppelzählung.
+  - API: `get()`, `operator->()`, `operator*()`, `operator bool()`, `id()`, `reset()`.
+- **Pin-Buchhaltung** (`ContentManager`):
+  - `m_pinCounts: unordered_map<UUID, int>` — Zähler pro Asset.
+  - `pinAsset(id)`: Zähler inkrementieren.
+  - `unpinAsset(id)`: Zähler dekrementieren; bei 0 wird der Eintrag entfernt.
+  - `isPinned(id)`: prüft ob Zähler > 0 vorhanden.
+- **`unloadAsset` gated**: frühes `return false` wenn `isPinned(id)` — kein Evict eines genutzten Assets.
+- **`acquireXxx`-Methoden** (7 Stück, inline nach `AssetRef`-Definition):
+  `acquireStaticMesh`, `acquireSkeletalMesh`, `acquireTexture`, `acquireMaterial`,
+  `acquireAudio`, `acquireScript`, `acquireShader` — jede ruft `getXxx` und baut einen `AssetRef<T>`.
+- **Tests:** 7 neue Doctest-Cases in `test_contentmanager.cpp` (acquire valid/invalid, pin blockiert unload,
+  Copy-Sharing, Move-Transfer, reset, acquireTexture+Material). **103 Tests grün** (96→103), Build sauber.
+- **Schaltet frei:** GPU-Eviction (3.7), Async-Asset-Streaming (6.4) — Renderer kann Assets via
+  `AssetRef<T>` pinnen und ist sicher vor Use-after-free bei gleichzeitigem `unloadAsset`.
+- **Nächster Schritt:** 0.4 Job-System → parallele RenderExtractor-Extraktion; dann 0.5 Tracy-Profiling.

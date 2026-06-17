@@ -386,6 +386,107 @@ TEST_CASE("ContentManager pollHotReload detects a changed file and reloads it")
 	CHECK(cm.pollHotReload().empty());
 }
 
+// ── AssetRef (pin-based lifetime) ─────────────────────────────────────────────
+
+TEST_CASE("AssetRef acquireStaticMesh returns valid handle for existing asset")
+{
+	ContentManager cm;
+	auto ref = cm.acquireStaticMesh(HE::kDefaultCubeMeshId);
+	REQUIRE(ref);
+	CHECK(ref.id() == HE::kDefaultCubeMeshId);
+	CHECK(ref.get() != nullptr);
+	CHECK(ref->id == HE::kDefaultCubeMeshId);
+}
+
+TEST_CASE("AssetRef acquireStaticMesh returns null handle for unknown UUID")
+{
+	ContentManager cm;
+	auto ref = cm.acquireStaticMesh(HE::UUID::generate());
+	CHECK_FALSE(ref);
+	CHECK(ref.get() == nullptr);
+}
+
+TEST_CASE("AssetRef blocks unloadAsset while alive")
+{
+	TempContentDir dir;
+	ContentManager cm(dir.path.string());
+
+	StaticMeshAsset mesh;
+	mesh.name     = "pinned";
+	mesh.vertices = { 0,0,0, 1,0,0, 0,1,0 };
+	mesh.indices  = { 0, 1, 2 };
+	HE::UUID id = cm.registerStaticMesh(std::move(mesh));
+	REQUIRE(cm.isLoaded(id));
+
+	{
+		auto pin = cm.acquireStaticMesh(id);
+		REQUIRE(pin);
+		CHECK(cm.isPinned(id));
+		// unload must fail while the pin is alive
+		CHECK_FALSE(cm.unloadAsset(id));
+		CHECK(cm.isLoaded(id));
+	}
+
+	// pin went out of scope — should succeed now
+	CHECK_FALSE(cm.isPinned(id));
+	CHECK(cm.unloadAsset(id));
+	CHECK_FALSE(cm.isLoaded(id));
+}
+
+TEST_CASE("AssetRef copy shares the pin; both must be released")
+{
+	ContentManager cm;
+	REQUIRE_FALSE(cm.isPinned(HE::kDefaultCubeMeshId));
+
+	auto a = cm.acquireStaticMesh(HE::kDefaultCubeMeshId);
+	CHECK(cm.isPinned(HE::kDefaultCubeMeshId));
+
+	{
+		auto b = a; // copy → pin count 2
+		CHECK(cm.isPinned(HE::kDefaultCubeMeshId));
+		CHECK(b.get() == a.get());
+	} // b destroyed → pin count 1, still pinned
+
+	CHECK(cm.isPinned(HE::kDefaultCubeMeshId));
+} // a destroyed → pin count 0
+
+TEST_CASE("AssetRef move transfers the pin without doubling it")
+{
+	ContentManager cm;
+
+	auto a = cm.acquireStaticMesh(HE::kDefaultCubeMeshId);
+	CHECK(a);
+	{
+		auto b = std::move(a); // move — a is now null
+		CHECK_FALSE(a);
+		CHECK(b);
+		CHECK(cm.isPinned(HE::kDefaultCubeMeshId));
+	} // b destroyed → pin released
+
+	CHECK_FALSE(cm.isPinned(HE::kDefaultCubeMeshId));
+}
+
+TEST_CASE("AssetRef reset releases the pin early")
+{
+	ContentManager cm;
+	auto ref = cm.acquireStaticMesh(HE::kDefaultCubeMeshId);
+	REQUIRE(ref);
+	ref.reset();
+	CHECK_FALSE(ref);
+	CHECK_FALSE(cm.isPinned(HE::kDefaultCubeMeshId));
+}
+
+TEST_CASE("AssetRef acquireTexture and acquireMaterial work on default assets")
+{
+	ContentManager cm;
+	auto tex = cm.acquireTexture(HE::kDefaultWhiteTextureId);
+	auto mat = cm.acquireMaterial(HE::kDefaultMaterialId);
+	REQUIRE(tex);
+	REQUIRE(mat);
+	CHECK(tex->width   == 1);
+	CHECK(mat->roughness == doctest::Approx(0.5f));
+}
+
 TEST_CASE("ContentManager pollHotReload ignores virtual mem:// paths")
 {
 	// Default manager has only mem:// assets — poll must not crash or signal any.
