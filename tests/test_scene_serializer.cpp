@@ -53,6 +53,14 @@ namespace
 		ScriptComponent sc;
 		sc.scriptAssetId = HE::UUID::generate();
 		sc.moduleName    = "spinner";
+		ScriptPropValue spd; spd.type = ScriptPropType::Float; spd.f = 3.5f;
+		ScriptPropValue lv;  lv.type  = ScriptPropType::Int;   lv.i  = 5;
+		ScriptPropValue vis; vis.type = ScriptPropType::Bool;   vis.b = true;
+		ScriptPropValue tag; tag.type = ScriptPropType::String; tag.s = "hero";
+		sc.properties["speed"]   = spd;
+		sc.properties["lives"]   = lv;
+		sc.properties["visible"] = vis;
+		sc.properties["tag"]     = tag;
 		world.addComponent(cube, sc);
 
 		return m.meshAssetId;
@@ -80,6 +88,18 @@ namespace
 			auto* sc = reg.try_get<ScriptComponent>(e);
 			REQUIRE(sc != nullptr);
 			CHECK(sc->moduleName == "spinner");
+			REQUIRE(sc->properties.count("speed"));
+			CHECK(sc->properties.at("speed").type == ScriptPropType::Float);
+			CHECK(sc->properties.at("speed").f == doctest::Approx(3.5f));
+			REQUIRE(sc->properties.count("lives"));
+			CHECK(sc->properties.at("lives").type == ScriptPropType::Int);
+			CHECK(sc->properties.at("lives").i == 5);
+			REQUIRE(sc->properties.count("visible"));
+			CHECK(sc->properties.at("visible").type == ScriptPropType::Bool);
+			CHECK(sc->properties.at("visible").b == true);
+			REQUIRE(sc->properties.count("tag"));
+			CHECK(sc->properties.at("tag").type == ScriptPropType::String);
+			CHECK(sc->properties.at("tag").s == "hero");
 		}
 		for (auto [e, c] : reg.view<CameraComponent>().each())
 		{

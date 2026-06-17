@@ -248,3 +248,9 @@ const std::string& ScriptContext::lastError() const
 {
     return m_engine.lastError();
 }
+
+void ScriptContext::injectProperties(ScriptEngine::InstanceId id,
+                                     const std::unordered_map<std::string, ScriptPropValue>& props)
+{
+    m_engine.injectProperties(id, props);
+}

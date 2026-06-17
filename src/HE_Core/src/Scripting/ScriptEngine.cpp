@@ -219,6 +219,99 @@ void ScriptEngine::setInstanceField(InstanceId id, const std::string& key, doubl
     lua_pop(m_L, 1);
 }
 
+void ScriptEngine::setInstanceField(InstanceId id, const std::string& key, bool value)
+{
+    auto it = m_instances.find(id);
+    if (it == m_instances.end()) return;
+    lua_rawgeti(m_L, LUA_REGISTRYINDEX, it->second.luaRef);
+    lua_pushboolean(m_L, value ? 1 : 0);
+    lua_setfield(m_L, -2, key.c_str());
+    lua_pop(m_L, 1);
+}
+
+void ScriptEngine::setInstanceField(InstanceId id, const std::string& key, const std::string& value)
+{
+    auto it = m_instances.find(id);
+    if (it == m_instances.end()) return;
+    lua_rawgeti(m_L, LUA_REGISTRYINDEX, it->second.luaRef);
+    lua_pushstring(m_L, value.c_str());
+    lua_setfield(m_L, -2, key.c_str());
+    lua_pop(m_L, 1);
+}
+
+void ScriptEngine::injectProperties(InstanceId id,
+                                    const std::unordered_map<std::string, ScriptPropValue>& props)
+{
+    for (const auto& [key, val] : props)
+    {
+        switch (val.type)
+        {
+        case ScriptPropType::Float:  setInstanceField(id, key, (double)val.f); break;
+        case ScriptPropType::Int:    setInstanceField(id, key, (double)val.i); break;
+        case ScriptPropType::Bool:   setInstanceField(id, key, val.b);         break;
+        case ScriptPropType::String: setInstanceField(id, key, val.s);         break;
+        }
+    }
+}
+
+std::vector<ScriptPropDef> ScriptEngine::getScriptProperties(const std::string& name) const
+{
+    std::vector<ScriptPropDef> result;
+    auto it = m_scripts.find(name);
+    if (it == m_scripts.end()) return result;
+
+    lua_rawgeti(m_L, LUA_REGISTRYINDEX, it->second.luaRef);
+    if (!lua_istable(m_L, -1)) { lua_pop(m_L, 1); return result; }
+
+    lua_getfield(m_L, -1, "properties");
+    if (!lua_istable(m_L, -1)) { lua_pop(m_L, 2); return result; }
+
+    int propIdx = lua_gettop(m_L);
+    lua_pushnil(m_L);
+    while (lua_next(m_L, propIdx) != 0)
+    {
+        if (lua_type(m_L, -2) == LUA_TSTRING)
+        {
+            ScriptPropDef def;
+            def.name = lua_tostring(m_L, -2);
+            int vt = lua_type(m_L, -1);
+            if (vt == LUA_TNUMBER)
+            {
+                if (lua_isinteger(m_L, -1))
+                {
+                    def.defaultVal.type = ScriptPropType::Int;
+                    def.defaultVal.i    = (int)lua_tointeger(m_L, -1);
+                }
+                else
+                {
+                    def.defaultVal.type = ScriptPropType::Float;
+                    def.defaultVal.f    = (float)lua_tonumber(m_L, -1);
+                }
+            }
+            else if (vt == LUA_TBOOLEAN)
+            {
+                def.defaultVal.type = ScriptPropType::Bool;
+                def.defaultVal.b    = lua_toboolean(m_L, -1) != 0;
+            }
+            else if (vt == LUA_TSTRING)
+            {
+                def.defaultVal.type = ScriptPropType::String;
+                def.defaultVal.s    = lua_tostring(m_L, -1);
+            }
+            else
+            {
+                lua_pop(m_L, 1);
+                continue;
+            }
+            result.push_back(std::move(def));
+        }
+        lua_pop(m_L, 1); // pop value, keep key for next iteration
+    }
+
+    lua_pop(m_L, 2); // pop properties table + module table
+    return result;
+}
+
 bool ScriptEngine::hotReloadScript(const std::string& name, const std::string& source)
 {
     auto it = m_scripts.find(name);

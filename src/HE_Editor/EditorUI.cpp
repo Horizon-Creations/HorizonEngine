@@ -1,6 +1,7 @@
 #include "EditorUI.h"
 #include "EditorApplication.h"
 #include <HorizonScene/HorizonScene.h>
+#include <Scripting/ScriptEngine.h>
 #include <ContentManager/HAsset.h>
 #include <ContentManager/ContentManager.h>
 #include <HorizonRendering/RenderExtractor.h>
@@ -3660,6 +3661,59 @@ void EditorUI::RenderInspector(AppContext& ctx)
 				ImGui::SetTooltip("Logical name matching ScriptEngine::loadScript(name, source).\n"
 				                  "Script must export onStart(self) and/or onUpdate(self, dt).");
 			ImGui::Checkbox("Enabled", &s->enabled); trackEdit();
+
+			// ── Declared properties (M.properties table) ──────────────────
+			if (ctx.propScriptEngine && ctx.contentManager && !s->moduleName.empty())
+			{
+				const ScriptAsset* asset = nullptr;
+				if (s->scriptAssetId != HE::UUID{})
+					asset = ctx.contentManager->getScript(s->scriptAssetId);
+				if (asset && !asset->sourceCode.empty())
+				{
+					if (!ctx.propScriptEngine->isScriptLoaded(s->moduleName))
+						ctx.propScriptEngine->loadScript(s->moduleName, asset->sourceCode);
+					auto defs = ctx.propScriptEngine->getScriptProperties(s->moduleName);
+					if (!defs.empty())
+					{
+						ImGui::Separator();
+						ImGui::TextDisabled("Properties");
+						for (const auto& def : defs)
+						{
+							auto it = s->properties.find(def.name);
+							if (it == s->properties.end())
+							{
+								s->properties[def.name] = def.defaultVal;
+								it = s->properties.find(def.name);
+							}
+							ScriptPropValue& val = it->second;
+							switch (val.type)
+							{
+							case ScriptPropType::Float:
+								if (ImGui::DragFloat(def.name.c_str(), &val.f, 0.1f)) trackEdit();
+								break;
+							case ScriptPropType::Int:
+								if (ImGui::DragInt(def.name.c_str(), &val.i)) trackEdit();
+								break;
+							case ScriptPropType::Bool:
+								if (ImGui::Checkbox(def.name.c_str(), &val.b)) trackEdit();
+								break;
+							case ScriptPropType::String:
+							{
+								char sbuf[256];
+								std::strncpy(sbuf, val.s.c_str(), sizeof(sbuf) - 1);
+								sbuf[sizeof(sbuf) - 1] = '\0';
+								if (ImGui::InputText(def.name.c_str(), sbuf, sizeof(sbuf)))
+								{
+									val.s = sbuf;
+									trackEdit();
+								}
+								break;
+							}
+							}
+						}
+					}
+				}
+			}
 		}
 		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<ScriptComponent>(entity); }
 	}

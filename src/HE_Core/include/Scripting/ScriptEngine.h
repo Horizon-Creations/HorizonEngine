@@ -1,7 +1,9 @@
 #pragma once
 #include "Types/Defines.h"
+#include "Scripting/ScriptTypes.h"
 #include <string>
 #include <unordered_map>
+#include <vector>
 #include <cstdint>
 
 struct lua_State;
@@ -70,8 +72,18 @@ public:
     // Read a global string from the Lua state.
     std::string getGlobalString(const std::string& name) const;
 
-    // Set a number field in the instance table (e.g. entityId).
+    // Set a typed field in the instance table.
     void setInstanceField(InstanceId id, const std::string& key, double value);
+    void setInstanceField(InstanceId id, const std::string& key, bool value);
+    void setInstanceField(InstanceId id, const std::string& key, const std::string& value);
+
+    // Inject all properties from a map into the instance table (sets each field).
+    void injectProperties(InstanceId id,
+                          const std::unordered_map<std::string, ScriptPropValue>& props);
+
+    // Read the M.properties table of a loaded script and return its declared properties.
+    // Returns an empty vector if the script has no M.properties table.
+    std::vector<ScriptPropDef> getScriptProperties(const std::string& name) const;
 
     // Recompile a loaded script and patch function fields in all live instances.
     // Data fields (non-function keys) in instance tables are preserved.

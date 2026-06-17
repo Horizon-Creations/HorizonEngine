@@ -104,6 +104,8 @@ std::string getRHIName(HE::RendererBackend backend)
 	}
 }
 
+EditorApplication::~EditorApplication() = default;
+
 HE::ApplicationConfig EditorApplication::GetConfig() const
 {
 	HE::ApplicationConfig cfg;
@@ -637,6 +639,7 @@ void EditorApplication::OnInit()
 	// Create the editor world and register it with the base Application
 	m_editorWorld = std::make_unique<HorizonWorld>();
 	setWorld(m_editorWorld.get());
+	m_propScriptEngine = std::make_unique<ScriptEngine>();
 	m_undo.setWorld(m_editorWorld.get());
 	Logger::Log(Logger::LogLevel::Info, "EditorApplication: HorizonWorld created and registered");
 
@@ -938,6 +941,7 @@ AppContext EditorApplication::makeContext()
 		.window              = window(),
 		.world               = world(),
 		.contentManager      = &contentManager(),
+		.propScriptEngine    = m_propScriptEngine.get(),
 		.editorCamera        = &m_editorCamera,
 		.selectedEntity      = m_selectedEntity,
 		.isPlaying           = m_isPlaying,

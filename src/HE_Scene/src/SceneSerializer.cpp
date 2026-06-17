@@ -48,6 +48,29 @@ namespace
 		return id;
 	}
 
+	json propValueToJson(const ScriptPropValue& v)
+	{
+		switch (v.type)
+		{
+		case ScriptPropType::Float:  return { {"type","float"},  {"value", v.f} };
+		case ScriptPropType::Int:    return { {"type","int"},    {"value", v.i} };
+		case ScriptPropType::Bool:   return { {"type","bool"},   {"value", v.b} };
+		case ScriptPropType::String: return { {"type","string"}, {"value", v.s} };
+		}
+		return {};
+	}
+
+	ScriptPropValue jsonToPropValue(const json& j)
+	{
+		ScriptPropValue v;
+		std::string type = j.value("type", "float");
+		if (type == "int")    { v.type = ScriptPropType::Int;    v.i = j.value("value", 0);    }
+		else if (type == "bool")   { v.type = ScriptPropType::Bool;   v.b = j.value("value", false); }
+		else if (type == "string") { v.type = ScriptPropType::String; v.s = j.value("value", std::string{}); }
+		else                       { v.type = ScriptPropType::Float;  v.f = j.value("value", 0.0f); }
+		return v;
+	}
+
 	// ── Per-entity component → JSON ──────────────────────────────────────────
 	json serializeComponents(entt::registry& registry, Entity entity)
 	{
@@ -120,10 +143,14 @@ namespace
 		}
 		if (auto* s = registry.try_get<ScriptComponent>(entity))
 		{
+			json props = json::object();
+			for (const auto& [k, v] : s->properties)
+				props[k] = propValueToJson(v);
 			comps["script"] = {
 				{ "asset",      uuidToJson(s->scriptAssetId) },
 				{ "moduleName", s->moduleName },
 				{ "enabled",    s->enabled },
+				{ "properties", props },
 			};
 		}
 		if (auto* e = registry.try_get<EnvironmentComponent>(entity))
@@ -307,6 +334,11 @@ namespace
 			s.scriptAssetId = jsonToUuid(c.value("asset", json()));
 			s.moduleName    = c.value("moduleName", s.moduleName);
 			s.enabled       = c.value("enabled",    s.enabled);
+			if (c.contains("properties") && c["properties"].is_object())
+			{
+				for (const auto& [k, v] : c["properties"].items())
+					s.properties[k] = jsonToPropValue(v);
+			}
 			registry.emplace_or_replace<ScriptComponent>(entity, s);
 		}
 		if (comps.contains("environment"))
