@@ -2012,11 +2012,20 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 								}
 							}
 
-							if (anyChange)
+							if (anyChange && ctx.contentManager)
 							{
-								tc.dirty = true;
+								// Invalidate AABB cache before regenerating so picking
+								// uses the new geometry next frame.
 								if (const auto* mc = terrainReg.try_get<MeshComponent>(terrainEnt))
 									s_aabbCache.erase(mc->meshAssetId);
+
+								// Regenerate NOW so m_renderer->Render() (called right after
+								// OnRender returns) uploads the updated mesh this frame.
+								// Without this the change is visible 2 frames late: the regular
+								// TerrainSystem call runs at the START of the next OnRender, after
+								// the renderer has already captured its draw list for that frame.
+								tc.dirty = true;
+								TerrainSystem::updateTerrains(*ctx.world, *ctx.contentManager);
 							}
 						}
 					}
