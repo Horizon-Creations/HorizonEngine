@@ -8,6 +8,7 @@
 #include <HorizonScene/Components/RigidBodyComponent.h>
 #include <HorizonScene/Components/ScriptComponent.h>
 #include <HorizonScene/Components/EnvironmentComponent.h>
+#include <HorizonScene/Components/EnvironmentLightComponent.h>
 #include <filesystem>
 
 namespace fs = std::filesystem;
@@ -88,6 +89,7 @@ namespace
 		}
 		for (auto [e, l] : reg.view<LightComponent>().each())
 		{
+			if (reg.all_of<EnvironmentLightComponent>(e)) continue; // skip built-in sun/moon
 			++lights;
 			CHECK(l.type == LightType::Directional);
 			CHECK(l.intensity == doctest::Approx(3.5f));
@@ -156,9 +158,13 @@ TEST_CASE("World root identity survives round-trip with children")
 	Entity root = loaded.rootEntity();
 	CHECK(lreg.get<NameComponent>(root).name == "World"); // not renamed to a child
 	auto& rHier = lreg.get<HierarchyComponent>(root);
-	CHECK(rHier.children.size() == 3);                    // Alpha/Beta/Gamma reparented to root
+	int sceneChildren = 0;
 	for (Entity c : rHier.children)
+	{
 		CHECK(lreg.get<HierarchyComponent>(c).parent == root);
+		if (!lreg.all_of<EnvironmentLightComponent>(c)) ++sceneChildren; // exclude built-in sun/moon
+	}
+	CHECK(sceneChildren == 3); // Alpha/Beta/Gamma reparented to root
 
 	fs::remove(file);
 }
@@ -213,10 +219,14 @@ TEST_CASE("Play-mode cycle: snapshot, clear, restore")
 	world.createEntity("SpawnedDuringPlay");
 	world.clear();
 
-	// Only the root must survive the clear
-	size_t count = 0;
-	for (auto e : world.registry().view<entt::entity>()) { (void)e; ++count; }
-	CHECK(count == 1);
+	// Only the root + the two built-in environment lights survive the clear; no
+	// authored scene entity may remain.
+	auto& creg = world.registry();
+	int sceneEntities = 0;
+	for (auto e : creg.view<entt::entity>())
+		if (e != world.rootEntity() && !creg.all_of<EnvironmentLightComponent>(e))
+			++sceneEntities;
+	CHECK(sceneEntities == 0);
 
 	REQUIRE(ser.load(world, file, SerializeFormat::Binary));
 	verify(world, meshId);

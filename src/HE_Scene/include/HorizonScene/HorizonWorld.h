@@ -31,6 +31,14 @@ public:
 	void clearHierarchyDirty()     { m_hierarchyDirty = false; }
 	void markHierarchyDirty()      { m_hierarchyDirty = true;  }
 
+	// Built-in entities (the root and the environment sun/moon lights) cannot be
+	// deleted or have arbitrary components managed; they belong to the World.
+	bool isBuiltin(Entity entity) const;
+	// Ensures the hidden, built-in sun + moon directional lights exist on the root
+	// (creating them if missing). Idempotent; called on construction, clear() and
+	// after scene load (the lights are never serialised, so they are recreated).
+	void ensureEnvironmentLights();
+
 	// Template helpers — must stay in header
 	void addComponent(Entity entity, auto&& component)
 	{

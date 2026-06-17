@@ -1160,3 +1160,37 @@ alpha-geblendeten Pass, der über die opake Szene **und** den Himmel composited.
 - **Verifiziert:** 36 Tests grün (neuer Env-Roundtrip-Case); GL+Metal-Dump rendert die Env aus der
   Default-Komponente, **GL == Metal** (0.01 % / 68 px = Sky-Floor). Interaktive Panels (Pin-Flow,
   World-Node-Environment-Editor) vom User zu bestätigen (headless nicht prüfbar).
+
+### Forts. 17 — Undo-Hierarchie-Bugfix + Built-in Sonne/Mond + World-Node-Regeln
+
+> **Aufgabe:** Undo/Redo-Bug (nach Undo verschwindet fast alles, Outliner zeigt nur „Sun"); Sonne/Mond
+> als versteckte, nicht-löschbare Built-in-Directional-Lights, die zur World/Environment gehören und bei
+> jeder Szene automatisch existieren; der World-Entity dürfen keine Komponenten hinzugefügt werden. ✅
+
+- **Undo/Load-Hierarchie-Bugfix** (Commit `f65eb51`): `SceneSerializer::applySceneJson` nahm an, die
+  **erste** serialisierte Entity sei die Root. entt's `view<NameComponent>` iteriert aber in umgekehrter
+  Erstellungsreihenfolge → die Root (zuerst erstellt) wird **zuletzt** serialisiert. Der Loader mappte
+  also „Sun" (erste) auf die Root, benannte die Root um und zerschoss die Hierarchie bei jedem
+  Save/Load und jedem Undo (clear+reload). Fix: Root über `parent == entt::null` identifizieren, nicht
+  über Position. Regressionstest (Root überlebt Round-Trip mit Kindern; entt-Reverse-Order erzwungen).
+- **Built-in Sonne + Mond** (versteckte Directional-Lights): Neue Tag-Komponente
+  `EnvironmentLightComponent{Role Sun|Moon}`. `HorizonWorld::ensureEnvironmentLights()` legt zwei
+  Directional-Light-Entities (Name „Sun"/„Moon" + Transform + Light + Tag) an der Root an — im Ctor, in
+  `clear()` und nach jedem Szenen-Load (idempotent). **Nicht serialisiert** (im SceneSerializer
+  übersprungen, auch aus den `children`-Arrays gefiltert) → jede Map erzeugt sie automatisch neu, nie
+  Duplikate. **Nicht löschbar** (`isBuiltin()`-Guard in `destroyEntity`/`reparentEntity`, clear() lässt
+  sie stehen) und **im Outliner versteckt**. Vom Environment getrieben: `LightData.envRole` (1=Sonne,
+  2=Mond) wird im Extractor aus dem Tag gesetzt; `RenderExtractor`-Day-Night treibt jetzt die
+  rollen-getaggten Lichter (Sonne = Rolle 1, Mond = Rolle 2) statt „erstes Directional + synthetischer
+  Mond". Day-Night-an = identisches Verhalten wie vorher; Day-Night-aus = Default-Sonne (Env-Farbe/
+  Intensität), Mond aus. Legacy-Fallback (erstes Directional + synthetischer Mond) bleibt für Welten
+  ohne Built-ins.
+- **World-Node:** kein „Add Component"-Button mehr (Inspector gated über `isBuiltin`); die World trägt
+  nur das Environment.
+- **Migration:** Bestehende Szenen mit einer **authored** „Sun"-Light-Entity (z. B. ShadowValidation)
+  sind kurzzeitig doppelt beleuchtet (authored Sun + neue Built-in-Sonne), bis der User die sichtbare
+  „Sun" löscht — danach = sauberes Tag-Bild (verifiziert: ohne authored Sun normal belichtet).
+- **Verifiziert:** 37 Tests grün (Undo-Regression + Env/Root-Roundtrip + Built-in-Filter in
+  populate/verify/play-mode/undo-Counts angepasst); GL+Metal-Dump rendert die Built-in-Sonne (Day-Night),
+  **GL == Metal** (0.01 %); saubere Belichtung mit nur der Built-in-Sonne bestätigt. Interaktiv (Undo
+  im Editor, versteckte Sun/Moon, kein Add-Component an World) vom User zu bestätigen.

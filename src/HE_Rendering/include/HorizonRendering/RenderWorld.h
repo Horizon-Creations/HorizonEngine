@@ -18,6 +18,7 @@ struct LightData {
     float     range        = 10.0f;   // point/spot attenuation radius
     float     spotAngleCos = 0.0f;    // cos(half angle), spot only
     uint8_t   type         = 0;       // HE::LightType
+    uint8_t   envRole      = 0;       // 0 none, 1 = environment sun, 2 = environment moon
 };
 
 // Directional-light shadow info, computed by the extractor. viewProj transforms

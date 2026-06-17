@@ -2,13 +2,18 @@
 #include "EditorUndo.h"
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/Components/TransformComponent.h>
+#include <HorizonScene/Components/EnvironmentLightComponent.h>
 
 namespace
 {
+	// Counts the root + authored scene entities, excluding the two built-in
+	// environment sun/moon lights (which every world carries automatically).
 	int entityCount(HorizonWorld& w)
 	{
+		auto& reg = w.registry();
 		int n = 0;
-		for (auto e : w.registry().view<entt::entity>()) { (void)e; ++n; }
+		for (auto e : reg.view<entt::entity>())
+			if (!reg.all_of<EnvironmentLightComponent>(e)) ++n;
 		return n;
 	}
 

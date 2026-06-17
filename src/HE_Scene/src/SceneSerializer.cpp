@@ -11,6 +11,7 @@
 #include "HorizonScene/Components/RigidBodyComponent.h"
 #include "HorizonScene/Components/ScriptComponent.h"
 #include "HorizonScene/Components/EnvironmentComponent.h"
+#include "HorizonScene/Components/EnvironmentLightComponent.h"
 #include <nlohmann/json.hpp>
 #include <fstream>
 
@@ -56,6 +57,12 @@ namespace
 		auto view = registry.view<NameComponent>();
 		for (auto entity : view)
 		{
+			// The built-in environment sun/moon lights are never serialised — they
+			// are recreated on load (ensureEnvironmentLights), so the scene file
+			// stays clean and they can never be duplicated or orphaned.
+			if (registry.all_of<EnvironmentLightComponent>(entity))
+				continue;
+
 			json eJson;
 			eJson["id"]   = static_cast<uint32_t>(entity);
 			eJson["name"] = registry.get<NameComponent>(entity).name;
@@ -65,7 +72,8 @@ namespace
 				eJson["parent"] = static_cast<uint32_t>(hier->parent);
 				json children = json::array();
 				for (auto child : hier->children)
-					children.push_back(static_cast<uint32_t>(child));
+					if (!registry.all_of<EnvironmentLightComponent>(child)) // omit built-ins
+						children.push_back(static_cast<uint32_t>(child));
 				eJson["children"] = children;
 			}
 
@@ -347,6 +355,9 @@ namespace
 			}
 		}
 
+		// Built-in sun/moon lights aren't serialised — recreate / re-attach them so
+		// every loaded scene has them on the root.
+		world.ensureEnvironmentLights();
 		world.markHierarchyDirty();
 		return true;
 	}

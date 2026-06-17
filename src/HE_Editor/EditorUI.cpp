@@ -1908,6 +1908,11 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
             std::function<void(Entity, int)> collect = [&](Entity entity, int depth)
             {
                 if (!registry.valid(entity)) return;
+                // The built-in environment sun/moon lights belong to the World's
+                // Environment, not the scene tree — hide them from the Outliner.
+                if (entity != ctx.world->rootEntity() &&
+                    registry.all_of<EnvironmentLightComponent>(entity))
+                    return;
                 auto* name = registry.try_get<NameComponent>(entity);
                 auto* hier = registry.try_get<HierarchyComponent>(entity);
                 s_outlinerCache.push_back({
@@ -3188,34 +3193,39 @@ void EditorUI::RenderInspector(AppContext& ctx)
 	}
 
 	// ── Add Component ───────────────────────────────────────────────────────
-	ImGui::Spacing();
-	ImGui::Separator();
-	ImGui::Spacing();
-	const float buttonW = 180.0f;
-	ImGui::SetCursorPosX((ImGui::GetContentRegionAvail().x - buttonW) * 0.5f
-	                     + ImGui::GetCursorPosX());
-	if (ImGui::Button("Add Component", ImVec2(buttonW, 0)))
-		ImGui::OpenPopup("##add_component");
-
-	if (ImGui::BeginPopup("##add_component"))
+	// Not for the World root — it only carries the scene's Environment, no
+	// arbitrary components (and the built-in sun/moon are managed automatically).
+	if (!ctx.world->isBuiltin(entity))
 	{
-		auto addItem = [&]<typename T>(const char* label, T)
+		ImGui::Spacing();
+		ImGui::Separator();
+		ImGui::Spacing();
+		const float buttonW = 180.0f;
+		ImGui::SetCursorPosX((ImGui::GetContentRegionAvail().x - buttonW) * 0.5f
+		                     + ImGui::GetCursorPosX());
+		if (ImGui::Button("Add Component", ImVec2(buttonW, 0)))
+			ImGui::OpenPopup("##add_component");
+
+		if (ImGui::BeginPopup("##add_component"))
 		{
-			if (!registry.all_of<T>(entity) && ImGui::MenuItem(label))
+			auto addItem = [&]<typename T>(const char* label, T)
 			{
-				if (ctx.undoSys) ctx.undoSys->snapshotNow();
-				registry.emplace<T>(entity);
-			}
-		};
-		addItem("Transform",    TransformComponent{});
-		addItem("Transform 2D", Transform2DComponent{});
-		addItem("Mesh",         MeshComponent{});
-		addItem("Material",     MaterialComponent{});
-		addItem("Camera",       CameraComponent{});
-		addItem("Light",        LightComponent{});
-		addItem("Rigid Body",   RigidBodyComponent{});
-		addItem("Script",       ScriptComponent{});
-		ImGui::EndPopup();
+				if (!registry.all_of<T>(entity) && ImGui::MenuItem(label))
+				{
+					if (ctx.undoSys) ctx.undoSys->snapshotNow();
+					registry.emplace<T>(entity);
+				}
+			};
+			addItem("Transform",    TransformComponent{});
+			addItem("Transform 2D", Transform2DComponent{});
+			addItem("Mesh",         MeshComponent{});
+			addItem("Material",     MaterialComponent{});
+			addItem("Camera",       CameraComponent{});
+			addItem("Light",        LightComponent{});
+			addItem("Rigid Body",   RigidBodyComponent{});
+			addItem("Script",       ScriptComponent{});
+			ImGui::EndPopup();
+		}
 	}
 
 	ImGui::End();

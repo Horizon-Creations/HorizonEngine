@@ -1,5 +1,8 @@
 #include "HorizonScene/HorizonWorld.h"
 #include "HorizonScene/Components/EnvironmentComponent.h"
+#include "HorizonScene/Components/EnvironmentLightComponent.h"
+#include "HorizonScene/Components/LightComponent.h"
+#include "HorizonScene/Components/TransformComponent.h"
 #include <algorithm>
 
 HorizonWorld::HorizonWorld()
@@ -10,6 +13,50 @@ HorizonWorld::HorizonWorld()
     // Scene-wide environment / sky settings live on the root ("World") entity so
     // they serialize with the scene and are edited in its Details panel.
     registry_.emplace<EnvironmentComponent>(rootEntity_);
+    ensureEnvironmentLights();
+}
+
+bool HorizonWorld::isBuiltin(Entity entity) const
+{
+    return entity == rootEntity_ || registry_.all_of<EnvironmentLightComponent>(entity);
+}
+
+void HorizonWorld::ensureEnvironmentLights()
+{
+    auto ensure = [&](EnvironmentLightComponent::Role role, const char* name)
+    {
+        // Find an existing light with this role (e.g. recreated after clear()).
+        Entity e = entt::null;
+        for (auto [ent, elc] : registry_.view<EnvironmentLightComponent>().each())
+            if (elc.role == role) { e = ent; break; }
+
+        if (e == entt::null)
+        {
+            e = createEntity(name); // Name + Hierarchy, parented to the root
+            // A (default) transform so the render extractor's
+            // <TransformComponent, LightComponent> view picks the light up; the
+            // direction itself is driven by the environment, not this transform.
+            registry_.emplace<TransformComponent>(e, TransformComponent{});
+            LightComponent lc;
+            lc.type = HE::LightType::Directional;
+            registry_.emplace<LightComponent>(e, lc);
+            registry_.emplace<EnvironmentLightComponent>(e, EnvironmentLightComponent{ role });
+        }
+        else
+        {
+            // Make sure it is still attached to the root (scene load rebuilds
+            // root.children from the serialised list, which omits these
+            // never-serialised lights).
+            auto& h = registry_.get<HierarchyComponent>(e);
+            h.parent = rootEntity_;
+            auto& rh = registry_.get<HierarchyComponent>(rootEntity_);
+            if (std::find(rh.children.begin(), rh.children.end(), e) == rh.children.end())
+                rh.children.push_back(e);
+        }
+    };
+    ensure(EnvironmentLightComponent::Role::Sun,  "Sun");
+    ensure(EnvironmentLightComponent::Role::Moon, "Moon");
+    m_hierarchyDirty = true;
 }
 
 Entity HorizonWorld::createEntity(const std::string& name)
@@ -26,8 +73,8 @@ Entity HorizonWorld::createEntity(const std::string& name)
 
 void HorizonWorld::destroyEntity(Entity entity)
 {
-    if (entity == rootEntity_ || !registry_.valid(entity))
-        return;
+    if (!registry_.valid(entity) || isBuiltin(entity))
+        return; // root + the environment sun/moon lights are not deletable
 
     // Detach from parent first so the recursion below never walks back up
     auto* h = registry_.try_get<HierarchyComponent>(entity);
@@ -70,7 +117,7 @@ void HorizonWorld::clear()
     }
     std::vector<Entity> strays;
     for (auto e : registry_.view<entt::entity>())
-        if (e != rootEntity_)
+        if (e != rootEntity_ && !isBuiltin(e)) // keep the built-in sun/moon lights
             strays.push_back(e);
     for (Entity e : strays)
         if (registry_.valid(e))
@@ -79,6 +126,7 @@ void HorizonWorld::clear()
     // without an environment block starts from a clean sky (a loaded scene that
     // has one overwrites this via the serializer's emplace_or_replace).
     registry_.emplace_or_replace<EnvironmentComponent>(rootEntity_);
+    ensureEnvironmentLights(); // re-attach (or recreate) the built-in sun/moon
     m_hierarchyDirty = true;
 }
 
@@ -99,6 +147,8 @@ bool HorizonWorld::reparentEntity(Entity entity, Entity newParent)
 {
     if (entity == rootEntity_ || entity == newParent)
         return false;
+    if (isBuiltin(entity) || isBuiltin(newParent))
+        return false; // the environment sun/moon stay attached to the root
     if (!registry_.valid(entity) || !registry_.valid(newParent))
         return false;
     if (isAncestorOf(entity, newParent))
