@@ -34,7 +34,7 @@ namespace
 	// The async SDL file slot (pendingFileReady/Result) is shared across project
 	// and scene operations; this records which one is currently in flight so the
 	// single result handler can dispatch correctly.
-	enum class PendingFileOp { OpenProject, OpenScene, SaveScene };
+	enum class PendingFileOp { OpenProject, OpenScene, SaveScene, ImportAsset };
 
 	// A destructive action that would discard the current scene. When requested
 	// while the scene is dirty it is stashed and a "Save changes?" modal is shown;
@@ -931,6 +931,24 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 			ctx.window ? ctx.window->GetNativeWindow() : nullptr,
 			filters, 1, nullptr, false);
 	};
+	auto triggerImportAsset = [&]()
+	{
+		if (!ctx.projectLoaded || !ctx.contentManager) return;
+		s_pendingFileOp = PendingFileOp::ImportAsset;
+		SDL_DialogFileFilter filters[] = {
+			{ "All Supported Assets", "gltf;glb;png;jpg;jpeg;tga;bmp;hdr;wav;hmat" },
+			{ "3D Models",            "gltf;glb" },
+			{ "Textures",             "png;jpg;jpeg;tga;bmp;hdr" },
+			{ "Audio",                "wav" },
+			{ "Materials",            "hmat" },
+		};
+		const std::string root = ctx.contentManager->contentRoot();
+		SDL_ShowOpenFileDialog(fileDialogCb, ctx.dialogBridge,
+			ctx.window ? ctx.window->GetNativeWindow() : nullptr,
+			filters, 5,
+			root.empty() ? nullptr : root.c_str(),
+			false);
+	};
 	auto doCloseProject = [&]()
 	{
 		ctx.projectManager->closeProject();
@@ -1019,7 +1037,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
     }
 	if (ImGui::BeginMenu("Assets"))
 	{
-		if (ImGui::MenuItem("Import Asset...")) {}
+		if (ImGui::MenuItem("Import Asset...", nullptr, false, ctx.projectLoaded))
+			triggerImportAsset();
 		if (ImGui::MenuItem("Refresh Assets")) {}
 		ImGui::EndMenu();
 	}
@@ -1124,6 +1143,33 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                 }
             }
             s_guardSaveThenAct = false;
+        }
+        else if (s_pendingFileOp == PendingFileOp::ImportAsset)
+        {
+            if (!chosen.empty() && ctx.contentManager)
+            {
+                const std::filesystem::path srcPath(chosen);
+                std::string ext = srcPath.extension().string();
+                for (auto& c : ext) c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
+
+                const bool isMeshSrc    = (ext == ".gltf" || ext == ".glb");
+                const bool isTextureSrc = (ext == ".png"  || ext == ".jpg" || ext == ".jpeg" ||
+                                           ext == ".tga"  || ext == ".bmp" || ext == ".hdr");
+                const bool isAudioSrc   = (ext == ".wav");
+                const bool isMatSrc     = (ext == ".hmat");
+
+                const std::filesystem::path root(ctx.contentManager->contentRoot());
+                bool ok = false;
+                if      (isMeshSrc)    ok = MeshImporter::import(srcPath, root)     != nullptr;
+                else if (isTextureSrc) ok = TextureImporter::import(srcPath, root)  != nullptr;
+                else if (isAudioSrc)   ok = AudioImporter::import(srcPath, root)    != nullptr;
+                else if (isMatSrc)     ok = MaterialImporter::import(srcPath, root) != nullptr;
+
+                if (!ok)
+                    Logger::Log(Logger::LogLevel::Error,
+                        ("Editor: import failed for " + srcPath.string()).c_str());
+                ctx.contentRefreshPending = true;
+            }
         }
         else // OpenProject
         {
