@@ -46,6 +46,7 @@ public:
 	void* GetViewportTexture() override;
 	bool  CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& width, uint32_t& height) override;
 	void  InvalidateMaterial(const HE::UUID& materialId) override;
+	void  InvalidateMesh    (const HE::UUID& meshId)     override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
 	void  SetSSAOSettings(const SSAOSettings& settings) override;
 
@@ -228,6 +229,7 @@ private:
 
 	// Uploaded asset meshes, keyed by asset UUID
 	std::unordered_map<HE::UUID, GpuMesh> m_meshCache;
+	std::vector<HE::UUID>                 m_pendingMeshInvalidations;
 
 	// Base-color textures for MaterialComponent overrides, keyed by material
 	// UUID (id<MTLTexture>, retained; nullptr = resolved, no texture).

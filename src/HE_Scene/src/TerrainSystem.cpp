@@ -4,11 +4,12 @@
 #include "HorizonScene/Components/MeshComponent.h"
 #include "HorizonScene/TerrainMeshGenerator.h"
 #include <ContentManager/ContentManager.h>
+#include <Renderer/IRenderer.h>
 #include <entt/entt.hpp>
 
 namespace TerrainSystem
 {
-    void updateTerrains(HorizonWorld& world, ContentManager& cm)
+    void updateTerrains(HorizonWorld& world, ContentManager& cm, IRenderer* renderer)
     {
         auto& registry = world.registry();
         auto view = registry.view<TerrainComponent>();
@@ -31,6 +32,9 @@ namespace TerrainSystem
                 // Keep the same UUID — swap the mesh data in-place
                 cm.replaceStaticMesh(existingId, std::move(newMesh));
                 meshId = existingId;
+                // Tell the renderer to evict its cached VBO so it re-uploads
+                // the new geometry before the next draw call.
+                if (renderer) renderer->InvalidateMesh(meshId);
             }
             else
             {

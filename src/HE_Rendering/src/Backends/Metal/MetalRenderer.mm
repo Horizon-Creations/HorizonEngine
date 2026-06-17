@@ -1831,6 +1831,13 @@ void MetalRenderer::InvalidateMaterial(const HE::UUID& materialId)
 	}
 }
 
+void MetalRenderer::InvalidateMesh(const HE::UUID& meshId)
+{
+	// Defer to the render loop where the Metal device context is active.
+	if (meshId != HE::UUID{})
+		m_pendingMeshInvalidations.push_back(meshId);
+}
+
 // ─── Window targets ───────────────────────────────────────────────────────────
 
 void MetalRenderer::CreateTarget(SDL_Window* sdlWin, WindowTarget& out)
@@ -2642,7 +2649,21 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 	@autoreleasepool
 	{
 		if (isPrimary)
+		{
 			AgeRetiredTextures();
+
+			// Release cached GPU buffers for any mesh invalidated since last frame
+			// (e.g. sculpted terrain). In-flight GPU work may reference them, so
+			// release via CFBridgingRelease (ARC autoreleasepool handles safety here).
+			for (const HE::UUID& id : m_pendingMeshInvalidations)
+				if (auto it = m_meshCache.find(id); it != m_meshCache.end())
+				{
+					if (it->second.vertexBuf) CFBridgingRelease(it->second.vertexBuf);
+					if (it->second.indexBuf)  CFBridgingRelease(it->second.indexBuf);
+					m_meshCache.erase(it);
+				}
+			m_pendingMeshInvalidations.clear();
+		}
 
 		CAMetalLayer* layer = (__bridge CAMetalLayer*)target.metalLayer;
 

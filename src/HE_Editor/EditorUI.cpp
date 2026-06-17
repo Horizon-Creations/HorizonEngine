@@ -2025,7 +2025,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 								// TerrainSystem call runs at the START of the next OnRender, after
 								// the renderer has already captured its draw list for that frame.
 								tc.dirty = true;
-								TerrainSystem::updateTerrains(*ctx.world, *ctx.contentManager);
+								TerrainSystem::updateTerrains(*ctx.world, *ctx.contentManager,
+							                              ctx.renderer);
 							}
 						}
 					}

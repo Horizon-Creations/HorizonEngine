@@ -31,6 +31,7 @@ public:
 	void* GetViewportTexture() override;
 	bool  CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& width, uint32_t& height) override;
 	void  InvalidateMaterial(const HE::UUID& materialId) override;
+	void  InvalidateMesh    (const HE::UUID& meshId)     override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
 	void  SetSSAOSettings(const SSAOSettings& settings) override;
 
@@ -125,6 +126,7 @@ private:
 	// by InvalidateMaterial via m_pendingMaterialInvalidations.
 	std::unordered_map<HE::UUID, unsigned int> m_materialTexCache;
 	std::vector<HE::UUID>                       m_pendingMaterialInvalidations;
+	std::vector<HE::UUID>                       m_pendingMeshInvalidations;
 
 	// ── Shadow map (single directional light) ───────────────────────────────
 	unsigned int m_shadowFBO      = 0;
