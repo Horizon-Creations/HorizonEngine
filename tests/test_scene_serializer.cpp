@@ -7,6 +7,7 @@
 #include <HorizonScene/Components/LightComponent.h>
 #include <HorizonScene/Components/RigidBodyComponent.h>
 #include <HorizonScene/Components/ScriptComponent.h>
+#include <HorizonScene/Components/EnvironmentComponent.h>
 #include <filesystem>
 
 namespace fs = std::filesystem;
@@ -128,6 +129,41 @@ TEST_CASE("SceneSerializer binary round-trip with components")
 	HorizonWorld loaded;
 	REQUIRE(ser.load(loaded, file, SerializeFormat::Binary));
 	verify(loaded, meshId);
+
+	fs::remove(file);
+}
+
+TEST_CASE("EnvironmentComponent on the World root round-trips")
+{
+	const fs::path file = fs::temp_directory_path() / "he_test_env.hescene";
+
+	HorizonWorld world;
+	auto& env = world.registry().get<EnvironmentComponent>(world.rootEntity());
+	env.dayNightCycle  = true;
+	env.timeOfDay      = 0.73f;
+	env.autoAdvance    = true;
+	env.cycleSeconds   = 42.0f;
+	env.sunIntensity   = 3.5f;
+	env.cloudCoverage  = 0.8f;
+	env.fogDensity     = 0.05f;
+	env.auroraIntensity = 0.6f;
+	env.nebulaColor    = glm::vec3(0.1f, 0.2f, 0.3f);
+
+	SceneSerializer ser;
+	REQUIRE(ser.save(world, file, SerializeFormat::JSON));
+
+	HorizonWorld loaded;
+	REQUIRE(ser.load(loaded, file, SerializeFormat::JSON));
+	const auto& le = loaded.registry().get<EnvironmentComponent>(loaded.rootEntity());
+	CHECK(le.dayNightCycle  == true);
+	CHECK(le.timeOfDay      == doctest::Approx(0.73f));
+	CHECK(le.autoAdvance    == true);
+	CHECK(le.cycleSeconds   == doctest::Approx(42.0f));
+	CHECK(le.sunIntensity   == doctest::Approx(3.5f));
+	CHECK(le.cloudCoverage  == doctest::Approx(0.8f));
+	CHECK(le.fogDensity     == doctest::Approx(0.05f));
+	CHECK(le.auroraIntensity == doctest::Approx(0.6f));
+	CHECK(le.nebulaColor.b  == doctest::Approx(0.3f));
 
 	fs::remove(file);
 }

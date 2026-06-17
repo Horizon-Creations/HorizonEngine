@@ -1,5 +1,6 @@
 #include "EditorApplication.h"
 #include "EditorUI.h"
+#include <HorizonScene/Components/EnvironmentComponent.h>
 #include <Renderer/RendererFactory.h>
 #include <Diagnostics/Logger.h>
 #include <SDL3/SDL.h>
@@ -520,8 +521,6 @@ void EditorApplication::OnInit()
 	m_editorConfig.ContentBrowserRefreshRate   = globalstate.getCustomConfigInt("ContentBrowserRefreshRate",   m_editorConfig.ContentBrowserRefreshRate);
 	m_editorConfig.KeepCPUAssets               = globalstate.getCustomConfigBool("KeepCPUAssets",               m_editorConfig.KeepCPUAssets);
 	m_editorConfig.KeepCPUAssetsInfoAcknoleged = globalstate.getCustomConfigBool("KeepCPUAssetsInfoAcknoleged", m_editorConfig.KeepCPUAssetsInfoAcknoleged);
-	m_editorConfig.QsRendererOpen              = globalstate.getCustomConfigBool("QsRendererOpen",              m_editorConfig.QsRendererOpen);
-	m_editorConfig.QsEditorOpen                = globalstate.getCustomConfigBool("QsEditorOpen",                m_editorConfig.QsEditorOpen);
 	m_editorConfig.ShowGrid                    = globalstate.getCustomConfigBool("ShowGrid",                    m_editorConfig.ShowGrid);
 	m_editorConfig.CbTreeWidth                 = globalstate.getCustomConfigFloat("CbTreeWidth", m_editorConfig.CbTreeWidth);
 	m_editorConfig.UiFontScale                 = globalstate.getCustomConfigFloat("UiFontScale",       m_editorConfig.UiFontScale);
@@ -532,32 +531,7 @@ void EditorApplication::OnInit()
 	m_editorConfig.SSAOEnabled                 = globalstate.getCustomConfigBool("SSAOEnabled",         m_editorConfig.SSAOEnabled);
 	m_editorConfig.SSAORadius                  = globalstate.getCustomConfigFloat("SSAORadius",         m_editorConfig.SSAORadius);
 	m_editorConfig.SSAOIntensity               = globalstate.getCustomConfigFloat("SSAOIntensity",      m_editorConfig.SSAOIntensity);
-	m_editorConfig.DayNightCycle               = globalstate.getCustomConfigBool("DayNightCycle",       m_editorConfig.DayNightCycle);
-	m_editorConfig.TimeOfDay                   = globalstate.getCustomConfigFloat("TimeOfDay",          m_editorConfig.TimeOfDay);
-	m_editorConfig.DayNightAutoAdvance         = globalstate.getCustomConfigBool("DayNightAutoAdvance", m_editorConfig.DayNightAutoAdvance);
-	m_editorConfig.DayNightCycleSeconds        = globalstate.getCustomConfigFloat("DayNightCycleSeconds", m_editorConfig.DayNightCycleSeconds);
-	m_editorConfig.SunIntensity                = globalstate.getCustomConfigFloat("SunIntensity",        m_editorConfig.SunIntensity);
-	m_editorConfig.SunColor.r                  = globalstate.getCustomConfigFloat("SunColorR",           m_editorConfig.SunColor.r);
-	m_editorConfig.SunColor.g                  = globalstate.getCustomConfigFloat("SunColorG",           m_editorConfig.SunColor.g);
-	m_editorConfig.SunColor.b                  = globalstate.getCustomConfigFloat("SunColorB",           m_editorConfig.SunColor.b);
-	m_editorConfig.MoonIntensity               = globalstate.getCustomConfigFloat("MoonIntensity",       m_editorConfig.MoonIntensity);
-	m_editorConfig.MoonColor.r                 = globalstate.getCustomConfigFloat("MoonColorR",          m_editorConfig.MoonColor.r);
-	m_editorConfig.MoonColor.g                 = globalstate.getCustomConfigFloat("MoonColorG",          m_editorConfig.MoonColor.g);
-	m_editorConfig.MoonColor.b                 = globalstate.getCustomConfigFloat("MoonColorB",          m_editorConfig.MoonColor.b);
-	m_editorConfig.CloudCoverage               = globalstate.getCustomConfigFloat("CloudCoverage",        m_editorConfig.CloudCoverage);
-	m_editorConfig.FogDensity                  = globalstate.getCustomConfigFloat("FogDensity",           m_editorConfig.FogDensity);
-	m_editorConfig.FogHeightFalloff            = globalstate.getCustomConfigFloat("FogHeightFalloff",     m_editorConfig.FogHeightFalloff);
-	m_editorConfig.AuroraIntensity             = globalstate.getCustomConfigFloat("AuroraIntensity",      m_editorConfig.AuroraIntensity);
-	m_editorConfig.MilkyWayIntensity           = globalstate.getCustomConfigFloat("MilkyWayIntensity",    m_editorConfig.MilkyWayIntensity);
-	m_editorConfig.NebulaIntensity             = globalstate.getCustomConfigFloat("NebulaIntensity",      m_editorConfig.NebulaIntensity);
-	m_editorConfig.NebulaColor.r               = globalstate.getCustomConfigFloat("NebulaColorR",         m_editorConfig.NebulaColor.r);
-	m_editorConfig.NebulaColor.g               = globalstate.getCustomConfigFloat("NebulaColorG",         m_editorConfig.NebulaColor.g);
-	m_editorConfig.NebulaColor.b               = globalstate.getCustomConfigFloat("NebulaColorB",         m_editorConfig.NebulaColor.b);
-	m_editorConfig.AuroraColor.r               = globalstate.getCustomConfigFloat("AuroraColorR",         m_editorConfig.AuroraColor.r);
-	m_editorConfig.AuroraColor.g               = globalstate.getCustomConfigFloat("AuroraColorG",         m_editorConfig.AuroraColor.g);
-	m_editorConfig.AuroraColor.b               = globalstate.getCustomConfigFloat("AuroraColorB",         m_editorConfig.AuroraColor.b);
-	m_editorConfig.WindDirection               = globalstate.getCustomConfigFloat("WindDirection",        m_editorConfig.WindDirection);
-	m_editorConfig.WindSpeed                   = globalstate.getCustomConfigFloat("WindSpeed",            m_editorConfig.WindSpeed);
+	m_editorConfig.QuickSettingsFavorites      = globalstate.getCustomConfigString("QuickSettingsFavorites", m_editorConfig.QuickSettingsFavorites);
 	m_editorCamera.setFlySpeed(m_editorConfig.EditorCameraSpeed);
 
 #ifdef HE_IMGUI_ENABLED
@@ -756,15 +730,7 @@ void EditorApplication::OnRender(float dt)
 		}
 	}
 
-	// Auto-advance the day-night cycle (time flows with real time).
-	if (m_editorConfig.DayNightCycle && m_editorConfig.DayNightAutoAdvance && dt > 0.0f)
-	{
-		const float secondsPerDay = std::max(m_editorConfig.DayNightCycleSeconds, 1.0f);
-		m_editorConfig.TimeOfDay += dt / secondsPerDay;
-		m_editorConfig.TimeOfDay -= std::floor(m_editorConfig.TimeOfDay); // wrap to [0,1)
-	}
-
-	// Push post-process + environment settings to the renderer from the editor prefs.
+	// Push post-process (engine prefs) + the scene's environment (World entity).
 	if (renderer())
 	{
 		renderer()->SetBloomSettings(IRenderer::BloomSettings{
@@ -775,22 +741,7 @@ void EditorApplication::OnRender(float dt)
 			m_editorConfig.SSAOEnabled,
 			m_editorConfig.SSAORadius,
 			m_editorConfig.SSAOIntensity});
-		renderer()->SetEnvironmentSettings(IRenderer::EnvironmentSettings{
-			m_editorConfig.DayNightCycle,
-			m_editorConfig.TimeOfDay,
-			m_editorConfig.SunColor,
-			m_editorConfig.SunIntensity,
-			m_editorConfig.MoonColor,
-			m_editorConfig.MoonIntensity,
-			m_editorConfig.CloudCoverage,
-			m_editorConfig.FogDensity,
-			m_editorConfig.FogHeightFalloff,
-			m_editorConfig.AuroraIntensity,
-			m_editorConfig.MilkyWayIntensity,
-			m_editorConfig.NebulaIntensity,
-			m_editorConfig.NebulaColor,
-			m_editorConfig.AuroraColor,
-			m_editorConfig.WindDirection, m_editorConfig.WindSpeed});
+		pushEnvironment(dt); // auto-advances + pushes the World env component
 	}
 
 	AppContext ctx = makeContext();
@@ -870,16 +821,7 @@ void EditorApplication::dumpFrameHeadless()
 		m_editorConfig.BloomEnabled, m_editorConfig.BloomThreshold, m_editorConfig.BloomIntensity});
 	r->SetSSAOSettings(IRenderer::SSAOSettings{
 		m_editorConfig.SSAOEnabled, m_editorConfig.SSAORadius, m_editorConfig.SSAOIntensity});
-	r->SetEnvironmentSettings(IRenderer::EnvironmentSettings{
-		m_editorConfig.DayNightCycle, m_editorConfig.TimeOfDay,
-		m_editorConfig.SunColor, m_editorConfig.SunIntensity,
-		m_editorConfig.MoonColor, m_editorConfig.MoonIntensity,
-		m_editorConfig.CloudCoverage,
-		m_editorConfig.FogDensity, m_editorConfig.FogHeightFalloff,
-		m_editorConfig.AuroraIntensity,
-		m_editorConfig.MilkyWayIntensity, m_editorConfig.NebulaIntensity,
-		m_editorConfig.NebulaColor, m_editorConfig.AuroraColor,
-		m_editorConfig.WindDirection, m_editorConfig.WindSpeed});
+	pushEnvironment(0.0f); // scene environment from the World entity (no auto-advance)
 	r->SetViewportSize(1280, 720);
 	for (int i = 0; i < 3; ++i)
 		r->Render();
@@ -1047,6 +989,31 @@ void EditorApplication::saveSceneToPath(const std::string& path)
 	}
 }
 
+void EditorApplication::pushEnvironment(float dt)
+{
+	if (!renderer() || !m_editorWorld) return;
+	auto* env = m_editorWorld->registry().try_get<EnvironmentComponent>(m_editorWorld->rootEntity());
+	if (!env) return;
+
+	// Auto-advance the day-night cycle (time flows with real time).
+	if (env->dayNightCycle && env->autoAdvance && dt > 0.0f)
+	{
+		env->timeOfDay += dt / std::max(env->cycleSeconds, 1.0f);
+		env->timeOfDay -= std::floor(env->timeOfDay); // wrap to [0,1)
+	}
+
+	renderer()->SetEnvironmentSettings(IRenderer::EnvironmentSettings{
+		env->dayNightCycle, env->timeOfDay,
+		env->sunColor, env->sunIntensity,
+		env->moonColor, env->moonIntensity,
+		env->cloudCoverage,
+		env->fogDensity, env->fogHeightFalloff,
+		env->auroraIntensity,
+		env->milkyWayIntensity, env->nebulaIntensity,
+		env->nebulaColor, env->auroraColor,
+		env->windDirection, env->windSpeed});
+}
+
 void EditorApplication::openScene(const std::string& path)
 {
 	if (!m_editorWorld || path.empty()) return;
@@ -1154,8 +1121,6 @@ void EditorApplication::OnShutdown()
 	globalstate.setCustomConfigEntry("KeepCPUAssets",               m_editorConfig.KeepCPUAssets);
 	globalstate.setCustomConfigEntry("KeepCPUAssetsInfoAcknoleged", m_editorConfig.KeepCPUAssetsInfoAcknoleged);
 	globalstate.setCustomConfigEntry("ContentBrowserRefreshRate",   m_editorConfig.ContentBrowserRefreshRate);
-	globalstate.setCustomConfigEntry("QsRendererOpen",              m_editorConfig.QsRendererOpen);
-	globalstate.setCustomConfigEntry("QsEditorOpen",                m_editorConfig.QsEditorOpen);
 	globalstate.setCustomConfigEntry("ShowGrid",                    m_editorConfig.ShowGrid);
 	globalstate.setCustomConfigEntry("CbTreeWidth",                 m_editorConfig.CbTreeWidth);
 	globalstate.setCustomConfigEntry("UiFontScale",                m_editorConfig.UiFontScale);
@@ -1166,32 +1131,7 @@ void EditorApplication::OnShutdown()
 	globalstate.setCustomConfigEntry("SSAOEnabled",                m_editorConfig.SSAOEnabled);
 	globalstate.setCustomConfigEntry("SSAORadius",                 m_editorConfig.SSAORadius);
 	globalstate.setCustomConfigEntry("SSAOIntensity",              m_editorConfig.SSAOIntensity);
-	globalstate.setCustomConfigEntry("DayNightCycle",              m_editorConfig.DayNightCycle);
-	globalstate.setCustomConfigEntry("TimeOfDay",                  m_editorConfig.TimeOfDay);
-	globalstate.setCustomConfigEntry("DayNightAutoAdvance",        m_editorConfig.DayNightAutoAdvance);
-	globalstate.setCustomConfigEntry("DayNightCycleSeconds",       m_editorConfig.DayNightCycleSeconds);
-	globalstate.setCustomConfigEntry("SunIntensity",              m_editorConfig.SunIntensity);
-	globalstate.setCustomConfigEntry("SunColorR",                 m_editorConfig.SunColor.r);
-	globalstate.setCustomConfigEntry("SunColorG",                 m_editorConfig.SunColor.g);
-	globalstate.setCustomConfigEntry("SunColorB",                 m_editorConfig.SunColor.b);
-	globalstate.setCustomConfigEntry("MoonIntensity",             m_editorConfig.MoonIntensity);
-	globalstate.setCustomConfigEntry("MoonColorR",                m_editorConfig.MoonColor.r);
-	globalstate.setCustomConfigEntry("MoonColorG",                m_editorConfig.MoonColor.g);
-	globalstate.setCustomConfigEntry("MoonColorB",                m_editorConfig.MoonColor.b);
-	globalstate.setCustomConfigEntry("CloudCoverage",            m_editorConfig.CloudCoverage);
-	globalstate.setCustomConfigEntry("FogDensity",              m_editorConfig.FogDensity);
-	globalstate.setCustomConfigEntry("FogHeightFalloff",        m_editorConfig.FogHeightFalloff);
-	globalstate.setCustomConfigEntry("AuroraIntensity",        m_editorConfig.AuroraIntensity);
-	globalstate.setCustomConfigEntry("MilkyWayIntensity",      m_editorConfig.MilkyWayIntensity);
-	globalstate.setCustomConfigEntry("NebulaIntensity",        m_editorConfig.NebulaIntensity);
-	globalstate.setCustomConfigEntry("NebulaColorR",           m_editorConfig.NebulaColor.r);
-	globalstate.setCustomConfigEntry("NebulaColorG",           m_editorConfig.NebulaColor.g);
-	globalstate.setCustomConfigEntry("NebulaColorB",           m_editorConfig.NebulaColor.b);
-	globalstate.setCustomConfigEntry("AuroraColorR",           m_editorConfig.AuroraColor.r);
-	globalstate.setCustomConfigEntry("AuroraColorG",           m_editorConfig.AuroraColor.g);
-	globalstate.setCustomConfigEntry("AuroraColorB",           m_editorConfig.AuroraColor.b);
-	globalstate.setCustomConfigEntry("WindDirection",         m_editorConfig.WindDirection);
-	globalstate.setCustomConfigEntry("WindSpeed",             m_editorConfig.WindSpeed);
+	globalstate.setCustomConfigEntry("QuickSettingsFavorites",     m_editorConfig.QuickSettingsFavorites);
 	globalstate.writeConfig();
 }
 

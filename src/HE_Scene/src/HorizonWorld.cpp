@@ -1,4 +1,5 @@
 #include "HorizonScene/HorizonWorld.h"
+#include "HorizonScene/Components/EnvironmentComponent.h"
 #include <algorithm>
 
 HorizonWorld::HorizonWorld()
@@ -6,6 +7,9 @@ HorizonWorld::HorizonWorld()
     rootEntity_ = registry_.create();
     registry_.emplace<NameComponent>(rootEntity_, NameComponent{ "World" });
     registry_.emplace<HierarchyComponent>(rootEntity_);
+    // Scene-wide environment / sky settings live on the root ("World") entity so
+    // they serialize with the scene and are edited in its Details panel.
+    registry_.emplace<EnvironmentComponent>(rootEntity_);
 }
 
 Entity HorizonWorld::createEntity(const std::string& name)
@@ -71,6 +75,10 @@ void HorizonWorld::clear()
     for (Entity e : strays)
         if (registry_.valid(e))
             registry_.destroy(e);
+    // Reset the root's environment to defaults so New Scene / loading a scene
+    // without an environment block starts from a clean sky (a loaded scene that
+    // has one overwrites this via the serializer's emplace_or_replace).
+    registry_.emplace_or_replace<EnvironmentComponent>(rootEntity_);
     m_hierarchyDirty = true;
 }
 
