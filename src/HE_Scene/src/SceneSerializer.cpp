@@ -13,6 +13,8 @@
 #include "HorizonScene/Components/EnvironmentComponent.h"
 #include "HorizonScene/Components/EnvironmentLightComponent.h"
 #include "HorizonScene/Components/TerrainComponent.h"
+#include "HorizonScene/Components/AudioSourceComponent.h"
+#include "HorizonScene/Components/AudioListenerComponent.h"
 #include <nlohmann/json.hpp>
 #include <fstream>
 
@@ -196,6 +198,25 @@ namespace
 				comps["terrain"] = tc;
 			}
 
+			if (auto* a = registry.try_get<AudioSourceComponent>(entity))
+			{
+				comps["audiosource"] = {
+					{ "asset",       uuidToJson(a->assetId) },
+					{ "volume",      a->volume },
+					{ "pitch",       a->pitch },
+					{ "range",       a->range },
+					{ "loop",        a->loop },
+					{ "playOnStart", a->playOnStart },
+					{ "spatial",     a->spatial },
+				};
+			}
+			if (auto* l = registry.try_get<AudioListenerComponent>(entity))
+			{
+				comps["audiolistener"] = {
+					{ "masterVolume", l->masterVolume },
+				};
+			}
+
 			if (!comps.is_null())
 				eJson["components"] = comps;
 
@@ -326,6 +347,26 @@ namespace
 				t.sculptHeights = c["sculptHeights"].get<std::vector<float>>();
 			t.dirty       = true; // always regenerate after load
 			registry.emplace_or_replace<TerrainComponent>(entity, t);
+		}
+		if (comps.contains("audiosource"))
+		{
+			const json& c = comps["audiosource"];
+			AudioSourceComponent a;
+			a.assetId     = jsonToUuid(c.value("asset", json()));
+			a.volume      = c.value("volume",      a.volume);
+			a.pitch       = c.value("pitch",       a.pitch);
+			a.range       = c.value("range",       a.range);
+			a.loop        = c.value("loop",        a.loop);
+			a.playOnStart = c.value("playOnStart",  a.playOnStart);
+			a.spatial     = c.value("spatial",     a.spatial);
+			registry.emplace_or_replace<AudioSourceComponent>(entity, a);
+		}
+		if (comps.contains("audiolistener"))
+		{
+			const json& c = comps["audiolistener"];
+			AudioListenerComponent l;
+			l.masterVolume = c.value("masterVolume", l.masterVolume);
+			registry.emplace_or_replace<AudioListenerComponent>(entity, l);
 		}
 	}
 

@@ -1,0 +1,165 @@
+#include "doctest.h"
+#include <HorizonScene/HorizonScene.h>
+#include <HorizonScene/SceneSerializer.h>
+#include <HorizonScene/HorizonWorld.h>
+#include <Types/UUID.h>
+
+// ─── AudioSourceComponent ──────────────────────────────────────────────────────
+
+TEST_CASE("AudioSourceComponent has sane defaults")
+{
+    AudioSourceComponent a;
+    CHECK(a.volume == doctest::Approx(1.0f));
+    CHECK(a.pitch  == doctest::Approx(1.0f));
+    CHECK(a.range  == doctest::Approx(20.0f));
+    CHECK(!a.loop);
+    CHECK(!a.playOnStart);
+    CHECK(!a.spatial);
+    CHECK(a.assetId == HE::UUID{}); // default-constructed = null
+}
+
+TEST_CASE("AudioSourceComponent can be attached to an entity")
+{
+    HorizonWorld world;
+    auto e = world.createEntity("Speaker");
+    auto& reg = world.registry();
+
+    HE::UUID assetId = HE::UUID::generate();
+    AudioSourceComponent src;
+    src.assetId     = assetId;
+    src.volume      = 0.75f;
+    src.loop        = true;
+    src.playOnStart = true;
+    src.spatial     = true;
+    src.range       = 50.0f;
+    reg.emplace<AudioSourceComponent>(e, src);
+
+    const auto& stored = reg.get<AudioSourceComponent>(e);
+    CHECK(stored.assetId     == assetId);
+    CHECK(stored.volume      == doctest::Approx(0.75f));
+    CHECK(stored.loop        == true);
+    CHECK(stored.playOnStart == true);
+    CHECK(stored.spatial     == true);
+    CHECK(stored.range       == doctest::Approx(50.0f));
+}
+
+// ─── AudioListenerComponent ───────────────────────────────────────────────────
+
+TEST_CASE("AudioListenerComponent has sane defaults")
+{
+    AudioListenerComponent l;
+    CHECK(l.masterVolume == doctest::Approx(1.0f));
+}
+
+TEST_CASE("AudioListenerComponent can be attached to an entity")
+{
+    HorizonWorld world;
+    auto e = world.createEntity("Player");
+    auto& reg = world.registry();
+
+    AudioListenerComponent l;
+    l.masterVolume = 0.8f;
+    reg.emplace<AudioListenerComponent>(e, l);
+
+    CHECK(reg.get<AudioListenerComponent>(e).masterVolume == doctest::Approx(0.8f));
+}
+
+// ─── SceneSerializer round-trip ───────────────────────────────────────────────
+
+TEST_CASE("AudioSourceComponent serializes and deserializes via memory snapshot")
+{
+    HorizonWorld world;
+    auto e = world.createEntity("Speaker");
+    auto& reg = world.registry();
+
+    HE::UUID assetId = HE::UUID::generate();
+    AudioSourceComponent src;
+    src.assetId     = assetId;
+    src.volume      = 0.6f;
+    src.pitch       = 1.2f;
+    src.range       = 30.0f;
+    src.loop        = true;
+    src.playOnStart = false;
+    src.spatial     = true;
+    reg.emplace<AudioSourceComponent>(e, src);
+
+    // Round-trip through the binary memory snapshot (same path as play-in-editor)
+    SceneSerializer serializer;
+    std::vector<uint8_t> snapshot;
+    REQUIRE(serializer.saveToMemory(world, snapshot));
+    CHECK(!snapshot.empty());
+
+    HorizonWorld world2;
+    REQUIRE(serializer.loadFromMemory(world2, snapshot));
+
+    bool found = false;
+    for (auto [ent, name] : world2.registry().view<NameComponent>().each())
+    {
+        if (name.name != "Speaker") continue;
+        found = true;
+        const auto* a = world2.registry().try_get<AudioSourceComponent>(ent);
+        REQUIRE(a != nullptr);
+        CHECK(a->assetId     == assetId);
+        CHECK(a->volume      == doctest::Approx(0.6f));
+        CHECK(a->pitch       == doctest::Approx(1.2f));
+        CHECK(a->range       == doctest::Approx(30.0f));
+        CHECK(a->loop        == true);
+        CHECK(a->playOnStart == false);
+        CHECK(a->spatial     == true);
+        break;
+    }
+    CHECK(found);
+}
+
+TEST_CASE("AudioListenerComponent serializes and deserializes via memory snapshot")
+{
+    HorizonWorld world;
+    auto e = world.createEntity("MainCamera");
+    auto& reg = world.registry();
+
+    AudioListenerComponent l;
+    l.masterVolume = 0.5f;
+    reg.emplace<AudioListenerComponent>(e, l);
+
+    SceneSerializer serializer;
+    std::vector<uint8_t> snapshot;
+    REQUIRE(serializer.saveToMemory(world, snapshot));
+
+    HorizonWorld world2;
+    REQUIRE(serializer.loadFromMemory(world2, snapshot));
+
+    bool found = false;
+    for (auto [ent, name] : world2.registry().view<NameComponent>().each())
+    {
+        if (name.name != "MainCamera") continue;
+        found = true;
+        const auto* lp = world2.registry().try_get<AudioListenerComponent>(ent);
+        REQUIRE(lp != nullptr);
+        CHECK(lp->masterVolume == doctest::Approx(0.5f));
+        break;
+    }
+    CHECK(found);
+}
+
+TEST_CASE("AudioSourceComponent round-trip preserves null assetId")
+{
+    HorizonWorld world;
+    auto e = world.createEntity("SilentSource");
+    world.registry().emplace<AudioSourceComponent>(e); // all defaults, null UUID
+
+    SceneSerializer serializer;
+    std::vector<uint8_t> snapshot;
+    REQUIRE(serializer.saveToMemory(world, snapshot));
+
+    HorizonWorld world2;
+    REQUIRE(serializer.loadFromMemory(world2, snapshot));
+
+    for (auto [ent, name] : world2.registry().view<NameComponent>().each())
+    {
+        if (name.name != "SilentSource") continue;
+        const auto* a = world2.registry().try_get<AudioSourceComponent>(ent);
+        REQUIRE(a != nullptr);
+        CHECK(a->assetId == HE::UUID{}); // should still be null
+        break;
+    }
+}

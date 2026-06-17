@@ -114,7 +114,7 @@ Keine Abhängigkeiten; jede Woche ein bisschen davon.
 | 0.3 | **`Ref<T>`** (intrusiver Refcount) + Einsatz im ContentManager | — | ✅ Forts. 25 — `AssetRef<T>` + `pinAsset`/`unpinAsset` + `unloadAsset`-Gate |
 | 0.4 | **Job-System** (Thread-Pool, parallel_for, Abhängigkeits-Handles) | — | ✅ Forts. 26 — parallele FrustumCuller + parallele RenderExtractor-Extraktion |
 | 0.5 | **Profiling-Hooks**: Tracy vendoren, Frame-/Zone-Marker | — | ✅ Forts. 27 — Tracy FetchContent + HE_PROFILE_FRAME/SCOPE/SCOPE_N + 4 Zone-Marker |
-| 0.6 | **Aufräumen**: doppelte glm-Kopie (vendored + FetchContent) auf eine Quelle | — | klein |
+| 0.6 | **Aufräumen**: doppelte glm-Kopie (vendored + FetchContent) auf eine Quelle | — | ✅ Forts. 28 — 33 MB vendored glm aus HE_Rendering entfernt (war CMake-toter Code) |
 | 0.7 | **Debug-Draw-API** (Linien, Wireframe-AABBs, Text im Viewport) | Render-Pfad ✅ | ✅ Forts. 24 — `DebugDrawBuffer` + GL- und Metal-Backend + Editor-Erdgitter |
 
 ---
@@ -210,7 +210,7 @@ profitieren von P2.8 (Play-Mode zum Testen).
 ### 4c — Audio
 | # | Aufgabe | Hängt ab von | Details |
 |---|---|---|---|
-| 4c.1 | **miniaudio** + AudioSource/AudioListener-Komponenten | 1.7, 2.2 | |
+| 4c.1 | **miniaudio** + AudioSource/AudioListener-Komponenten | 1.7, 2.2 | ✅ Forts. 29 — AudioSourceComponent + AudioListenerComponent + SceneSerializer + Editor-Inspector (miniaudio-Playback noch offen) |
 | 4c.2 | 3D-Spatialization, Attenuation | 4c.1 | |
 | 4c.3 | Mixer/Bus-System (Music/SFX-Gruppen, Lautstärke) | 4c.1 | |
 
@@ -1516,3 +1516,33 @@ Lifetime-sicher mit der bestehenden `SlotMap`/`m_handleToUUID`-Buchführung inte
   **106 Tests grün** (104→106), Build sauber.
 - **Aktivierung:** `cmake -DHE_ENABLE_TRACY=ON` — kein Code-Änderung nötig. Im Standard-Build null Overhead.
 - **Nächster Schritt:** 0.6 GLM-Dedup (doppelte vendored + FetchContent-Kopie bereinigen).
+
+### Forts. 28 — GLM-Dedup (0.6)
+
+> **Aufgabe:** Doppelte GLM-Kopie (33 MB vendored in `src/HE_Rendering/glm/` + FetchContent-GLM) auf eine Quelle reduzieren. ✅
+
+- Die vendored `src/HE_Rendering/glm/`-Kopie war seit dem Initial-Commit nie in einem CMakeLists referenziert.
+  Alle Backends linken bereits `glm::glm` aus FetchContent. Totes Gewicht.
+- Mit `git rm -r --cached src/HE_Rendering/glm/` aus dem Index entfernt (2090 Dateien, 33 MB).
+- Build-Verifikation: `cmake --build cmake-build-release --target he_tests` → „no work to do", alle 106 Tests weiterhin grün.
+- **Nächster Schritt:** Phase 4 — Forts. 29 Audio-Komponenten.
+
+### Forts. 29 — AudioSource/AudioListener-Komponenten (Phase 4c Anfang)
+
+> **Aufgabe:** Audio-Datenmodell aufbauen — Komponenten, Serialisierung, Editor-Inspector — als Fundament vor der miniaudio-Playback-Integration. ✅
+
+- **`AudioSourceComponent`** (`HorizonScene/Components/AudioSourceComponent.h`):
+  `assetId` (UUID → AudioAsset), `volume` (1.0), `pitch` (1.0), `range` (20 m, für Spatial-Audio),
+  `loop` / `playOnStart` / `spatial` (alle false).
+- **`AudioListenerComponent`** (`HorizonScene/Components/AudioListenerComponent.h`):
+  `masterVolume` (1.0). Position/Orientierung wird zur Laufzeit aus dem `TransformComponent` gelesen.
+- **`HorizonScene.h`** aggregiert beide neuen Header.
+- **`SceneSerializer`** erweitert: beide Komponenten in `buildSceneJson` serialisiert +
+  in `applyComponents` deserialisiert (alle Felder, UUID-Roundtrip).
+- **Editor-Inspector (`EditorUI.cpp`)**:
+  - Audio-Source-Panel: Asset-ID-Label, Volume/Pitch-Slider, Loop/PlayOnStart/Spatial-Checkboxen, Range-Slider (nur wenn Spatial).
+  - Audio-Listener-Panel: Master-Volume-Slider.
+  - Beide in „Add Component"-Popup eingetragen.
+- **Tests (`tests/test_audio.cpp`):** 7 neue Doctest-Cases (Defaults, Attach, Serialisierung-Roundtrip
+  für Source + Listener + Null-UUID-Erhalt). **113 Tests grün** (106→113), Build sauber.
+- **Offen (nächster Schritt 4c):** miniaudio.h vendoren + AudioEngine-Wrapper + `playOnStart`-Logic im GameLoop.

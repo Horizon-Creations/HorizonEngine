@@ -17,6 +17,8 @@
 #include "Components/EnvironmentComponent.h"
 #include "Components/EnvironmentLightComponent.h"
 #include "Components/TerrainComponent.h"
+#include "Components/AudioSourceComponent.h"
+#include "Components/AudioListenerComponent.h"
 #include "TerrainMeshGenerator.h"
 #include "TerrainSystem.h"
 
