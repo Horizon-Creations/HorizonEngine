@@ -784,6 +784,17 @@ void EditorApplication::OnRender(float dt)
 		if (m_editorWorld)
 			TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), renderer());
 
+		// Step physics at a fixed rate during play mode
+		if (m_isPlaying && m_physicsWorld && m_editorWorld)
+		{
+			m_physicsAccum += dt;
+			while (m_physicsAccum >= kPhysicsFixedDt)
+			{
+				m_physicsWorld->step(*m_editorWorld, kPhysicsFixedDt);
+				m_physicsAccum -= kPhysicsFixedDt;
+			}
+		}
+
 		pushEnvironment(dt); // auto-advances + pushes the World env component
 
 		// ── Debug draw overlay (ground grid + selected-entity marker) ─────────
@@ -1031,6 +1042,12 @@ void EditorApplication::setPlayMode(bool play)
 		}
 		m_isPlaying = true;
 		m_undo.clearHistory(); // edits made while playing are not undoable
+
+		// Initialise physics from the current world state
+		m_physicsWorld = std::make_unique<PhysicsWorld>();
+		m_physicsWorld->initialize(*m_editorWorld);
+		m_physicsAccum = 0.0f;
+
 		Logger::Log(Logger::LogLevel::Info, "EditorApplication: entering play mode");
 	}
 	else
@@ -1043,6 +1060,11 @@ void EditorApplication::setPlayMode(bool play)
 		m_editorWorld->markHierarchyDirty();
 		m_isPlaying = false;
 		m_undo.clearHistory();
+
+		// Tear down physics
+		m_physicsWorld.reset();
+		m_physicsAccum = 0.0f;
+
 		Logger::Log(Logger::LogLevel::Info, "EditorApplication: returned to edit mode");
 	}
 }
