@@ -4,6 +4,7 @@
 #include "Application/Input.h"
 #include "Application/InputMapping.h"
 #include "Events/EventBus.h"
+#include "Scripting/ScriptEngine.h"
 
 #include "Types/Defines.h"
 #include "Types/UUID.h"

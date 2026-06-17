@@ -2474,7 +2474,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                     SceneSerializer ser;
                     auto data = ser.serializeSubtree(*ctx.world, node.entity);
                     PrefabAsset prefab;
-                    prefab.name = registry.get<NameComponent>(node.entity).name;
+                    prefab.name = node.name;
                     prefab.data = std::move(data);
                     ctx.contentManager->registerPrefab(std::move(prefab));
                 }
@@ -3641,7 +3641,7 @@ void EditorUI::RenderInspector(AppContext& ctx)
 		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<RigidBodyComponent>(entity); }
 	}
 
-	// ── Script ──────────────────────────────────────────────────────────────
+	// ── Script (Lua) ────────────────────────────────────────────────────────
 	if (auto* s = registry.try_get<ScriptComponent>(entity))
 	{
 		if (componentHeader("Script", true, removed))
@@ -3649,9 +3649,16 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			char buf[256];
 			std::strncpy(buf, s->moduleName.c_str(), sizeof(buf) - 1);
 			buf[sizeof(buf) - 1] = '\0';
-			if (ImGui::InputText("Module", buf, sizeof(buf)))
+			if (ImGui::InputText("Script Name", buf, sizeof(buf)))
+			{
 				s->moduleName = buf;
-			trackEdit();
+				trackEdit();
+			}
+			ImGui::SameLine();
+			ImGui::TextDisabled("(?)");
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("Logical name matching ScriptEngine::loadScript(name, source).\n"
+				                  "Script must export onStart(self) and/or onUpdate(self, dt).");
 			ImGui::Checkbox("Enabled", &s->enabled); trackEdit();
 		}
 		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<ScriptComponent>(entity); }

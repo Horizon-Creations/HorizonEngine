@@ -201,7 +201,7 @@ profitieren von P2.8 (Play-Mode zum Testen).
 ### 4b — Scripting
 | # | Aufgabe | Hängt ab von | Details |
 |---|---|---|---|
-| 4b.1 | **Lua via sol2**, ScriptComponent-Lifecycle (onStart/onUpdate) | 2.2, 2.8 | Enums sind vorbereitet |
+| 4b.1 | **Lua via sol2**, ScriptComponent-Lifecycle (onStart/onUpdate) | 2.2, 2.8 | ✅ Forts. 34 — ScriptEngine (Lua 5.4 FetchContent), loadScript/createInstance/callOnStart/callOnUpdate, 17 Tests |
 | 4b.2 | Engine-API-Binding (Entity, Transform, Input, Spawn/Destroy) | 4b.1 | |
 | 4b.3 | Hot-Reload von Scripts im Play-Mode | 4b.1 | |
 | 4b.4 | Script-Properties im Inspector (exportierte Variablen) | 4b.1, 2.3 | |
@@ -1603,3 +1603,22 @@ Lifetime-sicher mit der bestehenden `SlotMap`/`m_handleToUUID`-Buchführung inte
 - **`subscriberCount<TEvent>()`** / **`totalSubscriberCount()`**: Hilfsmethoden für Tests und Debug-Anzeige.
 - **HorizonCore.h**: `#include "Events/EventBus.h"` ergänzt.
 - **Tests (`tests/test_eventbus.cpp`):** 15 neue Cases (no-op, single/multi subscriber, type-filtering, payload-forwarding, RAII destroy/release/double-release/move-construct/move-assign, subscriberCount, totalSubscriberCount, subscribe/unsubscribe during dispatch). **167 Tests grün** (153→167).
+
+### Forts. 34 — Lua Scripting Engine (4b.1)
+
+> **Aufgabe:** Lua-Scripting-Grundlage — ScriptEngine mit onStart/onUpdate-Lifecycle, ScriptComponent auf Lua umgestellt. ✅
+
+- **Lua 5.4.7** via FetchContent (`walterschell/Lua`), als `lua_static` in HorizonCore verlinkt.
+- **`ScriptEngine`** (`Scripting/ScriptEngine.h/.cpp`, in HorizonCore): Raw-Lua-C-API (lua.h/lualib.h/lauxlib.h). Kein sol2 in diesem Schritt (sol2 ist für 4b.2 Engine-API-Binding vorgesehen).
+- **Script-Format:** Lua-Chunk gibt ein Modul-Table zurück:
+  ```lua
+  local M = {}
+  function M.onStart(self) self.hp = 100 end
+  function M.onUpdate(self, dt) self.hp = self.hp - dt end
+  return M
+  ```
+- **API:** `loadScript(name, source)` (compile+store); `createInstance(name)` (neue Table als Instanz, Funktionen aus Modul kopiert); `callOnStart(id)` / `callOnUpdate(id, dt)` (ruft jeweilige Funktion mit self=instance); `destroyInstance(id)`; `exec(code)` + `getGlobalNumber/String` (für Tests/REPL); `lastError()`.
+- **Instanz-Modell:** Jede Instanz besitzt eine eigene Lua-Table (shallow copy des Modul-Tables) im Lua-Registry. Mehrere Instanzen desselben Scripts sind vollständig isoliert.
+- **ScriptComponent** (`HorizonScene/Components/ScriptComponent.h`): Kommentar von Python auf Lua aktualisiert.
+- **Editor (`EditorUI.cpp`):** Script-Inspector zeigt „Script Name" + Tooltip, behält scriptAssetId + enabled. Bugfix: `prefab.name = node.name` (statt undeklarierten `registry.get<NameComponent>`).
+- **Tests (`tests/test_scripting.cpp`):** 17 neue Cases (loadScript valid/invalid/non-table/reload/unload, createInstance valid/invalid/two-independent/destroy, onStart/onUpdate called, no-op ohne Hooks, Runtime-Error in onStart, exec/getGlobal*, multiple scripts coexist). **184 Tests grün** (167→184).

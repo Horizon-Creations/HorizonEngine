@@ -2,10 +2,9 @@
 #include <Types/UUID.h>
 #include <string>
 
-// Holds a reference to a Python script module.
-// HorizonScripting reads this component and manages the Python object lifecycle.
+// Identifies a Lua script for an entity. ScriptEngine manages the lifecycle.
 struct ScriptComponent {
-    HE::UUID    scriptAssetId;   // asset ID of the .py file
-    std::string moduleName;      // e.g. "player_controller"
+    HE::UUID    scriptAssetId;   // asset ID of the .lua file
+    std::string moduleName;      // logical name used with ScriptEngine::loadScript
     bool        enabled = true;
 };

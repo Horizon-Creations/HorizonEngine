@@ -74,6 +74,17 @@ set(JSON_Install         OFF CACHE BOOL "" FORCE)
 set(JSON_MultipleHeaders OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(nlohmann_json)
 
+# ─── Lua 5.4 ──────────────────────────────────────────────────────────────────
+FetchContent_Declare(
+    lua
+    GIT_REPOSITORY https://github.com/walterschell/Lua.git
+    GIT_TAG        v5.4.7
+    GIT_SHALLOW    TRUE
+)
+set(LUA_BUILD_SHARED    OFF CACHE BOOL "" FORCE)
+set(LUA_ENABLE_TESTING  OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(lua)
+
 # ─── Tracy (optional profiling) ────────────────────────────────────────────────
 # Enable with:  cmake -DHE_ENABLE_TRACY=ON ...
 # Default OFF so production/CI builds have zero overhead.
