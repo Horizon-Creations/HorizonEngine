@@ -1866,32 +1866,25 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 			toolBtn("Rotate", ImGuizmo::ROTATE,    "Rotate (E)"); ImGui::SameLine();
 			toolBtn("Scale",  ImGuizmo::SCALE,     "Scale (R)");  ImGui::SameLine();
 
-			// Local / World gizmo orientation
+			// Local / World gizmo orientation (dropdown)
 			{
-				const bool isWorld = (s_gizmoMode == ImGuizmo::WORLD);
-				if (ImGui::Button(isWorld ? "World" : "Local"))
-					s_gizmoMode = isWorld ? ImGuizmo::LOCAL : ImGuizmo::WORLD;
+				int modeIdx = (s_gizmoMode == ImGuizmo::WORLD) ? 1 : 0;
+				const char* modeItems[] = { "Local", "World" };
+				ImGui::SetNextItemWidth(90.0f);
+				if (ImGui::Combo("##GizmoMode", &modeIdx, modeItems, 2))
+					s_gizmoMode = (modeIdx == 1) ? ImGuizmo::WORLD : ImGuizmo::LOCAL;
 				if (ImGui::IsItemHovered())
-					ImGui::SetTooltip("Gizmo axes: %s\nClick to toggle Local / World",
-						isWorld ? "World" : "Local");
+					ImGui::SetTooltip("Gizmo axis orientation:\nLocal (object axes) or World (axis-aligned)");
 			}
 			ImGui::SameLine();
 
 			// Outer screen-space rotation ring (the white circle on the rotate
 			// gizmo that spins about the view axis) — off by default.
-			{
-				const bool active = s_rotateScreen;
-				if (active)
-					ImGui::PushStyleColor(ImGuiCol_Button,
-						ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
-				if (ImGui::Button("Screen")) s_rotateScreen = !s_rotateScreen;
-				if (active) ImGui::PopStyleColor();
-				if (ImGui::IsItemHovered())
-					ImGui::SetTooltip(
-						"Rotate gizmo: click to %s the outer screen-space ring\n"
-						"(rotates about the view axis)",
-						s_rotateScreen ? "hide" : "show");
-			}
+			ImGui::Checkbox("Screen ring", &s_rotateScreen);
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip(
+					"Show the rotate gizmo's outer screen-space ring\n"
+					"(rotates about the view axis)");
 			ImGui::SameLine();
 		}
 
