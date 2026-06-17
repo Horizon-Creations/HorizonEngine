@@ -731,6 +731,38 @@ void EditorApplication::OnRender(float dt)
 		}
 	}
 
+	// ── Hot-reload: poll disk assets every ~1.5 s ────────────────────────────
+	if (m_projectLoaded && renderer())
+	{
+		m_hotReloadTimer += dt;
+		if (m_hotReloadTimer >= 1.5f)
+		{
+			m_hotReloadTimer = 0.0f;
+			auto changed = contentManager().pollHotReload();
+			for (const HE::UUID& id : changed)
+			{
+				switch (contentManager().assetType(id))
+				{
+				case HE::AssetType::StaticMesh:
+				case HE::AssetType::SkeletalMesh:
+					renderer()->InvalidateMesh(id);
+					break;
+				case HE::AssetType::Material:
+					renderer()->InvalidateMaterial(id);
+					break;
+				case HE::AssetType::Texture:
+					// Texture GPU caches are keyed by material UUID, not texture UUID.
+					// Flush all material caches so re-uploads pick up the new texel data.
+					for (const HE::UUID& matId : contentManager().enumerateIds(HE::AssetType::Material))
+						renderer()->InvalidateMaterial(matId);
+					break;
+				default:
+					break;
+				}
+			}
+		}
+	}
+
 	// Push post-process (engine prefs) + the scene's environment (World entity).
 	if (renderer())
 	{

@@ -422,6 +422,13 @@ std::vector<HE::UUID> ContentManager::enumerateIds(HE::AssetType type) const
 	return out;
 }
 
+// ─── assetType ───────────────────────────────────────────────────────────────
+HE::AssetType ContentManager::assetType(HE::UUID id) const
+{
+	auto it = m_assetTypeIndex.find(id);
+	return it != m_assetTypeIndex.end() ? it->second : HE::AssetType::Unknown;
+}
+
 // ─── pollHotReload ───────────────────────────────────────────────────────────
 std::vector<HE::UUID> ContentManager::pollHotReload()
 {
@@ -444,6 +451,10 @@ std::vector<HE::UUID> ContentManager::pollHotReload()
 		auto storedIt = m_pathMtime.find(relPath);
 		if (storedIt == m_pathMtime.end() || mtime == storedIt->second)
 			continue; // not in map yet or unchanged
+
+		// Skip files that aren't valid .hasset yet (mid-write / partial save).
+		// Avoids evicting the live asset before the new version is readable.
+		if (getAssetType(fullPath) == HE::AssetType::Unknown) continue;
 
 		// File changed — unload old entry (removes from m_pathMtime) then reload.
 		auto pathIt = m_pathToUUID.find(relPath);

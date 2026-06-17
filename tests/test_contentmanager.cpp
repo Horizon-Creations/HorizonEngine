@@ -3,6 +3,7 @@
 #include <ContentManager/DefaultAssets.h>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 
 namespace fs = std::filesystem;
 
@@ -390,4 +391,29 @@ TEST_CASE("ContentManager pollHotReload ignores virtual mem:// paths")
 	// Default manager has only mem:// assets — poll must not crash or signal any.
 	ContentManager cm;
 	CHECK(cm.pollHotReload().empty());
+}
+
+TEST_CASE("ContentManager pollHotReload skips mid-write (invalid) files")
+{
+	TempContentDir dir;
+	ContentManager cm(dir.path.string());
+
+	MaterialAsset mat;
+	mat.type = HE::AssetType::Material;
+	mat.name = "guarded";
+	mat.path = "guarded.hasset";
+	REQUIRE(cm.saveAsset(mat));
+	const HE::UUID id = mat.id;
+	REQUIRE(cm.loadAsset("guarded.hasset") == id);
+
+	// Overwrite with garbage so getAssetType returns Unknown (simulates mid-write).
+	const fs::path diskPath = dir.path / "guarded.hasset";
+	{ std::ofstream f(diskPath, std::ios::binary); f << "GARBAGE_NOT_A_VALID_ASSET"; }
+	auto t = fs::last_write_time(diskPath);
+	fs::last_write_time(diskPath, t + std::chrono::seconds(2));
+
+	// Poll must skip the file and keep the old asset alive.
+	auto changed = cm.pollHotReload();
+	CHECK(changed.empty());
+	CHECK(cm.getMaterial(id) != nullptr);
 }

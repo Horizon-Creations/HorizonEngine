@@ -77,6 +77,8 @@ public:
 	std::vector<HE::UUID> enumerateIds(HE::AssetType type) const;
 	// Total number of loaded/registered assets (all types).
 	size_t assetCount() const { return m_handleToUUID.size(); }
+	// Returns the AssetType for a loaded/registered UUID, or Unknown if not found.
+	HE::AssetType assetType(HE::UUID id) const;
 
 private:
 
