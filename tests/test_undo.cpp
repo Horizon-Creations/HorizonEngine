@@ -91,3 +91,67 @@ TEST_CASE("EditorUndo new edit clears the redo stack")
 	world.createEntity("B");
 	CHECK_FALSE(undo.canRedo());
 }
+
+TEST_CASE("EditorUndo multi-level undo and redo")
+{
+	HorizonWorld world;
+	EditorUndo undo;
+	undo.setWorld(&world);
+
+	// Build 3 undo-able edits
+	undo.snapshotNow(); world.createEntity("A");
+	undo.snapshotNow(); world.createEntity("B");
+	undo.snapshotNow(); world.createEntity("C");
+	CHECK(entityCount(world) == 4); // root + A + B + C
+
+	CHECK(undo.undo()); CHECK(entityCount(world) == 3);
+	CHECK((findByName(world, "C") == entt::null));
+	CHECK(undo.undo()); CHECK(entityCount(world) == 2);
+	CHECK((findByName(world, "B") == entt::null));
+	CHECK(undo.undo()); CHECK(entityCount(world) == 1);
+	CHECK_FALSE(undo.canUndo());
+
+	// All three redo steps restore entities in order
+	CHECK(undo.redo()); CHECK(entityCount(world) == 2);
+	CHECK(undo.redo()); CHECK(entityCount(world) == 3);
+	CHECK(undo.redo()); CHECK(entityCount(world) == 4);
+	CHECK_FALSE(undo.canRedo());
+}
+
+TEST_CASE("EditorUndo revision counter increments on every mutation")
+{
+	HorizonWorld world;
+	EditorUndo undo;
+	undo.setWorld(&world);
+	const uint64_t base = undo.revision();
+
+	undo.snapshotNow();
+	world.createEntity("X");
+	CHECK(undo.revision() == base + 1); // push increments
+
+	undo.undo();
+	CHECK(undo.revision() == base + 2); // undo increments
+
+	undo.redo();
+	CHECK(undo.revision() == base + 3); // redo increments
+}
+
+TEST_CASE("EditorUndo clearHistory wipes both stacks without changing the world")
+{
+	HorizonWorld world;
+	EditorUndo undo;
+	undo.setWorld(&world);
+
+	undo.snapshotNow(); world.createEntity("A");
+	undo.snapshotNow(); world.createEntity("B");
+	REQUIRE(undo.canUndo());
+
+	undo.undo(); // restores to pre-B state; canRedo is now true
+	REQUIRE(undo.canRedo());
+
+	undo.clearHistory();
+	CHECK_FALSE(undo.canUndo());
+	CHECK_FALSE(undo.canRedo());
+	// World state is unchanged — only history is gone
+	CHECK(entityCount(world) == 2); // root + A (undo already reverted B)
+}
