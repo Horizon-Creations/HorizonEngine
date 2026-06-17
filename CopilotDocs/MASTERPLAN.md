@@ -63,6 +63,46 @@ untereinander unabhängig und parallelisierbar.
 
 ---
 
+## Bauprinzip — bottom-up (low-level zuerst)
+
+**Regel:** Erst die zugrunde liegenden Systeme *fertig* bauen, dann die Features, die darauf aufsetzen.
+Kein High-Level-Feature auf einem unfertigen Fundament. Der Abhängigkeitsgraph oben **ist** diese
+Reihenfolge — er wird **von unten nach oben** abgearbeitet (Core / Memory / Asset-Pipeline → Rendering /
+Editor → Engine-Systeme → Gameplay → Shipping → Kür).
+
+Konkret für die Arbeitsauswahl: Bevor ein Feature gebaut wird, das z. B. die Asset-Pipeline, das
+Job-System, `Ref<T>` oder den RenderGraph braucht, werden diese Bausteine zuerst auf einen *benutzbaren,
+getesteten* Stand gebracht. Ein Feature wird nie „blind" auf eine API gesetzt, die es noch nicht gibt —
+Beispiel: der Landscape-Plan (Forts. 19) braucht `ContentManager::registerStaticMesh`, also wird **zuerst**
+diese ContentManager-API gebaut (Forts. 20), erst danach das Terrain.
+
+> **Selbstkritik (17.06.2026):** Die letzten Iterationen (Himmel / Wolken / SSAO / Gizmo, Forts. 7–18)
+> waren stark High-Level/visuell getrieben, während Fundament-Lücken offen blieben. Ab jetzt gilt:
+> Fundament schließen, bevor weitere aufbauende Features dazukommen.
+
+### Fundament-Lücken (Stand 17.06.2026) — in Baureihenfolge
+
+Diese low-level Bausteine zuerst, in dieser Reihenfolge — jeder schaltet die darüberliegenden Features frei:
+
+1. **ContentManager fertigstellen** (Phase-0/1-Kern):
+   - ✅ **Runtime-Asset-Registrierung** `registerStaticMesh/Texture/Material` + `replace…` (In-Memory-Assets
+     ohne Disk-Datei) + Aliasing-Härtung der typisierten Getter/`unload` (Forts. 20). → schaltet prozedurale
+     Assets frei (Terrain, Default-/Fallback-Assets, editor-erzeugte Materialien).
+   - 🔜 **Default-/Fallback-Assets** mit festen UUIDs (weiße 1×1-Textur, Default-Material, Unit-/Error-Mesh),
+     im Ctor registriert — ersetzt die ad-hoc-Fallbacks in beiden Renderern.
+   - 🔜 **Asset-Enumeration** (geladene Assets + Content-Verzeichnis auflisten) für den Content Browser.
+   - 🔜 **Reload/Hot-Reload** einer geänderten Datei (mtime-Watch).
+2. **`Ref<T>`** (intrusiver Refcount, Phase 0.3) + Einsatz im ContentManager → sauberes Unloading/Eviction
+   statt manuellem `unloadAsset`.
+3. **Job-System** (Thread-Pool, `parallel_for`, Phase 0.4) → parallele Extraction, Async-Loading, Physik.
+4. **RenderGraph + Pass-System aktivieren** (Phase 3.4) → die Post-FX (Bloom/FXAA/SSAO/Transparenz) hängen
+   aktuell direkt im Backend statt an Graph-Knoten; diese Schuld vor weiterem Rendering-Ausbau tilgen.
+
+Erst wenn (1) steht, ist der **Landscape-Modus** (Forts. 19) dran — er ist bewusst *nach* der
+ContentManager-Fertigstellung eingeplant.
+
+---
+
 ## Phase 0 — Fundament (Querschnitt, sofort startbar, läuft nebenher)
 
 Keine Abhängigkeiten; jede Woche ein bisschen davon.
@@ -1290,3 +1330,33 @@ Live-Regenerierung beim Editieren, keine Mesh-Dateien pro Terrain.
 **Risiken/Notizen:** Normalen an Gitterrändern (Nachbarn fehlen → einseitige Differenzen); große Auflösung
 × Anzahl Terrains = RAM/Upload (Phase-2-Chunking adressiert das); `registerStaticMesh` muss thread-/
 Lifetime-sicher mit der bestehenden `SlotMap`/`m_handleToUUID`-Buchführung interagieren.
+
+---
+
+### Forts. 20 — ContentManager: Runtime-Asset-Registrierung + Getter-Aliasing-Härtung
+
+> **Aufgabe (User):** „fange erstmal an, die zugrunde liegenden Systeme wie den ContentManager
+> fertigzukriegen, bevor du Features baust, die darauf aufbauen — bottom-up bauen." Erster Schritt der
+> Fundament-Fertigstellung (s. Bauprinzip oben): die fehlende Laufzeit-Asset-Registrierung, die der
+> Landscape-Plan (Forts. 19) und prozedurale/Default-Assets generell brauchen. ✅
+
+- **Runtime-Registrierung** (neue API in `ContentManager`): `registerStaticMesh/Texture/Material(asset)
+  -> UUID` registriert ein **In-Memory-Asset ohne Disk-Datei** (mintet eine UUID falls keine vorhanden,
+  indexiert es wie ein geladenes Asset über `m_handleToUUID`/optional `m_pathToUUID`), `replaceStaticMesh/
+  Texture/Material(id, asset) -> bool` tauscht die Payload **in place unter Beibehaltung der UUID** (für
+  deterministische Regenerierung prozeduraler Assets; Identität id/name/path bleibt). Implementiert über
+  zwei private Member-Templates `registerRuntimeAsset`/`replaceRuntimeAsset` (nur in der .cpp instanziiert).
+- **Latenten Aliasing-Bug gehärtet:** `SlotHandle{index,generation}` sind **pro SlotMap** vergeben → derselbe
+  Handle kann in mehreren Maps gültig sein. Die typisierten Getter taten blind `map.get(handle)` ohne
+  Typ-/Identitätscheck → `getStaticMesh(materialId)` lieferte fälschlich ein Mesh, **sobald beide Maps
+  belegt sind**. Bisher maskiert (Renderer fragt Getter nie mit typ-fremder UUID ab, und in Tests war je nur
+  eine Map belegt). Fix: `lookupAsset`, `getMaterialMutable` und `unloadAsset` prüfen jetzt zusätzlich
+  `asset->id == id`; `unloadAsset` entfernt damit garantiert aus der **richtigen** Map (vorher konnte es das
+  falsche Asset löschen, wenn der Handle zuerst in einer anderen Map gültig war).
+- **Tests:** 3 neue Cases in `test_contentmanager.cpp` (Runtime-Mesh ohne Disk-Datei + UUID gemintet + kein
+  File geschrieben; `replaceStaticMesh` hält UUID/Name/Path, Wrong-Type-/Unknown-`replace` schlägt fehl;
+  Mesh- und Material-Registrierung kollidieren nicht trotz gleichem SlotHandle). **40 Tests grün** (37→40),
+  Editor baut + linkt, GL-Dump rendert sauber.
+- **Schaltet frei:** prozedurale Meshes (Landscape Forts. 19), Default-/Fallback-Assets, editor-erzeugte
+  Materialien. **Nächste Fundament-Schritte** (s. Liste oben): Default-Assets, Asset-Enumeration, Hot-Reload,
+  dann `Ref<T>` / Job-System / RenderGraph.
