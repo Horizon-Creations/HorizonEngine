@@ -3679,6 +3679,38 @@ void EditorUI::RenderInspector(AppContext& ctx)
 		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<TerrainComponent>(entity); }
 	}
 
+	// ── Audio Source ────────────────────────────────────────────────────────
+	if (auto* a = registry.try_get<AudioSourceComponent>(entity))
+	{
+		if (componentHeader("Audio Source", true, removed))
+		{
+			char buf[64];
+			snprintf(buf, sizeof(buf), "%llu:%llu", (unsigned long long)a->assetId.hi,
+			         (unsigned long long)a->assetId.lo);
+			ImGui::LabelText("Asset ID", "%s", buf);
+			ImGui::DragFloat("Volume##as", &a->volume, 0.01f, 0.0f, 2.0f); trackEdit();
+			ImGui::DragFloat("Pitch##as",  &a->pitch,  0.01f, 0.1f, 4.0f); trackEdit();
+			ImGui::Checkbox("Loop##as",        &a->loop);        trackEdit();
+			ImGui::Checkbox("Play on Start##as",&a->playOnStart); trackEdit();
+			ImGui::Checkbox("Spatial##as",     &a->spatial);     trackEdit();
+			if (a->spatial)
+			{
+				ImGui::DragFloat("Range##as", &a->range, 0.5f, 0.0f, 1000.0f, "%.1f m"); trackEdit();
+			}
+		}
+		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<AudioSourceComponent>(entity); }
+	}
+
+	// ── Audio Listener ──────────────────────────────────────────────────────
+	if (auto* l = registry.try_get<AudioListenerComponent>(entity))
+	{
+		if (componentHeader("Audio Listener", true, removed))
+		{
+			ImGui::DragFloat("Master Volume##al", &l->masterVolume, 0.01f, 0.0f, 2.0f); trackEdit();
+		}
+		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<AudioListenerComponent>(entity); }
+	}
+
 	// ── Add Component ───────────────────────────────────────────────────────
 	// Not for the World root — it only carries the scene's Environment, no
 	// arbitrary components (and the built-in sun/moon are managed automatically).
@@ -3709,8 +3741,10 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			addItem("Material",     MaterialComponent{});
 			addItem("Camera",       CameraComponent{});
 			addItem("Light",        LightComponent{});
-			addItem("Rigid Body",   RigidBodyComponent{});
-			addItem("Script",       ScriptComponent{});
+			addItem("Rigid Body",     RigidBodyComponent{});
+			addItem("Script",         ScriptComponent{});
+			addItem("Audio Source",   AudioSourceComponent{});
+			addItem("Audio Listener", AudioListenerComponent{});
 			ImGui::EndPopup();
 		}
 	}
