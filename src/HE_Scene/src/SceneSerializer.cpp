@@ -289,16 +289,22 @@ namespace
 		auto& registry = world.registry();
 
 		// ── Pass 1: create entities, set names, apply components ─────────────
-		// The first entry is always the root — map it to the existing root
-		// entity instead of creating a duplicate.
+		// The root is the entity with no parent (parent == entt::null), NOT
+		// necessarily the first entry: entt's view iterates in reverse-creation
+		// order, so the root (created first) is usually serialised LAST. Map that
+		// one to the existing root instead of creating a duplicate; mapping by
+		// position renamed the root to whatever happened to be first and shredded
+		// the hierarchy on every save/load and undo. (#root-by-parent)
+		constexpr uint32_t kNullId = 0xFFFFFFFFu; // static_cast<uint32_t>(entt::null)
 		bool rootMapped = false;
 		for (auto& eJson : scene["entities"])
 		{
 			uint32_t    serialId = eJson.value("id",   0u);
 			std::string name     = eJson.value("name", "Entity");
+			uint32_t    parent   = eJson.value("parent", kNullId);
 
 			Entity e;
-			if (!rootMapped)
+			if (!rootMapped && parent == kNullId)
 			{
 				e = world.rootEntity();
 				world.renameEntity(e, name);

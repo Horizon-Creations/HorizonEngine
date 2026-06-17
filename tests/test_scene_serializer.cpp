@@ -133,11 +133,42 @@ TEST_CASE("SceneSerializer binary round-trip with components")
 	fs::remove(file);
 }
 
+TEST_CASE("World root identity survives round-trip with children")
+{
+	// Regression: entt's view iterates in reverse-creation order, so the root is
+	// serialised LAST. The loader must map the root by parent==null, not by
+	// position — otherwise it renamed the root to the first child and shredded the
+	// hierarchy on every save/load and undo.
+	const fs::path file = fs::temp_directory_path() / "he_test_root.hescene";
+
+	HorizonWorld world;
+	world.createEntity("Alpha");
+	world.createEntity("Beta");
+	world.createEntity("Gamma"); // root ("World", id 0) is now created first → serialised last
+
+	SceneSerializer ser;
+	REQUIRE(ser.save(world, file, SerializeFormat::JSON));
+
+	HorizonWorld loaded;
+	REQUIRE(ser.load(loaded, file, SerializeFormat::JSON));
+
+	auto& lreg = loaded.registry();
+	Entity root = loaded.rootEntity();
+	CHECK(lreg.get<NameComponent>(root).name == "World"); // not renamed to a child
+	auto& rHier = lreg.get<HierarchyComponent>(root);
+	CHECK(rHier.children.size() == 3);                    // Alpha/Beta/Gamma reparented to root
+	for (Entity c : rHier.children)
+		CHECK(lreg.get<HierarchyComponent>(c).parent == root);
+
+	fs::remove(file);
+}
+
 TEST_CASE("EnvironmentComponent on the World root round-trips")
 {
 	const fs::path file = fs::temp_directory_path() / "he_test_env.hescene";
 
 	HorizonWorld world;
+	world.createEntity("Decoy"); // ensure the root is not the only/first entity
 	auto& env = world.registry().get<EnvironmentComponent>(world.rootEntity());
 	env.dayNightCycle  = true;
 	env.timeOfDay      = 0.73f;
