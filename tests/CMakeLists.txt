@@ -11,6 +11,7 @@ add_executable(he_tests
     test_ref.cpp
     test_jobsystem.cpp
     test_terrain.cpp
+    test_debug_draw.cpp
     # Culling/sorting/undo/camera/graph are compiled in directly — pulling in the
     # full HorizonRendering/Editor targets would drag GPU backends and ImGui in.
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/FrustumCuller.cpp

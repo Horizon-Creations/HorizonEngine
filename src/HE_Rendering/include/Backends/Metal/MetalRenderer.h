@@ -49,6 +49,7 @@ public:
 	void  InvalidateMesh    (const HE::UUID& meshId)     override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
 	void  SetSSAOSettings(const SSAOSettings& settings) override;
+	void  SetDebugLines(const std::vector<DebugLine>& lines) override;
 
 	// Multi-window support
 	void AttachWindow(HE::Window* window) override;
@@ -250,6 +251,12 @@ private:
 	void RetireTexture(void* texture);     // hand a retained id<MTLTexture> over
 	void AgeRetiredTextures();             // called once per frame
 	void DrainRetiredTextures();           // immediate release (shutdown only)
+
+	// ── Debug line overlay ───────────────────────────────────────────────────
+	void* m_debugLinePipeline = nullptr; // id<MTLRenderPipelineState>
+	std::vector<DebugLine> m_debugLines;
+	void  CreateDebugLinePipeline();
+	void  EncodeDebugLines(void* renderEncoder, const glm::mat4& viewProj);
 
 	MetalShaderManager m_shaderManager;
 };

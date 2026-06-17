@@ -1,8 +1,10 @@
 #include "EditorApplication.h"
 #include "EditorUI.h"
+#include <HorizonScene/HorizonScene.h>
 #include <HorizonScene/Components/EnvironmentComponent.h>
 #include <HorizonScene/TerrainSystem.h>
 #include <Renderer/RendererFactory.h>
+#include <DebugDraw/DebugDraw.h>
 #include <Diagnostics/Logger.h>
 #include <SDL3/SDL.h>
 
@@ -780,6 +782,38 @@ void EditorApplication::OnRender(float dt)
 			TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), renderer());
 
 		pushEnvironment(dt); // auto-advances + pushes the World env component
+
+		// ── Debug draw overlay (ground grid + selected-entity marker) ─────────
+		if (m_projectLoaded && m_editorWorld)
+		{
+			DebugDrawBuffer dbg;
+
+			// Ground grid: [-10..10] in X and Z at Y=0, step 1, grey
+			const glm::vec3 gridColor(0.35f, 0.35f, 0.35f);
+			for (int i = -10; i <= 10; ++i)
+			{
+				dbg.line({ float(i), 0.0f, -10.0f }, { float(i), 0.0f,  10.0f }, gridColor);
+				dbg.line({ -10.0f, 0.0f, float(i) }, {  10.0f, 0.0f, float(i) }, gridColor);
+			}
+
+			// Selected-entity marker: unit AABB centered on transform position
+			if (m_selectedEntity != entt::null && m_editorWorld->registry().valid(m_selectedEntity))
+			{
+				auto* tc = m_editorWorld->registry().try_get<TransformComponent>(m_selectedEntity);
+				if (tc)
+				{
+					const glm::vec3 p = tc->position;
+					dbg.aabb(p - glm::vec3(0.5f), p + glm::vec3(0.5f),
+					         glm::vec3(1.0f, 0.8f, 0.0f));
+				}
+			}
+
+			renderer()->SetDebugLines(dbg.lines());
+		}
+		else
+		{
+			renderer()->SetDebugLines({});
+		}
 	}
 
 	AppContext ctx = makeContext();
