@@ -3,6 +3,12 @@
 void CommandBuffer::reset()
 {
 	drawCalls_.clear();
+	postProcess_ = false;
+}
+
+void CommandBuffer::recordPostProcess()
+{
+	postProcess_ = true;
 }
 
 void CommandBuffer::recordDraw(const DrawCall& call)

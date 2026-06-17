@@ -117,16 +117,28 @@ TEST_CASE("RenderGraph executes passes and resets the buffer each frame")
 	CHECK(cmds.drawCalls().empty());
 }
 
-TEST_CASE("Inert passes record nothing")
+TEST_CASE("ShadowPass with shadow disabled records no draws")
 {
-	RenderWorld world;
-	world.objects.push_back(makeObj(1, { 0, 0, 0 }));
-	std::vector<uint32_t> sorted = { 0 };
-
+	RenderWorld world; // shadow.enabled = false by default
+	std::vector<uint32_t> sorted = {};
 	CommandBuffer cmds;
 	ShadowPass{}.execute(world, sorted, cmds);
+	CHECK(cmds.drawCalls().empty());
+	CHECK_FALSE(cmds.hasPostProcess());
+}
+
+TEST_CASE("PostProcessPass signals the post-process flag and records no draws")
+{
+	RenderWorld world;
+	std::vector<uint32_t> sorted = {};
+	CommandBuffer cmds;
 	PostProcessPass{}.execute(world, sorted, cmds);
 	CHECK(cmds.drawCalls().empty());
+	CHECK(cmds.hasPostProcess());
+
+	// reset must clear the flag.
+	cmds.reset();
+	CHECK_FALSE(cmds.hasPostProcess());
 }
 
 TEST_CASE("ShadowPass casts from the light frustum, not the camera-culled set")

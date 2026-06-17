@@ -5,6 +5,7 @@
 #include "../SlotMap.h"
 #include "Assets.h"
 #include "ContentManager/DefaultAssets.h"
+#include <filesystem>
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -58,6 +59,12 @@ public:
 	bool replaceTexture(HE::UUID id, TextureAsset asset);
 	bool replaceMaterial(HE::UUID id, MaterialAsset asset);
 
+	// Check all disk-backed assets for file changes and reload any that have
+	// been modified since the last load. Returns the UUIDs of reloaded assets
+	// (same UUIDs — existing references remain valid). Virtual mem:// paths are
+	// silently skipped. Safe to call every frame from the editor tick.
+	std::vector<HE::UUID> pollHotReload();
+
 	const std::string& contentRoot() const { return m_contentRoot; }
 	// Point the manager at a different content directory (e.g. when the
 	// editor opens a project). Previously loaded assets stay registered.
@@ -95,7 +102,8 @@ private:
 	SlotMap<FontAsset>         m_fontAssets;
 	SlotMap<ShaderAsset>       m_shaderAssets;
 
-	std::unordered_map<HE::UUID, SlotHandle>      m_handleToUUID;
-	std::unordered_map<HE::UUID, HE::AssetType>  m_assetTypeIndex; // mirrors m_handleToUUID with type info
-	std::unordered_map<std::string, HE::UUID>    m_pathToUUID;
+	std::unordered_map<HE::UUID, SlotHandle>                              m_handleToUUID;
+	std::unordered_map<HE::UUID, HE::AssetType>                          m_assetTypeIndex; // mirrors m_handleToUUID with type info
+	std::unordered_map<std::string, HE::UUID>                            m_pathToUUID;
+	std::unordered_map<std::string, std::filesystem::file_time_type>     m_pathMtime;      // disk mtime at last load
 };

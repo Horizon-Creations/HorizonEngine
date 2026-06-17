@@ -63,8 +63,14 @@ void ShadowPass::execute(const RenderWorld&           world,
 }
 
 // ─── PostProcessPass ─────────────────────────────────────────────────────────
-// Inert until HDR (3.6): needs a fullscreen tonemap reading the scene color.
-void PostProcessPass::execute(const RenderWorld&, const std::vector<uint32_t>&, CommandBuffer&) {}
+// Signals the backend that post-processing should run this frame. The actual
+// fullscreen tonemap/bloom/FXAA passes are dispatched by the backend directly
+// (they need per-backend pipeline state); this marker lets the graph and tests
+// verify the pass executed without pulling in GPU code.
+void PostProcessPass::execute(const RenderWorld&, const std::vector<uint32_t>&, CommandBuffer& outCmds)
+{
+	outCmds.recordPostProcess();
+}
 
 RenderPassIO ShadowPass::describe() const
 {

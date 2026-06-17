@@ -30,10 +30,13 @@ class HE_RENDERING_API CommandBuffer {
 public:
     void reset();
     void recordDraw(const DrawCall& call);
+    void recordPostProcess();   // signals that a post-process pass ran this frame
 
     const std::vector<DrawCall>& drawCalls() const;
+    bool hasPostProcess() const { return postProcess_; }
     bool empty() const { return drawCalls_.empty(); }
 
 private:
     std::vector<DrawCall> drawCalls_;
+    bool                  postProcess_ = false;
 };

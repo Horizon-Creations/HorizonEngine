@@ -1,6 +1,7 @@
 #include "doctest.h"
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/DefaultAssets.h>
+#include <chrono>
 #include <filesystem>
 
 namespace fs = std::filesystem;
@@ -334,4 +335,59 @@ TEST_CASE("ContentManager default assets are addressable by virtual path")
 	CHECK(cm.isLoaded("mem://default_cube"));
 	CHECK(cm.isLoaded("mem://default_white"));
 	CHECK(cm.isLoaded("mem://default_material"));
+}
+
+// ── Hot-reload ────────────────────────────────────────────────────────────────
+
+TEST_CASE("ContentManager pollHotReload detects a changed file and reloads it")
+{
+	TempContentDir dir;
+	ContentManager cm(dir.path.string());
+
+	// Save V1 — metallic = 0.1
+	MaterialAsset mat1;
+	mat1.type     = HE::AssetType::Material;
+	mat1.name     = "hotmat";
+	mat1.path     = "hotmat.hasset";
+	mat1.metallic = 0.1f;
+	REQUIRE(cm.saveAsset(mat1));
+	const HE::UUID savedId = mat1.id;
+
+	HE::UUID loaded = cm.loadAsset("hotmat.hasset");
+	REQUIRE(loaded == savedId);
+	REQUIRE(cm.getMaterial(loaded) != nullptr);
+	CHECK(cm.getMaterial(loaded)->metallic == doctest::Approx(0.1f));
+
+	// No changes yet — poll is quiet.
+	CHECK(cm.pollHotReload().empty());
+
+	// Overwrite V2 — same path, same UUID, different content.
+	MaterialAsset mat2 = *cm.getMaterial(loaded); // copies identity
+	mat2.metallic = 0.9f;
+	REQUIRE(cm.saveAsset(mat2));
+
+	// Advance the stored mtime by 2 s so the poller detects it on same-second saves.
+	const fs::path diskPath = dir.path / "hotmat.hasset";
+	auto cur = fs::last_write_time(diskPath);
+	fs::last_write_time(diskPath, cur + std::chrono::seconds(2));
+
+	// Poll — one asset changed, UUID is preserved (persisted in the v2 file).
+	auto changed = cm.pollHotReload();
+	REQUIRE(changed.size() == 1);
+	CHECK(changed[0] == savedId);
+
+	// Reloaded payload reflects V2.
+	const MaterialAsset* reloaded = cm.getMaterial(savedId);
+	REQUIRE(reloaded != nullptr);
+	CHECK(reloaded->metallic == doctest::Approx(0.9f));
+
+	// Second poll with no further changes is quiet.
+	CHECK(cm.pollHotReload().empty());
+}
+
+TEST_CASE("ContentManager pollHotReload ignores virtual mem:// paths")
+{
+	// Default manager has only mem:// assets — poll must not crash or signal any.
+	ContentManager cm;
+	CHECK(cm.pollHotReload().empty());
 }

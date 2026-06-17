@@ -175,6 +175,11 @@ HE::UUID ContentManager::loadAsset(const std::string& relativePath)
 	m_handleToUUID[id]         = handle;
 	m_assetTypeIndex[id]       = type;
 	m_pathToUUID[relativePath] = id;
+	{
+		std::error_code ec;
+		auto mtime = std::filesystem::last_write_time(fullPath, ec);
+		if (!ec) m_pathMtime[relativePath] = mtime;
+	}
 	return id;
 }
 
@@ -381,7 +386,7 @@ bool ContentManager::unloadAsset(HE::UUID id)
 		return false;
 
 	for (auto pit = m_pathToUUID.begin(); pit != m_pathToUUID.end(); ++pit)
-		if (pit->second == id) { m_pathToUUID.erase(pit); break; }
+		if (pit->second == id) { m_pathMtime.erase(pit->first); m_pathToUUID.erase(pit); break; }
 	m_handleToUUID.erase(id);
 	m_assetTypeIndex.erase(id);
 	return true;
@@ -415,6 +420,41 @@ std::vector<HE::UUID> ContentManager::enumerateIds(HE::AssetType type) const
 		if (t == type)
 			out.push_back(id);
 	return out;
+}
+
+// ─── pollHotReload ───────────────────────────────────────────────────────────
+std::vector<HE::UUID> ContentManager::pollHotReload()
+{
+	namespace fs = std::filesystem;
+	std::vector<HE::UUID> changed;
+
+	// Snapshot paths — unloadAsset/loadAsset mutate m_pathMtime during the loop.
+	std::vector<std::string> paths;
+	paths.reserve(m_pathMtime.size());
+	for (const auto& [p, _] : m_pathMtime)
+		paths.push_back(p);
+
+	for (const auto& relPath : paths)
+	{
+		const std::string fullPath = m_contentRoot + "/" + relPath;
+		std::error_code ec;
+		const auto mtime = fs::last_write_time(fullPath, ec);
+		if (ec) continue; // file deleted or inaccessible
+
+		auto storedIt = m_pathMtime.find(relPath);
+		if (storedIt == m_pathMtime.end() || mtime == storedIt->second)
+			continue; // not in map yet or unchanged
+
+		// File changed — unload old entry (removes from m_pathMtime) then reload.
+		auto pathIt = m_pathToUUID.find(relPath);
+		if (pathIt == m_pathToUUID.end()) continue;
+		unloadAsset(pathIt->second);
+
+		const HE::UUID newId = loadAsset(relPath); // re-records mtime
+		if (!(newId == HE::UUID{}))
+			changed.push_back(newId);
+	}
+	return changed;
 }
 
 // ─── initDefaultAssets ───────────────────────────────────────────────────────
