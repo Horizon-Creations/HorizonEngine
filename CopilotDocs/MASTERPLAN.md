@@ -88,8 +88,8 @@ Diese low-level Bausteine zuerst, in dieser Reihenfolge — jeder schaltet die d
    - ✅ **Runtime-Asset-Registrierung** `registerStaticMesh/Texture/Material` + `replace…` (In-Memory-Assets
      ohne Disk-Datei) + Aliasing-Härtung der typisierten Getter/`unload` (Forts. 20). → schaltet prozedurale
      Assets frei (Terrain, Default-/Fallback-Assets, editor-erzeugte Materialien).
-   - 🔜 **Default-/Fallback-Assets** mit festen UUIDs (weiße 1×1-Textur, Default-Material, Unit-/Error-Mesh),
-     im Ctor registriert — ersetzt die ad-hoc-Fallbacks in beiden Renderern.
+   - ✅ **Default-/Fallback-Assets** mit festen UUIDs (`kDefaultCubeMeshId`/`kDefaultWhiteTextureId`/`kDefaultMaterialId`
+     in `ContentManager/DefaultAssets.h`), im Ctor registriert; GL+Metal-Renderer-Fallback-Cube ersetzt (Forts. 21).
    - 🔜 **Asset-Enumeration** (geladene Assets + Content-Verzeichnis auflisten) für den Content Browser.
    - 🔜 **Reload/Hot-Reload** einer geänderten Datei (mtime-Watch).
 2. **`Ref<T>`** (intrusiver Refcount, Phase 0.3) + Einsatz im ContentManager → sauberes Unloading/Eviction
@@ -1360,3 +1360,28 @@ Lifetime-sicher mit der bestehenden `SlotMap`/`m_handleToUUID`-Buchführung inte
 - **Schaltet frei:** prozedurale Meshes (Landscape Forts. 19), Default-/Fallback-Assets, editor-erzeugte
   Materialien. **Nächste Fundament-Schritte** (s. Liste oben): Default-Assets, Asset-Enumeration, Hot-Reload,
   dann `Ref<T>` / Job-System / RenderGraph.
+
+---
+
+### Forts. 21 — ContentManager: Default-Assets mit festen UUIDs; per-Renderer-Fallback-Cube abgelöst
+
+> **Aufgabe:** Zweiter Fundament-Schritt der ContentManager-Fertigstellung (s. Bauprinzip + Forts. 20). ✅
+
+- **`ContentManager/DefaultAssets.h`** (neu): Drei `constexpr HE::UUID`-Konstanten mit Sentinel-Werten
+  (`hi < 0x10`, nie von `UUID::generate()` erzeugbar da version-4 `hi & 0xF000 == 0x4000` erzwingt):
+  `kDefaultCubeMeshId`, `kDefaultWhiteTextureId`, `kDefaultMaterialId`.
+- **`ContentManager::initDefaultAssets()`** (privat, von beiden Ctors aufgerufen): registriert drei
+  In-Memory-Assets mit diesen festen UUIDs und virtuellen Pfaden `mem://default_*`:
+  - Unit-Cube (24 Verts pos3+normal3, 36 Indices — exakt dieselbe Geometrie wie die alten Backend-Caches)
+  - 1×1 RGBA8 weiße Textur
+  - MaterialAsset mit PBR-Defaults (weiß / metallic 0 / roughness 0.5 / opacity 1)
+- **GL + Metal:** `CreateCubeMesh()` + Fallback-GPU-Ressourcen (`m_cubeVAO/VBO/EBO`, `m_cubeVertexBuf/IndexBuf`)
+  entfernt. Alle drei Fallback-Sites (Shadow, SSAO-Prepass, Main-Draw) lösen jetzt `ResolveMesh(kDefaultCubeMeshId)`
+  → gleicher lazy-Upload-Pfad wie jedes andere Mesh (8-Float interleaved pos+norm+uv, uv=0). `m_whiteTex` /
+  `m_dummyTexture` bleiben (GPU-interne Sampler-Bindung für Shadow/SSAO/Mond, kein Content-Manager-Belang).
+- **Tests:** 5 neue Cases in `test_contentmanager.cpp` (Cube 24×3 verts/normals/36 idx; White 1×1 RGBA8 0xFF;
+  Material-Defaults; UUID-Distinct + Sentinel-Check; isLoaded via virtual path). **45 Tests grün** (40→45),
+  GL+Metal-Build sauber, Headless-Dump byte-äquivalent (±1/43 Bytes = wall-clock Cloud-Drift wie baseline).
+- **Schaltet frei:** Landscape-Terrain kann `kDefaultCubeMeshId` als Platzhalter nutzen bis das Heightfield
+  generiert ist; neue Editor-Materialien starten von `kDefaultMaterialId`. **Nächster Fundament-Schritt:**
+  Asset-Enumeration (geladene Assets + Content-Verzeichnis auflisten für den Content Browser).
