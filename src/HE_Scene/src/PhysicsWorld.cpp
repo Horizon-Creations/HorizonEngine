@@ -10,6 +10,8 @@ JPH_SUPPRESS_WARNINGS
 #include <Jolt/Physics/PhysicsSettings.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
+#include <Jolt/Physics/Collision/Shape/SphereShape.h>
+#include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Body/BodyActivationListener.h>
 
@@ -17,6 +19,7 @@ JPH_SUPPRESS_WARNINGS
 #include "HorizonScene/HorizonWorld.h"
 #include "HorizonScene/Components/TransformComponent.h"
 #include "HorizonScene/Components/RigidBodyComponent.h"
+#include "HorizonScene/Components/ColliderComponent.h"
 
 #include <glm/gtc/quaternion.hpp>
 #include <mutex>
@@ -149,12 +152,41 @@ void PhysicsWorld::initialize(HorizonWorld& world)
     for (auto [entity, transform, rb] :
          reg.view<TransformComponent, RigidBodyComponent>().each())
     {
-        // Box half-extents from scale (clamped to avoid degenerate shapes)
-        glm::vec3 halfEx = glm::max(transform.scale * 0.5f, glm::vec3(0.01f));
-
-        auto shapeResult = JPH::BoxShapeSettings(
-            JPH::Vec3(halfEx.x, halfEx.y, halfEx.z)
-        ).Create();
+        // Build shape: prefer ColliderComponent if present, fall back to transform.scale box.
+        auto* col = reg.try_get<ColliderComponent>(entity);
+        JPH::ShapeSettings::ShapeResult shapeResult;
+        if (col)
+        {
+            switch (col->shape)
+            {
+            case ColliderShape::Sphere:
+                shapeResult = JPH::SphereShapeSettings(
+                    std::max(0.01f, col->radius)
+                ).Create();
+                break;
+            case ColliderShape::Capsule: {
+                float halfCyl = std::max(0.0f, col->height * 0.5f - col->radius);
+                shapeResult = JPH::CapsuleShapeSettings(
+                    halfCyl, std::max(0.01f, col->radius)
+                ).Create();
+                break;
+            }
+            default: // Box
+                shapeResult = JPH::BoxShapeSettings(
+                    JPH::Vec3(std::max(0.01f, col->halfExtents.x),
+                              std::max(0.01f, col->halfExtents.y),
+                              std::max(0.01f, col->halfExtents.z))
+                ).Create();
+                break;
+            }
+        }
+        else
+        {
+            glm::vec3 halfEx = glm::max(transform.scale * 0.5f, glm::vec3(0.01f));
+            shapeResult = JPH::BoxShapeSettings(
+                JPH::Vec3(halfEx.x, halfEx.y, halfEx.z)
+            ).Create();
+        }
         if (shapeResult.HasError())
             continue;
 
