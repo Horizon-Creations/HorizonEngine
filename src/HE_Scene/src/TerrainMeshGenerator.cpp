@@ -74,14 +74,21 @@ StaticMeshAsset generateTerrainMesh(const TerrainComponent& tc)
     // Pre-compute all heights so normal calculation can sample neighbours cheaply
     const uint32_t vertCount = res * res;
     std::vector<float> heights(vertCount);
-    for (uint32_t zi = 0; zi < res; ++zi)
+    if (tc.sculptHeights.size() == static_cast<size_t>(vertCount))
     {
-        for (uint32_t xi = 0; xi < res; ++xi)
+        heights = tc.sculptHeights; // sculpted data overrides fBm
+    }
+    else
+    {
+        for (uint32_t zi = 0; zi < res; ++zi)
         {
-            const float nx = static_cast<float>(xi) / static_cast<float>(res - 1);
-            const float nz = static_cast<float>(zi) / static_cast<float>(res - 1);
-            heights[zi * res + xi] = tc.heightScale
-                * fbm(tc.seed, nx, nz, tc.octaves, tc.frequency, tc.lacunarity, tc.gain);
+            for (uint32_t xi = 0; xi < res; ++xi)
+            {
+                const float nx = static_cast<float>(xi) / static_cast<float>(res - 1);
+                const float nz = static_cast<float>(zi) / static_cast<float>(res - 1);
+                heights[zi * res + xi] = tc.heightScale
+                    * fbm(tc.seed, nx, nz, tc.octaves, tc.frequency, tc.lacunarity, tc.gain);
+            }
         }
     }
 

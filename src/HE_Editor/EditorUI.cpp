@@ -23,6 +23,7 @@
 #include <vector>
 #include <cstring>
 #include <array>
+#include <unordered_map>
 
 // Forward declaration — defined in EditorApplication.cpp
 std::string getRHIName(HE::RendererBackend backend);
@@ -91,6 +92,16 @@ static bool                s_rotateScreen = false;
 // updated this frame without the heavyweight "##ContentRefresh" progress modal.
 // Consumed at the top of render(), outside the content-folder shared lock.
 static bool s_quietContentRefresh = false;
+
+// Landscape sculpt tool state (shared between the panel and viewport)
+enum class TerrainTool { Raise, Lower, Smooth };
+static TerrainTool s_terrainTool     = TerrainTool::Raise;
+static float       s_brushRadius     = 10.0f;
+static float       s_brushStrength   = 5.0f;
+static bool        s_brushWasDown    = false; // tracks LMB edge for undo
+
+// Picking + sculpt AABB cache (keyed by mesh asset UUID)
+static std::unordered_map<HE::UUID, HE::AABB> s_aabbCache;
 
 static void BuildDefaultDockLayout(ImGuiID dockspaceId, const ImVec2& size)
 {
@@ -1770,9 +1781,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 					const glm::vec3 rayOrigin(pNear);
 					const glm::vec3 rayDir(glm::vec3(pFar) - glm::vec3(pNear));
 
-					// Local-space AABBs per mesh asset, cached. Entities
-					// without an asset use the built-in fallback cube's box.
-					static std::unordered_map<HE::UUID, HE::AABB> s_aabbCache;
+					// Local-space AABBs per mesh asset, cached (file-scope).
+					// Entities without an asset use the built-in fallback cube's box.
 					static const HE::AABB s_cubeBox = []{
 						HE::AABB b; b.expand({-0.5f,-0.5f,-0.5f}); b.expand({0.5f,0.5f,0.5f}); return b;
 					}();
@@ -1810,6 +1820,145 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 						}
 					}
 					ctx.selectedEntity = hit; // miss = deselect
+				}
+
+				// ── Landscape sculpt brush ──────────────────────────────────
+				if (ctx.editorConfig.mode == EditorMode::Landscape && ctx.world && !navigating)
+				{
+					auto& terrainReg  = ctx.world->registry();
+					auto  tvw         = terrainReg.view<TerrainComponent>();
+					if (!tvw.empty())
+					{
+						Entity terrainEnt = tvw.front();
+						auto&  tc         = terrainReg.get<TerrainComponent>(terrainEnt);
+						const bool lmbDown = ImGui::IsMouseDown(ImGuiMouseButton_Left)
+						                  && ImGui::IsItemHovered()
+						                  && !io.KeyAlt;
+
+						// Undo snapshot on first press
+						if (lmbDown && !s_brushWasDown)
+						{
+							if (ctx.undoSys) ctx.undoSys->snapshotNow();
+
+							// Lazy-init sculptHeights from current procedural mesh
+							if (tc.sculptHeights.empty())
+							{
+								const uint32_t res    = std::clamp(tc.resolution, 2u, 1024u);
+								const size_t   nVerts = static_cast<size_t>(res) * res;
+								const StaticMeshAsset tmp = generateTerrainMesh(tc);
+								tc.sculptHeights.resize(nVerts);
+								for (size_t vi = 0; vi < nVerts; ++vi)
+									tc.sculptHeights[vi] = tmp.vertices[vi * 3 + 1];
+							}
+						}
+						s_brushWasDown = lmbDown;
+
+						if (lmbDown && !tc.sculptHeights.empty())
+						{
+							// Unproject mouse → ray
+							const ImVec2 mouse = ImGui::GetMousePos();
+							const float  u = (mouse.x - rectMin.x) / (rectMax.x - rectMin.x);
+							const float  v = (mouse.y - rectMin.y) / (rectMax.y - rectMin.y);
+							const glm::mat4 invVP = glm::inverse(
+								s_sceneSnapshot.camera.projection * s_sceneSnapshot.camera.view);
+							const glm::vec4 ndcNear(2.0f * u - 1.0f, 1.0f - 2.0f * v, -1.0f, 1.0f);
+							const glm::vec4 ndcFar (ndcNear.x, ndcNear.y, 1.0f, 1.0f);
+							glm::vec4 pNear = invVP * ndcNear; pNear /= pNear.w;
+							glm::vec4 pFar  = invVP * ndcFar;  pFar  /= pFar.w;
+							const glm::vec3 rayOrigin(pNear);
+							const glm::vec3 rayDir = glm::normalize(glm::vec3(pFar) - glm::vec3(pNear));
+
+							// Intersect with the terrain's XZ plane (Y = terrain world Y)
+							float terrainWorldY = 0.0f;
+							if (const auto* xf = terrainReg.try_get<TransformComponent>(terrainEnt))
+								terrainWorldY = xf->position.y;
+
+							const float denom = rayDir.y;
+							if (std::abs(denom) > 1e-5f)
+							{
+								const float tHit = (terrainWorldY - rayOrigin.y) / denom;
+								if (tHit > 0.0f)
+								{
+									const glm::vec3 hitWS = rayOrigin + tHit * rayDir;
+
+									// Apply brush to sculptHeights
+									const uint32_t res  = std::clamp(tc.resolution, 2u, 1024u);
+									const float    halfX = tc.sizeX * 0.5f;
+									const float    halfZ = tc.sizeZ * 0.5f;
+									const float    stepX = tc.sizeX / static_cast<float>(res - 1);
+									const float    stepZ = tc.sizeZ / static_cast<float>(res - 1);
+									const float    r2    = s_brushRadius * s_brushRadius;
+									const float    delta = s_brushStrength * static_cast<float>(dt);
+									bool anyChange = false;
+
+									if (s_terrainTool == TerrainTool::Smooth)
+									{
+										// Two-pass: gather → apply (avoid order dependence)
+										std::vector<float> smoothed = tc.sculptHeights;
+										for (uint32_t zi = 0; zi < res; ++zi)
+										{
+											for (uint32_t xi = 0; xi < res; ++xi)
+											{
+												const float wx = -halfX + static_cast<float>(xi) * stepX;
+												const float wz = -halfZ + static_cast<float>(zi) * stepZ;
+												const float dx = hitWS.x - wx;
+												const float dz = hitWS.z - wz;
+												const float dist2 = dx * dx + dz * dz;
+												if (dist2 >= r2) continue;
+												const float w = std::exp(-dist2 / (0.5f * r2));
+												// 3×3 neighbourhood average
+												float sum = 0.0f; int cnt = 0;
+												for (int dzi = -1; dzi <= 1; ++dzi)
+												{
+													for (int dxi = -1; dxi <= 1; ++dxi)
+													{
+														const int ni = static_cast<int>(zi) + dzi;
+														const int nj = static_cast<int>(xi) + dxi;
+														if (ni >= 0 && ni < static_cast<int>(res) &&
+														    nj >= 0 && nj < static_cast<int>(res))
+														{ sum += tc.sculptHeights[ni * res + nj]; ++cnt; }
+													}
+												}
+												const float avg = (cnt > 0) ? (sum / cnt) : tc.sculptHeights[zi * res + xi];
+												smoothed[zi * res + xi] = tc.sculptHeights[zi * res + xi]
+												    + w * (avg - tc.sculptHeights[zi * res + xi]) * std::min(delta, 1.0f);
+												anyChange = true;
+											}
+										}
+										if (anyChange) tc.sculptHeights = std::move(smoothed);
+									}
+									else
+									{
+										const float sign = (s_terrainTool == TerrainTool::Raise) ? 1.0f : -1.0f;
+										for (uint32_t zi = 0; zi < res; ++zi)
+										{
+											for (uint32_t xi = 0; xi < res; ++xi)
+											{
+												const float wx = -halfX + static_cast<float>(xi) * stepX;
+												const float wz = -halfZ + static_cast<float>(zi) * stepZ;
+												const float dx = hitWS.x - wx;
+												const float dz = hitWS.z - wz;
+												const float dist2 = dx * dx + dz * dz;
+												if (dist2 >= r2) continue;
+												const float w = std::exp(-dist2 / (0.5f * r2));
+												tc.sculptHeights[zi * res + xi] += sign * w * delta;
+												anyChange = true;
+											}
+										}
+									}
+
+									if (anyChange)
+									{
+										tc.dirty = true;
+										// Invalidate AABB cache for the terrain mesh so picking
+										// tracks the new geometry after sculpting.
+										if (const auto* mc = terrainReg.try_get<MeshComponent>(terrainEnt))
+											s_aabbCache.erase(mc->meshAssetId);
+									}
+								}
+							}
+						}
+					}
 				}
 			}
 			else
@@ -1922,85 +2071,114 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 		ImGui::End();
 	}
 
-    // ── Quick Settings panel ─────────────────────────────────────────────────
+    // ── Quick Settings / Landscape panel ────────────────────────────────────
+    // When Landscape mode is active the panel becomes the Landscape tool panel;
+    // otherwise it shows the user-pinned Quick Settings as normal.
     if (ctx.fontHeading) ImGui::PushFont(ctx.fontHeading);
     ImGui::Begin("Quick Settings");
     if (ctx.fontHeading) ImGui::PopFont();
 
-
-    // Quick Settings = the engine settings the user pinned in Preferences.
-    // (Scene environment settings live on the World node's Details panel.)
-    DrawEngineSettings(ctx, SettingsMode::QuickSettings);
-
-    ImGui::End();
-
-    // ── Landscape panel ──────────────────────────────────────────────────────
-    if (ctx.fontHeading) ImGui::PushFont(ctx.fontHeading);
-    ImGui::Begin("Landscape");
-    if (ctx.fontHeading) ImGui::PopFont();
-
-    if (ctx.editorConfig.mode != EditorMode::Landscape)
+    if (ctx.editorConfig.mode == EditorMode::Landscape && ctx.world)
     {
-        ImGui::TextDisabled("Switch to Landscape mode in the toolbar to use this panel.");
-    }
-    else if (ctx.world && ctx.contentManager)
-    {
-        ImGui::SeparatorText("Create Landscape");
+        // ── Check for an existing terrain entity ─────────────────────────────
+        auto& reg = ctx.world->registry();
+        auto terrainView = reg.view<TerrainComponent>();
+        const bool hasTerrain = !terrainView.empty();
 
-        static float  s_newSizeX      = 100.0f;
-        static float  s_newSizeZ      = 100.0f;
-        static int    s_newResolution = 128;
-        static float  s_newHeight     = 20.0f;
-        static int    s_newSeed       = 42;
-        static int    s_newOctaves    = 4;
-        static float  s_newFrequency  = 1.0f;
-        static float  s_newLacunarity = 2.0f;
-        static float  s_newGain       = 0.5f;
-
-        ImGui::DragFloat("Width (X)",     &s_newSizeX,      1.0f,  1.0f, 10000.0f, "%.1f m");
-        ImGui::DragFloat("Depth (Z)",     &s_newSizeZ,      1.0f,  1.0f, 10000.0f, "%.1f m");
-        ImGui::SliderInt("Resolution",    &s_newResolution, 2, 512);
-        ImGui::DragFloat("Height Scale",  &s_newHeight,     0.5f,  0.0f, 1000.0f,  "%.1f m");
-        ImGui::SeparatorText("Noise");
-        ImGui::InputInt("Seed",           &s_newSeed);
-        ImGui::SliderInt("Octaves",       &s_newOctaves,    1,  8);
-        ImGui::DragFloat("Frequency",     &s_newFrequency,  0.01f, 0.01f, 16.0f, "%.2f");
-        ImGui::DragFloat("Lacunarity",    &s_newLacunarity, 0.01f, 1.0f,  8.0f,  "%.2f");
-        ImGui::DragFloat("Gain",          &s_newGain,       0.01f, 0.0f,  1.0f,  "%.2f");
-
-        ImGui::Spacing();
-        const float btnW = 160.0f;
-        ImGui::SetCursorPosX((ImGui::GetContentRegionAvail().x - btnW) * 0.5f
-                             + ImGui::GetCursorPosX());
-        if (ImGui::Button("Create Landscape", ImVec2(btnW, 0)))
+        if (!hasTerrain)
         {
-            if (ctx.undoSys) ctx.undoSys->snapshotNow();
+            // ── No terrain yet — show creation form ──────────────────────────
+            ImGui::SeparatorText("Create Landscape");
 
-            TerrainComponent tc;
-            tc.sizeX      = s_newSizeX;
-            tc.sizeZ      = s_newSizeZ;
-            tc.resolution = static_cast<uint32_t>(std::clamp(s_newResolution, 2, 1024));
-            tc.heightScale= s_newHeight;
-            tc.seed       = s_newSeed;
-            tc.octaves    = s_newOctaves;
-            tc.frequency  = s_newFrequency;
-            tc.lacunarity = s_newLacunarity;
-            tc.gain       = s_newGain;
-            tc.dirty      = true;
+            static float  s_newSizeX      = 100.0f;
+            static float  s_newSizeZ      = 100.0f;
+            static int    s_newResolution = 128;
+            static float  s_newHeight     = 20.0f;
+            static int    s_newSeed       = 42;
+            static int    s_newOctaves    = 4;
+            static float  s_newFrequency  = 1.0f;
+            static float  s_newLacunarity = 2.0f;
+            static float  s_newGain       = 0.5f;
 
-            Entity e = ctx.world->createEntity("Terrain");
-            ctx.world->addComponent(e, TransformComponent{});
-            ctx.world->addComponent(e, tc);
-            // MeshComponent is added by TerrainSystem::updateTerrains next frame.
-            // Default material so the terrain renders with the standard shader.
-            MaterialComponent mc;
-            mc.materialAssetId = HE::kDefaultMaterialId;
-            ctx.world->addComponent(e, mc);
+            ImGui::DragFloat("Width (X)",    &s_newSizeX,      1.0f,  1.0f, 10000.0f, "%.1f m");
+            ImGui::DragFloat("Depth (Z)",    &s_newSizeZ,      1.0f,  1.0f, 10000.0f, "%.1f m");
+            ImGui::SliderInt("Resolution",   &s_newResolution, 2, 512);
+            ImGui::DragFloat("Height Scale", &s_newHeight,     0.5f,  0.0f, 1000.0f,  "%.1f m");
+            ImGui::SeparatorText("Noise");
+            ImGui::InputInt("Seed",          &s_newSeed);
+            ImGui::SliderInt("Octaves",      &s_newOctaves,    1, 8);
+            ImGui::DragFloat("Frequency",    &s_newFrequency,  0.01f, 0.01f, 16.0f, "%.2f");
+            ImGui::DragFloat("Lacunarity",   &s_newLacunarity, 0.01f, 1.0f,  8.0f,  "%.2f");
+            ImGui::DragFloat("Gain",         &s_newGain,       0.01f, 0.0f,  1.0f,  "%.2f");
 
-            ctx.world->markHierarchyDirty();
-            ctx.selectedEntity = e;
-            Logger::Log(Logger::LogLevel::Info, "Editor: created Terrain entity");
+            ImGui::Spacing();
+            const float btnW = 160.0f;
+            ImGui::SetCursorPosX((ImGui::GetContentRegionAvail().x - btnW) * 0.5f
+                                 + ImGui::GetCursorPosX());
+            if (ImGui::Button("Create Landscape", ImVec2(btnW, 0)))
+            {
+                if (ctx.undoSys) ctx.undoSys->snapshotNow();
+
+                TerrainComponent tc;
+                tc.sizeX      = s_newSizeX;
+                tc.sizeZ      = s_newSizeZ;
+                tc.resolution = static_cast<uint32_t>(std::clamp(s_newResolution, 2, 1024));
+                tc.heightScale= s_newHeight;
+                tc.seed       = s_newSeed;
+                tc.octaves    = s_newOctaves;
+                tc.frequency  = s_newFrequency;
+                tc.lacunarity = s_newLacunarity;
+                tc.gain       = s_newGain;
+                tc.dirty      = true;
+
+                Entity e = ctx.world->createEntity("Terrain");
+                ctx.world->addComponent(e, TransformComponent{});
+                ctx.world->addComponent(e, tc);
+                MaterialComponent mc;
+                mc.materialAssetId = HE::kDefaultMaterialId;
+                ctx.world->addComponent(e, mc);
+
+                ctx.world->markHierarchyDirty();
+                ctx.selectedEntity = e;
+                Logger::Log(Logger::LogLevel::Info, "Editor: created Terrain entity");
+            }
         }
+        else
+        {
+            // ── Terrain exists — show sculpt tools ───────────────────────────
+            ImGui::SeparatorText("Sculpt Tool");
+
+            const char* toolLabels[] = { "Raise", "Lower", "Smooth" };
+            int toolIdx = static_cast<int>(s_terrainTool);
+            for (int i = 0; i < 3; ++i)
+            {
+                if (i > 0) ImGui::SameLine();
+                if (ImGui::RadioButton(toolLabels[i], toolIdx == i))
+                    s_terrainTool = static_cast<TerrainTool>(i);
+            }
+
+            ImGui::Spacing();
+            ImGui::SliderFloat("Radius##brush",   &s_brushRadius,   1.0f,  100.0f, "%.1f m");
+            ImGui::SliderFloat("Strength##brush", &s_brushStrength, 0.1f,  20.0f,  "%.2f");
+
+            ImGui::Spacing();
+            ImGui::TextDisabled("LMB drag in viewport to sculpt");
+
+            ImGui::Spacing();
+            if (ImGui::Button("Reset Sculpting"))
+            {
+                Entity terrainEnt = terrainView.front();
+                auto& tc = reg.get<TerrainComponent>(terrainEnt);
+                if (ctx.undoSys) ctx.undoSys->snapshotNow();
+                tc.sculptHeights.clear();
+                tc.dirty = true;
+            }
+        }
+    }
+    else
+    {
+        // Quick Settings = the engine settings the user pinned in Preferences.
+        DrawEngineSettings(ctx, SettingsMode::QuickSettings);
     }
 
     ImGui::End();

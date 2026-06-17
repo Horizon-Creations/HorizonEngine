@@ -1,6 +1,7 @@
 #pragma once
 #include <Types/UUID.h>
 #include <cstdint>
+#include <vector>
 
 struct TerrainComponent {
     float    sizeX       = 100.0f;
@@ -14,4 +15,6 @@ struct TerrainComponent {
     float    gain        = 0.5f;
     HE::UUID heightmapTexture{};  // Phase 2: greyscale heightmap source
     bool     dirty = true;        // set to regenerate; not serialised
+    // Per-vertex sculpted heights (size == res*res overrides fBm); serialised.
+    std::vector<float> sculptHeights;
 };
