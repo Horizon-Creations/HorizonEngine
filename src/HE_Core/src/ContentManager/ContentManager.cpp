@@ -358,9 +358,31 @@ bool ContentManager::replaceStaticMesh(HE::UUID id, StaticMeshAsset asset) { ret
 bool ContentManager::replaceTexture(HE::UUID id, TextureAsset asset)       { return replaceRuntimeAsset(m_textureAssets,    id, std::move(asset)); }
 bool ContentManager::replaceMaterial(HE::UUID id, MaterialAsset asset)     { return replaceRuntimeAsset(m_materialAssets,   id, std::move(asset)); }
 
+// ─── Pin bookkeeping ─────────────────────────────────────────────────────────
+void ContentManager::pinAsset(HE::UUID id)
+{
+	++m_pinCounts[id];
+}
+
+void ContentManager::unpinAsset(HE::UUID id)
+{
+	auto it = m_pinCounts.find(id);
+	if (it != m_pinCounts.end() && --it->second <= 0)
+		m_pinCounts.erase(it);
+}
+
+bool ContentManager::isPinned(HE::UUID id) const
+{
+	auto it = m_pinCounts.find(id);
+	return it != m_pinCounts.end() && it->second > 0;
+}
+
 // ─── unloadAsset ─────────────────────────────────────────────────────────────
 bool ContentManager::unloadAsset(HE::UUID id)
 {
+	if (isPinned(id))
+		return false; // active AssetRef handle(s) hold a pin — refuse eviction
+
 	auto it = m_handleToUUID.find(id);
 	if (it == m_handleToUUID.end())
 		return false;
