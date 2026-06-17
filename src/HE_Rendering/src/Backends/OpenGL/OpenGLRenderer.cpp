@@ -1134,7 +1134,6 @@ void OpenGLRenderer::Initialize(HE::Window* window)
 	CreateTonemapPipeline();
 	CreateBloomPipeline();
 	CreateSSAOPipeline();
-	CreateCubeMesh();
 	Logger::Log(Logger::LogLevel::Info, "OpenGLRenderer: initialized successfully");
 }
 
@@ -1711,10 +1710,10 @@ unsigned int OpenGLRenderer::RenderSSAO(const CommandBuffer& cmds, int pw, int p
 			cMesh = ResolveMesh(dc.meshAssetId);
 			lastId = dc.meshAssetId; valid = true;
 		}
-		const GpuMesh* mesh = cMesh;
-		glBindVertexArray(mesh ? mesh->vao : m_cubeVAO);
-		glDrawElements(GL_TRIANGLES, mesh ? mesh->indexCount : m_cubeIndexCount,
-		               GL_UNSIGNED_INT, nullptr);
+		const GpuMesh* mesh = cMesh ? cMesh : ResolveMesh(HE::kDefaultCubeMeshId);
+		if (!mesh) continue;
+		glBindVertexArray(mesh->vao);
+		glDrawElements(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr);
 	}
 
 	// ── 2. Occlusion (fullscreen) ──────────────────────────────────────────
@@ -1785,50 +1784,6 @@ void OpenGLRenderer::DestroyHDRTarget()
 	if (m_hdrColor) { glDeleteTextures(1, &m_hdrColor);     m_hdrColor = 0; }
 	if (m_hdrDepth) { glDeleteRenderbuffers(1, &m_hdrDepth);m_hdrDepth = 0; }
 	m_hdrW = m_hdrH = 0;
-}
-
-void OpenGLRenderer::CreateCubeMesh()
-{
-	// Unit cube, 24 vertices (position + normal per face)
-	static const float verts[] = {
-		// +X                          // -X
-		 0.5f,-0.5f,-0.5f, 1,0,0,      -0.5f,-0.5f, 0.5f,-1,0,0,
-		 0.5f, 0.5f,-0.5f, 1,0,0,      -0.5f, 0.5f, 0.5f,-1,0,0,
-		 0.5f, 0.5f, 0.5f, 1,0,0,      -0.5f, 0.5f,-0.5f,-1,0,0,
-		 0.5f,-0.5f, 0.5f, 1,0,0,      -0.5f,-0.5f,-0.5f,-1,0,0,
-		// +Y                          // -Y
-		-0.5f, 0.5f,-0.5f, 0,1,0,      -0.5f,-0.5f, 0.5f, 0,-1,0,
-		-0.5f, 0.5f, 0.5f, 0,1,0,      -0.5f,-0.5f,-0.5f, 0,-1,0,
-		 0.5f, 0.5f, 0.5f, 0,1,0,       0.5f,-0.5f,-0.5f, 0,-1,0,
-		 0.5f, 0.5f,-0.5f, 0,1,0,       0.5f,-0.5f, 0.5f, 0,-1,0,
-		// +Z                          // -Z
-		-0.5f,-0.5f, 0.5f, 0,0,1,       0.5f,-0.5f,-0.5f, 0,0,-1,
-		 0.5f,-0.5f, 0.5f, 0,0,1,      -0.5f,-0.5f,-0.5f, 0,0,-1,
-		 0.5f, 0.5f, 0.5f, 0,0,1,      -0.5f, 0.5f,-0.5f, 0,0,-1,
-		-0.5f, 0.5f, 0.5f, 0,0,1,       0.5f, 0.5f,-0.5f, 0,0,-1,
-	};
-	static const uint32_t indices[] = {
-		 0, 2, 4,  0, 4, 6,    1, 3, 5,  1, 5, 7,   // +X -X
-		 8,10,12,  8,12,14,    9,11,13,  9,13,15,   // +Y -Y
-		16,18,20, 16,20,22,   17,19,21, 17,21,23,   // +Z -Z
-	};
-	m_cubeIndexCount = static_cast<int>(sizeof(indices) / sizeof(indices[0]));
-
-	glGenVertexArrays(1, &m_cubeVAO);
-	glGenBuffers(1, &m_cubeVBO);
-	glGenBuffers(1, &m_cubeEBO);
-
-	glBindVertexArray(m_cubeVAO);
-	glBindBuffer(GL_ARRAY_BUFFER, m_cubeVBO);
-	glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_cubeEBO);
-	glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
-
-	glEnableVertexAttribArray(0);
-	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)0);
-	glEnableVertexAttribArray(1);
-	glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
-	glBindVertexArray(0);
 }
 
 // ─── Asset mesh upload ────────────────────────────────────────────────────────
@@ -2011,9 +1966,6 @@ void OpenGLRenderer::Shutdown()
 		glDeleteTextures(1, &r.texture);
 	m_retiredTextures.clear();
 
-	if (m_cubeVAO)      { glDeleteVertexArrays(1, &m_cubeVAO); m_cubeVAO = 0; }
-	if (m_cubeVBO)      { glDeleteBuffers(1, &m_cubeVBO);      m_cubeVBO = 0; }
-	if (m_cubeEBO)      { glDeleteBuffers(1, &m_cubeEBO);      m_cubeEBO = 0; }
 	if (m_unlitProgram) { glDeleteProgram(m_unlitProgram);     m_unlitProgram = 0; }
 	if (m_depthProgram) { glDeleteProgram(m_depthProgram);     m_depthProgram = 0; }
 	if (m_skyProgram)   { glDeleteProgram(m_skyProgram);       m_skyProgram = 0; }
@@ -2232,10 +2184,10 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					shMesh      = ResolveMesh(dc.meshAssetId);
 					shMeshId    = dc.meshAssetId; shMeshValid = true;
 				}
-				const GpuMesh* mesh = shMesh;
-				glBindVertexArray(mesh ? mesh->vao : m_cubeVAO);
-				glDrawElements(GL_TRIANGLES, mesh ? mesh->indexCount : m_cubeIndexCount,
-				               GL_UNSIGNED_INT, nullptr);
+				const GpuMesh* mesh = shMesh ? shMesh : ResolveMesh(HE::kDefaultCubeMeshId);
+				if (!mesh) continue;
+				glBindVertexArray(mesh->vao);
+				glDrawElements(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr);
 			}
 			glBindFramebuffer(GL_FRAMEBUFFER, prevFBO);
 			glViewport(0, 0, pw, ph);
@@ -2409,8 +2361,10 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			if (!cHasMat)
 				baseColor = (tex != 0) ? glm::vec3(1.0f) : glm::vec3(0.85f, 0.55f, 0.25f);
 
-			const unsigned int vao        = mesh ? mesh->vao : m_cubeVAO;
-			const int          indexCount = mesh ? mesh->indexCount : m_cubeIndexCount;
+			const GpuMesh* drawMesh  = mesh ? mesh : ResolveMesh(HE::kDefaultCubeMeshId);
+			if (!drawMesh) continue;
+			const unsigned int vao        = drawMesh->vao;
+			const int          indexCount = drawMesh->indexCount;
 
 			if (cOpacity < 0.999f)
 			{
