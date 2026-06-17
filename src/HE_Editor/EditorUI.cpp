@@ -19,6 +19,9 @@
 #include <SDL3/SDL.h>
 #include <filesystem>
 #include <string>
+#include <sstream>
+#include <vector>
+#include <cstring>
 #include <array>
 
 // Forward declaration — defined in EditorApplication.cpp
@@ -120,6 +123,127 @@ static void ApplyVSync(AppContext& ctx)
 	if (ctx.renderer) ctx.renderer->SetVSync(ctx.vsync);
 }
 
+// ─── Engine-settings catalog + Quick-Settings favourites ────────────────────
+// One catalog of pinnable engine settings, rendered in two modes: Preferences
+// shows every setting with a "pin" toggle; Quick Settings shows only the pinned
+// ones. Favourites are a comma-separated list of stable keys in
+// EditorConfig::QuickSettingsFavorites (persisted to config.json). (Scene
+// environment settings are NOT here — those live on the World entity.)
+enum class SettingsMode { Preferences, QuickSettings };
+
+static bool isFavorite(const EditorConfig& cfg, const char* key)
+{
+	const std::string hay = "," + cfg.QuickSettingsFavorites + ",";
+	return hay.find("," + std::string(key) + ",") != std::string::npos;
+}
+static void toggleFavorite(EditorConfig& cfg, const char* key)
+{
+	std::vector<std::string> keys;
+	std::stringstream ss(cfg.QuickSettingsFavorites);
+	std::string tok;
+	bool had = false;
+	while (std::getline(ss, tok, ','))
+	{
+		if (tok.empty()) continue;
+		if (tok == key) { had = true; continue; } // drop it (toggle off)
+		keys.push_back(tok);
+	}
+	if (!had) keys.push_back(key);              // add it (toggle on)
+	cfg.QuickSettingsFavorites.clear();
+	for (size_t i = 0; i < keys.size(); ++i)
+		cfg.QuickSettingsFavorites += (i ? "," : "") + keys[i];
+}
+
+#ifdef HE_IMGUI_ENABLED
+// Renders the engine-settings catalog. Each `row(key, category, widget)` is a
+// logical setting group; `widget` draws its control(s).
+static void DrawEngineSettings(AppContext& ctx, SettingsMode mode)
+{
+	EditorConfig& cfg = ctx.editorConfig;
+	const char* lastCat = nullptr;
+	int shown = 0;
+	auto row = [&](const char* key, const char* cat, auto&& widget)
+	{
+		const bool fav = isFavorite(cfg, key);
+		if (mode == SettingsMode::QuickSettings && !fav) return;
+		if (!lastCat || std::strcmp(lastCat, cat) != 0) { ImGui::SeparatorText(cat); lastCat = cat; }
+		if (mode == SettingsMode::Preferences)
+		{
+			ImGui::PushID(key);
+			bool f = fav;
+			if (ImGui::Checkbox("##pin", &f)) toggleFavorite(cfg, key);
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip(fav ? "Unpin from Quick Settings" : "Pin to Quick Settings");
+			ImGui::PopID();
+			ImGui::SameLine();
+		}
+		widget();
+		++shown;
+	};
+
+	row("backend", "Renderer", [&]{
+		ImGui::TextUnformatted("Backend");
+		ImGui::SetNextItemWidth(-1.0f);
+		if (ImGui::BeginCombo("##backend", ctx.backendName.c_str()))
+		{
+			auto pick = [&](const char* label, HE::GraphicsAPI api){
+				if (ImGui::Selectable(label)) { ctx.globalState->setSelectedRHI(api); ctx.backendName = getRHIName(api); }
+			};
+			pick("OpenGL", HE::GraphicsAPI::OpenGL);
+			pick("Vulkan", HE::GraphicsAPI::Vulkan);
+			pick("DirectX11", HE::GraphicsAPI::D3D11);
+			pick("DirectX12", HE::GraphicsAPI::D3D12);
+#ifdef __APPLE__
+			pick("Metal", HE::GraphicsAPI::Metal);
+#endif
+			ImGui::EndCombo();
+		}
+	});
+	row("vsync", "Renderer", [&]{ if (ImGui::Checkbox("VSync", &ctx.vsync)) ApplyVSync(ctx); });
+
+	row("bloom", "Post-processing", [&]{
+		ImGui::Checkbox("Bloom", &cfg.BloomEnabled);
+		ImGui::BeginDisabled(!cfg.BloomEnabled);
+		ImGui::SetNextItemWidth(220.0f);
+		ImGui::SliderFloat("Bloom Threshold", &cfg.BloomThreshold, 0.0f, 4.0f, "%.2f");
+		ImGui::SetNextItemWidth(220.0f);
+		ImGui::SliderFloat("Bloom Intensity", &cfg.BloomIntensity, 0.0f, 2.0f, "%.2f");
+		ImGui::EndDisabled();
+	});
+	row("ssao", "Post-processing", [&]{
+		ImGui::Checkbox("SSAO", &cfg.SSAOEnabled);
+		ImGui::BeginDisabled(!cfg.SSAOEnabled);
+		ImGui::SetNextItemWidth(220.0f);
+		ImGui::SliderFloat("SSAO Radius", &cfg.SSAORadius, 0.05f, 2.0f, "%.2f");
+		ImGui::SetNextItemWidth(220.0f);
+		ImGui::SliderFloat("SSAO Intensity", &cfg.SSAOIntensity, 0.0f, 2.0f, "%.2f");
+		ImGui::EndDisabled();
+	});
+
+	row("grid", "Viewport", [&]{ ImGui::Checkbox("Show Grid", &cfg.ShowGrid); });
+	row("camspeed", "Viewport", [&]{
+		ImGui::SetNextItemWidth(220.0f);
+		if (ImGui::SliderFloat("Camera Speed", &cfg.EditorCameraSpeed, 1.0f, 50.0f, "%.1f u/s") && ctx.editorCamera)
+			ctx.editorCamera->setFlySpeed(cfg.EditorCameraSpeed);
+	});
+
+	row("fontscale", "Appearance", [&]{
+		ImGui::SetNextItemWidth(220.0f);
+		ImGui::SliderFloat("UI Font Scale", &cfg.UiFontScale, 0.5f, 2.0f, "%.2fx");
+	});
+
+	row("cpucache", "Content Browser", [&]{ ImGui::Checkbox("Keep CPU Asset Cache", &cfg.KeepCPUAssets); });
+	row("cbrefresh", "Content Browser", [&]{
+		ImGui::SetNextItemWidth(120.0f);
+		ImGui::InputInt("Refresh Interval (s)", &cfg.ContentBrowserRefreshRate, 0, 0);
+		if (cfg.ContentBrowserRefreshRate < 0) cfg.ContentBrowserRefreshRate = 0;
+	});
+
+	if (mode == SettingsMode::QuickSettings && shown == 0)
+		ImGui::TextDisabled("Pin engine settings in Preferences\n(Edit \xe2\x96\xb8 Preferences) to show them here.");
+}
+#endif // HE_IMGUI_ENABLED
+
 static void DrawPreferencesWindow(AppContext& ctx, bool& open)
 {
 	if (!open) return;
@@ -131,46 +255,11 @@ static void DrawPreferencesWindow(AppContext& ctx, bool& open)
 	{
 		EditorConfig& cfg = ctx.editorConfig;
 
-		ImGui::SeparatorText("Appearance");
-		ImGui::SetNextItemWidth(220.0f);
-		ImGui::SliderFloat("UI Font Scale", &cfg.UiFontScale, 0.5f, 2.0f, "%.2fx");
-		ImGui::SameLine();
-		if (ImGui::SmallButton("Reset##fontscale")) cfg.UiFontScale = 1.0f;
+		ImGui::TextDisabled("Tick the pin on a setting to show it in Quick Settings.");
+		ImGui::Spacing();
 
-		ImGui::SeparatorText("Viewport");
-		ImGui::Checkbox("Show Grid", &cfg.ShowGrid);
-		ImGui::SetNextItemWidth(220.0f);
-		if (ImGui::SliderFloat("Camera Speed", &cfg.EditorCameraSpeed, 1.0f, 50.0f, "%.1f u/s")
-		    && ctx.editorCamera)
-			ctx.editorCamera->setFlySpeed(cfg.EditorCameraSpeed);
-
-		ImGui::SeparatorText("Rendering");
-		if (ImGui::Checkbox("VSync", &ctx.vsync))
-			ApplyVSync(ctx);
-
-		// Bloom — pushed to the renderer each frame from these prefs.
-		ImGui::Checkbox("Bloom", &cfg.BloomEnabled);
-		ImGui::BeginDisabled(!cfg.BloomEnabled);
-		ImGui::SetNextItemWidth(220.0f);
-		ImGui::SliderFloat("Bloom Threshold", &cfg.BloomThreshold, 0.0f, 4.0f, "%.2f");
-		ImGui::SetNextItemWidth(220.0f);
-		ImGui::SliderFloat("Bloom Intensity", &cfg.BloomIntensity, 0.0f, 2.0f, "%.2f");
-		ImGui::EndDisabled();
-
-		// SSAO (screen-space ambient occlusion) — darkens the ambient in crevices.
-		ImGui::Checkbox("SSAO", &cfg.SSAOEnabled);
-		ImGui::BeginDisabled(!cfg.SSAOEnabled);
-		ImGui::SetNextItemWidth(220.0f);
-		ImGui::SliderFloat("SSAO Radius", &cfg.SSAORadius, 0.05f, 2.0f, "%.2f");
-		ImGui::SetNextItemWidth(220.0f);
-		ImGui::SliderFloat("SSAO Intensity", &cfg.SSAOIntensity, 0.0f, 2.0f, "%.2f");
-		ImGui::EndDisabled();
-
-		ImGui::SeparatorText("Content Browser");
-		ImGui::Checkbox("Keep CPU Asset Cache", &cfg.KeepCPUAssets);
-		ImGui::SetNextItemWidth(120.0f);
-		ImGui::InputInt("Refresh Interval (s)", &cfg.ContentBrowserRefreshRate);
-		if (cfg.ContentBrowserRefreshRate < 0) cfg.ContentBrowserRefreshRate = 0;
+		// The full engine-settings catalog (each row has a pin toggle here).
+		DrawEngineSettings(ctx, SettingsMode::Preferences);
 
 		ImGui::Separator();
 		ImGui::TextDisabled("Preferences are saved when the editor exits.");
@@ -1782,183 +1871,10 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
     ImGui::Begin("Quick Settings");
     if (ctx.fontHeading) ImGui::PopFont();
 
-    ImGui::SetNextItemOpen(ctx.editorConfig.QsRendererOpen, ImGuiCond_Always);
-    ctx.editorConfig.QsRendererOpen = ImGui::CollapsingHeader("Renderer");
-    if (ctx.editorConfig.QsRendererOpen)
-    {
-        ImGui::PushFont(ctx.fontBody);
-        ImGui::Text(("Selected RHI: " + ctx.backendName).c_str());
-        if (ImGui::BeginCombo("Backend", ctx.backendName.c_str()))
-        {
-            if (ImGui::Selectable("OpenGL"))
-            {
-                ctx.globalState->setSelectedRHI(HE::GraphicsAPI::OpenGL);
-                ctx.backendName = getRHIName(HE::GraphicsAPI::OpenGL);
-            }
-            if (ImGui::Selectable("Vulkan"))
-            {
-                ctx.globalState->setSelectedRHI(HE::GraphicsAPI::Vulkan);
-                ctx.backendName = getRHIName(HE::GraphicsAPI::Vulkan);
-            }
-            if (ImGui::Selectable("DirectX11"))
-            {
-                ctx.globalState->setSelectedRHI(HE::GraphicsAPI::D3D11);
-                ctx.backendName = getRHIName(HE::GraphicsAPI::D3D11);
-            }
-            if (ImGui::Selectable("DirectX12"))
-            {
-                ctx.globalState->setSelectedRHI(HE::GraphicsAPI::D3D12);
-                ctx.backendName = getRHIName(HE::GraphicsAPI::D3D12);
-            }
-#ifdef __APPLE__
-            if (ImGui::Selectable("Metal"))
-            {
-                ctx.globalState->setSelectedRHI(HE::GraphicsAPI::Metal);
-                ctx.backendName = getRHIName(HE::GraphicsAPI::Metal);
-            }
-#endif
-            ImGui::EndCombo();
-        }
-        // VSync toggle
-        ImGui::Spacing();
-        if (ImGui::Checkbox("VSync", &ctx.vsync))
-            ApplyVSync(ctx);
-        ImGui::PopFont();
-    }
-    ImGui::SetNextItemOpen(ctx.editorConfig.QsEditorOpen, ImGuiCond_Always);
-    ctx.editorConfig.QsEditorOpen = ImGui::CollapsingHeader("Editor");
-    if (ctx.editorConfig.QsEditorOpen)
-    {
-        ImGui::Checkbox("Show Grid", &ctx.editorConfig.ShowGrid);
-        ImGui::Checkbox("Keep CPU Asset Cache", &ctx.editorConfig.KeepCPUAssets);
 
-        if (ctx.editorConfig.KeepCPUAssets && !ctx.editorConfig.KeepCPUAssetsInfoAcknoleged)
-            ImGui::OpenPopup("##KeepCPUAssetsInfo");
-
-        ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-        ImGui::SetNextWindowSize(ImVec2(400, 0), ImGuiCond_Always);
-        if (ImGui::BeginPopupModal("##KeepCPUAssetsInfo", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
-        {
-            ImGui::TextWrapped("Keeping CPU copies of assets allows for faster reloads and access at runtime, but uses more RAM. It is recommended to keep this enabled unless you are very tight on memory.");
-            ImGui::Spacing();
-            ImGui::Separator();
-            ImGui::Spacing();
-
-            float buttonWidth = 120.0f;
-            float spacing = ImGui::GetStyle().ItemSpacing.x;
-            float offset = (ImGui::GetContentRegionAvail().x - buttonWidth * 2 - spacing) * 0.5f;
-            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + offset);
-
-            if (ImGui::Button("OK", ImVec2(buttonWidth, 0)))
-            {
-                ctx.editorConfig.KeepCPUAssetsInfoAcknoleged = true;
-                ImGui::CloseCurrentPopup();
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("Nevermind", ImVec2(buttonWidth, 0)))
-            {
-                ctx.editorConfig.KeepCPUAssets = false;
-                ctx.editorConfig.KeepCPUAssetsInfoAcknoleged = false;
-                ImGui::CloseCurrentPopup();
-            }
-            ImGui::EndPopup();
-        }
-        ImGui::Separator();
-        ImGui::SetNextItemWidth(25.0f);
-        ImGui::InputInt("Content Browser Refresh interval (Seconds)", &ctx.editorConfig.ContentBrowserRefreshRate, 0, 0);
-    }
-
-    // ── Environment: day-night cycle ──────────────────────────────────────────
-    if (ImGui::CollapsingHeader("Environment", ImGuiTreeNodeFlags_DefaultOpen))
-    {
-        ImGui::Checkbox("Day-Night Cycle", &ctx.editorConfig.DayNightCycle);
-
-        // Format the 0..1 time as a HH:MM clock shown inside the slider.
-        int minutes = static_cast<int>(ctx.editorConfig.TimeOfDay * 1440.0f) % 1440;
-        if (minutes < 0) minutes += 1440;
-        char clock[8];
-        std::snprintf(clock, sizeof(clock), "%02d:%02d", minutes / 60, minutes % 60);
-
-        // Always draggable; moving it starts the cycle so the change is visible.
-        // NoRoundToFormat is essential here: the HH:MM string is a *display*
-        // format with no numeric specifier, so without this flag ImGui rounds the
-        // value by re-parsing the clock (e.g. "12:00" → 12) and the thumb snaps to
-        // the extremes instead of dragging.
-        ImGui::SetNextItemWidth(-1.0f);
-        if (ImGui::SliderFloat("##timeofday", &ctx.editorConfig.TimeOfDay, 0.0f, 1.0f,
-                               clock, ImGuiSliderFlags_NoRoundToFormat))
-            ctx.editorConfig.DayNightCycle = true;
-
-        ImGui::TextDisabled(ctx.editorConfig.DayNightCycle
-            ? "Drives the sun, sky & shadows."
-            : "Move the slider to start a day-night cycle.");
-
-        // Auto-advance: time flows on its own at an adjustable speed.
-        if (ImGui::Checkbox("Auto-Advance", &ctx.editorConfig.DayNightAutoAdvance)
-            && ctx.editorConfig.DayNightAutoAdvance)
-            ctx.editorConfig.DayNightCycle = true; // animating implies the cycle is on
-        ImGui::BeginDisabled(!ctx.editorConfig.DayNightAutoAdvance);
-        ImGui::SetNextItemWidth(-1.0f);
-        ImGui::SliderFloat("##cyclelen", &ctx.editorConfig.DayNightCycleSeconds,
-                           5.0f, 600.0f, "Full day: %.0f s", ImGuiSliderFlags_Logarithmic);
-        ImGui::EndDisabled();
-
-        // Sun & moon light colour + brightness (drive the day-night lights).
-        ImGui::SeparatorText("Sun & Moon Light");
-        ImGui::ColorEdit3("Sun Color",  &ctx.editorConfig.SunColor.x,
-                          ImGuiColorEditFlags_NoInputs);
-        ImGui::SliderFloat("Sun Brightness",  &ctx.editorConfig.SunIntensity,
-                           0.0f, 10.0f, "%.2f");
-        ImGui::ColorEdit3("Moon Color", &ctx.editorConfig.MoonColor.x,
-                          ImGuiColorEditFlags_NoInputs);
-        ImGui::SliderFloat("Moon Brightness", &ctx.editorConfig.MoonIntensity,
-                           0.0f, 10.0f, "%.2f");
-
-        // Cloud amount: 0 = clear sky … 1 = full overcast. At full overcast the
-        // sun/moon directional light is switched off and replaced by ambient.
-        ImGui::SeparatorText("Clouds");
-        ImGui::SetNextItemWidth(-1.0f);
-        ImGui::SliderFloat("##cloudcoverage", &ctx.editorConfig.CloudCoverage,
-                           0.0f, 1.0f, "Coverage: %.2f");
-        ImGui::TextDisabled("Full overcast dims the sun & fills with ambient light.");
-        // Wind: the compass direction the clouds drift toward + how fast.
-        ImGui::SetNextItemWidth(-1.0f);
-        ImGui::SliderFloat("##winddir", &ctx.editorConfig.WindDirection,
-                           0.0f, 360.0f, "Wind direction: %.0f\xc2\xb0");
-        ImGui::SetNextItemWidth(-1.0f);
-        ImGui::SliderFloat("##windspeed", &ctx.editorConfig.WindSpeed,
-                           0.0f, 4.0f, "Wind speed: %.2f");
-
-        // Atmospheric fog / aerial perspective: distant geometry melts into the
-        // sky in its view direction. 0 density = off. Height falloff pools the
-        // fog near the ground (only meaningful when fog is on).
-        ImGui::SeparatorText("Atmospheric Fog");
-        ImGui::SetNextItemWidth(-1.0f);
-        ImGui::SliderFloat("##fogdensity", &ctx.editorConfig.FogDensity,
-                           0.0f, 0.15f, "Density: %.3f");
-        ImGui::BeginDisabled(ctx.editorConfig.FogDensity <= 0.0f);
-        ImGui::SetNextItemWidth(-1.0f);
-        ImGui::SliderFloat("##fogheight", &ctx.editorConfig.FogHeightFalloff,
-                           0.0f, 1.0f, "Ground hugging: %.2f");
-        ImGui::EndDisabled();
-        ImGui::TextDisabled("Distant objects blend into the horizon (warm at sunset).");
-
-        // Night sky: stars + the dense Milky Way band and the space nebula rotate
-        // with time-of-day; the aurora is drifting ribbons that sweep the sky.
-        ImGui::SeparatorText("Night Sky");
-        // (Milky Way intensity slider removed — it read as inert after the band was
-        // reworked into dense stars along the galactic plane; the Milky Way still
-        // renders at EditorConfig::MilkyWayIntensity.)
-        ImGui::SetNextItemWidth(-1.0f);
-        ImGui::SliderFloat("##nebula", &ctx.editorConfig.NebulaIntensity,
-                           0.0f, 1.0f, "Space Nebula: %.2f");
-        ImGui::ColorEdit3("Nebula Color", &ctx.editorConfig.NebulaColor.x);
-        ImGui::SetNextItemWidth(-1.0f);
-        ImGui::SliderFloat("##aurora", &ctx.editorConfig.AuroraIntensity,
-                           0.0f, 1.0f, "Aurora: %.2f");
-        ImGui::ColorEdit3("Aurora Color", &ctx.editorConfig.AuroraColor.x);
-        ImGui::TextDisabled("Stars, Milky Way & nebula turn with the day; aurora drifts.");
-    }
+    // Quick Settings = the engine settings the user pinned in Preferences.
+    // (Scene environment settings live on the World node's Details panel.)
+    DrawEngineSettings(ctx, SettingsMode::QuickSettings);
 
     ImGui::End();
 
@@ -1966,23 +1882,6 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
     if (ctx.fontHeading) ImGui::PushFont(ctx.fontHeading);
     ImGui::Begin("World Outliner");
     if (ctx.fontHeading) ImGui::PopFont();
-
-    // ── Outliner world-pointer diagnostic (logs once per change) ─────────
-    {
-        static HorizonWorld* s_loggedWorld   = reinterpret_cast<HorizonWorld*>(~0ull); // sentinel
-        static bool          s_loggedLoaded  = false;
-        if (ctx.world != s_loggedWorld || ctx.projectLoaded != s_loggedLoaded)
-        {
-            s_loggedWorld  = ctx.world;
-            s_loggedLoaded = ctx.projectLoaded;
-            char buf[128];
-            std::snprintf(buf, sizeof(buf),
-                "[Outliner] world ptr=%s  projectLoaded=%s",
-                ctx.world   ? "valid (non-null)" : "NULL",
-                ctx.projectLoaded ? "true" : "false");
-            Logger::Log(HE::LogLevel::Info, buf);
-        }
-    }
 
     if (ctx.world)
     {
@@ -2000,76 +1899,32 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
         // Rebuild cache only when the hierarchy changed or the world switched
         if (ctx.world->isHierarchyDirty() || s_lastWorld != ctx.world)
         {
-            Logger::Log(HE::LogLevel::Info, "World has changed or is dirty... rebuilding cache");
             s_lastWorld = ctx.world;
             s_outlinerCache.clear();
 
             auto& registry = ctx.world->registry();
             Entity root    = ctx.world->rootEntity();
 
-            // ── Logging: pre-build diagnostics ───────────────────────────
-            {
-                // Count all entities in the registry
-                size_t totalEntities = 0;
-                for (auto e : registry.view<entt::entity>()) { (void)e; ++totalEntities; }
-                bool rootValid = (root != entt::null) && registry.valid(root);
-                auto* rootHier = rootValid ? registry.try_get<HierarchyComponent>(root) : nullptr;
-                auto* rootName = rootValid ? registry.try_get<NameComponent>(root)      : nullptr;
-
-                char buf[256];
-                std::snprintf(buf, sizeof(buf),
-                    "[Outliner] Cache rebuild — total registry entities: %zu | root valid: %s | root name: '%s' | root children: %zu",
-                    totalEntities,
-                    rootValid ? "yes" : "NO",
-                    rootName  ? rootName->name.c_str() : "(none)",
-                    rootHier  ? rootHier->children.size() : 0u);
-                Logger::Log(HE::LogLevel::Info, buf);
-            }
-
-            int maxDepth = -1;
             std::function<void(Entity, int)> collect = [&](Entity entity, int depth)
             {
-                bool valid = registry.valid(entity);
-                auto* name = valid ? registry.try_get<NameComponent>(entity)      : nullptr;
-                auto* hier = valid ? registry.try_get<HierarchyComponent>(entity) : nullptr;
-
-                // Per-node log
-                {
-                    char buf[256];
-                    std::snprintf(buf, sizeof(buf),
-                        "[Outliner]   entity=%u valid=%s depth=%d name='%s' children=%zu",
-                        static_cast<uint32_t>(entity),
-                        valid ? "yes" : "NO",
-                        depth,
-                        name ? name->name.c_str() : "(none)",
-                        hier ? hier->children.size() : 0u);
-                    Logger::Log(HE::LogLevel::Info, buf);
-                }
-
-                if (!valid) return;
-
+                if (!registry.valid(entity)) return;
+                auto* name = registry.try_get<NameComponent>(entity);
+                auto* hier = registry.try_get<HierarchyComponent>(entity);
                 s_outlinerCache.push_back({
                     entity,
                     name ? name->name : "(unnamed)",
                     depth,
                     hier && !hier->children.empty()
                 });
-                if (depth > maxDepth) maxDepth = depth;
                 if (hier)
                     for (Entity child : hier->children)
                         collect(child, depth + 1);
             };
-
             collect(root, 0);
 
-            // ── Logging: post-build summary ───────────────────────────────
-            {
-                char buf[128];
-                std::snprintf(buf, sizeof(buf),
-                    "[Outliner] Cache built — %zu nodes, max depth: %d",
-                    s_outlinerCache.size(), maxDepth);
-                Logger::Log(HE::LogLevel::Info, buf);
-            }
+            char buf[96];
+            std::snprintf(buf, sizeof(buf), "[Outliner] rebuilt: %zu nodes", s_outlinerCache.size());
+            Logger::Log(HE::LogLevel::Info, buf);
 
             ctx.world->clearHierarchyDirty();
         }
@@ -2987,6 +2842,74 @@ void EditorUI::RenderInspector(AppContext& ctx)
 		}
 	}
 	ImGui::Separator();
+
+	// ── Environment (scene-wide sky settings, on the World root entity) ──────
+	// Edited here so it persists with the scene; pushed to the renderer each frame
+	// by EditorApplication::pushEnvironment.
+	if (auto* env = registry.try_get<EnvironmentComponent>(entity))
+	{
+		if (ImGui::CollapsingHeader("Environment", ImGuiTreeNodeFlags_DefaultOpen))
+		{
+			ImGui::Checkbox("Day-Night Cycle", &env->dayNightCycle); trackEdit();
+
+			// Format the 0..1 time as a HH:MM clock shown inside the slider.
+			int minutes = static_cast<int>(env->timeOfDay * 1440.0f) % 1440;
+			if (minutes < 0) minutes += 1440;
+			char clock[8];
+			std::snprintf(clock, sizeof(clock), "%02d:%02d", minutes / 60, minutes % 60);
+			ImGui::SetNextItemWidth(-1.0f);
+			if (ImGui::SliderFloat("##timeofday", &env->timeOfDay, 0.0f, 1.0f, clock,
+			                       ImGuiSliderFlags_NoRoundToFormat))
+				env->dayNightCycle = true;
+			trackEdit();
+			ImGui::TextDisabled(env->dayNightCycle
+				? "Drives the sun, sky & shadows."
+				: "Move the slider to start a day-night cycle.");
+
+			if (ImGui::Checkbox("Auto-Advance", &env->autoAdvance) && env->autoAdvance)
+				env->dayNightCycle = true;
+			trackEdit();
+			ImGui::BeginDisabled(!env->autoAdvance);
+			ImGui::SetNextItemWidth(-1.0f);
+			ImGui::SliderFloat("##cyclelen", &env->cycleSeconds, 5.0f, 600.0f,
+			                   "Full day: %.0f s", ImGuiSliderFlags_Logarithmic); trackEdit();
+			ImGui::EndDisabled();
+
+			ImGui::SeparatorText("Sun & Moon Light");
+			ImGui::ColorEdit3("Sun Color",  &env->sunColor.x, ImGuiColorEditFlags_NoInputs); trackEdit();
+			ImGui::SliderFloat("Sun Brightness",  &env->sunIntensity,  0.0f, 10.0f, "%.2f"); trackEdit();
+			ImGui::ColorEdit3("Moon Color", &env->moonColor.x, ImGuiColorEditFlags_NoInputs); trackEdit();
+			ImGui::SliderFloat("Moon Brightness", &env->moonIntensity, 0.0f, 10.0f, "%.2f"); trackEdit();
+
+			ImGui::SeparatorText("Clouds");
+			ImGui::SetNextItemWidth(-1.0f);
+			ImGui::SliderFloat("##cloudcoverage", &env->cloudCoverage, 0.0f, 1.0f, "Coverage: %.2f"); trackEdit();
+			ImGui::TextDisabled("Full overcast dims the sun & fills with ambient light.");
+			ImGui::SetNextItemWidth(-1.0f);
+			ImGui::SliderFloat("##winddir", &env->windDirection, 0.0f, 360.0f, "Wind direction: %.0f\xc2\xb0"); trackEdit();
+			ImGui::SetNextItemWidth(-1.0f);
+			ImGui::SliderFloat("##windspeed", &env->windSpeed, 0.0f, 4.0f, "Wind speed: %.2f"); trackEdit();
+
+			ImGui::SeparatorText("Atmospheric Fog");
+			ImGui::SetNextItemWidth(-1.0f);
+			ImGui::SliderFloat("##fogdensity", &env->fogDensity, 0.0f, 0.15f, "Density: %.3f"); trackEdit();
+			ImGui::BeginDisabled(env->fogDensity <= 0.0f);
+			ImGui::SetNextItemWidth(-1.0f);
+			ImGui::SliderFloat("##fogheight", &env->fogHeightFalloff, 0.0f, 1.0f, "Ground hugging: %.2f"); trackEdit();
+			ImGui::EndDisabled();
+			ImGui::TextDisabled("Distant objects blend into the horizon (warm at sunset).");
+
+			ImGui::SeparatorText("Night Sky");
+			ImGui::SetNextItemWidth(-1.0f);
+			ImGui::SliderFloat("##nebula", &env->nebulaIntensity, 0.0f, 1.0f, "Space Nebula: %.2f"); trackEdit();
+			ImGui::ColorEdit3("Nebula Color", &env->nebulaColor.x); trackEdit();
+			ImGui::SetNextItemWidth(-1.0f);
+			ImGui::SliderFloat("##aurora", &env->auroraIntensity, 0.0f, 1.0f, "Aurora: %.2f"); trackEdit();
+			ImGui::ColorEdit3("Aurora Color", &env->auroraColor.x); trackEdit();
+			ImGui::TextDisabled("Stars, Milky Way & nebula turn with the day; aurora drifts.");
+		}
+		ImGui::Separator();
+	}
 
 	// Header with a right-click "Remove Component" menu. Returns true when
 	// the section is open; sets `removed` when the user removed the component.

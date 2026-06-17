@@ -1127,3 +1127,36 @@ alpha-geblendeten Pass, der über die opake Szene **und** den Himmel composited.
   Vor-Transparenz-Stand (GL 2 / Metal 7 px = Wolken-Drift) → voll opt-in, kein Regress. 35 Tests grün.
   **OIT bleibt Kür (P7); D3D/Vulkan = nächster blinder Windows-Port** (RenderObject/DrawCall
   unverändert, ignorieren die Opacity dort).
+
+### Forts. 16 — Editor-UX-Umbau: Environment als World-Komponente + Quick-Settings-Favoriten
+
+> **Aufgabe:** Editor reviewen; Quick-Settings/Preferences sortieren; die Umgebungs-/Sonnen-/Mond-/
+> Tageszeit-Settings ins Details-Panel der World-Node schieben (als Properties, die der Szenen-Serializer
+> in die Map schreibt + wiederherstellt); Quick Settings zum Favoriten-Panel machen — nur **engine-
+> bezogene** Settings sind anpinnbar (User-Klärung). ✅
+
+- **Environment = `EnvironmentComponent` auf der World-Root-Entity** (`src/HE_Scene/.../Components/
+  EnvironmentComponent.h`): Tag-Nacht/Time-of-Day/Auto-Advance, Sonne/Mond (Farbe+Helligkeit), Wolken+
+  Wind, Nebel, Nachthimmel (Aurora/Milchstraße/Nebula). Default am Root angehängt (HorizonWorld-Ctor +
+  in `clear()` zurückgesetzt). **SceneSerializer** schreibt/liest sie wie jede Komponente (JSON+CBOR) →
+  **persistiert pro Map + wird wiederhergestellt** (Unit-Test `EnvironmentComponent ... round-trips`).
+  Damit ist Environment Szenen-Daten, keine globale Editor-Pref mehr (aus `EditorConfig` + config.json
+  entfernt).
+- **Renderer-Quelle gewechselt, Interface unverändert:** `EditorApplication::pushEnvironment(dt)` liest
+  die Root-`EnvironmentComponent`, auto-advanced `timeOfDay` und pusht via `SetEnvironmentSettings` (in
+  OnRender + Headless-Dump). Der Renderer-Code bleibt gleich (nur die Datenquelle ist die Komponente).
+- **Inspector:** Wird die World-Node selektiert, zeigt das Details-Panel eine **„Environment"-Sektion**
+  mit allen Reglern (aus Quick Settings hierher verschoben), undo-fähig über das bestehende
+  `trackEdit`-Muster.
+- **Quick-Settings-Favoriten (nur engine-bezogene Settings):** Ein gemeinsamer `DrawEngineSettings(ctx,
+  mode)`-Katalog mit `row(key,category,widget)`. Preferences (mode=Home) zeigt jede Setting mit einem
+  **Pin-Toggle**; Quick Settings (mode=QS) zeigt nur die gepinnten. Favoriten = Komma-Liste stabiler
+  Keys in `EditorConfig::QuickSettingsFavorites` (config.json, Default `backend,vsync,grid,bloom,ssao`).
+  Katalog: Renderer (Backend/VSync), Post-Processing (Bloom/SSAO), Viewport (Grid/Cam-Speed), Appearance
+  (Font-Scale), Content-Browser. Quick Settings ist jetzt das reine Favoriten-Panel (+ Leer-Hinweis).
+- **Review-Cleanup:** Das laute Per-Node-Outliner-Logging (jede Entity pro Hierarchy-Rebuild) + die
+  Diagnostik-Blöcke auf eine knappe `[Outliner] rebuilt: N nodes`-Zeile reduziert; tote
+  `QsRendererOpen/QsEditorOpen`-Config-Felder entfernt.
+- **Verifiziert:** 36 Tests grün (neuer Env-Roundtrip-Case); GL+Metal-Dump rendert die Env aus der
+  Default-Komponente, **GL == Metal** (0.01 % / 68 px = Sky-Floor). Interaktive Panels (Pin-Flow,
+  World-Node-Environment-Editor) vom User zu bestätigen (headless nicht prüfbar).

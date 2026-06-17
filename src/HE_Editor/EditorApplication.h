@@ -36,10 +36,6 @@ struct EditorConfig
 	bool KeepCPUAssetsInfoAcknoleged = false;
 	int  ContentBrowserRefreshRate = 60;
 
-	// Quick Settings panel — collapsed state of each section header
-	bool QsRendererOpen = true;
-	bool QsEditorOpen   = true;
-
 	// Scene viewport: draw the world-space ground grid
 	bool ShowGrid = true;
 
@@ -60,34 +56,14 @@ struct EditorConfig
 	float SSAORadius    = 0.5f;   // hemisphere sampling radius, view-space units
 	float SSAOIntensity = 1.0f;   // 0 = off … 1 = full ambient occlusion
 
-	// Environment: day-night cycle (pushed via SetEnvironmentSettings)
-	bool  DayNightCycle       = false;
-	float TimeOfDay           = 0.5f;    // 0..1 (0.5 = noon)
-	bool  DayNightAutoAdvance = false;   // advance TimeOfDay automatically
-	float DayNightCycleSeconds = 120.0f; // real seconds for one full day
-	// Sun & moon directional lights — user-adjustable colour and brightness.
-	glm::vec3 SunColor      = glm::vec3(1.0f, 0.97f, 0.90f);
-	float     SunIntensity  = 2.2f;
-	glm::vec3 MoonColor     = glm::vec3(0.55f, 0.65f, 0.95f);
-	float     MoonIntensity = 0.66f;
-	// Procedural cloud amount (0 = clear sky … 1 = full overcast).
-	float     CloudCoverage = 0.5f;
-	// Atmospheric fog / aerial perspective (0 density = off; height falloff > 0
-	// pools the fog near the ground).
-	float     FogDensity      = 0.0f;
-	float     FogHeightFalloff = 0.1f;
-	// Night-sky aurora borealis intensity (0 = off). Drifting light ribbons that
-	// sweep across the sky, drawn only at night.
-	float     AuroraIntensity = 0.0f;
-	// Milky Way (dense star band) brightness, space-nebula intensity, and the base
-	// colours for the nebula and the aurora ribbons.
-	float     MilkyWayIntensity = 0.6f;
-	float     NebulaIntensity   = 0.5f;
-	glm::vec3 NebulaColor       = glm::vec3(0.42f, 0.45f, 0.92f);
-	glm::vec3 AuroraColor       = glm::vec3(0.25f, 0.95f, 0.50f);
-	// Cloud wind: drift direction (degrees, 0 = toward north/-Z) + speed multiplier.
-	float     WindDirection     = 30.0f;
-	float     WindSpeed         = 1.0f;
+	// NOTE: environment / sky settings (day-night, sun, moon, clouds, fog, night
+	// sky, wind) are scene data now — they live on the World root entity as an
+	// EnvironmentComponent, are edited in its Details panel and persist with the
+	// scene. They are no longer editor preferences.
+
+	// Quick Settings = the engine settings the user pinned in Preferences. Stored
+	// as a comma-separated list of stable setting keys (see DrawEngineSettings).
+	std::string QuickSettingsFavorites = "backend,vsync,grid,bloom,ssao";
 
 	EditorMode mode = EditorMode::View;
 	std::string modeString() const
@@ -280,6 +256,10 @@ private:
 	void saveSceneToPath(const std::string& path);
 	void openScene(const std::string& path);
 	void newScene();
+	// Auto-advances (dt > 0) and pushes the World root's EnvironmentComponent to
+	// the renderer via SetEnvironmentSettings. The environment is scene data now,
+	// not an editor preference.
+	void pushEnvironment(float dt);
 
 	// Set by OnEvent when an OS-level close (X / Cmd+Q) is vetoed because the
 	// scene has unsaved changes; the UI reads it to raise the save-prompt with a

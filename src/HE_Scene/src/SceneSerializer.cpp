@@ -10,6 +10,7 @@
 #include "HorizonScene/Components/LightComponent.h"
 #include "HorizonScene/Components/RigidBodyComponent.h"
 #include "HorizonScene/Components/ScriptComponent.h"
+#include "HorizonScene/Components/EnvironmentComponent.h"
 #include <nlohmann/json.hpp>
 #include <fstream>
 
@@ -139,6 +140,29 @@ namespace
 					{ "enabled",    s->enabled },
 				};
 			}
+			if (auto* e = registry.try_get<EnvironmentComponent>(entity))
+			{
+				comps["environment"] = {
+					{ "dayNightCycle",     e->dayNightCycle },
+					{ "timeOfDay",         e->timeOfDay },
+					{ "autoAdvance",       e->autoAdvance },
+					{ "cycleSeconds",      e->cycleSeconds },
+					{ "sunColor",          vec3ToJson(e->sunColor) },
+					{ "sunIntensity",      e->sunIntensity },
+					{ "moonColor",         vec3ToJson(e->moonColor) },
+					{ "moonIntensity",     e->moonIntensity },
+					{ "cloudCoverage",     e->cloudCoverage },
+					{ "windDirection",     e->windDirection },
+					{ "windSpeed",         e->windSpeed },
+					{ "fogDensity",        e->fogDensity },
+					{ "fogHeightFalloff",  e->fogHeightFalloff },
+					{ "auroraIntensity",   e->auroraIntensity },
+					{ "milkyWayIntensity", e->milkyWayIntensity },
+					{ "nebulaIntensity",   e->nebulaIntensity },
+					{ "nebulaColor",       vec3ToJson(e->nebulaColor) },
+					{ "auroraColor",       vec3ToJson(e->auroraColor) },
+				};
+			}
 
 			if (!comps.is_null())
 				eJson["components"] = comps;
@@ -228,6 +252,30 @@ namespace
 			s.moduleName    = c.value("moduleName", s.moduleName);
 			s.enabled       = c.value("enabled",    s.enabled);
 			registry.emplace_or_replace<ScriptComponent>(entity, s);
+		}
+		if (comps.contains("environment"))
+		{
+			const json& c = comps["environment"];
+			EnvironmentComponent e;
+			e.dayNightCycle     = c.value("dayNightCycle",     e.dayNightCycle);
+			e.timeOfDay         = c.value("timeOfDay",         e.timeOfDay);
+			e.autoAdvance       = c.value("autoAdvance",       e.autoAdvance);
+			e.cycleSeconds      = c.value("cycleSeconds",      e.cycleSeconds);
+			e.sunColor          = jsonToVec3(c.value("sunColor",  json()), e.sunColor);
+			e.sunIntensity      = c.value("sunIntensity",      e.sunIntensity);
+			e.moonColor         = jsonToVec3(c.value("moonColor", json()), e.moonColor);
+			e.moonIntensity     = c.value("moonIntensity",     e.moonIntensity);
+			e.cloudCoverage     = c.value("cloudCoverage",     e.cloudCoverage);
+			e.windDirection     = c.value("windDirection",     e.windDirection);
+			e.windSpeed         = c.value("windSpeed",         e.windSpeed);
+			e.fogDensity        = c.value("fogDensity",        e.fogDensity);
+			e.fogHeightFalloff  = c.value("fogHeightFalloff",  e.fogHeightFalloff);
+			e.auroraIntensity   = c.value("auroraIntensity",   e.auroraIntensity);
+			e.milkyWayIntensity = c.value("milkyWayIntensity", e.milkyWayIntensity);
+			e.nebulaIntensity   = c.value("nebulaIntensity",   e.nebulaIntensity);
+			e.nebulaColor       = jsonToVec3(c.value("nebulaColor", json()), e.nebulaColor);
+			e.auroraColor       = jsonToVec3(c.value("auroraColor", json()), e.auroraColor);
+			registry.emplace_or_replace<EnvironmentComponent>(entity, e);
 		}
 	}
 
