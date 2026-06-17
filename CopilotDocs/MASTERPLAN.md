@@ -237,7 +237,7 @@ Macht aus „Renderer + Systeme" eine Engine, in der man ein Spiel *baut*.
 | 5.4 | **In-Game-UI-Runtime** (Canvas, Text via MSDF/stb_truetype, Buttons, Anchoring) | Render-Pfad ✅ | nicht ImGui — das ist Editor-only |
 | 5.5 | **Navigation**: Recast/Detour-NavMesh-Baking + Agenten | 4a.1 | |
 | 5.6 | **Szenen-Streaming/Additive-Load** (mehrere Szenen gleichzeitig) | 2.2 | |
-| 5.7 | **Event-/Messaging-System** für Gameplay-Code | 4b.2 | |
+| 5.7 | **Event-/Messaging-System** für Gameplay-Code | 4b.2 | ✅ Forts. 33 — EventBus (typed publish/subscribe, RAII Subscription, re-entrancy-safe snapshot), 15 Tests |
 
 ---
 
@@ -1591,3 +1591,15 @@ Lifetime-sicher mit der bestehenden `SlotMap`/`m_handleToUUID`-Buchführung inte
 - **`tick(const Input& input)`**: Wertet pro Frame `input.IsKeyDown(scancode)` aus; berechnet `isPressed`, `justPressed` (nur Frame der Betätigung), `justReleased` (nur Frame der Loslassung); Achsen via positiveKey/negativeKey/scale → `clamp(sum, -1, 1)`.
 - **Convenience-Methoden**: `isPressed(name)`, `justPressed(name)`, `justReleased(name)`, `axisValue(name)` (null-sicher, default false/0).
 - **Tests (`tests/test_inputmapping.cpp`):** 17 neue Cases (unbekannte Action/Axis, initialer Zustand, justPressed/justReleased-Timing, multi-Binding, Helfer, Achse +/-/0/Clamp/Scale, actionCount/axisCount, clear, Re-Mapping). **153 Tests grün** (136→153).
+
+### Forts. 33 — Event-/Messaging-System (5.7)
+
+> **Aufgabe:** Typisiertes Publish/Subscribe-System für Gameplay-Code — entkoppelt Sender und Empfänger ohne Vererbungszwang auf Event-Seite. ✅
+
+- **`EventBus`** (`Events/EventBus.h`, header-only, in HorizonCore): Template-Dispatcher mit `std::type_index` als Dispatch-Schlüssel. Handler werden als `std::function<void(const void*)>` (type-erased) gespeichert; der konkrete Typ wird an der Call-Site zurückgecastet.
+- **`subscribe<TEvent>(handler)`**: Registriert einen Handler, vergibt monoton wachsende `uint64_t`-ID, gibt ein RAII-`Subscription`-Objekt zurück (`[[nodiscard]]`).
+- **`publish<TEvent>(event)`**: Macht eine Snapshot-Kopie der Handler-Liste vor der Iteration → subscribe/unsubscribe während Dispatch sind crash-sicher und ohne Reentranz-Probleme.
+- **`Subscription`** (RAII, move-only): Hält Pointer auf `EventBus`, `type_index` und ID. `~Subscription()` / `release()` ruft `bus->unsubscribe(type, id)` auf. `valid()` prüft ob noch aktiv. Doppeltes `release()` ist safe (idempotent).
+- **`subscriberCount<TEvent>()`** / **`totalSubscriberCount()`**: Hilfsmethoden für Tests und Debug-Anzeige.
+- **HorizonCore.h**: `#include "Events/EventBus.h"` ergänzt.
+- **Tests (`tests/test_eventbus.cpp`):** 15 neue Cases (no-op, single/multi subscriber, type-filtering, payload-forwarding, RAII destroy/release/double-release/move-construct/move-assign, subscriberCount, totalSubscriberCount, subscribe/unsubscribe during dispatch). **167 Tests grün** (153→167).
