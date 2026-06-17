@@ -1,6 +1,7 @@
 #include "EditorApplication.h"
 #include "EditorUI.h"
 #include <HorizonScene/Components/EnvironmentComponent.h>
+#include <HorizonScene/TerrainSystem.h>
 #include <Renderer/RendererFactory.h>
 #include <Diagnostics/Logger.h>
 #include <SDL3/SDL.h>
@@ -741,6 +742,11 @@ void EditorApplication::OnRender(float dt)
 			m_editorConfig.SSAOEnabled,
 			m_editorConfig.SSAORadius,
 			m_editorConfig.SSAOIntensity});
+		// Regenerate terrain meshes for any entity whose TerrainComponent is dirty
+		// (newly created, parameter-edited in the inspector, or just loaded/restored).
+		if (m_editorWorld)
+			TerrainSystem::updateTerrains(*m_editorWorld, contentManager());
+
 		pushEnvironment(dt); // auto-advances + pushes the World env component
 	}
 

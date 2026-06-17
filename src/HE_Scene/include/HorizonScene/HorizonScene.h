@@ -16,6 +16,9 @@
 #include "Components/ScriptComponent.h"
 #include "Components/EnvironmentComponent.h"
 #include "Components/EnvironmentLightComponent.h"
+#include "Components/TerrainComponent.h"
+#include "TerrainMeshGenerator.h"
+#include "TerrainSystem.h"
 
 // Re-export EnTT entity type
 #include <entt/entt.hpp>

@@ -1934,6 +1934,77 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 
     ImGui::End();
 
+    // ── Landscape panel ──────────────────────────────────────────────────────
+    if (ctx.fontHeading) ImGui::PushFont(ctx.fontHeading);
+    ImGui::Begin("Landscape");
+    if (ctx.fontHeading) ImGui::PopFont();
+
+    if (ctx.editorConfig.mode != EditorMode::Landscape)
+    {
+        ImGui::TextDisabled("Switch to Landscape mode in the toolbar to use this panel.");
+    }
+    else if (ctx.world && ctx.contentManager)
+    {
+        ImGui::SeparatorText("Create Landscape");
+
+        static float  s_newSizeX      = 100.0f;
+        static float  s_newSizeZ      = 100.0f;
+        static int    s_newResolution = 128;
+        static float  s_newHeight     = 20.0f;
+        static int    s_newSeed       = 42;
+        static int    s_newOctaves    = 4;
+        static float  s_newFrequency  = 1.0f;
+        static float  s_newLacunarity = 2.0f;
+        static float  s_newGain       = 0.5f;
+
+        ImGui::DragFloat("Width (X)",     &s_newSizeX,      1.0f,  1.0f, 10000.0f, "%.1f m");
+        ImGui::DragFloat("Depth (Z)",     &s_newSizeZ,      1.0f,  1.0f, 10000.0f, "%.1f m");
+        ImGui::SliderInt("Resolution",    &s_newResolution, 2, 512);
+        ImGui::DragFloat("Height Scale",  &s_newHeight,     0.5f,  0.0f, 1000.0f,  "%.1f m");
+        ImGui::SeparatorText("Noise");
+        ImGui::InputInt("Seed",           &s_newSeed);
+        ImGui::SliderInt("Octaves",       &s_newOctaves,    1,  8);
+        ImGui::DragFloat("Frequency",     &s_newFrequency,  0.01f, 0.01f, 16.0f, "%.2f");
+        ImGui::DragFloat("Lacunarity",    &s_newLacunarity, 0.01f, 1.0f,  8.0f,  "%.2f");
+        ImGui::DragFloat("Gain",          &s_newGain,       0.01f, 0.0f,  1.0f,  "%.2f");
+
+        ImGui::Spacing();
+        const float btnW = 160.0f;
+        ImGui::SetCursorPosX((ImGui::GetContentRegionAvail().x - btnW) * 0.5f
+                             + ImGui::GetCursorPosX());
+        if (ImGui::Button("Create Landscape", ImVec2(btnW, 0)))
+        {
+            if (ctx.undoSys) ctx.undoSys->snapshotNow();
+
+            TerrainComponent tc;
+            tc.sizeX      = s_newSizeX;
+            tc.sizeZ      = s_newSizeZ;
+            tc.resolution = static_cast<uint32_t>(std::clamp(s_newResolution, 2, 1024));
+            tc.heightScale= s_newHeight;
+            tc.seed       = s_newSeed;
+            tc.octaves    = s_newOctaves;
+            tc.frequency  = s_newFrequency;
+            tc.lacunarity = s_newLacunarity;
+            tc.gain       = s_newGain;
+            tc.dirty      = true;
+
+            Entity e = ctx.world->createEntity("Terrain");
+            ctx.world->addComponent(e, TransformComponent{});
+            ctx.world->addComponent(e, tc);
+            // MeshComponent is added by TerrainSystem::updateTerrains next frame.
+            // Default material so the terrain renders with the standard shader.
+            MaterialComponent mc;
+            mc.materialAssetId = HE::kDefaultMaterialId;
+            ctx.world->addComponent(e, mc);
+
+            ctx.world->markHierarchyDirty();
+            ctx.selectedEntity = e;
+            Logger::Log(Logger::LogLevel::Info, "Editor: created Terrain entity");
+        }
+    }
+
+    ImGui::End();
+
     // World Outliner
     if (ctx.fontHeading) ImGui::PushFont(ctx.fontHeading);
     ImGui::Begin("World Outliner");
@@ -3246,6 +3317,37 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			ImGui::Checkbox("Enabled", &s->enabled); trackEdit();
 		}
 		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<ScriptComponent>(entity); }
+	}
+
+	// ── Terrain ─────────────────────────────────────────────────────────────
+	if (auto* t = registry.try_get<TerrainComponent>(entity))
+	{
+		if (componentHeader("Terrain", true, removed))
+		{
+			bool changed = false;
+			changed |= ImGui::DragFloat("Width (X)##tc",    &t->sizeX,      1.0f,  1.0f, 10000.0f, "%.1f m"); trackEdit();
+			changed |= ImGui::DragFloat("Depth (Z)##tc",    &t->sizeZ,      1.0f,  1.0f, 10000.0f, "%.1f m"); trackEdit();
+			int res = static_cast<int>(t->resolution);
+			if (ImGui::SliderInt("Resolution##tc", &res, 2, 512)) { t->resolution = static_cast<uint32_t>(res); changed = true; }
+			trackEdit();
+			changed |= ImGui::DragFloat("Height Scale##tc", &t->heightScale, 0.5f,  0.0f, 1000.0f,  "%.1f m"); trackEdit();
+			ImGui::SeparatorText("Noise");
+			changed |= ImGui::InputInt("Seed##tc",          &t->seed);       trackEdit();
+			int oct = t->octaves;
+			if (ImGui::SliderInt("Octaves##tc",             &oct, 1, 8)) { t->octaves = oct; changed = true; }
+			trackEdit();
+			changed |= ImGui::DragFloat("Frequency##tc",    &t->frequency,  0.01f, 0.01f, 16.0f, "%.2f"); trackEdit();
+			changed |= ImGui::DragFloat("Lacunarity##tc",   &t->lacunarity, 0.01f, 1.0f,  8.0f,  "%.2f"); trackEdit();
+			changed |= ImGui::DragFloat("Gain##tc",         &t->gain,       0.01f, 0.0f,  1.0f,  "%.2f"); trackEdit();
+			if (changed) t->dirty = true;
+			ImGui::Spacing();
+			if (ImGui::Button("Regenerate##tc"))
+			{
+				if (ctx.undoSys) ctx.undoSys->snapshotNow();
+				t->dirty = true;
+			}
+		}
+		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<TerrainComponent>(entity); }
 	}
 
 	// ── Add Component ───────────────────────────────────────────────────────
