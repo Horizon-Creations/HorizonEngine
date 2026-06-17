@@ -218,3 +218,50 @@ void ScriptEngine::setInstanceField(InstanceId id, const std::string& key, doubl
     lua_setfield(m_L, -2, key.c_str());
     lua_pop(m_L, 1);
 }
+
+bool ScriptEngine::hotReloadScript(const std::string& name, const std::string& source)
+{
+    auto it = m_scripts.find(name);
+    if (it == m_scripts.end()) return false;
+
+    // Compile the new source into a module table
+    if (luaL_loadstring(m_L, source.c_str()) != LUA_OK)
+    {
+        m_lastError = lua_tostring(m_L, -1);
+        lua_pop(m_L, 1);
+        return false;
+    }
+    if (!pcall(0, 1)) return false;          // execute chunk → module table on stack
+    if (!lua_istable(m_L, -1)) { lua_pop(m_L, 1); return false; }
+
+    // Replace old module reference with new one
+    luaL_unref(m_L, LUA_REGISTRYINDEX, it->second.luaRef);
+    it->second.luaRef = luaL_ref(m_L, LUA_REGISTRYINDEX); // pops module from stack
+
+    // Patch function fields in all live instances that use this script
+    lua_rawgeti(m_L, LUA_REGISTRYINDEX, it->second.luaRef); // push new module
+    int modIdx = lua_gettop(m_L);
+
+    for (auto& [instId, instRef] : m_instances)
+    {
+        if (instRef.scriptName != name) continue;
+        lua_rawgeti(m_L, LUA_REGISTRYINDEX, instRef.luaRef); // push instance
+        int instIdx = lua_gettop(m_L);
+
+        lua_pushnil(m_L); // first key for iteration
+        while (lua_next(m_L, modIdx) != 0) // key at -2, value at -1
+        {
+            if (lua_isfunction(m_L, -1))
+            {
+                lua_pushvalue(m_L, -2); // dup key
+                lua_pushvalue(m_L, -2); // dup value (val is now at -2 after key dup)
+                lua_settable(m_L, instIdx);
+            }
+            lua_pop(m_L, 1); // pop value, leave key for next iteration
+        }
+        lua_pop(m_L, 1); // pop instance
+    }
+    lua_pop(m_L, 1); // pop module
+    m_lastError.clear();
+    return true;
+}
