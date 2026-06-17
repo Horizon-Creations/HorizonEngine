@@ -2,7 +2,18 @@
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/AudioEngine.h>
+#include <HorizonScene/AudioSystem.h>
+#include <ContentManager/ContentManager.h>
 #include <Types/UUID.h>
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+// Generate N frames of silence as int16 PCM
+static std::vector<uint8_t> makeSilence(int frames, int channels)
+{
+    return std::vector<uint8_t>(static_cast<size_t>(frames * channels) * 2, 0);
+}
 
 // ─── AudioSourceComponent ──────────────────────────────────────────────────────
 
@@ -162,4 +173,131 @@ TEST_CASE("AudioSourceComponent round-trip preserves null assetId")
         CHECK(a->assetId == HE::UUID{}); // should still be null
         break;
     }
+}
+
+// ─── AudioEngine (noDevice / headless) ───────────────────────────────────────
+
+TEST_CASE("AudioEngine: init/shutdown in noDevice mode")
+{
+    AudioEngine engine;
+    CHECK(engine.init(true));   // noDevice=true
+    CHECK(engine.isInitialized());
+    engine.shutdown();
+    CHECK(!engine.isInitialized());
+}
+
+TEST_CASE("AudioEngine: double-init is safe")
+{
+    AudioEngine engine;
+    CHECK(engine.init(true));
+    CHECK(engine.init(true)); // second call is a no-op
+    engine.shutdown();
+}
+
+TEST_CASE("AudioEngine: play silence returns valid handle")
+{
+    AudioEngine engine;
+    REQUIRE(engine.init(true));
+
+    auto pcm = makeSilence(1024, 2);
+    uint64_t h = engine.play(pcm, 48000, 2);
+    CHECK(h != 0);
+    engine.shutdown();
+}
+
+TEST_CASE("AudioEngine: play empty data returns 0")
+{
+    AudioEngine engine;
+    REQUIRE(engine.init(true));
+
+    std::vector<uint8_t> empty;
+    CHECK(engine.play(empty, 48000, 2) == 0);
+    engine.shutdown();
+}
+
+TEST_CASE("AudioEngine: stop handle is safe")
+{
+    AudioEngine engine;
+    REQUIRE(engine.init(true));
+
+    auto pcm = makeSilence(1024, 1);
+    uint64_t h = engine.play(pcm, 44100, 1);
+    REQUIRE(h != 0);
+    engine.stop(h);
+    engine.stop(h);   // double-stop is safe
+    engine.stop(9999); // unknown handle is safe
+    engine.shutdown();
+}
+
+TEST_CASE("AudioEngine: stopAll clears all sounds")
+{
+    AudioEngine engine;
+    REQUIRE(engine.init(true));
+
+    auto pcm = makeSilence(512, 2);
+    uint64_t h1 = engine.play(pcm, 48000, 2);
+    uint64_t h2 = engine.play(pcm, 48000, 2);
+    CHECK(h1 != 0);
+    CHECK(h2 != 0);
+    engine.stopAll();
+    CHECK(!engine.isPlaying(h1));
+    CHECK(!engine.isPlaying(h2));
+    engine.shutdown();
+}
+
+TEST_CASE("AudioEngine: play with volume and pitch")
+{
+    AudioEngine engine;
+    REQUIRE(engine.init(true));
+
+    auto pcm = makeSilence(2048, 2);
+    uint64_t h = engine.play(pcm, 48000, 2, 0.5f, 1.5f, false);
+    CHECK(h != 0);
+    engine.shutdown();
+}
+
+// ─── AudioSystem::playOnStart ─────────────────────────────────────────────────
+
+TEST_CASE("AudioSystem: playOnStart skips entities without flag")
+{
+    HorizonWorld world;
+    AudioEngine  engine;
+    REQUIRE(engine.init(true));
+
+    auto e = world.createEntity("Speaker");
+    AudioSourceComponent src;
+    src.playOnStart = false;
+    world.registry().emplace<AudioSourceComponent>(e, src);
+
+    // No ContentManager and playOnStart=false — should not crash
+    AudioSystem::playOnStart(world, engine, nullptr);
+    engine.shutdown();
+}
+
+TEST_CASE("AudioSystem: playOnStart calls engine when asset is present")
+{
+    HorizonWorld    world;
+    ContentManager  content;
+    AudioEngine     engine;
+    REQUIRE(engine.init(true));
+
+    // Register an audio asset with silence PCM
+    AudioAsset asset;
+    asset.name       = "test_tone";
+    asset.sampleRate = 44100;
+    asset.channels   = 1;
+    asset.audioData  = makeSilence(4410, 1); // 0.1 s mono
+    HE::UUID assetId = content.registerAudio(std::move(asset));
+
+    // Entity with playOnStart=true
+    auto e = world.createEntity("SpeakerEntity");
+    AudioSourceComponent src;
+    src.assetId     = assetId;
+    src.playOnStart = true;
+    src.volume      = 0.8f;
+    world.registry().emplace<AudioSourceComponent>(e, src);
+
+    // Should not crash, engine.play() should succeed
+    AudioSystem::playOnStart(world, engine, &content);
+    engine.shutdown();
 }
