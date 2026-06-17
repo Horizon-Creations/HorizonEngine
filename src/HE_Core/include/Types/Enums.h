@@ -82,7 +82,8 @@ namespace HE
         Script,
         Audio,
         Font,
-        Shader
+        Shader,
+        Prefab
     };
 
     enum class TextureFormat : uint32_t

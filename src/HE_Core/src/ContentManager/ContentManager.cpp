@@ -303,6 +303,7 @@ const MaterialAsset*     ContentManager::getMaterial(HE::UUID id) const     { re
 const AudioAsset*        ContentManager::getAudio(HE::UUID id) const        { return lookupAsset(m_handleToUUID, m_audioAssets, id); }
 const ScriptAsset*       ContentManager::getScript(HE::UUID id) const       { return lookupAsset(m_handleToUUID, m_scriptAssets, id); }
 const ShaderAsset*       ContentManager::getShader(HE::UUID id) const       { return lookupAsset(m_handleToUUID, m_shaderAssets, id); }
+const PrefabAsset*       ContentManager::getPrefab(HE::UUID id) const       { return lookupAsset(m_handleToUUID, m_prefabAssets, id); }
 
 MaterialAsset* ContentManager::getMaterialMutable(HE::UUID id)
 {
@@ -355,6 +356,7 @@ bool ContentManager::replaceRuntimeAsset(SlotMap<T>& map, HE::UUID id, T asset)
 HE::UUID ContentManager::registerStaticMesh(StaticMeshAsset asset) { return registerRuntimeAsset(m_staticMeshAssets, std::move(asset), HE::AssetType::StaticMesh); }
 HE::UUID ContentManager::registerTexture(TextureAsset asset)       { return registerRuntimeAsset(m_textureAssets,    std::move(asset), HE::AssetType::Texture);    }
 HE::UUID ContentManager::registerMaterial(MaterialAsset asset)     { return registerRuntimeAsset(m_materialAssets,   std::move(asset), HE::AssetType::Material);   }
+HE::UUID ContentManager::registerPrefab(PrefabAsset asset)         { return registerRuntimeAsset(m_prefabAssets,     std::move(asset), HE::AssetType::Prefab);     }
 
 bool ContentManager::replaceStaticMesh(HE::UUID id, StaticMeshAsset asset) { return replaceRuntimeAsset(m_staticMeshAssets, id, std::move(asset)); }
 bool ContentManager::replaceTexture(HE::UUID id, TextureAsset asset)       { return replaceRuntimeAsset(m_textureAssets,    id, std::move(asset)); }

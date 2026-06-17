@@ -231,7 +231,7 @@ Macht aus „Renderer + Systeme" eine Engine, in der man ein Spiel *baut*.
 
 | # | Aufgabe | Hängt ab von | Details |
 |---|---|---|---|
-| 5.1 | **Prefabs** (Entity-Hierarchie als Asset, Instanzen + Overrides) | 2.2 | enormer Workflow-Gewinn, früh in P5 machen |
+| 5.1 | **Prefabs** (Entity-Hierarchie als Asset, Instanzen + Overrides) | 2.2 | ✅ Forts. 31 — serializeSubtree/instantiatePrefab, PrefabAsset, ContentManager-Integration, Editor-Kontextmenü, 9 Tests |
 | 5.2 | **Input-Mapping** (Actions/Axes statt Roh-Keys, Gamepad) | — | Scripting (4b.2) konsumiert es |
 | 5.3 | **Partikelsystem** (CPU-Sim zuerst, instanziertes Rendering) | 3.8 | GPU-Sim ist Kür |
 | 5.4 | **In-Game-UI-Runtime** (Canvas, Text via MSDF/stb_truetype, Buttons, Anchoring) | Render-Pfad ✅ | nicht ImGui — das ist Editor-only |
@@ -1568,3 +1568,15 @@ Lifetime-sicher mit der bestehenden `SlotMap`/`m_handleToUUID`-Buchführung inte
 - **Struct-Updates:** `MeshData`, `TextureData`, `MaterialDesc` bekommen Byte-Größen-Helfer (`sizeBytes()`).
 - **Tests (`tests/test_rendermanager.cpp`):** 13 neue Doctest-Cases (Allokator leer/alloc/free/reject-over-budget/evict-LRU/promote; Manager upload/idempotent/texture-footprint/material/release/invalid/shared-budget). **127 Tests grün** (113→127).
 - **Nächster Schritt:** Backends drähten die RenderResourceManager-Calls beim Upload/Draw/Eviction ein (ersetzt die per-Backend-Ad-Hoc-Caches in einer späteren Iteration).
+
+### Forts. 31 — Prefabs (5.1)
+
+> **Aufgabe:** Entity-Subtrees als wiederverwendbare Assets speichern und beliebig oft instanziieren. ✅
+
+- **`PrefabAsset`** (`ContentManager/Assets.h`): Neues `RuntimeAsset`-Derivat mit `std::vector<uint8_t> data` (CBOR-Payload). `AssetType::Prefab` ergänzt das Enum.
+- **`SceneSerializer::serializeSubtree(world, root)`**: Sammelt Root + alle Nachfahren (DFS via `collectSubtree`), remappt Entity-Handles auf sequenzielle IDs (0 = Root), serialisiert alle Komponenten via extrahierter `serializeComponents`-Hilfsfunktion → CBOR.
+- **`SceneSerializer::instantiatePrefab(world, data, parent)`**: CBOR → JSON → `applyPrefabJson` (3-Pass: create all entities, component apply, hierarchy-rebuild), dann Root-Entity an `parent` (oder World-Root) hängen via `reparentEntity`. Gibt `entt::null` bei parse-Fehler.
+- **`buildSceneJson`-Refaktor:** Extrahierte `serializeComponents(registry, entity)` → `json` als gemeinsame Hilfsfunktion, um Duplizierung zu vermeiden.
+- **ContentManager:** `getPrefab(UUID)`, `registerPrefab(PrefabAsset)`, `acquirePrefab(UUID)`, `SlotMap<PrefabAsset> m_prefabAssets`. Nutzt bestehenden `registerRuntimeAsset`-Template-Pfad.
+- **Editor (`EditorUI.cpp`):** „Save as Prefab" im Hierarchy-Kontextmenü (Per-Entity) → ruft `serializeSubtree` auf und registriert das Ergebnis im ContentManager.
+- **Tests (`tests/test_prefab.cpp`):** 9 neue Doctest-Cases (single-entity round-trip, Hierarchy-Preservation, zwei unabhängige Instanzen, Komponenten-Round-trip, non-empty blob, corrupt-data, ContentManager register/getPrefab/acquirePrefab). **136 Tests grün** (127→136).

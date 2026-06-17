@@ -35,6 +35,7 @@ public:
 	const AudioAsset*        getAudio(HE::UUID id) const;
 	const ScriptAsset*       getScript(HE::UUID id) const;
 	const ShaderAsset*       getShader(HE::UUID id) const;
+	const PrefabAsset*       getPrefab(HE::UUID id) const;
 
 	// Mutable access to a loaded material, for in-editor editing. Edits are
 	// visible immediately to any renderer sharing this manager; persist them to
@@ -53,6 +54,7 @@ public:
 	HE::UUID registerStaticMesh(StaticMeshAsset asset);
 	HE::UUID registerTexture(TextureAsset asset);
 	HE::UUID registerMaterial(MaterialAsset asset);
+	HE::UUID registerPrefab(PrefabAsset asset);
 
 	// Replace a registered asset's payload in place, keeping its UUID so existing
 	// references stay valid (e.g. regenerating a procedural terrain mesh after a
@@ -85,6 +87,7 @@ public:
 	AssetRef<AudioAsset>        acquireAudio(HE::UUID id);
 	AssetRef<ScriptAsset>       acquireScript(HE::UUID id);
 	AssetRef<ShaderAsset>       acquireShader(HE::UUID id);
+	AssetRef<PrefabAsset>       acquirePrefab(HE::UUID id);
 
 	// Pin bookkeeping — called by AssetRef; do not call directly.
 	void pinAsset(HE::UUID id);
@@ -124,6 +127,7 @@ private:
 	SlotMap<AudioAsset>        m_audioAssets;
 	SlotMap<FontAsset>         m_fontAssets;
 	SlotMap<ShaderAsset>       m_shaderAssets;
+	SlotMap<PrefabAsset>       m_prefabAssets;
 
 	std::unordered_map<HE::UUID, SlotHandle>                              m_handleToUUID;
 	std::unordered_map<HE::UUID, HE::AssetType>                          m_assetTypeIndex; // mirrors m_handleToUUID with type info
@@ -204,3 +208,4 @@ inline AssetRef<MaterialAsset>     ContentManager::acquireMaterial(HE::UUID id) 
 inline AssetRef<AudioAsset>        ContentManager::acquireAudio(HE::UUID id)        { return { this, id, getAudio(id) }; }
 inline AssetRef<ScriptAsset>       ContentManager::acquireScript(HE::UUID id)       { return { this, id, getScript(id) }; }
 inline AssetRef<ShaderAsset>       ContentManager::acquireShader(HE::UUID id)       { return { this, id, getShader(id) }; }
+inline AssetRef<PrefabAsset>       ContentManager::acquirePrefab(HE::UUID id)       { return { this, id, getPrefab(id) }; }
