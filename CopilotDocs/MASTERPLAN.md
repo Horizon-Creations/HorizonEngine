@@ -115,7 +115,7 @@ Keine Abhängigkeiten; jede Woche ein bisschen davon.
 | 0.4 | **Job-System** (Thread-Pool, parallel_for, Abhängigkeits-Handles) | — | Voraussetzung für parallele Extraction (3.8), Async-Loading (6.4), Physik-Threading |
 | 0.5 | **Profiling-Hooks**: Tracy vendoren, Frame-/Zone-Marker | — | Früh einbauen ist billig, nachrüsten teuer |
 | 0.6 | **Aufräumen**: doppelte glm-Kopie (vendored + FetchContent) auf eine Quelle | — | klein |
-| 0.7 | **Debug-Draw-API** (Linien, Wireframe-AABBs, Text im Viewport) | Render-Pfad ✅ | Hilft jeder späteren Phase (Physik-Collider, Frustum, NavMesh sichtbar machen) |
+| 0.7 | **Debug-Draw-API** (Linien, Wireframe-AABBs, Text im Viewport) | Render-Pfad ✅ | ✅ Forts. 24 — `DebugDrawBuffer` + GL- und Metal-Backend + Editor-Erdgitter |
 
 ---
 
@@ -1425,3 +1425,26 @@ Lifetime-sicher mit der bestehenden `SlotMap`/`m_handleToUUID`-Buchführung inte
   **51 Tests grün** (48→51), Build sauber.
 - **Schaltet frei:** Shader/Material/Mesh-Änderungen auf Disk werden im laufenden Editor automatisch neu geladen;
   Renderer zeigt immer aktuelle Asset-Daten ohne Neustart.
+
+### Forts. 24 — Debug-Draw-API (0.7)
+
+> **Aufgabe:** Fünfter Fundament-Schritt — wiederverwendbare CPU-seitige Linien-API für Editor-Visualisierungen. ✅
+
+- **`DebugDrawBuffer`** (header-only, `HE_Core/include/DebugDraw/DebugDraw.h`):
+  - `line(a, b, color)` — ein Segment
+  - `aabb(min, max, color)` — 12 Kanten einer achsenausgerichteten Box
+  - `sphere(center, radius, color, segments)` — 3 × N Kreissegmente (XZ, XY, YZ)
+  - `clear()`, `lines()`, `empty()`
+- **`IRenderer::SetDebugLines(const std::vector<DebugLine>&)`** — neue virtuelle Methode (Default: No-op).
+- **GL-Backend** (`OpenGLRenderer`): minimales GLSL-Unlit-Shader-Programm (Position + Farbe pro Vertex).
+  Linien werden am Ende des Geometry-Passes in den HDR-Target gezeichnet (nach opaque + transparent,
+  vor PostProcess → Tonemapping). Depth-Test an, kein Depth-Write.
+- **Metal-Backend** (`MetalRenderer`): MSL-Inline-Shader, temporärer `MTLBuffer` (Shared) pro Frame.
+  Wird zwischen `EncodeScene` und `[sceneEncoder endEncoding]` eingefügt — gleiches HDR-Target,
+  gleiche `kMetalClipFix`-Korrektur wie die Scene-Passes.
+- **Editor-Verdrahtung** (`EditorApplication::OnRender`): jedes Frame wird ein **Erdgitter** 21×21 Linien
+  (±10 m, Schritt 1 m, grau) gezeichnet; wenn eine Entität selektiert ist, erscheint eine gelbe 1×1×1-Box
+  um ihre Transform-Position.
+- **Tests:** 8 neue Doctest-Cases (`test_debug_draw.cpp`); alle 96 Tests grün (88→96), Build sauber.
+- **Nächster Schritt:** Phase 1 Asset-Pipeline — glTF-Import-Pipeline vervollständigen (Textur-/Material-
+  Serialisierung, asset_compiler), dann Editor-Phase 2 (SceneSerializer, Inspector-Erweiterungen).
