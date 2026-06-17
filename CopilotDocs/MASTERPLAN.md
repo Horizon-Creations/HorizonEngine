@@ -91,7 +91,7 @@ Diese low-level Bausteine zuerst, in dieser Reihenfolge — jeder schaltet die d
    - ✅ **Default-/Fallback-Assets** mit festen UUIDs (`kDefaultCubeMeshId`/`kDefaultWhiteTextureId`/`kDefaultMaterialId`
      in `ContentManager/DefaultAssets.h`), im Ctor registriert; GL+Metal-Renderer-Fallback-Cube ersetzt (Forts. 21).
    - ✅ **Asset-Enumeration** `enumerateIds()` / `enumerateIds(AssetType)` / `assetCount()` + `m_assetTypeIndex` (Forts. 22).
-   - 🔜 **Reload/Hot-Reload** einer geänderten Datei (mtime-Watch).
+   - ✅ **Reload/Hot-Reload** einer geänderten Datei (mtime-Watch) — Editor pollt jede 1,5 s, GPU-Cache-Invalidierung typ-dispatched (Forts. 23).
 2. **`Ref<T>`** (intrusiver Refcount, Phase 0.3) + Einsatz im ContentManager → sauberes Unloading/Eviction
    statt manuellem `unloadAsset`.
 3. **Job-System** (Thread-Pool, `parallel_for`, Phase 0.4) → parallele Extraction, Async-Loading, Physik.
@@ -1405,3 +1405,23 @@ Lifetime-sicher mit der bestehenden `SlotMap`/`m_handleToUUID`-Buchführung inte
 - **Schaltet frei:** Content Browser kann geladene Assets auflisten und nach Typ filtern; Landscape/
   Terrain-Editor kann alle registrierten Meshes aufzählen. **Nächster Fundament-Schritt:** Hot-Reload
   (mtime-Watch für geänderte Disk-Assets).
+
+### Forts. 23 — ContentManager: Hot-Reload (mtime-Watch)
+
+> **Aufgabe:** Vierter Fundament-Schritt der ContentManager-Fertigstellung. ✅
+
+- **`pollHotReload()` fertig verdrahtet** (war implementiert, aber nie aufgerufen):
+  - `EditorApplication::OnRender` pollt alle **1,5 s** (Timer `m_hotReloadTimer`), nur wenn Projekt geladen.
+  - Gibt `std::vector<HE::UUID>` der neu geladenen Assets zurück (gleiche UUID, existierende Referenzen bleiben gültig).
+- **Mid-write Race-Condition behoben:** Vor `unloadAsset` wird `getAssetType(fullPath)` geprüft;
+  liefert `Unknown` (partiell geschriebene / ungültige Datei) → Asset wird übersprungen, altes Live-Asset bleibt erhalten.
+- **Neue public API:** `assetType(UUID) const` → liefert `HE::AssetType` für eine UUID aus `m_assetTypeIndex`
+  (nötig für typ-dispatched GPU-Invalidierung im Editor).
+- **GPU-Cache-Invalidierung typ-dispatched:**
+  - `StaticMesh` / `SkeletalMesh` → `renderer()->InvalidateMesh(id)`
+  - `Material` → `renderer()->InvalidateMaterial(id)`
+  - `Texture` → `InvalidateMaterial` für alle geladenen Materialien (da GPU-Cache-Keys Material-UUIDs sind)
+- **Tests:** 3 Doctest-Cases für `pollHotReload*` (happy path reload, mem:// ignoriert, mid-write skip).
+  **51 Tests grün** (48→51), Build sauber.
+- **Schaltet frei:** Shader/Material/Mesh-Änderungen auf Disk werden im laufenden Editor automatisch neu geladen;
+  Renderer zeigt immer aktuelle Asset-Daten ohne Neustart.
