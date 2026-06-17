@@ -1,5 +1,6 @@
 #include "HorizonRendering/RenderExtractor.h"
 #include "HorizonRendering/RenderWorld.h"
+#include <Diagnostics/Profiler.h>
 #include <Renderer/IRenderer.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/Components/TransformComponent.h>
@@ -47,6 +48,7 @@ namespace
 void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspectRatio,
                               const EditorCameraOverride* editorCam)
 {
+	HE_PROFILE_SCOPE_N("RenderExtractor::extract");
 	out.clear();
 	auto& reg = world.registry();
 

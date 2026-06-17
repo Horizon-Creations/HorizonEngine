@@ -113,7 +113,7 @@ Keine Abhängigkeiten; jede Woche ein bisschen davon.
 | 0.2 | **CI** GitHub-Actions-Matrix (macOS + Windows, später Linux) | 0.1 | Build + Tests pro PR; verhindert Backend-Drift |
 | 0.3 | **`Ref<T>`** (intrusiver Refcount) + Einsatz im ContentManager | — | ✅ Forts. 25 — `AssetRef<T>` + `pinAsset`/`unpinAsset` + `unloadAsset`-Gate |
 | 0.4 | **Job-System** (Thread-Pool, parallel_for, Abhängigkeits-Handles) | — | ✅ Forts. 26 — parallele FrustumCuller + parallele RenderExtractor-Extraktion |
-| 0.5 | **Profiling-Hooks**: Tracy vendoren, Frame-/Zone-Marker | — | Früh einbauen ist billig, nachrüsten teuer |
+| 0.5 | **Profiling-Hooks**: Tracy vendoren, Frame-/Zone-Marker | — | ✅ Forts. 27 — Tracy FetchContent + HE_PROFILE_FRAME/SCOPE/SCOPE_N + 4 Zone-Marker |
 | 0.6 | **Aufräumen**: doppelte glm-Kopie (vendored + FetchContent) auf eine Quelle | — | klein |
 | 0.7 | **Debug-Draw-API** (Linien, Wireframe-AABBs, Text im Viewport) | Render-Pfad ✅ | ✅ Forts. 24 — `DebugDrawBuffer` + GL- und Metal-Backend + Editor-Erdgitter |
 
@@ -1492,3 +1492,27 @@ Lifetime-sicher mit der bestehenden `SlotMap`/`m_handleToUUID`-Buchführung inte
   parallele Korrektheit). **104 Tests grün** (103→104), Build sauber.
 - **Schaltet frei:** Instancing + weitere parallele Extraction (3.8); Basis für Async-Loading (6.4).
 - **Nächster Schritt:** 0.5 Tracy-Profiling.
+
+### Forts. 27 — Tracy-Profiling-Infrastruktur (0.5)
+
+> **Aufgabe:** Profiling-Hooks früh einbauen, bevor mehr Features kommen. Tracy als optionale Abhängigkeit; null Overhead im Standard-Build. ✅
+
+- **`CMakeLists.txt` (root):** `HE_ENABLE_TRACY`-Option (default OFF) + Tracy-FetchContent (v0.11.1,
+  `TRACY_ENABLE=ON`, `TRACY_NO_EXIT=ON`). Status-Log bei configure.
+- **`src/HE_Core/CMakeLists.txt`:** `target_link_libraries(HorizonCore PUBLIC Tracy::TracyClient)` hinter
+  dem Option-Guard. PUBLIC = Tracy-Define + Include transitiv in HorizonRendering/Editor/HorizonScene.
+- **`src/HE_Core/include/Diagnostics/Profiler.h`:** Drei Makros (früher leere Stubs, jetzt implementiert):
+  - `HE_PROFILE_FRAME()` → `FrameMark` (Rahmen-Ende)
+  - `HE_PROFILE_SCOPE()` → `ZoneScoped` (auto-named aus Funktion+Zeile)
+  - `HE_PROFILE_SCOPE_N(name)` → `ZoneScopedN(name)` (benannt)
+  - Wenn `TRACY_ENABLE` nicht definiert: alle drei leere Präprozessor-No-ops.
+- **Zone-Marker in den heißen Pfaden:**
+  - `Application.cpp` Haupt-Loop-Ende: `HE_PROFILE_FRAME()`
+  - `JobSystem.cpp` Worker-Thread: `HE_PROFILE_SCOPE_N("Job::Execute")` vor `task()`
+  - `ContentManager.cpp::loadAsset`: `HE_PROFILE_SCOPE_N("ContentManager::load")`
+  - `RenderExtractor.cpp::extract`: `HE_PROFILE_SCOPE_N("RenderExtractor::extract")`
+  - `FrustumCuller.cpp::cull`: `HE_PROFILE_SCOPE_N("FrustumCuller::cull")`
+- **`tests/test_profiler.cpp`:** 2 neue Doctest-Cases (compile + execute als No-ops; verschachtelte Scopes).
+  **106 Tests grün** (104→106), Build sauber.
+- **Aktivierung:** `cmake -DHE_ENABLE_TRACY=ON` — kein Code-Änderung nötig. Im Standard-Build null Overhead.
+- **Nächster Schritt:** 0.6 GLM-Dedup (doppelte vendored + FetchContent-Kopie bereinigen).

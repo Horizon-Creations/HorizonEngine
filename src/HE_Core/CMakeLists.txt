@@ -36,4 +36,10 @@ target_link_libraries(HorizonCore
 	PUBLIC  nlohmann_json::nlohmann_json
 )
 
+# Tracy::TracyClient propagates TRACY_ENABLE define + include dir to all
+# downstream consumers (HorizonRendering, HorizonEditor, etc.) via PUBLIC linkage.
+if(HE_ENABLE_TRACY)
+    target_link_libraries(HorizonCore PUBLIC Tracy::TracyClient)
+endif()
+
 he_deploy_dll(HorizonCore)

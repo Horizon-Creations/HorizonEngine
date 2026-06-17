@@ -1,4 +1,5 @@
 #include "HorizonRendering/FrustumCuller.h"
+#include <Diagnostics/Profiler.h>
 #include <JobSystem/JobSystem.h>
 
 Frustum Frustum::fromViewProj(const glm::mat4& vp)
@@ -51,6 +52,7 @@ void FrustumCuller::cull(const RenderWorld& world, std::vector<uint8_t>& outVisi
 void FrustumCuller::cull(const RenderWorld& world, const glm::mat4& viewProj,
                          std::vector<uint8_t>& outVisible)
 {
+	HE_PROFILE_SCOPE_N("FrustumCuller::cull");
 	const Frustum frustum = Frustum::fromViewProj(viewProj);
 	const size_t  count   = world.objects.size();
 
