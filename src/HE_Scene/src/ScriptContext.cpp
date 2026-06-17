@@ -224,6 +224,11 @@ bool ScriptContext::callOnUpdate(ScriptEngine::InstanceId id, float dt)
     return m_engine.callOnUpdate(id, dt);
 }
 
+bool ScriptContext::hotReloadScript(const std::string& name, const std::string& source)
+{
+    return m_engine.hotReloadScript(name, source);
+}
+
 bool ScriptContext::isScriptLoaded(const std::string& name) const
 {
     return m_engine.isScriptLoaded(name);

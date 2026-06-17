@@ -46,6 +46,10 @@ public:
     // Call onUpdate(self, dt) on the instance.
     bool callOnUpdate(ScriptEngine::InstanceId id, float dt);
 
+    // Hot-reload: recompile script and patch function fields in live instances.
+    // Data fields (non-function keys in instance tables) are preserved.
+    bool hotReloadScript(const std::string& name, const std::string& source);
+
     bool   isScriptLoaded(const std::string& name) const;
     size_t loadedScriptCount() const;
     size_t instanceCount() const;

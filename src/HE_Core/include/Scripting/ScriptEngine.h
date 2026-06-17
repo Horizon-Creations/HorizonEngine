@@ -73,6 +73,11 @@ public:
     // Set a number field in the instance table (e.g. entityId).
     void setInstanceField(InstanceId id, const std::string& key, double value);
 
+    // Recompile a loaded script and patch function fields in all live instances.
+    // Data fields (non-function keys) in instance tables are preserved.
+    // Returns false (and leaves state unchanged) if the new source fails to compile.
+    bool hotReloadScript(const std::string& name, const std::string& source);
+
     // Direct lua_State access for advanced binding (ScriptContext in HE_Scene uses this).
     lua_State* state() { return m_L; }
 

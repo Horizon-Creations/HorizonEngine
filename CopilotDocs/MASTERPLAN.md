@@ -203,7 +203,7 @@ profitieren von P2.8 (Play-Mode zum Testen).
 |---|---|---|---|
 | 4b.1 | **Lua via sol2**, ScriptComponent-Lifecycle (onStart/onUpdate) | 2.2, 2.8 | ✅ Forts. 34 — ScriptEngine (Lua 5.4 FetchContent), loadScript/createInstance/callOnStart/callOnUpdate, 17 Tests |
 | 4b.2 | Engine-API-Binding (Entity, Transform, Input, Spawn/Destroy) | 4b.1 | ✅ Forts. 35 — ScriptContext (HorizonWorld-Binding), horizon-Lua-API (get/setPosition/Rotation/Scale, spawn, destroy, getName), 13 Tests |
-| 4b.3 | Hot-Reload von Scripts im Play-Mode | 4b.1 | |
+| 4b.3 | Hot-Reload von Scripts im Play-Mode | 4b.1 | ✅ Forts. 37 — ScriptEngine::hotReloadScript (function-Patch, Daten erhalten), ScriptSystem::pollHotReload, ContentManager::registerScript, 5 Tests |
 | 4b.4 | Script-Properties im Inspector (exportierte Variablen) | 4b.1, 2.3 | |
 | 4b.5 | C#/.NET-Hosting — später oder nie | 4b.2 | erst evaluieren, wenn Lua nicht reicht |
 
@@ -1649,3 +1649,13 @@ Lifetime-sicher mit der bestehenden `SlotMap`/`m_handleToUUID`-Buchführung inte
 - **`ContentManager::registerAudio(AudioAsset)`** (HorizonCore): Analog zu `registerStaticMesh/Texture/Material/Prefab`; ermöglicht In-Memory-Audio-Assets (z.B. in Tests).
 - **macOS-Frameworks:** `CoreFoundation`, `CoreAudio`, `AudioToolbox` in HorizonScene CMakeLists under `if(APPLE)`.
 - **Tests (erweitert `tests/test_audio.cpp`):** 9 neue Cases (init/shutdown, double-init, play silence, play empty, stop-handle, stopAll, volume+pitch, AudioSystem::playOnStart-skip, AudioSystem::playOnStart-mit-Asset). **205 Tests grün** (196→205).
+
+### Forts. 37 — Script Hot-Reload (4b.3)
+
+> **Aufgabe:** Geladene Lua-Skripte können zur Laufzeit neu kompiliert werden, ohne Instanzen oder Datenzustand zu verlieren. ✅
+
+- **`ScriptEngine::hotReloadScript(name, source)`**: Kompiliert neues Modul-Table; ersetzt `luaRef` im `m_scripts`-Map; iteriert alle Instanzen des Skripts und aktualisiert **nur Funktions-Felder** (via `lua_isfunction` + `lua_settable`). Nicht-Funktions-Felder (hp, total, …) bleiben erhalten. Schlägt Kompilierung fehl → false, Zustand unverändert.
+- **`ScriptContext::hotReloadScript`**: Delegiert an ScriptEngine.
+- **`ScriptSystem::pollHotReload(world, ctx, content*)`** (`HorizonScene/ScriptSystem.h`, header-only): Ruft `content->pollHotReload()` auf, filtert `AssetType::Script`, mappt `asset.name` → `ctx.hotReloadScript`.
+- **`ContentManager::registerScript(ScriptAsset)`**: Analog zu `registerAudio` (Forts. 36); erlaubt In-Memory-Script-Assets (z.B. in Tests).
+- **Tests (`tests/test_scripting.cpp`, 5 neue Cases):** hotReload unbekanntes Skript → false; bad source → false + lastError gesetzt + alter Code läuft weiter; updated function in live instance; preserves data fields; multiple instances. **210 Tests grün** (205→210).
