@@ -127,7 +127,8 @@ struct AppContext
 	// scene); the UI turns it into a guarded Quit and clears it.
 	bool&        exitRequested;
 	std::function<void(const std::string&)> saveSceneToPath; // write world → .hescene (JSON)
-	std::function<void(const std::string&)> openScene;       // load .hescene, replacing the world
+	std::function<void(const std::string&)> openScene;          // load .hescene, replacing the world
+	std::function<void(const std::string&)> openSceneAdditive; // merge .hescene into the existing world
 	std::function<void()>                    newScene;        // clear to an empty scene
 
 	// Undo/redo. UI calls undoSys capture/stash/commit around mutations;
@@ -269,6 +270,7 @@ private:
 	uint64_t    m_savedRevision = 0;
 	void saveSceneToPath(const std::string& path);
 	void openScene(const std::string& path);
+	void openSceneAdditive(const std::string& path);
 	void newScene();
 	// Auto-advances (dt > 0) and pushes the World root's EnvironmentComponent to
 	// the renderer via SetEnvironmentSettings. The environment is scene data now,

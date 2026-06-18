@@ -35,7 +35,7 @@ namespace
 	// The async SDL file slot (pendingFileReady/Result) is shared across project
 	// and scene operations; this records which one is currently in flight so the
 	// single result handler can dispatch correctly.
-	enum class PendingFileOp { OpenProject, OpenScene, SaveScene, ImportAsset };
+	enum class PendingFileOp { OpenProject, OpenScene, SaveScene, ImportAsset, AddSceneAdditive };
 
 	// A destructive action that would discard the current scene. When requested
 	// while the scene is dirty it is stashed and a "Save changes?" modal is shown;
@@ -908,6 +908,15 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 			ctx.window ? ctx.window->GetNativeWindow() : nullptr,
 			filters, 1, dir.empty() ? nullptr : dir.c_str(), false);
 	};
+	auto triggerAddSceneAdditive = [&]()
+	{
+		s_pendingFileOp = PendingFileOp::AddSceneAdditive;
+		SDL_DialogFileFilter filters[] = { { "Horizon Scene", "hescene" } };
+		const std::string dir = sceneDialogDir();
+		SDL_ShowOpenFileDialog(fileDialogCb, ctx.dialogBridge,
+			ctx.window ? ctx.window->GetNativeWindow() : nullptr,
+			filters, 1, dir.empty() ? nullptr : dir.c_str(), false);
+	};
 	auto triggerSaveSceneAs = [&]()
 	{
 		s_guardSaveThenAct = false; // a manual Save-As is not part of a guard flow
@@ -1011,6 +1020,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
         ImGui::Separator();
         if (ImGui::MenuItem("New Scene"))            requestGuarded(GuardedAction::NewScene);
         if (ImGui::MenuItem("Open Scene..."))        requestGuarded(GuardedAction::OpenSceneDialog);
+        if (ImGui::MenuItem("Add Scene Additive...")) triggerAddSceneAdditive();
         if (ImGui::MenuItem("Save Scene", "Ctrl+S")) doSaveScene();
         if (ImGui::MenuItem("Save Scene As...", "Ctrl+Shift+S")) triggerSaveSceneAs();
         ImGui::Separator();
@@ -1127,6 +1137,10 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
         if (s_pendingFileOp == PendingFileOp::OpenScene)
         {
             if (!chosen.empty() && ctx.openScene) ctx.openScene(chosen);
+        }
+        else if (s_pendingFileOp == PendingFileOp::AddSceneAdditive)
+        {
+            if (!chosen.empty() && ctx.openSceneAdditive) ctx.openSceneAdditive(chosen);
         }
         else if (s_pendingFileOp == PendingFileOp::SaveScene)
         {

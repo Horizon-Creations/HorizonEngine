@@ -995,6 +995,7 @@ AppContext EditorApplication::makeContext()
 		.exitRequested       = m_exitRequested,
 		.saveSceneToPath     = [this](const std::string& p){ saveSceneToPath(p); },
 		.openScene           = [this](const std::string& p){ openScene(p); },
+		.openSceneAdditive   = [this](const std::string& p){ openSceneAdditive(p); },
 		.newScene            = [this]{ newScene(); },
 		.undoSys             = &m_undo,
 		.undo                = [this]{ if (m_undo.undo()) m_selectedEntity = entt::null; },
@@ -1168,6 +1169,23 @@ void EditorApplication::openScene(const std::string& path)
 	m_editorWorld->markHierarchyDirty();
 	m_undo.clearHistory();
 	m_savedRevision = m_undo.revision();
+}
+
+void EditorApplication::openSceneAdditive(const std::string& path)
+{
+	if (!m_editorWorld || path.empty()) return;
+
+	SceneSerializer serializer;
+	if (serializer.loadAdditive(*m_editorWorld, path, SerializeFormat::JSON))
+	{
+		m_undo.snapshotNow();
+		Logger::Log(Logger::LogLevel::Info, ("EditorApplication: scene merged from " + path).c_str());
+	}
+	else
+	{
+		Logger::Log(Logger::LogLevel::Error, ("EditorApplication: failed to merge scene from " + path).c_str());
+	}
+	m_editorWorld->markHierarchyDirty();
 }
 
 void EditorApplication::newScene()

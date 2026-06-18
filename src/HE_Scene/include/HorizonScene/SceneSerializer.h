@@ -20,6 +20,13 @@ public:
               const std::filesystem::path& path,
               SerializeFormat format);
 
+    // Additive load: merges the entities from a .hescene file into the existing
+    // world without clearing it first. The loaded scene's root entity becomes
+    // a new child of the current world root, preserving all existing entities.
+    bool loadAdditive(HorizonWorld& world,
+                      const std::filesystem::path& path,
+                      SerializeFormat format);
+
     // In-memory snapshot (CBOR, same structure as the binary file format).
     // Used by play-in-editor and the undo system. load does not clear the
     // world first — call HorizonWorld::clear() when replacing the content.
