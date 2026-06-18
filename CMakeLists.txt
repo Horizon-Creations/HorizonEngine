@@ -101,6 +101,18 @@ set(TARGET_UNIT_TESTS       OFF CACHE BOOL "" FORCE)
 set(ENABLE_INSTALL          OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(JoltPhysics)
 
+# ─── Recast Navigation ────────────────────────────────────────────────────────
+FetchContent_Declare(
+    recastnavigation
+    GIT_REPOSITORY https://github.com/recastnavigation/recastnavigation.git
+    GIT_TAG        main
+    GIT_SHALLOW    TRUE
+)
+set(RECASTNAVIGATION_DEMO     OFF CACHE BOOL "" FORCE)
+set(RECASTNAVIGATION_TESTS    OFF CACHE BOOL "" FORCE)
+set(RECASTNAVIGATION_EXAMPLES OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(recastnavigation)
+
 # ─── Tracy (optional profiling) ────────────────────────────────────────────────
 # Enable with:  cmake -DHE_ENABLE_TRACY=ON ...
 # Default OFF so production/CI builds have zero overhead.

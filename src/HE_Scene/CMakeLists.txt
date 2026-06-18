@@ -10,6 +10,7 @@ add_library(HorizonScene SHARED
     src/AnimationBlendSystem.cpp
     src/AnimationStateMachineSystem.cpp
     src/PropertyAnimationSystem.cpp
+    src/NavigationSystem.cpp
     src/ScriptContext.cpp
     src/AudioEngine.cpp
     src/PhysicsWorld.cpp
@@ -33,6 +34,8 @@ target_link_libraries(HorizonScene
     PUBLIC  HorizonCore
     PRIVATE nlohmann_json::nlohmann_json
             Jolt
+            RecastNavigation::Recast
+            RecastNavigation::Detour
 )
 
 if(APPLE)
