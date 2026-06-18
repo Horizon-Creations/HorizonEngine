@@ -518,3 +518,136 @@ TEST_CASE("ContentManager pollHotReload skips mid-write (invalid) files")
 	CHECK(changed.empty());
 	CHECK(cm.getMaterial(id) != nullptr);
 }
+
+// ─── SkeletalMeshAsset / CHUNK_SKEL round-trip ──────────────────────────────
+
+TEST_CASE("ContentManager skeletal mesh round-trip (no skeleton)")
+{
+	TempContentDir dir;
+	ContentManager cm(dir.path.string());
+
+	SkeletalMeshAsset mesh;
+	mesh.type     = HE::AssetType::SkeletalMesh;
+	mesh.name     = "sm_noskel";
+	mesh.path     = "sm_noskel.hasset";
+	mesh.vertices = { 0,0,0, 1,0,0, 0,1,0 };
+	mesh.indices  = { 0,1,2 };
+	mesh.normals  = { 0,0,1, 0,0,1, 0,0,1 };
+	mesh.uvs      = { 0,0, 1,0, 0,1 };
+	mesh.boneIDs     = { 0,0,0,0, 0,0,0,0, 0,0,0,0 };
+	mesh.boneWeights = { 1,0,0,0, 1,0,0,0, 1,0,0,0 };
+	REQUIRE(cm.saveAsset(mesh));
+
+	ContentManager cm2(dir.path.string());
+	HE::UUID id = cm2.loadAsset("sm_noskel.hasset");
+	const SkeletalMeshAsset* loaded = cm2.getSkeletalMesh(id);
+	REQUIRE(loaded != nullptr);
+	CHECK(loaded->name == "sm_noskel");
+	CHECK(loaded->vertices.size() == 9);
+	CHECK(loaded->indices.size() == 3);
+	CHECK(loaded->normals.size() == 9);
+	CHECK(loaded->uvs.size() == 6);
+	CHECK(loaded->boneIDs.size() == 12);
+	CHECK(loaded->boneWeights.size() == 12);
+	CHECK(loaded->skeleton.empty());
+}
+
+TEST_CASE("ContentManager skeletal mesh CHUNK_SKEL round-trip")
+{
+	TempContentDir dir;
+	ContentManager cm(dir.path.string());
+
+	SkeletalMeshAsset mesh;
+	mesh.type = HE::AssetType::SkeletalMesh;
+	mesh.name = "sm_skel";
+	mesh.path = "sm_skel.hasset";
+
+	// Minimal geometry
+	mesh.vertices = { 0,0,0, 1,0,0 };
+	mesh.indices  = { 0,1 };
+	mesh.normals  = { 0,1,0, 0,1,0 };
+	mesh.uvs      = { 0,0, 1,0 };
+	mesh.boneIDs     = { 0,0,0,0, 1,0,0,0 };
+	mesh.boneWeights = { 1,0,0,0, 0.5f,0.5f,0,0 };
+
+	// Two-joint skeleton: root (index 0) and child (index 1)
+	SkeletonJoint root;
+	root.name   = "root";
+	root.parent = -1;
+	root.inverseBindMatrix = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };
+
+	SkeletonJoint child;
+	child.name   = "hip";
+	child.parent = 0;
+	child.inverseBindMatrix = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 1,2,3,1 };
+
+	mesh.skeleton = { root, child };
+	REQUIRE(cm.saveAsset(mesh));
+	const HE::UUID savedId = mesh.id;
+
+	// Reload in a fresh ContentManager (simulates engine restart)
+	ContentManager cm2(dir.path.string());
+	HE::UUID loadedId = cm2.loadAsset("sm_skel.hasset");
+	CHECK(loadedId == savedId);
+
+	const SkeletalMeshAsset* loaded = cm2.getSkeletalMesh(loadedId);
+	REQUIRE(loaded != nullptr);
+	REQUIRE(loaded->skeleton.size() == 2);
+
+	CHECK(loaded->skeleton[0].name   == "root");
+	CHECK(loaded->skeleton[0].parent == -1);
+	CHECK(loaded->skeleton[0].inverseBindMatrix[0] == 1.0f);
+	CHECK(loaded->skeleton[0].inverseBindMatrix[15] == 1.0f);
+
+	CHECK(loaded->skeleton[1].name   == "hip");
+	CHECK(loaded->skeleton[1].parent == 0);
+	CHECK(loaded->skeleton[1].inverseBindMatrix[12] == 1.0f);
+	CHECK(loaded->skeleton[1].inverseBindMatrix[13] == 2.0f);
+	CHECK(loaded->skeleton[1].inverseBindMatrix[14] == 3.0f);
+}
+
+TEST_CASE("ContentManager SkeletonJoint default values")
+{
+	SkeletonJoint j;
+	CHECK(j.parent == -1);
+	CHECK(j.name.empty());
+	// All floats default to zero
+	for (float f : j.inverseBindMatrix)
+		CHECK(f == 0.0f);
+}
+
+TEST_CASE("ContentManager skeletal mesh preserves UUID across save/load")
+{
+	TempContentDir dir;
+	ContentManager cm(dir.path.string());
+
+	SkeletalMeshAsset mesh;
+	mesh.type = HE::AssetType::SkeletalMesh;
+	mesh.name = "sm_uuid";
+	mesh.path = "sm_uuid.hasset";
+	mesh.vertices = { 0,0,0 };
+	mesh.indices  = { 0 };
+	REQUIRE(cm.saveAsset(mesh));
+	const HE::UUID original = mesh.id;
+	REQUIRE_FALSE(original == HE::UUID{});
+
+	ContentManager cm2(dir.path.string());
+	HE::UUID reloaded = cm2.loadAsset("sm_uuid.hasset");
+	CHECK(reloaded == original);
+}
+
+TEST_CASE("ContentManager skeletal mesh wrong-type lookup returns null")
+{
+	TempContentDir dir;
+	ContentManager cm(dir.path.string());
+
+	SkeletalMeshAsset mesh;
+	mesh.type = HE::AssetType::SkeletalMesh;
+	mesh.name = "sm_wrongtype";
+	mesh.path = "sm_wrongtype.hasset";
+	REQUIRE(cm.saveAsset(mesh));
+	HE::UUID id = cm.loadAsset("sm_wrongtype.hasset");
+	CHECK(cm.getSkeletalMesh(id) != nullptr);
+	CHECK(cm.getStaticMesh(id)   == nullptr);
+	CHECK(cm.getTexture(id)      == nullptr);
+}

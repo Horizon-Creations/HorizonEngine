@@ -217,7 +217,7 @@ profitieren von P2.8 (Play-Mode zum Testen).
 ### 4d — Animation
 | # | Aufgabe | Hängt ab von | Details |
 |---|---|---|---|
-| 4d.1 | Skelett + Skinning-Daten im MeshImporter (glTF-Skins) | 1.2 | neue Chunks im .hasset-Format |
+| 4d.1 | Skelett + Skinning-Daten im MeshImporter (glTF-Skins) | 1.2 | neue Chunks im .hasset-Format | ✅ Forts. 45 |
 | 4d.2 | GPU-Skinning (Bone-Matrizen als Uniform/Storage-Buffer) | 4d.1, 3.3 | |
 | 4d.3 | AnimationClip-Playback + AnimatorComponent | 4d.1, 2.2 | |
 | 4d.4 | Blending + State-Machine (einfacher Animator-Graph) | 4d.3 | |
@@ -1755,3 +1755,17 @@ Lifetime-sicher mit der bestehenden `SlotMap`/`m_handleToUUID`-Buchführung inte
 - **EditorUI**: "Bus"-InputText im AudioSource-Inspector.
 - **10 Tests** in `test_audio.cpp`: createBus; idempotent; getVolume; setVolume; unbekannt=1.0; play through bus; non-existent bus fällt auf Master zurück; mute via 0; busName Default; Serializer round-trip.
 - **267 Tests grün** (257→267).
+
+---
+
+### Forts. 45 — Skelett + Skinning im MeshImporter (4d.1)
+
+> **Aufgabe:** glTF-Skins importieren: Skelett-Hierarchie + JOINTS_0/WEIGHTS_0 im .hasset-Format. ✅
+
+- **`Assets.h`**: `SkeletonJoint`-Struct (`name`, `parent`, `inverseBindMatrix[16]`); `SkeletalMeshAsset` um `skeleton`-Feld erweitert; `boneIDs` + `boneWeights` (4 Einflüsse/Vertex, flat).
+- **`HAsset.h`**: `CHUNK_SKEL` = `'S','K','E','L'`; `CHUNK_BONE` + `CHUNK_BWGT` für per-Vertex-Skinning.
+- **`ContentManager.cpp`**: CHUNK_SKEL-Serialize (count + je name/parent/16 IBM-floats) + Deserialize; CHUNK_BONE/BWGT für boneIDs/boneWeights.
+- **`SkeletalMeshImporter.h/.cpp`** (neu): `buildJointMap()` + `findParent()`; glTF-Geometry-Loop mit `JOINTS_0`/`WEIGHTS_0`-Attributen; Skelett aus erstem `cgltf_skin` (IBMs oder Identity-Fallback); Ausgabe: `stem + "_skeletal.hasset"`.
+- **`CMakeLists.txt`** (HE_Tools): `SkeletalMeshImporter.cpp` zu `HorizonImporters` hinzugefügt.
+- **5 Tests** in `test_contentmanager.cpp`: Skeletal ohne Skelett (Geometry+Skinning rund); CHUNK_SKEL full round-trip (2 Joints, IBMs, parent-Indizes, UUID); SkeletonJoint-Defaults; UUID-Persistenz; Wrong-Type-Lookup gibt null.
+- **272 Tests grün** (267→272).

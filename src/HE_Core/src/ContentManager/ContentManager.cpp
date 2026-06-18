@@ -102,6 +102,18 @@ HE::UUID ContentManager::loadAsset(const std::string& relativePath)
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_TEXC)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.uvs); }
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_BONE)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.boneIDs); }
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_BWGT)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.boneWeights); }
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_SKEL))
+		{
+			size_t o=0; uint32_t count=0;
+			HAsset::Reader::readPOD(c->data,o,count);
+			a.skeleton.resize(count);
+			for (auto& j : a.skeleton)
+			{
+				HAsset::Reader::readString(c->data,o,j.name);
+				HAsset::Reader::readPOD(c->data,o,j.parent);
+				for (float& f : j.inverseBindMatrix) HAsset::Reader::readPOD(c->data,o,f);
+			}
+		}
 		handle = m_skeletalMeshAssets.insert(std::move(a)); break;
 	}
 	case HE::AssetType::Texture:
@@ -223,6 +235,18 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 		{ std::vector<uint8_t> b; HAsset::Writer::appendVec(b,a.uvs);         w.addChunk(HAsset::CHUNK_TEXC,b.data(),b.size()); }
 		{ std::vector<uint8_t> b; HAsset::Writer::appendVec(b,a.boneIDs);     w.addChunk(HAsset::CHUNK_BONE,b.data(),b.size()); }
 		{ std::vector<uint8_t> b; HAsset::Writer::appendVec(b,a.boneWeights); w.addChunk(HAsset::CHUNK_BWGT,b.data(),b.size()); }
+		if (!a.skeleton.empty())
+		{
+			std::vector<uint8_t> b;
+			HAsset::Writer::appendPOD(b, static_cast<uint32_t>(a.skeleton.size()));
+			for (const auto& j : a.skeleton)
+			{
+				HAsset::Writer::appendString(b, j.name);
+				HAsset::Writer::appendPOD(b, j.parent);
+				for (float f : j.inverseBindMatrix) HAsset::Writer::appendPOD(b, f);
+			}
+			w.addChunk(HAsset::CHUNK_SKEL, b.data(), b.size());
+		}
 		break;
 	}
 	case HE::AssetType::Texture:

@@ -64,6 +64,7 @@ inline constexpr uint32_t CHUNK_NORM = makeChunkId('N','O','R','M');
 inline constexpr uint32_t CHUNK_TEXC = makeChunkId('T','E','X','C'); // UVs
 inline constexpr uint32_t CHUNK_BONE = makeChunkId('B','O','N','E'); // boneIDs
 inline constexpr uint32_t CHUNK_BWGT = makeChunkId('B','W','G','T'); // bone weights
+inline constexpr uint32_t CHUNK_SKEL = makeChunkId('S','K','E','L'); // skeleton hierarchy
 inline constexpr uint32_t CHUNK_MREF = makeChunkId('M','R','E','F'); // material path
 
 // Texture
