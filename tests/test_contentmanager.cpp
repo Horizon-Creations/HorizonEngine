@@ -363,16 +363,18 @@ TEST_CASE("ContentManager default grid texture has correct dimensions and grid p
 	CHECK(tex->data[(2 * 128 + 2) * 4] == 228);
 }
 
-TEST_CASE("ContentManager default terrain material references grid texture")
+TEST_CASE("ContentManager default terrain material is flat grey with no texture")
 {
 	ContentManager cm;
 	HE::UUID id = cm.loadAsset("mem://default_terrain_material");
 	REQUIRE_FALSE(id == HE::UUID{});
 	auto* mat = cm.getMaterial(id);
 	REQUIRE(mat != nullptr);
-	REQUIRE(mat->texturePaths.size() == 1);
-	CHECK(mat->texturePaths[0] == "mem://default_grid_tex");
+	CHECK(mat->texturePaths.empty());
 	CHECK(mat->roughness == doctest::Approx(0.8f));
+	// neutral grey base colour
+	CHECK(mat->baseColor[0] == doctest::Approx(0.50f));
+	CHECK(mat->baseColor[1] == doctest::Approx(0.52f));
 }
 
 // ── Hot-reload ────────────────────────────────────────────────────────────────

@@ -926,13 +926,15 @@ void ContentManager::initDefaultAssets()
 	}
 
 	// ── Default terrain material (kDefaultTerrainMaterialId) ─────────────────
-	// Uses the grid texture as albedo; slightly rough for a ground-like look.
+	// Flat neutral grey, no texture — keeps terrain readable without visual noise.
 	MaterialAsset terrainMat;
-	terrainMat.id           = HE::kDefaultTerrainMaterialId;
-	terrainMat.name         = "DefaultTerrainMaterial";
-	terrainMat.path         = "mem://default_terrain_material";
-	terrainMat.texturePaths = { "mem://default_grid_tex" };
-	terrainMat.roughness    = 0.8f;
-	terrainMat.doubleSided  = true;
+	terrainMat.id            = HE::kDefaultTerrainMaterialId;
+	terrainMat.name          = "DefaultTerrainMaterial";
+	terrainMat.path          = "mem://default_terrain_material";
+	terrainMat.baseColor[0]  = 0.50f;
+	terrainMat.baseColor[1]  = 0.52f;
+	terrainMat.baseColor[2]  = 0.50f;
+	terrainMat.roughness     = 0.8f;
+	terrainMat.doubleSided   = true;
 	registerMaterial(std::move(terrainMat));
 }
