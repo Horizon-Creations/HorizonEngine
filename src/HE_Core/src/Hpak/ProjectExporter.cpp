@@ -49,5 +49,18 @@ ExportResult ProjectExporter::exportProject(
     if (!ProjectConfigLoader::save(outputDir, cfg))
         return {false, "Failed to write project.hcfg", 0};
 
-    return {true, "", added};
+    // Copy game runtime binaries (executable + dylibs) so the export is runnable
+    int binaryCopied = 0;
+    if (!settings.gameRuntimeDir.empty() && std::filesystem::exists(settings.gameRuntimeDir, ec))
+    {
+        for (const auto& entry : std::filesystem::directory_iterator(settings.gameRuntimeDir, ec))
+        {
+            if (!entry.is_regular_file()) continue;
+            std::filesystem::copy_file(entry.path(), outputDir / entry.path().filename(),
+                std::filesystem::copy_options::overwrite_existing, ec);
+            if (!ec) ++binaryCopied;
+        }
+    }
+
+    return {true, "", added, binaryCopied};
 }

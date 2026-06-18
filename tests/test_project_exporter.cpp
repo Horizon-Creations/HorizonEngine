@@ -205,6 +205,100 @@ TEST_CASE("ProjectExporter copies startup scene file")
     std::filesystem::remove_all(outputDir);
 }
 
+TEST_CASE("ProjectExporter copies game runtime binaries when gameRuntimeDir is set")
+{
+    auto runtimeDir = std::filesystem::temp_directory_path() / "he_test_export_runtime";
+    auto contentDir = std::filesystem::temp_directory_path() / "he_test_export_bin_content";
+    auto outputDir  = std::filesystem::temp_directory_path() / "he_test_export_bin_out";
+    std::filesystem::create_directories(runtimeDir);
+    std::filesystem::create_directories(contentDir);
+
+    // Simulate game runtime dir: dummy executable + two dylibs
+    { std::ofstream f(runtimeDir / "HorizonGame"); f << "ELF_FAKE"; }
+    { std::ofstream f(runtimeDir / "libHorizonCore.dylib"); f << "DYLIB_FAKE_A"; }
+    { std::ofstream f(runtimeDir / "libSDL3.0.dylib"); f << "DYLIB_FAKE_B"; }
+
+    ExportSettings settings;
+    settings.compress       = false;
+    settings.gameRuntimeDir = runtimeDir;
+    const auto result = ProjectExporter::exportProject(
+        contentDir, "MyGame", "", outputDir, settings);
+
+    REQUIRE(result.success);
+    CHECK(result.binaryFilesCopied == 3);
+    CHECK(std::filesystem::exists(outputDir / "HorizonGame"));
+    CHECK(std::filesystem::exists(outputDir / "libHorizonCore.dylib"));
+    CHECK(std::filesystem::exists(outputDir / "libSDL3.0.dylib"));
+
+    std::filesystem::remove_all(runtimeDir);
+    std::filesystem::remove_all(contentDir);
+    std::filesystem::remove_all(outputDir);
+}
+
+TEST_CASE("ProjectExporter skips binary copy when gameRuntimeDir is empty")
+{
+    auto contentDir = std::filesystem::temp_directory_path() / "he_test_export_nobin_content";
+    auto outputDir  = std::filesystem::temp_directory_path() / "he_test_export_nobin_out";
+    std::filesystem::create_directories(contentDir);
+
+    ExportSettings settings;
+    settings.compress = false;
+    // gameRuntimeDir left empty (default)
+    const auto result = ProjectExporter::exportProject(
+        contentDir, "Game", "", outputDir, settings);
+
+    REQUIRE(result.success);
+    CHECK(result.binaryFilesCopied == 0);
+
+    std::filesystem::remove_all(contentDir);
+    std::filesystem::remove_all(outputDir);
+}
+
+TEST_CASE("ProjectExporter skips binary copy when gameRuntimeDir does not exist")
+{
+    auto contentDir = std::filesystem::temp_directory_path() / "he_test_export_baddrt_content";
+    auto outputDir  = std::filesystem::temp_directory_path() / "he_test_export_baddrt_out";
+    std::filesystem::create_directories(contentDir);
+
+    ExportSettings settings;
+    settings.compress       = false;
+    settings.gameRuntimeDir = "/nonexistent/path/that/does/not/exist/xyz123";
+    const auto result = ProjectExporter::exportProject(
+        contentDir, "Game", "", outputDir, settings);
+
+    REQUIRE(result.success); // asset pack still succeeds
+    CHECK(result.binaryFilesCopied == 0); // no binaries copied from missing dir
+
+    std::filesystem::remove_all(contentDir);
+    std::filesystem::remove_all(outputDir);
+}
+
+TEST_CASE("ProjectExporter does not copy subdirectories from gameRuntimeDir")
+{
+    auto runtimeDir = std::filesystem::temp_directory_path() / "he_test_export_subdir_runtime";
+    auto contentDir = std::filesystem::temp_directory_path() / "he_test_export_subdir_content";
+    auto outputDir  = std::filesystem::temp_directory_path() / "he_test_export_subdir_out";
+    std::filesystem::create_directories(runtimeDir / "subdir");
+    std::filesystem::create_directories(contentDir);
+    { std::ofstream f(runtimeDir / "HorizonGame"); f << "ELF"; }
+    { std::ofstream f(runtimeDir / "subdir" / "nested.txt"); f << "nested"; }
+
+    ExportSettings settings;
+    settings.compress       = false;
+    settings.gameRuntimeDir = runtimeDir;
+    const auto result = ProjectExporter::exportProject(
+        contentDir, "Game", "", outputDir, settings);
+
+    REQUIRE(result.success);
+    CHECK(result.binaryFilesCopied == 1);  // only HorizonGame, not the subdir
+    CHECK(std::filesystem::exists(outputDir / "HorizonGame"));
+    CHECK(!std::filesystem::exists(outputDir / "subdir")); // subdirs not copied
+
+    std::filesystem::remove_all(runtimeDir);
+    std::filesystem::remove_all(contentDir);
+    std::filesystem::remove_all(outputDir);
+}
+
 TEST_CASE("ProjectExporter returns error for invalid output dir (file in the way)")
 {
     auto contentDir = std::filesystem::temp_directory_path() / "he_test_export_err_content";

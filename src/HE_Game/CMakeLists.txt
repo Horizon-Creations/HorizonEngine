@@ -14,6 +14,13 @@ target_link_libraries(HorizonGame PRIVATE
 	SDL3::SDL3
 )
 
+# Add @executable_path to rpath so a copied binary finds its dylibs alongside it
+if(APPLE)
+    set_target_properties(HorizonGame PROPERTIES
+        BUILD_RPATH "@executable_path"
+    )
+endif()
+
 if(DEFINED HE_PROJECT_SECRET)
 	target_compile_definitions(HorizonGame
 		PRIVATE HE_PROJECT_SECRET="${HE_PROJECT_SECRET}"

@@ -8,12 +8,17 @@ struct HE_API ExportSettings {
     bool    compress = true;
     bool    encrypt  = false;
     uint8_t key[32]  = {};
+    // When non-empty, all files in this directory (the game runtime binaries:
+    // executable + dylibs/DLLs) are copied into outputDir so the export is
+    // self-contained and runnable on the target machine.
+    std::filesystem::path gameRuntimeDir;
 };
 
 struct HE_API ExportResult {
-    bool        success      = false;
+    bool        success          = false;
     std::string errorMessage;
-    int         assetsPacked = 0;
+    int         assetsPacked     = 0;
+    int         binaryFilesCopied = 0; // game exe + dylibs, 0 when gameRuntimeDir empty
 };
 
 // Packs a project's content directory into a distributable output folder:
