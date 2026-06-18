@@ -174,7 +174,7 @@ Reihenfolge nach Sichtbarkeit pro Aufwand. Braucht P1 für Materialien/Texturen;
 | 3.5 | **Schatten**: Directional mit einer Cascade → CSM | 3.4 | ✅ 2048²-Depth-Map, Texel-Snapping, 3×3-PCF, Slope-Bias; GL+Metal verifiziert, D3D/Vulkan blind |
 | 3.6 | **HDR + Tonemapping** als erster PostProcess-Pass | 3.4 | ✅ RGBA16F SceneColor, ACES-Tonemap, separabler Bloom (9-Tap Gauss, Soft-Knee), Toggle in Prefs |
 | 3.7 | **RenderResourceManager + GPUMemoryAllocator** | 0.3 | ✅ Forts. 30 — Budget-Tracking, LRU-Eviction, UUID→Handle-Index, 13 Tests |
-| 3.8 | **Instancing + parallele Extraction** | 3.1, 0.4 | instanceCount im DrawCall existiert schon |
+| 3.8 | **Instancing + parallele Extraction** | 3.1, 0.4 | ✅ GPU-Instancing — GeometryPass batcht same-mesh+same-material Runs; kInstancedVS (attrib locs 4–7, divisor=1); glDrawElementsInstanced; SSAO+Transparent-Pass expanded für instanced DrawCalls; 4 neue Tests; EditorUI value_ptr-Fix |
 | 3.9 | **Skybox + IBL** (Environment-Map, Irradiance/Prefilter) | 3.3 | ✅ Prozedurale analytische Sky (Atmosphäre/Tag-Nacht/Mond/Sterne/Wolken/Milchstraße/Aurora/Nebula), IBL-Ambient+Specular |
 | 3.10 | **Transparenz-Pass** (sortiertes Alpha-Blending) | 3.1, 3.4 | ✅ Forts. 15 — material-getriebenes opacity<1 → sortierte Transparenz-Liste, back-to-front |
 | 3.11 | **Anti-Aliasing**: FXAA zuerst | 3.6 | ✅ FXAA-PostProcess-Pass (GL+Metal); TAA ist Kür (P7) |
@@ -235,7 +235,7 @@ Macht aus „Renderer + Systeme" eine Engine, in der man ein Spiel *baut*.
 | 5.2 | **Input-Mapping** (Actions/Axes statt Roh-Keys, Gamepad) | — | ✅ Forts. 32 — InputMapping (Actions+Axes, mapAction/mapAxis/tick/isPressed/axisValue), 17 Tests |
 | 5.3 | **Partikelsystem** (CPU-Sim zuerst, instanziertes Rendering) | 3.8 | GPU-Sim ist Kür |
 | 5.4 | **In-Game-UI-Runtime** (Canvas, Text via MSDF/stb_truetype, Buttons, Anchoring) | Render-Pfad ✅ | nicht ImGui — das ist Editor-only |
-| 5.5 | **Navigation**: Recast/Detour-NavMesh-Baking + Agenten | 4a.1 | |
+| 5.5 | **Navigation**: Recast/Detour-NavMesh-Baking + Agenten | 4a.1 | ✅ Forts. 52 |
 | 5.6 | **Szenen-Streaming/Additive-Load** (mehrere Szenen gleichzeitig) | 2.2 | ✅ Forts. 51 |
 | 5.7 | **Event-/Messaging-System** für Gameplay-Code | 4b.2 | ✅ Forts. 33 — EventBus (typed publish/subscribe, RAII Subscription, re-entrancy-safe snapshot), 15 Tests |
 
@@ -1912,3 +1912,27 @@ Lifetime-sicher mit der bestehenden `SlotMap`/`m_handleToUUID`-Buchführung inte
 - Die Quelle-Root (World-Node der geladenen Datei) wird als neues Child des bestehenden `world.rootEntity()` eingefügt — nicht auf die existierende Root gemappt. Das erhält den Namen und die Komponenten der bestehenden Root.
 - `openSceneAdditive` ruft kein `clearHistory()` — der merge ist rückgängig-machbar via Undo (snapshotNow).
 - **323 Tests grün** (321→323). Commit `d9a7224`.
+
+### Forts. 52 — Navigation System (5.5)
+
+**Ziel:** Recast/Detour-NavMesh-Baking aus Geometry + Agenten-Pathfinding im Editor/Play-Mode.
+
+**Neue / geänderte Dateien:**
+
+- **`CMakeLists.txt`**: `FetchContent_Declare(recastnavigation … GIT_TAG main GIT_SHALLOW TRUE)`; DEMO/TESTS/EXAMPLES OFF; `FetchContent_MakeAvailable`.
+- **`src/HE_Scene/include/HorizonScene/Components/NavMeshComponent.h`** (neu): `NavMeshConfig` (cellSize, cellHeight, walkableHeight/Climb/Radius, maxSlope, maxEdgeLen, maxSimplification, minRegionArea, mergeRegionArea, detailSampleDist, detailMaxError); `NavMeshGeometry` (verts: float[], tris: int[]); `NavMeshComponent` (config, geometry, shared_ptr<dtNavMesh>, shared_ptr<dtNavMeshQuery>, isDirty).
+- **`src/HE_Scene/include/HorizonScene/Components/NavAgentComponent.h`** (neu): `NavAgentComponent` (targetPos, speed=3.5, stoppingDist=0.1, path: vec3[], pathIdx, hasPath, moving).
+- **`src/HE_Scene/include/HorizonScene/NavigationSystem.h`** (neu): `NavigationSystem::bake(NavMeshComponent&)` + `update(world, dt)`.
+- **`src/HE_Scene/src/NavigationSystem.cpp`** (neu): Recast-Pipeline (rcHeightfield → rcCompactHeightfield → rcBuildRegions → rcBuildContours → rcPolyMesh → rcPolyMeshDetail → dtNavMeshCreateParams → dtNavMesh); Y-Extent-Padding für flache Geometrien (`bmax[1] = bmin[1] + walkableHeight + 2*cellHeight`); `npolys==0`-Early-Return; `update`: findet erste NavMeshComponent, `findNearestPoly`→`findPath`→`findStraightPath`, überspringt erstes Waypoint (= nearestStart = Startposition), Overshoot-Snap (`dist <= speed*dt` → snap to wp).
+- **`src/HE_Scene/CMakeLists.txt`**: `NavigationSystem.cpp` + `RecastNavigation::Recast` + `RecastNavigation::Detour` ergänzt.
+- **`src/HE_Scene/include/HorizonScene/HorizonScene.h`**: NavMesh-/NavAgent-Component-Includes ergänzt.
+- **`src/HE_Editor/EditorApplication.cpp`**: `NavigationSystem::update` im Game-Loop eingebunden.
+- **`src/HE_Editor/EditorUI.cpp`**: NavMeshComponent-Inspector (Config-DragFloats, Geometrie-Info, "Bake"-Button); NavAgentComponent-Inspector (Target, Speed, StoppingDist, "Go"/"Stop"-Buttons); beide in Add-Component-Menü.
+- **`tests/test_navigation.cpp`** (neu): NavMeshComponent-Defaults, NavAgentComponent-Defaults, bake-empty (false), bake-flat-floor (true), update-moves-agent, update-idle.
+- **`tests/CMakeLists.txt`**: `test_navigation.cpp` ergänzt.
+
+**Architektur-Entscheidungen:**
+- Y-Extent-Padding ist notwendig, da Recast bei einer komplett flachen Geometrie (bmin.y==bmax.y) keine Voxel-Spans erzeugt. Das Padding entspricht `walkableHeight + 2*cellHeight` als Mindesthöhe des Heightfield-Volumens.
+- `findStraightPath` liefert als erstes Waypoint immer `nearestStart` (die Startposition auf dem NavMesh-Surface) — dieses wird via `pathIdx = (size > 1) ? 1 : 0` übersprungen.
+- Overshoot-Snap: wenn `dist <= speed*dt` schnappt der Agent direkt auf den Waypoint, verhindert Überfahren bei großem dt.
+- **329 Tests grün** (323→329). Commit `b703d73`.

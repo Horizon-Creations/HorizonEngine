@@ -17,10 +17,13 @@ struct DrawCall {
     HE::UUID     materialAssetId;                       // optional material override (null = mesh's own)
     RenderHandle mesh          = RenderHandle::invalid();
     RenderHandle material      = RenderHandle::invalid();
-    glm::mat4    transform     = glm::mat4(1.0f);
+    glm::mat4    transform     = glm::mat4(1.0f);      // first instance (or sole) transform
     uint32_t     instanceCount = 1;
     uint32_t     entityId      = 0;                    // editor picking / debug
     uint8_t      lod           = 0;
+    // Non-empty when GeometryPass batched multiple same-mesh+same-material objects.
+    // The backend uploads these to the instance VBO and calls glDrawElementsInstanced.
+    std::vector<glm::mat4> instanceTransforms;
 };
 
 // A draw call that also carries per-joint bone matrices for GPU skinning.

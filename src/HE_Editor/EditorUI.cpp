@@ -8,6 +8,7 @@
 #include <HorizonRendering/RenderExtractor.h>
 #include <HorizonRendering/RenderWorld.h>
 #include <Math/AABB.h>
+#include <glm/gtc/type_ptr.hpp>
 #include "MeshImporter.h"
 #include "TextureImporter.h"
 #include "MaterialImporter.h"
