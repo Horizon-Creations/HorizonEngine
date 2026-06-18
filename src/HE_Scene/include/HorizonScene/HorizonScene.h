@@ -10,6 +10,7 @@
 #include "Components/HierarchyComponent.h"
 #include "Components/MeshComponent.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "Components/AnimatorComponent.h"
 #include "Components/MaterialComponent.h"
 #include "Components/CameraComponent.h"
 #include "Components/LightComponent.h"

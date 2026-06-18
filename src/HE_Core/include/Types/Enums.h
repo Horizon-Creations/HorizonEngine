@@ -83,7 +83,8 @@ namespace HE
         Audio,
         Font,
         Shader,
-        Prefab
+        Prefab,
+        AnimationClip  // appended last — value is persisted as int in .hasset header
     };
 
     enum class TextureFormat : uint32_t

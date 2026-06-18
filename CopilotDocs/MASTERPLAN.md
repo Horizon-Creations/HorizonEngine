@@ -219,7 +219,7 @@ profitieren von P2.8 (Play-Mode zum Testen).
 |---|---|---|---|
 | 4d.1 | Skelett + Skinning-Daten im MeshImporter (glTF-Skins) | 1.2 | neue Chunks im .hasset-Format | ✅ Forts. 45 |
 | 4d.2 | GPU-Skinning (Bone-Matrizen als Uniform/Storage-Buffer) | 4d.1, 3.3 | | ✅ Forts. 46 |
-| 4d.3 | AnimationClip-Playback + AnimatorComponent | 4d.1, 2.2 | |
+| 4d.3 | AnimationClip-Playback + AnimatorComponent | 4d.1, 2.2 | | ✅ Forts. 47 |
 | 4d.4 | Blending + State-Machine (einfacher Animator-Graph) | 4d.3 | |
 | 4d.5 | Property-Animation (Transform/Material animieren, für Cutscenes/UI) | 4d.3 | |
 
@@ -1799,3 +1799,29 @@ Lifetime-sicher mit der bestehenden `SlotMap`/`m_handleToUUID`-Buchführung inte
 - Separate `skinnedObjects`-Liste statt Flag in RenderObject → Shadow/SSAO-Pfade sehen Skinned-Objekte nicht (bewusstes Deferral, TODO 4d.3).
 - 128 Bone-Slots hochgeladen (voller Array, Rest Identity) um Index-Sicherheit zu gewährleisten.
 - **287 Tests grün** (278→287).
+
+### Forts. 47 — AnimationClip-Playback + AnimatorComponent (4d.3)
+
+**Ziel:** Runtime-Animation für GPU-Skinning: AnimationClipAsset, AnimatorComponent, AnimationSystem (FK + Bone-Matrix-Schreiben).
+
+**Neue/geänderte Dateien:**
+- **`Enums.h`**: `AssetType::AnimationClip` (nach `Prefab`, appended last — Wert ist persistiert).
+- **`Assets.h`**: `AnimPathType` enum (Translation/Rotation/Scale), `AnimationChannel`-Struct (jointIndex, path, times, values), `AnimationClipAsset`-Struct (duration, channels).
+- **`HAsset.h`**: `CHUNK_ANIM = 'A','N','I','M'`.
+- **`ContentManager.h`**: `m_animClipAssets`, `getAnimationClip`, `registerAnimationClip`, `acquireAnimationClip`; außerdem fehlendes `registerSkeletalMesh` ergänzt.
+- **`ContentManager.cpp`**: loadAsset/saveAsset-Cases + lookupAsset-Getter + registerAnimationClip + unloadAsset-tryRemove + registerSkeletalMesh.
+- **`AnimatorComponent.h`** (neu): `clipAssetId, playbackTime, playbackSpeed, looping, playing`.
+- **`AnimationSystem.h/cpp`** (neu): `update(HorizonWorld&, ContentManager&, float dt)` — sample TRS-Keyframes per Kanal (lineare Interpolation), FK-Durchlauf (parent < child index angenommen gemäß glTF-Spec), Bone-Matrix = WorldJoint × IBM; Rotation via `glm::slerp`, glTF-Quaternionen als xyzw → `glm::quat(w,x,y,z)`.
+- **`HorizonScene.h`**: Include `AnimatorComponent.h`.
+- **`HorizonScene/CMakeLists.txt`**: `AnimationSystem.cpp` zur Library.
+- **`EditorApplication.cpp`**: `AnimationSystem::update()` nach `TerrainSystem::updateTerrains` (läuft immer, nicht nur in Play-Mode → Editor-Preview).
+- **`EditorUI.cpp`**: Animator-Inspector (Clip-Slot Drag-Drop, Speed/Time/Looping/Playing-Controls); Add-Component-Eintrag "Animator".
+- **`AnimationClipImporter.h/cpp`** (neu, HE_Tools): Liest alle `cgltf_animation`s aus .gltf/.glb, produziert einen `AnimationClipAsset` pro Animation (nur LINEAR-Interpolation, nur erste Skin-Indizes).
+- **`tests/test_animationsystem.cpp`** (neu): 13 Tests (Defaults, CM-Round-Trip, Wrong-Type-Lookup, Playback-Time-Advance, Looping, Stop-at-End, Skip-if-not-Playing, Skip-no-Clip, Identity-Bone, Translation-Interp bei t=0.5, Rotation-Slerp, FK 2-Joint-Kette).
+
+**Architektur-Entscheidungen:**
+- Translation/Scale: 3 floats/Key; Rotation: 4 floats/Key im xyzw-Format (glTF-Konvention) → `glm::quat(w,x,y,z)` + `glm::slerp`.
+- FK-Pass nimmt an: parent.index < child.index (glTF-Spec §5.22 garantiert Hierarchiereihenfolge in `skin.joints[]`).
+- AnimationSystem schreibt direkt in `SkeletalMeshComponent::boneMatrices` (dirty=true setzen) — der GPU-Skinning-Pfad aus 4d.2 übernimmt ohne Änderung.
+- `registerSkeletalMesh` war in ContentManager bisher nicht exponiert — ergänzt (nötig für Tests und Runtime-Authoring).
+- **300 Tests grün** (287→300).

@@ -3,6 +3,7 @@
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonScene/Components/EnvironmentComponent.h>
 #include <HorizonScene/TerrainSystem.h>
+#include <HorizonScene/AnimationSystem.h>
 #include <Renderer/RendererFactory.h>
 #include <DebugDraw/DebugDraw.h>
 #include <Diagnostics/Logger.h>
@@ -783,6 +784,7 @@ void EditorApplication::OnRender(float dt)
 		// (newly created, parameter-edited in the inspector, or just loaded/restored).
 		if (m_editorWorld)
 			TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), renderer());
+			AnimationSystem::update(*m_editorWorld, contentManager(), dt);
 
 		// Step physics at a fixed rate during play mode
 		if (m_isPlaying && m_physicsWorld && m_editorWorld)

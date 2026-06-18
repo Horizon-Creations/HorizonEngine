@@ -88,6 +88,9 @@ inline constexpr uint32_t CHUNK_FNTI = makeChunkId('F','N','T','I'); // font met
 // Scene
 inline constexpr uint32_t CHUNK_SCNE = makeChunkId('S','C','N','E'); // object path list
 
+// Animation
+inline constexpr uint32_t CHUNK_ANIM = makeChunkId('A','N','I','M'); // duration + channels
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  Writer
 // ─────────────────────────────────────────────────────────────────────────────

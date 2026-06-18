@@ -111,3 +111,28 @@ struct PrefabAsset : public RuntimeAsset
 {
 	std::vector<uint8_t> data; // CBOR payload
 };
+
+// ── Animation ─────────────────────────────────────────────────────────────────
+
+enum class AnimPathType : uint8_t
+{
+	Translation = 0,
+	Rotation    = 1,   // quaternion, stored as xyzw (glTF convention)
+	Scale       = 2,
+};
+
+// One animated property stream: times + values for a single joint and path.
+// Translation/Scale: 3 floats per keyframe; Rotation: 4 floats per keyframe (xyzw).
+struct AnimationChannel
+{
+	uint32_t           jointIndex = 0;
+	AnimPathType       path       = AnimPathType::Translation;
+	std::vector<float> times;   // keyframe timestamps in seconds
+	std::vector<float> values;  // 3 or 4 floats per key depending on path
+};
+
+struct AnimationClipAsset : public RuntimeAsset
+{
+	float                         duration = 0.0f;  // total clip length in seconds
+	std::vector<AnimationChannel> channels;
+};
