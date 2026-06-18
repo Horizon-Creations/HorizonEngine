@@ -212,7 +212,7 @@ profitieren von P2.8 (Play-Mode zum Testen).
 |---|---|---|---|
 | 4c.1 | **miniaudio** + AudioSource/AudioListener-Komponenten | 1.7, 2.2 | ✅ Forts. 29, 36 — AudioSourceComponent + AudioListenerComponent + SceneSerializer + Editor-Inspector + AudioEngine (miniaudio noDevice, int16 PCM, handle-based) + AudioSystem::playOnStart + ContentManager::registerAudio |
 | 4c.2 | 3D-Spatialization, Attenuation | 4c.1 | ✅ Forts. 43 — AudioEngine::playSpatial (linear attenuation, min/maxDist); setSoundPosition; setListenerTransform (ma_engine_listener); AudioSourceComponent: innerRange/rolloffFactor/handle; AudioSystem::updateSpatial (listener + sources each frame); SceneSerializer; Editor-Inspector; 9 Tests (257 gesamt) |
-| 4c.3 | Mixer/Bus-System (Music/SFX-Gruppen, Lautstärke) | 4c.1 | |
+| 4c.3 | Mixer/Bus-System (Music/SFX-Gruppen, Lautstärke) | 4c.1 | ✅ Forts. 44 — AudioEngine: createBus/setBusVolume/getBusVolume/hasBus (ma_sound_group, pro Instanz); play()/playSpatial() routen durch benannte Bus (nullptr=master Fallback); AudioSourceComponent::busName; SceneSerializer; Editor-Inspector "Bus"-Feld; 10 Tests (267 gesamt) |
 
 ### 4d — Animation
 | # | Aufgabe | Hängt ab von | Details |
@@ -1727,3 +1727,31 @@ Lifetime-sicher mit der bestehenden `SlotMap`/`m_handleToUUID`-Buchführung inte
 - **`EditorUI.cpp`**: Inspector-Section "Character Controller" (DragFloat für alle Parameter, Read-only Checkbox isGrounded + DragFloat3 velocity); "Character Controller" im Add-Component-Menu.
 - **9 Tests** in `test_character.cpp`: init kein Crash; Registrierung; fällt + landet; isGrounded nach 2 s; setCharacterVelocity bewegt horizontal; unbekannte Entity gibt false/kein Crash; Defaults; clear() idempotent.
 - **248 Tests grün** (239→248).
+
+---
+
+### Forts. 43 — 3D-Spatialization (4c.2)
+
+> **Aufgabe:** AudioEngine 3D-Spatialization + Listener-Update. ✅
+
+- **`AudioEngine.h/.cpp`**: `playSpatial(…, x,y,z, minDist, maxDist)` — ohne `MA_SOUND_FLAG_NO_SPATIALIZATION`; `ma_sound_set_attenuation_model(linear)`; min/maxDistance; `setSoundPosition(handle,x,y,z)`; `setListenerTransform(px,py,pz,fx,fy,fz,ux,uy,uz)` (ma_engine_listener_set_position/direction/world_up).
+- **`AudioSourceComponent.h`**: `innerRange` (min-Distanz), `rolloffFactor`, `handle` (Runtime, nicht serialisiert).
+- **`AudioSystem.h`**: `playOnStart()` nutzt `playSpatial()` wenn `src.spatial=true`; `updateSpatial(world, engine)` — updated Listener (erster `AudioListenerComponent+TransformComponent`) und Source-Positionen jedes Frame.
+- **SceneSerializer**: innerRange, rolloffFactor serialisiert; handle nicht.
+- **EditorUI**: Inspector zeigt "Inner Range", "Range", "Rolloff Factor" bei `spatial=true`.
+- **9 Tests** in `test_audio.cpp`: neue Defaults; playSpatial handle; playSpatial empty=0; setSoundPosition kein Crash; setListenerTransform kein Crash; updateSpatial ohne Entities; playOnStart spatial schreibt handle; updateSpatial mit Listener+Source; Serializer round-trip.
+- **257 Tests grün** (248→257).
+
+---
+
+### Forts. 44 — Mixer/Bus-System (4c.3)
+
+> **Aufgabe:** Benannte Audio-Busse für Gruppen-Lautstärkekontrolle. ✅
+
+- **`AudioEngine.h/.cpp`**: `createBus(name, volume)` (idempotent, `ma_sound_group_init`); `setBusVolume(name, v)`; `getBusVolume(name)` (1.0 wenn nicht gefunden); `hasBus(name)`. `play()`/`playSpatial()` bekommen `busName`-Parameter (default ""); `shutdown()` uninit alle Gruppen. Bus-Map: `unordered_map<string, unique_ptr<BusData>>` in Impl.
+- **`AudioSourceComponent.h`**: `busName`-Feld (serialisiert).
+- **`AudioSystem.h`**: `playOnStart()` übergibt `src.busName`.
+- **SceneSerializer**: `busName` im `audiosource`-JSON-Objekt.
+- **EditorUI**: "Bus"-InputText im AudioSource-Inspector.
+- **10 Tests** in `test_audio.cpp`: createBus; idempotent; getVolume; setVolume; unbekannt=1.0; play through bus; non-existent bus fällt auf Master zurück; mute via 0; busName Default; Serializer round-trip.
+- **267 Tests grün** (257→267).
