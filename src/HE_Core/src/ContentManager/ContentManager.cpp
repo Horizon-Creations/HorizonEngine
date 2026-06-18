@@ -644,22 +644,34 @@ void ContentManager::initDefaultAssets()
 	registerMaterial(std::move(mat));
 
 	// ── Default grid texture (kDefaultGridTextureId) ──────────────────────────
-	// 64×64 RGBA8: dark lines every 8 pixels on a light earthy background.
-	// Gives newly-created landscape terrain a visible grid without any file I/O.
+	// 128×128 RGBA8: cool light-grey cells with thin slate-blue grid lines and
+	// accent corner dots. Tile-friendly; gives terrain a clean technical look.
 	{
-		constexpr int kGridSize = 64;
-		constexpr int kCell     = 8;
-		// Background: warm light grey (185,185,175,255); lines: dark earthy (80,80,70,255)
-		constexpr uint8_t kBgR = 185, kBgG = 185, kBgB = 175;
-		constexpr uint8_t kLnR =  80, kLnG =  80, kLnB =  70;
+		constexpr int kGridSize = 128;
+		constexpr int kCell     = 32; // 4 cells across the texture
+		// Background: very light cool grey
+		constexpr uint8_t kBgR = 228, kBgG = 231, kBgB = 238;
+		// Primary grid lines: slate blue-grey
+		constexpr uint8_t kLnR = 108, kLnG = 116, kLnB = 138;
+		// Corner accent dots: slightly lighter than the line colour
+		constexpr uint8_t kDtR = 148, kDtG = 155, kDtB = 172;
 		std::vector<uint8_t> pixels;
 		pixels.reserve(kGridSize * kGridSize * 4);
 		for (int y = 0; y < kGridSize; ++y) {
 			for (int x = 0; x < kGridSize; ++x) {
-				bool line = (x % kCell == 0) || (y % kCell == 0);
-				pixels.push_back(line ? kLnR : kBgR);
-				pixels.push_back(line ? kLnG : kBgG);
-				pixels.push_back(line ? kLnB : kBgB);
+				// Single-pixel grid lines on every cell boundary
+				bool edge = (x % kCell == 0) || (y % kCell == 0);
+				// 3×3 accent dot at every cell corner
+				bool corner = ((x % kCell) <= 1 && (x % kCell) >= 0) &&
+				              ((y % kCell) <= 1 && (y % kCell) >= 0) &&
+				              (x % kCell + y % kCell < 2);
+				uint8_t r, g, b;
+				if (corner)       { r = kDtR; g = kDtG; b = kDtB; }
+				else if (edge)    { r = kLnR; g = kLnG; b = kLnB; }
+				else              { r = kBgR; g = kBgG; b = kBgB; }
+				pixels.push_back(r);
+				pixels.push_back(g);
+				pixels.push_back(b);
 				pixels.push_back(255);
 			}
 		}

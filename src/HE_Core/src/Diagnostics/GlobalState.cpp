@@ -81,8 +81,13 @@ void GlobalState::readConfig()
 	if (j.contains("KnownProjects") && j["KnownProjects"].is_array())
 	{
 		for (const auto& entry : j["KnownProjects"])
-			if (entry.is_string())
-				engineStatus.knownProjects.push_back(entry.get<std::string>());
+		{
+			if (!entry.is_string()) continue;
+			std::string p = entry.get<std::string>();
+			// Guard against corrupted entries (e.g. a settings string stored here by mistake)
+			if (p.size() >= 7 && p.substr(p.size() - 7) == ".heproj")
+				engineStatus.knownProjects.push_back(std::move(p));
+		}
 	}
 	if (j.contains("CustomConfig") && j["CustomConfig"].is_array())
 	{
@@ -123,6 +128,10 @@ bool GlobalState::writeConfig()
 
 void GlobalState::addKnownProject(const std::string& path)
 {
+	// Reject anything that isn't a .heproj path (guards against settings strings
+	// or other values being accidentally passed here).
+	if (path.size() < 7 || path.substr(path.size() - 7) != ".heproj")
+		return;
 	auto& kp = engineStatus.knownProjects;
 	// Remove existing occurrence to avoid duplicates
 	kp.erase(std::remove(kp.begin(), kp.end(), path), kp.end());

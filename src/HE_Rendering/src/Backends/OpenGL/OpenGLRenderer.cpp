@@ -267,7 +267,11 @@ void main()
 	// diffuse from the surface normal, specular from the reflection vector
 	// (bent toward the normal as roughness grows = crude prefilter).
 	vec3 Rrough  = normalize(mix(reflect(-V, N), N, uRoughness));
-	vec3 ambDiff = texture(uSkyEnv, N).rgb      * diffuseColor;
+	// Clamp the diffuse lookup direction so it never dips below the horizon.
+	// Sampling the skybox near the equator returns the warm horizon hue, which
+	// tints back-facing or near-horizontal surfaces yellow/orange.
+	vec3 Nup     = normalize(vec3(N.x, max(N.y, 0.0), N.z));
+	vec3 ambDiff = texture(uSkyEnv, Nup).rgb    * diffuseColor;
 	vec3 ambSpec = texture(uSkyEnv, Rrough).rgb * specColor;
 	vec3 ambient = ambDiff * 0.35 + ambSpec * (1.0 - 0.6 * uRoughness);
 	// Flat ambient fill (never-black floor + overcast replacement for the

@@ -806,18 +806,10 @@ void EditorApplication::OnRender(float dt)
 
 		pushEnvironment(dt); // auto-advances + pushes the World env component
 
-		// ── Debug draw overlay (ground grid + selected-entity marker) ─────────
+		// ── Debug draw overlay (selected-entity marker + colliders) ──────────
 		if (m_projectLoaded && m_editorWorld)
 		{
 			DebugDrawBuffer dbg;
-
-			// Ground grid: [-10..10] in X and Z at Y=0, step 1, grey
-			const glm::vec3 gridColor(0.35f, 0.35f, 0.35f);
-			for (int i = -10; i <= 10; ++i)
-			{
-				dbg.line({ float(i), 0.0f, -10.0f }, { float(i), 0.0f,  10.0f }, gridColor);
-				dbg.line({ -10.0f, 0.0f, float(i) }, {  10.0f, 0.0f, float(i) }, gridColor);
-			}
 
 			// Selected-entity marker: unit AABB centered on transform position
 			if (m_selectedEntity != entt::null && m_editorWorld->registry().valid(m_selectedEntity))

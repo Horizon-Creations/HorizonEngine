@@ -298,7 +298,10 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
 	// diffuse from the normal, specular from the reflection (bent toward N by
 	// roughness as a crude prefilter).
 	float3 Rrough  = normalize(mix(reflect(-V, N), N, in.roughness));
-	float3 ambDiff = skyEnv.sample(skyEnvSmp, N).rgb      * diffuseColor;
+	// Clamp the diffuse lookup direction so it never dips below the horizon
+	// (sampling near-horizontal sky returns the warm horizon hue → yellow tint).
+	float3 Nup     = normalize(float3(N.x, max(N.y, 0.0), N.z));
+	float3 ambDiff = skyEnv.sample(skyEnvSmp, Nup).rgb    * diffuseColor;
 	float3 ambSpec = skyEnv.sample(skyEnvSmp, Rrough).rgb * specColor;
 	float3 ambient = ambDiff * 0.35 + ambSpec * (1.0 - 0.6 * in.roughness);
 	// Flat ambient fill (never-black floor + overcast replacement for the
