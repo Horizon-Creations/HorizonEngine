@@ -1834,6 +1834,9 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 								SDL_WarpMouseInWindow(sdlWin, s_rmbStartX, s_rmbStartY);
 								s_rmbLastX = s_rmbStartX;
 								s_rmbLastY = s_rmbStartY;
+								// macOS restores cursor visibility on each warp call.
+								SDL_HideCursor();
+								ImGui::SetMouseCursor(ImGuiMouseCursor_None);
 							}
 							cin.fast = io.KeyShift;
 							if (ImGui::IsKeyDown(ImGuiKey_D)) cin.moveAxis.x += 1.0f;
