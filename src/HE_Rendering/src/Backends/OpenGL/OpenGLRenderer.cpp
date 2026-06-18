@@ -1122,17 +1122,32 @@ void main()
 	float occ = 0.0;
 	for (int i = 0; i < 32; ++i)
 	{
-		vec3 sp = P + (TBN * uKernel[i]) * uRadius;       // view-space sample point
+		// The kernel only chooses WHICH nearby screen pixels to inspect (a hemisphere
+		// footprint of radius uRadius around P, oriented to the surface).
+		vec3 sp = P + (TBN * uKernel[i]) * uRadius;
 		vec4 clip = uProj * vec4(sp, 1.0);
 		vec2 suv = (clip.xy / clip.w) * 0.5 + 0.5;        // GL: ndc.y up → uv.y up
 		if (suv.x < 0.0 || suv.x > 1.0 || suv.y < 0.0 || suv.y > 1.0) continue;
 		vec4 sv = texture(uViewPos, suv);
 		if (sv.a < 0.5) continue;                          // sampled the background
-		// View space looks down -Z, so geometry nearer the camera has the larger z.
-		float rangeCheck = smoothstep(0.0, 1.0, uRadius / max(abs(P.z - sv.z), 1e-4));
-		occ += ((sv.z >= sp.z + uBias) ? 1.0 : 0.0) * rangeCheck;
+		// Slope-invariant occlusion: measure how far the sampled neighbour rises ABOVE
+		// this fragment's own tangent plane (P, N). A flat surface — even viewed dead
+		// edge-on — has its neighbours lying IN the plane (dot ≈ 0), so it can never
+		// occlude itself; only geometry that genuinely lifts off the surface counts.
+		// This replaces the view-depth comparison, whose constant bias let grazing-
+		// angle terrain self-occlude (the darkening/discolouring seen when tilting up).
+		vec3  toOcc = sv.xyz - P;
+		float above = dot(toOcc, N);
+		float rangeCheck = smoothstep(0.0, 1.0, uRadius / max(length(toOcc), 1e-4));
+		occ += (above > uBias ? 1.0 : 0.0) * rangeCheck;
 	}
 	float ao = 1.0 - (occ / 32.0) * uIntensity;
+	// Safety floor: AO darkens the image-based ambient, a *primary* light source here,
+	// so cap it to dim the ambient by at most half — surfaces can't be crushed to
+	// black even at high radius/intensity. With the slope-invariant test above this is
+	// rarely hit; it's a backstop. (A full horizon estimator — GTAO — is the planned
+	// follow-up.)
+	ao = max(ao, 0.5);
 	FragColor = vec4(ao, ao, ao, 1.0);
 }
 )GLSL";
