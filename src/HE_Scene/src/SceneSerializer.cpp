@@ -19,6 +19,7 @@
 #include "HorizonScene/Components/AudioListenerComponent.h"
 #include "HorizonScene/Components/ParticleSystemComponent.h"
 #include "HorizonScene/Components/LODComponent.h"
+#include "HorizonScene/Components/FoliageComponent.h"
 #include "HorizonScene/Components/UICanvasComponent.h"
 #include "HorizonScene/Components/UIElementComponent.h"
 #include "HorizonScene/Components/UITextComponent.h"
@@ -279,6 +280,18 @@ namespace
 				levels.push_back({ { "meshId", uuidToJson(lvl.meshId) },
 				                   { "maxDistance", lvl.maxDistance } });
 			comps["lod"] = { { "levels", levels } };
+		}
+		if (auto* fol = registry.try_get<FoliageComponent>(entity))
+		{
+			comps["foliage"] = {
+				{ "mesh",         uuidToJson(fol->meshAssetId) },
+				{ "material",     uuidToJson(fol->materialAssetId) },
+				{ "density",      fol->density },
+				{ "seed",         fol->seed },
+				{ "minScale",     fol->minScale },
+				{ "maxScale",     fol->maxScale },
+				{ "drawDistance", fol->drawDistance },
+			};
 		}
 		if (auto* c = registry.try_get<UICanvasComponent>(entity))
 		{
@@ -565,6 +578,20 @@ namespace
 			ps.playing          = c.value("playing",         ps.playing);
 			ps.looping          = c.value("looping",         ps.looping);
 			registry.emplace_or_replace<ParticleSystemComponent>(entity, std::move(ps));
+		}
+		if (comps.contains("foliage"))
+		{
+			const json& c = comps["foliage"];
+			FoliageComponent fol;
+			fol.meshAssetId     = jsonToUuid(c.value("mesh",     json()));
+			fol.materialAssetId = jsonToUuid(c.value("material", json()));
+			fol.density         = c.value("density",      fol.density);
+			fol.seed            = c.value("seed",         fol.seed);
+			fol.minScale        = c.value("minScale",     fol.minScale);
+			fol.maxScale        = c.value("maxScale",     fol.maxScale);
+			fol.drawDistance    = c.value("drawDistance", fol.drawDistance);
+			fol.dirty           = true; // regenerate instances after load
+			registry.emplace_or_replace<FoliageComponent>(entity, std::move(fol));
 		}
 		if (comps.contains("lod"))
 		{

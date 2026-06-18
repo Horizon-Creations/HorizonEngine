@@ -11,6 +11,7 @@
 #include <HorizonScene/Components/LightComponent.h>
 #include <HorizonScene/Components/EnvironmentLightComponent.h>
 #include <HorizonScene/Components/ParticleSystemComponent.h>
+#include <HorizonScene/Components/FoliageComponent.h>
 #include <HorizonScene/UISystem.h>
 #include <ContentManager/DefaultAssets.h>
 #include <JobSystem/JobSystem.h>
@@ -188,6 +189,33 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 			obj.worldBounds     = kUnitCube.transformed(world);
 			obj.entityId        = static_cast<uint32_t>(e);
 			obj.lod             = 0;
+			out.objects.push_back(obj);
+		}
+	}
+
+	// ── Foliage ──────────────────────────────────────────────────────────────
+	// Each cached foliage instance is pushed as a RenderObject. Because all
+	// instances share the same meshAssetId, the geometry pass batches them into
+	// one DrawCall with instanceTransforms automatically.
+	for (auto [e, fol] : reg.view<FoliageComponent>().each())
+	{
+		if (fol.meshAssetId == HE::UUID{}) continue;
+		const float dd2 = fol.drawDistance * fol.drawDistance;
+		const glm::vec3 camPos = out.camera.position;
+
+		for (const glm::mat4& inst : fol.cachedInstances)
+		{
+			const glm::vec3 wp = glm::vec3(inst[3]);
+			const float dx = wp.x - camPos.x;
+			const float dz = wp.z - camPos.z;
+			if (dx * dx + dz * dz > dd2) continue;
+
+			RenderObject obj;
+			obj.meshAssetId     = fol.meshAssetId;
+			obj.materialAssetId = fol.materialAssetId;
+			obj.transform       = inst;
+			obj.worldBounds     = kUnitCube.transformed(inst);
+			obj.entityId        = static_cast<uint32_t>(e);
 			out.objects.push_back(obj);
 		}
 	}
