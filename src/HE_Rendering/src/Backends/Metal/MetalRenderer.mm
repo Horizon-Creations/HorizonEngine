@@ -2791,7 +2791,7 @@ void MetalRenderer::EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& v
 		u.flags = glm::vec4(effectiveTex ? 1.0f : 0.0f, 0, 0, 0);
 		glm::vec3 baseColor(1.0f); float metallic = 0.0f, roughness = 0.5f, opacity = 1.0f;
 		bool hasMat = ResolveMaterialParams(obj.materialAssetId, baseColor, metallic, roughness, opacity);
-		if (!hasMat) baseColor = effectiveTex ? glm::vec3(1.0f) : glm::vec3(0.85f, 0.55f, 0.25f);
+		if (!hasMat) baseColor = effectiveTex ? glm::vec3(1.0f) : glm::vec3(0.55f, 0.55f, 0.55f);
 		u.color = glm::vec4(baseColor, 1.0f);
 		u.pbr   = glm::vec4(metallic, roughness, opacity, 0.0f);
 
@@ -3005,7 +3005,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 			// (texture unchanged) or the flat fallback color when not.
 			glm::vec3 baseColor = cBaseColor;
 			if (!cHasMat)
-				baseColor = effectiveTex ? glm::vec3(1.0f) : glm::vec3(0.85f, 0.55f, 0.25f);
+				baseColor = effectiveTex ? glm::vec3(1.0f) : glm::vec3(0.55f, 0.55f, 0.55f);
 			u.color = glm::vec4(baseColor, 1.0f);
 
 			if (cOpacity < 0.999f)

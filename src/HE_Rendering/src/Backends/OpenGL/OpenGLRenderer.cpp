@@ -2929,7 +2929,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			// textured (so the texture is unchanged) or the flat fallback color.
 			glm::vec3 baseColor = cBaseColor;
 			if (!cHasMat)
-				baseColor = (tex != 0) ? glm::vec3(1.0f) : glm::vec3(0.85f, 0.55f, 0.25f);
+				baseColor = (tex != 0) ? glm::vec3(1.0f) : glm::vec3(0.55f, 0.55f, 0.55f);
 
 			const GpuMesh* drawMesh  = mesh ? mesh : ResolveMesh(HE::kDefaultCubeMeshId);
 			if (!drawMesh) continue;
@@ -3062,7 +3062,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				float metallic = 0.0f, roughness = 0.5f, opacity = 1.0f;
 				bool hasMat = ResolveMaterialParams(dc.materialAssetId, baseColor, metallic, roughness, opacity);
 				if (!hasMat)
-					baseColor = (tex != 0) ? glm::vec3(1.0f) : glm::vec3(0.85f, 0.55f, 0.25f);
+					baseColor = (tex != 0) ? glm::vec3(1.0f) : glm::vec3(0.55f, 0.55f, 0.55f);
 
 				glUniformMatrix4fv(m_uSkinnedMVP,  1, GL_FALSE, glm::value_ptr(viewProj * dc.transform));
 				glUniformMatrix4fv(m_uSkinnedModel, 1, GL_FALSE, glm::value_ptr(dc.transform));
