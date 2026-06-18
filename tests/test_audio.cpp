@@ -301,3 +301,158 @@ TEST_CASE("AudioSystem: playOnStart calls engine when asset is present")
     AudioSystem::playOnStart(world, engine, &content);
     engine.shutdown();
 }
+
+// ─── 4c.2 Spatialization ─────────────────────────────────────────────────────
+
+TEST_CASE("AudioSourceComponent: new spatial fields have sane defaults")
+{
+    AudioSourceComponent a;
+    CHECK(a.innerRange    == doctest::Approx(1.0f));
+    CHECK(a.rolloffFactor == doctest::Approx(1.0f));
+    CHECK(a.handle        == 0u);
+}
+
+TEST_CASE("AudioEngine: playSpatial returns valid handle")
+{
+    AudioEngine engine;
+    REQUIRE(engine.init(true));
+
+    auto pcm = makeSilence(4410, 1);
+    uint64_t h = engine.playSpatial(pcm, 44100, 1,
+                                     1.0f, 1.0f, false,
+                                     0.0f, 0.0f, 0.0f,
+                                     1.0f, 20.0f);
+    CHECK(h != 0);
+    engine.shutdown();
+}
+
+TEST_CASE("AudioEngine: playSpatial empty data returns 0")
+{
+    AudioEngine engine;
+    REQUIRE(engine.init(true));
+
+    uint64_t h = engine.playSpatial({}, 44100, 1, 1.0f, 1.0f, false, 0, 0, 0, 1, 20);
+    CHECK(h == 0);
+    engine.shutdown();
+}
+
+TEST_CASE("AudioEngine: setSoundPosition does not crash")
+{
+    AudioEngine engine;
+    REQUIRE(engine.init(true));
+
+    auto pcm = makeSilence(4410, 1);
+    uint64_t h = engine.playSpatial(pcm, 44100, 1, 1.0f, 1.0f, false, 0, 0, 0, 1, 20);
+    REQUIRE(h != 0);
+
+    CHECK_NOTHROW(engine.setSoundPosition(h, 5.0f, 0.0f, 3.0f));
+    CHECK_NOTHROW(engine.setSoundPosition(99999, 1.0f, 0.0f, 0.0f)); // unknown handle
+    engine.shutdown();
+}
+
+TEST_CASE("AudioEngine: setListenerTransform does not crash")
+{
+    AudioEngine engine;
+    REQUIRE(engine.init(true));
+
+    // Default forward=-Z, up=+Y
+    CHECK_NOTHROW(engine.setListenerTransform(
+        1.0f, 2.0f, 3.0f,
+        0.0f, 0.0f, -1.0f,
+        0.0f, 1.0f,  0.0f));
+    engine.shutdown();
+}
+
+TEST_CASE("AudioSystem: updateSpatial with no listener or sources does not crash")
+{
+    HorizonWorld world;
+    AudioEngine  engine;
+    REQUIRE(engine.init(true));
+    CHECK_NOTHROW(AudioSystem::updateSpatial(world, engine));
+    engine.shutdown();
+}
+
+TEST_CASE("AudioSystem: playOnStart plays spatial source and stores handle")
+{
+    HorizonWorld    world;
+    ContentManager  content;
+    AudioEngine     engine;
+    REQUIRE(engine.init(true));
+
+    AudioAsset asset;
+    asset.name       = "boom";
+    asset.sampleRate = 44100;
+    asset.channels   = 1;
+    asset.audioData  = makeSilence(4410, 1);
+    HE::UUID assetId = content.registerAudio(std::move(asset));
+
+    auto e = world.createEntity("SpatialSource");
+    TransformComponent t; t.position = { 5.0f, 0.0f, 0.0f };
+    world.registry().emplace<TransformComponent>(e, t);
+    AudioSourceComponent src;
+    src.assetId     = assetId;
+    src.playOnStart = true;
+    src.spatial     = true;
+    src.range       = 30.0f;
+    world.registry().emplace<AudioSourceComponent>(e, src);
+
+    AudioSystem::playOnStart(world, engine, &content);
+
+    // handle should have been written back into the component
+    const auto& stored = world.registry().get<AudioSourceComponent>(e);
+    CHECK(stored.handle != 0);
+    engine.shutdown();
+}
+
+TEST_CASE("AudioSystem: updateSpatial updates listener and source positions")
+{
+    HorizonWorld world;
+    AudioEngine  engine;
+    REQUIRE(engine.init(true));
+
+    // Listener entity
+    auto listener = world.createEntity("Listener");
+    TransformComponent lt; lt.position = { 0, 0, 0 }; lt.rotation = {};
+    world.registry().emplace<TransformComponent>(listener, lt);
+    world.registry().emplace<AudioListenerComponent>(listener, AudioListenerComponent{});
+
+    // Spatial source (already playing — simulate by storing a handle)
+    auto speaker = world.createEntity("Speaker");
+    TransformComponent st; st.position = { 5, 0, 0 };
+    world.registry().emplace<TransformComponent>(speaker, st);
+    AudioSourceComponent src;
+    src.spatial = true;
+    src.handle  = engine.playSpatial(makeSilence(4410, 1), 44100, 1,
+                                      1.0f, 1.0f, true, 5.0f, 0.0f, 0.0f, 1.0f, 30.0f);
+    world.registry().emplace<AudioSourceComponent>(speaker, src);
+
+    CHECK_NOTHROW(AudioSystem::updateSpatial(world, engine));
+    engine.shutdown();
+}
+
+TEST_CASE("AudioSourceComponent: new fields round-trip through serializer")
+{
+    HorizonWorld src_world;
+    auto e = src_world.createEntity("Speaker");
+    AudioSourceComponent src;
+    src.innerRange    = 2.5f;
+    src.rolloffFactor = 3.0f;
+    src.spatial       = true;
+    src_world.registry().emplace<AudioSourceComponent>(e, src);
+
+    // Save / load via memory snapshot
+    const auto snapshotPath = std::filesystem::temp_directory_path() / "he_audio_spatial_test.hescene";
+    SceneSerializer serializer;
+    REQUIRE(serializer.save(src_world, snapshotPath, SerializeFormat::JSON));
+
+    HorizonWorld dst_world;
+    REQUIRE(serializer.load(dst_world, snapshotPath, SerializeFormat::JSON));
+
+    auto view = dst_world.registry().view<AudioSourceComponent>();
+    REQUIRE(!view.empty());
+    const auto& loaded = dst_world.registry().get<AudioSourceComponent>(*view.begin());
+    CHECK(loaded.innerRange    == doctest::Approx(2.5f));
+    CHECK(loaded.rolloffFactor == doctest::Approx(3.0f));
+    CHECK(loaded.spatial       == true);
+    CHECK(loaded.handle        == 0u); // runtime field, not serialized
+}

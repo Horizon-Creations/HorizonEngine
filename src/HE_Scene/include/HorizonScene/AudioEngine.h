@@ -20,10 +20,25 @@ public:
     void shutdown();
     bool isInitialized() const { return m_initialized; }
 
-    // Play int16 interleaved PCM (from AudioAsset::audioData).
-    // Returns 0 on failure.
+    // Play non-spatial int16 interleaved PCM. Returns 0 on failure.
     uint64_t play(const std::vector<uint8_t>& pcmData, int sampleRate, int channels,
                   float volume = 1.0f, float pitch = 1.0f, bool loop = false);
+
+    // Play spatial sound at world-space position. minDist = full-volume radius,
+    // maxDist = silence radius. Uses linear attenuation. Returns 0 on failure.
+    uint64_t playSpatial(const std::vector<uint8_t>& pcmData, int sampleRate, int channels,
+                         float volume, float pitch, bool loop,
+                         float x, float y, float z,
+                         float minDist = 1.0f, float maxDist = 20.0f);
+
+    // Update the world-space position of a playing spatial sound.
+    void setSoundPosition(uint64_t handle, float x, float y, float z);
+
+    // Update the listener transform (call once per frame from AudioListener entity).
+    // forward and up should be unit vectors.
+    void setListenerTransform(float px, float py, float pz,
+                              float fx, float fy, float fz,
+                              float ux, float uy, float uz);
 
     void stop(uint64_t handle);
     void stopAll();
