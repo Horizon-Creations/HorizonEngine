@@ -6,12 +6,17 @@
 #include "Assets.h"
 #include "ContentManager/DefaultAssets.h"
 #include <filesystem>
+#include <functional>
+#include <mutex>
+#include <queue>
 #include <string>
+#include <unordered_set>
 #include <vector>
 #include <unordered_map>
 
-// Forward-declare so ContentManager can use it as a return type.
+// Forward-declares
 template<typename T> class AssetRef;
+namespace HAsset { class Reader; }
 
 class HE_API ContentManager
 {
@@ -88,6 +93,22 @@ public:
 	// Returns the UUID on success, an empty UUID on parse failure.
 	HE::UUID loadAssetFromMemory(const std::vector<uint8_t>& hassetData);
 
+	// Async streaming — submit a background I/O job that reads the file on a
+	// worker thread; call pollAsyncResults() each frame to register completed
+	// assets and fire callbacks on the main thread (safe, no locking needed on
+	// the SlotMaps). If the asset is already loaded the callback fires immediately
+	// with the existing UUID; duplicate in-flight requests for the same path are
+	// coalesced into one job (only the first callback fires — subsequent callers
+	// should use pollAsyncResults' return value or check isLoaded themselves).
+	void     loadAssetAsync(const std::string& relativePath,
+	                        std::function<void(HE::UUID)> callback = {});
+	// Drain completed async jobs and register each asset + fire callbacks.
+	// Call once per frame from the main/game thread.
+	// Returns the UUIDs of assets registered this call.
+	std::vector<HE::UUID> pollAsyncResults();
+	// True while a background job for this relative path is in flight.
+	bool isAsyncPending(const std::string& relativePath) const;
+
 	const std::string& contentRoot() const { return m_contentRoot; }
 	// Point the manager at a different content directory (e.g. when the
 	// editor opens a project). Previously loaded assets stay registered.
@@ -135,6 +156,27 @@ private:
 	HE::UUID registerRuntimeAsset(SlotMap<T>& map, T asset, HE::AssetType type);
 	template<typename T>
 	bool     replaceRuntimeAsset(SlotMap<T>& map, HE::UUID id, T asset);
+
+	// Shared parser called by loadAsset (sync) and pollAsyncResults (main-thread
+	// drain). reader must already be opened; fullPath is only used for mtime.
+	HE::UUID parseAndRegisterAsset(const std::string& relativePath,
+	                                const std::string& fullPath,
+	                                HAsset::Reader&    reader);
+
+	// ── Async streaming state ─────────────────────────────────────────────────
+	struct AsyncResult {
+		std::string                    relativePath;
+		std::string                    fullPath;
+		std::vector<uint8_t>           fileBytes;   // populated on background thread
+		std::function<void(HE::UUID)>  callback;
+		bool                           failed = false;
+	};
+
+	mutable std::mutex              m_pendingMutex;
+	std::unordered_set<std::string> m_pendingPaths;  // in-flight relative paths
+
+	std::mutex                      m_resultsMutex;
+	std::queue<AsyncResult>         m_asyncResults;  // ready to register (main thread)
 
 	std::string m_contentRoot;
 

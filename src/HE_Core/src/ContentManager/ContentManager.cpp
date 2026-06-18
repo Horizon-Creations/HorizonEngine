@@ -1,9 +1,11 @@
 #include "ContentManager/ContentManager.h"
 #include "ContentManager/HAsset.h"
 #include "Hpak/HpakReader.h"
+#include "JobSystem/JobSystem.h"
 #include "Diagnostics/Logger.h"
 #include "Diagnostics/Profiler.h"
 #include <cstring>
+#include <fstream>
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
@@ -48,18 +50,14 @@ HE::AssetType ContentManager::getAssetType(const std::string path) const
 	return static_cast<HE::AssetType>(hdr.asset_type);
 }
 
-HE::UUID ContentManager::loadAsset(const std::string& relativePath)
+// ─── parseAndRegisterAsset ────────────────────────────────────────────────────
+// Shared core: parse an already-opened reader and register the asset.
+// relativePath is stored as asset.path and keyed in m_pathToUUID.
+// fullPath is only used for mtime (empty string → skip mtime).
+HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
+                                                const std::string& fullPath,
+                                                HAsset::Reader&    reader)
 {
-	HE_PROFILE_SCOPE_N("ContentManager::load");
-	if (isLoaded(relativePath))
-		return m_pathToUUID.at(relativePath);
-
-	const std::string fullPath = m_contentRoot + "/" + relativePath;
-
-	HAsset::Reader reader;
-	if (!reader.open(fullPath))
-		return HE::UUID();
-
 	const HE::AssetType type = static_cast<HE::AssetType>(reader.assetType());
 
 	const auto* metaChunk = reader.findChunk(HAsset::CHUNK_META);
@@ -72,8 +70,6 @@ HE::UUID ContentManager::loadAsset(const std::string& relativePath)
 
 	if (id == HE::UUID{})
 	{
-		// v1 file without persisted UUID — references to this asset will not
-		// survive a restart until the file is re-saved in the new format.
 		id = HE::UUID::generate();
 		Logger::Log(Logger::LogLevel::Warning,
 			("ContentManager: asset has no persisted UUID (pre-v2 file), generated transient id: " + relativePath).c_str());
@@ -138,13 +134,12 @@ HE::UUID ContentManager::loadAsset(const std::string& relativePath)
 			size_t o=0;
 			HAsset::Reader::readString(c->data,o,a.shaderPath);
 			HAsset::Reader::readVec(c->data,o,a.texturePaths);
-			// PBR scalars — optional tail; older materials keep the defaults.
 			HAsset::Reader::readPOD(c->data,o,a.baseColor[0]);
 			HAsset::Reader::readPOD(c->data,o,a.baseColor[1]);
 			HAsset::Reader::readPOD(c->data,o,a.baseColor[2]);
 			HAsset::Reader::readPOD(c->data,o,a.metallic);
 			HAsset::Reader::readPOD(c->data,o,a.roughness);
-			HAsset::Reader::readPOD(c->data,o,a.opacity); // optional tail; defaults to 1.0
+			HAsset::Reader::readPOD(c->data,o,a.opacity);
 		}
 		handle = m_materialAssets.insert(std::move(a)); break;
 	}
@@ -212,12 +207,114 @@ HE::UUID ContentManager::loadAsset(const std::string& relativePath)
 	m_handleToUUID[id]         = handle;
 	m_assetTypeIndex[id]       = type;
 	m_pathToUUID[relativePath] = id;
+	if (!fullPath.empty())
 	{
 		std::error_code ec;
 		auto mtime = std::filesystem::last_write_time(fullPath, ec);
 		if (!ec) m_pathMtime[relativePath] = mtime;
 	}
 	return id;
+}
+
+// ─── loadAsset ────────────────────────────────────────────────────────────────
+HE::UUID ContentManager::loadAsset(const std::string& relativePath)
+{
+	HE_PROFILE_SCOPE_N("ContentManager::load");
+	if (isLoaded(relativePath))
+		return m_pathToUUID.at(relativePath);
+
+	const std::string fullPath = m_contentRoot + "/" + relativePath;
+
+	HAsset::Reader reader;
+	if (!reader.open(fullPath))
+		return HE::UUID();
+
+	return parseAndRegisterAsset(relativePath, fullPath, reader);
+}
+
+// ─── loadAssetAsync ───────────────────────────────────────────────────────────
+void ContentManager::loadAssetAsync(const std::string& relativePath,
+                                     std::function<void(HE::UUID)> callback)
+{
+	if (isLoaded(relativePath))
+	{
+		if (callback) callback(m_pathToUUID.at(relativePath));
+		return;
+	}
+
+	{
+		std::unique_lock<std::mutex> lock(m_pendingMutex);
+		if (m_pendingPaths.count(relativePath))
+			return; // already in flight — coalesce
+		m_pendingPaths.insert(relativePath);
+	}
+
+	const std::string fullPath = m_contentRoot + "/" + relativePath;
+
+	globalPool().submit([this, relativePath, fullPath,
+	                     cb = std::move(callback)]() mutable
+	{
+		AsyncResult result;
+		result.relativePath = relativePath;
+		result.fullPath     = fullPath;
+		result.callback     = std::move(cb);
+
+		std::ifstream f(fullPath, std::ios::binary);
+		if (f)
+		{
+			result.fileBytes.assign(std::istreambuf_iterator<char>(f),
+			                        std::istreambuf_iterator<char>());
+		}
+		else
+		{
+			result.failed = true;
+		}
+
+		std::unique_lock<std::mutex> lock(m_resultsMutex);
+		m_asyncResults.push(std::move(result));
+	});
+}
+
+// ─── pollAsyncResults ─────────────────────────────────────────────────────────
+std::vector<HE::UUID> ContentManager::pollAsyncResults()
+{
+	std::vector<AsyncResult> ready;
+	{
+		std::unique_lock<std::mutex> lock(m_resultsMutex);
+		while (!m_asyncResults.empty())
+		{
+			ready.push_back(std::move(m_asyncResults.front()));
+			m_asyncResults.pop();
+		}
+	}
+
+	std::vector<HE::UUID> registered;
+	for (auto& r : ready)
+	{
+		{
+			std::unique_lock<std::mutex> lock(m_pendingMutex);
+			m_pendingPaths.erase(r.relativePath);
+		}
+
+		HE::UUID id;
+		if (!r.failed && !r.fileBytes.empty())
+		{
+			HAsset::Reader reader;
+			if (reader.openData(r.fileBytes))
+				id = parseAndRegisterAsset(r.relativePath, r.fullPath, reader);
+		}
+
+		if (id != HE::UUID{}) registered.push_back(id);
+		if (r.callback) r.callback(id);
+	}
+	return registered;
+}
+
+// ─── isAsyncPending ───────────────────────────────────────────────────────────
+bool ContentManager::isAsyncPending(const std::string& relativePath) const
+{
+	std::unique_lock<std::mutex> lock(m_pendingMutex);
+	return m_pendingPaths.count(relativePath) > 0;
 }
 
 // ─── saveAsset ────────────────────────────────────────────────────────────────

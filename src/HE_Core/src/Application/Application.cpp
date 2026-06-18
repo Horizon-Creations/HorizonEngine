@@ -15,7 +15,7 @@ namespace HE
 		Logger::Log(Logger::LogLevel::Info, "Application starting up");
 		m_globalState->readConfig();
 		auto contentPath = startupPath + "Content";
-		m_contentManager = ContentManager(contentPath);
+		m_contentManager.setContentRoot(contentPath);
 	}
 	Application::~Application()
 	{
