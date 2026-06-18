@@ -787,6 +787,7 @@ void EditorApplication::OnRender(float dt)
 		// Regenerate terrain meshes for any entity whose TerrainComponent is dirty
 		// (newly created, parameter-edited in the inspector, or just loaded/restored).
 		if (m_editorWorld)
+		{
 			TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), renderer());
 			AnimationSystem::update(*m_editorWorld, contentManager(), dt);
 			AnimationBlendSystem::update(*m_editorWorld, contentManager(), dt);
@@ -795,6 +796,8 @@ void EditorApplication::OnRender(float dt)
 			NavigationSystem::update(*m_editorWorld, dt);
 			ParticleSystem::update(*m_editorWorld, dt);
 			FoliageSystem::update(*m_editorWorld);
+			LODSystem::update(*m_editorWorld, m_editorCamera.position());
+		}
 
 		// Step physics at a fixed rate during play mode
 		if (m_isPlaying && m_physicsWorld && m_editorWorld)
