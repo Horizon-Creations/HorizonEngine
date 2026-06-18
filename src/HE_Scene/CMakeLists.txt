@@ -5,7 +5,9 @@ add_library(HorizonScene SHARED
     src/Components/TransformComponent.cpp
     src/TerrainMeshGenerator.cpp
     src/TerrainSystem.cpp
+    src/AnimationEval.cpp
     src/AnimationSystem.cpp
+    src/AnimationBlendSystem.cpp
     src/ScriptContext.cpp
     src/AudioEngine.cpp
     src/PhysicsWorld.cpp

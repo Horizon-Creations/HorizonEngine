@@ -5,7 +5,9 @@
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/SkeletalMeshComponent.h>
 #include <HorizonScene/Components/AnimatorComponent.h>
+#include <HorizonScene/Components/AnimatorBlendComponent.h>
 #include <HorizonScene/AnimationSystem.h>
+#include <HorizonScene/AnimationBlendSystem.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -394,4 +396,163 @@ TEST_CASE("AnimationSystem applies FK across parent-child joints")
     // IBM = identity → bone[1] = translate(1,1,0)
     CHECK(s.boneMatrices[1][3][0] == doctest::Approx(1.0f));
     CHECK(s.boneMatrices[1][3][1] == doctest::Approx(1.0f));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  AnimatorBlendComponent defaults
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST_CASE("AnimatorBlendComponent defaults")
+{
+    AnimatorBlendComponent ab;
+    CHECK(ab.clipAId       == HE::UUID{});
+    CHECK(ab.clipBId       == HE::UUID{});
+    CHECK(ab.blendAlpha    == doctest::Approx(0.0f));
+    CHECK(ab.playbackTime  == doctest::Approx(0.0f));
+    CHECK(ab.playbackSpeed == doctest::Approx(1.0f));
+    CHECK(ab.looping       == true);
+    CHECK(ab.playing       == true);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  AnimationBlendSystem: integration tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Helper: build a clip that keeps joint 0 at a constant translation
+static AnimationClipAsset makeConstantClip(glm::vec3 pos, float duration = 1.0f)
+{
+    AnimationClipAsset clip;
+    clip.duration = duration;
+    clip.name     = "const";
+    AnimationChannel ch;
+    ch.jointIndex = 0;
+    ch.path       = AnimPathType::Translation;
+    ch.times      = { 0.0f };
+    ch.values     = { pos.x, pos.y, pos.z };
+    clip.channels.push_back(std::move(ch));
+    return clip;
+}
+
+TEST_CASE("AnimationBlendSystem alpha=0 produces pure clip A result")
+{
+    ContentManager cm;
+    HorizonWorld   world;
+
+    const HE::UUID meshId = HE::UUID::generate();
+    cm.registerSkeletalMesh(makeOneBoneSkeletalMesh(meshId));
+
+    const HE::UUID clipAId = cm.registerAnimationClip(makeConstantClip({2.0f, 0.0f, 0.0f}));
+    const HE::UUID clipBId = cm.registerAnimationClip(makeConstantClip({0.0f, 4.0f, 0.0f}));
+
+    entt::entity e = world.createEntity();
+    world.addComponent(e, TransformComponent{ .position = {}, .rotation = {}, .scale = glm::vec3(1.0f) });
+    SkeletalMeshComponent smc; smc.meshAssetId = meshId;
+    world.addComponent(e, smc);
+    AnimatorBlendComponent ab; ab.clipAId = clipAId; ab.clipBId = clipBId; ab.blendAlpha = 0.0f;
+    world.addComponent(e, ab);
+
+    AnimationBlendSystem::update(world, cm, 0.0f);
+    const auto& s = world.registry().get<SkeletalMeshComponent>(e);
+    REQUIRE(s.boneMatrices.size() == 1);
+    CHECK(s.boneMatrices[0][3][0] == doctest::Approx(2.0f).epsilon(1e-4));
+    CHECK(s.boneMatrices[0][3][1] == doctest::Approx(0.0f).epsilon(1e-4));
+}
+
+TEST_CASE("AnimationBlendSystem alpha=1 produces pure clip B result")
+{
+    ContentManager cm;
+    HorizonWorld   world;
+
+    const HE::UUID meshId = HE::UUID::generate();
+    cm.registerSkeletalMesh(makeOneBoneSkeletalMesh(meshId));
+
+    const HE::UUID clipAId = cm.registerAnimationClip(makeConstantClip({2.0f, 0.0f, 0.0f}));
+    const HE::UUID clipBId = cm.registerAnimationClip(makeConstantClip({0.0f, 4.0f, 0.0f}));
+
+    entt::entity e = world.createEntity();
+    world.addComponent(e, TransformComponent{ .position = {}, .rotation = {}, .scale = glm::vec3(1.0f) });
+    SkeletalMeshComponent smc; smc.meshAssetId = meshId;
+    world.addComponent(e, smc);
+    AnimatorBlendComponent ab; ab.clipAId = clipAId; ab.clipBId = clipBId; ab.blendAlpha = 1.0f;
+    world.addComponent(e, ab);
+
+    AnimationBlendSystem::update(world, cm, 0.0f);
+    const auto& s = world.registry().get<SkeletalMeshComponent>(e);
+    REQUIRE(s.boneMatrices.size() == 1);
+    CHECK(s.boneMatrices[0][3][0] == doctest::Approx(0.0f).epsilon(1e-4));
+    CHECK(s.boneMatrices[0][3][1] == doctest::Approx(4.0f).epsilon(1e-4));
+}
+
+TEST_CASE("AnimationBlendSystem alpha=0.5 produces midpoint translation")
+{
+    ContentManager cm;
+    HorizonWorld   world;
+
+    const HE::UUID meshId = HE::UUID::generate();
+    cm.registerSkeletalMesh(makeOneBoneSkeletalMesh(meshId));
+
+    const HE::UUID clipAId = cm.registerAnimationClip(makeConstantClip({2.0f, 0.0f, 0.0f}));
+    const HE::UUID clipBId = cm.registerAnimationClip(makeConstantClip({0.0f, 4.0f, 0.0f}));
+
+    entt::entity e = world.createEntity();
+    world.addComponent(e, TransformComponent{ .position = {}, .rotation = {}, .scale = glm::vec3(1.0f) });
+    SkeletalMeshComponent smc; smc.meshAssetId = meshId;
+    world.addComponent(e, smc);
+    AnimatorBlendComponent ab; ab.clipAId = clipAId; ab.clipBId = clipBId; ab.blendAlpha = 0.5f;
+    world.addComponent(e, ab);
+
+    AnimationBlendSystem::update(world, cm, 0.0f);
+    const auto& s = world.registry().get<SkeletalMeshComponent>(e);
+    REQUIRE(s.boneMatrices.size() == 1);
+    // lerp(2,0, 0.5) = 1.0 on X; lerp(0,4, 0.5) = 2.0 on Y
+    CHECK(s.boneMatrices[0][3][0] == doctest::Approx(1.0f).epsilon(1e-4));
+    CHECK(s.boneMatrices[0][3][1] == doctest::Approx(2.0f).epsilon(1e-4));
+}
+
+TEST_CASE("AnimationBlendSystem advances playbackTime")
+{
+    ContentManager cm;
+    HorizonWorld   world;
+
+    const HE::UUID meshId = HE::UUID::generate();
+    cm.registerSkeletalMesh(makeOneBoneSkeletalMesh(meshId));
+
+    const HE::UUID clipAId = cm.registerAnimationClip(makeConstantClip({1.0f, 0.0f, 0.0f}));
+    const HE::UUID clipBId = cm.registerAnimationClip(makeConstantClip({0.0f, 1.0f, 0.0f}));
+
+    entt::entity e = world.createEntity();
+    world.addComponent(e, TransformComponent{ .position = {}, .rotation = {}, .scale = glm::vec3(1.0f) });
+    SkeletalMeshComponent smc; smc.meshAssetId = meshId;
+    world.addComponent(e, smc);
+    AnimatorBlendComponent ab; ab.clipAId = clipAId; ab.clipBId = clipBId;
+    world.addComponent(e, ab);
+
+    AnimationBlendSystem::update(world, cm, 0.4f);
+    const auto& updatedAb = world.registry().get<AnimatorBlendComponent>(e);
+    CHECK(updatedAb.playbackTime == doctest::Approx(0.4f));
+}
+
+TEST_CASE("AnimationBlendSystem skips when playing=false")
+{
+    ContentManager cm;
+    HorizonWorld   world;
+
+    const HE::UUID meshId = HE::UUID::generate();
+    cm.registerSkeletalMesh(makeOneBoneSkeletalMesh(meshId));
+
+    const HE::UUID clipAId = cm.registerAnimationClip(makeConstantClip({1.0f, 0.0f, 0.0f}));
+    const HE::UUID clipBId = cm.registerAnimationClip(makeConstantClip({0.0f, 1.0f, 0.0f}));
+
+    entt::entity e = world.createEntity();
+    world.addComponent(e, TransformComponent{ .position = {}, .rotation = {}, .scale = glm::vec3(1.0f) });
+    SkeletalMeshComponent smc; smc.meshAssetId = meshId;
+    world.addComponent(e, smc);
+    AnimatorBlendComponent ab;
+    ab.clipAId = clipAId; ab.clipBId = clipBId;
+    ab.playing = false; ab.playbackTime = 0.3f;
+    world.addComponent(e, ab);
+
+    AnimationBlendSystem::update(world, cm, 0.5f);
+    const auto& updatedAb = world.registry().get<AnimatorBlendComponent>(e);
+    CHECK(updatedAb.playbackTime == doctest::Approx(0.3f));
 }

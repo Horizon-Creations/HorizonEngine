@@ -220,7 +220,7 @@ profitieren von P2.8 (Play-Mode zum Testen).
 | 4d.1 | Skelett + Skinning-Daten im MeshImporter (glTF-Skins) | 1.2 | neue Chunks im .hasset-Format | ✅ Forts. 45 |
 | 4d.2 | GPU-Skinning (Bone-Matrizen als Uniform/Storage-Buffer) | 4d.1, 3.3 | | ✅ Forts. 46 |
 | 4d.3 | AnimationClip-Playback + AnimatorComponent | 4d.1, 2.2 | | ✅ Forts. 47 |
-| 4d.4 | Blending + State-Machine (einfacher Animator-Graph) | 4d.3 | |
+| 4d.4 | Blending + State-Machine (einfacher Animator-Graph) | 4d.3 | | ✅ Forts. 48 |
 | 4d.5 | Property-Animation (Transform/Material animieren, für Cutscenes/UI) | 4d.3 | |
 
 ---
@@ -1825,3 +1825,27 @@ Lifetime-sicher mit der bestehenden `SlotMap`/`m_handleToUUID`-Buchführung inte
 - AnimationSystem schreibt direkt in `SkeletalMeshComponent::boneMatrices` (dirty=true setzen) — der GPU-Skinning-Pfad aus 4d.2 übernimmt ohne Änderung.
 - `registerSkeletalMesh` war in ContentManager bisher nicht exponiert — ergänzt (nötig für Tests und Runtime-Authoring).
 - **300 Tests grün** (287→300).
+
+### Forts. 48 — Animation Blending (4d.4)
+
+**Ziel:** Zwei AnimationClips gewichtet mischen (alpha=0→reines A, alpha=1→reines B), TRS-Level-Blend vor FK, shared eval-Logik extrahiert.
+
+**Neue / geänderte Dateien:**
+
+- **`src/HE_Scene/src/AnimationEval.h`** (intern): `JointTRS`-Struct + Deklarationen `sampleClip`, `composeBoneMatrices`, `blendTRS`.
+- **`src/HE_Scene/src/AnimationEval.cpp`** (neu): Implementierung der drei Eval-Funktionen. `sampleClip` enthält die Kanal-Sampling-Logik aus dem alten AnimationSystem. `composeBoneMatrices` macht den FK-Pass + IBM-Multiplikation. `blendTRS` macht per-Joint lerp(T,S) + slerp(R).
+- **`src/HE_Scene/src/AnimationSystem.cpp`** (refaktoriert): Nutzt jetzt `sampleClip` + `composeBoneMatrices` statt inliner Logik — deutlich kürzer.
+- **`src/HE_Scene/include/HorizonScene/Components/AnimatorBlendComponent.h`** (neu): `clipAId`, `clipBId`, `blendAlpha` (0→A, 1→B), `playbackTime/Speed`, `looping`, `playing`.
+- **`src/HE_Scene/include/HorizonScene/AnimationBlendSystem.h`** (neu): `AnimationBlendSystem::update(world, cm, dt)`.
+- **`src/HE_Scene/src/AnimationBlendSystem.cpp`** (neu): Samples beide Clips an denselben (zeitnormalisiert auf eigene Duration), ruft `blendTRS` → `composeBoneMatrices`, schreibt in `SkeletalMeshComponent::boneMatrices`.
+- **`src/HE_Scene/CMakeLists.txt`**: `AnimationEval.cpp` + `AnimationBlendSystem.cpp` ergänzt.
+- **`src/HE_Scene/include/HorizonScene/HorizonScene.h`**: `AnimatorBlendComponent.h` inkludiert.
+- **`src/HE_Editor/EditorApplication.cpp`**: `AnimationBlendSystem::update` nach `AnimationSystem::update` eingefügt.
+- **`src/HE_Editor/EditorUI.cpp`**: „Animator Blend"-Inspector-Panel (Clip A/B Drag-Drop, Blend-Slider, Playback-Controls); Add-Component-Menü ergänzt.
+- **`tests/test_animationsystem.cpp`**: 6 neue Tests (BlendComponent-Defaults, alpha=0/0.5/1, Time-Advance, Skip-if-not-Playing).
+
+**Architektur-Entscheidungen:**
+- Blend findet auf TRS-Ebene statt (vor FK) — nicht auf finalen Bone-Matrizen. Das ist physikalisch korrekt und ermöglicht spätere Additive-Blending-Erweiterung.
+- Fehlende Clip → Identity-TRS-Defaults → mit blendAlpha=1.0/0.0 korrekt entartbar.
+- Referenz-Duration = max(clipA.duration, clipB.duration) für Timeline; jeder Clip wird auf seine eigene Duration `fmod`-geloopt (Gait-Synchronisation bleibt dem Aufrufer überlassen).
+- **306 Tests grün** (300→306).
