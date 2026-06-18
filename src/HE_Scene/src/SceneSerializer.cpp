@@ -18,6 +18,11 @@
 #include "HorizonScene/Components/AudioSourceComponent.h"
 #include "HorizonScene/Components/AudioListenerComponent.h"
 #include "HorizonScene/Components/ParticleSystemComponent.h"
+#include "HorizonScene/Components/UICanvasComponent.h"
+#include "HorizonScene/Components/UIElementComponent.h"
+#include "HorizonScene/Components/UITextComponent.h"
+#include "HorizonScene/Components/UIImageComponent.h"
+#include "HorizonScene/Components/UIButtonComponent.h"
 #include <nlohmann/json.hpp>
 #include <fstream>
 
@@ -28,6 +33,13 @@ namespace
 {
 	json vec3ToJson(const glm::vec3& v)  { return json::array({ v.x, v.y, v.z }); }
 	json vec2ToJson(const glm::vec2& v)  { return json::array({ v.x, v.y }); }
+	json vec4ToJson(const glm::vec4& v)  { return json::array({ v.x, v.y, v.z, v.w }); }
+
+	glm::vec4 jsonToVec4(const json& j, const glm::vec4& fallback)
+	{
+		if (!j.is_array() || j.size() != 4) return fallback;
+		return { j[0].get<float>(), j[1].get<float>(), j[2].get<float>(), j[3].get<float>() };
+	}
 
 	glm::vec3 jsonToVec3(const json& j, const glm::vec3& fallback)
 	{
@@ -257,6 +269,51 @@ namespace
 				{ "maxParticles",     ps->maxParticles },
 				{ "playing",          ps->playing },
 				{ "looping",          ps->looping },
+			};
+		}
+		if (auto* c = registry.try_get<UICanvasComponent>(entity))
+		{
+			comps["uicanvas"] = {
+				{ "width",      c->width },
+				{ "height",     c->height },
+				{ "renderMode", static_cast<int>(c->renderMode) },
+				{ "active",     c->active },
+			};
+		}
+		if (auto* e2 = registry.try_get<UIElementComponent>(entity))
+		{
+			comps["uielement"] = {
+				{ "position", vec2ToJson(e2->position) },
+				{ "size",     vec2ToJson(e2->size) },
+				{ "pivot",    vec2ToJson(e2->pivot) },
+				{ "rotation", e2->rotation },
+				{ "anchor",   static_cast<int>(e2->anchor) },
+				{ "layer",    e2->layer },
+				{ "active",   e2->active },
+			};
+		}
+		if (auto* t2 = registry.try_get<UITextComponent>(entity))
+		{
+			comps["uitext"] = {
+				{ "text",     t2->text },
+				{ "fontSize", t2->fontSize },
+				{ "color",    vec4ToJson(t2->color) },
+			};
+		}
+		if (auto* img = registry.try_get<UIImageComponent>(entity))
+		{
+			comps["uiimage"] = {
+				{ "material", uuidToJson(img->materialAssetId) },
+				{ "tint",     vec4ToJson(img->tint) },
+			};
+		}
+		if (auto* btn = registry.try_get<UIButtonComponent>(entity))
+		{
+			comps["uibutton"] = {
+				{ "normalColor",   vec4ToJson(btn->normalColor) },
+				{ "hoveredColor",  vec4ToJson(btn->hoveredColor) },
+				{ "pressedColor",  vec4ToJson(btn->pressedColor) },
+				{ "onClickFunction", btn->onClickFunction },
 			};
 		}
 		return comps;
@@ -499,6 +556,56 @@ namespace
 			ps.playing          = c.value("playing",         ps.playing);
 			ps.looping          = c.value("looping",         ps.looping);
 			registry.emplace_or_replace<ParticleSystemComponent>(entity, std::move(ps));
+		}
+		if (comps.contains("uicanvas"))
+		{
+			const json& c = comps["uicanvas"];
+			UICanvasComponent cv;
+			cv.width      = c.value("width",      cv.width);
+			cv.height     = c.value("height",     cv.height);
+			cv.renderMode = static_cast<UIRenderMode>(c.value("renderMode", 0));
+			cv.active     = c.value("active",     cv.active);
+			registry.emplace_or_replace<UICanvasComponent>(entity, cv);
+		}
+		if (comps.contains("uielement"))
+		{
+			const json& c = comps["uielement"];
+			UIElementComponent el;
+			el.position = jsonToVec2(c.value("position", json()), el.position);
+			el.size     = jsonToVec2(c.value("size",     json()), el.size);
+			el.pivot    = jsonToVec2(c.value("pivot",    json()), el.pivot);
+			el.rotation = c.value("rotation", el.rotation);
+			el.anchor   = static_cast<UIAnchor>(c.value("anchor", 0));
+			el.layer    = c.value("layer",    el.layer);
+			el.active   = c.value("active",   el.active);
+			registry.emplace_or_replace<UIElementComponent>(entity, el);
+		}
+		if (comps.contains("uitext"))
+		{
+			const json& c = comps["uitext"];
+			UITextComponent t2;
+			t2.text     = c.value("text",     t2.text);
+			t2.fontSize = c.value("fontSize", t2.fontSize);
+			t2.color    = jsonToVec4(c.value("color", json()), t2.color);
+			registry.emplace_or_replace<UITextComponent>(entity, std::move(t2));
+		}
+		if (comps.contains("uiimage"))
+		{
+			const json& c = comps["uiimage"];
+			UIImageComponent img;
+			img.materialAssetId = jsonToUuid(c.value("material", json()));
+			img.tint            = jsonToVec4(c.value("tint", json()), img.tint);
+			registry.emplace_or_replace<UIImageComponent>(entity, img);
+		}
+		if (comps.contains("uibutton"))
+		{
+			const json& c = comps["uibutton"];
+			UIButtonComponent btn;
+			btn.normalColor      = jsonToVec4(c.value("normalColor",  json()), btn.normalColor);
+			btn.hoveredColor     = jsonToVec4(c.value("hoveredColor", json()), btn.hoveredColor);
+			btn.pressedColor     = jsonToVec4(c.value("pressedColor", json()), btn.pressedColor);
+			btn.onClickFunction  = c.value("onClickFunction", btn.onClickFunction);
+			registry.emplace_or_replace<UIButtonComponent>(entity, std::move(btn));
 		}
 	}
 
