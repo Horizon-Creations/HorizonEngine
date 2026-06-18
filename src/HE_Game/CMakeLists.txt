@@ -1,7 +1,6 @@
 add_executable(HorizonGame WIN32
 	src/main.cpp
 	src/GameApplication.cpp
-	src/ProjectConfig.cpp
 )
 
 target_include_directories(HorizonGame PRIVATE

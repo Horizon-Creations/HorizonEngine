@@ -21,6 +21,8 @@ add_library(HorizonCore SHARED
 	src/Hpak/HpakWriter.cpp
 	src/Hpak/HpakReader.cpp
 	src/Hpak/KeyDerivation.cpp
+	src/Hpak/ProjectConfig.cpp
+	src/Hpak/ProjectExporter.cpp
  "include/ContentManager/ContentManager.h" "src/ContentManager/ContentManager.cpp" "include/ContentManager/Assets.h")
 
 target_include_directories(HorizonCore

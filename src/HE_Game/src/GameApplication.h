@@ -1,6 +1,6 @@
 #pragma once
 #include <Application/Application.h>
-#include "ProjectConfig.h"
+#include <Hpak/ProjectConfig.h>
 
 // Game-specific Application: handles the packaged-shipping bootstrap
 // (project.hcfg, encrypted hpak, key derivation, GameLogic.dll loading).
