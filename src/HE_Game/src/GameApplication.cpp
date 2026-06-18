@@ -1,5 +1,8 @@
 #include "GameApplication.h"
+#include <Hpak/ProjectConfig.h>
 #include <Diagnostics/Logger.h>
+#include <SDL3/SDL.h>
+#include <filesystem>
 
 HE::ApplicationConfig GameApplication::GetConfig() const
 {
@@ -27,6 +30,29 @@ std::unique_ptr<IRenderer> GameApplication::CreateRenderer()
 void GameApplication::OnInit()
 {
 	Logger::Log(Logger::LogLevel::Info, "GameApplication::OnInit");
+
+	const char* baseRaw = SDL_GetBasePath();
+	if (!baseRaw)
+	{
+		Logger::Log(Logger::LogLevel::Warning, "GameApplication: SDL_GetBasePath returned null");
+		return;
+	}
+	const std::filesystem::path exeDir(baseRaw);
+
+	if (!ProjectConfigLoader::load(exeDir, m_config))
+	{
+		Logger::Log(Logger::LogLevel::Info, "GameApplication: no project.hcfg — running without pak");
+		return;
+	}
+
+	// Override content root set by Application base (it uses argv[0] + "Content")
+	contentManager().setContentRoot((exeDir / "Content").string());
+
+	const std::string pakPath = (exeDir / m_config.hpakFilename).string();
+	if (contentManager().loadPak(pakPath))
+		Logger::Log(Logger::LogLevel::Info, ("GameApplication: loaded " + m_config.hpakFilename).c_str());
+	else
+		Logger::Log(Logger::LogLevel::Warning, ("GameApplication: pak not found: " + pakPath).c_str());
 }
 
 void GameApplication::OnRender(float deltaTime)

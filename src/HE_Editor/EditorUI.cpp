@@ -1,5 +1,6 @@
 #include "EditorUI.h"
 #include "EditorApplication.h"
+#include <Hpak/ProjectExporter.h>
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonScene/NavigationSystem.h>
 #include <Scripting/ScriptEngine.h>
@@ -82,6 +83,14 @@ static bool s_resetLayoutRequested = false;
 
 // Toggled by Edit > Preferences (Ctrl+,); drives the Preferences window.
 static bool s_showPreferences = false;
+
+// Build > Export Project modal state
+static bool   s_showExportModal   = false;
+static char   s_exportOutputDir[512] = {};
+static bool   s_exportCompress    = true;
+static bool   s_exportEncrypt     = false;
+static bool   s_exportRunning     = false;
+static std::string s_exportResult;
 
 // Active manipulation tool, shared by the viewport toolbar buttons and the
 // W/E/R shortcuts and consumed by the gizmo (Move / Rotate / Scale).
@@ -1053,6 +1062,22 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 		if (ImGui::MenuItem("Refresh Assets")) {}
 		ImGui::EndMenu();
 	}
+	if (ImGui::BeginMenu("Build", ctx.projectLoaded))
+	{
+		if (ImGui::MenuItem("Export Project..."))
+		{
+			if (s_exportOutputDir[0] == '\0' && ctx.projectManager)
+			{
+				const auto& proj = ctx.projectManager->currentProject();
+				const auto outPath = std::filesystem::path(proj.path) / "Export";
+				std::strncpy(s_exportOutputDir, outPath.string().c_str(), sizeof(s_exportOutputDir) - 1);
+			}
+			s_exportResult.clear();
+			s_exportRunning = false;
+			s_showExportModal = true;
+		}
+		ImGui::EndMenu();
+	}
 	if (ImGui::BeginMenu("Help"))
 	{
 		if (ImGui::MenuItem("Documentation")) {}
@@ -1064,6 +1089,73 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 
     if (openNewProjectPopup)
         ImGui::OpenPopup("##NewProjectPopup");
+
+    // ── Export Project modal ────────────────────────────────────────────────
+    if (s_showExportModal)
+    {
+        ImGui::OpenPopup("Export Project##build");
+        s_showExportModal = false;
+    }
+    {
+        ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(),
+                                ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+        ImGui::SetNextWindowSize(ImVec2(520, 0), ImGuiCond_Always);
+        if (ImGui::BeginPopupModal("Export Project##build", nullptr,
+            ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings))
+        {
+            ImGui::Text("Output Directory:");
+            ImGui::SetNextItemWidth(-1.0f);
+            ImGui::InputText("##exportDir", s_exportOutputDir, sizeof(s_exportOutputDir));
+            ImGui::Spacing();
+            ImGui::Checkbox("Compress assets (LZ4)", &s_exportCompress);
+            ImGui::Checkbox("Encrypt assets",        &s_exportEncrypt);
+            if (s_exportEncrypt)
+                ImGui::TextDisabled("Note: encryption key management is the project's responsibility.");
+            ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+
+            if (!s_exportResult.empty())
+            {
+                const bool ok = s_exportResult.rfind("OK:", 0) == 0;
+                if (ok) ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.2f, 1.f), "%s", s_exportResult.c_str());
+                else    ImGui::TextColored(ImVec4(1.f,  0.3f, 0.3f, 1.f), "%s", s_exportResult.c_str());
+                ImGui::Spacing();
+            }
+
+            const bool canExport = s_exportOutputDir[0] != '\0'
+                                && ctx.contentManager && !s_exportRunning;
+            if (!canExport) ImGui::BeginDisabled();
+            if (ImGui::Button("Export", ImVec2(110, 0)))
+            {
+                s_exportRunning = true;
+                const std::string projName = ctx.projectManager
+                    ? ctx.projectManager->currentProject().name : "Game";
+                const std::string contentDir = ctx.contentManager
+                    ? ctx.contentManager->contentRoot() : "";
+                std::string sceneName;
+                if (!ctx.currentScenePath.empty())
+                    sceneName = std::filesystem::path(ctx.currentScenePath).filename().string();
+
+                ExportSettings es;
+                es.compress = s_exportCompress;
+                es.encrypt  = s_exportEncrypt;
+                const auto res = ProjectExporter::exportProject(
+                    contentDir, projName, sceneName,
+                    std::filesystem::path(s_exportOutputDir), es);
+
+                if (res.success)
+                    s_exportResult = "OK: " + std::to_string(res.assetsPacked)
+                                   + " asset(s) packed → " + s_exportOutputDir;
+                else
+                    s_exportResult = "Error: " + res.errorMessage;
+                s_exportRunning = false;
+            }
+            if (!canExport) ImGui::EndDisabled();
+            ImGui::SameLine();
+            if (ImGui::Button("Close", ImVec2(80, 0)))
+                ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+    }
 
     // ── Unsaved-changes modal ───────────────────────────────────────────────
     // Raised by requestGuarded() when a scene-discarding action is attempted with
