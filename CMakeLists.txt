@@ -113,6 +113,34 @@ set(RECASTNAVIGATION_TESTS    OFF CACHE BOOL "" FORCE)
 set(RECASTNAVIGATION_EXAMPLES OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(recastnavigation)
 
+# ─── LZ4 (hpak compression) ───────────────────────────────────────────────────
+# Use system lz4 if available (Homebrew on macOS, package manager on Linux/Windows).
+# Falls back gracefully: if not found, hpak entries can still be stored uncompressed.
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+    pkg_check_modules(LZ4 QUIET liblz4)
+endif()
+if(NOT LZ4_FOUND)
+    find_path(LZ4_INCLUDE_DIRS lz4.h
+        PATHS /opt/homebrew/include /usr/local/include /usr/include)
+    find_library(LZ4_LIBRARIES NAMES lz4
+        PATHS /opt/homebrew/lib /usr/local/lib /usr/lib)
+    if(LZ4_INCLUDE_DIRS AND LZ4_LIBRARIES)
+        set(LZ4_FOUND TRUE)
+    endif()
+endif()
+if(LZ4_FOUND)
+    message(STATUS "HorizonEngine: LZ4 found — hpak compression enabled")
+    add_library(lz4_import INTERFACE)
+    target_include_directories(lz4_import INTERFACE ${LZ4_INCLUDE_DIRS})
+    target_link_libraries(lz4_import INTERFACE ${LZ4_LIBRARIES})
+    add_library(lz4::lz4 ALIAS lz4_import)
+    set(HE_HAVE_LZ4 TRUE)
+else()
+    message(STATUS "HorizonEngine: LZ4 NOT found — hpak compression will store entries uncompressed")
+    set(HE_HAVE_LZ4 FALSE)
+endif()
+
 # ─── Tracy (optional profiling) ────────────────────────────────────────────────
 # Enable with:  cmake -DHE_ENABLE_TRACY=ON ...
 # Default OFF so production/CI builds have zero overhead.

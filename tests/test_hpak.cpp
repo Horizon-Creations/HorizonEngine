@@ -8,6 +8,16 @@
 #include <fstream>
 #include <cstring>
 
+// Detect whether the test binary was built with LZ4 support.
+// We check the kFlagCompressed constant — it's always defined,
+// but compression only works at runtime when HE_HAVE_LZ4 is set.
+// Test macros guard accordingly so CI without lz4 still passes.
+#ifdef HE_HAVE_LZ4
+#  define HE_LZ4_AVAILABLE 1
+#else
+#  define HE_LZ4_AVAILABLE 0
+#endif
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 static std::vector<uint8_t> makeMaterialBlob(const HE::UUID& id,
@@ -275,3 +285,111 @@ TEST_CASE("HpakWriter::addDirectory skips non-.hasset files")
 
     std::filesystem::remove_all(tmpDir);
 }
+
+// ─── LZ4 compression tests ────────────────────────────────────────────────────
+
+TEST_CASE("HpakWriter compression flag: compress=false stores raw data")
+{
+    const HE::UUID id{0x1234,0x5678};
+    const std::vector<uint8_t> data(256, 0xAB); // easily compressible
+
+    Hpak::PackSettings settings;
+    settings.compress = false; // explicit off
+
+    HpakWriter packer;
+    packer.addEntry(id, data, settings);
+
+    auto tmp = std::filesystem::temp_directory_path() / "he_test_nocomp.hpak";
+    REQUIRE(packer.write(tmp.string()));
+
+    HpakReader reader;
+    REQUIRE(reader.open(tmp.string()));
+    const auto out = reader.readEntry(id);
+    CHECK(out == data);
+
+    std::filesystem::remove(tmp);
+}
+
+#if HE_LZ4_AVAILABLE
+TEST_CASE("HpakWriter LZ4 compression round-trip")
+{
+    const HE::UUID id{0xC0C0,0xD0D0};
+    // Highly compressible payload (repeated bytes compress very well)
+    std::vector<uint8_t> data(4096, 0x42);
+
+    Hpak::PackSettings settings;
+    settings.compress = true;
+
+    HpakWriter packer;
+    packer.addEntry(id, data, settings);
+
+    auto tmp = std::filesystem::temp_directory_path() / "he_test_lz4.hpak";
+    REQUIRE(packer.write(tmp.string()));
+
+    // The on-disk file should be smaller than uncompressed (4096 bytes of 0x42)
+    const auto fileSize = std::filesystem::file_size(tmp);
+    CHECK(fileSize < sizeof(Hpak::FileHeader) + sizeof(Hpak::EntryDesc) + data.size());
+
+    HpakReader reader;
+    REQUIRE(reader.open(tmp.string()));
+    const auto out = reader.readEntry(id);
+    REQUIRE(out.size() == data.size());
+    CHECK(out == data);
+
+    std::filesystem::remove(tmp);
+}
+
+TEST_CASE("HpakWriter LZ4 compression + encryption round-trip")
+{
+    const HE::UUID id{0xE0E0,0xF0F0};
+    std::vector<uint8_t> data(2048);
+    for (size_t i = 0; i < data.size(); ++i) data[i] = static_cast<uint8_t>(i & 0xFF);
+
+    Hpak::PackSettings settings;
+    settings.compress = true;
+    settings.encrypt  = true;
+    for (int i = 0; i < 32; ++i) settings.key[i] = static_cast<uint8_t>(i + 7);
+
+    HpakWriter packer;
+    packer.addEntry(id, data, settings);
+
+    auto tmp = std::filesystem::temp_directory_path() / "he_test_lz4enc.hpak";
+    REQUIRE(packer.write(tmp.string()));
+
+    HpakReader reader;
+    REQUIRE(reader.open(tmp.string()));
+
+    // Without key: still encrypted → result is not the original
+    const auto garbled = reader.readEntry(id);
+    CHECK(garbled != data);
+
+    // With key: decrypt then decompress → original
+    const auto out = reader.readEntry(id, settings.key);
+    REQUIRE(out.size() == data.size());
+    CHECK(out == data);
+
+    std::filesystem::remove(tmp);
+}
+
+TEST_CASE("HpakWriter: compress=true on already-small data still round-trips")
+{
+    const HE::UUID id{0x1111,0x2222};
+    const std::vector<uint8_t> data = {1, 2, 3, 4, 5}; // may not compress smaller
+
+    Hpak::PackSettings settings;
+    settings.compress = true;
+
+    HpakWriter packer;
+    packer.addEntry(id, data, settings);
+
+    auto tmp = std::filesystem::temp_directory_path() / "he_test_lz4tiny.hpak";
+    REQUIRE(packer.write(tmp.string()));
+
+    HpakReader reader;
+    REQUIRE(reader.open(tmp.string()));
+    const auto out = reader.readEntry(id);
+    CHECK(out == data);
+
+    std::filesystem::remove(tmp);
+}
+#endif // HE_LZ4_AVAILABLE
