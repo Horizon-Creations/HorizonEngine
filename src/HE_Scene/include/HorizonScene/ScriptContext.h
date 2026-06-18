@@ -22,6 +22,8 @@ class PhysicsWorld;
 //   horizon.setScale(entityId, x, y, z)
 //   horizon.spawn(parentId, name)       → entityId
 //   horizon.destroy(entityId)
+//   horizon.setVelocity(entityId, vx, vy, vz)   (character controller only)
+//   horizon.isGrounded(entityId)        → bool   (character controller only)
 //
 // Each script instance has self.entityId set to the owning entity's raw handle.
 class ScriptContext

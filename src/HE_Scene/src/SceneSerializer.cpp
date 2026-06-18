@@ -10,6 +10,7 @@
 #include "HorizonScene/Components/LightComponent.h"
 #include "HorizonScene/Components/RigidBodyComponent.h"
 #include "HorizonScene/Components/ColliderComponent.h"
+#include "HorizonScene/Components/CharacterControllerComponent.h"
 #include "HorizonScene/Components/ScriptComponent.h"
 #include "HorizonScene/Components/EnvironmentComponent.h"
 #include "HorizonScene/Components/EnvironmentLightComponent.h"
@@ -150,6 +151,16 @@ namespace
 				{ "radius",    col->radius },
 				{ "height",    col->height },
 				{ "isTrigger", col->isTrigger },
+			};
+		}
+		if (auto* cc = registry.try_get<CharacterControllerComponent>(entity))
+		{
+			comps["characterController"] = {
+				{ "slopeLimit", cc->slopeLimit },
+				{ "stepHeight", cc->stepHeight },
+				{ "skinWidth",  cc->skinWidth  },
+				{ "mass",       cc->mass       },
+				{ "gravity",    cc->gravity    },
 			};
 		}
 		if (auto* s = registry.try_get<ScriptComponent>(entity))
@@ -349,6 +360,17 @@ namespace
 			if (c.contains("halfEx") && c["halfEx"].is_array() && c["halfEx"].size() == 3)
 				col.halfExtents = { c["halfEx"][0], c["halfEx"][1], c["halfEx"][2] };
 			registry.emplace_or_replace<ColliderComponent>(entity, col);
+		}
+		if (comps.contains("characterController"))
+		{
+			const json& c = comps["characterController"];
+			CharacterControllerComponent cc;
+			cc.slopeLimit = c.value("slopeLimit", cc.slopeLimit);
+			cc.stepHeight = c.value("stepHeight", cc.stepHeight);
+			cc.skinWidth  = c.value("skinWidth",  cc.skinWidth);
+			cc.mass       = c.value("mass",       cc.mass);
+			cc.gravity    = c.value("gravity",    cc.gravity);
+			registry.emplace_or_replace<CharacterControllerComponent>(entity, cc);
 		}
 		if (comps.contains("script"))
 		{

@@ -37,6 +37,13 @@ public:
                        const glm::vec3& direction,
                        float            maxDistance = 1000.0f) const;
 
+    // Set the movement velocity for a CharacterController entity (m/s).
+    // Has no effect if the entity has no active character controller.
+    void setCharacterVelocity(uint32_t entityId, const glm::vec3& velocity);
+
+    // Returns true if the character's feet are on solid ground.
+    bool isCharacterGrounded(uint32_t entityId) const;
+
     // Remove and destroy all physics bodies without touching the ECS.
     void clear();
 

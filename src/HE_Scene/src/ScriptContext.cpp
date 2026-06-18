@@ -195,6 +195,26 @@ static int lua_horizon_raycast(lua_State* L)
     return 1;
 }
 
+static int lua_horizon_setVelocity(lua_State* L)
+{
+    lua_Integer id = luaL_checkinteger(L, 1);
+    float vx = static_cast<float>(luaL_checknumber(L, 2));
+    float vy = static_cast<float>(luaL_checknumber(L, 3));
+    float vz = static_cast<float>(luaL_checknumber(L, 4));
+    PhysicsWorld* pw = getPhysics(L);
+    if (pw) pw->setCharacterVelocity(static_cast<uint32_t>(id), {vx, vy, vz});
+    return 0;
+}
+
+static int lua_horizon_isGrounded(lua_State* L)
+{
+    lua_Integer id = luaL_checkinteger(L, 1);
+    PhysicsWorld* pw = getPhysics(L);
+    bool grounded = pw && pw->isCharacterGrounded(static_cast<uint32_t>(id));
+    lua_pushboolean(L, grounded ? 1 : 0);
+    return 1;
+}
+
 // ─── Registration table ──────────────────────────────────────────────────────
 
 static const luaL_Reg kHorizonFuncs[] = {
@@ -209,6 +229,8 @@ static const luaL_Reg kHorizonFuncs[] = {
     { "spawn",       lua_horizon_spawn       },
     { "destroy",     lua_horizon_destroy     },
     { "raycast",     lua_horizon_raycast     },
+    { "setVelocity", lua_horizon_setVelocity },
+    { "isGrounded",  lua_horizon_isGrounded  },
     { nullptr, nullptr }
 };
 
