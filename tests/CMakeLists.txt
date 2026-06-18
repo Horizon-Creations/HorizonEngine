@@ -24,6 +24,7 @@ add_executable(he_tests
     test_collider.cpp
     test_raycast.cpp
     test_character.cpp
+    test_skeletalmeshimporter.cpp
     # Culling/sorting/undo/camera/graph are compiled in directly — pulling in the
     # full HorizonRendering/Editor targets would drag GPU backends and ImGui in.
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/FrustumCuller.cpp
@@ -51,6 +52,7 @@ target_compile_definitions(he_tests PRIVATE HE_RENDERING_BUILD_DLL)
 target_link_libraries(he_tests PRIVATE
     HorizonCore
     HorizonScene
+    HorizonImporters
     nlohmann_json::nlohmann_json
 )
 
