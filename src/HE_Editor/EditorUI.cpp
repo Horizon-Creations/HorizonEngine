@@ -3815,7 +3815,9 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			ImGui::Checkbox("Spatial##as",     &a->spatial);     trackEdit();
 			if (a->spatial)
 			{
-				ImGui::DragFloat("Range##as", &a->range, 0.5f, 0.0f, 1000.0f, "%.1f m"); trackEdit();
+				ImGui::DragFloat("Inner Range##as",   &a->innerRange,    0.1f, 0.0f, 1000.0f, "%.1f m"); trackEdit();
+				ImGui::DragFloat("Range##as",         &a->range,         0.5f, 0.0f, 1000.0f, "%.1f m"); trackEdit();
+				ImGui::DragFloat("Rolloff Factor##as", &a->rolloffFactor, 0.1f, 0.0f, 10.0f,  "%.2f");   trackEdit();
 			}
 		}
 		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<AudioSourceComponent>(entity); }

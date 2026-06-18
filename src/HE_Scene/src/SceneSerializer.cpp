@@ -218,13 +218,15 @@ namespace
 		if (auto* a = registry.try_get<AudioSourceComponent>(entity))
 		{
 			comps["audiosource"] = {
-				{ "asset",       uuidToJson(a->assetId) },
-				{ "volume",      a->volume },
-				{ "pitch",       a->pitch },
-				{ "range",       a->range },
-				{ "loop",        a->loop },
-				{ "playOnStart", a->playOnStart },
-				{ "spatial",     a->spatial },
+				{ "asset",        uuidToJson(a->assetId) },
+				{ "volume",       a->volume },
+				{ "pitch",        a->pitch },
+				{ "range",        a->range },
+				{ "innerRange",   a->innerRange },
+				{ "rolloffFactor",a->rolloffFactor },
+				{ "loop",         a->loop },
+				{ "playOnStart",  a->playOnStart },
+				{ "spatial",      a->spatial },
 			};
 		}
 		if (auto* l = registry.try_get<AudioListenerComponent>(entity))
@@ -432,13 +434,15 @@ namespace
 		{
 			const json& c = comps["audiosource"];
 			AudioSourceComponent a;
-			a.assetId     = jsonToUuid(c.value("asset", json()));
-			a.volume      = c.value("volume",      a.volume);
-			a.pitch       = c.value("pitch",       a.pitch);
-			a.range       = c.value("range",       a.range);
-			a.loop        = c.value("loop",        a.loop);
-			a.playOnStart = c.value("playOnStart",  a.playOnStart);
-			a.spatial     = c.value("spatial",     a.spatial);
+			a.assetId       = jsonToUuid(c.value("asset", json()));
+			a.volume        = c.value("volume",        a.volume);
+			a.pitch         = c.value("pitch",         a.pitch);
+			a.range         = c.value("range",         a.range);
+			a.innerRange    = c.value("innerRange",    a.innerRange);
+			a.rolloffFactor = c.value("rolloffFactor", a.rolloffFactor);
+			a.loop          = c.value("loop",          a.loop);
+			a.playOnStart   = c.value("playOnStart",   a.playOnStart);
+			a.spatial       = c.value("spatial",       a.spatial);
 			registry.emplace_or_replace<AudioSourceComponent>(entity, a);
 		}
 		if (comps.contains("audiolistener"))
