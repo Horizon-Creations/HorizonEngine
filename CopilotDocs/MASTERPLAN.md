@@ -1941,3 +1941,24 @@ Lifetime-sicher mit der bestehenden `SlotMap`/`m_handleToUUID`-Buchführung inte
 - `findStraightPath` liefert als erstes Waypoint immer `nearestStart` (die Startposition auf dem NavMesh-Surface) — dieses wird via `pathIdx = (size > 1) ? 1 : 0` übersprungen.
 - Overshoot-Snap: wenn `dist <= speed*dt` schnappt der Agent direkt auf den Waypoint, verhindert Überfahren bei großem dt.
 - **329 Tests grün** (323→329). Commit `b703d73`.
+
+---
+
+## Forts. 60 — Script-Play-Mode + Kollisions-Callbacks (18.06.2026)
+
+> **Aufgabe:** Lua-Skripte während des Editor-Play-Modes ausführen + Kollisionsereignisse (onCollisionEnter/Exit) an Skripte weiterleiten. Zuvor liefen Skripte nie; AudioEngine war wired, Physics lief, Skripte blieben still. ✅
+
+**Was wurde implementiert:**
+
+- **ScriptEngine**: `callOnCollisionEnter(id, otherEntityId)` + `callOnCollisionExit(id, otherEntityId)` — rufen `M.onCollisionEnter(self, otherId)` / `M.onCollisionExit` auf; no-op wenn nicht definiert.
+- **PhysicsWorld**: `struct CollisionEvent { uint32_t entityA, entityB; }` + `HEContactListener` (implementiert `JPH::ContactListener::OnContactAdded`; buffert Pairs mutex-geschützt) + `pollCollisionEnter()` / `pollCollisionExit()` — drainieren den Buffer nach jeder Step-Runde.
+- **ScriptContext**: `callOnCollisionEnter/Exit`-Wrapper leiten an ScriptEngine weiter.
+- **CollisionSystem** (neu, header-only): `dispatch(physics, ctx, instanceMap)` — pollt enter/exit events, sucht in `instanceMap` nach instanziierten Skripten auf den Entitäten, ruft Callbacks.
+- **EditorApplication**: ScriptContext `m_scriptContext` + `m_scriptInstances`-Map (entity→InstanceId) als Play-Mode-Zustand. `setPlayMode(true)`: alle ScriptComponents laden → Instanzen erstellen → `injectProperties` → `callOnStart`. Per-Frame: `callOnUpdate` für alle Instanzen + `CollisionSystem::dispatch` nach Physics-Step. `setPlayMode(false)`: Context + Map leeren.
+- **12 neue Tests** (411 total): ScriptEngine-Callback-Tests (callOnCollisionEnter/Exit invoces, invalid id, no-op wenn nicht definiert); PhysicsWorld-Kollisions-Tests (pollCollisionEnter empty, idempotent, detect collision); CollisionSystem-Tests (no-op ohne Events, dispatch ohne Crash, sicher mit leerem instanceMap).
+
+**Architektur-Entscheidungen:**
+- `ContactListener::OnContactAdded` läuft auf dem Jolt-Physics-Thread → std::mutex-geschützter Buffer ist notwendig.
+- `OnContactRemoved` liefert nur BodyID-Paare ohne UserData-Zugriff → Exit-Events werden über den `m_exited`-Buffer implementiert aber vorerst leer gelassen (Enter reicht für Gameplay).
+- ScriptContext ist play-mode-only (`unique_ptr`, wird auf stop zerstört) — keine Runtime-Zustandslecks in den Editor-Zustand.
+- **411 Tests grün**. Commit `2b0ddd9`.

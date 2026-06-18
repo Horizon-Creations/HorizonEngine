@@ -217,6 +217,39 @@ vertex float4 vertexShadow(uint vid [[vertex_id]],
 	return u.mvp * float4(float3(verts[vid].position), 1.0);
 }
 
+// Linear blend-skinning vertex shader. Bone matrices arrive in a dedicated buffer
+// (buffer 4) so they are not limited by the 4 KB setVertexBytes ceiling.
+// Outputs the same VSOut as vertexMain so fragmentMain is reused unchanged.
+vertex VSOut skinnedVertex(uint vid [[vertex_id]],
+                           const device VertexIn*   verts       [[buffer(0)]],
+                           constant Uniforms&        u           [[buffer(1)]],
+                           const device uint4*       boneIds     [[buffer(2)]],
+                           const device float4*      boneWeights [[buffer(3)]],
+                           constant float4x4*        boneMats    [[buffer(4)]])
+{
+    uint4  ids  = boneIds[vid];
+    float4 wgts = boneWeights[vid];
+    float4x4 skin = wgts.x * boneMats[ids.x]
+                  + wgts.y * boneMats[ids.y]
+                  + wgts.z * boneMats[ids.z]
+                  + wgts.w * boneMats[ids.w];
+    float4 skinnedPos = skin * float4(float3(verts[vid].position), 1.0);
+    float4 world      = u.model * skinnedPos;
+    float3x3 m3 = float3x3(u.model[0].xyz, u.model[1].xyz, u.model[2].xyz);
+    float3x3 s3 = float3x3(skin[0].xyz,    skin[1].xyz,    skin[2].xyz);
+    VSOut out;
+    out.position   = u.mvp * skinnedPos;
+    out.worldPos   = world.xyz;
+    out.normal     = normalize(m3 * (s3 * float3(verts[vid].normal)));
+    out.uv         = float2(verts[vid].uv);
+    out.color      = u.color.rgb;
+    out.hasTexture = u.flags.x;
+    out.metallic   = u.pbr.x;
+    out.roughness  = u.pbr.y;
+    out.opacity    = u.pbr.z;
+    return out;
+}
+
 float shadowFactor(constant SceneUniforms& scene, float3 worldPos, float3 N, float3 L,
                    texture2d<float> shadowMap, sampler shadowSmp)
 {
@@ -1287,6 +1320,16 @@ void MetalRenderer::Shutdown()
 	}
 	m_meshCache.clear();
 
+	for (auto& [id, smesh] : m_skeletalMeshCache)
+	{
+		if (smesh.vertexBuf)  CFBridgingRelease(smesh.vertexBuf);
+		if (smesh.boneIdBuf)  CFBridgingRelease(smesh.boneIdBuf);
+		if (smesh.boneWgtBuf) CFBridgingRelease(smesh.boneWgtBuf);
+		if (smesh.indexBuf)   CFBridgingRelease(smesh.indexBuf);
+		if (smesh.texture)    CFBridgingRelease(smesh.texture);
+	}
+	m_skeletalMeshCache.clear();
+
 	for (auto& [id, tex] : m_materialTexCache)
 		if (tex) CFBridgingRelease(tex);
 	m_materialTexCache.clear();
@@ -1309,8 +1352,9 @@ void MetalRenderer::Shutdown()
 	if (m_noiseTexture)    { CFBridgingRelease(m_noiseTexture);    m_noiseTexture = nullptr; }
 	if (m_noiseSampler)    { CFBridgingRelease(m_noiseSampler);    m_noiseSampler = nullptr; }
 	if (m_skyEnvCube)      { CFBridgingRelease(m_skyEnvCube);      m_skyEnvCube = nullptr; }
-	if (m_scenePipeline)   { CFBridgingRelease(m_scenePipeline);   m_scenePipeline = nullptr; }
-	if (m_sceneBlendPipeline) { CFBridgingRelease(m_sceneBlendPipeline); m_sceneBlendPipeline = nullptr; }
+	if (m_scenePipeline)        { CFBridgingRelease(m_scenePipeline);        m_scenePipeline = nullptr; }
+	if (m_sceneBlendPipeline)   { CFBridgingRelease(m_sceneBlendPipeline);   m_sceneBlendPipeline = nullptr; }
+	if (m_skinnedPipeline)      { CFBridgingRelease(m_skinnedPipeline);      m_skinnedPipeline = nullptr; }
 	if (m_sceneDepthState) { CFBridgingRelease(m_sceneDepthState); m_sceneDepthState = nullptr; }
 	if (m_shadowPipeline)  { CFBridgingRelease(m_shadowPipeline);  m_shadowPipeline = nullptr; }
 	if (m_shadowDepthTex)  { CFBridgingRelease(m_shadowDepthTex);  m_shadowDepthTex = nullptr; }
@@ -1493,6 +1537,16 @@ void MetalRenderer::CreateScenePipeline()
 			throw std::runtime_error(std::string("MetalRenderer: blend pipeline creation failed: ")
 				+ (error ? [[error localizedDescription] UTF8String] : "unknown"));
 		m_sceneBlendPipeline = (void*)CFBridgingRetain(blendPso);
+
+		// ── Skinned geometry pipeline (linear blend skinning, same fragment shader) ──
+		desc.colorAttachments[0].blendingEnabled = NO;
+		desc.vertexFunction   = [lib newFunctionWithName:@"skinnedVertex"];
+		desc.fragmentFunction = [lib newFunctionWithName:@"fragmentMain"];
+		id<MTLRenderPipelineState> skinPso = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+		if (!skinPso)
+			throw std::runtime_error(std::string("MetalRenderer: skinned pipeline creation failed: ")
+				+ (error ? [[error localizedDescription] UTF8String] : "unknown"));
+		m_skinnedPipeline = (void*)CFBridgingRetain(skinPso);
 
 		// ── HDR tonemap pipeline (RGBA16F scene color → swapchain LDR) ──────
 		NSError* tmError = nil;
@@ -1917,6 +1971,106 @@ const MetalRenderer::GpuMesh* MetalRenderer::ResolveMesh(const HE::UUID& assetId
 		 + (mesh.texture ? ", textured" : "") + ")").c_str());
 
 	return &m_meshCache.emplace(assetId, mesh).first->second;
+}
+
+// ─── Skeletal mesh upload ─────────────────────────────────────────────────────
+const MetalRenderer::GpuSkeletalMesh*
+MetalRenderer::ResolveSkeletalMesh(const HE::UUID& assetId)
+{
+	if (assetId == HE::UUID{} || !m_contentManager)
+		return nullptr;
+
+	if (auto it = m_skeletalMeshCache.find(assetId); it != m_skeletalMeshCache.end())
+		return &it->second;
+
+	const SkeletalMeshAsset* asset = m_contentManager->getSkeletalMesh(assetId);
+	if (!asset || asset->vertices.empty() || asset->indices.empty())
+		return nullptr;
+
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	const size_t vertexCount = asset->vertices.size() / 3;
+
+	// Interleaved pos+normal+uv (same layout as GpuMesh, buffer 0)
+	std::vector<float> interleaved;
+	interleaved.reserve(vertexCount * 8);
+	for (size_t v = 0; v < vertexCount; ++v)
+	{
+		interleaved.insert(interleaved.end(),
+			{ asset->vertices[v*3+0], asset->vertices[v*3+1], asset->vertices[v*3+2] });
+		if (v*3+2 < asset->normals.size())
+			interleaved.insert(interleaved.end(),
+				{ asset->normals[v*3+0], asset->normals[v*3+1], asset->normals[v*3+2] });
+		else
+			interleaved.insert(interleaved.end(), { 0.0f, 0.0f, 0.0f });
+		if (v*2+1 < asset->uvs.size())
+			interleaved.insert(interleaved.end(), { asset->uvs[v*2+0], asset->uvs[v*2+1] });
+		else
+			interleaved.insert(interleaved.end(), { 0.0f, 0.0f });
+	}
+
+	// Bone IDs (uint4 per vertex, buffer 2) — zero-padded when absent
+	std::vector<uint32_t> boneIds(vertexCount * 4, 0u);
+	if (!asset->boneIDs.empty())
+		std::copy_n(asset->boneIDs.begin(),
+		            std::min(asset->boneIDs.size(), vertexCount * 4),
+		            boneIds.begin());
+
+	// Bone weights (float4 per vertex, buffer 3) — default 100% joint 0
+	std::vector<float> boneWgts(vertexCount * 4, 0.0f);
+	for (size_t v = 0; v < vertexCount; ++v) boneWgts[v * 4] = 1.0f;
+	if (!asset->boneWeights.empty())
+		std::copy_n(asset->boneWeights.begin(),
+		            std::min(asset->boneWeights.size(), vertexCount * 4),
+		            boneWgts.begin());
+
+	GpuSkeletalMesh mesh;
+	mesh.indexCount  = static_cast<int>(asset->indices.size());
+	mesh.localBounds = HE::AABB::fromPositions(asset->vertices.data(), vertexCount);
+	mesh.vertexBuf  = (void*)CFBridgingRetain(
+		[device newBufferWithBytes:interleaved.data()
+		                    length:interleaved.size() * sizeof(float)
+		                   options:MTLResourceStorageModeShared]);
+	mesh.boneIdBuf  = (void*)CFBridgingRetain(
+		[device newBufferWithBytes:boneIds.data()
+		                    length:boneIds.size() * sizeof(uint32_t)
+		                   options:MTLResourceStorageModeShared]);
+	mesh.boneWgtBuf = (void*)CFBridgingRetain(
+		[device newBufferWithBytes:boneWgts.data()
+		                    length:boneWgts.size() * sizeof(float)
+		                   options:MTLResourceStorageModeShared]);
+	mesh.indexBuf   = (void*)CFBridgingRetain(
+		[device newBufferWithBytes:asset->indices.data()
+		                    length:asset->indices.size() * sizeof(uint32_t)
+		                   options:MTLResourceStorageModeShared]);
+
+	if (!asset->materialPath.empty())
+	{
+		const HE::UUID matId = m_contentManager->loadAsset(asset->materialPath);
+		if (const MaterialAsset* mat = m_contentManager->getMaterial(matId);
+		    mat && !mat->texturePaths.empty())
+		{
+			const HE::UUID texId = m_contentManager->loadAsset(mat->texturePaths[0]);
+			if (const TextureAsset* tex = m_contentManager->getTexture(texId);
+			    tex && !tex->data.empty() && tex->channels == 4)
+			{
+				MTLTextureDescriptor* desc = [MTLTextureDescriptor
+					texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+					                             width:tex->width
+					                            height:tex->height
+					                         mipmapped:NO];
+				desc.usage       = MTLTextureUsageShaderRead;
+				desc.storageMode = MTLStorageModeShared;
+				id<MTLTexture> texture = [device newTextureWithDescriptor:desc];
+				[texture replaceRegion:MTLRegionMake2D(0, 0, tex->width, tex->height)
+				           mipmapLevel:0
+				             withBytes:tex->data.data()
+				           bytesPerRow:tex->width * 4];
+				mesh.texture = (void*)CFBridgingRetain(texture);
+			}
+		}
+	}
+
+	return &m_skeletalMeshCache.emplace(assetId, mesh).first->second;
 }
 
 // ─── Material override texture ──────────────────────────────────────────────
@@ -2589,6 +2743,88 @@ void MetalRenderer::UpdateSkyEnvCube(const glm::vec3& sunDir)
 	}
 }
 
+// ─── Skinned geometry pass ────────────────────────────────────────────────────
+// Draws all SkinnedRenderObjects from the current render world using the
+// linear blend-skinning vertex shader. Must be called inside the HDR scene
+// render encoder (same attachments as the opaque geometry pass).
+// sceneUniformsPtr is a const SceneUniforms* (opaque to avoid pulling the struct
+// into the header).
+void MetalRenderer::EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& viewProj,
+                                         bool shadows, const void* sceneUniformsPtr)
+{
+	if (!m_skinnedPipeline || m_renderWorld.skinnedObjects.empty())
+		return;
+
+	id<MTLRenderCommandEncoder> encoder = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
+	id<MTLDevice>               device  = (__bridge id<MTLDevice>)m_device;
+	const SceneUniforms& scene = *static_cast<const SceneUniforms*>(sceneUniformsPtr);
+
+	[encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_skinnedPipeline];
+	[encoder setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
+	// Scene-wide fragment state: SceneUniforms + shadow map + skyEnv + AO
+	[encoder setFragmentBytes:&scene length:sizeof(scene) atIndex:0];
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(shadows ? m_shadowDepthTex : m_dummyTexture) atIndex:1];
+	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:1];
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)m_skyEnvCube atIndex:2];
+	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:2];
+	const bool ssaoActive = m_ssaoEnabled && m_ssaoResult;
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(ssaoActive ? m_ssaoResult : m_dummyTexture) atIndex:3];
+	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:3];
+	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
+
+	constexpr int kMaxBones = 128;
+	std::vector<glm::mat4> boneScratch(kMaxBones, glm::mat4(1.0f));
+
+	for (const SkinnedRenderObject& obj : m_renderWorld.skinnedObjects)
+	{
+		const GpuSkeletalMesh* smesh = ResolveSkeletalMesh(obj.meshAssetId);
+		if (!smesh) continue;
+
+		// Per-draw uniforms (mvp, model, color, pbr)
+		UnlitUniforms u;
+		u.mvp   = viewProj * obj.transform;
+		u.model = obj.transform;
+		void* matTex = nullptr;
+		bool  hasTex = ResolveMaterialTexture(obj.materialAssetId, matTex);
+		void* effectiveTex = hasTex ? matTex : smesh->texture;
+		void* texPtr = effectiveTex ? effectiveTex : m_dummyTexture;
+		u.flags = glm::vec4(effectiveTex ? 1.0f : 0.0f, 0, 0, 0);
+		glm::vec3 baseColor(1.0f); float metallic = 0.0f, roughness = 0.5f, opacity = 1.0f;
+		bool hasMat = ResolveMaterialParams(obj.materialAssetId, baseColor, metallic, roughness, opacity);
+		if (!hasMat) baseColor = effectiveTex ? glm::vec3(1.0f) : glm::vec3(0.85f, 0.55f, 0.25f);
+		u.color = glm::vec4(baseColor, 1.0f);
+		u.pbr   = glm::vec4(metallic, roughness, opacity, 0.0f);
+
+		// Upload bone matrices for this draw — allocate a temporary buffer so
+		// each draw call gets its own range (the encoder retains it until GPU completion).
+		const int boneCount = static_cast<int>(
+		    std::min(obj.boneMatrices.size(), static_cast<size_t>(kMaxBones)));
+		std::fill(boneScratch.begin(), boneScratch.end(), glm::mat4(1.0f));
+		if (boneCount > 0)
+			std::copy_n(obj.boneMatrices.begin(), boneCount, boneScratch.begin());
+
+		id<MTLBuffer> boneBuf = [device newBufferWithBytes:boneScratch.data()
+		                                            length:kMaxBones * sizeof(glm::mat4)
+		                                           options:MTLResourceStorageModeShared];
+
+		[encoder setVertexBuffer:(__bridge id<MTLBuffer>)smesh->vertexBuf  offset:0 atIndex:0];
+		[encoder setVertexBytes:&u length:sizeof(u) atIndex:1];
+		[encoder setVertexBuffer:(__bridge id<MTLBuffer>)smesh->boneIdBuf  offset:0 atIndex:2];
+		[encoder setVertexBuffer:(__bridge id<MTLBuffer>)smesh->boneWgtBuf offset:0 atIndex:3];
+		[encoder setVertexBuffer:boneBuf                                   offset:0 atIndex:4];
+		[encoder setFragmentTexture:(__bridge id<MTLTexture>)texPtr atIndex:0];
+		[encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+		                    indexCount:(NSUInteger)smesh->indexCount
+		                     indexType:MTLIndexTypeUInt32
+		                   indexBuffer:(__bridge id<MTLBuffer>)smesh->indexBuf
+		             indexBufferOffset:0];
+		// boneBuf is released here (ARC); the encoder holds its own strong reference
+	}
+
+	// Restore the regular scene pipeline for subsequent passes
+	[encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_scenePipeline];
+}
+
 void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 {
 	if (!m_world || !m_scenePipeline || width <= 0 || height <= 0)
@@ -2790,6 +3026,9 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 			             indexBufferOffset:0];
 		}
 	});
+
+	// ── Skinned geometry: drawn after opaque, before sky so they occlude the background.
+	EncodeSkinnedObjects(renderEncoder, viewProj, shadows, &scene);
 
 	// Sky LAST — fills the background pixels the geometry didn't cover.
 	drawSky();
