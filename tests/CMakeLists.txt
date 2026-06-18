@@ -21,6 +21,7 @@ add_executable(he_tests
     test_scripting.cpp
     test_scripting_binding.cpp
     test_physics.cpp
+    test_collision_system.cpp
     test_collider.cpp
     test_raycast.cpp
     test_character.cpp

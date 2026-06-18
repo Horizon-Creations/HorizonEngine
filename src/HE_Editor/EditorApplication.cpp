@@ -9,6 +9,10 @@
 #include <HorizonScene/PropertyAnimationSystem.h>
 #include <HorizonScene/NavigationSystem.h>
 #include <HorizonScene/ParticleSystem.h>
+#include <HorizonScene/ScriptContext.h>
+#include <HorizonScene/CollisionSystem.h>
+#include <HorizonScene/Components/ScriptComponent.h>
+#include <ContentManager/Assets.h>
 #include <Renderer/RendererFactory.h>
 #include <DebugDraw/DebugDraw.h>
 #include <Diagnostics/Logger.h>
@@ -818,6 +822,17 @@ void EditorApplication::OnRender(float dt)
 		if (m_isPlaying && m_editorWorld)
 			AudioSystem::updateSpatial(*m_editorWorld, m_audioEngine);
 
+		// Per-frame script update
+		if (m_isPlaying && m_scriptContext)
+		{
+			for (auto& [entityId, instId] : m_scriptInstances)
+				m_scriptContext->callOnUpdate(instId, dt);
+		}
+
+		// Dispatch collision events to scripts (after physics has stepped this frame)
+		if (m_isPlaying && m_physicsWorld && m_scriptContext)
+			CollisionSystem::dispatch(*m_physicsWorld, *m_scriptContext, m_scriptInstances);
+
 		pushEnvironment(dt); // auto-advances + pushes the World env component
 
 		// ── Debug draw overlay (selected-entity marker + colliders) ──────────
@@ -1092,6 +1107,26 @@ void EditorApplication::setPlayMode(bool play)
 		// Start audio for sources marked playOnStart
 		AudioSystem::playOnStart(*m_editorWorld, m_audioEngine, &contentManager());
 
+		// Initialise script context and start all enabled scripts
+		m_scriptContext = std::make_unique<ScriptContext>(*m_editorWorld);
+		m_scriptContext->setPhysicsWorld(m_physicsWorld.get());
+		{
+			auto& reg = m_editorWorld->registry();
+			for (auto [entity, sc] : reg.view<ScriptComponent>().each())
+			{
+				if (!sc.enabled) continue;
+				const ScriptAsset* asset = contentManager().getScript(sc.scriptAssetId);
+				if (!asset || asset->sourceCode.empty()) continue;
+				if (!m_scriptContext->isScriptLoaded(sc.moduleName))
+					m_scriptContext->loadScript(sc.moduleName, asset->sourceCode);
+				auto instId = m_scriptContext->createInstance(sc.moduleName, entity);
+				if (instId == ScriptEngine::kInvalidInstance) continue;
+				m_scriptContext->injectProperties(instId, sc.properties);
+				m_scriptContext->callOnStart(instId);
+				m_scriptInstances[static_cast<uint32_t>(entity)] = instId;
+			}
+		}
+
 		Logger::Log(Logger::LogLevel::Info, "EditorApplication: entering play mode");
 	}
 	else
@@ -1108,6 +1143,10 @@ void EditorApplication::setPlayMode(bool play)
 		// Tear down physics
 		m_physicsWorld.reset();
 		m_physicsAccum = 0.0f;
+
+		// Tear down scripts
+		m_scriptContext.reset();
+		m_scriptInstances.clear();
 
 		// Stop all audio when exiting play mode
 		m_audioEngine.stopAll();

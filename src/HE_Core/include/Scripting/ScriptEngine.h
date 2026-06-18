@@ -60,6 +60,12 @@ public:
     // Call script.onUpdate(self, dt). No-op (returns true) if not defined.
     bool callOnUpdate(InstanceId id, float dt);
 
+    // Call script.onCollisionEnter(self, otherEntityId). No-op if not defined.
+    bool callOnCollisionEnter(InstanceId id, uint32_t otherEntityId);
+
+    // Call script.onCollisionExit(self, otherEntityId). No-op if not defined.
+    bool callOnCollisionExit(InstanceId id, uint32_t otherEntityId);
+
     // Last error string from any failed compile or call.
     const std::string& lastError() const { return m_lastError; }
 

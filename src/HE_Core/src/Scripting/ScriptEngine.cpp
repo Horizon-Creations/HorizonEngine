@@ -170,6 +170,36 @@ bool ScriptEngine::callOnUpdate(InstanceId id, float dt)
     return pcall(2, 0);
 }
 
+bool ScriptEngine::callOnCollisionEnter(InstanceId id, uint32_t otherEntityId)
+{
+    auto it = m_instances.find(id);
+    if (it == m_instances.end()) { m_lastError = "Invalid instance id"; return false; }
+
+    lua_rawgeti(m_L, LUA_REGISTRYINDEX, it->second.luaRef);
+    lua_getfield(m_L, -1, "onCollisionEnter");
+    if (lua_isnil(m_L, -1)) { lua_pop(m_L, 2); return true; }
+
+    lua_rawgeti(m_L, LUA_REGISTRYINDEX, it->second.luaRef);
+    lua_remove(m_L, -3);
+    lua_pushinteger(m_L, static_cast<lua_Integer>(otherEntityId));
+    return pcall(2, 0);
+}
+
+bool ScriptEngine::callOnCollisionExit(InstanceId id, uint32_t otherEntityId)
+{
+    auto it = m_instances.find(id);
+    if (it == m_instances.end()) { m_lastError = "Invalid instance id"; return false; }
+
+    lua_rawgeti(m_L, LUA_REGISTRYINDEX, it->second.luaRef);
+    lua_getfield(m_L, -1, "onCollisionExit");
+    if (lua_isnil(m_L, -1)) { lua_pop(m_L, 2); return true; }
+
+    lua_rawgeti(m_L, LUA_REGISTRYINDEX, it->second.luaRef);
+    lua_remove(m_L, -3);
+    lua_pushinteger(m_L, static_cast<lua_Integer>(otherEntityId));
+    return pcall(2, 0);
+}
+
 bool ScriptEngine::exec(const std::string& code)
 {
     if (luaL_loadstring(m_L, code.c_str()) != LUA_OK)

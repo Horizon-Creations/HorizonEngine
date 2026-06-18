@@ -11,9 +11,12 @@
 #include <HorizonScene/PhysicsWorld.h>
 #include <HorizonScene/AudioEngine.h>
 #include <HorizonScene/AudioSystem.h>
+#include <HorizonScene/ScriptContext.h>
+#include <HorizonScene/CollisionSystem.h>
 #include <functional>
 #include <future>
 #include <memory>
+#include <unordered_map>
 
 #ifdef HE_IMGUI_ENABLED
 #include <imgui.h>
@@ -254,6 +257,11 @@ private:
 
 	// Audio engine — initialised at startup, active always (spatial update only in play mode).
 	AudioEngine m_audioEngine;
+
+	// Script execution context (play mode only; null outside play mode).
+	std::unique_ptr<ScriptContext> m_scriptContext;
+	// Maps raw entity handle → Lua instance id (parallel lifecycle to m_scriptContext).
+	std::unordered_map<uint32_t, ScriptEngine::InstanceId> m_scriptInstances;
 
 	// Outliner/inspector selection
 	Entity m_selectedEntity = entt::null;

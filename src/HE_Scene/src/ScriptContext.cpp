@@ -298,6 +298,16 @@ bool ScriptContext::callOnUpdate(ScriptEngine::InstanceId id, float dt)
     return m_engine.callOnUpdate(id, dt);
 }
 
+bool ScriptContext::callOnCollisionEnter(ScriptEngine::InstanceId id, uint32_t otherEntityId)
+{
+    return m_engine.callOnCollisionEnter(id, otherEntityId);
+}
+
+bool ScriptContext::callOnCollisionExit(ScriptEngine::InstanceId id, uint32_t otherEntityId)
+{
+    return m_engine.callOnCollisionExit(id, otherEntityId);
+}
+
 bool ScriptContext::hotReloadScript(const std::string& name, const std::string& source)
 {
     return m_engine.hotReloadScript(name, source);

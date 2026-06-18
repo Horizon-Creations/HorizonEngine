@@ -192,3 +192,66 @@ TEST_CASE("PhysicsWorld: can re-initialize after clear")
 
     CHECK(world.registry().get<TransformComponent>(e).position.y < 5.0f);
 }
+
+// ─── Collision events ─────────────────────────────────────────────────────────
+
+TEST_CASE("PhysicsWorld: pollCollisionEnter returns empty before any step")
+{
+    HorizonWorld world;
+    PhysicsWorld phys;
+    phys.initialize(world);
+    CHECK(phys.pollCollisionEnter().empty());
+    CHECK(phys.pollCollisionExit().empty());
+}
+
+TEST_CASE("PhysicsWorld: pollCollisionEnter returns empty on uninitialised world")
+{
+    PhysicsWorld phys;
+    CHECK(phys.pollCollisionEnter().empty());
+    CHECK(phys.pollCollisionExit().empty());
+}
+
+TEST_CASE("PhysicsWorld: pollCollisionEnter is idempotent after drain")
+{
+    HorizonWorld world;
+    PhysicsWorld phys;
+    phys.initialize(world);
+    phys.step(world, kDt);
+    // drain twice — second call must return empty
+    phys.pollCollisionEnter();
+    CHECK(phys.pollCollisionEnter().empty());
+}
+
+TEST_CASE("PhysicsWorld: collision detected between falling body and floor")
+{
+    HorizonWorld world;
+
+    Entity floor = world.createEntity("Floor");
+    {
+        TransformComponent t; t.position = {0, 0, 0}; t.scale = {20, 0.5f, 20};
+        world.addComponent(floor, t);
+        RigidBodyComponent rb; rb.type = RigidBodyType::Static;
+        world.addComponent(floor, rb);
+    }
+
+    Entity box = world.createEntity("Box");
+    {
+        TransformComponent t; t.position = {0, 2, 0}; t.scale = {1, 1, 1};
+        world.addComponent(box, t);
+        RigidBodyComponent rb; rb.type = RigidBodyType::Dynamic; rb.mass = 1.0f;
+        world.addComponent(box, rb);
+    }
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+
+    bool gotEnter = false;
+    for (int i = 0; i < kSteps2s && !gotEnter; ++i)
+    {
+        phys.step(world, kDt);
+        auto evts = phys.pollCollisionEnter();
+        if (!evts.empty()) gotEnter = true;
+    }
+
+    CHECK(gotEnter);
+}
