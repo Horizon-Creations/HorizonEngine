@@ -904,7 +904,7 @@ float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float time, float 
 			// Moonlit silver: moon rises on the opposite arc from the sun.
 			float3 cMoonDir = normalize(float3(-sunDir.x, -sunDir.y, sunDir.z));
 			float  cMoonUp  = clamp((cMoonDir.y + 0.10) / 0.25, 0.0, 1.0);
-			cloudCol += float3(0.20, 0.22, 0.38) * lit * cMoonUp * (1.0 - day) * 0.7;
+			cloudCol += float3(0.20, 0.22, 0.38) * lit * cMoonUp * (1.0 - day) * 0.25;
 			// Forward-scatter glow: Henyey-Greenstein-weighted direct sunlight makes
 			// the sun-facing edges flare gold (the silver lining), strongest when
 			// looking toward the sun and where the cloud isn't self-shadowed.
