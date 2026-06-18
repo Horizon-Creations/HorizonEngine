@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <memory>
 #include <vector>
+#include <string>
 
 // Wraps miniaudio's ma_engine to play decoded int16 PCM audio from AudioAsset.
 // Supports headless/no-device mode for tests (init(true)).
@@ -20,16 +21,30 @@ public:
     void shutdown();
     bool isInitialized() const { return m_initialized; }
 
+    // ─── Bus (mixer group) management ─────────────────────────────────────────
+
+    // Create a named bus (idempotent — re-creating is safe). Returns false on error.
+    bool  createBus(const std::string& name, float volume = 1.0f);
+    void  setBusVolume(const std::string& name, float volume);
+    float getBusVolume(const std::string& name) const; // returns 1.0 if bus not found
+    bool  hasBus(const std::string& name) const;
+
+    // ─── Playback ────────────────────────────────────────────────────────────
+
     // Play non-spatial int16 interleaved PCM. Returns 0 on failure.
+    // busName: route through a named bus ("" = master).
     uint64_t play(const std::vector<uint8_t>& pcmData, int sampleRate, int channels,
-                  float volume = 1.0f, float pitch = 1.0f, bool loop = false);
+                  float volume = 1.0f, float pitch = 1.0f, bool loop = false,
+                  const std::string& busName = {});
 
     // Play spatial sound at world-space position. minDist = full-volume radius,
     // maxDist = silence radius. Uses linear attenuation. Returns 0 on failure.
+    // busName: route through a named bus ("" = master).
     uint64_t playSpatial(const std::vector<uint8_t>& pcmData, int sampleRate, int channels,
                          float volume, float pitch, bool loop,
                          float x, float y, float z,
-                         float minDist = 1.0f, float maxDist = 20.0f);
+                         float minDist = 1.0f, float maxDist = 20.0f,
+                         const std::string& busName = {});
 
     // Update the world-space position of a playing spatial sound.
     void setSoundPosition(uint64_t handle, float x, float y, float z);

@@ -3808,6 +3808,10 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			snprintf(buf, sizeof(buf), "%llu:%llu", (unsigned long long)a->assetId.hi,
 			         (unsigned long long)a->assetId.lo);
 			ImGui::LabelText("Asset ID", "%s", buf);
+			char busBuf[64];
+			std::strncpy(busBuf, a->busName.c_str(), sizeof(busBuf) - 1);
+			busBuf[sizeof(busBuf) - 1] = '\0';
+			if (ImGui::InputText("Bus##as", busBuf, sizeof(busBuf))) { a->busName = busBuf; trackEdit(); }
 			ImGui::DragFloat("Volume##as", &a->volume, 0.01f, 0.0f, 2.0f); trackEdit();
 			ImGui::DragFloat("Pitch##as",  &a->pitch,  0.01f, 0.1f, 4.0f); trackEdit();
 			ImGui::Checkbox("Loop##as",        &a->loop);        trackEdit();
