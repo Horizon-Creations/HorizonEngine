@@ -5,6 +5,7 @@
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/MeshComponent.h>
+#include <HorizonScene/Components/SkeletalMeshComponent.h>
 #include <HorizonScene/Components/MaterialComponent.h>
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/LightComponent.h>
@@ -145,6 +146,23 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 		obj.entityId        = d.entId;
 		obj.lod             = d.lod;
 	});
+
+	// ── Skinned renderables ─────────────────────────────────────────────────
+	out.skinnedObjects.clear();
+	for (auto [e, t, smc] : reg.view<TransformComponent, SkeletalMeshComponent>().each())
+	{
+		SkinnedRenderObject obj;
+		obj.meshAssetId     = smc.meshAssetId;
+		obj.transform       = t.worldMatrix;
+		obj.worldBounds     = kUnitCube.transformed(t.worldMatrix);
+		obj.entityId        = static_cast<uint32_t>(e);
+		obj.boneMatrices    = smc.boneMatrices.empty()
+		                    ? std::vector<glm::mat4>{ glm::mat4(1.0f) }
+		                    : smc.boneMatrices;
+		if (const auto* matComp = reg.try_get<MaterialComponent>(e))
+			obj.materialAssetId = matComp->materialAssetId;
+		out.skinnedObjects.push_back(std::move(obj));
+	}
 
 	// ── Lights ──────────────────────────────────────────────────────────────
 	out.lights.reserve(reg.view<LightComponent>().size() + 1); // +1 for the day-night moon

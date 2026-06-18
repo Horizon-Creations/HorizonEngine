@@ -316,6 +316,37 @@ void main()
 }
 )GLSL";
 
+// ─── Skinned vertex shader ────────────────────────────────────────────────────
+// Identical shading to kUnlitVS/kUnlitFS but blends the vertex by up to 4 bone
+// matrices before applying the model+MVP.  The fragment shader is shared with
+// the unlit path (same uniforms), so only the vertex stage needs to change.
+static const char* kSkinnedVS = R"GLSL(
+#version 410 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec2 aUV;
+layout(location = 3) in uvec4 aBoneIDs;
+layout(location = 4) in vec4  aBoneWeights;
+uniform mat4 uMVP;
+uniform mat4 uModel;
+uniform mat4 uBoneMatrices[128];
+out vec3 vNormal;
+out vec2 vUV;
+out vec3 vWorldPos;
+void main()
+{
+    mat4 skin = aBoneWeights.x * uBoneMatrices[aBoneIDs.x]
+              + aBoneWeights.y * uBoneMatrices[aBoneIDs.y]
+              + aBoneWeights.z * uBoneMatrices[aBoneIDs.z]
+              + aBoneWeights.w * uBoneMatrices[aBoneIDs.w];
+    vec4 skinnedPos = skin * vec4(aPos, 1.0);
+    vWorldPos   = (uModel * skinnedPos).xyz;
+    vNormal     = mat3(uModel) * mat3(skin) * aNormal;
+    vUV         = aUV;
+    gl_Position = uMVP * skinnedPos;
+}
+)GLSL";
+
 // ─── Procedural skybox (drawn into the HDR target behind the scene) ─────────
 // Fullscreen triangle at the far plane; reconstructs a world-space ray per
 // pixel from the inverse view-projection and evaluates the same skyColor() the
@@ -1129,6 +1160,7 @@ void OpenGLRenderer::Initialize(HE::Window* window)
 
 	glEnable(GL_DEPTH_TEST);
 	CreateUnlitPipeline();
+	CreateSkinnedPipeline();
 	CreateShadowResources();
 	CreateSkyPipeline();
 	CreateTonemapPipeline();
@@ -1200,6 +1232,57 @@ void OpenGLRenderer::CreateUnlitPipeline()
 	m_uAO            = glGetUniformLocation(m_unlitProgram, "uAO");
 	m_uViewport      = glGetUniformLocation(m_unlitProgram, "uViewport");
 	m_uSSAOEnabled   = glGetUniformLocation(m_unlitProgram, "uSSAOEnabled");
+}
+
+void OpenGLRenderer::CreateSkinnedPipeline()
+{
+	GLuint vs = CompileStage(GL_VERTEX_SHADER,   kSkinnedVS);
+	GLuint fs = CompileStage(GL_FRAGMENT_SHADER, injectSkyFunc(kUnlitFS).c_str());
+
+	m_skinnedProgram = glCreateProgram();
+	glAttachShader(m_skinnedProgram, vs);
+	glAttachShader(m_skinnedProgram, fs);
+	glLinkProgram(m_skinnedProgram);
+	glDeleteShader(vs); glDeleteShader(fs);
+
+	GLint ok = 0;
+	glGetProgramiv(m_skinnedProgram, GL_LINK_STATUS, &ok);
+	if (!ok)
+	{
+		char log[512];
+		glGetProgramInfoLog(m_skinnedProgram, sizeof(log), nullptr, log);
+		Logger::Log(Logger::LogLevel::Error,
+		    (std::string("OpenGLRenderer: skinned link error: ") + log).c_str());
+		return;
+	}
+
+	auto loc = [&](const char* n){ return glGetUniformLocation(m_skinnedProgram, n); };
+	m_uSkinnedMVP          = loc("uMVP");
+	m_uSkinnedModel        = loc("uModel");
+	m_uSkinnedBones        = loc("uBoneMatrices");
+	m_uSkinnedColor        = loc("uColor");
+	m_uSkinnedHasTex       = loc("uHasTexture");
+	m_uSkinnedTex          = loc("uTexture");
+	m_uSkinnedMetallic     = loc("uMetallic");
+	m_uSkinnedRoughness    = loc("uRoughness");
+	m_uSkinnedOpacity      = loc("uOpacity");
+	m_uSkinnedLightCount   = loc("uLightCount");
+	m_uSkinnedLightPos     = loc("uLightPos");
+	m_uSkinnedLightDir     = loc("uLightDir");
+	m_uSkinnedLightColor   = loc("uLightColor");
+	m_uSkinnedLightParams  = loc("uLightParams");
+	m_uSkinnedCameraPos    = loc("uCameraPos");
+	m_uSkinnedAmbient      = loc("uAmbient");
+	m_uSkinnedSunDir       = loc("uSunDir");
+	m_uSkinnedSkyEnv       = loc("uSkyEnv");
+	m_uSkinnedFogDensity         = loc("uFogDensity");
+	m_uSkinnedFogHeightFalloff   = loc("uFogHeightFalloff");
+	m_uSkinnedShadowEnabled      = loc("uShadowEnabled");
+	m_uSkinnedLightVP            = loc("uLightVP");
+	m_uSkinnedShadowMap          = loc("uShadowMap");
+	m_uSkinnedAO                 = loc("uAO");
+	m_uSkinnedViewport           = loc("uViewport");
+	m_uSkinnedSSAOEnabled        = loc("uSSAOEnabled");
 }
 
 void OpenGLRenderer::UpdateSkyEnvCube(const glm::vec3& sunDir)
@@ -1877,6 +1960,133 @@ const OpenGLRenderer::GpuMesh* OpenGLRenderer::ResolveMesh(const HE::UUID& asset
 	return &m_meshCache.emplace(assetId, mesh).first->second;
 }
 
+// ─── Skeletal mesh upload ─────────────────────────────────────────────────────
+const OpenGLRenderer::GpuSkeletalMesh*
+OpenGLRenderer::ResolveSkeletalMesh(const HE::UUID& assetId)
+{
+	if (assetId == HE::UUID{} || !m_contentManager)
+		return nullptr;
+
+	if (auto it = m_skeletalMeshCache.find(assetId); it != m_skeletalMeshCache.end())
+		return &it->second;
+
+	const SkeletalMeshAsset* asset = m_contentManager->getSkeletalMesh(assetId);
+	if (!asset || asset->vertices.empty() || asset->indices.empty())
+		return nullptr;
+
+	const size_t vertexCount = asset->vertices.size() / 3;
+
+	// Interleaved pos + norm + uv  (attrib locs 0/1/2)
+	std::vector<float> interleaved;
+	interleaved.reserve(vertexCount * 8);
+	for (size_t v = 0; v < vertexCount; ++v)
+	{
+		interleaved.insert(interleaved.end(),
+			{ asset->vertices[v*3+0], asset->vertices[v*3+1], asset->vertices[v*3+2] });
+		if (v * 3 + 2 < asset->normals.size())
+			interleaved.insert(interleaved.end(),
+				{ asset->normals[v*3+0], asset->normals[v*3+1], asset->normals[v*3+2] });
+		else
+			interleaved.insert(interleaved.end(), { 0.0f, 0.0f, 0.0f });
+		if (v * 2 + 1 < asset->uvs.size())
+			interleaved.insert(interleaved.end(), { asset->uvs[v*2+0], asset->uvs[v*2+1] });
+		else
+			interleaved.insert(interleaved.end(), { 0.0f, 0.0f });
+	}
+
+	// Bone IDs per vertex  (4 × uint32, attrib loc 3) — zero-padded if missing
+	std::vector<uint32_t> boneIds(vertexCount * 4, 0u);
+	if (!asset->boneIDs.empty())
+		std::copy_n(asset->boneIDs.begin(),
+		            std::min(asset->boneIDs.size(), vertexCount * 4),
+		            boneIds.begin());
+
+	// Bone weights per vertex  (4 × float, attrib loc 4) — default 100% joint 0
+	std::vector<float> boneWgts(vertexCount * 4, 0.0f);
+	for (size_t v = 0; v < vertexCount; ++v) boneWgts[v * 4] = 1.0f;
+	if (!asset->boneWeights.empty())
+		std::copy_n(asset->boneWeights.begin(),
+		            std::min(asset->boneWeights.size(), vertexCount * 4),
+		            boneWgts.begin());
+
+	GpuSkeletalMesh mesh;
+	mesh.indexCount  = static_cast<int>(asset->indices.size());
+	mesh.localBounds = HE::AABB::fromPositions(asset->vertices.data(), vertexCount);
+
+	glGenVertexArrays(1, &mesh.vao);
+	glGenBuffers(1, &mesh.vbo);
+	glGenBuffers(1, &mesh.boneIdVbo);
+	glGenBuffers(1, &mesh.boneWgtVbo);
+	glGenBuffers(1, &mesh.ebo);
+
+	glBindVertexArray(mesh.vao);
+
+	// Base geometry (locs 0/1/2)
+	glBindBuffer(GL_ARRAY_BUFFER, mesh.vbo);
+	glBufferData(GL_ARRAY_BUFFER,
+	             static_cast<GLsizeiptr>(interleaved.size() * sizeof(float)),
+	             interleaved.data(), GL_STATIC_DRAW);
+	glEnableVertexAttribArray(0);
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
+	glEnableVertexAttribArray(1);
+	glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(3 * sizeof(float)));
+	glEnableVertexAttribArray(2);
+	glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(6 * sizeof(float)));
+
+	// Bone IDs (loc 3) — integer attrib so they arrive as uvec4 in the shader
+	glBindBuffer(GL_ARRAY_BUFFER, mesh.boneIdVbo);
+	glBufferData(GL_ARRAY_BUFFER,
+	             static_cast<GLsizeiptr>(boneIds.size() * sizeof(uint32_t)),
+	             boneIds.data(), GL_STATIC_DRAW);
+	glEnableVertexAttribArray(3);
+	glVertexAttribIPointer(3, 4, GL_UNSIGNED_INT, 4 * sizeof(uint32_t), (void*)0);
+
+	// Bone weights (loc 4)
+	glBindBuffer(GL_ARRAY_BUFFER, mesh.boneWgtVbo);
+	glBufferData(GL_ARRAY_BUFFER,
+	             static_cast<GLsizeiptr>(boneWgts.size() * sizeof(float)),
+	             boneWgts.data(), GL_STATIC_DRAW);
+	glEnableVertexAttribArray(4);
+	glVertexAttribPointer(4, 4, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
+
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.ebo);
+	glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+	             static_cast<GLsizeiptr>(asset->indices.size() * sizeof(uint32_t)),
+	             asset->indices.data(), GL_STATIC_DRAW);
+	glBindVertexArray(0);
+
+	// Base color texture
+	if (!asset->materialPath.empty())
+	{
+		const HE::UUID matId = m_contentManager->loadAsset(asset->materialPath);
+		if (const MaterialAsset* mat = m_contentManager->getMaterial(matId);
+		    mat && !mat->texturePaths.empty())
+		{
+			const HE::UUID texId = m_contentManager->loadAsset(mat->texturePaths[0]);
+			if (const TextureAsset* tex = m_contentManager->getTexture(texId);
+			    tex && !tex->data.empty() && tex->channels == 4)
+			{
+				glGenTextures(1, &mesh.texture);
+				glBindTexture(GL_TEXTURE_2D, mesh.texture);
+				glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
+				             static_cast<GLsizei>(tex->width), static_cast<GLsizei>(tex->height),
+				             0, GL_RGBA, GL_UNSIGNED_BYTE, tex->data.data());
+				glGenerateMipmap(GL_TEXTURE_2D);
+				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+				glBindTexture(GL_TEXTURE_2D, 0);
+			}
+		}
+	}
+
+	Logger::Log(Logger::LogLevel::Info,
+		("OpenGLRenderer: uploaded skeletal mesh '" + asset->name + "' ("
+		 + std::to_string(vertexCount) + " verts, "
+		 + std::to_string(asset->skeleton.size()) + " joints)").c_str());
+
+	return &m_skeletalMeshCache.emplace(assetId, mesh).first->second;
+}
+
 // ─── Material override texture ──────────────────────────────────────────────
 bool OpenGLRenderer::ResolveMaterialTexture(const HE::UUID& materialId, unsigned int& outTex)
 {
@@ -2481,6 +2691,96 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glUniform1i(m_uHasTexture, tex != 0);
 			glBindTexture(GL_TEXTURE_2D, tex);
 			glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, nullptr);
+		}
+
+		// ── Skinned draws (after opaque statics, before sky) ────────────────────
+		if (m_skinnedProgram && !cmds.skinnedDrawCalls().empty())
+		{
+			glUseProgram(m_skinnedProgram);
+			// Mirror per-frame uniforms from the unlit program.
+			glUniform1i(m_uSkinnedTex, 0);
+			glUniform3fv(m_uSkinnedSunDir,    1, glm::value_ptr(sunDir));
+			glUniform3fv(m_uSkinnedAmbient,   1, glm::value_ptr(m_renderWorld.ambient));
+			glUniform1f(m_uSkinnedFogDensity,       GetEnvironment().fogDensity);
+			glUniform1f(m_uSkinnedFogHeightFalloff, GetEnvironment().fogHeightFalloff);
+			glUniform1i(m_uSkinnedShadowEnabled, shadows ? 1 : 0);
+			glUniformMatrix4fv(m_uSkinnedLightVP, 1, GL_FALSE, glm::value_ptr(lightVP));
+			glUniform1i(m_uSkinnedShadowMap, 1);
+			glActiveTexture(GL_TEXTURE3);
+			glBindTexture(GL_TEXTURE_CUBE_MAP, m_skyEnvCube);
+			glUniform1i(m_uSkinnedSkyEnv, 3);
+			glActiveTexture(GL_TEXTURE4);
+			glBindTexture(GL_TEXTURE_2D, aoActive ? aoTex : m_whiteTex);
+			glUniform1i(m_uSkinnedAO, 4);
+			glActiveTexture(GL_TEXTURE0);
+			glUniform2f(m_uSkinnedViewport, static_cast<float>(pw), static_cast<float>(ph));
+			glUniform1i(m_uSkinnedSSAOEnabled, aoActive ? 1 : 0);
+			glUniform3fv(m_uSkinnedCameraPos, 1, glm::value_ptr(m_renderWorld.camera.position));
+			{
+				constexpr int kMaxLights = 8;
+				const int count = std::min(static_cast<int>(m_renderWorld.lights.size()), kMaxLights);
+				glm::vec4 pos[kMaxLights], dir[kMaxLights], color[kMaxLights], params[kMaxLights];
+				for (int i = 0; i < count; ++i)
+				{
+					const LightData& l = m_renderWorld.lights[i];
+					pos[i]    = glm::vec4(l.position,  static_cast<float>(l.type));
+					dir[i]    = glm::vec4(l.direction, l.spotAngleCos);
+					color[i]  = glm::vec4(l.color,     l.intensity);
+					params[i] = glm::vec4(l.range, 0.0f, 0.0f, 0.0f);
+				}
+				glUniform1i(m_uSkinnedLightCount, count);
+				if (count > 0)
+				{
+					glUniform4fv(m_uSkinnedLightPos,    count, glm::value_ptr(pos[0]));
+					glUniform4fv(m_uSkinnedLightDir,    count, glm::value_ptr(dir[0]));
+					glUniform4fv(m_uSkinnedLightColor,  count, glm::value_ptr(color[0]));
+					glUniform4fv(m_uSkinnedLightParams, count, glm::value_ptr(params[0]));
+				}
+			}
+
+			constexpr int kMaxBones = 128;
+			// Scratch buffer for the full bone matrix upload per draw call.
+			// Filled with the draw's matrices, rest is identity (safe default).
+			std::vector<glm::mat4> boneScratch(kMaxBones, glm::mat4(1.0f));
+
+			for (const SkinnedDrawCall& dc : cmds.skinnedDrawCalls())
+			{
+				const GpuSkeletalMesh* smesh = ResolveSkeletalMesh(dc.meshAssetId);
+				if (!smesh) continue;
+
+				// Refill scratch with identity, then copy the actual joint matrices.
+				std::fill(boneScratch.begin(), boneScratch.end(), glm::mat4(1.0f));
+				const int boneCount = static_cast<int>(
+				    std::min(dc.boneMatrices.size(), static_cast<size_t>(kMaxBones)));
+				if (boneCount > 0)
+					std::copy_n(dc.boneMatrices.begin(), boneCount, boneScratch.begin());
+				glUniformMatrix4fv(m_uSkinnedBones, kMaxBones, GL_FALSE,
+				                   glm::value_ptr(boneScratch[0]));
+
+				glm::vec3 baseColor(1.0f);
+				unsigned int tex = smesh->texture;
+				unsigned int overrideTex = 0;
+				bool hasOverride = ResolveMaterialTexture(dc.materialAssetId, overrideTex);
+				if (hasOverride) tex = overrideTex;
+				float metallic = 0.0f, roughness = 0.5f, opacity = 1.0f;
+				bool hasMat = ResolveMaterialParams(dc.materialAssetId, baseColor, metallic, roughness, opacity);
+				if (!hasMat)
+					baseColor = (tex != 0) ? glm::vec3(1.0f) : glm::vec3(0.85f, 0.55f, 0.25f);
+
+				glUniformMatrix4fv(m_uSkinnedMVP,  1, GL_FALSE, glm::value_ptr(viewProj * dc.transform));
+				glUniformMatrix4fv(m_uSkinnedModel, 1, GL_FALSE, glm::value_ptr(dc.transform));
+				glUniform3fv(m_uSkinnedColor,       1, glm::value_ptr(baseColor));
+				glUniform1f(m_uSkinnedMetallic,     metallic);
+				glUniform1f(m_uSkinnedRoughness,    roughness);
+				glUniform1f(m_uSkinnedOpacity,      1.0f);
+				glUniform1i(m_uSkinnedHasTex,       tex != 0);
+				glActiveTexture(GL_TEXTURE0);
+				glBindTexture(GL_TEXTURE_2D, tex);
+				glBindVertexArray(smesh->vao);
+				glDrawElements(GL_TRIANGLES, smesh->indexCount, GL_UNSIGNED_INT, nullptr);
+			}
+
+			glUseProgram(m_unlitProgram); // restore for the sky + transparent passes
 		}
 
 		// ── Skybox (drawn LAST): fill the remaining background with the procedural

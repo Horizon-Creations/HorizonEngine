@@ -3447,6 +3447,57 @@ void EditorUI::RenderInspector(AppContext& ctx)
 		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<MeshComponent>(entity); }
 	}
 
+	// ── Skeletal Mesh ────────────────────────────────────────────────────────
+	if (auto* sm = registry.try_get<SkeletalMeshComponent>(entity))
+	{
+		if (componentHeader("Skeletal Mesh", true, removed))
+		{
+			if (sm->meshAssetId == HE::UUID{})
+				ImGui::TextDisabled("Asset: (none)");
+			else if (ctx.contentManager)
+			{
+				const SkeletalMeshAsset* asset = ctx.contentManager->getSkeletalMesh(sm->meshAssetId);
+				ImGui::Text("Asset: %s", asset ? asset->name.c_str() : "(not loaded)");
+				if (asset)
+					ImGui::Text("Joints: %d | Bone matrices: %d",
+					    (int)asset->skeleton.size(), (int)sm->boneMatrices.size());
+			}
+			ImGui::Checkbox("Casts Shadow",    &sm->castsShadow);    trackEdit();
+			ImGui::Checkbox("Receives Shadow", &sm->receivesShadow); trackEdit();
+
+			// Drag-drop asset slot
+			ImGui::TextUnformatted("Asset");
+			ImGui::SameLine();
+			const SkeletalMeshAsset* cur = (sm->meshAssetId != HE::UUID{} && ctx.contentManager)
+			    ? ctx.contentManager->getSkeletalMesh(sm->meshAssetId) : nullptr;
+			const std::string label = cur ? cur->name : (sm->meshAssetId == HE::UUID{} ? "(none)" : "(not loaded)");
+			ImGui::Button((label + "##smslot").c_str());
+			if (ImGui::BeginDragDropTarget())
+			{
+				if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_ASSET_PATH"))
+				{
+					std::error_code ec;
+					std::string rel = std::filesystem::relative(
+					    static_cast<const char*>(p->Data),
+					    ctx.contentManager ? ctx.contentManager->contentRoot() : "",
+					    ec).generic_string();
+					if (!ec && !rel.empty() && rel.rfind("..", 0) != 0)
+					{
+						const HE::UUID id = ctx.contentManager->loadAsset(rel);
+						if (id != HE::UUID{} && ctx.contentManager->getSkeletalMesh(id))
+						{
+							if (ctx.undoSys) ctx.undoSys->snapshotNow();
+							sm->meshAssetId = id;
+							sm->dirty = true;
+						}
+					}
+				}
+				ImGui::EndDragDropTarget();
+			}
+		}
+		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<SkeletalMeshComponent>(entity); }
+	}
+
 	// ── Material ────────────────────────────────────────────────────────────
 	if (auto* m = registry.try_get<MaterialComponent>(entity))
 	{
@@ -3863,7 +3914,8 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			};
 			addItem("Transform",    TransformComponent{});
 			addItem("Transform 2D", Transform2DComponent{});
-			addItem("Mesh",         MeshComponent{});
+			addItem("Mesh",          MeshComponent{});
+			addItem("Skeletal Mesh", SkeletalMeshComponent{});
 			addItem("Material",     MaterialComponent{});
 			addItem("Camera",       CameraComponent{});
 			addItem("Light",        LightComponent{});

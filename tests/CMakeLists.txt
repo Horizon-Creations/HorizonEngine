@@ -25,8 +25,11 @@ add_executable(he_tests
     test_raycast.cpp
     test_character.cpp
     test_skeletalmeshimporter.cpp
+    test_skeletalmeshcomponent.cpp
     # Culling/sorting/undo/camera/graph are compiled in directly — pulling in the
     # full HorizonRendering/Editor targets would drag GPU backends and ImGui in.
+    ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderExtractor.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderWorld.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/FrustumCuller.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderSorter.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderGraph.cpp
