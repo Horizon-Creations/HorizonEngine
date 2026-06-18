@@ -1783,13 +1783,17 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 					navigating = s_navActive;
 
 					// RMB cursor capture: hide + lock while fly-looking, restore on release.
-					static bool   s_rmbCaptured = false;
-					static ImVec2 s_rmbStartPos{};
+					// Use SDL_GetMouseState for the start position so the captured coords and
+					// the warp-back are in the same SDL window-client space (avoids any ImGui
+					// display-scale or frame-offset mismatch).
+					static bool  s_rmbCaptured  = false;
+					static float s_rmbStartX    = 0.f;
+					static float s_rmbStartY    = 0.f;
 					if (SDL_Window* sdlWin = ctx.window ? ctx.window->GetNativeWindow() : nullptr)
 					{
 						if (rmb && imageHovered && !s_rmbCaptured)
 						{
-							s_rmbStartPos = io.MousePos;
+							SDL_GetMouseState(&s_rmbStartX, &s_rmbStartY);
 							SDL_HideCursor();
 							SDL_SetWindowRelativeMouseMode(sdlWin, true);
 							s_rmbCaptured = true;
@@ -1798,7 +1802,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 						{
 							SDL_SetWindowRelativeMouseMode(sdlWin, false);
 							SDL_ShowCursor();
-							SDL_WarpMouseInWindow(sdlWin, s_rmbStartPos.x, s_rmbStartPos.y);
+							SDL_WarpMouseInWindow(sdlWin, s_rmbStartX, s_rmbStartY);
 							s_rmbCaptured = false;
 						}
 					}
