@@ -646,6 +646,10 @@ void EditorApplication::OnInit()
 	setWorld(m_editorWorld.get());
 	m_propScriptEngine = std::make_unique<ScriptEngine>();
 	m_undo.setWorld(m_editorWorld.get());
+
+	if (!m_audioEngine.init())
+		Logger::Log(Logger::LogLevel::Warning, "EditorApplication: audio engine init failed (no audio playback)");
+
 	Logger::Log(Logger::LogLevel::Info, "EditorApplication: HorizonWorld created and registered");
 
 	// Register the project-loaded callback BEFORE the first loadProject call so
@@ -809,6 +813,10 @@ void EditorApplication::OnRender(float dt)
 				m_physicsAccum -= kPhysicsFixedDt;
 			}
 		}
+
+		// Keep spatial audio sources and listener in sync each play-mode frame
+		if (m_isPlaying && m_editorWorld)
+			AudioSystem::updateSpatial(*m_editorWorld, m_audioEngine);
 
 		pushEnvironment(dt); // auto-advances + pushes the World env component
 
@@ -1081,6 +1089,9 @@ void EditorApplication::setPlayMode(bool play)
 		m_physicsWorld->initialize(*m_editorWorld);
 		m_physicsAccum = 0.0f;
 
+		// Start audio for sources marked playOnStart
+		AudioSystem::playOnStart(*m_editorWorld, m_audioEngine, &contentManager());
+
 		Logger::Log(Logger::LogLevel::Info, "EditorApplication: entering play mode");
 	}
 	else
@@ -1097,6 +1108,9 @@ void EditorApplication::setPlayMode(bool play)
 		// Tear down physics
 		m_physicsWorld.reset();
 		m_physicsAccum = 0.0f;
+
+		// Stop all audio when exiting play mode
+		m_audioEngine.stopAll();
 
 		Logger::Log(Logger::LogLevel::Info, "EditorApplication: returned to edit mode");
 	}
@@ -1264,6 +1278,8 @@ void EditorApplication::OnShutdown()
 		renderer()->DestroyImGuiTexture(reinterpret_cast<void*>(static_cast<uintptr_t>(m_logoTexture)));
 		m_logoTexture = 0;
 	}
+
+	m_audioEngine.shutdown();
 
 	GlobalState& globalstate = GlobalState::getInstance();
 	globalstate.setCustomConfigEntry("KeepCPUAssets",               m_editorConfig.KeepCPUAssets);
