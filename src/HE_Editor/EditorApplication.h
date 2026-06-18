@@ -9,6 +9,8 @@
 #include <HorizonScene/HorizonScene.h>
 #include <Scripting/ScriptEngine.h>
 #include <HorizonScene/PhysicsWorld.h>
+#include <HorizonScene/AudioEngine.h>
+#include <HorizonScene/AudioSystem.h>
 #include <functional>
 #include <future>
 #include <memory>
@@ -249,6 +251,9 @@ private:
 	std::unique_ptr<PhysicsWorld> m_physicsWorld;
 	float m_physicsAccum = 0.0f;
 	static constexpr float kPhysicsFixedDt = 1.0f / 60.0f;
+
+	// Audio engine — initialised at startup, active always (spatial update only in play mode).
+	AudioEngine m_audioEngine;
 
 	// Outliner/inspector selection
 	Entity m_selectedEntity = entt::null;
