@@ -82,6 +82,19 @@ private:
 		HE::AABB localBounds;       // object-space bounds for culling
 	};
 
+	// GPU-side skeletal mesh: separate bone-ID and bone-weight buffers on top of
+	// the regular interleaved vertex buffer (pos+normal+uv, same stride as GpuMesh).
+	struct GpuSkeletalMesh
+	{
+		void* vertexBuf  = nullptr; // id<MTLBuffer>, interleaved pos3+normal3+uv2
+		void* boneIdBuf  = nullptr; // id<MTLBuffer>, uint4 per vertex (joint indices)
+		void* boneWgtBuf = nullptr; // id<MTLBuffer>, float4 per vertex (blend weights)
+		void* indexBuf   = nullptr; // id<MTLBuffer>, uint32 triangle indices
+		int   indexCount = 0;
+		void* texture    = nullptr; // id<MTLTexture>, base color (nullptr = none)
+		HE::AABB localBounds;
+	};
+
 	void CreateTarget(SDL_Window* sdlWin, WindowTarget& out);
 	void DestroyTarget(WindowTarget& target);
 	void EnsureDepthTexture(WindowTarget& target, int width, int height);
@@ -102,7 +115,13 @@ private:
 	void DestroyViewportTarget();
 	// Returns the GPU mesh for the asset, uploading it on first use.
 	// nullptr when the UUID is invalid or the asset is not loaded.
-	const GpuMesh* ResolveMesh(const HE::UUID& assetId);
+	const GpuMesh*         ResolveMesh        (const HE::UUID& assetId);
+	const GpuSkeletalMesh* ResolveSkeletalMesh(const HE::UUID& assetId);
+
+	// Skinned geometry pass: draws all skeletal mesh objects from the current
+	// render world using the linear blend-skinning vertex shader.
+	void EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& viewProj,
+	                          bool shadows, const void* sceneUniformsPtr);
 
 	// Resolves the base-color texture of an explicit MaterialComponent override,
 	// uploading it on first sight and caching by material UUID. Returns true if
@@ -137,8 +156,9 @@ private:
 	std::vector<uint32_t> m_sortedIndices; // per-frame draw order
 
 	// Unlit pipeline. All id<MTL…>, retained.
-	void* m_scenePipeline   = nullptr; // id<MTLRenderPipelineState>
-	void* m_sceneBlendPipeline = nullptr; // id<MTLRenderPipelineState> (alpha-blended transparency)
+	void* m_scenePipeline        = nullptr; // id<MTLRenderPipelineState>
+	void* m_sceneBlendPipeline   = nullptr; // id<MTLRenderPipelineState> (alpha-blended transparency)
+	void* m_skinnedPipeline      = nullptr; // id<MTLRenderPipelineState> (LBS skinning vertex shader)
 	void* m_sceneDepthState = nullptr; // id<MTLDepthStencilState> (test+write)
 	void* m_noDepthState    = nullptr; // id<MTLDepthStencilState> (overlay)
 	void* m_skyDepthState   = nullptr; // id<MTLDepthStencilState> (sky: LessEqual, no write)
@@ -233,7 +253,8 @@ private:
 	void  EncodeSSAO(void* cmdBuf, int width, int height);
 
 	// Uploaded asset meshes, keyed by asset UUID
-	std::unordered_map<HE::UUID, GpuMesh> m_meshCache;
+	std::unordered_map<HE::UUID, GpuMesh>         m_meshCache;
+	std::unordered_map<HE::UUID, GpuSkeletalMesh> m_skeletalMeshCache;
 	std::vector<HE::UUID>                 m_pendingMeshInvalidations;
 
 	// Base-color textures for MaterialComponent overrides, keyed by material
