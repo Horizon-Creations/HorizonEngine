@@ -88,8 +88,9 @@ Diese low-level Bausteine zuerst, in dieser Reihenfolge — jeder schaltet die d
    - ✅ **Runtime-Asset-Registrierung** `registerStaticMesh/Texture/Material` + `replace…` (In-Memory-Assets
      ohne Disk-Datei) + Aliasing-Härtung der typisierten Getter/`unload` (Forts. 20). → schaltet prozedurale
      Assets frei (Terrain, Default-/Fallback-Assets, editor-erzeugte Materialien).
-   - ✅ **Default-/Fallback-Assets** mit festen UUIDs (`kDefaultCubeMeshId`/`kDefaultWhiteTextureId`/`kDefaultMaterialId`
+   - ✅ **Default-/Fallback-Assets** mit festen UUIDs (`kDefaultCubeMeshId`/`kDefaultWhiteTextureId`/`kDefaultMaterialId`/`kDefaultGridTextureId`/`kDefaultTerrainMaterialId`
      in `ContentManager/DefaultAssets.h`), im Ctor registriert; GL+Metal-Renderer-Fallback-Cube ersetzt (Forts. 21).
+     Neues Landscape erhält `kDefaultTerrainMaterialId` (64×64-RGBA8-Gitter-Textur, roughness 0.8) statt weißem Default-Material.
    - ✅ **Asset-Enumeration** `enumerateIds()` / `enumerateIds(AssetType)` / `assetCount()` + `m_assetTypeIndex` (Forts. 22).
    - ✅ **Reload/Hot-Reload** einer geänderten Datei (mtime-Watch) — Editor pollt jede 1,5 s, GPU-Cache-Invalidierung typ-dispatched (Forts. 23).
 2. **`Ref<T>`** (intrusiver Refcount, Phase 0.3) + Einsatz im ContentManager → sauberes Unloading/Eviction
@@ -1386,6 +1387,10 @@ Lifetime-sicher mit der bestehenden `SlotMap`/`m_handleToUUID`-Buchführung inte
 - **Schaltet frei:** Landscape-Terrain kann `kDefaultCubeMeshId` als Platzhalter nutzen bis das Heightfield
   generiert ist; neue Editor-Materialien starten von `kDefaultMaterialId`. **Nächster Fundament-Schritt:**
   Asset-Enumeration (geladene Assets + Content-Verzeichnis auflisten für den Content Browser).
+- **Erweiterung (Forts. bff25f3):** `kDefaultGridTextureId` (64×64 RGBA8, Gitterlinie jede 8 Pixel, erdige
+  Farben) + `kDefaultTerrainMaterialId` (texturePath `mem://default_grid_tex`, roughness 0.8) als fünftes
+  Default-Asset. `EditorUI`: neues Landscape erhält `kDefaultTerrainMaterialId` statt `kDefaultMaterialId`.
+  3 neue Tests (Dimensionen, Pixel-Farbwert, Material-Pfad). **336 Tests grün.**
 
 ---
 
