@@ -3689,6 +3689,55 @@ void EditorUI::RenderInspector(AppContext& ctx)
 		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<AnimatorStateMachineComponent>(entity); }
 	}
 
+	// ── Property Animator ───────────────────────────────────────────────────
+	if (auto* pa = registry.try_get<PropertyAnimatorComponent>(entity))
+	{
+		if (componentHeader("Property Animator", true, removed))
+		{
+			// Clip drag-drop slot
+			ImGui::TextUnformatted("Clip");
+			ImGui::SameLine();
+			const PropertyAnimClipAsset* cur = (pa->clipId != HE::UUID{} && ctx.contentManager)
+				? ctx.contentManager->getPropertyAnimClip(pa->clipId) : nullptr;
+			const std::string clipLabel = cur ? cur->name : (pa->clipId == HE::UUID{} ? "(none)" : "(not loaded)");
+			ImGui::Button((clipLabel + "##pac").c_str());
+			if (ImGui::BeginDragDropTarget())
+			{
+				if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_ASSET_PATH"))
+				{
+					std::error_code ec;
+					std::string rel = std::filesystem::relative(
+						static_cast<const char*>(p->Data),
+						ctx.contentManager ? ctx.contentManager->contentRoot() : "",
+						ec).generic_string();
+					if (!ec && !rel.empty() && rel.rfind("..", 0) != 0)
+					{
+						const HE::UUID id = ctx.contentManager->loadAsset(rel);
+						if (id != HE::UUID{} && ctx.contentManager->getPropertyAnimClip(id))
+						{
+							if (ctx.undoSys) ctx.undoSys->snapshotNow();
+							pa->clipId = id;
+						}
+					}
+				}
+				ImGui::EndDragDropTarget();
+			}
+
+			ImGui::DragFloat("Speed##pa",  &pa->playbackSpeed, 0.01f, -4.0f, 4.0f, "%.2f"); trackEdit();
+			ImGui::DragFloat("Time##pa",   &pa->playbackTime,  0.01f,  0.0f, 999.0f, "%.3f s"); trackEdit();
+			ImGui::Checkbox("Looping##pa", &pa->looping); trackEdit();
+			ImGui::SameLine();
+			ImGui::Checkbox("Playing##pa", &pa->playing); trackEdit();
+
+			if (cur)
+			{
+				ImGui::Separator();
+				ImGui::Text("Duration: %.2f s | Channels: %zu", cur->duration, cur->channels.size());
+			}
+		}
+		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<PropertyAnimatorComponent>(entity); }
+	}
+
 	// ── Material ────────────────────────────────────────────────────────────
 	if (auto* m = registry.try_get<MaterialComponent>(entity))
 	{
@@ -4110,6 +4159,7 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			addItem("Animator",       AnimatorComponent{});
 			addItem("Animator Blend",          AnimatorBlendComponent{});
 			addItem("Animator State Machine",  AnimatorStateMachineComponent{});
+			addItem("Property Animator",       PropertyAnimatorComponent{});
 			addItem("Material",     MaterialComponent{});
 			addItem("Camera",       CameraComponent{});
 			addItem("Light",        LightComponent{});

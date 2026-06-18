@@ -136,3 +136,30 @@ struct AnimationClipAsset : public RuntimeAsset
 	float                         duration = 0.0f;  // total clip length in seconds
 	std::vector<AnimationChannel> channels;
 };
+
+// ── Property Animation ────────────────────────────────────────────────────────
+// Animates scalar properties of TransformComponent (position/rotation/scale)
+// and MaterialAsset (baseColor, metallic, roughness, opacity) on a per-entity basis.
+
+enum class PropTarget : uint8_t
+{
+    PosX = 0, PosY, PosZ,
+    RotX, RotY, RotZ,
+    ScaleX, ScaleY, ScaleZ,
+    MatColorR, MatColorG, MatColorB,
+    MatMetallic, MatRoughness, MatOpacity,
+};
+
+// One animated scalar stream: times + one float value per keyframe.
+struct PropertyAnimChannel
+{
+    PropTarget         target = PropTarget::PosX;
+    std::vector<float> times;
+    std::vector<float> values; // one float per keyframe
+};
+
+struct PropertyAnimClipAsset : public RuntimeAsset
+{
+    float                             duration = 0.0f;
+    std::vector<PropertyAnimChannel>  channels;
+};

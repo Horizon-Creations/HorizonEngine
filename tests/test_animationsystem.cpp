@@ -750,3 +750,174 @@ TEST_CASE("AnimationStateMachineSystem advances clipTime")
     const auto& updatedSm = world.registry().get<AnimatorStateMachineComponent>(e);
     CHECK(updatedSm.clipTime == doctest::Approx(0.3f));
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  PropertyAnimClipAsset + PropertyAnimationSystem
+// ─────────────────────────────────────────────────────────────────────────────
+#include <HorizonScene/Components/PropertyAnimatorComponent.h>
+#include <HorizonScene/PropertyAnimationSystem.h>
+
+static PropertyAnimClipAsset makePropClip(PropTarget target,
+                                           float fromV, float toV,
+                                           float duration = 1.0f)
+{
+    PropertyAnimClipAsset clip;
+    clip.duration = duration;
+    clip.name     = "propClip";
+    PropertyAnimChannel ch;
+    ch.target = target;
+    ch.times  = { 0.0f, duration };
+    ch.values = { fromV, toV };
+    clip.channels.push_back(std::move(ch));
+    return clip;
+}
+
+TEST_CASE("PropertyAnimatorComponent defaults")
+{
+    PropertyAnimatorComponent pa;
+    CHECK(pa.clipId       == HE::UUID{});
+    CHECK(pa.playbackTime  == doctest::Approx(0.0f));
+    CHECK(pa.playbackSpeed == doctest::Approx(1.0f));
+    CHECK(pa.looping       == true);
+    CHECK(pa.playing       == true);
+}
+
+TEST_CASE("PropertyAnimClipAsset registers and retrieves from ContentManager")
+{
+    ContentManager cm;
+    PropertyAnimClipAsset clip;
+    clip.duration = 2.0f;
+    clip.name     = "TestPropClip";
+
+    const HE::UUID id = cm.registerPropertyAnimClip(std::move(clip));
+    REQUIRE(id != HE::UUID{});
+    const PropertyAnimClipAsset* got = cm.getPropertyAnimClip(id);
+    REQUIRE(got != nullptr);
+    CHECK(got->duration == doctest::Approx(2.0f));
+    CHECK(got->name == "TestPropClip");
+}
+
+TEST_CASE("PropertyAnimationSystem animates TransformComponent PosX")
+{
+    ContentManager cm;
+    HorizonWorld   world;
+
+    // Clip: PosX from 0 to 5 over 1 second
+    const HE::UUID clipId = cm.registerPropertyAnimClip(
+        makePropClip(PropTarget::PosX, 0.0f, 5.0f, 1.0f));
+
+    entt::entity e = world.createEntity();
+    TransformComponent tc; tc.position = {}; tc.rotation = {}; tc.scale = glm::vec3(1.0f);
+    world.addComponent(e, tc);
+    PropertyAnimatorComponent pa;
+    pa.clipId = clipId; pa.playbackTime = 0.5f; // midpoint → PosX should be 2.5
+    world.addComponent(e, pa);
+
+    PropertyAnimationSystem::update(world, cm, 0.0f);
+
+    const auto& updTc = world.registry().get<TransformComponent>(e);
+    CHECK(updTc.position.x == doctest::Approx(2.5f).epsilon(0.01f));
+}
+
+TEST_CASE("PropertyAnimationSystem animates TransformComponent RotY")
+{
+    ContentManager cm;
+    HorizonWorld   world;
+
+    // Clip: RotY from 0 to 90 over 1 second
+    const HE::UUID clipId = cm.registerPropertyAnimClip(
+        makePropClip(PropTarget::RotY, 0.0f, 90.0f, 1.0f));
+
+    entt::entity e = world.createEntity();
+    TransformComponent tc; tc.position = {}; tc.rotation = {}; tc.scale = glm::vec3(1.0f);
+    world.addComponent(e, tc);
+    PropertyAnimatorComponent pa;
+    pa.clipId = clipId; pa.playbackTime = 1.0f; pa.looping = false; // end → RotY = 90
+    world.addComponent(e, pa);
+
+    PropertyAnimationSystem::update(world, cm, 0.0f);
+
+    const auto& updTc = world.registry().get<TransformComponent>(e);
+    CHECK(updTc.rotation.y == doctest::Approx(90.0f).epsilon(0.01f));
+}
+
+TEST_CASE("PropertyAnimationSystem advances playbackTime")
+{
+    ContentManager cm;
+    HorizonWorld   world;
+
+    const HE::UUID clipId = cm.registerPropertyAnimClip(
+        makePropClip(PropTarget::PosX, 0.0f, 1.0f, 2.0f));
+
+    entt::entity e = world.createEntity();
+    world.addComponent(e, TransformComponent{ .position = {}, .rotation = {}, .scale = glm::vec3(1.0f) });
+    PropertyAnimatorComponent pa; pa.clipId = clipId;
+    world.addComponent(e, pa);
+
+    PropertyAnimationSystem::update(world, cm, 0.7f);
+
+    const auto& updPa = world.registry().get<PropertyAnimatorComponent>(e);
+    CHECK(updPa.playbackTime == doctest::Approx(0.7f));
+}
+
+TEST_CASE("PropertyAnimationSystem loops playback")
+{
+    ContentManager cm;
+    HorizonWorld   world;
+
+    const HE::UUID clipId = cm.registerPropertyAnimClip(
+        makePropClip(PropTarget::PosX, 0.0f, 1.0f, 1.0f));
+
+    entt::entity e = world.createEntity();
+    world.addComponent(e, TransformComponent{ .position = {}, .rotation = {}, .scale = glm::vec3(1.0f) });
+    PropertyAnimatorComponent pa;
+    pa.clipId = clipId; pa.playbackTime = 0.8f; pa.looping = true;
+    world.addComponent(e, pa);
+
+    PropertyAnimationSystem::update(world, cm, 0.5f); // 0.8 + 0.5 = 1.3 → fmod 1.0 = 0.3
+
+    const auto& updPa = world.registry().get<PropertyAnimatorComponent>(e);
+    CHECK(updPa.playbackTime == doctest::Approx(0.3f).epsilon(1e-4));
+    CHECK(updPa.playing      == true);
+}
+
+TEST_CASE("PropertyAnimationSystem stops at end when not looping")
+{
+    ContentManager cm;
+    HorizonWorld   world;
+
+    const HE::UUID clipId = cm.registerPropertyAnimClip(
+        makePropClip(PropTarget::PosX, 0.0f, 1.0f, 1.0f));
+
+    entt::entity e = world.createEntity();
+    world.addComponent(e, TransformComponent{ .position = {}, .rotation = {}, .scale = glm::vec3(1.0f) });
+    PropertyAnimatorComponent pa;
+    pa.clipId = clipId; pa.playbackTime = 0.9f; pa.looping = false;
+    world.addComponent(e, pa);
+
+    PropertyAnimationSystem::update(world, cm, 0.5f); // over end
+
+    const auto& updPa = world.registry().get<PropertyAnimatorComponent>(e);
+    CHECK(updPa.playbackTime == doctest::Approx(1.0f));
+    CHECK(updPa.playing      == false);
+}
+
+TEST_CASE("PropertyAnimationSystem skips when playing=false")
+{
+    ContentManager cm;
+    HorizonWorld   world;
+
+    const HE::UUID clipId = cm.registerPropertyAnimClip(
+        makePropClip(PropTarget::PosX, 0.0f, 1.0f, 1.0f));
+
+    entt::entity e = world.createEntity();
+    world.addComponent(e, TransformComponent{ .position = {}, .rotation = {}, .scale = glm::vec3(1.0f) });
+    PropertyAnimatorComponent pa;
+    pa.clipId = clipId; pa.playbackTime = 0.4f; pa.playing = false;
+    world.addComponent(e, pa);
+
+    PropertyAnimationSystem::update(world, cm, 0.5f);
+
+    const auto& updPa = world.registry().get<PropertyAnimatorComponent>(e);
+    CHECK(updPa.playbackTime == doctest::Approx(0.4f));
+}

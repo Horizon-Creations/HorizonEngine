@@ -13,6 +13,7 @@
 #include "Components/AnimatorComponent.h"
 #include "Components/AnimatorBlendComponent.h"
 #include "Components/AnimatorStateMachineComponent.h"
+#include "Components/PropertyAnimatorComponent.h"
 #include "Components/MaterialComponent.h"
 #include "Components/CameraComponent.h"
 #include "Components/LightComponent.h"
