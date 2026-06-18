@@ -2,6 +2,7 @@
 #include "EditorApplication.h"
 #include <Hpak/ProjectExporter.h>
 #include <HorizonScene/HorizonScene.h>
+#include <HorizonScene/LODSystem.h>
 #include <HorizonScene/NavigationSystem.h>
 #include <Scripting/ScriptEngine.h>
 #include <ContentManager/HAsset.h>
@@ -4296,6 +4297,38 @@ void EditorUI::RenderInspector(AppContext& ctx)
 		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<ParticleSystemComponent>(entity); }
 	}
 
+	// ── LOD ──────────────────────────────────────────────────────────────────
+	if (auto* lod = registry.try_get<LODComponent>(entity))
+	{
+		if (componentHeader("LOD", true, removed))
+		{
+			ImGui::Text("Levels: %zu   Active: %u", lod->levels.size(), lod->current);
+			ImGui::Spacing();
+			for (int li = 0; li < static_cast<int>(lod->levels.size()); ++li)
+			{
+				auto& lvl = lod->levels[static_cast<size_t>(li)];
+				ImGui::PushID(li);
+				ImGui::Text("LOD %d", li);
+				ImGui::SameLine();
+				char distBuf[32];
+				std::snprintf(distBuf, sizeof(distBuf), "%.1f", lvl.maxDistance);
+				ImGui::SetNextItemWidth(80.f);
+				if (ImGui::InputText("##maxDist", distBuf, sizeof(distBuf),
+				                     ImGuiInputTextFlags_EnterReturnsTrue))
+				{
+					lvl.maxDistance = std::strtof(distBuf, nullptr);
+					trackEdit();
+				}
+				ImGui::SameLine();
+				ImGui::TextDisabled("UUID %llx", static_cast<unsigned long long>(lvl.meshId.hi));
+				if (ImGui::Button("Remove##lodlvl")) { lod->levels.erase(lod->levels.begin() + li); trackEdit(); --li; }
+				ImGui::PopID();
+			}
+			if (ImGui::Button("+ Level")) { lod->levels.push_back({}); trackEdit(); }
+		}
+		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<LODComponent>(entity); }
+	}
+
 	// ── UI Canvas ───────────────────────────────────────────────────────────
 	if (auto* cv = registry.try_get<UICanvasComponent>(entity))
 	{
@@ -4417,6 +4450,7 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			addItem("Audio Source",    AudioSourceComponent{});
 			addItem("Audio Listener",  AudioListenerComponent{});
 			addItem("Particle System", ParticleSystemComponent{});
+			addItem("LOD",             LODComponent{});
 			addItem("UI Canvas",       UICanvasComponent{});
 			addItem("UI Element",      UIElementComponent{});
 			addItem("UI Text",         UITextComponent{});
