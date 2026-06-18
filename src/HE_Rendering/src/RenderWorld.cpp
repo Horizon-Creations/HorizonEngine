@@ -3,6 +3,7 @@
 void RenderWorld::clear()
 {
 	objects.clear();
+	skinnedObjects.clear();
 	lights.clear();
 	camera = CameraData{};
 	shadow = ShadowData{};

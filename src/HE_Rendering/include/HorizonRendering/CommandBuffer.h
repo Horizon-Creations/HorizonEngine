@@ -23,6 +23,13 @@ struct DrawCall {
     uint8_t      lod           = 0;
 };
 
+// A draw call that also carries per-joint bone matrices for GPU skinning.
+// The backend binds the skinned shader and uploads boneMatrices as a uniform
+// array before issuing the draw.
+struct SkinnedDrawCall : DrawCall {
+    std::vector<glm::mat4> boneMatrices;  // one per joint; identity = bind pose
+};
+
 // Collects the draw calls produced by the render passes for one frame.
 // The backend replays drawCalls() after binding its pipeline and per-frame
 // state (camera, lights). Cleared and refilled every frame.
@@ -30,13 +37,16 @@ class HE_RENDERING_API CommandBuffer {
 public:
     void reset();
     void recordDraw(const DrawCall& call);
+    void recordSkinnedDraw(const SkinnedDrawCall& call);
     void recordPostProcess();   // signals that a post-process pass ran this frame
 
-    const std::vector<DrawCall>& drawCalls() const;
+    const std::vector<DrawCall>&        drawCalls()        const;
+    const std::vector<SkinnedDrawCall>& skinnedDrawCalls() const;
     bool hasPostProcess() const { return postProcess_; }
-    bool empty() const { return drawCalls_.empty(); }
+    bool empty() const { return drawCalls_.empty() && skinnedDrawCalls_.empty(); }
 
 private:
-    std::vector<DrawCall> drawCalls_;
-    bool                  postProcess_ = false;
+    std::vector<DrawCall>        drawCalls_;
+    std::vector<SkinnedDrawCall> skinnedDrawCalls_;
+    bool                         postProcess_ = false;
 };

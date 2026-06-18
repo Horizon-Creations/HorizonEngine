@@ -53,7 +53,22 @@ private:
 		HE::AABB     localBounds;      // object-space bounds for culling
 	};
 
+	// GPU-side skeletal mesh: same as GpuMesh but has separate VBOs for bone
+	// IDs (uvec4, integer attrib) and bone weights (vec4, float attrib).
+	struct GpuSkeletalMesh
+	{
+		unsigned int vao         = 0;
+		unsigned int vbo         = 0;   // interleaved: pos(3)+norm(3)+uv(2) float
+		unsigned int boneIdVbo   = 0;   // 4 × uint32 per vertex  → attrib loc 3
+		unsigned int boneWgtVbo  = 0;   // 4 × float  per vertex  → attrib loc 4
+		unsigned int ebo         = 0;
+		int          indexCount  = 0;
+		unsigned int texture     = 0;
+		HE::AABB     localBounds;
+	};
+
 	void CreateUnlitPipeline();
+	void CreateSkinnedPipeline();
 	void UpdateSkyEnvCube(const glm::vec3& sunDir); // rebuild the IBL cubemap on sun move
 	void DrawScene(int width, int height);
 	// (Re)creates the offscreen viewport FBO at the requested size.
@@ -61,7 +76,8 @@ private:
 	void DestroyViewportTarget();
 	// Returns the GPU mesh for the asset, uploading it on first use.
 	// nullptr when the UUID is invalid or the asset is not loaded.
-	const GpuMesh* ResolveMesh(const HE::UUID& assetId);
+	const GpuMesh*         ResolveMesh        (const HE::UUID& assetId);
+	const GpuSkeletalMesh* ResolveSkeletalMesh(const HE::UUID& assetId);
 
 	// Resolves the base-color texture of an explicit MaterialComponent override,
 	// uploading it on first sight and caching by material UUID. Returns true if
@@ -120,7 +136,37 @@ private:
 	int          m_uViewport      = -1;   // viewport size (screen-space AO lookup)
 	int          m_uSSAOEnabled   = -1;   // 1 = modulate ambient by SSAO
 	// Uploaded asset meshes, keyed by asset UUID
-	std::unordered_map<HE::UUID, GpuMesh> m_meshCache;
+	std::unordered_map<HE::UUID, GpuMesh>         m_meshCache;
+	std::unordered_map<HE::UUID, GpuSkeletalMesh> m_skeletalMeshCache;
+
+	// ── Skinned mesh pipeline ────────────────────────────────────────────────
+	unsigned int m_skinnedProgram   = 0;
+	int          m_uSkinnedMVP      = -1;
+	int          m_uSkinnedModel    = -1;
+	int          m_uSkinnedBones    = -1;   // mat4[128] uniform array location
+	int          m_uSkinnedColor    = -1;
+	int          m_uSkinnedHasTex   = -1;
+	int          m_uSkinnedTex      = -1;
+	int          m_uSkinnedMetallic = -1;
+	int          m_uSkinnedRoughness= -1;
+	int          m_uSkinnedOpacity  = -1;
+	int          m_uSkinnedLightCount= -1;
+	int          m_uSkinnedLightPos  = -1;
+	int          m_uSkinnedLightDir  = -1;
+	int          m_uSkinnedLightColor= -1;
+	int          m_uSkinnedLightParams=-1;
+	int          m_uSkinnedCameraPos = -1;
+	int          m_uSkinnedAmbient   = -1;
+	int          m_uSkinnedSunDir    = -1;
+	int          m_uSkinnedSkyEnv    = -1;
+	int          m_uSkinnedFogDensity      = -1;
+	int          m_uSkinnedFogHeightFalloff= -1;
+	int          m_uSkinnedShadowEnabled   = -1;
+	int          m_uSkinnedLightVP         = -1;
+	int          m_uSkinnedShadowMap       = -1;
+	int          m_uSkinnedAO              = -1;
+	int          m_uSkinnedViewport        = -1;
+	int          m_uSkinnedSSAOEnabled     = -1;
 
 	// Base-color textures for MaterialComponent overrides, keyed by material
 	// UUID. A present entry of 0 means "resolved, no texture". Drained/cleared

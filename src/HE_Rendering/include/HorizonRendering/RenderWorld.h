@@ -33,8 +33,9 @@ class RenderWorld {
 public:
     void clear();
 
-    std::vector<RenderObject> objects;
-    std::vector<LightData>    lights;
+    std::vector<RenderObject>        objects;
+    std::vector<SkinnedRenderObject> skinnedObjects;
+    std::vector<LightData>           lights;
     CameraData                camera;
     ShadowData                shadow;
 

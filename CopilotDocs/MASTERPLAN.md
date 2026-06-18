@@ -218,7 +218,7 @@ profitieren von P2.8 (Play-Mode zum Testen).
 | # | Aufgabe | Hängt ab von | Details |
 |---|---|---|---|
 | 4d.1 | Skelett + Skinning-Daten im MeshImporter (glTF-Skins) | 1.2 | neue Chunks im .hasset-Format | ✅ Forts. 45 |
-| 4d.2 | GPU-Skinning (Bone-Matrizen als Uniform/Storage-Buffer) | 4d.1, 3.3 | |
+| 4d.2 | GPU-Skinning (Bone-Matrizen als Uniform/Storage-Buffer) | 4d.1, 3.3 | | ✅ Forts. 46 |
 | 4d.3 | AnimationClip-Playback + AnimatorComponent | 4d.1, 2.2 | |
 | 4d.4 | Blending + State-Machine (einfacher Animator-Graph) | 4d.3 | |
 | 4d.5 | Property-Animation (Transform/Material animieren, für Cutscenes/UI) | 4d.3 | |
@@ -1769,3 +1769,33 @@ Lifetime-sicher mit der bestehenden `SlotMap`/`m_handleToUUID`-Buchführung inte
 - **`CMakeLists.txt`** (HE_Tools): `SkeletalMeshImporter.cpp` zu `HorizonImporters` hinzugefügt.
 - **5 Tests** in `test_contentmanager.cpp`: Skeletal ohne Skelett (Geometry+Skinning rund); CHUNK_SKEL full round-trip (2 Joints, IBMs, parent-Indizes, UUID); SkeletonJoint-Defaults; UUID-Persistenz; Wrong-Type-Lookup gibt null.
 - **272 Tests grün** (267→272).
+
+---
+
+### Forts. 46 — GPU Skinning (4d.2)
+
+**Ziel:** SkeletalMeshComponent im ECS + vollständiger OpenGL-Skinning-Pfad (Bone-Uniform-Array).
+
+**Architektur (Datenfluss):**
+`SkeletalMeshComponent` → `RenderExtractor::extract()` → `RenderWorld::skinnedObjects` → `GeometryPass` → `CommandBuffer::skinnedDrawCalls_` → `OpenGLRenderer::DrawScene()` replay mit `kSkinnedVS`.
+
+**Geänderte / neue Dateien:**
+- **`SkeletalMeshComponent.h`** (neu, HorizonScene/Components): `meshAssetId` + `boneMatrices` (vector<mat4>, default 1× Identity) + castsShadow/receivesShadow/dirty.
+- **`RenderObject.h`**: `SkinnedRenderObject : RenderObject` mit `boneMatrices`-Feld.
+- **`RenderWorld.h/.cpp`**: `skinnedObjects` (vector<SkinnedRenderObject>), in `clear()` geleert.
+- **`CommandBuffer.h/.cpp`**: `SkinnedDrawCall : DrawCall` + `boneMatrices`; `recordSkinnedDraw()` + `skinnedDrawCalls()`; `reset()` leert beide Vektoren; `empty()` prüft beide.
+- **`RenderPass.cpp`** (GeometryPass): iteriert `world.skinnedObjects` → `recordSkinnedDraw()`.
+- **`RenderExtractor.cpp`**: `SkeletalMeshComponent`-Include + ECS-View → `SkinnedRenderObject`; leere `boneMatrices` → fallback Identity.
+- **`OpenGLRenderer.h`**: `GpuSkeletalMesh`-Struct (vao/vbo/boneIdVbo/boneWgtVbo/ebo/indexCount/texture/localBounds); `m_skeletalMeshCache`; `m_skinnedProgram` + alle Uniform-Locations; `CreateSkinnedPipeline()` + `ResolveSkeletalMesh()`.
+- **`OpenGLRenderer.cpp`**: `kSkinnedVS` (GLSL 410, Attrib locs 0-4, `uvec4 aBoneIDs` via `glVertexAttribIPointer`, `mat4 uBoneMatrices[128]`; Skin berechnet pos + normal); `CreateSkinnedPipeline()`; `ResolveSkeletalMesh()` (identisch zu ResolveMesh + separate boneIdVbo/boneWgtVbo); Skinned-Draw-Loop in DrawScene (nach Opaque-Static, vor Skybox).
+- **`HorizonScene.h`**: `SkeletalMeshComponent.h`-Include ergänzt.
+- **`EditorUI.cpp`**: Inspector-Panel für SkeletalMeshComponent (Asset-Info, Joint-Zahl, Bone-Matrices, Drag-Drop-Slot); „Skeletal Mesh" im Add-Component-Menü.
+- **`tests/CMakeLists.txt`**: `RenderExtractor.cpp` + `RenderWorld.cpp` + `test_skeletalmeshcomponent.cpp` hinzugefügt.
+- **`test_skeletalmeshcomponent.cpp`** (neu): 9 Tests — Defaults (boneMatrices=1×Identity, flags), set-Matrizen, CommandBuffer record/reset/Isolation, RenderExtractor→skinnedObjects (korrekte Kopie + kein Eintrag in objects), leere Matrizen→Identity-Fallback, GeometryPass→SkinnedDrawCall.
+
+**Schlüssel-Entscheidungen:**
+- Bone-IDs als `GL_UNSIGNED_INT` + `glVertexAttribIPointer` → `uvec4` im Shader (keine float-Rundung).
+- Normal ebenfalls geskinnt: `vNormal = mat3(uModel) * mat3(skin) * aNormal` (korrekte Beleuchtung in 4d.3).
+- Separate `skinnedObjects`-Liste statt Flag in RenderObject → Shadow/SSAO-Pfade sehen Skinned-Objekte nicht (bewusstes Deferral, TODO 4d.3).
+- 128 Bone-Slots hochgeladen (voller Array, Rest Identity) um Index-Sicherheit zu gewährleisten.
+- **287 Tests grün** (278→287).

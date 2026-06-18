@@ -4,6 +4,7 @@
 #include <Math/Math.h>
 #include <Math/AABB.h>
 #include <cstdint>
+#include <vector>
 
 // One renderable entity extracted from the ECS world each frame.
 struct RenderObject {
@@ -24,4 +25,9 @@ struct RenderObject {
     HE::AABB     worldBounds;
     uint32_t     entityId       = 0;
     uint8_t      lod            = 0;
+};
+
+// Skinned renderable: same as RenderObject but carries bone matrices for GPU skinning.
+struct SkinnedRenderObject : RenderObject {
+    std::vector<glm::mat4> boneMatrices;
 };

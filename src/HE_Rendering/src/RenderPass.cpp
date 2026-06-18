@@ -28,6 +28,23 @@ void GeometryPass::execute(const RenderWorld&           world,
 		dc.lod           = obj.lod;
 		outCmds.recordDraw(dc);
 	}
+
+	// Skinned objects are not in the culled+sorted set: they are always drawn in
+	// submission order. Frustum-culling and sorting can be added in 4d.3+.
+	for (const SkinnedRenderObject& obj : world.skinnedObjects)
+	{
+		SkinnedDrawCall dc;
+		dc.meshAssetId     = obj.meshAssetId;
+		dc.materialAssetId = obj.materialAssetId;
+		dc.mesh          = obj.meshHandle;
+		dc.material      = obj.materialHandle;
+		dc.transform     = obj.transform;
+		dc.instanceCount = 1;
+		dc.entityId      = obj.entityId;
+		dc.lod           = obj.lod;
+		dc.boneMatrices  = obj.boneMatrices;
+		outCmds.recordSkinnedDraw(dc);
+	}
 }
 
 // ─── ShadowPass ─────────────────────────────────────────────────────────────
