@@ -226,9 +226,18 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 		ambient += (m_sunColor  * (m_sunIntensity  * sunUp)
 		          + m_moonColor * (m_moonIntensity * moonUp)) * (overcast * 0.22f);
 
+		// Night ambient: starlight fill so terrain is never pitch black, plus
+		// moonlit ambient proportional to how high the moon is. Both fade out by
+		// day so they don't inflate daytime ambient.
+		ambient += glm::vec3(0.04f, 0.045f, 0.075f) * (1.0f - sunUp);
+		ambient += m_moonColor * (m_moonIntensity * moonUp * 3.5f * (1.0f - sunUp));
+
 		if (sunLight)
 		{
-			sunLight->color     = m_sunColor;
+			// Scene geometry gets neutral (luminance-only) direct light so the
+			// sun's warm hue scatters only into the sky/clouds, not the terrain.
+			const float lum = 0.299f * m_sunColor.r + 0.587f * m_sunColor.g + 0.114f * m_sunColor.b;
+			sunLight->color     = glm::vec3(lum);
 			sunLight->direction = -sunToward; // light travels away from the sun
 			sunLight->intensity = m_sunIntensity * sunUp * direct;
 		}
@@ -257,7 +266,8 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 		// the environment's sun colour/intensity; the moon is off.
 		if (sunLight)
 		{
-			sunLight->color     = m_sunColor;
+			const float lum = 0.299f * m_sunColor.r + 0.587f * m_sunColor.g + 0.114f * m_sunColor.b;
+			sunLight->color     = glm::vec3(lum);
 			sunLight->direction = -sunToward;
 			sunLight->intensity = m_sunIntensity;
 		}
@@ -280,7 +290,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 		if (!shadowLight || l.intensity > shadowLight->intensity)
 			shadowLight = &l;
 	}
-	if (shadowLight && shadowLight->intensity > 1e-4f)
+	if (shadowLight && shadowLight->intensity > 0.1f)
 	{
 		HE::AABB sceneBox;
 		for (const RenderObject& o : out.objects)

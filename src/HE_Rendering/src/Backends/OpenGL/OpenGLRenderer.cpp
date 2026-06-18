@@ -78,8 +78,8 @@ static glm::vec3 SkyColorCPU(glm::vec3 dir, glm::vec3 sunDir)
 	float sunY = glm::clamp(sunDir.y, -0.2f, 1.0f);
 	float day  = glm::smoothstep(-0.10f, 0.10f, sunY);
 	float dusk = glm::smoothstep(-0.06f, 0.05f, sunY) * (1.0f - glm::smoothstep(0.05f, 0.28f, sunY));
-	glm::vec3 zenith  = glm::mix(glm::vec3(0.012f,0.016f,0.05f), glm::vec3(0.08f,0.28f,0.72f), day);
-	glm::vec3 horizon = glm::mix(glm::vec3(0.03f,0.04f,0.10f),   glm::vec3(0.42f,0.62f,0.88f), day);
+	glm::vec3 zenith  = glm::mix(glm::vec3(0.003f,0.005f,0.015f), glm::vec3(0.08f,0.28f,0.72f), day);
+	glm::vec3 horizon = glm::mix(glm::vec3(0.006f,0.009f,0.024f), glm::vec3(0.42f,0.62f,0.88f), day);
 	glm::vec2 sunAz = glm::normalize(glm::vec2(sunDir.x, sunDir.z) + glm::vec2(1e-5f));
 	float toward = glm::dot(glm::normalize(glm::vec2(dir.x, dir.z) + glm::vec2(1e-5f)), sunAz) * 0.5f + 0.5f;
 	toward = std::pow(glm::clamp(toward, 0.0f, 1.0f), 1.5f);
@@ -102,7 +102,7 @@ static glm::vec3 SkyColorCPU(glm::vec3 dir, glm::vec3 sunDir)
 	glm::vec3 moonDir = glm::normalize(glm::vec3(-sunDir.x, -sunDir.y, sunDir.z));
 	float mdot = std::max(glm::dot(dir, moonDir), 0.0f);
 	sky += glm::vec3(0.80f,0.86f,1.00f) * (std::pow(mdot,60.0f) * 0.05f * night);
-	sky += glm::vec3(0.04f,0.05f,0.08f) * night;
+	sky += glm::vec3(0.015f,0.018f,0.030f) * night;
 	return sky;
 }
 
@@ -690,10 +690,14 @@ vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float time, float coverage
 
 			// Higher-contrast shading: dark cool shaded base, sun-coloured lit tops.
 			vec3 dayCol   = mix(vec3(0.17, 0.20, 0.29), sunColor * 1.12, lit);
-			vec3 nightCol = mix(vec3(0.04, 0.05, 0.09), vec3(0.18, 0.21, 0.30), lit);
+			vec3 nightCol = mix(vec3(0.015, 0.018, 0.035), vec3(0.26, 0.29, 0.45), lit);
 			vec3 cloudCol = mix(nightCol, dayCol, day);
 			vec3 duskTop  = sunColor * vec3(1.25, 0.55, 0.28);
 			cloudCol = mix(cloudCol, duskTop, dusk * lit * 0.9);
+			// Moonlit silver: moon rises on the opposite arc from the sun.
+			vec3  cMoonDir = normalize(vec3(-sunDir.x, -sunDir.y, sunDir.z));
+			float cMoonUp  = clamp((cMoonDir.y + 0.10) / 0.25, 0.0, 1.0);
+			cloudCol += vec3(0.20, 0.22, 0.38) * lit * cMoonUp * (1.0 - day) * 0.7;
 			// Forward-scatter glow: Henyey-Greenstein-weighted direct sunlight makes
 			// the sun-facing edges flare gold (the silver lining), strongest when
 			// looking toward the sun and where the cloud isn't self-shadowed.
@@ -736,12 +740,12 @@ vec3 nebula(vec3 dir, vec3 cdir, vec3 sunDir, float intensity, vec3 nebColor)
 	vec3  cN   = normalize(cdir);
 	const vec3 galN = normalize(vec3(0.46, 0.52, -0.72));
 	float bd   = dot(cN, galN);
-	float band = exp(-bd * bd * 2.3);           // wide soft milky-way bias
+	float band = exp(-bd * bd * 1.5);           // wide soft milky-way bias
 	vec3  P    = cN * 3.4;
 	float big  = starFbm3(P * 0.7 + 11.0, 4);   // large clouds
 	float med  = starFbm3(P * 1.7 + 27.0, 3);   // medium clumps
 	float fine = starFbm3(P * 4.0 + 41.0, 2);   // fine mottle / embedded dust
-	float blob   = smoothstep(0.46, 0.74, big * 0.5 + med * 0.6);
+	float blob   = smoothstep(0.35, 0.70, big * 0.5 + med * 0.6);
 	// Structural character per region: dense puffy bodies vs. wispy filaments.
 	float charF  = starFbm3(P * 0.4 + 150.0, 2);
 	float wispy  = smoothstep(0.42, 0.70, charF);
@@ -771,7 +775,7 @@ vec3 nebula(vec3 dir, vec3 cdir, vec3 sunDir, float intensity, vec3 nebColor)
 	col = mix(col, colD, smoothstep(0.54, 0.72, h));
 	col = mix(col, colE, smoothstep(0.72, 0.92, h));
 	float horizon = smoothstep(0.0, 0.16, dir.y);
-	return col * (glow * 2.1 * horizon * night * intensity);
+	return col * (glow * 6.0 * horizon * night * intensity);
 }
 
 // Aurora borealis — drifting light curtains, night only, intensity + colour
@@ -794,19 +798,21 @@ vec3 aurora(vec3 dir, vec3 sunDir, float time, float intensity, vec3 auroraCol)
 	float across = P.y;
 	float wave   = 0.40 * sin(along * 0.7 + time * 0.15)
 	             + 0.30 * cloudFbm(vec2(along * 0.35 - time * 0.04, 3.0));
-	float phase  = across * 0.5 + wave;
+	float phase  = across * 0.30 + wave;
 	float f      = abs(fract(phase) - 0.5);             // distance to the nearest ribbon
-	float ribbon = smoothstep(0.22, 0.48, f);
+	float ribbon = smoothstep(0.10, 0.45, f);
 	float stri   = cloudFbm(vec2(along * 6.0 + time * 0.25, across * 1.2));
 	float curtain = ribbon * (0.45 + 0.55 * smoothstep(0.30, 0.80, stri));
-	float patches = 0.55 + 0.45 * smoothstep(0.25, 0.85,
+	float patches = 0.65 + 0.35 * smoothstep(0.25, 0.85,
 	               cloudFbm(vec2(along * 0.45 + time * 0.03, across * 0.4 + 9.0)));
-	// Base colour low, shifting toward violet tips with elevation.
-	float hcol   = smoothstep(0.05, 0.60, dir.y);
-	vec3  topCol = auroraCol * vec3(0.55, 0.40, 1.5);
-	vec3  col    = mix(auroraCol, topCol, hcol);
+	// 3-stop colour: purple base → green body → teal tips
+	float hcol    = smoothstep(0.05, 0.60, dir.y);
+	vec3  baseCol = auroraCol * vec3(0.60, 0.15, 0.90);
+	vec3  topCol  = auroraCol * vec3(0.30, 0.90, 0.70);
+	vec3  col     = mix(baseCol, auroraCol, smoothstep(0.0, 0.5, hcol));
+	col           = mix(col,     topCol,    smoothstep(0.5, 1.0, hcol));
 	float fade   = smoothstep(0.03, 0.16, dir.y) * (1.0 - smoothstep(0.78, 1.0, dir.y));
-	return col * (curtain * patches * fade * intensity * night * 2.4);
+	return col * (curtain * patches * fade * intensity * night * 5.0);
 }
 
 void main()
@@ -848,8 +854,8 @@ vec3 skyColor(vec3 dir, vec3 sunDir)
 
 	vec3 zenithDay  = vec3(0.08, 0.28, 0.72);
 	vec3 horizDay   = vec3(0.42, 0.62, 0.88);
-	vec3 zenithNite = vec3(0.012, 0.016, 0.05);
-	vec3 horizNite  = vec3(0.03, 0.04, 0.10);
+	vec3 zenithNite = vec3(0.003, 0.005, 0.015);
+	vec3 horizNite  = vec3(0.006, 0.009, 0.024);
 	vec3 zenith  = mix(zenithNite, zenithDay, day);
 	vec3 horizon = mix(horizNite,  horizDay,  day);
 
@@ -897,7 +903,7 @@ vec3 skyColor(vec3 dir, vec3 sunDir)
 	float m       = max(dot(dir, moonDir), 0.0);
 	vec3  moonTint= vec3(0.80, 0.86, 1.00);
 	sky += moonTint * (pow(m, 60.0)   * 0.05) * night;          // soft halo
-	sky += vec3(0.04, 0.05, 0.08) * night;                      // faint moonlit fill
+	sky += vec3(0.015, 0.018, 0.030) * night;                   // faint moonlit fill
 	return sky;
 }
 )GLSL";
