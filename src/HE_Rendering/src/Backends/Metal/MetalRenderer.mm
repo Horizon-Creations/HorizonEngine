@@ -635,6 +635,7 @@ fragment float4 ssaoFragment(SSAOOut in [[stage_in]],
 	float occ = 0.0;
 	for (int i = 0; i < 32; ++i)
 	{
+		// Kernel only picks which nearby screen pixels to inspect (hemisphere footprint).
 		float3 sp = Pp + (TBN * P.samples[i].xyz) * P.cfg.z;
 		float4 clip = P.proj * float4(sp, 1.0);
 		float2 suv = clip.xy / clip.w;
@@ -642,10 +643,21 @@ fragment float4 ssaoFragment(SSAOOut in [[stage_in]],
 		if (any(suv < 0.0) || any(suv > 1.0)) continue;
 		float4 sv = posTex.sample(posSmp, suv);
 		if (sv.a < 0.5) continue;                    // sampled the background
-		float rangeCheck = smoothstep(0.0, 1.0, P.cfg.z / max(abs(Pp.z - sv.z), 1e-4));
-		occ += ((sv.z >= sp.z + P.cfg.w) ? 1.0 : 0.0) * rangeCheck;
+		// Slope-invariant occlusion (mirrors GL kSSAOFS): how far the neighbour rises
+		// above this fragment's tangent plane (Pp, N). A flat surface — even edge-on —
+		// has neighbours lying IN the plane (dot ≈ 0) and can't occlude itself; only
+		// geometry that lifts off the surface counts. Replaces the view-depth compare
+		// that over-occluded grazing terrain (the darkening when the camera tilts up).
+		float3 toOcc = sv.xyz - Pp;
+		float  above = dot(toOcc, N);
+		float  rangeCheck = smoothstep(0.0, 1.0, P.cfg.z / max(length(toOcc), 1e-4));
+		occ += (above > P.cfg.w ? 1.0 : 0.0) * rangeCheck;
 	}
 	float ao = 1.0 - (occ / 32.0) * P.cfg2.x;
+	// Safety floor (mirrors GL kSSAOFS): AO dims the image-based ambient (a primary
+	// light source), so cap it to dim by at most half — no black surfaces even at high
+	// radius/intensity. Rarely hit now with the slope-invariant test; it's a backstop.
+	ao = max(ao, 0.5);
 	return float4(ao, ao, ao, 1.0);
 }
 
