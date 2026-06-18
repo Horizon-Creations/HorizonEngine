@@ -794,6 +794,7 @@ void EditorApplication::OnRender(float dt)
 			PropertyAnimationSystem::update(*m_editorWorld, contentManager(), dt);
 			NavigationSystem::update(*m_editorWorld, dt);
 			ParticleSystem::update(*m_editorWorld, dt);
+			FoliageSystem::update(*m_editorWorld);
 
 		// Step physics at a fixed rate during play mode
 		if (m_isPlaying && m_physicsWorld && m_editorWorld)

@@ -4297,6 +4297,22 @@ void EditorUI::RenderInspector(AppContext& ctx)
 		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<ParticleSystemComponent>(entity); }
 	}
 
+	// ── Foliage ──────────────────────────────────────────────────────────────
+	if (auto* fol = registry.try_get<FoliageComponent>(entity))
+	{
+		if (componentHeader("Foliage", true, removed))
+		{
+			ImGui::DragFloat("Density##fol",       &fol->density,      0.01f, 0.001f, 10.f); if (ImGui::IsItemDeactivatedAfterEdit()) { fol->dirty = true; trackEdit(); }
+			ImGui::DragFloat("Draw Distance##fol", &fol->drawDistance, 1.0f,  1.0f,  500.f); trackEdit();
+			ImGui::DragFloat("Min Scale##fol",     &fol->minScale,     0.01f, 0.01f, 10.f);  if (ImGui::IsItemDeactivatedAfterEdit()) { fol->dirty = true; trackEdit(); }
+			ImGui::DragFloat("Max Scale##fol",     &fol->maxScale,     0.01f, 0.01f, 10.f);  if (ImGui::IsItemDeactivatedAfterEdit()) { fol->dirty = true; trackEdit(); }
+			ImGui::DragInt  ("Seed##fol",          &fol->seed,         1);                    if (ImGui::IsItemDeactivatedAfterEdit()) { fol->dirty = true; trackEdit(); }
+			ImGui::Text("Instances: %zu", fol->cachedInstances.size());
+			if (ImGui::Button("Regenerate")) { fol->dirty = true; trackEdit(); }
+		}
+		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<FoliageComponent>(entity); }
+	}
+
 	// ── LOD ──────────────────────────────────────────────────────────────────
 	if (auto* lod = registry.try_get<LODComponent>(entity))
 	{
@@ -4451,6 +4467,7 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			addItem("Audio Listener",  AudioListenerComponent{});
 			addItem("Particle System", ParticleSystemComponent{});
 			addItem("LOD",             LODComponent{});
+			addItem("Foliage",         FoliageComponent{});
 			addItem("UI Canvas",       UICanvasComponent{});
 			addItem("UI Element",      UIElementComponent{});
 			addItem("UI Text",         UITextComponent{});

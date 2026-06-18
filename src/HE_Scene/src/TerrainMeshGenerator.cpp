@@ -160,3 +160,31 @@ StaticMeshAsset generateTerrainMesh(const TerrainComponent& tc)
 
     return mesh;
 }
+
+float terrainHeightAt(const TerrainComponent& tc, float localX, float localZ)
+{
+    const float nx = (localX + tc.sizeX * 0.5f) / tc.sizeX;
+    const float nz = (localZ + tc.sizeZ * 0.5f) / tc.sizeZ;
+
+    const uint32_t res = std::clamp(tc.resolution, 2u, 1024u);
+    if (tc.sculptHeights.size() == static_cast<size_t>(res * res))
+    {
+        // Bilinear sample from sculpted heights
+        const float fx = std::clamp(nx, 0.f, 1.f) * static_cast<float>(res - 1);
+        const float fz = std::clamp(nz, 0.f, 1.f) * static_cast<float>(res - 1);
+        const int   ix = static_cast<int>(fx);
+        const int   iz = static_cast<int>(fz);
+        const float tx = fx - static_cast<float>(ix);
+        const float tz = fz - static_cast<float>(iz);
+        const int   ix1 = std::min(ix + 1, static_cast<int>(res) - 1);
+        const int   iz1 = std::min(iz + 1, static_cast<int>(res) - 1);
+        const float h00 = tc.sculptHeights[static_cast<size_t>(iz  * static_cast<int>(res) + ix )];
+        const float h10 = tc.sculptHeights[static_cast<size_t>(iz  * static_cast<int>(res) + ix1)];
+        const float h01 = tc.sculptHeights[static_cast<size_t>(iz1 * static_cast<int>(res) + ix )];
+        const float h11 = tc.sculptHeights[static_cast<size_t>(iz1 * static_cast<int>(res) + ix1)];
+        return (h00 + (h10 - h00) * tx) + ((h01 - h00) + (h00 - h10 - h01 + h11) * tx) * tz;
+    }
+    if (tc.seed != 0)
+        return tc.heightScale * fbm(tc.seed, nx, nz, tc.octaves, tc.frequency, tc.lacunarity, tc.gain);
+    return 0.f;
+}
