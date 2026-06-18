@@ -218,15 +218,17 @@ out vec4 FragColor;
 float computeShadow(vec3 worldPos, vec3 N, vec3 L)
 {
 	if (uShadowEnabled == 0) return 1.0;
-	vec4 lp = uLightVP * vec4(worldPos, 1.0);
+	// Normal-offset bias: push the sample point off the surface along its normal
+	// before projecting into shadow space. This eliminates acne on steep terrain
+	// (slope-scaled depth bias alone doesn't handle large dz/dx well).
+	vec4 lp = uLightVP * vec4(worldPos + N * 0.06, 1.0);
 	vec3 p  = lp.xyz / lp.w;
 	p = p * 0.5 + 0.5;                       // NDC [-1,1] → [0,1]
 	if (p.z > 1.0 || any(lessThan(p.xy, vec2(0.0))) || any(greaterThan(p.xy, vec2(1.0))))
 		return 1.0;                          // outside the map → lit
-	// Slope-scaled bias: grows toward grazing sun angles (low sun / day-night
-	// sunsets) to stop shadow acne, clamped so high sun keeps crisp contact.
-	float ndl     = clamp(dot(N, L), 0.0, 1.0);
-	float bias    = clamp(0.0016 * tan(acos(ndl)), 0.0005, 0.04);
+	// Small residual depth bias for sub-texel precision.
+	float ndl  = clamp(dot(N, L), 0.0, 1.0);
+	float bias = clamp(0.0008 * tan(acos(ndl)), 0.0002, 0.02);
 	// 3×3 PCF: averaging neighbouring texels softens the edge and hides the
 	// per-texel flicker the hard test produced as the day-night light rotates.
 	vec2 texel = 1.0 / vec2(textureSize(uShadowMap, 0));
@@ -238,7 +240,10 @@ float computeShadow(vec3 worldPos, vec3 N, vec3 L)
 			vis += (p.z - bias > c) ? 0.0 : 1.0;
 		}
 	vis /= 9.0;
-	return mix(0.35, 1.0, vis);
+	// No direct-light floor in shadow — the IBL + flat ambient already provide
+	// the minimum indirect illumination. A non-zero floor bleeds warm sun colour
+	// into fully-shadowed areas and causes the yellow/orange cast at dusk.
+	return vis;
 }
 
 void main()
@@ -267,10 +272,10 @@ void main()
 	// diffuse from the surface normal, specular from the reflection vector
 	// (bent toward the normal as roughness grows = crude prefilter).
 	vec3 Rrough  = normalize(mix(reflect(-V, N), N, uRoughness));
-	// Clamp the diffuse lookup direction so it never dips below the horizon.
-	// Sampling the skybox near the equator returns the warm horizon hue, which
-	// tints back-facing or near-horizontal surfaces yellow/orange.
-	vec3 Nup     = normalize(vec3(N.x, max(N.y, 0.0), N.z));
+	// Clamp the diffuse IBL lookup at least 5° above the horizon. Sampling near
+	// or at the horizon (N.y ≈ 0) returns the warm/orange sunset band of the sky
+	// even at noon. A floor of 0.1 keeps the sample safely in the cool sky dome.
+	vec3 Nup     = normalize(vec3(N.x, max(N.y, 0.1), N.z));
 	vec3 ambDiff = texture(uSkyEnv, Nup).rgb    * diffuseColor;
 	vec3 ambSpec = texture(uSkyEnv, Rrough).rgb * specColor;
 	vec3 ambient = ambDiff * 0.35 + ambSpec * (1.0 - 0.6 * uRoughness);

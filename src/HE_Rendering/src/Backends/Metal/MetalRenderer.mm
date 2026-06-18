@@ -221,14 +221,16 @@ float shadowFactor(constant SceneUniforms& scene, float3 worldPos, float3 N, flo
                    texture2d<float> shadowMap, sampler shadowSmp)
 {
 	if (scene.shadowEnabled == 0) return 1.0;
-	float4 lp = scene.lightVP * float4(worldPos, 1.0);
+	// Normal-offset bias: push the sample point off the surface along its normal
+	// before projecting into shadow space. This eliminates acne on steep terrain
+	// (slope-scaled depth bias alone doesn't handle large dz/dx well).
+	float4 lp = scene.lightVP * float4(worldPos + N * 0.06, 1.0);
 	float3 p  = lp.xyz / lp.w;            // z already [0,1] (Metal clip); xy in [-1,1]
 	float2 uv = float2(p.x * 0.5 + 0.5, 1.0 - (p.y * 0.5 + 0.5)); // tex origin top-left
 	if (p.z > 1.0 || any(uv < 0.0) || any(uv > 1.0)) return 1.0;
-	// Slope-scaled bias: grows toward grazing sun angles (day-night sunsets) to
-	// stop shadow acne, clamped so a high sun keeps crisp contact shadows.
-	float ndl     = clamp(dot(N, L), 0.0, 1.0);
-	float bias    = clamp(0.0016 * tan(acos(ndl)), 0.0005, 0.02);
+	// Small residual depth bias for sub-texel precision.
+	float ndl  = clamp(dot(N, L), 0.0, 1.0);
+	float bias = clamp(0.0008 * tan(acos(ndl)), 0.0002, 0.02);
 	// 3×3 PCF: averaging neighbouring texels softens the edge and hides the
 	// per-texel flicker the hard test produced as the day-night light rotates.
 	float2 texel = 1.0 / float2(shadowMap.get_width(), shadowMap.get_height());
@@ -240,7 +242,10 @@ float shadowFactor(constant SceneUniforms& scene, float3 worldPos, float3 N, flo
 			vis += (p.z - bias > c) ? 0.0 : 1.0;
 		}
 	vis /= 9.0;
-	return mix(0.35, 1.0, vis);
+	// No direct-light floor in shadow — the IBL + flat ambient already provide
+	// the minimum indirect illumination. A non-zero floor bleeds warm sun colour
+	// into fully-shadowed areas and causes the yellow/orange cast at dusk.
+	return vis;
 }
 
 // Atmospheric fog / aerial perspective (mirrors the GL applyFog()): blend the
@@ -298,9 +303,10 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
 	// diffuse from the normal, specular from the reflection (bent toward N by
 	// roughness as a crude prefilter).
 	float3 Rrough  = normalize(mix(reflect(-V, N), N, in.roughness));
-	// Clamp the diffuse lookup direction so it never dips below the horizon
-	// (sampling near-horizontal sky returns the warm horizon hue → yellow tint).
-	float3 Nup     = normalize(float3(N.x, max(N.y, 0.0), N.z));
+	// Clamp the diffuse IBL lookup at least 5° above the horizon. Sampling near
+	// or at the horizon (N.y ≈ 0) returns the warm/orange sunset band of the sky
+	// even at noon. A floor of 0.1 keeps the sample safely in the cool sky dome.
+	float3 Nup     = normalize(float3(N.x, max(N.y, 0.1), N.z));
 	float3 ambDiff = skyEnv.sample(skyEnvSmp, Nup).rgb    * diffuseColor;
 	float3 ambSpec = skyEnv.sample(skyEnvSmp, Rrough).rgb * specColor;
 	float3 ambient = ambDiff * 0.35 + ambSpec * (1.0 - 0.6 * in.roughness);
