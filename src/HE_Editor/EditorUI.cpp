@@ -1782,6 +1782,27 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 					if (!anyNav)                s_navActive = false;
 					navigating = s_navActive;
 
+					// RMB cursor capture: hide + lock while fly-looking, restore on release.
+					static bool   s_rmbCaptured = false;
+					static ImVec2 s_rmbStartPos{};
+					if (SDL_Window* sdlWin = ctx.window ? ctx.window->GetNativeWindow() : nullptr)
+					{
+						if (rmb && imageHovered && !s_rmbCaptured)
+						{
+							s_rmbStartPos = io.MousePos;
+							SDL_HideCursor();
+							SDL_SetWindowRelativeMouseMode(sdlWin, true);
+							s_rmbCaptured = true;
+						}
+						else if (!rmb && s_rmbCaptured)
+						{
+							SDL_SetWindowRelativeMouseMode(sdlWin, false);
+							SDL_ShowCursor();
+							SDL_WarpMouseInWindow(sdlWin, s_rmbStartPos.x, s_rmbStartPos.y);
+							s_rmbCaptured = false;
+						}
+					}
+
 					EditorCamera::Input cin;
 					cin.dt             = dt;
 					cin.viewportHeight = avail.y;
