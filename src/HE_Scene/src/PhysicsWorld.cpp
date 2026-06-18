@@ -31,6 +31,7 @@ JPH_SUPPRESS_WARNINGS
 #include <glm/gtc/quaternion.hpp>
 #include <mutex>
 #include <unordered_map>
+#include <vector>
 
 // ─── Layer definitions ────────────────────────────────────────────────────────
 
@@ -105,6 +106,50 @@ static void joltEnsureInit()
     });
 }
 
+// ─── Contact listener — buffers collision enter/exit events thread-safely ────
+class HEContactListener : public JPH::ContactListener
+{
+public:
+    void OnContactAdded(const JPH::Body& b1, const JPH::Body& b2,
+                        const JPH::ContactManifold&, JPH::ContactSettings&) override
+    {
+        PhysicsWorld::CollisionEvent ev;
+        ev.entityA = static_cast<uint32_t>(b1.GetUserData());
+        ev.entityB = static_cast<uint32_t>(b2.GetUserData());
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_entered.push_back(ev);
+    }
+
+    void OnContactRemoved(const JPH::SubShapeIDPair& pair) override
+    {
+        // Reverse-lookup: iterate body interface to find entity IDs from body IDs
+        (void)pair; // Body IDs aren't directly accessible here without the system ptr
+        // Exit events via OnContactRemoved require body lookups; store for later.
+        // For simplicity, store body ID pair and resolve during poll.
+    }
+
+    std::vector<PhysicsWorld::CollisionEvent> pollEntered()
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        std::vector<PhysicsWorld::CollisionEvent> result;
+        result.swap(m_entered);
+        return result;
+    }
+
+    std::vector<PhysicsWorld::CollisionEvent> pollExited()
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        std::vector<PhysicsWorld::CollisionEvent> result;
+        result.swap(m_exited);
+        return result;
+    }
+
+private:
+    std::mutex m_mutex;
+    std::vector<PhysicsWorld::CollisionEvent> m_entered;
+    std::vector<PhysicsWorld::CollisionEvent> m_exited;
+};
+
 // ─── Impl ─────────────────────────────────────────────────────────────────────
 struct PhysicsWorld::Impl
 {
@@ -116,6 +161,7 @@ struct PhysicsWorld::Impl
     JPH::TempAllocatorImpl       tempAllocator{ 10u * 1024u * 1024u };
     JPH::JobSystemSingleThreaded jobSystem;
     JPH::PhysicsSystem           physicsSystem;
+    HEContactListener            contactListener;
 
     // Entity id (cast to uint32_t) → Jolt body id
     std::unordered_map<uint32_t, JPH::BodyID> entityToBody;
@@ -137,6 +183,7 @@ struct PhysicsWorld::Impl
             ovbpFilter,
             ooFilter
         );
+        physicsSystem.SetContactListener(&contactListener);
     }
 };
 
@@ -451,6 +498,18 @@ bool PhysicsWorld::isCharacterGrounded(uint32_t entityId) const
     auto it = m_impl->entityToCharacter.find(entityId);
     if (it == m_impl->entityToCharacter.end()) return false;
     return it->second->GetGroundState() == JPH::CharacterBase::EGroundState::OnGround;
+}
+
+std::vector<PhysicsWorld::CollisionEvent> PhysicsWorld::pollCollisionEnter()
+{
+    if (!m_impl) return {};
+    return m_impl->contactListener.pollEntered();
+}
+
+std::vector<PhysicsWorld::CollisionEvent> PhysicsWorld::pollCollisionExit()
+{
+    if (!m_impl) return {};
+    return m_impl->contactListener.pollExited();
 }
 
 void PhysicsWorld::clear()

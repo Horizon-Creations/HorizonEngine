@@ -51,6 +51,12 @@ public:
     // Call onUpdate(self, dt) on the instance.
     bool callOnUpdate(ScriptEngine::InstanceId id, float dt);
 
+    // Call onCollisionEnter(self, otherEntityId). No-op if not defined.
+    bool callOnCollisionEnter(ScriptEngine::InstanceId id, uint32_t otherEntityId);
+
+    // Call onCollisionExit(self, otherEntityId). No-op if not defined.
+    bool callOnCollisionExit(ScriptEngine::InstanceId id, uint32_t otherEntityId);
+
     // Hot-reload: recompile script and patch function fields in live instances.
     // Data fields (non-function keys in instance tables) are preserved.
     bool hotReloadScript(const std::string& name, const std::string& source);
