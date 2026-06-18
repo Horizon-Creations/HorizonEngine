@@ -20,6 +20,10 @@ public:
     void extract(HorizonWorld& world, RenderWorld& outWorld, float aspectRatio,
                  const EditorCameraOverride* editorCam = nullptr);
 
+    // Populate outWorld.uiObjects from UISystem::extract.
+    // Called after extract() when viewport pixel dimensions are known.
+    void extractUI(HorizonWorld& world, float vpWidth, float vpHeight, RenderWorld& outWorld);
+
     // Day-night cycle: when enabled, the extractor drives the sun from the time
     // of day (0..1: 0.25 sunrise, 0.5 noon, 0.75 sunset, 0/1 midnight) instead of
     // the scene light's authored direction — it rotates the first directional

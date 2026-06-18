@@ -280,6 +280,13 @@ private:
 	void EnsureLdrTarget(int width, int height);
 	void DestroyLdrTarget();
 
+	// ── In-Game UI (2D canvas elements, drawn after FXAA) ───────────────────
+	unsigned int m_uiProgram     = 0;
+	int          m_uUIRect       = -1;
+	int          m_uUIViewport   = -1;
+	int          m_uUIColor      = -1;
+	void         RenderUIPass(int pw, int ph);
+
 	// ── Bloom (bright-pass + separable Gaussian blur on the HDR target) ──────
 	// The bright pass extracts highlights above a soft-knee threshold into a
 	// half-res RGBA16F target; two ping-pong buffers blur it; the tonemap pass
