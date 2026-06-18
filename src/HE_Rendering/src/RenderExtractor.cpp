@@ -202,7 +202,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 	glm::vec3 sunToward(0.45f, 0.80f, 0.55f); // default high sun
 	// Weak ambient floor — always added so the scene is never fully black. Under
 	// heavy cloud cover it grows to replace the (switched-off) sun/moon light.
-	glm::vec3 ambient(0.03f, 0.035f, 0.05f);
+	glm::vec3 ambient(0.08f, 0.09f, 0.13f);
 
 	if (m_dayNight)
 	{

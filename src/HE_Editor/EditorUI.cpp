@@ -245,7 +245,6 @@ static void DrawEngineSettings(AppContext& ctx, SettingsMode mode)
 		ImGui::EndDisabled();
 	});
 
-	row("grid", "Viewport", [&]{ ImGui::Checkbox("Show Grid", &cfg.ShowGrid); });
 	row("camspeed", "Viewport", [&]{
 		ImGui::SetNextItemWidth(220.0f);
 		if (ImGui::SliderFloat("Camera Speed", &cfg.EditorCameraSpeed, 1.0f, 50.0f, "%.1f u/s") && ctx.editorCamera)
@@ -292,7 +291,6 @@ static void DrawPreferencesWindow(AppContext& ctx, bool& open)
 		{
 			cfg.UiFontScale       = 1.0f;
 			cfg.EditorCameraSpeed = 6.0f;
-			cfg.ShowGrid          = true;
 			cfg.KeepCPUAssets     = false;
 			cfg.ContentBrowserRefreshRate = 60;
 			cfg.BloomEnabled      = true;
@@ -1742,18 +1740,6 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 					s_extractor.extract(*ctx.world, s_sceneSnapshot, avail.x / avail.y,
 					                    camOverride.active ? &camOverride : nullptr);
 
-				// ── Ground grid (world XZ plane) ────────────────────────────
-				if (ctx.editorConfig.ShowGrid && !ctx.isPlaying)
-				{
-					ImGuizmo::SetOrthographic(false);
-					ImGuizmo::SetDrawlist();
-					ImGuizmo::SetRect(rectMin.x, rectMin.y,
-					                  rectMax.x - rectMin.x, rectMax.y - rectMin.y);
-					const glm::mat4 gridXform(1.0f);
-					ImGuizmo::DrawGrid(&s_sceneSnapshot.camera.view[0][0],
-					                   &s_sceneSnapshot.camera.projection[0][0],
-					                   &gridXform[0][0], 20.0f);
-				}
 
 				// Suppress the gizmo while the camera is being driven so Alt+LMB
 				// orbit and RMB fly-look don't fight the manipulator.

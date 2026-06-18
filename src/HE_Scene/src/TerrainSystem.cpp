@@ -2,8 +2,10 @@
 #include "HorizonScene/HorizonWorld.h"
 #include "HorizonScene/Components/TerrainComponent.h"
 #include "HorizonScene/Components/MeshComponent.h"
+#include "HorizonScene/Components/MaterialComponent.h"
 #include "HorizonScene/TerrainMeshGenerator.h"
 #include <ContentManager/ContentManager.h>
+#include <ContentManager/DefaultAssets.h>
 #include <Renderer/IRenderer.h>
 #include <entt/entt.hpp>
 
@@ -45,6 +47,16 @@ namespace TerrainSystem
             MeshComponent mc;
             mc.meshAssetId = meshId;
             registry.emplace_or_replace<MeshComponent>(entity, mc);
+
+            // Migrate plain-white material → grid terrain material so new and
+            // existing terrains without a custom shader get the grid overlay.
+            auto* matComp = registry.try_get<MaterialComponent>(entity);
+            if (!matComp || matComp->materialAssetId == HE::kDefaultMaterialId)
+            {
+                MaterialComponent mat;
+                mat.materialAssetId = HE::kDefaultTerrainMaterialId;
+                registry.emplace_or_replace<MaterialComponent>(entity, mat);
+            }
         }
     }
 }
