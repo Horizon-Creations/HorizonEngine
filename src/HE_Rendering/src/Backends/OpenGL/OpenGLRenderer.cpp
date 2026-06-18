@@ -697,7 +697,7 @@ vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float time, float coverage
 			// Moonlit silver: moon rises on the opposite arc from the sun.
 			vec3  cMoonDir = normalize(vec3(-sunDir.x, -sunDir.y, sunDir.z));
 			float cMoonUp  = clamp((cMoonDir.y + 0.10) / 0.25, 0.0, 1.0);
-			cloudCol += vec3(0.20, 0.22, 0.38) * lit * cMoonUp * (1.0 - day) * 0.7;
+			cloudCol += vec3(0.20, 0.22, 0.38) * lit * cMoonUp * (1.0 - day) * 0.25;
 			// Forward-scatter glow: Henyey-Greenstein-weighted direct sunlight makes
 			// the sun-facing edges flare gold (the silver lining), strongest when
 			// looking toward the sun and where the cloud isn't self-shadowed.

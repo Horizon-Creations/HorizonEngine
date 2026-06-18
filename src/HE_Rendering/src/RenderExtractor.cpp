@@ -226,12 +226,6 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 		ambient += (m_sunColor  * (m_sunIntensity  * sunUp)
 		          + m_moonColor * (m_moonIntensity * moonUp)) * (overcast * 0.22f);
 
-		// Night ambient: starlight fill so terrain is never pitch black, plus
-		// moonlit ambient proportional to how high the moon is. Both fade out by
-		// day so they don't inflate daytime ambient.
-		ambient += glm::vec3(0.04f, 0.045f, 0.075f) * (1.0f - sunUp);
-		ambient += m_moonColor * (m_moonIntensity * moonUp * 3.5f * (1.0f - sunUp));
-
 		if (sunLight)
 		{
 			// Scene geometry gets neutral (luminance-only) direct light so the
