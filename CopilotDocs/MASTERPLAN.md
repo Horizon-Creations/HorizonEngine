@@ -221,7 +221,7 @@ profitieren von P2.8 (Play-Mode zum Testen).
 | 4d.2 | GPU-Skinning (Bone-Matrizen als Uniform/Storage-Buffer) | 4d.1, 3.3 | | ✅ Forts. 46 |
 | 4d.3 | AnimationClip-Playback + AnimatorComponent | 4d.1, 2.2 | | ✅ Forts. 47 |
 | 4d.4 | Blending + State-Machine (einfacher Animator-Graph) | 4d.3 | | ✅ Forts. 48+49 |
-| 4d.5 | Property-Animation (Transform/Material animieren, für Cutscenes/UI) | 4d.3 | |
+| 4d.5 | Property-Animation (Transform/Material animieren, für Cutscenes/UI) | 4d.3 | | ✅ Forts. 50 |
 
 ---
 
@@ -1870,3 +1870,27 @@ Lifetime-sicher mit der bestehenden `SlotMap`/`m_handleToUUID`-Buchführung inte
 - Nach Abschluss: `currentStateName = transitionTarget`, `clipTime = transitionElapsed` (nahtlose Fortsetzung im neuen Zustand).
 - `inTransition` ist ein Mutex gegen verschachtelte Übergänge (nur einen aktiven Übergang zur gleichen Zeit).
 - **313 Tests grün** (306→313). Commit `3432883`.
+
+### Forts. 50 — Property Animation (4d.5)
+
+**Ziel:** Animiert skalare Eigenschaften von TransformComponent (position/rotation/scale) und MaterialAsset (baseColor/metallic/roughness/opacity) über eine Timeline.
+
+**Neue / geänderte Dateien:**
+
+- **`src/HE_Core/include/Types/Enums.h`**: `AssetType::PropertyAnimClip` ergänzt.
+- **`src/HE_Core/include/ContentManager/Assets.h`**: `PropTarget`-Enum (PosX/Y/Z, RotX/Y/Z, ScaleX/Y/Z, MatColorR/G/B, MatMetallic, MatRoughness, MatOpacity), `PropertyAnimChannel` (scalar times/values), `PropertyAnimClipAsset`.
+- **`src/HE_Core/include/ContentManager/ContentManager.h`**: `getPropertyAnimClip`, `registerPropertyAnimClip`, `acquirePropertyAnimClip`, `m_propAnimClipAssets`.
+- **`src/HE_Core/src/ContentManager/ContentManager.cpp`**: Implementierungen + unloadAsset-tryRemove ergänzt.
+- **`src/HE_Scene/include/HorizonScene/Components/PropertyAnimatorComponent.h`** (neu): `PropertyAnimatorComponent{clipId, playbackTime/Speed, looping, playing}`.
+- **`src/HE_Scene/include/HorizonScene/PropertyAnimationSystem.h`** (neu): `PropertyAnimationSystem::update(world, cm, dt)`.
+- **`src/HE_Scene/src/PropertyAnimationSystem.cpp`** (neu): Linear-Interpolation über `sampleChannel`; wendet auf `TransformComponent` (dirty=true) und `MaterialAsset` via `getMaterialMutable` an; Looping + Stop-am-Ende.
+- **`src/HE_Scene/CMakeLists.txt`**: `PropertyAnimationSystem.cpp` ergänzt.
+- **`src/HE_Scene/include/HorizonScene/HorizonScene.h`**: `PropertyAnimatorComponent.h` inkludiert.
+- **`src/HE_Editor/EditorApplication.cpp`**: `PropertyAnimationSystem::update` nach StateMachineSystem eingefügt.
+- **`src/HE_Editor/EditorUI.cpp`**: „Property Animator"-Inspector-Panel (Clip-DragDrop, Speed/Time/Looping/Playing, Clip-Info); Add-Component-Menü ergänzt.
+- **`tests/test_animationsystem.cpp`**: 8 neue Tests (Defaults, CM-Register, PosX-Midpoint, RotY-End, Time-Advance, Loop-Wrap, Stop-not-Looping, Skip-playing=false).
+
+**Architektur-Entscheidungen:**
+- Material-Channels schreiben direkt auf den geteilten `MaterialAsset` via `getMaterialMutable` (betrifft ALLE Entities mit demselben Material → für Per-Entity-Varianz bräuchte man Material-Instanz-Overrides = nächster Schritt).
+- PropTarget ist ein flaches uint8_t-Enum (kein Reflektionssystem nötig) — einfach erweiterbar, alle Switch-Arme explizit.
+- **321 Tests grün** (313→321). Commit `bef034d`.
