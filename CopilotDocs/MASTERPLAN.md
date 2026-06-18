@@ -14,7 +14,7 @@ Unity/Godot-Featureset, nicht Unreal-AAA).
 | UUID-Persistenz im META-Chunk (v2) | ✅ |
 | Erster Render-Pfad: ECS-Welt → sichtbares Mesh auf GL **und** Metal (CommandBuffer, RenderWorld, RenderExtractor, Kamera) | ✅ |
 | Editor-Shell: Hub, Docking, Outliner, Content Browser | ✅ |
-| Backend-Gerüste GL/Metal/Vulkan/D3D11/D3D12 | ✅ Alle 5 zeichnen Szene + Directional-Schatten; GL+Metal auf macOS verifiziert (inkl. HDR/Tonemapping), D3D11/D3D12/Vulkan auf Windows validiert (HDR dort noch offen) |
+| Backend-Gerüste GL/Metal/Vulkan/D3D11/D3D12 | 🟡 Alle 5 zeichnen Szene + Directional-Schatten; **GL+Metal sind das Vollausbau-Paar** (alle Rendering-Features); D3D11/D3D12/Vulkan nur auf Windows für Szene+Schatten validiert — alle weiteren Features fehlen dort (vollständige Lückenliste in Phase 6.2) |
 | Asset-Importer (Texture/Mesh/Material/Audio), asset_compiler, Packer | 🔴 Stubs |
 | SceneSerializer | 🔴 nur Name + Hierarchie |
 | RenderGraph, RenderPass, RenderResourceManager, GPUMemoryAllocator | 🔴 leer |
@@ -169,7 +169,7 @@ Reihenfolge nach Sichtbarkeit pro Aufwand. Braucht P1 für Materialien/Texturen;
 | # | Aufgabe | Hängt ab von | Details |
 |---|---|---|---|
 | 3.1 | **FrustumCuller + RenderSorter** | Render-Pfad ✅ | ✅ Gribb/Hartmann-Frustum, Mesh-Key+Distanz-Sort, bis zu 8 Lichter (Dir/Point/Spot) |
-| 3.2 | **Shader-Cross-Compile** ausbauen | — | `glslc → SPIR-V → SPIRV-Cross → MSL/HLSL` im shader_compiler |
+| 3.2 | **Shader-Cross-Compile** (nur Game/User-Shader) | — | 🟡 `glslc → SPIR-V` existiert (nur Vulkan-Pfad). **ENTSCHEIDUNG (18.06.2026):** Die **Core-Engine-Shader bleiben bewusst pro Backend von Hand geschrieben** (GLSL/MSL/HLSL bzw. SPIR-V) — kein Auto-Cross-Compile für Core (volle Kontrolle, backend-spezifische Optimierung, keine Generator-Black-Box). Cross-Compile höchstens als Komfort für künftige *Game-/User-*Shader, optional/später. |
 | 3.3 | **Beleuchtung**: Blinn-Phong → **PBR** (metallic/roughness) | 1.2/1.3 für echte Materialien | ✅ Blinn-Phong + PBR-Skalare (baseColor/metallic/roughness), Material-Inspector, D/P/S-Lights |
 | 3.4 | **RenderGraph + Pass-System aktivieren** | 3.1 | ✅ GeometryPass→PostProcessPass; RenderTarget-Abstraktion; alle 5 Backends |
 | 3.5 | **Schatten**: Directional mit einer Cascade → CSM | 3.4 | ✅ 2048²-Depth-Map, Texel-Snapping, 3×3-PCF, Slope-Bias; GL+Metal verifiziert, D3D/Vulkan blind |
@@ -247,7 +247,7 @@ Macht aus „Renderer + Systeme" eine Engine, in der man ein Spiel *baut*.
 | # | Aufgabe | Hängt ab von | Details |
 |---|---|---|---|
 | 6.1 | **hpak-Packaging**: HpakWriter + KeyDerivation implementieren, asset_compiler → Packer-Kette, GameApplication lädt aus .hpak | 1.4 | ✅ Forts. 55 — HpakWriter/HpakReader in HorizonCore; .hpak-Format (magic+TOC+Datenblöcke, 36B/Entry); KeyDerivation PBKDF2-HMAC-SHA256 (standalone, kein mbedtls); optionale XOR-Verschlüsselung; HAsset::toBytes/openData; ContentManager::loadPak+loadAssetFromMemory; hpak_packer-CLI (--secret); **LZ4-Kompression verdrahtet (Forts. 57): PackSettings.compress, compress→encrypt (write)/decrypt→decompress (read), system-lz4 via pkg-config+find_path, graceful fallback; 4 neue LZ4-Tests; 379 Tests grün** |
-| 6.2 | **Vulkan-Backend auf Parität** (Draw-Pfad, danach D3D12; D3D11 ggf. streichen) | 3.2, 3.4 | Linux-Support hängt hieran |
+| 6.2 | **Vulkan/D3D-Backends auf Parität** (Draw-Pfad, danach D3D12; D3D11 ggf. streichen) | 3.2, 3.4 | 🟡 alle 3 nur „Szene + Directional-Schatten" (Windows 14.06. validiert); **vollständige Lückenliste siehe unten**. Linux-Support hängt hieran |
 | 6.3 | **„Build Game"-Pipeline im Editor**: Standalone-Export (Executable + .hpak) pro Plattform | 6.1 | ✅ Forts. 58+59 — ProjectConfig+ProjectConfigLoader in HorizonCore; ProjectExporter packt .hasset→.hpak+schreibt project.hcfg+kopiert .hescene+kopiert Binary/dylibs (ExportSettings.gameRuntimeDir); ExportResult.binaryFilesCopied; GameApplication::OnInit lädt project.hcfg + ContentManager::loadPak; Editor: Build>Export-Modal; HorizonGame BUILD_RPATH @executable_path (macOS); 12 Tests (4 neu für Binary-Copy); 399 Tests grün |
 | 6.4 | **Async-Asset-Streaming** (Lade-Jobs, Platzhalter-Assets, Unloading via Ref\<T\>) | 0.3, 0.4 | ✅ Forts. 56 — ContentManager::loadAssetAsync/pollAsyncResults/isAsyncPending; I/O auf globalPool (ThreadPool), parse+SlotMap-Registration immer auf Main-Thread; Duplikate coalesced; parseAndRegisterAsset als shared helper (sync+async); Application.cpp auf setContentRoot() umgestellt; 9 neue Tests |
 | 6.5 | **Crash-Reporting scharf schalten** (CrashHandler existiert), Logging in Datei | — | ✅ Forts. 56 — SA_SIGINFO-Handler für SIGSEGV/SIGABRT/SIGILL/SIGFPE/SIGBUS; schreibt datierte .crash-Datei (Zeitstempel + Signal + backtrace via execinfo) in konfigurierbares Verzeichnis (Default: tmp); re-raised mit SIG_DFL für OS-Core-Dump; Windows-Stub (SEH TODO); 2 neue Tests |
@@ -256,19 +256,66 @@ Macht aus „Renderer + Systeme" eine Engine, in der man ein Spiel *baut*.
 
 **DoD:** Ein Knopf im Editor erzeugt ein lauffähiges, ausliefbares Spiel-Binary mit gepackten, komprimierten Assets — auf macOS und Windows.
 
+### D3D11 / D3D12 / Vulkan — was zur GL/Metal-Parität fehlt (Stand 18.06.2026)
+
+Die drei Nicht-macOS-Backends wurden am 14.06. auf Windows nur für **Szene-Draw +
+Directional-Schatten** validiert (`_shots/{d3d11,d3d12,vulkan}.png`). **Jedes Rendering-Feature
+seither wurde nur auf GL+Metal gebaut**; auf D3D/Vulkan ist es ein noch offener (blinder) Port.
+Verifiziert per Code-Scan (D3D11Renderer.cpp 715 Z., D3D12Renderer.cpp 844 Z., VulkanRenderer.cpp
+1288 Z.): **keines** der drei Backends hat eines der folgenden Features.
+
+| Feature (GL+Metal ✅) | D3D11 | D3D12 | Vulkan | Plan-Ref |
+|---|:--:|:--:|:--:|---|
+| Basecolor-Texturen | ✅ | 🔴 (Flat) | 🔴 (Flat) | — |
+| HDR + ACES-Tonemapping | 🔴 | 🔴 | 🔴 | 3.6 |
+| Bloom | 🔴 | 🔴 | 🔴 | 3.6 |
+| SSAO / HBAO | 🔴 | 🔴 | 🔴 | 3.12 |
+| FXAA | 🔴 | 🔴 | 🔴 | 3.11 |
+| Skybox + IBL-Ambient/Specular | 🔴 | 🔴 | 🔴 | 3.9 |
+| Tag-Nacht / Atmosphäre / Mond / Sterne / Wolken / Aurora | 🔴 | 🔴 | 🔴 | 3.9 |
+| Sortierte Transparenz (opacity<1) | 🔴 | 🔴 | 🔴 | 3.10 |
+| GPU-Instancing (same-mesh-Batch) | 🔴 | 🔴 | 🔴 | 3.8 |
+| Material-Override (MaterialComponent) | 🔴 | 🔴 | 🔴 | #Mat |
+| PBR-Skalare (baseColor/metallic/roughness) | 🔴 | 🔴 | 🔴 | 3.3 |
+| Debug-Draw (Linien/AABB/Sphere) | 🔴 | 🔴 | 🔴 | 0.7 |
+| In-Game-UI-Pass (Canvas/Text/Button) | 🔴 | 🔴 | 🔴 | 5.4 |
+| Skeletal-Mesh GPU-Skinning (Bone-Matrizen) | 🔴 | 🔴 | 🔴 | 4d.2 |
+| PostProcessPass im RenderGraph verdrahtet | 🔴 | 🔴 | 🔴 | 3.4 |
+
+Außerdem offen: **Textur-Kompression** (1.6, BCn/ASTC — Enum existiert, kein Encoder; Importer
+speichert RGBA8 roh) und **Linux-Window/Input-Pfad** (6.6 — nur `__APPLE__`/`_WIN32`-Branches im
+Code, kein `__linux__`). Hinweis: alle Post-FX-Pässe brauchen auf D3D/Vulkan zuerst die
+Offscreen-Render-Target-Allokation (RTV/DSV-Pool bzw. VkImage-Pool), die GL/Metal mit HDR
+eingeführt haben — der `RenderPassIO`-Seam (3.4) ist dafür bereits da, der Backend-Sink muss die
+Targets nur noch anlegen + binden.
+
 ---
 
 ## Phase 7 — Kür (nach Bedarf, von Catania getrieben)
 
 Kein fester Plan — einzeln ziehen, wenn das Spiel es verlangt:
 
-- **TAA** und/oder **OIT** (Order-Independent Transparency)
-- **Global Illumination** (Probes/DDGI-light) und **SSR**
-- **LOD-System** + Impostors
-- **Terrain** + Vegetation/Foliage
-- **GPU-Partikel**
+- **TAA** und/oder **OIT** (Order-Independent Transparency) — Fragment-Shader, GL+Metal-Parität
+- **SSR** (Screen-Space Reflections) — Fragment-Shader, GL+Metal-Parität
+- **GTAO** (Ground-Truth AO) — Fragment-Shader, GL+Metal-Parität; Fortsetzung von HBAO (AO-Methode 2)
+- **LOD-System** ✅ (Forts. 60) + Impostors (Impostors offen)
+- **Terrain** ✅ + Vegetation/Foliage ✅ (Forts. 61)
+- **Global Illumination** (Probes/DDGI/Voxel) — ⚠️ braucht Compute → **Metal-only** (s. Policy unten)
+- **GPU-Partikel** — ⚠️ braucht Compute → **Metal-only** (s. Policy unten); CPU-Partikel (5.3) existieren als Fallback
 - **Networking** (Replikation) — nur falls Catania Multiplayer wird
 - **Virtual Texturing / Bindless** — nur bei nachgewiesenem Bedarf
+
+### Compute-Feature-Policy (ENTSCHEIDUNG 18.06.2026)
+
+Das OpenGL-Backend ist `#version 410 core` (macOS-GL-Ceiling) → **keine Compute-Shader**
+(erst ab GL 4.3). Bisher galt strikte GL/Metal-Parität, was Compute-Features blockierte.
+**Neue Regel:** Compute-abhängige Features (GPU-Partikel, echtes/dynamisches GI wie Voxel-GI/
+DDGI, Compute-Culling etc.) werden **auf Metal implementiert** und sind **auf macOS+OpenGL
+schlicht nicht verfügbar** — dort greift ein **definierter Fallback** (z. B. CPU-Partikel statt
+GPU-Partikel; Sky-IBL-Ambient statt dynamischem GI). Die Parität gilt also weiterhin für alle
+*nicht*-Compute-Features (jedes Fragment-Shader-Feature muss GL == Metal bleiben), aber
+Compute-Features dürfen Metal-exklusiv sein, solange GL einen sauberen Fallback hat statt zu
+brechen. Auf Windows kann Vulkan/D3D12 dieselben Compute-Pfade später nachziehen.
 
 ---
 
