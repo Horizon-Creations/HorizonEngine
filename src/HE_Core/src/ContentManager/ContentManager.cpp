@@ -1,5 +1,6 @@
 #include "ContentManager/ContentManager.h"
 #include "ContentManager/HAsset.h"
+#include "Hpak/HpakReader.h"
 #include "Diagnostics/Logger.h"
 #include "Diagnostics/Profiler.h"
 #include <cstring>
@@ -562,6 +563,120 @@ std::vector<HE::UUID> ContentManager::pollHotReload()
 			changed.push_back(newId);
 	}
 	return changed;
+}
+
+// ─── loadAssetFromMemory ─────────────────────────────────────────────────────
+HE::UUID ContentManager::loadAssetFromMemory(const std::vector<uint8_t>& hassetData)
+{
+	HAsset::Reader reader;
+	if (!reader.openData(hassetData)) return HE::UUID{};
+
+	const HE::AssetType type = static_cast<HE::AssetType>(reader.assetType());
+
+	const auto* metaChunk = reader.findChunk(HAsset::CHUNK_META);
+	if (!metaChunk) return HE::UUID{};
+
+	HE::UUID    id;
+	std::string assetName, assetPath;
+	if (!readMetaChunk(*metaChunk, reader.header().version, id, assetName, assetPath))
+		return HE::UUID{};
+
+	if (id == HE::UUID{}) return HE::UUID{};
+
+	SlotHandle handle{};
+
+	switch (type)
+	{
+	case HE::AssetType::StaticMesh:
+	{
+		StaticMeshAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = assetPath;
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_MREF)) { size_t o=0; HAsset::Reader::readString(c->data,o,a.materialPath); }
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_VERT)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.vertices); }
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_INDX)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.indices); }
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_NORM)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.normals); }
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_TEXC)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.uvs); }
+		handle = m_staticMeshAssets.insert(std::move(a)); break;
+	}
+	case HE::AssetType::Texture:
+	{
+		TextureAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = assetPath;
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_TXMI))
+		{ size_t o=0; HAsset::Reader::readPOD(c->data,o,a.width); HAsset::Reader::readPOD(c->data,o,a.height); HAsset::Reader::readPOD(c->data,o,a.channels); }
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_PIXL)) a.data = c->data;
+		handle = m_textureAssets.insert(std::move(a)); break;
+	}
+	case HE::AssetType::Material:
+	{
+		MaterialAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = assetPath;
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_MTRL))
+		{
+			size_t o=0;
+			HAsset::Reader::readString(c->data,o,a.shaderPath);
+			HAsset::Reader::readVec(c->data,o,a.texturePaths);
+			HAsset::Reader::readPOD(c->data,o,a.baseColor[0]);
+			HAsset::Reader::readPOD(c->data,o,a.baseColor[1]);
+			HAsset::Reader::readPOD(c->data,o,a.baseColor[2]);
+			HAsset::Reader::readPOD(c->data,o,a.metallic);
+			HAsset::Reader::readPOD(c->data,o,a.roughness);
+			HAsset::Reader::readPOD(c->data,o,a.opacity);
+		}
+		handle = m_materialAssets.insert(std::move(a)); break;
+	}
+	case HE::AssetType::Audio:
+	{
+		AudioAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = assetPath;
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_AUMI))
+		{ size_t o=0; HAsset::Reader::readPOD(c->data,o,a.sampleRate); HAsset::Reader::readPOD(c->data,o,a.channels); }
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_PCMD)) a.audioData = c->data;
+		handle = m_audioAssets.insert(std::move(a)); break;
+	}
+	case HE::AssetType::AnimationClip:
+	{
+		AnimationClipAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = assetPath;
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_ANIM))
+		{
+			size_t o = 0;
+			HAsset::Reader::readPOD(c->data, o, a.duration);
+			uint32_t channelCount = 0;
+			HAsset::Reader::readPOD(c->data, o, channelCount);
+			a.channels.resize(channelCount);
+			for (auto& ch : a.channels)
+			{
+				uint8_t pathByte = 0;
+				HAsset::Reader::readPOD(c->data, o, ch.jointIndex);
+				HAsset::Reader::readPOD(c->data, o, pathByte);
+				ch.path = static_cast<AnimPathType>(pathByte);
+				HAsset::Reader::readVec(c->data, o, ch.times);
+				HAsset::Reader::readVec(c->data, o, ch.values);
+			}
+		}
+		handle = m_animClipAssets.insert(std::move(a)); break;
+	}
+	default:
+		return HE::UUID{};
+	}
+
+	m_handleToUUID[id]   = handle;
+	m_assetTypeIndex[id] = type;
+	if (!assetPath.empty())
+		m_pathToUUID[assetPath] = id;
+	return id;
+}
+
+// ─── loadPak ─────────────────────────────────────────────────────────────────
+bool ContentManager::loadPak(const std::string& path, const uint8_t key[32])
+{
+	HpakReader reader;
+	if (!reader.open(path)) return false;
+
+	for (const auto& id : reader.enumerate())
+	{
+		if (isLoaded(id)) continue;
+		auto data = reader.readEntry(id, key);
+		if (!data.empty())
+			loadAssetFromMemory(data);
+	}
+	return true;
 }
 
 // ─── initDefaultAssets ───────────────────────────────────────────────────────

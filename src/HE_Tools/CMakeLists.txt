@@ -58,10 +58,13 @@ add_executable(hpak_packer
 target_link_libraries(hpak_packer
     PRIVATE HorizonCore
     PRIVATE HorizonScene
-    # PRIVATE mbedtls  # FetchContent — add when implementing AES + PBKDF2
-    # PRIVATE lz4      # FetchContent — LZ4 compression before encryption
+    # PRIVATE mbedtls  # FetchContent — replace XOR with AES-256-CBC
+    # PRIVATE lz4      # FetchContent — enable LZ4 compression
 )
-target_include_directories(hpak_packer PRIVATE src/Packer)
+target_include_directories(hpak_packer
+    PRIVATE src/Packer
+    PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_Core/include
+)
 
 # ─── shader_compiler.exe ───────────────────────────────────────────────────────
 add_executable(shader_compiler

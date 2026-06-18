@@ -169,6 +169,31 @@ public:
 		return f.good();
 	}
 
+	// Serialize to an in-memory buffer (same layout as write(), no disk I/O).
+	std::vector<uint8_t> toBytes(uint16_t assetType) const
+	{
+		FileHeader hdr{};
+		std::memcpy(hdr.magic, k_magic, 4);
+		hdr.version     = k_version;
+		hdr.asset_type  = assetType;
+		hdr.chunk_count = static_cast<uint32_t>(m_chunks.size());
+		hdr.flags       = 0;
+
+		std::vector<uint8_t> out(sizeof(hdr));
+		std::memcpy(out.data(), &hdr, sizeof(hdr));
+
+		for (const auto& chunk : m_chunks)
+		{
+			ChunkHeader ch{};
+			ch.id   = chunk.id;
+			ch.size = chunk.data.size();
+			const auto* chp = reinterpret_cast<const uint8_t*>(&ch);
+			out.insert(out.end(), chp, chp + sizeof(ch));
+			out.insert(out.end(), chunk.data.begin(), chunk.data.end());
+		}
+		return out;
+	}
+
 private:
 	std::vector<Chunk> m_chunks;
 };
@@ -210,6 +235,39 @@ public:
 			if (ch.size > 0)
 				f.read(reinterpret_cast<char*>(c.data.data()),
 					   static_cast<std::streamsize>(ch.size));
+			m_chunks.push_back(std::move(c));
+		}
+		return true;
+	}
+
+	// Parse an in-memory .hasset blob (same format as open(), no disk I/O).
+	bool openData(const std::vector<uint8_t>& data)
+	{
+		if (data.size() < sizeof(FileHeader)) return false;
+		std::memcpy(&m_header, data.data(), sizeof(m_header));
+		if (std::memcmp(m_header.magic, k_magic, 4) != 0) return false;
+
+		m_chunks.clear();
+		m_chunks.reserve(m_header.chunk_count);
+
+		size_t offset = sizeof(FileHeader);
+		for (uint32_t i = 0; i < m_header.chunk_count; ++i)
+		{
+			if (offset + sizeof(ChunkHeader) > data.size()) break;
+			ChunkHeader ch{};
+			std::memcpy(&ch, data.data() + offset, sizeof(ch));
+			offset += sizeof(ChunkHeader);
+
+			Chunk c;
+			c.id = ch.id;
+			c.data.resize(static_cast<size_t>(ch.size));
+			if (ch.size > 0)
+			{
+				if (offset + static_cast<size_t>(ch.size) > data.size()) return false;
+				std::memcpy(c.data.data(), data.data() + offset,
+							static_cast<size_t>(ch.size));
+				offset += static_cast<size_t>(ch.size);
+			}
 			m_chunks.push_back(std::move(c));
 		}
 		return true;

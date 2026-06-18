@@ -234,8 +234,8 @@ Macht aus „Renderer + Systeme" eine Engine, in der man ein Spiel *baut*.
 |---|---|---|---|
 | 5.1 | **Prefabs** (Entity-Hierarchie als Asset, Instanzen + Overrides) | 2.2 | ✅ Forts. 31 — serializeSubtree/instantiatePrefab, PrefabAsset, ContentManager-Integration, Editor-Kontextmenü, 9 Tests |
 | 5.2 | **Input-Mapping** (Actions/Axes statt Roh-Keys, Gamepad) | — | ✅ Forts. 32 — InputMapping (Actions+Axes, mapAction/mapAxis/tick/isPressed/axisValue), 17 Tests |
-| 5.3 | **Partikelsystem** (CPU-Sim zuerst, instanziertes Rendering) | 3.8 | GPU-Sim ist Kür |
-| 5.4 | **In-Game-UI-Runtime** (Canvas, Text via MSDF/stb_truetype, Buttons, Anchoring) | Render-Pfad ✅ | nicht ImGui — das ist Editor-only |
+| 5.3 | **Partikelsystem** (CPU-Sim zuerst, instanziertes Rendering) | 3.8 | ✅ Forts. 53 — ParticleSystemComponent (Emitter-Config + Particle-Pool), ParticleSystem::update (Euler-Integration, Emission, Culling), Billboard-Rendering via GPU-Instancing, kDefaultQuadMeshId, SceneSerializer, EditorUI-Panel, 8 Tests |
+| 5.4 | **In-Game-UI-Runtime** (Canvas, Text via MSDF/stb_truetype, Buttons, Anchoring) | Render-Pfad ✅ | ✅ Forts. 54 — UICanvas/Element/Text/Image/Button-Components; UISystem::extract (Anchor-Layout, Pivot, Layer-Sort); stb_truetype ProggyClean-Atlas; GL+Metal 2D-Quad-Pass nach FXAA (attrib-los, vertex_id); UIRenderObject in HorizonCore; RenderExtractor::extractUI; SceneSerializer; EditorUI-Inspector; 14 Tests |
 | 5.5 | **Navigation**: Recast/Detour-NavMesh-Baking + Agenten | 4a.1 | ✅ Forts. 52 |
 | 5.6 | **Szenen-Streaming/Additive-Load** (mehrere Szenen gleichzeitig) | 2.2 | ✅ Forts. 51 |
 | 5.7 | **Event-/Messaging-System** für Gameplay-Code | 4b.2 | ✅ Forts. 33 — EventBus (typed publish/subscribe, RAII Subscription, re-entrancy-safe snapshot), 15 Tests |
