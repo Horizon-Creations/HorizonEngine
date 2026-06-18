@@ -279,13 +279,13 @@ void main()
 	vec3 ambDiff = texture(uSkyEnv, Nup).rgb    * diffuseColor;
 	vec3 ambSpec = texture(uSkyEnv, Rrough).rgb * specColor;
 	vec3 ambient = ambDiff * 0.35 + ambSpec * (1.0 - 0.6 * uRoughness);
-	// Flat ambient fill (never-black floor + overcast replacement for the
-	// switched-off sun/moon light), applied to the diffuse albedo.
-	ambient += uAmbient * diffuseColor;
-	// Screen-space ambient occlusion darkens only the ambient/indirect term in
+	// Screen-space ambient occlusion darkens only the IBL indirect term in
 	// crevices; the direct lighting added below is left untouched. 1.0 = fully lit.
 	float ao = (uSSAOEnabled == 1) ? texture(uAO, gl_FragCoord.xy / uViewport).r : 1.0;
-	vec3 result  = ambient * ao;
+	// Flat ambient fill (never-black floor + overcast replacement) is intentionally
+	// kept outside the AO product so SSAO over-darkening at grazing angles cannot
+	// zero it out. It is the minimum guaranteed brightness on any surface.
+	vec3 result  = ambient * ao + uAmbient * diffuseColor;
 
 	for (int i = 0; i < uLightCount; ++i)
 	{

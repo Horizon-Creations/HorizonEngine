@@ -694,5 +694,6 @@ void ContentManager::initDefaultAssets()
 	terrainMat.path         = "mem://default_terrain_material";
 	terrainMat.texturePaths = { "mem://default_grid_tex" };
 	terrainMat.roughness    = 0.8f;
+	terrainMat.doubleSided  = true;
 	registerMaterial(std::move(terrainMat));
 }
