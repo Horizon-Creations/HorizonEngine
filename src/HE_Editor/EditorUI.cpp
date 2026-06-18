@@ -3672,6 +3672,26 @@ void EditorUI::RenderInspector(AppContext& ctx)
 		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<ColliderComponent>(entity); }
 	}
 
+	// ── Character Controller ──────────────────────────────────────────────────
+	if (auto* cc = registry.try_get<CharacterControllerComponent>(entity))
+	{
+		if (componentHeader("Character Controller", true, removed))
+		{
+			ImGui::DragFloat("Slope Limit (deg)", &cc->slopeLimit, 0.5f, 1.0f, 90.0f); trackEdit();
+			ImGui::DragFloat("Step Height (m)",   &cc->stepHeight, 0.01f, 0.0f, 2.0f); trackEdit();
+			ImGui::DragFloat("Skin Width (m)",    &cc->skinWidth,  0.001f, 0.001f, 0.5f); trackEdit();
+			ImGui::DragFloat("Mass (kg)",          &cc->mass,       0.5f, 1.0f, 500.0f); trackEdit();
+			ImGui::DragFloat("Gravity (m/s²)",     &cc->gravity,    0.1f, 0.0f, 30.0f); trackEdit();
+			ImGui::Separator();
+			ImGui::BeginDisabled(true);
+			ImGui::Checkbox("Is Grounded", &cc->isGrounded);
+			float v[3] = { cc->velocity.x, cc->velocity.y, cc->velocity.z };
+			ImGui::DragFloat3("Velocity", v);
+			ImGui::EndDisabled();
+		}
+		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<CharacterControllerComponent>(entity); }
+	}
+
 	// ── Script (Lua) ────────────────────────────────────────────────────────
 	if (auto* s = registry.try_get<ScriptComponent>(entity))
 	{
@@ -3841,8 +3861,9 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			addItem("Material",     MaterialComponent{});
 			addItem("Camera",       CameraComponent{});
 			addItem("Light",        LightComponent{});
-			addItem("Rigid Body",     RigidBodyComponent{});
-		addItem("Collider",       ColliderComponent{});
+			addItem("Rigid Body",          RigidBodyComponent{});
+			addItem("Collider",            ColliderComponent{});
+			addItem("Character Controller", CharacterControllerComponent{});
 			addItem("Script",         ScriptComponent{});
 			addItem("Audio Source",   AudioSourceComponent{});
 			addItem("Audio Listener", AudioListenerComponent{});

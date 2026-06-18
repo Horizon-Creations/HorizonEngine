@@ -194,7 +194,7 @@ profitieren von P2.8 (Play-Mode zum Testen).
 |---|---|---|---|
 | 4a.1 | **Jolt Physics** integrieren (FetchContent) | 2.2, 2.8 | ✅ Forts. 39 — Jolt v5.5.0 FetchContent (SOURCE_SUBDIR Build); PhysicsWorld (PIMPL, JobSystemSingleThreaded, TempAllocatorImpl); process-globale Init via call_once; Box-Shape aus TransformComponent::scale; RigidBodyType→EMotionType; fixed-rate step + ECS sync-back; Editor: Physik-World on Play/Stop + fixed-timestep-Akkumulator in OnRender; 8 Tests (223 gesamt) |
 | 4a.2 | Collider-Komponenten (Box/Sphere/Capsule/Mesh) + Debug-Draw | 4a.1, 0.7 | ✅ Forts. 40 — ColliderComponent (Box/Sphere/Capsule + halfExtents/radius/height/isTrigger); PhysicsWorld wählt Shape aus ColliderComponent (Fallback: scale-Box); DebugDraw::capsule(); Viewport-Wireframes (Cyan=solid, Magenta=Trigger); SceneSerializer JSON+Binary; Inspector + Add-Component; 7 Tests |
-| 4a.3 | Raycasts/Queries als Engine-API | 4a.1 | braucht Scripting (4b) später als Konsument |
+| 4a.3 | Raycasts/Queries als Engine-API | 4a.1 | ✅ Forts. 41 — PhysicsWorld::raycast (RRayCast, NarrowPhaseQuery, BodyLockRead, Surface-Normal, Entity-UserData); ScriptContext::horizon.raycast Lua-Binding (nil on miss, table {entity,x,y,z,nx,ny,nz,distance} on hit); kPhysicsKey in Lua-Registry; 9 Tests (239 gesamt) |
 | 4a.4 | Character-Controller | 4a.1 | |
 | 4a.5 | 2D-Physik (Box2D) — optional, wenn Catania es braucht | 2.2 | Transform2D existiert schon |
 
@@ -1695,3 +1695,15 @@ Lifetime-sicher mit der bestehenden `SlotMap`/`m_handleToUUID`-Buchführung inte
 - **`EditorApplication.h/.cpp`**: `std::unique_ptr<PhysicsWorld> m_physicsWorld` + `float m_physicsAccum`. `setPlayMode(true)` → `PhysicsWorld::initialize`; `setPlayMode(false)` → `reset()`. `OnRender`: Fixed-rate-Akkumulator (1/60 s) → `step()` während Play-Mode.
 - **8 neue Tests** in `test_physics.cpp`: init leere Welt (kein Crash); step ohne init (kein Crash); Dynamic fällt unter Schwerkraft (y < 5 nach 2 s aus y=10); Static bleibt (y = 0.0); zwei Körper (Static bleibt, Dynamic fällt, kein Tunneling); Kinematic ignoriert Schwerkraft; `clear()` idempotent; Re-Initialize nach clear.
 - **223 Tests grün** (215→223).
+
+---
+
+### Forts. 41 — Raycasts / Queries als Engine-API (4a.3)
+
+> **Aufgabe:** PhysicsWorld::raycast-API + Lua-Binding `horizon.raycast`. ✅
+
+- **`PhysicsWorld.h`**: `RaycastHit`-Struct (`hit, entityId, point, normal, distance`); `raycast(origin, direction, maxDistance=1000) const`.
+- **`PhysicsWorld.cpp`**: `JPH::RRayCast` (Origin + Richtung×maxDist); `NarrowPhaseQuery::CastRay`; `BodyLockRead` für Surface-Normal (`GetWorldSpaceSurfaceNormal`); Entity-ID aus `body.GetUserData()` (bei `initialize` via `bcs.mUserData` gesetzt). Null-Richtung guard (len < 1e-6).
+- **`ScriptContext.h/.cpp`**: `kPhysicsKey = "__horizonPhysics"` in Lua-Registry; `lua_horizon_raycast()` (7 Zahlen-Args: ox,oy,oz,dx,dy,dz,maxDist; nil on miss; table on hit); `setPhysicsWorld(pw)` aktualisiert Registry-Pointer; `registerHorizonApi()` initialisiert Key mit nullptr.
+- **9 Tests** in `test_raycast.cpp`: Treffer Static-Box von oben (Point.y≈0.5, dist≈4.5, entityId, Normal.y>0.9); Miss; Strahl zu kurz; Uninitalisierte World; Null-Richtung; Sphere-Collider-Treffer; Lua nil ohne PhysicsWorld; Lua Treffer-Tabelle (y, dist, normY); Lua nil auf Miss. Lua-Boolean-Fallback via `(expr) and 1 or 0`-Pattern.
+- **239 Tests grün** (230→239).

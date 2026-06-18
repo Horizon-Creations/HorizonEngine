@@ -17,12 +17,16 @@ JPH_SUPPRESS_WARNINGS
 #include <Jolt/Physics/Collision/RayCast.h>
 #include <Jolt/Physics/Collision/CastResult.h>
 #include <Jolt/Physics/Collision/NarrowPhaseQuery.h>
+#include <Jolt/Physics/Character/CharacterVirtual.h>
+#include <Jolt/Physics/Collision/BroadPhase/BroadPhaseLayer.h>
+#include <Jolt/Physics/Collision/ObjectLayer.h>
 
 #include "HorizonScene/PhysicsWorld.h"
 #include "HorizonScene/HorizonWorld.h"
 #include "HorizonScene/Components/TransformComponent.h"
 #include "HorizonScene/Components/RigidBodyComponent.h"
 #include "HorizonScene/Components/ColliderComponent.h"
+#include "HorizonScene/Components/CharacterControllerComponent.h"
 
 #include <glm/gtc/quaternion.hpp>
 #include <mutex>
@@ -115,6 +119,9 @@ struct PhysicsWorld::Impl
 
     // Entity id (cast to uint32_t) → Jolt body id
     std::unordered_map<uint32_t, JPH::BodyID> entityToBody;
+
+    // Entity id → CharacterVirtual (for CharacterControllerComponent entities)
+    std::unordered_map<uint32_t, std::unique_ptr<JPH::CharacterVirtual>> entityToCharacter;
 
     bool initialized = false;
 
@@ -238,6 +245,54 @@ void PhysicsWorld::initialize(HorizonWorld& world)
             m_impl->entityToBody[static_cast<uint32_t>(entity)] = bodyId;
     }
 
+    // ── CharacterController entities ──────────────────────────────────────────
+    for (auto [entity, transform, cc] :
+         reg.view<TransformComponent, CharacterControllerComponent>().each())
+    {
+        // Entities with both RigidBody and CharacterController: skip as body.
+        if (reg.any_of<RigidBodyComponent>(entity))
+            continue;
+
+        // Use ColliderComponent if present (Capsule/Box/Sphere), else default capsule.
+        JPH::ShapeSettings::ShapeResult shapeResult;
+        auto* col = reg.try_get<ColliderComponent>(entity);
+        if (col && col->shape == ColliderShape::Capsule)
+        {
+            float halfCyl = std::max(0.0f, col->height * 0.5f - col->radius);
+            shapeResult = JPH::CapsuleShapeSettings(halfCyl, std::max(0.01f, col->radius)).Create();
+        }
+        else if (col && col->shape == ColliderShape::Sphere)
+        {
+            shapeResult = JPH::SphereShapeSettings(std::max(0.01f, col->radius)).Create();
+        }
+        else
+        {
+            // Default: capsule height=2.0, radius=0.3
+            shapeResult = JPH::CapsuleShapeSettings(0.7f, 0.3f).Create();
+        }
+        if (shapeResult.HasError())
+            continue;
+
+        JPH::CharacterVirtualSettings cvs;
+        cvs.mMass                  = cc.mass;
+        cvs.mCharacterPadding      = cc.skinWidth;
+        cvs.mShape                 = shapeResult.Get();
+        cvs.mUp                    = JPH::Vec3::sAxisY();
+        cvs.mMaxSlopeAngle         = JPH::DegreesToRadians(cc.slopeLimit);
+
+        JPH::RVec3 pos(transform.position.x, transform.position.y, transform.position.z);
+        glm::quat gq = glm::quat(glm::radians(transform.rotation));
+        JPH::Quat jq { gq.x, gq.y, gq.z, gq.w };
+
+        auto character = std::make_unique<JPH::CharacterVirtual>(
+            &cvs, pos, jq,
+            static_cast<uint64_t>(static_cast<uint32_t>(entity)),
+            &m_impl->physicsSystem
+        );
+
+        m_impl->entityToCharacter[static_cast<uint32_t>(entity)] = std::move(character);
+    }
+
     m_impl->physicsSystem.OptimizeBroadPhase();
     m_impl->initialized = true;
 }
@@ -280,6 +335,54 @@ void PhysicsWorld::step(HorizonWorld& world, float dt)
         glm::quat gq(rot.GetW(), rot.GetX(), rot.GetY(), rot.GetZ());
         transform->rotation = glm::degrees(glm::eulerAngles(gq));
         transform->dirty    = true;
+    }
+
+    // ── Character controller update ────────────────────────────────────────────
+    JPH::DefaultBroadPhaseLayerFilter bpFilter(m_impl->ovbpFilter, HELayers::MOVING);
+    JPH::DefaultObjectLayerFilter     olFilter(m_impl->ooFilter,   HELayers::MOVING);
+    JPH::BodyFilter                   bodyFilter;
+    JPH::ShapeFilter                  shapeFilter;
+    JPH::CharacterVirtual::ExtendedUpdateSettings euSettings;
+
+    for (auto& [entityId, character] : m_impl->entityToCharacter)
+    {
+        Entity entity = static_cast<Entity>(entityId);
+        if (!reg.valid(entity))
+            continue;
+
+        auto* cc        = reg.try_get<CharacterControllerComponent>(entity);
+        auto* transform = reg.try_get<TransformComponent>(entity);
+        if (!cc || !transform)
+            continue;
+
+        // Use Jolt character's current velocity so setCharacterVelocity() takes effect.
+        // cc->velocity is an output field — game code drives velocity via setCharacterVelocity.
+        float grav = cc->gravity;
+        JPH::Vec3 vel = character->GetLinearVelocity();
+        if (!character->IsSupported())
+            vel.SetY(vel.GetY() - grav * dt);
+        character->SetLinearVelocity(vel);
+
+        JPH::Vec3 gravity(0.0f, -grav, 0.0f);
+        euSettings.mWalkStairsStepUp = JPH::Vec3(0, cc->stepHeight, 0);
+
+        character->ExtendedUpdate(dt, gravity, euSettings,
+            bpFilter, olFilter, bodyFilter, shapeFilter,
+            m_impl->tempAllocator);
+
+        // Sync position back to transform
+        JPH::RVec3 pos = character->GetPosition();
+        transform->position = {
+            static_cast<float>(pos.GetX()),
+            static_cast<float>(pos.GetY()),
+            static_cast<float>(pos.GetZ())
+        };
+        transform->dirty = true;
+
+        // Sync velocity and ground state back to component
+        JPH::Vec3 newVel = character->GetLinearVelocity();
+        cc->velocity   = { newVel.GetX(), newVel.GetY(), newVel.GetZ() };
+        cc->isGrounded = (character->GetGroundState() == JPH::CharacterBase::EGroundState::OnGround);
     }
 }
 
@@ -334,6 +437,22 @@ PhysicsWorld::RaycastHit PhysicsWorld::raycast(
     return result;
 }
 
+void PhysicsWorld::setCharacterVelocity(uint32_t entityId, const glm::vec3& velocity)
+{
+    if (!m_impl) return;
+    auto it = m_impl->entityToCharacter.find(entityId);
+    if (it != m_impl->entityToCharacter.end())
+        it->second->SetLinearVelocity(JPH::Vec3(velocity.x, velocity.y, velocity.z));
+}
+
+bool PhysicsWorld::isCharacterGrounded(uint32_t entityId) const
+{
+    if (!m_impl) return false;
+    auto it = m_impl->entityToCharacter.find(entityId);
+    if (it == m_impl->entityToCharacter.end()) return false;
+    return it->second->GetGroundState() == JPH::CharacterBase::EGroundState::OnGround;
+}
+
 void PhysicsWorld::clear()
 {
     if (!m_impl)
@@ -346,5 +465,6 @@ void PhysicsWorld::clear()
         bodyInterface.DestroyBody(bodyId);
     }
     m_impl->entityToBody.clear();
+    m_impl->entityToCharacter.clear();
     m_impl->initialized = false;
 }
