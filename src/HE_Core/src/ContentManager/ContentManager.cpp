@@ -182,6 +182,28 @@ HE::UUID ContentManager::loadAsset(const std::string& relativePath)
 			a.sourceCode.assign(reinterpret_cast<const char*>(c->data.data()), c->data.size());
 		handle = m_shaderAssets.insert(std::move(a)); break;
 	}
+	case HE::AssetType::AnimationClip:
+	{
+		AnimationClipAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_ANIM))
+		{
+			size_t o = 0;
+			HAsset::Reader::readPOD(c->data, o, a.duration);
+			uint32_t channelCount = 0;
+			HAsset::Reader::readPOD(c->data, o, channelCount);
+			a.channels.resize(channelCount);
+			for (auto& ch : a.channels)
+			{
+				uint8_t pathByte = 0;
+				HAsset::Reader::readPOD(c->data, o, ch.jointIndex);
+				HAsset::Reader::readPOD(c->data, o, pathByte);
+				ch.path = static_cast<AnimPathType>(pathByte);
+				HAsset::Reader::readVec(c->data, o, ch.times);
+				HAsset::Reader::readVec(c->data, o, ch.values);
+			}
+		}
+		handle = m_animClipAssets.insert(std::move(a)); break;
+	}
 	default:
 		return HE::UUID();
 	}
@@ -299,6 +321,22 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 		w.addChunk(HAsset::CHUNK_SRC, a.sourceCode.data(), a.sourceCode.size());
 		break;
 	}
+	case HE::AssetType::AnimationClip:
+	{
+		auto& a = static_cast<AnimationClipAsset&>(asset);
+		std::vector<uint8_t> b;
+		HAsset::Writer::appendPOD(b, a.duration);
+		HAsset::Writer::appendPOD(b, static_cast<uint32_t>(a.channels.size()));
+		for (const auto& ch : a.channels)
+		{
+			HAsset::Writer::appendPOD(b, ch.jointIndex);
+			HAsset::Writer::appendPOD(b, static_cast<uint8_t>(ch.path));
+			HAsset::Writer::appendVec(b, ch.times);
+			HAsset::Writer::appendVec(b, ch.values);
+		}
+		w.addChunk(HAsset::CHUNK_ANIM, b.data(), b.size());
+		break;
+	}
 	default:
 		return false;
 	}
@@ -320,14 +358,15 @@ static const T* lookupAsset(const std::unordered_map<HE::UUID, SlotHandle>& inde
 	return (a && a->id == id) ? a : nullptr;
 }
 
-const StaticMeshAsset*   ContentManager::getStaticMesh(HE::UUID id) const   { return lookupAsset(m_handleToUUID, m_staticMeshAssets, id); }
-const SkeletalMeshAsset* ContentManager::getSkeletalMesh(HE::UUID id) const { return lookupAsset(m_handleToUUID, m_skeletalMeshAssets, id); }
-const TextureAsset*      ContentManager::getTexture(HE::UUID id) const      { return lookupAsset(m_handleToUUID, m_textureAssets, id); }
-const MaterialAsset*     ContentManager::getMaterial(HE::UUID id) const     { return lookupAsset(m_handleToUUID, m_materialAssets, id); }
-const AudioAsset*        ContentManager::getAudio(HE::UUID id) const        { return lookupAsset(m_handleToUUID, m_audioAssets, id); }
-const ScriptAsset*       ContentManager::getScript(HE::UUID id) const       { return lookupAsset(m_handleToUUID, m_scriptAssets, id); }
-const ShaderAsset*       ContentManager::getShader(HE::UUID id) const       { return lookupAsset(m_handleToUUID, m_shaderAssets, id); }
-const PrefabAsset*       ContentManager::getPrefab(HE::UUID id) const       { return lookupAsset(m_handleToUUID, m_prefabAssets, id); }
+const StaticMeshAsset*    ContentManager::getStaticMesh(HE::UUID id) const    { return lookupAsset(m_handleToUUID, m_staticMeshAssets, id); }
+const SkeletalMeshAsset*  ContentManager::getSkeletalMesh(HE::UUID id) const  { return lookupAsset(m_handleToUUID, m_skeletalMeshAssets, id); }
+const TextureAsset*       ContentManager::getTexture(HE::UUID id) const       { return lookupAsset(m_handleToUUID, m_textureAssets, id); }
+const MaterialAsset*      ContentManager::getMaterial(HE::UUID id) const      { return lookupAsset(m_handleToUUID, m_materialAssets, id); }
+const AudioAsset*         ContentManager::getAudio(HE::UUID id) const         { return lookupAsset(m_handleToUUID, m_audioAssets, id); }
+const ScriptAsset*        ContentManager::getScript(HE::UUID id) const        { return lookupAsset(m_handleToUUID, m_scriptAssets, id); }
+const ShaderAsset*        ContentManager::getShader(HE::UUID id) const        { return lookupAsset(m_handleToUUID, m_shaderAssets, id); }
+const PrefabAsset*        ContentManager::getPrefab(HE::UUID id) const        { return lookupAsset(m_handleToUUID, m_prefabAssets, id); }
+const AnimationClipAsset* ContentManager::getAnimationClip(HE::UUID id) const { return lookupAsset(m_handleToUUID, m_animClipAssets, id); }
 
 MaterialAsset* ContentManager::getMaterialMutable(HE::UUID id)
 {
@@ -377,12 +416,14 @@ bool ContentManager::replaceRuntimeAsset(SlotMap<T>& map, HE::UUID id, T asset)
 	return true;
 }
 
-HE::UUID ContentManager::registerStaticMesh(StaticMeshAsset asset) { return registerRuntimeAsset(m_staticMeshAssets, std::move(asset), HE::AssetType::StaticMesh); }
-HE::UUID ContentManager::registerTexture(TextureAsset asset)       { return registerRuntimeAsset(m_textureAssets,    std::move(asset), HE::AssetType::Texture);    }
-HE::UUID ContentManager::registerMaterial(MaterialAsset asset)     { return registerRuntimeAsset(m_materialAssets,   std::move(asset), HE::AssetType::Material);   }
-HE::UUID ContentManager::registerPrefab(PrefabAsset asset)         { return registerRuntimeAsset(m_prefabAssets,     std::move(asset), HE::AssetType::Prefab);     }
-HE::UUID ContentManager::registerAudio(AudioAsset asset)           { return registerRuntimeAsset(m_audioAssets,      std::move(asset), HE::AssetType::Audio);      }
-HE::UUID ContentManager::registerScript(ScriptAsset asset)         { return registerRuntimeAsset(m_scriptAssets,     std::move(asset), HE::AssetType::Script);     }
+HE::UUID ContentManager::registerStaticMesh(StaticMeshAsset asset)       { return registerRuntimeAsset(m_staticMeshAssets,  std::move(asset), HE::AssetType::StaticMesh);    }
+HE::UUID ContentManager::registerSkeletalMesh(SkeletalMeshAsset asset)   { return registerRuntimeAsset(m_skeletalMeshAssets, std::move(asset), HE::AssetType::SkeletalMesh); }
+HE::UUID ContentManager::registerTexture(TextureAsset asset)             { return registerRuntimeAsset(m_textureAssets,     std::move(asset), HE::AssetType::Texture);       }
+HE::UUID ContentManager::registerMaterial(MaterialAsset asset)           { return registerRuntimeAsset(m_materialAssets,    std::move(asset), HE::AssetType::Material);      }
+HE::UUID ContentManager::registerPrefab(PrefabAsset asset)               { return registerRuntimeAsset(m_prefabAssets,      std::move(asset), HE::AssetType::Prefab);        }
+HE::UUID ContentManager::registerAudio(AudioAsset asset)                 { return registerRuntimeAsset(m_audioAssets,       std::move(asset), HE::AssetType::Audio);         }
+HE::UUID ContentManager::registerScript(ScriptAsset asset)               { return registerRuntimeAsset(m_scriptAssets,      std::move(asset), HE::AssetType::Script);        }
+HE::UUID ContentManager::registerAnimationClip(AnimationClipAsset asset) { return registerRuntimeAsset(m_animClipAssets,    std::move(asset), HE::AssetType::AnimationClip); }
 
 bool ContentManager::replaceStaticMesh(HE::UUID id, StaticMeshAsset asset) { return replaceRuntimeAsset(m_staticMeshAssets, id, std::move(asset)); }
 bool ContentManager::replaceTexture(HE::UUID id, TextureAsset asset)       { return replaceRuntimeAsset(m_textureAssets,    id, std::move(asset)); }
@@ -433,7 +474,7 @@ bool ContentManager::unloadAsset(HE::UUID id)
 		tryRemove(m_textureAssets)      || tryRemove(m_materialAssets)     ||
 		tryRemove(m_sceneAssets)        || tryRemove(m_scriptAssets)       ||
 		tryRemove(m_audioAssets)        || tryRemove(m_fontAssets)         ||
-		tryRemove(m_shaderAssets);
+		tryRemove(m_shaderAssets)       || tryRemove(m_animClipAssets);
 	if (!removed)
 		return false;
 

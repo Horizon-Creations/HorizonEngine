@@ -28,14 +28,15 @@ public:
 
 	// Typed lookup of a loaded asset. Returns nullptr when the UUID is unknown
 	// or refers to an asset of a different type.
-	const StaticMeshAsset*   getStaticMesh(HE::UUID id) const;
-	const SkeletalMeshAsset* getSkeletalMesh(HE::UUID id) const;
-	const TextureAsset*      getTexture(HE::UUID id) const;
-	const MaterialAsset*     getMaterial(HE::UUID id) const;
-	const AudioAsset*        getAudio(HE::UUID id) const;
-	const ScriptAsset*       getScript(HE::UUID id) const;
-	const ShaderAsset*       getShader(HE::UUID id) const;
-	const PrefabAsset*       getPrefab(HE::UUID id) const;
+	const StaticMeshAsset*     getStaticMesh(HE::UUID id) const;
+	const SkeletalMeshAsset*   getSkeletalMesh(HE::UUID id) const;
+	const TextureAsset*        getTexture(HE::UUID id) const;
+	const MaterialAsset*       getMaterial(HE::UUID id) const;
+	const AudioAsset*          getAudio(HE::UUID id) const;
+	const ScriptAsset*         getScript(HE::UUID id) const;
+	const ShaderAsset*         getShader(HE::UUID id) const;
+	const PrefabAsset*         getPrefab(HE::UUID id) const;
+	const AnimationClipAsset*  getAnimationClip(HE::UUID id) const;
 
 	// Mutable access to a loaded material, for in-editor editing. Edits are
 	// visible immediately to any renderer sharing this manager; persist them to
@@ -52,11 +53,13 @@ public:
 	// real files. The asset is moved in; persist it later with saveAsset() if a
 	// real file is wanted.
 	HE::UUID registerStaticMesh(StaticMeshAsset asset);
+	HE::UUID registerSkeletalMesh(SkeletalMeshAsset asset);
 	HE::UUID registerTexture(TextureAsset asset);
 	HE::UUID registerMaterial(MaterialAsset asset);
 	HE::UUID registerPrefab(PrefabAsset asset);
 	HE::UUID registerAudio(AudioAsset asset);
 	HE::UUID registerScript(ScriptAsset asset);
+	HE::UUID registerAnimationClip(AnimationClipAsset asset);
 
 	// Replace a registered asset's payload in place, keeping its UUID so existing
 	// references stay valid (e.g. regenerating a procedural terrain mesh after a
@@ -82,14 +85,15 @@ public:
 	// is alive (RAII). unloadAsset() returns false while any handle is alive,
 	// preventing use-after-free in the renderer and enabling safe LRU eviction.
 	// The handle is null (operator bool() == false) when the UUID is unknown.
-	AssetRef<StaticMeshAsset>   acquireStaticMesh(HE::UUID id);
-	AssetRef<SkeletalMeshAsset> acquireSkeletalMesh(HE::UUID id);
-	AssetRef<TextureAsset>      acquireTexture(HE::UUID id);
-	AssetRef<MaterialAsset>     acquireMaterial(HE::UUID id);
-	AssetRef<AudioAsset>        acquireAudio(HE::UUID id);
-	AssetRef<ScriptAsset>       acquireScript(HE::UUID id);
-	AssetRef<ShaderAsset>       acquireShader(HE::UUID id);
-	AssetRef<PrefabAsset>       acquirePrefab(HE::UUID id);
+	AssetRef<StaticMeshAsset>    acquireStaticMesh(HE::UUID id);
+	AssetRef<SkeletalMeshAsset>  acquireSkeletalMesh(HE::UUID id);
+	AssetRef<TextureAsset>       acquireTexture(HE::UUID id);
+	AssetRef<MaterialAsset>      acquireMaterial(HE::UUID id);
+	AssetRef<AudioAsset>         acquireAudio(HE::UUID id);
+	AssetRef<ScriptAsset>        acquireScript(HE::UUID id);
+	AssetRef<ShaderAsset>        acquireShader(HE::UUID id);
+	AssetRef<PrefabAsset>        acquirePrefab(HE::UUID id);
+	AssetRef<AnimationClipAsset> acquireAnimationClip(HE::UUID id);
 
 	// Pin bookkeeping — called by AssetRef; do not call directly.
 	void pinAsset(HE::UUID id);
@@ -120,16 +124,17 @@ private:
 
 	std::string m_contentRoot;
 
-	SlotMap<StaticMeshAsset>   m_staticMeshAssets;
-	SlotMap<SkeletalMeshAsset> m_skeletalMeshAssets;
-	SlotMap<TextureAsset>      m_textureAssets;
-	SlotMap<MaterialAsset>     m_materialAssets;
-	SlotMap<SceneAsset>        m_sceneAssets;
-	SlotMap<ScriptAsset>       m_scriptAssets;
-	SlotMap<AudioAsset>        m_audioAssets;
-	SlotMap<FontAsset>         m_fontAssets;
-	SlotMap<ShaderAsset>       m_shaderAssets;
-	SlotMap<PrefabAsset>       m_prefabAssets;
+	SlotMap<StaticMeshAsset>    m_staticMeshAssets;
+	SlotMap<SkeletalMeshAsset>  m_skeletalMeshAssets;
+	SlotMap<TextureAsset>       m_textureAssets;
+	SlotMap<MaterialAsset>      m_materialAssets;
+	SlotMap<SceneAsset>         m_sceneAssets;
+	SlotMap<ScriptAsset>        m_scriptAssets;
+	SlotMap<AudioAsset>         m_audioAssets;
+	SlotMap<FontAsset>          m_fontAssets;
+	SlotMap<ShaderAsset>        m_shaderAssets;
+	SlotMap<PrefabAsset>        m_prefabAssets;
+	SlotMap<AnimationClipAsset> m_animClipAssets;
 
 	std::unordered_map<HE::UUID, SlotHandle>                              m_handleToUUID;
 	std::unordered_map<HE::UUID, HE::AssetType>                          m_assetTypeIndex; // mirrors m_handleToUUID with type info
@@ -203,11 +208,12 @@ private:
 };
 
 // Inline definitions of acquireXxx — placed here so AssetRef<T> is complete.
-inline AssetRef<StaticMeshAsset>   ContentManager::acquireStaticMesh(HE::UUID id)   { return { this, id, getStaticMesh(id) }; }
-inline AssetRef<SkeletalMeshAsset> ContentManager::acquireSkeletalMesh(HE::UUID id) { return { this, id, getSkeletalMesh(id) }; }
-inline AssetRef<TextureAsset>      ContentManager::acquireTexture(HE::UUID id)      { return { this, id, getTexture(id) }; }
-inline AssetRef<MaterialAsset>     ContentManager::acquireMaterial(HE::UUID id)     { return { this, id, getMaterial(id) }; }
-inline AssetRef<AudioAsset>        ContentManager::acquireAudio(HE::UUID id)        { return { this, id, getAudio(id) }; }
-inline AssetRef<ScriptAsset>       ContentManager::acquireScript(HE::UUID id)       { return { this, id, getScript(id) }; }
-inline AssetRef<ShaderAsset>       ContentManager::acquireShader(HE::UUID id)       { return { this, id, getShader(id) }; }
-inline AssetRef<PrefabAsset>       ContentManager::acquirePrefab(HE::UUID id)       { return { this, id, getPrefab(id) }; }
+inline AssetRef<StaticMeshAsset>    ContentManager::acquireStaticMesh(HE::UUID id)    { return { this, id, getStaticMesh(id) }; }
+inline AssetRef<SkeletalMeshAsset>  ContentManager::acquireSkeletalMesh(HE::UUID id)  { return { this, id, getSkeletalMesh(id) }; }
+inline AssetRef<TextureAsset>       ContentManager::acquireTexture(HE::UUID id)       { return { this, id, getTexture(id) }; }
+inline AssetRef<MaterialAsset>      ContentManager::acquireMaterial(HE::UUID id)      { return { this, id, getMaterial(id) }; }
+inline AssetRef<AudioAsset>         ContentManager::acquireAudio(HE::UUID id)         { return { this, id, getAudio(id) }; }
+inline AssetRef<ScriptAsset>        ContentManager::acquireScript(HE::UUID id)        { return { this, id, getScript(id) }; }
+inline AssetRef<ShaderAsset>        ContentManager::acquireShader(HE::UUID id)        { return { this, id, getShader(id) }; }
+inline AssetRef<PrefabAsset>        ContentManager::acquirePrefab(HE::UUID id)        { return { this, id, getPrefab(id) }; }
+inline AssetRef<AnimationClipAsset> ContentManager::acquireAnimationClip(HE::UUID id) { return { this, id, getAnimationClip(id) }; }

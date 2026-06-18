@@ -26,6 +26,7 @@ add_executable(he_tests
     test_character.cpp
     test_skeletalmeshimporter.cpp
     test_skeletalmeshcomponent.cpp
+    test_animationsystem.cpp
     # Culling/sorting/undo/camera/graph are compiled in directly — pulling in the
     # full HorizonRendering/Editor targets would drag GPU backends and ImGui in.
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderExtractor.cpp

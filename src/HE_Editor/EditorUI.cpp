@@ -3498,6 +3498,55 @@ void EditorUI::RenderInspector(AppContext& ctx)
 		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<SkeletalMeshComponent>(entity); }
 	}
 
+	// ── Animator ────────────────────────────────────────────────────────────
+	if (auto* an = registry.try_get<AnimatorComponent>(entity))
+	{
+		if (componentHeader("Animator", true, removed))
+		{
+			// Clip asset slot
+			ImGui::TextUnformatted("Clip");
+			ImGui::SameLine();
+			const AnimationClipAsset* cur = (an->clipAssetId != HE::UUID{} && ctx.contentManager)
+				? ctx.contentManager->getAnimationClip(an->clipAssetId) : nullptr;
+			const std::string clipLabel = cur ? cur->name
+				: (an->clipAssetId == HE::UUID{} ? "(none)" : "(not loaded)");
+			ImGui::Button((clipLabel + "##animslot").c_str());
+			if (ImGui::BeginDragDropTarget())
+			{
+				if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_ASSET_PATH"))
+				{
+					std::error_code ec;
+					std::string rel = std::filesystem::relative(
+						static_cast<const char*>(p->Data),
+						ctx.contentManager ? ctx.contentManager->contentRoot() : "",
+						ec).generic_string();
+					if (!ec && !rel.empty() && rel.rfind("..", 0) != 0)
+					{
+						const HE::UUID id = ctx.contentManager->loadAsset(rel);
+						if (id != HE::UUID{} && ctx.contentManager->getAnimationClip(id))
+						{
+							if (ctx.undoSys) ctx.undoSys->snapshotNow();
+							an->clipAssetId = id;
+						}
+					}
+				}
+				ImGui::EndDragDropTarget();
+			}
+
+			// Playback controls
+			ImGui::DragFloat("Speed##an",    &an->playbackSpeed, 0.01f, -4.0f, 4.0f, "%.2f"); trackEdit();
+			ImGui::DragFloat("Time##an",     &an->playbackTime,  0.01f,  0.0f, 999.0f, "%.3f s"); trackEdit();
+			ImGui::Checkbox("Looping##an",   &an->looping); trackEdit();
+			ImGui::SameLine();
+			ImGui::Checkbox("Playing##an",   &an->playing); trackEdit();
+
+			if (cur)
+				ImGui::Text("Duration: %.3f s  |  Channels: %d",
+					cur->duration, (int)cur->channels.size());
+		}
+		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<AnimatorComponent>(entity); }
+	}
+
 	// ── Material ────────────────────────────────────────────────────────────
 	if (auto* m = registry.try_get<MaterialComponent>(entity))
 	{
@@ -3916,6 +3965,7 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			addItem("Transform 2D", Transform2DComponent{});
 			addItem("Mesh",          MeshComponent{});
 			addItem("Skeletal Mesh", SkeletalMeshComponent{});
+			addItem("Animator",      AnimatorComponent{});
 			addItem("Material",     MaterialComponent{});
 			addItem("Camera",       CameraComponent{});
 			addItem("Light",        LightComponent{});
