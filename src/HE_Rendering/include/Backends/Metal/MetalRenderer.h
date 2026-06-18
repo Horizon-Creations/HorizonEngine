@@ -245,6 +245,7 @@ private:
 	bool  m_ssaoEnabled   = true;
 	float m_ssaoRadius    = 0.5f;
 	float m_ssaoIntensity = 1.0f;
+	int   m_ssaoMethod    = 0;   // 0 = SSAO, 1 = HBAO, 2 = GTAO
 	void  EnsureSSAOTargets(int width, int height);
 	void  DestroySSAOTargets();
 	// Pre-pass + occlusion + blur for the current scene into m_ssaoBlurTex; sets

@@ -246,12 +246,16 @@ static void DrawEngineSettings(AppContext& ctx, SettingsMode mode)
 		ImGui::EndDisabled();
 	});
 	row("ssao", "Post-processing", [&]{
-		ImGui::Checkbox("SSAO", &cfg.SSAOEnabled);
+		ImGui::Checkbox("AO", &cfg.SSAOEnabled);
 		ImGui::BeginDisabled(!cfg.SSAOEnabled);
 		ImGui::SetNextItemWidth(220.0f);
-		ImGui::SliderFloat("SSAO Radius", &cfg.SSAORadius, 0.05f, 2.0f, "%.2f");
+		// AO method: SSAO (kernel) or HBAO (horizon). GTAO is planned (not yet selectable).
+		const char* kAOMethods[] = { "SSAO", "HBAO" };
+		ImGui::Combo("AO Method", &cfg.SSAOMethod, kAOMethods, IM_ARRAYSIZE(kAOMethods));
 		ImGui::SetNextItemWidth(220.0f);
-		ImGui::SliderFloat("SSAO Intensity", &cfg.SSAOIntensity, 0.0f, 2.0f, "%.2f");
+		ImGui::SliderFloat("AO Radius", &cfg.SSAORadius, 0.05f, 2.0f, "%.2f");
+		ImGui::SetNextItemWidth(220.0f);
+		ImGui::SliderFloat("AO Intensity", &cfg.SSAOIntensity, 0.0f, 2.0f, "%.2f");
 		ImGui::EndDisabled();
 	});
 

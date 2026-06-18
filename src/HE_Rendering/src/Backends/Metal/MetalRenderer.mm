@@ -602,9 +602,21 @@ vertex SSAOOut ssaoVertex(uint vid [[vertex_id]])
 struct SSAOParams {
 	float4x4 proj;        // camera projection (GL convention)
 	float4   cfg;         // x,y = noise scale (viewport/4), z = radius, w = bias
-	float4   cfg2;        // x = intensity
+	float4   cfg2;        // x = intensity, y = AO method (0 SSAO, 1 HBAO, 2 GTAO)
 	float4   samples[32]; // hemisphere kernel (xyz)  — 'kernel' is reserved in MSL
 };
+
+// HBAO: OR the angular sectors [minH,maxH] (each normalised to [0,1] across the
+// hemisphere arc) into a 32-bit visibility bitmask.
+static uint hbaoSectors(float minH, float maxH, uint mask)
+{
+	uint startBit = min(uint(clamp(minH, 0.0, 1.0) * 32.0), 31u);
+	uint count    = uint(ceil(clamp(maxH - minH, 0.0, 1.0) * 32.0));
+	uint bits     = (count > 0u) ? (0xFFFFFFFFu >> (32u - count)) : 0u;
+	return mask | (bits << startBit);
+}
+// Interleaved-gradient noise for the per-pixel slice/step jitter (Jimenez 2014).
+static float ssaoIgn(float2 p) { return fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y)); }
 
 fragment float4 ssaoFragment(SSAOOut in [[stage_in]],
                              texture2d<float> posTex   [[texture(0)]],
@@ -627,37 +639,83 @@ fragment float4 ssaoFragment(SSAOOut in [[stage_in]],
 	float3 N = normalize(cross(ddx, ddy));
 	if (N.z < 0.0) N = -N;                          // face the camera (+Z view space)
 
-	float3 randv = noiseTex.sample(noiseSmp, in.uv * P.cfg.xy).xyz;
-	float3 T = normalize(randv - N * dot(randv, N));
-	float3 B = cross(N, T);
-	float3x3 TBN = float3x3(T, B, N);
-
-	float occ = 0.0;
-	for (int i = 0; i < 32; ++i)
+	float ao;
+	if (int(P.cfg2.y + 0.5) == 1)
 	{
-		// Kernel only picks which nearby screen pixels to inspect (hemisphere footprint).
-		float3 sp = Pp + (TBN * P.samples[i].xyz) * P.cfg.z;
-		float4 clip = P.proj * float4(sp, 1.0);
-		float2 suv = clip.xy / clip.w;
-		suv = float2(suv.x * 0.5 + 0.5, 1.0 - (suv.y * 0.5 + 0.5)); // Metal: top-left origin
-		if (any(suv < 0.0) || any(suv > 1.0)) continue;
-		float4 sv = posTex.sample(posSmp, suv);
-		if (sv.a < 0.5) continue;                    // sampled the background
-		// Slope-invariant occlusion (mirrors GL kSSAOFS): how far the neighbour rises
-		// above this fragment's tangent plane (Pp, N). A flat surface — even edge-on —
-		// has neighbours lying IN the plane (dot ≈ 0) and can't occlude itself; only
-		// geometry that lifts off the surface counts. Replaces the view-depth compare
-		// that over-occluded grazing terrain (the darkening when the camera tilts up).
-		float3 toOcc = sv.xyz - Pp;
-		float  above = dot(toOcc, N);
-		float  rangeCheck = smoothstep(0.0, 1.0, P.cfg.z / max(length(toOcc), 1e-4));
-		occ += (above > P.cfg.w ? 1.0 : 0.0) * rangeCheck;
+		// ── HBAO: horizon-based AO via a 32-sector visibility bitmask (mirrors GL) ──
+		const int   SLICES = 3;
+		const int   STEPS  = 8;
+		const float THICKNESS = 0.5;                 // assumed occluder depth (view units)
+		float3 V = normalize(-Pp);                   // camera at the view-space origin
+		float2 fragCoord = in.uv * float2(float(posTex.get_width()), float(posTex.get_height()));
+		float  jitter = ssaoIgn(fragCoord) - 0.5;
+		float  depthScale = 0.5 * P.cfg.z / max(-Pp.z, 1e-4);   // cfg.z = radius
+		float  visibility = 0.0;
+		for (int s = 0; s < SLICES; ++s)
+		{
+			float  phi = (float(s) + jitter) * (6.28318530718 / float(SLICES));
+			float2 omega = float2(cos(phi), sin(phi));
+			float3 dir = float3(omega, 0.0);
+			float3 orthoDir = dir - dot(dir, V) * V;
+			float3 axis = cross(dir, V);
+			float3 projN = N - axis * dot(N, axis);  // normal projected into the slice plane
+			float  projLen = length(projN);
+			if (projLen < 1e-5) { visibility += 1.0; continue; }
+			float  nAng = sign(dot(orthoDir, projN)) * acos(clamp(dot(projN, V) / projLen, 0.0, 1.0));
+			// Metal: uv.y is top-left, so negate the y of the UV march so the sampled
+			// neighbours stay in the same view-space slice plane that nAng assumes.
+			float2 omegaUV = float2(P.proj[0][0] * omega.x, -P.proj[1][1] * omega.y);
+			uint occ = 0u;
+			for (int i = 0; i < STEPS; ++i)
+			{
+				float  t   = (float(i) + jitter) / float(STEPS) + 0.01;
+				float2 sUV = in.uv - t * depthScale * omegaUV;
+				float4 sp  = posTex.sample(posSmp, sUV);
+				if (sp.a < 0.5) continue;
+				float3 d   = sp.xyz - Pp;
+				float  len = length(d);
+				float2 fb;
+				fb.x = dot(d / max(len, 1e-5), V);                    // front horizon
+				fb.y = dot(normalize(d - V * THICKNESS), V);          // back (thickness)
+				fb   = acos(clamp(fb, -1.0, 1.0));
+				fb   = clamp((fb + nAng + 1.57079632679) / 3.14159265359, 0.0, 1.0);
+				occ  = hbaoSectors(min(fb.x, fb.y), max(fb.x, fb.y), occ);
+			}
+			visibility += 1.0 - float(popcount(occ)) / 32.0;
+		}
+		visibility /= float(SLICES);
+		ao = 1.0 - (1.0 - visibility) * P.cfg2.x;    // cfg2.x = intensity
+		ao = max(ao, 0.1);                           // backstop against pure black
 	}
-	float ao = 1.0 - (occ / 32.0) * P.cfg2.x;
-	// Safety floor (mirrors GL kSSAOFS): AO dims the image-based ambient (a primary
-	// light source), so cap it to dim by at most half — no black surfaces even at high
-	// radius/intensity. Rarely hit now with the slope-invariant test; it's a backstop.
-	ao = max(ao, 0.5);
+	else
+	{
+		// ── SSAO: slope-invariant tangent-plane kernel ─────────────────────────
+		float3 randv = noiseTex.sample(noiseSmp, in.uv * P.cfg.xy).xyz;
+		float3 T = normalize(randv - N * dot(randv, N));
+		float3 B = cross(N, T);
+		float3x3 TBN = float3x3(T, B, N);
+		float occ = 0.0;
+		for (int i = 0; i < 32; ++i)
+		{
+			// Kernel only picks which nearby screen pixels to inspect (hemisphere footprint).
+			float3 sp = Pp + (TBN * P.samples[i].xyz) * P.cfg.z;
+			float4 clip = P.proj * float4(sp, 1.0);
+			float2 suv = clip.xy / clip.w;
+			suv = float2(suv.x * 0.5 + 0.5, 1.0 - (suv.y * 0.5 + 0.5)); // Metal: top-left origin
+			if (any(suv < 0.0) || any(suv > 1.0)) continue;
+			float4 sv = posTex.sample(posSmp, suv);
+			if (sv.a < 0.5) continue;                    // sampled the background
+			// Slope-invariant occlusion: how far the neighbour rises above this fragment's
+			// tangent plane (Pp, N). A flat surface — even edge-on — has neighbours IN the
+			// plane (dot ≈ 0) and can't occlude itself.
+			float3 toOcc = sv.xyz - Pp;
+			float  above = dot(toOcc, N);
+			float  rangeCheck = smoothstep(0.0, 1.0, P.cfg.z / max(length(toOcc), 1e-4));
+			occ += (above > P.cfg.w ? 1.0 : 0.0) * rangeCheck;
+		}
+		ao = 1.0 - (occ / 32.0) * P.cfg2.x;
+		ao = max(ao, 0.5);                           // conservative backstop
+	}
 	return float4(ao, ao, ao, 1.0);
 }
 
@@ -1238,7 +1296,7 @@ struct SSAOParamsCPU
 {
 	glm::mat4 proj;
 	glm::vec4 cfg;          // xy = noise scale, z = radius, w = bias
-	glm::vec4 cfg2;         // x = intensity
+	glm::vec4 cfg2;         // x = intensity, y = AO method (0 SSAO, 1 HBAO, 2 GTAO)
 	glm::vec4 samples[32];  // hemisphere kernel (xyz)
 };
 
@@ -2480,6 +2538,7 @@ void MetalRenderer::SetSSAOSettings(const SSAOSettings& s)
 	m_ssaoEnabled   = s.enabled;
 	m_ssaoRadius    = s.radius;
 	m_ssaoIntensity = s.intensity;
+	m_ssaoMethod    = s.method;
 }
 
 void MetalRenderer::EnsureSSAOTargets(int width, int height)
@@ -2593,7 +2652,7 @@ void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
 		params.proj = m_renderWorld.camera.projection;
 		params.cfg  = glm::vec4(static_cast<float>(width) / 4.0f, static_cast<float>(height) / 4.0f,
 		                        m_ssaoRadius, 0.025f);
-		params.cfg2 = glm::vec4(m_ssaoIntensity, 0.0f, 0.0f, 0.0f);
+		params.cfg2 = glm::vec4(m_ssaoIntensity, static_cast<float>(m_ssaoMethod), 0.0f, 0.0f);
 		const std::vector<glm::vec3> kernel = BuildSSAOKernel(32);
 		for (int i = 0; i < 32; ++i) params.samples[i] = glm::vec4(kernel[i], 0.0f);
 		{

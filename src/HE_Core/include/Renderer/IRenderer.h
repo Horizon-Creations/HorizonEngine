@@ -117,6 +117,7 @@ public:
         bool  enabled   = true;
         float radius    = 0.5f;  // hemisphere sampling radius in view-space units
         float intensity = 1.0f;  // 0 = no darkening … 1 = full occlusion
+        int   method    = 0;     // AO method: 0 = SSAO, 1 = HBAO, 2 = GTAO (planned)
     };
     virtual void SetSSAOSettings(const SSAOSettings& /*settings*/) {}
 

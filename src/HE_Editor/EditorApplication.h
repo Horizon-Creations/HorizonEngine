@@ -60,6 +60,7 @@ struct EditorConfig
 	bool  SSAOEnabled   = true;
 	float SSAORadius    = 0.5f;   // hemisphere sampling radius, view-space units
 	float SSAOIntensity = 1.0f;   // 0 = off … 1 = full ambient occlusion
+	int   SSAOMethod    = 0;      // AO method: 0 = SSAO, 1 = HBAO, 2 = GTAO (planned)
 
 	// NOTE: environment / sky settings (day-night, sun, moon, clouds, fog, night
 	// sky, wind) are scene data now — they live on the World root entity as an

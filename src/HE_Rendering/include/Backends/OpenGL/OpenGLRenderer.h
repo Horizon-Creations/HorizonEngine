@@ -330,6 +330,7 @@ private:
 	int          m_uSsaoBias      = -1;
 	int          m_uSsaoIntensity = -1;
 	int          m_uSsaoKernel    = -1;
+	int          m_uAOMethod      = -1;  // 0 = SSAO, 1 = HBAO, 2 = GTAO
 	unsigned int m_ssaoBlurProgram = 0;  // fullscreen 4×4 box blur
 	int          m_uBlurAO        = -1;
 	unsigned int m_ssaoPosFBO     = 0;   // view-space position target + depth
@@ -346,6 +347,7 @@ private:
 	bool         m_ssaoEnabled    = true;
 	float        m_ssaoRadius     = 0.5f;
 	float        m_ssaoIntensity  = 1.0f;
+	int          m_ssaoMethod     = 0;   // 0 = SSAO, 1 = HBAO, 2 = GTAO
 	void CreateSSAOPipeline();           // programs + kernel + noise texture
 	void EnsureSSAOTargets(int width, int height);
 	void DestroySSAOTargets();
