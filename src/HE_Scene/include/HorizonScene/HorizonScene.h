@@ -29,6 +29,8 @@
 #include "Components/AudioSourceComponent.h"
 #include "Components/AudioListenerComponent.h"
 #include "Components/ParticleSystemComponent.h"
+#include "Components/LODComponent.h"
+#include "LODSystem.h"
 #include "Components/UICanvasComponent.h"
 #include "Components/UIElementComponent.h"
 #include "Components/UITextComponent.h"

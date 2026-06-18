@@ -18,6 +18,7 @@
 #include "HorizonScene/Components/AudioSourceComponent.h"
 #include "HorizonScene/Components/AudioListenerComponent.h"
 #include "HorizonScene/Components/ParticleSystemComponent.h"
+#include "HorizonScene/Components/LODComponent.h"
 #include "HorizonScene/Components/UICanvasComponent.h"
 #include "HorizonScene/Components/UIElementComponent.h"
 #include "HorizonScene/Components/UITextComponent.h"
@@ -270,6 +271,14 @@ namespace
 				{ "playing",          ps->playing },
 				{ "looping",          ps->looping },
 			};
+		}
+		if (auto* lod = registry.try_get<LODComponent>(entity))
+		{
+			json levels = json::array();
+			for (const auto& lvl : lod->levels)
+				levels.push_back({ { "meshId", uuidToJson(lvl.meshId) },
+				                   { "maxDistance", lvl.maxDistance } });
+			comps["lod"] = { { "levels", levels } };
 		}
 		if (auto* c = registry.try_get<UICanvasComponent>(entity))
 		{
@@ -556,6 +565,22 @@ namespace
 			ps.playing          = c.value("playing",         ps.playing);
 			ps.looping          = c.value("looping",         ps.looping);
 			registry.emplace_or_replace<ParticleSystemComponent>(entity, std::move(ps));
+		}
+		if (comps.contains("lod"))
+		{
+			const json& c = comps["lod"];
+			LODComponent lod;
+			if (c.contains("levels") && c["levels"].is_array())
+			{
+				for (const auto& lj : c["levels"])
+				{
+					LODLevel lvl;
+					lvl.meshId      = jsonToUuid(lj.value("meshId", json()));
+					lvl.maxDistance = lj.value("maxDistance", lvl.maxDistance);
+					lod.levels.push_back(lvl);
+				}
+			}
+			registry.emplace_or_replace<LODComponent>(entity, std::move(lod));
 		}
 		if (comps.contains("uicanvas"))
 		{
