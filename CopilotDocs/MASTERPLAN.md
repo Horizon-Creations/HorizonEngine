@@ -195,7 +195,7 @@ profitieren von P2.8 (Play-Mode zum Testen).
 | 4a.1 | **Jolt Physics** integrieren (FetchContent) | 2.2, 2.8 | ✅ Forts. 39 — Jolt v5.5.0 FetchContent (SOURCE_SUBDIR Build); PhysicsWorld (PIMPL, JobSystemSingleThreaded, TempAllocatorImpl); process-globale Init via call_once; Box-Shape aus TransformComponent::scale; RigidBodyType→EMotionType; fixed-rate step + ECS sync-back; Editor: Physik-World on Play/Stop + fixed-timestep-Akkumulator in OnRender; 8 Tests (223 gesamt) |
 | 4a.2 | Collider-Komponenten (Box/Sphere/Capsule/Mesh) + Debug-Draw | 4a.1, 0.7 | ✅ Forts. 40 — ColliderComponent (Box/Sphere/Capsule + halfExtents/radius/height/isTrigger); PhysicsWorld wählt Shape aus ColliderComponent (Fallback: scale-Box); DebugDraw::capsule(); Viewport-Wireframes (Cyan=solid, Magenta=Trigger); SceneSerializer JSON+Binary; Inspector + Add-Component; 7 Tests |
 | 4a.3 | Raycasts/Queries als Engine-API | 4a.1 | ✅ Forts. 41 — PhysicsWorld::raycast (RRayCast, NarrowPhaseQuery, BodyLockRead, Surface-Normal, Entity-UserData); ScriptContext::horizon.raycast Lua-Binding (nil on miss, table {entity,x,y,z,nx,ny,nz,distance} on hit); kPhysicsKey in Lua-Registry; 9 Tests (239 gesamt) |
-| 4a.4 | Character-Controller | 4a.1 | |
+| 4a.4 | Character-Controller | 4a.1 | ✅ Forts. 42 — CharacterControllerComponent (slopeLimit/stepHeight/skinWidth/mass/gravity + velocity/isGrounded runtime); PhysicsWorld: entityToCharacter map, CharacterVirtual (ExtendedUpdate+gravity+step-sync); setCharacterVelocity/isCharacterGrounded API; horizon.setVelocity/isGrounded Lua-Binding; SceneSerializer; Editor-Inspector (read-only runtime state); 9 Tests (248 gesamt) |
 | 4a.5 | 2D-Physik (Box2D) — optional, wenn Catania es braucht | 2.2 | Transform2D existiert schon |
 
 ### 4b — Scripting
@@ -1707,3 +1707,23 @@ Lifetime-sicher mit der bestehenden `SlotMap`/`m_handleToUUID`-Buchführung inte
 - **`ScriptContext.h/.cpp`**: `kPhysicsKey = "__horizonPhysics"` in Lua-Registry; `lua_horizon_raycast()` (7 Zahlen-Args: ox,oy,oz,dx,dy,dz,maxDist; nil on miss; table on hit); `setPhysicsWorld(pw)` aktualisiert Registry-Pointer; `registerHorizonApi()` initialisiert Key mit nullptr.
 - **9 Tests** in `test_raycast.cpp`: Treffer Static-Box von oben (Point.y≈0.5, dist≈4.5, entityId, Normal.y>0.9); Miss; Strahl zu kurz; Uninitalisierte World; Null-Richtung; Sphere-Collider-Treffer; Lua nil ohne PhysicsWorld; Lua Treffer-Tabelle (y, dist, normY); Lua nil auf Miss. Lua-Boolean-Fallback via `(expr) and 1 or 0`-Pattern.
 - **239 Tests grün** (230→239).
+
+---
+
+### Forts. 42 — Character Controller (4a.4)
+
+> **Aufgabe:** Jolt CharacterVirtual-basierter Character Controller mit Lua-Binding. ✅
+
+- **`CharacterControllerComponent.h`** (neu): `slopeLimit` (45°), `stepHeight` (0.4m), `skinWidth` (0.02m), `mass` (70 kg), `gravity` (9.81 m/s²). Runtime-Felder: `velocity` (Output, nach Step geschrieben), `isGrounded`.
+- **`PhysicsWorld.h/.cpp`**:
+  - `Impl::entityToCharacter: unordered_map<uint32_t, unique_ptr<CharacterVirtual>>`
+  - `initialize()`: Entities mit `CharacterControllerComponent` (ohne gleichzeitigen `RigidBodyComponent`): `CharacterVirtualSettings` (Mass, Padding, Shape, MaxSlopeAngle); `CapsuleShape` aus `ColliderComponent` wenn vorhanden, sonst Default 0.7+0.3 Capsule. `CharacterVirtual` with entity-ID als UserData.
+  - `step()`: `DefaultBroadPhaseLayerFilter(MOVING)` + `DefaultObjectLayerFilter(MOVING)`; liest aktuelle Velocity vom Jolt-Character (extern gesetzte Velocity bleibt so erhalten); Gravity auf Y wenn !IsSupported(); `ExtendedUpdate(dt, gravity, euSettings, …, tempAllocator)`; Position/Velocity/isGrounded sync-back.
+  - `setCharacterVelocity(entityId, velocity)`: Direkt `CharacterVirtual::SetLinearVelocity`.
+  - `isCharacterGrounded(entityId)`: `GetGroundState() == OnGround`.
+  - `clear()`: `entityToCharacter.clear()` (CharacterVirtual hat keinen Destroy-Call — unique_ptr-Destruktor genügt).
+- **`ScriptContext.cpp`**: `lua_horizon_setVelocity(entityId, vx, vy, vz)`, `lua_horizon_isGrounded(entityId) → bool`.
+- **`SceneSerializer.cpp`**: JSON-Key `"characterController"` mit slopeLimit/stepHeight/skinWidth/mass/gravity (keine Runtime-Felder).
+- **`EditorUI.cpp`**: Inspector-Section "Character Controller" (DragFloat für alle Parameter, Read-only Checkbox isGrounded + DragFloat3 velocity); "Character Controller" im Add-Component-Menu.
+- **9 Tests** in `test_character.cpp`: init kein Crash; Registrierung; fällt + landet; isGrounded nach 2 s; setCharacterVelocity bewegt horizontal; unbekannte Entity gibt false/kein Crash; Defaults; clear() idempotent.
+- **248 Tests grün** (239→248).
