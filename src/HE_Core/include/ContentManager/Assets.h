@@ -65,6 +65,9 @@ struct MaterialAsset : public RuntimeAsset
 	// sorted, alpha-blended transparency pass instead of the opaque pass.
 	// Appended after the PBR scalars (same backward-compatible MTRL tail).
 	float opacity      = 1.0f;
+	// Disable backface culling for this material. Needed for terrain/quads
+	// that must be visible from below (e.g. at grazing camera angles).
+	bool doubleSided   = false;
 };
 
 struct SceneAsset : public RuntimeAsset

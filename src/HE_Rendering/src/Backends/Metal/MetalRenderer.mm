@@ -310,14 +310,13 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
 	float3 ambDiff = skyEnv.sample(skyEnvSmp, Nup).rgb    * diffuseColor;
 	float3 ambSpec = skyEnv.sample(skyEnvSmp, Rrough).rgb * specColor;
 	float3 ambient = ambDiff * 0.35 + ambSpec * (1.0 - 0.6 * in.roughness);
-	// Flat ambient fill (never-black floor + overcast replacement for the
-	// switched-off sun/moon light), applied to the diffuse albedo.
-	ambient += scene.ambient.xyz * diffuseColor;
-	// Screen-space ambient occlusion darkens only the ambient/indirect term in
+	// Screen-space ambient occlusion darkens only the IBL indirect term in
 	// crevices; the direct lighting added below is left untouched. 1.0 = fully lit.
 	float ao = (scene.viewport.z > 0.5)
 		? aoTex.sample(aoSmp, in.position.xy / scene.viewport.xy).r : 1.0;
-	float3 result  = ambient * ao;
+	// Flat ambient fill (never-black floor + overcast replacement) kept outside AO
+	// so grazing-angle SSAO over-darkening cannot zero it out.
+	float3 result  = ambient * ao + scene.ambient.xyz * diffuseColor;
 
 	for (int i = 0; i < scene.lightCount; ++i)
 	{
