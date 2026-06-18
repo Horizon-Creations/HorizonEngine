@@ -28,6 +28,7 @@
 #include "Components/TerrainComponent.h"
 #include "Components/AudioSourceComponent.h"
 #include "Components/AudioListenerComponent.h"
+#include "Components/ParticleSystemComponent.h"
 #include "TerrainMeshGenerator.h"
 #include "TerrainSystem.h"
 

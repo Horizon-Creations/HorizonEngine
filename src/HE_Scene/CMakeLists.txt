@@ -11,6 +11,7 @@ add_library(HorizonScene SHARED
     src/AnimationStateMachineSystem.cpp
     src/PropertyAnimationSystem.cpp
     src/NavigationSystem.cpp
+    src/ParticleSystem.cpp
     src/ScriptContext.cpp
     src/AudioEngine.cpp
     src/PhysicsWorld.cpp

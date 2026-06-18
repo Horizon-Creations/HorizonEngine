@@ -10,6 +10,8 @@
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/LightComponent.h>
 #include <HorizonScene/Components/EnvironmentLightComponent.h>
+#include <HorizonScene/Components/ParticleSystemComponent.h>
+#include <ContentManager/DefaultAssets.h>
 #include <JobSystem/JobSystem.h>
 #include <glm/gtc/quaternion.hpp>
 #include <glm/common.hpp>
@@ -146,6 +148,48 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 		obj.entityId        = d.entId;
 		obj.lod             = d.lod;
 	});
+
+	// ── Particles ────────────────────────────────────────────────────────────
+	// Each live particle becomes a billboard RenderObject. Same-emitter particles
+	// share the same mesh+material so the renderer's instancing pass batches them.
+	for (auto [e, tc, ps] : reg.view<TransformComponent, ParticleSystemComponent>().each())
+	{
+		if (ps.particles.empty()) continue;
+		const HE::UUID meshId = (ps.meshAssetId == HE::UUID{}) ? HE::kDefaultQuadMeshId : ps.meshAssetId;
+
+		for (const Particle& p : ps.particles)
+		{
+			if (p.lifetime <= 0.0f) continue;
+			const float t01  = 1.0f - p.lifetime / p.maxLifetime;  // 0=born, 1=dead
+			const float size = ps.startSize + (ps.endSize - ps.startSize) * t01;
+			if (size <= 0.0f) continue;
+
+			// Billboard: rotate quad to face the camera.
+			glm::vec3 look = out.camera.position - p.position;
+			const float d  = glm::length(look);
+			if (d < 1e-5f) continue;
+			look /= d;
+			glm::vec3 right = glm::cross(glm::vec3(0,1,0), look);
+			if (glm::length(right) < 1e-4f) right = glm::vec3(1,0,0);
+			right = glm::normalize(right);
+			const glm::vec3 up = glm::cross(look, right);
+
+			glm::mat4 world(1.0f);
+			world[0] = glm::vec4(right * size, 0.0f);
+			world[1] = glm::vec4(up    * size, 0.0f);
+			world[2] = glm::vec4(look  * size, 0.0f);
+			world[3] = glm::vec4(p.position,   1.0f);
+
+			RenderObject obj;
+			obj.meshAssetId     = meshId;
+			obj.materialAssetId = ps.materialAssetId;
+			obj.transform       = world;
+			obj.worldBounds     = kUnitCube.transformed(world);
+			obj.entityId        = static_cast<uint32_t>(e);
+			obj.lod             = 0;
+			out.objects.push_back(obj);
+		}
+	}
 
 	// ── Skinned renderables ─────────────────────────────────────────────────
 	out.skinnedObjects.clear();
