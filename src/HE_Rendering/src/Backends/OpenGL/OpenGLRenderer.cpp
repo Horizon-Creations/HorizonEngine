@@ -1080,22 +1080,39 @@ void main() { FragColor = vec4(vViewPos, 1.0); } // a = 1 → valid geometry
 )GLSL";
 
 // Occlusion estimate (fullscreen, shares the tonemap fullscreen-triangle VS).
-// For each pixel: reconstruct the view-space normal from neighbouring positions,
-// build a TBN from a tiled random rotation, then sample a hemisphere kernel and
-// count how many samples are occluded by nearer geometry. Mirrors the Metal pass
-// exactly except for the NDC→UV y-flip (GL framebuffers are bottom-up).
+// Reconstructs the view-space normal from neighbouring positions, then runs the
+// AO method selected by uAOMethod (0 = SSAO tangent-plane kernel, 1 = HBAO
+// horizon/visibility-bitmask). uAOMethod is a *uniform* so the branch is coherent
+// across the whole pass (no divergence). Mirrors the Metal pass except the UV y
+// flip (GL framebuffers are bottom-up; Metal is top-left).
 static const char* kSSAOFS = R"GLSL(
 #version 410 core
 in vec2 vUV;
 uniform sampler2D uViewPos;     // RGBA16F: xyz view-space pos, a = valid
-uniform sampler2D uNoise;       // 4×4 random rotation vectors (xy in [-1,1])
+uniform sampler2D uNoise;       // 4×4 random rotation vectors (xy in [-1,1]) — SSAO only
 uniform mat4      uProj;        // camera projection (GL convention)
 uniform vec2      uNoiseScale;  // viewport / 4 (tiles the noise across the screen)
 uniform float     uRadius;
 uniform float     uBias;
 uniform float     uIntensity;
-uniform vec3      uKernel[32];
+uniform vec3      uKernel[32];  // hemisphere kernel — SSAO only
+uniform int       uAOMethod;    // 0 = SSAO, 1 = HBAO
 out vec4 FragColor;
+
+const float PI = 3.14159265359, TWO_PI = 6.28318530718, HALF_PI = 1.57079632679;
+
+// HBAO: OR the angular sectors [minH,maxH] (each normalised to [0,1] across the
+// hemisphere arc) into a 32-bit visibility bitmask.
+uint hbaoSectors(float minH, float maxH, uint mask)
+{
+	uint startBit = min(uint(clamp(minH, 0.0, 1.0) * 32.0), 31u);
+	uint count    = uint(ceil(clamp(maxH - minH, 0.0, 1.0) * 32.0));
+	uint bits     = (count > 0u) ? (0xFFFFFFFFu >> (32u - count)) : 0u;
+	return mask | (bits << startBit);
+}
+// Interleaved-gradient noise for the per-pixel slice/step jitter (Jimenez 2014).
+float ign(vec2 p) { return fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y)); }
+
 void main()
 {
 	vec4 pv = texture(uViewPos, vUV);
@@ -1114,40 +1131,86 @@ void main()
 	vec3 N = normalize(cross(ddx, ddy));
 	if (N.z < 0.0) N = -N;                       // face the camera (+Z in view space)
 
-	vec3 randv = texture(uNoise, vUV * uNoiseScale).xyz;
-	vec3 T = normalize(randv - N * dot(randv, N)); // Gram-Schmidt
-	vec3 B = cross(N, T);
-	mat3 TBN = mat3(T, B, N);
-
-	float occ = 0.0;
-	for (int i = 0; i < 32; ++i)
+	float ao;
+	if (uAOMethod == 1)
 	{
-		// The kernel only chooses WHICH nearby screen pixels to inspect (a hemisphere
-		// footprint of radius uRadius around P, oriented to the surface).
-		vec3 sp = P + (TBN * uKernel[i]) * uRadius;
-		vec4 clip = uProj * vec4(sp, 1.0);
-		vec2 suv = (clip.xy / clip.w) * 0.5 + 0.5;        // GL: ndc.y up → uv.y up
-		if (suv.x < 0.0 || suv.x > 1.0 || suv.y < 0.0 || suv.y > 1.0) continue;
-		vec4 sv = texture(uViewPos, suv);
-		if (sv.a < 0.5) continue;                          // sampled the background
-		// Slope-invariant occlusion: measure how far the sampled neighbour rises ABOVE
-		// this fragment's own tangent plane (P, N). A flat surface — even viewed dead
-		// edge-on — has its neighbours lying IN the plane (dot ≈ 0), so it can never
-		// occlude itself; only geometry that genuinely lifts off the surface counts.
-		// This replaces the view-depth comparison, whose constant bias let grazing-
-		// angle terrain self-occlude (the darkening/discolouring seen when tilting up).
-		vec3  toOcc = sv.xyz - P;
-		float above = dot(toOcc, N);
-		float rangeCheck = smoothstep(0.0, 1.0, uRadius / max(length(toOcc), 1e-4));
-		occ += (above > uBias ? 1.0 : 0.0) * rangeCheck;
+		// ── HBAO: horizon-based AO via a 32-sector visibility bitmask ───────────
+		// (Therrien et al., "Screen Space Indirect Lighting with Visibility Bitmask",
+		// AO-only.) Per slice we OR the sectors blocked by each marched neighbour into
+		// a mask; visibility = fraction of unblocked sectors. Horizon-based ⇒ a flat
+		// surface reads visibility ≈ 1 at any view angle (no grazing self-occlusion).
+		const int   SLICES = 3;
+		const int   STEPS  = 8;
+		const float THICKNESS = 0.5;                 // assumed occluder depth (view units)
+		vec3  V = normalize(-P);                      // camera at the view-space origin
+		float jitter = ign(gl_FragCoord.xy) - 0.5;
+		float depthScale = 0.5 * uRadius / max(-P.z, 1e-4);
+		float visibility = 0.0;
+		for (int s = 0; s < SLICES; ++s)
+		{
+			float phi = (float(s) + jitter) * (TWO_PI / float(SLICES));
+			vec2  omega = vec2(cos(phi), sin(phi));
+			vec3  dir = vec3(omega, 0.0);
+			vec3  orthoDir = dir - dot(dir, V) * V;
+			vec3  axis = cross(dir, V);
+			vec3  projN = N - axis * dot(N, axis);   // normal projected into the slice plane
+			float projLen = length(projN);
+			if (projLen < 1e-5) { visibility += 1.0; continue; }
+			float nAng = sign(dot(orthoDir, projN)) * acos(clamp(dot(projN, V) / projLen, 0.0, 1.0));
+			// March the slice direction in UV — proj scales x/y so the footprint is the
+			// correct view-space circle and the samples lie in this slice's plane.
+			vec2 omegaUV = vec2(uProj[0][0] * omega.x, uProj[1][1] * omega.y);
+			uint occ = 0u;
+			for (int i = 0; i < STEPS; ++i)
+			{
+				float t   = (float(i) + jitter) / float(STEPS) + 0.01;
+				vec2  sUV = vUV - t * depthScale * omegaUV;   // GL: uv.y up
+				vec4  sp  = texture(uViewPos, sUV);
+				if (sp.a < 0.5) continue;
+				vec3  d   = sp.xyz - P;
+				float len = length(d);
+				vec2  fb;
+				fb.x = dot(d / max(len, 1e-5), V);                    // front horizon
+				fb.y = dot(normalize(d - V * THICKNESS), V);         // back (thickness)
+				fb   = acos(clamp(fb, -1.0, 1.0));
+				fb   = clamp((fb + nAng + HALF_PI) / PI, 0.0, 1.0);  // → sector space
+				occ  = hbaoSectors(min(fb.x, fb.y), max(fb.x, fb.y), occ);
+			}
+			visibility += 1.0 - float(bitCount(occ)) / 32.0;
+		}
+		visibility /= float(SLICES);
+		ao = 1.0 - (1.0 - visibility) * uIntensity;
+		ao = max(ao, 0.1);                            // backstop against pure black
 	}
-	float ao = 1.0 - (occ / 32.0) * uIntensity;
-	// Safety floor: AO darkens the image-based ambient, a *primary* light source here,
-	// so cap it to dim the ambient by at most half — surfaces can't be crushed to
-	// black even at high radius/intensity. With the slope-invariant test above this is
-	// rarely hit; it's a backstop. (A full horizon estimator — GTAO — is the planned
-	// follow-up.)
-	ao = max(ao, 0.5);
+	else
+	{
+		// ── SSAO: slope-invariant tangent-plane kernel ─────────────────────────
+		vec3 randv = texture(uNoise, vUV * uNoiseScale).xyz;
+		vec3 T = normalize(randv - N * dot(randv, N)); // Gram-Schmidt
+		vec3 B = cross(N, T);
+		mat3 TBN = mat3(T, B, N);
+		float occ = 0.0;
+		for (int i = 0; i < 32; ++i)
+		{
+			// The kernel only chooses WHICH nearby screen pixels to inspect (a hemisphere
+			// footprint of radius uRadius around P, oriented to the surface).
+			vec3 sp = P + (TBN * uKernel[i]) * uRadius;
+			vec4 clip = uProj * vec4(sp, 1.0);
+			vec2 suv = (clip.xy / clip.w) * 0.5 + 0.5;        // GL: ndc.y up → uv.y up
+			if (suv.x < 0.0 || suv.x > 1.0 || suv.y < 0.0 || suv.y > 1.0) continue;
+			vec4 sv = texture(uViewPos, suv);
+			if (sv.a < 0.5) continue;                          // sampled the background
+			// Slope-invariant occlusion: how far the sampled neighbour rises ABOVE this
+			// fragment's own tangent plane (P, N). A flat surface — even edge-on — has
+			// its neighbours IN the plane (dot ≈ 0) and can't occlude itself.
+			vec3  toOcc = sv.xyz - P;
+			float above = dot(toOcc, N);
+			float rangeCheck = smoothstep(0.0, 1.0, uRadius / max(length(toOcc), 1e-4));
+			occ += (above > uBias ? 1.0 : 0.0) * rangeCheck;
+		}
+		ao = 1.0 - (occ / 32.0) * uIntensity;
+		ao = max(ao, 0.5);                            // conservative backstop
+	}
 	FragColor = vec4(ao, ao, ao, 1.0);
 }
 )GLSL";
@@ -1823,6 +1886,7 @@ void OpenGLRenderer::CreateSSAOPipeline()
 		m_uSsaoBias       = glGetUniformLocation(m_ssaoProgram, "uBias");
 		m_uSsaoIntensity  = glGetUniformLocation(m_ssaoProgram, "uIntensity");
 		m_uSsaoKernel     = glGetUniformLocation(m_ssaoProgram, "uKernel");
+		m_uAOMethod       = glGetUniformLocation(m_ssaoProgram, "uAOMethod");
 	}
 	// Blur program.
 	{
@@ -1872,6 +1936,7 @@ void OpenGLRenderer::SetSSAOSettings(const SSAOSettings& s)
 	m_ssaoEnabled   = s.enabled;
 	m_ssaoRadius    = s.radius;
 	m_ssaoIntensity = s.intensity;
+	m_ssaoMethod    = s.method;
 }
 
 void OpenGLRenderer::EnsureSSAOTargets(int width, int height)
@@ -2001,6 +2066,7 @@ unsigned int OpenGLRenderer::RenderSSAO(const CommandBuffer& cmds, int pw, int p
 	glUniform1f(m_uSsaoRadius,    m_ssaoRadius);
 	glUniform1f(m_uSsaoBias,      0.025f);
 	glUniform1f(m_uSsaoIntensity, m_ssaoIntensity);
+	glUniform1i(m_uAOMethod,      m_ssaoMethod);
 	glDrawArrays(GL_TRIANGLES, 0, 3);
 
 	// ── 3. Box blur (fullscreen) ───────────────────────────────────────────

@@ -545,6 +545,7 @@ void EditorApplication::OnInit()
 	m_editorConfig.SSAOEnabled                 = globalstate.getCustomConfigBool("SSAOEnabled",         m_editorConfig.SSAOEnabled);
 	m_editorConfig.SSAORadius                  = globalstate.getCustomConfigFloat("SSAORadius",         m_editorConfig.SSAORadius);
 	m_editorConfig.SSAOIntensity               = globalstate.getCustomConfigFloat("SSAOIntensity",      m_editorConfig.SSAOIntensity);
+	m_editorConfig.SSAOMethod                  = globalstate.getCustomConfigInt("SSAOMethod",           m_editorConfig.SSAOMethod);
 	m_editorConfig.QuickSettingsFavorites      = globalstate.getCustomConfigString("QuickSettingsFavorites", m_editorConfig.QuickSettingsFavorites);
 	m_editorCamera.setFlySpeed(m_editorConfig.EditorCameraSpeed);
 
@@ -791,7 +792,8 @@ void EditorApplication::OnRender(float dt)
 		renderer()->SetSSAOSettings(IRenderer::SSAOSettings{
 			m_editorConfig.SSAOEnabled,
 			m_editorConfig.SSAORadius,
-			m_editorConfig.SSAOIntensity});
+			m_editorConfig.SSAOIntensity,
+			m_editorConfig.SSAOMethod});
 		// Regenerate terrain meshes for any entity whose TerrainComponent is dirty
 		// (newly created, parameter-edited in the inspector, or just loaded/restored).
 		if (m_editorWorld)
@@ -961,7 +963,8 @@ void EditorApplication::dumpFrameHeadless()
 	r->SetBloomSettings(IRenderer::BloomSettings{
 		m_editorConfig.BloomEnabled, m_editorConfig.BloomThreshold, m_editorConfig.BloomIntensity});
 	r->SetSSAOSettings(IRenderer::SSAOSettings{
-		m_editorConfig.SSAOEnabled, m_editorConfig.SSAORadius, m_editorConfig.SSAOIntensity});
+		m_editorConfig.SSAOEnabled, m_editorConfig.SSAORadius, m_editorConfig.SSAOIntensity,
+		m_editorConfig.SSAOMethod});
 	pushEnvironment(0.0f); // scene environment from the World entity (no auto-advance)
 	r->SetViewportSize(1280, 720);
 	for (int i = 0; i < 3; ++i)
@@ -1333,6 +1336,7 @@ void EditorApplication::OnShutdown()
 	globalstate.setCustomConfigEntry("SSAOEnabled",                m_editorConfig.SSAOEnabled);
 	globalstate.setCustomConfigEntry("SSAORadius",                 m_editorConfig.SSAORadius);
 	globalstate.setCustomConfigEntry("SSAOIntensity",              m_editorConfig.SSAOIntensity);
+	globalstate.setCustomConfigEntry("SSAOMethod",                 m_editorConfig.SSAOMethod);
 	globalstate.setCustomConfigEntry("QuickSettingsFavorites",     m_editorConfig.QuickSettingsFavorites);
 	globalstate.writeConfig();
 }
