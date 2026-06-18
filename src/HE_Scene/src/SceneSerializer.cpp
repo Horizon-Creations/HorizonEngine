@@ -531,6 +531,70 @@ namespace
 		return true;
 	}
 
+	// Additive variant: creates ALL entities fresh (including the loaded scene's
+	// root, which is parented to world.rootEntity() by createEntity). The loaded
+	// scene's children are grafted under the existing world root without clearing it.
+	bool applyAdditiveJson(HorizonWorld& world, const json& scene)
+	{
+		if (!scene.contains("entities")) return true;
+
+		std::unordered_map<uint32_t, Entity> idMap;
+		auto& registry = world.registry();
+		constexpr uint32_t kNullId = 0xFFFFFFFFu;
+
+		// Pass 1: create all entities fresh (no root remapping)
+		for (auto& eJson : scene["entities"])
+		{
+			uint32_t    serialId = eJson.value("id",   0u);
+			std::string name     = eJson.value("name", "Entity");
+			uint32_t    parent   = eJson.value("parent", kNullId);
+
+			Entity e;
+			if (parent == kNullId)
+				// This was the source scene's root; create a fresh sub-root.
+				// createEntity() parents it to world.rootEntity() automatically.
+				e = world.createEntity(name);
+			else
+				e = world.createEntity(name);
+
+			idMap[serialId] = e;
+
+			if (eJson.contains("components"))
+				applyComponents(registry, e, eJson["components"]);
+		}
+
+		// Pass 2: rebuild hierarchy (only within the newly loaded entities)
+		for (auto& eJson : scene["entities"])
+		{
+			if (!eJson.contains("children")) continue;
+
+			uint32_t serialId = eJson.value("id", 0u);
+			auto it = idMap.find(serialId);
+			if (it == idMap.end()) continue;
+
+			Entity parent = it->second;
+			auto*  pHier  = registry.try_get<HierarchyComponent>(parent);
+			if (!pHier) continue;
+
+			pHier->children.clear();
+
+			for (auto& childId : eJson["children"])
+			{
+				uint32_t cid = childId.get<uint32_t>();
+				auto cit = idMap.find(cid);
+				if (cit == idMap.end()) continue;
+				Entity child = cit->second;
+				pHier->children.push_back(child);
+				if (auto* cHier = registry.try_get<HierarchyComponent>(child))
+					cHier->parent = parent;
+			}
+		}
+
+		world.ensureEnvironmentLights();
+		world.markHierarchyDirty();
+		return true;
+	}
+
 	// ── Prefab helpers (placed after applyComponents so they can call it) ────
 	void collectSubtree(entt::registry& registry, Entity root,
 	                    std::vector<Entity>& out)
@@ -669,6 +733,28 @@ bool SceneSerializer::load(HorizonWorld& world,
     if (format == SerializeFormat::JSON)   return loadJSON(world, path);
     if (format == SerializeFormat::Binary) return loadBinary(world, path);
     return false;
+}
+
+bool SceneSerializer::loadAdditive(HorizonWorld& world,
+                                    const std::filesystem::path& path,
+                                    SerializeFormat format)
+{
+    if (format == SerializeFormat::Binary)
+    {
+        std::ifstream in(path, std::ios::binary);
+        if (!in.is_open()) return false;
+        const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(in)),
+                                          std::istreambuf_iterator<char>());
+        json scene = json::from_cbor(bytes, true, false);
+        if (scene.is_discarded()) return false;
+        return applyAdditiveJson(world, scene);
+    }
+    // Default: JSON
+    std::ifstream in(path);
+    if (!in.is_open()) return false;
+    json scene = json::parse(in, nullptr, false);
+    if (scene.is_discarded()) return false;
+    return applyAdditiveJson(world, scene);
 }
 
 // ── JSON ──────────────────────────────────────────────────────────────────────

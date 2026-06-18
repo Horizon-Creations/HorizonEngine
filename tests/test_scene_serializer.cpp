@@ -294,3 +294,92 @@ TEST_CASE("SceneSerializer hierarchy survives round-trip")
 
 	fs::remove(file);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  loadAdditive: merges entities without clearing
+// ─────────────────────────────────────────────────────────────────────────────
+TEST_CASE("SceneSerializer loadAdditive preserves existing entities")
+{
+    namespace fs = std::filesystem;
+    const fs::path file = fs::temp_directory_path() / "he_test_additive.hescene";
+
+    // Save a small scene to disk
+    {
+        HorizonWorld src;
+        Entity child = src.createEntity("AdditiveChild");
+        src.addComponent(child, TransformComponent{ .position = {5.0f, 0.0f, 0.0f},
+                                                     .rotation = {},
+                                                     .scale    = glm::vec3(1.0f) });
+        SceneSerializer ser;
+        REQUIRE(ser.save(src, file, SerializeFormat::JSON));
+    }
+
+    // Load additively into a world that already has an entity
+    HorizonWorld world;
+    Entity existing = world.createEntity("Existing");
+    world.addComponent(existing, TransformComponent{ .position = {}, .rotation = {}, .scale = glm::vec3(1.0f) });
+
+    SceneSerializer ser;
+    REQUIRE(ser.loadAdditive(world, file, SerializeFormat::JSON));
+
+    // Both existing and loaded entities must be present
+    auto& reg = world.registry();
+    bool foundExisting = false, foundAdditive = false;
+    for (auto [e, name] : reg.view<NameComponent>().each())
+    {
+        if (name.name == "Existing")      foundExisting = true;
+        if (name.name == "AdditiveChild") foundAdditive = true;
+    }
+    CHECK(foundExisting);
+    CHECK(foundAdditive);
+
+    fs::remove(file);
+}
+
+TEST_CASE("SceneSerializer loadAdditive does not clear the world")
+{
+    namespace fs = std::filesystem;
+    const fs::path file = fs::temp_directory_path() / "he_test_additive2.hescene";
+
+    // Scene to merge: single entity with a known component value
+    {
+        HorizonWorld src;
+        Entity e = src.createEntity("MergedEntity");
+        src.addComponent(e, TransformComponent{ .position = {3.0f, 0.0f, 0.0f},
+                                                 .rotation = {},
+                                                 .scale    = glm::vec3(1.0f) });
+        SceneSerializer ser;
+        REQUIRE(ser.save(src, file, SerializeFormat::JSON));
+    }
+
+    HorizonWorld world;
+    // Add 3 entities to the base world
+    world.createEntity("A");
+    world.createEntity("B");
+    world.createEntity("C");
+
+    size_t before = 0;
+    for (auto [e, n] : world.registry().view<NameComponent>().each()) ++before;
+
+    SceneSerializer ser;
+    REQUIRE(ser.loadAdditive(world, file, SerializeFormat::JSON));
+
+    size_t after = 0;
+    for (auto [e, n] : world.registry().view<NameComponent>().each()) ++after;
+
+    // After additive load there must be more entities than before
+    CHECK(after > before);
+
+    // Verify the merged entity's transform
+    const auto& reg = world.registry();
+    Entity merged = entt::null;
+    for (auto [e, n] : reg.view<NameComponent>().each())
+        if (n.name == "MergedEntity") { merged = e; break; }
+    REQUIRE((merged != entt::null));
+
+    const auto* tc = reg.try_get<TransformComponent>(merged);
+    REQUIRE(tc != nullptr);
+    CHECK(tc->position.x == doctest::Approx(3.0f));
+
+    fs::remove(file);
+}
