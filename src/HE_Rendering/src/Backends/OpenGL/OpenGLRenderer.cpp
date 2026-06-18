@@ -226,7 +226,7 @@ float computeShadow(vec3 worldPos, vec3 N, vec3 L)
 	// Slope-scaled bias: grows toward grazing sun angles (low sun / day-night
 	// sunsets) to stop shadow acne, clamped so high sun keeps crisp contact.
 	float ndl     = clamp(dot(N, L), 0.0, 1.0);
-	float bias    = clamp(0.0016 * tan(acos(ndl)), 0.0005, 0.02);
+	float bias    = clamp(0.0016 * tan(acos(ndl)), 0.0005, 0.04);
 	// 3×3 PCF: averaging neighbouring texels softens the edge and hides the
 	// per-texel flicker the hard test produced as the day-night light rotates.
 	vec2 texel = 1.0 / vec2(textureSize(uShadowMap, 0));
@@ -2601,6 +2601,10 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glViewport(0, 0, m_shadowSize, m_shadowSize);
 			glClear(GL_DEPTH_BUFFER_BIT);
 			glUseProgram(m_depthProgram);
+			// Push depth values away from the light camera so shadow-map samples
+			// for back-lit fragments never self-shadow the surface (shadow acne).
+			glEnable(GL_POLYGON_OFFSET_FILL);
+			glPolygonOffset(2.0f, 4.0f);
 			HE::UUID shMeshId{}; const GpuMesh* shMesh = nullptr; bool shMeshValid = false;
 			for (const DrawCall& dc : cmds.drawCalls())
 			{
@@ -2615,6 +2619,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				glBindVertexArray(mesh->vao);
 				glDrawElements(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr);
 			}
+			glDisable(GL_POLYGON_OFFSET_FILL);
 			glBindFramebuffer(GL_FRAMEBUFFER, prevFBO);
 			glViewport(0, 0, pw, ph);
 			return;

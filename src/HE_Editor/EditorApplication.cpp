@@ -531,7 +531,6 @@ void EditorApplication::OnInit()
 	m_editorConfig.ContentBrowserRefreshRate   = globalstate.getCustomConfigInt("ContentBrowserRefreshRate",   m_editorConfig.ContentBrowserRefreshRate);
 	m_editorConfig.KeepCPUAssets               = globalstate.getCustomConfigBool("KeepCPUAssets",               m_editorConfig.KeepCPUAssets);
 	m_editorConfig.KeepCPUAssetsInfoAcknoleged = globalstate.getCustomConfigBool("KeepCPUAssetsInfoAcknoleged", m_editorConfig.KeepCPUAssetsInfoAcknoleged);
-	m_editorConfig.ShowGrid                    = globalstate.getCustomConfigBool("ShowGrid",                    m_editorConfig.ShowGrid);
 	m_editorConfig.CbTreeWidth                 = globalstate.getCustomConfigFloat("CbTreeWidth", m_editorConfig.CbTreeWidth);
 	m_editorConfig.UiFontScale                 = globalstate.getCustomConfigFloat("UiFontScale",       m_editorConfig.UiFontScale);
 	m_editorConfig.EditorCameraSpeed           = globalstate.getCustomConfigFloat("EditorCameraSpeed", m_editorConfig.EditorCameraSpeed);
@@ -1272,7 +1271,6 @@ void EditorApplication::OnShutdown()
 	globalstate.setCustomConfigEntry("KeepCPUAssets",               m_editorConfig.KeepCPUAssets);
 	globalstate.setCustomConfigEntry("KeepCPUAssetsInfoAcknoleged", m_editorConfig.KeepCPUAssetsInfoAcknoleged);
 	globalstate.setCustomConfigEntry("ContentBrowserRefreshRate",   m_editorConfig.ContentBrowserRefreshRate);
-	globalstate.setCustomConfigEntry("ShowGrid",                    m_editorConfig.ShowGrid);
 	globalstate.setCustomConfigEntry("CbTreeWidth",                 m_editorConfig.CbTreeWidth);
 	globalstate.setCustomConfigEntry("UiFontScale",                m_editorConfig.UiFontScale);
 	globalstate.setCustomConfigEntry("EditorCameraSpeed",          m_editorConfig.EditorCameraSpeed);

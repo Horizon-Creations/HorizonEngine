@@ -39,9 +39,6 @@ struct EditorConfig
 	bool KeepCPUAssetsInfoAcknoleged = false;
 	int  ContentBrowserRefreshRate = 60;
 
-	// Scene viewport: draw the world-space ground grid
-	bool ShowGrid = true;
-
 	// Content browser tree-panel width (-1 = auto on first frame)
 	float CbTreeWidth = -1.0f;
 
