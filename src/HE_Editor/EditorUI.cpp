@@ -2299,7 +2299,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                 ctx.world->addComponent(e, TransformComponent{});
                 ctx.world->addComponent(e, tc);
                 MaterialComponent mc;
-                mc.materialAssetId = HE::kDefaultMaterialId;
+                mc.materialAssetId = HE::kDefaultTerrainMaterialId;
                 ctx.world->addComponent(e, mc);
 
                 ctx.world->markHierarchyDirty();

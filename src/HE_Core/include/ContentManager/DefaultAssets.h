@@ -24,4 +24,12 @@ constexpr UUID kDefaultWhiteTextureId = { 0x0000000000000002ULL, 0x0000000000000
 // Useful as a starting point for newly created materials.
 constexpr UUID kDefaultMaterialId     = { 0x0000000000000003ULL, 0x0000000000000001ULL };
 
+// A 64×64 RGBA8 grid texture (dark lines every 8 pixels on a light earthy background).
+// Used as the default terrain material's albedo.
+constexpr UUID kDefaultGridTextureId  = { 0x0000000000000004ULL, 0x0000000000000001ULL };
+
+// A material that uses kDefaultGridTextureId as its albedo.
+// Assigned to newly created Landscape entities so the terrain shows a grid.
+constexpr UUID kDefaultTerrainMaterialId = { 0x0000000000000005ULL, 0x0000000000000001ULL };
+
 } // namespace HE

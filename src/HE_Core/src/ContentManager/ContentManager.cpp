@@ -642,4 +642,45 @@ void ContentManager::initDefaultAssets()
 	mat.name       = "DefaultMaterial";
 	mat.path       = "mem://default_material";
 	registerMaterial(std::move(mat));
+
+	// ── Default grid texture (kDefaultGridTextureId) ──────────────────────────
+	// 64×64 RGBA8: dark lines every 8 pixels on a light earthy background.
+	// Gives newly-created landscape terrain a visible grid without any file I/O.
+	{
+		constexpr int kGridSize = 64;
+		constexpr int kCell     = 8;
+		// Background: warm light grey (185,185,175,255); lines: dark earthy (80,80,70,255)
+		constexpr uint8_t kBgR = 185, kBgG = 185, kBgB = 175;
+		constexpr uint8_t kLnR =  80, kLnG =  80, kLnB =  70;
+		std::vector<uint8_t> pixels;
+		pixels.reserve(kGridSize * kGridSize * 4);
+		for (int y = 0; y < kGridSize; ++y) {
+			for (int x = 0; x < kGridSize; ++x) {
+				bool line = (x % kCell == 0) || (y % kCell == 0);
+				pixels.push_back(line ? kLnR : kBgR);
+				pixels.push_back(line ? kLnG : kBgG);
+				pixels.push_back(line ? kLnB : kBgB);
+				pixels.push_back(255);
+			}
+		}
+		TextureAsset grid;
+		grid.id       = HE::kDefaultGridTextureId;
+		grid.name     = "DefaultGridTexture";
+		grid.path     = "mem://default_grid_tex";
+		grid.data     = std::move(pixels);
+		grid.width    = kGridSize;
+		grid.height   = kGridSize;
+		grid.channels = 4;
+		registerTexture(std::move(grid));
+	}
+
+	// ── Default terrain material (kDefaultTerrainMaterialId) ─────────────────
+	// Uses the grid texture as albedo; slightly rough for a ground-like look.
+	MaterialAsset terrainMat;
+	terrainMat.id           = HE::kDefaultTerrainMaterialId;
+	terrainMat.name         = "DefaultTerrainMaterial";
+	terrainMat.path         = "mem://default_terrain_material";
+	terrainMat.texturePaths = { "mem://default_grid_tex" };
+	terrainMat.roughness    = 0.8f;
+	registerMaterial(std::move(terrainMat));
 }

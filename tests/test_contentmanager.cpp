@@ -266,10 +266,10 @@ TEST_CASE("ContentManager default asset UUIDs are fixed and distinct")
 
 TEST_CASE("ContentManager enumerateIds returns all registered assets")
 {
-	ContentManager cm; // starts with 3 default assets
+	ContentManager cm; // starts with 5 default assets (cube, white tex, material, grid tex, terrain material)
 
 	const size_t defaultCount = cm.assetCount();
-	REQUIRE(defaultCount == 3);
+	REQUIRE(defaultCount == 5);
 
 	StaticMeshAsset m; m.name = "extra";
 	HE::UUID extraId = cm.registerStaticMesh(std::move(m));
@@ -284,7 +284,7 @@ TEST_CASE("ContentManager enumerateIds returns all registered assets")
 
 TEST_CASE("ContentManager enumerateIds(type) filters by asset type")
 {
-	ContentManager cm; // 1 cube mesh, 1 white texture, 1 material
+	ContentManager cm; // 1 cube mesh, 2 textures (white + grid), 2 materials (default + terrain)
 
 	auto meshes   = cm.enumerateIds(HE::AssetType::StaticMesh);
 	auto textures = cm.enumerateIds(HE::AssetType::Texture);
@@ -292,19 +292,25 @@ TEST_CASE("ContentManager enumerateIds(type) filters by asset type")
 	auto scripts  = cm.enumerateIds(HE::AssetType::Script);
 
 	CHECK(meshes.size()    == 1);
-	CHECK(textures.size()  == 1);
-	CHECK(materials.size() == 1);
+	CHECK(textures.size()  == 2);
+	CHECK(materials.size() == 2);
 	CHECK(scripts.size()   == 0);
 
-	CHECK(meshes[0]    == HE::kDefaultCubeMeshId);
-	CHECK(textures[0]  == HE::kDefaultWhiteTextureId);
-	CHECK(materials[0] == HE::kDefaultMaterialId);
+	// Unordered_map iteration order is not guaranteed — use containment checks.
+	auto contains = [](const std::vector<HE::UUID>& v, HE::UUID id) {
+		return std::find(v.begin(), v.end(), id) != v.end();
+	};
+	CHECK(contains(meshes,     HE::kDefaultCubeMeshId));
+	CHECK(contains(textures,   HE::kDefaultWhiteTextureId));
+	CHECK(contains(textures,   HE::kDefaultGridTextureId));
+	CHECK(contains(materials,  HE::kDefaultMaterialId));
+	CHECK(contains(materials,  HE::kDefaultTerrainMaterialId));
 
 	// Add another mesh — only meshes count increases.
 	StaticMeshAsset m2; m2.name = "m2";
 	cm.registerStaticMesh(std::move(m2));
 	CHECK(cm.enumerateIds(HE::AssetType::StaticMesh).size() == 2);
-	CHECK(cm.enumerateIds(HE::AssetType::Texture).size()    == 1);
+	CHECK(cm.enumerateIds(HE::AssetType::Texture).size()    == 2);
 }
 
 TEST_CASE("ContentManager enumerateIds unload removes entry")
@@ -316,12 +322,12 @@ TEST_CASE("ContentManager enumerateIds unload removes entry")
 	HE::UUID id = cm.registerStaticMesh(std::move(m));
 
 	auto before = cm.enumerateIds();
-	REQUIRE(before.size() == 4); // 3 defaults + 1
+	REQUIRE(before.size() == 6); // 5 defaults + 1
 
 	REQUIRE(cm.unloadAsset(id));
 
 	auto after = cm.enumerateIds();
-	CHECK(after.size() == 3);
+	CHECK(after.size() == 5);
 	for (auto uid : after) CHECK_FALSE(uid == id);
 
 	// Type-filtered enumeration also must not contain it
@@ -336,6 +342,36 @@ TEST_CASE("ContentManager default assets are addressable by virtual path")
 	CHECK(cm.isLoaded("mem://default_cube"));
 	CHECK(cm.isLoaded("mem://default_white"));
 	CHECK(cm.isLoaded("mem://default_material"));
+	CHECK(cm.isLoaded("mem://default_grid_tex"));
+	CHECK(cm.isLoaded("mem://default_terrain_material"));
+}
+
+TEST_CASE("ContentManager default grid texture has correct dimensions and grid pattern")
+{
+	ContentManager cm;
+	HE::UUID id = cm.loadAsset("mem://default_grid_tex");
+	REQUIRE_FALSE(id == HE::UUID{});
+	auto* tex = cm.getTexture(id);
+	REQUIRE(tex != nullptr);
+	CHECK(tex->width    == 64);
+	CHECK(tex->height   == 64);
+	CHECK(tex->channels == 4);
+	// pixel (0,0) must be a line pixel (dark)
+	CHECK(tex->data[0] == 80);
+	// pixel (1,1) must be background (not a line)
+	CHECK(tex->data[(1 * 64 + 1) * 4] == 185);
+}
+
+TEST_CASE("ContentManager default terrain material references grid texture")
+{
+	ContentManager cm;
+	HE::UUID id = cm.loadAsset("mem://default_terrain_material");
+	REQUIRE_FALSE(id == HE::UUID{});
+	auto* mat = cm.getMaterial(id);
+	REQUIRE(mat != nullptr);
+	REQUIRE(mat->texturePaths.size() == 1);
+	CHECK(mat->texturePaths[0] == "mem://default_grid_tex");
+	CHECK(mat->roughness == doctest::Approx(0.8f));
 }
 
 // ── Hot-reload ────────────────────────────────────────────────────────────────
