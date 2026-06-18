@@ -69,6 +69,7 @@ private:
 
 	void CreateUnlitPipeline();
 	void CreateSkinnedPipeline();
+	void CreateInstancedPipeline();
 	void UpdateSkyEnvCube(const glm::vec3& sunDir); // rebuild the IBL cubemap on sun move
 	void DrawScene(int width, int height);
 	// (Re)creates the offscreen viewport FBO at the requested size.
@@ -167,6 +168,36 @@ private:
 	int          m_uSkinnedAO              = -1;
 	int          m_uSkinnedViewport        = -1;
 	int          m_uSkinnedSSAOEnabled     = -1;
+
+	// ── GPU-instanced pipeline (same-mesh batching via glDrawElementsInstanced) ─
+	// kInstancedVS reads per-instance model matrices from a VBO at attrib locs 4–7
+	// (divisor = 1); kUnlitFS is shared with the unlit pipeline.
+	unsigned int m_instancedProgram         = 0;
+	unsigned int m_instanceVBO              = 0;   // scratch instance-transform VBO
+	int          m_uInstViewProj            = -1;  // vertex: uViewProj
+	int          m_uInstColor               = -1;
+	int          m_uInstHasTexture          = -1;
+	int          m_uInstTexture             = -1;
+	int          m_uInstMetallic            = -1;
+	int          m_uInstRoughness           = -1;
+	int          m_uInstOpacity             = -1;
+	int          m_uInstLightCount          = -1;
+	int          m_uInstLightPos            = -1;
+	int          m_uInstLightDir            = -1;
+	int          m_uInstLightColor          = -1;
+	int          m_uInstLightParams         = -1;
+	int          m_uInstCameraPos           = -1;
+	int          m_uInstSunDir              = -1;
+	int          m_uInstSkyEnv              = -1;
+	int          m_uInstAmbient             = -1;
+	int          m_uInstFogDensity          = -1;
+	int          m_uInstFogHeightFalloff    = -1;
+	int          m_uInstLightVP             = -1;
+	int          m_uInstShadowMap           = -1;
+	int          m_uInstShadowEnabled       = -1;
+	int          m_uInstAO                  = -1;
+	int          m_uInstViewport            = -1;
+	int          m_uInstSSAOEnabled         = -1;
 
 	// Base-color textures for MaterialComponent overrides, keyed by material
 	// UUID. A present entry of 0 means "resolved, no texture". Drained/cleared

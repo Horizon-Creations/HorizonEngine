@@ -347,6 +347,32 @@ void main()
 }
 )GLSL";
 
+// ─── GPU-instanced vertex shader ─────────────────────────────────────────────
+// Per-instance model matrix supplied via a VBO at attribute locations 4–7
+// (one mat4 = 4 × vec4, divisor = 1). The fragment shader is kUnlitFS (shared).
+static const char* kInstancedVS = R"GLSL(
+#version 410 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec2 aUV;
+layout(location = 4) in vec4 aInstCol0;
+layout(location = 5) in vec4 aInstCol1;
+layout(location = 6) in vec4 aInstCol2;
+layout(location = 7) in vec4 aInstCol3;
+uniform mat4 uViewProj;
+out vec3 vNormal;
+out vec2 vUV;
+out vec3 vWorldPos;
+void main()
+{
+    mat4 model  = mat4(aInstCol0, aInstCol1, aInstCol2, aInstCol3);
+    vWorldPos   = (model * vec4(aPos, 1.0)).xyz;
+    vNormal     = mat3(model) * aNormal;
+    vUV         = aUV;
+    gl_Position = uViewProj * vec4(vWorldPos, 1.0);
+}
+)GLSL";
+
 // ─── Procedural skybox (drawn into the HDR target behind the scene) ─────────
 // Fullscreen triangle at the far plane; reconstructs a world-space ray per
 // pixel from the inverse view-projection and evaluates the same skyColor() the
@@ -1161,6 +1187,17 @@ void OpenGLRenderer::Initialize(HE::Window* window)
 	glEnable(GL_DEPTH_TEST);
 	CreateUnlitPipeline();
 	CreateSkinnedPipeline();
+	CreateInstancedPipeline();
+
+	// Scratch VBO for per-instance transform matrices (mat4, GL_STREAM_DRAW).
+	// Allocated with one identity matrix so attrib locs 4–7 always point to
+	// valid storage even on the first single-instance draw via m_unlitProgram.
+	glGenBuffers(1, &m_instanceVBO);
+	glBindBuffer(GL_ARRAY_BUFFER, m_instanceVBO);
+	const glm::mat4 identity(1.0f);
+	glBufferData(GL_ARRAY_BUFFER, sizeof(glm::mat4), &identity, GL_STREAM_DRAW);
+	glBindBuffer(GL_ARRAY_BUFFER, 0);
+
 	CreateShadowResources();
 	CreateSkyPipeline();
 	CreateTonemapPipeline();
@@ -1283,6 +1320,55 @@ void OpenGLRenderer::CreateSkinnedPipeline()
 	m_uSkinnedAO                 = loc("uAO");
 	m_uSkinnedViewport           = loc("uViewport");
 	m_uSkinnedSSAOEnabled        = loc("uSSAOEnabled");
+}
+
+void OpenGLRenderer::CreateInstancedPipeline()
+{
+	GLuint vs = CompileStage(GL_VERTEX_SHADER,   kInstancedVS);
+	GLuint fs = CompileStage(GL_FRAGMENT_SHADER, injectSkyFunc(kUnlitFS).c_str());
+
+	m_instancedProgram = glCreateProgram();
+	glAttachShader(m_instancedProgram, vs);
+	glAttachShader(m_instancedProgram, fs);
+	glLinkProgram(m_instancedProgram);
+	glDeleteShader(vs); glDeleteShader(fs);
+
+	GLint ok = 0;
+	glGetProgramiv(m_instancedProgram, GL_LINK_STATUS, &ok);
+	if (!ok)
+	{
+		char log[512];
+		glGetProgramInfoLog(m_instancedProgram, sizeof(log), nullptr, log);
+		Logger::Log(Logger::LogLevel::Error,
+		    (std::string("OpenGLRenderer: instanced program link error: ") + log).c_str());
+		return;
+	}
+
+	auto loc = [&](const char* n){ return glGetUniformLocation(m_instancedProgram, n); };
+	m_uInstViewProj         = loc("uViewProj");
+	m_uInstColor            = loc("uColor");
+	m_uInstHasTexture       = loc("uHasTexture");
+	m_uInstTexture          = loc("uTexture");
+	m_uInstMetallic         = loc("uMetallic");
+	m_uInstRoughness        = loc("uRoughness");
+	m_uInstOpacity          = loc("uOpacity");
+	m_uInstLightCount       = loc("uLightCount");
+	m_uInstLightPos         = loc("uLightPos");
+	m_uInstLightDir         = loc("uLightDir");
+	m_uInstLightColor       = loc("uLightColor");
+	m_uInstLightParams      = loc("uLightParams");
+	m_uInstCameraPos        = loc("uCameraPos");
+	m_uInstSunDir           = loc("uSunDir");
+	m_uInstSkyEnv           = loc("uSkyEnv");
+	m_uInstAmbient          = loc("uAmbient");
+	m_uInstFogDensity       = loc("uFogDensity");
+	m_uInstFogHeightFalloff = loc("uFogHeightFalloff");
+	m_uInstLightVP          = loc("uLightVP");
+	m_uInstShadowMap        = loc("uShadowMap");
+	m_uInstShadowEnabled    = loc("uShadowEnabled");
+	m_uInstAO               = loc("uAO");
+	m_uInstViewport         = loc("uViewport");
+	m_uInstSSAOEnabled      = loc("uSSAOEnabled");
 }
 
 void OpenGLRenderer::UpdateSkyEnvCube(const glm::vec3& sunDir)
@@ -1787,8 +1873,6 @@ unsigned int OpenGLRenderer::RenderSSAO(const CommandBuffer& cmds, int pw, int p
 	HE::UUID lastId{}; const GpuMesh* cMesh = nullptr; bool valid = false;
 	for (const DrawCall& dc : cmds.drawCalls())
 	{
-		glUniformMatrix4fv(m_uPosMVP,       1, GL_FALSE, glm::value_ptr(viewProj * dc.transform));
-		glUniformMatrix4fv(m_uPosModelView, 1, GL_FALSE, glm::value_ptr(view * dc.transform));
 		if (!valid || dc.meshAssetId != lastId)
 		{
 			cMesh = ResolveMesh(dc.meshAssetId);
@@ -1797,7 +1881,24 @@ unsigned int OpenGLRenderer::RenderSSAO(const CommandBuffer& cmds, int pw, int p
 		const GpuMesh* mesh = cMesh ? cMesh : ResolveMesh(HE::kDefaultCubeMeshId);
 		if (!mesh) continue;
 		glBindVertexArray(mesh->vao);
-		glDrawElements(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr);
+
+		// Instanced batches: draw each instance separately with its own transform.
+		// The SSAO pre-pass uses per-draw uniforms, not the instance VBO.
+		if (!dc.instanceTransforms.empty())
+		{
+			for (const glm::mat4& t : dc.instanceTransforms)
+			{
+				glUniformMatrix4fv(m_uPosMVP,       1, GL_FALSE, glm::value_ptr(viewProj * t));
+				glUniformMatrix4fv(m_uPosModelView, 1, GL_FALSE, glm::value_ptr(view * t));
+				glDrawElements(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr);
+			}
+		}
+		else
+		{
+			glUniformMatrix4fv(m_uPosMVP,       1, GL_FALSE, glm::value_ptr(viewProj * dc.transform));
+			glUniformMatrix4fv(m_uPosModelView, 1, GL_FALSE, glm::value_ptr(view * dc.transform));
+			glDrawElements(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr);
+		}
 	}
 
 	// ── 2. Occlusion (fullscreen) ──────────────────────────────────────────
@@ -1926,6 +2027,23 @@ const OpenGLRenderer::GpuMesh* OpenGLRenderer::ResolveMesh(const HE::UUID& asset
 	glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(3 * sizeof(float)));
 	glEnableVertexAttribArray(2);
 	glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(6 * sizeof(float)));
+
+	// Per-instance transform (mat4 = 4 × vec4) at attrib locs 4–7.
+	// The VAO remembers the binding so future instanced draws just bind the VAO.
+	if (m_instanceVBO)
+	{
+		glBindBuffer(GL_ARRAY_BUFFER, m_instanceVBO);
+		for (int col = 0; col < 4; ++col)
+		{
+			const GLuint attrLoc = static_cast<GLuint>(4 + col);
+			glEnableVertexAttribArray(attrLoc);
+			glVertexAttribPointer(attrLoc, 4, GL_FLOAT, GL_FALSE,
+			                      sizeof(glm::mat4),
+			                      (void*)(static_cast<GLintptr>(col) * sizeof(glm::vec4)));
+			glVertexAttribDivisor(attrLoc, 1);
+		}
+		glBindBuffer(GL_ARRAY_BUFFER, 0);
+	}
 	glBindVertexArray(0);
 
 	// Base color texture via the mesh's material (load on demand by path)
@@ -2258,7 +2376,9 @@ void OpenGLRenderer::Shutdown()
 		glDeleteTextures(1, &r.texture);
 	m_retiredTextures.clear();
 
-	if (m_unlitProgram) { glDeleteProgram(m_unlitProgram);     m_unlitProgram = 0; }
+	if (m_unlitProgram)     { glDeleteProgram(m_unlitProgram);     m_unlitProgram = 0; }
+	if (m_instancedProgram) { glDeleteProgram(m_instancedProgram); m_instancedProgram = 0; }
+	if (m_instanceVBO)      { glDeleteBuffers(1, &m_instanceVBO);  m_instanceVBO = 0; }
 	if (m_depthProgram) { glDeleteProgram(m_depthProgram);     m_depthProgram = 0; }
 	if (m_skyProgram)   { glDeleteProgram(m_skyProgram);       m_skyProgram = 0; }
 	if (m_tonemapProgram) { glDeleteProgram(m_tonemapProgram); m_tonemapProgram = 0; }
@@ -2618,6 +2738,48 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		glBindTexture(GL_TEXTURE_2D, shadows ? m_shadowDepthTex : 0);
 		glActiveTexture(GL_TEXTURE0); // base color binds here in the loop
 
+		// Mirror per-frame uniforms onto the instanced program (texture units are
+		// shared; only the location integers differ between programs).
+		if (m_instancedProgram)
+		{
+			glUseProgram(m_instancedProgram);
+			glUniform1i(m_uInstTexture, 0);
+			glUniform3fv(m_uInstSunDir,    1, glm::value_ptr(sunDir));
+			glUniform1i(m_uInstSkyEnv, 3);
+			glUniform3fv(m_uInstAmbient,   1, glm::value_ptr(m_renderWorld.ambient));
+			glUniform1f(m_uInstFogDensity,       GetEnvironment().fogDensity);
+			glUniform1f(m_uInstFogHeightFalloff, GetEnvironment().fogHeightFalloff);
+			glUniform1i(m_uInstAO, 4);
+			glUniform2f(m_uInstViewport, static_cast<float>(pw), static_cast<float>(ph));
+			glUniform1i(m_uInstSSAOEnabled, aoActive ? 1 : 0);
+			{
+				constexpr int kMaxLights = 8;
+				const int count = std::min(static_cast<int>(m_renderWorld.lights.size()), kMaxLights);
+				glm::vec4 pos[kMaxLights], dir[kMaxLights], color[kMaxLights], params[kMaxLights];
+				for (int i = 0; i < count; ++i)
+				{
+					const LightData& l = m_renderWorld.lights[i];
+					pos[i]    = glm::vec4(l.position,  static_cast<float>(l.type));
+					dir[i]    = glm::vec4(l.direction, l.spotAngleCos);
+					color[i]  = glm::vec4(l.color,     l.intensity);
+					params[i] = glm::vec4(l.range, 0.0f, 0.0f, 0.0f);
+				}
+				glUniform1i(m_uInstLightCount, count);
+				if (count > 0)
+				{
+					glUniform4fv(m_uInstLightPos,    count, glm::value_ptr(pos[0]));
+					glUniform4fv(m_uInstLightDir,    count, glm::value_ptr(dir[0]));
+					glUniform4fv(m_uInstLightColor,  count, glm::value_ptr(color[0]));
+					glUniform4fv(m_uInstLightParams, count, glm::value_ptr(params[0]));
+				}
+				glUniform3fv(m_uInstCameraPos, 1, glm::value_ptr(m_renderWorld.camera.position));
+			}
+			glUniform1i(m_uInstShadowEnabled, shadows ? 1 : 0);
+			glUniformMatrix4fv(m_uInstLightVP, 1, GL_FALSE, glm::value_ptr(lightVP));
+			glUniform1i(m_uInstShadowMap, 1);
+			glUseProgram(m_unlitProgram); // restore for the per-object loop
+		}
+
 		// Draws arrive sorted by mesh id, so consecutive draws usually share the
 		// same mesh (and often the same material). Memoise the last resolved
 		// mesh/material so repeated draws skip the cache + content-manager
@@ -2674,23 +2836,56 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 
 			if (cOpacity < 0.999f)
 			{
-				const glm::vec3 d = glm::vec3(dc.transform[3]) - camPos;
-				transparent.push_back({ viewProj * dc.transform, dc.transform, baseColor,
-				                        cMetallic, cRoughness, cOpacity, tex, vao, indexCount,
-				                        glm::dot(d, d) });
+				// Transparent instanced batches: push one TPDraw per instance so
+				// each object is sorted individually by distance.
+				auto pushTP = [&](const glm::mat4& t) {
+					const glm::vec3 d = glm::vec3(t[3]) - camPos;
+					transparent.push_back({ viewProj * t, t, baseColor,
+					                        cMetallic, cRoughness, cOpacity, tex, vao, indexCount,
+					                        glm::dot(d, d) });
+				};
+				if (!dc.instanceTransforms.empty())
+					for (const glm::mat4& t : dc.instanceTransforms) pushTP(t);
+				else
+					pushTP(dc.transform);
 				continue; // drawn in the transparency pass below
 			}
 
-			glUniformMatrix4fv(m_uMVP,   1, GL_FALSE, glm::value_ptr(viewProj * dc.transform));
-			glUniformMatrix4fv(m_uModel, 1, GL_FALSE, glm::value_ptr(dc.transform));
-			glUniform3fv(m_uColor, 1, glm::value_ptr(baseColor));
-			glUniform1f(m_uMetallic,  cMetallic);
-			glUniform1f(m_uRoughness, cRoughness);
+			if (!dc.instanceTransforms.empty() && m_instancedProgram && m_instanceVBO)
+			{
+				// GPU-instanced opaque draw: upload all transforms to the scratch VBO,
+				// then call glDrawElementsInstanced with the instanced program.
+				glBindBuffer(GL_ARRAY_BUFFER, m_instanceVBO);
+				glBufferData(GL_ARRAY_BUFFER,
+				             static_cast<GLsizeiptr>(dc.instanceTransforms.size() * sizeof(glm::mat4)),
+				             dc.instanceTransforms.data(), GL_STREAM_DRAW);
+				glBindBuffer(GL_ARRAY_BUFFER, 0);
 
-			glBindVertexArray(vao);
-			glUniform1i(m_uHasTexture, tex != 0);
-			glBindTexture(GL_TEXTURE_2D, tex);
-			glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, nullptr);
+				glUseProgram(m_instancedProgram);
+				glUniformMatrix4fv(m_uInstViewProj, 1, GL_FALSE, glm::value_ptr(viewProj));
+				glUniform3fv(m_uInstColor,     1, glm::value_ptr(baseColor));
+				glUniform1f(m_uInstMetallic,   cMetallic);
+				glUniform1f(m_uInstRoughness,  cRoughness);
+				glUniform1f(m_uInstOpacity,    1.0f);
+				glBindVertexArray(vao);
+				glUniform1i(m_uInstHasTexture, tex != 0);
+				glBindTexture(GL_TEXTURE_2D, tex);
+				glDrawElementsInstanced(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, nullptr,
+				                        static_cast<GLsizei>(dc.instanceTransforms.size()));
+				glUseProgram(m_unlitProgram); // restore for the next single-draw
+			}
+			else
+			{
+				glUniformMatrix4fv(m_uMVP,   1, GL_FALSE, glm::value_ptr(viewProj * dc.transform));
+				glUniformMatrix4fv(m_uModel, 1, GL_FALSE, glm::value_ptr(dc.transform));
+				glUniform3fv(m_uColor, 1, glm::value_ptr(baseColor));
+				glUniform1f(m_uMetallic,  cMetallic);
+				glUniform1f(m_uRoughness, cRoughness);
+				glBindVertexArray(vao);
+				glUniform1i(m_uHasTexture, tex != 0);
+				glBindTexture(GL_TEXTURE_2D, tex);
+				glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, nullptr);
+			}
 		}
 
 		// ── Skinned draws (after opaque statics, before sky) ────────────────────

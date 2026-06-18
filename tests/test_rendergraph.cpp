@@ -171,6 +171,132 @@ TEST_CASE("ShadowPass casts from the light frustum, not the camera-culled set")
 	CHECK(cmds.drawCalls()[0].entityId == 1);
 }
 
+// ─── GPU instancing batching tests ──────────────────────────────────────────
+// These run on the CPU-side GeometryPass only; no GL context is needed.
+
+namespace {
+	// Helper: N objects that all share the same meshAssetId / materialAssetId.
+	void addSameMeshObjects(RenderWorld& world, HE::UUID sharedMesh, int n)
+	{
+		for (int i = 0; i < n; ++i)
+		{
+			RenderObject o;
+			o.meshAssetId = sharedMesh;
+			o.transform   = glm::translate(glm::mat4(1.0f), glm::vec3(float(i), 0.0f, 0.0f));
+			o.entityId    = static_cast<uint32_t>(100 + i);
+			world.objects.push_back(o);
+		}
+	}
+}
+
+TEST_CASE("GeometryPass batches consecutive same-mesh objects into one instanced DrawCall")
+{
+	HE::UUID sharedMesh; sharedMesh.hi = 42; sharedMesh.lo = 7;
+
+	RenderWorld world;
+	addSameMeshObjects(world, sharedMesh, 3);
+	std::vector<uint32_t> sorted = { 0, 1, 2 };
+
+	CommandBuffer cmds;
+	GeometryPass{}.execute(world, sorted, cmds);
+
+	REQUIRE(cmds.drawCalls().size() == 1);
+	const DrawCall& dc = cmds.drawCalls()[0];
+	CHECK(dc.meshAssetId == sharedMesh);
+	CHECK(dc.instanceCount == 3);
+	REQUIRE(dc.instanceTransforms.size() == 3);
+	CHECK(dc.instanceTransforms[0] == world.objects[0].transform);
+	CHECK(dc.instanceTransforms[1] == world.objects[1].transform);
+	CHECK(dc.instanceTransforms[2] == world.objects[2].transform);
+}
+
+TEST_CASE("GeometryPass does not batch objects with different materials")
+{
+	HE::UUID sharedMesh; sharedMesh.hi = 99; sharedMesh.lo = 1;
+	HE::UUID matA; matA.hi = 1; matA.lo = 0;
+	HE::UUID matB; matB.hi = 2; matB.lo = 0;
+
+	RenderWorld world;
+	for (int i = 0; i < 2; ++i)
+	{
+		RenderObject o;
+		o.meshAssetId     = sharedMesh;
+		o.materialAssetId = (i == 0) ? matA : matB;
+		o.transform       = glm::mat4(1.0f);
+		o.entityId        = static_cast<uint32_t>(i);
+		world.objects.push_back(o);
+	}
+	std::vector<uint32_t> sorted = { 0, 1 };
+
+	CommandBuffer cmds;
+	GeometryPass{}.execute(world, sorted, cmds);
+
+	// Different materials → two separate DrawCalls, each with a single instance.
+	REQUIRE(cmds.drawCalls().size() == 2);
+	CHECK(cmds.drawCalls()[0].instanceCount == 1);
+	CHECK(cmds.drawCalls()[0].instanceTransforms.empty());
+	CHECK(cmds.drawCalls()[1].instanceCount == 1);
+	CHECK(cmds.drawCalls()[1].instanceTransforms.empty());
+}
+
+TEST_CASE("GeometryPass batches only contiguous runs (non-consecutive same mesh stays separate)")
+{
+	HE::UUID meshA; meshA.hi = 1; meshA.lo = 0;
+	HE::UUID meshB; meshB.hi = 2; meshB.lo = 0;
+
+	RenderWorld world;
+	// Pattern: A B A  →  3 separate draws (A and the second A are not adjacent)
+	for (int i = 0; i < 3; ++i)
+	{
+		RenderObject o;
+		o.meshAssetId = (i == 1) ? meshB : meshA;
+		o.transform   = glm::mat4(1.0f);
+		o.entityId    = static_cast<uint32_t>(i);
+		world.objects.push_back(o);
+	}
+	std::vector<uint32_t> sorted = { 0, 1, 2 };
+
+	CommandBuffer cmds;
+	GeometryPass{}.execute(world, sorted, cmds);
+
+	CHECK(cmds.drawCalls().size() == 3);
+	for (const DrawCall& dc : cmds.drawCalls())
+	{
+		CHECK(dc.instanceCount == 1);
+		CHECK(dc.instanceTransforms.empty());
+	}
+}
+
+TEST_CASE("GeometryPass produces one batch + one single for partial run (A A B)")
+{
+	HE::UUID meshA; meshA.hi = 5; meshA.lo = 0;
+	HE::UUID meshB; meshB.hi = 6; meshB.lo = 0;
+
+	RenderWorld world;
+	for (int i = 0; i < 3; ++i)
+	{
+		RenderObject o;
+		o.meshAssetId = (i < 2) ? meshA : meshB;
+		o.transform   = glm::translate(glm::mat4(1.0f), glm::vec3(float(i), 0.0f, 0.0f));
+		o.entityId    = static_cast<uint32_t>(i);
+		world.objects.push_back(o);
+	}
+	std::vector<uint32_t> sorted = { 0, 1, 2 };
+
+	CommandBuffer cmds;
+	GeometryPass{}.execute(world, sorted, cmds);
+
+	REQUIRE(cmds.drawCalls().size() == 2);
+	// First draw: A×2 batch
+	CHECK(cmds.drawCalls()[0].meshAssetId == meshA);
+	CHECK(cmds.drawCalls()[0].instanceCount == 2);
+	REQUIRE(cmds.drawCalls()[0].instanceTransforms.size() == 2);
+	// Second draw: B single
+	CHECK(cmds.drawCalls()[1].meshAssetId == meshB);
+	CHECK(cmds.drawCalls()[1].instanceCount == 1);
+	CHECK(cmds.drawCalls()[1].instanceTransforms.empty());
+}
+
 TEST_CASE("RenderPass declares its render-target I/O")
 {
 	CHECK(GeometryPass{}.describe().output.id == kBackbufferTarget);

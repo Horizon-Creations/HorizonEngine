@@ -11,22 +11,48 @@ void GeometryPass::execute(const RenderWorld&           world,
                            const std::vector<uint32_t>& sortedIndices,
                            CommandBuffer&               outCmds)
 {
-	for (uint32_t idx : sortedIndices)
+	// Batch consecutive runs of objects that share mesh + material.
+	// The sorter already groups by mesh id, so runs are the common case.
+	size_t i = 0;
+	while (i < sortedIndices.size())
 	{
-		if (idx >= world.objects.size())
-			continue;
+		const uint32_t idx = sortedIndices[i];
+		if (idx >= world.objects.size()) { ++i; continue; }
 
-		const RenderObject& obj = world.objects[idx];
+		const RenderObject& first = world.objects[idx];
+
+		// Extend the run while the next valid index has the same key.
+		size_t j = i + 1;
+		while (j < sortedIndices.size())
+		{
+			const uint32_t jdx = sortedIndices[j];
+			if (jdx >= world.objects.size()) break;
+			const RenderObject& next = world.objects[jdx];
+			if (next.meshAssetId != first.meshAssetId ||
+			    next.materialAssetId != first.materialAssetId) break;
+			++j;
+		}
+
+		const size_t runLen = j - i;
 		DrawCall dc;
-		dc.meshAssetId     = obj.meshAssetId;
-		dc.materialAssetId = obj.materialAssetId;
-		dc.mesh          = obj.meshHandle;
-		dc.material      = obj.materialHandle;
-		dc.transform     = obj.transform;
-		dc.instanceCount = 1;
-		dc.entityId      = obj.entityId;
-		dc.lod           = obj.lod;
+		dc.meshAssetId     = first.meshAssetId;
+		dc.materialAssetId = first.materialAssetId;
+		dc.mesh            = first.meshHandle;
+		dc.material        = first.materialHandle;
+		dc.transform       = first.transform;
+		dc.entityId        = first.entityId;
+		dc.lod             = first.lod;
+
+		if (runLen > 1)
+		{
+			dc.instanceCount = static_cast<uint32_t>(runLen);
+			dc.instanceTransforms.reserve(runLen);
+			for (size_t k = i; k < j; ++k)
+				dc.instanceTransforms.push_back(world.objects[sortedIndices[k]].transform);
+		}
+
 		outCmds.recordDraw(dc);
+		i = j;
 	}
 
 	// Skinned objects are not in the culled+sorted set: they are always drawn in
