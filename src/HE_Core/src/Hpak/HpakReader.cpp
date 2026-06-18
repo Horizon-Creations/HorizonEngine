@@ -1,4 +1,7 @@
 #include <Hpak/HpakReader.h>
+#ifdef HE_HAVE_LZ4
+#  include <lz4.h>
+#endif
 #include <fstream>
 #include <cstring>
 
@@ -63,15 +66,31 @@ std::vector<uint8_t> HpakReader::readEntry(const HE::UUID& id, const uint8_t key
         f.read(reinterpret_cast<char*>(raw.data()), static_cast<std::streamsize>(e.dataSize));
         if (!f && e.dataSize > 0) return {};
 
-        // Decrypt if needed
+        // Step 1: decrypt (order matches write: compress → encrypt)
         if ((e.flags & Hpak::kFlagEncrypted) && key)
         {
             for (size_t i = 0; i < raw.size(); ++i)
                 raw[i] ^= key[i % 32];
         }
 
-        // Decompression placeholder (lz4 not yet wired)
-        // if (e.flags & Hpak::kFlagCompressed) { ... }
+        // Step 2: decompress (LZ4)
+        if (e.flags & Hpak::kFlagCompressed)
+        {
+#ifdef HE_HAVE_LZ4
+            if (e.origSize == 0) return {};
+            std::vector<uint8_t> decompressed(e.origSize);
+            const int result = LZ4_decompress_safe(
+                reinterpret_cast<const char*>(raw.data()),
+                reinterpret_cast<char*>(decompressed.data()),
+                static_cast<int>(raw.size()),
+                static_cast<int>(e.origSize));
+            if (result != static_cast<int>(e.origSize)) return {};
+            return decompressed;
+#else
+            // LZ4 not available at build time — return empty to signal failure
+            return {};
+#endif
+        }
 
         return raw;
     }

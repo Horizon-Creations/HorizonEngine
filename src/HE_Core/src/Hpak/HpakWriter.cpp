@@ -1,5 +1,8 @@
 #include <Hpak/HpakWriter.h>
 #include <ContentManager/HAsset.h>
+#ifdef HE_HAVE_LZ4
+#  include <lz4.h>
+#endif
 #include <fstream>
 #include <cstring>
 
@@ -28,16 +31,43 @@ void HpakWriter::addEntry(const HE::UUID& id, const std::vector<uint8_t>& hasset
     e.origSize = static_cast<uint32_t>(hassetData.size());
     e.flags    = 0;
 
+    // Step 1: compress (LZ4) if requested and available
+    const uint8_t* src     = hassetData.data();
+    size_t         srcSize = hassetData.size();
+    std::vector<uint8_t> compressed; // only populated when compress=true
+
+#ifdef HE_HAVE_LZ4
+    if (settings.compress && srcSize > 0)
+    {
+        const int bound = LZ4_compressBound(static_cast<int>(srcSize));
+        compressed.resize(static_cast<size_t>(bound));
+        const int written = LZ4_compress_default(
+            reinterpret_cast<const char*>(src),
+            reinterpret_cast<char*>(compressed.data()),
+            static_cast<int>(srcSize),
+            bound);
+        if (written > 0)
+        {
+            compressed.resize(static_cast<size_t>(written));
+            src     = compressed.data();
+            srcSize = compressed.size();
+            e.flags |= Hpak::kFlagCompressed;
+        }
+        // on failure (written <= 0) fall through and store uncompressed
+    }
+#endif
+
+    // Step 2: encrypt (XOR) if requested
     if (settings.encrypt)
     {
         e.flags |= Hpak::kFlagEncrypted;
-        e.data.resize(hassetData.size());
-        for (size_t i = 0; i < hassetData.size(); ++i)
-            e.data[i] = hassetData[i] ^ settings.key[i % 32];
+        e.data.resize(srcSize);
+        for (size_t i = 0; i < srcSize; ++i)
+            e.data[i] = src[i] ^ settings.key[i % 32];
     }
     else
     {
-        e.data = hassetData;
+        e.data.assign(src, src + srcSize);
     }
 
     m_entries.push_back(std::move(e));

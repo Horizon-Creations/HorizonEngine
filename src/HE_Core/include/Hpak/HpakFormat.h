@@ -9,9 +9,9 @@
 //    [ EntryDesc × entryCount           ]  TOC
 //    [ raw data blocks at each offset   ]  .hasset blobs
 //
-//  All values are little-endian. Compression and encryption are opt-in per
-//  entry via entryFlags. LZ4 compression is a placeholder (not yet implemented;
-//  enable when lz4 FetchContent is wired in CMakeLists).
+//  All values are little-endian. Compression (LZ4) and encryption (XOR) are
+//  opt-in per entry via entryFlags. Operation order: compress → encrypt (write);
+//  decrypt → decompress (read). origSize always holds the uncompressed size.
 // ─────────────────────────────────────────────────────────────────────────────
 
 namespace Hpak
@@ -21,7 +21,7 @@ inline constexpr char     k_magic[4]      = {'H','P','A','K'};
 inline constexpr uint32_t k_version       = 1;
 
 // EntryDesc::entryFlags bits
-inline constexpr uint8_t  kFlagCompressed = 0x01; // LZ4 compressed (not yet impl)
+inline constexpr uint8_t  kFlagCompressed = 0x01; // LZ4 compressed
 inline constexpr uint8_t  kFlagEncrypted  = 0x02; // XOR with 32-byte derived key
 
 #pragma pack(push, 1)
@@ -49,11 +49,13 @@ static_assert(sizeof(EntryDesc) == 36, "Hpak::EntryDesc must be 36 bytes");
 
 #pragma pack(pop)
 
-// Per-entry packing options (no external dep: compression is a placeholder).
+// Per-entry packing options.
+// Operation order on write: compress → encrypt.
+// Operation order on read:  decrypt  → decompress.
 struct PackSettings {
-    bool    encrypt = false;
-    uint8_t key[32] = {};   // 32-byte XOR key (from KeyDerivation::derive)
-    // bool compress = false; // TODO: enable with lz4 FetchContent
+    bool    compress = false; // LZ4-compress before optional encryption
+    bool    encrypt  = false;
+    uint8_t key[32]  = {};    // 32-byte XOR key (from KeyDerivation::derive)
 };
 
 } // namespace Hpak

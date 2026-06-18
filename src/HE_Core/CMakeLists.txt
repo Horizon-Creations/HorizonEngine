@@ -41,6 +41,10 @@ target_link_libraries(HorizonCore
 	PUBLIC  nlohmann_json::nlohmann_json
 	PUBLIC  lua_static
 )
+if(HE_HAVE_LZ4)
+    target_link_libraries(HorizonCore PRIVATE lz4::lz4)
+    target_compile_definitions(HorizonCore PRIVATE HE_HAVE_LZ4)
+endif()
 
 # Tracy::TracyClient propagates TRACY_ENABLE define + include dir to all
 # downstream consumers (HorizonRendering, HorizonEditor, etc.) via PUBLIC linkage.
