@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <array>
 #include "Types/Enums.h"
 #include "Types/UUID.h"
 
@@ -27,15 +28,25 @@ struct StaticMeshAsset : public RuntimeAsset
 	std::vector<float>     uvs;
 };
 
+// One joint in the skeleton hierarchy.
+// inverseBindMatrix is column-major (16 floats, glm::mat4 layout).
+struct SkeletonJoint
+{
+	std::string            name;
+	int32_t                parent          = -1; // -1 = root
+	std::array<float, 16>  inverseBindMatrix = {};
+};
+
 struct SkeletalMeshAsset : public RuntimeAsset
 {
-	std::string            materialPath;
-	std::vector<float>     vertices;
-	std::vector<uint32_t>  indices;
-	std::vector<float>     normals;
-	std::vector<float>     uvs;
-	std::vector<uint32_t>  boneIDs;
-	std::vector<float>     boneWeights;
+	std::string                 materialPath;
+	std::vector<float>          vertices;
+	std::vector<uint32_t>       indices;
+	std::vector<float>          normals;
+	std::vector<float>          uvs;
+	std::vector<uint32_t>       boneIDs;      // 4 joints per vertex, flat
+	std::vector<float>          boneWeights;  // 4 weights per vertex, flat
+	std::vector<SkeletonJoint>  skeleton;     // joint hierarchy
 };
 
 struct MaterialAsset : public RuntimeAsset
