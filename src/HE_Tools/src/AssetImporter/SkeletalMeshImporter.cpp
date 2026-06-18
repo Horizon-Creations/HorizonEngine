@@ -82,10 +82,13 @@ std::unique_ptr<SkeletalMeshAsset> SkeletalMeshImporter::import(
         const cgltf_node& node = data->nodes[ni];
         if (!node.mesh) continue;
 
-        // World transform of this node
+        // Skinned nodes: the skin matrices handle world placement; baking the node
+        // transform into vertices would corrupt the IBM-based skinning math.
         float mat[16];
         cgltf_node_transform_world(&node, mat);
-        glm::mat4 world = glm::transpose(glm::make_mat4(mat));
+        glm::mat4 world = (node.skin != nullptr)
+            ? glm::mat4(1.0f)
+            : glm::transpose(glm::make_mat4(mat));
 
         const glm::mat3 normalMat = glm::transpose(glm::inverse(glm::mat3(world)));
 
