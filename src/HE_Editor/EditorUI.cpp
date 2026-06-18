@@ -1139,13 +1139,17 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                 ExportSettings es;
                 es.compress = s_exportCompress;
                 es.encrypt  = s_exportEncrypt;
+                // Resolve game runtime dir from editor executable location (../Game/)
+                if (const char* base = SDL_GetBasePath())
+                    es.gameRuntimeDir = std::filesystem::path(base) / ".." / "Game";
                 const auto res = ProjectExporter::exportProject(
                     contentDir, projName, sceneName,
                     std::filesystem::path(s_exportOutputDir), es);
 
                 if (res.success)
                     s_exportResult = "OK: " + std::to_string(res.assetsPacked)
-                                   + " asset(s) packed → " + s_exportOutputDir;
+                                   + " asset(s) packed, " + std::to_string(res.binaryFilesCopied)
+                                   + " binary file(s) → " + s_exportOutputDir;
                 else
                     s_exportResult = "Error: " + res.errorMessage;
                 s_exportRunning = false;
