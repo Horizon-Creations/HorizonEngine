@@ -449,6 +449,33 @@ fragment float4 fxaaFragment(FXOut in [[stage_in]],
 }
 )MSL";
 
+// In-Game UI 2D pass: solid-color quads derived from vertex_id + uniforms.
+// rect = {x, y, w, h} pixels;  viewport = {vpW, vpH} pixels.
+static const char* kUIMSL = R"MSL(
+#include <metal_stdlib>
+using namespace metal;
+struct UIVert { float4 position [[position]]; float2 uv; };
+vertex UIVert uiVertex(uint vid [[vertex_id]],
+                       constant float4& rect     [[buffer(0)]],
+                       constant float2& viewport [[buffer(1)]])
+{
+    const float2 c[4] = { float2(0,0), float2(1,0), float2(0,1), float2(1,1) };
+    float2 uv = c[vid];
+    float2 sp = rect.xy + uv * rect.zw;
+    float2 ndc = float2(sp.x / viewport.x * 2.0 - 1.0,
+                        1.0 - sp.y / viewport.y * 2.0);
+    UIVert o;
+    o.position = float4(ndc, 0.0, 1.0);
+    o.uv = uv;
+    return o;
+}
+fragment float4 uiFragment(UIVert in [[stage_in]],
+                           constant float4& color [[buffer(0)]])
+{
+    return color;
+}
+)MSL";
+
 // Bloom bright-pass + separable Gaussian blur. Reuses the fullscreen-triangle VS
 // (1:1 upright mapping, same convention as the tonemap pass). Mirrors the GL
 // kBloomBrightFS / kBloomBlurFS shaders.
@@ -1272,6 +1299,7 @@ void MetalRenderer::Shutdown()
 	DrainRetiredTextures();
 	if (m_tonemapPipeline)      { CFBridgingRelease(m_tonemapPipeline);      m_tonemapPipeline = nullptr; }
 	if (m_fxaaPipeline)         { CFBridgingRelease(m_fxaaPipeline);         m_fxaaPipeline = nullptr; }
+	if (m_uiPipeline)           { CFBridgingRelease(m_uiPipeline);           m_uiPipeline = nullptr; }
 	if (m_bloomBrightPipeline)  { CFBridgingRelease(m_bloomBrightPipeline);  m_bloomBrightPipeline = nullptr; }
 	if (m_blurPipeline)         { CFBridgingRelease(m_blurPipeline);         m_blurPipeline = nullptr; }
 	if (m_skyPipeline)          { CFBridgingRelease(m_skyPipeline);          m_skyPipeline = nullptr; }
@@ -1503,6 +1531,31 @@ void MetalRenderer::CreateScenePipeline()
 			throw std::runtime_error(std::string("MetalRenderer: FXAA pipeline creation failed: ")
 				+ (fxError ? [[fxError localizedDescription] UTF8String] : "unknown"));
 		m_fxaaPipeline = (void*)CFBridgingRetain(fxPso);
+
+		// ── UI pipeline (2D colored quads, LDR swapchain format, no depth) ─
+		NSError* uiError = nil;
+		id<MTLLibrary> uiLib = [device newLibraryWithSource:
+			[NSString stringWithUTF8String:kUIMSL] options:nil error:&uiError];
+		if (!uiLib)
+			throw std::runtime_error(std::string("MetalRenderer: UI shader compile failed: ")
+				+ (uiError ? [[uiError localizedDescription] UTF8String] : "unknown"));
+		MTLRenderPipelineDescriptor* uiDesc = [[MTLRenderPipelineDescriptor alloc] init];
+		uiDesc.vertexFunction   = [uiLib newFunctionWithName:@"uiVertex"];
+		uiDesc.fragmentFunction = [uiLib newFunctionWithName:@"uiFragment"];
+		uiDesc.colorAttachments[0].pixelFormat     = kSwapchainFormat;
+		uiDesc.colorAttachments[0].blendingEnabled = YES;
+		uiDesc.colorAttachments[0].rgbBlendOperation       = MTLBlendOperationAdd;
+		uiDesc.colorAttachments[0].alphaBlendOperation     = MTLBlendOperationAdd;
+		uiDesc.colorAttachments[0].sourceRGBBlendFactor    = MTLBlendFactorSourceAlpha;
+		uiDesc.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+		uiDesc.colorAttachments[0].sourceAlphaBlendFactor  = MTLBlendFactorOne;
+		uiDesc.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorZero;
+		uiDesc.depthAttachmentPixelFormat = kDepthFormat;
+		id<MTLRenderPipelineState> uiPso = [device newRenderPipelineStateWithDescriptor:uiDesc error:&uiError];
+		if (!uiPso)
+			throw std::runtime_error(std::string("MetalRenderer: UI pipeline creation failed: ")
+				+ (uiError ? [[uiError localizedDescription] UTF8String] : "unknown"));
+		m_uiPipeline = (void*)CFBridgingRetain(uiPso);
 
 		// ── Bloom pipelines (bright-pass + blur, into RGBA16F, no depth) ────
 		NSError* blError = nil;
@@ -2467,6 +2520,25 @@ void MetalRenderer::EncodeFxaa(void* renderEncoderPtr, int width, int height)
 	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
 }
 
+// 2D UI quads (solid color) into the bound render encoder's target.
+void MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height)
+{
+	if (!m_uiPipeline || m_renderWorld.uiObjects.empty()) return;
+	id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoderPtr;
+	[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_uiPipeline];
+	[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_noDepthState];
+	const simd::float2 vp = { (float)std::max(1, width), (float)std::max(1, height) };
+	[enc setVertexBytes:&vp length:sizeof(vp) atIndex:1];
+	for (const UIRenderObject& obj : m_renderWorld.uiObjects)
+	{
+		const simd::float4 rect  = { obj.position.x, obj.position.y, obj.size.x, obj.size.y };
+		const simd::float4 color = { obj.color.r, obj.color.g, obj.color.b, obj.color.a };
+		[enc setVertexBytes:&rect  length:sizeof(rect)  atIndex:0];
+		[enc setFragmentBytes:&color length:sizeof(color) atIndex:0];
+		[enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+	}
+}
+
 // ─── Frame encoding ───────────────────────────────────────────────────────────
 
 void MetalRenderer::EncodeSky(void* renderEncoder, const glm::mat4& invViewProj,
@@ -2532,6 +2604,8 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 	m_extractor.extract(*m_world, m_renderWorld,
 	                    static_cast<float>(width) / static_cast<float>(height),
 	                    &m_editorCamera);
+	m_extractor.extractUI(*m_world, static_cast<float>(width), static_cast<float>(height),
+	                      m_renderWorld);
 
 	const glm::mat4 viewProj =
 		m_renderWorld.camera.projection * m_renderWorld.camera.view;
@@ -2868,6 +2942,7 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 				id<MTLRenderCommandEncoder> fxEncoder =
 					[cmdBuf renderCommandEncoderWithDescriptor:fxPass];
 				EncodeFxaa((__bridge void*)fxEncoder, sceneW, sceneH);
+				EncodeUIPass((__bridge void*)fxEncoder, sceneW, sceneH);
 				[fxEncoder endEncoding];
 			}
 			else if (m_viewportColor)
@@ -2893,6 +2968,10 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			// Direct-to-window (game/no editor viewport): FXAA the tonemapped LDR → drawable.
 			if (isPrimary && !offscreen)
 				EncodeFxaa((__bridge void*)encoder, pw, ph);
+
+			// ── In-Game UI ──────────────────────────────────────────────────
+			if (isPrimary && !offscreen)
+				EncodeUIPass((__bridge void*)encoder, pw, ph);
 
 			// ── Overlay (ImGui) ─────────────────────────────────────────────
 			if (isPrimary && m_overlayCallback)

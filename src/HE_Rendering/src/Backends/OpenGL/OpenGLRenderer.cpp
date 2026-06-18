@@ -1155,6 +1155,37 @@ void main()
 }
 )GLSL";
 
+// ── In-Game UI (2D canvas) ──────────────────────────────────────────────────
+// Attribute-less: position is derived from gl_VertexID (0-3 for TRIANGLE_STRIP)
+// and the per-quad uniforms uRect (x,y,w,h pixels) + uViewport (vpW,vpH pixels).
+static const char* kUIVS = R"GLSL(
+#version 410 core
+uniform vec4 uRect;
+uniform vec2 uViewport;
+out vec2 vUV;
+void main()
+{
+    const vec2 c[4] = vec2[](vec2(0,0), vec2(1,0), vec2(0,1), vec2(1,1));
+    vec2 uv = c[gl_VertexID];
+    vec2 sp = uRect.xy + uv * uRect.zw;
+    vUV = uv;
+    gl_Position = vec4(sp.x / uViewport.x * 2.0 - 1.0,
+                       1.0 - sp.y / uViewport.y * 2.0,
+                       0.0, 1.0);
+}
+)GLSL";
+
+static const char* kUIFS = R"GLSL(
+#version 410 core
+in vec2 vUV;
+uniform vec4 uColor;
+out vec4 FragColor;
+void main()
+{
+    FragColor = uColor;
+}
+)GLSL";
+
 static GLuint CompileStage(GLenum stage, const char* src)
 {
 	GLuint shader = glCreateShader(stage);
@@ -1539,6 +1570,29 @@ void OpenGLRenderer::CreateTonemapPipeline()
 
 	// Core profile needs a bound VAO for glDrawArrays even with no attributes.
 	glGenVertexArrays(1, &m_fsVAO);
+
+	// ── 2D UI pipeline ──────────────────────────────────────────────────────
+	{
+		GLuint uvs = CompileStage(GL_VERTEX_SHADER,   kUIVS);
+		GLuint ufs = CompileStage(GL_FRAGMENT_SHADER, kUIFS);
+		m_uiProgram = glCreateProgram();
+		glAttachShader(m_uiProgram, uvs);
+		glAttachShader(m_uiProgram, ufs);
+		glLinkProgram(m_uiProgram);
+		glDeleteShader(uvs);
+		glDeleteShader(ufs);
+		GLint uok = 0;
+		glGetProgramiv(m_uiProgram, GL_LINK_STATUS, &uok);
+		if (!uok)
+		{
+			GLchar log[512];
+			glGetProgramInfoLog(m_uiProgram, sizeof(log), nullptr, log);
+			throw std::runtime_error(std::string("OpenGLRenderer: UI program link failed: ") + log);
+		}
+		m_uUIRect     = glGetUniformLocation(m_uiProgram, "uRect");
+		m_uUIViewport = glGetUniformLocation(m_uiProgram, "uViewport");
+		m_uUIColor    = glGetUniformLocation(m_uiProgram, "uColor");
+	}
 }
 
 // LDR intermediate the tonemap writes to and FXAA reads from. RGBA8, sized to the
@@ -1944,6 +1998,29 @@ unsigned int OpenGLRenderer::RenderSSAO(const CommandBuffer& cmds, int pw, int p
 
 	glActiveTexture(GL_TEXTURE0);
 	return m_ssaoBlurTex;
+}
+
+void OpenGLRenderer::RenderUIPass(int pw, int ph)
+{
+	if (!m_uiProgram || m_renderWorld.uiObjects.empty()) return;
+
+	glDisable(GL_DEPTH_TEST);
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+	glUseProgram(m_uiProgram);
+	glBindVertexArray(m_fsVAO);
+	glUniform2f(m_uUIViewport, static_cast<float>(pw), static_cast<float>(ph));
+
+	for (const UIRenderObject& obj : m_renderWorld.uiObjects)
+	{
+		glUniform4f(m_uUIRect,  obj.position.x, obj.position.y, obj.size.x, obj.size.y);
+		glUniform4f(m_uUIColor, obj.color.r, obj.color.g, obj.color.b, obj.color.a);
+		glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+	}
+
+	glDisable(GL_BLEND);
+	glEnable(GL_DEPTH_TEST);
 }
 
 void OpenGLRenderer::EnsureHDRTarget(int width, int height)
@@ -2398,6 +2475,7 @@ void OpenGLRenderer::Shutdown()
 	if (m_skyProgram)   { glDeleteProgram(m_skyProgram);       m_skyProgram = 0; }
 	if (m_tonemapProgram) { glDeleteProgram(m_tonemapProgram); m_tonemapProgram = 0; }
 	if (m_fxaaProgram)    { glDeleteProgram(m_fxaaProgram);    m_fxaaProgram = 0; }
+	if (m_uiProgram)      { glDeleteProgram(m_uiProgram);      m_uiProgram = 0; }
 	if (m_bloomBrightProgram) { glDeleteProgram(m_bloomBrightProgram); m_bloomBrightProgram = 0; }
 	if (m_blurProgram)    { glDeleteProgram(m_blurProgram);    m_blurProgram = 0; }
 	if (m_fsVAO)          { glDeleteVertexArrays(1, &m_fsVAO);  m_fsVAO = 0; }
@@ -2563,6 +2641,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	m_extractor.extract(*m_world, m_renderWorld,
 	                    static_cast<float>(pw) / static_cast<float>(ph),
 	                    &m_editorCamera);
+	m_extractor.extractUI(*m_world, static_cast<float>(pw), static_cast<float>(ph),
+	                      m_renderWorld);
 	// NB: do NOT early-out when there are no (visible) objects — the skybox is the
 	// background and must still be drawn, or the viewport falls back to a stale
 	// gray clear when the camera looks away from the scene.
@@ -2674,6 +2754,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glUniform1i(m_uFxaaScene, 0);
 			glUniform2f(m_uFxaaRcpFrame, 1.0f / float(pw), 1.0f / float(ph));
 			glDrawArrays(GL_TRIANGLES, 0, 3);
+
+			RenderUIPass(pw, ph);
 
 			glEnable(GL_DEPTH_TEST);
 			return;

@@ -182,6 +182,10 @@ private:
 	void  DestroyLdrTarget();
 	void  EncodeFxaa(void* renderEncoder, int width, int height); // FXAA of m_ldrColor
 
+	// ── In-Game UI (2D canvas elements, drawn after FXAA) ───────────────────
+	void* m_uiPipeline = nullptr; // id<MTLRenderPipelineState>
+	void  EncodeUIPass(void* renderEncoder, int width, int height);
+
 	// ── Bloom (bright-pass + separable Gaussian blur on the HDR target) ──────
 	// Mirrors the GL backend: highlights above a soft-knee threshold are blurred
 	// into a half-res target and added back during tonemap.

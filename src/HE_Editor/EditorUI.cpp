@@ -4204,6 +4204,83 @@ void EditorUI::RenderInspector(AppContext& ctx)
 		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<ParticleSystemComponent>(entity); }
 	}
 
+	// ── UI Canvas ───────────────────────────────────────────────────────────
+	if (auto* cv = registry.try_get<UICanvasComponent>(entity))
+	{
+		if (componentHeader("UI Canvas", true, removed))
+		{
+			ImGui::DragFloat("Width##cv",  &cv->width,  1.0f, 1.0f, 7680.0f); trackEdit();
+			ImGui::DragFloat("Height##cv", &cv->height, 1.0f, 1.0f, 4320.0f); trackEdit();
+			int rm = static_cast<int>(cv->renderMode);
+			if (ImGui::Combo("Render Mode##cv", &rm, "Screen Space\0World Space\0")) {
+				cv->renderMode = static_cast<UIRenderMode>(rm); trackEdit();
+			}
+			ImGui::Checkbox("Active##cv", &cv->active); trackEdit();
+		}
+		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<UICanvasComponent>(entity); }
+	}
+
+	// ── UI Element ──────────────────────────────────────────────────────────
+	if (auto* el = registry.try_get<UIElementComponent>(entity))
+	{
+		if (componentHeader("UI Element", true, removed))
+		{
+			ImGui::DragFloat2("Position##el", glm::value_ptr(el->position), 1.0f); trackEdit();
+			ImGui::DragFloat2("Size##el",     glm::value_ptr(el->size),     1.0f, 0.0f, 10000.0f); trackEdit();
+			ImGui::DragFloat2("Pivot##el",    glm::value_ptr(el->pivot),    0.01f, 0.0f, 1.0f); trackEdit();
+			ImGui::DragFloat("Rotation##el",  &el->rotation, 0.5f); trackEdit();
+			int anch = static_cast<int>(el->anchor);
+			const char* anchNames = "Top Left\0Top Center\0Top Right\0"
+			                        "Mid Left\0Mid Center\0Mid Right\0"
+			                        "Bot Left\0Bot Center\0Bot Right\0";
+			if (ImGui::Combo("Anchor##el", &anch, anchNames)) {
+				el->anchor = static_cast<UIAnchor>(anch); trackEdit();
+			}
+			ImGui::DragInt("Layer##el",  &el->layer, 1); trackEdit();
+			ImGui::Checkbox("Active##el", &el->active); trackEdit();
+		}
+		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<UIElementComponent>(entity); }
+	}
+
+	// ── UI Text ─────────────────────────────────────────────────────────────
+	if (auto* txt = registry.try_get<UITextComponent>(entity))
+	{
+		if (componentHeader("UI Text", true, removed))
+		{
+			char buf[256];
+			strncpy(buf, txt->text.c_str(), sizeof(buf) - 1); buf[sizeof(buf)-1] = '\0';
+			if (ImGui::InputText("Text##txt", buf, sizeof(buf))) { txt->text = buf; trackEdit(); }
+			ImGui::DragFloat("Font Size##txt", &txt->fontSize, 0.5f, 4.0f, 256.0f); trackEdit();
+			ImGui::ColorEdit4("Color##txt",    glm::value_ptr(txt->color)); trackEdit();
+		}
+		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<UITextComponent>(entity); }
+	}
+
+	// ── UI Image ─────────────────────────────────────────────────────────────
+	if (auto* img = registry.try_get<UIImageComponent>(entity))
+	{
+		if (componentHeader("UI Image", true, removed))
+		{
+			ImGui::ColorEdit4("Tint##img", glm::value_ptr(img->tint)); trackEdit();
+		}
+		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<UIImageComponent>(entity); }
+	}
+
+	// ── UI Button ───────────────────────────────────────────────────────────
+	if (auto* btn = registry.try_get<UIButtonComponent>(entity))
+	{
+		if (componentHeader("UI Button", true, removed))
+		{
+			ImGui::ColorEdit4("Normal##btn",  glm::value_ptr(btn->normalColor)); trackEdit();
+			ImGui::ColorEdit4("Hovered##btn", glm::value_ptr(btn->hoveredColor)); trackEdit();
+			ImGui::ColorEdit4("Pressed##btn", glm::value_ptr(btn->pressedColor)); trackEdit();
+			char buf[128];
+			strncpy(buf, btn->onClickFunction.c_str(), sizeof(buf)-1); buf[sizeof(buf)-1] = '\0';
+			if (ImGui::InputText("OnClick##btn", buf, sizeof(buf))) { btn->onClickFunction = buf; trackEdit(); }
+		}
+		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<UIButtonComponent>(entity); }
+	}
+
 	// ── Add Component ───────────────────────────────────────────────────────
 	// Not for the World root — it only carries the scene's Environment, no
 	// arbitrary components (and the built-in sun/moon are managed automatically).
@@ -4248,6 +4325,11 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			addItem("Audio Source",    AudioSourceComponent{});
 			addItem("Audio Listener",  AudioListenerComponent{});
 			addItem("Particle System", ParticleSystemComponent{});
+			addItem("UI Canvas",       UICanvasComponent{});
+			addItem("UI Element",      UIElementComponent{});
+			addItem("UI Text",         UITextComponent{});
+			addItem("UI Image",        UIImageComponent{});
+			addItem("UI Button",       UIButtonComponent{});
 			ImGui::EndPopup();
 		}
 	}

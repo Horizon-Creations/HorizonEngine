@@ -11,6 +11,7 @@
 #include <HorizonScene/Components/LightComponent.h>
 #include <HorizonScene/Components/EnvironmentLightComponent.h>
 #include <HorizonScene/Components/ParticleSystemComponent.h>
+#include <HorizonScene/UISystem.h>
 #include <ContentManager/DefaultAssets.h>
 #include <JobSystem/JobSystem.h>
 #include <glm/gtc/quaternion.hpp>
@@ -361,4 +362,11 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 		out.shadow.direction = dir;
 		out.shadow.enabled   = true;
 	}
+}
+
+void RenderExtractor::extractUI(HorizonWorld& world, float vpWidth, float vpHeight,
+                                RenderWorld& out)
+{
+	out.uiObjects.clear();
+	UISystem::extract(world, vpWidth, vpHeight, out.uiObjects);
 }
