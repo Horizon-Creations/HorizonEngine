@@ -1,6 +1,7 @@
 #include "EditorUI.h"
 #include "EditorApplication.h"
 #include <HorizonScene/HorizonScene.h>
+#include <HorizonScene/NavigationSystem.h>
 #include <Scripting/ScriptEngine.h>
 #include <ContentManager/HAsset.h>
 #include <ContentManager/ContentManager.h>
@@ -3752,6 +3753,53 @@ void EditorUI::RenderInspector(AppContext& ctx)
 		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<PropertyAnimatorComponent>(entity); }
 	}
 
+	// ── NavMesh ─────────────────────────────────────────────────────────────
+	if (auto* nmc = registry.try_get<NavMeshComponent>(entity))
+	{
+		if (componentHeader("Nav Mesh", true, removed))
+		{
+			ImGui::DragFloat("Cell Size##nm",       &nmc->config.cellSize,      0.01f, 0.05f, 2.0f,   "%.2f"); trackEdit();
+			ImGui::DragFloat("Cell Height##nm",     &nmc->config.cellHeight,    0.01f, 0.05f, 2.0f,   "%.2f"); trackEdit();
+			ImGui::DragFloat("Walk Height##nm",     &nmc->config.walkableHeight,0.1f,  0.5f,  5.0f,   "%.2f"); trackEdit();
+			ImGui::DragFloat("Walk Climb##nm",      &nmc->config.walkableClimb, 0.1f,  0.0f,  2.0f,   "%.2f"); trackEdit();
+			ImGui::DragFloat("Walk Radius##nm",     &nmc->config.walkableRadius,0.05f, 0.0f,  2.0f,   "%.2f"); trackEdit();
+			ImGui::DragFloat("Max Slope##nm",       &nmc->config.maxSlope,      1.0f,  0.0f,  90.0f,  "%.1f°"); trackEdit();
+			ImGui::Separator();
+			ImGui::Text("Geometry: %zu verts  %zu tris",
+				nmc->geometry.verts.size() / 3,
+				nmc->geometry.tris.size()  / 3);
+			const bool baked = (bool)nmc->navMesh;
+			ImGui::Text("NavMesh: %s", baked ? "baked" : "not baked");
+			if (ImGui::Button("Bake##nm"))
+			{
+				if (ctx.undoSys) ctx.undoSys->snapshotNow();
+				NavigationSystem::bake(*nmc);
+			}
+		}
+		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<NavMeshComponent>(entity); }
+	}
+
+	// ── NavAgent ────────────────────────────────────────────────────────────
+	if (auto* na = registry.try_get<NavAgentComponent>(entity))
+	{
+		if (componentHeader("Nav Agent", true, removed))
+		{
+			ImGui::DragFloat3("Target##na",     glm::value_ptr(na->targetPos), 0.1f); trackEdit();
+			ImGui::DragFloat("Speed##na",       &na->speed,        0.1f, 0.0f, 20.0f, "%.1f m/s"); trackEdit();
+			ImGui::DragFloat("Stop Dist##na",   &na->stoppingDist, 0.01f,0.0f, 2.0f,  "%.2f m"); trackEdit();
+			ImGui::Separator();
+			ImGui::Text("Path: %zu pts  idx=%zu  %s",
+				na->path.size(), na->pathIdx,
+				na->moving ? "MOVING" : "stopped");
+			if (ImGui::Button("Go##na"))
+			{ na->hasPath = false; na->moving = true; }
+			ImGui::SameLine();
+			if (ImGui::Button("Stop##na"))
+			{ na->moving = false; na->hasPath = false; }
+		}
+		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<NavAgentComponent>(entity); }
+	}
+
 	// ── Material ────────────────────────────────────────────────────────────
 	if (auto* m = registry.try_get<MaterialComponent>(entity))
 	{
@@ -4174,6 +4222,8 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			addItem("Animator Blend",          AnimatorBlendComponent{});
 			addItem("Animator State Machine",  AnimatorStateMachineComponent{});
 			addItem("Property Animator",       PropertyAnimatorComponent{});
+			addItem("Nav Mesh",                NavMeshComponent{});
+			addItem("Nav Agent",               NavAgentComponent{});
 			addItem("Material",     MaterialComponent{});
 			addItem("Camera",       CameraComponent{});
 			addItem("Light",        LightComponent{});
