@@ -353,13 +353,13 @@ TEST_CASE("ContentManager default grid texture has correct dimensions and grid p
 	REQUIRE_FALSE(id == HE::UUID{});
 	auto* tex = cm.getTexture(id);
 	REQUIRE(tex != nullptr);
-	CHECK(tex->width    == 64);
-	CHECK(tex->height   == 64);
+	CHECK(tex->width    == 128);
+	CHECK(tex->height   == 128);
 	CHECK(tex->channels == 4);
-	// pixel (0,0) must be a line pixel (dark)
-	CHECK(tex->data[0] == 80);
-	// pixel (1,1) must be background (not a line)
-	CHECK(tex->data[(1 * 64 + 1) * 4] == 185);
+	// pixel (0,0) is a corner accent dot (lighter than the line: R=148)
+	CHECK(tex->data[0] == 148);
+	// pixel (2,2) is in the background cell (light cool-grey R=228)
+	CHECK(tex->data[(2 * 128 + 2) * 4] == 228);
 }
 
 TEST_CASE("ContentManager default terrain material references grid texture")
