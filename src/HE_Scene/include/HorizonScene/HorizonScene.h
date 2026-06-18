@@ -29,6 +29,12 @@
 #include "Components/AudioSourceComponent.h"
 #include "Components/AudioListenerComponent.h"
 #include "Components/ParticleSystemComponent.h"
+#include "Components/UICanvasComponent.h"
+#include "Components/UIElementComponent.h"
+#include "Components/UITextComponent.h"
+#include "Components/UIImageComponent.h"
+#include "Components/UIButtonComponent.h"
+#include "UISystem.h"
 #include "TerrainMeshGenerator.h"
 #include "TerrainSystem.h"
 

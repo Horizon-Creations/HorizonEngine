@@ -1,5 +1,6 @@
 #pragma once
 #include "RenderObject.h"
+#include <Renderer/UIRenderObject.h>
 #include <Math/Math.h>
 #include <vector>
 #include <cstdint>
@@ -36,6 +37,7 @@ public:
     std::vector<RenderObject>        objects;
     std::vector<SkinnedRenderObject> skinnedObjects;
     std::vector<LightData>           lights;
+    std::vector<UIRenderObject>      uiObjects;
     CameraData                camera;
     ShadowData                shadow;
 
