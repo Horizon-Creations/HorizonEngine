@@ -8,6 +8,7 @@ add_library(HorizonScene SHARED
     src/AnimationEval.cpp
     src/AnimationSystem.cpp
     src/AnimationBlendSystem.cpp
+    src/AnimationStateMachineSystem.cpp
     src/ScriptContext.cpp
     src/AudioEngine.cpp
     src/PhysicsWorld.cpp
