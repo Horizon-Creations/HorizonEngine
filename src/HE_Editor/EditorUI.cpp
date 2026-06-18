@@ -284,12 +284,21 @@ static void DrawEngineSettings(AppContext& ctx, SettingsMode mode)
 
 static void DrawPreferencesWindow(AppContext& ctx, bool& open)
 {
-	if (!open) return;
+	// `open` is a one-shot request raised by the Edit menu / Ctrl+, shortcut.
+	// We turn it into a *modal* popup rather than a plain window: a modal renders
+	// above everything and ignores clicks outside its bounds, so it can no longer
+	// be dismissed by clicking next to it nor slip behind the fullscreen dockspace
+	// and become unreachable. Escape, the X, or the Close button dismiss it.
+	if (open)
+	{
+		ImGui::OpenPopup("Preferences");
+		open = false; // consume the request; the popup now owns its lifetime
+	}
 
-	ImGui::SetNextWindowSize(ImVec2(440.0f, 0.0f), ImGuiCond_FirstUseEver);
+	ImGui::SetNextWindowSize(ImVec2(440.0f, 0.0f), ImGuiCond_Appearing);
 	ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(),
-	                        ImGuiCond_FirstUseEver, ImVec2(0.5f, 0.5f));
-	if (ImGui::Begin("Preferences", &open, ImGuiWindowFlags_NoCollapse))
+	                        ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+	if (ImGui::BeginPopupModal("Preferences", nullptr, ImGuiWindowFlags_NoCollapse))
 	{
 		EditorConfig& cfg = ctx.editorConfig;
 
@@ -313,12 +322,13 @@ static void DrawPreferencesWindow(AppContext& ctx, bool& open)
 			cfg.SSAOEnabled       = true;
 			cfg.SSAORadius        = 0.5f;
 			cfg.SSAOIntensity     = 1.0f;
+			cfg.SSAOMethod        = 0;
 			if (ctx.editorCamera) ctx.editorCamera->setFlySpeed(cfg.EditorCameraSpeed);
 		}
 		ImGui::SameLine();
-		if (ImGui::Button("Close")) open = false;
+		if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
+		ImGui::EndPopup();
 	}
-	ImGui::End();
 }
 #endif // HE_IMGUI_ENABLED
 
