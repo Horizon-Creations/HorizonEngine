@@ -236,7 +236,7 @@ Macht aus „Renderer + Systeme" eine Engine, in der man ein Spiel *baut*.
 | 5.3 | **Partikelsystem** (CPU-Sim zuerst, instanziertes Rendering) | 3.8 | GPU-Sim ist Kür |
 | 5.4 | **In-Game-UI-Runtime** (Canvas, Text via MSDF/stb_truetype, Buttons, Anchoring) | Render-Pfad ✅ | nicht ImGui — das ist Editor-only |
 | 5.5 | **Navigation**: Recast/Detour-NavMesh-Baking + Agenten | 4a.1 | |
-| 5.6 | **Szenen-Streaming/Additive-Load** (mehrere Szenen gleichzeitig) | 2.2 | |
+| 5.6 | **Szenen-Streaming/Additive-Load** (mehrere Szenen gleichzeitig) | 2.2 | ✅ Forts. 51 |
 | 5.7 | **Event-/Messaging-System** für Gameplay-Code | 4b.2 | ✅ Forts. 33 — EventBus (typed publish/subscribe, RAII Subscription, re-entrancy-safe snapshot), 15 Tests |
 
 ---
@@ -1894,3 +1894,21 @@ Lifetime-sicher mit der bestehenden `SlotMap`/`m_handleToUUID`-Buchführung inte
 - Material-Channels schreiben direkt auf den geteilten `MaterialAsset` via `getMaterialMutable` (betrifft ALLE Entities mit demselben Material → für Per-Entity-Varianz bräuchte man Material-Instanz-Overrides = nächster Schritt).
 - PropTarget ist ein flaches uint8_t-Enum (kein Reflektionssystem nötig) — einfach erweiterbar, alle Switch-Arme explizit.
 - **321 Tests grün** (313→321). Commit `bef034d`.
+
+### Forts. 51 — Additive Scene Loading (5.6)
+
+**Ziel:** Mehrere .hescene-Dateien gleichzeitig in derselben World halten — ohne die existierenden Entities zu löschen.
+
+**Neue / geänderte Dateien:**
+
+- **`src/HE_Scene/include/HorizonScene/SceneSerializer.h`**: `loadAdditive(world, path, format)` deklariert.
+- **`src/HE_Scene/src/SceneSerializer.cpp`**: `applyAdditiveJson` (anon-namespace): erstellt ALLE Entities aus der Quelldatei frisch (keine Root-Remapping) — die Quelle-Root wird durch `createEntity()` automatisch als Child von `world.rootEntity()` verlinkt; Pass 2 rekonstruiert die interne Hierarchie; `ensureEnvironmentLights()` + `markHierarchyDirty()` am Ende. `SceneSerializer::loadAdditive` delegiert an `applyAdditiveJson`.
+- **`src/HE_Editor/EditorApplication.h`**: `openSceneAdditive(path)` deklariert; `EditorRenderContext.openSceneAdditive` Callback ergänzt.
+- **`src/HE_Editor/EditorApplication.cpp`**: `openSceneAdditive` implementiert (kein `clear()`, kein Play-Mode-Reset, kein History-Reset — nur merge + snapshot + markDirty).
+- **`src/HE_Editor/EditorUI.cpp`**: `PendingFileOp::AddSceneAdditive`; `triggerAddSceneAdditive` Lambda; „Add Scene Additive..."-Menüeintrag im File-Menü; Handler im pendingFileReady-Block.
+- **`tests/test_scene_serializer.cpp`**: 2 neue Tests (preserves-existing-entities, does-not-clear-world).
+
+**Architektur-Entscheidungen:**
+- Die Quelle-Root (World-Node der geladenen Datei) wird als neues Child des bestehenden `world.rootEntity()` eingefügt — nicht auf die existierende Root gemappt. Das erhält den Namen und die Komponenten der bestehenden Root.
+- `openSceneAdditive` ruft kein `clearHistory()` — der merge ist rückgängig-machbar via Undo (snapshotNow).
+- **323 Tests grün** (321→323). Commit `d9a7224`.
