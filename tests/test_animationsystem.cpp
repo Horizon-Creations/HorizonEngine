@@ -8,6 +8,8 @@
 #include <HorizonScene/Components/AnimatorBlendComponent.h>
 #include <HorizonScene/AnimationSystem.h>
 #include <HorizonScene/AnimationBlendSystem.h>
+#include <HorizonScene/Components/AnimatorStateMachineComponent.h>
+#include <HorizonScene/AnimationStateMachineSystem.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -555,4 +557,196 @@ TEST_CASE("AnimationBlendSystem skips when playing=false")
     AnimationBlendSystem::update(world, cm, 0.5f);
     const auto& updatedAb = world.registry().get<AnimatorBlendComponent>(e);
     CHECK(updatedAb.playbackTime == doctest::Approx(0.3f));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  AnimatorStateMachineComponent: default values
+// ─────────────────────────────────────────────────────────────────────────────
+TEST_CASE("AnimatorStateMachineComponent defaults")
+{
+    AnimatorStateMachineComponent sm;
+    CHECK(sm.states.empty());
+    CHECK(sm.transitions.empty());
+    CHECK(sm.params.empty());
+    CHECK(sm.currentStateName.empty());
+    CHECK(sm.clipTime      == doctest::Approx(0.0f));
+    CHECK(sm.playbackSpeed == doctest::Approx(1.0f));
+    CHECK(!sm.inTransition);
+    CHECK(sm.transitionElapsed  == doctest::Approx(0.0f));
+    CHECK(sm.transitionDuration == doctest::Approx(0.2f));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  AnimationStateMachineSystem: integration helpers
+// ─────────────────────────────────────────────────────────────────────────────
+static AnimatorStateMachineComponent makeSimpleSM(
+    HE::UUID clipIdA, HE::UUID clipIdB,
+    float transitionDuration = 0.2f)
+{
+    AnimatorStateMachineComponent sm;
+    sm.states.push_back({"Idle",  clipIdA, true});
+    sm.states.push_back({"Walk",  clipIdB, true});
+    sm.transitions.push_back({"Idle", "Walk", "speed",
+                               TransitionOp::Greater, 0.5f, transitionDuration});
+    sm.params["speed"]     = 0.0f;
+    sm.currentStateName    = "Idle";
+    sm.playbackSpeed       = 1.0f;
+    return sm;
+}
+
+TEST_CASE("AnimationStateMachineSystem plays current state clip")
+{
+    ContentManager cm;
+    HorizonWorld   world;
+
+    const HE::UUID meshId  = HE::UUID::generate();
+    cm.registerSkeletalMesh(makeOneBoneSkeletalMesh(meshId));
+    const HE::UUID clipAId = cm.registerAnimationClip(makeConstantClip({3.0f, 0.0f, 0.0f}));
+    const HE::UUID clipBId = cm.registerAnimationClip(makeConstantClip({0.0f, 5.0f, 0.0f}));
+
+    entt::entity e = world.createEntity();
+    world.addComponent(e, TransformComponent{ .position = {}, .rotation = {}, .scale = glm::vec3(1.0f) });
+    SkeletalMeshComponent smc; smc.meshAssetId = meshId;
+    world.addComponent(e, smc);
+    world.addComponent(e, makeSimpleSM(clipAId, clipBId));
+
+    AnimationStateMachineSystem::update(world, cm, 0.0f);
+
+    const auto& boneMatrices = world.registry().get<SkeletalMeshComponent>(e).boneMatrices;
+    REQUIRE(!boneMatrices.empty());
+    // Bone 0 local translation should be X=3 (clip A / Idle state)
+    CHECK(boneMatrices[0][3][0] == doctest::Approx(3.0f).epsilon(0.01f));
+    CHECK(boneMatrices[0][3][1] == doctest::Approx(0.0f).epsilon(0.01f));
+}
+
+TEST_CASE("AnimationStateMachineSystem transition fires when param exceeds threshold")
+{
+    ContentManager cm;
+    HorizonWorld   world;
+
+    const HE::UUID meshId  = HE::UUID::generate();
+    cm.registerSkeletalMesh(makeOneBoneSkeletalMesh(meshId));
+    const HE::UUID clipAId = cm.registerAnimationClip(makeConstantClip({3.0f, 0.0f, 0.0f}));
+    const HE::UUID clipBId = cm.registerAnimationClip(makeConstantClip({0.0f, 5.0f, 0.0f}));
+
+    entt::entity e = world.createEntity();
+    world.addComponent(e, TransformComponent{ .position = {}, .rotation = {}, .scale = glm::vec3(1.0f) });
+    SkeletalMeshComponent smc; smc.meshAssetId = meshId;
+    world.addComponent(e, smc);
+    auto sm = makeSimpleSM(clipAId, clipBId, 0.4f);
+    sm.params["speed"] = 1.0f; // exceeds 0.5 threshold → transition should fire
+    world.addComponent(e, sm);
+
+    AnimationStateMachineSystem::update(world, cm, 0.0f);
+
+    const auto& updatedSm = world.registry().get<AnimatorStateMachineComponent>(e);
+    CHECK(updatedSm.inTransition);
+    CHECK(updatedSm.transitionTarget == "Walk");
+}
+
+TEST_CASE("AnimationStateMachineSystem does NOT transition when param below threshold")
+{
+    ContentManager cm;
+    HorizonWorld   world;
+
+    const HE::UUID meshId  = HE::UUID::generate();
+    cm.registerSkeletalMesh(makeOneBoneSkeletalMesh(meshId));
+    const HE::UUID clipAId = cm.registerAnimationClip(makeConstantClip({3.0f, 0.0f, 0.0f}));
+    const HE::UUID clipBId = cm.registerAnimationClip(makeConstantClip({0.0f, 5.0f, 0.0f}));
+
+    entt::entity e = world.createEntity();
+    world.addComponent(e, TransformComponent{ .position = {}, .rotation = {}, .scale = glm::vec3(1.0f) });
+    SkeletalMeshComponent smc; smc.meshAssetId = meshId;
+    world.addComponent(e, smc);
+    auto sm = makeSimpleSM(clipAId, clipBId);
+    sm.params["speed"] = 0.2f; // below threshold
+    world.addComponent(e, sm);
+
+    AnimationStateMachineSystem::update(world, cm, 0.0f);
+
+    const auto& updatedSm = world.registry().get<AnimatorStateMachineComponent>(e);
+    CHECK(!updatedSm.inTransition);
+    CHECK(updatedSm.currentStateName == "Idle");
+}
+
+TEST_CASE("AnimationStateMachineSystem crossfade midpoint blends 50/50")
+{
+    ContentManager cm;
+    HorizonWorld   world;
+
+    const HE::UUID meshId  = HE::UUID::generate();
+    cm.registerSkeletalMesh(makeOneBoneSkeletalMesh(meshId));
+    const HE::UUID clipAId = cm.registerAnimationClip(makeConstantClip({2.0f, 0.0f, 0.0f}));
+    const HE::UUID clipBId = cm.registerAnimationClip(makeConstantClip({0.0f, 4.0f, 0.0f}));
+
+    entt::entity e = world.createEntity();
+    world.addComponent(e, TransformComponent{ .position = {}, .rotation = {}, .scale = glm::vec3(1.0f) });
+    SkeletalMeshComponent smc; smc.meshAssetId = meshId;
+    world.addComponent(e, smc);
+    auto sm = makeSimpleSM(clipAId, clipBId, 0.4f);
+    sm.params["speed"]     = 1.0f;
+    sm.inTransition        = true;
+    sm.transitionTarget    = "Walk";
+    sm.transitionElapsed   = 0.2f; // halfway through 0.4s crossfade → alpha = 0.5
+    sm.transitionDuration  = 0.4f;
+    world.addComponent(e, sm);
+
+    AnimationStateMachineSystem::update(world, cm, 0.0f);
+
+    const auto& boneMatrices = world.registry().get<SkeletalMeshComponent>(e).boneMatrices;
+    REQUIRE(!boneMatrices.empty());
+    CHECK(boneMatrices[0][3][0] == doctest::Approx(1.0f).epsilon(0.02f)); // X: 2*0.5
+    CHECK(boneMatrices[0][3][1] == doctest::Approx(2.0f).epsilon(0.02f)); // Y: 4*0.5
+}
+
+TEST_CASE("AnimationStateMachineSystem completes transition after full duration")
+{
+    ContentManager cm;
+    HorizonWorld   world;
+
+    const HE::UUID meshId  = HE::UUID::generate();
+    cm.registerSkeletalMesh(makeOneBoneSkeletalMesh(meshId));
+    const HE::UUID clipAId = cm.registerAnimationClip(makeConstantClip({2.0f, 0.0f, 0.0f}));
+    const HE::UUID clipBId = cm.registerAnimationClip(makeConstantClip({0.0f, 4.0f, 0.0f}));
+
+    entt::entity e = world.createEntity();
+    world.addComponent(e, TransformComponent{ .position = {}, .rotation = {}, .scale = glm::vec3(1.0f) });
+    SkeletalMeshComponent smc; smc.meshAssetId = meshId;
+    world.addComponent(e, smc);
+    auto sm = makeSimpleSM(clipAId, clipBId, 0.2f);
+    sm.params["speed"]    = 1.0f;
+    sm.inTransition       = true;
+    sm.transitionTarget   = "Walk";
+    sm.transitionElapsed  = 0.19f;
+    sm.transitionDuration = 0.2f;
+    world.addComponent(e, sm);
+
+    // One tick of dt=0.05 → transitionElapsed becomes 0.24 >= 0.2 → complete
+    AnimationStateMachineSystem::update(world, cm, 0.05f);
+
+    const auto& updatedSm = world.registry().get<AnimatorStateMachineComponent>(e);
+    CHECK(!updatedSm.inTransition);
+    CHECK(updatedSm.currentStateName == "Walk");
+}
+
+TEST_CASE("AnimationStateMachineSystem advances clipTime")
+{
+    ContentManager cm;
+    HorizonWorld   world;
+
+    const HE::UUID meshId  = HE::UUID::generate();
+    cm.registerSkeletalMesh(makeOneBoneSkeletalMesh(meshId));
+    const HE::UUID clipAId = cm.registerAnimationClip(makeConstantClip({1.0f, 0.0f, 0.0f}, 2.0f));
+    const HE::UUID clipBId = cm.registerAnimationClip(makeConstantClip({0.0f, 1.0f, 0.0f}, 2.0f));
+
+    entt::entity e = world.createEntity();
+    world.addComponent(e, TransformComponent{ .position = {}, .rotation = {}, .scale = glm::vec3(1.0f) });
+    SkeletalMeshComponent smc; smc.meshAssetId = meshId;
+    world.addComponent(e, smc);
+    world.addComponent(e, makeSimpleSM(clipAId, clipBId));
+
+    AnimationStateMachineSystem::update(world, cm, 0.3f);
+
+    const auto& updatedSm = world.registry().get<AnimatorStateMachineComponent>(e);
+    CHECK(updatedSm.clipTime == doctest::Approx(0.3f));
 }
