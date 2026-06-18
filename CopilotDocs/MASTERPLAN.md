@@ -246,11 +246,11 @@ Macht aus „Renderer + Systeme" eine Engine, in der man ein Spiel *baut*.
 
 | # | Aufgabe | Hängt ab von | Details |
 |---|---|---|---|
-| 6.1 | **hpak-Packaging**: HpakWriter + KeyDerivation implementieren, asset_compiler → Packer-Kette, GameApplication lädt aus .hpak | 1.4 | SerializeFormat::Binary-Pfad |
+| 6.1 | **hpak-Packaging**: HpakWriter + KeyDerivation implementieren, asset_compiler → Packer-Kette, GameApplication lädt aus .hpak | 1.4 | ✅ Forts. 55 — HpakWriter/HpakReader in HorizonCore; .hpak-Format (magic+TOC+Datenblöcke, 36B/Entry); KeyDerivation PBKDF2-HMAC-SHA256 (standalone, kein mbedtls); optionale XOR-Verschlüsselung; HAsset::toBytes/openData; ContentManager::loadPak+loadAssetFromMemory; hpak_packer-CLI (--secret); LZ4 placeholder (kFlagCompressed defined, nicht verdrahtet); 12 neue Tests |
 | 6.2 | **Vulkan-Backend auf Parität** (Draw-Pfad, danach D3D12; D3D11 ggf. streichen) | 3.2, 3.4 | Linux-Support hängt hieran |
 | 6.3 | **„Build Game"-Pipeline im Editor**: Standalone-Export (Executable + .hpak) pro Plattform | 6.1 | |
-| 6.4 | **Async-Asset-Streaming** (Lade-Jobs, Platzhalter-Assets, Unloading via Ref\<T\>) | 0.3, 0.4 | |
-| 6.5 | **Crash-Reporting scharf schalten** (CrashHandler existiert), Logging in Datei | — | |
+| 6.4 | **Async-Asset-Streaming** (Lade-Jobs, Platzhalter-Assets, Unloading via Ref\<T\>) | 0.3, 0.4 | ✅ Forts. 56 — ContentManager::loadAssetAsync/pollAsyncResults/isAsyncPending; I/O auf globalPool (ThreadPool), parse+SlotMap-Registration immer auf Main-Thread; Duplikate coalesced; parseAndRegisterAsset als shared helper (sync+async); Application.cpp auf setContentRoot() umgestellt; 9 neue Tests |
+| 6.5 | **Crash-Reporting scharf schalten** (CrashHandler existiert), Logging in Datei | — | ✅ Forts. 56 — SA_SIGINFO-Handler für SIGSEGV/SIGABRT/SIGILL/SIGFPE/SIGBUS; schreibt datierte .crash-Datei (Zeitstempel + Signal + backtrace via execinfo) in konfigurierbares Verzeichnis (Default: tmp); re-raised mit SIG_DFL für OS-Core-Dump; Windows-Stub (SEH TODO); 2 neue Tests |
 | 6.6 | **Linux-Window/Input-Pfad** testen + CI-Leg | 0.2, 6.2 | |
 | 6.7 | **Doku**: Getting-Started, Script-API-Referenz | 4b.2 | spätestens wenn jemand Zweites die Engine benutzt |
 
