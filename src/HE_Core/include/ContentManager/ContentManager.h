@@ -37,6 +37,7 @@ public:
 	const ShaderAsset*         getShader(HE::UUID id) const;
 	const PrefabAsset*         getPrefab(HE::UUID id) const;
 	const AnimationClipAsset*  getAnimationClip(HE::UUID id) const;
+	const PropertyAnimClipAsset* getPropertyAnimClip(HE::UUID id) const;
 
 	// Mutable access to a loaded material, for in-editor editing. Edits are
 	// visible immediately to any renderer sharing this manager; persist them to
@@ -60,6 +61,7 @@ public:
 	HE::UUID registerAudio(AudioAsset asset);
 	HE::UUID registerScript(ScriptAsset asset);
 	HE::UUID registerAnimationClip(AnimationClipAsset asset);
+	HE::UUID registerPropertyAnimClip(PropertyAnimClipAsset asset);
 
 	// Replace a registered asset's payload in place, keeping its UUID so existing
 	// references stay valid (e.g. regenerating a procedural terrain mesh after a
@@ -93,7 +95,8 @@ public:
 	AssetRef<ScriptAsset>        acquireScript(HE::UUID id);
 	AssetRef<ShaderAsset>        acquireShader(HE::UUID id);
 	AssetRef<PrefabAsset>        acquirePrefab(HE::UUID id);
-	AssetRef<AnimationClipAsset> acquireAnimationClip(HE::UUID id);
+	AssetRef<AnimationClipAsset>      acquireAnimationClip(HE::UUID id);
+	AssetRef<PropertyAnimClipAsset>   acquirePropertyAnimClip(HE::UUID id);
 
 	// Pin bookkeeping — called by AssetRef; do not call directly.
 	void pinAsset(HE::UUID id);
@@ -134,7 +137,8 @@ private:
 	SlotMap<FontAsset>          m_fontAssets;
 	SlotMap<ShaderAsset>        m_shaderAssets;
 	SlotMap<PrefabAsset>        m_prefabAssets;
-	SlotMap<AnimationClipAsset> m_animClipAssets;
+	SlotMap<AnimationClipAsset>      m_animClipAssets;
+	SlotMap<PropertyAnimClipAsset>   m_propAnimClipAssets;
 
 	std::unordered_map<HE::UUID, SlotHandle>                              m_handleToUUID;
 	std::unordered_map<HE::UUID, HE::AssetType>                          m_assetTypeIndex; // mirrors m_handleToUUID with type info
@@ -216,4 +220,5 @@ inline AssetRef<AudioAsset>         ContentManager::acquireAudio(HE::UUID id)   
 inline AssetRef<ScriptAsset>        ContentManager::acquireScript(HE::UUID id)        { return { this, id, getScript(id) }; }
 inline AssetRef<ShaderAsset>        ContentManager::acquireShader(HE::UUID id)        { return { this, id, getShader(id) }; }
 inline AssetRef<PrefabAsset>        ContentManager::acquirePrefab(HE::UUID id)        { return { this, id, getPrefab(id) }; }
-inline AssetRef<AnimationClipAsset> ContentManager::acquireAnimationClip(HE::UUID id) { return { this, id, getAnimationClip(id) }; }
+inline AssetRef<AnimationClipAsset>      ContentManager::acquireAnimationClip(HE::UUID id)     { return { this, id, getAnimationClip(id) }; }
+inline AssetRef<PropertyAnimClipAsset>   ContentManager::acquirePropertyAnimClip(HE::UUID id)  { return { this, id, getPropertyAnimClip(id) }; }

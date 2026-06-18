@@ -6,6 +6,7 @@
 #include <HorizonScene/AnimationSystem.h>
 #include <HorizonScene/AnimationBlendSystem.h>
 #include <HorizonScene/AnimationStateMachineSystem.h>
+#include <HorizonScene/PropertyAnimationSystem.h>
 #include <Renderer/RendererFactory.h>
 #include <DebugDraw/DebugDraw.h>
 #include <Diagnostics/Logger.h>
@@ -789,6 +790,7 @@ void EditorApplication::OnRender(float dt)
 			AnimationSystem::update(*m_editorWorld, contentManager(), dt);
 			AnimationBlendSystem::update(*m_editorWorld, contentManager(), dt);
 			AnimationStateMachineSystem::update(*m_editorWorld, contentManager(), dt);
+			PropertyAnimationSystem::update(*m_editorWorld, contentManager(), dt);
 
 		// Step physics at a fixed rate during play mode
 		if (m_isPlaying && m_physicsWorld && m_editorWorld)
