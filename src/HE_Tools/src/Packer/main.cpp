@@ -1,33 +1,65 @@
-// hpak_packer.exe entrypoint
-// Usage: hpak_packer <project_root> <output.hpak>
+// hpak_packer — pack a project's .hasset files into a single .hpak archive
+// Usage: hpak_packer <project_root> <output.hpak> [--secret <passphrase>]
 //
-// Scans <project_root> for .hasset files, derives the AES-256 key,
-// and writes them as an encrypted .hpak archive.
+// If --secret is provided the entries are XOR-encrypted with a key derived
+// from the passphrase + a zero salt. The same passphrase must be passed to
+// ContentManager::loadPak() at runtime.
 
 #include "HpakWriter.h"
 #include "KeyDerivation.h"
 #include <iostream>
 #include <string>
 #include <filesystem>
+#include <cstring>
 
 int main(int argc, char** argv)
 {
     if (argc < 3)
     {
-        std::cerr << "Usage: hpak_packer <project_root> <output.hpak>" << std::endl;
+        std::cerr << "Usage: hpak_packer <project_root> <output.hpak> [--secret <passphrase>]\n";
         return 1;
     }
-    std::string inputPath = argv[1];
-    std::string outputFile = argv[2];
-	if (!std::filesystem::exists(inputPath))
+
+    const std::string inputPath  = argv[1];
+    const std::string outputFile = argv[2];
+
+    std::string secret;
+    for (int i = 3; i < argc - 1; ++i)
     {
-        std::cerr << "Input path does not exist: " << inputPath << std::endl;
+        if (std::strcmp(argv[i], "--secret") == 0)
+        {
+            secret = argv[i + 1];
+            ++i;
+        }
+    }
+
+    if (!std::filesystem::exists(inputPath))
+    {
+        std::cerr << "Input path does not exist: " << inputPath << "\n";
         return 1;
     }
+
+    Hpak::PackSettings settings;
+    if (!secret.empty())
+    {
+        settings.encrypt = true;
+        uint8_t salt[16] = {};  // zero salt for the packer tool
+        KeyDerivation::derive(secret, salt, settings.key);
+    }
+
+    HpakWriter packer;
+    const int added = packer.addDirectory(inputPath, settings);
+    std::cout << "Packed " << added << " asset(s) from: " << inputPath << "\n";
+
     if (std::filesystem::exists(outputFile))
-    {
         std::filesystem::remove(outputFile);
+
+    if (!packer.write(outputFile))
+    {
+        std::cerr << "Failed to write: " << outputFile << "\n";
+        return 1;
     }
-    //Implement the actual hpack creation after this.
+
+    std::cout << "Written: " << outputFile << "\n";
     return 0;
 }

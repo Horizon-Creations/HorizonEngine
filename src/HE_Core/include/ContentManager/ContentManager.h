@@ -77,6 +77,17 @@ public:
 	// silently skipped. Safe to call every frame from the editor tick.
 	std::vector<HE::UUID> pollHotReload();
 
+	// Load all assets packed in a .hpak archive. Each entry's raw .hasset blob
+	// is parsed and registered exactly like loadAsset() would. Already-loaded
+	// UUIDs are skipped. Pass a 32-byte key if the pak was encrypted; nullptr
+	// for unencrypted. Returns true when the file was opened; individual entry
+	// parse failures are silently skipped.
+	bool loadPak(const std::string& path, const uint8_t key[32] = nullptr);
+
+	// Parse a raw .hasset blob from memory and register it by its embedded UUID.
+	// Returns the UUID on success, an empty UUID on parse failure.
+	HE::UUID loadAssetFromMemory(const std::vector<uint8_t>& hassetData);
+
 	const std::string& contentRoot() const { return m_contentRoot; }
 	// Point the manager at a different content directory (e.g. when the
 	// editor opens a project). Previously loaded assets stay registered.
