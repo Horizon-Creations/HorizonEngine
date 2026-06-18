@@ -193,7 +193,7 @@ profitieren von P2.8 (Play-Mode zum Testen).
 | # | Aufgabe | Hängt ab von | Details |
 |---|---|---|---|
 | 4a.1 | **Jolt Physics** integrieren (FetchContent) | 2.2, 2.8 | ✅ Forts. 39 — Jolt v5.5.0 FetchContent (SOURCE_SUBDIR Build); PhysicsWorld (PIMPL, JobSystemSingleThreaded, TempAllocatorImpl); process-globale Init via call_once; Box-Shape aus TransformComponent::scale; RigidBodyType→EMotionType; fixed-rate step + ECS sync-back; Editor: Physik-World on Play/Stop + fixed-timestep-Akkumulator in OnRender; 8 Tests (223 gesamt) |
-| 4a.2 | Collider-Komponenten (Box/Sphere/Capsule/Mesh) + Debug-Draw | 4a.1, 0.7 | |
+| 4a.2 | Collider-Komponenten (Box/Sphere/Capsule/Mesh) + Debug-Draw | 4a.1, 0.7 | ✅ Forts. 40 — ColliderComponent (Box/Sphere/Capsule + halfExtents/radius/height/isTrigger); PhysicsWorld wählt Shape aus ColliderComponent (Fallback: scale-Box); DebugDraw::capsule(); Viewport-Wireframes (Cyan=solid, Magenta=Trigger); SceneSerializer JSON+Binary; Inspector + Add-Component; 7 Tests |
 | 4a.3 | Raycasts/Queries als Engine-API | 4a.1 | braucht Scripting (4b) später als Konsument |
 | 4a.4 | Character-Controller | 4a.1 | |
 | 4a.5 | 2D-Physik (Box2D) — optional, wenn Catania es braucht | 2.2 | Transform2D existiert schon |

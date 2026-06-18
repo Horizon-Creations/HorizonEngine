@@ -6,6 +6,7 @@
 #include <unordered_map>
 
 class HorizonWorld;
+class PhysicsWorld;
 
 // Wraps a ScriptEngine and binds it to a HorizonWorld, exposing the engine
 // API (Transform read/write, spawn/destroy, log) to Lua via a `horizon` table.
@@ -61,11 +62,16 @@ public:
     size_t instanceCount() const;
     const std::string& lastError() const;
 
+    // Provide access to the active PhysicsWorld so scripts can call horizon.raycast.
+    // Pass nullptr to disable raycasting (default, and safe for editor prop inspection).
+    void setPhysicsWorld(PhysicsWorld* pw);
+
     ScriptEngine& engine() { return m_engine; }
 
 private:
     void registerHorizonApi();
 
     HorizonWorld* m_world;
+    PhysicsWorld* m_physicsWorld = nullptr;
     ScriptEngine  m_engine;
 };
