@@ -14,6 +14,9 @@ JPH_SUPPRESS_WARNINGS
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Body/BodyActivationListener.h>
+#include <Jolt/Physics/Collision/RayCast.h>
+#include <Jolt/Physics/Collision/CastResult.h>
+#include <Jolt/Physics/Collision/NarrowPhaseQuery.h>
 
 #include "HorizonScene/PhysicsWorld.h"
 #include "HorizonScene/HorizonWorld.h"
@@ -227,6 +230,9 @@ void PhysicsWorld::initialize(HorizonWorld& world)
             ? JPH::EActivation::DontActivate
             : JPH::EActivation::Activate;
 
+        // Store entity ID in body user data for reverse lookup during raycasts.
+        bcs.mUserData = static_cast<uint64_t>(static_cast<uint32_t>(entity));
+
         JPH::BodyID bodyId = bodyInterface.CreateAndAddBody(bcs, activation);
         if (!bodyId.IsInvalid())
             m_impl->entityToBody[static_cast<uint32_t>(entity)] = bodyId;
@@ -275,6 +281,57 @@ void PhysicsWorld::step(HorizonWorld& world, float dt)
         transform->rotation = glm::degrees(glm::eulerAngles(gq));
         transform->dirty    = true;
     }
+}
+
+PhysicsWorld::RaycastHit PhysicsWorld::raycast(
+    const glm::vec3& origin,
+    const glm::vec3& direction,
+    float            maxDistance) const
+{
+    RaycastHit result;
+    if (!m_impl || !m_impl->initialized || maxDistance <= 0.0f)
+        return result;
+
+    // Normalise direction; bail on zero-length.
+    float len = std::sqrt(direction.x * direction.x +
+                          direction.y * direction.y +
+                          direction.z * direction.z);
+    if (len < 1e-6f)
+        return result;
+    glm::vec3 dir = direction / len;
+
+    JPH::RRayCast ray{
+        JPH::RVec3(origin.x, origin.y, origin.z),
+        JPH::Vec3(dir.x, dir.y, dir.z) * maxDistance
+    };
+    JPH::RayCastResult hit;
+    if (!m_impl->physicsSystem.GetNarrowPhaseQuery().CastRay(ray, hit))
+        return result;
+
+    result.hit      = true;
+    result.distance = hit.mFraction * maxDistance;
+
+    // Hit position along the ray
+    JPH::RVec3 hitPos = ray.GetPointOnRay(hit.mFraction);
+    result.point = {
+        static_cast<float>(hitPos.GetX()),
+        static_cast<float>(hitPos.GetY()),
+        static_cast<float>(hitPos.GetZ())
+    };
+
+    // Surface normal via body lock
+    {
+        JPH::BodyLockRead lock(m_impl->physicsSystem.GetBodyLockInterface(), hit.mBodyID);
+        if (lock.Succeeded())
+        {
+            const JPH::Body& body = lock.GetBody();
+            JPH::Vec3 n = body.GetWorldSpaceSurfaceNormal(hit.mSubShapeID2, hitPos);
+            result.normal = { n.GetX(), n.GetY(), n.GetZ() };
+            result.entityId = static_cast<uint32_t>(body.GetUserData());
+        }
+    }
+
+    return result;
 }
 
 void PhysicsWorld::clear()

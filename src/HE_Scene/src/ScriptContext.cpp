@@ -1,5 +1,6 @@
 #include "HorizonScene/ScriptContext.h"
 #include "HorizonScene/HorizonWorld.h"
+#include "HorizonScene/PhysicsWorld.h"
 #include "HorizonScene/Components/TransformComponent.h"
 #include "HorizonScene/Components/NameComponent.h"
 
@@ -9,8 +10,9 @@ extern "C" {
 #include <lauxlib.h>
 }
 
-// ─── Registry key used to store the HorizonWorld* ───────────────────────────
-static const char* kWorldKey = "__horizonWorld";
+// ─── Registry keys ────────────────────────────────────────────────────────────
+static const char* kWorldKey   = "__horizonWorld";
+static const char* kPhysicsKey = "__horizonPhysics";
 
 static HorizonWorld* getWorld(lua_State* L)
 {
@@ -18,6 +20,14 @@ static HorizonWorld* getWorld(lua_State* L)
     auto* w = static_cast<HorizonWorld*>(lua_touserdata(L, -1));
     lua_pop(L, 1);
     return w;
+}
+
+static PhysicsWorld* getPhysics(lua_State* L)
+{
+    lua_getfield(L, LUA_REGISTRYINDEX, kPhysicsKey);
+    auto* pw = static_cast<PhysicsWorld*>(lua_touserdata(L, -1));
+    lua_pop(L, 1);
+    return pw;
 }
 
 static entt::entity toEntity(lua_Integer v)
@@ -156,6 +166,35 @@ static int lua_horizon_destroy(lua_State* L)
     return 0;
 }
 
+static int lua_horizon_raycast(lua_State* L)
+{
+    float ox = static_cast<float>(luaL_checknumber(L, 1));
+    float oy = static_cast<float>(luaL_checknumber(L, 2));
+    float oz = static_cast<float>(luaL_checknumber(L, 3));
+    float dx = static_cast<float>(luaL_checknumber(L, 4));
+    float dy = static_cast<float>(luaL_checknumber(L, 5));
+    float dz = static_cast<float>(luaL_checknumber(L, 6));
+    float maxDist = static_cast<float>(luaL_optnumber(L, 7, 1000.0));
+
+    PhysicsWorld* pw = getPhysics(L);
+    if (!pw) { lua_pushnil(L); return 1; }
+
+    PhysicsWorld::RaycastHit hit = pw->raycast({ox, oy, oz}, {dx, dy, dz}, maxDist);
+    if (!hit.hit) { lua_pushnil(L); return 1; }
+
+    lua_newtable(L);
+    lua_pushinteger(L, static_cast<lua_Integer>(hit.entityId));
+    lua_setfield(L, -2, "entity");
+    lua_pushnumber(L, hit.point.x);    lua_setfield(L, -2, "x");
+    lua_pushnumber(L, hit.point.y);    lua_setfield(L, -2, "y");
+    lua_pushnumber(L, hit.point.z);    lua_setfield(L, -2, "z");
+    lua_pushnumber(L, hit.normal.x);   lua_setfield(L, -2, "nx");
+    lua_pushnumber(L, hit.normal.y);   lua_setfield(L, -2, "ny");
+    lua_pushnumber(L, hit.normal.z);   lua_setfield(L, -2, "nz");
+    lua_pushnumber(L, hit.distance);   lua_setfield(L, -2, "distance");
+    return 1;
+}
+
 // ─── Registration table ──────────────────────────────────────────────────────
 
 static const luaL_Reg kHorizonFuncs[] = {
@@ -169,6 +208,7 @@ static const luaL_Reg kHorizonFuncs[] = {
     { "setScale",    lua_horizon_setScale    },
     { "spawn",       lua_horizon_spawn       },
     { "destroy",     lua_horizon_destroy     },
+    { "raycast",     lua_horizon_raycast     },
     { nullptr, nullptr }
 };
 
@@ -188,9 +228,21 @@ void ScriptContext::registerHorizonApi()
     lua_pushlightuserdata(L, m_world);
     lua_setfield(L, LUA_REGISTRYINDEX, kWorldKey);
 
+    // Physics starts as null; updated via setPhysicsWorld()
+    lua_pushlightuserdata(L, nullptr);
+    lua_setfield(L, LUA_REGISTRYINDEX, kPhysicsKey);
+
     // Create `horizon` global table and register all functions
     luaL_newlib(L, kHorizonFuncs);
     lua_setglobal(L, "horizon");
+}
+
+void ScriptContext::setPhysicsWorld(PhysicsWorld* pw)
+{
+    m_physicsWorld = pw;
+    lua_State* L = m_engine.state();
+    lua_pushlightuserdata(L, pw);
+    lua_setfield(L, LUA_REGISTRYINDEX, kPhysicsKey);
 }
 
 bool ScriptContext::loadScript(const std::string& name, const std::string& source)
