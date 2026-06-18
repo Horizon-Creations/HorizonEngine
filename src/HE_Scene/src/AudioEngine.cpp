@@ -7,6 +7,7 @@
 #include "HorizonScene/AudioEngine.h"
 #include <unordered_map>
 #include <cstring>
+#include <string>
 
 // ─── PIMPL ────────────────────────────────────────────────────────────────────
 
@@ -19,11 +20,18 @@ struct ActiveSound
     bool                 soundOk  = false;
 };
 
+struct BusData
+{
+    ma_sound_group group;
+    bool           groupOk = false;
+};
+
 struct AudioEngine::Impl
 {
     ma_engine                                        engine;
     bool                                             engineOk = false;
     std::unordered_map<uint64_t, std::unique_ptr<ActiveSound>> sounds;
+    std::unordered_map<std::string, std::unique_ptr<BusData>>  buses;
 };
 
 // ─── AudioEngine ─────────────────────────────────────────────────────────────
@@ -56,14 +64,55 @@ void AudioEngine::shutdown()
 {
     if (!m_initialized) return;
     stopAll();
+    // Uninit buses before engine teardown
+    for (auto& [name, bus] : m_impl->buses)
+        if (bus->groupOk) { ma_sound_group_uninit(&bus->group); bus->groupOk = false; }
+    m_impl->buses.clear();
     ma_engine_uninit(&m_impl->engine);
     m_impl->engineOk  = false;
     m_initialized     = false;
 }
 
+// ─── Bus management ────────────────────────────────────────────────────────────
+bool AudioEngine::createBus(const std::string& name, float volume)
+{
+    if (!m_initialized || name.empty()) return false;
+    if (m_impl->buses.count(name)) return true; // idempotent
+
+    auto bus = std::make_unique<BusData>();
+    if (ma_sound_group_init(&m_impl->engine, 0, nullptr, &bus->group) != MA_SUCCESS)
+        return false;
+    bus->groupOk = true;
+    ma_sound_group_set_volume(&bus->group, volume);
+    m_impl->buses.emplace(name, std::move(bus));
+    return true;
+}
+
+void AudioEngine::setBusVolume(const std::string& name, float volume)
+{
+    if (!m_initialized) return;
+    auto it = m_impl->buses.find(name);
+    if (it != m_impl->buses.end() && it->second->groupOk)
+        ma_sound_group_set_volume(&it->second->group, volume);
+}
+
+float AudioEngine::getBusVolume(const std::string& name) const
+{
+    if (!m_initialized) return 1.0f;
+    auto it = m_impl->buses.find(name);
+    if (it == m_impl->buses.end() || !it->second->groupOk) return 1.0f;
+    return ma_sound_group_get_volume(&it->second->group);
+}
+
+bool AudioEngine::hasBus(const std::string& name) const
+{
+    return m_impl->buses.count(name) > 0;
+}
+
 uint64_t AudioEngine::play(const std::vector<uint8_t>& pcmData,
                             int sampleRate, int channels,
-                            float volume, float pitch, bool loop)
+                            float volume, float pitch, bool loop,
+                            const std::string& busName)
 {
     if (!m_initialized || pcmData.empty()) return 0;
     if (sampleRate <= 0 || channels <= 0)  return 0;
@@ -85,10 +134,18 @@ uint64_t AudioEngine::play(const std::vector<uint8_t>& pcmData,
         return 0;
     snd->bufferOk = true;
 
+    // Route through bus if found, otherwise null (master)
+    ma_sound_group* busGroup = nullptr;
+    if (!busName.empty()) {
+        auto it = m_impl->buses.find(busName);
+        if (it != m_impl->buses.end() && it->second->groupOk)
+            busGroup = &it->second->group;
+    }
+
     ma_uint32 flags = MA_SOUND_FLAG_NO_SPATIALIZATION;
     if (ma_sound_init_from_data_source(&m_impl->engine,
                                         &snd->buffer,
-                                        flags, nullptr,
+                                        flags, busGroup,
                                         &snd->sound) != MA_SUCCESS)
     {
         ma_audio_buffer_uninit(&snd->buffer);
@@ -136,7 +193,8 @@ uint64_t AudioEngine::playSpatial(const std::vector<uint8_t>& pcmData,
                                    int sampleRate, int channels,
                                    float volume, float pitch, bool loop,
                                    float x, float y, float z,
-                                   float minDist, float maxDist)
+                                   float minDist, float maxDist,
+                                   const std::string& busName)
 {
     if (!m_initialized || pcmData.empty()) return 0;
     if (sampleRate <= 0 || channels <= 0)  return 0;
@@ -158,10 +216,18 @@ uint64_t AudioEngine::playSpatial(const std::vector<uint8_t>& pcmData,
         return 0;
     snd->bufferOk = true;
 
+    // Route through bus if found
+    ma_sound_group* busGroup = nullptr;
+    if (!busName.empty()) {
+        auto it = m_impl->buses.find(busName);
+        if (it != m_impl->buses.end() && it->second->groupOk)
+            busGroup = &it->second->group;
+    }
+
     // No NO_SPATIALIZATION flag — spatial positioning enabled
     if (ma_sound_init_from_data_source(&m_impl->engine,
                                         &snd->buffer,
-                                        0, nullptr,
+                                        0, busGroup,
                                         &snd->sound) != MA_SUCCESS)
     {
         ma_audio_buffer_uninit(&snd->buffer);

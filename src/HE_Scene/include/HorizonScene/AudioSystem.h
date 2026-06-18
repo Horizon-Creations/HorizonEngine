@@ -34,12 +34,13 @@ struct AudioSystem
                 src.handle = engine.playSpatial(
                     asset->audioData, asset->sampleRate, asset->channels,
                     src.volume, src.pitch, src.loop,
-                    x, y, z, src.innerRange, src.range);
+                    x, y, z, src.innerRange, src.range, src.busName);
             }
             else
             {
                 src.handle = engine.play(asset->audioData, asset->sampleRate,
-                                          asset->channels, src.volume, src.pitch, src.loop);
+                                          asset->channels, src.volume, src.pitch, src.loop,
+                                          src.busName);
             }
         }
     }

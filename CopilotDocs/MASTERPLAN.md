@@ -211,7 +211,7 @@ profitieren von P2.8 (Play-Mode zum Testen).
 | # | Aufgabe | Hängt ab von | Details |
 |---|---|---|---|
 | 4c.1 | **miniaudio** + AudioSource/AudioListener-Komponenten | 1.7, 2.2 | ✅ Forts. 29, 36 — AudioSourceComponent + AudioListenerComponent + SceneSerializer + Editor-Inspector + AudioEngine (miniaudio noDevice, int16 PCM, handle-based) + AudioSystem::playOnStart + ContentManager::registerAudio |
-| 4c.2 | 3D-Spatialization, Attenuation | 4c.1 | |
+| 4c.2 | 3D-Spatialization, Attenuation | 4c.1 | ✅ Forts. 43 — AudioEngine::playSpatial (linear attenuation, min/maxDist); setSoundPosition; setListenerTransform (ma_engine_listener); AudioSourceComponent: innerRange/rolloffFactor/handle; AudioSystem::updateSpatial (listener + sources each frame); SceneSerializer; Editor-Inspector; 9 Tests (257 gesamt) |
 | 4c.3 | Mixer/Bus-System (Music/SFX-Gruppen, Lautstärke) | 4c.1 | |
 
 ### 4d — Animation

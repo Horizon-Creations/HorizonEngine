@@ -219,6 +219,7 @@ namespace
 		{
 			comps["audiosource"] = {
 				{ "asset",        uuidToJson(a->assetId) },
+				{ "busName",      a->busName },
 				{ "volume",       a->volume },
 				{ "pitch",        a->pitch },
 				{ "range",        a->range },
@@ -435,6 +436,7 @@ namespace
 			const json& c = comps["audiosource"];
 			AudioSourceComponent a;
 			a.assetId       = jsonToUuid(c.value("asset", json()));
+			a.busName       = c.value("busName",       a.busName);
 			a.volume        = c.value("volume",        a.volume);
 			a.pitch         = c.value("pitch",         a.pitch);
 			a.range         = c.value("range",         a.range);

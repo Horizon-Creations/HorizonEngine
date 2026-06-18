@@ -456,3 +456,117 @@ TEST_CASE("AudioSourceComponent: new fields round-trip through serializer")
     CHECK(loaded.spatial       == true);
     CHECK(loaded.handle        == 0u); // runtime field, not serialized
 }
+
+// ─── 4c.3 Mixer/Bus ──────────────────────────────────────────────────────────
+
+TEST_CASE("AudioEngine: createBus returns true and bus exists")
+{
+    AudioEngine engine;
+    REQUIRE(engine.init(true));
+
+    CHECK(engine.createBus("SFX", 0.8f));
+    CHECK(engine.hasBus("SFX"));
+    CHECK_FALSE(engine.hasBus("Music")); // not created
+    engine.shutdown();
+}
+
+TEST_CASE("AudioEngine: createBus is idempotent")
+{
+    AudioEngine engine;
+    REQUIRE(engine.init(true));
+
+    CHECK(engine.createBus("SFX"));
+    CHECK(engine.createBus("SFX")); // second call should not crash
+    engine.shutdown();
+}
+
+TEST_CASE("AudioEngine: getBusVolume returns set value")
+{
+    AudioEngine engine;
+    REQUIRE(engine.init(true));
+
+    engine.createBus("Music", 0.5f);
+    CHECK(engine.getBusVolume("Music") == doctest::Approx(0.5f).epsilon(0.01f));
+    engine.shutdown();
+}
+
+TEST_CASE("AudioEngine: setBusVolume changes volume")
+{
+    AudioEngine engine;
+    REQUIRE(engine.init(true));
+
+    engine.createBus("SFX", 1.0f);
+    engine.setBusVolume("SFX", 0.25f);
+    CHECK(engine.getBusVolume("SFX") == doctest::Approx(0.25f).epsilon(0.01f));
+    engine.shutdown();
+}
+
+TEST_CASE("AudioEngine: getBusVolume returns 1.0 for unknown bus")
+{
+    AudioEngine engine;
+    REQUIRE(engine.init(true));
+    CHECK(engine.getBusVolume("NonExistent") == doctest::Approx(1.0f));
+    engine.shutdown();
+}
+
+TEST_CASE("AudioEngine: play through named bus routes correctly")
+{
+    AudioEngine engine;
+    REQUIRE(engine.init(true));
+
+    engine.createBus("SFX", 1.0f);
+    auto pcm = makeSilence(4410, 1);
+    uint64_t h = engine.play(pcm, 44100, 1, 1.0f, 1.0f, false, "SFX");
+    CHECK(h != 0);
+    engine.stop(h);
+    engine.shutdown();
+}
+
+TEST_CASE("AudioEngine: play through non-existent bus still plays on master")
+{
+    AudioEngine engine;
+    REQUIRE(engine.init(true));
+
+    auto pcm = makeSilence(4410, 1);
+    uint64_t h = engine.play(pcm, 44100, 1, 1.0f, 1.0f, false, "NonExistentBus");
+    CHECK(h != 0); // should fall back to master, not fail
+    engine.stop(h);
+    engine.shutdown();
+}
+
+TEST_CASE("AudioEngine: bus volume 0 mutes sounds on that bus")
+{
+    AudioEngine engine;
+    REQUIRE(engine.init(true));
+
+    engine.createBus("Quiet", 0.0f);
+    CHECK(engine.getBusVolume("Quiet") == doctest::Approx(0.0f));
+    engine.shutdown();
+}
+
+TEST_CASE("AudioSourceComponent: busName field defaults to empty")
+{
+    AudioSourceComponent a;
+    CHECK(a.busName.empty());
+}
+
+TEST_CASE("AudioSourceComponent: busName serializes and deserializes")
+{
+    HorizonWorld src_world;
+    auto e = src_world.createEntity("Speaker");
+    AudioSourceComponent src;
+    src.busName = "Music";
+    src_world.registry().emplace<AudioSourceComponent>(e, src);
+
+    const auto snapshotPath = std::filesystem::temp_directory_path() / "he_audio_bus_test.hescene";
+    SceneSerializer serializer;
+    REQUIRE(serializer.save(src_world, snapshotPath, SerializeFormat::JSON));
+
+    HorizonWorld dst_world;
+    REQUIRE(serializer.load(dst_world, snapshotPath, SerializeFormat::JSON));
+
+    auto view = dst_world.registry().view<AudioSourceComponent>();
+    REQUIRE(!view.empty());
+    const auto& loaded = dst_world.registry().get<AudioSourceComponent>(*view.begin());
+    CHECK(loaded.busName == "Music");
+}
