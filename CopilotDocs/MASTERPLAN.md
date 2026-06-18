@@ -220,7 +220,7 @@ profitieren von P2.8 (Play-Mode zum Testen).
 | 4d.1 | Skelett + Skinning-Daten im MeshImporter (glTF-Skins) | 1.2 | neue Chunks im .hasset-Format | ✅ Forts. 45 |
 | 4d.2 | GPU-Skinning (Bone-Matrizen als Uniform/Storage-Buffer) | 4d.1, 3.3 | | ✅ Forts. 46 |
 | 4d.3 | AnimationClip-Playback + AnimatorComponent | 4d.1, 2.2 | | ✅ Forts. 47 |
-| 4d.4 | Blending + State-Machine (einfacher Animator-Graph) | 4d.3 | | ✅ Forts. 48 |
+| 4d.4 | Blending + State-Machine (einfacher Animator-Graph) | 4d.3 | | ✅ Forts. 48+49 |
 | 4d.5 | Property-Animation (Transform/Material animieren, für Cutscenes/UI) | 4d.3 | |
 
 ---
@@ -1849,3 +1849,24 @@ Lifetime-sicher mit der bestehenden `SlotMap`/`m_handleToUUID`-Buchführung inte
 - Fehlende Clip → Identity-TRS-Defaults → mit blendAlpha=1.0/0.0 korrekt entartbar.
 - Referenz-Duration = max(clipA.duration, clipB.duration) für Timeline; jeder Clip wird auf seine eigene Duration `fmod`-geloopt (Gait-Synchronisation bleibt dem Aufrufer überlassen).
 - **306 Tests grün** (300→306).
+
+### Forts. 49 — Animator State Machine (4d.4 Fortsetzung)
+
+**Ziel:** Zustandsbasierte Clip-Wiedergabe mit parametrisierten Übergängen und Crossfade-Blending.
+
+**Neue / geänderte Dateien:**
+
+- **`src/HE_Scene/include/HorizonScene/Components/AnimatorStateMachineComponent.h`** (neu): `TransitionOp`-Enum (Greater/Less/Equal), `AnimationState`-Struct, `AnimationTransition`-Struct, `AnimatorStateMachineComponent` (states, transitions, params, currentStateName, clipTime, playbackSpeed, inTransition, transitionTarget, transitionElapsed, transitionDuration).
+- **`src/HE_Scene/include/HorizonScene/AnimationStateMachineSystem.h`** (neu): `AnimationStateMachineSystem::update(world, cm, dt)`.
+- **`src/HE_Scene/src/AnimationStateMachineSystem.cpp`** (neu): Findet `currentState`, prüft Übergänge via `TransitionOp`, startet Crossfade (`inTransition=true`), samples outgoing+incoming Clips via `sampleClip`, ruft `blendTRS` im Übergang, `composeBoneMatrices` → `smc.dirty=true`. Übergang abgeschlossen wenn `transitionElapsed >= transitionDuration`.
+- **`src/HE_Scene/CMakeLists.txt`**: `AnimationStateMachineSystem.cpp` ergänzt.
+- **`src/HE_Scene/include/HorizonScene/HorizonScene.h`**: `AnimatorStateMachineComponent.h` inkludiert.
+- **`src/HE_Editor/EditorApplication.cpp`**: `AnimationStateMachineSystem::update` nach `AnimationBlendSystem::update` eingefügt.
+- **`src/HE_Editor/EditorUI.cpp`**: „Animator State Machine"-Inspector-Panel (State/Speed/Time/Crossfade-Progress, States-TreeNode, Transitions-TreeNode, Params-TreeNode); Add-Component-Menü ergänzt.
+- **`tests/test_animationsystem.cpp`**: 7 neue Tests (Defaults, plays-current-state, transition-fires, no-fire-below-threshold, crossfade-midpoint-50/50, completes-after-full-duration, advances-clipTime).
+
+**Architektur-Entscheidungen:**
+- Ausgehender Clip spielt bei `clipTime` weiter, eingehender Clip startet bei `transitionElapsed` (= Zeit seit Übergangsstart) — realistisches Einblenden.
+- Nach Abschluss: `currentStateName = transitionTarget`, `clipTime = transitionElapsed` (nahtlose Fortsetzung im neuen Zustand).
+- `inTransition` ist ein Mutex gegen verschachtelte Übergänge (nur einen aktiven Übergang zur gleichen Zeit).
+- **313 Tests grün** (306→313). Commit `3432883`.
