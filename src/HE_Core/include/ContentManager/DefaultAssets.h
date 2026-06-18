@@ -32,4 +32,8 @@ constexpr UUID kDefaultGridTextureId  = { 0x0000000000000004ULL, 0x0000000000000
 // Assigned to newly created Landscape entities so the terrain shows a grid.
 constexpr UUID kDefaultTerrainMaterialId = { 0x0000000000000005ULL, 0x0000000000000001ULL };
 
+// A 1×1 billboard quad in the XY plane, normal pointing +Z.
+// Default mesh for ParticleSystemComponent; also useful for sprite quads.
+constexpr UUID kDefaultQuadMeshId = { 0x0000000000000006ULL, 0x0000000000000001ULL };
+
 } // namespace HE

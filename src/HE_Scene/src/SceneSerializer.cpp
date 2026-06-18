@@ -17,6 +17,7 @@
 #include "HorizonScene/Components/TerrainComponent.h"
 #include "HorizonScene/Components/AudioSourceComponent.h"
 #include "HorizonScene/Components/AudioListenerComponent.h"
+#include "HorizonScene/Components/ParticleSystemComponent.h"
 #include <nlohmann/json.hpp>
 #include <fstream>
 
@@ -236,6 +237,28 @@ namespace
 				{ "masterVolume", l->masterVolume },
 			};
 		}
+		if (auto* ps = registry.try_get<ParticleSystemComponent>(entity))
+		{
+			comps["particlesystem"] = {
+				{ "mesh",             uuidToJson(ps->meshAssetId) },
+				{ "material",         uuidToJson(ps->materialAssetId) },
+				{ "emitRate",         ps->emitRate },
+				{ "lifetimeMin",      ps->lifetimeMin },
+				{ "lifetimeMax",      ps->lifetimeMax },
+				{ "startSize",        ps->startSize },
+				{ "endSize",          ps->endSize },
+				{ "startColor",       vec3ToJson(ps->startColor) },
+				{ "endColor",         vec3ToJson(ps->endColor) },
+				{ "startAlpha",       ps->startAlpha },
+				{ "endAlpha",         ps->endAlpha },
+				{ "initialVelocity",  vec3ToJson(ps->initialVelocity) },
+				{ "velocitySpread",   ps->velocitySpread },
+				{ "gravity",          vec3ToJson(ps->gravity) },
+				{ "maxParticles",     ps->maxParticles },
+				{ "playing",          ps->playing },
+				{ "looping",          ps->looping },
+			};
+		}
 		return comps;
 	}
 
@@ -453,6 +476,29 @@ namespace
 			AudioListenerComponent l;
 			l.masterVolume = c.value("masterVolume", l.masterVolume);
 			registry.emplace_or_replace<AudioListenerComponent>(entity, l);
+		}
+		if (comps.contains("particlesystem"))
+		{
+			const json& c = comps["particlesystem"];
+			ParticleSystemComponent ps;
+			ps.meshAssetId      = jsonToUuid(c.value("mesh",     json()));
+			ps.materialAssetId  = jsonToUuid(c.value("material", json()));
+			ps.emitRate         = c.value("emitRate",        ps.emitRate);
+			ps.lifetimeMin      = c.value("lifetimeMin",     ps.lifetimeMin);
+			ps.lifetimeMax      = c.value("lifetimeMax",     ps.lifetimeMax);
+			ps.startSize        = c.value("startSize",       ps.startSize);
+			ps.endSize          = c.value("endSize",         ps.endSize);
+			ps.startColor       = jsonToVec3(c.value("startColor",      json()), ps.startColor);
+			ps.endColor         = jsonToVec3(c.value("endColor",        json()), ps.endColor);
+			ps.startAlpha       = c.value("startAlpha",      ps.startAlpha);
+			ps.endAlpha         = c.value("endAlpha",        ps.endAlpha);
+			ps.initialVelocity  = jsonToVec3(c.value("initialVelocity", json()), ps.initialVelocity);
+			ps.velocitySpread   = c.value("velocitySpread",  ps.velocitySpread);
+			ps.gravity          = jsonToVec3(c.value("gravity",         json()), ps.gravity);
+			ps.maxParticles     = c.value("maxParticles",    ps.maxParticles);
+			ps.playing          = c.value("playing",         ps.playing);
+			ps.looping          = c.value("looping",         ps.looping);
+			registry.emplace_or_replace<ParticleSystemComponent>(entity, std::move(ps));
 		}
 	}
 

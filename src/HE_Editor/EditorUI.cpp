@@ -4177,6 +4177,33 @@ void EditorUI::RenderInspector(AppContext& ctx)
 		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<AudioListenerComponent>(entity); }
 	}
 
+	// ── Particle System ─────────────────────────────────────────────────────
+	if (auto* ps = registry.try_get<ParticleSystemComponent>(entity))
+	{
+		if (componentHeader("Particle System", true, removed))
+		{
+			ImGui::DragFloat("Emit Rate##ps",      &ps->emitRate,      0.5f, 0.0f, 10000.0f); trackEdit();
+			ImGui::DragFloat("Lifetime Min##ps",   &ps->lifetimeMin,   0.05f, 0.01f, 100.0f); trackEdit();
+			ImGui::DragFloat("Lifetime Max##ps",   &ps->lifetimeMax,   0.05f, 0.01f, 100.0f); trackEdit();
+			ImGui::DragFloat("Start Size##ps",     &ps->startSize,     0.01f, 0.0f, 100.0f); trackEdit();
+			ImGui::DragFloat("End Size##ps",       &ps->endSize,       0.01f, 0.0f, 100.0f); trackEdit();
+			ImGui::ColorEdit3("Start Color##ps",   glm::value_ptr(ps->startColor)); trackEdit();
+			ImGui::ColorEdit3("End Color##ps",     glm::value_ptr(ps->endColor)); trackEdit();
+			ImGui::DragFloat("Start Alpha##ps",    &ps->startAlpha,    0.01f, 0.0f, 1.0f); trackEdit();
+			ImGui::DragFloat("End Alpha##ps",      &ps->endAlpha,      0.01f, 0.0f, 1.0f); trackEdit();
+			ImGui::DragFloat3("Velocity##ps",      glm::value_ptr(ps->initialVelocity), 0.1f); trackEdit();
+			ImGui::DragFloat("Spread (rad)##ps",   &ps->velocitySpread, 0.01f, 0.0f, 3.14f); trackEdit();
+			ImGui::DragFloat3("Gravity##ps",       glm::value_ptr(ps->gravity), 0.1f); trackEdit();
+			ImGui::DragInt("Max Particles##ps",    &ps->maxParticles, 1, 1, 10000); trackEdit();
+			ImGui::Checkbox("Playing##ps",         &ps->playing); trackEdit();
+			ImGui::SameLine();
+			ImGui::Checkbox("Looping##ps",         &ps->looping); trackEdit();
+			// Live particle count (read-only info).
+			ImGui::Text("Live: %zu", ps->particles.size());
+		}
+		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<ParticleSystemComponent>(entity); }
+	}
+
 	// ── Add Component ───────────────────────────────────────────────────────
 	// Not for the World root — it only carries the scene's Environment, no
 	// arbitrary components (and the built-in sun/moon are managed automatically).
@@ -4218,8 +4245,9 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			addItem("Collider",            ColliderComponent{});
 			addItem("Character Controller", CharacterControllerComponent{});
 			addItem("Script",         ScriptComponent{});
-			addItem("Audio Source",   AudioSourceComponent{});
-			addItem("Audio Listener", AudioListenerComponent{});
+			addItem("Audio Source",    AudioSourceComponent{});
+			addItem("Audio Listener",  AudioListenerComponent{});
+			addItem("Particle System", ParticleSystemComponent{});
 			ImGui::EndPopup();
 		}
 	}

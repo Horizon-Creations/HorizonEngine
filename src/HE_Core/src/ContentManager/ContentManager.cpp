@@ -622,6 +622,33 @@ void ContentManager::initDefaultAssets()
 	cube.indices .assign(kCubeIdx, kCubeIdx + sizeof(kCubeIdx)/sizeof(kCubeIdx[0]));
 	registerStaticMesh(std::move(cube));
 
+	// ── Default billboard quad mesh (kDefaultQuadMeshId) ─────────────────────
+	// 1×1 quad in the XY plane, normal +Z. Used as the default particle mesh.
+	// CCW winding viewed from +Z; two triangles (0,1,2) and (0,2,3).
+	static const float kQuadPos[] = {
+		-0.5f,-0.5f, 0.0f,
+		 0.5f,-0.5f, 0.0f,
+		 0.5f, 0.5f, 0.0f,
+		-0.5f, 0.5f, 0.0f,
+	};
+	static const float kQuadNrm[] = {
+		0,0,1,  0,0,1,  0,0,1,  0,0,1,
+	};
+	static const float kQuadUV[] = {
+		0,0,  1,0,  1,1,  0,1,
+	};
+	static const uint32_t kQuadIdx[] = { 0,1,2,  0,2,3 };
+
+	StaticMeshAsset quad;
+	quad.id   = HE::kDefaultQuadMeshId;
+	quad.name = "DefaultQuad";
+	quad.path = "mem://default_quad";
+	quad.vertices.assign(kQuadPos, kQuadPos + 12);
+	quad.normals .assign(kQuadNrm, kQuadNrm + 12);
+	quad.uvs     .assign(kQuadUV,  kQuadUV  + 8);
+	quad.indices .assign(kQuadIdx, kQuadIdx + 6);
+	registerStaticMesh(std::move(quad));
+
 	// ── Default white texture (kDefaultWhiteTextureId) ────────────────────────
 	// 1×1 RGBA8 opaque white — neutral placeholder; multiplied with any colour
 	// leaves it unchanged.
