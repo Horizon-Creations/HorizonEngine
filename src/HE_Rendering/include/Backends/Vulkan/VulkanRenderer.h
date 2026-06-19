@@ -40,6 +40,18 @@ public:
 
 	void SetVSync(bool enabled) override;
 
+	// Offscreen viewport (editor scene view)
+	void  SetViewportSize(uint32_t width, uint32_t height) override;
+	// GetViewportTexture() is inherited from IRenderer; returns m_viewportImGuiHandle
+	// which is a VkDescriptorSet registered by the editor via SetViewportImGuiHandle.
+	bool  CaptureViewport(std::vector<uint8_t>& rgba,
+	                      uint32_t& width, uint32_t& height) override;
+	// Returns VkImageView for the viewport color image (for ImGui_ImplVulkan_AddTexture).
+	void* GetViewportVkImageView() const;
+	void* GetViewportVkSampler()   const;
+	bool  HasViewportResourceChanged() const;
+	void  ClearViewportResourceChanged();
+
 private:
 	void createInstance();
 	void createSurface();
@@ -61,7 +73,7 @@ private:
 	void           destroyDepthResources();
 	void           createScenePipeline();
 	void           destroyScenePipeline();
-	void           DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t height);
+	void           DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t height, bool hdr = false);
 	VkShaderModule loadShaderModule(const char* spvFileName);
 	uint32_t       findMemoryType(uint32_t typeBits, VkMemoryPropertyFlags props) const;
 
@@ -109,9 +121,12 @@ private:
 	// Per-object data (MVP + model) goes through push constants; per-frame data
 	// (camera + lights) through a host-visible UBO bound via a descriptor set,
 	// one per frame in flight.
-	VkDescriptorSetLayout m_sceneSetLayout      = VK_NULL_HANDLE;
-	VkPipelineLayout      m_scenePipelineLayout = VK_NULL_HANDLE;
-	VkPipeline            m_scenePipeline       = VK_NULL_HANDLE;
+	VkDescriptorSetLayout m_sceneSetLayout             = VK_NULL_HANDLE;
+	VkPipelineLayout      m_scenePipelineLayout        = VK_NULL_HANDLE;
+	VkPipeline            m_scenePipeline              = VK_NULL_HANDLE;
+	VkPipeline            m_sceneTransparentPipeline   = VK_NULL_HANDLE;
+	VkPipeline            m_scenePipelineHDR           = VK_NULL_HANDLE;
+	VkPipeline            m_sceneTransparentPipelineHDR= VK_NULL_HANDLE;
 	VkDescriptorPool      m_descPool            = VK_NULL_HANDLE;
 	struct FrameUBO
 	{
@@ -121,6 +136,11 @@ private:
 		VkDescriptorSet set    = VK_NULL_HANDLE;
 	};
 	FrameUBO m_frameUBO[2];
+
+	// Per-draw material data (32 bytes: baseColor(rgb)+metallic(a) + roughness + pad).
+	// Updated per-draw via vkCmdUpdateBuffer; binding 2 in scene descriptor set.
+	VkBuffer       m_matUBO    = VK_NULL_HANDLE;
+	VkDeviceMemory m_matMem    = VK_NULL_HANDLE;
 
 	struct GpuMesh
 	{
@@ -146,6 +166,81 @@ private:
 	CommandBuffer   m_cmds;
 	std::vector<uint8_t>  m_visible;
 	std::vector<uint32_t> m_sortedIndices;
+
+	// ── Viewport offscreen render target ────────────────────────────────────
+	// Color image sampled by ImGui; depth image for the viewport render pass.
+	void createViewportResources(uint32_t w, uint32_t h);
+	void destroyViewportResources();
+	VkImage        m_viewportImage   = VK_NULL_HANDLE;
+	VkDeviceMemory m_viewportMemory  = VK_NULL_HANDLE;
+	VkImageView    m_viewportView    = VK_NULL_HANDLE;
+	VkImage        m_viewportDepthImage  = VK_NULL_HANDLE;
+	VkDeviceMemory m_viewportDepthMemory = VK_NULL_HANDLE;
+	VkImageView    m_viewportDepthView   = VK_NULL_HANDLE;
+	VkRenderPass   m_viewportRenderPass  = VK_NULL_HANDLE;
+	VkFramebuffer  m_viewportFramebuffer = VK_NULL_HANDLE;
+	VkSampler      m_viewportSampler     = VK_NULL_HANDLE;
+	uint32_t       m_viewportW        = 0;
+	uint32_t       m_viewportH        = 0;
+	uint32_t       m_viewportReqW     = 0;
+	uint32_t       m_viewportReqH     = 0;
+	bool           m_viewportResChanged = false;
+	VkImageLayout  m_viewportLayout   = VK_IMAGE_LAYOUT_UNDEFINED;
+
+	// ── PostFX pipeline ─────────────────────────────────────────────────────
+	void createPostFXResources(uint32_t w, uint32_t h);
+	void destroyPostFXResources();
+	void createPostFXPipelines();
+	void destroyPostFXPipelines();
+	void runPostFXBarrier(VkCommandBuffer cmd, VkImage img,
+	                      VkImageLayout from, VkImageLayout to,
+	                      VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage);
+
+	VkRenderPass m_postFxSceneRP  = VK_NULL_HANDLE;
+	VkRenderPass m_postFxBlitF16  = VK_NULL_HANDLE;
+	VkRenderPass m_postFxBlitF8   = VK_NULL_HANDLE;
+	VkRenderPass m_postFxFinalRP  = VK_NULL_HANDLE;
+
+	VkImage        m_hdrImage   = VK_NULL_HANDLE;
+	VkDeviceMemory m_hdrMemory  = VK_NULL_HANDLE;
+	VkImageView    m_hdrView    = VK_NULL_HANDLE;
+	VkFramebuffer  m_hdrFB      = VK_NULL_HANDLE;
+	VkImageLayout  m_hdrLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
+
+	VkImage        m_bloomImage[2]  = {};
+	VkDeviceMemory m_bloomMemory[2] = {};
+	VkImageView    m_bloomView[2]   = {};
+	VkFramebuffer  m_bloomFB[2]     = {};
+	VkImageLayout  m_bloomLayout[2] = { VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_UNDEFINED };
+
+	VkImage        m_ldrImage   = VK_NULL_HANDLE;
+	VkDeviceMemory m_ldrMemory  = VK_NULL_HANDLE;
+	VkImageView    m_ldrView    = VK_NULL_HANDLE;
+	VkFramebuffer  m_ldrFB      = VK_NULL_HANDLE;
+	VkImageLayout  m_ldrLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
+
+	VkImage        m_dummyImage   = VK_NULL_HANDLE;
+	VkDeviceMemory m_dummyMemory  = VK_NULL_HANDLE;
+	VkImageView    m_dummyView    = VK_NULL_HANDLE;
+
+	VkFramebuffer  m_fxaaFB    = VK_NULL_HANDLE;
+
+	VkDescriptorSetLayout m_postFxDSLayout   = VK_NULL_HANDLE;
+	VkDescriptorPool      m_postFxDSPool     = VK_NULL_HANDLE;
+	VkDescriptorSet       m_postFxDS[5]      = {};
+
+	VkSampler             m_postFxSampler    = VK_NULL_HANDLE;
+	VkPipelineLayout      m_postFxPipeLayout = VK_NULL_HANDLE;
+	VkPipeline            m_bloomBrightPipe  = VK_NULL_HANDLE;
+	VkPipeline            m_bloomBlurPipe    = VK_NULL_HANDLE;
+	VkPipeline            m_tonemapPipe      = VK_NULL_HANDLE;
+	VkPipeline            m_fxaaPipe         = VK_NULL_HANDLE;
+
+	bool   m_postFxReady     = false;
+	float  m_exposure        = 1.0f;
+	float  m_bloomStrength   = 0.25f;
+	float  m_bloomThreshold  = 1.0f;
+	float  m_bloomKnee       = 0.1f;
 
 	// ── Per-secondary-window resources ──────────────────────────────────────
 	struct WindowData

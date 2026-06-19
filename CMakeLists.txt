@@ -99,6 +99,9 @@ set(TARGET_SAMPLES          OFF CACHE BOOL "" FORCE)
 set(TARGET_VIEWER           OFF CACHE BOOL "" FORCE)
 set(TARGET_UNIT_TESTS       OFF CACHE BOOL "" FORCE)
 set(ENABLE_INSTALL          OFF CACHE BOOL "" FORCE)
+# Match the engine's /MD runtime — Jolt defaults to /MT which causes LNK2038
+# "RuntimeLibrary conflict MTd_StaticDebug vs MDd_DynamicDebug" at link time.
+set(USE_STATIC_MSVC_RUNTIME_LIBRARY OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(JoltPhysics)
 
 # ─── Recast Navigation ────────────────────────────────────────────────────────
@@ -130,15 +133,50 @@ if(NOT LZ4_FOUND)
     endif()
 endif()
 if(LZ4_FOUND)
-    message(STATUS "HorizonEngine: LZ4 found — hpak compression enabled")
+    message(STATUS "HorizonEngine: LZ4 found (system) — hpak compression enabled")
     add_library(lz4_import INTERFACE)
     target_include_directories(lz4_import INTERFACE ${LZ4_INCLUDE_DIRS})
     target_link_libraries(lz4_import INTERFACE ${LZ4_LIBRARIES})
     add_library(lz4::lz4 ALIAS lz4_import)
     set(HE_HAVE_LZ4 TRUE)
 else()
-    message(STATUS "HorizonEngine: LZ4 NOT found — hpak compression will store entries uncompressed")
-    set(HE_HAVE_LZ4 FALSE)
+    # System LZ4 not found — build it from source so compression is always available
+    # and gets distributed with the engine (statically linked into HorizonCore, no
+    # extra DLL to ship). We intentionally skip lz4's own CMakeLists.txt (which
+    # requires cmake_minimum_required < 3.5, removed in CMake 3.27) and create our
+    # own minimal target directly from lz4's lib/ sources.
+    message(STATUS "HorizonEngine: LZ4 not found on system — fetching v1.9.4 from source")
+    FetchContent_Declare(
+        lz4
+        GIT_REPOSITORY https://github.com/lz4/lz4.git
+        GIT_TAG        v1.9.4
+        GIT_SHALLOW    TRUE
+    )
+    FetchContent_GetProperties(lz4)
+    if(NOT lz4_POPULATED)
+        # FetchContent_Populate downloads without calling add_subdirectory, which
+        # lets us bypass lz4's old cmake_minimum_required.
+        # CMP0169 (CMake >= 3.28) deprecates this form; suppress the warning.
+        if(POLICY CMP0169)
+            cmake_policy(SET CMP0169 OLD)
+        endif()
+        FetchContent_Populate(lz4)
+        if(POLICY CMP0169)
+            cmake_policy(SET CMP0169 NEW)
+        endif()
+    endif()
+    # LZ4 is written in C; enable the C compiler for this target only.
+    enable_language(C)
+    add_library(lz4_static STATIC
+        "${lz4_SOURCE_DIR}/lib/lz4.c"
+        "${lz4_SOURCE_DIR}/lib/lz4hc.c"
+    )
+    target_include_directories(lz4_static PUBLIC "${lz4_SOURCE_DIR}/lib")
+    set_target_properties(lz4_static PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    if(NOT TARGET lz4::lz4)
+        add_library(lz4::lz4 ALIAS lz4_static)
+    endif()
+    set(HE_HAVE_LZ4 TRUE)
 endif()
 
 # ─── Tracy (optional profiling) ────────────────────────────────────────────────

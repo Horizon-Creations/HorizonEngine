@@ -25,6 +25,11 @@ struct RenderObject {
     HE::AABB     worldBounds;
     uint32_t     entityId       = 0;
     uint8_t      lod            = 0;
+    // PBR material scalars (resolved at extract time from MaterialAsset).
+    glm::vec3    baseColor      = { 1.0f, 1.0f, 1.0f };
+    float        metallic       = 0.0f;
+    float        roughness      = 0.5f;
+    float        opacity        = 1.0f;
     // Cheap-billboard opt-outs. Precipitation/particles set these false so thousands of
     // them skip the per-object shadow-map depth pass and the SSAO position prepass (where
     // they are NOT instanced) — and so rain/snow don't wrongly cast shadows or darken AO.

@@ -349,8 +349,14 @@ private:
 	ImFont* m_fontSubheading = nullptr;
 	ImFont* m_fontHeading    = nullptr;
 
-	void* m_d3d12SrvHeap      = nullptr;
-	void* m_d3d12SrvAllocator = nullptr;
+	void*    m_d3d12SrvHeap      = nullptr;
+	void*    m_d3d12SrvAllocator = nullptr;
+	// Viewport offscreen RT SRV slot in the ImGui heap (D3D12 only).
+	uint64_t m_d3d12ViewportSrvCpuPtr   = 0;
+	uint64_t m_d3d12ViewportSrvGpuPtr   = 0;
+	bool     m_d3d12ViewportSrvAllocated = false;
+	// Viewport ImGui descriptor set (Vulkan only); void* to avoid Vulkan headers here.
+	void*    m_vkViewportDescSet         = nullptr;
 
 	ImTextureID m_logoTexture = 0;
 	int         m_logoW       = 0;
