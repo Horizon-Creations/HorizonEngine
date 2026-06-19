@@ -32,6 +32,9 @@ public:
     bool  HasViewportResourceChanged() const;
     void  ClearViewportResourceChanged();
 
+    void SetDebugLines(const std::vector<DebugLine>& lines) override;
+    void SetMoonTexture(const void* rgba8Pixels, int width, int height) override;
+
 private:
     // Extract → cull → sort → RenderGraph → replay into the bound command list.
     void DrawScene(void* cmdList, int width, int height);

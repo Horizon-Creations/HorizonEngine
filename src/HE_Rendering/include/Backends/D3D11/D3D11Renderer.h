@@ -28,6 +28,10 @@ public:
     bool  CaptureViewport(std::vector<uint8_t>& rgba,
                           uint32_t& width, uint32_t& height) override;
 
+    // [blind] added D3D11 sky+IBL+debuglines parity
+    void SetDebugLines(const std::vector<DebugLine>& lines) override;
+    void SetMoonTexture(const void* rgba8Pixels, int width, int height) override;
+
 private:
     // Extract → cull → sort → RenderGraph → replay into the currently bound targets.
     void DrawScene(int width, int height);
