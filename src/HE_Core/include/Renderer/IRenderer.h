@@ -162,6 +162,9 @@ public:
         // backend turns these into a horizontal drift vector for the cloud noise.
         float     windDirection = 30.0f;
         float     windSpeed     = 1.0f;
+        // Lightning flash brightness (0 = none … 1 = full strike). Driven by the
+        // WeatherSystem during storms; added to the sky colour in the backend.
+        float     flash         = 0.0f;
     };
     virtual void SetEnvironmentSettings(const EnvironmentSettings& e) { m_environment = e; }
     const EnvironmentSettings& GetEnvironment() const { return m_environment; }

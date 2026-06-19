@@ -31,6 +31,10 @@ struct EnvironmentComponent
     float fogDensity      = 0.0f;
     float fogHeightFalloff = 0.1f;
 
+    // Lightning flash (0..1, runtime only — driven by the WeatherSystem during storms,
+    // never serialized). Brightens the sky shader for a brief strike.
+    float flash = 0.0f;
+
     // Night sky: aurora ribbons, Milky-Way band and the space nebula.
     float     auroraIntensity   = 0.0f;
     float     milkyWayIntensity = 0.6f;

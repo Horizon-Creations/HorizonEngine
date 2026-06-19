@@ -13,6 +13,8 @@ add_library(HorizonScene SHARED
     src/NavigationSystem.cpp
     src/ParticleSystem.cpp
     src/LODSystem.cpp
+    src/WeatherSystem.cpp
+    src/SceneSystems.cpp
     src/FoliageSystem.cpp
     src/UISystem.cpp
     src/ScriptContext.cpp

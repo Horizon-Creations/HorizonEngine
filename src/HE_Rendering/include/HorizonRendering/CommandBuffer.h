@@ -21,6 +21,7 @@ struct DrawCall {
     uint32_t     instanceCount = 1;
     uint32_t     entityId      = 0;                    // editor picking / debug
     uint8_t      lod           = 0;
+    bool         contributesAO = true;                 // false → skipped by the SSAO prepass
     // Non-empty when GeometryPass batched multiple same-mesh+same-material objects.
     // The backend uploads these to the instance VBO and calls glDrawElementsInstanced.
     std::vector<glm::mat4> instanceTransforms;

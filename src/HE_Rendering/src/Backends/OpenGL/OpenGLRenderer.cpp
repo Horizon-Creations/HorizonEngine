@@ -416,6 +416,7 @@ uniform vec3      uNebulaColor; // space-nebula base colour
 uniform vec3      uAuroraColor; // aurora base colour
 uniform vec3      uWind;        // cloud drift vector (world units / s, horizontal)
 uniform sampler3D uNoise;       // tiling 3D value-noise (replaces the hash fbm)
+uniform float     uFlash;       // lightning flash (0 = none … 1 = full strike)
 out vec4 FragColor;
 //#SKYFUNC#
 
@@ -834,6 +835,7 @@ void main()
 		col += moonDisk(dir, uSunDir);
 	}
 	col = applyClouds(col, dir, uSunDir, uTime, uCloudCoverage, uSunColor, uWind);
+	col += uFlash * vec3(0.85, 0.90, 1.0); // lightning lights up the sky/clouds
 	FragColor = vec4(col, 1.0);
 }
 )GLSL";
@@ -1644,6 +1646,7 @@ void OpenGLRenderer::CreateSkyPipeline()
 	m_uSkyAuroraColor = glGetUniformLocation(m_skyProgram, "uAuroraColor");
 	m_uSkyWind        = glGetUniformLocation(m_skyProgram, "uWind");
 	m_uSkyNoise       = glGetUniformLocation(m_skyProgram, "uNoise");
+	m_uSkyFlash       = glGetUniformLocation(m_skyProgram, "uFlash");
 
 	// Procedural 3D noise volume the sky's starFbm3/worleyFbm sample (clouds +
 	// nebula) — built once on the CPU. RG16 (R=value noise, G=Worley billows) +
@@ -2084,6 +2087,7 @@ unsigned int OpenGLRenderer::RenderSSAO(const CommandBuffer& cmds, int pw, int p
 	HE::UUID lastId{}; const GpuMesh* cMesh = nullptr; bool valid = false;
 	for (const DrawCall& dc : cmds.drawCalls())
 	{
+		if (!dc.contributesAO) continue; // precip/particles: skip the SSAO position prepass
 		if (!valid || dc.meshAssetId != lastId)
 		{
 			cMesh = ResolveMesh(dc.meshAssetId);
@@ -3248,6 +3252,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glUniform1f(m_uSkyNebula, GetEnvironment().nebulaIntensity);
 			glUniform3fv(m_uSkyNebulaColor, 1, glm::value_ptr(GetEnvironment().nebulaColor));
 			glUniform3fv(m_uSkyAuroraColor, 1, glm::value_ptr(GetEnvironment().auroraColor));
+			glUniform1f(m_uSkyFlash, GetEnvironment().flash);
 			{
 				// Wind control → horizontal cloud drift vector. Direction 0° drifts
 				// toward -Z (north), increasing clockwise; speed scales the rate.
