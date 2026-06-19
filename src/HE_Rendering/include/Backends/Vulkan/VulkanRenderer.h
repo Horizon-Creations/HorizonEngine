@@ -40,6 +40,9 @@ public:
 
 	void SetVSync(bool enabled) override;
 
+	void SetDebugLines(const std::vector<DebugLine>& lines) override;
+	void SetMoonTexture(const void* rgba8Pixels, int width, int height) override;
+
 	// Offscreen viewport (editor scene view)
 	void  SetViewportSize(uint32_t width, uint32_t height) override;
 	// GetViewportTexture() is inherited from IRenderer; returns m_viewportImGuiHandle
@@ -273,4 +276,57 @@ private:
 	bool        m_vsync = true;
 
 	VulkanShaderManager m_shaderManager;
+
+	// ── Sky rendering ────────────────────────────────────────────────────────
+	void createSkyPipeline();
+	void destroySkyPipeline();
+	void drawSky(VkCommandBuffer cmd, uint32_t width, uint32_t height, bool hdr);
+
+	// Per-frame sky UBO (mirrors FrameUBO pattern).
+	struct SkyUBO
+	{
+		VkBuffer        buf    = VK_NULL_HANDLE;
+		VkDeviceMemory  mem    = VK_NULL_HANDLE;
+		void*           mapped = nullptr;
+		VkDescriptorSet set    = VK_NULL_HANDLE;
+	};
+	SkyUBO                m_skyUBO[2];
+	VkDescriptorSetLayout m_skyDSLayout        = VK_NULL_HANDLE;
+	VkDescriptorPool      m_skyDSPool          = VK_NULL_HANDLE;
+	VkPipelineLayout      m_skyPipelineLayout  = VK_NULL_HANDLE;
+	VkPipeline            m_skyPipeline        = VK_NULL_HANDLE;
+	VkPipeline            m_skyPipelineHDR     = VK_NULL_HANDLE;
+
+	// Moon texture (uploaded once via SetMoonTexture).
+	VkImage        m_moonImage   = VK_NULL_HANDLE;
+	VkDeviceMemory m_moonMemory  = VK_NULL_HANDLE;
+	VkImageView    m_moonView    = VK_NULL_HANDLE;
+	VkSampler      m_moonSampler = VK_NULL_HANDLE;
+
+	// Wall-clock time (seconds) updated each frame by Render().
+	float m_wallTime = 0.0f;
+
+	// ── Debug line rendering ─────────────────────────────────────────────────
+	void createDebugLinePipeline();
+	void destroyDebugLinePipeline();
+	void drawDebugLines(VkCommandBuffer cmd, const glm::mat4& viewProj, bool hdr = false);
+
+	// Per-frame debug UBO + vertex buffer.
+	struct DebugUBO
+	{
+		VkBuffer        buf    = VK_NULL_HANDLE;
+		VkDeviceMemory  mem    = VK_NULL_HANDLE;
+		void*           mapped = nullptr;
+		VkDescriptorSet set    = VK_NULL_HANDLE;
+	};
+	DebugUBO              m_debugUBO[2];
+	VkBuffer              m_debugVB[2]        = {};
+	VkDeviceMemory        m_debugVBMem[2]     = {};
+	void*                 m_debugVBMapped[2]  = {};
+	VkDescriptorSetLayout m_debugDSLayout       = VK_NULL_HANDLE;
+	VkDescriptorPool      m_debugDSPool         = VK_NULL_HANDLE;
+	VkPipelineLayout      m_debugPipelineLayout  = VK_NULL_HANDLE;
+	VkPipeline            m_debugPipeline        = VK_NULL_HANDLE;
+	VkPipeline            m_debugPipelineHDR     = VK_NULL_HANDLE;
+	std::vector<DebugLine> m_debugLines;
 };

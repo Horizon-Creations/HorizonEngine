@@ -26,6 +26,276 @@
 
 using Microsoft::WRL::ComPtr;
 
+// [blind] added D3D11 sky+IBL+debuglines parity
+
+// ─── Shared sky colour function ─────────────────────────────────────────────
+// Mirrors kSkyFuncGLSL in OpenGLRenderer.cpp exactly (GLSL→HLSL: lerp/frac/float3).
+static const char* kSkyFuncHLSL = R"HLSL(
+float3 skyColor(float3 dir, float3 sunDir)
+{
+    dir    = normalize(dir);
+    sunDir = normalize(sunDir);
+    float sunY = clamp(sunDir.y, -0.2f, 1.0f);
+    float day  = smoothstep(-0.10f, 0.10f, sunY);
+    float dusk = smoothstep(-0.06f, 0.05f, sunY)
+               * (1.0f - smoothstep(0.05f, 0.28f, sunY));
+    float3 zenithDay  = float3(0.08f, 0.28f, 0.72f);
+    float3 horizDay   = float3(0.42f, 0.62f, 0.88f);
+    float3 zenithNite = float3(0.003f, 0.005f, 0.015f);
+    float3 horizNite  = float3(0.006f, 0.009f, 0.024f);
+    float3 zenith  = lerp(zenithNite, zenithDay, day);
+    float3 horizon = lerp(horizNite,  horizDay,  day);
+    float2 sunAz  = normalize(sunDir.xz + 1e-5f);
+    float toward  = dot(normalize(dir.xz + 1e-5f), sunAz) * 0.5f + 0.5f;
+    toward = pow(clamp(toward, 0.0f, 1.0f), 1.5f);
+    float3 duskHoriz = lerp(float3(0.52f,0.30f,0.52f), float3(1.20f,0.50f,0.16f), toward);
+    horizon = lerp(horizon, duskHoriz, dusk);
+    zenith  = lerp(zenith,  float3(0.20f,0.16f,0.40f), dusk * 0.6f);
+    float  h    = clamp(dir.y, 0.0f, 1.0f);
+    float  grad = pow(1.0f - h, 2.5f);
+    float3 sky  = lerp(zenith, horizon, grad);
+    float band = pow(1.0f - h, 8.0f) * toward;
+    sky += float3(1.25f,0.62f,0.26f) * (band * dusk * 0.8f);
+    float3 ground = lerp(float3(0.02f,0.02f,0.03f), float3(0.24f,0.23f,0.21f), day);
+    sky = lerp(sky, ground, smoothstep(0.0f, -0.25f, dir.y));
+    float3 sunTint = lerp(float3(1.0f,0.42f,0.20f), float3(1.0f,0.96f,0.88f),
+                          smoothstep(0.0f, 0.25f, sunY));
+    float  s      = max(dot(dir, sunDir), 0.0f);
+    float  sunVis = max(day, dusk);
+    sky += sunTint * (pow(s, 1800.0f) * 14.0f) * day;
+    sky += sunTint * (pow(s, 180.0f)  * 2.2f)  * sunVis;
+    sky += sunTint * (pow(s, 22.0f)   * 0.7f)  * sunVis;
+    sky += float3(1.0f,0.5f,0.25f) * (pow(s, 5.0f) * 0.5f) * dusk;
+    float  night   = 1.0f - day;
+    float3 moonDir = normalize(float3(-sunDir.x, -sunDir.y, sunDir.z));
+    float  m       = max(dot(dir, moonDir), 0.0f);
+    sky += float3(0.80f,0.86f,1.00f) * (pow(m, 60.0f) * 0.05f) * night;
+    sky += float3(0.015f,0.018f,0.030f) * night;
+    return sky;
+}
+)HLSL";
+
+// ─── Sky background pass HLSL ───────────────────────────────────────────────
+// VSSky: fullscreen triangle at D3D far plane (z=1 so geometry draws over it).
+static const char* kSkyVSHLSL = R"HLSL(
+struct SkyVSOut { float4 pos : SV_POSITION; float2 ndc : TEXCOORD0; };
+SkyVSOut VSSky(uint vid : SV_VertexID)
+{
+    SkyVSOut o;
+    float x = (float)((vid & 1u) << 2u) - 1.0f;
+    float y = (float)((vid & 2u) << 1u) - 1.0f;
+    o.pos = float4(x, y, 1.0f, 1.0f); // z=1 = D3D far plane
+    o.ndc = float2(x, y);
+    return o;
+}
+)HLSL";
+
+// PSSky: reconstruct world ray from inv(viewProj), evaluate sky + effects.
+// Prepend kSkyFuncHLSL when compiling so skyColor() is in scope.
+static const char* kSkyPSHLSL = R"HLSL(
+cbuffer SkyEnv : register(b0)
+{
+    float4x4 uInvViewProj;
+    float3   uSunDir;       float  uTimeOfDay;
+    float3   uSunColor;     float  uCloudCoverage;
+    float3   uWind;         float  uTime;
+    float3   uAuroraColor;  float  uAurora;
+    float    uMilkyWay;     float  uFlash; int uHasMoonTex; float _skyPad;
+};
+Texture2D    uMoonTex   : register(t0);
+SamplerState uSkyLinear : register(s0);
+
+// ── Hash / noise (pure math) ─────────────────────────────────────────────────
+float starHash(float3 p)
+{
+    p = frac(p * 0.1031f); p += dot(p, p.zyx + 31.32f);
+    return frac((p.x + p.y) * p.z);
+}
+float starNoise3(float3 p)
+{
+    float3 i = floor(p), f = frac(p), u = f*f*(3.0f-2.0f*f);
+    return lerp(
+        lerp(lerp(starHash(i),             starHash(i+float3(1,0,0)), u.x),
+             lerp(starHash(i+float3(0,1,0)), starHash(i+float3(1,1,0)), u.x), u.y),
+        lerp(lerp(starHash(i+float3(0,0,1)), starHash(i+float3(1,0,1)), u.x),
+             lerp(starHash(i+float3(0,1,1)), starHash(i+float3(1,1,1)), u.x), u.y), u.z);
+}
+float starFbm3(float3 p, int oct)
+{
+    float v=0.0f, a=0.5f;
+    for (int i=0;i<oct;++i){v+=a*starNoise3(p);p*=2.03f;a*=0.5f;}
+    return v;
+}
+float cloudHash(float2 p)
+{
+    p=frac(p*float2(127.1f,311.7f)); p+=dot(p,p+34.56f); return frac(p.x*p.y);
+}
+float cloudNoise(float2 p)
+{
+    float2 i=floor(p),f=frac(p),u=f*f*(3.0f-2.0f*f);
+    return lerp(lerp(cloudHash(i),cloudHash(i+float2(1,0)),u.x),
+                lerp(cloudHash(i+float2(0,1)),cloudHash(i+float2(1,1)),u.x),u.y);
+}
+float cloudFbm(float2 p)
+{
+    float v=0.0f,a=0.5f;
+    for(int i=0;i<5;++i){v+=a*cloudNoise(p);p*=2.02f;a*=0.5f;}
+    return v;
+}
+
+// ── Celestial rotation ────────────────────────────────────────────────────────
+float3 celestialDir(float3 dir, float tod)
+{
+    float a=tod*6.2831853f;
+    float3 axis=normalize(float3(0.22f,0.92f,0.32f));
+    float c=cos(a),s=sin(a);
+    return dir*c+cross(axis,dir)*s+axis*dot(axis,dir)*(1.0f-c);
+}
+float galacticBand(float3 cd)
+{
+    float3 gN=normalize(float3(0.46f,0.52f,-0.72f));
+    float d=dot(normalize(cd),gN); return exp(-d*d*7.0f);
+}
+
+// ── Star field ────────────────────────────────────────────────────────────────
+float3 starField(float3 dir, float3 cdir, float3 sunDir, float t, float mw)
+{
+    float night=1.0f-smoothstep(-0.10f,0.10f,clamp(sunDir.y,-0.2f,1.0f));
+    if(night<=0.0f||dir.y<=0.0f) return (float3)0;
+    float band=galacticBand(cdir), mwc=clamp(mw,0.0f,1.0f);
+    float thresh=lerp(0.92f,lerp(0.86f,0.72f,mwc),band);
+    float3 p=cdir*70.0f, cell=floor(p);
+    float present=starHash(cell);
+    if(present<thresh) return (float3)0;
+    float3 sp=float3(starHash(cell+1.7f),starHash(cell+4.3f),starHash(cell+8.9f));
+    float d=length(frac(p)-sp);
+    float sizeH=starHash(cell+5.7f), big=sizeH*sizeH*sizeH;
+    float radius=lerp(0.05f,0.17f,big);
+    float core=smoothstep(radius,0.0f,d); core*=core;
+    float halo=smoothstep(radius*3.0f,radius,d)*(big*big)*0.35f;
+    float shape=core+halo;
+    float mag=(0.4f+0.6f*smoothstep(thresh,1.0f,present))*lerp(0.7f,2.7f,big);
+    float twPhase=starHash(cell+23.5f)*6.2831f, twFreq=2.0f+4.0f*starHash(cell+47.1f);
+    float tw=0.7f+0.3f*sin(t*twFreq+twPhase);
+    float horizon=smoothstep(0.0f,0.15f,dir.y);
+    float3 tint=lerp(float3(0.80f,0.88f,1.0f),float3(1.0f,0.93f,0.82f),starHash(cell+12.1f));
+    float bandDim=lerp(1.6f,lerp(0.9f,1.5f,mwc),band);
+    return tint*(shape*mag*tw*horizon*night*bandDim);
+}
+
+// ── Aurora ────────────────────────────────────────────────────────────────────
+float3 aurora(float3 dir, float3 sunDir, float t, float intensity, float3 auroraCol)
+{
+    if(intensity<=0.0f) return (float3)0;
+    float night=1.0f-smoothstep(-0.10f,0.10f,clamp(sunDir.y,-0.2f,1.0f));
+    if(night<=0.0f||dir.y<=0.04f) return (float3)0;
+    float2 P=dir.xz/(dir.y+0.45f);
+    float along=P.x, across=P.y;
+    float wave=0.40f*sin(along*0.7f+t*0.15f)+0.30f*cloudFbm(float2(along*0.35f-t*0.04f,3.0f));
+    float phase=across*0.30f+wave;
+    float f=abs(frac(phase)-0.5f);
+    float ribbon=smoothstep(0.10f,0.45f,f);
+    float stri=cloudFbm(float2(along*6.0f+t*0.25f,across*1.2f));
+    float curtain=ribbon*(0.45f+0.55f*smoothstep(0.30f,0.80f,stri));
+    float patches=0.65f+0.35f*smoothstep(0.25f,0.85f,cloudFbm(float2(along*0.45f+t*0.03f,across*0.4f+9.0f)));
+    float hcol=smoothstep(0.05f,0.60f,dir.y);
+    float3 bCol=auroraCol*float3(0.60f,0.15f,0.90f), tCol=auroraCol*float3(0.30f,0.90f,0.70f);
+    float3 col=lerp(lerp(bCol,auroraCol,smoothstep(0.0f,0.5f,hcol)),tCol,smoothstep(0.5f,1.0f,hcol));
+    float fade=smoothstep(0.03f,0.16f,dir.y)*(1.0f-smoothstep(0.78f,1.0f,dir.y));
+    return col*(curtain*patches*fade*intensity*night*5.0f);
+}
+
+// ── Moon disk ─────────────────────────────────────────────────────────────────
+float3 moonDisk(float3 dir, float3 sunDir)
+{
+    float day=smoothstep(-0.10f,0.10f,clamp(sunDir.y,-0.2f,1.0f)), night=1.0f-day;
+    if(night<=0.0f) return (float3)0;
+    float3 moonDir2=normalize(float3(-sunDir.x,-sunDir.y,sunDir.z));
+    if(dot(dir,moonDir2)<=0.0f) return (float3)0;
+    float3 right=normalize(cross(float3(0,1,0),moonDir2)), up=cross(moonDir2,right);
+    const float kR=0.030f;
+    float2 q=float2(dot(dir,right),dot(dir,up))/kR;
+    float r=length(q); if(r>1.0f) return (float3)0;
+    float tex=uHasMoonTex?uMoonTex.Sample(uSkyLinear,q*0.5f+0.5f).r:1.0f;
+    float limb=sqrt(max(1.0f-r*r,0.0f)), edge=smoothstep(1.0f,0.90f,r);
+    return float3(0.92f,0.94f,1.00f)*(tex*limb*edge*3.0f*night);
+}
+
+// ── Simplified cloud layer (2D FBM slab raymarch) ─────────────────────────────
+float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float t,
+                   float coverage, float3 sunColor, float3 wind)
+{
+    if(coverage<=0.0f||dir.y<0.02f) return baseSky;
+    const int N=8;
+    float sBase=1.0f/max(dir.y,1e-3f), sTop=2.6f/max(dir.y,1e-3f);
+    float ds=(sTop-sBase)/float(N);
+    float jitter=cloudHash(dir.xz*173.3f+dir.y);
+    float sunY=clamp(sunDir.y,-0.2f,1.0f);
+    float day=smoothstep(-0.10f,0.10f,sunY);
+    float dusk=smoothstep(-0.06f,0.05f,sunY)*(1.0f-smoothstep(0.05f,0.28f,sunY));
+    float costh=max(dot(dir,sunDir),0.0f);
+    float g=0.6f,g2=g*g;
+    float phase=(1.0f-g2)/(12.566371f*pow(max(1.0f+g2-2.0f*g*costh,1e-4f),1.5f));
+    float T=1.0f; float3 L=(float3)0;
+    for(int i=0;i<N;++i)
+    {
+        float s=sBase+(float(i)+jitter)*ds;
+        float3 pos=dir*s;
+        float lo=lerp(0.70f,0.22f,clamp(coverage,0.0f,1.0f));
+        float dens=smoothstep(lo,lo+0.13f,cloudFbm(pos.xz*1.2f+wind.xz*t));
+        if(dens>0.001f)
+        {
+            float sh=exp(-smoothstep(lo,lo+0.13f,cloudFbm((pos+sunDir*0.5f).xz*1.2f+wind.xz*t))*1.7f);
+            float powder=1.0f-exp(-dens*3.0f), lit=sh*powder;
+            float3 dayCol=lerp(float3(0.17f,0.20f,0.29f),sunColor*1.12f,lit);
+            float3 nightCol=lerp(float3(0.015f,0.018f,0.035f),float3(0.26f,0.29f,0.45f),lit);
+            float3 cc=lerp(nightCol,dayCol,day);
+            cc=lerp(cc,sunColor*float3(1.25f,0.55f,0.28f),dusk*lit*0.9f);
+            cc+=sunColor*(phase*sh*0.9f*max(day,dusk));
+            float hT=smoothstep(1.0f,2.6f,pos.y); cc*=lerp(0.5f,1.15f,hT);
+            float a=1.0f-exp(-dens*ds*7.0f);
+            L+=T*a*cc; T*=1.0f-a; if(T<0.02f) break;
+        }
+    }
+    float horizon=smoothstep(0.02f,0.16f,dir.y);
+    T=1.0f-(1.0f-T)*horizon; L*=horizon;
+    return baseSky*T+L;
+}
+
+struct SkyVSOut { float4 pos : SV_POSITION; float2 ndc : TEXCOORD0; };
+float4 PSSky(SkyVSOut i) : SV_TARGET
+{
+    // Reconstruct world-space ray. D3D NDC z in [0,1]: 0=near, 1=far.
+    float4 wp1=mul(uInvViewProj,float4(i.ndc,1.0f,1.0f)); // far
+    float4 wp0=mul(uInvViewProj,float4(i.ndc,0.0f,1.0f)); // near
+    float3 dir=wp1.xyz/wp1.w - wp0.xyz/wp0.w;
+    float3 col=skyColor(dir,uSunDir);
+    float nightF=1.0f-smoothstep(-0.10f,0.10f,clamp(normalize(uSunDir).y,-0.2f,1.0f));
+    if(nightF>0.0f)
+    {
+        float3 cdir=celestialDir(dir,uTimeOfDay);
+        col+=starField(dir,cdir,uSunDir,uTime,uMilkyWay);
+        col+=aurora(dir,uSunDir,uTime,uAurora,uAuroraColor);
+        col+=moonDisk(dir,uSunDir);
+    }
+    col=applyClouds(col,dir,uSunDir,uTime,uCloudCoverage,uSunColor,uWind);
+    col+=uFlash*float3(0.85f,0.90f,1.0f);
+    return float4(col,1.0f);
+}
+)HLSL";
+
+// ─── Debug line pass HLSL ───────────────────────────────────────────────────
+static const char* kDebugLineHLSL = R"HLSL(
+cbuffer DebugCB : register(b0) { float4x4 uVP; };
+struct LineIn  { float3 pos : POSITION; float3 color : COLOR0; };
+struct LineOut { float4 clip : SV_POSITION; float3 color : COLOR0; };
+LineOut VSLine(LineIn i)
+{
+    LineOut o; o.clip=mul(uVP,float4(i.pos,1.0f)); o.color=i.color; return o;
+}
+float4 PSLine(LineOut i) : SV_TARGET { return float4(i.color,1.0f); }
+)HLSL";
+
 // ─── Embedded HLSL ──────────────────────────────────────────────────────────
 // Same unlit Blinn-Phong as the GL/Metal backends. Matrices come straight from
 // glm (column-major); HLSL's default cbuffer matrix packing is column_major, so
@@ -48,6 +318,8 @@ cbuffer PerFrame : register(b1)
     float4   uLightParams[8];   // x range
     float4x4 uLightVP;          // directional-light view-proj (D3D clip)
     int4     uShadowEnabled;    // x = 0/1
+    float4   uSunDir;           // xyz = sun direction toward sky, w unused
+    float4   uFog;              // x = fogDensity, y = fogHeightFalloff
 };
 
 Texture2D    uTexture   : register(t0);
@@ -123,7 +395,14 @@ float4 PSMain(VSOut i) : SV_TARGET
     }
 
     float3 V      = normalize(uCameraPos.xyz - i.worldPos);
-    float3 result = 0.03 * base * (1.0-met);  // ambient
+    // IBL ambient: sample sky in surface normal and reflection direction.
+    float3 Nup    = normalize(float3(N.x, max(N.y, 0.1f), N.z));
+    float3 Rrough = normalize(lerp(reflect(-V, N), N, rough));
+    float3 F0     = lerp(float3(0.04f,0.04f,0.04f), base, met);
+    float3 kd     = (1.0f - F0) * (1.0f - met);
+    float3 ambDiff = skyColor(Nup,    uSunDir.xyz) * base * kd;
+    float3 ambSpec = skyColor(Rrough, uSunDir.xyz) * F0;
+    float3 result  = ambDiff * 0.35f + ambSpec * (1.0f - 0.6f * rough);
 
     for (int li = 0; li < uLightCount.x; ++li)
     {
@@ -151,6 +430,17 @@ float4 PSMain(VSOut i) : SV_TARGET
         }
         float  sh = (type == 0) ? shadowFactor(i.worldPos, N, L) : 1.0;
         result += BRDF(L, V, N, base, met, rough) * uLightColor[li].rgb * uLightColor[li].w * atten * sh;
+    }
+    // Atmospheric fog
+    if (uFog.x > 0.0f) {
+        float3 ray = i.worldPos - uCameraPos.xyz;
+        float dist = max(length(ray), 1e-4f);
+        float k = uFog.y * ray.y;
+        float ta = abs(k) > 1e-4f ? (1.0f - exp(-k)) / k : 1.0f;
+        float opt = uFog.x * dist * exp(-uFog.y * uCameraPos.y) * ta;
+        float f = 1.0f - exp(-opt);
+        float3 fogCol = skyColor(ray/dist, uSunDir.xyz);
+        result = lerp(result, fogCol, clamp(f, 0.0f, 1.0f));
     }
     return float4(result, uPBR.z);
 }
@@ -291,6 +581,17 @@ namespace
         glm::vec4  lightParams[8];
         glm::mat4  lightVP;
         glm::ivec4 shadowEnabled;
+        glm::vec4  sunDir;   // xyz = sun direction
+        glm::vec4  fog;      // x=fogDensity, y=fogHeightFalloff
+    };
+
+    struct SkyCB {
+        glm::mat4 invViewProj;
+        glm::vec3 sunDir;    float timeOfDay;
+        glm::vec3 sunColor;  float cloudCoverage;
+        glm::vec3 wind;      float time;
+        glm::vec3 auroraColor; float aurora;
+        float milkyWay;      float flash; int hasMoonTex; float _pad;
     };
 
     // Remaps the extractor's GL-convention light projection (depth -1..1) to D3D
@@ -371,6 +672,23 @@ struct D3D11RendererImpl
     ComPtr<ID3D11Buffer>            postFxCB;
     bool postFxReady     = false;
     float exposure       = 1.0f;
+
+    // ── Sky pipeline ──────────────────────────────────────────────────────
+    ComPtr<ID3D11VertexShader>       skyVS;
+    ComPtr<ID3D11PixelShader>        skyPS;
+    ComPtr<ID3D11Buffer>             skyCB;
+    ComPtr<ID3D11Texture2D>          moonTex2D;
+    ComPtr<ID3D11ShaderResourceView> moonSRV;
+    bool skyReady = false;
+    // ── Debug line pipeline ───────────────────────────────────────────────
+    ComPtr<ID3D11VertexShader>  debugVS;
+    ComPtr<ID3D11PixelShader>   debugPS;
+    ComPtr<ID3D11Buffer>        debugVB;
+    ComPtr<ID3D11Buffer>        debugCB;
+    ComPtr<ID3D11InputLayout>   debugIL;
+    bool debugReady = false;
+    std::vector<DebugLine> m_debugLines;
+    float m_wallTime = 0.0f;
     float bloomStrength  = 0.25f;
     float bloomThreshold = 1.0f;
     float bloomKnee      = 0.1f;
@@ -594,14 +912,15 @@ struct D3D11RendererImpl
         flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
 #endif
         ComPtr<ID3DBlob> vsBlob, psBlob, err;
-        if (FAILED(D3DCompile(kSceneHLSL, std::strlen(kSceneHLSL), "scene", nullptr, nullptr,
+        const std::string sceneSource = std::string(kSkyFuncHLSL) + kSceneHLSL;
+        if (FAILED(D3DCompile(sceneSource.c_str(), sceneSource.size(), "scene", nullptr, nullptr,
                               "VSMain", "vs_5_0", flags, 0, &vsBlob, &err)))
         {
             Logger::Log(Logger::LogLevel::Error, (std::string("D3D11Renderer: VS compile failed: ")
                 + (err ? static_cast<const char*>(err->GetBufferPointer()) : "")).c_str());
             return false;
         }
-        if (FAILED(D3DCompile(kSceneHLSL, std::strlen(kSceneHLSL), "scene", nullptr, nullptr,
+        if (FAILED(D3DCompile(sceneSource.c_str(), sceneSource.size(), "scene", nullptr, nullptr,
                               "PSMain", "ps_5_0", flags, 0, &psBlob, &err)))
         {
             Logger::Log(Logger::LogLevel::Error, (std::string("D3D11Renderer: PS compile failed: ")
@@ -620,7 +939,7 @@ struct D3D11RendererImpl
 
         // Depth-only vertex shader for the shadow pass.
         ComPtr<ID3DBlob> dvsBlob;
-        if (SUCCEEDED(D3DCompile(kSceneHLSL, std::strlen(kSceneHLSL), "scene", nullptr, nullptr,
+        if (SUCCEEDED(D3DCompile(sceneSource.c_str(), sceneSource.size(), "scene", nullptr, nullptr,
                                  "VSDepth", "vs_5_0", flags, 0, &dvsBlob, &err)))
             device->CreateVertexShader(dvsBlob->GetBufferPointer(), dvsBlob->GetBufferSize(), nullptr, &depthVS);
 
@@ -707,6 +1026,8 @@ struct D3D11RendererImpl
                 device->CreateShaderResourceView(tex.Get(), nullptr, &dummyTexture);
         }
         createPostFX();
+        createSkyPipeline();
+        createDebugLinePipeline();
         return vs && ps && inputLayout && perObjectCB && perFrameCB && sampler;
     }
 
@@ -808,6 +1129,168 @@ struct D3D11RendererImpl
         }
         return &meshCache.emplace(assetId, mesh).first->second;
     }
+
+    bool createSkyPipeline()
+    {
+        UINT flags = 0;
+#ifdef _DEBUG
+        flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+        auto compile = [&](const char* src, size_t srcLen, const char* entry, const char* profile,
+                           ComPtr<ID3DBlob>& out) -> bool
+        {
+            ComPtr<ID3DBlob> err;
+            if (FAILED(D3DCompile(src, srcLen, entry, nullptr, nullptr,
+                                  entry, profile, flags, 0, &out, &err)))
+            {
+                Logger::Log(Logger::LogLevel::Error,
+                    (std::string("D3D11 sky '") + entry + "': " +
+                     (err ? static_cast<const char*>(err->GetBufferPointer()) : "?")).c_str());
+                return false;
+            }
+            return true;
+        };
+        ComPtr<ID3DBlob> vsB, psB;
+        const std::string skyPS_src = std::string(kSkyFuncHLSL) + kSkyPSHLSL;
+        if (!compile(kSkyVSHLSL, std::strlen(kSkyVSHLSL), "VSSky", "vs_5_0", vsB)) return false;
+        if (!compile(skyPS_src.c_str(), skyPS_src.size(), "PSSky", "ps_5_0", psB)) return false;
+        device->CreateVertexShader(vsB->GetBufferPointer(), vsB->GetBufferSize(), nullptr, &skyVS);
+        device->CreatePixelShader (psB->GetBufferPointer(), psB->GetBufferSize(), nullptr, &skyPS);
+        D3D11_BUFFER_DESC bd{};
+        bd.ByteWidth = (sizeof(SkyCB) + 15u) & ~15u;
+        bd.Usage = D3D11_USAGE_DYNAMIC;
+        bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        device->CreateBuffer(&bd, nullptr, &skyCB);
+        skyReady = skyVS && skyPS && skyCB;
+        return skyReady;
+    }
+
+    bool createDebugLinePipeline()
+    {
+        UINT flags = 0;
+#ifdef _DEBUG
+        flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+        ComPtr<ID3DBlob> vsB, psB, err;
+        if (FAILED(D3DCompile(kDebugLineHLSL, std::strlen(kDebugLineHLSL),
+                              "dbgline", nullptr, nullptr, "VSLine", "vs_5_0", flags, 0, &vsB, &err)))
+        {
+            Logger::Log(Logger::LogLevel::Error, "D3D11 DebugLine VS compile failed");
+            return false;
+        }
+        if (FAILED(D3DCompile(kDebugLineHLSL, std::strlen(kDebugLineHLSL),
+                              "dbgline", nullptr, nullptr, "PSLine", "ps_5_0", flags, 0, &psB, &err)))
+        {
+            Logger::Log(Logger::LogLevel::Error, "D3D11 DebugLine PS compile failed");
+            return false;
+        }
+        device->CreateVertexShader(vsB->GetBufferPointer(), vsB->GetBufferSize(), nullptr, &debugVS);
+        device->CreatePixelShader (psB->GetBufferPointer(), psB->GetBufferSize(), nullptr, &debugPS);
+        const D3D11_INPUT_ELEMENT_DESC debugLayout[] = {
+            {"POSITION",0,DXGI_FORMAT_R32G32B32_FLOAT,0, 0,D3D11_INPUT_PER_VERTEX_DATA,0},
+            {"COLOR",   0,DXGI_FORMAT_R32G32B32_FLOAT,0,12,D3D11_INPUT_PER_VERTEX_DATA,0},
+        };
+        device->CreateInputLayout(debugLayout, 2, vsB->GetBufferPointer(), vsB->GetBufferSize(), &debugIL);
+        D3D11_BUFFER_DESC cbd{};
+        cbd.ByteWidth = 64; cbd.Usage = D3D11_USAGE_DYNAMIC;
+        cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER; cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        device->CreateBuffer(&cbd, nullptr, &debugCB);
+        D3D11_BUFFER_DESC vbd{};
+        vbd.ByteWidth = 4096 * 6 * sizeof(float);
+        vbd.Usage = D3D11_USAGE_DYNAMIC; vbd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+        vbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        device->CreateBuffer(&vbd, nullptr, &debugVB);
+        debugReady = debugVS && debugPS && debugIL && debugCB && debugVB;
+        return debugReady;
+    }
+
+    void drawSky(ID3D11DeviceContext* ctx, const glm::mat4& invVP,
+                 const glm::vec3& sunDir, const IRenderer::EnvironmentSettings& env)
+    {
+        if (!skyReady) return;
+        SkyCB cb{};
+        cb.invViewProj = invVP;
+        cb.sunDir      = sunDir; cb.timeOfDay = env.timeOfDay;
+        cb.sunColor    = env.sunColor; cb.cloudCoverage = env.cloudCoverage;
+        cb.wind = glm::vec3(
+            std::sin(glm::radians(env.windDirection)) * env.windSpeed,
+            0.0f,
+            std::cos(glm::radians(env.windDirection)) * env.windSpeed);
+        cb.time = m_wallTime;
+        cb.auroraColor = env.auroraColor; cb.aurora = env.auroraIntensity;
+        cb.milkyWay = env.milkyWayIntensity; cb.flash = env.flash;
+        cb.hasMoonTex = moonSRV ? 1 : 0;
+        D3D11_MAPPED_SUBRESOURCE m{};
+        if (SUCCEEDED(ctx->Map(skyCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m)))
+        { std::memcpy(m.pData, &cb, sizeof(cb)); ctx->Unmap(skyCB.Get(), 0); }
+        ctx->IASetInputLayout(nullptr);
+        ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ctx->VSSetShader(skyVS.Get(), nullptr, 0);
+        ctx->PSSetShader(skyPS.Get(), nullptr, 0);
+        ctx->VSSetConstantBuffers(0, 1, skyCB.GetAddressOf());
+        ctx->PSSetConstantBuffers(0, 1, skyCB.GetAddressOf());
+        ctx->OMSetDepthStencilState(noDepthDSS.Get(), 0);
+        ctx->RSSetState(fsRastState.Get());
+        ctx->PSSetSamplers(0, 1, linearSampler.GetAddressOf());
+        ID3D11ShaderResourceView* moonSrv = moonSRV ? moonSRV.Get() : nullptr;
+        ctx->PSSetShaderResources(0, 1, &moonSrv);
+        ctx->Draw(3, 0);
+        // Unbind texture and restore scene state
+        ID3D11ShaderResourceView* nullSrv = nullptr;
+        ctx->PSSetShaderResources(0, 1, &nullSrv);
+        ctx->OMSetDepthStencilState(depthState.Get(), 0);
+        ctx->RSSetState(rasterState.Get());
+        ctx->PSSetSamplers(0, 1, sampler.GetAddressOf());
+    }
+
+    void drawDebugLines(ID3D11DeviceContext* ctx, const glm::mat4& viewProj,
+                        const std::vector<DebugLine>& lines)
+    {
+        if (!debugReady || lines.empty()) return;
+        std::vector<float> verts;
+        verts.reserve(lines.size() * 12);
+        for (const DebugLine& l : lines) {
+            verts.insert(verts.end(), {l.start.x,l.start.y,l.start.z,l.color.r,l.color.g,l.color.b});
+            verts.insert(verts.end(), {l.end.x,  l.end.y,  l.end.z,  l.color.r,l.color.g,l.color.b});
+        }
+        const UINT needed = static_cast<UINT>(verts.size() * sizeof(float));
+        D3D11_BUFFER_DESC existDesc{};
+        if (debugVB) debugVB->GetDesc(&existDesc);
+        if (needed > existDesc.ByteWidth) {
+            debugVB.Reset();
+            D3D11_BUFFER_DESC bd{};
+            bd.ByteWidth = (needed + 0xFFF) & ~0xFFFu;
+            bd.Usage = D3D11_USAGE_DYNAMIC; bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+            bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+            device->CreateBuffer(&bd, nullptr, &debugVB);
+        }
+        if (!debugVB) return;
+        D3D11_MAPPED_SUBRESOURCE m{};
+        if (SUCCEEDED(ctx->Map(debugVB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m)))
+        { std::memcpy(m.pData, verts.data(), verts.size()*sizeof(float)); ctx->Unmap(debugVB.Get(), 0); }
+        if (SUCCEEDED(ctx->Map(debugCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m)))
+        { std::memcpy(m.pData, glm::value_ptr(viewProj), 64); ctx->Unmap(debugCB.Get(), 0); }
+        const UINT stride = 6 * sizeof(float), offset = 0;
+        ctx->IASetInputLayout(debugIL.Get());
+        ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_LINELIST);
+        ctx->IASetVertexBuffers(0, 1, debugVB.GetAddressOf(), &stride, &offset);
+        ctx->VSSetShader(debugVS.Get(), nullptr, 0);
+        ctx->PSSetShader(debugPS.Get(), nullptr, 0);
+        ctx->VSSetConstantBuffers(0, 1, debugCB.GetAddressOf());
+        ctx->OMSetDepthStencilState(depthState.Get(), 0);
+        ctx->RSSetState(rasterState.Get());
+        ctx->Draw(static_cast<UINT>(lines.size() * 2), 0);
+        // Restore scene state
+        ctx->IASetInputLayout(inputLayout.Get());
+        ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ctx->VSSetShader(vs.Get(), nullptr, 0);
+        ctx->PSSetShader(ps.Get(), nullptr, 0);
+        ctx->VSSetConstantBuffers(0, 1, perObjectCB.GetAddressOf());
+        ctx->VSSetConstantBuffers(1, 1, perFrameCB.GetAddressOf());
+        ctx->PSSetConstantBuffers(0, 1, perObjectCB.GetAddressOf());
+        ctx->PSSetConstantBuffers(1, 1, perFrameCB.GetAddressOf());
+    }
 };
 
 D3D11Renderer::D3D11Renderer()  : m_impl(new D3D11RendererImpl{}) {}
@@ -859,6 +1342,10 @@ void D3D11Renderer::Shutdown()
 {
     Logger::Log(Logger::LogLevel::Info, "D3D11Renderer: shutdown");
     m_impl->meshCache.clear();
+    m_impl->skyVS.Reset(); m_impl->skyPS.Reset(); m_impl->skyCB.Reset();
+    m_impl->moonSRV.Reset(); m_impl->moonTex2D.Reset();
+    m_impl->debugVS.Reset(); m_impl->debugPS.Reset(); m_impl->debugVB.Reset();
+    m_impl->debugCB.Reset(); m_impl->debugIL.Reset();
     m_impl->rtv.Reset();
     m_impl->dsv.Reset();
     m_impl->depthTex.Reset();
@@ -935,6 +1422,8 @@ void D3D11Renderer::DrawScene(int width, int height)
         }
         f.lightVP       = lightClip;
         f.shadowEnabled = glm::ivec4(shadows ? 1 : 0, 0, 0, 0);
+        f.sunDir = glm::vec4(p.m_renderWorld.sunDirection, 0.0f);
+        f.fog    = glm::vec4(m_environment.fogDensity, m_environment.fogHeightFalloff, 0, 0);
         D3D11_MAPPED_SUBRESOURCE m{};
         if (SUCCEEDED(ctx->Map(p.perFrameCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m)))
         {
@@ -1011,9 +1500,25 @@ void D3D11Renderer::DrawScene(int width, int height)
 
         if (io.output.id != kBackbufferTarget) return;
 
-        // Shadow map on t1 for sampling.
-        ID3D11ShaderResourceView* shadowSrv = shadows ? p.shadowSRV.Get() : nullptr;
-        ctx->PSSetShaderResources(1, 1, &shadowSrv);
+        // Compute invViewProj for sky ray reconstruction
+        const glm::mat4 invViewProj = glm::inverse(viewProj);
+        // Draw sky before geometry (depth disabled, sky sits behind all meshes)
+        p.drawSky(ctx, invViewProj, p.m_renderWorld.sunDirection, m_environment);
+        // Re-bind scene shaders (sky pass changed them)
+        ctx->IASetInputLayout(p.inputLayout.Get());
+        ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ctx->VSSetShader(p.vs.Get(), nullptr, 0);
+        ctx->PSSetShader(p.ps.Get(), nullptr, 0);
+        ctx->OMSetDepthStencilState(p.depthState.Get(), 0);
+        ctx->RSSetState(p.rasterState.Get());
+        ctx->PSSetSamplers(0, 1, p.sampler.GetAddressOf());
+        ctx->VSSetConstantBuffers(0, 1, p.perObjectCB.GetAddressOf());
+        ctx->VSSetConstantBuffers(1, 1, p.perFrameCB.GetAddressOf());
+        ctx->PSSetConstantBuffers(0, 1, p.perObjectCB.GetAddressOf());
+        ctx->PSSetConstantBuffers(1, 1, p.perFrameCB.GetAddressOf());
+        // Shadow SRV on t1
+        ID3D11ShaderResourceView* shadowSrv_ = shadows ? p.shadowSRV.Get() : nullptr;
+        ctx->PSSetShaderResources(1, 1, &shadowSrv_);
 
         const glm::vec3 camPos = p.m_renderWorld.camera.position;
 
@@ -1061,12 +1566,16 @@ void D3D11Renderer::DrawScene(int width, int height)
             ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
             ctx->OMSetDepthStencilState(p.depthState.Get(), 0);
         }
+        // Debug lines on top of geometry, before post-process
+        if (!p.m_debugLines.empty())
+            p.drawDebugLines(ctx, viewProj, p.m_debugLines);
     });
 }
 
 void D3D11Renderer::Render()
 {
     auto& p = *m_impl;
+    p.m_wallTime = static_cast<float>(SDL_GetTicks()) * 0.001f;
     const float bgColor[4] = { 0.18f, 0.18f, 0.20f, 1.0f };
 
     // Recreate the viewport RT if the editor requested a different size.
@@ -1258,4 +1767,24 @@ void D3D11Renderer::DestroyImGuiTexture(void* handle)
 {
 	if (!handle) return;
 	static_cast<ID3D11ShaderResourceView*>(handle)->Release();
+}
+
+void D3D11Renderer::SetDebugLines(const std::vector<DebugLine>& lines)
+{
+    m_impl->m_debugLines = lines;
+}
+
+void D3D11Renderer::SetMoonTexture(const void* rgba8Pixels, int width, int height)
+{
+    auto& p = *m_impl;
+    p.moonSRV.Reset(); p.moonTex2D.Reset();
+    if (!rgba8Pixels || width <= 0 || height <= 0 || !p.device) return;
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width = static_cast<UINT>(width); td.Height = static_cast<UINT>(height);
+    td.MipLevels = 1; td.ArraySize = 1; td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_IMMUTABLE;
+    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    D3D11_SUBRESOURCE_DATA srd{}; srd.pSysMem = rgba8Pixels; srd.SysMemPitch = static_cast<UINT>(width*4);
+    if (FAILED(p.device->CreateTexture2D(&td, &srd, &p.moonTex2D))) return;
+    p.device->CreateShaderResourceView(p.moonTex2D.Get(), nullptr, &p.moonSRV);
 }

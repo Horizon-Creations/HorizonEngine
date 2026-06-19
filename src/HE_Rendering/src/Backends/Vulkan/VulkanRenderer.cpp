@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <fstream>
 #include <cstring>
+#include <cmath>
 #include <memory>
 #include <Diagnostics/Logger.h>
 
@@ -37,6 +38,26 @@ namespace
         glm::vec4  lightParams[8];
         glm::mat4  lightVP;
         glm::ivec4 shadowEnabled;
+        // sky/fog additions — must match scene.frag Frame block exactly
+        glm::vec4  sunDir;  // xyz = sun direction, w = 0
+        glm::vec4  fog;     // x = fogDensity, y = fogHeightFalloff, zw = 0
+    };
+
+    // Sky pass UBO (set=0 binding=0 in sky.frag) — must match std140 exactly.
+    struct SkyUBOData
+    {
+        glm::mat4  invViewProj;                          // offset   0, 64 bytes
+        glm::vec3  sunDir;       float timeOfDay;        // offset  64, 16 bytes
+        glm::vec3  sunColor;     float cloudCoverage;    // offset  80, 16 bytes
+        glm::vec3  wind;         float time;             // offset  96, 16 bytes
+        glm::vec3  auroraColor;  float aurora;           // offset 112, 16 bytes
+        float      milkyWay;     float flash;  int hasMoonTex;  float _pad; // offset 128, 16 bytes
+    }; // 144 bytes
+
+    // Debug line pass constant buffer (set=0 binding=0 in debug_line.vert).
+    struct DebugUBOData
+    {
+        glm::mat4 uVP;
     };
 
     // The camera projection is built by the shared RenderExtractor with GL
@@ -69,6 +90,8 @@ void VulkanRenderer::Initialize(HE::Window* window)
     createScenePipeline();  Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: scene pipeline created");
     createCube();           Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: initialized successfully");
     createPostFXPipelines();
+    createSkyPipeline();         Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: sky pipeline created");
+    createDebugLinePipeline();   Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: debug line pipeline created");
 	m_shaderManager = VulkanShaderManager();
 }
 
@@ -76,6 +99,8 @@ void VulkanRenderer::Shutdown()
 {
     Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: shutdown — waiting for GPU");
     if (m_device) vkDeviceWaitIdle(m_device);
+    destroySkyPipeline();
+    destroyDebugLinePipeline();
     destroyPostFXResources();
     destroyPostFXPipelines();
     // Destroy secondary windows first
@@ -117,6 +142,8 @@ void VulkanRenderer::Shutdown()
 
 void VulkanRenderer::Render()
 {
+    m_wallTime = static_cast<float>(SDL_GetTicks()) * 0.001f;
+
     // Resize viewport resources if the editor requested a different size.
     if (m_viewportReqW > 0 && m_viewportReqH > 0 &&
         (m_viewportReqW != m_viewportW || m_viewportReqH != m_viewportH))
@@ -2130,6 +2157,8 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         }
         f.lightVP       = kVulkanClipFix * m_renderWorld.shadow.viewProj;
         f.shadowEnabled = glm::ivec4(m_renderWorld.shadow.enabled ? 1 : 0, 0, 0, 0);
+        f.sunDir        = glm::vec4(m_renderWorld.sunDirection, 0.0f);
+        f.fog           = glm::vec4(m_environment.fogDensity, m_environment.fogHeightFalloff, 0.0f, 0.0f);
         if (m_frameUBO[m_currentFrame].mapped)
             std::memcpy(m_frameUBO[m_currentFrame].mapped, &f, sizeof(f));
     }
@@ -2149,6 +2178,14 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         [&](const RenderPass&, const RenderPassIO& io, const CommandBuffer& cmds)
     {
         if (io.output.id != kBackbufferTarget) return;
+
+        // Draw the procedural sky before geometry (depth writes off in sky pipeline).
+        drawSky(cmd, width, height, hdr);
+        // Restore scene pipeline + descriptor set so geometry draw uses the correct state.
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+            hdr && m_scenePipelineHDR ? m_scenePipelineHDR : m_scenePipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_scenePipelineLayout,
+                                0, 1, &m_frameUBO[m_currentFrame].set, 0, nullptr);
 
         const glm::vec3 camPos = m_renderWorld.camera.position;
         std::vector<const DrawCall*> opaqueDCs, transparentDCs;
@@ -2208,6 +2245,642 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, transPipe);
             for (const DrawCall* dc : transparentDCs) drawDCVk(*dc);
         }
+
+        // Debug lines on top of opaque+transparent geometry, before post-process.
+        drawDebugLines(cmd, viewProj, hdr);
     });
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Sky pipeline
+// ─────────────────────────────────────────────────────────────────────────────
+
+void VulkanRenderer::createSkyPipeline()
+{
+    // ── Descriptor set layout: binding 0 = SkyEnv UBO, binding 1 = moon sampler ──
+    VkDescriptorSetLayoutBinding bindings[2]{};
+    bindings[0].binding         = 0;
+    bindings[0].descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    bindings[0].descriptorCount = 1;
+    bindings[0].stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
+    bindings[1].binding         = 1;
+    bindings[1].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[1].descriptorCount = 1;
+    bindings[1].stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+    VkDescriptorSetLayoutCreateInfo dslci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+    dslci.bindingCount = 2;
+    dslci.pBindings    = bindings;
+    vkCheck(vkCreateDescriptorSetLayout(m_device, &dslci, nullptr, &m_skyDSLayout),
+            "sky descriptor set layout");
+
+    // ── Pipeline layout (no push constants needed) ──────────────────────────
+    VkPipelineLayoutCreateInfo plci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    plci.setLayoutCount = 1;
+    plci.pSetLayouts    = &m_skyDSLayout;
+    vkCheck(vkCreatePipelineLayout(m_device, &plci, nullptr, &m_skyPipelineLayout),
+            "sky pipeline layout");
+
+    // ── Descriptor pool (k_maxFramesInFlight UBOs + samplers) ───────────────
+    VkDescriptorPoolSize poolSizes[2]{};
+    poolSizes[0].type            = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    poolSizes[0].descriptorCount = k_maxFramesInFlight;
+    poolSizes[1].type            = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    poolSizes[1].descriptorCount = k_maxFramesInFlight;
+    VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+    dpci.maxSets       = k_maxFramesInFlight;
+    dpci.poolSizeCount = 2;
+    dpci.pPoolSizes    = poolSizes;
+    vkCheck(vkCreateDescriptorPool(m_device, &dpci, nullptr, &m_skyDSPool), "sky descriptor pool");
+
+    // ── Per-frame UBO buffers, descriptor sets ───────────────────────────────
+    for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
+    {
+        VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        bci.size        = sizeof(SkyUBOData);
+        bci.usage       = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+        bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        vkCheck(vkCreateBuffer(m_device, &bci, nullptr, &m_skyUBO[i].buf), "sky UBO buffer");
+
+        VkMemoryRequirements mr;
+        vkGetBufferMemoryRequirements(m_device, m_skyUBO[i].buf, &mr);
+        VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        mai.allocationSize  = mr.size;
+        mai.memoryTypeIndex = findMemoryType(mr.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        vkCheck(vkAllocateMemory(m_device, &mai, nullptr, &m_skyUBO[i].mem), "sky UBO memory");
+        vkBindBufferMemory(m_device, m_skyUBO[i].buf, m_skyUBO[i].mem, 0);
+        vkMapMemory(m_device, m_skyUBO[i].mem, 0, sizeof(SkyUBOData), 0, &m_skyUBO[i].mapped);
+
+        VkDescriptorSetAllocateInfo dsai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+        dsai.descriptorPool     = m_skyDSPool;
+        dsai.descriptorSetCount = 1;
+        dsai.pSetLayouts        = &m_skyDSLayout;
+        vkCheck(vkAllocateDescriptorSets(m_device, &dsai, &m_skyUBO[i].set), "sky descriptor set");
+
+        VkDescriptorBufferInfo dbi{ m_skyUBO[i].buf, 0, sizeof(SkyUBOData) };
+        VkWriteDescriptorSet wr[2]{};
+        wr[0].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        wr[0].dstSet          = m_skyUBO[i].set;
+        wr[0].dstBinding      = 0;
+        wr[0].descriptorCount = 1;
+        wr[0].descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        wr[0].pBufferInfo     = &dbi;
+        // binding 1 (moon sampler) will be updated by SetMoonTexture; for now
+        // point at the engine's dummy image so the set is fully valid.
+        VkDescriptorImageInfo dii{};
+        dii.sampler     = m_postFxSampler;   // reuse the linear sampler from PostFX
+        dii.imageView   = m_dummyView;
+        dii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        wr[1].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        wr[1].dstSet          = m_skyUBO[i].set;
+        wr[1].dstBinding      = 1;
+        wr[1].descriptorCount = 1;
+        wr[1].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        wr[1].pImageInfo      = &dii;
+        vkUpdateDescriptorSets(m_device, 2, wr, 0, nullptr);
+    }
+
+    // ── Dummy 1×1 white moon texture (used until SetMoonTexture is called) ───
+    // The real default is the dummy image already created by PostFX; nothing to do.
+
+    // ── Create moon sampler ─────────────────────────────────────────────────
+    VkSamplerCreateInfo sci{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+    sci.magFilter    = VK_FILTER_LINEAR;
+    sci.minFilter    = VK_FILTER_LINEAR;
+    sci.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    vkCheck(vkCreateSampler(m_device, &sci, nullptr, &m_moonSampler), "moon sampler");
+
+    // ── Shader modules ───────────────────────────────────────────────────────
+    VkShaderModule vs = loadShaderModule("sky.vert.spv");
+    VkShaderModule fs = loadShaderModule("sky.frag.spv");
+    if (!vs || !fs)
+    {
+        if (vs) vkDestroyShaderModule(m_device, vs, nullptr);
+        if (fs) vkDestroyShaderModule(m_device, fs, nullptr);
+        Logger::Log(Logger::LogLevel::Warning, "VulkanRenderer: sky shaders not found — sky disabled");
+        return;
+    }
+
+    VkPipelineShaderStageCreateInfo stages[2]{};
+    stages[0].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage  = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = vs;
+    stages[0].pName  = "main";
+    stages[1].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[1].stage  = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = fs;
+    stages[1].pName  = "main";
+
+    // No vertex input — sky.vert generates a full-screen triangle from gl_VertexIndex.
+    VkPipelineVertexInputStateCreateInfo vi{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+    VkPipelineInputAssemblyStateCreateInfo ia{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    VkPipelineViewportStateCreateInfo vps{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+    vps.viewportCount = 1;
+    vps.scissorCount  = 1;
+
+    VkPipelineRasterizationStateCreateInfo rs{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+    rs.polygonMode = VK_POLYGON_MODE_FILL;
+    rs.cullMode    = VK_CULL_MODE_NONE;
+    rs.frontFace   = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rs.lineWidth   = 1.0f;
+
+    VkPipelineMultisampleStateCreateInfo ms{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    // Depth test off, depth write off — sky is the background.
+    VkPipelineDepthStencilStateCreateInfo ds{ VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
+    ds.depthTestEnable  = VK_FALSE;
+    ds.depthWriteEnable = VK_FALSE;
+
+    VkPipelineColorBlendAttachmentState cba{};
+    cba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                         VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    cba.blendEnable = VK_FALSE;
+    VkPipelineColorBlendStateCreateInfo cb{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+    cb.attachmentCount = 1;
+    cb.pAttachments    = &cba;
+
+    VkDynamicState dynStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+    VkPipelineDynamicStateCreateInfo dyn{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+    dyn.dynamicStateCount = 2;
+    dyn.pDynamicStates    = dynStates;
+
+    auto makeSkyPipeline = [&](VkRenderPass rp, VkPipeline& out) {
+        VkGraphicsPipelineCreateInfo pci{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+        pci.stageCount          = 2;
+        pci.pStages             = stages;
+        pci.pVertexInputState   = &vi;
+        pci.pInputAssemblyState = &ia;
+        pci.pViewportState      = &vps;
+        pci.pRasterizationState = &rs;
+        pci.pMultisampleState   = &ms;
+        pci.pDepthStencilState  = &ds;
+        pci.pColorBlendState    = &cb;
+        pci.pDynamicState       = &dyn;
+        pci.layout              = m_skyPipelineLayout;
+        pci.renderPass          = rp;
+        pci.subpass             = 0;
+        if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &out) != VK_SUCCESS)
+            Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: sky pipeline creation failed");
+    };
+
+    makeSkyPipeline(m_renderPass, m_skyPipeline);
+    if (m_postFxSceneRP)
+        makeSkyPipeline(m_postFxSceneRP, m_skyPipelineHDR);
+
+    vkDestroyShaderModule(m_device, vs, nullptr);
+    vkDestroyShaderModule(m_device, fs, nullptr);
+}
+
+void VulkanRenderer::destroySkyPipeline()
+{
+    for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
+    {
+        if (m_skyUBO[i].mapped) { vkUnmapMemory(m_device, m_skyUBO[i].mem); m_skyUBO[i].mapped = nullptr; }
+        if (m_skyUBO[i].buf)    { vkDestroyBuffer(m_device, m_skyUBO[i].buf, nullptr); m_skyUBO[i].buf = VK_NULL_HANDLE; }
+        if (m_skyUBO[i].mem)    { vkFreeMemory(m_device, m_skyUBO[i].mem, nullptr); m_skyUBO[i].mem = VK_NULL_HANDLE; }
+    }
+    if (m_skyDSPool)        { vkDestroyDescriptorPool(m_device, m_skyDSPool, nullptr); m_skyDSPool = VK_NULL_HANDLE; }
+    if (m_skyDSLayout)      { vkDestroyDescriptorSetLayout(m_device, m_skyDSLayout, nullptr); m_skyDSLayout = VK_NULL_HANDLE; }
+    if (m_skyPipelineHDR)   { vkDestroyPipeline(m_device, m_skyPipelineHDR, nullptr); m_skyPipelineHDR = VK_NULL_HANDLE; }
+    if (m_skyPipeline)      { vkDestroyPipeline(m_device, m_skyPipeline, nullptr); m_skyPipeline = VK_NULL_HANDLE; }
+    if (m_skyPipelineLayout){ vkDestroyPipelineLayout(m_device, m_skyPipelineLayout, nullptr); m_skyPipelineLayout = VK_NULL_HANDLE; }
+    // Moon texture
+    if (m_moonSampler)      { vkDestroySampler(m_device, m_moonSampler, nullptr); m_moonSampler = VK_NULL_HANDLE; }
+    if (m_moonView)         { vkDestroyImageView(m_device, m_moonView, nullptr); m_moonView = VK_NULL_HANDLE; }
+    if (m_moonImage)        { vkDestroyImage(m_device, m_moonImage, nullptr); m_moonImage = VK_NULL_HANDLE; }
+    if (m_moonMemory)       { vkFreeMemory(m_device, m_moonMemory, nullptr); m_moonMemory = VK_NULL_HANDLE; }
+}
+
+void VulkanRenderer::drawSky(VkCommandBuffer cmd, uint32_t /*width*/, uint32_t /*height*/, bool hdr)
+{
+    VkPipeline pipe = hdr && m_skyPipelineHDR ? m_skyPipelineHDR : m_skyPipeline;
+    if (!pipe || !m_skyPipelineLayout) return;
+
+    const glm::mat4 vp = kVulkanClipFix * m_renderWorld.camera.projection * m_renderWorld.camera.view;
+
+    SkyUBOData sky{};
+    sky.invViewProj   = glm::inverse(vp);
+    sky.sunDir        = glm::normalize(m_renderWorld.sunDirection);
+    sky.timeOfDay     = m_environment.timeOfDay;
+    sky.sunColor      = m_environment.sunColor;
+    sky.cloudCoverage = m_environment.cloudCoverage;
+    {
+        const float rad = m_environment.windDirection * (3.14159265f / 180.0f);
+        sky.wind        = glm::vec3(std::sin(rad), 0.0f, std::cos(rad)) * m_environment.windSpeed;
+    }
+    sky.time          = m_wallTime;
+    sky.auroraColor   = m_environment.auroraColor;
+    sky.aurora        = m_environment.auroraIntensity;
+    sky.milkyWay      = m_environment.milkyWayIntensity;
+    sky.flash         = m_environment.flash;
+    sky.hasMoonTex    = (m_moonImage != VK_NULL_HANDLE) ? 1 : 0;
+    sky._pad          = 0.0f;
+
+    if (m_skyUBO[m_currentFrame].mapped)
+        std::memcpy(m_skyUBO[m_currentFrame].mapped, &sky, sizeof(sky));
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skyPipelineLayout,
+                            0, 1, &m_skyUBO[m_currentFrame].set, 0, nullptr);
+    vkCmdDraw(cmd, 3, 1, 0, 0);  // full-screen triangle, no vertex buffer
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Debug line pipeline
+// ─────────────────────────────────────────────────────────────────────────────
+
+void VulkanRenderer::createDebugLinePipeline()
+{
+    // ── Descriptor set layout: binding 0 = DebugCB UBO (mat4 uVP) ───────────
+    VkDescriptorSetLayoutBinding binding{};
+    binding.binding         = 0;
+    binding.descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    binding.descriptorCount = 1;
+    binding.stageFlags      = VK_SHADER_STAGE_VERTEX_BIT;
+
+    VkDescriptorSetLayoutCreateInfo dslci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+    dslci.bindingCount = 1;
+    dslci.pBindings    = &binding;
+    vkCheck(vkCreateDescriptorSetLayout(m_device, &dslci, nullptr, &m_debugDSLayout),
+            "debug line descriptor set layout");
+
+    VkPipelineLayoutCreateInfo plci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    plci.setLayoutCount = 1;
+    plci.pSetLayouts    = &m_debugDSLayout;
+    vkCheck(vkCreatePipelineLayout(m_device, &plci, nullptr, &m_debugPipelineLayout),
+            "debug line pipeline layout");
+
+    // ── Descriptor pool ──────────────────────────────────────────────────────
+    VkDescriptorPoolSize ps{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, k_maxFramesInFlight };
+    VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+    dpci.maxSets       = k_maxFramesInFlight;
+    dpci.poolSizeCount = 1;
+    dpci.pPoolSizes    = &ps;
+    vkCheck(vkCreateDescriptorPool(m_device, &dpci, nullptr, &m_debugDSPool),
+            "debug line descriptor pool");
+
+    // ── Per-frame UBO + host-visible vertex buffers ──────────────────────────
+    constexpr VkDeviceSize kMaxDebugVerts = 65536;
+    for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
+    {
+        // UBO
+        VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        bci.size        = sizeof(DebugUBOData);
+        bci.usage       = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+        bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        vkCheck(vkCreateBuffer(m_device, &bci, nullptr, &m_debugUBO[i].buf), "debug UBO buffer");
+
+        VkMemoryRequirements mr;
+        vkGetBufferMemoryRequirements(m_device, m_debugUBO[i].buf, &mr);
+        VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        mai.allocationSize  = mr.size;
+        mai.memoryTypeIndex = findMemoryType(mr.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        vkCheck(vkAllocateMemory(m_device, &mai, nullptr, &m_debugUBO[i].mem), "debug UBO memory");
+        vkBindBufferMemory(m_device, m_debugUBO[i].buf, m_debugUBO[i].mem, 0);
+        vkMapMemory(m_device, m_debugUBO[i].mem, 0, sizeof(DebugUBOData), 0, &m_debugUBO[i].mapped);
+
+        // Vertex buffer (interleaved vec3 pos + vec3 color = 24 bytes per vertex)
+        VkBufferCreateInfo vbci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        vbci.size        = kMaxDebugVerts * sizeof(float) * 6;
+        vbci.usage       = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+        vbci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        vkCheck(vkCreateBuffer(m_device, &vbci, nullptr, &m_debugVB[i]), "debug vertex buffer");
+        vkGetBufferMemoryRequirements(m_device, m_debugVB[i], &mr);
+        mai.allocationSize  = mr.size;
+        mai.memoryTypeIndex = findMemoryType(mr.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        vkCheck(vkAllocateMemory(m_device, &mai, nullptr, &m_debugVBMem[i]), "debug VB memory");
+        vkBindBufferMemory(m_device, m_debugVB[i], m_debugVBMem[i], 0);
+        vkMapMemory(m_device, m_debugVBMem[i], 0, vbci.size, 0, &m_debugVBMapped[i]);
+
+        // Descriptor set
+        VkDescriptorSetAllocateInfo dsai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+        dsai.descriptorPool     = m_debugDSPool;
+        dsai.descriptorSetCount = 1;
+        dsai.pSetLayouts        = &m_debugDSLayout;
+        vkCheck(vkAllocateDescriptorSets(m_device, &dsai, &m_debugUBO[i].set), "debug descriptor set");
+
+        VkDescriptorBufferInfo dbi{ m_debugUBO[i].buf, 0, sizeof(DebugUBOData) };
+        VkWriteDescriptorSet wr{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+        wr.dstSet          = m_debugUBO[i].set;
+        wr.dstBinding      = 0;
+        wr.descriptorCount = 1;
+        wr.descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        wr.pBufferInfo     = &dbi;
+        vkUpdateDescriptorSets(m_device, 1, &wr, 0, nullptr);
+    }
+
+    // ── Shader modules ───────────────────────────────────────────────────────
+    VkShaderModule vs = loadShaderModule("debug_line.vert.spv");
+    VkShaderModule fs = loadShaderModule("debug_line.frag.spv");
+    if (!vs || !fs)
+    {
+        if (vs) vkDestroyShaderModule(m_device, vs, nullptr);
+        if (fs) vkDestroyShaderModule(m_device, fs, nullptr);
+        Logger::Log(Logger::LogLevel::Warning, "VulkanRenderer: debug line shaders not found — debug lines disabled");
+        return;
+    }
+
+    VkPipelineShaderStageCreateInfo stages[2]{};
+    stages[0].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage  = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = vs;
+    stages[0].pName  = "main";
+    stages[1].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[1].stage  = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = fs;
+    stages[1].pName  = "main";
+
+    // location=0: vec3 aPos, location=1: vec3 aColor (interleaved, stride=24)
+    VkVertexInputBindingDescription vbd{};
+    vbd.binding   = 0;
+    vbd.stride    = sizeof(float) * 6;
+    vbd.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+    VkVertexInputAttributeDescription attrs[2]{};
+    attrs[0].location = 0; attrs[0].binding = 0; attrs[0].format = VK_FORMAT_R32G32B32_SFLOAT; attrs[0].offset = 0;
+    attrs[1].location = 1; attrs[1].binding = 0; attrs[1].format = VK_FORMAT_R32G32B32_SFLOAT; attrs[1].offset = sizeof(float) * 3;
+
+    VkPipelineVertexInputStateCreateInfo vi{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+    vi.vertexBindingDescriptionCount   = 1;
+    vi.pVertexBindingDescriptions      = &vbd;
+    vi.vertexAttributeDescriptionCount = 2;
+    vi.pVertexAttributeDescriptions    = attrs;
+
+    VkPipelineInputAssemblyStateCreateInfo ia{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+    ia.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+
+    VkPipelineViewportStateCreateInfo vps{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+    vps.viewportCount = 1;
+    vps.scissorCount  = 1;
+
+    VkPipelineRasterizationStateCreateInfo rs{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+    rs.polygonMode = VK_POLYGON_MODE_FILL;
+    rs.cullMode    = VK_CULL_MODE_NONE;
+    rs.frontFace   = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rs.lineWidth   = 1.0f;
+
+    VkPipelineMultisampleStateCreateInfo ms{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    // Depth test on so lines correctly occlude behind geometry, but no depth write.
+    VkPipelineDepthStencilStateCreateInfo ds{ VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
+    ds.depthTestEnable  = VK_TRUE;
+    ds.depthWriteEnable = VK_FALSE;
+    ds.depthCompareOp   = VK_COMPARE_OP_LESS_OR_EQUAL;
+
+    VkPipelineColorBlendAttachmentState cba{};
+    cba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                         VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    cba.blendEnable = VK_FALSE;
+    VkPipelineColorBlendStateCreateInfo cb{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+    cb.attachmentCount = 1;
+    cb.pAttachments    = &cba;
+
+    VkDynamicState dynStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+    VkPipelineDynamicStateCreateInfo dyn{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+    dyn.dynamicStateCount = 2;
+    dyn.pDynamicStates    = dynStates;
+
+    auto makeDebugPipeline = [&](VkRenderPass rp, VkPipeline& out) {
+        VkGraphicsPipelineCreateInfo pci{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+        pci.stageCount          = 2;
+        pci.pStages             = stages;
+        pci.pVertexInputState   = &vi;
+        pci.pInputAssemblyState = &ia;
+        pci.pViewportState      = &vps;
+        pci.pRasterizationState = &rs;
+        pci.pMultisampleState   = &ms;
+        pci.pDepthStencilState  = &ds;
+        pci.pColorBlendState    = &cb;
+        pci.pDynamicState       = &dyn;
+        pci.layout              = m_debugPipelineLayout;
+        pci.renderPass          = rp;
+        pci.subpass             = 0;
+        if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &out) != VK_SUCCESS)
+            Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: debug line pipeline creation failed");
+    };
+
+    makeDebugPipeline(m_renderPass, m_debugPipeline);
+    if (m_postFxSceneRP)
+        makeDebugPipeline(m_postFxSceneRP, m_debugPipelineHDR);
+
+    vkDestroyShaderModule(m_device, vs, nullptr);
+    vkDestroyShaderModule(m_device, fs, nullptr);
+}
+
+void VulkanRenderer::destroyDebugLinePipeline()
+{
+    for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
+    {
+        if (m_debugVBMapped[i])  { vkUnmapMemory(m_device, m_debugVBMem[i]); m_debugVBMapped[i] = nullptr; }
+        if (m_debugVB[i])        { vkDestroyBuffer(m_device, m_debugVB[i], nullptr); m_debugVB[i] = VK_NULL_HANDLE; }
+        if (m_debugVBMem[i])     { vkFreeMemory(m_device, m_debugVBMem[i], nullptr); m_debugVBMem[i] = VK_NULL_HANDLE; }
+        if (m_debugUBO[i].mapped){ vkUnmapMemory(m_device, m_debugUBO[i].mem); m_debugUBO[i].mapped = nullptr; }
+        if (m_debugUBO[i].buf)   { vkDestroyBuffer(m_device, m_debugUBO[i].buf, nullptr); m_debugUBO[i].buf = VK_NULL_HANDLE; }
+        if (m_debugUBO[i].mem)   { vkFreeMemory(m_device, m_debugUBO[i].mem, nullptr); m_debugUBO[i].mem = VK_NULL_HANDLE; }
+    }
+    if (m_debugDSPool)        { vkDestroyDescriptorPool(m_device, m_debugDSPool, nullptr); m_debugDSPool = VK_NULL_HANDLE; }
+    if (m_debugDSLayout)      { vkDestroyDescriptorSetLayout(m_device, m_debugDSLayout, nullptr); m_debugDSLayout = VK_NULL_HANDLE; }
+    if (m_debugPipelineHDR)   { vkDestroyPipeline(m_device, m_debugPipelineHDR, nullptr); m_debugPipelineHDR = VK_NULL_HANDLE; }
+    if (m_debugPipeline)      { vkDestroyPipeline(m_device, m_debugPipeline, nullptr); m_debugPipeline = VK_NULL_HANDLE; }
+    if (m_debugPipelineLayout){ vkDestroyPipelineLayout(m_device, m_debugPipelineLayout, nullptr); m_debugPipelineLayout = VK_NULL_HANDLE; }
+}
+
+void VulkanRenderer::drawDebugLines(VkCommandBuffer cmd, const glm::mat4& viewProj, bool hdr)
+{
+    if (!m_debugPipeline || !m_debugPipelineLayout) return;
+    if (m_debugLines.empty()) return;
+
+    const uint32_t fi = m_currentFrame;
+
+    // Pack interleaved float data: [pos.x, pos.y, pos.z, col.r, col.g, col.b] per endpoint
+    constexpr VkDeviceSize kMaxDebugVerts = 65536;
+    const uint32_t vertCount = std::min<uint32_t>(
+        static_cast<uint32_t>(m_debugLines.size() * 2), kMaxDebugVerts);
+
+    if (m_debugVBMapped[fi] && vertCount > 0)
+    {
+        float* dst = static_cast<float*>(m_debugVBMapped[fi]);
+        for (uint32_t li = 0; li < vertCount / 2; ++li)
+        {
+            const DebugLine& dl = m_debugLines[li];
+            *dst++ = dl.start.x; *dst++ = dl.start.y; *dst++ = dl.start.z;
+            *dst++ = dl.color.r; *dst++ = dl.color.g; *dst++ = dl.color.b;
+            *dst++ = dl.end.x;   *dst++ = dl.end.y;   *dst++ = dl.end.z;
+            *dst++ = dl.color.r; *dst++ = dl.color.g; *dst++ = dl.color.b;
+        }
+    }
+
+    if (m_debugUBO[fi].mapped)
+    {
+        DebugUBOData d{ viewProj };
+        std::memcpy(m_debugUBO[fi].mapped, &d, sizeof(d));
+    }
+
+    VkPipeline pipe = hdr && m_debugPipelineHDR ? m_debugPipelineHDR : m_debugPipeline;
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_debugPipelineLayout,
+                            0, 1, &m_debugUBO[fi].set, 0, nullptr);
+    VkDeviceSize offset = 0;
+    vkCmdBindVertexBuffers(cmd, 0, 1, &m_debugVB[fi], &offset);
+    vkCmdDraw(cmd, vertCount, 1, 0, 0);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SetDebugLines / SetMoonTexture
+// ─────────────────────────────────────────────────────────────────────────────
+
+void VulkanRenderer::SetDebugLines(const std::vector<DebugLine>& lines)
+{
+    m_debugLines = lines;
+}
+
+void VulkanRenderer::SetMoonTexture(const void* rgba8Pixels, int width, int height)
+{
+    if (!rgba8Pixels || width <= 0 || height <= 0) return;
+
+    vkDeviceWaitIdle(m_device);
+
+    // Destroy any previous moon texture.
+    if (m_moonView)   { vkDestroyImageView(m_device, m_moonView, nullptr);  m_moonView   = VK_NULL_HANDLE; }
+    if (m_moonImage)  { vkDestroyImage    (m_device, m_moonImage, nullptr); m_moonImage  = VK_NULL_HANDLE; }
+    if (m_moonMemory) { vkFreeMemory      (m_device, m_moonMemory, nullptr); m_moonMemory = VK_NULL_HANDLE; }
+
+    const VkDeviceSize dataSize = static_cast<VkDeviceSize>(width * height * 4);
+
+    // ── Staging buffer ───────────────────────────────────────────────────────
+    VkBuffer       stageBuf  = VK_NULL_HANDLE;
+    VkDeviceMemory stageMem  = VK_NULL_HANDLE;
+    {
+        VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        bci.size  = dataSize;
+        bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        vkCreateBuffer(m_device, &bci, nullptr, &stageBuf);
+        VkMemoryRequirements mr;
+        vkGetBufferMemoryRequirements(m_device, stageBuf, &mr);
+        VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        mai.allocationSize  = mr.size;
+        mai.memoryTypeIndex = findMemoryType(mr.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        vkAllocateMemory(m_device, &mai, nullptr, &stageMem);
+        vkBindBufferMemory(m_device, stageBuf, stageMem, 0);
+        void* ptr = nullptr;
+        vkMapMemory(m_device, stageMem, 0, dataSize, 0, &ptr);
+        std::memcpy(ptr, rgba8Pixels, static_cast<size_t>(dataSize));
+        vkUnmapMemory(m_device, stageMem);
+    }
+
+    // ── Device-local RGBA8 image ─────────────────────────────────────────────
+    VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+    ici.imageType     = VK_IMAGE_TYPE_2D;
+    ici.format        = VK_FORMAT_R8G8B8A8_UNORM;
+    ici.extent        = { static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1 };
+    ici.mipLevels     = 1;
+    ici.arrayLayers   = 1;
+    ici.samples       = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling        = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage         = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    vkCreateImage(m_device, &ici, nullptr, &m_moonImage);
+    VkMemoryRequirements imr;
+    vkGetImageMemoryRequirements(m_device, m_moonImage, &imr);
+    VkMemoryAllocateInfo imal{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    imal.allocationSize  = imr.size;
+    imal.memoryTypeIndex = findMemoryType(imr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    vkAllocateMemory(m_device, &imal, nullptr, &m_moonMemory);
+    vkBindImageMemory(m_device, m_moonImage, m_moonMemory, 0);
+
+    // ── One-shot command buffer: transition + copy ───────────────────────────
+    VkCommandBufferAllocateInfo cbai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+    cbai.commandPool        = m_cmdPool;
+    cbai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cbai.commandBufferCount = 1;
+    VkCommandBuffer oneCB = VK_NULL_HANDLE;
+    vkAllocateCommandBuffers(m_device, &cbai, &oneCB);
+    VkCommandBufferBeginInfo oneBI{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    oneBI.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(oneCB, &oneBI);
+
+    // UNDEFINED → TRANSFER_DST
+    {
+        VkImageMemoryBarrier bar{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+        bar.oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED;
+        bar.newLayout           = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bar.image               = m_moonImage;
+        bar.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        bar.srcAccessMask       = 0;
+        bar.dstAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(oneCB,
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &bar);
+    }
+
+    VkBufferImageCopy region{};
+    region.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    region.imageExtent      = { static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1 };
+    vkCmdCopyBufferToImage(oneCB, stageBuf, m_moonImage,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+    // TRANSFER_DST → SHADER_READ_ONLY
+    {
+        VkImageMemoryBarrier bar{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+        bar.oldLayout           = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        bar.newLayout           = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bar.image               = m_moonImage;
+        bar.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        bar.srcAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
+        bar.dstAccessMask       = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(oneCB,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &bar);
+    }
+
+    vkEndCommandBuffer(oneCB);
+    VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    si.commandBufferCount = 1;
+    si.pCommandBuffers    = &oneCB;
+    vkQueueSubmit(m_graphicsQueue, 1, &si, VK_NULL_HANDLE);
+    vkQueueWaitIdle(m_graphicsQueue);
+    vkFreeCommandBuffers(m_device, m_cmdPool, 1, &oneCB);
+
+    // Destroy staging resources.
+    vkDestroyBuffer(m_device, stageBuf, nullptr);
+    vkFreeMemory(m_device, stageMem, nullptr);
+
+    // ── Image view ───────────────────────────────────────────────────────────
+    VkImageViewCreateInfo ivci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+    ivci.image            = m_moonImage;
+    ivci.viewType         = VK_IMAGE_VIEW_TYPE_2D;
+    ivci.format           = VK_FORMAT_R8G8B8A8_UNORM;
+    ivci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    vkCreateImageView(m_device, &ivci, nullptr, &m_moonView);
+
+    // ── Update descriptor sets to point at the real moon texture ─────────────
+    for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
+    {
+        if (!m_skyUBO[i].set) continue;
+        VkDescriptorImageInfo dii{};
+        dii.sampler     = m_moonSampler;
+        dii.imageView   = m_moonView;
+        dii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        VkWriteDescriptorSet wr{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+        wr.dstSet          = m_skyUBO[i].set;
+        wr.dstBinding      = 1;
+        wr.descriptorCount = 1;
+        wr.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        wr.pImageInfo      = &dii;
+        vkUpdateDescriptorSets(m_device, 1, &wr, 0, nullptr);
+    }
+}

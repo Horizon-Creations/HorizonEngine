@@ -13,6 +13,8 @@ layout(set = 0, binding = 0) uniform Frame {
     vec4  lightParams[8];
     mat4  lightVP;
     ivec4 shadowEnabled;
+    vec4  sunDir;   // xyz = sun direction
+    vec4  fog;      // x=fogDensity, y=fogHeightFalloff
 } uf;
 
 layout(set = 0, binding = 1) uniform sampler2D uShadowMap;
@@ -22,6 +24,48 @@ layout(set = 0, binding = 2) uniform MatUBO {
     vec4 baseColorMet;  // rgb = baseColor, a = metallic
     vec4 roughPad;      // x = roughness, y = opacity
 } mat_ubo;
+
+// ── Procedural sky ────────────────────────────────────────────────────────────
+vec3 skyColor(vec3 dir, vec3 sunDir)
+{
+    dir    = normalize(dir);
+    sunDir = normalize(sunDir);
+    float sunY = clamp(sunDir.y, -0.2, 1.0);
+    float day  = smoothstep(-0.10, 0.10, sunY);
+    float dusk = smoothstep(-0.06, 0.05, sunY) * (1.0 - smoothstep(0.05, 0.28, sunY));
+    vec3 zenithDay  = vec3(0.08, 0.28, 0.72);
+    vec3 horizDay   = vec3(0.42, 0.62, 0.88);
+    vec3 zenithNite = vec3(0.003, 0.005, 0.015);
+    vec3 horizNite  = vec3(0.006, 0.009, 0.024);
+    vec3 zenith  = mix(zenithNite, zenithDay, day);
+    vec3 horizon = mix(horizNite,  horizDay,  day);
+    vec2  sunAz  = normalize(sunDir.xz + vec2(1e-5));
+    float toward = dot(normalize(dir.xz + vec2(1e-5)), sunAz) * 0.5 + 0.5;
+    toward = pow(clamp(toward, 0.0, 1.0), 1.5);
+    vec3  duskHoriz = mix(vec3(0.52, 0.30, 0.52), vec3(1.20, 0.50, 0.16), toward);
+    horizon = mix(horizon, duskHoriz, dusk);
+    zenith  = mix(zenith,  vec3(0.20, 0.16, 0.40), dusk * 0.6);
+    float h    = clamp(dir.y, 0.0, 1.0);
+    float grad = pow(1.0 - h, 2.5);
+    vec3 sky = mix(zenith, horizon, grad);
+    float band = pow(1.0 - h, 8.0) * toward;
+    sky += vec3(1.25, 0.62, 0.26) * (band * dusk * 0.8);
+    vec3 ground = mix(vec3(0.02, 0.02, 0.03), vec3(0.24, 0.23, 0.21), day);
+    sky = mix(sky, ground, smoothstep(0.0, -0.25, dir.y));
+    vec3  sunTint = mix(vec3(1.0, 0.42, 0.20), vec3(1.0, 0.96, 0.88), smoothstep(0.0, 0.25, sunY));
+    float s = max(dot(dir, sunDir), 0.0);
+    float sunVis = max(day, dusk);
+    sky += sunTint * (pow(s, 1800.0) * 14.0) * day;
+    sky += sunTint * (pow(s, 180.0)  * 2.2) * sunVis;
+    sky += sunTint * (pow(s, 22.0)   * 0.7) * sunVis;
+    sky += vec3(1.0, 0.5, 0.25) * (pow(s, 5.0) * 0.5) * dusk;
+    float night   = 1.0 - day;
+    vec3  moonDir = normalize(vec3(-sunDir.x, -sunDir.y, sunDir.z));
+    float m       = max(dot(dir, moonDir), 0.0);
+    sky += vec3(0.80, 0.86, 1.00) * (pow(m, 60.0) * 0.05) * night;
+    sky += vec3(0.015, 0.018, 0.030) * night;
+    return sky;
+}
 
 // ── Cook-Torrance BRDF ────────────────────────────────────────────────────────
 const float PI = 3.14159265;
@@ -76,7 +120,13 @@ void main()
     }
 
     vec3 V      = normalize(uf.cameraPos.xyz - vWorldPos);
-    vec3 result = 0.03 * base * (1.0 - met);  // ambient
+    vec3 Nup    = normalize(vec3(N.x, max(N.y, 0.1), N.z));
+    vec3 Rrough = normalize(mix(reflect(-V, N), N, rough));
+    vec3 F0     = mix(vec3(0.04), base, met);
+    vec3 kd     = (1.0 - F0) * (1.0 - met);
+    vec3 ambDiff = skyColor(Nup,    uf.sunDir.xyz) * base * kd;
+    vec3 ambSpec = skyColor(Rrough, uf.sunDir.xyz) * F0;
+    vec3 result  = ambDiff * 0.35 + ambSpec * (1.0 - 0.6 * rough);
 
     for (int i = 0; i < uf.lightCount.x; ++i)
     {
@@ -104,6 +154,17 @@ void main()
         }
         float sh = (type == 0) ? shadowFactor(vWorldPos, N, L) : 1.0;
         result += BRDF(L, V, N, base, met, rough) * uf.lightColor[i].rgb * uf.lightColor[i].w * atten * sh;
+    }
+    // Atmospheric fog
+    if (uf.fog.x > 0.0) {
+        vec3  ray  = vWorldPos - uf.cameraPos.xyz;
+        float dist = max(length(ray), 1e-4);
+        float k    = uf.fog.y * ray.y;
+        float ta   = abs(k) > 1e-4 ? (1.0 - exp(-k)) / k : 1.0;
+        float opt  = uf.fog.x * dist * exp(-uf.fog.y * uf.cameraPos.y) * ta;
+        float f    = 1.0 - exp(-opt);
+        vec3  fogCol = skyColor(ray/dist, uf.sunDir.xyz);
+        result = mix(result, fogCol, clamp(f, 0.0, 1.0));
     }
     FragColor = vec4(result, mat_ubo.roughPad.y);
 }
