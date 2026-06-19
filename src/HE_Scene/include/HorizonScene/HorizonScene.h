@@ -25,6 +25,7 @@
 #include "Components/ScriptComponent.h"
 #include "Components/EnvironmentComponent.h"
 #include "Components/EnvironmentLightComponent.h"
+#include "Components/WeatherComponent.h"
 #include "Components/TerrainComponent.h"
 #include "Components/AudioSourceComponent.h"
 #include "Components/AudioListenerComponent.h"

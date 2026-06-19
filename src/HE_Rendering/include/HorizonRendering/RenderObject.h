@@ -25,6 +25,11 @@ struct RenderObject {
     HE::AABB     worldBounds;
     uint32_t     entityId       = 0;
     uint8_t      lod            = 0;
+    // Cheap-billboard opt-outs. Precipitation/particles set these false so thousands of
+    // them skip the per-object shadow-map depth pass and the SSAO position prepass (where
+    // they are NOT instanced) — and so rain/snow don't wrongly cast shadows or darken AO.
+    bool         castsShadow    = true;
+    bool         contributesAO  = true;
 };
 
 // Skinned renderable: same as RenderObject but carries bone matrices for GPU skinning.

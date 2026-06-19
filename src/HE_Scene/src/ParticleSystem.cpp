@@ -6,8 +6,9 @@
 #include <algorithm>
 #include <cmath>
 
-void ParticleSystem::update(HorizonWorld& world, float dt)
+void ParticleSystem::update(HorizonWorld& world, float dt, const glm::vec3& cameraPos)
 {
+    (void)cameraPos; // used by camera-following volume emitters (Phase 2)
     auto& reg = world.registry();
 
     for (auto [e, tc, ps] : reg.view<TransformComponent, ParticleSystemComponent>().each())

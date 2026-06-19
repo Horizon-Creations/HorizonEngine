@@ -42,6 +42,7 @@ void GeometryPass::execute(const RenderWorld&           world,
 		dc.transform       = first.transform;
 		dc.entityId        = first.entityId;
 		dc.lod             = first.lod;
+		dc.contributesAO   = first.contributesAO;
 
 		if (runLen > 1)
 		{
@@ -93,6 +94,7 @@ void ShadowPass::execute(const RenderWorld&           world,
 	for (size_t idx = 0; idx < world.objects.size(); ++idx)
 	{
 		const RenderObject& obj = world.objects[idx];
+		if (!obj.castsShadow) continue; // billboards (precip/particles) don't cast shadows
 		if (obj.worldBounds.isValid() && !lightFrustum.intersects(obj.worldBounds))
 			continue; // caster lies entirely outside the shadow map's coverage
 		DrawCall dc;

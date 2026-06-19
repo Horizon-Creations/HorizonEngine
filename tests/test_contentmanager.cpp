@@ -266,10 +266,10 @@ TEST_CASE("ContentManager default asset UUIDs are fixed and distinct")
 
 TEST_CASE("ContentManager enumerateIds returns all registered assets")
 {
-	ContentManager cm; // starts with 6 default assets (cube, quad, white tex, material, grid tex, terrain material)
+	ContentManager cm; // 7 default assets (cube, quad, snowflake, white tex, material, grid tex, terrain material)
 
 	const size_t defaultCount = cm.assetCount();
-	REQUIRE(defaultCount == 6);
+	REQUIRE(defaultCount == 7);
 
 	StaticMeshAsset m; m.name = "extra";
 	HE::UUID extraId = cm.registerStaticMesh(std::move(m));
@@ -284,14 +284,14 @@ TEST_CASE("ContentManager enumerateIds returns all registered assets")
 
 TEST_CASE("ContentManager enumerateIds(type) filters by asset type")
 {
-	ContentManager cm; // 2 meshes (cube + quad), 2 textures (white + grid), 2 materials (default + terrain)
+	ContentManager cm; // 3 meshes (cube + quad + snowflake), 2 textures (white + grid), 2 materials (default + terrain)
 
 	auto meshes   = cm.enumerateIds(HE::AssetType::StaticMesh);
 	auto textures = cm.enumerateIds(HE::AssetType::Texture);
 	auto materials= cm.enumerateIds(HE::AssetType::Material);
 	auto scripts  = cm.enumerateIds(HE::AssetType::Script);
 
-	CHECK(meshes.size()    == 2);
+	CHECK(meshes.size()    == 3);
 	CHECK(textures.size()  == 2);
 	CHECK(materials.size() == 2);
 	CHECK(scripts.size()   == 0);
@@ -310,7 +310,7 @@ TEST_CASE("ContentManager enumerateIds(type) filters by asset type")
 	// Add another mesh — only meshes count increases.
 	StaticMeshAsset m2; m2.name = "m2";
 	cm.registerStaticMesh(std::move(m2));
-	CHECK(cm.enumerateIds(HE::AssetType::StaticMesh).size() == 3);
+	CHECK(cm.enumerateIds(HE::AssetType::StaticMesh).size() == 4);
 	CHECK(cm.enumerateIds(HE::AssetType::Texture).size()    == 2);
 }
 
@@ -323,17 +323,17 @@ TEST_CASE("ContentManager enumerateIds unload removes entry")
 	HE::UUID id = cm.registerStaticMesh(std::move(m));
 
 	auto before = cm.enumerateIds();
-	REQUIRE(before.size() == 7); // 6 defaults + 1
+	REQUIRE(before.size() == 8); // 7 defaults + 1
 
 	REQUIRE(cm.unloadAsset(id));
 
 	auto after = cm.enumerateIds();
-	CHECK(after.size() == 6);
+	CHECK(after.size() == 7);
 	for (auto uid : after) CHECK_FALSE(uid == id);
 
 	// Type-filtered enumeration also must not contain it
 	auto meshes = cm.enumerateIds(HE::AssetType::StaticMesh);
-	CHECK(meshes.size() == 2); // default cube + quad
+	CHECK(meshes.size() == 3); // default cube + quad + snowflake
 	for (auto uid : meshes) CHECK_FALSE(uid == id);
 }
 

@@ -11,6 +11,7 @@
 #include <HorizonScene/Components/LightComponent.h>
 #include <HorizonScene/Components/EnvironmentLightComponent.h>
 #include <HorizonScene/Components/ParticleSystemComponent.h>
+#include <HorizonScene/Components/WeatherComponent.h>
 #include <HorizonScene/Components/FoliageComponent.h>
 #include <HorizonScene/UISystem.h>
 #include <ContentManager/DefaultAssets.h>
@@ -189,6 +190,69 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 			obj.worldBounds     = kUnitCube.transformed(world);
 			obj.entityId        = static_cast<uint32_t>(e);
 			obj.lod             = 0;
+			obj.castsShadow     = false; // billboard particles: no shadow / AO
+			obj.contributesAO   = false;
+			out.objects.push_back(obj);
+		}
+	}
+
+	// ── Weather precipitation (rain / snow) ────────────────────────────────────
+	// The WeatherComponent owns a camera-following particle pool (simulated by
+	// WeatherSystem). Each drop is a billboard: rain stretches along its velocity into a
+	// thin streak, snow is a small camera-facing flake. Same mesh+material so the geometry
+	// pass batches them.
+	for (auto [e, wx] : reg.view<WeatherComponent>().each())
+	{
+		if (wx.precip.empty()) continue;
+		const bool isSnow = (wx.curPrecipType == PrecipType::Snow);
+		const glm::vec3 camPos = out.camera.position;
+		// Snow uses the star flake mesh; rain uses the quad stretched into a streak.
+		const HE::UUID precipMesh = isSnow ? HE::kDefaultSnowflakeMeshId : HE::kDefaultQuadMeshId;
+
+		for (const Particle& p : wx.precip)
+		{
+			glm::vec3 look = camPos - p.position;
+			const float d = glm::length(look);
+			if (d < 1e-4f) continue;
+			look /= d;
+
+			glm::mat4 world(1.0f);
+			if (isSnow)
+			{
+				const float s = 0.16f; // flake radius (star mesh spans ±0.5 in local space)
+				glm::vec3 right = glm::cross(glm::vec3(0,1,0), look);
+				if (glm::length(right) < 1e-4f) right = glm::vec3(1,0,0);
+				right = glm::normalize(right);
+				const glm::vec3 up = glm::cross(look, right);
+				world[0] = glm::vec4(right * s, 0.0f);
+				world[1] = glm::vec4(up    * s, 0.0f);
+				world[2] = glm::vec4(look  * s, 0.0f);
+			}
+			else // rain streak: long axis along the screen-projected velocity
+			{
+				glm::vec3 vdir = p.velocity;
+				const float vl = glm::length(vdir);
+				vdir = (vl > 1e-4f) ? vdir / vl : glm::vec3(0,-1,0);
+				glm::vec3 up = vdir - look * glm::dot(vdir, look); // project onto camera plane
+				if (glm::length(up) < 1e-4f) up = glm::vec3(0,1,0);
+				up = glm::normalize(up);
+				const glm::vec3 right = glm::normalize(glm::cross(up, look));
+				const float len = 0.6f, thin = 0.02f;
+				world[0] = glm::vec4(right * thin, 0.0f);
+				world[1] = glm::vec4(up    * len,  0.0f);
+				world[2] = glm::vec4(look,         0.0f);
+			}
+			world[3] = glm::vec4(p.position, 1.0f);
+
+			RenderObject obj;
+			obj.meshAssetId     = precipMesh;
+			obj.materialAssetId = HE::UUID{};
+			obj.transform       = world;
+			obj.worldBounds     = kUnitCube.transformed(world);
+			obj.entityId        = static_cast<uint32_t>(e);
+			obj.lod             = 0;
+			obj.castsShadow     = false; // rain/snow don't cast shadows or darken AO
+			obj.contributesAO   = false;
 			out.objects.push_back(obj);
 		}
 	}

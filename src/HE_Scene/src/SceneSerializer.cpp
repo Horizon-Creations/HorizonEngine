@@ -14,6 +14,7 @@
 #include "HorizonScene/Components/ScriptComponent.h"
 #include "HorizonScene/Components/EnvironmentComponent.h"
 #include "HorizonScene/Components/EnvironmentLightComponent.h"
+#include "HorizonScene/Components/WeatherComponent.h"
 #include "HorizonScene/Components/TerrainComponent.h"
 #include "HorizonScene/Components/AudioSourceComponent.h"
 #include "HorizonScene/Components/AudioListenerComponent.h"
@@ -211,6 +212,21 @@ namespace
 				{ "nebulaIntensity",   e->nebulaIntensity },
 				{ "nebulaColor",       vec3ToJson(e->nebulaColor) },
 				{ "auroraColor",       vec3ToJson(e->auroraColor) },
+			};
+		}
+		if (auto* w = registry.try_get<WeatherComponent>(entity))
+		{
+			comps["weather"] = {
+				{ "currentKind",        static_cast<int>(w->currentKind) },
+				{ "targetKind",         static_cast<int>(w->targetKind) },
+				{ "intensity",          w->intensity },
+				{ "transitionDuration", w->transitionDuration },
+				{ "autoCycle",          w->autoCycle },
+				{ "cycleSeconds",       w->cycleSeconds },
+				{ "thunderSound",       uuidToJson(w->thunderSound) },
+				{ "maxRainParticles",   w->maxRainParticles },
+				{ "maxSnowParticles",   w->maxSnowParticles },
+				{ "groundLevel",        w->groundLevel },
 			};
 		}
 		if (auto* t = registry.try_get<TerrainComponent>(entity))
@@ -514,6 +530,22 @@ namespace
 			e.nebulaColor       = jsonToVec3(c.value("nebulaColor", json()), e.nebulaColor);
 			e.auroraColor       = jsonToVec3(c.value("auroraColor", json()), e.auroraColor);
 			registry.emplace_or_replace<EnvironmentComponent>(entity, e);
+		}
+		if (comps.contains("weather"))
+		{
+			const json& c = comps["weather"];
+			WeatherComponent w;
+			w.currentKind        = static_cast<WeatherKind>(c.value("currentKind", static_cast<int>(w.currentKind)));
+			w.targetKind         = static_cast<WeatherKind>(c.value("targetKind",  static_cast<int>(w.targetKind)));
+			w.intensity          = c.value("intensity",          w.intensity);
+			w.transitionDuration = c.value("transitionDuration", w.transitionDuration);
+			w.autoCycle          = c.value("autoCycle",          w.autoCycle);
+			w.cycleSeconds       = c.value("cycleSeconds",       w.cycleSeconds);
+			if (c.contains("thunderSound")) w.thunderSound = jsonToUuid(c["thunderSound"]);
+			w.maxRainParticles = c.value("maxRainParticles", w.maxRainParticles);
+			w.maxSnowParticles = c.value("maxSnowParticles", w.maxSnowParticles);
+			w.groundLevel      = c.value("groundLevel",      w.groundLevel);
+			registry.emplace_or_replace<WeatherComponent>(entity, w);
 		}
 		if (comps.contains("terrain"))
 		{

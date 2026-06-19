@@ -36,4 +36,8 @@ constexpr UUID kDefaultTerrainMaterialId = { 0x0000000000000005ULL, 0x0000000000
 // Default mesh for ParticleSystemComponent; also useful for sprite quads.
 constexpr UUID kDefaultQuadMeshId = { 0x0000000000000006ULL, 0x0000000000000001ULL };
 
+// A flat 6-pointed star in the XY plane, normal +Z (radius ~0.5). Billboarded by the
+// weather system as a snowflake so flakes read as a shape, not a white square.
+constexpr UUID kDefaultSnowflakeMeshId = { 0x0000000000000007ULL, 0x0000000000000001ULL };
+
 } // namespace HE

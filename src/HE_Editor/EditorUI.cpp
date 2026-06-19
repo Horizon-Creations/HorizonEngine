@@ -3662,6 +3662,8 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			ImGui::ColorEdit3("Moon Color", &env->moonColor.x, ImGuiColorEditFlags_NoInputs); trackEdit();
 			ImGui::SliderFloat("Moon Brightness", &env->moonIntensity, 0.0f, 10.0f, "%.2f"); trackEdit();
 
+			const bool weatherDriven = registry.all_of<WeatherComponent>(entity);
+			ImGui::BeginDisabled(weatherDriven);
 			ImGui::SeparatorText("Clouds");
 			ImGui::SetNextItemWidth(-1.0f);
 			ImGui::SliderFloat("##cloudcoverage", &env->cloudCoverage, 0.0f, 1.0f, "Coverage: %.2f"); trackEdit();
@@ -3679,6 +3681,9 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			ImGui::SliderFloat("##fogheight", &env->fogHeightFalloff, 0.0f, 1.0f, "Ground hugging: %.2f"); trackEdit();
 			ImGui::EndDisabled();
 			ImGui::TextDisabled("Distant objects blend into the horizon (warm at sunset).");
+			ImGui::EndDisabled();
+			if (weatherDriven)
+				ImGui::TextDisabled("Clouds, fog & wind are driven by the Weather system below.");
 
 			ImGui::SeparatorText("Night Sky");
 			ImGui::SetNextItemWidth(-1.0f);
@@ -3690,6 +3695,82 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			ImGui::TextDisabled("Stars, Milky Way & nebula turn with the day; aurora drifts.");
 		}
 		ImGui::Separator();
+	}
+
+	// ── Weather (scene-wide; drives the sky's clouds / fog / wind) ──────────
+	if (registry.all_of<EnvironmentComponent>(entity))
+	{
+		if (auto* w = registry.try_get<WeatherComponent>(entity))
+		{
+			if (ImGui::CollapsingHeader("Weather", ImGuiTreeNodeFlags_DefaultOpen))
+			{
+				const char* kinds[] = { "Clear","Cloudy","Overcast","Foggy","Rain","Storm","Snow" };
+				int target = static_cast<int>(w->targetKind);
+				ImGui::SetNextItemWidth(-1.0f);
+				if (ImGui::Combo("##weatherkind", &target, kinds, IM_ARRAYSIZE(kinds)))
+				{
+					w->targetKind = static_cast<WeatherKind>(target);
+					trackEdit();
+				}
+				ImGui::SliderFloat("Intensity",  &w->intensity, 0.0f, 1.0f, "%.2f"); trackEdit();
+				ImGui::SliderFloat("Transition", &w->transitionDuration, 0.0f, 30.0f, "%.1f s"); trackEdit();
+				ImGui::Checkbox("Auto-Cycle", &w->autoCycle); trackEdit();
+				ImGui::BeginDisabled(!w->autoCycle);
+				ImGui::SliderFloat("Cycle Time", &w->cycleSeconds, 5.0f, 600.0f, "%.0f s",
+				                   ImGuiSliderFlags_Logarithmic); trackEdit();
+				ImGui::EndDisabled();
+
+				if (w->currentKind != w->targetKind)
+					ImGui::Text("Transitioning %s -> %s",
+					            kinds[static_cast<int>(w->currentKind)],
+					            kinds[static_cast<int>(w->targetKind)]);
+				else
+					ImGui::Text("Current: %s", kinds[static_cast<int>(w->currentKind)]);
+				ImGui::TextDisabled("Cloud %.2f  Fog %.3f  Wind %.2f  Precip %.2f",
+				                    w->curCloudCoverage, w->curFogDensity,
+				                    w->curWindSpeed, w->curPrecip);
+
+				ImGui::SeparatorText("Precipitation");
+				ImGui::DragInt("Max Rain", &w->maxRainParticles, 10.0f, 0, 20000); trackEdit();
+				ImGui::DragInt("Max Snow", &w->maxSnowParticles, 10.0f, 0, 20000); trackEdit();
+				ImGui::DragFloat("Ground Y", &w->groundLevel, 0.1f, -1000.0f, 1000.0f,
+				                 "%.1f (fallback floor)"); trackEdit();
+				ImGui::TextDisabled("Drops collide via physics in Play; else die at Ground Y.");
+
+				// Thunder sound — drop an audio .hasset here (played on each strike).
+				{
+					const char* tlabel = (w->thunderSound == HE::UUID{})
+						? "Thunder: (none — drop audio)" : "Thunder: (set)";
+					ImGui::Button(tlabel);
+					if (ImGui::BeginDragDropTarget())
+					{
+						const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_ASSET_PATH");
+						if (p && ctx.contentManager)
+						{
+							std::error_code ec;
+							const std::string rel = std::filesystem::relative(
+								static_cast<const char*>(p->Data),
+								ctx.contentManager->contentRoot(), ec).generic_string();
+							const HE::UUID id = (ec || rel.empty())
+								? HE::UUID{} : ctx.contentManager->loadAsset(rel);
+							if (id != HE::UUID{} && ctx.contentManager->getAudio(id))
+							{
+								if (ctx.undoSys) ctx.undoSys->snapshotNow();
+								w->thunderSound = id;
+							}
+						}
+						ImGui::EndDragDropTarget();
+					}
+					if (w->thunderSound != HE::UUID{})
+					{
+						ImGui::SameLine();
+						if (ImGui::SmallButton("Clear##thunder")) w->thunderSound = HE::UUID{};
+					}
+				}
+
+			}
+			ImGui::Separator();
+		}
 	}
 
 	// Header with a right-click "Remove Component" menu. Returns true when

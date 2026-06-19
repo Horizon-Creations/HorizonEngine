@@ -9,6 +9,8 @@
 #include <HorizonScene/PropertyAnimationSystem.h>
 #include <HorizonScene/NavigationSystem.h>
 #include <HorizonScene/ParticleSystem.h>
+#include <HorizonScene/WeatherSystem.h>
+#include <HorizonScene/SceneSystems.h>
 #include <HorizonScene/ScriptContext.h>
 #include <HorizonScene/CollisionSystem.h>
 #include <HorizonScene/Components/ScriptComponent.h>
@@ -798,15 +800,12 @@ void EditorApplication::OnRender(float dt)
 		// (newly created, parameter-edited in the inspector, or just loaded/restored).
 		if (m_editorWorld)
 		{
-			TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), renderer());
-			AnimationSystem::update(*m_editorWorld, contentManager(), dt);
-			AnimationBlendSystem::update(*m_editorWorld, contentManager(), dt);
-			AnimationStateMachineSystem::update(*m_editorWorld, contentManager(), dt);
-			PropertyAnimationSystem::update(*m_editorWorld, contentManager(), dt);
-			NavigationSystem::update(*m_editorWorld, dt);
-			ParticleSystem::update(*m_editorWorld, dt);
-			FoliageSystem::update(*m_editorWorld);
-			LODSystem::update(*m_editorWorld, m_editorCamera.position());
+			// Shared with the standalone game runtime (GameApplication) so weather,
+			// animation, particles, terrain, foliage, nav & LOD behave identically.
+			// Pass the physics world in play mode so precipitation collides with the scene.
+			SceneSystems::tick(*m_editorWorld, contentManager(), renderer(),
+			                   m_editorCamera.position(), dt,
+			                   (m_isPlaying && m_physicsWorld) ? m_physicsWorld.get() : nullptr);
 		}
 
 		// Step physics at a fixed rate during play mode
@@ -823,6 +822,19 @@ void EditorApplication::OnRender(float dt)
 		// Keep spatial audio sources and listener in sync each play-mode frame
 		if (m_isPlaying && m_editorWorld)
 			AudioSystem::updateSpatial(*m_editorWorld, m_audioEngine);
+
+		// Thunder: when a lightning strike fired this frame, play the configured sound
+		// (graceful no-op if no thunderSound asset is set on the WeatherComponent).
+		if (m_isPlaying && m_editorWorld)
+		{
+			for (auto [e, wx] : m_editorWorld->registry().view<WeatherComponent>().each())
+			{
+				if (wx.flashTriggered && wx.thunderSound != HE::UUID{})
+					if (const auto* a = contentManager().getAudio(wx.thunderSound))
+						m_audioEngine.play(a->audioData, a->sampleRate, a->channels);
+				break;
+			}
+		}
 
 		// Per-frame script update
 		if (m_isPlaying && m_scriptContext)
@@ -1248,7 +1260,7 @@ void EditorApplication::pushEnvironment(float dt)
 		env->auroraIntensity,
 		env->milkyWayIntensity, env->nebulaIntensity,
 		env->nebulaColor, env->auroraColor,
-		env->windDirection, env->windSpeed});
+		env->windDirection, env->windSpeed, env->flash});
 }
 
 void EditorApplication::openScene(const std::string& path)

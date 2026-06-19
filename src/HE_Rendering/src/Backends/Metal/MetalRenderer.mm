@@ -801,7 +801,7 @@ static const char* kSkyMSL = R"MSL(
 using namespace metal;
 
 struct SkyOut { float4 position [[position]]; float2 ndc; };
-struct SkyParams { float4x4 invViewProj; float4 sunDir; float4 sunColor; float4 params; float4 nebulaColor; float4 auroraColor; float4 wind; }; // params: x=timeOfDay y=coverage z=time w=aurora; nebulaColor.w=nebula intensity; auroraColor.w=milkyWay; wind.xyz=cloud drift/s
+struct SkyParams { float4x4 invViewProj; float4 sunDir; float4 sunColor; float4 params; float4 nebulaColor; float4 auroraColor; float4 wind; }; // params: x=timeOfDay y=coverage z=time w=aurora; nebulaColor.w=nebula intensity; auroraColor.w=milkyWay; wind.xyz=cloud drift/s; wind.w=lightning flash
 
 vertex SkyOut skyVertex(uint vid [[vertex_id]])
 {
@@ -1237,6 +1237,7 @@ fragment float4 skyFragment(SkyOut in [[stage_in]],
 		col += moonDisk(dir, p.sunDir.xyz, p.sunDir.w > 0.5, moonTex, moonSamp);
 	}
 	col = applyClouds(col, dir, p.sunDir.xyz, p.params.z, p.params.y, p.sunColor.xyz, p.wind.xyz, noiseTex, noiseSamp);
+	col += p.wind.w * float3(0.85, 0.90, 1.0); // lightning lights up the sky/clouds
 	return float4(col, 1.0);
 }
 )MSL";
@@ -1996,6 +1997,7 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr)
 		for (uint32_t idx : m_sortedIndices)
 		{
 			const RenderObject& obj = m_renderWorld.objects[idx];
+			if (!obj.castsShadow) continue; // billboards (precip/particles) cast no shadow
 			UnlitUniforms u;
 			u.mvp = lightClip * obj.transform;
 
@@ -2692,6 +2694,7 @@ void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
 		for (uint32_t idx : m_sortedIndices)
 		{
 			const RenderObject& obj = m_renderWorld.objects[idx];
+			if (!obj.contributesAO) continue; // precip/particles: skip the SSAO prepass
 			SSAOPosUniforms u;
 			u.mvp       = viewProj * obj.transform;
 			u.modelView = view * obj.transform;
@@ -2854,7 +2857,7 @@ void MetalRenderer::EncodeSky(void* renderEncoder, const glm::mat4& invViewProj,
 	p.params      = glm::vec4(timeOfDay, cloudCoverage, time, auroraIntensity);
 	p.nebulaColor = glm::vec4(nebulaColor, nebulaIntensity);
 	p.auroraColor = glm::vec4(auroraColor, milkyWayIntensity);
-	p.wind        = glm::vec4(wind, 0.0f);
+	p.wind        = glm::vec4(wind, GetEnvironment().flash); // w = lightning flash
 	[enc setFragmentBytes:&p length:sizeof(p) atIndex:0];
 	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
 }

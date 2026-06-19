@@ -861,6 +861,38 @@ void ContentManager::initDefaultAssets()
 	quad.indices .assign(kQuadIdx, kQuadIdx + 6);
 	registerStaticMesh(std::move(quad));
 
+	// ── Default snowflake mesh (kDefaultSnowflakeMeshId) ──────────────────────
+	// Flat 6-pointed star in the XY plane (normal +Z): centre vertex + 12 rim verts
+	// alternating outer/inner radius, 12 triangles fanned from the centre. Billboarded
+	// by the weather system so snow reads as a flake shape instead of a square.
+	{
+		StaticMeshAsset flake;
+		flake.id   = HE::kDefaultSnowflakeMeshId;
+		flake.name = "DefaultSnowflake";
+		flake.path = "mem://default_snowflake";
+		flake.vertices = { 0.0f, 0.0f, 0.0f };
+		flake.normals  = { 0.0f, 0.0f, 1.0f };
+		flake.uvs      = { 0.5f, 0.5f };
+		constexpr int kPoints = 6;
+		for (int i = 0; i < kPoints * 2; ++i)
+		{
+			const float r   = (i % 2 == 0) ? 0.5f : 0.2f; // outer tip / inner notch
+			const float ang = (3.14159265f / kPoints) * static_cast<float>(i);
+			const float x = std::cos(ang) * r;
+			const float y = std::sin(ang) * r;
+			flake.vertices.insert(flake.vertices.end(), { x, y, 0.0f });
+			flake.normals .insert(flake.normals.end(),  { 0.0f, 0.0f, 1.0f });
+			flake.uvs     .insert(flake.uvs.end(),      { x + 0.5f, y + 0.5f });
+		}
+		for (uint32_t i = 0; i < kPoints * 2; ++i)
+		{
+			const uint32_t a = 1u + i;
+			const uint32_t b = 1u + ((i + 1) % (kPoints * 2));
+			flake.indices.insert(flake.indices.end(), { 0u, a, b });
+		}
+		registerStaticMesh(std::move(flake));
+	}
+
 	// ── Default white texture (kDefaultWhiteTextureId) ────────────────────────
 	// 1×1 RGBA8 opaque white — neutral placeholder; multiplied with any colour
 	// leaves it unchanged.

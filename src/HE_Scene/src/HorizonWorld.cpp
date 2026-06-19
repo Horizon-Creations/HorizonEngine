@@ -1,5 +1,6 @@
 #include "HorizonScene/HorizonWorld.h"
 #include "HorizonScene/Components/EnvironmentComponent.h"
+#include "HorizonScene/Components/WeatherComponent.h"
 #include "HorizonScene/Components/EnvironmentLightComponent.h"
 #include "HorizonScene/Components/LightComponent.h"
 #include "HorizonScene/Components/TransformComponent.h"
@@ -11,8 +12,10 @@ HorizonWorld::HorizonWorld()
     registry_.emplace<NameComponent>(rootEntity_, NameComponent{ "World" });
     registry_.emplace<HierarchyComponent>(rootEntity_);
     // Scene-wide environment / sky settings live on the root ("World") entity so
-    // they serialize with the scene and are edited in its Details panel.
+    // they serialize with the scene and are edited in its Details panel. Weather is a
+    // built-in part of the World too (drives the sky's clouds/fog/wind + precipitation).
     registry_.emplace<EnvironmentComponent>(rootEntity_);
+    registry_.emplace<WeatherComponent>(rootEntity_);
     ensureEnvironmentLights();
 }
 
@@ -122,10 +125,11 @@ void HorizonWorld::clear()
     for (Entity e : strays)
         if (registry_.valid(e))
             registry_.destroy(e);
-    // Reset the root's environment to defaults so New Scene / loading a scene
-    // without an environment block starts from a clean sky (a loaded scene that
-    // has one overwrites this via the serializer's emplace_or_replace).
+    // Reset the root's environment + weather to defaults so New Scene / loading a scene
+    // without those blocks starts from a clean sky (a loaded scene that has them
+    // overwrites this via the serializer's emplace_or_replace).
     registry_.emplace_or_replace<EnvironmentComponent>(rootEntity_);
+    registry_.emplace_or_replace<WeatherComponent>(rootEntity_);
     ensureEnvironmentLights(); // re-attach (or recreate) the built-in sun/moon
     m_hierarchyDirty = true;
 }
