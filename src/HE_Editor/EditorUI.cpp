@@ -82,6 +82,7 @@ namespace
 // to force a rebuild of the default layout even when a layout is already loaded.
 static bool s_resetLayoutRequested = false;
 
+
 // Toggled by Edit > Preferences (Ctrl+,); drives the Preferences window.
 static bool s_showPreferences = false;
 
@@ -230,9 +231,13 @@ static void DrawEngineSettings(AppContext& ctx, SettingsMode mode)
 				if (ImGui::Selectable(label)) { ctx.globalState->setSelectedRHI(api); ctx.backendName = getRHIName(api); }
 			};
 			pick("OpenGL", HE::GraphicsAPI::OpenGL);
+#ifdef HE_VULKAN_ENABLED
 			pick("Vulkan", HE::GraphicsAPI::Vulkan);
+#endif
+#ifdef _WIN32
 			pick("DirectX11", HE::GraphicsAPI::D3D11);
 			pick("DirectX12", HE::GraphicsAPI::D3D12);
+#endif
 #ifdef __APPLE__
 			pick("Metal", HE::GraphicsAPI::Metal);
 #endif
@@ -1072,7 +1077,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
     if (ImGui::BeginMenu("View"))
     {
         if (ImGui::MenuItem("Toggle Fullscreen", "F11")) {}
-        if (ImGui::MenuItem("Reset Layout")) s_resetLayoutRequested = true;
+        if (ImGui::MenuItem("Reset Layout")) { s_resetLayoutRequested = true; }
         ImGui::EndMenu();
     }
 	if (ImGui::BeginMenu("Assets"))
@@ -1742,6 +1747,84 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 		             ImGuiWindowFlags_NoMove);
 		ImGui::PopStyleVar();
 
+		// ── Inline toolbar (always at top of Scene, works docked or floating) ──
+		{
+			constexpr float kToolbarH = 36.0f;
+			ImGui::SetCursorPos(ImVec2(4.0f, 6.0f));
+
+			ImGui::SetNextItemWidth(120.0f);
+			if (ImGui::BeginCombo("##ModeSelector", ctx.editorConfig.modeString().c_str()))
+			{
+				if (ImGui::Selectable("View"))      ctx.editorConfig.mode = EditorMode::View;
+				if (ImGui::Selectable("Landscape")) ctx.editorConfig.mode = EditorMode::Landscape;
+				ImGui::EndCombo();
+			}
+			ImGui::SameLine();
+
+			auto toolBtn = [&](const char* label, ImGuizmo::OPERATION op, const char* tip)
+			{
+				const bool active = (s_gizmoOp == op);
+				if (active) ImGui::PushStyleColor(ImGuiCol_Button,
+					ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+				if (ImGui::Button(label)) s_gizmoOp = op;
+				if (active) ImGui::PopStyleColor();
+				if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
+			};
+			toolBtn("Move",   ImGuizmo::TRANSLATE, "Move (W)");   ImGui::SameLine();
+			toolBtn("Rotate", ImGuizmo::ROTATE,    "Rotate (E)"); ImGui::SameLine();
+			toolBtn("Scale",  ImGuizmo::SCALE,     "Scale (R)");  ImGui::SameLine();
+
+			{
+				int modeIdx = (s_gizmoMode == ImGuizmo::WORLD) ? 1 : 0;
+				const char* modeItems[] = { "Local", "World" };
+				ImGui::SetNextItemWidth(90.0f);
+				if (ImGui::Combo("##GizmoMode", &modeIdx, modeItems, 2))
+					s_gizmoMode = (modeIdx == 1) ? ImGuizmo::WORLD : ImGuizmo::LOCAL;
+				if (ImGui::IsItemHovered())
+					ImGui::SetTooltip("Gizmo axis orientation:\nLocal (object axes) or World (axis-aligned)");
+			}
+			ImGui::SameLine();
+
+			ImGui::Checkbox("Screen ring", &s_rotateScreen);
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("Show the rotate gizmo's outer screen-space ring\n(rotates about the view axis)");
+			ImGui::SameLine();
+
+			// Play / Stop button — centered in the remaining space
+			{
+				const bool playing = ctx.isPlaying;
+				constexpr float btnSize = 20.0f;
+				const float centerX = (ImGui::GetContentRegionAvail().x - 120 - btnSize) * 0.5f;
+				ImGui::SetCursorPosX(ImGui::GetCursorPosX() + centerX);
+
+				ImTextureID icon = playing ? ctx.toolbarIcons.stop : ctx.toolbarIcons.play;
+				ImVec4 tint = playing
+					? ImVec4(1.0f, 0.35f, 0.35f, 1.0f)
+					: ImVec4(0.35f, 1.0f, 0.55f, 1.0f);
+
+				ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0,0,0,0));
+				ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1,1,1,0.08f));
+				ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1,1,1,0.16f));
+				ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(2.0f, 2.0f));
+
+				bool toggled = false;
+				if (icon)
+					toggled = ImGui::ImageButton("##tbPlay", icon, ImVec2(btnSize, btnSize),
+						ImVec2(0,0), ImVec2(1,1), ImVec4(0,0,0,0), tint);
+				else
+					toggled = ImGui::Button(playing ? "Stop" : "Play", ImVec2(btnSize * 2.0f, btnSize));
+
+				if (toggled && ctx.setPlayMode) ctx.setPlayMode(!playing);
+
+				ImGui::PopStyleVar();
+				ImGui::PopStyleColor(3);
+			}
+
+			// Advance cursor to fixed toolbar height and draw a separator line
+			ImGui::SetCursorPos(ImVec2(0.0f, kToolbarH));
+			ImGui::Separator();
+		}
+
 		ImVec2 avail = ImGui::GetContentRegionAvail();
 
 		// HE_VIEWPORT_RESIZE_STRESS=1 oscillates the viewport size every frame
@@ -2398,109 +2481,6 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 		ImGui::End();
 	}
 
-	// topbar inside viewport (for quick actions) — position set on first use, freely movable after
-	{
-		const ImGuiViewport* vp = ImGui::GetMainViewport();
-		ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x, vp->WorkPos.y + kTabBarH), ImGuiCond_FirstUseEver);
-		ImGui::SetNextWindowSize(ImVec2(vp->WorkSize.x, 36.0f), ImGuiCond_FirstUseEver);
-
-		ImGui::Begin("Toolbar##ViewportTopBar", nullptr,
-			ImGuiWindowFlags_NoTitleBar         |
-			ImGuiWindowFlags_NoScrollbar        |
-			ImGuiWindowFlags_NoFocusOnAppearing |
-			ImGuiWindowFlags_NoNav              |
-			ImGuiWindowFlags_NoDecoration
-			);
-
-		ImGui::SetNextItemWidth(120.0f);
-
-        {
-            if (ImGui::BeginCombo("##ModeSelector",ctx.editorConfig.modeString().c_str()))
-            {
-                if (ImGui::Selectable("View"))
-                {
-                    ctx.editorConfig.mode = EditorMode::View;
-                }
-                if (ImGui::Selectable("Landscape"))
-                {
-                    ctx.editorConfig.mode = EditorMode::Landscape;
-                }
-                ImGui::EndCombo();
-            }
-        }
-		ImGui::SameLine();
-
-		// ── Gizmo tools: Move / Rotate / Scale (mirror the W/E/R shortcuts) ──
-		{
-			auto toolBtn = [&](const char* label, ImGuizmo::OPERATION op, const char* tip)
-			{
-				const bool active = (s_gizmoOp == op);
-				if (active)
-					ImGui::PushStyleColor(ImGuiCol_Button,
-						ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
-				if (ImGui::Button(label)) s_gizmoOp = op;
-				if (active) ImGui::PopStyleColor();
-				if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
-			};
-			toolBtn("Move",   ImGuizmo::TRANSLATE, "Move (W)");   ImGui::SameLine();
-			toolBtn("Rotate", ImGuizmo::ROTATE,    "Rotate (E)"); ImGui::SameLine();
-			toolBtn("Scale",  ImGuizmo::SCALE,     "Scale (R)");  ImGui::SameLine();
-
-			// Local / World gizmo orientation (dropdown)
-			{
-				int modeIdx = (s_gizmoMode == ImGuizmo::WORLD) ? 1 : 0;
-				const char* modeItems[] = { "Local", "World" };
-				ImGui::SetNextItemWidth(90.0f);
-				if (ImGui::Combo("##GizmoMode", &modeIdx, modeItems, 2))
-					s_gizmoMode = (modeIdx == 1) ? ImGuizmo::WORLD : ImGuizmo::LOCAL;
-				if (ImGui::IsItemHovered())
-					ImGui::SetTooltip("Gizmo axis orientation:\nLocal (object axes) or World (axis-aligned)");
-			}
-			ImGui::SameLine();
-
-			// Outer screen-space rotation ring (the white circle on the rotate
-			// gizmo that spins about the view axis) — off by default.
-			ImGui::Checkbox("Screen ring", &s_rotateScreen);
-			if (ImGui::IsItemHovered())
-				ImGui::SetTooltip(
-					"Show the rotate gizmo's outer screen-space ring\n"
-					"(rotates about the view axis)");
-			ImGui::SameLine();
-		}
-
-		// ── Play button centered ────────────────────────────────────────────
-		{
-			const bool playing = ctx.isPlaying;
-			constexpr float btnSize = 20.0f;
-			const float centerX = (ImGui::GetContentRegionAvail().x - 120 - btnSize) * 0.5f;
-			ImGui::SetCursorPosX(ImGui::GetCursorPosX() + centerX);
-
-			ImTextureID icon = playing ? ctx.toolbarIcons.stop : ctx.toolbarIcons.play;
-			ImVec4 tint = playing
-				? ImVec4(1.0f, 0.35f, 0.35f, 1.0f)
-				: ImVec4(0.35f, 1.0f, 0.55f, 1.0f);
-
-			ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0,0,0,0));
-			ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1,1,1,0.08f));
-			ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1,1,1,0.16f));
-			ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(2.0f, 2.0f));
-
-			bool toggled = false;
-			if (icon)
-				toggled = ImGui::ImageButton("##tbPlay", icon, ImVec2(btnSize, btnSize),
-					ImVec2(0,0), ImVec2(1,1), ImVec4(0,0,0,0), tint);
-			else
-				toggled = ImGui::Button(playing ? "Stop" : "Play", ImVec2(btnSize * 2.0f, btnSize));
-
-			if (toggled && ctx.setPlayMode)
-				ctx.setPlayMode(!playing);
-
-			ImGui::PopStyleVar();
-			ImGui::PopStyleColor(3);
-		}
-
-		ImGui::End();
-	}
 
     // ── Quick Settings / Landscape panel ────────────────────────────────────
     // When Landscape mode is active the panel becomes the Landscape tool panel;

@@ -175,7 +175,12 @@ public:
     // ImGui-compatible texture handle (GL: GLuint cast; Metal: id<MTLTexture>).
     // Pass 0×0 to return to direct-to-window rendering.
     virtual void  SetViewportSize(uint32_t /*width*/, uint32_t /*height*/) {}
-    virtual void* GetViewportTexture() { return nullptr; }
+    virtual void* GetViewportTexture() { return m_viewportImGuiHandle; }
+
+    // Called by the platform layer (editor) after it has registered the viewport
+    // texture with the ImGui GPU backend (D3D12: D3D12_GPU_DESCRIPTOR_HANDLE.ptr
+    // packed into void*; Vulkan: VkDescriptorSet; others: unused).
+    void SetViewportImGuiHandle(void* handle) { m_viewportImGuiHandle = handle; }
 
     // ── Offscreen capture (headless screenshot / validation / thumbnails) ───
     // Read the most recently rendered offscreen viewport color target back into
@@ -219,8 +224,12 @@ public:
 
 protected:
     OverlayCallback      m_overlayCallback;
-    HorizonWorld*        m_world          = nullptr;
-    ContentManager*      m_contentManager = nullptr;
+    HorizonWorld*        m_world                = nullptr;
+    ContentManager*      m_contentManager       = nullptr;
     EditorCameraOverride m_editorCamera;
     EnvironmentSettings  m_environment;
+    // Viewport texture handle registered by the editor with the ImGui GPU backend.
+    // OpenGL/D3D11 override GetViewportTexture() and ignore this field; D3D12 and
+    // Vulkan return it so the editor can control descriptor lifetime.
+    void*                m_viewportImGuiHandle  = nullptr;
 };

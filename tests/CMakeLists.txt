@@ -31,6 +31,7 @@ add_executable(he_tests
     test_navigation.cpp
     test_particles.cpp
     test_ui.cpp
+    test_postfx.cpp
     test_hpak.cpp
     test_async_streaming.cpp
     test_crash_handler.cpp
@@ -71,3 +72,19 @@ target_link_libraries(he_tests PRIVATE
 )
 
 add_test(NAME he_tests COMMAND he_tests)
+
+# On Windows the test binary is in tests/ but the engine DLLs are in per-target
+# subdirectories. There is no rpath equivalent, so copy the DLLs next to the exe
+# via POST_BUILD (mirrors he_deploy_dll). SDL3.dll is needed transitively by
+# HorizonCore.dll even though tests don't use it directly.
+if(WIN32)
+    add_custom_command(TARGET he_tests POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:HorizonCore>  $<TARGET_FILE_DIR:he_tests>
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:HorizonScene> $<TARGET_FILE_DIR:he_tests>
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:SDL3-shared>  $<TARGET_FILE_DIR:he_tests>
+        VERBATIM
+    )
+endif()

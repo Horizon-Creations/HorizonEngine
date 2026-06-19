@@ -1,4 +1,5 @@
 #pragma once
+#include "Types/Defines.h"
 #include <condition_variable>
 #include <functional>
 #include <future>
@@ -8,7 +9,7 @@
 #include <vector>
 
 // Fixed-size thread pool. Workers pull tasks from a shared queue.
-class ThreadPool {
+class HE_API ThreadPool {
 public:
     explicit ThreadPool(size_t threadCount);
     ~ThreadPool();
@@ -37,7 +38,7 @@ private:
 };
 
 // Process-wide thread pool (hardware_concurrency threads, created on first use).
-ThreadPool& globalPool();
+HE_API ThreadPool& globalPool();
 
 // Distribute [0, count) invocations of f across the global pool and block until
 // all finish. f(i) is called exactly once for each i in [0, count).

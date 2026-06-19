@@ -54,7 +54,7 @@ public:
         m_objectToBP[HELayers::NON_MOVING] = HEBPLayers::NON_MOVING;
         m_objectToBP[HELayers::MOVING]     = HEBPLayers::MOVING;
     }
-    uint GetNumBroadPhaseLayers() const override { return HEBPLayers::NUM_LAYERS; }
+    JPH::uint GetNumBroadPhaseLayers() const override { return HEBPLayers::NUM_LAYERS; }
     JPH::BroadPhaseLayer GetBroadPhaseLayer(JPH::ObjectLayer layer) const override {
         JPH_ASSERT(layer < HELayers::NUM_LAYERS);
         return m_objectToBP[layer];

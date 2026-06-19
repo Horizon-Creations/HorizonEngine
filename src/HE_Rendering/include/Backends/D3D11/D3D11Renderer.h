@@ -22,8 +22,14 @@ public:
     void* GetContext() const;
     void  SetVSync(bool enabled) override;
 
+    // Offscreen viewport (editor scene view)
+    void  SetViewportSize(uint32_t width, uint32_t height) override;
+    void* GetViewportTexture() override; // returns ID3D11ShaderResourceView*
+    bool  CaptureViewport(std::vector<uint8_t>& rgba,
+                          uint32_t& width, uint32_t& height) override;
+
 private:
-    // Extract → cull → sort → RenderGraph → replay into the bound targets.
+    // Extract → cull → sort → RenderGraph → replay into the currently bound targets.
     void DrawScene(int width, int height);
 
     D3D11RendererImpl* m_impl = nullptr;

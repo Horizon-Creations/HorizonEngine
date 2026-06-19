@@ -59,8 +59,11 @@ target_link_libraries(hpak_packer
     PRIVATE HorizonCore
     PRIVATE HorizonScene
     # PRIVATE mbedtls  # FetchContent — replace XOR with AES-256-CBC
-    # PRIVATE lz4      # FetchContent — enable LZ4 compression
 )
+if(HE_HAVE_LZ4)
+    target_link_libraries(hpak_packer PRIVATE lz4::lz4)
+    target_compile_definitions(hpak_packer PRIVATE HE_HAVE_LZ4)
+endif()
 target_include_directories(hpak_packer
     PRIVATE src/Packer
     PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_Core/include

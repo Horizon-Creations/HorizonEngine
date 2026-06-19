@@ -142,6 +142,16 @@ public:
 		}
 	}
 
+	// std::string is not POD — serialize each element with appendString so the
+	// format is portable across platforms with different sizeof(std::string).
+	static void appendVec(std::vector<uint8_t>& buf, const std::vector<std::string>& vec)
+	{
+		uint64_t count = vec.size();
+		appendPOD(buf, count);
+		for (const auto& s : vec)
+			appendString(buf, s);
+	}
+
 	bool write(const std::string& filePath, uint16_t assetType) const
 	{
 		std::ofstream f(filePath, std::ios::binary | std::ios::trunc);
@@ -321,6 +331,18 @@ public:
 						static_cast<size_t>(count) * sizeof(T));
 			offset += static_cast<size_t>(count) * sizeof(T);
 		}
+		return true;
+	}
+
+	// std::string is not POD — read each element with readString so the format
+	// is portable across platforms with different sizeof(std::string).
+	static bool readVec(const std::vector<uint8_t>& buf, size_t& offset, std::vector<std::string>& out)
+	{
+		uint64_t count = 0;
+		if (!readPOD(buf, offset, count)) return false;
+		out.resize(static_cast<size_t>(count));
+		for (auto& s : out)
+			if (!readString(buf, offset, s)) return false;
 		return true;
 	}
 

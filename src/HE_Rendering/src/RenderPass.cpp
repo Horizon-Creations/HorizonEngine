@@ -43,6 +43,10 @@ void GeometryPass::execute(const RenderWorld&           world,
 		dc.entityId        = first.entityId;
 		dc.lod             = first.lod;
 		dc.contributesAO   = first.contributesAO;
+		dc.baseColor       = first.baseColor;
+		dc.metallic        = first.metallic;
+		dc.roughness       = first.roughness;
+		dc.opacity         = first.opacity;
 
 		if (runLen > 1)
 		{

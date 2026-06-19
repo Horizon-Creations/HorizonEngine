@@ -949,6 +949,81 @@ void EditorApplication::OnRender(float dt)
 		}
 	}
 
+	// ── Viewport texture registration (D3D12 / Vulkan) ──────────────────────
+	// The renderer creates the offscreen RT inside Render() (previous frame).
+	// When the RT is (re)created HasViewportResourceChanged() fires; we
+	// allocate an SRV / descriptor set in the editor-side ImGui heap here,
+	// then hand the opaque handle back to the renderer so GetViewportTexture()
+	// returns it for use in ImGui::Image().
+#ifdef _WIN32
+	if (m_backend == RendererFactory::Backend::D3D12)
+	{
+		auto* dx12 = static_cast<D3D12Renderer*>(renderer());
+		if (dx12 && dx12->HasViewportResourceChanged())
+		{
+			auto* device = static_cast<ID3D12Device*>(dx12->GetDevice());
+			auto* alloc  = static_cast<D3D12DescriptorHeapAllocator*>(m_d3d12SrvAllocator);
+			if (device && alloc)
+			{
+				// Release the previous slot if we already had one.
+				if (m_d3d12ViewportSrvAllocated)
+				{
+					D3D12_CPU_DESCRIPTOR_HANDLE cpu{}; cpu.ptr = static_cast<SIZE_T>(m_d3d12ViewportSrvCpuPtr);
+					D3D12_GPU_DESCRIPTOR_HANDLE gpu{}; gpu.ptr = static_cast<UINT64>(m_d3d12ViewportSrvGpuPtr);
+					alloc->Free(cpu, gpu);
+					m_d3d12ViewportSrvAllocated = false;
+				}
+				auto* rt = static_cast<ID3D12Resource*>(dx12->GetViewportD3DResource());
+				if (rt)
+				{
+					D3D12_CPU_DESCRIPTOR_HANDLE cpu{};
+					D3D12_GPU_DESCRIPTOR_HANDLE gpu{};
+					alloc->Alloc(&cpu, &gpu);
+					m_d3d12ViewportSrvCpuPtr    = static_cast<uint64_t>(cpu.ptr);
+					m_d3d12ViewportSrvGpuPtr    = static_cast<uint64_t>(gpu.ptr);
+					m_d3d12ViewportSrvAllocated = true;
+
+					D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+					srvDesc.Format                  = DXGI_FORMAT_R8G8B8A8_UNORM;
+					srvDesc.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
+					srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+					srvDesc.Texture2D.MipLevels     = 1;
+					device->CreateShaderResourceView(rt, &srvDesc, cpu);
+
+					// Pass the GPU handle as the ImGui texture ID.
+					dx12->SetViewportImGuiHandle(reinterpret_cast<void*>(static_cast<uintptr_t>(gpu.ptr)));
+				}
+				dx12->ClearViewportResourceChanged();
+			}
+		}
+	}
+#endif
+#ifdef HE_IMGUI_VULKAN_ENABLED
+	if (m_backend == RendererFactory::Backend::Vulkan)
+	{
+		auto* vk = static_cast<VulkanRenderer*>(renderer());
+		if (vk && vk->HasViewportResourceChanged())
+		{
+			// Remove the old descriptor set if present.
+			if (m_vkViewportDescSet)
+			{
+				ImGui_ImplVulkan_RemoveTexture(reinterpret_cast<VkDescriptorSet>(m_vkViewportDescSet));
+				m_vkViewportDescSet = nullptr;
+			}
+			auto sampler = reinterpret_cast<VkSampler>(vk->GetViewportVkSampler());
+			auto view    = reinterpret_cast<VkImageView>(vk->GetViewportVkImageView());
+			if (sampler && view)
+			{
+				VkDescriptorSet ds = ImGui_ImplVulkan_AddTexture(
+					sampler, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+				m_vkViewportDescSet = reinterpret_cast<void*>(ds);
+				vk->SetViewportImGuiHandle(reinterpret_cast<void*>(ds));
+			}
+			vk->ClearViewportResourceChanged();
+		}
+	}
+#endif
+
 	AppContext ctx = makeContext();
 	EditorUI::render(ctx, dt);
 
