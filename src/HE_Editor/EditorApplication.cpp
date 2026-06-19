@@ -879,6 +879,56 @@ void EditorApplication::OnRender(float dt)
 				}
 			}
 
+			// New-landscape grid preview: while the Landscape creation form is
+			// open (no terrain yet) draw a green wireframe of the terrain-to-be.
+			// Emitting it as debug lines means it's depth-tested by the backend —
+			// closer objects occlude it per-pixel, like any 3D mesh.
+			if (m_editorConfig.mode == EditorMode::Landscape && !m_isPlaying &&
+			    m_editorWorld->registry().view<TerrainComponent>().empty())
+			{
+				TerrainComponent preview;
+				preview.sizeX       = m_editorConfig.newTerrain.sizeX;
+				preview.sizeZ       = m_editorConfig.newTerrain.sizeZ;
+				preview.resolution  = static_cast<uint32_t>(
+					std::clamp(m_editorConfig.newTerrain.resolution, 2, 1024));
+				preview.heightScale = m_editorConfig.newTerrain.heightScale;
+				preview.seed        = m_editorConfig.newTerrain.seed;
+				preview.octaves     = m_editorConfig.newTerrain.octaves;
+				preview.frequency   = m_editorConfig.newTerrain.frequency;
+				preview.lacunarity  = m_editorConfig.newTerrain.lacunarity;
+				preview.gain        = m_editorConfig.newTerrain.gain;
+
+				// Coarse, readable grid (not the full sculpt resolution).
+				const int   gridN = std::clamp(static_cast<int>(preview.resolution), 2, 33);
+				const float halfX = preview.sizeX * 0.5f;
+				const float halfZ = preview.sizeZ * 0.5f;
+				const float stepX = preview.sizeX / static_cast<float>(gridN - 1);
+				const float stepZ = preview.sizeZ / static_cast<float>(gridN - 1);
+
+				std::vector<float> hpre(static_cast<size_t>(gridN) * gridN);
+				for (int zi = 0; zi < gridN; ++zi)
+					for (int xi = 0; xi < gridN; ++xi)
+						hpre[zi * gridN + xi] = terrainHeightAt(
+							preview, -halfX + xi * stepX, -halfZ + zi * stepZ);
+
+				const glm::vec3 colMid (0.30f, 0.85f, 0.45f);
+				const glm::vec3 colEdge(0.50f, 1.00f, 0.65f); // boundary, brighter
+				auto vert = [&](int xi, int zi) {
+					return glm::vec3(-halfX + xi * stepX, hpre[zi * gridN + xi],
+					                 -halfZ + zi * stepZ);
+				};
+				for (int zi = 0; zi < gridN; ++zi)
+					for (int xi = 0; xi < gridN; ++xi)
+					{
+						if (xi + 1 < gridN)
+							dbg.line(vert(xi, zi), vert(xi + 1, zi),
+							         (zi == 0 || zi == gridN - 1) ? colEdge : colMid);
+						if (zi + 1 < gridN)
+							dbg.line(vert(xi, zi), vert(xi, zi + 1),
+							         (xi == 0 || xi == gridN - 1) ? colEdge : colMid);
+					}
+			}
+
 			renderer()->SetDebugLines(dbg.lines());
 		}
 		else
