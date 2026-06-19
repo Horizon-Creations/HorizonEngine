@@ -249,8 +249,8 @@ static void DrawEngineSettings(AppContext& ctx, SettingsMode mode)
 		ImGui::Checkbox("AO", &cfg.SSAOEnabled);
 		ImGui::BeginDisabled(!cfg.SSAOEnabled);
 		ImGui::SetNextItemWidth(220.0f);
-		// AO method: SSAO (kernel) or HBAO (horizon). GTAO is planned (not yet selectable).
-		const char* kAOMethods[] = { "SSAO", "HBAO" };
+		// AO method: SSAO (kernel), HBAO (horizon bitmask), or GTAO (analytic arc).
+		const char* kAOMethods[] = { "SSAO", "HBAO", "GTAO" };
 		ImGui::Combo("AO Method", &cfg.SSAOMethod, kAOMethods, IM_ARRAYSIZE(kAOMethods));
 		ImGui::SetNextItemWidth(220.0f);
 		ImGui::SliderFloat("AO Radius", &cfg.SSAORadius, 0.05f, 2.0f, "%.2f");

@@ -1082,7 +1082,8 @@ void main() { FragColor = vec4(vViewPos, 1.0); } // a = 1 → valid geometry
 // Occlusion estimate (fullscreen, shares the tonemap fullscreen-triangle VS).
 // Reconstructs the view-space normal from neighbouring positions, then runs the
 // AO method selected by uAOMethod (0 = SSAO tangent-plane kernel, 1 = HBAO
-// horizon/visibility-bitmask). uAOMethod is a *uniform* so the branch is coherent
+// horizon/visibility-bitmask, 2 = GTAO analytic horizon-arc integral).
+// uAOMethod is a *uniform* so the branch is coherent
 // across the whole pass (no divergence). Mirrors the Metal pass except the UV y
 // flip (GL framebuffers are bottom-up; Metal is top-left).
 static const char* kSSAOFS = R"GLSL(
@@ -1096,7 +1097,7 @@ uniform float     uRadius;
 uniform float     uBias;
 uniform float     uIntensity;
 uniform vec3      uKernel[32];  // hemisphere kernel — SSAO only
-uniform int       uAOMethod;    // 0 = SSAO, 1 = HBAO
+uniform int       uAOMethod;    // 0 = SSAO, 1 = HBAO, 2 = GTAO
 out vec4 FragColor;
 
 const float PI = 3.14159265359, TWO_PI = 6.28318530718, HALF_PI = 1.57079632679;
@@ -1179,6 +1180,67 @@ void main()
 			visibility += 1.0 - float(bitCount(occ)) / 32.0;
 		}
 		visibility /= float(SLICES);
+		ao = 1.0 - (1.0 - visibility) * uIntensity;
+		ao = max(ao, 0.1);                            // backstop against pure black
+	}
+	else if (uAOMethod == 2)
+	{
+		// ── GTAO: Ground-Truth AO (Jiménez et al. 2016) ────────────────────────
+		// Reuses the HBAO slice setup, but instead of a coverage bitmask it finds
+		// the max horizon angle on EACH side of the slice line and integrates
+		// visibility analytically over the cosine-weighted hemisphere arc between
+		// them: V = 0.25·|projN|·Σ(−cos(2h−γ)+cos γ+2h·sin γ). γ = angle of the
+		// surface normal projected into the slice plane (relative to V). Slices
+		// span [0,π) since each line covers both ± directions.
+		const int SLICES = 3;
+		const int STEPS  = 8;
+		vec3  V = normalize(-P);
+		float jitter = ign(gl_FragCoord.xy);
+		float depthScale = 0.5 * uRadius / max(-P.z, 1e-4);
+		float visAccum = 0.0;
+		for (int s = 0; s < SLICES; ++s)
+		{
+			float phi = (float(s) + jitter) * (PI / float(SLICES));
+			vec2  omega = vec2(cos(phi), sin(phi));
+			vec3  dir = vec3(omega, 0.0);
+			vec3  axis = cross(dir, V);
+			float axisLen = length(axis);
+			if (axisLen < 1e-5) { visAccum += 1.0; continue; }
+			axis /= axisLen;
+			vec3  orthoDir = normalize(dir - dot(dir, V) * V); // in-plane ⟂ V, toward +omega
+			vec3  projN = N - axis * dot(N, axis);             // normal into slice plane
+			float projLen = length(projN);
+			if (projLen < 1e-5) continue;                      // normal ⟂ slice → no AO here
+			float gamma = sign(dot(orthoDir, projN)) * acos(clamp(dot(projN, V) / projLen, -1.0, 1.0));
+			vec2  omegaUV = vec2(uProj[0][0] * omega.x, uProj[1][1] * omega.y);
+			float cH1 = 0.0;   // +omega side horizon cosine (vs V); 0 ⇒ no occluder
+			float cH2 = 0.0;   // -omega side
+			for (int i = 0; i < STEPS; ++i)
+			{
+				float t = (float(i) + jitter) / float(STEPS) + 0.02;
+				vec4  sp1 = texture(uViewPos, vUV + t * depthScale * omegaUV); // GL uv.y up
+				if (sp1.a >= 0.5) {
+					vec3 d = sp1.xyz - P; float len = length(d);
+					float fall = clamp(1.0 - len / uRadius, 0.0, 1.0);
+					cH1 = max(cH1, (dot(d, V) / max(len, 1e-5)) * fall);
+				}
+				vec4  sp2 = texture(uViewPos, vUV - t * depthScale * omegaUV);
+				if (sp2.a >= 0.5) {
+					vec3 d = sp2.xyz - P; float len = length(d);
+					float fall = clamp(1.0 - len / uRadius, 0.0, 1.0);
+					cH2 = max(cH2, (dot(d, V) / max(len, 1e-5)) * fall);
+				}
+			}
+			float h1 =  acos(clamp(cH1, -1.0, 1.0));  // +side, ≥0
+			float h2 = -acos(clamp(cH2, -1.0, 1.0));  // -side, ≤0
+			h1 = gamma + min(h1 - gamma,  HALF_PI);   // clamp to normal's hemisphere
+			h2 = gamma + max(h2 - gamma, -HALF_PI);
+			float cosG = cos(gamma), sinG = sin(gamma);
+			float arc = (-cos(2.0 * h1 - gamma) + cosG + 2.0 * h1 * sinG)
+			          + (-cos(2.0 * h2 - gamma) + cosG + 2.0 * h2 * sinG);
+			visAccum += projLen * 0.25 * arc;
+		}
+		float visibility = clamp(visAccum / float(SLICES), 0.0, 1.0);
 		ao = 1.0 - (1.0 - visibility) * uIntensity;
 		ao = max(ao, 0.1);                            // backstop against pure black
 	}

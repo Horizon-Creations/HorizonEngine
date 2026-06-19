@@ -687,6 +687,68 @@ fragment float4 ssaoFragment(SSAOOut in [[stage_in]],
 		ao = 1.0 - (1.0 - visibility) * P.cfg2.x;    // cfg2.x = intensity
 		ao = max(ao, 0.1);                           // backstop against pure black
 	}
+	else if (int(P.cfg2.y + 0.5) == 2)
+	{
+		// ── GTAO: Ground-Truth AO (Jiménez et al. 2016, mirrors GL) ─────────────
+		// Per slice find the max horizon angle on each side, project the normal into
+		// the slice plane (γ), then integrate visibility analytically over the
+		// cosine-weighted arc between the two horizons. Slices span [0,π) (each line
+		// covers both ± directions).
+		const int SLICES = 3;
+		const int STEPS  = 8;
+		const float PI = 3.14159265359, HALF_PI = 1.57079632679;
+		float3 V = normalize(-Pp);
+		float2 fragCoord = in.uv * float2(float(posTex.get_width()), float(posTex.get_height()));
+		float  jitter = ssaoIgn(fragCoord);
+		float  depthScale = 0.5 * P.cfg.z / max(-Pp.z, 1e-4);   // cfg.z = radius
+		float  visAccum = 0.0;
+		for (int s = 0; s < SLICES; ++s)
+		{
+			float  phi = (float(s) + jitter) * (PI / float(SLICES));
+			float2 omega = float2(cos(phi), sin(phi));
+			float3 dir = float3(omega, 0.0);
+			float3 axis = cross(dir, V);
+			float  axisLen = length(axis);
+			if (axisLen < 1e-5) { visAccum += 1.0; continue; }
+			axis /= axisLen;
+			float3 orthoDir = normalize(dir - dot(dir, V) * V);  // in-plane ⟂ V, toward +omega
+			float3 projN = N - axis * dot(N, axis);              // normal into slice plane
+			float  projLen = length(projN);
+			if (projLen < 1e-5) continue;                        // normal ⟂ slice → no AO here
+			float  gamma = sign(dot(orthoDir, projN)) * acos(clamp(dot(projN, V) / projLen, -1.0, 1.0));
+			// Metal: uv.y top-left, negate the y of the UV march (same as HBAO).
+			float2 omegaUV = float2(P.proj[0][0] * omega.x, -P.proj[1][1] * omega.y);
+			float  cH1 = 0.0;   // +omega side horizon cosine (vs V); 0 ⇒ no occluder
+			float  cH2 = 0.0;   // -omega side
+			for (int i = 0; i < STEPS; ++i)
+			{
+				float  t = (float(i) + jitter) / float(STEPS) + 0.02;
+				float4 sp1 = posTex.sample(posSmp, in.uv + t * depthScale * omegaUV);
+				if (sp1.a >= 0.5) {
+					float3 d = sp1.xyz - Pp; float len = length(d);
+					float fall = clamp(1.0 - len / P.cfg.z, 0.0, 1.0);
+					cH1 = max(cH1, (dot(d, V) / max(len, 1e-5)) * fall);
+				}
+				float4 sp2 = posTex.sample(posSmp, in.uv - t * depthScale * omegaUV);
+				if (sp2.a >= 0.5) {
+					float3 d = sp2.xyz - Pp; float len = length(d);
+					float fall = clamp(1.0 - len / P.cfg.z, 0.0, 1.0);
+					cH2 = max(cH2, (dot(d, V) / max(len, 1e-5)) * fall);
+				}
+			}
+			float h1 =  acos(clamp(cH1, -1.0, 1.0));  // +side, ≥0
+			float h2 = -acos(clamp(cH2, -1.0, 1.0));  // -side, ≤0
+			h1 = gamma + min(h1 - gamma,  HALF_PI);   // clamp to normal's hemisphere
+			h2 = gamma + max(h2 - gamma, -HALF_PI);
+			float cosG = cos(gamma), sinG = sin(gamma);
+			float arc = (-cos(2.0 * h1 - gamma) + cosG + 2.0 * h1 * sinG)
+			          + (-cos(2.0 * h2 - gamma) + cosG + 2.0 * h2 * sinG);
+			visAccum += projLen * 0.25 * arc;
+		}
+		float visibility = clamp(visAccum / float(SLICES), 0.0, 1.0);
+		ao = 1.0 - (1.0 - visibility) * P.cfg2.x;
+		ao = max(ao, 0.1);                           // backstop against pure black
+	}
 	else
 	{
 		// ── SSAO: slope-invariant tangent-plane kernel ─────────────────────────
