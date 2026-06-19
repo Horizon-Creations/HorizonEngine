@@ -72,6 +72,24 @@ struct EditorConfig
 	std::string QuickSettingsFavorites = "backend,vsync,grid,bloom,ssao";
 
 	EditorMode mode = EditorMode::View;
+
+	// New-landscape creation-form parameters. Transient (not serialised) — shared
+	// here so the renderer can draw a 3D grid preview of the terrain-to-be while
+	// the Landscape creation form is open. Mirrors TerrainComponent's noise fields.
+	struct NewTerrainParams
+	{
+		float sizeX       = 100.0f;
+		float sizeZ       = 100.0f;
+		int   resolution  = 128;
+		float heightScale = 20.0f;
+		int   seed        = 0;     // 0 = flat
+		int   octaves     = 4;
+		float frequency   = 1.0f;
+		float lacunarity  = 2.0f;
+		float gain        = 0.5f;
+	};
+	NewTerrainParams newTerrain;
+
 	std::string modeString() const
 	{
 		switch (mode)

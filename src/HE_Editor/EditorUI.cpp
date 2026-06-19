@@ -108,12 +108,17 @@ static bool                s_rotateScreen = false;
 static bool s_quietContentRefresh = false;
 
 // Landscape sculpt tool state (shared between the panel and viewport)
-enum class TerrainTool { Raise, Lower, Smooth };
+enum class TerrainTool { Raise, Lower, Smooth, Flatten, Ramp, Roughen };
 static TerrainTool s_terrainTool     = TerrainTool::Raise;
 static float       s_brushRadius     = 10.0f;  // inner full-strength radius (m)
 static float       s_falloffRadius   = 5.0f;   // transition width — strength falls linearly to 0
 static float       s_brushStrength   = 5.0f;
 static bool        s_brushWasDown    = false;   // tracks LMB edge for undo
+// Stroke-scoped state, captured on the LMB-down edge (see the sculpt block):
+static float       s_flattenTarget   = 0.0f;    // Flatten: height to pull toward
+static glm::vec3   s_rampStartWS{};             // Ramp: world-space start of the gradient
+static float       s_rampStartH      = 0.0f;    // Ramp: terrain height at the start point
+static bool        s_rampValid       = false;   // Ramp: a start point was captured this stroke
 
 // Picking + sculpt AABB cache (keyed by mesh asset UUID)
 static std::unordered_map<HE::UUID, HE::AABB> s_aabbCache;
@@ -1902,8 +1907,12 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				ImGuizmo::Enable(!navigating && !io.KeyAlt);
 
 				// ── Gizmo on the selected entity ────────────────────────────
+				// Suppressed in Landscape mode: there LMB belongs to the sculpt
+				// brush, and a stray gizmo drag would silently move/scale the
+				// terrain — which then breaks the brush's world↔grid mapping.
 				bool gizmoActive = false;
-				if (ctx.world && ctx.selectedEntity != entt::null &&
+				if (ctx.editorConfig.mode != EditorMode::Landscape &&
+				    ctx.world && ctx.selectedEntity != entt::null &&
 				    ctx.world->registry().valid(ctx.selectedEntity))
 				if (auto* t = ctx.world->registry().try_get<TransformComponent>(ctx.selectedEntity))
 				{
@@ -1972,7 +1981,10 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				}
 
 				// ── Picking: click in the viewport selects the hit entity ──
-				if (ctx.world && !gizmoActive && !navigating && !io.KeyAlt &&
+				// Disabled in Landscape mode so a brush stroke can't deselect /
+				// reselect entities and pop the gizmo back up mid-sculpt.
+				if (ctx.editorConfig.mode != EditorMode::Landscape &&
+				    ctx.world && !gizmoActive && !navigating && !io.KeyAlt &&
 				    ImGui::IsItemClicked(ImGuiMouseButton_Left))
 				{
 					const ImVec2 mouse = ImGui::GetMousePos();
@@ -2040,9 +2052,14 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 						Entity terrainEnt = tvw.front();
 						auto&  tc         = terrainReg.get<TerrainComponent>(terrainEnt);
 
-						float terrainWorldY = 0.0f;
+						// Terrain world translation. The brush works in world XZ but
+						// the height grid is local, so every world↔grid conversion has
+						// to subtract / add this offset (recovers a terrain that an
+						// earlier stray gizmo drag may have displaced).
+						glm::vec3 terrainWorldPos(0.0f);
 						if (const auto* xf = terrainReg.try_get<TransformComponent>(terrainEnt))
-							terrainWorldY = xf->position.y;
+							terrainWorldPos = xf->position;
+						const float terrainWorldY = terrainWorldPos.y;
 
 						// ── Terrain height sampler (bilinear, local space) ────────
 						// Returns the sculpted height at world XZ; 0 if no sculpt data.
@@ -2054,10 +2071,16 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 
 						auto sampleH = [&](float wx, float wz) -> float
 						{
-							if (tc.sculptHeights.empty()) return 0.0f;
-							const float gx = std::clamp((wx + tcHalfX) / tcStepX,
+							const float lx = wx - terrainWorldPos.x;  // world → local XZ
+							const float lz = wz - terrainWorldPos.z;
+							// No baked heights yet (e.g. a freshly-loaded seeded
+							// terrain): sample the generated surface so the cursor
+							// still tracks fBm bumps. Brushes bake on first stroke.
+							if (tc.sculptHeights.empty())
+								return terrainHeightAt(tc, lx, lz);
+							const float gx = std::clamp((lx + tcHalfX) / tcStepX,
 							                            0.0f, static_cast<float>(tcRes - 1));
-							const float gz = std::clamp((wz + tcHalfZ) / tcStepZ,
+							const float gz = std::clamp((lz + tcHalfZ) / tcStepZ,
 							                            0.0f, static_cast<float>(tcRes - 1));
 							const int xi0 = static_cast<int>(gx);
 							const int zi0 = static_cast<int>(gz);
@@ -2099,19 +2122,28 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 							const float denom = rayDir.y;
 							if (std::abs(denom) > 1e-5f)
 							{
-								// Step 1: intersect with the flat base plane (Y = terrainWorldY)
-								const float t0 = (terrainWorldY - rayOrigin.y) / denom;
-								if (t0 > 0.0f)
+								// Start at the flat base plane (Y = terrainWorldY), then
+								// fixed-point iterate t so the hit lands on the actual
+								// sculpted surface Y = terrainWorldY + h(p.xz). One step
+								// suffices for gentle slopes; a few more keep the cursor
+								// glued to the surface on steep, heavily-sculpted terrain.
+								float t = (terrainWorldY - rayOrigin.y) / denom;
+								if (t > 0.0f)
 								{
-									const glm::vec3 hit0 = rayOrigin + t0 * rayDir;
-									// Step 2: one Newton refinement — intersect with
-									// Y = terrainWorldY + h(hit0.xz).  For gradually
-									// sloped terrain this converges in one step.
-									const float h0 = sampleH(hit0.x, hit0.z);
-									const float t1 = ((terrainWorldY + h0) - rayOrigin.y) / denom;
-									if (t1 > 0.0f)
+									glm::vec3 p = rayOrigin + t * rayDir;
+									for (int it = 0; it < 8; ++it)
 									{
-										hitWS  = rayOrigin + t1 * rayDir;
+										const float surfaceY = terrainWorldY + sampleH(p.x, p.z);
+										const float tn = (surfaceY - rayOrigin.y) / denom;
+										if (tn <= 0.0f) break;
+										const bool converged = std::abs(tn - t) < 1e-3f;
+										t = tn;
+										p = rayOrigin + t * rayDir;
+										if (converged) break;
+									}
+									if (t > 0.0f)
+									{
+										hitWS  = p;
 										hasHit = true;
 									}
 								}
@@ -2163,6 +2195,17 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 									prev = cur; prevValid = curValid;
 								}
 							}
+
+							// Ramp guide: a line from the stroke start to the cursor so
+							// the gradient direction is visible while dragging.
+							if (s_terrainTool == TerrainTool::Ramp && s_rampValid &&
+							    ImGui::IsMouseDown(ImGuiMouseButton_Left))
+							{
+								ImVec2 ps{}, pe{};
+								if (projectPt(s_rampStartWS.x, s_rampStartWS.z, ps) &&
+								    projectPt(hitWS.x, hitWS.z, pe))
+									dl->AddLine(ps, pe, IM_COL32(120,200,255,230), 2.0f);
+							}
 						}
 
 						// ── Apply brush on LMB drag ───────────────────────────────
@@ -2182,6 +2225,17 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 								for (size_t vi = 0; vi < nVerts; ++vi)
 									tc.sculptHeights[vi] = tmp.vertices[vi * 3 + 1];
 							}
+							// Capture stroke-scoped targets (sculptHeights is now
+							// populated, so sampleH returns the real local height).
+							if (hasHit)
+							{
+								s_flattenTarget = sampleH(hitWS.x, hitWS.z);
+								s_rampStartWS   = hitWS;
+								s_rampStartH    = s_flattenTarget;
+								s_rampValid     = true;
+							}
+							else
+								s_rampValid = false;
 						}
 						s_brushWasDown = lmbDown;
 
@@ -2208,8 +2262,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 								{
 									for (uint32_t xi = 0; xi < tcRes; ++xi)
 									{
-										const float wx = -tcHalfX + static_cast<float>(xi) * tcStepX;
-										const float wz = -tcHalfZ + static_cast<float>(zi) * tcStepZ;
+										const float wx = terrainWorldPos.x - tcHalfX + static_cast<float>(xi) * tcStepX;
+										const float wz = terrainWorldPos.z - tcHalfZ + static_cast<float>(zi) * tcStepZ;
 										const float d2 = (hitWS.x-wx)*(hitWS.x-wx)
 										               + (hitWS.z-wz)*(hitWS.z-wz);
 										const float w  = brushWeight(d2);
@@ -2236,6 +2290,76 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 								}
 								if (anyChange) tc.sculptHeights = std::move(smoothed);
 							}
+							else if (s_terrainTool == TerrainTool::Flatten)
+							{
+								// Pull heights toward the height sampled where the
+								// stroke began — levels bumps without a fixed plane.
+								for (uint32_t zi = 0; zi < tcRes; ++zi)
+								for (uint32_t xi = 0; xi < tcRes; ++xi)
+								{
+									const float wx = terrainWorldPos.x - tcHalfX + static_cast<float>(xi) * tcStepX;
+									const float wz = terrainWorldPos.z - tcHalfZ + static_cast<float>(zi) * tcStepZ;
+									const float d2 = (hitWS.x-wx)*(hitWS.x-wx) + (hitWS.z-wz)*(hitWS.z-wz);
+									const float w  = brushWeight(d2);
+									if (w <= 0.0f) continue;
+									const float blend = std::min(w * delta * 6.0f, w);
+									float& h = tc.sculptHeights[zi*tcRes+xi];
+									h += blend * (s_flattenTarget - h);
+									anyChange = true;
+								}
+							}
+							else if (s_terrainTool == TerrainTool::Ramp)
+							{
+								// Linear height gradient from the stroke start to the
+								// cursor, inside a corridor the width of the brush.
+								const glm::vec2 a(s_rampStartWS.x, s_rampStartWS.z);
+								const glm::vec2 b(hitWS.x, hitWS.z);
+								const glm::vec2 ab = b - a;
+								const float L2 = glm::dot(ab, ab);
+								if (s_rampValid && L2 > 1e-3f)
+								{
+									const float endH = sampleH(hitWS.x, hitWS.z);
+									for (uint32_t zi = 0; zi < tcRes; ++zi)
+									for (uint32_t xi = 0; xi < tcRes; ++xi)
+									{
+										const float wx = terrainWorldPos.x - tcHalfX + static_cast<float>(xi) * tcStepX;
+										const float wz = terrainWorldPos.z - tcHalfZ + static_cast<float>(zi) * tcStepZ;
+										const glm::vec2 p(wx, wz);
+										const float t = std::clamp(glm::dot(p - a, ab) / L2, 0.0f, 1.0f);
+										const glm::vec2 d = p - (a + t * ab);
+										const float w = brushWeight(glm::dot(d, d)); // dist² to ramp line
+										if (w <= 0.0f) continue;
+										const float target = s_rampStartH + (endH - s_rampStartH) * t;
+										const float blend  = std::min(w * delta * 6.0f, w);
+										float& h = tc.sculptHeights[zi*tcRes+xi];
+										h += blend * (target - h);
+										anyChange = true;
+									}
+								}
+							}
+							else if (s_terrainTool == TerrainTool::Roughen)
+							{
+								// Stable per-vertex hash → consistent bumps, no shimmer.
+								auto vhash = [](uint32_t xi, uint32_t zi) -> float
+								{
+									uint32_t n = xi * 73856093u ^ zi * 19349663u;
+									n = (n ^ 61u) ^ (n >> 16u); n += n << 3u;
+									n ^= n >> 4u; n *= 0x27D4EB2Du; n ^= n >> 15u;
+									return static_cast<float>(n & 0x00FFFFFFu)
+									     / static_cast<float>(0x01000000u) * 2.0f - 1.0f;
+								};
+								for (uint32_t zi = 0; zi < tcRes; ++zi)
+								for (uint32_t xi = 0; xi < tcRes; ++xi)
+								{
+									const float wx = terrainWorldPos.x - tcHalfX + static_cast<float>(xi) * tcStepX;
+									const float wz = terrainWorldPos.z - tcHalfZ + static_cast<float>(zi) * tcStepZ;
+									const float d2 = (hitWS.x-wx)*(hitWS.x-wx) + (hitWS.z-wz)*(hitWS.z-wz);
+									const float w  = brushWeight(d2);
+									if (w <= 0.0f) continue;
+									tc.sculptHeights[zi*tcRes+xi] += vhash(xi, zi) * w * delta;
+									anyChange = true;
+								}
+							}
 							else
 							{
 								const float sign = (s_terrainTool == TerrainTool::Raise) ? 1.0f : -1.0f;
@@ -2243,8 +2367,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 								{
 									for (uint32_t xi = 0; xi < tcRes; ++xi)
 									{
-										const float wx = -tcHalfX + static_cast<float>(xi) * tcStepX;
-										const float wz = -tcHalfZ + static_cast<float>(zi) * tcStepZ;
+										const float wx = terrainWorldPos.x - tcHalfX + static_cast<float>(xi) * tcStepX;
+										const float wz = terrainWorldPos.z - tcHalfZ + static_cast<float>(zi) * tcStepZ;
 										const float d2 = (hitWS.x-wx)*(hitWS.x-wx)
 										               + (hitWS.z-wz)*(hitWS.z-wz);
 										const float w  = brushWeight(d2);
@@ -2266,6 +2390,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 						}
 					}
 				}
+
 			}
 			else
 				ImGui::TextDisabled("  Viewport not available on this backend yet.");
@@ -2394,28 +2519,22 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
         if (!hasTerrain)
         {
             // ── No terrain yet — show creation form ──────────────────────────
+            // Parameters live on EditorConfig so the renderer can draw a 3D grid
+            // preview of the terrain-to-be (see EditorApplication debug-draw).
+            auto& np = ctx.editorConfig.newTerrain;
             ImGui::SeparatorText("Create Landscape");
+            ImGui::TextDisabled("Green grid in the viewport previews the result");
 
-            static float  s_newSizeX      = 100.0f;
-            static float  s_newSizeZ      = 100.0f;
-            static int    s_newResolution = 128;
-            static float  s_newHeight     = 20.0f;
-            static int    s_newSeed       = 0;  // 0 = flat
-            static int    s_newOctaves    = 4;
-            static float  s_newFrequency  = 1.0f;
-            static float  s_newLacunarity = 2.0f;
-            static float  s_newGain       = 0.5f;
-
-            ImGui::DragFloat("Width (X)",    &s_newSizeX,      1.0f,  1.0f, 10000.0f, "%.1f m");
-            ImGui::DragFloat("Depth (Z)",    &s_newSizeZ,      1.0f,  1.0f, 10000.0f, "%.1f m");
-            ImGui::DragInt  ("Resolution",   &s_newResolution, 1,     2,    512);
-            ImGui::DragFloat("Height Scale", &s_newHeight,     0.5f,  0.0f, 1000.0f,  "%.1f m");
+            ImGui::DragFloat("Width (X)",    &np.sizeX,       1.0f,  1.0f, 10000.0f, "%.1f m");
+            ImGui::DragFloat("Depth (Z)",    &np.sizeZ,       1.0f,  1.0f, 10000.0f, "%.1f m");
+            ImGui::DragInt  ("Resolution",   &np.resolution,  1,     2,    512);
+            ImGui::DragFloat("Height Scale", &np.heightScale, 0.5f,  0.0f, 1000.0f,  "%.1f m");
             ImGui::SeparatorText("Noise (seed 0 = flat)");
-            ImGui::DragInt  ("Seed",         &s_newSeed,       1,     0,    0x7fffffff);
-            ImGui::DragInt  ("Octaves",      &s_newOctaves,    1,     1,    8);
-            ImGui::DragFloat("Frequency",    &s_newFrequency,  0.01f, 0.01f, 16.0f, "%.2f");
-            ImGui::DragFloat("Lacunarity",   &s_newLacunarity, 0.01f, 1.0f,  8.0f,  "%.2f");
-            ImGui::DragFloat("Gain",         &s_newGain,       0.01f, 0.0f,  1.0f,  "%.2f");
+            ImGui::DragInt  ("Seed",         &np.seed,        1,     0,    0x7fffffff);
+            ImGui::DragInt  ("Octaves",      &np.octaves,     1,     1,    8);
+            ImGui::DragFloat("Frequency",    &np.frequency,   0.01f, 0.01f, 16.0f, "%.2f");
+            ImGui::DragFloat("Lacunarity",   &np.lacunarity,  0.01f, 1.0f,  8.0f,  "%.2f");
+            ImGui::DragFloat("Gain",         &np.gain,        0.01f, 0.0f,  1.0f,  "%.2f");
 
             ImGui::Spacing();
             const float btnW = 160.0f;
@@ -2426,16 +2545,30 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                 if (ctx.undoSys) ctx.undoSys->snapshotNow();
 
                 TerrainComponent tc;
-                tc.sizeX      = s_newSizeX;
-                tc.sizeZ      = s_newSizeZ;
-                tc.resolution = static_cast<uint32_t>(std::clamp(s_newResolution, 2, 1024));
-                tc.heightScale= s_newHeight;
-                tc.seed       = s_newSeed;
-                tc.octaves    = s_newOctaves;
-                tc.frequency  = s_newFrequency;
-                tc.lacunarity = s_newLacunarity;
-                tc.gain       = s_newGain;
+                tc.sizeX      = np.sizeX;
+                tc.sizeZ      = np.sizeZ;
+                tc.resolution = static_cast<uint32_t>(std::clamp(np.resolution, 2, 1024));
+                tc.heightScale= np.heightScale;
+                tc.seed       = np.seed;
+                tc.octaves    = np.octaves;
+                tc.frequency  = np.frequency;
+                tc.lacunarity = np.lacunarity;
+                tc.gain       = np.gain;
                 tc.dirty      = true;
+
+                // Bake a seeded surface into editable per-vertex heights right
+                // away. From here the terrain is a plain heightfield the brushes
+                // edit directly — the seed/noise is a one-time creation input and
+                // no longer feeds the mesh (sculptHeights overrides it). A flat
+                // terrain (seed 0) is left empty and stays flat until first sculpt.
+                if (tc.seed != 0)
+                {
+                    const StaticMeshAsset gen = generateTerrainMesh(tc);
+                    const size_t nVerts = gen.vertices.size() / 3;
+                    tc.sculptHeights.resize(nVerts);
+                    for (size_t vi = 0; vi < nVerts; ++vi)
+                        tc.sculptHeights[vi] = gen.vertices[vi * 3 + 1];
+                }
 
                 Entity e = ctx.world->createEntity("Terrain");
                 ctx.world->addComponent(e, TransformComponent{});
@@ -2454,11 +2587,13 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
             // ── Terrain exists — show sculpt tools ───────────────────────────
             ImGui::SeparatorText("Sculpt Tool");
 
-            const char* toolLabels[] = { "Raise", "Lower", "Smooth" };
-            int toolIdx = static_cast<int>(s_terrainTool);
-            for (int i = 0; i < 3; ++i)
+            const char* toolLabels[] = { "Raise", "Lower", "Smooth",
+                                         "Flatten", "Ramp", "Roughen" };
+            const int toolCount = static_cast<int>(sizeof(toolLabels) / sizeof(toolLabels[0]));
+            const int toolIdx   = static_cast<int>(s_terrainTool);
+            for (int i = 0; i < toolCount; ++i)
             {
-                if (i > 0) ImGui::SameLine();
+                if (i % 3 != 0) ImGui::SameLine();   // 3 tools per row
                 if (ImGui::RadioButton(toolLabels[i], toolIdx == i))
                     s_terrainTool = static_cast<TerrainTool>(i);
             }
@@ -2471,7 +2606,24 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
             s_falloffRadius = std::max(0.0f, s_falloffRadius);
 
             ImGui::Spacing();
-            ImGui::TextDisabled("LMB drag in viewport to sculpt");
+            // Per-tool hint — Ramp and Flatten read the point where the drag began.
+            switch (s_terrainTool)
+            {
+            case TerrainTool::Ramp:
+                ImGui::TextDisabled("Drag from one spot to another:");
+                ImGui::TextDisabled("ramps between their heights");
+                break;
+            case TerrainTool::Flatten:
+                ImGui::TextDisabled("Flattens toward the height");
+                ImGui::TextDisabled("where the drag began");
+                break;
+            case TerrainTool::Roughen:
+                ImGui::TextDisabled("Adds fixed-noise bumps under the brush");
+                break;
+            default:
+                ImGui::TextDisabled("LMB drag in viewport to sculpt");
+                break;
+            }
             ImGui::TextDisabled("Ctrl+click a field to type a value");
 
             ImGui::Spacing();
@@ -4276,21 +4428,21 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			if (ImGui::SliderInt("Resolution##tc", &res, 2, 512)) { t->resolution = static_cast<uint32_t>(res); changed = true; }
 			trackEdit();
 			changed |= ImGui::DragFloat("Height Scale##tc", &t->heightScale, 0.5f,  0.0f, 1000.0f,  "%.1f m"); trackEdit();
-			ImGui::SeparatorText("Noise");
-			changed |= ImGui::InputInt("Seed##tc",          &t->seed);       trackEdit();
+
+			// Noise is a one-time creation input: it is baked into editable
+			// heights when the landscape is created, so these are read-only here
+			// (shown for reference) and can no longer change the terrain.
+			ImGui::SeparatorText("Noise (set at creation)");
+			ImGui::BeginDisabled();
+			ImGui::InputInt  ("Seed##tc",       &t->seed);
 			int oct = t->octaves;
-			if (ImGui::SliderInt("Octaves##tc",             &oct, 1, 8)) { t->octaves = oct; changed = true; }
-			trackEdit();
-			changed |= ImGui::DragFloat("Frequency##tc",    &t->frequency,  0.01f, 0.01f, 16.0f, "%.2f"); trackEdit();
-			changed |= ImGui::DragFloat("Lacunarity##tc",   &t->lacunarity, 0.01f, 1.0f,  8.0f,  "%.2f"); trackEdit();
-			changed |= ImGui::DragFloat("Gain##tc",         &t->gain,       0.01f, 0.0f,  1.0f,  "%.2f"); trackEdit();
+			ImGui::SliderInt ("Octaves##tc",    &oct, 1, 8);
+			ImGui::DragFloat ("Frequency##tc",  &t->frequency,  0.01f, 0.01f, 16.0f, "%.2f");
+			ImGui::DragFloat ("Lacunarity##tc", &t->lacunarity, 0.01f, 1.0f,  8.0f,  "%.2f");
+			ImGui::DragFloat ("Gain##tc",       &t->gain,       0.01f, 0.0f,  1.0f,  "%.2f");
+			ImGui::EndDisabled();
+
 			if (changed) t->dirty = true;
-			ImGui::Spacing();
-			if (ImGui::Button("Regenerate##tc"))
-			{
-				if (ctx.undoSys) ctx.undoSys->snapshotNow();
-				t->dirty = true;
-			}
 		}
 		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<TerrainComponent>(entity); }
 	}
