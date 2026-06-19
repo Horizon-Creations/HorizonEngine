@@ -195,3 +195,18 @@ if(HE_VULKAN_ENABLED)
 		VERBATIM
 	)
 endif()
+
+# ── macOS DMG packaging ────────────────────────────────────────────────────────
+# Usage: cmake --build <build_dir> --target dmg
+# Output: out/HorizonEditor-<version>-macOS.dmg  (next to the source root)
+# Sources the flat deploy in out/deploy/Editor/ which POST_BUILD keeps current.
+if(APPLE)
+	add_custom_target(dmg
+		COMMAND "${CMAKE_SOURCE_DIR}/scripts/package_macos.sh"
+		        "${CMAKE_PROJECT_VERSION}"
+		WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+		COMMENT "Packaging HorizonEditor ${CMAKE_PROJECT_VERSION} as macOS DMG"
+		VERBATIM
+	)
+	add_dependencies(dmg HorizonEditor)
+endif()
