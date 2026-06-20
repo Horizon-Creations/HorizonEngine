@@ -444,4 +444,22 @@ private:
 	void                    createSkinnedPipeline();
 	const GpuSkeletalMesh*  resolveSkeletalMesh(const HE::UUID& id);
 	void                    destroySkeletalMeshCache();
+
+	// ── 2D UI canvas rendering ──────────────────────────────────────────────────
+	// Draws solid-color quads (UIRenderObject) over the final image.
+	// In the game path (no editor viewport) the draw is inline inside the
+	// swapchain render pass.  In the editor viewport path a separate render pass
+	// with LOAD_OP_LOAD is opened on m_viewportImage after FXAA completes.
+	void createUIPipeline();
+	void runUIPass(VkCommandBuffer cmd, int width, int height);
+
+	// Pipeline that targets the swapchain render pass (m_renderPass, BGRA8/etc.).
+	VkPipeline       m_uiPipeline          = VK_NULL_HANDLE;
+	// Pipeline that targets the viewport RGBA8 image (m_uiViewportRP).
+	VkPipeline       m_uiViewportPipeline  = VK_NULL_HANDLE;
+	VkPipelineLayout m_uiPipeLayout        = VK_NULL_HANDLE;
+	// Load-preserving render pass for compositing UI onto the viewport image.
+	VkRenderPass     m_uiViewportRP        = VK_NULL_HANDLE;
+	// Single-frame framebuffer wrapping m_viewportView for the UI viewport pass.
+	VkFramebuffer    m_uiViewportFB        = VK_NULL_HANDLE;
 };

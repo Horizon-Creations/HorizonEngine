@@ -85,7 +85,8 @@ if(HE_VULKAN_ENABLED)
                       sky.vert sky.frag
                       debug_line.vert debug_line.frag
                       ssao_pos.vert ssao_pos.frag ssao.frag ssao_blur.frag
-                      skinned.vert)
+                      skinned.vert
+                      ui.vert ui.frag)
             set(src "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${stage}")
             set(dst "${HE_SHADER_OUT_DIR}/${stage}.spv")
             if(GLSLC_EXECUTABLE MATCHES "glslangValidator")
