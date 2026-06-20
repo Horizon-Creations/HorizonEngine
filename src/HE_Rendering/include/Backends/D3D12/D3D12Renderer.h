@@ -36,6 +36,13 @@ public:
     void SetMoonTexture(const void* rgba8Pixels, int width, int height) override;
     void SetSSAOSettings(const SSAOSettings& settings) override;
 
+    // ImGui editor textures (content-browser icons + logo). Uploads the RGBA8
+    // pixels to a GPU texture, then hands the resource to the editor-installed
+    // registrar (m_imguiTexRegistrar) which builds the ImGui SRV. Returns the
+    // ImTextureID-compatible handle, or nullptr if no registrar is installed.
+    void* CreateImGuiTexture(const void* rgba8Pixels, int width, int height) override;
+    void  DestroyImGuiTexture(void* handle) override;
+
 private:
     // Extract → cull → sort → RenderGraph → replay into the bound command list.
     void DrawScene(void* cmdList, int width, int height);

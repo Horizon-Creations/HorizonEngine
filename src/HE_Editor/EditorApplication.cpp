@@ -436,7 +436,14 @@ void EditorApplication::OnInit()
 			vkInfo.Device            = static_cast<VkDevice>(vk->GetDevice());
 			vkInfo.QueueFamily       = vk->GetQueueFamily();
 			vkInfo.Queue             = static_cast<VkQueue>(vk->GetQueue());
-			vkInfo.DescriptorPoolSize = 8; // let ImGui create an internal pool
+			// ImGui creates one fixed-size internal pool of this many SAMPLED_IMAGE
+			// descriptors; each ImGui_ImplVulkan_AddTexture() consumes one and they
+			// are not freed (DestroyImGuiTexture is a no-op). Sized to cover the
+			// font atlas + viewport + logo + content-browser icons with headroom
+			// (mirrors the 64-slot D3D12 ImGui SRV heap). Was 8 — too small once the
+			// editor registers ~15 icon/logo textures, which silently exhausted the
+			// pool and left those textures blank.
+			vkInfo.DescriptorPoolSize = 64;
 			vkInfo.MinImageCount     = 2;
 			vkInfo.ImageCount        = vk->GetImageCount();
 			const uint64_t rpRaw = vk->GetRenderPass();
@@ -529,6 +536,55 @@ void EditorApplication::OnInit()
 				break;
 			}
 		});
+
+		// ── ImGui texture registrar (D3D12 / Vulkan) ────────────────────────────
+		// The renderer DLL does not link ImGui, so for these backends the editor
+		// must turn an uploaded GPU texture into an ImGui ImTextureID. Installed
+		// here (inside the m_imguiReady block, before the logo/icons are loaded
+		// below) so the renderer's CreateImGuiTexture can call back into ImGui's
+		// descriptor heap.
+#ifdef _WIN32
+		if (m_backend == RendererFactory::Backend::D3D12)
+		{
+			renderer()->SetImGuiTextureRegistrar(
+				[this](void* res, void* /*unused*/) -> void*
+			{
+				auto* dx12   = static_cast<D3D12Renderer*>(renderer());
+				auto* device = dx12 ? static_cast<ID3D12Device*>(dx12->GetDevice()) : nullptr;
+				auto* alloc  = static_cast<D3D12DescriptorHeapAllocator*>(m_d3d12SrvAllocator);
+				if (!device || !alloc || !res) return nullptr;
+
+				// Allocate an ImGui-heap SRV slot and create the texture's SRV.
+				D3D12_CPU_DESCRIPTOR_HANDLE cpu{};
+				D3D12_GPU_DESCRIPTOR_HANDLE gpu{};
+				alloc->Alloc(&cpu, &gpu);
+
+				D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+				srvDesc.Format                  = DXGI_FORMAT_R8G8B8A8_UNORM;
+				srvDesc.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
+				srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+				srvDesc.Texture2D.MipLevels     = 1;
+				device->CreateShaderResourceView(
+					static_cast<ID3D12Resource*>(res), &srvDesc, cpu);
+
+				// The GPU descriptor handle is the ImGui texture ID.
+				return reinterpret_cast<void*>(static_cast<uintptr_t>(gpu.ptr));
+			});
+		}
+#endif
+#ifdef HE_IMGUI_VULKAN_ENABLED
+		if (m_backend == RendererFactory::Backend::Vulkan)
+		{
+			renderer()->SetImGuiTextureRegistrar(
+				[](void* view, void* sampler) -> void*
+			{
+				return reinterpret_cast<void*>(ImGui_ImplVulkan_AddTexture(
+					reinterpret_cast<VkSampler>(sampler),
+					reinterpret_cast<VkImageView>(view),
+					VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL));
+			});
+		}
+#endif
 	}
 #endif // HE_IMGUI_ENABLED
 	m_backend      = m_globalState->getSelectedRHI();

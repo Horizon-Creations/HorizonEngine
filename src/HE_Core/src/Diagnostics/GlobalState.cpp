@@ -42,11 +42,8 @@ void GlobalState::setLogFile(const std::string& exePath)
 	// Derive log file next to the exe: <exeDir>/HorizonEngine.log
 	fs::path logPath =
 		fs::path(exePath).parent_path() / "HorizonEngine.log";
-	if (fs::exists(logPath))
-	{
-		fs::remove(logPath);
-	}
-	logFileStream.open(logPath.string(), std::ios::out | std::ios::app);
+	// Truncate on each launch so every run starts with a fresh log (one run = one file).
+	logFileStream.open(logPath.string(), std::ios::out | std::ios::trunc);
 }
 
 std::ofstream& GlobalState::getLogFileStream()

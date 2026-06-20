@@ -8,6 +8,8 @@
 #include <cstdint>
 #include <vector>
 #include <algorithm>
+#include <numeric>
+#include <execution>
 #include <Diagnostics/Logger.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/type_ptr.hpp>
@@ -56,16 +58,25 @@ static std::vector<uint16_t> BuildSkyNoise3D(int n)
 	};
 	std::vector<uint16_t> d(static_cast<size_t>(n) * n * n * 2);
 	const float inv = 1.0f / static_cast<float>(n);
-	for (int z = 0; z < n; ++z)
-		for (int y = 0; y < n; ++y)
-			for (int x = 0; x < n; ++x)
-			{
-				size_t idx = ((static_cast<size_t>(z) * n + y) * n + x) * 2;
-				glm::vec3 uv((x + 0.5f) * inv, (y + 0.5f) * inv, (z + 0.5f) * inv);
-				d[idx + 0] = static_cast<uint16_t>(
-					glm::clamp(hash(glm::vec3(x, y, z)), 0.0f, 1.0f) * 65535.0f + 0.5f);
-				d[idx + 1] = static_cast<uint16_t>(worley(uv) * 65535.0f + 0.5f);
-			}
+
+	// Each Z-slice is fully independent — no shared mutable state — so we can
+	// fan out across all CPU cores.  On MSVC this uses the Windows Thread Pool
+	// with no extra library dependency.
+	std::vector<int> zs(n);
+	std::iota(zs.begin(), zs.end(), 0);
+	std::for_each(std::execution::par_unseq, zs.begin(), zs.end(),
+		[&](int z)
+		{
+			for (int y = 0; y < n; ++y)
+				for (int x = 0; x < n; ++x)
+				{
+					const size_t idx = ((static_cast<size_t>(z) * n + y) * n + x) * 2;
+					glm::vec3 uv((x + 0.5f) * inv, (y + 0.5f) * inv, (z + 0.5f) * inv);
+					d[idx + 0] = static_cast<uint16_t>(
+						glm::clamp(hash(glm::vec3(x, y, z)), 0.0f, 1.0f) * 65535.0f + 0.5f);
+					d[idx + 1] = static_cast<uint16_t>(worley(uv) * 65535.0f + 0.5f);
+				}
+		});
 	return d;
 }
 
@@ -1651,7 +1662,14 @@ void OpenGLRenderer::CreateSkyPipeline()
 	// Procedural 3D noise volume the sky's starFbm3/worleyFbm sample (clouds +
 	// nebula) — built once on the CPU. RG16 (R=value noise, G=Worley billows) +
 	// LINEAR + REPEAT so it tiles seamlessly.
-	constexpr int kNoiseN = 256;   // large tile so the sky's offset/octave coords fit
+	// Release: full 256³ tile so sky fBm octaves don't visibly repeat.
+	// Debug: 64³ (64× fewer voxels) so the CPU bake takes < 1s instead of 30min
+	// without SIMD optimisation in MSVC Debug mode.
+#ifdef NDEBUG
+	constexpr int kNoiseN = 256;
+#else
+	constexpr int kNoiseN = 64;
+#endif
 	const std::vector<uint16_t> noise = BuildSkyNoise3D(kNoiseN);
 	glGenTextures(1, &m_noiseTex);
 	glBindTexture(GL_TEXTURE_3D, m_noiseTex);
