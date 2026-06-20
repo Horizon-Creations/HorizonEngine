@@ -137,6 +137,7 @@ void VulkanRenderer::Initialize(HE::Window* window)
     createDebugLinePipeline();   Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: debug line pipeline created");
     createSSAOPipeline();        Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: SSAO pipeline created");
     createSkinnedPipeline();     Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: skinned pipeline created");
+    createUIPipeline();          Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: UI pipeline created");
 	m_shaderManager = VulkanShaderManager();
 }
 
@@ -181,6 +182,12 @@ void VulkanRenderer::Shutdown()
     if (m_skinnedPipeLayout)   { vkDestroyPipelineLayout(m_device, m_skinnedPipeLayout,  nullptr);  m_skinnedPipeLayout   = VK_NULL_HANDLE; }
     if (m_skinnedDescPool)     { vkDestroyDescriptorPool(m_device, m_skinnedDescPool,    nullptr);  m_skinnedDescPool     = VK_NULL_HANDLE; }
     if (m_skinnedBonesDSL)     { vkDestroyDescriptorSetLayout(m_device, m_skinnedBonesDSL, nullptr); m_skinnedBonesDSL    = VK_NULL_HANDLE; }
+    // UI canvas pipeline
+    if (m_uiViewportFB)       { vkDestroyFramebuffer    (m_device, m_uiViewportFB,      nullptr); m_uiViewportFB      = VK_NULL_HANDLE; }
+    if (m_uiViewportPipeline) { vkDestroyPipeline       (m_device, m_uiViewportPipeline,nullptr); m_uiViewportPipeline = VK_NULL_HANDLE; }
+    if (m_uiPipeline)         { vkDestroyPipeline       (m_device, m_uiPipeline,        nullptr); m_uiPipeline        = VK_NULL_HANDLE; }
+    if (m_uiPipeLayout)       { vkDestroyPipelineLayout (m_device, m_uiPipeLayout,      nullptr); m_uiPipeLayout      = VK_NULL_HANDLE; }
+    if (m_uiViewportRP)       { vkDestroyRenderPass     (m_device, m_uiViewportRP,      nullptr); m_uiViewportRP      = VK_NULL_HANDLE; }
     for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
     {
         if (m_boneUBOPtr[i])  { vkUnmapMemory(m_device, m_boneUBOMem[i]); m_boneUBOPtr[i] = nullptr; }
@@ -365,6 +372,30 @@ void VulkanRenderer::Render()
               blitPass(m_postFxFinalRP, m_fxaaFB, m_viewportW, m_viewportH, m_fxaaPipe, m_postFxDS[4], p); }
             m_viewportLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
+            // ── UI canvas: composite onto viewport image (editor path) ──────
+            if (m_uiViewportPipeline && !m_renderWorld.uiObjects.empty() && m_uiViewportFB)
+            {
+                // viewportImage is SHADER_READ_ONLY after FXAA; transition to COLOR_ATTACHMENT.
+                runPostFXBarrier(cmd, m_viewportImage,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+                m_viewportLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+                VkRenderPassBeginInfo uirpbi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+                uirpbi.renderPass        = m_uiViewportRP;
+                uirpbi.framebuffer       = m_uiViewportFB;
+                uirpbi.renderArea.extent = { m_viewportW, m_viewportH };
+                vkCmdBeginRenderPass(cmd, &uirpbi, VK_SUBPASS_CONTENTS_INLINE);
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_uiViewportPipeline);
+                VkViewport uivp = { 0, 0, float(m_viewportW), float(m_viewportH), 0, 1 };
+                VkRect2D   uisc = { {0,0}, {m_viewportW, m_viewportH} };
+                vkCmdSetViewport(cmd, 0, 1, &uivp);
+                vkCmdSetScissor(cmd,  0, 1, &uisc);
+                runUIPass(cmd, int(m_viewportW), int(m_viewportH));
+                vkCmdEndRenderPass(cmd);
+                m_viewportLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            }
+
             // bloomRT[1] may still be in COLOR_ATTACHMENT_OPTIMAL — normalize for next frame.
             if (m_bloomLayout[1] == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
                 runPostFXBarrier(cmd, m_bloomImage[1],
@@ -396,6 +427,29 @@ void VulkanRenderer::Render()
             DrawScene(cmd, m_viewportW, m_viewportH);
             vkCmdEndRenderPass(cmd);
             m_viewportLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+            // ── UI canvas: composite onto viewport image (no-PostFX editor path) ─
+            if (m_uiViewportPipeline && !m_renderWorld.uiObjects.empty() && m_uiViewportFB)
+            {
+                runPostFXBarrier(cmd, m_viewportImage,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+                m_viewportLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+                VkRenderPassBeginInfo uirpbi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+                uirpbi.renderPass        = m_uiViewportRP;
+                uirpbi.framebuffer       = m_uiViewportFB;
+                uirpbi.renderArea.extent = { m_viewportW, m_viewportH };
+                vkCmdBeginRenderPass(cmd, &uirpbi, VK_SUBPASS_CONTENTS_INLINE);
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_uiViewportPipeline);
+                VkViewport uivp = { 0, 0, float(m_viewportW), float(m_viewportH), 0, 1 };
+                VkRect2D   uisc = { {0,0}, {m_viewportW, m_viewportH} };
+                vkCmdSetViewport(cmd, 0, 1, &uivp);
+                vkCmdSetScissor(cmd,  0, 1, &uisc);
+                runUIPass(cmd, int(m_viewportW), int(m_viewportH));
+                vkCmdEndRenderPass(cmd);
+                m_viewportLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            }
         }
     }
 
@@ -409,7 +463,19 @@ void VulkanRenderer::Render()
     rpbi.pClearValues      = clears;
     vkCmdBeginRenderPass(cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
     if (!useViewport)
+    {
         DrawScene(cmd, m_swapExtent.width, m_swapExtent.height);
+        // UI canvas — inline in the swapchain pass (game / non-editor path).
+        if (m_uiPipeline && !m_renderWorld.uiObjects.empty())
+        {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_uiPipeline);
+            VkViewport uivp = { 0, 0, float(m_swapExtent.width), float(m_swapExtent.height), 0, 1 };
+            VkRect2D   uisc = { {0,0}, {m_swapExtent.width, m_swapExtent.height} };
+            vkCmdSetViewport(cmd, 0, 1, &uivp);
+            vkCmdSetScissor(cmd,  0, 1, &uisc);
+            runUIPass(cmd, int(m_swapExtent.width), int(m_swapExtent.height));
+        }
+    }
     if (m_overlayCallback) m_overlayCallback(cmd);
     vkCmdEndRenderPass(cmd);
     vkEndCommandBuffer(cmd);
@@ -1744,6 +1810,9 @@ void VulkanRenderer::createPostFXResources(uint32_t w, uint32_t h)
     makeFB(m_postFxBlitF16, m_bloomView[1], bw, bh, m_bloomFB[1]);
     makeFB(m_postFxBlitF8,  m_ldrView,      w,  h,  m_ldrFB);
     makeFB(m_postFxFinalRP, m_viewportView, w,  h,  m_fxaaFB);
+    // UI overlay framebuffer — uses the same viewport image with LOAD_OP_LOAD render pass.
+    if (m_uiViewportRP && m_viewportView)
+        makeFB(m_uiViewportRP, m_viewportView, w, h, m_uiViewportFB);
 
     // Write descriptor sets: [0]=bloomBright, [1]=blurH(bloom[0]), [2]=blurV(bloom[1]),
     //                         [3]=tonemap, [4]=fxaa
@@ -1773,6 +1842,7 @@ void VulkanRenderer::createPostFXResources(uint32_t w, uint32_t h)
 void VulkanRenderer::destroyPostFXResources()
 {
     vkDeviceWaitIdle(m_device);
+    if (m_uiViewportFB) { vkDestroyFramebuffer(m_device, m_uiViewportFB, nullptr); m_uiViewportFB = VK_NULL_HANDLE; }
     if (m_fxaaFB)     { vkDestroyFramebuffer(m_device, m_fxaaFB,     nullptr); m_fxaaFB=VK_NULL_HANDLE; }
     if (m_ldrFB)      { vkDestroyFramebuffer(m_device, m_ldrFB,      nullptr); m_ldrFB=VK_NULL_HANDLE; }
     if (m_bloomFB[1]) { vkDestroyFramebuffer(m_device, m_bloomFB[1], nullptr); m_bloomFB[1]=VK_NULL_HANDLE; }
@@ -4209,4 +4279,174 @@ void VulkanRenderer::destroySkeletalMeshCache()
         // texImage/texView/texMem reserved for future texture support; hasTex is always false here.
     }
     m_skeletalMeshCache.clear();
+}
+
+// ─── 2D UI canvas rendering ───────────────────────────────────────────────────
+
+void VulkanRenderer::createUIPipeline()
+{
+    VkShaderModule vs = loadShaderModule("ui.vert.spv");
+    VkShaderModule fs = loadShaderModule("ui.frag.spv");
+    if (!vs || !fs)
+    {
+        Logger::Log(Logger::LogLevel::Warning, "VulkanRenderer: UI shaders missing — in-game UI disabled");
+        if (vs) vkDestroyShaderModule(m_device, vs, nullptr);
+        if (fs) vkDestroyShaderModule(m_device, fs, nullptr);
+        return;
+    }
+
+    // Push constant layout: UIPush (48 bytes) visible to both stages.
+    VkPushConstantRange pcr{};
+    pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    pcr.offset     = 0;
+    pcr.size       = 48; // vec4 rect + vec4 color + vec2 viewport + vec2 pad
+
+    VkPipelineLayoutCreateInfo plci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    plci.pushConstantRangeCount = 1;
+    plci.pPushConstantRanges    = &pcr;
+    vkCheck(vkCreatePipelineLayout(m_device, &plci, nullptr, &m_uiPipeLayout), "ui pipe layout");
+
+    // Render pass for the viewport/editor path: single RGBA8 color attachment,
+    // LOAD_OP_LOAD (preserve FXAA output), STORE_OP_STORE, no depth.
+    // initialLayout = COLOR_ATTACHMENT_OPTIMAL (we barrier into it before the pass),
+    // finalLayout   = SHADER_READ_ONLY_OPTIMAL (ImGui reads it after).
+    {
+        VkAttachmentDescription att{};
+        att.format         = VK_FORMAT_R8G8B8A8_UNORM;
+        att.samples        = VK_SAMPLE_COUNT_1_BIT;
+        att.loadOp         = VK_ATTACHMENT_LOAD_OP_LOAD;
+        att.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
+        att.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        att.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        att.initialLayout  = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        att.finalLayout    = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+        VkAttachmentReference ref{ 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+        VkSubpassDescription sub{};
+        sub.pipelineBindPoint    = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        sub.colorAttachmentCount = 1;
+        sub.pColorAttachments    = &ref;
+
+        VkSubpassDependency dep{};
+        dep.srcSubpass    = VK_SUBPASS_EXTERNAL;
+        dep.dstSubpass    = 0;
+        dep.srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dep.dstStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dep.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+        VkRenderPassCreateInfo rpci{ VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
+        rpci.attachmentCount = 1;
+        rpci.pAttachments    = &att;
+        rpci.subpassCount    = 1;
+        rpci.pSubpasses      = &sub;
+        rpci.dependencyCount = 1;
+        rpci.pDependencies   = &dep;
+        vkCheck(vkCreateRenderPass(m_device, &rpci, nullptr, &m_uiViewportRP), "ui viewport render pass");
+    }
+
+    // Helper: build the graphics pipeline for a given render pass.
+    auto buildPipeline = [&](VkRenderPass rp, VkPipeline& out) {
+        VkPipelineShaderStageCreateInfo stages[2]{};
+        stages[0].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[0].stage  = VK_SHADER_STAGE_VERTEX_BIT;
+        stages[0].module = vs;
+        stages[0].pName  = "main";
+        stages[1].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[1].stage  = VK_SHADER_STAGE_FRAGMENT_BIT;
+        stages[1].module = fs;
+        stages[1].pName  = "main";
+
+        // No vertex buffer — positions are computed from gl_VertexIndex + push constants.
+        VkPipelineVertexInputStateCreateInfo vi{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+
+        VkPipelineInputAssemblyStateCreateInfo ia{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+        ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+
+        VkPipelineViewportStateCreateInfo vps{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+        vps.viewportCount = 1;
+        vps.scissorCount  = 1;
+
+        VkPipelineRasterizationStateCreateInfo rs{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+        rs.polygonMode = VK_POLYGON_MODE_FILL;
+        rs.cullMode    = VK_CULL_MODE_NONE;
+        rs.frontFace   = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        rs.lineWidth   = 1.0f;
+
+        VkPipelineMultisampleStateCreateInfo ms{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+        ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+        // Depth test and write both disabled — UI always on top.
+        VkPipelineDepthStencilStateCreateInfo ds{ VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
+        ds.depthTestEnable  = VK_FALSE;
+        ds.depthWriteEnable = VK_FALSE;
+
+        // Alpha blend: SRC_ALPHA / ONE_MINUS_SRC_ALPHA.
+        VkPipelineColorBlendAttachmentState cba{};
+        cba.blendEnable         = VK_TRUE;
+        cba.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+        cba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        cba.colorBlendOp        = VK_BLEND_OP_ADD;
+        cba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        cba.alphaBlendOp        = VK_BLEND_OP_ADD;
+        cba.colorWriteMask      = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT
+                                | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+
+        VkPipelineColorBlendStateCreateInfo cb{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+        cb.attachmentCount = 1;
+        cb.pAttachments    = &cba;
+
+        VkDynamicState dynStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+        VkPipelineDynamicStateCreateInfo dyn{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+        dyn.dynamicStateCount = 2;
+        dyn.pDynamicStates    = dynStates;
+
+        VkGraphicsPipelineCreateInfo pci{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+        pci.stageCount          = 2;
+        pci.pStages             = stages;
+        pci.pVertexInputState   = &vi;
+        pci.pInputAssemblyState = &ia;
+        pci.pViewportState      = &vps;
+        pci.pRasterizationState = &rs;
+        pci.pMultisampleState   = &ms;
+        pci.pDepthStencilState  = &ds;
+        pci.pColorBlendState    = &cb;
+        pci.pDynamicState       = &dyn;
+        pci.layout              = m_uiPipeLayout;
+        pci.renderPass          = rp;
+        pci.subpass             = 0;
+        vkCheck(vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &out), "ui pipeline");
+    };
+
+    // Swapchain pipeline: m_renderPass (swapchain format, has depth attachment).
+    buildPipeline(m_renderPass, m_uiPipeline);
+
+    // Viewport pipeline: m_uiViewportRP (RGBA8, color-only, LOAD_OP_LOAD).
+    buildPipeline(m_uiViewportRP, m_uiViewportPipeline);
+
+    vkDestroyShaderModule(m_device, vs, nullptr);
+    vkDestroyShaderModule(m_device, fs, nullptr);
+
+    Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: UI canvas pipelines created (swapchain + viewport)");
+}
+
+void VulkanRenderer::runUIPass(VkCommandBuffer cmd, int width, int height)
+{
+    // Caller is responsible for binding the correct pipeline and setting
+    // viewport/scissor before calling. This function only loops over UI objects
+    // and issues draw calls — it does NOT begin/end a render pass.
+    struct UIPush { glm::vec4 rect; glm::vec4 color; glm::vec2 viewport; glm::vec2 pad; };
+
+    for (const UIRenderObject& obj : m_renderWorld.uiObjects)
+    {
+        UIPush push{};
+        push.rect     = glm::vec4(obj.position.x, obj.position.y, obj.size.x, obj.size.y);
+        push.color    = glm::vec4(obj.color.r, obj.color.g, obj.color.b, obj.color.a);
+        push.viewport = glm::vec2(float(width), float(height));
+        vkCmdPushConstants(cmd, m_uiPipeLayout,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(UIPush), &push);
+        vkCmdDraw(cmd, 4, 1, 0, 0);
+    }
 }

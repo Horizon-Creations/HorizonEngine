@@ -2,6 +2,7 @@
 #include <Window/Window.h>
 #include <ContentManager/ContentManager.h>
 #include <HorizonRendering/RenderWorld.h>
+#include <Renderer/UIRenderObject.h>
 #include <HorizonRendering/RenderExtractor.h>
 #include <HorizonRendering/FrustumCuller.h>
 #include <HorizonRendering/RenderSorter.h>
@@ -808,6 +809,32 @@ float4 main(In i) : SV_Target {
 }
 )HLSL";
 
+// ─── 2D UI canvas HLSL ──────────────────────────────────────────────────────
+// Generates a screen-space quad from SV_VertexID (0-3, TRIANGLESTRIP).
+// cbuffer layout: rect(16) + color(16) + viewport(8) + pad(8) = 48 bytes.
+static const char* kUIHLSL = R"HLSL(
+cbuffer UICB : register(b0) {
+    float4 uRect;      // xy = top-left in pixels, zw = size in pixels
+    float4 uColor;     // rgba
+    float2 uViewport;  // w, h in pixels
+    float2 _upad;
+};
+struct UIOut { float4 clip : SV_POSITION; float2 uv : TEXCOORD0; };
+UIOut UIVSMain(uint vid : SV_VertexID)
+{
+    static const float2 c[4] = { float2(0,0), float2(1,0), float2(0,1), float2(1,1) };
+    float2 uv = c[vid];
+    float2 sp = uRect.xy + uv * uRect.zw;
+    UIOut o;
+    o.clip = float4(sp.x / uViewport.x * 2.0f - 1.0f,
+                    1.0f - sp.y / uViewport.y * 2.0f,
+                    0.0f, 1.0f);
+    o.uv = uv;
+    return o;
+}
+float4 UIPSMain(UIOut i) : SV_TARGET { return uColor; }
+)HLSL";
+
 namespace
 {
     // GPU mesh uploaded on first sight, mirroring the GL/Metal backends.
@@ -1036,6 +1063,13 @@ struct D3D11RendererImpl
     ComPtr<ID3D11InputLayout>  skinnedLayout;
     ComPtr<ID3D11Buffer>       bonesCB;
     std::unordered_map<HE::UUID, GpuSkeletalMesh> skeletalMeshCache;
+
+    // ── UI canvas pipeline ────────────────────────────────────────────────────
+    ComPtr<ID3D11VertexShader>      uiVS;
+    ComPtr<ID3D11PixelShader>       uiPS;
+    ComPtr<ID3D11Buffer>            uiCB;       // 48 bytes: rect(16)+color(16)+viewport(8)+pad(8)
+    ComPtr<ID3D11BlendState>        uiBlend;    // alpha blend
+    ComPtr<ID3D11DepthStencilState> uiDepth;    // depth test off
 
     void createHDRTargets(uint32_t w, uint32_t h)
     {
@@ -1637,6 +1671,7 @@ struct D3D11RendererImpl
         createSkyPipeline();
         createDebugLinePipeline();
         createSkinnedPipeline();
+        createUIPipeline();
         return vs && ps && inputLayout && perObjectCB && perFrameCB && sampler;
     }
 
@@ -1941,6 +1976,94 @@ struct D3D11RendererImpl
         device->CreateBuffer(&bd, nullptr, &bonesCB);
 
         return skinnedVS && skinnedLayout && bonesCB;
+    }
+
+    void createUIPipeline()
+    {
+        auto& dev = *device.Get();
+        UINT flags = D3DCOMPILE_ENABLE_STRICTNESS;
+#ifdef _DEBUG
+        flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+        ComPtr<ID3DBlob> vsBlob, psBlob, err;
+        if (FAILED(D3DCompile(kUIHLSL, strlen(kUIHLSL), nullptr, nullptr, nullptr,
+                              "UIVSMain", "vs_5_0", flags, 0, &vsBlob, &err)))
+        {
+            Logger::Log(Logger::LogLevel::Error, "D3D11: UI VS compile failed");
+            if (err) OutputDebugStringA(static_cast<const char*>(err->GetBufferPointer()));
+            return;
+        }
+        if (FAILED(D3DCompile(kUIHLSL, strlen(kUIHLSL), nullptr, nullptr, nullptr,
+                              "UIPSMain", "ps_5_0", flags, 0, &psBlob, &err)))
+        {
+            Logger::Log(Logger::LogLevel::Error, "D3D11: UI PS compile failed");
+            if (err) OutputDebugStringA(static_cast<const char*>(err->GetBufferPointer()));
+            return;
+        }
+        dev.CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &uiVS);
+        dev.CreatePixelShader (psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &uiPS);
+
+        // cbuffer: float4 rect(16) + float4 color(16) + float2 viewport(8) + float2 pad(8) = 48 bytes
+        D3D11_BUFFER_DESC bd{};
+        bd.ByteWidth      = 48u;
+        bd.Usage          = D3D11_USAGE_DYNAMIC;
+        bd.BindFlags      = D3D11_BIND_CONSTANT_BUFFER;
+        bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        dev.CreateBuffer(&bd, nullptr, &uiCB);
+
+        D3D11_BLEND_DESC bd2{};
+        bd2.RenderTarget[0].BlendEnable            = TRUE;
+        bd2.RenderTarget[0].SrcBlend              = D3D11_BLEND_SRC_ALPHA;
+        bd2.RenderTarget[0].DestBlend             = D3D11_BLEND_INV_SRC_ALPHA;
+        bd2.RenderTarget[0].BlendOp               = D3D11_BLEND_OP_ADD;
+        bd2.RenderTarget[0].SrcBlendAlpha         = D3D11_BLEND_ONE;
+        bd2.RenderTarget[0].DestBlendAlpha        = D3D11_BLEND_ZERO;
+        bd2.RenderTarget[0].BlendOpAlpha          = D3D11_BLEND_OP_ADD;
+        bd2.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+        dev.CreateBlendState(&bd2, &uiBlend);
+
+        D3D11_DEPTH_STENCIL_DESC dd{};
+        dd.DepthEnable    = FALSE;
+        dd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+        dd.StencilEnable  = FALSE;
+        dev.CreateDepthStencilState(&dd, &uiDepth);
+    }
+
+    void renderUIPass(ID3D11DeviceContext* ctx, int width, int height)
+    {
+        if (!uiVS || m_renderWorld.uiObjects.empty()) return;
+
+        ctx->VSSetShader(uiVS.Get(), nullptr, 0);
+        ctx->PSSetShader(uiPS.Get(), nullptr, 0);
+        ctx->IASetInputLayout(nullptr);
+        ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        ctx->VSSetConstantBuffers(0, 1, uiCB.GetAddressOf());
+        ctx->PSSetConstantBuffers(0, 1, uiCB.GetAddressOf());
+
+        float blendFactor[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        ctx->OMSetBlendState(uiBlend.Get(), blendFactor, 0xFFFFFFFF);
+        ctx->OMSetDepthStencilState(uiDepth.Get(), 0);
+
+        struct UICBData { glm::vec4 rect; glm::vec4 color; glm::vec2 viewport; glm::vec2 pad; };
+        for (const UIRenderObject& obj : m_renderWorld.uiObjects)
+        {
+            UICBData cb;
+            cb.rect     = glm::vec4(obj.position.x, obj.position.y, obj.size.x, obj.size.y);
+            cb.color    = obj.color;
+            cb.viewport = glm::vec2(float(width), float(height));
+            cb.pad      = glm::vec2(0.0f, 0.0f);
+            D3D11_MAPPED_SUBRESOURCE mr{};
+            if (SUCCEEDED(ctx->Map(uiCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mr)))
+            {
+                std::memcpy(mr.pData, &cb, sizeof(cb));
+                ctx->Unmap(uiCB.Get(), 0);
+            }
+            ctx->Draw(4, 0);
+        }
+
+        // Restore: opaque blend, depth on
+        ctx->OMSetBlendState(nullptr, blendFactor, 0xFFFFFFFF);
+        ctx->OMSetDepthStencilState(nullptr, 0);
     }
 
     // Upload and cache GPU resources for a SkeletalMeshAsset.
@@ -2489,6 +2612,12 @@ void D3D11Renderer::Render()
             p.context->PSSetSamplers(0, 1, p.sampler.GetAddressOf());
         }
 
+        // UI canvas pass: draw onto the final composited viewport target (after tonemap/FXAA).
+        p.context->OMSetRenderTargets(1, p.viewportRTV.GetAddressOf(), nullptr);
+        p.context->RSSetViewports(1, &vvp);
+        p.renderUIPass(p.context.Get(), static_cast<int>(p.viewportW), static_cast<int>(p.viewportH));
+        { ID3D11RenderTargetView* n = nullptr; p.context->OMSetRenderTargets(1, &n, nullptr); }
+
         // ImGui overlay → swapchain RT (clear first so it's a clean dark bg).
         p.context->OMSetRenderTargets(1, p.rtv.GetAddressOf(), nullptr);
         p.context->ClearRenderTargetView(p.rtv.Get(), bgColor);
@@ -2507,6 +2636,8 @@ void D3D11Renderer::Render()
         vp.MaxDepth = 1.0f;
         p.context->RSSetViewports(1, &vp);
         DrawScene(p.width, p.height);
+        // UI canvas pass: swapchain RT + scene viewport already bound.
+        p.renderUIPass(p.context.Get(), p.width, p.height);
     }
 
     if (m_overlayCallback) m_overlayCallback(nullptr);

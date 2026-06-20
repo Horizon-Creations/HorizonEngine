@@ -581,6 +581,27 @@ VSOut VSMainSkinned(SkinnedIn i)
 }
 )HLSL";
 
+static const char* kUIHLSL12 = R"HLSL(
+cbuffer UICB : register(b0) {
+    float4 uRect;      // xy=top-left px, zw=size px
+    float4 uColor;
+    float2 uViewport;
+    float2 _upad;
+};
+struct UIOut { float4 clip : SV_POSITION; float2 uv : TEXCOORD0; };
+UIOut UIVSMain(uint vid : SV_VertexID)
+{
+    static const float2 c[4] = { float2(0,0), float2(1,0), float2(0,1), float2(1,1) };
+    float2 uv = c[vid];
+    float2 sp = uRect.xy + uv * uRect.zw;
+    UIOut o;
+    o.clip = float4(sp.x/uViewport.x*2.0f-1.0f, 1.0f-sp.y/uViewport.y*2.0f, 0.0f, 1.0f);
+    o.uv = uv;
+    return o;
+}
+float4 UIPSMain(UIOut i) : SV_TARGET { return uColor; }
+)HLSL";
+
 static const char* kSSAOBlurHLSL12 = R"HLSL(
 Texture2D    uAOInput   : register(t0);
 SamplerState uPointSamp : register(s0);
@@ -1507,6 +1528,15 @@ struct D3D12RendererImpl
     uint8_t*                m_bonesCBPtr[k_frameCount]{};
     std::unordered_map<HE::UUID, GpuSkeletalMesh12> m_skeletalMeshCache;
 
+    // ── 2D UI canvas pipeline ─────────────────────────────────────────────────
+    ComPtr<ID3D12PipelineState>  m_uiPSO;
+    ComPtr<ID3D12RootSignature>  m_uiRootSig;
+    // Per-frame UI CB ring: up to 256 quads per frame × 256 bytes each (48B padded to 256B).
+    static constexpr UINT   k_maxUIQuads = 256;
+    static constexpr UINT64 k_uiCBSlot   = 256;
+    ComPtr<ID3D12Resource>  m_uiCB[k_frameCount];
+    uint8_t*                m_uiCBPtr[k_frameCount]{};
+
     // ── Combined scene SRV heap (shadow t0, AO-blur t2, white-fallback t2) ──
     // [0]=shadow, [1]=AO-blur, [2]=white-fallback
     ComPtr<ID3D12DescriptorHeap> sceneSrvHeap;    // CBV_SRV_UAV shader-visible, 3 slots
@@ -1688,6 +1718,121 @@ struct D3D12RendererImpl
             // Also fill slot 0 of the combined scene SRV heap (if already created).
             if (sceneSrvHeap)
                 device->CreateShaderResourceView(shadowDepth.Get(), &svd, sceneSrvCpu(0));
+        }
+    }
+
+    bool createUIPipeline()
+    {
+        UINT flags = 0;
+#ifdef _DEBUG
+        flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+        ComPtr<ID3DBlob> vsB, psB, err;
+        if (FAILED(D3DCompile(kUIHLSL12, strlen(kUIHLSL12),
+                              "ui", nullptr, nullptr, "UIVSMain", "vs_5_0", flags, 0, &vsB, &err)))
+        {
+            Logger::Log(Logger::LogLevel::Error,
+                (std::string("D3D12 UI VS compile failed: ")
+                 + (err ? static_cast<const char*>(err->GetBufferPointer()) : "?")).c_str());
+            return false;
+        }
+        if (FAILED(D3DCompile(kUIHLSL12, strlen(kUIHLSL12),
+                              "ui", nullptr, nullptr, "UIPSMain", "ps_5_0", flags, 0, &psB, &err)))
+        {
+            Logger::Log(Logger::LogLevel::Error,
+                (std::string("D3D12 UI PS compile failed: ")
+                 + (err ? static_cast<const char*>(err->GetBufferPointer()) : "?")).c_str());
+            return false;
+        }
+
+        // Root signature: single root CBV at b0, visible to VS and PS.
+        {
+            D3D12_ROOT_PARAMETER param{};
+            param.ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
+            param.Descriptor       = { 0, 0 }; // b0
+            param.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+            D3D12_ROOT_SIGNATURE_DESC rsd{};
+            rsd.NumParameters = 1; rsd.pParameters = &param;
+            rsd.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+            ComPtr<ID3DBlob> sig, sigErr;
+            if (FAILED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &sigErr)) ||
+                FAILED(device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
+                       IID_PPV_ARGS(&m_uiRootSig))))
+            {
+                Logger::Log(Logger::LogLevel::Error, "D3D12 UI root signature failed");
+                return false;
+            }
+        }
+
+        // PSO: alpha blend, no depth test, RGBA8 output (final viewport/swapchain RT).
+        {
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+            pd.pRootSignature = m_uiRootSig.Get();
+            pd.VS = { vsB->GetBufferPointer(), vsB->GetBufferSize() };
+            pd.PS = { psB->GetBufferPointer(), psB->GetBufferSize() };
+            pd.InputLayout           = { nullptr, 0 };
+            pd.SampleMask            = UINT_MAX;
+            pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+            pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+            pd.DepthStencilState.DepthEnable = FALSE;
+            auto& rt = pd.BlendState.RenderTarget[0];
+            rt.BlendEnable    = TRUE;
+            rt.SrcBlend       = D3D12_BLEND_SRC_ALPHA;
+            rt.DestBlend      = D3D12_BLEND_INV_SRC_ALPHA;
+            rt.BlendOp        = D3D12_BLEND_OP_ADD;
+            rt.SrcBlendAlpha  = D3D12_BLEND_ONE;
+            rt.DestBlendAlpha = D3D12_BLEND_ZERO;
+            rt.BlendOpAlpha   = D3D12_BLEND_OP_ADD;
+            rt.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+            pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+            pd.NumRenderTargets      = 1;
+            pd.RTVFormats[0]         = DXGI_FORMAT_R8G8B8A8_UNORM;
+            pd.SampleDesc.Count      = 1;
+            if (FAILED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&m_uiPSO))))
+            {
+                Logger::Log(Logger::LogLevel::Error, "D3D12 UI PSO creation failed");
+                return false;
+            }
+        }
+
+        // Per-frame upload CBs, persistently mapped.
+        for (UINT f = 0; f < k_frameCount; ++f)
+        {
+            m_uiCB[f] = createUploadBuffer(
+                static_cast<UINT64>(k_maxUIQuads) * k_uiCBSlot,
+                reinterpret_cast<void**>(&m_uiCBPtr[f]));
+            if (!m_uiCB[f])
+            {
+                Logger::Log(Logger::LogLevel::Error, "D3D12 UI CB allocation failed");
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    void renderUIPass12(ID3D12GraphicsCommandList* cmd, int fi, int w, int h)
+    {
+        if (!m_uiPSO || m_renderWorld.uiObjects.empty()) return;
+        cmd->SetPipelineState(m_uiPSO.Get());
+        cmd->SetGraphicsRootSignature(m_uiRootSig.Get());
+        cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+
+        struct UICB { glm::vec4 rect; glm::vec4 color; glm::vec2 vp; glm::vec2 pad; };
+        int qi = 0;
+        for (const UIRenderObject& obj : m_renderWorld.uiObjects) {
+            if (qi >= static_cast<int>(k_maxUIQuads)) break;
+            UICB cb;
+            cb.rect  = glm::vec4(obj.position.x, obj.position.y, obj.size.x, obj.size.y);
+            cb.color = glm::vec4(obj.color.r, obj.color.g, obj.color.b, obj.color.a);
+            cb.vp    = glm::vec2(float(w), float(h));
+            cb.pad   = {};
+            std::memcpy(m_uiCBPtr[fi] + static_cast<size_t>(qi) * k_uiCBSlot, &cb, sizeof(cb));
+            D3D12_GPU_VIRTUAL_ADDRESS addr = m_uiCB[fi]->GetGPUVirtualAddress()
+                                           + static_cast<UINT64>(qi) * k_uiCBSlot;
+            cmd->SetGraphicsRootConstantBufferView(0, addr);
+            cmd->DrawInstanced(4, 1, 0, 0);
+            ++qi;
         }
     }
 
@@ -1909,6 +2054,7 @@ struct D3D12RendererImpl
         createDebugLinePipeline();
         createSSAOPipeline();
         createSkinnedPipeline();
+        createUIPipeline();
         return rootSig && pso;
     }
 
@@ -3311,6 +3457,26 @@ void D3D12Renderer::Render()
 
             // PostFX chain: HDR→bloom→tonemap→FXAA→viewportRT (leaves viewportRT in PSR).
             p.runPostFX(p.cmdList.Get(), p.viewportW, p.viewportH);
+
+            // ── 2D UI canvas: draw on top of the final tonemapped image ─────────
+            // runPostFX left viewportRT in PSR; transition back to RT for UI draw.
+            p.barrier12(p.cmdList.Get(), p.viewportRT.Get(),
+                        p.viewportState, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            p.viewportState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+            {
+                auto uirtv = p.viewportRtvHeap->GetCPUDescriptorHandleForHeapStart();
+                p.cmdList->OMSetRenderTargets(1, &uirtv, FALSE, nullptr);
+                D3D12_VIEWPORT uivp{ 0, 0, (float)p.viewportW, (float)p.viewportH, 0.0f, 1.0f };
+                D3D12_RECT     uisc{ 0, 0, (LONG)p.viewportW, (LONG)p.viewportH };
+                p.cmdList->RSSetViewports(1, &uivp);
+                p.cmdList->RSSetScissorRects(1, &uisc);
+            }
+            p.renderUIPass12(p.cmdList.Get(), p.frameIndex,
+                             static_cast<int>(p.viewportW), static_cast<int>(p.viewportH));
+            // Transition back to PSR so ImGui can sample viewportRT.
+            p.barrier12(p.cmdList.Get(), p.viewportRT.Get(),
+                        p.viewportState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            p.viewportState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
         }
         else
         {
@@ -3331,6 +3497,18 @@ void D3D12Renderer::Render()
             p.cmdList->RSSetScissorRects(1, &vsc);
             p.usingHDR = false;
             DrawScene(p.cmdList.Get(), static_cast<int>(p.viewportW), static_cast<int>(p.viewportH));
+
+            // ── 2D UI canvas on the viewport RT (still in RENDER_TARGET state) ─
+            {
+                auto uirtv = p.viewportRtvHeap->GetCPUDescriptorHandleForHeapStart();
+                p.cmdList->OMSetRenderTargets(1, &uirtv, FALSE, nullptr);
+                D3D12_VIEWPORT uivp{ 0, 0, (float)p.viewportW, (float)p.viewportH, 0.0f, 1.0f };
+                D3D12_RECT     uisc{ 0, 0, (LONG)p.viewportW, (LONG)p.viewportH };
+                p.cmdList->RSSetViewports(1, &uivp);
+                p.cmdList->RSSetScissorRects(1, &uisc);
+            }
+            p.renderUIPass12(p.cmdList.Get(), p.frameIndex,
+                             static_cast<int>(p.viewportW), static_cast<int>(p.viewportH));
 
             p.barrier12(p.cmdList.Get(), p.viewportRT.Get(),
                         p.viewportState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -3362,6 +3540,16 @@ void D3D12Renderer::Render()
         p.cmdList->RSSetScissorRects(1, &sc);
         p.usingHDR = false;
         DrawScene(p.cmdList.Get(), p.width, p.height);
+
+        // ── 2D UI canvas on swapchain RT (already bound, in RENDER_TARGET state) ─
+        p.cmdList->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+        {
+            D3D12_VIEWPORT uivp{ 0, 0, static_cast<float>(p.width), static_cast<float>(p.height), 0.0f, 1.0f };
+            D3D12_RECT     uisc{ 0, 0, p.width, p.height };
+            p.cmdList->RSSetViewports(1, &uivp);
+            p.cmdList->RSSetScissorRects(1, &uisc);
+        }
+        p.renderUIPass12(p.cmdList.Get(), p.frameIndex, p.width, p.height);
     }
 
     // Overlay (ImGui) records into this command list and binds its own SRV heap.
