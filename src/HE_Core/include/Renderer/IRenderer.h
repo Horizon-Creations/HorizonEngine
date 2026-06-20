@@ -209,6 +209,17 @@ public:
     // Release a texture previously created with CreateImGuiTexture.
     virtual void  DestroyImGuiTexture(void* handle);
 
+    // ── ImGui texture registrar (D3D12 / Vulkan) ───────────────────────────
+    // The renderer DLL does not link ImGui, so backends whose ImTextureID is an
+    // ImGui-owned object (D3D12: a GPU SRV descriptor in ImGui's heap; Vulkan: a
+    // VkDescriptorSet from ImGui_ImplVulkan_AddTexture) cannot build the handle
+    // themselves. The editor installs this callback after ImGui is initialized;
+    // the backend creates+uploads the GPU texture and then calls the registrar to
+    // turn its native handle into an ImGui ImTextureID.
+    //   D3D12:  a = ID3D12Resource*,  b = nullptr.
+    //   Vulkan: a = VkImageView,      b = VkSampler.
+    void SetImGuiTextureRegistrar(std::function<void*(void*, void*)> fn) { m_imguiTexRegistrar = std::move(fn); }
+
     // ── Night-sky moon texture (optional) ──────────────────────────────────
     // Pushed once by the app. The backend uploads the RGBA8, tightly-packed
     // pixels and samples them on the moon disk in the procedural night sky.
@@ -232,4 +243,8 @@ protected:
     // OpenGL/D3D11 override GetViewportTexture() and ignore this field; D3D12 and
     // Vulkan return it so the editor can control descriptor lifetime.
     void*                m_viewportImGuiHandle  = nullptr;
+    // Editor-installed callback that converts a backend native texture handle into
+    // an ImGui ImTextureID. See SetImGuiTextureRegistrar above. Null on backends
+    // (OpenGL/D3D11) that build the handle directly inside CreateImGuiTexture.
+    std::function<void*(void*, void*)> m_imguiTexRegistrar;
 };

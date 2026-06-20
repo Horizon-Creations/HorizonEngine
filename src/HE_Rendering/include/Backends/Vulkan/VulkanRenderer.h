@@ -44,6 +44,14 @@ public:
 	void SetMoonTexture(const void* rgba8Pixels, int width, int height) override;
 	void SetSSAOSettings(const SSAOSettings& s) override;
 
+	// ImGui editor textures (content-browser icons + logo). Uploads the RGBA8
+	// pixels to a sampled VkImage (+ view + linear sampler), then hands the view +
+	// sampler to the editor-installed registrar (m_imguiTexRegistrar) which calls
+	// ImGui_ImplVulkan_AddTexture. Returns the VkDescriptorSet-backed ImTextureID,
+	// or nullptr if no registrar is installed.
+	void* CreateImGuiTexture(const void* rgba8Pixels, int width, int height) override;
+	void  DestroyImGuiTexture(void* handle) override;
+
 	// Offscreen viewport (editor scene view)
 	void  SetViewportSize(uint32_t width, uint32_t height) override;
 	// GetViewportTexture() is inherited from IRenderer; returns m_viewportImGuiHandle
@@ -66,6 +74,7 @@ private:
 	void createFramebuffers();
 	void createCommandBuffers();
 	void createSyncObjects();
+	void createImageSyncObjects();   // per-swapchain-image present semaphores + in-flight fences
 	void destroySwapchain();
 	// Rebuild the swapchain + depth + framebuffers + command buffers for the
 	// window's current size. Called on resize (vkAcquire/Present reports
@@ -95,6 +104,7 @@ private:
 	uint32_t       m_shadowSize     = 2048;
 
 	VkInstance               m_instance       = VK_NULL_HANDLE;
+	VkDebugUtilsMessengerEXT m_debugMessenger = VK_NULL_HANDLE; // validation → Logger (debug only)
 	VkPhysicalDevice         m_physDevice     = VK_NULL_HANDLE;
 	VkDevice                 m_device         = VK_NULL_HANDLE;
 	VkQueue                  m_graphicsQueue  = VK_NULL_HANDLE;
@@ -110,9 +120,12 @@ private:
 	VkCommandPool            m_cmdPool        = VK_NULL_HANDLE;
 	std::vector<VkCommandBuffer> m_cmdBufs;
 
-	VkSemaphore m_imageReady[2]{};
-	VkSemaphore m_renderDone[2]{};
-	VkFence     m_frameFence[2]{};
+	VkSemaphore m_imageReady[2]{};              // per frame-in-flight (acquire signal)
+	std::vector<VkSemaphore> m_renderDone;      // per SWAPCHAIN IMAGE (present wait) —
+	                                            // a per-frame present semaphore is reused
+	                                            // while the swapchain may still hold it.
+	VkFence     m_frameFence[2]{};              // per frame-in-flight (submit fence)
+	std::vector<VkFence>     m_imagesInFlight;  // per image: the fence currently using it
 	uint32_t    m_currentFrame = 0;
 
 	// ── Depth buffer (shared, transient) ────────────────────────────────────
@@ -178,6 +191,11 @@ private:
 	VkImage        m_viewportImage   = VK_NULL_HANDLE;
 	VkDeviceMemory m_viewportMemory  = VK_NULL_HANDLE;
 	VkImageView    m_viewportView    = VK_NULL_HANDLE;
+	// Old viewport color image/view/memory retired on resize: ImGui's descriptor is one
+	// frame behind (editor updates it next frame), so the old image must outlive the
+	// current frame's ImGui draw — else it samples a destroyed image (null view → TDR).
+	struct RetiredViewport { VkImage img; VkImageView view; VkDeviceMemory mem; int frames; };
+	std::vector<RetiredViewport> m_retiredViewports;
 	VkImage        m_viewportDepthImage  = VK_NULL_HANDLE;
 	VkDeviceMemory m_viewportDepthMemory = VK_NULL_HANDLE;
 	VkImageView    m_viewportDepthView   = VK_NULL_HANDLE;
@@ -303,6 +321,24 @@ private:
 	VkDeviceMemory m_moonMemory  = VK_NULL_HANDLE;
 	VkImageView    m_moonView    = VK_NULL_HANDLE;
 	VkSampler      m_moonSampler = VK_NULL_HANDLE;
+
+	// Sky 3D noise volume (RG16: R=value hash, G=Worley) baked once in
+	// createSkyPipeline; sampled by sky.frag (binding 2) for the volumetric clouds.
+	VkImage        m_skyNoiseImage   = VK_NULL_HANDLE;
+	VkDeviceMemory m_skyNoiseMemory  = VK_NULL_HANDLE;
+	VkImageView    m_skyNoiseView    = VK_NULL_HANDLE;
+	VkSampler      m_skyNoiseSampler = VK_NULL_HANDLE;
+
+	// ImGui editor textures (logo + content-browser icons). Each owns its own
+	// image/view/memory/sampler; held here so they outlive ImGui's use of the
+	// VkDescriptorSet the editor creates over them. Destroyed in Shutdown().
+	struct ImGuiTexture {
+		VkImage        image   = VK_NULL_HANDLE;
+		VkImageView    view    = VK_NULL_HANDLE;
+		VkDeviceMemory memory  = VK_NULL_HANDLE;
+		VkSampler      sampler = VK_NULL_HANDLE;
+	};
+	std::vector<ImGuiTexture> m_imguiTextures;
 
 	// Wall-clock time (seconds) updated each frame by Render().
 	float m_wallTime = 0.0f;

@@ -9,10 +9,12 @@ layout(set = 0, binding = 0) uniform SkyEnv {
     vec3  sunColor;  float cloudCoverage;
     vec3  wind;      float time;
     vec3  auroraColor; float aurora;
-    float milkyWay;  float flash; int hasMoonTex; float _pad;
+    float milkyWay;  float flash; int hasMoonTex; float nebula;
+    vec3  nebulaColor; float _pad2;
 } sky;
 
 layout(set = 0, binding = 1) uniform sampler2D uMoonTex;
+layout(set = 0, binding = 2) uniform sampler3D uNoise;
 
 // ── Procedural sky ────────────────────────────────────────────────────────────
 vec3 skyColor(vec3 dir, vec3 sunDir)
@@ -62,14 +64,15 @@ float starHash(vec3 p)
     p = fract(p * 0.1031); p += dot(p, p.zyx + 31.32);
     return fract((p.x + p.y) * p.z);
 }
+// Trilinear value noise sampled from the precomputed uNoise volume (texels hold
+// starHash at the integer lattice). Pre-smoothstepping the fractional coordinate
+// makes the hardware linear filter reproduce the old smoothstep interpolation,
+// and +0.5 lands integer lattice points on texel centres.
 float starNoise3(vec3 p)
 {
-    vec3 i = floor(p), f = fract(p), u = f*f*(3.0-2.0*f);
-    return mix(
-        mix(mix(starHash(i),            starHash(i+vec3(1,0,0)), u.x),
-            mix(starHash(i+vec3(0,1,0)), starHash(i+vec3(1,1,0)), u.x), u.y),
-        mix(mix(starHash(i+vec3(0,0,1)), starHash(i+vec3(1,0,1)), u.x),
-            mix(starHash(i+vec3(0,1,1)), starHash(i+vec3(1,1,1)), u.x), u.y), u.z);
+    vec3 f = fract(p);
+    vec3 q = floor(p) + f * f * (3.0 - 2.0 * f) + 0.5;
+    return texture(uNoise, q * (1.0 / 256.0)).r;
 }
 float starFbm3(vec3 p, int oct)
 {
@@ -169,43 +172,180 @@ vec3 moonDisk(vec3 dir, vec3 sunDir)
     return vec3(0.92,0.94,1.00)*(tex*limb*edge*3.0*night);
 }
 
-vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float t, float coverage, vec3 sunColor, vec3 wind)
+// Cloud slab heights (arbitrary world units in the sky-ray hemisphere model).
+const float kCloudBase  = 1.0;
+const float kCloudTop   = 2.6;
+const float kCloudScale = 1.2;    // spatial frequency of the cloud field
+// Worley (cellular) lookup from the noise volume's G channel.
+float worleyNoise3(vec3 p)
 {
-    if(coverage<=0.0||dir.y<0.02) return baseSky;
-    const int N=8;
-    float sBase=1.0/max(dir.y,1e-3), sTop=2.6/max(dir.y,1e-3);
-    float ds=(sTop-sBase)/float(N);
-    float jitter=cloudHash(dir.xz*173.3+dir.y);
-    float sunY=clamp(sunDir.y,-0.2,1.0);
-    float day=smoothstep(-0.10,0.10,sunY);
-    float dusk=smoothstep(-0.06,0.05,sunY)*(1.0-smoothstep(0.05,0.28,sunY));
-    float costh=max(dot(dir,sunDir),0.0);
-    float g=0.6,g2=g*g;
-    float phase=(1.0-g2)/(12.566371*pow(max(1.0+g2-2.0*g*costh,1e-4),1.5));
-    float T=1.0; vec3 L=vec3(0.0);
-    for(int i=0;i<N;++i)
+    return texture(uNoise, p * (1.0 / 256.0)).g;
+}
+float worleyFbm(vec3 p)
+{
+    return worleyNoise3(p)        * 0.625
+         + worleyNoise3(p * 2.03) * 0.25
+         + worleyNoise3(p * 4.06) * 0.125;
+}
+// Henyey-Greenstein phase: forward-biased scattering so the sun-facing edges glow.
+float hgPhase(float cosT, float g)
+{
+    float g2 = g * g;
+    return (1.0 - g2) / (12.566371 * pow(max(1.0 + g2 - 2.0 * g * cosT, 1e-4), 1.5));
+}
+// Rounded vertical density taper so the slab reads as puffy bodies, not a sheet.
+float cloudHeightGrad(float y)
+{
+    float hf = clamp((y - kCloudBase) / (kCloudTop - kCloudBase), 0.0, 1.0);
+    return smoothstep(0.0, 0.25, hf) * (1.0 - smoothstep(0.6, 1.0, hf));
+}
+// Full density at a world point: billowy Worley over a large-scale perlin coverage
+// field, thresholded by the coverage slider and shaped by the slab height.
+float cloudDensity(vec3 pos, float time, float coverage, vec3 wind)
+{
+    float hgrad = cloudHeightGrad(pos.y);
+    if (hgrad <= 0.0) return 0.0;                                  // outside slab → no fetches
+    vec3  p      = pos * kCloudScale + wind * time;
+    float morph  = time * 0.030;                                  // slow forming/dissolving
+    float perlin = starFbm3(p + vec3(0.0, morph, 0.0), 4);        // large-scale coverage
+    float billow = worleyFbm(p * 0.9 + vec3(morph, 0.0, 0.0));    // fine cauliflower detail
+    float base   = perlin * 0.5 + billow * 0.55;
+    float lo     = mix(0.70, 0.22, clamp(coverage, 0.0, 1.0));
+    return smoothstep(lo, lo + 0.13, base) * hgrad;
+}
+// Density for the sun light-march. Slightly fewer octaves than the view density.
+float cloudShadowDensity(vec3 pos, float time, float coverage, vec3 wind)
+{
+    float hgrad = cloudHeightGrad(pos.y);
+    if (hgrad <= 0.0) return 0.0;
+    vec3  p      = pos * kCloudScale + wind * time;
+    float morph  = time * 0.030;
+    float perlin = starFbm3(p + vec3(0.0, morph, 0.0), 3);
+    float billow = worleyNoise3(p * 0.9 + vec3(morph, 0.0, 0.0)) * 0.7
+                 + worleyNoise3(p * 1.8) * 0.3;
+    float base   = perlin * 0.5 + billow * 0.55;
+    float lo     = mix(0.70, 0.22, clamp(coverage, 0.0, 1.0));
+    return smoothstep(lo, lo + 0.13, base) * hgrad;
+}
+vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float time, float coverage, vec3 sunColor, vec3 wind)
+{
+    if (coverage <= 0.0) return baseSky;          // clear sky → skip the whole raymarch
+    dir    = normalize(dir);
+    sunDir = normalize(sunDir);
+    if (dir.y < 0.02) return baseSky;             // no clouds at/below the horizon
+
+    // March the view ray through the cloud slab between base and top heights.
+    float s0 = kCloudBase / max(dir.y, 1e-3);
+    float s1 = kCloudTop  / max(dir.y, 1e-3);
+    const int N = 16;
+    float ds = (s1 - s0) / float(N);
+    float jitter = cloudHash(dir.xz * 173.3 + vec2(dir.y * 37.1, dir.y * 19.7));
+
+    // Day/night/dusk drive the cloud colour (independent of the drift clock).
+    float sunY = clamp(sunDir.y, -0.2, 1.0);
+    float day  = smoothstep(-0.10, 0.10, sunY);
+    float dusk = smoothstep(-0.06, 0.05, sunY) * (1.0 - smoothstep(0.05, 0.28, sunY));
+
+    // Forward-scatter phase (view vs. sun) — constant along the ray, so compute once.
+    float costh = max(dot(dir, sunDir), 0.0);
+    float phase = mix(hgPhase(costh, 0.6), hgPhase(costh, -0.3), 0.25);
+
+    float T = 1.0;                                 // transmittance along the view ray
+    vec3  L = vec3(0.0);                           // accumulated in-scattered colour
+    for (int i = 0; i < N; ++i)
     {
-        float s=sBase+(float(i)+jitter)*ds;
-        vec3 pos=dir*s;
-        float lo=mix(0.70,0.22,clamp(coverage,0.0,1.0));
-        float dens=smoothstep(lo,lo+0.13,cloudFbm(pos.xz*1.2+wind.xz*t));
-        if(dens>0.001)
+        float s   = s0 + (float(i) + jitter) * ds;
+        vec3  pos = dir * s;
+        float dens = cloudDensity(pos, time, coverage, wind);
+        if (dens > 0.001)
         {
-            float sh=exp(-smoothstep(lo,lo+0.13,cloudFbm((pos+sunDir*0.5).xz*1.2+wind.xz*t))*1.7);
-            float powder=1.0-exp(-dens*3.0), lit=sh*powder;
-            vec3 dayCol=mix(vec3(0.17,0.20,0.29),sunColor*1.12,lit);
-            vec3 nightCol=mix(vec3(0.015,0.018,0.035),vec3(0.26,0.29,0.45),lit);
-            vec3 cc=mix(nightCol,dayCol,day);
-            cc=mix(cc,sunColor*vec3(1.25,0.55,0.28),dusk*lit*0.9);
-            cc+=sunColor*(phase*sh*0.9*max(day,dusk));
-            float hT=smoothstep(1.0,2.6,pos.y); cc*=mix(0.5,1.15,hT);
-            float a=1.0-exp(-dens*ds*7.0);
-            L+=T*a*cc; T*=1.0-a; if(T<0.02) break;
+            // Light-march toward the sun: Beer's-law self-shadowing (3 steps).
+            float shadow = 0.0;
+            for (int j = 1; j <= 3; ++j)
+                shadow += cloudShadowDensity(pos + sunDir * (float(j) * 0.25), time, coverage, wind);
+            float sun    = exp(-shadow * 1.7);
+            float powder = 1.0 - exp(-dens * 3.0); // dark soft edges (powder effect)
+            float lit    = sun * powder;
+
+            // Higher-contrast shading: dark cool shaded base, sun-coloured lit tops.
+            vec3 dayCol   = mix(vec3(0.17, 0.20, 0.29), sunColor * 1.12, lit);
+            vec3 nightCol = mix(vec3(0.015, 0.018, 0.035), vec3(0.26, 0.29, 0.45), lit);
+            vec3 cloudCol = mix(nightCol, dayCol, day);
+            vec3 duskTop  = sunColor * vec3(1.25, 0.55, 0.28);
+            cloudCol = mix(cloudCol, duskTop, dusk * lit * 0.9);
+            // Moonlit silver: moon rises on the opposite arc from the sun.
+            vec3  cMoonDir = normalize(vec3(-sunDir.x, -sunDir.y, sunDir.z));
+            float cMoonUp  = clamp((cMoonDir.y + 0.10) / 0.25, 0.0, 1.0);
+            cloudCol += vec3(0.20, 0.22, 0.38) * lit * cMoonUp * (1.0 - day) * 0.25;
+            // Forward-scatter glow: the silver lining.
+            cloudCol += sunColor * (phase * sun * 0.9 * max(day, dusk));
+            // Cheap vertical depth: tops catch the light, base sits in self-shadow.
+            float hTone = smoothstep(kCloudBase, kCloudTop, pos.y);
+            cloudCol *= mix(0.5, 1.15, hTone);
+            cloudCol += vec3(0.07, 0.10, 0.17) * ((1.0 - hTone) * day * 0.25);
+
+            float opticalDepth = dens * ds * 7.0;
+            float a = 1.0 - exp(-opticalDepth);
+            L += T * a * cloudCol;
+            T *= 1.0 - a;
+            if (T < 0.02) break;
         }
     }
-    float horizon=smoothstep(0.02,0.16,dir.y);
-    T=1.0-(1.0-T)*horizon; L*=horizon;
-    return baseSky*T+L;
+
+    // Fade the whole cloud layer out into the horizon haze.
+    float horizon = smoothstep(0.02, 0.16, dir.y);
+    T = 1.0 - (1.0 - T) * horizon;
+    L *= horizon;
+    return baseSky * T + L;
+}
+
+// Space nebula — drifting coloured emission clouds gathered toward the galactic
+// band. Sampled as 3D blobs on the celestial sphere (rotates with the stars).
+vec3 nebula(vec3 dir, vec3 cdir, vec3 sunDir, float intensity, vec3 nebColor)
+{
+    if (intensity <= 0.0) return vec3(0.0);
+    dir    = normalize(dir);
+    sunDir = normalize(sunDir);
+    float night = 1.0 - smoothstep(-0.10, 0.10, clamp(sunDir.y, -0.2, 1.0));
+    if (night <= 0.0 || dir.y <= 0.0) return vec3(0.0);
+
+    vec3  cN   = normalize(cdir);
+    const vec3 galN = normalize(vec3(0.46, 0.52, -0.72));
+    float bd   = dot(cN, galN);
+    float band = exp(-bd * bd * 1.5);           // wide soft milky-way bias
+    vec3  P    = cN * 3.4;
+    float big  = starFbm3(P * 0.7 + 11.0, 4);   // large clouds
+    float med  = starFbm3(P * 1.7 + 27.0, 3);   // medium clumps
+    float fine = starFbm3(P * 4.0 + 41.0, 2);   // fine mottle / embedded dust
+    float blob   = smoothstep(0.35, 0.70, big * 0.5 + med * 0.6);
+    // Structural character per region: dense puffy bodies vs. wispy filaments.
+    float charF  = starFbm3(P * 0.4 + 150.0, 2);
+    float wispy  = smoothstep(0.42, 0.70, charF);
+    float fila   = smoothstep(0.55, 0.86, starFbm3(P * 5.5 + 97.0, 2));   // fine filaments
+    float detail = (0.30 + 0.70 * smoothstep(0.32, 0.86, fine)) * mix(1.0, 0.65 + 0.9 * fila, wispy);
+    float dust   = 1.0 - 0.5 * smoothstep(0.50, 0.88, starFbm3(P * 2.6 + 63.0, 3));
+    float density = blob * detail * dust;
+    float core   = smoothstep(0.62, 0.95, big * 0.55 + med * 0.55);   // bright centres
+    float glow   = (band * 0.85 + 0.15) * (density + 0.6 * core);     // baseline -> off-band patches
+    if (glow <= 0.0) return vec3(0.0);
+
+    // Hue wheel across neighbouring blobs.
+    float h = clamp(starFbm3(P * 0.5 + 71.0, 3) * 1.7 - 0.35
+                  + 0.25 * (starFbm3(P * 1.1 + 83.0, 2) - 0.5), 0.0, 1.0);
+    float warm = smoothstep(0.40, 0.72, starFbm3(P * 0.32 + 131.0, 2));
+    h = clamp(h + warm * 0.30, 0.0, 1.0);
+    vec3  colA = nebColor * vec3(0.42, 0.62, 1.50);   // cool blue
+    vec3  colB = nebColor * vec3(0.34, 1.42, 1.18);   // teal/cyan
+    vec3  colC = nebColor * vec3(0.55, 1.42, 0.55);   // green
+    vec3  colD = nebColor * vec3(1.75, 1.10, 0.40);   // gold/amber
+    vec3  colE = nebColor * vec3(1.85, 0.42, 0.95);   // magenta/pink
+    vec3  col  = colA;
+    col = mix(col, colB, smoothstep(0.14, 0.36, h));
+    col = mix(col, colC, smoothstep(0.36, 0.54, h));
+    col = mix(col, colD, smoothstep(0.54, 0.72, h));
+    col = mix(col, colE, smoothstep(0.72, 0.92, h));
+    float horizon = smoothstep(0.0, 0.16, dir.y);
+    return col * (glow * 6.0 * horizon * night * intensity);
 }
 
 void main()
@@ -216,13 +356,17 @@ void main()
     // Reconstruct world ray: NDC z=0 near, z=1 far.
     vec4 wp1 = sky.invViewProj * vec4(vNDC, 1.0, 1.0); // far
     vec4 wp0 = sky.invViewProj * vec4(vNDC, 0.0, 1.0); // near
-    vec3 dir = wp1.xyz / wp1.w - wp0.xyz / wp0.w;
+    // Normalize: starField/aurora/moonDisk/clouds all assume a unit direction. Without
+    // this, dir has the far-plane magnitude (~1000) and the star cells land at huge
+    // coordinates where the hash loses float precision → stars flicker/vanish on rotate.
+    vec3 dir = normalize(wp1.xyz / wp1.w - wp0.xyz / wp0.w);
 
     vec3 col = skyColor(dir, sky.sunDir);
     float nightF = 1.0 - smoothstep(-0.10, 0.10, clamp(normalize(sky.sunDir).y, -0.2, 1.0));
     if (nightF > 0.0) {
         vec3 cdir = celestialDir(dir, sky.timeOfDay);
         col += starField(dir, cdir, sky.sunDir, sky.time, sky.milkyWay);
+        col += nebula(dir, cdir, sky.sunDir, sky.nebula, sky.nebulaColor);
         col += aurora(dir, sky.sunDir, sky.time, sky.aurora, sky.auroraColor);
         col += moonDisk(dir, sky.sunDir);
     }

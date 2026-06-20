@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <fstream>
 #include <cstring>
+#include <cstdlib>
 #include <cmath>
 #include <memory>
 #include <functional>
@@ -21,6 +22,60 @@ static void vkCheck(VkResult r, const char* msg)
 {
     if (r != VK_SUCCESS)
         throw std::runtime_error(std::string("Vulkan: ") + msg);
+}
+
+// ─── Sky 3D noise volume bake ───────────────────────────────────────────────
+// CPU-baked RG16 volume the sky's starFbm3 (.r value noise) and worleyFbm
+// (.g cellular) sample for the volumetric clouds. Mirrors OpenGLRenderer's
+// BuildSkyNoise3D exactly — identical math — but serial nested loops instead of
+// std::execution::par_unseq (one-time init; avoids <execution>/<numeric>).
+// Tightly packed: index ((z*n+y)*n+x)*2 into the uint16_t buffer.
+static std::vector<uint16_t> BuildSkyNoise3D(int n)
+{
+    auto hash = [](glm::vec3 p) {
+        p = glm::fract(p * 0.1031f);
+        p += glm::dot(p, glm::vec3(p.z, p.y, p.x) + 31.32f);
+        return glm::fract((p.x + p.y) * p.z);
+    };
+    // Decorrelated per-cell jitter for the Worley feature points (sin-free so it is
+    // bit-deterministic across compilers — both backends bake CPU-side).
+    auto hash3 = [](glm::vec3 c) {
+        glm::vec3 p = glm::fract(c * glm::vec3(0.1031f, 0.1030f, 0.0973f));
+        p += glm::dot(p, glm::vec3(p.y, p.z, p.x) + 33.33f);
+        return glm::fract(glm::vec3((p.x + p.y) * p.z, (p.x + p.z) * p.y, (p.y + p.z) * p.x));
+    };
+    const int kWorleyGrid = 48;   // feature cells per axis across the tile
+    auto worley = [&](glm::vec3 uv) {
+        glm::vec3 pc = uv * static_cast<float>(kWorleyGrid);
+        glm::vec3 id = glm::floor(pc);
+        glm::vec3 fp = pc - id;
+        float f1 = 1e9f;
+        for (int k = -1; k <= 1; ++k)
+            for (int j = -1; j <= 1; ++j)
+                for (int i = -1; i <= 1; ++i)
+                {
+                    glm::vec3 off(static_cast<float>(i), static_cast<float>(j), static_cast<float>(k));
+                    glm::vec3 wrapped = glm::mod(id + off, static_cast<float>(kWorleyGrid)); // seamless tile
+                    glm::vec3 d = (off + hash3(wrapped)) - fp;
+                    f1 = std::min(f1, glm::dot(d, d));   // nearest feature (squared)
+                }
+        return glm::clamp(1.0f - std::sqrt(f1), 0.0f, 1.0f);
+    };
+    std::vector<uint16_t> d(static_cast<size_t>(n) * n * n * 2);
+    const float inv = 1.0f / static_cast<float>(n);
+
+    // Serial nested loops (one-time init): each voxel is fully independent.
+    for (int z = 0; z < n; ++z)
+        for (int y = 0; y < n; ++y)
+            for (int x = 0; x < n; ++x)
+            {
+                const size_t idx = ((static_cast<size_t>(z) * n + y) * n + x) * 2;
+                glm::vec3 uv((x + 0.5f) * inv, (y + 0.5f) * inv, (z + 0.5f) * inv);
+                d[idx + 0] = static_cast<uint16_t>(
+                    glm::clamp(hash(glm::vec3(x, y, z)), 0.0f, 1.0f) * 65535.0f + 0.5f);
+                d[idx + 1] = static_cast<uint16_t>(worley(uv) * 65535.0f + 0.5f);
+            }
+    return d;
 }
 
 namespace
@@ -53,8 +108,9 @@ namespace
         glm::vec3  sunColor;     float cloudCoverage;    // offset  80, 16 bytes
         glm::vec3  wind;         float time;             // offset  96, 16 bytes
         glm::vec3  auroraColor;  float aurora;           // offset 112, 16 bytes
-        float      milkyWay;     float flash;  int hasMoonTex;  float _pad; // offset 128, 16 bytes
-    }; // 144 bytes
+        float      milkyWay;     float flash;  int hasMoonTex;  float nebula; // offset 128, 16 bytes
+        glm::vec3  nebulaColor;  float _pad2;            // offset 144, 16 bytes
+    }; // 160 bytes
 
     // Debug line pass constant buffer (set=0 binding=0 in debug_line.vert).
     struct DebugUBOData
@@ -145,6 +201,17 @@ void VulkanRenderer::Shutdown()
 {
     Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: shutdown — waiting for GPU");
     if (m_device) vkDeviceWaitIdle(m_device);
+    // ImGui editor textures (logo + content-browser icons): destroy the GPU
+    // resources we retained for them. The ImGui descriptor sets are freed by
+    // ImGui's own shutdown, which the editor runs before tearing down the renderer.
+    for (auto& t : m_imguiTextures)
+    {
+        if (t.sampler) vkDestroySampler  (m_device, t.sampler, nullptr);
+        if (t.view)    vkDestroyImageView(m_device, t.view,    nullptr);
+        if (t.image)   vkDestroyImage    (m_device, t.image,   nullptr);
+        if (t.memory)  vkFreeMemory      (m_device, t.memory,  nullptr);
+    }
+    m_imguiTextures.clear();
     destroySkyPipeline();
     destroyDebugLinePipeline();
     destroyPostFXResources();
@@ -201,9 +268,11 @@ void VulkanRenderer::Shutdown()
     for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
     {
         if (m_frameFence[i])  vkDestroyFence    (m_device, m_frameFence[i],  nullptr);
-        if (m_renderDone[i])  vkDestroySemaphore(m_device, m_renderDone[i],  nullptr);
         if (m_imageReady[i])  vkDestroySemaphore(m_device, m_imageReady[i],  nullptr);
     }
+    for (VkSemaphore s : m_renderDone) if (s) vkDestroySemaphore(m_device, s, nullptr);
+    m_renderDone.clear();
+    m_imagesInFlight.clear();   // fences are owned by m_frameFence — don't destroy here
     // Scene resources
     for (auto& [id, mesh] : m_meshCache)
     {
@@ -221,12 +290,25 @@ void VulkanRenderer::Shutdown()
     destroyScenePipeline();
 
     destroyViewportResources();
+    for (auto& r : m_retiredViewports)   // flush any pending retired viewport images
+    {
+        if (r.view) vkDestroyImageView(m_device, r.view, nullptr);
+        if (r.img)  vkDestroyImage    (m_device, r.img,  nullptr);
+        if (r.mem)  vkFreeMemory       (m_device, r.mem,  nullptr);
+    }
+    m_retiredViewports.clear();
     destroyShadowResources();
     if (m_cmdPool)     vkDestroyCommandPool(m_device,   m_cmdPool,     nullptr);
     if (m_renderPass)  vkDestroyRenderPass (m_device,   m_renderPass,  nullptr);
     destroySwapchain();
     if (m_device)   vkDestroyDevice    (m_device,              nullptr);
     if (m_surface)  vkDestroySurfaceKHR(m_instance, m_surface, nullptr);
+    if (m_debugMessenger)
+    {
+        auto destroy = reinterpret_cast<PFN_vkDestroyDebugUtilsMessengerEXT>(
+            vkGetInstanceProcAddr(m_instance, "vkDestroyDebugUtilsMessengerEXT"));
+        if (destroy) destroy(m_instance, m_debugMessenger, nullptr);
+    }
     if (m_instance) vkDestroyInstance  (m_instance,            nullptr);
     Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: all resources released");
 }
@@ -235,6 +317,19 @@ void VulkanRenderer::Render()
 {
     m_wallTime = static_cast<float>(SDL_GetTicks()) * 0.001f;
     m_ssaoRanThisFrame = false;  // cleared each frame; set true only inside runSSAO()
+
+    // Free retired viewport color images once enough frames have passed (GPU done).
+    for (auto it = m_retiredViewports.begin(); it != m_retiredViewports.end(); )
+    {
+        if (--it->frames <= 0)
+        {
+            if (it->view) vkDestroyImageView(m_device, it->view, nullptr);
+            if (it->img)  vkDestroyImage    (m_device, it->img,  nullptr);
+            if (it->mem)  vkFreeMemory       (m_device, it->mem,  nullptr);
+            it = m_retiredViewports.erase(it);
+        }
+        else ++it;
+    }
 
     // Resize viewport resources if the editor requested a different size.
     if (m_viewportReqW > 0 && m_viewportReqH > 0 &&
@@ -261,6 +356,13 @@ void VulkanRenderer::Render()
     }
     if (acq != VK_SUCCESS && acq != VK_SUBOPTIMAL_KHR)
         vkCheck(acq, "vkAcquireNextImageKHR");
+
+    // This swapchain image's command buffer / present semaphore may still be in use by a
+    // PREVIOUS in-flight frame (the per-frame fence we waited above does not cover it).
+    // Wait on the fence that last used this image before reusing its resources.
+    if (m_imagesInFlight[imageIndex] != VK_NULL_HANDLE)
+        vkWaitForFences(m_device, 1, &m_imagesInFlight[imageIndex], VK_TRUE, UINT64_MAX);
+    m_imagesInFlight[imageIndex] = m_frameFence[fi];
 
     vkResetFences(m_device, 1, &m_frameFence[fi]);
 
@@ -489,13 +591,13 @@ void VulkanRenderer::Render()
     si.commandBufferCount   = 1;
     si.pCommandBuffers      = &cmd;
     si.signalSemaphoreCount = 1;
-    si.pSignalSemaphores    = &m_renderDone[fi];
+    si.pSignalSemaphores    = &m_renderDone[imageIndex];   // per-image present semaphore
     vkQueueSubmit(m_graphicsQueue, 1, &si, m_frameFence[fi]);
 
     VkPresentInfoKHR pi{};
     pi.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     pi.waitSemaphoreCount = 1;
-    pi.pWaitSemaphores    = &m_renderDone[fi];
+    pi.pWaitSemaphores    = &m_renderDone[imageIndex];     // per-image present semaphore
     pi.swapchainCount     = 1;
     pi.pSwapchains        = &m_swapchain;
     pi.pImageIndices      = &imageIndex;
@@ -537,10 +639,66 @@ void VulkanRenderer::SetVSync(bool enabled)
     Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: swapchain recreated");
 }
 
+// Validation messages → engine Logger so Vulkan API misuse is visible without a
+// debugger/external tooling (the Vulkan analog of the D3D12 InfoQueue drain).
+static VKAPI_ATTR VkBool32 VKAPI_CALL vkDebugCallback(
+    VkDebugUtilsMessageSeverityFlagBitsEXT severity,
+    VkDebugUtilsMessageTypeFlagsEXT /*types*/,
+    const VkDebugUtilsMessengerCallbackDataEXT* data, void* /*user*/)
+{
+    if (!data || !data->pMessage) return VK_FALSE;
+    const auto lvl = (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT)
+                         ? Logger::LogLevel::Error
+                     : (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT)
+                         ? Logger::LogLevel::Warning
+                         : Logger::LogLevel::Info;
+    // Only surface warnings/errors — info/verbose would flood the log.
+    if (lvl != Logger::LogLevel::Info)
+        Logger::Log(lvl, (std::string("Vulkan validation: ") + data->pMessage).c_str());
+    return VK_FALSE;
+}
+
 void VulkanRenderer::createInstance()
 {
     uint32_t extCount = 0;
     const char* const* sdlExts = SDL_Vulkan_GetInstanceExtensions(&extCount);
+
+    std::vector<const char*> exts(sdlExts, sdlExts + extCount);
+    std::vector<const char*> layers;
+
+    // GPU debug instrumentation (validation layer). TEMPORARILY forced ON while the Vulkan
+    // backend is still broken (black screen) so the user gets a validation log with zero
+    // setup. Re-gate to `_DEBUG || std::getenv("HE_GPU_DEBUG")` once Vulkan renders.
+    const bool gpuDebug = true;
+    (void)0;
+    bool haveDebugUtils = false;
+    if (gpuDebug)
+    {
+        // Enable the KHRONOS validation layer + debug-utils extension ONLY when actually
+        // present (Vulkan SDK installed), so a machine without them still initialises.
+        bool haveValidation = false;
+    {
+        uint32_t n = 0;
+        vkEnumerateInstanceLayerProperties(&n, nullptr);
+        std::vector<VkLayerProperties> props(n);
+        if (n) vkEnumerateInstanceLayerProperties(&n, props.data());
+        for (const auto& p : props)
+            if (std::strcmp(p.layerName, "VK_LAYER_KHRONOS_validation") == 0) { haveValidation = true; break; }
+
+        uint32_t en = 0;
+        vkEnumerateInstanceExtensionProperties(nullptr, &en, nullptr);
+        std::vector<VkExtensionProperties> eprops(en);
+        if (en) vkEnumerateInstanceExtensionProperties(nullptr, &en, eprops.data());
+        for (const auto& e : eprops)
+            if (std::strcmp(e.extensionName, VK_EXT_DEBUG_UTILS_EXTENSION_NAME) == 0) { haveDebugUtils = true; break; }
+    }
+    if (haveValidation) layers.push_back("VK_LAYER_KHRONOS_validation");
+    if (haveDebugUtils) exts.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+    Logger::Log(Logger::LogLevel::Info,
+        haveValidation ? "VulkanRenderer: validation layer ENABLED (HE_GPU_DEBUG)"
+                       : "VulkanRenderer: validation layer requested but NOT available");
+    }
+
     VkApplicationInfo appInfo{};
     appInfo.sType            = VK_STRUCTURE_TYPE_APPLICATION_INFO;
     appInfo.pApplicationName = "HorizonEngine";
@@ -548,9 +706,28 @@ void VulkanRenderer::createInstance()
     VkInstanceCreateInfo ci{};
     ci.sType                   = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
     ci.pApplicationInfo        = &appInfo;
-    ci.enabledExtensionCount   = extCount;
-    ci.ppEnabledExtensionNames = sdlExts;
+    ci.enabledExtensionCount   = static_cast<uint32_t>(exts.size());
+    ci.ppEnabledExtensionNames = exts.data();
+    ci.enabledLayerCount       = static_cast<uint32_t>(layers.size());
+    ci.ppEnabledLayerNames     = layers.empty() ? nullptr : layers.data();
     vkCheck(vkCreateInstance(&ci, nullptr, &m_instance), "vkCreateInstance");
+
+    if (gpuDebug && haveDebugUtils)
+    {
+        auto create = reinterpret_cast<PFN_vkCreateDebugUtilsMessengerEXT>(
+            vkGetInstanceProcAddr(m_instance, "vkCreateDebugUtilsMessengerEXT"));
+        if (create)
+        {
+            VkDebugUtilsMessengerCreateInfoEXT dci{ VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT };
+            dci.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+                                  VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+            dci.messageType     = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+                                  VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+                                  VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+            dci.pfnUserCallback = vkDebugCallback;
+            create(m_instance, &dci, nullptr, &m_debugMessenger);
+        }
+    }
 }
 
 void VulkanRenderer::createSurface()
@@ -801,12 +978,30 @@ void VulkanRenderer::createSyncObjects()
     VkSemaphoreCreateInfo sci{ VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
     VkFenceCreateInfo     fci{ VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
     fci.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+    // Per frame-in-flight: acquire semaphore + submit fence.
     for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
     {
         vkCheck(vkCreateSemaphore(m_device, &sci, nullptr, &m_imageReady[i]), "imageReady");
-        vkCheck(vkCreateSemaphore(m_device, &sci, nullptr, &m_renderDone[i]), "renderDone");
         vkCheck(vkCreateFence    (m_device, &fci, nullptr, &m_frameFence[i]), "frameFence");
     }
+    createImageSyncObjects();
+}
+
+// Present semaphores are PER SWAPCHAIN IMAGE (not per frame-in-flight): the present op
+// holds the semaphore until the image is actually scanned out, which the per-frame fence
+// does NOT track — reusing a per-frame present semaphore trips "semaphore still in use by
+// swapchain". m_imagesInFlight[img] tracks which frame's fence last used each image so we
+// can wait before reusing that image's command buffer. Recreated with the swapchain since
+// the image count can change.
+void VulkanRenderer::createImageSyncObjects()
+{
+    for (VkSemaphore s : m_renderDone) if (s) vkDestroySemaphore(m_device, s, nullptr);
+    m_renderDone.clear();
+    VkSemaphoreCreateInfo sci{ VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+    m_renderDone.resize(m_framebuffers.size());
+    for (auto& s : m_renderDone)
+        vkCheck(vkCreateSemaphore(m_device, &sci, nullptr, &s), "renderDone(perImage)");
+    m_imagesInFlight.assign(m_framebuffers.size(), VK_NULL_HANDLE);
 }
 
 void VulkanRenderer::destroySwapchain()
@@ -835,6 +1030,7 @@ void VulkanRenderer::recreateSwapchain()
     createSwapchain(static_cast<uint32_t>(w), static_cast<uint32_t>(h));
     createFramebuffers();
     createCommandBuffers();                              // pool kept, buffers reallocated
+    createImageSyncObjects();                            // image count may have changed
 }
 
 // ─── Multi-window helpers ────────────────────────────────────────────────────
@@ -1883,6 +2079,18 @@ void VulkanRenderer::destroyViewportResources()
 
 void VulkanRenderer::createViewportResources(uint32_t w, uint32_t h)
 {
+    // Retire the OLD color image/view/memory: ImGui's viewport descriptor still points at
+    // them for the CURRENT frame (the editor only updates it next frame on
+    // HasViewportResourceChanged). Destroying them now → ImGui samples a dead image → null
+    // view → GPU fault → ~2s TDR → black. Freed a few frames later by the Render() sweep.
+    if (m_viewportImage)
+    {
+        m_retiredViewports.push_back({ m_viewportImage, m_viewportView, m_viewportMemory,
+                                       static_cast<int>(k_maxFramesInFlight) + 2 });
+        m_viewportImage  = VK_NULL_HANDLE;
+        m_viewportView   = VK_NULL_HANDLE;
+        m_viewportMemory = VK_NULL_HANDLE;
+    }
     destroyViewportResources();
 
     // ── Color image (RGBA8, sampled by ImGui, written by scene render pass) ─
@@ -2275,9 +2483,29 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
 {
     if (!m_world || m_scenePipeline == VK_NULL_HANDLE || width == 0 || height == 0) return;
 
+    // Feed time-of-day so the extractor recomputes the sun/moon direction (otherwise the
+    // sky never responds to the time slider). Mirrors OpenGL/Metal.
+    m_extractor.setDayNight(m_environment.dayNightCycle, m_environment.timeOfDay,
+                            m_environment.sunColor, m_environment.sunIntensity,
+                            m_environment.moonColor, m_environment.moonIntensity,
+                            m_environment.cloudCoverage);
     m_extractor.extract(*m_world, m_renderWorld,
                         static_cast<float>(width) / static_cast<float>(height),
                         &m_editorCamera);
+
+    // Sky is independent of scene geometry — draw it before any early returns so it
+    // always renders even when the scene is empty or fully culled (otherwise the
+    // viewport falls back to the gray clear and reads as black). Mirrors the
+    // D3D12/OpenGL ordering. The render pass is already active (begun in Render());
+    // the sky pipeline uses dynamic viewport/scissor, so set them for its triangle.
+    {
+        VkViewport svp{ 0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height), 0.0f, 1.0f };
+        VkRect2D   ssc{ { 0, 0 }, { width, height } };
+        vkCmdSetViewport(cmd, 0, 1, &svp);
+        vkCmdSetScissor(cmd, 0, 1, &ssc);
+        drawSky(cmd, width, height, hdr);
+    }
+
     if (m_renderWorld.objects.empty()) return;
 
     for (RenderObject& obj : m_renderWorld.objects)
@@ -2353,9 +2581,8 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
     {
         if (io.output.id != kBackbufferTarget) return;
 
-        // Draw the procedural sky before geometry (depth writes off in sky pipeline).
-        drawSky(cmd, width, height, hdr);
-        // Restore scene pipeline + descriptor set so geometry draw uses the correct state.
+        // Sky was already drawn at the top of DrawScene (before the empty-scene early
+        // returns) so it shows even with no geometry. Re-bind scene pipeline + set.
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
             hdr && m_scenePipelineHDR ? m_scenePipelineHDR : m_scenePipeline);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_scenePipelineLayout,
@@ -2436,19 +2663,24 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skinnedPipeLayout,
                                     0, 1, &m_frameUBO[m_currentFrame].set, 0, nullptr);
 
-            constexpr int kMaxBones = 128;
-            // 128 × 64 bytes = 8192 bytes per frame slot.
+            constexpr int          kMaxBones     = 128;
+            constexpr VkDeviceSize kBoneSlotSize = 128 * sizeof(glm::mat4);
+            constexpr uint32_t     kMaxSkinnedVk = 256;
             static const glm::mat4 kIdentity(1.0f);
+            uint32_t skinnedIdx = 0;
 
             for (const SkinnedDrawCall& dc : cmds.skinnedDrawCalls())
             {
+                if (skinnedIdx >= kMaxSkinnedVk) break;
                 const GpuSkeletalMesh* smesh = resolveSkeletalMesh(dc.meshAssetId);
                 if (!smesh || !smesh->indexCount) continue;
 
-                // Upload bone matrices (pad remainder with identity).
+                // Upload bone matrices into this draw's slot of the per-frame ring buffer.
                 if (m_boneUBOPtr[m_currentFrame])
                 {
-                    auto* dst = static_cast<glm::mat4*>(m_boneUBOPtr[m_currentFrame]);
+                    auto* dst = reinterpret_cast<glm::mat4*>(
+                        static_cast<uint8_t*>(m_boneUBOPtr[m_currentFrame])
+                        + skinnedIdx * kBoneSlotSize);
                     const int boneCount = static_cast<int>(
                         std::min(dc.boneMatrices.size(), static_cast<size_t>(kMaxBones)));
                     for (int b = 0; b < boneCount; ++b)
@@ -2457,9 +2689,10 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                         dst[b] = kIdentity;
                 }
 
-                // Bind bones descriptor set at set=1.
+                // Bind bones descriptor set at set=1 with a dynamic offset into the ring buffer.
+                uint32_t dynOffset = static_cast<uint32_t>(skinnedIdx * kBoneSlotSize);
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skinnedPipeLayout,
-                                        1, 1, &m_boneDescSet[m_currentFrame], 0, nullptr);
+                                        1, 1, &m_boneDescSet[m_currentFrame], 1, &dynOffset);
 
                 // Update material UBO (same as drawDCVk).
                 if (m_matUBO)
@@ -2492,6 +2725,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                                    0, sizeof(pc2), &pc2);
 
                 vkCmdDrawIndexed(cmd, static_cast<uint32_t>(smesh->indexCount), 1, 0, 0, 0);
+                ++skinnedIdx;
             }
 
             // Restore scene pipeline and set=0 binding for any subsequent work.
@@ -2512,8 +2746,9 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
 
 void VulkanRenderer::createSkyPipeline()
 {
-    // ── Descriptor set layout: binding 0 = SkyEnv UBO, binding 1 = moon sampler ──
-    VkDescriptorSetLayoutBinding bindings[2]{};
+    // ── Descriptor set layout: binding 0 = SkyEnv UBO, binding 1 = moon sampler,
+    //    binding 2 = 3D noise volume (volumetric clouds + nebula) ──
+    VkDescriptorSetLayoutBinding bindings[3]{};
     bindings[0].binding         = 0;
     bindings[0].descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     bindings[0].descriptorCount = 1;
@@ -2522,9 +2757,13 @@ void VulkanRenderer::createSkyPipeline()
     bindings[1].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     bindings[1].descriptorCount = 1;
     bindings[1].stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
+    bindings[2].binding         = 2;
+    bindings[2].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[2].descriptorCount = 1;
+    bindings[2].stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
 
     VkDescriptorSetLayoutCreateInfo dslci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-    dslci.bindingCount = 2;
+    dslci.bindingCount = 3;
     dslci.pBindings    = bindings;
     vkCheck(vkCreateDescriptorSetLayout(m_device, &dslci, nullptr, &m_skyDSLayout),
             "sky descriptor set layout");
@@ -2536,17 +2775,149 @@ void VulkanRenderer::createSkyPipeline()
     vkCheck(vkCreatePipelineLayout(m_device, &plci, nullptr, &m_skyPipelineLayout),
             "sky pipeline layout");
 
-    // ── Descriptor pool (k_maxFramesInFlight UBOs + samplers) ───────────────
+    // ── Descriptor pool (k_maxFramesInFlight UBOs + 2 samplers/set: moon + noise) ─
     VkDescriptorPoolSize poolSizes[2]{};
     poolSizes[0].type            = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     poolSizes[0].descriptorCount = k_maxFramesInFlight;
     poolSizes[1].type            = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSizes[1].descriptorCount = k_maxFramesInFlight;
+    poolSizes[1].descriptorCount = k_maxFramesInFlight * 2;   // moon (binding 1) + noise (binding 2)
     VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
     dpci.maxSets       = k_maxFramesInFlight;
     dpci.poolSizeCount = 2;
     dpci.pPoolSizes    = poolSizes;
     vkCheck(vkCreateDescriptorPool(m_device, &dpci, nullptr, &m_skyDSPool), "sky descriptor pool");
+
+    // ── 3D noise volume (RG16: R=value hash, G=Worley) for volumetric clouds ─
+    // Baked CPU-side (mirrors OpenGL/D3D11 BuildSkyNoise3D). Created + uploaded
+    // BEFORE the per-frame descriptor loop so binding 2 references a live view.
+    {
+#ifdef NDEBUG
+        const int kNoiseN = 256;
+#else
+        const int kNoiseN = 64;
+#endif
+        std::vector<uint16_t> noise = BuildSkyNoise3D(kNoiseN);
+        const VkDeviceSize dataSize =
+            static_cast<VkDeviceSize>(kNoiseN) * kNoiseN * kNoiseN * 4; // RG16 = 4 bytes/texel
+
+        // Staging buffer (tightly packed — vkCmdCopyBufferToImage handles the layout).
+        VkBuffer       stageBuf = VK_NULL_HANDLE;
+        VkDeviceMemory stageMem = VK_NULL_HANDLE;
+        {
+            VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+            bci.size  = dataSize;
+            bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+            vkCreateBuffer(m_device, &bci, nullptr, &stageBuf);
+            VkMemoryRequirements mr;
+            vkGetBufferMemoryRequirements(m_device, stageBuf, &mr);
+            VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+            mai.allocationSize  = mr.size;
+            mai.memoryTypeIndex = findMemoryType(mr.memoryTypeBits,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            vkAllocateMemory(m_device, &mai, nullptr, &stageMem);
+            vkBindBufferMemory(m_device, stageBuf, stageMem, 0);
+            void* ptr = nullptr;
+            vkMapMemory(m_device, stageMem, 0, dataSize, 0, &ptr);
+            std::memcpy(ptr, noise.data(), static_cast<size_t>(dataSize));
+            vkUnmapMemory(m_device, stageMem);
+        }
+
+        // Device-local 3D R16G16_UNORM image.
+        VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+        ici.imageType     = VK_IMAGE_TYPE_3D;
+        ici.format        = VK_FORMAT_R16G16_UNORM;
+        ici.extent        = { static_cast<uint32_t>(kNoiseN),
+                              static_cast<uint32_t>(kNoiseN),
+                              static_cast<uint32_t>(kNoiseN) };
+        ici.mipLevels     = 1;
+        ici.arrayLayers   = 1;
+        ici.samples       = VK_SAMPLE_COUNT_1_BIT;
+        ici.tiling        = VK_IMAGE_TILING_OPTIMAL;
+        ici.usage         = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        vkCheck(vkCreateImage(m_device, &ici, nullptr, &m_skyNoiseImage), "sky noise image");
+        VkMemoryRequirements imr;
+        vkGetImageMemoryRequirements(m_device, m_skyNoiseImage, &imr);
+        VkMemoryAllocateInfo imal{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        imal.allocationSize  = imr.size;
+        imal.memoryTypeIndex = findMemoryType(imr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        vkCheck(vkAllocateMemory(m_device, &imal, nullptr, &m_skyNoiseMemory), "sky noise memory");
+        vkBindImageMemory(m_device, m_skyNoiseImage, m_skyNoiseMemory, 0);
+
+        // One-shot command buffer: UNDEFINED→TRANSFER_DST, copy, TRANSFER_DST→SHADER_READ.
+        VkCommandBufferAllocateInfo cbai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+        cbai.commandPool        = m_cmdPool;
+        cbai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cbai.commandBufferCount = 1;
+        VkCommandBuffer oneCB = VK_NULL_HANDLE;
+        vkAllocateCommandBuffers(m_device, &cbai, &oneCB);
+        VkCommandBufferBeginInfo oneBI{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+        oneBI.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(oneCB, &oneBI);
+        {
+            VkImageMemoryBarrier bar{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+            bar.oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED;
+            bar.newLayout           = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            bar.image               = m_skyNoiseImage;
+            bar.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+            bar.srcAccessMask       = 0;
+            bar.dstAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
+            vkCmdPipelineBarrier(oneCB,
+                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                0, 0, nullptr, 0, nullptr, 1, &bar);
+        }
+        VkBufferImageCopy region{};
+        region.bufferRowLength   = 0;   // tightly packed
+        region.bufferImageHeight = 0;
+        region.imageSubresource  = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        region.imageExtent       = { static_cast<uint32_t>(kNoiseN),
+                                     static_cast<uint32_t>(kNoiseN),
+                                     static_cast<uint32_t>(kNoiseN) };
+        vkCmdCopyBufferToImage(oneCB, stageBuf, m_skyNoiseImage,
+                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+        {
+            VkImageMemoryBarrier bar{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+            bar.oldLayout           = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            bar.newLayout           = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            bar.image               = m_skyNoiseImage;
+            bar.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+            bar.srcAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
+            bar.dstAccessMask       = VK_ACCESS_SHADER_READ_BIT;
+            vkCmdPipelineBarrier(oneCB,
+                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                0, 0, nullptr, 0, nullptr, 1, &bar);
+        }
+        vkEndCommandBuffer(oneCB);
+        VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+        si.commandBufferCount = 1;
+        si.pCommandBuffers    = &oneCB;
+        vkQueueSubmit(m_graphicsQueue, 1, &si, VK_NULL_HANDLE);
+        vkQueueWaitIdle(m_graphicsQueue);
+        vkFreeCommandBuffers(m_device, m_cmdPool, 1, &oneCB);
+        vkDestroyBuffer(m_device, stageBuf, nullptr);
+        vkFreeMemory(m_device, stageMem, nullptr);
+
+        // 3D image view.
+        VkImageViewCreateInfo ivci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+        ivci.image            = m_skyNoiseImage;
+        ivci.viewType         = VK_IMAGE_VIEW_TYPE_3D;
+        ivci.format           = VK_FORMAT_R16G16_UNORM;
+        ivci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        vkCheck(vkCreateImageView(m_device, &ivci, nullptr, &m_skyNoiseView), "sky noise image view");
+
+        // Linear, REPEAT-on-all-axes sampler (the bake tiles seamlessly).
+        VkSamplerCreateInfo nsci{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+        nsci.magFilter    = VK_FILTER_LINEAR;
+        nsci.minFilter    = VK_FILTER_LINEAR;
+        nsci.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        nsci.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        nsci.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        vkCheck(vkCreateSampler(m_device, &nsci, nullptr, &m_skyNoiseSampler), "sky noise sampler");
+    }
 
     // ── Per-frame UBO buffers, descriptor sets ───────────────────────────────
     for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
@@ -2574,7 +2945,7 @@ void VulkanRenderer::createSkyPipeline()
         vkCheck(vkAllocateDescriptorSets(m_device, &dsai, &m_skyUBO[i].set), "sky descriptor set");
 
         VkDescriptorBufferInfo dbi{ m_skyUBO[i].buf, 0, sizeof(SkyUBOData) };
-        VkWriteDescriptorSet wr[2]{};
+        VkWriteDescriptorSet wr[3]{};
         wr[0].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         wr[0].dstSet          = m_skyUBO[i].set;
         wr[0].dstBinding      = 0;
@@ -2593,7 +2964,18 @@ void VulkanRenderer::createSkyPipeline()
         wr[1].descriptorCount = 1;
         wr[1].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         wr[1].pImageInfo      = &dii;
-        vkUpdateDescriptorSets(m_device, 2, wr, 0, nullptr);
+        // binding 2 = baked 3D noise volume (volumetric clouds + nebula).
+        VkDescriptorImageInfo niiNoise{};
+        niiNoise.sampler     = m_skyNoiseSampler;
+        niiNoise.imageView   = m_skyNoiseView;
+        niiNoise.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        wr[2].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        wr[2].dstSet          = m_skyUBO[i].set;
+        wr[2].dstBinding      = 2;
+        wr[2].descriptorCount = 1;
+        wr[2].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        wr[2].pImageInfo      = &niiNoise;
+        vkUpdateDescriptorSets(m_device, 3, wr, 0, nullptr);
     }
 
     // ── Dummy 1×1 white moon texture (used until SetMoonTexture is called) ───
@@ -2710,6 +3092,11 @@ void VulkanRenderer::destroySkyPipeline()
     if (m_moonView)         { vkDestroyImageView(m_device, m_moonView, nullptr); m_moonView = VK_NULL_HANDLE; }
     if (m_moonImage)        { vkDestroyImage(m_device, m_moonImage, nullptr); m_moonImage = VK_NULL_HANDLE; }
     if (m_moonMemory)       { vkFreeMemory(m_device, m_moonMemory, nullptr); m_moonMemory = VK_NULL_HANDLE; }
+    // Sky 3D noise volume
+    if (m_skyNoiseSampler)  { vkDestroySampler(m_device, m_skyNoiseSampler, nullptr); m_skyNoiseSampler = VK_NULL_HANDLE; }
+    if (m_skyNoiseView)     { vkDestroyImageView(m_device, m_skyNoiseView, nullptr); m_skyNoiseView = VK_NULL_HANDLE; }
+    if (m_skyNoiseImage)    { vkDestroyImage(m_device, m_skyNoiseImage, nullptr); m_skyNoiseImage = VK_NULL_HANDLE; }
+    if (m_skyNoiseMemory)   { vkFreeMemory(m_device, m_skyNoiseMemory, nullptr); m_skyNoiseMemory = VK_NULL_HANDLE; }
 }
 
 void VulkanRenderer::drawSky(VkCommandBuffer cmd, uint32_t /*width*/, uint32_t /*height*/, bool hdr)
@@ -2726,8 +3113,10 @@ void VulkanRenderer::drawSky(VkCommandBuffer cmd, uint32_t /*width*/, uint32_t /
     sky.sunColor      = m_environment.sunColor;
     sky.cloudCoverage = m_environment.cloudCoverage;
     {
+        // Cloud drift: world-units/sec. The 0.025 factor matches the OpenGL reference
+        // (windSpeed * 0.025) — without it the clouds scroll ~40× too fast.
         const float rad = m_environment.windDirection * (3.14159265f / 180.0f);
-        sky.wind        = glm::vec3(std::sin(rad), 0.0f, std::cos(rad)) * m_environment.windSpeed;
+        sky.wind        = glm::vec3(std::sin(rad), 0.0f, std::cos(rad)) * (m_environment.windSpeed * 0.025f);
     }
     sky.time          = m_wallTime;
     sky.auroraColor   = m_environment.auroraColor;
@@ -2735,7 +3124,9 @@ void VulkanRenderer::drawSky(VkCommandBuffer cmd, uint32_t /*width*/, uint32_t /
     sky.milkyWay      = m_environment.milkyWayIntensity;
     sky.flash         = m_environment.flash;
     sky.hasMoonTex    = (m_moonImage != VK_NULL_HANDLE) ? 1 : 0;
-    sky._pad          = 0.0f;
+    sky.nebula        = m_environment.nebulaIntensity;
+    sky.nebulaColor   = m_environment.nebulaColor;
+    // sky._pad2 is left zeroed by the SkyUBOData{} value-initialisation above.
 
     if (m_skyUBO[m_currentFrame].mapped)
         std::memcpy(m_skyUBO[m_currentFrame].mapped, &sky, sizeof(sky));
@@ -3138,6 +3529,164 @@ void VulkanRenderer::SetMoonTexture(const void* rgba8Pixels, int width, int heig
         wr.pImageInfo      = &dii;
         vkUpdateDescriptorSets(m_device, 1, &wr, 0, nullptr);
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ImGui editor textures (content-browser icons + logo)
+// ─────────────────────────────────────────────────────────────────────────────
+// Mirrors SetMoonTexture's upload path (staging buffer → device-local
+// R8G8B8A8_UNORM image, UNDEFINED→TRANSFER_DST copy → SHADER_READ_ONLY, one-shot
+// command buffer + vkQueueWaitIdle) but creates its OWN linear sampler (the moon
+// path reuses m_moonSampler) and does NOT touch any scene descriptor sets. The
+// image/view/memory/sampler are retained in m_imguiTextures so they outlive the
+// VkDescriptorSet ImGui samples from; the editor's registrar (which links ImGui)
+// calls ImGui_ImplVulkan_AddTexture to build that descriptor set.
+void* VulkanRenderer::CreateImGuiTexture(const void* rgba8Pixels, int width, int height)
+{
+    if (!rgba8Pixels || width <= 0 || height <= 0 || !m_device) return nullptr;
+
+    vkDeviceWaitIdle(m_device);
+
+    const VkDeviceSize dataSize = static_cast<VkDeviceSize>(width * height * 4);
+
+    // ── Staging buffer ───────────────────────────────────────────────────────
+    VkBuffer       stageBuf  = VK_NULL_HANDLE;
+    VkDeviceMemory stageMem  = VK_NULL_HANDLE;
+    {
+        VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        bci.size  = dataSize;
+        bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        vkCreateBuffer(m_device, &bci, nullptr, &stageBuf);
+        VkMemoryRequirements mr;
+        vkGetBufferMemoryRequirements(m_device, stageBuf, &mr);
+        VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        mai.allocationSize  = mr.size;
+        mai.memoryTypeIndex = findMemoryType(mr.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        vkAllocateMemory(m_device, &mai, nullptr, &stageMem);
+        vkBindBufferMemory(m_device, stageBuf, stageMem, 0);
+        void* ptr = nullptr;
+        vkMapMemory(m_device, stageMem, 0, dataSize, 0, &ptr);
+        std::memcpy(ptr, rgba8Pixels, static_cast<size_t>(dataSize));
+        vkUnmapMemory(m_device, stageMem);
+    }
+
+    // ── Device-local RGBA8 image ─────────────────────────────────────────────
+    VkImage        image  = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+    ici.imageType     = VK_IMAGE_TYPE_2D;
+    ici.format        = VK_FORMAT_R8G8B8A8_UNORM;
+    ici.extent        = { static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1 };
+    ici.mipLevels     = 1;
+    ici.arrayLayers   = 1;
+    ici.samples       = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling        = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage         = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    vkCreateImage(m_device, &ici, nullptr, &image);
+    VkMemoryRequirements imr;
+    vkGetImageMemoryRequirements(m_device, image, &imr);
+    VkMemoryAllocateInfo imal{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    imal.allocationSize  = imr.size;
+    imal.memoryTypeIndex = findMemoryType(imr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    vkAllocateMemory(m_device, &imal, nullptr, &memory);
+    vkBindImageMemory(m_device, image, memory, 0);
+
+    // ── One-shot command buffer: transition + copy ───────────────────────────
+    VkCommandBufferAllocateInfo cbai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+    cbai.commandPool        = m_cmdPool;
+    cbai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cbai.commandBufferCount = 1;
+    VkCommandBuffer oneCB = VK_NULL_HANDLE;
+    vkAllocateCommandBuffers(m_device, &cbai, &oneCB);
+    VkCommandBufferBeginInfo oneBI{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    oneBI.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(oneCB, &oneBI);
+
+    // UNDEFINED → TRANSFER_DST
+    {
+        VkImageMemoryBarrier bar{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+        bar.oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED;
+        bar.newLayout           = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bar.image               = image;
+        bar.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        bar.srcAccessMask       = 0;
+        bar.dstAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(oneCB,
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &bar);
+    }
+
+    VkBufferImageCopy region{};
+    region.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    region.imageExtent      = { static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1 };
+    vkCmdCopyBufferToImage(oneCB, stageBuf, image,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+    // TRANSFER_DST → SHADER_READ_ONLY
+    {
+        VkImageMemoryBarrier bar{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+        bar.oldLayout           = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        bar.newLayout           = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bar.image               = image;
+        bar.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        bar.srcAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
+        bar.dstAccessMask       = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(oneCB,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &bar);
+    }
+
+    vkEndCommandBuffer(oneCB);
+    VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    si.commandBufferCount = 1;
+    si.pCommandBuffers    = &oneCB;
+    vkQueueSubmit(m_graphicsQueue, 1, &si, VK_NULL_HANDLE);
+    vkQueueWaitIdle(m_graphicsQueue);
+    vkFreeCommandBuffers(m_device, m_cmdPool, 1, &oneCB);
+
+    // Destroy staging resources.
+    vkDestroyBuffer(m_device, stageBuf, nullptr);
+    vkFreeMemory(m_device, stageMem, nullptr);
+
+    // ── Image view ───────────────────────────────────────────────────────────
+    VkImageView view = VK_NULL_HANDLE;
+    VkImageViewCreateInfo ivci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+    ivci.image            = image;
+    ivci.viewType         = VK_IMAGE_VIEW_TYPE_2D;
+    ivci.format           = VK_FORMAT_R8G8B8A8_UNORM;
+    ivci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    vkCreateImageView(m_device, &ivci, nullptr, &view);
+
+    // ── Linear sampler (mirrors the moon sampler creation) ───────────────────
+    VkSampler sampler = VK_NULL_HANDLE;
+    VkSamplerCreateInfo sci{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+    sci.magFilter    = VK_FILTER_LINEAR;
+    sci.minFilter    = VK_FILTER_LINEAR;
+    sci.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    vkCreateSampler(m_device, &sci, nullptr, &sampler);
+
+    // Retain so the resources outlive ImGui's descriptor set.
+    m_imguiTextures.push_back({ image, view, memory, sampler });
+
+    return m_imguiTexRegistrar
+        ? m_imguiTexRegistrar(reinterpret_cast<void*>(view), reinterpret_cast<void*>(sampler))
+        : nullptr;
+}
+
+void VulkanRenderer::DestroyImGuiTexture(void* /*handle*/)
+{
+    // No-op: the editor textures live until renderer shutdown, where the stored
+    // images/views/memory/samplers are destroyed (after vkDeviceWaitIdle). The
+    // ImGui VkDescriptorSet is owned by ImGui's internal pool and freed on ImGui
+    // shutdown, so there is nothing to free here.
 }
 
 void VulkanRenderer::SetSSAOSettings(const SSAOSettings& s)
@@ -3981,7 +4530,7 @@ void VulkanRenderer::createSkinnedPipeline()
     // ── Bones descriptor set layout (set=1, binding=0, VERTEX stage) ─────────
     VkDescriptorSetLayoutBinding bonesBind{};
     bonesBind.binding         = 0;
-    bonesBind.descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    bonesBind.descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
     bonesBind.descriptorCount = 1;
     bonesBind.stageFlags      = VK_SHADER_STAGE_VERTEX_BIT;
     VkDescriptorSetLayoutCreateInfo bonesDslci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
@@ -4011,7 +4560,7 @@ void VulkanRenderer::createSkinnedPipeline()
     }
 
     // ── Descriptor pool for per-frame bones sets ──────────────────────────────
-    VkDescriptorPoolSize bonePooSize{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, k_maxFramesInFlight };
+    VkDescriptorPoolSize bonePooSize{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, k_maxFramesInFlight };
     VkDescriptorPoolCreateInfo bonesPoolci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
     bonesPoolci.maxSets       = k_maxFramesInFlight;
     bonesPoolci.poolSizeCount = 1;
@@ -4022,12 +4571,16 @@ void VulkanRenderer::createSkinnedPipeline()
         return;
     }
 
-    // ── Per-frame bones UBO (128 mat4 = 8192 bytes, persistently mapped) ─────
-    constexpr VkDeviceSize kBoneUBOSize = 128 * sizeof(glm::mat4);  // 8192 bytes
+    // ── Per-frame bones UBO (256 slots × 8192 bytes = 2MB, dynamic offsets) ──
+    // Each skinned draw gets its own slot so the GPU sees the correct pose
+    // when multiple skinned meshes are drawn in one frame.
+    constexpr VkDeviceSize kBoneSlotSize  = 128 * sizeof(glm::mat4);  // 8192 bytes per draw
+    constexpr uint32_t     k_maxSkinnedVk = 256;
+    constexpr VkDeviceSize kBoneUBOTotal  = k_maxSkinnedVk * kBoneSlotSize;
     for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
     {
         VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
-        bci.size  = kBoneUBOSize;
+        bci.size  = kBoneUBOTotal;
         bci.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
         if (vkCreateBuffer(m_device, &bci, nullptr, &m_boneUBO[i]) != VK_SUCCESS)
         {
@@ -4046,7 +4599,7 @@ void VulkanRenderer::createSkinnedPipeline()
             return;
         }
         vkBindBufferMemory(m_device, m_boneUBO[i], m_boneUBOMem[i], 0);
-        vkMapMemory(m_device, m_boneUBOMem[i], 0, kBoneUBOSize, 0, &m_boneUBOPtr[i]);
+        vkMapMemory(m_device, m_boneUBOMem[i], 0, kBoneUBOTotal, 0, &m_boneUBOPtr[i]);
 
         // Allocate and write the per-frame descriptor set for the bones UBO.
         VkDescriptorSetAllocateInfo dsai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
@@ -4058,12 +4611,13 @@ void VulkanRenderer::createSkinnedPipeline()
             Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: skinned descriptor set alloc failed");
             return;
         }
-        VkDescriptorBufferInfo dbi{ m_boneUBO[i], 0, kBoneUBOSize };
+        // range = one slot; the dynamic offset selects which slot the shader reads.
+        VkDescriptorBufferInfo dbi{ m_boneUBO[i], 0, kBoneSlotSize };
         VkWriteDescriptorSet wr{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
         wr.dstSet          = m_boneDescSet[i];
         wr.dstBinding      = 0;
         wr.descriptorCount = 1;
-        wr.descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        wr.descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
         wr.pBufferInfo     = &dbi;
         vkUpdateDescriptorSets(m_device, 1, &wr, 0, nullptr);
     }
