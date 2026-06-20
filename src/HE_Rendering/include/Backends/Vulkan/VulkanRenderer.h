@@ -399,4 +399,49 @@ private:
 	float    m_ssaoIntensity= 1.5f;
 	int      m_ssaoMethod   = 0;
 	uint32_t m_ssaoW = 0, m_ssaoH = 0;
+
+	// ── GPU skeletal-mesh skinning ───────────────────────────────────────────
+	// Each skeletal mesh uploaded to the GPU gets three vertex buffers:
+	//   slot 0 — interleaved pos+norm+uv (32 bytes/vertex, matches scene.vert binding)
+	//   slot 1 — bone IDs  (uvec4, 16 bytes/vertex)
+	//   slot 2 — bone weights (vec4, 16 bytes/vertex)
+	// plus one index buffer. Textures are unused in this initial implementation
+	// (scene.frag drives material from the per-draw UBO, not a texture).
+	struct GpuSkeletalMesh {
+		VkBuffer       vb          = VK_NULL_HANDLE;  // slot 0: interleaved pos+norm+uv
+		VkDeviceMemory vbMem       = VK_NULL_HANDLE;
+		VkBuffer       boneIdVb    = VK_NULL_HANDLE;  // slot 1: uvec4 bone IDs
+		VkDeviceMemory boneIdMem   = VK_NULL_HANDLE;
+		VkBuffer       boneWgtVb   = VK_NULL_HANDLE;  // slot 2: vec4 bone weights
+		VkDeviceMemory boneWgtMem  = VK_NULL_HANDLE;
+		VkBuffer       ib          = VK_NULL_HANDLE;
+		VkDeviceMemory ibMem       = VK_NULL_HANDLE;
+		VkImageView    texView     = VK_NULL_HANDLE;  // reserved for future texture support
+		VkImage        texImage    = VK_NULL_HANDLE;
+		VkDeviceMemory texMem      = VK_NULL_HANDLE;
+		bool           hasTex      = false;
+		int            indexCount  = 0;
+	};
+
+	// Two pipelines to match the two render passes (swapchain vs. HDR RGBA16F).
+	VkPipeline            m_skinnedPipeline      = VK_NULL_HANDLE; // renderPass = m_renderPass
+	VkPipeline            m_skinnedPipelineHDR   = VK_NULL_HANDLE; // renderPass = m_postFxSceneRP
+	VkPipelineLayout      m_skinnedPipeLayout    = VK_NULL_HANDLE;
+	VkDescriptorSetLayout m_skinnedBonesDSL      = VK_NULL_HANDLE; // set=1: bones UBO
+	VkDescriptorPool      m_skinnedDescPool      = VK_NULL_HANDLE;
+
+	// Per-frame bones UBO ring (k_maxFramesInFlight slots).
+	// Holds 128 mat4s = 8192 bytes per slot. NOTE: a single-slot design means only
+	// one skinned mesh pose renders correctly per frame; later work can move to a
+	// dynamic-offset UBO to support multiple skinned meshes per frame.
+	VkBuffer              m_boneUBO[2]           = {};
+	VkDeviceMemory        m_boneUBOMem[2]        = {};
+	void*                 m_boneUBOPtr[2]        = {};
+	VkDescriptorSet       m_boneDescSet[2]       = {}; // one set per frame, bound at set=1
+
+	std::unordered_map<HE::UUID, GpuSkeletalMesh> m_skeletalMeshCache;
+
+	void                    createSkinnedPipeline();
+	const GpuSkeletalMesh*  resolveSkeletalMesh(const HE::UUID& id);
+	void                    destroySkeletalMeshCache();
 };

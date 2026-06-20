@@ -136,6 +136,7 @@ void VulkanRenderer::Initialize(HE::Window* window)
     createSkyPipeline();         Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: sky pipeline created");
     createDebugLinePipeline();   Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: debug line pipeline created");
     createSSAOPipeline();        Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: SSAO pipeline created");
+    createSkinnedPipeline();     Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: skinned pipeline created");
 	m_shaderManager = VulkanShaderManager();
 }
 
@@ -173,6 +174,19 @@ void VulkanRenderer::Shutdown()
     if (m_ssaoWhiteView)        { vkDestroyImageView     (m_device, m_ssaoWhiteView,         nullptr); m_ssaoWhiteView        = VK_NULL_HANDLE; }
     if (m_ssaoWhiteTex)         { vkDestroyImage         (m_device, m_ssaoWhiteTex,          nullptr); m_ssaoWhiteTex         = VK_NULL_HANDLE; }
     if (m_ssaoWhiteMem)         { vkFreeMemory           (m_device, m_ssaoWhiteMem,          nullptr); m_ssaoWhiteMem         = VK_NULL_HANDLE; }
+    // Skeletal mesh skinning resources
+    destroySkeletalMeshCache();
+    if (m_skinnedPipelineHDR)  { vkDestroyPipeline      (m_device, m_skinnedPipelineHDR, nullptr);  m_skinnedPipelineHDR  = VK_NULL_HANDLE; }
+    if (m_skinnedPipeline)     { vkDestroyPipeline      (m_device, m_skinnedPipeline,    nullptr);  m_skinnedPipeline     = VK_NULL_HANDLE; }
+    if (m_skinnedPipeLayout)   { vkDestroyPipelineLayout(m_device, m_skinnedPipeLayout,  nullptr);  m_skinnedPipeLayout   = VK_NULL_HANDLE; }
+    if (m_skinnedDescPool)     { vkDestroyDescriptorPool(m_device, m_skinnedDescPool,    nullptr);  m_skinnedDescPool     = VK_NULL_HANDLE; }
+    if (m_skinnedBonesDSL)     { vkDestroyDescriptorSetLayout(m_device, m_skinnedBonesDSL, nullptr); m_skinnedBonesDSL    = VK_NULL_HANDLE; }
+    for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
+    {
+        if (m_boneUBOPtr[i])  { vkUnmapMemory(m_device, m_boneUBOMem[i]); m_boneUBOPtr[i] = nullptr; }
+        if (m_boneUBO[i])     { vkDestroyBuffer(m_device, m_boneUBO[i],   nullptr); m_boneUBO[i]    = VK_NULL_HANDLE; }
+        if (m_boneUBOMem[i])  { vkFreeMemory  (m_device, m_boneUBOMem[i], nullptr); m_boneUBOMem[i] = VK_NULL_HANDLE; }
+    }
     // Destroy secondary windows first
     for (auto& [sdlWin, wd] : m_extraWindows)
         destroyWindowData(wd);
@@ -2336,6 +2350,87 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
             for (const DrawCall* dc : transparentDCs) drawDCVk(*dc);
         }
 
+        // ── Skinned mesh draw loop ────────────────────────────────────────────
+        // Runs after opaque+transparent geometry so blending and depth test are
+        // already resolved. Uses skinned.vert + scene.frag (set=0 still bound).
+        // NOTE: a single per-frame bone UBO means only the LAST skinned draw's
+        // bone pose is visible if multiple skinned meshes exist in one frame.
+        // Use a dynamic-offset UBO (4d.3+) to handle multiple poses correctly.
+        const VkPipeline skinnedPipe = hdr && m_skinnedPipelineHDR
+            ? m_skinnedPipelineHDR : m_skinnedPipeline;
+        if (skinnedPipe && !cmds.skinnedDrawCalls().empty())
+        {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, skinnedPipe);
+            // set=0 (scene.frag per-frame data) is already bound from DrawScene preamble.
+            // Re-bind it here because the sky / transparent passes may have changed state.
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skinnedPipeLayout,
+                                    0, 1, &m_frameUBO[m_currentFrame].set, 0, nullptr);
+
+            constexpr int kMaxBones = 128;
+            // 128 × 64 bytes = 8192 bytes per frame slot.
+            static const glm::mat4 kIdentity(1.0f);
+
+            for (const SkinnedDrawCall& dc : cmds.skinnedDrawCalls())
+            {
+                const GpuSkeletalMesh* smesh = resolveSkeletalMesh(dc.meshAssetId);
+                if (!smesh || !smesh->indexCount) continue;
+
+                // Upload bone matrices (pad remainder with identity).
+                if (m_boneUBOPtr[m_currentFrame])
+                {
+                    auto* dst = static_cast<glm::mat4*>(m_boneUBOPtr[m_currentFrame]);
+                    const int boneCount = static_cast<int>(
+                        std::min(dc.boneMatrices.size(), static_cast<size_t>(kMaxBones)));
+                    for (int b = 0; b < boneCount; ++b)
+                        dst[b] = dc.boneMatrices[b];
+                    for (int b = boneCount; b < kMaxBones; ++b)
+                        dst[b] = kIdentity;
+                }
+
+                // Bind bones descriptor set at set=1.
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skinnedPipeLayout,
+                                        1, 1, &m_boneDescSet[m_currentFrame], 0, nullptr);
+
+                // Update material UBO (same as drawDCVk).
+                if (m_matUBO)
+                {
+                    struct MatData { float r,g,b,met; float rough,opacity; float pad[2]; } md{
+                        dc.baseColor.r, dc.baseColor.g, dc.baseColor.b, dc.metallic,
+                        dc.roughness, dc.opacity
+                    };
+                    vkCmdUpdateBuffer(cmd, m_matUBO, 0, sizeof(md), &md);
+                    VkBufferMemoryBarrier bar{ VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER };
+                    bar.srcAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
+                    bar.dstAccessMask       = VK_ACCESS_UNIFORM_READ_BIT;
+                    bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    bar.buffer = m_matUBO; bar.offset = 0; bar.size = VK_WHOLE_SIZE;
+                    vkCmdPipelineBarrier(cmd,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                        0, 0, nullptr, 1, &bar, 0, nullptr);
+                }
+
+                // Bind the three vertex buffer slots and index buffer.
+                const VkBuffer    vbs[3]     = { smesh->vb, smesh->boneIdVb, smesh->boneWgtVb };
+                const VkDeviceSize offsets[3] = { 0, 0, 0 };
+                vkCmdBindVertexBuffers(cmd, 0, 3, vbs, offsets);
+                vkCmdBindIndexBuffer(cmd, smesh->ib, 0, VK_INDEX_TYPE_UINT32);
+
+                // Push constants: MVP + model (same as drawDCVk).
+                PushConstants pc2{ viewProj * dc.transform, dc.transform };
+                vkCmdPushConstants(cmd, m_skinnedPipeLayout, VK_SHADER_STAGE_VERTEX_BIT,
+                                   0, sizeof(pc2), &pc2);
+
+                vkCmdDrawIndexed(cmd, static_cast<uint32_t>(smesh->indexCount), 1, 0, 0, 0);
+            }
+
+            // Restore scene pipeline and set=0 binding for any subsequent work.
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                hdr && m_scenePipelineHDR ? m_scenePipelineHDR : m_scenePipeline);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_scenePipelineLayout,
+                                    0, 1, &m_frameUBO[m_currentFrame].set, 0, nullptr);
+        }
+
         // Debug lines on top of opaque+transparent geometry, before post-process.
         drawDebugLines(cmd, viewProj, hdr);
     });
@@ -3805,4 +3900,313 @@ void VulkanRenderer::runSSAO(VkCommandBuffer cmd, uint32_t w, uint32_t h)
     // ssaoBlurRT transitions to SHADER_READ_ONLY via renderpass finalLayout.
     // It is now safe for the scene pass to sample it at binding=3.
     m_ssaoRanThisFrame = true;  // blurRT is valid; DrawScene will enable AO sampling
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GPU skeletal-mesh skinning
+// ─────────────────────────────────────────────────────────────────────────────
+
+void VulkanRenderer::createSkinnedPipeline()
+{
+    // ── Bones descriptor set layout (set=1, binding=0, VERTEX stage) ─────────
+    VkDescriptorSetLayoutBinding bonesBind{};
+    bonesBind.binding         = 0;
+    bonesBind.descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    bonesBind.descriptorCount = 1;
+    bonesBind.stageFlags      = VK_SHADER_STAGE_VERTEX_BIT;
+    VkDescriptorSetLayoutCreateInfo bonesDslci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+    bonesDslci.bindingCount = 1;
+    bonesDslci.pBindings    = &bonesBind;
+    if (vkCreateDescriptorSetLayout(m_device, &bonesDslci, nullptr, &m_skinnedBonesDSL) != VK_SUCCESS)
+    {
+        Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: skinned bones DSL creation failed");
+        return;
+    }
+
+    // ── Pipeline layout: set=0 (scene.frag data) + set=1 (bones) + push const ─
+    VkDescriptorSetLayout sets[2] = { m_sceneSetLayout, m_skinnedBonesDSL };
+    VkPushConstantRange pcr{};
+    pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    pcr.offset     = 0;
+    pcr.size       = sizeof(PushConstants);
+    VkPipelineLayoutCreateInfo plci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    plci.setLayoutCount         = 2;
+    plci.pSetLayouts            = sets;
+    plci.pushConstantRangeCount = 1;
+    plci.pPushConstantRanges    = &pcr;
+    if (vkCreatePipelineLayout(m_device, &plci, nullptr, &m_skinnedPipeLayout) != VK_SUCCESS)
+    {
+        Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: skinned pipeline layout failed");
+        return;
+    }
+
+    // ── Descriptor pool for per-frame bones sets ──────────────────────────────
+    VkDescriptorPoolSize bonePooSize{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, k_maxFramesInFlight };
+    VkDescriptorPoolCreateInfo bonesPoolci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+    bonesPoolci.maxSets       = k_maxFramesInFlight;
+    bonesPoolci.poolSizeCount = 1;
+    bonesPoolci.pPoolSizes    = &bonePooSize;
+    if (vkCreateDescriptorPool(m_device, &bonesPoolci, nullptr, &m_skinnedDescPool) != VK_SUCCESS)
+    {
+        Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: skinned descriptor pool failed");
+        return;
+    }
+
+    // ── Per-frame bones UBO (128 mat4 = 8192 bytes, persistently mapped) ─────
+    constexpr VkDeviceSize kBoneUBOSize = 128 * sizeof(glm::mat4);  // 8192 bytes
+    for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
+    {
+        VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        bci.size  = kBoneUBOSize;
+        bci.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+        if (vkCreateBuffer(m_device, &bci, nullptr, &m_boneUBO[i]) != VK_SUCCESS)
+        {
+            Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: bone UBO buffer failed");
+            return;
+        }
+        VkMemoryRequirements req{};
+        vkGetBufferMemoryRequirements(m_device, m_boneUBO[i], &req);
+        VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        mai.allocationSize  = req.size;
+        mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if (vkAllocateMemory(m_device, &mai, nullptr, &m_boneUBOMem[i]) != VK_SUCCESS)
+        {
+            Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: bone UBO memory failed");
+            return;
+        }
+        vkBindBufferMemory(m_device, m_boneUBO[i], m_boneUBOMem[i], 0);
+        vkMapMemory(m_device, m_boneUBOMem[i], 0, kBoneUBOSize, 0, &m_boneUBOPtr[i]);
+
+        // Allocate and write the per-frame descriptor set for the bones UBO.
+        VkDescriptorSetAllocateInfo dsai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+        dsai.descriptorPool     = m_skinnedDescPool;
+        dsai.descriptorSetCount = 1;
+        dsai.pSetLayouts        = &m_skinnedBonesDSL;
+        if (vkAllocateDescriptorSets(m_device, &dsai, &m_boneDescSet[i]) != VK_SUCCESS)
+        {
+            Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: skinned descriptor set alloc failed");
+            return;
+        }
+        VkDescriptorBufferInfo dbi{ m_boneUBO[i], 0, kBoneUBOSize };
+        VkWriteDescriptorSet wr{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+        wr.dstSet          = m_boneDescSet[i];
+        wr.dstBinding      = 0;
+        wr.descriptorCount = 1;
+        wr.descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        wr.pBufferInfo     = &dbi;
+        vkUpdateDescriptorSets(m_device, 1, &wr, 0, nullptr);
+    }
+
+    // ── Shaders: skinned.vert.spv + scene.frag.spv ───────────────────────────
+    VkShaderModule vs = loadShaderModule("skinned.vert.spv");
+    VkShaderModule fs = loadShaderModule("scene.frag.spv");
+    if (vs == VK_NULL_HANDLE || fs == VK_NULL_HANDLE)
+    {
+        Logger::Log(Logger::LogLevel::Warning,
+            "VulkanRenderer: skinned.vert.spv or scene.frag.spv not found — skinned draws will be skipped");
+        if (vs) vkDestroyShaderModule(m_device, vs, nullptr);
+        if (fs) vkDestroyShaderModule(m_device, fs, nullptr);
+        return;
+    }
+
+    VkPipelineShaderStageCreateInfo stages[2]{};
+    stages[0].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage  = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = vs;
+    stages[0].pName  = "main";
+    stages[1].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[1].stage  = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = fs;
+    stages[1].pName  = "main";
+
+    // ── Vertex input: 3 bindings ──────────────────────────────────────────────
+    //   slot 0 — interleaved pos(12) + norm(12) + uv(8)  = 32 bytes/vertex
+    //   slot 1 — bone IDs:     uvec4 = 16 bytes/vertex
+    //   slot 2 — bone weights: vec4  = 16 bytes/vertex
+    VkVertexInputBindingDescription bindings[3] = {
+        { 0, 32u,                  VK_VERTEX_INPUT_RATE_VERTEX },
+        { 1, 4u * sizeof(uint32_t), VK_VERTEX_INPUT_RATE_VERTEX },
+        { 2, 4u * sizeof(float),   VK_VERTEX_INPUT_RATE_VERTEX },
+    };
+    VkVertexInputAttributeDescription attrs[5] = {
+        { 0, 0, VK_FORMAT_R32G32B32_SFLOAT,    0  },   // aPos
+        { 1, 0, VK_FORMAT_R32G32B32_SFLOAT,    12 },   // aNormal
+        { 2, 0, VK_FORMAT_R32G32_SFLOAT,       24 },   // aUV
+        { 3, 1, VK_FORMAT_R32G32B32A32_UINT,   0  },   // aBoneIds
+        { 4, 2, VK_FORMAT_R32G32B32A32_SFLOAT, 0  },   // aBoneWgts
+    };
+    VkPipelineVertexInputStateCreateInfo vi{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+    vi.vertexBindingDescriptionCount   = 3;
+    vi.pVertexBindingDescriptions      = bindings;
+    vi.vertexAttributeDescriptionCount = 5;
+    vi.pVertexAttributeDescriptions    = attrs;
+
+    // ── Remaining pipeline state (mirrors createScenePipeline) ───────────────
+    VkPipelineInputAssemblyStateCreateInfo ia{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    VkPipelineViewportStateCreateInfo vp{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+    vp.viewportCount = 1; vp.scissorCount = 1;
+
+    VkPipelineRasterizationStateCreateInfo rs{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+    rs.polygonMode = VK_POLYGON_MODE_FILL;
+    rs.cullMode    = VK_CULL_MODE_NONE;
+    rs.frontFace   = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rs.lineWidth   = 1.0f;
+
+    VkPipelineMultisampleStateCreateInfo ms{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineDepthStencilStateCreateInfo ds{ VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
+    ds.depthTestEnable  = VK_TRUE;
+    ds.depthWriteEnable = VK_TRUE;
+    ds.depthCompareOp   = VK_COMPARE_OP_LESS;
+
+    VkPipelineColorBlendAttachmentState cba{};
+    cba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT
+                       | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    VkPipelineColorBlendStateCreateInfo cb{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+    cb.attachmentCount = 1;
+    cb.pAttachments    = &cba;
+
+    VkDynamicState dynStates[2] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+    VkPipelineDynamicStateCreateInfo dyn{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+    dyn.dynamicStateCount = 2;
+    dyn.pDynamicStates    = dynStates;
+
+    VkGraphicsPipelineCreateInfo pci{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+    pci.stageCount          = 2;
+    pci.pStages             = stages;
+    pci.pVertexInputState   = &vi;
+    pci.pInputAssemblyState = &ia;
+    pci.pViewportState      = &vp;
+    pci.pRasterizationState = &rs;
+    pci.pMultisampleState   = &ms;
+    pci.pDepthStencilState  = &ds;
+    pci.pColorBlendState    = &cb;
+    pci.pDynamicState       = &dyn;
+    pci.layout              = m_skinnedPipeLayout;
+    pci.renderPass          = m_renderPass;
+    pci.subpass             = 0;
+    if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &m_skinnedPipeline) != VK_SUCCESS)
+        Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: skinned pipeline creation failed");
+
+    // ── HDR variant (renderPass = m_postFxSceneRP, RGBA16F) ──────────────────
+    if (m_postFxSceneRP != VK_NULL_HANDLE)
+    {
+        VkGraphicsPipelineCreateInfo hdrPci = pci;
+        hdrPci.renderPass = m_postFxSceneRP;
+        if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &hdrPci, nullptr, &m_skinnedPipelineHDR) != VK_SUCCESS)
+            Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: skinned HDR pipeline creation failed");
+    }
+
+    vkDestroyShaderModule(m_device, vs, nullptr);
+    vkDestroyShaderModule(m_device, fs, nullptr);
+}
+
+const VulkanRenderer::GpuSkeletalMesh*
+VulkanRenderer::resolveSkeletalMesh(const HE::UUID& id)
+{
+    if (id == HE::UUID{} || !m_contentManager) return nullptr;
+    if (auto it = m_skeletalMeshCache.find(id); it != m_skeletalMeshCache.end())
+        return &it->second;
+
+    const SkeletalMeshAsset* asset = m_contentManager->getSkeletalMesh(id);
+    if (!asset || asset->vertices.empty() || asset->indices.empty()) return nullptr;
+
+    const size_t vertexCount = asset->vertices.size() / 3;
+
+    // Slot 0: interleaved pos + norm + uv (32 bytes/vertex), same layout as scene.vert.
+    std::vector<float> interleaved;
+    interleaved.reserve(vertexCount * 8);
+    for (size_t i = 0; i < vertexCount; ++i)
+    {
+        interleaved.insert(interleaved.end(),
+            { asset->vertices[i*3+0], asset->vertices[i*3+1], asset->vertices[i*3+2] });
+        if (i * 3 + 2 < asset->normals.size())
+            interleaved.insert(interleaved.end(),
+                { asset->normals[i*3+0], asset->normals[i*3+1], asset->normals[i*3+2] });
+        else
+            interleaved.insert(interleaved.end(), { 0.0f, 0.0f, 0.0f });
+        if (i * 2 + 1 < asset->uvs.size())
+            interleaved.insert(interleaved.end(), { asset->uvs[i*2+0], asset->uvs[i*2+1] });
+        else
+            interleaved.insert(interleaved.end(), { 0.0f, 0.0f });
+    }
+
+    // Slot 1: bone IDs (flat uint32 array, 4 per vertex).
+    // Pad to vertexCount*4 entries with zeros if the asset is short.
+    std::vector<uint32_t> boneIds(vertexCount * 4, 0u);
+    {
+        const size_t copy = std::min(asset->boneIDs.size(), vertexCount * 4);
+        std::copy_n(asset->boneIDs.begin(), copy, boneIds.begin());
+    }
+
+    // Slot 2: bone weights (flat float array, 4 per vertex).
+    std::vector<float> boneWgts(vertexCount * 4, 0.0f);
+    {
+        const size_t copy = std::min(asset->boneWeights.size(), vertexCount * 4);
+        std::copy_n(asset->boneWeights.begin(), copy, boneWgts.begin());
+    }
+
+    // Helper: create a host-visible/coherent buffer and memcpy data into it.
+    auto makeHostBuf = [&](VkDeviceSize size, VkBufferUsageFlags usage,
+                            const void* data, VkBuffer& buf, VkDeviceMemory& mem) -> bool
+    {
+        VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        bci.size  = size;
+        bci.usage = usage;
+        if (vkCreateBuffer(m_device, &bci, nullptr, &buf) != VK_SUCCESS) return false;
+        VkMemoryRequirements req{};
+        vkGetBufferMemoryRequirements(m_device, buf, &req);
+        VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        mai.allocationSize  = req.size;
+        mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if (vkAllocateMemory(m_device, &mai, nullptr, &mem) != VK_SUCCESS) return false;
+        vkBindBufferMemory(m_device, buf, mem, 0);
+        void* p = nullptr;
+        vkMapMemory(m_device, mem, 0, size, 0, &p);
+        std::memcpy(p, data, static_cast<size_t>(size));
+        vkUnmapMemory(m_device, mem);
+        return true;
+    };
+
+    GpuSkeletalMesh sm;
+    bool ok = true;
+    ok = ok && makeHostBuf(interleaved.size() * sizeof(float), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                           interleaved.data(), sm.vb, sm.vbMem);
+    ok = ok && makeHostBuf(boneIds.size()  * sizeof(uint32_t), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                           boneIds.data(),  sm.boneIdVb, sm.boneIdMem);
+    ok = ok && makeHostBuf(boneWgts.size() * sizeof(float),    VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                           boneWgts.data(), sm.boneWgtVb, sm.boneWgtMem);
+    ok = ok && makeHostBuf(asset->indices.size() * sizeof(uint32_t), VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                           asset->indices.data(), sm.ib, sm.ibMem);
+    if (!ok)
+    {
+        Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: resolveSkeletalMesh buffer creation failed");
+        // Partial cleanup: destroy whatever was created before the failure.
+        if (sm.vb)       { vkDestroyBuffer(m_device, sm.vb,       nullptr); vkFreeMemory(m_device, sm.vbMem,      nullptr); }
+        if (sm.boneIdVb) { vkDestroyBuffer(m_device, sm.boneIdVb, nullptr); vkFreeMemory(m_device, sm.boneIdMem,  nullptr); }
+        if (sm.boneWgtVb){ vkDestroyBuffer(m_device, sm.boneWgtVb,nullptr); vkFreeMemory(m_device, sm.boneWgtMem, nullptr); }
+        if (sm.ib)       { vkDestroyBuffer(m_device, sm.ib,       nullptr); vkFreeMemory(m_device, sm.ibMem,      nullptr); }
+        return nullptr;
+    }
+
+    sm.indexCount = static_cast<int>(asset->indices.size());
+    return &m_skeletalMeshCache.emplace(id, sm).first->second;
+}
+
+void VulkanRenderer::destroySkeletalMeshCache()
+{
+    for (auto& [id, sm] : m_skeletalMeshCache)
+    {
+        if (sm.vb)        { vkDestroyBuffer(m_device, sm.vb,        nullptr); vkFreeMemory(m_device, sm.vbMem,       nullptr); }
+        if (sm.boneIdVb)  { vkDestroyBuffer(m_device, sm.boneIdVb,  nullptr); vkFreeMemory(m_device, sm.boneIdMem,   nullptr); }
+        if (sm.boneWgtVb) { vkDestroyBuffer(m_device, sm.boneWgtVb, nullptr); vkFreeMemory(m_device, sm.boneWgtMem,  nullptr); }
+        if (sm.ib)        { vkDestroyBuffer(m_device, sm.ib,        nullptr); vkFreeMemory(m_device, sm.ibMem,        nullptr); }
+        // texImage/texView/texMem reserved for future texture support; hasTex is always false here.
+    }
+    m_skeletalMeshCache.clear();
 }
