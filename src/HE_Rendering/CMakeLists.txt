@@ -81,7 +81,10 @@ if(HE_VULKAN_ENABLED)
         set(HE_VULKAN_SPV "")
         foreach(stage scene.vert scene.frag scene_shadow.vert
                       postfx.vert postfx_tonemap.frag postfx_fxaa.frag
-                      postfx_bloom_bright.frag postfx_bloom_blur.frag)
+                      postfx_bloom_bright.frag postfx_bloom_blur.frag
+                      sky.vert sky.frag
+                      debug_line.vert debug_line.frag
+                      ssao_pos.vert ssao_pos.frag ssao.frag ssao_blur.frag)
             set(src "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${stage}")
             set(dst "${HE_SHADER_OUT_DIR}/${stage}.spv")
             if(GLSLC_EXECUTABLE MATCHES "glslangValidator")

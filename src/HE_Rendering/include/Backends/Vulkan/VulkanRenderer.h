@@ -329,4 +329,72 @@ private:
 	VkPipeline            m_debugPipeline        = VK_NULL_HANDLE;
 	VkPipeline            m_debugPipelineHDR     = VK_NULL_HANDLE;
 	std::vector<DebugLine> m_debugLines;
+
+	// ── SSAO (screen-space ambient occlusion) ───────────────────────────────
+	// Three render passes: (1) view-space position prepass, (2) SSAO compute,
+	// (3) box blur.  All run before the scene HDR pass each frame.
+	void createSSAOPipeline();
+	void createSSAOTargets(uint32_t w, uint32_t h);
+	void destroySSAOTargets();
+	void runSSAO(VkCommandBuffer cmd, uint32_t w, uint32_t h);
+
+	// Render-target bundle: color image + optional depth + framebuffer.
+	struct SSAORenderTarget {
+		VkImage        image  = VK_NULL_HANDLE;
+		VkDeviceMemory memory = VK_NULL_HANDLE;
+		VkImageView    view   = VK_NULL_HANDLE;
+		VkFramebuffer  fb     = VK_NULL_HANDLE;
+	};
+	SSAORenderTarget m_ssaoPosRT;    // RGBA16F: view-space position (color)
+	SSAORenderTarget m_ssaoPosDepth; // D16_UNORM: depth for position prepass
+	SSAORenderTarget m_ssaoRT;       // R8_UNORM: raw occlusion
+	SSAORenderTarget m_ssaoBlurRT;   // R8_UNORM: blurred occlusion (bound to scene set)
+
+	VkRenderPass m_ssaoPosRenderPass  = VK_NULL_HANDLE; // color(RGBA16F) + depth(D16)
+	VkRenderPass m_ssaoRenderPass     = VK_NULL_HANDLE; // fullscreen AO pass  (R8)
+	VkRenderPass m_ssaoBlurRenderPass = VK_NULL_HANDLE; // fullscreen blur pass (R8)
+
+	// Position prepass: push-constant layout (reuses scene m_scenePipelineLayout).
+	VkPipeline   m_ssaoPosGfxPipeline  = VK_NULL_HANDLE;
+
+	// SSAO fullscreen pass descriptors (set=0: UBO + posRT + noise).
+	VkDescriptorSetLayout m_ssaoDescLayout     = VK_NULL_HANDLE;
+	VkPipelineLayout      m_ssaoPipeLayout     = VK_NULL_HANDLE;
+	VkPipeline            m_ssaoGfxPipeline    = VK_NULL_HANDLE;
+
+	// Blur fullscreen pass descriptors (set=0: AO input sampler).
+	VkDescriptorSetLayout m_ssaoBlurDescLayout = VK_NULL_HANDLE;
+	VkPipelineLayout      m_ssaoBlurPipeLayout = VK_NULL_HANDLE;
+	VkPipeline            m_ssaoBlurGfxPipeline= VK_NULL_HANDLE;
+
+	// Shared descriptor pool for SSAO + blur sets.
+	VkDescriptorPool  m_ssaoDescPool    = VK_NULL_HANDLE;
+	VkDescriptorSet   m_ssaoDescSet     = VK_NULL_HANDLE;
+	VkDescriptorSet   m_ssaoBlurDescSet = VK_NULL_HANDLE;
+
+	// SSAO UBO: SSAOCB (608 bytes: mat4 + vec4 + vec4 + vec4[32]).
+	VkBuffer       m_ssaoUBO    = VK_NULL_HANDLE;
+	VkDeviceMemory m_ssaoUBOMem = VK_NULL_HANDLE;
+	void*          m_ssaoUBOPtr = nullptr;
+
+	// 4x4 rotation noise texture (RGBA32F, NEAREST, REPEAT).
+	VkImage        m_ssaoNoiseTex     = VK_NULL_HANDLE;
+	VkDeviceMemory m_ssaoNoiseMem     = VK_NULL_HANDLE;
+	VkImageView    m_ssaoNoiseView    = VK_NULL_HANDLE;
+	VkSampler      m_ssaoNoiseSampler = VK_NULL_HANDLE; // NEAREST + REPEAT
+
+	// 1x1 white R8_UNORM fallback bound at scene binding=3 when SSAO is off.
+	VkImage        m_ssaoWhiteTex  = VK_NULL_HANDLE;
+	VkDeviceMemory m_ssaoWhiteMem  = VK_NULL_HANDLE;
+	VkImageView    m_ssaoWhiteView = VK_NULL_HANDLE;
+	// Linear clamp sampler shared for all SSAO fullscreen passes.
+	VkSampler      m_ssaoSampler   = VK_NULL_HANDLE;
+
+	bool     m_ssaoReady        = false; // true once createSSAOPipeline() succeeded
+	bool     m_ssaoEnabled      = true;
+	bool     m_ssaoRanThisFrame = false; // set true by runSSAO(); cleared at top of Render()
+	float    m_ssaoRadius   = 0.5f;
+	float    m_ssaoBias     = 0.025f;
+	float    m_ssaoIntensity= 1.5f;
+	uint32_t m_ssaoW = 0, m_ssaoH = 0;
 };

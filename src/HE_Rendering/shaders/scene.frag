@@ -15,6 +15,7 @@ layout(set = 0, binding = 0) uniform Frame {
     ivec4 shadowEnabled;
     vec4  sunDir;   // xyz = sun direction
     vec4  fog;      // x=fogDensity, y=fogHeightFalloff
+    vec4  viewport; // x=W, y=H, z=ssaoEnabled(1.0), w=unused — must match FrameUBOData exactly
 } uf;
 
 layout(set = 0, binding = 1) uniform sampler2D uShadowMap;
@@ -24,6 +25,10 @@ layout(set = 0, binding = 2) uniform MatUBO {
     vec4 baseColorMet;  // rgb = baseColor, a = metallic
     vec4 roughPad;      // x = roughness, y = opacity
 } mat_ubo;
+
+// SSAO occlusion texture (1x1 white when SSAO is disabled so ao = 1.0).
+// Binding 3 must match the scene descriptor set layout in VulkanRenderer.cpp.
+layout(set = 0, binding = 3) uniform sampler2D uAO;
 
 // ── Procedural sky ────────────────────────────────────────────────────────────
 vec3 skyColor(vec3 dir, vec3 sunDir)
@@ -126,7 +131,13 @@ void main()
     vec3 kd     = (1.0 - F0) * (1.0 - met);
     vec3 ambDiff = skyColor(Nup,    uf.sunDir.xyz) * base * kd;
     vec3 ambSpec = skyColor(Rrough, uf.sunDir.xyz) * F0;
-    vec3 result  = ambDiff * 0.35 + ambSpec * (1.0 - 0.6 * rough);
+    // AO only darkens the ambient (sky IBL) terms; direct BRDF lights are unaffected.
+    // When SSAO is disabled, uf.viewport.z == 0 and we use a 1x1 white fallback texture
+    // so ao = 1.0 and the ambient result is unchanged.
+    float ao = (uf.viewport.z > 0.5)
+        ? texture(uAO, gl_FragCoord.xy / uf.viewport.xy).r
+        : 1.0;
+    vec3 result  = ao * (ambDiff * 0.35 + ambSpec * (1.0 - 0.6 * rough));
 
     for (int i = 0; i < uf.lightCount.x; ++i)
     {
