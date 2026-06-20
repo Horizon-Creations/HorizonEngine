@@ -2975,6 +2975,14 @@ void VulkanRenderer::SetMoonTexture(const void* rgba8Pixels, int width, int heig
     }
 }
 
+void VulkanRenderer::SetSSAOSettings(const SSAOSettings& s)
+{
+    m_ssaoEnabled   = s.enabled;
+    m_ssaoRadius    = s.radius;
+    m_ssaoIntensity = s.intensity;
+    m_ssaoMethod    = s.method;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // SSAO — screen-space ambient occlusion
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3721,7 +3729,7 @@ void VulkanRenderer::runSSAO(VkCommandBuffer cmd, uint32_t w, uint32_t h)
                              float(h) / float(kSSAONoiseSize), 0.0f, 0.0f);
         std::memcpy(base + 64, &noiseScale, 16);
         // [80..95]: uSSAOParams = (radius, bias, intensity, 0)
-        glm::vec4 params(m_ssaoRadius, m_ssaoBias, m_ssaoIntensity, 0.0f);
+        glm::vec4 params(m_ssaoRadius, m_ssaoBias, m_ssaoIntensity, float(m_ssaoMethod));
         std::memcpy(base + 80, &params, 16);
         // [96..607]: kernel (pre-filled in createSSAOPipeline, not changed here)
     }
