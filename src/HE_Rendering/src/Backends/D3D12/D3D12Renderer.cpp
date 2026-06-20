@@ -247,11 +247,14 @@ cbuffer PerFrame : register(b1)
     float4   uLightParams[8];
     float4x4 uLightVP;
     int4     uShadowEnabled;
-    float4   uSunDir;   // xyz = sun direction
-    float4   uFog;      // x=fogDensity, y=fogHeightFalloff
+    float4   uSunDir;    // xyz = sun direction
+    float4   uFog;       // x=fogDensity, y=fogHeightFalloff
+    float4   uViewport;  // x=W, y=H, z=ssaoEnabled
 };
 Texture2D    uShadowMap : register(t0);
+Texture2D    uAO        : register(t2);
 SamplerState uShadowSamp : register(s0);
+SamplerState uAOSampler  : register(s1);
 
 struct VSIn  { float3 pos : POSITION; float3 normal : NORMAL; float2 uv : TEXCOORD0; };
 struct VSOut { float4 clip : SV_POSITION; float3 worldPos : TEXCOORD0; float3 normal : TEXCOORD1; };
@@ -316,7 +319,8 @@ float4 PSMain(VSOut i) : SV_TARGET
     float3 kd     = (1.0f - F0) * (1.0f - met);
     float3 ambDiff = skyColor(Nup,    uSunDir.xyz) * base * kd;
     float3 ambSpec = skyColor(Rrough, uSunDir.xyz) * F0;
-    float3 result  = ambDiff * 0.35f + ambSpec * (1.0f - 0.6f * rough);
+    float  ao      = (uViewport.z > 0.5f) ? uAO.SampleLevel(uAOSampler, i.clip.xy / uViewport.xy, 0).r : 1.0f;
+    float3 result  = ao * (ambDiff * 0.35f + ambSpec * (1.0f - 0.6f * rough));
     for (int li = 0; li < uLightCount.x; ++li)
     {
         int type = (int)uLightPos[li].w;
@@ -350,6 +354,93 @@ float4 PSMain(VSOut i) : SV_TARGET
         result = lerp(result, fogCol, saturate(f));
     }
     return float4(result, uPBR.z);
+}
+)HLSL";
+
+// ─── SSAO HLSL ──────────────────────────────────────────────────────────────
+static const char* kSSAOPosHLSL12 = R"HLSL(
+cbuffer SSAOPosCB : register(b0)
+{
+    float4x4 uPosMVP;
+    float4x4 uPosModelView;
+};
+struct VSIn  { float3 pos : POSITION; float3 n : NORMAL; float2 uv : TEXCOORD0; };
+struct VSOut { float4 clip : SV_POSITION; float3 viewPos : TEXCOORD0; };
+VSOut VSPos(VSIn i)
+{
+    VSOut o;
+    o.viewPos = mul(uPosModelView, float4(i.pos, 1.0)).xyz;
+    o.clip    = mul(uPosMVP,       float4(i.pos, 1.0));
+    return o;
+}
+float4 PSPos(VSOut i) : SV_TARGET { return float4(i.viewPos, 1.0); }
+)HLSL";
+
+static const char* kSSAOHLSL12 = R"HLSL(
+Texture2D    uViewPos   : register(t0);
+Texture2D    uNoise     : register(t1);
+SamplerState uPointSamp : register(s0);
+cbuffer SSAOCB : register(b0)
+{
+    float4x4 uSSAOProj;
+    float4   uSSAONoiseScale;
+    float4   uSSAOParams;       // x=radius, y=bias, z=intensity
+    float4   uSSAOKernel[32];
+};
+struct FsIn { float4 clip : SV_POSITION; float2 uv : TEXCOORD0; };
+float4 SSAOMain(FsIn i) : SV_TARGET
+{
+    float4 pv = uViewPos.SampleLevel(uPointSamp, i.uv, 0);
+    if (pv.a < 0.5) return float4(1,1,1,1);
+    float3 P = pv.xyz;
+    float2 texel = rcp(float2(uSSAONoiseScale.xy * 4.0));
+    float3 Pr = uViewPos.SampleLevel(uPointSamp, i.uv + float2( texel.x, 0), 0).xyz;
+    float3 Pl = uViewPos.SampleLevel(uPointSamp, i.uv - float2( texel.x, 0), 0).xyz;
+    float3 Pu = uViewPos.SampleLevel(uPointSamp, i.uv + float2(0,  texel.y), 0).xyz;
+    float3 Pd = uViewPos.SampleLevel(uPointSamp, i.uv - float2(0,  texel.y), 0).xyz;
+    float3 ddx_ = (abs(Pr.z-P.z) < abs(P.z-Pl.z)) ? (Pr-P) : (P-Pl);
+    float3 ddy_ = (abs(Pd.z-P.z) < abs(P.z-Pu.z)) ? (Pd-P) : (P-Pu);
+    float3 N = normalize(cross(ddx_, ddy_));
+    if (N.z < 0.0) N = -N;
+    float3 randv = uNoise.SampleLevel(uPointSamp, i.uv * uSSAONoiseScale.xy, 0).xyz;
+    float3 T = normalize(randv - N * dot(randv, N));
+    float3 B = cross(N, T);
+    float3x3 TBN = float3x3(T, B, N);
+    float occ = 0.0;
+    float radius = uSSAOParams.x, bias = uSSAOParams.y, intensity = uSSAOParams.z;
+    for (int k = 0; k < 32; ++k)
+    {
+        float3 sp = P + mul(TBN, uSSAOKernel[k].xyz) * radius;
+        float4 clipSP = mul(uSSAOProj, float4(sp, 1.0));
+        float2 suv = float2(clipSP.x/clipSP.w * 0.5 + 0.5,
+                            0.5 - clipSP.y/clipSP.w * 0.5);
+        if (suv.x < 0 || suv.x > 1 || suv.y < 0 || suv.y > 1) continue;
+        float4 sv = uViewPos.SampleLevel(uPointSamp, suv, 0);
+        if (sv.a < 0.5) continue;
+        float3 toOcc = sv.xyz - P;
+        float above = dot(toOcc, N);
+        float rangeCheck = smoothstep(0.0, 1.0, radius / max(length(toOcc), 1e-4));
+        occ += (above > bias ? 1.0 : 0.0) * rangeCheck;
+    }
+    float ao = 1.0 - (occ / 32.0) * intensity;
+    ao = max(ao, 0.5);
+    return float4(ao, ao, ao, 1.0);
+}
+)HLSL";
+
+static const char* kSSAOBlurHLSL12 = R"HLSL(
+Texture2D    uAOInput   : register(t0);
+SamplerState uPointSamp : register(s0);
+cbuffer BlurCB : register(b0) { float2 uBlurTexel; float2 _pad; };
+struct FsIn { float4 clip : SV_POSITION; float2 uv : TEXCOORD0; };
+float4 SSAOBlurMain(FsIn i) : SV_TARGET
+{
+    float sum = 0.0;
+    for (int x = -2; x < 2; ++x)
+        for (int y = -2; y < 2; ++y)
+            sum += uAOInput.SampleLevel(uPointSamp, i.uv + float2(x,y) * uBlurTexel, 0).r;
+    float ao = sum / 16.0;
+    return float4(ao, ao, ao, 1.0);
 }
 )HLSL";
 
@@ -447,8 +538,9 @@ namespace
         glm::vec4  lightParams[8];
         glm::mat4  lightVP;
         glm::ivec4 shadowEnabled;
-        glm::vec4  sunDir;   // xyz = sun direction
-        glm::vec4  fog;      // x=fogDensity, y=fogHeightFalloff
+        glm::vec4  sunDir;     // xyz = sun direction
+        glm::vec4  fog;        // x=fogDensity, y=fogHeightFalloff
+        glm::vec4  viewport;   // x=W, y=H, z=ssaoEnabled
     };
 
     struct SkyCB {
@@ -478,6 +570,29 @@ namespace
     };
 
     UINT alignUp(UINT v, UINT a) { return (v + a - 1u) & ~(a - 1u); }
+
+    struct SsaoRng {
+        uint32_t s;
+        float next() { s = s * 1664525u + 1013904223u; return float(s >> 8) * (1.0f / 16777216.0f); }
+    };
+    static std::vector<glm::vec3> BuildSSAOKernel(int n) {
+        SsaoRng rng{ 0x9E3779B9u };
+        std::vector<glm::vec3> k(n);
+        for (int i = 0; i < n; ++i) {
+            glm::vec3 s(rng.next()*2-1, rng.next()*2-1, rng.next());
+            s = glm::normalize(s) * rng.next();
+            float t = float(i)/float(n); s *= 0.1f + 0.9f * t * t;
+            k[i] = s;
+        }
+        return k;
+    }
+    static std::vector<glm::vec3> BuildSSAONoise(int n) {
+        SsaoRng rng{ 0x2545F491u };
+        std::vector<glm::vec3> v(n);
+        for (int i = 0; i < n; ++i)
+            v[i] = glm::vec3(rng.next()*2-1, rng.next()*2-1, 0.0f);
+        return v;
+    }
 }
 
 struct D3D12RendererImpl
@@ -1212,6 +1327,80 @@ struct D3D12RendererImpl
     std::vector<uint32_t> m_sortedIndices;
     std::unordered_map<HE::UUID, GpuMesh> meshCache;
 
+    // ── Combined scene SRV heap (shadow t0, AO-blur t2, white-fallback t2) ──
+    // [0]=shadow, [1]=AO-blur, [2]=white-fallback
+    ComPtr<ID3D12DescriptorHeap> sceneSrvHeap;    // CBV_SRV_UAV shader-visible, 3 slots
+    UINT                         sceneSrvDescSize = 0;
+
+    D3D12_CPU_DESCRIPTOR_HANDLE sceneSrvCpu(UINT slot) const
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE h = sceneSrvHeap->GetCPUDescriptorHandleForHeapStart();
+        h.ptr += static_cast<SIZE_T>(slot) * sceneSrvDescSize;
+        return h;
+    }
+    D3D12_GPU_DESCRIPTOR_HANDLE sceneSrvGpu(UINT slot) const
+    {
+        D3D12_GPU_DESCRIPTOR_HANDLE h = sceneSrvHeap->GetGPUDescriptorHandleForHeapStart();
+        h.ptr += static_cast<UINT64>(slot) * sceneSrvDescSize;
+        return h;
+    }
+
+    // ── SSAO ────────────────────────────────────────────────────────────────
+    ComPtr<ID3D12PipelineState>  ssaoPosPSO;
+    ComPtr<ID3D12PipelineState>  ssaoPSO;
+    ComPtr<ID3D12PipelineState>  ssaoBlurPSO;
+    ComPtr<ID3D12RootSignature>  ssaoPosRS;
+    ComPtr<ID3D12RootSignature>  ssaoRS;
+    // Resources
+    ComPtr<ID3D12Resource>       ssaoPosRT;          // RGBA16F positions
+    ComPtr<ID3D12Resource>       ssaoPosDepth;        // D16 depth for pos prepass
+    ComPtr<ID3D12Resource>       ssaoRT;              // R8 AO
+    ComPtr<ID3D12Resource>       ssaoBlurRT;          // R8 blurred AO
+    ComPtr<ID3D12Resource>       ssaoNoiseTex;        // 4x4 RGBA32F noise
+    ComPtr<ID3D12Resource>       ssaoNoiseUpload;     // upload heap for noise
+    ComPtr<ID3D12Resource>       ssaoWhiteTex;        // 1x1 R8 white fallback
+    ComPtr<ID3D12Resource>       ssaoWhiteUpload;
+    // CBs (persistently mapped, UPLOAD heap, per-frame)
+    ComPtr<ID3D12Resource>       ssaoPosPerObjRing[k_frameCount]; // ring: k_maxDraws × 256 bytes
+    uint8_t*                     ssaoPosPerObjPtr[k_frameCount]{};
+    ComPtr<ID3D12Resource>       ssaoCB[k_frameCount];   // 768-byte: proj+noiseScale+params+kernel32
+    void*                        ssaoCBPtr[k_frameCount]{};
+    ComPtr<ID3D12Resource>       ssaoBlurCB[k_frameCount]; // 256-byte: texel
+    void*                        ssaoBlurCBPtr[k_frameCount]{};
+    // Descriptor heap for SSAO SRVs
+    ComPtr<ID3D12DescriptorHeap> ssaoSrvHeap;        // CBV_SRV_UAV shader-visible, 4 slots
+    // [0]=ssaoPosRT, [1]=ssaoNoiseTex, [2]=ssaoRT, [3]=ssaoBlurRT
+    ComPtr<ID3D12DescriptorHeap> ssaoSamplerHeap;    // SAMPLER shader-visible, 1 descriptor
+    // RTV/DSV heap for SSAO render targets
+    ComPtr<ID3D12DescriptorHeap> ssaoRtvHeap;        // 3 RTVs: [0]=pos, [1]=ao, [2]=aoBlur
+    ComPtr<ID3D12DescriptorHeap> ssaoDsvHeap;        // 1 DSV: [0]=pos depth
+    UINT                         ssaoSrvDescSize  = 0;
+    UINT                         ssaoRtvDescSize  = 0;
+    UINT                         ssaoDsvDescSize  = 0;
+    UINT                         ssaoSampDescSize = 0;
+    // CPU/GPU descriptor handles (cached after heap creation)
+    D3D12_CPU_DESCRIPTOR_HANDLE  ssaoPosRtvCpu{};
+    D3D12_CPU_DESCRIPTOR_HANDLE  ssaoRtvCpu{};
+    D3D12_CPU_DESCRIPTOR_HANDLE  ssaoBlurRtvCpu{};
+    D3D12_CPU_DESCRIPTOR_HANDLE  ssaoDsvCpu{};
+    D3D12_GPU_DESCRIPTOR_HANDLE  ssaoPosGpuSrv{};   // SSAO main pass t0
+    D3D12_GPU_DESCRIPTOR_HANDLE  ssaoNoiseGpuSrv{};  // SSAO main pass t1
+    D3D12_GPU_DESCRIPTOR_HANDLE  ssaoGpuSrv{};       // blur pass t0
+    D3D12_GPU_DESCRIPTOR_HANDLE  ssaoBlurGpuSrv{};   // scene pass / sceneSrvHeap[1]
+    D3D12_GPU_DESCRIPTOR_HANDLE  ssaoPointSamplerGpu{};
+    // Current resource states
+    D3D12_RESOURCE_STATES ssaoPosRTState  = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    D3D12_RESOURCE_STATES ssaoRTState     = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    D3D12_RESOURCE_STATES ssaoBlurRTState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    // Settings
+    float ssaoRadius    = 0.5f;
+    float ssaoBias      = 0.025f;
+    float ssaoIntensity = 1.5f;
+    bool  ssaoEnabled   = true;
+    bool  ssaoReady     = false;
+    int   ssaoW         = 0;
+    int   ssaoH         = 0;
+
     D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle(UINT index) const
     {
         D3D12_CPU_DESCRIPTOR_HANDLE h = rtvHeap->GetCPUDescriptorHandleForHeapStart();
@@ -1315,17 +1504,35 @@ struct D3D12RendererImpl
             svd.Texture2D.MipLevels     = 1;
             device->CreateShaderResourceView(shadowDepth.Get(), &svd,
                 shadowSrvHeap->GetCPUDescriptorHandleForHeapStart());
+            // Also fill slot 0 of the combined scene SRV heap (if already created).
+            if (sceneSrvHeap)
+                device->CreateShaderResourceView(shadowDepth.Get(), &svd, sceneSrvCpu(0));
         }
     }
 
     bool createPipeline()
     {
-        // Root signature: two root CBVs (b0 per-object, b1 per-frame) + an SRV
-        // table (t0, shadow map) + a static sampler (s0).
-        D3D12_DESCRIPTOR_RANGE srvRange{};
-        srvRange.RangeType          = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-        srvRange.NumDescriptors     = 1;
-        srvRange.BaseShaderRegister = 0; // t0
+        // Root signature: two root CBVs (b0 per-object, b1 per-frame) +
+        // SRV table [t0=shadow, t2=AO] (params[2]) sharing one heap +
+        // static samplers s0 (shadow, linear-clamp) + s1 (AO, point-clamp).
+        //
+        // We declare TWO descriptor ranges inside params[2]:
+        //   range0: 1 SRV at t0 (shadow)
+        //   range1: 1 SRV at t2 (AO)  -- note BaseShaderRegister=2
+        // Both ranges point into the same descriptor table (sceneSrvHeap).
+        // Layout of sceneSrvHeap: [0]=shadow(t0), [1]=AO-blur(t2), [2]=white(t2 fallback).
+        // Since t2 is at heap slot 1, we set OffsetInDescriptorsFromTableStart=1 for range1.
+        D3D12_DESCRIPTOR_RANGE srvRanges[2]{};
+        srvRanges[0].RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        srvRanges[0].NumDescriptors                    = 1;
+        srvRanges[0].BaseShaderRegister                = 0; // t0
+        srvRanges[0].RegisterSpace                     = 0;
+        srvRanges[0].OffsetInDescriptorsFromTableStart = 0; // heap slot 0
+        srvRanges[1].RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        srvRanges[1].NumDescriptors                    = 1;
+        srvRanges[1].BaseShaderRegister                = 2; // t2
+        srvRanges[1].RegisterSpace                     = 0;
+        srvRanges[1].OffsetInDescriptorsFromTableStart = 1; // heap slot 1
 
         D3D12_ROOT_PARAMETER params[3]{};
         params[0].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
@@ -1335,21 +1542,26 @@ struct D3D12RendererImpl
         params[1].Descriptor       = { 1, 0 }; // b1
         params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
         params[2].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        params[2].DescriptorTable.NumDescriptorRanges = 1;
-        params[2].DescriptorTable.pDescriptorRanges   = &srvRange;
+        params[2].DescriptorTable.NumDescriptorRanges = 2; // t0 + t2
+        params[2].DescriptorTable.pDescriptorRanges   = srvRanges;
         params[2].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
 
-        D3D12_STATIC_SAMPLER_DESC samp{};
-        samp.Filter         = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-        samp.AddressU = samp.AddressV = samp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-        samp.ShaderRegister = 0; // s0
-        samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        // s0 = shadow sampler (linear-clamp), s1 = AO sampler (point-clamp)
+        D3D12_STATIC_SAMPLER_DESC samplers[2]{};
+        samplers[0].Filter         = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+        samplers[0].AddressU = samplers[0].AddressV = samplers[0].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        samplers[0].ShaderRegister = 0; // s0
+        samplers[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        samplers[1].Filter         = D3D12_FILTER_MIN_MAG_MIP_POINT;
+        samplers[1].AddressU = samplers[1].AddressV = samplers[1].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        samplers[1].ShaderRegister = 1; // s1
+        samplers[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
         D3D12_ROOT_SIGNATURE_DESC rsd{};
         rsd.NumParameters     = 3;
         rsd.pParameters       = params;
-        rsd.NumStaticSamplers = 1;
-        rsd.pStaticSamplers   = &samp;
+        rsd.NumStaticSamplers = 2;
+        rsd.pStaticSamplers   = samplers;
         rsd.Flags             = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
         ComPtr<ID3DBlob> sig, err;
@@ -1361,6 +1573,38 @@ struct D3D12RendererImpl
         if (FAILED(device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
                    IID_PPV_ARGS(&rootSig))))
             return false;
+
+        // Build the combined scene SRV heap: [0]=shadow, [1]=AO-blur, [2]=white-fallback.
+        // Slots 1 and 2 are filled later by createSSAOPipeline (noise upload) and
+        // createSSAOTargets (actual render targets).  For now write null/white to slots 1+2
+        // so the heap is always valid.
+        {
+            sceneSrvDescSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+            D3D12_DESCRIPTOR_HEAP_DESC hd{};
+            hd.NumDescriptors = 3;
+            hd.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+            hd.Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+            if (FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&sceneSrvHeap))))
+                return false;
+            // Slot 0: shadow map SRV — createDepth() runs before createPipeline(), so fill now.
+            D3D12_SHADER_RESOURCE_VIEW_DESC nullSrv{};
+            nullSrv.Format = DXGI_FORMAT_R32_FLOAT;
+            nullSrv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            nullSrv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            nullSrv.Texture2D.MipLevels = 1;
+            if (shadowDepth)
+                device->CreateShaderResourceView(shadowDepth.Get(), &nullSrv, sceneSrvCpu(0));
+            else
+                device->CreateShaderResourceView(nullptr, &nullSrv, sceneSrvCpu(0));
+            // Slot 1 (AO-blur / white): null SRV placeholder for R8
+            D3D12_SHADER_RESOURCE_VIEW_DESC nullSrvR8{};
+            nullSrvR8.Format = DXGI_FORMAT_R8_UNORM;
+            nullSrvR8.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            nullSrvR8.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            nullSrvR8.Texture2D.MipLevels = 1;
+            device->CreateShaderResourceView(nullptr, &nullSrvR8, sceneSrvCpu(1));
+            device->CreateShaderResourceView(nullptr, &nullSrvR8, sceneSrvCpu(2));
+        }
 
         UINT flags = 0;
 #ifdef _DEBUG
@@ -1482,7 +1726,624 @@ struct D3D12RendererImpl
         }
         createSkyPipeline();
         createDebugLinePipeline();
+        createSSAOPipeline();
         return rootSig && pso;
+    }
+
+    // ── SSAO pipeline creation ───────────────────────────────────────────────
+    bool createSSAOPipeline()
+    {
+        UINT flags = 0;
+#ifdef _DEBUG
+        flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+        auto compile = [&](const char* src, const char* entry, const char* profile,
+                           ComPtr<ID3DBlob>& out) -> bool
+        {
+            ComPtr<ID3DBlob> errBlob;
+            if (FAILED(D3DCompile(src, strlen(src), entry, nullptr, nullptr,
+                                  entry, profile, flags, 0, &out, &errBlob)))
+            {
+                Logger::Log(Logger::LogLevel::Error,
+                    (std::string("D3D12 SSAO '") + entry + "' compile failed: "
+                    + (errBlob ? static_cast<const char*>(errBlob->GetBufferPointer()) : "?")).c_str());
+                return false;
+            }
+            return true;
+        };
+
+        // ── Root signature for pos prepass ───────────────────────────────────
+        // [0] CBV b0 (per-object: mvp + modelView)
+        {
+            D3D12_ROOT_PARAMETER p0{};
+            p0.ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
+            p0.Descriptor       = { 0, 0 }; // b0
+            p0.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+            D3D12_ROOT_SIGNATURE_DESC rsd{};
+            rsd.NumParameters = 1; rsd.pParameters = &p0;
+            rsd.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+            ComPtr<ID3DBlob> sig, e;
+            if (FAILED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &e)) ||
+                FAILED(device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
+                       IID_PPV_ARGS(&ssaoPosRS))))
+            { Logger::Log(Logger::LogLevel::Error, "D3D12 SSAO pos root sig failed"); return false; }
+        }
+
+        // ── Root signature for SSAO main pass and blur pass ──────────────────
+        // [0] CBV b0  (SSAO params or blur texel)
+        // [1] SRV table t0 + t1  (2 descriptors for SSAO; 1 for blur)
+        // [2] static POINT-WRAP sampler s0
+        {
+            D3D12_DESCRIPTOR_RANGE srvR{};
+            srvR.RangeType          = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+            srvR.NumDescriptors     = 2; // t0 + t1 (blur pass only uses t0 but declares 2 as max)
+            srvR.BaseShaderRegister = 0;
+            srvR.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+            D3D12_ROOT_PARAMETER ssaoParams[2]{};
+            ssaoParams[0].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
+            ssaoParams[0].Descriptor       = { 0, 0 };
+            ssaoParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+            ssaoParams[1].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            ssaoParams[1].DescriptorTable  = { 1, &srvR };
+            ssaoParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            D3D12_STATIC_SAMPLER_DESC ssaoSamp{};
+            ssaoSamp.Filter   = D3D12_FILTER_MIN_MAG_MIP_POINT;
+            ssaoSamp.AddressU = ssaoSamp.AddressV = ssaoSamp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+            ssaoSamp.ShaderRegister  = 0;
+            ssaoSamp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            D3D12_ROOT_SIGNATURE_DESC rsd{};
+            rsd.NumParameters = 2; rsd.pParameters = ssaoParams;
+            rsd.NumStaticSamplers = 1; rsd.pStaticSamplers = &ssaoSamp;
+            ComPtr<ID3DBlob> sig, e;
+            if (FAILED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &e)) ||
+                FAILED(device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
+                       IID_PPV_ARGS(&ssaoRS))))
+            { Logger::Log(Logger::LogLevel::Error, "D3D12 SSAO root sig failed"); return false; }
+        }
+
+        // ── Compile shaders ───────────────────────────────────────────────────
+        ComPtr<ID3DBlob> posvs, pops, fsVS, ssaoPS, blurPS;
+        if (!compile(kSSAOPosHLSL12,   "VSPos",         "vs_5_0", posvs))  return false;
+        if (!compile(kSSAOPosHLSL12,   "PSPos",         "ps_5_0", pops))   return false;
+        if (!compile(kFSTriangleVS12,   "main",          "vs_5_0", fsVS))   return false;
+        if (!compile(kSSAOHLSL12,       "SSAOMain",      "ps_5_0", ssaoPS)) return false;
+        if (!compile(kSSAOBlurHLSL12,   "SSAOBlurMain",  "ps_5_0", blurPS)) return false;
+
+        // ── Position prepass PSO ──────────────────────────────────────────────
+        {
+            const D3D12_INPUT_ELEMENT_DESC layout[] = {
+                { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+                { "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+                { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+            };
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+            pd.pRootSignature        = ssaoPosRS.Get();
+            pd.VS                    = { posvs->GetBufferPointer(), posvs->GetBufferSize() };
+            pd.PS                    = { pops->GetBufferPointer(),  pops->GetBufferSize() };
+            pd.InputLayout           = { layout, 3 };
+            pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+            pd.NumRenderTargets      = 1;
+            pd.RTVFormats[0]         = DXGI_FORMAT_R16G16B16A16_FLOAT;
+            pd.DSVFormat             = DXGI_FORMAT_D16_UNORM;
+            pd.SampleDesc.Count      = 1;
+            pd.SampleMask            = UINT_MAX;
+            pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+            pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+            pd.RasterizerState.DepthClipEnable = TRUE;
+            pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+            pd.DepthStencilState.DepthEnable    = TRUE;
+            pd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+            pd.DepthStencilState.DepthFunc      = D3D12_COMPARISON_FUNC_LESS;
+            if (FAILED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&ssaoPosPSO))))
+            { Logger::Log(Logger::LogLevel::Error, "D3D12 SSAO pos PSO failed"); return false; }
+        }
+
+        // ── SSAO main pass PSO (fullscreen, R8, no depth) ────────────────────
+        {
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+            pd.pRootSignature        = ssaoRS.Get();
+            pd.VS                    = { fsVS->GetBufferPointer(),   fsVS->GetBufferSize() };
+            pd.PS                    = { ssaoPS->GetBufferPointer(), ssaoPS->GetBufferSize() };
+            pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+            pd.NumRenderTargets      = 1;
+            pd.RTVFormats[0]         = DXGI_FORMAT_R8_UNORM;
+            pd.SampleDesc.Count      = 1;
+            pd.SampleMask            = UINT_MAX;
+            pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+            pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+            pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+            pd.DepthStencilState.DepthEnable = FALSE;
+            if (FAILED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&ssaoPSO))))
+            { Logger::Log(Logger::LogLevel::Error, "D3D12 SSAO PSO failed"); return false; }
+        }
+
+        // ── SSAO blur pass PSO (fullscreen, R8, no depth) ────────────────────
+        {
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+            pd.pRootSignature        = ssaoRS.Get();
+            pd.VS                    = { fsVS->GetBufferPointer(),   fsVS->GetBufferSize() };
+            pd.PS                    = { blurPS->GetBufferPointer(), blurPS->GetBufferSize() };
+            pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+            pd.NumRenderTargets      = 1;
+            pd.RTVFormats[0]         = DXGI_FORMAT_R8_UNORM;
+            pd.SampleDesc.Count      = 1;
+            pd.SampleMask            = UINT_MAX;
+            pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+            pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+            pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+            pd.DepthStencilState.DepthEnable = FALSE;
+            if (FAILED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&ssaoBlurPSO))))
+            { Logger::Log(Logger::LogLevel::Error, "D3D12 SSAO blur PSO failed"); return false; }
+        }
+
+        // ── Constant buffers (per-frame rings, persistently mapped) ──────────
+        for (UINT f = 0; f < k_frameCount; ++f)
+        {
+            // Per-object ring for pos prepass: k_maxDraws × 256 bytes
+            ssaoPosPerObjRing[f] = createUploadBuffer(
+                static_cast<UINT64>(k_maxDraws) * k_cbSlot,
+                reinterpret_cast<void**>(&ssaoPosPerObjPtr[f]));
+            // SSAO main CB: proj(64) + noiseScale(16) + params(16) + kernel32(512) = 608 → 768 bytes
+            ssaoCB[f] = createUploadBuffer(alignUp(608u, k_cbSlot),
+                reinterpret_cast<void**>(&ssaoCBPtr[f]));
+            // SSAO blur CB: texel(8) padded = 16 → 256 bytes
+            ssaoBlurCB[f] = createUploadBuffer(alignUp(16u, k_cbSlot),
+                reinterpret_cast<void**>(&ssaoBlurCBPtr[f]));
+        }
+
+        // ── Descriptor heaps ──────────────────────────────────────────────────
+        ssaoSrvDescSize  = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        ssaoRtvDescSize  = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+        ssaoDsvDescSize  = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
+        ssaoSampDescSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+
+        // SRV heap (4 slots): [0]=ssaoPosRT, [1]=ssaoNoiseTex, [2]=ssaoRT, [3]=ssaoBlurRT
+        {
+            D3D12_DESCRIPTOR_HEAP_DESC hd{};
+            hd.NumDescriptors = 4;
+            hd.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+            hd.Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+            if (FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&ssaoSrvHeap))))
+                return false;
+            // Cache GPU handles for each slot
+            auto gpuBase = ssaoSrvHeap->GetGPUDescriptorHandleForHeapStart();
+            ssaoPosGpuSrv.ptr   = gpuBase.ptr + 0 * ssaoSrvDescSize;
+            ssaoNoiseGpuSrv.ptr = gpuBase.ptr + 1 * ssaoSrvDescSize;
+            ssaoGpuSrv.ptr      = gpuBase.ptr + 2 * ssaoSrvDescSize;
+            ssaoBlurGpuSrv.ptr  = gpuBase.ptr + 3 * ssaoSrvDescSize;
+        }
+
+        // Sampler heap (1 slot): POINT WRAP
+        {
+            D3D12_DESCRIPTOR_HEAP_DESC hd{};
+            hd.NumDescriptors = 1;
+            hd.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
+            hd.Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+            if (FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&ssaoSamplerHeap))))
+                return false;
+            D3D12_SAMPLER_DESC sd{};
+            sd.Filter   = D3D12_FILTER_MIN_MAG_MIP_POINT;
+            sd.AddressU = sd.AddressV = sd.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+            sd.MaxLOD   = D3D12_FLOAT32_MAX;
+            device->CreateSampler(&sd, ssaoSamplerHeap->GetCPUDescriptorHandleForHeapStart());
+            ssaoPointSamplerGpu = ssaoSamplerHeap->GetGPUDescriptorHandleForHeapStart();
+        }
+
+        // RTV heap (3 slots): [0]=ssaoPosRT, [1]=ssaoRT, [2]=ssaoBlurRT
+        {
+            D3D12_DESCRIPTOR_HEAP_DESC hd{};
+            hd.NumDescriptors = 3;
+            hd.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+            if (FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&ssaoRtvHeap))))
+                return false;
+            auto cpuBase = ssaoRtvHeap->GetCPUDescriptorHandleForHeapStart();
+            ssaoPosRtvCpu.ptr  = cpuBase.ptr + 0 * ssaoRtvDescSize;
+            ssaoRtvCpu.ptr     = cpuBase.ptr + 1 * ssaoRtvDescSize;
+            ssaoBlurRtvCpu.ptr = cpuBase.ptr + 2 * ssaoRtvDescSize;
+        }
+
+        // DSV heap (1 slot): [0]=ssaoPosDepth
+        {
+            D3D12_DESCRIPTOR_HEAP_DESC hd{};
+            hd.NumDescriptors = 1;
+            hd.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+            if (FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&ssaoDsvHeap))))
+                return false;
+            ssaoDsvCpu = ssaoDsvHeap->GetCPUDescriptorHandleForHeapStart();
+        }
+
+        // ── Noise texture (4×4, RGBA32F) ──────────────────────────────────────
+        {
+            auto noise = BuildSSAONoise(16);
+            // Pack vec3→float4 (alpha=0)
+            std::vector<float> noiseData(16 * 4);
+            for (int i = 0; i < 16; ++i)
+            {
+                noiseData[i*4+0] = noise[i].x;
+                noiseData[i*4+1] = noise[i].y;
+                noiseData[i*4+2] = noise[i].z;
+                noiseData[i*4+3] = 0.0f;
+            }
+
+            D3D12_HEAP_PROPERTIES defHp{}; defHp.Type = D3D12_HEAP_TYPE_DEFAULT;
+            D3D12_RESOURCE_DESC td{};
+            td.Dimension        = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            td.Width            = 4;
+            td.Height           = 4;
+            td.DepthOrArraySize = 1;
+            td.MipLevels        = 1;
+            td.Format           = DXGI_FORMAT_R32G32B32A32_FLOAT;
+            td.SampleDesc.Count = 1;
+            device->CreateCommittedResource(&defHp, D3D12_HEAP_FLAG_NONE, &td,
+                D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&ssaoNoiseTex));
+
+            // Upload buffer: D3D12_TEXTURE_DATA_PITCH_ALIGNMENT aligned row pitch
+            const UINT rowPitch = alignUp(4u * 4u * sizeof(float), D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
+            const UINT64 uploadSize = static_cast<UINT64>(rowPitch) * 4;
+            D3D12_HEAP_PROPERTIES upHp{}; upHp.Type = D3D12_HEAP_TYPE_UPLOAD;
+            D3D12_RESOURCE_DESC ubd{};
+            ubd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            ubd.Width = uploadSize; ubd.Height = 1; ubd.DepthOrArraySize = 1;
+            ubd.MipLevels = 1; ubd.Format = DXGI_FORMAT_UNKNOWN;
+            ubd.SampleDesc.Count = 1; ubd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            device->CreateCommittedResource(&upHp, D3D12_HEAP_FLAG_NONE, &ubd,
+                D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&ssaoNoiseUpload));
+
+            if (ssaoNoiseUpload)
+            {
+                void* mapped = nullptr; D3D12_RANGE noRead{0,0};
+                ssaoNoiseUpload->Map(0, &noRead, &mapped);
+                if (mapped)
+                {
+                    // Fill row by row (each row = 4 texels × 4 floats = 64 bytes, padded to rowPitch)
+                    for (int row = 0; row < 4; ++row)
+                        std::memcpy(static_cast<uint8_t*>(mapped) + row * rowPitch,
+                            noiseData.data() + row * 4 * 4, 4u * 4u * sizeof(float));
+                    ssaoNoiseUpload->Unmap(0, nullptr);
+                }
+
+                // Execute a one-shot copy command
+                waitForAllFrames();
+                cmdAllocators[0]->Reset();
+                cmdList->Reset(cmdAllocators[0].Get(), nullptr);
+
+                D3D12_TEXTURE_COPY_LOCATION src2{};
+                src2.pResource = ssaoNoiseUpload.Get();
+                src2.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                src2.PlacedFootprint.Offset = 0;
+                src2.PlacedFootprint.Footprint = { DXGI_FORMAT_R32G32B32A32_FLOAT, 4, 4, 1, rowPitch };
+                D3D12_TEXTURE_COPY_LOCATION dst2{};
+                dst2.pResource = ssaoNoiseTex.Get();
+                dst2.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                dst2.SubresourceIndex = 0;
+                cmdList->CopyTextureRegion(&dst2, 0, 0, 0, &src2, nullptr);
+
+                D3D12_RESOURCE_BARRIER b{};
+                b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                b.Transition.pResource   = ssaoNoiseTex.Get();
+                b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+                b.Transition.StateAfter  = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+                b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                cmdList->ResourceBarrier(1, &b);
+                cmdList->Close();
+                ID3D12CommandList* lists[] = { cmdList.Get() };
+                cmdQueue->ExecuteCommandLists(1, lists);
+                waitForAllFrames();
+
+                // Create SRV for noise in ssaoSrvHeap[1]
+                D3D12_CPU_DESCRIPTOR_HANDLE noiseCpu = ssaoSrvHeap->GetCPUDescriptorHandleForHeapStart();
+                noiseCpu.ptr += 1 * ssaoSrvDescSize;
+                D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+                sv.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+                sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+                sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                sv.Texture2D.MipLevels = 1;
+                device->CreateShaderResourceView(ssaoNoiseTex.Get(), &sv, noiseCpu);
+            }
+        }
+
+        // ── White fallback texture (1×1, R8) ─────────────────────────────────
+        // Uploaded as a single-texel buffer then transitioned to PSR.
+        {
+            D3D12_HEAP_PROPERTIES defHp{}; defHp.Type = D3D12_HEAP_TYPE_DEFAULT;
+            D3D12_RESOURCE_DESC td{};
+            td.Dimension        = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            td.Width            = 1;
+            td.Height           = 1;
+            td.DepthOrArraySize = 1;
+            td.MipLevels        = 1;
+            td.Format           = DXGI_FORMAT_R8_UNORM;
+            td.SampleDesc.Count = 1;
+            device->CreateCommittedResource(&defHp, D3D12_HEAP_FLAG_NONE, &td,
+                D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&ssaoWhiteTex));
+
+            const UINT rowPitch = alignUp(1u, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
+            D3D12_HEAP_PROPERTIES upHp{}; upHp.Type = D3D12_HEAP_TYPE_UPLOAD;
+            D3D12_RESOURCE_DESC ubd{};
+            ubd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            ubd.Width = rowPitch; ubd.Height = 1; ubd.DepthOrArraySize = 1;
+            ubd.MipLevels = 1; ubd.Format = DXGI_FORMAT_UNKNOWN;
+            ubd.SampleDesc.Count = 1; ubd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            device->CreateCommittedResource(&upHp, D3D12_HEAP_FLAG_NONE, &ubd,
+                D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&ssaoWhiteUpload));
+
+            if (ssaoWhiteUpload && ssaoWhiteTex)
+            {
+                void* mapped = nullptr; D3D12_RANGE noRead{0,0};
+                ssaoWhiteUpload->Map(0, &noRead, &mapped);
+                if (mapped) { static_cast<uint8_t*>(mapped)[0] = 0xFF; ssaoWhiteUpload->Unmap(0, nullptr); }
+
+                waitForAllFrames();
+                cmdAllocators[0]->Reset();
+                cmdList->Reset(cmdAllocators[0].Get(), nullptr);
+
+                D3D12_TEXTURE_COPY_LOCATION src2{};
+                src2.pResource = ssaoWhiteUpload.Get();
+                src2.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                src2.PlacedFootprint.Footprint = { DXGI_FORMAT_R8_UNORM, 1, 1, 1, rowPitch };
+                D3D12_TEXTURE_COPY_LOCATION dst2{};
+                dst2.pResource = ssaoWhiteTex.Get();
+                dst2.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                dst2.SubresourceIndex = 0;
+                cmdList->CopyTextureRegion(&dst2, 0, 0, 0, &src2, nullptr);
+
+                D3D12_RESOURCE_BARRIER b{};
+                b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                b.Transition.pResource   = ssaoWhiteTex.Get();
+                b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+                b.Transition.StateAfter  = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+                b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                cmdList->ResourceBarrier(1, &b);
+                cmdList->Close();
+                ID3D12CommandList* lists[] = { cmdList.Get() };
+                cmdQueue->ExecuteCommandLists(1, lists);
+                waitForAllFrames();
+
+                // Fill sceneSrvHeap[2] (white fallback for t2 when SSAO disabled)
+                D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+                sv.Format = DXGI_FORMAT_R8_UNORM;
+                sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+                sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                sv.Texture2D.MipLevels = 1;
+                device->CreateShaderResourceView(ssaoWhiteTex.Get(), &sv, sceneSrvCpu(2));
+                // Initialize slot 1 to white as well (overwritten when SSAO targets are created)
+                device->CreateShaderResourceView(ssaoWhiteTex.Get(), &sv, sceneSrvCpu(1));
+            }
+        }
+
+        // Kernel seeds
+        auto kernel = BuildSSAOKernel(32);
+
+        // Pre-fill ssaoCBPtr[*] kernel section (proj, noiseScale, params come from runSSAO each frame)
+        for (UINT f = 0; f < k_frameCount; ++f)
+        {
+            if (!ssaoCBPtr[f]) continue;
+            // Kernel: starts at offset 64+16+16 = 96 bytes (after proj(64)+noiseScale(16)+params(16))
+            uint8_t* kptr = static_cast<uint8_t*>(ssaoCBPtr[f]) + 96;
+            for (int i = 0; i < 32; ++i)
+            {
+                glm::vec4 k4(kernel[i], 0.0f);
+                std::memcpy(kptr + i * 16, &k4, sizeof(k4));
+            }
+        }
+
+        ssaoReady = true;
+        return true;
+    }
+
+    // ── SSAO render target creation/resize ───────────────────────────────────
+    void createSSAOTargets(int w, int h)
+    {
+        waitForAllFrames();
+        ssaoPosRT.Reset(); ssaoPosDepth.Reset(); ssaoRT.Reset(); ssaoBlurRT.Reset();
+
+        D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+        auto makeRT = [&](DXGI_FORMAT fmt, UINT tw, UINT th, bool isDepth,
+                          ComPtr<ID3D12Resource>& res,
+                          D3D12_RESOURCE_STATES initState) -> bool
+        {
+            D3D12_RESOURCE_DESC rd{};
+            rd.Dimension        = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            rd.Width            = tw;
+            rd.Height           = th;
+            rd.DepthOrArraySize = 1;
+            rd.MipLevels        = 1;
+            rd.Format           = fmt;
+            rd.SampleDesc.Count = 1;
+            rd.Flags            = isDepth ? D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL
+                                          : D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+            D3D12_CLEAR_VALUE cv{};
+            cv.Format = fmt;
+            if (isDepth) { cv.DepthStencil.Depth = 1.0f; }
+            else         { cv.Color[0]=cv.Color[1]=cv.Color[2]=cv.Color[3]=1.0f; }
+            return SUCCEEDED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+                initState, &cv, IID_PPV_ARGS(&res)));
+        };
+
+        if (!makeRT(DXGI_FORMAT_R16G16B16A16_FLOAT, static_cast<UINT>(w), static_cast<UINT>(h),
+                    false, ssaoPosRT, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)) return;
+        if (!makeRT(DXGI_FORMAT_D16_UNORM, static_cast<UINT>(w), static_cast<UINT>(h),
+                    true, ssaoPosDepth, D3D12_RESOURCE_STATE_DEPTH_WRITE)) return;
+        if (!makeRT(DXGI_FORMAT_R8_UNORM, static_cast<UINT>(w), static_cast<UINT>(h),
+                    false, ssaoRT, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)) return;
+        if (!makeRT(DXGI_FORMAT_R8_UNORM, static_cast<UINT>(w), static_cast<UINT>(h),
+                    false, ssaoBlurRT, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)) return;
+
+        ssaoPosRTState  = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        ssaoRTState     = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        ssaoBlurRTState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+
+        // RTVs
+        device->CreateRenderTargetView(ssaoPosRT.Get(),  nullptr, ssaoPosRtvCpu);
+        device->CreateRenderTargetView(ssaoRT.Get(),     nullptr, ssaoRtvCpu);
+        device->CreateRenderTargetView(ssaoBlurRT.Get(), nullptr, ssaoBlurRtvCpu);
+
+        // DSV
+        D3D12_DEPTH_STENCIL_VIEW_DESC dvd{};
+        dvd.Format        = DXGI_FORMAT_D16_UNORM;
+        dvd.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+        device->CreateDepthStencilView(ssaoPosDepth.Get(), &dvd, ssaoDsvCpu);
+
+        // SRVs in ssaoSrvHeap: [0]=ssaoPosRT, [2]=ssaoRT, [3]=ssaoBlurRT
+        // (slot [1] = noise, already filled)
+        D3D12_CPU_DESCRIPTOR_HANDLE srvBase = ssaoSrvHeap->GetCPUDescriptorHandleForHeapStart();
+        {
+            D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+            sv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+            sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            sv.Texture2D.MipLevels = 1;
+            D3D12_CPU_DESCRIPTOR_HANDLE h0 = srvBase; h0.ptr += 0 * ssaoSrvDescSize;
+            device->CreateShaderResourceView(ssaoPosRT.Get(), &sv, h0);
+        }
+        {
+            D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+            sv.Format = DXGI_FORMAT_R8_UNORM;
+            sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            sv.Texture2D.MipLevels = 1;
+            D3D12_CPU_DESCRIPTOR_HANDLE h2 = srvBase; h2.ptr += 2 * ssaoSrvDescSize;
+            D3D12_CPU_DESCRIPTOR_HANDLE h3 = srvBase; h3.ptr += 3 * ssaoSrvDescSize;
+            device->CreateShaderResourceView(ssaoRT.Get(),     &sv, h2);
+            device->CreateShaderResourceView(ssaoBlurRT.Get(), &sv, h3);
+        }
+
+        // Also update sceneSrvHeap[1] to point to ssaoBlurRT (the AO result bound at t2)
+        {
+            D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+            sv.Format = DXGI_FORMAT_R8_UNORM;
+            sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            sv.Texture2D.MipLevels = 1;
+            device->CreateShaderResourceView(ssaoBlurRT.Get(), &sv, sceneSrvCpu(1));
+        }
+
+        ssaoW = w; ssaoH = h;
+    }
+
+    // ── SSAO 3-pass execution (called each frame before geometry) ────────────
+    void runSSAO(ID3D12GraphicsCommandList* cl, UINT fi,
+                 const std::vector<const DrawCall*>& opaqueDCs,
+                 const glm::mat4& view, const glm::mat4& proj,
+                 const glm::mat4& viewProj,
+                 int w, int h,
+                 ContentManager* cm)
+    {
+        if (!ssaoReady || !ssaoPosRT) return;
+
+        // ── Pass 1: position prepass ────────────────────────────────────────
+        barrier12(cl, ssaoPosRT.Get(), ssaoPosRTState, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        ssaoPosRTState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+
+        const float clearBlack[4] = { 0,0,0,0 };
+        const float clearWhite[4] = { 1,1,1,1 };
+        cl->ClearRenderTargetView(ssaoPosRtvCpu, clearBlack, 0, nullptr);
+        cl->ClearDepthStencilView(ssaoDsvCpu, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+        cl->OMSetRenderTargets(1, &ssaoPosRtvCpu, FALSE, &ssaoDsvCpu);
+        D3D12_VIEWPORT vp{ 0, 0, (float)w, (float)h, 0.0f, 1.0f };
+        D3D12_RECT     sc{ 0, 0, w, h };
+        cl->RSSetViewports(1, &vp);
+        cl->RSSetScissorRects(1, &sc);
+        cl->SetPipelineState(ssaoPosPSO.Get());
+        cl->SetGraphicsRootSignature(ssaoPosRS.Get());
+        cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+        UINT posDrawIdx = 0;
+        for (const DrawCall* dc : opaqueDCs)
+        {
+            if (posDrawIdx >= k_maxDraws) break;
+            const GpuMesh* mesh = resolveMesh(dc->meshAssetId, cm);
+            const GpuMesh& m    = mesh ? *mesh : cube;
+            if (!m.indexCount) continue;
+
+            auto drawPosOne = [&](const glm::mat4& model) {
+                if (posDrawIdx >= k_maxDraws) return;
+                struct PosCB { glm::mat4 mvp; glm::mat4 modelView; };
+                PosCB pcb{};
+                pcb.mvp       = viewProj * model;
+                pcb.modelView = view     * model;
+                if (ssaoPosPerObjPtr[fi])
+                    std::memcpy(ssaoPosPerObjPtr[fi] + static_cast<size_t>(posDrawIdx) * k_cbSlot,
+                                &pcb, sizeof(pcb));
+                cl->SetGraphicsRootConstantBufferView(0,
+                    ssaoPosPerObjRing[fi]->GetGPUVirtualAddress()
+                    + static_cast<UINT64>(posDrawIdx) * k_cbSlot);
+                cl->IASetVertexBuffers(0, 1, &m.vbv);
+                cl->IASetIndexBuffer(&m.ibv);
+                cl->DrawIndexedInstanced(m.indexCount, 1, 0, 0, 0);
+                ++posDrawIdx;
+            };
+
+            if (!dc->instanceTransforms.empty())
+                for (const glm::mat4& t : dc->instanceTransforms) drawPosOne(t);
+            else
+                drawPosOne(dc->transform);
+        }
+
+        // ── Transition pos RT to SRV, bind ssaoSrvHeap ─────────────────────
+        barrier12(cl, ssaoPosRT.Get(), ssaoPosRTState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        ssaoPosRTState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+
+        // ── Pass 2: SSAO ────────────────────────────────────────────────────
+        barrier12(cl, ssaoRT.Get(), ssaoRTState, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        ssaoRTState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        cl->ClearRenderTargetView(ssaoRtvCpu, clearWhite, 0, nullptr);
+        cl->OMSetRenderTargets(1, &ssaoRtvCpu, FALSE, nullptr);
+        cl->RSSetViewports(1, &vp);
+        cl->RSSetScissorRects(1, &sc);
+        cl->SetPipelineState(ssaoPSO.Get());
+        cl->SetGraphicsRootSignature(ssaoRS.Get());
+
+        // Upload SSAO CB: proj(64) + noiseScale(16) + params(16) + kernel already set in slots 96+
+        if (ssaoCBPtr[fi])
+        {
+            // proj matrix (column-major, HLSL default = row-major, glm is column-major)
+            // D3D12 expects row-major in HLSL unless #pragma pack_matrix or transposed.
+            // The scene already passes glm mats directly (kSceneHLSL), so mirror that convention.
+            std::memcpy(ssaoCBPtr[fi], glm::value_ptr(proj), 64);
+            // noiseScale: (W/4, H/4, 0, 0)
+            glm::vec4 noiseScale(float(w)/4.0f, float(h)/4.0f, 0.0f, 0.0f);
+            std::memcpy(static_cast<uint8_t*>(ssaoCBPtr[fi]) + 64, &noiseScale, 16);
+            // params: (radius, bias, intensity, 0)
+            glm::vec4 params(ssaoRadius, ssaoBias, ssaoIntensity, 0.0f);
+            std::memcpy(static_cast<uint8_t*>(ssaoCBPtr[fi]) + 80, &params, 16);
+            // kernel[32] already filled at init time
+        }
+        cl->SetGraphicsRootConstantBufferView(0, ssaoCB[fi]->GetGPUVirtualAddress());
+        ID3D12DescriptorHeap* ssaoHeaps[] = { ssaoSrvHeap.Get(), ssaoSamplerHeap.Get() };
+        cl->SetDescriptorHeaps(2, ssaoHeaps);
+        cl->SetGraphicsRootDescriptorTable(1, ssaoPosGpuSrv); // t0=posRT, t1=noise (contiguous)
+        cl->DrawInstanced(3, 1, 0, 0);
+
+        // ── Transition AO RT to SRV, AO blur RT to render target ────────────
+        barrier12(cl, ssaoRT.Get(), ssaoRTState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        ssaoRTState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+
+        // ── Pass 3: SSAO blur ───────────────────────────────────────────────
+        barrier12(cl, ssaoBlurRT.Get(), ssaoBlurRTState, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        ssaoBlurRTState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        cl->ClearRenderTargetView(ssaoBlurRtvCpu, clearWhite, 0, nullptr);
+        cl->OMSetRenderTargets(1, &ssaoBlurRtvCpu, FALSE, nullptr);
+        cl->RSSetViewports(1, &vp);
+        cl->RSSetScissorRects(1, &sc);
+        cl->SetPipelineState(ssaoBlurPSO.Get());
+        cl->SetGraphicsRootSignature(ssaoRS.Get());
+        if (ssaoBlurCBPtr[fi])
+        {
+            glm::vec4 texel(1.0f/float(w), 1.0f/float(h), 0.0f, 0.0f);
+            std::memcpy(ssaoBlurCBPtr[fi], &texel, 16);
+        }
+        cl->SetGraphicsRootConstantBufferView(0, ssaoBlurCB[fi]->GetGPUVirtualAddress());
+        // Bind only ssaoSrvHeap (no sampler heap change needed if root sig uses static sampler)
+        // — our ssaoRS uses a static sampler, so the sampler heap is not needed here.
+        // But we already set the SRV heap above; just update table to point at ssaoRT (slot 2).
+        cl->SetGraphicsRootDescriptorTable(1, ssaoGpuSrv); // t0=ssaoRT
+        cl->DrawInstanced(3, 1, 0, 0);
+
+        // ── Transition blur result to SRV (ready for scene) ─────────────────
+        barrier12(cl, ssaoBlurRT.Get(), ssaoBlurRTState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        ssaoBlurRTState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
     }
 
     void uploadMesh(GpuMesh& mesh, const std::vector<float>& interleaved,
@@ -1743,6 +2604,8 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         f.shadowEnabled = glm::ivec4(shadows ? 1 : 0, 0, 0, 0);
         f.sunDir = glm::vec4(p.m_renderWorld.sunDirection, 0.0f);
         f.fog    = glm::vec4(m_environment.fogDensity, m_environment.fogHeightFalloff, 0, 0);
+        f.viewport = glm::vec4(float(width), float(height),
+                               (p.ssaoEnabled && p.ssaoReady) ? 1.0f : 0.0f, 0.0f);
         if (p.perFramePtr[p.frameIndex])
             std::memcpy(p.perFramePtr[p.frameIndex], &f, sizeof(f));
     }
@@ -1817,6 +2680,59 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
 
         if (io.output.id != kBackbufferTarget) return;
 
+        // Collect draw calls split by opacity (needed for SSAO and for transparency sort).
+        const glm::vec3 camPos = p.m_renderWorld.camera.position;
+        std::vector<const DrawCall*> opaqueDCs, transparentDCs;
+        for (const DrawCall& dc : cmds.drawCalls())
+            (dc.opacity < 0.999f ? transparentDCs : opaqueDCs).push_back(&dc);
+
+        // ── SSAO: run 3-pass (pos prepass → ssao → blur) before sky/geometry ─
+        if (p.ssaoEnabled && p.ssaoReady)
+        {
+            if (p.ssaoW != width || p.ssaoH != height)
+                p.createSSAOTargets(width, height);
+            p.runSSAO(cl, p.frameIndex, opaqueDCs,
+                      p.m_renderWorld.camera.view, p.m_renderWorld.camera.projection,
+                      viewProj, width, height, m_contentManager);
+            // Restore the scene RTV + depth after SSAO changed them.
+            // (The RTV that was active before depends on HDR vs LDR path;
+            //  Render() will have already called OMSetRenderTargets to the correct one.
+            //  Re-bind it here so subsequent sky/geometry writes go to the right target.)
+            // We store the active RTV handle in a local so we can restore it.
+            // SSAO doesn't know the active RTV, so we rebuild from known state:
+            // In the HDR path: hdrRT RTV; in LDR path: viewportRT or swapchain RTV.
+            // The simplest correct approach is to re-issue OMSetRenderTargets using the
+            // same targets that Render() bound before calling DrawScene().
+            // Since we don't have that handle here, we leave it to the sky/geometry
+            // stage below, which will use the already-bound RTV (sky doesn't re-set it).
+            // DrawScene is called with the correct RTV already set by Render().
+            // The SSAO pass changes RTV but leaves the command list in a drawable state.
+            // We must rebind here.
+            // Determine which RTV is active: hdrRT if usingHDR, else viewportRT if present.
+            if (p.usingHDR && p.hdrRtvHeap)
+            {
+                auto hrtv = p.hdrRtvHeap->GetCPUDescriptorHandleForHeapStart();
+                auto vdsv = p.viewportDsvHeap->GetCPUDescriptorHandleForHeapStart();
+                cl->OMSetRenderTargets(1, &hrtv, FALSE, &vdsv);
+            }
+            else if (p.viewportRtvHeap)
+            {
+                auto vrtv = p.viewportRtvHeap->GetCPUDescriptorHandleForHeapStart();
+                auto vdsv = p.viewportDsvHeap->GetCPUDescriptorHandleForHeapStart();
+                cl->OMSetRenderTargets(1, &vrtv, FALSE, &vdsv);
+            }
+            else
+            {
+                auto rtv  = p.rtvHandle(p.frameIndex);
+                auto dsv0 = p.dsvHandle(0);
+                cl->OMSetRenderTargets(1, &rtv, FALSE, &dsv0);
+            }
+            D3D12_VIEWPORT vvp{ 0, 0, (float)width, (float)height, 0.0f, 1.0f };
+            D3D12_RECT     vsc{ 0, 0, width, height };
+            cl->RSSetViewports(1, &vvp);
+            cl->RSSetScissorRects(1, &vsc);
+        }
+
         // Sky background: draw before geometry so depth test kills it behind meshes.
         // (hdrRT clear was already done by Render(); sky writes to same bound RTV.)
         p.drawSky(cl, p.frameIndex, invVP, p.m_renderWorld.sunDirection, m_environment);
@@ -1826,18 +2742,15 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         cl->SetGraphicsRootConstantBufferView(1, p.perFrameCB[p.frameIndex]->GetGPUVirtualAddress());
 
-        // ── Geometry pass: scene PSO + shadow map bound for sampling ────────
-        if (p.shadowSrvHeap)
+        // ── Geometry pass: bind combined sceneSrvHeap (shadow t0 + AO t2) ───
+        if (p.sceneSrvHeap)
         {
-            ID3D12DescriptorHeap* heaps[] = { p.shadowSrvHeap.Get() };
+            ID3D12DescriptorHeap* heaps[] = { p.sceneSrvHeap.Get() };
             cl->SetDescriptorHeaps(1, heaps);
-            cl->SetGraphicsRootDescriptorTable(2, p.shadowSrvHeap->GetGPUDescriptorHandleForHeapStart());
+            // sceneSrvHeap[0]=shadow(t0), [1]=AO-blur(t2); the descriptor table has 2 ranges
+            // starting at heap slot 0, so one SetGraphicsRootDescriptorTable covers both.
+            cl->SetGraphicsRootDescriptorTable(2, p.sceneSrvHeap->GetGPUDescriptorHandleForHeapStart());
         }
-
-        const glm::vec3 camPos = p.m_renderWorld.camera.position;
-        std::vector<const DrawCall*> opaqueDCs, transparentDCs;
-        for (const DrawCall& dc : cmds.drawCalls())
-            (dc.opacity < 0.999f ? transparentDCs : opaqueDCs).push_back(&dc);
         std::sort(transparentDCs.begin(), transparentDCs.end(),
             [&](const DrawCall* a, const DrawCall* b) {
                 return glm::length(glm::vec3(a->transform[3]) - camPos) >
