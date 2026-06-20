@@ -451,6 +451,45 @@ float4 PSMain(VSOut i) : SV_TARGET
 }
 )HLSL";
 
+// ─── Skinned vertex shader HLSL ─────────────────────────────────────────────
+// Only contains the VS entry; PSMain from kSceneHLSL is shared and pre-bound.
+static const char* kSkinnedHLSL = R"HLSL(
+cbuffer PerObject : register(b0)
+{
+    float4x4 uMVP;
+    float4x4 uModel;
+    float4   uColor;
+    float4   uPBR;
+};
+cbuffer BonesCB : register(b2)
+{
+    float4x4 uBoneMatrices[128];
+};
+struct SkinnedIn
+{
+    float3 pos     : POSITION;
+    float3 normal  : NORMAL;
+    float2 uv      : TEXCOORD0;
+    uint4  boneIds : BLENDINDICES;
+    float4 boneWgt : BLENDWEIGHT;
+};
+struct VSOut { float4 clip : SV_POSITION; float3 worldPos : TEXCOORD0; float3 normal : TEXCOORD1; float2 uv : TEXCOORD2; };
+VSOut VSMainSkinned(SkinnedIn i)
+{
+    float4x4 skin = i.boneWgt.x * uBoneMatrices[i.boneIds.x]
+                  + i.boneWgt.y * uBoneMatrices[i.boneIds.y]
+                  + i.boneWgt.z * uBoneMatrices[i.boneIds.z]
+                  + i.boneWgt.w * uBoneMatrices[i.boneIds.w];
+    float4 sp  = mul(skin, float4(i.pos, 1.0f));
+    VSOut o;
+    o.worldPos = mul(uModel, sp).xyz;
+    o.normal   = mul((float3x3)uModel, mul((float3x3)skin, i.normal));
+    o.uv       = i.uv;
+    o.clip     = mul(uMVP, sp);
+    return o;
+}
+)HLSL";
+
 // ─── SSAO HLSL ──────────────────────────────────────────────────────────────
 
 // Position prepass: outputs view-space position (alpha=1 marks valid geometry).
@@ -781,6 +820,18 @@ namespace
         HE::AABB                         localBounds;
     };
 
+    // GPU resources for a skinned/skeletal mesh.
+    // Three vertex buffers: interleaved pos+norm+uv (slot 0), bone IDs (slot 1), bone weights (slot 2).
+    struct GpuSkeletalMesh
+    {
+        ComPtr<ID3D11Buffer>             vb;         // interleaved pos(12)+norm(12)+uv(8) = 32 bytes/vertex
+        ComPtr<ID3D11Buffer>             boneIdVb;   // uint4 per vertex (16 bytes)
+        ComPtr<ID3D11Buffer>             boneWgtVb;  // float4 per vertex (16 bytes)
+        ComPtr<ID3D11Buffer>             ib;
+        ComPtr<ID3D11ShaderResourceView> srv;        // albedo texture (may be null)
+        int                              indexCount  = 0;
+    };
+
     // Constant-buffer layouts must match the HLSL cbuffers exactly (16-byte rules).
     struct PerObjectCB
     {
@@ -979,6 +1030,12 @@ struct D3D11RendererImpl
     bool  ssaoReady     = false;
     int   ssaoW         = 0;
     int   ssaoH         = 0;
+
+    // ── Skinned mesh pipeline ─────────────────────────────────────────────────
+    ComPtr<ID3D11VertexShader> skinnedVS;
+    ComPtr<ID3D11InputLayout>  skinnedLayout;
+    ComPtr<ID3D11Buffer>       bonesCB;
+    std::unordered_map<HE::UUID, GpuSkeletalMesh> skeletalMeshCache;
 
     void createHDRTargets(uint32_t w, uint32_t h)
     {
@@ -1579,6 +1636,7 @@ struct D3D11RendererImpl
         createSSAOPipeline();
         createSkyPipeline();
         createDebugLinePipeline();
+        createSkinnedPipeline();
         return vs && ps && inputLayout && perObjectCB && perFrameCB && sampler;
     }
 
@@ -1841,6 +1899,147 @@ struct D3D11RendererImpl
         ctx->VSSetConstantBuffers(1, 1, perFrameCB.GetAddressOf());
         ctx->PSSetConstantBuffers(0, 1, perObjectCB.GetAddressOf());
         ctx->PSSetConstantBuffers(1, 1, perFrameCB.GetAddressOf());
+    }
+
+    // ── Skinned mesh pipeline ─────────────────────────────────────────────────
+    bool createSkinnedPipeline()
+    {
+        UINT flags = 0;
+#ifdef _DEBUG
+        flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+        ComPtr<ID3DBlob> vsBlob, err;
+        if (FAILED(D3DCompile(kSkinnedHLSL, std::strlen(kSkinnedHLSL), "skinned",
+                              nullptr, nullptr, "VSMainSkinned", "vs_5_0", flags, 0, &vsBlob, &err)))
+        {
+            const char* msg = err ? static_cast<const char*>(err->GetBufferPointer()) : "unknown";
+            Logger::Log(Logger::LogLevel::Error,
+                        (std::string("D3D11: skinned VS compile: ") + msg).c_str());
+            return false;
+        }
+        device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(),
+                                   nullptr, &skinnedVS);
+
+        // Input layout: slot0 = interleaved(pos+norm+uv), slot1 = boneIds, slot2 = boneWgt
+        const D3D11_INPUT_ELEMENT_DESC layout[] = {
+            { "POSITION",     0, DXGI_FORMAT_R32G32B32_FLOAT,    0,  0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+            { "NORMAL",       0, DXGI_FORMAT_R32G32B32_FLOAT,    0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+            { "TEXCOORD",     0, DXGI_FORMAT_R32G32_FLOAT,       0, 24, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+            { "BLENDINDICES", 0, DXGI_FORMAT_R32G32B32A32_UINT,  1,  0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+            { "BLENDWEIGHT",  0, DXGI_FORMAT_R32G32B32A32_FLOAT, 2,  0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        };
+        device->CreateInputLayout(layout, 5,
+                                  vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(),
+                                  &skinnedLayout);
+
+        // Bone CB: 128 × mat4 = 8192 bytes, dynamic for per-draw upload
+        D3D11_BUFFER_DESC bd{};
+        bd.ByteWidth      = 8192u;
+        bd.Usage          = D3D11_USAGE_DYNAMIC;
+        bd.BindFlags      = D3D11_BIND_CONSTANT_BUFFER;
+        bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        device->CreateBuffer(&bd, nullptr, &bonesCB);
+
+        return skinnedVS && skinnedLayout && bonesCB;
+    }
+
+    // Upload and cache GPU resources for a SkeletalMeshAsset.
+    const GpuSkeletalMesh* resolveSkeletalMesh(const HE::UUID& assetId, ContentManager* cm)
+    {
+        if (assetId == HE::UUID{} || !cm) return nullptr;
+        if (auto it = skeletalMeshCache.find(assetId); it != skeletalMeshCache.end())
+            return &it->second;
+
+        const SkeletalMeshAsset* asset = cm->getSkeletalMesh(assetId);
+        if (!asset || asset->vertices.empty() || asset->indices.empty()) return nullptr;
+
+        const size_t vertexCount = asset->vertices.size() / 3;
+
+        // Interleaved pos(12) + norm(12) + uv(8) = 32 bytes per vertex
+        std::vector<float> interleaved;
+        interleaved.reserve(vertexCount * 8);
+        for (size_t v = 0; v < vertexCount; ++v)
+        {
+            interleaved.insert(interleaved.end(),
+                { asset->vertices[v*3+0], asset->vertices[v*3+1], asset->vertices[v*3+2] });
+            if (v*3+2 < asset->normals.size())
+                interleaved.insert(interleaved.end(),
+                    { asset->normals[v*3+0], asset->normals[v*3+1], asset->normals[v*3+2] });
+            else
+                interleaved.insert(interleaved.end(), { 0.0f, 0.0f, 0.0f });
+            if (v*2+1 < asset->uvs.size())
+                interleaved.insert(interleaved.end(), { asset->uvs[v*2+0], asset->uvs[v*2+1] });
+            else
+                interleaved.insert(interleaved.end(), { 0.0f, 0.0f });
+        }
+
+        // Bone IDs per vertex (uint32 × 4), zero-padded
+        std::vector<uint32_t> boneIds(vertexCount * 4, 0u);
+        if (!asset->boneIDs.empty())
+            std::copy_n(asset->boneIDs.begin(),
+                        std::min(asset->boneIDs.size(), vertexCount * 4), boneIds.begin());
+
+        // Bone weights per vertex (float × 4), default 100% joint 0
+        std::vector<float> boneWgts(vertexCount * 4, 0.0f);
+        for (size_t v = 0; v < vertexCount; ++v) boneWgts[v*4] = 1.0f;
+        if (!asset->boneWeights.empty())
+            std::copy_n(asset->boneWeights.begin(),
+                        std::min(asset->boneWeights.size(), vertexCount * 4), boneWgts.begin());
+
+        auto makeVB = [&](const void* data, UINT bytes) -> ComPtr<ID3D11Buffer>
+        {
+            D3D11_BUFFER_DESC bd{};
+            bd.ByteWidth  = bytes;
+            bd.Usage      = D3D11_USAGE_IMMUTABLE;
+            bd.BindFlags  = D3D11_BIND_VERTEX_BUFFER;
+            D3D11_SUBRESOURCE_DATA sd{}; sd.pSysMem = data;
+            ComPtr<ID3D11Buffer> buf;
+            device->CreateBuffer(&bd, &sd, &buf);
+            return buf;
+        };
+
+        GpuSkeletalMesh mesh;
+        mesh.indexCount = static_cast<int>(asset->indices.size());
+        mesh.vb       = makeVB(interleaved.data(), static_cast<UINT>(interleaved.size() * sizeof(float)));
+        mesh.boneIdVb = makeVB(boneIds.data(),    static_cast<UINT>(boneIds.size()  * sizeof(uint32_t)));
+        mesh.boneWgtVb= makeVB(boneWgts.data(),   static_cast<UINT>(boneWgts.size() * sizeof(float)));
+
+        // Index buffer
+        {
+            D3D11_BUFFER_DESC bd{};
+            bd.ByteWidth = static_cast<UINT>(asset->indices.size() * sizeof(uint32_t));
+            bd.Usage     = D3D11_USAGE_IMMUTABLE;
+            bd.BindFlags = D3D11_BIND_INDEX_BUFFER;
+            D3D11_SUBRESOURCE_DATA sd{}; sd.pSysMem = asset->indices.data();
+            device->CreateBuffer(&bd, &sd, &mesh.ib);
+        }
+
+        // Try to load albedo texture — same pattern as resolveMesh()
+        if (!asset->materialPath.empty())
+        {
+            const HE::UUID matId = cm->loadAsset(asset->materialPath);
+            if (const MaterialAsset* mat = cm->getMaterial(matId); mat && !mat->texturePaths.empty())
+            {
+                const HE::UUID texId = cm->loadAsset(mat->texturePaths[0]);
+                if (const TextureAsset* tex = cm->getTexture(texId);
+                    tex && !tex->data.empty() && tex->channels == 4)
+                {
+                    D3D11_TEXTURE2D_DESC td{};
+                    td.Width = tex->width; td.Height = tex->height;
+                    td.MipLevels = 1; td.ArraySize = 1;
+                    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1;
+                    td.Usage = D3D11_USAGE_IMMUTABLE; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                    D3D11_SUBRESOURCE_DATA srd{};
+                    srd.pSysMem = tex->data.data();
+                    srd.SysMemPitch = tex->width * 4;
+                    ComPtr<ID3D11Texture2D> t;
+                    if (SUCCEEDED(device->CreateTexture2D(&td, &srd, &t)))
+                        device->CreateShaderResourceView(t.Get(), nullptr, &mesh.srv);
+                }
+            }
+        }
+
+        return &skeletalMeshCache.emplace(assetId, std::move(mesh)).first->second;
     }
 };
 
@@ -2138,6 +2337,59 @@ void D3D11Renderer::DrawScene(int width, int height)
         };
 
         for (const DrawCall* dc : opaqueDCs) drawDC(*dc);
+
+        // ── Skinned mesh pass ─────────────────────────────────────────────────
+        // Shares PSMain (lighting + shadow + AO) already bound above.
+        // Only the VS and input layout change; the rest of the pipeline is kept.
+        if (p.skinnedVS && !cmds.skinnedDrawCalls().empty())
+        {
+            ctx->VSSetShader(p.skinnedVS.Get(), nullptr, 0);
+            ctx->IASetInputLayout(p.skinnedLayout.Get());
+            ctx->VSSetConstantBuffers(2, 1, p.bonesCB.GetAddressOf());
+
+            constexpr int kMaxBones = 128;
+            std::vector<glm::mat4> boneScratch(kMaxBones, glm::mat4(1.0f));
+
+            for (const SkinnedDrawCall& dc : cmds.skinnedDrawCalls())
+            {
+                const GpuSkeletalMesh* sm = p.resolveSkeletalMesh(dc.meshAssetId, m_contentManager);
+                if (!sm || !sm->vb || !sm->ib) continue;
+
+                // Upload bone matrices to b2
+                std::fill(boneScratch.begin(), boneScratch.end(), glm::mat4(1.0f));
+                const int n = std::min(static_cast<int>(dc.boneMatrices.size()), kMaxBones);
+                if (n > 0) std::copy_n(dc.boneMatrices.begin(), n, boneScratch.begin());
+                {
+                    D3D11_MAPPED_SUBRESOURCE mr{};
+                    if (SUCCEEDED(ctx->Map(p.bonesCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mr)))
+                    {
+                        std::memcpy(mr.pData, boneScratch.data(), kMaxBones * sizeof(glm::mat4));
+                        ctx->Unmap(p.bonesCB.Get(), 0);
+                    }
+                }
+
+                // Per-object CB (reuse the uploadObject lambda in scope)
+                const float hasTex = sm->srv ? 1.0f : 0.0f;
+                uploadObject(viewProj * dc.transform, dc.transform,
+                             dc.baseColor, hasTex, dc.metallic, dc.roughness, dc.opacity);
+
+                // Bind three vertex buffer slots
+                const UINT strides[3] = { 32u, 16u, 16u };
+                const UINT offs[3]    = { 0u, 0u, 0u };
+                ID3D11Buffer* vbs[3] = { sm->vb.Get(), sm->boneIdVb.Get(), sm->boneWgtVb.Get() };
+                ctx->IASetVertexBuffers(0, 3, vbs, strides, offs);
+                ctx->IASetIndexBuffer(sm->ib.Get(), DXGI_FORMAT_R32_UINT, 0);
+
+                ID3D11ShaderResourceView* albedoSrv = sm->srv ? sm->srv.Get() : p.dummyTexture.Get();
+                ctx->PSSetShaderResources(0, 1, &albedoSrv);
+
+                ctx->DrawIndexed(static_cast<UINT>(sm->indexCount), 0, 0);
+            }
+
+            // Restore scene VS + layout for the transparent pass
+            ctx->VSSetShader(p.vs.Get(), nullptr, 0);
+            ctx->IASetInputLayout(p.inputLayout.Get());
+        }
 
         if (!transparentDCs.empty()) {
             ctx->OMSetBlendState(p.alphaBlendState.Get(), nullptr, 0xFFFFFFFF);

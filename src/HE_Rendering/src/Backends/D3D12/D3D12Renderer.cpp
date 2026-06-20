@@ -543,6 +543,44 @@ float4 SSAOMain(FsIn i) : SV_TARGET
 }
 )HLSL";
 
+// ── GPU Skeletal-Mesh Skinning VS ─────────────────────────────────────────────
+static const char* kSkinnedHLSL12 = R"HLSL(
+cbuffer PerObject : register(b0)
+{
+    float4x4 uMVP;
+    float4x4 uModel;
+    float4   uColor;
+    float4   uPBR;
+};
+cbuffer BonesCB : register(b2)
+{
+    float4x4 uBoneMatrices[128];
+};
+struct SkinnedIn
+{
+    float3 pos     : POSITION;
+    float3 normal  : NORMAL;
+    float2 uv      : TEXCOORD0;
+    uint4  boneIds : BLENDINDICES;
+    float4 boneWgt : BLENDWEIGHT;
+};
+struct VSOut { float4 clip : SV_POSITION; float3 worldPos : TEXCOORD0; float3 normal : TEXCOORD1; float2 uv : TEXCOORD2; };
+VSOut VSMainSkinned(SkinnedIn i)
+{
+    float4x4 skin = i.boneWgt.x * uBoneMatrices[i.boneIds.x]
+                  + i.boneWgt.y * uBoneMatrices[i.boneIds.y]
+                  + i.boneWgt.z * uBoneMatrices[i.boneIds.z]
+                  + i.boneWgt.w * uBoneMatrices[i.boneIds.w];
+    float4 sp  = mul(skin, float4(i.pos, 1.0f));
+    VSOut o;
+    o.worldPos = mul(uModel, sp).xyz;
+    o.normal   = mul((float3x3)uModel, mul((float3x3)skin, i.normal));
+    o.uv       = i.uv;
+    o.clip     = mul(uMVP, sp);
+    return o;
+}
+)HLSL";
+
 static const char* kSSAOBlurHLSL12 = R"HLSL(
 Texture2D    uAOInput   : register(t0);
 SamplerState uPointSamp : register(s0);
@@ -682,6 +720,22 @@ namespace
         D3D12_INDEX_BUFFER_VIEW  ibv{};
         UINT                     indexCount = 0;
         HE::AABB                 localBounds;
+    };
+
+    // GPU buffers for a skeletal mesh — three vertex-buffer slots plus an index buffer.
+    // Slot 0: interleaved pos(3)+norm(3)+uv(2), stride 32.
+    // Slot 1: boneIds   uint4 per vertex,        stride 16.
+    // Slot 2: boneWeights float4 per vertex,     stride 16.
+    struct GpuSkeletalMesh12 {
+        ComPtr<ID3D12Resource>   vbuf;        // slot 0: pos+norm+uv interleaved
+        ComPtr<ID3D12Resource>   boneIdVb;   // slot 1: uint4 boneIds
+        ComPtr<ID3D12Resource>   boneWgtVb;  // slot 2: float4 boneWeights
+        ComPtr<ID3D12Resource>   ibuf;
+        D3D12_VERTEX_BUFFER_VIEW vbv{};
+        D3D12_VERTEX_BUFFER_VIEW boneIdVbv{};
+        D3D12_VERTEX_BUFFER_VIEW boneWgtVbv{};
+        D3D12_INDEX_BUFFER_VIEW  ibv{};
+        UINT                     indexCount = 0;
     };
 
     UINT alignUp(UINT v, UINT a) { return (v + a - 1u) & ~(a - 1u); }
@@ -1442,6 +1496,17 @@ struct D3D12RendererImpl
     std::vector<uint32_t> m_sortedIndices;
     std::unordered_map<HE::UUID, GpuMesh> meshCache;
 
+    // ── Skinned-mesh pipeline + resources ────────────────────────────────────
+    ComPtr<ID3D12RootSignature> skinnedRootSig;
+    ComPtr<ID3D12PipelineState> m_skinnedPSO;       // RGBA8 (fallback/swapchain path)
+    ComPtr<ID3D12PipelineState> m_skinnedHdrPSO;    // RGBA16F (PostFX HDR path)
+    // Per-frame bones CB ring: k_maxSkinnedDraws slots × 8192 bytes (128 × 64).
+    static constexpr UINT  k_maxSkinnedDraws = 256;
+    static constexpr UINT64 k_bonesCBSlot    = 128 * 64; // exactly 8192 — already 256-aligned
+    ComPtr<ID3D12Resource>  m_bonesCB[k_frameCount];
+    uint8_t*                m_bonesCBPtr[k_frameCount]{};
+    std::unordered_map<HE::UUID, GpuSkeletalMesh12> m_skeletalMeshCache;
+
     // ── Combined scene SRV heap (shadow t0, AO-blur t2, white-fallback t2) ──
     // [0]=shadow, [1]=AO-blur, [2]=white-fallback
     ComPtr<ID3D12DescriptorHeap> sceneSrvHeap;    // CBV_SRV_UAV shader-visible, 3 slots
@@ -1843,6 +1908,7 @@ struct D3D12RendererImpl
         createSkyPipeline();
         createDebugLinePipeline();
         createSSAOPipeline();
+        createSkinnedPipeline();
         return rootSig && pso;
     }
 
@@ -2526,6 +2592,211 @@ struct D3D12RendererImpl
         uploadMesh(mesh, interleaved, asset->indices);
         return &meshCache.emplace(assetId, mesh).first->second;
     }
+
+    // ── Skinned pipeline (separate root sig with b2 for bones CB) ────────────
+    bool createSkinnedPipeline()
+    {
+        // Root signature = scene root sig + an extra root CBV at param[3] for b2 (bones).
+        // Params [0..2] are byte-identical to the scene root sig so the shared PS works.
+        D3D12_DESCRIPTOR_RANGE srvRanges[2]{};
+        srvRanges[0].RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        srvRanges[0].NumDescriptors                    = 1;
+        srvRanges[0].BaseShaderRegister                = 0; // t0
+        srvRanges[0].RegisterSpace                     = 0;
+        srvRanges[0].OffsetInDescriptorsFromTableStart = 0;
+        srvRanges[1].RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        srvRanges[1].NumDescriptors                    = 1;
+        srvRanges[1].BaseShaderRegister                = 2; // t2
+        srvRanges[1].RegisterSpace                     = 0;
+        srvRanges[1].OffsetInDescriptorsFromTableStart = 1;
+
+        D3D12_ROOT_PARAMETER params[4]{};
+        params[0].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
+        params[0].Descriptor       = { 0, 0 }; // b0 per-object
+        params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        params[1].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
+        params[1].Descriptor       = { 1, 0 }; // b1 per-frame
+        params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        params[2].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        params[2].DescriptorTable.NumDescriptorRanges = 2;
+        params[2].DescriptorTable.pDescriptorRanges   = srvRanges;
+        params[2].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
+        params[3].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
+        params[3].Descriptor       = { 2, 0 }; // b2 bones
+        params[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+
+        // Same static samplers as the scene root sig (s0 shadow linear-clamp, s1 AO point-clamp).
+        D3D12_STATIC_SAMPLER_DESC samplers[2]{};
+        samplers[0].Filter         = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+        samplers[0].AddressU = samplers[0].AddressV = samplers[0].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        samplers[0].ShaderRegister = 0;
+        samplers[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        samplers[1].Filter         = D3D12_FILTER_MIN_MAG_MIP_POINT;
+        samplers[1].AddressU = samplers[1].AddressV = samplers[1].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        samplers[1].ShaderRegister = 1;
+        samplers[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+        D3D12_ROOT_SIGNATURE_DESC rsd{};
+        rsd.NumParameters     = 4;
+        rsd.pParameters       = params;
+        rsd.NumStaticSamplers = 2;
+        rsd.pStaticSamplers   = samplers;
+        rsd.Flags             = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+        ComPtr<ID3DBlob> sig, err;
+        if (FAILED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err)))
+        {
+            Logger::Log(Logger::LogLevel::Error, "D3D12Renderer: skinned root signature serialize failed");
+            return false;
+        }
+        if (FAILED(device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
+                   IID_PPV_ARGS(&skinnedRootSig))))
+            return false;
+
+        UINT flags = 0;
+#ifdef _DEBUG
+        flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+        // Reuse the scene PS (PSMain from kSceneHLSL — it references b0, b1, t0, t2, s0, s1).
+        const std::string sceneSource = std::string(kSkyFuncHLSL12) + kSceneHLSL;
+        ComPtr<ID3DBlob> ps, cerr;
+        if (FAILED(D3DCompile(sceneSource.c_str(), sceneSource.size(), "scene", nullptr, nullptr,
+                              "PSMain", "ps_5_0", flags, 0, &ps, &cerr)))
+        {
+            Logger::Log(Logger::LogLevel::Error, (std::string("D3D12Renderer: skinned PS compile failed: ")
+                + (cerr ? static_cast<const char*>(cerr->GetBufferPointer()) : "")).c_str());
+            return false;
+        }
+        // Skinned vertex shader.
+        ComPtr<ID3DBlob> vs;
+        if (FAILED(D3DCompile(kSkinnedHLSL12, strlen(kSkinnedHLSL12), "skinned", nullptr, nullptr,
+                              "VSMainSkinned", "vs_5_0", flags, 0, &vs, &cerr)))
+        {
+            Logger::Log(Logger::LogLevel::Error, (std::string("D3D12Renderer: skinned VS compile failed: ")
+                + (cerr ? static_cast<const char*>(cerr->GetBufferPointer()) : "")).c_str());
+            return false;
+        }
+
+        // 5-element input layout: slot 0 interleaved (pos+norm+uv), slot 1 boneIds, slot 2 boneWeights.
+        const D3D12_INPUT_ELEMENT_DESC layout[] = {
+            { "POSITION",     0, DXGI_FORMAT_R32G32B32_FLOAT,    0,  0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+            { "NORMAL",       0, DXGI_FORMAT_R32G32B32_FLOAT,    0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+            { "TEXCOORD",     0, DXGI_FORMAT_R32G32_FLOAT,       0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+            { "BLENDINDICES", 0, DXGI_FORMAT_R32G32B32A32_UINT,  1,  0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+            { "BLENDWEIGHT",  0, DXGI_FORMAT_R32G32B32A32_FLOAT, 2,  0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        };
+
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+        pd.pRootSignature        = skinnedRootSig.Get();
+        pd.VS                    = { vs->GetBufferPointer(), vs->GetBufferSize() };
+        pd.PS                    = { ps->GetBufferPointer(), ps->GetBufferSize() };
+        pd.InputLayout           = { layout, 5 };
+        pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        pd.NumRenderTargets      = 1;
+        pd.RTVFormats[0]         = DXGI_FORMAT_R8G8B8A8_UNORM; // fallback; HDR variant created below
+        pd.DSVFormat             = DXGI_FORMAT_D32_FLOAT;
+        pd.SampleDesc.Count      = 1;
+        pd.SampleMask            = UINT_MAX;
+        pd.RasterizerState.FillMode              = D3D12_FILL_MODE_SOLID;
+        pd.RasterizerState.CullMode              = D3D12_CULL_MODE_NONE;
+        pd.RasterizerState.DepthClipEnable       = TRUE;
+        pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+        pd.DepthStencilState.DepthEnable    = TRUE;
+        pd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+        pd.DepthStencilState.DepthFunc      = D3D12_COMPARISON_FUNC_LESS;
+
+        if (FAILED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&m_skinnedPSO))))
+        {
+            Logger::Log(Logger::LogLevel::Error, "D3D12Renderer: skinned PSO creation failed");
+            return false;
+        }
+
+        // HDR variant: RGBA16F for the PostFX scene pass.
+        {
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC hp = pd;
+            hp.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+            device->CreateGraphicsPipelineState(&hp, IID_PPV_ARGS(&m_skinnedHdrPSO));
+        }
+
+        // Bones CB ring: k_maxSkinnedDraws slots × k_bonesCBSlot bytes per frame.
+        for (UINT f = 0; f < k_frameCount; ++f)
+        {
+            m_bonesCB[f] = createUploadBuffer(static_cast<UINT64>(k_maxSkinnedDraws) * k_bonesCBSlot,
+                                              reinterpret_cast<void**>(&m_bonesCBPtr[f]));
+        }
+        return true;
+    }
+
+    // ── Upload + cache a SkeletalMeshAsset → GpuSkeletalMesh12 ──────────────
+    const GpuSkeletalMesh12* resolveSkeletalMesh12(const HE::UUID& assetId, ContentManager* cm)
+    {
+        if (assetId == HE::UUID{} || !cm) return nullptr;
+        if (auto it = m_skeletalMeshCache.find(assetId); it != m_skeletalMeshCache.end())
+            return &it->second;
+
+        const SkeletalMeshAsset* asset = cm->getSkeletalMesh(assetId);
+        if (!asset || asset->vertices.empty() || asset->indices.empty()) return nullptr;
+
+        const size_t vertexCount = asset->vertices.size() / 3;
+        if (asset->boneIDs.empty() || asset->boneWeights.empty() ||
+            asset->boneIDs.size() != vertexCount * 4)
+            return nullptr;
+
+        // Build interleaved pos+norm+uv for slot 0 (stride 32).
+        std::vector<float> interleaved;
+        interleaved.reserve(vertexCount * 8);
+        for (size_t i = 0; i < vertexCount; ++i)
+        {
+            interleaved.insert(interleaved.end(),
+                { asset->vertices[i*3+0], asset->vertices[i*3+1], asset->vertices[i*3+2] });
+            if (i * 3 + 2 < asset->normals.size())
+                interleaved.insert(interleaved.end(),
+                    { asset->normals[i*3+0], asset->normals[i*3+1], asset->normals[i*3+2] });
+            else
+                interleaved.insert(interleaved.end(), { 0.0f, 0.0f, 0.0f });
+            if (i * 2 + 1 < asset->uvs.size())
+                interleaved.insert(interleaved.end(), { asset->uvs[i*2+0], asset->uvs[i*2+1] });
+            else
+                interleaved.insert(interleaved.end(), { 0.0f, 0.0f });
+        }
+
+        GpuSkeletalMesh12 skm;
+        // Slot 0: interleaved VB (stride 32).
+        {
+            const UINT64 bytes = static_cast<UINT64>(interleaved.size()) * sizeof(float);
+            skm.vbuf = createUploadBuffer(bytes, nullptr, interleaved.data());
+            skm.vbv.BufferLocation = skm.vbuf->GetGPUVirtualAddress();
+            skm.vbv.SizeInBytes    = static_cast<UINT>(bytes);
+            skm.vbv.StrideInBytes  = 8 * sizeof(float); // pos3+norm3+uv2
+        }
+        // Slot 1: boneIds (uint32 × 4 per vertex, stride 16).
+        {
+            const UINT64 bytes = static_cast<UINT64>(vertexCount) * 4 * sizeof(uint32_t);
+            skm.boneIdVb = createUploadBuffer(bytes, nullptr, asset->boneIDs.data());
+            skm.boneIdVbv.BufferLocation = skm.boneIdVb->GetGPUVirtualAddress();
+            skm.boneIdVbv.SizeInBytes    = static_cast<UINT>(bytes);
+            skm.boneIdVbv.StrideInBytes  = 4 * sizeof(uint32_t);
+        }
+        // Slot 2: boneWeights (float × 4 per vertex, stride 16).
+        {
+            const UINT64 bytes = static_cast<UINT64>(vertexCount) * 4 * sizeof(float);
+            skm.boneWgtVb = createUploadBuffer(bytes, nullptr, asset->boneWeights.data());
+            skm.boneWgtVbv.BufferLocation = skm.boneWgtVb->GetGPUVirtualAddress();
+            skm.boneWgtVbv.SizeInBytes    = static_cast<UINT>(bytes);
+            skm.boneWgtVbv.StrideInBytes  = 4 * sizeof(float);
+        }
+        // Index buffer.
+        {
+            const UINT64 bytes = static_cast<UINT64>(asset->indices.size()) * sizeof(uint32_t);
+            skm.ibuf = createUploadBuffer(bytes, nullptr, asset->indices.data());
+            skm.ibv.BufferLocation = skm.ibuf->GetGPUVirtualAddress();
+            skm.ibv.SizeInBytes    = static_cast<UINT>(bytes);
+            skm.ibv.Format         = DXGI_FORMAT_R32_UINT;
+        }
+        skm.indexCount = static_cast<UINT>(asset->indices.size());
+
+        return &m_skeletalMeshCache.emplace(assetId, std::move(skm)).first->second;
+    }
 };
 
 D3D12Renderer::D3D12Renderer()  : m_impl(new D3D12RendererImpl{}) {}
@@ -2624,12 +2895,18 @@ void D3D12Renderer::Shutdown()
     if (m_impl->fenceEvent) { CloseHandle(m_impl->fenceEvent); m_impl->fenceEvent = nullptr; }
 
     m_impl->meshCache.clear();
+    m_impl->m_skeletalMeshCache.clear();
     m_impl->cube = {};
     m_impl->viewportRT.Reset();
     m_impl->viewportDepth.Reset();
     m_impl->viewportReadback.Reset();
     m_impl->viewportRtvHeap.Reset();
     m_impl->viewportDsvHeap.Reset();
+    m_impl->m_skinnedPSO.Reset();
+    m_impl->m_skinnedHdrPSO.Reset();
+    m_impl->skinnedRootSig.Reset();
+    for (UINT i = 0; i < k_frameCount; ++i)
+        m_impl->m_bonesCB[i].Reset();
     m_impl->pso.Reset();
     m_impl->transparentPSO.Reset();
     m_impl->depthPSO.Reset();
@@ -2903,6 +3180,74 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         auto* transePso = p.usingHDR && p.hdrTransparentPso ? p.hdrTransparentPso.Get() : p.transparentPSO.Get();
         cl->SetPipelineState(scenePso);
         for (const DrawCall* dc : opaqueDCs) drawDC12(*dc);
+
+        // ── Skinned draw calls ────────────────────────────────────────────────
+        if (p.m_skinnedPSO && p.skinnedRootSig && !cmds.skinnedDrawCalls().empty())
+        {
+            auto* activeSkinnedPso = (p.usingHDR && p.m_skinnedHdrPSO)
+                                         ? p.m_skinnedHdrPSO.Get()
+                                         : p.m_skinnedPSO.Get();
+
+            UINT skinnedIdx = 0;
+            const D3D12_GPU_VIRTUAL_ADDRESS bonesBase =
+                p.m_bonesCB[p.frameIndex] ? p.m_bonesCB[p.frameIndex]->GetGPUVirtualAddress() : 0;
+            uint8_t* bonesPtr = p.m_bonesCBPtr[p.frameIndex];
+
+            // Switch to skinned root sig + PSO, re-bind per-frame CB and scene SRV table.
+            cl->SetGraphicsRootSignature(p.skinnedRootSig.Get());
+            cl->SetPipelineState(activeSkinnedPso);
+            cl->SetGraphicsRootConstantBufferView(1, p.perFrameCB[p.frameIndex]->GetGPUVirtualAddress());
+            if (p.sceneSrvHeap)
+                cl->SetGraphicsRootDescriptorTable(2, p.sceneSrvHeap->GetGPUDescriptorHandleForHeapStart());
+
+            for (const SkinnedDrawCall& sdc : cmds.skinnedDrawCalls())
+            {
+                if (drawIdx >= k_maxDraws) break;
+                if (skinnedIdx >= p.k_maxSkinnedDraws) break;
+
+                const GpuSkeletalMesh12* skm = p.resolveSkeletalMesh12(sdc.meshAssetId, m_contentManager);
+                if (!skm || !skm->indexCount) continue;
+
+                // Upload bone matrices (clamped to 128) into the bones ring slot.
+                if (bonesPtr && bonesBase)
+                {
+                    const size_t boneCount = std::min(sdc.boneMatrices.size(), size_t(128));
+                    uint8_t* dst = bonesPtr + static_cast<size_t>(skinnedIdx) * p.k_bonesCBSlot;
+                    std::memcpy(dst, sdc.boneMatrices.data(), boneCount * sizeof(glm::mat4));
+                }
+
+                // Per-object CB (reuses perObjectRing / drawIdx).
+                PerObjectCB o{};
+                o.mvp   = viewProj * sdc.transform;
+                o.model = sdc.transform;
+                o.color = glm::vec4(sdc.baseColor, 0.0f);
+                o.pbr   = glm::vec4(sdc.metallic, sdc.roughness, sdc.opacity, 0.0f);
+                if (ringPtr)
+                    std::memcpy(ringPtr + static_cast<size_t>(drawIdx) * k_cbSlot, &o, sizeof(o));
+                cl->SetGraphicsRootConstantBufferView(0, ringBase + static_cast<UINT64>(drawIdx) * k_cbSlot);
+
+                // Bones CB at param index 3 (b2).
+                if (bonesBase)
+                    cl->SetGraphicsRootConstantBufferView(3, bonesBase + static_cast<UINT64>(skinnedIdx) * p.k_bonesCBSlot);
+
+                // Bind 3 VB slots + IB.
+                D3D12_VERTEX_BUFFER_VIEW vbvs[3] = { skm->vbv, skm->boneIdVbv, skm->boneWgtVbv };
+                cl->IASetVertexBuffers(0, 3, vbvs);
+                cl->IASetIndexBuffer(&skm->ibv);
+                cl->DrawIndexedInstanced(skm->indexCount, 1, 0, 0, 0);
+
+                ++drawIdx;
+                ++skinnedIdx;
+            }
+
+            // Restore scene root sig + PSO for subsequent transparent/debug draws.
+            cl->SetGraphicsRootSignature(p.rootSig.Get());
+            cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            cl->SetGraphicsRootConstantBufferView(1, p.perFrameCB[p.frameIndex]->GetGPUVirtualAddress());
+            if (p.sceneSrvHeap)
+                cl->SetGraphicsRootDescriptorTable(2, p.sceneSrvHeap->GetGPUDescriptorHandleForHeapStart());
+            cl->SetPipelineState(scenePso);
+        }
 
         if (!transparentDCs.empty() && transePso) {
             cl->SetPipelineState(transePso);
