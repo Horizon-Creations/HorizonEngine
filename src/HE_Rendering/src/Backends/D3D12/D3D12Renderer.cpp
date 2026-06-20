@@ -384,16 +384,27 @@ cbuffer SSAOCB : register(b0)
 {
     float4x4 uSSAOProj;
     float4   uSSAONoiseScale;
-    float4   uSSAOParams;       // x=radius, y=bias, z=intensity
+    float4   uSSAOParams;  // x=radius, y=bias, z=intensity, w=method(0=SSAO,1=HBAO,2=GTAO)
     float4   uSSAOKernel[32];
 };
 struct FsIn { float4 clip : SV_POSITION; float2 uv : TEXCOORD0; };
+static const float HE_PI      = 3.14159265359f;
+static const float HE_TWO_PI  = 6.28318530718f;
+static const float HE_HALF_PI = 1.57079632679f;
+uint hbaoSectors(float minH, float maxH, uint mask)
+{
+    uint startBit = min(uint(clamp(minH, 0.0f, 1.0f) * 32.0f), 31u);
+    uint count    = uint(ceil(clamp(maxH - minH, 0.0f, 1.0f) * 32.0f));
+    uint bits     = (count > 0u) ? (0xFFFFFFFFu >> (32u - count)) : 0u;
+    return mask | (bits << startBit);
+}
+float hbaoIgn(float2 p) { return frac(52.9829189f * frac(0.06711056f * p.x + 0.00583715f * p.y)); }
 float4 SSAOMain(FsIn i) : SV_TARGET
 {
     float4 pv = uViewPos.SampleLevel(uPointSamp, i.uv, 0);
-    if (pv.a < 0.5) return float4(1,1,1,1);
+    if (pv.a < 0.5f) return float4(1,1,1,1);
     float3 P = pv.xyz;
-    float2 texel = rcp(float2(uSSAONoiseScale.xy * 4.0));
+    float2 texel = rcp(float2(uSSAONoiseScale.xy * 4.0f));
     float3 Pr = uViewPos.SampleLevel(uPointSamp, i.uv + float2( texel.x, 0), 0).xyz;
     float3 Pl = uViewPos.SampleLevel(uPointSamp, i.uv - float2( texel.x, 0), 0).xyz;
     float3 Pu = uViewPos.SampleLevel(uPointSamp, i.uv + float2(0,  texel.y), 0).xyz;
@@ -401,30 +412,134 @@ float4 SSAOMain(FsIn i) : SV_TARGET
     float3 ddx_ = (abs(Pr.z-P.z) < abs(P.z-Pl.z)) ? (Pr-P) : (P-Pl);
     float3 ddy_ = (abs(Pd.z-P.z) < abs(P.z-Pu.z)) ? (Pd-P) : (P-Pu);
     float3 N = normalize(cross(ddx_, ddy_));
-    if (N.z < 0.0) N = -N;
-    float3 randv = uNoise.SampleLevel(uPointSamp, i.uv * uSSAONoiseScale.xy, 0).xyz;
-    float3 T = normalize(randv - N * dot(randv, N));
-    float3 B = cross(N, T);
-    float3x3 TBN = float3x3(T, B, N);
-    float occ = 0.0;
-    float radius = uSSAOParams.x, bias = uSSAOParams.y, intensity = uSSAOParams.z;
-    for (int k = 0; k < 32; ++k)
+    if (N.z < 0.0f) N = -N;
+    float radius    = uSSAOParams.x;
+    float bias      = uSSAOParams.y;
+    float intensity = uSSAOParams.z;
+    int   method    = (int)uSSAOParams.w;
+    float ao;
+    if (method == 1)
     {
-        float3 sp = P + mul(TBN, uSSAOKernel[k].xyz) * radius;
-        float4 clipSP = mul(uSSAOProj, float4(sp, 1.0));
-        float2 suv = float2(clipSP.x/clipSP.w * 0.5 + 0.5,
-                            0.5 - clipSP.y/clipSP.w * 0.5);
-        if (suv.x < 0 || suv.x > 1 || suv.y < 0 || suv.y > 1) continue;
-        float4 sv = uViewPos.SampleLevel(uPointSamp, suv, 0);
-        if (sv.a < 0.5) continue;
-        float3 toOcc = sv.xyz - P;
-        float above = dot(toOcc, N);
-        float rangeCheck = smoothstep(0.0, 1.0, radius / max(length(toOcc), 1e-4));
-        occ += (above > bias ? 1.0 : 0.0) * rangeCheck;
+        const int   SLICES    = 3;
+        const int   STEPS     = 8;
+        const float THICKNESS = 0.5f;
+        float3 V = normalize(-P);
+        float  jitter = hbaoIgn(i.clip.xy) - 0.5f;
+        float  depthScale = 0.5f * radius / max(-P.z, 1e-4f);
+        float  visibility = 0.0f;
+        for (int s = 0; s < SLICES; ++s)
+        {
+            float  phi     = (float(s) + jitter) * (HE_TWO_PI / float(SLICES));
+            float2 omega   = float2(cos(phi), sin(phi));
+            float3 dir     = float3(omega, 0.0f);
+            float3 orthoDir = dir - dot(dir, V) * V;
+            float3 axis    = cross(dir, V);
+            float3 projN   = N - axis * dot(N, axis);
+            float  projLen = length(projN);
+            if (projLen < 1e-5f) { visibility += 1.0f; continue; }
+            float  nAng    = sign(dot(orthoDir, projN)) * acos(clamp(dot(projN, V) / projLen, 0.0f, 1.0f));
+            float2 omegaUV = float2(uSSAOProj[0][0] * omega.x, uSSAOProj[1][1] * omega.y);
+            uint   occ     = 0u;
+            for (int k = 0; k < STEPS; ++k)
+            {
+                float  t   = (float(k) + jitter) / float(STEPS) + 0.01f;
+                float2 sUV = i.uv - t * depthScale * omegaUV;
+                float4 sp  = uViewPos.SampleLevel(uPointSamp, sUV, 0);
+                if (sp.a < 0.5f) continue;
+                float3 d   = sp.xyz - P;
+                float  len = length(d);
+                float2 fb;
+                fb.x = dot(d / max(len, 1e-5f), V);
+                fb.y = dot(normalize(d - V * THICKNESS), V);
+                fb   = acos(clamp(fb, -1.0f, 1.0f));
+                fb   = clamp((fb + nAng + HE_HALF_PI) / HE_PI, 0.0f, 1.0f);
+                occ  = hbaoSectors(min(fb.x, fb.y), max(fb.x, fb.y), occ);
+            }
+            visibility += 1.0f - float(countbits(occ)) / 32.0f;
+        }
+        visibility /= float(SLICES);
+        ao = 1.0f - (1.0f - visibility) * intensity;
+        ao = max(ao, 0.1f);
     }
-    float ao = 1.0 - (occ / 32.0) * intensity;
-    ao = max(ao, 0.5);
-    return float4(ao, ao, ao, 1.0);
+    else if (method == 2)
+    {
+        const int SLICES = 3;
+        const int STEPS  = 8;
+        float3 V = normalize(-P);
+        float  jitter = hbaoIgn(i.clip.xy);
+        float  depthScale = 0.5f * radius / max(-P.z, 1e-4f);
+        float  visAccum = 0.0f;
+        for (int s = 0; s < SLICES; ++s)
+        {
+            float  phi     = (float(s) + jitter) * (HE_PI / float(SLICES));
+            float2 omega   = float2(cos(phi), sin(phi));
+            float3 dir     = float3(omega, 0.0f);
+            float3 axis    = cross(dir, V);
+            float  axisLen = length(axis);
+            if (axisLen < 1e-5f) { visAccum += 1.0f; continue; }
+            axis /= axisLen;
+            float3 orthoDir = normalize(dir - dot(dir, V) * V);
+            float3 projN    = N - axis * dot(N, axis);
+            float  projLen  = length(projN);
+            if (projLen < 1e-5f) continue;
+            float  gamma    = sign(dot(orthoDir, projN)) * acos(clamp(dot(projN, V) / projLen, -1.0f, 1.0f));
+            float2 omegaUV  = float2(uSSAOProj[0][0] * omega.x, uSSAOProj[1][1] * omega.y);
+            float  cH1 = 0.0f;
+            float  cH2 = 0.0f;
+            for (int k = 0; k < STEPS; ++k)
+            {
+                float  t   = (float(k) + jitter) / float(STEPS) + 0.02f;
+                float4 sp1 = uViewPos.SampleLevel(uPointSamp, i.uv + t * depthScale * omegaUV, 0);
+                if (sp1.a >= 0.5f) {
+                    float3 d = sp1.xyz - P; float len = length(d);
+                    float fall = clamp(1.0f - len / radius, 0.0f, 1.0f);
+                    cH1 = max(cH1, (dot(d, V) / max(len, 1e-5f)) * fall);
+                }
+                float4 sp2 = uViewPos.SampleLevel(uPointSamp, i.uv - t * depthScale * omegaUV, 0);
+                if (sp2.a >= 0.5f) {
+                    float3 d = sp2.xyz - P; float len = length(d);
+                    float fall = clamp(1.0f - len / radius, 0.0f, 1.0f);
+                    cH2 = max(cH2, (dot(d, V) / max(len, 1e-5f)) * fall);
+                }
+            }
+            float h1 =  acos(clamp(cH1, -1.0f, 1.0f));
+            float h2 = -acos(clamp(cH2, -1.0f, 1.0f));
+            h1 = gamma + min(h1 - gamma,  HE_HALF_PI);
+            h2 = gamma + max(h2 - gamma, -HE_HALF_PI);
+            float cosG = cos(gamma), sinG = sin(gamma);
+            float arc  = (-cos(2.0f * h1 - gamma) + cosG + 2.0f * h1 * sinG)
+                       + (-cos(2.0f * h2 - gamma) + cosG + 2.0f * h2 * sinG);
+            visAccum += projLen * 0.25f * arc;
+        }
+        float visibility = clamp(visAccum / float(SLICES), 0.0f, 1.0f);
+        ao = 1.0f - (1.0f - visibility) * intensity;
+        ao = max(ao, 0.1f);
+    }
+    else
+    {
+        float3 randv = uNoise.SampleLevel(uPointSamp, i.uv * uSSAONoiseScale.xy, 0).xyz;
+        float3 T = normalize(randv - N * dot(randv, N));
+        float3 B = cross(N, T);
+        float3x3 TBN = float3x3(T, B, N);
+        float occ = 0.0f;
+        for (int k = 0; k < 32; ++k)
+        {
+            float3 sp = P + mul(TBN, uSSAOKernel[k].xyz) * radius;
+            float4 clipSP = mul(uSSAOProj, float4(sp, 1.0f));
+            float2 suv = float2(clipSP.x/clipSP.w * 0.5f + 0.5f,
+                                0.5f - clipSP.y/clipSP.w * 0.5f);
+            if (suv.x < 0 || suv.x > 1 || suv.y < 0 || suv.y > 1) continue;
+            float4 sv = uViewPos.SampleLevel(uPointSamp, suv, 0);
+            if (sv.a < 0.5f) continue;
+            float3 toOcc = sv.xyz - P;
+            float above = dot(toOcc, N);
+            float rangeCheck = smoothstep(0.0f, 1.0f, radius / max(length(toOcc), 1e-4f));
+            occ += (above > bias ? 1.0f : 0.0f) * rangeCheck;
+        }
+        ao = 1.0f - (occ / 32.0f) * intensity;
+        ao = max(ao, 0.5f);
+    }
+    return float4(ao, ao, ao, 1.0f);
 }
 )HLSL";
 
@@ -1397,6 +1512,7 @@ struct D3D12RendererImpl
     float ssaoBias      = 0.025f;
     float ssaoIntensity = 1.5f;
     bool  ssaoEnabled   = true;
+    int   ssaoMethod    = 0;
     bool  ssaoReady     = false;
     int   ssaoW         = 0;
     int   ssaoH         = 0;
@@ -2305,8 +2421,8 @@ struct D3D12RendererImpl
             // noiseScale: (W/4, H/4, 0, 0)
             glm::vec4 noiseScale(float(w)/4.0f, float(h)/4.0f, 0.0f, 0.0f);
             std::memcpy(static_cast<uint8_t*>(ssaoCBPtr[fi]) + 64, &noiseScale, 16);
-            // params: (radius, bias, intensity, 0)
-            glm::vec4 params(ssaoRadius, ssaoBias, ssaoIntensity, 0.0f);
+            // params: (radius, bias, intensity, method)
+            glm::vec4 params(ssaoRadius, ssaoBias, ssaoIntensity, float(ssaoMethod));
             std::memcpy(static_cast<uint8_t*>(ssaoCBPtr[fi]) + 80, &params, 16);
             // kernel[32] already filled at init time
         }
@@ -3088,4 +3204,13 @@ void D3D12Renderer::SetMoonTexture(const void* rgba8Pixels, int width, int heigh
     sv.Texture2D.MipLevels = 1;
     p.device->CreateShaderResourceView(p.moonTex12.Get(), &sv,
         p.skyEnvHeap->GetCPUDescriptorHandleForHeapStart());
+}
+
+void D3D12Renderer::SetSSAOSettings(const SSAOSettings& s)
+{
+    m_impl->ssaoEnabled   = s.enabled;
+    m_impl->ssaoRadius    = s.radius;
+    m_impl->ssaoBias      = 0.025f;   // no bias field in SSAOSettings; keep default
+    m_impl->ssaoIntensity = s.intensity;
+    m_impl->ssaoMethod    = s.method;
 }

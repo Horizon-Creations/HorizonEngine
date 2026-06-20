@@ -42,6 +42,7 @@ public:
 
 	void SetDebugLines(const std::vector<DebugLine>& lines) override;
 	void SetMoonTexture(const void* rgba8Pixels, int width, int height) override;
+	void SetSSAOSettings(const SSAOSettings& s) override;
 
 	// Offscreen viewport (editor scene view)
 	void  SetViewportSize(uint32_t width, uint32_t height) override;
@@ -396,5 +397,6 @@ private:
 	float    m_ssaoRadius   = 0.5f;
 	float    m_ssaoBias     = 0.025f;
 	float    m_ssaoIntensity= 1.5f;
+	int      m_ssaoMethod   = 0;
 	uint32_t m_ssaoW = 0, m_ssaoH = 0;
 };

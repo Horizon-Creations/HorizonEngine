@@ -34,6 +34,7 @@ public:
 
     void SetDebugLines(const std::vector<DebugLine>& lines) override;
     void SetMoonTexture(const void* rgba8Pixels, int width, int height) override;
+    void SetSSAOSettings(const SSAOSettings& settings) override;
 
 private:
     // Extract → cull → sort → RenderGraph → replay into the bound command list.
