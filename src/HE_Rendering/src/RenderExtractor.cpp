@@ -152,89 +152,85 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 		obj.lod             = d.lod;
 	});
 
-	// ── Particles ────────────────────────────────────────────────────────────
-	// Each live particle becomes a billboard RenderObject. Same-emitter particles
-	// share the same mesh+material so the renderer's instancing pass batches them.
+	// ── Particles + weather precipitation ─────────────────────────────────────
+	// Both sources turn each live particle into a camera-facing billboard. The
+	// per-particle cost is the billboard basis (cross products + normalises), so we
+	// first gather lightweight inputs (cheap, serial) and then build the matrices
+	// across all cores — the same gather→parallel_for pattern as the mesh path. At
+	// high precipitation caps this turns a serial tens-of-thousands stall into a
+	// parallel sweep. Same-emitter particles keep one mesh+material so the geometry
+	// pass still instances them.
+	enum class BillboardKind : uint8_t { Camera, Snow, RainStreak };
+	struct ParticleInput {
+		glm::vec3     position;
+		glm::vec3     velocity;   // RainStreak only
+		float         size;       // Camera / Snow
+		HE::UUID      meshId;
+		HE::UUID      matId;
+		uint32_t      entityId;
+		BillboardKind kind;
+	};
+	std::vector<ParticleInput> pin;
+
 	for (auto [e, tc, ps] : reg.view<TransformComponent, ParticleSystemComponent>().each())
 	{
 		if (ps.particles.empty()) continue;
 		const HE::UUID meshId = (ps.meshAssetId == HE::UUID{}) ? HE::kDefaultQuadMeshId : ps.meshAssetId;
-
+		pin.reserve(pin.size() + ps.particles.size());
 		for (const Particle& p : ps.particles)
 		{
 			if (p.lifetime <= 0.0f) continue;
 			const float t01  = 1.0f - p.lifetime / p.maxLifetime;  // 0=born, 1=dead
 			const float size = ps.startSize + (ps.endSize - ps.startSize) * t01;
 			if (size <= 0.0f) continue;
-
-			// Billboard: rotate quad to face the camera.
-			glm::vec3 look = out.camera.position - p.position;
-			const float d  = glm::length(look);
-			if (d < 1e-5f) continue;
-			look /= d;
-			glm::vec3 right = glm::cross(glm::vec3(0,1,0), look);
-			if (glm::length(right) < 1e-4f) right = glm::vec3(1,0,0);
-			right = glm::normalize(right);
-			const glm::vec3 up = glm::cross(look, right);
-
-			glm::mat4 world(1.0f);
-			world[0] = glm::vec4(right * size, 0.0f);
-			world[1] = glm::vec4(up    * size, 0.0f);
-			world[2] = glm::vec4(look  * size, 0.0f);
-			world[3] = glm::vec4(p.position,   1.0f);
-
-			RenderObject obj;
-			obj.meshAssetId     = meshId;
-			obj.materialAssetId = ps.materialAssetId;
-			obj.transform       = world;
-			obj.worldBounds     = kUnitCube.transformed(world);
-			obj.entityId        = static_cast<uint32_t>(e);
-			obj.lod             = 0;
-			obj.castsShadow     = false; // billboard particles: no shadow / AO
-			obj.contributesAO   = false;
-			out.objects.push_back(obj);
+			pin.push_back({ p.position, glm::vec3(0.0f), size, meshId, ps.materialAssetId,
+			                static_cast<uint32_t>(e), BillboardKind::Camera });
 		}
 	}
 
-	// ── Weather precipitation (rain / snow) ────────────────────────────────────
-	// The WeatherComponent owns a camera-following particle pool (simulated by
-	// WeatherSystem). Each drop is a billboard: rain stretches along its velocity into a
-	// thin streak, snow is a small camera-facing flake. Same mesh+material so the geometry
-	// pass batches them.
 	for (auto [e, wx] : reg.view<WeatherComponent>().each())
 	{
 		if (wx.precip.empty()) continue;
 		const bool isSnow = (wx.curPrecipType == PrecipType::Snow);
-		const glm::vec3 camPos = out.camera.position;
 		// Snow uses the star flake mesh; rain uses the quad stretched into a streak.
-		const HE::UUID precipMesh = isSnow ? HE::kDefaultSnowflakeMeshId : HE::kDefaultQuadMeshId;
-
+		const HE::UUID      precipMesh = isSnow ? HE::kDefaultSnowflakeMeshId : HE::kDefaultQuadMeshId;
+		const BillboardKind kind       = isSnow ? BillboardKind::Snow : BillboardKind::RainStreak;
+		pin.reserve(pin.size() + wx.precip.size());
 		for (const Particle& p : wx.precip)
-		{
-			glm::vec3 look = camPos - p.position;
-			const float d = glm::length(look);
-			if (d < 1e-4f) continue;
-			look /= d;
+			pin.push_back({ p.position, p.velocity, 0.0f, precipMesh, HE::UUID{},
+			                static_cast<uint32_t>(e), kind });
+	}
 
-			glm::mat4 world(1.0f);
-			if (isSnow)
+	if (!pin.empty())
+	{
+		const size_t   base   = out.objects.size();
+		const glm::vec3 camPos = out.camera.position;
+		out.objects.resize(base + pin.size());
+		parallel_for(pin.size(), [&](size_t i) {
+			const ParticleInput& in  = pin[i];
+			RenderObject&        obj = out.objects[base + i];
+			obj.meshAssetId     = in.meshId;
+			obj.materialAssetId = in.matId;
+			obj.entityId        = in.entityId;
+			obj.lod             = 0;
+			obj.castsShadow     = false;  // billboards: no shadow / AO contribution
+			obj.contributesAO   = false;
+
+			glm::vec3   look = camPos - in.position;
+			const float d    = glm::length(look);
+			glm::mat4   world(1.0f);
+			if (d <= 1e-5f)
 			{
-				const float s = 0.16f; // flake radius (star mesh spans ±0.5 in local space)
-				glm::vec3 right = glm::cross(glm::vec3(0,1,0), look);
-				if (glm::length(right) < 1e-4f) right = glm::vec3(1,0,0);
-				right = glm::normalize(right);
-				const glm::vec3 up = glm::cross(look, right);
-				world[0] = glm::vec4(right * s, 0.0f);
-				world[1] = glm::vec4(up    * s, 0.0f);
-				world[2] = glm::vec4(look  * s, 0.0f);
+				world = glm::mat4(0.0f);  // particle sitting on the camera → degenerate/invisible
 			}
-			else // rain streak: long axis along the screen-projected velocity
+			else if (in.kind == BillboardKind::RainStreak)
 			{
-				glm::vec3 vdir = p.velocity;
+				look /= d;
+				glm::vec3 vdir = in.velocity;
 				const float vl = glm::length(vdir);
-				vdir = (vl > 1e-4f) ? vdir / vl : glm::vec3(0,-1,0);
-				glm::vec3 up = vdir - look * glm::dot(vdir, look); // project onto camera plane
-				if (glm::length(up) < 1e-4f) up = glm::vec3(0,1,0);
+				vdir = (vl > 1e-4f) ? vdir / vl : glm::vec3(0, -1, 0);
+				glm::vec3 up = vdir - look * glm::dot(vdir, look);  // project onto camera plane
+				if (glm::length(up) < 1e-4f) up = glm::vec3(0, 1, 0);
 				up = glm::normalize(up);
 				const glm::vec3 right = glm::normalize(glm::cross(up, look));
 				const float len = 0.6f, thin = 0.02f;
@@ -242,19 +238,22 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 				world[1] = glm::vec4(up    * len,  0.0f);
 				world[2] = glm::vec4(look,         0.0f);
 			}
-			world[3] = glm::vec4(p.position, 1.0f);
-
-			RenderObject obj;
-			obj.meshAssetId     = precipMesh;
-			obj.materialAssetId = HE::UUID{};
-			obj.transform       = world;
-			obj.worldBounds     = kUnitCube.transformed(world);
-			obj.entityId        = static_cast<uint32_t>(e);
-			obj.lod             = 0;
-			obj.castsShadow     = false; // rain/snow don't cast shadows or darken AO
-			obj.contributesAO   = false;
-			out.objects.push_back(obj);
-		}
+			else  // Camera-facing quad (general particle) or snow flake
+			{
+				look /= d;
+				const float s = (in.kind == BillboardKind::Snow) ? 0.16f : in.size;
+				glm::vec3 right = glm::cross(glm::vec3(0, 1, 0), look);
+				if (glm::length(right) < 1e-4f) right = glm::vec3(1, 0, 0);
+				right = glm::normalize(right);
+				const glm::vec3 up = glm::cross(look, right);
+				world[0] = glm::vec4(right * s, 0.0f);
+				world[1] = glm::vec4(up    * s, 0.0f);
+				world[2] = glm::vec4(look  * s, 0.0f);
+			}
+			world[3] = glm::vec4(in.position, 1.0f);
+			obj.transform   = world;
+			obj.worldBounds = kUnitCube.transformed(world);
+		});
 	}
 
 	// ── Foliage ──────────────────────────────────────────────────────────────
