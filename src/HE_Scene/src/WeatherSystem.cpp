@@ -247,6 +247,9 @@ void WeatherSystem::update(HorizonWorld& world, float dt, const glm::vec3& camer
 
     if (wantsPrecip)
     {
+        // Grow the pool to its cap once so the emission loop never reallocates mid-fill.
+        if (static_cast<int>(wx.precip.capacity()) < maxParticles)
+            wx.precip.reserve(static_cast<size_t>(maxParticles));
         const float emitRate = wx.curPrecip * (isSnow ? 400.0f : 900.0f); // particles/sec
         const float interval = (emitRate > 0.0f) ? 1.0f / emitRate : 1e30f;
         wx.precipEmitAccum += dt;
