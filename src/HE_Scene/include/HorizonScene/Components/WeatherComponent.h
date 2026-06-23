@@ -65,6 +65,11 @@ struct WeatherComponent
     // (raycasts) overrides this per-cell.
     float groundLevel = 0.0f;
 
+    // When true the weather blend still runs (precipitation, lightning, autoCycle)
+    // but stops writing cloudCoverage/fogDensity/windSpeed into the EnvironmentComponent,
+    // so those can be dialled in by hand from the inspector while a WeatherComponent exists.
+    bool  manualEnvironment = false;
+
     // ── Runtime (never serialized) ───────────────────────────────────────────
     // Blend bookkeeping: `from*` is a snapshot of the live output taken when a new
     // target is requested, so retargeting mid-transition stays continuous.

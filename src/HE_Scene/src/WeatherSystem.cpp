@@ -172,9 +172,19 @@ void WeatherSystem::update(HorizonWorld& world, float dt, const glm::vec3& camer
     float windDirDeg = 30.0f;
     if (auto* env = reg.try_get<EnvironmentComponent>(world.rootEntity()))
     {
-        env->cloudCoverage = wx.curCloudCoverage;
-        env->fogDensity    = wx.curFogDensity;
-        env->windSpeed     = wx.curWindSpeed;
+        // In manual-environment mode the user owns cloud/fog/wind from the inspector —
+        // leave them untouched. Flash stays weather-driven (it's a transient effect, not
+        // an authored slider). windSpeed for the precip drift then follows env->windSpeed.
+        if (!wx.manualEnvironment)
+        {
+            env->cloudCoverage = wx.curCloudCoverage;
+            env->fogDensity    = wx.curFogDensity;
+            env->windSpeed     = wx.curWindSpeed;
+        }
+        else
+        {
+            wx.curWindSpeed = env->windSpeed;   // keep precip drift in sync with the manual value
+        }
         env->flash         = wx.flashIntensity;
         windDirDeg         = env->windDirection;
     }
