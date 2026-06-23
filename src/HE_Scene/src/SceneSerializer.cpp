@@ -227,6 +227,7 @@ namespace
 				{ "maxRainParticles",   w->maxRainParticles },
 				{ "maxSnowParticles",   w->maxSnowParticles },
 				{ "groundLevel",        w->groundLevel },
+				{ "manualEnvironment",  w->manualEnvironment },
 			};
 		}
 		if (auto* t = registry.try_get<TerrainComponent>(entity))
@@ -545,6 +546,7 @@ namespace
 			w.maxRainParticles = c.value("maxRainParticles", w.maxRainParticles);
 			w.maxSnowParticles = c.value("maxSnowParticles", w.maxSnowParticles);
 			w.groundLevel      = c.value("groundLevel",      w.groundLevel);
+			w.manualEnvironment = c.value("manualEnvironment", w.manualEnvironment);
 			registry.emplace_or_replace<WeatherComponent>(entity, w);
 		}
 		if (comps.contains("terrain"))

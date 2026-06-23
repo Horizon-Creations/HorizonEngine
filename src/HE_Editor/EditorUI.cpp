@@ -3642,7 +3642,8 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			ImGui::ColorEdit3("Moon Color", &env->moonColor.x, ImGuiColorEditFlags_NoInputs); trackEdit();
 			ImGui::SliderFloat("Moon Brightness", &env->moonIntensity, 0.0f, 10.0f, "%.2f"); trackEdit();
 
-			const bool weatherDriven = registry.all_of<WeatherComponent>(entity);
+			const auto* weatherComp = registry.try_get<WeatherComponent>(entity);
+			const bool weatherDriven = weatherComp && !weatherComp->manualEnvironment;
 			ImGui::BeginDisabled(weatherDriven);
 			ImGui::SeparatorText("Clouds");
 			ImGui::SetNextItemWidth(-1.0f);
@@ -3699,6 +3700,11 @@ void EditorUI::RenderInspector(AppContext& ctx)
 				ImGui::SliderFloat("Cycle Time", &w->cycleSeconds, 5.0f, 600.0f, "%.0f s",
 				                   ImGuiSliderFlags_Logarithmic); trackEdit();
 				ImGui::EndDisabled();
+
+				ImGui::Checkbox("Manual sky (clouds/fog/wind)", &w->manualEnvironment); trackEdit();
+				ImGui::TextDisabled(w->manualEnvironment
+					? "Cloud/fog/wind set by hand above; precip & lightning still follow the preset."
+					: "Cloud/fog/wind are driven by the preset; tick to edit them by hand.");
 
 				if (w->currentKind != w->targetKind)
 					ImGui::Text("Transitioning %s -> %s",
