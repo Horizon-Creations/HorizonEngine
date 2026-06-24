@@ -173,6 +173,7 @@ struct SceneUniforms {
 	float4   ambient;        // xyz = flat ambient fill (floor + overcast); w unused
 	float4   fog;            // x = density (0 = off), y = height falloff
 	float4   viewport;       // xy = output size (screen-space AO lookup), z = ssaoEnabled
+	float4   weather;        // x = wetness, y = snow cover (ground response)
 };
 
 // shared skyColor() injected at the marker below (newLibraryWithSource)
@@ -317,6 +318,15 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
 		: in.color;
 	float3 N = normalize(in.normal);
 
+	// Weather ground response (matches the GL backend): snow on up-facing surfaces,
+	// wetness darkens + glosses the rest. Driven by the EnvironmentComponent.
+	float snowMask = smoothstep(0.25, 0.75, clamp(N.y, 0.0, 1.0)) * clamp(scene.weather.y, 0.0, 1.0);
+	float wet      = clamp(scene.weather.x, 0.0, 1.0) * (1.0 - snowMask);
+	albedo = mix(albedo, float3(0.90, 0.93, 0.97), snowMask);
+	albedo *= (1.0 - 0.30 * wet);
+	float wRough = mix(in.roughness, 0.08, wet);
+	wRough = mix(wRough, 0.85, snowMask);
+
 	if (scene.lightCount == 0)
 	{
 		float3 L    = normalize(float3(0.5, 0.8, 0.6));
@@ -327,22 +337,23 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
 	// Metallic-roughness split (matches the GL backend).
 	float3 diffuseColor = albedo * (1.0 - in.metallic);
 	float3 specColor    = mix(float3(0.04), albedo, in.metallic);
-	float  shininess    = mix(128.0, 8.0, in.roughness);
-	float  specScale    = mix(0.5, 0.03, in.roughness);
+	float  shininess    = mix(128.0, 8.0, wRough);
+	float  specScale    = mix(0.5, 0.03, wRough) + 0.25 * wet; // wet sheen
+	specColor           = mix(specColor, float3(0.08), wet);
 
 	float3 V = normalize(scene.cameraPos.xyz - in.worldPos);
 
 	// Image-based ambient from the procedural sky (matches the GL backend):
 	// diffuse from the normal, specular from the reflection (bent toward N by
 	// roughness as a crude prefilter).
-	float3 Rrough  = normalize(mix(reflect(-V, N), N, in.roughness));
+	float3 Rrough  = normalize(mix(reflect(-V, N), N, wRough));
 	// Clamp the diffuse IBL lookup at least 5° above the horizon. Sampling near
 	// or at the horizon (N.y ≈ 0) returns the warm/orange sunset band of the sky
 	// even at noon. A floor of 0.1 keeps the sample safely in the cool sky dome.
 	float3 Nup     = normalize(float3(N.x, max(N.y, 0.1), N.z));
 	float3 ambDiff = skyEnv.sample(skyEnvSmp, Nup).rgb    * diffuseColor;
 	float3 ambSpec = skyEnv.sample(skyEnvSmp, Rrough).rgb * specColor;
-	float3 ambient = ambDiff * 0.35 + ambSpec * (1.0 - 0.6 * in.roughness);
+	float3 ambient = ambDiff * 0.35 + ambSpec * (1.0 - 0.6 * wRough);
 	// Screen-space ambient occlusion darkens only the IBL indirect term in
 	// crevices; the direct lighting added below is left untouched. 1.0 = fully lit.
 	float ao = (scene.viewport.z > 0.5)
@@ -1347,6 +1358,7 @@ struct SceneUniforms
 	glm::vec4 ambient = glm::vec4(0.0f);
 	glm::vec4 fog = glm::vec4(0.0f); // x = density (0 = off), y = height falloff
 	glm::vec4 viewport = glm::vec4(0.0f); // xy = output size, z = ssaoEnabled
+	glm::vec4 weather = glm::vec4(0.0f); // x = wetness, y = snow cover
 };
 
 // Matches the MSL SSAOPosUniforms / SSAOParams structs.
@@ -3072,6 +3084,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 	                                GetEnvironment().fogHeightFalloff, 0.0f, 0.0f);
 	scene.viewport      = glm::vec4(static_cast<float>(width), static_cast<float>(height),
 	                                ssaoActive ? 1.0f : 0.0f, 0.0f);
+	scene.weather       = glm::vec4(GetEnvironment().wetness, GetEnvironment().snowAmount, 0.0f, 0.0f);
 	[encoder setFragmentBytes:&scene length:sizeof(scene) atIndex:0];
 
 	// Transparent (opacity < 1) draws collected during the opaque loop and replayed

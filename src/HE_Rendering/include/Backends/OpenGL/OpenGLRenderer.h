@@ -137,6 +137,8 @@ private:
 	int          m_uAO            = -1;   // SSAO occlusion sampler unit
 	int          m_uViewport      = -1;   // viewport size (screen-space AO lookup)
 	int          m_uSSAOEnabled   = -1;   // 1 = modulate ambient by SSAO
+	int          m_uWetness       = -1;   // weather wet-surface response
+	int          m_uSnow          = -1;   // weather snow cover
 	// Uploaded asset meshes, keyed by asset UUID
 	std::unordered_map<HE::UUID, GpuMesh>         m_meshCache;
 	std::unordered_map<HE::UUID, GpuSkeletalMesh> m_skeletalMeshCache;
@@ -199,6 +201,8 @@ private:
 	int          m_uInstAO                  = -1;
 	int          m_uInstViewport            = -1;
 	int          m_uInstSSAOEnabled         = -1;
+	int          m_uInstWetness             = -1;
+	int          m_uInstSnow                = -1;
 
 	// ── GPU weather particles (transform-feedback precipitation) ────────────
 	// A fixed pool of rain/snow drops lives in two ping-pong VBOs (interleaved

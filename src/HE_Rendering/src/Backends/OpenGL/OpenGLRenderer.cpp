@@ -189,6 +189,8 @@ uniform float     uFogHeightFalloff; // >0 = fog pools near the ground
 uniform sampler2D uAO;               // SSAO occlusion (screen-space); 1 = unoccluded
 uniform vec2      uViewport;         // output size, for the screen-space AO lookup
 uniform int       uSSAOEnabled;      // 1 = darken the ambient by SSAO
+uniform float     uWetness;          // 0..1 wet-surface darken + gloss
+uniform float     uSnow;             // 0..1 snow cover on up-facing surfaces
 
 // shared skyColor() is injected at the marker below (CreateUnlitPipeline)
 //#SKYFUNC#
@@ -255,6 +257,17 @@ void main()
 	vec3 albedo = uHasTexture ? texture(uTexture, vUV).rgb * uColor : uColor;
 	vec3 N      = normalize(vNormal);
 
+	// ── Weather ground response ──────────────────────────────────────────────
+	// Snow lies on up-facing surfaces (matte white); wetness darkens + glosses the
+	// rest. Driven by the EnvironmentComponent (preset or manual); 0 = no effect.
+	float snowMask = smoothstep(0.25, 0.75, clamp(N.y, 0.0, 1.0)) * clamp(uSnow, 0.0, 1.0);
+	float wet      = clamp(uWetness, 0.0, 1.0) * (1.0 - snowMask);
+	albedo = mix(albedo, vec3(0.90, 0.93, 0.97), snowMask);
+	albedo *= (1.0 - 0.30 * wet);
+	// Wet = glossier (sharper highlight); snow = matte.
+	float wRough = mix(uRoughness, 0.08, wet);
+	wRough = mix(wRough, 0.85, snowMask);
+
 	if (uLightCount == 0)
 	{
 		vec3  L    = normalize(vec3(0.5, 0.8, 0.6));
@@ -267,22 +280,23 @@ void main()
 	// roughness widens + dims the Blinn-Phong highlight (cheap PBR stand-in).
 	vec3  diffuseColor = albedo * (1.0 - uMetallic);
 	vec3  specColor    = mix(vec3(0.04), albedo, uMetallic);
-	float shininess    = mix(128.0, 8.0, uRoughness);
-	float specScale    = mix(0.5, 0.03, uRoughness);
+	float shininess    = mix(128.0, 8.0, wRough);
+	float specScale    = mix(0.5, 0.03, wRough) + 0.25 * wet; // wet sheen
+	specColor          = mix(specColor, vec3(0.08), wet);     // water-like F0 on wet ground
 
 	vec3 V = normalize(uCameraPos - vWorldPos);
 
 	// Image-based ambient from the procedural sky (replaces the flat floor):
 	// diffuse from the surface normal, specular from the reflection vector
 	// (bent toward the normal as roughness grows = crude prefilter).
-	vec3 Rrough  = normalize(mix(reflect(-V, N), N, uRoughness));
+	vec3 Rrough  = normalize(mix(reflect(-V, N), N, wRough));
 	// Clamp the diffuse IBL lookup at least 5° above the horizon. Sampling near
 	// or at the horizon (N.y ≈ 0) returns the warm/orange sunset band of the sky
 	// even at noon. A floor of 0.1 keeps the sample safely in the cool sky dome.
 	vec3 Nup     = normalize(vec3(N.x, max(N.y, 0.1), N.z));
 	vec3 ambDiff = texture(uSkyEnv, Nup).rgb    * diffuseColor;
 	vec3 ambSpec = texture(uSkyEnv, Rrough).rgb * specColor;
-	vec3 ambient = ambDiff * 0.35 + ambSpec * (1.0 - 0.6 * uRoughness);
+	vec3 ambient = ambDiff * 0.35 + ambSpec * (1.0 - 0.6 * wRough);
 	// Screen-space ambient occlusion darkens only the IBL indirect term in
 	// crevices; the direct lighting added below is left untouched. 1.0 = fully lit.
 	float ao = (uSSAOEnabled == 1) ? texture(uAO, gl_FragCoord.xy / uViewport).r : 1.0;
@@ -1456,6 +1470,8 @@ void OpenGLRenderer::CreateUnlitPipeline()
 	glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
 	m_uFogDensity       = glGetUniformLocation(m_unlitProgram, "uFogDensity");
 	m_uFogHeightFalloff = glGetUniformLocation(m_unlitProgram, "uFogHeightFalloff");
+	m_uWetness          = glGetUniformLocation(m_unlitProgram, "uWetness");
+	m_uSnow             = glGetUniformLocation(m_unlitProgram, "uSnow");
 	m_uLightVP       = glGetUniformLocation(m_unlitProgram, "uLightVP");
 	m_uShadowMap     = glGetUniformLocation(m_unlitProgram, "uShadowMap");
 	m_uShadowEnabled = glGetUniformLocation(m_unlitProgram, "uShadowEnabled");
@@ -1556,6 +1572,8 @@ void OpenGLRenderer::CreateInstancedPipeline()
 	m_uInstAmbient          = loc("uAmbient");
 	m_uInstFogDensity       = loc("uFogDensity");
 	m_uInstFogHeightFalloff = loc("uFogHeightFalloff");
+	m_uInstWetness          = loc("uWetness");
+	m_uInstSnow             = loc("uSnow");
 	m_uInstLightVP          = loc("uLightVP");
 	m_uInstShadowMap        = loc("uShadowMap");
 	m_uInstShadowEnabled    = loc("uShadowEnabled");
@@ -2959,6 +2977,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		glUniform3fv(m_uAmbient, 1, glm::value_ptr(m_renderWorld.ambient));
 		glUniform1f(m_uFogDensity,       GetEnvironment().fogDensity);
 		glUniform1f(m_uFogHeightFalloff, GetEnvironment().fogHeightFalloff);
+		glUniform1f(m_uWetness,          GetEnvironment().wetness);
+		glUniform1f(m_uSnow,             GetEnvironment().snowAmount);
 		// SSAO occlusion on unit 4 (white fallback when off → ao = 1, no change).
 		const bool aoActive = m_ssaoEnabled && aoTex != 0;
 		glActiveTexture(GL_TEXTURE4);
@@ -3011,6 +3031,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glUniform3fv(m_uInstAmbient,   1, glm::value_ptr(m_renderWorld.ambient));
 			glUniform1f(m_uInstFogDensity,       GetEnvironment().fogDensity);
 			glUniform1f(m_uInstFogHeightFalloff, GetEnvironment().fogHeightFalloff);
+			glUniform1f(m_uInstWetness,          GetEnvironment().wetness);
+			glUniform1f(m_uInstSnow,             GetEnvironment().snowAmount);
 			glUniform1i(m_uInstAO, 4);
 			glUniform2f(m_uInstViewport, static_cast<float>(pw), static_cast<float>(ph));
 			glUniform1i(m_uInstSSAOEnabled, aoActive ? 1 : 0);
