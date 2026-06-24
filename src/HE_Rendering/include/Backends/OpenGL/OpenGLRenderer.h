@@ -34,6 +34,7 @@ public:
 	void  InvalidateMesh    (const HE::UUID& meshId)     override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
 	void  SetSSAOSettings(const SSAOSettings& settings) override;
+	void  SetGpuParticleParams(const GpuParticleParams& p) override;
 	void  SetDebugLines(const std::vector<DebugLine>& lines) override;
 
 	// Multi-window support
@@ -198,6 +199,37 @@ private:
 	int          m_uInstAO                  = -1;
 	int          m_uInstViewport            = -1;
 	int          m_uInstSSAOEnabled         = -1;
+
+	// ── GPU weather particles (transform-feedback precipitation) ────────────
+	// A fixed pool of rain/snow drops lives in two ping-pong VBOs (interleaved
+	// pos/vel/life/seed, 8 floats each). m_particleSimProgram integrates + recycles
+	// them via transform feedback (rasterizer discard); m_particleDrawProgram pulls
+	// the written buffer as per-instance data and expands an attribute-less quad
+	// (gl_VertexID) into camera-facing billboards. See SetGpuParticleParams / the
+	// SimulateGpuParticles + DrawGpuParticles passes.
+	unsigned int m_particleSimProgram  = 0;   // VS-only, transform feedback
+	unsigned int m_particleDrawProgram = 0;   // billboard VS + FS
+	unsigned int m_particleBuf[2]      = {0, 0};
+	unsigned int m_particleSimVAO[2]   = {0, 0};  // buf as per-vertex attribs (sim input)
+	unsigned int m_particleDrawVAO[2]  = {0, 0};  // buf as per-instance attribs (draw)
+	int          m_particleCur         = 0;   // index of the freshest buffer
+	int          m_particleCapacity    = 0;   // allocated pool size
+	bool         m_particleInit        = false; // buffers seeded with the starting pool
+	GpuParticleParams m_gpuParticles;          // latest params pushed from the scene tick
+	// sim uniforms
+	int m_uPSimDt = -1, m_uPSimTime = -1, m_uPSimCamPos = -1, m_uPSimWind = -1;
+	int m_uPSimCoverage = -1, m_uPSimFall = -1, m_uPSimLife = -1, m_uPSimGround = -1;
+	int m_uPSimBoxHalf = -1, m_uPSimBoxTop = -1, m_uPSimSnow = -1;
+	// draw uniforms
+	int m_uPDrawViewProj = -1, m_uPDrawCamRight = -1, m_uPDrawCamUp = -1;
+	int m_uPDrawCamPos = -1, m_uPDrawSnow = -1, m_uPDrawLife = -1;
+
+	void CreateParticlePipeline();
+	void EnsureParticleBuffers(int count);
+	void SeedParticleBuffer(int count);
+	void DestroyParticleResources();
+	void SimulateGpuParticles();
+	void DrawGpuParticles(const glm::mat4& viewProj, const glm::vec3& camPos);
 
 	// Base-color textures for MaterialComponent overrides, keyed by material
 	// UUID. A present entry of 0 means "resolved, no texture". Drained/cleared

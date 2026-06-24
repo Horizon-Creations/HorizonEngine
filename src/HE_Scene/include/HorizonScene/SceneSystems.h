@@ -16,6 +16,10 @@ namespace SceneSystems
     // those on play-mode; the game runs them every frame.
     // physics (optional) enables real precipitation collision via the weather system's
     // ground-height grid (downward raycasts); nullptr falls back to a flat ground plane.
+    // gpuParticles = the resolved "GPU weather particles" setting (toggle AND backend
+    // support). When true the CPU precipitation pool is skipped and the renderer is
+    // handed the emission parameters to simulate + draw rain/snow on the GPU instead.
     void tick(HorizonWorld& world, ContentManager& cm, IRenderer* renderer,
-              const glm::vec3& cameraPos, float dt, const PhysicsWorld* physics = nullptr);
+              const glm::vec3& cameraPos, float dt, const PhysicsWorld* physics = nullptr,
+              bool gpuParticles = false);
 }

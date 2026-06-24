@@ -268,6 +268,16 @@ static void DrawEngineSettings(AppContext& ctx, SettingsMode mode)
 		ImGui::SliderFloat("AO Intensity", &cfg.SSAOIntensity, 0.0f, 2.0f, "%.2f");
 		ImGui::EndDisabled();
 	});
+	row("gpuparticles", "Renderer", [&]{
+		const bool supported = ctx.renderer && ctx.renderer->GetCapabilities().supportsGpuParticles;
+		ImGui::BeginDisabled(!supported);
+		ImGui::Checkbox("GPU Weather Particles", &cfg.GpuParticles);
+		ImGui::EndDisabled();
+		if (!supported && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+			ImGui::SetTooltip("Not available on this backend (needs OpenGL / transform feedback).");
+		else if (supported)
+			ImGui::TextDisabled("Simulate rain/snow on the GPU (transform feedback).");
+	});
 
 	row("camspeed", "Viewport", [&]{
 		ImGui::SetNextItemWidth(220.0f);
@@ -333,6 +343,7 @@ static void DrawPreferencesWindow(AppContext& ctx, bool& open)
 			cfg.SSAORadius        = 0.5f;
 			cfg.SSAOIntensity     = 1.0f;
 			cfg.SSAOMethod        = 0;
+			cfg.GpuParticles      = false;
 			if (ctx.editorCamera) ctx.editorCamera->setFlySpeed(cfg.EditorCameraSpeed);
 		}
 		ImGui::SameLine();

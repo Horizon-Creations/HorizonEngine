@@ -16,6 +16,9 @@ namespace WeatherSystem
     // the precipitation volume on the viewer. physics (optional) enables real collision:
     // the ground-height grid is sampled with downward raycasts when supplied, else it
     // falls back to WeatherComponent::groundLevel.
+    // gpuPrecip = true means the renderer simulates rain/snow on the GPU, so the CPU
+    // particle pool is skipped (and cleared); the blend still drives cloud/fog/wind and
+    // curPrecip so the GPU path and the inspector read the same values.
     void update(HorizonWorld& world, float dt, const glm::vec3& cameraPos = glm::vec3(0.0f),
-                const PhysicsWorld* physics = nullptr);
+                const PhysicsWorld* physics = nullptr, bool gpuPrecip = false);
 }
