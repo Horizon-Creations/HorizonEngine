@@ -65,11 +65,6 @@ struct WeatherComponent
     // (raycasts) overrides this per-cell.
     float groundLevel = 0.0f;
 
-    // When true the weather blend still runs (precipitation, lightning, autoCycle)
-    // but stops writing cloudCoverage/fogDensity/windSpeed into the EnvironmentComponent,
-    // so those can be dialled in by hand from the inspector while a WeatherComponent exists.
-    bool  manualEnvironment = false;
-
     // ── Runtime (never serialized) ───────────────────────────────────────────
     // Blend bookkeeping: `from*` is a snapshot of the live output taken when a new
     // target is requested, so retargeting mid-transition stays continuous.
@@ -81,9 +76,21 @@ struct WeatherComponent
     float      fromCloud      = 0.0f;
     float      fromFog        = 0.0f;
     float      fromWind       = 1.0f;
-    float      fromPrecip     = 0.0f;
+    float      fromRain       = 0.0f;
+    float      fromSnow       = 0.0f;
     float      fromWetness    = 0.0f;
-    PrecipType fromPrecipType = PrecipType::None;
+
+    // Last value the weather wrote into each EnvironmentComponent field. If the live
+    // env value has drifted from this (the user moved a slider) the weather stops
+    // driving that field — until the next preset selection reclaims it. Sentinel
+    // (-999) so nothing is "owned" before the first apply (a loaded scene's authored
+    // env is respected; picking a preset reclaims everything).
+    float      lastCloud   = -999.0f;
+    float      lastFog     = -999.0f;
+    float      lastWind    = -999.0f;
+    float      lastRain    = -999.0f;
+    float      lastSnow    = -999.0f;
+    float      lastWetness = -999.0f;
 
     // Current blended output written into the EnvironmentComponent + precipitation.
     float      curCloudCoverage = 0.0f;

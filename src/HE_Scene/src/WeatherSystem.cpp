@@ -104,48 +104,80 @@ void WeatherSystem::update(HorizonWorld& world, float dt, const glm::vec3& camer
     const float tPrec  = std::clamp(tp.precip * intensity, 0.0f, 1.0f);
     const float tWet   = std::clamp(tp.wetness * intensity, 0.0f, 1.0f);
 
-    if (wx.targetKind == wx.currentKind)
-    {
-        // Settled (also the load / steady-state path): snap outputs to the target.
-        wx.curCloudCoverage = tCloud;
-        wx.curFogDensity    = tFog;
-        wx.curWindSpeed     = tWind;
-        wx.curPrecip        = tPrec;
-        wx.curPrecipType    = tp.precipType;
-        wx.curWetness       = tWet;
-        wx.transitionElapsed = 0.0f;
-        wx.prevTarget        = wx.targetKind;
-    }
-    else
-    {
-        // Transitioning currentKind → targetKind. Snapshot the live output as the
-        // blend origin the first frame a (new) target is seen — robust to retargeting
-        // mid-transition.
-        if (wx.targetKind != wx.prevTarget)
-        {
-            wx.fromCloud      = wx.curCloudCoverage;
-            wx.fromFog        = wx.curFogDensity;
-            wx.fromWind       = wx.curWindSpeed;
-            wx.fromPrecip     = wx.curPrecip;
-            wx.fromWetness    = wx.curWetness;
-            wx.fromPrecipType = wx.curPrecipType;
-            wx.transitionElapsed = 0.0f;
-            wx.prevTarget        = wx.targetKind;
-        }
+    // A weather preset is a *set of values*. The system drives them into the
+    // EnvironmentComponent, but per-value it backs off the moment the user moves a slider
+    // (the live env value drifts from the last value weather wrote) — so the sliders are
+    // always editable, no toggle needed. Selecting a (new) preset reclaims every value.
+    const float tRain = (tp.precipType == PrecipType::Rain) ? tPrec : 0.0f;
+    const float tSnow = (tp.precipType == PrecipType::Snow) ? tPrec : 0.0f;
+    EnvironmentComponent* env = reg.try_get<EnvironmentComponent>(world.rootEntity());
+    float windDirDeg = env ? env->windDirection : 30.0f;
+    const bool reclaim = (wx.targetKind != wx.prevTarget);
 
+    // Desired values this frame: blended while transitioning, the target once settled.
+    float dCloud, dFog, dWind, dRain, dSnow, dWet;
+    if (wx.targetKind != wx.currentKind)
+    {
+        if (reclaim) // first frame of a new target → snapshot the live env as the origin
+        {
+            wx.fromCloud   = env ? env->cloudCoverage : wx.curCloudCoverage;
+            wx.fromFog     = env ? env->fogDensity    : wx.curFogDensity;
+            wx.fromWind    = env ? env->windSpeed     : wx.curWindSpeed;
+            wx.fromRain    = env ? env->rainAmount    : 0.0f;
+            wx.fromSnow    = env ? env->snowAmount    : 0.0f;
+            wx.fromWetness = env ? env->wetness       : wx.curWetness;
+            wx.transitionElapsed = 0.0f;
+        }
         const float dur = std::max(wx.transitionDuration, 1e-4f);
         wx.transitionElapsed = std::min(wx.transitionElapsed + std::max(dt, 0.0f), dur);
         const float a = std::clamp(wx.transitionElapsed / dur, 0.0f, 1.0f);
         const float s = a * a * (3.0f - 2.0f * a); // smoothstep
-
-        wx.curCloudCoverage = lerpf(wx.fromCloud,   tCloud, s);
-        wx.curFogDensity    = lerpf(wx.fromFog,     tFog,   s);
-        wx.curWindSpeed     = lerpf(wx.fromWind,    tWind,  s);
-        wx.curPrecip        = lerpf(wx.fromPrecip,  tPrec,  s);
-        wx.curWetness       = lerpf(wx.fromWetness, tWet,   s);
-        wx.curPrecipType    = (s >= 0.5f) ? tp.precipType : wx.fromPrecipType;
-
+        dCloud = lerpf(wx.fromCloud,   tCloud, s);
+        dFog   = lerpf(wx.fromFog,     tFog,   s);
+        dWind  = lerpf(wx.fromWind,    tWind,  s);
+        dRain  = lerpf(wx.fromRain,    tRain,  s);
+        dSnow  = lerpf(wx.fromSnow,    tSnow,  s);
+        dWet   = lerpf(wx.fromWetness, tWet,   s);
         if (a >= 1.0f) wx.currentKind = wx.targetKind;
+    }
+    else
+    {
+        dCloud = tCloud; dFog = tFog; dWind = tWind;
+        dRain  = tRain;  dSnow = tSnow; dWet = tWet;
+        wx.transitionElapsed = 0.0f;
+    }
+    wx.prevTarget = wx.targetKind;
+
+    // Write each field unless the user owns it (its value drifted from what weather last
+    // wrote). reclaim forces a full re-apply when a new preset is picked.
+    auto drive = [&](float& envVal, float& last, float desired) {
+        if (reclaim || std::abs(envVal - last) <= 1e-4f) { envVal = desired; last = desired; }
+    };
+    if (env)
+    {
+        drive(env->cloudCoverage, wx.lastCloud,   dCloud);
+        drive(env->fogDensity,    wx.lastFog,     dFog);
+        drive(env->windSpeed,     wx.lastWind,    dWind);
+        drive(env->rainAmount,    wx.lastRain,    dRain);
+        drive(env->snowAmount,    wx.lastSnow,    dSnow);
+        drive(env->wetness,       wx.lastWetness, dWet);
+        wx.curCloudCoverage = env->cloudCoverage;
+        wx.curFogDensity    = env->fogDensity;
+        wx.curWindSpeed     = env->windSpeed;
+        wx.curWetness       = env->wetness;
+    }
+    else
+    {
+        wx.curCloudCoverage = dCloud; wx.curFogDensity = dFog;
+        wx.curWindSpeed     = dWind;  wx.curWetness    = dWet;
+    }
+    // Display mirror: the dominant precip drives the status text + CPU pool below.
+    {
+        const float rainA = env ? env->rainAmount : 0.0f;
+        const float snowA = env ? env->snowAmount : 0.0f;
+        wx.curPrecip     = std::max(rainA, snowA);
+        wx.curPrecipType = (wx.curPrecip <= 0.001f) ? PrecipType::None
+                         : (snowA > rainA ? PrecipType::Snow : PrecipType::Rain);
     }
 
     // ── Lightning (storm only) ──────────────────────────────────────────────
@@ -166,31 +198,11 @@ void WeatherSystem::update(HorizonWorld& world, float dt, const glm::vec3& camer
         }
     }
     wx.flashIntensity = std::max(0.0f, wx.flashIntensity - dt * 6.0f); // fast decay
+    if (env) env->flash = wx.flashIntensity; // transient effect — always weather-driven
 
-    // Drive the scene environment. windSpeed is the SMOOTH curWindSpeed (no per-frame
-    // gust) — gusts modulated the cloud-drift uniform and made the clouds wobble.
-    float windDirDeg = 30.0f;
-    if (auto* env = reg.try_get<EnvironmentComponent>(world.rootEntity()))
-    {
-        // In manual-environment mode the user owns cloud/fog/wind from the inspector —
-        // leave them untouched. Flash stays weather-driven (it's a transient effect, not
-        // an authored slider). windSpeed for the precip drift then follows env->windSpeed.
-        if (!wx.manualEnvironment)
-        {
-            env->cloudCoverage = wx.curCloudCoverage;
-            env->fogDensity    = wx.curFogDensity;
-            env->windSpeed     = wx.curWindSpeed;
-        }
-        else
-        {
-            wx.curWindSpeed = env->windSpeed;   // keep precip drift in sync with the manual value
-        }
-        env->flash         = wx.flashIntensity;
-        windDirDeg         = env->windDirection;
-    }
-    // GPU precipitation: the renderer owns the rain/snow pool (transform feedback),
-    // so skip the CPU volume entirely. Free the CPU pool once so RenderExtractor stops
-    // emitting billboards for it. cloud/fog/wind + curPrecip were already updated above.
+    // GPU precipitation: the renderer owns the rain/snow pool, so skip the CPU volume
+    // entirely. Free the CPU pool once so RenderExtractor stops emitting billboards for
+    // it. The env rain/snow amounts were already written above for the renderer to read.
     if (gpuPrecip)
     {
         if (!wx.precip.empty()) { wx.precip.clear(); wx.precip.shrink_to_fit(); }

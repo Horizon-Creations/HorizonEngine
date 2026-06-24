@@ -3653,9 +3653,8 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			ImGui::ColorEdit3("Moon Color", &env->moonColor.x, ImGuiColorEditFlags_NoInputs); trackEdit();
 			ImGui::SliderFloat("Moon Brightness", &env->moonIntensity, 0.0f, 10.0f, "%.2f"); trackEdit();
 
-			const auto* weatherComp = registry.try_get<WeatherComponent>(entity);
-			const bool weatherDriven = weatherComp && !weatherComp->manualEnvironment;
-			ImGui::BeginDisabled(weatherDriven);
+			// These are always editable. A Weather preset (below) sets a whole set of
+			// these values when applied / transitioning; otherwise they're yours to move.
 			ImGui::SeparatorText("Clouds");
 			ImGui::SetNextItemWidth(-1.0f);
 			ImGui::SliderFloat("##cloudcoverage", &env->cloudCoverage, 0.0f, 1.0f, "Coverage: %.2f"); trackEdit();
@@ -3673,9 +3672,15 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			ImGui::SliderFloat("##fogheight", &env->fogHeightFalloff, 0.0f, 1.0f, "Ground hugging: %.2f"); trackEdit();
 			ImGui::EndDisabled();
 			ImGui::TextDisabled("Distant objects blend into the horizon (warm at sunset).");
-			ImGui::EndDisabled();
-			if (weatherDriven)
-				ImGui::TextDisabled("Clouds, fog & wind are driven by the Weather system below.");
+
+			ImGui::SeparatorText("Precipitation & Ground");
+			ImGui::SetNextItemWidth(-1.0f);
+			ImGui::SliderFloat("##rain", &env->rainAmount, 0.0f, 1.0f, "Rain: %.2f"); trackEdit();
+			ImGui::SetNextItemWidth(-1.0f);
+			ImGui::SliderFloat("##snow", &env->snowAmount, 0.0f, 1.0f, "Snow: %.2f"); trackEdit();
+			ImGui::SetNextItemWidth(-1.0f);
+			ImGui::SliderFloat("##wetness", &env->wetness, 0.0f, 1.0f, "Wetness: %.2f"); trackEdit();
+			ImGui::TextDisabled("Rain/snow spawn particles; wetness darkens & snow whitens the ground.");
 
 			ImGui::SeparatorText("Night Sky");
 			ImGui::SetNextItemWidth(-1.0f);
@@ -3711,11 +3716,7 @@ void EditorUI::RenderInspector(AppContext& ctx)
 				ImGui::SliderFloat("Cycle Time", &w->cycleSeconds, 5.0f, 600.0f, "%.0f s",
 				                   ImGuiSliderFlags_Logarithmic); trackEdit();
 				ImGui::EndDisabled();
-
-				ImGui::Checkbox("Manual sky (clouds/fog/wind)", &w->manualEnvironment); trackEdit();
-				ImGui::TextDisabled(w->manualEnvironment
-					? "Cloud/fog/wind set by hand above; precip & lightning still follow the preset."
-					: "Cloud/fog/wind are driven by the preset; tick to edit them by hand.");
+				ImGui::TextDisabled("Picking a preset sets clouds/fog/wind/precip; the sliders above\nstay editable, so you can nudge any value afterwards.");
 
 				if (w->currentKind != w->targetKind)
 					ImGui::Text("Transitioning %s -> %s",

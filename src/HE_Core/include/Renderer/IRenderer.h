@@ -169,6 +169,10 @@ public:
         // Lightning flash brightness (0 = none … 1 = full strike). Driven by the
         // WeatherSystem during storms; added to the sky colour in the backend.
         float     flash         = 0.0f;
+        // Ground response to weather (0..1). wetness darkens + glosses lit surfaces;
+        // snowAmount lays white snow on up-facing surfaces. Read by the lit shader.
+        float     wetness    = 0.0f;
+        float     snowAmount = 0.0f;
     };
     virtual void SetEnvironmentSettings(const EnvironmentSettings& e) { m_environment = e; }
     const EnvironmentSettings& GetEnvironment() const { return m_environment; }

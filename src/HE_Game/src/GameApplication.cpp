@@ -117,7 +117,8 @@ void GameApplication::OnRender(float deltaTime)
 				env->auroraIntensity,
 				env->milkyWayIntensity, env->nebulaIntensity,
 				env->nebulaColor, env->auroraColor,
-				env->windDirection, env->windSpeed, env->flash});
+				env->windDirection, env->windSpeed, env->flash,
+				env->wetness, env->snowAmount});
 		}
 	}
 }
