@@ -5,6 +5,7 @@
 #include "HorizonScene/Components/EnvironmentComponent.h"
 
 #include <algorithm>
+#include <cmath>
 #include <random>
 
 // ── Preset table ────────────────────────────────────────────────────────────
@@ -216,14 +217,20 @@ void WeatherSystem::update(HorizonWorld& world, float dt, const glm::vec3& camer
     // ── Precipitation: camera-following volume with collision ────────────────
     // Drops spawn well above the viewer and fall (wind-slanted), dying at the ground
     // height sampled from the collision grid. Snow is slow with a gentle sway.
-    const bool  isSnow      = (wx.curPrecipType == PrecipType::Snow);
-    const bool  wantsPrecip = (wx.curPrecipType != PrecipType::None) && (wx.curPrecip > 0.001f);
+    const bool  isSnow = (wx.curPrecipType == PrecipType::Snow);
     constexpr float kBoxHalf = 16.0f;  // horizontal half-extent around the camera
     constexpr float kBoxTop  = 24.0f;  // spawn height above the camera
     const int   maxParticles = isSnow ? std::max(0, wx.maxSnowParticles)
                                       : std::max(0, wx.maxRainParticles);
     const float fallSpeed = isSnow ? 2.0f : 18.0f;
-    const float lifeSpan  = (kBoxTop + 60.0f) / std::max(fallSpeed, 0.01f); // generous fall cap
+
+    // Reserve the pool once (capacity = cap) so drops are reused, never reallocated mid-
+    // flight. The live count tracks curPrecip; a drop that lands is recycled in place
+    // (re-simulated from the top) when still under budget rather than freed.
+    if (wx.precip.capacity() < static_cast<size_t>(std::max(0, maxParticles)))
+        wx.precip.reserve(static_cast<size_t>(std::max(0, maxParticles)));
+    const int budget = std::clamp(static_cast<int>(std::lround(wx.curPrecip * maxParticles)),
+                                  0, maxParticles);
 
     // Refresh the collision height grid (~0.4 s) centred on the camera. With a physics
     // world each cell is a downward raycast (real collision against bodies/colliders);
@@ -253,51 +260,52 @@ void WeatherSystem::update(HorizonWorld& world, float dt, const glm::vec3& camer
         wx.gridReady = true;
     }
 
-    // Integrate, then recycle drops that reached the ground or outlived the fall cap.
-    for (Particle& p : wx.precip)
+    std::uniform_real_distribution<float> u11(-1.0f, 1.0f);
+    auto respawnTop = [&](Particle& p)
     {
+        p.position = glm::vec3(cameraPos.x + u11(wx.precipRng) * kBoxHalf,
+                               cameraPos.y + kBoxTop,
+                               cameraPos.z + u11(wx.precipRng) * kBoxHalf);
+        glm::vec3 vel(0.0f, -fallSpeed, 0.0f);
+        if (isSnow) { vel.x += u11(wx.precipRng) * 0.6f + windVec.x * 0.3f;
+                      vel.z += u11(wx.precipRng) * 0.6f + windVec.z * 0.3f; }
+        else        { vel.x += windVec.x * 1.2f; vel.z += windVec.z * 1.2f; }
+        p.velocity    = vel;
+        p.lifetime    = (cameraPos.y + kBoxTop - wx.groundLevel) / std::max(fallSpeed, 0.01f) + 1.0f;
+        p.maxLifetime = p.lifetime;
+    };
+
+    // Integrate live drops. A drop that touches the ground (this frame, i.e. within 1 s of
+    // landing) or outlives its fall backstop is recycled in place from the top while we're
+    // still under budget, else dropped. The write index compacts the survivors — capacity
+    // is kept, so nothing is reallocated.
+    size_t wIdx = 0;
+    for (size_t i = 0; i < wx.precip.size(); ++i)
+    {
+        Particle p = wx.precip[i];
         p.lifetime -= dt;
         p.position += p.velocity * dt;
-        if (isSnow) // gentle horizontal sway
-            p.position.x += std::sin((p.maxLifetime - p.lifetime) * 2.2f) * 0.5f * dt;
-    }
-    wx.precip.erase(std::remove_if(wx.precip.begin(), wx.precip.end(),
-        [&](const Particle& p)
-        { return p.lifetime <= 0.0f || p.position.y <= sampleGround(wx, p.position.x, p.position.z); }),
-        wx.precip.end());
-
-    if (wantsPrecip)
-    {
-        // Grow the pool to its cap once so the emission loop never reallocates mid-fill.
-        if (static_cast<int>(wx.precip.capacity()) < maxParticles)
-            wx.precip.reserve(static_cast<size_t>(maxParticles));
-        const float emitRate = wx.curPrecip * (isSnow ? 400.0f : 900.0f); // particles/sec
-        const float interval = (emitRate > 0.0f) ? 1.0f / emitRate : 1e30f;
-        wx.precipEmitAccum += dt;
-        std::uniform_real_distribution<float> u11(-1.0f, 1.0f);
-        while (wx.precipEmitAccum >= interval && static_cast<int>(wx.precip.size()) < maxParticles)
+        if (isSnow) p.position.x += std::sin((p.maxLifetime - p.lifetime) * 2.2f) * 0.5f * dt;
+        if (p.lifetime <= 0.0f || p.position.y <= sampleGround(wx, p.position.x, p.position.z))
         {
-            wx.precipEmitAccum -= interval;
-            Particle p;
-            p.position = glm::vec3(cameraPos.x + u11(wx.precipRng) * kBoxHalf,
-                                   cameraPos.y + kBoxTop,
-                                   cameraPos.z + u11(wx.precipRng) * kBoxHalf);
-            glm::vec3 vel(0.0f, -fallSpeed, 0.0f);
-            if (isSnow)
-            {
-                vel.x += u11(wx.precipRng) * 0.6f + windVec.x * 0.3f;
-                vel.z += u11(wx.precipRng) * 0.6f + windVec.z * 0.3f;
-            }
-            else // rain leans with the wind
-            {
-                vel.x += windVec.x * 1.2f;
-                vel.z += windVec.z * 1.2f;
-            }
-            p.velocity    = vel;
-            p.lifetime    = lifeSpan;
-            p.maxLifetime = lifeSpan;
-            wx.precip.push_back(p);
+            if (static_cast<int>(wIdx) >= budget) continue; // over budget → let it die
+            respawnTop(p);                                  // under budget → recycle from the top
         }
-        if (wx.precipEmitAccum > interval) wx.precipEmitAccum = interval; // no burst after a stall
+        wx.precip[wIdx++] = p;
     }
+    wx.precip.resize(wIdx);
+
+    // Grow toward the budget, rate-limited (~fill in 1 s) so density ramps in rather than a
+    // visible sheet. push_back stays within the reserved capacity, so no allocation.
+    if (static_cast<int>(wx.precip.size()) < budget)
+    {
+        wx.precipEmitAccum += dt * static_cast<float>(std::max(1, maxParticles));
+        int canSpawn = static_cast<int>(wx.precipEmitAccum);
+        wx.precipEmitAccum -= static_cast<float>(canSpawn);
+        while (static_cast<int>(wx.precip.size()) < budget && canSpawn-- > 0)
+        {
+            Particle p; respawnTop(p); wx.precip.push_back(p);
+        }
+    }
+    else wx.precipEmitAccum = 0.0f;
 }
