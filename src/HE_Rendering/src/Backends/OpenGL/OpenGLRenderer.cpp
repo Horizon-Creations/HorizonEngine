@@ -1396,6 +1396,7 @@ void OpenGLRenderer::Initialize(HE::Window* window)
 	CreateBloomPipeline();
 	CreateSSAOPipeline();
 	CreateDebugLinePipeline();
+	CreateParticlePipeline();
 	Logger::Log(Logger::LogLevel::Info, "OpenGLRenderer: initialized successfully");
 }
 
@@ -2629,6 +2630,7 @@ void OpenGLRenderer::Shutdown()
 	if (m_unlitProgram)     { glDeleteProgram(m_unlitProgram);     m_unlitProgram = 0; }
 	if (m_instancedProgram) { glDeleteProgram(m_instancedProgram); m_instancedProgram = 0; }
 	if (m_instanceVBO)      { glDeleteBuffers(1, &m_instanceVBO);  m_instanceVBO = 0; }
+	DestroyParticleResources();
 	if (m_depthProgram) { glDeleteProgram(m_depthProgram);     m_depthProgram = 0; }
 	if (m_skyProgram)   { glDeleteProgram(m_skyProgram);       m_skyProgram = 0; }
 	if (m_tonemapProgram) { glDeleteProgram(m_tonemapProgram); m_tonemapProgram = 0; }
@@ -3314,6 +3316,10 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glDisable(GL_BLEND);
 		}
 
+		// ── GPU weather particles: simulated by transform feedback (once per
+		// frame in Render), drawn here as alpha-blended billboards over the scene.
+		DrawGpuParticles(viewProj, m_renderWorld.camera.position);
+
 		// ── Debug line overlay: world-space segments over the opaque scene ────
 		// Depth-test on so lines are occluded by geometry; depth-write off so
 		// they don't mask later transparent objects.
@@ -3351,6 +3357,10 @@ void OpenGLRenderer::Render()
 
 	AgeRetiredTextures();
 
+	// Step the GPU particle pool once per frame (before any DrawScene, which may run
+	// for both the offscreen viewport and the window — drawing reads, only this steps).
+	SimulateGpuParticles();
+
 	const bool offscreen = m_viewportReqW > 0 && m_viewportReqH > 0;
 
 	if (offscreen)
@@ -3377,9 +3387,314 @@ void OpenGLRenderer::Render()
 	if (m_overlayCallback) m_overlayCallback(nullptr);
 }
 
+// ─── GPU weather particles (transform-feedback precipitation) ─────────────────
+// A fixed pool of drops lives in two interleaved VBOs (pos.xyz, vel.xyz, life,
+// seed = 8 floats). The sim VS integrates + recycles each drop and writes the new
+// state through transform feedback (rasterizer discard, no fragments). The draw VS
+// pulls the freshest buffer as per-instance data and expands an attribute-less
+// triangle-strip (gl_VertexID) into a camera-facing billboard. Runs on GL 4.1.
+namespace {
+constexpr int kParticleFloats = 8;   // pos3 vel3 life seed
+constexpr int kParticleMax    = 1000000;
+
+const char* kParticleSimVS = R"(#version 410 core
+layout(location=0) in vec3  iPos;
+layout(location=1) in vec3  iVel;
+layout(location=2) in float iLife;
+layout(location=3) in float iSeed;
+out vec3  oPos;
+out vec3  oVel;
+out float oLife;
+out float oSeed;
+uniform float dt, time, coverage, fallSpeed, lifeSpan, groundLevel, boxHalf, boxTop, isSnow;
+uniform vec3  camPos, wind;
+float h21(vec2 p){ vec3 p3=fract(vec3(p.xyx)*0.1031); p3+=dot(p3,p3.yzx+33.33); return fract((p3.x+p3.y)*p3.z); }
+void main(){
+    oSeed = iSeed;
+    float alive = step(iSeed, coverage);        // this slot participates at the current density
+    vec3  pos = iPos + iVel * dt;
+    vec3  vel = iVel;
+    float life = iLife - dt;
+    if (isSnow > 0.5) pos.x += sin((lifeSpan - life) * 2.2 + iSeed * 6.2831) * 0.5 * dt;
+    bool dead = life <= 0.0 || pos.y <= groundLevel;
+    if (dead) {
+        if (alive > 0.5) {
+            float ep = floor(time * 7.0) + iSeed * 131.0;          // respawn epoch
+            float rx = h21(vec2(iSeed * 91.7, ep)) * 2.0 - 1.0;
+            float rz = h21(vec2(ep, iSeed * 57.3)) * 2.0 - 1.0;
+            pos = vec3(camPos.x + rx * boxHalf, camPos.y + boxTop, camPos.z + rz * boxHalf);
+            vel = vec3(0.0, -fallSpeed, 0.0);
+            if (isSnow > 0.5) {
+                vel.x += (h21(vec2(ep, iSeed)) * 2.0 - 1.0) * 0.6 + wind.x * 0.3;
+                vel.z += (h21(vec2(iSeed, ep)) * 2.0 - 1.0) * 0.6 + wind.z * 0.3;
+            } else {
+                vel.x += wind.x * 1.2;
+                vel.z += wind.z * 1.2;
+            }
+            life = lifeSpan * (0.6 + 0.4 * iSeed);
+        } else {
+            life = -1.0;                                            // parked: stays invisible
+            pos  = camPos + vec3(0.0, -100000.0, 0.0);
+            vel  = vec3(0.0);
+        }
+    }
+    oPos = pos; oVel = vel; oLife = life;
+    gl_Position = vec4(0.0);   // unused (rasterizer discarded)
+}
+)";
+
+const char* kParticleDrawVS = R"(#version 410 core
+layout(location=0) in vec3  iPos;
+layout(location=1) in vec3  iVel;
+layout(location=2) in float iLife;
+layout(location=3) in float iSeed;
+uniform mat4 uViewProj;
+uniform vec3 uCamPos;
+uniform float uSnow;
+out vec2  vUV;
+out float vSnow;
+void main(){
+    if (iLife <= 0.0) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); vUV = vec2(0.0); vSnow = uSnow; return; }
+    vec2 c = vec2(float(gl_VertexID & 1), float((gl_VertexID >> 1) & 1)) - 0.5; // quad corner [-0.5,0.5]
+    vUV = c; vSnow = uSnow;
+    vec3 look = uCamPos - iPos;
+    float d = length(look);
+    look = (d > 1e-4) ? look / d : vec3(0.0, 0.0, 1.0);
+    vec3 worldPos;
+    if (uSnow > 0.5) {
+        const float s = 0.16;
+        vec3 right = normalize(cross(vec3(0.0, 1.0, 0.0), look));
+        vec3 up    = cross(look, right);
+        worldPos = iPos + (right * c.x + up * c.y) * s;
+    } else {
+        vec3 vdir = iVel; float vl = length(vdir);
+        vdir = (vl > 1e-4) ? vdir / vl : vec3(0.0, -1.0, 0.0);
+        vec3 up = vdir - look * dot(vdir, look);
+        up = (length(up) > 1e-4) ? normalize(up) : vec3(0.0, 1.0, 0.0);
+        vec3 right = normalize(cross(up, look));
+        worldPos = iPos + right * (c.x * 0.02) + up * (c.y * 0.6);
+    }
+    gl_Position = uViewProj * vec4(worldPos, 1.0);
+}
+)";
+
+const char* kParticleDrawFS = R"(#version 410 core
+in vec2  vUV;
+in float vSnow;
+out vec4 Frag;
+void main(){
+    if (vSnow > 0.5) {
+        float a = smoothstep(0.5, 0.15, length(vUV)) * 0.9;       // soft round flake
+        Frag = vec4(vec3(0.92, 0.95, 1.0), a);
+    } else {
+        float a = smoothstep(0.5, 0.0, abs(vUV.x)) * 0.45;        // soft thin streak
+        Frag = vec4(vec3(0.55, 0.62, 0.78), a);
+    }
+}
+)";
+
+void setupParticleVAO(unsigned int vao, unsigned int buf, unsigned int divisor)
+{
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, buf);
+    const GLsizei stride = kParticleFloats * sizeof(float);
+    glEnableVertexAttribArray(0); glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*)0);
+    glEnableVertexAttribArray(1); glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void*)(3 * sizeof(float)));
+    glEnableVertexAttribArray(2); glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, stride, (void*)(6 * sizeof(float)));
+    glEnableVertexAttribArray(3); glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, stride, (void*)(7 * sizeof(float)));
+    glVertexAttribDivisor(0, divisor); glVertexAttribDivisor(1, divisor);
+    glVertexAttribDivisor(2, divisor); glVertexAttribDivisor(3, divisor);
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+} // namespace
+
+void OpenGLRenderer::CreateParticlePipeline()
+{
+    // Sim program: VS only, outputs captured by transform feedback (interleaved).
+    {
+        GLuint vs = CompileStage(GL_VERTEX_SHADER, kParticleSimVS);
+        m_particleSimProgram = glCreateProgram();
+        glAttachShader(m_particleSimProgram, vs);
+        const char* varyings[] = { "oPos", "oVel", "oLife", "oSeed" };
+        glTransformFeedbackVaryings(m_particleSimProgram, 4, varyings, GL_INTERLEAVED_ATTRIBS);
+        glLinkProgram(m_particleSimProgram);
+        glDeleteShader(vs);
+        GLint ok = 0; glGetProgramiv(m_particleSimProgram, GL_LINK_STATUS, &ok);
+        if (!ok) { GLchar log[512]; glGetProgramInfoLog(m_particleSimProgram, sizeof(log), nullptr, log);
+                   throw std::runtime_error(std::string("OpenGLRenderer: particle sim link failed: ") + log); }
+        glUseProgram(m_particleSimProgram);
+        m_uPSimDt = glGetUniformLocation(m_particleSimProgram, "dt");
+        m_uPSimTime = glGetUniformLocation(m_particleSimProgram, "time");
+        m_uPSimCamPos = glGetUniformLocation(m_particleSimProgram, "camPos");
+        m_uPSimWind = glGetUniformLocation(m_particleSimProgram, "wind");
+        m_uPSimCoverage = glGetUniformLocation(m_particleSimProgram, "coverage");
+        m_uPSimFall = glGetUniformLocation(m_particleSimProgram, "fallSpeed");
+        m_uPSimLife = glGetUniformLocation(m_particleSimProgram, "lifeSpan");
+        m_uPSimGround = glGetUniformLocation(m_particleSimProgram, "groundLevel");
+        m_uPSimBoxHalf = glGetUniformLocation(m_particleSimProgram, "boxHalf");
+        m_uPSimBoxTop = glGetUniformLocation(m_particleSimProgram, "boxTop");
+        m_uPSimSnow = glGetUniformLocation(m_particleSimProgram, "isSnow");
+    }
+    // Draw program: billboard expansion + soft sprite shading.
+    {
+        GLuint vs = CompileStage(GL_VERTEX_SHADER, kParticleDrawVS);
+        GLuint fs = CompileStage(GL_FRAGMENT_SHADER, kParticleDrawFS);
+        m_particleDrawProgram = glCreateProgram();
+        glAttachShader(m_particleDrawProgram, vs);
+        glAttachShader(m_particleDrawProgram, fs);
+        glLinkProgram(m_particleDrawProgram);
+        glDeleteShader(vs); glDeleteShader(fs);
+        GLint ok = 0; glGetProgramiv(m_particleDrawProgram, GL_LINK_STATUS, &ok);
+        if (!ok) { GLchar log[512]; glGetProgramInfoLog(m_particleDrawProgram, sizeof(log), nullptr, log);
+                   throw std::runtime_error(std::string("OpenGLRenderer: particle draw link failed: ") + log); }
+        m_uPDrawViewProj = glGetUniformLocation(m_particleDrawProgram, "uViewProj");
+        m_uPDrawCamPos = glGetUniformLocation(m_particleDrawProgram, "uCamPos");
+        m_uPDrawSnow = glGetUniformLocation(m_particleDrawProgram, "uSnow");
+    }
+    glGenBuffers(2, m_particleBuf);
+    glGenVertexArrays(2, m_particleSimVAO);
+    glGenVertexArrays(2, m_particleDrawVAO);
+    glUseProgram(0);
+}
+
+void OpenGLRenderer::EnsureParticleBuffers(int count)
+{
+    if (count == m_particleCapacity) return;
+    const GLsizeiptr bytes = static_cast<GLsizeiptr>(count) * kParticleFloats * sizeof(float);
+    for (int k = 0; k < 2; ++k)
+    {
+        glBindBuffer(GL_ARRAY_BUFFER, m_particleBuf[k]);
+        glBufferData(GL_ARRAY_BUFFER, bytes, nullptr, GL_DYNAMIC_COPY);
+        setupParticleVAO(m_particleSimVAO[k],  m_particleBuf[k], 0); // sim: per-vertex
+        setupParticleVAO(m_particleDrawVAO[k], m_particleBuf[k], 1); // draw: per-instance
+    }
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    m_particleCapacity = count;
+    m_particleCur      = 0;
+    m_particleInit     = false;
+}
+
+void OpenGLRenderer::SeedParticleBuffer(int count)
+{
+    // Pre-distribute the pool down the fall column so it doesn't all spawn at once.
+    // seed = (i+0.5)/count gives an even spread, so step(seed,coverage) yields exactly
+    // a `coverage` fraction of live drops.
+    const GpuParticleParams& p = m_gpuParticles;
+    std::vector<float> data(static_cast<size_t>(count) * kParticleFloats);
+    const float top = p.cameraPos.y + p.boxTop;
+    uint32_t rng = 0x9E3779B9u;
+    auto frand = [&]() { rng = rng * 1664525u + 1013904223u; return (rng >> 8) * (1.0f / 16777216.0f); };
+    for (int i = 0; i < count; ++i)
+    {
+        const float seed = (i + 0.5f) / static_cast<float>(count);
+        const float y    = p.groundLevel + frand() * std::max(top - p.groundLevel, 1.0f);
+        float* d = &data[static_cast<size_t>(i) * kParticleFloats];
+        d[0] = p.cameraPos.x + (frand() * 2.0f - 1.0f) * p.boxHalf;
+        d[1] = y;
+        d[2] = p.cameraPos.z + (frand() * 2.0f - 1.0f) * p.boxHalf;
+        d[3] = p.windVec.x * (p.isSnow ? 0.3f : 1.2f);
+        d[4] = -p.fallSpeed;
+        d[5] = p.windVec.z * (p.isSnow ? 0.3f : 1.2f);
+        d[6] = (y - p.groundLevel) / std::max(p.fallSpeed, 0.01f); // life so it dies at the ground
+        d[7] = seed;
+    }
+    glBindBuffer(GL_ARRAY_BUFFER, m_particleBuf[m_particleCur]);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(data.size() * sizeof(float)), data.data());
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    m_particleInit = true;
+}
+
+void OpenGLRenderer::SimulateGpuParticles()
+{
+    const GpuParticleParams& p = m_gpuParticles;
+    if (!p.enabled) return;
+    const int count = std::clamp(p.count, 0, kParticleMax);
+    if (count <= 0) return;
+    EnsureParticleBuffers(count);
+    if (!m_particleInit) SeedParticleBuffer(count);
+
+    const int src = m_particleCur, dst = 1 - m_particleCur;
+    glUseProgram(m_particleSimProgram);
+    glUniform1f(m_uPSimDt, p.dt);
+    glUniform1f(m_uPSimTime, p.time);
+    glUniform3f(m_uPSimCamPos, p.cameraPos.x, p.cameraPos.y, p.cameraPos.z);
+    glUniform3f(m_uPSimWind, p.windVec.x, p.windVec.y, p.windVec.z);
+    glUniform1f(m_uPSimCoverage, p.coverage);
+    glUniform1f(m_uPSimFall, p.fallSpeed);
+    glUniform1f(m_uPSimLife, p.lifeSpan);
+    glUniform1f(m_uPSimGround, p.groundLevel);
+    glUniform1f(m_uPSimBoxHalf, p.boxHalf);
+    glUniform1f(m_uPSimBoxTop, p.boxTop);
+    glUniform1f(m_uPSimSnow, p.isSnow ? 1.0f : 0.0f);
+
+    glEnable(GL_RASTERIZER_DISCARD);
+    glBindVertexArray(m_particleSimVAO[src]);
+    glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, m_particleBuf[dst]);
+    glBeginTransformFeedback(GL_POINTS);
+    glDrawArrays(GL_POINTS, 0, count);
+    glEndTransformFeedback();
+    glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, 0);
+    glBindVertexArray(0);
+    glDisable(GL_RASTERIZER_DISCARD);
+    glUseProgram(0);
+    m_particleCur = dst;
+}
+
+void OpenGLRenderer::DrawGpuParticles(const glm::mat4& viewProj, const glm::vec3& camPos)
+{
+    const GpuParticleParams& p = m_gpuParticles;
+    if (!p.enabled || m_particleCapacity <= 0) return;
+    const int count = std::clamp(p.count, 0, m_particleCapacity);
+    if (count <= 0) return;
+
+    glUseProgram(m_particleDrawProgram);
+    glUniformMatrix4fv(m_uPDrawViewProj, 1, GL_FALSE, glm::value_ptr(viewProj));
+    glUniform3f(m_uPDrawCamPos, camPos.x, camPos.y, camPos.z);
+    glUniform1f(m_uPDrawSnow, p.isSnow ? 1.0f : 0.0f);
+
+    // Depth test stays as the scene left it (drops are occluded by closer geometry);
+    // we only add alpha blending + disable depth write, like the transparency pass.
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDepthMask(GL_FALSE);                          // blend over the scene, don't occlude
+    glBindVertexArray(m_particleDrawVAO[m_particleCur]);
+    glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, count);
+    glBindVertexArray(0);
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
+    glUseProgram(0);
+}
+
+void OpenGLRenderer::DestroyParticleResources()
+{
+    if (m_particleSimProgram)  { glDeleteProgram(m_particleSimProgram);  m_particleSimProgram = 0; }
+    if (m_particleDrawProgram) { glDeleteProgram(m_particleDrawProgram); m_particleDrawProgram = 0; }
+    if (m_particleBuf[0]) glDeleteBuffers(2, m_particleBuf);
+    if (m_particleSimVAO[0]) glDeleteVertexArrays(2, m_particleSimVAO);
+    if (m_particleDrawVAO[0]) glDeleteVertexArrays(2, m_particleDrawVAO);
+    m_particleBuf[0] = m_particleBuf[1] = 0;
+    m_particleSimVAO[0] = m_particleSimVAO[1] = 0;
+    m_particleDrawVAO[0] = m_particleDrawVAO[1] = 0;
+    m_particleCapacity = 0;
+    m_particleInit = false;
+}
+
 IRenderer::Capabilities OpenGLRenderer::GetCapabilities() const
 {
-	return { true, true, true };
+	Capabilities c;
+	c.supportsShadows        = true;
+	c.supportsPostProcessing = true;
+	c.supportsHDR            = true;
+	// Transform feedback is core in GL 4.1, so the GPU precipitation path runs on
+	// every GL context this backend creates (incl. macOS 4.1).
+	c.supportsGpuParticles   = true;
+	return c;
+}
+
+void OpenGLRenderer::SetGpuParticleParams(const GpuParticleParams& p)
+{
+	m_gpuParticles = p;
 }
 
 // ─── Multi-window support ─────────────────────────────────────────────────────

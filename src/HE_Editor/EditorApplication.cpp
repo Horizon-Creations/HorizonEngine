@@ -604,6 +604,7 @@ void EditorApplication::OnInit()
 	m_editorConfig.SSAORadius                  = globalstate.getCustomConfigFloat("SSAORadius",         m_editorConfig.SSAORadius);
 	m_editorConfig.SSAOIntensity               = globalstate.getCustomConfigFloat("SSAOIntensity",      m_editorConfig.SSAOIntensity);
 	m_editorConfig.SSAOMethod                  = globalstate.getCustomConfigInt("SSAOMethod",           m_editorConfig.SSAOMethod);
+	m_editorConfig.GpuParticles                = globalstate.getCustomConfigBool("GpuParticles",        m_editorConfig.GpuParticles);
 	m_editorConfig.QuickSettingsFavorites      = globalstate.getCustomConfigString("QuickSettingsFavorites", m_editorConfig.QuickSettingsFavorites);
 	m_editorCamera.setFlySpeed(m_editorConfig.EditorCameraSpeed);
 
@@ -859,9 +860,12 @@ void EditorApplication::OnRender(float dt)
 			// Shared with the standalone game runtime (GameApplication) so weather,
 			// animation, particles, terrain, foliage, nav & LOD behave identically.
 			// Pass the physics world in play mode so precipitation collides with the scene.
+			const bool gpuParticles = m_editorConfig.GpuParticles &&
+			                          renderer()->GetCapabilities().supportsGpuParticles;
 			SceneSystems::tick(*m_editorWorld, contentManager(), renderer(),
 			                   m_editorCamera.position(), dt,
-			                   (m_isPlaying && m_physicsWorld) ? m_physicsWorld.get() : nullptr);
+			                   (m_isPlaying && m_physicsWorld) ? m_physicsWorld.get() : nullptr,
+			                   gpuParticles);
 		}
 
 		// Step physics at a fixed rate during play mode
@@ -1530,6 +1534,7 @@ void EditorApplication::OnShutdown()
 	globalstate.setCustomConfigEntry("SSAORadius",                 m_editorConfig.SSAORadius);
 	globalstate.setCustomConfigEntry("SSAOIntensity",              m_editorConfig.SSAOIntensity);
 	globalstate.setCustomConfigEntry("SSAOMethod",                 m_editorConfig.SSAOMethod);
+	globalstate.setCustomConfigEntry("GpuParticles",              m_editorConfig.GpuParticles);
 	globalstate.setCustomConfigEntry("QuickSettingsFavorites",     m_editorConfig.QuickSettingsFavorites);
 	globalstate.writeConfig();
 }

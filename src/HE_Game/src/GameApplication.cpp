@@ -1,6 +1,7 @@
 #include "GameApplication.h"
 #include <Hpak/ProjectConfig.h>
 #include <Diagnostics/Logger.h>
+#include <Diagnostics/GlobalState.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/SceneSystems.h>
@@ -92,7 +93,10 @@ void GameApplication::OnRender(float deltaTime)
 			camPos = glm::vec3(tc.worldMatrix[3]);
 			break;
 		}
-		SceneSystems::tick(*m_world, contentManager(), renderer(), camPos, deltaTime);
+		const bool gpuParticles = GlobalState::getInstance().getCustomConfigBool("GpuParticles", false) &&
+		                          renderer()->GetCapabilities().supportsGpuParticles;
+		SceneSystems::tick(*m_world, contentManager(), renderer(), camPos, deltaTime,
+		                   nullptr, gpuParticles);
 
 		// Push the scene environment to the renderer. The base Application renders the
 		// world but never pushes EnvironmentSettings (that lived only in the editor), so

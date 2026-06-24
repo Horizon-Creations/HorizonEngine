@@ -74,7 +74,7 @@ namespace
 }
 
 void WeatherSystem::update(HorizonWorld& world, float dt, const glm::vec3& cameraPos,
-                           const PhysicsWorld* physics)
+                           const PhysicsWorld* physics, bool gpuPrecip)
 {
     auto& reg = world.registry();
 
@@ -188,6 +188,15 @@ void WeatherSystem::update(HorizonWorld& world, float dt, const glm::vec3& camer
         env->flash         = wx.flashIntensity;
         windDirDeg         = env->windDirection;
     }
+    // GPU precipitation: the renderer owns the rain/snow pool (transform feedback),
+    // so skip the CPU volume entirely. Free the CPU pool once so RenderExtractor stops
+    // emitting billboards for it. cloud/fog/wind + curPrecip were already updated above.
+    if (gpuPrecip)
+    {
+        if (!wx.precip.empty()) { wx.precip.clear(); wx.precip.shrink_to_fit(); }
+        return;
+    }
+
     // Steady horizontal wind vector (direction 0 = toward -Z, matching the clouds).
     const float wr = glm::radians(windDirDeg);
     const glm::vec3 windVec = glm::vec3(std::sin(wr), 0.0f, -std::cos(wr)) * wx.curWindSpeed;

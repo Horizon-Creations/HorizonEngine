@@ -42,6 +42,10 @@ public:
         bool supportsShadows        = false;
         bool supportsPostProcessing = false;
         bool supportsHDR            = false;
+        // GPU-simulated weather particles (transform feedback). True only on
+        // backends + drivers that can run the GPU precipitation path; the editor
+        // greys out the toggle when false. GL reports true (TF is core in 4.1).
+        bool supportsGpuParticles   = false;
     };
 
     // Overlay callback: called by the backend at the correct point inside the
@@ -168,6 +172,30 @@ public:
     };
     virtual void SetEnvironmentSettings(const EnvironmentSettings& e) { m_environment = e; }
     const EnvironmentSettings& GetEnvironment() const { return m_environment; }
+
+    // ── GPU weather particles (transform-feedback precipitation) ────────────
+    // Pushed every frame by the scene tick. When `enabled`, the backend owns the
+    // rain/snow simulation entirely: a fixed camera-following pool lives in GPU
+    // buffers, is integrated + recycled by a transform-feedback pass, and drawn as
+    // vertex-pulled billboards — the CPU precipitation pool is skipped. `enabled`
+    // is false (idle/clear) whenever the toggle is off or the backend can't do it.
+    struct GpuParticleParams
+    {
+        bool      enabled     = false;
+        bool      isSnow      = false;
+        int       count       = 0;       // pool size (cap); buffers resize on change
+        float     dt          = 0.0f;    // sim step this frame
+        float     time        = 0.0f;    // monotonically rising clock (sway / respawn hash)
+        glm::vec3 cameraPos   = glm::vec3(0.0f);
+        glm::vec3 windVec     = glm::vec3(0.0f);
+        float     coverage    = 0.0f;    // 0..1 fraction of the pool kept alive (curPrecip)
+        float     fallSpeed   = 18.0f;
+        float     lifeSpan    = 5.0f;
+        float     groundLevel = 0.0f;    // flat collision plane for the GPU path
+        float     boxHalf     = 16.0f;   // horizontal half-extent of the spawn volume
+        float     boxTop      = 24.0f;   // spawn height above the camera
+    };
+    virtual void SetGpuParticleParams(const GpuParticleParams& /*p*/) {}
 
     // ── Offscreen viewport (editor scene view) ────────────────────────────
     // When a non-zero size is set, the scene is rendered into an offscreen
