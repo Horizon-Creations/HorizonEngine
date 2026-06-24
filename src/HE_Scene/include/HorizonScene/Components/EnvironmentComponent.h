@@ -31,6 +31,15 @@ struct EnvironmentComponent
     float fogDensity      = 0.0f;
     float fogHeightFalloff = 0.1f;
 
+    // Precipitation + ground response (0..1). The single source of truth for both
+    // the weather-particle systems and the terrain shading — set by a WeatherPreset
+    // when one is applied, or dialled in by hand (the sliders are always live). The
+    // particle path renders the dominant of rain/snow; wetness darkens + glosses lit
+    // surfaces, snowAmount lays white on up-facing ones.
+    float rainAmount = 0.0f;   // rain density → velocity-streak billboards
+    float snowAmount = 0.0f;   // snow density → flake billboards + ground snow cover
+    float wetness    = 0.0f;   // wet-surface darkening + specular boost
+
     // Lightning flash (0..1, runtime only — driven by the WeatherSystem during storms,
     // never serialized). Brightens the sky shader for a brief strike.
     float flash = 0.0f;

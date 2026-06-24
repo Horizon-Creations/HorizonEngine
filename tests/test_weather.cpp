@@ -86,6 +86,48 @@ TEST_CASE("weather writes through into the EnvironmentComponent")
     CHECK(env->windSpeed     == doctest::Approx(w.curWindSpeed).epsilon(0.5)); // gust-modulated
 }
 
+TEST_CASE("manual env edits are respected; a new preset reclaims them")
+{
+    HorizonWorld world;
+    WeatherComponent& w = setupWeatherWorld(world);
+    auto* env = world.registry().try_get<EnvironmentComponent>(world.rootEntity());
+    w.currentKind = w.targetKind = WeatherKind::Overcast;
+
+    WeatherSystem::update(world, 0.016f); // selecting Overcast applies its values
+    CHECK(env->cloudCoverage == doctest::Approx(weatherPreset(WeatherKind::Overcast).cloudCoverage));
+
+    // The user drags the cloud slider — weather must not stomp it the next frame.
+    env->cloudCoverage = 0.123f;
+    WeatherSystem::update(world, 0.016f);
+    CHECK(env->cloudCoverage == doctest::Approx(0.123f));
+
+    // Picking a new preset reclaims every value, overriding the manual edit.
+    w.targetKind = WeatherKind::Clear;
+    for (int i = 0; i < 200; ++i) WeatherSystem::update(world, 0.1f); // run the transition out
+    CHECK(env->cloudCoverage ==
+          doctest::Approx(weatherPreset(WeatherKind::Clear).cloudCoverage).epsilon(0.02));
+}
+
+TEST_CASE("rain stops once the rain amount returns to zero")
+{
+    HorizonWorld world;
+    WeatherComponent& w = setupWeatherWorld(world);
+    auto* env = world.registry().try_get<EnvironmentComponent>(world.rootEntity());
+    w.currentKind = w.targetKind = WeatherKind::Rain;
+    w.transitionDuration = 0.1f;
+
+    WeatherSystem::update(world, 0.5f, glm::vec3(0.0f));
+    REQUIRE(env->rainAmount > 0.0f);
+    REQUIRE(!w.precip.empty());
+
+    // Manually zero the rain — the precipitation must drain out (the reported bug).
+    env->rainAmount = 0.0f;
+    for (int i = 0; i < 60; ++i)
+        WeatherSystem::update(world, 0.2f, glm::vec3(0.0f));
+    CHECK(env->rainAmount == doctest::Approx(0.0f));
+    CHECK(w.precip.empty());
+}
+
 TEST_CASE("intensity 0 collapses the weather to a calm sky")
 {
     HorizonWorld world;

@@ -207,6 +207,9 @@ namespace
 				{ "windSpeed",         e->windSpeed },
 				{ "fogDensity",        e->fogDensity },
 				{ "fogHeightFalloff",  e->fogHeightFalloff },
+				{ "rainAmount",        e->rainAmount },
+				{ "snowAmount",        e->snowAmount },
+				{ "wetness",           e->wetness },
 				{ "auroraIntensity",   e->auroraIntensity },
 				{ "milkyWayIntensity", e->milkyWayIntensity },
 				{ "nebulaIntensity",   e->nebulaIntensity },
@@ -227,7 +230,6 @@ namespace
 				{ "maxRainParticles",   w->maxRainParticles },
 				{ "maxSnowParticles",   w->maxSnowParticles },
 				{ "groundLevel",        w->groundLevel },
-				{ "manualEnvironment",  w->manualEnvironment },
 			};
 		}
 		if (auto* t = registry.try_get<TerrainComponent>(entity))
@@ -525,6 +527,9 @@ namespace
 			e.windSpeed         = c.value("windSpeed",         e.windSpeed);
 			e.fogDensity        = c.value("fogDensity",        e.fogDensity);
 			e.fogHeightFalloff  = c.value("fogHeightFalloff",  e.fogHeightFalloff);
+			e.rainAmount        = c.value("rainAmount",        e.rainAmount);
+			e.snowAmount        = c.value("snowAmount",        e.snowAmount);
+			e.wetness           = c.value("wetness",           e.wetness);
 			e.auroraIntensity   = c.value("auroraIntensity",   e.auroraIntensity);
 			e.milkyWayIntensity = c.value("milkyWayIntensity", e.milkyWayIntensity);
 			e.nebulaIntensity   = c.value("nebulaIntensity",   e.nebulaIntensity);
@@ -538,6 +543,7 @@ namespace
 			WeatherComponent w;
 			w.currentKind        = static_cast<WeatherKind>(c.value("currentKind", static_cast<int>(w.currentKind)));
 			w.targetKind         = static_cast<WeatherKind>(c.value("targetKind",  static_cast<int>(w.targetKind)));
+			w.prevTarget         = w.targetKind; // no spurious reclaim on load → authored env is respected
 			w.intensity          = c.value("intensity",          w.intensity);
 			w.transitionDuration = c.value("transitionDuration", w.transitionDuration);
 			w.autoCycle          = c.value("autoCycle",          w.autoCycle);
@@ -546,7 +552,6 @@ namespace
 			w.maxRainParticles = c.value("maxRainParticles", w.maxRainParticles);
 			w.maxSnowParticles = c.value("maxSnowParticles", w.maxSnowParticles);
 			w.groundLevel      = c.value("groundLevel",      w.groundLevel);
-			w.manualEnvironment = c.value("manualEnvironment", w.manualEnvironment);
 			registry.emplace_or_replace<WeatherComponent>(entity, w);
 		}
 		if (comps.contains("terrain"))
