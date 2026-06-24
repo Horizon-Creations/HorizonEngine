@@ -49,6 +49,7 @@ public:
 	void  InvalidateMesh    (const HE::UUID& meshId)     override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
 	void  SetSSAOSettings(const SSAOSettings& settings) override;
+	void  SetGpuParticleParams(const GpuParticleParams& p) override;
 	void  SetDebugLines(const std::vector<DebugLine>& lines) override;
 
 	// Multi-window support
@@ -283,6 +284,25 @@ private:
 	std::vector<DebugLine> m_debugLines;
 	void  CreateDebugLinePipeline();
 	void  EncodeDebugLines(void* renderEncoder, const glm::mat4& viewProj);
+
+	// ── GPU weather particles (compute simulation + vertex-pull billboards) ──
+	// A fixed camera-following rain/snow pool lives in one MTLBuffer (interleaved
+	// float4(pos,life) + float4(vel,seed) = 32 B/particle). A compute kernel
+	// integrates + recycles it in place once per frame; an attribute-less instanced
+	// triangle-strip pulls the buffer in the vertex stage and expands camera-facing
+	// billboards. Mirrors the OpenGL transform-feedback path (compute instead of TF).
+	void* m_particleSimPipeline  = nullptr; // id<MTLComputePipelineState>
+	void* m_particleDrawPipeline = nullptr; // id<MTLRenderPipelineState> (blended billboard)
+	void* m_particleBuffer       = nullptr; // id<MTLBuffer>, the pool
+	int   m_particleCapacity     = 0;
+	bool  m_particleSeeded       = false;
+	GpuParticleParams m_gpuParticleParams;  // latest params pushed from the scene tick
+	void  CreateParticlePipeline();
+	void  EnsureParticleBuffer(int count);
+	void  SeedParticleBuffer(int count);
+	void  SimulateGpuParticles(void* cmdBuf);                            // compute dispatch
+	void  DrawGpuParticles(void* renderEncoder, const glm::mat4& viewProj,
+	                       const glm::vec3& camPos);                     // billboard draw
 
 	MetalShaderManager m_shaderManager;
 };

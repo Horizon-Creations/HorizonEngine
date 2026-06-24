@@ -1405,6 +1405,7 @@ void MetalRenderer::Initialize(HE::Window* window)
 	CreateTarget(m_primarySdlWindow, m_primaryTarget);
 	CreateScenePipeline();
 	CreateDebugLinePipeline();
+	CreateParticlePipeline();
 	EnsureShadowResources();
 
 	// Persistent pass descriptor describing the swapchain attachment layout.
@@ -1488,6 +1489,9 @@ void MetalRenderer::Shutdown()
 	if (m_scenePipeline)        { CFBridgingRelease(m_scenePipeline);        m_scenePipeline = nullptr; }
 	if (m_sceneBlendPipeline)   { CFBridgingRelease(m_sceneBlendPipeline);   m_sceneBlendPipeline = nullptr; }
 	if (m_skinnedPipeline)      { CFBridgingRelease(m_skinnedPipeline);      m_skinnedPipeline = nullptr; }
+	if (m_particleSimPipeline)  { CFBridgingRelease(m_particleSimPipeline);  m_particleSimPipeline = nullptr; }
+	if (m_particleDrawPipeline) { CFBridgingRelease(m_particleDrawPipeline); m_particleDrawPipeline = nullptr; }
+	if (m_particleBuffer)       { CFBridgingRelease(m_particleBuffer);       m_particleBuffer = nullptr; }
 	if (m_sceneDepthState) { CFBridgingRelease(m_sceneDepthState); m_sceneDepthState = nullptr; }
 	if (m_shadowPipeline)  { CFBridgingRelease(m_shadowPipeline);  m_shadowPipeline = nullptr; }
 	if (m_shadowDepthTex)  { CFBridgingRelease(m_shadowDepthTex);  m_shadowDepthTex = nullptr; }
@@ -3199,6 +3203,10 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 			             indexBufferOffset:0];
 		}
 	}
+
+	// GPU weather particles: simulated by the compute pass (EncodeFrame), drawn here
+	// as alpha-blended billboards over the opaque scene + sky.
+	DrawGpuParticles(renderEncoder, viewProj, m_renderWorld.camera.position);
 }
 
 void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool isPrimary)
@@ -3244,6 +3252,12 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 		// Only the swapchain present below needs the drawable.
 		if (isPrimary)
 			EncodeShadowMap((__bridge void*)cmdBuf);
+
+		// Step the GPU weather-particle pool once per frame (primary only), before the
+		// scene render encoder reads it. Metal tracks the compute→vertex dependency on
+		// the shared buffer within this command buffer. No-op when the path is disabled.
+		if (isPrimary)
+			SimulateGpuParticles((__bridge void*)cmdBuf);
 
 		const bool offscreen = isPrimary && m_viewportReqW > 0 && m_viewportReqH > 0;
 		if (isPrimary)
@@ -3374,9 +3388,249 @@ void MetalRenderer::Render()
 	EncodeFrame(m_primarySdlWindow, m_primaryTarget, /*isPrimary=*/true);
 }
 
+// ─── GPU weather particles (compute simulation + vertex-pull billboards) ──────
+// Metal has no transform feedback, so the pool is integrated + recycled by a
+// compute kernel in place (one MTLBuffer, particle = float4(pos,life)+float4(vel,
+// seed)). The draw stage pulls the buffer per-instance and expands an attribute-
+// less triangle-strip into camera-facing billboards. Math mirrors the GL path.
+namespace {
+constexpr int kParticleMax = 1000000;
+
+// setBytes layouts — all-float4 so MSL float4 alignment matches byte-for-byte.
+struct PSimParams { glm::vec4 a, b, c, camPos, wind; };
+//   a = (dt, time, coverage, fallSpeed)   b = (lifeSpan, groundLevel, boxHalf, boxTop)
+//   c = (isSnow, count, 0, 0)             camPos.xyz, wind.xyz
+struct PDrawParams { glm::mat4 viewProj; glm::vec4 camPos; glm::vec4 snow; };
+
+const char* kParticleMSL = R"(#include <metal_stdlib>
+using namespace metal;
+struct Particle { float4 p0; float4 p1; };   // p0=(pos,life)  p1=(vel,seed)
+struct PSim  { float4 a, b, c, camPos, wind; };
+struct PDraw { float4x4 viewProj; float4 camPos; float4 snow; };
+
+static float h21(float2 p){ float3 p3=fract(float3(p.x,p.y,p.x)*0.1031);
+    p3+=dot(p3,float3(p3.y,p3.z,p3.x)+33.33); return fract((p3.x+p3.y)*p3.z); }
+
+kernel void particleSim(device Particle* parts [[buffer(0)]],
+                        constant PSim&   u     [[buffer(1)]],
+                        uint id [[thread_position_in_grid]])
+{
+    if (float(id) >= u.c.y) return;                         // c.y = count
+    float dt=u.a.x, time=u.a.y, coverage=u.a.z, fallSpeed=u.a.w;
+    float lifeSpan=u.b.x, groundLevel=u.b.y, boxHalf=u.b.z, boxTop=u.b.w;
+    float isSnow=u.c.x;
+    float3 camPos=u.camPos.xyz, wind=u.wind.xyz;
+    Particle pt = parts[id];
+    float3 pos=pt.p0.xyz; float life=pt.p0.w;
+    float3 vel=pt.p1.xyz; float seed=pt.p1.w;
+    float alive = step(seed, coverage);
+    pos += vel * dt;
+    life -= dt;
+    if (isSnow > 0.5) pos.x += sin((lifeSpan - life) * 2.2 + seed * 6.2831) * 0.5 * dt;
+    bool dead = life <= 0.0 || pos.y <= groundLevel;
+    if (dead) {
+        if (alive > 0.5) {
+            float ep = floor(time * 7.0) + seed * 131.0;
+            float rx = h21(float2(seed * 91.7, ep)) * 2.0 - 1.0;
+            float rz = h21(float2(ep, seed * 57.3)) * 2.0 - 1.0;
+            pos = float3(camPos.x + rx * boxHalf, camPos.y + boxTop, camPos.z + rz * boxHalf);
+            vel = float3(0.0, -fallSpeed, 0.0);
+            if (isSnow > 0.5) {
+                vel.x += (h21(float2(ep, seed)) * 2.0 - 1.0) * 0.6 + wind.x * 0.3;
+                vel.z += (h21(float2(seed, ep)) * 2.0 - 1.0) * 0.6 + wind.z * 0.3;
+            } else {
+                vel.x += wind.x * 1.2;
+                vel.z += wind.z * 1.2;
+            }
+            life = lifeSpan * (0.6 + 0.4 * seed);
+        } else {
+            life = -1.0; pos = camPos + float3(0.0, -100000.0, 0.0); vel = float3(0.0);
+        }
+    }
+    parts[id].p0 = float4(pos, life);
+    parts[id].p1 = float4(vel, seed);
+}
+
+struct VOut { float4 pos [[position]]; float2 uv; float snow; };
+vertex VOut particleVertex(uint vid [[vertex_id]], uint iid [[instance_id]],
+                           device const Particle* parts [[buffer(0)]],
+                           constant PDraw& u [[buffer(1)]])
+{
+    Particle pt = parts[iid];
+    float life = pt.p0.w;
+    VOut o; o.snow = u.snow.x;
+    if (life <= 0.0) { o.pos = float4(2.0, 2.0, 2.0, 1.0); o.uv = float2(0.0); return o; }
+    float2 c = float2(float(vid & 1u), float((vid >> 1u) & 1u)) - 0.5;
+    o.uv = c;
+    float3 ppos = pt.p0.xyz, vel = pt.p1.xyz;
+    float3 look = u.camPos.xyz - ppos;
+    float d = length(look);
+    look = (d > 1e-4) ? look / d : float3(0.0, 0.0, 1.0);
+    float3 worldPos;
+    if (u.snow.x > 0.5) {
+        float s = 0.16;
+        float3 right = normalize(cross(float3(0.0, 1.0, 0.0), look));
+        float3 up    = cross(look, right);
+        worldPos = ppos + (right * c.x + up * c.y) * s;
+    } else {
+        float3 vdir = vel; float vl = length(vdir);
+        vdir = (vl > 1e-4) ? vdir / vl : float3(0.0, -1.0, 0.0);
+        float3 up = vdir - look * dot(vdir, look);
+        up = (length(up) > 1e-4) ? normalize(up) : float3(0.0, 1.0, 0.0);
+        float3 right = normalize(cross(up, look));
+        worldPos = ppos + right * (c.x * 0.02) + up * (c.y * 0.6);
+    }
+    o.pos = u.viewProj * float4(worldPos, 1.0);
+    return o;
+}
+fragment float4 particleFragment(VOut in [[stage_in]])
+{
+    if (in.snow > 0.5) {
+        float a = (1.0 - smoothstep(0.15, 0.5, length(in.uv))) * 0.9;
+        return float4(0.92, 0.95, 1.0, a);
+    }
+    float a = (1.0 - smoothstep(0.0, 0.5, abs(in.uv.x))) * 0.45;
+    return float4(0.55, 0.62, 0.78, a);
+}
+)";
+} // namespace
+
+void MetalRenderer::CreateParticlePipeline()
+{
+	@autoreleasepool
+	{
+		id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+		NSError* error = nil;
+		id<MTLLibrary> lib = [device newLibraryWithSource:[NSString stringWithUTF8String:kParticleMSL]
+		                                          options:nil error:&error];
+		if (!lib)
+			throw std::runtime_error(std::string("MetalRenderer: particle shader compile failed: ")
+				+ (error ? [[error localizedDescription] UTF8String] : "unknown"));
+
+		id<MTLComputePipelineState> simPso =
+			[device newComputePipelineStateWithFunction:[lib newFunctionWithName:@"particleSim"] error:&error];
+		if (!simPso)
+			throw std::runtime_error(std::string("MetalRenderer: particle sim pipeline failed: ")
+				+ (error ? [[error localizedDescription] UTF8String] : "unknown"));
+		m_particleSimPipeline = (void*)CFBridgingRetain(simPso);
+
+		MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
+		desc.vertexFunction   = [lib newFunctionWithName:@"particleVertex"];
+		desc.fragmentFunction = [lib newFunctionWithName:@"particleFragment"];
+		desc.colorAttachments[0].pixelFormat = kSceneColorFormat;
+		desc.depthAttachmentPixelFormat      = kDepthFormat;
+		desc.colorAttachments[0].blendingEnabled             = YES;
+		desc.colorAttachments[0].rgbBlendOperation           = MTLBlendOperationAdd;
+		desc.colorAttachments[0].alphaBlendOperation         = MTLBlendOperationAdd;
+		desc.colorAttachments[0].sourceRGBBlendFactor        = MTLBlendFactorSourceAlpha;
+		desc.colorAttachments[0].sourceAlphaBlendFactor      = MTLBlendFactorSourceAlpha;
+		desc.colorAttachments[0].destinationRGBBlendFactor   = MTLBlendFactorOneMinusSourceAlpha;
+		desc.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+		id<MTLRenderPipelineState> drawPso = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+		if (!drawPso)
+			throw std::runtime_error(std::string("MetalRenderer: particle draw pipeline failed: ")
+				+ (error ? [[error localizedDescription] UTF8String] : "unknown"));
+		m_particleDrawPipeline = (void*)CFBridgingRetain(drawPso);
+	}
+}
+
+void MetalRenderer::EnsureParticleBuffer(int count)
+{
+	if (count == m_particleCapacity && m_particleBuffer) return;
+	@autoreleasepool
+	{
+		id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+		if (m_particleBuffer) { CFBridgingRelease(m_particleBuffer); m_particleBuffer = nullptr; }
+		id<MTLBuffer> buf = [device newBufferWithLength:(NSUInteger)count * 8 * sizeof(float)
+		                                       options:MTLResourceStorageModeShared];
+		m_particleBuffer = (void*)CFBridgingRetain(buf);
+	}
+	m_particleCapacity = count;
+	m_particleSeeded   = false;
+}
+
+void MetalRenderer::SeedParticleBuffer(int count)
+{
+	// Pre-distribute the pool down the fall column (same scheme as the GL backend):
+	// seed = (i+0.5)/count so step(seed,coverage) keeps exactly a `coverage` fraction.
+	const GpuParticleParams& p = m_gpuParticleParams;
+	float* d = (float*)[(__bridge id<MTLBuffer>)m_particleBuffer contents];
+	const float top = p.cameraPos.y + p.boxTop;
+	uint32_t rng = 0x9E3779B9u;
+	auto frand = [&]() { rng = rng * 1664525u + 1013904223u; return (rng >> 8) * (1.0f / 16777216.0f); };
+	for (int i = 0; i < count; ++i)
+	{
+		const float seed = (i + 0.5f) / static_cast<float>(count);
+		const float y    = p.groundLevel + frand() * std::max(top - p.groundLevel, 1.0f);
+		float* e = &d[static_cast<size_t>(i) * 8];
+		e[0] = p.cameraPos.x + (frand() * 2.0f - 1.0f) * p.boxHalf;  // p0 = pos.xyz, life
+		e[1] = y;
+		e[2] = p.cameraPos.z + (frand() * 2.0f - 1.0f) * p.boxHalf;
+		e[3] = (y - p.groundLevel) / std::max(p.fallSpeed, 0.01f);
+		e[4] = p.windVec.x * (p.isSnow ? 0.3f : 1.2f);              // p1 = vel.xyz, seed
+		e[5] = -p.fallSpeed;
+		e[6] = p.windVec.z * (p.isSnow ? 0.3f : 1.2f);
+		e[7] = seed;
+	}
+	m_particleSeeded = true;
+}
+
+void MetalRenderer::SimulateGpuParticles(void* cmdBuf)
+{
+	const GpuParticleParams& p = m_gpuParticleParams;
+	if (!p.enabled || !m_particleSimPipeline) return;
+	const int count = std::clamp(p.count, 0, kParticleMax);
+	if (count <= 0) return;
+	EnsureParticleBuffer(count);
+	if (!m_particleSeeded) SeedParticleBuffer(count);
+
+	@autoreleasepool
+	{
+		PSimParams u;
+		u.a      = glm::vec4(p.dt, p.time, p.coverage, p.fallSpeed);
+		u.b      = glm::vec4(p.lifeSpan, p.groundLevel, p.boxHalf, p.boxTop);
+		u.c      = glm::vec4(p.isSnow ? 1.0f : 0.0f, static_cast<float>(count), 0.0f, 0.0f);
+		u.camPos = glm::vec4(p.cameraPos, 0.0f);
+		u.wind   = glm::vec4(p.windVec, 0.0f);
+
+		id<MTLComputeCommandEncoder> ce = [(__bridge id<MTLCommandBuffer>)cmdBuf computeCommandEncoder];
+		[ce setComputePipelineState:(__bridge id<MTLComputePipelineState>)m_particleSimPipeline];
+		[ce setBuffer:(__bridge id<MTLBuffer>)m_particleBuffer offset:0 atIndex:0];
+		[ce setBytes:&u length:sizeof(u) atIndex:1];
+		const NSUInteger tg     = 64;
+		const NSUInteger groups = ((NSUInteger)count + tg - 1) / tg;
+		[ce dispatchThreadgroups:MTLSizeMake(groups, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+		[ce endEncoding];
+	}
+}
+
+void MetalRenderer::DrawGpuParticles(void* renderEncoder, const glm::mat4& viewProj, const glm::vec3& camPos)
+{
+	const GpuParticleParams& p = m_gpuParticleParams;
+	if (!p.enabled || !m_particleDrawPipeline || !m_particleBuffer) return;
+	const int count = std::clamp(p.count, 0, m_particleCapacity);
+	if (count <= 0) return;
+
+	id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
+	PDrawParams u;
+	u.viewProj = viewProj;
+	u.camPos   = glm::vec4(camPos, 0.0f);
+	u.snow     = glm::vec4(p.isSnow ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+	[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_particleDrawPipeline];
+	[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_skyDepthState]; // LessEqual, no write
+	[enc setVertexBuffer:(__bridge id<MTLBuffer>)m_particleBuffer offset:0 atIndex:0];
+	[enc setVertexBytes:&u length:sizeof(u) atIndex:1];
+	[enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4 instanceCount:(NSUInteger)count];
+}
+
 IRenderer::Capabilities MetalRenderer::GetCapabilities() const
 {
-	return { true, true, true };
+	return { true, true, true, true /* supportsGpuParticles */ };
+}
+
+void MetalRenderer::SetGpuParticleParams(const GpuParticleParams& p)
+{
+	m_gpuParticleParams = p;
 }
 
 void MetalRenderer::SetVSync(bool enabled)
