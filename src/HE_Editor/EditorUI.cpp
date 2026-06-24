@@ -343,7 +343,7 @@ static void DrawPreferencesWindow(AppContext& ctx, bool& open)
 			cfg.SSAORadius        = 0.5f;
 			cfg.SSAOIntensity     = 1.0f;
 			cfg.SSAOMethod        = 0;
-			cfg.GpuParticles      = false;
+			cfg.GpuParticles      = true;
 			if (ctx.editorCamera) ctx.editorCamera->setFlySpeed(cfg.EditorCameraSpeed);
 		}
 		ImGui::SameLine();

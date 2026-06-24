@@ -93,7 +93,7 @@ void GameApplication::OnRender(float deltaTime)
 			camPos = glm::vec3(tc.worldMatrix[3]);
 			break;
 		}
-		const bool gpuParticles = GlobalState::getInstance().getCustomConfigBool("GpuParticles", false) &&
+		const bool gpuParticles = GlobalState::getInstance().getCustomConfigBool("GpuParticles", true) &&
 		                          renderer()->GetCapabilities().supportsGpuParticles;
 		SceneSystems::tick(*m_world, contentManager(), renderer(), camPos, deltaTime,
 		                   nullptr, gpuParticles);

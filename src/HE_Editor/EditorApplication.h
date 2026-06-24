@@ -62,9 +62,10 @@ struct EditorConfig
 	float SSAOIntensity = 1.0f;   // 0 = off … 1 = full ambient occlusion
 	int   SSAOMethod    = 0;      // AO method: 0 = SSAO, 1 = HBAO, 2 = GTAO (planned)
 
-	// GPU weather particles: simulate rain/snow on the GPU (transform feedback) instead
-	// of the CPU pool. Only honoured when the backend reports supportsGpuParticles.
-	bool  GpuParticles  = false;
+	// GPU weather particles: simulate rain/snow on the GPU (transform feedback / compute)
+	// instead of the CPU pool. Default on; the backend's supportsGpuParticles gates it
+	// (GL + Metal = yes, so it's the path used unless the user turns it off).
+	bool  GpuParticles  = true;
 
 	// NOTE: environment / sky settings (day-night, sun, moon, clouds, fog, night
 	// sky, wind) are scene data now — they live on the World root entity as an
