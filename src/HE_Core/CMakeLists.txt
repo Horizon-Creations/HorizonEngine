@@ -7,6 +7,7 @@ add_library(HorizonCore SHARED
 	src/Diagnostics/GlobalState.cpp
 	src/Diagnostics/Logger.cpp
 	src/Diagnostics/Profiler.cpp
+	src/Diagnostics/EngineProfiler.cpp
 	src/Diagnostics/CrashHandler.cpp
 	src/Memory/PoolAllocator.cpp
 	src/Memory/Ref.cpp

@@ -14,10 +14,13 @@ void LODSystem::update(HorizonWorld& world, const glm::vec3& cameraPos)
     {
         if (lod.levels.empty()) continue;
 
-        // Use entity translation if available, otherwise treat as at origin.
+        // Use WORLD position (worldMatrix translation), not local — terrain chunks
+        // are children, so their local position is a per-chunk offset; only the world
+        // position gives the right per-chunk camera distance. worldMatrix is computed
+        // by the scene graph / extractor (1-frame lag at most, invisible for LOD).
         glm::vec3 pos(0.f);
         if (const auto* tf = registry.try_get<TransformComponent>(entity))
-            pos = tf->position;
+            pos = glm::vec3(tf->worldMatrix[3]);
 
         const float dist = glm::distance(cameraPos, pos);
 

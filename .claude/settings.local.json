@@ -44,7 +44,9 @@
       "Bash(echo \"BUILD_EXIT=$?\")",
       "Bash(echo \"EXIT=$?\")",
       "Bash(curl -sL --max-time 30 -o tests/vendor/doctest.h https://raw.githubusercontent.com/doctest/doctest/master/doctest/doctest.h)",
-      "Bash(cmake --build \"out/build/x64-debug\" --target HorizonScene -- -j4)"
+      "Bash(cmake --build \"out/build/x64-debug\" --target HorizonScene -- -j4)",
+      "Bash(grep -E '\\\\.\\(glsl|hlsl|metal|spv|h|cpp|hpp|vs|fs|cs\\)$')",
+      "Workflow(deep-research)"
     ]
   }
 }

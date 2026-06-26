@@ -13,6 +13,7 @@
 #include "HorizonScene/Components/WeatherComponent.h"
 #include "HorizonScene/Components/EnvironmentComponent.h"
 #include "Renderer/IRenderer.h"
+#include "Diagnostics/Profiler.h"
 #include <cmath>
 
 namespace {
@@ -60,15 +61,16 @@ void SceneSystems::tick(HorizonWorld& world, ContentManager& cm, IRenderer* rend
                         const glm::vec3& cameraPos, float dt, const PhysicsWorld* physics,
                         bool gpuParticles)
 {
-    TerrainSystem::updateTerrains(world, cm, renderer);
-    AnimationSystem::update(world, cm, dt);
-    AnimationBlendSystem::update(world, cm, dt);
-    AnimationStateMachineSystem::update(world, cm, dt);
-    PropertyAnimationSystem::update(world, cm, dt);
-    NavigationSystem::update(world, dt);
-    WeatherSystem::update(world, dt, cameraPos, physics, gpuParticles); // env clouds/fog/wind + precip
+    { HE_PROFILE_SCOPE_N("Terrain");               TerrainSystem::updateTerrains(world, cm, renderer); }
+    { HE_PROFILE_SCOPE_N("Animation");             AnimationSystem::update(world, cm, dt); }
+    { HE_PROFILE_SCOPE_N("AnimationBlend");        AnimationBlendSystem::update(world, cm, dt); }
+    { HE_PROFILE_SCOPE_N("AnimationStateMachine"); AnimationStateMachineSystem::update(world, cm, dt); }
+    { HE_PROFILE_SCOPE_N("PropertyAnimation");     PropertyAnimationSystem::update(world, cm, dt); }
+    { HE_PROFILE_SCOPE_N("Navigation");            NavigationSystem::update(world, dt); }
+    { HE_PROFILE_SCOPE_N("Weather");               WeatherSystem::update(world, dt, cameraPos, physics, gpuParticles); } // env clouds/fog/wind + precip
     if (renderer)
     {
+        HE_PROFILE_SCOPE_N("GpuParticleParams");
         // Always push (active=gpuParticles) so the GPU pool reliably stops when the
         // toggle is off or precip hits zero. Clock for the respawn hash: weatherTime
         // when a WeatherComponent exists, else a steady fallback from the frame time.
@@ -76,7 +78,7 @@ void SceneSystems::tick(HorizonWorld& world, ContentManager& cm, IRenderer* rend
         for (auto [e, wc] : world.registry().view<WeatherComponent>().each()) { clock = wc.weatherTime; break; }
         pushGpuParticleParams(world, renderer, cameraPos, dt, gpuParticles, clock);
     }
-    ParticleSystem::update(world, dt, cameraPos); // camera-following precipitation volume (Phase 2)
-    FoliageSystem::update(world);
-    LODSystem::update(world, cameraPos);
+    { HE_PROFILE_SCOPE_N("ParticleSystem"); ParticleSystem::update(world, dt, cameraPos); } // camera-following precipitation volume (Phase 2)
+    { HE_PROFILE_SCOPE_N("Foliage");        FoliageSystem::update(world); }
+    { HE_PROFILE_SCOPE_N("LOD");            LODSystem::update(world, cameraPos); }
 }

@@ -1,5 +1,6 @@
 #include "EditorApplication.h"
 #include "EditorUI.h"
+#include <Diagnostics/Profiler.h>
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonScene/Components/EnvironmentComponent.h>
 #include <HorizonScene/TerrainSystem.h>
@@ -777,17 +778,28 @@ void EditorApplication::OnRender(float dt)
 	// ── Window title ─────────────────────────────────────────────────────
 	{
 		const std::string& projName = m_projectManager.currentProject().name;
-		std::string title = projName.empty()
-			? "Horizon Engine"
-			: "Horizon Engine — " + projName;
-
-		// Append the scene name (file stem, or "Untitled") and a dirty marker.
-		const std::string sceneName = m_currentScenePath.empty()
-			? "Untitled"
-			: std::filesystem::path(m_currentScenePath).stem().string();
 		const bool dirty = m_undo.revision() != m_savedRevision;
-		title += " — " + sceneName + (dirty ? " *" : "");
-		window()->SetTitle(title);
+		// Only rebuild the title (string concats + filesystem path-stem parse + the
+		// SDL_SetWindowTitle syscall) when an input actually changed — this whole block
+		// ran every editor frame otherwise.
+		static std::string s_lastProj, s_lastScene;
+		static int         s_lastDirty = -1;
+		if (projName != s_lastProj || m_currentScenePath != s_lastScene ||
+		    static_cast<int>(dirty) != s_lastDirty)
+		{
+			s_lastProj  = projName;
+			s_lastScene = m_currentScenePath;
+			s_lastDirty = static_cast<int>(dirty);
+
+			std::string title = projName.empty()
+				? "Horizon Engine"
+				: "Horizon Engine — " + projName;
+			const std::string sceneName = m_currentScenePath.empty()
+				? "Untitled"
+				: std::filesystem::path(m_currentScenePath).stem().string();
+			title += " — " + sceneName + (dirty ? " *" : "");
+			window()->SetTitle(title);
+		}
 	}
 	// ── Automatischer asynchroner Content-Refresh ─────────────────────────────
 	if (m_projectLoaded && m_editorConfig.ContentBrowserRefreshRate > 0)
@@ -862,6 +874,7 @@ void EditorApplication::OnRender(float dt)
 			// Pass the physics world in play mode so precipitation collides with the scene.
 			const bool gpuParticles = m_editorConfig.GpuParticles &&
 			                          renderer()->GetCapabilities().supportsGpuParticles;
+			HE_PROFILE_SCOPE_N("SceneSystemsTick");
 			SceneSystems::tick(*m_editorWorld, contentManager(), renderer(),
 			                   m_editorCamera.position(), dt,
 			                   (m_isPlaying && m_physicsWorld) ? m_physicsWorld.get() : nullptr,
@@ -871,6 +884,7 @@ void EditorApplication::OnRender(float dt)
 		// Step physics at a fixed rate during play mode
 		if (m_isPlaying && m_physicsWorld && m_editorWorld)
 		{
+			HE_PROFILE_SCOPE_N("PhysicsStep");
 			m_physicsAccum += dt;
 			while (m_physicsAccum >= kPhysicsFixedDt)
 			{
@@ -881,7 +895,10 @@ void EditorApplication::OnRender(float dt)
 
 		// Keep spatial audio sources and listener in sync each play-mode frame
 		if (m_isPlaying && m_editorWorld)
+		{
+			HE_PROFILE_SCOPE_N("AudioSpatial");
 			AudioSystem::updateSpatial(*m_editorWorld, m_audioEngine);
+		}
 
 		// Thunder: when a lightning strike fired this frame, play the configured sound
 		// (graceful no-op if no thunderSound asset is set on the WeatherComponent).
@@ -899,15 +916,22 @@ void EditorApplication::OnRender(float dt)
 		// Per-frame script update
 		if (m_isPlaying && m_scriptContext)
 		{
+			HE_PROFILE_SCOPE_N("ScriptUpdate");
 			for (auto& [entityId, instId] : m_scriptInstances)
 				m_scriptContext->callOnUpdate(instId, dt);
 		}
 
 		// Dispatch collision events to scripts (after physics has stepped this frame)
 		if (m_isPlaying && m_physicsWorld && m_scriptContext)
+		{
+			HE_PROFILE_SCOPE_N("CollisionDispatch");
 			CollisionSystem::dispatch(*m_physicsWorld, *m_scriptContext, m_scriptInstances);
+		}
 
-		pushEnvironment(dt); // auto-advances + pushes the World env component
+		{
+			HE_PROFILE_SCOPE_N("EnvironmentPush");
+			pushEnvironment(dt); // auto-advances + pushes the World env component
+		}
 
 		// ── Debug draw overlay (selected-entity marker + colliders) ──────────
 		if (m_projectLoaded && m_editorWorld)
@@ -1197,6 +1221,8 @@ AppContext EditorApplication::makeContext()
 	return AppContext{
 		.imguiReady          = m_imguiReady,
 		.quit                = [this]{ Quit(); },
+		.toggleProfilerCapture = [this]{ toggleProfilerCapture(); },
+		.setVSync              = [this](bool v){ setVSync(v); m_vsync = v; },
 		.editorConfig        = m_editorConfig,
 		.vsync               = m_vsync,
 		.backendName         = m_backend_name,

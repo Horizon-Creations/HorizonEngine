@@ -51,6 +51,17 @@ std::ofstream& GlobalState::getLogFileStream()
 	return logFileStream;
 }
 
+std::string GlobalState::getDumpsDir() const
+{
+	// Mirror setLogFile's exe-adjacent derivation: <exeDir>/dumps. startupPath is
+	// argv[0] (the executable), so parent_path() is the deploy directory — the same
+	// folder that holds HorizonEngine.log.
+	fs::path dumps = fs::path(engineStatus.startupPath).parent_path() / "dumps";
+	std::error_code ec;
+	fs::create_directories(dumps, ec);
+	return dumps.string();
+}
+
 void GlobalState::readConfig()
 {
 	if (!fs::exists("config.json"))

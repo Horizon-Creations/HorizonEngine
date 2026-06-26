@@ -198,6 +198,21 @@ else()
     message(STATUS "HorizonEngine: Tracy profiling disabled (pass -DHE_ENABLE_TRACY=ON to enable)")
 endif()
 
+# ── In-engine profiler (EngineProfiler scopes / editor profiling window) ──────
+# ON for development/editor builds; the HE_PROFILE_SCOPE_N macros expand to the
+# EngineProfiler RAII timers. Turn OFF for a shipping GAME build
+# (cmake -DHE_PROFILING=OFF ...) → the scope macros become no-ops, so the shipped
+# game carries ZERO profiler overhead (not even the per-scope recording check).
+# Defined globally (before add_subdirectory) so the shared engine libs that hold
+# the system scopes (Terrain, render passes, …) are instrumented for the editor.
+option(HE_PROFILING "In-engine EngineProfiler scopes (editor/dev)" ON)
+if(HE_PROFILING)
+    add_compile_definitions(HE_PROFILING_ENABLED)
+    message(STATUS "HorizonEngine: in-engine profiler ENABLED (pass -DHE_PROFILING=OFF for a zero-overhead shipping game)")
+else()
+    message(STATUS "HorizonEngine: in-engine profiler compiled OUT (zero overhead)")
+endif()
+
 # ─── Deploy directories ────────────────────────────────────────────────────────
 if(WIN32)
     set(DEPLOY_DIR    "C:/Users/conno/source/repos/HorizonEngineBuild")

@@ -22,6 +22,10 @@ public:
 	void Shutdown()                      override;
 	void Render()                        override;
 	Capabilities GetCapabilities() const override;
+	// GPU timing stays unavailable on macOS GL (timestamp queries are unreliable —
+	// reported as gpuFrameMs = -1), but the CPU render counters are filled so the
+	// profiler/editor show draws/triangles/visible/total on the GL backend too.
+	FrameGpuStats GetFrameGpuStats() const override;
 
 	void* CreateImGuiTexture(const void* rgba8Pixels, int width, int height) override;
 	void  DestroyImGuiTexture(void* handle) override;
@@ -43,6 +47,13 @@ public:
 	void RenderWindow(HE::Window* window) override;
 
 private:
+	// Per-frame render counters (main thread), reset + filled by the scene render
+	// and returned by GetFrameGpuStats. draws/tris count actual GL draws (instanced
+	// batches = 1 draw, tris scaled by instance count); visible/total = culled vs
+	// extracted static objects.
+	struct FrameCounters { uint32_t draws = 0, tris = 0, visible = 0, total = 0; };
+	FrameCounters m_counters;
+
 	// GPU-side mesh, uploaded on first sight from ContentManager data.
 	struct GpuMesh
 	{
