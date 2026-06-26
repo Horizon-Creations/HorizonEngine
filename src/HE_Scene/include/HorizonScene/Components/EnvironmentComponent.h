@@ -25,6 +25,13 @@ struct EnvironmentComponent
     float cloudCoverage = 0.5f;
     float windDirection = 30.0f;     // degrees, 0 = toward -Z/north, clockwise
     float windSpeed     = 1.0f;
+    // Cloud render mode (OpenGL backend): 0 = sky-dome clouds (the default; clouds sit
+    // on the sky hemisphere — cheap, but no parallax), 1 = 3D volumetric clouds anchored
+    // in the world so they parallax / shift as the camera moves through the scene.
+    // cloudHeight is how far above the camera the 3D layer sits, in world units — tune
+    // it to your world's scale (bigger world = larger value).
+    int   cloudMode   = 0;
+    float cloudHeight = 200.0f;
 
     // Atmospheric fog / aerial perspective (0 density = off; height falloff pools
     // the fog near the ground).

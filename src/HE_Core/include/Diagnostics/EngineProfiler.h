@@ -111,6 +111,11 @@ public:
 
 	bool isRecording()        const { return m_recording.load(std::memory_order_acquire); }
 	bool isRecordingOrPending() const { return isRecording() || m_pending == Pending::Start; }
+	// True only during the one frame of a single-frame capture (set at beginFrame,
+	// cleared at endFrame). Backends with async GPU timing (OpenGL timer queries,
+	// reaped 1–N frames late) use this to force a same-frame read for that one frame,
+	// so the captured record gets THAT frame's GPU times rather than a stale slot.
+	bool isSingleFrameCapture() const { return m_singleMode; }
 
 	// ── Detailed GPU capture ───────────────────────────────────────────────
 	// When on, backends that support it (Metal) submit each render pass as its own

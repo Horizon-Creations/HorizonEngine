@@ -206,6 +206,11 @@ public:
         // snowAmount lays white snow on up-facing surfaces. Read by the lit shader.
         float     wetness    = 0.0f;
         float     snowAmount = 0.0f;
+        // Cloud render mode (OpenGL): 0 = sky-dome (default), 1 = 3D volumetric clouds
+        // anchored in the world so they parallax as the camera moves. cloudHeight = the
+        // 3D layer's height above the camera in world units. Other backends ignore these.
+        int       cloudMode   = 0;
+        float     cloudHeight = 200.0f;
     };
     virtual void SetEnvironmentSettings(const EnvironmentSettings& e) { m_environment = e; }
     const EnvironmentSettings& GetEnvironment() const { return m_environment; }

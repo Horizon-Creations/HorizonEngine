@@ -510,10 +510,14 @@ static void DrawFrameDetail(const ProfFrameRecord& f)
     // ── GPU passes ──────────────────────────────────────────────────────────
     if (!f.gpuPasses.empty())
     {
-        const bool detailed = f.gpuTimingMode && std::string(f.gpuTimingMode) == "detailed";
+        const std::string gpuMode = f.gpuTimingMode ? f.gpuTimingMode : "";
+        // "detailed" (Metal, serialized cmd-buffer/pass) and "gl-timer" (GL timer
+        // queries) are both exclusive + additive per-pass, so the sum is meaningful;
+        // "counter" spans overlap on TBDR and must NOT be summed.
+        const bool detailed = gpuMode == "detailed" || gpuMode == "gl-timer";
         const double gref = f.gpuFrameMs > 0.0 ? f.gpuFrameMs : 1.0;
         ImGui::Separator();
-        ImGui::TextUnformatted(detailed ? "GPU passes (exclusive, serialized)"
+        ImGui::TextUnformatted(detailed ? "GPU passes (exclusive, additive)"
                                         : "GPU passes (per-encoder spans — see caveat)");
         double sumExact = 0.0; bool anyExact = false;
         for (const ProfGpuPass& gp : f.gpuPasses)
@@ -548,9 +552,11 @@ static void DrawFrameDetail(const ProfFrameRecord& f)
         }
         if (!detailed)
             ImGui::TextDisabled("Per-encoder spans overlap on TBDR — enable 'Detailed GPU' for exclusive per-pass.");
-        else
+        else if (gpuMode == "detailed")
             ImGui::TextDisabled("Note: the FIRST pass (Shadow) absorbs GPU queue/present latency in a single\n"
                                 "serialized frame — it can read high here. Trust the Overview median, not one frame.");
+        else // gl-timer: exact, exclusive per-pass GPU time — no serialization caveat.
+            ImGui::TextDisabled("GL timer queries: exact per-pass GPU time; \xCE\xA3 passes + untimed = GPU frame.");
     }
 
     // ── CPU scopes (nested) ─────────────────────────────────────────────────
@@ -3944,6 +3950,22 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			ImGui::SetNextItemWidth(-1.0f);
 			ImGui::SliderFloat("##cloudcoverage", &env->cloudCoverage, 0.0f, 1.0f, "Coverage: %.2f"); trackEdit();
 			ImGui::TextDisabled("Full overcast dims the sun & fills with ambient light.");
+			// Cloud render mode (OpenGL backend): sky-dome (cheap, infinite — no parallax)
+			// vs 3D volumetric (world-anchored — clouds parallax as you move through the
+			// scene). 3D exposes a height slider to match the world's unit scale.
+			{
+				const char* cloudModes[] = { "Sky-dome (default)", "3D volumetric (parallax)" };
+				int cmode = (env->cloudMode == 1) ? 1 : 0;
+				ImGui::SetNextItemWidth(-1.0f);
+				if (ImGui::Combo("##cloudmode", &cmode, cloudModes, 2)) { env->cloudMode = cmode; trackEdit(); }
+				if (env->cloudMode == 1)
+				{
+					ImGui::SetNextItemWidth(-1.0f);
+					ImGui::SliderFloat("##cloudheight", &env->cloudHeight, 20.0f, 2000.0f,
+					                   "3D height: %.0f"); trackEdit();
+					ImGui::TextDisabled("3D clouds parallax as you move. Tune the height to your world's scale (OpenGL only).");
+				}
+			}
 			ImGui::SetNextItemWidth(-1.0f);
 			ImGui::SliderFloat("##winddir", &env->windDirection, 0.0f, 360.0f, "Wind direction: %.0f\xc2\xb0"); trackEdit();
 			ImGui::SetNextItemWidth(-1.0f);
