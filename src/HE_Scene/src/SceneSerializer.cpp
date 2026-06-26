@@ -253,6 +253,8 @@ namespace
 				{ "moonColor",         vec3ToJson(e->moonColor) },
 				{ "moonIntensity",     e->moonIntensity },
 				{ "cloudCoverage",     e->cloudCoverage },
+				{ "cloudMode",         e->cloudMode },
+				{ "cloudHeight",       e->cloudHeight },
 				{ "windDirection",     e->windDirection },
 				{ "windSpeed",         e->windSpeed },
 				{ "fogDensity",        e->fogDensity },
@@ -581,6 +583,8 @@ namespace
 			e.moonColor         = jsonToVec3(c.value("moonColor", json()), e.moonColor);
 			e.moonIntensity     = c.value("moonIntensity",     e.moonIntensity);
 			e.cloudCoverage     = c.value("cloudCoverage",     e.cloudCoverage);
+			e.cloudMode         = c.value("cloudMode",         e.cloudMode);
+			e.cloudHeight       = c.value("cloudHeight",       e.cloudHeight);
 			e.windDirection     = c.value("windDirection",     e.windDirection);
 			e.windSpeed         = c.value("windSpeed",         e.windSpeed);
 			e.fogDensity        = c.value("fogDensity",        e.fogDensity);

@@ -38,6 +38,7 @@ public:
 	void  InvalidateMesh    (const HE::UUID& meshId)     override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
 	void  SetSSAOSettings(const SSAOSettings& settings) override;
+	void  SetShadowDebug(bool on) override { m_debugShadowCascades = on; }
 	void  SetGpuParticleParams(const GpuParticleParams& p) override;
 	void  SetDebugLines(const std::vector<DebugLine>& lines) override;
 
@@ -53,6 +54,56 @@ private:
 	// extracted static objects.
 	struct FrameCounters { uint32_t draws = 0, tris = 0, visible = 0, total = 0; };
 	FrameCounters m_counters;
+
+	// ── GPU timing (profiler per-pass trace) ────────────────────────────────
+	// Real per-pass + whole-frame GPU time via GL timer queries: GL_TIME_ELAPSED
+	// per pass (exact, exclusive, additive on an immediate-mode GPU — no TBDR
+	// overlap, so the sum is meaningful) + a GL_TIMESTAMP pair for the whole frame.
+	// Results come back 1–N frames late, so a small ring of query-sets is recycled
+	// and reaped when a slot comes back around (no stall); a single-frame / detailed
+	// capture does glFinish + same-frame reap so its numbers are that exact frame.
+	// Active only while the profiler is recording or its live HUD is open (zero cost
+	// otherwise). Disabled on Apple GL, where timestamp queries are unreliable
+	// (m_gpuTimerSupported = false → GetFrameGpuStats reports gpuFrameMs = -1).
+	struct GpuTimerPass { const char* name = ""; unsigned int query = 0; };
+	struct GpuTimerSlot
+	{
+		unsigned int              tsStart = 0, tsEnd = 0; // GL_TIMESTAMP pair (whole frame)
+		std::vector<unsigned int> pool;                  // reusable GL_TIME_ELAPSED query ids
+		std::vector<GpuTimerPass> passes;                // (name, query) issued this use
+		size_t   poolUsed   = 0;                         // high-water of pool used this frame
+		uint64_t frameIdx   = 0;
+		bool     pending    = false;                     // has un-reaped results
+	};
+	static constexpr int kGpuTimerRing = 4;
+	GpuTimerSlot  m_gpuSlots[kGpuTimerRing];
+	bool          m_gpuTimerSupported   = false;  // false on Apple GL (unreliable)
+	bool          m_gpuTimerInit        = false;  // timestamp queries allocated
+	uint64_t      m_gpuFrameIdx         = 0;
+	int           m_gpuCurSlot          = -1;     // slot in flight this frame (-1 = none)
+	bool          m_gpuTimingActive     = false;  // whole-frame timing this (primary) frame
+	bool          m_gpuWasActive        = false;  // timing was active last frame (fresh-activation edge)
+	bool          m_gpuPerPass          = false;  // per-pass GL_TIME_ELAPSED this frame
+	bool          m_gpuDetailed         = false;  // glFinish + same-frame reap this frame
+	int           m_gpuActiveQuery      = -1;     // pool index of the open elapsed query (-1 none)
+	FrameGpuStats m_lastGpuStats;                 // newest reaped GPU times (merged w/ counters)
+
+	void GpuTimerBeginFrame();   // primary Render() only: latch flags, recycle+reap a slot, tsStart
+	void GpuTimerEndFrame();     // tsEnd, mark pending; detailed → glFinish + same-frame reap
+	bool GpuTimerBeginPass(const char* name); // begin a GL_TIME_ELAPSED query; true if one was begun
+	void GpuTimerEndPass();
+	void GpuTimerReap(GpuTimerSlot& slot);    // read a slot's results into m_lastGpuStats
+	void DestroyGpuTimer();
+	// RAII pass timer: pairs Begin/EndPass across early-returns so an unbalanced
+	// begin (→ GL_INVALID_OPERATION on the next glBeginQuery) is impossible.
+	struct GpuPassScope
+	{
+		OpenGLRenderer* r; bool active;
+		GpuPassScope(OpenGLRenderer* r_, const char* name) : r(r_), active(r_->GpuTimerBeginPass(name)) {}
+		~GpuPassScope() { if (active) r->GpuTimerEndPass(); }
+		GpuPassScope(const GpuPassScope&) = delete;
+		GpuPassScope& operator=(const GpuPassScope&) = delete;
+	};
 
 	// GPU-side mesh, uploaded on first sight from ContentManager data.
 	struct GpuMesh
@@ -142,9 +193,12 @@ private:
 	int          m_uAmbient       = -1;   // flat ambient fill (floor + overcast)
 	int          m_uFogDensity       = -1; // atmospheric fog amount (0 = off)
 	int          m_uFogHeightFalloff = -1; // fog height falloff
-	int          m_uLightVP       = -1;   // directional-light view-proj (shadow)
-	int          m_uShadowMap     = -1;   // shadow map sampler unit
+	int          m_uCascadeVP     = -1;   // mat4[kGLCsmCascades] per-cascade light view-proj
+	int          m_uCascadeSplits = -1;   // vec4: xyz = cascade far dist (view), w = count
+	int          m_uCameraFwd     = -1;   // world forward (planar view-Z cascade select)
+	int          m_uShadowMap     = -1;   // CSM shadow-map array sampler unit
 	int          m_uShadowEnabled = -1;
+	int          m_uShadowDebug   = -1;   // 1 = tint fragments by cascade index
 	int          m_uAO            = -1;   // SSAO occlusion sampler unit
 	int          m_uViewport      = -1;   // viewport size (screen-space AO lookup)
 	int          m_uSSAOEnabled   = -1;   // 1 = modulate ambient by SSAO
@@ -177,7 +231,10 @@ private:
 	int          m_uSkinnedFogDensity      = -1;
 	int          m_uSkinnedFogHeightFalloff= -1;
 	int          m_uSkinnedShadowEnabled   = -1;
-	int          m_uSkinnedLightVP         = -1;
+	int          m_uSkinnedCascadeVP       = -1;
+	int          m_uSkinnedCascadeSplits   = -1;
+	int          m_uSkinnedCameraFwd       = -1;
+	int          m_uSkinnedShadowDebug     = -1;
 	int          m_uSkinnedShadowMap       = -1;
 	int          m_uSkinnedAO              = -1;
 	int          m_uSkinnedViewport        = -1;
@@ -206,7 +263,10 @@ private:
 	int          m_uInstAmbient             = -1;
 	int          m_uInstFogDensity          = -1;
 	int          m_uInstFogHeightFalloff    = -1;
-	int          m_uInstLightVP             = -1;
+	int          m_uInstCascadeVP           = -1;
+	int          m_uInstCascadeSplits       = -1;
+	int          m_uInstCameraFwd           = -1;
+	int          m_uInstShadowDebug         = -1;
 	int          m_uInstShadowMap           = -1;
 	int          m_uInstShadowEnabled       = -1;
 	int          m_uInstAO                  = -1;
@@ -253,12 +313,21 @@ private:
 	std::vector<HE::UUID>                       m_pendingMaterialInvalidations;
 	std::vector<HE::UUID>                       m_pendingMeshInvalidations;
 
-	// ── Shadow map (single directional light) ───────────────────────────────
+	// ── Shadow map (cascaded; directional light) ────────────────────────────
+	// m_shadowDepthTex is a GL_TEXTURE_2D_ARRAY (one Depth24 layer per cascade);
+	// the shadow pass renders each cascade into its layer and the scene shader
+	// samples the array with planar view-Z cascade selection. Mirrors the Metal
+	// backend's CSM (D3D/Vulkan still use the legacy single map).
 	unsigned int m_shadowFBO      = 0;
-	unsigned int m_shadowDepthTex = 0;
+	unsigned int m_shadowDepthTex = 0;   // GL_TEXTURE_2D_ARRAY, Depth24, one layer/cascade
 	int          m_shadowSize     = 2048;
-	unsigned int m_depthProgram   = 0;   // depth-only pass (lightVP * model * pos)
+	unsigned int m_depthProgram   = 0;   // depth-only pass (cascadeVP * model * pos)
 	int          m_uDepthMVP      = -1;
+	bool         m_debugShadowCascades = false; // tint fragments by cascade index (debug)
+	// Per-cascade caster culling scratch (kept off m_visible/m_sortedIndices so the
+	// shadow pass never clobbers the camera cull the geometry pass relies on).
+	std::vector<uint8_t>  m_shadowVisible;
+	std::vector<uint32_t> m_shadowSorted;
 	void CreateShadowResources();
 
 	// ── Procedural skybox (drawn into the HDR target behind the scene) ───────
@@ -279,6 +348,9 @@ private:
 	int          m_uSkyWind        = -1;  // cloud drift vector
 	int          m_uSkyNoise       = -1;  // 3D value-noise sampler
 	int          m_uSkyFlash       = -1;  // lightning flash brightness
+	int          m_uSkyCloudMode   = -1;  // 0 = sky-dome clouds, 1 = 3D volumetric
+	int          m_uSkyCameraPos   = -1;  // camera world position (3D-cloud parallax)
+	int          m_uSkyCloudHeight = -1;  // 3D cloud layer height above the camera
 	unsigned int m_noiseTex        = 0;   // GL_TEXTURE_3D, R16 value noise
 	int          m_uSkyEnv         = -1;  // image-based-ambient cubemap sampler
 	unsigned int m_skyEnvCube      = 0;   // GL_TEXTURE_CUBE_MAP, baked skyColor

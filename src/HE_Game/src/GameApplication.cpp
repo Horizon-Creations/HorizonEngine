@@ -120,7 +120,8 @@ void GameApplication::OnRender(float deltaTime)
 				env->milkyWayIntensity, env->nebulaIntensity,
 				env->nebulaColor, env->auroraColor,
 				env->windDirection, env->windSpeed, env->flash,
-				env->wetness, env->snowAmount});
+				env->wetness, env->snowAmount,
+				env->cloudMode, env->cloudHeight});
 		}
 	}
 }

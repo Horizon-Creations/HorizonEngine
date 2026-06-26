@@ -9,6 +9,8 @@
 #include <vector>
 #include <algorithm>
 #include <Diagnostics/Logger.h>
+#include <Diagnostics/EngineProfiler.h>
+#include <JobSystem/JobSystem.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
@@ -116,25 +118,33 @@ static glm::vec3 SkyColorCPU(glm::vec3 dir, glm::vec3 sunDir)
 static std::vector<float> BuildSkyEnvCube(int faceN, const glm::vec3& sunDir)
 {
 	std::vector<float> px(static_cast<size_t>(faceN) * faceN * 6 * 4);
-	for (int f = 0; f < 6; ++f)
-		for (int t = 0; t < faceN; ++t)
-			for (int s = 0; s < faceN; ++s)
-			{
-				float u = (s + 0.5f) / faceN * 2.0f - 1.0f;
-				float v = (t + 0.5f) / faceN * 2.0f - 1.0f;
-				glm::vec3 d;
-				switch (f) {
-					case 0: d = glm::vec3( 1.0f, -v, -u); break; // +X
-					case 1: d = glm::vec3(-1.0f, -v,  u); break; // -X
-					case 2: d = glm::vec3( u,  1.0f,  v); break; // +Y
-					case 3: d = glm::vec3( u, -1.0f, -v); break; // -Y
-					case 4: d = glm::vec3( u, -v,  1.0f); break; // +Z
-					default:d = glm::vec3(-u, -v, -1.0f); break; // -Z
-				}
-				glm::vec3 c = SkyColorCPU(glm::normalize(d), sunDir);
-				size_t i = ((static_cast<size_t>(f) * faceN + t) * faceN + s) * 4;
-				px[i+0] = c.r; px[i+1] = c.g; px[i+2] = c.b; px[i+3] = 1.0f;
+	// Parallelize over the 6*faceN rows (face,row): each row is independent and
+	// SkyColorCPU is a pure function, so this is data-race-free. Uses the engine's
+	// portable thread pool — NOT std::execution::par (which libc++/macOS lacks). At
+	// 128² this serial bake was ~47 ms (a per-frame stall under day-night auto-advance);
+	// parallel it is a few ms.
+	parallel_for(static_cast<size_t>(6) * faceN, [&](size_t idx)
+	{
+		const int f = static_cast<int>(idx / faceN);
+		const int t = static_cast<int>(idx % faceN);
+		for (int s = 0; s < faceN; ++s)
+		{
+			float u = (s + 0.5f) / faceN * 2.0f - 1.0f;
+			float v = (t + 0.5f) / faceN * 2.0f - 1.0f;
+			glm::vec3 d;
+			switch (f) {
+				case 0: d = glm::vec3( 1.0f, -v, -u); break; // +X
+				case 1: d = glm::vec3(-1.0f, -v,  u); break; // -X
+				case 2: d = glm::vec3( u,  1.0f,  v); break; // +Y
+				case 3: d = glm::vec3( u, -1.0f, -v); break; // -Y
+				case 4: d = glm::vec3( u, -v,  1.0f); break; // +Z
+				default:d = glm::vec3(-u, -v, -1.0f); break; // -Z
 			}
+			glm::vec3 c = SkyColorCPU(glm::normalize(d), sunDir);
+			size_t i = ((static_cast<size_t>(f) * faceN + t) * faceN + s) * 4;
+			px[i+0] = c.r; px[i+1] = c.g; px[i+2] = c.b; px[i+3] = 1.0f;
+		}
+	});
 	return px;
 }
 
@@ -214,36 +224,61 @@ vec3 applyFog(vec3 color, vec3 camPos, vec3 worldPos, vec3 sunDir)
 	return mix(color, fogCol, clamp(f, 0.0, 1.0));
 }
 
-// Directional-light shadow map
-uniform mat4      uLightVP;
-uniform sampler2D uShadowMap;
-uniform int       uShadowEnabled;
+// Directional-light cascaded shadow maps (CSM). uShadowMap is a depth-texture
+// ARRAY (one layer per cascade); the cascade is picked per fragment by its planar
+// camera-forward distance. The cascade matrices arrive in GL clip (z∈[-1,1]), so
+// no clip-fix is needed here — this mirrors the Metal backend's shadowFactor()
+// (Metal applies a [-1,1]→[0,1] clip-fix to the same extractor matrices instead).
+const int CSM_CASCADES = 3;
+uniform sampler2DArray uShadowMap;
+uniform int   uShadowEnabled;
+uniform mat4  uCascadeVP[CSM_CASCADES]; // per-cascade light view-proj (GL clip)
+uniform vec4  uCascadeSplits;           // xyz = cascade far distance (view space); w = count
+uniform vec3  uCameraFwd;               // world forward, for planar view-Z cascade select
+uniform int   uShadowDebug;             // 1 = tint fragments by cascade index
 
 out vec4 FragColor;
 
-float computeShadow(vec3 worldPos, vec3 N, vec3 L)
+// Cascaded shadows: pick the first cascade whose far distance covers the fragment
+// (by planar camera-forward distance), project into that cascade's light clip and
+// 3×3-PCF sample its layer of the shadow-map array. outCascade returns the chosen
+// index (for the debug tint).
+float computeShadow(vec3 worldPos, vec3 N, vec3 L, out int outCascade)
 {
+	outCascade = 0;
 	if (uShadowEnabled == 0) return 1.0;
-	// Normal-offset bias: push the sample point off the surface along its normal
-	// before projecting into shadow space. This eliminates acne on steep terrain
-	// (slope-scaled depth bias alone doesn't handle large dz/dx well).
-	vec4 lp = uLightVP * vec4(worldPos + N * 0.06, 1.0);
+
+	// Planar view-space depth along the camera forward — matches the cascade splits
+	// (planar view-Z far distances, NOT euclidean radius). Euclidean distance here
+	// would push screen-edge pixels into a too-coarse cascade → dropouts.
+	float viewDist = dot(worldPos - uCameraPos, uCameraFwd);
+	int count = int(uCascadeSplits.w);
+	int c = (count > 0) ? count - 1 : 0;
+	if      (count > 0 && viewDist < uCascadeSplits.x) c = 0;
+	else if (count > 1 && viewDist < uCascadeSplits.y) c = 1;
+	else if (count > 2 && viewDist < uCascadeSplits.z) c = 2;
+	c = clamp(c, 0, CSM_CASCADES - 1);
+	outCascade = c;
+
+	// Normal-offset bias scaled by cascade — coarser (farther) cascades have larger
+	// texels and need a bigger offset to avoid acne.
+	vec4 lp = uCascadeVP[c] * vec4(worldPos + N * (0.06 * float(c + 1)), 1.0);
 	vec3 p  = lp.xyz / lp.w;
-	p = p * 0.5 + 0.5;                       // NDC [-1,1] → [0,1]
+	p = p * 0.5 + 0.5;                       // NDC [-1,1] → [0,1] (GL convention)
 	if (p.z > 1.0 || any(lessThan(p.xy, vec2(0.0))) || any(greaterThan(p.xy, vec2(1.0))))
-		return 1.0;                          // outside the map → lit
-	// Small residual depth bias for sub-texel precision.
+		return 1.0;                          // outside this cascade → lit
+	// Slope-scaled residual depth bias for sub-texel precision, scaled by cascade.
 	float ndl  = clamp(dot(N, L), 0.0, 1.0);
-	float bias = clamp(0.0008 * tan(acos(ndl)), 0.0002, 0.02);
-	// 3×3 PCF: averaging neighbouring texels softens the edge and hides the
-	// per-texel flicker the hard test produced as the day-night light rotates.
-	vec2 texel = 1.0 / vec2(textureSize(uShadowMap, 0));
+	float bias = clamp(0.0008 * tan(acos(ndl)), 0.0002, 0.02) * float(c + 1);
+	// 3×3 PCF over the chosen cascade's array layer. textureSize on a sampler2DArray
+	// returns ivec3 (w,h,layers); .xy is the per-layer 2D size.
+	vec2 texel = 1.0 / vec2(textureSize(uShadowMap, 0).xy);
 	float vis = 0.0;
 	for (int y = -1; y <= 1; ++y)
 		for (int x = -1; x <= 1; ++x)
 		{
-			float c = texture(uShadowMap, p.xy + vec2(x, y) * texel).r;
-			vis += (p.z - bias > c) ? 0.0 : 1.0;
+			float cd = texture(uShadowMap, vec3(p.xy + vec2(x, y) * texel, float(c))).r;
+			vis += (p.z - bias > cd) ? 0.0 : 1.0;
 		}
 	vis /= 9.0;
 	// No direct-light floor in shadow — the IBL + flat ambient already provide
@@ -305,6 +340,7 @@ void main()
 	// zero it out. It is the minimum guaranteed brightness on any surface.
 	vec3 result  = ambient * ao + uAmbient * diffuseColor;
 
+	int dbgCascade = 0;   // cascade chosen by the directional shadow (debug tint)
 	for (int i = 0; i < uLightCount; ++i)
 	{
 		int   type  = int(uLightPos[i].w);
@@ -329,8 +365,11 @@ void main()
 			}
 		}
 
-		// Only the (first) directional light casts shadows.
-		float sh = (type == 0) ? computeShadow(vWorldPos, N, L) : 1.0;
+		// Only the (first) directional light casts shadows. Explicit if (not a
+		// ternary) so the `out` cascade index is written only on the directional
+		// branch — strict GLSL compilers reject out-params inside a ?: selection.
+		float sh = 1.0;
+		if (type == 0) sh = computeShadow(vWorldPos, N, L, dbgCascade);
 
 		float diff = max(dot(N, L), 0.0);
 		vec3  H    = normalize(L + V);
@@ -339,6 +378,15 @@ void main()
 		        * uLightColor[i].rgb * uLightColor[i].w * atten * sh;
 	}
 	result = applyFog(result, uCameraPos, vWorldPos, uSunDir);
+
+	// Debug: tint each fragment by its shadow cascade (red / green / blue / yellow)
+	// so the cascade split placement is verifiable at a glance. Mirrors Metal.
+	if (uShadowDebug != 0 && uShadowEnabled != 0)
+	{
+		vec3 tint[4] = vec3[4](vec3(1.0, 0.4, 0.4), vec3(0.4, 1.0, 0.4),
+		                       vec3(0.4, 0.6, 1.0), vec3(1.0, 1.0, 0.4));
+		result *= tint[min(dbgCascade, 3)];
+	}
 	FragColor = vec4(result, uOpacity);
 }
 )GLSL";
@@ -435,6 +483,9 @@ uniform vec3      uAuroraColor; // aurora base colour
 uniform vec3      uWind;        // cloud drift vector (world units / s, horizontal)
 uniform sampler3D uNoise;       // tiling 3D value-noise (replaces the hash fbm)
 uniform float     uFlash;       // lightning flash (0 = none … 1 = full strike)
+uniform int       uCloudMode;   // 0 = sky-dome clouds, 1 = 3D volumetric (world-anchored)
+uniform vec3      uCameraPos;   // camera world position (for 3D-cloud parallax)
+uniform float     uCloudHeight; // 3D cloud layer height above the camera (world units)
 out vec4 FragColor;
 //#SKYFUNC#
 
@@ -664,6 +715,9 @@ float cloudShadowDensity(vec3 pos, float time, float coverage, vec3 wind)
 	float lo     = mix(0.70, 0.22, clamp(coverage, 0.0, 1.0));
 	return smoothstep(lo, lo + 0.13, base) * hgrad;
 }
+// Procedural volumetric clouds composited over the base sky (returns the blend).
+// Marches the view ray through a slab on the sky hemisphere with a 3-step sun
+// light-march (Beer's-law self-shadowing). Mirrors the Metal applyClouds().
 vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float time, float coverage, vec3 sunColor, vec3 wind)
 {
 	if (coverage <= 0.0) return baseSky;          // clear sky → skip the whole raymarch
@@ -676,7 +730,11 @@ vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float time, float coverage
 	// that show up as visible horizontal cloud layers near grazing view angles.
 	float s0 = kCloudBase / max(dir.y, 1e-3);
 	float s1 = kCloudTop  / max(dir.y, 1e-3);
-	const int N = 16;
+	// Near the horizon the slab span (s1-s0) grows ~1/dir.y, so a fixed step count
+	// undersamples the noise → the "pixelated"/speckled distant clouds. Scale the
+	// step count with 1/dir.y (capped at 64) so the world-space sample spacing stays
+	// roughly constant down toward the horizon — that is the actual anti-aliasing.
+	int   N  = int(clamp(16.0 / max(dir.y, 0.12), 16.0, 64.0));
 	float ds = (s1 - s0) / float(N);
 	float jitter = cloudHash(dir.xz * 173.3 + vec2(dir.y * 37.1, dir.y * 19.7));
 
@@ -711,8 +769,10 @@ vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float time, float coverage
 			vec3 dayCol   = mix(vec3(0.17, 0.20, 0.29), sunColor * 1.12, lit);
 			vec3 nightCol = mix(vec3(0.015, 0.018, 0.035), vec3(0.26, 0.29, 0.45), lit);
 			vec3 cloudCol = mix(nightCol, dayCol, day);
-			vec3 duskTop  = sunColor * vec3(1.25, 0.55, 0.28);
-			cloudCol = mix(cloudCol, duskTop, dusk * lit * 0.9);
+			vec3 duskTop  = sunColor * vec3(1.5, 0.85, 0.42);
+			// Even shaded cloud bodies pick up sunset warmth (0.35 floor), lit faces more —
+			// so the whole cloud glows golden/orange at dawn & dusk, not just the rim.
+			cloudCol = mix(cloudCol, duskTop, dusk * (0.35 + 0.65 * lit));
 			// Moonlit silver: moon rises on the opposite arc from the sun.
 			vec3  cMoonDir = normalize(vec3(-sunDir.x, -sunDir.y, sunDir.z));
 			float cMoonUp  = clamp((cMoonDir.y + 0.10) / 0.25, 0.0, 1.0);
@@ -720,7 +780,7 @@ vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float time, float coverage
 			// Forward-scatter glow: Henyey-Greenstein-weighted direct sunlight makes
 			// the sun-facing edges flare gold (the silver lining), strongest when
 			// looking toward the sun and where the cloud isn't self-shadowed.
-			cloudCol += sunColor * (phase * sun * 0.9 * max(day, dusk));
+			cloudCol += sunColor * mix(vec3(1.0), vec3(1.25, 0.78, 0.42), dusk) * (phase * sun * 0.75 * max(day, dusk));
 			// Cheap vertical depth: tops catch the light (bright crown), the base
 			// sits in self-shadow (darker, cooler) — fakes the volumetric
 			// "cauliflower" relief from just the sample's height in the slab.
@@ -736,8 +796,121 @@ vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float time, float coverage
 		}
 	}
 
-	// Fade the whole cloud layer out into the horizon haze.
-	float horizon = smoothstep(0.02, 0.16, dir.y);
+	// Fade the whole cloud layer out into the horizon haze. Start higher + wider than
+	// before so the grazing band (coarsest sampling even with the extra steps) melts
+	// into the haze instead of showing residual undersampling speckle.
+	float horizon = smoothstep(0.03, 0.22, dir.y);
+	T = 1.0 - (1.0 - T) * horizon;
+	L *= horizon;
+	return baseSky * T + L;
+}
+
+// 3D volumetric clouds (cloud mode 1): a WORLD-ANCHORED slab so the clouds parallax /
+// shift as the camera moves through the world. The slab sits `cloudH` world units ABOVE
+// the camera (camera-relative altitude → scale-robust at any world size), but the
+// density is sampled at absolute WORLD positions, so moving horizontally slides
+// different clouds overhead (the parallax). The noise frequency scales with cloudH so
+// the angular cloud size stays the same regardless of cloudH. Distant clouds fade into
+// the horizon haze. Self-contained (its own raymarch + shading) so the dome path is
+// left untouched. Same cloud LOOK/lighting as the dome, just world-projected.
+vec3 applyClouds3D(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float time,
+                   float coverage, vec3 sunColor, vec3 wind, float cloudH)
+{
+	if (coverage <= 0.0) return baseSky;
+	dir    = normalize(dir);
+	sunDir = normalize(sunDir);
+	if (dir.y < 0.02) return baseSky;             // at/below the horizon → ray misses the slab above
+
+	cloudH      = max(cloudH, 1.0);
+	float thick = cloudH * 1.5;                   // TALL slab so cumuli can billow upward (3D)
+	float baseY = camPos.y + cloudH;
+	float tNear = cloudH / dir.y;                 // (baseY - camPos.y)/dir.y, dir.y>0
+	float tFar  = (cloudH + thick) / dir.y;
+	float maxDist = cloudH * 60.0;                // fade clouds beyond this (∝ altitude)
+	tFar = min(tFar, maxDist);
+	if (tFar <= tNear) return baseSky;
+
+	// Step count grows with how much slab the ray crosses (much more near the horizon).
+	int   N  = int(clamp((tFar - tNear) / (thick * 0.25), 24.0, 96.0));
+	float ds = (tFar - tNear) / float(N);
+	float jitter = cloudHash(dir.xz * 173.3 + vec2(dir.y * 37.1, dir.y * 19.7));
+
+	float sunY  = clamp(sunDir.y, -0.2, 1.0);
+	float day   = smoothstep(-0.10, 0.10, sunY);
+	float dusk  = smoothstep(-0.06, 0.05, sunY) * (1.0 - smoothstep(0.05, 0.28, sunY));
+	float costh = max(dot(dir, sunDir), 0.0);
+	float phase = mix(hgPhase(costh, 0.6), hgPhase(costh, -0.3), 0.25);
+
+	// FIXED world→noise frequency (≈125-unit cloud features) so cloudHeight is a real,
+	// VISIBLE knob: raising it lifts the layer (clouds look smaller/farther + more of
+	// them), lowering it brings big cumuli low overhead. (0.008 matches the previous
+	// look at the default height 200.)
+	float nscale = 0.008;
+	float lo     = mix(0.70, 0.22, clamp(coverage, 0.0, 1.0));
+
+	float T = 1.0;
+	vec3  L = vec3(0.0);
+	for (int i = 0; i < N; ++i)
+	{
+		float t   = tNear + (float(i) + jitter) * ds;
+		vec3  pos = camPos + dir * t;             // WORLD position → parallax
+		float hf  = clamp((pos.y - baseY) / thick, 0.0, 1.0);
+		vec3  np  = pos * nscale + wind * time;
+		// Coverage field (large-scale): WHERE clouds are and HOW HIGH they tower.
+		float cover = starFbm3(np + vec3(0.0, time * 0.03, 0.0), 4);
+		float pres  = smoothstep(lo, lo + 0.20, cover);          // 0..1 cloud presence
+		if (pres <= 0.0) continue;
+		// Towering-cumulus vertical profile: denser columns reach higher; round bottom,
+		// billowing eroded top — this is what gives the clouds 3D HEIGHT (not a flat sheet).
+		float towerTop = mix(0.30, 1.0, smoothstep(lo, lo + 0.30, cover));
+		float vshape   = smoothstep(0.0, 0.10, hf) * (1.0 - smoothstep(towerTop * 0.6, towerTop, hf));
+		if (vshape <= 0.0) continue;
+		// Fine Worley billow erodes the body into cauliflower lumps, strongest up high.
+		float billow = worleyFbm(np * 1.2 + vec3(time * 0.03, 0.0, 0.0));
+		float erode  = mix(1.0, smoothstep(0.20, 0.70, billow), hf * 0.85);
+		float dens   = pres * vshape * erode;
+		if (dens > 0.001)
+		{
+			// Sun light-march (Beer's law) toward the sun through the slab.
+			float shadow = 0.0;
+			for (int j = 1; j <= 3; ++j)
+			{
+				vec3  sp  = pos + sunDir * (float(j) * thick * 0.22);
+				float shf = clamp((sp.y - baseY) / thick, 0.0, 1.0);
+				float shg = smoothstep(0.0, 0.25, shf) * (1.0 - smoothstep(0.6, 1.0, shf));
+				if (shg <= 0.0) continue;
+				vec3  snp = sp * nscale + wind * time;
+				float p2  = starFbm3(snp + vec3(0.0, time * 0.03, 0.0), 3);
+				float b2  = worleyNoise3(snp * 0.9 + vec3(time * 0.03, 0.0, 0.0)) * 0.7
+				          + worleyNoise3(snp * 1.8) * 0.3;
+				shadow += smoothstep(lo, lo + 0.13, p2 * 0.5 + b2 * 0.55) * shg;
+			}
+			float sun    = exp(-shadow * 1.7);
+			float powder = 1.0 - exp(-dens * 3.0);
+			float lit    = sun * powder;
+			vec3 dayCol   = mix(vec3(0.17, 0.20, 0.29), sunColor * 1.12, lit);
+			vec3 nightCol = mix(vec3(0.015, 0.018, 0.035), vec3(0.26, 0.29, 0.45), lit);
+			vec3 cloudCol = mix(nightCol, dayCol, day);
+			vec3 duskTop  = sunColor * vec3(1.5, 0.85, 0.42);
+			// Even shaded cloud bodies pick up sunset warmth (0.35 floor), lit faces more —
+			// so the whole cloud glows golden/orange at dawn & dusk, not just the rim.
+			cloudCol = mix(cloudCol, duskTop, dusk * (0.35 + 0.65 * lit));
+			cloudCol += sunColor * mix(vec3(1.0), vec3(1.25, 0.78, 0.42), dusk) * (phase * sun * 0.75 * max(day, dusk));
+			cloudCol *= mix(0.32, 1.30, hf);                      // strong base→crown contrast (3D relief)
+			cloudCol += vec3(0.07, 0.10, 0.17) * ((1.0 - hf) * day * 0.25);
+
+			// Fade far clouds into the horizon haze, and normalise the optical depth by
+			// the slab thickness (ds is in world units, unlike the dome's unit slab).
+			float distFade     = 1.0 - smoothstep(maxDist * 0.5, maxDist, t);
+			float opticalDepth = dens * (ds / thick) * 7.0 * distFade;
+			float a = 1.0 - exp(-opticalDepth);
+			L += T * a * cloudCol;
+			T *= 1.0 - a;
+			if (T < 0.02) break;
+		}
+	}
+	// Soft horizon blend so the slab's low edge melts into haze instead of a hard line.
+	float horizon = smoothstep(0.02, 0.12, dir.y);
 	T = 1.0 - (1.0 - T) * horizon;
 	L *= horizon;
 	return baseSky * T + L;
@@ -838,7 +1011,13 @@ void main()
 {
 	vec4 wp1 = uInvViewProj * vec4(vNDC,  1.0, 1.0);
 	vec4 wp0 = uInvViewProj * vec4(vNDC, -1.0, 1.0);
-	vec3 dir = wp1.xyz / wp1.w - wp0.xyz / wp0.w;
+	// NORMALIZE the reconstructed ray before the celestial/star path. The star + nebula
+	// fields are sampled in cells of `cdir * 70` (cdir = celestialDir(dir)); the raw ray
+	// (far-point − near-point) has a magnitude that changes with the camera orientation,
+	// so an un-normalized dir makes a FIXED sky direction fall into DIFFERENT cells frame
+	// to frame → stars flicker / jump as the camera turns. (skyColor/applyClouds
+	// normalize internally, so nothing downstream needs the raw vector.)
+	vec3 dir = normalize(wp1.xyz / wp1.w - wp0.xyz / wp0.w);
 	vec3 col  = skyColor(dir, uSunDir);
 	// Night-sky elements (stars/Milky Way/nebula/aurora/moon) + the celestial
 	// rotation are skipped entirely by day. The branch is coherent — sunDir is a
@@ -852,7 +1031,10 @@ void main()
 		col += aurora(dir, uSunDir, uTime, uAurora, uAuroraColor);
 		col += moonDisk(dir, uSunDir);
 	}
-	col = applyClouds(col, dir, uSunDir, uTime, uCloudCoverage, uSunColor, uWind);
+	if (uCloudMode == 1)
+		col = applyClouds3D(col, dir, uCameraPos, uSunDir, uTime, uCloudCoverage, uSunColor, uWind, uCloudHeight);
+	else
+		col = applyClouds(col, dir, uSunDir, uTime, uCloudCoverage, uSunColor, uWind);
 	col += uFlash * vec3(0.85, 0.90, 1.0); // lightning lights up the sky/clouds
 	FragColor = vec4(col, 1.0);
 }
@@ -884,18 +1066,22 @@ vec3 skyColor(vec3 dir, vec3 sunDir)
 	// and the zenith picks up a touch of dusk purple for atmospheric depth.
 	vec2  sunAz  = normalize(sunDir.xz + vec2(1e-5));
 	float toward = dot(normalize(dir.xz + vec2(1e-5)), sunAz) * 0.5 + 0.5; // 0 away → 1 toward
-	toward = pow(clamp(toward, 0.0, 1.0), 1.5);
-	vec3  duskHoriz = mix(vec3(0.52, 0.30, 0.52), vec3(1.20, 0.50, 0.16), toward);
+	toward = pow(clamp(toward, 0.0, 1.0), 1.8);                 // tighter warm wedge: only near the sun glows
+	// Darker, saturated sunset: deep blue-purple away from the sun, burnt orange toward
+	// it. Kept well under 1.0 so the ACES tonemap renders COLOUR, not a washed white.
+	vec3  duskHoriz = mix(vec3(0.30, 0.17, 0.30), vec3(0.85, 0.40, 0.12), toward);
 	horizon = mix(horizon, duskHoriz, dusk);                    // warm directional sunset band
-	zenith  = mix(zenith,  vec3(0.20, 0.16, 0.40), dusk * 0.6);
+	zenith  = mix(zenith,  vec3(0.10, 0.09, 0.22), dusk * 0.7); // darker dusk zenith
 
 	float h    = clamp(dir.y, 0.0, 1.0);
 	float grad = pow(1.0 - h, 2.5);                             // horizon-weighted
 	vec3 sky = mix(zenith, horizon, grad);
 
-	// Concentrated golden scattering band hugging the horizon toward the sun.
-	float band = pow(1.0 - h, 8.0) * toward;
-	sky += vec3(1.25, 0.62, 0.26) * (band * dusk * 0.8);
+	// Warm horizon bands — modest so the sky stays a rich golden, not a bright wash.
+	float band  = pow(1.0 - h, 8.0) * toward;
+	float band2 = pow(1.0 - h, 3.5) * toward;
+	sky += vec3(0.95, 0.50, 0.16) * (band  * dusk * 0.70);
+	sky += vec3(0.60, 0.34, 0.14) * (band2 * dusk * 0.30);
 
 	// Below the horizon: ease into a soft ground haze over a wide band so the
 	// sky stays atmospheric just under the horizon line.
@@ -904,14 +1090,21 @@ vec3 skyColor(vec3 dir, vec3 sunDir)
 
 	// Layered sun aureole — a crisp disk plus tight/mid blooms and a broad warm
 	// scatter that survive through sunset for a cinematic, volumetric glow.
-	vec3  sunTint = mix(vec3(1.0, 0.42, 0.20), vec3(1.0, 0.96, 0.88),
-	                    smoothstep(0.0, 0.25, sunY));
+	// Warm golden-orange at low sun, easing to white when high. Low-sun tint is a
+	// yellow-gold (not a hot near-white) so sunrise/sunset reads as COLOUR, not glare.
+	vec3  sunTint = mix(vec3(1.0, 0.58, 0.24), vec3(1.0, 0.96, 0.88),
+	                    smoothstep(0.0, 0.28, sunY));
 	float s = max(dot(dir, sunDir), 0.0);
 	float sunVis = max(day, dusk);
-	sky += sunTint * (pow(s, 1800.0) * 14.0) * day;             // crisp disk (blooms)
-	sky += sunTint * (pow(s, 180.0)  * 2.2) * sunVis;           // tight bloom
-	sky += sunTint * (pow(s, 22.0)   * 0.7) * sunVis;           // mid aureole
-	sky += vec3(1.0, 0.5, 0.25) * (pow(s, 5.0) * 0.5) * dusk;   // broad warm scatter
+	// Tame the near-sun bloom toward the horizon so it GLOWS instead of blinding; the
+	// crisp daytime disk is unaffected (it is gated by `day`).
+	float bloomDamp = mix(1.0, 0.28, dusk);                        // bloom much dimmer at dusk → no white blob
+	sky += sunTint * (pow(s, 1800.0) * 14.0) * day;                // crisp daytime disk only
+	sky += sunTint * (pow(s, 220.0)  * 1.1 * bloomDamp) * sunVis;  // tight bloom
+	sky += sunTint * (pow(s, 30.0)   * 0.22 * bloomDamp) * sunVis; // mid aureole
+	// Broad golden scatter — saturated + modest, so it tints the sun side gold instead
+	// of blowing it out to white.
+	sky += vec3(1.10, 0.46, 0.13) * (pow(s, 4.0) * 0.40) * dusk;
 
 	// Moon: opposite the sun, fading in at night. The lit disk itself is drawn
 	// (textured) in the sky pass; here we keep only the soft halo and a faint
@@ -1411,10 +1604,26 @@ void OpenGLRenderer::Initialize(HE::Window* window)
 	CreateSSAOPipeline();
 	CreateDebugLinePipeline();
 	CreateParticlePipeline();
+
+	// Profiler GPU timing via GL timer queries. Reliable on desktop GL (Windows /
+	// Linux); left off on Apple GL, where GL_TIMESTAMP / GL_TIME_ELAPSED queries are
+	// unreliable — there GetFrameGpuStats keeps reporting gpuFrameMs = -1.
+#ifdef __APPLE__
+	m_gpuTimerSupported = false;
+#else
+	m_gpuTimerSupported = true;
+#endif
+
 	Logger::Log(Logger::LogLevel::Info, "OpenGLRenderer: initialized successfully");
 }
 
 static constexpr int kSkyEnvFace = 128; // image-based-ambient cubemap face size
+
+// Cascaded shadow maps: number of depth-array layers / cascades. MUST match the
+// shader's CSM_CASCADES (kUnlitFS) and stay ≤ ShadowData::kMaxCascades. The
+// extractor fits ShadowData::cascadeCount (3) cascades; this caps the GL side to
+// the same number it renders + samples.
+static constexpr int kGLCsmCascades = 3;
 
 void OpenGLRenderer::CreateUnlitPipeline()
 {
@@ -1472,9 +1681,12 @@ void OpenGLRenderer::CreateUnlitPipeline()
 	m_uFogHeightFalloff = glGetUniformLocation(m_unlitProgram, "uFogHeightFalloff");
 	m_uWetness          = glGetUniformLocation(m_unlitProgram, "uWetness");
 	m_uSnow             = glGetUniformLocation(m_unlitProgram, "uSnow");
-	m_uLightVP       = glGetUniformLocation(m_unlitProgram, "uLightVP");
+	m_uCascadeVP     = glGetUniformLocation(m_unlitProgram, "uCascadeVP[0]");
+	m_uCascadeSplits = glGetUniformLocation(m_unlitProgram, "uCascadeSplits");
+	m_uCameraFwd     = glGetUniformLocation(m_unlitProgram, "uCameraFwd");
 	m_uShadowMap     = glGetUniformLocation(m_unlitProgram, "uShadowMap");
 	m_uShadowEnabled = glGetUniformLocation(m_unlitProgram, "uShadowEnabled");
+	m_uShadowDebug   = glGetUniformLocation(m_unlitProgram, "uShadowDebug");
 	m_uAO            = glGetUniformLocation(m_unlitProgram, "uAO");
 	m_uViewport      = glGetUniformLocation(m_unlitProgram, "uViewport");
 	m_uSSAOEnabled   = glGetUniformLocation(m_unlitProgram, "uSSAOEnabled");
@@ -1524,7 +1736,10 @@ void OpenGLRenderer::CreateSkinnedPipeline()
 	m_uSkinnedFogDensity         = loc("uFogDensity");
 	m_uSkinnedFogHeightFalloff   = loc("uFogHeightFalloff");
 	m_uSkinnedShadowEnabled      = loc("uShadowEnabled");
-	m_uSkinnedLightVP            = loc("uLightVP");
+	m_uSkinnedCascadeVP          = loc("uCascadeVP[0]");
+	m_uSkinnedCascadeSplits      = loc("uCascadeSplits");
+	m_uSkinnedCameraFwd          = loc("uCameraFwd");
+	m_uSkinnedShadowDebug        = loc("uShadowDebug");
 	m_uSkinnedShadowMap          = loc("uShadowMap");
 	m_uSkinnedAO                 = loc("uAO");
 	m_uSkinnedViewport           = loc("uViewport");
@@ -1574,7 +1789,10 @@ void OpenGLRenderer::CreateInstancedPipeline()
 	m_uInstFogHeightFalloff = loc("uFogHeightFalloff");
 	m_uInstWetness          = loc("uWetness");
 	m_uInstSnow             = loc("uSnow");
-	m_uInstLightVP          = loc("uLightVP");
+	m_uInstCascadeVP        = loc("uCascadeVP[0]");
+	m_uInstCascadeSplits    = loc("uCascadeSplits");
+	m_uInstCameraFwd        = loc("uCameraFwd");
+	m_uInstShadowDebug      = loc("uShadowDebug");
 	m_uInstShadowMap        = loc("uShadowMap");
 	m_uInstShadowEnabled    = loc("uShadowEnabled");
 	m_uInstAO               = loc("uAO");
@@ -1584,9 +1802,11 @@ void OpenGLRenderer::CreateInstancedPipeline()
 
 void OpenGLRenderer::UpdateSkyEnvCube(const glm::vec3& sunDir)
 {
-	// The baked sky only changes with the sun direction — skip the CPU rebuild +
-	// upload when it hasn't moved.
-	if (m_skyEnvValid && glm::distance(sunDir, m_skyEnvSunDir) < 1e-4f)
+	// The baked sky only changes with the sun direction — skip the CPU rebuild + upload
+	// when it has barely moved. The IBL ambient is very low-frequency, so a small dead-
+	// band (≈0.11°) is imperceptible but, under day-night auto-advance, cuts the rebuild
+	// rate to roughly every other frame instead of every frame.
+	if (m_skyEnvValid && glm::distance(sunDir, m_skyEnvSunDir) < 2.0e-3f)
 		return;
 	m_skyEnvSunDir = sunDir;
 	m_skyEnvValid  = true;
@@ -1613,25 +1833,30 @@ void OpenGLRenderer::CreateShadowResources()
 	glDeleteShader(fs);
 	m_uDepthMVP = glGetUniformLocation(m_depthProgram, "uDepthMVP");
 
-	// Depth texture + FBO. Border color 1.0 so samples outside the map read as
-	// "fully lit" (depth 1).
+	// Cascaded shadow map: a Depth24 texture ARRAY (one layer per cascade), sampled
+	// by the scene shader. Each cascade renders into its own layer (attached per
+	// cascade in the shadow pass via glFramebufferTextureLayer). Border color 1.0
+	// so samples outside a cascade read as "fully lit" (depth 1).
 	glGenTextures(1, &m_shadowDepthTex);
-	glBindTexture(GL_TEXTURE_2D, m_shadowDepthTex);
-	glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, m_shadowSize, m_shadowSize,
+	glBindTexture(GL_TEXTURE_2D_ARRAY, m_shadowDepthTex);
+	glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_DEPTH_COMPONENT24,
+	             m_shadowSize, m_shadowSize, kGLCsmCascades,
 	             0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+	glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+	glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
 	const float border[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
-	glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, border);
+	glTexParameterfv(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_BORDER_COLOR, border);
 
+	// FBO is completed per cascade in the pass; attach layer 0 here so the initial
+	// completeness check passes.
 	glGenFramebuffers(1, &m_shadowFBO);
 	glBindFramebuffer(GL_FRAMEBUFFER, m_shadowFBO);
-	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, m_shadowDepthTex, 0);
+	glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, m_shadowDepthTex, 0, 0);
 	glDrawBuffer(GL_NONE);
 	glReadBuffer(GL_NONE);
-	glBindTexture(GL_TEXTURE_2D, 0);
+	glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
@@ -1670,6 +1895,9 @@ void OpenGLRenderer::CreateSkyPipeline()
 	m_uSkyWind        = glGetUniformLocation(m_skyProgram, "uWind");
 	m_uSkyNoise       = glGetUniformLocation(m_skyProgram, "uNoise");
 	m_uSkyFlash       = glGetUniformLocation(m_skyProgram, "uFlash");
+	m_uSkyCloudMode   = glGetUniformLocation(m_skyProgram, "uCloudMode");
+	m_uSkyCameraPos   = glGetUniformLocation(m_skyProgram, "uCameraPos");
+	m_uSkyCloudHeight = glGetUniformLocation(m_skyProgram, "uCloudHeight");
 
 	// Procedural 3D noise volume the sky's starFbm3/worleyFbm sample (clouds +
 	// nebula) — built once on the CPU. RG16 (R=value noise, G=Worley billows) +
@@ -2640,6 +2868,7 @@ void OpenGLRenderer::Shutdown()
 	DestroyHDRTarget();
 	DestroyBloomTargets();
 	DestroyLdrTarget();
+	DestroyGpuTimer();
 	DestroySSAOTargets();
 	for (auto& r : m_retiredTextures)
 		glDeleteTextures(1, &r.texture);
@@ -2859,8 +3088,25 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	GLint prevFBO = 0;
 	glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
 
-	const bool      shadows = m_renderWorld.shadow.enabled && m_shadowFBO != 0;
-	const glm::mat4 lightVP = m_renderWorld.shadow.viewProj;
+	const bool shadows = m_renderWorld.shadow.enabled && m_shadowFBO != 0;
+
+	// ── Cascaded shadow map uniforms (shared across unlit/skinned/instanced) ──
+	// World forward (−Z of the camera-to-world matrix) for planar view-Z cascade
+	// selection — MUST match the planar splits the cascades were fit with (same
+	// formula as the extractor). The cascade matrices arrive in GL clip space, so
+	// they're uploaded as-is (no clip-fix, unlike Metal).
+	const ShadowData& sh = m_renderWorld.shadow;
+	const int   nCascades = std::clamp(sh.cascadeCount, 0, kGLCsmCascades);
+	const glm::vec3 camFwd =
+		-glm::normalize(glm::vec3(glm::inverse(m_renderWorld.camera.view)[2]));
+	const glm::vec4 cascadeSplits(
+		nCascades > 0 ? sh.cascadeSplit[0] : 1e9f,
+		nCascades > 1 ? sh.cascadeSplit[1] : 1e9f,
+		nCascades > 2 ? sh.cascadeSplit[2] : 1e9f,
+		static_cast<float>(nCascades));
+	// Upload kGLCsmCascades matrices (contiguous in ShadowData); unused tail slots
+	// are identity and never sampled (the shader clamps the cascade index to count).
+	const float* cascadeVPData = glm::value_ptr(sh.cascadeViewProj[0]);
 
 	// ShadowPass → depth map; GeometryPass → HDR scene color; PostProcessPass
 	// tonemaps that into the backbuffer/viewport.
@@ -2876,31 +3122,56 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	m_renderGraph.execute(m_renderWorld, m_sortedIndices,
 		[&](const RenderPass&, const RenderPassIO& io, const CommandBuffer& cmds)
 	{
-		// ── Shadow pass: depth from the light's POV into the shadow map ──────
+		// ── Shadow pass: cascaded depth maps from the light's POV ───────────
+		// One depth render per cascade into its own array layer. Each cascade
+		// re-culls casters against ITS light frustum (not the camera), so an
+		// off-screen object still casts into the visible scene while it sits
+		// inside the cascade coverage. Mirrors the Metal backend's EncodeShadowMap.
 		if (io.output.id == kShadowMapTarget)
 		{
 			if (!shadows) return;
+			GpuPassScope _shadowTimer(this, "Shadow"); // ends (glEndQuery) at this branch's return
 			glBindFramebuffer(GL_FRAMEBUFFER, m_shadowFBO);
 			glViewport(0, 0, m_shadowSize, m_shadowSize);
-			glClear(GL_DEPTH_BUFFER_BIT);
 			glUseProgram(m_depthProgram);
 			// Push depth values away from the light camera so shadow-map samples
 			// for back-lit fragments never self-shadow the surface (shadow acne).
 			glEnable(GL_POLYGON_OFFSET_FILL);
 			glPolygonOffset(2.0f, 4.0f);
-			HE::UUID shMeshId{}; const GpuMesh* shMesh = nullptr; bool shMeshValid = false;
-			for (const DrawCall& dc : cmds.drawCalls())
+
+			const int cascades = std::clamp(m_renderWorld.shadow.cascadeCount, 1, kGLCsmCascades);
+			for (int c = 0; c < cascades; ++c)
 			{
-				glUniformMatrix4fv(m_uDepthMVP, 1, GL_FALSE, glm::value_ptr(lightVP * dc.transform));
-				if (!shMeshValid || dc.meshAssetId != shMeshId)
+				// Render this cascade into its own depth-array layer.
+				glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+				                          m_shadowDepthTex, 0, c);
+				glClear(GL_DEPTH_BUFFER_BIT);
+
+				// Cull + sort against this cascade's light frustum into scratch
+				// buffers (NOT m_visible/m_sortedIndices — those hold the camera cull
+				// the geometry pass consumes). Sorting keeps draws grouped by mesh id
+				// so the per-mesh resolve memoisation below stays valid.
+				const glm::mat4& cvp = m_renderWorld.shadow.cascadeViewProj[c];
+				m_culler.cull(m_renderWorld, cvp, m_shadowVisible);
+				m_sorter.sort(m_renderWorld, m_shadowVisible, m_shadowSorted);
+
+				HE::UUID shMeshId{}; const GpuMesh* shMesh = nullptr; bool shMeshValid = false;
+				for (uint32_t idx : m_shadowSorted)
 				{
-					shMesh      = ResolveMesh(dc.meshAssetId);
-					shMeshId    = dc.meshAssetId; shMeshValid = true;
+					const RenderObject& obj = m_renderWorld.objects[idx];
+					if (!obj.castsShadow) continue; // billboards (precip/particles) cast none
+					glUniformMatrix4fv(m_uDepthMVP, 1, GL_FALSE,
+					                   glm::value_ptr(cvp * obj.transform));
+					if (!shMeshValid || obj.meshAssetId != shMeshId)
+					{
+						shMesh      = ResolveMesh(obj.meshAssetId);
+						shMeshId    = obj.meshAssetId; shMeshValid = true;
+					}
+					const GpuMesh* mesh = shMesh ? shMesh : ResolveMesh(HE::kDefaultCubeMeshId);
+					if (!mesh) continue;
+					glBindVertexArray(mesh->vao);
+					glDrawElements(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr);
 				}
-				const GpuMesh* mesh = shMesh ? shMesh : ResolveMesh(HE::kDefaultCubeMeshId);
-				if (!mesh) continue;
-				glBindVertexArray(mesh->vao);
-				glDrawElements(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr);
 			}
 			glDisable(GL_POLYGON_OFFSET_FILL);
 			glBindFramebuffer(GL_FRAMEBUFFER, prevFBO);
@@ -2916,34 +3187,48 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 
 			// Bright-pass + blur the HDR target into the half-res bloom buffer
 			// (skipped when bloom is disabled → strength 0 below).
-			const unsigned int bloomTex = m_bloomEnabled ? RenderBloom(pw, ph) : 0u;
+			unsigned int bloomTex = 0u;
+			if (m_bloomEnabled)
+			{
+				GpuPassScope _bloomTimer(this, "Bloom");
+				bloomTex = RenderBloom(pw, ph);
+			}
 
 			// Tonemap HDR scene color + bloom into the LDR intermediate (FXAA reads it).
-			EnsureLdrTarget(pw, ph);
-			glBindFramebuffer(GL_FRAMEBUFFER, m_ldrFBO);
-			glViewport(0, 0, pw, ph);
-			glUseProgram(m_tonemapProgram);
-			glActiveTexture(GL_TEXTURE0);
-			glBindTexture(GL_TEXTURE_2D, m_hdrColor);
-			glUniform1i(m_uHDRTex, 0);
-			glActiveTexture(GL_TEXTURE1);
-			glBindTexture(GL_TEXTURE_2D, bloomTex);
-			glUniform1i(m_uBloomTex, 1);
-			glUniform1f(m_uExposure, 1.0f);
-			glUniform1f(m_uBloomStrength, bloomTex ? m_bloomStrength : 0.0f);
-			glActiveTexture(GL_TEXTURE0);
-			glDrawArrays(GL_TRIANGLES, 0, 3);
+			{
+				GpuPassScope _tonemapTimer(this, "Tonemap");
+				EnsureLdrTarget(pw, ph);
+				glBindFramebuffer(GL_FRAMEBUFFER, m_ldrFBO);
+				glViewport(0, 0, pw, ph);
+				glUseProgram(m_tonemapProgram);
+				glActiveTexture(GL_TEXTURE0);
+				glBindTexture(GL_TEXTURE_2D, m_hdrColor);
+				glUniform1i(m_uHDRTex, 0);
+				glActiveTexture(GL_TEXTURE1);
+				glBindTexture(GL_TEXTURE_2D, bloomTex);
+				glUniform1i(m_uBloomTex, 1);
+				glUniform1f(m_uExposure, 1.0f);
+				glUniform1f(m_uBloomStrength, bloomTex ? m_bloomStrength : 0.0f);
+				glActiveTexture(GL_TEXTURE0);
+				glDrawArrays(GL_TRIANGLES, 0, 3);
+			}
 
 			// FXAA the tonemapped LDR image into the actual output.
-			glBindFramebuffer(GL_FRAMEBUFFER, prevFBO);
-			glViewport(0, 0, pw, ph);
-			glUseProgram(m_fxaaProgram);
-			glBindTexture(GL_TEXTURE_2D, m_ldrColor);
-			glUniform1i(m_uFxaaScene, 0);
-			glUniform2f(m_uFxaaRcpFrame, 1.0f / float(pw), 1.0f / float(ph));
-			glDrawArrays(GL_TRIANGLES, 0, 3);
+			{
+				GpuPassScope _fxaaTimer(this, "FXAA");
+				glBindFramebuffer(GL_FRAMEBUFFER, prevFBO);
+				glViewport(0, 0, pw, ph);
+				glUseProgram(m_fxaaProgram);
+				glBindTexture(GL_TEXTURE_2D, m_ldrColor);
+				glUniform1i(m_uFxaaScene, 0);
+				glUniform2f(m_uFxaaRcpFrame, 1.0f / float(pw), 1.0f / float(ph));
+				glDrawArrays(GL_TRIANGLES, 0, 3);
+			}
 
-			RenderUIPass(pw, ph);
+			{
+				GpuPassScope _uiTimer(this, "UI");
+				RenderUIPass(pw, ph);
+			}
 
 			glEnable(GL_DEPTH_TEST);
 			return;
@@ -2952,14 +3237,19 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		// ── SSAO: view-space position pre-pass → occlusion → blur ───────────
 		// Computed before shading (using these same geometry draw calls) so the
 		// scene shader can darken its ambient term. Skipped (zero cost) when off.
-		const unsigned int aoTex = m_ssaoEnabled
-			? RenderSSAO(cmds, pw, ph, viewProj, m_renderWorld.camera.view,
-			             m_renderWorld.camera.projection)
-			: 0u;
+		unsigned int aoTex = 0u;
+		if (m_ssaoEnabled)
+		{
+			GpuPassScope _ssaoTimer(this, "SSAO");
+			aoTex = RenderSSAO(cmds, pw, ph, viewProj, m_renderWorld.camera.view,
+			                   m_renderWorld.camera.projection);
+		}
 
 		// ── Geometry pass: scene program + per-frame state, into HDR target ─
 		// Set here (not before the graph) because the shadow pass switched the
-		// active program.
+		// active program. The "Scene" GPU timer spans every scene draw below and
+		// ends (glEndQuery) when this lambda body returns to the render graph.
+		GpuPassScope _sceneTimer(this, "Scene");
 		glBindFramebuffer(GL_FRAMEBUFFER, m_hdrFBO);
 		glViewport(0, 0, pw, ph);
 		// Explicit depth state for the opaque geometry: test on, write on, LESS, so
@@ -3022,12 +3312,17 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glUniform3fv(m_uCameraPos, 1, glm::value_ptr(m_renderWorld.camera.position));
 		}
 
-		// Shadow map bound on texture unit 1.
+		// CSM shadow-map array bound on texture unit 1. Always bound (the sampling
+		// is gated by uShadowEnabled) so the sampler2DArray never reads a mismatched
+		// target; the per-cascade matrices/splits/forward drive the selection.
 		glUniform1i(m_uShadowEnabled, shadows ? 1 : 0);
-		glUniformMatrix4fv(m_uLightVP, 1, GL_FALSE, glm::value_ptr(lightVP));
+		glUniform1i(m_uShadowDebug,   m_debugShadowCascades ? 1 : 0);
+		glUniformMatrix4fv(m_uCascadeVP, kGLCsmCascades, GL_FALSE, cascadeVPData);
+		glUniform4fv(m_uCascadeSplits, 1, glm::value_ptr(cascadeSplits));
+		glUniform3fv(m_uCameraFwd, 1, glm::value_ptr(camFwd));
 		glUniform1i(m_uShadowMap, 1);
 		glActiveTexture(GL_TEXTURE1);
-		glBindTexture(GL_TEXTURE_2D, shadows ? m_shadowDepthTex : 0);
+		glBindTexture(GL_TEXTURE_2D_ARRAY, m_shadowDepthTex);
 		glActiveTexture(GL_TEXTURE0); // base color binds here in the loop
 
 		// Mirror per-frame uniforms onto the instanced program (texture units are
@@ -3069,7 +3364,10 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				glUniform3fv(m_uInstCameraPos, 1, glm::value_ptr(m_renderWorld.camera.position));
 			}
 			glUniform1i(m_uInstShadowEnabled, shadows ? 1 : 0);
-			glUniformMatrix4fv(m_uInstLightVP, 1, GL_FALSE, glm::value_ptr(lightVP));
+			glUniform1i(m_uInstShadowDebug,   m_debugShadowCascades ? 1 : 0);
+			glUniformMatrix4fv(m_uInstCascadeVP, kGLCsmCascades, GL_FALSE, cascadeVPData);
+			glUniform4fv(m_uInstCascadeSplits, 1, glm::value_ptr(cascadeSplits));
+			glUniform3fv(m_uInstCameraFwd, 1, glm::value_ptr(camFwd));
 			glUniform1i(m_uInstShadowMap, 1);
 			glUseProgram(m_unlitProgram); // restore for the per-object loop
 		}
@@ -3198,8 +3496,16 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glUniform1f(m_uSkinnedFogDensity,       GetEnvironment().fogDensity);
 			glUniform1f(m_uSkinnedFogHeightFalloff, GetEnvironment().fogHeightFalloff);
 			glUniform1i(m_uSkinnedShadowEnabled, shadows ? 1 : 0);
-			glUniformMatrix4fv(m_uSkinnedLightVP, 1, GL_FALSE, glm::value_ptr(lightVP));
+			glUniform1i(m_uSkinnedShadowDebug,   m_debugShadowCascades ? 1 : 0);
+			glUniformMatrix4fv(m_uSkinnedCascadeVP, kGLCsmCascades, GL_FALSE, cascadeVPData);
+			glUniform4fv(m_uSkinnedCascadeSplits, 1, glm::value_ptr(cascadeSplits));
+			glUniform3fv(m_uSkinnedCameraFwd, 1, glm::value_ptr(camFwd));
 			glUniform1i(m_uSkinnedShadowMap, 1);
+			// Re-assert the CSM array on unit 1 — opaque/instanced draws and the AO
+			// bind run between the unlit setup and here; this guarantees the skinned
+			// sampler2DArray reads the shadow array, not a stale 2D texture.
+			glActiveTexture(GL_TEXTURE1);
+			glBindTexture(GL_TEXTURE_2D_ARRAY, m_shadowDepthTex);
 			glActiveTexture(GL_TEXTURE3);
 			glBindTexture(GL_TEXTURE_CUBE_MAP, m_skyEnvCube);
 			glUniform1i(m_uSkinnedSkyEnv, 3);
@@ -3297,6 +3603,10 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glUniform1i(m_uSkyHasMoon, m_moonTex ? 1 : 0);
 			glUniform1f(m_uSkyTime, GetEnvironment().timeOfDay);
 			glUniform1f(m_uSkyCoverage, GetEnvironment().cloudCoverage);
+			// Cloud render mode + 3D-cloud parallax inputs (camera world pos + layer height).
+			glUniform1i(m_uSkyCloudMode,   GetEnvironment().cloudMode);
+			glUniform3fv(m_uSkyCameraPos,  1, glm::value_ptr(m_renderWorld.camera.position));
+			glUniform1f(m_uSkyCloudHeight, GetEnvironment().cloudHeight);
 			glUniform1f(m_uSkyClock, static_cast<float>(SDL_GetTicks()) / 1000.0f);
 			glUniform3fv(m_uSkySunColor, 1, glm::value_ptr(GetEnvironment().sunColor));
 			glUniform1f(m_uSkyAurora, GetEnvironment().auroraIntensity);
@@ -3396,11 +3706,19 @@ void OpenGLRenderer::Render()
 	if (m_primarySdlWindow && m_glContext)
 		SDL_GL_MakeCurrent(m_primarySdlWindow, static_cast<SDL_GLContext>(m_glContext));
 
+	// Profiler GPU-timer frame (primary window only — secondary RenderWindow shares
+	// DrawScene but must not re-issue queries against this frame's slot). No-op unless
+	// a capture is recording or the live HUD is open.
+	GpuTimerBeginFrame();
+
 	AgeRetiredTextures();
 
 	// Step the GPU particle pool once per frame (before any DrawScene, which may run
 	// for both the offscreen viewport and the window — drawing reads, only this steps).
-	SimulateGpuParticles();
+	{
+		GpuPassScope _ps(this, "ParticleSim");
+		SimulateGpuParticles();
+	}
 
 	const bool offscreen = m_viewportReqW > 0 && m_viewportReqH > 0;
 
@@ -3426,6 +3744,9 @@ void OpenGLRenderer::Render()
 		DrawScene(pw, ph);
 	}
 	if (m_overlayCallback) m_overlayCallback(nullptr);
+
+	// Close the GPU-timer frame (tsEnd; detailed capture flushes + reaps now).
+	GpuTimerEndFrame();
 }
 
 // ─── GPU weather particles (transform-feedback precipitation) ─────────────────
@@ -3733,12 +4054,153 @@ IRenderer::Capabilities OpenGLRenderer::GetCapabilities() const
 	return c;
 }
 
+// ─── GPU timing (profiler per-pass trace) ─────────────────────────────────────
+// GL timer queries: GL_TIME_ELAPSED per pass (exact, exclusive, additive — no TBDR
+// overlap on an immediate-mode GPU, so the per-pass sum is meaningful) + a
+// GL_TIMESTAMP pair for the whole frame. Single-threaded: every call is on the
+// GL/main thread inside Render(), so no locking is needed (unlike Metal's async
+// completion handlers / GpuPassAccumulator).
+
+void OpenGLRenderer::GpuTimerReap(GpuTimerSlot& slot)
+{
+	if (!slot.pending) return;
+	GLuint64 t0 = 0, t1 = 0;
+	glGetQueryObjectui64v(slot.tsStart, GL_QUERY_RESULT, &t0); // ns; blocks iff not ready
+	glGetQueryObjectui64v(slot.tsEnd,   GL_QUERY_RESULT, &t1);
+	FrameGpuStats fs;
+	fs.gpuFrameMs    = (t1 > t0) ? static_cast<double>(t1 - t0) * 1e-6 : 0.0;
+	fs.gpuTimingMode = "gl-timer";
+	fs.passes.reserve(slot.passes.size());
+	for (const GpuTimerPass& p : slot.passes)
+	{
+		GLuint64 elapsed = 0;
+		glGetQueryObjectui64v(p.query, GL_QUERY_RESULT, &elapsed);
+		fs.passes.push_back({ p.name, static_cast<double>(elapsed) * 1e-6, /*approx=*/false });
+	}
+	m_lastGpuStats = fs;   // CPU counters are merged in by GetFrameGpuStats
+	slot.pending   = false;
+}
+
+void OpenGLRenderer::GpuTimerBeginFrame()
+{
+	// Latch the profiler decision once per primary frame so Begin/EndPass + EndFrame
+	// agree (a mid-frame toggle can never unbalance a query begin/end pair).
+	EngineProfiler& prof = EngineProfiler::instance();
+	const bool rec  = prof.isRecording();
+	const bool live = prof.liveEnabled();
+	m_gpuTimingActive = m_gpuTimerSupported && (rec || live);
+	m_gpuPerPass      = m_gpuTimingActive && rec;
+	// Same-frame reap (glFinish) for the detailed-capture toggle AND for a one-shot
+	// single-frame capture. A single-frame capture records exactly one frame and the
+	// profiler reads its stats that same frame, so the async ring (results 1–N frames
+	// late) would attribute a DIFFERENT frame's GPU times to it. The flush costs one
+	// stall on that single frame only; the per-pass GL_TIME_ELAPSED values stay exact.
+	m_gpuDetailed     = m_gpuPerPass && (prof.detailedGpuCapture() || prof.isSingleFrameCapture());
+	const bool freshActivation = m_gpuTimingActive && !m_gpuWasActive;
+	m_gpuWasActive    = m_gpuTimingActive;
+	m_gpuCurSlot      = -1;
+	m_gpuActiveQuery  = -1;
+	if (!m_gpuTimingActive) return;
+
+	if (!m_gpuTimerInit)
+	{
+		for (GpuTimerSlot& s : m_gpuSlots)
+		{
+			glGenQueries(1, &s.tsStart);
+			glGenQueries(1, &s.tsEnd);
+		}
+		m_gpuTimerInit = true;
+	}
+
+	// Fresh activation (profiler just turned on after being idle): slots left pending
+	// by a PRIOR session hold that session's results. Drop them (don't reap) and clear
+	// the published stats, so the first frames honestly report "warming up"
+	// (gpuFrameMs = -1) instead of stale cross-session numbers, until the ring fills.
+	if (freshActivation)
+	{
+		for (GpuTimerSlot& s : m_gpuSlots) s.pending = false;
+		m_lastGpuStats = FrameGpuStats{};
+	}
+
+	const int slotIdx  = static_cast<int>(m_gpuFrameIdx % kGpuTimerRing);
+	GpuTimerSlot& slot = m_gpuSlots[slotIdx];
+	// This slot was last used kGpuTimerRing frames ago, so its results are certainly
+	// ready — reaping here never stalls (no-op if the detailed path already reaped it).
+	GpuTimerReap(slot);
+	slot.passes.clear();
+	slot.poolUsed = 0;
+	slot.frameIdx = m_gpuFrameIdx;
+	m_gpuCurSlot  = slotIdx;
+
+	glQueryCounter(slot.tsStart, GL_TIMESTAMP);
+}
+
+void OpenGLRenderer::GpuTimerEndFrame()
+{
+	if (!m_gpuTimingActive || m_gpuCurSlot < 0) { ++m_gpuFrameIdx; return; }
+	GpuTimerSlot& slot = m_gpuSlots[m_gpuCurSlot];
+	glQueryCounter(slot.tsEnd, GL_TIMESTAMP);
+	slot.pending = true;
+
+	if (m_gpuDetailed)
+	{
+		// Detailed / single-frame capture: attribute THIS frame's GPU numbers to THIS
+		// frame (the profiler reads GetFrameGpuStats right after this in the loop).
+		// Flush so the queries are done, then reap now. One glFinish per frame, only
+		// while the user opted into detailed capture (mirrors Metal's serialization
+		// trade-off — the per-pass GL_TIME_ELAPSED values themselves stay exact).
+		glFinish();
+		GpuTimerReap(slot);
+	}
+	m_gpuCurSlot = -1;
+	++m_gpuFrameIdx;
+}
+
+bool OpenGLRenderer::GpuTimerBeginPass(const char* name)
+{
+	if (!m_gpuPerPass || m_gpuCurSlot < 0) return false;
+	if (m_gpuActiveQuery >= 0) return false;   // GL_TIME_ELAPSED cannot nest
+	GpuTimerSlot& slot = m_gpuSlots[m_gpuCurSlot];
+	if (slot.poolUsed >= slot.pool.size())
+	{
+		GLuint q = 0;
+		glGenQueries(1, &q);
+		slot.pool.push_back(q);
+	}
+	const unsigned int q = slot.pool[slot.poolUsed];
+	m_gpuActiveQuery = static_cast<int>(slot.poolUsed);
+	++slot.poolUsed;
+	slot.passes.push_back({ name, q });
+	glBeginQuery(GL_TIME_ELAPSED, q);
+	return true;
+}
+
+void OpenGLRenderer::GpuTimerEndPass()
+{
+	if (m_gpuActiveQuery < 0) return;
+	glEndQuery(GL_TIME_ELAPSED);
+	m_gpuActiveQuery = -1;
+}
+
+void OpenGLRenderer::DestroyGpuTimer()
+{
+	if (!m_gpuTimerInit) return;
+	for (GpuTimerSlot& s : m_gpuSlots)
+	{
+		if (s.tsStart) glDeleteQueries(1, &s.tsStart);
+		if (s.tsEnd)   glDeleteQueries(1, &s.tsEnd);
+		if (!s.pool.empty())
+			glDeleteQueries(static_cast<GLsizei>(s.pool.size()), s.pool.data());
+		s = GpuTimerSlot{};
+	}
+	m_gpuTimerInit = false;
+}
+
 IRenderer::FrameGpuStats OpenGLRenderer::GetFrameGpuStats() const
 {
-	// GPU timing left unavailable on macOS GL (timestamp queries unreliable) — the
-	// honest default is -1 rather than a misleading number. CPU counters are real.
-	FrameGpuStats s;
-	s.gpuFrameMs     = -1.0;
+	// GPU times come from the newest reaped timer slot (1–N frames late; -1 and no
+	// passes on Apple GL / before the first reap). CPU counters are this frame's.
+	FrameGpuStats s = m_lastGpuStats;
 	s.drawCalls      = m_counters.draws;
 	s.triangles      = m_counters.tris;
 	s.visibleObjects = m_counters.visible;
