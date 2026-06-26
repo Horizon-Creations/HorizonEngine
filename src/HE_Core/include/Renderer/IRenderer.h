@@ -64,6 +64,35 @@ public:
     virtual void Render()                        = 0;
     virtual Capabilities GetCapabilities() const = 0;
 
+    // ── Profiler GPU stats ─────────────────────────────────────────────────
+    // Per-frame GPU timing + counters, pulled by the EngineProfiler when a
+    // capture is recording (never on the hot path otherwise). GPU times are
+    // measured with backend timer queries and are typically 1–N frames behind
+    // the CPU; the profiler attributes them to the frame it reads them on.
+    // `name` pointers are static string literals owned by the backend.
+    //   gpuFrameMs < 0  → GPU timing unavailable on this backend/driver.
+    //   passes          → per-pass breakdown (Shadow / SSAO / Scene=Sky+Clouds /
+    //                     Bloom / Tonemap / …) — the cost breakdown that matters.
+    //   approx = true → a draw-boundary interval inside one render encoder (an
+    //   intra-"Scene" element split). Tile-deferred fragment work on TBDR GPUs
+    //   makes such sub-encoder deltas approximate, not exact — the profiler marks
+    //   them so they are never read as authoritative pass costs.
+    struct GpuPassTime { const char* name = ""; double ms = 0.0; bool approx = false; };
+    struct FrameGpuStats
+    {
+        double                   gpuFrameMs = -1.0;
+        std::vector<GpuPassTime> passes;
+        uint32_t drawCalls = 0, triangles = 0, visibleObjects = 0, totalObjects = 0;
+        double   vramUsedMB = 0.0, vramBudgetMB = 0.0;
+        // Which GPU-timing path actually produced `passes` this frame (a static
+        // literal): "detailed" (one cmdbuf/pass, serialized, exclusive+additive),
+        // "counter" (stage-boundary spans — overlap on TBDR), "whole-frame" (no
+        // per-pass), or "" (none). Recorded so a dump says what RAN, not what was
+        // requested — the request flag can't catch an engage bug.
+        const char* gpuTimingMode = "";
+    };
+    virtual FrameGpuStats GetFrameGpuStats() const { return {}; }
+
     // ── Multi-window support (optional – backends may override) ────────────
     // Attach a secondary window so the renderer can create an additional
     // swap-chain / framebuffer for it.  Called once after the window is open.
@@ -124,6 +153,10 @@ public:
         int   method    = 0;     // AO method: 0 = SSAO, 1 = HBAO, 2 = GTAO (planned)
     };
     virtual void SetSSAOSettings(const SSAOSettings& /*settings*/) {}
+
+    // Debug: tint each lit fragment by its shadow cascade index (Metal CSM) so the
+    // cascade split placement can be verified visually. No-op on other backends.
+    virtual void SetShadowDebug(bool /*on*/) {}
 
     // ── Environment / day-night cycle ───────────────────────────────────────
     // Pushed by the editor. When dayNightCycle is on, the renderer's extractor

@@ -2786,6 +2786,10 @@ void OpenGLRenderer::DestroyViewportTarget()
 
 void OpenGLRenderer::DrawScene(int pw, int ph)
 {
+	// Reset the render counters before the early-return guards so a non-rendered
+	// frame (no world / zero-size) honestly reports zeros, not last frame's values.
+	// total/visible are filled after the cull below; draws/tris at the draw sites.
+	m_counters = FrameCounters{};
 	if (!m_world) return;
 	if (pw <= 0 || ph <= 0) return;
 	glViewport(0, 0, pw, ph);
@@ -2843,6 +2847,12 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
 	// (no early-out on empty: the geometry pass still draws the skybox background
 	// and the post-process still tonemaps it, even with zero visible objects.)
+
+	// Profiler render counters: draws/tris are tallied at the draw sites below;
+	// visible/total come from the cull result vs the extracted set (already reset
+	// to zero at the top of DrawScene).
+	m_counters.total   = static_cast<uint32_t>(m_renderWorld.objects.size());
+	m_counters.visible = static_cast<uint32_t>(m_sortedIndices.size());
 
 	// Snapshot the active target (window or editor-viewport FBO) so the shadow
 	// pass can render into the shadow map and then restore it for the main pass.
@@ -3156,6 +3166,9 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				glBindTexture(GL_TEXTURE_2D, tex);
 				glDrawElementsInstanced(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, nullptr,
 				                        static_cast<GLsizei>(dc.instanceTransforms.size()));
+				++m_counters.draws;
+				m_counters.tris += static_cast<uint32_t>(indexCount / 3) *
+				                   static_cast<uint32_t>(dc.instanceTransforms.size());
 				glUseProgram(m_unlitProgram); // restore for the next single-draw
 			}
 			else
@@ -3169,6 +3182,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				glUniform1i(m_uHasTexture, tex != 0);
 				glBindTexture(GL_TEXTURE_2D, tex);
 				glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, nullptr);
+				++m_counters.draws;
+				m_counters.tris += static_cast<uint32_t>(indexCount / 3);
 			}
 		}
 
@@ -3257,6 +3272,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				glBindTexture(GL_TEXTURE_2D, tex);
 				glBindVertexArray(smesh->vao);
 				glDrawElements(GL_TRIANGLES, smesh->indexCount, GL_UNSIGNED_INT, nullptr);
+				++m_counters.draws;
+				m_counters.tris += static_cast<uint32_t>(smesh->indexCount / 3);
 			}
 
 			glUseProgram(m_unlitProgram); // restore for the sky + transparent passes
@@ -3333,6 +3350,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				glBindVertexArray(t.vao);
 				glBindTexture(GL_TEXTURE_2D, t.tex);
 				glDrawElements(GL_TRIANGLES, t.indexCount, GL_UNSIGNED_INT, nullptr);
+				++m_counters.draws;
+				m_counters.tris += static_cast<uint32_t>(t.indexCount / 3);
 			}
 			glDepthMask(GL_TRUE);
 			glDisable(GL_BLEND);
@@ -3712,6 +3731,19 @@ IRenderer::Capabilities OpenGLRenderer::GetCapabilities() const
 	// every GL context this backend creates (incl. macOS 4.1).
 	c.supportsGpuParticles   = true;
 	return c;
+}
+
+IRenderer::FrameGpuStats OpenGLRenderer::GetFrameGpuStats() const
+{
+	// GPU timing left unavailable on macOS GL (timestamp queries unreliable) — the
+	// honest default is -1 rather than a misleading number. CPU counters are real.
+	FrameGpuStats s;
+	s.gpuFrameMs     = -1.0;
+	s.drawCalls      = m_counters.draws;
+	s.triangles      = m_counters.tris;
+	s.visibleObjects = m_counters.visible;
+	s.totalObjects   = m_counters.total;
+	return s;
 }
 
 void OpenGLRenderer::SetGpuParticleParams(const GpuParticleParams& p)

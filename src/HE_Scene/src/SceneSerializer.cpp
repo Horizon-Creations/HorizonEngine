@@ -14,6 +14,7 @@
 #include "HorizonScene/Components/ScriptComponent.h"
 #include "HorizonScene/Components/EnvironmentComponent.h"
 #include "HorizonScene/Components/EnvironmentLightComponent.h"
+#include "HorizonScene/Components/TerrainChunkComponent.h"
 #include "HorizonScene/Components/WeatherComponent.h"
 #include "HorizonScene/Components/TerrainComponent.h"
 #include "HorizonScene/Components/AudioSourceComponent.h"
@@ -28,6 +29,9 @@
 #include "HorizonScene/Components/UIButtonComponent.h"
 #include <nlohmann/json.hpp>
 #include <fstream>
+#include <cstring>
+#include <cstdint>
+#include <string>
 
 using json = nlohmann::json;
 
@@ -42,6 +46,52 @@ namespace
 	{
 		if (!j.is_array() || j.size() != 4) return fallback;
 		return { j[0].get<float>(), j[1].get<float>(), j[2].get<float>(), j[3].get<float>() };
+	}
+
+	// Base64 (RFC 4648) for embedding a large binary array (terrain sculptHeights)
+	// as ONE string node instead of a JSON array of N floats — the array form builds
+	// N nlohmann json nodes (N≈260k for a 513² terrain), which dominated the editor
+	// undo snapshot (saveToMemory → CBOR). The string is host-endian raw float bytes;
+	// fine for the in-memory undo and for same-arch scene files (all targets little-endian).
+	constexpr char kB64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+	std::string base64Encode(const uint8_t* data, size_t len)
+	{
+		std::string out;
+		out.reserve(((len + 2) / 3) * 4);
+		for (size_t i = 0; i < len; i += 3)
+		{
+			uint32_t n = static_cast<uint32_t>(data[i]) << 16;
+			if (i + 1 < len) n |= static_cast<uint32_t>(data[i + 1]) << 8;
+			if (i + 2 < len) n |= static_cast<uint32_t>(data[i + 2]);
+			out.push_back(kB64[(n >> 18) & 63]);
+			out.push_back(kB64[(n >> 12) & 63]);
+			out.push_back((i + 1 < len) ? kB64[(n >> 6) & 63] : '=');
+			out.push_back((i + 2 < len) ? kB64[n & 63]        : '=');
+		}
+		return out;
+	}
+	std::vector<uint8_t> base64Decode(const std::string& s)
+	{
+		auto val = [](char c) -> int {
+			if (c >= 'A' && c <= 'Z') return c - 'A';
+			if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+			if (c >= '0' && c <= '9') return c - '0' + 52;
+			if (c == '+') return 62;
+			if (c == '/') return 63;
+			return -1;
+		};
+		std::vector<uint8_t> out;
+		out.reserve(s.size() / 4 * 3);
+		int buf = 0, bits = 0;
+		for (char c : s)
+		{
+			if (c == '=') break;
+			const int v = val(c);
+			if (v < 0) continue;
+			buf = (buf << 6) | v; bits += 6;
+			if (bits >= 8) { bits -= 8; out.push_back(static_cast<uint8_t>((buf >> bits) & 0xFF)); }
+		}
+		return out;
 	}
 
 	glm::vec3 jsonToVec3(const json& j, const glm::vec3& fallback)
@@ -246,7 +296,13 @@ namespace
 				{ "gain",       t->gain },
 			};
 			if (!t->sculptHeights.empty())
-				tc["sculptHeights"] = t->sculptHeights;
+			{
+				// As a base64 blob, NOT a JSON array of N floats — the array form
+				// builds N json nodes and dominated the undo snapshot cost.
+				tc["sculptHeightsB64"] = base64Encode(
+					reinterpret_cast<const uint8_t*>(t->sculptHeights.data()),
+					t->sculptHeights.size() * sizeof(float));
+			}
 			comps["terrain"] = tc;
 		}
 		if (auto* a = registry.try_get<AudioSourceComponent>(entity))
@@ -372,10 +428,11 @@ namespace
 		auto view = registry.view<NameComponent>();
 		for (auto entity : view)
 		{
-			// The built-in environment sun/moon lights are never serialised — they
-			// are recreated on load (ensureEnvironmentLights), so the scene file
-			// stays clean and they can never be duplicated or orphaned.
-			if (registry.all_of<EnvironmentLightComponent>(entity))
+			// The built-in environment sun/moon lights and runtime terrain chunks are
+			// never serialised — both are recreated on load (ensureEnvironmentLights /
+			// TerrainSystem from the TerrainComponent), so the scene file stays clean.
+			if (registry.all_of<EnvironmentLightComponent>(entity) ||
+			    registry.all_of<TerrainChunkComponent>(entity))
 				continue;
 
 			json eJson;
@@ -387,7 +444,8 @@ namespace
 				eJson["parent"] = static_cast<uint32_t>(hier->parent);
 				json children = json::array();
 				for (auto child : hier->children)
-					if (!registry.all_of<EnvironmentLightComponent>(child)) // omit built-ins
+					if (!registry.all_of<EnvironmentLightComponent>(child) &&    // omit built-ins
+					    !registry.all_of<TerrainChunkComponent>(child))          // + terrain chunks
 						children.push_back(static_cast<uint32_t>(child));
 				eJson["children"] = children;
 			}
@@ -567,8 +625,17 @@ namespace
 			t.frequency   = c.value("frequency",    t.frequency);
 			t.lacunarity  = c.value("lacunarity",   t.lacunarity);
 			t.gain        = c.value("gain",         t.gain);
-			if (c.contains("sculptHeights") && c["sculptHeights"].is_array())
-				t.sculptHeights = c["sculptHeights"].get<std::vector<float>>();
+			if (c.contains("sculptHeightsB64") && c["sculptHeightsB64"].is_string())
+			{
+				const std::vector<uint8_t> bytes =
+					base64Decode(c["sculptHeightsB64"].get<std::string>());
+				t.sculptHeights.resize(bytes.size() / sizeof(float));
+				if (!t.sculptHeights.empty())
+					std::memcpy(t.sculptHeights.data(), bytes.data(),
+					            t.sculptHeights.size() * sizeof(float));
+			}
+			else if (c.contains("sculptHeights") && c["sculptHeights"].is_array())
+				t.sculptHeights = c["sculptHeights"].get<std::vector<float>>(); // legacy scenes
 			t.dirty       = true; // always regenerate after load
 			registry.emplace_or_replace<TerrainComponent>(entity, t);
 		}

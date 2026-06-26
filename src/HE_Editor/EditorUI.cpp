@@ -21,6 +21,7 @@
 #endif
 
 #include <Diagnostics/Logger.h>
+#include <Diagnostics/EngineProfiler.h>
 #include <SDL3/SDL.h>
 #include <filesystem>
 #include <string>
@@ -85,6 +86,9 @@ static bool s_resetLayoutRequested = false;
 
 // Toggled by Edit > Preferences (Ctrl+,); drives the Preferences window.
 static bool s_showPreferences = false;
+
+// Toggled by View > Performance Profiler; drives the profiler panel.
+static bool s_showProfiler = false;
 
 // Build > Export Project modal state
 static bool   s_showExportModal   = false;
@@ -160,6 +164,10 @@ static void BuildDefaultDockLayout(ImGuiID dockspaceId, const ImVec2& size)
 // the toggle takes effect on every backend.
 static void ApplyVSync(AppContext& ctx)
 {
+	// Route through Application::setVSync so the app's vsync state (which the profiler
+	// capture saves/restores around F9) stays in sync with this editor toggle — else
+	// a capture turns vsync back ON after stopping even though the user had it OFF.
+	if (ctx.setVSync) { ctx.setVSync(ctx.vsync); return; }
 	if (ctx.window)   ctx.window->SetVSync(ctx.vsync);
 	if (ctx.renderer) ctx.renderer->SetVSync(ctx.vsync);
 }
@@ -467,6 +475,255 @@ void EditorUI::render(AppContext& ctx, float dt)
             SDL_GL_MakeCurrent(backupWin, backupCtx);
     }
 #endif // HE_IMGUI_ENABLED
+}
+
+// ─── Performance Profiler window (View > Performance Profiler) ──────────────────
+// Three tabs over the runtime EngineProfiler:
+//   Overview     — always-live HUD: FPS / CPU / GPU / counters + a frame-time graph.
+//   Capture      — benchmark capture (F9 → JSON dump), single-frame capture, toggles.
+//   Frame Detail — the full per-pass GPU + per-scope CPU breakdown of one frame
+//                  (the single-frame capture if taken, else the last captured frame).
+// Reads the profiler singleton directly. Sets liveEnabled() so the app feeds the HUD.
+#ifdef HE_IMGUI_ENABLED
+// Full breakdown of one captured frame: counters, GPU passes, CPU scope tree.
+static void DrawFrameDetail(const ProfFrameRecord& f)
+{
+    const double fps = f.deltaMs > 0.0 ? 1000.0 / f.deltaMs : 0.0;
+    ImGui::Text("Frame %llu", static_cast<unsigned long long>(f.index));
+    ImGui::Text("CPU %.3f ms", f.cpuFrameMs);
+    ImGui::SameLine(160); ImGui::Text("frame %.3f ms (%.0f FPS)", f.deltaMs, fps);
+    if (f.gpuFrameMs >= 0.0)
+    {
+        ImGui::Text("GPU %.3f ms", f.gpuFrameMs);
+        if (f.gpuTimingMode && f.gpuTimingMode[0])
+        { ImGui::SameLine(160); ImGui::TextDisabled("mode: %s", f.gpuTimingMode); }
+    }
+    else
+        ImGui::TextDisabled("GPU n/a on this backend");
+
+    const ProfRenderStats& s = f.stats;
+    ImGui::Text("draws %u  ·  tris %u  ·  objects %u/%u visible",
+                s.drawCalls, s.triangles, s.visibleObjects, s.totalObjects);
+    if (s.vramBudgetMB > 0.0)
+        ImGui::Text("VRAM %.0f / %.0f MB", s.vramUsedMB, s.vramBudgetMB);
+
+    // ── GPU passes ──────────────────────────────────────────────────────────
+    if (!f.gpuPasses.empty())
+    {
+        const bool detailed = f.gpuTimingMode && std::string(f.gpuTimingMode) == "detailed";
+        const double gref = f.gpuFrameMs > 0.0 ? f.gpuFrameMs : 1.0;
+        ImGui::Separator();
+        ImGui::TextUnformatted(detailed ? "GPU passes (exclusive, serialized)"
+                                        : "GPU passes (per-encoder spans — see caveat)");
+        double sumExact = 0.0; bool anyExact = false;
+        for (const ProfGpuPass& gp : f.gpuPasses)
+        {
+            const char* nm = gp.name ? gp.name : "?";
+            if (gp.approx)
+            {
+                ImGui::TextDisabled("    ~ %s", nm);
+                ImGui::SameLine(210); ImGui::TextDisabled("%7.3f ms", gp.ms);
+            }
+            else
+            {
+                sumExact += gp.ms; anyExact = true;
+                ImGui::Text("%s", nm);
+                ImGui::SameLine(210); ImGui::Text("%7.3f ms", gp.ms);
+            }
+            ImGui::SameLine(300);
+            ImGui::ProgressBar(static_cast<float>(gp.ms / gref), ImVec2(-1, 0), "");
+        }
+        if (anyExact && f.gpuFrameMs > 0.0)
+        {
+            if (!detailed && sumExact > f.gpuFrameMs * 1.05)
+                ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.2f, 1.0f),
+                    "\xCE\xA3 spans %.2f ms = %.1fx GPU frame — spans OVERLAP, not exclusive; do not sum.",
+                    sumExact, sumExact / f.gpuFrameMs);
+            else
+            {
+                ImGui::Text("\xCE\xA3 passes %.3f ms", sumExact);
+                ImGui::SameLine(220);
+                ImGui::TextDisabled("untimed %.3f ms", f.gpuFrameMs - sumExact);
+            }
+        }
+        if (!detailed)
+            ImGui::TextDisabled("Per-encoder spans overlap on TBDR — enable 'Detailed GPU' for exclusive per-pass.");
+        else
+            ImGui::TextDisabled("Note: the FIRST pass (Shadow) absorbs GPU queue/present latency in a single\n"
+                                "serialized frame — it can read high here. Trust the Overview median, not one frame.");
+    }
+
+    // ── CPU scopes (nested) ─────────────────────────────────────────────────
+    if (!f.scopes.empty())
+    {
+        const double ref = f.cpuFrameMs > 0.0 ? f.cpuFrameMs : 1.0;
+        ImGui::Separator();
+        ImGui::TextUnformatted("CPU scopes");
+        for (const ProfScopeSample& sc : f.scopes)
+        {
+            std::string label(static_cast<size_t>(sc.depth) * 2, ' ');
+            label += sc.name ? sc.name : "?";
+            ImGui::Text("%s", label.c_str());
+            ImGui::SameLine(210); ImGui::Text("%7.3f ms", sc.ms);
+            ImGui::SameLine(300);
+            ImGui::ProgressBar(static_cast<float>(sc.ms / ref), ImVec2(-1, 0), "");
+        }
+    }
+}
+#endif // HE_IMGUI_ENABLED
+
+static void DrawProfilerWindow(AppContext& ctx, bool& open)
+{
+#ifdef HE_IMGUI_ENABLED
+    EngineProfiler& prof = EngineProfiler::instance();
+    if (!open) { prof.setLiveEnabled(false); return; }
+
+    ImGui::SetNextWindowSize(ImVec2(480, 600), ImGuiCond_FirstUseEver);
+    const bool visible = ImGui::Begin("Performance Profiler", &open);
+    // Feed the live HUD only while the window is actually visible (not collapsed).
+    prof.setLiveEnabled(visible);
+    if (!visible) { ImGui::End(); return; }
+
+    if (ImGui::BeginTabBar("##profTabs"))
+    {
+        // ── Overview: live HUD + frame-time graph ───────────────────────────
+        if (ImGui::BeginTabItem("Overview"))
+        {
+            const std::vector<ProfLiveFrame> live = prof.liveSnapshot();
+            if (live.empty())
+                ImGui::TextDisabled("Collecting live data…");
+            else
+            {
+                const ProfLiveFrame& cur = live.back();
+                const double fps = cur.deltaMs > 0.0 ? 1000.0 / cur.deltaMs : 0.0;
+                ImGui::Text("%.1f FPS", fps);
+                ImGui::SameLine(120); ImGui::Text("frame %.2f ms", cur.deltaMs);
+                ImGui::Text("CPU %.2f ms", cur.cpuFrameMs);
+                ImGui::SameLine(120);
+                if (cur.gpuFrameMs >= 0.0) ImGui::Text("GPU %.2f ms", cur.gpuFrameMs);
+                else                       ImGui::TextDisabled("GPU n/a");
+                ImGui::Text("draws %u  ·  tris %u  ·  objects %u/%u",
+                            cur.draws, cur.triangles, cur.visible, cur.total);
+
+                // Frame-time graph over the live window (+ avg/max overlay).
+                std::vector<float> ftimes; ftimes.reserve(live.size());
+                float mx = 0.0f; double sum = 0.0;
+                for (const ProfLiveFrame& lf : live)
+                {
+                    const float v = static_cast<float>(lf.deltaMs);
+                    ftimes.push_back(v); sum += v; if (v > mx) mx = v;
+                }
+                const float avg = ftimes.empty() ? 0.0f : static_cast<float>(sum / ftimes.size());
+                char overlay[64];
+                std::snprintf(overlay, sizeof(overlay), "avg %.2f  max %.2f ms", avg, mx);
+                ImGui::Separator();
+                ImGui::TextUnformatted("Frame time (ms)");
+                ImGui::PlotLines("##ft", ftimes.data(), static_cast<int>(ftimes.size()),
+                                 0, overlay, 0.0f, mx > 0.0f ? mx * 1.1f : 1.0f, ImVec2(-1, 80));
+
+                // GPU-time graph (only if available).
+                bool anyGpu = false;
+                std::vector<float> gtimes; gtimes.reserve(live.size());
+                float gmx = 0.0f;
+                for (const ProfLiveFrame& lf : live)
+                {
+                    const float v = lf.gpuFrameMs >= 0.0 ? static_cast<float>(lf.gpuFrameMs) : 0.0f;
+                    if (lf.gpuFrameMs >= 0.0) anyGpu = true;
+                    gtimes.push_back(v); if (v > gmx) gmx = v;
+                }
+                if (anyGpu)
+                {
+                    ImGui::TextUnformatted("GPU time (ms, whole frame)");
+                    ImGui::PlotLines("##gt", gtimes.data(), static_cast<int>(gtimes.size()),
+                                     0, nullptr, 0.0f, gmx > 0.0f ? gmx * 1.1f : 1.0f, ImVec2(-1, 60));
+                }
+            }
+            ImGui::EndTabItem();
+        }
+
+        // ── Capture controls ────────────────────────────────────────────────
+        if (ImGui::BeginTabItem("Capture"))
+        {
+            const bool recording = prof.isRecordingOrPending();
+            if (recording)
+            {
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.62f, 0.20f, 0.20f, 1.0f));
+                if (ImGui::Button("Stop & Dump  (F9)", ImVec2(-1, 0)) && ctx.toggleProfilerCapture)
+                    ctx.toggleProfilerCapture();
+                ImGui::PopStyleColor();
+                ImGui::TextDisabled("Recording — %zu frames (vsync off)", prof.recordedFrames());
+            }
+            else
+            {
+                if (ImGui::Button("Start Benchmark Capture  (F9)", ImVec2(-1, 0)) && ctx.toggleProfilerCapture)
+                    ctx.toggleProfilerCapture();
+                ImGui::TextDisabled("Benchmark = vsync-off multi-frame capture → JSON dump.");
+
+                // Single-frame capture: one frame in full detail (forces detailed GPU),
+                // shown in the Frame Detail tab. No dump.
+                if (ImGui::Button("Capture Single Frame", ImVec2(-1, 0)))
+                    prof.requestSingleFrameCapture();
+                ImGui::TextDisabled("One frame (CPU scopes + counters + GPU) → 'Frame Detail'. Fast unless");
+                ImGui::TextDisabled("'Detailed GPU' is ticked (then exclusive per-pass, but that frame is slow).");
+            }
+
+            ImGui::Separator();
+            // Detailed GPU capture (serialized per-pass). Also auto-forced for single frames.
+            bool detailed = prof.detailedGpuCapture();
+            if (ImGui::Checkbox("Detailed GPU pass timing (serializes GPU — capture only)", &detailed))
+                prof.setDetailedGpuCapture(detailed);
+            ImGui::TextDisabled("On = exclusive per-pass GPU (ranking/upper bound). FPS during capture is meaningless.");
+
+            // Debug: tint lit fragments by shadow-cascade index (red/green/blue) to
+            // verify the CSM split placement (cascade 0 should hug the camera).
+            static bool s_dbgCascades = false;
+            if (ImGui::Checkbox("Debug: shadow cascades (cascade-index tint)", &s_dbgCascades))
+                if (ctx.renderer) ctx.renderer->SetShadowDebug(s_dbgCascades);
+
+            ImGui::Separator();
+            if (ImGui::Button("Dump Now"))
+            {
+                std::string p = prof.dumpNow();
+                if (!p.empty()) Logger::Log(Logger::LogLevel::Info, ("Profiler dump: " + p).c_str());
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Open Dumps Folder"))
+            {
+                std::string dir = !prof.dumpsDir().empty()
+                                ? prof.dumpsDir()
+                                : (ctx.globalState ? ctx.globalState->getDumpsDir() : std::string());
+                if (!dir.empty()) SDL_OpenURL(("file://" + dir).c_str());
+            }
+            {
+                std::string dir = !prof.dumpsDir().empty()
+                                ? prof.dumpsDir()
+                                : (ctx.globalState ? ctx.globalState->getDumpsDir() : std::string("(starts on first capture)"));
+                ImGui::TextDisabled("%s", dir.c_str());
+            }
+            ImGui::EndTabItem();
+        }
+
+        // ── Frame Detail: single-frame capture, else last captured frame ────
+        if (ImGui::BeginTabItem("Frame Detail"))
+        {
+            const ProfFrameRecord* single = prof.singleFrame();
+            const ProfFrameRecord* last   = prof.lastFrame();
+            const ProfFrameRecord* f      = single ? single : last;
+            if (single) ImGui::TextDisabled("Source: single-frame capture");
+            else if (last) ImGui::TextDisabled("Source: last benchmark frame");
+            ImGui::Separator();
+            if (f) DrawFrameDetail(*f);
+            else   ImGui::TextDisabled("No frame yet — use 'Capture Single Frame' or run a benchmark.");
+            ImGui::EndTabItem();
+        }
+
+        ImGui::EndTabBar();
+    }
+
+    ImGui::End();
+#else
+    (void)ctx; (void)open;
+#endif
 }
 
 // ─── Project Hub ──────────────────────────────────────────────────────────────
@@ -1089,6 +1346,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
     {
         if (ImGui::MenuItem("Toggle Fullscreen", "F11")) {}
         if (ImGui::MenuItem("Reset Layout")) { s_resetLayoutRequested = true; }
+        if (ImGui::MenuItem("Performance Profiler", nullptr, s_showProfiler)) s_showProfiler = !s_showProfiler;
         ImGui::EndMenu();
     }
 	if (ImGui::BeginMenu("Assets"))
@@ -2026,9 +2284,14 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 					ImGuizmo::SetRect(rectMin.x, rectMin.y,
 					                  rectMax.x - rectMin.x, rectMax.y - rectMin.y);
 
-					// Pre-state for undo — captured while hovering, before
-					// the first Manipulate of a drag session mutates anything.
-					if (ctx.undoSys && !ImGuizmo::IsUsing())
+					// Pre-state for undo — captured ONLY on the frame a gizmo drag is
+					// about to begin (mouse pressed over the gizmo), NOT every frame.
+					// capturePre() serializes the WHOLE world (expensive with terrain),
+					// so the old per-frame call dropped the editor to ~15 ms the moment
+					// anything was selected. IsOver()+MouseClicked fires once, just
+					// before Manipulate first mutates the transform this frame.
+					if (ctx.undoSys && !ImGuizmo::IsUsing() && ImGuizmo::IsOver()
+					    && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
 						ctx.undoSys->capturePre();
 
 					// For rotation, optionally drop ImGuizmo's outer screen-space
@@ -2477,7 +2740,22 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 							{
 								if (const auto* mc = terrainReg.try_get<MeshComponent>(terrainEnt))
 									s_aabbCache.erase(mc->meshAssetId);
-								tc.dirty = true;
+								// Regenerate only the chunks the brush touched (terrain-local
+								// XZ rect around the hit + brush extent), not all 64+ chunks —
+								// otherwise interactive sculpting rebuilds the whole terrain each
+								// frame. The first stroke still triggers a full build (the chunk
+								// grid doesn't exist yet → TerrainSystem detects the grid change).
+								const float r = s_brushRadius + s_falloffRadius;
+								float mnX = hitWS.x - r, mxX = hitWS.x + r;
+								float mnZ = hitWS.z - r, mxZ = hitWS.z + r;
+								if (s_terrainTool == TerrainTool::Ramp && s_rampValid)
+								{
+									mnX = std::min(mnX, s_rampStartWS.x - r); mxX = std::max(mxX, s_rampStartWS.x + r);
+									mnZ = std::min(mnZ, s_rampStartWS.z - r); mxZ = std::max(mxZ, s_rampStartWS.z + r);
+								}
+								tc.dirtyMinX = mnX - terrainWorldPos.x; tc.dirtyMaxX = mxX - terrainWorldPos.x;
+								tc.dirtyMinZ = mnZ - terrainWorldPos.z; tc.dirtyMaxZ = mxZ - terrainWorldPos.z;
+								tc.regionDirty = true;
 								TerrainSystem::updateTerrains(*ctx.world, *ctx.contentManager,
 								                              ctx.renderer);
 							}
@@ -2667,9 +2945,11 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
             {
                 if (!registry.valid(entity)) return;
                 // The built-in environment sun/moon lights belong to the World's
-                // Environment, not the scene tree — hide them from the Outliner.
+                // Environment, and runtime terrain chunks are generated from the
+                // TerrainComponent — hide both from the Outliner.
                 if (entity != ctx.world->rootEntity() &&
-                    registry.all_of<EnvironmentLightComponent>(entity))
+                    (registry.all_of<EnvironmentLightComponent>(entity) ||
+                     registry.all_of<TerrainChunkComponent>(entity)))
                     return;
                 auto* name = registry.try_get<NameComponent>(entity);
                 auto* hier = registry.try_get<HierarchyComponent>(entity);
@@ -2862,6 +3142,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
     RenderInspector(ctx);
 
     DrawPreferencesWindow(ctx, s_showPreferences);
+    DrawProfilerWindow(ctx, s_showProfiler);
 
     //Content Browser
 	auto [contentFolder, contentLock] = ctx.globalState->lockContentFolder();
@@ -3587,10 +3868,14 @@ void EditorUI::RenderInspector(AppContext& ctx)
 	auto&  registry = ctx.world->registry();
 	Entity entity   = ctx.selectedEntity;
 
-	// Pre-frame world state for undo. Captured once — only one ImGui item
-	// can become active per frame, and its pre-state is this snapshot.
-	// Widgets stash it on activation and commit when the edit session ends.
-	if (ctx.undoSys)
+	// Pre-frame world state for undo. capturePre() serializes the WHOLE world, so it
+	// must NOT run every frame — doing so dropped the editor to ~15 ms the instant any
+	// entity was selected (the terrain's sculptHeights alone is 263k floats). An edit
+	// can only START on a mouse press inside this panel, so capture the pre-state only
+	// then; the widget's IsItemActivated (same frame) stashes it.
+	if (ctx.undoSys
+	    && ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows)
+	    && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
 		ctx.undoSys->capturePre();
 	auto trackEdit = [&]
 	{

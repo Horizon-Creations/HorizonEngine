@@ -25,6 +25,10 @@ public:
 	void setLogFile(const std::string& path);
 	std::ofstream& getLogFileStream();
 
+	// Deploy-adjacent "dumps/" directory (next to HorizonEngine.log), created on
+	// demand. Used by the profiler and crash handler for diagnostic output.
+	std::string getDumpsDir() const;
+
 	// config
 	const HE::GraphicsAPI&            getSelectedRHI()       const { return engineStatus.selectedRHI; }
 	const HE::OS&                     getCurrentOS()          const { return engineStatus.currentOS; }

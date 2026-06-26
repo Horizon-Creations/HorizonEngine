@@ -108,8 +108,15 @@ namespace HE
 		// Look up a secondary window by its handle (returns nullptr if not found).
 		Window* getWindow(WindowHandle handle) const;
 
+		// Toggle a profiler benchmark capture (bound to F9). On start it disables
+		// vsync (so frame times reflect true cost, not the refresh rate) and on
+		// stop it restores the previous vsync state and writes a dump.
+		void toggleProfilerCapture();
+
 	private:
 		bool                       m_running  = false;
+		bool                       m_vsyncEnabled = true;  // current vsync state
+		bool                       m_savedVsync   = true;  // vsync to restore after a capture
 		std::unique_ptr<Window>    m_window;
 		std::unique_ptr<IRenderer> m_renderer;
 		Input                      m_input;

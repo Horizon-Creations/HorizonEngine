@@ -123,6 +123,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 		HE::UUID  matId;
 		uint32_t  entId;
 		int       lod;
+		bool      castsShadow;
 	};
 	auto meshView = reg.view<TransformComponent, MeshComponent>();
 	std::vector<EntityData> items;
@@ -137,6 +138,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 			d.matId = matComp->materialAssetId;
 		d.entId  = static_cast<uint32_t>(e);
 		d.lod    = mesh.lodBias;
+		d.castsShadow = mesh.castsShadow;
 		items.push_back(d);
 	}
 
@@ -150,6 +152,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 		obj.worldBounds     = kUnitCube.transformed(d.world);
 		obj.entityId        = d.entId;
 		obj.lod             = d.lod;
+		obj.castsShadow     = d.castsShadow;
 	});
 
 	// ── Particles + weather precipitation ─────────────────────────────────────
@@ -449,9 +452,94 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 		const glm::vec3 eye = center - dir * (radius * 2.0f);
 		const glm::mat4 view = glm::lookAt(eye, center, up);
 		const glm::mat4 proj = glm::ortho(-radius, radius, -radius, radius, 0.05f, radius * 4.0f);
-		out.shadow.viewProj  = proj * view;
+		out.shadow.viewProj  = proj * view;   // legacy single map (GL / D3D / Vulkan)
 		out.shadow.direction = dir;
 		out.shadow.enabled   = true;
+
+		// ── Cascaded Shadow Maps (Metal) ───────────────────────────────────
+		// Fit `kCascadeCount` tight light frusta to successive slices of the camera
+		// frustum, but only out to a BOUNDED shadowDistance (not the 5000-unit far
+		// plane) — that bound is what makes the near cascade hug the camera and give
+		// sharp shadows. Each cascade is fit to the bounding SPHERE of its sub-frustum
+		// (rotation-invariant → stable texel size) and texel-snapped in its own light
+		// space (no crawl). The light-direction (Z) range is kept generous so casters
+		// between the light and the slice are not clipped.
+		constexpr int   kCascadeCount  = 3;
+		constexpr float kShadowDistance = 250.0f; // metres of shadow coverage (tunable)
+		constexpr float kLambda        = 0.5f;    // uniform↔logarithmic split blend
+		constexpr float kCascadeRes    = 2048.0f;
+
+		// Camera near/far from the (glm, z∈[-1,1]) projection matrix.
+		const glm::mat4& P = out.camera.projection;
+		const float camN = P[3][2] / (P[2][2] - 1.0f);
+		const float camF = P[3][2] / (P[2][2] + 1.0f);
+		const float shadowFar = std::min(std::max(camF, camN + 1.0f), kShadowDistance);
+
+		float splitD[ShadowData::kMaxCascades + 1];
+		splitD[0] = camN;
+		for (int i = 1; i <= kCascadeCount; ++i)
+		{
+			const float pf   = static_cast<float>(i) / static_cast<float>(kCascadeCount);
+			const float logS = camN * std::pow(shadowFar / camN, pf);
+			const float uniS = camN + (shadowFar - camN) * pf;
+			splitD[i] = kLambda * logS + (1.0f - kLambda) * uniS;
+		}
+
+		// Stable per-cascade sphere fit (jitter-free → no shadow swim): the bounding
+		// sphere of a frustum slice depends ONLY on fov/aspect/splits, not the camera
+		// pose, so its radius is constant frame-to-frame → constant texel size. The
+		// centre rides the camera forward axis. Texel-snapping is done in shadow-clip
+		// space (round the projected world origin to a whole texel) — the robust form
+		// that keeps shadows locked to the world as the cascade centre moves.
+		const float thfX = (P[0][0] != 0.0f) ? 1.0f / P[0][0] : 1.0f; // tan(halfFovX)
+		const float thfY = (P[1][1] != 0.0f) ? 1.0f / P[1][1] : 1.0f; // tan(halfFovY)
+		const glm::mat4 camWorld = glm::inverse(out.camera.view);
+		const glm::vec3 camPos   = glm::vec3(camWorld[3]);
+		const glm::vec3 camFwd   = -glm::normalize(glm::vec3(camWorld[2]));
+
+		out.shadow.cascadeCount = kCascadeCount;
+		for (int c = 0; c < kCascadeCount; ++c)
+		{
+			const float nC = splitD[c];
+			const float fC = splitD[c + 1];
+			// Sphere through the slice's near + far corner rings, centre on view axis.
+			const float xn = nC * thfX, yn = nC * thfY;
+			const float xf = fC * thfX, yf = fC * thfY;
+			const float aa = xn * xn + yn * yn;
+			const float bb = xf * xf + yf * yf;
+			float zc = (bb - aa + fC * fC - nC * nC) / (2.0f * (fC - nC));
+			zc = glm::clamp(zc, nC, fC);
+			float crad = std::sqrt(std::max(aa + (nC - zc) * (nC - zc),
+			                                bb + (fC - zc) * (fC - zc)));
+			crad = std::max(crad, 0.01f);
+			crad = std::ceil(crad * 16.0f) / 16.0f;   // quantise → texel quantum stays
+			                                          // stable across small fov/aspect drift
+			const glm::vec3 ccenter = camPos + camFwd * zc;
+
+			// Pull the light eye back BEYOND the whole scene toward the light so casters
+			// that sit above/behind this cascade slice (off-screen, but casting INTO the
+			// visible region) are still rasterized — otherwise their shadows vanish the
+			// moment the caster leaves the camera frustum (the reported "shadows
+			// disappear at certain angles"). The Z range is generous; D32 depth keeps
+			// sub-mm precision over these distances, and the XY snap (crad) is unaffected.
+			const float     backZ = crad + radius;   // radius = whole-scene bounding radius
+			const glm::vec3 cEye  = ccenter - dir * backZ;
+			const glm::mat4 cView = glm::lookAt(cEye, ccenter, up);
+			glm::mat4       cProj = glm::ortho(-crad, crad, -crad, crad, 0.05f, backZ + crad);
+
+			// Texel snap in clip space: shift the projection so the (fixed) world origin
+			// lands on a whole shadow texel → the texel grid is world-anchored.
+			const glm::mat4 vp = cProj * cView;
+			const glm::vec4 o  = vp * glm::vec4(0.0f, 0.0f, 0.0f, 1.0f); // ortho → w = 1
+			const float halfRes = kCascadeRes * 0.5f;
+			const glm::vec2 so  = glm::vec2(o.x, o.y) * halfRes;        // origin in texels
+			const glm::vec2 off = (glm::round(so) - so) / halfRes;      // sub-texel NDC fix
+			cProj[3][0] += off.x;
+			cProj[3][1] += off.y;
+
+			out.shadow.cascadeViewProj[c] = cProj * cView;
+			out.shadow.cascadeSplit[c]    = fC;   // view-space far distance
+		}
 	}
 }
 

@@ -22,12 +22,23 @@ struct LightData {
     uint8_t   envRole      = 0;       // 0 none, 1 = environment sun, 2 = environment moon
 };
 
-// Directional-light shadow info, computed by the extractor. viewProj transforms
-// world space into the light's clip space (orthographic) for shadow mapping.
+// Directional-light shadow info, computed by the extractor.
+//   viewProj   — single whole-scene light clip transform. Used by the backends that
+//                are still on a single shadow map (OpenGL / D3D / Vulkan).
+//   cascade*   — Cascaded Shadow Maps: `cascadeCount` tight light frusta fit to
+//                successive camera-distance slices (sharp near, coarse far), used by
+//                the Metal backend. cascadeSplit[i] = the cascade's far distance in
+//                view space (camera-forward metres) for per-fragment cascade pick.
 struct ShadowData {
     glm::mat4 viewProj   = glm::mat4(1.0f);
     glm::vec3 direction  = glm::vec3(0.0f, -1.0f, 0.0f);
     bool      enabled    = false; // true when a directional light is present
+
+    static constexpr int kMaxCascades = 4;
+    int       cascadeCount = 0;
+    glm::mat4 cascadeViewProj[kMaxCascades] = { glm::mat4(1.0f), glm::mat4(1.0f),
+                                                glm::mat4(1.0f), glm::mat4(1.0f) };
+    float     cascadeSplit[kMaxCascades]    = { 0.0f, 0.0f, 0.0f, 0.0f };
 };
 
 class RenderWorld {

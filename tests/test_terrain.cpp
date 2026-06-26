@@ -199,3 +199,124 @@ TEST_CASE("TerrainComponent serialises and round-trips via SceneSerializer")
     CHECK(world2.registry().try_get<MeshComponent>(
         world2.registry().view<TerrainComponent>().front()) == nullptr);
 }
+
+// ── Chunked / LOD terrain ──────────────────────────────────────────────────────
+
+TEST_CASE("computeTerrainHeightField is res*res and flat for seed 0")
+{
+    TerrainComponent tc;
+    tc.resolution = 32;
+    tc.seed = 0;                       // flat
+    const std::vector<float> h = computeTerrainHeightField(tc);
+    CHECK(h.size() == static_cast<size_t>(32) * 32);
+    bool allZero = true;
+    for (float v : h) if (v != 0.0f) { allZero = false; break; }
+    CHECK(allZero);
+}
+
+TEST_CASE("generateTerrainChunkMesh vertex/index counts include the skirt")
+{
+    const uint32_t res = 33;
+    std::vector<float> field(static_cast<size_t>(res) * res, 0.0f);
+    const uint32_t N = 5; // vertsPerSide
+    StaticMeshAsset m = generateTerrainChunkMesh(field, res, 100.f, 100.f,
+                                                 0.0f, 0.0f, 0.5f, 0.5f, N);
+    const size_t ring   = static_cast<size_t>(4) * (N - 1);  // perimeter verts
+    const size_t verts  = static_cast<size_t>(N) * N + ring; // grid + skirt
+    CHECK(m.vertices.size() == verts * 3);
+    CHECK(m.normals .size() == verts * 3);
+    CHECK(m.uvs     .size() == verts * 2);
+    const size_t gridIdx  = static_cast<size_t>(N - 1) * (N - 1) * 6;
+    const size_t skirtIdx = ring * 6;                        // one-sided: 2 tris per segment
+    CHECK(m.indices.size() == gridIdx + skirtIdx);
+}
+
+TEST_CASE("generateTerrainChunkMesh samples the height field (flat → grid at y=0)")
+{
+    const uint32_t res = 17;
+    std::vector<float> field(static_cast<size_t>(res) * res, 0.0f);
+    const uint32_t N = 4;
+    StaticMeshAsset m = generateTerrainChunkMesh(field, res, 50.f, 50.f,
+                                                 0.0f, 0.0f, 1.0f, 1.0f, N);
+    // The N*N grid vertices (the first N*N) sit on the flat field → y == 0.
+    for (uint32_t i = 0; i < N * N; ++i)
+        CHECK(m.vertices[i * 3 + 1] == doctest::Approx(0.0f));
+    // Skirt vertices (after the grid) are pushed below 0.
+    bool skirtBelow = true;
+    for (size_t i = static_cast<size_t>(N) * N; i < m.vertices.size() / 3; ++i)
+        if (m.vertices[i * 3 + 1] >= 0.0f) { skirtBelow = false; break; }
+    CHECK(skirtBelow);
+}
+
+TEST_CASE("Adjacent chunks share boundary height + normal (no seam) at same LOD")
+{
+    // A non-trivial field so normals vary.
+    const uint32_t res = 33;
+    std::vector<float> field(static_cast<size_t>(res) * res);
+    for (uint32_t z = 0; z < res; ++z)
+        for (uint32_t x = 0; x < res; ++x)
+            field[z * res + x] = static_cast<float>(x) * 0.5f + static_cast<float>(z) * 0.25f;
+
+    const uint32_t N = 5;
+    // Left chunk covers u in [0,0.5], right chunk u in [0.5,1] — they meet at u=0.5.
+    StaticMeshAsset L = generateTerrainChunkMesh(field, res, 80.f, 60.f, 0.0f, 0.0f, 0.5f, 1.0f, N);
+    StaticMeshAsset R = generateTerrainChunkMesh(field, res, 80.f, 60.f, 0.5f, 0.0f, 1.0f, 1.0f, N);
+
+    // L's right column (i=N-1) and R's left column (i=0), row by row: same world Y
+    // and same normal (both sampled from the global field at the shared u=0.5).
+    for (uint32_t j = 0; j < N; ++j)
+    {
+        const uint32_t li = j * N + (N - 1);
+        const uint32_t ri = j * N + 0;
+        CHECK(L.vertices[li * 3 + 1] == doctest::Approx(R.vertices[ri * 3 + 1])); // height
+        CHECK(L.normals [li * 3 + 0] == doctest::Approx(R.normals [ri * 3 + 0])); // nx
+        CHECK(L.normals [li * 3 + 1] == doctest::Approx(R.normals [ri * 3 + 1])); // ny
+        CHECK(L.normals [li * 3 + 2] == doctest::Approx(R.normals [ri * 3 + 2])); // nz
+    }
+}
+
+TEST_CASE("resampleHeightField preserves corners and linear fields")
+{
+    // A linear ramp on a 3×3 grid: value = x (columns 0,1,2).
+    const uint32_t oldRes = 3;
+    std::vector<float> src = { 0,1,2,  0,1,2,  0,1,2 };
+    std::vector<float> dst = resampleHeightField(src, oldRes, 5);
+    REQUIRE(dst.size() == 25);
+    // Corners preserved exactly.
+    CHECK(dst[0]            == doctest::Approx(0.0f)); // (0,0)
+    CHECK(dst[4]            == doctest::Approx(2.0f)); // (4,0) → x=max → 2
+    CHECK(dst[24]           == doctest::Approx(2.0f)); // (4,4)
+    // Linear interior: column x=2 of 5 → u=0.5 → value 1.0.
+    CHECK(dst[2]            == doctest::Approx(1.0f));
+    // Same-resolution resample is a no-op.
+    std::vector<float> same = resampleHeightField(src, oldRes, oldRes);
+    CHECK(same == src);
+}
+
+TEST_CASE("TerrainComponent sculptHeights survive save/load (base64 round-trip)")
+{
+    HorizonWorld world;
+    auto& reg = world.registry();
+    Entity e = world.createEntity("sculptTerrain");
+    TerrainComponent tc;
+    tc.resolution = 16;
+    // Distinct per-vertex values incl. negatives + fractions to catch any corruption.
+    tc.sculptHeights.resize(16u * 16u);
+    for (size_t i = 0; i < tc.sculptHeights.size(); ++i)
+        tc.sculptHeights[i] = static_cast<float>(i) * 0.5f - 31.7f;
+    reg.emplace<TerrainComponent>(e, tc);
+
+    SceneSerializer ser;
+    std::vector<uint8_t> bytes;                 // saveToMemory uses CBOR (the undo path)
+    REQUIRE(ser.saveToMemory(world, bytes));
+    HorizonWorld world2;
+    REQUIRE(ser.loadFromMemory(world2, bytes));
+
+    const TerrainComponent* loaded = nullptr;
+    for (auto ent : world2.registry().view<TerrainComponent>())
+        loaded = &world2.registry().get<TerrainComponent>(ent);
+    REQUIRE(loaded != nullptr);
+    REQUIRE(loaded->sculptHeights.size() == tc.sculptHeights.size());
+    for (size_t i = 0; i < tc.sculptHeights.size(); ++i)
+        CHECK(loaded->sculptHeights[i] == doctest::Approx(tc.sculptHeights[i]));
+}

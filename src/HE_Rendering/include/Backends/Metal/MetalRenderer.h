@@ -1,5 +1,6 @@
 #pragma once
 #include <Renderer/IRenderer.h>
+#include <Renderer/GpuPassAccumulator.h>
 #include "MetalShaderManager.h"
 #include <HorizonRendering/RenderWorld.h>
 #include <HorizonRendering/RenderExtractor.h>
@@ -10,6 +11,35 @@
 #include <Math/AABB.h>
 #include <Types/UUID.h>
 #include <unordered_map>
+#include <atomic>
+#include <memory>
+#include <mutex>
+
+// Shared state for Metal GPU timing. Held by shared_ptr so an in-flight
+// command-buffer completion handler (which captures a copy) keeps it alive even
+// if the renderer is destroyed before the GPU drains — no use-after-free, no
+// forced GPU stall on shutdown. `last` is the most recently completed frame's
+// GPU stats (whole-frame + per-pass); `gpuTicksToMs` is the CPU/GPU timestamp
+// correlation factor, refreshed each captured frame on the main thread.
+struct MetalGpuTimerShared
+{
+	std::mutex                 mutex;
+	IRenderer::FrameGpuStats   last;             // newest published frame (any mode)
+	std::atomic<double>        gpuTicksToMs{ 0.0 };
+	// Detailed-capture (one command buffer per pass) bookkeeping. Its completion
+	// handlers call accum.report(); a completed frame is mirrored into `last`.
+	GpuPassAccumulator         accum;
+};
+
+// One GPU pass timed at its encoder's stage boundaries: timestamp sample at
+// `base` (start of vertex) and base+1 (end of fragment), so end-start is the
+// pass's GPU duration. Built per captured frame, copied into the completion
+// handler. `name` is a static string literal.
+struct GpuTimedPair  { const char* name; uint32_t base; };
+// One draw-boundary timestamp sampled between draws inside a single render
+// encoder (an intra-"Scene" element split). Duration of element i is
+// sample[i] - sample[i-1]; the first point is the anchor with no interval.
+struct GpuTimedPoint { const char* name; uint32_t slot; };
 
 struct SDL_Window;
 
@@ -35,6 +65,7 @@ public:
 	void Shutdown()                      override;
 	void Render()                        override;
 	Capabilities GetCapabilities() const override;
+	FrameGpuStats GetFrameGpuStats() const override;
 
 	void SetVSync(bool enabled) override;
 
@@ -49,6 +80,7 @@ public:
 	void  InvalidateMesh    (const HE::UUID& meshId)     override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
 	void  SetSSAOSettings(const SSAOSettings& settings) override;
+	void  SetShadowDebug(bool on) override { m_debugShadowCascades = on; }
 	void  SetGpuParticleParams(const GpuParticleParams& p) override;
 	void  SetDebugLines(const std::vector<DebugLine>& lines) override;
 
@@ -146,6 +178,58 @@ private:
 	void* m_imguiPassDescriptor = nullptr; // MTLRenderPassDescriptor* (retained)
 	bool  m_vsync = true;
 
+	// Whole-frame GPU time (ms) fallback, used when per-pass counter sampling is
+	// unavailable. Written from the command-buffer completion handler (background
+	// thread), read by GetFrameGpuStats(). -1 = not measured. Vsync-immune.
+	std::shared_ptr<std::atomic<double>> m_gpuFrameMs =
+		std::make_shared<std::atomic<double>>(-1.0);
+
+	// ── Per-pass GPU timing (MTLCounterSampleBuffer, stage-boundary) ────────
+	// Lazily probed once; null if the device/driver can't sample counters, in
+	// which case GetFrameGpuStats falls back to whole-frame timing above. Only
+	// active while a profiler capture is recording (zero overhead otherwise).
+	void  EnsureGpuTimer();                       // probe support, build shared state
+	bool  m_gpuTimerChecked      = false;
+	void* m_timestampCounterSet  = nullptr;       // id<MTLCounterSet> (CFBridgingRetain'd) or null
+	std::shared_ptr<MetalGpuTimerShared> m_gpuTimer;   // always created; holds whole-frame + detailed accum
+	bool  m_counterSamplingOk = false;            // stage-boundary MTLCounterSampleBuffer available
+	bool  m_drawBoundary = false;                 // MTLCounterSamplingPointAtDrawBoundary supported
+	uint64_t m_detailFrameIdx = 0;                // monotonic frame index for detailed-capture accum
+	uint64_t m_prevCpuTs = 0;                     // CPU/GPU timestamp correlation (main thread)
+	uint64_t m_prevGpuTs = 0;
+
+	// ── Profiler render counters (current frame, main thread) ───────────────
+	// Filled while encoding the scene; returned (merged with the 1-2-frame-late
+	// GPU times) by GetFrameGpuStats. Reset at the top of each primary EncodeFrame.
+	struct FrameCounters { uint32_t draws = 0, tris = 0, visible = 0, total = 0; };
+	FrameCounters m_counters;
+
+	// ── Per-frame GPU timing context ────────────────────────────────────────
+	// Valid only inside one EncodeFrame; the major encoders read it to attach
+	// stage-boundary timers (pairs) or place draw-boundary samples (points). The
+	// completion handler captures copies, so it is rebuilt each captured frame.
+	// `sampleBuf` is borrowed — EncodeFrame owns the strong ref until commit.
+	struct GpuFrameTiming
+	{
+		void*    sampleBuf = nullptr; // id<MTLCounterSampleBuffer> (borrowed)
+		uint32_t next      = 0;       // next free sample slot (high-water mark)
+		bool     stage     = false;   // per-encoder timing active this frame
+		bool     draw      = false;   // intra-encoder sampling active this frame
+		std::vector<GpuTimedPair>  pairs;
+		std::vector<GpuTimedPoint> points;
+		void reset() { sampleBuf = nullptr; next = 0; stage = draw = false; pairs.clear(); points.clear(); }
+	};
+	GpuFrameTiming m_ft;
+	uint32_t ftPair(const char* name);   // reserve a start/end sample pair, returns base slot
+	uint32_t ftPoint(const char* name);  // reserve one draw-boundary sample, returns slot
+	// Stage-boundary attach helpers (no-op unless stage timing is active):
+	void     ftAttachPass(void* passDesc, const char* name); // single-encoder pass (start+end)
+	uint32_t ftBeginMulti(const char* name);                 // multi-encoder pass: reserve base
+	void     ftAttachStart(void* passDesc, uint32_t base);   // first encoder of a multi-encoder pass
+	void     ftAttachEnd  (void* passDesc, uint32_t base);   // last encoder of a multi-encoder pass
+	// Draw-boundary sample inside one render encoder (intra-Scene element split):
+	void     SamplePoint(void* encoder, const char* name);
+
 	// ── Scene rendering ─────────────────────────────────────────────────────
 	RenderExtractor m_extractor;
 	RenderWorld     m_renderWorld;
@@ -172,12 +256,13 @@ private:
 	bool  m_skyEnvValid     = false;
 	void  UpdateSkyEnvCube(const glm::vec3& sunDir); // rebuild the IBL cubemap on sun move
 
-	// ── Shadow map (single directional light) ───────────────────────────────
-	void* m_shadowDepthTex = nullptr;  // id<MTLTexture>, Depth32Float (retained)
+	// ── Shadow map (cascaded; directional light) ────────────────────────────
+	void* m_shadowDepthTex = nullptr;  // id<MTLTexture>, Depth32Float 2D ARRAY (one layer/cascade)
 	void* m_shadowPipeline = nullptr;  // id<MTLRenderPipelineState>, depth-only
 	int   m_shadowSize     = 2048;
+	bool  m_debugShadowCascades = false; // tint fragments by cascade index (debug)
 	void  EnsureShadowResources();
-	void  EncodeShadowMap(void* cmdBuf); // renders the depth map before the scene
+	void  EncodeShadowMap(void* cmdBuf, float aspect); // CSM depth maps; aspect MUST match the scene extract
 
 	// ── HDR scene color + tonemap (PostProcessPass) ─────────────────────────
 	// The scene is rendered into an RGBA16Float target; EncodeTonemap then maps

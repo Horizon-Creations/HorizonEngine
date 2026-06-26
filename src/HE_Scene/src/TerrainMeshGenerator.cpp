@@ -63,6 +63,30 @@ namespace
     }
 }
 
+std::vector<float> computeTerrainHeightField(const TerrainComponent& tc)
+{
+    const uint32_t res       = std::clamp(tc.resolution, 2u, 1024u);
+    const uint32_t vertCount = res * res;
+    std::vector<float> heights(vertCount, 0.0f);
+    if (tc.sculptHeights.size() == static_cast<size_t>(vertCount))
+    {
+        heights = tc.sculptHeights; // sculpted data overrides everything
+    }
+    else if (tc.seed != 0)
+    {
+        for (uint32_t zi = 0; zi < res; ++zi)
+            for (uint32_t xi = 0; xi < res; ++xi)
+            {
+                const float nx = static_cast<float>(xi) / static_cast<float>(res - 1);
+                const float nz = static_cast<float>(zi) / static_cast<float>(res - 1);
+                heights[zi * res + xi] = tc.heightScale
+                    * fbm(tc.seed, nx, nz, tc.octaves, tc.frequency, tc.lacunarity, tc.gain);
+            }
+    }
+    // seed == 0 → heights remain zero → flat terrain
+    return heights;
+}
+
 StaticMeshAsset generateTerrainMesh(const TerrainComponent& tc)
 {
     const uint32_t res   = std::clamp(tc.resolution, 2u, 1024u);
@@ -73,25 +97,7 @@ StaticMeshAsset generateTerrainMesh(const TerrainComponent& tc)
 
     // Pre-compute all heights so normal calculation can sample neighbours cheaply
     const uint32_t vertCount = res * res;
-    std::vector<float> heights(vertCount);
-    if (tc.sculptHeights.size() == static_cast<size_t>(vertCount))
-    {
-        heights = tc.sculptHeights; // sculpted data overrides everything
-    }
-    else if (tc.seed != 0)
-    {
-        for (uint32_t zi = 0; zi < res; ++zi)
-        {
-            for (uint32_t xi = 0; xi < res; ++xi)
-            {
-                const float nx = static_cast<float>(xi) / static_cast<float>(res - 1);
-                const float nz = static_cast<float>(zi) / static_cast<float>(res - 1);
-                heights[zi * res + xi] = tc.heightScale
-                    * fbm(tc.seed, nx, nz, tc.octaves, tc.frequency, tc.lacunarity, tc.gain);
-            }
-        }
-    }
-    // seed == 0 → heights remain zero → flat terrain
+    const std::vector<float> heights = computeTerrainHeightField(tc);
 
     StaticMeshAsset mesh;
     mesh.type = HE::AssetType::StaticMesh;
@@ -187,4 +193,162 @@ float terrainHeightAt(const TerrainComponent& tc, float localX, float localZ)
     if (tc.seed != 0)
         return tc.heightScale * fbm(tc.seed, nx, nz, tc.octaves, tc.frequency, tc.lacunarity, tc.gain);
     return 0.f;
+}
+
+// ─── Chunked / LOD terrain ──────────────────────────────────────────────────
+namespace
+{
+    // Bilinear sample of the row-major res×res height field at normalized (u,v).
+    float sampleField(const std::vector<float>& h, uint32_t res, float u, float v)
+    {
+        u = std::clamp(u, 0.0f, 1.0f);
+        v = std::clamp(v, 0.0f, 1.0f);
+        const float fx = u * static_cast<float>(res - 1);
+        const float fz = v * static_cast<float>(res - 1);
+        const int   ix = static_cast<int>(fx);
+        const int   iz = static_cast<int>(fz);
+        const int   ix1 = std::min(ix + 1, static_cast<int>(res) - 1);
+        const int   iz1 = std::min(iz + 1, static_cast<int>(res) - 1);
+        const float tx = fx - static_cast<float>(ix);
+        const float tz = fz - static_cast<float>(iz);
+        const float h00 = h[static_cast<size_t>(iz)  * res + ix ];
+        const float h10 = h[static_cast<size_t>(iz)  * res + ix1];
+        const float h01 = h[static_cast<size_t>(iz1) * res + ix ];
+        const float h11 = h[static_cast<size_t>(iz1) * res + ix1];
+        return (h00 + (h10 - h00) * tx) + ((h01 - h00) + (h00 - h10 - h01 + h11) * tx) * tz;
+    }
+
+    // Surface normal at (u,v), from the global field at SOURCE-cell spacing so every
+    // chunk/LOD computes the same normal at a shared position → no lighting seams.
+    void sampleFieldNormal(const std::vector<float>& h, uint32_t res, float sizeX, float sizeZ,
+                           float u, float v, float& nx, float& ny, float& nz)
+    {
+        const float d  = 1.0f / static_cast<float>(res - 1);
+        const float hl = sampleField(h, res, u - d, v);
+        const float hr = sampleField(h, res, u + d, v);
+        const float hb = sampleField(h, res, u, v - d);
+        const float ht = sampleField(h, res, u, v + d);
+        const float gx = (hr - hl) / (sizeX * d * 2.0f);   // dh/dx
+        const float gz = (ht - hb) / (sizeZ * d * 2.0f);   // dh/dz
+        nx = -gx; ny = 1.0f; nz = -gz;
+        const float len = std::sqrt(nx * nx + ny * ny + nz * nz);
+        if (len > 0.0f) { nx /= len; ny /= len; nz /= len; }
+    }
+}
+
+std::vector<float> resampleHeightField(const std::vector<float>& src,
+                                       uint32_t oldRes, uint32_t newRes)
+{
+    if (oldRes < 2 || newRes < 2 || src.size() != static_cast<size_t>(oldRes) * oldRes)
+        return src;
+    std::vector<float> out(static_cast<size_t>(newRes) * newRes);
+    for (uint32_t z = 0; z < newRes; ++z)
+        for (uint32_t x = 0; x < newRes; ++x)
+        {
+            const float u = static_cast<float>(x) / static_cast<float>(newRes - 1);
+            const float v = static_cast<float>(z) / static_cast<float>(newRes - 1);
+            out[static_cast<size_t>(z) * newRes + x] = sampleField(src, oldRes, u, v);
+        }
+    return out;
+}
+
+StaticMeshAsset generateTerrainChunkMesh(
+    const std::vector<float>& heights, uint32_t srcRes,
+    float sizeX, float sizeZ,
+    float u0, float v0, float u1, float v1,
+    uint32_t vertsPerSide)
+{
+    const uint32_t N = std::max(2u, vertsPerSide);
+    const float halfX = sizeX * 0.5f;
+    const float halfZ = sizeZ * 0.5f;
+    // Chunk centre (terrain-local) — the chunk entity is positioned here, and chunk
+    // vertices are stored relative to it so per-chunk culling + distance-LOD work.
+    const float cxLocal = -halfX + ((u0 + u1) * 0.5f) * sizeX;
+    const float czLocal = -halfZ + ((v0 + v1) * 0.5f) * sizeZ;
+
+    StaticMeshAsset mesh;
+    mesh.type = HE::AssetType::StaticMesh;
+    mesh.name = "terrain_chunk";
+    mesh.path = "mem://terrain_chunk";
+
+    const size_t grid = static_cast<size_t>(N) * N;
+    mesh.vertices.reserve((grid + static_cast<size_t>(N) * 4) * 3);
+    mesh.normals .reserve((grid + static_cast<size_t>(N) * 4) * 3);
+    mesh.uvs     .reserve((grid + static_cast<size_t>(N) * 4) * 2);
+
+    float hmin =  1e30f, hmax = -1e30f;
+    for (uint32_t j = 0; j < N; ++j)
+        for (uint32_t i = 0; i < N; ++i)
+        {
+            const float u  = u0 + (u1 - u0) * static_cast<float>(i) / static_cast<float>(N - 1);
+            const float v  = v0 + (v1 - v0) * static_cast<float>(j) / static_cast<float>(N - 1);
+            const float wx = -halfX + u * sizeX;
+            const float wz = -halfZ + v * sizeZ;
+            const float hy = sampleField(heights, srcRes, u, v);
+            hmin = std::min(hmin, hy); hmax = std::max(hmax, hy);
+
+            mesh.vertices.push_back(wx - cxLocal);
+            mesh.vertices.push_back(hy);
+            mesh.vertices.push_back(wz - czLocal);
+            mesh.uvs.push_back(u);
+            mesh.uvs.push_back(v);
+            float nx, ny, nz; sampleFieldNormal(heights, srcRes, sizeX, sizeZ, u, v, nx, ny, nz);
+            mesh.normals.push_back(nx); mesh.normals.push_back(ny); mesh.normals.push_back(nz);
+        }
+
+    // Surface triangles (winding matches generateTerrainMesh → normal +Y).
+    for (uint32_t j = 0; j < N - 1; ++j)
+        for (uint32_t i = 0; i < N - 1; ++i)
+        {
+            const uint32_t bl = j * N + i;
+            const uint32_t br = j * N + (i + 1);
+            const uint32_t tl = (j + 1) * N + i;
+            const uint32_t tr = (j + 1) * N + (i + 1);
+            mesh.indices.push_back(bl); mesh.indices.push_back(tl); mesh.indices.push_back(br);
+            mesh.indices.push_back(br); mesh.indices.push_back(tl); mesh.indices.push_back(tr);
+        }
+
+    // ── Skirt: a downward wall around the perimeter hides the cracks that appear
+    // where this chunk meets a neighbour at a different LOD. Depth adapts to the
+    // chunk's slope (height span) and cell size. One-sided — the backends render
+    // terrain without backface culling, so a single winding shows from any view.
+    const float cellWorld  = std::max(sizeX * (u1 - u0), sizeZ * (v1 - v0)) / static_cast<float>(N - 1);
+    const float heightSpan = (hmax > hmin) ? (hmax - hmin) : 0.0f;
+    const float skirtDepth = std::max(cellWorld * 0.5f, heightSpan * 0.25f) + 0.01f;
+
+    // Perimeter grid-vertex indices in loop order (bottom→right→top→left).
+    std::vector<uint32_t> ring;
+    ring.reserve(static_cast<size_t>(N) * 4);
+    for (uint32_t i = 0;       i < N;     ++i) ring.push_back(0 * N + i);            // bottom
+    for (uint32_t j = 1;       j < N;     ++j) ring.push_back(j * N + (N - 1));      // right
+    for (uint32_t i = N - 1;   i-- > 0;      ) ring.push_back((N - 1) * N + i);      // top (reverse)
+    for (uint32_t j = N - 1;   j-- > 1;      ) ring.push_back(j * N + 0);            // left (reverse)
+
+    // One skirt vertex below each ring vertex (same XZ + normal + UV, y dropped).
+    const uint32_t skirtBase = static_cast<uint32_t>(mesh.vertices.size() / 3);
+    for (uint32_t idx : ring)
+    {
+        mesh.vertices.push_back(mesh.vertices[idx * 3 + 0]);
+        mesh.vertices.push_back(mesh.vertices[idx * 3 + 1] - skirtDepth);
+        mesh.vertices.push_back(mesh.vertices[idx * 3 + 2]);
+        mesh.normals.push_back(mesh.normals[idx * 3 + 0]);
+        mesh.normals.push_back(mesh.normals[idx * 3 + 1]);
+        mesh.normals.push_back(mesh.normals[idx * 3 + 2]);
+        mesh.uvs.push_back(mesh.uvs[idx * 2 + 0]);
+        mesh.uvs.push_back(mesh.uvs[idx * 2 + 1]);
+    }
+
+    const uint32_t ringN = static_cast<uint32_t>(ring.size());
+    for (uint32_t k = 0; k < ringN; ++k)
+    {
+        const uint32_t a  = ring[k];
+        const uint32_t b  = ring[(k + 1) % ringN];
+        const uint32_t sa = skirtBase + k;
+        const uint32_t sb = skirtBase + (k + 1) % ringN;
+        // One-sided wall quad (a, b, sb, sa) → 2 triangles.
+        mesh.indices.push_back(a);  mesh.indices.push_back(b);  mesh.indices.push_back(sb);
+        mesh.indices.push_back(a);  mesh.indices.push_back(sb); mesh.indices.push_back(sa);
+    }
+
+    return mesh;
 }

@@ -1,6 +1,7 @@
 #include "GameApplication.h"
 #include <Hpak/ProjectConfig.h>
 #include <Diagnostics/Logger.h>
+#include <Diagnostics/Profiler.h>
 #include <Diagnostics/GlobalState.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/SceneSerializer.h>
@@ -95,6 +96,7 @@ void GameApplication::OnRender(float deltaTime)
 		}
 		const bool gpuParticles = GlobalState::getInstance().getCustomConfigBool("GpuParticles", true) &&
 		                          renderer()->GetCapabilities().supportsGpuParticles;
+		HE_PROFILE_SCOPE_N("SceneSystemsTick");
 		SceneSystems::tick(*m_world, contentManager(), renderer(), camPos, deltaTime,
 		                   nullptr, gpuParticles);
 

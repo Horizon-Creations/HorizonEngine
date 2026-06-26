@@ -116,6 +116,15 @@ struct AppContext
 	// Quit callback — called when the user requests exit from the UI
 	std::function<void()> quit;
 
+	// Toggle a profiler benchmark capture (same path as the F9 hotkey: disables
+	// vsync on start so frame times reflect true cost, dumps + restores on stop).
+	std::function<void()> toggleProfilerCapture;
+
+	// Apply a vsync change THROUGH Application::setVSync so the app's vsync state
+	// (used by the profiler capture to save/restore) stays in sync with the editor's
+	// preference — otherwise a capture restores a stale vsync after F9.
+	std::function<void(bool)> setVSync;
+
 	// Config (mutable — UI writes changes directly)
 	EditorConfig&  editorConfig;
 	bool&          vsync;

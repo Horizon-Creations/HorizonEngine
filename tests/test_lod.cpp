@@ -122,9 +122,13 @@ TEST_CASE("LODSystem uses entity world position for distance")
     HorizonWorld world;
     auto& reg = world.registry();
 
-    // Entity at (100, 0, 0), camera at origin → distance 100
+    // Entity at world (100, 0, 0), camera at origin → distance 100. LODSystem reads
+    // the WORLD position (worldMatrix translation, as the extractor maintains it),
+    // not the local position — set it explicitly here.
     auto e = world.createEntity("Distant Mesh");
-    reg.emplace<TransformComponent>(e, TransformComponent{ .position = glm::vec3(100.f, 0.f, 0.f) });
+    TransformComponent tf{ .position = glm::vec3(100.f, 0.f, 0.f) };
+    tf.worldMatrix[3] = glm::vec4(100.f, 0.f, 0.f, 1.f);
+    reg.emplace<TransformComponent>(e, tf);
     reg.emplace<MeshComponent>(e, MeshComponent{});
 
     LODComponent lod;

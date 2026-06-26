@@ -2,7 +2,22 @@
 <project version="4">
   <component name="VcsDirectoryMappings">
     <mapping directory="" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/build/_deps/glm-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/build/_deps/joltphysics-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/build/_deps/lua-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/build/_deps/nlohmann_json-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/build/_deps/recastnavigation-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/build/_deps/sdl3-src" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/cmake-build-release/_deps/glm-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-release/_deps/joltphysics-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-release/_deps/lua-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-release/_deps/recastnavigation-src" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/cmake-build-release/_deps/sdl3-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/out/build/copilot-macos-debug/_deps/glm-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/out/build/copilot-macos-debug/_deps/joltphysics-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/out/build/copilot-macos-debug/_deps/lua-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/out/build/copilot-macos-debug/_deps/nlohmann_json-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/out/build/copilot-macos-debug/_deps/recastnavigation-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/out/build/copilot-macos-debug/_deps/sdl3-src" vcs="Git" />
   </component>
 </project>
