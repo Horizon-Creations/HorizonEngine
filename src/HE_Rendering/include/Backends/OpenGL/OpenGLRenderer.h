@@ -336,6 +336,7 @@ private:
 	int          m_uSkySunDir     = -1;
 	int          m_uSkyMoonTex    = -1;   // moon texture sampler unit
 	int          m_uSkyHasMoon    = -1;   // 1 when a moon texture is bound
+	int          m_uSkyMoonPhase  = -1;   // lunar phase 0..1
 	int          m_uSkyTime       = -1;   // time of day (cloud scroll phase)
 	int          m_uSkyCoverage   = -1;   // cloud amount (0 clear … 1 overcast)
 	int          m_uSkyClock      = -1;   // wall-clock seconds (star twinkle)
@@ -343,14 +344,34 @@ private:
 	int          m_uSkyAurora     = -1;   // aurora intensity (0 = off)
 	int          m_uSkyMilkyWay    = -1;  // milky-way (dense star band) intensity
 	int          m_uSkyNebula      = -1;  // space-nebula intensity
-	int          m_uSkyNebulaColor = -1;  // space-nebula base colour
+	int          m_uSkyNebulaColor = -1;  // space-nebula colour 1
+	int          m_uSkyNebulaColor2 = -1; // space-nebula colour 2
+	int          m_uSkyNebulaColor3 = -1; // space-nebula colour 3
+	int          m_uSkyNebulaSeed  = -1;  // space-nebula seed
+	int          m_uSkyNebulaHiFi  = -1;  // space-nebula fidelity mode
 	int          m_uSkyAuroraColor = -1;  // aurora base colour
+	int          m_uSkyAuroraColorTop = -1; // aurora upper colour
+	int          m_uSkyAuroraHeight   = -1; // aurora band elevation
+	int          m_uSkyAuroraFragment = -1; // aurora streak fragmentation
 	int          m_uSkyWind        = -1;  // cloud drift vector
 	int          m_uSkyNoise       = -1;  // 3D value-noise sampler
 	int          m_uSkyFlash       = -1;  // lightning flash brightness
 	int          m_uSkyCloudMode   = -1;  // 0 = sky-dome clouds, 1 = 3D volumetric
 	int          m_uSkyCameraPos   = -1;  // camera world position (3D-cloud parallax)
 	int          m_uSkyCloudHeight = -1;  // 3D cloud layer height above the camera
+	int          m_uSkyCloudDensity   = -1; // cloud opacity/density multiplier
+	int          m_uSkyCloudFluffiness = -1; // cloud erosion / billow strength
+	int          m_uSkyCloudTint      = -1; // cloud colour tint
+	int          m_uSkyContrails      = -1; // contrail (vapour-trail) amount
+	int          m_uSkyCirrus         = -1; // thin high cirrus cloud amount
+	int          m_uSkyCirrusSeed     = -1; // cirrus pattern seed
+	int          m_uSkyStarBright      = -1; // star field brightness multiplier
+	int          m_uSkyStarColor       = -1; // star field colour tint
+	int          m_uSkyStarSize        = -1; // star size multiplier
+	int          m_uSkyStarSizeVar     = -1; // star size variation
+	int          m_uSkyStarDensity     = -1; // star amount/density
+	int          m_uSkyStarGlow        = -1; // star glow/halo amount
+	int          m_uSkyStarTwinkle     = -1; // star twinkle amount
 	unsigned int m_noiseTex        = 0;   // GL_TEXTURE_3D, R16 value noise
 	int          m_uSkyEnv         = -1;  // image-based-ambient cubemap sampler
 	unsigned int m_skyEnvCube      = 0;   // GL_TEXTURE_CUBE_MAP, baked skyColor

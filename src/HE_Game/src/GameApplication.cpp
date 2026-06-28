@@ -107,21 +107,36 @@ void GameApplication::OnRender(float deltaTime)
 		{
 			if (env->dayNightCycle && env->autoAdvance && deltaTime > 0.0f)
 			{
-				env->timeOfDay += deltaTime / std::max(env->cycleSeconds, 1.0f);
+				const float dayFrac = deltaTime / std::max(env->cycleSeconds, 1.0f);
+					if (env->moonPhaseAuto) { env->moonPhase += dayFrac / std::max(env->moonCycleDays, 0.1f); env->moonPhase -= std::floor(env->moonPhase); }
+				env->timeOfDay += dayFrac;
 				env->timeOfDay -= std::floor(env->timeOfDay);
 			}
 			renderer()->SetEnvironmentSettings(IRenderer::EnvironmentSettings{
-				env->dayNightCycle, env->timeOfDay,
-				env->sunColor, env->sunIntensity,
-				env->moonColor, env->moonIntensity,
-				env->cloudCoverage,
-				env->fogDensity, env->fogHeightFalloff,
-				env->auroraIntensity,
-				env->milkyWayIntensity, env->nebulaIntensity,
-				env->nebulaColor, env->auroraColor,
-				env->windDirection, env->windSpeed, env->flash,
-				env->wetness, env->snowAmount,
-				env->cloudMode, env->cloudHeight});
+				.dayNightCycle = env->dayNightCycle, .timeOfDay = env->timeOfDay,
+				.sunColor = env->sunColor, .sunIntensity = env->sunIntensity,
+				.moonColor = env->moonColor, .moonIntensity = env->moonIntensity, .moonPhase = env->moonPhase,
+				.cloudCoverage = env->cloudCoverage,
+				.fogDensity = env->fogDensity, .fogHeightFalloff = env->fogHeightFalloff,
+				.auroraIntensity = env->auroraIntensity,
+				.milkyWayIntensity = env->milkyWayIntensity, .nebulaIntensity = env->nebulaIntensity,
+				.nebulaColor = env->nebulaColor, .nebulaColor2 = env->nebulaColor2,
+				.nebulaColor3 = env->nebulaColor3, .nebulaSeed = env->nebulaSeed,
+				.nebulaHighFidelity = env->nebulaHighFidelity,
+				.auroraColor = env->auroraColor,
+				.auroraColorTop = env->auroraColorTop,
+				.auroraHeight = env->auroraHeight, .auroraFragmentation = env->auroraFragmentation,
+				.windDirection = env->windDirection, .windSpeed = env->windSpeed, .flash = env->flash,
+				.wetness = env->wetness, .snowAmount = env->snowAmount,
+				.cloudMode = env->cloudMode, .cloudHeight = env->cloudHeight,
+				.cloudDensity = env->cloudDensity, .cloudFluffiness = env->cloudFluffiness,
+				.cloudTint = env->cloudTint,
+				.contrailAmount = env->contrailAmount,
+				.cirrusAmount = env->cirrusAmount, .cirrusSeed = env->cirrusSeed,
+				.starBrightness = env->starBrightness, .starColor = env->starColor,
+				.starSize = env->starSize, .starSizeVariation = env->starSizeVariation,
+				.starGlow = env->starGlow, .starTwinkle = env->starTwinkle,
+				.starDensity = env->starDensity});
 		}
 	}
 }

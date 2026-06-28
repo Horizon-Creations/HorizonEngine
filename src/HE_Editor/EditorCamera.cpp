@@ -42,6 +42,16 @@ void EditorCamera::ensureInit()
 	m_initialised = true;
 }
 
+void EditorCamera::setOrientation(const glm::vec3& pos, const glm::vec3& forwardDir)
+{
+	m_position = pos;
+	const glm::vec3 f = glm::normalize(forwardDir);
+	m_pitch = std::asin(glm::clamp(f.y, -1.0f, 1.0f));
+	m_yaw   = std::atan2(f.x, -f.z);
+	m_pivotDistance = std::max(kMinPivot, m_pivotDistance);
+	m_initialised = true;
+}
+
 void EditorCamera::update(const Input& in)
 {
 	ensureInit();
