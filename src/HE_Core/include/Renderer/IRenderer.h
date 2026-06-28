@@ -173,6 +173,7 @@ public:
         float     sunIntensity  = 2.2f;
         glm::vec3 moonColor     = glm::vec3(0.55f, 0.65f, 0.95f); // cool moonlight
         float     moonIntensity = 0.66f;
+        float     moonPhase     = 0.5f;  // 0/1 new … 0.5 full
         // Procedural cloud amount (0 = clear sky … 1 = full overcast). At full
         // overcast the sun/moon directional light is switched off (optimisation)
         // and replaced by a soft scattered ambient fill.
@@ -191,9 +192,16 @@ public:
         // base colours for the nebula and the aurora ribbons. Stars + nebula
         // rotate with time-of-day to mimic Earth's rotation.
         float     milkyWayIntensity = 0.6f;
-        float     nebulaIntensity   = 0.5f;
+        float     nebulaIntensity   = 0.3f;
         glm::vec3 nebulaColor       = glm::vec3(0.42f, 0.45f, 0.92f);
+        glm::vec3 nebulaColor2      = glm::vec3(0.85f, 0.40f, 1.00f);
+        glm::vec3 nebulaColor3      = glm::vec3(1.00f, 0.52f, 0.72f);
+        float     nebulaSeed        = 0.0f;
+        bool      nebulaHighFidelity = true;
         glm::vec3 auroraColor       = glm::vec3(0.25f, 0.95f, 0.50f);
+        glm::vec3 auroraColorTop     = glm::vec3(0.62f, 0.26f, 0.95f);
+        float     auroraHeight        = 0.18f;
+        float     auroraFragmentation = 0.4f;
         // Cloud wind: the compass direction the clouds drift toward (degrees, 0 =
         // toward -Z/north, increasing clockwise) and a speed multiplier. The
         // backend turns these into a horizontal drift vector for the cloud noise.
@@ -211,6 +219,24 @@ public:
         // 3D layer's height above the camera in world units. Other backends ignore these.
         int       cloudMode   = 0;
         float     cloudHeight = 200.0f;
+        // Cloud appearance (OpenGL 3D path): density scales opacity, fluffiness
+        // drives the cauliflower erosion, tint colours the clouds.
+        float     cloudDensity    = 1.0f;
+        float     cloudFluffiness = 0.6f;
+        glm::vec3 cloudTint       = glm::vec3(1.0f);
+        // Contrails: scattered vapour-trail lines that fill an empty daytime sky.
+        float     contrailAmount  = 0.0f;
+        // Thin high cirrus clouds: amount = cover/brightness, seed re-rolls the pattern.
+        float     cirrusAmount    = 0.0f;
+        float     cirrusSeed      = 0.0f;
+        // Star field brightness + colour tint, overall size and size variation.
+        float     starBrightness    = 1.0f;
+        glm::vec3 starColor         = glm::vec3(1.0f);
+        float     starSize          = 1.0f;
+        float     starSizeVariation = 0.5f;
+        float     starGlow          = 1.0f;
+        float     starTwinkle       = 0.6f;
+        float     starDensity       = 0.5f;
     };
     virtual void SetEnvironmentSettings(const EnvironmentSettings& e) { m_environment = e; }
     const EnvironmentSettings& GetEnvironment() const { return m_environment; }

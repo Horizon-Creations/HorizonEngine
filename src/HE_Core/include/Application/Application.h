@@ -96,6 +96,11 @@ namespace HE
 		void setWindowSize(uint32_t width, uint32_t height);
 		void setVSync(bool enabled);
 		void setWindowMode(WindowMode mode);
+		// Optional frame-rate ceiling applied only when VSync is OFF (0 = unlimited).
+		// Lets the loop be paced without VSync (e.g. to smooth the editor's mouse-look or
+		// cut needless GPU load) while defaulting to fully uncapped.
+		void  setMaxFps(float fps) { m_maxFps = fps > 0.0f ? fps : 0.0f; }
+		float maxFps() const       { return m_maxFps; }
 
 		// ── Multi-window API ──────────────────────────────────────────────
 		// Open a new secondary window.  The renderer's AttachWindow() is called
@@ -117,6 +122,7 @@ namespace HE
 		bool                       m_running  = false;
 		bool                       m_vsyncEnabled = true;  // current vsync state
 		bool                       m_savedVsync   = true;  // vsync to restore after a capture
+		float                      m_maxFps       = 0.0f;  // VSync-off frame cap (0 = unlimited)
 		std::unique_ptr<Window>    m_window;
 		std::unique_ptr<IRenderer> m_renderer;
 		Input                      m_input;

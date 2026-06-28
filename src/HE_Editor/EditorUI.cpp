@@ -37,6 +37,11 @@ std::string getRHIName(HE::RendererBackend backend);
 
 namespace
 {
+	// Last viewport RENDER resolution in framebuffer pixels (HiDPI-aware), captured when
+	// the viewport panel is drawn and shown in the footer beside the FPS counter.
+	int s_viewportPxW = 0;
+	int s_viewportPxH = 0;
+
 	// The async SDL file slot (pendingFileReady/Result) is shared across project
 	// and scene operations; this records which one is currently in flight so the
 	// single result handler can dispatch correctly.
@@ -253,6 +258,20 @@ static void DrawEngineSettings(AppContext& ctx, SettingsMode mode)
 		}
 	});
 	row("vsync", "Renderer", [&]{ if (ImGui::Checkbox("VSync", &ctx.vsync)) ApplyVSync(ctx); });
+	row("maxfps", "Renderer", [&]{
+		// VSync-off frame cap. 0 = unlimited (default — full FPS). A cap paces the loop so
+		// the high-FPS mouse-look stays smooth and idle GPU load drops; ignored with VSync on.
+		ImGui::BeginDisabled(ctx.vsync);
+		int capped = static_cast<int>(cfg.MaxFps);
+		ImGui::SetNextItemWidth(220.0f);
+		if (ImGui::SliderInt("Max FPS (VSync off)", &capped, 0, 1000,
+		                     capped <= 0 ? "Unlimited" : "%d FPS"))
+		{
+			cfg.MaxFps = static_cast<float>(capped < 0 ? 0 : capped);
+			if (ctx.setMaxFps) ctx.setMaxFps(cfg.MaxFps);
+		}
+		ImGui::EndDisabled();
+	});
 
 	row("bloom", "Post-processing", [&]{
 		ImGui::Checkbox("Bloom", &cfg.BloomEnabled);
@@ -1873,9 +1892,13 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 			ImGui::PopStyleColor(3);
 		}
 
-		// Right — FPS (drawn before SameLine so GetWindowWidth() is stable)
-		const std::string fpsText = "FPS: " + std::to_string(static_cast<int>(ctx.smoothFps));
-		const float       fpsW   = ImGui::CalcTextSize(fpsText.c_str()).x;
+		// Right — render resolution + FPS (drawn before SameLine so GetWindowWidth() is stable).
+		// The resolution is the actual viewport framebuffer size the scene renders at.
+		std::string fpsText = "FPS: " + std::to_string(static_cast<int>(ctx.smoothFps));
+		if (s_viewportPxW > 0 && s_viewportPxH > 0)
+			fpsText = std::to_string(s_viewportPxW) + "x" + std::to_string(s_viewportPxH)
+			        + "   " + fpsText;
+		const float fpsW = ImGui::CalcTextSize(fpsText.c_str()).x;
 		ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - ImGui::GetStyle().WindowPadding.x);
 		ImGui::Text("%s", fpsText.c_str());
 
@@ -2119,9 +2142,11 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 		{
 			// Render at framebuffer resolution (HiDPI aware)
 			const ImVec2 fbScale = ImGui::GetIO().DisplayFramebufferScale;
+			s_viewportPxW = static_cast<int>(avail.x * fbScale.x);
+			s_viewportPxH = static_cast<int>(avail.y * fbScale.y);
 			ctx.renderer->SetViewportSize(
-				static_cast<uint32_t>(avail.x * fbScale.x),
-				static_cast<uint32_t>(avail.y * fbScale.y));
+				static_cast<uint32_t>(s_viewportPxW),
+				static_cast<uint32_t>(s_viewportPxH));
 
 			if (void* tex = ctx.renderer->GetViewportTexture())
 			{
@@ -3944,6 +3969,27 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			ImGui::ColorEdit3("Moon Color", &env->moonColor.x, ImGuiColorEditFlags_NoInputs); trackEdit();
 			ImGui::SliderFloat("Moon Brightness", &env->moonIntensity, 0.0f, 10.0f, "%.2f"); trackEdit();
 
+			ImGui::SeparatorText("Moon Phase");
+			{
+				float mp = env->moonPhase;
+				const char* nm = (mp < 0.03f || mp > 0.97f) ? "New Moon" :
+				                 mp < 0.22f ? "Waxing Crescent" :
+				                 mp < 0.28f ? "First Quarter" :
+				                 mp < 0.47f ? "Waxing Gibbous" :
+				                 mp < 0.53f ? "Full Moon" :
+				                 mp < 0.72f ? "Waning Gibbous" :
+				                 mp < 0.78f ? "Last Quarter" : "Waning Crescent";
+				ImGui::SetNextItemWidth(-1.0f);
+				if (ImGui::SliderFloat("##moonphase", &env->moonPhase, 0.0f, 1.0f, "Phase: %.3f")) trackEdit();
+				ImGui::TextDisabled("%s", nm);
+				if (ImGui::Checkbox("Auto Lunar Cycle", &env->moonPhaseAuto)) trackEdit();
+				ImGui::SameLine(); ImGui::TextDisabled("(needs Auto-Advance)");
+				ImGui::BeginDisabled(!env->moonPhaseAuto);
+				ImGui::SetNextItemWidth(-1.0f);
+				if (ImGui::SliderFloat("##mooncycledays", &env->moonCycleDays, 1.0f, 60.0f, "Lunar cycle: %.1f days")) trackEdit();
+				ImGui::EndDisabled();
+			}
+
 			// These are always editable. A Weather preset (below) sets a whole set of
 			// these values when applied / transitioning; otherwise they're yours to move.
 			ImGui::SeparatorText("Clouds");
@@ -3963,13 +4009,32 @@ void EditorUI::RenderInspector(AppContext& ctx)
 					ImGui::SetNextItemWidth(-1.0f);
 					ImGui::SliderFloat("##cloudheight", &env->cloudHeight, 20.0f, 2000.0f,
 					                   "3D height: %.0f"); trackEdit();
-					ImGui::TextDisabled("3D clouds parallax as you move. Tune the height to your world's scale (OpenGL only).");
+					ImGui::TextDisabled("Lifts the cloud band higher in the sky (clear sky opens toward the\nhorizon); the clouds keep the same size & shape (OpenGL only).");
 				}
 			}
+			// Cloud appearance: tweak the look without re-rolling the pattern.
+			ImGui::SetNextItemWidth(-1.0f);
+			ImGui::SliderFloat("##clouddensity", &env->cloudDensity, 0.2f, 2.5f, "Density: %.2f"); trackEdit();
+			ImGui::SetNextItemWidth(-1.0f);
+			ImGui::SliderFloat("##cloudfluffy", &env->cloudFluffiness, 0.0f, 1.0f, "Fluffiness: %.2f"); trackEdit();
+			ImGui::ColorEdit3("Cloud Tint", &env->cloudTint.x, ImGuiColorEditFlags_NoInputs); trackEdit();
+			ImGui::TextDisabled("Density thickens, fluffiness breaks the bodies into puffy cauliflower lumps.");
 			ImGui::SetNextItemWidth(-1.0f);
 			ImGui::SliderFloat("##winddir", &env->windDirection, 0.0f, 360.0f, "Wind direction: %.0f\xc2\xb0"); trackEdit();
 			ImGui::SetNextItemWidth(-1.0f);
 			ImGui::SliderFloat("##windspeed", &env->windSpeed, 0.0f, 4.0f, "Wind speed: %.2f"); trackEdit();
+
+			ImGui::SeparatorText("Contrails & Cirrus");
+			ImGui::SetNextItemWidth(-1.0f);
+			ImGui::SliderFloat("##contrails", &env->contrailAmount, 0.0f, 1.0f, "Contrails: %.2f"); trackEdit();
+			ImGui::TextDisabled("Scattered vapour-trail lines to fill a clear daytime sky; fade as clouds build.");
+			ImGui::SetNextItemWidth(-1.0f);
+			ImGui::SliderFloat("##cirrus", &env->cirrusAmount, 0.0f, 1.0f, "Cirrus: %.2f"); trackEdit();
+			ImGui::BeginDisabled(env->cirrusAmount <= 0.0f);
+			ImGui::SetNextItemWidth(-1.0f);
+			ImGui::SliderFloat("##cirrusseed", &env->cirrusSeed, 0.0f, 50.0f, "Cirrus seed: %.1f"); trackEdit();
+			ImGui::EndDisabled();
+			ImGui::TextDisabled("Thin high wispy clouds. Intensity = cover, seed re-rolls the pattern (OpenGL).");
 
 			ImGui::SeparatorText("Atmospheric Fog");
 			ImGui::SetNextItemWidth(-1.0f);
@@ -3989,13 +4054,49 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			ImGui::SliderFloat("##wetness", &env->wetness, 0.0f, 1.0f, "Wetness: %.2f"); trackEdit();
 			ImGui::TextDisabled("Rain/snow spawn particles; wetness darkens & snow whitens the ground.");
 
-			ImGui::SeparatorText("Night Sky");
+			ImGui::SeparatorText("Stars & Milky Way");
 			ImGui::SetNextItemWidth(-1.0f);
-			ImGui::SliderFloat("##nebula", &env->nebulaIntensity, 0.0f, 1.0f, "Space Nebula: %.2f"); trackEdit();
-			ImGui::ColorEdit3("Nebula Color", &env->nebulaColor.x); trackEdit();
+			ImGui::SliderFloat("##starbright", &env->starBrightness, 0.0f, 3.0f, "Star Brightness: %.2f"); trackEdit();
+			ImGui::ColorEdit3("Star Color", &env->starColor.x, ImGuiColorEditFlags_NoInputs); trackEdit();
 			ImGui::SetNextItemWidth(-1.0f);
-			ImGui::SliderFloat("##aurora", &env->auroraIntensity, 0.0f, 1.0f, "Aurora: %.2f"); trackEdit();
-			ImGui::ColorEdit3("Aurora Color", &env->auroraColor.x); trackEdit();
+			ImGui::SliderFloat("##stardensity", &env->starDensity, 0.0f, 1.0f, "Star Amount: %.2f"); trackEdit();
+			ImGui::SetNextItemWidth(-1.0f);
+			ImGui::SliderFloat("##starsize", &env->starSize, 0.3f, 2.5f, "Star Size: %.2f"); trackEdit();
+			ImGui::SetNextItemWidth(-1.0f);
+			ImGui::SliderFloat("##starsizevar", &env->starSizeVariation, 0.0f, 1.0f, "Size Variation: %.2f"); trackEdit();
+			ImGui::SetNextItemWidth(-1.0f);
+			ImGui::SliderFloat("##starglow", &env->starGlow, 0.0f, 3.0f, "Star Glow: %.2f"); trackEdit();
+			ImGui::SetNextItemWidth(-1.0f);
+			ImGui::SliderFloat("##startwinkle", &env->starTwinkle, 0.0f, 1.0f, "Twinkle: %.2f"); trackEdit();
+			ImGui::SetNextItemWidth(-1.0f);
+			ImGui::SliderFloat("##milkyway", &env->milkyWayIntensity, 0.0f, 1.0f, "Milky Way: %.2f"); trackEdit();
+
+			ImGui::SeparatorText("Nebula");
+			ImGui::SetNextItemWidth(-1.0f);
+			ImGui::SliderFloat("##nebula", &env->nebulaIntensity, 0.0f, 1.0f, "Intensity: %.2f"); trackEdit();
+			{
+				int nebMode = env->nebulaHighFidelity ? 0 : 1;
+				ImGui::SetNextItemWidth(-1.0f);
+				if (ImGui::Combo("##nebulafidelity", &nebMode, "High Fidelity (max detail)\0High Performance (lighter)\0"))
+				{ env->nebulaHighFidelity = (nebMode == 0); trackEdit(); }
+			}
+			ImGui::SetNextItemWidth(-1.0f);
+			ImGui::SliderFloat("##nebulaseed", &env->nebulaSeed, 0.0f, 50.0f, "Seed: %.1f"); trackEdit();
+			ImGui::ColorEdit3("Nebula Color 1", &env->nebulaColor.x,  ImGuiColorEditFlags_NoInputs); trackEdit();
+			ImGui::ColorEdit3("Nebula Color 2", &env->nebulaColor2.x, ImGuiColorEditFlags_NoInputs); trackEdit();
+			ImGui::ColorEdit3("Nebula Color 3", &env->nebulaColor3.x, ImGuiColorEditFlags_NoInputs); trackEdit();
+
+			ImGui::SeparatorText("Aurora");
+			ImGui::SetNextItemWidth(-1.0f);
+			ImGui::SliderFloat("##aurora", &env->auroraIntensity, 0.0f, 1.0f, "Intensity: %.2f"); trackEdit();
+			ImGui::ColorEdit3("Color (base)", &env->auroraColor.x, ImGuiColorEditFlags_NoInputs); trackEdit();
+			ImGui::ColorEdit3("Color (top)",  &env->auroraColorTop.x, ImGuiColorEditFlags_NoInputs); trackEdit();
+			ImGui::BeginDisabled(env->auroraIntensity <= 0.0f);
+			ImGui::SetNextItemWidth(-1.0f);
+			ImGui::SliderFloat("##auroraheight", &env->auroraHeight, 0.0f, 1.0f, "Height: %.2f"); trackEdit();
+			ImGui::SetNextItemWidth(-1.0f);
+			ImGui::SliderFloat("##aurorafrag", &env->auroraFragmentation, 0.0f, 1.0f, "Fragmentation: %.2f"); trackEdit();
+			ImGui::EndDisabled();
 			ImGui::TextDisabled("Stars, Milky Way & nebula turn with the day; aurora drifts.");
 		}
 		ImGui::Separator();

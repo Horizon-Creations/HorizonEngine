@@ -246,6 +246,19 @@ namespace HE
 				            ("Profiler dump written: " + dumpPath).c_str());
 
 			HE_PROFILE_FRAME();
+
+			// Optional frame-rate ceiling, applied ONLY when VSync is OFF and the user has
+			// set a limit (m_maxFps > 0). Default is 0 = UNLIMITED, so the loop runs fully
+			// uncapped (no added latency, full FPS) unless the user opts into a cap — e.g.
+			// to smooth the editor's high-FPS mouse-look or cut idle GPU load. Skipped while
+			// the profiler benchmarks (it wants a true uncapped capture).
+			if (m_maxFps > 0.0f && !m_vsyncEnabled && !profiler.isRecording())
+			{
+				const Uint64 frameCapNs = static_cast<Uint64>(1.0e9 / m_maxFps);
+				const Uint64 elapsed = SDL_GetTicksNS() - nowTick;
+				if (elapsed < frameCapNs)
+					SDL_DelayNS(frameCapNs - elapsed);
+			}
 		}
 
 		Logger::Log(Logger::LogLevel::Info, "Main loop exited — shutting down");

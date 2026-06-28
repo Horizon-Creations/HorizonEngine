@@ -35,6 +35,10 @@ public:
 	// Frame a bounding sphere keeping the current orientation.
 	void focusOn(const glm::vec3& center, float radius);
 
+	// Place the camera at a world position looking along a forward direction
+	// (used by headless captures / scripted views to aim the camera deterministically).
+	void setOrientation(const glm::vec3& pos, const glm::vec3& forwardDir);
+
 	glm::mat4 viewMatrix()  const;
 	glm::vec3 position()    const { return m_position; }
 	float     fovDegrees()  const { return m_fov; }

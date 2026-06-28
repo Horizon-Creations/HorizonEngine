@@ -50,6 +50,7 @@ struct EditorConfig
 	// Preferences (Edit > Preferences)
 	float UiFontScale       = 1.0f;   // global editor font scale (style.FontScaleMain)
 	float EditorCameraSpeed = 6.0f;   // editor fly-camera speed, world units/second
+	float MaxFps            = 0.0f;   // VSync-off frame cap (0 = unlimited); paces mouse-look
 
 	// Post-process: bloom (pushed to the renderer each frame via SetBloomSettings)
 	bool  BloomEnabled   = true;
@@ -124,6 +125,8 @@ struct AppContext
 	// (used by the profiler capture to save/restore) stays in sync with the editor's
 	// preference — otherwise a capture restores a stale vsync after F9.
 	std::function<void(bool)> setVSync;
+	// Apply a VSync-off frame cap through Application::setMaxFps (0 = unlimited).
+	std::function<void(float)> setMaxFps;
 
 	// Config (mutable — UI writes changes directly)
 	EditorConfig&  editorConfig;

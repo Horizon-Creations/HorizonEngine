@@ -20,6 +20,10 @@ struct EnvironmentComponent
     float     sunIntensity  = 2.2f;
     glm::vec3 moonColor     = glm::vec3(0.55f, 0.65f, 0.95f);
     float     moonIntensity = 0.66f;
+    // Lunar phase: 0/1 = new, 0.25 = first quarter, 0.5 = full, 0.75 = last quarter.
+    float     moonPhase     = 0.5f;   // full by default
+    bool      moonPhaseAuto = true;   // advance the phase with the day-night cycle
+    float     moonCycleDays = 29.5f;  // days (day-night cycles) per full lunar cycle
 
     // Procedural clouds: coverage 0 = clear … 1 = overcast, plus wind drift.
     float cloudCoverage = 0.5f;
@@ -32,6 +36,20 @@ struct EnvironmentComponent
     // it to your world's scale (bigger world = larger value).
     int   cloudMode   = 0;
     float cloudHeight = 200.0f;
+    // Cloud appearance knobs (so the look can be tweaked without re-rolling the
+    // pattern): density scales opacity/thickness, fluffiness drives the cauliflower
+    // erosion (higher = puffier, more broken-up billows), tint colours the clouds.
+    float     cloudDensity    = 1.0f;   // 0.2 wispy … 2 thick/dense
+    float     cloudFluffiness = 0.6f;   // 0 smooth sheet … 1 very billowy
+    glm::vec3 cloudTint       = glm::vec3(1.0f); // multiplied into the cloud colour
+
+    // Contrails (Kondensstreifen): scattered vapour-trail lines that fill an otherwise
+    // empty daytime sky. 0 = none. Independent of the cloud layer.
+    float     contrailAmount = 0.0f;
+    // Thin high cirrus clouds: wispy fibrous streaks high in the sky. amount = how much
+    // cover/brightness, seed re-rolls the pattern. 0 = none.
+    float     cirrusAmount = 0.0f;
+    float     cirrusSeed   = 0.0f;
 
     // Atmospheric fog / aerial perspective (0 density = off; height falloff pools
     // the fog near the ground).
@@ -54,7 +72,29 @@ struct EnvironmentComponent
     // Night sky: aurora ribbons, Milky-Way band and the space nebula.
     float     auroraIntensity   = 0.0f;
     float     milkyWayIntensity = 0.6f;
-    float     nebulaIntensity   = 0.5f;
-    glm::vec3 nebulaColor       = glm::vec3(0.42f, 0.45f, 0.92f);
-    glm::vec3 auroraColor       = glm::vec3(0.25f, 0.95f, 0.50f);
+    float     nebulaIntensity   = 0.3f;
+    glm::vec3 nebulaColor       = glm::vec3(0.42f, 0.45f, 0.92f); // colour 1 (cool regions)
+    glm::vec3 nebulaColor2      = glm::vec3(0.85f, 0.40f, 1.00f); // colour 2 (mid regions)
+    glm::vec3 nebulaColor3      = glm::vec3(1.00f, 0.52f, 0.72f); // colour 3 (warm regions)
+    float     nebulaSeed        = 0.0f;                           // randomisation seed
+    bool      nebulaHighFidelity = true;                          // true = sharp detailed forms, false = cheap
+    glm::vec3 auroraColor       = glm::vec3(0.25f, 0.95f, 0.50f); // lower/base colour (green)
+    glm::vec3 auroraColorTop     = glm::vec3(0.62f, 0.26f, 0.95f); // upper colour (purple)
+    // Aurora band elevation (0 low/horizon … 1 high) and fragmentation
+    // (0 = clean continuous band … 1 = broken into patches).
+    float     auroraHeight        = 0.18f;
+    float     auroraFragmentation = 0.4f;
+    // Star field brightness multiplier + overall colour tint (per-star warm/cool
+    // variation is preserved; this tints/scales the whole field). starSize scales the
+    // overall star size; starSizeVariation controls how much sizes differ (0 = uniform,
+    // 1 = wide small→large spread).
+    float     starBrightness    = 1.0f;
+    glm::vec3 starColor         = glm::vec3(1.0f);
+    float     starSize          = 1.0f;
+    float     starSizeVariation = 0.5f;
+    // Glow halo around stars (0 = crisp points only, higher = more glow) and twinkle
+    // amount (0 = steady, 1 = strong blinking).
+    float     starGlow    = 1.0f;
+    float     starTwinkle = 0.6f;
+    float     starDensity = 0.5f;   // amount of stars (0 = few … 1 = many)
 };

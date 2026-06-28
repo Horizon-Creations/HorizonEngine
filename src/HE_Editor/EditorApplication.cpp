@@ -598,6 +598,7 @@ void EditorApplication::OnInit()
 	m_editorConfig.CbTreeWidth                 = globalstate.getCustomConfigFloat("CbTreeWidth", m_editorConfig.CbTreeWidth);
 	m_editorConfig.UiFontScale                 = globalstate.getCustomConfigFloat("UiFontScale",       m_editorConfig.UiFontScale);
 	m_editorConfig.EditorCameraSpeed           = globalstate.getCustomConfigFloat("EditorCameraSpeed", m_editorConfig.EditorCameraSpeed);
+	m_editorConfig.MaxFps                      = globalstate.getCustomConfigFloat("MaxFps",            m_editorConfig.MaxFps);
 	m_editorConfig.BloomEnabled                = globalstate.getCustomConfigBool("BloomEnabled",        m_editorConfig.BloomEnabled);
 	m_editorConfig.BloomThreshold              = globalstate.getCustomConfigFloat("BloomThreshold",     m_editorConfig.BloomThreshold);
 	m_editorConfig.BloomIntensity              = globalstate.getCustomConfigFloat("BloomIntensity",     m_editorConfig.BloomIntensity);
@@ -608,6 +609,7 @@ void EditorApplication::OnInit()
 	m_editorConfig.GpuParticles                = globalstate.getCustomConfigBool("GpuParticles",        m_editorConfig.GpuParticles);
 	m_editorConfig.QuickSettingsFavorites      = globalstate.getCustomConfigString("QuickSettingsFavorites", m_editorConfig.QuickSettingsFavorites);
 	m_editorCamera.setFlySpeed(m_editorConfig.EditorCameraSpeed);
+	setMaxFps(m_editorConfig.MaxFps);   // VSync-off frame cap (0 = unlimited)
 
 #ifdef HE_IMGUI_ENABLED
 	// ── Load HC_Logo ──────────────────────────────────────────────────────────
@@ -1186,6 +1188,51 @@ void EditorApplication::dumpFrameHeadless()
 	r->SetSSAOSettings(IRenderer::SSAOSettings{
 		m_editorConfig.SSAOEnabled, m_editorConfig.SSAORadius, m_editorConfig.SSAOIntensity,
 		m_editorConfig.SSAOMethod});
+
+	// ── Sky-test capture (HE_DUMP_SKYTEST): aim the camera up at the sky and override
+	// the scene environment so a headless dump exercises the sky features (stars /
+	// nebula / 3D clouds / contrails) that the default down-looking editor camera and
+	// daytime env never show. Env knobs are read from optional vars so several scenes
+	// can be captured without rebuilding. No-op unless HE_DUMP_SKYTEST is set.
+	if (const char* st = std::getenv("HE_DUMP_SKYTEST"); st && *st && m_editorWorld)
+	{
+		auto envF = [](const char* k, float d){ const char* v = std::getenv(k); return v && *v ? std::atof(v) : d; };
+		if (auto* e = m_editorWorld->registry().try_get<EnvironmentComponent>(m_editorWorld->rootEntity()))
+		{
+			e->dayNightCycle  = true;
+			e->timeOfDay      = static_cast<float>(envF("HE_DUMP_TOD", 0.0f));        // 0 = midnight
+			e->cloudMode      = static_cast<int>(envF("HE_DUMP_CLOUDMODE", 1.0f));
+			e->cloudCoverage  = static_cast<float>(envF("HE_DUMP_COVERAGE", 0.5f));
+			e->contrailAmount = static_cast<float>(envF("HE_DUMP_CONTRAILS", 0.0f));
+			e->cirrusAmount   = static_cast<float>(envF("HE_DUMP_CIRRUS", 0.0f));
+			e->cirrusSeed     = static_cast<float>(envF("HE_DUMP_CIRRUSSEED", 0.0f));
+			e->cloudHeight    = static_cast<float>(envF("HE_DUMP_CLOUDHEIGHT", 200.0f));
+			e->nebulaIntensity   = static_cast<float>(envF("HE_DUMP_NEBULA",   e->nebulaIntensity));
+			e->nebulaSeed        = static_cast<float>(envF("HE_DUMP_NEBSEED",  e->nebulaSeed));
+			e->nebulaHighFidelity = envF("HE_DUMP_NEBHIFI", e->nebulaHighFidelity ? 1.0 : 0.0) > 0.5;
+			e->moonPhase         = static_cast<float>(envF("HE_DUMP_MOONPHASE", e->moonPhase));
+			e->milkyWayIntensity = static_cast<float>(envF("HE_DUMP_MILKYWAY", e->milkyWayIntensity));
+			e->starSizeVariation = static_cast<float>(envF("HE_DUMP_STARVAR",  e->starSizeVariation));
+			e->starDensity       = static_cast<float>(envF("HE_DUMP_STARDENS", e->starDensity));
+			e->starSize          = static_cast<float>(envF("HE_DUMP_STARSIZE", e->starSize));
+			e->starGlow          = static_cast<float>(envF("HE_DUMP_STARGLOW", e->starGlow));
+			e->starTwinkle       = static_cast<float>(envF("HE_DUMP_STARTWINKLE", e->starTwinkle));
+			e->auroraIntensity   = static_cast<float>(envF("HE_DUMP_AURORA", e->auroraIntensity));
+			e->auroraHeight        = static_cast<float>(envF("HE_DUMP_AURHEIGHT", e->auroraHeight));
+			e->auroraFragmentation = static_cast<float>(envF("HE_DUMP_AURFRAG",   e->auroraFragmentation));
+		}
+		// Look slightly up toward the sky from a low vantage. HE_DUMP_YAW rotates the
+		// heading (0 = toward -Z, 180 = toward +Z) so e.g. the aurora band can be framed.
+		const float pitch = glm::radians(static_cast<float>(envF("HE_DUMP_PITCH", 22.0f)));
+		const float yaw   = glm::radians(static_cast<float>(envF("HE_DUMP_YAW", 0.0f)));
+		const glm::vec3 fwd(std::sin(yaw) * std::cos(pitch), std::sin(pitch),
+		                    -std::cos(yaw) * std::cos(pitch));
+		const glm::vec3 camPos(static_cast<float>(envF("HE_DUMP_CAMX", 0.0f)), 2.0f,
+		                       static_cast<float>(envF("HE_DUMP_CAMZ", 0.0f)));
+		m_editorCamera.setOrientation(camPos, fwd);
+		r->SetEditorCamera(m_editorCamera.makeOverride());
+	}
+
 	pushEnvironment(0.0f); // scene environment from the World entity (no auto-advance)
 	r->SetViewportSize(1280, 720);
 	for (int i = 0; i < 3; ++i)
@@ -1223,6 +1270,7 @@ AppContext EditorApplication::makeContext()
 		.quit                = [this]{ Quit(); },
 		.toggleProfilerCapture = [this]{ toggleProfilerCapture(); },
 		.setVSync              = [this](bool v){ setVSync(v); m_vsync = v; },
+		.setMaxFps             = [this](float f){ setMaxFps(f); m_editorConfig.MaxFps = f; },
 		.editorConfig        = m_editorConfig,
 		.vsync               = m_vsync,
 		.backendName         = m_backend_name,
@@ -1408,22 +1456,43 @@ void EditorApplication::pushEnvironment(float dt)
 	// Auto-advance the day-night cycle (time flows with real time).
 	if (env->dayNightCycle && env->autoAdvance && dt > 0.0f)
 	{
-		env->timeOfDay += dt / std::max(env->cycleSeconds, 1.0f);
+		float dayFrac = dt / std::max(env->cycleSeconds, 1.0f);
+		env->timeOfDay += dayFrac;
 		env->timeOfDay -= std::floor(env->timeOfDay); // wrap to [0,1)
+		// Lunar cycle: the moon phase advances one full cycle per moonCycleDays day-night cycles.
+		if (env->moonPhaseAuto)
+		{
+			env->moonPhase += dayFrac / std::max(env->moonCycleDays, 0.1f);
+			env->moonPhase -= std::floor(env->moonPhase);
+		}
 	}
 
 	renderer()->SetEnvironmentSettings(IRenderer::EnvironmentSettings{
-		env->dayNightCycle, env->timeOfDay,
-		env->sunColor, env->sunIntensity,
-		env->moonColor, env->moonIntensity,
-		env->cloudCoverage,
-		env->fogDensity, env->fogHeightFalloff,
-		env->auroraIntensity,
-		env->milkyWayIntensity, env->nebulaIntensity,
-		env->nebulaColor, env->auroraColor,
-		env->windDirection, env->windSpeed, env->flash,
-		env->wetness, env->snowAmount,
-		env->cloudMode, env->cloudHeight});
+		.dayNightCycle = env->dayNightCycle, .timeOfDay = env->timeOfDay,
+		.sunColor = env->sunColor, .sunIntensity = env->sunIntensity,
+		.moonColor = env->moonColor, .moonIntensity = env->moonIntensity,
+		.moonPhase = env->moonPhase,
+		.cloudCoverage = env->cloudCoverage,
+		.fogDensity = env->fogDensity, .fogHeightFalloff = env->fogHeightFalloff,
+		.auroraIntensity = env->auroraIntensity,
+		.milkyWayIntensity = env->milkyWayIntensity, .nebulaIntensity = env->nebulaIntensity,
+		.nebulaColor = env->nebulaColor, .nebulaColor2 = env->nebulaColor2,
+		.nebulaColor3 = env->nebulaColor3, .nebulaSeed = env->nebulaSeed,
+		.nebulaHighFidelity = env->nebulaHighFidelity,
+		.auroraColor = env->auroraColor,
+		.auroraColorTop = env->auroraColorTop,
+		.auroraHeight = env->auroraHeight, .auroraFragmentation = env->auroraFragmentation,
+		.windDirection = env->windDirection, .windSpeed = env->windSpeed, .flash = env->flash,
+		.wetness = env->wetness, .snowAmount = env->snowAmount,
+		.cloudMode = env->cloudMode, .cloudHeight = env->cloudHeight,
+		.cloudDensity = env->cloudDensity, .cloudFluffiness = env->cloudFluffiness,
+		.cloudTint = env->cloudTint,
+		.contrailAmount = env->contrailAmount,
+		.cirrusAmount = env->cirrusAmount, .cirrusSeed = env->cirrusSeed,
+		.starBrightness = env->starBrightness, .starColor = env->starColor,
+		.starSize = env->starSize, .starSizeVariation = env->starSizeVariation,
+		.starGlow = env->starGlow, .starTwinkle = env->starTwinkle,
+		.starDensity = env->starDensity});
 }
 
 void EditorApplication::openScene(const std::string& path)
@@ -1555,6 +1624,7 @@ void EditorApplication::OnShutdown()
 	globalstate.setCustomConfigEntry("CbTreeWidth",                 m_editorConfig.CbTreeWidth);
 	globalstate.setCustomConfigEntry("UiFontScale",                m_editorConfig.UiFontScale);
 	globalstate.setCustomConfigEntry("EditorCameraSpeed",          m_editorConfig.EditorCameraSpeed);
+	globalstate.setCustomConfigEntry("MaxFps",                     m_editorConfig.MaxFps);
 	globalstate.setCustomConfigEntry("BloomEnabled",               m_editorConfig.BloomEnabled);
 	globalstate.setCustomConfigEntry("BloomThreshold",             m_editorConfig.BloomThreshold);
 	globalstate.setCustomConfigEntry("BloomIntensity",             m_editorConfig.BloomIntensity);

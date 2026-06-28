@@ -252,9 +252,18 @@ namespace
 				{ "sunIntensity",      e->sunIntensity },
 				{ "moonColor",         vec3ToJson(e->moonColor) },
 				{ "moonIntensity",     e->moonIntensity },
+				{ "moonPhase",         e->moonPhase },
+				{ "moonPhaseAuto",     e->moonPhaseAuto },
+				{ "moonCycleDays",     e->moonCycleDays },
 				{ "cloudCoverage",     e->cloudCoverage },
 				{ "cloudMode",         e->cloudMode },
 				{ "cloudHeight",       e->cloudHeight },
+				{ "cloudDensity",      e->cloudDensity },
+				{ "cloudFluffiness",   e->cloudFluffiness },
+				{ "cloudTint",         vec3ToJson(e->cloudTint) },
+				{ "contrailAmount",    e->contrailAmount },
+				{ "cirrusAmount",      e->cirrusAmount },
+				{ "cirrusSeed",        e->cirrusSeed },
 				{ "windDirection",     e->windDirection },
 				{ "windSpeed",         e->windSpeed },
 				{ "fogDensity",        e->fogDensity },
@@ -266,7 +275,21 @@ namespace
 				{ "milkyWayIntensity", e->milkyWayIntensity },
 				{ "nebulaIntensity",   e->nebulaIntensity },
 				{ "nebulaColor",       vec3ToJson(e->nebulaColor) },
+				{ "nebulaColor2",      vec3ToJson(e->nebulaColor2) },
+				{ "nebulaColor3",      vec3ToJson(e->nebulaColor3) },
+				{ "nebulaSeed",        e->nebulaSeed },
+				{ "nebulaHighFidelity", e->nebulaHighFidelity },
 				{ "auroraColor",       vec3ToJson(e->auroraColor) },
+				{ "auroraColorTop",    vec3ToJson(e->auroraColorTop) },
+				{ "auroraHeight",        e->auroraHeight },
+				{ "auroraFragmentation", e->auroraFragmentation },
+				{ "starBrightness",    e->starBrightness },
+				{ "starColor",         vec3ToJson(e->starColor) },
+				{ "starSize",          e->starSize },
+				{ "starSizeVariation", e->starSizeVariation },
+				{ "starGlow",          e->starGlow },
+				{ "starTwinkle",       e->starTwinkle },
+				{ "starDensity",       e->starDensity },
 			};
 		}
 		if (auto* w = registry.try_get<WeatherComponent>(entity))
@@ -582,9 +605,18 @@ namespace
 			e.sunIntensity      = c.value("sunIntensity",      e.sunIntensity);
 			e.moonColor         = jsonToVec3(c.value("moonColor", json()), e.moonColor);
 			e.moonIntensity     = c.value("moonIntensity",     e.moonIntensity);
+			e.moonPhase         = c.value("moonPhase",         e.moonPhase);
+			e.moonPhaseAuto     = c.value("moonPhaseAuto",     e.moonPhaseAuto);
+			e.moonCycleDays     = c.value("moonCycleDays",     e.moonCycleDays);
 			e.cloudCoverage     = c.value("cloudCoverage",     e.cloudCoverage);
 			e.cloudMode         = c.value("cloudMode",         e.cloudMode);
 			e.cloudHeight       = c.value("cloudHeight",       e.cloudHeight);
+			e.cloudDensity      = c.value("cloudDensity",      e.cloudDensity);
+			e.cloudFluffiness   = c.value("cloudFluffiness",   e.cloudFluffiness);
+			e.cloudTint         = jsonToVec3(c.value("cloudTint", json()), e.cloudTint);
+			e.contrailAmount    = c.value("contrailAmount",    e.contrailAmount);
+			e.cirrusAmount      = c.value("cirrusAmount",      e.cirrusAmount);
+			e.cirrusSeed        = c.value("cirrusSeed",        e.cirrusSeed);
 			e.windDirection     = c.value("windDirection",     e.windDirection);
 			e.windSpeed         = c.value("windSpeed",         e.windSpeed);
 			e.fogDensity        = c.value("fogDensity",        e.fogDensity);
@@ -596,7 +628,21 @@ namespace
 			e.milkyWayIntensity = c.value("milkyWayIntensity", e.milkyWayIntensity);
 			e.nebulaIntensity   = c.value("nebulaIntensity",   e.nebulaIntensity);
 			e.nebulaColor       = jsonToVec3(c.value("nebulaColor", json()), e.nebulaColor);
+			e.nebulaColor2      = jsonToVec3(c.value("nebulaColor2", json()), e.nebulaColor2);
+			e.nebulaColor3      = jsonToVec3(c.value("nebulaColor3", json()), e.nebulaColor3);
+			e.nebulaSeed        = c.value("nebulaSeed",        e.nebulaSeed);
+			e.nebulaHighFidelity = c.value("nebulaHighFidelity", e.nebulaHighFidelity);
 			e.auroraColor       = jsonToVec3(c.value("auroraColor", json()), e.auroraColor);
+			e.auroraColorTop     = jsonToVec3(c.value("auroraColorTop", json()), e.auroraColorTop);
+			e.auroraHeight        = c.value("auroraHeight",        e.auroraHeight);
+			e.auroraFragmentation = c.value("auroraFragmentation", e.auroraFragmentation);
+			e.starBrightness    = c.value("starBrightness",    e.starBrightness);
+			e.starColor         = jsonToVec3(c.value("starColor", json()), e.starColor);
+			e.starSize          = c.value("starSize",          e.starSize);
+			e.starSizeVariation = c.value("starSizeVariation", e.starSizeVariation);
+			e.starGlow          = c.value("starGlow",          e.starGlow);
+			e.starTwinkle       = c.value("starTwinkle",       e.starTwinkle);
+			e.starDensity       = c.value("starDensity",       e.starDensity);
 			registry.emplace_or_replace<EnvironmentComponent>(entity, e);
 		}
 		if (comps.contains("weather"))
