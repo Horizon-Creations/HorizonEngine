@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(HorizonEngine VERSION 1.0 LANGUAGES CXX)
+project(HorizonEngine VERSION 0.0.1 LANGUAGES CXX)
 
 # ─── Architecture guard ──────────────────────────────────────────────────────
 # This engine is built and shipped as x64. If CMake is configured from an x86
@@ -237,6 +237,17 @@ function(he_deploy_dll target)
         VERBATIM
     )
 endfunction()
+
+# ─── Version header (codename + version → generated HorizonVersion.h) ────────────
+# Sky-themed release codename (see docs/version-codenames.md). Change this one line
+# per release; it surfaces in the editor title/Project Hub and drives the DMG theme.
+set(HE_VERSION_CODENAME "First Light" CACHE STRING "Sky-themed codename for this release")
+configure_file(
+    "${CMAKE_SOURCE_DIR}/cmake/HorizonVersion.h.in"
+    "${CMAKE_BINARY_DIR}/generated/HorizonVersion.h"
+    @ONLY)
+# Global so every engine lib + the editor can #include "HorizonVersion.h".
+include_directories("${CMAKE_BINARY_DIR}/generated")
 
 add_subdirectory(src/HE_Core)
 add_subdirectory(src/HE_Scene)

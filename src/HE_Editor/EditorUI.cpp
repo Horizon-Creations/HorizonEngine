@@ -1,5 +1,6 @@
 #include "EditorUI.h"
 #include "EditorApplication.h"
+#include "HorizonVersion.h"
 #include <Hpak/ProjectExporter.h>
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonScene/LODSystem.h>
@@ -783,7 +784,7 @@ void EditorUI::RenderProjectHub(AppContext& ctx)
         ImGuiWindowFlags_NoScrollbar);
 
     if (ctx.fontHeading) ImGui::PushFont(ctx.fontHeading);
-    const char* title = "HorizonEngine  —  Project Hub";
+    const char* title = "Horizon Engine " HE_VERSION_STRING " \"" HE_VERSION_CODENAME "\"  —  Project Hub";
 
     const float logoDisplayH = headerH - 16.0f;
     if (ctx.logoTexture && ctx.logoW > 0 && ctx.logoH > 0)
