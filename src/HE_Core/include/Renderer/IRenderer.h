@@ -219,6 +219,8 @@ public:
         // 3D layer's height above the camera in world units. Other backends ignore these.
         int       cloudMode   = 0;
         float     cloudHeight = 200.0f;
+        // Cloud raymarch quality (perf knob): 0 Low, 1 Medium, 2 High — scales step counts.
+        int       cloudQuality = 1;
         // Cloud appearance (OpenGL 3D path): density scales opacity, fluffiness
         // drives the cauliflower erosion, tint colours the clouds.
         float     cloudDensity    = 1.0f;

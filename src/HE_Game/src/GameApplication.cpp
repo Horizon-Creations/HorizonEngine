@@ -129,6 +129,7 @@ void GameApplication::OnRender(float deltaTime)
 				.windDirection = env->windDirection, .windSpeed = env->windSpeed, .flash = env->flash,
 				.wetness = env->wetness, .snowAmount = env->snowAmount,
 				.cloudMode = env->cloudMode, .cloudHeight = env->cloudHeight,
+				.cloudQuality = env->cloudQuality,
 				.cloudDensity = env->cloudDensity, .cloudFluffiness = env->cloudFluffiness,
 				.cloudTint = env->cloudTint,
 				.contrailAmount = env->contrailAmount,

@@ -497,6 +497,7 @@ uniform vec3      uWind;        // cloud drift vector (world units / s, horizont
 uniform sampler3D uNoise;       // tiling 3D value-noise (replaces the hash fbm)
 uniform float     uFlash;       // lightning flash (0 = none … 1 = full strike)
 uniform int       uCloudMode;   // 0 = sky-dome clouds, 1 = 3D volumetric (world-anchored)
+uniform int       uCloudQuality; // cloud raymarch quality: 0 Low, 1 Med, 2 High (perf knob)
 uniform vec3      uCameraPos;   // camera world position (for 3D-cloud parallax)
 uniform float     uCloudHeight; // 3D cloud layer height above the camera (world units)
 uniform float     uCloudDensity;    // cloud opacity/density multiplier (1 = default)
@@ -706,14 +707,12 @@ vec3 starField(vec3 dir, vec3 cdir, vec3 sunDir, float time, float milkyWay)
 		float sizeH = starHash(cell + 5.7);
 		float skew  = mix(sizeH, sizeH * sizeH * sizeH, 0.7);
 		float sz    = mix(0.45, skew, szVar);                 // 0..~1 size class
-		// Wide radius range so the size-variation control has visible headroom ABOVE the
-		// anti-alias floor (a too-high floor clamps every star to the same size → the
-		// variation slider does nothing, which is what it used to do).
-		float radius = uStarSize * mix(0.035, 0.20, sz);     // SMALLER, finer stars
-		// Round, anti-aliased dot: a tight Gaussian floored to ~1.6 px so even the smallest
-		// stars stay round/AA (not single-pixel squares), kept small so the field reads as
-		// fine pinpoints like a real night sky.
-		float sigma = clamp(max(radius, pix * 1.6), 0.0, 0.40);
+		// uStarSize controls the on-screen DIAMETER: it scales the gaussian radius
+		// directly, and the screen-space term is demoted to a sub-pixel anti-alias FLOOR
+		// (not a hard size). Previously the floor (pix*1.6) sat above the radius across
+		// the whole slider, so the slider only nudged the very largest stars.
+		float radius = mix(0.16, 0.40, sz) * uStarSize;
+		float sigma  = clamp(max(radius, pix * 0.6), 0.0, 0.70);
 		float core  = exp(-(d * d) / (sigma * sigma));
 		core = core * core;                                   // crisp centre, but wide enough to stay round
 		// Small, dim halo (windowed to zero by one cell so a wide glow can't be clipped into
@@ -847,12 +846,18 @@ float cloudShadowDensity(vec3 pos, float time, float coverage, vec3 wind)
 // Procedural volumetric clouds composited over the base sky (returns the blend).
 // Marches the view ray through a slab on the sky hemisphere with a 3-step sun
 // light-march (Beer's-law self-shadowing). Mirrors the Metal applyClouds().
-vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float time, float coverage, vec3 sunColor, vec3 wind)
+vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float time, float coverage, vec3 sunColor, vec3 wind, out float outT)
 {
+	outT = 1.0;
 	if (coverage <= 0.0) return baseSky;          // clear sky → skip the whole raymarch
 	dir    = normalize(dir);
 	sunDir = normalize(sunDir);
 	if (dir.y < 0.02) return baseSky;             // no clouds at/below the horizon
+
+	// Quality (perf knob, uCloudQuality): 0 Low, 1 Med, 2 High. High == original counts.
+	int qBaseN  = (uCloudQuality <= 0) ? 8  : (uCloudQuality == 1 ? 12 : 16);
+	int qMaxN   = (uCloudQuality <= 0) ? 18 : (uCloudQuality == 1 ? 32 : 64);
+	int qShadow = (uCloudQuality <= 0) ? 1  : (uCloudQuality == 1 ? 2  : 3);
 
 	// March the view ray through the cloud slab between base and top heights.
 	// A deterministic per-ray offset breaks up otherwise coherent sample planes
@@ -863,7 +868,7 @@ vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float time, float coverage
 	// undersamples the noise → the "pixelated"/speckled distant clouds. Scale the
 	// step count with 1/dir.y (capped at 64) so the world-space sample spacing stays
 	// roughly constant down toward the horizon — that is the actual anti-aliasing.
-	int   N  = int(clamp(16.0 / max(dir.y, 0.12), 16.0, 64.0));
+	int   N  = int(clamp(float(qBaseN) / max(dir.y, 0.12), float(qBaseN), float(qMaxN)));
 	float ds = (s1 - s0) / float(N);
 	float jitter = cloudHash(dir.xz * 173.3 + vec2(dir.y * 37.1, dir.y * 19.7));
 
@@ -876,21 +881,33 @@ vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float time, float coverage
 	float costh = max(dot(dir, sunDir), 0.0);
 	float phase = mix(hgPhase(costh, 0.6), hgPhase(costh, -0.3), 0.25);
 
+	float lo = mix(0.70, 0.22, clamp(coverage, 0.0, 1.0)); // coverage threshold (for the cheap gate)
 	float T = 1.0;                                 // transmittance along the view ray
 	vec3  L = vec3(0.0);                           // accumulated in-scattered colour
 	for (int i = 0; i < N; ++i)
 	{
 		float s   = s0 + (float(i) + jitter) * ds;
 		vec3  pos = dir * s;
-		float dens = cloudDensity(pos, time, coverage, wind);
+		float hgrad = cloudHeightGrad(pos.y);
+		if (hgrad <= 0.0) continue;
+		// Inline cloudDensity() with an EXACT coverage gate: base = perlin*0.5 + billow*0.55
+		// and billow <= 1, so (perlin*0.5 + 0.55) upper-bounds it. Where that can't reach the
+		// threshold, skip the Worley fetch + the sun light-march. Uses the SAME 4-octave
+		// perlin as cloudDensity, so it never culls a real cloud.
+		vec3  pp     = pos * kCloudScale + wind * time;
+		float morph  = time * 0.030;
+		float perlin = starFbm3(pp + vec3(0.0, morph, 0.0), 4);
+		if (perlin * 0.5 + 0.55 < lo) continue;
+		float billow = worleyFbm(pp * 0.9 + vec3(morph, 0.0, 0.0));
+		float dens   = smoothstep(lo, lo + 0.13, perlin * 0.5 + billow * 0.55) * hgrad;
 		if (dens > 0.001)
 		{
-			// Light-march toward the sun: Beer's-law self-shadowing (3 steps for a
-			// smooth shadow gradient; fewer steps undersample and flicker).
+			// Light-march toward the sun: Beer's-law self-shadowing (qShadow steps;
+			// scaled by 3/qShadow so fewer steps don't brighten the clouds).
 			float shadow = 0.0;
-			for (int j = 1; j <= 3; ++j)
+			for (int j = 1; j <= qShadow; ++j)
 				shadow += cloudShadowDensity(pos + sunDir * (float(j) * 0.25), time, coverage, wind);
-			float sun    = exp(-shadow * 1.7);
+			float sun    = exp(-shadow * 1.7 * (3.0 / float(qShadow)));
 			float powder = 1.0 - exp(-dens * 3.0); // dark soft edges (powder effect)
 			float lit    = sun * powder;
 
@@ -932,6 +949,7 @@ vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float time, float coverage
 	float horizon = smoothstep(0.03, 0.22, dir.y);
 	T = 1.0 - (1.0 - T) * horizon;
 	L *= horizon;
+	outT = T;
 	return baseSky * T + L;
 }
 
@@ -980,12 +998,19 @@ float cirrusFbm(vec2 p)
 // the horizon haze. Self-contained (its own raymarch + shading) so the dome path is
 // left untouched. Same cloud LOOK/lighting as the dome, just world-projected.
 vec3 applyClouds3D(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float time,
-                   float coverage, vec3 sunColor, vec3 wind, float cloudH)
+                   float coverage, vec3 sunColor, vec3 wind, float cloudH, out float outT)
 {
+	outT = 1.0;
 	if (coverage <= 0.0) return baseSky;
 	dir    = normalize(dir);
 	sunDir = normalize(sunDir);
 	if (dir.y < 0.02) return baseSky;             // at/below the horizon → ray misses the slab above
+
+	// Quality (perf knob, uCloudQuality): 0 Low, 1 Med, 2 High. High == original counts.
+	float qStepF  = (uCloudQuality <= 0) ? 0.40 : (uCloudQuality == 1 ? 0.30 : 0.22);
+	float qMinN   = (uCloudQuality <= 0) ? 12.0 : (uCloudQuality == 1 ? 18.0 : 24.0);
+	float qMaxN   = (uCloudQuality <= 0) ? 40.0 : (uCloudQuality == 1 ? 72.0 : 128.0);
+	int   qShadow = (uCloudQuality <= 0) ? 1    : (uCloudQuality == 1 ? 2    : 3);
 
 	cloudH      = max(cloudH, 1.0);
 	float thick = cloudH * 1.5;                   // TALL slab so cumuli can billow upward (3D)
@@ -999,7 +1024,7 @@ vec3 applyClouds3D(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float time,
 	// Step count grows with how much slab the ray crosses (much more near the horizon)
 	// so the world-space sample spacing stays roughly constant — undersampling near the
 	// horizon is what speckles/"pixelates" the distant clouds.
-	int   N  = int(clamp((tFar - tNear) / (thick * 0.22), 24.0, 128.0));
+	int   N  = int(clamp((tFar - tNear) / (thick * qStepF), qMinN, qMaxN));
 	float ds = (tFar - tNear) / float(N);
 	// Interleaved-gradient jitter (blue-noise-like) instead of white noise → the residual
 	// undersampling shows as fine filterable dither, not coarse speckle/grain.
@@ -1078,7 +1103,7 @@ vec3 applyClouds3D(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float time,
 		{
 			// Sun light-march (Beer's law) toward the sun through the slab.
 			float shadow = 0.0;
-			for (int j = 1; j <= 3; ++j)
+			for (int j = 1; j <= qShadow; ++j)
 			{
 				vec3  sp  = pos + sunDir * (float(j) * thick * 0.22);
 				float shf = clamp((sp.y - baseY) / thick, 0.0, 1.0);
@@ -1090,7 +1115,7 @@ vec3 applyClouds3D(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float time,
 				          + worleyNoise3(snp * 1.8) * 0.3;
 				shadow += smoothstep(lo, lo + 0.13, p2 * 0.5 + b2 * 0.55) * shg;
 			}
-			float sun    = exp(-shadow * 1.7);
+			float sun    = exp(-shadow * 1.7 * (3.0 / float(qShadow)));
 			float powder = 1.0 - exp(-dens * mix(3.0, 4.5, fluff)); // softer fraying edges when fluffy
 			float lit    = sun * powder;
 			vec3 dayCol   = mix(vec3(0.17, 0.20, 0.29), sunColor * 1.12, lit);
@@ -1129,6 +1154,7 @@ vec3 applyClouds3D(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float time,
 	float horizon = smoothstep(elevFloor, elevFloor + 0.14, dir.y);
 	T = 1.0 - (1.0 - T) * horizon;
 	L *= horizon;
+	outT = T;
 	return baseSky * T + L;
 }
 
@@ -1502,6 +1528,28 @@ vec3 cirrus(vec3 baseSky, vec3 dir, vec3 sunDir, vec3 sunColor, float amount, fl
 	return mix(baseSky, white, alpha);
 }
 
+// The bright sun BODY (crisp disk + tight bloom) factored out of skyColor() so the
+// cloud pass can occlude it. main() subtracts this, runs the clouds, then re-adds it
+// weighted by pow(cloudTransmittance, k): an opaque cloud (T~0.1) then fully hides the
+// sun instead of leaking a ~14x ghost through a plain *T. The expressions below MUST
+// stay byte-identical to the matching disk+bloom lines in kSkyFuncGLSL skyColor() so
+// that (col -= sunGlare) cancels exactly and a clear sky is unchanged.
+vec3 sunGlare(vec3 dir, vec3 sunDir)
+{
+	dir    = normalize(dir);
+	sunDir = normalize(sunDir);
+	float sunY = clamp(sunDir.y, -0.3, 1.0);
+	float day  = smoothstep(-0.10, 0.10, sunY);
+	float dusk = smoothstep(-0.14, 0.04, sunY) * (1.0 - smoothstep(0.04, 0.26, sunY));
+	vec3  sunTint = mix(vec3(1.0, 0.58, 0.24), vec3(1.0, 0.96, 0.88), smoothstep(0.0, 0.28, sunY));
+	float s         = max(dot(dir, sunDir), 0.0);
+	float sunVis    = max(day, dusk);
+	float bloomDamp = mix(1.0, 0.28, dusk);
+	vec3  g  = sunTint * (pow(s, 1800.0) * 14.0) * day;               // crisp daytime disk
+	g       += sunTint * (pow(s, 220.0)  * 1.1 * bloomDamp) * sunVis; // tight bloom
+	return g;
+}
+
 void main()
 {
 	vec4 wp1 = uInvViewProj * vec4(vNDC,  1.0, 1.0);
@@ -1514,6 +1562,9 @@ void main()
 	// normalize internally, so nothing downstream needs the raw vector.)
 	vec3 dir = normalize(wp1.xyz / wp1.w - wp0.xyz / wp0.w);
 	vec3 col  = skyColor(dir, uSunDir);
+	// Lift the bright sun body out so the cloud pass can occlude it (re-added below).
+	vec3 sunGlareCol = sunGlare(dir, uSunDir);
+	col -= sunGlareCol;
 	// Night-sky elements (stars/Milky Way/nebula/aurora/moon) + the celestial
 	// rotation are skipped entirely by day. The branch is coherent — sunDir is a
 	// uniform, so every pixel in the frame takes the same path — so it is cheap.
@@ -1530,10 +1581,13 @@ void main()
 	// in front — so the lower clouds correctly occlude the thin upper layers.
 	col  = cirrus(col, dir, uSunDir, uSunColor, uCirrus, uCirrusSeed, uTime, uWind.xz); // alpha-blended
 	col  = contrails(col, dir, uSunDir, uContrails, uCloudCoverage); // alpha-blended into the sky
+	float cloudT = 1.0;                                   // view-ray cloud transmittance
 	if (uCloudMode == 1)
-		col = applyClouds3D(col, dir, uCameraPos, uSunDir, uTime, uCloudCoverage, uSunColor, uWind, uCloudHeight);
+		col = applyClouds3D(col, dir, uCameraPos, uSunDir, uTime, uCloudCoverage, uSunColor, uWind, uCloudHeight, cloudT);
 	else
-		col = applyClouds(col, dir, uSunDir, uTime, uCloudCoverage, uSunColor, uWind);
+		col = applyClouds(col, dir, uSunDir, uTime, uCloudCoverage, uSunColor, uWind, cloudT);
+	// Re-add the sun, steeply occluded by cloud opacity so a solid cloud fully hides it.
+	col += sunGlareCol * pow(cloudT, 2.5);
 	col += uFlash * vec3(0.85, 0.90, 1.0); // lightning lights up the sky/clouds
 	FragColor = vec4(col, 1.0);
 }
@@ -2412,6 +2466,7 @@ void OpenGLRenderer::CreateSkyPipeline()
 	m_uSkyNoise       = glGetUniformLocation(m_skyProgram, "uNoise");
 	m_uSkyFlash       = glGetUniformLocation(m_skyProgram, "uFlash");
 	m_uSkyCloudMode   = glGetUniformLocation(m_skyProgram, "uCloudMode");
+	m_uSkyCloudQuality = glGetUniformLocation(m_skyProgram, "uCloudQuality");
 	m_uSkyCameraPos   = glGetUniformLocation(m_skyProgram, "uCameraPos");
 	m_uSkyCloudHeight = glGetUniformLocation(m_skyProgram, "uCloudHeight");
 	m_uSkyCloudDensity    = glGetUniformLocation(m_skyProgram, "uCloudDensity");
@@ -4135,6 +4190,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glUniform1f(m_uSkyCoverage, GetEnvironment().cloudCoverage);
 			// Cloud render mode + 3D-cloud parallax inputs (camera world pos + layer height).
 			glUniform1i(m_uSkyCloudMode,   GetEnvironment().cloudMode);
+			glUniform1i(m_uSkyCloudQuality, GetEnvironment().cloudQuality);
 			glUniform3fv(m_uSkyCameraPos,  1, glm::value_ptr(m_renderWorld.camera.position));
 			glUniform1f(m_uSkyCloudHeight, GetEnvironment().cloudHeight);
 			glUniform1f(m_uSkyCloudDensity,    GetEnvironment().cloudDensity);

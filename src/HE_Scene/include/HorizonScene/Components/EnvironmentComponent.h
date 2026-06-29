@@ -36,6 +36,10 @@ struct EnvironmentComponent
     // it to your world's scale (bigger world = larger value).
     int   cloudMode   = 0;
     float cloudHeight = 200.0f;
+    // Cloud raymarch quality (performance knob): 0 = Low, 1 = Medium, 2 = High.
+    // Scales the view-ray step count and sun light-march steps in both cloud paths.
+    // Lower = cheaper (helps on integrated GPUs / Apple Silicon Air); default Medium.
+    int   cloudQuality = 1;
     // Cloud appearance knobs (so the look can be tweaked without re-rolling the
     // pattern): density scales opacity/thickness, fluffiness drives the cauliflower
     // erosion (higher = puffier, more broken-up billows), tint colours the clouds.

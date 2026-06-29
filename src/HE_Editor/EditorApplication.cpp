@@ -610,6 +610,20 @@ void EditorApplication::OnInit()
 	m_editorConfig.GpuParticles                = globalstate.getCustomConfigBool("GpuParticles",        m_editorConfig.GpuParticles);
 	m_editorConfig.QuickSettingsFavorites      = globalstate.getCustomConfigString("QuickSettingsFavorites", m_editorConfig.QuickSettingsFavorites);
 	m_editorCamera.setFlySpeed(m_editorConfig.EditorCameraSpeed);
+	// Restore the last editor camera view (saved on exit). Skipped on first run (no
+	// saved view yet) so the default 3/4 framing of the world origin is used instead.
+	if (globalstate.getCustomConfigBool("EditorCamValid", false))
+	{
+		const glm::vec3 camPos(
+			globalstate.getCustomConfigFloat("EditorCamPosX", m_editorCamera.position().x),
+			globalstate.getCustomConfigFloat("EditorCamPosY", m_editorCamera.position().y),
+			globalstate.getCustomConfigFloat("EditorCamPosZ", m_editorCamera.position().z));
+		m_editorCamera.restoreView(
+			camPos,
+			globalstate.getCustomConfigFloat("EditorCamYaw",   m_editorCamera.yaw()),
+			globalstate.getCustomConfigFloat("EditorCamPitch", m_editorCamera.pitch()),
+			globalstate.getCustomConfigFloat("EditorCamPivot", m_editorCamera.pivotDistance()));
+	}
 	setMaxFps(m_editorConfig.MaxFps);   // VSync-off frame cap (0 = unlimited)
 
 #ifdef HE_IMGUI_ENABLED
@@ -1492,6 +1506,7 @@ void EditorApplication::pushEnvironment(float dt)
 		.windDirection = env->windDirection, .windSpeed = env->windSpeed, .flash = env->flash,
 		.wetness = env->wetness, .snowAmount = env->snowAmount,
 		.cloudMode = env->cloudMode, .cloudHeight = env->cloudHeight,
+		.cloudQuality = env->cloudQuality,
 		.cloudDensity = env->cloudDensity, .cloudFluffiness = env->cloudFluffiness,
 		.cloudTint = env->cloudTint,
 		.contrailAmount = env->contrailAmount,
@@ -1631,6 +1646,18 @@ void EditorApplication::OnShutdown()
 	globalstate.setCustomConfigEntry("CbTreeWidth",                 m_editorConfig.CbTreeWidth);
 	globalstate.setCustomConfigEntry("UiFontScale",                m_editorConfig.UiFontScale);
 	globalstate.setCustomConfigEntry("EditorCameraSpeed",          m_editorConfig.EditorCameraSpeed);
+	// Persist the last editor camera view so it is restored next launch. Only when the
+	// camera was actually used this session (otherwise keep any previously-saved view).
+	if (m_editorCamera.initialised())
+	{
+		globalstate.setCustomConfigEntry("EditorCamPosX",  m_editorCamera.position().x);
+		globalstate.setCustomConfigEntry("EditorCamPosY",  m_editorCamera.position().y);
+		globalstate.setCustomConfigEntry("EditorCamPosZ",  m_editorCamera.position().z);
+		globalstate.setCustomConfigEntry("EditorCamYaw",   m_editorCamera.yaw());
+		globalstate.setCustomConfigEntry("EditorCamPitch", m_editorCamera.pitch());
+		globalstate.setCustomConfigEntry("EditorCamPivot", m_editorCamera.pivotDistance());
+		globalstate.setCustomConfigEntry("EditorCamValid", true);
+	}
 	globalstate.setCustomConfigEntry("MaxFps",                     m_editorConfig.MaxFps);
 	globalstate.setCustomConfigEntry("BloomEnabled",               m_editorConfig.BloomEnabled);
 	globalstate.setCustomConfigEntry("BloomThreshold",             m_editorConfig.BloomThreshold);

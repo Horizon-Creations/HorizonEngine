@@ -48,6 +48,22 @@ public:
 	float     flySpeed()    const         { return m_flySpeed; }
 	void      setFlySpeed(float s)        { m_flySpeed = s > 0.0f ? s : m_flySpeed; }
 
+	// ── View persistence (save/restore the last editor camera between sessions) ──
+	float     yaw()           const { return m_yaw; }
+	float     pitch()         const { return m_pitch; }
+	float     pivotDistance() const { return m_pivotDistance; }
+	bool      initialised()   const { return m_initialised; }   // false until first update/use
+	// Restore a previously-saved view EXACTLY (position + orientation + orbit distance).
+	// Marks the camera initialised so ensureInit() won't re-derive a look-at-origin pose.
+	void      restoreView(const glm::vec3& pos, float yawRad, float pitchRad, float pivotDist)
+	{
+		m_position      = pos;
+		m_yaw           = yawRad;
+		m_pitch         = pitchRad;
+		m_pivotDistance = pivotDist > 0.0f ? pivotDist : m_pivotDistance;
+		m_initialised   = true;
+	}
+
 	EditorCameraOverride makeOverride() const;
 
 private:
