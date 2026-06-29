@@ -4013,6 +4013,16 @@ void EditorUI::RenderInspector(AppContext& ctx)
 					ImGui::TextDisabled("Lifts the cloud band higher in the sky (clear sky opens toward the\nhorizon); the clouds keep the same size & shape (OpenGL only).");
 				}
 			}
+			// Cloud quality (performance): scales the raymarch step counts + sun
+			// light-march. Drop to Low on integrated GPUs / Apple Silicon Air if the
+			// clouds are costing frames. (Metal first; other backends follow.)
+			{
+				const char* cloudQ[] = { "Low (fastest)", "Medium", "High (best)" };
+				int q = (env->cloudQuality < 0) ? 0 : (env->cloudQuality > 2 ? 2 : env->cloudQuality);
+				ImGui::SetNextItemWidth(-1.0f);
+				if (ImGui::Combo("##cloudquality", &q, cloudQ, 3)) { env->cloudQuality = q; trackEdit(); }
+				ImGui::TextDisabled("Lower = cheaper. Clouds are a top GPU cost; Low ~halves their step count.");
+			}
 			// Cloud appearance: tweak the look without re-rolling the pattern.
 			ImGui::SetNextItemWidth(-1.0f);
 			ImGui::SliderFloat("##clouddensity", &env->cloudDensity, 0.2f, 2.5f, "Density: %.2f"); trackEdit();

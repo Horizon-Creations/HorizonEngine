@@ -357,6 +357,7 @@ private:
 	int          m_uSkyNoise       = -1;  // 3D value-noise sampler
 	int          m_uSkyFlash       = -1;  // lightning flash brightness
 	int          m_uSkyCloudMode   = -1;  // 0 = sky-dome clouds, 1 = 3D volumetric
+	int          m_uSkyCloudQuality = -1; // cloud raymarch quality: 0 Low, 1 Med, 2 High
 	int          m_uSkyCameraPos   = -1;  // camera world position (3D-cloud parallax)
 	int          m_uSkyCloudHeight = -1;  // 3D cloud layer height above the camera
 	int          m_uSkyCloudDensity   = -1; // cloud opacity/density multiplier

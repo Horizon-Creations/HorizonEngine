@@ -257,6 +257,7 @@ namespace
 				{ "moonCycleDays",     e->moonCycleDays },
 				{ "cloudCoverage",     e->cloudCoverage },
 				{ "cloudMode",         e->cloudMode },
+				{ "cloudQuality",      e->cloudQuality },
 				{ "cloudHeight",       e->cloudHeight },
 				{ "cloudDensity",      e->cloudDensity },
 				{ "cloudFluffiness",   e->cloudFluffiness },
@@ -610,6 +611,7 @@ namespace
 			e.moonCycleDays     = c.value("moonCycleDays",     e.moonCycleDays);
 			e.cloudCoverage     = c.value("cloudCoverage",     e.cloudCoverage);
 			e.cloudMode         = c.value("cloudMode",         e.cloudMode);
+			e.cloudQuality      = c.value("cloudQuality",      e.cloudQuality);
 			e.cloudHeight       = c.value("cloudHeight",       e.cloudHeight);
 			e.cloudDensity      = c.value("cloudDensity",      e.cloudDensity);
 			e.cloudFluffiness   = c.value("cloudFluffiness",   e.cloudFluffiness);
