@@ -12,7 +12,12 @@ set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SOURCE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-VERSION="${1:-1.0}"
+VERSION="${1:-0.0.1}"
+
+# Sky-themed release codename — single source of truth is CMakeLists.txt. Shown in
+# the macOS About panel as "Version <VERSION> (<CODENAME>)", e.g. 0.0.1 (First Light).
+CODENAME="${DMG_CODENAME:-$(grep -oE 'HE_VERSION_CODENAME "[^"]+"' "$SOURCE_DIR/CMakeLists.txt" 2>/dev/null | head -1 | sed -E 's/.*"([^"]+)".*/\1/')}"
+[ -n "$CODENAME" ] || CODENAME="$VERSION"
 
 APP_NAME="HorizonEditor"
 DMG_NAME="${APP_NAME}-${VERSION}-macOS.dmg"
@@ -39,6 +44,33 @@ if [ ! -f "$DEPLOY_DIR/$APP_NAME" ]; then
     echo "Run a full build first:  cmake --build <build_dir> --target HorizonEditor"
     exit 1
 fi
+
+# ─── 1b. DMG tooling (icon + styled installer window) ─────────────────────────
+# A small Python venv (cached in out/.dmgvenv) provides Pillow (asset rendering)
+# and dmgbuild (headless styled-DMG layout — no Finder/AppleScript, so it never
+# triggers a TCC "control Finder" prompt). If this can't be set up (e.g. offline),
+# FANCY=0 and we fall back to a plain DMG with no icon/background.
+ASSETS_DIR="$SCRIPT_DIR/dmg_assets"
+ICON_SRC="$SOURCE_DIR/EditorDeps/Images/HC_Logo.png"
+# Procedural backdrop theme — keep this tracking the release codename in
+# docs/version-codenames.md (0.0.1 "First Light" → dawn → sunrise).
+DMG_THEME="${DMG_THEME:-sunrise}"           # twilight | midnight | sunrise
+DMG_PHOTO="${DMG_PHOTO:-}"                   # optional: a screenshot backdrop (overrides DMG_THEME)
+DMG_VENV="$SOURCE_DIR/out/.dmgvenv"
+FANCY=1
+
+if "$DMG_VENV/bin/python" -c "import dmgbuild, PIL" >/dev/null 2>&1; then
+    DMG_PY="$DMG_VENV/bin/python"
+elif python3 -m venv "$DMG_VENV" >/dev/null 2>&1 \
+     && "$DMG_VENV/bin/pip" install --quiet --disable-pip-version-check dmgbuild Pillow >/dev/null 2>&1 \
+     && "$DMG_VENV/bin/python" -c "import dmgbuild, PIL" >/dev/null 2>&1; then
+    echo "--> Set up DMG tooling (dmgbuild + Pillow) in out/.dmgvenv"
+    DMG_PY="$DMG_VENV/bin/python"
+else
+    echo "    WARNING: could not set up dmgbuild/Pillow — building a plain DMG."
+    FANCY=0
+fi
+[ -f "$ICON_SRC" ] || { echo "    WARNING: $ICON_SRC missing — plain DMG."; FANCY=0; }
 
 # ─── 2. Bundle skeleton ───────────────────────────────────────────────────────
 echo "--> Creating bundle skeleton..."
@@ -101,6 +133,19 @@ EDITOR_DEPS="$SOURCE_DIR/EditorDeps"
 [ -d "$EDITOR_DEPS/Fonts"  ] && cp -R "$EDITOR_DEPS/Fonts"  "$RES_PATH/"
 [ -d "$EDITOR_DEPS/Images" ] && cp -R "$EDITOR_DEPS/Images" "$RES_PATH/"
 
+# ─── 6b. App icon (.icns from the HC logo) ────────────────────────────────────
+# Must land in Resources/ and be referenced in Info.plist BEFORE codesign so the
+# signature covers it and the Finder/Dock icon sticks.
+ICON_PLIST=""
+if [ "$FANCY" -eq 1 ]; then
+    echo "--> Generating app icon from HC logo..."
+    if "$DMG_PY" "$ASSETS_DIR/gen_assets.py" icon --logo "$ICON_SRC" --out "$RES_PATH/AppIcon.icns"; then
+        ICON_PLIST=$'\n    <key>CFBundleIconFile</key>\n    <string>AppIcon</string>'
+    else
+        echo "    WARNING: icon generation failed — bundle will have no custom icon."
+    fi
+fi
+
 # ─── 7. Info.plist ────────────────────────────────────────────────────────────
 echo "--> Writing Info.plist..."
 cat > "$APP_PATH/Contents/Info.plist" <<PLIST
@@ -117,7 +162,7 @@ cat > "$APP_PATH/Contents/Info.plist" <<PLIST
     <key>CFBundleDisplayName</key>
     <string>Horizon Editor</string>
     <key>CFBundleVersion</key>
-    <string>${VERSION}</string>
+    <string>${CODENAME}</string>
     <key>CFBundleShortVersionString</key>
     <string>${VERSION}</string>
     <key>CFBundlePackageType</key>
@@ -125,7 +170,7 @@ cat > "$APP_PATH/Contents/Info.plist" <<PLIST
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSPrincipalClass</key>
-    <string>NSApplication</string>
+    <string>NSApplication</string>${ICON_PLIST}
 </dict>
 </plist>
 PLIST
@@ -205,16 +250,70 @@ fi
 mkdir -p "$SOURCE_DIR/out"
 rm -f "$DMG_OUT"
 
-# Applications symlink → users drag the .app into /Applications
-ln -sf /Applications "$STAGING/Applications"
+if [ "$FANCY" -eq 1 ]; then
+    PHOTO_ARG=()
+    if [ -n "$DMG_PHOTO" ] && [ -f "$DMG_PHOTO" ]; then
+        PHOTO_ARG=(--photo "$DMG_PHOTO")
+        echo "--> Rendering DMG background (screenshot: $(basename "$DMG_PHOTO"))..."
+    else
+        echo "--> Rendering DMG background ('${DMG_THEME}' theme)..."
+    fi
+    WORK="$SOURCE_DIR/out/dmg_work"
+    rm -rf "$WORK"; mkdir -p "$WORK"
+    if "$DMG_PY" "$ASSETS_DIR/gen_assets.py" background \
+            --logo "$ICON_SRC" --theme "$DMG_THEME" "${PHOTO_ARG[@]}" --out "$WORK/background.png" \
+       && tiffutil -cathidpicheck "$WORK/background.png" "$WORK/background@2x.png" \
+            -out "$WORK/background.tiff" >/dev/null 2>&1; then
 
-echo "--> Creating DMG..."
-hdiutil create \
-    -volname "${APP_NAME} ${VERSION}" \
-    -srcfolder "$STAGING" \
-    -ov \
-    -format UDZO \
-    "$DMG_OUT"
+        echo "--> Building styled DMG (dmgbuild)..."
+        if "$DMG_VENV/bin/dmgbuild" \
+                -s "$ASSETS_DIR/dmg_settings.py" \
+                -D app="$APP_PATH" \
+                -D background="$WORK/background.tiff" \
+                -D volicon="$RES_PATH/AppIcon.icns" \
+                "${APP_NAME} ${VERSION}" "$DMG_OUT"; then
+            echo "    Styled DMG created."
+        else
+            echo "    WARNING: dmgbuild failed — falling back to a plain DMG."
+            FANCY=0
+        fi
+    else
+        echo "    WARNING: background render failed — falling back to a plain DMG."
+        FANCY=0
+    fi
+fi
+
+if [ "$FANCY" -eq 0 ]; then
+    echo "--> Creating plain DMG..."
+    ln -sf /Applications "$STAGING/Applications"
+    hdiutil create \
+        -volname "${APP_NAME} ${VERSION}" \
+        -srcfolder "$STAGING" \
+        -ov \
+        -format UDZO \
+        "$DMG_OUT"
+fi
+
+# ─── 12b. Custom Finder icon on the .dmg FILE ─────────────────────────────────
+# dmgbuild sets the *mounted volume* icon, but not the icon Finder shows for the
+# .dmg file itself. Embed the HC icon into the file's resource fork + set the
+# "has custom icon" attribute so the download shows the logo.
+ICNS_FILE="$RES_PATH/AppIcon.icns"
+if [ -f "$ICNS_FILE" ] && [ -f "$DMG_OUT" ] \
+   && xcrun -f Rez >/dev/null 2>&1 && xcrun -f DeRez >/dev/null 2>&1; then
+    echo "--> Setting Finder icon on the DMG file..."
+    TMPIC="$(mktemp -d)"
+    cp "$ICNS_FILE" "$TMPIC/icon.icns"
+    if sips -i "$TMPIC/icon.icns" >/dev/null 2>&1 \
+       && xcrun DeRez -only icns "$TMPIC/icon.icns" > "$TMPIC/icon.rsrc" 2>/dev/null \
+       && xcrun Rez -append "$TMPIC/icon.rsrc" -o "$DMG_OUT" 2>/dev/null; then
+        xcrun SetFile -a C "$DMG_OUT"
+        echo "    DMG file icon set."
+    else
+        echo "    WARNING: could not set DMG file icon (non-fatal)."
+    fi
+    rm -rf "$TMPIC"
+fi
 
 echo ""
 echo "======================================================================"

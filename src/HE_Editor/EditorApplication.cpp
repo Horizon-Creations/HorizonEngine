@@ -1,5 +1,6 @@
 #include "EditorApplication.h"
 #include "EditorUI.h"
+#include "HorizonVersion.h"
 #include <Diagnostics/Profiler.h>
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonScene/Components/EnvironmentComponent.h>
@@ -122,7 +123,7 @@ EditorApplication::~EditorApplication() = default;
 HE::ApplicationConfig EditorApplication::GetConfig() const
 {
 	HE::ApplicationConfig cfg;
-	cfg.windowprops.title  = "HorizonEngine Editor";
+	cfg.windowprops.title  = "Horizon Engine Editor  " HE_VERSION_FULL;
 	cfg.windowprops.width  = 1600;
 	cfg.windowprops.height = 900;
 	cfg.windowprops.vsync  = true;
@@ -621,7 +622,12 @@ void EditorApplication::OnInit()
 		unsigned char* pixels = stbi_load(logoPath.c_str(), &w, &h, &ch, 4);
 		if (pixels)
 		{
+#ifndef __APPLE__
 			// ── Window icon via SDL ───────────────────────────────────────────
+			// On macOS the Dock/app icon comes from the .app bundle's icns
+			// (CFBundleIconFile, set by scripts/package_macos.sh). Overriding it
+			// at runtime would replace the polished squircle with the bare logo,
+			// so we skip it here and let the bundle icon stand.
 			SDL_Surface* iconSurface = SDL_CreateSurfaceFrom(
 				w, h, SDL_PIXELFORMAT_RGBA32, pixels, w * 4);
 			if (iconSurface && window() && window()->GetNativeWindow())
@@ -629,6 +635,7 @@ void EditorApplication::OnInit()
 				SDL_SetWindowIcon(window()->GetNativeWindow(), iconSurface);
 				SDL_DestroySurface(iconSurface);
 			}
+#endif
 
 			// ── ImGui texture (via abstract renderer API) ────────────────────
 			if (void* handle = renderer()->CreateImGuiTexture(pixels, w, h))
