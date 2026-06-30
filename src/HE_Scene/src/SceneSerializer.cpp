@@ -258,6 +258,7 @@ namespace
 				{ "cloudCoverage",     e->cloudCoverage },
 				{ "cloudMode",         e->cloudMode },
 				{ "cloudQuality",      e->cloudQuality },
+				{ "lowResClouds",      e->lowResClouds },
 				{ "cloudHeight",       e->cloudHeight },
 				{ "cloudDensity",      e->cloudDensity },
 				{ "cloudFluffiness",   e->cloudFluffiness },
@@ -612,6 +613,7 @@ namespace
 			e.cloudCoverage     = c.value("cloudCoverage",     e.cloudCoverage);
 			e.cloudMode         = c.value("cloudMode",         e.cloudMode);
 			e.cloudQuality      = c.value("cloudQuality",      e.cloudQuality);
+			e.lowResClouds      = c.value("lowResClouds",      e.lowResClouds);
 			e.cloudHeight       = c.value("cloudHeight",       e.cloudHeight);
 			e.cloudDensity      = c.value("cloudDensity",      e.cloudDensity);
 			e.cloudFluffiness   = c.value("cloudFluffiness",   e.cloudFluffiness);
