@@ -40,6 +40,11 @@ struct EnvironmentComponent
     // Scales the view-ray step count and sun light-march steps in both cloud paths.
     // Lower = cheaper (helps on integrated GPUs / Apple Silicon Air); default Medium.
     int   cloudQuality = 1;
+    // Low-resolution cloud pass (performance): raymarch the clouds at quarter resolution
+    // into an offscreen buffer, then bilinear-upsample + composite. Big win in open-sky
+    // views (clouds are the dominant per-pixel sky cost). Default OFF = the proven inline
+    // path (so it can never regress); turn ON and A/B with F9 to measure the win. Metal first.
+    bool  lowResClouds = false;
     // Cloud appearance knobs (so the look can be tweaked without re-rolling the
     // pattern): density scales opacity/thickness, fluffiness drives the cauliflower
     // erosion (higher = puffier, more broken-up billows), tint colours the clouds.

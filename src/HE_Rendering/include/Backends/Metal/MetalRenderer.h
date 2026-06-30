@@ -310,6 +310,25 @@ private:
 	// Bright-pass + blur m_hdrColor into m_bloomColor[0]; returns its texture ptr.
 	void* EncodeBloom(void* cmdBuf, int fullW, int fullH);
 
+	// ── Low-res clouds (quarter-res cloud pre-pass; EnvironmentSettings.lowResClouds) ──
+	// Raymarch the clouds into m_cloudColor (rgb = L, a = T) at quarter resolution; the
+	// sky pass then bilinear-upsamples + composites. Uses the PREVIOUS frame's view/sun
+	// (clouds are soft; a 1-frame lag in this perf mode is imperceptible) so the pre-pass
+	// can run before the scene encoder without re-running the extractor.
+	void* m_cloudPipeline = nullptr;  // id<MTLRenderPipelineState> (skyVertex + cloudFragment)
+	void* m_cloudColor    = nullptr;  // id<MTLTexture> RGBA16F, quarter-res (L, T)
+	int   m_cloudW        = 0;
+	int   m_cloudH        = 0;
+	glm::mat4 m_lastViewProj = glm::mat4(1.0f); // previous frame, for the cloud pre-pass
+	glm::vec3 m_lastSunDir   = glm::vec3(0.0f, 1.0f, 0.0f);
+	void  EnsureCloudTarget(int width, int height);
+	void  DestroyCloudTarget();
+	void  EncodeCloudPrepass(void* cmdBuf, const glm::mat4& invViewProj, const glm::vec3& sunDir,
+	                         const glm::vec3& sunColor, float timeOfDay, float cloudCoverage,
+	                         float time, float auroraIntensity, const glm::vec3& nebulaColor,
+	                         float nebulaIntensity, const glm::vec3& auroraColor,
+	                         float milkyWayIntensity, const glm::vec3& wind, int width, int height);
+
 	// ── SSAO (screen-space ambient occlusion) ───────────────────────────────
 	// Mirrors the GL backend: a view-space position pre-pass feeds a hemisphere-
 	// kernel occlusion estimate, blurred and then sampled by the scene shader to

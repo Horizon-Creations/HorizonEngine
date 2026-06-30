@@ -495,6 +495,9 @@ uniform vec3      uAuroraColor;    // aurora lower/base colour (e.g. green)
 uniform vec3      uAuroraColorTop; // aurora upper colour (e.g. purple)
 uniform vec3      uWind;        // cloud drift vector (world units / s, horizontal)
 uniform sampler3D uNoise;       // tiling 3D value-noise (replaces the hash fbm)
+uniform sampler2D uCloudTex;    // quarter-res cloud buffer (rgb = L, a = T) for low-res clouds
+uniform float     uLowResClouds; // 1 = composite uCloudTex instead of the inline raymarch
+uniform float     uCloudPrepass; // 1 = this draw outputs (L, T) only (the quarter-res cloud pass)
 uniform float     uFlash;       // lightning flash (0 = none … 1 = full strike)
 uniform int       uCloudMode;   // 0 = sky-dome clouds, 1 = 3D volumetric (world-anchored)
 uniform int       uCloudQuality; // cloud raymarch quality: 0 Low, 1 Med, 2 High (perf knob)
@@ -1576,6 +1579,22 @@ void main()
 	// to frame → stars flicker / jump as the camera turns. (skyColor/applyClouds
 	// normalize internally, so nothing downstream needs the raw vector.)
 	vec3 dir = normalize(wp1.xyz / wp1.w - wp0.xyz / wp0.w);
+	if (uCloudPrepass > 0.5)
+	{
+		// Quarter-res clouds-only pass: output (L, T); the sky pass upsamples + composites.
+		float T = 1.0; vec3 L;
+		if (uCloudMode == 1)
+		{
+			vec3 hazeSky = skyColor(dir, uSunDir);   // aerial-perspective reference
+			vec3 comp = applyClouds3D(hazeSky, dir, uCameraPos, uSunDir, uTime, uCloudCoverage,
+			                          uSunColor, uWind, uCloudHeight, T);
+			L = comp - hazeSky * T;                  // recover L
+		}
+		else
+			L = applyClouds(vec3(0.0), dir, uSunDir, uTime, uCloudCoverage, uSunColor, uWind, T);
+		FragColor = vec4(L, T);
+		return;
+	}
 	vec3 col  = skyColor(dir, uSunDir);
 	// Lift the bright sun body out so the cloud pass can occlude it (re-added below).
 	vec3 sunGlareCol = sunGlare(dir, uSunDir);
@@ -1597,7 +1616,14 @@ void main()
 	col  = cirrus(col, dir, uSunDir, uSunColor, uCirrus, uCirrusSeed, uTime, uWind.xz); // alpha-blended
 	col  = contrails(col, dir, uSunDir, uContrails, uCloudCoverage); // alpha-blended into the sky
 	float cloudT = 1.0;                                   // view-ray cloud transmittance
-	if (uCloudMode == 1)
+	if (uLowResClouds > 0.5)
+	{
+		// Low-res clouds: composite the upsampled (L, T) from the quarter-res pre-pass.
+		vec4 lt = texture(uCloudTex, vNDC * 0.5 + 0.5);
+		col = col * lt.a + lt.rgb;
+		cloudT = lt.a;
+	}
+	else if (uCloudMode == 1)
 		col = applyClouds3D(col, dir, uCameraPos, uSunDir, uTime, uCloudCoverage, uSunColor, uWind, uCloudHeight, cloudT);
 	else
 		col = applyClouds(col, dir, uSunDir, uTime, uCloudCoverage, uSunColor, uWind, cloudT);
@@ -2479,6 +2505,9 @@ void OpenGLRenderer::CreateSkyPipeline()
 	m_uSkyAuroraFragment = glGetUniformLocation(m_skyProgram, "uAuroraFragment");
 	m_uSkyWind        = glGetUniformLocation(m_skyProgram, "uWind");
 	m_uSkyNoise       = glGetUniformLocation(m_skyProgram, "uNoise");
+	m_uSkyCloudTex     = glGetUniformLocation(m_skyProgram, "uCloudTex");
+	m_uSkyLowResClouds = glGetUniformLocation(m_skyProgram, "uLowResClouds");
+	m_uSkyCloudPrepass = glGetUniformLocation(m_skyProgram, "uCloudPrepass");
 	m_uSkyFlash       = glGetUniformLocation(m_skyProgram, "uFlash");
 	m_uSkyCloudMode   = glGetUniformLocation(m_skyProgram, "uCloudMode");
 	m_uSkyCloudQuality = glGetUniformLocation(m_skyProgram, "uCloudQuality");
@@ -2697,6 +2726,38 @@ void OpenGLRenderer::DestroyBloomTargets()
 	m_bloomFBO[0] = m_bloomFBO[1] = 0;
 	m_bloomColor[0] = m_bloomColor[1] = 0;
 	m_bloomW = m_bloomH = 0;
+}
+
+void OpenGLRenderer::EnsureCloudFBO(int width, int height)
+{
+	width  = std::max(1, width);
+	height = std::max(1, height);
+	if (m_cloudFBO && width == m_cloudW && height == m_cloudH) return;
+	DestroyCloudFBO();
+	glGenFramebuffers(1, &m_cloudFBO);
+	glGenTextures(1, &m_cloudTex);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_cloudFBO);
+	glBindTexture(GL_TEXTURE_2D, m_cloudTex);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); // bilinear upsample
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_cloudTex, 0);
+	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+		Logger::Log(Logger::LogLevel::Error, "OpenGLRenderer: cloud FBO incomplete");
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	m_cloudW = width;
+	m_cloudH = height;
+}
+
+void OpenGLRenderer::DestroyCloudFBO()
+{
+	if (m_cloudFBO) glDeleteFramebuffers(1, &m_cloudFBO);
+	if (m_cloudTex) glDeleteTextures(1, &m_cloudTex);
+	m_cloudFBO = 0; m_cloudTex = 0;
+	m_cloudW = m_cloudH = 0;
 }
 
 // Bright-pass the HDR color, then ping-pong blur. Leaves the result in
@@ -3466,6 +3527,7 @@ void OpenGLRenderer::Shutdown()
 	DestroyViewportTarget();
 	DestroyHDRTarget();
 	DestroyBloomTargets();
+	DestroyCloudFBO();
 	DestroyLdrTarget();
 	DestroyGpuTimer();
 	DestroySSAOTargets();
@@ -4251,11 +4313,42 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glActiveTexture(GL_TEXTURE2);             // 3D value-noise on unit 2
 			glBindTexture(GL_TEXTURE_3D, m_noiseTex);
 			glUniform1i(m_uSkyNoise, 2);
+			// ── Low-res clouds: quarter-res clouds-only pre-pass (previous-frame camera so
+			// it can run without re-extracting; 1-frame lag is imperceptible on soft clouds).
+			const bool lowRes = GetEnvironment().lowResClouds && GetEnvironment().cloudCoverage > 0.0f;
+			if (lowRes)
+			{
+				GLint prevFBO = 0; glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevFBO);
+				EnsureCloudFBO(std::max(1, pw / 2), std::max(1, ph / 2));
+				glUniformMatrix4fv(m_uSkyInvVP, 1, GL_FALSE, glm::value_ptr(m_lastInvViewProj));
+				glUniform3fv(m_uSkySunDir, 1, glm::value_ptr(m_lastSunDir));
+				glUniform1f(m_uSkyCloudPrepass, 1.0f);
+				glUniform1f(m_uSkyLowResClouds, 0.0f);
+				glBindFramebuffer(GL_FRAMEBUFFER, m_cloudFBO);
+				glViewport(0, 0, m_cloudW, m_cloudH);
+				glDisable(GL_DEPTH_TEST);
+				glClearColor(0.0f, 0.0f, 0.0f, 1.0f);    // L=0, T=1 (clear sky)
+				glClear(GL_COLOR_BUFFER_BIT);
+				glBindVertexArray(m_fsVAO);
+				glDrawArrays(GL_TRIANGLES, 0, 3);
+				glEnable(GL_DEPTH_TEST);
+				glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prevFBO);
+				glViewport(0, 0, pw, ph);
+				glUniformMatrix4fv(m_uSkyInvVP, 1, GL_FALSE, glm::value_ptr(invViewProj)); // restore this frame
+				glUniform3fv(m_uSkySunDir, 1, glm::value_ptr(sunDir));
+			}
+			glUniform1f(m_uSkyCloudPrepass, 0.0f);
+			glUniform1f(m_uSkyLowResClouds, (lowRes && m_cloudTex) ? 1.0f : 0.0f);
+			glActiveTexture(GL_TEXTURE3);            // quarter-res cloud buffer on unit 3
+			glBindTexture(GL_TEXTURE_2D, m_cloudTex);
+			glUniform1i(m_uSkyCloudTex, 3);
 			glActiveTexture(GL_TEXTURE0);
 			glBindVertexArray(m_fsVAO);
 			glDrawArrays(GL_TRIANGLES, 0, 3);
 			glDepthFunc(GL_LESS);   // restore default for the next pass
 			glDepthMask(GL_TRUE);
+			m_lastInvViewProj = invViewProj;   // remembered for next frame's cloud pre-pass
+			m_lastSunDir      = sunDir;
 		}
 
 		// ── Transparency pass: sorted alpha-blended draws over the opaque scene +

@@ -4022,6 +4022,8 @@ void EditorUI::RenderInspector(AppContext& ctx)
 				ImGui::SetNextItemWidth(-1.0f);
 				if (ImGui::Combo("##cloudquality", &q, cloudQ, 3)) { env->cloudQuality = q; trackEdit(); }
 				ImGui::TextDisabled("Lower = cheaper. Clouds are a top GPU cost; Low ~halves their step count.");
+				if (ImGui::Checkbox("Low-res clouds (quarter-res pass)", &env->lowResClouds)) trackEdit();
+				ImGui::TextDisabled("Raymarch clouds at 1/4 res + upsample. Big win in open-sky views.\nToggle + F9 to A/B the cost. (Metal first.)");
 			}
 			// Cloud appearance: tweak the look without re-rolling the pattern.
 			ImGui::SetNextItemWidth(-1.0f);

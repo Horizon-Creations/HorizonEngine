@@ -1905,12 +1905,61 @@ float3 sunGlare(float3 dir, float3 sunDir)
 	return g;
 }
 
+// ── Low-res cloud pass support ───────────────────────────────────────────────
+// The cloud raymarch as a standalone (L, T): scattered light L (rgb) + view-ray
+// transmittance T (a), WITHOUT the baseSky composite (the caller does baseSky*T+L).
+// Thin wrappers over the unchanged applyClouds()/applyClouds3D() so the inline path
+// stays byte-identical: dome passes baseSky=0 (→ returns L directly); 3D needs a
+// baseSky for its aerial-perspective haze, so it uses skyColor(dir) and recovers
+// L = composited − baseSky*T (exact, since applyClouds3D returns baseSky*T + L).
+float4 cloudsDomeLT(float3 dir, float3 sunDir, float time, float coverage, float3 sunColor,
+                    float3 wind, float3 cloudTint, float densityMul, float quality,
+                    texture3d<float> noiseTex, sampler noiseSamp)
+{
+	float T = 1.0;
+	float3 L = applyClouds(float3(0.0), dir, sunDir, time, coverage, sunColor, wind,
+	                       cloudTint, densityMul, quality, noiseTex, noiseSamp, T);
+	return float4(L, T);
+}
+float4 clouds3DLT(float3 dir, float3 camPos, float3 sunDir, float time, float coverage,
+                  float3 sunColor, float3 wind, float cloudH, float cloudFluffiness,
+                  float cloudDensity, float quality, float3 cloudTint, float2 fragCoord,
+                  texture3d<float> noiseTex, sampler noiseSamp)
+{
+	float3 hazeSky = skyColor(dir, sunDir);   // aerial-perspective reference (quarter-res ok)
+	float  T = 1.0;
+	float3 comp = applyClouds3D(hazeSky, dir, camPos, sunDir, time, coverage, sunColor, wind,
+	                            cloudH, cloudFluffiness, cloudDensity, quality, cloudTint,
+	                            fragCoord, noiseTex, noiseSamp, T);
+	return float4(comp - hazeSky * T, T);     // recover L
+}
+
+// Standalone cloud pass (drawn at quarter resolution → upsampled + composited in
+// skyFragment when low-res clouds are enabled). Output: rgb = L, a = T.
+fragment float4 cloudFragment(SkyOut in [[stage_in]],
+                              constant SkyParams& p [[buffer(0)]],
+                              texture3d<float> noiseTex [[texture(1)]],
+                              sampler noiseSamp [[sampler(1)]])
+{
+	float4 wp1 = p.invViewProj * float4(in.ndc,  1.0, 1.0);
+	float4 wp0 = p.invViewProj * float4(in.ndc, -1.0, 1.0);
+	float3 dir = normalize(wp1.xyz / wp1.w - wp0.xyz / wp0.w);
+	if (p.cameraPos.w > 0.5)
+		return clouds3DLT(dir, p.cameraPos.xyz, p.sunDir.xyz, p.params.z, p.params.y,
+		                  p.sunColor.xyz, p.wind.xyz, p.cloud.x, p.cloud.z, p.cloud.y,
+		                  p.star2.y, p.cloudTint.xyz, in.position.xy, noiseTex, noiseSamp);
+	return cloudsDomeLT(dir, p.sunDir.xyz, p.params.z, p.params.y, p.sunColor.xyz, p.wind.xyz,
+	                    p.cloudTint.xyz, p.cloud.y, p.star2.y, noiseTex, noiseSamp);
+}
+
 fragment float4 skyFragment(SkyOut in [[stage_in]],
                             constant SkyParams& p [[buffer(0)]],
                             texture2d<float> moonTex [[texture(0)]],
                             sampler moonSamp [[sampler(0)]],
                             texture3d<float> noiseTex [[texture(1)]],
-                            sampler noiseSamp [[sampler(1)]])
+                            sampler noiseSamp [[sampler(1)]],
+                            texture2d<float> cloudTex [[texture(2)]],
+                            sampler cloudSamp [[sampler(2)]])
 {
 	float4 wp1 = p.invViewProj * float4(in.ndc,  1.0, 1.0);
 	float4 wp0 = p.invViewProj * float4(in.ndc, -1.0, 1.0);
@@ -1942,7 +1991,15 @@ fragment float4 skyFragment(SkyOut in [[stage_in]],
 	col = cirrus(col, dir, p.sunDir.xyz, p.sunColor.xyz, p.cloudTint.w, p.cirrus.x, p.params.z, p.wind.xz);
 	col = contrails(col, dir, p.sunDir.xyz, p.cloud.w, p.params.y);
 	float cloudT = 1.0;                                     // view-ray cloud transmittance
-	if (p.cameraPos.w > 0.5)
+	if (p.star2.z > 0.5)
+	{
+		// Low-res clouds: composite the upsampled (L, T) from the quarter-res pre-pass.
+		float2 uv = float2(in.ndc.x * 0.5 + 0.5, 0.5 - in.ndc.y * 0.5);
+		float4 lt = cloudTex.sample(cloudSamp, uv);
+		col = col * lt.a + lt.rgb;
+		cloudT = lt.a;
+	}
+	else if (p.cameraPos.w > 0.5)
 		col = applyClouds3D(col, dir, p.cameraPos.xyz, p.sunDir.xyz, p.params.z, p.params.y,
 		                    p.sunColor.xyz, p.wind.xyz, p.cloud.x, p.cloud.z, p.cloud.y, p.star2.y,
 		                    p.cloudTint.xyz, in.position.xy, noiseTex, noiseSamp, cloudT);
@@ -2227,6 +2284,7 @@ void MetalRenderer::Shutdown()
 	DestroyViewportTarget();
 	DestroyHDRTarget();
 	DestroyBloomTargets();
+	DestroyCloudTarget();
 	DestroyLdrTarget();
 	DestroySSAOTargets();
 	DrainRetiredTextures();
@@ -2236,6 +2294,7 @@ void MetalRenderer::Shutdown()
 	if (m_bloomBrightPipeline)  { CFBridgingRelease(m_bloomBrightPipeline);  m_bloomBrightPipeline = nullptr; }
 	if (m_blurPipeline)         { CFBridgingRelease(m_blurPipeline);         m_blurPipeline = nullptr; }
 	if (m_skyPipeline)          { CFBridgingRelease(m_skyPipeline);          m_skyPipeline = nullptr; }
+	if (m_cloudPipeline)        { CFBridgingRelease(m_cloudPipeline);        m_cloudPipeline = nullptr; }
 	if (m_moonTexture)          { CFBridgingRelease(m_moonTexture);          m_moonTexture = nullptr; }
 	if (m_dummyTexture)    { CFBridgingRelease(m_dummyTexture);    m_dummyTexture = nullptr; }
 	if (m_linearSampler)   { CFBridgingRelease(m_linearSampler);   m_linearSampler = nullptr; }
@@ -2549,6 +2608,17 @@ void MetalRenderer::CreateScenePipeline()
 			throw std::runtime_error(std::string("MetalRenderer: sky pipeline creation failed: ")
 				+ (skyError ? [[skyError localizedDescription] UTF8String] : "unknown"));
 		m_skyPipeline = (void*)CFBridgingRetain(skyPso);
+
+		// ── Cloud pre-pass pipeline (quarter-res clouds-only → RGBA16F (L,T), no depth) ──
+		MTLRenderPipelineDescriptor* cloudDesc = [[MTLRenderPipelineDescriptor alloc] init];
+		cloudDesc.vertexFunction   = [skyLib newFunctionWithName:@"skyVertex"];
+		cloudDesc.fragmentFunction = [skyLib newFunctionWithName:@"cloudFragment"];
+		cloudDesc.colorAttachments[0].pixelFormat = kSceneColorFormat; // RGBA16F (rgb=L, a=T)
+		id<MTLRenderPipelineState> cloudPso = [device newRenderPipelineStateWithDescriptor:cloudDesc error:&skyError];
+		if (!cloudPso)
+			throw std::runtime_error(std::string("MetalRenderer: cloud pipeline creation failed: ")
+				+ (skyError ? [[skyError localizedDescription] UTF8String] : "unknown"));
+		m_cloudPipeline = (void*)CFBridgingRetain(cloudPso);
 
 		MTLDepthStencilDescriptor* depthDesc = [[MTLDepthStencilDescriptor alloc] init];
 		depthDesc.depthCompareFunction = MTLCompareFunctionLessEqual;
@@ -3321,6 +3391,73 @@ void MetalRenderer::DestroyBloomTargets()
 	m_bloomW = m_bloomH = 0;
 }
 
+void MetalRenderer::EnsureCloudTarget(int width, int height)
+{
+	width  = std::max(1, width);
+	height = std::max(1, height);
+	if (m_cloudColor && width == m_cloudW && height == m_cloudH) return;
+	DestroyCloudTarget();
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	MTLTextureDescriptor* desc = [MTLTextureDescriptor
+		texture2DDescriptorWithPixelFormat:kSceneColorFormat width:width height:height mipmapped:NO];
+	desc.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+	desc.storageMode = MTLStorageModePrivate;
+	m_cloudColor = (void*)CFBridgingRetain([device newTextureWithDescriptor:desc]);
+	m_cloudW = width;
+	m_cloudH = height;
+}
+
+void MetalRenderer::DestroyCloudTarget()
+{
+	if (m_cloudColor) { CFBridgingRelease(m_cloudColor); m_cloudColor = nullptr; }
+	m_cloudW = m_cloudH = 0;
+}
+
+// Quarter-res clouds-only pass → m_cloudColor (rgb = scattered L, a = transmittance T).
+// The sky pass upsamples + composites it (bg*T + L) when EnvironmentSettings.lowResClouds
+// is on. SkyParams build MUST stay identical to EncodeSky() so the clouds match the sky.
+void MetalRenderer::EncodeCloudPrepass(void* cmdBufPtr, const glm::mat4& invViewProj,
+	const glm::vec3& sunDir, const glm::vec3& sunColor, float timeOfDay, float cloudCoverage,
+	float time, float auroraIntensity, const glm::vec3& nebulaColor, float nebulaIntensity,
+	const glm::vec3& auroraColor, float milkyWayIntensity, const glm::vec3& wind, int width, int height)
+{
+	if (!m_cloudPipeline || width <= 0 || height <= 0) return;
+	EnsureCloudTarget(width, height);
+	if (!m_cloudColor) return;
+	id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
+	MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+	pass.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_cloudColor;
+	pass.colorAttachments[0].loadAction  = MTLLoadActionClear;
+	pass.colorAttachments[0].clearColor  = MTLClearColorMake(0.0, 0.0, 0.0, 1.0); // L=0, T=1 (clear sky)
+	pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+	id<MTLRenderCommandEncoder> enc = [cmdBuf renderCommandEncoderWithDescriptor:pass];
+	[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_cloudPipeline];
+	[enc setFragmentTexture:(__bridge id<MTLTexture>)m_noiseTexture atIndex:1];
+	[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_noiseSampler atIndex:1];
+	const IRenderer::EnvironmentSettings& env = GetEnvironment();
+	SkyParams p;
+	p.invViewProj    = invViewProj;
+	p.sunDir         = glm::vec4(sunDir, m_moonTexture ? 1.0f : 0.0f);
+	p.sunColor       = glm::vec4(sunColor, env.moonPhase);
+	p.params         = glm::vec4(timeOfDay, cloudCoverage, time, auroraIntensity);
+	p.nebulaColor    = glm::vec4(nebulaColor, nebulaIntensity);
+	p.auroraColor    = glm::vec4(auroraColor, milkyWayIntensity);
+	p.wind           = glm::vec4(wind, env.flash);
+	p.cameraPos      = glm::vec4(m_renderWorld.camera.position, (float)env.cloudMode);
+	p.cloud          = glm::vec4(env.cloudHeight, env.cloudDensity, env.cloudFluffiness, env.contrailAmount);
+	p.cloudTint      = glm::vec4(env.cloudTint, env.cirrusAmount);
+	p.cirrus         = glm::vec4(env.cirrusSeed, env.auroraHeight, env.auroraFragmentation, env.nebulaSeed);
+	p.nebulaColor2   = glm::vec4(env.nebulaColor2, (float)env.nebulaQuality);
+	p.nebulaColor3   = glm::vec4(env.nebulaColor3, 0.0f);
+	p.auroraColorTop = glm::vec4(env.auroraColorTop, 0.0f);
+	p.starColor      = glm::vec4(env.starColor, env.starBrightness);
+	p.star           = glm::vec4(env.starSize, env.starSizeVariation, env.starDensity, env.starGlow);
+	p.star2          = glm::vec4(env.starTwinkle, (float)env.cloudQuality, 1.0f, 0.0f);
+	[enc setFragmentBytes:&p length:sizeof(p) atIndex:0];
+	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+	[enc endEncoding];
+}
+
 void MetalRenderer::SetBloomSettings(const BloomSettings& s)
 {
 	m_bloomEnabled   = s.enabled;
@@ -3663,7 +3800,13 @@ void MetalRenderer::EncodeSky(void* renderEncoder, const glm::mat4& invViewProj,
 	p.auroraColorTop = glm::vec4(env.auroraColorTop, 0.0f);
 	p.starColor      = glm::vec4(env.starColor, env.starBrightness);
 	p.star           = glm::vec4(env.starSize, env.starSizeVariation, env.starDensity, env.starGlow);
-	p.star2          = glm::vec4(env.starTwinkle, (float)env.cloudQuality, 0.0f, 0.0f); // y = cloud quality
+	// z = low-res clouds, but only when the pre-pass actually produced a buffer (else
+	// fall back to the inline raymarch so nothing breaks if the target is missing).
+	p.star2          = glm::vec4(env.starTwinkle, (float)env.cloudQuality,
+	                             (env.lowResClouds && m_cloudColor) ? 1.0f : 0.0f, 0.0f);
+	// Quarter-res cloud buffer (rgb=L, a=T) on slot 2; dummy when unused (must be bound).
+	[enc setFragmentTexture:(__bridge id<MTLTexture>)(m_cloudColor ? m_cloudColor : m_dummyTexture) atIndex:2];
+	[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:2];
 	[enc setFragmentBytes:&p length:sizeof(p) atIndex:0];
 	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
 }
@@ -3789,6 +3932,10 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 
 	const glm::mat4 viewProj =
 		m_renderWorld.camera.projection * m_renderWorld.camera.view;
+	// Remember this frame's view/sun so next frame's quarter-res cloud pre-pass (which
+	// runs before the extractor) has a camera to march from (1-frame lag, imperceptible).
+	m_lastViewProj = viewProj;
+	m_lastSunDir   = m_renderWorld.sunDirection;
 
 	// Direction toward the sun for sky + image-based ambient — resolved by the
 	// extractor (scene directional light, or the day-night cycle when enabled).
@@ -4253,6 +4400,25 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			// "Scene" stage pair — instead derive the Scene total from the first/last
 			// draw-boundary points in the completion handler (it becomes approx too).
 			ftAttachPass((__bridge void*)hdrPass, "Scene");
+
+			// Low-res clouds: raymarch the clouds into the quarter-res buffer BEFORE the
+			// scene encoder (its own pass), using the previous frame's view (the extractor
+			// hasn't run yet this frame). The sky pass below then upsamples + composites it.
+			{
+				const IRenderer::EnvironmentSettings& cenv = GetEnvironment();
+				if (cenv.lowResClouds && cenv.cloudCoverage > 0.0f && m_cloudPipeline)
+				{
+					const float cwr = glm::radians(cenv.windDirection);
+					const glm::vec3 cwind = glm::vec3(std::sin(cwr), 0.0f, -std::cos(cwr))
+					                      * (cenv.windSpeed * 0.025f);
+					EncodeCloudPrepass((__bridge void*)cmdBuf, glm::inverse(m_lastViewProj), m_lastSunDir,
+						cenv.sunColor, cenv.timeOfDay, cenv.cloudCoverage,
+						static_cast<float>(SDL_GetTicks()) / 1000.0f, cenv.auroraIntensity,
+						cenv.nebulaColor, cenv.nebulaIntensity, cenv.auroraColor, cenv.milkyWayIntensity,
+						cwind, std::max(1, sceneW / 2), std::max(1, sceneH / 2));
+				}
+				else if (m_cloudColor) DestroyCloudTarget(); // freed when toggled off
+			}
 
 			id<MTLRenderCommandEncoder> sceneEncoder =
 				[cmdBuf renderCommandEncoderWithDescriptor:hdrPass];

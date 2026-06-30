@@ -445,6 +445,21 @@ private:
 	unsigned int m_bloomColor[2] = { 0, 0 };   // RGBA16F, half-res
 	int          m_bloomW        = 0;
 	int          m_bloomH        = 0;
+	// ── Low-res clouds (quarter-res cloud pre-pass; EnvironmentSettings.lowResClouds) ──
+	// Reuses m_skyProgram with uCloudPrepass=1 to raymarch clouds into m_cloudTex (rgb=L,
+	// a=T) at quarter res; the sky pass upsamples + composites it. Uses the previous
+	// frame's view/sun (1-frame lag, imperceptible) so the pre-pass needs no re-extract.
+	unsigned int m_cloudFBO = 0;
+	unsigned int m_cloudTex = 0;               // RGBA16F, quarter-res (L, T)
+	int          m_cloudW   = 0;
+	int          m_cloudH   = 0;
+	int          m_uSkyCloudTex     = -1;
+	int          m_uSkyLowResClouds = -1;
+	int          m_uSkyCloudPrepass = -1;
+	glm::mat4    m_lastInvViewProj = glm::mat4(1.0f); // previous frame, for the cloud pre-pass
+	glm::vec3    m_lastSunDir      = glm::vec3(0.0f, 1.0f, 0.0f);
+	void         EnsureCloudFBO(int width, int height);
+	void         DestroyCloudFBO();
 	bool         m_bloomEnabled   = true;
 	float        m_bloomThreshold = 1.0f;
 	float        m_bloomKnee      = 0.5f;
