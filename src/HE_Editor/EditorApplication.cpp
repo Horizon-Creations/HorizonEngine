@@ -1253,6 +1253,7 @@ void EditorApplication::dumpFrameHeadless()
 			e->auroraIntensity   = static_cast<float>(envF("HE_DUMP_AURORA", e->auroraIntensity));
 			e->auroraHeight        = static_cast<float>(envF("HE_DUMP_AURHEIGHT", e->auroraHeight));
 			e->auroraFragmentation = static_cast<float>(envF("HE_DUMP_AURFRAG",   e->auroraFragmentation));
+			e->rainAmount        = static_cast<float>(envF("HE_DUMP_RAIN",     e->rainAmount));
 		}
 		// Look slightly up toward the sky from a low vantage. HE_DUMP_YAW rotates the
 		// heading (0 = toward -Z, 180 = toward +Z) so e.g. the aurora band can be framed.
@@ -1517,7 +1518,7 @@ void EditorApplication::pushEnvironment(float dt)
 		.auroraColorTop = env->auroraColorTop,
 		.auroraHeight = env->auroraHeight, .auroraFragmentation = env->auroraFragmentation,
 		.windDirection = env->windDirection, .windSpeed = env->windSpeed, .flash = env->flash,
-		.wetness = env->wetness, .snowAmount = env->snowAmount,
+		.wetness = env->wetness, .snowAmount = env->snowAmount, .rainAmount = env->rainAmount,
 		.cloudMode = env->cloudMode, .cloudHeight = env->cloudHeight,
 		.cloudQuality = env->cloudQuality, .lowResClouds = env->lowResClouds,
 		.cloudDensity = env->cloudDensity, .cloudFluffiness = env->cloudFluffiness,

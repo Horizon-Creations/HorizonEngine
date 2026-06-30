@@ -214,6 +214,7 @@ public:
         // snowAmount lays white snow on up-facing surfaces. Read by the lit shader.
         float     wetness    = 0.0f;
         float     snowAmount = 0.0f;
+        float     rainAmount = 0.0f;   // drives the sky rainbow (rain + sun) — Metal/OpenGL sky pass
         // Cloud render mode (OpenGL): 0 = sky-dome (default), 1 = 3D volumetric clouds
         // anchored in the world so they parallax as the camera moves. cloudHeight = the
         // 3D layer's height above the camera in world units. Other backends ignore these.

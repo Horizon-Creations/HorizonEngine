@@ -456,6 +456,7 @@ private:
 	int          m_uSkyCloudTex     = -1;
 	int          m_uSkyLowResClouds = -1;
 	int          m_uSkyCloudPrepass = -1;
+	int          m_uSkyRainAmount   = -1;
 	glm::mat4    m_lastInvViewProj = glm::mat4(1.0f); // previous frame, for the cloud pre-pass
 	glm::vec3    m_lastSunDir      = glm::vec3(0.0f, 1.0f, 0.0f);
 	void         EnsureCloudFBO(int width, int height);

@@ -127,7 +127,7 @@ void GameApplication::OnRender(float deltaTime)
 				.auroraColorTop = env->auroraColorTop,
 				.auroraHeight = env->auroraHeight, .auroraFragmentation = env->auroraFragmentation,
 				.windDirection = env->windDirection, .windSpeed = env->windSpeed, .flash = env->flash,
-				.wetness = env->wetness, .snowAmount = env->snowAmount,
+				.wetness = env->wetness, .snowAmount = env->snowAmount, .rainAmount = env->rainAmount,
 				.cloudMode = env->cloudMode, .cloudHeight = env->cloudHeight,
 				.cloudQuality = env->cloudQuality, .lowResClouds = env->lowResClouds,
 				.cloudDensity = env->cloudDensity, .cloudFluffiness = env->cloudFluffiness,
