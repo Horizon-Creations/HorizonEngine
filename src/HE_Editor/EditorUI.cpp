@@ -4103,6 +4103,9 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			ImGui::SliderFloat("##startwinkle", &env->starTwinkle, 0.0f, 1.0f, "Twinkle: %.2f"); trackEdit();
 			ImGui::SetNextItemWidth(-1.0f);
 			ImGui::SliderFloat("##milkyway", &env->milkyWayIntensity, 0.0f, 1.0f, "Milky Way: %.2f"); trackEdit();
+			ImGui::SetNextItemWidth(-1.0f);
+			ImGui::SliderFloat("##shootingstars", &env->shootingStars, 0.0f, 1.0f, "Shooting Stars: %.2f"); trackEdit();
+			ImGui::TextDisabled("Occasional meteors streak across the night sky; higher = more frequent. Night only.");
 
 			ImGui::SeparatorText("Nebula");
 			ImGui::SetNextItemWidth(-1.0f);

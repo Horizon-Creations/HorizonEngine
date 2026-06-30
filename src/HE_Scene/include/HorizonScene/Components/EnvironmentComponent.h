@@ -66,6 +66,11 @@ struct EnvironmentComponent
     // budget. Strongest with broken cloud cover (needs cloudCoverage > 0 to have gaps).
     float     godRays = 0.0f;   // 0 none … 1 strong shafts
 
+    // Shooting stars / meteors: occasional bright streaks across the night sky. 0 = none,
+    // higher = more frequent (and more concurrent). Night-only; deterministic from the sky
+    // clock so they animate smoothly and reproduce in headless captures.
+    float     shootingStars = 0.0f;   // 0 none … 1 frequent meteors
+
     // Atmospheric fog / aerial perspective (0 density = off; height falloff pools
     // the fog near the ground).
     float fogDensity      = 0.0f;
