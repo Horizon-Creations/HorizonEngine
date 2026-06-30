@@ -2166,8 +2166,28 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				// In play mode the game's scene camera takes over, so the
 				// override is cleared and editor navigation is disabled.
 				bool navigating = false;
+				// RMB fly-look capture state (relative-mouse mode). Hoisted above the
+				// play branch so entering play mode mid-drag releases the capture too,
+				// instead of stranding the window with a hidden/pinned cursor.
+				static bool  s_rmbCaptured = false;
+				static float s_rmbStartX   = 0.f;   // cursor pos at press, restored on release
+				static float s_rmbStartY   = 0.f;
+				SDL_Window* sdlWin = ctx.window ? ctx.window->GetNativeWindow() : nullptr;
+				// Drop fly-look capture: warp the cursor back to the press point BEFORE
+				// leaving relative mode (SDL applies the warp as the post-relative
+				// position, landing it exactly where the look-drag began).
+				auto endLookCapture = [&]()
+				{
+					if (s_rmbCaptured && sdlWin)
+					{
+						SDL_WarpMouseInWindow(sdlWin, s_rmbStartX, s_rmbStartY);
+						SDL_SetWindowRelativeMouseMode(sdlWin, false);
+						s_rmbCaptured = false;
+					}
+				};
 				if (ctx.editorCamera && ctx.isPlaying)
 				{
+					endLookCapture();
 					ctx.renderer->SetEditorCamera(EditorCameraOverride{}); // active=false
 				}
 				else if (ctx.editorCamera)
@@ -2185,33 +2205,34 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 					if (!anyNav)                s_navActive = false;
 					navigating = s_navActive;
 
-					// RMB cursor capture: hide cursor on press, warp it back to the press
-					// position every fly-look frame so it never drifts to a display edge
-					// and never hovers over other UI widgets.  Delta is computed via
-					// SDL_GetMouseState so it is independent of ImGui's mouse tracking.
-					static bool  s_rmbCaptured  = false;
-					static float s_rmbStartX    = 0.f;
-					static float s_rmbStartY    = 0.f;
-					static float s_rmbLastX     = 0.f;
-					static float s_rmbLastY     = 0.f;
-					SDL_Window* sdlWin = ctx.window ? ctx.window->GetNativeWindow() : nullptr;
+					// RMB fly-look capture: put the window into relative-mouse mode so we
+					// read raw OS motion deltas (event.motion.xrel/yrel) instead of the
+					// absolute cursor position. The previous approach sampled the absolute
+					// position once per frame and warped the cursor back to the press point,
+					// which discarded the sub-pixel remainder every frame. At high frame
+					// rates the per-frame movement is tiny, so that cumulative loss (plus OS
+					// pointer-acceleration) made looking feel sluggish and frame-rate
+					// dependent. Relative mode delivers acceleration-free, frame-rate-
+					// independent deltas with no warping and no display-edge collisions.
+					//
+					// Capture tracks the look predicate EXACTLY (rmb && !altLmb): Alt+LMB
+					// is the orbit gesture, which needs a visible cursor and io.MouseDelta,
+					// so engaging Alt mid-RMB must drop relative mode — otherwise orbit
+					// freezes and the stale accumulator snaps the view when look resumes.
 					if (sdlWin)
 					{
-						if (rmb && imageHovered && !s_rmbCaptured)
+						if (rmb && !altLmb && imageHovered && !s_rmbCaptured)
 						{
 							SDL_GetMouseState(&s_rmbStartX, &s_rmbStartY);
-							s_rmbLastX = s_rmbStartX;
-							s_rmbLastY = s_rmbStartY;
-							SDL_SetWindowMouseGrab(sdlWin, true);
-							SDL_HideCursor();
+							SDL_SetWindowRelativeMouseMode(sdlWin, true);
+							// Discard any relative motion accumulated before capture so the
+							// first look frame doesn't jump by a stale delta.
+							SDL_GetRelativeMouseState(nullptr, nullptr);
 							s_rmbCaptured = true;
 						}
-						else if (!rmb && s_rmbCaptured)
+						else if ((!rmb || altLmb) && s_rmbCaptured)
 						{
-							SDL_SetWindowMouseGrab(sdlWin, false);
-							SDL_ShowCursor();
-							SDL_WarpMouseInWindow(sdlWin, s_rmbStartX, s_rmbStartY);
-							s_rmbCaptured = false;
+							endLookCapture();
 						}
 					}
 
@@ -2226,19 +2247,13 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 						cin.mouseDelta = glm::vec2(io.MouseDelta.x, io.MouseDelta.y);
 						if (cin.look)
 						{
-							// Fixed-point warp: read SDL position, compute delta from last
-							// known pos, then snap cursor back to the press position.
-							// This prevents display-edge collisions and UI hover pollution.
+							// Relative mode keeps the OS cursor pinned, so this is the raw
+							// frame motion delta — no warp, no absolute-position truncation.
 							if (s_rmbCaptured && sdlWin)
 							{
-								float mx, my;
-								SDL_GetMouseState(&mx, &my);
-								cin.mouseDelta = glm::vec2(mx - s_rmbLastX, my - s_rmbLastY);
-								SDL_WarpMouseInWindow(sdlWin, s_rmbStartX, s_rmbStartY);
-								s_rmbLastX = s_rmbStartX;
-								s_rmbLastY = s_rmbStartY;
-								// macOS restores cursor visibility on each warp call.
-								SDL_HideCursor();
+								float rx = 0.f, ry = 0.f;
+								SDL_GetRelativeMouseState(&rx, &ry);
+								cin.mouseDelta = glm::vec2(rx, ry);
 								ImGui::SetMouseCursor(ImGuiMouseCursor_None);
 							}
 							cin.fast = io.KeyShift;
