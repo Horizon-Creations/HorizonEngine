@@ -500,6 +500,7 @@ uniform float     uLowResClouds; // 1 = composite uCloudTex instead of the inlin
 uniform float     uCloudPrepass; // 1 = this draw outputs (L, T) only (the quarter-res cloud pass)
 uniform float     uRainAmount;   // rain (0..1) → rainbow arc when the sun is up + low
 uniform float     uGodRays;      // crepuscular sun-shaft strength (0 = off)
+uniform float     uShootingStars; // meteor frequency (0 = none) — night only
 uniform float     uFlash;       // lightning flash (0 = none … 1 = full strike)
 uniform int       uCloudMode;   // 0 = sky-dome clouds, 1 = 3D volumetric (world-anchored)
 uniform int       uCloudQuality; // cloud raymarch quality: 0 Low, 1 Med, 2 High (perf knob)
@@ -742,6 +743,58 @@ vec3 starField(vec3 dir, vec3 cdir, vec3 sunDir, float time, float milkyWay)
 	float bandDim = mix(1.6, mix(0.9, 1.5, mw), band);
 	// Dust lanes also dim the stars that DO survive in them (blocked background starlight).
 	return acc * (horizon * night * bandDim * (1.0 - 0.6 * rift * band));
+}
+
+// Shooting stars / meteors. A few independent "slots" each spawn a meteor once per cycle;
+// the meteor is a thin bright streak (small sharp head + tapering tail) that arcs across the
+// upper sky and fades over its short life. Deterministic from the sky clock so it animates
+// smoothly and reproduces in headless captures. Night-only. rate (0..1) scales frequency +
+// concurrency. Mirrors the Metal shootingStars().
+vec3 shootingStars(vec3 dir, vec3 sunDir, float time, float rate)
+{
+	if (rate <= 0.0) return vec3(0.0);
+	dir = normalize(dir); sunDir = normalize(sunDir);
+	float night = 1.0 - smoothstep(-0.10, 0.10, clamp(sunDir.y, -0.3, 1.0));
+	if (night <= 0.0 || dir.y <= 0.05) return vec3(0.0);
+
+	float r      = clamp(rate, 0.0, 1.0);
+	int   slots  = 1 + int(r * 3.0);                  // 1..4 concurrent meteor slots
+	float period = mix(9.0, 3.5, r);                  // seconds between meteors per slot
+	vec3  col    = vec3(0.0);
+	for (int k = 0; k < slots; ++k)
+	{
+		float tk  = time / period + float(k) * 1.37;
+		float idx = floor(tk);
+		float ph  = fract(tk);
+		float dur = 0.16;                             // visible fraction of the cycle
+		if (ph > dur) continue;
+		float t = ph / dur;                           // 0..1 along the streak's life
+
+		vec3  seed = vec3(idx * 1.7 + 0.3, float(k) * 7.3 + 1.1, idx * 0.31 + float(k) * 3.9);
+		float az   = starHash(seed)        * 6.2831853;
+		float el   = 0.25 + starHash(seed + 2.1) * 0.6;   // upper sky
+		vec3  p0   = normalize(vec3(cos(az) * cos(el), sin(el), sin(az) * cos(el)));
+		vec3  rnd  = vec3(starHash(seed + 3.3) - 0.5, starHash(seed + 5.7) - 0.5,
+		                  starHash(seed + 8.1) - 0.5);
+		vec3  tdir = normalize(cross(p0, normalize(rnd + vec3(0.001))));
+		float arc  = 0.5 + 0.4 * starHash(seed + 9.9); // angular travel over the life
+		vec3  head = normalize(p0 + tdir * (t * arc));
+		vec3  tail = normalize(p0 + tdir * (t * arc - 0.30)); // tail end trailing behind the head
+
+		// Closest point on the head→tail chord (small-arc approximation in direction space).
+		vec3  seg = tail - head;
+		float s   = clamp(dot(dir - head, seg) / max(dot(seg, seg), 1e-5), 0.0, 1.0);
+		float dd  = length(dir - (head + seg * s));
+		float w      = mix(0.0045, 0.0014, s);                       // taper: wider at head, thin at tail
+		float streak = exp(-(dd * dd) / (w * w)) * pow(1.0 - s, 1.6); // brightest at the head
+		float dh     = length(dir - head);
+		float headG  = exp(-(dh * dh) / 0.00006);                    // small sharp head (≈0.45°)
+		float life   = smoothstep(0.0, 0.08, t) * (1.0 - smoothstep(0.55, 1.0, t));
+		vec3  mcol   = vec3(0.78, 0.88, 1.0);                        // cool blue-white meteor
+		col += mcol * ((streak * 1.7 + headG * 1.1) * life);
+	}
+	float horizon = smoothstep(0.0, 0.12, dir.y);
+	return col * night * horizon;
 }
 
 // Procedural volumetric clouds — drawn only in the sky pass (kept out of the
@@ -1727,6 +1780,7 @@ void main()
 		col += nebula(dir, cdir, uSunDir, uNebula, uNebulaColor);
 		col += applyAurora3D(dir, uCameraPos, uTime, uAurora, uAuroraColor, uAuroraColorTop);
 		col += moonDisk(dir, uSunDir);
+		col += shootingStars(dir, uSunDir, uTime, uShootingStars); // meteors (clouds occlude below)
 	}
 	// High thin cirrus sits highest (farthest), then contrails, then the cumulus layer
 	// in front — so the lower clouds correctly occlude the thin upper layers.
@@ -2632,6 +2686,7 @@ void OpenGLRenderer::CreateSkyPipeline()
 	m_uSkyCloudPrepass = glGetUniformLocation(m_skyProgram, "uCloudPrepass");
 	m_uSkyRainAmount   = glGetUniformLocation(m_skyProgram, "uRainAmount");
 	m_uSkyGodRays      = glGetUniformLocation(m_skyProgram, "uGodRays");
+	m_uSkyShootingStars = glGetUniformLocation(m_skyProgram, "uShootingStars");
 	m_uSkyFlash       = glGetUniformLocation(m_skyProgram, "uFlash");
 	m_uSkyCloudMode   = glGetUniformLocation(m_skyProgram, "uCloudMode");
 	m_uSkyCloudQuality = glGetUniformLocation(m_skyProgram, "uCloudQuality");
@@ -4415,6 +4470,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glUniform1f(m_uSkyStarTwinkle, GetEnvironment().starTwinkle);
 			glUniform1f(m_uSkyRainAmount,  GetEnvironment().rainAmount);
 			glUniform1f(m_uSkyGodRays,     GetEnvironment().godRays);
+			glUniform1f(m_uSkyShootingStars, GetEnvironment().shootingStars);
 			// HE_SKY_TIME overrides the animation clock (for deterministic headless capture
 			// of time-animated sky elements like the aurora); normal runs use the wall clock.
 			float skyClock = static_cast<float>(SDL_GetTicks()) / 1000.0f;

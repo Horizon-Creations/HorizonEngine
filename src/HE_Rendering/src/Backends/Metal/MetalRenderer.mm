@@ -983,7 +983,7 @@ struct SkyParams {
 	float4 cirrus;        // x = cirrusSeed, y = auroraHeight, z = auroraFragmentation, w = nebulaSeed
 	float4 nebulaColor2;  // xyz = nebula colour 2, w = nebulaQuality (0 Perf / 1 High / 2 Max)
 	float4 nebulaColor3;  // xyz = nebula colour 3, w = god-ray (crepuscular) strength
-	float4 auroraColorTop;// xyz = aurora top colour
+	float4 auroraColorTop;// xyz = aurora top colour, w = shooting-star (meteor) frequency
 	float4 starColor;     // xyz = star colour, w = starBrightness
 	float4 star;          // x = starSize, y = starSizeVariation, z = starDensity, w = starGlow
 	float4 star2;         // x = starTwinkle
@@ -1190,6 +1190,58 @@ float3 starField(float3 dir, float3 cdir, float3 sunDir, float time, float milky
 	}
 	float bandDim = mix(1.6, mix(0.9, 1.5, mw), band);
 	return acc * (horizon * night * bandDim * (1.0 - 0.6 * rift * band));
+}
+
+// Shooting stars / meteors. A few independent "slots" each spawn a meteor once per cycle;
+// the meteor is a thin bright streak (head + short tail) that arcs across the upper sky and
+// fades over its short life. Deterministic from the sky clock so it animates smoothly and
+// reproduces in headless captures. Night-only. rate (0..1) scales frequency + concurrency.
+// Mirrors the GL shootingStars().
+float3 shootingStars(float3 dir, float3 sunDir, float time, float rate)
+{
+	if (rate <= 0.0) return float3(0.0);
+	dir = normalize(dir); sunDir = normalize(sunDir);
+	float night = 1.0 - smoothstep(-0.10, 0.10, clamp(sunDir.y, -0.3, 1.0));
+	if (night <= 0.0 || dir.y <= 0.05) return float3(0.0);
+
+	float  r      = clamp(rate, 0.0, 1.0);
+	int    slots  = 1 + int(r * 3.0);                  // 1..4 concurrent meteor slots
+	float  period = mix(9.0, 3.5, r);                  // seconds between meteors per slot
+	float3 col    = float3(0.0);
+	for (int k = 0; k < slots; ++k)
+	{
+		float tk  = time / period + float(k) * 1.37;
+		float idx = floor(tk);
+		float ph  = fract(tk);
+		float dur = 0.16;                              // visible fraction of the cycle
+		if (ph > dur) continue;
+		float t = ph / dur;                            // 0..1 along the streak's life
+
+		float3 seed = float3(idx * 1.7 + 0.3, float(k) * 7.3 + 1.1, idx * 0.31 + float(k) * 3.9);
+		float  az   = starHash(seed)        * 6.2831853;
+		float  el   = 0.25 + starHash(seed + 2.1) * 0.6;   // upper sky
+		float3 p0   = normalize(float3(cos(az) * cos(el), sin(el), sin(az) * cos(el)));
+		float3 rnd  = float3(starHash(seed + 3.3) - 0.5, starHash(seed + 5.7) - 0.5,
+		                     starHash(seed + 8.1) - 0.5);
+		float3 tdir = normalize(cross(p0, normalize(rnd + float3(0.001))));
+		float  arc  = 0.5 + 0.4 * starHash(seed + 9.9); // angular travel over the life
+		float3 head = normalize(p0 + tdir * (t * arc));
+		float3 tail = normalize(p0 + tdir * (t * arc - 0.30)); // tail end trailing behind the head
+
+		// Closest point on the head→tail chord (small-arc approximation in direction space).
+		float3 seg = tail - head;
+		float  s   = clamp(dot(dir - head, seg) / max(dot(seg, seg), 1e-5), 0.0, 1.0);
+		float  dd  = length(dir - (head + seg * s));
+		float  w      = mix(0.0045, 0.0014, s);                        // taper: wider at the head, thin at the tail
+		float  streak = exp(-(dd * dd) / (w * w)) * pow(1.0 - s, 1.6); // brightest at the head, fading down the tail
+		float  dh     = length(dir - head);
+		float  headG  = exp(-(dh * dh) / 0.00006);                     // small sharp head (≈0.45°)
+		float  life   = smoothstep(0.0, 0.08, t) * (1.0 - smoothstep(0.55, 1.0, t));
+		float3 mcol   = float3(0.78, 0.88, 1.0);                       // cool blue-white meteor
+		col += mcol * ((streak * 1.7 + headG * 1.1) * life);
+	}
+	float horizon = smoothstep(0.0, 0.12, dir.y);
+	return col * night * horizon;
 }
 
 // Procedural volumetric clouds — drawn only in the sky pass (kept out of the
@@ -2105,6 +2157,7 @@ fragment float4 skyFragment(SkyOut in [[stage_in]],
 		                     p.auroraColor.xyz, p.auroraColorTop.xyz, p.sunDir.xyz,
 		                     p.cirrus.y, p.cirrus.z, in.position.xy);
 		col += moonDisk(dir, p.sunDir.xyz, p.sunDir.w > 0.5, p.sunColor.w, moonTex, moonSamp);
+		col += shootingStars(dir, p.sunDir.xyz, p.params.z, p.auroraColorTop.w); // meteors (clouds occlude below)
 	}
 	// High thin layers first, then the cumulus clouds in front so lower clouds occlude them.
 	col = cirrus(col, dir, p.sunDir.xyz, p.sunColor.xyz, p.cloudTint.w, p.cirrus.x, p.params.z, p.wind.xz);
@@ -3574,7 +3627,7 @@ void MetalRenderer::EncodeCloudPrepass(void* cmdBufPtr, const glm::mat4& invView
 	p.cirrus         = glm::vec4(env.cirrusSeed, env.auroraHeight, env.auroraFragmentation, env.nebulaSeed);
 	p.nebulaColor2   = glm::vec4(env.nebulaColor2, (float)env.nebulaQuality);
 	p.nebulaColor3   = glm::vec4(env.nebulaColor3, env.godRays); // w = god-ray strength
-	p.auroraColorTop = glm::vec4(env.auroraColorTop, 0.0f);
+	p.auroraColorTop = glm::vec4(env.auroraColorTop, env.shootingStars); // w = meteor frequency
 	p.starColor      = glm::vec4(env.starColor, env.starBrightness);
 	p.star           = glm::vec4(env.starSize, env.starSizeVariation, env.starDensity, env.starGlow);
 	p.star2          = glm::vec4(env.starTwinkle, (float)env.cloudQuality, 1.0f, 0.0f);
@@ -3922,7 +3975,7 @@ void MetalRenderer::EncodeSky(void* renderEncoder, const glm::mat4& invViewProj,
 	p.cirrus         = glm::vec4(env.cirrusSeed, env.auroraHeight, env.auroraFragmentation, env.nebulaSeed);
 	p.nebulaColor2   = glm::vec4(env.nebulaColor2, (float)env.nebulaQuality); // w = nebula quality 0/1/2
 	p.nebulaColor3   = glm::vec4(env.nebulaColor3, env.godRays); // w = god-ray strength
-	p.auroraColorTop = glm::vec4(env.auroraColorTop, 0.0f);
+	p.auroraColorTop = glm::vec4(env.auroraColorTop, env.shootingStars); // w = meteor frequency
 	p.starColor      = glm::vec4(env.starColor, env.starBrightness);
 	p.star           = glm::vec4(env.starSize, env.starSizeVariation, env.starDensity, env.starGlow);
 	// z = low-res clouds, but only when the pre-pass actually produced a buffer (else
