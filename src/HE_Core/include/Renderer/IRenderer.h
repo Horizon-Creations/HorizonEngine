@@ -197,7 +197,7 @@ public:
         glm::vec3 nebulaColor2      = glm::vec3(0.85f, 0.40f, 1.00f);
         glm::vec3 nebulaColor3      = glm::vec3(1.00f, 0.52f, 0.72f);
         float     nebulaSeed        = 0.0f;
-        bool      nebulaHighFidelity = true;
+        int       nebulaQuality      = 1;   // 0 Performance, 1 High, 2 Max (Metal + OpenGL)
         glm::vec3 auroraColor       = glm::vec3(0.25f, 0.95f, 0.50f);
         glm::vec3 auroraColorTop     = glm::vec3(0.62f, 0.26f, 0.95f);
         float     auroraHeight        = 0.18f;

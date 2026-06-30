@@ -81,7 +81,7 @@ struct EnvironmentComponent
     glm::vec3 nebulaColor2      = glm::vec3(0.85f, 0.40f, 1.00f); // colour 2 (mid regions)
     glm::vec3 nebulaColor3      = glm::vec3(1.00f, 0.52f, 0.72f); // colour 3 (warm regions)
     float     nebulaSeed        = 0.0f;                           // randomisation seed
-    bool      nebulaHighFidelity = true;                          // true = sharp detailed forms, false = cheap
+    int       nebulaQuality      = 1;                             // 0 = Performance (cheap), 1 = High (detailed), 2 = Max (most detail)
     glm::vec3 auroraColor       = glm::vec3(0.25f, 0.95f, 0.50f); // lower/base colour (green)
     glm::vec3 auroraColorTop     = glm::vec3(0.62f, 0.26f, 0.95f); // upper colour (purple)
     // Aurora band elevation (0 low/horizon … 1 high) and fragmentation
