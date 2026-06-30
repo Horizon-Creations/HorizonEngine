@@ -266,6 +266,7 @@ namespace
 				{ "contrailAmount",    e->contrailAmount },
 				{ "cirrusAmount",      e->cirrusAmount },
 				{ "cirrusSeed",        e->cirrusSeed },
+				{ "godRays",           e->godRays },
 				{ "windDirection",     e->windDirection },
 				{ "windSpeed",         e->windSpeed },
 				{ "fogDensity",        e->fogDensity },
@@ -621,6 +622,7 @@ namespace
 			e.contrailAmount    = c.value("contrailAmount",    e.contrailAmount);
 			e.cirrusAmount      = c.value("cirrusAmount",      e.cirrusAmount);
 			e.cirrusSeed        = c.value("cirrusSeed",        e.cirrusSeed);
+			e.godRays           = c.value("godRays",           e.godRays);
 			e.windDirection     = c.value("windDirection",     e.windDirection);
 			e.windSpeed         = c.value("windSpeed",         e.windSpeed);
 			e.fogDensity        = c.value("fogDensity",        e.fogDensity);

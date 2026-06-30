@@ -4064,6 +4064,11 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			ImGui::EndDisabled();
 			ImGui::TextDisabled("Thin high wispy clouds. Intensity = cover, seed re-rolls the pattern (OpenGL).");
 
+			ImGui::SeparatorText("Sun Through Clouds (God Rays)");
+			ImGui::SetNextItemWidth(-1.0f);
+			ImGui::SliderFloat("##godrays", &env->godRays, 0.0f, 1.0f, "God rays: %.2f"); trackEdit();
+			ImGui::TextDisabled("Warm crepuscular glow where sunlight breaks through gaps in the cloud cover. Needs broken cloud (Coverage > 0) and the sun up; off when overcast or clear.");
+
 			ImGui::SeparatorText("Atmospheric Fog");
 			ImGui::SetNextItemWidth(-1.0f);
 			ImGui::SliderFloat("##fogdensity", &env->fogDensity, 0.0f, 0.15f, "Density: %.3f"); trackEdit();

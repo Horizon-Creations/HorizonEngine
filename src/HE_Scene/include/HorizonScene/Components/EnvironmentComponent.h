@@ -60,6 +60,12 @@ struct EnvironmentComponent
     float     cirrusAmount = 0.0f;
     float     cirrusSeed   = 0.0f;
 
+    // Crepuscular rays (god-rays): bright shafts of sunlight streaming through gaps in
+    // the cloud layer toward the sun. 0 = off. Computed in the sky shader (no extra
+    // full-screen pass), gated to a cone around the sun by day — kind to the frame
+    // budget. Strongest with broken cloud cover (needs cloudCoverage > 0 to have gaps).
+    float     godRays = 0.0f;   // 0 none … 1 strong shafts
+
     // Atmospheric fog / aerial perspective (0 density = off; height falloff pools
     // the fog near the ground).
     float fogDensity      = 0.0f;
