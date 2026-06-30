@@ -2121,6 +2121,41 @@ float3 crepuscular(float3 dir, float3 sunDir, float3 sunColor, float time,
 	return sunColor * shaft * 0.55;
 }
 
+// 22° ice halo + sun dogs (parhelia): the ring of light refracted by hexagonal ice
+// crystals in high cirrus cloud. Visible only when there IS cirrus (reuses cirrusAmount —
+// physically what carries the ice) with the sun up. The ring is faint, red on the inner
+// edge (~21.7°) fading to blue-white outward; the sun dogs are two bright patches 22° to
+// either side of the sun at its own altitude. Additive, added before the cloud composite so
+// lower clouds occlude it. Cheap (a couple of angle tests). Mirrors the GL iceHalo().
+float3 iceHalo(float3 dir, float3 sunDir, float3 sunColor, float cirrus)
+{
+	if (cirrus <= 0.0) return float3(0.0);
+	dir = normalize(dir); sunDir = normalize(sunDir);
+	float day = smoothstep(-0.02, 0.10, sunDir.y);
+	if (day <= 0.0 || dir.y < 0.0) return float3(0.0);
+	float vis = day * clamp(cirrus, 0.0, 1.0) * smoothstep(0.0, 0.10, dir.y);
+	if (vis <= 0.0) return float3(0.0);
+
+	float ang = acos(clamp(dot(dir, sunDir), -1.0, 1.0)) * 57.29578; // degrees from the sun
+	// 22° ring: sharp red inner edge, soft blue-white outer falloff.
+	float ring = smoothstep(21.0, 21.9, ang) * (1.0 - smoothstep(22.4, 25.0, ang));
+	float tcol = clamp((ang - 21.7) / 2.6, 0.0, 1.0);
+	float3 hcol = mix(float3(1.0, 0.74, 0.52), float3(0.85, 0.92, 1.0), tcol); // red → blue-white
+	float3 col  = hcol * (ring * vis * 0.45);
+
+	// Parhelia: rotate the sun direction ±22° about world-up (same altitude as the sun).
+	float3 sH   = normalize(float3(sunDir.x, 0.0, sunDir.z) + float3(1e-5));
+	float3 side = normalize(cross(float3(0.0, 1.0, 0.0), sH));
+	float  c22  = 0.92718, s22 = 0.37461;                 // cos/sin(22°)
+	float3 pdR  = normalize(sunDir * c22 + side * s22);
+	float3 pdL  = normalize(sunDir * c22 - side * s22);
+	float  dR   = acos(clamp(dot(dir, pdR), -1.0, 1.0));
+	float  dL   = acos(clamp(dot(dir, pdL), -1.0, 1.0));
+	float  dog  = exp(-(dR * dR) / 0.0007) + exp(-(dL * dL) / 0.0007);
+	col += mix(float3(1.0, 0.82, 0.6), sunColor, 0.5) * (dog * vis * 0.6);
+	return col;
+}
+
 fragment float4 skyFragment(SkyOut in [[stage_in]],
                             constant SkyParams& p [[buffer(0)]],
                             texture2d<float> moonTex [[texture(0)]],
@@ -2163,6 +2198,7 @@ fragment float4 skyFragment(SkyOut in [[stage_in]],
 	col = cirrus(col, dir, p.sunDir.xyz, p.sunColor.xyz, p.cloudTint.w, p.cirrus.x, p.params.z, p.wind.xz);
 	col = contrails(col, dir, p.sunDir.xyz, p.cloud.w, p.params.y);
 	col += rainbow(dir, p.sunDir.xyz, p.star2.w);   // rain + sun → spectral arc (clouds occlude it below)
+	col += iceHalo(dir, p.sunDir.xyz, p.sunColor.xyz, p.cloudTint.w); // 22° halo + sun dogs through cirrus
 	float cloudT = 1.0;                                     // view-ray cloud transmittance
 	if (p.star2.z > 0.5)
 	{
