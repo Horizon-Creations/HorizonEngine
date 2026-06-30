@@ -1230,7 +1230,7 @@ void EditorApplication::dumpFrameHeadless()
 			e->cloudHeight    = static_cast<float>(envF("HE_DUMP_CLOUDHEIGHT", 200.0f));
 			e->nebulaIntensity   = static_cast<float>(envF("HE_DUMP_NEBULA",   e->nebulaIntensity));
 			e->nebulaSeed        = static_cast<float>(envF("HE_DUMP_NEBSEED",  e->nebulaSeed));
-			e->nebulaHighFidelity = envF("HE_DUMP_NEBHIFI", e->nebulaHighFidelity ? 1.0 : 0.0) > 0.5;
+			e->nebulaQuality     = static_cast<int>(envF("HE_DUMP_NEBQUALITY", e->nebulaQuality));
 			e->moonPhase         = static_cast<float>(envF("HE_DUMP_MOONPHASE", e->moonPhase));
 			e->milkyWayIntensity = static_cast<float>(envF("HE_DUMP_MILKYWAY", e->milkyWayIntensity));
 			e->starSizeVariation = static_cast<float>(envF("HE_DUMP_STARVAR",  e->starSizeVariation));
@@ -1499,7 +1499,7 @@ void EditorApplication::pushEnvironment(float dt)
 		.milkyWayIntensity = env->milkyWayIntensity, .nebulaIntensity = env->nebulaIntensity,
 		.nebulaColor = env->nebulaColor, .nebulaColor2 = env->nebulaColor2,
 		.nebulaColor3 = env->nebulaColor3, .nebulaSeed = env->nebulaSeed,
-		.nebulaHighFidelity = env->nebulaHighFidelity,
+		.nebulaQuality = env->nebulaQuality,
 		.auroraColor = env->auroraColor,
 		.auroraColorTop = env->auroraColorTop,
 		.auroraHeight = env->auroraHeight, .auroraFragmentation = env->auroraFragmentation,

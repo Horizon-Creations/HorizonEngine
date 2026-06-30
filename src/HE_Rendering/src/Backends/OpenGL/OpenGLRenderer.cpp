@@ -1182,7 +1182,8 @@ vec3 nebula(vec3 dir, vec3 cdir, vec3 sunDir, float intensity, vec3 nebColor)
 	// SEED: shift the sample window into the noise field so the cloud SHAPES (and the colour
 	// layout below) re-randomise. The band stays put — it comes from cN — only the gas moves.
 	P += vec3(uNebulaSeed * 13.1, uNebulaSeed * 7.7, uNebulaSeed * 19.3);
-	bool  hifi = uNebulaHiFi > 0.5;
+	bool  hifi = uNebulaHiFi >= 0.5;   // 1 High, 2 Max → detailed filament branch
+	bool  maxq = uNebulaHiFi >= 1.5;   // 2 Max → extra crisping + faded fine octaves
 	float density, core;
 	if (hifi)
 	{
@@ -1204,6 +1205,10 @@ vec3 nebula(vec3 dir, vec3 cdir, vec3 sunDir, float intensity, vec3 nebColor)
 		                 starFbm3(hfw2 + vec3( 3.3, 21.7,  5.1), 2)) - 0.5;
 		vec3 Pw = P + 0.90 * hfQ1 + 0.42 * hfQ2;   // advected → flowing tendrils
 		vec3 Pc = P + 0.30 * hfQ1;                  // steadier coord for cloud bodies
+		// Max-only anti-alias weight for the extra fine octaves: fade them toward 0 where
+		// the finest sample's screen footprint nears pixel-Nyquist, so they add detail when
+		// the nebula fills the view but never shimmer on camera rotation.
+		float aaFine = maxq ? (1.0 - smoothstep(0.30, 0.70, length(fwidth(Pw)) * 520.0)) : 0.0;
 		// (2) Ridged MULTIFRACTAL #1: fine filament network (each octave gated by the prev ridge)
 		vec3  rp = Pw * 1.45 + hfSeed * 0.37;
 		float rsum = 0.0, ramp = 1.0, rw = 1.0, rs, rn;
@@ -1216,6 +1221,11 @@ vec3 nebula(vec3 dir, vec3 cdir, vec3 sunDir, float intensity, vec3 nebColor)
 		rp *= RLAC; rw = clamp(rs*RGAIN,0.0,1.0); rn = starFbm3(rp,1); rs = ROFF-abs(4.0*rn-1.0); rs*=rs; rs*=rw; rsum += ramp*rs; ramp*=RSW;
 		rp *= RLAC; rw = clamp(rs*RGAIN,0.0,1.0); rn = starFbm3(rp,1); rs = ROFF-abs(4.0*rn-1.0); rs*=rs; rs*=rw; rsum += ramp*rs; ramp*=RSW;
 		rp *= RLAC; rw = clamp(rs*RGAIN,0.0,1.0); rn = starFbm3(rp,1); rs = ROFF-abs(4.0*rn-1.0); rs*=rs; rs*=rw; rsum += ramp*rs; ramp*=RSW;
+		if (maxq)   // Max: two extra fine octaves, fwidth-faded so they never alias
+		{
+			rp *= RLAC; rw = clamp(rs*RGAIN,0.0,1.0); rn = starFbm3(rp,1); rs = ROFF-abs(4.0*rn-1.0); rs*=rs; rs*=rw; rsum += ramp*rs*aaFine; ramp*=RSW;
+			rp *= RLAC; rw = clamp(rs*RGAIN,0.0,1.0); rn = starFbm3(rp,1); rs = ROFF-abs(4.0*rn-1.0); rs*=rs; rs*=rw; rsum += ramp*rs*aaFine; ramp*=RSW;
+		}
 		// (3) Ridged MULTIFRACTAL #2: broad crossing tendrils (lower freq)
 		vec3  rp2 = Pw * 0.78 + hfSeed * 0.19 + 113.0;
 		float r2sum = 0.0, r2amp = 1.0, r2w = 1.0, r2s, r2n;
@@ -1226,9 +1236,14 @@ vec3 nebula(vec3 dir, vec3 cdir, vec3 sunDir, float intensity, vec3 nebColor)
 		rp2*=R2LAC; r2w=clamp(r2s*R2GAIN,0.0,1.0); r2n=starFbm3(rp2,1); r2s=R2OFF-abs(4.0*r2n-1.0); r2s*=r2s; r2s*=r2w; r2sum+=r2amp*r2s; r2amp*=R2SW;
 		rp2*=R2LAC; r2w=clamp(r2s*R2GAIN,0.0,1.0); r2n=starFbm3(rp2,1); r2s=R2OFF-abs(4.0*r2n-1.0); r2s*=r2s; r2s*=r2w; r2sum+=r2amp*r2s; r2amp*=R2SW;
 		rp2*=R2LAC; r2w=clamp(r2s*R2GAIN,0.0,1.0); r2n=starFbm3(rp2,1); r2s=R2OFF-abs(4.0*r2n-1.0); r2s*=r2s; r2s*=r2w; r2sum+=r2amp*r2s; r2amp*=R2SW;
+		if (maxq)   // Max: two extra fine octaves, fwidth-faded
+		{
+			rp2*=R2LAC; r2w=clamp(r2s*R2GAIN,0.0,1.0); r2n=starFbm3(rp2,1); r2s=R2OFF-abs(4.0*r2n-1.0); r2s*=r2s; r2s*=r2w; r2sum+=r2amp*r2s*aaFine; r2amp*=R2SW;
+			rp2*=R2LAC; r2w=clamp(r2s*R2GAIN,0.0,1.0); r2n=starFbm3(rp2,1); r2s=R2OFF-abs(4.0*r2n-1.0); r2s*=r2s; r2s*=r2w; r2sum+=r2amp*r2s*aaFine; r2amp*=R2SW;
+		}
 		float hfFil = max(rsum, r2sum);                 // union → crossing filament web
 		float filN  = clamp(hfFil / 1.45, 0.0, 1.0);
-		float lines = pow(smoothstep(0.30, 0.58, filN), 3.2);  // CRISP thin filament lines (wiry)
+		float lines = pow(smoothstep(maxq ? 0.33 : 0.30, maxq ? 0.55 : 0.58, filN), maxq ? 3.5 : 3.2);  // crisper thin filaments at Max
 		float wisp  = smoothstep(0.05, 0.40, filN);            // faint diffuse halo around them
 		// Anisotropic STREAKS: ridged noise sampled with a stretched axis → elongated filament
 		// lines that the domain warp bends into curves — reads more line-like than round ridges.
@@ -1259,9 +1274,9 @@ vec3 nebula(vec3 dir, vec3 cdir, vec3 sunDir, float intensity, vec3 nebColor)
 		// (8) Compose — filament-DOMINANT crisp lines + faint halo + fine detail in the gaps,
 		// textured by grain (matte), then layered dust absorption for depth. Matte cores (no bloom).
 		float reach = hfCloud*0.85 + 0.15;
-		float gas = lines * 1.35 * reach                // BRIGHT crisp filaments (dominant)
+		float gas = lines * (maxq ? 1.5 : 1.35) * reach // BRIGHT crisp filaments (dominant; bolder at Max)
 		          + wisp  * 0.30 * reach
-		          + voidDetail * 0.42 * (1.0 - hfCloud*0.35) // fine detail filling the dark gaps
+		          + voidDetail * (maxq ? 0.60 : 0.42) * (1.0 - hfCloud*0.35) // more fine gap detail at Max
 		          + hfCloud * 0.13;
 		gas *= mix(1.0, grain, 0.70);                   // strong matte texture (anti-shiny)
 		gas *= hfDust;                                  // layered absorption → depth
@@ -1298,7 +1313,7 @@ vec3 nebula(vec3 dir, vec3 cdir, vec3 sunDir, float intensity, vec3 nebColor)
 
 	// Per-region hue field → blend the THREE user-adjustable colours so neighbouring regions
 	// differ clearly in colour. Seeded so the colour layout also re-randomises.
-	float h = clamp(starFbm3(P * 0.5 + 71.0 + uNebulaSeed * 5.0, hifi ? 3 : 2) * 1.7 - 0.35, 0.0, 1.0);
+	float h = clamp(starFbm3(P * 0.5 + 71.0 + uNebulaSeed * 5.0, maxq ? 4 : (hifi ? 3 : 2)) * 1.7 - 0.35, 0.0, 1.0);
 	vec3 col = mix(nebColor, uNebulaColor2, smoothstep(0.05, 0.50, h));   // colour 1 → 2
 	col = mix(col, uNebulaColor3, smoothstep(0.50, 0.95, h));             // → colour 3
 	// Light desaturation only (the user wants VISIBLE colour contrast, not a whitish glow).
@@ -4221,7 +4236,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glUniform3fv(m_uSkyNebulaColor2, 1, glm::value_ptr(GetEnvironment().nebulaColor2));
 			glUniform3fv(m_uSkyNebulaColor3, 1, glm::value_ptr(GetEnvironment().nebulaColor3));
 			glUniform1f(m_uSkyNebulaSeed, GetEnvironment().nebulaSeed);
-			glUniform1f(m_uSkyNebulaHiFi, GetEnvironment().nebulaHighFidelity ? 1.0f : 0.0f);
+			glUniform1f(m_uSkyNebulaHiFi, (float)GetEnvironment().nebulaQuality); // 0/1/2 (carried in uNebulaHiFi)
 			glUniform3fv(m_uSkyAuroraColor, 1, glm::value_ptr(GetEnvironment().auroraColor));
 			glUniform3fv(m_uSkyAuroraColorTop, 1, glm::value_ptr(GetEnvironment().auroraColorTop));
 			glUniform1f(m_uSkyFlash, GetEnvironment().flash);

@@ -4086,10 +4086,14 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			ImGui::SetNextItemWidth(-1.0f);
 			ImGui::SliderFloat("##nebula", &env->nebulaIntensity, 0.0f, 1.0f, "Intensity: %.2f"); trackEdit();
 			{
-				int nebMode = env->nebulaHighFidelity ? 0 : 1;
+				// Combo index == nebulaQuality (0 Performance, 1 High, 2 Max).
+				int nebQ = env->nebulaQuality < 0 ? 0 : (env->nebulaQuality > 2 ? 2 : env->nebulaQuality);
 				ImGui::SetNextItemWidth(-1.0f);
-				if (ImGui::Combo("##nebulafidelity", &nebMode, "High Fidelity (max detail)\0High Performance (lighter)\0"))
-				{ env->nebulaHighFidelity = (nebMode == 0); trackEdit(); }
+				if (ImGui::Combo("##nebulafidelity", &nebQ,
+				    "High Performance (lighter)\0High Fidelity (detailed)\0Max Quality (most detail)\0"))
+				{ env->nebulaQuality = nebQ; trackEdit(); }
+				if (nebQ == 2)
+					ImGui::TextDisabled("Extra filament octaves + crisper lines (night sky; pricier). Metal/OpenGL.");
 			}
 			ImGui::SetNextItemWidth(-1.0f);
 			ImGui::SliderFloat("##nebulaseed", &env->nebulaSeed, 0.0f, 50.0f, "Seed: %.1f"); trackEdit();

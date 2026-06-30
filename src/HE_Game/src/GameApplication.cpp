@@ -122,7 +122,7 @@ void GameApplication::OnRender(float deltaTime)
 				.milkyWayIntensity = env->milkyWayIntensity, .nebulaIntensity = env->nebulaIntensity,
 				.nebulaColor = env->nebulaColor, .nebulaColor2 = env->nebulaColor2,
 				.nebulaColor3 = env->nebulaColor3, .nebulaSeed = env->nebulaSeed,
-				.nebulaHighFidelity = env->nebulaHighFidelity,
+				.nebulaQuality = env->nebulaQuality,
 				.auroraColor = env->auroraColor,
 				.auroraColorTop = env->auroraColorTop,
 				.auroraHeight = env->auroraHeight, .auroraFragmentation = env->auroraFragmentation,
