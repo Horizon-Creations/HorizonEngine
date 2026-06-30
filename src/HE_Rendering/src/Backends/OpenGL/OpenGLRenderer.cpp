@@ -1681,6 +1681,39 @@ vec3 crepuscular(vec3 dir, vec3 sunDir, vec3 sunColor, float time,
 	return sunColor * shaft * 0.55;
 }
 
+// 22° ice halo + sun dogs (parhelia): the ring refracted by hexagonal ice crystals in high
+// cirrus cloud. Visible only when there IS cirrus (reuses cirrusAmount) with the sun up. Red
+// inner edge (~21.7°) fading to blue-white outward; two bright patches 22° to either side of
+// the sun at its altitude. Added before the cloud composite so lower clouds occlude it.
+// Mirrors the Metal iceHalo().
+vec3 iceHalo(vec3 dir, vec3 sunDir, vec3 sunColor, float cirrus)
+{
+	if (cirrus <= 0.0) return vec3(0.0);
+	dir = normalize(dir); sunDir = normalize(sunDir);
+	float day = smoothstep(-0.02, 0.10, sunDir.y);
+	if (day <= 0.0 || dir.y < 0.0) return vec3(0.0);
+	float vis = day * clamp(cirrus, 0.0, 1.0) * smoothstep(0.0, 0.10, dir.y);
+	if (vis <= 0.0) return vec3(0.0);
+
+	float ang = acos(clamp(dot(dir, sunDir), -1.0, 1.0)) * 57.29578; // degrees from the sun
+	float ring = smoothstep(21.0, 21.9, ang) * (1.0 - smoothstep(22.4, 25.0, ang));
+	float tcol = clamp((ang - 21.7) / 2.6, 0.0, 1.0);
+	vec3  hcol = mix(vec3(1.0, 0.74, 0.52), vec3(0.85, 0.92, 1.0), tcol); // red → blue-white
+	vec3  col  = hcol * (ring * vis * 0.45);
+
+	// Parhelia: rotate the sun direction ±22° about world-up (same altitude as the sun).
+	vec3  sH   = normalize(vec3(sunDir.x, 0.0, sunDir.z) + vec3(1e-5));
+	vec3  side = normalize(cross(vec3(0.0, 1.0, 0.0), sH));
+	float c22  = 0.92718, s22 = 0.37461;                  // cos/sin(22°)
+	vec3  pdR  = normalize(sunDir * c22 + side * s22);
+	vec3  pdL  = normalize(sunDir * c22 - side * s22);
+	float dR   = acos(clamp(dot(dir, pdR), -1.0, 1.0));
+	float dL   = acos(clamp(dot(dir, pdL), -1.0, 1.0));
+	float dog  = exp(-(dR * dR) / 0.0007) + exp(-(dL * dL) / 0.0007);
+	col += mix(vec3(1.0, 0.82, 0.6), sunColor, 0.5) * (dog * vis * 0.6);
+	return col;
+}
+
 vec3 sunGlare(vec3 dir, vec3 sunDir)
 {
 	dir    = normalize(dir);
@@ -1787,6 +1820,7 @@ void main()
 	col  = cirrus(col, dir, uSunDir, uSunColor, uCirrus, uCirrusSeed, uTime, uWind.xz); // alpha-blended
 	col  = contrails(col, dir, uSunDir, uContrails, uCloudCoverage); // alpha-blended into the sky
 	col += rainbow(dir, uSunDir, uRainAmount);           // anti-solar arc while raining (clouds occlude it below)
+	col += iceHalo(dir, uSunDir, uSunColor, uCirrus);    // 22° halo + sun dogs through cirrus
 	float cloudT = 1.0;                                   // view-ray cloud transmittance
 	if (uLowResClouds > 0.5)
 	{
