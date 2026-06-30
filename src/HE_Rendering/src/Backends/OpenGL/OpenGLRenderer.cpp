@@ -498,6 +498,7 @@ uniform sampler3D uNoise;       // tiling 3D value-noise (replaces the hash fbm)
 uniform sampler2D uCloudTex;    // quarter-res cloud buffer (rgb = L, a = T) for low-res clouds
 uniform float     uLowResClouds; // 1 = composite uCloudTex instead of the inline raymarch
 uniform float     uCloudPrepass; // 1 = this draw outputs (L, T) only (the quarter-res cloud pass)
+uniform float     uRainAmount;   // rain (0..1) → rainbow arc when the sun is up + low
 uniform float     uFlash;       // lightning flash (0 = none … 1 = full strike)
 uniform int       uCloudMode;   // 0 = sky-dome clouds, 1 = 3D volumetric (world-anchored)
 uniform int       uCloudQuality; // cloud raymarch quality: 0 Low, 1 Med, 2 High (perf knob)
@@ -1552,6 +1553,36 @@ vec3 cirrus(vec3 baseSky, vec3 dir, vec3 sunDir, vec3 sunColor, float amount, fl
 // sun instead of leaking a ~14x ghost through a plain *T. The expressions below MUST
 // stay byte-identical to the matching disk+bloom lines in kSkyFuncGLSL skyColor() so
 // that (col -= sunGlare) cancels exactly and a clear sky is unchanged.
+
+// Spectral helper (hue 0 = red … 0.78 ≈ violet) for the rainbow arc.
+vec3 skyHsv(float h, float s, float v)
+{
+	vec3 p = abs(fract(h + vec3(0.0, 2.0/3.0, 1.0/3.0)) * 6.0 - 3.0);
+	return v * mix(vec3(1.0), clamp(p - 1.0, 0.0, 1.0), s);
+}
+// Primary + secondary rainbow centred on the anti-solar point (−sunDir). Only while it
+// is raining (rainAmt) with the sun up but not too high. Subtle + additive; added before
+// the cloud composite so clouds occlude it. Mirrors the Metal rainbow().
+vec3 rainbow(vec3 dir, vec3 sunDir, float rainAmt)
+{
+	if (rainAmt <= 0.0) return vec3(0.0);
+	dir    = normalize(dir);
+	sunDir = normalize(sunDir);
+	float day    = smoothstep(-0.02, 0.12, sunDir.y);
+	float lowSun = 1.0 - smoothstep(0.45, 0.72, sunDir.y);
+	float vis    = day * lowSun;
+	if (vis <= 0.0 || dir.y < 0.0) return vec3(0.0);
+	float ang = acos(clamp(dot(dir, -sunDir), -1.0, 1.0)) * 57.29578; // degrees from anti-solar point
+	float pBand = smoothstep(39.6, 40.6, ang) * (1.0 - smoothstep(42.2, 43.2, ang));
+	float tp    = clamp((ang - 40.5) / 1.9, 0.0, 1.0);
+	vec3  cP    = skyHsv(0.78 * (1.0 - tp), 1.0, 1.0);
+	float sBand = smoothstep(50.2, 51.0, ang) * (1.0 - smoothstep(53.3, 54.3, ang));
+	float ts    = clamp((ang - 51.0) / 2.5, 0.0, 1.0);
+	vec3  cS    = skyHsv(0.78 * ts, 1.0, 1.0) * 0.5;
+	float horizon = smoothstep(0.0, 0.12, dir.y);
+	return (cP * pBand + cS * sBand) * (vis * clamp(rainAmt, 0.0, 1.0) * horizon * 0.45);
+}
+
 vec3 sunGlare(vec3 dir, vec3 sunDir)
 {
 	dir    = normalize(dir);
@@ -1656,6 +1687,7 @@ void main()
 	// in front — so the lower clouds correctly occlude the thin upper layers.
 	col  = cirrus(col, dir, uSunDir, uSunColor, uCirrus, uCirrusSeed, uTime, uWind.xz); // alpha-blended
 	col  = contrails(col, dir, uSunDir, uContrails, uCloudCoverage); // alpha-blended into the sky
+	col += rainbow(dir, uSunDir, uRainAmount);           // anti-solar arc while raining (clouds occlude it below)
 	float cloudT = 1.0;                                   // view-ray cloud transmittance
 	if (uLowResClouds > 0.5)
 	{
@@ -2550,6 +2582,7 @@ void OpenGLRenderer::CreateSkyPipeline()
 	m_uSkyCloudTex     = glGetUniformLocation(m_skyProgram, "uCloudTex");
 	m_uSkyLowResClouds = glGetUniformLocation(m_skyProgram, "uLowResClouds");
 	m_uSkyCloudPrepass = glGetUniformLocation(m_skyProgram, "uCloudPrepass");
+	m_uSkyRainAmount   = glGetUniformLocation(m_skyProgram, "uRainAmount");
 	m_uSkyFlash       = glGetUniformLocation(m_skyProgram, "uFlash");
 	m_uSkyCloudMode   = glGetUniformLocation(m_skyProgram, "uCloudMode");
 	m_uSkyCloudQuality = glGetUniformLocation(m_skyProgram, "uCloudQuality");
@@ -4331,6 +4364,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glUniform1f(m_uSkyStarDensity, GetEnvironment().starDensity);
 			glUniform1f(m_uSkyStarGlow,    GetEnvironment().starGlow);
 			glUniform1f(m_uSkyStarTwinkle, GetEnvironment().starTwinkle);
+			glUniform1f(m_uSkyRainAmount,  GetEnvironment().rainAmount);
 			// HE_SKY_TIME overrides the animation clock (for deterministic headless capture
 			// of time-animated sky elements like the aurora); normal runs use the wall clock.
 			float skyClock = static_cast<float>(SDL_GetTicks()) / 1000.0f;

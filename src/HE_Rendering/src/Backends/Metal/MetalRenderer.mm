@@ -1889,6 +1889,38 @@ float3 cirrus(float3 baseSky, float3 dir, float3 sunDir, float3 sunColor, float 
 // the sun instead of leaking a ~14× ghost through a plain *T. The expressions below
 // MUST stay byte-identical to the matching disk+bloom lines in kSkyFuncMSL skyColor()
 // so that (col -= sunGlare) cancels exactly and a clear sky is unchanged.
+// Spectral helper (hue 0 = red … 0.78 ≈ violet) for the rainbow arc.
+float3 skyHsv(float h, float s, float v)
+{
+	float3 p = abs(fract(h + float3(0.0, 2.0/3.0, 1.0/3.0)) * 6.0 - 3.0);
+	return v * mix(float3(1.0), clamp(p - 1.0, 0.0, 1.0), s);
+}
+
+// Primary + secondary rainbow centred on the anti-solar point (−sunDir). Only while it
+// is raining (rainAmt) with the sun up but not too high (above ~46° the arc sinks below
+// the horizon). Subtle + additive; added before the cloud composite so clouds occlude it.
+float3 rainbow(float3 dir, float3 sunDir, float rainAmt)
+{
+	if (rainAmt <= 0.0) return float3(0.0);
+	dir    = normalize(dir);
+	sunDir = normalize(sunDir);
+	float day    = smoothstep(-0.02, 0.12, sunDir.y);           // daytime only
+	float lowSun = 1.0 - smoothstep(0.45, 0.72, sunDir.y);      // sun low enough to throw an arc
+	float vis    = day * lowSun;
+	if (vis <= 0.0 || dir.y < 0.0) return float3(0.0);
+	float ang = acos(clamp(dot(dir, -sunDir), -1.0, 1.0)) * 57.29578; // degrees from anti-solar point
+	// Primary bow: violet (inner, ~40.5°) → red (outer, ~42.4°).
+	float pBand = smoothstep(39.6, 40.6, ang) * (1.0 - smoothstep(42.2, 43.2, ang));
+	float tp    = clamp((ang - 40.5) / 1.9, 0.0, 1.0);
+	float3 cP   = skyHsv(0.78 * (1.0 - tp), 1.0, 1.0);
+	// Secondary bow: reversed order, fainter, ~50.5..53.5°.
+	float sBand = smoothstep(50.2, 51.0, ang) * (1.0 - smoothstep(53.3, 54.3, ang));
+	float ts    = clamp((ang - 51.0) / 2.5, 0.0, 1.0);
+	float3 cS   = skyHsv(0.78 * ts, 1.0, 1.0) * 0.5;
+	float horizon = smoothstep(0.0, 0.12, dir.y);
+	return (cP * pBand + cS * sBand) * (vis * clamp(rainAmt, 0.0, 1.0) * horizon * 0.45);
+}
+
 float3 sunGlare(float3 dir, float3 sunDir)
 {
 	dir    = normalize(dir);
@@ -2029,6 +2061,7 @@ fragment float4 skyFragment(SkyOut in [[stage_in]],
 	// High thin layers first, then the cumulus clouds in front so lower clouds occlude them.
 	col = cirrus(col, dir, p.sunDir.xyz, p.sunColor.xyz, p.cloudTint.w, p.cirrus.x, p.params.z, p.wind.xz);
 	col = contrails(col, dir, p.sunDir.xyz, p.cloud.w, p.params.y);
+	col += rainbow(dir, p.sunDir.xyz, p.star2.w);   // rain + sun → spectral arc (clouds occlude it below)
 	float cloudT = 1.0;                                     // view-ray cloud transmittance
 	if (p.star2.z > 0.5)
 	{
@@ -3843,7 +3876,8 @@ void MetalRenderer::EncodeSky(void* renderEncoder, const glm::mat4& invViewProj,
 	// z = low-res clouds, but only when the pre-pass actually produced a buffer (else
 	// fall back to the inline raymarch so nothing breaks if the target is missing).
 	p.star2          = glm::vec4(env.starTwinkle, (float)env.cloudQuality,
-	                             (env.lowResClouds && m_cloudColor) ? 1.0f : 0.0f, 0.0f);
+	                             (env.lowResClouds && m_cloudColor) ? 1.0f : 0.0f,
+	                             env.rainAmount); // w = rain amount (rainbow)
 	// Quarter-res cloud buffer (rgb=L, a=T) on slot 2; dummy when unused (must be bound).
 	[enc setFragmentTexture:(__bridge id<MTLTexture>)(m_cloudColor ? m_cloudColor : m_dummyTexture) atIndex:2];
 	[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:2];
