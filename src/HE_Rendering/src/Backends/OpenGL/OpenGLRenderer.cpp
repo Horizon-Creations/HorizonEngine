@@ -499,6 +499,7 @@ uniform sampler2D uCloudTex;    // quarter-res cloud buffer (rgb = L, a = T) for
 uniform float     uLowResClouds; // 1 = composite uCloudTex instead of the inline raymarch
 uniform float     uCloudPrepass; // 1 = this draw outputs (L, T) only (the quarter-res cloud pass)
 uniform float     uRainAmount;   // rain (0..1) → rainbow arc when the sun is up + low
+uniform float     uGodRays;      // crepuscular sun-shaft strength (0 = off)
 uniform float     uFlash;       // lightning flash (0 = none … 1 = full strike)
 uniform int       uCloudMode;   // 0 = sky-dome clouds, 1 = 3D volumetric (world-anchored)
 uniform int       uCloudQuality; // cloud raymarch quality: 0 Low, 1 Med, 2 High (perf knob)
@@ -1583,6 +1584,50 @@ vec3 rainbow(vec3 dir, vec3 sunDir, float rainAmt)
 	return (cP * pBand + cS * sBand) * (vis * clamp(rainAmt, 0.0, 1.0) * horizon * 0.45);
 }
 
+// Crepuscular rays (god-rays). Cheap dome-cloud occlusion proxy: how much sunlight passes
+// along direction d (1 = clear sky, 0 = blocked). Mirrors the dome cloud's perlin coverage
+// gate (applyClouds) with the Worley billow approximated by its mean, so shafts line up
+// with the visible dome clouds for a fraction of the cost. Mirrors the Metal godrayClear().
+float godrayClear(vec3 d, float time, float coverage, vec3 wind)
+{
+	d = normalize(d);
+	if (d.y < 0.05) return 1.0;                          // toward the horizon → no cloud slab hit
+	float s    = kCloudBase / max(d.y, 1e-3);
+	vec3  pos  = d * s;
+	vec3  pp   = pos * kCloudScale + wind * time;
+	float perlin = starFbm3(pp + vec3(0.0, time * 0.030, 0.0), 4);
+	float lo   = mix(0.70, 0.22, clamp(coverage, 0.0, 1.0)); // same threshold as applyClouds
+	float dens = smoothstep(lo, lo + 0.10, perlin * 0.5 + 0.275); // billow≈0.5 mean (sharper gap/cloud edge)
+	return 1.0 - clamp(dens, 0.0, 1.0);
+}
+// Sun shafts: march from the view direction toward the sun, accumulating the clear-sky
+// fraction so light streaks through the gaps between clouds. Gated to a cone around the
+// sun by day, only with partial cloud cover. Additive, sun-coloured. Mirrors Metal crepuscular().
+vec3 crepuscular(vec3 dir, vec3 sunDir, vec3 sunColor, float time,
+                 float coverage, vec3 wind, float strength)
+{
+	if (strength <= 0.0) return vec3(0.0);
+	dir = normalize(dir); sunDir = normalize(sunDir);
+	float day = smoothstep(-0.02, 0.12, sunDir.y);
+	if (day <= 0.0) return vec3(0.0);
+	float ct = dot(dir, sunDir);
+	if (ct < 0.15) return vec3(0.0);                     // near-sun cone (past ~80° contributes ~0)
+	float coverGate = smoothstep(0.05, 0.35, coverage) * (1.0 - smoothstep(0.85, 1.0, coverage));
+	if (coverGate <= 0.0) return vec3(0.0);              // need broken cloud for gaps
+	const int GN = 8;
+	float light = 0.0;
+	vec3  d = dir;
+	for (int i = 0; i < GN; ++i)
+	{
+		d = normalize(mix(d, sunDir, 0.12));             // step toward the sun
+		light += godrayClear(d, time, coverage, wind);
+	}
+	light /= float(GN);
+	float cone  = pow(clamp(ct, 0.0, 1.0), 2.0);         // falloff away from the sun (extends shaft reach)
+	float shaft = light * cone * day * coverGate * clamp(strength, 0.0, 1.0);
+	return sunColor * shaft * 0.55;
+}
+
 vec3 sunGlare(vec3 dir, vec3 sunDir)
 {
 	dir    = normalize(dir);
@@ -1702,6 +1747,9 @@ void main()
 		col = applyClouds(col, dir, uSunDir, uTime, uCloudCoverage, uSunColor, uWind, cloudT);
 	// Re-add the sun, steeply occluded by cloud opacity so a solid cloud fully hides it.
 	col += (sunGlareCol + sunBodyCol) * pow(cloudT, 2.5);
+	// God-rays: sun shafts through cloud gaps. Scaled by cloudT so a cloud directly in front
+	// dims the shaft (rays show in the clear air, not painted over the cloud).
+	col += crepuscular(dir, uSunDir, uSunColor, uTime, uCloudCoverage, uWind, uGodRays) * cloudT;
 	col += uFlash * vec3(0.85, 0.90, 1.0); // lightning lights up the sky/clouds
 	FragColor = vec4(col, 1.0);
 }
@@ -2583,6 +2631,7 @@ void OpenGLRenderer::CreateSkyPipeline()
 	m_uSkyLowResClouds = glGetUniformLocation(m_skyProgram, "uLowResClouds");
 	m_uSkyCloudPrepass = glGetUniformLocation(m_skyProgram, "uCloudPrepass");
 	m_uSkyRainAmount   = glGetUniformLocation(m_skyProgram, "uRainAmount");
+	m_uSkyGodRays      = glGetUniformLocation(m_skyProgram, "uGodRays");
 	m_uSkyFlash       = glGetUniformLocation(m_skyProgram, "uFlash");
 	m_uSkyCloudMode   = glGetUniformLocation(m_skyProgram, "uCloudMode");
 	m_uSkyCloudQuality = glGetUniformLocation(m_skyProgram, "uCloudQuality");
@@ -4365,6 +4414,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glUniform1f(m_uSkyStarGlow,    GetEnvironment().starGlow);
 			glUniform1f(m_uSkyStarTwinkle, GetEnvironment().starTwinkle);
 			glUniform1f(m_uSkyRainAmount,  GetEnvironment().rainAmount);
+			glUniform1f(m_uSkyGodRays,     GetEnvironment().godRays);
 			// HE_SKY_TIME overrides the animation clock (for deterministic headless capture
 			// of time-animated sky elements like the aurora); normal runs use the wall clock.
 			float skyClock = static_cast<float>(SDL_GetTicks()) / 1000.0f;

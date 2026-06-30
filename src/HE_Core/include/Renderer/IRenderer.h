@@ -233,6 +233,7 @@ public:
         // Thin high cirrus clouds: amount = cover/brightness, seed re-rolls the pattern.
         float     cirrusAmount    = 0.0f;
         float     cirrusSeed      = 0.0f;
+        float     godRays         = 0.0f;   // crepuscular sun-shaft strength — Metal/OpenGL sky pass
         // Star field brightness + colour tint, overall size and size variation.
         float     starBrightness    = 1.0f;
         glm::vec3 starColor         = glm::vec3(1.0f);
