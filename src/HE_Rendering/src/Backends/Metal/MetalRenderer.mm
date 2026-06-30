@@ -1900,9 +1900,46 @@ float3 sunGlare(float3 dir, float3 sunDir)
 	float  s         = max(dot(dir, sunDir), 0.0);
 	float  sunVis    = max(day, dusk);
 	float  bloomDamp = mix(1.0, 0.28, dusk);
-	float3 g  = sunTint * (pow(s, 1800.0) * 14.0) * day;               // crisp daytime disk
-	g        += sunTint * (pow(s, 220.0)  * 1.1 * bloomDamp) * sunVis; // tight bloom
+	// The crisp daytime disk is now a geometric body (sunDisk, below) — only the
+	// cloud-occludable tight bloom remains here, so the col -= sunGlare / re-add dance
+	// still cancels byte-for-byte against skyColor()'s matching bloom line.
+	float3 g  = sunTint * (pow(s, 220.0)  * 1.1 * bloomDamp) * sunVis; // tight bloom
 	return g;
+}
+
+// Geometric sun disk — a real limb-darkened body (like moonDisk) replacing the old
+// pow(dot(dir,sunDir)) glare lobe. Eddington limb darkening dims the edge; atmospheric
+// refraction flattens it into a wider-than-tall, reddened ellipse near the horizon (a
+// proper setting sun). Emissive; sky-pass only (kept out of skyColor/IBL, like the
+// moon) and composited after the clouds in skyFragment, weighted by cloud transmittance.
+float3 sunDisk(float3 dir, float3 sunDir)
+{
+	dir    = normalize(dir);
+	sunDir = normalize(sunDir);
+	float sunY = clamp(sunDir.y, -0.3, 1.0);
+	// Visible from noon down to just below the horizon (the setting sun), then gone.
+	float vis = smoothstep(-0.06, 0.02, sunY);
+	if (vis <= 0.0 || dot(dir, sunDir) <= 0.0) return float3(0.0);
+	// Tangent frame: right = horizontal, upv = vertical, so the disk can squash vertically.
+	float3 right = normalize(cross(float3(0.0, 1.0, 0.0), sunDir));
+	float3 upv   = cross(sunDir, right);
+	const float kRadius = 0.027;                                   // angular radius (~ the moon)
+	// Refraction flattening: near the horizon the lower limb lifts → wider-than-tall.
+	float squash = mix(0.62, 1.0, smoothstep(0.0, 0.14, sunY));    // <1 ⇒ vertically compressed
+	float qx = dot(dir, right) / kRadius;
+	float qy = dot(dir, upv)   / (kRadius * squash);
+	float r  = length(float2(qx, qy));
+	if (r > 1.0) return float3(0.0);
+	// Eddington limb darkening: I(mu) = 1 - u(1 - mu), mu = cos(angle) = sqrt(1 - r^2), u = 0.6.
+	float mu   = sqrt(max(1.0 - r * r, 0.0));
+	float limb = 1.0 - 0.6 * (1.0 - mu);                           // centre 1.0 → limb 0.4
+	float edge = smoothstep(1.0, 0.96, r);                         // soft anti-aliased rim
+	// Reddens toward the horizon (more atmosphere), warm-white when high. Kept DIM at low
+	// sun so ACES doesn't desaturate the core to flat white (it must read as a red-orange
+	// ellipse — same lesson as the moon's ×3.0→×1.3 fix).
+	float3 tint  = mix(float3(1.0, 0.38, 0.14), float3(1.0, 0.95, 0.88), smoothstep(0.0, 0.22, sunY));
+	float bright = mix(2.8, 11.0, smoothstep(0.0, 0.22, sunY));
+	return tint * (limb * edge * bright * vis);
 }
 
 // ── Low-res cloud pass support ───────────────────────────────────────────────
@@ -1966,8 +2003,10 @@ fragment float4 skyFragment(SkyOut in [[stage_in]],
 	// normalize → stars/nebula/celestial frame don't jitter as the camera turns (GL parity).
 	float3 dir = normalize(wp1.xyz / wp1.w - wp0.xyz / wp0.w);
 	float3 col  = skyColor(dir, p.sunDir.xyz);
-	// Lift the bright sun body out so the cloud pass can occlude it (re-added below).
+	// Lift the sun's cloud-occludable bloom out (re-added below) and compute the
+	// geometric sun disk (a sky-only body, like the moon) to add on top of it.
 	float3 sunGlareCol = sunGlare(dir, p.sunDir.xyz);
+	float3 sunBodyCol  = sunDisk(dir, p.sunDir.xyz);
 	col -= sunGlareCol;
 	// Night-sky elements + the celestial rotation are skipped entirely by day. The
 	// branch is coherent (sunDir is uniform → every pixel takes the same path).
@@ -2007,7 +2046,7 @@ fragment float4 skyFragment(SkyOut in [[stage_in]],
 		col = applyClouds(col, dir, p.sunDir.xyz, p.params.z, p.params.y, p.sunColor.xyz, p.wind.xyz,
 		                  p.cloudTint.xyz, p.cloud.y, p.star2.y, noiseTex, noiseSamp, cloudT);
 	// Re-add the sun, steeply occluded by cloud opacity so a solid cloud fully hides it.
-	col += sunGlareCol * pow(cloudT, 2.5);
+	col += (sunGlareCol + sunBodyCol) * pow(cloudT, 2.5);
 	col += p.wind.w * float3(0.85, 0.90, 1.0); // lightning lights up the sky/clouds
 	return float4(col, 1.0);
 }
@@ -2068,7 +2107,8 @@ float3 skyColor(float3 dir, float3 sunDir)
 	float s = max(dot(dir, sunDir), 0.0);
 	float sunVis = max(day, dusk);
 	float bloomDamp = mix(1.0, 0.28, dusk);                        // bloom much dimmer at dusk
-	sky += sunTint * (pow(s, 1800.0) * 14.0) * day;                // crisp daytime disk only
+	// Crisp disk removed — the sun is now a geometric body (sunDisk in skyFragment),
+	// kept out of skyColor so the shared IBL/fog reference isn't a razor-thin spike.
 	sky += sunTint * (pow(s, 220.0)  * 1.1 * bloomDamp) * sunVis;  // tight bloom
 	sky += sunTint * (pow(s, 30.0)   * 0.22 * bloomDamp) * sunVis; // mid aureole
 	sky += float3(1.10, 0.46, 0.13) * (pow(s, 4.0) * 0.40) * dusk; // broad golden scatter

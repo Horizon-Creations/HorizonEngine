@@ -1563,9 +1563,48 @@ vec3 sunGlare(vec3 dir, vec3 sunDir)
 	float s         = max(dot(dir, sunDir), 0.0);
 	float sunVis    = max(day, dusk);
 	float bloomDamp = mix(1.0, 0.28, dusk);
-	vec3  g  = sunTint * (pow(s, 1800.0) * 14.0) * day;               // crisp daytime disk
-	g       += sunTint * (pow(s, 220.0)  * 1.1 * bloomDamp) * sunVis; // tight bloom
+	// The crisp daytime disk is now a geometric body (sunDisk, below) — only the
+	// cloud-occludable tight bloom remains here, so the col -= sunGlare / re-add dance
+	// still cancels byte-for-byte against skyColor()'s matching bloom line.
+	vec3  g  = sunTint * (pow(s, 220.0)  * 1.1 * bloomDamp) * sunVis; // tight bloom
 	return g;
+}
+
+// Geometric sun disk — a real limb-darkened body (like moonDisk) replacing the old
+// pow(dot(dir,sunDir)) glare lobe. Eddington limb darkening dims the edge; atmospheric
+// refraction flattens it into a wider-than-tall, reddened ellipse near the horizon (a
+// proper setting sun). Emissive; sky-pass only (kept out of skyColor/IBL, like the
+// moon) and composited after the clouds in main(), weighted by cloud transmittance.
+vec3 sunDisk(vec3 dir, vec3 sunDir)
+{
+	dir    = normalize(dir);
+	sunDir = normalize(sunDir);
+	float sunY = clamp(sunDir.y, -0.3, 1.0);
+	// Visible from noon down to just below the horizon (the setting sun), then gone.
+	float vis = smoothstep(-0.06, 0.02, sunY);
+	if (vis <= 0.0 || dot(dir, sunDir) <= 0.0) return vec3(0.0);
+	// Tangent frame: right = horizontal, upv = vertical, so the disk can squash vertically.
+	vec3  right = normalize(cross(vec3(0.0, 1.0, 0.0), sunDir));
+	vec3  upv   = cross(sunDir, right);
+	const float kRadius = 0.027;                                   // angular radius (~ the moon)
+	// Refraction flattening: near the horizon the lower limb lifts → wider-than-tall.
+	float squash = mix(0.62, 1.0, smoothstep(0.0, 0.14, sunY));    // <1 ⇒ vertically compressed
+	float qx = dot(dir, right) / kRadius;
+	float qy = dot(dir, upv)   / (kRadius * squash);
+	float r  = length(vec2(qx, qy));
+	if (r > 1.0) return vec3(0.0);
+	// Eddington limb darkening: I(mu) = 1 - u(1 - mu), mu = cos(angle) = sqrt(1 - r^2), u = 0.6.
+	float mu   = sqrt(max(1.0 - r * r, 0.0));
+	float limb = 1.0 - 0.6 * (1.0 - mu);                           // centre 1.0 → limb 0.4
+	float edge = smoothstep(1.0, 0.96, r);                         // soft anti-aliased rim
+	// Reddens toward the horizon (more atmosphere), warm-white when high. The low-sun
+	// disk is kept DIM on purpose: a hard limb-darkened disk integrates far more energy
+	// than the old falloff lobe, so at full brightness ACES desaturates the core to flat
+	// white and the reddening/limb shading never reads (the setting sun must stay dim
+	// enough to read as a red-orange ellipse — same lesson as the moon's ×3.0→×1.3 fix).
+	vec3  tint   = mix(vec3(1.0, 0.38, 0.14), vec3(1.0, 0.95, 0.88), smoothstep(0.0, 0.22, sunY));
+	float bright = mix(2.8, 11.0, smoothstep(0.0, 0.22, sunY));
+	return tint * (limb * edge * bright * vis);
 }
 
 void main()
@@ -1596,8 +1635,10 @@ void main()
 		return;
 	}
 	vec3 col  = skyColor(dir, uSunDir);
-	// Lift the bright sun body out so the cloud pass can occlude it (re-added below).
+	// Lift the sun's cloud-occludable bloom out (re-added below) and compute the
+	// geometric sun disk (a sky-only body, like the moon) to add on top of it.
 	vec3 sunGlareCol = sunGlare(dir, uSunDir);
+	vec3 sunBodyCol  = sunDisk(dir, uSunDir);
 	col -= sunGlareCol;
 	// Night-sky elements (stars/Milky Way/nebula/aurora/moon) + the celestial
 	// rotation are skipped entirely by day. The branch is coherent — sunDir is a
@@ -1628,7 +1669,7 @@ void main()
 	else
 		col = applyClouds(col, dir, uSunDir, uTime, uCloudCoverage, uSunColor, uWind, cloudT);
 	// Re-add the sun, steeply occluded by cloud opacity so a solid cloud fully hides it.
-	col += sunGlareCol * pow(cloudT, 2.5);
+	col += (sunGlareCol + sunBodyCol) * pow(cloudT, 2.5);
 	col += uFlash * vec3(0.85, 0.90, 1.0); // lightning lights up the sky/clouds
 	FragColor = vec4(col, 1.0);
 }
@@ -1702,7 +1743,8 @@ vec3 skyColor(vec3 dir, vec3 sunDir)
 	// Tame the near-sun bloom toward the horizon so it GLOWS instead of blinding; the
 	// crisp daytime disk is unaffected (it is gated by `day`).
 	float bloomDamp = mix(1.0, 0.28, dusk);                        // bloom much dimmer at dusk → no white blob
-	sky += sunTint * (pow(s, 1800.0) * 14.0) * day;                // crisp daytime disk only
+	// Crisp disk removed — the sun is now a geometric body (sunDisk in the sky FS),
+	// kept out of skyColor so the shared IBL/fog reference isn't a razor-thin spike.
 	sky += sunTint * (pow(s, 220.0)  * 1.1 * bloomDamp) * sunVis;  // tight bloom
 	sky += sunTint * (pow(s, 30.0)   * 0.22 * bloomDamp) * sunVis; // mid aureole
 	// Broad golden scatter — saturated + modest, so it tints the sun side gold instead
@@ -3908,9 +3950,13 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 
 		// ── Geometry pass: scene program + per-frame state, into HDR target ─
 		// Set here (not before the graph) because the shadow pass switched the
-		// active program. The "Scene" GPU timer spans every scene draw below and
-		// ends (glEndQuery) when this lambda body returns to the render graph.
-		GpuPassScope _sceneTimer(this, "Scene");
+		// active program. Opaque geometry, the procedural sky/clouds and transparency
+		// are timed as SIBLING GPU passes (GL_TIME_ELAPSED cannot nest — see
+		// GpuTimerBeginPass), breaking the heavy sky/cloud cost out of the old single
+		// "Scene" scope so it is individually measurable (matches the Metal backend's
+		// "Opaque" / "Sky+Clouds" markers). The geometry branch has no early return, so
+		// these explicit begin/end pairs always balance.
+		GpuTimerBeginPass("Opaque");
 		glBindFramebuffer(GL_FRAMEBUFFER, m_hdrFBO);
 		glViewport(0, 0, pw, ph);
 		// Explicit depth state for the opaque geometry: test on, write on, LESS, so
@@ -4245,6 +4291,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 
 			glUseProgram(m_unlitProgram); // restore for the sky + transparent passes
 		}
+		GpuTimerEndPass();                 // end "Opaque"
+		GpuTimerBeginPass("Sky+Clouds");   // sibling (matches Metal)
 
 		// ── Skybox (drawn LAST): fill the remaining background with the procedural
 		// sky. The fullscreen triangle sits at z = 1 (far plane); with GL_LEQUAL and
@@ -4350,6 +4398,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			m_lastInvViewProj = invViewProj;   // remembered for next frame's cloud pre-pass
 			m_lastSunDir      = sunDir;
 		}
+		GpuTimerEndPass();                 // end "Sky+Clouds"
+		GpuTimerBeginPass("Transparent");  // transparency + particles + debug lines
 
 		// ── Transparency pass: sorted alpha-blended draws over the opaque scene +
 		// sky. Back-to-front so the blend order is correct; depth-tested against the
@@ -4398,6 +4448,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			DrawDebugLines(viewProj);
 			glDepthMask(GL_TRUE);
 		}
+		GpuTimerEndPass();                 // end "Transparent"
 	});
 
 	glBindVertexArray(0);
