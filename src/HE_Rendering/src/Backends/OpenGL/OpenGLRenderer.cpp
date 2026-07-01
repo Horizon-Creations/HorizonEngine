@@ -2001,9 +2001,7 @@ vec3 lensFlareOverlay(vec2 uv, vec4 lf)
 	vec3  warm  = vec3(1.0, 0.92, 0.80);
 	float core  = 0.22 * exp(-sunDist * sunDist * 45.0);
 	float streak = 0.10 * exp(-toSun.x * toSun.x * 5.0) * exp(-toSun.y * toSun.y * 800.0);
-	float hd    = length(P);
-	float halo  = 0.06 * smoothstep(0.05, 0.0, abs(hd - 0.55));
-	vec3  flare = warm * (core + streak + halo);
+	vec3  flare = warm * (core + streak);                       // no halo ring (removed per feedback)
 	float t[5]   = float[5]( 0.30, 0.55, 0.80, 1.20, 1.55 );
 	float rad[5] = float[5]( 0.09, 0.14, 0.06, 0.20, 0.11 );
 	float amp[5] = float[5]( 0.22, 0.15, 0.28, 0.10, 0.18 );
