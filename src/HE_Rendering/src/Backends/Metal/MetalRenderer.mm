@@ -2121,29 +2121,23 @@ float3 crepuscular(float3 dir, float3 sunDir, float3 sunColor, float time,
 	return sunColor * shaft * 0.55;
 }
 
-// Lunar corona: the small diffraction aureole + faint coloured ring that hugs the moon's
-// own disk when thin cirrus/ice haze crosses it — NOT the wide 22° halo (which reads as a
-// camera artifact and dwarfs the moon). A bluish-white aureole a moon-radius or two across,
-// with a faint reddish outer ring. Cirrus-gated, night-only. Mirrors GL moonCorona().
-float3 moonCorona(float3 dir, float3 sunDir, bool hasMoon, float cirrus)
+// Subtle moon glow: one soft luminous ring hugging the moon's disk — a gentle aureole that
+// makes the moon read as glowing rather than a flat cut-out. Deliberately understated
+// (dezent), always present at night, cool white. NOT the wide 22° halo. Mirrors GL moonCorona().
+float3 moonCorona(float3 dir, float3 sunDir, bool hasMoon)
 {
-	if (cirrus <= 0.0 || !hasMoon) return float3(0.0);
+	if (!hasMoon) return float3(0.0);
 	dir = normalize(dir); sunDir = normalize(sunDir);
 	float night = 1.0 - smoothstep(-0.10, 0.10, clamp(sunDir.y, -0.2, 1.0));
 	if (night <= 0.0 || dir.y < 0.0) return float3(0.0);
 	float3 moonDir = normalize(float3(-sunDir.x, -sunDir.y, sunDir.z));
 	if (dot(dir, moonDir) <= 0.0) return float3(0.0);
-	float vis = night * clamp(cirrus, 0.0, 1.0)
-	          * smoothstep(0.0, 0.04, dir.y) * smoothstep(0.0, 0.10, moonDir.y);
+	float vis = night * smoothstep(0.0, 0.04, dir.y) * smoothstep(0.0, 0.10, moonDir.y);
 	if (vis <= 0.0) return float3(0.0);
 	const float kMoonR = 0.030;                                   // moon angular radius (matches moonDisk)
-	float ang = acos(clamp(dot(dir, moonDir), -1.0, 1.0));        // radians from moon centre
-	float d   = max(ang - kMoonR, 0.0);                           // distance outside the disk edge
-	float aureole = exp(-(d * d) / (0.018 * 0.018));              // soft glow hugging the disk
-	float ring    = exp(-((ang - 0.052) * (ang - 0.052)) / (0.010 * 0.010)); // one faint outer ring (~1.7×R)
-	float3 aurCol  = float3(0.82, 0.88, 1.0);                     // bluish-white inner aureole
-	float3 ringCol = float3(1.0, 0.72, 0.55);                     // reddish-brown outer ring
-	return (aurCol * (aureole * 0.30) + ringCol * (ring * 0.16)) * vis;
+	float ang  = acos(clamp(dot(dir, moonDir), -1.0, 1.0));       // radians from moon centre
+	float ring = exp(-((ang - kMoonR * 1.15) * (ang - kMoonR * 1.15)) / (0.016 * 0.016)); // soft ring at the limb
+	return float3(0.85, 0.90, 1.0) * (ring * 0.14 * vis);         // dezent cool-white glow
 }
 
 fragment float4 skyFragment(SkyOut in [[stage_in]],
@@ -2188,7 +2182,7 @@ fragment float4 skyFragment(SkyOut in [[stage_in]],
 	col = cirrus(col, dir, p.sunDir.xyz, p.sunColor.xyz, p.cloudTint.w, p.cirrus.x, p.params.z, p.wind.xz);
 	col = contrails(col, dir, p.sunDir.xyz, p.cloud.w, p.params.y);
 	col += rainbow(dir, p.sunDir.xyz, p.star2.w);   // rain + sun → spectral arc (clouds occlude it below)
-	col += moonCorona(dir, p.sunDir.xyz, p.sunDir.w > 0.5, p.cloudTint.w); // tight lunar corona through cirrus
+	col += moonCorona(dir, p.sunDir.xyz, p.sunDir.w > 0.5); // subtle glow ring around the moon
 	float cloudT = 1.0;                                     // view-ray cloud transmittance
 	if (p.star2.z > 0.5)
 	{
