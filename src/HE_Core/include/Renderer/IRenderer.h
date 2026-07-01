@@ -235,6 +235,7 @@ public:
         float     cirrusSeed      = 0.0f;
         float     godRays         = 0.0f;   // crepuscular sun-shaft strength — Metal/OpenGL sky pass
         float     shootingStars   = 0.0f;   // meteor frequency (0 = none) — Metal/OpenGL night sky
+        float     lensFlare       = 0.0f;   // camera sun lens-flare strength (0 = off) — post-process overlay
         // Star field brightness + colour tint, overall size and size variation.
         float     starBrightness    = 1.0f;
         glm::vec3 starColor         = glm::vec3(1.0f);

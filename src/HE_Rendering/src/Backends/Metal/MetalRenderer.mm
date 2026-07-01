@@ -583,17 +583,66 @@ float3 aces(float3 v)
 	return clamp((v * (a * v + b)) / (v * (c * v + d) + e), 0.0, 1.0);
 }
 
+// Camera lens flare (default OFF): a post-process overlay added in gamma/LDR space after
+// ACES, so the chromatic ghosts/halo stay vivid. lf = (sunNDC.xy, aspect, strength) with
+// strength already folding behind-camera / off-screen / below-horizon on the CPU. Occlusion
+// (behind cloud / geometry) is a cheap luma probe of the HDR at the sun's screen position.
+// All element math runs in a canonical y-up aspect-NDC space so it is byte-identical to GL.
+float3 lensFlareOverlay(texture2d<float> hdr, sampler s, float2 uv, float4 lf)
+{
+	float S = lf.w;
+	if (S <= 0.0) return float3(0.0);
+	float  aspect = lf.z;
+	float2 sunNDC = lf.xy;
+	float2 pNDC = float2(uv.x * 2.0 - 1.0, 1.0 - 2.0 * uv.y);   // canonical y-up (Metal uv is top-left)
+	float2 P    = float2(pNDC.x * aspect, pNDC.y);
+	float2 Sc   = float2(sunNDC.x * aspect, sunNDC.y);
+	float2 toSun = P - Sc; float sunDist = length(toSun);
+	float2 axis  = -Sc;                                         // sun → screen centre (and beyond)
+
+	// Occlusion: 5-tap HDR luma at the sun's screen uv (Metal top-left). The sky pass draws
+	// the sun disc very bright; cloud/opaque geometry in front drops the luma → flare fades.
+	float2 sunUV = float2(sunNDC.x * 0.5 + 0.5, 1.0 - (sunNDC.y * 0.5 + 0.5));
+	const float2 off[5] = { float2(0.0,0.0), float2(0.006,0.0), float2(-0.006,0.0),
+	                        float2(0.0,0.006), float2(0.0,-0.006) };
+	float lum = 0.0;
+	for (int i = 0; i < 5; ++i)
+		lum += dot(hdr.sample(s, clamp(sunUV + off[i], 0.0, 1.0)).rgb, float3(0.2126, 0.7152, 0.0722));
+	float vis = smoothstep(2.0, 7.0, lum * 0.2);               // sun disc >> bright sky/cloud
+
+	float3 warm  = float3(1.0, 0.92, 0.80);
+	float  core  = 0.22 * exp(-sunDist * sunDist * 45.0);       // subtle — the sky already draws a bright sun
+	float  streak = 0.10 * exp(-toSun.x * toSun.x * 5.0) * exp(-toSun.y * toSun.y * 800.0);
+	float  hd    = length(P);
+	float  halo  = 0.06 * smoothstep(0.05, 0.0, abs(hd - 0.55)); // thin, faint ring
+	float3 flare = warm * (core + streak + halo);
+	// Ghost disc chain along the sun→centre axis (aperture reflections) — the signature element.
+	const float t[5]   = { 0.30, 0.55, 0.80, 1.20, 1.55 };
+	const float rad[5] = { 0.09, 0.14, 0.06, 0.20, 0.11 };
+	const float amp[5] = { 0.22, 0.15, 0.28, 0.10, 0.18 };
+	const float3 gcol[5] = { float3(1.0,0.85,0.6), float3(0.6,0.8,1.0), float3(1.0,0.7,0.7),
+	                         float3(0.7,1.0,0.8), float3(0.8,0.7,1.0) };
+	for (int i = 0; i < 5; ++i)
+	{
+		float d = length(P - (Sc + axis * t[i]));
+		flare += amp[i] * gcol[i] * smoothstep(rad[i], 0.0, d);
+	}
+	return flare * (S * vis);
+}
+
 fragment float4 tonemapFragment(TMOut in [[stage_in]],
                                 texture2d<float> hdr   [[texture(0)]],
                                 texture2d<float> bloom [[texture(1)]],
-                                constant float2& params [[buffer(0)]]) // x: exposure, y: bloomStrength
+                                constant float2& params [[buffer(0)]], // x: exposure, y: bloomStrength
+                                constant float4& lf     [[buffer(1)]]) // lens flare: xy sunNDC, z aspect, w strength
 {
-	constexpr sampler s(filter::linear);
+	constexpr sampler s(filter::linear, address::clamp_to_edge);
 	float3 c = hdr.sample(s, in.uv).rgb;
 	c += bloom.sample(s, in.uv).rgb * params.y;
 	c *= params.x;
 	c = aces(c);
 	c = pow(c, float3(1.0 / 2.2));
+	c = clamp(c + lensFlareOverlay(hdr, s, in.uv, lf), 0.0, 1.0); // camera sun flare (OFF when lf.w<=0)
 	return float4(c, 1.0);
 }
 )MSL";
@@ -3910,6 +3959,7 @@ void MetalRenderer::EncodeTonemap(void* renderEncoderPtr)
 	[enc setFragmentTexture:bloomTex atIndex:1];
 	const simd::float2 params = { 1.0f, m_bloomResult ? m_bloomStrength : 0.0f };
 	[enc setFragmentBytes:&params length:sizeof(params) atIndex:0];
+	[enc setFragmentBytes:m_lensFlareParams length:sizeof(m_lensFlareParams) atIndex:1];
 	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
 }
 
@@ -4654,6 +4704,28 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			m_bloomResult = m_bloomEnabled ? EncodeBloom((__bridge void*)cmdBuf, sceneW, sceneH)
 			                               : nullptr;
 			flushPass("Tonemap");   // detailed: commit the Bloom command buffer (empty if bloom off)
+
+			// Camera lens flare: project the sun (a point at infinity, w=0 drops the view
+			// translation) to NDC and fold behind-camera / off-screen / below-horizon into a
+			// single strength scalar. The tonemap shader reads m_lensFlareParams; w<=0 = OFF.
+			{
+				const float lfAmt = GetEnvironment().lensFlare;
+				const glm::mat4 vp = m_renderWorld.camera.projection * m_renderWorld.camera.view;
+				glm::vec3 sd = glm::normalize(m_renderWorld.sunDirection);
+				glm::vec4 clip = vp * glm::vec4(sd, 0.0f);
+				glm::vec2 sunNDC(0.0f);
+				float strength = 0.0f;
+				if (lfAmt > 0.0f && clip.w > 1e-4f)
+				{
+					sunNDC = glm::vec2(clip) / clip.w;
+					const float onScreen = 1.0f - glm::smoothstep(1.0f, 1.7f, glm::length(sunNDC));
+					const float horizon  = glm::smoothstep(-0.02f, 0.10f, sd.y);
+					strength = lfAmt * onScreen * horizon;
+				}
+				const float aspect = (sceneH > 0) ? (float)sceneW / (float)sceneH : 1.0f;
+				m_lensFlareParams[0] = sunNDC.x; m_lensFlareParams[1] = sunNDC.y;
+				m_lensFlareParams[2] = aspect;   m_lensFlareParams[3] = strength;
+			}
 
 			// Tonemap HDR → LDR intermediate; FXAA reads it next (for both the editor
 			// viewport and the direct-to-drawable path). m_hdrDepth is a DontCare

@@ -134,7 +134,7 @@ void GameApplication::OnRender(float deltaTime)
 				.cloudTint = env->cloudTint,
 				.contrailAmount = env->contrailAmount,
 				.cirrusAmount = env->cirrusAmount, .cirrusSeed = env->cirrusSeed,
-				.godRays = env->godRays, .shootingStars = env->shootingStars,
+				.godRays = env->godRays, .shootingStars = env->shootingStars, .lensFlare = env->lensFlare,
 				.starBrightness = env->starBrightness, .starColor = env->starColor,
 				.starSize = env->starSize, .starSizeVariation = env->starSizeVariation,
 				.starGlow = env->starGlow, .starTwinkle = env->starTwinkle,

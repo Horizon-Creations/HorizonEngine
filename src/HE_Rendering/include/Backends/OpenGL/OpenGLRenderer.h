@@ -403,6 +403,7 @@ private:
 	int          m_uExposure      = -1;
 	int          m_uBloomTex      = -1;
 	int          m_uBloomStrength = -1;
+	int          m_uLensFlare     = -1;
 	unsigned int m_fsVAO          = 0;  // empty VAO for the fullscreen triangle
 	void CreateTonemapPipeline();
 	void EnsureHDRTarget(int width, int height);

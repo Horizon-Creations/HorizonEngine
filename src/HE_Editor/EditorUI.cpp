@@ -4068,6 +4068,9 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			ImGui::SetNextItemWidth(-1.0f);
 			ImGui::SliderFloat("##godrays", &env->godRays, 0.0f, 1.0f, "God rays: %.2f"); trackEdit();
 			ImGui::TextDisabled("Warm crepuscular glow where sunlight breaks through gaps in the cloud cover. Needs broken cloud (Coverage > 0) and the sun up; off when overcast or clear.");
+			ImGui::SetNextItemWidth(-1.0f);
+			ImGui::SliderFloat("##lensflare", &env->lensFlare, 0.0f, 1.0f, "Lens flare: %.2f"); trackEdit();
+			ImGui::TextDisabled("Camera lens flare for the sun: core, ghost discs and a halo along the sun\xe2\x86\x92screen-centre axis. Fades when the sun is off-screen, below the horizon, or occluded. A camera artifact.");
 
 			ImGui::SeparatorText("Atmospheric Fog");
 			ImGui::SetNextItemWidth(-1.0f);
