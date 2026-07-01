@@ -1821,7 +1821,9 @@ void main()
 	float cloudT = 1.0;                                   // view-ray cloud transmittance
 	if (uLowResClouds > 0.5)
 	{
-		// Low-res clouds: composite the upsampled (L, T) from the quarter-res pre-pass.
+		// Low-res clouds: composite the upsampled (L, T) from the quarter-res pre-pass, which
+		// this backend renders with the CURRENT camera (see DrawScene) so it lines up 1:1 with
+		// the sky — no reprojection needed, no panning lag.
 		vec4 lt = texture(uCloudTex, vNDC * 0.5 + 0.5);
 		col = col * lt.a + lt.rgb;
 		cloudT = lt.a;
@@ -4600,8 +4602,12 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			{
 				GLint prevFBO = 0; glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevFBO);
 				EnsureCloudFBO(std::max(1, pw / 2), std::max(1, ph / 2));
-				glUniformMatrix4fv(m_uSkyInvVP, 1, GL_FALSE, glm::value_ptr(m_lastInvViewProj));
-				glUniform3fv(m_uSkySunDir, 1, glm::value_ptr(m_lastSunDir));
+				// Render the pre-pass with the CURRENT camera (this backend draws the sky after
+				// extraction, so the current view is available inline). Compositing at the current
+				// screen UV then lines the clouds up 1:1 with the sky — no lag/swim when panning.
+				// (uInvVP/uSunDir are already the current values here; set explicitly for clarity.)
+				glUniformMatrix4fv(m_uSkyInvVP, 1, GL_FALSE, glm::value_ptr(invViewProj));
+				glUniform3fv(m_uSkySunDir, 1, glm::value_ptr(sunDir));
 				glUniform1f(m_uSkyCloudPrepass, 1.0f);
 				glUniform1f(m_uSkyLowResClouds, 0.0f);
 				glBindFramebuffer(GL_FRAMEBUFFER, m_cloudFBO);
@@ -4627,7 +4633,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glDrawArrays(GL_TRIANGLES, 0, 3);
 			glDepthFunc(GL_LESS);   // restore default for the next pass
 			glDepthMask(GL_TRUE);
-			m_lastInvViewProj = invViewProj;   // remembered for next frame's cloud pre-pass
+			m_lastInvViewProj = invViewProj;   // (kept for compatibility; pre-pass now uses the current camera)
 			m_lastSunDir      = sunDir;
 		}
 		GpuTimerEndPass();                 // end "Sky+Clouds"
