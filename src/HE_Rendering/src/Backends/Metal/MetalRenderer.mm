@@ -2121,57 +2121,29 @@ float3 crepuscular(float3 dir, float3 sunDir, float3 sunColor, float time,
 	return sunColor * shaft * 0.55;
 }
 
-// 22° ice halo + sun dogs (parhelia): the ring of light refracted by hexagonal ice
-// crystals in high cirrus cloud. Visible only when there IS cirrus (reuses cirrusAmount —
-// physically what carries the ice) with the sun up. The ring is faint, red on the inner
-// edge (~21.7°) fading to blue-white outward; the sun dogs are two bright patches 22° to
-// either side of the sun at its own altitude. Additive, added before the cloud composite so
-// lower clouds occlude it. Cheap (a couple of angle tests). Mirrors the GL iceHalo().
-float3 iceHalo(float3 dir, float3 sunDir, float3 sunColor, float cirrus)
-{
-	if (cirrus <= 0.0) return float3(0.0);
-	dir = normalize(dir); sunDir = normalize(sunDir);
-	float day = smoothstep(-0.02, 0.10, sunDir.y);
-	if (day <= 0.0 || dir.y < 0.0) return float3(0.0);
-	float vis = day * clamp(cirrus, 0.0, 1.0) * smoothstep(0.0, 0.10, dir.y);
-	if (vis <= 0.0) return float3(0.0);
-
-	float ang = acos(clamp(dot(dir, sunDir), -1.0, 1.0)) * 57.29578; // degrees from the sun
-	// 22° ring: sharp red inner edge, soft blue-white outer falloff.
-	float ring = smoothstep(21.0, 21.9, ang) * (1.0 - smoothstep(22.4, 25.0, ang));
-	float tcol = clamp((ang - 21.7) / 2.6, 0.0, 1.0);
-	float3 hcol = mix(float3(1.0, 0.74, 0.52), float3(0.85, 0.92, 1.0), tcol); // red → blue-white
-	float3 col  = hcol * (ring * vis * 0.45);
-
-	// Parhelia: rotate the sun direction ±22° about world-up (same altitude as the sun).
-	float3 sH   = normalize(float3(sunDir.x, 0.0, sunDir.z) + float3(1e-5));
-	float3 side = normalize(cross(float3(0.0, 1.0, 0.0), sH));
-	float  c22  = 0.92718, s22 = 0.37461;                 // cos/sin(22°)
-	float3 pdR  = normalize(sunDir * c22 + side * s22);
-	float3 pdL  = normalize(sunDir * c22 - side * s22);
-	float  dR   = acos(clamp(dot(dir, pdR), -1.0, 1.0));
-	float  dL   = acos(clamp(dot(dir, pdL), -1.0, 1.0));
-	float  dog  = exp(-(dR * dR) / 0.0007) + exp(-(dL * dL) / 0.0007);
-	col += mix(float3(1.0, 0.82, 0.6), sunColor, 0.5) * (dog * vis * 0.6);
-	return col;
-}
-
-// Lunar 22° halo: the night companion to iceHalo(). Moonlight is dim, so the ring is faint
-// and near-white (little colour at low light) with no sun dogs. Only at night, when there is
-// a moon up, through cirrus. Centred on the moon (opposite the sun). Mirrors GL moonHalo().
-float3 moonHalo(float3 dir, float3 sunDir, bool hasMoon, float cirrus)
+// Lunar corona: the small diffraction aureole + faint coloured ring that hugs the moon's
+// own disk when thin cirrus/ice haze crosses it — NOT the wide 22° halo (which reads as a
+// camera artifact and dwarfs the moon). A bluish-white aureole a moon-radius or two across,
+// with a faint reddish outer ring. Cirrus-gated, night-only. Mirrors GL moonCorona().
+float3 moonCorona(float3 dir, float3 sunDir, bool hasMoon, float cirrus)
 {
 	if (cirrus <= 0.0 || !hasMoon) return float3(0.0);
 	dir = normalize(dir); sunDir = normalize(sunDir);
 	float night = 1.0 - smoothstep(-0.10, 0.10, clamp(sunDir.y, -0.2, 1.0));
 	if (night <= 0.0 || dir.y < 0.0) return float3(0.0);
 	float3 moonDir = normalize(float3(-sunDir.x, -sunDir.y, sunDir.z));
+	if (dot(dir, moonDir) <= 0.0) return float3(0.0);
 	float vis = night * clamp(cirrus, 0.0, 1.0)
-	          * smoothstep(0.0, 0.06, dir.y) * smoothstep(0.0, 0.10, moonDir.y);
+	          * smoothstep(0.0, 0.04, dir.y) * smoothstep(0.0, 0.10, moonDir.y);
 	if (vis <= 0.0) return float3(0.0);
-	float ang  = acos(clamp(dot(dir, moonDir), -1.0, 1.0)) * 57.29578;
-	float ring = smoothstep(21.0, 21.9, ang) * (1.0 - smoothstep(22.4, 25.0, ang));
-	return float3(0.80, 0.86, 1.0) * (ring * vis * 0.16); // faint cool-white ring
+	const float kMoonR = 0.030;                                   // moon angular radius (matches moonDisk)
+	float ang = acos(clamp(dot(dir, moonDir), -1.0, 1.0));        // radians from moon centre
+	float d   = max(ang - kMoonR, 0.0);                           // distance outside the disk edge
+	float aureole = exp(-(d * d) / (0.018 * 0.018));              // soft glow hugging the disk
+	float ring    = exp(-((ang - 0.052) * (ang - 0.052)) / (0.010 * 0.010)); // one faint outer ring (~1.7×R)
+	float3 aurCol  = float3(0.82, 0.88, 1.0);                     // bluish-white inner aureole
+	float3 ringCol = float3(1.0, 0.72, 0.55);                     // reddish-brown outer ring
+	return (aurCol * (aureole * 0.30) + ringCol * (ring * 0.16)) * vis;
 }
 
 fragment float4 skyFragment(SkyOut in [[stage_in]],
@@ -2216,8 +2188,7 @@ fragment float4 skyFragment(SkyOut in [[stage_in]],
 	col = cirrus(col, dir, p.sunDir.xyz, p.sunColor.xyz, p.cloudTint.w, p.cirrus.x, p.params.z, p.wind.xz);
 	col = contrails(col, dir, p.sunDir.xyz, p.cloud.w, p.params.y);
 	col += rainbow(dir, p.sunDir.xyz, p.star2.w);   // rain + sun → spectral arc (clouds occlude it below)
-	col += iceHalo(dir, p.sunDir.xyz, p.sunColor.xyz, p.cloudTint.w); // 22° halo + sun dogs through cirrus
-	col += moonHalo(dir, p.sunDir.xyz, p.sunDir.w > 0.5, p.cloudTint.w); // faint lunar 22° halo at night
+	col += moonCorona(dir, p.sunDir.xyz, p.sunDir.w > 0.5, p.cloudTint.w); // tight lunar corona through cirrus
 	float cloudT = 1.0;                                     // view-ray cloud transmittance
 	if (p.star2.z > 0.5)
 	{

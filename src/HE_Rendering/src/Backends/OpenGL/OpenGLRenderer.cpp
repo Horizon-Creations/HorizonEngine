@@ -1681,54 +1681,29 @@ vec3 crepuscular(vec3 dir, vec3 sunDir, vec3 sunColor, float time,
 	return sunColor * shaft * 0.55;
 }
 
-// 22° ice halo + sun dogs (parhelia): the ring refracted by hexagonal ice crystals in high
-// cirrus cloud. Visible only when there IS cirrus (reuses cirrusAmount) with the sun up. Red
-// inner edge (~21.7°) fading to blue-white outward; two bright patches 22° to either side of
-// the sun at its altitude. Added before the cloud composite so lower clouds occlude it.
-// Mirrors the Metal iceHalo().
-vec3 iceHalo(vec3 dir, vec3 sunDir, vec3 sunColor, float cirrus)
-{
-	if (cirrus <= 0.0) return vec3(0.0);
-	dir = normalize(dir); sunDir = normalize(sunDir);
-	float day = smoothstep(-0.02, 0.10, sunDir.y);
-	if (day <= 0.0 || dir.y < 0.0) return vec3(0.0);
-	float vis = day * clamp(cirrus, 0.0, 1.0) * smoothstep(0.0, 0.10, dir.y);
-	if (vis <= 0.0) return vec3(0.0);
-
-	float ang = acos(clamp(dot(dir, sunDir), -1.0, 1.0)) * 57.29578; // degrees from the sun
-	float ring = smoothstep(21.0, 21.9, ang) * (1.0 - smoothstep(22.4, 25.0, ang));
-	float tcol = clamp((ang - 21.7) / 2.6, 0.0, 1.0);
-	vec3  hcol = mix(vec3(1.0, 0.74, 0.52), vec3(0.85, 0.92, 1.0), tcol); // red → blue-white
-	vec3  col  = hcol * (ring * vis * 0.45);
-
-	// Parhelia: rotate the sun direction ±22° about world-up (same altitude as the sun).
-	vec3  sH   = normalize(vec3(sunDir.x, 0.0, sunDir.z) + vec3(1e-5));
-	vec3  side = normalize(cross(vec3(0.0, 1.0, 0.0), sH));
-	float c22  = 0.92718, s22 = 0.37461;                  // cos/sin(22°)
-	vec3  pdR  = normalize(sunDir * c22 + side * s22);
-	vec3  pdL  = normalize(sunDir * c22 - side * s22);
-	float dR   = acos(clamp(dot(dir, pdR), -1.0, 1.0));
-	float dL   = acos(clamp(dot(dir, pdL), -1.0, 1.0));
-	float dog  = exp(-(dR * dR) / 0.0007) + exp(-(dL * dL) / 0.0007);
-	col += mix(vec3(1.0, 0.82, 0.6), sunColor, 0.5) * (dog * vis * 0.6);
-	return col;
-}
-
-// Lunar 22° halo: the night companion to iceHalo(). Faint, near-white, no sun dogs. Only at
-// night, when there is a moon up, through cirrus. Centred on the moon. Mirrors Metal moonHalo().
-vec3 moonHalo(vec3 dir, vec3 sunDir, bool hasMoon, float cirrus)
+// Lunar corona: the small diffraction aureole + faint coloured ring that hugs the moon's own
+// disk when thin cirrus/ice haze crosses it — NOT the wide 22° halo. Bluish-white aureole a
+// moon-radius or two across + a faint reddish outer ring. Cirrus-gated, night-only. Mirrors
+// Metal moonCorona().
+vec3 moonCorona(vec3 dir, vec3 sunDir, bool hasMoon, float cirrus)
 {
 	if (cirrus <= 0.0 || !hasMoon) return vec3(0.0);
 	dir = normalize(dir); sunDir = normalize(sunDir);
 	float night = 1.0 - smoothstep(-0.10, 0.10, clamp(sunDir.y, -0.2, 1.0));
 	if (night <= 0.0 || dir.y < 0.0) return vec3(0.0);
 	vec3  moonDir = normalize(vec3(-sunDir.x, -sunDir.y, sunDir.z));
+	if (dot(dir, moonDir) <= 0.0) return vec3(0.0);
 	float vis = night * clamp(cirrus, 0.0, 1.0)
-	          * smoothstep(0.0, 0.06, dir.y) * smoothstep(0.0, 0.10, moonDir.y);
+	          * smoothstep(0.0, 0.04, dir.y) * smoothstep(0.0, 0.10, moonDir.y);
 	if (vis <= 0.0) return vec3(0.0);
-	float ang  = acos(clamp(dot(dir, moonDir), -1.0, 1.0)) * 57.29578;
-	float ring = smoothstep(21.0, 21.9, ang) * (1.0 - smoothstep(22.4, 25.0, ang));
-	return vec3(0.80, 0.86, 1.0) * (ring * vis * 0.16); // faint cool-white ring
+	const float kMoonR = 0.030;                                   // moon angular radius (matches moonDisk)
+	float ang = acos(clamp(dot(dir, moonDir), -1.0, 1.0));        // radians from moon centre
+	float d   = max(ang - kMoonR, 0.0);
+	float aureole = exp(-(d * d) / (0.018 * 0.018));              // soft glow hugging the disk
+	float ring    = exp(-((ang - 0.052) * (ang - 0.052)) / (0.010 * 0.010)); // faint outer ring (~1.7×R)
+	vec3  aurCol  = vec3(0.82, 0.88, 1.0);
+	vec3  ringCol = vec3(1.0, 0.72, 0.55);
+	return (aurCol * (aureole * 0.30) + ringCol * (ring * 0.16)) * vis;
 }
 
 vec3 sunGlare(vec3 dir, vec3 sunDir)
@@ -1837,8 +1812,7 @@ void main()
 	col  = cirrus(col, dir, uSunDir, uSunColor, uCirrus, uCirrusSeed, uTime, uWind.xz); // alpha-blended
 	col  = contrails(col, dir, uSunDir, uContrails, uCloudCoverage); // alpha-blended into the sky
 	col += rainbow(dir, uSunDir, uRainAmount);           // anti-solar arc while raining (clouds occlude it below)
-	col += iceHalo(dir, uSunDir, uSunColor, uCirrus);    // 22° halo + sun dogs through cirrus
-	col += moonHalo(dir, uSunDir, true, uCirrus);        // faint lunar 22° halo at night (moon always up in GL)
+	col += moonCorona(dir, uSunDir, true, uCirrus);      // tight lunar corona through cirrus (moon always up in GL)
 	float cloudT = 1.0;                                   // view-ray cloud transmittance
 	if (uLowResClouds > 0.5)
 	{
