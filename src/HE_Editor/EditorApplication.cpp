@@ -1256,6 +1256,7 @@ void EditorApplication::dumpFrameHeadless()
 			e->rainAmount        = static_cast<float>(envF("HE_DUMP_RAIN",     e->rainAmount));
 			e->godRays           = static_cast<float>(envF("HE_DUMP_GODRAYS", e->godRays));
 			e->shootingStars     = static_cast<float>(envF("HE_DUMP_METEORS", e->shootingStars));
+			e->lensFlare         = static_cast<float>(envF("HE_DUMP_LENSFLARE", e->lensFlare));
 		}
 		// Look slightly up toward the sky from a low vantage. HE_DUMP_YAW rotates the
 		// heading (0 = toward -Z, 180 = toward +Z) so e.g. the aurora band can be framed.
@@ -1527,7 +1528,7 @@ void EditorApplication::pushEnvironment(float dt)
 		.cloudTint = env->cloudTint,
 		.contrailAmount = env->contrailAmount,
 		.cirrusAmount = env->cirrusAmount, .cirrusSeed = env->cirrusSeed,
-		.godRays = env->godRays, .shootingStars = env->shootingStars,
+		.godRays = env->godRays, .shootingStars = env->shootingStars, .lensFlare = env->lensFlare,
 		.starBrightness = env->starBrightness, .starColor = env->starColor,
 		.starSize = env->starSize, .starSizeVariation = env->starSizeVariation,
 		.starGlow = env->starGlow, .starTwinkle = env->starTwinkle,

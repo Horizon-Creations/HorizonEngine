@@ -305,6 +305,7 @@ private:
 	float m_bloomThreshold      = 1.0f;
 	float m_bloomKnee           = 0.5f;
 	float m_bloomStrength       = 0.6f;
+	float m_lensFlareParams[4]  = { 0.0f, 0.0f, 1.0f, 0.0f }; // xy sunNDC, z aspect, w strength (tonemap flare)
 	void  EnsureBloomTargets(int width, int height);
 	void  DestroyBloomTargets();
 	// Bright-pass + blur m_hdrColor into m_bloomColor[0]; returns its texture ptr.

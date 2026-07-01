@@ -268,6 +268,7 @@ namespace
 				{ "cirrusSeed",        e->cirrusSeed },
 				{ "godRays",           e->godRays },
 				{ "shootingStars",     e->shootingStars },
+				{ "lensFlare",         e->lensFlare },
 				{ "windDirection",     e->windDirection },
 				{ "windSpeed",         e->windSpeed },
 				{ "fogDensity",        e->fogDensity },
@@ -625,6 +626,7 @@ namespace
 			e.cirrusSeed        = c.value("cirrusSeed",        e.cirrusSeed);
 			e.godRays           = c.value("godRays",           e.godRays);
 			e.shootingStars     = c.value("shootingStars",     e.shootingStars);
+			e.lensFlare         = c.value("lensFlare",         e.lensFlare);
 			e.windDirection     = c.value("windDirection",     e.windDirection);
 			e.windSpeed         = c.value("windSpeed",         e.windSpeed);
 			e.fogDensity        = c.value("fogDensity",        e.fogDensity);

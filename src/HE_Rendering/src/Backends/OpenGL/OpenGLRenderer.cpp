@@ -1968,11 +1968,53 @@ uniform sampler2D uHDR;
 uniform sampler2D uBloom;
 uniform float     uExposure;
 uniform float     uBloomStrength;
+uniform vec4      uLensFlare;   // xy sunNDC, z aspect, w strength (0 = OFF)
 out vec4 FragColor;
 vec3 aces(vec3 x)
 {
 	const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
 	return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+// Camera lens flare (default OFF): post-process overlay added in gamma/LDR space after ACES.
+// Mirrors the Metal lensFlareOverlay() byte-for-byte; only the pNDC reconstruction + probe uv
+// convention differ (GL bottom-left uv → no y-flip).
+vec3 lensFlareOverlay(vec2 uv, vec4 lf)
+{
+	float S = lf.w;
+	if (S <= 0.0) return vec3(0.0);
+	float aspect = lf.z;
+	vec2  sunNDC = lf.xy;
+	vec2  pNDC = uv * 2.0 - 1.0;                        // canonical y-up (GL uv is bottom-left)
+	vec2  P    = vec2(pNDC.x * aspect, pNDC.y);
+	vec2  Sc   = vec2(sunNDC.x * aspect, sunNDC.y);
+	vec2  toSun = P - Sc; float sunDist = length(toSun);
+	vec2  axis  = -Sc;                                  // sun → screen centre (and beyond)
+
+	vec2  sunUV = sunNDC * 0.5 + 0.5;                   // GL bottom-left uv
+	vec2  off[5] = vec2[5]( vec2(0.0,0.0), vec2(0.006,0.0), vec2(-0.006,0.0),
+	                        vec2(0.0,0.006), vec2(0.0,-0.006) );
+	float lum = 0.0;
+	for (int i = 0; i < 5; ++i)
+		lum += dot(texture(uHDR, clamp(sunUV + off[i], 0.0, 1.0)).rgb, vec3(0.2126, 0.7152, 0.0722));
+	float vis = smoothstep(2.0, 7.0, lum * 0.2);
+
+	vec3  warm  = vec3(1.0, 0.92, 0.80);
+	float core  = 0.22 * exp(-sunDist * sunDist * 45.0);
+	float streak = 0.10 * exp(-toSun.x * toSun.x * 5.0) * exp(-toSun.y * toSun.y * 800.0);
+	float hd    = length(P);
+	float halo  = 0.06 * smoothstep(0.05, 0.0, abs(hd - 0.55));
+	vec3  flare = warm * (core + streak + halo);
+	float t[5]   = float[5]( 0.30, 0.55, 0.80, 1.20, 1.55 );
+	float rad[5] = float[5]( 0.09, 0.14, 0.06, 0.20, 0.11 );
+	float amp[5] = float[5]( 0.22, 0.15, 0.28, 0.10, 0.18 );
+	vec3  gcol[5] = vec3[5]( vec3(1.0,0.85,0.6), vec3(0.6,0.8,1.0), vec3(1.0,0.7,0.7),
+	                         vec3(0.7,1.0,0.8), vec3(0.8,0.7,1.0) );
+	for (int i = 0; i < 5; ++i)
+	{
+		float d = length(P - (Sc + axis * t[i]));
+		flare += amp[i] * gcol[i] * smoothstep(rad[i], 0.0, d);
+	}
+	return flare * (S * vis);
 }
 void main()
 {
@@ -1981,6 +2023,7 @@ void main()
 	hdr        *= uExposure;
 	vec3 mapped = aces(hdr);
 	mapped      = pow(mapped, vec3(1.0 / 2.2));
+	mapped      = clamp(mapped + lensFlareOverlay(vUV, uLensFlare), 0.0, 1.0); // camera sun flare
 	FragColor   = vec4(mapped, 1.0);
 }
 )GLSL";
@@ -2784,6 +2827,7 @@ void OpenGLRenderer::CreateTonemapPipeline()
 	m_uExposure      = glGetUniformLocation(m_tonemapProgram, "uExposure");
 	m_uBloomTex      = glGetUniformLocation(m_tonemapProgram, "uBloom");
 	m_uBloomStrength = glGetUniformLocation(m_tonemapProgram, "uBloomStrength");
+	m_uLensFlare     = glGetUniformLocation(m_tonemapProgram, "uLensFlare");
 
 	// FXAA program (shares the fullscreen-triangle VS).
 	{
@@ -4080,6 +4124,25 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				glUniform1i(m_uBloomTex, 1);
 				glUniform1f(m_uExposure, 1.0f);
 				glUniform1f(m_uBloomStrength, bloomTex ? m_bloomStrength : 0.0f);
+				// Camera lens flare: project the sun (a point at infinity, w=0 drops the view
+				// translation) to y-up NDC and fold behind-camera / off-screen / below-horizon
+				// into a single strength. Matches the Metal CPU path; the shader is byte-identical.
+				{
+					const float lfAmt = GetEnvironment().lensFlare;
+					glm::vec3 sd = glm::normalize(sunDir);
+					glm::vec4 clip = viewProj * glm::vec4(sd, 0.0f);
+					glm::vec2 sunNDC(0.0f);
+					float strength = 0.0f;
+					if (lfAmt > 0.0f && clip.w > 1e-4f)
+					{
+						sunNDC = glm::vec2(clip) / clip.w;
+						const float onScreen = 1.0f - glm::smoothstep(1.0f, 1.7f, glm::length(sunNDC));
+						const float horizon  = glm::smoothstep(-0.02f, 0.10f, sd.y);
+						strength = lfAmt * onScreen * horizon;
+					}
+					const float aspect = (ph > 0) ? (float)pw / (float)ph : 1.0f;
+					glUniform4f(m_uLensFlare, sunNDC.x, sunNDC.y, aspect, strength);
+				}
 				glActiveTexture(GL_TEXTURE0);
 				glDrawArrays(GL_TRIANGLES, 0, 3);
 			}

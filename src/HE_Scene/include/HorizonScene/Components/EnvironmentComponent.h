@@ -71,6 +71,12 @@ struct EnvironmentComponent
     // clock so they animate smoothly and reproduce in headless captures.
     float     shootingStars = 0.0f;   // 0 none … 1 frequent meteors
 
+    // Camera lens flare for the sun (0 = off): a post-process overlay — bright core at the
+    // sun's screen position, a chain of ghost discs along the sun→centre axis, and a halo
+    // ring. Fades out when the sun is off-screen, below the horizon, behind cloud, or
+    // occluded by geometry. A camera artifact (opt-in), not an eye-view phenomenon.
+    float     lensFlare = 0.0f;   // 0 off … 1 strong
+
     // Atmospheric fog / aerial perspective (0 density = off; height falloff pools
     // the fog near the ground).
     float fogDensity      = 0.0f;
