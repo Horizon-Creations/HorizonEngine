@@ -1683,8 +1683,10 @@ vec3 crepuscular(vec3 dir, vec3 sunDir, vec3 sunColor, float time,
 
 // Subtle moon glow: one soft luminous ring hugging the moon's disk — a gentle aureole so the
 // moon reads as glowing rather than a flat cut-out. Deliberately understated (dezent), always
-// present at night, cool white. NOT the wide 22° halo. Mirrors Metal moonCorona().
-vec3 moonCorona(vec3 dir, vec3 sunDir, bool hasMoon)
+// present at night, cool white, and SHAPED BY THE PHASE: glows on the lit limb and fades across
+// the terminator (a crescent glows only on its bright side, a full moon all around). NOT the
+// wide 22° halo. Mirrors Metal moonCorona().
+vec3 moonCorona(vec3 dir, vec3 sunDir, bool hasMoon, float moonPhase)
 {
 	if (!hasMoon) return vec3(0.0);
 	dir = normalize(dir); sunDir = normalize(sunDir);
@@ -1697,7 +1699,16 @@ vec3 moonCorona(vec3 dir, vec3 sunDir, bool hasMoon)
 	const float kMoonR = 0.030;                                   // moon angular radius (matches moonDisk)
 	float ang  = acos(clamp(dot(dir, moonDir), -1.0, 1.0));       // radians from moon centre
 	float ring = exp(-((ang - kMoonR * 1.15) * (ang - kMoonR * 1.15)) / (0.016 * 0.016)); // soft ring at the limb
-	return vec3(0.85, 0.90, 1.0) * (ring * 0.14 * vis);           // dezent cool-white glow
+	// Phase shaping: build the moon-view frame (as moonDisk), take the outward direction of
+	// this ring point, and light a just-inside-the-limb normal by the same sun direction L.
+	vec3  right = normalize(cross(vec3(0.0, 1.0, 0.0), moonDir));
+	vec3  up    = cross(moonDir, right);
+	vec2  rad   = normalize(vec2(dot(dir, right), dot(dir, up)) + vec2(1e-6));
+	float ph    = moonPhase * 6.2831853;
+	vec3  L     = vec3(sin(ph), 0.0, -cos(ph));                   // sun direction across the disk (== moonDisk)
+	vec3  Nlimb = normalize(vec3(rad * 0.85, 0.53));             // normal just inside the lit limb
+	float lit   = smoothstep(0.0, 0.55, dot(Nlimb, L));          // 0 dark limb .. 1 lit limb
+	return vec3(0.85, 0.90, 1.0) * (ring * lit * 0.17 * vis);    // dezent, phase-shaped
 }
 
 vec3 sunGlare(vec3 dir, vec3 sunDir)
@@ -1806,7 +1817,7 @@ void main()
 	col  = cirrus(col, dir, uSunDir, uSunColor, uCirrus, uCirrusSeed, uTime, uWind.xz); // alpha-blended
 	col  = contrails(col, dir, uSunDir, uContrails, uCloudCoverage); // alpha-blended into the sky
 	col += rainbow(dir, uSunDir, uRainAmount);           // anti-solar arc while raining (clouds occlude it below)
-	col += moonCorona(dir, uSunDir, true);               // subtle glow ring around the moon (moon always up in GL)
+	col += moonCorona(dir, uSunDir, true, uMoonPhase);   // subtle phase-shaped glow ring around the moon (moon always up in GL)
 	float cloudT = 1.0;                                   // view-ray cloud transmittance
 	if (uLowResClouds > 0.5)
 	{

@@ -2123,8 +2123,10 @@ float3 crepuscular(float3 dir, float3 sunDir, float3 sunColor, float time,
 
 // Subtle moon glow: one soft luminous ring hugging the moon's disk — a gentle aureole that
 // makes the moon read as glowing rather than a flat cut-out. Deliberately understated
-// (dezent), always present at night, cool white. NOT the wide 22° halo. Mirrors GL moonCorona().
-float3 moonCorona(float3 dir, float3 sunDir, bool hasMoon)
+// (dezent), always present at night, cool white, and SHAPED BY THE PHASE: it glows on the lit
+// limb and fades across the terminator (a crescent glows only on its bright side, a full moon
+// all around). NOT the wide 22° halo. Mirrors GL moonCorona().
+float3 moonCorona(float3 dir, float3 sunDir, bool hasMoon, float moonPhase)
 {
 	if (!hasMoon) return float3(0.0);
 	dir = normalize(dir); sunDir = normalize(sunDir);
@@ -2137,7 +2139,16 @@ float3 moonCorona(float3 dir, float3 sunDir, bool hasMoon)
 	const float kMoonR = 0.030;                                   // moon angular radius (matches moonDisk)
 	float ang  = acos(clamp(dot(dir, moonDir), -1.0, 1.0));       // radians from moon centre
 	float ring = exp(-((ang - kMoonR * 1.15) * (ang - kMoonR * 1.15)) / (0.016 * 0.016)); // soft ring at the limb
-	return float3(0.85, 0.90, 1.0) * (ring * 0.14 * vis);         // dezent cool-white glow
+	// Phase shaping: build the moon-view frame (as moonDisk), take the outward direction of
+	// this ring point, and light a just-inside-the-limb normal by the same sun direction L.
+	float3 right = normalize(cross(float3(0.0, 1.0, 0.0), moonDir));
+	float3 up    = cross(moonDir, right);
+	float2 rad   = normalize(float2(dot(dir, right), dot(dir, up)) + float2(1e-6));
+	float  ph    = moonPhase * 6.2831853;
+	float3 L     = float3(sin(ph), 0.0, -cos(ph));               // sun direction across the disk (== moonDisk)
+	float3 Nlimb = normalize(float3(rad * 0.85, 0.53));          // normal just inside the lit limb
+	float  lit   = smoothstep(0.0, 0.55, dot(Nlimb, L));         // 0 dark limb .. 1 lit limb
+	return float3(0.85, 0.90, 1.0) * (ring * lit * 0.17 * vis);  // dezent, phase-shaped
 }
 
 fragment float4 skyFragment(SkyOut in [[stage_in]],
@@ -2182,7 +2193,7 @@ fragment float4 skyFragment(SkyOut in [[stage_in]],
 	col = cirrus(col, dir, p.sunDir.xyz, p.sunColor.xyz, p.cloudTint.w, p.cirrus.x, p.params.z, p.wind.xz);
 	col = contrails(col, dir, p.sunDir.xyz, p.cloud.w, p.params.y);
 	col += rainbow(dir, p.sunDir.xyz, p.star2.w);   // rain + sun → spectral arc (clouds occlude it below)
-	col += moonCorona(dir, p.sunDir.xyz, p.sunDir.w > 0.5); // subtle glow ring around the moon
+	col += moonCorona(dir, p.sunDir.xyz, p.sunDir.w > 0.5, p.sunColor.w); // subtle phase-shaped glow ring around the moon
 	float cloudT = 1.0;                                     // view-ray cloud transmittance
 	if (p.star2.z > 0.5)
 	{
