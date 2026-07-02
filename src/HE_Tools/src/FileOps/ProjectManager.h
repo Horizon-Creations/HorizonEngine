@@ -29,6 +29,13 @@ struct ExportProfile
 	// Glob patterns (Content-relative, forward slashes) excluded from the pak,
 	// e.g. "Debug/*", "*_test.hasset".
 	std::vector<std::string> excludePatterns;
+	// Incremental packing: reuse unchanged assets from the previous export
+	// (manifest-gated; falls back to a full pack automatically).
+	bool incremental = true;
+	// Export target: "Host" (this machine, runtime from ../Game) or
+	// "Windows"/"macOS"/"Linux" (prebuilt bundle from ../GameRuntimes/<name>,
+	// output lands in a per-platform sub-folder).
+	std::string targetPlatform = "Host";
 };
 
 // The two seeded defaults for projects that have no profiles yet (also used by

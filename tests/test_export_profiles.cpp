@@ -3,10 +3,12 @@
 #include <Hpak/HpakWriter.h>
 #include <Hpak/HpakReader.h>
 #include <Hpak/ProjectExporter.h>
+#include <Hpak/ProjectConfig.h>
 #include <ContentManager/HAsset.h>
 #include <Types/Enums.h>
 #include <Types/UUID.h>
 #include "ProjectManager.h"
+#include <cstring>
 
 #include <nlohmann/json.hpp>
 #include <filesystem>
@@ -186,6 +188,8 @@ TEST_CASE("ProjectManager: profiles round-trip and unknown manifest keys survive
     proj.exportProfiles[1].excludePatterns = { "Debug/*", "*_wip.hasset" };
     proj.exportProfiles[1].startupScene    = "Content/Menu.hescene";
     proj.exportProfiles[1].outputDir       = "/tmp/ship_out";
+    proj.exportProfiles[1].incremental     = false;
+    proj.exportProfiles[1].targetPlatform  = "Windows";
     ExportProfile extra;
     extra.name = "DemoDisk";
     extra.compress = true;
@@ -203,7 +207,11 @@ TEST_CASE("ProjectManager: profiles round-trip and unknown manifest keys survive
           == std::vector<std::string>{ "Debug/*", "*_wip.hasset" });
     CHECK(p2.exportProfiles[1].startupScene == "Content/Menu.hescene");
     CHECK(p2.exportProfiles[1].outputDir == "/tmp/ship_out");
+    CHECK_FALSE(p2.exportProfiles[1].incremental);
+    CHECK(p2.exportProfiles[1].targetPlatform == "Windows");
     CHECK(p2.exportProfiles[2].name == "DemoDisk");
+    CHECK(p2.exportProfiles[2].incremental);              // default true
+    CHECK(p2.exportProfiles[2].targetPlatform == "Host"); // default
     // startupScene survives the read-modify-write save (old saveProject lost it).
     CHECK_FALSE(p2.startupScene.empty());
 
@@ -215,6 +223,135 @@ TEST_CASE("ProjectManager: profiles round-trip and unknown manifest keys survive
         CHECK(j.contains("preset"));
     }
     fs::remove_all(dir);
+}
+
+// ─── Incremental packing ──────────────────────────────────────────────────────
+
+// Three-asset content dir + one export call with given settings.
+static ExportResult runExport(const fs::path& dir, const fs::path& out,
+                              bool compress, bool encrypt, bool incremental)
+{
+    ExportSettings s;
+    s.compress    = compress;
+    s.encrypt     = encrypt;
+    s.incremental = incremental;
+    return ProjectExporter::exportProject(dir, "Inc", "", out, s);
+}
+
+TEST_CASE("Incremental export: unchanged assets are reused, changes repack")
+{
+    const auto dir = fs::temp_directory_path() / "he_inc_src";
+    const auto out = fs::temp_directory_path() / "he_inc_out";
+    fs::remove_all(dir); fs::remove_all(out);
+    writeBlob(dir / "a.hasset", tinyHasset({0x1, 0xA}, "a.hasset"));
+    writeBlob(dir / "b.hasset", tinyHasset({0x2, 0xB}, "b.hasset"));
+    writeBlob(dir / "c.hasset", tinyHasset({0x3, 0xC}, "c.hasset"));
+
+    // First export: nothing to reuse; manifest gets written.
+    auto r1 = runExport(dir, out, /*compress*/true, false, true);
+    REQUIRE(r1.success);
+    CHECK(r1.assetsPacked == 3);
+    CHECK(r1.assetsReused == 0);
+    CHECK(fs::exists(out / "Inc.hpak.manifest"));
+
+    // Second export, no changes: everything carried over verbatim.
+    auto r2 = runExport(dir, out, true, false, true);
+    REQUIRE(r2.success);
+    CHECK(r2.assetsPacked == 3);
+    CHECK(r2.assetsReused == 3);
+
+    // A reused entry must still decode to the original bytes.
+    {
+        HpakReader reader;
+        REQUIRE(reader.open((out / "Inc.hpak").string()));
+        CHECK(reader.readEntry(HE::UUID{0x1, 0xA}) == tinyHasset({0x1, 0xA}, "a.hasset"));
+    }
+
+    // Modify one asset → exactly that one repacks.
+    writeBlob(dir / "b.hasset", tinyHasset({0x2, 0xB}, "renamed/b.hasset"));
+    auto r3 = runExport(dir, out, true, false, true);
+    REQUIRE(r3.success);
+    CHECK(r3.assetsPacked == 3);
+    CHECK(r3.assetsReused == 2);
+
+    // Manifest deleted → full repack (graceful fallback, still succeeds).
+    fs::remove(out / "Inc.hpak.manifest");
+    auto r4 = runExport(dir, out, true, false, true);
+    REQUIRE(r4.success);
+    CHECK(r4.assetsReused == 0);
+
+    // Settings change (codec) invalidates the manifest → full repack.
+    auto r5 = runExport(dir, out, true, false, true);   // rebuild manifest (compress)
+    CHECK(r5.assetsReused == 3);
+    auto r6 = runExport(dir, out, /*compress*/false, false, true);
+    REQUIRE(r6.success);
+    CHECK(r6.assetsReused == 0);
+
+    // incremental=false ignores the cache entirely.
+    auto r7 = runExport(dir, out, false, false, true);  // manifest now matches store
+    CHECK(r7.assetsReused == 3);
+    auto r8 = runExport(dir, out, false, false, /*incremental*/false);
+    REQUIRE(r8.success);
+    CHECK(r8.assetsReused == 0);
+
+    fs::remove_all(dir); fs::remove_all(out);
+}
+
+#ifdef HE_HAVE_OPENSSL
+TEST_CASE("Incremental export: encryption reuses the previous key, pak stays readable")
+{
+    const auto dir = fs::temp_directory_path() / "he_inc_enc_src";
+    const auto out = fs::temp_directory_path() / "he_inc_enc_out";
+    fs::remove_all(dir); fs::remove_all(out);
+    writeBlob(dir / "a.hasset", tinyHasset({0x4, 0xD}, "a.hasset"));
+    writeBlob(dir / "b.hasset", tinyHasset({0x5, 0xE}, "b.hasset"));
+
+    auto r1 = runExport(dir, out, true, /*encrypt*/true, true);
+    REQUIRE(r1.success);
+    ProjectConfig cfg1;
+    REQUIRE(ProjectConfigLoader::load(out, cfg1));
+    REQUIRE(cfg1.encrypted);
+
+    auto r2 = runExport(dir, out, true, true, true);
+    REQUIRE(r2.success);
+    CHECK(r2.assetsReused == 2);                       // verbatim incl. nonce+tag
+    ProjectConfig cfg2;
+    REQUIRE(ProjectConfigLoader::load(out, cfg2));
+    CHECK(std::memcmp(cfg1.encKey, cfg2.encKey, 32) == 0); // key carried over
+
+    // The reused encrypted entry decrypts with the shipped key.
+    HpakReader reader;
+    REQUIRE(reader.open((out / "Inc.hpak").string()));
+    CHECK(reader.readEntry(HE::UUID{0x4, 0xD}, cfg2.encKey)
+          == tinyHasset({0x4, 0xD}, "a.hasset"));
+
+    fs::remove_all(dir); fs::remove_all(out);
+}
+#endif
+
+// ─── Platform targets ─────────────────────────────────────────────────────────
+
+TEST_CASE("ExportPlatform: name mapping and runtime-dir resolution")
+{
+    CHECK(std::string(exportPlatformName(ExportPlatform::Host))    == "Host");
+    CHECK(std::string(exportPlatformName(ExportPlatform::Windows)) == "Windows");
+    CHECK(std::string(exportPlatformName(ExportPlatform::MacOS))   == "macOS");
+    CHECK(std::string(exportPlatformName(ExportPlatform::Linux))   == "Linux");
+
+    CHECK(exportPlatformFromName("Windows") == ExportPlatform::Windows);
+    CHECK(exportPlatformFromName("macOS")   == ExportPlatform::MacOS);
+    CHECK(exportPlatformFromName("Linux")   == ExportPlatform::Linux);
+    CHECK(exportPlatformFromName("Host")    == ExportPlatform::Host);
+    CHECK(exportPlatformFromName("")        == ExportPlatform::Host);   // unknown → Host
+    CHECK(exportPlatformFromName("Amiga")   == ExportPlatform::Host);
+
+    const fs::path base = "/opt/editor";
+    CHECK(resolveRuntimeDir(base, ExportPlatform::Host).lexically_normal()
+          == fs::path("/opt/Game"));
+    CHECK(resolveRuntimeDir(base, ExportPlatform::Windows).lexically_normal()
+          == fs::path("/opt/GameRuntimes/Windows"));
+    CHECK(resolveRuntimeDir(base, ExportPlatform::Linux).lexically_normal()
+          == fs::path("/opt/GameRuntimes/Linux"));
 }
 
 // ─── Review-fix regressions ───────────────────────────────────────────────────

@@ -35,6 +35,7 @@ bool HpakReader::open(const std::string& path)
     }
     if (Hpak::hash64(toc.data(), toc.size()) != hdr.tocHash)
         return false; // corrupt / truncated TOC
+    m_tocHash = hdr.tocHash;
 
     m_entries.resize(hdr.entryCount);
     for (uint32_t i = 0; i < hdr.entryCount; ++i)
@@ -77,6 +78,35 @@ std::vector<HE::UUID> HpakReader::enumerate() const
     for (const auto& e : m_entries)
         ids.push_back(e.uuid);
     return ids;
+}
+
+bool HpakReader::readStoredEntry(const HE::UUID& id, StoredEntry& out) const
+{
+    const EntryMeta* e = find(id);
+    if (!e || !m_file.is_open()) return false;
+    if (e->dataSize > 0x7FFFFFFFu || e->origSize > 0x7FFFFFFFu) return false;
+
+    m_file.clear(); // drop sticky fail/eof bits from a previous read
+    m_file.seekg(static_cast<std::streamoff>(e->dataOffset));
+    if (!m_file) return false;
+
+    out.data.resize(e->dataSize);
+    if (e->dataSize > 0)
+    {
+        m_file.read(reinterpret_cast<char*>(out.data.data()),
+                    static_cast<std::streamsize>(e->dataSize));
+        if (!m_file) return false;
+    }
+    // Verify before handing the bytes on — a corrupt stored entry must be
+    // repacked from source, never carried verbatim into the next archive.
+    if (Hpak::hash64(out.data.data(), out.data.size()) != e->contentHash) return false;
+
+    out.origSize    = e->origSize;
+    out.contentHash = e->contentHash;
+    out.codec       = e->codec;
+    out.flags       = e->flags;
+    std::memcpy(out.nonce, e->nonce, sizeof(out.nonce));
+    return true;
 }
 
 std::vector<uint8_t> HpakReader::readEntry(const HE::UUID& id, const uint8_t key[32]) const

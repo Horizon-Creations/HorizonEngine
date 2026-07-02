@@ -23,6 +23,24 @@ public:
     // All UUIDs present in this archive (in stored / sorted order).
     std::vector<HE::UUID> enumerate() const;
 
+    // TOC hash of the opened archive (identity for incremental-pack manifests).
+    uint64_t tocHash() const { return m_tocHash; }
+
+    // One entry's STORED representation: the on-disk bytes (compressed +
+    // encrypted, exactly as written) plus the TOC metadata needed to carry the
+    // entry verbatim into another archive. Used by incremental packing to skip
+    // re-compressing unchanged assets.
+    struct StoredEntry {
+        std::vector<uint8_t> data;        // stored bytes, content-hash verified
+        uint32_t             origSize = 0;
+        uint64_t             contentHash = 0;
+        uint8_t              codec = 0;   // Hpak::Codec
+        uint8_t              flags = 0;   // Hpak::kFlag*
+        uint8_t              nonce[12] = {};
+    };
+    // False when the entry is absent, unreadable, or fails its content hash.
+    bool readStoredEntry(const HE::UUID& id, StoredEntry& out) const;
+
     // Read and return the raw (decrypted, decompressed) .hasset bytes for one
     // entry. Pass key=nullptr for unencrypted entries. Returns an empty vector
     // when the entry is not found, the file is unreadable, the stored bytes fail
@@ -47,5 +65,6 @@ private:
 
     std::string            m_path;
     mutable std::ifstream  m_file;   // held open for the reader's lifetime
+    uint64_t               m_tocHash = 0;
     std::vector<EntryMeta> m_entries;
 };

@@ -21,6 +21,14 @@ struct HE_API ExportSettings {
     // Glob patterns (relative to contentDir, forward slashes) for assets to skip
     // when packing — e.g. "Debug/*", "*_test.hasset". See Hpak::PackSettings.
     std::vector<std::string> excludePatterns;
+    // Incremental packing: reuse the stored (compressed + encrypted) bytes of
+    // unchanged assets from the previous export at the same outputDir, keyed by
+    // the hash of each asset's rewritten blob (persisted in a
+    // <name>.hpak.manifest sidecar). Falls back to a full pack whenever the
+    // previous pak/manifest is missing, mismatched, or the pack settings
+    // (codec/level/encrypt/key) changed. With encrypt, the previous export's
+    // key is reused (read from its project.hcfg) so entries stay verbatim.
+    bool incremental = true;
     // Optional progress callback: (assetsDone, assetsTotal, currentFile). Invoked
     // from whatever thread runs exportProject — the caller must make it
     // thread-safe when exporting on a worker thread.
@@ -32,7 +40,21 @@ struct HE_API ExportResult {
     std::string errorMessage;
     int         assetsPacked     = 0;
     int         binaryFilesCopied = 0; // game exe + dylibs, 0 when gameRuntimeDir empty
+    int         assetsReused     = 0;  // carried verbatim from the previous pak (incremental)
 };
+
+// ─── Export target platforms ──────────────────────────────────────────────────
+// The pak + project.hcfg are platform-neutral; the target only decides which
+// game-runtime binaries ship and (in the editor) the output sub-folder. Host =
+// the platform the editor is running on, served from <base>/../Game as always;
+// cross-targets are served from <base>/../GameRuntimes/<Name>/ — a prebuilt
+// runtime bundle the user drops there (built on that platform / CI).
+enum class ExportPlatform : uint8_t { Host = 0, Windows, MacOS, Linux };
+
+HE_API const char*    exportPlatformName(ExportPlatform p);   // "Host"/"Windows"/"macOS"/"Linux"
+HE_API ExportPlatform exportPlatformFromName(const std::string& name); // unknown → Host
+HE_API std::filesystem::path resolveRuntimeDir(const std::filesystem::path& editorBaseDir,
+                                               ExportPlatform p);
 
 // Packs a project's content directory into a distributable output folder:
 //   • All .hasset files → projectName.hpak (with optional LZ4 + encryption)

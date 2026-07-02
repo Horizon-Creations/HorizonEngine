@@ -52,6 +52,8 @@ static json profileToJson(const ExportProfile& p)
 	j["startupScene"]     = p.startupScene;
 	j["outputDir"]        = p.outputDir;
 	j["excludePatterns"]  = p.excludePatterns;
+	j["incremental"]      = p.incremental;
+	j["targetPlatform"]   = p.targetPlatform;
 	return j;
 }
 
@@ -64,6 +66,9 @@ static ExportProfile profileFromJson(const json& j)
 	p.enableModSupport = jsonBool(j, "enableModSupport", false);
 	p.startupScene     = jsonString(j, "startupScene");
 	p.outputDir        = jsonString(j, "outputDir");
+	p.incremental      = jsonBool(j, "incremental", true);
+	p.targetPlatform   = jsonString(j, "targetPlatform", "Host");
+	if (p.targetPlatform.empty()) p.targetPlatform = "Host";
 	if (auto it = j.find("excludePatterns"); it != j.end() && it->is_array())
 		for (const auto& e : *it)
 			if (e.is_string()) p.excludePatterns.push_back(e.get<std::string>());

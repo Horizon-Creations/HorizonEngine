@@ -201,6 +201,19 @@ void HpakWriter::addEntry(const HE::UUID& id, const std::vector<uint8_t>& hasset
     m_entries.push_back(std::move(e));
 }
 
+void HpakWriter::addPackedEntry(const HE::UUID& id, const HpakReader::StoredEntry& stored)
+{
+    PendingEntry e;
+    e.uuid        = id;
+    e.data        = stored.data;
+    e.origSize    = stored.origSize;
+    e.contentHash = stored.contentHash;
+    e.codec       = stored.codec;
+    e.flags       = stored.flags;
+    std::memcpy(e.nonce, stored.nonce, sizeof(e.nonce));
+    m_entries.push_back(std::move(e));
+}
+
 // Glob matcher for PackSettings::excludePatterns: `*` matches any sequence
 // (including '/'), `?` matches exactly one character. Iterative backtracking
 // (classic wildcard match) — no regex, no recursion.
@@ -231,7 +244,8 @@ bool Hpak::globMatch(const std::string& pattern, const std::string& path)
 
 int HpakWriter::addDirectory(const std::filesystem::path& rootDir,
                               const Hpak::PackSettings& settings,
-                              const AddProgressFn& progress)
+                              const AddProgressFn& progress,
+                              const Hpak::IncrementalCache* cache)
 {
     std::error_code ec;
 
@@ -283,12 +297,42 @@ int HpakWriter::addDirectory(const std::filesystem::path& rootDir,
 
     // Pass 2: rewrite path refs to baked UUIDs (dropping the path strings), then pack.
     // This is the expensive pass (compression + encryption) → progress reports here.
+    // The incremental cache key is hash64 of the REWRITTEN blob (not the source
+    // file): a rename/delete of a *referenced* asset changes the rewrite result
+    // without touching this file, and must invalidate the cached entry.
     int count = 0;
-    const int total = static_cast<int>(pending.size());
+    m_reused = 0;
+    m_srcHashes.clear();
+    const int  total         = static_cast<int>(pending.size());
+    const bool wantEncrypted = settings.encrypt && Hpak::cryptoAvailable();
     for (auto& pe : pending)
     {
         if (progress) progress(count, total, pe.relPath);
-        addEntry(pe.id, rewriteRefsForPack(pe.bytes, pathToUuid), settings);
+        std::vector<uint8_t> blob = rewriteRefsForPack(pe.bytes, pathToUuid);
+        const uint64_t srcHash = Hpak::hash64(blob.data(), blob.size());
+        m_srcHashes.emplace_back(pe.id, srcHash);
+
+        bool reused = false;
+        if (cache && cache->previousPak)
+        {
+            auto it = cache->srcHashes.find(pe.id);
+            if (it != cache->srcHashes.end() && it->second == srcHash)
+            {
+                HpakReader::StoredEntry se;
+                // readStoredEntry verifies the content hash, so a corrupt old
+                // entry falls through to a fresh pack. The flag/size sanity
+                // checks guard against a cache paired with the wrong archive.
+                if (cache->previousPak->readStoredEntry(pe.id, se)
+                    && ((se.flags & Hpak::kFlagEncrypted) != 0) == wantEncrypted
+                    && se.origSize == static_cast<uint32_t>(blob.size()))
+                {
+                    addPackedEntry(pe.id, se);
+                    reused = true;
+                    ++m_reused;
+                }
+            }
+        }
+        if (!reused) addEntry(pe.id, blob, settings);
         ++count;
     }
     if (progress) progress(count, total, {});

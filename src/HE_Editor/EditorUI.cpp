@@ -110,6 +110,8 @@ static bool   s_exportCompress    = true;
 static bool   s_exportEncrypt     = false;
 static bool   s_exportModSupport  = false;
 static std::string s_exportExcludes;               // one glob pattern per line
+static bool   s_exportIncremental = true;
+static std::string s_exportPlatform = "Host";      // exportPlatformName() value
 static std::string              s_exportStartupScene;  // project-relative; "" = current scene
 static std::vector<std::string> s_exportSceneChoices;  // .hescene files found on modal open
 static std::string s_exportNewProfileName;
@@ -167,6 +169,8 @@ static void exportProfileToDialog(const ExportProfile& p, const std::filesystem:
 	s_exportEncrypt      = p.encrypt;
 	s_exportModSupport   = p.enableModSupport;
 	s_exportStartupScene = p.startupScene;
+	s_exportIncremental  = p.incremental;
+	s_exportPlatform     = p.targetPlatform.empty() ? "Host" : p.targetPlatform;
 	s_exportExcludes.clear();
 	for (const auto& pat : p.excludePatterns) { s_exportExcludes += pat; s_exportExcludes += '\n'; }
 }
@@ -180,6 +184,8 @@ static void exportDialogToProfile(ExportProfile& p)
 	p.enableModSupport = s_exportModSupport;
 	p.startupScene     = s_exportStartupScene;
 	p.excludePatterns  = parseExcludeLines(s_exportExcludes.c_str());
+	p.incremental      = s_exportIncremental;
+	p.targetPlatform   = s_exportPlatform;
 }
 
 // Active manipulation tool, shared by the viewport toolbar buttons and the
@@ -1636,6 +1642,26 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                 ImGui::EndCombo();
             }
 
+            ImGui::Text("Target Platform:");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(140.0f);
+            if (ImGui::BeginCombo("##exportPlatform", s_exportPlatform.c_str()))
+            {
+                for (const char* name : { "Host", "Windows", "macOS", "Linux" })
+                    if (ImGui::Selectable(name, s_exportPlatform == name))
+                        s_exportPlatform = name;
+                ImGui::EndCombo();
+            }
+            if (s_exportPlatform != "Host")
+            {
+                const auto rt = resolveRuntimeDir(
+                    SDL_GetBasePath() ? std::filesystem::path(SDL_GetBasePath())
+                                      : std::filesystem::path{},
+                    exportPlatformFromName(s_exportPlatform));
+                ImGui::TextDisabled("Runtime bundle: %s", rt.lexically_normal().string().c_str());
+                ImGui::TextDisabled("Output goes to a %s/ sub-folder.", s_exportPlatform.c_str());
+            }
+
             ImGui::Spacing();
             ImGui::Checkbox("Compress assets",       &s_exportCompress);
             ImGui::Checkbox("Encrypt assets",        &s_exportEncrypt);
@@ -1644,6 +1670,13 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
             ImGui::Checkbox("Enable mod support",    &s_exportModSupport);
             if (s_exportModSupport)
                 ImGui::TextDisabled("The game mounts every .hpak in a Mods/ folder next to the executable.");
+            ImGui::Checkbox("Incremental packing",   &s_exportIncremental);
+            ImGui::SameLine();
+            ImGui::TextDisabled("(?)");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Reuse unchanged assets from the previous export at the same output\n"
+                                  "directory instead of re-compressing them (via a .manifest sidecar).\n"
+                                  "Falls back to a full pack automatically when settings changed.");
 
             ImGui::Spacing();
             ImGui::Text("Exclude Patterns:");
@@ -1720,9 +1753,34 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                         sceneOk = false;
                 }
 
+                // Resolve the target platform: runtime-binaries dir + per-platform
+                // output sub-folder. A cross-platform target without its prebuilt
+                // runtime bundle fails up front (the pak would ship unrunnable).
+                const ExportPlatform platform = exportPlatformFromName(s_exportPlatform);
+                std::filesystem::path effOutDir = s_exportOutputDir;
+                if (platform != ExportPlatform::Host)
+                    effOutDir /= exportPlatformName(platform);
+                std::filesystem::path runtimeDir;
+                if (const char* base = SDL_GetBasePath())
+                    runtimeDir = resolveRuntimeDir(base, platform);
+                bool runtimeOk = true;
+                if (platform != ExportPlatform::Host)
+                {
+                    std::error_code rtEc;
+                    if (runtimeDir.empty() || !std::filesystem::exists(runtimeDir, rtEc))
+                        runtimeOk = false;
+                }
+
                 if (!sceneOk)
                 {
                     s_exportResult = "Error: startup scene could not be loaded: " + scenePath;
+                }
+                else if (!runtimeOk)
+                {
+                    s_exportResult = "Error: no " + s_exportPlatform + " runtime bundle at "
+                                   + runtimeDir.lexically_normal().string()
+                                   + " — build the game runtime on " + s_exportPlatform
+                                   + " and place it there.";
                 }
                 else
                 {
@@ -1731,9 +1789,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                 es.encrypt          = s_exportEncrypt;
                 es.enableModSupport = s_exportModSupport;
                 es.excludePatterns  = parseExcludeLines(s_exportExcludes.c_str());
-                // Resolve game runtime dir from editor executable location (../Game/)
-                if (const char* base = SDL_GetBasePath())
-                    es.gameRuntimeDir = std::filesystem::path(base) / ".." / "Game";
+                es.incremental      = s_exportIncremental;
+                es.gameRuntimeDir   = runtimeDir;
                 // Worker → UI progress: atomics + a mutex-guarded filename.
                 es.progress = [](int done, int total, const std::string& current)
                 {
@@ -1745,7 +1802,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 
                 const std::string projName = pm ? pm->currentProject().name : "Game";
                 const std::string contentDir = ctx.contentManager->contentRoot();
-                const std::string outDir     = s_exportOutputDir;
+                const std::string outDir     = effOutDir.string();
 
                 s_exportDone.store(0);
                 s_exportTotal.store(0);
@@ -1771,7 +1828,9 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                             std::filesystem::path(outDir), es, sceneBinary);
                         msg = res.success
                             ? "OK: " + std::to_string(res.assetsPacked)
-                              + " asset(s) packed, " + std::to_string(res.binaryFilesCopied)
+                              + " asset(s) packed ("
+                              + std::to_string(res.assetsReused) + " reused), "
+                              + std::to_string(res.binaryFilesCopied)
                               + " binary file(s) → " + outDir
                             : "Error: " + res.errorMessage;
                     }
