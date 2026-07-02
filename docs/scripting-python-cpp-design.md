@@ -171,6 +171,24 @@ class Main(horizon.Behavior):
 
 ---
 
+## 4b. IMPLEMENTIERUNGSSTATUS (2026-07-02)
+
+**Backend-Entscheidung:** CPython (echtes Python 3.14, per `find_package(Python3 COMPONENTS Development.Embed)` → `HE_HAVE_PYTHON`) statt pocketpy — bewusste User-Entscheidung (siehe Header). Ohne CPython kompiliert das Backend zu No-op-Stubs (`PyScriptBackend::available()==false`), Callers brauchen keine `#ifdef`s.
+
+**Fertig & getestet (macOS, 529 Cases / 7188 Assertions grün):**
+- **A1/A2:** `IScriptBackend` + `ScriptApi` (13 Funktionen) extrahiert; Lua- und Python-Backend marshallen beide gegen `ScriptApi`. Routing in `ScriptContext`: Sprache im High-Byte der `InstanceId` (Lua==0 → bit-identisch), `backendForName` für namensbasierte Calls, `loadScript(name, src, lang)`. Coexistence-Test (Lua+Python gleichzeitig, keine Id-Kollision) grün.
+- **P1–P3, P6, P7:** `PyScriptBackend.cpp` (pImpl, `horizon`-Inittab-Modul, `horizon.Behavior`-Kontrakt, `self.entity_id`, `on_start`/`on_update`/`on_collision_enter`/`on_collision_exit`, fehlender Handler = No-op-Erfolg, Exception → `lastError`, Hot-Reload via `__class__`-Patch mit `__dict__`-Erhalt). 16 Test-Cases in `tests/test_python_scripting.cpp` (12 backend-direkt + 4 durch `ScriptContext`).
+- **P4 (Backend):** `getScriptProperties` (typisierte Klassenattribute → `ScriptPropDef`), `injectProperties`. Getestet.
+- **P5:** Sprache lebt am `ScriptAsset::language` (nicht am Pfad — Skripte sind `.hasset`-Blobs ohne Endung), persistiert als 1-Byte `CHUNK_SLNG` (fehlt → Lua, back-compat). Roundtrip über Store/LZ4/Zstd-Pack + Mount getestet; Script-Blobs gehen beim Packen verbatim durch (`HpakWriter.cpp:57`).
+- **Editor:** Content-Create-Menü „Script (Lua)" / „Script (Python)" mit Sprach-Starter-Template und `CHUNK_SLNG` bereits im Stub (`tryCreate` schreibt META direkt, umgeht den CM-Save-Pfad). Play-Mode-Routing über `asset->language`.
+
+**Bewusst zurückgestellt (Follow-up):**
+- **Editor-Property-*Preview* für Python** (`EditorUI.cpp:4912`, `propScriptEngine` ist ein Lua-only `ScriptEngine`). Skripte laufen und `injectProperties` funktioniert auch ohne; nachrüstbar, da `getScriptProperties` weltfrei ist (nur load+read, kein `g_world`). Vorsicht: ein zweites `PyScriptBackend` im Editor teilt sich die prozessglobalen `g_world`/`g_physics`-Statics.
+- **GameApplication treibt keine Skripte** (weder Lua noch Python) — Skripte laufen nur im Editor-Play-Mode. Pre-existing (`GameApplication` tickt keine ECS-Systeme). Kein Regress dieses Vorhabens.
+- **C++-Scripting C3/C4/C5** (Editor-Template/Build-Button, mtime-Hot-Reload, Packaging) offen.
+
+---
+
 ## 5. RISIKEN / BEWUSST NICHT BAUEN
 
 **Nicht bauen:**

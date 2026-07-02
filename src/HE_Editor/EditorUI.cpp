@@ -3829,7 +3829,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 			const std::string targetFolder = displayFolder ? displayFolder->fullPath
 														   : contentFolder.fullPath;
 
-			auto tryCreate = [&](const char* defaultName, const char* ext, HE::AssetType type)
+			auto tryCreate = [&](const char* defaultName, const char* ext, HE::AssetType type,
+			                     ScriptLanguage scriptLang = ScriptLanguage::Lua)
 			{
 				// Build a path that does not yet exist
 				std::string base = targetFolder + "/" + defaultName;
@@ -3857,6 +3858,27 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 					HAsset::Writer::appendString(meta, defaultName);
 					HAsset::Writer::appendString(meta, relative);
 					w.addChunk(HAsset::CHUNK_META, meta.data(), meta.size());
+					// Scripts are born with a language and a starter template. The
+					// language byte (CHUNK_SLNG) is the single source of truth for
+					// routing Lua vs Python, so it must be written here at birth —
+					// this stub bypasses the ContentManager save path.
+					if (type == HE::AssetType::Script)
+					{
+						static const char* kLuaStarter =
+							"local M = {}\n\n"
+							"function M.onStart(self)\nend\n\n"
+							"function M.onUpdate(self, dt)\nend\n\n"
+							"return M\n";
+						static const char* kPyStarter =
+							"import horizon\n\n"
+							"class NewScript(horizon.Behavior):\n"
+							"    def on_start(self):\n        pass\n\n"
+							"    def on_update(self, dt):\n        pass\n";
+						const char* starter = (scriptLang == ScriptLanguage::Python) ? kPyStarter : kLuaStarter;
+						w.addChunk(HAsset::CHUNK_SRC, starter, std::char_traits<char>::length(starter));
+						const uint8_t lb = static_cast<uint8_t>(scriptLang);
+						w.addChunk(HAsset::CHUNK_SLNG, &lb, 1);
+					}
 					w.write(path, static_cast<uint16_t>(type));
 				}
 
@@ -3878,7 +3900,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 			if (ImGui::MenuItem("Texture"))      tryCreate("NewTexture",  ".hasset",  HE::AssetType::Texture);
 			if (ImGui::MenuItem("Static Mesh"))  tryCreate("NewMesh",     ".hasset",  HE::AssetType::StaticMesh);
 			if (ImGui::MenuItem("Skeletal Mesh"))tryCreate("NewSkelMesh", ".hasset",  HE::AssetType::SkeletalMesh);
-			if (ImGui::MenuItem("Script"))       tryCreate("NewScript",   ".hasset",  HE::AssetType::Script);
+			if (ImGui::MenuItem("Script (Lua)"))    tryCreate("NewScript", ".hasset", HE::AssetType::Script, ScriptLanguage::Lua);
+			if (ImGui::MenuItem("Script (Python)")) tryCreate("NewScript", ".hasset", HE::AssetType::Script, ScriptLanguage::Python);
 			if (ImGui::MenuItem("Shader"))       tryCreate("NewShader",   ".hasset",  HE::AssetType::Shader);
 			if (ImGui::MenuItem("Audio"))        tryCreate("NewAudio",    ".hasset",  HE::AssetType::Audio);
 			if (ImGui::MenuItem("Font"))         tryCreate("NewFont",     ".hasset",  HE::AssetType::Font);

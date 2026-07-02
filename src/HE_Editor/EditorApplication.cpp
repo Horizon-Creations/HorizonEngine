@@ -1436,7 +1436,7 @@ void EditorApplication::setPlayMode(bool play)
 				const ScriptAsset* asset = contentManager().getScript(sc.scriptAssetId);
 				if (!asset || asset->sourceCode.empty()) continue;
 				if (!m_scriptContext->isScriptLoaded(sc.moduleName))
-					m_scriptContext->loadScript(sc.moduleName, asset->sourceCode);
+					m_scriptContext->loadScript(sc.moduleName, asset->sourceCode, asset->language);
 				auto instId = m_scriptContext->createInstance(sc.moduleName, entity);
 				if (instId == ScriptEngine::kInvalidInstance) continue;
 				m_scriptContext->injectProperties(instId, sc.properties);

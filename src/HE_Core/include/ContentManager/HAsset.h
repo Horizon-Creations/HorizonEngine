@@ -82,6 +82,7 @@ inline constexpr uint32_t CHUNK_MTLU = makeChunkId('M','T','L','U'); // shader U
 
 // Script / Shader (source text as UTF-8)
 inline constexpr uint32_t CHUNK_SRC  = makeChunkId('S','R','C',' ');
+inline constexpr uint32_t CHUNK_SLNG = makeChunkId('S','L','N','G'); // script language (1 byte; absent → Lua)
 
 // Font
 inline constexpr uint32_t CHUNK_FNTD = makeChunkId('F','N','T','D'); // raw font bytes

@@ -1,0 +1,335 @@
+#include "doctest.h"
+
+// These tests only compile when the engine was built with CPython embedding.
+// Everything runs through the PyScriptBackend public API (no <Python.h> here),
+// which also proves the interpreter boots and executes end to end.
+#ifdef HE_HAVE_PYTHON
+
+#include <HorizonScene/PyScriptBackend.h>
+#include <HorizonScene/ScriptContext.h>
+#include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/Components/TransformComponent.h>
+
+// ─── Test scripts ───────────────────────────────────────────────────────────
+
+// Writes a fixed position on start, integrates dt on update — exercises the
+// horizon module, self.entity_id injection, and ScriptApi delegation.
+static const char* kMover = R"py(
+import horizon
+
+class Mover(horizon.Behavior):
+    speed  = 2.5
+    active = True
+    label  = "hero"
+    count  = 3
+
+    def on_start(self):
+        horizon.setPosition(self.entity_id, 7.0, 8.0, 9.0)
+
+    def on_update(self, dt):
+        x, y, z = horizon.getPosition(self.entity_id)
+        horizon.setPosition(self.entity_id, x + dt, y, z)
+)py";
+
+// on_start echoes the (possibly injected) speed into the entity's X position.
+static const char* kSpeedEcho = R"py(
+import horizon
+
+class Echo(horizon.Behavior):
+    speed = 1.0
+    def on_start(self):
+        horizon.setPosition(self.entity_id, self.speed, 0.0, 0.0)
+)py";
+
+static const char* kBadSyntax = "class Broken(:\n    pass\n";
+static const char* kNoBehavior = "import horizon\nclass Plain:\n    pass\n";
+static const char* kRaises     = R"py(
+import horizon
+class Boom(horizon.Behavior):
+    def on_start(self):
+        raise ValueError("kaboom")
+)py";
+
+// Helper: an entity with a zeroed transform.
+static entt::entity makeEntity(HorizonWorld& world, const char* name)
+{
+    auto e = world.createEntity(name);
+    TransformComponent tc;
+    tc.position = {0.0f, 0.0f, 0.0f};
+    world.registry().emplace<TransformComponent>(e, tc);
+    return e;
+}
+
+// ─── Boot / availability ────────────────────────────────────────────────────
+
+TEST_CASE("PyScriptBackend: available and constructs")
+{
+    CHECK(PyScriptBackend::available());
+    HorizonWorld world;
+    PyScriptBackend py(world);
+    CHECK(py.loadedScriptCount() == 0);
+    CHECK(py.instanceCount() == 0);
+}
+
+TEST_CASE("PyScriptBackend: loads a Behavior subclass")
+{
+    HorizonWorld world;
+    PyScriptBackend py(world);
+    CHECK(py.loadScript("mover", kMover));
+    CHECK(py.isScriptLoaded("mover"));
+    CHECK(py.loadedScriptCount() == 1);
+    CHECK(py.lastError().empty());
+}
+
+TEST_CASE("PyScriptBackend: rejects a syntax error")
+{
+    HorizonWorld world;
+    PyScriptBackend py(world);
+    CHECK_FALSE(py.loadScript("bad", kBadSyntax));
+    CHECK_FALSE(py.isScriptLoaded("bad"));
+    CHECK_FALSE(py.lastError().empty());
+}
+
+TEST_CASE("PyScriptBackend: rejects source with no Behavior subclass")
+{
+    HorizonWorld world;
+    PyScriptBackend py(world);
+    CHECK_FALSE(py.loadScript("plain", kNoBehavior));
+    CHECK_FALSE(py.lastError().empty());
+}
+
+// ─── Lifecycle + horizon API round-trip ─────────────────────────────────────
+
+TEST_CASE("PyScriptBackend: on_start runs and reaches the world")
+{
+    HorizonWorld world;
+    PyScriptBackend py(world);
+    REQUIRE(py.loadScript("mover", kMover));
+
+    auto e  = makeEntity(world, "Hero");
+    auto id = py.createInstance("mover", static_cast<uint32_t>(e));
+    REQUIRE(id != IScriptBackend::kInvalidInstance);
+    CHECK(py.instanceCount() == 1);
+
+    CHECK(py.callOnStart(id));
+    const auto& t = world.registry().get<TransformComponent>(e);
+    CHECK(t.position.x == doctest::Approx(7.0f));
+    CHECK(t.position.y == doctest::Approx(8.0f));
+    CHECK(t.position.z == doctest::Approx(9.0f));
+}
+
+TEST_CASE("PyScriptBackend: on_update integrates dt")
+{
+    HorizonWorld world;
+    PyScriptBackend py(world);
+    REQUIRE(py.loadScript("mover", kMover));
+
+    auto e  = makeEntity(world, "Hero");
+    auto id = py.createInstance("mover", static_cast<uint32_t>(e));
+    REQUIRE(py.callOnStart(id));           // → x = 7
+    CHECK(py.callOnUpdate(id, 0.5f));      // → x = 7.5
+    CHECK(py.callOnUpdate(id, 0.25f));     // → x = 7.75
+
+    const auto& t = world.registry().get<TransformComponent>(e);
+    CHECK(t.position.x == doctest::Approx(7.75f));
+}
+
+TEST_CASE("PyScriptBackend: missing handler is a no-op success")
+{
+    HorizonWorld world;
+    PyScriptBackend py(world);
+    REQUIRE(py.loadScript("echo", kSpeedEcho)); // no on_update defined
+    auto e  = makeEntity(world, "E");
+    auto id = py.createInstance("echo", static_cast<uint32_t>(e));
+    CHECK(py.callOnUpdate(id, 0.1f));       // no on_update → true, no error
+    CHECK(py.lastError().empty());
+}
+
+TEST_CASE("PyScriptBackend: a raising handler reports the error")
+{
+    HorizonWorld world;
+    PyScriptBackend py(world);
+    REQUIRE(py.loadScript("boom", kRaises));
+    auto e  = makeEntity(world, "E");
+    auto id = py.createInstance("boom", static_cast<uint32_t>(e));
+    CHECK_FALSE(py.callOnStart(id));
+    CHECK(py.lastError().find("kaboom") != std::string::npos);
+}
+
+// ─── Properties ─────────────────────────────────────────────────────────────
+
+TEST_CASE("PyScriptBackend: getScriptProperties reads typed class attributes")
+{
+    HorizonWorld world;
+    PyScriptBackend py(world);
+    REQUIRE(py.loadScript("mover", kMover));
+
+    auto defs = py.getScriptProperties("mover");
+    auto find = [&](const char* n) -> const ScriptPropDef* {
+        for (auto& d : defs) if (d.name == n) return &d;
+        return nullptr;
+    };
+    CHECK(defs.size() == 4);                 // speed, active, label, count (not methods/entity_id)
+
+    REQUIRE(find("speed"));
+    CHECK(find("speed")->defaultVal.type == ScriptPropType::Float);
+    CHECK(find("speed")->defaultVal.f == doctest::Approx(2.5f));
+
+    REQUIRE(find("active"));
+    CHECK(find("active")->defaultVal.type == ScriptPropType::Bool);
+    CHECK(find("active")->defaultVal.b == true);
+
+    REQUIRE(find("count"));
+    CHECK(find("count")->defaultVal.type == ScriptPropType::Int);
+    CHECK(find("count")->defaultVal.i == 3);
+
+    REQUIRE(find("label"));
+    CHECK(find("label")->defaultVal.type == ScriptPropType::String);
+    CHECK(find("label")->defaultVal.s == "hero");
+}
+
+TEST_CASE("PyScriptBackend: injectProperties overrides before on_start")
+{
+    HorizonWorld world;
+    PyScriptBackend py(world);
+    REQUIRE(py.loadScript("echo", kSpeedEcho));
+
+    auto e  = makeEntity(world, "E");
+    auto id = py.createInstance("echo", static_cast<uint32_t>(e));
+
+    ScriptPropValue v; v.type = ScriptPropType::Float; v.f = 42.0f;
+    py.injectProperties(id, {{"speed", v}});
+    REQUIRE(py.callOnStart(id));            // echoes self.speed into x
+
+    const auto& t = world.registry().get<TransformComponent>(e);
+    CHECK(t.position.x == doctest::Approx(42.0f));
+}
+
+// ─── Hot reload ─────────────────────────────────────────────────────────────
+
+TEST_CASE("PyScriptBackend: hotReload swaps behavior, preserves instance data")
+{
+    HorizonWorld world;
+    PyScriptBackend py(world);
+
+    static const char* v1 = R"py(
+import horizon
+class S(horizon.Behavior):
+    def on_start(self):
+        self.hp = 100
+    def on_update(self, dt):
+        horizon.setPosition(self.entity_id, self.hp, 0.0, 0.0)
+)py";
+    static const char* v2 = R"py(
+import horizon
+class S(horizon.Behavior):
+    def on_update(self, dt):
+        horizon.setPosition(self.entity_id, self.hp + 1, 0.0, 0.0)
+)py";
+
+    REQUIRE(py.loadScript("s", v1));
+    auto e  = makeEntity(world, "E");
+    auto id = py.createInstance("s", static_cast<uint32_t>(e));
+    REQUIRE(py.callOnStart(id));            // self.hp = 100 (data)
+
+    CHECK(py.hotReloadScript("s", v2));     // new class, keep __dict__
+    CHECK(py.callOnUpdate(id, 0.0f));       // v2: x = hp + 1
+
+    const auto& t = world.registry().get<TransformComponent>(e);
+    CHECK(t.position.x == doctest::Approx(101.0f)); // 100 preserved + v2 code ran
+}
+
+// ─── Teardown ───────────────────────────────────────────────────────────────
+
+TEST_CASE("PyScriptBackend: unload destroys instances")
+{
+    HorizonWorld world;
+    PyScriptBackend py(world);
+    REQUIRE(py.loadScript("mover", kMover));
+    auto e = makeEntity(world, "E");
+    py.createInstance("mover", static_cast<uint32_t>(e));
+    CHECK(py.instanceCount() == 1);
+    py.unloadScript("mover");
+    CHECK_FALSE(py.isScriptLoaded("mover"));
+    CHECK(py.instanceCount() == 0);
+}
+
+// ─── Routing through ScriptContext (tag → route → untag) ─────────────────────
+// These exercise the language-tag path that the backend-direct tests above do
+// NOT: a missing untag decode would pass every Lua test yet break only Python.
+
+// Lua counterpart of kMover's on_start: sets X to 3.
+static const char* kLuaSetX = R"lua(
+local M = {}
+function M.onStart(self)
+    horizon.setPosition(self.entityId, 3, 0, 0)
+end
+return M
+)lua";
+
+TEST_CASE("ScriptContext: Python script routes and reaches the world")
+{
+    HorizonWorld world;
+    ScriptContext ctx(world);
+    REQUIRE(ctx.loadScript("pym", kMover, ScriptLanguage::Python));
+    CHECK(ctx.isScriptLoaded("pym"));
+
+    auto e  = makeEntity(world, "Hero");
+    auto id = ctx.createInstance("pym", e);
+    REQUIRE(id != ScriptEngine::kInvalidInstance);
+
+    REQUIRE(ctx.callOnStart(id));              // → (7,8,9)
+    CHECK(ctx.callOnUpdate(id, 0.5f));         // → x 7.5 : proves the id untagged back to the Python instance
+    const auto& t = world.registry().get<TransformComponent>(e);
+    CHECK(t.position.x == doctest::Approx(7.5f));
+    CHECK(t.position.z == doctest::Approx(9.0f));
+}
+
+TEST_CASE("ScriptContext: Lua and Python coexist without id collision")
+{
+    HorizonWorld world;
+    ScriptContext ctx(world);
+    REQUIRE(ctx.loadScript("pym", kMover,   ScriptLanguage::Python));
+    REQUIRE(ctx.loadScript("lm",  kLuaSetX, ScriptLanguage::Lua));
+    CHECK(ctx.loadedScriptCount() == 2);
+
+    auto ePy  = makeEntity(world, "Py");
+    auto eLua = makeEntity(world, "Lua");
+    auto idPy  = ctx.createInstance("pym", ePy);
+    auto idLua = ctx.createInstance("lm",  eLua);
+    REQUIRE(idPy  != ScriptEngine::kInvalidInstance);
+    REQUIRE(idLua != ScriptEngine::kInvalidInstance);
+    CHECK(idPy != idLua);
+    CHECK(ctx.instanceCount() == 2);
+
+    REQUIRE(ctx.callOnStart(idPy));   // Python → (7,8,9)
+    REQUIRE(ctx.callOnStart(idLua));  // Lua    → (3,0,0)
+    CHECK(ctx.callOnUpdate(idPy, 0.5f)); // Python instance advances, Lua untouched
+
+    CHECK(world.registry().get<TransformComponent>(ePy).position.x  == doctest::Approx(7.5f));
+    CHECK(world.registry().get<TransformComponent>(eLua).position.x == doctest::Approx(3.0f));
+}
+
+TEST_CASE("ScriptContext: Python runtime error surfaces via lastError")
+{
+    HorizonWorld world;
+    ScriptContext ctx(world);
+    REQUIRE(ctx.loadScript("boom", kRaises, ScriptLanguage::Python));
+    auto e  = makeEntity(world, "E");
+    auto id = ctx.createInstance("boom", e);
+    CHECK_FALSE(ctx.callOnStart(id));
+    CHECK(ctx.lastError().find("kaboom") != std::string::npos);
+}
+
+TEST_CASE("ScriptContext: unloaded Python name falls back safely")
+{
+    HorizonWorld world;
+    ScriptContext ctx(world);
+    // Nothing loaded: neither backend owns the name; must not crash.
+    CHECK_FALSE(ctx.isScriptLoaded("ghost"));
+    auto e  = makeEntity(world, "E");
+    auto id = ctx.createInstance("ghost", e); // routes to Lua (default), fails cleanly
+    CHECK(id == ScriptEngine::kInvalidInstance);
+}
+
+#endif // HE_HAVE_PYTHON

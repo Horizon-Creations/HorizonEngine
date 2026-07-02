@@ -248,6 +248,18 @@ else()
     message(STATUS "HorizonEngine: OpenSSL not found — hpak encryption disabled")
 endif()
 
+# ─── Python (optional: CPython embedding for Python gameplay scripting) ───────
+# Gameplay scripts can be written in Python (in addition to Lua). Dev builds link
+# libpython; without it, the Python script backend is compiled out and only Lua
+# is available. Shipping needs a bundled interpreter (see docs/scripting design).
+find_package(Python3 QUIET COMPONENTS Development.Embed)
+if(Python3_Development.Embed_FOUND)
+    message(STATUS "HorizonEngine: Python3 found (${Python3_VERSION}) — Python scripting enabled")
+    set(HE_HAVE_PYTHON TRUE)
+else()
+    message(STATUS "HorizonEngine: Python3 embed libs not found — Python scripting disabled (Lua only)")
+endif()
+
 # ─── Tracy (optional profiling) ────────────────────────────────────────────────
 # Enable with:  cmake -DHE_ENABLE_TRACY=ON ...
 # Default OFF so production/CI builds have zero overhead.

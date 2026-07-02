@@ -165,6 +165,8 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 		ScriptAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_SRC))
 			a.sourceCode.assign(reinterpret_cast<const char*>(c->data.data()), c->data.size());
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_SLNG); c && !c->data.empty())
+			a.language = static_cast<ScriptLanguage>(c->data[0]); // absent → default Lua
 		handle = m_scriptAssets.insert(std::move(a)); break;
 	}
 	case HE::AssetType::Audio:
@@ -571,6 +573,8 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 	{
 		auto& a = static_cast<ScriptAsset&>(asset);
 		w.addChunk(HAsset::CHUNK_SRC, a.sourceCode.data(), a.sourceCode.size());
+		const uint8_t lang = static_cast<uint8_t>(a.language);
+		w.addChunk(HAsset::CHUNK_SLNG, &lang, 1);
 		break;
 	}
 	case HE::AssetType::Audio:
