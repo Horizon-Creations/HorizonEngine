@@ -272,12 +272,16 @@ public:
 			std::memcpy(&ch, data.data() + offset, sizeof(ch));
 			offset += sizeof(ChunkHeader);
 
+			// Validate the declared size BEFORE allocating: a corrupt/hostile size
+			// would otherwise throw bad_alloc/length_error out of the resize.
+			// Compare against the remaining bytes — `offset + ch.size` could wrap
+			// (size is attacker-controlled uint64) and slip past the check.
+			if (static_cast<size_t>(ch.size) > data.size() - offset) return false;
 			Chunk c;
 			c.id = ch.id;
 			c.data.resize(static_cast<size_t>(ch.size));
 			if (ch.size > 0)
 			{
-				if (offset + static_cast<size_t>(ch.size) > data.size()) return false;
 				std::memcpy(c.data.data(), data.data() + offset,
 							static_cast<size_t>(ch.size));
 				offset += static_cast<size_t>(ch.size);

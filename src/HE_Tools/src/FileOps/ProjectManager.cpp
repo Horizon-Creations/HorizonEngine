@@ -27,6 +27,21 @@ std::vector<ExportProfile> defaultExportProfiles()
 	return { dev, ship };
 }
 
+// Type-checked json getters. .heproj manifests are user-editable text; nlohmann's
+// value()/get<> throw type_error on a wrong-typed value, which would escape
+// loadProject and (because the editor auto-loads the last project on startup)
+// crash-loop the editor until the file is hand-fixed. Wrong types → default.
+static std::string jsonString(const json& j, const char* key, const std::string& def = {})
+{
+	auto it = j.find(key);
+	return (it != j.end() && it->is_string()) ? it->get<std::string>() : def;
+}
+static bool jsonBool(const json& j, const char* key, bool def)
+{
+	auto it = j.find(key);
+	return (it != j.end() && it->is_boolean()) ? it->get<bool>() : def;
+}
+
 static json profileToJson(const ExportProfile& p)
 {
 	json j;
@@ -43,12 +58,12 @@ static json profileToJson(const ExportProfile& p)
 static ExportProfile profileFromJson(const json& j)
 {
 	ExportProfile p;
-	p.name             = j.value("name", std::string{});
-	p.compress         = j.value("compress", true);
-	p.encrypt          = j.value("encrypt", false);
-	p.enableModSupport = j.value("enableModSupport", false);
-	p.startupScene     = j.value("startupScene", std::string{});
-	p.outputDir        = j.value("outputDir", std::string{});
+	p.name             = jsonString(j, "name");
+	p.compress         = jsonBool(j, "compress", true);
+	p.encrypt          = jsonBool(j, "encrypt", false);
+	p.enableModSupport = jsonBool(j, "enableModSupport", false);
+	p.startupScene     = jsonString(j, "startupScene");
+	p.outputDir        = jsonString(j, "outputDir");
 	if (auto it = j.find("excludePatterns"); it != j.end() && it->is_array())
 		for (const auto& e : *it)
 			if (e.is_string()) p.excludePatterns.push_back(e.get<std::string>());
@@ -63,13 +78,14 @@ static void readProfiles(const json& j, ProjectData& data)
 	if (auto it = j.find("exportProfiles"); it != j.end() && it->is_array())
 		for (const auto& e : *it)
 		{
+			if (!e.is_object()) continue; // malformed entry: skip, don't throw
 			ExportProfile p = profileFromJson(e);
 			if (!p.name.empty()) data.exportProfiles.push_back(std::move(p));
 		}
 	if (data.exportProfiles.empty())
 		data.exportProfiles = defaultExportProfiles();
 
-	data.activeExportProfile = j.value("activeExportProfile", std::string{});
+	data.activeExportProfile = jsonString(j, "activeExportProfile");
 	const bool known = std::any_of(data.exportProfiles.begin(), data.exportProfiles.end(),
 		[&](const ExportProfile& p) { return p.name == data.activeExportProfile; });
 	if (!known) data.activeExportProfile = data.exportProfiles.front().name;
@@ -181,12 +197,12 @@ bool ProjectManager::loadProject(const std::string& projectPath)
 	if (j.is_discarded())
 		return false;
 
-	m_currentProject.name = j.value("name", fs::path(projectPath).stem().string());
+	m_currentProject.name = jsonString(j, "name", fs::path(projectPath).stem().string());
 	m_currentProject.path = projectPath;
 
 	// Resolve startup scene relative to the project root
 	fs::path projectRoot = fs::path(projectPath).parent_path();
-	std::string relScene = j.value("startupScene", "");
+	std::string relScene = jsonString(j, "startupScene");
 	if (!relScene.empty())
 	{
 		fs::path absScene = projectRoot / relScene;
@@ -209,11 +225,15 @@ bool ProjectManager::saveProject(const std::string& projectPath)
 	// Read-modify-write: preserve every key the manifest already has (preset,
 	// startupScene, future fields) and only overwrite what ProjectData owns.
 	json j;
-	if (std::ifstream in(projectPath); in.is_open())
+	if (fs::exists(projectPath))
 	{
+		// An existing manifest we cannot read or parse must NOT be clobbered
+		// with a fresh skeleton — it may be hand-recoverable.
+		std::ifstream in(projectPath);
+		if (!in.is_open()) return false;
 		json existing = json::parse(in, nullptr, false);
-		if (!existing.is_discarded() && existing.is_object())
-			j = std::move(existing);
+		if (existing.is_discarded() || !existing.is_object()) return false;
+		j = std::move(existing);
 	}
 
 	j["name"]    = m_currentProject.name;
@@ -225,10 +245,31 @@ bool ProjectManager::saveProject(const std::string& projectPath)
 	j["exportProfiles"]      = std::move(jp);
 	j["activeExportProfile"] = m_currentProject.activeExportProfile;
 
-	std::ofstream out(projectPath);
-	if (!out.is_open())
+	// Write temp + rename: an in-place ofstream truncates the only copy before
+	// the new content is durable, so disk-full/kill mid-write would leave an
+	// empty manifest. rename() swaps atomically on POSIX.
+	const std::string tmpPath = projectPath + ".tmp";
+	{
+		std::ofstream out(tmpPath, std::ios::trunc);
+		if (!out.is_open()) return false;
+		out << j.dump(4);
+		out.flush();
+		if (!out.good())
+		{
+			out.close();
+			std::error_code ec;
+			fs::remove(tmpPath, ec);
+			return false;
+		}
+	}
+	std::error_code ec;
+	fs::rename(tmpPath, projectPath, ec);
+	if (ec)
+	{
+		std::error_code ec2;
+		fs::remove(tmpPath, ec2);
 		return false;
-	out << j.dump(4);
+	}
 	return true;
 }
 

@@ -217,6 +217,98 @@ TEST_CASE("ProjectManager: profiles round-trip and unknown manifest keys survive
     fs::remove_all(dir);
 }
 
+// ─── Review-fix regressions ───────────────────────────────────────────────────
+
+TEST_CASE("ProjectManager: type-malformed profile values load without throwing")
+{
+    const auto dir = fs::temp_directory_path() / "he_prof_badtypes";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    {
+        // name as number, compress as string, excludePatterns with mixed types,
+        // one non-object entry, activeExportProfile as number.
+        std::ofstream out(dir / "B.heproj");
+        out << R"({"name":123,"startupScene":7,"exportProfiles":[
+                    42,
+                    {"name":"Odd","compress":"yes","encrypt":1,
+                     "excludePatterns":["ok",5,true,"also_ok"]},
+                    {"compress":true}
+                  ],"activeExportProfile":9})";
+    }
+    ProjectManager pm;
+    REQUIRE(pm.loadProject((dir / "B.heproj").string())); // must not throw
+    const auto& p = pm.currentProject();
+    REQUIRE(p.exportProfiles.size() == 1);               // only "Odd" has a name
+    CHECK(p.exportProfiles[0].compress == true);          // wrong type → default
+    CHECK(p.exportProfiles[0].excludePatterns
+          == std::vector<std::string>{ "ok", "also_ok" });
+    CHECK(p.activeExportProfile == "Odd");                // number → fallback
+    CHECK(p.name == "B");                                 // number → filename stem
+    fs::remove_all(dir);
+}
+
+TEST_CASE("ProjectManager: saveProject refuses to clobber a corrupt manifest")
+{
+    const auto dir = fs::temp_directory_path() / "he_prof_corrupt";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const auto heproj = dir / "C.heproj";
+    {
+        std::ofstream out(heproj);
+        out << "{ this is not json";
+    }
+    ProjectManager pm;
+    pm.currentProject().name = "C";
+    pm.currentProject().exportProfiles = defaultExportProfiles();
+    CHECK_FALSE(pm.saveProject(heproj.string()));         // refuse, don't overwrite
+    {
+        std::ifstream in(heproj);
+        std::string content((std::istreambuf_iterator<char>(in)),
+                            std::istreambuf_iterator<char>());
+        CHECK(content == "{ this is not json");           // untouched
+    }
+    CHECK_FALSE(fs::exists(heproj.string() + ".tmp"));    // no temp left behind
+    fs::remove_all(dir);
+}
+
+TEST_CASE("HpakWriter: unreadable subdirectory does not throw out of addDirectory")
+{
+    const auto dir = fs::temp_directory_path() / "he_excl_denied";
+    fs::remove_all(dir);
+    writeBlob(dir / "ok.hasset", tinyHasset({0x7, 0x7}, "ok.hasset"));
+    fs::create_directories(dir / "locked");
+    writeBlob(dir / "locked" / "hidden.hasset", tinyHasset({0x8, 0x8}, "locked/hidden.hasset"));
+    fs::permissions(dir / "locked", fs::perms::none);     // chmod 000
+
+    HpakWriter packer;
+    int added = -1;
+    // The old range-for iteration threw filesystem_error here (== std::terminate
+    // on the export worker thread). Must complete and pack the readable asset.
+    CHECK_NOTHROW(added = packer.addDirectory(dir, Hpak::PackSettings{}));
+    CHECK(added >= 1);
+
+    fs::permissions(dir / "locked", fs::perms::owner_all); // restore for cleanup
+    fs::remove_all(dir);
+}
+
+TEST_CASE("HAsset::Reader: corrupt chunk size fails cleanly instead of allocating")
+{
+    // Header claims one chunk whose size field is bogus-huge: openData must
+    // return false (bounds check) rather than resize(huge) → length_error. All 8
+    // size bytes are set to 0xFF so `offset + size` would WRAP size_t — the
+    // overflow-safe remaining-bytes comparison must still reject it.
+    auto blob = tinyHasset({0x9, 0x9}, "x.hasset");
+    // Chunk layout: FileHeader(32B), then ChunkHeader { uint32 id; uint64 size; }.
+    REQUIRE(blob.size() > sizeof(HAsset::FileHeader) + 12);
+    const size_t sizeOff = sizeof(HAsset::FileHeader) + 4; // after chunk id
+    for (int i = 0; i < 8; ++i) blob[sizeOff + i] = 0xFF;
+
+    HAsset::Reader r;
+    bool ok = true;
+    CHECK_NOTHROW(ok = r.openData(blob));
+    CHECK_FALSE(ok);
+}
+
 TEST_CASE("ProjectManager: unknown active profile falls back to the first")
 {
     const auto dir = fs::temp_directory_path() / "he_prof_fallback";
