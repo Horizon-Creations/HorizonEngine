@@ -301,6 +301,17 @@ bool ScriptContext::hotReloadScript(const std::string& name, const std::string& 
     return b->hotReloadScript(name, source);
 }
 
+bool ScriptContext::hotReloadScript(const std::string& name, const std::string& source,
+                                    ScriptLanguage lang)
+{
+    IScriptBackend* b = (lang == ScriptLanguage::Python)
+                            ? static_cast<IScriptBackend*>(m_py.get())
+                            : &m_engine;
+    if (!b) { m_lastBackend = &m_engine; return false; } // Python requested, unavailable
+    m_lastBackend = b;
+    return b->hotReloadScript(name, source);
+}
+
 bool ScriptContext::isScriptLoaded(const std::string& name) const
 {
     if (m_engine.isScriptLoaded(name)) return true;

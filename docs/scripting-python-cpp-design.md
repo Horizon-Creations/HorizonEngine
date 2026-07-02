@@ -187,6 +187,8 @@ class Main(horizon.Behavior):
 - **GameApplication treibt keine Skripte** (weder Lua noch Python) — Skripte laufen nur im Editor-Play-Mode. Pre-existing (`GameApplication` tickt keine ECS-Systeme). Kein Regress dieses Vorhabens.
 - **C++-Scripting C3/C4/C5** (Editor-Template/Build-Button, mtime-Hot-Reload, Packaging) offen.
 
+**Bekannte Einschränkung (pre-existing, sprachunabhängig):** `ScriptSystem::pollHotReload` schlüsselt auf `asset->name`, `loadScript`/`createInstance` auf `sc.moduleName`. Weichen die beiden ab, findet der Editor-Hot-Reload das Skript nicht (No-op) — betrifft Lua genauso wie Python. Die Sprach-Routing-Lücke ist geschlossen (`hotReloadScript`/`createInstance`/`isScriptLoaded` nehmen die Sprache explizit; `pollHotReload` reicht `asset->language` durch), aber die name/moduleName-Kopplung bleibt als eigener Follow-up.
+
 ---
 
 ## 5. RISIKEN / BEWUSST NICHT BAUEN

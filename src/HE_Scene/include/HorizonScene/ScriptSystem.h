@@ -21,7 +21,7 @@ struct ScriptSystem
             if (content->assetType(id) != HE::AssetType::Script) continue;
             const ScriptAsset* asset = content->getScript(id);
             if (!asset || asset->sourceCode.empty()) continue;
-            ctx.hotReloadScript(asset->name, asset->sourceCode);
+            ctx.hotReloadScript(asset->name, asset->sourceCode, asset->language);
         }
     }
 };

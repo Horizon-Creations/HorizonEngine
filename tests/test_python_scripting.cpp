@@ -408,6 +408,42 @@ TEST_CASE("ScriptContext: same moduleName in two languages routes by language")
     CHECK(world.registry().get<TransformComponent>(eP).position.z == doctest::Approx(9.0f));
 }
 
+// #1b: hotReload must route by language too — a name loaded in both backends
+// would otherwise send (e.g.) Lua source to the Python backend and silently fail.
+TEST_CASE("ScriptContext: hotReload routes by language when a name exists in both")
+{
+    HorizonWorld world;
+    ScriptContext ctx(world);
+    REQUIRE(ctx.loadScript("dup", kLuaSetX, ScriptLanguage::Lua));    // Lua onStart → x=3
+    REQUIRE(ctx.loadScript("dup", kMover,   ScriptLanguage::Python)); // Py on_start → (7,8,9)
+
+    auto eL = makeEntity(world, "L");
+    auto eP = makeEntity(world, "P");
+    auto idL = ctx.createInstance("dup", eL, ScriptLanguage::Lua);
+    auto idP = ctx.createInstance("dup", eP, ScriptLanguage::Python);
+    REQUIRE(idL != ScriptEngine::kInvalidInstance);
+    REQUIRE(idP != ScriptEngine::kInvalidInstance);
+
+    // Reload the LUA "dup" → x=9. Name-only routing (Python-first) would send this
+    // Lua source to the Python backend and fail; language routing sends it to Lua.
+    static const char* kLuaV2 =
+        "local M={}\nfunction M.onStart(self) horizon.setPosition(self.entityId, 9,0,0) end\nreturn M\n";
+    CHECK(ctx.hotReloadScript("dup", kLuaV2, ScriptLanguage::Lua));
+
+    static const char* kPyV2 = R"py(
+import horizon
+class Mover(horizon.Behavior):
+    def on_start(self):
+        horizon.setPosition(self.entity_id, 42.0, 0.0, 0.0)
+)py";
+    CHECK(ctx.hotReloadScript("dup", kPyV2, ScriptLanguage::Python));
+
+    REQUIRE(ctx.callOnStart(idL));  // Lua v2  → x = 9
+    REQUIRE(ctx.callOnStart(idP));  // Py  v2  → x = 42
+    CHECK(world.registry().get<TransformComponent>(eL).position.x == doctest::Approx(9.0f));
+    CHECK(world.registry().get<TransformComponent>(eP).position.x == doctest::Approx(42.0f));
+}
+
 // #3: an instance finalizer that calls physics must be safe even when the
 // PhysicsWorld was freed before the backend is destroyed (g_physics nulled first).
 // A hard failure here needs ASAN; without it this still asserts no crash.
