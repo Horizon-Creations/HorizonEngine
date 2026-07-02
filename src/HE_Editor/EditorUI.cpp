@@ -4051,7 +4051,7 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			                   "Full day: %.0f s", ImGuiSliderFlags_Logarithmic); trackEdit();
 			ImGui::EndDisabled();
 
-			ImGui::SeparatorText("Sun & Moon Light");
+			if (ImGui::TreeNodeEx("Sun & Moon", ImGuiTreeNodeFlags_DefaultOpen)) {
 			ImGui::ColorEdit3("Sun Color",  &env->sunColor.x, ImGuiColorEditFlags_NoInputs); trackEdit();
 			ImGui::SliderFloat("Sun Brightness",  &env->sunIntensity,  0.0f, 10.0f, "%.2f"); trackEdit();
 			ImGui::ColorEdit3("Moon Color", &env->moonColor.x, ImGuiColorEditFlags_NoInputs); trackEdit();
@@ -4078,9 +4078,11 @@ void EditorUI::RenderInspector(AppContext& ctx)
 				ImGui::EndDisabled();
 			}
 
+			ImGui::TreePop(); } // end Sun & Moon
+
 			// These are always editable. A Weather preset (below) sets a whole set of
 			// these values when applied / transitioning; otherwise they're yours to move.
-			ImGui::SeparatorText("Clouds");
+			if (ImGui::TreeNodeEx("Clouds", ImGuiTreeNodeFlags_DefaultOpen)) {
 			ImGui::SetNextItemWidth(-1.0f);
 			ImGui::SliderFloat("##cloudcoverage", &env->cloudCoverage, 0.0f, 1.0f, "Coverage: %.2f"); trackEdit();
 			ImGui::TextDisabled("Full overcast dims the sun & fills with ambient light.");
@@ -4124,7 +4126,9 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			ImGui::SetNextItemWidth(-1.0f);
 			ImGui::SliderFloat("##windspeed", &env->windSpeed, 0.0f, 4.0f, "Wind speed: %.2f"); trackEdit();
 
-			ImGui::SeparatorText("Contrails & Cirrus");
+			ImGui::TreePop(); } // end Clouds
+
+			if (ImGui::TreeNodeEx("Contrails & Cirrus")) {
 			ImGui::SetNextItemWidth(-1.0f);
 			ImGui::SliderFloat("##contrails", &env->contrailAmount, 0.0f, 1.0f, "Contrails: %.2f"); trackEdit();
 			ImGui::TextDisabled("Scattered vapour-trail lines to fill a clear daytime sky; fade as clouds build.");
@@ -4136,7 +4140,9 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			ImGui::EndDisabled();
 			ImGui::TextDisabled("Thin high wispy clouds. Intensity = cover, seed re-rolls the pattern (OpenGL).");
 
-			ImGui::SeparatorText("Sun Through Clouds (God Rays)");
+			ImGui::TreePop(); } // end Contrails & Cirrus
+
+			if (ImGui::TreeNodeEx("Sun Effects")) {
 			ImGui::SetNextItemWidth(-1.0f);
 			ImGui::SliderFloat("##godrays", &env->godRays, 0.0f, 1.0f, "God rays: %.2f"); trackEdit();
 			ImGui::TextDisabled("Warm crepuscular glow where sunlight breaks through gaps in the cloud cover. Needs broken cloud (Coverage > 0) and the sun up; off when overcast or clear.");
@@ -4144,7 +4150,9 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			ImGui::SliderFloat("##lensflare", &env->lensFlare, 0.0f, 1.0f, "Lens flare: %.2f"); trackEdit();
 			ImGui::TextDisabled("Camera lens flare for the sun: core, ghost discs and a halo along the sun\xe2\x86\x92screen-centre axis. Fades when the sun is off-screen, below the horizon, or occluded. A camera artifact.");
 
-			ImGui::SeparatorText("Atmospheric Fog");
+			ImGui::TreePop(); } // end Sun Effects
+
+			if (ImGui::TreeNodeEx("Atmospheric Fog")) {
 			ImGui::SetNextItemWidth(-1.0f);
 			ImGui::SliderFloat("##fogdensity", &env->fogDensity, 0.0f, 0.15f, "Density: %.3f"); trackEdit();
 			ImGui::BeginDisabled(env->fogDensity <= 0.0f);
@@ -4153,7 +4161,9 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			ImGui::EndDisabled();
 			ImGui::TextDisabled("Distant objects blend into the horizon (warm at sunset).");
 
-			ImGui::SeparatorText("Precipitation & Ground");
+			ImGui::TreePop(); } // end Atmospheric Fog
+
+			if (ImGui::TreeNodeEx("Precipitation & Ground")) {
 			ImGui::SetNextItemWidth(-1.0f);
 			ImGui::SliderFloat("##rain", &env->rainAmount, 0.0f, 1.0f, "Rain: %.2f"); trackEdit();
 			ImGui::SetNextItemWidth(-1.0f);
@@ -4162,7 +4172,9 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			ImGui::SliderFloat("##wetness", &env->wetness, 0.0f, 1.0f, "Wetness: %.2f"); trackEdit();
 			ImGui::TextDisabled("Rain/snow spawn particles; wetness darkens & snow whitens the ground.");
 
-			ImGui::SeparatorText("Stars & Milky Way");
+			ImGui::TreePop(); } // end Precipitation & Ground
+
+			if (ImGui::TreeNodeEx("Stars & Milky Way")) {
 			ImGui::SetNextItemWidth(-1.0f);
 			ImGui::SliderFloat("##starbright", &env->starBrightness, 0.0f, 3.0f, "Star Brightness: %.2f"); trackEdit();
 			ImGui::ColorEdit3("Star Color", &env->starColor.x, ImGuiColorEditFlags_NoInputs); trackEdit();
@@ -4182,7 +4194,9 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			ImGui::SliderFloat("##shootingstars", &env->shootingStars, 0.0f, 1.0f, "Shooting Stars: %.2f"); trackEdit();
 			ImGui::TextDisabled("Occasional meteors streak across the night sky; higher = more frequent. Night only.");
 
-			ImGui::SeparatorText("Nebula");
+			ImGui::TreePop(); } // end Stars & Milky Way
+
+			if (ImGui::TreeNodeEx("Nebula")) {
 			ImGui::SetNextItemWidth(-1.0f);
 			ImGui::SliderFloat("##nebula", &env->nebulaIntensity, 0.0f, 1.0f, "Intensity: %.2f"); trackEdit();
 			{
@@ -4201,7 +4215,9 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			ImGui::ColorEdit3("Nebula Color 2", &env->nebulaColor2.x, ImGuiColorEditFlags_NoInputs); trackEdit();
 			ImGui::ColorEdit3("Nebula Color 3", &env->nebulaColor3.x, ImGuiColorEditFlags_NoInputs); trackEdit();
 
-			ImGui::SeparatorText("Aurora");
+			ImGui::TreePop(); } // end Nebula
+
+			if (ImGui::TreeNodeEx("Aurora")) {
 			ImGui::SetNextItemWidth(-1.0f);
 			ImGui::SliderFloat("##aurora", &env->auroraIntensity, 0.0f, 1.0f, "Intensity: %.2f"); trackEdit();
 			ImGui::ColorEdit3("Color (base)", &env->auroraColor.x, ImGuiColorEditFlags_NoInputs); trackEdit();
@@ -4213,6 +4229,7 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			ImGui::SliderFloat("##aurorafrag", &env->auroraFragmentation, 0.0f, 1.0f, "Fragmentation: %.2f"); trackEdit();
 			ImGui::EndDisabled();
 			ImGui::TextDisabled("Stars, Milky Way & nebula turn with the day; aurora drifts.");
+			ImGui::TreePop(); } // end Aurora
 		}
 		ImGui::Separator();
 	}
