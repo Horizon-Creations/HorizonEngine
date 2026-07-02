@@ -114,9 +114,28 @@ public:
 	// encrypted pak. Returns true when the archive opened.
 	bool mountPak(const std::string& path, const uint8_t key[32] = nullptr);
 
-	// Ensure the asset is resident, loading it from the highest-priority mount that
-	// provides it if necessary. MAIN-THREAD ONLY (mutates the SlotMaps — never call
-	// during rendering). Returns true if the asset is resident afterwards.
+	// Mount every .hpak in `dir` as an overlay (mods/patches/DLC) on top of the
+	// already-mounted base pak. Archives are mounted in alphabetical filename
+	// order, so a later name deterministically shadows an earlier one, and all
+	// of them shadow the base (same UUID = replacement, new UUID = addition —
+	// including the packed startup scene). Mod paks are expected unencrypted.
+	// Returns the number of archives mounted; 0 when the directory is missing.
+	size_t mountPakOverlays(const std::filesystem::path& dir);
+
+	// ── Disk asset registry (UUID → path, loose content) ──────────────────────
+	// Scan the content root recursively for .hasset files and index their META
+	// (UUID, path) pairs WITHOUT loading the assets (only chunk headers + the META
+	// chunk are read; payload chunks are skipped). Afterwards ensureResident() and
+	// loadAssetAsync(UUID) can resolve UUID references from loose content — this is
+	// what lets scene references (mesh/material component UUIDs) resolve after an
+	// editor restart or scene reload without a bulk preload. Call after
+	// setContentRoot(); rescans replace the previous registry. Returns entry count.
+	size_t scanContentDirectory();
+
+	// Ensure the asset is resident, loading it from the highest-priority mounted
+	// pak that provides it — or, failing that, from the disk registry (loose
+	// content, see scanContentDirectory). MAIN-THREAD ONLY (mutates the SlotMaps —
+	// never call during rendering). Returns true if the asset is resident afterwards.
 	bool ensureResident(HE::UUID id);
 
 	// Number of currently mounted archives.
@@ -260,6 +279,7 @@ private:
 	};
 	std::vector<MountedPak>                       m_mounts;        // overlay stack (later = higher priority)
 	std::unordered_map<HE::UUID, size_t>          m_pakResidency;  // UUID → index into m_mounts
+	std::unordered_map<HE::UUID, std::string>     m_diskRegistry;  // UUID → relative path (loose content)
 
 	std::unordered_map<HE::UUID, SlotHandle>                              m_handleToUUID;
 	std::unordered_map<HE::UUID, HE::AssetType>                          m_assetTypeIndex; // mirrors m_handleToUUID with type info

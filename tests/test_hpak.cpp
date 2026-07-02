@@ -671,6 +671,118 @@ TEST_CASE("mountPak overlay: later mount shadows earlier by UUID, adds new UUIDs
     std::filesystem::remove(std::filesystem::temp_directory_path() / "he_mod.hpak");
 }
 
+TEST_CASE("Disk registry: scanContentDirectory resolves UUIDs from loose content")
+{
+    auto dir = std::filesystem::temp_directory_path() / "he_registry";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir / "sub");
+
+    // Author two assets — one in a subfolder — with a FIRST manager, then resolve
+    // them by UUID with a FRESH manager (the editor-restart / scene-reload case).
+    HE::UUID matId, meshId;
+    {
+        ContentManager author(dir.string());
+        MaterialAsset mat; mat.type = HE::AssetType::Material; mat.name = "regmat";
+        mat.path = "regmat.hasset"; mat.baseColor[0] = 0.42f;
+        REQUIRE(author.saveAsset(mat)); matId = mat.id;
+        StaticMeshAsset mesh; mesh.type = HE::AssetType::StaticMesh; mesh.name = "regmesh";
+        mesh.path = "sub/regmesh.hasset";
+        mesh.vertices = {0,0,0, 1,0,0, 0,1,0}; mesh.indices = {0,1,2};
+        REQUIRE(author.saveAsset(mesh)); meshId = mesh.id;
+    }
+
+    ContentManager cm(dir.string());
+    // Before the scan, the UUIDs are unresolvable (the documented limitation).
+    CHECK(!cm.ensureResident(matId));
+
+    CHECK(cm.scanContentDirectory() == 2);
+
+    // Sync resolution (editor preload path).
+    REQUIRE(cm.ensureResident(matId));
+    const MaterialAsset* m = cm.getMaterial(matId);
+    REQUIRE(m != nullptr);
+    CHECK(m->baseColor[0] == doctest::Approx(0.42f));
+
+    // Async resolution (game WIP path — UUID overload falls back to disk).
+    cm.loadAssetAsync(meshId);
+    bool done = false;
+    for (int i = 0; i < 500 && !done; ++i)
+    {
+        cm.pollAsyncResults();
+        done = cm.isLoaded(meshId);
+        if (!done) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    REQUIRE(done);
+    CHECK(cm.getStaticMesh(meshId) != nullptr);
+
+    std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("preloadAssetRefs makes scene-referenced loose assets resident")
+{
+    auto dir = std::filesystem::temp_directory_path() / "he_preload";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+
+    HE::UUID matId;
+    {
+        ContentManager author(dir.string());
+        MaterialAsset mat; mat.type = HE::AssetType::Material; mat.name = "pmat";
+        mat.path = "pmat.hasset";
+        REQUIRE(author.saveAsset(mat)); matId = mat.id;
+    }
+
+    HorizonWorld world;
+    auto e = world.createEntity("obj");
+    { MaterialComponent mc; mc.materialAssetId = matId; world.addComponent(e, mc); }
+
+    ContentManager cm(dir.string());
+    cm.scanContentDirectory();
+    CHECK(SceneSystems::preloadAssetRefs(world, cm) == 1);
+    CHECK(cm.getMaterial(matId) != nullptr);
+
+    std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("mountPakOverlays: Mods folder mounts alphabetically over the base pak")
+{
+    const HE::UUID shared{0x300, 0x1};   // in base + both mods
+    const HE::UUID addedByA{0x300, 0x2}; // only in a_mod
+    auto tmp  = std::filesystem::temp_directory_path();
+    auto mods = tmp / "he_mods_dir";
+    std::filesystem::remove_all(mods);
+    std::filesystem::create_directories(mods);
+
+    { HpakWriter p; p.addEntry(shared, makeMaterialBlob(shared, "base", 1.f,0.f,0.f));
+      REQUIRE(p.write((tmp / "he_modbase.hpak").string())); }
+    { HpakWriter p;
+      p.addEntry(shared,   makeMaterialBlob(shared,   "a_mod", 0.f,1.f,0.f));
+      p.addEntry(addedByA, makeMaterialBlob(addedByA, "a_add", 0.f,0.f,1.f));
+      REQUIRE(p.write((mods / "a_mod.hpak").string())); }
+    { HpakWriter p; p.addEntry(shared, makeMaterialBlob(shared, "b_mod", 1.f,1.f,0.f));
+      REQUIRE(p.write((mods / "b_mod.hpak").string())); }
+    // Non-pak files in Mods/ are ignored.
+    { std::ofstream f(mods / "readme.txt"); f << "not a pak"; }
+
+    ContentManager cm;
+    REQUIRE(cm.mountPak((tmp / "he_modbase.hpak").string()));
+    CHECK(cm.mountPakOverlays(mods) == 2);
+    CHECK(cm.mountedPakCount() == 3);
+
+    // b_mod.hpak sorts after a_mod.hpak → mounted last → wins for `shared`.
+    { auto ref = cm.acquireMaterial(shared); REQUIRE(ref);
+      CHECK(ref->baseColor[0] == doctest::Approx(1.f));   // yellow (b_mod)
+      CHECK(ref->baseColor[1] == doctest::Approx(1.f)); }
+    // a_mod's addition is available.
+    CHECK(cm.ensureResident(addedByA));
+
+    // Missing directory → 0, no error.
+    CHECK(cm.mountPakOverlays(tmp / "he_no_such_dir") == 0);
+
+    std::filesystem::remove(tmp / "he_modbase.hpak");
+    std::filesystem::remove_all(mods);
+}
+
 TEST_CASE("SceneSystems::collectAssetRefs gathers component asset UUIDs (the stream seed)")
 {
     HorizonWorld world;

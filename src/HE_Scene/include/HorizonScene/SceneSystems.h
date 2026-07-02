@@ -18,6 +18,12 @@ namespace SceneSystems
     // the pak are never loaded. Duplicates are fine — the loader coalesces.
     std::vector<HE::UUID> collectAssetRefs(HorizonWorld& world);
 
+    // Synchronously make every scene-referenced asset resident (collectAssetRefs →
+    // ContentManager::ensureResident, which resolves from mounted paks or the disk
+    // registry). Used by the editor after a scene load so mesh/material component
+    // UUIDs render immediately after a reload/restart. Returns how many resolved.
+    size_t preloadAssetRefs(HorizonWorld& world, ContentManager& cm);
+
     // Runs the always-on visual / gameplay systems for one frame: terrain regen,
     // skeletal animation (clip / blend / state-machine / property), navigation,
     // weather, particles, foliage and LOD. Shared by the editor (preview every frame)

@@ -75,6 +75,7 @@ ExportResult ProjectExporter::exportProject(
     cfg.hpakFilename  = hpakFilename;
     cfg.mainSceneName = sceneFile;
     std::memset(cfg.projectUuidBytes, 0, 16);
+    cfg.enableModSupport = settings.enableModSupport;
     cfg.encrypted = settings.encrypt;
     if (settings.encrypt) std::memcpy(cfg.encKey, packSettings.key, 32);
     if (!startupSceneBinary.empty())

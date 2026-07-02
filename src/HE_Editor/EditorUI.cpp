@@ -101,6 +101,7 @@ static bool   s_showExportModal   = false;
 static char   s_exportOutputDir[512] = {};
 static bool   s_exportCompress    = true;
 static bool   s_exportEncrypt     = false;
+static bool   s_exportModSupport  = false;
 static bool   s_exportRunning     = false;
 static std::string s_exportResult;
 
@@ -1427,10 +1428,13 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
             ImGui::SetNextItemWidth(-1.0f);
             ImGui::InputText("##exportDir", s_exportOutputDir, sizeof(s_exportOutputDir));
             ImGui::Spacing();
-            ImGui::Checkbox("Compress assets (LZ4)", &s_exportCompress);
+            ImGui::Checkbox("Compress assets",       &s_exportCompress);
             ImGui::Checkbox("Encrypt assets",        &s_exportEncrypt);
             if (s_exportEncrypt)
                 ImGui::TextDisabled("Note: encryption key management is the project's responsibility.");
+            ImGui::Checkbox("Enable mod support",    &s_exportModSupport);
+            if (s_exportModSupport)
+                ImGui::TextDisabled("The game mounts every .hpak in a Mods/ folder next to the executable.");
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
 
             if (!s_exportResult.empty())
@@ -1456,8 +1460,9 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                     sceneName = std::filesystem::path(ctx.currentScenePath).filename().string();
 
                 ExportSettings es;
-                es.compress = s_exportCompress;
-                es.encrypt  = s_exportEncrypt;
+                es.compress         = s_exportCompress;
+                es.encrypt          = s_exportEncrypt;
+                es.enableModSupport = s_exportModSupport;
                 // Resolve game runtime dir from editor executable location (../Game/)
                 if (const char* base = SDL_GetBasePath())
                     es.gameRuntimeDir = std::filesystem::path(base) / ".." / "Game";

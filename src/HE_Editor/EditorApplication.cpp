@@ -765,6 +765,11 @@ void EditorApplication::OnInit()
 			if (std::filesystem::is_regular_file(projectPath))
 				projectPath = projectPath.parent_path();
 			contentManager().setContentRoot((projectPath / "Content").string());
+			// Index every .hasset's (UUID → path) so scene component references
+			// (mesh/material UUIDs) resolve after a reload without a bulk preload.
+			const size_t indexed = contentManager().scanContentDirectory();
+			Logger::Log(Logger::LogLevel::Info,
+				("EditorApplication: indexed " + std::to_string(indexed) + " content assets").c_str());
 		}
 
 		m_currentScenePath.clear();
@@ -775,6 +780,7 @@ void EditorApplication::OnInit()
 			if (ok)
 			{
 				m_currentScenePath = sceneAbsPath;
+				SceneSystems::preloadAssetRefs(*m_editorWorld, contentManager());
 				Logger::Log(Logger::LogLevel::Info,
 					("EditorApplication: startup scene loaded from " + sceneAbsPath).c_str());
 			}
@@ -1546,6 +1552,7 @@ void EditorApplication::openScene(const std::string& path)
 	if (serializer.load(*m_editorWorld, path, SerializeFormat::JSON))
 	{
 		m_currentScenePath = path;
+		SceneSystems::preloadAssetRefs(*m_editorWorld, contentManager());
 		Logger::Log(Logger::LogLevel::Info, ("EditorApplication: scene opened from " + path).c_str());
 	}
 	else
@@ -1568,6 +1575,7 @@ void EditorApplication::openSceneAdditive(const std::string& path)
 	if (serializer.loadAdditive(*m_editorWorld, path, SerializeFormat::JSON))
 	{
 		m_undo.snapshotNow();
+		SceneSystems::preloadAssetRefs(*m_editorWorld, contentManager());
 		Logger::Log(Logger::LogLevel::Info, ("EditorApplication: scene merged from " + path).c_str());
 	}
 	else

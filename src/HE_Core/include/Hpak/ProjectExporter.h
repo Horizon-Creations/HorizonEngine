@@ -8,6 +8,10 @@
 struct HE_API ExportSettings {
     bool    compress = true;
     bool    encrypt  = false;
+    // When set, the shipped game scans a Mods/ folder next to the executable and
+    // mounts every .hpak there as an overlay on the base pak (same UUID replaces,
+    // new UUID adds — including the packed startup scene).
+    bool    enableModSupport = false;
     uint8_t key[32]  = {};
     // When non-empty, all files in this directory (the game runtime binaries:
     // executable + dylibs/DLLs) are copied into outputDir so the export is
