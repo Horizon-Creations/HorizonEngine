@@ -69,8 +69,11 @@ public:
     bool callOnCollisionExit(ScriptEngine::InstanceId id, uint32_t otherEntityId);
 
     // Hot-reload: recompile script and patch function fields in live instances.
-    // Data fields (non-function keys in instance tables) are preserved.
+    // Data fields (non-function keys in instance tables) are preserved. The
+    // 2-arg form routes by which backend owns the name (ambiguous across
+    // languages); prefer the 3-arg form with the script's known language.
     bool hotReloadScript(const std::string& name, const std::string& source);
+    bool hotReloadScript(const std::string& name, const std::string& source, ScriptLanguage lang);
 
     // Inject stored property overrides into a live instance before onStart.
     void injectProperties(ScriptEngine::InstanceId id,
