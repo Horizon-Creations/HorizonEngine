@@ -62,6 +62,10 @@ void GameApplication::OnInit()
 
 	// Override content root set by Application base (it uses argv[0] + "Content")
 	contentManager().setContentRoot((exeDir / "Content").string());
+	// Index loose content (UUID → path) so a WIP build without a pak (or with
+	// assets missing from the pak) still resolves scene references from disk.
+	// No-op in a fully packaged build where Content/ doesn't exist.
+	contentManager().scanContentDirectory();
 
 	const std::string pakPath = (exeDir / m_config.hpakFilename).string();
 	// Pass the AES key for an encrypted pak (obfuscation key shipped in the hcfg);
@@ -82,8 +86,22 @@ void GameApplication::OnInit()
 	}
 
 	if (contentManager().mountPak(pakPath, pakKey))
+	{
 		Logger::Log(Logger::LogLevel::Info,
 			("GameApplication: mounted " + m_config.hpakFilename).c_str());
+
+		// Mod overlays: every .hpak in Mods/ next to the executable, mounted on
+		// top of the base pak in alphabetical order. Same UUID = replacement,
+		// new UUID = addition — this also lets a mod override the packed startup
+		// scene, which is why mods mount BEFORE the scene is read below.
+		if (m_config.enableModSupport)
+		{
+			const size_t mods = contentManager().mountPakOverlays(exeDir / "Mods");
+			if (mods > 0)
+				Logger::Log(Logger::LogLevel::Info,
+					("GameApplication: mounted " + std::to_string(mods) + " mod pak(s)").c_str());
+		}
+	}
 	else
 		Logger::Log(Logger::LogLevel::Warning, ("GameApplication: pak not found: " + pakPath).c_str());
 
@@ -118,8 +136,9 @@ void GameApplication::OnInit()
 	// Reference-graph streaming seed: kick off async loads for the assets this scene
 	// actually references. Their baked transitive dependencies (materials → textures)
 	// follow automatically via the frontier in pollAsyncResults, so the loader pulls
-	// only the closure the scene needs — unused pak assets are never loaded.
-	if (contentManager().mountedPakCount() > 0)
+	// only the closure the scene needs — unused pak assets are never loaded. The
+	// async UUID loader resolves from mounted paks first and falls back to the disk
+	// registry, so this also works for a WIP build running on loose content.
 	{
 		const auto refs = SceneSystems::collectAssetRefs(*m_world);
 		for (HE::UUID r : refs) contentManager().loadAssetAsync(r);

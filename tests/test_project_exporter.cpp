@@ -131,7 +131,8 @@ TEST_CASE("ProjectExporter packs .hasset files from content dir")
     { std::ofstream f(contentDir / "readme.txt"); f << "not an asset"; }
 
     ExportSettings settings;
-    settings.compress = false;
+    settings.compress         = false;
+    settings.enableModSupport = true;
     const auto result = ProjectExporter::exportProject(
         contentDir, "MyGame", "", outputDir, settings);
 
@@ -159,6 +160,7 @@ TEST_CASE("ProjectExporter packs .hasset files from content dir")
     CHECK(cfg.projectName  == "MyGame");
     CHECK(cfg.hpakFilename == "MyGame.hpak");
     CHECK(cfg.mainSceneName.empty()); // no scene specified
+    CHECK(cfg.enableModSupport);      // export flag reaches the runtime config
 
     std::filesystem::remove_all(contentDir);
     std::filesystem::remove_all(outputDir);

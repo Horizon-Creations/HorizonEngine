@@ -4,6 +4,7 @@
 #include "JobSystem/JobSystem.h"
 #include "Diagnostics/Logger.h"
 #include "Diagnostics/Profiler.h"
+#include <algorithm>
 #include <cstring>
 #include <fstream>
 
@@ -364,7 +365,14 @@ void ContentManager::loadAssetAsync(HE::UUID id, std::function<void(HE::UUID)> c
 	const auto it = m_pakResidency.find(id);
 	if (it == m_pakResidency.end())
 	{
-		if (callback) callback(HE::UUID{}); // not provided by any mount
+		// Not in any mounted pak — fall back to loose content on disk via the
+		// registry (async path-based load; coalesced by path).
+		if (const auto d = m_diskRegistry.find(id); d != m_diskRegistry.end())
+		{
+			loadAssetAsync(d->second, std::move(callback));
+			return;
+		}
+		if (callback) callback(HE::UUID{}); // unknown UUID
 		return;
 	}
 	const MountedPak& mount = m_mounts[it->second];
@@ -896,12 +904,88 @@ bool ContentManager::mountPak(const std::string& path, const uint8_t key[32])
 	return true;
 }
 
+size_t ContentManager::mountPakOverlays(const std::filesystem::path& dir)
+{
+	std::error_code ec;
+	if (!std::filesystem::is_directory(dir, ec)) return 0;
+
+	// Collect + sort by filename so mount order (= overlay priority) is
+	// deterministic across platforms and directory-iteration orders.
+	std::vector<std::filesystem::path> paks;
+	for (const auto& p : std::filesystem::directory_iterator(dir, ec))
+		if (p.is_regular_file(ec) && p.path().extension() == ".hpak")
+			paks.push_back(p.path());
+	std::sort(paks.begin(), paks.end(),
+	          [](const auto& a, const auto& b) { return a.filename() < b.filename(); });
+
+	size_t mounted = 0;
+	for (const auto& p : paks)
+		if (mountPak(p.string()))
+			++mounted;
+	return mounted;
+}
+
+size_t ContentManager::scanContentDirectory()
+{
+	m_diskRegistry.clear();
+	std::error_code ec;
+	const std::filesystem::path root(m_contentRoot);
+	if (!std::filesystem::is_directory(root, ec)) return 0;
+
+	for (const auto& p : std::filesystem::recursive_directory_iterator(root, ec))
+	{
+		if (!p.is_regular_file(ec) || p.path().extension() != ".hasset") continue;
+
+		// Stream just the header + chunk headers; read only the META payload and
+		// skip everything else, so indexing stays cheap even for large assets.
+		std::ifstream f(p.path(), std::ios::binary);
+		if (!f) continue;
+		HAsset::FileHeader hdr{};
+		f.read(reinterpret_cast<char*>(&hdr), sizeof(hdr));
+		if (!f || std::memcmp(hdr.magic, HAsset::k_magic, 4) != 0) continue;
+
+		for (uint32_t i = 0; i < hdr.chunk_count && f; ++i)
+		{
+			HAsset::ChunkHeader ch{};
+			f.read(reinterpret_cast<char*>(&ch), sizeof(ch));
+			if (!f) break;
+			if (ch.id != HAsset::CHUNK_META)
+			{
+				f.seekg(static_cast<std::streamoff>(ch.size), std::ios::cur);
+				continue;
+			}
+			HAsset::Reader::Chunk meta;
+			meta.id = ch.id;
+			meta.data.resize(static_cast<size_t>(ch.size));
+			f.read(reinterpret_cast<char*>(meta.data.data()),
+			       static_cast<std::streamsize>(ch.size));
+			HE::UUID id; std::string name, metaPath;
+			if (f && readMetaChunk(meta, hdr.version, id, name, metaPath) && id != HE::UUID{})
+			{
+				// Key by the file's ACTUAL location relative to the content root
+				// (not the META-embedded path) so moved/renamed files still resolve.
+				const auto rel = std::filesystem::relative(p.path(), root, ec);
+				if (!ec) m_diskRegistry[id] = rel.generic_string();
+			}
+			break; // META handled — done with this file
+		}
+	}
+	return m_diskRegistry.size();
+}
+
 bool ContentManager::ensureResident(HE::UUID id)
 {
 	if (isLoaded(id)) return true;
 
 	const auto it = m_pakResidency.find(id);
-	if (it == m_pakResidency.end()) return false;
+	if (it == m_pakResidency.end())
+	{
+		// Not in any mounted pak — fall back to loose content on disk.
+		const auto d = m_diskRegistry.find(id);
+		if (d == m_diskRegistry.end()) return false;
+		loadAsset(d->second);
+		return isLoaded(id);
+	}
 
 	MountedPak& mount = m_mounts[it->second];
 	if (!mount.reader) return false;

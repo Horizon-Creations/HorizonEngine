@@ -26,6 +26,7 @@
 #include "HorizonScene/Components/UIImageComponent.h"
 #include "HorizonScene/Components/TerrainComponent.h"
 #include "HorizonScene/Components/LODComponent.h"
+#include "ContentManager/ContentManager.h"
 #include "Renderer/IRenderer.h"
 #include "Diagnostics/Profiler.h"
 #include <cmath>
@@ -120,4 +121,13 @@ std::vector<HE::UUID> SceneSystems::collectAssetRefs(HorizonWorld& world)
     for (auto [e, c] : reg.view<AnimatorStateMachineComponent>().each()) for (const auto& st : c.states) add(st.clipId);
 
     return out;
+}
+
+size_t SceneSystems::preloadAssetRefs(HorizonWorld& world, ContentManager& cm)
+{
+    size_t resolved = 0;
+    for (HE::UUID id : collectAssetRefs(world))
+        if (cm.ensureResident(id))
+            ++resolved;
+    return resolved;
 }
