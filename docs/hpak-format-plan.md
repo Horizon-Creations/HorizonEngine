@@ -420,7 +420,21 @@ heute nur lose Dateien. Erweitern:
 
 ---
 
-## 6.5 Referenzgraph — nur gebrauchte Assets laden (DESIGN, offen)
+## 6.5 Referenzgraph — nur gebrauchte Assets laden ✅ UMGESETZT (Step 1+2)
+
+> **Status:** Beide Stufen gebaut und getestet (506 Tests grün, Metal-Headless-Shot verifiziert).
+> **Step 1**: Pack-Zeit-Baking der Pfad-Refs zu UUIDs (Chunks `MRFU`/`MTLU`/`SCNU`), Companion-Fix
+> (echter META-Pfad in `m_pathToUUID`), Frontier-Expansion in `pollAsyncResults`, Seed via
+> `SceneSystems::collectAssetRefs` — GameApplication streamt nur noch die Szenen-Closure.
+> **Step 2 („nur UUIDs")**: Der Packer **droppt die Pfad-Strings** im Pak (MREF/SCNE ersetzt,
+> MTRL mit leeren Strings + byte-verbatim PBR-Tail), und die Backend-Resolver laufen im
+> Dual-Mode über zentrale Helper `ContentManager::resolveMaterialRef/resolveTextureRef`
+> (baked UUID bevorzugt → `ensureResident`, Editor-Pfad als Loose-Fallback). Umgestellt:
+> Metal ×3, GL ×3 (beide kompiliert + Metal visuell verifiziert), **D3D11 ×2 blind**
+> (Windows-Verify offen). Lose Editor-Assets bleiben vollständig pfad-basiert (Debugging).
+> Der ursprüngliche Design-Text folgt unverändert als Begründungs-Doku.
+
+### (ursprüngliches Design)
 
 **Ziel:** statt `streamMountedAssets()` das ganze Pak zu streamen, nur die Assets laden, die die
 Startup-Szene tatsächlich referenziert (+ deren transitive Abhängigkeiten). Speicher-/Bandbreiten-Optimierung,

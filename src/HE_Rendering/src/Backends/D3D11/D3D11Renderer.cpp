@@ -1916,27 +1916,25 @@ struct D3D11RendererImpl
         mesh.localBounds = HE::AABB::fromPositions(asset->vertices.data(), vertexCount);
         uploadBuffers(mesh, interleaved, asset->indices);
 
-        if (!asset->materialPath.empty())
+        // Baked UUID (packed builds) with editor-path fallback (loose content).
+        if (const MaterialAsset* mat = cm->resolveMaterialRef(asset->materialId, asset->materialPath))
         {
-            const HE::UUID matId = cm->loadAsset(asset->materialPath);
-            if (const MaterialAsset* mat = cm->getMaterial(matId); mat && !mat->texturePaths.empty())
+            const HE::UUID    texId0   = mat->textureIds.empty()   ? HE::UUID{}    : mat->textureIds[0];
+            const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
+            if (const TextureAsset* tex = cm->resolveTextureRef(texId0, texPath0);
+                tex && !tex->data.empty() && tex->channels == 4)
             {
-                const HE::UUID texId = cm->loadAsset(mat->texturePaths[0]);
-                if (const TextureAsset* tex = cm->getTexture(texId);
-                    tex && !tex->data.empty() && tex->channels == 4)
-                {
-                    D3D11_TEXTURE2D_DESC td{};
-                    td.Width = tex->width; td.Height = tex->height;
-                    td.MipLevels = 1; td.ArraySize = 1;
-                    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1;
-                    td.Usage = D3D11_USAGE_IMMUTABLE; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-                    D3D11_SUBRESOURCE_DATA srd{};
-                    srd.pSysMem = tex->data.data();
-                    srd.SysMemPitch = tex->width * 4;
-                    ComPtr<ID3D11Texture2D> t;
-                    if (SUCCEEDED(device->CreateTexture2D(&td, &srd, &t)))
-                        device->CreateShaderResourceView(t.Get(), nullptr, &mesh.texture);
-                }
+                D3D11_TEXTURE2D_DESC td{};
+                td.Width = tex->width; td.Height = tex->height;
+                td.MipLevels = 1; td.ArraySize = 1;
+                td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1;
+                td.Usage = D3D11_USAGE_IMMUTABLE; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                D3D11_SUBRESOURCE_DATA srd{};
+                srd.pSysMem = tex->data.data();
+                srd.SysMemPitch = tex->width * 4;
+                ComPtr<ID3D11Texture2D> t;
+                if (SUCCEEDED(device->CreateTexture2D(&td, &srd, &t)))
+                    device->CreateShaderResourceView(t.Get(), nullptr, &mesh.texture);
             }
         }
         return &meshCache.emplace(assetId, mesh).first->second;
@@ -2353,27 +2351,25 @@ struct D3D11RendererImpl
         }
 
         // Try to load albedo texture — same pattern as resolveMesh()
-        if (!asset->materialPath.empty())
+        // (baked UUID for packed builds, editor path as loose fallback).
+        if (const MaterialAsset* mat = cm->resolveMaterialRef(asset->materialId, asset->materialPath))
         {
-            const HE::UUID matId = cm->loadAsset(asset->materialPath);
-            if (const MaterialAsset* mat = cm->getMaterial(matId); mat && !mat->texturePaths.empty())
+            const HE::UUID    texId0   = mat->textureIds.empty()   ? HE::UUID{}    : mat->textureIds[0];
+            const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
+            if (const TextureAsset* tex = cm->resolveTextureRef(texId0, texPath0);
+                tex && !tex->data.empty() && tex->channels == 4)
             {
-                const HE::UUID texId = cm->loadAsset(mat->texturePaths[0]);
-                if (const TextureAsset* tex = cm->getTexture(texId);
-                    tex && !tex->data.empty() && tex->channels == 4)
-                {
-                    D3D11_TEXTURE2D_DESC td{};
-                    td.Width = tex->width; td.Height = tex->height;
-                    td.MipLevels = 1; td.ArraySize = 1;
-                    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1;
-                    td.Usage = D3D11_USAGE_IMMUTABLE; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-                    D3D11_SUBRESOURCE_DATA srd{};
-                    srd.pSysMem = tex->data.data();
-                    srd.SysMemPitch = tex->width * 4;
-                    ComPtr<ID3D11Texture2D> t;
-                    if (SUCCEEDED(device->CreateTexture2D(&td, &srd, &t)))
-                        device->CreateShaderResourceView(t.Get(), nullptr, &mesh.srv);
-                }
+                D3D11_TEXTURE2D_DESC td{};
+                td.Width = tex->width; td.Height = tex->height;
+                td.MipLevels = 1; td.ArraySize = 1;
+                td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1;
+                td.Usage = D3D11_USAGE_IMMUTABLE; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                D3D11_SUBRESOURCE_DATA srd{};
+                srd.pSysMem = tex->data.data();
+                srd.SysMemPitch = tex->width * 4;
+                ComPtr<ID3D11Texture2D> t;
+                if (SUCCEEDED(device->CreateTexture2D(&td, &srd, &t)))
+                    device->CreateShaderResourceView(t.Get(), nullptr, &mesh.srv);
             }
         }
 

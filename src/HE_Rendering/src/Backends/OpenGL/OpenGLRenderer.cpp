@@ -3455,27 +3455,25 @@ const OpenGLRenderer::GpuMesh* OpenGLRenderer::ResolveMesh(const HE::UUID& asset
 	}
 	glBindVertexArray(0);
 
-	// Base color texture via the mesh's material (load on demand by path)
-	if (!asset->materialPath.empty())
+	// Base color texture via the mesh's material — baked UUID (packed builds)
+	// with the editor path as fallback (loose content).
+	if (const MaterialAsset* mat =
+	        m_contentManager->resolveMaterialRef(asset->materialId, asset->materialPath))
 	{
-		const HE::UUID matId = m_contentManager->loadAsset(asset->materialPath);
-		if (const MaterialAsset* mat = m_contentManager->getMaterial(matId);
-		    mat && !mat->texturePaths.empty())
+		const HE::UUID    texId0   = mat->textureIds.empty()   ? HE::UUID{}    : mat->textureIds[0];
+		const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
+		if (const TextureAsset* tex = m_contentManager->resolveTextureRef(texId0, texPath0);
+		    tex && !tex->data.empty() && tex->channels == 4)
 		{
-			const HE::UUID texId = m_contentManager->loadAsset(mat->texturePaths[0]);
-			if (const TextureAsset* tex = m_contentManager->getTexture(texId);
-			    tex && !tex->data.empty() && tex->channels == 4)
-			{
-				glGenTextures(1, &mesh.texture);
-				glBindTexture(GL_TEXTURE_2D, mesh.texture);
-				glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
-				             static_cast<GLsizei>(tex->width), static_cast<GLsizei>(tex->height),
-				             0, GL_RGBA, GL_UNSIGNED_BYTE, tex->data.data());
-				glGenerateMipmap(GL_TEXTURE_2D);
-				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-				glBindTexture(GL_TEXTURE_2D, 0);
-			}
+			glGenTextures(1, &mesh.texture);
+			glBindTexture(GL_TEXTURE_2D, mesh.texture);
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
+			             static_cast<GLsizei>(tex->width), static_cast<GLsizei>(tex->height),
+			             0, GL_RGBA, GL_UNSIGNED_BYTE, tex->data.data());
+			glGenerateMipmap(GL_TEXTURE_2D);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+			glBindTexture(GL_TEXTURE_2D, 0);
 		}
 	}
 
@@ -3582,27 +3580,24 @@ OpenGLRenderer::ResolveSkeletalMesh(const HE::UUID& assetId)
 	             asset->indices.data(), GL_STATIC_DRAW);
 	glBindVertexArray(0);
 
-	// Base color texture
-	if (!asset->materialPath.empty())
+	// Base color texture — baked UUID (packed) with editor-path fallback (loose).
+	if (const MaterialAsset* mat =
+	        m_contentManager->resolveMaterialRef(asset->materialId, asset->materialPath))
 	{
-		const HE::UUID matId = m_contentManager->loadAsset(asset->materialPath);
-		if (const MaterialAsset* mat = m_contentManager->getMaterial(matId);
-		    mat && !mat->texturePaths.empty())
+		const HE::UUID    texId0   = mat->textureIds.empty()   ? HE::UUID{}    : mat->textureIds[0];
+		const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
+		if (const TextureAsset* tex = m_contentManager->resolveTextureRef(texId0, texPath0);
+		    tex && !tex->data.empty() && tex->channels == 4)
 		{
-			const HE::UUID texId = m_contentManager->loadAsset(mat->texturePaths[0]);
-			if (const TextureAsset* tex = m_contentManager->getTexture(texId);
-			    tex && !tex->data.empty() && tex->channels == 4)
-			{
-				glGenTextures(1, &mesh.texture);
-				glBindTexture(GL_TEXTURE_2D, mesh.texture);
-				glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
-				             static_cast<GLsizei>(tex->width), static_cast<GLsizei>(tex->height),
-				             0, GL_RGBA, GL_UNSIGNED_BYTE, tex->data.data());
-				glGenerateMipmap(GL_TEXTURE_2D);
-				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-				glBindTexture(GL_TEXTURE_2D, 0);
-			}
+			glGenTextures(1, &mesh.texture);
+			glBindTexture(GL_TEXTURE_2D, mesh.texture);
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
+			             static_cast<GLsizei>(tex->width), static_cast<GLsizei>(tex->height),
+			             0, GL_RGBA, GL_UNSIGNED_BYTE, tex->data.data());
+			glGenerateMipmap(GL_TEXTURE_2D);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+			glBindTexture(GL_TEXTURE_2D, 0);
 		}
 	}
 
@@ -3632,10 +3627,10 @@ bool OpenGLRenderer::ResolveMaterialTexture(const HE::UUID& materialId, unsigned
 		return false; // not loaded yet — retry next frame without caching
 
 	unsigned int tex = 0;
-	if (!mat->texturePaths.empty())
 	{
-		const HE::UUID texId = m_contentManager->loadAsset(mat->texturePaths[0]);
-		if (const TextureAsset* t = m_contentManager->getTexture(texId);
+		const HE::UUID    texId0   = mat->textureIds.empty()   ? HE::UUID{}    : mat->textureIds[0];
+		const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
+		if (const TextureAsset* t = m_contentManager->resolveTextureRef(texId0, texPath0);
 		    t && !t->data.empty() && t->channels == 4)
 		{
 			glGenTextures(1, &tex);

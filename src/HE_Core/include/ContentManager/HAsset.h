@@ -297,6 +297,10 @@ public:
 		return nullptr;
 	}
 
+	// All chunks in file order — for transforms that reserialize an asset
+	// (e.g. the pack-time path→UUID reference rewrite).
+	const std::vector<Chunk>& chunks() const { return m_chunks; }
+
 	// ── Read helpers ──────────────────────────────────────────────────────────
 
 	// Read a length-prefixed string from a buffer at offset (offset is advanced)

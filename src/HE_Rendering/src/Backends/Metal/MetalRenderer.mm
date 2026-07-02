@@ -3177,31 +3177,29 @@ const MetalRenderer::GpuMesh* MetalRenderer::ResolveMesh(const HE::UUID& assetId
 		                    length:asset->indices.size() * sizeof(uint32_t)
 		                   options:MTLResourceStorageModeShared]);
 
-	// Base color texture via the mesh's material (load on demand by path)
-	if (!asset->materialPath.empty())
+	// Base color texture via the mesh's material — baked UUID (packed builds)
+	// with the editor path as fallback (loose content).
+	if (const MaterialAsset* mat =
+	        m_contentManager->resolveMaterialRef(asset->materialId, asset->materialPath))
 	{
-		const HE::UUID matId = m_contentManager->loadAsset(asset->materialPath);
-		if (const MaterialAsset* mat = m_contentManager->getMaterial(matId);
-		    mat && !mat->texturePaths.empty())
+		const HE::UUID    texId0   = mat->textureIds.empty()   ? HE::UUID{}    : mat->textureIds[0];
+		const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
+		if (const TextureAsset* tex = m_contentManager->resolveTextureRef(texId0, texPath0);
+		    tex && !tex->data.empty() && tex->channels == 4)
 		{
-			const HE::UUID texId = m_contentManager->loadAsset(mat->texturePaths[0]);
-			if (const TextureAsset* tex = m_contentManager->getTexture(texId);
-			    tex && !tex->data.empty() && tex->channels == 4)
-			{
-				MTLTextureDescriptor* desc = [MTLTextureDescriptor
-					texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
-					                             width:tex->width
-					                            height:tex->height
-					                         mipmapped:NO];
-				desc.usage       = MTLTextureUsageShaderRead;
-				desc.storageMode = MTLStorageModeShared;
-				id<MTLTexture> texture = [device newTextureWithDescriptor:desc];
-				[texture replaceRegion:MTLRegionMake2D(0, 0, tex->width, tex->height)
-				           mipmapLevel:0
-				             withBytes:tex->data.data()
-				           bytesPerRow:tex->width * 4];
-				mesh.texture = (void*)CFBridgingRetain(texture);
-			}
+			MTLTextureDescriptor* desc = [MTLTextureDescriptor
+				texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+				                             width:tex->width
+				                            height:tex->height
+				                         mipmapped:NO];
+			desc.usage       = MTLTextureUsageShaderRead;
+			desc.storageMode = MTLStorageModeShared;
+			id<MTLTexture> texture = [device newTextureWithDescriptor:desc];
+			[texture replaceRegion:MTLRegionMake2D(0, 0, tex->width, tex->height)
+			           mipmapLevel:0
+			             withBytes:tex->data.data()
+			           bytesPerRow:tex->width * 4];
+			mesh.texture = (void*)CFBridgingRetain(texture);
 		}
 	}
 
@@ -3283,30 +3281,27 @@ MetalRenderer::ResolveSkeletalMesh(const HE::UUID& assetId)
 		                    length:asset->indices.size() * sizeof(uint32_t)
 		                   options:MTLResourceStorageModeShared]);
 
-	if (!asset->materialPath.empty())
+	if (const MaterialAsset* mat =
+	        m_contentManager->resolveMaterialRef(asset->materialId, asset->materialPath))
 	{
-		const HE::UUID matId = m_contentManager->loadAsset(asset->materialPath);
-		if (const MaterialAsset* mat = m_contentManager->getMaterial(matId);
-		    mat && !mat->texturePaths.empty())
+		const HE::UUID    texId0   = mat->textureIds.empty()   ? HE::UUID{}    : mat->textureIds[0];
+		const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
+		if (const TextureAsset* tex = m_contentManager->resolveTextureRef(texId0, texPath0);
+		    tex && !tex->data.empty() && tex->channels == 4)
 		{
-			const HE::UUID texId = m_contentManager->loadAsset(mat->texturePaths[0]);
-			if (const TextureAsset* tex = m_contentManager->getTexture(texId);
-			    tex && !tex->data.empty() && tex->channels == 4)
-			{
-				MTLTextureDescriptor* desc = [MTLTextureDescriptor
-					texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
-					                             width:tex->width
-					                            height:tex->height
-					                         mipmapped:NO];
-				desc.usage       = MTLTextureUsageShaderRead;
-				desc.storageMode = MTLStorageModeShared;
-				id<MTLTexture> texture = [device newTextureWithDescriptor:desc];
-				[texture replaceRegion:MTLRegionMake2D(0, 0, tex->width, tex->height)
-				           mipmapLevel:0
-				             withBytes:tex->data.data()
-				           bytesPerRow:tex->width * 4];
-				mesh.texture = (void*)CFBridgingRetain(texture);
-			}
+			MTLTextureDescriptor* desc = [MTLTextureDescriptor
+				texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+				                             width:tex->width
+				                            height:tex->height
+				                         mipmapped:NO];
+			desc.usage       = MTLTextureUsageShaderRead;
+			desc.storageMode = MTLStorageModeShared;
+			id<MTLTexture> texture = [device newTextureWithDescriptor:desc];
+			[texture replaceRegion:MTLRegionMake2D(0, 0, tex->width, tex->height)
+			           mipmapLevel:0
+			             withBytes:tex->data.data()
+			           bytesPerRow:tex->width * 4];
+			mesh.texture = (void*)CFBridgingRetain(texture);
 		}
 	}
 
@@ -3331,10 +3326,10 @@ bool MetalRenderer::ResolveMaterialTexture(const HE::UUID& materialId, void*& ou
 		return false; // not loaded yet — retry next frame without caching
 
 	void* retained = nullptr;
-	if (!mat->texturePaths.empty())
 	{
-		const HE::UUID texId = m_contentManager->loadAsset(mat->texturePaths[0]);
-		if (const TextureAsset* tex = m_contentManager->getTexture(texId);
+		const HE::UUID    texId0   = mat->textureIds.empty()   ? HE::UUID{}    : mat->textureIds[0];
+		const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
+		if (const TextureAsset* tex = m_contentManager->resolveTextureRef(texId0, texPath0);
 		    tex && !tex->data.empty() && tex->channels == 4)
 		{
 			id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;

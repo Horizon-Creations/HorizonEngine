@@ -50,6 +50,16 @@ public:
 	const AnimationClipAsset*  getAnimationClip(HE::UUID id) const;
 	const PropertyAnimClipAsset* getPropertyAnimClip(HE::UUID id) const;
 
+	// ── Dual-mode reference resolution (used by the renderer backends) ─────────
+	// Resolve an asset→asset reference that carries a pack-time baked UUID and/or
+	// an editor path. Packed builds have the UUID (path strings are dropped at pack
+	// time); loose editor content has only the path. Prefers the UUID: ensures the
+	// asset is resident (on-demand from a mounted pak — usually a no-op because the
+	// streaming closure already loaded it) and returns it. Falls back to the path
+	// via loadAsset(). Returns nullptr when neither resolves. MAIN-THREAD ONLY.
+	const MaterialAsset* resolveMaterialRef(HE::UUID bakedId, const std::string& path);
+	const TextureAsset*  resolveTextureRef (HE::UUID bakedId, const std::string& path);
+
 	// Mutable access to a loaded material, for in-editor editing. Edits are
 	// visible immediately to any renderer sharing this manager; persist them to
 	// disk with saveAsset(). Returns nullptr when the UUID is not a material.
