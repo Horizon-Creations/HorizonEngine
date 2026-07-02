@@ -5,8 +5,11 @@
 #include "../SlotMap.h"
 #include "Assets.h"
 #include "ContentManager/DefaultAssets.h"
+#include <array>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <queue>
 #include <string>
@@ -17,13 +20,16 @@
 // Forward-declares
 template<typename T> class AssetRef;
 namespace HAsset { class Reader; }
+class HpakReader;
 
 class HE_API ContentManager
 {
 public:
-	ContentManager()                          { initDefaultAssets(); }
-	ContentManager(std::string contentPath) : m_contentRoot(std::move(contentPath)) { initDefaultAssets(); }
-	~ContentManager() = default;
+	// Defined in the .cpp: ContentManager owns std::unique_ptr<HpakReader> mounts,
+	// so its special members must be instantiated where HpakReader is complete.
+	ContentManager();
+	explicit ContentManager(std::string contentPath);
+	~ContentManager();
 
 	HE::UUID loadAsset(const std::string& relativePath);
 	bool unloadAsset(HE::UUID id);
@@ -89,6 +95,23 @@ public:
 	// parse failures are silently skipped.
 	bool loadPak(const std::string& path, const uint8_t key[32] = nullptr);
 
+	// ── On-demand pak mounting (streaming) ─────────────────────────────────────
+	// Mount a .hpak WITHOUT parsing its entries: the archive is kept open and a
+	// UUID→entry residency index is built, so assets load lazily on first access
+	// (acquireXxx / ensureResident) instead of all up front. Mounting is an overlay
+	// stack — a later mount SHADOWS an earlier one for the same UUID (patch/DLC/mod
+	// semantics) and contributes new UUIDs as additions. Pass a 32-byte key for an
+	// encrypted pak. Returns true when the archive opened.
+	bool mountPak(const std::string& path, const uint8_t key[32] = nullptr);
+
+	// Ensure the asset is resident, loading it from the highest-priority mount that
+	// provides it if necessary. MAIN-THREAD ONLY (mutates the SlotMaps — never call
+	// during rendering). Returns true if the asset is resident afterwards.
+	bool ensureResident(HE::UUID id);
+
+	// Number of currently mounted archives.
+	size_t mountedPakCount() const { return m_mounts.size(); }
+
 	// Parse a raw .hasset blob from memory and register it by its embedded UUID.
 	// Returns the UUID on success, an empty UUID on parse failure.
 	HE::UUID loadAssetFromMemory(const std::vector<uint8_t>& hassetData);
@@ -102,10 +125,30 @@ public:
 	// should use pollAsyncResults' return value or check isLoaded themselves).
 	void     loadAssetAsync(const std::string& relativePath,
 	                        std::function<void(HE::UUID)> callback = {});
+	// Async-load an asset by UUID from a mounted pak (see mountPak): the worker
+	// reads + decodes the entry off-thread, pollAsyncResults() registers it on the
+	// main thread. Fires the callback immediately if already resident; the callback
+	// gets an empty UUID if the id is in no mount. Duplicate in-flight requests for
+	// the same UUID are coalesced.
+	void     loadAssetAsync(HE::UUID id, std::function<void(HE::UUID)> callback = {});
+	// Kick off async background loads for every mounted-but-not-yet-resident asset
+	// (stream a whole pak without blocking startup). Drain via pollAsyncResults().
+	// UUIDs in `exclude` are skipped (e.g. the packed startup scene, which is not a
+	// parseable asset). Returns the number of load jobs submitted.
+	size_t   streamMountedAssets(const std::unordered_set<HE::UUID>& exclude = {});
+
+	// Read the raw (decoded) bytes of a mounted entry WITHOUT parsing/registering
+	// it as an asset — for non-asset payloads packed into the .hpak, e.g. the
+	// binary startup scene. Empty vector if the UUID is in no mount or read fails.
+	std::vector<uint8_t> readMountedEntry(HE::UUID id);
 	// Drain completed async jobs and register each asset + fire callbacks.
-	// Call once per frame from the main/game thread.
+	// Call once per frame from the main/game thread. Registration (parse + insert)
+	// runs here on the main thread, so `maxRegistrations` caps how many assets are
+	// processed per call — pass a small budget while streaming so a burst of
+	// simultaneously-finished loads is spread across frames instead of freezing one.
+	// The rest stay queued for the next call. Default: unlimited (drain everything).
 	// Returns the UUIDs of assets registered this call.
-	std::vector<HE::UUID> pollAsyncResults();
+	std::vector<HE::UUID> pollAsyncResults(size_t maxRegistrations = SIZE_MAX);
 	// True while a background job for this relative path is in flight.
 	bool isAsyncPending(const std::string& relativePath) const;
 
@@ -193,6 +236,16 @@ private:
 	SlotMap<AnimationClipAsset>      m_animClipAssets;
 	SlotMap<PropertyAnimClipAsset>   m_propAnimClipAssets;
 
+	// ── Mounted paks (on-demand streaming) ─────────────────────────────────────
+	struct MountedPak {
+		std::unique_ptr<HpakReader> reader;   // main-thread synchronous reads (ensureResident)
+		std::string                 path;     // reopened per async job (worker-thread reads)
+		std::array<uint8_t, 32>     key{};
+		bool                        encrypted = false;
+	};
+	std::vector<MountedPak>                       m_mounts;        // overlay stack (later = higher priority)
+	std::unordered_map<HE::UUID, size_t>          m_pakResidency;  // UUID → index into m_mounts
+
 	std::unordered_map<HE::UUID, SlotHandle>                              m_handleToUUID;
 	std::unordered_map<HE::UUID, HE::AssetType>                          m_assetTypeIndex; // mirrors m_handleToUUID with type info
 	std::unordered_map<std::string, HE::UUID>                            m_pathToUUID;
@@ -265,13 +318,15 @@ private:
 };
 
 // Inline definitions of acquireXxx — placed here so AssetRef<T> is complete.
-inline AssetRef<StaticMeshAsset>    ContentManager::acquireStaticMesh(HE::UUID id)    { return { this, id, getStaticMesh(id) }; }
-inline AssetRef<SkeletalMeshAsset>  ContentManager::acquireSkeletalMesh(HE::UUID id)  { return { this, id, getSkeletalMesh(id) }; }
-inline AssetRef<TextureAsset>       ContentManager::acquireTexture(HE::UUID id)       { return { this, id, getTexture(id) }; }
-inline AssetRef<MaterialAsset>      ContentManager::acquireMaterial(HE::UUID id)      { return { this, id, getMaterial(id) }; }
-inline AssetRef<AudioAsset>         ContentManager::acquireAudio(HE::UUID id)         { return { this, id, getAudio(id) }; }
-inline AssetRef<ScriptAsset>        ContentManager::acquireScript(HE::UUID id)        { return { this, id, getScript(id) }; }
-inline AssetRef<ShaderAsset>        ContentManager::acquireShader(HE::UUID id)        { return { this, id, getShader(id) }; }
-inline AssetRef<PrefabAsset>        ContentManager::acquirePrefab(HE::UUID id)        { return { this, id, getPrefab(id) }; }
-inline AssetRef<AnimationClipAsset>      ContentManager::acquireAnimationClip(HE::UUID id)     { return { this, id, getAnimationClip(id) }; }
-inline AssetRef<PropertyAnimClipAsset>   ContentManager::acquirePropertyAnimClip(HE::UUID id)  { return { this, id, getPropertyAnimClip(id) }; }
+// Each ensures the asset is resident first (loading it on demand from a mounted
+// pak if needed), then pins it. Safe on the main thread; do not call while drawing.
+inline AssetRef<StaticMeshAsset>    ContentManager::acquireStaticMesh(HE::UUID id)    { ensureResident(id); return { this, id, getStaticMesh(id) }; }
+inline AssetRef<SkeletalMeshAsset>  ContentManager::acquireSkeletalMesh(HE::UUID id)  { ensureResident(id); return { this, id, getSkeletalMesh(id) }; }
+inline AssetRef<TextureAsset>       ContentManager::acquireTexture(HE::UUID id)       { ensureResident(id); return { this, id, getTexture(id) }; }
+inline AssetRef<MaterialAsset>      ContentManager::acquireMaterial(HE::UUID id)      { ensureResident(id); return { this, id, getMaterial(id) }; }
+inline AssetRef<AudioAsset>         ContentManager::acquireAudio(HE::UUID id)         { ensureResident(id); return { this, id, getAudio(id) }; }
+inline AssetRef<ScriptAsset>        ContentManager::acquireScript(HE::UUID id)        { ensureResident(id); return { this, id, getScript(id) }; }
+inline AssetRef<ShaderAsset>        ContentManager::acquireShader(HE::UUID id)        { ensureResident(id); return { this, id, getShader(id) }; }
+inline AssetRef<PrefabAsset>        ContentManager::acquirePrefab(HE::UUID id)        { ensureResident(id); return { this, id, getPrefab(id) }; }
+inline AssetRef<AnimationClipAsset>      ContentManager::acquireAnimationClip(HE::UUID id)     { ensureResident(id); return { this, id, getAnimationClip(id) }; }
+inline AssetRef<PropertyAnimClipAsset>   ContentManager::acquirePropertyAnimClip(HE::UUID id)  { ensureResident(id); return { this, id, getPropertyAnimClip(id) }; }

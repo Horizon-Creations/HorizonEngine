@@ -9,7 +9,10 @@
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/EnvironmentComponent.h>
+#include <Types/UUID.h>
 #include <cmath>
+#include <cstring>
+#include <unordered_set>
 #include <SDL3/SDL.h>
 #include <glm/glm.hpp>
 #include <filesystem>
@@ -61,18 +64,57 @@ void GameApplication::OnInit()
 	contentManager().setContentRoot((exeDir / "Content").string());
 
 	const std::string pakPath = (exeDir / m_config.hpakFilename).string();
-	if (contentManager().loadPak(pakPath))
-		Logger::Log(Logger::LogLevel::Info, ("GameApplication: loaded " + m_config.hpakFilename).c_str());
+	// Pass the AES key for an encrypted pak (obfuscation key shipped in the hcfg);
+	// nullptr for an unencrypted pak. Without this an encrypted pak cannot load.
+	const uint8_t* pakKey = m_config.encrypted ? m_config.encKey : nullptr;
+	// Mount (not eager-load): the archive is opened + indexed, then its assets are
+	// streamed in on background workers instead of decompressing the whole pak
+	// synchronously at startup. pollAsyncResults() in OnRender registers them on
+	// the main thread as they arrive; the renderer skips not-yet-resident assets,
+	// so the scene pops in over the first frames. Mounting also enables overlay
+	// paks (patch/DLC/mods) later.
+	// Reconstruct the packed-scene UUID (if any) so we can both read it and keep
+	// it out of the asset stream (it is CBOR scene data, not a parseable .hasset).
+	HE::UUID sceneUuid{};
+	if (m_config.hasPackedScene)
+	{
+		std::memcpy(&sceneUuid.hi, m_config.startupSceneUuid,     8);
+		std::memcpy(&sceneUuid.lo, m_config.startupSceneUuid + 8, 8);
+	}
+
+	if (contentManager().mountPak(pakPath, pakKey))
+	{
+		std::unordered_set<HE::UUID> exclude;
+		if (m_config.hasPackedScene) exclude.insert(sceneUuid);
+		const size_t jobs = contentManager().streamMountedAssets(exclude);
+		Logger::Log(Logger::LogLevel::Info,
+			("GameApplication: mounted " + m_config.hpakFilename +
+			 ", streaming " + std::to_string(jobs) + " assets").c_str());
+	}
 	else
 		Logger::Log(Logger::LogLevel::Warning, ("GameApplication: pak not found: " + pakPath).c_str());
 
 	// Load the startup scene into a world and hand it to the renderer. The base
 	// Application renders m_world each frame; OnRender ticks its gameplay systems.
 	m_world = std::make_unique<HorizonWorld>();
-	if (!m_config.mainSceneName.empty())
+	SceneSerializer serializer;
+	bool sceneLoaded = false;
+	if (m_config.hasPackedScene)
 	{
+		// Preferred: binary (CBOR) scene packed into the .hpak.
+		const auto sceneBytes = contentManager().readMountedEntry(sceneUuid);
+		if (!sceneBytes.empty() && serializer.loadFromMemory(*m_world, sceneBytes))
+		{
+			sceneLoaded = true;
+			Logger::Log(Logger::LogLevel::Info, "GameApplication: loaded packed startup scene");
+		}
+		else
+			Logger::Log(Logger::LogLevel::Warning, "GameApplication: failed to load packed startup scene");
+	}
+	if (!sceneLoaded && !m_config.mainSceneName.empty())
+	{
+		// Fallback: loose .hescene (JSON) next to the executable.
 		const std::filesystem::path scenePath = exeDir / m_config.mainSceneName;
-		SceneSerializer serializer;
 		if (serializer.load(*m_world, scenePath, SerializeFormat::JSON))
 			Logger::Log(Logger::LogLevel::Info, ("GameApplication: loaded scene " + m_config.mainSceneName).c_str());
 		else
@@ -83,6 +125,13 @@ void GameApplication::OnInit()
 
 void GameApplication::OnRender(float deltaTime)
 {
+	// Register assets that finished streaming since last frame (main-thread insert —
+	// safe point for the SlotMaps, never during draw). Budgeted so a burst of
+	// simultaneously-finished loads is spread across frames instead of freezing one;
+	// the rest stay queued for the next frame. Cheap no-op once fully streamed in.
+	constexpr size_t kStreamRegistrationsPerFrame = 16;
+	contentManager().pollAsyncResults(kStreamRegistrationsPerFrame);
+
 	// Tick the shared gameplay/visual systems (weather, animation, particles, …) so a
 	// shipped game animates exactly like the editor preview. Feed the active scene
 	// camera's world position so LOD + precipitation follow the player.

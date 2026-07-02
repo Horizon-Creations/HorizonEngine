@@ -1,22 +1,20 @@
 #include "doctest.h"
 #include <Hpak/HpakWriter.h>
 #include <Hpak/HpakReader.h>
+#include <Hpak/HpakFormat.h>
 #include <Hpak/KeyDerivation.h>
 #include <ContentManager/HAsset.h>
 #include <ContentManager/ContentManager.h>
+#include <ContentManager/Assets.h>
+#include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/SceneSerializer.h>
+#include <HorizonScene/Components/TransformComponent.h>
+#include <array>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <thread>
 #include <cstring>
-
-// Detect whether the test binary was built with LZ4 support.
-// We check the kFlagCompressed constant — it's always defined,
-// but compression only works at runtime when HE_HAVE_LZ4 is set.
-// Test macros guard accordingly so CI without lz4 still passes.
-#ifdef HE_HAVE_LZ4
-#  define HE_LZ4_AVAILABLE 1
-#else
-#  define HE_LZ4_AVAILABLE 0
-#endif
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -50,7 +48,25 @@ static std::vector<uint8_t> makeMaterialBlob(const HE::UUID& id,
     return w.toBytes(static_cast<uint16_t>(HE::AssetType::Material));
 }
 
-// ─── Tests ───────────────────────────────────────────────────────────────────
+// Flip one byte at `offset` in a file (corruption injection).
+static void flipByteAt(const std::filesystem::path& p, std::streamoff offset)
+{
+    std::fstream f(p, std::ios::binary | std::ios::in | std::ios::out);
+    f.seekg(offset); char c; f.read(&c, 1);
+    c = static_cast<char>(c ^ 0xFF);
+    f.seekp(offset); f.write(&c, 1);
+}
+
+// ─── Format layout ─────────────────────────────────────────────────────────────
+
+TEST_CASE("hpak v2 struct sizes are fixed")
+{
+    CHECK(sizeof(Hpak::FileHeader) == 64);
+    CHECK(sizeof(Hpak::EntryDesc)  == 56);
+    CHECK(Hpak::k_version == 2);
+}
+
+// ─── Round-trip basics ─────────────────────────────────────────────────────────
 
 TEST_CASE("HpakWriter/HpakReader round-trip single entry")
 {
@@ -74,17 +90,20 @@ TEST_CASE("HpakWriter/HpakReader round-trip single entry")
     std::filesystem::remove(tmp);
 }
 
-TEST_CASE("HpakWriter/HpakReader multiple entries data integrity")
+TEST_CASE("HpakWriter/HpakReader multiple entries, sorted TOC + binary search")
 {
-    const HE::UUID id1{1,1}, id2{2,2}, id3{3,3};
+    // Insert deliberately out of UUID order to exercise the sort + binary search.
+    const HE::UUID id1{3,3}, id2{1,1}, id3{2,2}, id4{1,5};
     const auto b1 = makeMaterialBlob(id1, "mat1", 1.f,0.f,0.f);
     const auto b2 = makeMaterialBlob(id2, "mat2", 0.f,1.f,0.f);
     const auto b3 = makeMaterialBlob(id3, "mat3", 0.f,0.f,1.f);
+    const auto b4 = makeMaterialBlob(id4, "mat4", 0.2f,0.3f,0.4f);
 
     HpakWriter packer;
     packer.addEntry(id1, b1);
     packer.addEntry(id2, b2);
     packer.addEntry(id3, b3);
+    packer.addEntry(id4, b4);
 
     auto tmp = std::filesystem::temp_directory_path() / "he_test_multi.hpak";
     REQUIRE(packer.write(tmp.string()));
@@ -93,11 +112,19 @@ TEST_CASE("HpakWriter/HpakReader multiple entries data integrity")
     REQUIRE(reader.open(tmp.string()));
 
     const auto ids = reader.enumerate();
-    REQUIRE(ids.size() == 3);
+    REQUIRE(ids.size() == 4);
+    // enumerate() returns stored order → must be ascending by (hi,lo)
+    for (size_t i = 1; i < ids.size(); ++i)
+    {
+        const bool ordered = (ids[i-1].hi < ids[i].hi) ||
+                             (ids[i-1].hi == ids[i].hi && ids[i-1].lo <= ids[i].lo);
+        CHECK(ordered);
+    }
 
     CHECK(reader.readEntry(id1) == b1);
     CHECK(reader.readEntry(id2) == b2);
     CHECK(reader.readEntry(id3) == b3);
+    CHECK(reader.readEntry(id4) == b4);
 
     std::filesystem::remove(tmp);
 }
@@ -105,10 +132,10 @@ TEST_CASE("HpakWriter/HpakReader multiple entries data integrity")
 TEST_CASE("HpakReader returns empty for missing entry")
 {
     const HE::UUID id{42,42};
-    const std::vector<uint8_t> data = {1,2,3};
+    const auto blob = makeMaterialBlob(id, "present");
 
     HpakWriter packer;
-    packer.addEntry(id, data);
+    packer.addEntry(id, blob);
 
     auto tmp = std::filesystem::temp_directory_path() / "he_test_missing.hpak";
     REQUIRE(packer.write(tmp.string()));
@@ -136,44 +163,227 @@ TEST_CASE("Empty HpakWriter writes and reads back correctly")
     std::filesystem::remove(tmp);
 }
 
-TEST_CASE("HpakWriter encryption round-trip")
+// ─── Codec matrix ────────────────────────────────────────────────────────────
+
+TEST_CASE("Codec round-trip: store / lz4 / zstd all reproduce the input")
+{
+    const HE::UUID id{0xC0DEC0DEC0DEC0DEULL, 0x1111222233334444ULL};
+    // Highly compressible + structured payload so compression is exercised.
+    std::vector<uint8_t> data(8192);
+    for (size_t i = 0; i < data.size(); ++i)
+        data[i] = static_cast<uint8_t>((i / 64) & 0xFF);
+
+    const Hpak::Codec codecs[] = { Hpak::Codec::Store, Hpak::Codec::LZ4, Hpak::Codec::Zstd };
+    for (Hpak::Codec codec : codecs)
+    {
+        Hpak::PackSettings s; s.codec = codec;
+        HpakWriter packer;
+        packer.addEntry(id, data, s);
+
+        auto tmp = std::filesystem::temp_directory_path() / "he_test_codec.hpak";
+        REQUIRE(packer.write(tmp.string()));
+
+        HpakReader reader;
+        REQUIRE(reader.open(tmp.string()));
+        const auto out = reader.readEntry(id);
+        CHECK(out == data);   // round-trips regardless of codec availability
+        std::filesystem::remove(tmp);
+    }
+}
+
+#ifdef HE_HAVE_LZ4
+TEST_CASE("LZ4 codec actually shrinks compressible data")
+{
+    const HE::UUID id{0xAAAA,0xBBBB};
+    std::vector<uint8_t> data(16384, 0x42);
+    Hpak::PackSettings s; s.codec = Hpak::Codec::LZ4;
+    HpakWriter packer; packer.addEntry(id, data, s);
+
+    auto tmp = std::filesystem::temp_directory_path() / "he_test_lz4.hpak";
+    REQUIRE(packer.write(tmp.string()));
+    const auto fileSize = std::filesystem::file_size(tmp);
+    CHECK(fileSize < sizeof(Hpak::FileHeader) + sizeof(Hpak::EntryDesc) + data.size());
+
+    HpakReader reader; REQUIRE(reader.open(tmp.string()));
+    CHECK(reader.readEntry(id) == data);
+    std::filesystem::remove(tmp);
+}
+#endif
+
+#ifdef HE_HAVE_ZSTD
+TEST_CASE("zstd codec actually shrinks compressible data")
+{
+    const HE::UUID id{0xCCCC,0xDDDD};
+    std::vector<uint8_t> data(16384, 0x37);
+    Hpak::PackSettings s; s.codec = Hpak::Codec::Zstd;
+    HpakWriter packer; packer.addEntry(id, data, s);
+
+    auto tmp = std::filesystem::temp_directory_path() / "he_test_zstd.hpak";
+    REQUIRE(packer.write(tmp.string()));
+    const auto fileSize = std::filesystem::file_size(tmp);
+    CHECK(fileSize < sizeof(Hpak::FileHeader) + sizeof(Hpak::EntryDesc) + data.size());
+
+    HpakReader reader; REQUIRE(reader.open(tmp.string()));
+    CHECK(reader.readEntry(id) == data);
+    std::filesystem::remove(tmp);
+}
+#endif
+
+// ─── Encryption (AES-256-GCM, Phase B) ─────────────────────────────────────────
+
+#ifdef HE_HAVE_OPENSSL
+TEST_CASE("AES-256-GCM round-trip (store + encrypt)")
 {
     const HE::UUID id{0xABCD,0xEF01};
     const std::vector<uint8_t> data = {10,20,30,40,50,60,70,80};
 
-    Hpak::PackSettings settings;
-    settings.encrypt = true;
-    for (int i = 0; i < 32; ++i) settings.key[i] = static_cast<uint8_t>(i + 1);
+    Hpak::PackSettings s;
+    s.encrypt = true;
+    for (int i = 0; i < 32; ++i) s.key[i] = static_cast<uint8_t>(i + 1);
 
-    HpakWriter packer;
-    packer.addEntry(id, data, settings);
-
+    HpakWriter packer; packer.addEntry(id, data, s);
     auto tmp = std::filesystem::temp_directory_path() / "he_test_enc.hpak";
     REQUIRE(packer.write(tmp.string()));
 
-    HpakReader reader;
-    REQUIRE(reader.open(tmp.string()));
+    HpakReader reader; REQUIRE(reader.open(tmp.string()));
+    CHECK(reader.readEntry(id).empty());                 // no key → cannot decrypt
 
-    // Without key returns XOR-scrambled bytes
-    const auto garbled = reader.readEntry(id);
-    CHECK(garbled != data);
-    CHECK(garbled.size() == data.size());
+    uint8_t wrong[32]; for (int i=0;i<32;++i) wrong[i] = static_cast<uint8_t>(i + 2);
+    CHECK(reader.readEntry(id, wrong).empty());          // wrong key → GCM tag mismatch
 
-    // With correct key returns original
-    const auto decrypted = reader.readEntry(id, settings.key);
+    const auto decrypted = reader.readEntry(id, s.key);  // correct key
     CHECK(decrypted == data);
 
     std::filesystem::remove(tmp);
 }
 
+TEST_CASE("AES-256-GCM uses a unique nonce per entry")
+{
+    // Two entries with identical plaintext + key must produce different stored
+    // bytes (fresh random nonce each) — the property XOR lacked.
+    const HE::UUID id1{1,1}, id2{2,2};
+    const std::vector<uint8_t> data(64, 0x5A);
+    Hpak::PackSettings s; s.encrypt = true;
+    for (int i = 0; i < 32; ++i) s.key[i] = static_cast<uint8_t>(i + 5);
+
+    HpakWriter packer; packer.addEntry(id1, data, s); packer.addEntry(id2, data, s);
+    auto tmp = std::filesystem::temp_directory_path() / "he_test_nonce.hpak";
+    REQUIRE(packer.write(tmp.string()));
+
+    // Read the two data blocks straight off disk and confirm they differ.
+    std::ifstream f(tmp, std::ios::binary);
+    std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    const size_t dataStart = sizeof(Hpak::FileHeader) + 2 * sizeof(Hpak::EntryDesc);
+    const size_t blockLen  = data.size() + 16; // ciphertext + tag
+    REQUIRE(bytes.size() >= dataStart + 2 * blockLen);
+    const std::vector<uint8_t> b1(bytes.begin()+dataStart, bytes.begin()+dataStart+blockLen);
+    const std::vector<uint8_t> b2(bytes.begin()+dataStart+blockLen, bytes.begin()+dataStart+2*blockLen);
+    CHECK(b1 != b2);
+
+    HpakReader reader; REQUIRE(reader.open(tmp.string()));
+    CHECK(reader.readEntry(id1, s.key) == data);
+    CHECK(reader.readEntry(id2, s.key) == data);
+    std::filesystem::remove(tmp);
+}
+
+TEST_CASE("Compression + encryption round-trip")
+{
+    const HE::UUID id{0xE0E0,0xF0F0};
+    std::vector<uint8_t> data(2048);
+    for (size_t i = 0; i < data.size(); ++i) data[i] = static_cast<uint8_t>(i & 0xFF);
+
+    Hpak::PackSettings s;
+    s.codec   = Hpak::Codec::Zstd;
+    s.encrypt = true;
+    for (int i = 0; i < 32; ++i) s.key[i] = static_cast<uint8_t>(i + 7);
+
+    HpakWriter packer; packer.addEntry(id, data, s);
+    auto tmp = std::filesystem::temp_directory_path() / "he_test_encomp.hpak";
+    REQUIRE(packer.write(tmp.string()));
+
+    HpakReader reader; REQUIRE(reader.open(tmp.string()));
+    CHECK(reader.readEntry(id).empty());                 // no key → cannot decode
+    const auto out = reader.readEntry(id, s.key);        // key → decrypt then decompress
+    REQUIRE(out.size() == data.size());
+    CHECK(out == data);
+
+    std::filesystem::remove(tmp);
+}
+#endif // HE_HAVE_OPENSSL
+
+// ─── Integrity ──────────────────────────────────────────────────────────────
+
+TEST_CASE("Corrupt TOC byte → open() fails (tocHash mismatch)")
+{
+    const HE::UUID id{7,7};
+    const auto blob = makeMaterialBlob(id, "toc_guard");
+    HpakWriter packer; packer.addEntry(id, blob);
+
+    auto tmp = std::filesystem::temp_directory_path() / "he_test_toc_corrupt.hpak";
+    REQUIRE(packer.write(tmp.string()));
+
+    // Flip a byte inside the first EntryDesc (TOC region starts right after the 64B header)
+    flipByteAt(tmp, static_cast<std::streamoff>(sizeof(Hpak::FileHeader)));
+
+    HpakReader reader;
+    CHECK(!reader.open(tmp.string()));  // TOC hash no longer matches
+
+    std::filesystem::remove(tmp);
+}
+
+TEST_CASE("Corrupt data byte → readEntry() returns empty (contentHash mismatch)")
+{
+    const HE::UUID id{8,8};
+    const auto blob = makeMaterialBlob(id, "data_guard");
+    HpakWriter packer; packer.addEntry(id, blob);
+
+    auto tmp = std::filesystem::temp_directory_path() / "he_test_data_corrupt.hpak";
+    REQUIRE(packer.write(tmp.string()));
+
+    // Flip a byte in the data region (immediately after header + 1 EntryDesc)
+    const auto dataStart = static_cast<std::streamoff>(sizeof(Hpak::FileHeader) + sizeof(Hpak::EntryDesc));
+    flipByteAt(tmp, dataStart);
+
+    HpakReader reader;
+    REQUIRE(reader.open(tmp.string()));      // TOC still valid
+    CHECK(reader.readEntry(id).empty());     // stored bytes fail their content hash
+
+    std::filesystem::remove(tmp);
+}
+
+TEST_CASE("A failed read does not poison subsequent reads on the same reader")
+{
+    // Regression: the reader holds one persistent file handle. A failed read
+    // leaves a sticky failbit; if the entry guard is checked before clear(), one
+    // truncated/corrupt entry disables every later read on that reader instance.
+    const HE::UUID lo{1,1}, hi{2,2};              // hi sorts last → highest offset
+    const auto bLo = makeMaterialBlob(lo, "lo");
+    const auto bHi = makeMaterialBlob(hi, "hi");
+    HpakWriter packer; packer.addEntry(lo, bLo); packer.addEntry(hi, bHi);
+
+    auto tmp = std::filesystem::temp_directory_path() / "he_test_poison.hpak";
+    REQUIRE(packer.write(tmp.string()));
+
+    // Cut the tail so the last (higher-UUID) entry is short; the lower one stays whole.
+    const auto full = std::filesystem::file_size(tmp);
+    std::filesystem::resize_file(tmp, full - 16);
+
+    HpakReader reader;
+    REQUIRE(reader.open(tmp.string()));      // header + TOC intact
+    CHECK(reader.readEntry(hi).empty());     // truncated entry → short read fails
+    CHECK(reader.readEntry(lo) == bLo);      // MUST still succeed (no failbit poisoning)
+
+    std::filesystem::remove(tmp);
+}
+
+// ─── KeyDerivation (unchanged in Phase A) ──────────────────────────────────────
+
 TEST_CASE("KeyDerivation is deterministic")
 {
     const uint8_t salt[16] = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16};
     uint8_t key1[32] = {}, key2[32] = {};
-
     KeyDerivation::derive("my_secret_passphrase", salt, key1);
     KeyDerivation::derive("my_secret_passphrase", salt, key2);
-
     CHECK(std::memcmp(key1, key2, 32) == 0);
 }
 
@@ -181,215 +391,404 @@ TEST_CASE("KeyDerivation different secrets yield different keys")
 {
     const uint8_t salt[16] = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16};
     uint8_t key1[32] = {}, key2[32] = {};
-
     KeyDerivation::derive("secret_alpha", salt, key1);
     KeyDerivation::derive("secret_beta",  salt, key2);
-
     CHECK(std::memcmp(key1, key2, 32) != 0);
-}
-
-TEST_CASE("KeyDerivation different salts yield different keys")
-{
-    const uint8_t salt1[16] = {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1};
-    const uint8_t salt2[16] = {2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2};
-    uint8_t key1[32] = {}, key2[32] = {};
-
-    KeyDerivation::derive("same_secret", salt1, key1);
-    KeyDerivation::derive("same_secret", salt2, key2);
-
-    CHECK(std::memcmp(key1, key2, 32) != 0);
-}
-
-TEST_CASE("ContentManager::loadPak registers assets")
-{
-    const HE::UUID matId{0xCAFEBABE11111111ULL, 0x2222222222222222ULL};
-    const auto blob = makeMaterialBlob(matId, "pak_mat", 0.5f, 0.7f, 0.9f);
-
-    HpakWriter packer;
-    packer.addEntry(matId, blob);
-
-    auto tmp = std::filesystem::temp_directory_path() / "he_test_cm_pak.hpak";
-    REQUIRE(packer.write(tmp.string()));
-
-    ContentManager cm;
-    REQUIRE(cm.loadPak(tmp.string()));
-    REQUIRE(!cm.loadPak("nonexistent.hpak")); // bad path returns false
-
-    const MaterialAsset* mat = cm.getMaterial(matId);
-    REQUIRE(mat != nullptr);
-    CHECK(mat->baseColor[0] == doctest::Approx(0.5f));
-    CHECK(mat->baseColor[1] == doctest::Approx(0.7f));
-    CHECK(mat->baseColor[2] == doctest::Approx(0.9f));
-
-    std::filesystem::remove(tmp);
-}
-
-TEST_CASE("ContentManager::loadPak skips already-loaded UUIDs")
-{
-    const HE::UUID matId{0xBEEFCAFE,0xDEAD1234ULL};
-    const auto blob = makeMaterialBlob(matId, "dup_mat");
-
-    HpakWriter packer;
-    packer.addEntry(matId, blob);
-
-    auto tmp = std::filesystem::temp_directory_path() / "he_test_cm_skip.hpak";
-    REQUIRE(packer.write(tmp.string()));
-
-    ContentManager cm;
-    cm.loadPak(tmp.string());
-
-    // Loading the same pak again should not fail or duplicate
-    CHECK(cm.loadPak(tmp.string()));
-    CHECK(cm.getMaterial(matId) != nullptr);
-
-    std::filesystem::remove(tmp);
-}
-
-TEST_CASE("HAsset::Writer::toBytes / Reader::openData round-trip")
-{
-    const HE::UUID id{0x1234567890ABCDEFULL, 0xFEDCBA9876543210ULL};
-
-    std::vector<uint8_t> meta;
-    const uint16_t typeVal = static_cast<uint16_t>(HE::AssetType::Material);
-    HAsset::Writer::appendPOD(meta, typeVal);
-    HAsset::Writer::appendPOD(meta, id.hi);
-    HAsset::Writer::appendPOD(meta, id.lo);
-    HAsset::Writer::appendString(meta, "blob_mat");
-    HAsset::Writer::appendString(meta, "mem://blob_mat");
-
-    HAsset::Writer w;
-    w.addChunk(HAsset::CHUNK_META, meta.data(), meta.size());
-
-    const auto bytes = w.toBytes(typeVal);
-    CHECK(!bytes.empty());
-
-    HAsset::Reader r;
-    REQUIRE(r.openData(bytes));
-    CHECK(r.assetType() == typeVal);
-    REQUIRE(r.findChunk(HAsset::CHUNK_META) != nullptr);
 }
 
 TEST_CASE("HpakWriter::addDirectory skips non-.hasset files")
 {
     auto tmpDir = std::filesystem::temp_directory_path() / "he_test_hpak_dir";
+    std::filesystem::remove_all(tmpDir);
     std::filesystem::create_directories(tmpDir);
-
-    // Write a non-.hasset file
     { std::ofstream f(tmpDir / "notes.txt"); f << "not an asset"; }
-    // Write a fake .hasset (no META → skipped)
     { std::ofstream f(tmpDir / "dummy.hasset", std::ios::binary); f << "FAKE"; }
 
     HpakWriter packer;
     const int added = packer.addDirectory(tmpDir);
-    CHECK(added == 0); // fake data has no valid META UUID
-
+    CHECK(added == 0);
     std::filesystem::remove_all(tmpDir);
 }
 
-// ─── LZ4 compression tests ────────────────────────────────────────────────────
+// ─── All asset types round-trip through ContentManager × codec ─────────────────
+//
+// The core guarantee the user asked for: every pak-serializable asset type is
+// encoded into a .hpak and decoded back correctly, under each codec.
 
-TEST_CASE("HpakWriter compression flag: compress=false stores raw data")
+namespace {
+
+struct TypeIds {
+    HE::UUID mesh, skel, tex, mat, scene, script, shader, audio, font, anim;
+};
+
+// Author one asset of every serializable type into `dir` via ContentManager,
+// returning their (minted) UUIDs. Values are distinctive so we can verify them.
+static TypeIds authorAllTypes(const std::filesystem::path& dir)
 {
-    const HE::UUID id{0x1234,0x5678};
-    const std::vector<uint8_t> data(256, 0xAB); // easily compressible
+    ContentManager cm(dir.string());
+    TypeIds ids;
 
-    Hpak::PackSettings settings;
-    settings.compress = false; // explicit off
+    StaticMeshAsset mesh; mesh.type = HE::AssetType::StaticMesh; mesh.name = "mesh"; mesh.path = "mesh.hasset";
+    mesh.vertices = {0.f,0.f,0.f, 1.f,0.f,0.f, 0.f,1.f,0.f};
+    mesh.indices  = {0,1,2};
+    mesh.normals  = {0.f,0.f,1.f, 0.f,0.f,1.f, 0.f,0.f,1.f};
+    mesh.uvs      = {0.f,0.f, 1.f,0.f, 0.f,1.f};
+    REQUIRE(cm.saveAsset(mesh)); ids.mesh = mesh.id;
 
-    HpakWriter packer;
-    packer.addEntry(id, data, settings);
+    SkeletalMeshAsset skel; skel.type = HE::AssetType::SkeletalMesh; skel.name = "skel"; skel.path = "skel.hasset";
+    skel.vertices = {0.f,0.f,0.f, 1.f,0.f,0.f};
+    skel.indices  = {0,1};
+    skel.normals  = {0.f,1.f,0.f, 0.f,1.f,0.f};
+    skel.uvs      = {0.f,0.f, 1.f,1.f};
+    skel.boneIDs  = {0,0,0,0, 1,0,0,0};
+    skel.boneWeights = {1.f,0.f,0.f,0.f, 1.f,0.f,0.f,0.f};
+    { SkeletonJoint j; j.name = "root"; j.parent = -1; skel.skeleton.push_back(j); }
+    REQUIRE(cm.saveAsset(skel)); ids.skel = skel.id;
 
-    auto tmp = std::filesystem::temp_directory_path() / "he_test_nocomp.hpak";
-    REQUIRE(packer.write(tmp.string()));
+    TextureAsset tex; tex.type = HE::AssetType::Texture; tex.name = "tex"; tex.path = "tex.hasset";
+    tex.width = 2; tex.height = 2; tex.channels = 4;
+    tex.data = {255,0,0,255, 0,255,0,255, 0,0,255,255, 255,255,0,255};
+    REQUIRE(cm.saveAsset(tex)); ids.tex = tex.id;
 
-    HpakReader reader;
-    REQUIRE(reader.open(tmp.string()));
-    const auto out = reader.readEntry(id);
-    CHECK(out == data);
+    MaterialAsset mat; mat.type = HE::AssetType::Material; mat.name = "mat"; mat.path = "mat.hasset";
+    mat.shaderPath = "shaders/pbr"; mat.texturePaths = {"a.png","b.png"};
+    mat.baseColor[0]=0.1f; mat.baseColor[1]=0.2f; mat.baseColor[2]=0.3f;
+    mat.metallic=0.4f; mat.roughness=0.6f; mat.opacity=0.8f;
+    REQUIRE(cm.saveAsset(mat)); ids.mat = mat.id;
 
-    std::filesystem::remove(tmp);
+    SceneAsset scene; scene.type = HE::AssetType::Scene; scene.name = "scene"; scene.path = "scene.hasset";
+    scene.objectPaths = {"obj/a","obj/b","obj/c"};
+    REQUIRE(cm.saveAsset(scene)); ids.scene = scene.id;
+
+    ScriptAsset script; script.type = HE::AssetType::Script; script.name = "script"; script.path = "script.hasset";
+    script.sourceCode = "function on_update(dt) end";
+    REQUIRE(cm.saveAsset(script)); ids.script = script.id;
+
+    ShaderAsset shader; shader.type = HE::AssetType::Shader; shader.name = "shader"; shader.path = "shader.hasset";
+    shader.sourceCode = "#version 410\nvoid main(){}";
+    REQUIRE(cm.saveAsset(shader)); ids.shader = shader.id;
+
+    AudioAsset audio; audio.type = HE::AssetType::Audio; audio.name = "audio"; audio.path = "audio.hasset";
+    audio.sampleRate = 44100; audio.channels = 2;
+    audio.audioData = {1,2,3,4,5,6,7,8};
+    REQUIRE(cm.saveAsset(audio)); ids.audio = audio.id;
+
+    FontAsset font; font.type = HE::AssetType::Font; font.name = "font"; font.path = "font.hasset";
+    font.size = 24; font.fontData = {0xAA,0xBB,0xCC,0xDD};
+    REQUIRE(cm.saveAsset(font)); ids.font = font.id;
+
+    AnimationClipAsset anim; anim.type = HE::AssetType::AnimationClip; anim.name = "anim"; anim.path = "anim.hasset";
+    anim.duration = 2.5f;
+    { AnimationChannel ch; ch.jointIndex = 0; ch.path = AnimPathType::Translation;
+      ch.times = {0.f,1.f,2.5f}; ch.values = {0,0,0, 1,0,0, 2,0,0}; anim.channels.push_back(ch); }
+    REQUIRE(cm.saveAsset(anim)); ids.anim = anim.id;
+
+    return ids;
 }
 
-#if HE_LZ4_AVAILABLE
-TEST_CASE("HpakWriter LZ4 compression round-trip")
+static void verifyAllTypes(Hpak::Codec codec)
 {
-    const HE::UUID id{0xC0C0,0xD0D0};
-    // Highly compressible payload (repeated bytes compress very well)
-    std::vector<uint8_t> data(4096, 0x42);
+    auto dir = std::filesystem::temp_directory_path() /
+               ("he_types_" + std::to_string(static_cast<int>(codec)));
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
 
-    Hpak::PackSettings settings;
-    settings.compress = true;
+    const TypeIds ids = authorAllTypes(dir);
 
+    Hpak::PackSettings s; s.codec = codec;
     HpakWriter packer;
-    packer.addEntry(id, data, settings);
+    const int added = packer.addDirectory(dir, s);
+    CHECK(added == 10);
 
-    auto tmp = std::filesystem::temp_directory_path() / "he_test_lz4.hpak";
-    REQUIRE(packer.write(tmp.string()));
+    auto pak = std::filesystem::temp_directory_path() /
+               ("he_types_" + std::to_string(static_cast<int>(codec)) + ".hpak");
+    REQUIRE(packer.write(pak.string()));
 
-    // The on-disk file should be smaller than uncompressed (4096 bytes of 0x42)
-    const auto fileSize = std::filesystem::file_size(tmp);
-    CHECK(fileSize < sizeof(Hpak::FileHeader) + sizeof(Hpak::EntryDesc) + data.size());
+    ContentManager cm;                       // fresh manager (only default assets)
+    REQUIRE(cm.loadPak(pak.string()));
 
-    HpakReader reader;
-    REQUIRE(reader.open(tmp.string()));
-    const auto out = reader.readEntry(id);
-    REQUIRE(out.size() == data.size());
-    CHECK(out == data);
+    // Types with typed getters → verify identity + a representative field.
+    const StaticMeshAsset* m = cm.getStaticMesh(ids.mesh);
+    REQUIRE(m != nullptr);
+    CHECK(m->indices == std::vector<uint32_t>{0,1,2});
+    CHECK(m->vertices.size() == 9);
 
-    std::filesystem::remove(tmp);
+    const SkeletalMeshAsset* sk = cm.getSkeletalMesh(ids.skel);
+    REQUIRE(sk != nullptr);
+    CHECK(sk->boneIDs.size() == 8);
+    REQUIRE(sk->skeleton.size() == 1);
+    CHECK(sk->skeleton[0].name == "root");
+
+    const TextureAsset* t = cm.getTexture(ids.tex);
+    REQUIRE(t != nullptr);
+    CHECK(t->width == 2); CHECK(t->height == 2); CHECK(t->channels == 4);
+    CHECK(t->data.size() == 16);
+
+    const MaterialAsset* mt = cm.getMaterial(ids.mat);
+    REQUIRE(mt != nullptr);
+    CHECK(mt->baseColor[0] == doctest::Approx(0.1f));
+    CHECK(mt->baseColor[2] == doctest::Approx(0.3f));
+    CHECK(mt->texturePaths.size() == 2);
+
+    const ScriptAsset* scr = cm.getScript(ids.script);
+    REQUIRE(scr != nullptr);
+    CHECK(scr->sourceCode == "function on_update(dt) end");
+
+    const ShaderAsset* sh = cm.getShader(ids.shader);
+    REQUIRE(sh != nullptr);
+    CHECK(sh->sourceCode.rfind("#version 410", 0) == 0);
+
+    const AudioAsset* au = cm.getAudio(ids.audio);
+    REQUIRE(au != nullptr);
+    CHECK(au->sampleRate == 44100); CHECK(au->channels == 2);
+    CHECK(au->audioData.size() == 8);
+
+    const AnimationClipAsset* an = cm.getAnimationClip(ids.anim);
+    REQUIRE(an != nullptr);
+    CHECK(an->duration == doctest::Approx(2.5f));
+    REQUIRE(an->channels.size() == 1);
+    CHECK(an->channels[0].times.size() == 3);
+
+    // Types without a typed getter (Scene, Font) → verify presence + type.
+    CHECK(cm.isLoaded(ids.scene));
+    CHECK(cm.assetType(ids.scene) == HE::AssetType::Scene);
+    CHECK(cm.isLoaded(ids.font));
+    CHECK(cm.assetType(ids.font)  == HE::AssetType::Font);
+
+    std::filesystem::remove(pak);
+    std::filesystem::remove_all(dir);
 }
 
-TEST_CASE("HpakWriter LZ4 compression + encryption round-trip")
-{
-    const HE::UUID id{0xE0E0,0xF0F0};
-    std::vector<uint8_t> data(2048);
-    for (size_t i = 0; i < data.size(); ++i) data[i] = static_cast<uint8_t>(i & 0xFF);
+} // namespace
 
-    Hpak::PackSettings settings;
-    settings.compress = true;
-    settings.encrypt  = true;
-    for (int i = 0; i < 32; ++i) settings.key[i] = static_cast<uint8_t>(i + 7);
+TEST_CASE("All asset types round-trip through a Store pak")  { verifyAllTypes(Hpak::Codec::Store); }
+TEST_CASE("All asset types round-trip through an LZ4 pak")   { verifyAllTypes(Hpak::Codec::LZ4);   }
+TEST_CASE("All asset types round-trip through a zstd pak")   { verifyAllTypes(Hpak::Codec::Zstd);  }
+
+#ifdef HE_HAVE_OPENSSL
+TEST_CASE("All asset types round-trip through an encrypted zstd pak")
+{
+    auto dir = std::filesystem::temp_directory_path() / "he_types_enc";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    const TypeIds ids = authorAllTypes(dir);
+
+    Hpak::PackSettings s; s.codec = Hpak::Codec::Zstd; s.encrypt = true;
+    for (int i = 0; i < 32; ++i) s.key[i] = static_cast<uint8_t>(i * 3 + 1);
 
     HpakWriter packer;
-    packer.addEntry(id, data, settings);
+    CHECK(packer.addDirectory(dir, s) == 10);
+    auto pak = std::filesystem::temp_directory_path() / "he_types_enc.hpak";
+    REQUIRE(packer.write(pak.string()));
 
-    auto tmp = std::filesystem::temp_directory_path() / "he_test_lz4enc.hpak";
-    REQUIRE(packer.write(tmp.string()));
+    ContentManager cm;
+    REQUIRE(cm.loadPak(pak.string(), s.key));   // pass the key
+    CHECK(cm.getStaticMesh(ids.mesh) != nullptr);
+    CHECK(cm.getMaterial(ids.mat)    != nullptr);
+    CHECK(cm.getAudio(ids.audio)     != nullptr);
+    CHECK(cm.isLoaded(ids.font));
 
-    HpakReader reader;
-    REQUIRE(reader.open(tmp.string()));
-
-    // Without key: still encrypted → result is not the original
-    const auto garbled = reader.readEntry(id);
-    CHECK(garbled != data);
-
-    // With key: decrypt then decompress → original
-    const auto out = reader.readEntry(id, settings.key);
-    REQUIRE(out.size() == data.size());
-    CHECK(out == data);
-
-    std::filesystem::remove(tmp);
+    std::filesystem::remove(pak);
+    std::filesystem::remove_all(dir);
 }
+#endif // HE_HAVE_OPENSSL
 
-TEST_CASE("HpakWriter: compress=true on already-small data still round-trips")
+// ─── On-demand mounting + overlay ──────────────────────────────────────────────
+
+TEST_CASE("mountPak loads assets on demand, not eagerly")
 {
-    const HE::UUID id{0x1111,0x2222};
-    const std::vector<uint8_t> data = {1, 2, 3, 4, 5}; // may not compress smaller
+    const HE::UUID id{0x0D,0x0E};
+    const auto blob = makeMaterialBlob(id, "ondemand", 0.3f, 0.6f, 0.9f);
+    HpakWriter packer; packer.addEntry(id, blob, {Hpak::Codec::Zstd});
+    auto pak = std::filesystem::temp_directory_path() / "he_mount.hpak";
+    REQUIRE(packer.write(pak.string()));
 
-    Hpak::PackSettings settings;
-    settings.compress = true;
+    ContentManager cm;
+    REQUIRE(cm.mountPak(pak.string()));
+    CHECK(cm.mountedPakCount() == 1);
 
-    HpakWriter packer;
-    packer.addEntry(id, data, settings);
+    // Mounted but NOT parsed yet.
+    CHECK(!cm.isLoaded(id));
+    CHECK(cm.getMaterial(id) == nullptr);
 
-    auto tmp = std::filesystem::temp_directory_path() / "he_test_lz4tiny.hpak";
-    REQUIRE(packer.write(tmp.string()));
+    // acquire triggers the on-demand load; afterwards it is resident.
+    {
+        auto ref = cm.acquireMaterial(id);
+        REQUIRE(ref);
+        CHECK(ref->baseColor[1] == doctest::Approx(0.6f));
+    }
+    CHECK(cm.isLoaded(id));
+    CHECK(cm.getMaterial(id) != nullptr);
 
-    HpakReader reader;
-    REQUIRE(reader.open(tmp.string()));
-    const auto out = reader.readEntry(id);
-    CHECK(out == data);
+    // ensureResident is idempotent and returns false for unknown UUIDs.
+    CHECK(cm.ensureResident(id));
+    CHECK(!cm.ensureResident(HE::UUID{0xDEAD, 0xDEAD}));
 
-    std::filesystem::remove(tmp);
+    std::filesystem::remove(pak);
 }
-#endif // HE_LZ4_AVAILABLE
+
+TEST_CASE("mountPak overlay: later mount shadows earlier by UUID, adds new UUIDs")
+{
+    const HE::UUID shared{0x100, 0x1};   // present in both paks
+    const HE::UUID baseOnly{0x100, 0x2};
+    const HE::UUID modOnly{0x100, 0x3};
+
+    // Base pak: shared (red) + baseOnly.
+    { HpakWriter p;
+      p.addEntry(shared,   makeMaterialBlob(shared,   "base_shared", 1.f, 0.f, 0.f));
+      p.addEntry(baseOnly, makeMaterialBlob(baseOnly, "base_only",   0.f, 0.f, 1.f));
+      REQUIRE(p.write((std::filesystem::temp_directory_path() / "he_base.hpak").string())); }
+    // Mod pak: shared (green, different content) + modOnly.
+    { HpakWriter p;
+      p.addEntry(shared,  makeMaterialBlob(shared,  "mod_shared", 0.f, 1.f, 0.f));
+      p.addEntry(modOnly, makeMaterialBlob(modOnly, "mod_only",   1.f, 1.f, 0.f));
+      REQUIRE(p.write((std::filesystem::temp_directory_path() / "he_mod.hpak").string())); }
+
+    ContentManager cm;
+    REQUIRE(cm.mountPak((std::filesystem::temp_directory_path() / "he_base.hpak").string()));
+    REQUIRE(cm.mountPak((std::filesystem::temp_directory_path() / "he_mod.hpak").string())); // higher priority
+    CHECK(cm.mountedPakCount() == 2);
+
+    // shared resolves to the MOD version (green), not the base (red).
+    { auto ref = cm.acquireMaterial(shared); REQUIRE(ref);
+      CHECK(ref->baseColor[0] == doctest::Approx(0.f));
+      CHECK(ref->baseColor[1] == doctest::Approx(1.f)); }
+    // base-only still resolves; mod-only is an addition.
+    CHECK(cm.ensureResident(baseOnly));
+    CHECK(cm.ensureResident(modOnly));
+    CHECK(cm.getMaterial(baseOnly) != nullptr);
+    CHECK(cm.getMaterial(modOnly)  != nullptr);
+
+    std::filesystem::remove(std::filesystem::temp_directory_path() / "he_base.hpak");
+    std::filesystem::remove(std::filesystem::temp_directory_path() / "he_mod.hpak");
+}
+
+TEST_CASE("Async streaming from a mounted pak (loadAssetAsync by UUID)")
+{
+    const HE::UUID a{0xA1,1}, b{0xA2,2}, c{0xA3,3};
+    HpakWriter p;
+    p.addEntry(a, makeMaterialBlob(a, "stream_a", 1.f,0.f,0.f), {Hpak::Codec::Zstd});
+    p.addEntry(b, makeMaterialBlob(b, "stream_b", 0.f,1.f,0.f), {Hpak::Codec::LZ4});
+    p.addEntry(c, makeMaterialBlob(c, "stream_c", 0.f,0.f,1.f));
+    auto pak = std::filesystem::temp_directory_path() / "he_stream.hpak";
+    REQUIRE(p.write(pak.string()));
+
+    ContentManager cm;
+    REQUIRE(cm.mountPak(pak.string()));
+    const size_t jobs = cm.streamMountedAssets();
+    CHECK(jobs == 3);
+    CHECK(!cm.isLoaded(a));   // async → nothing registered until we pump the drain
+
+    bool done = false;
+    for (int i = 0; i < 500 && !done; ++i)
+    {
+        cm.pollAsyncResults();  // main-thread registration point
+        done = cm.isLoaded(a) && cm.isLoaded(b) && cm.isLoaded(c);
+        if (!done) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    REQUIRE(done);
+    CHECK(cm.getMaterial(a) != nullptr);
+    CHECK(cm.getMaterial(b) != nullptr);
+    CHECK(cm.getMaterial(c) != nullptr);
+    CHECK(cm.streamMountedAssets() == 0);  // all resident → nothing to submit
+
+    std::filesystem::remove(pak);
+}
+
+TEST_CASE("Binary scene round-trips through a mounted pak (readMountedEntry)")
+{
+    // Build a small world, serialize it to CBOR, pack it as a raw pak entry, then
+    // mount + read it back and re-deserialize — the D8 binary-scene-in-pak path.
+    HorizonWorld world;
+    for (int i = 0; i < 3; ++i)
+    {
+        auto e = world.createEntity("Obj" + std::to_string(i));
+        world.addComponent(e, TransformComponent{});
+    }
+    SceneSerializer ser;
+    std::vector<uint8_t> sceneBytes;
+    REQUIRE(ser.saveToMemory(world, sceneBytes));
+    REQUIRE(!sceneBytes.empty());
+
+    const HE::UUID sceneUuid{0x5CE, 0x11};
+    HpakWriter p;
+    p.addEntry(sceneUuid, sceneBytes, {Hpak::Codec::Zstd});
+    auto pak = std::filesystem::temp_directory_path() / "he_scene.hpak";
+    REQUIRE(p.write(pak.string()));
+
+    ContentManager cm;
+    REQUIRE(cm.mountPak(pak.string()));
+
+    // Raw read returns the exact scene bytes (survived compression + the pak).
+    const auto got = cm.readMountedEntry(sceneUuid);
+    CHECK(got == sceneBytes);
+
+    // And it is NOT registered as an asset (it's scene data, not a .hasset).
+    CHECK(!cm.isLoaded(sceneUuid));
+
+    // Re-deserialize into a fresh world; the entities came through.
+    HorizonWorld world2;
+    REQUIRE(ser.loadFromMemory(world2, got));
+    size_t transforms = 0;
+    for (auto e : world2.registry().view<TransformComponent>()) { (void)e; ++transforms; }
+    CHECK(transforms >= 3);
+
+    std::filesystem::remove(pak);
+}
+
+TEST_CASE("pollAsyncResults honors the per-frame registration budget")
+{
+    HpakWriter p;
+    std::vector<HE::UUID> ids;
+    for (uint64_t i = 0; i < 6; ++i)
+    {
+        HE::UUID id{0xB0, i + 1};
+        ids.push_back(id);
+        p.addEntry(id, makeMaterialBlob(id, "budget" + std::to_string(i)), {Hpak::Codec::Zstd});
+    }
+    auto pak = std::filesystem::temp_directory_path() / "he_budget.hpak";
+    REQUIRE(p.write(pak.string()));
+
+    ContentManager cm;
+    REQUIRE(cm.mountPak(pak.string()));
+    CHECK(cm.streamMountedAssets() == 6);
+
+    // Budget 0 → registers nothing, even if results are already waiting.
+    CHECK(cm.pollAsyncResults(0).empty());
+
+    // Drain at most 2 per call: every call respects the cap, all load eventually.
+    size_t resident = 0;
+    for (int i = 0; i < 500 && resident < 6; ++i)
+    {
+        const auto got = cm.pollAsyncResults(2);
+        CHECK(got.size() <= 2);
+        resident = 0;
+        for (const auto& id : ids) if (cm.isLoaded(id)) ++resident;
+        if (resident < 6) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    CHECK(resident == 6);
+
+    std::filesystem::remove(pak);
+}
+
+#ifdef HE_HAVE_OPENSSL
+TEST_CASE("mountPak with an encrypted pak loads on demand with the key")
+{
+    const HE::UUID id{0x0E,0x0C};
+    const auto blob = makeMaterialBlob(id, "enc_ondemand", 0.2f, 0.4f, 0.8f);
+    Hpak::PackSettings s; s.codec = Hpak::Codec::Zstd; s.encrypt = true;
+    for (int i = 0; i < 32; ++i) s.key[i] = static_cast<uint8_t>(i + 11);
+    HpakWriter packer; packer.addEntry(id, blob, s);
+    auto pak = std::filesystem::temp_directory_path() / "he_mount_enc.hpak";
+    REQUIRE(packer.write(pak.string()));
+
+    ContentManager cm;
+    REQUIRE(cm.mountPak(pak.string(), s.key));
+    CHECK(!cm.isLoaded(id));
+    auto ref = cm.acquireMaterial(id);
+    REQUIRE(ref);
+    CHECK(ref->baseColor[2] == doctest::Approx(0.8f));
+
+    std::filesystem::remove(pak);
+}
+#endif // HE_HAVE_OPENSSL

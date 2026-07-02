@@ -63,6 +63,17 @@ target_include_directories(he_tests PRIVATE
 # resolves to dllexport (definitions are local to this exe) rather than dllimport,
 # which would emit unresolved __imp_ references for those same locally-built symbols.
 target_compile_definitions(he_tests PRIVATE HE_RENDERING_BUILD_DLL)
+# Mirror the codec availability macros so hpak tests can assert compression
+# actually happened (the writer silently falls back to Store when unavailable).
+if(HE_HAVE_LZ4)
+    target_compile_definitions(he_tests PRIVATE HE_HAVE_LZ4)
+endif()
+if(HE_HAVE_ZSTD)
+    target_compile_definitions(he_tests PRIVATE HE_HAVE_ZSTD)
+endif()
+if(HE_HAVE_OPENSSL)
+    target_compile_definitions(he_tests PRIVATE HE_HAVE_OPENSSL)
+endif()
 
 target_link_libraries(he_tests PRIVATE
     HorizonCore

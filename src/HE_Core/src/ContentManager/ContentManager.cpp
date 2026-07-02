@@ -276,12 +276,14 @@ void ContentManager::loadAssetAsync(const std::string& relativePath,
 }
 
 // ─── pollAsyncResults ─────────────────────────────────────────────────────────
-std::vector<HE::UUID> ContentManager::pollAsyncResults()
+std::vector<HE::UUID> ContentManager::pollAsyncResults(size_t maxRegistrations)
 {
 	std::vector<AsyncResult> ready;
 	{
 		std::unique_lock<std::mutex> lock(m_resultsMutex);
-		while (!m_asyncResults.empty())
+		// Pull at most `maxRegistrations` completed jobs; leave the rest queued so
+		// a burst is spread over frames (registration/parse runs on this thread).
+		while (!m_asyncResults.empty() && ready.size() < maxRegistrations)
 		{
 			ready.push_back(std::move(m_asyncResults.front()));
 			m_asyncResults.pop();
@@ -315,6 +317,84 @@ bool ContentManager::isAsyncPending(const std::string& relativePath) const
 {
 	std::unique_lock<std::mutex> lock(m_pendingMutex);
 	return m_pendingPaths.count(relativePath) > 0;
+}
+
+// ─── loadAssetAsync (by UUID, from a mounted pak) ─────────────────────────────
+void ContentManager::loadAssetAsync(HE::UUID id, std::function<void(HE::UUID)> callback)
+{
+	if (isLoaded(id))
+	{
+		if (callback) callback(id);
+		return;
+	}
+
+	const auto it = m_pakResidency.find(id);
+	if (it == m_pakResidency.end())
+	{
+		if (callback) callback(HE::UUID{}); // not provided by any mount
+		return;
+	}
+	const MountedPak& mount = m_mounts[it->second];
+
+	// Coalesce by a synthetic per-UUID key so it shares the pending set with the
+	// path-based overload without colliding with real relative paths.
+	const std::string coalesceKey =
+		"pak://" + std::to_string(id.hi) + "-" + std::to_string(id.lo);
+	{
+		std::unique_lock<std::mutex> lock(m_pendingMutex);
+		if (m_pendingPaths.count(coalesceKey)) return; // already in flight
+		m_pendingPaths.insert(coalesceKey);
+	}
+
+	// Capture everything the worker needs by value — it must not touch the shared
+	// mount reader (single ifstream, not thread-safe), so it opens its own.
+	const std::string       path = mount.path;
+	const bool              enc  = mount.encrypted;
+	std::array<uint8_t, 32> key  = mount.key;
+
+	globalPool().submit([this, id, path, enc, key, coalesceKey,
+	                     cb = std::move(callback)]() mutable
+	{
+		AsyncResult result;
+		result.relativePath = coalesceKey;
+		result.callback     = std::move(cb);
+
+		HpakReader reader; // worker-local; safe for concurrent reads across jobs
+		if (reader.open(path))
+		{
+			auto data = reader.readEntry(id, enc ? key.data() : nullptr);
+			if (!data.empty()) result.fileBytes = std::move(data); // decoded .hasset
+			else               result.failed = true;
+		}
+		else result.failed = true;
+
+		std::unique_lock<std::mutex> lock(m_resultsMutex);
+		m_asyncResults.push(std::move(result));
+	});
+}
+
+// ─── streamMountedAssets ──────────────────────────────────────────────────────
+size_t ContentManager::streamMountedAssets(const std::unordered_set<HE::UUID>& exclude)
+{
+	size_t submitted = 0;
+	for (const auto& [id, mountIdx] : m_pakResidency)
+	{
+		(void)mountIdx;
+		if (isLoaded(id) || exclude.count(id)) continue;
+		loadAssetAsync(id);
+		++submitted;
+	}
+	return submitted;
+}
+
+// ─── readMountedEntry (raw, non-asset payload) ────────────────────────────────
+std::vector<uint8_t> ContentManager::readMountedEntry(HE::UUID id)
+{
+	const auto it = m_pakResidency.find(id);
+	if (it == m_pakResidency.end()) return {};
+	MountedPak& mount = m_mounts[it->second];
+	if (!mount.reader) return {};
+	return mount.reader->readEntry(id, mount.encrypted ? mount.key.data() : nullptr);
 }
 
 // ─── saveAsset ────────────────────────────────────────────────────────────────
@@ -668,96 +748,20 @@ HE::UUID ContentManager::loadAssetFromMemory(const std::vector<uint8_t>& hassetD
 	HAsset::Reader reader;
 	if (!reader.openData(hassetData)) return HE::UUID{};
 
-	const HE::AssetType type = static_cast<HE::AssetType>(reader.assetType());
-
-	const auto* metaChunk = reader.findChunk(HAsset::CHUNK_META);
-	if (!metaChunk) return HE::UUID{};
-
-	HE::UUID    id;
-	std::string assetName, assetPath;
-	if (!readMetaChunk(*metaChunk, reader.header().version, id, assetName, assetPath))
-		return HE::UUID{};
-
-	if (id == HE::UUID{}) return HE::UUID{};
-
-	SlotHandle handle{};
-
-	switch (type)
+	// Recover the embedded asset path so the registered asset keeps a sensible
+	// path (and path→UUID key), then delegate to parseAndRegisterAsset — the
+	// single, complete per-type parser. Previously this function carried its own
+	// copy of the switch that only handled a subset of types, so SkeletalMesh /
+	// Scene / Script / Font / Shader entries loaded from a .hpak were silently
+	// dropped. There is now one parser shared by the disk and in-memory paths.
+	std::string relativePath;
+	if (const auto* metaChunk = reader.findChunk(HAsset::CHUNK_META))
 	{
-	case HE::AssetType::StaticMesh:
-	{
-		StaticMeshAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = assetPath;
-		if (const auto* c = reader.findChunk(HAsset::CHUNK_MREF)) { size_t o=0; HAsset::Reader::readString(c->data,o,a.materialPath); }
-		if (const auto* c = reader.findChunk(HAsset::CHUNK_VERT)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.vertices); }
-		if (const auto* c = reader.findChunk(HAsset::CHUNK_INDX)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.indices); }
-		if (const auto* c = reader.findChunk(HAsset::CHUNK_NORM)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.normals); }
-		if (const auto* c = reader.findChunk(HAsset::CHUNK_TEXC)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.uvs); }
-		handle = m_staticMeshAssets.insert(std::move(a)); break;
-	}
-	case HE::AssetType::Texture:
-	{
-		TextureAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = assetPath;
-		if (const auto* c = reader.findChunk(HAsset::CHUNK_TXMI))
-		{ size_t o=0; HAsset::Reader::readPOD(c->data,o,a.width); HAsset::Reader::readPOD(c->data,o,a.height); HAsset::Reader::readPOD(c->data,o,a.channels); }
-		if (const auto* c = reader.findChunk(HAsset::CHUNK_PIXL)) a.data = c->data;
-		handle = m_textureAssets.insert(std::move(a)); break;
-	}
-	case HE::AssetType::Material:
-	{
-		MaterialAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = assetPath;
-		if (const auto* c = reader.findChunk(HAsset::CHUNK_MTRL))
-		{
-			size_t o=0;
-			HAsset::Reader::readString(c->data,o,a.shaderPath);
-			HAsset::Reader::readVec(c->data,o,a.texturePaths);
-			HAsset::Reader::readPOD(c->data,o,a.baseColor[0]);
-			HAsset::Reader::readPOD(c->data,o,a.baseColor[1]);
-			HAsset::Reader::readPOD(c->data,o,a.baseColor[2]);
-			HAsset::Reader::readPOD(c->data,o,a.metallic);
-			HAsset::Reader::readPOD(c->data,o,a.roughness);
-			HAsset::Reader::readPOD(c->data,o,a.opacity);
-		}
-		handle = m_materialAssets.insert(std::move(a)); break;
-	}
-	case HE::AssetType::Audio:
-	{
-		AudioAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = assetPath;
-		if (const auto* c = reader.findChunk(HAsset::CHUNK_AUMI))
-		{ size_t o=0; HAsset::Reader::readPOD(c->data,o,a.sampleRate); HAsset::Reader::readPOD(c->data,o,a.channels); }
-		if (const auto* c = reader.findChunk(HAsset::CHUNK_PCMD)) a.audioData = c->data;
-		handle = m_audioAssets.insert(std::move(a)); break;
-	}
-	case HE::AssetType::AnimationClip:
-	{
-		AnimationClipAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = assetPath;
-		if (const auto* c = reader.findChunk(HAsset::CHUNK_ANIM))
-		{
-			size_t o = 0;
-			HAsset::Reader::readPOD(c->data, o, a.duration);
-			uint32_t channelCount = 0;
-			HAsset::Reader::readPOD(c->data, o, channelCount);
-			a.channels.resize(channelCount);
-			for (auto& ch : a.channels)
-			{
-				uint8_t pathByte = 0;
-				HAsset::Reader::readPOD(c->data, o, ch.jointIndex);
-				HAsset::Reader::readPOD(c->data, o, pathByte);
-				ch.path = static_cast<AnimPathType>(pathByte);
-				HAsset::Reader::readVec(c->data, o, ch.times);
-				HAsset::Reader::readVec(c->data, o, ch.values);
-			}
-		}
-		handle = m_animClipAssets.insert(std::move(a)); break;
-	}
-	default:
-		return HE::UUID{};
+		HE::UUID id; std::string name;
+		readMetaChunk(*metaChunk, reader.header().version, id, name, relativePath);
 	}
 
-	m_handleToUUID[id]   = handle;
-	m_assetTypeIndex[id] = type;
-	if (!assetPath.empty())
-		m_pathToUUID[assetPath] = id;
-	return id;
+	return parseAndRegisterAsset(relativePath, /*fullPath=*/std::string{}, reader);
 }
 
 // ─── loadPak ─────────────────────────────────────────────────────────────────
@@ -774,6 +778,51 @@ bool ContentManager::loadPak(const std::string& path, const uint8_t key[32])
 			loadAssetFromMemory(data);
 	}
 	return true;
+}
+
+// ─── mountPak / ensureResident (on-demand streaming) ──────────────────────────
+// Special members live here (not in the header) because ContentManager owns
+// std::unique_ptr<HpakReader> mounts and HpakReader is only complete in this TU.
+ContentManager::ContentManager() { initDefaultAssets(); }
+ContentManager::ContentManager(std::string contentPath)
+	: m_contentRoot(std::move(contentPath)) { initDefaultAssets(); }
+ContentManager::~ContentManager() = default;
+
+bool ContentManager::mountPak(const std::string& path, const uint8_t key[32])
+{
+	auto reader = std::make_unique<HpakReader>();
+	if (!reader->open(path)) return false;
+
+	MountedPak mount;
+	mount.path      = path;
+	mount.encrypted = (key != nullptr);
+	if (key) std::memcpy(mount.key.data(), key, 32);
+
+	const size_t index = m_mounts.size();
+	// Register every UUID this archive provides. A later mount overwrites the
+	// residency entry for an existing UUID → it shadows earlier mounts (overlay),
+	// while new UUIDs are simply added.
+	for (const auto& id : reader->enumerate())
+		m_pakResidency[id] = index;
+
+	mount.reader = std::move(reader);
+	m_mounts.push_back(std::move(mount));
+	return true;
+}
+
+bool ContentManager::ensureResident(HE::UUID id)
+{
+	if (isLoaded(id)) return true;
+
+	const auto it = m_pakResidency.find(id);
+	if (it == m_pakResidency.end()) return false;
+
+	MountedPak& mount = m_mounts[it->second];
+	if (!mount.reader) return false;
+	auto data = mount.reader->readEntry(id, mount.encrypted ? mount.key.data() : nullptr);
+	if (data.empty()) return false;
+
+	return loadAssetFromMemory(data) != HE::UUID{};
 }
 
 // ─── initDefaultAssets ───────────────────────────────────────────────────────

@@ -9,9 +9,19 @@
 struct HE_API ProjectConfig {
     std::string  projectName;
     std::string  hpakFilename;          // e.g. "MyGame.hpak"
-    std::string  mainSceneName;         // filename of startup .hescene (empty = none)
-    uint8_t      projectUuidBytes[16] = {}; // PBKDF2 salt for key derivation
+    std::string  mainSceneName;         // fallback: filename of a loose startup .hescene (empty = none)
+    uint8_t      projectUuidBytes[16] = {}; // legacy (unused by the AES-GCM path)
     bool         enableModSupport = false;
+    // AES-256 key for the pak. NOTE: this ships with the game, so it is
+    // obfuscation against casual ripping, not a security boundary. The runtime
+    // reads it here and hands it to ContentManager::loadPak().
+    bool         encrypted = false;
+    uint8_t      encKey[32] = {};
+    // Startup scene packed into the .hpak as a binary (CBOR) entry. When
+    // hasPackedScene is set, the runtime reads startupSceneUuid from the mounted
+    // pak and deserializes it, instead of loading a loose mainSceneName file.
+    bool         hasPackedScene = false;
+    uint8_t      startupSceneUuid[16] = {};
 };
 
 class HE_API ProjectConfigLoader {

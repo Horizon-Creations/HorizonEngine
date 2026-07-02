@@ -21,6 +21,7 @@ add_library(HorizonCore SHARED
 	src/Scripting/ScriptEngine.cpp
 	src/Hpak/HpakWriter.cpp
 	src/Hpak/HpakReader.cpp
+	src/Hpak/Aes256Gcm.cpp
 	src/Hpak/KeyDerivation.cpp
 	src/Hpak/ProjectConfig.cpp
 	src/Hpak/ProjectExporter.cpp
@@ -48,6 +49,14 @@ target_link_libraries(HorizonCore
 if(HE_HAVE_LZ4)
     target_link_libraries(HorizonCore PRIVATE lz4::lz4)
     target_compile_definitions(HorizonCore PRIVATE HE_HAVE_LZ4)
+endif()
+if(HE_HAVE_ZSTD)
+    target_link_libraries(HorizonCore PRIVATE zstd::zstd)
+    target_compile_definitions(HorizonCore PRIVATE HE_HAVE_ZSTD)
+endif()
+if(HE_HAVE_OPENSSL)
+    target_link_libraries(HorizonCore PRIVATE OpenSSL::Crypto)
+    target_compile_definitions(HorizonCore PRIVATE HE_HAVE_OPENSSL)
 endif()
 
 # Tracy::TracyClient propagates TRACY_ENABLE define + include dir to all

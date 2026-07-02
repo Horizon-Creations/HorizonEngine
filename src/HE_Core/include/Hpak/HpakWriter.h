@@ -29,9 +29,12 @@ public:
 private:
     struct PendingEntry {
         HE::UUID             uuid;
-        std::vector<uint8_t> data;      // stored bytes (may be encrypted)
+        std::vector<uint8_t> data;        // stored bytes (compressed then encrypted)
         uint32_t             origSize;
-        uint8_t              flags;
+        uint64_t             contentHash;  // hash64 of `data`
+        uint8_t              codec;        // Hpak::Codec
+        uint8_t              flags;        // Hpak::kFlag*
+        uint8_t              nonce[12];    // reserved (zero for XOR)
     };
     std::vector<PendingEntry> m_entries;
 };

@@ -16,19 +16,29 @@ int main(int argc, char** argv)
 {
     if (argc < 3)
     {
-        std::cerr << "Usage: hpak_packer <project_root> <output.hpak> [--secret <passphrase>]\n";
+        std::cerr << "Usage: hpak_packer <project_root> <output.hpak> "
+                     "[--codec store|lz4|zstd] [--secret <passphrase>]\n";
         return 1;
     }
 
     const std::string inputPath  = argv[1];
     const std::string outputFile = argv[2];
 
-    std::string secret;
+    std::string   secret;
+    Hpak::Codec   codec = Hpak::Codec::Zstd; // sensible ship default
     for (int i = 3; i < argc - 1; ++i)
     {
         if (std::strcmp(argv[i], "--secret") == 0)
         {
             secret = argv[i + 1];
+            ++i;
+        }
+        else if (std::strcmp(argv[i], "--codec") == 0)
+        {
+            const std::string c = argv[i + 1];
+            if      (c == "store") codec = Hpak::Codec::Store;
+            else if (c == "lz4")   codec = Hpak::Codec::LZ4;
+            else if (c == "zstd")  codec = Hpak::Codec::Zstd;
             ++i;
         }
     }
@@ -40,6 +50,7 @@ int main(int argc, char** argv)
     }
 
     Hpak::PackSettings settings;
+    settings.codec = codec;
     if (!secret.empty())
     {
         settings.encrypt = true;

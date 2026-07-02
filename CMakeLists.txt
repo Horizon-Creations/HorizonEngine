@@ -179,6 +179,75 @@ else()
     set(HE_HAVE_LZ4 TRUE)
 endif()
 
+# ─── zstd (hpak ship codec + dictionary training) ─────────────────────────────
+# Use system zstd if available (Homebrew on macOS, package manager elsewhere);
+# otherwise build a minimal static lib from source. Falls back gracefully: without
+# zstd, hpak still supports Store + LZ4 codecs.
+if(PkgConfig_FOUND)
+    pkg_check_modules(ZSTD QUIET libzstd)
+endif()
+if(NOT ZSTD_FOUND)
+    find_path(ZSTD_INCLUDE_DIRS zstd.h
+        PATHS /opt/homebrew/include /usr/local/include /usr/include)
+    find_library(ZSTD_LIBRARIES NAMES zstd
+        PATHS /opt/homebrew/lib /usr/local/lib /usr/lib)
+    if(ZSTD_INCLUDE_DIRS AND ZSTD_LIBRARIES)
+        set(ZSTD_FOUND TRUE)
+    endif()
+endif()
+if(ZSTD_FOUND)
+    message(STATUS "HorizonEngine: zstd found (system) — hpak zstd codec enabled")
+    add_library(zstd_import INTERFACE)
+    target_include_directories(zstd_import INTERFACE ${ZSTD_INCLUDE_DIRS})
+    target_link_libraries(zstd_import INTERFACE ${ZSTD_LIBRARIES})
+    add_library(zstd::zstd ALIAS zstd_import)
+    set(HE_HAVE_ZSTD TRUE)
+else()
+    message(STATUS "HorizonEngine: zstd not found on system — fetching v1.5.6 from source")
+    FetchContent_Declare(
+        zstd
+        GIT_REPOSITORY https://github.com/facebook/zstd.git
+        GIT_TAG        v1.5.6
+        GIT_SHALLOW    TRUE
+    )
+    FetchContent_GetProperties(zstd)
+    if(NOT zstd_POPULATED)
+        if(POLICY CMP0169)
+            cmake_policy(SET CMP0169 OLD)
+        endif()
+        FetchContent_Populate(zstd)
+    endif()
+    enable_language(C)
+    file(GLOB ZSTD_SRC
+        "${zstd_SOURCE_DIR}/lib/common/*.c"
+        "${zstd_SOURCE_DIR}/lib/compress/*.c"
+        "${zstd_SOURCE_DIR}/lib/decompress/*.c"
+        "${zstd_SOURCE_DIR}/lib/dictBuilder/*.c")
+    add_library(zstd_static STATIC ${ZSTD_SRC})
+    target_include_directories(zstd_static PUBLIC "${zstd_SOURCE_DIR}/lib")
+    target_compile_definitions(zstd_static PRIVATE ZSTD_DISABLE_ASM=1)
+    set_target_properties(zstd_static PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    if(NOT TARGET zstd::zstd)
+        add_library(zstd::zstd ALIAS zstd_static)
+    endif()
+    set(HE_HAVE_ZSTD TRUE)
+endif()
+
+# ─── OpenSSL (hpak AES-256-GCM encryption) ────────────────────────────────────
+# Encryption of shipped assets is obfuscation against casual ripping, NOT a
+# security boundary (the key ships with the game). Optional: without OpenSSL the
+# hpak encrypt path is simply unavailable (assets pack unencrypted).
+if(NOT OPENSSL_ROOT_DIR AND EXISTS "/opt/homebrew/opt/openssl@3")
+    set(OPENSSL_ROOT_DIR "/opt/homebrew/opt/openssl@3")
+endif()
+find_package(OpenSSL QUIET COMPONENTS Crypto)
+if(OPENSSL_FOUND)
+    message(STATUS "HorizonEngine: OpenSSL found — hpak AES-256-GCM enabled")
+    set(HE_HAVE_OPENSSL TRUE)
+else()
+    message(STATUS "HorizonEngine: OpenSSL not found — hpak encryption disabled")
+endif()
+
 # ─── Tracy (optional profiling) ────────────────────────────────────────────────
 # Enable with:  cmake -DHE_ENABLE_TRACY=ON ...
 # Default OFF so production/CI builds have zero overhead.
