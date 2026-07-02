@@ -20,6 +20,7 @@ add_executable(he_tests
     test_eventbus.cpp
     test_scripting.cpp
     test_scripting_binding.cpp
+    test_python_scripting.cpp
     test_physics.cpp
     test_collision_system.cpp
     test_collider.cpp
@@ -74,6 +75,12 @@ if(HE_HAVE_ZSTD)
 endif()
 if(HE_HAVE_OPENSSL)
     target_compile_definitions(he_tests PRIVATE HE_HAVE_OPENSSL)
+endif()
+# Compile the Python scripting tests only when CPython is embedded. The tests use
+# only PyScriptBackend's public API (linked via HorizonScene), so no direct
+# libpython link is needed here.
+if(HE_HAVE_PYTHON)
+    target_compile_definitions(he_tests PRIVATE HE_HAVE_PYTHON)
 endif()
 
 # ─── Native game-logic fixture ─────────────────────────────────────────────────

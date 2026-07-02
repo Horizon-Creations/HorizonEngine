@@ -184,6 +184,8 @@ ScriptContext::ScriptContext(HorizonWorld& world)
     : m_world(&world)
 {
     registerHorizonApi();
+    if (PyScriptBackend::available())
+        m_py = std::make_unique<PyScriptBackend>(world);
 }
 
 void ScriptContext::registerHorizonApi()
@@ -209,72 +211,108 @@ void ScriptContext::setPhysicsWorld(PhysicsWorld* pw)
     lua_State* L = m_engine.state();
     lua_pushlightuserdata(L, pw);
     lua_setfield(L, LUA_REGISTRYINDEX, kPhysicsKey);
+
+    if (m_py) m_py->setPhysicsWorld(pw);
 }
 
-bool ScriptContext::loadScript(const std::string& name, const std::string& source)
+// ─── Backend routing ───────────────────────────────────────────────────────────
+
+IScriptBackend* ScriptContext::backendForId(InstanceId id)
 {
+    if (langOf(id) == ScriptLanguage::Python && m_py) return m_py.get();
+    return &m_engine;
+}
+
+IScriptBackend* ScriptContext::backendForName(const std::string& name)
+{
+    if (m_py && m_py->isScriptLoaded(name)) return m_py.get();
+    return &m_engine;
+}
+
+bool ScriptContext::loadScript(const std::string& name, const std::string& source,
+                               ScriptLanguage lang)
+{
+    if (lang == ScriptLanguage::Python)
+    {
+        if (!m_py) { m_lastBackend = &m_engine; return false; } // built without Python
+        m_lastBackend = m_py.get();
+        return m_py->loadScript(name, source);
+    }
+    m_lastBackend = &m_engine;
     return m_engine.loadScript(name, source);
 }
 
 ScriptEngine::InstanceId ScriptContext::createInstance(const std::string& scriptName,
                                                         entt::entity       entity)
 {
-    // The entity binding (self.entityId) is handled by the backend overload.
-    return m_engine.createInstance(scriptName, static_cast<uint32_t>(entity));
+    IScriptBackend* backend = backendForName(scriptName);
+    m_lastBackend = backend;
+    // The entity binding (self.entityId / self.entity_id) is set by the backend.
+    const InstanceId raw = backend->createInstance(scriptName, static_cast<uint32_t>(entity));
+    if (raw == IScriptBackend::kInvalidInstance) return IScriptBackend::kInvalidInstance;
+    const ScriptLanguage lang = (backend == m_py.get()) ? ScriptLanguage::Python
+                                                        : ScriptLanguage::Lua;
+    return tagId(raw, lang);
 }
 
 void ScriptContext::destroyInstance(ScriptEngine::InstanceId id)
 {
-    m_engine.destroyInstance(id);
+    backendForId(id)->destroyInstance(rawId(id));
 }
 
 bool ScriptContext::callOnStart(ScriptEngine::InstanceId id)
 {
-    return m_engine.callOnStart(id);
+    IScriptBackend* b = backendForId(id); m_lastBackend = b;
+    return b->callOnStart(rawId(id));
 }
 
 bool ScriptContext::callOnUpdate(ScriptEngine::InstanceId id, float dt)
 {
-    return m_engine.callOnUpdate(id, dt);
+    IScriptBackend* b = backendForId(id); m_lastBackend = b;
+    return b->callOnUpdate(rawId(id), dt);
 }
 
 bool ScriptContext::callOnCollisionEnter(ScriptEngine::InstanceId id, uint32_t otherEntityId)
 {
-    return m_engine.callOnCollisionEnter(id, otherEntityId);
+    IScriptBackend* b = backendForId(id); m_lastBackend = b;
+    return b->callOnCollisionEnter(rawId(id), otherEntityId);
 }
 
 bool ScriptContext::callOnCollisionExit(ScriptEngine::InstanceId id, uint32_t otherEntityId)
 {
-    return m_engine.callOnCollisionExit(id, otherEntityId);
+    IScriptBackend* b = backendForId(id); m_lastBackend = b;
+    return b->callOnCollisionExit(rawId(id), otherEntityId);
 }
 
 bool ScriptContext::hotReloadScript(const std::string& name, const std::string& source)
 {
-    return m_engine.hotReloadScript(name, source);
+    IScriptBackend* b = backendForName(name); m_lastBackend = b;
+    return b->hotReloadScript(name, source);
 }
 
 bool ScriptContext::isScriptLoaded(const std::string& name) const
 {
-    return m_engine.isScriptLoaded(name);
+    if (m_engine.isScriptLoaded(name)) return true;
+    return m_py && m_py->isScriptLoaded(name);
 }
 
 size_t ScriptContext::loadedScriptCount() const
 {
-    return m_engine.loadedScriptCount();
+    return m_engine.loadedScriptCount() + (m_py ? m_py->loadedScriptCount() : 0);
 }
 
 size_t ScriptContext::instanceCount() const
 {
-    return m_engine.instanceCount();
+    return m_engine.instanceCount() + (m_py ? m_py->instanceCount() : 0);
 }
 
 const std::string& ScriptContext::lastError() const
 {
-    return m_engine.lastError();
+    return m_lastBackend->lastError();
 }
 
 void ScriptContext::injectProperties(ScriptEngine::InstanceId id,
                                      const std::unordered_map<std::string, ScriptPropValue>& props)
 {
-    m_engine.injectProperties(id, props);
+    backendForId(id)->injectProperties(rawId(id), props);
 }

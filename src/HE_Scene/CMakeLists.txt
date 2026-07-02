@@ -19,6 +19,7 @@ add_library(HorizonScene SHARED
     src/UISystem.cpp
     src/ScriptContext.cpp
     src/ScriptApi.cpp
+    src/PyScriptBackend.cpp
     src/AudioEngine.cpp
     src/PhysicsWorld.cpp
 )
@@ -51,6 +52,11 @@ if(APPLE)
         "-framework CoreAudio"
         "-framework AudioToolbox"
     )
+endif()
+
+if(HE_HAVE_PYTHON)
+    target_link_libraries(HorizonScene PRIVATE Python3::Python)
+    target_compile_definitions(HorizonScene PRIVATE HE_HAVE_PYTHON)
 endif()
 
 set_target_properties(HorizonScene PROPERTIES

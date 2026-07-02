@@ -467,6 +467,7 @@ static TypeIds authorAllTypes(const std::filesystem::path& dir)
 
     ScriptAsset script; script.type = HE::AssetType::Script; script.name = "script"; script.path = "script.hasset";
     script.sourceCode = "function on_update(dt) end";
+    script.language   = ScriptLanguage::Python; // exercise CHUNK_SLNG through pack/mount
     REQUIRE(cm.saveAsset(script)); ids.script = script.id;
 
     ShaderAsset shader; shader.type = HE::AssetType::Shader; shader.name = "shader"; shader.path = "shader.hasset";
@@ -541,6 +542,7 @@ static void verifyAllTypes(Hpak::Codec codec)
     const ScriptAsset* scr = cm.getScript(ids.script);
     REQUIRE(scr != nullptr);
     CHECK(scr->sourceCode == "function on_update(dt) end");
+    CHECK(scr->language == ScriptLanguage::Python); // CHUNK_SLNG survived pack + mount
 
     const ShaderAsset* sh = cm.getShader(ids.shader);
     REQUIRE(sh != nullptr);
@@ -572,6 +574,46 @@ static void verifyAllTypes(Hpak::Codec codec)
 TEST_CASE("All asset types round-trip through a Store pak")  { verifyAllTypes(Hpak::Codec::Store); }
 TEST_CASE("All asset types round-trip through an LZ4 pak")   { verifyAllTypes(Hpak::Codec::LZ4);   }
 TEST_CASE("All asset types round-trip through a zstd pak")   { verifyAllTypes(Hpak::Codec::Zstd);  }
+
+// Builds a Script .hasset blob in memory; omit the language to test back-compat.
+static std::vector<uint8_t> makeScriptBlob(HE::UUID id, const char* src,
+                                           bool withLang, ScriptLanguage lang)
+{
+    std::vector<uint8_t> meta;
+    HAsset::Writer::appendPOD(meta, static_cast<uint16_t>(HE::AssetType::Script));
+    HAsset::Writer::appendPOD(meta, id.hi);
+    HAsset::Writer::appendPOD(meta, id.lo);
+    HAsset::Writer::appendString(meta, "s");
+    HAsset::Writer::appendString(meta, "s.hasset");
+
+    HAsset::Writer w;
+    w.addChunk(HAsset::CHUNK_META, meta.data(), meta.size());
+    w.addChunk(HAsset::CHUNK_SRC, src, std::char_traits<char>::length(src));
+    if (withLang) { const uint8_t b = static_cast<uint8_t>(lang); w.addChunk(HAsset::CHUNK_SLNG, &b, 1); }
+    return w.toBytes(static_cast<uint16_t>(HE::AssetType::Script));
+}
+
+TEST_CASE("Script language: CHUNK_SLNG round-trips, absent chunk defaults to Lua")
+{
+    ContentManager cm;
+
+    SUBCASE("explicit Python survives load")
+    {
+        const HE::UUID id{0x11, 0x22};
+        auto uuid = cm.loadAssetFromMemory(makeScriptBlob(id, "x", true, ScriptLanguage::Python));
+        const ScriptAsset* s = cm.getScript(uuid);
+        REQUIRE(s != nullptr);
+        CHECK(s->language == ScriptLanguage::Python);
+    }
+    SUBCASE("missing SLNG chunk loads as Lua (back-compat with old .hasset files)")
+    {
+        const HE::UUID id{0x33, 0x44};
+        auto uuid = cm.loadAssetFromMemory(makeScriptBlob(id, "y", false, ScriptLanguage::Lua));
+        const ScriptAsset* s = cm.getScript(uuid);
+        REQUIRE(s != nullptr);
+        CHECK(s->language == ScriptLanguage::Lua);
+    }
+}
 
 #ifdef HE_HAVE_OPENSSL
 TEST_CASE("All asset types round-trip through an encrypted zstd pak")
