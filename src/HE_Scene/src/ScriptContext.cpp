@@ -246,12 +246,23 @@ ScriptEngine::InstanceId ScriptContext::createInstance(const std::string& script
                                                         entt::entity       entity)
 {
     IScriptBackend* backend = backendForName(scriptName);
+    const ScriptLanguage lang = (backend == m_py.get()) ? ScriptLanguage::Python
+                                                        : ScriptLanguage::Lua;
+    return createInstance(scriptName, entity, lang);
+}
+
+ScriptEngine::InstanceId ScriptContext::createInstance(const std::string& scriptName,
+                                                        entt::entity       entity,
+                                                        ScriptLanguage     lang)
+{
+    IScriptBackend* backend = (lang == ScriptLanguage::Python)
+                                  ? static_cast<IScriptBackend*>(m_py.get())
+                                  : &m_engine;
+    if (!backend) return IScriptBackend::kInvalidInstance; // Python requested, unavailable
     m_lastBackend = backend;
     // The entity binding (self.entityId / self.entity_id) is set by the backend.
     const InstanceId raw = backend->createInstance(scriptName, static_cast<uint32_t>(entity));
     if (raw == IScriptBackend::kInvalidInstance) return IScriptBackend::kInvalidInstance;
-    const ScriptLanguage lang = (backend == m_py.get()) ? ScriptLanguage::Python
-                                                        : ScriptLanguage::Lua;
     return tagId(raw, lang);
 }
 
@@ -294,6 +305,12 @@ bool ScriptContext::isScriptLoaded(const std::string& name) const
 {
     if (m_engine.isScriptLoaded(name)) return true;
     return m_py && m_py->isScriptLoaded(name);
+}
+
+bool ScriptContext::isScriptLoaded(const std::string& name, ScriptLanguage lang) const
+{
+    if (lang == ScriptLanguage::Python) return m_py && m_py->isScriptLoaded(name);
+    return m_engine.isScriptLoaded(name);
 }
 
 size_t ScriptContext::loadedScriptCount() const

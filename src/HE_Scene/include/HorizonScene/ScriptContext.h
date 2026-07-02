@@ -43,8 +43,16 @@ public:
 
     // Create an instance of a named script bound to an entity.
     // self.entityId is set to the raw entt::entity value.
+    //
+    // The 2-arg form routes by which backend currently owns the name (Python
+    // first) — convenient, but ambiguous if the same name is loaded in both
+    // languages. Prefer the 3-arg form, which routes by the caller's known
+    // language so two entities can share a moduleName across languages.
     ScriptEngine::InstanceId createInstance(const std::string& scriptName,
                                             entt::entity       entity);
+    ScriptEngine::InstanceId createInstance(const std::string& scriptName,
+                                            entt::entity       entity,
+                                            ScriptLanguage     lang);
 
     void destroyInstance(ScriptEngine::InstanceId id);
 
@@ -68,7 +76,10 @@ public:
     void injectProperties(ScriptEngine::InstanceId id,
                           const std::unordered_map<std::string, ScriptPropValue>& props);
 
+    // True if the name is loaded in either backend; the 2-arg form checks the
+    // specific language (so a Lua-loaded name reads as not-loaded for Python).
     bool   isScriptLoaded(const std::string& name) const;
+    bool   isScriptLoaded(const std::string& name, ScriptLanguage lang) const;
     size_t loadedScriptCount() const;
     size_t instanceCount() const;
     const std::string& lastError() const;
