@@ -420,6 +420,31 @@ size_t ContentManager::streamMountedAssets(const std::unordered_set<HE::UUID>& e
 	return submitted;
 }
 
+// ─── Dual-mode reference resolution ───────────────────────────────────────────
+const MaterialAsset* ContentManager::resolveMaterialRef(HE::UUID bakedId, const std::string& path)
+{
+	if (bakedId != HE::UUID{})
+	{
+		ensureResident(bakedId);          // no-op when already streamed in
+		return getMaterial(bakedId);
+	}
+	if (!path.empty())
+		return getMaterial(loadAsset(path)); // editor / loose-content fallback
+	return nullptr;
+}
+
+const TextureAsset* ContentManager::resolveTextureRef(HE::UUID bakedId, const std::string& path)
+{
+	if (bakedId != HE::UUID{})
+	{
+		ensureResident(bakedId);
+		return getTexture(bakedId);
+	}
+	if (!path.empty())
+		return getTexture(loadAsset(path));
+	return nullptr;
+}
+
 // ─── expandFrontier (reference-graph closure via baked UUID refs) ─────────────
 void ContentManager::expandFrontier(HE::UUID id)
 {

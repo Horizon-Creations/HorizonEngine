@@ -533,7 +533,10 @@ static void verifyAllTypes(Hpak::Codec codec)
     REQUIRE(mt != nullptr);
     CHECK(mt->baseColor[0] == doctest::Approx(0.1f));
     CHECK(mt->baseColor[2] == doctest::Approx(0.3f));
-    CHECK(mt->texturePaths.size() == 2);
+    // Packed builds drop the path strings; the baked UUID list stays
+    // index-parallel (nulls here — "a.png"/"b.png" are not in the pack).
+    CHECK(mt->texturePaths.empty());
+    CHECK(mt->textureIds.size() == 2);
 
     const ScriptAsset* scr = cm.getScript(ids.script);
     REQUIRE(scr != nullptr);
@@ -704,12 +707,14 @@ TEST_CASE("Pack-time UUID-ref baking: mesh->material and material->texture")
     REQUIRE(cmSrc.saveAsset(tex));
     MaterialAsset mat; mat.type = HE::AssetType::Material; mat.name = "mat"; mat.path = "mat.hasset";
     mat.texturePaths = {"tex.hasset"};
+    mat.baseColor[0] = 0.25f; mat.baseColor[1] = 0.5f; mat.baseColor[2] = 0.75f;
+    mat.metallic = 0.6f; mat.roughness = 0.35f; mat.opacity = 0.9f;
     REQUIRE(cmSrc.saveAsset(mat));
     StaticMeshAsset mesh; mesh.type = HE::AssetType::StaticMesh; mesh.name = "mesh"; mesh.path = "mesh.hasset";
     mesh.materialPath = "mat.hasset"; mesh.vertices = {0,0,0, 1,0,0, 0,1,0}; mesh.indices = {0,1,2};
     REQUIRE(cmSrc.saveAsset(mesh));
 
-    // Loose parse (no pack) → UUID-ref fields stay empty (paths only, for the editor).
+    // Loose parse (no pack) → UUID-ref fields stay empty, paths intact (editor mode).
     {
         std::ifstream f(dir / "mesh.hasset", std::ios::binary);
         std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
@@ -717,10 +722,11 @@ TEST_CASE("Pack-time UUID-ref baking: mesh->material and material->texture")
         REQUIRE(loose.loadAssetFromMemory(bytes) == mesh.id);
         const StaticMeshAsset* lm = loose.getStaticMesh(mesh.id);
         REQUIRE(lm != nullptr);
-        CHECK(lm->materialId == HE::UUID{});   // no baking on loose assets
+        CHECK(lm->materialId == HE::UUID{});      // no baking on loose assets
+        CHECK(lm->materialPath == "mat.hasset");  // paths kept for debugging
     }
 
-    // Pack (bakes refs) + load → UUID-ref fields resolved to the target UUIDs.
+    // Pack → paths are DROPPED and replaced by baked UUID refs.
     HpakWriter packer;
     CHECK(packer.addDirectory(dir, {Hpak::Codec::Zstd}) == 3);
     auto pak = std::filesystem::temp_directory_path() / "he_refbake.hpak";
@@ -731,10 +737,29 @@ TEST_CASE("Pack-time UUID-ref baking: mesh->material and material->texture")
     const StaticMeshAsset* m = cm.getStaticMesh(mesh.id);
     REQUIRE(m != nullptr);
     CHECK(m->materialId == mat.id);            // mesh -> material baked
+    CHECK(m->materialPath.empty());            // path dropped in the pack
     const MaterialAsset* mt = cm.getMaterial(mat.id);
     REQUIRE(mt != nullptr);
     REQUIRE(mt->textureIds.size() == 1);
     CHECK(mt->textureIds[0] == tex.id);        // material -> texture baked
+    CHECK(mt->texturePaths.empty());           // path dropped in the pack
+    // The MTRL scalar tail must survive the rewrite byte-exactly.
+    CHECK(mt->baseColor[0] == doctest::Approx(0.25f));
+    CHECK(mt->baseColor[1] == doctest::Approx(0.5f));
+    CHECK(mt->baseColor[2] == doctest::Approx(0.75f));
+    CHECK(mt->metallic  == doctest::Approx(0.6f));
+    CHECK(mt->roughness == doctest::Approx(0.35f));
+    CHECK(mt->opacity   == doctest::Approx(0.9f));
+
+    // Dual-mode resolvers (what the renderer backends call): baked UUID wins,
+    // and the texture chain resolves without any path.
+    CHECK(cm.resolveMaterialRef(m->materialId, m->materialPath) == mt);
+    CHECK(cm.resolveTextureRef(mt->textureIds[0], "") != nullptr);
+    CHECK(cm.resolveMaterialRef(HE::UUID{}, "") == nullptr);
+    // Editor/loose fallback: no baked UUID, resolve via path from the content root.
+    { const MaterialAsset* viaPath = cmSrc.resolveMaterialRef(HE::UUID{}, "mat.hasset");
+      REQUIRE(viaPath != nullptr);
+      CHECK(viaPath->id == mat.id); }
 
     std::filesystem::remove(pak);
     std::filesystem::remove_all(dir);

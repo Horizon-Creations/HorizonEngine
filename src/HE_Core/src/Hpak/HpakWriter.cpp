@@ -32,90 +32,89 @@ static bool metaFromHasset(const std::vector<uint8_t>& data, HE::UUID& id, std::
     return true;
 }
 
-// Append one chunk to an existing .hasset blob in place — additive only: bump the
-// chunk_count in the 32-byte FileHeader (uint32 at offset 8) and append the chunk
-// header + data. Existing chunks (incl. the MTRL PBR tail) are left byte-untouched.
-static void appendChunkTo(std::vector<uint8_t>& blob, uint32_t chunkId,
-                          const std::vector<uint8_t>& chunkData)
-{
-    if (blob.size() < sizeof(HAsset::FileHeader)) return;
-    uint32_t count = 0;
-    std::memcpy(&count, blob.data() + 8, sizeof(count));
-    count += 1;
-    std::memcpy(blob.data() + 8, &count, sizeof(count));
-
-    HAsset::ChunkHeader ch{};
-    ch.id   = chunkId;
-    ch.size = chunkData.size();
-    const auto* chp = reinterpret_cast<const uint8_t*>(&ch);
-    blob.insert(blob.end(), chp, chp + sizeof(ch));
-    blob.insert(blob.end(), chunkData.begin(), chunkData.end());
-}
-
-// Resolve an asset's path-based references to UUIDs and bake them into additive
-// U-chunks (MRFU/MTLU/SCNU). Loose editor assets keep their path chunks; the U-chunk
-// is added alongside so packed assets carry both. A ref whose target isn't in the
-// pack resolves to a null UUID placeholder (index-parallel; the frontier skips it).
-static void bakeUuidRefs(std::vector<uint8_t>& blob,
-                         const std::unordered_map<std::string, HE::UUID>& pathToUuid)
+// Pack-time reference rewrite: resolve an asset's path-based refs to UUIDs and
+// RE-serialize the asset with the path strings dropped — packed assets carry
+// UUID refs only (loose editor .hasset files keep paths for debugging):
+//   • StaticMesh/SkeletalMesh: MREF (material path) → replaced by MRFU (UUID).
+//   • Material: MTRL keeps its PBR scalar tail byte-identical, but shaderPath and
+//     texturePaths are written as empty strings; MTLU carries shaderId+textureIds.
+//   • Scene: SCNE (object paths) → replaced by SCNU (UUIDs). (objectPaths has no
+//     runtime consumer — verified before dropping.)
+// A ref whose target isn't in the pack becomes a null UUID placeholder so the
+// vectors stay index-parallel; the streaming frontier skips nulls. Assets of any
+// other type are returned unchanged.
+static std::vector<uint8_t> rewriteRefsForPack(
+    const std::vector<uint8_t>& blob,
+    const std::unordered_map<std::string, HE::UUID>& pathToUuid)
 {
     HAsset::Reader r;
-    if (!r.openData(blob)) return;
+    if (!r.openData(blob)) return blob;
     const auto type = static_cast<HE::AssetType>(r.assetType());
+
+    const bool isMesh  = type == HE::AssetType::StaticMesh || type == HE::AssetType::SkeletalMesh;
+    const bool isMat   = type == HE::AssetType::Material;
+    const bool isScene = type == HE::AssetType::Scene;
+    if (!isMesh && !isMat && !isScene) return blob; // no refs to rewrite
 
     auto resolve = [&](const std::string& p) -> HE::UUID {
         auto it = pathToUuid.find(p);
         return it != pathToUuid.end() ? it->second : HE::UUID{};
     };
 
-    switch (type)
+    HAsset::Writer w;
+    for (const auto& c : r.chunks())
     {
-    case HE::AssetType::StaticMesh:
-    case HE::AssetType::SkeletalMesh:
-    {
-        const auto* c = r.findChunk(HAsset::CHUNK_MREF);
-        if (!c) break;
-        size_t o = 0; std::string matPath;
-        if (!HAsset::Reader::readString(c->data, o, matPath) || matPath.empty()) break;
-        const HE::UUID mid = resolve(matPath);
-        std::vector<uint8_t> d;
-        HAsset::Writer::appendPOD(d, mid.hi);
-        HAsset::Writer::appendPOD(d, mid.lo);
-        appendChunkTo(blob, HAsset::CHUNK_MRFU, d);
-        break;
+        if (isMesh && c.id == HAsset::CHUNK_MREF)
+        {
+            // Replace the material path with its baked UUID.
+            size_t o = 0; std::string matPath;
+            HAsset::Reader::readString(c.data, o, matPath);
+            const HE::UUID mid = matPath.empty() ? HE::UUID{} : resolve(matPath);
+            std::vector<uint8_t> d;
+            HAsset::Writer::appendPOD(d, mid.hi);
+            HAsset::Writer::appendPOD(d, mid.lo);
+            w.addChunk(HAsset::CHUNK_MRFU, d.data(), d.size());
+            continue;
+        }
+        if (isMat && c.id == HAsset::CHUNK_MTRL)
+        {
+            // Read the two leading path fields, then copy the remaining scalar
+            // tail (baseColor/metallic/roughness/opacity + any future additions)
+            // byte-verbatim — no fragile re-serialization of the PBR values.
+            size_t o = 0; std::string shaderPath; std::vector<std::string> texPaths;
+            HAsset::Reader::readString(c.data, o, shaderPath);
+            HAsset::Reader::readVec(c.data, o, texPaths);
+
+            std::vector<uint8_t> mtrl;
+            HAsset::Writer::appendString(mtrl, std::string{});           // shaderPath dropped
+            HAsset::Writer::appendVec(mtrl, std::vector<std::string>{}); // texturePaths dropped
+            mtrl.insert(mtrl.end(), c.data.begin() + o, c.data.end());   // scalar tail verbatim
+            w.addChunk(HAsset::CHUNK_MTRL, mtrl.data(), mtrl.size());
+
+            const HE::UUID sid = shaderPath.empty() ? HE::UUID{} : resolve(shaderPath);
+            std::vector<HE::UUID> texIds; texIds.reserve(texPaths.size());
+            for (const auto& tp : texPaths) texIds.push_back(resolve(tp));
+            std::vector<uint8_t> d;
+            HAsset::Writer::appendPOD(d, sid.hi);
+            HAsset::Writer::appendPOD(d, sid.lo);
+            HAsset::Writer::appendVec(d, texIds);
+            w.addChunk(HAsset::CHUNK_MTLU, d.data(), d.size());
+            continue;
+        }
+        if (isScene && c.id == HAsset::CHUNK_SCNE)
+        {
+            size_t o = 0; std::vector<std::string> objPaths;
+            HAsset::Reader::readVec(c.data, o, objPaths);
+            std::vector<HE::UUID> objIds; objIds.reserve(objPaths.size());
+            for (const auto& op : objPaths) objIds.push_back(resolve(op));
+            std::vector<uint8_t> d;
+            HAsset::Writer::appendVec(d, objIds);
+            w.addChunk(HAsset::CHUNK_SCNU, d.data(), d.size());
+            continue;
+        }
+        w.addChunk(c.id, c.data.data(), c.data.size()); // everything else verbatim
     }
-    case HE::AssetType::Material:
-    {
-        const auto* c = r.findChunk(HAsset::CHUNK_MTRL);
-        if (!c) break;
-        size_t o = 0; std::string shaderPath; std::vector<std::string> texPaths;
-        HAsset::Reader::readString(c->data, o, shaderPath);
-        HAsset::Reader::readVec(c->data, o, texPaths);
-        const HE::UUID sid = shaderPath.empty() ? HE::UUID{} : resolve(shaderPath);
-        std::vector<HE::UUID> texIds; texIds.reserve(texPaths.size());
-        for (const auto& tp : texPaths) texIds.push_back(resolve(tp));
-        std::vector<uint8_t> d;
-        HAsset::Writer::appendPOD(d, sid.hi);
-        HAsset::Writer::appendPOD(d, sid.lo);
-        HAsset::Writer::appendVec(d, texIds);
-        appendChunkTo(blob, HAsset::CHUNK_MTLU, d);
-        break;
-    }
-    case HE::AssetType::Scene:
-    {
-        const auto* c = r.findChunk(HAsset::CHUNK_SCNE);
-        if (!c) break;
-        size_t o = 0; std::vector<std::string> objPaths;
-        HAsset::Reader::readVec(c->data, o, objPaths);
-        std::vector<HE::UUID> objIds; objIds.reserve(objPaths.size());
-        for (const auto& op : objPaths) objIds.push_back(resolve(op));
-        std::vector<uint8_t> d;
-        HAsset::Writer::appendVec(d, objIds);
-        appendChunkTo(blob, HAsset::CHUNK_SCNU, d);
-        break;
-    }
-    default: break;
-    }
+    return w.toBytes(r.assetType());
 }
 
 void HpakWriter::addEntry(const HE::UUID& id, const std::vector<uint8_t>& hassetData,
@@ -228,12 +227,11 @@ int HpakWriter::addDirectory(const std::filesystem::path& rootDir,
         pending.push_back({std::move(bytes), id});
     }
 
-    // Pass 2: bake path→UUID refs into additive U-chunks, then pack.
+    // Pass 2: rewrite path refs to baked UUIDs (dropping the path strings), then pack.
     int count = 0;
     for (auto& pe : pending)
     {
-        bakeUuidRefs(pe.bytes, pathToUuid);
-        addEntry(pe.id, pe.bytes, settings);
+        addEntry(pe.id, rewriteRefsForPack(pe.bytes, pathToUuid), settings);
         ++count;
     }
     return count;
