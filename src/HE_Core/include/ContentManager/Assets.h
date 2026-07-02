@@ -22,6 +22,7 @@ struct RuntimeAsset : public ContentAsset {};
 struct StaticMeshAsset : public RuntimeAsset
 {
 	std::string            materialPath;
+	HE::UUID               materialId;   // pack-time baked from materialPath; {} for loose/editor assets
 	std::vector<float>     vertices;
 	std::vector<uint32_t>  indices;
 	std::vector<float>     normals;
@@ -40,6 +41,7 @@ struct SkeletonJoint
 struct SkeletalMeshAsset : public RuntimeAsset
 {
 	std::string                 materialPath;
+	HE::UUID                    materialId;   // pack-time baked; {} for loose/editor assets
 	std::vector<float>          vertices;
 	std::vector<uint32_t>       indices;
 	std::vector<float>          normals;
@@ -53,6 +55,10 @@ struct MaterialAsset : public RuntimeAsset
 {
 	std::string                  shaderPath;
 	std::vector<std::string>     texturePaths;
+	// Pack-time baked UUID equivalents (index-parallel to texturePaths). Empty for
+	// loose/editor assets. Populated from the MTLU chunk when a packed asset is read.
+	HE::UUID                     shaderId;
+	std::vector<HE::UUID>        textureIds;
 
 	// PBR scalars (metallic-roughness workflow). baseColor multiplies the
 	// albedo (texture or flat); metallic/roughness drive the lighting. Appended
@@ -73,6 +79,7 @@ struct MaterialAsset : public RuntimeAsset
 struct SceneAsset : public RuntimeAsset
 {
 	std::vector<std::string> objectPaths;
+	std::vector<HE::UUID>    objectIds;   // pack-time baked, index-parallel to objectPaths; empty for loose
 };
 
 struct ScriptAsset : public RuntimeAsset

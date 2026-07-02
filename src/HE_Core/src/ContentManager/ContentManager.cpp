@@ -83,6 +83,7 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 	{
 		StaticMeshAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_MREF)) { size_t o=0; HAsset::Reader::readString(c->data,o,a.materialPath); }
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_MRFU)) { size_t o=0; HAsset::Reader::readPOD(c->data,o,a.materialId.hi); HAsset::Reader::readPOD(c->data,o,a.materialId.lo); }
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_VERT)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.vertices); }
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_INDX)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.indices); }
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_NORM)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.normals); }
@@ -93,6 +94,7 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 	{
 		SkeletalMeshAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_MREF)) { size_t o=0; HAsset::Reader::readString(c->data,o,a.materialPath); }
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_MRFU)) { size_t o=0; HAsset::Reader::readPOD(c->data,o,a.materialId.hi); HAsset::Reader::readPOD(c->data,o,a.materialId.lo); }
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_VERT)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.vertices); }
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_INDX)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.indices); }
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_NORM)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.normals); }
@@ -141,12 +143,20 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 			HAsset::Reader::readPOD(c->data,o,a.roughness);
 			HAsset::Reader::readPOD(c->data,o,a.opacity);
 		}
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_MTLU))
+		{
+			size_t o=0;
+			HAsset::Reader::readPOD(c->data,o,a.shaderId.hi);
+			HAsset::Reader::readPOD(c->data,o,a.shaderId.lo);
+			HAsset::Reader::readVec(c->data,o,a.textureIds);
+		}
 		handle = m_materialAssets.insert(std::move(a)); break;
 	}
 	case HE::AssetType::Scene:
 	{
 		SceneAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_SCNE)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.objectPaths); }
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_SCNU)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.objectIds); }
 		handle = m_sceneAssets.insert(std::move(a)); break;
 	}
 	case HE::AssetType::Script:
@@ -303,10 +313,33 @@ std::vector<HE::UUID> ContentManager::pollAsyncResults(size_t maxRegistrations)
 		{
 			HAsset::Reader reader;
 			if (reader.openData(r.fileBytes))
-				id = parseAndRegisterAsset(r.relativePath, r.fullPath, reader);
+			{
+				// Register under the asset's REAL embedded META path, not the
+				// synthetic "pak://hi-lo" coalesce key, so a path-based resolver
+				// (loadAsset(materialPath)) hits the m_pathToUUID cache instead of
+				// falling through to a disk read that fails in a pak-only build.
+				std::string registerPath = r.relativePath;
+				if (registerPath.rfind("pak://", 0) == 0)
+				{
+					if (const auto* meta = reader.findChunk(HAsset::CHUNK_META))
+					{
+						HE::UUID mid; std::string mname, mpath;
+						if (readMetaChunk(*meta, reader.header().version, mid, mname, mpath) && !mpath.empty())
+							registerPath = mpath;
+					}
+				}
+				id = parseAndRegisterAsset(registerPath, r.fullPath, reader);
+			}
 		}
 
-		if (id != HE::UUID{}) registered.push_back(id);
+		if (id != HE::UUID{})
+		{
+			registered.push_back(id);
+			// Reference-graph frontier: stream this asset's baked UUID dependencies
+			// (mesh→material, material→textures) so the closure loads with pure UUID
+			// traversal — no path lookups. No-op for loose assets (empty ref UUIDs).
+			expandFrontier(id);
+		}
 		if (r.callback) r.callback(id);
 	}
 	return registered;
@@ -385,6 +418,34 @@ size_t ContentManager::streamMountedAssets(const std::unordered_set<HE::UUID>& e
 		++submitted;
 	}
 	return submitted;
+}
+
+// ─── expandFrontier (reference-graph closure via baked UUID refs) ─────────────
+void ContentManager::expandFrontier(HE::UUID id)
+{
+	auto enqueue = [&](HE::UUID dep) {
+		// loadAssetAsync(uuid) itself skips already-resident + non-mounted UUIDs
+		// and coalesces duplicates, so this is safe to call unconditionally.
+		if (dep != HE::UUID{} && !isLoaded(dep)) loadAssetAsync(dep);
+	};
+	switch (assetType(id))
+	{
+	case HE::AssetType::StaticMesh:
+		if (const auto* a = getStaticMesh(id)) enqueue(a->materialId);
+		break;
+	case HE::AssetType::SkeletalMesh:
+		if (const auto* a = getSkeletalMesh(id)) enqueue(a->materialId);
+		break;
+	case HE::AssetType::Material:
+		if (const auto* a = getMaterial(id))
+		{
+			enqueue(a->shaderId);
+			for (HE::UUID t : a->textureIds) enqueue(t);
+		}
+		break;
+	default:
+		break;
+	}
 }
 
 // ─── readMountedEntry (raw, non-asset payload) ────────────────────────────────

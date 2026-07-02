@@ -66,6 +66,7 @@ inline constexpr uint32_t CHUNK_BONE = makeChunkId('B','O','N','E'); // boneIDs
 inline constexpr uint32_t CHUNK_BWGT = makeChunkId('B','W','G','T'); // bone weights
 inline constexpr uint32_t CHUNK_SKEL = makeChunkId('S','K','E','L'); // skeleton hierarchy
 inline constexpr uint32_t CHUNK_MREF = makeChunkId('M','R','E','F'); // material path
+inline constexpr uint32_t CHUNK_MRFU = makeChunkId('M','R','F','U'); // material UUID (pack-time baked; POD HE::UUID)
 
 // Texture
 inline constexpr uint32_t CHUNK_TXMI = makeChunkId('T','X','M','I'); // texture meta
@@ -77,6 +78,7 @@ inline constexpr uint32_t CHUNK_PCMD = makeChunkId('P','C','M','D'); // PCM data
 
 // Material
 inline constexpr uint32_t CHUNK_MTRL = makeChunkId('M','T','R','L'); // shader path + tex refs
+inline constexpr uint32_t CHUNK_MTLU = makeChunkId('M','T','L','U'); // shader UUID + texture UUIDs (pack-time baked)
 
 // Script / Shader (source text as UTF-8)
 inline constexpr uint32_t CHUNK_SRC  = makeChunkId('S','R','C',' ');
@@ -87,6 +89,7 @@ inline constexpr uint32_t CHUNK_FNTI = makeChunkId('F','N','T','I'); // font met
 
 // Scene
 inline constexpr uint32_t CHUNK_SCNE = makeChunkId('S','C','N','E'); // object path list
+inline constexpr uint32_t CHUNK_SCNU = makeChunkId('S','C','N','U'); // object UUIDs (pack-time baked)
 
 // Animation
 inline constexpr uint32_t CHUNK_ANIM = makeChunkId('A','N','I','M'); // duration + channels
