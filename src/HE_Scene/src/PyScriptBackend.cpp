@@ -5,6 +5,8 @@
 #include "HorizonScene/ScriptApi.h"
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
+#include <algorithm>
+#include <limits>
 
 // The interpreter is a process singleton driven from the main thread. A single
 // active backend feeds the module functions the current world/physics through
@@ -192,6 +194,14 @@ PyScriptBackend::~PyScriptBackend()
 {
 	if (m_impl)
 	{
+		// Dropping the last ref to an instance runs its Python finalizer (__del__)
+		// synchronously here, and a finalizer may call horizon.setVelocity/raycast/
+		// isGrounded. The owner often frees the PhysicsWorld *before* destroying this
+		// backend (e.g. editor play-mode stop resets physics, then the script
+		// context), leaving g_physics dangling. Null it first so those calls hit the
+		// null-guard in ScriptApi instead of dereferencing freed memory. g_world
+		// outlives the backend on every teardown path, so it stays valid here.
+		g_physics = nullptr;
 		for (auto& [id, inst] : m_impl->instances) Py_XDECREF(inst.obj);
 		for (auto& [name, cls] : m_impl->classes)  Py_XDECREF(cls);
 		Py_XDECREF(m_impl->behaviorBase);
@@ -358,13 +368,32 @@ std::vector<ScriptPropDef> PyScriptBackend::getScriptProperties(const std::strin
 
 		ScriptPropDef def; def.name = kname;
 		if (PyBool_Check(val))        { def.defaultVal.type = ScriptPropType::Bool;   def.defaultVal.b = (val == Py_True); }
-		else if (PyLong_Check(val))   { def.defaultVal.type = ScriptPropType::Int;    def.defaultVal.i = (int)PyLong_AsLong(val); }
+		else if (PyLong_Check(val))
+		{
+			// ScriptPropValue::i is int32. Clamp rather than let the C cast turn an
+			// out-of-range positive (e.g. 0xFFFFFFFF) into a negative, and treat a
+			// too-big-for-long-long value (10**40) as 0 without leaking the error.
+			def.defaultVal.type = ScriptPropType::Int;
+			long long lv = PyLong_AsLongLong(val);
+			if (PyErr_Occurred()) { PyErr_Clear(); lv = 0; }
+			lv = std::max<long long>(std::numeric_limits<int>::min(),
+			         std::min<long long>(std::numeric_limits<int>::max(), lv));
+			def.defaultVal.i = static_cast<int>(lv);
+		}
 		else if (PyFloat_Check(val))  { def.defaultVal.type = ScriptPropType::Float;  def.defaultVal.f = (float)PyFloat_AsDouble(val); }
-		else if (PyUnicode_Check(val)){ def.defaultVal.type = ScriptPropType::String; def.defaultVal.s = PyUnicode_AsUTF8(val); }
+		else if (PyUnicode_Check(val))
+		{
+			// A valid str can still fail strict-UTF-8 encoding (lone surrogate) and
+			// return NULL; assigning NULL to std::string is a strlen(NULL) crash.
+			const char* sv = PyUnicode_AsUTF8(val);
+			if (!sv) { PyErr_Clear(); continue; }
+			def.defaultVal.type = ScriptPropType::String; def.defaultVal.s = sv;
+		}
 		else continue;                                // skip methods/other types
 		out.push_back(std::move(def));
 	}
 	Py_DECREF(items);
+	PyErr_Clear();  // never leave a pending error for the next C-API call
 	return out;
 }
 

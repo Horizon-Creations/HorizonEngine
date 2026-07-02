@@ -8,7 +8,10 @@
 #include <HorizonScene/PyScriptBackend.h>
 #include <HorizonScene/ScriptContext.h>
 #include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/PhysicsWorld.h>
 #include <HorizonScene/Components/TransformComponent.h>
+#include <limits>
+#include <memory>
 
 // ─── Test scripts ───────────────────────────────────────────────────────────
 
@@ -330,6 +333,105 @@ TEST_CASE("ScriptContext: unloaded Python name falls back safely")
     auto e  = makeEntity(world, "E");
     auto id = ctx.createInstance("ghost", e); // routes to Lua (default), fails cleanly
     CHECK(id == ScriptEngine::kInvalidInstance);
+}
+
+// ─── Regression tests for adversarial-review findings ────────────────────────
+
+// #1: a valid str that fails strict UTF-8 (lone surrogate) must not crash the
+// property scan (PyUnicode_AsUTF8 → NULL → std::string(NULL) was a strlen crash).
+TEST_CASE("PyScriptBackend: non-UTF8 string property is skipped, not a crash")
+{
+    HorizonWorld world;
+    PyScriptBackend py(world);
+    static const char* kSurrogate = R"py(
+import horizon
+class P(horizon.Behavior):
+    good = 5
+    tag  = '\udce9'
+)py";
+    REQUIRE(py.loadScript("p", kSurrogate));
+    auto defs = py.getScriptProperties("p");   // must return, not segfault
+    bool hasGood = false, hasTag = false;
+    for (auto& d : defs) { if (d.name == "good") hasGood = true; if (d.name == "tag") hasTag = true; }
+    CHECK(hasGood);       // the encodable property survives
+    CHECK_FALSE(hasTag);  // the un-encodable one is dropped
+}
+
+// #2: int class attributes outside int32 must clamp (not wrap to -1 via C cast)
+// and must not leave a pending Python error.
+TEST_CASE("PyScriptBackend: out-of-range int properties clamp instead of wrapping")
+{
+    HorizonWorld world;
+    PyScriptBackend py(world);
+    static const char* kBigInts = R"py(
+import horizon
+class Q(horizon.Behavior):
+    big   = 10**40
+    col   = 0xFFFFFFFF
+    small = 7
+)py";
+    REQUIRE(py.loadScript("q", kBigInts));
+    auto defs = py.getScriptProperties("q");
+    auto find = [&](const char* n) -> const ScriptPropDef* {
+        for (auto& d : defs) if (d.name == n) return &d; return nullptr;
+    };
+    REQUIRE(find("small")); CHECK(find("small")->defaultVal.i == 7);
+    REQUIRE(find("col"));   CHECK(find("col")->defaultVal.i == std::numeric_limits<int>::max());
+    REQUIRE(find("big"));   CHECK(find("big")->defaultVal.i == 0); // overflowed long long → 0, no wrap
+    // A follow-up call proves no stale error leaked from the overflow.
+    CHECK(py.getScriptProperties("q").size() == defs.size());
+}
+
+// #4: two entities sharing a moduleName across languages each route to their own
+// backend when the caller passes the language (createInstance/isScriptLoaded 3-arg).
+TEST_CASE("ScriptContext: same moduleName in two languages routes by language")
+{
+    HorizonWorld world;
+    ScriptContext ctx(world);
+    REQUIRE(ctx.loadScript("shared", kLuaSetX, ScriptLanguage::Lua));
+    REQUIRE(ctx.loadScript("shared", kMover,   ScriptLanguage::Python));
+    CHECK(ctx.isScriptLoaded("shared", ScriptLanguage::Lua));
+    CHECK(ctx.isScriptLoaded("shared", ScriptLanguage::Python));
+
+    auto eL = makeEntity(world, "L");
+    auto eP = makeEntity(world, "P");
+    auto idL = ctx.createInstance("shared", eL, ScriptLanguage::Lua);
+    auto idP = ctx.createInstance("shared", eP, ScriptLanguage::Python);
+    REQUIRE(idL != ScriptEngine::kInvalidInstance);
+    REQUIRE(idP != ScriptEngine::kInvalidInstance);
+    CHECK(idL != idP);
+
+    REQUIRE(ctx.callOnStart(idL));  // Lua kLuaSetX  → x = 3
+    REQUIRE(ctx.callOnStart(idP));  // Python kMover → (7,8,9)
+    CHECK(world.registry().get<TransformComponent>(eL).position.x == doctest::Approx(3.0f));
+    CHECK(world.registry().get<TransformComponent>(eP).position.x == doctest::Approx(7.0f));
+    CHECK(world.registry().get<TransformComponent>(eP).position.z == doctest::Approx(9.0f));
+}
+
+// #3: an instance finalizer that calls physics must be safe even when the
+// PhysicsWorld was freed before the backend is destroyed (g_physics nulled first).
+// A hard failure here needs ASAN; without it this still asserts no crash.
+TEST_CASE("PyScriptBackend: finalizer touching freed physics during teardown is safe")
+{
+    HorizonWorld world;
+    auto e  = makeEntity(world, "E");
+    auto py = std::make_unique<PyScriptBackend>(world);
+
+    static const char* kFinalizer = R"py(
+import horizon
+class F(horizon.Behavior):
+    def __del__(self):
+        horizon.setVelocity(self.entity_id, 1.0, 2.0, 3.0)
+        horizon.isGrounded(self.entity_id)
+)py";
+    REQUIRE(py->loadScript("f", kFinalizer));
+    {
+        PhysicsWorld phys; phys.initialize(world);
+        py->setPhysicsWorld(&phys);
+        py->createInstance("f", static_cast<uint32_t>(e));
+    } // phys destroyed here → g_physics now dangles
+    py.reset(); // backend dtor runs the finalizer; must not touch freed physics
+    CHECK(true);
 }
 
 #endif // HE_HAVE_PYTHON
