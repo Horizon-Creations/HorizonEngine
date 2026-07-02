@@ -201,20 +201,58 @@ void HpakWriter::addEntry(const HE::UUID& id, const std::vector<uint8_t>& hasset
     m_entries.push_back(std::move(e));
 }
 
+// Glob matcher for PackSettings::excludePatterns: `*` matches any sequence
+// (including '/'), `?` matches exactly one character. Iterative backtracking
+// (classic wildcard match) — no regex, no recursion.
+bool Hpak::globMatch(const std::string& pattern, const std::string& path)
+{
+    size_t p = 0, s = 0, starP = std::string::npos, starS = 0;
+    while (s < path.size())
+    {
+        if (p < pattern.size() && (pattern[p] == '?' || pattern[p] == path[s]))
+        {
+            ++p; ++s;
+        }
+        else if (p < pattern.size() && pattern[p] == '*')
+        {
+            starP = p++;   // remember the star; try matching zero chars first
+            starS = s;
+        }
+        else if (starP != std::string::npos)
+        {
+            p = starP + 1; // backtrack: let the star swallow one more char
+            s = ++starS;
+        }
+        else return false;
+    }
+    while (p < pattern.size() && pattern[p] == '*') ++p; // trailing stars match empty
+    return p == pattern.size();
+}
+
 int HpakWriter::addDirectory(const std::filesystem::path& rootDir,
-                              const Hpak::PackSettings& settings)
+                              const Hpak::PackSettings& settings,
+                              const AddProgressFn& progress)
 {
     std::error_code ec;
 
     // Pass 1: read every .hasset, extract (UUID, embedded path), and build a
     // path→UUID map. Each asset's own META (path,uuid) pair IS the manifest — no
     // separate manifest file is needed to resolve intra-asset path references.
-    struct Pending { std::vector<uint8_t> bytes; HE::UUID id; };
+    struct Pending { std::vector<uint8_t> bytes; HE::UUID id; std::string relPath; };
     std::vector<Pending> pending;
     std::unordered_map<std::string, HE::UUID> pathToUuid;
     for (const auto& p : std::filesystem::recursive_directory_iterator(rootDir, ec))
     {
         if (!p.is_regular_file(ec) || p.path().extension() != ".hasset") continue;
+
+        // Exclude filter: match against the rootDir-relative path with forward
+        // slashes (e.g. "Debug/Test.hasset"), the same shape shown in the editor.
+        std::string rel = std::filesystem::relative(p.path(), rootDir, ec).generic_string();
+        if (ec) { ec.clear(); rel = p.path().filename().generic_string(); }
+        bool excluded = false;
+        for (const auto& pat : settings.excludePatterns)
+            if (!pat.empty() && Hpak::globMatch(pat, rel)) { excluded = true; break; }
+        if (excluded) continue;
 
         std::ifstream f(p.path(), std::ios::binary);
         if (!f) continue;
@@ -224,16 +262,20 @@ int HpakWriter::addDirectory(const std::filesystem::path& rootDir,
         HE::UUID id; std::string path;
         if (!metaFromHasset(bytes, id, path) || id == HE::UUID{}) continue;
         if (!path.empty()) pathToUuid[path] = id;
-        pending.push_back({std::move(bytes), id});
+        pending.push_back({std::move(bytes), id, std::move(rel)});
     }
 
     // Pass 2: rewrite path refs to baked UUIDs (dropping the path strings), then pack.
+    // This is the expensive pass (compression + encryption) → progress reports here.
     int count = 0;
+    const int total = static_cast<int>(pending.size());
     for (auto& pe : pending)
     {
+        if (progress) progress(count, total, pe.relPath);
         addEntry(pe.id, rewriteRefsForPack(pe.bytes, pathToUuid), settings);
         ++count;
     }
+    if (progress) progress(count, total, {});
     return count;
 }
 

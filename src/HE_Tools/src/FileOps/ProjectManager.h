@@ -1,6 +1,7 @@
 #pragma once
 #include "HE_TOOLS_API.h"
 #include <string>
+#include <vector>
 #include <functional>
 
 enum class ProjectPreset
@@ -11,11 +12,37 @@ enum class ProjectPreset
 	Tool,        // Assets, Source sub-folders
 };
 
+// A named, persisted packaging preset (Build > Export Project). Stored in the
+// .heproj manifest so export settings survive editor restarts. The editor maps
+// the selected profile onto ExportSettings (HE_Core) when exporting.
+struct ExportProfile
+{
+	std::string name;
+	bool        compress         = true;
+	bool        encrypt          = false;
+	bool        enableModSupport = false;
+	// Project-relative path of the .hescene to ship as startup scene.
+	// Empty = the scene currently open in the editor.
+	std::string startupScene;
+	// Export output directory. Empty = <ProjectRoot>/Export/<profile name>.
+	std::string outputDir;
+	// Glob patterns (Content-relative, forward slashes) excluded from the pak,
+	// e.g. "Debug/*", "*_test.hasset".
+	std::vector<std::string> excludePatterns;
+};
+
+// The two seeded defaults for projects that have no profiles yet (also used by
+// tests): "Development" (uncompressed, mods on) and "Shipping" (zstd + AES).
+HE_TOOLS_API std::vector<ExportProfile> defaultExportProfiles();
+
 struct ProjectData
 {
 	std::string name;
 	std::string path;
 	std::string startupScene; // absolute path to the startup .hescene file (empty = none)
+
+	std::vector<ExportProfile> exportProfiles;      // never empty after load/create
+	std::string                activeExportProfile; // name of the last-used profile
 };
 
 class HE_TOOLS_API ProjectManager

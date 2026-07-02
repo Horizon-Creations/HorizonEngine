@@ -32,6 +32,9 @@
 #include <array>
 #include <unordered_map>
 #include <cmath>
+#include <atomic>
+#include <mutex>
+#include <thread>
 
 // Forward declaration — defined in EditorApplication.cpp
 std::string getRHIName(HE::RendererBackend backend);
@@ -96,14 +99,89 @@ static bool s_showPreferences = false;
 // Toggled by View > Performance Profiler; drives the profiler panel.
 static bool s_showProfiler = false;
 
-// Build > Export Project modal state
+// Build > Export Project modal state. Editable fields mirror the selected
+// ExportProfile (persisted in the .heproj); the export itself runs on a worker
+// thread so packing/compression never freezes the UI.
 static bool   s_showExportModal   = false;
-static char   s_exportOutputDir[512] = {};
+static int    s_exportProfileIdx  = 0;             // index into exportProfiles
+static char   s_exportOutputDir[512]  = {};
 static bool   s_exportCompress    = true;
 static bool   s_exportEncrypt     = false;
 static bool   s_exportModSupport  = false;
-static bool   s_exportRunning     = false;
-static std::string s_exportResult;
+static char   s_exportExcludes[1024]  = {};        // one glob pattern per line
+static std::string              s_exportStartupScene;  // project-relative; "" = current scene
+static std::vector<std::string> s_exportSceneChoices;  // .hescene files found on modal open
+static char   s_exportNewProfileName[64] = {};
+// Worker-thread state: the callback writes the atomics + the mutex-guarded
+// strings; the UI thread only reads them and joins once running flips false.
+static std::atomic<bool> s_exportRunning{false};
+static std::atomic<int>  s_exportDone{0};
+static std::atomic<int>  s_exportTotal{0};
+static std::mutex        s_exportMutex;            // guards the two strings below
+static std::string       s_exportCurrentFile;
+static std::string       s_exportResultShared;
+static std::string       s_exportResult;           // UI-side copy (main thread only)
+static std::thread       s_exportThread;
+
+void EditorUI::joinPendingExport()
+{
+	// Called on editor shutdown: an export in flight must finish before the
+	// process tears down statics (a joinable std::thread dying = std::terminate).
+	if (s_exportThread.joinable()) s_exportThread.join();
+}
+
+// One exclude pattern per line; blank lines and surrounding whitespace dropped.
+static std::vector<std::string> parseExcludeLines(const char* buf)
+{
+	std::vector<std::string> out;
+	std::string line;
+	for (const char* c = buf;; ++c)
+	{
+		if (*c == '\n' || *c == '\r' || *c == '\0')
+		{
+			const auto a = line.find_first_not_of(" \t");
+			if (a != std::string::npos)
+			{
+				const auto b = line.find_last_not_of(" \t");
+				out.push_back(line.substr(a, b - a + 1));
+			}
+			line.clear();
+			if (*c == '\0') break;
+		}
+		else line += *c;
+	}
+	return out;
+}
+
+// Fill the export dialog fields from a profile. An empty profile outputDir
+// resolves to <projectRoot>/Export/<profile name>.
+static void exportProfileToDialog(const ExportProfile& p, const std::filesystem::path& projectRoot)
+{
+	const std::string out = p.outputDir.empty()
+		? (projectRoot / "Export" / p.name).string()
+		: p.outputDir;
+	std::strncpy(s_exportOutputDir, out.c_str(), sizeof(s_exportOutputDir) - 1);
+	s_exportOutputDir[sizeof(s_exportOutputDir) - 1] = '\0';
+	s_exportCompress     = p.compress;
+	s_exportEncrypt      = p.encrypt;
+	s_exportModSupport   = p.enableModSupport;
+	s_exportStartupScene = p.startupScene;
+	std::string ex;
+	for (const auto& pat : p.excludePatterns) { ex += pat; ex += '\n'; }
+	std::strncpy(s_exportExcludes, ex.c_str(), sizeof(s_exportExcludes) - 1);
+	s_exportExcludes[sizeof(s_exportExcludes) - 1] = '\0';
+}
+
+// Read the dialog fields back into a profile (the name stays as-is).
+static void exportDialogToProfile(ExportProfile& p)
+{
+	p.outputDir        = s_exportOutputDir;
+	p.compress         = s_exportCompress;
+	p.encrypt          = s_exportEncrypt;
+	p.enableModSupport = s_exportModSupport;
+	p.startupScene     = s_exportStartupScene;
+	p.excludePatterns  = parseExcludeLines(s_exportExcludes);
+}
 
 // Active manipulation tool, shared by the viewport toolbar buttons and the
 // W/E/R shortcuts and consumed by the gizmo (Move / Rotate / Scale).
@@ -1385,16 +1463,29 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 	}
 	if (ImGui::BeginMenu("Build", ctx.projectLoaded))
 	{
-		if (ImGui::MenuItem("Export Project..."))
+		if (ImGui::MenuItem("Export Project...") && ctx.projectManager)
 		{
-			if (s_exportOutputDir[0] == '\0' && ctx.projectManager)
-			{
-				const auto& proj = ctx.projectManager->currentProject();
-				const auto outPath = std::filesystem::path(proj.path) / "Export";
-				std::strncpy(s_exportOutputDir, outPath.string().c_str(), sizeof(s_exportOutputDir) - 1);
-			}
+			auto& proj = ctx.projectManager->currentProject();
+			const std::filesystem::path projectRoot =
+				std::filesystem::path(proj.path).parent_path();
+
+			// Select the last-used profile and mirror it into the dialog fields.
+			s_exportProfileIdx = 0;
+			for (int i = 0; i < static_cast<int>(proj.exportProfiles.size()); ++i)
+				if (proj.exportProfiles[i].name == proj.activeExportProfile)
+				{ s_exportProfileIdx = i; break; }
+			if (!proj.exportProfiles.empty())
+				exportProfileToDialog(proj.exportProfiles[s_exportProfileIdx], projectRoot);
+
+			// Offer every .hescene in the project as a startup-scene choice.
+			s_exportSceneChoices.clear();
+			std::error_code ec;
+			for (const auto& e : std::filesystem::recursive_directory_iterator(projectRoot, ec))
+				if (e.is_regular_file(ec) && e.path().extension() == ".hescene")
+					s_exportSceneChoices.push_back(
+						std::filesystem::relative(e.path(), projectRoot, ec).generic_string());
+
 			s_exportResult.clear();
-			s_exportRunning = false;
 			s_showExportModal = true;
 		}
 		ImGui::EndMenu();
@@ -1418,15 +1509,116 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
         s_showExportModal = false;
     }
     {
+        // Reap a finished export worker + fetch its result. This runs outside the
+        // modal so a completed export is joined even if the popup was closed.
+        if (!s_exportRunning.load() && s_exportThread.joinable())
+        {
+            s_exportThread.join();
+            std::lock_guard<std::mutex> lk(s_exportMutex);
+            if (!s_exportResultShared.empty())
+                s_exportResult = s_exportResultShared;
+        }
+
         ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(),
                                 ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-        ImGui::SetNextWindowSize(ImVec2(520, 0), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2(560, 0), ImGuiCond_Always);
         if (ImGui::BeginPopupModal("Export Project##build", nullptr,
             ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings))
         {
+            ProjectManager* pm = ctx.projectManager;
+            const std::filesystem::path projectRoot = pm
+                ? std::filesystem::path(pm->currentProject().path).parent_path()
+                : std::filesystem::path{};
+            const bool running = s_exportRunning.load();
+
+            if (running) ImGui::BeginDisabled();
+
+            // ── Profile row: dropdown + Save Profile + Save As <name> ─────────
+            if (pm && !pm->currentProject().exportProfiles.empty())
+            {
+                auto& proj = pm->currentProject();
+                if (s_exportProfileIdx >= static_cast<int>(proj.exportProfiles.size()))
+                    s_exportProfileIdx = 0;
+
+                ImGui::Text("Profile:");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(180.0f);
+                if (ImGui::BeginCombo("##exportProfile",
+                        proj.exportProfiles[s_exportProfileIdx].name.c_str()))
+                {
+                    for (int i = 0; i < static_cast<int>(proj.exportProfiles.size()); ++i)
+                    {
+                        const bool sel = (i == s_exportProfileIdx);
+                        if (ImGui::Selectable(proj.exportProfiles[i].name.c_str(), sel) && !sel)
+                        {
+                            s_exportProfileIdx = i;
+                            exportProfileToDialog(proj.exportProfiles[i], projectRoot);
+                            proj.activeExportProfile = proj.exportProfiles[i].name;
+                            pm->saveProject(proj.path);
+                            s_exportResult.clear();
+                        }
+                        if (sel) ImGui::SetItemDefaultFocus();
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Save Profile"))
+                {
+                    exportDialogToProfile(proj.exportProfiles[s_exportProfileIdx]);
+                    proj.activeExportProfile = proj.exportProfiles[s_exportProfileIdx].name;
+                    pm->saveProject(proj.path);
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Store the fields below into the selected profile\n(persisted in the .heproj manifest).");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(120.0f);
+                ImGui::InputTextWithHint("##newProfileName", "new profile",
+                                         s_exportNewProfileName, sizeof(s_exportNewProfileName));
+                ImGui::SameLine();
+                const bool canAdd = s_exportNewProfileName[0] != '\0';
+                if (!canAdd) ImGui::BeginDisabled();
+                if (ImGui::Button("Save As"))
+                {
+                    // Same name = overwrite that profile, otherwise append a new one.
+                    int idx = -1;
+                    for (int i = 0; i < static_cast<int>(proj.exportProfiles.size()); ++i)
+                        if (proj.exportProfiles[i].name == s_exportNewProfileName) { idx = i; break; }
+                    if (idx < 0)
+                    {
+                        ExportProfile np;
+                        np.name = s_exportNewProfileName;
+                        proj.exportProfiles.push_back(std::move(np));
+                        idx = static_cast<int>(proj.exportProfiles.size()) - 1;
+                    }
+                    exportDialogToProfile(proj.exportProfiles[idx]);
+                    s_exportProfileIdx       = idx;
+                    proj.activeExportProfile = proj.exportProfiles[idx].name;
+                    pm->saveProject(proj.path);
+                    s_exportNewProfileName[0] = '\0';
+                }
+                if (!canAdd) ImGui::EndDisabled();
+                ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+            }
+
+            // ── Editable fields (mirror of the selected profile) ──────────────
             ImGui::Text("Output Directory:");
             ImGui::SetNextItemWidth(-1.0f);
             ImGui::InputText("##exportDir", s_exportOutputDir, sizeof(s_exportOutputDir));
+
+            ImGui::Text("Startup Scene:");
+            ImGui::SetNextItemWidth(-1.0f);
+            const char* scenePreview = s_exportStartupScene.empty()
+                ? "(currently open scene)" : s_exportStartupScene.c_str();
+            if (ImGui::BeginCombo("##exportScene", scenePreview))
+            {
+                if (ImGui::Selectable("(currently open scene)", s_exportStartupScene.empty()))
+                    s_exportStartupScene.clear();
+                for (const auto& sc : s_exportSceneChoices)
+                    if (ImGui::Selectable(sc.c_str(), sc == s_exportStartupScene))
+                        s_exportStartupScene = sc;
+                ImGui::EndCombo();
+            }
+
             ImGui::Spacing();
             ImGui::Checkbox("Compress assets",       &s_exportCompress);
             ImGui::Checkbox("Encrypt assets",        &s_exportEncrypt);
@@ -1435,9 +1627,42 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
             ImGui::Checkbox("Enable mod support",    &s_exportModSupport);
             if (s_exportModSupport)
                 ImGui::TextDisabled("The game mounts every .hpak in a Mods/ folder next to the executable.");
+
+            ImGui::Spacing();
+            ImGui::Text("Exclude Patterns:");
+            ImGui::SameLine();
+            ImGui::TextDisabled("(?)");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("One glob per line, matched against Content-relative paths.\n"
+                                  "*  matches any characters (including /)\n"
+                                  "?  matches exactly one character\n"
+                                  "Examples: Debug/*   *_test.hasset   Scenes/Playground*");
+            ImGui::InputTextMultiline("##exportExcludes", s_exportExcludes, sizeof(s_exportExcludes),
+                                      ImVec2(-1.0f, ImGui::GetTextLineHeight() * 3.5f));
+
+            if (running) ImGui::EndDisabled();
+
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
 
-            if (!s_exportResult.empty())
+            // ── Progress (while running) / result (after) ─────────────────────
+            if (running)
+            {
+                const int done  = s_exportDone.load();
+                const int total = s_exportTotal.load();
+                std::string current;
+                {
+                    std::lock_guard<std::mutex> lk(s_exportMutex);
+                    current = s_exportCurrentFile;
+                }
+                char overlay[64];
+                std::snprintf(overlay, sizeof(overlay), "%d / %d", done, total);
+                ImGui::ProgressBar(total > 0 ? static_cast<float>(done) / static_cast<float>(total)
+                                             : 0.0f,
+                                   ImVec2(-1.0f, 0.0f), overlay);
+                ImGui::TextDisabled("%s", current.empty() ? "Packing..." : current.c_str());
+                ImGui::Spacing();
+            }
+            else if (!s_exportResult.empty())
             {
                 const bool ok = s_exportResult.rfind("OK:", 0) == 0;
                 if (ok) ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.2f, 1.f), "%s", s_exportResult.c_str());
@@ -1446,55 +1671,86 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
             }
 
             const bool canExport = s_exportOutputDir[0] != '\0'
-                                && ctx.contentManager && !s_exportRunning;
+                                && ctx.contentManager && !running;
             if (!canExport) ImGui::BeginDisabled();
             if (ImGui::Button("Export", ImVec2(110, 0)))
             {
-                s_exportRunning = true;
-                const std::string projName = ctx.projectManager
-                    ? ctx.projectManager->currentProject().name : "Game";
-                const std::string contentDir = ctx.contentManager
-                    ? ctx.contentManager->contentRoot() : "";
+                // Resolve the startup scene: the profile's project-relative choice,
+                // or the scene currently open in the editor.
+                std::string scenePath = ctx.currentScenePath;
+                if (!s_exportStartupScene.empty() && !projectRoot.empty())
+                    scenePath = (projectRoot / s_exportStartupScene).string();
                 std::string sceneName;
-                if (!ctx.currentScenePath.empty())
-                    sceneName = std::filesystem::path(ctx.currentScenePath).filename().string();
+                if (!scenePath.empty())
+                    sceneName = std::filesystem::path(scenePath).filename().string();
+
+                // Serialize the SAVED startup scene to binary (CBOR) on the main
+                // thread — loaded fresh from disk rather than the live editor
+                // world, which may hold unsaved or play-mode mutations.
+                std::vector<uint8_t> sceneBinary;
+                if (!scenePath.empty())
+                {
+                    HorizonWorld sceneWorld;
+                    SceneSerializer ser;
+                    if (ser.load(sceneWorld, scenePath, SerializeFormat::JSON))
+                        ser.saveToMemory(sceneWorld, sceneBinary);
+                }
 
                 ExportSettings es;
                 es.compress         = s_exportCompress;
                 es.encrypt          = s_exportEncrypt;
                 es.enableModSupport = s_exportModSupport;
+                es.excludePatterns  = parseExcludeLines(s_exportExcludes);
                 // Resolve game runtime dir from editor executable location (../Game/)
                 if (const char* base = SDL_GetBasePath())
                     es.gameRuntimeDir = std::filesystem::path(base) / ".." / "Game";
-
-                // Serialize the SAVED startup scene to binary (CBOR) so it ships
-                // packed inside the .hpak. Load fresh from disk rather than the live
-                // editor world, which may hold unsaved or play-mode mutations.
-                std::vector<uint8_t> sceneBinary;
-                if (!ctx.currentScenePath.empty())
+                // Worker → UI progress: atomics + a mutex-guarded filename.
+                es.progress = [](int done, int total, const std::string& current)
                 {
-                    HorizonWorld sceneWorld;
-                    SceneSerializer ser;
-                    if (ser.load(sceneWorld, ctx.currentScenePath, SerializeFormat::JSON))
-                        ser.saveToMemory(sceneWorld, sceneBinary);
+                    s_exportDone.store(done);
+                    s_exportTotal.store(total);
+                    std::lock_guard<std::mutex> lk(s_exportMutex);
+                    s_exportCurrentFile = current;
+                };
+
+                const std::string projName = pm ? pm->currentProject().name : "Game";
+                const std::string contentDir = ctx.contentManager->contentRoot();
+                const std::string outDir     = s_exportOutputDir;
+
+                s_exportDone.store(0);
+                s_exportTotal.store(0);
+                {
+                    std::lock_guard<std::mutex> lk(s_exportMutex);
+                    s_exportCurrentFile.clear();
+                    s_exportResultShared.clear();
                 }
-
-                const auto res = ProjectExporter::exportProject(
-                    contentDir, projName, sceneName,
-                    std::filesystem::path(s_exportOutputDir), es, sceneBinary);
-
-                if (res.success)
-                    s_exportResult = "OK: " + std::to_string(res.assetsPacked)
-                                   + " asset(s) packed, " + std::to_string(res.binaryFilesCopied)
-                                   + " binary file(s) → " + s_exportOutputDir;
-                else
-                    s_exportResult = "Error: " + res.errorMessage;
-                s_exportRunning = false;
+                s_exportResult.clear();
+                s_exportRunning.store(true);
+                if (s_exportThread.joinable()) s_exportThread.join(); // defensive; reaped above
+                s_exportThread = std::thread([es, contentDir, projName, sceneName,
+                                              outDir, sceneBinary]()
+                {
+                    const auto res = ProjectExporter::exportProject(
+                        contentDir, projName, sceneName,
+                        std::filesystem::path(outDir), es, sceneBinary);
+                    std::string msg = res.success
+                        ? "OK: " + std::to_string(res.assetsPacked)
+                          + " asset(s) packed, " + std::to_string(res.binaryFilesCopied)
+                          + " binary file(s) → " + outDir
+                        : "Error: " + res.errorMessage;
+                    {
+                        std::lock_guard<std::mutex> lk(s_exportMutex);
+                        s_exportResultShared = std::move(msg);
+                    }
+                    s_exportRunning.store(false); // last: UI may join right after
+                });
             }
             if (!canExport) ImGui::EndDisabled();
             ImGui::SameLine();
+            if (running) ImGui::BeginDisabled();
             if (ImGui::Button("Close", ImVec2(80, 0)))
                 ImGui::CloseCurrentPopup();
+            if (running) ImGui::EndDisabled();
             ImGui::EndPopup();
         }
     }

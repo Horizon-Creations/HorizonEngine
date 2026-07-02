@@ -37,6 +37,7 @@ add_executable(he_tests
     test_async_streaming.cpp
     test_crash_handler.cpp
     test_project_exporter.cpp
+    test_export_profiles.cpp
     test_lod.cpp
     test_weather.cpp
     test_gamelogic_loader.cpp
@@ -96,6 +97,7 @@ target_link_libraries(he_tests PRIVATE
     HorizonCore
     HorizonScene
     HorizonImporters
+    HorizonTools
     nlohmann_json::nlohmann_json
 )
 
@@ -111,6 +113,8 @@ if(WIN32)
             $<TARGET_FILE:HorizonCore>  $<TARGET_FILE_DIR:he_tests>
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             $<TARGET_FILE:HorizonScene> $<TARGET_FILE_DIR:he_tests>
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:HorizonTools> $<TARGET_FILE_DIR:he_tests>
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             $<TARGET_FILE:SDL3-shared>  $<TARGET_FILE_DIR:he_tests>
         VERBATIM
