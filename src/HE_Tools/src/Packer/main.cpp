@@ -17,7 +17,8 @@ int main(int argc, char** argv)
     if (argc < 3)
     {
         std::cerr << "Usage: hpak_packer <project_root> <output.hpak> "
-                     "[--codec store|lz4|zstd] [--secret <passphrase>]\n";
+                     "[--codec store|lz4|zstd] [--secret <passphrase>] "
+                     "[--exclude <glob>]...\n";
         return 1;
     }
 
@@ -26,6 +27,7 @@ int main(int argc, char** argv)
 
     std::string   secret;
     Hpak::Codec   codec = Hpak::Codec::Zstd; // sensible ship default
+    std::vector<std::string> excludes;
     for (int i = 3; i < argc - 1; ++i)
     {
         if (std::strcmp(argv[i], "--secret") == 0)
@@ -41,6 +43,12 @@ int main(int argc, char** argv)
             else if (c == "zstd")  codec = Hpak::Codec::Zstd;
             ++i;
         }
+        else if (std::strcmp(argv[i], "--exclude") == 0)
+        {
+            // Repeatable. Glob vs the project-root-relative path ('*' spans '/').
+            excludes.emplace_back(argv[i + 1]);
+            ++i;
+        }
     }
 
     if (!std::filesystem::exists(inputPath))
@@ -51,6 +59,7 @@ int main(int argc, char** argv)
 
     Hpak::PackSettings settings;
     settings.codec = codec;
+    settings.excludePatterns = std::move(excludes);
     if (!secret.empty())
     {
         settings.encrypt = true;

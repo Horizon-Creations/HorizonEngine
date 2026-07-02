@@ -1602,6 +1602,10 @@ void EditorApplication::newScene()
 
 void EditorApplication::OnShutdown()
 {
+	// A project export may still be packing on its worker thread — wait for it
+	// (destroying a joinable std::thread would terminate the process).
+	EditorUI::joinPendingExport();
+
 #ifdef HE_IMGUI_ENABLED
 	if (!m_imguiReady) return;
 	Logger::Log(Logger::LogLevel::Info, "EditorApplication::OnShutdown — shutting down ImGui");

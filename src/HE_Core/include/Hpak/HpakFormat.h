@@ -1,6 +1,9 @@
 #pragma once
 #include <cstdint>
 #include <cstddef>
+#include <string>
+#include <vector>
+#include <Types/Defines.h>
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  .hpak  —  Horizon Engine packed asset archive (binary format), version 2
@@ -111,6 +114,14 @@ struct PackSettings {
     int     level   = 0;            // codec level; 0 = codec default (LZ4HC 9 / zstd 19)
     bool    encrypt = false;        // XOR obfuscation with `key` (see kFlagEncrypted note)
     uint8_t key[32] = {};           // 32-byte key (from KeyDerivation::derive)
+    // Glob patterns matched against each file's path RELATIVE to the packed
+    // directory (forward slashes, e.g. "Debug/*", "*_test.hasset"). Matching
+    // files are skipped by HpakWriter::addDirectory. `*` matches any sequence
+    // (including '/'), `?` matches exactly one character. Case-sensitive.
+    std::vector<std::string> excludePatterns;
 };
+
+// Glob match used by PackSettings::excludePatterns (see semantics there).
+HE_API bool globMatch(const std::string& pattern, const std::string& path);
 
 } // namespace Hpak

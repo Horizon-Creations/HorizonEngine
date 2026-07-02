@@ -42,8 +42,10 @@ ExportResult ProjectExporter::exportProject(
             return {false, "Crypto backend unavailable — cannot encrypt", 0};
     }
 
+    packSettings.excludePatterns = settings.excludePatterns;
+
     HpakWriter packer;
-    const int added = packer.addDirectory(contentDir, packSettings);
+    const int added = packer.addDirectory(contentDir, packSettings, settings.progress);
 
     // Pack the startup scene as a binary entry INTO the pak (if the caller
     // serialized one), under a fresh UUID recorded in the hcfg. Same codec +

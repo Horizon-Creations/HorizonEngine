@@ -3,6 +3,7 @@
 #include <Types/UUID.h>
 #include <Types/Defines.h>
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <vector>
 #include <cstdint>
@@ -15,11 +16,18 @@ public:
     void addEntry(const HE::UUID& id, const std::vector<uint8_t>& hassetData,
                   const Hpak::PackSettings& settings = Hpak::PackSettings{});
 
+    // Progress callback for addDirectory: (entriesDone, entriesTotal, currentFile).
+    // Called before each file is packed and once more with (total, total, "") at
+    // the end. currentFile is the rootDir-relative path being packed.
+    using AddProgressFn = std::function<void(int, int, const std::string&)>;
+
     // Scan rootDir recursively for *.hasset files. UUID is read from the
-    // embedded META chunk; files where the UUID cannot be parsed are skipped.
+    // embedded META chunk; files where the UUID cannot be parsed are skipped,
+    // as are files matching settings.excludePatterns (see PackSettings).
     // Returns the number of entries successfully added.
     int addDirectory(const std::filesystem::path& rootDir,
-                     const Hpak::PackSettings& settings = Hpak::PackSettings{});
+                     const Hpak::PackSettings& settings = Hpak::PackSettings{},
+                     const AddProgressFn& progress = {});
 
     // Write all added entries to outputPath. Returns false on I/O error.
     bool write(const std::string& outputPath) const;

@@ -1,6 +1,7 @@
 #pragma once
 #include <Types/Defines.h>
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <vector>
 #include <cstdint>
@@ -17,6 +18,13 @@ struct HE_API ExportSettings {
     // executable + dylibs/DLLs) are copied into outputDir so the export is
     // self-contained and runnable on the target machine.
     std::filesystem::path gameRuntimeDir;
+    // Glob patterns (relative to contentDir, forward slashes) for assets to skip
+    // when packing — e.g. "Debug/*", "*_test.hasset". See Hpak::PackSettings.
+    std::vector<std::string> excludePatterns;
+    // Optional progress callback: (assetsDone, assetsTotal, currentFile). Invoked
+    // from whatever thread runs exportProject — the caller must make it
+    // thread-safe when exporting on a worker thread.
+    std::function<void(int, int, const std::string&)> progress;
 };
 
 struct HE_API ExportResult {
