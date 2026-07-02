@@ -34,9 +34,12 @@ public:
     IGameLogic*  logic()     const;   // nullptr if not loaded
 
 private:
-    DynLib             lib_;
-    IGameLogic*        logic_      = nullptr;
-    FnDestroyGameLogic destroyFn_  = nullptr;
+    DynLib                lib_;
+    IGameLogic*           logic_      = nullptr;
+    FnDestroyGameLogic    destroyFn_  = nullptr;
+    // The uniquely-named hot-copy actually dlopen'ed (see load()); removed on
+    // unload. Empty when the original path was loaded directly.
+    std::filesystem::path loadedCopyPath_;
 };
 
 } // namespace HE
