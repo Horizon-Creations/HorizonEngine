@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <fstream>
+#include <atomic>
 #include <shared_mutex>
 #include <nlohmann/json.hpp>
 
@@ -52,6 +53,13 @@ public:
 	std::string getCustomConfigString(const std::string& key, const std::string& defaultValue = "") const;
 
 	bool refreshContentFolder();
+
+	// Bumped by every successful refreshContentFolder(). The refresh deletes and
+	// rebuilds every Folder/File node, so ANY Folder*/File* held across frames
+	// (e.g. the content browser's navigation statics) dangles afterwards.
+	// Consumers compare this against their last-seen value and re-resolve their
+	// pointers by path when it changed.
+	std::atomic<uint64_t> contentFolderVersion{0};
 
 	// Thread-safe read accessor: hält den shared_lock für die Lebensdauer des zurückgegebenen lock-Objekts.
 	// Verwendung: auto [folder, lock] = globalState->lockContentFolder();
