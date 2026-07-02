@@ -3299,11 +3299,42 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 		// s_selectedTreeFolder nullptr → root; otherwise the selected sub-folder
 		static const Folder* s_gridFolder = nullptr;
 
+		// refreshContentFolder() (asset create/rename/delete, project load) deletes
+		// and rebuilds every Folder node, so the navigation statics above dangle
+		// after each refresh — dereferencing them was a use-after-free crash when
+		// creating an asset inside a sub-folder. Re-resolve the remembered path in
+		// the fresh tree; if the folder no longer exists, fall back to the root.
+		static uint64_t    s_treeVersionSeen = ~0ull;
+		static std::string s_gridFolderPath;
+		const uint64_t treeVersion =
+			ctx.globalState ? ctx.globalState->contentFolderVersion.load(std::memory_order_acquire) : 0;
+		if (treeVersion != s_treeVersionSeen)
+		{
+			s_treeVersionSeen = treeVersion;
+			const Folder* fresh = nullptr;
+			if (!s_gridFolderPath.empty())
+			{
+				std::function<const Folder*(const Folder*)> findByPath =
+					[&](const Folder* cur) -> const Folder*
+				{
+					if (cur->fullPath == s_gridFolderPath) return cur;
+					for (const Folder* sub : cur->subfolders)
+						if (const Folder* hit = findByPath(sub)) return hit;
+					return nullptr;
+				};
+				fresh = findByPath(&contentFolder);
+				if (fresh == &contentFolder) fresh = nullptr; // root is the null state
+			}
+			s_gridFolder         = fresh;
+			s_selectedTreeFolder = fresh;
+		}
+
 		// Sync from tree double-click
 		if (s_selectedTreeFolder != s_gridFolder)
 			s_gridFolder = s_selectedTreeFolder;
 
 		const Folder* displayFolder = s_gridFolder ? s_gridFolder : &contentFolder;
+		s_gridFolderPath = s_gridFolder ? s_gridFolder->fullPath : std::string{};
 
 		// ── Breadcrumb ────────────────────────────────────────────────────
 		if (ctx.fontSubheading) ImGui::PushFont(ctx.fontSubheading);

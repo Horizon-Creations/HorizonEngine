@@ -221,6 +221,8 @@ bool GlobalState::refreshContentFolder()
 		clearFolder(&contentFolder);
 		contentFolder = std::move(fresh);
 	}
+	// Old Folder/File nodes are gone — tell pointer-holders to re-resolve by path.
+	contentFolderVersion.fetch_add(1, std::memory_order_release);
 
 	Logger::Log(Logger::LogLevel::Info, "Content folder refreshed.");
 	Logger::Log(Logger::LogLevel::Info, ("Number of folders: " + std::to_string(contentFolder.subfolders.size())).c_str());
