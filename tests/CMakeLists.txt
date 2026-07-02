@@ -38,6 +38,7 @@ add_executable(he_tests
     test_project_exporter.cpp
     test_lod.cpp
     test_weather.cpp
+    test_gamelogic_loader.cpp
     # Culling/sorting/undo/camera/graph are compiled in directly — pulling in the
     # full HorizonRendering/Editor targets would drag GPU backends and ImGui in.
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderExtractor.cpp
@@ -74,6 +75,15 @@ endif()
 if(HE_HAVE_OPENSSL)
     target_compile_definitions(he_tests PRIVATE HE_HAVE_OPENSSL)
 endif()
+
+# ─── Native game-logic fixture ─────────────────────────────────────────────────
+# A real shared library implementing IGameLogic, loaded at runtime by
+# test_gamelogic_loader.cpp to exercise GameLogicLoader end to end.
+add_library(test_gamelogic SHARED fixtures/test_gamelogic.cpp)
+target_link_libraries(test_gamelogic PRIVATE HorizonCore HorizonScene)
+add_dependencies(he_tests test_gamelogic)
+target_compile_definitions(he_tests PRIVATE
+    HE_TEST_GAMELOGIC_LIB="$<TARGET_FILE:test_gamelogic>")
 
 target_link_libraries(he_tests PRIVATE
     HorizonCore

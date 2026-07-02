@@ -146,6 +146,23 @@ void GameApplication::OnInit()
 			("GameApplication: streaming " + std::to_string(refs.size()) +
 			 " scene-referenced asset roots").c_str());
 	}
+
+	// Native C++ game logic: an optional GameLogic library next to the executable
+	// (built from the game's C++ project). Once loaded, the base Application loop
+	// ticks logic->onUpdate at the fixed timestep automatically. Absent library =
+	// pure script game, no warning needed.
+#ifdef _WIN32
+	const auto logicPath = exeDir / "GameLogic.dll";
+#elif defined(__APPLE__)
+	const auto logicPath = exeDir / "GameLogic.dylib";
+#else
+	const auto logicPath = exeDir / "GameLogic.so";
+#endif
+	if (std::filesystem::exists(logicPath) && logicLoader().load(logicPath))
+	{
+		logicLoader().logic()->onStart(*m_world);
+		Logger::Log(Logger::LogLevel::Info, "GameApplication: native game logic started");
+	}
 }
 
 void GameApplication::OnRender(float deltaTime)
@@ -219,5 +236,8 @@ void GameApplication::OnRender(float deltaTime)
 
 void GameApplication::OnShutdown()
 {
+	// Stop + unload native game logic before the world is torn down.
+	if (m_world && logicLoader().isLoaded())
+		logicLoader().unload(*m_world);
 	Logger::Log(Logger::LogLevel::Info, "GameApplication::OnShutdown");
 }
