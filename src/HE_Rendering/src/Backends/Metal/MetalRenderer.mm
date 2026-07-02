@@ -2205,7 +2205,8 @@ fragment float4 skyFragment(SkyOut in [[stage_in]],
                             texture3d<float> noiseTex [[texture(1)]],
                             sampler noiseSamp [[sampler(1)]],
                             texture2d<float> cloudTex [[texture(2)]],
-                            sampler cloudSamp [[sampler(2)]])
+                            sampler cloudSamp [[sampler(2)]],
+                            constant float4x4& prevVP [[buffer(1)]]) // pre-pass camera (low-res cloud reprojection)
 {
 	float4 wp1 = p.invViewProj * float4(in.ndc,  1.0, 1.0);
 	float4 wp0 = p.invViewProj * float4(in.ndc, -1.0, 1.0);
@@ -2244,9 +2245,15 @@ fragment float4 skyFragment(SkyOut in [[stage_in]],
 	float cloudT = 1.0;                                     // view-ray cloud transmittance
 	if (p.star2.z > 0.5)
 	{
-		// Low-res clouds: composite the upsampled (L, T) from the quarter-res pre-pass.
-		float2 uv = float2(in.ndc.x * 0.5 + 0.5, 0.5 - in.ndc.y * 0.5);
-		float4 lt = cloudTex.sample(cloudSamp, uv);
+		// Low-res clouds: composite the upsampled (L, T) from the quarter-res pre-pass. The
+		// pre-pass was rendered with a DIFFERENT (previous-frame) camera, so reproject this
+		// pixel's world view direction into that camera's screen space — otherwise the clouds
+		// lag/swim relative to the freshly-drawn sky while panning. Identity when cameras match.
+		float4 pc = prevVP * float4(dir, 0.0);           // direction → point at infinity
+		float2 uv = (pc.w > 1e-4)
+			? float2(pc.x / pc.w * 0.5 + 0.5, 0.5 - pc.y / pc.w * 0.5)
+			: float2(in.ndc.x * 0.5 + 0.5, 0.5 - in.ndc.y * 0.5);
+		float4 lt = cloudTex.sample(cloudSamp, clamp(uv, 0.0, 1.0));
 		col = col * lt.a + lt.rgb;
 		cloudT = lt.a;
 	}
@@ -4061,6 +4068,7 @@ void MetalRenderer::EncodeSky(void* renderEncoder, const glm::mat4& invViewProj,
 	[enc setFragmentTexture:(__bridge id<MTLTexture>)(m_cloudColor ? m_cloudColor : m_dummyTexture) atIndex:2];
 	[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:2];
 	[enc setFragmentBytes:&p length:sizeof(p) atIndex:0];
+	[enc setFragmentBytes:&m_prepassViewProj[0][0] length:sizeof(glm::mat4) atIndex:1]; // low-res cloud reprojection
 	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
 }
 
@@ -4669,7 +4677,21 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 					const float cwr = glm::radians(cenv.windDirection);
 					const glm::vec3 cwind = glm::vec3(std::sin(cwr), 0.0f, -std::cos(cwr))
 					                      * (cenv.windSpeed * 0.025f);
-					EncodeCloudPrepass((__bridge void*)cmdBuf, glm::inverse(m_lastViewProj), m_lastSunDir,
+					// The pre-pass renders with the PREVIOUS frame's camera (the extractor for this
+					// frame hasn't run yet); the sky pass reprojects the result to the current view so
+					// the clouds stay locked to the sky when panning. Remember exactly that camera.
+					m_prepassViewProj = m_lastViewProj;
+					// Verification hook: yaw the pre-pass camera so it deliberately differs from the
+					// current view — with reprojection the composited clouds must NOT move (regression
+					// test for the panning bug). No-op unless HE_CLOUD_PREPASS_YAW is set.
+					if (const char* yv = std::getenv("HE_CLOUD_PREPASS_YAW"); yv && *yv)
+					{
+						const float th = glm::radians(static_cast<float>(std::atof(yv)));
+						const float cy = std::cos(th), sy = std::sin(th);
+						glm::mat4 R(1.0f); R[0][0] = cy; R[2][0] = sy; R[0][2] = -sy; R[2][2] = cy;
+						m_prepassViewProj = m_lastViewProj * R;
+					}
+					EncodeCloudPrepass((__bridge void*)cmdBuf, glm::inverse(m_prepassViewProj), m_lastSunDir,
 						cenv.sunColor, cenv.timeOfDay, cenv.cloudCoverage,
 						static_cast<float>(SDL_GetTicks()) / 1000.0f, cenv.auroraIntensity,
 						cenv.nebulaColor, cenv.nebulaIntensity, cenv.auroraColor, cenv.milkyWayIntensity,
