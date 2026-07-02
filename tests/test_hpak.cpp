@@ -8,7 +8,12 @@
 #include <ContentManager/Assets.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/SceneSerializer.h>
+#include <HorizonScene/SceneSystems.h>
 #include <HorizonScene/Components/TransformComponent.h>
+#include <HorizonScene/Components/MeshComponent.h>
+#include <HorizonScene/Components/MaterialComponent.h>
+#include <HorizonScene/Components/AudioSourceComponent.h>
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <filesystem>
@@ -661,6 +666,123 @@ TEST_CASE("mountPak overlay: later mount shadows earlier by UUID, adds new UUIDs
 
     std::filesystem::remove(std::filesystem::temp_directory_path() / "he_base.hpak");
     std::filesystem::remove(std::filesystem::temp_directory_path() / "he_mod.hpak");
+}
+
+TEST_CASE("SceneSystems::collectAssetRefs gathers component asset UUIDs (the stream seed)")
+{
+    HorizonWorld world;
+    const HE::UUID meshId{0x11,1}, matId{0x22,2}, audioId{0x33,3};
+
+    auto e1 = world.createEntity("meshed");
+    { MeshComponent mc; mc.meshAssetId = meshId; world.addComponent(e1, mc); }
+    { MaterialComponent mc; mc.materialAssetId = matId; world.addComponent(e1, mc); }
+    auto e2 = world.createEntity("sound");
+    { AudioSourceComponent ac; ac.assetId = audioId; world.addComponent(e2, ac); }
+    // An entity whose mesh ref is null must contribute nothing.
+    auto e3 = world.createEntity("empty");
+    { MeshComponent mc; world.addComponent(e3, mc); }
+
+    const auto refs = SceneSystems::collectAssetRefs(world);
+    auto has = [&](HE::UUID id){ return std::find(refs.begin(), refs.end(), id) != refs.end(); };
+    CHECK(has(meshId));
+    CHECK(has(matId));
+    CHECK(has(audioId));
+    CHECK(std::count(refs.begin(), refs.end(), HE::UUID{}) == 0);  // no null seeds
+}
+
+TEST_CASE("Pack-time UUID-ref baking: mesh->material and material->texture")
+{
+    auto dir = std::filesystem::temp_directory_path() / "he_refbake";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+
+    // Author a texture, a material referencing it by path, and a mesh referencing
+    // the material by path — all as loose .hasset files.
+    ContentManager cmSrc(dir.string());
+    TextureAsset tex; tex.type = HE::AssetType::Texture; tex.name = "tex"; tex.path = "tex.hasset";
+    tex.width = 2; tex.height = 2; tex.channels = 4; tex.data = std::vector<uint8_t>(16, 0x77);
+    REQUIRE(cmSrc.saveAsset(tex));
+    MaterialAsset mat; mat.type = HE::AssetType::Material; mat.name = "mat"; mat.path = "mat.hasset";
+    mat.texturePaths = {"tex.hasset"};
+    REQUIRE(cmSrc.saveAsset(mat));
+    StaticMeshAsset mesh; mesh.type = HE::AssetType::StaticMesh; mesh.name = "mesh"; mesh.path = "mesh.hasset";
+    mesh.materialPath = "mat.hasset"; mesh.vertices = {0,0,0, 1,0,0, 0,1,0}; mesh.indices = {0,1,2};
+    REQUIRE(cmSrc.saveAsset(mesh));
+
+    // Loose parse (no pack) → UUID-ref fields stay empty (paths only, for the editor).
+    {
+        std::ifstream f(dir / "mesh.hasset", std::ios::binary);
+        std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        ContentManager loose;
+        REQUIRE(loose.loadAssetFromMemory(bytes) == mesh.id);
+        const StaticMeshAsset* lm = loose.getStaticMesh(mesh.id);
+        REQUIRE(lm != nullptr);
+        CHECK(lm->materialId == HE::UUID{});   // no baking on loose assets
+    }
+
+    // Pack (bakes refs) + load → UUID-ref fields resolved to the target UUIDs.
+    HpakWriter packer;
+    CHECK(packer.addDirectory(dir, {Hpak::Codec::Zstd}) == 3);
+    auto pak = std::filesystem::temp_directory_path() / "he_refbake.hpak";
+    REQUIRE(packer.write(pak.string()));
+
+    ContentManager cm;
+    REQUIRE(cm.loadPak(pak.string()));
+    const StaticMeshAsset* m = cm.getStaticMesh(mesh.id);
+    REQUIRE(m != nullptr);
+    CHECK(m->materialId == mat.id);            // mesh -> material baked
+    const MaterialAsset* mt = cm.getMaterial(mat.id);
+    REQUIRE(mt != nullptr);
+    REQUIRE(mt->textureIds.size() == 1);
+    CHECK(mt->textureIds[0] == tex.id);        // material -> texture baked
+
+    std::filesystem::remove(pak);
+    std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("Reference-graph streaming: seeding a mesh streams its closure only")
+{
+    auto dir = std::filesystem::temp_directory_path() / "he_closure";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+
+    ContentManager cmSrc(dir.string());
+    TextureAsset tex; tex.type = HE::AssetType::Texture; tex.name = "tex"; tex.path = "tex.hasset";
+    tex.width = 2; tex.height = 2; tex.channels = 4; tex.data = std::vector<uint8_t>(16, 0x33);
+    REQUIRE(cmSrc.saveAsset(tex));
+    MaterialAsset mat; mat.type = HE::AssetType::Material; mat.name = "mat"; mat.path = "mat.hasset";
+    mat.texturePaths = {"tex.hasset"};
+    REQUIRE(cmSrc.saveAsset(mat));
+    StaticMeshAsset mesh; mesh.type = HE::AssetType::StaticMesh; mesh.name = "mesh"; mesh.path = "mesh.hasset";
+    mesh.materialPath = "mat.hasset"; mesh.vertices = {0,0,0, 1,0,0, 0,1,0}; mesh.indices = {0,1,2};
+    REQUIRE(cmSrc.saveAsset(mesh));
+    // An unreferenced material — must NOT be pulled by the closure.
+    MaterialAsset orphan; orphan.type = HE::AssetType::Material; orphan.name = "orphan"; orphan.path = "orphan.hasset";
+    REQUIRE(cmSrc.saveAsset(orphan));
+
+    HpakWriter packer;
+    CHECK(packer.addDirectory(dir, {Hpak::Codec::Zstd}) == 4);
+    auto pak = std::filesystem::temp_directory_path() / "he_closure.hpak";
+    REQUIRE(packer.write(pak.string()));
+
+    ContentManager cm;
+    REQUIRE(cm.mountPak(pak.string()));
+    cm.loadAssetAsync(mesh.id);   // seed ONLY the mesh
+
+    bool done = false;
+    for (int i = 0; i < 500 && !done; ++i)
+    {
+        cm.pollAsyncResults();    // frontier expands as each asset registers
+        done = cm.isLoaded(mesh.id) && cm.isLoaded(mat.id) && cm.isLoaded(tex.id);
+        if (!done) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    REQUIRE(done);                        // mesh -> material -> texture all streamed in
+    // Drain a few more times to be sure nothing else sneaks in.
+    for (int i = 0; i < 5; ++i) { cm.pollAsyncResults(); std::this_thread::sleep_for(std::chrono::milliseconds(2)); }
+    CHECK(!cm.isLoaded(orphan.id));       // unreferenced asset never loaded
+
+    std::filesystem::remove(pak);
+    std::filesystem::remove_all(dir);
 }
 
 TEST_CASE("Async streaming from a mounted pak (loadAssetAsync by UUID)")

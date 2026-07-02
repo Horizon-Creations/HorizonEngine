@@ -1,5 +1,7 @@
 #pragma once
 #include <glm/glm.hpp>
+#include <vector>
+#include <Types/UUID.h>
 
 class HorizonWorld;
 class ContentManager;
@@ -8,6 +10,14 @@ class PhysicsWorld;
 
 namespace SceneSystems
 {
+    // Collect every asset UUID referenced by the world's components (mesh, material,
+    // skeletal mesh, script, foliage, particles, animation clips, audio, UI image,
+    // terrain heightmap, weather sound, LOD levels, state-machine states). Used by
+    // the game runtime as the SEED for reference-graph streaming: only these roots
+    // (and their baked transitive dependencies) are streamed, so unused assets in
+    // the pak are never loaded. Duplicates are fine — the loader coalesces.
+    std::vector<HE::UUID> collectAssetRefs(HorizonWorld& world);
+
     // Runs the always-on visual / gameplay systems for one frame: terrain regen,
     // skeletal animation (clip / blend / state-machine / property), navigation,
     // weather, particles, foliage and LOD. Shared by the editor (preview every frame)

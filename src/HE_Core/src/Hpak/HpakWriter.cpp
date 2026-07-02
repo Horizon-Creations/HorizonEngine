@@ -1,6 +1,7 @@
 #include <Hpak/HpakWriter.h>
 #include <Hpak/Aes256Gcm.h>
 #include <ContentManager/HAsset.h>
+#include <Types/Enums.h>
 #ifdef HE_HAVE_LZ4
 #  include <lz4.h>
 #  include <lz4hc.h>
@@ -10,23 +11,111 @@
 #endif
 #include <algorithm>
 #include <fstream>
+#include <string>
+#include <unordered_map>
 #include <cstring>
 
-// Extract the asset UUID from a raw .hasset blob's META chunk.
-static HE::UUID uuidFromHasset(const std::vector<uint8_t>& data)
+// Extract the asset UUID + embedded path from a raw .hasset blob's META chunk.
+// META layout: uint16_t type, uint64_t hi, uint64_t lo, string name, string path.
+static bool metaFromHasset(const std::vector<uint8_t>& data, HE::UUID& id, std::string& path)
 {
     HAsset::Reader r;
-    if (!r.openData(data)) return {};
+    if (!r.openData(data)) return false;
     const auto* meta = r.findChunk(HAsset::CHUNK_META);
-    if (!meta) return {};
-    // META layout: uint16_t type, uint64_t hi, uint64_t lo, strings...
-    constexpr size_t kTypeSize = sizeof(uint16_t);
-    if (meta->data.size() < kTypeSize + 16) return {};
-    HE::UUID id;
-    size_t off = kTypeSize;
-    HAsset::Reader::readPOD(meta->data, off, id.hi);
-    HAsset::Reader::readPOD(meta->data, off, id.lo);
-    return id;
+    if (!meta) return false;
+    size_t off = sizeof(uint16_t); // skip asset type
+    std::string name;
+    if (!HAsset::Reader::readPOD(meta->data, off, id.hi))   return false;
+    if (!HAsset::Reader::readPOD(meta->data, off, id.lo))   return false;
+    if (!HAsset::Reader::readString(meta->data, off, name)) return false;
+    if (!HAsset::Reader::readString(meta->data, off, path)) return false;
+    return true;
+}
+
+// Append one chunk to an existing .hasset blob in place — additive only: bump the
+// chunk_count in the 32-byte FileHeader (uint32 at offset 8) and append the chunk
+// header + data. Existing chunks (incl. the MTRL PBR tail) are left byte-untouched.
+static void appendChunkTo(std::vector<uint8_t>& blob, uint32_t chunkId,
+                          const std::vector<uint8_t>& chunkData)
+{
+    if (blob.size() < sizeof(HAsset::FileHeader)) return;
+    uint32_t count = 0;
+    std::memcpy(&count, blob.data() + 8, sizeof(count));
+    count += 1;
+    std::memcpy(blob.data() + 8, &count, sizeof(count));
+
+    HAsset::ChunkHeader ch{};
+    ch.id   = chunkId;
+    ch.size = chunkData.size();
+    const auto* chp = reinterpret_cast<const uint8_t*>(&ch);
+    blob.insert(blob.end(), chp, chp + sizeof(ch));
+    blob.insert(blob.end(), chunkData.begin(), chunkData.end());
+}
+
+// Resolve an asset's path-based references to UUIDs and bake them into additive
+// U-chunks (MRFU/MTLU/SCNU). Loose editor assets keep their path chunks; the U-chunk
+// is added alongside so packed assets carry both. A ref whose target isn't in the
+// pack resolves to a null UUID placeholder (index-parallel; the frontier skips it).
+static void bakeUuidRefs(std::vector<uint8_t>& blob,
+                         const std::unordered_map<std::string, HE::UUID>& pathToUuid)
+{
+    HAsset::Reader r;
+    if (!r.openData(blob)) return;
+    const auto type = static_cast<HE::AssetType>(r.assetType());
+
+    auto resolve = [&](const std::string& p) -> HE::UUID {
+        auto it = pathToUuid.find(p);
+        return it != pathToUuid.end() ? it->second : HE::UUID{};
+    };
+
+    switch (type)
+    {
+    case HE::AssetType::StaticMesh:
+    case HE::AssetType::SkeletalMesh:
+    {
+        const auto* c = r.findChunk(HAsset::CHUNK_MREF);
+        if (!c) break;
+        size_t o = 0; std::string matPath;
+        if (!HAsset::Reader::readString(c->data, o, matPath) || matPath.empty()) break;
+        const HE::UUID mid = resolve(matPath);
+        std::vector<uint8_t> d;
+        HAsset::Writer::appendPOD(d, mid.hi);
+        HAsset::Writer::appendPOD(d, mid.lo);
+        appendChunkTo(blob, HAsset::CHUNK_MRFU, d);
+        break;
+    }
+    case HE::AssetType::Material:
+    {
+        const auto* c = r.findChunk(HAsset::CHUNK_MTRL);
+        if (!c) break;
+        size_t o = 0; std::string shaderPath; std::vector<std::string> texPaths;
+        HAsset::Reader::readString(c->data, o, shaderPath);
+        HAsset::Reader::readVec(c->data, o, texPaths);
+        const HE::UUID sid = shaderPath.empty() ? HE::UUID{} : resolve(shaderPath);
+        std::vector<HE::UUID> texIds; texIds.reserve(texPaths.size());
+        for (const auto& tp : texPaths) texIds.push_back(resolve(tp));
+        std::vector<uint8_t> d;
+        HAsset::Writer::appendPOD(d, sid.hi);
+        HAsset::Writer::appendPOD(d, sid.lo);
+        HAsset::Writer::appendVec(d, texIds);
+        appendChunkTo(blob, HAsset::CHUNK_MTLU, d);
+        break;
+    }
+    case HE::AssetType::Scene:
+    {
+        const auto* c = r.findChunk(HAsset::CHUNK_SCNE);
+        if (!c) break;
+        size_t o = 0; std::vector<std::string> objPaths;
+        HAsset::Reader::readVec(c->data, o, objPaths);
+        std::vector<HE::UUID> objIds; objIds.reserve(objPaths.size());
+        for (const auto& op : objPaths) objIds.push_back(resolve(op));
+        std::vector<uint8_t> d;
+        HAsset::Writer::appendVec(d, objIds);
+        appendChunkTo(blob, HAsset::CHUNK_SCNU, d);
+        break;
+    }
+    default: break;
+    }
 }
 
 void HpakWriter::addEntry(const HE::UUID& id, const std::vector<uint8_t>& hassetData,
@@ -116,22 +205,35 @@ void HpakWriter::addEntry(const HE::UUID& id, const std::vector<uint8_t>& hasset
 int HpakWriter::addDirectory(const std::filesystem::path& rootDir,
                               const Hpak::PackSettings& settings)
 {
-    int count = 0;
     std::error_code ec;
+
+    // Pass 1: read every .hasset, extract (UUID, embedded path), and build a
+    // path→UUID map. Each asset's own META (path,uuid) pair IS the manifest — no
+    // separate manifest file is needed to resolve intra-asset path references.
+    struct Pending { std::vector<uint8_t> bytes; HE::UUID id; };
+    std::vector<Pending> pending;
+    std::unordered_map<std::string, HE::UUID> pathToUuid;
     for (const auto& p : std::filesystem::recursive_directory_iterator(rootDir, ec))
     {
         if (!p.is_regular_file(ec) || p.path().extension() != ".hasset") continue;
 
         std::ifstream f(p.path(), std::ios::binary);
         if (!f) continue;
-
         std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)),
                                     std::istreambuf_iterator<char>());
 
-        const HE::UUID id = uuidFromHasset(bytes);
-        if (id == HE::UUID{}) continue;
+        HE::UUID id; std::string path;
+        if (!metaFromHasset(bytes, id, path) || id == HE::UUID{}) continue;
+        if (!path.empty()) pathToUuid[path] = id;
+        pending.push_back({std::move(bytes), id});
+    }
 
-        addEntry(id, bytes, settings);
+    // Pass 2: bake path→UUID refs into additive U-chunks, then pack.
+    int count = 0;
+    for (auto& pe : pending)
+    {
+        bakeUuidRefs(pe.bytes, pathToUuid);
+        addEntry(pe.id, pe.bytes, settings);
         ++count;
     }
     return count;

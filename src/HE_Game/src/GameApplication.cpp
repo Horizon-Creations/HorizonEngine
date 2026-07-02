@@ -67,14 +67,13 @@ void GameApplication::OnInit()
 	// Pass the AES key for an encrypted pak (obfuscation key shipped in the hcfg);
 	// nullptr for an unencrypted pak. Without this an encrypted pak cannot load.
 	const uint8_t* pakKey = m_config.encrypted ? m_config.encKey : nullptr;
-	// Mount (not eager-load): the archive is opened + indexed, then its assets are
-	// streamed in on background workers instead of decompressing the whole pak
-	// synchronously at startup. pollAsyncResults() in OnRender registers them on
-	// the main thread as they arrive; the renderer skips not-yet-resident assets,
-	// so the scene pops in over the first frames. Mounting also enables overlay
-	// paks (patch/DLC/mods) later.
-	// Reconstruct the packed-scene UUID (if any) so we can both read it and keep
-	// it out of the asset stream (it is CBOR scene data, not a parseable .hasset).
+	// Mount (not eager-load): open + index the archive. Assets are then streamed on
+	// background workers, seeded from what the scene actually references (below), so
+	// only the reference-graph closure loads — unused pak assets are never touched.
+	// pollAsyncResults() in OnRender registers arrivals on the main thread; the
+	// renderer skips not-yet-resident assets, so the scene pops in over the first
+	// frames. Mounting also enables overlay paks (patch/DLC/mods) later.
+	// Reconstruct the packed-scene UUID (if any) to read the scene entry directly.
 	HE::UUID sceneUuid{};
 	if (m_config.hasPackedScene)
 	{
@@ -83,14 +82,8 @@ void GameApplication::OnInit()
 	}
 
 	if (contentManager().mountPak(pakPath, pakKey))
-	{
-		std::unordered_set<HE::UUID> exclude;
-		if (m_config.hasPackedScene) exclude.insert(sceneUuid);
-		const size_t jobs = contentManager().streamMountedAssets(exclude);
 		Logger::Log(Logger::LogLevel::Info,
-			("GameApplication: mounted " + m_config.hpakFilename +
-			 ", streaming " + std::to_string(jobs) + " assets").c_str());
-	}
+			("GameApplication: mounted " + m_config.hpakFilename).c_str());
 	else
 		Logger::Log(Logger::LogLevel::Warning, ("GameApplication: pak not found: " + pakPath).c_str());
 
@@ -121,6 +114,19 @@ void GameApplication::OnInit()
 			Logger::Log(Logger::LogLevel::Warning, ("GameApplication: failed to load scene " + scenePath.string()).c_str());
 	}
 	setWorld(m_world.get());
+
+	// Reference-graph streaming seed: kick off async loads for the assets this scene
+	// actually references. Their baked transitive dependencies (materials → textures)
+	// follow automatically via the frontier in pollAsyncResults, so the loader pulls
+	// only the closure the scene needs — unused pak assets are never loaded.
+	if (contentManager().mountedPakCount() > 0)
+	{
+		const auto refs = SceneSystems::collectAssetRefs(*m_world);
+		for (HE::UUID r : refs) contentManager().loadAssetAsync(r);
+		Logger::Log(Logger::LogLevel::Info,
+			("GameApplication: streaming " + std::to_string(refs.size()) +
+			 " scene-referenced asset roots").c_str());
+	}
 }
 
 void GameApplication::OnRender(float deltaTime)

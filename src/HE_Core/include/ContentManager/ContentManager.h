@@ -206,6 +206,11 @@ private:
 	                                const std::string& fullPath,
 	                                HAsset::Reader&    reader);
 
+	// Reference-graph frontier: enqueue a just-registered asset's baked UUID
+	// dependencies (mesh→material, material→textures) for async streaming. Called
+	// from pollAsyncResults on the main thread. No-op for loose assets.
+	void expandFrontier(HE::UUID id);
+
 	// ── Async streaming state ─────────────────────────────────────────────────
 	struct AsyncResult {
 		std::string                    relativePath;

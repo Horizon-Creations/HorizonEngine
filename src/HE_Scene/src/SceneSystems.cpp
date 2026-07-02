@@ -12,6 +12,20 @@
 #include "HorizonScene/HorizonWorld.h"
 #include "HorizonScene/Components/WeatherComponent.h"
 #include "HorizonScene/Components/EnvironmentComponent.h"
+#include "HorizonScene/Components/MeshComponent.h"
+#include "HorizonScene/Components/MaterialComponent.h"
+#include "HorizonScene/Components/SkeletalMeshComponent.h"
+#include "HorizonScene/Components/ScriptComponent.h"
+#include "HorizonScene/Components/FoliageComponent.h"
+#include "HorizonScene/Components/ParticleSystemComponent.h"
+#include "HorizonScene/Components/AnimatorComponent.h"
+#include "HorizonScene/Components/AnimatorBlendComponent.h"
+#include "HorizonScene/Components/AnimatorStateMachineComponent.h"
+#include "HorizonScene/Components/PropertyAnimatorComponent.h"
+#include "HorizonScene/Components/AudioSourceComponent.h"
+#include "HorizonScene/Components/UIImageComponent.h"
+#include "HorizonScene/Components/TerrainComponent.h"
+#include "HorizonScene/Components/LODComponent.h"
 #include "Renderer/IRenderer.h"
 #include "Diagnostics/Profiler.h"
 #include <cmath>
@@ -81,4 +95,29 @@ void SceneSystems::tick(HorizonWorld& world, ContentManager& cm, IRenderer* rend
     { HE_PROFILE_SCOPE_N("ParticleSystem"); ParticleSystem::update(world, dt, cameraPos); } // camera-following precipitation volume (Phase 2)
     { HE_PROFILE_SCOPE_N("Foliage");        FoliageSystem::update(world); }
     { HE_PROFILE_SCOPE_N("LOD");            LODSystem::update(world, cameraPos); }
+}
+
+std::vector<HE::UUID> SceneSystems::collectAssetRefs(HorizonWorld& world)
+{
+    std::vector<HE::UUID> out;
+    auto& reg = world.registry();
+    auto add = [&](HE::UUID id) { if (id != HE::UUID{}) out.push_back(id); };
+
+    for (auto [e, c] : reg.view<MeshComponent>().each())            add(c.meshAssetId);
+    for (auto [e, c] : reg.view<MaterialComponent>().each())        add(c.materialAssetId);
+    for (auto [e, c] : reg.view<SkeletalMeshComponent>().each())    add(c.meshAssetId);
+    for (auto [e, c] : reg.view<ScriptComponent>().each())          add(c.scriptAssetId);
+    for (auto [e, c] : reg.view<FoliageComponent>().each())         { add(c.meshAssetId); add(c.materialAssetId); }
+    for (auto [e, c] : reg.view<ParticleSystemComponent>().each())  { add(c.meshAssetId); add(c.materialAssetId); }
+    for (auto [e, c] : reg.view<AnimatorComponent>().each())        add(c.clipAssetId);
+    for (auto [e, c] : reg.view<AnimatorBlendComponent>().each())   { add(c.clipAId); add(c.clipBId); }
+    for (auto [e, c] : reg.view<PropertyAnimatorComponent>().each()) add(c.clipId);
+    for (auto [e, c] : reg.view<AudioSourceComponent>().each())     add(c.assetId);
+    for (auto [e, c] : reg.view<UIImageComponent>().each())         add(c.materialAssetId);
+    for (auto [e, c] : reg.view<TerrainComponent>().each())         add(c.heightmapTexture);
+    for (auto [e, c] : reg.view<WeatherComponent>().each())         add(c.thunderSound);
+    for (auto [e, c] : reg.view<LODComponent>().each())             for (const auto& lvl : c.levels) add(lvl.meshId);
+    for (auto [e, c] : reg.view<AnimatorStateMachineComponent>().each()) for (const auto& st : c.states) add(st.clipId);
+
+    return out;
 }

@@ -146,8 +146,11 @@ TEST_CASE("ProjectExporter packs .hasset files from content dir")
     REQUIRE(reader.open(pakPath.string()));
     CHECK(reader.hasEntry(id1));
     CHECK(reader.hasEntry(id2));
-    CHECK(reader.readEntry(id1) == blob1);
-    CHECK(reader.readEntry(id2) == blob2);
+    // The packer bakes additive UUID-ref chunks (MTLU here), so the stored entry
+    // is no longer byte-identical to the source blob — verify it parses instead.
+    { ContentManager cm; REQUIRE(cm.loadPak(pakPath.string()));
+      CHECK(cm.getMaterial(id1) != nullptr);
+      CHECK(cm.getMaterial(id2) != nullptr); }
 
     // project.hcfg should exist
     REQUIRE(std::filesystem::exists(outputDir / "project.hcfg"));
