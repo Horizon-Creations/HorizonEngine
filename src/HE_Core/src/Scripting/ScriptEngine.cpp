@@ -113,6 +113,15 @@ ScriptEngine::InstanceId ScriptEngine::createInstance(const std::string& scriptN
     return id;
 }
 
+ScriptEngine::InstanceId ScriptEngine::createInstance(const std::string& scriptName,
+                                                      uint32_t entityId)
+{
+    const InstanceId id = createInstance(scriptName);
+    if (id != kInvalidInstance)
+        setInstanceField(id, "entityId", static_cast<double>(entityId));
+    return id;
+}
+
 void ScriptEngine::destroyInstance(InstanceId id)
 {
     auto it = m_instances.find(id);
