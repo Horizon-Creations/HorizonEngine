@@ -241,29 +241,45 @@ int HpakWriter::addDirectory(const std::filesystem::path& rootDir,
     struct Pending { std::vector<uint8_t> bytes; HE::UUID id; std::string relPath; };
     std::vector<Pending> pending;
     std::unordered_map<std::string, HE::UUID> pathToUuid;
-    for (const auto& p : std::filesystem::recursive_directory_iterator(rootDir, ec))
+    // Manual iteration with increment(ec): the range-for's operator++ THROWS on
+    // unreadable subdirectories (this runs on the editor's export worker thread,
+    // where an escaped exception is std::terminate). skip_permission_denied
+    // covers the common case; increment(ec) the rest.
+    std::filesystem::recursive_directory_iterator it(
+        rootDir, std::filesystem::directory_options::skip_permission_denied, ec);
+    const std::filesystem::recursive_directory_iterator end;
+    while (!ec && it != end)
     {
-        if (!p.is_regular_file(ec) || p.path().extension() != ".hasset") continue;
+        const auto& p = *it;
+        const bool regular = p.is_regular_file(ec);
+        if (ec) { ec.clear(); it.increment(ec); continue; }
+        if (!regular || p.path().extension() != ".hasset") { it.increment(ec); continue; }
 
         // Exclude filter: match against the rootDir-relative path with forward
-        // slashes (e.g. "Debug/Test.hasset"), the same shape shown in the editor.
-        std::string rel = std::filesystem::relative(p.path(), rootDir, ec).generic_string();
-        if (ec) { ec.clear(); rel = p.path().filename().generic_string(); }
+        // slashes (e.g. "Debug/Test.hasset") — the shape shown in the editor.
+        // lexically_relative is pure string math: no symlink resolution (which
+        // would match against the TARGET path) and no filesystem access.
+        std::string rel = p.path().lexically_relative(rootDir).generic_string();
+        if (rel.empty()) rel = p.path().filename().generic_string();
         bool excluded = false;
         for (const auto& pat : settings.excludePatterns)
             if (!pat.empty() && Hpak::globMatch(pat, rel)) { excluded = true; break; }
-        if (excluded) continue;
+        if (excluded) { it.increment(ec); continue; }
 
-        std::ifstream f(p.path(), std::ios::binary);
-        if (!f) continue;
-        std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)),
-                                    std::istreambuf_iterator<char>());
+        do {
+            std::ifstream f(p.path(), std::ios::binary);
+            if (!f) break;
+            std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)),
+                                        std::istreambuf_iterator<char>());
 
-        HE::UUID id; std::string path;
-        if (!metaFromHasset(bytes, id, path) || id == HE::UUID{}) continue;
-        if (!path.empty()) pathToUuid[path] = id;
-        pending.push_back({std::move(bytes), id, std::move(rel)});
+            HE::UUID id; std::string path;
+            if (!metaFromHasset(bytes, id, path) || id == HE::UUID{}) break;
+            if (!path.empty()) pathToUuid[path] = id;
+            pending.push_back({std::move(bytes), id, std::move(rel)});
+        } while (false);
+        it.increment(ec);
     }
+    ec.clear();
 
     // Pass 2: rewrite path refs to baked UUIDs (dropping the path strings), then pack.
     // This is the expensive pass (compression + encryption) → progress reports here.

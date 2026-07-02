@@ -90,17 +90,27 @@ ExportResult ProjectExporter::exportProject(
     if (!ProjectConfigLoader::save(outputDir, cfg))
         return {false, "Failed to write project.hcfg", 0};
 
-    // Copy game runtime binaries (executable + dylibs) so the export is runnable
+    // Copy game runtime binaries (executable + dylibs) so the export is runnable.
+    // Non-throwing iteration: this runs on the editor's export worker thread,
+    // where an escaped filesystem_error would be std::terminate.
     int binaryCopied = 0;
     if (!settings.gameRuntimeDir.empty() && std::filesystem::exists(settings.gameRuntimeDir, ec))
     {
-        for (const auto& entry : std::filesystem::directory_iterator(settings.gameRuntimeDir, ec))
+        std::filesystem::directory_iterator dit(settings.gameRuntimeDir, ec);
+        const std::filesystem::directory_iterator dend;
+        while (!ec && dit != dend)
         {
-            if (!entry.is_regular_file()) continue;
-            std::filesystem::copy_file(entry.path(), outputDir / entry.path().filename(),
-                std::filesystem::copy_options::overwrite_existing, ec);
-            if (!ec) ++binaryCopied;
+            const bool regular = dit->is_regular_file(ec);
+            if (!ec && regular)
+            {
+                std::filesystem::copy_file(dit->path(), outputDir / dit->path().filename(),
+                    std::filesystem::copy_options::overwrite_existing, ec);
+                if (!ec) ++binaryCopied;
+            }
+            ec.clear();
+            dit.increment(ec);
         }
+        ec.clear();
     }
 
     return {true, "", added, binaryCopied};
