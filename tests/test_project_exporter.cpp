@@ -3,10 +3,14 @@
 #include <Hpak/ProjectExporter.h>
 #include <Hpak/HpakReader.h>
 #include <ContentManager/HAsset.h>
+#include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <Types/UUID.h>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <thread>
+#include <unordered_set>
 #include <cstring>
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -320,3 +324,146 @@ TEST_CASE("ProjectExporter returns error for invalid output dir (file in the way
     std::filesystem::remove_all(contentDir);
     std::filesystem::remove(outputPath);
 }
+
+// Mirrors the GameApplication runtime sequence: export a project, then read the
+// hcfg, mount the pak with its key, stream the assets in on background workers,
+// and drain via pollAsyncResults until they are resident — exactly what the game
+// runtime now does instead of an eager blocking load.
+TEST_CASE("ProjectExporter output mounts + streams like the game runtime")
+{
+    auto contentDir = std::filesystem::temp_directory_path() / "he_export_stream_content";
+    auto outputDir  = std::filesystem::temp_directory_path() / "he_export_stream_out";
+    std::filesystem::remove_all(contentDir);
+    std::filesystem::remove_all(outputDir);
+    std::filesystem::create_directories(contentDir);
+
+    const HE::UUID id1{0x5711,0x01}, id2{0x5711,0x02};
+    for (auto [id, name] : {std::pair{id1, "s1"}, std::pair{id2, "s2"}})
+    {
+        const auto blob = makeMinimalMaterialBlob(id, name);
+        std::ofstream f(contentDir / (std::string(name) + ".hasset"), std::ios::binary);
+        f.write(reinterpret_cast<const char*>(blob.data()), blob.size());
+    }
+
+    ExportSettings settings;
+    settings.compress = true;
+    const auto result = ProjectExporter::exportProject(contentDir, "StreamGame", "", outputDir, settings);
+    REQUIRE(result.success);
+    CHECK(result.assetsPacked == 2);
+
+    // ── The exact game-runtime sequence ──
+    ProjectConfig cfg;
+    REQUIRE(ProjectConfigLoader::load(outputDir, cfg));
+    const uint8_t* key = cfg.encrypted ? cfg.encKey : nullptr;
+
+    ContentManager cm;
+    REQUIRE(cm.mountPak((outputDir / cfg.hpakFilename).string(), key));
+    CHECK(!cm.isLoaded(id1));                 // mounted, not yet parsed
+    CHECK(cm.streamMountedAssets() == 2);     // both stream in the background
+
+    bool done = false;
+    for (int i = 0; i < 500 && !done; ++i)
+    {
+        cm.pollAsyncResults();
+        done = cm.isLoaded(id1) && cm.isLoaded(id2);
+        if (!done) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    REQUIRE(done);
+    CHECK(cm.getMaterial(id1) != nullptr);
+    CHECK(cm.getMaterial(id2) != nullptr);
+
+    std::filesystem::remove_all(contentDir);
+    std::filesystem::remove_all(outputDir);
+}
+
+TEST_CASE("ProjectExporter packs a binary startup scene into the pak")
+{
+    auto contentDir = std::filesystem::temp_directory_path() / "he_scene_pak_content";
+    auto outputDir  = std::filesystem::temp_directory_path() / "he_scene_pak_out";
+    std::filesystem::remove_all(contentDir);
+    std::filesystem::remove_all(outputDir);
+    std::filesystem::create_directories(contentDir);
+
+    // One real asset so the pak isn't scene-only.
+    const HE::UUID matId{0xA55E, 0x7};
+    { const auto blob = makeMinimalMaterialBlob(matId, "with_scene");
+      std::ofstream f(contentDir / "with_scene.hasset", std::ios::binary);
+      f.write(reinterpret_cast<const char*>(blob.data()), blob.size()); }
+
+    // Stand-in for SceneSerializer::saveToMemory output (arbitrary binary blob).
+    std::vector<uint8_t> sceneBinary(256);
+    for (size_t i = 0; i < sceneBinary.size(); ++i) sceneBinary[i] = static_cast<uint8_t>(i * 7 + 3);
+
+    ExportSettings settings; settings.compress = true;
+    const auto result = ProjectExporter::exportProject(
+        contentDir, "SceneGame", "Main.hescene", outputDir, settings, sceneBinary);
+    REQUIRE(result.success);
+    CHECK(result.assetsPacked == 1);   // the scene is packed separately, not counted as an asset
+
+    // hcfg records the packed scene; the loose-scene fallback is skipped.
+    ProjectConfig cfg;
+    REQUIRE(ProjectConfigLoader::load(outputDir, cfg));
+    CHECK(cfg.hasPackedScene);
+    CHECK(cfg.mainSceneName.empty());
+    uint8_t zero[16] = {};
+    CHECK(std::memcmp(cfg.startupSceneUuid, zero, 16) != 0);
+
+    HE::UUID sceneUuid{};
+    std::memcpy(&sceneUuid.hi, cfg.startupSceneUuid,     8);
+    std::memcpy(&sceneUuid.lo, cfg.startupSceneUuid + 8, 8);
+
+    ContentManager cm;
+    REQUIRE(cm.mountPak((outputDir / cfg.hpakFilename).string(),
+                        cfg.encrypted ? cfg.encKey : nullptr));
+    // Raw scene bytes round-trip through pack + compression.
+    CHECK(cm.readMountedEntry(sceneUuid) == sceneBinary);
+    // Streaming skips the scene entry (only the material asset streams).
+    std::unordered_set<HE::UUID> exclude{sceneUuid};
+    CHECK(cm.streamMountedAssets(exclude) == 1);
+
+    std::filesystem::remove_all(contentDir);
+    std::filesystem::remove_all(outputDir);
+}
+
+#ifdef HE_HAVE_OPENSSL
+// End-to-end: exporting with encryption generates a random key, ships it in
+// project.hcfg, and the runtime path (loadPak with that key) decrypts correctly.
+// This is the fix for the bug where the game never passed a key to loadPak.
+TEST_CASE("ProjectExporter encrypts and the hcfg key decrypts the pak")
+{
+    auto contentDir = std::filesystem::temp_directory_path() / "he_test_export_enc_content";
+    auto outputDir  = std::filesystem::temp_directory_path() / "he_test_export_enc_out";
+    std::filesystem::remove_all(contentDir);
+    std::filesystem::remove_all(outputDir);
+    std::filesystem::create_directories(contentDir);
+
+    const HE::UUID id{0xFEED,0xBEEF};
+    const auto blob = makeMinimalMaterialBlob(id, "secret_mat");
+    { std::ofstream f(contentDir / "secret_mat.hasset", std::ios::binary);
+      f.write(reinterpret_cast<const char*>(blob.data()), blob.size()); }
+
+    ExportSettings settings;
+    settings.compress = true;
+    settings.encrypt  = true;
+    const auto result = ProjectExporter::exportProject(
+        contentDir, "SecretGame", "", outputDir, settings);
+    REQUIRE(result.success);
+    CHECK(result.assetsPacked == 1);
+
+    // hcfg records encryption + a non-zero random key.
+    ProjectConfig cfg;
+    REQUIRE(ProjectConfigLoader::load(outputDir, cfg));
+    CHECK(cfg.encrypted);
+    uint8_t zero[32] = {};
+    CHECK(std::memcmp(cfg.encKey, zero, 32) != 0);
+
+    const auto pakPath = (outputDir / "SecretGame.hpak").string();
+
+    // Without the key → asset does not load. With the hcfg key → it does.
+    { ContentManager cm; REQUIRE(cm.loadPak(pakPath)); CHECK(cm.getMaterial(id) == nullptr); }
+    { ContentManager cm; REQUIRE(cm.loadPak(pakPath, cfg.encKey)); CHECK(cm.getMaterial(id) != nullptr); }
+
+    std::filesystem::remove_all(contentDir);
+    std::filesystem::remove_all(outputDir);
+}
+#endif // HE_HAVE_OPENSSL

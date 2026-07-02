@@ -64,6 +64,14 @@ if(HE_HAVE_LZ4)
     target_link_libraries(hpak_packer PRIVATE lz4::lz4)
     target_compile_definitions(hpak_packer PRIVATE HE_HAVE_LZ4)
 endif()
+if(HE_HAVE_ZSTD)
+    target_link_libraries(hpak_packer PRIVATE zstd::zstd)
+    target_compile_definitions(hpak_packer PRIVATE HE_HAVE_ZSTD)
+endif()
+if(HE_HAVE_OPENSSL)
+    target_link_libraries(hpak_packer PRIVATE OpenSSL::Crypto)
+    target_compile_definitions(hpak_packer PRIVATE HE_HAVE_OPENSSL)
+endif()
 target_include_directories(hpak_packer
     PRIVATE src/Packer
     PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_Core/include

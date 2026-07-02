@@ -1,61 +1,116 @@
 #pragma once
 #include <cstdint>
+#include <cstddef>
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  .hpak  —  Horizon Engine packed asset archive (binary format)
+//  .hpak  —  Horizon Engine packed asset archive (binary format), version 2
 //
 //  Layout:
-//    [ FileHeader (16 bytes)            ]
-//    [ EntryDesc × entryCount           ]  TOC
+//    [ FileHeader (64 bytes)            ]
+//    [ EntryDesc × entryCount           ]  TOC, ASCENDING by (uuidHi,uuidLo)
+//    [ optional shared zstd dictionary  ]  at FileHeader::dictOffset, dictSize bytes
 //    [ raw data blocks at each offset   ]  .hasset blobs
 //
-//  All values are little-endian. Compression (LZ4) and encryption (XOR) are
-//  opt-in per entry via entryFlags. Operation order: compress → encrypt (write);
-//  decrypt → decompress (read). origSize always holds the uncompressed size.
+//  All values are little-endian.
+//
+//  Per entry: an optional codec (store/lz4/zstd) and optional XOR obfuscation,
+//  selected via EntryDesc::codec and EntryDesc::entryFlags.
+//    Operation order on write: compress → encrypt.
+//    Operation order on read:  decrypt  → decompress.
+//    origSize always holds the uncompressed .hasset size.
+//
+//  Integrity (two independent layers, both cheap):
+//    • FileHeader::tocHash    — hash64 over the EntryDesc region; verified at open()
+//                               → fail-fast on a truncated/corrupt archive.
+//    • EntryDesc::contentHash — hash64 over the STORED (compressed+encrypted) bytes;
+//                               verified per read → catches localized corruption.
+//  These use a fast non-cryptographic hash: they detect ACCIDENTAL corruption,
+//  they are NOT tamper-proof (an attacker just recomputes them). Tamper-evidence
+//  requires a secret — see the AEAD auth tag once encryption lands (kFlagEncrypted).
 // ─────────────────────────────────────────────────────────────────────────────
 
 namespace Hpak
 {
 
-inline constexpr char     k_magic[4]      = {'H','P','A','K'};
-inline constexpr uint32_t k_version       = 1;
+inline constexpr char     k_magic[4] = {'H','P','A','K'};
+inline constexpr uint32_t k_version  = 2;
 
-// EntryDesc::entryFlags bits
-inline constexpr uint8_t  kFlagCompressed = 0x01; // LZ4 compressed
-inline constexpr uint8_t  kFlagEncrypted  = 0x02; // XOR with 32-byte derived key
+// ── Per-entry compression codec (EntryDesc::codec) ────────────────────────────
+enum class Codec : uint8_t
+{
+    Store = 0, // uncompressed
+    LZ4   = 1, // LZ4 block (LZ4HC at pack time; decoded by LZ4_decompress_safe)
+    Zstd  = 2, // zstd frame (optionally with the archive's shared dictionary)
+};
+
+// ── Archive-wide flags (FileHeader::flags) ────────────────────────────────────
+inline constexpr uint32_t kArchiveSortedTOC = 0x1; // TOC ascending by UUID (binary search valid)
+inline constexpr uint32_t kArchiveHasDict   = 0x2; // dictOffset/dictSize point at a shared zstd dictionary
+inline constexpr uint32_t kArchiveEncrypted = 0x4; // at least one entry carries kFlagEncrypted
+
+// ── Per-entry flags (EntryDesc::entryFlags) ───────────────────────────────────
+// NOTE: kFlagEncrypted is currently XOR (obfuscation, NOT a security guarantee —
+// the key ships with the game). It is scheduled to become AES-256-GCM (AEAD).
+inline constexpr uint8_t  kFlagEncrypted   = 0x1; // payload is obfuscated/encrypted
+inline constexpr uint8_t  kFlagUsesDict    = 0x2; // zstd entry compressed with the archive dictionary
+inline constexpr uint8_t  kFlagBlockFramed = 0x4; // RESERVED: per-block framing (not yet implemented)
 
 #pragma pack(push, 1)
 
 struct FileHeader
 {
-    char     magic[4];      // "HPAK"
-    uint32_t version;       // k_version = 1
+    char     magic[4];       // "HPAK"
+    uint32_t version;        // k_version = 2
     uint32_t entryCount;
-    uint32_t flags;         // reserved
+    uint32_t flags;          // kArchive* bits
+    uint64_t buildId;        // hash/semver of the build → patch validation
+    uint64_t baseArchiveId;  // 0 = base archive; else buildId of the base this patch overlays
+    uint64_t tocHash;        // hash64 over the EntryDesc region
+    uint64_t dictOffset;     // byte offset of the shared zstd dictionary blob (0 = none)
+    uint32_t dictSize;       // dictionary blob length
+    uint32_t reserved0;
+    uint64_t reserved1;
 };
-static_assert(sizeof(FileHeader) == 16, "Hpak::FileHeader must be 16 bytes");
+static_assert(sizeof(FileHeader) == 64, "Hpak::FileHeader must be 64 bytes");
 
 struct EntryDesc
 {
-    uint64_t uuidHi;
-    uint64_t uuidLo;
-    uint32_t origSize;      // original .hasset size before compression
-    uint32_t dataSize;      // stored size (may differ with compression)
-    uint64_t dataOffset;    // byte offset from start of file
-    uint8_t  entryFlags;    // kFlagCompressed | kFlagEncrypted
-    uint8_t  pad[3];
+    uint64_t uuidHi;         // sorted key (high)
+    uint64_t uuidLo;         // sorted key (low)
+    uint64_t dataOffset;     // byte offset from start of file
+    uint32_t origSize;       // uncompressed .hasset size
+    uint32_t dataSize;       // stored size (compressed+encrypted; incl. AEAD tag once encrypted)
+    uint64_t contentHash;    // hash64 of the stored bytes
+    uint8_t  nonce[12];      // AEAD nonce (96-bit); zero when unencrypted / XOR
+    uint8_t  codec;          // Hpak::Codec
+    uint8_t  entryFlags;     // kFlag* bits
+    uint16_t pad;
 };
-static_assert(sizeof(EntryDesc) == 36, "Hpak::EntryDesc must be 36 bytes");
+static_assert(sizeof(EntryDesc) == 56, "Hpak::EntryDesc must be 56 bytes");
 
 #pragma pack(pop)
 
+// ── Fast non-cryptographic hash (FNV-1a, 64-bit) ──────────────────────────────
+// Deterministic across platforms/runs. Used for tocHash + contentHash (corruption
+// detection only — see the header comment). Dependency-free by design.
+inline uint64_t hash64(const uint8_t* data, size_t len) noexcept
+{
+    uint64_t h = 1469598103934665603ULL;        // FNV offset basis
+    for (size_t i = 0; i < len; ++i)
+    {
+        h ^= static_cast<uint64_t>(data[i]);
+        h *= 1099511628211ULL;                   // FNV prime
+    }
+    return h;
+}
+
 // Per-entry packing options.
 // Operation order on write: compress → encrypt.
-// Operation order on read:  decrypt  → decompress.
 struct PackSettings {
-    bool    compress = false; // LZ4-compress before optional encryption
-    bool    encrypt  = false;
-    uint8_t key[32]  = {};    // 32-byte XOR key (from KeyDerivation::derive)
+    Codec   codec   = Codec::Store; // compression codec (Store = none)
+    int     level   = 0;            // codec level; 0 = codec default (LZ4HC 9 / zstd 19)
+    bool    encrypt = false;        // XOR obfuscation with `key` (see kFlagEncrypted note)
+    uint8_t key[32] = {};           // 32-byte key (from KeyDerivation::derive)
 };
 
 } // namespace Hpak

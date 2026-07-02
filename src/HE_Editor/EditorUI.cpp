@@ -1461,9 +1461,22 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                 // Resolve game runtime dir from editor executable location (../Game/)
                 if (const char* base = SDL_GetBasePath())
                     es.gameRuntimeDir = std::filesystem::path(base) / ".." / "Game";
+
+                // Serialize the SAVED startup scene to binary (CBOR) so it ships
+                // packed inside the .hpak. Load fresh from disk rather than the live
+                // editor world, which may hold unsaved or play-mode mutations.
+                std::vector<uint8_t> sceneBinary;
+                if (!ctx.currentScenePath.empty())
+                {
+                    HorizonWorld sceneWorld;
+                    SceneSerializer ser;
+                    if (ser.load(sceneWorld, ctx.currentScenePath, SerializeFormat::JSON))
+                        ser.saveToMemory(sceneWorld, sceneBinary);
+                }
+
                 const auto res = ProjectExporter::exportProject(
                     contentDir, projName, sceneName,
-                    std::filesystem::path(s_exportOutputDir), es);
+                    std::filesystem::path(s_exportOutputDir), es, sceneBinary);
 
                 if (res.success)
                     s_exportResult = "OK: " + std::to_string(res.assetsPacked)

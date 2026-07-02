@@ -2,6 +2,7 @@
 #include <Types/Defines.h>
 #include <filesystem>
 #include <string>
+#include <vector>
 #include <cstdint>
 
 struct HE_API ExportSettings {
@@ -30,8 +31,13 @@ public:
     static ExportResult exportProject(
         const std::filesystem::path& contentDir,
         const std::string&           projectName,
-        const std::string&           startupSceneName, // filename only, e.g. "Main.hescene"
+        const std::string&           startupSceneName, // fallback loose scene filename (e.g. "Main.hescene")
         const std::filesystem::path& outputDir,
-        const ExportSettings&        settings = {}
+        const ExportSettings&        settings = {},
+        // Startup scene pre-serialized to binary (CBOR via SceneSerializer::saveToMemory)
+        // by the caller (which has HorizonScene). When non-empty it is packed INTO the
+        // .hpak under a generated UUID and referenced from project.hcfg, and the loose
+        // scene copy is skipped. Empty → fall back to copying the loose startupSceneName.
+        const std::vector<uint8_t>&  startupSceneBinary = {}
     );
 };
