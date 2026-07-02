@@ -18,6 +18,7 @@ add_library(HorizonScene SHARED
     src/FoliageSystem.cpp
     src/UISystem.cpp
     src/ScriptContext.cpp
+    src/ScriptApi.cpp
     src/AudioEngine.cpp
     src/PhysicsWorld.cpp
 )

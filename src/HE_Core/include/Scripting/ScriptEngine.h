@@ -1,5 +1,6 @@
 #pragma once
 #include "Types/Defines.h"
+#include "Scripting/IScriptBackend.h"
 #include "Scripting/ScriptTypes.h"
 #include <string>
 #include <unordered_map>
@@ -23,51 +24,55 @@ struct lua_State;
 //   engine.callOnStart(id);
 //   engine.callOnUpdate(id, 0.016f);
 //   engine.destroyInstance(id);
-class HE_API ScriptEngine
+class HE_API ScriptEngine : public IScriptBackend
 {
 public:
-    using InstanceId = uint64_t;
-    static constexpr InstanceId kInvalidInstance = 0;
+    using InstanceId = IScriptBackend::InstanceId;
+    static constexpr InstanceId kInvalidInstance = IScriptBackend::kInvalidInstance;
 
     ScriptEngine();
-    ~ScriptEngine();
+    ~ScriptEngine() override;
 
     ScriptEngine(const ScriptEngine&)            = delete;
     ScriptEngine& operator=(const ScriptEngine&) = delete;
 
     // Compile and store a named script from a Lua source string.
     // Returns false on compile error; check lastError().
-    bool loadScript(const std::string& name, const std::string& source);
+    bool loadScript(const std::string& name, const std::string& source) override;
 
     // Remove a script and destroy all instances created from it.
-    void unloadScript(const std::string& name);
+    void unloadScript(const std::string& name) override;
 
-    bool   isScriptLoaded(const std::string& name) const;
-    size_t loadedScriptCount() const { return m_scripts.size(); }
+    bool   isScriptLoaded(const std::string& name) const override;
+    size_t loadedScriptCount() const override { return m_scripts.size(); }
 
     // Create an instance (own table) of a named script.
     // Returns kInvalidInstance if the script is not loaded.
     InstanceId createInstance(const std::string& scriptName);
 
-    // Destroy an instance and remove it from the Lua registry.
-    void destroyInstance(InstanceId id);
+    // IScriptBackend variant: create an instance bound to an entity —
+    // sets self.entityId in the instance table.
+    InstanceId createInstance(const std::string& scriptName, uint32_t entityId) override;
 
-    size_t instanceCount() const { return m_instances.size(); }
+    // Destroy an instance and remove it from the Lua registry.
+    void destroyInstance(InstanceId id) override;
+
+    size_t instanceCount() const override { return m_instances.size(); }
 
     // Call script.onStart(self). No-op (returns true) if not defined.
-    bool callOnStart(InstanceId id);
+    bool callOnStart(InstanceId id) override;
 
     // Call script.onUpdate(self, dt). No-op (returns true) if not defined.
-    bool callOnUpdate(InstanceId id, float dt);
+    bool callOnUpdate(InstanceId id, float dt) override;
 
     // Call script.onCollisionEnter(self, otherEntityId). No-op if not defined.
-    bool callOnCollisionEnter(InstanceId id, uint32_t otherEntityId);
+    bool callOnCollisionEnter(InstanceId id, uint32_t otherEntityId) override;
 
     // Call script.onCollisionExit(self, otherEntityId). No-op if not defined.
-    bool callOnCollisionExit(InstanceId id, uint32_t otherEntityId);
+    bool callOnCollisionExit(InstanceId id, uint32_t otherEntityId) override;
 
     // Last error string from any failed compile or call.
-    const std::string& lastError() const { return m_lastError; }
+    const std::string& lastError() const override { return m_lastError; }
 
     // Execute a raw Lua string in the global state (useful for tests/REPL).
     bool exec(const std::string& code);
@@ -85,16 +90,16 @@ public:
 
     // Inject all properties from a map into the instance table (sets each field).
     void injectProperties(InstanceId id,
-                          const std::unordered_map<std::string, ScriptPropValue>& props);
+                          const std::unordered_map<std::string, ScriptPropValue>& props) override;
 
     // Read the M.properties table of a loaded script and return its declared properties.
     // Returns an empty vector if the script has no M.properties table.
-    std::vector<ScriptPropDef> getScriptProperties(const std::string& name) const;
+    std::vector<ScriptPropDef> getScriptProperties(const std::string& name) const override;
 
     // Recompile a loaded script and patch function fields in all live instances.
     // Data fields (non-function keys) in instance tables are preserved.
     // Returns false (and leaves state unchanged) if the new source fails to compile.
-    bool hotReloadScript(const std::string& name, const std::string& source);
+    bool hotReloadScript(const std::string& name, const std::string& source) override;
 
     // Direct lua_State access for advanced binding (ScriptContext in HE_Scene uses this).
     lua_State* state() { return m_L; }

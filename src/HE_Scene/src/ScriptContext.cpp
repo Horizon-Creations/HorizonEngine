@@ -1,8 +1,7 @@
 #include "HorizonScene/ScriptContext.h"
 #include "HorizonScene/HorizonWorld.h"
 #include "HorizonScene/PhysicsWorld.h"
-#include "HorizonScene/Components/TransformComponent.h"
-#include "HorizonScene/Components/NameComponent.h"
+#include "HorizonScene/ScriptApi.h"
 
 extern "C" {
 #include <lua.h>
@@ -30,156 +29,104 @@ static PhysicsWorld* getPhysics(lua_State* L)
     return pw;
 }
 
-static entt::entity toEntity(lua_Integer v)
-{
-    return static_cast<entt::entity>(static_cast<uint32_t>(v));
-}
-
 // ─── Lua C functions ─────────────────────────────────────────────────────────
+// Thin marshalling shims: all behavior lives in the language-neutral ScriptApi
+// (shared 1:1 with the Python backend).
 
 static int lua_horizon_log(lua_State* L)
 {
-    const char* msg = luaL_checkstring(L, 1);
-    printf("[Lua] %s\n", msg);
+    ScriptApi::log(luaL_checkstring(L, 1));
     return 0;
 }
 
 static int lua_horizon_getName(lua_State* L)
 {
-    lua_Integer id = luaL_checkinteger(L, 1);
-    HorizonWorld* world = getWorld(L);
-    auto& reg = world->registry();
-    entt::entity e = toEntity(id);
-    if (!reg.valid(e)) { lua_pushstring(L, ""); return 1; }
-    const auto* nc = reg.try_get<NameComponent>(e);
-    lua_pushstring(L, nc ? nc->name.c_str() : "");
+    const auto id = static_cast<uint32_t>(luaL_checkinteger(L, 1));
+    lua_pushstring(L, ScriptApi::getName(*getWorld(L), id).c_str());
     return 1;
 }
 
 static int lua_horizon_getPosition(lua_State* L)
 {
-    lua_Integer id = luaL_checkinteger(L, 1);
-    HorizonWorld* world = getWorld(L);
-    auto& reg = world->registry();
-    entt::entity e = toEntity(id);
-    const auto* t = reg.valid(e) ? reg.try_get<TransformComponent>(e) : nullptr;
-    if (t) { lua_pushnumber(L, t->position.x); lua_pushnumber(L, t->position.y); lua_pushnumber(L, t->position.z); return 3; }
-    lua_pushnumber(L, 0); lua_pushnumber(L, 0); lua_pushnumber(L, 0);
+    const auto id = static_cast<uint32_t>(luaL_checkinteger(L, 1));
+    const glm::vec3 p = ScriptApi::getPosition(*getWorld(L), id);
+    lua_pushnumber(L, p.x); lua_pushnumber(L, p.y); lua_pushnumber(L, p.z);
     return 3;
 }
 
 static int lua_horizon_setPosition(lua_State* L)
 {
-    lua_Integer id = luaL_checkinteger(L, 1);
-    float x = static_cast<float>(luaL_checknumber(L, 2));
-    float y = static_cast<float>(luaL_checknumber(L, 3));
-    float z = static_cast<float>(luaL_checknumber(L, 4));
-    HorizonWorld* world = getWorld(L);
-    auto& reg = world->registry();
-    entt::entity e = toEntity(id);
-    if (reg.valid(e))
-    {
-        auto* t = reg.try_get<TransformComponent>(e);
-        if (t) { t->position = {x, y, z}; t->dirty = true; }
-    }
+    const auto id = static_cast<uint32_t>(luaL_checkinteger(L, 1));
+    ScriptApi::setPosition(*getWorld(L), id,
+        { static_cast<float>(luaL_checknumber(L, 2)),
+          static_cast<float>(luaL_checknumber(L, 3)),
+          static_cast<float>(luaL_checknumber(L, 4)) });
     return 0;
 }
 
 static int lua_horizon_getRotation(lua_State* L)
 {
-    lua_Integer id = luaL_checkinteger(L, 1);
-    HorizonWorld* world = getWorld(L);
-    auto& reg = world->registry();
-    entt::entity e = toEntity(id);
-    const auto* t = reg.valid(e) ? reg.try_get<TransformComponent>(e) : nullptr;
-    if (t) { lua_pushnumber(L, t->rotation.x); lua_pushnumber(L, t->rotation.y); lua_pushnumber(L, t->rotation.z); return 3; }
-    lua_pushnumber(L, 0); lua_pushnumber(L, 0); lua_pushnumber(L, 0);
+    const auto id = static_cast<uint32_t>(luaL_checkinteger(L, 1));
+    const glm::vec3 r = ScriptApi::getRotation(*getWorld(L), id);
+    lua_pushnumber(L, r.x); lua_pushnumber(L, r.y); lua_pushnumber(L, r.z);
     return 3;
 }
 
 static int lua_horizon_setRotation(lua_State* L)
 {
-    lua_Integer id = luaL_checkinteger(L, 1);
-    float x = static_cast<float>(luaL_checknumber(L, 2));
-    float y = static_cast<float>(luaL_checknumber(L, 3));
-    float z = static_cast<float>(luaL_checknumber(L, 4));
-    HorizonWorld* world = getWorld(L);
-    auto& reg = world->registry();
-    entt::entity e = toEntity(id);
-    if (reg.valid(e))
-    {
-        auto* t = reg.try_get<TransformComponent>(e);
-        if (t) { t->rotation = {x, y, z}; t->dirty = true; }
-    }
+    const auto id = static_cast<uint32_t>(luaL_checkinteger(L, 1));
+    ScriptApi::setRotation(*getWorld(L), id,
+        { static_cast<float>(luaL_checknumber(L, 2)),
+          static_cast<float>(luaL_checknumber(L, 3)),
+          static_cast<float>(luaL_checknumber(L, 4)) });
     return 0;
 }
 
 static int lua_horizon_getScale(lua_State* L)
 {
-    lua_Integer id = luaL_checkinteger(L, 1);
-    HorizonWorld* world = getWorld(L);
-    auto& reg = world->registry();
-    entt::entity e = toEntity(id);
-    const auto* t = reg.valid(e) ? reg.try_get<TransformComponent>(e) : nullptr;
-    if (t) { lua_pushnumber(L, t->scale.x); lua_pushnumber(L, t->scale.y); lua_pushnumber(L, t->scale.z); return 3; }
-    lua_pushnumber(L, 1); lua_pushnumber(L, 1); lua_pushnumber(L, 1);
+    const auto id = static_cast<uint32_t>(luaL_checkinteger(L, 1));
+    const glm::vec3 s = ScriptApi::getScale(*getWorld(L), id);
+    lua_pushnumber(L, s.x); lua_pushnumber(L, s.y); lua_pushnumber(L, s.z);
     return 3;
 }
 
 static int lua_horizon_setScale(lua_State* L)
 {
-    lua_Integer id = luaL_checkinteger(L, 1);
-    float x = static_cast<float>(luaL_checknumber(L, 2));
-    float y = static_cast<float>(luaL_checknumber(L, 3));
-    float z = static_cast<float>(luaL_checknumber(L, 4));
-    HorizonWorld* world = getWorld(L);
-    auto& reg = world->registry();
-    entt::entity e = toEntity(id);
-    if (reg.valid(e))
-    {
-        auto* t = reg.try_get<TransformComponent>(e);
-        if (t) { t->scale = {x, y, z}; t->dirty = true; }
-    }
+    const auto id = static_cast<uint32_t>(luaL_checkinteger(L, 1));
+    ScriptApi::setScale(*getWorld(L), id,
+        { static_cast<float>(luaL_checknumber(L, 2)),
+          static_cast<float>(luaL_checknumber(L, 3)),
+          static_cast<float>(luaL_checknumber(L, 4)) });
     return 0;
 }
 
 static int lua_horizon_spawn(lua_State* L)
 {
-    lua_Integer parentId = luaL_checkinteger(L, 1);
+    const auto parentId = static_cast<uint32_t>(luaL_checkinteger(L, 1));
     const char* name    = luaL_optstring(L, 2, "Entity");
-    HorizonWorld* world = getWorld(L);
-    entt::entity parent = toEntity(parentId);
-    entt::entity child  = world->createEntity(name);
-    if (world->registry().valid(parent))
-        world->reparentEntity(child, parent);
-    lua_pushinteger(L, static_cast<lua_Integer>(static_cast<uint32_t>(child)));
+    const uint32_t child = ScriptApi::spawn(*getWorld(L), parentId, name);
+    lua_pushinteger(L, static_cast<lua_Integer>(child));
     return 1;
 }
 
 static int lua_horizon_destroy(lua_State* L)
 {
-    lua_Integer id = luaL_checkinteger(L, 1);
-    HorizonWorld* world = getWorld(L);
-    entt::entity e = toEntity(id);
-    if (world->registry().valid(e))
-        world->destroyEntity(e);
+    const auto id = static_cast<uint32_t>(luaL_checkinteger(L, 1));
+    ScriptApi::destroy(*getWorld(L), id);
     return 0;
 }
 
 static int lua_horizon_raycast(lua_State* L)
 {
-    float ox = static_cast<float>(luaL_checknumber(L, 1));
-    float oy = static_cast<float>(luaL_checknumber(L, 2));
-    float oz = static_cast<float>(luaL_checknumber(L, 3));
-    float dx = static_cast<float>(luaL_checknumber(L, 4));
-    float dy = static_cast<float>(luaL_checknumber(L, 5));
-    float dz = static_cast<float>(luaL_checknumber(L, 6));
-    float maxDist = static_cast<float>(luaL_optnumber(L, 7, 1000.0));
+    const glm::vec3 origin{ static_cast<float>(luaL_checknumber(L, 1)),
+                            static_cast<float>(luaL_checknumber(L, 2)),
+                            static_cast<float>(luaL_checknumber(L, 3)) };
+    const glm::vec3 dir{ static_cast<float>(luaL_checknumber(L, 4)),
+                         static_cast<float>(luaL_checknumber(L, 5)),
+                         static_cast<float>(luaL_checknumber(L, 6)) };
+    const float maxDist = static_cast<float>(luaL_optnumber(L, 7, 1000.0));
 
-    PhysicsWorld* pw = getPhysics(L);
-    if (!pw) { lua_pushnil(L); return 1; }
-
-    PhysicsWorld::RaycastHit hit = pw->raycast({ox, oy, oz}, {dx, dy, dz}, maxDist);
+    const auto hit = ScriptApi::raycast(getPhysics(L), origin, dir, maxDist);
     if (!hit.hit) { lua_pushnil(L); return 1; }
 
     lua_newtable(L);
@@ -197,21 +144,18 @@ static int lua_horizon_raycast(lua_State* L)
 
 static int lua_horizon_setVelocity(lua_State* L)
 {
-    lua_Integer id = luaL_checkinteger(L, 1);
-    float vx = static_cast<float>(luaL_checknumber(L, 2));
-    float vy = static_cast<float>(luaL_checknumber(L, 3));
-    float vz = static_cast<float>(luaL_checknumber(L, 4));
-    PhysicsWorld* pw = getPhysics(L);
-    if (pw) pw->setCharacterVelocity(static_cast<uint32_t>(id), {vx, vy, vz});
+    const auto id = static_cast<uint32_t>(luaL_checkinteger(L, 1));
+    ScriptApi::setVelocity(getPhysics(L), id,
+        { static_cast<float>(luaL_checknumber(L, 2)),
+          static_cast<float>(luaL_checknumber(L, 3)),
+          static_cast<float>(luaL_checknumber(L, 4)) });
     return 0;
 }
 
 static int lua_horizon_isGrounded(lua_State* L)
 {
-    lua_Integer id = luaL_checkinteger(L, 1);
-    PhysicsWorld* pw = getPhysics(L);
-    bool grounded = pw && pw->isCharacterGrounded(static_cast<uint32_t>(id));
-    lua_pushboolean(L, grounded ? 1 : 0);
+    const auto id = static_cast<uint32_t>(luaL_checkinteger(L, 1));
+    lua_pushboolean(L, ScriptApi::isGrounded(getPhysics(L), id) ? 1 : 0);
     return 1;
 }
 
@@ -275,12 +219,8 @@ bool ScriptContext::loadScript(const std::string& name, const std::string& sourc
 ScriptEngine::InstanceId ScriptContext::createInstance(const std::string& scriptName,
                                                         entt::entity       entity)
 {
-    auto id = m_engine.createInstance(scriptName);
-    if (id == ScriptEngine::kInvalidInstance) return id;
-    // Store entity ID in instance table so scripts can use self.entityId
-    m_engine.setInstanceField(id, "entityId",
-        static_cast<double>(static_cast<uint32_t>(entity)));
-    return id;
+    // The entity binding (self.entityId) is handled by the backend overload.
+    return m_engine.createInstance(scriptName, static_cast<uint32_t>(entity));
 }
 
 void ScriptContext::destroyInstance(ScriptEngine::InstanceId id)
