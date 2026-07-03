@@ -2348,6 +2348,7 @@ void VulkanRenderer::EncodeShadowMap(VkCommandBuffer cmd)
 {
     if (!m_world || m_shadowPipeline == VK_NULL_HANDLE) return;
 
+    m_extractor.setContentManager(m_contentManager);
     m_extractor.extract(*m_world, m_renderWorld, 1.0f, &m_editorCamera);
     if (!m_renderWorld.shadow.enabled || m_renderWorld.objects.empty()) return;
     for (RenderObject& obj : m_renderWorld.objects)
@@ -2502,6 +2503,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             m_environment.sunColor, m_environment.sunIntensity,
                             m_environment.moonColor, m_environment.moonIntensity,
                             m_environment.cloudCoverage);
+    m_extractor.setContentManager(m_contentManager);
     m_extractor.extract(*m_world, m_renderWorld,
                         static_cast<float>(width) / static_cast<float>(height),
                         &m_editorCamera);
@@ -4429,6 +4431,7 @@ void VulkanRenderer::runSSAO(VkCommandBuffer cmd, uint32_t w, uint32_t h)
 
     // Extract + cull the scene against the camera frustum (same as DrawScene).
     const float aspect = w > 0 && h > 0 ? float(w) / float(h) : 1.0f;
+    m_extractor.setContentManager(m_contentManager);
     m_extractor.extract(*m_world, m_renderWorld, aspect, &m_editorCamera);
     if (m_renderWorld.objects.empty()) return;
 

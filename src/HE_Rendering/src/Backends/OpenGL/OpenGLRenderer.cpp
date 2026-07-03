@@ -4014,6 +4014,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	                        env.sunColor, env.sunIntensity,
 	                        env.moonColor, env.moonIntensity,
 	                        env.cloudCoverage);
+	m_extractor.setContentManager(m_contentManager);
 	m_extractor.extract(*m_world, m_renderWorld,
 	                    static_cast<float>(pw) / static_cast<float>(ph),
 	                    &m_editorCamera);

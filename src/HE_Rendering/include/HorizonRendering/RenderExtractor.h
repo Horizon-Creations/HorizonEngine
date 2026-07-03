@@ -4,6 +4,7 @@
 
 class HorizonWorld;
 class RenderWorld;
+class ContentManager;
 struct EditorCameraOverride;
 
 // Reads the ECS world each frame and fills a RenderWorld snapshot.
@@ -23,6 +24,12 @@ public:
     // Populate outWorld.uiObjects from UISystem::extract.
     // Called after extract() when viewport pixel dimensions are known.
     void extractUI(HorizonWorld& world, float vpWidth, float vpHeight, RenderWorld& outWorld);
+
+    // Optional: when set, mesh renderables are culled against each mesh's real
+    // object-space AABB (looked up by asset UUID) instead of a unit-cube proxy —
+    // less overdraw / popping and a tighter shadow-frustum fit. Falls back to the
+    // unit cube when a mesh isn't resident yet or carries no bounds.
+    void setContentManager(ContentManager* cm) { m_contentManager = cm; }
 
     // Day-night cycle: when enabled, the extractor drives the sun from the time
     // of day (0..1: 0.25 sunrise, 0.5 noon, 0.75 sunset, 0/1 midnight) instead of
@@ -46,6 +53,7 @@ public:
     }
 
 private:
+    ContentManager* m_contentManager = nullptr;
     bool      m_dayNight       = false;
     float     m_timeOfDay      = 0.5f;
     glm::vec3 m_sunColor       = glm::vec3(1.0f, 0.97f, 0.90f);

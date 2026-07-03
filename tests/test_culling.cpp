@@ -2,7 +2,51 @@
 #include <Math/AABB.h>
 #include <HorizonRendering/FrustumCuller.h>
 #include <HorizonRendering/RenderSorter.h>
+#include <HorizonRendering/RenderExtractor.h>
+#include <HorizonRendering/RenderWorld.h>
+#include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/Components/TransformComponent.h>
+#include <HorizonScene/Components/MeshComponent.h>
+#include <ContentManager/ContentManager.h>
+#include <ContentManager/Assets.h>
 #include <glm/gtc/matrix_transform.hpp>
+
+TEST_CASE("RenderExtractor: real mesh bounds when a ContentManager is set, unit-cube otherwise")
+{
+	// A mesh whose real bounds are a 4-unit box (much bigger than the unit cube).
+	ContentManager cm;
+	StaticMeshAsset mesh; mesh.type = HE::AssetType::StaticMesh; mesh.name = "big";
+	mesh.indices = {0,1,2};
+	mesh.boundsMin[0] = mesh.boundsMin[1] = mesh.boundsMin[2] = -2.0f;
+	mesh.boundsMax[0] = mesh.boundsMax[1] = mesh.boundsMax[2] =  2.0f;
+	const HE::UUID meshId = cm.registerStaticMesh(mesh);
+
+	HorizonWorld world;
+	auto e = world.createEntity("obj");
+	world.registry().emplace<TransformComponent>(e, TransformComponent{}); // identity
+	MeshComponent mc; mc.meshAssetId = meshId;
+	world.registry().emplace<MeshComponent>(e, mc);
+
+	// With the ContentManager, worldBounds should be the real 4-unit box.
+	{
+		RenderExtractor ex;
+		ex.setContentManager(&cm);
+		RenderWorld rw;
+		ex.extract(world, rw, 1.0f);
+		REQUIRE(rw.objects.size() == 1);
+		CHECK(rw.objects[0].worldBounds.min.x == doctest::Approx(-2.0f));
+		CHECK(rw.objects[0].worldBounds.max.x == doctest::Approx( 2.0f));
+	}
+	// Without one, it falls back to the unit-cube proxy (±0.5).
+	{
+		RenderExtractor ex;
+		RenderWorld rw;
+		ex.extract(world, rw, 1.0f);
+		REQUIRE(rw.objects.size() == 1);
+		CHECK(rw.objects[0].worldBounds.min.x == doctest::Approx(-0.5f));
+		CHECK(rw.objects[0].worldBounds.max.x == doctest::Approx( 0.5f));
+	}
+}
 
 TEST_CASE("AABB build and ray intersection")
 {

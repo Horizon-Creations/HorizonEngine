@@ -102,6 +102,19 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 			if (const auto* c = reader.findChunk(HAsset::CHUNK_VERT)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.vertices); }
 			if (const auto* c = reader.findChunk(HAsset::CHUNK_NORM)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.normals); }
 			if (const auto* c = reader.findChunk(HAsset::CHUNK_TEXC)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.uvs); }
+			// Object-space AABB, so the extractor can cull against real bounds (the
+			// cooked path already carries a baked AABB). Cheap one-time scan on load.
+			if (!a.vertices.empty())
+			{
+				a.boundsMin[0] = a.boundsMin[1] = a.boundsMin[2] =  1e30f;
+				a.boundsMax[0] = a.boundsMax[1] = a.boundsMax[2] = -1e30f;
+				for (size_t v = 0; v + 2 < a.vertices.size(); v += 3)
+					for (int k = 0; k < 3; ++k)
+					{
+						a.boundsMin[k] = std::min(a.boundsMin[k], a.vertices[v + k]);
+						a.boundsMax[k] = std::max(a.boundsMax[k], a.vertices[v + k]);
+					}
+			}
 		}
 		handle = m_staticMeshAssets.insert(std::move(a)); break;
 	}
