@@ -2454,27 +2454,40 @@ const VulkanRenderer::GpuMesh* VulkanRenderer::resolveMesh(const HE::UUID& asset
     if (auto it = m_meshCache.find(assetId); it != m_meshCache.end()) return &it->second;
 
     const StaticMeshAsset* asset = m_contentManager->getStaticMesh(assetId);
-    if (!asset || asset->vertices.empty() || asset->indices.empty()) return nullptr;
+    if (!asset || asset->indices.empty() || (asset->vertices.empty() && !asset->cooked)) return nullptr;
 
-    const size_t vertexCount = asset->vertices.size() / 3;
-    std::vector<float> interleaved;
-    interleaved.reserve(vertexCount * 8);
-    for (size_t i = 0; i < vertexCount; ++i)
-    {
-        interleaved.insert(interleaved.end(),
-            { asset->vertices[i*3+0], asset->vertices[i*3+1], asset->vertices[i*3+2] });
-        if (i * 3 + 2 < asset->normals.size())
-            interleaved.insert(interleaved.end(),
-                { asset->normals[i*3+0], asset->normals[i*3+1], asset->normals[i*3+2] });
-        else
-            interleaved.insert(interleaved.end(), { 0.0f, 0.0f, 0.0f });
-        if (i * 2 + 1 < asset->uvs.size())
-            interleaved.insert(interleaved.end(), { asset->uvs[i*2+0], asset->uvs[i*2+1] });
-        else
-            interleaved.insert(interleaved.end(), { 0.0f, 0.0f });
-    }
+    // Cooked (packaged) assets ship the interleaved pos+norm+uv buffer + baked
+    // AABB, built once at pack time. Loose/editor assets interleave on first draw.
     GpuMesh mesh;
-    mesh.localBounds = HE::AABB::fromPositions(asset->vertices.data(), vertexCount);
+    std::vector<float> built;
+    const std::vector<float>* vtx = &asset->interleaved;
+    if (asset->cooked)
+    {
+        mesh.localBounds.min = { asset->boundsMin[0], asset->boundsMin[1], asset->boundsMin[2] };
+        mesh.localBounds.max = { asset->boundsMax[0], asset->boundsMax[1], asset->boundsMax[2] };
+    }
+    else
+    {
+        const size_t vertexCount = asset->vertices.size() / 3;
+        built.reserve(vertexCount * 8);
+        for (size_t i = 0; i < vertexCount; ++i)
+        {
+            built.insert(built.end(),
+                { asset->vertices[i*3+0], asset->vertices[i*3+1], asset->vertices[i*3+2] });
+            if (i * 3 + 2 < asset->normals.size())
+                built.insert(built.end(),
+                    { asset->normals[i*3+0], asset->normals[i*3+1], asset->normals[i*3+2] });
+            else
+                built.insert(built.end(), { 0.0f, 0.0f, 0.0f });
+            if (i * 2 + 1 < asset->uvs.size())
+                built.insert(built.end(), { asset->uvs[i*2+0], asset->uvs[i*2+1] });
+            else
+                built.insert(built.end(), { 0.0f, 0.0f });
+        }
+        vtx = &built;
+        mesh.localBounds = HE::AABB::fromPositions(asset->vertices.data(), vertexCount);
+    }
+    const std::vector<float>& interleaved = *vtx;
     if (!createMeshBuffers(mesh, interleaved, asset->indices)) return nullptr;
     return &m_meshCache.emplace(assetId, mesh).first->second;
 }

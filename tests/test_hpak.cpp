@@ -575,6 +575,59 @@ TEST_CASE("All asset types round-trip through a Store pak")  { verifyAllTypes(Hp
 TEST_CASE("All asset types round-trip through an LZ4 pak")   { verifyAllTypes(Hpak::Codec::LZ4);   }
 TEST_CASE("All asset types round-trip through a zstd pak")   { verifyAllTypes(Hpak::Codec::Zstd);  }
 
+TEST_CASE("Cook: static mesh ships pre-interleaved + baked AABB; uncooked stays SoA")
+{
+    auto dir = std::filesystem::temp_directory_path() / "he_cook_src";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    const TypeIds ids = authorAllTypes(dir);  // mesh: 3 verts, normals + uvs, indices {0,1,2}
+
+    // Cooked pack.
+    {
+        Hpak::PackSettings s; s.codec = Hpak::Codec::Store; s.cook = true;
+        HpakWriter packer; packer.addDirectory(dir, s);
+        auto pak = std::filesystem::temp_directory_path() / "he_cook.hpak";
+        REQUIRE(packer.write(pak.string()));
+
+        ContentManager cm;
+        REQUIRE(cm.loadPak(pak.string()));
+        const StaticMeshAsset* m = cm.getStaticMesh(ids.mesh);
+        REQUIRE(m != nullptr);
+        CHECK(m->cooked);
+        CHECK(m->vertices.empty());               // SoA dropped in the cooked form
+        CHECK(m->vertexCount == 3);
+        CHECK(m->indices == std::vector<uint32_t>{0,1,2}); // INDX kept as-is
+        // The interleaved 8-float/vertex layout the backends upload verbatim.
+        const std::vector<float> expected = {
+            0,0,0, 0,0,1, 0,0,   // v0 pos,norm,uv
+            1,0,0, 0,0,1, 1,0,   // v1
+            0,1,0, 0,0,1, 0,1 }; // v2
+        REQUIRE(m->interleaved.size() == expected.size());
+        for (size_t i = 0; i < expected.size(); ++i)
+            CHECK(m->interleaved[i] == doctest::Approx(expected[i]));
+        // Baked AABB matches the positions.
+        CHECK(m->boundsMin[0] == doctest::Approx(0.f)); CHECK(m->boundsMin[1] == doctest::Approx(0.f));
+        CHECK(m->boundsMax[0] == doctest::Approx(1.f)); CHECK(m->boundsMax[1] == doctest::Approx(1.f));
+    }
+
+    // Uncooked pack of the same source keeps the raw SoA path (editor/loose).
+    {
+        Hpak::PackSettings s; s.codec = Hpak::Codec::Store; s.cook = false;
+        HpakWriter packer; packer.addDirectory(dir, s);
+        auto pak = std::filesystem::temp_directory_path() / "he_uncook.hpak";
+        REQUIRE(packer.write(pak.string()));
+
+        ContentManager cm;
+        REQUIRE(cm.loadPak(pak.string()));
+        const StaticMeshAsset* m = cm.getStaticMesh(ids.mesh);
+        REQUIRE(m != nullptr);
+        CHECK_FALSE(m->cooked);
+        CHECK(m->vertices.size() == 9);           // raw SoA present
+        CHECK(m->interleaved.empty());
+    }
+    std::filesystem::remove_all(dir);
+}
+
 // Builds a Script .hasset blob in memory; omit the language to test back-compat.
 static std::vector<uint8_t> makeScriptBlob(HE::UUID id, const char* src,
                                            bool withLang, ScriptLanguage lang)

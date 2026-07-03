@@ -28,6 +28,16 @@ struct StaticMeshAsset : public RuntimeAsset
 	std::vector<uint32_t>  indices;
 	std::vector<float>     normals;
 	std::vector<float>     uvs;
+
+	// Pack-time COOKED GPU-ready form (CHUNK_MVBO). When `cooked` is true,
+	// `interleaved` holds vertexCount*8 floats (pos3+norm3+uv2 — the exact layout
+	// both backends upload) and boundsMin/Max hold the precomputed AABB; the SoA
+	// arrays above are then empty. Loose/editor assets are not cooked (SoA path).
+	bool                   cooked      = false;
+	std::vector<float>     interleaved;            // vertexCount * 8
+	uint32_t               vertexCount = 0;
+	float                  boundsMin[3] = { 0.0f, 0.0f, 0.0f };
+	float                  boundsMax[3] = { 0.0f, 0.0f, 0.0f };
 };
 
 // One joint in the skeleton hierarchy.

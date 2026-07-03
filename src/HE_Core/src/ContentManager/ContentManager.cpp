@@ -85,10 +85,24 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 		StaticMeshAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_MREF)) { size_t o=0; HAsset::Reader::readString(c->data,o,a.materialPath); }
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_MRFU)) { size_t o=0; HAsset::Reader::readPOD(c->data,o,a.materialId.hi); HAsset::Reader::readPOD(c->data,o,a.materialId.lo); }
-		if (const auto* c = reader.findChunk(HAsset::CHUNK_VERT)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.vertices); }
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_INDX)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.indices); }
-		if (const auto* c = reader.findChunk(HAsset::CHUNK_NORM)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.normals); }
-		if (const auto* c = reader.findChunk(HAsset::CHUNK_TEXC)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.uvs); }
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_MVBO))
+		{
+			// Cooked (pack-time) form: interleaved GPU-ready vertices + baked AABB.
+			size_t o = 0;
+			HAsset::Reader::readPOD(c->data, o, a.vertexCount);
+			for (int i = 0; i < 3; ++i) HAsset::Reader::readPOD(c->data, o, a.boundsMin[i]);
+			for (int i = 0; i < 3; ++i) HAsset::Reader::readPOD(c->data, o, a.boundsMax[i]);
+			HAsset::Reader::readVec(c->data, o, a.interleaved);
+			a.cooked = a.vertexCount > 0 && a.interleaved.size() == static_cast<size_t>(a.vertexCount) * 8;
+		}
+		else
+		{
+			// Raw SoA form (loose/editor assets).
+			if (const auto* c = reader.findChunk(HAsset::CHUNK_VERT)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.vertices); }
+			if (const auto* c = reader.findChunk(HAsset::CHUNK_NORM)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.normals); }
+			if (const auto* c = reader.findChunk(HAsset::CHUNK_TEXC)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.uvs); }
+		}
 		handle = m_staticMeshAssets.insert(std::move(a)); break;
 	}
 	case HE::AssetType::SkeletalMesh:
@@ -515,10 +529,24 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 	{
 		auto& a = static_cast<StaticMeshAsset&>(asset);
 		{ std::vector<uint8_t> b; HAsset::Writer::appendString(b,a.materialPath); w.addChunk(HAsset::CHUNK_MREF,b.data(),b.size()); }
-		{ std::vector<uint8_t> b; HAsset::Writer::appendVec(b,a.vertices);   w.addChunk(HAsset::CHUNK_VERT,b.data(),b.size()); }
 		{ std::vector<uint8_t> b; HAsset::Writer::appendVec(b,a.indices);    w.addChunk(HAsset::CHUNK_INDX,b.data(),b.size()); }
-		{ std::vector<uint8_t> b; HAsset::Writer::appendVec(b,a.normals);    w.addChunk(HAsset::CHUNK_NORM,b.data(),b.size()); }
-		{ std::vector<uint8_t> b; HAsset::Writer::appendVec(b,a.uvs);        w.addChunk(HAsset::CHUNK_TEXC,b.data(),b.size()); }
+		if (a.cooked)
+		{
+			// Round-trip the cooked form (its SoA arrays are empty) — defensive:
+			// the editor edits loose (raw) assets, but never lose geometry here.
+			std::vector<uint8_t> b;
+			HAsset::Writer::appendPOD(b, a.vertexCount);
+			for (int i = 0; i < 3; ++i) HAsset::Writer::appendPOD(b, a.boundsMin[i]);
+			for (int i = 0; i < 3; ++i) HAsset::Writer::appendPOD(b, a.boundsMax[i]);
+			HAsset::Writer::appendVec(b, a.interleaved);
+			w.addChunk(HAsset::CHUNK_MVBO, b.data(), b.size());
+		}
+		else
+		{
+			{ std::vector<uint8_t> b; HAsset::Writer::appendVec(b,a.vertices); w.addChunk(HAsset::CHUNK_VERT,b.data(),b.size()); }
+			{ std::vector<uint8_t> b; HAsset::Writer::appendVec(b,a.normals);  w.addChunk(HAsset::CHUNK_NORM,b.data(),b.size()); }
+			{ std::vector<uint8_t> b; HAsset::Writer::appendVec(b,a.uvs);      w.addChunk(HAsset::CHUNK_TEXC,b.data(),b.size()); }
+		}
 		break;
 	}
 	case HE::AssetType::SkeletalMesh:
