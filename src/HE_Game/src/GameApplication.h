@@ -16,13 +16,21 @@ public:
 protected:
     HE::ApplicationConfig GetConfig() const override;
     void            OnInit()               override;
+    bool            OnEvent(const SDL_Event& event) override;
     void            OnRender(float dt)     override;
     void            OnShutdown()           override;
 
     std::unique_ptr<IRenderer> CreateRenderer()      override;
 
 private:
+    // Grab/release the mouse for FPS-style look: relative mode + hidden cursor.
+    // The packaged game starts captured; Esc toggles it so the cursor is
+    // reachable (e.g. to quit) without trapping the player.
+    void setMouseCaptured(bool captured);
+
     ProjectConfig                 m_config;
     std::unique_ptr<HorizonWorld> m_world; // startup scene, ticked + rendered each frame
+    bool m_mouseCaptured = false;          // set true in OnInit once the window exists
+    bool m_vsyncOn       = true;           // mirrors GetConfig().windowprops.vsync; V toggles it
 };
 
