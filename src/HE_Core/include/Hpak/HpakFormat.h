@@ -123,6 +123,10 @@ struct PackSettings {
     // cookForPack): today, static meshes are pre-interleaved into the GPU vertex
     // layout with a baked AABB. Off for editor/loose saves (which stay editable).
     bool cook = false;
+    // Additionally transcode RGBA8 textures to ASTC 4x4 (needs HE_HAVE_ASTCENC).
+    // Only set for targets whose GPU samples ASTC (Apple-Silicon Metal); other
+    // targets keep RGBA8 + baked mipmaps.
+    bool astcTextures = false;
 };
 
 // Glob match used by PackSettings::excludePatterns (see semantics there).

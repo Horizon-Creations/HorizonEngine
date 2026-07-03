@@ -1934,7 +1934,7 @@ struct D3D11RendererImpl
             const HE::UUID    texId0   = mat->textureIds.empty()   ? HE::UUID{}    : mat->textureIds[0];
             const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
             if (const TextureAsset* tex = cm->resolveTextureRef(texId0, texPath0);
-                tex && !tex->data.empty() && tex->channels == 4)
+                tex && !tex->data.empty() && tex->channels == 4 && tex->format == TextureFormat::RGBA8)
             {
                 D3D11_TEXTURE2D_DESC td{};
                 td.Width = tex->width; td.Height = tex->height;
@@ -2369,7 +2369,7 @@ struct D3D11RendererImpl
             const HE::UUID    texId0   = mat->textureIds.empty()   ? HE::UUID{}    : mat->textureIds[0];
             const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
             if (const TextureAsset* tex = cm->resolveTextureRef(texId0, texPath0);
-                tex && !tex->data.empty() && tex->channels == 4)
+                tex && !tex->data.empty() && tex->channels == 4 && tex->format == TextureFormat::RGBA8)
             {
                 D3D11_TEXTURE2D_DESC td{};
                 td.Width = tex->width; td.Height = tex->height;

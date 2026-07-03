@@ -6,6 +6,9 @@
 #include <ContentManager/HAsset.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
+#ifdef HE_HAVE_ASTCENC
+#  include <astcenc.h>
+#endif
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/SceneSystems.h>
@@ -570,6 +573,61 @@ static void verifyAllTypes(Hpak::Codec codec)
 }
 
 } // namespace
+
+#ifdef HE_HAVE_ASTCENC
+static std::vector<uint8_t> decodeAstc4x4(const uint8_t* blocks, size_t len, uint32_t w, uint32_t h)
+{
+    astcenc_config cfg{};
+    astcenc_config_init(ASTCENC_PRF_LDR, 4, 4, 1, ASTCENC_PRE_FAST,
+                        ASTCENC_FLG_DECOMPRESS_ONLY, &cfg);
+    astcenc_context* ctx = nullptr;
+    astcenc_context_alloc(&cfg, 1, &ctx);
+    std::vector<uint8_t> out(static_cast<size_t>(w) * h * 4);
+    astcenc_image img{}; img.dim_x = w; img.dim_y = h; img.dim_z = 1; img.data_type = ASTCENC_TYPE_U8;
+    void* slice = out.data(); void* slices[1] = { slice }; img.data = slices;
+    const astcenc_swizzle swz{ ASTCENC_SWZ_R, ASTCENC_SWZ_G, ASTCENC_SWZ_B, ASTCENC_SWZ_A };
+    astcenc_decompress_image(ctx, blocks, len, &img, &swz, 0);
+    astcenc_context_free(ctx);
+    return out;
+}
+
+TEST_CASE("Cook: ASTC texture round-trips and decodes close to the original")
+{
+    auto dir = std::filesystem::temp_directory_path() / "he_astc_src";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    ContentManager cmw(dir.string());
+    // 8x8 RGBA8, solid colour → ASTC encodes constant blocks near-losslessly.
+    TextureAsset tex; tex.type = HE::AssetType::Texture; tex.name = "t"; tex.path = "t.hasset";
+    tex.width = 8; tex.height = 8; tex.channels = 4;
+    tex.data.assign(8 * 8 * 4, 0);
+    for (size_t p = 0; p < 8 * 8; ++p) { tex.data[p*4+0] = 200; tex.data[p*4+1] = 100; tex.data[p*4+2] = 50; tex.data[p*4+3] = 255; }
+    REQUIRE(cmw.saveAsset(tex));
+    const HE::UUID texId = tex.id;
+
+    Hpak::PackSettings s; s.codec = Hpak::Codec::Store; s.cook = true; s.astcTextures = true;
+    HpakWriter packer; packer.addDirectory(dir, s);
+    auto pak = std::filesystem::temp_directory_path() / "he_astc.hpak";
+    REQUIRE(packer.write(pak.string()));
+
+    ContentManager cm;
+    REQUIRE(cm.loadPak(pak.string()));
+    const TextureAsset* t = cm.getTexture(texId);
+    REQUIRE(t != nullptr);
+    CHECK(t->format == TextureFormat::ASTC_4x4);
+    CHECK(t->mipLevels == 4);                     // 8,4,2,1
+    // ASTC 4x4 block sizes: 8x8=4 blocks, others=1 block, ×16 bytes.
+    CHECK(t->data.size() == (4 + 1 + 1 + 1) * 16);
+
+    // Decode level 0 and confirm it's close to the original solid colour.
+    auto decoded = decodeAstc4x4(t->data.data(), 4 * 16, 8, 8);
+    REQUIRE(decoded.size() == 8 * 8 * 4);
+    CHECK(std::abs(int(decoded[0]) - 200) <= 6);
+    CHECK(std::abs(int(decoded[1]) - 100) <= 6);
+    CHECK(std::abs(int(decoded[2]) -  50) <= 6);
+    std::filesystem::remove_all(dir);
+}
+#endif
 
 TEST_CASE("All asset types round-trip through a Store pak")  { verifyAllTypes(Hpak::Codec::Store); }
 TEST_CASE("All asset types round-trip through an LZ4 pak")   { verifyAllTypes(Hpak::Codec::LZ4);   }

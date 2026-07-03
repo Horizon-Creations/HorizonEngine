@@ -3478,7 +3478,7 @@ const OpenGLRenderer::GpuMesh* OpenGLRenderer::ResolveMesh(const HE::UUID& asset
 		const HE::UUID    texId0   = mat->textureIds.empty()   ? HE::UUID{}    : mat->textureIds[0];
 		const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
 		if (const TextureAsset* tex = m_contentManager->resolveTextureRef(texId0, texPath0);
-		    tex && !tex->data.empty() && tex->channels == 4)
+		    tex && !tex->data.empty() && tex->channels == 4 && tex->format == TextureFormat::RGBA8)
 		{
 			glGenTextures(1, &mesh.texture);
 			glBindTexture(GL_TEXTURE_2D, mesh.texture);
@@ -3623,7 +3623,7 @@ OpenGLRenderer::ResolveSkeletalMesh(const HE::UUID& assetId)
 		const HE::UUID    texId0   = mat->textureIds.empty()   ? HE::UUID{}    : mat->textureIds[0];
 		const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
 		if (const TextureAsset* tex = m_contentManager->resolveTextureRef(texId0, texPath0);
-		    tex && !tex->data.empty() && tex->channels == 4)
+		    tex && !tex->data.empty() && tex->channels == 4 && tex->format == TextureFormat::RGBA8)
 		{
 			glGenTextures(1, &mesh.texture);
 			glBindTexture(GL_TEXTURE_2D, mesh.texture);

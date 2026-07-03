@@ -1842,6 +1842,9 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                 es.excludePatterns  = parseExcludeLines(s_exportExcludes.c_str());
                 es.incremental      = s_exportIncremental;
                 es.appBundle        = s_exportAppBundle && exportAppBundleApplicable(s_exportPlatform);
+                // ASTC textures only for Apple-Silicon Metal targets (Host/macOS
+                // on a Mac) — the same condition as .app-bundle applicability.
+                es.astcTextures     = exportAppBundleApplicable(s_exportPlatform);
                 es.gameRuntimeDir   = runtimeDir;
                 // Worker → UI progress: atomics + a mutex-guarded filename.
                 es.progress = [](int done, int total, const std::string& current)

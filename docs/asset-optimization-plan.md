@@ -31,10 +31,17 @@ der Packaged-Build die gekochte.
   GL lädt die Levels direkt (kein Runtime-`glGenerateMipmap`); **Metal bekommt endlich Mipmaps**
   (`mipmapLevelCount` + `mipFilter` — fixt das Minification-Aliasing) — beide verifiziert. D3D/
   Vulkan bleiben unangetastet: alle 5 Backends lesen Level 0 als führende Bytes, angehängte Mips
-  sind byte-kompatibel ignoriert. **Offen daran:** GPU-Kompression — auf Apple-Silicon-Metal
-  bedeutet das **ASTC** (nicht BC; Apple-GPUs können kein BC), auf Desktop/Intel/GL BC via
-  `stb_dxt`; braucht einen ASTC-Encoder (astcenc) + den Cook-Cache. sRGB-Tag ist verdrahtet, aber
-  noch nicht gesetzt (braucht Textur-Rollen-Info aus dem Material).
+  sind byte-kompatibel ignoriert. sRGB-Tag ist verdrahtet, aber noch nicht gesetzt (braucht
+  Textur-Rollen-Info aus dem Material).
+- ✅ **GPU-Textur-Kompression: ASTC 4×4** (Tier 1 #3, VRAM-Gewinn): `astcenc` (ARM astc-encoder
+  5.3.0) via FetchContent (native single-arch, `HE_HAVE_ASTCENC`). Der Textur-Cook encodet jede
+  RGBA8-Mip-Stufe pack-time zu ASTC_4x4_LDR (4:1 gegenüber RGBA8, `format`-Byte im `TXMI`-Tail),
+  gated auf `PackSettings::astcTextures` — die der Editor für Apple-Silicon-Metal-Targets (Host/
+  macOS) setzt. **Metal** lädt ASTC direkt (`MTLPixelFormatASTC_4x4_LDR`, Block-`bytesPerRow` =
+  `ceil(w/4)*16`), mit `supportsFamily:Apple2`-Guard → Intel-Macs überspringen es sauber. GL 4.1/
+  D3D11 überspringen ASTC-Texturen (`format == RGBA8`-Guard); D3D12/Vulkan laden eh keine Content-
+  Texturen. **Encode round-trip-verifiziert** (Cook→ASTC→Decode innerhalb Toleranz); die *GPU-
+  Sampling-Qualität* auf Apple Silicon braucht einen echten Fenster-Run (headless nicht prüfbar).
 - ✅ **Echte-Bounds-Culling** (Tier 2 #7): der Extractor cullt Mesh-Renderables jetzt gegen die
   echte Objekt-AABB (per UUID aus dem ContentManager) statt eines Unit-Cube-Proxys — weniger
   Overdraw/Popping + engere Shadow-Frustum-Fit. Backend-neutral (nur `RenderExtractor` + 1 Setter
@@ -43,10 +50,9 @@ der Packaged-Build die gekochte.
 
 **Bewusst noch NICHT umgesetzt (jeweils mit echtem Blocker — brauchen einen eigenen, verifizierbaren
 Durchgang):**
-- **GPU-Textur-Kompression** (der VRAM-Gewinn): auf Apple-Silicon-Metal **ASTC** (Apple-GPUs können
-  kein BC) → braucht `astcenc` (großer Encoder) + Cook-Cache + Metal-ASTC-Upload; auf Desktop/GL/
-  D3D/Vulkan BC via `stb_dxt`. Target-spezifisch und headless nicht *qualitativ* prüfbar → eigener
-  Durchgang mit Encoder-Entscheidung.
+- **BC-Textur-Kompression (Desktop/Intel/GL)**: ASTC deckt Apple Silicon ab; für Desktop-GL/D3D/
+  Intel-Mac fehlt noch BC via `stb_dxt` (anderes Cook-Target). Niedrigere Priorität, solange das
+  primäre Ziel Apple-Silicon-Metal ist.
 - **sRGB-Aktivierung**: ändert sichtbare Farben (Albedo sRGB→linear) → braucht visuelle Abnahme +
   Textur-Rollen-Info aus dem Material.
 - **Vertex-/Skinning-Quantisierung**: Shader-Änderungen in allen 5 Backends + visuelle Abnahme.
