@@ -412,5 +412,8 @@ bool HpakWriter::write(const std::string& outputPath) const
                     static_cast<std::streamsize>(e.data.size()));
     }
 
-    return f.good();
+    // Close explicitly: the final buffered tail is flushed here, and a
+    // disk-full at that point must fail the write, not ship a truncated pak.
+    f.close();
+    return !f.fail();
 }

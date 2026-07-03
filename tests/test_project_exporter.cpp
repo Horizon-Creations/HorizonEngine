@@ -263,7 +263,11 @@ TEST_CASE("ProjectExporter skips binary copy when gameRuntimeDir is empty")
     std::filesystem::remove_all(outputDir);
 }
 
-TEST_CASE("ProjectExporter skips binary copy when gameRuntimeDir does not exist")
+// Contract CHANGED with the runnable-exports work: a runtime dir that is named
+// but missing used to be silently skipped (data-only export reported OK — the
+// exact defect users hit); it is now a hard error. Empty gameRuntimeDir remains
+// the supported "data only" mode.
+TEST_CASE("ProjectExporter fails when a named gameRuntimeDir does not exist")
 {
     auto contentDir = std::filesystem::temp_directory_path() / "he_test_export_baddrt_content";
     auto outputDir  = std::filesystem::temp_directory_path() / "he_test_export_baddrt_out";
@@ -275,8 +279,9 @@ TEST_CASE("ProjectExporter skips binary copy when gameRuntimeDir does not exist"
     const auto result = ProjectExporter::exportProject(
         contentDir, "Game", "", outputDir, settings);
 
-    REQUIRE(result.success); // asset pack still succeeds
-    CHECK(result.binaryFilesCopied == 0); // no binaries copied from missing dir
+    CHECK_FALSE(result.success);
+    CHECK(result.errorMessage.find("not found") != std::string::npos);
+    CHECK(result.binaryFilesCopied == 0);
 
     std::filesystem::remove_all(contentDir);
     std::filesystem::remove_all(outputDir);
