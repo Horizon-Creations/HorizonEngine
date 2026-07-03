@@ -28,6 +28,12 @@ private:
     // reachable (e.g. to quit) without trapping the player.
     void setMouseCaptured(bool captured);
 
+    // Built-in free-fly camera so a shipped game is navigable out of the box:
+    // mouse look + WASD/QE (Shift = sprint) drive the scene's main camera while
+    // the mouse is captured. A no-op if the scene has no camera; game logic can
+    // ignore it by not marking a camera isMain / releasing the mouse.
+    void updateCameraController(float dt);
+
     ProjectConfig                 m_config;
     std::unique_ptr<HorizonWorld> m_world; // startup scene, ticked + rendered each frame
     bool m_mouseCaptured = false;          // set true in OnInit once the window exists
