@@ -45,9 +45,13 @@ std::filesystem::path resolveRuntimeDir(const std::filesystem::path& editorBaseD
 
 // A directory qualifies as a runtime bundle only if the game executable is
 // actually in it — a bare/leftover folder must not silently export 0 binaries.
+// A previous EXPORT output also contains HorizonGame (plus project.hcfg + pak);
+// shipping a stale export as the "runtime" would carry its old patched key and
+// old binaries, so anything with a project.hcfg is rejected.
 static bool isRuntimeBundle(const std::filesystem::path& dir)
 {
     std::error_code ec;
+    if (std::filesystem::exists(dir / "project.hcfg", ec)) return false;
     return std::filesystem::is_regular_file(dir / "HorizonGame", ec)
         || std::filesystem::is_regular_file(dir / "HorizonGame.exe", ec);
 }
@@ -100,21 +104,34 @@ static bool readWholeFile(const std::filesystem::path& p, std::vector<uint8_t>& 
     return f.good() || f.eof();
 }
 
-#ifdef __APPLE__
-// Patching invalidates the (ad-hoc) code signature; on arm64 macOS an invalid
-// signature means the binary is killed on launch. Re-sign ad-hoc in place.
-static void resignIfMachO(const std::filesystem::path& p, const std::vector<uint8_t>& bytes)
+// Mach-O detection (needed on every host: cross-exports can carry macOS
+// runtimes, and a patched Mach-O MUST be re-signed or arm64 kills it on launch).
+static bool looksMachO(const std::vector<uint8_t>& bytes)
 {
-    if (bytes.size() < 4) return;
+    if (bytes.size() < 4) return false;
     const uint32_t w = static_cast<uint32_t>(bytes[0])
                      | static_cast<uint32_t>(bytes[1]) << 8
                      | static_cast<uint32_t>(bytes[2]) << 16
                      | static_cast<uint32_t>(bytes[3]) << 24;
-    const bool machO = w == 0xFEEDFACFu || w == 0xFEEDFACEu   // MH_MAGIC_64 / MH_MAGIC
-                    || w == 0xBEBAFECAu || w == 0xCAFEBABEu;  // FAT magics (either order)
-    if (!machO) return;
-    const std::string cmd = "/usr/bin/codesign --force --sign - '" + p.string() + "' 2>/dev/null";
-    std::system(cmd.c_str());
+    return w == 0xFEEDFACFu || w == 0xFEEDFACEu   // MH_MAGIC_64 / MH_MAGIC
+        || w == 0xBEBAFECAu || w == 0xCAFEBABEu;  // FAT magics (either order)
+}
+
+#ifdef __APPLE__
+// Ad-hoc re-sign in place. Patching invalidated the signature; on arm64 macOS
+// an invalid signature means the binary is killed on launch, so a failed
+// re-sign must FAIL the export — never ship silently unrunnable.
+static bool resignMachO(const std::filesystem::path& p)
+{
+    // Shell-quote the path: wrap in single quotes, escaping embedded single
+    // quotes as '\'' (an apostrophe in the export path must not break the
+    // command — that would skip the re-sign, not just look ugly).
+    std::string quoted = "'";
+    for (const char c : p.string())
+        quoted += (c == '\'') ? "'\\''" : std::string(1, c);
+    quoted += "'";
+    const std::string cmd = "/usr/bin/codesign --force --sign - " + quoted + " 2>/dev/null";
+    return std::system(cmd.c_str()) == 0;
 }
 #endif
 
@@ -122,6 +139,14 @@ int patchEmbeddedPakKey(const std::filesystem::path& binary, const uint8_t key[3
 {
     std::vector<uint8_t> bytes;
     if (!readWholeFile(binary, bytes)) return -1;
+
+#ifndef __APPLE__
+    // A Mach-O runtime patched on a non-Apple host cannot be re-signed here —
+    // the result would be killed on launch on Apple Silicon. Leave the binary
+    // untouched (signature stays valid); the caller then ships the key in
+    // project.hcfg, which the runtime uses as its fallback.
+    if (looksMachO(bytes)) return 0;
+#endif
 
     const std::string magic = embeddedKeyMagic();
     if (bytes.size() < 64) return 0;
@@ -143,15 +168,38 @@ int patchEmbeddedPakKey(const std::filesystem::path& binary, const uint8_t key[3
     }
     if (patched == 0) return 0;
 
+    // Write temp + rename: an in-place trunc rewrite that fails mid-stream
+    // (disk full) would leave a corrupt half-written executable behind. The
+    // temp file inherits fresh permissions, so the original's (notably +x)
+    // are copied over before the swap.
+    std::error_code ec;
+    const auto perms = std::filesystem::status(binary, ec).permissions();
+    const std::filesystem::path tmp = binary.string() + ".keytmp";
     {
-        std::ofstream f(binary, std::ios::binary | std::ios::trunc);
+        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
         if (!f) return -1;
         f.write(reinterpret_cast<const char*>(bytes.data()),
                 static_cast<std::streamsize>(bytes.size()));
-        if (!f.good()) return -1;
+        f.close();
+        if (f.fail())
+        {
+            std::filesystem::remove(tmp, ec);
+            return -1;
+        }
     }
+    if (!ec) std::filesystem::permissions(tmp, perms, ec);
+    ec.clear();
+    std::filesystem::rename(tmp, binary, ec);
+    if (ec)
+    {
+        std::error_code ec2;
+        std::filesystem::remove(tmp, ec2);
+        return -1;
+    }
+
 #ifdef __APPLE__
-    resignIfMachO(binary, bytes);
+    if (looksMachO(bytes) && !resignMachO(binary))
+        return -2; // patched but unsigned = killed on launch; caller must fail
 #endif
     return patched;
 }
@@ -367,22 +415,38 @@ ExportResult ProjectExporter::exportProject(
     // std::terminate.
     int  binaryCopied = 0;
     bool keyEmbedded  = false;
-    if (!settings.gameRuntimeDir.empty() && std::filesystem::exists(settings.gameRuntimeDir, ec))
+    if (!settings.gameRuntimeDir.empty())
     {
+        // A named-but-missing runtime dir must FAIL, not silently ship a
+        // data-only export (an existence gate here previously skipped the
+        // whole block, including all its error checks).
+        if (!std::filesystem::is_directory(settings.gameRuntimeDir, ec))
+            return {false, "Game runtime dir not found: "
+                           + settings.gameRuntimeDir.string(), added};
+
+        // Every file in the bundle is required (executable AND its libraries):
+        // any copy failure is a hard error. A silently skipped executable is
+        // the worst case — the output would keep a STALE previously-exported
+        // exe whose embedded key no longer matches this pak.
         std::vector<std::filesystem::path> copied;
         std::filesystem::directory_iterator dit(settings.gameRuntimeDir, ec);
         const std::filesystem::directory_iterator dend;
         while (!ec && dit != dend)
         {
             const bool regular = dit->is_regular_file(ec);
-            if (!ec && regular)
+            if (ec) { ec.clear(); dit.increment(ec); continue; }
+            if (regular)
             {
                 const auto dst = outputDir / dit->path().filename();
                 std::filesystem::copy_file(dit->path(), dst,
                     std::filesystem::copy_options::overwrite_existing, ec);
-                if (!ec) { ++binaryCopied; copied.push_back(dst); }
+                if (ec)
+                    return {false, "Failed to copy runtime binary "
+                                   + dit->path().filename().string() + ": "
+                                   + ec.message(), added};
+                ++binaryCopied;
+                copied.push_back(dst);
             }
-            ec.clear();
             dit.increment(ec);
         }
         ec.clear();
@@ -396,15 +460,23 @@ ExportResult ProjectExporter::exportProject(
         // Patch the pak key into the game executable's embedded key block.
         // Only the game exe carries the block; other copied files are skipped
         // cheaply by name. A runtime without the block (built before the block
-        // existed) falls back to shipping the key in project.hcfg.
+        // existed) falls back to shipping the key in project.hcfg. Patch/sign
+        // FAILURES are hard errors — the alternatives are a corrupt or
+        // killed-on-launch executable shipped as "OK".
         if (settings.encrypt)
         {
             for (const auto& dst : copied)
             {
                 const auto name = dst.filename().string();
                 if (name != "HorizonGame" && name != "HorizonGame.exe") continue;
-                if (patchEmbeddedPakKey(dst, packSettings.key) > 0)
-                    keyEmbedded = true;
+                const int patched = patchEmbeddedPakKey(dst, packSettings.key);
+                if (patched == -1)
+                    return {false, "Failed to embed the pak key into " + name
+                                   + " (write error)", added};
+                if (patched == -2)
+                    return {false, "Failed to re-sign " + name
+                                   + " after embedding the pak key (codesign)", added};
+                if (patched > 0) keyEmbedded = true;
             }
         }
     }

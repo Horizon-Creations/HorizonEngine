@@ -470,6 +470,83 @@ TEST_CASE("Export with encryption falls back to the hcfg key for a legacy runtim
 }
 #endif
 
+TEST_CASE("Export fails when the runtime dir is named but missing")
+{
+    const auto dir = fs::temp_directory_path() / "he_missrt_src";
+    const auto out = fs::temp_directory_path() / "he_missrt_out";
+    fs::remove_all(dir); fs::remove_all(out);
+    writeBlob(dir / "a.hasset", tinyHasset({0xE, 0x4}, "a.hasset"));
+
+    ExportSettings s;
+    s.compress = false;
+    s.gameRuntimeDir = fs::temp_directory_path() / "he_missrt_DOES_NOT_EXIST";
+    auto r = ProjectExporter::exportProject(dir, "Miss", "", out, s);
+    CHECK_FALSE(r.success);
+    CHECK(r.errorMessage.find("not found") != std::string::npos);
+    fs::remove_all(dir); fs::remove_all(out);
+}
+
+TEST_CASE("Export fails hard when copying a runtime binary fails")
+{
+    const auto dir = fs::temp_directory_path() / "he_cpyfail_src";
+    const auto rt  = fs::temp_directory_path() / "he_cpyfail_rt";
+    const auto out = fs::temp_directory_path() / "he_cpyfail_out";
+    fs::remove_all(dir); fs::remove_all(rt); fs::remove_all(out);
+    writeBlob(dir / "a.hasset", tinyHasset({0xE, 0x5}, "a.hasset"));
+    writeBlob(rt / "HorizonGame", fakeGameBinary(true));
+    writeBlob(rt / "libFake.dylib", fakeGameBinary(false));
+    // A DIRECTORY squatting on the destination name makes copy_file fail —
+    // previously that was silently skipped, shipping a stale/missing exe as OK.
+    fs::create_directories(out / "HorizonGame");
+
+    ExportSettings s;
+    s.compress = false;
+    s.gameRuntimeDir = rt;
+    auto r = ProjectExporter::exportProject(dir, "CpyFail", "", out, s);
+    CHECK_FALSE(r.success);
+    CHECK(r.errorMessage.find("Failed to copy") != std::string::npos);
+    fs::remove_all(dir); fs::remove_all(rt); fs::remove_all(out);
+}
+
+#ifdef HE_HAVE_OPENSSL
+TEST_CASE("Key patching preserves the executable bit")
+{
+    const auto dir = fs::temp_directory_path() / "he_perm_src";
+    const auto rt  = fs::temp_directory_path() / "he_perm_rt";
+    const auto out = fs::temp_directory_path() / "he_perm_out";
+    fs::remove_all(dir); fs::remove_all(rt); fs::remove_all(out);
+    writeBlob(dir / "a.hasset", tinyHasset({0xE, 0x6}, "a.hasset"));
+    writeBlob(rt / "HorizonGame", fakeGameBinary(true));
+    fs::permissions(rt / "HorizonGame",
+                    fs::perms::owner_all | fs::perms::group_read | fs::perms::others_read);
+
+    ExportSettings s;
+    s.compress = false; s.encrypt = true;
+    s.gameRuntimeDir = rt;
+    auto r = ProjectExporter::exportProject(dir, "Perm", "", out, s);
+    REQUIRE(r.success);
+    REQUIRE(r.keyEmbedded);
+    // The temp+rename patch path must not strip +x — an exported game the OS
+    // refuses to execute is just as broken as a missing one.
+    const auto perms = fs::status(out / "HorizonGame").permissions();
+    CHECK((perms & fs::perms::owner_exec) != fs::perms::none);
+    fs::remove_all(dir); fs::remove_all(rt); fs::remove_all(out);
+}
+#endif
+
+TEST_CASE("findRuntimeBundle: a previous export output is not a runtime bundle")
+{
+    const auto root = fs::temp_directory_path() / "he_bundle_export_root";
+    fs::remove_all(root);
+    // Looks like a bundle (has HorizonGame) but is an old EXPORT (has hcfg) —
+    // shipping it would carry a stale patched key + stale binaries.
+    writeBlob(root / "deploy" / "Game" / "HorizonGame", fakeGameBinary(false));
+    writeBlob(root / "deploy" / "Game" / "project.hcfg", { 0x01, 0x02 });
+    fs::create_directories(root / "deploy" / "Editor");
+    CHECK(findRuntimeBundle(root / "deploy" / "Editor", ExportPlatform::Host).empty());
+    fs::remove_all(root);
+}
+
 TEST_CASE("Export fails when the runtime dir yields no binaries")
 {
     const auto dir = fs::temp_directory_path() / "he_nobin_src";

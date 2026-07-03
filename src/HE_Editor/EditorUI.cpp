@@ -115,6 +115,12 @@ static std::string s_exportPlatform = "Host";      // exportPlatformName() value
 static std::string              s_exportStartupScene;  // project-relative; "" = current scene
 static std::vector<std::string> s_exportSceneChoices;  // .hescene files found on modal open
 static std::string s_exportNewProfileName;
+// Runtime-bundle lookup cache for the modal's live display: findRuntimeBundle
+// stats a couple dozen paths — fine once, wasteful every frame. Keyed by the
+// selected platform; cleared when the modal opens so a freshly built runtime
+// shows up on reopen.
+static std::string           s_exportBundleKey;
+static std::filesystem::path s_exportBundleCache;
 // Worker-thread state: the callback writes the atomics + the mutex-guarded
 // strings; the UI thread only reads them and joins once running flips false.
 static std::atomic<bool> s_exportRunning{false};
@@ -1504,6 +1510,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 			}
 
 			s_exportResult.clear();
+			s_exportBundleKey.clear(); // re-stat the runtime bundle on open
 			s_showExportModal = true;
 		}
 		ImGui::EndMenu();
@@ -1662,7 +1669,12 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                     SDL_GetBasePath() ? std::filesystem::path(SDL_GetBasePath())
                                       : std::filesystem::path{};
                 const ExportPlatform plat = exportPlatformFromName(s_exportPlatform);
-                const auto bundle = findRuntimeBundle(base, plat);
+                if (s_exportBundleKey != s_exportPlatform)
+                {
+                    s_exportBundleKey   = s_exportPlatform;
+                    s_exportBundleCache = findRuntimeBundle(base, plat);
+                }
+                const auto& bundle = s_exportBundleCache;
                 if (!bundle.empty())
                     ImGui::TextDisabled("Game runtime: %s",
                                         bundle.lexically_normal().string().c_str());
