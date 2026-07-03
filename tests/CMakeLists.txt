@@ -93,6 +93,14 @@ add_dependencies(he_tests test_gamelogic)
 target_compile_definitions(he_tests PRIVATE
     HE_TEST_GAMELOGIC_LIB="$<TARGET_FILE:test_gamelogic>")
 
+# Real HorizonGame executable path, so the macOS .app-bundle test can exercise
+# codesign against a genuine Mach-O (fake bytes cannot be signed).
+if(TARGET HorizonGame)
+    add_dependencies(he_tests HorizonGame)
+    target_compile_definitions(he_tests PRIVATE
+        HE_TEST_GAME_EXE="$<TARGET_FILE:HorizonGame>")
+endif()
+
 target_link_libraries(he_tests PRIVATE
     HorizonCore
     HorizonScene

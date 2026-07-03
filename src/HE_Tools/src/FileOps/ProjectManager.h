@@ -32,6 +32,9 @@ struct ExportProfile
 	// Incremental packing: reuse unchanged assets from the previous export
 	// (manifest-gated; falls back to a full pack automatically).
 	bool incremental = true;
+	// macOS: emit a .app bundle instead of a flat folder (only applied when the
+	// target produces macOS binaries; ignored otherwise).
+	bool appBundle = false;
 	// Export target: "Host" (this machine, runtime from ../Game) or
 	// "Windows"/"macOS"/"Linux" (prebuilt bundle from ../GameRuntimes/<name>,
 	// output lands in a per-platform sub-folder).

@@ -284,6 +284,78 @@ static void savePakManifest(const std::filesystem::path& path,
     if (out.is_open()) out << j.dump();
 }
 
+// ─── macOS .app bundle ────────────────────────────────────────────────────────
+
+// Reverse-DNS bundle id from the project name: keep [A-Za-z0-9-], collapse the
+// rest, lower-case. Empty → "game" so the id is always well-formed.
+static std::string bundleIdentifier(const std::string& projectName)
+{
+    std::string s;
+    for (char c : projectName)
+    {
+        if ((c >= 'A' && c <= 'Z')) s += static_cast<char>(c - 'A' + 'a');
+        else if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-') s += c;
+    }
+    if (s.empty()) s = "game";
+    return "com.horizonengine." + s;
+}
+
+static bool writeInfoPlist(const std::filesystem::path& contentsDir,
+                           const std::string& projectName)
+{
+    // XML-escape the display name (project names can contain & < > " ').
+    std::string name;
+    for (char c : projectName)
+        switch (c)
+        {
+        case '&': name += "&amp;"; break;
+        case '<': name += "&lt;"; break;
+        case '>': name += "&gt;"; break;
+        case '"': name += "&quot;"; break;
+        case '\'': name += "&apos;"; break;
+        default: name += c;
+        }
+
+    const std::string plist =
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
+        "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+        "<plist version=\"1.0\">\n<dict>\n"
+        "  <key>CFBundleExecutable</key><string>HorizonGame</string>\n"
+        "  <key>CFBundleIdentifier</key><string>" + bundleIdentifier(projectName) + "</string>\n"
+        "  <key>CFBundleName</key><string>" + name + "</string>\n"
+        "  <key>CFBundleDisplayName</key><string>" + name + "</string>\n"
+        "  <key>CFBundlePackageType</key><string>APPL</string>\n"
+        "  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>\n"
+        "  <key>CFBundleVersion</key><string>1.0</string>\n"
+        "  <key>CFBundleShortVersionString</key><string>1.0</string>\n"
+        "  <key>NSHighResolutionCapable</key><true/>\n"
+        "  <key>LSMinimumSystemVersion</key><string>11.0</string>\n"
+        "</dict>\n</plist>\n";
+
+    std::ofstream f(contentsDir / "Info.plist", std::ios::trunc);
+    if (!f) return false;
+    f << plist;
+    f.close();
+    return !f.fail();
+}
+
+#ifdef __APPLE__
+// Ad-hoc code-sign the whole bundle (executable + nested dylibs + seal). Without
+// a valid signature Apple Silicon kills the app at launch, so a sign failure is
+// a hard error — never ship a silently-unrunnable .app.
+static bool signAppBundle(const std::filesystem::path& appPath)
+{
+    std::string quoted = "'";
+    for (const char c : appPath.string())
+        quoted += (c == '\'') ? "'\\''" : std::string(1, c);
+    quoted += "'";
+    const std::string cmd =
+        "/usr/bin/codesign --force --deep --sign - " + quoted + " 2>/dev/null";
+    return std::system(cmd.c_str()) == 0;
+}
+#endif
+
 ExportResult ProjectExporter::exportProject(
     const std::filesystem::path& contentDir,
     const std::string&           projectName,
@@ -296,6 +368,24 @@ ExportResult ProjectExporter::exportProject(
 
     std::filesystem::create_directories(outputDir, ec);
     if (ec) return {false, "Cannot create output dir: " + ec.message(), 0};
+
+    // Layout: a macOS .app splits the export in two — the executable + engine
+    // dylibs live in Contents/MacOS (found via @executable_path rpath) while the
+    // pak, project.hcfg, loose scene and GameLogic live in Contents/Resources
+    // (where SDL_GetBasePath resolves inside a bundle). A flat export collapses
+    // both to outputDir. Everything below routes through binDir / dataDir so the
+    // two layouts share one code path.
+    const bool app = settings.appBundle;
+    const std::filesystem::path appPath =
+        app ? outputDir / (projectName + ".app") : std::filesystem::path{};
+    const std::filesystem::path binDir  = app ? appPath / "Contents" / "MacOS"     : outputDir;
+    const std::filesystem::path dataDir = app ? appPath / "Contents" / "Resources" : outputDir;
+    if (app)
+    {
+        std::filesystem::create_directories(binDir, ec);
+        std::filesystem::create_directories(dataDir, ec);
+        if (ec) return {false, "Cannot create .app bundle: " + ec.message(), 0};
+    }
 
     Hpak::PackSettings packSettings;
     // Map the export "compress" toggle to the best codec available at build time
@@ -325,7 +415,7 @@ ExportResult ProjectExporter::exportProject(
             // deliberately zero it); then the key patched into the previous
             // export's game executable.
             ProjectConfig prevCfg;
-            if (ProjectConfigLoader::load(outputDir, prevCfg) && prevCfg.encrypted)
+            if (ProjectConfigLoader::load(dataDir, prevCfg) && prevCfg.encrypted)
             {
                 bool nonZero = false;
                 for (int i = 0; i < 32; ++i) nonZero |= (prevCfg.encKey[i] != 0);
@@ -338,7 +428,7 @@ ExportResult ProjectExporter::exportProject(
             if (!haveKey)
             {
                 for (const char* exe : { "HorizonGame", "HorizonGame.exe" })
-                    if (readEmbeddedPakKey(outputDir / exe, packSettings.key))
+                    if (readEmbeddedPakKey(binDir / exe, packSettings.key))
                     { haveKey = true; break; }
             }
         }
@@ -349,8 +439,8 @@ ExportResult ProjectExporter::exportProject(
     packSettings.excludePatterns = settings.excludePatterns;
 
     const std::string hpakFilename = projectName + ".hpak";
-    const auto pakPath      = outputDir / hpakFilename;
-    const auto manifestPath = outputDir / (hpakFilename + ".manifest");
+    const auto pakPath      = dataDir / hpakFilename;
+    const auto manifestPath = dataDir / (hpakFilename + ".manifest");
     const uint64_t settingsFp = settingsFingerprint(packSettings);
 
     // Incremental cache: previous pak + its manifest, gated on the manifest
@@ -403,7 +493,7 @@ ExportResult ProjectExporter::exportProject(
         const auto sceneSrc = contentDir / startupSceneName;
         sceneFile = std::filesystem::path(startupSceneName).filename().string();
         if (std::filesystem::exists(sceneSrc, ec))
-            std::filesystem::copy_file(sceneSrc, outputDir / sceneFile,
+            std::filesystem::copy_file(sceneSrc, dataDir / sceneFile,
                 std::filesystem::copy_options::overwrite_existing, ec);
     }
 
@@ -424,6 +514,21 @@ ExportResult ProjectExporter::exportProject(
             return {false, "Game runtime dir not found: "
                            + settings.gameRuntimeDir.string(), added};
 
+        // Route each runtime file to the right place for the .app layout: the
+        // executable and engine dylibs go next to the exe (binDir); GameLogic and
+        // anything else (config.json) goes with the data (dataDir) so the running
+        // game finds it via SDL_GetBasePath. Flat exports collapse both to
+        // outputDir, so the routing is a no-op there.
+        auto routeRuntime = [&](const std::string& n) -> std::filesystem::path {
+            const bool gameLogic = n.rfind("GameLogic.", 0) == 0; // loaded from base path
+            const bool engineBin = !gameLogic
+                && (n == "HorizonGame" || n == "HorizonGame.exe"
+                    || n.size() > 4 && (n.compare(n.size() - 4, 4, ".dll") == 0)
+                    || n.size() > 3 && (n.compare(n.size() - 3, 3, ".so") == 0)
+                    || n.size() > 6 && (n.compare(n.size() - 6, 6, ".dylib") == 0));
+            return (engineBin ? binDir : dataDir) / n;
+        };
+
         // Every file in the bundle is required (executable AND its libraries):
         // any copy failure is a hard error. A silently skipped executable is
         // the worst case — the output would keep a STALE previously-exported
@@ -437,7 +542,7 @@ ExportResult ProjectExporter::exportProject(
             if (ec) { ec.clear(); dit.increment(ec); continue; }
             if (regular)
             {
-                const auto dst = outputDir / dit->path().filename();
+                const auto dst = routeRuntime(dit->path().filename().string());
                 std::filesystem::copy_file(dit->path(), dst,
                     std::filesystem::copy_options::overwrite_existing, ec);
                 if (ec)
@@ -499,8 +604,22 @@ ExportResult ProjectExporter::exportProject(
         std::memcpy(cfg.startupSceneUuid + 8,  &sceneUuid.lo, 8);
     }
 
-    if (!ProjectConfigLoader::save(outputDir, cfg))
+    if (!ProjectConfigLoader::save(dataDir, cfg))
         return {false, "Failed to write project.hcfg", 0};
+
+    // Finalize the .app: Info.plist makes Contents/ a real bundle (so
+    // SDL_GetBasePath resolves Resources), then an ad-hoc codesign of the whole
+    // thing — the key patch already re-signed the bare executable, but adding
+    // Info.plist and dylibs invalidates that; the bundle must be sealed last.
+    if (app)
+    {
+        if (!writeInfoPlist(appPath / "Contents", projectName))
+            return {false, "Failed to write Info.plist", added};
+#ifdef __APPLE__
+        if (!signAppBundle(appPath))
+            return {false, "Failed to codesign the .app bundle", added};
+#endif
+    }
 
     return {true, "", added, binaryCopied, reused, keyEmbedded};
 }

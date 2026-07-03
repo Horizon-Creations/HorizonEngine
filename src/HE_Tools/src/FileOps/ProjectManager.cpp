@@ -54,6 +54,7 @@ static json profileToJson(const ExportProfile& p)
 	j["excludePatterns"]  = p.excludePatterns;
 	j["incremental"]      = p.incremental;
 	j["targetPlatform"]   = p.targetPlatform;
+	j["appBundle"]        = p.appBundle;
 	return j;
 }
 
@@ -69,6 +70,7 @@ static ExportProfile profileFromJson(const json& j)
 	p.incremental      = jsonBool(j, "incremental", true);
 	p.targetPlatform   = jsonString(j, "targetPlatform", "Host");
 	if (p.targetPlatform.empty()) p.targetPlatform = "Host";
+	p.appBundle        = jsonBool(j, "appBundle", false);
 	if (auto it = j.find("excludePatterns"); it != j.end() && it->is_array())
 		for (const auto& e : *it)
 			if (e.is_string()) p.excludePatterns.push_back(e.get<std::string>());
