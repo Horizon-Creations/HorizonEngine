@@ -337,6 +337,13 @@ add_subdirectory(src/HE_Tools)
 add_subdirectory(src/HE_Game)
 add_subdirectory(src/HE_Editor)
 
+# Building the editor always (re)builds + deploys the game runtime: the editor's
+# Build > Export ships those binaries, and a stale/missing out/deploy/Game
+# silently produced data-only, unrunnable exports.
+if(TARGET HorizonEditor AND TARGET HorizonGame)
+    add_dependencies(HorizonEditor HorizonGame)
+endif()
+
 # ─── Tests ─────────────────────────────────────────────────────────────────────
 option(HE_BUILD_TESTS "Build the doctest unit tests" ON)
 if(HE_BUILD_TESTS)

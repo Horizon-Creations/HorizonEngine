@@ -329,6 +329,198 @@ TEST_CASE("Incremental export: encryption reuses the previous key, pak stays rea
 }
 #endif
 
+// ─── Embedded pak key ─────────────────────────────────────────────────────────
+
+// Mirror of the game's EmbeddedPakKeyBlock initializer (magic must match).
+static std::vector<uint8_t> fakeGameBinary(bool withBlock)
+{
+    std::vector<uint8_t> bin;
+    for (int i = 0; i < 300; ++i) bin.push_back(static_cast<uint8_t>(i * 7 + 3));
+    if (withBlock)
+    {
+        std::string magic = "HE_EMBEDDED_";
+        magic += "PAKKEY_V1";
+        magic.append(24 - magic.size(), '\0');
+        bin.insert(bin.end(), magic.begin(), magic.end()); // magic[24]
+        bin.push_back(0);                                  // hasKey = 0
+        bin.insert(bin.end(), 7, 0);                       // pad[7]
+        bin.insert(bin.end(), 32, 0);                      // key[32]
+    }
+    for (int i = 0; i < 300; ++i) bin.push_back(static_cast<uint8_t>(i * 13 + 1));
+    return bin;
+}
+
+TEST_CASE("patchEmbeddedPakKey: patches the block, readEmbeddedPakKey round-trips")
+{
+    const auto dir = fs::temp_directory_path() / "he_embed_unit";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+
+    uint8_t key[32];
+    for (int i = 0; i < 32; ++i) key[i] = static_cast<uint8_t>(200 - i);
+
+    SUBCASE("binary with a block")
+    {
+        writeBlob(dir / "game", fakeGameBinary(true));
+        CHECK(patchEmbeddedPakKey(dir / "game", key) == 1);
+        uint8_t got[32] = {};
+        REQUIRE(readEmbeddedPakKey(dir / "game", got));
+        CHECK(std::memcmp(got, key, 32) == 0);
+    }
+    SUBCASE("binary without a block → 0 patched, read fails")
+    {
+        writeBlob(dir / "plain", fakeGameBinary(false));
+        CHECK(patchEmbeddedPakKey(dir / "plain", key) == 0);
+        uint8_t got[32];
+        CHECK_FALSE(readEmbeddedPakKey(dir / "plain", got));
+    }
+    SUBCASE("two blocks (universal binary): both patched")
+    {
+        auto two = fakeGameBinary(true);
+        const auto second = fakeGameBinary(true);
+        two.insert(two.end(), second.begin(), second.end());
+        writeBlob(dir / "fat", two);
+        CHECK(patchEmbeddedPakKey(dir / "fat", key) == 2);
+    }
+    SUBCASE("unpatched block reads as no key")
+    {
+        writeBlob(dir / "fresh", fakeGameBinary(true));
+        uint8_t got[32];
+        CHECK_FALSE(readEmbeddedPakKey(dir / "fresh", got)); // hasKey still 0
+    }
+    fs::remove_all(dir);
+}
+
+#ifdef HE_HAVE_OPENSSL
+TEST_CASE("Export with encryption embeds the key in the game binary, not the hcfg")
+{
+    const auto dir = fs::temp_directory_path() / "he_embed_src";
+    const auto rt  = fs::temp_directory_path() / "he_embed_rt";
+    const auto out = fs::temp_directory_path() / "he_embed_out";
+    fs::remove_all(dir); fs::remove_all(rt); fs::remove_all(out);
+    writeBlob(dir / "a.hasset", tinyHasset({0xE, 0x1}, "a.hasset"));
+    writeBlob(rt / "HorizonGame", fakeGameBinary(true));
+    writeBlob(rt / "libFake.dylib", fakeGameBinary(false));
+
+    ExportSettings s;
+    s.compress = true; s.encrypt = true; s.incremental = true;
+    s.gameRuntimeDir = rt;
+    auto r1 = ProjectExporter::exportProject(dir, "Emb", "", out, s);
+    REQUIRE(r1.success);
+    CHECK(r1.binaryFilesCopied == 2);
+    CHECK(r1.keyEmbedded);
+
+    // Key is in the shipped binary…
+    uint8_t key[32] = {};
+    REQUIRE(readEmbeddedPakKey(out / "HorizonGame", key));
+    // …and NOT in project.hcfg (encrypted flag stays set, key is zeroed).
+    ProjectConfig cfg;
+    REQUIRE(ProjectConfigLoader::load(out, cfg));
+    CHECK(cfg.encrypted);
+    bool anyKeyByte = false;
+    for (int i = 0; i < 32; ++i) anyKeyByte |= (cfg.encKey[i] != 0);
+    CHECK_FALSE(anyKeyByte);
+
+    // The pak decrypts with the embedded key (what the runtime will use).
+    HpakReader reader;
+    REQUIRE(reader.open((out / "Emb.hpak").string()));
+    CHECK(reader.readEntry(HE::UUID{0xE, 0x1}, key) == tinyHasset({0xE, 0x1}, "a.hasset"));
+
+    // Incremental re-export: key recovered from the patched binary (hcfg has
+    // none), entries reused verbatim, key unchanged.
+    auto r2 = ProjectExporter::exportProject(dir, "Emb", "", out, s);
+    REQUIRE(r2.success);
+    CHECK(r2.assetsReused == 1);
+    CHECK(r2.keyEmbedded);
+    uint8_t key2[32] = {};
+    REQUIRE(readEmbeddedPakKey(out / "HorizonGame", key2));
+    CHECK(std::memcmp(key, key2, 32) == 0);
+
+    fs::remove_all(dir); fs::remove_all(rt); fs::remove_all(out);
+}
+
+TEST_CASE("Export with encryption falls back to the hcfg key for a legacy runtime")
+{
+    const auto dir = fs::temp_directory_path() / "he_embed_legacy_src";
+    const auto rt  = fs::temp_directory_path() / "he_embed_legacy_rt";
+    const auto out = fs::temp_directory_path() / "he_embed_legacy_out";
+    fs::remove_all(dir); fs::remove_all(rt); fs::remove_all(out);
+    writeBlob(dir / "a.hasset", tinyHasset({0xE, 0x2}, "a.hasset"));
+    writeBlob(rt / "HorizonGame", fakeGameBinary(false)); // no key block
+
+    ExportSettings s;
+    s.compress = true; s.encrypt = true;
+    s.gameRuntimeDir = rt;
+    auto r = ProjectExporter::exportProject(dir, "Leg", "", out, s);
+    REQUIRE(r.success);
+    CHECK_FALSE(r.keyEmbedded);
+
+    ProjectConfig cfg;
+    REQUIRE(ProjectConfigLoader::load(out, cfg));
+    REQUIRE(cfg.encrypted);
+    bool anyKeyByte = false;
+    for (int i = 0; i < 32; ++i) anyKeyByte |= (cfg.encKey[i] != 0);
+    CHECK(anyKeyByte); // key ships in the hcfg as before
+
+    HpakReader reader;
+    REQUIRE(reader.open((out / "Leg.hpak").string()));
+    CHECK(reader.readEntry(HE::UUID{0xE, 0x2}, cfg.encKey) == tinyHasset({0xE, 0x2}, "a.hasset"));
+
+    fs::remove_all(dir); fs::remove_all(rt); fs::remove_all(out);
+}
+#endif
+
+TEST_CASE("Export fails when the runtime dir yields no binaries")
+{
+    const auto dir = fs::temp_directory_path() / "he_nobin_src";
+    const auto rt  = fs::temp_directory_path() / "he_nobin_rt";   // exists, empty
+    const auto out = fs::temp_directory_path() / "he_nobin_out";
+    fs::remove_all(dir); fs::remove_all(rt); fs::remove_all(out);
+    writeBlob(dir / "a.hasset", tinyHasset({0xE, 0x3}, "a.hasset"));
+    fs::create_directories(rt);
+
+    ExportSettings s;
+    s.compress = false;
+    s.gameRuntimeDir = rt;
+    auto r = ProjectExporter::exportProject(dir, "NoBin", "", out, s);
+    CHECK_FALSE(r.success);
+    CHECK(r.errorMessage.find("no files") != std::string::npos);
+
+    fs::remove_all(dir); fs::remove_all(rt); fs::remove_all(out);
+}
+
+TEST_CASE("findRuntimeBundle: deploy layout, build-tree layout, cross-platform")
+{
+    const auto root = fs::temp_directory_path() / "he_bundle_root";
+    fs::remove_all(root);
+
+    // Deploy layout: <root>/deploy/{Editor,Game}
+    writeBlob(root / "deploy" / "Game" / "HorizonGame", fakeGameBinary(false));
+    fs::create_directories(root / "deploy" / "Editor");
+    CHECK(findRuntimeBundle(root / "deploy" / "Editor", ExportPlatform::Host)
+          == (root / "deploy" / "Game").lexically_normal());
+
+    // Build-tree layout: editor runs from <root>/cmake-build/src/HE_Editor,
+    // runtime deployed to <root>/out/deploy/Game.
+    writeBlob(root / "out" / "deploy" / "Game" / "HorizonGame", fakeGameBinary(false));
+    fs::create_directories(root / "cmake-build" / "src" / "HE_Editor");
+    CHECK(findRuntimeBundle(root / "cmake-build" / "src" / "HE_Editor", ExportPlatform::Host)
+          == (root / "out" / "deploy" / "Game").lexically_normal());
+
+    // Cross-platform bundle with a Windows exe.
+    writeBlob(root / "out" / "deploy" / "GameRuntimes" / "Windows" / "HorizonGame.exe",
+              fakeGameBinary(false));
+    CHECK(findRuntimeBundle(root / "cmake-build" / "src" / "HE_Editor", ExportPlatform::Windows)
+          == (root / "out" / "deploy" / "GameRuntimes" / "Windows").lexically_normal());
+
+    // A bundle dir WITHOUT the executable does not qualify.
+    fs::create_directories(root / "empty" / "Game");
+    fs::create_directories(root / "empty" / "Editor");
+    CHECK(findRuntimeBundle(root / "empty" / "Editor", ExportPlatform::Linux).empty());
+
+    fs::remove_all(root);
+}
+
 // ─── Platform targets ─────────────────────────────────────────────────────────
 
 TEST_CASE("ExportPlatform: name mapping and runtime-dir resolution")

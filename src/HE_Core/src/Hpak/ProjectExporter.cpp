@@ -6,9 +6,11 @@
 #include <Hpak/Aes256Gcm.h>
 #include <Types/UUID.h>
 #include <nlohmann/json.hpp>
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <cstdlib>
 #include <cstring>
 
 // ─── Export platforms ─────────────────────────────────────────────────────────
@@ -39,6 +41,133 @@ std::filesystem::path resolveRuntimeDir(const std::filesystem::path& editorBaseD
     if (p == ExportPlatform::Host)
         return editorBaseDir / ".." / "Game";
     return editorBaseDir / ".." / "GameRuntimes" / exportPlatformName(p);
+}
+
+// A directory qualifies as a runtime bundle only if the game executable is
+// actually in it — a bare/leftover folder must not silently export 0 binaries.
+static bool isRuntimeBundle(const std::filesystem::path& dir)
+{
+    std::error_code ec;
+    return std::filesystem::is_regular_file(dir / "HorizonGame", ec)
+        || std::filesystem::is_regular_file(dir / "HorizonGame.exe", ec);
+}
+
+std::filesystem::path findRuntimeBundle(const std::filesystem::path& editorBaseDir,
+                                        ExportPlatform p)
+{
+    if (editorBaseDir.empty()) return {};
+
+    const std::filesystem::path sub = (p == ExportPlatform::Host)
+        ? std::filesystem::path("Game")
+        : std::filesystem::path("GameRuntimes") / exportPlatformName(p);
+
+    // Walk upward: <dir>/Game next to the editor covers the deploy layout
+    // (deploy/Editor + deploy/Game); <dir>/out/deploy/Game covers running the
+    // editor from a build tree anywhere inside the repo.
+    std::error_code ec;
+    std::filesystem::path dir = editorBaseDir.lexically_normal();
+    for (int depth = 0; depth < 7 && !dir.empty(); ++depth)
+    {
+        if (isRuntimeBundle(dir / sub))                    return dir / sub;
+        if (isRuntimeBundle(dir / "out" / "deploy" / sub)) return dir / "out" / "deploy" / sub;
+        const auto parent = dir.parent_path();
+        if (parent == dir) break; // filesystem root
+        dir = parent;
+    }
+    return {};
+}
+
+// ─── Embedded pak key ─────────────────────────────────────────────────────────
+// Block layout (ABI, see HE_Game/src/EmbeddedPakKey.h):
+//   magic[24] | hasKey(1) | pad(7) | key(32)  — 64 bytes total.
+
+static std::string embeddedKeyMagic()
+{
+    // Assembled from pieces so the contiguous 24-byte pattern exists in no
+    // binary except the game's real key block (a literal here would also live
+    // in libHorizonCore and be falsely patched as a "block").
+    std::string m = "HE_EMBEDDED_";
+    m += "PAKKEY_V1";
+    m.append(24 - m.size(), '\0');
+    return m;
+}
+
+static bool readWholeFile(const std::filesystem::path& p, std::vector<uint8_t>& out)
+{
+    std::ifstream f(p, std::ios::binary);
+    if (!f) return false;
+    out.assign((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    return f.good() || f.eof();
+}
+
+#ifdef __APPLE__
+// Patching invalidates the (ad-hoc) code signature; on arm64 macOS an invalid
+// signature means the binary is killed on launch. Re-sign ad-hoc in place.
+static void resignIfMachO(const std::filesystem::path& p, const std::vector<uint8_t>& bytes)
+{
+    if (bytes.size() < 4) return;
+    const uint32_t w = static_cast<uint32_t>(bytes[0])
+                     | static_cast<uint32_t>(bytes[1]) << 8
+                     | static_cast<uint32_t>(bytes[2]) << 16
+                     | static_cast<uint32_t>(bytes[3]) << 24;
+    const bool machO = w == 0xFEEDFACFu || w == 0xFEEDFACEu   // MH_MAGIC_64 / MH_MAGIC
+                    || w == 0xBEBAFECAu || w == 0xCAFEBABEu;  // FAT magics (either order)
+    if (!machO) return;
+    const std::string cmd = "/usr/bin/codesign --force --sign - '" + p.string() + "' 2>/dev/null";
+    std::system(cmd.c_str());
+}
+#endif
+
+int patchEmbeddedPakKey(const std::filesystem::path& binary, const uint8_t key[32])
+{
+    std::vector<uint8_t> bytes;
+    if (!readWholeFile(binary, bytes)) return -1;
+
+    const std::string magic = embeddedKeyMagic();
+    if (bytes.size() < 64) return 0;
+
+    int patched = 0;
+    // Patch EVERY occurrence: universal (fat) binaries carry one block per
+    // architecture slice.
+    auto it = bytes.begin();
+    while (true)
+    {
+        it = std::search(it, bytes.end(), magic.begin(), magic.end());
+        if (it == bytes.end()) break;
+        const size_t off = static_cast<size_t>(it - bytes.begin());
+        if (off + 64 > bytes.size()) break;
+        bytes[off + 24] = 1;                        // hasKey
+        std::memcpy(bytes.data() + off + 32, key, 32);
+        ++patched;
+        it += 64;
+    }
+    if (patched == 0) return 0;
+
+    {
+        std::ofstream f(binary, std::ios::binary | std::ios::trunc);
+        if (!f) return -1;
+        f.write(reinterpret_cast<const char*>(bytes.data()),
+                static_cast<std::streamsize>(bytes.size()));
+        if (!f.good()) return -1;
+    }
+#ifdef __APPLE__
+    resignIfMachO(binary, bytes);
+#endif
+    return patched;
+}
+
+bool readEmbeddedPakKey(const std::filesystem::path& binary, uint8_t outKey[32])
+{
+    std::vector<uint8_t> bytes;
+    if (!readWholeFile(binary, bytes) || bytes.size() < 64) return false;
+
+    const std::string magic = embeddedKeyMagic();
+    auto it = std::search(bytes.begin(), bytes.end(), magic.begin(), magic.end());
+    if (it == bytes.end()) return false;
+    const size_t off = static_cast<size_t>(it - bytes.begin());
+    if (off + 64 > bytes.size() || bytes[off + 24] != 1) return false;
+    std::memcpy(outKey, bytes.data() + off + 32, 32);
+    return true;
 }
 
 // ─── Incremental-pack manifest ────────────────────────────────────────────────
@@ -143,11 +272,26 @@ ExportResult ProjectExporter::exportProject(
         bool haveKey = false;
         if (settings.incremental)
         {
+            // Previous key sources, in order: project.hcfg (legacy exports keep
+            // the key there) — but only a NON-ZERO key (embedded-key exports
+            // deliberately zero it); then the key patched into the previous
+            // export's game executable.
             ProjectConfig prevCfg;
             if (ProjectConfigLoader::load(outputDir, prevCfg) && prevCfg.encrypted)
             {
-                std::memcpy(packSettings.key, prevCfg.encKey, 32);
-                haveKey = true;
+                bool nonZero = false;
+                for (int i = 0; i < 32; ++i) nonZero |= (prevCfg.encKey[i] != 0);
+                if (nonZero)
+                {
+                    std::memcpy(packSettings.key, prevCfg.encKey, 32);
+                    haveKey = true;
+                }
+            }
+            if (!haveKey)
+            {
+                for (const char* exe : { "HorizonGame", "HorizonGame.exe" })
+                    if (readEmbeddedPakKey(outputDir / exe, packSettings.key))
+                    { haveKey = true; break; }
             }
         }
         if (!haveKey && !Hpak::randomBytes(packSettings.key, 32))
@@ -215,6 +359,56 @@ ExportResult ProjectExporter::exportProject(
                 std::filesystem::copy_options::overwrite_existing, ec);
     }
 
+    // Copy game runtime binaries (executable + dylibs) so the export is runnable.
+    // This happens BEFORE project.hcfg is written: with encryption the key is
+    // patched into the copied game executable, and only if that succeeds is the
+    // key omitted from the hcfg. Non-throwing iteration: this runs on the
+    // editor's export worker thread, where an escaped filesystem_error would be
+    // std::terminate.
+    int  binaryCopied = 0;
+    bool keyEmbedded  = false;
+    if (!settings.gameRuntimeDir.empty() && std::filesystem::exists(settings.gameRuntimeDir, ec))
+    {
+        std::vector<std::filesystem::path> copied;
+        std::filesystem::directory_iterator dit(settings.gameRuntimeDir, ec);
+        const std::filesystem::directory_iterator dend;
+        while (!ec && dit != dend)
+        {
+            const bool regular = dit->is_regular_file(ec);
+            if (!ec && regular)
+            {
+                const auto dst = outputDir / dit->path().filename();
+                std::filesystem::copy_file(dit->path(), dst,
+                    std::filesystem::copy_options::overwrite_existing, ec);
+                if (!ec) { ++binaryCopied; copied.push_back(dst); }
+            }
+            ec.clear();
+            dit.increment(ec);
+        }
+        ec.clear();
+
+        // A runtime dir that yields nothing is a broken export (data without an
+        // executable) — the exact failure mode this parameter exists to prevent.
+        if (binaryCopied == 0)
+            return {false, "Game runtime dir contained no files: "
+                           + settings.gameRuntimeDir.string(), added};
+
+        // Patch the pak key into the game executable's embedded key block.
+        // Only the game exe carries the block; other copied files are skipped
+        // cheaply by name. A runtime without the block (built before the block
+        // existed) falls back to shipping the key in project.hcfg.
+        if (settings.encrypt)
+        {
+            for (const auto& dst : copied)
+            {
+                const auto name = dst.filename().string();
+                if (name != "HorizonGame" && name != "HorizonGame.exe") continue;
+                if (patchEmbeddedPakKey(dst, packSettings.key) > 0)
+                    keyEmbedded = true;
+            }
+        }
+    }
+
     ProjectConfig cfg;
     cfg.projectName   = projectName;
     cfg.hpakFilename  = hpakFilename;
@@ -222,7 +416,10 @@ ExportResult ProjectExporter::exportProject(
     std::memset(cfg.projectUuidBytes, 0, 16);
     cfg.enableModSupport = settings.enableModSupport;
     cfg.encrypted = settings.encrypt;
-    if (settings.encrypt) std::memcpy(cfg.encKey, packSettings.key, 32);
+    // Key placement: inside the game executable when the patch succeeded (the
+    // hcfg then carries only the encrypted flag), in the hcfg otherwise.
+    if (settings.encrypt && !keyEmbedded)
+        std::memcpy(cfg.encKey, packSettings.key, 32);
     if (!startupSceneBinary.empty())
     {
         cfg.hasPackedScene = true;
@@ -233,28 +430,5 @@ ExportResult ProjectExporter::exportProject(
     if (!ProjectConfigLoader::save(outputDir, cfg))
         return {false, "Failed to write project.hcfg", 0};
 
-    // Copy game runtime binaries (executable + dylibs) so the export is runnable.
-    // Non-throwing iteration: this runs on the editor's export worker thread,
-    // where an escaped filesystem_error would be std::terminate.
-    int binaryCopied = 0;
-    if (!settings.gameRuntimeDir.empty() && std::filesystem::exists(settings.gameRuntimeDir, ec))
-    {
-        std::filesystem::directory_iterator dit(settings.gameRuntimeDir, ec);
-        const std::filesystem::directory_iterator dend;
-        while (!ec && dit != dend)
-        {
-            const bool regular = dit->is_regular_file(ec);
-            if (!ec && regular)
-            {
-                std::filesystem::copy_file(dit->path(), outputDir / dit->path().filename(),
-                    std::filesystem::copy_options::overwrite_existing, ec);
-                if (!ec) ++binaryCopied;
-            }
-            ec.clear();
-            dit.increment(ec);
-        }
-        ec.clear();
-    }
-
-    return {true, "", added, binaryCopied, reused};
+    return {true, "", added, binaryCopied, reused, keyEmbedded};
 }
