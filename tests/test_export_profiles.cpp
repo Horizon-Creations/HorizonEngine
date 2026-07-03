@@ -498,9 +498,12 @@ TEST_CASE("Export fails hard when copying a runtime binary fails")
     writeBlob(dir / "a.hasset", tinyHasset({0xE, 0x5}, "a.hasset"));
     writeBlob(rt / "HorizonGame", fakeGameBinary(true));
     writeBlob(rt / "libFake.dylib", fakeGameBinary(false));
-    // A DIRECTORY squatting on the destination name makes copy_file fail —
-    // previously that was silently skipped, shipping a stale/missing exe as OK.
+    // A NON-EMPTY directory squatting on the destination name makes copy_file
+    // fail (and can't be cleared by the pre-copy remove, which only deletes
+    // files/empty dirs) — previously a copy failure was silently skipped,
+    // shipping a stale/missing exe as OK.
     fs::create_directories(out / "HorizonGame");
+    writeBlob(out / "HorizonGame" / "squat", { 0x00 });
 
     ExportSettings s;
     s.compress = false;
@@ -703,6 +706,52 @@ TEST_CASE("Export .app bundle: real binary is bundled, signed, and (encrypted) k
     bool anyKeyByte = false;
     for (int i = 0; i < 32; ++i) anyKeyByte |= (cfg.encKey[i] != 0);
     CHECK_FALSE(anyKeyByte);
+
+    fs::remove_all(dir); fs::remove_all(rt); fs::remove_all(out);
+}
+
+TEST_CASE("Export .app bundle: re-export over an existing signed bundle re-signs cleanly")
+{
+    const auto dir = fs::temp_directory_path() / "he_app_reexp_src";
+    const auto rt  = fs::temp_directory_path() / "he_app_reexp_rt";
+    const auto out = fs::temp_directory_path() / "he_app_reexp_out";
+    fs::remove_all(dir); fs::remove_all(rt); fs::remove_all(out);
+    writeBlob(dir / "a.hasset", tinyHasset({0xA9, 0x3}, "a.hasset"));
+    fs::create_directories(rt);
+    fs::copy_file(HE_TEST_GAME_EXE, rt / "HorizonGame");
+    // A stray extra dylib present in the FIRST runtime but not the second, to
+    // prove stale binaries do not linger in the re-signed bundle.
+    fs::copy_file(HE_TEST_GAME_EXE, rt / "libStale.dylib");
+
+    ExportSettings s;
+    s.compress = true; s.encrypt = true; s.incremental = true;
+    s.gameRuntimeDir = rt;
+    s.appBundle = true;
+
+    // First export: builds + signs the .app (with libStale.dylib inside).
+    auto r1 = ProjectExporter::exportProject(dir, "ReApp", "", out, s);
+    REQUIRE_MESSAGE(r1.success, r1.errorMessage);
+    const auto app = out / "ReApp.app";
+    REQUIRE(fs::exists(app / "Contents" / "MacOS" / "libStale.dylib"));
+
+    // Drop the stray dylib, then re-export over the existing signed bundle —
+    // this used to fail codesign (stale _CodeSignature + leftover binary).
+    fs::remove(rt / "libStale.dylib");
+    auto r2 = ProjectExporter::exportProject(dir, "ReApp", "", out, s);
+    REQUIRE_MESSAGE(r2.success, r2.errorMessage);
+    CHECK(r2.assetsReused == 1);                       // incremental still worked
+
+    // The stale dylib is gone and the re-signed bundle verifies.
+    CHECK_FALSE(fs::exists(app / "Contents" / "MacOS" / "libStale.dylib"));
+    const std::string verify = "/usr/bin/codesign --verify --deep '" + app.string() + "' 2>/dev/null";
+    CHECK(std::system(verify.c_str()) == 0);
+
+    // The pak still decrypts with the (reused) embedded key.
+    uint8_t key[32] = {};
+    REQUIRE(readEmbeddedPakKey(app / "Contents" / "MacOS" / "HorizonGame", key));
+    HpakReader reader;
+    REQUIRE(reader.open((app / "Contents" / "Resources" / "ReApp.hpak").string()));
+    CHECK(reader.readEntry(HE::UUID{0xA9, 0x3}, key) == tinyHasset({0xA9, 0x3}, "a.hasset"));
 
     fs::remove_all(dir); fs::remove_all(rt); fs::remove_all(out);
 }
