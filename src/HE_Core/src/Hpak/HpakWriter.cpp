@@ -322,8 +322,12 @@ int HpakWriter::addDirectory(const std::filesystem::path& rootDir,
                 // readStoredEntry verifies the content hash, so a corrupt old
                 // entry falls through to a fresh pack. The flag/size sanity
                 // checks guard against a cache paired with the wrong archive.
+                // Dict-compressed entries can never be carried verbatim: this
+                // writer emits no shared dictionary, so the entry would be
+                // undecodable in the new archive.
                 if (cache->previousPak->readStoredEntry(pe.id, se)
                     && ((se.flags & Hpak::kFlagEncrypted) != 0) == wantEncrypted
+                    && (se.flags & Hpak::kFlagUsesDict) == 0
                     && se.origSize == static_cast<uint32_t>(blob.size()))
                 {
                     addPackedEntry(pe.id, se);
