@@ -3482,10 +3482,31 @@ const OpenGLRenderer::GpuMesh* OpenGLRenderer::ResolveMesh(const HE::UUID& asset
 		{
 			glGenTextures(1, &mesh.texture);
 			glBindTexture(GL_TEXTURE_2D, mesh.texture);
-			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
-			             static_cast<GLsizei>(tex->width), static_cast<GLsizei>(tex->height),
-			             0, GL_RGBA, GL_UNSIGNED_BYTE, tex->data.data());
-			glGenerateMipmap(GL_TEXTURE_2D);
+			if (tex->mipLevels > 1)
+			{
+				// Cooked: upload the pre-baked mip chain (level 0 first), no
+				// runtime glGenerateMipmap.
+				size_t   off = 0;
+				uint32_t lw = static_cast<uint32_t>(tex->width);
+				uint32_t lh = static_cast<uint32_t>(tex->height);
+				for (uint32_t l = 0; l < tex->mipLevels; ++l)
+				{
+					glTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(l), GL_RGBA8,
+					             static_cast<GLsizei>(lw), static_cast<GLsizei>(lh),
+					             0, GL_RGBA, GL_UNSIGNED_BYTE, tex->data.data() + off);
+					off += static_cast<size_t>(lw) * lh * 4;
+					lw = std::max<uint32_t>(1, lw >> 1);
+					lh = std::max<uint32_t>(1, lh >> 1);
+				}
+				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, static_cast<GLint>(tex->mipLevels - 1));
+			}
+			else
+			{
+				glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
+				             static_cast<GLsizei>(tex->width), static_cast<GLsizei>(tex->height),
+				             0, GL_RGBA, GL_UNSIGNED_BYTE, tex->data.data());
+				glGenerateMipmap(GL_TEXTURE_2D);
+			}
 			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
 			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 			glBindTexture(GL_TEXTURE_2D, 0);
@@ -3606,10 +3627,31 @@ OpenGLRenderer::ResolveSkeletalMesh(const HE::UUID& assetId)
 		{
 			glGenTextures(1, &mesh.texture);
 			glBindTexture(GL_TEXTURE_2D, mesh.texture);
-			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
-			             static_cast<GLsizei>(tex->width), static_cast<GLsizei>(tex->height),
-			             0, GL_RGBA, GL_UNSIGNED_BYTE, tex->data.data());
-			glGenerateMipmap(GL_TEXTURE_2D);
+			if (tex->mipLevels > 1)
+			{
+				// Cooked: upload the pre-baked mip chain (level 0 first), no
+				// runtime glGenerateMipmap.
+				size_t   off = 0;
+				uint32_t lw = static_cast<uint32_t>(tex->width);
+				uint32_t lh = static_cast<uint32_t>(tex->height);
+				for (uint32_t l = 0; l < tex->mipLevels; ++l)
+				{
+					glTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(l), GL_RGBA8,
+					             static_cast<GLsizei>(lw), static_cast<GLsizei>(lh),
+					             0, GL_RGBA, GL_UNSIGNED_BYTE, tex->data.data() + off);
+					off += static_cast<size_t>(lw) * lh * 4;
+					lw = std::max<uint32_t>(1, lw >> 1);
+					lh = std::max<uint32_t>(1, lh >> 1);
+				}
+				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, static_cast<GLint>(tex->mipLevels - 1));
+			}
+			else
+			{
+				glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
+				             static_cast<GLsizei>(tex->width), static_cast<GLsizei>(tex->height),
+				             0, GL_RGBA, GL_UNSIGNED_BYTE, tex->data.data());
+				glGenerateMipmap(GL_TEXTURE_2D);
+			}
 			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
 			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 			glBindTexture(GL_TEXTURE_2D, 0);

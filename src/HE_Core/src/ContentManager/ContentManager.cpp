@@ -139,6 +139,12 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 			HAsset::Reader::readPOD(c->data,o,a.width);
 			HAsset::Reader::readPOD(c->data,o,a.height);
 			HAsset::Reader::readPOD(c->data,o,a.channels);
+			// Cook tail (mipLevels, format, srgb) — guarded so pre-cook TXMI
+			// chunks (width/height/channels only) keep their defaults.
+			if (o + sizeof(uint32_t) <= c->data.size()) HAsset::Reader::readPOD(c->data,o,a.mipLevels);
+			if (o + 1 <= c->data.size()) { uint8_t f=0; HAsset::Reader::readPOD(c->data,o,f); a.format = static_cast<TextureFormat>(f); }
+			if (o + 1 <= c->data.size()) { uint8_t s=0; HAsset::Reader::readPOD(c->data,o,s); a.srgb = s != 0; }
+			if (a.mipLevels == 0) a.mipLevels = 1;
 		}
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_PIXL)) a.data = c->data;
 		handle = m_textureAssets.insert(std::move(a)); break;
@@ -576,7 +582,11 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 	case HE::AssetType::Texture:
 	{
 		auto& a = static_cast<TextureAsset&>(asset);
-		{ std::vector<uint8_t> b; HAsset::Writer::appendPOD(b,a.width); HAsset::Writer::appendPOD(b,a.height); HAsset::Writer::appendPOD(b,a.channels); w.addChunk(HAsset::CHUNK_TXMI,b.data(),b.size()); }
+		{ std::vector<uint8_t> b; HAsset::Writer::appendPOD(b,a.width); HAsset::Writer::appendPOD(b,a.height); HAsset::Writer::appendPOD(b,a.channels);
+		  HAsset::Writer::appendPOD(b, a.mipLevels);
+		  HAsset::Writer::appendPOD(b, static_cast<uint8_t>(a.format));
+		  HAsset::Writer::appendPOD(b, static_cast<uint8_t>(a.srgb ? 1 : 0));
+		  w.addChunk(HAsset::CHUNK_TXMI,b.data(),b.size()); }
 		w.addChunk(HAsset::CHUNK_PIXL, a.data.data(), a.data.size());
 		break;
 	}
