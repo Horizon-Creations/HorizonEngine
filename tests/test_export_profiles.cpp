@@ -190,6 +190,7 @@ TEST_CASE("ProjectManager: profiles round-trip and unknown manifest keys survive
     proj.exportProfiles[1].outputDir       = "/tmp/ship_out";
     proj.exportProfiles[1].incremental     = false;
     proj.exportProfiles[1].targetPlatform  = "Windows";
+    proj.exportProfiles[1].appBundle       = true;
     ExportProfile extra;
     extra.name = "DemoDisk";
     extra.compress = true;
@@ -209,6 +210,8 @@ TEST_CASE("ProjectManager: profiles round-trip and unknown manifest keys survive
     CHECK(p2.exportProfiles[1].outputDir == "/tmp/ship_out");
     CHECK_FALSE(p2.exportProfiles[1].incremental);
     CHECK(p2.exportProfiles[1].targetPlatform == "Windows");
+    CHECK(p2.exportProfiles[1].appBundle);
+    CHECK_FALSE(p2.exportProfiles[2].appBundle); // default
     CHECK(p2.exportProfiles[2].name == "DemoDisk");
     CHECK(p2.exportProfiles[2].incremental);              // default true
     CHECK(p2.exportProfiles[2].targetPlatform == "Host"); // default
@@ -597,6 +600,113 @@ TEST_CASE("findRuntimeBundle: deploy layout, build-tree layout, cross-platform")
 
     fs::remove_all(root);
 }
+
+// ─── macOS .app bundle ────────────────────────────────────────────────────────
+
+TEST_CASE("Export .app bundle: layout routes binaries vs data correctly")
+{
+    const auto dir = fs::temp_directory_path() / "he_app_src";
+    const auto rt  = fs::temp_directory_path() / "he_app_rt";
+    const auto out = fs::temp_directory_path() / "he_app_out";
+    fs::remove_all(dir); fs::remove_all(rt); fs::remove_all(out);
+    writeBlob(dir / "a.hasset", tinyHasset({0xA9, 0x1}, "a.hasset"));
+    // A runtime dir with the exe, an engine dylib, GameLogic, and a data file.
+    writeBlob(rt / "HorizonGame",           fakeGameBinary(false));
+    writeBlob(rt / "libHorizonCore.dylib",  fakeGameBinary(false));
+    writeBlob(rt / "GameLogic.dylib",       fakeGameBinary(false));
+    writeBlob(rt / "config.json",           { '{', '}' });
+
+    ExportSettings s;
+    s.compress = false;
+    s.gameRuntimeDir = rt;
+    s.appBundle = true;
+    // Off-macOS this still builds the structure (only the codesign step is
+    // skipped); on macOS the sign runs but our fake exe isn't a Mach-O — so
+    // this layout test is guarded to non-Apple. The Apple path is covered by
+    // the real-binary end-to-end test below.
+#ifndef __APPLE__
+    auto r = ProjectExporter::exportProject(dir, "MyGame", "", out, s);
+    REQUIRE(r.success);
+
+    const auto app = out / "MyGame.app";
+    CHECK(fs::exists(app / "Contents" / "Info.plist"));
+    // Executable + engine dylib next to the exe.
+    CHECK(fs::exists(app / "Contents" / "MacOS" / "HorizonGame"));
+    CHECK(fs::exists(app / "Contents" / "MacOS" / "libHorizonCore.dylib"));
+    // GameLogic + data + pak + hcfg in Resources (SDL_GetBasePath).
+    CHECK(fs::exists(app / "Contents" / "Resources" / "GameLogic.dylib"));
+    CHECK(fs::exists(app / "Contents" / "Resources" / "config.json"));
+    CHECK(fs::exists(app / "Contents" / "Resources" / "MyGame.hpak"));
+    CHECK(fs::exists(app / "Contents" / "Resources" / "project.hcfg"));
+    // The dylib must NOT also be in Resources, nor the pak in MacOS.
+    CHECK_FALSE(fs::exists(app / "Contents" / "Resources" / "libHorizonCore.dylib"));
+    CHECK_FALSE(fs::exists(app / "Contents" / "MacOS" / "MyGame.hpak"));
+
+    // Info.plist names the executable.
+    std::ifstream pf(app / "Contents" / "Info.plist");
+    std::string plist((std::istreambuf_iterator<char>(pf)), std::istreambuf_iterator<char>());
+    CHECK(plist.find("<key>CFBundleExecutable</key><string>HorizonGame</string>") != std::string::npos);
+    CHECK(plist.find("com.horizonengine.mygame") != std::string::npos);
+#endif
+    fs::remove_all(dir); fs::remove_all(rt); fs::remove_all(out);
+}
+
+#if defined(__APPLE__) && defined(HE_TEST_GAME_EXE)
+TEST_CASE("Export .app bundle: real binary is bundled, signed, and (encrypted) key-embedded")
+{
+    const auto dir = fs::temp_directory_path() / "he_app_real_src";
+    const auto rt  = fs::temp_directory_path() / "he_app_real_rt";
+    const auto out = fs::temp_directory_path() / "he_app_real_out";
+    fs::remove_all(dir); fs::remove_all(rt); fs::remove_all(out);
+    writeBlob(dir / "a.hasset", tinyHasset({0xA9, 0x2}, "a.hasset"));
+    fs::create_directories(rt);
+    // The genuine HorizonGame Mach-O, so codesign + key patching operate on real
+    // structures. A permission copy keeps the +x bit. config.json is a data file
+    // (not Mach-O, safe under codesign --deep) → must route to Resources.
+    fs::copy_file(HE_TEST_GAME_EXE, rt / "HorizonGame");
+    writeBlob(rt / "config.json", { '{', '}' });
+
+    ExportSettings s;
+    s.compress = false;
+    s.encrypt  = true;                 // exercises key-embed into the bundled exe
+    s.gameRuntimeDir = rt;
+    s.appBundle = true;
+    auto r = ProjectExporter::exportProject(dir, "RealApp", "", out, s);
+    REQUIRE_MESSAGE(r.success, r.errorMessage);
+    CHECK(r.keyEmbedded);
+
+    const auto app = out / "RealApp.app";
+    const auto exe = app / "Contents" / "MacOS" / "HorizonGame";
+    REQUIRE(fs::exists(exe));
+    // Data-vs-bin split: exe in MacOS, pak/hcfg/config in Resources.
+    CHECK(fs::exists(app / "Contents" / "Resources" / "RealApp.hpak"));
+    CHECK(fs::exists(app / "Contents" / "Resources" / "config.json"));
+    CHECK(fs::exists(app / "Contents" / "Info.plist"));
+    CHECK_FALSE(fs::exists(app / "Contents" / "MacOS" / "config.json"));
+    CHECK((fs::status(exe).permissions() & fs::perms::owner_exec) != fs::perms::none);
+
+    // The whole bundle carries a valid (ad-hoc) signature.
+    const std::string verify = "/usr/bin/codesign --verify '" + app.string() + "' 2>/dev/null";
+    CHECK(std::system(verify.c_str()) == 0);
+
+    // The key was patched into the bundled executable and the pak decrypts with it.
+    uint8_t key[32] = {};
+    REQUIRE(readEmbeddedPakKey(exe, key));
+    HpakReader reader;
+    REQUIRE(reader.open((app / "Contents" / "Resources" / "RealApp.hpak").string()));
+    CHECK(reader.readEntry(HE::UUID{0xA9, 0x2}, key) == tinyHasset({0xA9, 0x2}, "a.hasset"));
+
+    // The hcfg carries only the flag, not the key.
+    ProjectConfig cfg;
+    REQUIRE(ProjectConfigLoader::load(app / "Contents" / "Resources", cfg));
+    CHECK(cfg.encrypted);
+    bool anyKeyByte = false;
+    for (int i = 0; i < 32; ++i) anyKeyByte |= (cfg.encKey[i] != 0);
+    CHECK_FALSE(anyKeyByte);
+
+    fs::remove_all(dir); fs::remove_all(rt); fs::remove_all(out);
+}
+#endif
 
 // ─── Platform targets ─────────────────────────────────────────────────────────
 

@@ -29,6 +29,12 @@ struct HE_API ExportSettings {
     // (codec/level/encrypt/key) changed. With encrypt, the previous export's
     // key is reused (read from its project.hcfg) so entries stay verbatim.
     bool incremental = true;
+    // macOS only: emit a <projectName>.app bundle instead of a flat folder —
+    // executable + engine dylibs in Contents/MacOS, pak/hcfg/GameLogic in
+    // Contents/Resources (where SDL_GetBasePath resolves inside a bundle), a
+    // generated Info.plist, and an ad-hoc codesign of the whole bundle. Only
+    // honoured when the runtime binaries are macOS binaries; ignored otherwise.
+    bool appBundle = false;
     // Optional progress callback: (assetsDone, assetsTotal, currentFile). Invoked
     // from whatever thread runs exportProject — the caller must make it
     // thread-safe when exporting on a worker thread.

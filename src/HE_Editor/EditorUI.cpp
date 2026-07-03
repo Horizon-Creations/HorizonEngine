@@ -111,7 +111,20 @@ static bool   s_exportEncrypt     = false;
 static bool   s_exportModSupport  = false;
 static std::string s_exportExcludes;               // one glob pattern per line
 static bool   s_exportIncremental = true;
+static bool   s_exportAppBundle   = false;         // macOS .app bundle
 static std::string s_exportPlatform = "Host";      // exportPlatformName() value
+
+// True when the selected target produces macOS binaries the editor can bundle +
+// sign — i.e. this editor runs on macOS and targets Host or macOS. Building a
+// signed .app requires codesign, so it is a macOS-host-only feature.
+static bool exportAppBundleApplicable(const std::string& platform)
+{
+#ifdef __APPLE__
+    return platform == "Host" || platform == "macOS";
+#else
+    (void)platform; return false;
+#endif
+}
 static std::string              s_exportStartupScene;  // project-relative; "" = current scene
 static std::vector<std::string> s_exportSceneChoices;  // .hescene files found on modal open
 static std::string s_exportNewProfileName;
@@ -176,6 +189,7 @@ static void exportProfileToDialog(const ExportProfile& p, const std::filesystem:
 	s_exportModSupport   = p.enableModSupport;
 	s_exportStartupScene = p.startupScene;
 	s_exportIncremental  = p.incremental;
+	s_exportAppBundle    = p.appBundle;
 	// Canonicalize via the enum round-trip: a hand-edited value like "windows"
 	// falls back to Host — showing "Host" in the combo makes that fallback
 	// visible BEFORE exporting host binaries somewhere unexpected.
@@ -195,6 +209,7 @@ static void exportDialogToProfile(ExportProfile& p)
 	p.excludePatterns  = parseExcludeLines(s_exportExcludes.c_str());
 	p.incremental      = s_exportIncremental;
 	p.targetPlatform   = s_exportPlatform;
+	p.appBundle        = s_exportAppBundle;
 }
 
 // Active manipulation tool, shared by the viewport toolbar buttons and the
@@ -1705,6 +1720,17 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                                   "directory instead of re-compressing them (via a .manifest sidecar).\n"
                                   "Falls back to a full pack automatically when settings changed.");
 
+            if (exportAppBundleApplicable(s_exportPlatform))
+            {
+                ImGui::Checkbox("macOS .app bundle", &s_exportAppBundle);
+                ImGui::SameLine();
+                ImGui::TextDisabled("(?)");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Emit a signed <project>.app instead of a flat folder:\n"
+                                      "executable + libraries in Contents/MacOS, pak + config in\n"
+                                      "Contents/Resources, generated Info.plist, ad-hoc codesigned.");
+            }
+
             ImGui::Spacing();
             ImGui::Text("Exclude Patterns:");
             ImGui::SameLine();
@@ -1815,6 +1841,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                 es.enableModSupport = s_exportModSupport;
                 es.excludePatterns  = parseExcludeLines(s_exportExcludes.c_str());
                 es.incremental      = s_exportIncremental;
+                es.appBundle        = s_exportAppBundle && exportAppBundleApplicable(s_exportPlatform);
                 es.gameRuntimeDir   = runtimeDir;
                 // Worker → UI progress: atomics + a mutex-guarded filename.
                 es.progress = [](int done, int total, const std::string& current)
@@ -1858,6 +1885,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                               + std::to_string(res.binaryFilesCopied)
                               + " binary file(s) → " + outDir
                             : "Error: " + res.errorMessage;
+                        if (res.success && es.appBundle)
+                            msg += " — " + projName + ".app bundle";
                         if (res.success && es.encrypt)
                             msg += res.keyEmbedded
                                 ? " — key embedded in the game binary"
