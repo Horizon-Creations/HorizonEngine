@@ -1842,8 +1842,12 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                 es.excludePatterns  = parseExcludeLines(s_exportExcludes.c_str());
                 es.incremental      = s_exportIncremental;
                 es.appBundle        = s_exportAppBundle && exportAppBundleApplicable(s_exportPlatform);
-                // ASTC textures only for Apple-Silicon Metal targets (Host/macOS
-                // on a Mac) — the same condition as .app-bundle applicability.
+                // ASTC textures for Apple Metal targets (Host/macOS on a Mac) —
+                // shares the .app-bundle predicate incidentally (both are "Apple
+                // target"), not by definition. Caveat: on an Intel-Mac *target*
+                // the GPU can't sample ASTC, so those meshes fall back to white
+                // (see MetalRenderer astcOk guard). Fine for Apple-Silicon; a
+                // dedicated toggle can split this if Intel distribution matters.
                 es.astcTextures     = exportAppBundleApplicable(s_exportPlatform);
                 es.gameRuntimeDir   = runtimeDir;
                 // Worker → UI progress: atomics + a mutex-guarded filename.
