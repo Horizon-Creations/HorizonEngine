@@ -608,6 +608,16 @@ TEST_CASE("Cook: static mesh ships pre-interleaved + baked AABB; uncooked stays 
         // Baked AABB matches the positions.
         CHECK(m->boundsMin[0] == doctest::Approx(0.f)); CHECK(m->boundsMin[1] == doctest::Approx(0.f));
         CHECK(m->boundsMax[0] == doctest::Approx(1.f)); CHECK(m->boundsMax[1] == doctest::Approx(1.f));
+
+        // Texture: the 2x2 RGBA8 gets its full mip chain baked (2x2, 1x1).
+        const TextureAsset* t = cm.getTexture(ids.tex);
+        REQUIRE(t != nullptr);
+        CHECK(t->mipLevels == 2);
+        CHECK(t->data.size() == 2*2*4 + 1*1*4);   // level0 + level1 concatenated
+        // Level 0 is unchanged (the leading bytes every backend reads).
+        const std::vector<uint8_t> level0 = {255,0,0,255, 0,255,0,255, 0,0,255,255, 255,255,0,255};
+        REQUIRE(t->data.size() >= level0.size());
+        for (size_t i = 0; i < level0.size(); ++i) CHECK(t->data[i] == level0[i]);
     }
 
     // Uncooked pack of the same source keeps the raw SoA path (editor/loose).
@@ -624,6 +634,10 @@ TEST_CASE("Cook: static mesh ships pre-interleaved + baked AABB; uncooked stays 
         CHECK_FALSE(m->cooked);
         CHECK(m->vertices.size() == 9);           // raw SoA present
         CHECK(m->interleaved.empty());
+        const TextureAsset* t = cm.getTexture(ids.tex);
+        REQUIRE(t != nullptr);
+        CHECK(t->mipLevels == 1);                 // no baked mips
+        CHECK(t->data.size() == 2*2*4);
     }
     std::filesystem::remove_all(dir);
 }

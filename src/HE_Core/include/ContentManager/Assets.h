@@ -115,12 +115,26 @@ struct FontAsset : public RuntimeAsset
 	int                  size = 0;
 };
 
+// GPU pixel format of a TextureAsset's `data`. RGBA8 is the raw/editor form;
+// block-compressed variants (BCn / ASTC) are a future pack-time cook target.
+enum class TextureFormat : uint8_t { RGBA8 = 0 };
+
 struct TextureAsset : public RuntimeAsset
 {
+	// Pixel bytes. For mipLevels > 1 the levels are concatenated (level 0
+	// full-resolution first, then each halved level). Every backend reads level
+	// 0 as the leading width*height*channels bytes, so appended mips are
+	// backward-compatible (ignored by consumers that don't sample them).
 	std::vector<uint8_t> data;     // raw pixel bytes (RGBA8 unless channels says otherwise)
 	size_t               width    = 0;
 	size_t               height   = 0;
 	size_t               channels = 0;
+
+	// Pack-time cook metadata (CHUNK_TXMI tail; absent → the defaults below, so
+	// old assets keep loading unchanged).
+	uint32_t             mipLevels = 1;                       // levels stored in `data`
+	TextureFormat        format    = TextureFormat::RGBA8;
+	bool                 srgb      = false;                   // sample as sRGB (color) vs linear (data)
 };
 
 struct ShaderAsset : public RuntimeAsset

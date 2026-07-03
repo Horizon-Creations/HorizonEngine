@@ -214,16 +214,108 @@ void HpakWriter::addPackedEntry(const HE::UUID& id, const HpakReader::StoredEntr
     m_entries.push_back(std::move(e));
 }
 
+// Box-downsample an RGBA8 image to half size (min 1px), averaging each 2x2 block
+// (clamped on odd dimensions). Used to bake the mip chain at pack time.
+static std::vector<uint8_t> halveRGBA8(const uint8_t* src, uint32_t w, uint32_t h,
+                                       uint32_t& outW, uint32_t& outH)
+{
+    outW = std::max<uint32_t>(1, w / 2);
+    outH = std::max<uint32_t>(1, h / 2);
+    std::vector<uint8_t> out(static_cast<size_t>(outW) * outH * 4);
+    for (uint32_t y = 0; y < outH; ++y)
+    {
+        const uint32_t y0 = std::min(y * 2, h - 1), y1 = std::min(y * 2 + 1, h - 1);
+        for (uint32_t x = 0; x < outW; ++x)
+        {
+            const uint32_t x0 = std::min(x * 2, w - 1), x1 = std::min(x * 2 + 1, w - 1);
+            for (int c = 0; c < 4; ++c)
+            {
+                const uint32_t s = src[(y0 * w + x0) * 4 + c] + src[(y0 * w + x1) * 4 + c]
+                                 + src[(y1 * w + x0) * 4 + c] + src[(y1 * w + x1) * 4 + c];
+                out[(y * outW + x) * 4 + c] = static_cast<uint8_t>((s + 2) / 4);
+            }
+        }
+    }
+    return out;
+}
+
+// Cook a full RGBA8 texture: bake the whole mip chain into PIXL (level 0 first,
+// then each halved level) and record mipLevels in TXMI. The runtime uploads the
+// levels directly (Metal gains mips it never had; GL drops glGenerateMipmap).
+// Level 0 stays the leading bytes, so backends that don't read mips are unaffected.
+static std::vector<uint8_t> cookTexture(HAsset::Reader& r)
+{
+    const HAsset::Reader::Chunk* tm = nullptr;
+    const HAsset::Reader::Chunk* px = nullptr;
+    for (const auto& c : r.chunks())
+    {
+        if      (c.id == HAsset::CHUNK_TXMI) tm = &c;
+        else if (c.id == HAsset::CHUNK_PIXL) px = &c;
+    }
+    if (!tm || !px) return {};
+
+    size_t o = 0, width = 0, height = 0, channels = 0;
+    HAsset::Reader::readPOD(tm->data, o, width);
+    HAsset::Reader::readPOD(tm->data, o, height);
+    HAsset::Reader::readPOD(tm->data, o, channels);
+    uint32_t existingMips = 1;
+    if (o + sizeof(uint32_t) <= tm->data.size()) HAsset::Reader::readPOD(tm->data, o, existingMips);
+
+    // Only cook plain single-level RGBA8 base textures (skip already-cooked,
+    // sub-2px, or non-RGBA8/odd-sized payloads — nothing to gain / can't halve).
+    if (channels != 4 || width < 2 || height < 2 || existingMips > 1) return {};
+    if (px->data.size() != static_cast<size_t>(width) * height * 4) return {};
+
+    std::vector<uint8_t> levels = px->data;      // level 0
+    std::vector<uint8_t> prev   = px->data;
+    uint32_t cw = static_cast<uint32_t>(width), ch = static_cast<uint32_t>(height), count = 1;
+    while (cw > 1 || ch > 1)
+    {
+        uint32_t nw = 0, nh = 0;
+        std::vector<uint8_t> lvl = halveRGBA8(prev.data(), cw, ch, nw, nh);
+        levels.insert(levels.end(), lvl.begin(), lvl.end());
+        prev = std::move(lvl); cw = nw; ch = nh; ++count;
+    }
+
+    HAsset::Writer w;
+    for (const auto& c : r.chunks())
+    {
+        if (c.id == HAsset::CHUNK_TXMI)
+        {
+            std::vector<uint8_t> b;
+            HAsset::Writer::appendPOD(b, width);
+            HAsset::Writer::appendPOD(b, height);
+            HAsset::Writer::appendPOD(b, channels);
+            HAsset::Writer::appendPOD(b, count);
+            HAsset::Writer::appendPOD(b, static_cast<uint8_t>(0)); // format RGBA8
+            HAsset::Writer::appendPOD(b, static_cast<uint8_t>(0)); // srgb false
+            w.addChunk(HAsset::CHUNK_TXMI, b.data(), b.size());
+        }
+        else if (c.id == HAsset::CHUNK_PIXL)
+            w.addChunk(HAsset::CHUNK_PIXL, levels.data(), levels.size());
+        else
+            w.addChunk(c.id, c.data.data(), c.data.size());
+    }
+    return w.toBytes(r.assetType());
+}
+
 // Pack-time asset cook: transform an already-ref-rewritten .hasset blob into a
 // runtime-optimal form. Today: static meshes are pre-interleaved into the exact
 // 8-float (pos3+norm3+uv2) GPU layout both backends build at runtime, with a
-// baked AABB (CHUNK_MVBO replacing VERT/NORM/TEXC; INDX kept). Unknown/uncookable
-// assets pass through unchanged. Must be lossless w.r.t. what the runtime uploads.
+// baked AABB (CHUNK_MVBO replacing VERT/NORM/TEXC; INDX kept); RGBA8 textures get
+// their full mip chain baked into PIXL. Unknown/uncookable assets pass through
+// unchanged. Must be lossless w.r.t. what the runtime uploads.
 static std::vector<uint8_t> cookForPack(const std::vector<uint8_t>& blob)
 {
     HAsset::Reader r;
     if (!r.openData(blob)) return blob;
-    if (static_cast<HE::AssetType>(r.assetType()) != HE::AssetType::StaticMesh) return blob;
+    const HE::AssetType type = static_cast<HE::AssetType>(r.assetType());
+    if (type == HE::AssetType::Texture)
+    {
+        std::vector<uint8_t> cooked = cookTexture(r);
+        return cooked.empty() ? blob : cooked;
+    }
+    if (type != HE::AssetType::StaticMesh) return blob;
 
     // Pull the SoA geometry out of the raw chunks.
     const HAsset::Reader::Chunk* vc = nullptr;

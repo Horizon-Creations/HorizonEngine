@@ -26,7 +26,16 @@ der Packaged-Build die gekochte.
   8-float-VBO (`CHUNK_MVBO`) + gebackene AABB umgeschrieben; alle 5 Backends laden ihn direkt
   (GL+Metal verifiziert, D3D/Vulkan blind nach identischem Muster). Entfernt den First-Draw-
   Interleave-Loop + AABB-Scan. **Offen daran:** uint16-Indizes, Vertex-Quantisierung, Skeletal-Cook.
-- ⬜ **Textur-Cook** (Tier 1 #3, der größte Gewinn) — als Nächstes.
+- ✅ **Textur-Cook: Mipmaps + Format-Tag** (Tier 1 #3, Teil): RGBA8-Texturen bekommen die volle
+  Mip-Kette pack-time in `PIXL` gebacken (`mipLevels`/`format`/`srgb` im `TXMI`-Tail, back-compat).
+  GL lädt die Levels direkt (kein Runtime-`glGenerateMipmap`); **Metal bekommt endlich Mipmaps**
+  (`mipmapLevelCount` + `mipFilter` — fixt das Minification-Aliasing) — beide verifiziert. D3D/
+  Vulkan bleiben unangetastet: alle 5 Backends lesen Level 0 als führende Bytes, angehängte Mips
+  sind byte-kompatibel ignoriert. **Offen daran:** GPU-Kompression — auf Apple-Silicon-Metal
+  bedeutet das **ASTC** (nicht BC; Apple-GPUs können kein BC), auf Desktop/Intel/GL BC via
+  `stb_dxt`; braucht einen ASTC-Encoder (astcenc) + den Cook-Cache. sRGB-Tag ist verdrahtet, aber
+  noch nicht gesetzt (braucht Textur-Rollen-Info aus dem Material).
+- ⬜ **GPU-Textur-Kompression** (ASTC/BC) + **sRGB-Aktivierung** — als Nächstes.
 
 ---
 
