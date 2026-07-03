@@ -2626,6 +2626,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 					{
 						SDL_WarpMouseInWindow(sdlWin, s_rmbStartX, s_rmbStartY);
 						SDL_SetWindowRelativeMouseMode(sdlWin, false);
+						SDL_ShowCursor();                                        // restore the OS cursor
+						io.ConfigFlags &= ~ImGuiConfigFlags_NoMouseCursorChange; // hand cursor control back to ImGui
 						s_rmbCaptured = false;
 					}
 				};
@@ -2669,6 +2671,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 						{
 							SDL_GetMouseState(&s_rmbStartX, &s_rmbStartY);
 							SDL_SetWindowRelativeMouseMode(sdlWin, true);
+							SDL_HideCursor(); // relative mode alone doesn't reliably hide the OS cursor (SDL3/macOS)
 							// Discard any relative motion accumulated before capture so the
 							// first look frame doesn't jump by a stale delta.
 							SDL_GetRelativeMouseState(nullptr, nullptr);
@@ -2698,6 +2701,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 								float rx = 0.f, ry = 0.f;
 								SDL_GetRelativeMouseState(&rx, &ry);
 								cin.mouseDelta = glm::vec2(rx, ry);
+								io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange; // don't let ImGui re-show it mid-look
+								SDL_HideCursor();
 								ImGui::SetMouseCursor(ImGuiMouseCursor_None);
 							}
 							cin.fast = io.KeyShift;
