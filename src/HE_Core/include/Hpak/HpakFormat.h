@@ -119,6 +119,10 @@ struct PackSettings {
     // files are skipped by HpakWriter::addDirectory. `*` matches any sequence
     // (including '/'), `?` matches exactly one character. Case-sensitive.
     std::vector<std::string> excludePatterns;
+    // Cook assets into a runtime-optimal form at pack time (see HpakWriter
+    // cookForPack): today, static meshes are pre-interleaved into the GPU vertex
+    // layout with a baked AABB. Off for editor/loose saves (which stay editable).
+    bool cook = false;
 };
 
 // Glob match used by PackSettings::excludePatterns (see semantics there).

@@ -3147,34 +3147,47 @@ const MetalRenderer::GpuMesh* MetalRenderer::ResolveMesh(const HE::UUID& assetId
 		return &it->second;
 
 	const StaticMeshAsset* asset = m_contentManager->getStaticMesh(assetId);
-	if (!asset || asset->vertices.empty() || asset->indices.empty())
+	if (!asset || asset->indices.empty() || (asset->vertices.empty() && !asset->cooked))
 		return nullptr;
 
-	// Interleave position + normal + uv (8 floats per vertex), zero-filling
-	// missing attributes — must match the MSL VertexIn layout.
-	const size_t vertexCount = asset->vertices.size() / 3;
-	std::vector<float> interleaved;
-	interleaved.reserve(vertexCount * 8);
-	for (size_t v = 0; v < vertexCount; ++v)
+	GpuMesh mesh;
+	mesh.indexCount = static_cast<int>(asset->indices.size());
+	const size_t vertexCount = asset->cooked ? asset->vertexCount : asset->vertices.size() / 3;
+
+	// Cooked (packaged) assets ship the interleaved pos+norm+uv buffer + baked
+	// AABB, built once at pack time — upload it as-is. Loose/editor assets are
+	// interleaved here on first draw (must match the MSL VertexIn layout,
+	// zero-filling missing normals/uvs).
+	std::vector<float> built;
+	const std::vector<float>* vtx = &asset->interleaved;
+	if (asset->cooked)
 	{
-		interleaved.insert(interleaved.end(),
-			{ asset->vertices[v*3+0], asset->vertices[v*3+1], asset->vertices[v*3+2] });
-		if (v * 3 + 2 < asset->normals.size())
-			interleaved.insert(interleaved.end(),
-				{ asset->normals[v*3+0], asset->normals[v*3+1], asset->normals[v*3+2] });
-		else
-			interleaved.insert(interleaved.end(), { 0.0f, 0.0f, 0.0f });
-		if (v * 2 + 1 < asset->uvs.size())
-			interleaved.insert(interleaved.end(), { asset->uvs[v*2+0], asset->uvs[v*2+1] });
-		else
-			interleaved.insert(interleaved.end(), { 0.0f, 0.0f });
+		mesh.localBounds.min = { asset->boundsMin[0], asset->boundsMin[1], asset->boundsMin[2] };
+		mesh.localBounds.max = { asset->boundsMax[0], asset->boundsMax[1], asset->boundsMax[2] };
 	}
+	else
+	{
+		built.reserve(vertexCount * 8);
+		for (size_t v = 0; v < vertexCount; ++v)
+		{
+			built.insert(built.end(),
+				{ asset->vertices[v*3+0], asset->vertices[v*3+1], asset->vertices[v*3+2] });
+			if (v * 3 + 2 < asset->normals.size())
+				built.insert(built.end(),
+					{ asset->normals[v*3+0], asset->normals[v*3+1], asset->normals[v*3+2] });
+			else
+				built.insert(built.end(), { 0.0f, 0.0f, 0.0f });
+			if (v * 2 + 1 < asset->uvs.size())
+				built.insert(built.end(), { asset->uvs[v*2+0], asset->uvs[v*2+1] });
+			else
+				built.insert(built.end(), { 0.0f, 0.0f });
+		}
+		vtx = &built;
+		mesh.localBounds = HE::AABB::fromPositions(asset->vertices.data(), vertexCount);
+	}
+	const std::vector<float>& interleaved = *vtx;
 
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
-
-	GpuMesh mesh;
-	mesh.indexCount  = static_cast<int>(asset->indices.size());
-	mesh.localBounds = HE::AABB::fromPositions(asset->vertices.data(), vertexCount);
 	mesh.vertexBuf  = (void*)CFBridgingRetain(
 		[device newBufferWithBytes:interleaved.data()
 		                    length:interleaved.size() * sizeof(float)

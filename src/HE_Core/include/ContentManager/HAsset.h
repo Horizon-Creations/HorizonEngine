@@ -62,6 +62,12 @@ inline constexpr uint32_t CHUNK_VERT = makeChunkId('V','E','R','T');
 inline constexpr uint32_t CHUNK_INDX = makeChunkId('I','N','D','X');
 inline constexpr uint32_t CHUNK_NORM = makeChunkId('N','O','R','M');
 inline constexpr uint32_t CHUNK_TEXC = makeChunkId('T','E','X','C'); // UVs
+// Pack-time COOKED static-mesh vertex buffer: the exact interleaved 8-float
+// (pos3+norm3+uv2) layout both GPU backends build at runtime, plus vertexCount
+// and the precomputed AABB. Replaces VERT/NORM/TEXC in a cooked pak so the
+// runtime uploads it directly (no per-load interleave loop, no AABB scan).
+// INDX is kept as-is. Absent in loose/editor assets (SoA fallback).
+inline constexpr uint32_t CHUNK_MVBO = makeChunkId('M','V','B','O');
 inline constexpr uint32_t CHUNK_BONE = makeChunkId('B','O','N','E'); // boneIDs
 inline constexpr uint32_t CHUNK_BWGT = makeChunkId('B','W','G','T'); // bone weights
 inline constexpr uint32_t CHUNK_SKEL = makeChunkId('S','K','E','L'); // skeleton hierarchy

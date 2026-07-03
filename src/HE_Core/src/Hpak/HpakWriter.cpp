@@ -214,6 +214,76 @@ void HpakWriter::addPackedEntry(const HE::UUID& id, const HpakReader::StoredEntr
     m_entries.push_back(std::move(e));
 }
 
+// Pack-time asset cook: transform an already-ref-rewritten .hasset blob into a
+// runtime-optimal form. Today: static meshes are pre-interleaved into the exact
+// 8-float (pos3+norm3+uv2) GPU layout both backends build at runtime, with a
+// baked AABB (CHUNK_MVBO replacing VERT/NORM/TEXC; INDX kept). Unknown/uncookable
+// assets pass through unchanged. Must be lossless w.r.t. what the runtime uploads.
+static std::vector<uint8_t> cookForPack(const std::vector<uint8_t>& blob)
+{
+    HAsset::Reader r;
+    if (!r.openData(blob)) return blob;
+    if (static_cast<HE::AssetType>(r.assetType()) != HE::AssetType::StaticMesh) return blob;
+
+    // Pull the SoA geometry out of the raw chunks.
+    const HAsset::Reader::Chunk* vc = nullptr;
+    const HAsset::Reader::Chunk* nc = nullptr;
+    const HAsset::Reader::Chunk* tc = nullptr;
+    for (const auto& c : r.chunks())
+    {
+        if      (c.id == HAsset::CHUNK_VERT) vc = &c;
+        else if (c.id == HAsset::CHUNK_NORM) nc = &c;
+        else if (c.id == HAsset::CHUNK_TEXC) tc = &c;
+    }
+    if (!vc) return blob; // nothing to cook (already cooked, or empty)
+
+    std::vector<float> positions, normals, uvs;
+    { size_t o = 0; HAsset::Reader::readVec(vc->data, o, positions); }
+    if (nc) { size_t o = 0; HAsset::Reader::readVec(nc->data, o, normals); }
+    if (tc) { size_t o = 0; HAsset::Reader::readVec(tc->data, o, uvs); }
+    if (positions.empty() || positions.size() % 3 != 0) return blob;
+
+    const uint32_t vertexCount = static_cast<uint32_t>(positions.size() / 3);
+
+    // Interleave + AABB — byte-identical to the backends' upload loops
+    // (OpenGLRenderer.cpp / MetalRenderer.mm), so the cooked buffer uploads 1:1.
+    std::vector<float> interleaved;
+    interleaved.reserve(static_cast<size_t>(vertexCount) * 8);
+    float mn[3] = {  1e30f,  1e30f,  1e30f };
+    float mx[3] = { -1e30f, -1e30f, -1e30f };
+    for (uint32_t v = 0; v < vertexCount; ++v)
+    {
+        const float px = positions[v*3+0], py = positions[v*3+1], pz = positions[v*3+2];
+        interleaved.push_back(px); interleaved.push_back(py); interleaved.push_back(pz);
+        mn[0] = std::min(mn[0], px); mn[1] = std::min(mn[1], py); mn[2] = std::min(mn[2], pz);
+        mx[0] = std::max(mx[0], px); mx[1] = std::max(mx[1], py); mx[2] = std::max(mx[2], pz);
+        if (static_cast<size_t>(v)*3 + 2 < normals.size())
+            { interleaved.push_back(normals[v*3+0]); interleaved.push_back(normals[v*3+1]); interleaved.push_back(normals[v*3+2]); }
+        else
+            { interleaved.push_back(0.0f); interleaved.push_back(0.0f); interleaved.push_back(0.0f); }
+        if (static_cast<size_t>(v)*2 + 1 < uvs.size())
+            { interleaved.push_back(uvs[v*2+0]); interleaved.push_back(uvs[v*2+1]); }
+        else
+            { interleaved.push_back(0.0f); interleaved.push_back(0.0f); }
+    }
+
+    // Rewrite: keep everything except the SoA geometry; emit MVBO instead.
+    HAsset::Writer w;
+    for (const auto& c : r.chunks())
+    {
+        if (c.id == HAsset::CHUNK_VERT || c.id == HAsset::CHUNK_NORM || c.id == HAsset::CHUNK_TEXC)
+            continue; // replaced by MVBO
+        w.addChunk(c.id, c.data.data(), c.data.size());
+    }
+    std::vector<uint8_t> mvbo;
+    HAsset::Writer::appendPOD(mvbo, vertexCount);
+    for (int i = 0; i < 3; ++i) HAsset::Writer::appendPOD(mvbo, mn[i]);
+    for (int i = 0; i < 3; ++i) HAsset::Writer::appendPOD(mvbo, mx[i]);
+    HAsset::Writer::appendVec(mvbo, interleaved);
+    w.addChunk(HAsset::CHUNK_MVBO, mvbo.data(), mvbo.size());
+    return w.toBytes(r.assetType());
+}
+
 // Glob matcher for PackSettings::excludePatterns: `*` matches any sequence
 // (including '/'), `?` matches exactly one character. Iterative backtracking
 // (classic wildcard match) — no regex, no recursion.
@@ -309,6 +379,9 @@ int HpakWriter::addDirectory(const std::filesystem::path& rootDir,
     {
         if (progress) progress(count, total, pe.relPath);
         std::vector<uint8_t> blob = rewriteRefsForPack(pe.bytes, pathToUuid);
+        if (settings.cook) blob = cookForPack(blob);
+        // Hash the final (cooked) blob: incremental reuse keys on exactly the
+        // bytes that get stored, so a cook change re-packs the entry.
         const uint64_t srcHash = Hpak::hash64(blob.data(), blob.size());
         m_srcHashes.emplace_back(pe.id, srcHash);
 

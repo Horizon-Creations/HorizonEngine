@@ -16,6 +16,20 @@ der Packaged-Build die gekochte.
 
 ---
 
+## 0. Umsetzungsstand
+
+- ✅ **Cook-Fundament** (Tier 0 #1): `cookForPack()` in `HpakWriter` Pass 2 (Geschwister von
+  `rewriteRefsForPack`), `PackSettings::cook`, in `settingsFingerprint` (Toggle → Re-Pack),
+  `ProjectExporter` cookt jeden Export. Dual-Mode-Parse in `ContentManager` (gekochter Chunk →
+  GPU-ready, sonst rohe SoA).
+- ✅ **Mesh-Cook** (Tier 1 #4, Teil): Static-Meshes werden pack-time in den exakten interleavten
+  8-float-VBO (`CHUNK_MVBO`) + gebackene AABB umgeschrieben; alle 5 Backends laden ihn direkt
+  (GL+Metal verifiziert, D3D/Vulkan blind nach identischem Muster). Entfernt den First-Draw-
+  Interleave-Loop + AABB-Scan. **Offen daran:** uint16-Indizes, Vertex-Quantisierung, Skeletal-Cook.
+- ⬜ **Textur-Cook** (Tier 1 #3, der größte Gewinn) — als Nächstes.
+
+---
+
 ## 1. Ist-Zustand: Was geliefert wird vs. was die Runtime dafür zahlt
 
 | Asset | Liefert heute | Runtime zahlt (Datei:Zeile) |
