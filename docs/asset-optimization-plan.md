@@ -35,7 +35,24 @@ der Packaged-Build die gekochte.
   bedeutet das **ASTC** (nicht BC; Apple-GPUs können kein BC), auf Desktop/Intel/GL BC via
   `stb_dxt`; braucht einen ASTC-Encoder (astcenc) + den Cook-Cache. sRGB-Tag ist verdrahtet, aber
   noch nicht gesetzt (braucht Textur-Rollen-Info aus dem Material).
-- ⬜ **GPU-Textur-Kompression** (ASTC/BC) + **sRGB-Aktivierung** — als Nächstes.
+- ✅ **Echte-Bounds-Culling** (Tier 2 #7): der Extractor cullt Mesh-Renderables jetzt gegen die
+  echte Objekt-AABB (per UUID aus dem ContentManager) statt eines Unit-Cube-Proxys — weniger
+  Overdraw/Popping + engere Shadow-Frustum-Fit. Backend-neutral (nur `RenderExtractor` + 1 Setter
+  pro Backend). Uncooked-Assets bekommen die AABB beim Parse (cooked tragen sie eh); Fallback auf
+  Unit-Cube wenn ein Mesh (noch) nicht resident ist. Unit-getestet.
+
+**Bewusst noch NICHT umgesetzt (jeweils mit echtem Blocker — brauchen einen eigenen, verifizierbaren
+Durchgang):**
+- **GPU-Textur-Kompression** (der VRAM-Gewinn): auf Apple-Silicon-Metal **ASTC** (Apple-GPUs können
+  kein BC) → braucht `astcenc` (großer Encoder) + Cook-Cache + Metal-ASTC-Upload; auf Desktop/GL/
+  D3D/Vulkan BC via `stb_dxt`. Target-spezifisch und headless nicht *qualitativ* prüfbar → eigener
+  Durchgang mit Encoder-Entscheidung.
+- **sRGB-Aktivierung**: ändert sichtbare Farben (Albedo sRGB→linear) → braucht visuelle Abnahme +
+  Textur-Rollen-Info aus dem Material.
+- **Vertex-/Skinning-Quantisierung**: Shader-Änderungen in allen 5 Backends + visuelle Abnahme.
+- **uint16-Indizes**: viele Draw-Sites × 5 (teils blind) Backends, moderater Gewinn.
+- **Shader-Binary-Caches / totes Payload cullen / Transform-Dirty-Flags**: Startup-/Größe-/CPU-
+  Politur, niedrigerer Hebel.
 
 ---
 

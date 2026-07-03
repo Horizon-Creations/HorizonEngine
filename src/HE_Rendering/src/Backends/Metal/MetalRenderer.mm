@@ -3070,6 +3070,7 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 	                        env.sunColor, env.sunIntensity,
 	                        env.moonColor, env.moonIntensity,
 	                        env.cloudCoverage);
+	m_extractor.setContentManager(m_contentManager);
 	m_extractor.extract(*m_world, m_renderWorld, aspect, &m_editorCamera);
 	if (!m_renderWorld.shadow.enabled || m_renderWorld.objects.empty()) return;
 	for (RenderObject& obj : m_renderWorld.objects)
@@ -3905,6 +3906,7 @@ void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
 	                        env.sunColor, env.sunIntensity,
 	                        env.moonColor, env.moonIntensity,
 	                        env.cloudCoverage);
+	m_extractor.setContentManager(m_contentManager);
 	m_extractor.extract(*m_world, m_renderWorld,
 	                    static_cast<float>(width) / static_cast<float>(height), &m_editorCamera);
 	if (m_renderWorld.objects.empty()) return;
@@ -4247,6 +4249,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 	                        env.sunColor, env.sunIntensity,
 	                        env.moonColor, env.moonIntensity,
 	                        env.cloudCoverage);
+	m_extractor.setContentManager(m_contentManager);
 	m_extractor.extract(*m_world, m_renderWorld,
 	                    static_cast<float>(width) / static_cast<float>(height),
 	                    &m_editorCamera);

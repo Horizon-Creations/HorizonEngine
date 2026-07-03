@@ -15,6 +15,8 @@
 #include <HorizonScene/Components/FoliageComponent.h>
 #include <HorizonScene/UISystem.h>
 #include <ContentManager/DefaultAssets.h>
+#include <ContentManager/ContentManager.h>
+#include <ContentManager/Assets.h>
 #include <JobSystem/JobSystem.h>
 #include <glm/gtc/quaternion.hpp>
 #include <glm/common.hpp>
@@ -124,6 +126,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 		uint32_t  entId;
 		int       lod;
 		bool      castsShadow;
+		HE::AABB  localBounds; // real mesh AABB, or invalid → unit-cube fallback
 	};
 	auto meshView = reg.view<TransformComponent, MeshComponent>();
 	std::vector<EntityData> items;
@@ -139,6 +142,16 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 		d.entId  = static_cast<uint32_t>(e);
 		d.lod    = mesh.lodBias;
 		d.castsShadow = mesh.castsShadow;
+		// Look up the real object-space bounds here (sequential — the
+		// ContentManager read must not race the parallel_for below).
+		if (m_contentManager)
+			if (const StaticMeshAsset* m = m_contentManager->getStaticMesh(d.meshId))
+			{
+				HE::AABB b;
+				b.min = { m->boundsMin[0], m->boundsMin[1], m->boundsMin[2] };
+				b.max = { m->boundsMax[0], m->boundsMax[1], m->boundsMax[2] };
+				if (b.isValid()) d.localBounds = b;
+			}
 		items.push_back(d);
 	}
 
@@ -149,7 +162,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 		obj.meshAssetId     = d.meshId;
 		obj.materialAssetId = d.matId;
 		obj.transform       = d.world;
-		obj.worldBounds     = kUnitCube.transformed(d.world);
+		obj.worldBounds     = (d.localBounds.isValid() ? d.localBounds : kUnitCube).transformed(d.world);
 		obj.entityId        = d.entId;
 		obj.lod             = d.lod;
 		obj.castsShadow     = d.castsShadow;

@@ -2462,6 +2462,7 @@ void D3D11Renderer::DrawScene(int width, int height)
                               m_environment.sunColor, m_environment.sunIntensity,
                               m_environment.moonColor, m_environment.moonIntensity,
                               m_environment.cloudCoverage);
+    p.m_extractor.setContentManager(m_contentManager);
     p.m_extractor.extract(*m_world, p.m_renderWorld,
                           static_cast<float>(width) / static_cast<float>(height),
                           &m_editorCamera);
