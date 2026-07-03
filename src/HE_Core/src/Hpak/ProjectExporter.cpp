@@ -529,6 +529,22 @@ ExportResult ProjectExporter::exportProject(
             return (engineBin ? binDir : dataDir) / n;
         };
 
+        // Clear STALE code before copying fresh binaries. Re-signing over a
+        // previous export's leftovers is the classic codesign failure ("bundle
+        // format unrecognized" / "code object is not signed"): an old
+        // _CodeSignature seal no longer matches, and stale dylibs from an older
+        // runtime linger in the bundle. For a .app, Contents/MacOS is disjoint
+        // from Contents/Resources, so wiping it does NOT touch the pak/hcfg the
+        // incremental cache already read above — recreate it empty. (Flat
+        // exports share one dir with the just-written pak, so they only remove
+        // each destination individually, below.)
+        if (app)
+        {
+            std::filesystem::remove_all(appPath / "Contents" / "_CodeSignature", ec); ec.clear();
+            std::filesystem::remove_all(binDir, ec); ec.clear();
+            std::filesystem::create_directories(binDir, ec); ec.clear();
+        }
+
         // Every file in the bundle is required (executable AND its libraries):
         // any copy failure is a hard error. A silently skipped executable is
         // the worst case — the output would keep a STALE previously-exported
@@ -543,6 +559,10 @@ ExportResult ProjectExporter::exportProject(
             if (regular)
             {
                 const auto dst = routeRuntime(dit->path().filename().string());
+                // Delete any existing file first (fresh inode): copying over a
+                // code-signed / currently-mapped binary in place can leave a
+                // stale signature or a busy-file error on re-export.
+                std::filesystem::remove(dst, ec); ec.clear();
                 std::filesystem::copy_file(dit->path(), dst,
                     std::filesystem::copy_options::overwrite_existing, ec);
                 if (ec)
