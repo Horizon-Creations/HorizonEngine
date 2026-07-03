@@ -1242,6 +1242,7 @@ void EditorApplication::dumpFrameHeadless()
 			e->timeOfDay      = static_cast<float>(envF("HE_DUMP_TOD", 0.0f));        // 0 = midnight
 			e->cloudMode      = static_cast<int>(envF("HE_DUMP_CLOUDMODE", 1.0f));
 			e->cloudCoverage  = static_cast<float>(envF("HE_DUMP_COVERAGE", 0.5f));
+			e->lowResClouds   = envF("HE_DUMP_LOWRESCLOUDS", 0.0f) > 0.5f;  // diag: exercise the quarter-res cloud reprojection path
 			e->contrailAmount = static_cast<float>(envF("HE_DUMP_CONTRAILS", 0.0f));
 			e->cirrusAmount   = static_cast<float>(envF("HE_DUMP_CIRRUS", 0.0f));
 			e->cirrusSeed     = static_cast<float>(envF("HE_DUMP_CIRRUSSEED", 0.0f));

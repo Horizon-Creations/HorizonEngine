@@ -4288,10 +4288,6 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 
 	const glm::mat4 viewProj =
 		m_renderWorld.camera.projection * m_renderWorld.camera.view;
-	// Remember this frame's view/sun so next frame's quarter-res cloud pre-pass (which
-	// runs before the extractor) has a camera to march from (1-frame lag, imperceptible).
-	m_lastViewProj = viewProj;
-	m_lastSunDir   = m_renderWorld.sunDirection;
 
 	// Direction toward the sun for sky + image-based ambient — resolved by the
 	// extractor (scene directional light, or the day-night cycle when enabled).
@@ -4763,8 +4759,8 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			ftAttachPass((__bridge void*)hdrPass, "Scene");
 
 			// Low-res clouds: raymarch the clouds into the quarter-res buffer BEFORE the
-			// scene encoder (its own pass), using the previous frame's view (the extractor
-			// hasn't run yet this frame). The sky pass below then upsamples + composites it.
+			// scene encoder (its own pass), rendered from THIS frame's camera (extracted in
+			// the block below). The sky pass then upsamples + composites it 1:1.
 			{
 				const IRenderer::EnvironmentSettings& cenv = GetEnvironment();
 				if (cenv.lowResClouds && cenv.cloudCoverage > 0.0f && m_cloudPipeline)
@@ -4772,21 +4768,24 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 					const float cwr = glm::radians(cenv.windDirection);
 					const glm::vec3 cwind = glm::vec3(std::sin(cwr), 0.0f, -std::cos(cwr))
 					                      * (cenv.windSpeed * 0.025f);
-					// The pre-pass renders with the PREVIOUS frame's camera (the extractor for this
-					// frame hasn't run yet); the sky pass reprojects the result to the current view so
-					// the clouds stay locked to the sky when panning. Remember exactly that camera.
-					m_prepassViewProj = m_lastViewProj;
-					// Verification hook: yaw the pre-pass camera so it deliberately differs from the
-					// current view — with reprojection the composited clouds must NOT move (regression
-					// test for the panning bug). No-op unless HE_CLOUD_PREPASS_YAW is set.
-					if (const char* yv = std::getenv("HE_CLOUD_PREPASS_YAW"); yv && *yv)
-					{
-						const float th = glm::radians(static_cast<float>(std::atof(yv)));
-						const float cy = std::cos(th), sy = std::sin(th);
-						glm::mat4 R(1.0f); R[0][0] = cy; R[2][0] = sy; R[0][2] = -sy; R[2][2] = cy;
-						m_prepassViewProj = m_lastViewProj * R;
-					}
-					EncodeCloudPrepass((__bridge void*)cmdBuf, glm::inverse(m_prepassViewProj), m_lastSunDir,
+					// Render the pre-pass with THIS frame's camera — like the GL backend. The
+					// shadow/SSAO extracts above are skippable, so extract explicitly here to make
+					// m_renderWorld.camera current; the quarter-res clouds then line up 1:1 with the
+					// sky composited in EncodeScene (the sky's reprojection collapses to identity). No
+					// previous-frame reprojection means the clouds no longer smear/tear at the screen
+					// edges on a fast turn — the disoccluded edge band used to sample a clamped edge
+					// texel. The extra extract runs only on the opt-in low-res-cloud path; EncodeScene
+					// re-extracts identically below.
+					m_extractor.setDayNight(cenv.dayNightCycle, cenv.timeOfDay,
+					                        cenv.sunColor, cenv.sunIntensity,
+					                        cenv.moonColor, cenv.moonIntensity, cenv.cloudCoverage);
+					m_extractor.setContentManager(m_contentManager);
+					m_extractor.extract(*m_world, m_renderWorld,
+					                    static_cast<float>(sceneW) / static_cast<float>(std::max(1, sceneH)),
+					                    &m_editorCamera);
+					m_prepassViewProj = m_renderWorld.camera.projection * m_renderWorld.camera.view;
+					EncodeCloudPrepass((__bridge void*)cmdBuf, glm::inverse(m_prepassViewProj),
+						m_renderWorld.sunDirection,
 						cenv.sunColor, cenv.timeOfDay, cenv.cloudCoverage,
 						static_cast<float>(SDL_GetTicks()) / 1000.0f, cenv.auroraIntensity,
 						cenv.nebulaColor, cenv.nebulaIntensity, cenv.auroraColor, cenv.milkyWayIntensity,
