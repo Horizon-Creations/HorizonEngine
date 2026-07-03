@@ -11,11 +11,13 @@
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/EnvironmentComponent.h>
 #include <Types/UUID.h>
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <unordered_set>
 #include <SDL3/SDL.h>
 #include <glm/glm.hpp>
+#include <glm/gtc/quaternion.hpp>
 #include <filesystem>
 
 GameApplication::~GameApplication() = default;
@@ -143,6 +145,27 @@ void GameApplication::OnInit()
 	}
 	setWorld(m_world.get());
 
+	// Ensure a camera the free-fly controller can drive. A scene authored without
+	// one otherwise renders through the extractor's fixed fallback camera, which
+	// can't move — so the game would look frozen. Only added when the scene has
+	// no camera at all; an authored camera is never overridden.
+	{
+		auto& reg = m_world->registry();
+		bool hasCamera = false;
+		for (auto e : reg.view<CameraComponent>()) { (void)e; hasCamera = true; break; }
+		if (!hasCamera)
+		{
+			auto camE = m_world->createEntity("GameCamera");
+			TransformComponent tc;
+			tc.position = glm::vec3(0.0f, 2.0f, 8.0f); // back + up, looking toward -Z
+			reg.emplace<TransformComponent>(camE, tc);
+			CameraComponent cc; cc.isMain = true;
+			reg.emplace<CameraComponent>(camE, cc);
+			Logger::Log(Logger::LogLevel::Info,
+				"GameApplication: added a default free-fly camera (scene had none)");
+		}
+	}
+
 	// Reference-graph streaming seed: kick off async loads for the assets this scene
 	// actually references. Their baked transitive dependencies (materials → textures)
 	// follow automatically via the frontier in pollAsyncResults, so the loader pulls
@@ -183,8 +206,63 @@ void GameApplication::setMouseCaptured(bool captured)
 	// Relative mode alone doesn't reliably hide the OS cursor on SDL3/macOS,
 	// so drive the cursor visibility explicitly (mirrors the editor's fly-look).
 	SDL_SetWindowRelativeMouseMode(w, captured);
-	if (captured) SDL_HideCursor();
-	else          SDL_ShowCursor();
+	if (captured)
+	{
+		SDL_HideCursor();
+		// Drop any relative motion accumulated while released so the first
+		// look-frame after (re)capture doesn't jump by a stale delta.
+		SDL_GetRelativeMouseState(nullptr, nullptr);
+	}
+	else SDL_ShowCursor();
+}
+
+void GameApplication::updateCameraController(float dt)
+{
+	if (!m_mouseCaptured || !m_world || dt <= 0.0f) return;
+	auto& reg = m_world->registry();
+
+	// The scene's main camera (prefer isMain; else the first camera found).
+	entt::entity cam = entt::null;
+	for (auto [e, t, c] : reg.view<TransformComponent, CameraComponent>().each())
+	{
+		if (cam == entt::null) cam = e;
+		if (c.isMain) { cam = e; break; }
+	}
+	if (cam == entt::null) return; // nothing to drive (fallback camera is fixed)
+
+	auto& t = reg.get<TransformComponent>(cam);
+
+	// Mouse look from the relative motion accumulated since last frame.
+	float dx = 0.0f, dy = 0.0f;
+	SDL_GetRelativeMouseState(&dx, &dy);
+	constexpr float kSensitivity = 0.12f; // degrees per pixel
+	t.rotation.y -= dx * kSensitivity;    // yaw
+	t.rotation.x -= dy * kSensitivity;    // pitch
+	t.rotation.x = std::clamp(t.rotation.x, -89.0f, 89.0f);
+
+	// Movement along the camera's own axes (rotation matches SceneGraph: the
+	// worldMatrix is built from glm::quat(radians(rotation))).
+	const glm::quat q = glm::quat(glm::radians(t.rotation));
+	const glm::vec3 forward = q * glm::vec3(0.0f, 0.0f, -1.0f);
+	const glm::vec3 right   = q * glm::vec3(1.0f, 0.0f, 0.0f);
+	const glm::vec3 worldUp(0.0f, 1.0f, 0.0f);
+
+	Input& in = input();
+	glm::vec3 move(0.0f);
+	if (in.IsKeyDown(SDL_SCANCODE_W)) move += forward;
+	if (in.IsKeyDown(SDL_SCANCODE_S)) move -= forward;
+	if (in.IsKeyDown(SDL_SCANCODE_D)) move += right;
+	if (in.IsKeyDown(SDL_SCANCODE_A)) move -= right;
+	if (in.IsKeyDown(SDL_SCANCODE_E) || in.IsKeyDown(SDL_SCANCODE_SPACE)) move += worldUp;
+	if (in.IsKeyDown(SDL_SCANCODE_Q) || in.IsKeyDown(SDL_SCANCODE_LCTRL)) move -= worldUp;
+
+	if (glm::dot(move, move) > 0.0f)
+	{
+		float speed = 6.0f; // units/sec
+		if (in.IsKeyDown(SDL_SCANCODE_LSHIFT) || in.IsKeyDown(SDL_SCANCODE_RSHIFT)) speed *= 3.0f;
+		t.position += glm::normalize(move) * speed * dt;
+	}
+	t.dirty = true;
 }
 
 bool GameApplication::OnEvent(const SDL_Event& event)
@@ -218,6 +296,10 @@ void GameApplication::OnRender(float deltaTime)
 	// the rest stay queued for the next frame. Cheap no-op once fully streamed in.
 	constexpr size_t kStreamRegistrationsPerFrame = 16;
 	contentManager().pollAsyncResults(kStreamRegistrationsPerFrame);
+
+	// Built-in free-fly camera (mouse look + WASD) so the game is navigable —
+	// runs before the systems tick so LOD/particles follow the new camera pos.
+	updateCameraController(deltaTime);
 
 	// Tick the shared gameplay/visual systems (weather, animation, particles, …) so a
 	// shipped game animates exactly like the editor preview. Feed the active scene
