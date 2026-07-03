@@ -170,7 +170,10 @@ static void exportProfileToDialog(const ExportProfile& p, const std::filesystem:
 	s_exportModSupport   = p.enableModSupport;
 	s_exportStartupScene = p.startupScene;
 	s_exportIncremental  = p.incremental;
-	s_exportPlatform     = p.targetPlatform.empty() ? "Host" : p.targetPlatform;
+	// Canonicalize via the enum round-trip: a hand-edited value like "windows"
+	// falls back to Host — showing "Host" in the combo makes that fallback
+	// visible BEFORE exporting host binaries somewhere unexpected.
+	s_exportPlatform     = exportPlatformName(exportPlatformFromName(p.targetPlatform));
 	s_exportExcludes.clear();
 	for (const auto& pat : p.excludePatterns) { s_exportExcludes += pat; s_exportExcludes += '\n'; }
 }
@@ -1767,7 +1770,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                 if (platform != ExportPlatform::Host)
                 {
                     std::error_code rtEc;
-                    if (runtimeDir.empty() || !std::filesystem::exists(runtimeDir, rtEc))
+                    if (runtimeDir.empty() || !std::filesystem::is_directory(runtimeDir, rtEc))
                         runtimeOk = false;
                 }
 
