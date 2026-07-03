@@ -47,6 +47,11 @@ void GameApplication::OnInit()
 {
 	Logger::Log(Logger::LogLevel::Info, "GameApplication::OnInit");
 
+	// Grab the mouse on startup (FPS-style look). Done first so it holds even on
+	// the early-return paths below (no hcfg / no pak); Esc toggles it back so the
+	// cursor is always reachable. The window is already open by the time OnInit runs.
+	setMouseCaptured(true);
+
 	const char* baseRaw = SDL_GetBasePath();
 	if (!baseRaw)
 	{
@@ -168,6 +173,41 @@ void GameApplication::OnInit()
 		logicLoader().logic()->onStart(*m_world);
 		Logger::Log(Logger::LogLevel::Info, "GameApplication: native game logic started");
 	}
+}
+
+void GameApplication::setMouseCaptured(bool captured)
+{
+	m_mouseCaptured = captured;
+	SDL_Window* w = window() ? window()->GetNativeWindow() : nullptr;
+	if (!w) return;
+	// Relative mode alone doesn't reliably hide the OS cursor on SDL3/macOS,
+	// so drive the cursor visibility explicitly (mirrors the editor's fly-look).
+	SDL_SetWindowRelativeMouseMode(w, captured);
+	if (captured) SDL_HideCursor();
+	else          SDL_ShowCursor();
+}
+
+bool GameApplication::OnEvent(const SDL_Event& event)
+{
+	if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat)
+	{
+		// V: static VSync toggle for packaged builds (no settings menu yet).
+		if (event.key.key == SDLK_V)
+		{
+			m_vsyncOn = !m_vsyncOn;
+			setVSync(m_vsyncOn);
+			Logger::Log(Logger::LogLevel::Info,
+				m_vsyncOn ? "GameApplication: VSync ON" : "GameApplication: VSync OFF");
+			return true;
+		}
+		// Esc: release/re-grab the mouse.
+		if (event.key.key == SDLK_ESCAPE)
+		{
+			setMouseCaptured(!m_mouseCaptured);
+			return true;
+		}
+	}
+	return false;
 }
 
 void GameApplication::OnRender(float deltaTime)
