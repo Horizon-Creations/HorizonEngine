@@ -260,6 +260,32 @@ else()
     message(STATUS "HorizonEngine: Python3 embed libs not found — Python scripting disabled (Lua only)")
 endif()
 
+# ─── astcenc (optional: ASTC texture compression cook) ─────────────────────────
+# The pack-time texture cook can transcode RGBA8 → ASTC for GPUs that sample it
+# (Apple-Silicon Metal). Without it, textures stay RGBA8 (+ baked mipmaps).
+# Disable with -DHE_ENABLE_ASTC=OFF if the encoder fails to configure.
+option(HE_ENABLE_ASTC "Fetch astc-encoder for ASTC texture cooking" ON)
+if(HE_ENABLE_ASTC)
+    FetchContent_Declare(
+        astcenc
+        GIT_REPOSITORY https://github.com/ARM-software/astc-encoder.git
+        GIT_TAG        5.3.0
+        GIT_SHALLOW    TRUE
+    )
+    set(ASTCENC_CLI             OFF CACHE BOOL "" FORCE)
+    set(ASTCENC_UNITTEST        OFF CACHE BOOL "" FORCE)
+    set(ASTCENC_UNIVERSAL_BUILD OFF CACHE BOOL "" FORCE) # single-arch (native) lib
+    set(ASTCENC_ISA_NATIVE      ON  CACHE BOOL "" FORCE)
+    set(ASTCENC_INVARIANCE      OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(astcenc)
+    if(TARGET astcenc-native-static)
+        set(HE_HAVE_ASTCENC TRUE)
+        message(STATUS "HorizonEngine: astcenc found — ASTC texture cooking enabled")
+    else()
+        message(STATUS "HorizonEngine: astcenc target not found — ASTC cooking disabled")
+    endif()
+endif()
+
 # ─── Tracy (optional profiling) ────────────────────────────────────────────────
 # Enable with:  cmake -DHE_ENABLE_TRACY=ON ...
 # Default OFF so production/CI builds have zero overhead.

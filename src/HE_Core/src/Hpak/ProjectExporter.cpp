@@ -230,7 +230,7 @@ static uint64_t settingsFingerprint(const Hpak::PackSettings& s)
     buf[0] = static_cast<uint8_t>(s.codec);
     buf[1] = static_cast<uint8_t>(s.level);
     buf[2] = s.encrypt ? 1 : 0;
-    buf[3] = s.cook ? 1 : 0;          // a cook toggle must re-pack every entry
+    buf[3] = static_cast<uint8_t>((s.cook ? 1 : 0) | (s.astcTextures ? 2 : 0)); // cook/astc toggles re-pack
     std::memcpy(buf + 4, s.key, 32);  // all-zero when not encrypting
     return Hpak::hash64(buf, sizeof(buf));
 }
@@ -439,6 +439,7 @@ ExportResult ProjectExporter::exportProject(
 
     packSettings.excludePatterns = settings.excludePatterns;
     packSettings.cook = true; // always cook exports into the runtime-optimal form
+    packSettings.astcTextures = settings.astcTextures;
 
     const std::string hpakFilename = projectName + ".hpak";
     const auto pakPath      = dataDir / hpakFilename;

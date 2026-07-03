@@ -116,8 +116,10 @@ struct FontAsset : public RuntimeAsset
 };
 
 // GPU pixel format of a TextureAsset's `data`. RGBA8 is the raw/editor form;
-// block-compressed variants (BCn / ASTC) are a future pack-time cook target.
-enum class TextureFormat : uint8_t { RGBA8 = 0 };
+// ASTC_4x4 is the pack-time cook target for GPUs that sample it (Apple-Silicon
+// Metal). Each ASTC 4x4 block is 16 bytes; a level's byte size is
+// ceil(w/4)*ceil(h/4)*16, levels concatenated in `data` like RGBA8 mips.
+enum class TextureFormat : uint8_t { RGBA8 = 0, ASTC_4x4 = 1 };
 
 struct TextureAsset : public RuntimeAsset
 {

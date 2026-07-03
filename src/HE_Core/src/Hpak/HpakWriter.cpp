@@ -9,11 +9,42 @@
 #ifdef HE_HAVE_ZSTD
 #  include <zstd.h>
 #endif
+#ifdef HE_HAVE_ASTCENC
+#  include <astcenc.h>
+#endif
 #include <algorithm>
 #include <fstream>
 #include <string>
 #include <unordered_map>
 #include <cstring>
+
+#ifdef HE_HAVE_ASTCENC
+// Encode one RGBA8 image to ASTC 4x4 (LDR). Returns empty on failure. Each 4x4
+// block is 16 bytes; the output is ceil(w/4)*ceil(h/4)*16 bytes.
+static std::vector<uint8_t> encodeAstc4x4(const uint8_t* rgba, uint32_t w, uint32_t h)
+{
+    astcenc_config cfg{};
+    if (astcenc_config_init(ASTCENC_PRF_LDR, 4, 4, 1, ASTCENC_PRE_FAST, 0, &cfg) != ASTCENC_SUCCESS)
+        return {};
+    astcenc_context* ctx = nullptr;
+    if (astcenc_context_alloc(&cfg, 1, &ctx) != ASTCENC_SUCCESS) return {};
+
+    astcenc_image img{};
+    img.dim_x = w; img.dim_y = h; img.dim_z = 1;
+    img.data_type = ASTCENC_TYPE_U8;
+    void* slice = const_cast<uint8_t*>(rgba);
+    void* slices[1] = { slice };
+    img.data = slices;
+
+    const astcenc_swizzle swz{ ASTCENC_SWZ_R, ASTCENC_SWZ_G, ASTCENC_SWZ_B, ASTCENC_SWZ_A };
+    const size_t blocks = static_cast<size_t>((w + 3) / 4) * ((h + 3) / 4);
+    std::vector<uint8_t> out(blocks * 16);
+    const astcenc_error e = astcenc_compress_image(ctx, &img, &swz, out.data(), out.size(), 0);
+    astcenc_context_free(ctx);
+    if (e != ASTCENC_SUCCESS) return {};
+    return out;
+}
+#endif
 
 // Extract the asset UUID + embedded path from a raw .hasset blob's META chunk.
 // META layout: uint16_t type, uint64_t hi, uint64_t lo, string name, string path.
@@ -243,7 +274,7 @@ static std::vector<uint8_t> halveRGBA8(const uint8_t* src, uint32_t w, uint32_t 
 // then each halved level) and record mipLevels in TXMI. The runtime uploads the
 // levels directly (Metal gains mips it never had; GL drops glGenerateMipmap).
 // Level 0 stays the leading bytes, so backends that don't read mips are unaffected.
-static std::vector<uint8_t> cookTexture(HAsset::Reader& r)
+static std::vector<uint8_t> cookTexture(HAsset::Reader& r, bool astc)
 {
     const HAsset::Reader::Chunk* tm = nullptr;
     const HAsset::Reader::Chunk* px = nullptr;
@@ -266,16 +297,42 @@ static std::vector<uint8_t> cookTexture(HAsset::Reader& r)
     if (channels != 4 || width < 2 || height < 2 || existingMips > 1) return {};
     if (px->data.size() != static_cast<size_t>(width) * height * 4) return {};
 
-    std::vector<uint8_t> levels = px->data;      // level 0
-    std::vector<uint8_t> prev   = px->data;
+    // Build the RGBA8 mip chain first (also the fallback if ASTC is unavailable).
+    std::vector<uint8_t> rgbaLevels = px->data;  // level 0
+    std::vector<uint8_t> prev       = px->data;
     uint32_t cw = static_cast<uint32_t>(width), ch = static_cast<uint32_t>(height), count = 1;
     while (cw > 1 || ch > 1)
     {
         uint32_t nw = 0, nh = 0;
         std::vector<uint8_t> lvl = halveRGBA8(prev.data(), cw, ch, nw, nh);
-        levels.insert(levels.end(), lvl.begin(), lvl.end());
+        rgbaLevels.insert(rgbaLevels.end(), lvl.begin(), lvl.end());
         prev = std::move(lvl); cw = nw; ch = nh; ++count;
     }
+
+    std::vector<uint8_t> levels = std::move(rgbaLevels);
+    uint8_t format = 0; // 0 = RGBA8, 1 = ASTC_4x4 (TextureFormat)
+
+#ifdef HE_HAVE_ASTCENC
+    if (astc)
+    {
+        // Transcode each RGBA8 level to ASTC 4x4; keep RGBA8 on any failure.
+        std::vector<uint8_t> astcLevels;
+        size_t off = 0; uint32_t lw = static_cast<uint32_t>(width), lh = static_cast<uint32_t>(height);
+        bool ok = true;
+        for (uint32_t l = 0; l < count; ++l)
+        {
+            std::vector<uint8_t> enc = encodeAstc4x4(levels.data() + off, lw, lh);
+            if (enc.empty()) { ok = false; break; }
+            astcLevels.insert(astcLevels.end(), enc.begin(), enc.end());
+            off += static_cast<size_t>(lw) * lh * 4;
+            lw = std::max<uint32_t>(1, lw >> 1);
+            lh = std::max<uint32_t>(1, lh >> 1);
+        }
+        if (ok) { levels = std::move(astcLevels); format = 1; }
+    }
+#else
+    (void)astc;
+#endif
 
     HAsset::Writer w;
     for (const auto& c : r.chunks())
@@ -287,7 +344,7 @@ static std::vector<uint8_t> cookTexture(HAsset::Reader& r)
             HAsset::Writer::appendPOD(b, height);
             HAsset::Writer::appendPOD(b, channels);
             HAsset::Writer::appendPOD(b, count);
-            HAsset::Writer::appendPOD(b, static_cast<uint8_t>(0)); // format RGBA8
+            HAsset::Writer::appendPOD(b, format);
             HAsset::Writer::appendPOD(b, static_cast<uint8_t>(0)); // srgb false
             w.addChunk(HAsset::CHUNK_TXMI, b.data(), b.size());
         }
@@ -305,14 +362,14 @@ static std::vector<uint8_t> cookTexture(HAsset::Reader& r)
 // baked AABB (CHUNK_MVBO replacing VERT/NORM/TEXC; INDX kept); RGBA8 textures get
 // their full mip chain baked into PIXL. Unknown/uncookable assets pass through
 // unchanged. Must be lossless w.r.t. what the runtime uploads.
-static std::vector<uint8_t> cookForPack(const std::vector<uint8_t>& blob)
+static std::vector<uint8_t> cookForPack(const std::vector<uint8_t>& blob, bool astcTextures)
 {
     HAsset::Reader r;
     if (!r.openData(blob)) return blob;
     const HE::AssetType type = static_cast<HE::AssetType>(r.assetType());
     if (type == HE::AssetType::Texture)
     {
-        std::vector<uint8_t> cooked = cookTexture(r);
+        std::vector<uint8_t> cooked = cookTexture(r, astcTextures);
         return cooked.empty() ? blob : cooked;
     }
     if (type != HE::AssetType::StaticMesh) return blob;
@@ -471,7 +528,7 @@ int HpakWriter::addDirectory(const std::filesystem::path& rootDir,
     {
         if (progress) progress(count, total, pe.relPath);
         std::vector<uint8_t> blob = rewriteRefsForPack(pe.bytes, pathToUuid);
-        if (settings.cook) blob = cookForPack(blob);
+        if (settings.cook) blob = cookForPack(blob, settings.astcTextures);
         // Hash the final (cooked) blob: incremental reuse keys on exactly the
         // bytes that get stored, so a cook change re-packs the entry.
         const uint64_t srcHash = Hpak::hash64(blob.data(), blob.size());

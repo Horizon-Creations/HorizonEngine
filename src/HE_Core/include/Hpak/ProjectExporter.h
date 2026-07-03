@@ -29,6 +29,10 @@ struct HE_API ExportSettings {
     // (codec/level/encrypt/key) changed. With encrypt, the previous export's
     // key is reused (read from its project.hcfg) so entries stay verbatim.
     bool incremental = true;
+    // Transcode RGBA8 textures to ASTC 4x4 at pack time (needs an ASTC encoder in
+    // the build). Only meaningful for targets whose GPU samples ASTC (Apple-
+    // Silicon Metal); the editor sets it accordingly.
+    bool astcTextures = false;
     // macOS only: emit a <projectName>.app bundle instead of a flat folder —
     // executable + engine dylibs in Contents/MacOS, pak/hcfg/GameLogic in
     // Contents/Resources (where SDL_GetBasePath resolves inside a bundle), a

@@ -3209,30 +3209,40 @@ const MetalRenderer::GpuMesh* MetalRenderer::ResolveMesh(const HE::UUID& assetId
 		if (const TextureAsset* tex = m_contentManager->resolveTextureRef(texId0, texPath0);
 		    tex && !tex->data.empty() && tex->channels == 4)
 		{
-			const uint32_t mips = tex->mipLevels > 0 ? tex->mipLevels : 1;
+			const uint32_t mips   = tex->mipLevels > 0 ? tex->mipLevels : 1;
+			const bool     isAstc = (tex->format == TextureFormat::ASTC_4x4);
+			// ASTC needs an Apple-family GPU (Apple Silicon). On a device that
+			// can't sample it (Intel Mac), skip the texture rather than crash.
+			const bool     astcOk = !isAstc || [device supportsFamily:MTLGPUFamilyApple2];
 			MTLTextureDescriptor* desc = [MTLTextureDescriptor
-				texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+				texture2DDescriptorWithPixelFormat:(isAstc ? MTLPixelFormatASTC_4x4_LDR
+				                                           : MTLPixelFormatRGBA8Unorm)
 				                             width:tex->width
 				                            height:tex->height
 				                         mipmapped:(mips > 1)];
 			desc.mipmapLevelCount = mips;
 			desc.usage       = MTLTextureUsageShaderRead;
 			desc.storageMode = MTLStorageModeShared;
-			id<MTLTexture> texture = [device newTextureWithDescriptor:desc];
+			id<MTLTexture> texture = astcOk ? [device newTextureWithDescriptor:desc] : nil;
+			if (texture)
 			{
 				// Upload the pre-baked mip chain (level 0 first). Cooked textures
-				// finally give Metal a mip chain (fixes minification aliasing);
-				// uncooked textures upload just level 0 (mips == 1).
+				// give Metal a mip chain (fixes minification aliasing); ASTC levels
+				// are block-compressed (16 B / 4x4 block).
 				size_t   off = 0;
 				uint32_t lw = static_cast<uint32_t>(tex->width);
 				uint32_t lh = static_cast<uint32_t>(tex->height);
 				for (uint32_t l = 0; l < mips; ++l)
 				{
+					const size_t bpr = isAstc ? (static_cast<size_t>((lw + 3) / 4) * 16)
+					                          : (static_cast<size_t>(lw) * 4);
+					const size_t lvl = isAstc ? (static_cast<size_t>((lw + 3) / 4) * ((lh + 3) / 4) * 16)
+					                          : (static_cast<size_t>(lw) * lh * 4);
 					[texture replaceRegion:MTLRegionMake2D(0, 0, lw, lh)
 					           mipmapLevel:l
 					             withBytes:tex->data.data() + off
-					           bytesPerRow:lw * 4];
-					off += static_cast<size_t>(lw) * lh * 4;
+					           bytesPerRow:bpr];
+					off += lvl;
 					lw = lw > 1 ? (lw >> 1) : 1;
 					lh = lh > 1 ? (lh >> 1) : 1;
 				}
@@ -3327,30 +3337,40 @@ MetalRenderer::ResolveSkeletalMesh(const HE::UUID& assetId)
 		if (const TextureAsset* tex = m_contentManager->resolveTextureRef(texId0, texPath0);
 		    tex && !tex->data.empty() && tex->channels == 4)
 		{
-			const uint32_t mips = tex->mipLevels > 0 ? tex->mipLevels : 1;
+			const uint32_t mips   = tex->mipLevels > 0 ? tex->mipLevels : 1;
+			const bool     isAstc = (tex->format == TextureFormat::ASTC_4x4);
+			// ASTC needs an Apple-family GPU (Apple Silicon). On a device that
+			// can't sample it (Intel Mac), skip the texture rather than crash.
+			const bool     astcOk = !isAstc || [device supportsFamily:MTLGPUFamilyApple2];
 			MTLTextureDescriptor* desc = [MTLTextureDescriptor
-				texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+				texture2DDescriptorWithPixelFormat:(isAstc ? MTLPixelFormatASTC_4x4_LDR
+				                                           : MTLPixelFormatRGBA8Unorm)
 				                             width:tex->width
 				                            height:tex->height
 				                         mipmapped:(mips > 1)];
 			desc.mipmapLevelCount = mips;
 			desc.usage       = MTLTextureUsageShaderRead;
 			desc.storageMode = MTLStorageModeShared;
-			id<MTLTexture> texture = [device newTextureWithDescriptor:desc];
+			id<MTLTexture> texture = astcOk ? [device newTextureWithDescriptor:desc] : nil;
+			if (texture)
 			{
 				// Upload the pre-baked mip chain (level 0 first). Cooked textures
-				// finally give Metal a mip chain (fixes minification aliasing);
-				// uncooked textures upload just level 0 (mips == 1).
+				// give Metal a mip chain (fixes minification aliasing); ASTC levels
+				// are block-compressed (16 B / 4x4 block).
 				size_t   off = 0;
 				uint32_t lw = static_cast<uint32_t>(tex->width);
 				uint32_t lh = static_cast<uint32_t>(tex->height);
 				for (uint32_t l = 0; l < mips; ++l)
 				{
+					const size_t bpr = isAstc ? (static_cast<size_t>((lw + 3) / 4) * 16)
+					                          : (static_cast<size_t>(lw) * 4);
+					const size_t lvl = isAstc ? (static_cast<size_t>((lw + 3) / 4) * ((lh + 3) / 4) * 16)
+					                          : (static_cast<size_t>(lw) * lh * 4);
 					[texture replaceRegion:MTLRegionMake2D(0, 0, lw, lh)
 					           mipmapLevel:l
 					             withBytes:tex->data.data() + off
-					           bytesPerRow:lw * 4];
-					off += static_cast<size_t>(lw) * lh * 4;
+					           bytesPerRow:bpr];
+					off += lvl;
 					lw = lw > 1 ? (lw >> 1) : 1;
 					lh = lh > 1 ? (lh >> 1) : 1;
 				}
@@ -3387,30 +3407,40 @@ bool MetalRenderer::ResolveMaterialTexture(const HE::UUID& materialId, void*& ou
 		    tex && !tex->data.empty() && tex->channels == 4)
 		{
 			id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
-			const uint32_t mips = tex->mipLevels > 0 ? tex->mipLevels : 1;
+			const uint32_t mips   = tex->mipLevels > 0 ? tex->mipLevels : 1;
+			const bool     isAstc = (tex->format == TextureFormat::ASTC_4x4);
+			// ASTC needs an Apple-family GPU (Apple Silicon). On a device that
+			// can't sample it (Intel Mac), skip the texture rather than crash.
+			const bool     astcOk = !isAstc || [device supportsFamily:MTLGPUFamilyApple2];
 			MTLTextureDescriptor* desc = [MTLTextureDescriptor
-				texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+				texture2DDescriptorWithPixelFormat:(isAstc ? MTLPixelFormatASTC_4x4_LDR
+				                                           : MTLPixelFormatRGBA8Unorm)
 				                             width:tex->width
 				                            height:tex->height
 				                         mipmapped:(mips > 1)];
 			desc.mipmapLevelCount = mips;
 			desc.usage       = MTLTextureUsageShaderRead;
 			desc.storageMode = MTLStorageModeShared;
-			id<MTLTexture> texture = [device newTextureWithDescriptor:desc];
+			id<MTLTexture> texture = astcOk ? [device newTextureWithDescriptor:desc] : nil;
+			if (texture)
 			{
 				// Upload the pre-baked mip chain (level 0 first). Cooked textures
-				// finally give Metal a mip chain (fixes minification aliasing);
-				// uncooked textures upload just level 0 (mips == 1).
+				// give Metal a mip chain (fixes minification aliasing); ASTC levels
+				// are block-compressed (16 B / 4x4 block).
 				size_t   off = 0;
 				uint32_t lw = static_cast<uint32_t>(tex->width);
 				uint32_t lh = static_cast<uint32_t>(tex->height);
 				for (uint32_t l = 0; l < mips; ++l)
 				{
+					const size_t bpr = isAstc ? (static_cast<size_t>((lw + 3) / 4) * 16)
+					                          : (static_cast<size_t>(lw) * 4);
+					const size_t lvl = isAstc ? (static_cast<size_t>((lw + 3) / 4) * ((lh + 3) / 4) * 16)
+					                          : (static_cast<size_t>(lw) * lh * 4);
 					[texture replaceRegion:MTLRegionMake2D(0, 0, lw, lh)
 					           mipmapLevel:l
 					             withBytes:tex->data.data() + off
-					           bytesPerRow:lw * 4];
-					off += static_cast<size_t>(lw) * lh * 4;
+					           bytesPerRow:bpr];
+					off += lvl;
 					lw = lw > 1 ? (lw >> 1) : 1;
 					lh = lh > 1 ? (lh >> 1) : 1;
 				}

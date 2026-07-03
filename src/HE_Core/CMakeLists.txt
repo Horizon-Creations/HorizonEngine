@@ -58,6 +58,11 @@ if(HE_HAVE_OPENSSL)
     target_link_libraries(HorizonCore PRIVATE OpenSSL::Crypto)
     target_compile_definitions(HorizonCore PRIVATE HE_HAVE_OPENSSL)
 endif()
+if(HE_HAVE_ASTCENC)
+    target_link_libraries(HorizonCore PRIVATE astcenc-native-static)
+    target_include_directories(HorizonCore PRIVATE ${astcenc_SOURCE_DIR}/Source)
+    target_compile_definitions(HorizonCore PRIVATE HE_HAVE_ASTCENC)
+endif()
 
 # Tracy::TracyClient propagates TRACY_ENABLE define + include dir to all
 # downstream consumers (HorizonRendering, HorizonEditor, etc.) via PUBLIC linkage.
