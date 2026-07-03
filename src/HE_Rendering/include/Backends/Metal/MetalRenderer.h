@@ -321,8 +321,6 @@ private:
 	void* m_cloudColor    = nullptr;  // id<MTLTexture> RGBA16F, quarter-res (L, T)
 	int   m_cloudW        = 0;
 	int   m_cloudH        = 0;
-	glm::mat4 m_lastViewProj = glm::mat4(1.0f); // previous frame, for the cloud pre-pass
-	glm::vec3 m_lastSunDir   = glm::vec3(0.0f, 1.0f, 0.0f);
 	void  EnsureCloudTarget(int width, int height);
 	void  DestroyCloudTarget();
 	void  EncodeCloudPrepass(void* cmdBuf, const glm::mat4& invViewProj, const glm::vec3& sunDir,
