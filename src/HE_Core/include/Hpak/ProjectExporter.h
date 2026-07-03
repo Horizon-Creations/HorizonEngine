@@ -41,6 +41,10 @@ struct HE_API ExportResult {
     int         assetsPacked     = 0;
     int         binaryFilesCopied = 0; // game exe + dylibs, 0 when gameRuntimeDir empty
     int         assetsReused     = 0;  // carried verbatim from the previous pak (incremental)
+    // Encryption key was patched into the copied game executable (no key in
+    // project.hcfg). False with encrypt when the runtime binary carries no key
+    // block (legacy runtime) — then the key ships in the hcfg as before.
+    bool        keyEmbedded      = false;
 };
 
 // ─── Export target platforms ──────────────────────────────────────────────────
@@ -55,6 +59,27 @@ HE_API const char*    exportPlatformName(ExportPlatform p);   // "Host"/"Windows
 HE_API ExportPlatform exportPlatformFromName(const std::string& name); // unknown → Host
 HE_API std::filesystem::path resolveRuntimeDir(const std::filesystem::path& editorBaseDir,
                                                ExportPlatform p);
+
+// Locate a COMPLETE runtime bundle (a directory that actually contains
+// HorizonGame / HorizonGame.exe) for the target platform. resolveRuntimeDir
+// only names the canonical location, which breaks when the editor runs from a
+// build tree instead of the deploy layout — this walks upward from
+// editorBaseDir (a few levels) checking <dir>/Game (Host) resp.
+// <dir>/GameRuntimes/<Name>, plus <dir>/out/deploy/... at each level.
+// Returns an empty path when no bundle with a game executable is found.
+HE_API std::filesystem::path findRuntimeBundle(const std::filesystem::path& editorBaseDir,
+                                               ExportPlatform p);
+
+// ─── Embedded pak key ─────────────────────────────────────────────────────────
+// The game executable carries a 64-byte patchable key block (see
+// HE_Game/src/EmbeddedPakKey.h): magic[24] | hasKey | pad[7] | key[32].
+// patchEmbeddedPakKey writes hasKey=1 + key into every occurrence of the magic
+// in `binary` (re-signing Mach-O files on macOS afterwards) and returns the
+// number of blocks patched (0 = no block, -1 = I/O error).
+// readEmbeddedPakKey extracts a previously patched key (for incremental
+// exports, where project.hcfg intentionally no longer contains it).
+HE_API int  patchEmbeddedPakKey(const std::filesystem::path& binary, const uint8_t key[32]);
+HE_API bool readEmbeddedPakKey(const std::filesystem::path& binary, uint8_t outKey[32]);
 
 // Packs a project's content directory into a distributable output folder:
 //   • All .hasset files → projectName.hpak (with optional LZ4 + encryption)

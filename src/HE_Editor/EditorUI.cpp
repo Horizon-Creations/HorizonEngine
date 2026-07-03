@@ -1655,14 +1655,26 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                         s_exportPlatform = name;
                 ImGui::EndCombo();
             }
-            if (s_exportPlatform != "Host")
             {
-                const auto rt = resolveRuntimeDir(
+                // Live feedback: show the runtime bundle this export would ship,
+                // or a warning when none is found (data-only exports can't run).
+                const std::filesystem::path base =
                     SDL_GetBasePath() ? std::filesystem::path(SDL_GetBasePath())
-                                      : std::filesystem::path{},
-                    exportPlatformFromName(s_exportPlatform));
-                ImGui::TextDisabled("Runtime bundle: %s", rt.lexically_normal().string().c_str());
-                ImGui::TextDisabled("Output goes to a %s/ sub-folder.", s_exportPlatform.c_str());
+                                      : std::filesystem::path{};
+                const ExportPlatform plat = exportPlatformFromName(s_exportPlatform);
+                const auto bundle = findRuntimeBundle(base, plat);
+                if (!bundle.empty())
+                    ImGui::TextDisabled("Game runtime: %s",
+                                        bundle.lexically_normal().string().c_str());
+                else
+                    ImGui::TextColored(ImVec4(1.f, 0.55f, 0.2f, 1.f),
+                        plat == ExportPlatform::Host
+                            ? "No game runtime found — build the HorizonGame target first."
+                            : "No %s runtime bundle — place one at %s.",
+                        s_exportPlatform.c_str(),
+                        resolveRuntimeDir(base, plat).lexically_normal().string().c_str());
+                if (plat != ExportPlatform::Host)
+                    ImGui::TextDisabled("Output goes to a %s/ sub-folder.", s_exportPlatform.c_str());
             }
 
             ImGui::Spacing();
@@ -1756,34 +1768,32 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                         sceneOk = false;
                 }
 
-                // Resolve the target platform: runtime-binaries dir + per-platform
-                // output sub-folder. A cross-platform target without its prebuilt
-                // runtime bundle fails up front (the pak would ship unrunnable).
+                // Resolve the target platform: a COMPLETE runtime bundle (found
+                // via findRuntimeBundle, which also handles running the editor
+                // from a build tree) + per-platform output sub-folder. An export
+                // without a game executable is just data — fail up front.
                 const ExportPlatform platform = exportPlatformFromName(s_exportPlatform);
                 std::filesystem::path effOutDir = s_exportOutputDir;
                 if (platform != ExportPlatform::Host)
                     effOutDir /= exportPlatformName(platform);
-                std::filesystem::path runtimeDir;
-                if (const char* base = SDL_GetBasePath())
-                    runtimeDir = resolveRuntimeDir(base, platform);
-                bool runtimeOk = true;
-                if (platform != ExportPlatform::Host)
-                {
-                    std::error_code rtEc;
-                    if (runtimeDir.empty() || !std::filesystem::is_directory(runtimeDir, rtEc))
-                        runtimeOk = false;
-                }
+                const std::filesystem::path base =
+                    SDL_GetBasePath() ? std::filesystem::path(SDL_GetBasePath())
+                                      : std::filesystem::path{};
+                const std::filesystem::path runtimeDir = findRuntimeBundle(base, platform);
 
                 if (!sceneOk)
                 {
                     s_exportResult = "Error: startup scene could not be loaded: " + scenePath;
                 }
-                else if (!runtimeOk)
+                else if (runtimeDir.empty())
                 {
-                    s_exportResult = "Error: no " + s_exportPlatform + " runtime bundle at "
-                                   + runtimeDir.lexically_normal().string()
-                                   + " — build the game runtime on " + s_exportPlatform
-                                   + " and place it there.";
+                    s_exportResult = platform == ExportPlatform::Host
+                        ? std::string("Error: no game runtime found — build the HorizonGame "
+                                      "target, then export again.")
+                        : "Error: no " + s_exportPlatform + " runtime bundle at "
+                          + resolveRuntimeDir(base, platform).lexically_normal().string()
+                          + " — build the game runtime on " + s_exportPlatform
+                          + " and place it there.";
                 }
                 else
                 {
@@ -1836,6 +1846,10 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                               + std::to_string(res.binaryFilesCopied)
                               + " binary file(s) → " + outDir
                             : "Error: " + res.errorMessage;
+                        if (res.success && es.encrypt)
+                            msg += res.keyEmbedded
+                                ? " — key embedded in the game binary"
+                                : " — key in project.hcfg (runtime has no key block)";
                     }
                     catch (const std::exception& e)
                     {

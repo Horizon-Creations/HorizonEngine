@@ -1,6 +1,7 @@
 add_executable(HorizonGame WIN32
 	src/main.cpp
 	src/GameApplication.cpp
+	src/EmbeddedPakKey.cpp
 )
 
 target_include_directories(HorizonGame PRIVATE

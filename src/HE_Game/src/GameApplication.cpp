@@ -1,4 +1,5 @@
 #include "GameApplication.h"
+#include "EmbeddedPakKey.h"
 #include <Hpak/ProjectConfig.h>
 #include <Diagnostics/Logger.h>
 #include <Diagnostics/Profiler.h>
@@ -68,9 +69,13 @@ void GameApplication::OnInit()
 	contentManager().scanContentDirectory();
 
 	const std::string pakPath = (exeDir / m_config.hpakFilename).string();
-	// Pass the AES key for an encrypted pak (obfuscation key shipped in the hcfg);
-	// nullptr for an unencrypted pak. Without this an encrypted pak cannot load.
-	const uint8_t* pakKey = m_config.encrypted ? m_config.encKey : nullptr;
+	// AES key for an encrypted pak; nullptr for an unencrypted one. Preferred
+	// source is the key block the exporter patched into THIS executable
+	// (EmbeddedPakKey.h — no key file next to the game); the key in project.hcfg
+	// is the legacy fallback for exports made against a runtime without the block.
+	const uint8_t* pakKey = nullptr;
+	if (g_hePakKeyBlock.hasKey)      pakKey = g_hePakKeyBlock.key;
+	else if (m_config.encrypted)     pakKey = m_config.encKey;
 	// Mount (not eager-load): open + index the archive. Assets are then streamed on
 	// background workers, seeded from what the scene actually references (below), so
 	// only the reference-graph closure loads — unused pak assets are never touched.
