@@ -11,7 +11,7 @@
 #include <ContentManager/Assets.h>
 #include <glm/gtc/matrix_transform.hpp>
 
-TEST_CASE("RenderExtractor: real mesh bounds when a ContentManager is set, unit-cube otherwise")
+TEST_CASE("RenderExtractor: real mesh bounds when a ContentManager is set, invalid (kept visible) otherwise")
 {
 	// A mesh whose real bounds are a 4-unit box (much bigger than the unit cube).
 	ContentManager cm;
@@ -37,15 +37,40 @@ TEST_CASE("RenderExtractor: real mesh bounds when a ContentManager is set, unit-
 		CHECK(rw.objects[0].worldBounds.min.x == doctest::Approx(-2.0f));
 		CHECK(rw.objects[0].worldBounds.max.x == doctest::Approx( 2.0f));
 	}
-	// Without one, it falls back to the unit-cube proxy (±0.5).
+	// Without a ContentManager the real bounds are unknown, so the object is left with
+	// INVALID bounds — the conservative frustum culler then keeps it visible rather than
+	// culling a large mesh against a tiny unit-cube proxy (the cause of in-view meshes
+	// vanishing while streaming / on LOD swaps).
 	{
 		RenderExtractor ex;
 		RenderWorld rw;
 		ex.extract(world, rw, 1.0f);
 		REQUIRE(rw.objects.size() == 1);
-		CHECK(rw.objects[0].worldBounds.min.x == doctest::Approx(-0.5f));
-		CHECK(rw.objects[0].worldBounds.max.x == doctest::Approx( 0.5f));
+		CHECK_FALSE(rw.objects[0].worldBounds.isValid());
 	}
+}
+
+TEST_CASE("FrustumCuller keeps objects with unknown (invalid) bounds visible")
+{
+	// A mesh whose real bounds aren't resolved yet must never be culled — otherwise a
+	// large in-view mesh vanishes while streaming / mid LOD swap. The extractor leaves
+	// such objects' worldBounds invalid; the culler must treat them as visible.
+	RenderWorld rw;
+	rw.camera.view       = glm::lookAt(glm::vec3(0,0,5), glm::vec3(0,0,0), glm::vec3(0,1,0));
+	rw.camera.projection = glm::perspective(glm::radians(60.0f), 1.0f, 0.1f, 100.0f);
+
+	RenderObject visibleBox;   // a valid box far off to the side → should be culled
+	visibleBox.worldBounds.expand({ 900.0f, 900.0f, 0.0f });
+	visibleBox.worldBounds.expand({ 901.0f, 901.0f, 1.0f });
+	RenderObject unknown;       // invalid bounds (default) → must be kept visible
+	rw.objects = { visibleBox, unknown };
+
+	FrustumCuller culler;
+	std::vector<uint8_t> vis;
+	culler.cull(rw, vis);
+	REQUIRE(vis.size() == 2);
+	CHECK(vis[0] == 0u);   // valid box outside the frustum → culled
+	CHECK(vis[1] == 1u);   // unknown/invalid bounds → kept visible
 }
 
 TEST_CASE("AABB build and ray intersection")
