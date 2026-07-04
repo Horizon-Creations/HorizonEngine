@@ -6,6 +6,9 @@
 #include <HorizonScene/Components/EnvironmentComponent.h>
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
+#include <HorizonScene/Components/MeshComponent.h>
+#include <HorizonScene/Components/MaterialComponent.h>
+#include <ContentManager/DefaultAssets.h>
 #include <glm/gtc/quaternion.hpp>
 #include <HorizonScene/TerrainSystem.h>
 #include <HorizonScene/AnimationSystem.h>
@@ -1285,6 +1288,75 @@ void EditorApplication::dumpFrameHeadless()
 		                       static_cast<float>(envF("HE_DUMP_CAMZ", 0.0f)));
 		m_editorCamera.setOrientation(camPos, fwd);
 		r->SetEditorCamera(m_editorCamera.makeOverride());
+	}
+
+	// ── Material asset→pixel proof (HE_DUMP_MATERIALTEST): put a real entity in the
+	// scene whose MaterialAsset carries a custom shader, so the NORMAL render path
+	// (extractor → RenderObject.materialAssetId → ResolveMaterialShader → cross-compiled
+	// pipeline) draws it — witnessing the full asset→pixel path, not just an inline demo.
+	if (const char* mt = std::getenv("HE_DUMP_MATERIALTEST"); mt && *mt && m_editorWorld)
+	{
+		MaterialAsset mat;
+		mat.type = HE::AssetType::Material;
+		mat.name = "MatTest";
+		mat.baseColor[0] = 0.2f; mat.baseColor[1] = 0.8f; mat.baseColor[2] = 0.3f;
+		mat.customShaderFragGlsl = R"(#version 450
+layout(location = 0) in vec3 vNormal;
+layout(location = 1) in vec3 vColor;
+layout(location = 0) out vec4 oColor;
+void main() {
+    vec3 n = normalize(vNormal);
+    float band = step(0.0, sin(n.y * 26.0));          // bold banding = unmistakably custom
+    vec3 a = vec3(0.95, 0.75, 0.10), b = vec3(0.80, 0.10, 0.55);
+    oColor = vec4(mix(a, b, band) * (0.35 + 0.65 * max(n.z, 0.0)), 1.0);
+}
+)";
+		const HE::UUID matId = contentManager().registerMaterial(std::move(mat));
+
+		// Procedural UV sphere (SoA loose asset) so the per-normal shader banding shows on
+		// a curved surface (a cube's flat faces have constant normals → uniform color).
+		StaticMeshAsset sphere;
+		sphere.type = HE::AssetType::StaticMesh;
+		sphere.name = "MatTestSphere";
+		{
+			const int segU = 48, segV = 24; const float radius = 2.5f;
+			const float kPi = glm::pi<float>();
+			for (int y = 0; y <= segV; ++y)
+			{
+				const float v = (float)y / segV, phi = v * kPi;
+				for (int x = 0; x <= segU; ++x)
+				{
+					const float uu = (float)x / segU, th = uu * 2.0f * kPi;
+					const glm::vec3 n(std::sin(phi) * std::cos(th), std::cos(phi), std::sin(phi) * std::sin(th));
+					const glm::vec3 p = n * radius;
+					sphere.vertices.insert(sphere.vertices.end(), { p.x, p.y, p.z });
+					sphere.normals.insert(sphere.normals.end(),   { n.x, n.y, n.z });
+					sphere.uvs.insert(sphere.uvs.end(),           { uu, v });
+				}
+			}
+			for (int y = 0; y < segV; ++y)
+				for (int x = 0; x < segU; ++x)
+				{
+					const uint32_t a = y * (segU + 1) + x, b = a + segU + 1;
+					sphere.indices.insert(sphere.indices.end(), { a, b, a + 1, a + 1, b, b + 1 });
+				}
+		}
+		const HE::UUID meshId = contentManager().registerStaticMesh(std::move(sphere));
+
+		auto& reg = m_editorWorld->registry();
+		auto  e   = m_editorWorld->createEntity("MatTestSphere");
+		// Camera forward from public yaw/pitch (EditorCamera::forward is private) — same
+		// convention: yaw=0,pitch=0 looks down -Z; +pitch up; +yaw right.
+		const float cp = std::cos(m_editorCamera.pitch()), sp = std::sin(m_editorCamera.pitch());
+		const float cy = std::cos(m_editorCamera.yaw()),   sy = std::sin(m_editorCamera.yaw());
+		const glm::vec3 camFwd(cp * sy, sp, -cp * cy);
+		TransformComponent tc;
+		tc.position = m_editorCamera.position() + camFwd * 8.0f;
+		reg.emplace<TransformComponent>(e, tc);
+		reg.emplace<MeshComponent>(e, MeshComponent{ meshId });
+		reg.emplace<MaterialComponent>(e, MaterialComponent{ matId });
+		Logger::Log(Logger::LogLevel::Info,
+			"EditorApplication: HE_DUMP_MATERIALTEST sphere with custom-shader material added");
 	}
 
 	pushEnvironment(0.0f); // scene environment from the World entity (no auto-advance)
