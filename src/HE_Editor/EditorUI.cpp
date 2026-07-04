@@ -1323,6 +1323,12 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 	static bool          s_openUnsavedModal = false;
 	static bool          s_guardSaveThenAct = false;
 
+	// One-shot request to programmatically select a top-level tab (set by a
+	// Content-Browser double-click). -1 = none. The tab bar applies SetSelected for
+	// exactly one frame and then clears it, so it never fights the user's own tab
+	// clicks — applying SetSelected every frame would (and did) do both.
+	static int           s_tabSelectRequest = -1;
+
 	auto sceneDialogDir = [&]() -> std::string
 	{
 		if (!ctx.projectManager) return {};
@@ -2406,7 +2412,11 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                 if (!tab.open) { s_tabs.erase(s_tabs.begin() + i); continue; }
 
                 ImGuiTabItemFlags flags = ImGuiTabItemFlags_None;
-                if (i == s_activeTab) flags |= ImGuiTabItemFlags_SetSelected;
+                // Force-select only on an explicit one-shot request (double-click). Using
+                // s_activeTab here every frame is wrong: BeginTabItem mutates s_activeTab
+                // mid-loop, so the Scene tab (rendered first) steals it back — and the
+                // constant SetSelected also swallows manual tab clicks.
+                if (i == s_tabSelectRequest) flags |= ImGuiTabItemFlags_SetSelected;
 
                 bool pOpen = tab.closable ? tab.open : true;
                 // Stable ID (### + assetPath) so appending a dirty marker to the visible
@@ -2432,6 +2442,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
             if (s_activeTab >= static_cast<int>(s_tabs.size()))
                 s_activeTab = static_cast<int>(s_tabs.size()) - 1;
             if (s_activeTab < 0) s_activeTab = 0;
+            s_tabSelectRequest = -1;   // consume the one-shot select request
 
             ImGui::EndTabBar();
         }
@@ -4086,6 +4097,9 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				{
 					ctx.activeTab = static_cast<int>(std::distance(ctx.tabs.begin(), it));
 				}
+					// Force the tab bar to select this tab next frame (else ImGui keeps the
+					// Scene tab selected and the editor never opens).
+					s_tabSelectRequest = ctx.activeTab;
 				}
 			}
 			// Right click → select only, open menu after loop
