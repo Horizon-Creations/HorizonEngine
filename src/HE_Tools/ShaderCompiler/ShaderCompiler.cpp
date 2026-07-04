@@ -103,6 +103,11 @@ bool spirvToSource(const std::vector<uint32_t>& spirv, Target target,
                 spirv_cross::CompilerGLSL::Options o;
                 o.version = (target == Target::Glsl410) ? 410u : 300u;
                 o.es      = (target == Target::GlslEs300);
+                // macOS GL 4.1 core does not expose GL_ARB_shading_language_420pack, so
+                // don't emit `layout(binding = N)` on UBOs/samplers — the host binds blocks
+                // via glUniformBlockBinding by name instead. (Vertex attribute locations are
+                // core GLSL 330+ and stay.)
+                o.enable_420pack_extension = false;
                 c.set_common_options(o);
                 out = c.compile();
                 return true;

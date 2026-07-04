@@ -42,6 +42,11 @@ target_include_directories(RendererOpenGL PUBLIC
     ${HE_CORE_INCLUDE}
 )
 target_link_libraries(RendererOpenGL PRIVATE glad OpenGL::GL glm::glm HorizonCore)
+# Shared cross-backend material shader layer (per-material GL programs). Propagates
+# HE_HAVE_SHADERC=1 so the material path compiles in when the cross-compiler was fetched.
+if(TARGET he_materialshader)
+    target_link_libraries(RendererOpenGL PRIVATE he_materialshader he_shadercompiler)
+endif()
 target_compile_definitions(RendererOpenGL PRIVATE HE_RENDERING_BUILD_DLL)
 
 # ─── Vulkan Backend ────────────────────────────────────────────────────────────
