@@ -276,18 +276,20 @@ private:
 	void* m_shadercDemoPipeline = nullptr; // id<MTLRenderPipelineState>
 	bool  m_shadercDemoTried    = false;
 
-	// Drop-in scene pipeline whose MSL is cross-compiled from a canonical-GLSL "standard"
-	// surface template (he::shaderc), pinned to the same bind points as m_scenePipeline
-	// (verts@0, Uniforms@1). Selected for the opaque pass when HE_SHADERC_MATERIAL=1 —
-	// the first per-material pipeline selection in the real geometry loop (M1).
-	void* m_shadercMaterialPipeline = nullptr; // id<MTLRenderPipelineState>
-	bool  m_shadercMaterialTried    = false;
-	// A procedural sphere (interleaved pos3/normal3/uv2, matching VertexIn) so the
-	// cross-compiled scene pipeline can be seen on real 3D geometry even in the empty
-	// headless dump scene. Built alongside the pipeline; drawn when HE_SHADERC_MATERIAL=1.
+	// Per-material pipeline cache (M1): a MaterialAsset with a customShaderFragGlsl gets
+	// its fragment cross-compiled (he::shaderc) and spliced onto the standard drop-in
+	// vertex (verts@0, Uniforms@1), then cached here keyed by a hash of the source. The
+	// opaque loop selects a material's pipeline per-draw; materials without a custom
+	// shader use the built-in PBR m_scenePipeline. Value may be null (build failed →
+	// cached so we don't retry every frame).
+	std::unordered_map<uint64_t, void*> m_materialPipelineCache; // hash → id<MTLRenderPipelineState>
+	// A procedural sphere (interleaved pos3/normal3/uv2, matching VertexIn) so per-material
+	// pipelines are visible on real 3D geometry even in the empty headless dump scene.
+	// Built + drawn (two spheres, two materials) when HE_SHADERC_MATERIAL=1.
 	void* m_shadercTestVB   = nullptr; // id<MTLBuffer>
 	void* m_shadercTestIB   = nullptr; // id<MTLBuffer>
 	int   m_shadercTestIdx  = 0;       // index count
+	bool  m_shadercTestTried = false;
 
 	void* m_hdrColor        = nullptr; // id<MTLTexture>, RGBA16Float (retained)
 	void* m_hdrDepth        = nullptr; // id<MTLTexture>, Depth32Float (retained)
@@ -298,7 +300,12 @@ private:
 	void  EncodeTonemap(void* renderEncoder); // fullscreen tonemap of m_hdrColor → LDR
 #if defined(HE_HAVE_SHADERC)
 	void  EnsureShadercDemoPipeline();        // HE_SHADERC_DEMO overlay (material-system M1)
-	void  EnsureShadercMaterialPipeline();    // HE_SHADERC_MATERIAL drop-in scene pipeline
+	void  EnsureShadercTestMesh();            // procedural sphere for the HE_SHADERC_MATERIAL demo
+	// Build (or fetch cached) a pipeline for a material's custom fragment GLSL, spliced
+	// onto the standard drop-in vertex. Returns null on compile/link failure (also cached).
+	void* GetOrBuildMaterialPipeline(uint64_t key, const std::string& fragGlsl);
+	// Resolve a material's custom shader: true + (key,frag) if it has customShaderFragGlsl.
+	bool  ResolveMaterialShader(const HE::UUID& materialId, uint64_t& key, std::string& frag);
 #endif
 
 	// ── FXAA (edge antialiasing) ─────────────────────────────────────────────
