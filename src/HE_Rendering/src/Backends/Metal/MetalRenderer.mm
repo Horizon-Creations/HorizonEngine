@@ -4484,24 +4484,40 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 				baseColor = effectiveTex ? glm::vec3(1.0f) : glm::vec3(0.55f, 0.55f, 0.55f);
 			u.color = glm::vec4(baseColor, 1.0f);
 
-			if (cOpacity < 0.999f)
+			// Draw one instance at its own world transform. GeometryPass batches consecutive
+			// same-mesh + same-material objects into ONE DrawCall carrying every transform in
+			// dc.instanceTransforms; the shared uniforms (color/pbr/flags/texture) are set
+			// above, only mvp/model differ per instance. Without this only dc.transform drew
+			// and every OTHER copy of an identical mesh vanished (the other backends already
+			// iterate instanceTransforms).
+			auto drawInstance = [&](const glm::mat4& xform)
 			{
-				const glm::vec3 d = glm::vec3(dc.transform[3]) - camPos;
-				transparent.push_back({ u, (__bridge void*)vertexBuf, (__bridge void*)indexBuf,
-				                        indexCount, texPtr, glm::dot(d, d) });
-				continue; // drawn in the transparency pass below
-			}
-
-			[encoder setVertexBuffer:vertexBuf offset:0 atIndex:0];
-			[encoder setVertexBytes:&u length:sizeof(u) atIndex:1];
-			[encoder setFragmentTexture:texture atIndex:0];
-			[encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
-			                    indexCount:indexCount
-			                     indexType:MTLIndexTypeUInt32
-			                   indexBuffer:indexBuf
-			             indexBufferOffset:0];
-			++m_counters.draws;
-			m_counters.tris += static_cast<uint32_t>(indexCount / 3);
+				UnlitUniforms ui = u;
+				ui.mvp   = viewProj * xform;
+				ui.model = xform;
+				if (cOpacity < 0.999f)
+				{
+					const glm::vec3 d = glm::vec3(xform[3]) - camPos;
+					transparent.push_back({ ui, (__bridge void*)vertexBuf, (__bridge void*)indexBuf,
+					                        indexCount, texPtr, glm::dot(d, d) });
+					return; // drawn in the transparency pass below
+				}
+				[encoder setVertexBuffer:vertexBuf offset:0 atIndex:0];
+				[encoder setVertexBytes:&ui length:sizeof(ui) atIndex:1];
+				[encoder setFragmentTexture:texture atIndex:0];
+				[encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+				                    indexCount:indexCount
+				                     indexType:MTLIndexTypeUInt32
+				                   indexBuffer:indexBuf
+				             indexBufferOffset:0];
+				++m_counters.draws;
+				m_counters.tris += static_cast<uint32_t>(indexCount / 3);
+			};
+			if (dc.instanceTransforms.empty())
+				drawInstance(dc.transform);
+			else
+				for (const glm::mat4& t : dc.instanceTransforms)
+					drawInstance(t);
 		}
 	});
 	SamplePoint(renderEncoder, "Opaque");
