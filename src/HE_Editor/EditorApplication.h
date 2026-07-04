@@ -204,6 +204,7 @@ struct AppContext
 	ImFont* fontBody       = nullptr;
 	ImFont* fontSubheading = nullptr;
 	ImFont* fontHeading    = nullptr;
+	ImFont* codeFont       = nullptr;  // monospace, for the script code editor
 
 	// Logo
 	ImTextureID logoTexture = 0;
@@ -365,6 +366,7 @@ private:
 	ImFont* m_fontBody       = nullptr;
 	ImFont* m_fontSubheading = nullptr;
 	ImFont* m_fontHeading    = nullptr;
+	ImFont* m_fontMono       = nullptr;  // monospace (ProggyClean) for the code editor
 
 	void*    m_d3d12SrvHeap      = nullptr;
 	void*    m_d3d12SrvAllocator = nullptr;

@@ -1,5 +1,6 @@
 #include "EditorUI.h"
 #include "EditorApplication.h"
+#include "ScriptEditorPanel.h"
 #include "HorizonVersion.h"
 #include <Hpak/ProjectExporter.h>
 #include <HorizonScene/HorizonScene.h>
@@ -2408,7 +2409,12 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                 if (i == s_activeTab) flags |= ImGuiTabItemFlags_SetSelected;
 
                 bool pOpen = tab.closable ? tab.open : true;
-                if (ImGui::BeginTabItem(tab.label.c_str(), tab.closable ? &pOpen : nullptr, flags))
+                // Stable ID (### + assetPath) so appending a dirty marker to the visible
+                // label never changes the tab's identity — which would reset its state.
+                const bool tabDirty = !tab.assetPath.empty() && ScriptEditorPanel::isDirty(tab.assetPath);
+                const std::string shown = tab.label + (tabDirty ? " *" : "")
+                    + "###tab_" + (tab.assetPath.empty() ? std::string("scene") : tab.assetPath);
+                if (ImGui::BeginTabItem(shown.c_str(), tab.closable ? &pOpen : nullptr, flags))
                 {
                     s_activeTab = i;
                     ImGui::EndTabItem();
@@ -2421,6 +2427,11 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                 std::remove_if(s_tabs.begin(), s_tabs.end(),
                     [](const AppContext::EditorTab& t){ return t.closable && !t.open; }),
                 s_tabs.end());
+            // Keep the active index valid after a tab closes (else it dangles or points
+            // at the wrong tab). Fall back to the Scene tab (index 0) when out of range.
+            if (s_activeTab >= static_cast<int>(s_tabs.size()))
+                s_activeTab = static_cast<int>(s_tabs.size()) - 1;
+            if (s_activeTab < 0) s_activeTab = 0;
 
             ImGui::EndTabBar();
         }
@@ -2428,6 +2439,24 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
         if (ctx.fontBody) ImGui::PopFont();
 
         ImGui::End();
+    }
+
+    // ── Top-level tab gating ───────────────────────────────────────────────────
+    // The built-in "Scene" tab (empty assetPath) shows the dockspace + all panels
+    // below. A script tab instead fills that same area with its code editor and we
+    // skip the scene panels for this frame. Default to the scene when the active
+    // index is out of range. (All ImGui windows above are already balanced, so the
+    // early return is safe; modals/menus render before this point.)
+    const bool sceneTabActive =
+        ctx.activeTab < 0 || ctx.activeTab >= static_cast<int>(ctx.tabs.size())
+        || ctx.tabs[ctx.activeTab].assetPath.empty();
+    if (!sceneTabActive)
+    {
+        const ImGuiViewport* vpTab = ImGui::GetMainViewport();
+        ScriptEditorPanel::render(ctx, ctx.tabs[ctx.activeTab].assetPath,
+            ImVec2(vpTab->WorkPos.x, vpTab->WorkPos.y + kTabBarH),
+            ImVec2(vpTab->WorkSize.x, vpTab->WorkSize.y - kFooterH - kTabBarH));
+        return;
     }
 
     // ── DockSpace (shrunk by footer + tabbar height so docked windows never overlap)
@@ -4041,7 +4070,9 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				{
 					requestGuarded(GuardedAction::OpenScenePath, file->fullPath);
 				}
-				else
+				// Script assets open a syntax-highlighting code editor tab. Other asset
+				// types have no dedicated editor yet, so a double-click on them is a no-op.
+				else if (ScriptEditorPanel::isScriptAsset(file->fullPath))
 				{
 				const std::string tabLabel = std::filesystem::path(file->name).stem().string();
 				auto it = std::find_if(ctx.tabs.begin(), ctx.tabs.end(),
