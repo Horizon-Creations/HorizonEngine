@@ -2545,6 +2545,77 @@ void OpenGLRenderer::CreateUnlitPipeline()
 	m_uSSAOEnabled   = glGetUniformLocation(m_unlitProgram, "uSSAOEnabled");
 }
 
+#if defined(HE_HAVE_SHADERC)
+// Resolve a material's custom shader via the shared, backend-agnostic library.
+bool OpenGLRenderer::resolveMaterialShader(const HE::UUID& materialId, uint64_t& key, std::string& frag)
+{
+	if (!m_contentManager) return false;
+	return m_matShaderLib.resolveFragment(*m_contentManager, materialId, key, frag);
+}
+
+// Build (or fetch) a GL program for a material's custom fragment. The shared library
+// cross-compiles the standard attribute vertex + the material fragment to GLSL 410; here we
+// compile+link them and wire the two UBO blocks to fixed binding points (macOS GL 4.1 has no
+// layout(binding), so bind by block name). Cached by hash; 0 cached on failure so a broken
+// shader isn't rebuilt every frame.
+unsigned int OpenGLRenderer::getOrBuildMaterialProgram(uint64_t key, const std::string& fragGlsl)
+{
+	if (auto it = m_materialPrograms.find(key); it != m_materialPrograms.end()) return it->second;
+
+	using Backend = HE::MaterialShaderLibrary::Backend;
+	const auto& v = m_matShaderLib.standardVertex(Backend::GLSL410);       // attribute vertex (GL-4.1 safe)
+	const auto& f = m_matShaderLib.fragment(key, fragGlsl, Backend::GLSL410);
+	unsigned int program = 0;
+	if (v.ok && f.ok)
+	{
+		GLuint vs = CompileStage(GL_VERTEX_SHADER,   v.source.c_str());
+		GLuint fs = CompileStage(GL_FRAGMENT_SHADER, f.source.c_str());
+		GLuint prog = glCreateProgram();
+		glAttachShader(prog, vs);
+		glAttachShader(prog, fs);
+		glLinkProgram(prog);
+		glDeleteShader(vs); glDeleteShader(fs);
+		GLint ok = 0; glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+		if (ok)
+		{
+			const GLuint uIdx = glGetUniformBlockIndex(prog, "U");
+			if (uIdx != GL_INVALID_INDEX) glUniformBlockBinding(prog, uIdx, 1);
+			const GLuint lIdx = glGetUniformBlockIndex(prog, "HeLighting");
+			if (lIdx != GL_INVALID_INDEX) glUniformBlockBinding(prog, lIdx, 0);
+			program = prog;
+			Logger::Log(Logger::LogLevel::Info,
+				"OpenGLRenderer: built a material program from canonical GLSL via he::shaderc");
+		}
+		else
+		{
+			char log[2048]; glGetProgramInfoLog(prog, sizeof(log), nullptr, log);
+			Logger::Log(Logger::LogLevel::Error,
+				(std::string("OpenGLRenderer: material program link failed: ") + log).c_str());
+			glDeleteProgram(prog);
+		}
+	}
+	else
+		Logger::Log(Logger::LogLevel::Error,
+			(std::string("OpenGLRenderer: material shader cross-compile failed\n") + v.log + f.log).c_str());
+
+	// Lazily create the shared per-object + lighting UBOs on first material.
+	if (!m_matObjUBO)
+	{
+		glGenBuffers(1, &m_matObjUBO);
+		glBindBuffer(GL_UNIFORM_BUFFER, m_matObjUBO);
+		glBufferData(GL_UNIFORM_BUFFER, 176, nullptr, GL_DYNAMIC_DRAW); // mat4 mvp+model + 3×vec4
+		glGenBuffers(1, &m_matLightUBO);
+		glBindBuffer(GL_UNIFORM_BUFFER, m_matLightUBO);
+		glBufferData(GL_UNIFORM_BUFFER,
+			static_cast<GLsizeiptr>(sizeof(HE::MaterialShaderLibrary::Lighting)), nullptr, GL_DYNAMIC_DRAW);
+		glBindBuffer(GL_UNIFORM_BUFFER, 0);
+	}
+
+	m_materialPrograms[key] = program; // cache success AND failure (0)
+	return program;
+}
+#endif // HE_HAVE_SHADERC
+
 void OpenGLRenderer::CreateSkinnedPipeline()
 {
 	GLuint vs = CompileStage(GL_VERTEX_SHADER,   kSkinnedVS);
@@ -3840,6 +3911,12 @@ void OpenGLRenderer::Shutdown()
 	m_retiredTextures.clear();
 
 	if (m_unlitProgram)     { glDeleteProgram(m_unlitProgram);     m_unlitProgram = 0; }
+#if defined(HE_HAVE_SHADERC)
+	for (auto& [k, prog] : m_materialPrograms) if (prog) glDeleteProgram(prog);
+	m_materialPrograms.clear();
+	if (m_matObjUBO)   { glDeleteBuffers(1, &m_matObjUBO);   m_matObjUBO = 0; }
+	if (m_matLightUBO) { glDeleteBuffers(1, &m_matLightUBO); m_matLightUBO = 0; }
+#endif
 	if (m_instancedProgram) { glDeleteProgram(m_instancedProgram); m_instancedProgram = 0; }
 	if (m_instanceVBO)      { glDeleteBuffers(1, &m_instanceVBO);  m_instanceVBO = 0; }
 	DestroyParticleResources();
@@ -4460,6 +4537,43 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			}
 			else
 			{
+#if defined(HE_HAVE_SHADERC)
+				// Per-material GL program (MaterialAsset custom shader), cross-compiled from
+				// canonical GLSL via the shared library. Feeds per-object + lighting through
+				// UBOs; same VAO/attribs as the unlit program. Materials without one fall
+				// through to the built-in shader below.
+				uint64_t shKey; std::string shFrag; unsigned int matProg = 0;
+				if (resolveMaterialShader(dc.materialAssetId, shKey, shFrag))
+					matProg = getOrBuildMaterialProgram(shKey, shFrag);
+				if (matProg)
+				{
+					glUseProgram(matProg);
+					struct { glm::mat4 mvp, model; glm::vec4 color, flags, pbr; } obj;
+					obj.mvp   = viewProj * dc.transform;
+					obj.model = dc.transform;
+					obj.color = glm::vec4(baseColor, 1.0f);
+					obj.flags = glm::vec4(tex != 0 ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+					obj.pbr   = glm::vec4(cMetallic, cRoughness, cOpacity, 0.0f);
+					glBindBuffer(GL_UNIFORM_BUFFER, m_matObjUBO);
+					glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(obj), &obj);
+					HE::MaterialShaderLibrary::Lighting lit;
+					const glm::vec3 sc = GetEnvironment().sunColor;
+					lit.sunDir[0]=sunDir.x; lit.sunDir[1]=sunDir.y; lit.sunDir[2]=sunDir.z;
+					lit.sunColor[0]=sc.r; lit.sunColor[1]=sc.g; lit.sunColor[2]=sc.b;
+					lit.ambient[0]=m_renderWorld.ambient.r; lit.ambient[1]=m_renderWorld.ambient.g; lit.ambient[2]=m_renderWorld.ambient.b;
+					glBindBuffer(GL_UNIFORM_BUFFER, m_matLightUBO);
+					glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(lit), &lit);
+					glBindBuffer(GL_UNIFORM_BUFFER, 0);
+					glBindBufferBase(GL_UNIFORM_BUFFER, 1, m_matObjUBO);   // block "U"
+					glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_matLightUBO); // block "HeLighting"
+					glBindVertexArray(vao);
+					glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, nullptr);
+					glUseProgram(m_unlitProgram); // restore for the next single-draw
+					++m_counters.draws;
+					m_counters.tris += static_cast<uint32_t>(indexCount / 3);
+					continue;
+				}
+#endif
 				glUniformMatrix4fv(m_uMVP,   1, GL_FALSE, glm::value_ptr(viewProj * dc.transform));
 				glUniformMatrix4fv(m_uModel, 1, GL_FALSE, glm::value_ptr(dc.transform));
 				glUniform3fv(m_uColor, 1, glm::value_ptr(baseColor));

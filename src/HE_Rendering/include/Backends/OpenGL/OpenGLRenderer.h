@@ -9,7 +9,9 @@
 #include <HorizonRendering/CommandBuffer.h>
 #include <Math/AABB.h>
 #include <Types/UUID.h>
+#include <material/MaterialShaderLibrary.h> // shared cross-backend material shader layer
 #include <unordered_map>
+#include <string>
 
 struct SDL_Window;
 
@@ -175,6 +177,18 @@ private:
 	// Unlit pipeline + built-in cube (fallback for entities whose mesh
 	// asset is missing or not loaded)
 	unsigned int m_unlitProgram   = 0;
+
+	// Per-material GL programs cross-compiled from MaterialAsset::customShaderFragGlsl via
+	// the shared MaterialShaderLibrary (→ GLSL 410, attribute vertex + lighting-UBO fragment).
+	// Same VAO/attribs as the unlit program; per-object + lighting fed via UBOs (blocks
+	// "U" @ binding 1, "HeLighting" @ binding 0). Selected per-draw in the opaque loop.
+	HE::MaterialShaderLibrary                  m_matShaderLib;
+	std::unordered_map<uint64_t, unsigned int> m_materialPrograms; // hash → program (0 = failed)
+	unsigned int m_matObjUBO   = 0;  // per-object U   (mvp/model/color/flags/pbr), 176 B
+	unsigned int m_matLightUBO = 0;  // HeLighting     (sunDir/sunColor/ambient),   48 B
+	unsigned int getOrBuildMaterialProgram(uint64_t key, const std::string& fragGlsl);
+	bool         resolveMaterialShader(const HE::UUID& materialId, uint64_t& key, std::string& frag);
+
 	int          m_uMVP           = -1;
 	int          m_uModel         = -1;
 	int          m_uColor         = -1;
