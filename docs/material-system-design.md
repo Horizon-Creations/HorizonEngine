@@ -153,15 +153,16 @@ mehr Nodes/Domains, Instancing/Perf, Hot-Reload.
 ---
 
 ## 7. Risiken
-- **Der geteilte Standard-Vertex ist SSBO-basiert (GL 4.3+) — bricht auf macOS-GL 4.1
-  (empirisch bestätigt 2026-07-04):** `MaterialShaderLibrary::standardVertexGlsl()` vertex-pullt
-  die Vertices via `layout(std430) buffer` (spiegelt Metals `const device VertexIn*`). SPIRV-Cross
-  emittiert für `Target::Glsl410` zwar `#version 410`, aber **weiterhin einen `std430 buffer`-Block**
-  → ungültig auf einem 4.1-Kontext (SSBO erst ab 4.3). D.h. der Layer ist cross-backend in der **API**,
-  aber der Vertex portiert real nur nach Metal/Vulkan/D3D (StructuredBuffer/SSBO ok), **nicht** nach
-  macOS-GL. **Entscheidung für GL-Adoption:** eine **GL-4.1-Vertex-Variante** mit echten `in`-Attributen
-  + Vertex-Descriptor bauen (statt SSBO-Pull); Metal behält den SSBO-Pull. Das ist genau der Vertex-
-  Factory-Vertrag aus §2 — der Vertex-Pfad ist backend-spezifisch, nur das Fragment ist wirklich geteilt.
+- **SSBO-Vertex vs. GL 4.1 — GELÖST auf Quell-Ebene (2026-07-04):** Der SSBO-Vertex-Pull (`std430
+  buffer`, GL 4.3+) läuft nicht auf macOS-GL 4.1. **Fix:** `standardVertex(backend)` liefert jetzt zwei
+  Varianten — Metal behält den SSBO-Pull (`kStandardVertexSSBO`, gepinnt), alle anderen Backends bekommen
+  eine **attribut-basierte Variante** (`kStandardVertexAttrib`: `layout(location=0/1/2) in`), die der GL-
+  Backend via VAO füttert. Empirisch verifiziert: die von SPIRV-Cross emittierte GLSL 410 (Vertex + Fragment
+  inkl. Lighting-Preamble) ist **`glslangValidator`-gültig als Desktop-GLSL 410** (kein `buffer`-Block).
+  Damit ist das **Fragment + Lighting + der attribut-Vertex** echt GL-portabel. **Offen (separat):** der
+  OpenGL-Renderer *konsumiert* das Material-System noch nicht (per-Material-GL-Programme + VAO-Setup in
+  seiner Geometry-Schleife) — das ist die eigentliche GL-Adoption, hier nicht laufzeit-verifizierbar
+  (kein GL-Display in der Sandbox).
 - **Asset→Pixel-Pfad ist verdrahtet, aber noch nicht bezeugt:** `resolveFragment` liest echte
   `MaterialAsset.customShaderFragGlsl` und der Loop wählt die Pipeline — aber getestet sind bisher nur
   (a) Serialisierungs-Round-Trip (Daten) und (b) Inline-Shader→Pixel (Demo-Kugeln rufen
