@@ -128,6 +128,12 @@ if(APPLE)
         PUBLIC  "-framework Metal" "-framework QuartzCore" "-framework Foundation"
         PRIVATE glm::glm HorizonCore SDL3::SDL3)
     target_compile_definitions(RendererMetal PRIVATE HE_RENDERING_BUILD_DLL)
+    # Cross-backend shader codegen (material system M1). Links the in-process
+    # glslang+SPIRV-Cross compiler when it was fetched (HE_ENABLE_SHADERC); the
+    # linked lib propagates HE_HAVE_SHADERC=1 so the demo path compiles in.
+    if(TARGET he_shadercompiler)
+        target_link_libraries(RendererMetal PRIVATE he_shadercompiler)
+    endif()
     message(STATUS "HorizonRendering: Metal backend enabled")
 endif()
 
