@@ -1410,24 +1410,56 @@ AppContext EditorApplication::makeContext()
 // playing are discarded.
 void EditorApplication::setPlayMouseCaptured(bool captured)
 {
+	const bool wasCaptured = m_playMouseCaptured;
 	m_playMouseCaptured = captured;
-	if (SDL_Window* w = window() ? window()->GetNativeWindow() : nullptr)
+	// SDL engages relative mode only while the *flagged* window holds keyboard focus
+	// (SDL_UpdateRelativeMouseMode). With multi-viewport panels the focused window can
+	// be a floating panel's OS window rather than the main one — so flag whichever
+	// window actually has focus (updatePlayCameraController re-asserts this per frame
+	// in case focus moves while captured).
+	SDL_Window* const mainWin = window() ? window()->GetNativeWindow() : nullptr;
+	SDL_Window* const focusWin = SDL_GetKeyboardFocus();
+	if (captured)
 	{
-		SDL_SetWindowRelativeMouseMode(w, captured);
-		if (captured)
+		if (SDL_Window* w = focusWin ? focusWin : mainWin)
 		{
+			SDL_SetWindowRelativeMouseMode(w, true);
 			SDL_HideCursor();
 			SDL_GetRelativeMouseState(nullptr, nullptr); // flush stale delta
 		}
-		else SDL_ShowCursor();
 	}
-	// While the game owns the mouse, stop ImGui from reacting to the pinned cursor
-	// (panels/toolbar). Esc releases it so the editor UI is clickable again.
+	else if (wasCaptured) // skip the release work (esp. the warp) if nothing was captured
+	{
+		// Clear the flag from every window — focus may have wandered across several
+		// viewport windows while captured, flagging each via the per-frame re-assert.
+		int winCount = 0;
+		if (SDL_Window** wins = SDL_GetWindows(&winCount))
+		{
+			for (int i = 0; i < winCount; ++i)
+				SDL_SetWindowRelativeMouseMode(wins[i], false);
+			SDL_free(wins);
+		}
+		SDL_ShowCursor();
+		if (SDL_Window* w = focusWin ? focusWin : mainWin)
+		{
+			// Reappear mid-window instead of wherever the cursor last drifted.
+			int ww = 0, wh = 0;
+			SDL_GetWindowSize(w, &ww, &wh);
+			SDL_WarpMouseInWindow(w, ww * 0.5f, wh * 0.5f);
+		}
+	}
+	// While the game owns the input, stop ImGui from reacting: NoMouse blocks hover/
+	// click, NoKeyboard blocks keyboard-nav (Space would otherwise activate the nav-
+	// focused Play button), NoMouseCursorChange stops the SDL3 backend from re-showing
+	// the hidden cursor every frame (imgui_impl_sdl3 UpdateMouseCursor). Esc restores
+	// normal editor input so the UI is clickable again.
 	if (m_imguiReady)
 	{
+		constexpr ImGuiConfigFlags kPlayFlags = ImGuiConfigFlags_NoMouse |
+			ImGuiConfigFlags_NoKeyboard | ImGuiConfigFlags_NoMouseCursorChange;
 		ImGuiIO& io = ImGui::GetIO();
-		if (captured) io.ConfigFlags |= ImGuiConfigFlags_NoMouse;
-		else          io.ConfigFlags &= ~ImGuiConfigFlags_NoMouse;
+		if (captured) io.ConfigFlags |= kPlayFlags;
+		else          io.ConfigFlags &= ~kPlayFlags;
 	}
 }
 
@@ -1446,11 +1478,59 @@ void EditorApplication::updatePlayCameraController(float dt)
 		if (cam == entt::null) cam = e;
 		if (c.isMain) { cam = e; break; }
 	}
+
+	// Re-assert the capture every frame: SDL engages relative mode only while the
+	// *flagged* window holds keyboard focus, and with multi-viewport panels the focus
+	// can move between OS windows mid-play — the flag set on one window silently stops
+	// engaging when another gains focus. Also re-hide the cursor in case anything
+	// slipped past ImGuiConfigFlags_NoMouseCursorChange and re-showed it.
+	SDL_Window* const focusWin = SDL_GetKeyboardFocus();
+	if (focusWin && !SDL_GetWindowRelativeMouseMode(focusWin))
+		SDL_SetWindowRelativeMouseMode(focusWin, true);
+	if (SDL_CursorVisible())
+		SDL_HideCursor();
+
+	// Relative mouse delta accumulated since the last frame. Read exactly once — a
+	// second SDL_GetRelativeMouseState() would return zero because reading drains it.
+	float dx = 0.0f, dy = 0.0f;
+	SDL_GetRelativeMouseState(&dx, &dy);
+
+	// Park the cursor back at the focused window's centre after each frame's relative
+	// motion. With relative mode engaged this is a pure internal position update (SDL
+	// generates no motion events for it); when it is NOT engaged (focus transition,
+	// platform quirk) the OS cursor physically drifts and would stall the look at the
+	// screen edge — the warp keeps it centred either way. SDL pre-sets last_x/last_y
+	// to the warp target, so the warp never pollutes the relative accumulator.
+	if (focusWin)
+	{
+		int fw = 0, fh = 0;
+		SDL_GetWindowSize(focusWin, &fw, &fh);
+		SDL_WarpMouseInWindow(focusWin, fw * 0.5f, fh * 0.5f);
+	}
+
+	// ── Self-diagnostic (throttled ~once/sec) ──────────────────────────────────────
+	// One PIE test should be conclusive: this reports whether a camera is being driven
+	// and whether mouse motion is actually reaching us, so a "still doesn't move" report
+	// tells us which cause (no camera / input not arriving / extractor) to chase.
+	static int   s_diagFrames = 0;
+	static float s_diagMotion = 0.0f;
+	s_diagMotion += std::abs(dx) + std::abs(dy);
+	if (++s_diagFrames >= 60)
+	{
+		Logger::Log(Logger::LogLevel::Info,
+			(std::string("PIE camera controller: ")
+			+ (cam == entt::null ? "NO camera to drive" : "driving a scene camera")
+			+ ", mouse motion (60 frames) = " + std::to_string(s_diagMotion)
+			+ (input().IsKeyDown(SDL_SCANCODE_W) ? " [W held]" : "")
+			+ (focusWin && SDL_GetWindowRelativeMouseMode(focusWin) ? "" : " [rel-mode OFF]")
+			+ (SDL_CursorVisible() ? " [cursor visible]" : "")).c_str());
+		s_diagFrames  = 0;
+		s_diagMotion  = 0.0f;
+	}
+
 	if (cam == entt::null) return;
 	auto& t = reg.get<TransformComponent>(cam);
 
-	float dx = 0.0f, dy = 0.0f;
-	SDL_GetRelativeMouseState(&dx, &dy);
 	constexpr float kSensitivity = 0.12f; // degrees per pixel
 	t.rotation.y -= dx * kSensitivity;    // yaw
 	t.rotation.x -= dy * kSensitivity;    // pitch
@@ -1497,6 +1577,34 @@ void EditorApplication::setPlayMode(bool play)
 		}
 		m_isPlaying = true;
 		m_undo.clearHistory(); // edits made while playing are not undoable
+
+		// PIE needs a camera to *drive* and to render through. Edit-mode scenes are
+		// navigated with the editor camera, so many have no CameraComponent at all — the
+		// packaged game handles that by adding a default one (GameApplication::OnInit), and
+		// PIE must mirror it or the view sits on a fixed fallback and mouse-look/WASD appear
+		// to do nothing. Added *after* the snapshot save above, so leaving play mode (clear +
+		// restore from snapshot) drops it again. Seeded at the editor camera's current pose so
+		// PIE opens on the view you were looking at. Mapping editor yaw/pitch → TransformComponent
+		// euler: editor forward = (cp·sy, sp, -cp·cy); TransformComponent forward = quat(radians(rot))·(0,0,-1),
+		// which yields rot.x = +pitch, rot.y = -yaw.
+		{
+			auto& reg = m_editorWorld->registry();
+			bool hasCamera = false;
+			for (auto e : reg.view<CameraComponent>()) { (void)e; hasCamera = true; break; }
+			if (!hasCamera)
+			{
+				auto camE = m_editorWorld->createEntity("PlayCamera");
+				TransformComponent tc;
+				tc.position   =  m_editorCamera.position();
+				tc.rotation.x =  glm::degrees(m_editorCamera.pitch());
+				tc.rotation.y = -glm::degrees(m_editorCamera.yaw());
+				reg.emplace<TransformComponent>(camE, tc);
+				CameraComponent cc; cc.isMain = true;
+				reg.emplace<CameraComponent>(camE, cc);
+				Logger::Log(Logger::LogLevel::Info,
+					"EditorApplication: PIE added a default main camera at the editor view (scene had none)");
+			}
+		}
 
 		// Initialise physics from the current world state
 		m_physicsWorld = std::make_unique<PhysicsWorld>();
@@ -1825,6 +1933,19 @@ bool EditorApplication::OnEvent(const SDL_Event& event)
 		setPlayMouseCaptured(!m_playMouseCaptured);
 		return true;
 	}
+
+	// While PIE owns the mouse, the game owns the keyboard too. Without this,
+	// NavEnableKeyboard keeps io.WantCaptureKeyboard true whenever any ImGui window
+	// is focused, so the tail of this function would consume every key event before
+	// it ever reaches the engine Input — WASD in play mode would be dead. Esc (above)
+	// is the one key the editor keeps for itself. Key-UPs pass whenever playing (even
+	// while released): a key held across the Esc toggle must still deliver its release,
+	// or Input would keep it "down" forever and the camera would drift on re-capture.
+	if (m_isPlaying &&
+	    (event.type == SDL_EVENT_KEY_UP ||
+	     (m_playMouseCaptured && (event.type == SDL_EVENT_KEY_DOWN ||
+	                              event.type == SDL_EVENT_TEXT_INPUT))))
+		return false;
 
 	// ── Unsaved-changes guard for OS-level close (window X / Cmd+Q / app quit) ──
 	// Window::PollEvents() has already flagged the window to close this frame; if
