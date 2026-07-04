@@ -286,6 +286,60 @@ if(HE_ENABLE_ASTC)
     endif()
 endif()
 
+# ─── Shader cross-compiler: glslang + SPIRV-Cross (Material-System M0) ──────────
+# Canonical GLSL → glslang → SPIR-V → SPIRV-Cross → MSL / HLSL / GLSL(-ES).
+# The backbone for the cross-backend material system (docs/material-system-design.md).
+# Disable with -DHE_ENABLE_SHADERC=OFF (skips the fetch + the he_shader_spike tool).
+option(HE_ENABLE_SHADERC "Fetch glslang + SPIRV-Cross for cross-backend shader codegen" ON)
+if(HE_ENABLE_SHADERC)
+    # glslang (GLSL → SPIR-V). ENABLE_OPT=OFF avoids the SPIRV-Tools optimizer submodule.
+    FetchContent_Declare(
+        glslang
+        GIT_REPOSITORY https://github.com/KhronosGroup/glslang.git
+        GIT_TAG        15.4.0
+        GIT_SHALLOW    TRUE
+    )
+    set(ENABLE_OPT               OFF CACHE BOOL "" FORCE) # no SPIRV-Tools optimizer dep
+    set(GLSLANG_TESTS            OFF CACHE BOOL "" FORCE)
+    set(GLSLANG_ENABLE_INSTALL   OFF CACHE BOOL "" FORCE)
+    set(ENABLE_GLSLANG_BINARIES  OFF CACHE BOOL "" FORCE) # skip the standalone exes
+    set(ENABLE_SPVREMAPPER       OFF CACHE BOOL "" FORCE)
+    set(ENABLE_HLSL              OFF CACHE BOOL "" FORCE) # we author canonical GLSL, not HLSL
+    set(BUILD_TESTING            OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(glslang)
+
+    # SPIRV-Cross (SPIR-V → MSL/HLSL/GLSL). Static libs, no CLI, no tests.
+    FetchContent_Declare(
+        spirv_cross
+        GIT_REPOSITORY https://github.com/KhronosGroup/SPIRV-Cross.git
+        GIT_TAG        vulkan-sdk-1.4.313.0
+        GIT_SHALLOW    TRUE
+    )
+    set(SPIRV_CROSS_CLI          OFF CACHE BOOL "" FORCE)
+    set(SPIRV_CROSS_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
+    set(SPIRV_CROSS_ENABLE_GLSL  ON  CACHE BOOL "" FORCE)
+    set(SPIRV_CROSS_ENABLE_MSL   ON  CACHE BOOL "" FORCE)
+    set(SPIRV_CROSS_ENABLE_HLSL  ON  CACHE BOOL "" FORCE)
+    set(SPIRV_CROSS_ENABLE_CPP   OFF CACHE BOOL "" FORCE)
+    set(SPIRV_CROSS_ENABLE_C_API OFF CACHE BOOL "" FORCE)
+    set(SPIRV_CROSS_SHARED       OFF CACHE BOOL "" FORCE)
+    set(SPIRV_CROSS_STATIC       ON  CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(spirv_cross)
+
+    if(TARGET glslang AND TARGET SPIRV AND TARGET spirv-cross-msl)
+        set(HE_HAVE_SHADERC TRUE)
+        message(STATUS "HorizonEngine: glslang + SPIRV-Cross found — shader cross-compile enabled")
+        # M0 spike: prove GLSL → SPIR-V → MSL/HLSL/GLSL end-to-end.
+        add_executable(he_shader_spike ${CMAKE_SOURCE_DIR}/src/HE_Tools/ShaderCompiler/spike_main.cpp)
+        target_link_libraries(he_shader_spike PRIVATE
+            glslang SPIRV glslang-default-resource-limits
+            spirv-cross-core spirv-cross-glsl spirv-cross-msl spirv-cross-hlsl)
+        target_compile_features(he_shader_spike PRIVATE cxx_std_20)
+    else()
+        message(STATUS "HorizonEngine: glslang/SPIRV-Cross targets not found — shader cross-compile disabled")
+    endif()
+endif()
+
 # ─── Tracy (optional profiling) ────────────────────────────────────────────────
 # Enable with:  cmake -DHE_ENABLE_TRACY=ON ...
 # Default OFF so production/CI builds have zero overhead.
