@@ -310,6 +310,13 @@ private:
 	bool m_isPlaying = false;
 	void setPlayMode(bool play);
 
+	// Mouse-captured free-fly camera while playing in the editor — mirrors the
+	// packaged game so PIE is navigable. Captured on play-enter, released on exit,
+	// toggled with Esc. Drives the scene's main camera from the mouse + WASD.
+	bool m_playMouseCaptured = false;
+	void setPlayMouseCaptured(bool captured);
+	void updatePlayCameraController(float dt);
+
 	// Scene file management. m_currentScenePath is the .hescene the editor
 	// world was last saved to / loaded from (empty = new/unsaved). m_savedRevision
 	// is the undo revision at that point; the scene is dirty when it differs.
