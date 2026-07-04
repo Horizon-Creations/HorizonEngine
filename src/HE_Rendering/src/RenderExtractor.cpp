@@ -150,7 +150,10 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 				HE::AABB b;
 				b.min = { m->boundsMin[0], m->boundsMin[1], m->boundsMin[2] };
 				b.max = { m->boundsMax[0], m->boundsMax[1], m->boundsMax[2] };
-				if (b.isValid()) d.localBounds = b;
+				// Require a real, non-degenerate box. A mesh registered without a computed
+				// AABB leaves boundsMin==boundsMax=={0,0,0} — "valid" but a zero-volume point,
+				// and culling against it drops the object the moment its pivot exits the view.
+				if (b.isValid() && b.max != b.min) d.localBounds = b;
 			}
 		items.push_back(d);
 	}
@@ -162,7 +165,14 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 		obj.meshAssetId     = d.meshId;
 		obj.materialAssetId = d.matId;
 		obj.transform       = d.world;
-		obj.worldBounds     = (d.localBounds.isValid() ? d.localBounds : kUnitCube).transformed(d.world);
+		// Cull only against KNOWN bounds. A mesh whose real AABB isn't available yet (not
+		// resident — common while streaming or on an LOD swap, worse in packaged builds)
+		// must NOT be culled against a tiny unit-cube proxy: that box is far smaller than a
+		// large mesh, so the object vanishes while plainly in view. Leaving the bounds
+		// invalid makes the conservative culler keep it visible until the backend resolves
+		// the mesh and fills in the real bounds (the GPU still clips it if it is genuinely
+		// off-screen, so there is no visible cost).
+		obj.worldBounds     = d.localBounds.isValid() ? d.localBounds.transformed(d.world) : HE::AABB{};
 		obj.entityId        = d.entId;
 		obj.lod             = d.lod;
 		obj.castsShadow     = d.castsShadow;
@@ -293,7 +303,10 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 			obj.meshAssetId     = fol.meshAssetId;
 			obj.materialAssetId = fol.materialAssetId;
 			obj.transform       = inst;
-			obj.worldBounds     = kUnitCube.transformed(inst);
+			// Real bounds are filled in by the backend mesh-resolve refine; leave them invalid
+			// here so a not-yet-resident instance stays visible instead of being culled against
+			// a unit-cube proxy smaller than the actual foliage mesh.
+			obj.worldBounds     = HE::AABB{};
 			obj.entityId        = static_cast<uint32_t>(e);
 			out.objects.push_back(obj);
 		}
