@@ -1300,6 +1300,9 @@ void EditorApplication::dumpFrameHeadless()
 		mat.type = HE::AssetType::Material;
 		mat.name = "MatTest";
 		mat.baseColor[0] = 0.2f; mat.baseColor[1] = 0.8f; mat.baseColor[2] = 0.3f;
+		// Custom base-color (banding) fed through the shared std-lit helper heLit() — so
+		// the sphere is both unmistakably custom AND sun-lit (M2). heLit + the lighting UBO
+		// come from the MaterialShaderLibrary preamble; the bright side follows HE_DUMP_TOD.
 		mat.customShaderFragGlsl = R"(#version 450
 layout(location = 0) in vec3 vNormal;
 layout(location = 1) in vec3 vColor;
@@ -1307,8 +1310,8 @@ layout(location = 0) out vec4 oColor;
 void main() {
     vec3 n = normalize(vNormal);
     float band = step(0.0, sin(n.y * 26.0));          // bold banding = unmistakably custom
-    vec3 a = vec3(0.95, 0.75, 0.10), b = vec3(0.80, 0.10, 0.55);
-    oColor = vec4(mix(a, b, band) * (0.35 + 0.65 * max(n.z, 0.0)), 1.0);
+    vec3 base = mix(vec3(0.95, 0.75, 0.10), vec3(0.80, 0.10, 0.55), band);
+    oColor = vec4(heLit(base, n, 0.0, 0.35), 1.0);    // shared Standard-Lit shading
 }
 )";
 		const HE::UUID matId = contentManager().registerMaterial(std::move(mat));
