@@ -235,6 +235,24 @@ void GameApplication::updateCameraController(float dt)
 	// Mouse look from the relative motion accumulated since last frame.
 	float dx = 0.0f, dy = 0.0f;
 	SDL_GetRelativeMouseState(&dx, &dy);
+
+	// Park the cursor back at the window centre after each frame's relative motion.
+	// With relative mode engaged this is a pure internal position update (no motion
+	// events); when it is NOT engaged (focus transition, platform quirk) the OS cursor
+	// physically drifts and would stall the look at the screen edge — the warp keeps it
+	// centred either way. SDL pre-sets last_x/last_y to the warp target, so the warp
+	// never pollutes the relative accumulator. Skipped while unfocused (alt-tabbed) so
+	// we never yank the cursor away from another app.
+	if (SDL_Window* w = window() ? window()->GetNativeWindow() : nullptr)
+	{
+		if (SDL_GetWindowFlags(w) & SDL_WINDOW_INPUT_FOCUS)
+		{
+			int ww = 0, wh = 0;
+			SDL_GetWindowSize(w, &ww, &wh);
+			SDL_WarpMouseInWindow(w, ww * 0.5f, wh * 0.5f);
+		}
+	}
+
 	constexpr float kSensitivity = 0.12f; // degrees per pixel
 	t.rotation.y -= dx * kSensitivity;    // yaw
 	t.rotation.x -= dy * kSensitivity;    // pitch
