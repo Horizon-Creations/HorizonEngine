@@ -14,7 +14,10 @@ namespace
 // interleaved 32-byte VertexIn (pos3, normal3, uv2 = 8 floats) as a flat std430 float
 // array indexed by gl_VertexIndex, and reads the Uniforms UBO (std140, matching the
 // engine's per-object Uniforms). This is the M2 surface-template's vertex stage in embryo.
-constexpr const char* kStandardVertexGlsl = R"(#version 450
+// Metal/Vulkan/D3D vertex: pulls the interleaved VertexIn as a flat std430 SSBO indexed
+// by gl_VertexIndex (mirrors the engine's `const device VertexIn*` binding). SSBOs are
+// GL 4.3+, so this variant is NOT used for the macOS-GL (4.1) path — see kStandardVertexAttrib.
+constexpr const char* kStandardVertexSSBO = R"(#version 450
 layout(std430, set = 0, binding = 0) readonly buffer Verts { float d[]; };
 layout(std140, set = 0, binding = 1) uniform U {
     mat4 mvp; mat4 model; vec4 color; vec4 flags; vec4 pbr;
@@ -27,6 +30,26 @@ void main() {
     vec3 nrm = vec3(d[b + 3], d[b + 4], d[b + 5]);
     gl_Position = u.mvp * vec4(pos, 1.0);
     vNormal = mat3(u.model) * nrm;
+    vColor  = u.color.rgb;
+}
+)";
+
+// GL-4.1-portable vertex: real vertex attributes (no SSBO), so it compiles on a GLSL 410
+// core context. The GL backend feeds pos/normal/uv via a VAO (locations 0/1/2, the same
+// interleaved 32-byte layout). Same varyings + Uniforms UBO as the SSBO variant, so the
+// shared fragments are identical across backends — only the vertex data path differs.
+constexpr const char* kStandardVertexAttrib = R"(#version 450
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec2 aUV;
+layout(std140, set = 0, binding = 1) uniform U {
+    mat4 mvp; mat4 model; vec4 color; vec4 flags; vec4 pbr;
+} u;
+layout(location = 0) out vec3 vNormal;
+layout(location = 1) out vec3 vColor;
+void main() {
+    gl_Position = u.mvp * vec4(aPos, 1.0);
+    vNormal = mat3(u.model) * aNormal;
     vColor  = u.color.rgb;
 }
 )";
@@ -94,7 +117,7 @@ std::string injectPreamble(const std::string& src)
 }
 } // namespace
 
-const char* MaterialShaderLibrary::standardVertexGlsl() { return kStandardVertexGlsl; }
+const char* MaterialShaderLibrary::standardVertexGlsl() { return kStandardVertexAttrib; }
 
 bool MaterialShaderLibrary::resolveFragment(const ContentManager& cm, const UUID& materialId,
                                             uint64_t& hashOut, std::string& glslOut) const
@@ -116,14 +139,15 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::standardVertex(Bac
     Compiled out;
     if (backend == Backend::Metal)
     {
-        // Pin so the vertex buffer lands at [[buffer(0)]] and Uniforms at [[buffer(1)]] —
-        // the exact bind points the Metal geometry loop issues per draw.
-        out = toCompiled(compileMslPinned(kStandardVertexGlsl, Stage::Vertex,
+        // SSBO vertex-pull, pinned so the vertex buffer lands at [[buffer(0)]] and Uniforms
+        // at [[buffer(1)]] — the exact bind points the Metal geometry loop issues per draw.
+        out = toCompiled(compileMslPinned(kStandardVertexSSBO, Stage::Vertex,
             { { Stage::Vertex, 0, 0, 0 }, { Stage::Vertex, 0, 1, 1 } }));
     }
     else
     {
-        out = toCompiled(compile(kStandardVertexGlsl, Stage::Vertex, toTarget(backend)));
+        // GL/D3D/Vulkan: attribute-based vertex so macOS-GL (4.1, no SSBO) can compile it.
+        out = toCompiled(compile(kStandardVertexAttrib, Stage::Vertex, toTarget(backend)));
     }
     return m_vertCache.emplace(key, std::move(out)).first->second;
 }
