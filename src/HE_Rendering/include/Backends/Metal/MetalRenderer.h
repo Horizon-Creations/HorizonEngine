@@ -10,6 +10,7 @@
 #include <HorizonRendering/CommandBuffer.h>
 #include <Math/AABB.h>
 #include <Types/UUID.h>
+#include <material/MaterialShaderLibrary.h> // shared cross-backend material shader layer
 #include <unordered_map>
 #include <atomic>
 #include <memory>
@@ -283,6 +284,7 @@ private:
 	// shader use the built-in PBR m_scenePipeline. Value may be null (build failed →
 	// cached so we don't retry every frame).
 	std::unordered_map<uint64_t, void*> m_materialPipelineCache; // hash → id<MTLRenderPipelineState>
+	HE::MaterialShaderLibrary           m_matShaderLib;          // shared GLSL→MSL cross-compile + cache
 	// A procedural sphere (interleaved pos3/normal3/uv2, matching VertexIn) so per-material
 	// pipelines are visible on real 3D geometry even in the empty headless dump scene.
 	// Built + drawn (two spheres, two materials) when HE_SHADERC_MATERIAL=1.
