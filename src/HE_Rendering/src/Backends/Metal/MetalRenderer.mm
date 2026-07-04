@@ -4675,6 +4675,21 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 	scene.weather       = glm::vec4(GetEnvironment().wetness, GetEnvironment().snowAmount, 0.0f, 0.0f);
 	[encoder setFragmentBytes:&scene length:sizeof(scene) atIndex:0];
 
+#if defined(HE_HAVE_SHADERC)
+	// Compact "material lighting ABI" for custom-shader materials (M2 std-lit). Bound at
+	// fragment buffer 1 so the shared MaterialShaderLibrary preamble's heLit() has sun +
+	// ambient. Harmless for the default PBR pipeline (which doesn't read buffer 1).
+	{
+		const glm::vec3 sc = GetEnvironment().sunColor, am = m_renderWorld.ambient;
+		HE::MaterialShaderLibrary::Lighting matLight;
+		matLight.sunDir[0]   = sunDir.x; matLight.sunDir[1]   = sunDir.y; matLight.sunDir[2]   = sunDir.z;
+		matLight.sunColor[0] = sc.r;     matLight.sunColor[1] = sc.g;     matLight.sunColor[2] = sc.b;
+		matLight.ambient[0]  = am.r;     matLight.ambient[1]  = am.g;     matLight.ambient[2]  = am.b;
+		[encoder setFragmentBytes:&matLight length:sizeof(matLight)
+		                  atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
+	}
+#endif
+
 	// Transparent (opacity < 1) draws collected during the opaque loop and replayed
 	// sorted back-to-front, alpha-blended, after the sky.
 	struct TPDraw { UnlitUniforms u; void* vbuf; void* ibuf; NSUInteger indexCount; void* tex; float distSq; };

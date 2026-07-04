@@ -22,6 +22,19 @@ class MaterialShaderLibrary
 public:
     enum class Backend { Metal, HLSL, GLSL410, GLSLES300, SpirV };
 
+    // Compact, stable shading input for material pipelines — the "material lighting ABI".
+    // The engine fills this each frame; the standard-lit preamble's heLit() reads it.
+    // std140: three vec4 = 48 bytes. Each backend binds it at its lighting slot (Metal:
+    // fragment [[buffer(kMetalLightingBufferIndex)]]). A UBO (GL 3.1+), so unlike the SSBO
+    // vertex it is fully GL-4.1 portable.
+    struct Lighting
+    {
+        float sunDir[4]   = { 0.0f, 1.0f, 0.0f, 0.0f }; // xyz = direction TO the sun
+        float sunColor[4] = { 1.0f, 1.0f, 1.0f, 0.0f }; // rgb = sun radiance
+        float ambient[4]  = { 0.1f, 0.1f, 0.1f, 0.0f }; // rgb = ambient/sky fill
+    };
+    static constexpr int kMetalLightingBufferIndex = 1; // fragment [[buffer(1)]]
+
     struct Compiled
     {
         bool                  ok = false;

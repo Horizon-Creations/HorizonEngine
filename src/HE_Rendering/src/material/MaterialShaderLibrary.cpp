@@ -55,6 +55,43 @@ MaterialShaderLibrary::Compiled toCompiled(he::shaderc::Result&& r)
     c.log    = std::move(r.log);
     return c;
 }
+
+// Standard-lit shader-library preamble, injected into every material fragment (after its
+// #version). Provides the lighting UBO (matches HE::MaterialShaderLibrary::Lighting) and
+// heLit() — the M2 "Standard Lit" shading a material calls instead of hand-rolling its own.
+// Unused by raw fragments (glslang drops the UBO when heLit isn't called), so it's inert
+// for the escape-hatch path. UBO (not SSBO) → GL-4.1 portable. Later: the node graph emits
+// calls to these std-library functions.
+constexpr const char* kLightingPreamble = R"(
+layout(std140, set = 0, binding = 0) uniform HeLighting {
+    vec4 sunDir;    // xyz = direction TO the sun (normalized)
+    vec4 sunColor;  // rgb = sun radiance
+    vec4 ambient;   // rgb = ambient / sky fill
+} heLight;
+vec3 heLit(vec3 baseColor, vec3 N, float metallic, float roughness) {
+    vec3  L    = normalize(heLight.sunDir.xyz);
+    vec3  n    = normalize(N);
+    float ndl  = max(dot(n, L), 0.0);
+    vec3  diff = baseColor * heLight.sunColor.rgb * ndl;
+    vec3  amb  = baseColor * heLight.ambient.rgb;
+    // cheap roughness-driven spec toward the sun (view ≈ +Z in this simple model)
+    vec3  H    = normalize(L + vec3(0.0, 0.0, 1.0));
+    float spec = pow(max(dot(n, H), 0.0), mix(4.0, 64.0, 1.0 - roughness)) * (1.0 - roughness);
+    return amb + diff + heLight.sunColor.rgb * spec * mix(0.04, 1.0, metallic);
+}
+)";
+
+// Insert the preamble right after the material's #version directive (GLSL requires
+// #version to be the first token). If the source has none, prepend one.
+std::string injectPreamble(const std::string& src)
+{
+    const size_t vpos = src.find("#version");
+    if (vpos == std::string::npos)
+        return std::string("#version 450\n") + kLightingPreamble + src;
+    size_t eol = src.find('\n', vpos);
+    if (eol == std::string::npos) eol = src.size() - 1;
+    return src.substr(0, eol + 1) + kLightingPreamble + src.substr(eol + 1);
+}
 } // namespace
 
 const char* MaterialShaderLibrary::standardVertexGlsl() { return kStandardVertexGlsl; }
@@ -100,7 +137,19 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragment(
     if (auto it = m_fragCache.find(key); it != m_fragCache.end()) return it->second;
 
     using namespace he::shaderc;
-    Compiled out = toCompiled(compile(glsl, Stage::Fragment, toTarget(backend)));
+    const std::string injected = injectPreamble(glsl); // adds the lighting UBO + heLit()
+    Compiled out;
+    if (backend == Backend::Metal)
+    {
+        // Pin the lighting UBO to the fragment slot the engine binds it at (buffer 1;
+        // SceneUniforms occupies fragment buffer 0 in the scene pass).
+        out = toCompiled(compileMslPinned(injected, Stage::Fragment,
+            { { Stage::Fragment, 0, 0, static_cast<uint32_t>(kMetalLightingBufferIndex) } }));
+    }
+    else
+    {
+        out = toCompiled(compile(injected, Stage::Fragment, toTarget(backend)));
+    }
     return m_fragCache.emplace(key, std::move(out)).first->second;
 }
 } // namespace HE
