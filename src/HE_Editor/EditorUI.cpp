@@ -1305,6 +1305,41 @@ void EditorUI::RenderProjectHub(AppContext& ctx)
 #endif // HE_IMGUI_ENABLED
 }
 
+// Starter template for a freshly created script, by language (0 = Lua, 1 = Python).
+static const char* scriptStarterTemplate(int lang)
+{
+	static const char* kLua =
+		"local M = {}\n\n"
+		"function M.onStart(self)\nend\n\n"
+		"function M.onUpdate(self, dt)\nend\n\n"
+		"return M\n";
+	static const char* kPy =
+		"import horizon\n\n"
+		"class NewScript(horizon.Behavior):\n"
+		"    def on_start(self):\n        pass\n\n"
+		"    def on_update(self, dt):\n        pass\n";
+	return (lang == 1) ? kPy : kLua;
+}
+
+// Rewrite a just-created script stub's language byte (SLNG) + starter (SRC), keeping
+// every other chunk (META → the UUID). Used when the user flips the language in the
+// name-on-create dialog, before they've opened/edited the file.
+static void rewriteScriptStubLanguage(const std::string& path, int lang)
+{
+	HAsset::Reader r;
+	if (!r.open(path)) return;
+	const uint16_t type = r.assetType();
+	HAsset::Writer w;
+	for (const auto& c : r.chunks())
+		if (c.id != HAsset::CHUNK_SRC && c.id != HAsset::CHUNK_SLNG)
+			w.addChunk(c.id, c.data.data(), c.data.size());
+	const char* starter = scriptStarterTemplate(lang);
+	w.addChunk(HAsset::CHUNK_SRC, starter, std::char_traits<char>::length(starter));
+	const uint8_t lb = static_cast<uint8_t>(lang);
+	w.addChunk(HAsset::CHUNK_SLNG, &lb, 1);
+	w.write(path, type);
+}
+
 // ─── Full Editor UI ───────────────────────────────────────────────────────────
 void EditorUI::RenderEditor(AppContext& ctx, float dt)
 {
@@ -3920,6 +3955,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 		static char        s_renameBuf[256]   = {};
 		static bool        s_openRenamePopup  = false;
 		static bool        s_renameIsCreate   = false; // naming a freshly created item
+		static int         s_renameScriptLang = -1;    // creating a script: 0=Lua 1=Python; -1=not a script
 		static bool        s_rightClickOnItem = false;
 
 		// ── Folders first ─────────────────────────────────────────────────
@@ -4221,6 +4257,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				s_renameTarget   = s_ctxMenuItem;
 				s_renameIsFolder = s_ctxMenuIsFolder;
 				s_renameIsCreate = false;
+				s_renameScriptLang = -1;
 				std::strncpy(s_renameBuf, displayName.c_str(), sizeof(s_renameBuf) - 1);
 				s_renameBuf[sizeof(s_renameBuf) - 1] = '\0';
 				s_openRenamePopup = true;
@@ -4267,6 +4304,17 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
 			ImGui::Spacing();
 
+			// Language picker for a script being created — flipping it rewrites the
+			// stub starter + language byte in place (the UUID in META is kept).
+			if (s_renameScriptLang >= 0)
+			{
+				ImGui::TextUnformatted("Language"); ImGui::SameLine();
+				ImGui::SetNextItemWidth(-1.0f);
+				if (ImGui::Combo("##script_lang", &s_renameScriptLang, "Lua\0Python\0"))
+					rewriteScriptStubLanguage(s_renameTarget, s_renameScriptLang);
+				ImGui::Spacing();
+			}
+
 			if (ImGui::Button("OK", ImVec2(140, 0)) || confirm)
 			{
 				std::string newName(s_renameBuf);
@@ -4298,6 +4346,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				}
 				s_renameTarget.clear();
 				s_renameIsCreate = false;
+				s_renameScriptLang = -1;
 				ImGui::CloseCurrentPopup();
 			}
 			ImGui::SameLine();
@@ -4307,6 +4356,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				// exists on disk; nothing to undo.
 				s_renameTarget.clear();
 				s_renameIsCreate = false;
+				s_renameScriptLang = -1;
 				ImGui::CloseCurrentPopup();
 			}
 
@@ -4373,19 +4423,10 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 					// this stub bypasses the ContentManager save path.
 					if (type == HE::AssetType::Script)
 					{
-						static const char* kLuaStarter =
-							"local M = {}\n\n"
-							"function M.onStart(self)\nend\n\n"
-							"function M.onUpdate(self, dt)\nend\n\n"
-							"return M\n";
-						static const char* kPyStarter =
-							"import horizon\n\n"
-							"class NewScript(horizon.Behavior):\n"
-							"    def on_start(self):\n        pass\n\n"
-							"    def on_update(self, dt):\n        pass\n";
-						const char* starter = (scriptLang == ScriptLanguage::Python) ? kPyStarter : kLuaStarter;
+						const int lang = static_cast<int>(scriptLang);
+						const char* starter = scriptStarterTemplate(lang);
 						w.addChunk(HAsset::CHUNK_SRC, starter, std::char_traits<char>::length(starter));
-						const uint8_t lb = static_cast<uint8_t>(scriptLang);
+						const uint8_t lb = static_cast<uint8_t>(lang);
 						w.addChunk(HAsset::CHUNK_SLNG, &lb, 1);
 					}
 					w.write(path, static_cast<uint16_t>(type));
@@ -4397,6 +4438,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				s_renameTarget    = path;
 				s_renameIsFolder  = false;
 				s_renameIsCreate  = true;
+				s_renameScriptLang = (type == HE::AssetType::Script) ? static_cast<int>(scriptLang) : -1;
 				std::strncpy(s_renameBuf, defaultName, sizeof(s_renameBuf) - 1);
 				s_renameBuf[sizeof(s_renameBuf) - 1] = '\0';
 				s_openRenamePopup = true;
@@ -4409,8 +4451,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 			if (ImGui::MenuItem("Texture"))      tryCreate("NewTexture",  ".hasset",  HE::AssetType::Texture);
 			if (ImGui::MenuItem("Static Mesh"))  tryCreate("NewMesh",     ".hasset",  HE::AssetType::StaticMesh);
 			if (ImGui::MenuItem("Skeletal Mesh"))tryCreate("NewSkelMesh", ".hasset",  HE::AssetType::SkeletalMesh);
-			if (ImGui::MenuItem("Script (Lua)"))    tryCreate("NewScript", ".hasset", HE::AssetType::Script, ScriptLanguage::Lua);
-			if (ImGui::MenuItem("Script (Python)")) tryCreate("NewScript", ".hasset", HE::AssetType::Script, ScriptLanguage::Python);
+				if (ImGui::MenuItem("Script"))       tryCreate("NewScript",   ".hasset",  HE::AssetType::Script, ScriptLanguage::Lua);
 			if (ImGui::MenuItem("Shader"))       tryCreate("NewShader",   ".hasset",  HE::AssetType::Shader);
 			if (ImGui::MenuItem("Audio"))        tryCreate("NewAudio",    ".hasset",  HE::AssetType::Audio);
 			if (ImGui::MenuItem("Font"))         tryCreate("NewFont",     ".hasset",  HE::AssetType::Font);
