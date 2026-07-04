@@ -153,6 +153,21 @@ mehr Nodes/Domains, Instancing/Perf, Hot-Reload.
 ---
 
 ## 7. Risiken
+- **Der geteilte Standard-Vertex ist SSBO-basiert (GL 4.3+) — bricht auf macOS-GL 4.1
+  (empirisch bestätigt 2026-07-04):** `MaterialShaderLibrary::standardVertexGlsl()` vertex-pullt
+  die Vertices via `layout(std430) buffer` (spiegelt Metals `const device VertexIn*`). SPIRV-Cross
+  emittiert für `Target::Glsl410` zwar `#version 410`, aber **weiterhin einen `std430 buffer`-Block**
+  → ungültig auf einem 4.1-Kontext (SSBO erst ab 4.3). D.h. der Layer ist cross-backend in der **API**,
+  aber der Vertex portiert real nur nach Metal/Vulkan/D3D (StructuredBuffer/SSBO ok), **nicht** nach
+  macOS-GL. **Entscheidung für GL-Adoption:** eine **GL-4.1-Vertex-Variante** mit echten `in`-Attributen
+  + Vertex-Descriptor bauen (statt SSBO-Pull); Metal behält den SSBO-Pull. Das ist genau der Vertex-
+  Factory-Vertrag aus §2 — der Vertex-Pfad ist backend-spezifisch, nur das Fragment ist wirklich geteilt.
+- **Asset→Pixel-Pfad ist verdrahtet, aber noch nicht bezeugt:** `resolveFragment` liest echte
+  `MaterialAsset.customShaderFragGlsl` und der Loop wählt die Pipeline — aber getestet sind bisher nur
+  (a) Serialisierungs-Round-Trip (Daten) und (b) Inline-Shader→Pixel (Demo-Kugeln rufen
+  `GetOrBuildMaterialPipeline` direkt). Kein Test/Screenshot treibt ein **echtes Asset** durch
+  resolve→Pipeline→Pixel (leere Dump-Szene, keine Editor-UI setzt das Feld). Nächster Beweis: eine
+  Szene mit einem Material-Asset, das einen Shader trägt (Editor-UI oder Test-Szene im Dump).
 - **Varianten-/Permutations-Explosion (beißt ab M1, nicht M4):** Material × Domain × Feature-`#define`s
   × **Vertex-Factory** (statisch/skinned/instanziert) × 5 Backends ist *der* klassische Skalierungs-
   Fehler von Material-Systemen. Erzwingt einen **Varianten-Key im `MaterialAsset`-Schema** und eine
