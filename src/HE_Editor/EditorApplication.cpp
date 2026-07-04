@@ -4,6 +4,9 @@
 #include <Diagnostics/Profiler.h>
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonScene/Components/EnvironmentComponent.h>
+#include <HorizonScene/Components/CameraComponent.h>
+#include <HorizonScene/Components/TransformComponent.h>
+#include <glm/gtc/quaternion.hpp>
 #include <HorizonScene/TerrainSystem.h>
 #include <HorizonScene/AnimationSystem.h>
 #include <HorizonScene/AnimationBlendSystem.h>
@@ -917,6 +920,8 @@ void EditorApplication::OnRender(float dt)
 			// Shared with the standalone game runtime (GameApplication) so weather,
 			// animation, particles, terrain, foliage, nav & LOD behave identically.
 			// Pass the physics world in play mode so precipitation collides with the scene.
+			// Drive the free-fly PIE camera first so LOD/particles follow the new pose.
+			updatePlayCameraController(dt);
 			const bool gpuParticles = m_editorConfig.GpuParticles &&
 			                          renderer()->GetCapabilities().supportsGpuParticles;
 			HE_PROFILE_SCOPE_N("SceneSystemsTick");
@@ -1403,6 +1408,76 @@ AppContext EditorApplication::makeContext()
 // Play: snapshot the editor world to a temp file (binary). Stop: wipe the
 // world and restore the snapshot — any changes made by game systems while
 // playing are discarded.
+void EditorApplication::setPlayMouseCaptured(bool captured)
+{
+	m_playMouseCaptured = captured;
+	if (SDL_Window* w = window() ? window()->GetNativeWindow() : nullptr)
+	{
+		SDL_SetWindowRelativeMouseMode(w, captured);
+		if (captured)
+		{
+			SDL_HideCursor();
+			SDL_GetRelativeMouseState(nullptr, nullptr); // flush stale delta
+		}
+		else SDL_ShowCursor();
+	}
+	// While the game owns the mouse, stop ImGui from reacting to the pinned cursor
+	// (panels/toolbar). Esc releases it so the editor UI is clickable again.
+	if (m_imguiReady)
+	{
+		ImGuiIO& io = ImGui::GetIO();
+		if (captured) io.ConfigFlags |= ImGuiConfigFlags_NoMouse;
+		else          io.ConfigFlags &= ~ImGuiConfigFlags_NoMouse;
+	}
+}
+
+// Free-fly camera while playing in the editor — mirrors GameApplication so PIE is
+// navigable like the packaged game. Drives the scene's main camera (isMain, else the
+// first) from raw mouse motion (look) + WASD/QE/Space/Ctrl (move). No-op unless
+// playing AND the mouse is captured.
+void EditorApplication::updatePlayCameraController(float dt)
+{
+	if (!m_isPlaying || !m_playMouseCaptured || !m_editorWorld || dt <= 0.0f) return;
+	auto& reg = m_editorWorld->registry();
+
+	entt::entity cam = entt::null;
+	for (auto [e, t, c] : reg.view<TransformComponent, CameraComponent>().each())
+	{
+		if (cam == entt::null) cam = e;
+		if (c.isMain) { cam = e; break; }
+	}
+	if (cam == entt::null) return;
+	auto& t = reg.get<TransformComponent>(cam);
+
+	float dx = 0.0f, dy = 0.0f;
+	SDL_GetRelativeMouseState(&dx, &dy);
+	constexpr float kSensitivity = 0.12f; // degrees per pixel
+	t.rotation.y -= dx * kSensitivity;    // yaw
+	t.rotation.x -= dy * kSensitivity;    // pitch
+	t.rotation.x = std::clamp(t.rotation.x, -89.0f, 89.0f);
+
+	const glm::quat q = glm::quat(glm::radians(t.rotation));
+	const glm::vec3 forward = q * glm::vec3(0.0f, 0.0f, -1.0f);
+	const glm::vec3 right   = q * glm::vec3(1.0f, 0.0f, 0.0f);
+	const glm::vec3 worldUp(0.0f, 1.0f, 0.0f);
+
+	Input& in = input();
+	glm::vec3 move(0.0f);
+	if (in.IsKeyDown(SDL_SCANCODE_W)) move += forward;
+	if (in.IsKeyDown(SDL_SCANCODE_S)) move -= forward;
+	if (in.IsKeyDown(SDL_SCANCODE_D)) move += right;
+	if (in.IsKeyDown(SDL_SCANCODE_A)) move -= right;
+	if (in.IsKeyDown(SDL_SCANCODE_E) || in.IsKeyDown(SDL_SCANCODE_SPACE)) move += worldUp;
+	if (in.IsKeyDown(SDL_SCANCODE_Q) || in.IsKeyDown(SDL_SCANCODE_LCTRL)) move -= worldUp;
+	if (glm::dot(move, move) > 0.0f)
+	{
+		float speed = 6.0f; // units/sec
+		if (in.IsKeyDown(SDL_SCANCODE_LSHIFT) || in.IsKeyDown(SDL_SCANCODE_RSHIFT)) speed *= 3.0f;
+		t.position += glm::normalize(move) * speed * dt;
+	}
+	t.dirty = true;
+}
+
 void EditorApplication::setPlayMode(bool play)
 {
 	if (play == m_isPlaying || !m_editorWorld)
@@ -1451,10 +1526,14 @@ void EditorApplication::setPlayMode(bool play)
 			}
 		}
 
+		// Capture the mouse so PIE plays like the packaged game (Esc toggles it).
+		setPlayMouseCaptured(true);
+
 		Logger::Log(Logger::LogLevel::Info, "EditorApplication: entering play mode");
 	}
 	else
 	{
+		setPlayMouseCaptured(false); // release the mouse when leaving play mode
 		m_editorWorld->clear();
 		if (!serializer.load(*m_editorWorld, snapshot, SerializeFormat::Binary))
 			Logger::Log(Logger::LogLevel::Error,
@@ -1736,6 +1815,15 @@ bool EditorApplication::OnEvent(const SDL_Event& event)
 #endif
 	default:
 		break;
+	}
+
+	// Esc toggles the play-mode mouse capture (like the packaged game): release it to
+	// click the editor UI (e.g. Stop), press again to resume mouse-look. Only in PIE.
+	if (m_isPlaying && event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat
+	    && event.key.key == SDLK_ESCAPE)
+	{
+		setPlayMouseCaptured(!m_playMouseCaptured);
+		return true;
 	}
 
 	// ── Unsaved-changes guard for OS-level close (window X / Cmd+Q / app quit) ──
