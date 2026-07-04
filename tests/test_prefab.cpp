@@ -1,4 +1,5 @@
 #include "doctest.h"
+#include <algorithm>
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/Components/TransformComponent.h>
@@ -180,4 +181,24 @@ TEST_CASE("ContentManager: acquirePrefab pins the asset")
     CHECK(cm.isPinned(id));
     // Unload should be refused while pinned
     CHECK(!cm.unloadAsset(id));
+}
+
+
+TEST_CASE("HorizonWorld: un-parent a child back to the World root")
+{
+    HorizonWorld world;
+    Entity parent = world.createEntity("Parent");
+    Entity child  = world.createEntity("Child");
+    REQUIRE(world.reparentEntity(child, parent));
+    auto& reg = world.registry();
+    CHECK(reg.get<HierarchyComponent>(child).parent == parent);
+
+    // Dragging an entity onto the outliner background reparents it to the root. The
+    // root is a built-in, but reparenting TO it (detaching to the top level) is allowed.
+    REQUIRE(world.reparentEntity(child, world.rootEntity()));
+    CHECK(reg.get<HierarchyComponent>(child).parent == world.rootEntity());
+    auto& pch = reg.get<HierarchyComponent>(parent).children;
+    CHECK(std::find(pch.begin(), pch.end(), child) == pch.end());       // gone from old parent
+    auto& rch = reg.get<HierarchyComponent>(world.rootEntity()).children;
+    CHECK(std::find(rch.begin(), rch.end(), child) != rch.end());        // now under the root
 }
