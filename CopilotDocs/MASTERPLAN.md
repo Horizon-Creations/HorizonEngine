@@ -253,9 +253,26 @@ Macht aus „Renderer + Systeme" eine Engine, in der man ein Spiel *baut*.
 | 6.4 | **Async-Asset-Streaming** (Lade-Jobs, Platzhalter-Assets, Unloading via Ref\<T\>) | 0.3, 0.4 | ✅ Forts. 56 — ContentManager::loadAssetAsync/pollAsyncResults/isAsyncPending; I/O auf globalPool (ThreadPool), parse+SlotMap-Registration immer auf Main-Thread; Duplikate coalesced; parseAndRegisterAsset als shared helper (sync+async); Application.cpp auf setContentRoot() umgestellt; 9 neue Tests — **On-demand-Streaming-Umbau (Forts. 62, 02.07., uncommitted): `mountPak` (lazy, ohne Parsen) + UUID→Entry-Residency-Index + Overlay-Stack (späterer Mount shadowt früheren per UUID = Patch/DLC/Mod) + on-demand `acquireXxx`/`ensureResident` (sync, nutzt AssetRef-Pin) + `loadAssetAsync(UUID)`/`streamMountedAssets` (async; Worker öffnet EIGENEN Reader, greift nie auf den geteilten Mount-Reader zu). GameApplication geflippt: eager `loadPak`→`mountPak`+`streamMountedAssets`, `pollAsyncResults(16)` budgetiert je Frame → nicht-blockierender Start, Assets poppen über Frames rein (Renderer überspringt nicht-residente), kein Frame-Freeze durch Registrierungs-Burst. read()-Backend statt mmap (bewusst: mmap-Zero-Copy hier gedämpft wg. comp+enc + SIGBUS-Risiko bei truncation). SlotMap ist `std::vector`-backed → Inserts nur an Frame-Grenzen, `getXxx` bleibt resident-only. Getestet: alle 10 Typen×{Store,LZ4,zstd}+verschlüsselt, overlay-shadowing, async-stream, Registrierungs-Budget, exakte Spiel-Runtime-Sequenz (ProjectExporter→hcfg→mount→stream→poll)** |
 | 6.5 | **Crash-Reporting scharf schalten** (CrashHandler existiert), Logging in Datei | — | ✅ Forts. 56 — SA_SIGINFO-Handler für SIGSEGV/SIGABRT/SIGILL/SIGFPE/SIGBUS; schreibt datierte .crash-Datei (Zeitstempel + Signal + backtrace via execinfo) in konfigurierbares Verzeichnis (Default: tmp); re-raised mit SIG_DFL für OS-Core-Dump; Windows-Stub (SEH TODO); 2 neue Tests |
 | 6.6 | **Linux-Window/Input-Pfad** testen + CI-Leg | 0.2, 6.2 | |
-| 6.7 | **Doku**: Getting-Started, Script-API-Referenz | 4b.2 | spätestens wenn jemand Zweites die Engine benutzt |
+| 6.7 | **Doku**: Getting-Started, Script-API-Referenz | 4b.2 | 🟡 Docs-Site live (Website-Repo `HorizonEngineDocs/`, https://horizonengine.horizoncreations.dev): Overview + Getting Started + Advanced, am 04.07.2026 gegen den Code verifiziert. Pflege-Regel siehe **Doku-Policy** unten. Offen: vollständige Script-API-Referenz (`horizon.*`) |
 
 **DoD:** Ein Knopf im Editor erzeugt ein lauffähiges, ausliefbares Spiel-Binary mit gepackten, komprimierten Assets — auf macOS und Windows.
+
+### Doku-Policy — Docs-Site aktuell halten & deployen (ENTSCHEIDUNG 04.07.2026)
+
+Die öffentliche Engine-Dokumentation lebt im **Website-Repo**
+(`~/VSCode/Website/HorizonEngineDocs/`, live unter
+https://horizonengine.horizoncreations.dev — Overview / Getting Started / Advanced).
+Stand 04.07.2026 ist sie gegen den Code verifiziert (Panel-Namen Scene / World Outliner /
+Details / Content Browser, Project Hub, `.hescene`-JSON v1.1, Lua-Scripting via
+`horizon`-API, Backends, Shortcuts, Systemanforderungen).
+
+**Regel:** Die Docs sind Teil der Definition-of-Done. Jede Änderung, die nutzersichtbares
+Verhalten berührt — Editor-UI/Panels, Shortcuts, Szenen-/Projektformat, Script-API
+(`horizon.*`, Lifecycle-Callbacks), Backends/Plattformen, Build/Export,
+Systemanforderungen — wird **im selben Arbeitsgang** in den Docs nachgezogen und
+anschließend **deployt** (`python3 deploy.py` im Website-Repo). Nicht aufschieben:
+veraltete Doku ist schlimmer als keine (Warnbeispiel: die stale ROADMAP.md /
+„Ist-Zustand"-Tabelle, die dem Code monatelang widersprach).
 
 ### D3D11 / D3D12 / Vulkan — was zur GL/Metal-Parität fehlt (Stand 18.06.2026)
 
