@@ -151,8 +151,11 @@ bool HorizonWorld::reparentEntity(Entity entity, Entity newParent)
 {
     if (entity == rootEntity_ || entity == newParent)
         return false;
-    if (isBuiltin(entity) || isBuiltin(newParent))
-        return false; // the environment sun/moon stay attached to the root
+    // A built-in (the environment sun/moon) can't be reparented, and nothing may be
+    // dropped UNDER a built-in — except the World root itself, which is the valid
+    // target for un-parenting an entity back to the top level.
+    if (isBuiltin(entity) || (isBuiltin(newParent) && newParent != rootEntity_))
+        return false;
     if (!registry_.valid(entity) || !registry_.valid(newParent))
         return false;
     if (isAncestorOf(entity, newParent))

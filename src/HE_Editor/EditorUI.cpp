@@ -3655,6 +3655,29 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
             --prevDepth;
         }
 
+        // ── Drop onto the empty area below the tree → un-parent to the World root ──
+        // The root is not a normal drop target (it's a built-in), so dragging an entity
+        // onto the outliner background is how you detach a child back to the top level.
+        // A rect-based target (not a Dummy item) so it doesn't suppress the background
+        // right-click "Create Entity" menu (which uses NoOpenOverItems).
+        {
+            const ImVec2 dropMin = ImGui::GetCursorScreenPos();
+            const ImVec2 avail   = ImGui::GetContentRegionAvail();
+            const ImRect dropBB(dropMin, ImVec2(dropMin.x + avail.x,
+                                                dropMin.y + std::max(avail.y, 24.0f)));
+            if (ImGui::BeginDragDropTargetCustom(dropBB, ImGui::GetID("##outliner_root_drop")))
+            {
+                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("HE_ENTITY"))
+                {
+                    Entity dragged{};
+                    std::memcpy(&dragged, payload->Data, sizeof(Entity));
+                    if (ctx.undoSys) ctx.undoSys->snapshotNow();
+                    ctx.world->reparentEntity(dragged, ctx.world->rootEntity());
+                }
+                ImGui::EndDragDropTarget();
+            }
+        }
+
         // ── Background context menu: create entity at root level ──────────
         if (ImGui::BeginPopupContextWindow("##outliner_bg_ctx",
             ImGuiPopupFlags_MouseButtonRight | ImGuiPopupFlags_NoOpenOverItems))
