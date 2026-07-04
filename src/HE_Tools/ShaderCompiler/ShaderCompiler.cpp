@@ -133,6 +133,48 @@ Result compile(const std::string& glsl, Stage stage, Target target)
     return r;
 }
 
+Result compileMslPinned(const std::string& glsl, Stage stage,
+                        const std::vector<MslPin>& pins)
+{
+    Result r;
+    std::lock_guard<std::mutex> lock(g_glslangMutex);
+    glslang::InitializeProcess();
+    if (glslToSpirv(glsl, stage, r.spirv, r.log))
+    {
+        try
+        {
+            spirv_cross::CompilerMSL c(r.spirv);
+            spirv_cross::CompilerMSL::Options o;
+            o.platform = spirv_cross::CompilerMSL::Options::macOS;
+            o.set_msl_version(2, 3);
+            c.set_msl_options(o);
+            for (const MslPin& p : pins)
+            {
+                spirv_cross::MSLResourceBinding b{};
+                b.stage = (p.stage == Stage::Vertex)   ? spv::ExecutionModelVertex
+                        : (p.stage == Stage::Fragment) ? spv::ExecutionModelFragment
+                                                       : spv::ExecutionModelGLCompute;
+                b.desc_set    = p.set;
+                b.binding     = p.binding;
+                b.msl_buffer  = p.mslBuffer;
+                b.msl_texture = p.mslBuffer;
+                b.msl_sampler = p.mslBuffer;
+                c.add_msl_resource_binding(b);
+            }
+            r.source = c.compile();
+            r.ok = true;
+        }
+        catch (const std::exception& e)
+        {
+            r.log += "SPIRV-Cross(MSL pinned): ";
+            r.log += e.what();
+            r.log += '\n';
+        }
+    }
+    glslang::FinalizeProcess();
+    return r;
+}
+
 MultiResult compileMany(const std::string& glsl, Stage stage,
                         const std::vector<Target>& targets)
 {

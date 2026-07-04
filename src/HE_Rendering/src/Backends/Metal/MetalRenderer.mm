@@ -12,6 +12,7 @@
 #include <vector>
 #include <algorithm>
 #include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp> // glm::translate (shaderc test mesh)
 #include <simd/simd.h>
 
 #import <Metal/Metal.h>
@@ -2557,6 +2558,9 @@ void MetalRenderer::Shutdown()
 	DrainRetiredTextures();
 	if (m_tonemapPipeline)      { CFBridgingRelease(m_tonemapPipeline);      m_tonemapPipeline = nullptr; }
 	if (m_shadercDemoPipeline)  { CFBridgingRelease(m_shadercDemoPipeline);  m_shadercDemoPipeline = nullptr; }
+	if (m_shadercMaterialPipeline) { CFBridgingRelease(m_shadercMaterialPipeline); m_shadercMaterialPipeline = nullptr; }
+	if (m_shadercTestVB)        { CFBridgingRelease(m_shadercTestVB);        m_shadercTestVB = nullptr; }
+	if (m_shadercTestIB)        { CFBridgingRelease(m_shadercTestIB);        m_shadercTestIB = nullptr; }
 	if (m_fxaaPipeline)         { CFBridgingRelease(m_fxaaPipeline);         m_fxaaPipeline = nullptr; }
 	if (m_uiPipeline)           { CFBridgingRelease(m_uiPipeline);           m_uiPipeline = nullptr; }
 	if (m_bloomBrightPipeline)  { CFBridgingRelease(m_bloomBrightPipeline);  m_bloomBrightPipeline = nullptr; }
@@ -4127,6 +4131,132 @@ void main() {
 	Logger::Log(Logger::LogLevel::Info,
 		"MetalRenderer: HE_SHADERC_DEMO overlay built from canonical GLSL via he::shaderc");
 }
+
+// Material-system M1: a DROP-IN replacement for m_scenePipeline whose MSL is cross-
+// compiled from a canonical-GLSL "standard" surface template. Pinned so the vertex
+// buffer lands at [[buffer(0)]] and Uniforms at [[buffer(1)]] — exactly the bind points
+// the opaque draw loop already uses (verts@0, setVertexBytes u@1) — so it needs no
+// changes to the per-draw binds. Deliberately simple hemispheric lighting (no sky/fog/
+// shadow) so a screenshot visibly shows THIS shader drawing the geometry. Enabled with
+// HE_SHADERC_MATERIAL=1; built once.
+void MetalRenderer::EnsureShadercMaterialPipeline()
+{
+	if (m_shadercMaterialTried) return;
+	m_shadercMaterialTried = true;
+	if (!std::getenv("HE_SHADERC_MATERIAL")) return;
+
+	// Vertex pulling mirrors the hand-written kUnlitMSL: read the interleaved 32-byte
+	// vertex (pos3, normal3, uv2 = 8 floats) as a flat std430 float array indexed by
+	// gl_VertexIndex, so the layout matches VertexIn byte-for-byte. Uniforms UBO (std140)
+	// matches the Metal `Uniforms` struct (mvp, model, color, flags, pbr).
+	static const char* kVert = R"(#version 450
+layout(std430, set = 0, binding = 0) readonly buffer Verts { float d[]; };
+layout(std140, set = 0, binding = 1) uniform U {
+    mat4 mvp; mat4 model; vec4 color; vec4 flags; vec4 pbr;
+} u;
+layout(location = 0) out vec3 vNormal;
+layout(location = 1) out vec3 vColor;
+void main() {
+    int b = gl_VertexIndex * 8;
+    vec3 pos = vec3(d[b + 0], d[b + 1], d[b + 2]);
+    vec3 nrm = vec3(d[b + 3], d[b + 4], d[b + 5]);
+    gl_Position = u.mvp * vec4(pos, 1.0);
+    vNormal = mat3(u.model) * nrm;
+    vColor  = u.color.rgb;
+}
+)";
+	static const char* kFrag = R"(#version 450
+layout(location = 0) in vec3 vNormal;
+layout(location = 1) in vec3 vColor;
+layout(location = 0) out vec4 oColor;
+void main() {
+    vec3 n = normalize(vNormal);
+    vec3 L = normalize(vec3(0.4, 0.9, 0.3));
+    float diff = max(dot(n, L), 0.0);
+    float hemi = 0.5 + 0.5 * n.y;                 // sky/ground ambient
+    vec3 col = vColor * (0.25 * hemi + 0.9 * diff);
+    oColor = vec4(col, 1.0);
+}
+)";
+
+	using namespace he::shaderc;
+	const Result v = compileMslPinned(kVert, Stage::Vertex, {
+		{ Stage::Vertex, 0, 0, 0 },   // SSBO verts  → [[buffer(0)]]
+		{ Stage::Vertex, 0, 1, 1 } }); // UBO Uniforms → [[buffer(1)]]
+	const Result f = compile(kFrag, Stage::Fragment, Target::Msl);
+	if (!v.ok || !f.ok)
+	{
+		Logger::Log(Logger::LogLevel::Error,
+			(std::string("MetalRenderer: HE_SHADERC_MATERIAL compile failed\n") + v.log + f.log).c_str());
+		return;
+	}
+
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	NSError* err = nil;
+	id<MTLLibrary> vLib = [device newLibraryWithSource:[NSString stringWithUTF8String:v.source.c_str()]
+	                                           options:nil error:&err];
+	id<MTLLibrary> fLib = err ? nil
+		: [device newLibraryWithSource:[NSString stringWithUTF8String:f.source.c_str()]
+		                       options:nil error:&err];
+	if (!vLib || !fLib)
+	{
+		Logger::Log(Logger::LogLevel::Error,
+			(std::string("MetalRenderer: HE_SHADERC_MATERIAL MSL did not compile: ")
+			 + (err ? err.localizedDescription.UTF8String : "?")).c_str());
+		return;
+	}
+	MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
+	desc.vertexFunction   = [vLib newFunctionWithName:@"main0"];
+	desc.fragmentFunction = [fLib newFunctionWithName:@"main0"];
+	desc.colorAttachments[0].pixelFormat = kSceneColorFormat; // same HDR target as m_scenePipeline
+	desc.depthAttachmentPixelFormat      = kDepthFormat;
+	id<MTLRenderPipelineState> pso = [device newRenderPipelineStateWithDescriptor:desc error:&err];
+	if (!pso)
+	{
+		Logger::Log(Logger::LogLevel::Error,
+			(std::string("MetalRenderer: HE_SHADERC_MATERIAL pipeline failed: ")
+			 + (err ? err.localizedDescription.UTF8String : "?")).c_str());
+		return;
+	}
+	m_shadercMaterialPipeline = (void*)CFBridgingRetain(pso);
+	Logger::Log(Logger::LogLevel::Info,
+		"MetalRenderer: HE_SHADERC_MATERIAL scene pipeline built from canonical GLSL via he::shaderc");
+
+	// Procedural UV sphere (interleaved pos3/normal3/uv2 = 8 floats, matching VertexIn)
+	// so the cross-compiled pipeline is visible on real 3D geometry even when the dump
+	// scene has no mesh objects.
+	{
+		const int   segU = 48, segV = 24;
+		const float radius = 18.0f;
+		std::vector<float>    verts;    verts.reserve((segU + 1) * (segV + 1) * 8);
+		std::vector<uint32_t> indices;
+		for (int y = 0; y <= segV; ++y)
+		{
+			const float v  = (float)y / segV, phi = v * (float)M_PI;
+			for (int x = 0; x <= segU; ++x)
+			{
+				const float u2 = (float)x / segU, theta = u2 * 2.0f * (float)M_PI;
+				const glm::vec3 n(std::sin(phi) * std::cos(theta), std::cos(phi),
+				                  std::sin(phi) * std::sin(theta));
+				const glm::vec3 p = n * radius;
+				verts.insert(verts.end(), { p.x, p.y, p.z, n.x, n.y, n.z, u2, v });
+			}
+		}
+		for (int y = 0; y < segV; ++y)
+			for (int x = 0; x < segU; ++x)
+			{
+				const uint32_t a = y * (segU + 1) + x, b = a + segU + 1;
+				indices.insert(indices.end(), { a, b, a + 1, a + 1, b, b + 1 });
+			}
+		m_shadercTestIdx = (int)indices.size();
+		id<MTLBuffer> vb = [device newBufferWithBytes:verts.data()
+			length:verts.size() * sizeof(float) options:MTLResourceStorageModeShared];
+		id<MTLBuffer> ib = [device newBufferWithBytes:indices.data()
+			length:indices.size() * sizeof(uint32_t) options:MTLResourceStorageModeShared];
+		m_shadercTestVB = (void*)CFBridgingRetain(vb);
+		m_shadercTestIB = (void*)CFBridgingRetain(ib);
+	}
+}
 #endif // HE_HAVE_SHADERC
 
 // Fullscreen tonemap of the HDR scene color (+ bloom) into the bound encoder's target.
@@ -4423,6 +4553,31 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 	// total still comes from the exact stage-boundary pair on the encoder.
 	m_counters.total = static_cast<uint32_t>(m_renderWorld.objects.size());
 
+#if defined(HE_HAVE_SHADERC)
+	// M1 visual proof: draw a procedural sphere with the cross-compiled scene pipeline
+	// (verts@0, Uniforms@1 — the exact drop-in binding). Runs even in the empty dump
+	// scene so the cross-compiled geometry path is screenshot-able. HE_SHADERC_MATERIAL=1.
+	EnsureShadercMaterialPipeline();
+	if (m_shadercMaterialPipeline && m_shadercTestVB)
+	{
+		[encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_shadercMaterialPipeline];
+		[encoder setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
+		const glm::vec3 c = m_renderWorld.camera.position;
+		const glm::vec3 fwd = -glm::normalize(glm::vec3(glm::inverse(m_renderWorld.camera.view)[2]));
+		UnlitUniforms u{};
+		u.model = glm::translate(glm::mat4(1.0f), c + fwd * 60.0f); // 60u in front of the camera
+		u.mvp   = viewProj * u.model;
+		u.color = glm::vec4(0.95f, 0.42f, 0.18f, 1.0f);
+		[encoder setVertexBuffer:(__bridge id<MTLBuffer>)m_shadercTestVB offset:0 atIndex:0];
+		[encoder setVertexBytes:&u length:sizeof(u) atIndex:1];
+		[encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+		                    indexCount:(NSUInteger)m_shadercTestIdx
+		                     indexType:MTLIndexTypeUInt32
+		                   indexBuffer:(__bridge id<MTLBuffer>)m_shadercTestIB
+		             indexBufferOffset:0];
+	}
+#endif
+
 	if (m_renderWorld.objects.empty())
 	{
 		SamplePoint(renderEncoder, "(scene)");   // anchor
@@ -4451,7 +4606,15 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 
 	SamplePoint(renderEncoder, "(scene)");   // anchor before the opaque element
 
-	[encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_scenePipeline];
+	// M1: pick the opaque pipeline. Default = the hand-written PBR uber-shader; with
+	// HE_SHADERC_MATERIAL=1, the cross-compiled-from-canonical-GLSL drop-in (same bind
+	// points) — the first per-material pipeline selection in the real geometry loop.
+	void* opaquePipeline = m_scenePipeline;
+#if defined(HE_HAVE_SHADERC)
+	EnsureShadercMaterialPipeline();
+	if (m_shadercMaterialPipeline) opaquePipeline = m_shadercMaterialPipeline;
+#endif
+	[encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)opaquePipeline];
 	[encoder setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
 
