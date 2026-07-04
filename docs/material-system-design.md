@@ -159,10 +159,13 @@ mehr Nodes/Domains, Instancing/Perf, Hot-Reload.
   eine **attribut-basierte Variante** (`kStandardVertexAttrib`: `layout(location=0/1/2) in`), die der GL-
   Backend via VAO füttert. Empirisch verifiziert: die von SPIRV-Cross emittierte GLSL 410 (Vertex + Fragment
   inkl. Lighting-Preamble) ist **`glslangValidator`-gültig als Desktop-GLSL 410** (kein `buffer`-Block).
-  Damit ist das **Fragment + Lighting + der attribut-Vertex** echt GL-portabel. **Offen (separat):** der
-  OpenGL-Renderer *konsumiert* das Material-System noch nicht (per-Material-GL-Programme + VAO-Setup in
-  seiner Geometry-Schleife) — das ist die eigentliche GL-Adoption, hier nicht laufzeit-verifizierbar
-  (kein GL-Display in der Sandbox).
+  Damit ist das **Fragment + Lighting + der attribut-Vertex** echt GL-portabel. **ERLEDIGT + verifiziert
+  (2026-07-04, 5e694e6):** Der OpenGL-Renderer konsumiert das Material-System jetzt — per-Material-GL-
+  Programme (Hash-Cache) aus der geteilten Lib, per-Object + Lighting via UBOs (Blöcke „U"@1/„HeLighting"@0,
+  `glUniformBlockBinding` per Name; SPIRV-Cross-420pack aus für macOS-GL-4.1). Der Attribut-Vertex nutzt
+  loc 0/1/2 = passt exakt aufs bestehende Mesh-VAO. **GL läuft headless auf dem Dev-Mac** → real verifiziert:
+  dieselbe Material-Kugel via GL, glGetError=0, **Sphere-Pixel-Diff Metal↔GL = 0.63/255** (praktisch identisch).
+  Offen: Custom-Materials auf den GL-Instanced/Transparent-Pfaden (wie im Metal-Scope) + D3D/Vulkan.
 - **Asset→Pixel-Pfad ist verdrahtet, aber noch nicht bezeugt:** `resolveFragment` liest echte
   `MaterialAsset.customShaderFragGlsl` und der Loop wählt die Pipeline — aber getestet sind bisher nur
   (a) Serialisierungs-Round-Trip (Daten) und (b) Inline-Shader→Pixel (Demo-Kugeln rufen
