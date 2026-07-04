@@ -2628,6 +2628,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 						SDL_SetWindowRelativeMouseMode(sdlWin, false);
 						SDL_ShowCursor();                                        // restore the OS cursor
 						io.ConfigFlags &= ~ImGuiConfigFlags_NoMouseCursorChange; // hand cursor control back to ImGui
+						io.ConfigFlags &= ~ImGuiConfigFlags_NoMouse;             // re-enable ImGui mouse interaction
 						s_rmbCaptured = false;
 					}
 				};
@@ -2702,6 +2703,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 								SDL_GetRelativeMouseState(&rx, &ry);
 								cin.mouseDelta = glm::vec2(rx, ry);
 								io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange; // don't let ImGui re-show it mid-look
+								io.ConfigFlags |= ImGuiConfigFlags_NoMouse;            // block ImGui hover/click while free-looking
 								SDL_HideCursor();
 								ImGui::SetMouseCursor(ImGuiMouseCursor_None);
 							}
