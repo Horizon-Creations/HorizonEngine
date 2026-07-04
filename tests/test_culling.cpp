@@ -1,4 +1,7 @@
 #include "doctest.h"
+#include <Renderer/IRenderer.h>
+#include <HorizonScene/Components/HierarchyComponent.h>
+
 #include <Math/AABB.h>
 #include <HorizonRendering/FrustumCuller.h>
 #include <HorizonRendering/RenderSorter.h>
@@ -229,4 +232,39 @@ TEST_CASE("RenderSorter groups by mesh and sorts front-to-back")
 	CHECK(order[0] == 2);
 	CHECK(order[1] == 1);
 	CHECK(order[2] == 3);
+}
+
+TEST_CASE("Repro: a placed mesh dead-center in view must not be culled")
+{
+	ContentManager cm;
+	StaticMeshAsset mesh; mesh.type = HE::AssetType::StaticMesh; mesh.name = "box";
+	mesh.indices = {0,1,2};
+	mesh.boundsMin[0]=mesh.boundsMin[1]=mesh.boundsMin[2]=-1.0f;
+	mesh.boundsMax[0]=mesh.boundsMax[1]=mesh.boundsMax[2]= 1.0f;
+	const HE::UUID meshId = cm.registerStaticMesh(mesh);
+
+	HorizonWorld world;
+	auto e = world.createEntity("obj");
+	TransformComponent t; t.position = glm::vec3(10.0f, 0.0f, 0.0f);
+	world.registry().emplace<TransformComponent>(e, t);
+	MeshComponent mc; mc.meshAssetId = meshId;
+	world.registry().emplace<MeshComponent>(e, mc);
+
+	EditorCameraOverride cam;
+	cam.active = true;
+	cam.position = glm::vec3(10.0f, 0.0f, 20.0f);
+	cam.view = glm::lookAt(cam.position, glm::vec3(10.0f,0.0f,0.0f), glm::vec3(0,1,0));
+
+	RenderExtractor ex; ex.setContentManager(&cm);
+	RenderWorld rw;
+	ex.extract(world, rw, 16.0f/9.0f, &cam);
+	REQUIRE(rw.objects.size() == 1);
+	INFO("worldBounds min=(", rw.objects[0].worldBounds.min.x, ",", rw.objects[0].worldBounds.min.y, ",", rw.objects[0].worldBounds.min.z, ") max=(", rw.objects[0].worldBounds.max.x, ",", rw.objects[0].worldBounds.max.y, ",", rw.objects[0].worldBounds.max.z, ")");
+	INFO("transform col3=(", rw.objects[0].transform[3][0], ",", rw.objects[0].transform[3][1], ",", rw.objects[0].transform[3][2], ")");
+
+	FrustumCuller culler;
+	std::vector<uint8_t> vis;
+	culler.cull(rw, vis);
+	REQUIRE(vis.size() == 1);
+	CHECK(vis[0] == 1u);   // dead-center placed mesh must be visible
 }
