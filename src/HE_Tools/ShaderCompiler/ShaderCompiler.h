@@ -44,6 +44,23 @@ struct Result
 // Thread-safe: serialises glslang process init/teardown internally.
 Result compile(const std::string& glsl, Stage stage, Target target);
 
+// Pin a GLSL resource (descriptor set + binding) to an explicit MSL buffer slot, so a
+// cross-compiled shader can be a DROP-IN for a hand-written Metal pipeline whose bind
+// points are fixed (e.g. vertex buffer at [[buffer(0)]], uniforms at [[buffer(1)]]).
+// Without pinning, SPIRV-Cross auto-assigns MSL slots and the indices may not match
+// what the renderer binds.
+struct MslPin
+{
+    Stage    stage;       // which shader stage the resource is used in
+    uint32_t set;         // GLSL: layout(set = ...)
+    uint32_t binding;     // GLSL: layout(binding = ...)
+    uint32_t mslBuffer;   // target MSL [[buffer(n)]]
+};
+
+// Compile canonical GLSL to MSL with explicit buffer-slot assignments (Target::Msl).
+Result compileMslPinned(const std::string& glsl, Stage stage,
+                        const std::vector<MslPin>& pins);
+
 // Convenience: compile once to SPIR-V, then emit several targets from it (cheaper
 // than re-parsing the GLSL per target). Returns SPIR-V + a source per requested target,
 // in the same order as `targets`. `out[i].ok == false` on a per-target failure.

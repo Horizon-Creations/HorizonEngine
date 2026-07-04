@@ -276,6 +276,19 @@ private:
 	void* m_shadercDemoPipeline = nullptr; // id<MTLRenderPipelineState>
 	bool  m_shadercDemoTried    = false;
 
+	// Drop-in scene pipeline whose MSL is cross-compiled from a canonical-GLSL "standard"
+	// surface template (he::shaderc), pinned to the same bind points as m_scenePipeline
+	// (verts@0, Uniforms@1). Selected for the opaque pass when HE_SHADERC_MATERIAL=1 —
+	// the first per-material pipeline selection in the real geometry loop (M1).
+	void* m_shadercMaterialPipeline = nullptr; // id<MTLRenderPipelineState>
+	bool  m_shadercMaterialTried    = false;
+	// A procedural sphere (interleaved pos3/normal3/uv2, matching VertexIn) so the
+	// cross-compiled scene pipeline can be seen on real 3D geometry even in the empty
+	// headless dump scene. Built alongside the pipeline; drawn when HE_SHADERC_MATERIAL=1.
+	void* m_shadercTestVB   = nullptr; // id<MTLBuffer>
+	void* m_shadercTestIB   = nullptr; // id<MTLBuffer>
+	int   m_shadercTestIdx  = 0;       // index count
+
 	void* m_hdrColor        = nullptr; // id<MTLTexture>, RGBA16Float (retained)
 	void* m_hdrDepth        = nullptr; // id<MTLTexture>, Depth32Float (retained)
 	int   m_hdrW            = 0;
@@ -285,6 +298,7 @@ private:
 	void  EncodeTonemap(void* renderEncoder); // fullscreen tonemap of m_hdrColor → LDR
 #if defined(HE_HAVE_SHADERC)
 	void  EnsureShadercDemoPipeline();        // HE_SHADERC_DEMO overlay (material-system M1)
+	void  EnsureShadercMaterialPipeline();    // HE_SHADERC_MATERIAL drop-in scene pipeline
 #endif
 
 	// ── FXAA (edge antialiasing) ─────────────────────────────────────────────
