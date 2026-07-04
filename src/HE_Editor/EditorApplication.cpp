@@ -315,6 +315,10 @@ void EditorApplication::OnInit()
 			m_fontHeading    = io.Fonts->AddFontDefault();
 		}
 
+		// Monospace font for the script code editor — ImGui's built-in ProggyClean is
+		// monospace, so the columns/line-numbers align without shipping a new TTF.
+		m_fontMono = io.Fonts->AddFontDefault();
+
 		// No io.Fonts->Build() here — since ImGui 1.92 the renderer backends
 		// own the font atlas (ImGuiBackendFlags_RendererHasTextures) and build
 		// it lazily; calling Build() before backend init raises errors.
@@ -1356,6 +1360,7 @@ AppContext EditorApplication::makeContext()
 		.fontBody            = m_fontBody,
 		.fontSubheading      = m_fontSubheading,
 		.fontHeading         = m_fontHeading,
+		.codeFont            = m_fontMono,
 		.logoTexture         = m_logoTexture,
 		.logoW               = m_logoW,
 		.logoH               = m_logoH,

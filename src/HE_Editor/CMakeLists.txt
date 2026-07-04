@@ -53,12 +53,20 @@ if(EXISTS "${IMGUI_DIR}/imgui.cpp")
 		${CMAKE_CURRENT_SOURCE_DIR}/vendor/imguizmo/ImGuizmo.cpp
 	)
 
+	# ImGuiColorTextEdit (vendored, MIT) — syntax-highlighting code editor for the
+	# script code-editor tab. Uses std::regex (patched from the fork's boost::regex).
+	list(APPEND IMGUI_SOURCES
+		${CMAKE_CURRENT_SOURCE_DIR}/vendor/ImGuiColorTextEdit/TextEditor.cpp
+		${CMAKE_CURRENT_SOURCE_DIR}/vendor/ImGuiColorTextEdit/LanguageDefinitions.cpp
+	)
+
 	add_library(imgui_editor STATIC ${IMGUI_SOURCES} "EditorUI.h")
 
 	target_include_directories(imgui_editor PUBLIC
 		${IMGUI_DIR}
 		${IMGUI_DIR}/backends
 		${CMAKE_CURRENT_SOURCE_DIR}/vendor/imguizmo
+		${CMAKE_CURRENT_SOURCE_DIR}/vendor/ImGuiColorTextEdit
 	)
 	target_link_libraries(imgui_editor PRIVATE SDL3::SDL3)
 
@@ -94,8 +102,9 @@ add_executable(HorizonEditor WIN32
 	EditorApplication.cpp
 	EditorUndo.cpp
 	EditorCamera.cpp
+	ScriptEditorPanel.cpp
 	stb_image_impl.cpp
- "EditorUI.h" "EditorUI.cpp")
+ "EditorUI.h" "EditorUI.cpp" "ScriptEditorPanel.h")
 
 if(APPLE)
 	target_sources(HorizonEditor PRIVATE ImGuiMetalBridge.mm ImGuiMetalBridge.h)
