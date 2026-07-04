@@ -2,6 +2,10 @@
 #include <Window/Window.h>
 #include <ContentManager/ContentManager.h>
 #include <Diagnostics/Logger.h>
+#if defined(HE_HAVE_SHADERC)
+#include "ShaderCompiler.h" // he::shaderc — canonical GLSL → MSL (material-system M1)
+#include <cstdlib>
+#endif
 #include <Diagnostics/EngineProfiler.h>
 #include <SDL3/SDL.h>
 #include <stdexcept>
@@ -2552,6 +2556,7 @@ void MetalRenderer::Shutdown()
 	DestroySSAOTargets();
 	DrainRetiredTextures();
 	if (m_tonemapPipeline)      { CFBridgingRelease(m_tonemapPipeline);      m_tonemapPipeline = nullptr; }
+	if (m_shadercDemoPipeline)  { CFBridgingRelease(m_shadercDemoPipeline);  m_shadercDemoPipeline = nullptr; }
 	if (m_fxaaPipeline)         { CFBridgingRelease(m_fxaaPipeline);         m_fxaaPipeline = nullptr; }
 	if (m_uiPipeline)           { CFBridgingRelease(m_uiPipeline);           m_uiPipeline = nullptr; }
 	if (m_bloomBrightPipeline)  { CFBridgingRelease(m_bloomBrightPipeline);  m_bloomBrightPipeline = nullptr; }
@@ -4036,6 +4041,94 @@ void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
 	m_ssaoResult = m_ssaoBlurTex;
 }
 
+#if defined(HE_HAVE_SHADERC)
+// Material-system M1 visual proof. Builds a fullscreen overlay pipeline whose MSL is
+// generated at runtime from ONE canonical GLSL source (glslang→SPIR-V→SPIRV-Cross via
+// he::shaderc) — the exact path a cross-backend material would take. Enabled only with
+// HE_SHADERC_DEMO=1; built once. Draws a shaded SDF sphere, alpha-blended over the scene,
+// so a screenshot proves the cross-compiled shader runs inside the real Metal frame.
+void MetalRenderer::EnsureShadercDemoPipeline()
+{
+	if (m_shadercDemoTried) return;
+	m_shadercDemoTried = true;
+	if (!std::getenv("HE_SHADERC_DEMO")) return;
+
+	// Canonical GLSL (Vulkan semantics) — authored ONCE, cross-compiled to MSL.
+	static const char* kVert = R"(#version 450
+void main() {
+    // Fullscreen triangle from gl_VertexIndex (no vertex buffer).
+    vec2 p = vec2(float((gl_VertexIndex << 1) & 2), float(gl_VertexIndex & 2));
+    gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}
+)";
+	static const char* kFrag = R"(#version 450
+layout(location = 0) out vec4 oColor;
+void main() {
+    vec2 res = vec2(1280.0, 720.0);              // dump is fixed 1280x720
+    vec2 uv = (gl_FragCoord.xy - 0.5 * res) / res.y;
+    uv.y = -uv.y;
+    float r = length(uv);
+    const float radius = 0.42;
+    float inside = smoothstep(radius, radius - 0.006, r);
+    vec3 n = normalize(vec3(uv, sqrt(max(radius*radius - r*r, 1e-4))));
+    vec3 L = normalize(vec3(0.5, 0.65, 0.8));
+    float d = max(dot(n, L), 0.0);
+    vec3 base = vec3(0.95, 0.42, 0.18);
+    vec3 col = base * (0.15 + 0.85 * d);
+    vec3 h = normalize(L + vec3(0.0, 0.0, 1.0));
+    col += vec3(1.0) * pow(max(dot(n, h), 0.0), 40.0) * 0.6;   // spec highlight
+    oColor = vec4(col, inside);
+}
+)";
+
+	using namespace he::shaderc;
+	const Result v = compile(kVert, Stage::Vertex,   Target::Msl);
+	const Result f = compile(kFrag, Stage::Fragment, Target::Msl);
+	if (!v.ok || !f.ok)
+	{
+		Logger::Log(Logger::LogLevel::Error,
+			(std::string("MetalRenderer: HE_SHADERC_DEMO compile failed\n") + v.log + f.log).c_str());
+		return;
+	}
+
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	NSError* err = nil;
+	id<MTLLibrary> vLib = [device newLibraryWithSource:[NSString stringWithUTF8String:v.source.c_str()]
+	                                           options:nil error:&err];
+	id<MTLLibrary> fLib = err ? nil
+		: [device newLibraryWithSource:[NSString stringWithUTF8String:f.source.c_str()]
+		                       options:nil error:&err];
+	if (!vLib || !fLib)
+	{
+		Logger::Log(Logger::LogLevel::Error,
+			(std::string("MetalRenderer: HE_SHADERC_DEMO MSL did not compile: ")
+			 + (err ? err.localizedDescription.UTF8String : "?")).c_str());
+		return;
+	}
+	// SPIRV-Cross names the entry point "main0" for every stage.
+	MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
+	desc.vertexFunction   = [vLib newFunctionWithName:@"main0"];
+	desc.fragmentFunction = [fLib newFunctionWithName:@"main0"];
+	desc.colorAttachments[0].pixelFormat = kSwapchainFormat;
+	desc.colorAttachments[0].blendingEnabled             = YES;
+	desc.colorAttachments[0].sourceRGBBlendFactor        = MTLBlendFactorSourceAlpha;
+	desc.colorAttachments[0].destinationRGBBlendFactor   = MTLBlendFactorOneMinusSourceAlpha;
+	desc.colorAttachments[0].sourceAlphaBlendFactor      = MTLBlendFactorOne;
+	desc.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+	id<MTLRenderPipelineState> pso = [device newRenderPipelineStateWithDescriptor:desc error:&err];
+	if (!pso)
+	{
+		Logger::Log(Logger::LogLevel::Error,
+			(std::string("MetalRenderer: HE_SHADERC_DEMO pipeline failed: ")
+			 + (err ? err.localizedDescription.UTF8String : "?")).c_str());
+		return;
+	}
+	m_shadercDemoPipeline = (void*)CFBridgingRetain(pso);
+	Logger::Log(Logger::LogLevel::Info,
+		"MetalRenderer: HE_SHADERC_DEMO overlay built from canonical GLSL via he::shaderc");
+}
+#endif // HE_HAVE_SHADERC
+
 // Fullscreen tonemap of the HDR scene color (+ bloom) into the bound encoder's target.
 void MetalRenderer::EncodeTonemap(void* renderEncoderPtr)
 {
@@ -4055,6 +4148,17 @@ void MetalRenderer::EncodeTonemap(void* renderEncoderPtr)
 	[enc setFragmentBytes:&params length:sizeof(params) atIndex:0];
 	[enc setFragmentBytes:m_lensFlareParams length:sizeof(m_lensFlareParams) atIndex:1];
 	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+
+#if defined(HE_HAVE_SHADERC)
+	// Material-system M1 proof: overlay a cross-compiled-from-GLSL shader (HE_SHADERC_DEMO=1).
+	EnsureShadercDemoPipeline();
+	if (m_shadercDemoPipeline)
+	{
+		[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_shadercDemoPipeline];
+		[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_noDepthState];
+		[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+	}
+#endif
 }
 
 // LDR intermediate the tonemap writes to and FXAA reads from. kSwapchainFormat so

@@ -329,12 +329,22 @@ if(HE_ENABLE_SHADERC)
     if(TARGET glslang AND TARGET SPIRV AND TARGET spirv-cross-msl)
         set(HE_HAVE_SHADERC TRUE)
         message(STATUS "HorizonEngine: glslang + SPIRV-Cross found — shader cross-compile enabled")
-        # M0 spike: prove GLSL → SPIR-V → MSL/HLSL/GLSL end-to-end.
-        add_executable(he_shader_spike ${CMAKE_SOURCE_DIR}/src/HE_Tools/ShaderCompiler/spike_main.cpp)
-        target_link_libraries(he_shader_spike PRIVATE
+
+        # Reusable in-process cross-compiler lib. glslang + SPIRV-Cross are linked
+        # PRIVATE so consumers only need src/HE_Tools/ShaderCompiler/ShaderCompiler.h.
+        add_library(he_shadercompiler STATIC
+            ${CMAKE_SOURCE_DIR}/src/HE_Tools/ShaderCompiler/ShaderCompiler.cpp)
+        target_include_directories(he_shadercompiler PUBLIC
+            ${CMAKE_SOURCE_DIR}/src/HE_Tools/ShaderCompiler)
+        target_link_libraries(he_shadercompiler PRIVATE
             glslang SPIRV glslang-default-resource-limits
             spirv-cross-core spirv-cross-glsl spirv-cross-msl spirv-cross-hlsl)
-        target_compile_features(he_shader_spike PRIVATE cxx_std_20)
+        target_compile_features(he_shadercompiler PUBLIC cxx_std_20)
+        target_compile_definitions(he_shadercompiler PUBLIC HE_HAVE_SHADERC=1)
+
+        # M0 spike: prove GLSL → SPIR-V → MSL/HLSL/GLSL end-to-end.
+        add_executable(he_shader_spike ${CMAKE_SOURCE_DIR}/src/HE_Tools/ShaderCompiler/spike_main.cpp)
+        target_link_libraries(he_shader_spike PRIVATE he_shadercompiler)
     else()
         message(STATUS "HorizonEngine: glslang/SPIRV-Cross targets not found — shader cross-compile disabled")
     endif()

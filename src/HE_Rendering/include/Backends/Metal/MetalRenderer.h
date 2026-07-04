@@ -269,6 +269,13 @@ private:
 	// it down to the LDR output (viewport texture or drawable). Sized to the
 	// current scene output, recreated on resize.
 	void* m_tonemapPipeline = nullptr; // id<MTLRenderPipelineState>
+
+	// Material-system M1 visual proof (HE_SHADERC_DEMO=1): a fullscreen overlay whose
+	// MSL is generated at runtime from ONE canonical GLSL source via he::shaderc
+	// (glslang→SPIR-V→SPIRV-Cross). Off unless the env var is set; built lazily.
+	void* m_shadercDemoPipeline = nullptr; // id<MTLRenderPipelineState>
+	bool  m_shadercDemoTried    = false;
+
 	void* m_hdrColor        = nullptr; // id<MTLTexture>, RGBA16Float (retained)
 	void* m_hdrDepth        = nullptr; // id<MTLTexture>, Depth32Float (retained)
 	int   m_hdrW            = 0;
@@ -276,6 +283,9 @@ private:
 	void  EnsureHDRTarget(int width, int height);
 	void  DestroyHDRTarget();
 	void  EncodeTonemap(void* renderEncoder); // fullscreen tonemap of m_hdrColor → LDR
+#if defined(HE_HAVE_SHADERC)
+	void  EnsureShadercDemoPipeline();        // HE_SHADERC_DEMO overlay (material-system M1)
+#endif
 
 	// ── FXAA (edge antialiasing) ─────────────────────────────────────────────
 	// Tonemap writes to m_ldrColor; this pass reads it, runs FXAA on the gamma-space
