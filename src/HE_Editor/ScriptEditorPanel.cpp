@@ -1,6 +1,7 @@
 #include "ScriptEditorPanel.h"
 #include "EditorApplication.h"                 // AppContext
 #include "TextEditor.h"                        // ImGuiColorTextEdit (vendored, MIT)
+#include <imgui_internal.h>                    // ImGuiContext::PlatformImeData (text-input activation)
 #include <ContentManager/HAsset.h>
 #include <Types/Enums.h>                       // HE::AssetType
 #include <filesystem>
@@ -148,6 +149,19 @@ namespace ScriptEditorPanel
 		st.editor.Render("##code",
 			ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows), ImVec2(0, 0), false);
 		if (ctx.codeFont) ImGui::PopFont();
+
+		// ImGuiColorTextEdit signals typing via io.WantTextInput, but ImGui 1.92 drives
+		// platform text-input activation (SDL_StartTextInput on macOS) from
+		// g.PlatformImeData.WantTextInput instead — which a custom widget never sets. So
+		// character events never reach io.InputQueueCharacters and typing does nothing
+		// (arrows/backspace still work — those are key events). Drive it directly while
+		// the editor is focused so SDL starts delivering SDL_EVENT_TEXT_INPUT.
+		if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows))
+		{
+			ImGuiContext& g = *ImGui::GetCurrentContext();
+			g.PlatformImeData.WantTextInput = true;
+			g.PlatformImeData.InputPos      = ImGui::GetWindowPos();
+		}
 
 		ImGui::End();
 	}
