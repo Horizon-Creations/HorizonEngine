@@ -176,6 +176,9 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 			HAsset::Reader::readPOD(c->data,o,a.metallic);
 			HAsset::Reader::readPOD(c->data,o,a.roughness);
 			HAsset::Reader::readPOD(c->data,o,a.opacity);
+			// Optional custom shader (appended after the PBR tail; absent in older
+			// materials → left empty by the bounds-checked reader → built-in PBR).
+			HAsset::Reader::readString(c->data,o,a.customShaderFragGlsl);
 		}
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_MTLU))
 		{
@@ -610,6 +613,7 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 		HAsset::Writer::appendPOD(b,a.baseColor[0]); HAsset::Writer::appendPOD(b,a.baseColor[1]); HAsset::Writer::appendPOD(b,a.baseColor[2]);
 		HAsset::Writer::appendPOD(b,a.metallic); HAsset::Writer::appendPOD(b,a.roughness);
 		HAsset::Writer::appendPOD(b,a.opacity);
+		HAsset::Writer::appendString(b,a.customShaderFragGlsl); // optional custom shader (back-compatible tail)
 		w.addChunk(HAsset::CHUNK_MTRL,b.data(),b.size());
 		break;
 	}

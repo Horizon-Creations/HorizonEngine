@@ -13,6 +13,22 @@ target_include_directories(glad PUBLIC
 
 set(HE_CORE_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/../HE_Core/include)
 
+# ─── Shared cross-backend material shader layer ────────────────────────────────
+# Backend-agnostic: MaterialAsset custom GLSL → per-backend source via he::shaderc.
+# Every backend links this and builds its own pipeline object from the shared source.
+# Only available when the shader cross-compiler was fetched (HE_ENABLE_SHADERC).
+if(TARGET he_shadercompiler)
+    add_library(he_materialshader STATIC
+        src/material/MaterialShaderLibrary.cpp
+        include/material/MaterialShaderLibrary.h)
+    target_include_directories(he_materialshader PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${HE_CORE_INCLUDE})
+    target_link_libraries(he_materialshader PUBLIC HorizonCore PRIVATE he_shadercompiler)
+    target_compile_features(he_materialshader PUBLIC cxx_std_20)
+    target_compile_definitions(he_materialshader PUBLIC HE_HAVE_SHADERC=1)
+endif()
+
 # ─── OpenGL Backend ────────────────────────────────────────────────────────────
 find_package(OpenGL REQUIRED)
 
@@ -128,11 +144,11 @@ if(APPLE)
         PUBLIC  "-framework Metal" "-framework QuartzCore" "-framework Foundation"
         PRIVATE glm::glm HorizonCore SDL3::SDL3)
     target_compile_definitions(RendererMetal PRIVATE HE_RENDERING_BUILD_DLL)
-    # Cross-backend shader codegen (material system M1). Links the in-process
-    # glslang+SPIRV-Cross compiler when it was fetched (HE_ENABLE_SHADERC); the
-    # linked lib propagates HE_HAVE_SHADERC=1 so the demo path compiles in.
-    if(TARGET he_shadercompiler)
-        target_link_libraries(RendererMetal PRIVATE he_shadercompiler)
+    # Cross-backend shader codegen (material system M1). The shared material shader
+    # layer (he_materialshader) turns MaterialAsset GLSL into MSL; RendererMetal builds
+    # the pipeline objects. Both pull HE_HAVE_SHADERC=1 so the material path compiles in.
+    if(TARGET he_materialshader)
+        target_link_libraries(RendererMetal PRIVATE he_materialshader he_shadercompiler)
     endif()
     message(STATUS "HorizonRendering: Metal backend enabled")
 endif()

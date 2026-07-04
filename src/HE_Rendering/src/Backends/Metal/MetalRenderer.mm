@@ -4138,44 +4138,20 @@ void main() {
 // buffer lands at [[buffer(0)]] and Uniforms at [[buffer(1)]] — exactly the bind points
 // the opaque draw loop already uses (verts@0, setVertexBytes u@1) — so it needs no
 // changes to the per-draw binds. Deliberately simple hemispheric lighting (no sky/fog/
-// shadow) so a screenshot visibly shows THIS shader drawing the geometry. Enabled with
-// HE_SHADERC_MATERIAL=1; built once.
-// The standard drop-in vertex: vertex-pulls the interleaved 32-byte VertexIn (pos3,
-// normal3, uv2) as a flat std430 float array indexed by gl_VertexIndex, and reads the
-// Uniforms UBO (std140, matching the Metal `Uniforms` struct). Every material pipeline
-// splices its own fragment onto THIS vertex, so all materials share the loop's binds
-// (verts@0, Uniforms@1). This is the M2 surface-template's vertex stage in embryo.
-static const char* kStdMaterialVertGlsl = R"(#version 450
-layout(std430, set = 0, binding = 0) readonly buffer Verts { float d[]; };
-layout(std140, set = 0, binding = 1) uniform U {
-    mat4 mvp; mat4 model; vec4 color; vec4 flags; vec4 pbr;
-} u;
-layout(location = 0) out vec3 vNormal;
-layout(location = 1) out vec3 vColor;
-void main() {
-    int b = gl_VertexIndex * 8;
-    vec3 pos = vec3(d[b + 0], d[b + 1], d[b + 2]);
-    vec3 nrm = vec3(d[b + 3], d[b + 4], d[b + 5]);
-    gl_Position = u.mvp * vec4(pos, 1.0);
-    vNormal = mat3(u.model) * nrm;
-    vColor  = u.color.rgb;
-}
-)";
-
-// Build (or fetch) a pipeline for a material's custom fragment GLSL, spliced onto the
-// standard vertex. Cached by `key` (a hash of the fragment source); a null result is
-// cached too so a broken shader is not recompiled every frame.
+// Build (or fetch) a Metal pipeline for a material's custom fragment. The shared
+// MaterialShaderLibrary owns the canonical GLSL, the standard drop-in vertex, and the
+// glslang→SPIRV-Cross cross-compile (so every backend shares them); this function only
+// turns the emitted MSL into an MTLRenderPipelineState. Cached by `key` (fragment source
+// hash); a null result is cached too so a broken shader isn't rebuilt every frame.
 void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string& fragGlsl)
 {
 	if (auto it = m_materialPipelineCache.find(key); it != m_materialPipelineCache.end())
 		return it->second;
 
-	using namespace he::shaderc;
+	using Backend = HE::MaterialShaderLibrary::Backend;
+	const auto& v = m_matShaderLib.standardVertex(Backend::Metal);       // shared, cached MSL
+	const auto& f = m_matShaderLib.fragment(key, fragGlsl, Backend::Metal); // shared, cached MSL
 	void* result = nullptr;
-	const Result v = compileMslPinned(kStdMaterialVertGlsl, Stage::Vertex, {
-		{ Stage::Vertex, 0, 0, 0 },    // SSBO verts   → [[buffer(0)]]
-		{ Stage::Vertex, 0, 1, 1 } }); // UBO Uniforms → [[buffer(1)]]
-	const Result f = compile(fragGlsl, Stage::Fragment, Target::Msl);
 	if (v.ok && f.ok)
 	{
 		id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
@@ -4208,16 +4184,11 @@ void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string&
 	return result;
 }
 
-// A material has a custom shader iff its MaterialAsset carries customShaderFragGlsl.
-// key = hash of the source, so identical shaders across materials share one pipeline.
+// Delegate to the shared, backend-agnostic library (reads the MaterialAsset).
 bool MetalRenderer::ResolveMaterialShader(const HE::UUID& materialId, uint64_t& key, std::string& frag)
 {
-	if (materialId == HE::UUID{} || !m_contentManager) return false;
-	const MaterialAsset* mat = m_contentManager->getMaterial(materialId);
-	if (!mat || mat->customShaderFragGlsl.empty()) return false;
-	frag = mat->customShaderFragGlsl;
-	key  = std::hash<std::string>{}(frag);
-	return true;
+	if (!m_contentManager) return false;
+	return m_matShaderLib.resolveFragment(*m_contentManager, materialId, key, frag);
 }
 
 void MetalRenderer::EnsureShadercTestMesh()

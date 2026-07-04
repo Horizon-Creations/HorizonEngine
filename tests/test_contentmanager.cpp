@@ -114,6 +114,40 @@ TEST_CASE("ContentManager unload removes asset")
 	CHECK(cm.getMaterial(id) == nullptr);
 }
 
+TEST_CASE("ContentManager round-trips a material's custom shader (and defaults empty)")
+{
+	TempContentDir dir;
+	ContentManager cm(dir.path.string());
+
+	// A material WITH a custom shader source survives save → load.
+	MaterialAsset mat;
+	mat.type       = HE::AssetType::Material;
+	mat.name       = "custom";
+	mat.path       = "custom.hasset";
+	mat.baseColor[0] = 0.2f; mat.baseColor[1] = 0.4f; mat.baseColor[2] = 0.6f;
+	mat.opacity    = 0.75f;
+	mat.customShaderFragGlsl =
+		"#version 450\nlayout(location=0) out vec4 o;\nvoid main(){ o = vec4(1.0); }\n";
+	REQUIRE(cm.saveAsset(mat));
+
+	HE::UUID id = cm.loadAsset("custom.hasset");
+	const MaterialAsset* loaded = cm.getMaterial(id);
+	REQUIRE(loaded != nullptr);
+	CHECK(loaded->customShaderFragGlsl == mat.customShaderFragGlsl);
+	CHECK(loaded->opacity == doctest::Approx(0.75f)); // tail field before it still reads
+
+	// A material WITHOUT one loads with the field empty (back-compatible default).
+	MaterialAsset plain;
+	plain.type = HE::AssetType::Material;
+	plain.name = "plain";
+	plain.path = "plain.hasset";
+	REQUIRE(cm.saveAsset(plain));
+	HE::UUID pid = cm.loadAsset("plain.hasset");
+	const MaterialAsset* ploaded = cm.getMaterial(pid);
+	REQUIRE(ploaded != nullptr);
+	CHECK(ploaded->customShaderFragGlsl.empty());
+}
+
 TEST_CASE("ContentManager registers a runtime mesh without a disk file")
 {
 	TempContentDir dir;
