@@ -52,6 +52,33 @@ namespace
 	int s_viewportPxW = 0;
 	int s_viewportPxH = 0;
 
+	// RMB fly-look capture state for the Scene viewport (SDL relative-mouse mode). File-
+	// scope (not a viewport-local static) so the capture can be force-released from paths
+	// that DON'T draw the viewport — e.g. switching to a material/script tab mid-look via a
+	// keyboard shortcut. Otherwise relative mode + the ImGui NoMouse flag stay latched and
+	// the cursor is hidden/pinned with no way out but quitting.
+	bool  s_rmbCaptured = false;
+	float s_rmbStartX   = 0.f;
+	float s_rmbStartY   = 0.f;
+
+	// Drop any active fly-look capture: warp the cursor back to where the look-drag began,
+	// leave relative mode, re-show the OS cursor, and hand mouse control back to ImGui.
+	// Safe to call every frame — a no-op unless a capture is actually active.
+	void releaseViewportLookCapture(SDL_Window* win)
+	{
+		if (!s_rmbCaptured) return;
+		ImGuiIO& io = ImGui::GetIO();
+		if (win)
+		{
+			SDL_WarpMouseInWindow(win, s_rmbStartX, s_rmbStartY);
+			SDL_SetWindowRelativeMouseMode(win, false);
+		}
+		SDL_ShowCursor();
+		io.ConfigFlags &= ~ImGuiConfigFlags_NoMouseCursorChange;
+		io.ConfigFlags &= ~ImGuiConfigFlags_NoMouse;
+		s_rmbCaptured = false;
+	}
+
 	// The async SDL file slot (pendingFileReady/Result) is shared across project
 	// and scene operations; this records which one is currently in flight so the
 	// single result handler can dispatch correctly.
@@ -2612,6 +2639,11 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
         || ctx.tabs[ctx.activeTab].assetPath.empty();
     if (!sceneTabActive)
     {
+        // The scene viewport (and its RMB fly-look release) won't run this frame. If the
+        // user switched here mid-look via a keyboard shortcut, force-release the capture so
+        // the cursor isn't left hidden/pinned with ImGui mouse input disabled.
+        releaseViewportLookCapture(ctx.window ? ctx.window->GetNativeWindow() : nullptr);
+
         const ImGuiViewport* vpTab = ImGui::GetMainViewport();
         const std::string& tabPath = ctx.tabs[ctx.activeTab].assetPath;
         const ImVec2 tabPos(vpTab->WorkPos.x, vpTab->WorkPos.y + kTabBarH);
@@ -2806,28 +2838,12 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				// In play mode the game's scene camera takes over, so the
 				// override is cleared and editor navigation is disabled.
 				bool navigating = false;
-				// RMB fly-look capture state (relative-mouse mode). Hoisted above the
-				// play branch so entering play mode mid-drag releases the capture too,
-				// instead of stranding the window with a hidden/pinned cursor.
-				static bool  s_rmbCaptured = false;
-				static float s_rmbStartX   = 0.f;   // cursor pos at press, restored on release
-				static float s_rmbStartY   = 0.f;
 				SDL_Window* sdlWin = ctx.window ? ctx.window->GetNativeWindow() : nullptr;
 				// Drop fly-look capture: warp the cursor back to the press point BEFORE
 				// leaving relative mode (SDL applies the warp as the post-relative
-				// position, landing it exactly where the look-drag began).
-				auto endLookCapture = [&]()
-				{
-					if (s_rmbCaptured && sdlWin)
-					{
-						SDL_WarpMouseInWindow(sdlWin, s_rmbStartX, s_rmbStartY);
-						SDL_SetWindowRelativeMouseMode(sdlWin, false);
-						SDL_ShowCursor();                                        // restore the OS cursor
-						io.ConfigFlags &= ~ImGuiConfigFlags_NoMouseCursorChange; // hand cursor control back to ImGui
-						io.ConfigFlags &= ~ImGuiConfigFlags_NoMouse;             // re-enable ImGui mouse interaction
-						s_rmbCaptured = false;
-					}
-				};
+				// position, landing it exactly where the look-drag began). Shared with the
+				// tab-switch safety release (releaseViewportLookCapture, file scope).
+				auto endLookCapture = [&]() { releaseViewportLookCapture(sdlWin); };
 				if (ctx.editorCamera && ctx.isPlaying)
 				{
 					endLookCapture();
