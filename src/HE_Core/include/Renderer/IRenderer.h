@@ -308,6 +308,16 @@ public:
     // pipelines are a cheap cache hit. No-op on backends that build eagerly.
     virtual void WarmupMaterials(const std::vector<HE::UUID>& /*materialIds*/) {}
 
+    // ── Material preview ───────────────────────────────────────────────────
+    // Render a single sphere shaded with material `materialId` into a small
+    // dedicated offscreen target and return an ImGui-compatible texture handle
+    // for ImGui::Image (GL: GLuint cast; Metal: id<MTLTexture>). `size` is the
+    // square edge in pixels; `yaw` rotates the sphere (radians) for a turntable.
+    // Returns nullptr on backends without a preview path or on failure — the
+    // editor then shows a placeholder. Independent of the main viewport target.
+    virtual void* RenderMaterialPreview(class ContentManager& /*cm*/, const HE::UUID& /*materialId*/,
+                                        uint32_t /*size*/, float /*yaw*/) { return nullptr; }
+
     // Drop cached GPU buffers for a mesh so ResolveMesh re-uploads from the
     // ContentManager next frame. Call after replaceStaticMesh so sculpt/edit
     // changes are not masked by the renderer's VBO cache.

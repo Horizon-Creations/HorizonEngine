@@ -1297,6 +1297,7 @@ void EditorApplication::dumpFrameHeadless()
 	// scene whose MaterialAsset carries a custom shader, so the NORMAL render path
 	// (extractor → RenderObject.materialAssetId → ResolveMaterialShader → cross-compiled
 	// pipeline) draws it — witnessing the full asset→pixel path, not just an inline demo.
+	HE::UUID s_matTestId{}; // material-test id, reused by the preview-path witness below
 	if (const char* mt = std::getenv("HE_DUMP_MATERIALTEST"); mt && *mt && m_editorWorld)
 	{
 		MaterialAsset mat;
@@ -1367,6 +1368,7 @@ void EditorApplication::dumpFrameHeadless()
 			}
 		}
 		const HE::UUID matId = contentManager().registerMaterial(std::move(mat));
+		s_matTestId = matId;
 
 		// Witness the runtime scripting param path (HE_DUMP_SETPARAM="Name,r,g,b"):
 		// set a named graph parameter BY NAME exactly as a script's
@@ -1456,6 +1458,11 @@ void EditorApplication::dumpFrameHeadless()
 	// exercises the warmed path — the draw loop then hits the cache instead of
 	// cross-compiling mid-encoder.
 	if (m_editorWorld) r->WarmupMaterials(SceneSystems::collectAssetRefs(*m_editorWorld));
+
+	// Witness the material-preview offscreen path (HE_DUMP_PREVIEW + HE_PREVIEW_DUMP):
+	// render the test material's preview sphere and let the backend dump it.
+	if (const char* pv = std::getenv("HE_DUMP_PREVIEW"); pv && *pv && s_matTestId != HE::UUID{})
+		r->RenderMaterialPreview(contentManager(), s_matTestId, 512, 0.6f);
 	for (int i = 0; i < 3; ++i)
 		r->Render();
 
