@@ -192,7 +192,9 @@ State& stateFor(const std::string& path, AppContext& ctx)
 // Inline parameter widgets for a node; returns true when an edit was COMMITTED
 // (deactivated-after-edit), so constant drags don't rebuild the pipeline every frame.
 // `scale` = canvas zoom, so the fixed widget widths track the scaled node box.
-bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f)
+// `drawName` = draw the name/label field (true in the side panel); the canvas passes
+// false because the name is edited in the node's colored header instead.
+bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true)
 {
 	bool committed = false;
 	switch (n.type)
@@ -244,17 +246,21 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f)
 			break;
 		}
 		case MatNodeType::ParamFloat:
-			ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
-			ImGui::InputText("##name", &n.s);
-			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			if (drawName) {
+				ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
+				ImGui::InputText("##name", &n.s);
+				committed |= ImGui::IsItemDeactivatedAfterEdit();
+			}
 			ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
 			ImGui::DragFloat("##v", &n.p[0], 0.01f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
 			break;
 		case MatNodeType::ParamColor:
-			ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
-			ImGui::InputText("##name", &n.s);
-			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			if (drawName) {
+				ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
+				ImGui::InputText("##name", &n.s);
+				committed |= ImGui::IsItemDeactivatedAfterEdit();
+			}
 			ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
 			ImGui::ColorEdit3("##c", n.p, ImGuiColorEditFlags_Float);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
@@ -262,9 +268,11 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f)
 		case MatNodeType::FnInput:
 		case MatNodeType::FnOutput:
 		{
-			ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
-			ImGui::InputText("##name", &n.s);
-			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			if (drawName) {
+				ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
+				ImGui::InputText("##name", &n.s);
+				committed |= ImGui::IsItemDeactivatedAfterEdit();
+			}
 			static const char* kTypes[] = { "Float", "Vec2", "Vec3", "Vec4" };
 			int t = std::clamp(static_cast<int>(n.p[0]), 0, 3);
 			ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
@@ -279,26 +287,32 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f)
 			break;
 		}
 		case MatNodeType::ParamVec2:
-			ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
-			ImGui::InputText("##name", &n.s);
-			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			if (drawName) {
+				ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
+				ImGui::InputText("##name", &n.s);
+				committed |= ImGui::IsItemDeactivatedAfterEdit();
+			}
 			ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
 			ImGui::DragFloat2("##v2", n.p, 0.01f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
 			break;
 		case MatNodeType::ParamVec4:
-			ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
-			ImGui::InputText("##name", &n.s);
-			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			if (drawName) {
+				ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
+				ImGui::InputText("##name", &n.s);
+				committed |= ImGui::IsItemDeactivatedAfterEdit();
+			}
 			ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
 			ImGui::DragFloat4("##v4", n.p, 0.01f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
 			break;
 		case MatNodeType::ParamBool:
 		{
-			ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
-			ImGui::InputText("##name", &n.s);
-			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			if (drawName) {
+				ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
+				ImGui::InputText("##name", &n.s);
+				committed |= ImGui::IsItemDeactivatedAfterEdit();
+			}
 			bool on = n.p[0] > 0.5f;
 			if (ImGui::Checkbox("Default", &on)) { n.p[0] = on ? 1.0f : 0.0f; committed = true; }
 			break;
@@ -308,17 +322,15 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f)
 	return committed;
 }
 
-// Vertical space the node reserves for its inline widgets (Param nodes have two rows).
+// Vertical space the node reserves for its inline VALUE widgets (the name, for named
+// nodes, lives in the colored header now — not in the body).
 float nodeParamHeight(MatNodeType type)
 {
 	const HE::MatNodeDesc& d = HE::matNodeDesc(type);
-	if (d.paramCount == 0) return 0.0f;
-	if (type == MatNodeType::ConstVec4 || type == MatNodeType::TextureSample) return 44.0f;
-	if (type == MatNodeType::ParamVec4) return 70.0f;                 // name + vec4 rows
-	if (type == MatNodeType::ParamFloat || type == MatNodeType::ParamColor ||
-	    type == MatNodeType::ParamVec2  || type == MatNodeType::ParamBool  ||
-	    type == MatNodeType::FnInput    || type == MatNodeType::FnOutput) return 52.0f;
-	return 26.0f;
+	if (d.paramCount == 0 && type != MatNodeType::TextureSample) return 0.0f;
+	if (type == MatNodeType::TextureSample) return 44.0f;         // filename + hint rows
+	if (type == MatNodeType::ConstVec4 || type == MatNodeType::ParamVec4) return 30.0f; // vec4 drag row
+	return 26.0f;                                                 // one value/combo row
 }
 
 bool isParamNode(MatNodeType t)
@@ -332,6 +344,15 @@ bool isConstNode(MatNodeType t)
 	return t == MatNodeType::ConstFloat || t == MatNodeType::ConstColor ||
 	       t == MatNodeType::ConstVec2  || t == MatNodeType::ConstVec4  ||
 	       t == MatNodeType::ConstBool;
+}
+// Nodes whose title is an editable NAME/label shown in the colored header (params +
+// constants + function-interface pins). The name (n.s) drives the uniform name for
+// params and the interface name for FnInput/FnOutput; for constants it is a cosmetic
+// label for readability (does not affect codegen).
+bool isNamedNode(MatNodeType t)
+{
+	return isParamNode(t) || isConstNode(t) ||
+	       t == MatNodeType::FnInput || t == MatNodeType::FnOutput;
 }
 
 // Central "Parameters & Constants" panel: every Param/Const node of the graph in
@@ -639,27 +660,28 @@ void render(AppContext& ctx, const std::string& assetPath,
 
 		ImGui::PushID(n.id);
 
-		// Body + title
+		// Body + colored header + border.
 		const bool selected = isSelected(n.id);
+		const bool named    = isNamedNode(n.type);
 		dl->AddRectFilled(p, ImVec2(p.x + nodeW, p.y + h), IM_COL32(52, 52, 56, 255), 5.0f);
 		dl->AddRectFilled(p, ImVec2(p.x + nodeW, p.y + titleH), categoryColor(d.category), 5.0f,
 		                  ImDrawFlags_RoundCornersTop);
 		dl->AddRect(p, ImVec2(p.x + nodeW, p.y + h),
 		            selected ? IM_COL32(255, 200, 80, 255) : IM_COL32(0, 0, 0, 160), 5.0f, 0,
 		            selected ? 2.0f : 1.0f);
-		dl->AddText(font, fsz, ImVec2(p.x + 8.0f * Z, p.y + 4.0f * Z), IM_COL32_WHITE,
-		            titleOverride.empty() ? d.name : titleOverride.c_str());
 
-		// Title = drag handle (selection + group move + node context menu).
+		// Full-node drag handle behind the title field / pins / widgets (AllowOverlap so
+		// those on-top items still get clicks; this only drags on empty node space) —
+		// lets you drag named nodes whose header is now an editable text field.
 		ImGui::SetCursorScreenPos(p);
-		ImGui::InvisibleButton("##title", ImVec2(nodeW, titleH));
+		ImGui::SetNextItemAllowOverlap();
+		ImGui::InvisibleButton("##nodedrag", ImVec2(nodeW, h));
 		if (ImGui::IsItemActivated())
 		{
 			st.selectedNode = n.id;
 			const bool shift = ImGui::GetIO().KeyShift;
 			if (shift)
 			{
-				// Toggle this node in/out of the multi-selection.
 				if (isSelected(n.id))
 					st.selection.erase(std::remove(st.selection.begin(), st.selection.end(), n.id), st.selection.end());
 				else
@@ -670,7 +692,6 @@ void render(AppContext& ctx, const std::string& assetPath,
 		}
 		if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
 		{
-			// Drag moves the whole selection (in graph units, so zoom-independent).
 			const float dxg = ImGui::GetIO().MouseDelta.x / Z;
 			const float dyg = ImGui::GetIO().MouseDelta.y / Z;
 			if (isSelected(n.id) && st.selection.size() > 1)
@@ -686,8 +707,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 			if (ImGui::MenuItem("Delete Node", nullptr, false, deletable)) deleteNode = n.id;
 			ImGui::EndPopup();
 		}
-		// Texture Sample: accept a texture dropped from the Content Browser (its payload
-		// is an absolute path — store it content-relative to match graphTexturePaths).
+		// Texture Sample: accept a texture dropped from the Content Browser onto the node.
 		if (n.type == MatNodeType::TextureSample && ImGui::BeginDragDropTarget())
 		{
 			if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("HE_ASSET_PATH"))
@@ -704,6 +724,26 @@ void render(AppContext& ctx, const std::string& assetPath,
 			}
 			ImGui::EndDragDropTarget();
 		}
+
+		// Header title: an editable name for Param/Const/Fn nodes, otherwise static text.
+		if (named)
+		{
+			ImGui::SetCursorScreenPos(ImVec2(p.x + 5.0f * Z, p.y + 3.0f * Z));
+			ImGui::SetNextItemWidth(nodeW - 10.0f * Z);
+			ImGui::PushStyleColor(ImGuiCol_FrameBg,        ImVec4(0, 0, 0, 0.0f));  // blend into the header
+			ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(1, 1, 1, 0.12f));
+			ImGui::PushStyleColor(ImGuiCol_FrameBgActive,  ImVec4(0, 0, 0, 0.30f));
+			ImGui::PushStyleColor(ImGuiCol_Text,           ImVec4(1, 1, 1, 1));
+			ImGui::SetWindowFontScale(Z);
+			const char* hint = isConstNode(n.type) ? d.name : "name"; // constants default to their type name
+			ImGui::InputTextWithHint("##hdrname", hint, &n.s);
+			if (ImGui::IsItemDeactivatedAfterEdit()) paramEdit = true; // rename → regenerate
+			ImGui::SetWindowFontScale(1.0f);
+			ImGui::PopStyleColor(4);
+		}
+		else
+			dl->AddText(font, fsz, ImVec2(p.x + 8.0f * Z, p.y + 4.0f * Z), IM_COL32_WHITE,
+			            titleOverride.empty() ? d.name : titleOverride.c_str());
 
 		const float pinR = kPinR * Z;
 		const float hit  = 16.0f * Z;
@@ -742,7 +782,8 @@ void render(AppContext& ctx, const std::string& assetPath,
 		{
 			ImGui::SetCursorScreenPos(ImVec2(p.x + 10.0f * Z, p.y + titleH + pad6 + rows * rowH));
 			ImGui::SetWindowFontScale(Z);
-			if (nodeParamWidgets(n, Z)) paramEdit = true;
+			// Name lives in the header for named nodes → only the value widget here.
+			if (nodeParamWidgets(n, Z, /*drawName=*/false)) paramEdit = true;
 			ImGui::SetWindowFontScale(1.0f);
 		}
 

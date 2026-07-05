@@ -382,7 +382,58 @@ TEST_CASE("MaterialGraph v5: logic nodes, If, and new parameter types")
 	CHECK(gen.glsl.find("step(0.5, heParams") != std::string::npos); // ParamBool threshold
 }
 
+TEST_CASE("Every node type has a registry entry and its emit matches its pins")
+{
+	// The registry (pins) drives both the editor UI and codegen; a type missing from
+	// it, or an emit case reading a pin the registry doesn't declare, is a bug.
+	for (int t = 0; t <= (int)MatNodeType::Not; ++t)
+	{
+		const auto type = static_cast<MatNodeType>(t);
+		const HE::MatNodeDesc& d = HE::matNodeDesc(type);
+		CHECK_MESSAGE(d.type == type, "registry entry missing/mismatched for node ", t);
+		// matNodeDescByName must round-trip the display name back to the same type.
+		const HE::MatNodeDesc* byName = HE::matNodeDescByName(d.name);
+		REQUIRE(byName != nullptr);
+		CHECK(byName->type == type);
+	}
+}
+
 #if defined(HE_TESTS_HAVE_SHADERC)
+TEST_CASE("Every standard node cross-compiles with all inputs wired")
+{
+	// Wire each node's inputs from a source and its output into the material Output,
+	// then cross-compile. A pin/emit mismatch produces malformed GLSL that fails here.
+	using B = HE::MaterialShaderLibrary::Backend;
+	HE::MaterialShaderLibrary lib;
+	for (const HE::MatNodeDesc& d : HE::matNodeRegistry())
+	{
+		// Output is the sink; the function-interface + call nodes need a function graph.
+		if (d.type == MatNodeType::Output || d.type == MatNodeType::FnInput ||
+		    d.type == MatNodeType::FnOutput || d.type == MatNodeType::FunctionCall)
+			continue;
+
+		MaterialGraph g;
+		const int out = g.addNode(MatNodeType::Output);
+		const int n   = g.addNode(d.type);
+		// Feed every input pin from a fresh source node (ConstColor → coerces to any type).
+		for (size_t i = 0; i < d.inputs.size(); ++i)
+		{
+			const int src = g.addNode(MatNodeType::ConstColor);
+			CHECK(g.connect(src, 0, n, (int)i));
+		}
+		// Route the node's first output into BaseColor (or Metallic for a sink-less node).
+		if (!d.outputs.empty())
+			CHECK(g.connect(n, 0, out, 0));
+
+		const std::string glsl = HE::generateFragment(g).glsl;
+		const uint64_t hash = std::hash<std::string>{}(glsl) ^ (uint64_t)d.type;
+		const auto& msl = lib.fragment(hash, glsl, B::Metal);
+		CHECK_MESSAGE(msl.ok, "MSL compile failed for node '", d.name, "': ", msl.log);
+		const auto& gl = lib.fragment(hash, glsl, B::GLSL410);
+		CHECK_MESSAGE(gl.ok, "GLSL compile failed for node '", d.name, "': ", gl.log);
+	}
+}
+
 TEST_CASE("v5 graph (logic + If + new params) cross-compiles for Metal and GL")
 {
 	MaterialGraph g;
