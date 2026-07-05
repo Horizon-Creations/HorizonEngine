@@ -189,6 +189,27 @@ State& stateFor(const std::string& path, AppContext& ctx)
 	return st;
 }
 
+// Scale embedded ImGui widgets to the canvas zoom. Font scale alone is not enough —
+// FramePadding/spacing/grab are in pixels and would keep full size, making widgets
+// overflow the shrunken node box; scale those too so a node's widgets track its box.
+void pushWidgetScale(float z)
+{
+	const ImGuiStyle& s = ImGui::GetStyle();
+	const ImVec2 fp = s.FramePadding, is = s.ItemSpacing, iis = s.ItemInnerSpacing;
+	const float  fr = s.FrameRounding, gm = s.GrabMinSize;
+	ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,     ImVec2(fp.x * z, fp.y * z));
+	ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,      ImVec2(is.x * z, is.y * z));
+	ImGui::PushStyleVar(ImGuiStyleVar_ItemInnerSpacing, ImVec2(iis.x * z, iis.y * z));
+	ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding,    fr * z);
+	ImGui::PushStyleVar(ImGuiStyleVar_GrabMinSize,      gm * z);
+	ImGui::SetWindowFontScale(z);
+}
+void popWidgetScale()
+{
+	ImGui::SetWindowFontScale(1.0f);
+	ImGui::PopStyleVar(5);
+}
+
 // Inline parameter widgets for a node; returns true when an edit was COMMITTED
 // (deactivated-after-edit), so constant drags don't rebuild the pipeline every frame.
 // `scale` = canvas zoom, so the fixed widget widths track the scaled node box.
@@ -594,20 +615,26 @@ void render(AppContext& ctx, const std::string& assetPath,
 	const ImVec2 origin = ImGui::GetCursorScreenPos();
 	const ImVec2 avail  = ImGui::GetContentRegionAvail();
 
-	// ── Zoom: mouse-wheel over the canvas scales the view about the cursor ────────
-	if (ImGui::IsWindowHovered())
+	// ── Scroll wheel: Cmd/Ctrl+wheel ZOOMS about the cursor; plain two-finger scroll
+	// (or wheel) PANS — the trackpad-natural way to move the canvas around. ──────────
+	if (ImGui::IsWindowHovered() && st.dragNode == 0 && !st.boxSel)
 	{
-		const float wheel = ImGui::GetIO().MouseWheel;
-		if (wheel != 0.0f && st.dragNode == 0 && !st.boxSel)
+		const ImGuiIO& io = ImGui::GetIO();
+		const bool zoomMod = io.KeyCtrl || io.KeySuper;
+		if (zoomMod && io.MouseWheel != 0.0f)
 		{
 			const float oldZoom = st.zoom;
-			st.zoom = std::clamp(st.zoom * (1.0f + wheel * 0.12f), 0.35f, 2.5f);
-			// Keep the graph point under the cursor fixed while zooming.
-			const ImVec2 mp = ImGui::GetIO().MousePos;
+			st.zoom = std::clamp(st.zoom * (1.0f + io.MouseWheel * 0.12f), 0.35f, 2.5f);
+			const ImVec2 mp = io.MousePos; // keep the graph point under the cursor fixed
 			const float gxr = (mp.x - origin.x - st.scroll.x) / oldZoom;
 			const float gyr = (mp.y - origin.y - st.scroll.y) / oldZoom;
 			st.scroll.x = mp.x - origin.x - gxr * st.zoom;
 			st.scroll.y = mp.y - origin.y - gyr * st.zoom;
+		}
+		else if (!zoomMod && (io.MouseWheel != 0.0f || io.MouseWheelH != 0.0f))
+		{
+			st.scroll.x += io.MouseWheelH * 28.0f;
+			st.scroll.y += io.MouseWheel  * 28.0f;
 		}
 	}
 	const float Z = st.zoom;
@@ -621,6 +648,17 @@ void render(AppContext& ctx, const std::string& assetPath,
 		dl->AddLine(ImVec2(origin.x + x, origin.y), ImVec2(origin.x + x, origin.y + avail.y), IM_COL32(255,255,255,10));
 	for (float y = fmodf(st.scroll.y, grid); y < avail.y; y += grid)
 		dl->AddLine(ImVec2(origin.x, origin.y + y), ImVec2(origin.x + avail.x, origin.y + y), IM_COL32(255,255,255,10));
+
+	// Full-canvas background button FIRST (nodes draw on top). It owns all empty-space
+	// interaction — pan + box-select — so this no longer depends on the fragile
+	// "is any item hovered" heuristic that the per-node drag handles broke. AllowOverlap
+	// lets the node buttons submitted afterwards take priority where they overlap.
+	ImGui::SetCursorScreenPos(origin);
+	ImGui::SetNextItemAllowOverlap();
+	ImGui::InvisibleButton("##canvasbg", ImVec2(std::max(avail.x, 1.0f), std::max(avail.y, 1.0f)),
+		ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonMiddle);
+	const bool canvasActive  = ImGui::IsItemActive();
+	const bool canvasHovered = ImGui::IsItemHovered();
 
 	std::vector<PinPos> pins;
 	pins.reserve(st.graph.nodes.size() * 4);
@@ -734,11 +772,11 @@ void render(AppContext& ctx, const std::string& assetPath,
 			ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(1, 1, 1, 0.12f));
 			ImGui::PushStyleColor(ImGuiCol_FrameBgActive,  ImVec4(0, 0, 0, 0.30f));
 			ImGui::PushStyleColor(ImGuiCol_Text,           ImVec4(1, 1, 1, 1));
-			ImGui::SetWindowFontScale(Z);
+			pushWidgetScale(Z);
 			const char* hint = isConstNode(n.type) ? d.name : "name"; // constants default to their type name
 			ImGui::InputTextWithHint("##hdrname", hint, &n.s);
 			if (ImGui::IsItemDeactivatedAfterEdit()) paramEdit = true; // rename → regenerate
-			ImGui::SetWindowFontScale(1.0f);
+			popWidgetScale();
 			ImGui::PopStyleColor(4);
 		}
 		else
@@ -781,10 +819,10 @@ void render(AppContext& ctx, const std::string& assetPath,
 		if (d.paramCount > 0 || n.type == MatNodeType::TextureSample)
 		{
 			ImGui::SetCursorScreenPos(ImVec2(p.x + 10.0f * Z, p.y + titleH + pad6 + rows * rowH));
-			ImGui::SetWindowFontScale(Z);
+			pushWidgetScale(Z);
 			// Name lives in the header for named nodes → only the value widget here.
 			if (nodeParamWidgets(n, Z, /*drawName=*/false)) paramEdit = true;
-			ImGui::SetWindowFontScale(1.0f);
+			popWidgetScale();
 		}
 
 		ImGui::PopID();
@@ -839,34 +877,22 @@ void render(AppContext& ctx, const std::string& assetPath,
 		}
 	}
 
-	// ── Pan (drag empty space or MMB), box-select (Shift+LMB on empty), add (RMB) ─
-	const bool onEmpty = ImGui::IsWindowHovered() && !ImGui::IsAnyItemHovered()
-	                     && st.dragNode == 0 && !ImGui::IsAnyItemActive();
-	// Middle-drag pans regardless of what's under the cursor.
-	if (ImGui::IsWindowHovered() && st.dragNode == 0 && !st.boxSel &&
+	// ── Empty-canvas interaction (driven by the ##canvasbg button, robust vs nodes) ─
+	// Middle-drag pans (mouse users); trackpad users pan with two-finger scroll above.
+	if ((canvasActive || ImGui::IsWindowHovered()) && st.dragNode == 0 && !st.boxSel &&
 	    ImGui::IsMouseDragging(ImGuiMouseButton_Middle))
 	{
 		st.scroll.x += ImGui::GetIO().MouseDelta.x;
 		st.scroll.y += ImGui::GetIO().MouseDelta.y;
 	}
-	// Left-drag on empty canvas PANS the view (trackpad-friendly — no middle button
-	// needed); hold Shift to rubber-band box-select instead. Clicking empty (no drag,
-	// no Shift) clears the selection.
-	if (onEmpty && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+	// Left-press on empty canvas begins a rubber-band box-select; a plain click (no
+	// drag) just clears the selection. Shift keeps the existing selection (additive).
+	if (canvasActive && st.dragNode == 0 && !st.boxSel &&
+	    ImGui::IsMouseClicked(ImGuiMouseButton_Left))
 	{
-		if (ImGui::GetIO().KeyShift)
-		{
-			st.boxSel   = true;
-			st.boxStart = ImGui::GetIO().MousePos;
-		}
-		else
-			st.selection.clear();
-	}
-	if (onEmpty && !st.boxSel && ImGui::IsMouseDragging(ImGuiMouseButton_Left) &&
-	    !ImGui::GetIO().KeyShift)
-	{
-		st.scroll.x += ImGui::GetIO().MouseDelta.x;
-		st.scroll.y += ImGui::GetIO().MouseDelta.y;
+		st.boxSel   = true;
+		st.boxStart = ImGui::GetIO().MousePos;
+		if (!ImGui::GetIO().KeyShift) st.selection.clear();
 	}
 	if (st.boxSel)
 	{
@@ -898,8 +924,8 @@ void render(AppContext& ctx, const std::string& assetPath,
 		st.selectedNode = 0;
 		structuralEdit = true;
 	}
-	if (ImGui::IsWindowHovered() && !ImGui::IsAnyItemHovered() &&
-	    ImGui::IsMouseClicked(ImGuiMouseButton_Right))
+	// Right-click over empty canvas (the bg button is hovered, not a node) → add-node.
+	if (canvasHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right))
 		ImGui::OpenPopup("##addNode");
 	// Fixed-size popup with an internal scroll region: the size never depends on the
 	// filtered result count, so the window can't grow/reposition (which shifted the
