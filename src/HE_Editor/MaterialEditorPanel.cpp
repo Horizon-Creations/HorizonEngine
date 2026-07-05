@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cfloat>
 #include <cstdint>
 #include <filesystem>
 #include <map>
@@ -33,7 +34,12 @@ struct State
 	bool          loaded  = false;
 	bool          dirty   = false;   // unsaved-to-disk graph edits
 	ImVec2        scroll  = ImVec2(40.0f, 40.0f);
-	int           selectedNode = 0;
+	float         zoom    = 1.0f;    // canvas zoom (graph-space → screen scale)
+	int           selectedNode = 0;  // primary selection (context menu / last clicked)
+	std::vector<int> selection;      // all selected node ids (multi-select move / box-select)
+	bool          boxSel   = false;  // rubber-band box-select in progress
+	ImVec2        boxStart;          // box-select anchor (screen space)
+	int           viewMode = 0;      // right pane: 0 = graph canvas, 1 = generated shader code
 	// Live link drag: source pin (node, pin index, output side?) or inactive (node == 0).
 	int  dragNode = 0, dragPin = 0;
 	bool dragFromOutput = true;
@@ -64,6 +70,8 @@ const HE::MaterialGraph* loadFunctionGraph(AppContext& ctx, const std::string& r
 
 // Pin hit-test data collected while drawing, consumed for link routing + drop targets.
 struct PinPos { int node; int pin; bool output; ImVec2 pos; MatPinType type; };
+// Screen-space node box, collected while drawing, consumed by box-select.
+struct NodeBox { int id; ImVec2 mn, mx; };
 
 constexpr float kNodeW    = 172.0f;
 constexpr float kTitleH   = 24.0f;
@@ -177,33 +185,34 @@ State& stateFor(const std::string& path, AppContext& ctx)
 
 // Inline parameter widgets for a node; returns true when an edit was COMMITTED
 // (deactivated-after-edit), so constant drags don't rebuild the pipeline every frame.
-bool nodeParamWidgets(MatGraphNode& n)
+// `scale` = canvas zoom, so the fixed widget widths track the scaled node box.
+bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f)
 {
 	bool committed = false;
 	switch (n.type)
 	{
 		case MatNodeType::ConstFloat:
-			ImGui::SetNextItemWidth(kNodeW - 24.0f);
+			ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
 			ImGui::DragFloat("##v", &n.p[0], 0.01f);
 			committed = ImGui::IsItemDeactivatedAfterEdit();
 			break;
 		case MatNodeType::ConstColor:
-			ImGui::SetNextItemWidth(kNodeW - 24.0f);
+			ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
 			ImGui::ColorEdit3("##c", n.p, ImGuiColorEditFlags_Float);
 			committed = ImGui::IsItemDeactivatedAfterEdit();
 			break;
 		case MatNodeType::Fresnel:
-			ImGui::SetNextItemWidth(kNodeW - 60.0f);
+			ImGui::SetNextItemWidth((kNodeW - 60.0f) * scale);
 			ImGui::DragFloat("Pow", &n.p[0], 0.05f, 0.01f, 16.0f);
 			committed = ImGui::IsItemDeactivatedAfterEdit();
 			break;
 		case MatNodeType::ConstVec2:
-			ImGui::SetNextItemWidth(kNodeW - 24.0f);
+			ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
 			ImGui::DragFloat2("##v2", n.p, 0.01f);
 			committed = ImGui::IsItemDeactivatedAfterEdit();
 			break;
 		case MatNodeType::ConstVec4:
-			ImGui::SetNextItemWidth(kNodeW - 24.0f);
+			ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
 			ImGui::DragFloat4("##v4", n.p, 0.01f);
 			committed = ImGui::IsItemDeactivatedAfterEdit();
 			break;
@@ -229,30 +238,30 @@ bool nodeParamWidgets(MatGraphNode& n)
 			break;
 		}
 		case MatNodeType::ParamFloat:
-			ImGui::SetNextItemWidth(kNodeW - 24.0f);
+			ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
 			ImGui::InputText("##name", &n.s);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
-			ImGui::SetNextItemWidth(kNodeW - 24.0f);
+			ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
 			ImGui::DragFloat("##v", &n.p[0], 0.01f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
 			break;
 		case MatNodeType::ParamColor:
-			ImGui::SetNextItemWidth(kNodeW - 24.0f);
+			ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
 			ImGui::InputText("##name", &n.s);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
-			ImGui::SetNextItemWidth(kNodeW - 24.0f);
+			ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
 			ImGui::ColorEdit3("##c", n.p, ImGuiColorEditFlags_Float);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
 			break;
 		case MatNodeType::FnInput:
 		case MatNodeType::FnOutput:
 		{
-			ImGui::SetNextItemWidth(kNodeW - 24.0f);
+			ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
 			ImGui::InputText("##name", &n.s);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
 			static const char* kTypes[] = { "Float", "Vec2", "Vec3", "Vec4" };
 			int t = std::clamp(static_cast<int>(n.p[0]), 0, 3);
-			ImGui::SetNextItemWidth(kNodeW - 24.0f);
+			ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
 			if (ImGui::Combo("##type", &t, kTypes, 4)) { n.p[0] = (float)t; committed = true; }
 			break;
 		}
@@ -264,24 +273,24 @@ bool nodeParamWidgets(MatGraphNode& n)
 			break;
 		}
 		case MatNodeType::ParamVec2:
-			ImGui::SetNextItemWidth(kNodeW - 24.0f);
+			ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
 			ImGui::InputText("##name", &n.s);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
-			ImGui::SetNextItemWidth(kNodeW - 24.0f);
+			ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
 			ImGui::DragFloat2("##v2", n.p, 0.01f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
 			break;
 		case MatNodeType::ParamVec4:
-			ImGui::SetNextItemWidth(kNodeW - 24.0f);
+			ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
 			ImGui::InputText("##name", &n.s);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
-			ImGui::SetNextItemWidth(kNodeW - 24.0f);
+			ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
 			ImGui::DragFloat4("##v4", n.p, 0.01f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
 			break;
 		case MatNodeType::ParamBool:
 		{
-			ImGui::SetNextItemWidth(kNodeW - 24.0f);
+			ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
 			ImGui::InputText("##name", &n.s);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
 			bool on = n.p[0] > 0.5f;
@@ -334,32 +343,29 @@ bool drawParamConstPanel(MaterialGraph& graph)
 	if (params.empty() && consts.empty()) return false;
 
 	bool committed = false;
-	if (ImGui::CollapsingHeader("Parameters & Constants", ImGuiTreeNodeFlags_DefaultOpen))
+	if (!params.empty())
 	{
-		if (!params.empty())
+		ImGui::TextDisabled("Parameters (runtime-settable uniforms)");
+		ImGui::Separator();
+		for (MatGraphNode* n : params)
 		{
-			ImGui::TextDisabled("Parameters (runtime-settable uniforms)");
-			ImGui::Separator();
-			for (MatGraphNode* n : params)
-			{
-				ImGui::PushID(n->id);
-				committed |= nodeParamWidgets(*n);
-				ImGui::PopID();
-			}
+			ImGui::PushID(n->id);
+			committed |= nodeParamWidgets(*n);
+			ImGui::PopID();
 		}
-		if (!consts.empty())
+	}
+	if (!consts.empty())
+	{
+		if (!params.empty()) ImGui::Spacing();
+		ImGui::TextDisabled("Constants (baked into the shader)");
+		ImGui::Separator();
+		for (MatGraphNode* n : consts)
 		{
-			if (!params.empty()) ImGui::Spacing();
-			ImGui::TextDisabled("Constants (baked into the shader)");
-			ImGui::Separator();
-			for (MatGraphNode* n : consts)
-			{
-				ImGui::PushID(n->id);
-				ImGui::TextUnformatted(HE::matNodeDesc(n->type).name);
-				ImGui::SameLine(90.0f);
-				committed |= nodeParamWidgets(*n);
-				ImGui::PopID();
-			}
+			ImGui::PushID(n->id);
+			ImGui::TextUnformatted(HE::matNodeDesc(n->type).name);
+			ImGui::SameLine(90.0f);
+			committed |= nodeParamWidgets(*n);
+			ImGui::PopID();
 		}
 	}
 	return committed;
@@ -429,12 +435,20 @@ void render(AppContext& ctx, const std::string& assetPath,
 		? ctx.contentManager->getMaterialFunctionMutable(st.materialId) : nullptr;
 	const bool assetOk = mat || fnAsset;
 
-	// ── Header: name, save, hints ──────────────────────────────────────────────
+	// ── Header: name, view toggle, save ────────────────────────────────────────
 	ImGui::TextUnformatted(st.name.c_str());
 	ImGui::SameLine();
 	ImGui::TextDisabled("%s%s", st.isFunction ? "material function" : "material graph",
 	                    st.dirty ? "  (unsaved)" : "");
-	ImGui::SameLine(ImGui::GetContentRegionAvail().x - 160.0f);
+	// Graph / Shader-code toggle for the right pane (functions have no shader).
+	if (!st.isFunction)
+	{
+		ImGui::SameLine(ImGui::GetContentRegionAvail().x - 330.0f);
+		if (ImGui::RadioButton("Graph", st.viewMode == 0)) st.viewMode = 0;
+		ImGui::SameLine();
+		if (ImGui::RadioButton("Shader Code", st.viewMode == 1)) st.viewMode = 1;
+	}
+	ImGui::SameLine(ImGui::GetContentRegionAvail().x - 140.0f);
 	if (ImGui::Button(st.isFunction ? "Save Function" : "Save Material") && assetOk)
 	{
 		applyToMaterial(st, ctx);
@@ -444,27 +458,86 @@ void render(AppContext& ctx, const std::string& assetPath,
 		Logger::Log(Logger::LogLevel::Info,
 			("MaterialEditor: saved '" + st.name + "'").c_str());
 	}
-	ImGui::SameLine();
-	ImGui::TextDisabled("(edits apply live)");
 	if (!assetOk)
 		ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "Asset could not be loaded.");
 	ImGui::Separator();
 
-	// ── Canvas ──────────────────────────────────────────────────────────────────
-	const float glslPaneH = 0.0f; // GLSL view lives in a collapsing header below the canvas
-	ImVec2 canvasSize = ImGui::GetContentRegionAvail();
-	canvasSize.y -= 28.0f; // keep one row for the GLSL collapsing header
-	ImGui::BeginChild("##graphCanvas", canvasSize, ImGuiChildFlags_Borders,
+	// Edit flags — both columns contribute; applied once at the end.
+	bool structuralEdit = false; // connect/disconnect/add/delete → apply immediately
+	bool paramEdit      = false; // committed inline widget edit → apply
+	bool panelEdit      = false; // committed edit in the side properties panel
+	int  deleteNode     = 0;
+
+	// ── Left column: material preview (top) + properties panel (scrollable) ──────
+	const float leftW = 300.0f;
+	ImGui::BeginChild("##matLeft", ImVec2(leftW, 0), ImGuiChildFlags_Borders);
+	{
+		ImGui::TextDisabled("Preview");
+		ImGui::BeginChild("##matPreview", ImVec2(0, 220), ImGuiChildFlags_Borders);
+		{
+			// Live material preview sphere lands here (RenderMaterialPreview). Until
+			// then, a centered placeholder so the layout is stable.
+			const ImVec2 cur = ImGui::GetCursorScreenPos();
+			const ImVec2 av  = ImGui::GetContentRegionAvail();
+			ImGui::GetWindowDrawList()->AddText(
+				ImVec2(cur.x + av.x * 0.5f - 28.0f, cur.y + av.y * 0.5f - 6.0f),
+				IM_COL32(140, 140, 140, 255), "(preview)");
+		}
+		ImGui::EndChild();
+		ImGui::Spacing();
+		ImGui::TextDisabled("Properties");
+		ImGui::BeginChild("##matProps", ImVec2(0, 0), ImGuiChildFlags_Borders);
+		if (!st.isFunction)
+			panelEdit = drawParamConstPanel(st.graph);
+		else
+			ImGui::TextDisabled("(function graph — no exposed parameters)");
+		ImGui::EndChild();
+	}
+	ImGui::EndChild();
+	ImGui::SameLine();
+
+	// ── Right column: graph canvas OR generated shader code ──────────────────────
+	ImGui::BeginChild("##matRight", ImVec2(0, 0), ImGuiChildFlags_Borders);
+	const bool showGraph = st.isFunction || st.viewMode == 0;
+	if (!showGraph)
+	{
+		// Read-only generated fragment GLSL.
+		ImGui::TextDisabled("Generated fragment GLSL (read-only)");
+		ImGui::InputTextMultiline("##shaderView", &st.lastGlsl, ImGui::GetContentRegionAvail(),
+			ImGuiInputTextFlags_ReadOnly);
+	}
+	else
+	{
+	ImGui::BeginChild("##graphCanvas", ImGui::GetContentRegionAvail(), ImGuiChildFlags_None,
 		ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoMove);
 
 	ImDrawList* dl = ImGui::GetWindowDrawList();
 	const ImVec2 origin = ImGui::GetCursorScreenPos();
 	const ImVec2 avail  = ImGui::GetContentRegionAvail();
-	(void)glslPaneH;
 
-	// Grid
+	// ── Zoom: mouse-wheel over the canvas scales the view about the cursor ────────
+	if (ImGui::IsWindowHovered())
+	{
+		const float wheel = ImGui::GetIO().MouseWheel;
+		if (wheel != 0.0f && st.dragNode == 0 && !st.boxSel)
+		{
+			const float oldZoom = st.zoom;
+			st.zoom = std::clamp(st.zoom * (1.0f + wheel * 0.12f), 0.35f, 2.5f);
+			// Keep the graph point under the cursor fixed while zooming.
+			const ImVec2 mp = ImGui::GetIO().MousePos;
+			const float gxr = (mp.x - origin.x - st.scroll.x) / oldZoom;
+			const float gyr = (mp.y - origin.y - st.scroll.y) / oldZoom;
+			st.scroll.x = mp.x - origin.x - gxr * st.zoom;
+			st.scroll.y = mp.y - origin.y - gyr * st.zoom;
+		}
+	}
+	const float Z = st.zoom;
+	ImFont* const font   = ImGui::GetFont();
+	const float   fsz    = ImGui::GetFontSize() * Z; // draw-list text size at this zoom
+
+	// Grid (spacing scales with zoom so the canvas feels anchored)
 	dl->AddRectFilled(origin, ImVec2(origin.x + avail.x, origin.y + avail.y), IM_COL32(28, 28, 30, 255));
-	const float grid = 32.0f;
+	const float grid = 32.0f * Z;
 	for (float x = fmodf(st.scroll.x, grid); x < avail.x; x += grid)
 		dl->AddLine(ImVec2(origin.x + x, origin.y), ImVec2(origin.x + x, origin.y + avail.y), IM_COL32(255,255,255,10));
 	for (float y = fmodf(st.scroll.y, grid); y < avail.y; y += grid)
@@ -472,9 +545,10 @@ void render(AppContext& ctx, const std::string& assetPath,
 
 	std::vector<PinPos> pins;
 	pins.reserve(st.graph.nodes.size() * 4);
-	bool  structuralEdit = false; // connect/disconnect/add/delete → apply immediately
-	bool  paramEdit      = false; // committed widget edit → apply
-	int   deleteNode     = 0;
+	// Screen rects of each node this frame → box-select hit-testing at mouse-release.
+	std::vector<NodeBox> nodeRects;
+	nodeRects.reserve(st.graph.nodes.size());
+	auto isSelected = [&](int id){ return std::find(st.selection.begin(), st.selection.end(), id) != st.selection.end(); };
 
 	// ── Nodes ──
 	for (auto& n : st.graph.nodes)
@@ -495,32 +569,58 @@ void render(AppContext& ctx, const std::string& assetPath,
 			titleOverride = std::filesystem::path(n.s).stem().string();
 			if (titleOverride.empty()) titleOverride = "Material Function";
 		}
-		const ImVec2 p(origin.x + st.scroll.x + n.x, origin.y + st.scroll.y + n.y);
+		const ImVec2 p(origin.x + st.scroll.x + n.x * Z, origin.y + st.scroll.y + n.y * Z);
+		const float nodeW  = kNodeW  * Z;
+		const float titleH = kTitleH * Z;
+		const float rowH   = kRowH   * Z;
+		const float pad6   = 6.0f    * Z;
 		const int rows = std::max<int>((int)nodeIns->size(), (int)nodeOuts->size());
-		const float paramH = nodeParamHeight(n.type);
-		const float h = kTitleH + 6.0f + rows * kRowH + paramH;
+		const float paramH = nodeParamHeight(n.type) * Z;
+		const float h = titleH + pad6 + rows * rowH + paramH;
+		nodeRects.push_back({ n.id, p, ImVec2(p.x + nodeW, p.y + h) });
 
 		ImGui::PushID(n.id);
 
 		// Body + title
-		const bool selected = st.selectedNode == n.id;
-		dl->AddRectFilled(p, ImVec2(p.x + kNodeW, p.y + h), IM_COL32(52, 52, 56, 255), 5.0f);
-		dl->AddRectFilled(p, ImVec2(p.x + kNodeW, p.y + kTitleH), categoryColor(d.category), 5.0f,
+		const bool selected = isSelected(n.id);
+		dl->AddRectFilled(p, ImVec2(p.x + nodeW, p.y + h), IM_COL32(52, 52, 56, 255), 5.0f);
+		dl->AddRectFilled(p, ImVec2(p.x + nodeW, p.y + titleH), categoryColor(d.category), 5.0f,
 		                  ImDrawFlags_RoundCornersTop);
-		dl->AddRect(p, ImVec2(p.x + kNodeW, p.y + h),
+		dl->AddRect(p, ImVec2(p.x + nodeW, p.y + h),
 		            selected ? IM_COL32(255, 200, 80, 255) : IM_COL32(0, 0, 0, 160), 5.0f, 0,
 		            selected ? 2.0f : 1.0f);
-		dl->AddText(ImVec2(p.x + 8, p.y + 4), IM_COL32_WHITE,
+		dl->AddText(font, fsz, ImVec2(p.x + 8.0f * Z, p.y + 4.0f * Z), IM_COL32_WHITE,
 		            titleOverride.empty() ? d.name : titleOverride.c_str());
 
-		// Title = drag handle (and selection, and node context menu).
+		// Title = drag handle (selection + group move + node context menu).
 		ImGui::SetCursorScreenPos(p);
-		ImGui::InvisibleButton("##title", ImVec2(kNodeW, kTitleH));
-		if (ImGui::IsItemActivated()) st.selectedNode = n.id;
+		ImGui::InvisibleButton("##title", ImVec2(nodeW, titleH));
+		if (ImGui::IsItemActivated())
+		{
+			st.selectedNode = n.id;
+			const bool shift = ImGui::GetIO().KeyShift;
+			if (shift)
+			{
+				// Toggle this node in/out of the multi-selection.
+				if (isSelected(n.id))
+					st.selection.erase(std::remove(st.selection.begin(), st.selection.end(), n.id), st.selection.end());
+				else
+					st.selection.push_back(n.id);
+			}
+			else if (!isSelected(n.id))
+				st.selection = { n.id }; // fresh single-select (keep group if already selected)
+		}
 		if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
 		{
-			n.x += ImGui::GetIO().MouseDelta.x;
-			n.y += ImGui::GetIO().MouseDelta.y;
+			// Drag moves the whole selection (in graph units, so zoom-independent).
+			const float dxg = ImGui::GetIO().MouseDelta.x / Z;
+			const float dyg = ImGui::GetIO().MouseDelta.y / Z;
+			if (isSelected(n.id) && st.selection.size() > 1)
+			{
+				for (int sid : st.selection)
+					if (MatGraphNode* sn = st.graph.findNode(sid)) { sn->x += dxg; sn->y += dyg; }
+			}
+			else { n.x += dxg; n.y += dyg; }
 		}
 		if (ImGui::BeginPopupContextItem("##nodeCtx"))
 		{
@@ -547,15 +647,17 @@ void render(AppContext& ctx, const std::string& assetPath,
 			ImGui::EndDragDropTarget();
 		}
 
+		const float pinR = kPinR * Z;
+		const float hit  = 16.0f * Z;
 		// Input pins (left column)
 		for (int i = 0; i < (int)nodeIns->size(); ++i)
 		{
-			const ImVec2 pp(p.x, p.y + kTitleH + 6.0f + i * kRowH + kRowH * 0.5f);
+			const ImVec2 pp(p.x, p.y + titleH + pad6 + i * rowH + rowH * 0.5f);
 			pins.push_back({ n.id, i, false, pp, (*nodeIns)[i].type });
-			dl->AddCircleFilled(pp, kPinR, pinColor((*nodeIns)[i].type));
-			dl->AddText(ImVec2(pp.x + 10, pp.y - 8), IM_COL32(210, 210, 210, 255), (*nodeIns)[i].name);
-			ImGui::SetCursorScreenPos(ImVec2(pp.x - 8, pp.y - 8));
-			ImGui::InvisibleButton((std::string("##in") + std::to_string(i)).c_str(), ImVec2(16, 16));
+			dl->AddCircleFilled(pp, pinR, pinColor((*nodeIns)[i].type));
+			dl->AddText(font, fsz, ImVec2(pp.x + 10.0f * Z, pp.y - fsz * 0.5f), IM_COL32(210, 210, 210, 255), (*nodeIns)[i].name);
+			ImGui::SetCursorScreenPos(ImVec2(pp.x - hit * 0.5f, pp.y - hit * 0.5f));
+			ImGui::InvisibleButton((std::string("##in") + std::to_string(i)).c_str(), ImVec2(hit, hit));
 			if (ImGui::IsItemActivated())
 			{ st.dragNode = n.id; st.dragPin = i; st.dragFromOutput = false; }
 			if (ImGui::IsItemClicked(ImGuiMouseButton_Right))
@@ -564,23 +666,26 @@ void render(AppContext& ctx, const std::string& assetPath,
 		// Output pins (right column)
 		for (int i = 0; i < (int)nodeOuts->size(); ++i)
 		{
-			const ImVec2 pp(p.x + kNodeW, p.y + kTitleH + 6.0f + i * kRowH + kRowH * 0.5f);
+			const ImVec2 pp(p.x + nodeW, p.y + titleH + pad6 + i * rowH + rowH * 0.5f);
 			pins.push_back({ n.id, i, true, pp, (*nodeOuts)[i].type });
-			dl->AddCircleFilled(pp, kPinR, pinColor((*nodeOuts)[i].type));
-			const ImVec2 ts = ImGui::CalcTextSize((*nodeOuts)[i].name);
-			dl->AddText(ImVec2(pp.x - 10 - ts.x, pp.y - 8), IM_COL32(210, 210, 210, 255), (*nodeOuts)[i].name);
-			ImGui::SetCursorScreenPos(ImVec2(pp.x - 8, pp.y - 8));
-			ImGui::InvisibleButton((std::string("##out") + std::to_string(i)).c_str(), ImVec2(16, 16));
+			dl->AddCircleFilled(pp, pinR, pinColor((*nodeOuts)[i].type));
+			const ImVec2 ts = font->CalcTextSizeA(fsz, FLT_MAX, 0.0f, (*nodeOuts)[i].name);
+			dl->AddText(font, fsz, ImVec2(pp.x - 10.0f * Z - ts.x, pp.y - fsz * 0.5f), IM_COL32(210, 210, 210, 255), (*nodeOuts)[i].name);
+			ImGui::SetCursorScreenPos(ImVec2(pp.x - hit * 0.5f, pp.y - hit * 0.5f));
+			ImGui::InvisibleButton((std::string("##out") + std::to_string(i)).c_str(), ImVec2(hit, hit));
 			if (ImGui::IsItemActivated())
 			{ st.dragNode = n.id; st.dragPin = i; st.dragFromOutput = true; }
 		}
 
 		// Inline parameter widgets under the pins (also for Texture Sample, which has
-		// no numeric params but shows its picked-texture label + clear).
+		// no numeric params but shows its picked-texture label + clear). Font-scaled to
+		// the zoom so they track the node box.
 		if (d.paramCount > 0 || n.type == MatNodeType::TextureSample)
 		{
-			ImGui::SetCursorScreenPos(ImVec2(p.x + 10, p.y + kTitleH + 6.0f + rows * kRowH));
-			if (nodeParamWidgets(n)) paramEdit = true;
+			ImGui::SetCursorScreenPos(ImVec2(p.x + 10.0f * Z, p.y + titleH + pad6 + rows * rowH));
+			ImGui::SetWindowFontScale(Z);
+			if (nodeParamWidgets(n, Z)) paramEdit = true;
+			ImGui::SetWindowFontScale(1.0f);
 		}
 
 		ImGui::PopID();
@@ -635,29 +740,70 @@ void render(AppContext& ctx, const std::string& assetPath,
 		}
 	}
 
-	// ── Canvas panning (LMB/MMB drag on empty space) + add-node context menu ──
-	if (ImGui::IsWindowHovered() && !ImGui::IsAnyItemActive() && st.dragNode == 0)
+	// ── Pan (MMB drag), box-select (LMB drag on empty), add-node (RMB) ───────────
+	const bool onEmpty = ImGui::IsWindowHovered() && !ImGui::IsAnyItemHovered()
+	                     && st.dragNode == 0 && !ImGui::IsAnyItemActive();
+	// Middle-drag pans regardless of what's under the cursor.
+	if (ImGui::IsWindowHovered() && st.dragNode == 0 &&
+	    ImGui::IsMouseDragging(ImGuiMouseButton_Middle))
 	{
-		if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle) ||
-		    (ImGui::IsMouseDragging(ImGuiMouseButton_Left) && !ImGui::IsAnyItemHovered()))
+		st.scroll.x += ImGui::GetIO().MouseDelta.x;
+		st.scroll.y += ImGui::GetIO().MouseDelta.y;
+	}
+	// LMB press on empty canvas starts a rubber-band box-select (Shift = additive).
+	if (onEmpty && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+	{
+		st.boxSel   = true;
+		st.boxStart = ImGui::GetIO().MousePos;
+		if (!ImGui::GetIO().KeyShift) st.selection.clear();
+	}
+	if (st.boxSel)
+	{
+		const ImVec2 m = ImGui::GetIO().MousePos;
+		const ImVec2 a(std::min(st.boxStart.x, m.x), std::min(st.boxStart.y, m.y));
+		const ImVec2 b(std::max(st.boxStart.x, m.x), std::max(st.boxStart.y, m.y));
+		dl->AddRectFilled(a, b, IM_COL32(255, 200, 80, 30));
+		dl->AddRect(a, b, IM_COL32(255, 200, 80, 180));
+		if (ImGui::IsMouseReleased(ImGuiMouseButton_Left))
 		{
-			st.scroll.x += ImGui::GetIO().MouseDelta.x;
-			st.scroll.y += ImGui::GetIO().MouseDelta.y;
+			for (const NodeBox& nb : nodeRects)
+			{
+				const bool hit = nb.mn.x <= b.x && nb.mx.x >= a.x && nb.mn.y <= b.y && nb.mx.y >= a.y;
+				if (hit && std::find(st.selection.begin(), st.selection.end(), nb.id) == st.selection.end())
+					st.selection.push_back(nb.id);
+			}
+			if (st.selection.size() == 1) st.selectedNode = st.selection[0];
+			st.boxSel = false;
 		}
+	}
+	// Delete key removes the whole selection (never the material Output node).
+	if (ImGui::IsWindowHovered() && !ImGui::IsAnyItemActive() && !st.selection.empty() &&
+	    ImGui::IsKeyPressed(ImGuiKey_Delete))
+	{
+		for (int sid : st.selection)
+			if (const MatGraphNode* sn = st.graph.findNode(sid); sn && sn->type != MatNodeType::Output)
+				st.graph.removeNode(sid);
+		st.selection.clear();
+		st.selectedNode = 0;
+		structuralEdit = true;
 	}
 	if (ImGui::IsWindowHovered() && !ImGui::IsAnyItemHovered() &&
 	    ImGui::IsMouseClicked(ImGuiMouseButton_Right))
 		ImGui::OpenPopup("##addNode");
+	// Fixed-size popup with an internal scroll region: the size never depends on the
+	// filtered result count, so the window can't grow/reposition (which shifted the
+	// item hitboxes) as you type. Results live in a scrolling child.
+	ImGui::SetNextWindowSize(ImVec2(250.0f, 340.0f), ImGuiCond_Always);
 	if (ImGui::BeginPopup("##addNode"))
 	{
 		const ImVec2 m = ImGui::GetMousePosOnOpeningCurrentPopup();
-		const float gx = m.x - origin.x - st.scroll.x;
-		const float gy = m.y - origin.y - st.scroll.y;
+		const float gx = (m.x - origin.x - st.scroll.x) / st.zoom;
+		const float gy = (m.y - origin.y - st.scroll.y) / st.zoom;
 		// Searchable palette: filters the node library AND the project's material
 		// functions by substring (name or category, case-insensitive).
 		static std::string s_search;
 		if (ImGui::IsWindowAppearing()) { s_search.clear(); ImGui::SetKeyboardFocusHere(); }
-		ImGui::SetNextItemWidth(220.0f);
+		ImGui::SetNextItemWidth(-1.0f);
 		ImGui::InputTextWithHint("##nodeSearch", "Search nodes...", &s_search);
 		ImGui::Separator();
 		auto lower = [](std::string v){ std::transform(v.begin(), v.end(), v.begin(),
@@ -667,25 +813,29 @@ void render(AppContext& ctx, const std::string& assetPath,
 		{ return q.empty() || lower(name).find(q) != std::string::npos
 		      || lower(cat).find(q) != std::string::npos; };
 
+		ImGui::BeginChild("##nodeList", ImVec2(0, 0), ImGuiChildFlags_None);
 		const char* lastCat = "";
 		for (const auto& d : HE::matNodeRegistry())
 		{
-			// Exactly one material Output; the function interface nodes only exist in
-			// function graphs; FunctionCall is inserted via the functions list below.
+			// Exactly one material Output; FunctionCall is inserted via the functions
+			// list below. FnInput/FnOutput exist ONLY in function graphs; every other
+			// node is available in both materials and functions.
 			if (d.type == MatNodeType::Output || d.type == MatNodeType::FunctionCall) continue;
 			const bool fnInterface = d.type == MatNodeType::FnInput || d.type == MatNodeType::FnOutput;
-			if (fnInterface != st.isFunction && fnInterface) continue; // Fn nodes only in functions
+			if (fnInterface && !st.isFunction) continue;
 			if (!matches(d.name, d.category)) continue;
 			if (std::string(lastCat) != d.category)
 			{
-				if (*lastCat) ImGui::Separator();
+				if (*lastCat) ImGui::Spacing();
 				ImGui::TextDisabled("%s", d.category);
 				lastCat = d.category;
 			}
-			if (ImGui::MenuItem(d.name))
+			if (ImGui::Selectable(d.name))
 			{
 				st.selectedNode = st.graph.addNode(d.type, gx, gy);
+				st.selection = { st.selectedNode };
 				structuralEdit = true;
+				ImGui::CloseCurrentPopup();
 			}
 		}
 
@@ -703,41 +853,34 @@ void render(AppContext& ctx, const std::string& assetPath,
 				if (st.isFunction && fn->path == st.relPath) continue; // no direct self-call
 				if (!headerShown)
 				{
-					if (*lastCat) ImGui::Separator();
+					if (*lastCat) ImGui::Spacing();
 					ImGui::TextDisabled("Material Functions");
 					headerShown = true;
 				}
-				if (ImGui::MenuItem(fnName.c_str()))
+				if (ImGui::Selectable(fnName.c_str()))
 				{
 					const int id = st.graph.addNode(MatNodeType::FunctionCall, gx, gy);
 					st.graph.findNode(id)->s = fn->path;
 					st.selectedNode = id;
+					st.selection = { id };
 					structuralEdit = true;
+					ImGui::CloseCurrentPopup();
 				}
 			}
 		}
+		ImGui::EndChild();
 		ImGui::EndPopup();
 	}
 
-	ImGui::EndChild();
+	ImGui::EndChild(); // ##graphCanvas
+	}                  // end graph-view branch
 
-	// ── Central Parameters & Constants panel ────────────────────────────────────
-	// Edit every Param/Const value in one place instead of hunting nodes on the
-	// canvas. Committed edits fold into the same regenerate path as canvas edits.
-	const bool panelEdit = drawParamConstPanel(st.graph);
+	ImGui::EndChild(); // ##matRight
 
-	// Structural / committed edits → regenerate + push into the live material.
+	// Structural / committed edits (either column) → regenerate + push into the live material.
 	if (deleteNode != 0) { st.graph.removeNode(deleteNode); structuralEdit = true; }
 	if ((structuralEdit || paramEdit || panelEdit) && assetOk)
 		applyToMaterial(st, ctx);
-
-	// ── Generated GLSL (debug view) ─────────────────────────────────────────────
-	if (!st.isFunction && ImGui::CollapsingHeader("Generated GLSL"))
-	{
-		ImGui::BeginChild("##glsl", ImVec2(0, 180.0f), ImGuiChildFlags_Borders);
-		ImGui::TextUnformatted(st.lastGlsl.c_str());
-		ImGui::EndChild();
-	}
 
 	ImGui::End();
 }
