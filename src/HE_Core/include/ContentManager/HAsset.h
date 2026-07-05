@@ -90,6 +90,7 @@ inline constexpr uint32_t CHUNK_MTLU = makeChunkId('M','T','L','U'); // shader U
 inline constexpr uint32_t CHUNK_SRC  = makeChunkId('S','R','C',' ');
 inline constexpr uint32_t CHUNK_SLNG = makeChunkId('S','L','N','G'); // script language (1 byte; absent → Lua)
 inline constexpr uint32_t CHUNK_MGRF = makeChunkId('M','G','R','F'); // material-function node graph (JSON)
+inline constexpr uint32_t CHUNK_PSHD = makeChunkId('P','S','H','D'); // precompiled per-backend material shaders
 
 // Font
 inline constexpr uint32_t CHUNK_FNTD = makeChunkId('F','N','T','D'); // raw font bytes

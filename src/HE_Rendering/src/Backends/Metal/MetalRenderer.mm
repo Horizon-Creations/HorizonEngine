@@ -4153,23 +4153,38 @@ void main() {
 // glslang→SPIRV-Cross cross-compile (so every backend shares them); this function only
 // turns the emitted MSL into an MTLRenderPipelineState. Cached by `key` (fragment source
 // hash); a null result is cached too so a broken shader isn't rebuilt every frame.
-void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string& fragGlsl)
+void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string& fragGlsl,
+                                               const MaterialShaderVariant* precompiled)
 {
 	if (auto it = m_materialPipelineCache.find(key); it != m_materialPipelineCache.end())
 		return it->second;
 
 	using Backend = HE::MaterialShaderLibrary::Backend;
-	const auto& v = m_matShaderLib.standardVertex(Backend::Metal);       // shared, cached MSL
-	const auto& f = m_matShaderLib.fragment(key, fragGlsl, Backend::Metal); // shared, cached MSL
+	std::string vertMSL, fragMSL, log;
+	bool ok = false;
+	if (precompiled)
+	{
+		// Baked at export time — no runtime cross-compile.
+		vertMSL = precompiled->vertex; fragMSL = precompiled->fragment;
+		ok = !vertMSL.empty() && !fragMSL.empty();
+	}
+	else
+	{
+		const auto& v = m_matShaderLib.standardVertex(Backend::Metal);       // shared, cached MSL
+		const auto& f = m_matShaderLib.fragment(key, fragGlsl, Backend::Metal); // shared, cached MSL
+		vertMSL = v.source; fragMSL = f.source; log = v.log + f.log;
+		ok = v.ok && f.ok;
+	}
+
 	void* result = nullptr;
-	if (v.ok && f.ok)
+	if (ok)
 	{
 		id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
 		NSError* err = nil;
-		id<MTLLibrary> vLib = [device newLibraryWithSource:[NSString stringWithUTF8String:v.source.c_str()]
+		id<MTLLibrary> vLib = [device newLibraryWithSource:[NSString stringWithUTF8String:vertMSL.c_str()]
 		                                           options:nil error:&err];
 		id<MTLLibrary> fLib = err ? nil
-			: [device newLibraryWithSource:[NSString stringWithUTF8String:f.source.c_str()]
+			: [device newLibraryWithSource:[NSString stringWithUTF8String:fragMSL.c_str()]
 			                       options:nil error:&err];
 		if (vLib && fLib)
 		{
@@ -4188,7 +4203,7 @@ void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string&
 	}
 	else
 		Logger::Log(Logger::LogLevel::Error,
-			(std::string("MetalRenderer: material shader compile failed\n") + v.log + f.log).c_str());
+			(std::string("MetalRenderer: material shader compile failed\n") + log).c_str());
 
 	m_materialPipelineCache[key] = result; // cache success AND failure (null)
 	return result;
@@ -4768,7 +4783,14 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 					uint64_t shKey; std::string shFrag;
 					if (ResolveMaterialShader(dc.materialAssetId, shKey, shFrag))
 					{
-						cMaterialPipeline = GetOrBuildMaterialPipeline(shKey, shFrag);
+						// Prefer a shader precompiled into the pack for this backend (no
+						// runtime cross-compile); else cross-compile via the shared library.
+						const MaterialShaderVariant* pre = nullptr;
+						if (const MaterialAsset* ma = m_contentManager
+							? m_contentManager->getMaterial(dc.materialAssetId) : nullptr)
+							for (const auto& var : ma->precompiledShaders)
+								if (var.backend == static_cast<uint8_t>(HE::RendererBackend::Metal)) { pre = &var; break; }
+						cMaterialPipeline = GetOrBuildMaterialPipeline(shKey, shFrag, pre);
 						if (const MaterialAsset* ma = m_contentManager
 							? m_contentManager->getMaterial(dc.materialAssetId) : nullptr)
 						{

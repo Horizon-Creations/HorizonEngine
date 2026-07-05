@@ -76,7 +76,8 @@ static bool metaFromHasset(const std::vector<uint8_t>& data, HE::UUID& id, std::
 // other type are returned unchanged.
 static std::vector<uint8_t> rewriteRefsForPack(
     const std::vector<uint8_t>& blob,
-    const std::unordered_map<std::string, HE::UUID>& pathToUuid)
+    const std::unordered_map<std::string, HE::UUID>& pathToUuid,
+    const Hpak::PackSettings& settings)
 {
     HAsset::Reader r;
     if (!r.openData(blob)) return blob;
@@ -122,9 +123,10 @@ static std::vector<uint8_t> rewriteRefsForPack(
             // and drop the paths (baked into MTLU as UUIDs). graphTexturePaths is the
             // last field, so truncating there is safe (an absent trailing vec reads empty).
             size_t tailStart = o;
+            std::string customShaderGlsl;
             { float f; std::string s; uint32_t n = 0;
               for (int i = 0; i < 6; ++i) HAsset::Reader::readPOD(c.data, o, f); // baseColor3+met+rough+opacity
-              HAsset::Reader::readString(c.data, o, s);   // customShaderFragGlsl
+              HAsset::Reader::readString(c.data, o, customShaderGlsl); // customShaderFragGlsl
               HAsset::Reader::readString(c.data, o, s);   // nodeGraphJson
               if (HAsset::Reader::readPOD(c.data, o, n))  // param count + floats
                   for (uint32_t i = 0; i < n && o + 4 <= c.data.size(); ++i) HAsset::Reader::readPOD(c.data, o, f);
@@ -150,6 +152,14 @@ static std::vector<uint8_t> rewriteRefsForPack(
             HAsset::Writer::appendVec(d, texIds);
             HAsset::Writer::appendVec(d, graphTexIds); // baked node-graph textures
             w.addChunk(HAsset::CHUNK_MTLU, d.data(), d.size());
+
+            // Precompile this material's shader for the chosen backends (CHUNK_PSHD) so
+            // the shipped game never cross-compiles. The editor supplies the compiler.
+            if (!customShaderGlsl.empty() && settings.shaderBackends != 0 && settings.compileShaderVariants)
+            {
+                std::vector<uint8_t> pshd = settings.compileShaderVariants(customShaderGlsl, settings.shaderBackends);
+                if (!pshd.empty()) w.addChunk(HAsset::CHUNK_PSHD, pshd.data(), pshd.size());
+            }
             continue;
         }
         if (isScene && c.id == HAsset::CHUNK_SCNE)
@@ -547,7 +557,7 @@ int HpakWriter::addDirectory(const std::filesystem::path& rootDir,
     for (auto& pe : pending)
     {
         if (progress) progress(count, total, pe.relPath);
-        std::vector<uint8_t> blob = rewriteRefsForPack(pe.bytes, pathToUuid);
+        std::vector<uint8_t> blob = rewriteRefsForPack(pe.bytes, pathToUuid, settings);
         if (settings.cook) blob = cookForPack(blob, settings.astcTextures);
         // Hash the final (cooked) blob: incremental reuse keys on exactly the
         // bytes that get stored, so a cook change re-packs the entry.

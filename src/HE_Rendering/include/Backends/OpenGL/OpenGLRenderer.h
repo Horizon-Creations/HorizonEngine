@@ -14,6 +14,7 @@
 #include <string>
 
 struct SDL_Window;
+struct MaterialShaderVariant; // ContentManager/Assets.h — baked per-backend shader
 
 class OpenGLRenderer : public IRenderer
 {
@@ -188,7 +189,8 @@ private:
 	unsigned int m_matObjUBO   = 0;  // per-object U   (mvp/model/color/flags/pbr), 176 B
 	unsigned int m_matLightUBO = 0;  // HeLighting     (sunDir/sunColor/ambient/camPos), 64 B
 	unsigned int m_matParamUBO = 0;  // HeParams       (exposed graph parameters), 256 B
-	unsigned int getOrBuildMaterialProgram(uint64_t key, const std::string& fragGlsl);
+	unsigned int getOrBuildMaterialProgram(uint64_t key, const std::string& fragGlsl,
+	                                       const MaterialShaderVariant* precompiled = nullptr);
 	bool         resolveMaterialShader(const HE::UUID& materialId, uint64_t& key, std::string& frag);
 
 	int          m_uMVP           = -1;

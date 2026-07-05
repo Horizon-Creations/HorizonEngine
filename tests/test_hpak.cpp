@@ -1218,3 +1218,120 @@ TEST_CASE("mountPak with an encrypted pak loads on demand with the key")
     std::filesystem::remove(pak);
 }
 #endif // HE_HAVE_OPENSSL
+
+// A node-graph material carries customShaderFragGlsl; packing with a shaderBackends
+// bitmask + compileShaderVariants callback must bake a CHUNK_PSHD that the runtime
+// decodes back into MaterialAsset::precompiledShaders. Materials WITHOUT a custom
+// shader (or packed with shaderBackends == 0) must stay chunk-free.
+TEST_CASE("Pack precompiles node-graph material shaders into CHUNK_PSHD")
+{
+    auto dir = std::filesystem::temp_directory_path() / "he_pshd_pack";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+
+    ContentManager cm(dir.string());
+
+    // Graph material — has a generated fragment shader.
+    MaterialAsset graphMat;
+    graphMat.type = HE::AssetType::Material; graphMat.name = "graphmat";
+    graphMat.path = "graphmat.hasset";
+    graphMat.customShaderFragGlsl = "// generated\nvoid main(){ oColor = vec4(1.0); }";
+    graphMat.nodeGraphJson        = "{\"nodes\":[]}";
+    REQUIRE(cm.saveAsset(graphMat));
+    const HE::UUID graphId = graphMat.id;
+
+    // Plain material — no custom shader, must never get a PSHD chunk.
+    MaterialAsset plainMat;
+    plainMat.type = HE::AssetType::Material; plainMat.name = "plainmat";
+    plainMat.path = "plainmat.hasset";
+    plainMat.baseColor[0] = 0.5f;
+    REQUIRE(cm.saveAsset(plainMat));
+    const HE::UUID plainId = plainMat.id;
+
+    // Stub cross-compiler: records the (glsl, backends) it was handed and returns a
+    // deterministic two-variant PSHD blob — no real glslang needed in HE_Core tests.
+    std::string   seenGlsl;
+    uint32_t      seenBackends = 0;
+    auto stub = [&](const std::string& glsl, uint32_t backends) -> std::vector<uint8_t> {
+        seenGlsl = glsl; seenBackends = backends;
+        std::vector<MaterialShaderVariant> vs;
+        MaterialShaderVariant a; a.backend = static_cast<uint8_t>(HE::RendererBackend::Metal);
+        a.vertex = "MV"; a.fragment = "MF"; vs.push_back(a);
+        MaterialShaderVariant b; b.backend = static_cast<uint8_t>(HE::RendererBackend::OpenGL);
+        b.vertex = "GV"; b.fragment = "GF"; vs.push_back(b);
+        return HE::encodeMaterialShaderVariants(vs);
+    };
+
+    Hpak::PackSettings s;
+    s.codec                = Hpak::Codec::Store;
+    s.shaderBackends       = (1u << static_cast<uint32_t>(HE::RendererBackend::Metal))
+                           | (1u << static_cast<uint32_t>(HE::RendererBackend::OpenGL));
+    s.compileShaderVariants = stub;
+
+    HpakWriter packer;
+    REQUIRE(packer.addDirectory(dir, s) == 2);
+    auto pak = std::filesystem::temp_directory_path() / "he_pshd_pack.hpak";
+    REQUIRE(packer.write(pak.string()));
+
+    // The callback ran on the graph material with the generated GLSL + our bitmask.
+    CHECK(seenGlsl == graphMat.customShaderFragGlsl);
+    CHECK(seenBackends == s.shaderBackends);
+
+    ContentManager loaded;
+    REQUIRE(loaded.loadPak(pak.string()));
+
+    const MaterialAsset* gm = loaded.getMaterial(graphId);
+    REQUIRE(gm != nullptr);
+    REQUIRE(gm->precompiledShaders.size() == 2);
+    CHECK(gm->precompiledShaders[0].backend == static_cast<uint8_t>(HE::RendererBackend::Metal));
+    CHECK(gm->precompiledShaders[0].fragment == "MF");
+    CHECK(gm->precompiledShaders[1].backend == static_cast<uint8_t>(HE::RendererBackend::OpenGL));
+    CHECK(gm->precompiledShaders[1].vertex == "GV");
+
+    const MaterialAsset* pm = loaded.getMaterial(plainId);
+    REQUIRE(pm != nullptr);
+    CHECK(pm->precompiledShaders.empty());
+
+    std::filesystem::remove(pak);
+    std::filesystem::remove_all(dir);
+}
+
+// shaderBackends == 0 (or a null callback) must not bake any PSHD chunk — the
+// shipped game then cross-compiles at load, exactly as before this feature.
+TEST_CASE("Pack skips PSHD when no backends selected")
+{
+    auto dir = std::filesystem::temp_directory_path() / "he_pshd_none";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+
+    ContentManager cm(dir.string());
+    MaterialAsset mat;
+    mat.type = HE::AssetType::Material; mat.name = "m"; mat.path = "m.hasset";
+    mat.customShaderFragGlsl = "void main(){ oColor = vec4(0.0); }";
+    REQUIRE(cm.saveAsset(mat));
+    const HE::UUID id = mat.id;
+
+    bool called = false;
+    Hpak::PackSettings s;
+    s.codec = Hpak::Codec::Store;
+    s.shaderBackends = 0; // ← nothing selected
+    s.compileShaderVariants = [&](const std::string&, uint32_t) {
+        called = true; return std::vector<uint8_t>{};
+    };
+
+    HpakWriter packer;
+    REQUIRE(packer.addDirectory(dir, s) == 1);
+    auto pak = std::filesystem::temp_directory_path() / "he_pshd_none.hpak";
+    REQUIRE(packer.write(pak.string()));
+
+    CHECK_FALSE(called); // guarded by shaderBackends != 0 before the callback
+
+    ContentManager loaded;
+    REQUIRE(loaded.loadPak(pak.string()));
+    const MaterialAsset* m = loaded.getMaterial(id);
+    REQUIRE(m != nullptr);
+    CHECK(m->precompiledShaders.empty());
+
+    std::filesystem::remove(pak);
+    std::filesystem::remove_all(dir);
+}

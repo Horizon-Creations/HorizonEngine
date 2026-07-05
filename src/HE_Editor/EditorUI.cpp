@@ -10,6 +10,9 @@
 #include <Scripting/ScriptEngine.h>
 #include <ContentManager/HAsset.h>
 #include <ContentManager/ContentManager.h>
+#include <ContentManager/Assets.h>
+#include <material/MaterialShaderLibrary.h>
+#include <Types/Enums.h>
 #include <HorizonRendering/RenderExtractor.h>
 #include <HorizonRendering/RenderWorld.h>
 #include <Math/AABB.h>
@@ -115,6 +118,7 @@ static std::string s_exportExcludes;               // one glob pattern per line
 static bool   s_exportIncremental = true;
 static bool   s_exportAppBundle   = false;         // macOS .app bundle
 static std::string s_exportPlatform = "Host";      // exportPlatformName() value
+static uint32_t s_exportShaderBackends = (1u << 4) | (1u << 0); // Metal|OpenGL bitmask of 1u<<RendererBackend
 
 // True when the selected target produces macOS binaries the editor can bundle +
 // sign — i.e. this editor runs on macOS and targets Host or macOS. Building a
@@ -177,6 +181,72 @@ static std::vector<std::string> parseExcludeLines(const char* buf)
 	return out;
 }
 
+// ─── Precompiled material shaders (cook-time) ───────────────────────────────
+// The exporter (in HE_Core) cannot link the shader cross-compiler, so it calls
+// back into the editor with a material's canonical fragment GLSL + a bitmask of
+// target backends (1u << HE::RendererBackend). We cross-compile the standard
+// vertex + this fragment for each requested backend and return the PSHD blob the
+// runtime decodes into MaterialAsset::precompiledShaders. Empty result → the
+// exporter simply omits the chunk and the shipped game cross-compiles at load.
+static std::vector<uint8_t> CompileMaterialShaderVariants(const std::string& fragGlsl,
+                                                          uint32_t backends)
+{
+	using LB = HE::MaterialShaderLibrary::Backend;
+	if (fragGlsl.empty() || backends == 0) return {};
+
+	// RendererBackend value → cross-compiler backend. D3D11/D3D12 share HLSL.
+	auto mapBackend = [](HE::RendererBackend rb, LB& out) -> bool {
+		switch (rb) {
+			case HE::RendererBackend::OpenGL: out = LB::GLSL410; return true;
+			case HE::RendererBackend::Vulkan: out = LB::SpirV;   return true;
+			case HE::RendererBackend::D3D11:
+			case HE::RendererBackend::D3D12:  out = LB::HLSL;     return true;
+			case HE::RendererBackend::Metal:  out = LB::Metal;    return true;
+		}
+		return false;
+	};
+
+	// SPIR-V words → a byte string (the variant stores backend-native text OR, for
+	// Vulkan, the raw SPIR-V bytes in the same string field; runtime reinterprets).
+	auto spirvToBytes = [](const std::vector<uint32_t>& words) {
+		std::string s;
+		s.resize(words.size() * sizeof(uint32_t));
+		if (!words.empty()) std::memcpy(s.data(), words.data(), s.size());
+		return s;
+	};
+
+	HE::MaterialShaderLibrary lib;
+	const uint64_t hash = std::hash<std::string>{}(fragGlsl);
+
+	std::vector<MaterialShaderVariant> variants;
+	for (uint8_t v = 0; v <= static_cast<uint8_t>(HE::RendererBackend::Metal); ++v)
+	{
+		if ((backends & (1u << v)) == 0) continue;
+		LB lb;
+		if (!mapBackend(static_cast<HE::RendererBackend>(v), lb)) continue;
+
+		const auto& vert = lib.standardVertex(lb);
+		const auto& frag = lib.fragment(hash, fragGlsl, lb);
+		if (!vert.ok || !frag.ok)
+		{
+			Logger::Log(Logger::LogLevel::Warning,
+			            ("Export: material shader precompile failed for backend "
+			             + std::to_string(static_cast<int>(v)) + " — "
+			             + vert.log + " " + frag.log).c_str());
+			continue; // skip this backend; runtime falls back to cross-compile
+		}
+
+		MaterialShaderVariant var;
+		var.backend  = v;
+		var.vertex   = (lb == LB::SpirV) ? spirvToBytes(vert.spirv) : vert.source;
+		var.fragment = (lb == LB::SpirV) ? spirvToBytes(frag.spirv) : frag.source;
+		variants.push_back(std::move(var));
+	}
+
+	if (variants.empty()) return {};
+	return HE::encodeMaterialShaderVariants(variants);
+}
+
 // Fill the export dialog fields from a profile. An empty profile outputDir
 // resolves to <projectRoot>/Export/<profile name>. All string fields are
 // std::string — no fixed buffers, so nothing can silently truncate (a cut-off
@@ -196,6 +266,7 @@ static void exportProfileToDialog(const ExportProfile& p, const std::filesystem:
 	// falls back to Host — showing "Host" in the combo makes that fallback
 	// visible BEFORE exporting host binaries somewhere unexpected.
 	s_exportPlatform     = exportPlatformName(exportPlatformFromName(p.targetPlatform));
+	s_exportShaderBackends = p.shaderBackends;
 	s_exportExcludes.clear();
 	for (const auto& pat : p.excludePatterns) { s_exportExcludes += pat; s_exportExcludes += '\n'; }
 }
@@ -212,6 +283,7 @@ static void exportDialogToProfile(ExportProfile& p)
 	p.incremental      = s_exportIncremental;
 	p.targetPlatform   = s_exportPlatform;
 	p.appBundle        = s_exportAppBundle;
+	p.shaderBackends   = s_exportShaderBackends;
 }
 
 // Active manipulation tool, shared by the viewport toolbar buttons and the
@@ -1786,6 +1858,40 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
             ImGui::InputTextMultiline("##exportExcludes", &s_exportExcludes,
                                       ImVec2(-1.0f, ImGui::GetTextLineHeight() * 3.5f));
 
+            // ── Precompiled material shaders ──────────────────────────────────
+            ImGui::Spacing();
+            ImGui::Text("Precompiled Material Shaders:");
+            ImGui::SameLine();
+            ImGui::TextDisabled("(?)");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Cross-compile every node-graph material into the pak for the\n"
+                                  "selected backends, so the shipped game never cross-compiles at\n"
+                                  "load. Ship only the backend(s) the target actually runs.\n"
+                                  "None selected \xe2\x86\x92 the game compiles shaders on first use.");
+            {
+                struct Bk { const char* label; HE::RendererBackend rb; };
+                static const Bk kBackends[] = {
+                    { "Metal",  HE::RendererBackend::Metal  },
+                    { "OpenGL", HE::RendererBackend::OpenGL },
+                    { "Vulkan", HE::RendererBackend::Vulkan },
+                    { "D3D11",  HE::RendererBackend::D3D11  },
+                    { "D3D12",  HE::RendererBackend::D3D12  },
+                };
+                int col = 0;
+                for (const Bk& b : kBackends)
+                {
+                    const uint32_t bit = 1u << static_cast<uint32_t>(b.rb);
+                    bool on = (s_exportShaderBackends & bit) != 0;
+                    if (ImGui::Checkbox(b.label, &on))
+                    {
+                        if (on) s_exportShaderBackends |=  bit;
+                        else    s_exportShaderBackends &= ~bit;
+                    }
+                    if (++col < 3) ImGui::SameLine();
+                    else           col = 0;
+                }
+            }
+
             if (running) ImGui::EndDisabled();
 
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
@@ -1893,6 +1999,10 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                 // dedicated toggle can split this if Intel distribution matters.
                 es.astcTextures     = exportAppBundleApplicable(s_exportPlatform);
                 es.gameRuntimeDir   = runtimeDir;
+                // Precompile node-graph material shaders into the pak for the
+                // selected backends (0 → runtime cross-compiles as before).
+                es.shaderBackends        = s_exportShaderBackends;
+                es.compileShaderVariants = &CompileMaterialShaderVariants;
                 // Worker → UI progress: atomics + a mutex-guarded filename.
                 es.progress = [](int done, int total, const std::string& current)
                 {
