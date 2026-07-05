@@ -100,6 +100,18 @@ struct MaterialAsset : public RuntimeAsset
 	// TRUTH the material editor edits. The editor regenerates customShaderFragGlsl from
 	// it on every change; shaders are not a user-facing asset type.
 	std::string nodeGraphJson;
+
+	// Exposed graph parameters (Param nodes), 4 floats per HeParams UBO slot, in slot
+	// order. Generated alongside customShaderFragGlsl; the renderer uploads this per
+	// material — editing a parameter VALUE never recompiles the shader.
+	std::vector<float> shaderParamData;
+};
+
+// A reusable material sub-graph (node editor "Material Function"): its FnInput/FnOutput
+// nodes are the interface; a material's FunctionCall node inlines it at codegen time.
+struct MaterialFunctionAsset : public RuntimeAsset
+{
+	std::string nodeGraphJson;
 };
 
 struct SceneAsset : public RuntimeAsset

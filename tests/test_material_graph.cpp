@@ -168,7 +168,136 @@ TEST_CASE("MaterialGraph v2 nodes: noise helpers, view-dir fresnel, named params
 	CHECK(HE::generateFragmentGlsl(r) == glsl);
 }
 
+TEST_CASE("MaterialGraph v3: RGBA output, split/combine masks, param slots")
+{
+	// Opacity flows into oColor.a; texture alpha is a separate pin; split/combine round-trip.
+	MaterialGraph g;
+	const int out   = g.addNode(MatNodeType::Output);
+	const int tex   = g.addNode(MatNodeType::TextureSample);
+	const int comb  = g.addNode(MatNodeType::CombineRGBA);
+	const int split = g.addNode(MatNodeType::SplitRGBA);
+	const int pf    = g.addNode(MatNodeType::ParamFloat);
+	g.findNode(pf)->s = "Glow";
+	const int pc    = g.addNode(MatNodeType::ParamColor);
+	g.findNode(pc)->s = "Tint";
+	CHECK(g.connect(tex,   0, comb,  0)); // RGB (coerced vec3→float .x)
+	CHECK(g.connect(tex,   1, comb,  3)); // texture ALPHA pin → A
+	CHECK(g.connect(comb,  0, split, 0)); // vec4 → split
+	CHECK(g.connect(split, 3, out,   4)); // A → Opacity
+	CHECK(g.connect(pc,    0, out,   0)); // param color → BaseColor
+	CHECK(g.connect(pf,    0, out,   1)); // param float → Metallic
+
+	const HE::MatShaderGen gen = HE::generateFragment(g);
+	CHECK(gen.glsl.find(".w") != std::string::npos);                       // alpha access
+	CHECK(gen.glsl.find("uniform HeParams") != std::string::npos);         // params UBO emitted
+	CHECK(gen.glsl.find("heParams.v[") != std::string::npos);
+	REQUIRE(gen.params.size() == 2);
+	// Slot order is emission order; both named params present with their values.
+	bool hasTint = false, hasGlow = false;
+	for (const auto& sl : gen.params)
+	{
+		if (sl.name == "Tint") { hasTint = true; CHECK(sl.isColor); }
+		if (sl.name == "Glow") { hasGlow = true; CHECK_FALSE(sl.isColor); }
+	}
+	CHECK(hasTint); CHECK(hasGlow);
+
+	// No params → no UBO block.
+	CHECK(HE::generateFragmentGlsl(MaterialGraph::makeDefault()).find("HeParams")
+	      == std::string::npos);
+}
+
+TEST_CASE("MaterialGraph v3: material functions inline (and recursion is guarded)")
+{
+	// Function: doubles its input. Interface = FnInput → FnOutput.
+	MaterialGraph fn;
+	const int fin  = fn.addNode(MatNodeType::FnInput);
+	fn.findNode(fin)->s = "X";
+	const int two  = fn.addNode(MatNodeType::ConstFloat);
+	fn.findNode(two)->p[0] = 2.0f;
+	const int mul  = fn.addNode(MatNodeType::Multiply);
+	const int fout = fn.addNode(MatNodeType::FnOutput);
+	fn.findNode(fout)->s = "Doubled";
+	CHECK(fn.connect(fin, 0, mul, 0));
+	CHECK(fn.connect(two, 0, mul, 1));
+	CHECK(fn.connect(mul, 0, fout, 0));
+
+	// Interface extraction drives the call node's pins.
+	std::vector<HE::MatPinDesc> ins, outs;
+	HE::matFunctionPins(fn, ins, outs);
+	REQUIRE(ins.size() == 1);  CHECK(std::string(ins[0].name) == "X");
+	REQUIRE(outs.size() == 1); CHECK(std::string(outs[0].name) == "Doubled");
+
+	// Material calls the function with a constant.
+	MaterialGraph g;
+	const int out  = g.addNode(MatNodeType::Output);
+	const int c    = g.addNode(MatNodeType::ConstColor);
+	const int call = g.addNode(MatNodeType::FunctionCall);
+	g.findNode(call)->s = "Fns/Double.hasset";
+	CHECK(g.connect(c,    0, call, 0));
+	CHECK(g.connect(call, 0, out,  0));
+
+	HE::MatFunctionLoader loader = [&](const std::string& path) -> const MaterialGraph*
+	{ return path == "Fns/Double.hasset" ? &fn : nullptr; };
+	const std::string glsl = HE::generateFragment(g, loader).glsl;
+	CHECK(glsl.find("* ") != std::string::npos);           // the multiply was inlined
+	CHECK(glsl.find("2.000000") != std::string::npos);     // with the function's constant
+	CHECK(glsl.find("missing function") == std::string::npos);
+
+	// Missing loader → magenta placeholder, still valid GLSL.
+	const std::string noLoader = HE::generateFragment(g, {}).glsl;
+	CHECK(noLoader.find("missing function") != std::string::npos);
+
+	// Self-recursive function → guarded (magenta), terminates.
+	MaterialGraph rec;
+	const int rIn   = rec.addNode(MatNodeType::FnInput);
+	const int rCall = rec.addNode(MatNodeType::FunctionCall);
+	rec.findNode(rCall)->s = "Fns/Rec.hasset";
+	const int rOut  = rec.addNode(MatNodeType::FnOutput);
+	CHECK(rec.connect(rIn,   0, rCall, 0));
+	CHECK(rec.connect(rCall, 0, rOut,  0));
+	MaterialGraph g2;
+	const int out2  = g2.addNode(MatNodeType::Output);
+	const int call2 = g2.addNode(MatNodeType::FunctionCall);
+	g2.findNode(call2)->s = "Fns/Rec.hasset";
+	CHECK(g2.connect(call2, 0, out2, 0));
+	HE::MatFunctionLoader recLoader = [&](const std::string& path) -> const MaterialGraph*
+	{ return path == "Fns/Rec.hasset" ? &rec : nullptr; };
+	const std::string recGlsl = HE::generateFragment(g2, recLoader).glsl; // must terminate
+	CHECK(recGlsl.find("recursive") != std::string::npos);
+}
+
 #if defined(HE_TESTS_HAVE_SHADERC)
+TEST_CASE("v3 graph (params + function call + alpha) cross-compiles for Metal and GL")
+{
+	MaterialGraph fn;
+	const int fin  = fn.addNode(MatNodeType::FnInput);
+	const int fout = fn.addNode(MatNodeType::FnOutput);
+	CHECK(fn.connect(fin, 0, fout, 0));
+
+	MaterialGraph g;
+	const int out  = g.addNode(MatNodeType::Output);
+	const int pc   = g.addNode(MatNodeType::ParamColor);
+	g.findNode(pc)->s = "Base";
+	const int call = g.addNode(MatNodeType::FunctionCall);
+	g.findNode(call)->s = "F.hasset";
+	const int half = g.addNode(MatNodeType::ConstFloat);
+	g.findNode(half)->p[0] = 0.5f;
+	CHECK(g.connect(pc,   0, call, 0));
+	CHECK(g.connect(call, 0, out,  0));
+	CHECK(g.connect(half, 0, out,  4)); // opacity
+
+	HE::MatFunctionLoader loader = [&](const std::string&) -> const MaterialGraph* { return &fn; };
+	const std::string glsl = HE::generateFragment(g, loader).glsl;
+	const uint64_t hash = std::hash<std::string>{}(glsl);
+	HE::MaterialShaderLibrary lib;
+	using B = HE::MaterialShaderLibrary::Backend;
+	const auto& msl = lib.fragment(hash, glsl, B::Metal);
+	CHECK_MESSAGE(msl.ok, msl.log);
+	const auto& gl = lib.fragment(hash, glsl, B::GLSL410);
+	CHECK_MESSAGE(gl.ok, gl.log);
+	CHECK(gl.source.find("readonly buffer") == std::string::npos);
+}
+
 TEST_CASE("v2 graph GLSL (noise + fresnel + panner) cross-compiles for Metal and GL")
 {
 	MaterialGraph g;

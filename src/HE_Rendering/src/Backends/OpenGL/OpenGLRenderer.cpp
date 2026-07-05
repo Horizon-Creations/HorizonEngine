@@ -2582,6 +2582,8 @@ unsigned int OpenGLRenderer::getOrBuildMaterialProgram(uint64_t key, const std::
 			if (uIdx != GL_INVALID_INDEX) glUniformBlockBinding(prog, uIdx, 1);
 			const GLuint lIdx = glGetUniformBlockIndex(prog, "HeLighting");
 			if (lIdx != GL_INVALID_INDEX) glUniformBlockBinding(prog, lIdx, 0);
+			const GLuint pIdx = glGetUniformBlockIndex(prog, "HeParams");
+			if (pIdx != GL_INVALID_INDEX) glUniformBlockBinding(prog, pIdx, 2);
 			program = prog;
 			Logger::Log(Logger::LogLevel::Info,
 				"OpenGLRenderer: built a material program from canonical GLSL via he::shaderc");
@@ -2608,6 +2610,9 @@ unsigned int OpenGLRenderer::getOrBuildMaterialProgram(uint64_t key, const std::
 		glBindBuffer(GL_UNIFORM_BUFFER, m_matLightUBO);
 		glBufferData(GL_UNIFORM_BUFFER,
 			static_cast<GLsizeiptr>(sizeof(HE::MaterialShaderLibrary::Lighting)), nullptr, GL_DYNAMIC_DRAW);
+		glGenBuffers(1, &m_matParamUBO);
+		glBindBuffer(GL_UNIFORM_BUFFER, m_matParamUBO);
+		glBufferData(GL_UNIFORM_BUFFER, 256, nullptr, GL_DYNAMIC_DRAW); // vec4 v[16]
 		glBindBuffer(GL_UNIFORM_BUFFER, 0);
 	}
 
@@ -3916,6 +3921,7 @@ void OpenGLRenderer::Shutdown()
 	m_materialPrograms.clear();
 	if (m_matObjUBO)   { glDeleteBuffers(1, &m_matObjUBO);   m_matObjUBO = 0; }
 	if (m_matLightUBO) { glDeleteBuffers(1, &m_matLightUBO); m_matLightUBO = 0; }
+	if (m_matParamUBO) { glDeleteBuffers(1, &m_matParamUBO); m_matParamUBO = 0; }
 #endif
 	if (m_instancedProgram) { glDeleteProgram(m_instancedProgram); m_instancedProgram = 0; }
 	if (m_instanceVBO)      { glDeleteBuffers(1, &m_instanceVBO);  m_instanceVBO = 0; }
@@ -4575,6 +4581,20 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					glBindBuffer(GL_UNIFORM_BUFFER, 0);
 					glBindBufferBase(GL_UNIFORM_BUFFER, 1, m_matObjUBO);   // block "U"
 					glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_matLightUBO); // block "HeLighting"
+					// Exposed graph parameters (HeParams @ binding 2) — value edits reach the
+					// shader without any recompile.
+					if (const MaterialAsset* ma = m_contentManager
+						? m_contentManager->getMaterial(dc.materialAssetId) : nullptr;
+					    ma && !ma->shaderParamData.empty())
+					{
+						float padded[64] = { 0 };
+						std::memcpy(padded, ma->shaderParamData.data(),
+						            std::min(ma->shaderParamData.size(), size_t(64)) * sizeof(float));
+						glBindBuffer(GL_UNIFORM_BUFFER, m_matParamUBO);
+						glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(padded), padded);
+						glBindBuffer(GL_UNIFORM_BUFFER, 0);
+					}
+					glBindBufferBase(GL_UNIFORM_BUFFER, 2, m_matParamUBO); // block "HeParams"
 					glBindVertexArray(vao);
 					// Material texture on unit 0 for TextureSample nodes (the emitted
 					// sampler uniform defaults to unit 0 — no binding layout on GL 4.1).

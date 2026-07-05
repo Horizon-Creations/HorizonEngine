@@ -10,6 +10,7 @@
 #include <misc/cpp/imgui_stdlib.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <filesystem>
 #include <map>
@@ -38,8 +39,28 @@ struct State
 	bool dragFromOutput = true;
 	std::string lastGlsl;            // generated fragment (debug view)
 	std::string name;                // filename for the header
+	bool        isFunction = false;  // editing a MaterialFunction asset (FnInput/FnOutput mode)
+	std::string relPath;             // content-root-relative path of this asset
 };
 std::map<std::string, State> g_states;
+
+// Cache of loaded material-FUNCTION graphs, keyed by content-relative path. Backs both
+// the codegen loader and the dynamic pins of FunctionCall nodes. Invalidated when a
+// function is saved in this editor.
+std::map<std::string, HE::MaterialGraph> g_fnGraphCache;
+
+const HE::MaterialGraph* loadFunctionGraph(AppContext& ctx, const std::string& relPath)
+{
+	if (relPath.empty() || !ctx.contentManager) return nullptr;
+	if (auto it = g_fnGraphCache.find(relPath); it != g_fnGraphCache.end()) return &it->second;
+	const HE::UUID id = ctx.contentManager->loadAsset(relPath);
+	const MaterialFunctionAsset* fn = ctx.contentManager->getMaterialFunction(id);
+	if (!fn) return nullptr;
+	HE::MaterialGraph g;
+	if (!fn->nodeGraphJson.empty() && !HE::materialGraphFromJson(fn->nodeGraphJson, g))
+		return nullptr;
+	return &(g_fnGraphCache[relPath] = std::move(g));
+}
 
 // Pin hit-test data collected while drawing, consumed for link routing + drop targets.
 struct PinPos { int node; int pin; bool output; ImVec2 pos; MatPinType type; };
@@ -55,7 +76,11 @@ ImU32 categoryColor(const char* cat)
 	if (c == "Material") return IM_COL32(140,  60,  60, 255);
 	if (c == "Input")    return IM_COL32( 60, 100, 140, 255);
 	if (c == "Math")     return IM_COL32( 60, 120,  80, 255);
-	if (c == "Texture")  return IM_COL32(120,  90, 150, 255);
+	if (c == "Texture")    return IM_COL32(120,  90, 150, 255);
+	if (c == "Parameter")  return IM_COL32(160, 110,  50, 255);
+	if (c == "Procedural") return IM_COL32( 90, 130, 130, 255);
+	if (c == "Channels")   return IM_COL32( 90,  90, 130, 255);
+	if (c == "Function")   return IM_COL32(150,  70, 110, 255);
 	return IM_COL32(110, 110,  70, 255); // Shading & misc
 }
 
@@ -66,6 +91,7 @@ ImU32 pinColor(MatPinType t)
 		case MatPinType::Float: return IM_COL32(160, 200, 120, 255);
 		case MatPinType::Vec2:  return IM_COL32(120, 190, 200, 255);
 		case MatPinType::Vec3:  return IM_COL32(230, 200, 110, 255);
+		case MatPinType::Vec4:  return IM_COL32(235, 140, 180, 255);
 	}
 	return IM_COL32_WHITE;
 }
@@ -76,11 +102,30 @@ ImU32 pinColor(MatPinType t)
 void applyToMaterial(State& st, AppContext& ctx)
 {
 	if (!ctx.contentManager) return;
+	if (st.isFunction)
+	{
+		// Functions carry only their graph. Saving invalidates the pin/codegen cache so
+		// open materials pick up the new interface on their next regenerate.
+		if (MaterialFunctionAsset* fn = ctx.contentManager->getMaterialFunctionMutable(st.materialId))
+		{
+			fn->nodeGraphJson = HE::materialGraphToJson(st.graph);
+			g_fnGraphCache.erase(st.relPath);
+			st.dirty = true;
+		}
+		return;
+	}
 	MaterialAsset* mat = ctx.contentManager->getMaterialMutable(st.materialId);
 	if (!mat) return;
-	st.lastGlsl = HE::generateFragmentGlsl(st.graph);
+	HE::MatFunctionLoader loader = [&ctx](const std::string& path)
+	{ return loadFunctionGraph(ctx, path); };
+	HE::MatShaderGen gen = HE::generateFragment(st.graph, loader);
+	st.lastGlsl = gen.glsl;
 	mat->customShaderFragGlsl = st.lastGlsl;
 	mat->nodeGraphJson        = HE::materialGraphToJson(st.graph);
+	mat->shaderParamData.clear();
+	for (const auto& slot : gen.params)
+		mat->shaderParamData.insert(mat->shaderParamData.end(),
+		                            slot.value, slot.value + 4);
 	st.dirty = true;
 }
 
@@ -94,19 +139,27 @@ State& stateFor(const std::string& path, AppContext& ctx)
 	std::error_code ec;
 	const std::string rel = std::filesystem::relative(
 		path, ctx.contentManager->contentRoot(), ec).generic_string();
-	st.materialId = ctx.contentManager->loadAsset(ec ? path : rel);
+	st.relPath    = ec ? path : rel;
+	st.materialId = ctx.contentManager->loadAsset(st.relPath);
+	st.isFunction = ctx.contentManager->assetType(st.materialId) == HE::AssetType::MaterialFunction;
 
-	const MaterialAsset* mat = ctx.contentManager->getMaterial(st.materialId);
-	if (mat && !mat->nodeGraphJson.empty() &&
-	    HE::materialGraphFromJson(mat->nodeGraphJson, st.graph))
+	if (st.isFunction)
 	{
-		st.lastGlsl = HE::generateFragmentGlsl(st.graph);
+		const MaterialFunctionAsset* fn = ctx.contentManager->getMaterialFunction(st.materialId);
+		if (!fn || fn->nodeGraphJson.empty() ||
+		    !HE::materialGraphFromJson(fn->nodeGraphJson, st.graph))
+			st.graph = MaterialGraph::makeDefaultFunction();
 	}
 	else
 	{
-		// No graph yet (fresh material, or one with only a hand-written shader): start
-		// from the default graph. Nothing is written to the asset until the first edit.
-		st.graph = MaterialGraph::makeDefault();
+		const MaterialAsset* mat = ctx.contentManager->getMaterial(st.materialId);
+		if (!mat || mat->nodeGraphJson.empty() ||
+		    !HE::materialGraphFromJson(mat->nodeGraphJson, st.graph))
+		{
+			// No graph yet (fresh material, or one with only a hand-written shader):
+			// start from the default. Nothing is written until the first edit.
+			st.graph = MaterialGraph::makeDefault();
+		}
 		st.lastGlsl = HE::generateFragmentGlsl(st.graph);
 	}
 	st.loaded = true;
@@ -157,6 +210,18 @@ bool nodeParamWidgets(MatGraphNode& n)
 			ImGui::ColorEdit3("##c", n.p, ImGuiColorEditFlags_Float);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
 			break;
+		case MatNodeType::FnInput:
+		case MatNodeType::FnOutput:
+		{
+			ImGui::SetNextItemWidth(kNodeW - 24.0f);
+			ImGui::InputText("##name", &n.s);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			static const char* kTypes[] = { "Float", "Vec2", "Vec3", "Vec4" };
+			int t = std::clamp(static_cast<int>(n.p[0]), 0, 3);
+			ImGui::SetNextItemWidth(kNodeW - 24.0f);
+			if (ImGui::Combo("##type", &t, kTypes, 4)) { n.p[0] = (float)t; committed = true; }
+			break;
+		}
 		default: break;
 	}
 	return committed;
@@ -167,7 +232,8 @@ float nodeParamHeight(MatNodeType type)
 {
 	const HE::MatNodeDesc& d = HE::matNodeDesc(type);
 	if (d.paramCount == 0) return 0.0f;
-	if (type == MatNodeType::ParamFloat || type == MatNodeType::ParamColor) return 52.0f;
+	if (type == MatNodeType::ParamFloat || type == MatNodeType::ParamColor ||
+	    type == MatNodeType::FnInput    || type == MatNodeType::FnOutput) return 52.0f;
 	return 26.0f;
 }
 } // namespace
@@ -185,6 +251,17 @@ bool isMaterialAsset(const std::string& path)
 		r.assetType() == static_cast<uint16_t>(HE::AssetType::Material);
 	s_typeCache[path] = isMat;
 	return isMat;
+}
+
+bool isMaterialFunctionAsset(const std::string& path)
+{
+	static std::map<std::string, bool> s_typeCache;
+	if (auto it = s_typeCache.find(path); it != s_typeCache.end()) return it->second;
+	HAsset::Reader r;
+	const bool isFn = r.open(path) &&
+		r.assetType() == static_cast<uint16_t>(HE::AssetType::MaterialFunction);
+	s_typeCache[path] = isFn;
+	return isFn;
 }
 
 bool isDirty(const std::string& assetPath)
@@ -207,25 +284,31 @@ void render(AppContext& ctx, const std::string& assetPath,
 		ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus |
 		ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
-	MaterialAsset* mat = ctx.contentManager
+	MaterialAsset* mat = (!st.isFunction && ctx.contentManager)
 		? ctx.contentManager->getMaterialMutable(st.materialId) : nullptr;
+	MaterialFunctionAsset* fnAsset = (st.isFunction && ctx.contentManager)
+		? ctx.contentManager->getMaterialFunctionMutable(st.materialId) : nullptr;
+	const bool assetOk = mat || fnAsset;
 
 	// ── Header: name, save, hints ──────────────────────────────────────────────
 	ImGui::TextUnformatted(st.name.c_str());
 	ImGui::SameLine();
-	ImGui::TextDisabled("material graph%s", st.dirty ? "  (unsaved)" : "");
+	ImGui::TextDisabled("%s%s", st.isFunction ? "material function" : "material graph",
+	                    st.dirty ? "  (unsaved)" : "");
 	ImGui::SameLine(ImGui::GetContentRegionAvail().x - 160.0f);
-	if (ImGui::Button("Save Material") && mat)
+	if (ImGui::Button(st.isFunction ? "Save Function" : "Save Material") && assetOk)
 	{
 		applyToMaterial(st, ctx);
-		if (ctx.contentManager->saveAsset(*mat)) st.dirty = false;
+		RuntimeAsset* toSave = st.isFunction ? static_cast<RuntimeAsset*>(fnAsset)
+		                                     : static_cast<RuntimeAsset*>(mat);
+		if (toSave && ctx.contentManager->saveAsset(*toSave)) st.dirty = false;
 		Logger::Log(Logger::LogLevel::Info,
 			("MaterialEditor: saved '" + st.name + "'").c_str());
 	}
 	ImGui::SameLine();
 	ImGui::TextDisabled("(edits apply live)");
-	if (!mat)
-		ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "Material asset could not be loaded.");
+	if (!assetOk)
+		ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "Asset could not be loaded.");
 	ImGui::Separator();
 
 	// ── Canvas ──────────────────────────────────────────────────────────────────
@@ -258,8 +341,23 @@ void render(AppContext& ctx, const std::string& assetPath,
 	for (auto& n : st.graph.nodes)
 	{
 		const MatNodeDesc& d = HE::matNodeDesc(n.type);
+		// FunctionCall pins are dynamic — the referenced function graph's interface.
+		std::vector<HE::MatPinDesc> dynIn, dynOut;
+		const std::vector<HE::MatPinDesc>* nodeIns  = &d.inputs;
+		const std::vector<HE::MatPinDesc>* nodeOuts = &d.outputs;
+		std::string titleOverride;
+		if (n.type == MatNodeType::FunctionCall)
+		{
+			if (const HE::MaterialGraph* fn = loadFunctionGraph(ctx, n.s))
+			{
+				HE::matFunctionPins(*fn, dynIn, dynOut);
+				nodeIns = &dynIn; nodeOuts = &dynOut;
+			}
+			titleOverride = std::filesystem::path(n.s).stem().string();
+			if (titleOverride.empty()) titleOverride = "Material Function";
+		}
 		const ImVec2 p(origin.x + st.scroll.x + n.x, origin.y + st.scroll.y + n.y);
-		const int rows = std::max<int>((int)d.inputs.size(), (int)d.outputs.size());
+		const int rows = std::max<int>((int)nodeIns->size(), (int)nodeOuts->size());
 		const float paramH = nodeParamHeight(n.type);
 		const float h = kTitleH + 6.0f + rows * kRowH + paramH;
 
@@ -273,7 +371,8 @@ void render(AppContext& ctx, const std::string& assetPath,
 		dl->AddRect(p, ImVec2(p.x + kNodeW, p.y + h),
 		            selected ? IM_COL32(255, 200, 80, 255) : IM_COL32(0, 0, 0, 160), 5.0f, 0,
 		            selected ? 2.0f : 1.0f);
-		dl->AddText(ImVec2(p.x + 8, p.y + 4), IM_COL32_WHITE, d.name);
+		dl->AddText(ImVec2(p.x + 8, p.y + 4), IM_COL32_WHITE,
+		            titleOverride.empty() ? d.name : titleOverride.c_str());
 
 		// Title = drag handle (and selection, and node context menu).
 		ImGui::SetCursorScreenPos(p);
@@ -292,12 +391,12 @@ void render(AppContext& ctx, const std::string& assetPath,
 		}
 
 		// Input pins (left column)
-		for (int i = 0; i < (int)d.inputs.size(); ++i)
+		for (int i = 0; i < (int)nodeIns->size(); ++i)
 		{
 			const ImVec2 pp(p.x, p.y + kTitleH + 6.0f + i * kRowH + kRowH * 0.5f);
-			pins.push_back({ n.id, i, false, pp, d.inputs[i].type });
-			dl->AddCircleFilled(pp, kPinR, pinColor(d.inputs[i].type));
-			dl->AddText(ImVec2(pp.x + 10, pp.y - 8), IM_COL32(210, 210, 210, 255), d.inputs[i].name);
+			pins.push_back({ n.id, i, false, pp, (*nodeIns)[i].type });
+			dl->AddCircleFilled(pp, kPinR, pinColor((*nodeIns)[i].type));
+			dl->AddText(ImVec2(pp.x + 10, pp.y - 8), IM_COL32(210, 210, 210, 255), (*nodeIns)[i].name);
 			ImGui::SetCursorScreenPos(ImVec2(pp.x - 8, pp.y - 8));
 			ImGui::InvisibleButton((std::string("##in") + std::to_string(i)).c_str(), ImVec2(16, 16));
 			if (ImGui::IsItemActivated())
@@ -306,13 +405,13 @@ void render(AppContext& ctx, const std::string& assetPath,
 			{ st.graph.disconnectInput(n.id, i); structuralEdit = true; }
 		}
 		// Output pins (right column)
-		for (int i = 0; i < (int)d.outputs.size(); ++i)
+		for (int i = 0; i < (int)nodeOuts->size(); ++i)
 		{
 			const ImVec2 pp(p.x + kNodeW, p.y + kTitleH + 6.0f + i * kRowH + kRowH * 0.5f);
-			pins.push_back({ n.id, i, true, pp, d.outputs[i].type });
-			dl->AddCircleFilled(pp, kPinR, pinColor(d.outputs[i].type));
-			const ImVec2 ts = ImGui::CalcTextSize(d.outputs[i].name);
-			dl->AddText(ImVec2(pp.x - 10 - ts.x, pp.y - 8), IM_COL32(210, 210, 210, 255), d.outputs[i].name);
+			pins.push_back({ n.id, i, true, pp, (*nodeOuts)[i].type });
+			dl->AddCircleFilled(pp, kPinR, pinColor((*nodeOuts)[i].type));
+			const ImVec2 ts = ImGui::CalcTextSize((*nodeOuts)[i].name);
+			dl->AddText(ImVec2(pp.x - 10 - ts.x, pp.y - 8), IM_COL32(210, 210, 210, 255), (*nodeOuts)[i].name);
 			ImGui::SetCursorScreenPos(ImVec2(pp.x - 8, pp.y - 8));
 			ImGui::InvisibleButton((std::string("##out") + std::to_string(i)).c_str(), ImVec2(16, 16));
 			if (ImGui::IsItemActivated())
@@ -396,12 +495,29 @@ void render(AppContext& ctx, const std::string& assetPath,
 		const ImVec2 m = ImGui::GetMousePosOnOpeningCurrentPopup();
 		const float gx = m.x - origin.x - st.scroll.x;
 		const float gy = m.y - origin.y - st.scroll.y;
-		ImGui::TextDisabled("Add Node");
+		// Searchable palette: filters the node library AND the project's material
+		// functions by substring (name or category, case-insensitive).
+		static std::string s_search;
+		if (ImGui::IsWindowAppearing()) { s_search.clear(); ImGui::SetKeyboardFocusHere(); }
+		ImGui::SetNextItemWidth(220.0f);
+		ImGui::InputTextWithHint("##nodeSearch", "Search nodes...", &s_search);
 		ImGui::Separator();
+		auto lower = [](std::string v){ std::transform(v.begin(), v.end(), v.begin(),
+			[](unsigned char ch){ return (char)std::tolower(ch); }); return v; };
+		const std::string q = lower(s_search);
+		auto matches = [&](const char* name, const char* cat)
+		{ return q.empty() || lower(name).find(q) != std::string::npos
+		      || lower(cat).find(q) != std::string::npos; };
+
 		const char* lastCat = "";
 		for (const auto& d : HE::matNodeRegistry())
 		{
-			if (d.type == MatNodeType::Output) continue; // exactly one output exists
+			// Exactly one material Output; the function interface nodes only exist in
+			// function graphs; FunctionCall is inserted via the functions list below.
+			if (d.type == MatNodeType::Output || d.type == MatNodeType::FunctionCall) continue;
+			const bool fnInterface = d.type == MatNodeType::FnInput || d.type == MatNodeType::FnOutput;
+			if (fnInterface != st.isFunction && fnInterface) continue; // Fn nodes only in functions
+			if (!matches(d.name, d.category)) continue;
 			if (std::string(lastCat) != d.category)
 			{
 				if (*lastCat) ImGui::Separator();
@@ -414,6 +530,34 @@ void render(AppContext& ctx, const std::string& assetPath,
 				structuralEdit = true;
 			}
 		}
+
+		// Project-wide material functions (insert as FunctionCall).
+		if (ctx.contentManager)
+		{
+			bool headerShown = false;
+			for (const HE::UUID& fnId :
+			     ctx.contentManager->enumerateIds(HE::AssetType::MaterialFunction))
+			{
+				const MaterialFunctionAsset* fn = ctx.contentManager->getMaterialFunction(fnId);
+				if (!fn) continue;
+				const std::string fnName = std::filesystem::path(fn->path).stem().string();
+				if (!matches(fnName.c_str(), "Function")) continue;
+				if (st.isFunction && fn->path == st.relPath) continue; // no direct self-call
+				if (!headerShown)
+				{
+					if (*lastCat) ImGui::Separator();
+					ImGui::TextDisabled("Material Functions");
+					headerShown = true;
+				}
+				if (ImGui::MenuItem(fnName.c_str()))
+				{
+					const int id = st.graph.addNode(MatNodeType::FunctionCall, gx, gy);
+					st.graph.findNode(id)->s = fn->path;
+					st.selectedNode = id;
+					structuralEdit = true;
+				}
+			}
+		}
 		ImGui::EndPopup();
 	}
 
@@ -421,11 +565,11 @@ void render(AppContext& ctx, const std::string& assetPath,
 
 	// Structural / committed edits → regenerate + push into the live material.
 	if (deleteNode != 0) { st.graph.removeNode(deleteNode); structuralEdit = true; }
-	if ((structuralEdit || paramEdit) && mat)
+	if ((structuralEdit || paramEdit) && assetOk)
 		applyToMaterial(st, ctx);
 
 	// ── Generated GLSL (debug view) ─────────────────────────────────────────────
-	if (ImGui::CollapsingHeader("Generated GLSL"))
+	if (!st.isFunction && ImGui::CollapsingHeader("Generated GLSL"))
 	{
 		ImGui::BeginChild("##glsl", ImVec2(0, 180.0f), ImGuiChildFlags_Borders);
 		ImGui::TextUnformatted(st.lastGlsl.c_str());

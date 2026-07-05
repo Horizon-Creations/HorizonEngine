@@ -185,7 +185,8 @@ private:
 	HE::MaterialShaderLibrary                  m_matShaderLib;
 	std::unordered_map<uint64_t, unsigned int> m_materialPrograms; // hash → program (0 = failed)
 	unsigned int m_matObjUBO   = 0;  // per-object U   (mvp/model/color/flags/pbr), 176 B
-	unsigned int m_matLightUBO = 0;  // HeLighting     (sunDir/sunColor/ambient),   48 B
+	unsigned int m_matLightUBO = 0;  // HeLighting     (sunDir/sunColor/ambient/camPos), 64 B
+	unsigned int m_matParamUBO = 0;  // HeParams       (exposed graph parameters), 256 B
 	unsigned int getOrBuildMaterialProgram(uint64_t key, const std::string& fragGlsl);
 	bool         resolveMaterialShader(const HE::UUID& materialId, uint64_t& key, std::string& frag);
 
