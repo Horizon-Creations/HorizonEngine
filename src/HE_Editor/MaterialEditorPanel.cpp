@@ -124,11 +124,13 @@ void applyToMaterial(State& st, AppContext& ctx)
 	mat->nodeGraphJson        = HE::materialGraphToJson(st.graph);
 	mat->shaderParamData.clear();
 	mat->graphParamNames.clear();
+	mat->graphParamTypes.clear();
 	for (const auto& slot : gen.params)
 	{
 		mat->shaderParamData.insert(mat->shaderParamData.end(),
 		                            slot.value, slot.value + 4);
 		mat->graphParamNames.push_back(slot.name); // parallel to slots → runtime setMaterialParam
+		mat->graphParamTypes.push_back(static_cast<uint8_t>(slot.kind)); // typed editors
 	}
 	// Project textures the graph samples, in slot order (heTexP0..) — the renderer
 	// binds these on loose materials; packing bakes them to graphTextureIds (MTLU).
@@ -302,6 +304,65 @@ float nodeParamHeight(MatNodeType type)
 	    type == MatNodeType::ParamVec2  || type == MatNodeType::ParamBool  ||
 	    type == MatNodeType::FnInput    || type == MatNodeType::FnOutput) return 52.0f;
 	return 26.0f;
+}
+
+bool isParamNode(MatNodeType t)
+{
+	return t == MatNodeType::ParamFloat || t == MatNodeType::ParamColor ||
+	       t == MatNodeType::ParamVec2  || t == MatNodeType::ParamVec4  ||
+	       t == MatNodeType::ParamBool;
+}
+bool isConstNode(MatNodeType t)
+{
+	return t == MatNodeType::ConstFloat || t == MatNodeType::ConstColor ||
+	       t == MatNodeType::ConstVec2  || t == MatNodeType::ConstVec4  ||
+	       t == MatNodeType::ConstBool;
+}
+
+// Central "Parameters & Constants" panel: every Param/Const node of the graph in
+// one list with its typed widget, so values can be set centrally instead of hunting
+// nodes on the canvas. Reuses the inline node widgets (rename + value for params,
+// value for constants). Returns true if any value was committed (→ regenerate).
+bool drawParamConstPanel(MaterialGraph& graph)
+{
+	std::vector<MatGraphNode*> params, consts;
+	for (auto& n : graph.nodes)
+	{
+		if (isParamNode(n.type))  params.push_back(&n);
+		else if (isConstNode(n.type)) consts.push_back(&n);
+	}
+	if (params.empty() && consts.empty()) return false;
+
+	bool committed = false;
+	if (ImGui::CollapsingHeader("Parameters & Constants", ImGuiTreeNodeFlags_DefaultOpen))
+	{
+		if (!params.empty())
+		{
+			ImGui::TextDisabled("Parameters (runtime-settable uniforms)");
+			ImGui::Separator();
+			for (MatGraphNode* n : params)
+			{
+				ImGui::PushID(n->id);
+				committed |= nodeParamWidgets(*n);
+				ImGui::PopID();
+			}
+		}
+		if (!consts.empty())
+		{
+			if (!params.empty()) ImGui::Spacing();
+			ImGui::TextDisabled("Constants (baked into the shader)");
+			ImGui::Separator();
+			for (MatGraphNode* n : consts)
+			{
+				ImGui::PushID(n->id);
+				ImGui::TextUnformatted(HE::matNodeDesc(n->type).name);
+				ImGui::SameLine(90.0f);
+				committed |= nodeParamWidgets(*n);
+				ImGui::PopID();
+			}
+		}
+	}
+	return committed;
 }
 } // namespace
 
@@ -660,9 +721,14 @@ void render(AppContext& ctx, const std::string& assetPath,
 
 	ImGui::EndChild();
 
+	// ── Central Parameters & Constants panel ────────────────────────────────────
+	// Edit every Param/Const value in one place instead of hunting nodes on the
+	// canvas. Committed edits fold into the same regenerate path as canvas edits.
+	const bool panelEdit = drawParamConstPanel(st.graph);
+
 	// Structural / committed edits → regenerate + push into the live material.
 	if (deleteNode != 0) { st.graph.removeNode(deleteNode); structuralEdit = true; }
-	if ((structuralEdit || paramEdit) && assetOk)
+	if ((structuralEdit || paramEdit || panelEdit) && assetOk)
 		applyToMaterial(st, ctx);
 
 	// ── Generated GLSL (debug view) ─────────────────────────────────────────────

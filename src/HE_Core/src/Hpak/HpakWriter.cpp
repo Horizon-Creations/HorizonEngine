@@ -137,6 +137,8 @@ static std::vector<uint8_t> rewriteRefsForPack(
             HAsset::Reader::readVec(c.data, o, graphTexPaths); // node-graph textures (dropped)
             std::vector<std::string> graphParamNames;
             HAsset::Reader::readVec(c.data, o, graphParamNames); // param names (kept)
+            std::vector<uint8_t> graphParamTypes;
+            HAsset::Reader::readVec(c.data, o, graphParamTypes); // param widget kinds (kept)
 
             std::vector<uint8_t> mtrl;
             HAsset::Writer::appendString(mtrl, std::string{});           // shaderPath dropped
@@ -144,6 +146,7 @@ static std::vector<uint8_t> rewriteRefsForPack(
             mtrl.insert(mtrl.end(), c.data.begin() + tailStart, c.data.begin() + graphTexOffset); // scalar tail verbatim
             HAsset::Writer::appendVec(mtrl, std::vector<std::string>{}); // graphTexturePaths dropped (baked to MTLU)
             HAsset::Writer::appendVec(mtrl, graphParamNames);            // graphParamNames kept for runtime
+            HAsset::Writer::appendVec(mtrl, graphParamTypes);            // graphParamTypes kept for runtime
             w.addChunk(HAsset::CHUNK_MTRL, mtrl.data(), mtrl.size());
 
             const HE::UUID sid = shaderPath.empty() ? HE::UUID{} : resolve(shaderPath);

@@ -151,12 +151,25 @@ void matFunctionPins(const MaterialGraph& fnGraph,
 // with a lambda. Returned pointer must stay valid for the duration of the generate call.
 using MatFunctionLoader = std::function<const MaterialGraph*(const std::string& path)>;
 
+// Widget kind of an exposed parameter — drives typed editors OUTSIDE the node
+// canvas (central param panel, entity Details). Serialized per slot (1 byte) in
+// MaterialAsset::graphParamTypes, parallel to graphParamNames.
+enum class MatParamKind : uint8_t { Float = 0, Color = 1, Vec2 = 2, Vec4 = 3, Bool = 4 };
+
+// How many of the vec4's components a param kind carries (rest stay 0).
+inline int matParamKindComponents(MatParamKind k)
+{
+    switch (k) { case MatParamKind::Vec2: return 2; case MatParamKind::Color: return 3;
+                 case MatParamKind::Vec4: return 4; default: return 1; } // Float/Bool → 1
+}
+
 // One exposed parameter slot (a vec4 in the HeParams UBO, in slot order).
 struct MatParamSlot
 {
-    std::string name;
-    bool        isColor = false;      // color (xyz) vs scalar (x)
-    float       value[4] = { 0, 0, 0, 0 };
+    std::string  name;
+    bool         isColor = false;             // color (xyz) vs scalar (x) — legacy proxy
+    MatParamKind kind    = MatParamKind::Float; // full widget type (Float/Color/Vec2/Vec4/Bool)
+    float        value[4] = { 0, 0, 0, 0 };
 };
 
 struct MatShaderGen

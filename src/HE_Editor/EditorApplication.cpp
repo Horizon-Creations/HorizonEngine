@@ -1335,6 +1335,7 @@ void EditorApplication::dumpFrameHeadless()
 				mat.shaderParamData.insert(mat.shaderParamData.end(),
 				                           slot.value, slot.value + 4);
 				mat.graphParamNames.push_back(slot.name); // runtime setMaterialParam by name
+				mat.graphParamTypes.push_back(static_cast<uint8_t>(slot.kind));
 			}
 
 			// Witness the PRECOMPILED path (HE_DUMP_MATPRECOMPILE): bake per-backend
