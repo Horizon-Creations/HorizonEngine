@@ -1310,6 +1310,23 @@ void EditorApplication::dumpFrameHeadless()
 		// Graph: lerp(orange, blue, fresnel) → lit BaseColor; sin(time) → Metallic.
 		{
 			HE::MaterialGraph g;
+			if (std::string(mt) == "noise")
+			{
+				// v6 witness: colour × Noise Texture → mottled ("fleckig") BaseColor.
+				// Proves the NoiseTexture node varies across the mesh (uses vUV) instead
+				// of darkening uniformly like an unconnected noise node used to.
+				const int out = g.addNode(HE::MatNodeType::Output);
+				const int col = g.addNode(HE::MatNodeType::ConstColor);
+				g.findNode(col)->p[0] = 0.85f; g.findNode(col)->p[1] = 0.30f; g.findNode(col)->p[2] = 0.20f;
+				const int tex = g.addNode(HE::MatNodeType::NoiseTexture);
+				g.findNode(tex)->p[0] = 10.0f; // Scale — fine speckle, obvious in a capture
+				const int mul = g.addNode(HE::MatNodeType::Multiply);
+				g.connect(col, 0, mul, 0);
+				g.connect(tex, 0, mul, 1);
+				g.connect(mul, 0, out, 0); // BaseColor
+			}
+			else
+			{
 			const int out  = g.addNode(HE::MatNodeType::Output);
 			// Base color as a NAMED PARAM → exercises the HeParams uniform path (the value
 			// reaches the shader through the UBO upload, not as a baked constant).
@@ -1329,6 +1346,7 @@ void EditorApplication::dumpFrameHeadless()
 			g.connect(lerp, 0, out,  0); // BaseColor
 			g.connect(time, 0, sine, 0);
 			g.connect(sine, 0, out,  1); // Metallic
+			}
 			mat.nodeGraphJson = HE::materialGraphToJson(g);
 			const HE::MatShaderGen gen = HE::generateFragment(g);
 			mat.customShaderFragGlsl = gen.glsl;

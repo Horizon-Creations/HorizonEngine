@@ -338,6 +338,12 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true)
 			if (ImGui::Checkbox("Default", &on)) { n.p[0] = on ? 1.0f : 0.0f; committed = true; }
 			break;
 		}
+		// ── v6: procedural texture — inline Scale (bigger = finer speckle) ──
+		case MatNodeType::NoiseTexture:
+			ImGui::SetNextItemWidth((kNodeW - 60.0f) * scale);
+			ImGui::DragFloat("Scale", &n.p[0], 0.1f, 0.01f, 256.0f);
+			committed = ImGui::IsItemDeactivatedAfterEdit();
+			break;
 		default: break;
 	}
 	return committed;
