@@ -79,6 +79,21 @@ namespace
 		s_rmbCaptured = false;
 	}
 
+	// Belt-and-suspenders invariant, run once per frame BEFORE any early-out: fly-look
+	// capture must never outlive a physically-held right mouse button. If the OS reports RMB
+	// is not down but we're still flagged as captured, force-release — this recovers from any
+	// path that latched the capture without releasing it (tab switch, focus change, a stale
+	// ImGui button state that spuriously (re)engaged look). Reads the PHYSICAL SDL button
+	// state, not ImGui's io.MouseDown (which NoMouse zeroes during a real look), so an actual
+	// fly-look is never cut short.
+	void enforceViewportLookCaptureInvariant(SDL_Window* win)
+	{
+		if (!s_rmbCaptured) return;
+		const bool rmbDown =
+			(SDL_GetMouseState(nullptr, nullptr) & SDL_BUTTON_MASK(SDL_BUTTON_RIGHT)) != 0;
+		if (!rmbDown) releaseViewportLookCapture(win);
+	}
+
 	// The async SDL file slot (pendingFileReady/Result) is shared across project
 	// and scene operations; this records which one is currently in flight so the
 	// single result handler can dispatch correctly.
@@ -1445,6 +1460,10 @@ static void rewriteScriptStubLanguage(const std::string& path, int lang)
 void EditorUI::RenderEditor(AppContext& ctx, float dt)
 {
 #ifdef HE_IMGUI_ENABLED
+	// Runs every frame regardless of which tab/panel is active (before any early-out):
+	// guarantees the RMB fly-look capture can never stay stuck once the button is released.
+	enforceViewportLookCaptureInvariant(ctx.window ? ctx.window->GetNativeWindow() : nullptr);
+
 	// ── Scene-file dialog helpers ──────────────────────────────────────────
 	static PendingFileOp s_pendingFileOp = PendingFileOp::OpenProject;
 
@@ -2880,7 +2899,12 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 					// freezes and the stale accumulator snaps the view when look resumes.
 					if (sdlWin)
 					{
-						if (rmb && !altLmb && imageHovered && !s_rmbCaptured)
+						// Engage on a FRESH right-press over the viewport (click edge), never on
+						// "RMB happens to be down" — otherwise arriving on the Scene tab with a
+						// stale/held button state would capture the cursor without the user
+						// starting a look here.
+						const bool rmbClicked = ImGui::IsMouseClicked(ImGuiMouseButton_Right);
+						if (rmbClicked && !altLmb && imageHovered && !s_rmbCaptured)
 						{
 							SDL_GetMouseState(&s_rmbStartX, &s_rmbStartY);
 							SDL_SetWindowRelativeMouseMode(sdlWin, true);
