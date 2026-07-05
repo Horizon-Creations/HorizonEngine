@@ -1428,7 +1428,23 @@ void EditorApplication::dumpFrameHeadless()
 		tc.position = m_editorCamera.position() + camFwd * 8.0f;
 		reg.emplace<TransformComponent>(e, tc);
 		reg.emplace<MeshComponent>(e, MeshComponent{ meshId });
-		reg.emplace<MaterialComponent>(e, MaterialComponent{ matId });
+		MaterialComponent mc{ matId };
+		// Witness the PER-ENTITY override path (HE_DUMP_ENTITYPARAM="Name,r,g,b"): the
+		// shared material is untouched — the value rides on this entity's component and
+		// is merged by the extractor into the DrawCall's HeParams block.
+		if (const char* ep = std::getenv("HE_DUMP_ENTITYPARAM"); ep && *ep)
+		{
+			std::string s(ep); const size_t c0 = s.find(',');
+			if (c0 != std::string::npos)
+			{
+				MaterialParamOverride ov; ov.name = s.substr(0, c0);
+				std::sscanf(s.c_str() + c0 + 1, "%f,%f,%f", &ov.value[0], &ov.value[1], &ov.value[2]);
+				mc.paramOverrides.push_back(ov);
+				Logger::Log(Logger::LogLevel::Info,
+					("EditorApplication: HE_DUMP_ENTITYPARAM override '" + ov.name + "' on entity").c_str());
+			}
+		}
+		reg.emplace<MaterialComponent>(e, mc);
 		Logger::Log(Logger::LogLevel::Info,
 			"EditorApplication: HE_DUMP_MATERIALTEST sphere with custom-shader material added");
 	}

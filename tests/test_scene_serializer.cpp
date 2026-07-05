@@ -3,6 +3,7 @@
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/MeshComponent.h>
+#include <HorizonScene/Components/MaterialComponent.h>
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/LightComponent.h>
 #include <HorizonScene/Components/RigidBodyComponent.h>
@@ -153,6 +154,41 @@ TEST_CASE("SceneSerializer binary round-trip with components")
 	verify(loaded, meshId);
 
 	fs::remove(file);
+}
+
+TEST_CASE("SceneSerializer round-trips per-entity material param overrides")
+{
+	for (SerializeFormat fmt : { SerializeFormat::JSON, SerializeFormat::Binary })
+	{
+		const fs::path file = fs::temp_directory_path() / "he_test_paramov.hescene";
+		HorizonWorld world;
+		auto e = world.createEntity("Overridden");
+		MaterialComponent mc;
+		mc.materialAssetId = HE::UUID::generate();
+		MaterialParamOverride a; a.name = "K";    a.value[0] = 0.42f;
+		MaterialParamOverride b; b.name = "Tint"; b.value[0] = 0.1f; b.value[1] = 0.2f; b.value[2] = 0.3f; b.value[3] = 1.0f;
+		mc.paramOverrides = { a, b };
+		world.registry().emplace<MaterialComponent>(e, mc);
+
+		SceneSerializer ser;
+		REQUIRE(ser.save(world, file, fmt));
+		HorizonWorld loaded;
+		REQUIRE(ser.load(loaded, file, fmt));
+
+		// Find the sole entity with a MaterialComponent and check its overrides.
+		bool found = false;
+		for (auto [le, lm] : loaded.registry().view<MaterialComponent>().each())
+		{
+			found = true;
+			REQUIRE(lm.paramOverrides.size() == 2);
+			CHECK(lm.paramOverrides[0].name == "K");
+			CHECK(lm.paramOverrides[0].value[0] == doctest::Approx(0.42f));
+			CHECK(lm.paramOverrides[1].name == "Tint");
+			CHECK(lm.paramOverrides[1].value[3] == doctest::Approx(1.0f));
+		}
+		CHECK(found);
+		fs::remove(file);
+	}
 }
 
 TEST_CASE("World root identity survives round-trip with children")

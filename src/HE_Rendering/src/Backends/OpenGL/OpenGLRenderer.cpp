@@ -4639,13 +4639,18 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_matLightUBO); // block "HeLighting"
 					// Exposed graph parameters (HeParams @ binding 2) — value edits reach the
 					// shader without any recompile.
-					if (const MaterialAsset* ma = m_contentManager
+					// A per-entity override (already the full merged block, never batched)
+					// wins over the material's shared shaderParamData.
+					const MaterialAsset* ma = m_contentManager
 						? m_contentManager->getMaterial(dc.materialAssetId) : nullptr;
-					    ma && !ma->shaderParamData.empty())
+					const std::vector<float>* params =
+						!dc.paramOverride.empty() ? &dc.paramOverride
+						: (ma && !ma->shaderParamData.empty() ? &ma->shaderParamData : nullptr);
+					if (params)
 					{
 						float padded[64] = { 0 };
-						std::memcpy(padded, ma->shaderParamData.data(),
-						            std::min(ma->shaderParamData.size(), size_t(64)) * sizeof(float));
+						std::memcpy(padded, params->data(),
+						            std::min(params->size(), size_t(64)) * sizeof(float));
 						glBindBuffer(GL_UNIFORM_BUFFER, m_matParamUBO);
 						glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(padded), padded);
 						glBindBuffer(GL_UNIFORM_BUFFER, 0);

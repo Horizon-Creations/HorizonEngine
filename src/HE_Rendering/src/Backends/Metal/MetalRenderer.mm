@@ -4866,11 +4866,15 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 				// draw so parameter edits take effect without any shader recompile. Padded
 				// to the shader's declared vec4 v[16] so the debug layer never sees a
 				// shorter-than-declared buffer.
-				if (cMaterialPipeline && cMaterialParams)
+				if (cMaterialPipeline && (cMaterialParams || !dc.paramOverride.empty()))
 				{
+					// Per-entity override (already the full merged block) wins over the
+					// material's shared shaderParamData — never batched, so per-draw.
+					const std::vector<float>& src =
+						!dc.paramOverride.empty() ? dc.paramOverride : *cMaterialParams;
 					float padded[64] = { 0 };
-					std::memcpy(padded, cMaterialParams->data(),
-					            std::min(cMaterialParams->size(), size_t(64)) * sizeof(float));
+					std::memcpy(padded, src.data(),
+					            std::min(src.size(), size_t(64)) * sizeof(float));
 					[encoder setFragmentBytes:padded length:sizeof(padded) atIndex:2];
 				}
 				// Node-graph project textures at fragment texture units 1..4 (+ linear

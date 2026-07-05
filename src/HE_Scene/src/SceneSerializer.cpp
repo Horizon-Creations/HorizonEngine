@@ -177,6 +177,15 @@ namespace
 			comps["material"] = {
 				{ "asset", uuidToJson(m->materialAssetId) },
 			};
+			// Per-entity node-graph param overrides (name → [x,y,z,w]).
+			if (!m->paramOverrides.empty())
+			{
+				json ovs = json::array();
+				for (const auto& ov : m->paramOverrides)
+					ovs.push_back({ { "name", ov.name },
+					                { "value", { ov.value[0], ov.value[1], ov.value[2], ov.value[3] } } });
+				comps["material"]["paramOverrides"] = std::move(ovs);
+			}
 		}
 		if (auto* c = registry.try_get<CameraComponent>(entity))
 		{
@@ -525,6 +534,16 @@ namespace
 		{
 			MaterialComponent m;
 			m.materialAssetId = jsonToUuid(comps["material"].value("asset", json()));
+			if (auto it = comps["material"].find("paramOverrides");
+			    it != comps["material"].end() && it->is_array())
+				for (const auto& jo : *it)
+				{
+					MaterialParamOverride ov;
+					ov.name = jo.value("name", std::string());
+					if (auto v = jo.find("value"); v != jo.end() && v->is_array())
+						for (size_t k = 0; k < 4 && k < v->size(); ++k) ov.value[k] = (*v)[k].get<float>();
+					if (!ov.name.empty()) m.paramOverrides.push_back(std::move(ov));
+				}
 			registry.emplace_or_replace<MaterialComponent>(entity, m);
 		}
 		if (comps.contains("camera"))

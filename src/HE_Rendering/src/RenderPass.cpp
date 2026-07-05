@@ -30,6 +30,9 @@ void GeometryPass::execute(const RenderWorld&           world,
 			const RenderObject& next = world.objects[jdx];
 			if (next.meshAssetId != first.meshAssetId ||
 			    next.materialAssetId != first.materialAssetId) break;
+			// Per-entity param overrides make objects visually distinct even when
+			// they share mesh+material — they must not be instanced together.
+			if (!next.paramOverride.empty() || !first.paramOverride.empty()) break;
 			++j;
 		}
 
@@ -47,6 +50,7 @@ void GeometryPass::execute(const RenderWorld&           world,
 		dc.metallic        = first.metallic;
 		dc.roughness       = first.roughness;
 		dc.opacity         = first.opacity;
+		dc.paramOverride   = first.paramOverride; // per-entity HeParams block (empty = none)
 
 		if (runLen > 1)
 		{
@@ -74,6 +78,7 @@ void GeometryPass::execute(const RenderWorld&           world,
 		dc.entityId      = obj.entityId;
 		dc.lod           = obj.lod;
 		dc.boneMatrices  = obj.boneMatrices;
+		dc.paramOverride = obj.paramOverride; // per-entity HeParams block (empty = none)
 		outCmds.recordSkinnedDraw(dc);
 	}
 }
