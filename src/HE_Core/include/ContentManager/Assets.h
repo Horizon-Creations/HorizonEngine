@@ -105,6 +105,11 @@ struct MaterialAsset : public RuntimeAsset
 	// order. Generated alongside customShaderFragGlsl; the renderer uploads this per
 	// material — editing a parameter VALUE never recompiles the shader.
 	std::vector<float> shaderParamData;
+
+	// Project textures the node graph's Texture Sample nodes reference, in slot order
+	// (heTexP0..). Loose assets keep paths; packing bakes them to graphTextureIds (MTLU).
+	std::vector<std::string> graphTexturePaths;
+	std::vector<HE::UUID>    graphTextureIds;
 };
 
 // A reusable material sub-graph (node editor "Material Function"): its FnInput/FnOutput

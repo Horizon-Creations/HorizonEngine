@@ -188,6 +188,31 @@ bool nodeParamWidgets(MatGraphNode& n)
 			ImGui::DragFloat("Pow", &n.p[0], 0.05f, 0.01f, 16.0f);
 			committed = ImGui::IsItemDeactivatedAfterEdit();
 			break;
+		case MatNodeType::ConstVec2:
+			ImGui::SetNextItemWidth(kNodeW - 24.0f);
+			ImGui::DragFloat2("##v2", n.p, 0.01f);
+			committed = ImGui::IsItemDeactivatedAfterEdit();
+			break;
+		case MatNodeType::ConstVec4:
+			ImGui::SetNextItemWidth(kNodeW - 24.0f);
+			ImGui::DragFloat4("##v4", n.p, 0.01f);
+			committed = ImGui::IsItemDeactivatedAfterEdit();
+			break;
+		case MatNodeType::TextureSample:
+		{
+			// A picked texture shows its filename + a clear button; the drop target
+			// itself is the whole node body (handled in the node loop). Empty = the
+			// material's own base/mesh texture.
+			const std::string label = n.s.empty()
+				? std::string("(mesh texture)")
+				: std::filesystem::path(n.s).filename().string();
+			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.8f, 0.85f, 1.0f, 1.0f));
+			ImGui::TextWrapped("%s", label.c_str());
+			ImGui::PopStyleColor();
+			if (!n.s.empty() && ImGui::SmallButton("Clear")) { n.s.clear(); committed = true; }
+			ImGui::TextDisabled("(drop a texture)");
+			break;
+		}
 		case MatNodeType::Output:
 		{
 			bool lit = n.p[0] > 0.5f;
@@ -232,6 +257,7 @@ float nodeParamHeight(MatNodeType type)
 {
 	const HE::MatNodeDesc& d = HE::matNodeDesc(type);
 	if (d.paramCount == 0) return 0.0f;
+	if (type == MatNodeType::ConstVec4 || type == MatNodeType::TextureSample) return 44.0f;
 	if (type == MatNodeType::ParamFloat || type == MatNodeType::ParamColor ||
 	    type == MatNodeType::FnInput    || type == MatNodeType::FnOutput) return 52.0f;
 	return 26.0f;
@@ -251,6 +277,17 @@ bool isMaterialAsset(const std::string& path)
 		r.assetType() == static_cast<uint16_t>(HE::AssetType::Material);
 	s_typeCache[path] = isMat;
 	return isMat;
+}
+
+bool isTextureAsset(const std::string& path)
+{
+	static std::map<std::string, bool> s_texCache;
+	if (auto it = s_texCache.find(path); it != s_texCache.end()) return it->second;
+	HAsset::Reader r;
+	const bool isTex = r.open(path) &&
+		r.assetType() == static_cast<uint16_t>(HE::AssetType::Texture);
+	s_texCache[path] = isTex;
+	return isTex;
 }
 
 bool isMaterialFunctionAsset(const std::string& path)
@@ -389,6 +426,24 @@ void render(AppContext& ctx, const std::string& assetPath,
 			if (ImGui::MenuItem("Delete Node", nullptr, false, deletable)) deleteNode = n.id;
 			ImGui::EndPopup();
 		}
+		// Texture Sample: accept a texture dropped from the Content Browser (its payload
+		// is an absolute path — store it content-relative to match graphTexturePaths).
+		if (n.type == MatNodeType::TextureSample && ImGui::BeginDragDropTarget())
+		{
+			if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("HE_ASSET_PATH"))
+			{
+				const std::string abs(static_cast<const char*>(pl->Data));
+				if (MaterialEditorPanel::isTextureAsset(abs) && ctx.contentManager)
+				{
+					std::error_code ec;
+					const std::string rel = std::filesystem::relative(
+						abs, ctx.contentManager->contentRoot(), ec).generic_string();
+					n.s = ec ? abs : rel;
+					structuralEdit = true; // texture list changed → regenerate
+				}
+			}
+			ImGui::EndDragDropTarget();
+		}
 
 		// Input pins (left column)
 		for (int i = 0; i < (int)nodeIns->size(); ++i)
@@ -418,8 +473,9 @@ void render(AppContext& ctx, const std::string& assetPath,
 			{ st.dragNode = n.id; st.dragPin = i; st.dragFromOutput = true; }
 		}
 
-		// Inline parameter widgets under the pins
-		if (d.paramCount > 0)
+		// Inline parameter widgets under the pins (also for Texture Sample, which has
+		// no numeric params but shows its picked-texture label + clear).
+		if (d.paramCount > 0 || n.type == MatNodeType::TextureSample)
 		{
 			ImGui::SetCursorScreenPos(ImVec2(p.x + 10, p.y + kTitleH + 6.0f + rows * kRowH));
 			if (nodeParamWidgets(n)) paramEdit = true;

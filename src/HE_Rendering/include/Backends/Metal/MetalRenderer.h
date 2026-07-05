@@ -163,6 +163,8 @@ private:
 	// when the UUID is null or the material is not loaded yet. outTex is an
 	// (unretained, autoreleased) id<MTLTexture> owned by the cache.
 	bool ResolveMaterialTexture(const HE::UUID& materialId, void*& outTex);
+	// Node-graph project texture (Texture Sample nodes), cached by UUID/path key.
+	void* ResolveGraphTexture(const HE::UUID& texId, const std::string& path);
 
 	// Resolves a material override's PBR scalars (baseColor/metallic/roughness/
 	// opacity). Returns true if the material is loaded; leaves outputs untouched.
@@ -399,7 +401,8 @@ private:
 	// Base-color textures for MaterialComponent overrides, keyed by material
 	// UUID (id<MTLTexture>, retained; nullptr = resolved, no texture).
 	// InvalidateMaterial retires the texture and drops the entry.
-	std::unordered_map<HE::UUID, void*> m_materialTexCache;
+	std::unordered_map<HE::UUID, void*>    m_materialTexCache;
+	std::unordered_map<std::string, void*> m_graphTexCache; // node-graph textures by UUID/path key
 
 	// ── Offscreen viewport (editor scene view) ──────────────────────────────
 	uint32_t m_viewportReqW    = 0;  // requested by the UI, 0 = direct to window
