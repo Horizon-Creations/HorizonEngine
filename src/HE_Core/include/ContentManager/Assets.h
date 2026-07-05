@@ -124,6 +124,11 @@ struct MaterialAsset : public RuntimeAsset
 	// material — editing a parameter VALUE never recompiles the shader.
 	std::vector<float> shaderParamData;
 
+	// Parameter names in slot order (parallel to shaderParamData's vec4 slots) — lets
+	// runtime code / scripts set a parameter BY NAME (setMaterialParam). Generated with
+	// shaderParamData from the graph's Param nodes. Empty for hand-written shaders.
+	std::vector<std::string> graphParamNames;
+
 	// Project textures the node graph's Texture Sample nodes reference, in slot order
 	// (heTexP0..). Loose assets keep paths; packing bakes them to graphTextureIds (MTLU).
 	std::vector<std::string> graphTexturePaths;

@@ -312,7 +312,108 @@ TEST_CASE("MaterialGraph v4: extra inputs + project-texture slots")
 	CHECK(gen.glsl.find("binding = 4)")               != std::string::npos); // first project tex
 }
 
+TEST_CASE("MaterialGraph v5: logic nodes, If, and new parameter types")
+{
+	// If(Cond, orange, blue) driven by Greater(param 'K' > 0.5) → BaseColor.
+	MaterialGraph g;
+	const int out   = g.addNode(MatNodeType::Output);
+	const int k     = g.addNode(MatNodeType::ParamFloat);
+	g.findNode(k)->s = "K"; g.findNode(k)->p[0] = 0.8f;
+	const int half  = g.addNode(MatNodeType::ConstFloat);
+	g.findNode(half)->p[0] = 0.5f;
+	const int gt    = g.addNode(MatNodeType::Greater);
+	const int orange= g.addNode(MatNodeType::ConstColor);
+	g.findNode(orange)->p[0] = 0.9f;
+	const int blue  = g.addNode(MatNodeType::ConstColor);
+	g.findNode(blue)->p[2] = 0.9f;
+	const int iff   = g.addNode(MatNodeType::If);
+	CHECK(g.connect(k,     0, gt,  0));
+	CHECK(g.connect(half,  0, gt,  1));
+	CHECK(g.connect(gt,    0, iff, 0));  // Cond
+	CHECK(g.connect(orange,0, iff, 1));  // True
+	CHECK(g.connect(blue,  0, iff, 2));  // False
+	CHECK(g.connect(iff,   0, out, 0));  // BaseColor
+	const std::string glsl = HE::generateFragmentGlsl(g);
+	CHECK(glsl.find(" > ") != std::string::npos);          // Greater
+	CHECK(glsl.find("mix(") != std::string::npos);         // If via mix+step
+	CHECK(glsl.find("step(0.5,") != std::string::npos);    // If condition threshold
+
+	// And/Or/Not compile to boolean float expressions.
+	MaterialGraph b;
+	const int bout = b.addNode(MatNodeType::Output);
+	const int p1   = b.addNode(MatNodeType::ConstBool);
+	const int p2   = b.addNode(MatNodeType::ConstBool); b.findNode(p2)->p[0] = 0.0f;
+	const int andN = b.addNode(MatNodeType::And);
+	const int notN = b.addNode(MatNodeType::Not);
+	CHECK(b.connect(p1, 0, andN, 0));
+	CHECK(b.connect(p2, 0, andN, 1));
+	CHECK(b.connect(andN, 0, notN, 0));
+	CHECK(b.connect(notN, 0, bout, 1)); // Metallic
+	const std::string bglsl = HE::generateFragmentGlsl(b);
+	CHECK(bglsl.find("&&") != std::string::npos);          // And
+	CHECK(bglsl.find("<= 0.5") != std::string::npos);      // Not
+
+	// New parameter types get HeParams slots with the right component layout.
+	MaterialGraph p;
+	const int pout = p.addNode(MatNodeType::Output);
+	const int pv2  = p.addNode(MatNodeType::ParamVec2);
+	p.findNode(pv2)->s = "Tiling"; p.findNode(pv2)->p[0] = 4.0f; p.findNode(pv2)->p[1] = 2.0f;
+	const int pv4  = p.addNode(MatNodeType::ParamVec4);
+	p.findNode(pv4)->s = "Tint"; p.findNode(pv4)->p[0] = 0.3f; p.findNode(pv4)->p[3] = 1.0f;
+	const int pb   = p.addNode(MatNodeType::ParamBool);
+	p.findNode(pb)->s = "Toggle"; p.findNode(pb)->p[0] = 1.0f;
+	CHECK(p.connect(pv4, 0, pout, 0));  // BaseColor from vec4 (coerced)
+	CHECK(p.connect(pb,  0, pout, 1));  // Metallic from bool
+	CHECK(p.connect(pv2, 0, pout, 3));  // Emissive from vec2 (coerced)
+	const HE::MatShaderGen gen = HE::generateFragment(p);
+	REQUIRE(gen.params.size() == 3);
+	// Slots in first-emit order; check names + component values survive.
+	bool sawTiling = false, sawTint = false, sawToggle = false;
+	for (const auto& sl : gen.params)
+	{
+		if (sl.name == "Tiling") { sawTiling = true;
+			CHECK(sl.value[0] == doctest::Approx(4.0f)); CHECK(sl.value[1] == doctest::Approx(2.0f)); }
+		if (sl.name == "Tint")   { sawTint = true;
+			CHECK(sl.value[0] == doctest::Approx(0.3f)); CHECK(sl.value[3] == doctest::Approx(1.0f)); }
+		if (sl.name == "Toggle") { sawToggle = true; CHECK(sl.value[0] == doctest::Approx(1.0f)); }
+	}
+	CHECK(sawTiling); CHECK(sawTint); CHECK(sawToggle);
+	CHECK(gen.glsl.find("step(0.5, heParams") != std::string::npos); // ParamBool threshold
+}
+
 #if defined(HE_TESTS_HAVE_SHADERC)
+TEST_CASE("v5 graph (logic + If + new params) cross-compiles for Metal and GL")
+{
+	MaterialGraph g;
+	const int out = g.addNode(MatNodeType::Output);
+	const int pv2 = g.addNode(MatNodeType::ParamVec2); g.findNode(pv2)->s = "Tiling";
+	const int pv4 = g.addNode(MatNodeType::ParamVec4); g.findNode(pv4)->s = "Tint";
+	const int pb  = g.addNode(MatNodeType::ParamBool);  g.findNode(pb)->s = "Toggle";
+	const int cb  = g.addNode(MatNodeType::ConstBool);
+	const int orr = g.addNode(MatNodeType::Or);
+	const int ge  = g.addNode(MatNodeType::GreaterEqual);
+	const int eq  = g.addNode(MatNodeType::Equal);
+	const int iff = g.addNode(MatNodeType::If);
+	const int blue= g.addNode(MatNodeType::ConstColor); g.findNode(blue)->p[2] = 1.0f;
+	g.connect(pv2, 0, ge, 0);          // vec2 coerced to float for compare
+	g.connect(cb,  0, ge, 1);
+	g.connect(pb,  0, orr, 0);
+	g.connect(ge,  0, orr, 1);
+	g.connect(orr, 0, iff, 0);         // Cond
+	g.connect(pv4, 0, iff, 1);         // True (vec4 → vec3)
+	g.connect(blue,0, iff, 2);         // False
+	g.connect(iff, 0, out, 0);         // BaseColor
+	g.connect(eq,  0, out, 4);         // Opacity from Equal (unconnected inputs → defaults)
+	const std::string glsl = HE::generateFragment(g).glsl;
+	const uint64_t hash = std::hash<std::string>{}(glsl);
+	HE::MaterialShaderLibrary lib;
+	using B = HE::MaterialShaderLibrary::Backend;
+	const auto& msl = lib.fragment(hash, glsl, B::Metal);
+	CHECK_MESSAGE(msl.ok, msl.log);
+	const auto& gl = lib.fragment(hash, glsl, B::GLSL410);
+	CHECK_MESSAGE(gl.ok, gl.log);
+}
+
 TEST_CASE("v4 graph (project textures + new inputs) cross-compiles for Metal and GL")
 {
 	MaterialGraph g;

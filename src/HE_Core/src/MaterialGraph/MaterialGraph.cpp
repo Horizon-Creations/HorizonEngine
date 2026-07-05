@@ -117,6 +117,37 @@ const std::vector<MatNodeDesc>& registry()
           {}, { { "Dist", F::Float, 0 } }, 0 },
         { MatNodeType::ScreenPos, "Screen Position", "Input",
           {}, { { "XY", F::Vec2, 0 } }, 0 },
+
+        // ── v5: baked constants, parameter types, logic ──
+        { MatNodeType::ConstBool, "Bool", "Input",
+          {}, { { "Out", F::Float, 0 } }, 1 }, // p[0] = 0/1
+        { MatNodeType::ParamVec2, "Param (Vector2)", "Parameter",
+          {}, { { "XY", F::Vec2, 0 } }, 2 },
+        { MatNodeType::ParamVec4, "Param (Vector4)", "Parameter",
+          {}, { { "XYZW", F::Vec4, 0 } }, 4 },
+        { MatNodeType::ParamBool, "Param (Bool)", "Parameter",
+          {}, { { "Out", F::Float, 0 } }, 1 }, // p[0] = 0/1
+        { MatNodeType::If, "If", "Logic",
+          { { "Cond", F::Float, 0 }, { "True", F::Vec3, 1 }, { "False", F::Vec3, 0 } },
+          { { "Out", F::Vec3, 0 } }, 0 },
+        { MatNodeType::Greater, "Greater (A>B)", "Logic",
+          { { "A", F::Float, 0 }, { "B", F::Float, 0 } }, { { "Out", F::Float, 0 } }, 0 },
+        { MatNodeType::Less, "Less (A<B)", "Logic",
+          { { "A", F::Float, 0 }, { "B", F::Float, 0 } }, { { "Out", F::Float, 0 } }, 0 },
+        { MatNodeType::GreaterEqual, "Greater or Equal", "Logic",
+          { { "A", F::Float, 0 }, { "B", F::Float, 0 } }, { { "Out", F::Float, 0 } }, 0 },
+        { MatNodeType::LessEqual, "Less or Equal", "Logic",
+          { { "A", F::Float, 0 }, { "B", F::Float, 0 } }, { { "Out", F::Float, 0 } }, 0 },
+        { MatNodeType::Equal, "Equal", "Logic",
+          { { "A", F::Float, 0 }, { "B", F::Float, 0 } }, { { "Out", F::Float, 0 } }, 0 },
+        { MatNodeType::NotEqual, "Not Equal", "Logic",
+          { { "A", F::Float, 0 }, { "B", F::Float, 0 } }, { { "Out", F::Float, 0 } }, 0 },
+        { MatNodeType::And, "And", "Logic",
+          { { "A", F::Float, 0 }, { "B", F::Float, 0 } }, { { "Out", F::Float, 0 } }, 0 },
+        { MatNodeType::Or, "Or", "Logic",
+          { { "A", F::Float, 0 }, { "B", F::Float, 0 } }, { { "Out", F::Float, 0 } }, 0 },
+        { MatNodeType::Not, "Not", "Logic",
+          { { "X", F::Float, 0 } }, { { "Out", F::Float, 0 } }, 0 },
     };
     return kReg;
 }
@@ -228,6 +259,11 @@ int MaterialGraph::addNode(MatNodeType type, float x, float y)
     if (type == MatNodeType::ParamColor) { n.p[0] = n.p[1] = n.p[2] = 0.8f; n.s = "MyColor"; }
     if (type == MatNodeType::FnInput)    { n.p[0] = 2.0f; n.s = "In";  } // vec3
     if (type == MatNodeType::FnOutput)   { n.p[0] = 2.0f; n.s = "Out"; }
+    // v5: baked constants + more parameter types
+    if (type == MatNodeType::ConstBool)  n.p[0] = 1.0f;
+    if (type == MatNodeType::ParamVec2)  { n.p[0] = n.p[1] = 0.0f; n.s = "MyVec2"; }
+    if (type == MatNodeType::ParamVec4)  { n.p[0] = n.p[1] = n.p[2] = n.p[3] = 0.0f; n.s = "MyVec4"; }
+    if (type == MatNodeType::ParamBool)  { n.p[0] = 1.0f; n.s = "MyBool"; }
     nodes.push_back(n);
     return n.id;
 }
@@ -337,18 +373,19 @@ struct Scope
 std::string inputExpr(EmitCtx& c, const Scope& sc, const MatGraphNode& node,
                       int pinIdx, MatPinType wantType);
 
-// Allocate (or find) the HeParams slot for a named parameter.
-int paramSlot(EmitCtx& c, const MatGraphNode& n, bool isColor)
+// Allocate (or find) the HeParams slot for a named parameter. `keep` = how many of
+// the vec4's components carry the default value (1 float/bool, 2 vec2, 3 color, 4 vec4);
+// the rest stay 0. Same name reuses the slot so repeated Param nodes share one uniform.
+int paramSlot(EmitCtx& c, const MatGraphNode& n, bool isColor, int keep)
 {
     const std::string name = n.s.empty() ? ("param_" + std::to_string(n.id)) : n.s;
     for (size_t i = 0; i < c.params.size(); ++i)
-        if (c.params[i].name == name && c.params[i].isColor == isColor)
+        if (c.params[i].name == name)
             return (int)i;
     MatParamSlot slot;
     slot.name = name;
     slot.isColor = isColor;
-    for (int i = 0; i < 4; ++i) slot.value[i] = n.p[i];
-    if (!isColor) { slot.value[1] = slot.value[2] = slot.value[3] = 0.0f; }
+    for (int i = 0; i < 4; ++i) slot.value[i] = (i < keep) ? n.p[i] : 0.0f;
     c.params.push_back(std::move(slot));
     return (int)c.params.size() - 1;
 }
@@ -436,14 +473,14 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
             decl = "vec3 " + v + " = normalize(heLight.camPos.xyz - vWorldPos);"; break;
         case MatNodeType::ParamFloat:
         {
-            const int slot = paramSlot(c, n, false);
+            const int slot = paramSlot(c, n, false, 1);
             decl = "float " + v + " = heParams.v[" + std::to_string(slot) + "].x; // param: "
                  + (n.s.empty() ? "?" : n.s);
             break;
         }
         case MatNodeType::ParamColor:
         {
-            const int slot = paramSlot(c, n, true);
+            const int slot = paramSlot(c, n, true, 3);
             decl = "vec3 " + v + " = heParams.v[" + std::to_string(slot) + "].xyz; // param: "
                  + (n.s.empty() ? "?" : n.s);
             break;
@@ -565,6 +602,62 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
             decl = "float " + v + " = length(heLight.camPos.xyz - vWorldPos);"; break;
         case MatNodeType::ScreenPos:
             decl = "vec2 " + v + " = gl_FragCoord.xy;"; break;
+
+        // ── v5: baked constants, parameter types, logic ──
+        case MatNodeType::ConstBool:
+            decl = "float " + v + " = " + (n.p[0] > 0.5f ? "1.0" : "0.0") + ";"; break;
+        case MatNodeType::ParamVec2:
+        {
+            const int slot = paramSlot(c, n, false, 2);
+            decl = "vec2 " + v + " = heParams.v[" + std::to_string(slot) + "].xy; // param: "
+                 + (n.s.empty() ? "?" : n.s);
+            break;
+        }
+        case MatNodeType::ParamVec4:
+        {
+            const int slot = paramSlot(c, n, false, 4);
+            decl = "vec4 " + v + " = heParams.v[" + std::to_string(slot) + "]; // param: "
+                 + (n.s.empty() ? "?" : n.s);
+            break;
+        }
+        case MatNodeType::ParamBool:
+        {
+            const int slot = paramSlot(c, n, false, 1);
+            // Threshold so a bool param reads cleanly as 0.0/1.0 even if set to e.g. 0.7.
+            decl = "float " + v + " = step(0.5, heParams.v[" + std::to_string(slot) + "].x); // param: "
+                 + (n.s.empty() ? "?" : n.s);
+            break;
+        }
+        case MatNodeType::If:
+            decl = "vec3 " + v + " = mix(" + inputExpr(c, sc, n, 2, F::Vec3) + ", "
+                 + inputExpr(c, sc, n, 1, F::Vec3) + ", step(0.5, "
+                 + inputExpr(c, sc, n, 0, F::Float) + "));"; break;
+        case MatNodeType::Greater:
+            decl = "float " + v + " = float(" + inputExpr(c, sc, n, 0, F::Float) + " > "
+                 + inputExpr(c, sc, n, 1, F::Float) + ");"; break;
+        case MatNodeType::Less:
+            decl = "float " + v + " = float(" + inputExpr(c, sc, n, 0, F::Float) + " < "
+                 + inputExpr(c, sc, n, 1, F::Float) + ");"; break;
+        case MatNodeType::GreaterEqual:
+            decl = "float " + v + " = float(" + inputExpr(c, sc, n, 0, F::Float) + " >= "
+                 + inputExpr(c, sc, n, 1, F::Float) + ");"; break;
+        case MatNodeType::LessEqual:
+            decl = "float " + v + " = float(" + inputExpr(c, sc, n, 0, F::Float) + " <= "
+                 + inputExpr(c, sc, n, 1, F::Float) + ");"; break;
+        case MatNodeType::Equal:
+            decl = "float " + v + " = float(abs(" + inputExpr(c, sc, n, 0, F::Float) + " - "
+                 + inputExpr(c, sc, n, 1, F::Float) + ") < 1e-4);"; break;
+        case MatNodeType::NotEqual:
+            decl = "float " + v + " = float(abs(" + inputExpr(c, sc, n, 0, F::Float) + " - "
+                 + inputExpr(c, sc, n, 1, F::Float) + ") >= 1e-4);"; break;
+        case MatNodeType::And:
+            decl = "float " + v + " = float(" + inputExpr(c, sc, n, 0, F::Float) + " > 0.5 && "
+                 + inputExpr(c, sc, n, 1, F::Float) + " > 0.5);"; break;
+        case MatNodeType::Or:
+            decl = "float " + v + " = float(" + inputExpr(c, sc, n, 0, F::Float) + " > 0.5 || "
+                 + inputExpr(c, sc, n, 1, F::Float) + " > 0.5);"; break;
+        case MatNodeType::Not:
+            decl = "float " + v + " = float(" + inputExpr(c, sc, n, 0, F::Float) + " <= 0.5);"; break;
 
         case MatNodeType::Output:
             decl = ""; break; // handled by generateFragment

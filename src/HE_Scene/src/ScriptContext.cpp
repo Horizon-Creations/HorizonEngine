@@ -12,6 +12,7 @@ extern "C" {
 // ─── Registry keys ────────────────────────────────────────────────────────────
 static const char* kWorldKey   = "__horizonWorld";
 static const char* kPhysicsKey = "__horizonPhysics";
+static const char* kContentKey = "__horizonContent";
 
 static HorizonWorld* getWorld(lua_State* L)
 {
@@ -27,6 +28,14 @@ static PhysicsWorld* getPhysics(lua_State* L)
     auto* pw = static_cast<PhysicsWorld*>(lua_touserdata(L, -1));
     lua_pop(L, 1);
     return pw;
+}
+
+static ContentManager* getContent(lua_State* L)
+{
+    lua_getfield(L, LUA_REGISTRYINDEX, kContentKey);
+    auto* cm = static_cast<ContentManager*>(lua_touserdata(L, -1));
+    lua_pop(L, 1);
+    return cm;
 }
 
 // ─── Lua C functions ─────────────────────────────────────────────────────────
@@ -159,6 +168,33 @@ static int lua_horizon_isGrounded(lua_State* L)
     return 1;
 }
 
+// horizon.setMaterialParam(entityId, name, x [, y, z, w]) — 1..4 numeric components;
+// omitted components default to 0. Returns true if the parameter was found.
+static int lua_horizon_setMaterialParam(lua_State* L)
+{
+    const auto id = static_cast<uint32_t>(luaL_checkinteger(L, 1));
+    const char* name = luaL_checkstring(L, 2);
+    glm::vec4 v(0.0f);
+    v.x = static_cast<float>(luaL_checknumber(L, 3));
+    v.y = static_cast<float>(luaL_optnumber(L, 4, 0.0));
+    v.z = static_cast<float>(luaL_optnumber(L, 5, 0.0));
+    v.w = static_cast<float>(luaL_optnumber(L, 6, 0.0));
+    const bool ok = ScriptApi::setMaterialParam(*getWorld(L), getContent(L), id, name, v);
+    lua_pushboolean(L, ok ? 1 : 0);
+    return 1;
+}
+
+// horizon.getMaterialParam(entityId, name) → x, y, z, w (four numbers).
+static int lua_horizon_getMaterialParam(lua_State* L)
+{
+    const auto id = static_cast<uint32_t>(luaL_checkinteger(L, 1));
+    const char* name = luaL_checkstring(L, 2);
+    const glm::vec4 v = ScriptApi::getMaterialParam(*getWorld(L), getContent(L), id, name);
+    lua_pushnumber(L, v.x); lua_pushnumber(L, v.y);
+    lua_pushnumber(L, v.z); lua_pushnumber(L, v.w);
+    return 4;
+}
+
 // ─── Registration table ──────────────────────────────────────────────────────
 
 static const luaL_Reg kHorizonFuncs[] = {
@@ -175,6 +211,8 @@ static const luaL_Reg kHorizonFuncs[] = {
     { "raycast",     lua_horizon_raycast     },
     { "setVelocity", lua_horizon_setVelocity },
     { "isGrounded",  lua_horizon_isGrounded  },
+    { "setMaterialParam", lua_horizon_setMaterialParam },
+    { "getMaterialParam", lua_horizon_getMaterialParam },
     { nullptr, nullptr }
 };
 
@@ -200,6 +238,10 @@ void ScriptContext::registerHorizonApi()
     lua_pushlightuserdata(L, nullptr);
     lua_setfield(L, LUA_REGISTRYINDEX, kPhysicsKey);
 
+    // Content manager starts as null; updated via setContentManager()
+    lua_pushlightuserdata(L, nullptr);
+    lua_setfield(L, LUA_REGISTRYINDEX, kContentKey);
+
     // Create `horizon` global table and register all functions
     luaL_newlib(L, kHorizonFuncs);
     lua_setglobal(L, "horizon");
@@ -213,6 +255,16 @@ void ScriptContext::setPhysicsWorld(PhysicsWorld* pw)
     lua_setfield(L, LUA_REGISTRYINDEX, kPhysicsKey);
 
     if (m_py) m_py->setPhysicsWorld(pw);
+}
+
+void ScriptContext::setContentManager(ContentManager* cm)
+{
+    m_contentManager = cm;
+    lua_State* L = m_engine.state();
+    lua_pushlightuserdata(L, cm);
+    lua_setfield(L, LUA_REGISTRYINDEX, kContentKey);
+
+    if (m_py) m_py->setContentManager(cm);
 }
 
 // ─── Backend routing ───────────────────────────────────────────────────────────

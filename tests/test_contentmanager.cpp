@@ -148,6 +148,43 @@ TEST_CASE("ContentManager round-trips a material's custom shader (and defaults e
 	CHECK(ploaded->customShaderFragGlsl.empty());
 }
 
+TEST_CASE("ContentManager setMaterialParam sets node-graph params by name + round-trips")
+{
+	TempContentDir dir;
+	ContentManager cm(dir.path.string());
+
+	MaterialAsset mat;
+	mat.type = HE::AssetType::Material;
+	mat.name = "params"; mat.path = "params.hasset";
+	// Two exposed params: 'K' (scalar, slot 0) and 'Tint' (vec4, slot 1).
+	mat.graphParamNames = { "K", "Tint" };
+	mat.shaderParamData = { 1.0f, 0, 0, 0,   0.1f, 0.2f, 0.3f, 1.0f };
+	REQUIRE(cm.saveAsset(mat));
+	const HE::UUID id = cm.loadAsset("params.hasset");
+	REQUIRE(cm.getMaterial(id) != nullptr);
+
+	// Param names survive the MTRL-tail round-trip.
+	CHECK(cm.getMaterial(id)->graphParamNames == std::vector<std::string>{ "K", "Tint" });
+
+	// Set the scalar param by name → shaderParamData slot 0 updated.
+	const float kv[1] = { 0.42f };
+	CHECK(cm.setMaterialParam(id, "K", kv, 1));
+	CHECK(cm.getMaterial(id)->shaderParamData[0] == doctest::Approx(0.42f));
+
+	// Set the vec4 param → all four components of slot 1 updated.
+	const float tint[4] = { 0.9f, 0.8f, 0.7f, 0.6f };
+	CHECK(cm.setMaterialParam(id, "Tint", tint, 4));
+	float out[4] = { 0, 0, 0, 0 };
+	REQUIRE(cm.getMaterialParam(id, "Tint", out));
+	CHECK(out[0] == doctest::Approx(0.9f));
+	CHECK(out[3] == doctest::Approx(0.6f));
+
+	// Unknown parameter / non-material → false, no crash.
+	CHECK_FALSE(cm.setMaterialParam(id, "Nope", kv, 1));
+	CHECK_FALSE(cm.getMaterialParam(id, "Nope", out));
+	CHECK_FALSE(cm.setMaterialParam(HE::UUID::generate(), "K", kv, 1));
+}
+
 TEST_CASE("ContentManager registers a runtime mesh without a disk file")
 {
 	TempContentDir dir;

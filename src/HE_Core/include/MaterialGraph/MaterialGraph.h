@@ -68,6 +68,23 @@ enum class MatNodeType : uint8_t
     CameraPos,      // heLight.camPos.xyz
     CameraDistance, // length(camPos - worldPos)
     ScreenPos,      // gl_FragCoord.xy (raw pixels)
+
+    // ── v5: baked constants, more parameter types, logic ──
+    ConstBool,      // p[0] = 0/1 (baked literal) → float 0.0/1.0
+    ParamVec2,      // named exposed parameter (s = name, p[0..1]) → HeParams .xy
+    ParamVec4,      // named exposed parameter (s = name, p[0..3]) → HeParams .xyzw
+    ParamBool,      // named exposed parameter (s = name, p[0] = 0/1) → HeParams .x
+    // Logic — comparisons/booleans emit 0.0/1.0 floats; If selects branchlessly.
+    If,             // (Cond, True, False) → mix(False, True, step(0.5, Cond))
+    Greater,        // A > B  → 1/0
+    Less,           // A < B  → 1/0
+    GreaterEqual,   // A >= B → 1/0
+    LessEqual,      // A <= B → 1/0
+    Equal,          // |A-B| < eps → 1/0
+    NotEqual,       // |A-B| >= eps → 1/0
+    And,            // (A>0.5)&&(B>0.5) → 1/0
+    Or,             // (A>0.5)||(B>0.5) → 1/0
+    Not,            // A<=0.5 → 1/0
 };
 
 struct MatGraphNode

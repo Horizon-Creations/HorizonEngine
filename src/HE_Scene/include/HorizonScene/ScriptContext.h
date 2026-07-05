@@ -9,6 +9,7 @@
 
 class HorizonWorld;
 class PhysicsWorld;
+class ContentManager;
 
 // Hosts the per-language script backends (Lua via ScriptEngine, Python via
 // PyScriptBackend) and binds them to a HorizonWorld, exposing the identical
@@ -91,6 +92,10 @@ public:
     // Pass nullptr to disable raycasting (default, and safe for editor prop inspection).
     void setPhysicsWorld(PhysicsWorld* pw);
 
+    // Provide the ContentManager so scripts can call horizon.setMaterialParam /
+    // getMaterialParam. Pass nullptr to disable (default) — those calls then no-op.
+    void setContentManager(ContentManager* cm);
+
     ScriptEngine& engine() { return m_engine; }
 
 private:
@@ -112,8 +117,9 @@ private:
     IScriptBackend* backendForId(InstanceId id);
     IScriptBackend* backendForName(const std::string& name);
 
-    HorizonWorld* m_world;
-    PhysicsWorld* m_physicsWorld = nullptr;
+    HorizonWorld*   m_world;
+    PhysicsWorld*   m_physicsWorld   = nullptr;
+    ContentManager* m_contentManager = nullptr;
     ScriptEngine  m_engine;                        // Lua
     std::unique_ptr<PyScriptBackend> m_py;         // Python (null if unavailable)
     IScriptBackend* m_lastBackend = &m_engine;     // whose lastError() to report
