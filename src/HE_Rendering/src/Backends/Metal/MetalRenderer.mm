@@ -3508,6 +3508,29 @@ void MetalRenderer::InvalidateMesh(const HE::UUID& meshId)
 		m_pendingMeshInvalidations.push_back(meshId);
 }
 
+void MetalRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
+{
+	// Build each custom-shader material's pipeline state NOW so the first draw
+	// doesn't stall on cross-compile + PSO creation inside the encoder loop. The
+	// Metal device is always available; cache hits are cheap; built-in-PBR
+	// materials resolve no shader and are skipped.
+	int built = 0;
+	for (const HE::UUID& id : materialIds)
+	{
+		uint64_t shKey; std::string shFrag;
+		if (!ResolveMaterialShader(id, shKey, shFrag)) continue;
+		if (m_materialPipelineCache.find(shKey) != m_materialPipelineCache.end()) continue; // warm
+		const MaterialShaderVariant* pre = nullptr;
+		if (const MaterialAsset* ma = m_contentManager ? m_contentManager->getMaterial(id) : nullptr)
+			for (const auto& var : ma->precompiledShaders)
+				if (var.backend == static_cast<uint8_t>(HE::RendererBackend::Metal)) { pre = &var; break; }
+		if (GetOrBuildMaterialPipeline(shKey, shFrag, pre)) ++built;
+	}
+	if (built > 0)
+		Logger::Log(Logger::LogLevel::Info,
+			("MetalRenderer: warmed up " + std::to_string(built) + " material pipeline(s)").c_str());
+}
+
 // ─── Window targets ───────────────────────────────────────────────────────────
 
 void MetalRenderer::CreateTarget(SDL_Window* sdlWin, WindowTarget& out)

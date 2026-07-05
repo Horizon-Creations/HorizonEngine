@@ -79,6 +79,7 @@ public:
 	void* GetViewportTexture() override;
 	bool  CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& width, uint32_t& height) override;
 	void  InvalidateMaterial(const HE::UUID& materialId) override;
+	void  WarmupMaterials(const std::vector<HE::UUID>& materialIds) override;
 	void  InvalidateMesh    (const HE::UUID& meshId)     override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
 	void  SetSSAOSettings(const SSAOSettings& settings) override;
