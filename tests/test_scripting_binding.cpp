@@ -4,6 +4,9 @@
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/NameComponent.h>
+#include <HorizonScene/Components/MaterialComponent.h>
+#include <ContentManager/ContentManager.h>
+#include <ContentManager/Assets.h>
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -270,4 +273,60 @@ TEST_CASE("ScriptContext: invalid entity operations are safe (no crash)")
     engine.exec("horizon.destroy(99999)");
     engine.exec("_n = horizon.getName(99999)");
     CHECK(engine.getGlobalString("_n") == ""); // safe default
+}
+
+// ─── Material parameters from scripts ──────────────────────────────────────────
+
+TEST_CASE("ScriptContext: horizon.setMaterialParam drives the entity's material")
+{
+    // A node-graph material with two exposed params, referenced by an entity.
+    ContentManager cm;
+    MaterialAsset mat;
+    mat.type = HE::AssetType::Material; mat.name = "scripted";
+    mat.graphParamNames = { "K", "Tint" };
+    mat.shaderParamData = { 0,0,0,0,  0,0,0,0 };
+    const HE::UUID matId = cm.registerMaterial(std::move(mat));
+
+    HorizonWorld world;
+    ScriptContext ctx(world);
+    ctx.setContentManager(&cm); // enable horizon.setMaterialParam / getMaterialParam
+
+    auto entity = world.createEntity("Painted");
+    world.registry().emplace<MaterialComponent>(entity, MaterialComponent{ matId });
+
+    // onStart sets the scalar 'K'; onUpdate writes the vec4 'Tint' (module-table
+    // style, matching the other binding tests — self.entityId is injected).
+    const char* kPainter = R"lua(
+local M = {}
+function M.onStart(self) horizon.setMaterialParam(self.entityId, 'K', 0.7) end
+function M.onUpdate(self, dt) horizon.setMaterialParam(self.entityId, 'Tint', 0.1, 0.9, 0.2, 1.0) end
+return M
+)lua";
+    REQUIRE(ctx.loadScript("painter", kPainter));
+    auto id = ctx.createInstance("painter", entity);
+    REQUIRE(id != ScriptEngine::kInvalidInstance);
+
+    CHECK(ctx.callOnStart(id));
+    CHECK(cm.getMaterial(matId)->shaderParamData[0] == doctest::Approx(0.7f)); // 'K' slot 0
+
+    CHECK(ctx.callOnUpdate(id, 0.016f));
+    float tint[4] = { 0, 0, 0, 0 };
+    REQUIRE(cm.getMaterialParam(matId, "Tint", tint));
+    CHECK(tint[1] == doctest::Approx(0.9f)); // 'Tint' green
+    CHECK(tint[3] == doctest::Approx(1.0f));
+
+    // getMaterialParam round-trips back into the script.
+    auto& engine = ctx.engine();
+    auto eId = static_cast<int64_t>(static_cast<uint32_t>(entity));
+    engine.exec("_k = ({horizon.getMaterialParam(" + std::to_string(eId) + ", 'K')})[1]");
+    CHECK(engine.getGlobalNumber("_k") == doctest::Approx(0.7));
+}
+
+TEST_CASE("ScriptContext: setMaterialParam is safe without a ContentManager")
+{
+    HorizonWorld world;
+    ScriptContext ctx(world); // no setContentManager → calls must no-op, not crash
+    auto& engine = ctx.engine();
+    engine.exec("_ok = horizon.setMaterialParam(1, 'K', 0.5) and 1 or 0");
+    CHECK(engine.getGlobalNumber("_ok") == doctest::Approx(0.0)); // false, no crash
 }

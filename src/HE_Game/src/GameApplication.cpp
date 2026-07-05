@@ -7,9 +7,13 @@
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/SceneSystems.h>
+#include <HorizonScene/ScriptContext.h>
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/EnvironmentComponent.h>
+#include <HorizonScene/Components/ScriptComponent.h>
+#include <ContentManager/ContentManager.h>
+#include <ContentManager/Assets.h>
 #include <Types/UUID.h>
 #include <algorithm>
 #include <cmath>
@@ -20,6 +24,8 @@
 #include <glm/gtc/quaternion.hpp>
 #include <filesystem>
 
+GameApplication::GameApplication(std::string startupPath)
+	: HE::Application(std::move(startupPath)) {}
 GameApplication::~GameApplication() = default;
 
 HE::ApplicationConfig GameApplication::GetConfig() const
@@ -196,6 +202,47 @@ void GameApplication::OnInit()
 		logicLoader().logic()->onStart(*m_world);
 		Logger::Log(Logger::LogLevel::Info, "GameApplication: native game logic started");
 	}
+
+	// ECS gameplay scripts (Lua/Python): the packaged game drives them exactly like
+	// the editor's play mode, so a shipped game behaves like PIE.
+	startScripts();
+}
+
+void GameApplication::startScripts()
+{
+	if (!m_world) return;
+	m_scriptContext = std::make_unique<ScriptContext>(*m_world);
+	// No PhysicsWorld in the shipping runtime yet → raycast/velocity/isGrounded
+	// no-op; onStart/onUpdate + horizon.setMaterialParam work.
+	m_scriptContext->setContentManager(&contentManager());
+
+	int started = 0;
+	auto& reg = m_world->registry();
+	for (auto [entity, sc] : reg.view<ScriptComponent>().each())
+	{
+		if (!sc.enabled) continue;
+		const ScriptAsset* asset = contentManager().getScript(sc.scriptAssetId);
+		if (!asset || asset->sourceCode.empty()) continue;
+		if (!m_scriptContext->isScriptLoaded(sc.moduleName, asset->language))
+			m_scriptContext->loadScript(sc.moduleName, asset->sourceCode, asset->language);
+		auto instId = m_scriptContext->createInstance(sc.moduleName, entity, asset->language);
+		if (instId == ScriptEngine::kInvalidInstance) continue;
+		m_scriptContext->injectProperties(instId, sc.properties);
+		m_scriptContext->callOnStart(instId);
+		m_scriptInstances[static_cast<uint32_t>(entity)] = instId;
+		++started;
+	}
+	if (started > 0)
+		Logger::Log(Logger::LogLevel::Info,
+			("GameApplication: started " + std::to_string(started) + " ECS script(s)").c_str());
+}
+
+void GameApplication::updateScripts(float dt)
+{
+	if (!m_scriptContext || dt <= 0.0f) return;
+	HE_PROFILE_SCOPE_N("ScriptUpdate");
+	for (auto& [entityId, instId] : m_scriptInstances)
+		m_scriptContext->callOnUpdate(instId, dt);
 }
 
 void GameApplication::setMouseCaptured(bool captured)
@@ -319,6 +366,10 @@ void GameApplication::OnRender(float deltaTime)
 	// runs before the systems tick so LOD/particles follow the new camera pos.
 	updateCameraController(deltaTime);
 
+	// Per-frame ECS script update (Lua/Python onUpdate), before the systems tick so
+	// script-driven transforms/params are reflected the same frame.
+	updateScripts(deltaTime);
+
 	// Tick the shared gameplay/visual systems (weather, animation, particles, …) so a
 	// shipped game animates exactly like the editor preview. Feed the active scene
 	// camera's world position so LOD + precipitation follow the player.
@@ -381,6 +432,10 @@ void GameApplication::OnRender(float deltaTime)
 
 void GameApplication::OnShutdown()
 {
+	// Tear down ECS scripts before the world (their finalizers may touch entities).
+	m_scriptContext.reset();
+	m_scriptInstances.clear();
+
 	// Stop + unload native game logic before the world is torn down.
 	if (m_world && logicLoader().isLoaded())
 		logicLoader().unload(*m_world);
