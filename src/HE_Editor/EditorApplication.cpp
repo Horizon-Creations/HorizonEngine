@@ -793,6 +793,7 @@ void EditorApplication::OnInit()
 			{
 				m_currentScenePath = sceneAbsPath;
 				SceneSystems::preloadAssetRefs(*m_editorWorld, contentManager());
+				warmupWorldMaterials(); // build custom-material pipelines before the first draw
 				Logger::Log(Logger::LogLevel::Info,
 					("EditorApplication: startup scene loaded from " + sceneAbsPath).c_str());
 			}
@@ -1451,6 +1452,10 @@ void EditorApplication::dumpFrameHeadless()
 
 	pushEnvironment(0.0f); // scene environment from the World entity (no auto-advance)
 	r->SetViewportSize(1280, 720);
+	// Warm the material pipelines before rendering (mirrors openScene) so the dump
+	// exercises the warmed path — the draw loop then hits the cache instead of
+	// cross-compiling mid-encoder.
+	if (m_editorWorld) r->WarmupMaterials(SceneSystems::collectAssetRefs(*m_editorWorld));
 	for (int i = 0; i < 3; ++i)
 		r->Render();
 
@@ -1897,6 +1902,12 @@ void EditorApplication::pushEnvironment(float dt)
 		.starDensity = env->starDensity});
 }
 
+void EditorApplication::warmupWorldMaterials()
+{
+	if (!m_editorWorld || !renderer()) return;
+	renderer()->WarmupMaterials(SceneSystems::collectAssetRefs(*m_editorWorld));
+}
+
 void EditorApplication::openScene(const std::string& path)
 {
 	if (!m_editorWorld || path.empty()) return;
@@ -1909,6 +1920,7 @@ void EditorApplication::openScene(const std::string& path)
 	{
 		m_currentScenePath = path;
 		SceneSystems::preloadAssetRefs(*m_editorWorld, contentManager());
+		warmupWorldMaterials(); // build custom-material pipelines before the first draw
 		Logger::Log(Logger::LogLevel::Info, ("EditorApplication: scene opened from " + path).c_str());
 	}
 	else

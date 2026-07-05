@@ -299,6 +299,15 @@ public:
     // re-assigned. No-op on backends that do not honour MaterialComponent yet.
     virtual void InvalidateMaterial(const HE::UUID& /*materialId*/) {}
 
+    // ── Material pipeline warm-up ──────────────────────────────────────────
+    // Build (cross-compile + link/PSO) the node-graph material pipelines for
+    // these materials AHEAD of their first draw, so the first frame that shows a
+    // custom material doesn't hitch on a synchronous glslang/SPIRV-Cross + pipeline
+    // build inside the encoder loop. Call after a scene loads (editor + packaged
+    // game). Materials without a custom shader are skipped; already-built
+    // pipelines are a cheap cache hit. No-op on backends that build eagerly.
+    virtual void WarmupMaterials(const std::vector<HE::UUID>& /*materialIds*/) {}
+
     // Drop cached GPU buffers for a mesh so ResolveMesh re-uploads from the
     // ContentManager next frame. Call after replaceStaticMesh so sculpt/edit
     // changes are not masked by the renderer's VBO cache.

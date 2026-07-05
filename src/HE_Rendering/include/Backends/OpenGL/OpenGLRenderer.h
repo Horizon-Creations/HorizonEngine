@@ -38,6 +38,7 @@ public:
 	void* GetViewportTexture() override;
 	bool  CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& width, uint32_t& height) override;
 	void  InvalidateMaterial(const HE::UUID& materialId) override;
+	void  WarmupMaterials(const std::vector<HE::UUID>& materialIds) override;
 	void  InvalidateMesh    (const HE::UUID& meshId)     override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
 	void  SetSSAOSettings(const SSAOSettings& settings) override;
@@ -189,6 +190,12 @@ private:
 	unsigned int m_matObjUBO   = 0;  // per-object U   (mvp/model/color/flags/pbr), 176 B
 	unsigned int m_matLightUBO = 0;  // HeLighting     (sunDir/sunColor/ambient/camPos), 64 B
 	unsigned int m_matParamUBO = 0;  // HeParams       (exposed graph parameters), 256 B
+	// Per-draw UBO-upload dedup: the lighting UBO is frame-constant (upload once per
+	// frame), and HeParams rarely changes (upload only when its 64 floats differ from
+	// what the UBO already holds — still correct for per-entity param overrides).
+	bool         m_matLightUploadedThisFrame = false;
+	float        m_lastMatParams[64] = { 0 };
+	bool         m_haveMatParams = false;
 	unsigned int getOrBuildMaterialProgram(uint64_t key, const std::string& fragGlsl,
 	                                       const MaterialShaderVariant* precompiled = nullptr);
 	bool         resolveMaterialShader(const HE::UUID& materialId, uint64_t& key, std::string& frag);

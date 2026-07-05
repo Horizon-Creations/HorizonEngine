@@ -360,7 +360,14 @@ void GameApplication::OnRender(float deltaTime)
 	// simultaneously-finished loads is spread across frames instead of freezing one;
 	// the rest stay queued for the next frame. Cheap no-op once fully streamed in.
 	constexpr size_t kStreamRegistrationsPerFrame = 16;
-	contentManager().pollAsyncResults(kStreamRegistrationsPerFrame);
+	const std::vector<HE::UUID> justRegistered =
+		contentManager().pollAsyncResults(kStreamRegistrationsPerFrame);
+	// Warm up node-graph material pipelines the moment their material becomes
+	// resident — building the pipeline here (before the material is first drawn)
+	// keeps the first frame that shows it from stalling on a synchronous
+	// cross-compile inside the encoder loop. Non-material ids are skipped.
+	if (!justRegistered.empty() && renderer())
+		renderer()->WarmupMaterials(justRegistered);
 
 	// Built-in free-fly camera (mouse look + WASD) so the game is navigable —
 	// runs before the systems tick so LOD/particles follow the new camera pos.

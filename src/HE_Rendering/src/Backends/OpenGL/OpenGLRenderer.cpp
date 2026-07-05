@@ -3859,6 +3859,29 @@ void OpenGLRenderer::InvalidateMesh(const HE::UUID& meshId)
 		m_pendingMeshInvalidations.push_back(meshId);
 }
 
+void OpenGLRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
+{
+	// Build each custom-shader material's GL program NOW so the first draw doesn't
+	// stall on compile+link. Caller guarantees the GL context is current (called
+	// on the render thread after a scene load). Cache hits are cheap; built-in-PBR
+	// materials resolve no shader and are skipped.
+	int built = 0;
+	for (const HE::UUID& id : materialIds)
+	{
+		uint64_t shKey; std::string shFrag;
+		if (!resolveMaterialShader(id, shKey, shFrag)) continue;
+		if (m_materialPrograms.count(shKey)) continue; // already warm
+		const MaterialShaderVariant* pre = nullptr;
+		if (const MaterialAsset* ma = m_contentManager ? m_contentManager->getMaterial(id) : nullptr)
+			for (const auto& var : ma->precompiledShaders)
+				if (var.backend == static_cast<uint8_t>(HE::RendererBackend::OpenGL)) { pre = &var; break; }
+		if (getOrBuildMaterialProgram(shKey, shFrag, pre)) ++built;
+	}
+	if (built > 0)
+		Logger::Log(Logger::LogLevel::Info,
+			("OpenGLRenderer: warmed up " + std::to_string(built) + " material program(s)").c_str());
+}
+
 void OpenGLRenderer::SetDebugLines(const std::vector<DebugLine>& lines)
 {
 	m_debugLines = lines;
@@ -4513,6 +4536,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		const glm::vec3 camPos = m_renderWorld.camera.position;
 
 		glUniform1f(m_uOpacity, 1.0f); // opaque pass writes alpha 1
+		m_matLightUploadedThisFrame = false; // lighting UBO re-uploaded at most once this frame
 		for (const DrawCall& dc : cmds.drawCalls())
 		{
 			// An explicit MaterialComponent override wins over the mesh's own
@@ -4632,9 +4656,14 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					lit.camPos[2] = m_renderWorld.camera.position.z;
 					lit.sunColor[0]=sc.r; lit.sunColor[1]=sc.g; lit.sunColor[2]=sc.b;
 					lit.ambient[0]=m_renderWorld.ambient.r; lit.ambient[1]=m_renderWorld.ambient.g; lit.ambient[2]=m_renderWorld.ambient.b;
-					glBindBuffer(GL_UNIFORM_BUFFER, m_matLightUBO);
-					glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(lit), &lit);
-					glBindBuffer(GL_UNIFORM_BUFFER, 0);
+					// Lighting is identical for every material draw this frame → upload once.
+					if (!m_matLightUploadedThisFrame)
+					{
+						glBindBuffer(GL_UNIFORM_BUFFER, m_matLightUBO);
+						glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(lit), &lit);
+						glBindBuffer(GL_UNIFORM_BUFFER, 0);
+						m_matLightUploadedThisFrame = true;
+					}
 					glBindBufferBase(GL_UNIFORM_BUFFER, 1, m_matObjUBO);   // block "U"
 					glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_matLightUBO); // block "HeLighting"
 					// Exposed graph parameters (HeParams @ binding 2) — value edits reach the
@@ -4651,9 +4680,17 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						float padded[64] = { 0 };
 						std::memcpy(padded, params->data(),
 						            std::min(params->size(), size_t(64)) * sizeof(float));
-						glBindBuffer(GL_UNIFORM_BUFFER, m_matParamUBO);
-						glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(padded), padded);
-						glBindBuffer(GL_UNIFORM_BUFFER, 0);
+						// Skip the upload when the UBO already holds these exact params
+						// (the common case: many draws of the same material). Still correct
+						// for per-entity overrides — their block differs, so it re-uploads.
+						if (!m_haveMatParams || std::memcmp(padded, m_lastMatParams, sizeof(padded)) != 0)
+						{
+							std::memcpy(m_lastMatParams, padded, sizeof(padded));
+							m_haveMatParams = true;
+							glBindBuffer(GL_UNIFORM_BUFFER, m_matParamUBO);
+							glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(padded), padded);
+							glBindBuffer(GL_UNIFORM_BUFFER, 0);
+						}
 					}
 					glBindBufferBase(GL_UNIFORM_BUFFER, 2, m_matParamUBO); // block "HeParams"
 					glBindVertexArray(vao);
