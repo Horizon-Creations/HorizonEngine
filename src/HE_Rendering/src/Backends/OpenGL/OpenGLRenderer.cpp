@@ -4559,6 +4559,12 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					HE::MaterialShaderLibrary::Lighting lit;
 					const glm::vec3 sc = GetEnvironment().sunColor;
 					lit.sunDir[0]=sunDir.x; lit.sunDir[1]=sunDir.y; lit.sunDir[2]=sunDir.z;
+					// Engine seconds for the node graph's Time input (HE_SKY_TIME pins it
+					// for deterministic headless captures, mirroring the sky clock).
+					static const char* s_timeOv = std::getenv("HE_SKY_TIME");
+					lit.sunDir[3] = s_timeOv && *s_timeOv
+						? static_cast<float>(std::atof(s_timeOv))
+						: static_cast<float>(SDL_GetTicks()) / 1000.0f;
 					lit.sunColor[0]=sc.r; lit.sunColor[1]=sc.g; lit.sunColor[2]=sc.b;
 					lit.ambient[0]=m_renderWorld.ambient.r; lit.ambient[1]=m_renderWorld.ambient.g; lit.ambient[2]=m_renderWorld.ambient.b;
 					glBindBuffer(GL_UNIFORM_BUFFER, m_matLightUBO);
@@ -4567,6 +4573,9 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					glBindBufferBase(GL_UNIFORM_BUFFER, 1, m_matObjUBO);   // block "U"
 					glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_matLightUBO); // block "HeLighting"
 					glBindVertexArray(vao);
+					// Material texture on unit 0 for TextureSample nodes (the emitted
+					// sampler uniform defaults to unit 0 — no binding layout on GL 4.1).
+					glBindTexture(GL_TEXTURE_2D, tex);
 					glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, nullptr);
 					glUseProgram(m_unlitProgram); // restore for the next single-draw
 					++m_counters.draws;

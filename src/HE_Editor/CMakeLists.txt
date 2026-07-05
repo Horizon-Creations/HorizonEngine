@@ -103,8 +103,9 @@ add_executable(HorizonEditor WIN32
 	EditorUndo.cpp
 	EditorCamera.cpp
 	ScriptEditorPanel.cpp
+	MaterialEditorPanel.cpp
 	stb_image_impl.cpp
- "EditorUI.h" "EditorUI.cpp" "ScriptEditorPanel.h")
+ "EditorUI.h" "EditorUI.cpp" "ScriptEditorPanel.h" "MaterialEditorPanel.h")
 
 if(APPLE)
 	target_sources(HorizonEditor PRIVATE ImGuiMetalBridge.mm ImGuiMetalBridge.h)

@@ -24,6 +24,7 @@ layout(std140, set = 0, binding = 1) uniform U {
 } u;
 layout(location = 0) out vec3 vNormal;
 layout(location = 1) out vec3 vColor;
+layout(location = 2) out vec2 vUV;
 void main() {
     int b = gl_VertexIndex * 8;
     vec3 pos = vec3(d[b + 0], d[b + 1], d[b + 2]);
@@ -31,6 +32,7 @@ void main() {
     gl_Position = u.mvp * vec4(pos, 1.0);
     vNormal = mat3(u.model) * nrm;
     vColor  = u.color.rgb;
+    vUV     = vec2(d[b + 6], d[b + 7]);
 }
 )";
 
@@ -47,10 +49,12 @@ layout(std140, set = 0, binding = 1) uniform U {
 } u;
 layout(location = 0) out vec3 vNormal;
 layout(location = 1) out vec3 vColor;
+layout(location = 2) out vec2 vUV;
 void main() {
     gl_Position = u.mvp * vec4(aPos, 1.0);
     vNormal = mat3(u.model) * aNormal;
     vColor  = u.color.rgb;
+    vUV     = aUV;
 }
 )";
 
@@ -166,9 +170,12 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragment(
     if (backend == Backend::Metal)
     {
         // Pin the lighting UBO to the fragment slot the engine binds it at (buffer 1;
-        // SceneUniforms occupies fragment buffer 0 in the scene pass).
+        // SceneUniforms occupies fragment buffer 0 in the scene pass), and the material
+        // texture (set 0, binding 2 in canonical GLSL) to texture/sampler 0 — the slot the
+        // geometry loop already binds per draw (material/mesh texture + linear sampler).
         out = toCompiled(compileMslPinned(injected, Stage::Fragment,
-            { { Stage::Fragment, 0, 0, static_cast<uint32_t>(kMetalLightingBufferIndex) } }));
+            { { Stage::Fragment, 0, 0, static_cast<uint32_t>(kMetalLightingBufferIndex) },
+              { Stage::Fragment, 0, 2, 0 } }));
     }
     else
     {

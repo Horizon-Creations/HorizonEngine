@@ -3,6 +3,7 @@ add_executable(he_tests
     test_slotmap.cpp
     test_hasset.cpp
     test_contentmanager.cpp
+    test_material_graph.cpp
     test_scene_serializer.cpp
     test_culling.cpp
     test_undo.cpp
@@ -114,6 +115,14 @@ target_link_libraries(he_tests PRIVATE
     HorizonTools
     nlohmann_json::nlohmann_json
 )
+
+# Shared material shader layer (CPU-only: glslang + SPIRV-Cross under the hood) — lets
+# the material-graph tests validate that GENERATED GLSL cross-compiles through the REAL
+# path (standard vertex + lighting preamble + fragment) for the Metal + GL targets.
+if(TARGET he_materialshader)
+    target_link_libraries(he_tests PRIVATE he_materialshader)
+    target_compile_definitions(he_tests PRIVATE HE_TESTS_HAVE_SHADERC=1)
+endif()
 
 add_test(NAME he_tests COMMAND he_tests)
 

@@ -86,14 +86,20 @@ struct MaterialAsset : public RuntimeAsset
 	// that must be visible from below (e.g. at grazing camera angles).
 	bool doubleSided   = false;
 
-	// Material-system M1: optional canonical-GLSL fragment source (Vulkan semantics).
+	// Material-system M1/M3: canonical-GLSL fragment source (Vulkan semantics).
 	// Empty → the material renders with the engine's built-in PBR uber-shader. When set,
 	// the renderer cross-compiles it (glslang→SPIR-V→SPIRV-Cross), caches the resulting
 	// pipeline per source hash, and selects it for this material's draws. Interface:
 	//   layout(location=0) in vec3 vNormal;  layout(location=1) in vec3 vColor;
-    //   layout(location=0) out vec4 oColor;
-    // (Node-graph output splices in here later; this is the raw M1 escape hatch.)
+	//   layout(location=2) in vec2 vUV;      layout(location=0) out vec4 oColor;
+	// With a node graph (below) this is the GENERATED artifact — the runtime only ever
+	// reads this string; hand-written GLSL remains the escape hatch when no graph exists.
 	std::string customShaderFragGlsl;
+
+	// Material-system M3: the node graph (JSON, see HE::MaterialGraph) — the SOURCE OF
+	// TRUTH the material editor edits. The editor regenerates customShaderFragGlsl from
+	// it on every change; shaders are not a user-facing asset type.
+	std::string nodeGraphJson;
 };
 
 struct SceneAsset : public RuntimeAsset

@@ -9,6 +9,7 @@
 #include <HorizonScene/Components/MeshComponent.h>
 #include <HorizonScene/Components/MaterialComponent.h>
 #include <ContentManager/DefaultAssets.h>
+#include <MaterialGraph/MaterialGraph.h>
 #include <glm/gtc/quaternion.hpp>
 #include <HorizonScene/TerrainSystem.h>
 #include <HorizonScene/AnimationSystem.h>
@@ -1300,20 +1301,31 @@ void EditorApplication::dumpFrameHeadless()
 		mat.type = HE::AssetType::Material;
 		mat.name = "MatTest";
 		mat.baseColor[0] = 0.2f; mat.baseColor[1] = 0.8f; mat.baseColor[2] = 0.3f;
-		// Custom base-color (banding) fed through the shared std-lit helper heLit() — so
-		// the sphere is both unmistakably custom AND sun-lit (M2). heLit + the lighting UBO
-		// come from the MaterialShaderLibrary preamble; the bright side follows HE_DUMP_TOD.
-		mat.customShaderFragGlsl = R"(#version 450
-layout(location = 0) in vec3 vNormal;
-layout(location = 1) in vec3 vColor;
-layout(location = 0) out vec4 oColor;
-void main() {
-    vec3 n = normalize(vNormal);
-    float band = step(0.0, sin(n.y * 26.0));          // bold banding = unmistakably custom
-    vec3 base = mix(vec3(0.95, 0.75, 0.10), vec3(0.80, 0.10, 0.55), band);
-    oColor = vec4(heLit(base, n, 0.0, 0.35), 1.0);    // shared Standard-Lit shading
-}
-)";
+		// M3 witness: author the material as a NODE GRAPH (the same authoring model the
+		// editor tab edits), then generate the shader from it — so the screenshot proves
+		// graph → codegen → cross-compile → pixels, not a hand-written fragment.
+		// Graph: lerp(orange, blue, fresnel) → lit BaseColor; sin(time) → Metallic.
+		{
+			HE::MaterialGraph g;
+			const int out  = g.addNode(HE::MatNodeType::Output);
+			const int a    = g.addNode(HE::MatNodeType::ConstColor);
+			g.findNode(a)->p[0] = 0.95f; g.findNode(a)->p[1] = 0.42f; g.findNode(a)->p[2] = 0.18f;
+			const int b    = g.addNode(HE::MatNodeType::ConstColor);
+			g.findNode(b)->p[0] = 0.10f; g.findNode(b)->p[1] = 0.35f; g.findNode(b)->p[2] = 0.85f;
+			const int fres = g.addNode(HE::MatNodeType::Fresnel);
+			g.findNode(fres)->p[0] = 1.2f; // wide rim so the effect is obvious in captures
+			const int lerp = g.addNode(HE::MatNodeType::Lerp);
+			const int time = g.addNode(HE::MatNodeType::Time);
+			const int sine = g.addNode(HE::MatNodeType::Sine);
+			g.connect(a,    0, lerp, 0);
+			g.connect(b,    0, lerp, 1);
+			g.connect(fres, 0, lerp, 2);
+			g.connect(lerp, 0, out,  0); // BaseColor
+			g.connect(time, 0, sine, 0);
+			g.connect(sine, 0, out,  1); // Metallic
+			mat.nodeGraphJson        = HE::materialGraphToJson(g);
+			mat.customShaderFragGlsl = HE::generateFragmentGlsl(g);
+		}
 		const HE::UUID matId = contentManager().registerMaterial(std::move(mat));
 
 		// Procedural UV sphere (SoA loose asset) so the per-normal shader banding shows on
