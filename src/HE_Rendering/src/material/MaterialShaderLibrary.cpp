@@ -25,14 +25,17 @@ layout(std140, set = 0, binding = 1) uniform U {
 layout(location = 0) out vec3 vNormal;
 layout(location = 1) out vec3 vColor;
 layout(location = 2) out vec2 vUV;
+layout(location = 3) out vec3 vWorldPos;
 void main() {
     int b = gl_VertexIndex * 8;
     vec3 pos = vec3(d[b + 0], d[b + 1], d[b + 2]);
     vec3 nrm = vec3(d[b + 3], d[b + 4], d[b + 5]);
+    vec4 wp  = u.model * vec4(pos, 1.0);
     gl_Position = u.mvp * vec4(pos, 1.0);
-    vNormal = mat3(u.model) * nrm;
-    vColor  = u.color.rgb;
-    vUV     = vec2(d[b + 6], d[b + 7]);
+    vNormal   = mat3(u.model) * nrm;
+    vColor    = u.color.rgb;
+    vUV       = vec2(d[b + 6], d[b + 7]);
+    vWorldPos = wp.xyz;
 }
 )";
 
@@ -50,11 +53,14 @@ layout(std140, set = 0, binding = 1) uniform U {
 layout(location = 0) out vec3 vNormal;
 layout(location = 1) out vec3 vColor;
 layout(location = 2) out vec2 vUV;
+layout(location = 3) out vec3 vWorldPos;
 void main() {
+    vec4 wp = u.model * vec4(aPos, 1.0);
     gl_Position = u.mvp * vec4(aPos, 1.0);
-    vNormal = mat3(u.model) * aNormal;
-    vColor  = u.color.rgb;
-    vUV     = aUV;
+    vNormal   = mat3(u.model) * aNormal;
+    vColor    = u.color.rgb;
+    vUV       = aUV;
+    vWorldPos = wp.xyz;
 }
 )";
 
@@ -91,9 +97,10 @@ MaterialShaderLibrary::Compiled toCompiled(he::shaderc::Result&& r)
 // calls to these std-library functions.
 constexpr const char* kLightingPreamble = R"(
 layout(std140, set = 0, binding = 0) uniform HeLighting {
-    vec4 sunDir;    // xyz = direction TO the sun (normalized)
+    vec4 sunDir;    // xyz = direction TO the sun (normalized); w = engine time (s)
     vec4 sunColor;  // rgb = sun radiance
     vec4 ambient;   // rgb = ambient / sky fill
+    vec4 camPos;    // xyz = camera world position
 } heLight;
 vec3 heLit(vec3 baseColor, vec3 N, float metallic, float roughness) {
     vec3  L    = normalize(heLight.sunDir.xyz);

@@ -59,6 +59,40 @@ const std::vector<MatNodeDesc>& registry()
         { MatNodeType::Combine3, "Combine XYZ", "Math",
           { { "X", F::Float, 0 }, { "Y", F::Float, 0 }, { "Z", F::Float, 0 } },
           { { "RGB", F::Vec3, 0 } }, 0 },
+
+        // ── v2 ──
+        { MatNodeType::WorldPos, "World Position", "Input",
+          {}, { { "XYZ", F::Vec3, 0 } }, 0 },
+        { MatNodeType::ViewDir, "View Direction", "Input",
+          {}, { { "V", F::Vec3, 0 } }, 0 },
+        { MatNodeType::ParamFloat, "Param (Float)", "Parameter",
+          {}, { { "Value", F::Float, 0 } }, 1 }, // s = name, p[0] = value
+        { MatNodeType::ParamColor, "Param (Color)", "Parameter",
+          {}, { { "RGB", F::Vec3, 0 } }, 3 },    // s = name, p[0..2] = rgb
+        { MatNodeType::Subtract, "Subtract", "Math",
+          { { "A", F::Vec3, 0 }, { "B", F::Vec3, 0 } }, { { "Out", F::Vec3, 0 } }, 0 },
+        { MatNodeType::Divide, "Divide", "Math",
+          { { "A", F::Vec3, 1 }, { "B", F::Vec3, 1 } }, { { "Out", F::Vec3, 0 } }, 0 },
+        { MatNodeType::Absolute, "Abs", "Math",
+          { { "X", F::Vec3, 0 } }, { { "Out", F::Vec3, 0 } }, 0 },
+        { MatNodeType::Fract, "Fract", "Math",
+          { { "X", F::Vec3, 0 } }, { { "Out", F::Vec3, 0 } }, 0 },
+        { MatNodeType::Smoothstep, "Smoothstep", "Math",
+          { { "Edge0", F::Float, 0 }, { "Edge1", F::Float, 1 }, { "X", F::Float, 0 } },
+          { { "Out", F::Float, 0 } }, 0 },
+        { MatNodeType::Step, "Step", "Math",
+          { { "Edge", F::Float, 0.5f }, { "X", F::Float, 0 } }, { { "Out", F::Float, 0 } }, 0 },
+        { MatNodeType::Normalize3, "Normalize", "Math",
+          { { "V", F::Vec3, 0 } }, { { "Out", F::Vec3, 0 } }, 0 },
+        { MatNodeType::Panner, "Panner", "Texture",
+          { { "UV", F::Vec2, 0 }, { "SpeedX", F::Float, 0.1f }, { "SpeedY", F::Float, 0 } },
+          { { "UV", F::Vec2, 0 } }, 0 },
+        { MatNodeType::ValueNoise, "Noise", "Procedural",
+          { { "UV", F::Vec2, 0 }, { "Scale", F::Float, 8 } }, { { "Out", F::Float, 0 } }, 0 },
+        { MatNodeType::Fbm, "FBM Noise", "Procedural",
+          { { "UV", F::Vec2, 0 }, { "Scale", F::Float, 8 } }, { { "Out", F::Float, 0 } }, 0 },
+        { MatNodeType::Checker, "Checker", "Procedural",
+          { { "UV", F::Vec2, 0 }, { "Scale", F::Float, 8 } }, { { "Out", F::Float, 0 } }, 0 },
     };
     return kReg;
 }
@@ -126,6 +160,8 @@ int MaterialGraph::addNode(MatNodeType type, float x, float y)
     if (type == MatNodeType::ConstColor) { n.p[0] = n.p[1] = n.p[2] = 0.8f; }
     if (type == MatNodeType::ConstFloat) n.p[0] = 1.0f;
     if (type == MatNodeType::Fresnel)    n.p[0] = 3.0f;
+    if (type == MatNodeType::ParamFloat) { n.p[0] = 1.0f; n.s = "MyParam"; }
+    if (type == MatNodeType::ParamColor) { n.p[0] = n.p[1] = n.p[2] = 0.8f; n.s = "MyColor"; }
     nodes.push_back(n);
     return n.id;
 }
@@ -196,6 +232,7 @@ struct EmitCtx
     std::unordered_map<long long, std::string> outVar;  // (node<<8|pin) → var name
     std::unordered_set<int> emitting;                   // cycle guard
     bool usesTexture = false;
+    bool usesNoise   = false; // pulls the heHash/heValueNoise/heFbm helpers into the shader
     int  varCounter  = 0;
 };
 
@@ -249,11 +286,60 @@ std::string emitNode(EmitCtx& c, const MatGraphNode& n, int pin)
         case MatNodeType::Sine:
             decl = "float " + v + " = sin(" + inputExpr(c, n, 0, F::Float) + ");"; break;
         case MatNodeType::Fresnel:
-            decl = "float " + v + " = pow(1.0 - max(dot(normalize(vNormal), vec3(0.0, 0.0, 1.0)), 0.0), "
+            // True per-pixel view direction (camera − fragment), not a fixed axis.
+            decl = "float " + v + " = pow(1.0 - max(dot(normalize(vNormal), "
+                   "normalize(heLight.camPos.xyz - vWorldPos)), 0.0), "
                  + fmtF(std::max(n.p[0], 0.01f)) + ");"; break;
         case MatNodeType::Combine3:
             decl = "vec3 " + v + " = vec3(" + inputExpr(c, n, 0, F::Float) + ", "
                  + inputExpr(c, n, 1, F::Float) + ", " + inputExpr(c, n, 2, F::Float) + ");"; break;
+
+        // ── v2 ──
+        case MatNodeType::WorldPos:
+            decl = "vec3 " + v + " = vWorldPos;"; break;
+        case MatNodeType::ViewDir:
+            decl = "vec3 " + v + " = normalize(heLight.camPos.xyz - vWorldPos);"; break;
+        case MatNodeType::ParamFloat:
+            // Exposed named parameter — emitted as its current value (the name marks it
+            // for the Simple-mode parameter surface; true uniforms come with M3.5).
+            decl = "float " + v + " = " + fmtF(n.p[0]) + "; // param: " + (n.s.empty() ? "?" : n.s); break;
+        case MatNodeType::ParamColor:
+            decl = "vec3 " + v + " = vec3(" + fmtF(n.p[0]) + ", " + fmtF(n.p[1]) + ", " + fmtF(n.p[2])
+                 + "); // param: " + (n.s.empty() ? "?" : n.s); break;
+        case MatNodeType::Subtract:
+            decl = "vec3 " + v + " = " + inputExpr(c, n, 0, F::Vec3) + " - " + inputExpr(c, n, 1, F::Vec3) + ";"; break;
+        case MatNodeType::Divide:
+            decl = "vec3 " + v + " = " + inputExpr(c, n, 0, F::Vec3) + " / max("
+                 + inputExpr(c, n, 1, F::Vec3) + ", vec3(1e-5));"; break;
+        case MatNodeType::Absolute:
+            decl = "vec3 " + v + " = abs(" + inputExpr(c, n, 0, F::Vec3) + ");"; break;
+        case MatNodeType::Fract:
+            decl = "vec3 " + v + " = fract(" + inputExpr(c, n, 0, F::Vec3) + ");"; break;
+        case MatNodeType::Smoothstep:
+            decl = "float " + v + " = smoothstep(" + inputExpr(c, n, 0, F::Float) + ", "
+                 + inputExpr(c, n, 1, F::Float) + ", " + inputExpr(c, n, 2, F::Float) + ");"; break;
+        case MatNodeType::Step:
+            decl = "float " + v + " = step(" + inputExpr(c, n, 0, F::Float) + ", "
+                 + inputExpr(c, n, 1, F::Float) + ");"; break;
+        case MatNodeType::Normalize3:
+            decl = "vec3 " + v + " = normalize(" + inputExpr(c, n, 0, F::Vec3) + ");"; break;
+        case MatNodeType::Panner:
+            decl = "vec2 " + v + " = " + inputExpr(c, n, 0, F::Vec2) + " + vec2("
+                 + inputExpr(c, n, 1, F::Float) + ", " + inputExpr(c, n, 2, F::Float)
+                 + ") * heLight.sunDir.w;"; break;
+        case MatNodeType::ValueNoise:
+            c.usesNoise = true;
+            decl = "float " + v + " = heValueNoise(" + inputExpr(c, n, 0, F::Vec2) + " * "
+                 + inputExpr(c, n, 1, F::Float) + ");"; break;
+        case MatNodeType::Fbm:
+            c.usesNoise = true;
+            decl = "float " + v + " = heFbm(" + inputExpr(c, n, 0, F::Vec2) + " * "
+                 + inputExpr(c, n, 1, F::Float) + ");"; break;
+        case MatNodeType::Checker:
+            decl = "float " + v + " = mod(floor(" + inputExpr(c, n, 0, F::Vec2) + ".x * "
+                 + inputExpr(c, n, 1, F::Float) + ") + floor(" + inputExpr(c, n, 0, F::Vec2) + ".y * "
+                 + inputExpr(c, n, 1, F::Float) + "), 2.0);"; break;
+
         case MatNodeType::Output:
             decl = ""; break; // handled by generateFragmentGlsl
     }
@@ -299,6 +385,7 @@ std::string generateFragmentGlsl(const MaterialGraph& graph)
         "layout(location = 0) in vec3 vNormal;\n"
         "layout(location = 1) in vec3 vColor;\n"
         "layout(location = 2) in vec2 vUV;\n"
+        "layout(location = 3) in vec3 vWorldPos;\n"
         "layout(location = 0) out vec4 oColor;\n";
 
     if (!out)
@@ -314,6 +401,18 @@ std::string generateFragmentGlsl(const MaterialGraph& graph)
     std::string src = header;
     if (c.usesTexture)
         src += "layout(set = 0, binding = 2) uniform sampler2D heTex0;\n";
+    if (c.usesNoise)
+        src +=
+            "float heHash21(vec2 p) { p = fract(p * vec2(123.34, 456.21));"
+            " p += dot(p, p + 45.32); return fract(p.x * p.y); }\n"
+            "float heValueNoise(vec2 p) { vec2 i = floor(p); vec2 f = fract(p);"
+            " vec2 u = f * f * (3.0 - 2.0 * f);"
+            " float a = heHash21(i); float b = heHash21(i + vec2(1.0, 0.0));"
+            " float cc = heHash21(i + vec2(0.0, 1.0)); float d = heHash21(i + vec2(1.0, 1.0));"
+            " return mix(mix(a, b, u.x), mix(cc, d, u.x), u.y); }\n"
+            "float heFbm(vec2 p) { float v = 0.0; float a = 0.5;"
+            " for (int i = 0; i < 4; i++) { v += a * heValueNoise(p); p *= 2.0; a *= 0.5; }"
+            " return v; }\n";
     src += "void main() {\n" + c.body;
     if (lit)
         src += "    oColor = vec4(heLit(" + base + ", normalize(vNormal), " + met + ", " + rough + ") + "
@@ -331,9 +430,13 @@ std::string materialGraphToJson(const MaterialGraph& graph)
     j["version"] = 1;
     j["nextId"]  = graph.nextId;
     for (const auto& n : graph.nodes)
-        j["nodes"].push_back({ { "id", n.id }, { "type", matNodeDesc(n.type).name },
-                               { "p", { n.p[0], n.p[1], n.p[2], n.p[3] } },
-                               { "x", n.x }, { "y", n.y } });
+    {
+        nlohmann::json jn = { { "id", n.id }, { "type", matNodeDesc(n.type).name },
+                              { "p", { n.p[0], n.p[1], n.p[2], n.p[3] } },
+                              { "x", n.x }, { "y", n.y } };
+        if (!n.s.empty()) jn["s"] = n.s; // exposed-parameter name
+        j["nodes"].push_back(std::move(jn));
+    }
     for (const auto& l : graph.links)
         j["links"].push_back({ { "sn", l.srcNode }, { "sp", l.srcPin },
                                { "dn", l.dstNode }, { "dp", l.dstPin } });
@@ -355,6 +458,7 @@ bool materialGraphFromJson(const std::string& json, MaterialGraph& out)
         n.type = d->type;
         if (auto p = jn.find("p"); p != jn.end() && p->is_array())
             for (size_t i = 0; i < 4 && i < p->size(); ++i) n.p[i] = (*p)[i].get<float>();
+        n.s = jn.value("s", std::string());
         n.x = jn.value("x", 0.0f);
         n.y = jn.value("y", 0.0f);
         g.nodes.push_back(n);

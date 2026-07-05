@@ -4565,6 +4565,9 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					lit.sunDir[3] = s_timeOv && *s_timeOv
 						? static_cast<float>(std::atof(s_timeOv))
 						: static_cast<float>(SDL_GetTicks()) / 1000.0f;
+					lit.camPos[0] = m_renderWorld.camera.position.x;
+					lit.camPos[1] = m_renderWorld.camera.position.y;
+					lit.camPos[2] = m_renderWorld.camera.position.z;
 					lit.sunColor[0]=sc.r; lit.sunColor[1]=sc.g; lit.sunColor[2]=sc.b;
 					lit.ambient[0]=m_renderWorld.ambient.r; lit.ambient[1]=m_renderWorld.ambient.g; lit.ambient[2]=m_renderWorld.ambient.b;
 					glBindBuffer(GL_UNIFORM_BUFFER, m_matLightUBO);

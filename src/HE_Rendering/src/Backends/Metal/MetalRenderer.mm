@@ -4684,6 +4684,9 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 		HE::MaterialShaderLibrary::Lighting matLight;
 		matLight.sunDir[0]   = sunDir.x; matLight.sunDir[1]   = sunDir.y; matLight.sunDir[2]   = sunDir.z;
 		matLight.sunDir[3]   = skyClock; // engine seconds — the node graph's Time input
+		matLight.camPos[0]   = m_renderWorld.camera.position.x;
+		matLight.camPos[1]   = m_renderWorld.camera.position.y;
+		matLight.camPos[2]   = m_renderWorld.camera.position.z;
 		matLight.sunColor[0] = sc.r;     matLight.sunColor[1] = sc.g;     matLight.sunColor[2] = sc.b;
 		matLight.ambient[0]  = am.r;     matLight.ambient[1]  = am.g;     matLight.ambient[2]  = am.b;
 		[encoder setFragmentBytes:&matLight length:sizeof(matLight)
