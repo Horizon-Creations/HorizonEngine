@@ -7,6 +7,24 @@
 #include "Types/UUID.h"
 #include "Scripting/ScriptTypes.h"
 
+// One precompiled material shader variant for a specific graphics backend (baked at
+// export time so the shipped game never cross-compiles). `vertex`/`fragment` hold the
+// backend-native source (MSL / HLSL / desktop-GLSL text) or, for Vulkan, raw SPIR-V bytes.
+struct MaterialShaderVariant
+{
+	uint8_t     backend = 0; // HE::RendererBackend
+	std::string vertex;
+	std::string fragment;
+};
+
+namespace HE
+{
+	// PSHD chunk (de)serialization — the single source of truth for the precompiled-
+	// shader byte layout, shared by the exporter (encode) and the runtime (decode).
+	std::vector<uint8_t> encodeMaterialShaderVariants(const std::vector<MaterialShaderVariant>& v);
+	std::vector<MaterialShaderVariant> decodeMaterialShaderVariants(const std::vector<uint8_t>& bytes);
+}
+
 struct ContentAsset
 {
 	// Stable identity — written into the META chunk on save and reused on
@@ -110,6 +128,12 @@ struct MaterialAsset : public RuntimeAsset
 	// (heTexP0..). Loose assets keep paths; packing bakes them to graphTextureIds (MTLU).
 	std::vector<std::string> graphTexturePaths;
 	std::vector<HE::UUID>    graphTextureIds;
+
+	// Precompiled per-backend shaders baked into the .hpak at export time (CHUNK_PSHD).
+	// Empty for loose editor assets → the renderer cross-compiles customShaderFragGlsl at
+	// runtime; when present, the renderer uses the variant for the active backend directly
+	// (no glslang/SPIRV-Cross at runtime). The exporter fills only the chosen backends.
+	std::vector<MaterialShaderVariant> precompiledShaders;
 };
 
 // A reusable material sub-graph (node editor "Material Function"): its FnInput/FnOutput

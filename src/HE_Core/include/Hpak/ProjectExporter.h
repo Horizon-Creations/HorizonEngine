@@ -43,6 +43,12 @@ struct HE_API ExportSettings {
     // from whatever thread runs exportProject — the caller must make it
     // thread-safe when exporting on a worker thread.
     std::function<void(int, int, const std::string&)> progress;
+    // Precompile node-graph material shaders into the pak for these graphics backends
+    // (bitmask of 1u << HE::RendererBackend). 0 → no precompile (runtime cross-compile).
+    // `compileShaderVariants` is supplied by the editor (it links the shader compiler):
+    // (fragment GLSL, backend bitmask) → PSHD-encoded bytes.
+    uint32_t shaderBackends = 0;
+    std::function<std::vector<uint8_t>(const std::string&, uint32_t)> compileShaderVariants;
 };
 
 struct HE_API ExportResult {

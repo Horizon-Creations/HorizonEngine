@@ -415,3 +415,44 @@ TEST_CASE("Generated graph GLSL cross-compiles through the real material pipelin
 	CHECK(lib.standardVertex(B::GLSL410).ok);
 }
 #endif
+
+// ── Precompiled-shader (PSHD) byte layout ───────────────────────────────────
+// encode/decode is the single source of truth shared by the exporter and the
+// runtime; a roundtrip must preserve backend + both (possibly binary) sources.
+#include <ContentManager/Assets.h>
+
+TEST_CASE("PSHD encode/decode roundtrip preserves variants")
+{
+	std::vector<MaterialShaderVariant> in;
+	{
+		MaterialShaderVariant m;
+		m.backend  = static_cast<uint8_t>(HE::RendererBackend::Metal);
+		m.vertex   = "vertex float4 v_main() { return 0; }";
+		m.fragment = "fragment float4 f_main() { return 1; }";
+		in.push_back(m);
+	}
+	{
+		// SpirV path: fragment carries raw bytes, including embedded NULs.
+		MaterialShaderVariant v;
+		v.backend  = static_cast<uint8_t>(HE::RendererBackend::Vulkan);
+		v.vertex   = std::string("\x03\x02\x23\x07\x00\x00\x01\x00", 8);
+		v.fragment = std::string("\x00\xDE\xAD\x00\xBE\xEF\x00", 7);
+		in.push_back(v);
+	}
+
+	const std::vector<uint8_t> bytes = HE::encodeMaterialShaderVariants(in);
+	CHECK(!bytes.empty());
+
+	const std::vector<MaterialShaderVariant> out = HE::decodeMaterialShaderVariants(bytes);
+	REQUIRE(out.size() == in.size());
+	for (size_t i = 0; i < in.size(); ++i)
+	{
+		CHECK(out[i].backend  == in[i].backend);
+		CHECK(out[i].vertex   == in[i].vertex);   // std::string ==, NUL-safe
+		CHECK(out[i].fragment == in[i].fragment);
+	}
+
+	// Empty input → empty blob → empty decode (exporter treats this as "no chunk").
+	CHECK(HE::encodeMaterialShaderVariants({}).empty());
+	CHECK(HE::decodeMaterialShaderVariants({}).empty());
+}

@@ -43,6 +43,7 @@ struct GpuTimedPair  { const char* name; uint32_t base; };
 struct GpuTimedPoint { const char* name; uint32_t slot; };
 
 struct SDL_Window;
+struct MaterialShaderVariant; // ContentManager/Assets.h — baked per-backend shader
 
 // Passed as the overlay-callback context so ImGui (or any other overlay) can
 // encode into the active render pass. All pointers are Objective-C objects
@@ -307,7 +308,9 @@ private:
 	void  EnsureShadercTestMesh();            // procedural sphere for the HE_SHADERC_MATERIAL demo
 	// Build (or fetch cached) a pipeline for a material's custom fragment GLSL, spliced
 	// onto the standard drop-in vertex. Returns null on compile/link failure (also cached).
-	void* GetOrBuildMaterialPipeline(uint64_t key, const std::string& fragGlsl);
+	// precompiled != null → build directly from baked MSL (no runtime cross-compile).
+	void* GetOrBuildMaterialPipeline(uint64_t key, const std::string& fragGlsl,
+	                                 const MaterialShaderVariant* precompiled = nullptr);
 	// Resolve a material's custom shader: true + (key,frag) if it has customShaderFragGlsl.
 	bool  ResolveMaterialShader(const HE::UUID& materialId, uint64_t& key, std::string& frag);
 #endif

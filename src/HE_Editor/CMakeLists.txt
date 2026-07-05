@@ -121,7 +121,12 @@ target_include_directories(HorizonEditor PRIVATE
 	${CMAKE_CURRENT_SOURCE_DIR}/../HE_Tools/src/FileOps
 )
 
+if(TARGET he_materialshader)
+	# The editor precompiles material shaders for export (needs the cross-compiler).
+	set(HE_EDITOR_LINK_MATSHADER he_materialshader he_shadercompiler)
+endif()
 target_link_libraries(HorizonEditor PRIVATE
+	${HE_EDITOR_LINK_MATSHADER}
 	HorizonCore
 	HorizonScene
 	HorizonRendering

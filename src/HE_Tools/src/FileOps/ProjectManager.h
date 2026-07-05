@@ -39,6 +39,10 @@ struct ExportProfile
 	// "Windows"/"macOS"/"Linux" (prebuilt bundle from ../GameRuntimes/<name>,
 	// output lands in a per-platform sub-folder).
 	std::string targetPlatform = "Host";
+	// Precompile node-graph material shaders into the pak for these graphics backends
+	// (bitmask of 1u << HE::RendererBackend). Default = Metal | OpenGL (the runtime-
+	// consumed backends). 0 → shaders cross-compile at runtime as before.
+	uint32_t shaderBackends = (1u << 4) | (1u << 0); // Metal | OpenGL
 };
 
 // The two seeded defaults for projects that have no profiles yet (also used by

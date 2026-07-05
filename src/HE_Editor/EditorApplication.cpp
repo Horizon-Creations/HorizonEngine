@@ -10,6 +10,7 @@
 #include <HorizonScene/Components/MaterialComponent.h>
 #include <ContentManager/DefaultAssets.h>
 #include <MaterialGraph/MaterialGraph.h>
+#include <material/MaterialShaderLibrary.h> // HE_DUMP_MATPRECOMPILE witness
 #include <glm/gtc/quaternion.hpp>
 #include <HorizonScene/TerrainSystem.h>
 #include <HorizonScene/AnimationSystem.h>
@@ -1332,6 +1333,33 @@ void EditorApplication::dumpFrameHeadless()
 			for (const auto& slot : gen.params)
 				mat.shaderParamData.insert(mat.shaderParamData.end(),
 				                           slot.value, slot.value + 4);
+
+			// Witness the PRECOMPILED path (HE_DUMP_MATPRECOMPILE): bake per-backend
+			// shader variants into the material NOW, exactly as the exporter would, so
+			// the renderer takes the getOrBuild*(precompiled) branch instead of cross-
+			// compiling at draw time. A capture matching the non-baked run proves the
+			// baked path renders identically.
+			if (const char* pc = std::getenv("HE_DUMP_MATPRECOMPILE"); pc && *pc)
+			{
+				using LB = HE::MaterialShaderLibrary::Backend;
+				HE::MaterialShaderLibrary lib;
+				const uint64_t h = std::hash<std::string>{}(gen.glsl);
+				auto bake = [&](HE::RendererBackend rb, LB lb) {
+					const auto& v = lib.standardVertex(lb);
+					const auto& f = lib.fragment(h, gen.glsl, lb);
+					if (v.ok && f.ok) {
+						MaterialShaderVariant var;
+						var.backend  = static_cast<uint8_t>(rb);
+						var.vertex   = v.source;
+						var.fragment = f.source;
+						mat.precompiledShaders.push_back(std::move(var));
+					}
+				};
+				bake(HE::RendererBackend::OpenGL, LB::GLSL410);
+				bake(HE::RendererBackend::Metal,  LB::Metal);
+				Logger::Log(Logger::LogLevel::Info,
+					"EditorApplication: HE_DUMP_MATPRECOMPILE baked precompiled shader variants");
+			}
 		}
 		const HE::UUID matId = contentManager().registerMaterial(std::move(mat));
 

@@ -198,6 +198,8 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 			HAsset::Reader::readVec(c->data,o,a.textureIds);
 			HAsset::Reader::readVec(c->data,o,a.graphTextureIds); // baked node-graph textures
 		}
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_PSHD)) // precompiled shaders (packed)
+			a.precompiledShaders = HE::decodeMaterialShaderVariants(c->data);
 		handle = m_materialAssets.insert(std::move(a)); break;
 	}
 	case HE::AssetType::Scene:
@@ -722,6 +724,41 @@ const SkeletalMeshAsset*  ContentManager::getSkeletalMesh(HE::UUID id) const  { 
 const TextureAsset*       ContentManager::getTexture(HE::UUID id) const       { return lookupAsset(m_handleToUUID, m_textureAssets, id); }
 const MaterialAsset*      ContentManager::getMaterial(HE::UUID id) const      { return lookupAsset(m_handleToUUID, m_materialAssets, id); }
 const AudioAsset*         ContentManager::getAudio(HE::UUID id) const         { return lookupAsset(m_handleToUUID, m_audioAssets, id); }
+namespace HE
+{
+std::vector<uint8_t> encodeMaterialShaderVariants(const std::vector<MaterialShaderVariant>& vars)
+{
+	// No variants → no blob, so the exporter's `if (!pshd.empty())` guard skips the
+	// chunk entirely (rather than baking a count-0 PSHD that decodes to nothing).
+	if (vars.empty()) return {};
+	std::vector<uint8_t> b;
+	HAsset::Writer::appendPOD(b, static_cast<uint8_t>(std::min<size_t>(vars.size(), 255)));
+	for (const auto& v : vars)
+	{
+		HAsset::Writer::appendPOD(b, v.backend);
+		HAsset::Writer::appendString(b, v.vertex);
+		HAsset::Writer::appendString(b, v.fragment);
+	}
+	return b;
+}
+std::vector<MaterialShaderVariant> decodeMaterialShaderVariants(const std::vector<uint8_t>& bytes)
+{
+	std::vector<MaterialShaderVariant> out;
+	size_t o = 0; uint8_t count = 0;
+	if (!HAsset::Reader::readPOD(bytes, o, count)) return out;
+	out.reserve(count);
+	for (uint8_t i = 0; i < count; ++i)
+	{
+		MaterialShaderVariant v;
+		if (!HAsset::Reader::readPOD(bytes, o, v.backend))     break;
+		if (!HAsset::Reader::readString(bytes, o, v.vertex))   break;
+		if (!HAsset::Reader::readString(bytes, o, v.fragment)) break;
+		out.push_back(std::move(v));
+	}
+	return out;
+}
+} // namespace HE
+
 const ScriptAsset*        ContentManager::getScript(HE::UUID id) const        { return lookupAsset(m_handleToUUID, m_scriptAssets, id); }
 const MaterialFunctionAsset* ContentManager::getMaterialFunction(HE::UUID id) const { return lookupAsset(m_handleToUUID, m_materialFunctionAssets, id); }
 MaterialFunctionAsset* ContentManager::getMaterialFunctionMutable(HE::UUID id)

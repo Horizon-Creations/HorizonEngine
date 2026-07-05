@@ -2558,18 +2558,29 @@ bool OpenGLRenderer::resolveMaterialShader(const HE::UUID& materialId, uint64_t&
 // compile+link them and wire the two UBO blocks to fixed binding points (macOS GL 4.1 has no
 // layout(binding), so bind by block name). Cached by hash; 0 cached on failure so a broken
 // shader isn't rebuilt every frame.
-unsigned int OpenGLRenderer::getOrBuildMaterialProgram(uint64_t key, const std::string& fragGlsl)
+unsigned int OpenGLRenderer::getOrBuildMaterialProgram(uint64_t key, const std::string& fragGlsl,
+                                                       const MaterialShaderVariant* precompiled)
 {
 	if (auto it = m_materialPrograms.find(key); it != m_materialPrograms.end()) return it->second;
 
 	using Backend = HE::MaterialShaderLibrary::Backend;
-	const auto& v = m_matShaderLib.standardVertex(Backend::GLSL410);       // attribute vertex (GL-4.1 safe)
-	const auto& f = m_matShaderLib.fragment(key, fragGlsl, Backend::GLSL410);
-	unsigned int program = 0;
-	if (v.ok && f.ok)
+	std::string vertSrc, fragSrc, log; bool ok = false;
+	if (precompiled)
 	{
-		GLuint vs = CompileStage(GL_VERTEX_SHADER,   v.source.c_str());
-		GLuint fs = CompileStage(GL_FRAGMENT_SHADER, f.source.c_str());
+		vertSrc = precompiled->vertex; fragSrc = precompiled->fragment;
+		ok = !vertSrc.empty() && !fragSrc.empty(); // baked GLSL 410 — no runtime cross-compile
+	}
+	else
+	{
+		const auto& v = m_matShaderLib.standardVertex(Backend::GLSL410);       // attribute vertex (GL-4.1 safe)
+		const auto& f = m_matShaderLib.fragment(key, fragGlsl, Backend::GLSL410);
+		vertSrc = v.source; fragSrc = f.source; log = v.log + f.log; ok = v.ok && f.ok;
+	}
+	unsigned int program = 0;
+	if (ok)
+	{
+		GLuint vs = CompileStage(GL_VERTEX_SHADER,   vertSrc.c_str());
+		GLuint fs = CompileStage(GL_FRAGMENT_SHADER, fragSrc.c_str());
 		GLuint prog = glCreateProgram();
 		glAttachShader(prog, vs);
 		glAttachShader(prog, fs);
@@ -2595,8 +2606,9 @@ unsigned int OpenGLRenderer::getOrBuildMaterialProgram(uint64_t key, const std::
 			}
 			glUseProgram(0);
 			program = prog;
-			Logger::Log(Logger::LogLevel::Info,
-				"OpenGLRenderer: built a material program from canonical GLSL via he::shaderc");
+			Logger::Log(Logger::LogLevel::Info, precompiled
+				? "OpenGLRenderer: built a material program from a PRECOMPILED variant (no runtime cross-compile)"
+				: "OpenGLRenderer: built a material program from canonical GLSL via he::shaderc");
 		}
 		else
 		{
@@ -2608,7 +2620,7 @@ unsigned int OpenGLRenderer::getOrBuildMaterialProgram(uint64_t key, const std::
 	}
 	else
 		Logger::Log(Logger::LogLevel::Error,
-			(std::string("OpenGLRenderer: material shader cross-compile failed\n") + v.log + f.log).c_str());
+			(std::string("OpenGLRenderer: material shader cross-compile failed\n") + log).c_str());
 
 	// Lazily create the shared per-object + lighting UBOs on first material.
 	if (!m_matObjUBO)
@@ -4587,7 +4599,14 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				// through to the built-in shader below.
 				uint64_t shKey; std::string shFrag; unsigned int matProg = 0;
 				if (resolveMaterialShader(dc.materialAssetId, shKey, shFrag))
-					matProg = getOrBuildMaterialProgram(shKey, shFrag);
+				{
+					const MaterialShaderVariant* pre = nullptr;
+					if (const MaterialAsset* ma = m_contentManager
+						? m_contentManager->getMaterial(dc.materialAssetId) : nullptr)
+						for (const auto& var : ma->precompiledShaders)
+							if (var.backend == static_cast<uint8_t>(HE::RendererBackend::OpenGL)) { pre = &var; break; }
+					matProg = getOrBuildMaterialProgram(shKey, shFrag, pre);
+				}
 				if (matProg)
 				{
 					glUseProgram(matProg);

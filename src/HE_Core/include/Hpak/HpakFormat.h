@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <cstddef>
+#include <functional>
 #include <string>
 #include <vector>
 #include <Types/Defines.h>
@@ -127,6 +128,15 @@ struct PackSettings {
     // Only set for targets whose GPU samples ASTC (Apple-Silicon Metal); other
     // targets keep RGBA8 + baked mipmaps.
     bool astcTextures = false;
+
+    // Precompile node-graph material shaders into the pak (CHUNK_PSHD). `shaderBackends`
+    // is a bitmask of (1u << HE::RendererBackend). The callback — supplied by the editor,
+    // which links the shader cross-compiler — turns a material's fragment GLSL into the
+    // per-backend variants (already PSHD-encoded bytes). Null / 0 backends → no precompile
+    // (the shipped game cross-compiles at runtime as before).
+    uint32_t shaderBackends = 0;
+    std::function<std::vector<uint8_t>(const std::string& fragGlsl, uint32_t backends)>
+        compileShaderVariants;
 };
 
 // Glob match used by PackSettings::excludePatterns (see semantics there).
