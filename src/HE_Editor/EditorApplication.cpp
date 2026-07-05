@@ -1310,7 +1310,7 @@ void EditorApplication::dumpFrameHeadless()
 		// Graph: lerp(orange, blue, fresnel) → lit BaseColor; sin(time) → Metallic.
 		{
 			HE::MaterialGraph g;
-			if (std::string(mt) == "noise")
+			if (std::string(mt) == "noise" || std::string(mt) == "noisecube")
 			{
 				// v6 witness: colour × Noise Texture → mottled ("fleckig") BaseColor.
 				// Proves the NoiseTexture node varies across the mesh (uses vUV) instead
@@ -1408,11 +1408,40 @@ void EditorApplication::dumpFrameHeadless()
 			}
 		}
 
-		// Procedural UV sphere (SoA loose asset) so the per-normal shader banding shows on
-		// a curved surface (a cube's flat faces have constant normals → uniform color).
+		// Test mesh (SoA loose asset). Default: a procedural UV sphere (curved surface shows
+		// per-normal shading). MATERIALTEST=noisecube: a UNIT CUBE with UVs all (0,0) — i.e.
+		// a mesh WITHOUT real UVs — to reproduce the "Noise Texture on a cube is black" case
+		// (UV noise collapses at vUV=0; world-space noise must still mottle it).
 		StaticMeshAsset sphere;
 		sphere.type = HE::AssetType::StaticMesh;
-		sphere.name = "MatTestSphere";
+		const bool cubeMesh = (std::string(mt) == "noisecube");
+		sphere.name = cubeMesh ? "MatTestCube" : "MatTestSphere";
+		if (cubeMesh)
+		{
+			const float h = 2.0f;
+			const glm::vec3 fn[6] = {{0,0,1},{0,0,-1},{1,0,0},{-1,0,0},{0,1,0},{0,-1,0}};
+			const glm::vec3 fq[6][4] = {
+				{{-h,-h, h},{ h,-h, h},{ h, h, h},{-h, h, h}}, // +Z
+				{{ h,-h,-h},{-h,-h,-h},{-h, h,-h},{ h, h,-h}}, // -Z
+				{{ h,-h, h},{ h,-h,-h},{ h, h,-h},{ h, h, h}}, // +X
+				{{-h,-h,-h},{-h,-h, h},{-h, h, h},{-h, h,-h}}, // -X
+				{{-h, h, h},{ h, h, h},{ h, h,-h},{-h, h,-h}}, // +Y
+				{{-h,-h,-h},{ h,-h,-h},{ h,-h, h},{-h,-h, h}}, // -Y
+			};
+			for (int f = 0; f < 6; ++f)
+			{
+				const uint32_t base = (uint32_t)(sphere.vertices.size() / 3);
+				for (int k = 0; k < 4; ++k)
+				{
+					sphere.vertices.insert(sphere.vertices.end(), { fq[f][k].x, fq[f][k].y, fq[f][k].z });
+					sphere.normals.insert(sphere.normals.end(),   { fn[f].x, fn[f].y, fn[f].z });
+					sphere.uvs.insert(sphere.uvs.end(),           { 0.0f, 0.0f }); // NO real UVs
+				}
+				sphere.indices.insert(sphere.indices.end(),
+					{ base, base + 1, base + 2, base, base + 2, base + 3 });
+			}
+		}
+		else
 		{
 			const int segU = 48, segV = 24; const float radius = 2.5f;
 			const float kPi = glm::pi<float>();

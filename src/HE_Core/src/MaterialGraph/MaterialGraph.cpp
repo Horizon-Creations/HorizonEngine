@@ -359,7 +359,8 @@ struct EmitCtx
     std::unordered_map<std::string, std::string> outVar; // scopeKey:node:pin → expr
     std::unordered_set<std::string> emitting;            // cycle guard (scoped)
     bool usesTexture = false;                            // legacy default sampler (heTex0)
-    bool usesNoise   = false;
+    bool usesNoise   = false;                            // 2D value-noise/fbm helpers (UV-space)
+    bool usesNoise3  = false;                            // 3D value-noise/fbm helpers (world-space)
     int  varCounter  = 0;
     std::vector<MatParamSlot> params;                    // exposed parameters, slot order
     std::vector<std::string>  textures;                  // project textures, slot order (max 4)
@@ -536,11 +537,13 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
         }
         case MatNodeType::NoiseTexture:
         {
-            // Self-contained procedural texture: fbm over the mesh UV, no input pins.
+            // Self-contained procedural texture: 3D fbm over WORLD-SPACE position, no input
+            // pins. World position (not UV) so it works on ANY mesh — a cube with no UVs
+            // has vUV = 0 everywhere, which would collapse UV noise to a single value.
             // Output as grayscale RGB (multiply against a colour → mottling) and raw Value.
-            c.usesNoise = true;
+            c.usesNoise3 = true;
             const float scale = n.p[0] > 0.01f ? n.p[0] : 0.01f;
-            decl = "float " + v + " = heFbm(vUV * " + fmtF(scale) + ");";
+            decl = "float " + v + " = heFbm3(vWorldPos * " + fmtF(scale) + ");";
             pinExpr = { "vec3(" + v + ")", v };
             break;
         }
@@ -816,6 +819,22 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
             " return mix(mix(a, b, u.x), mix(cc, d, u.x), u.y); }\n"
             "float heFbm(vec2 p) { float v = 0.0; float a = 0.5;"
             " for (int i = 0; i < 4; i++) { v += a * heValueNoise(p); p *= 2.0; a *= 0.5; }"
+            " return v; }\n";
+    if (c.usesNoise3)
+        src +=
+            "float heHash31(vec3 p) { p = fract(p * 0.1031); p += dot(p, p.zyx + 31.32);"
+            " return fract((p.x + p.y) * p.z); }\n"
+            "float heValueNoise3(vec3 p) { vec3 i = floor(p); vec3 f = fract(p);"
+            " vec3 u = f * f * (3.0 - 2.0 * f);"
+            " float n000 = heHash31(i); float n100 = heHash31(i + vec3(1.0, 0.0, 0.0));"
+            " float n010 = heHash31(i + vec3(0.0, 1.0, 0.0)); float n110 = heHash31(i + vec3(1.0, 1.0, 0.0));"
+            " float n001 = heHash31(i + vec3(0.0, 0.0, 1.0)); float n101 = heHash31(i + vec3(1.0, 0.0, 1.0));"
+            " float n011 = heHash31(i + vec3(0.0, 1.0, 1.0)); float n111 = heHash31(i + vec3(1.0, 1.0, 1.0));"
+            " float x00 = mix(n000, n100, u.x); float x10 = mix(n010, n110, u.x);"
+            " float x01 = mix(n001, n101, u.x); float x11 = mix(n011, n111, u.x);"
+            " return mix(mix(x00, x10, u.y), mix(x01, x11, u.y), u.z); }\n"
+            "float heFbm3(vec3 p) { float v = 0.0; float a = 0.5;"
+            " for (int i = 0; i < 4; i++) { v += a * heValueNoise3(p); p *= 2.0; a *= 0.5; }"
             " return v; }\n";
     src += "void main() {\n" + c.body;
     if (lit)
