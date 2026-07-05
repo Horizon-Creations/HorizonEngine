@@ -289,6 +289,14 @@ private:
 	// cached so we don't retry every frame).
 	std::unordered_map<uint64_t, void*> m_materialPipelineCache; // hash → id<MTLRenderPipelineState>
 	HE::MaterialShaderLibrary           m_matShaderLib;          // shared GLSL→MSL cross-compile + cache
+	// On-disk pipeline cache (MTLBinaryArchive): persists compiled material pipeline
+	// functions across launches so the Metal compiler doesn't re-run every start.
+	// Lazily loaded from disk; best-effort (any failure falls back to normal build).
+	void*       m_matBinaryArchive = nullptr;  // id<MTLBinaryArchive> (retained), null = unavailable
+	bool        m_matArchiveTried  = false;    // ensured once
+	std::string m_matArchivePath;              // serialize target on disk
+	// Returns the material binary archive (loading/creating it on first use), or nil.
+	void* ensureMaterialArchive();
 	// A procedural sphere (interleaved pos3/normal3/uv2, matching VertexIn) so per-material
 	// pipelines are visible on real 3D geometry even in the empty headless dump scene.
 	// Built + drawn (two spheres, two materials) when HE_SHADERC_MATERIAL=1.

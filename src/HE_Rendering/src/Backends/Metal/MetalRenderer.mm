@@ -2565,6 +2565,8 @@ void MetalRenderer::Shutdown()
 	if (m_shadercDemoPipeline)  { CFBridgingRelease(m_shadercDemoPipeline);  m_shadercDemoPipeline = nullptr; }
 	for (auto& [k, pso] : m_materialPipelineCache) if (pso) CFBridgingRelease(pso);
 	m_materialPipelineCache.clear();
+	if (m_matBinaryArchive) { CFBridgingRelease(m_matBinaryArchive); m_matBinaryArchive = nullptr; }
+	m_matArchiveTried = false;
 	if (m_shadercTestVB)        { CFBridgingRelease(m_shadercTestVB);        m_shadercTestVB = nullptr; }
 	if (m_shadercTestIB)        { CFBridgingRelease(m_shadercTestIB);        m_shadercTestIB = nullptr; }
 	if (m_fxaaPipeline)         { CFBridgingRelease(m_fxaaPipeline);         m_fxaaPipeline = nullptr; }
@@ -4166,6 +4168,45 @@ void main() {
 		"MetalRenderer: HE_SHADERC_DEMO overlay built from canonical GLSL via he::shaderc");
 }
 
+void* MetalRenderer::ensureMaterialArchive()
+{
+	if (m_matArchiveTried) return m_matBinaryArchive;
+	m_matArchiveTried = true;
+	if (@available(macOS 11.0, *))
+	{
+		id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+		if (!device) return nullptr;
+		NSArray<NSString*>* dirs = NSSearchPathForDirectoriesInDomains(
+			NSApplicationSupportDirectory, NSUserDomainMask, YES);
+		NSString* base = dirs.count ? dirs[0] : NSTemporaryDirectory();
+		NSString* dir  = [base stringByAppendingPathComponent:@"HorizonEngine"];
+		[[NSFileManager defaultManager] createDirectoryAtPath:dir
+			withIntermediateDirectories:YES attributes:nil error:nil];
+		NSString* path = [dir stringByAppendingPathComponent:@"material-pipelines.metalar"];
+		m_matArchivePath = path.UTF8String;
+		const BOOL exists = [[NSFileManager defaultManager] fileExistsAtPath:path];
+		MTLBinaryArchiveDescriptor* d = [[MTLBinaryArchiveDescriptor alloc] init];
+		if (exists) d.url = [NSURL fileURLWithPath:path];
+		NSError* err = nil;
+		id<MTLBinaryArchive> arch = [device newBinaryArchiveWithDescriptor:d error:&err];
+		if (!arch && exists)
+		{
+			// Stale / incompatible archive (driver or OS changed) → start fresh.
+			d.url = nil;
+			arch = [device newBinaryArchiveWithDescriptor:d error:&err];
+		}
+		if (arch)
+		{
+			m_matBinaryArchive = (void*)CFBridgingRetain(arch);
+			Logger::Log(Logger::LogLevel::Info, exists
+				? "MetalRenderer: loaded material pipeline archive from disk"
+				: "MetalRenderer: created a new material pipeline archive");
+		}
+		return m_matBinaryArchive;
+	}
+	return nullptr;
+}
+
 // Material-system M1: a DROP-IN replacement for m_scenePipeline whose MSL is cross-
 // compiled from a canonical-GLSL "standard" surface template. Pinned so the vertex
 // buffer lands at [[buffer(0)]] and Uniforms at [[buffer(1)]] — exactly the bind points
@@ -4216,8 +4257,30 @@ void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string&
 			desc.fragmentFunction = [fLib newFunctionWithName:@"main0"];
 			desc.colorAttachments[0].pixelFormat = kSceneColorFormat; // same HDR target as m_scenePipeline
 			desc.depthAttachmentPixelFormat      = kDepthFormat;
+			// On-disk pipeline cache: point the descriptor at the binary archive so
+			// Metal reuses previously-compiled functions (fast) when present. Best-
+			// effort — if the function isn't cached, Metal compiles it as usual.
+			id<MTLBinaryArchive> arch = nil;
+			if (@available(macOS 11.0, *))
+			{
+				arch = (__bridge id<MTLBinaryArchive>)ensureMaterialArchive();
+				if (arch) desc.binaryArchives = @[arch];
+			}
 			id<MTLRenderPipelineState> pso = [device newRenderPipelineStateWithDescriptor:desc error:&err];
-			if (pso) result = (void*)CFBridgingRetain(pso);
+			if (pso)
+			{
+				result = (void*)CFBridgingRetain(pso);
+				// Add this pipeline's functions to the archive + persist, so the next
+				// launch loads them instead of recompiling. Best-effort.
+				if (@available(macOS 11.0, *))
+					if (arch)
+					{
+						NSError* aerr = nil;
+						if ([arch addRenderPipelineFunctionsWithDescriptor:desc error:&aerr]
+						    && !m_matArchivePath.empty())
+							[arch serializeToURL:[NSURL fileURLWithPath:@(m_matArchivePath.c_str())] error:nil];
+					}
+			}
 		}
 		if (!result)
 			Logger::Log(Logger::LogLevel::Error,
