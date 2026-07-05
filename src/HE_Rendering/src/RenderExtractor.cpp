@@ -127,6 +127,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 		int       lod;
 		bool      castsShadow;
 		HE::AABB  localBounds; // real mesh AABB, or invalid → unit-cube fallback
+		std::vector<float> paramOverride; // merged HeParams block, or empty
 	};
 	auto meshView = reg.view<TransformComponent, MeshComponent>();
 	std::vector<EntityData> items;
@@ -138,7 +139,26 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 		d.meshId = mesh.meshAssetId;
 		d.matId  = {};
 		if (const auto* matComp = reg.try_get<MaterialComponent>(e))
+		{
 			d.matId = matComp->materialAssetId;
+			// Per-entity param overrides → merge into a full HeParams block now (serial,
+			// ContentManager-safe). Empty when the entity has no overrides / no material.
+			if (!matComp->paramOverrides.empty() && m_contentManager)
+				if (const MaterialAsset* ma = m_contentManager->getMaterial(d.matId))
+				{
+					std::vector<float> block(64, 0.0f); // 16 vec4 slots
+					const size_t n = std::min(ma->shaderParamData.size(), size_t(64));
+					std::copy(ma->shaderParamData.begin(), ma->shaderParamData.begin() + n, block.begin());
+					for (const auto& ov : matComp->paramOverrides)
+						for (size_t s = 0; s < ma->graphParamNames.size() && s < 16; ++s)
+							if (ma->graphParamNames[s] == ov.name)
+							{
+								for (int k = 0; k < 4; ++k) block[s * 4 + k] = ov.value[k];
+								break;
+							}
+					d.paramOverride = std::move(block);
+				}
+		}
 		d.entId  = static_cast<uint32_t>(e);
 		d.lod    = mesh.lodBias;
 		d.castsShadow = mesh.castsShadow;
@@ -176,6 +196,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 		obj.entityId        = d.entId;
 		obj.lod             = d.lod;
 		obj.castsShadow     = d.castsShadow;
+		obj.paramOverride   = d.paramOverride; // per-entity HeParams block (empty = none)
 	});
 
 	// ── Particles + weather precipitation ─────────────────────────────────────

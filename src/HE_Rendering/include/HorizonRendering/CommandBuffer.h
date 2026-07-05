@@ -30,6 +30,11 @@ struct DrawCall {
     // Non-empty when GeometryPass batched multiple same-mesh+same-material objects.
     // The backend uploads these to the instance VBO and calls glDrawElementsInstanced.
     std::vector<glm::mat4> instanceTransforms;
+    // Per-entity node-graph param override: empty = use the material's own
+    // shaderParamData; otherwise the FULL merged HeParams block (16 vec4 = 64
+    // floats) the backend uploads instead. Objects carrying an override are never
+    // batched (each is its own DrawCall), so this is per-draw unambiguous.
+    std::vector<float> paramOverride;
 };
 
 // A draw call that also carries per-joint bone matrices for GPU skinning.

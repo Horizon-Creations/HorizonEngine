@@ -35,6 +35,11 @@ struct RenderObject {
     // they are NOT instanced) — and so rain/snow don't wrongly cast shadows or darken AO.
     bool         castsShadow    = true;
     bool         contributesAO  = true;
+    // Per-entity node-graph param override: empty = use the material's own
+    // shaderParamData; otherwise the FULL merged HeParams block (16 vec4 = 64
+    // floats) the backend uploads instead. Filled by the extractor from
+    // MaterialComponent::paramOverrides; only set when the entity has overrides.
+    std::vector<float> paramOverride;
 };
 
 // Skinned renderable: same as RenderObject but carries bone matrices for GPU skinning.

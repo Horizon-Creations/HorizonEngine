@@ -12,6 +12,7 @@
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <material/MaterialShaderLibrary.h>
+#include <MaterialGraph/MaterialGraph.h> // HE::MatParamKind for the entity param editor
 #include <Types/Enums.h>
 #include <HorizonRendering/RenderExtractor.h>
 #include <HorizonRendering/RenderWorld.h>
@@ -5500,6 +5501,75 @@ void EditorUI::RenderInspector(AppContext& ctx)
 				}
 				if (ImGui::SmallButton("+ Texture Slot"))
 					mat->texturePaths.emplace_back();
+
+				// ── Node-graph parameters (per-ENTITY override) ──────────────────
+				// Live-tweak this entity's exposed material parameters without opening
+				// the material editor. Values write to MaterialComponent::paramOverrides
+				// (this entity only) — the shared material asset is untouched. The
+				// extractor merges them onto the material's defaults each frame.
+				if (!mat->graphParamNames.empty())
+				{
+					ImGui::SeparatorText("Material Parameters (this entity)");
+					// Find an existing override by name, or nullptr.
+					auto findOverride = [&](const std::string& nm) -> MaterialParamOverride* {
+						for (auto& o : m->paramOverrides) if (o.name == nm) return &o;
+						return nullptr;
+					};
+					for (size_t i = 0; i < mat->graphParamNames.size(); ++i)
+					{
+						const std::string& nm = mat->graphParamNames[i];
+						const HE::MatParamKind kind = (i < mat->graphParamTypes.size())
+							? static_cast<HE::MatParamKind>(mat->graphParamTypes[i])
+							: HE::MatParamKind::Float;
+						MaterialParamOverride* ov = findOverride(nm);
+						// Working value: the override if present, else the material default.
+						float val[4] = { 0, 0, 0, 0 };
+						if (ov) { for (int k = 0; k < 4; ++k) val[k] = ov->value[k]; }
+						else if (i * 4 + 3 < mat->shaderParamData.size())
+							for (int k = 0; k < 4; ++k) val[k] = mat->shaderParamData[i * 4 + k];
+
+						ImGui::PushID(static_cast<int>(i));
+						bool edited = false;
+						ImGui::SetNextItemWidth(-60.0f);
+						switch (kind)
+						{
+							case HE::MatParamKind::Color:
+								edited = ImGui::ColorEdit3(nm.c_str(), val, ImGuiColorEditFlags_Float); break;
+							case HE::MatParamKind::Vec2:
+								edited = ImGui::DragFloat2(nm.c_str(), val, 0.01f); break;
+							case HE::MatParamKind::Vec4:
+								edited = ImGui::DragFloat4(nm.c_str(), val, 0.01f); break;
+							case HE::MatParamKind::Bool:
+							{
+								bool b = val[0] > 0.5f;
+								if (ImGui::Checkbox(nm.c_str(), &b)) { val[0] = b ? 1.0f : 0.0f; edited = true; }
+								break;
+							}
+							default: // Float
+								edited = ImGui::DragFloat(nm.c_str(), val, 0.01f); break;
+						}
+						if (edited)
+						{
+							if (!ov) { MaterialParamOverride n; n.name = nm; m->paramOverrides.push_back(n); ov = &m->paramOverrides.back(); }
+							for (int k = 0; k < 4; ++k) ov->value[k] = val[k];
+							m->dirty = true;
+						}
+						// Per-param reset: drop the override → back to the material default.
+						if (ov)
+						{
+							ImGui::SameLine();
+							if (ImGui::SmallButton("Reset"))
+							{
+								for (auto it = m->paramOverrides.begin(); it != m->paramOverrides.end(); ++it)
+									if (it->name == nm) { m->paramOverrides.erase(it); break; }
+								m->dirty = true;
+							}
+						}
+						ImGui::PopID();
+					}
+					if (!m->paramOverrides.empty())
+						ImGui::TextDisabled("%zu override(s) on this entity", m->paramOverrides.size());
+				}
 
 				// Custom shader (fragment GLSL). Empty → built-in PBR. When set, the
 				// renderer cross-compiles it (shared MaterialShaderLibrary) and draws this
