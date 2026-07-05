@@ -148,6 +148,12 @@ const std::vector<MatNodeDesc>& registry()
           { { "A", F::Float, 0 }, { "B", F::Float, 0 } }, { { "Out", F::Float, 0 } }, 0 },
         { MatNodeType::Not, "Not", "Logic",
           { { "X", F::Float, 0 } }, { { "Out", F::Float, 0 } }, 0 },
+
+        // ── v6: procedural texture ──
+        // No input pins → always samples the mesh UV, so it "just works": drop it in,
+        // set Scale, wire RGB into a Multiply to mottle a colour.
+        { MatNodeType::NoiseTexture, "Noise Texture", "Procedural",
+          {}, { { "RGB", F::Vec3, 0 }, { "Value", F::Float, 0 } }, 1 }, // p[0] = Scale
     };
     return kReg;
 }
@@ -264,6 +270,8 @@ int MaterialGraph::addNode(MatNodeType type, float x, float y)
     if (type == MatNodeType::ParamVec2)  { n.p[0] = n.p[1] = 0.0f; n.s = "MyVec2"; }
     if (type == MatNodeType::ParamVec4)  { n.p[0] = n.p[1] = n.p[2] = n.p[3] = 0.0f; n.s = "MyVec4"; }
     if (type == MatNodeType::ParamBool)  { n.p[0] = 1.0f; n.s = "MyBool"; }
+    // v6: procedural texture
+    if (type == MatNodeType::NoiseTexture) n.p[0] = 6.0f;                     // Scale
     nodes.push_back(n);
     return n.id;
 }
@@ -372,6 +380,8 @@ struct Scope
 
 std::string inputExpr(EmitCtx& c, const Scope& sc, const MatGraphNode& node,
                       int pinIdx, MatPinType wantType);
+bool        hasInput(const Scope& sc, const MatGraphNode& node, int pinIdx);
+std::string uvInput(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pinIdx);
 
 // Allocate (or find) the HeParams slot for a named parameter. `kind` drives how many
 // of the vec4's components carry the default value (rest stay 0) AND the typed widget
@@ -511,16 +521,29 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
                  + ") * heLight.sunDir.w;"; break;
         case MatNodeType::ValueNoise:
             c.usesNoise = true;
-            decl = "float " + v + " = heValueNoise(" + inputExpr(c, sc, n, 0, F::Vec2) + " * "
+            decl = "float " + v + " = heValueNoise(" + uvInput(c, sc, n, 0) + " * "
                  + inputExpr(c, sc, n, 1, F::Float) + ");"; break;
         case MatNodeType::Fbm:
             c.usesNoise = true;
-            decl = "float " + v + " = heFbm(" + inputExpr(c, sc, n, 0, F::Vec2) + " * "
+            decl = "float " + v + " = heFbm(" + uvInput(c, sc, n, 0) + " * "
                  + inputExpr(c, sc, n, 1, F::Float) + ");"; break;
         case MatNodeType::Checker:
-            decl = "float " + v + " = mod(floor(" + inputExpr(c, sc, n, 0, F::Vec2) + ".x * "
-                 + inputExpr(c, sc, n, 1, F::Float) + ") + floor(" + inputExpr(c, sc, n, 0, F::Vec2) + ".y * "
-                 + inputExpr(c, sc, n, 1, F::Float) + "), 2.0);"; break;
+        {
+            const std::string uv = uvInput(c, sc, n, 0);
+            const std::string sc2 = inputExpr(c, sc, n, 1, F::Float);
+            decl = "float " + v + " = mod(floor(" + uv + ".x * " + sc2 + ") + floor("
+                 + uv + ".y * " + sc2 + "), 2.0);"; break;
+        }
+        case MatNodeType::NoiseTexture:
+        {
+            // Self-contained procedural texture: fbm over the mesh UV, no input pins.
+            // Output as grayscale RGB (multiply against a colour → mottling) and raw Value.
+            c.usesNoise = true;
+            const float scale = n.p[0] > 0.01f ? n.p[0] : 0.01f;
+            decl = "float " + v + " = heFbm(vUV * " + fmtF(scale) + ");";
+            pinExpr = { "vec3(" + v + ")", v };
+            break;
+        }
 
         // ── v3 ──
         case MatNodeType::SplitRGBA:
@@ -721,6 +744,22 @@ std::string inputExpr(EmitCtx& c, const Scope& sc, const MatGraphNode& node,
         return coerce(defaultExpr(pin), pin.type, wantType);
     }
     return coerce("0.0", F::Float, wantType);
+}
+
+// True if input pin `pinIdx` of `node` is wired to a source in this scope's graph.
+bool hasInput(const Scope& sc, const MatGraphNode& node, int pinIdx)
+{
+    for (const MatGraphLink& l : sc.g->links)
+        if (l.dstNode == node.id && l.dstPin == pinIdx) return true;
+    return false;
+}
+
+// A UV input that falls back to the MESH UV (vUV) when unconnected, instead of the
+// numeric pin default (which was vec2(0) → constant noise = uniform, "just dark").
+// This is what makes procedural nodes vary across the surface out of the box.
+std::string uvInput(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pinIdx)
+{
+    return hasInput(sc, n, pinIdx) ? inputExpr(c, sc, n, pinIdx, F::Vec2) : std::string("vUV");
 }
 } // namespace
 

@@ -85,6 +85,9 @@ enum class MatNodeType : uint8_t
     And,            // (A>0.5)&&(B>0.5) → 1/0
     Or,             // (A>0.5)||(B>0.5) → 1/0
     Not,            // A<=0.5 → 1/0
+
+    // ── v6: procedural texture ──
+    NoiseTexture,   // fbm(vUV*Scale) → grayscale RGB (Vec3) + Value (Float); drop-in to multiply for mottling
 };
 
 struct MatGraphNode

@@ -386,7 +386,7 @@ TEST_CASE("Every node type has a registry entry and its emit matches its pins")
 {
 	// The registry (pins) drives both the editor UI and codegen; a type missing from
 	// it, or an emit case reading a pin the registry doesn't declare, is a bug.
-	for (int t = 0; t <= (int)MatNodeType::Not; ++t)
+	for (int t = 0; t <= (int)MatNodeType::NoiseTexture; ++t)
 	{
 		const auto type = static_cast<MatNodeType>(t);
 		const HE::MatNodeDesc& d = HE::matNodeDesc(type);
@@ -396,6 +396,44 @@ TEST_CASE("Every node type has a registry entry and its emit matches its pins")
 		REQUIRE(byName != nullptr);
 		CHECK(byName->type == type);
 	}
+}
+
+TEST_CASE("Unconnected noise UV falls back to the mesh UV (vUV), not vec2(0)")
+{
+	// Regression: a Noise/FBM/Checker node with nothing wired to its UV pin used to
+	// default to vec2(0), producing a CONSTANT value that just darkened everything.
+	// It must now sample vUV so the pattern actually varies across the surface.
+	struct Case { MatNodeType type; const char* expect; };
+	for (Case cs : { Case{ MatNodeType::ValueNoise, "heValueNoise(vUV" },
+	                 Case{ MatNodeType::Fbm,        "heFbm(vUV" },
+	                 Case{ MatNodeType::Checker,    "floor(vUV" } })
+	{
+		MaterialGraph g;
+		const int out = g.addNode(MatNodeType::Output);
+		const int n   = g.addNode(cs.type);
+		CHECK(g.connect(n, 0, out, 0));
+		const std::string glsl = HE::generateFragment(g).glsl;
+		// The noise samples the mesh UV directly — no vec2(0) constant fed into it.
+		CHECK_MESSAGE(glsl.find(cs.expect) != std::string::npos,
+		              "expected '", cs.expect, "' in:\n", glsl);
+	}
+}
+
+TEST_CASE("Noise Texture node emits varying fbm over vUV as a vec3 (drop-in to multiply)")
+{
+	MaterialGraph g;
+	const int out = g.addNode(MatNodeType::Output);
+	const int tex = g.addNode(MatNodeType::NoiseTexture); // default Scale = 6
+	const int col = g.addNode(MatNodeType::ConstColor);
+	const int mul = g.addNode(MatNodeType::Multiply);
+	CHECK(g.connect(col, 0, mul, 0));
+	CHECK(g.connect(tex, 0, mul, 1));                     // colour * noise → mottling
+	CHECK(g.connect(mul, 0, out, 0));
+	const std::string glsl = HE::generateFragment(g).glsl;
+	CHECK(glsl.find("heFbm(vUV") != std::string::npos);   // procedural, varies over the mesh
+	CHECK(glsl.find("vec3(") != std::string::npos);       // grayscale RGB for a clean multiply
+	// The default Scale (6) must be baked into the expression.
+	CHECK(glsl.find("6.0") != std::string::npos);
 }
 
 #if defined(HE_TESTS_HAVE_SHADERC)
