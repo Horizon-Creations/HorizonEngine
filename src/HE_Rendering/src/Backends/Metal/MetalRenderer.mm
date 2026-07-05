@@ -4360,6 +4360,26 @@ void* MetalRenderer::ensureMaterialArchive()
 {
 	if (m_matArchiveTried) return m_matBinaryArchive;
 	m_matArchiveTried = true;
+
+	// MTLBinaryArchive's serializeToURL: segfaults inside Metal on macOS 26+ (Tahoe/beta)
+	// when a warmup re-serializes the growing archive. The on-disk archive is only a
+	// COLD-START optimization — in-session pipelines are still cached in
+	// m_materialPipelineCache — so disable it entirely on the affected systems to keep the
+	// editor from crashing at project load. HE_MTL_ARCHIVE=1 forces it back on (older/fixed
+	// OSes), =0 forces it off everywhere.
+	{
+		bool enable;
+		if (const char* e = std::getenv("HE_MTL_ARCHIVE")) enable = (std::atoi(e) != 0);
+		else enable = (NSProcessInfo.processInfo.operatingSystemVersion.majorVersion < 26);
+		if (!enable)
+		{
+			Logger::Log(Logger::LogLevel::Info,
+				"MetalRenderer: on-disk material pipeline archive disabled "
+				"(MTLBinaryArchive serialize is unstable on this macOS; in-session cache still active)");
+			return nullptr; // m_matBinaryArchive stays null → GetOrBuildMaterialPipeline skips it
+		}
+	}
+
 	if (@available(macOS 11.0, *))
 	{
 		id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
