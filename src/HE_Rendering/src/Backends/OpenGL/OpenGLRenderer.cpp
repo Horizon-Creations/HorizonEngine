@@ -8,6 +8,8 @@
 #include <cstdint>
 #include <vector>
 #include <algorithm>
+#include <filesystem>
+#include <fstream>
 #include <Diagnostics/Logger.h>
 #include <Diagnostics/EngineProfiler.h>
 #include <JobSystem/JobSystem.h>
@@ -2558,6 +2560,83 @@ bool OpenGLRenderer::resolveMaterialShader(const HE::UUID& materialId, uint64_t&
 // compile+link them and wire the two UBO blocks to fixed binding points (macOS GL 4.1 has no
 // layout(binding), so bind by block name). Cached by hash; 0 cached on failure so a broken
 // shader isn't rebuilt every frame.
+namespace {
+// ── On-disk GL program-binary cache ─────────────────────────────────────────
+// Persists linked material programs across launches (glGetProgramBinary /
+// glProgramBinary), keyed by hash(vertSrc, fragSrc, GL device signature) so a
+// driver/GPU change invalidates it. A safe no-op where the driver exposes no
+// program-binary formats (e.g. Apple's GL 4.1) — falls back to compile+link.
+bool glProgramBinarySupported()
+{
+	static int n = [] { GLint v = 0; glGetIntegerv(GL_NUM_PROGRAM_BINARY_FORMATS, &v); return (int)v; }();
+	return n > 0;
+}
+std::filesystem::path glProgramCacheDir()
+{
+	static std::filesystem::path dir = [] {
+		std::filesystem::path d;
+		if (char* pref = SDL_GetPrefPath("HorizonCreations", "HorizonEngine")) {
+			d = std::filesystem::path(pref) / "glprogcache"; SDL_free(pref);
+		} else {
+			d = std::filesystem::temp_directory_path() / "HorizonEngine" / "glprogcache";
+		}
+		std::error_code ec; std::filesystem::create_directories(d, ec);
+		return d;
+	}();
+	return dir;
+}
+uint64_t glDeviceSig()
+{
+	static uint64_t sig = [] {
+		std::string s;
+		auto add = [&](GLenum e){ const GLubyte* p = glGetString(e); if (p) s += reinterpret_cast<const char*>(p); s += '|'; };
+		add(GL_VENDOR); add(GL_RENDERER); add(GL_VERSION);
+		return (uint64_t)std::hash<std::string>{}(s);
+	}();
+	return sig;
+}
+std::filesystem::path glProgramCachePath(const std::string& vertSrc, const std::string& fragSrc)
+{
+	const uint64_t h = (uint64_t)std::hash<std::string>{}(vertSrc + "\x1e" + fragSrc)
+	                 ^ (glDeviceSig() * 0x9E3779B97F4A7C15ULL);
+	char name[40]; std::snprintf(name, sizeof(name), "%016llx.glprog", (unsigned long long)h);
+	return glProgramCacheDir() / name;
+}
+// Create a linked program from a cached binary; 0 on miss/failure (stale → recompile).
+GLuint glTryLoadCachedProgram(const std::filesystem::path& path)
+{
+	std::ifstream f(path, std::ios::binary);
+	if (!f) return 0;
+	uint32_t fmt = 0, len = 0;
+	f.read(reinterpret_cast<char*>(&fmt), 4);
+	f.read(reinterpret_cast<char*>(&len), 4);
+	if (!f || len == 0 || len > (64u << 20)) return 0;
+	std::vector<uint8_t> bin(len);
+	f.read(reinterpret_cast<char*>(bin.data()), len);
+	if (!f) return 0;
+	GLuint prog = glCreateProgram();
+	glProgramBinary(prog, (GLenum)fmt, bin.data(), (GLsizei)len);
+	GLint linked = 0; glGetProgramiv(prog, GL_LINK_STATUS, &linked);
+	if (!linked) { glDeleteProgram(prog); return 0; }
+	return prog;
+}
+void glSaveCachedProgram(const std::filesystem::path& path, GLuint prog)
+{
+	GLint len = 0; glGetProgramiv(prog, GL_PROGRAM_BINARY_LENGTH, &len);
+	if (len <= 0) return;
+	std::vector<uint8_t> bin(len);
+	GLenum fmt = 0; GLsizei got = 0;
+	glGetProgramBinary(prog, len, &got, &fmt, bin.data());
+	if (got <= 0) return;
+	std::ofstream f(path, std::ios::binary | std::ios::trunc);
+	if (!f) return;
+	uint32_t fmt32 = (uint32_t)fmt, len32 = (uint32_t)got;
+	f.write(reinterpret_cast<const char*>(&fmt32), 4);
+	f.write(reinterpret_cast<const char*>(&len32), 4);
+	f.write(reinterpret_cast<const char*>(bin.data()), got);
+}
+} // namespace
+
 unsigned int OpenGLRenderer::getOrBuildMaterialProgram(uint64_t key, const std::string& fragGlsl,
                                                        const MaterialShaderVariant* precompiled)
 {
@@ -2576,12 +2655,51 @@ unsigned int OpenGLRenderer::getOrBuildMaterialProgram(uint64_t key, const std::
 		const auto& f = m_matShaderLib.fragment(key, fragGlsl, Backend::GLSL410);
 		vertSrc = v.source; fragSrc = f.source; log = v.log + f.log; ok = v.ok && f.ok;
 	}
+	// Uniform-block bindings + sampler-unit assignments. Program state (not always
+	// captured in a program binary), so re-applied whether the program was linked
+	// fresh or restored from the on-disk cache.
+	auto setupProgram = [](GLuint prog) {
+		const GLuint uIdx = glGetUniformBlockIndex(prog, "U");
+		if (uIdx != GL_INVALID_INDEX) glUniformBlockBinding(prog, uIdx, 1);
+		const GLuint lIdx = glGetUniformBlockIndex(prog, "HeLighting");
+		if (lIdx != GL_INVALID_INDEX) glUniformBlockBinding(prog, lIdx, 0);
+		const GLuint pIdx = glGetUniformBlockIndex(prog, "HeParams");
+		if (pIdx != GL_INVALID_INDEX) glUniformBlockBinding(prog, pIdx, 2);
+		// Sampler uniforms → texture units: heTex0 (legacy/mesh) = 0, node-graph
+		// project textures heTexP0..3 = units 1..4. GL 4.1 has no layout(binding).
+		glUseProgram(prog);
+		if (GLint l = glGetUniformLocation(prog, "heTex0"); l >= 0) glUniform1i(l, 0);
+		for (int k = 0; k < 4; ++k)
+		{
+			const std::string nm = "heTexP" + std::to_string(k);
+			if (GLint l = glGetUniformLocation(prog, nm.c_str()); l >= 0) glUniform1i(l, k + 1);
+		}
+		glUseProgram(0);
+	};
+
 	unsigned int program = 0;
 	if (ok)
 	{
+		// Fast path: a linked binary cached from a previous launch — skips the
+		// GLSL compile + link entirely. Only when the driver supports binaries.
+		const bool cacheable = glProgramBinarySupported();
+		const std::filesystem::path cachePath =
+			cacheable ? glProgramCachePath(vertSrc, fragSrc) : std::filesystem::path{};
+		if (cacheable)
+			if (GLuint cached = glTryLoadCachedProgram(cachePath))
+			{
+				setupProgram(cached);
+				program = cached;
+				m_materialPrograms[key] = program;
+				Logger::Log(Logger::LogLevel::Info,
+					"OpenGLRenderer: loaded a material program from the on-disk binary cache");
+				return program;
+			}
+
 		GLuint vs = CompileStage(GL_VERTEX_SHADER,   vertSrc.c_str());
 		GLuint fs = CompileStage(GL_FRAGMENT_SHADER, fragSrc.c_str());
 		GLuint prog = glCreateProgram();
+		if (cacheable) glProgramParameteri(prog, GL_PROGRAM_BINARY_RETRIEVABLE_HINT, GL_TRUE);
 		glAttachShader(prog, vs);
 		glAttachShader(prog, fs);
 		glLinkProgram(prog);
@@ -2589,23 +2707,9 @@ unsigned int OpenGLRenderer::getOrBuildMaterialProgram(uint64_t key, const std::
 		GLint ok = 0; glGetProgramiv(prog, GL_LINK_STATUS, &ok);
 		if (ok)
 		{
-			const GLuint uIdx = glGetUniformBlockIndex(prog, "U");
-			if (uIdx != GL_INVALID_INDEX) glUniformBlockBinding(prog, uIdx, 1);
-			const GLuint lIdx = glGetUniformBlockIndex(prog, "HeLighting");
-			if (lIdx != GL_INVALID_INDEX) glUniformBlockBinding(prog, lIdx, 0);
-			const GLuint pIdx = glGetUniformBlockIndex(prog, "HeParams");
-			if (pIdx != GL_INVALID_INDEX) glUniformBlockBinding(prog, pIdx, 2);
-			// Sampler uniforms → texture units: heTex0 (legacy/mesh) = 0, node-graph
-			// project textures heTexP0..3 = units 1..4. GL 4.1 has no layout(binding).
-			glUseProgram(prog);
-			if (GLint l = glGetUniformLocation(prog, "heTex0"); l >= 0) glUniform1i(l, 0);
-			for (int k = 0; k < 4; ++k)
-			{
-				const std::string nm = "heTexP" + std::to_string(k);
-				if (GLint l = glGetUniformLocation(prog, nm.c_str()); l >= 0) glUniform1i(l, k + 1);
-			}
-			glUseProgram(0);
+			setupProgram(prog);
 			program = prog;
+			if (cacheable) glSaveCachedProgram(cachePath, prog); // persist for next launch
 			Logger::Log(Logger::LogLevel::Info, precompiled
 				? "OpenGLRenderer: built a material program from a PRECOMPILED variant (no runtime cross-compile)"
 				: "OpenGLRenderer: built a material program from canonical GLSL via he::shaderc");
