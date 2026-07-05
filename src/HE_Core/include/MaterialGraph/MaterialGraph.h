@@ -33,8 +33,19 @@ enum class MatNodeType : uint8_t
     Time,          // engine time in seconds (heLight.sunDir.w)
     TextureSample, // texture slot 0 sampled at UV input
     Add, Multiply, Lerp, OneMinus, Power, Saturate, DotProduct, Sine,
-    Fresnel,       // pow(1 - max(dot(N, view), 0), p[0]); view ≈ +Z (matches heLit's model)
+    Fresnel,       // pow(1 - max(dot(N, V), 0), p[0]) with the TRUE per-pixel view direction
     Combine3,      // (x, y, z) → vec3
+
+    // ── v2 additions ──
+    WorldPos,      // world-space fragment position (vWorldPos)
+    ViewDir,       // normalize(camera - worldPos)
+    ParamFloat,    // named exposed parameter (s = name, p[0] = value) — Simple-mode surface
+    ParamColor,    // named exposed parameter (s = name, p[0..2] = rgb)
+    Subtract, Divide, Absolute, Fract, Smoothstep, Step, Normalize3,
+    Panner,        // UV + vec2(SpeedX, SpeedY) * time
+    ValueNoise,    // value noise (UV, Scale) → float
+    Fbm,           // 4-octave fractal noise (UV, Scale) → float
+    Checker,       // checkerboard (UV, Scale) → float
 };
 
 struct MatGraphNode
@@ -42,6 +53,7 @@ struct MatGraphNode
     int         id   = 0;
     MatNodeType type = MatNodeType::ConstFloat;
     float       p[4] = { 0, 0, 0, 0 }; // node params (const values / lit flag / fresnel power)
+    std::string s;                     // string param (exposed-parameter name)
     float       x = 0.0f, y = 0.0f;    // canvas position (editor-only, serialized for layout)
 };
 

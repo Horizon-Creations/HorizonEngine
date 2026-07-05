@@ -121,7 +121,83 @@ TEST_CASE("MaterialGraph JSON round-trip preserves nodes, params and links")
 	CHECK(untouched.nodes.size() == n);
 }
 
+TEST_CASE("MaterialGraph v2 nodes: noise helpers, view-dir fresnel, named params")
+{
+	// Noise/FBM pull in the helper functions exactly once; Panner uses the time uniform.
+	MaterialGraph g;
+	const int out    = g.addNode(MatNodeType::Output);
+	const int uv     = g.addNode(MatNodeType::UV);
+	const int pan    = g.addNode(MatNodeType::Panner);
+	const int fbm    = g.addNode(MatNodeType::Fbm);
+	const int noise  = g.addNode(MatNodeType::ValueNoise);
+	const int lerp   = g.addNode(MatNodeType::Lerp);
+	const int colA   = g.addNode(MatNodeType::ParamColor);
+	g.findNode(colA)->s = "GrassTint";
+	CHECK(g.connect(uv,   0, pan,   0));
+	CHECK(g.connect(pan,  0, fbm,   0));
+	CHECK(g.connect(uv,   0, noise, 0));
+	CHECK(g.connect(colA, 0, lerp,  0));
+	CHECK(g.connect(fbm,  0, lerp,  2));
+	CHECK(g.connect(lerp, 0, out,   0));
+	const std::string glsl = HE::generateFragmentGlsl(g);
+	CHECK(glsl.find("heValueNoise(") != std::string::npos);
+	CHECK(glsl.find("heFbm(") != std::string::npos);
+	// helper definitions appear exactly once
+	size_t first = glsl.find("float heValueNoise(vec2 p)");
+	REQUIRE(first != std::string::npos);
+	CHECK(glsl.find("float heValueNoise(vec2 p)", first + 1) == std::string::npos);
+	CHECK(glsl.find("param: GrassTint") != std::string::npos);
+	CHECK(glsl.find("vWorldPos") != std::string::npos); // varying declared in the header
+
+	// Fresnel + ViewDir use the real camera position, not a fixed axis.
+	MaterialGraph g2 = MaterialGraph::makeDefault();
+	int out2 = 0;
+	for (auto& n : g2.nodes) if (n.type == MatNodeType::Output) out2 = n.id;
+	const int fres = g2.addNode(MatNodeType::Fresnel);
+	CHECK(g2.connect(fres, 0, out2, 1));
+	const std::string fresGlsl = HE::generateFragmentGlsl(g2);
+	CHECK(fresGlsl.find("heLight.camPos.xyz - vWorldPos") != std::string::npos);
+
+	// Param name survives the JSON round-trip.
+	MaterialGraph r;
+	REQUIRE(HE::materialGraphFromJson(HE::materialGraphToJson(g), r));
+	bool foundName = false;
+	for (const auto& n : r.nodes)
+		if (n.type == MatNodeType::ParamColor && n.s == "GrassTint") foundName = true;
+	CHECK(foundName);
+	CHECK(HE::generateFragmentGlsl(r) == glsl);
+}
+
 #if defined(HE_TESTS_HAVE_SHADERC)
+TEST_CASE("v2 graph GLSL (noise + fresnel + panner) cross-compiles for Metal and GL")
+{
+	MaterialGraph g;
+	const int out   = g.addNode(MatNodeType::Output);
+	const int uv    = g.addNode(MatNodeType::UV);
+	const int pan   = g.addNode(MatNodeType::Panner);
+	const int fbm   = g.addNode(MatNodeType::Fbm);
+	const int fres  = g.addNode(MatNodeType::Fresnel);
+	const int comb  = g.addNode(MatNodeType::Combine3);
+	CHECK(g.connect(uv,   0, pan,  0));
+	CHECK(g.connect(pan,  0, fbm,  0));
+	CHECK(g.connect(fbm,  0, comb, 0));
+	CHECK(g.connect(fres, 0, comb, 1));
+	CHECK(g.connect(comb, 0, out,  0));
+	const std::string glsl = HE::generateFragmentGlsl(g);
+	const uint64_t hash = std::hash<std::string>{}(glsl);
+
+	HE::MaterialShaderLibrary lib;
+	using B = HE::MaterialShaderLibrary::Backend;
+	const auto& msl = lib.fragment(hash, glsl, B::Metal);
+	CHECK_MESSAGE(msl.ok, msl.log);
+	const auto& gl = lib.fragment(hash, glsl, B::GLSL410);
+	CHECK_MESSAGE(gl.ok, gl.log);
+	CHECK(gl.source.find("readonly buffer") == std::string::npos);
+	// The extended standard vertices (vWorldPos) still compile.
+	CHECK(lib.standardVertex(B::Metal).ok);
+	CHECK(lib.standardVertex(B::GLSL410).ok);
+}
+
 TEST_CASE("Generated graph GLSL cross-compiles through the real material pipeline")
 {
 	const MaterialGraph g = makeDemoGraph();

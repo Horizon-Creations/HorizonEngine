@@ -141,9 +141,34 @@ bool nodeParamWidgets(MatGraphNode& n)
 			if (ImGui::Checkbox("Lit", &lit)) { n.p[0] = lit ? 1.0f : 0.0f; committed = true; }
 			break;
 		}
+		case MatNodeType::ParamFloat:
+			ImGui::SetNextItemWidth(kNodeW - 24.0f);
+			ImGui::InputText("##name", &n.s);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			ImGui::SetNextItemWidth(kNodeW - 24.0f);
+			ImGui::DragFloat("##v", &n.p[0], 0.01f);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			break;
+		case MatNodeType::ParamColor:
+			ImGui::SetNextItemWidth(kNodeW - 24.0f);
+			ImGui::InputText("##name", &n.s);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			ImGui::SetNextItemWidth(kNodeW - 24.0f);
+			ImGui::ColorEdit3("##c", n.p, ImGuiColorEditFlags_Float);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			break;
 		default: break;
 	}
 	return committed;
+}
+
+// Vertical space the node reserves for its inline widgets (Param nodes have two rows).
+float nodeParamHeight(MatNodeType type)
+{
+	const HE::MatNodeDesc& d = HE::matNodeDesc(type);
+	if (d.paramCount == 0) return 0.0f;
+	if (type == MatNodeType::ParamFloat || type == MatNodeType::ParamColor) return 52.0f;
+	return 26.0f;
 }
 } // namespace
 
@@ -235,7 +260,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 		const MatNodeDesc& d = HE::matNodeDesc(n.type);
 		const ImVec2 p(origin.x + st.scroll.x + n.x, origin.y + st.scroll.y + n.y);
 		const int rows = std::max<int>((int)d.inputs.size(), (int)d.outputs.size());
-		const float paramH = d.paramCount > 0 ? 26.0f : 0.0f;
+		const float paramH = nodeParamHeight(n.type);
 		const float h = kTitleH + 6.0f + rows * kRowH + paramH;
 
 		ImGui::PushID(n.id);
