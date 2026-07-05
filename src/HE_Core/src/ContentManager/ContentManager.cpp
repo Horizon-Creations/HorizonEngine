@@ -187,13 +187,16 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 				for (uint32_t i = 0; i < paramFloats; ++i)
 					HAsset::Reader::readPOD(c->data,o,a.shaderParamData[i]);
 			}
+			HAsset::Reader::readVec(c->data,o,a.graphTexturePaths); // node-graph textures (paths)
 		}
+		// Baked graph-texture UUIDs live in MTLU alongside shaderId/textureIds.
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_MTLU))
 		{
 			size_t o=0;
 			HAsset::Reader::readPOD(c->data,o,a.shaderId.hi);
 			HAsset::Reader::readPOD(c->data,o,a.shaderId.lo);
 			HAsset::Reader::readVec(c->data,o,a.textureIds);
+			HAsset::Reader::readVec(c->data,o,a.graphTextureIds); // baked node-graph textures
 		}
 		handle = m_materialAssets.insert(std::move(a)); break;
 	}
@@ -632,6 +635,7 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 		HAsset::Writer::appendString(b,a.nodeGraphJson);        // optional node graph (source of truth)
 		HAsset::Writer::appendPOD(b,static_cast<uint32_t>(a.shaderParamData.size()));
 		for (float f : a.shaderParamData) HAsset::Writer::appendPOD(b,f); // exposed params (HeParams)
+		HAsset::Writer::appendVec(b,a.graphTexturePaths);                 // node-graph textures (paths)
 		w.addChunk(HAsset::CHUNK_MTRL,b.data(),b.size());
 		break;
 	}

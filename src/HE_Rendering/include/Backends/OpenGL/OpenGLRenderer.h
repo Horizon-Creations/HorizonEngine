@@ -150,6 +150,7 @@ private:
 	// the material was found (outTex may still be 0 = material has no texture);
 	// false when the UUID is null or the material is not loaded yet.
 	bool ResolveMaterialTexture(const HE::UUID& materialId, unsigned int& outTex);
+	unsigned int ResolveGraphTexture(const HE::UUID& id, const std::string& path);
 
 	// Resolves a material override's PBR scalars (baseColor/metallic/roughness/
 	// opacity). Returns true if the material is loaded; leaves the outputs
@@ -325,6 +326,7 @@ private:
 	// UUID. A present entry of 0 means "resolved, no texture". Drained/cleared
 	// by InvalidateMaterial via m_pendingMaterialInvalidations.
 	std::unordered_map<HE::UUID, unsigned int> m_materialTexCache;
+	std::unordered_map<std::string, unsigned int> m_graphTexCache;
 	std::vector<HE::UUID>                       m_pendingMaterialInvalidations;
 	std::vector<HE::UUID>                       m_pendingMeshInvalidations;
 

@@ -116,19 +116,39 @@ static std::vector<uint8_t> rewriteRefsForPack(
             HAsset::Reader::readString(c.data, o, shaderPath);
             HAsset::Reader::readVec(c.data, o, texPaths);
 
+            // Walk the scalar/string tail (PBR scalars, custom shader, node graph,
+            // params) WITHOUT re-serializing it — we only need the byte offset where the
+            // node-graph texture paths begin, so we can copy everything before verbatim
+            // and drop the paths (baked into MTLU as UUIDs). graphTexturePaths is the
+            // last field, so truncating there is safe (an absent trailing vec reads empty).
+            size_t tailStart = o;
+            { float f; std::string s; uint32_t n = 0;
+              for (int i = 0; i < 6; ++i) HAsset::Reader::readPOD(c.data, o, f); // baseColor3+met+rough+opacity
+              HAsset::Reader::readString(c.data, o, s);   // customShaderFragGlsl
+              HAsset::Reader::readString(c.data, o, s);   // nodeGraphJson
+              if (HAsset::Reader::readPOD(c.data, o, n))  // param count + floats
+                  for (uint32_t i = 0; i < n && o + 4 <= c.data.size(); ++i) HAsset::Reader::readPOD(c.data, o, f);
+            }
+            const size_t graphTexOffset = o;
+            std::vector<std::string> graphTexPaths;
+            HAsset::Reader::readVec(c.data, o, graphTexPaths); // node-graph textures (dropped)
+
             std::vector<uint8_t> mtrl;
             HAsset::Writer::appendString(mtrl, std::string{});           // shaderPath dropped
             HAsset::Writer::appendVec(mtrl, std::vector<std::string>{}); // texturePaths dropped
-            mtrl.insert(mtrl.end(), c.data.begin() + o, c.data.end());   // scalar tail verbatim
+            mtrl.insert(mtrl.end(), c.data.begin() + tailStart, c.data.begin() + graphTexOffset); // tail verbatim, minus paths
             w.addChunk(HAsset::CHUNK_MTRL, mtrl.data(), mtrl.size());
 
             const HE::UUID sid = shaderPath.empty() ? HE::UUID{} : resolve(shaderPath);
             std::vector<HE::UUID> texIds; texIds.reserve(texPaths.size());
             for (const auto& tp : texPaths) texIds.push_back(resolve(tp));
+            std::vector<HE::UUID> graphTexIds; graphTexIds.reserve(graphTexPaths.size());
+            for (const auto& tp : graphTexPaths) graphTexIds.push_back(resolve(tp));
             std::vector<uint8_t> d;
             HAsset::Writer::appendPOD(d, sid.hi);
             HAsset::Writer::appendPOD(d, sid.lo);
             HAsset::Writer::appendVec(d, texIds);
+            HAsset::Writer::appendVec(d, graphTexIds); // baked node-graph textures
             w.addChunk(HAsset::CHUNK_MTLU, d.data(), d.size());
             continue;
         }

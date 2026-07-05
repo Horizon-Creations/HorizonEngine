@@ -266,7 +266,74 @@ TEST_CASE("MaterialGraph v3: material functions inline (and recursion is guarded
 	CHECK(recGlsl.find("recursive") != std::string::npos);
 }
 
+TEST_CASE("MaterialGraph v4: extra inputs + project-texture slots")
+{
+	// New input nodes emit the expected expressions.
+	MaterialGraph g;
+	const int out = g.addNode(MatNodeType::Output);
+	const int cd  = g.addNode(MatNodeType::CameraDistance);
+	const int sp  = g.addNode(MatNodeType::ScreenPos);
+	const int cp  = g.addNode(MatNodeType::CameraPos);
+	const int v4  = g.addNode(MatNodeType::ConstVec4);
+	g.findNode(v4)->p[3] = 0.5f;
+	CHECK(g.connect(cp, 0, out, 0)); // BaseColor = camera pos
+	CHECK(g.connect(cd, 0, out, 1)); // Metallic = distance
+	CHECK(g.connect(sp, 0, out, 3)); // Emissive from screen pos (coerced)
+	CHECK(g.connect(v4, 0, out, 4)); // Opacity from vec4.x
+	const std::string glsl = HE::generateFragmentGlsl(g);
+	CHECK(glsl.find("length(heLight.camPos.xyz - vWorldPos)") != std::string::npos);
+	CHECK(glsl.find("gl_FragCoord.xy") != std::string::npos);
+	CHECK(glsl.find("heLight.camPos.xyz") != std::string::npos);
+
+	// Texture Sample nodes: empty path → legacy heTex0; distinct picked paths get
+	// their own slots heTexP0/heTexP1; a repeated path shares a slot.
+	MaterialGraph t;
+	const int tout  = t.addNode(MatNodeType::Output);
+	const int def   = t.addNode(MatNodeType::TextureSample);           // no path → heTex0
+	const int a     = t.addNode(MatNodeType::TextureSample);
+	t.findNode(a)->s = "Tex/grass.hasset";
+	const int b     = t.addNode(MatNodeType::TextureSample);
+	t.findNode(b)->s = "Tex/rock.hasset";
+	const int b2    = t.addNode(MatNodeType::TextureSample);
+	t.findNode(b2)->s = "Tex/rock.hasset";                            // same as b → shares slot
+	const int comb  = t.addNode(MatNodeType::Add);
+	CHECK(t.connect(def, 0, comb, 0));
+	CHECK(t.connect(a,   0, comb, 1));
+	CHECK(t.connect(comb,0, tout, 0));
+	CHECK(t.connect(b,   0, tout, 3));
+	CHECK(t.connect(b2,  0, tout, 3)); // replaces link but references rock again
+	const HE::MatShaderGen gen = HE::generateFragment(t);
+	REQUIRE(gen.textures.size() == 2);          // grass, rock (dedup)
+	CHECK(gen.textures[0] == "Tex/grass.hasset");
+	CHECK(gen.textures[1] == "Tex/rock.hasset");
+	CHECK(gen.glsl.find("uniform sampler2D heTex0")   != std::string::npos); // legacy default used
+	CHECK(gen.glsl.find("uniform sampler2D heTexP0")  != std::string::npos);
+	CHECK(gen.glsl.find("uniform sampler2D heTexP1")  != std::string::npos);
+	CHECK(gen.glsl.find("binding = 4)")               != std::string::npos); // first project tex
+}
+
 #if defined(HE_TESTS_HAVE_SHADERC)
+TEST_CASE("v4 graph (project textures + new inputs) cross-compiles for Metal and GL")
+{
+	MaterialGraph g;
+	const int out = g.addNode(MatNodeType::Output);
+	const int ts  = g.addNode(MatNodeType::TextureSample);
+	g.findNode(ts)->s = "Tex/a.hasset";
+	const int uv  = g.addNode(MatNodeType::UV);
+	const int cd  = g.addNode(MatNodeType::CameraDistance);
+	CHECK(g.connect(uv, 0, ts,  0));
+	CHECK(g.connect(ts, 0, out, 0));
+	CHECK(g.connect(cd, 0, out, 1));
+	const std::string glsl = HE::generateFragment(g).glsl;
+	const uint64_t hash = std::hash<std::string>{}(glsl);
+	HE::MaterialShaderLibrary lib;
+	using B = HE::MaterialShaderLibrary::Backend;
+	const auto& msl = lib.fragment(hash, glsl, B::Metal);
+	CHECK_MESSAGE(msl.ok, msl.log);
+	const auto& gl = lib.fragment(hash, glsl, B::GLSL410);
+	CHECK_MESSAGE(gl.ok, gl.log);
+}
+
 TEST_CASE("v3 graph (params + function call + alpha) cross-compiles for Metal and GL")
 {
 	MaterialGraph fn;

@@ -105,6 +105,18 @@ const std::vector<MatNodeDesc>& registry()
           { { "Value", F::Vec3, 0 } }, {}, 1 }, // s = name, p[0] = type; input type is dynamic
         { MatNodeType::FunctionCall, "Material Function", "Function",
           {}, {}, 0 }, // pins resolved from the referenced graph (matFunctionPins)
+
+        // ── v4 inputs ──
+        { MatNodeType::ConstVec2, "Vector2", "Input",
+          {}, { { "XY", F::Vec2, 0 } }, 2 },
+        { MatNodeType::ConstVec4, "Vector4", "Input",
+          {}, { { "XYZW", F::Vec4, 0 } }, 4 },
+        { MatNodeType::CameraPos, "Camera Position", "Input",
+          {}, { { "XYZ", F::Vec3, 0 } }, 0 },
+        { MatNodeType::CameraDistance, "Camera Distance", "Input",
+          {}, { { "Dist", F::Float, 0 } }, 0 },
+        { MatNodeType::ScreenPos, "Screen Position", "Input",
+          {}, { { "XY", F::Vec2, 0 } }, 0 },
     };
     return kReg;
 }
@@ -302,10 +314,11 @@ struct EmitCtx
     std::string body;
     std::unordered_map<std::string, std::string> outVar; // scopeKey:node:pin → expr
     std::unordered_set<std::string> emitting;            // cycle guard (scoped)
-    bool usesTexture = false;
+    bool usesTexture = false;                            // legacy default sampler (heTex0)
     bool usesNoise   = false;
     int  varCounter  = 0;
     std::vector<MatParamSlot> params;                    // exposed parameters, slot order
+    std::vector<std::string>  textures;                  // project textures, slot order (max 4)
     const MatFunctionLoader*  loader = nullptr;
     std::vector<std::string>  fnStack;                   // inline stack (recursion guard)
 };
@@ -371,10 +384,27 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
         case MatNodeType::Time:
             decl = "float " + v + " = heLight.sunDir.w;"; break;
         case MatNodeType::TextureSample:
-            c.usesTexture = true;
-            decl = "vec4 " + v + " = texture(heTex0, " + inputExpr(c, sc, n, 0, F::Vec2) + ");";
+        {
+            // A node with no picked texture (empty s) samples the material's legacy/mesh
+            // texture (heTex0). A picked project texture gets its own slot heTexP{k}
+            // (deduplicated, capped at kMatMaxGraphTextures); extras fall back to heTex0.
+            std::string sampler = "heTex0";
+            if (!n.s.empty())
+            {
+                int slot = -1;
+                for (size_t i = 0; i < c.textures.size(); ++i)
+                    if (c.textures[i] == n.s) { slot = (int)i; break; }
+                if (slot < 0 && (int)c.textures.size() < kMatMaxGraphTextures)
+                { slot = (int)c.textures.size(); c.textures.push_back(n.s); }
+                if (slot >= 0) sampler = "heTexP" + std::to_string(slot);
+                else           c.usesTexture = true; // over budget → default
+            }
+            else
+                c.usesTexture = true;
+            decl = "vec4 " + v + " = texture(" + sampler + ", " + inputExpr(c, sc, n, 0, F::Vec2) + ");";
             pinExpr = { v + ".xyz", v + ".w" };
             break;
+        }
         case MatNodeType::Add:
             decl = "vec3 " + v + " = " + inputExpr(c, sc, n, 0, F::Vec3) + " + " + inputExpr(c, sc, n, 1, F::Vec3) + ";"; break;
         case MatNodeType::Multiply:
@@ -523,6 +553,19 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
             break;
         }
 
+        // ── v4 inputs ──
+        case MatNodeType::ConstVec2:
+            decl = "vec2 " + v + " = vec2(" + fmtF(n.p[0]) + ", " + fmtF(n.p[1]) + ");"; break;
+        case MatNodeType::ConstVec4:
+            decl = "vec4 " + v + " = vec4(" + fmtF(n.p[0]) + ", " + fmtF(n.p[1]) + ", "
+                 + fmtF(n.p[2]) + ", " + fmtF(n.p[3]) + ");"; break;
+        case MatNodeType::CameraPos:
+            decl = "vec3 " + v + " = heLight.camPos.xyz;"; break;
+        case MatNodeType::CameraDistance:
+            decl = "float " + v + " = length(heLight.camPos.xyz - vWorldPos);"; break;
+        case MatNodeType::ScreenPos:
+            decl = "vec2 " + v + " = gl_FragCoord.xy;"; break;
+
         case MatNodeType::Output:
             decl = ""; break; // handled by generateFragment
     }
@@ -621,7 +664,10 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
 
     std::string src = header;
     if (c.usesTexture)
-        src += "layout(set = 0, binding = 2) uniform sampler2D heTex0;\n";
+        src += "layout(set = 0, binding = 2) uniform sampler2D heTex0;\n"; // legacy/mesh texture
+    for (size_t i = 0; i < c.textures.size(); ++i) // project textures (binding 4 + slot)
+        src += "layout(set = 0, binding = " + std::to_string(4 + i)
+             + ") uniform sampler2D heTexP" + std::to_string(i) + ";\n";
     if (!c.params.empty())
         src += "layout(std140, set = 0, binding = 3) uniform HeParams { vec4 v[16]; } heParams;\n";
     if (c.usesNoise)
@@ -647,8 +693,9 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
     // Cap at the UBO's 16 slots (over-budget params were still emitted with their slot
     // index — clamp the layout so uploads stay in bounds; realistically never hit).
     if (c.params.size() > 16) c.params.resize(16);
-    gen.glsl   = std::move(src);
-    gen.params = std::move(c.params);
+    gen.glsl     = std::move(src);
+    gen.params   = std::move(c.params);
+    gen.textures = std::move(c.textures);
     return gen;
 }
 

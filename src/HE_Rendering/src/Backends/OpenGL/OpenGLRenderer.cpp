@@ -2584,6 +2584,16 @@ unsigned int OpenGLRenderer::getOrBuildMaterialProgram(uint64_t key, const std::
 			if (lIdx != GL_INVALID_INDEX) glUniformBlockBinding(prog, lIdx, 0);
 			const GLuint pIdx = glGetUniformBlockIndex(prog, "HeParams");
 			if (pIdx != GL_INVALID_INDEX) glUniformBlockBinding(prog, pIdx, 2);
+			// Sampler uniforms → texture units: heTex0 (legacy/mesh) = 0, node-graph
+			// project textures heTexP0..3 = units 1..4. GL 4.1 has no layout(binding).
+			glUseProgram(prog);
+			if (GLint l = glGetUniformLocation(prog, "heTex0"); l >= 0) glUniform1i(l, 0);
+			for (int k = 0; k < 4; ++k)
+			{
+				const std::string nm = "heTexP" + std::to_string(k);
+				if (GLint l = glGetUniformLocation(prog, nm.c_str()); l >= 0) glUniform1i(l, k + 1);
+			}
+			glUseProgram(0);
 			program = prog;
 			Logger::Log(Logger::LogLevel::Info,
 				"OpenGLRenderer: built a material program from canonical GLSL via he::shaderc");
@@ -3783,6 +3793,31 @@ bool OpenGLRenderer::ResolveMaterialTexture(const HE::UUID& materialId, unsigned
 	return true;
 }
 
+// Resolve a node-graph project texture (UUID for packed assets, path for loose editor
+// assets) to a GL texture, cached by a stable key. 0 if not loadable.
+unsigned int OpenGLRenderer::ResolveGraphTexture(const HE::UUID& id, const std::string& path)
+{
+	const std::string key = id != HE::UUID{}
+		? (std::to_string(id.hi) + ":" + std::to_string(id.lo)) : path;
+	if (key.empty() || !m_contentManager) return 0;
+	if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end()) return it->second;
+	unsigned int tex = 0;
+	if (const TextureAsset* t = m_contentManager->resolveTextureRef(id, path);
+	    t && !t->data.empty() && t->channels == 4)
+	{
+		glGenTextures(1, &tex);
+		glBindTexture(GL_TEXTURE_2D, tex);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)t->width, (GLsizei)t->height,
+		             0, GL_RGBA, GL_UNSIGNED_BYTE, t->data.data());
+		glGenerateMipmap(GL_TEXTURE_2D);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glBindTexture(GL_TEXTURE_2D, 0);
+	}
+	m_graphTexCache.emplace(key, tex);
+	return tex;
+}
+
 bool OpenGLRenderer::ResolveMaterialParams(const HE::UUID& materialId,
 	glm::vec3& outBaseColor, float& outMetallic, float& outRoughness, float& outOpacity)
 {
@@ -3922,6 +3957,8 @@ void OpenGLRenderer::Shutdown()
 	if (m_matObjUBO)   { glDeleteBuffers(1, &m_matObjUBO);   m_matObjUBO = 0; }
 	if (m_matLightUBO) { glDeleteBuffers(1, &m_matLightUBO); m_matLightUBO = 0; }
 	if (m_matParamUBO) { glDeleteBuffers(1, &m_matParamUBO); m_matParamUBO = 0; }
+	for (auto& [k, t] : m_graphTexCache) if (t) glDeleteTextures(1, &t);
+	m_graphTexCache.clear();
 #endif
 	if (m_instancedProgram) { glDeleteProgram(m_instancedProgram); m_instancedProgram = 0; }
 	if (m_instanceVBO)      { glDeleteBuffers(1, &m_instanceVBO);  m_instanceVBO = 0; }
@@ -4596,9 +4633,24 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					}
 					glBindBufferBase(GL_UNIFORM_BUFFER, 2, m_matParamUBO); // block "HeParams"
 					glBindVertexArray(vao);
-					// Material texture on unit 0 for TextureSample nodes (the emitted
-					// sampler uniform defaults to unit 0 — no binding layout on GL 4.1).
+					// Legacy/mesh texture on unit 0 (heTex0).
+					glActiveTexture(GL_TEXTURE0);
 					glBindTexture(GL_TEXTURE_2D, tex);
+					// Node-graph project textures on units 1..4 (heTexP0..3).
+					if (const MaterialAsset* ma = m_contentManager
+						? m_contentManager->getMaterial(dc.materialAssetId) : nullptr)
+					{
+						const size_t nTex = std::min<size_t>(4,
+							std::max(ma->graphTexturePaths.size(), ma->graphTextureIds.size()));
+						for (size_t i = 0; i < nTex; ++i)
+						{
+							const HE::UUID    gid = i < ma->graphTextureIds.size()   ? ma->graphTextureIds[i]   : HE::UUID{};
+							const std::string gp  = i < ma->graphTexturePaths.size() ? ma->graphTexturePaths[i] : std::string{};
+							glActiveTexture(GL_TEXTURE1 + (GLenum)i);
+							glBindTexture(GL_TEXTURE_2D, ResolveGraphTexture(gid, gp));
+						}
+						glActiveTexture(GL_TEXTURE0);
+					}
 					glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, nullptr);
 					glUseProgram(m_unlitProgram); // restore for the next single-draw
 					++m_counters.draws;

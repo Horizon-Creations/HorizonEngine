@@ -25,6 +25,7 @@ namespace MaterialEditorPanel
 	// (reads the HAsset header type; cached per path).
 	bool isMaterialAsset(const std::string& path);
 	bool isMaterialFunctionAsset(const std::string& path);
+	bool isTextureAsset(const std::string& path);
 
 	// Drop cached editor state for `path`.
 	void forget(const std::string& assetPath);

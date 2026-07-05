@@ -61,6 +61,13 @@ enum class MatNodeType : uint8_t
     FnInput,       // function-graph interface: s = name, p[0] = type (0=Float 1=Vec2 2=Vec3 3=Vec4)
     FnOutput,      // function-graph interface: s = name, p[0] = type; one input pin
     FunctionCall,  // s = content-relative path of the MaterialFunction asset; pins from its graph
+
+    // ── v4: more inputs ──
+    ConstVec2,      // p[0..1]
+    ConstVec4,      // p[0..3]
+    CameraPos,      // heLight.camPos.xyz
+    CameraDistance, // length(camPos - worldPos)
+    ScreenPos,      // gl_FragCoord.xy (raw pixels)
 };
 
 struct MatGraphNode
@@ -137,9 +144,16 @@ struct MatParamSlot
 
 struct MatShaderGen
 {
-    std::string               glsl;   // canonical fragment (→ MaterialAsset::customShaderFragGlsl)
-    std::vector<MatParamSlot> params; // HeParams layout (→ MaterialAsset::shaderParamData)
+    std::string               glsl;     // canonical fragment (→ MaterialAsset::customShaderFragGlsl)
+    std::vector<MatParamSlot> params;   // HeParams layout (→ MaterialAsset::shaderParamData)
+    // Content-relative paths of the project textures referenced by Texture Sample nodes,
+    // in slot order (heTexP0..heTexP3). → MaterialAsset::graphTexturePaths. Max 4.
+    std::vector<std::string>  textures;
 };
+
+// Max project textures a single material graph may sample (fixed so the per-backend
+// binding pins stay static).
+inline constexpr int kMatMaxGraphTextures = 4;
 
 // Generate shader + parameter layout. Always succeeds (unconnected inputs fall back to
 // pin defaults; a missing Output node yields a magenta error shader; recursive function
