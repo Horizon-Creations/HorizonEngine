@@ -1310,11 +1310,26 @@ void EditorApplication::dumpFrameHeadless()
 		// Graph: lerp(orange, blue, fresnel) → lit BaseColor; sin(time) → Metallic.
 		{
 			HE::MaterialGraph g;
-			if (std::string(mt) == "noise" || std::string(mt) == "noisecube")
+			if (std::string(mt) == "noisecube")
+			{
+				// Auto-UV witness: the user's exact graph — UV → FBM → (colour ×) → BaseColor
+				// on a cube WITHOUT texture coords. Without generated UVs this is solid black
+				// (vUV = 0 → heFbm(0) = 0); with box-projection UVs it mottles per face.
+				const int out = g.addNode(HE::MatNodeType::Output);
+				const int col = g.addNode(HE::MatNodeType::ConstColor);
+				g.findNode(col)->p[0] = 0.85f; g.findNode(col)->p[1] = 0.30f; g.findNode(col)->p[2] = 0.20f;
+				const int uv  = g.addNode(HE::MatNodeType::UV);
+				const int fbm = g.addNode(HE::MatNodeType::Fbm);
+				g.findNode(fbm)->p[0] = 8.0f;
+				const int mul = g.addNode(HE::MatNodeType::Multiply);
+				g.connect(uv,  0, fbm, 0);
+				g.connect(col, 0, mul, 0);
+				g.connect(fbm, 0, mul, 1);
+				g.connect(mul, 0, out, 0);
+			}
+			else if (std::string(mt) == "noise")
 			{
 				// v6 witness: colour × Noise Texture → mottled ("fleckig") BaseColor.
-				// Proves the NoiseTexture node varies across the mesh (uses vUV) instead
-				// of darkening uniformly like an unconnected noise node used to.
 				const int out = g.addNode(HE::MatNodeType::Output);
 				const int col = g.addNode(HE::MatNodeType::ConstColor);
 				g.findNode(col)->p[0] = 0.85f; g.findNode(col)->p[1] = 0.30f; g.findNode(col)->p[2] = 0.20f;
@@ -1435,7 +1450,8 @@ void EditorApplication::dumpFrameHeadless()
 				{
 					sphere.vertices.insert(sphere.vertices.end(), { fq[f][k].x, fq[f][k].y, fq[f][k].z });
 					sphere.normals.insert(sphere.normals.end(),   { fn[f].x, fn[f].y, fn[f].z });
-					sphere.uvs.insert(sphere.uvs.end(),           { 0.0f, 0.0f }); // NO real UVs
+					// NO uvs on purpose → exercises ContentManager's box-projection UV
+					// fallback (the real default cube also ships without texture coords).
 				}
 				sphere.indices.insert(sphere.indices.end(),
 					{ base, base + 1, base + 2, base, base + 2, base + 3 });

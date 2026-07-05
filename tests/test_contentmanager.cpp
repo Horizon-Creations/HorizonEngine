@@ -293,6 +293,37 @@ TEST_CASE("ContentManager pre-registers the default cube mesh")
 	CHECK(cube->vertices.size() == 24 * 3); // 24 verts × 3 floats (pos)
 	CHECK(cube->normals .size() == 24 * 3);
 	CHECK(cube->indices .size() == 36);
+	// The cube ships without texture coords; ContentManager must box-project UVs so
+	// UV-space material nodes (Noise/FBM/Checker/TextureSample) don't collapse to
+	// vUV = (0,0) (which renders solid black). Each per-face UV lands in [0,1].
+	REQUIRE(cube->uvs.size() == 24 * 2);
+	bool anyNonZero = false, allInRange = true;
+	for (size_t i = 0; i < cube->uvs.size(); ++i)
+	{
+		if (cube->uvs[i] != 0.0f) anyNonZero = true;
+		if (cube->uvs[i] < -0.001f || cube->uvs[i] > 1.001f) allInRange = false;
+	}
+	CHECK(anyNonZero);  // not all (0,0) → the pattern actually varies across a face
+	CHECK(allInRange);  // box projection of a unit cube maps into [0,1]
+}
+
+TEST_CASE("ContentManager box-projects UVs for a registered mesh that has none")
+{
+	ContentManager cm;
+	StaticMeshAsset m;
+	m.type = HE::AssetType::StaticMesh;
+	m.name = "NoUVQuad";
+	// A single +Z-facing quad, no uvs supplied.
+	m.vertices = { -0.5f,-0.5f,0.0f,  0.5f,-0.5f,0.0f,  0.5f,0.5f,0.0f,  -0.5f,0.5f,0.0f };
+	m.normals  = {  0,0,1,            0,0,1,            0,0,1,             0,0,1 };
+	m.indices  = { 0,1,2, 0,2,3 };
+	const HE::UUID id = cm.registerStaticMesh(std::move(m));
+	const StaticMeshAsset* got = cm.getStaticMesh(id);
+	REQUIRE(got != nullptr);
+	REQUIRE(got->uvs.size() == 4 * 2); // one uv per vertex, generated
+	// +Z face → uv = (px, py) + 0.5 → the four corners span the full [0,1] square.
+	CHECK(got->uvs[0] == doctest::Approx(0.0f)); CHECK(got->uvs[1] == doctest::Approx(0.0f));
+	CHECK(got->uvs[4] == doctest::Approx(1.0f)); CHECK(got->uvs[5] == doctest::Approx(1.0f));
 }
 
 TEST_CASE("ContentManager pre-registers the default white texture")
