@@ -30,6 +30,21 @@ Vulkans `glslc`-Pfad ist der halbe Beweis der Codegen-Idee.
 
 ---
 
+## 1b. Kernentscheidung: Shader sind KEIN Asset-Typ (User-Entscheidung 2026-07-05)
+
+Shader existieren am Ende **nicht** als eigenständige, user-sichtbare Assets. Das **Material ist die
+einzige Autoring-Oberfläche**: der Node-Editor im Material-Asset generiert den Shader-Code automatisch,
+und jedes Mesh, das das Material verwendet, bekommt ihn automatisch. Konsequenzen:
+
+- **`ShaderAsset` wird ausgemustert**, nicht ausgebaut (heute ohnehin ein toter Stub — kein Renderer
+  liest ihn). Kein Shader-Editor-Tab (der frühere Phase-1-Punkt im editor-asset-tabs-plan entfällt).
+- **`MaterialAsset.shaderPath`/`shaderId`** sind Alt-Felder ohne Zukunft (heute schon von keinem
+  Backend gelesen) — bei nächster Schema-Gelegenheit entfernen.
+- **`customShaderFragGlsl` ist ein Zwischenzustand:** heute der handgeschriebene M1-Escape-Hatch, am
+  Ende das **generierte Artefakt des Node-Graphen** (Graph = Source of Truth, gespeichert im Material;
+  der GLSL-Code ist Cache/Output des Codegen — der User sieht ihn normal nie).
+- Der Material-Editor-Tab IST der Node-Editor (M3) — es gibt kein separates Shader-Autoring.
+
 ## 2. Kernentscheidung: das Unreal-Modell (fixer Surface, Graph liefert Attribute)
 
 Der Node-Graph ist **kein** Freiform-Shader. Er berechnet nur die **Material-Attribute** (Base Color,

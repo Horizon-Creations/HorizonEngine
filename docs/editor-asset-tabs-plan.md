@@ -57,7 +57,7 @@ wenn es nur wenige Properties / Import-Settings / kleine Preview sind.
 
 | Asset | Empfehlung | Begründung | Aufwand |
 |---|---|---|---|
-| **Shader** | **Tab** — `ScriptEditorPanel` + `Glsl`/`Hlsl`-LangDef | Quelle in `CHUNK_SRC`, LangDefs vorhanden → fast geschenkt; behebt Inkonsistenz zu Script | **XS** |
+| **Shader** | **ENTFÄLLT** (User-Entscheidung 2026-07-05): Shader sind kein Asset-Typ mehr — sie werden vom Node-Editor im **Material** generiert (siehe `material-system-design.md` §1b). `ShaderAsset` wird ausgemustert, kein Shader-Editor-Tab | — | — |
 | **Material** | **eigener Track** → siehe `material-system-design.md` (Node-Editor wie Unreal + Cross-Backend-Codegen). Material-Editor-Tab = dessen UI-Frontend ab M2/M3 | meistgenutztes Asset; wird zur Shader-Abstraktion, nicht bloß PBR-Panel | **XL** |
 | **Texture** | **Viewer-Tab** (Bild-Canvas, Zoom/Pan, Kanal-Toggle, Mip-Slider) + **Asset-Inspector** für Import-Settings | Doppelklick = Bild groß ansehen ist natürlich | **M** |
 | **StaticMesh / SkeletalMesh** | **Viewer-Tab** (3D-Orbit-Preview, Stats, Material-Slots, LOD, Skelett) | Ansehen/Prüfen; Geometrie kommt aus DCC | **M–L** |
@@ -168,8 +168,8 @@ Jeder Tab = neues Dateipaar `src/HE_Editor/<Name>Panel.{h,cpp}` mit
 **Phase 0 — Infra:** Dispatch-Registry (4.1) + `EditorTab.type` + Asset-Inspector-Skelett (4.2).
 → danach kostet jeder neue Tab nur noch das Panel selbst.
 
-**Phase 1 — Shader-Editor (XS):** `TextAssetEditorPanel` (Script+Shader gemeinsam) + GLSL/HLSL.
-Konsistenz-Win, minimaler Code.
+**Phase 1 — ENTFÄLLT** (war: Shader-Editor). Shader sind kein Asset-Typ mehr; Shader-Autoring
+läuft ausschließlich über den Material-Node-Editor (material-system-design.md M3).
 
 **Phase 2 — Asset-Inspector füllen (S–M):** Texture-Import-Settings, Audio (Waveform+Play),
 Font (Glyph-Preview **+ TTF-Importer nachrüsten**), Mesh-Info, Material-Quick-Edit hierher.
