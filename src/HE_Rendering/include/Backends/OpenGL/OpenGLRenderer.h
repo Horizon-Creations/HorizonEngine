@@ -39,6 +39,8 @@ public:
 	bool  CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& width, uint32_t& height) override;
 	void  InvalidateMaterial(const HE::UUID& materialId) override;
 	void  WarmupMaterials(const std::vector<HE::UUID>& materialIds) override;
+	void* RenderMaterialPreview(ContentManager& cm, const HE::UUID& materialId,
+	                            uint32_t size, float yaw) override;
 	void  InvalidateMesh    (const HE::UUID& meshId)     override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
 	void  SetSSAOSettings(const SSAOSettings& settings) override;
@@ -190,6 +192,12 @@ private:
 	unsigned int m_matObjUBO   = 0;  // per-object U   (mvp/model/color/flags/pbr), 176 B
 	unsigned int m_matLightUBO = 0;  // HeLighting     (sunDir/sunColor/ambient/camPos), 64 B
 	unsigned int m_matParamUBO = 0;  // HeParams       (exposed graph parameters), 256 B
+	// Material-preview target (RenderMaterialPreview) — a small dedicated FBO + a
+	// lazily-built unit sphere, independent of the main viewport.
+	unsigned int m_previewFBO = 0, m_previewColor = 0, m_previewDepth = 0;
+	int          m_previewSize = 0;
+	unsigned int m_previewVAO = 0, m_previewVBO = 0, m_previewIBO = 0;
+	int          m_previewIdxCount = 0;
 	// Per-draw UBO-upload dedup: the lighting UBO is frame-constant (upload once per
 	// frame), and HeParams rarely changes (upload only when its 64 floats differ from
 	// what the UBO already holds — still correct for per-entity param overrides).

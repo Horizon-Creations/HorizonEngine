@@ -2567,6 +2567,11 @@ void MetalRenderer::Shutdown()
 	m_materialPipelineCache.clear();
 	if (m_matBinaryArchive) { CFBridgingRelease(m_matBinaryArchive); m_matBinaryArchive = nullptr; }
 	m_matArchiveTried = false;
+	if (m_previewColorTex) { CFBridgingRelease(m_previewColorTex); m_previewColorTex = nullptr; }
+	if (m_previewDepthTex) { CFBridgingRelease(m_previewDepthTex); m_previewDepthTex = nullptr; }
+	if (m_previewVB)       { CFBridgingRelease(m_previewVB);       m_previewVB = nullptr; }
+	if (m_previewIB)       { CFBridgingRelease(m_previewIB);       m_previewIB = nullptr; }
+	m_previewSize = 0;
 	if (m_shadercTestVB)        { CFBridgingRelease(m_shadercTestVB);        m_shadercTestVB = nullptr; }
 	if (m_shadercTestIB)        { CFBridgingRelease(m_shadercTestIB);        m_shadercTestIB = nullptr; }
 	if (m_fxaaPipeline)         { CFBridgingRelease(m_fxaaPipeline);         m_fxaaPipeline = nullptr; }
@@ -3531,6 +3536,188 @@ void MetalRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 	if (built > 0)
 		Logger::Log(Logger::LogLevel::Info,
 			("MetalRenderer: warmed up " + std::to_string(built) + " material pipeline(s)").c_str());
+}
+
+void* MetalRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& materialId,
+                                           uint32_t size, float yaw)
+{
+	const int S = std::clamp(static_cast<int>(size), 32, 1024);
+	if (!m_contentManager) m_contentManager = &cm;
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)m_commandQueue;
+	if (!device || !queue) return nullptr;
+
+	// Resolve the node-graph material pipeline (built-in-PBR materials have none).
+	uint64_t shKey; std::string shFrag;
+	if (!ResolveMaterialShader(materialId, shKey, shFrag)) return nullptr;
+	const MaterialAsset* ma = m_contentManager->getMaterial(materialId);
+	const MaterialShaderVariant* pre = nullptr;
+	if (ma)
+		for (const auto& var : ma->precompiledShaders)
+			if (var.backend == static_cast<uint8_t>(HE::RendererBackend::Metal)) { pre = &var; break; }
+	id<MTLRenderPipelineState> pso = (__bridge id<MTLRenderPipelineState>)GetOrBuildMaterialPipeline(shKey, shFrag, pre);
+	if (!pso) return nullptr;
+
+	// ── Lazy unit sphere (interleaved pos3/normal3/uv2 + uint32 indices).
+	if (!m_previewVB)
+	{
+		const int segU = 48, segV = 32;
+		std::vector<float>    verts; std::vector<uint32_t> idx;
+		for (int y = 0; y <= segV; ++y)
+		{
+			const float v = (float)y / segV, phi = v * (float)M_PI;
+			for (int x = 0; x <= segU; ++x)
+			{
+				const float u = (float)x / segU, th = u * 2.0f * (float)M_PI;
+				const glm::vec3 n(std::sin(phi) * std::cos(th), std::cos(phi), std::sin(phi) * std::sin(th));
+				verts.insert(verts.end(), { n.x, n.y, n.z, n.x, n.y, n.z, u, v });
+			}
+		}
+		for (int y = 0; y < segV; ++y)
+			for (int x = 0; x < segU; ++x)
+			{
+				const uint32_t a = y * (segU + 1) + x, b = a + segU + 1;
+				idx.insert(idx.end(), { a, b, a + 1, a + 1, b, b + 1 });
+			}
+		m_previewIdxCount = (int)idx.size();
+		m_previewVB = (void*)CFBridgingRetain([device newBufferWithBytes:verts.data()
+			length:verts.size() * sizeof(float) options:MTLResourceStorageModeShared]);
+		m_previewIB = (void*)CFBridgingRetain([device newBufferWithBytes:idx.data()
+			length:idx.size() * sizeof(uint32_t) options:MTLResourceStorageModeShared]);
+	}
+
+	// ── Lazy / resized target: RGBA16F color (matches the material PSO) + depth.
+	if (!m_previewColorTex || m_previewSize != S)
+	{
+		if (m_previewColorTex) { CFBridgingRelease(m_previewColorTex); m_previewColorTex = nullptr; }
+		if (m_previewDepthTex) { CFBridgingRelease(m_previewDepthTex); m_previewDepthTex = nullptr; }
+		MTLTextureDescriptor* cd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kSceneColorFormat
+			width:S height:S mipmapped:NO];
+		cd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+		cd.storageMode = MTLStorageModePrivate;
+		m_previewColorTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:cd]);
+		MTLTextureDescriptor* dd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kDepthFormat
+			width:S height:S mipmapped:NO];
+		dd.usage = MTLTextureUsageRenderTarget; dd.storageMode = MTLStorageModePrivate;
+		m_previewDepthTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:dd]);
+		m_previewSize = S;
+	}
+	id<MTLTexture> colorTex = (__bridge id<MTLTexture>)m_previewColorTex;
+
+	// ── Encode one sphere draw into the preview target.
+	MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+	rp.colorAttachments[0].texture     = colorTex;
+	rp.colorAttachments[0].loadAction  = MTLLoadActionClear;
+	rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+	rp.colorAttachments[0].clearColor  = MTLClearColorMake(0.11, 0.11, 0.13, 1.0);
+	rp.depthAttachment.texture     = (__bridge id<MTLTexture>)m_previewDepthTex;
+	rp.depthAttachment.loadAction  = MTLLoadActionClear;
+	rp.depthAttachment.storeAction = MTLStoreActionDontCare;
+	rp.depthAttachment.clearDepth  = 1.0;
+
+	id<MTLCommandBuffer> cb = [queue commandBuffer];
+	id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+	[enc setRenderPipelineState:pso];
+	[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
+
+	const glm::vec3 camPos(0.0f, 0.0f, 3.1f);
+	const glm::mat4 view  = glm::lookAt(camPos, glm::vec3(0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+	const glm::mat4 proj  = glm::perspective(glm::radians(32.0f), 1.0f, 0.1f, 20.0f);
+	const glm::mat4 model = glm::rotate(glm::mat4(1.0f), yaw, glm::vec3(0.0f, 1.0f, 0.0f));
+	UnlitUniforms ui;
+	ui.mvp   = proj * view * model;
+	ui.model = model;
+	ui.color = glm::vec4(ma ? glm::vec3(ma->baseColor[0], ma->baseColor[1], ma->baseColor[2]) : glm::vec3(1.0f), 1.0f);
+	ui.flags = glm::vec4(0.0f);
+	ui.pbr   = glm::vec4(ma ? ma->metallic : 0.0f, ma ? ma->roughness : 0.5f, ma ? ma->opacity : 1.0f, 0.0f);
+	[enc setVertexBuffer:(__bridge id<MTLBuffer>)m_previewVB offset:0 atIndex:0];
+	[enc setVertexBytes:&ui length:sizeof(ui) atIndex:1];
+
+	HE::MaterialShaderLibrary::Lighting lit;
+	const glm::vec3 sd = glm::normalize(glm::vec3(0.45f, 0.75f, 0.55f));
+	lit.sunDir[0] = sd.x; lit.sunDir[1] = sd.y; lit.sunDir[2] = sd.z; lit.sunDir[3] = 0.0f;
+	lit.sunColor[0] = lit.sunColor[1] = lit.sunColor[2] = 1.05f;
+	lit.ambient[0] = lit.ambient[1] = lit.ambient[2] = 0.28f;
+	lit.camPos[0] = camPos.x; lit.camPos[1] = camPos.y; lit.camPos[2] = camPos.z;
+	[enc setFragmentBytes:&lit length:sizeof(lit) atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
+
+	if (ma && !ma->shaderParamData.empty())
+	{
+		float padded[64] = { 0 };
+		std::memcpy(padded, ma->shaderParamData.data(),
+		            std::min(ma->shaderParamData.size(), size_t(64)) * sizeof(float));
+		[enc setFragmentBytes:padded length:sizeof(padded) atIndex:2];
+	}
+	[enc setFragmentTexture:(__bridge id<MTLTexture>)m_dummyTexture atIndex:0]; // heTex0
+	if (ma)
+	{
+		const size_t nTex = std::min<size_t>(HE::kMatMaxGraphTextures,
+			std::max(ma->graphTexturePaths.size(), ma->graphTextureIds.size()));
+		for (size_t i = 0; i < nTex; ++i)
+		{
+			const HE::UUID    gid = i < ma->graphTextureIds.size()   ? ma->graphTextureIds[i]   : HE::UUID{};
+			const std::string gp  = i < ma->graphTexturePaths.size() ? ma->graphTexturePaths[i] : std::string{};
+			if (void* t = ResolveGraphTexture(gid, gp))
+			{
+				[enc setFragmentTexture:(__bridge id<MTLTexture>)t atIndex:(i + 1)];
+				[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:(i + 1)];
+			}
+		}
+	}
+	[enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:(NSUInteger)m_previewIdxCount
+	                 indexType:MTLIndexTypeUInt32 indexBuffer:(__bridge id<MTLBuffer>)m_previewIB
+	         indexBufferOffset:0];
+	[enc endEncoding];
+
+	// Headless witness (HE_PREVIEW_DUMP=path): blit to a managed staging texture, read
+	// back the RGBA16F, decode halves → PPM. No-op in normal editor use.
+	const char* dp = std::getenv("HE_PREVIEW_DUMP");
+	id<MTLTexture> staging = nil;
+	if (dp && *dp)
+	{
+		MTLTextureDescriptor* sd2 = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kSceneColorFormat
+			width:S height:S mipmapped:NO];
+		sd2.storageMode = MTLStorageModeManaged; sd2.usage = MTLTextureUsageShaderRead;
+		staging = [device newTextureWithDescriptor:sd2];
+		id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+		[blit copyFromTexture:colorTex sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0)
+		           sourceSize:MTLSizeMake(S,S,1) toTexture:staging destinationSlice:0 destinationLevel:0
+		    destinationOrigin:MTLOriginMake(0,0,0)];
+		[blit synchronizeResource:staging];
+		[blit endEncoding];
+	}
+	[cb commit];
+	[cb waitUntilCompleted];
+
+	if (staging)
+	{
+		std::vector<uint16_t> half((size_t)S * S * 4);
+		[staging getBytes:half.data() bytesPerRow:S * 4 * sizeof(uint16_t)
+		       fromRegion:MTLRegionMake2D(0, 0, S, S) mipmapLevel:0];
+		auto h2f = [](uint16_t h) -> float {
+			uint32_t s = (h >> 15) & 1, e = (h >> 10) & 0x1f, m = h & 0x3ff, f;
+			if (e == 0) { if (m == 0) f = s << 31; else { e = 127 - 15 + 1; while (!(m & 0x400)) { m <<= 1; e--; } m &= 0x3ff; f = (s << 31) | (e << 23) | (m << 13); } }
+			else if (e == 0x1f) f = (s << 31) | (0xffu << 23) | (m << 13);
+			else f = (s << 31) | ((e - 15 + 127) << 23) | (m << 13);
+			float o; std::memcpy(&o, &f, 4); return o;
+		};
+		if (std::ofstream fo(dp, std::ios::binary); fo)
+		{
+			fo << "P6\n" << S << " " << S << "\n255\n";
+			for (int y = 0; y < S; ++y)
+				for (int x = 0; x < S; ++x)
+				{
+					const uint16_t* pxl = &half[((size_t)y * S + x) * 4];
+					for (int c = 0; c < 3; ++c)
+					{
+						float v = h2f(pxl[c]); v = v < 0 ? 0 : (v > 1 ? 1 : v);
+						uint8_t b = (uint8_t)(v * 255.0f + 0.5f);
+						fo.write(reinterpret_cast<const char*>(&b), 1);
+					}
+				}
+		}
+	}
+	return m_previewColorTex; // id<MTLTexture> for ImGui::Image
 }
 
 // ─── Window targets ───────────────────────────────────────────────────────────

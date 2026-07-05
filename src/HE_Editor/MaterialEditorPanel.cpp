@@ -475,13 +475,35 @@ void render(AppContext& ctx, const std::string& assetPath,
 		ImGui::TextDisabled("Preview");
 		ImGui::BeginChild("##matPreview", ImVec2(0, 220), ImGuiChildFlags_Borders);
 		{
-			// Live material preview sphere lands here (RenderMaterialPreview). Until
-			// then, a centered placeholder so the layout is stable.
-			const ImVec2 cur = ImGui::GetCursorScreenPos();
-			const ImVec2 av  = ImGui::GetContentRegionAvail();
-			ImGui::GetWindowDrawList()->AddText(
-				ImVec2(cur.x + av.x * 0.5f - 28.0f, cur.y + av.y * 0.5f - 6.0f),
-				IM_COL32(140, 140, 140, 255), "(preview)");
+			// Live material preview: a slowly-spinning sphere shaded with THIS material,
+			// rendered offscreen by the backend and shown via ImGui::Image. Falls back to
+			// a placeholder when the backend has no preview path (returns null).
+			const ImVec2 av = ImGui::GetContentRegionAvail();
+			const int px = (int)std::min(av.x, av.y);
+			void* tex = nullptr;
+			if (!st.isFunction && ctx.renderer && ctx.contentManager &&
+			    st.materialId != HE::UUID{} && px >= 32)
+			{
+				const float yaw = (float)ImGui::GetTime() * 0.6f;
+				tex = ctx.renderer->RenderMaterialPreview(*ctx.contentManager, st.materialId,
+				                                          (uint32_t)px, yaw);
+			}
+			if (tex)
+			{
+				const bool flipY = (ctx.backend == HE::RendererBackend::OpenGL);
+				const float side = (float)px;
+				ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (av.x - side) * 0.5f);
+				ImGui::Image(reinterpret_cast<ImTextureID>(tex), ImVec2(side, side),
+					flipY ? ImVec2(0, 1) : ImVec2(0, 0),
+					flipY ? ImVec2(1, 0) : ImVec2(1, 1));
+			}
+			else
+			{
+				const ImVec2 cur = ImGui::GetCursorScreenPos();
+				ImGui::GetWindowDrawList()->AddText(
+					ImVec2(cur.x + av.x * 0.5f - 28.0f, cur.y + av.y * 0.5f - 6.0f),
+					IM_COL32(140, 140, 140, 255), "(preview)");
+			}
 		}
 		ImGui::EndChild();
 		ImGui::Spacing();

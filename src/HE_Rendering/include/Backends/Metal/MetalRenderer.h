@@ -80,6 +80,8 @@ public:
 	bool  CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& width, uint32_t& height) override;
 	void  InvalidateMaterial(const HE::UUID& materialId) override;
 	void  WarmupMaterials(const std::vector<HE::UUID>& materialIds) override;
+	void* RenderMaterialPreview(ContentManager& cm, const HE::UUID& materialId,
+	                            uint32_t size, float yaw) override;
 	void  InvalidateMesh    (const HE::UUID& meshId)     override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
 	void  SetSSAOSettings(const SSAOSettings& settings) override;
@@ -297,6 +299,14 @@ private:
 	std::string m_matArchivePath;              // serialize target on disk
 	// Returns the material binary archive (loading/creating it on first use), or nil.
 	void* ensureMaterialArchive();
+	// Material-preview target (RenderMaterialPreview): a small RGBA16F color texture
+	// (matches the material PSO's HDR format) + depth, plus a lazily-built unit sphere,
+	// independent of the main viewport.
+	void* m_previewColorTex = nullptr; // id<MTLTexture> (retained) — shown by ImGui::Image
+	void* m_previewDepthTex = nullptr; // id<MTLTexture> (retained)
+	int   m_previewSize     = 0;
+	void* m_previewVB = nullptr, *m_previewIB = nullptr; // id<MTLBuffer> (retained)
+	int   m_previewIdxCount = 0;
 	// A procedural sphere (interleaved pos3/normal3/uv2, matching VertexIn) so per-material
 	// pipelines are visible on real 3D geometry even in the empty headless dump scene.
 	// Built + drawn (two spheres, two materials) when HE_SHADERC_MATERIAL=1.

@@ -15,6 +15,7 @@
 #include <JobSystem/JobSystem.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/type_ptr.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 
 // Builds a tiling NxNxN two-channel noise volume (interleaved RG16):
 //   R = value noise whose lattice values are exactly the sky shader's
@@ -3986,6 +3987,167 @@ void OpenGLRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 			("OpenGLRenderer: warmed up " + std::to_string(built) + " material program(s)").c_str());
 }
 
+void* OpenGLRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& materialId,
+                                           uint32_t size, float yaw)
+{
+	const int S = std::clamp(static_cast<int>(size), 32, 1024);
+	if (!m_contentManager) m_contentManager = &cm;
+
+	// Resolve the material's node-graph program (built-in-PBR materials have none →
+	// nothing to preview). Reuses the same program cache + precompiled-variant path.
+	uint64_t shKey; std::string shFrag;
+	if (!resolveMaterialShader(materialId, shKey, shFrag)) return nullptr;
+	const MaterialShaderVariant* pre = nullptr;
+	const MaterialAsset* ma = m_contentManager->getMaterial(materialId);
+	if (ma)
+		for (const auto& var : ma->precompiledShaders)
+			if (var.backend == static_cast<uint8_t>(HE::RendererBackend::OpenGL)) { pre = &var; break; }
+	const unsigned int prog = getOrBuildMaterialProgram(shKey, shFrag, pre);
+	if (!prog) return nullptr;
+
+	// ── Lazy unit sphere (interleaved pos3/normal3/uv2 — the material vertex layout).
+	if (!m_previewVAO)
+	{
+		const int segU = 48, segV = 32;
+		std::vector<float>    verts; std::vector<unsigned int> idx;
+		for (int y = 0; y <= segV; ++y)
+		{
+			const float v = (float)y / segV, phi = v * 3.14159265f;
+			for (int x = 0; x <= segU; ++x)
+			{
+				const float u = (float)x / segU, th = u * 6.2831853f;
+				const glm::vec3 n(std::sin(phi) * std::cos(th), std::cos(phi), std::sin(phi) * std::sin(th));
+				verts.insert(verts.end(), { n.x, n.y, n.z, n.x, n.y, n.z, u, v });
+			}
+		}
+		for (int y = 0; y < segV; ++y)
+			for (int x = 0; x < segU; ++x)
+			{
+				const unsigned int a = y * (segU + 1) + x, b = a + segU + 1;
+				idx.insert(idx.end(), { a, b, a + 1, a + 1, b, b + 1 });
+			}
+		m_previewIdxCount = (int)idx.size();
+		glGenVertexArrays(1, &m_previewVAO);
+		glBindVertexArray(m_previewVAO);
+		glGenBuffers(1, &m_previewVBO);
+		glBindBuffer(GL_ARRAY_BUFFER, m_previewVBO);
+		glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(), GL_STATIC_DRAW);
+		glGenBuffers(1, &m_previewIBO);
+		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_previewIBO);
+		glBufferData(GL_ELEMENT_ARRAY_BUFFER, idx.size() * sizeof(unsigned int), idx.data(), GL_STATIC_DRAW);
+		glEnableVertexAttribArray(0); glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
+		glEnableVertexAttribArray(1); glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(3 * sizeof(float)));
+		glEnableVertexAttribArray(2); glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(6 * sizeof(float)));
+		glBindVertexArray(0);
+	}
+
+	// ── Lazy / resized offscreen target.
+	if (!m_previewFBO || m_previewSize != S)
+	{
+		if (m_previewColor) glDeleteTextures(1, &m_previewColor);
+		if (m_previewDepth) glDeleteRenderbuffers(1, &m_previewDepth);
+		if (!m_previewFBO) glGenFramebuffers(1, &m_previewFBO);
+		glBindFramebuffer(GL_FRAMEBUFFER, m_previewFBO);
+		glGenTextures(1, &m_previewColor);
+		glBindTexture(GL_TEXTURE_2D, m_previewColor);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, S, S, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_previewColor, 0);
+		glGenRenderbuffers(1, &m_previewDepth);
+		glBindRenderbuffer(GL_RENDERBUFFER, m_previewDepth);
+		glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, S, S);
+		glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, m_previewDepth);
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		glBindTexture(GL_TEXTURE_2D, 0);
+		m_previewSize = S;
+	}
+
+	// ── Draw the sphere into the preview target. Save/restore the caller's FBO+viewport.
+	GLint prevFBO = 0; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
+	GLint prevVP[4]; glGetIntegerv(GL_VIEWPORT, prevVP);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_previewFBO);
+	glViewport(0, 0, S, S);
+	glClearColor(0.11f, 0.11f, 0.13f, 1.0f);
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+	glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LESS);
+	glDisable(GL_BLEND); glDisable(GL_CULL_FACE);
+
+	glUseProgram(prog);
+	const glm::vec3 camPos(0.0f, 0.0f, 3.1f);
+	const glm::mat4 view = glm::lookAt(camPos, glm::vec3(0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+	const glm::mat4 proj = glm::perspective(glm::radians(32.0f), 1.0f, 0.1f, 20.0f);
+	const glm::mat4 model = glm::rotate(glm::mat4(1.0f), yaw, glm::vec3(0.0f, 1.0f, 0.0f));
+	struct { glm::mat4 mvp, model; glm::vec4 color, flags, pbr; } obj;
+	obj.mvp = proj * view * model; obj.model = model;
+	obj.color = glm::vec4(ma ? glm::vec3(ma->baseColor[0], ma->baseColor[1], ma->baseColor[2]) : glm::vec3(1.0f), 1.0f);
+	obj.flags = glm::vec4(0.0f);
+	obj.pbr   = glm::vec4(ma ? ma->metallic : 0.0f, ma ? ma->roughness : 0.5f, ma ? ma->opacity : 1.0f, 0.0f);
+	glBindBuffer(GL_UNIFORM_BUFFER, m_matObjUBO);
+	glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(obj), &obj);
+	glBindBufferBase(GL_UNIFORM_BUFFER, 1, m_matObjUBO);
+
+	HE::MaterialShaderLibrary::Lighting lit;
+	const glm::vec3 sd = glm::normalize(glm::vec3(0.45f, 0.75f, 0.55f));
+	lit.sunDir[0] = sd.x; lit.sunDir[1] = sd.y; lit.sunDir[2] = sd.z; lit.sunDir[3] = 0.0f;
+	lit.sunColor[0] = lit.sunColor[1] = lit.sunColor[2] = 1.05f;
+	lit.ambient[0] = lit.ambient[1] = lit.ambient[2] = 0.28f;
+	lit.camPos[0] = camPos.x; lit.camPos[1] = camPos.y; lit.camPos[2] = camPos.z;
+	glBindBuffer(GL_UNIFORM_BUFFER, m_matLightUBO);
+	glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(lit), &lit);
+	glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_matLightUBO);
+	m_matLightUploadedThisFrame = false; // invalidate the main loop's per-frame dedup
+
+	if (ma && !ma->shaderParamData.empty())
+	{
+		float padded[64] = { 0 };
+		std::memcpy(padded, ma->shaderParamData.data(),
+		            std::min(ma->shaderParamData.size(), size_t(64)) * sizeof(float));
+		glBindBuffer(GL_UNIFORM_BUFFER, m_matParamUBO);
+		glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(padded), padded);
+		m_haveMatParams = false; // invalidate the main loop's content-skip
+	}
+	glBindBufferBase(GL_UNIFORM_BUFFER, 2, m_matParamUBO);
+	glBindBuffer(GL_UNIFORM_BUFFER, 0);
+
+	// Node-graph project textures at units 1..4 (heTexP0..3).
+	if (ma)
+	{
+		const size_t nTex = std::min<size_t>(4, std::max(ma->graphTexturePaths.size(), ma->graphTextureIds.size()));
+		for (size_t i = 0; i < nTex; ++i)
+		{
+			const HE::UUID    gid = i < ma->graphTextureIds.size()   ? ma->graphTextureIds[i]   : HE::UUID{};
+			const std::string gp  = i < ma->graphTexturePaths.size() ? ma->graphTexturePaths[i] : std::string{};
+			glActiveTexture(GL_TEXTURE1 + (GLenum)i);
+			glBindTexture(GL_TEXTURE_2D, ResolveGraphTexture(gid, gp));
+		}
+	}
+
+	glBindVertexArray(m_previewVAO);
+	glDrawElements(GL_TRIANGLES, m_previewIdxCount, GL_UNSIGNED_INT, nullptr);
+	glBindVertexArray(0);
+	glActiveTexture(GL_TEXTURE0);
+
+	// Headless witness: dump the preview target to a PPM (HE_PREVIEW_DUMP=path).
+	if (const char* dp = std::getenv("HE_PREVIEW_DUMP"); dp && *dp)
+	{
+		std::vector<uint8_t> px((size_t)S * S * 3);
+		glPixelStorei(GL_PACK_ALIGNMENT, 1);
+		glReadPixels(0, 0, S, S, GL_RGB, GL_UNSIGNED_BYTE, px.data());
+		if (std::ofstream f(dp, std::ios::binary); f)
+		{
+			f << "P6\n" << S << " " << S << "\n255\n";
+			for (int y = S - 1; y >= 0; --y) // flip to top-down
+				f.write(reinterpret_cast<const char*>(px.data() + (size_t)y * S * 3), (std::streamsize)S * 3);
+		}
+	}
+
+	glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prevFBO);
+	glViewport(prevVP[0], prevVP[1], prevVP[2], prevVP[3]);
+	glUseProgram(0);
+	return reinterpret_cast<void*>(static_cast<intptr_t>(m_previewColor));
+}
+
 void OpenGLRenderer::SetDebugLines(const std::vector<DebugLine>& lines)
 {
 	m_debugLines = lines;
@@ -4096,6 +4258,12 @@ void OpenGLRenderer::Shutdown()
 	if (m_matObjUBO)   { glDeleteBuffers(1, &m_matObjUBO);   m_matObjUBO = 0; }
 	if (m_matLightUBO) { glDeleteBuffers(1, &m_matLightUBO); m_matLightUBO = 0; }
 	if (m_matParamUBO) { glDeleteBuffers(1, &m_matParamUBO); m_matParamUBO = 0; }
+	if (m_previewColor) { glDeleteTextures(1, &m_previewColor);      m_previewColor = 0; }
+	if (m_previewDepth) { glDeleteRenderbuffers(1, &m_previewDepth); m_previewDepth = 0; }
+	if (m_previewFBO)   { glDeleteFramebuffers(1, &m_previewFBO);    m_previewFBO = 0; }
+	if (m_previewVBO)   { glDeleteBuffers(1, &m_previewVBO);         m_previewVBO = 0; }
+	if (m_previewIBO)   { glDeleteBuffers(1, &m_previewIBO);         m_previewIBO = 0; }
+	if (m_previewVAO)   { glDeleteVertexArrays(1, &m_previewVAO);    m_previewVAO = 0; }
 	for (auto& [k, t] : m_graphTexCache) if (t) glDeleteTextures(1, &t);
 	m_graphTexCache.clear();
 #endif
