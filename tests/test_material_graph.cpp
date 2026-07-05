@@ -419,7 +419,7 @@ TEST_CASE("Unconnected noise UV falls back to the mesh UV (vUV), not vec2(0)")
 	}
 }
 
-TEST_CASE("Noise Texture node emits varying fbm over vUV as a vec3 (drop-in to multiply)")
+TEST_CASE("Noise Texture node emits 3D world-space fbm as a vec3 (mesh-independent, drop-in)")
 {
 	MaterialGraph g;
 	const int out = g.addNode(MatNodeType::Output);
@@ -427,13 +427,15 @@ TEST_CASE("Noise Texture node emits varying fbm over vUV as a vec3 (drop-in to m
 	const int col = g.addNode(MatNodeType::ConstColor);
 	const int mul = g.addNode(MatNodeType::Multiply);
 	CHECK(g.connect(col, 0, mul, 0));
-	CHECK(g.connect(tex, 0, mul, 1));                     // colour * noise → mottling
+	CHECK(g.connect(tex, 0, mul, 1));                          // colour * noise → mottling
 	CHECK(g.connect(mul, 0, out, 0));
 	const std::string glsl = HE::generateFragment(g).glsl;
-	CHECK(glsl.find("heFbm(vUV") != std::string::npos);   // procedural, varies over the mesh
-	CHECK(glsl.find("vec3(") != std::string::npos);       // grayscale RGB for a clean multiply
-	// The default Scale (6) must be baked into the expression.
-	CHECK(glsl.find("6.0") != std::string::npos);
+	// World-space 3D noise so it varies on ANY mesh (a UV-less cube has vUV=0 everywhere,
+	// which would collapse UV noise to a single value → flat/black).
+	CHECK(glsl.find("heFbm3(vWorldPos") != std::string::npos);
+	CHECK(glsl.find("float heValueNoise3(vec3") != std::string::npos); // 3D helper injected
+	CHECK(glsl.find("vec3(") != std::string::npos);           // grayscale RGB for a clean multiply
+	CHECK(glsl.find("6.0") != std::string::npos);             // default Scale baked in
 }
 
 #if defined(HE_TESTS_HAVE_SHADERC)
