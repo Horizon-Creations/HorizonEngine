@@ -18,6 +18,7 @@
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 #include <cstdint>
+#include <cstring>
 
 // ── Per-pass GPU timing helpers (Metal stage-boundary counter sampling) ──────
 namespace {
@@ -4729,6 +4730,7 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 		// only re-bind on an actual change (draws arrive sorted, so this is rare).
 		void*     cMaterialPipeline = nullptr;
 		void*     boundPipeline     = defaultPipeline;
+		const std::vector<float>* cMaterialParams = nullptr; // HeParams data (buffer 2)
 		for (const DrawCall& dc : cmds.drawCalls())
 		{
 			UnlitUniforms u;
@@ -4749,10 +4751,17 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 				// Per-material shader: a MaterialAsset with customShaderFragGlsl gets its
 				// own cross-compiled pipeline (cached by source hash); else the default.
 				cMaterialPipeline = nullptr;
+				cMaterialParams   = nullptr;
 				{
 					uint64_t shKey; std::string shFrag;
 					if (ResolveMaterialShader(dc.materialAssetId, shKey, shFrag))
+					{
 						cMaterialPipeline = GetOrBuildMaterialPipeline(shKey, shFrag);
+						if (const MaterialAsset* ma = m_contentManager
+							? m_contentManager->getMaterial(dc.materialAssetId) : nullptr;
+						    ma && !ma->shaderParamData.empty())
+							cMaterialParams = &ma->shaderParamData;
+					}
 				}
 #endif
 			}
@@ -4808,6 +4817,17 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 				{
 					[encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)wantPipeline];
 					boundPipeline = wantPipeline;
+				}
+				// Exposed graph parameters (HeParams UBO, fragment buffer 2) — uploaded per
+				// draw so parameter edits take effect without any shader recompile. Padded
+				// to the shader's declared vec4 v[16] so the debug layer never sees a
+				// shorter-than-declared buffer.
+				if (cMaterialPipeline && cMaterialParams)
+				{
+					float padded[64] = { 0 };
+					std::memcpy(padded, cMaterialParams->data(),
+					            std::min(cMaterialParams->size(), size_t(64)) * sizeof(float));
+					[encoder setFragmentBytes:padded length:sizeof(padded) atIndex:2];
 				}
 				[encoder setVertexBuffer:vertexBuf offset:0 atIndex:0];
 				[encoder setVertexBytes:&ui length:sizeof(ui) atIndex:1];

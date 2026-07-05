@@ -182,7 +182,8 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragment(
         // geometry loop already binds per draw (material/mesh texture + linear sampler).
         out = toCompiled(compileMslPinned(injected, Stage::Fragment,
             { { Stage::Fragment, 0, 0, static_cast<uint32_t>(kMetalLightingBufferIndex) },
-              { Stage::Fragment, 0, 2, 0 } }));
+              { Stage::Fragment, 0, 2, 0 },     // material texture → texture/sampler 0
+              { Stage::Fragment, 0, 3, 2 } })); // HeParams UBO → fragment buffer 2
     }
     else
     {

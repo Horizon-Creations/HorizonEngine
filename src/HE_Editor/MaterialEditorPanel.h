@@ -21,8 +21,10 @@ namespace MaterialEditorPanel
 	// True if the graph has edits not yet saved to disk (drives the tab's dirty mark).
 	bool isDirty(const std::string& assetPath);
 
-	// Whether the .hasset at `path` is a material asset (reads the HAsset header type).
+	// Whether the .hasset at `path` is a material / material-function asset
+	// (reads the HAsset header type; cached per path).
 	bool isMaterialAsset(const std::string& path);
+	bool isMaterialFunctionAsset(const std::string& path);
 
 	// Drop cached editor state for `path`.
 	void forget(const std::string& assetPath);

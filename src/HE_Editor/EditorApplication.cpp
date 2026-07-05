@@ -1308,7 +1308,10 @@ void EditorApplication::dumpFrameHeadless()
 		{
 			HE::MaterialGraph g;
 			const int out  = g.addNode(HE::MatNodeType::Output);
-			const int a    = g.addNode(HE::MatNodeType::ConstColor);
+			// Base color as a NAMED PARAM → exercises the HeParams uniform path (the value
+			// reaches the shader through the UBO upload, not as a baked constant).
+			const int a    = g.addNode(HE::MatNodeType::ParamColor);
+			g.findNode(a)->s = "BaseTint";
 			g.findNode(a)->p[0] = 0.95f; g.findNode(a)->p[1] = 0.42f; g.findNode(a)->p[2] = 0.18f;
 			const int b    = g.addNode(HE::MatNodeType::ConstColor);
 			g.findNode(b)->p[0] = 0.10f; g.findNode(b)->p[1] = 0.35f; g.findNode(b)->p[2] = 0.85f;
@@ -1323,8 +1326,12 @@ void EditorApplication::dumpFrameHeadless()
 			g.connect(lerp, 0, out,  0); // BaseColor
 			g.connect(time, 0, sine, 0);
 			g.connect(sine, 0, out,  1); // Metallic
-			mat.nodeGraphJson        = HE::materialGraphToJson(g);
-			mat.customShaderFragGlsl = HE::generateFragmentGlsl(g);
+			mat.nodeGraphJson = HE::materialGraphToJson(g);
+			const HE::MatShaderGen gen = HE::generateFragment(g);
+			mat.customShaderFragGlsl = gen.glsl;
+			for (const auto& slot : gen.params)
+				mat.shaderParamData.insert(mat.shaderParamData.end(),
+				                           slot.value, slot.value + 4);
 		}
 		const HE::UUID matId = contentManager().registerMaterial(std::move(mat));
 

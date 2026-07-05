@@ -85,7 +85,8 @@ namespace HE
         Shader,
         Prefab,
         AnimationClip,
-        PropertyAnimClip  // property/transform/material animation clips
+        PropertyAnimClip, // property/transform/material animation clips
+        MaterialFunction  // reusable material sub-graph (node editor), inlined at codegen
     };
 
     enum class TextureFormat : uint32_t

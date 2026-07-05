@@ -176,10 +176,17 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 			HAsset::Reader::readPOD(c->data,o,a.metallic);
 			HAsset::Reader::readPOD(c->data,o,a.roughness);
 			HAsset::Reader::readPOD(c->data,o,a.opacity);
-			// Optional custom shader + node graph (appended after the PBR tail; absent in
-			// older materials → left empty by the bounds-checked reader → built-in PBR).
+			// Optional custom shader + node graph + exposed-parameter data (appended after
+			// the PBR tail; absent in older materials → bounds-checked reader defaults).
 			HAsset::Reader::readString(c->data,o,a.customShaderFragGlsl);
 			HAsset::Reader::readString(c->data,o,a.nodeGraphJson);
+			uint32_t paramFloats = 0;
+			if (HAsset::Reader::readPOD(c->data,o,paramFloats) && paramFloats <= 16 * 4)
+			{
+				a.shaderParamData.resize(paramFloats);
+				for (uint32_t i = 0; i < paramFloats; ++i)
+					HAsset::Reader::readPOD(c->data,o,a.shaderParamData[i]);
+			}
 		}
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_MTLU))
 		{
@@ -205,6 +212,13 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_SLNG); c && !c->data.empty())
 			a.language = static_cast<ScriptLanguage>(c->data[0]); // absent → default Lua
 		handle = m_scriptAssets.insert(std::move(a)); break;
+	}
+	case HE::AssetType::MaterialFunction:
+	{
+		MaterialFunctionAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_MGRF))
+			a.nodeGraphJson.assign(reinterpret_cast<const char*>(c->data.data()), c->data.size());
+		handle = m_materialFunctionAssets.insert(std::move(a)); break;
 	}
 	case HE::AssetType::Audio:
 	{
@@ -616,6 +630,8 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 		HAsset::Writer::appendPOD(b,a.opacity);
 		HAsset::Writer::appendString(b,a.customShaderFragGlsl); // optional custom shader (back-compatible tail)
 		HAsset::Writer::appendString(b,a.nodeGraphJson);        // optional node graph (source of truth)
+		HAsset::Writer::appendPOD(b,static_cast<uint32_t>(a.shaderParamData.size()));
+		for (float f : a.shaderParamData) HAsset::Writer::appendPOD(b,f); // exposed params (HeParams)
 		w.addChunk(HAsset::CHUNK_MTRL,b.data(),b.size());
 		break;
 	}
@@ -632,6 +648,12 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 		w.addChunk(HAsset::CHUNK_SRC, a.sourceCode.data(), a.sourceCode.size());
 		const uint8_t lang = static_cast<uint8_t>(a.language);
 		w.addChunk(HAsset::CHUNK_SLNG, &lang, 1);
+		break;
+	}
+	case HE::AssetType::MaterialFunction:
+	{
+		auto& a = static_cast<MaterialFunctionAsset&>(asset);
+		w.addChunk(HAsset::CHUNK_MGRF, a.nodeGraphJson.data(), a.nodeGraphJson.size());
 		break;
 	}
 	case HE::AssetType::Audio:
@@ -697,6 +719,14 @@ const TextureAsset*       ContentManager::getTexture(HE::UUID id) const       { 
 const MaterialAsset*      ContentManager::getMaterial(HE::UUID id) const      { return lookupAsset(m_handleToUUID, m_materialAssets, id); }
 const AudioAsset*         ContentManager::getAudio(HE::UUID id) const         { return lookupAsset(m_handleToUUID, m_audioAssets, id); }
 const ScriptAsset*        ContentManager::getScript(HE::UUID id) const        { return lookupAsset(m_handleToUUID, m_scriptAssets, id); }
+const MaterialFunctionAsset* ContentManager::getMaterialFunction(HE::UUID id) const { return lookupAsset(m_handleToUUID, m_materialFunctionAssets, id); }
+MaterialFunctionAsset* ContentManager::getMaterialFunctionMutable(HE::UUID id)
+{
+	auto it = m_handleToUUID.find(id);
+	if (it == m_handleToUUID.end()) return nullptr;
+	MaterialFunctionAsset* a = m_materialFunctionAssets.get(it->second);
+	return (a && a->id == id) ? a : nullptr; // reject wrong-type aliasing
+}
 const ShaderAsset*        ContentManager::getShader(HE::UUID id) const        { return lookupAsset(m_handleToUUID, m_shaderAssets, id); }
 const PrefabAsset*        ContentManager::getPrefab(HE::UUID id) const        { return lookupAsset(m_handleToUUID, m_prefabAssets, id); }
 const AnimationClipAsset*      ContentManager::getAnimationClip(HE::UUID id) const      { return lookupAsset(m_handleToUUID, m_animClipAssets,     id); }
@@ -757,6 +787,7 @@ HE::UUID ContentManager::registerMaterial(MaterialAsset asset)           { retur
 HE::UUID ContentManager::registerPrefab(PrefabAsset asset)               { return registerRuntimeAsset(m_prefabAssets,      std::move(asset), HE::AssetType::Prefab);        }
 HE::UUID ContentManager::registerAudio(AudioAsset asset)                 { return registerRuntimeAsset(m_audioAssets,       std::move(asset), HE::AssetType::Audio);         }
 HE::UUID ContentManager::registerScript(ScriptAsset asset)               { return registerRuntimeAsset(m_scriptAssets,      std::move(asset), HE::AssetType::Script);        }
+HE::UUID ContentManager::registerMaterialFunction(MaterialFunctionAsset asset) { return registerRuntimeAsset(m_materialFunctionAssets, std::move(asset), HE::AssetType::MaterialFunction); }
 HE::UUID ContentManager::registerAnimationClip(AnimationClipAsset asset)       { return registerRuntimeAsset(m_animClipAssets,     std::move(asset), HE::AssetType::AnimationClip);     }
 HE::UUID ContentManager::registerPropertyAnimClip(PropertyAnimClipAsset asset) { return registerRuntimeAsset(m_propAnimClipAssets, std::move(asset), HE::AssetType::PropertyAnimClip); }
 

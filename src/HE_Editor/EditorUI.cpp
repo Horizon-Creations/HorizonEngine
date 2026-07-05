@@ -2507,7 +2507,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
         const ImVec2 tabSize(vpTab->WorkSize.x, vpTab->WorkSize.y - kFooterH - kTabBarH);
         // Dispatch by asset type: material assets get the node-graph editor, script
         // assets the code editor. (Cheap header sniff; both panels cache their state.)
-        if (MaterialEditorPanel::isMaterialAsset(tabPath))
+        if (MaterialEditorPanel::isMaterialAsset(tabPath) ||
+            MaterialEditorPanel::isMaterialFunctionAsset(tabPath))
             MaterialEditorPanel::render(ctx, tabPath, tabPos, tabSize);
         else
             ScriptEditorPanel::render(ctx, tabPath, tabPos, tabSize);
@@ -4152,7 +4153,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				// Script assets open the code editor tab, material assets the node-graph
 				// editor tab. Other asset types have no dedicated editor yet → no-op.
 				else if (ScriptEditorPanel::isScriptAsset(file->fullPath) ||
-				         MaterialEditorPanel::isMaterialAsset(file->fullPath))
+				         MaterialEditorPanel::isMaterialAsset(file->fullPath) ||
+				         MaterialEditorPanel::isMaterialFunctionAsset(file->fullPath))
 				{
 				const std::string tabLabel = std::filesystem::path(file->name).stem().string();
 				auto it = std::find_if(ctx.tabs.begin(), ctx.tabs.end(),
@@ -4481,6 +4483,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 
 			if (ImGui::MenuItem("Scene"))        tryCreate("NewScene",    ".hescene", HE::AssetType::Scene);
 			if (ImGui::MenuItem("Material"))     tryCreate("NewMaterial", ".hasset",  HE::AssetType::Material);
+			if (ImGui::MenuItem("Material Function")) tryCreate("NewMaterialFunction", ".hasset", HE::AssetType::MaterialFunction);
 			if (ImGui::MenuItem("Texture"))      tryCreate("NewTexture",  ".hasset",  HE::AssetType::Texture);
 			if (ImGui::MenuItem("Static Mesh"))  tryCreate("NewMesh",     ".hasset",  HE::AssetType::StaticMesh);
 			if (ImGui::MenuItem("Skeletal Mesh"))tryCreate("NewSkelMesh", ".hasset",  HE::AssetType::SkeletalMesh);

@@ -45,6 +45,8 @@ public:
 	const MaterialAsset*       getMaterial(HE::UUID id) const;
 	const AudioAsset*          getAudio(HE::UUID id) const;
 	const ScriptAsset*         getScript(HE::UUID id) const;
+	const MaterialFunctionAsset* getMaterialFunction(HE::UUID id) const;
+	MaterialFunctionAsset*     getMaterialFunctionMutable(HE::UUID id);
 	const ShaderAsset*         getShader(HE::UUID id) const;
 	const PrefabAsset*         getPrefab(HE::UUID id) const;
 	const AnimationClipAsset*  getAnimationClip(HE::UUID id) const;
@@ -81,6 +83,7 @@ public:
 	HE::UUID registerPrefab(PrefabAsset asset);
 	HE::UUID registerAudio(AudioAsset asset);
 	HE::UUID registerScript(ScriptAsset asset);
+	HE::UUID registerMaterialFunction(MaterialFunctionAsset asset);
 	HE::UUID registerAnimationClip(AnimationClipAsset asset);
 	HE::UUID registerPropertyAnimClip(PropertyAnimClipAsset asset);
 
@@ -263,6 +266,7 @@ private:
 	SlotMap<MaterialAsset>      m_materialAssets;
 	SlotMap<SceneAsset>         m_sceneAssets;
 	SlotMap<ScriptAsset>        m_scriptAssets;
+	SlotMap<MaterialFunctionAsset> m_materialFunctionAssets;
 	SlotMap<AudioAsset>         m_audioAssets;
 	SlotMap<FontAsset>          m_fontAssets;
 	SlotMap<ShaderAsset>        m_shaderAssets;
