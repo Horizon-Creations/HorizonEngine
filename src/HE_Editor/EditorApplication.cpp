@@ -1331,8 +1331,11 @@ void EditorApplication::dumpFrameHeadless()
 			const HE::MatShaderGen gen = HE::generateFragment(g);
 			mat.customShaderFragGlsl = gen.glsl;
 			for (const auto& slot : gen.params)
+			{
 				mat.shaderParamData.insert(mat.shaderParamData.end(),
 				                           slot.value, slot.value + 4);
+				mat.graphParamNames.push_back(slot.name); // runtime setMaterialParam by name
+			}
 
 			// Witness the PRECOMPILED path (HE_DUMP_MATPRECOMPILE): bake per-backend
 			// shader variants into the material NOW, exactly as the exporter would, so
@@ -1362,6 +1365,26 @@ void EditorApplication::dumpFrameHeadless()
 			}
 		}
 		const HE::UUID matId = contentManager().registerMaterial(std::move(mat));
+
+		// Witness the runtime scripting param path (HE_DUMP_SETPARAM="Name,r,g,b"):
+		// set a named graph parameter BY NAME exactly as a script's
+		// horizon.setMaterialParam would, so the capture reflects the override
+		// (the harness graph exposes ParamColor "BaseTint").
+		if (const char* sp = std::getenv("HE_DUMP_SETPARAM"); sp && *sp)
+		{
+			std::string s(sp); std::string name; float rgb[3] = { 0, 0, 0 };
+			const size_t c0 = s.find(',');
+			if (c0 != std::string::npos)
+			{
+				name = s.substr(0, c0);
+				std::sscanf(s.c_str() + c0 + 1, "%f,%f,%f", &rgb[0], &rgb[1], &rgb[2]);
+				const float v[4] = { rgb[0], rgb[1], rgb[2], 0.0f };
+				const bool ok = contentManager().setMaterialParam(matId, name, v, 4);
+				Logger::Log(Logger::LogLevel::Info, ok
+					? ("EditorApplication: HE_DUMP_SETPARAM set '" + name + "' at runtime").c_str()
+					: ("EditorApplication: HE_DUMP_SETPARAM param '" + name + "' not found").c_str());
+			}
+		}
 
 		// Procedural UV sphere (SoA loose asset) so the per-normal shader banding shows on
 		// a curved surface (a cube's flat faces have constant normals → uniform color).
@@ -1739,6 +1762,7 @@ void EditorApplication::setPlayMode(bool play)
 		// Initialise script context and start all enabled scripts
 		m_scriptContext = std::make_unique<ScriptContext>(*m_editorWorld);
 		m_scriptContext->setPhysicsWorld(m_physicsWorld.get());
+		m_scriptContext->setContentManager(&contentManager()); // horizon.setMaterialParam
 		{
 			auto& reg = m_editorWorld->registry();
 			for (auto [entity, sc] : reg.view<ScriptComponent>().each())

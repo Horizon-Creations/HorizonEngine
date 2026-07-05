@@ -3,6 +3,8 @@
 #include "HorizonScene/PhysicsWorld.h"
 #include "HorizonScene/Components/TransformComponent.h"
 #include "HorizonScene/Components/NameComponent.h"
+#include "HorizonScene/Components/MaterialComponent.h"
+#include "ContentManager/ContentManager.h"
 #include <cstdio>
 
 namespace {
@@ -107,6 +109,33 @@ void setVelocity(PhysicsWorld* physics, uint32_t entityId, const glm::vec3& v)
 bool isGrounded(PhysicsWorld* physics, uint32_t entityId)
 {
 	return physics && physics->isCharacterGrounded(entityId);
+}
+
+bool setMaterialParam(HorizonWorld& world, ContentManager* content,
+                      uint32_t entityId, const std::string& name, const glm::vec4& value)
+{
+	if (!content) return false;
+	auto& reg = world.registry();
+	entt::entity e = toEntity(entityId);
+	if (!reg.valid(e)) return false;
+	const auto* mc = reg.try_get<MaterialComponent>(e);
+	if (!mc) return false;
+	const float v[4] = { value.x, value.y, value.z, value.w };
+	return content->setMaterialParam(mc->materialAssetId, name, v, 4);
+}
+
+glm::vec4 getMaterialParam(HorizonWorld& world, ContentManager* content,
+                           uint32_t entityId, const std::string& name)
+{
+	if (!content) return glm::vec4(0.0f);
+	auto& reg = world.registry();
+	entt::entity e = toEntity(entityId);
+	if (!reg.valid(e)) return glm::vec4(0.0f);
+	const auto* mc = reg.try_get<MaterialComponent>(e);
+	if (!mc) return glm::vec4(0.0f);
+	float out[4] = { 0, 0, 0, 0 };
+	content->getMaterialParam(mc->materialAssetId, name, out);
+	return glm::vec4(out[0], out[1], out[2], out[3]);
 }
 
 } // namespace ScriptApi

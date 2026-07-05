@@ -7,6 +7,7 @@
 
 class HorizonWorld;
 class PhysicsWorld;
+class ContentManager;
 
 // Python (CPython) gameplay-script backend. Scripts define a subclass of
 // horizon.Behavior; one instance per entity receives on_start/on_update/
@@ -31,6 +32,7 @@ public:
 	static bool available();
 
 	void setPhysicsWorld(PhysicsWorld* pw);
+	void setContentManager(ContentManager* cm);
 
 	bool   loadScript(const std::string& name, const std::string& source) override;
 	void   unloadScript(const std::string& name) override;

@@ -188,6 +188,7 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 					HAsset::Reader::readPOD(c->data,o,a.shaderParamData[i]);
 			}
 			HAsset::Reader::readVec(c->data,o,a.graphTexturePaths); // node-graph textures (paths)
+			HAsset::Reader::readVec(c->data,o,a.graphParamNames);  // param names (slot order)
 		}
 		// Baked graph-texture UUIDs live in MTLU alongside shaderId/textureIds.
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_MTLU))
@@ -638,6 +639,7 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 		HAsset::Writer::appendPOD(b,static_cast<uint32_t>(a.shaderParamData.size()));
 		for (float f : a.shaderParamData) HAsset::Writer::appendPOD(b,f); // exposed params (HeParams)
 		HAsset::Writer::appendVec(b,a.graphTexturePaths);                 // node-graph textures (paths)
+		HAsset::Writer::appendVec(b,a.graphParamNames);                   // param names (slot order)
 		w.addChunk(HAsset::CHUNK_MTRL,b.data(),b.size());
 		break;
 	}
@@ -779,6 +781,37 @@ MaterialAsset* ContentManager::getMaterialMutable(HE::UUID id)
 	if (it == m_handleToUUID.end()) return nullptr;
 	MaterialAsset* a = m_materialAssets.get(it->second);
 	return (a && a->id == id) ? a : nullptr; // reject wrong-type aliasing
+}
+
+bool ContentManager::setMaterialParam(HE::UUID id, const std::string& name,
+                                      const float* values, int count)
+{
+	if (!values || count < 1) return false;
+	MaterialAsset* a = getMaterialMutable(id);
+	if (!a) return false;
+	int slot = -1;
+	for (size_t i = 0; i < a->graphParamNames.size(); ++i)
+		if (a->graphParamNames[i] == name) { slot = (int)i; break; }
+	if (slot < 0) return false;
+	// Each parameter occupies one vec4 (4 floats) in shaderParamData, in slot order.
+	const size_t base = (size_t)slot * 4;
+	if (a->shaderParamData.size() < base + 4) a->shaderParamData.resize(base + 4, 0.0f);
+	for (int i = 0; i < count && i < 4; ++i) a->shaderParamData[base + i] = values[i];
+	return true;
+}
+
+bool ContentManager::getMaterialParam(HE::UUID id, const std::string& name, float out[4]) const
+{
+	const MaterialAsset* a = getMaterial(id);
+	if (!a) return false;
+	int slot = -1;
+	for (size_t i = 0; i < a->graphParamNames.size(); ++i)
+		if (a->graphParamNames[i] == name) { slot = (int)i; break; }
+	if (slot < 0) return false;
+	const size_t base = (size_t)slot * 4;
+	for (int i = 0; i < 4; ++i)
+		out[i] = (base + i < a->shaderParamData.size()) ? a->shaderParamData[base + i] : 0.0f;
+	return true;
 }
 
 // ─── Runtime (in-memory) asset registration ──────────────────────────────────

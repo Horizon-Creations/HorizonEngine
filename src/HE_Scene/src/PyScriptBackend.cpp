@@ -12,8 +12,9 @@
 // active backend feeds the module functions the current world/physics through
 // these file-statics (set by the backend; the `horizon` C functions read them).
 namespace {
-HorizonWorld* g_world   = nullptr;
-PhysicsWorld* g_physics = nullptr;
+HorizonWorld*   g_world   = nullptr;
+PhysicsWorld*   g_physics = nullptr;
+ContentManager* g_content = nullptr;
 
 // ── horizon.* native functions (thin shims over ScriptApi) ──────────────────
 PyObject* py_log(PyObject*, PyObject* args)
@@ -85,6 +86,23 @@ PyObject* py_isGrounded(PyObject*, PyObject* args)
 	if (ScriptApi::isGrounded(g_physics, (uint32_t)id)) Py_RETURN_TRUE;
 	Py_RETURN_FALSE;
 }
+// setMaterialParam(entity, name, x [, y, z, w]) — 1..4 components; missing → 0.
+PyObject* py_setMaterialParam(PyObject*, PyObject* args)
+{
+	long id; const char* name = nullptr; float x = 0, y = 0, z = 0, w = 0;
+	if (!PyArg_ParseTuple(args, "lsf|fff", &id, &name, &x, &y, &z, &w)) return nullptr;
+	const bool ok = ScriptApi::setMaterialParam(*g_world, g_content, (uint32_t)id, name, {x, y, z, w});
+	if (ok) Py_RETURN_TRUE;
+	Py_RETURN_FALSE;
+}
+// getMaterialParam(entity, name) -> (x, y, z, w)
+PyObject* py_getMaterialParam(PyObject*, PyObject* args)
+{
+	long id; const char* name = nullptr;
+	if (!PyArg_ParseTuple(args, "ls", &id, &name)) return nullptr;
+	const glm::vec4 v = ScriptApi::getMaterialParam(*g_world, g_content, (uint32_t)id, name);
+	return Py_BuildValue("(ffff)", v.x, v.y, v.z, v.w);
+}
 
 PyMethodDef kHorizonMethods[] = {
 	{"log",         py_log,         METH_VARARGS, "log(message)"},
@@ -100,6 +118,8 @@ PyMethodDef kHorizonMethods[] = {
 	{"raycast",     py_raycast,     METH_VARARGS, "raycast(ox,oy,oz,dx,dy,dz,maxDist) -> dict|None"},
 	{"setVelocity", py_setVelocity, METH_VARARGS, "setVelocity(entity, vx, vy, vz)"},
 	{"isGrounded",  py_isGrounded,  METH_VARARGS, "isGrounded(entity) -> bool"},
+	{"setMaterialParam", py_setMaterialParam, METH_VARARGS, "setMaterialParam(entity, name, x[,y,z,w]) -> bool"},
+	{"getMaterialParam", py_getMaterialParam, METH_VARARGS, "getMaterialParam(entity, name) -> (x,y,z,w)"},
 	{nullptr, nullptr, 0, nullptr}
 };
 PyModuleDef kHorizonModule = {
@@ -146,8 +166,9 @@ std::string takePyError()
 
 // ── Impl ────────────────────────────────────────────────────────────────────
 struct PyScriptBackend::Impl {
-	HorizonWorld* world   = nullptr;
-	PhysicsWorld* physics = nullptr;
+	HorizonWorld*   world   = nullptr;
+	PhysicsWorld*   physics = nullptr;
+	ContentManager* content = nullptr;
 	PyObject*     behaviorBase = nullptr;                 // horizon.Behavior
 	std::unordered_map<std::string, PyObject*> classes;  // script name → class object
 	struct Inst { PyObject* obj = nullptr; std::string script; };
@@ -202,11 +223,12 @@ PyScriptBackend::~PyScriptBackend()
 		// null-guard in ScriptApi instead of dereferencing freed memory. g_world
 		// outlives the backend on every teardown path, so it stays valid here.
 		g_physics = nullptr;
+		g_content = nullptr; // same dangling concern as g_physics (freed before backend)
 		for (auto& [id, inst] : m_impl->instances) Py_XDECREF(inst.obj);
 		for (auto& [name, cls] : m_impl->classes)  Py_XDECREF(cls);
 		Py_XDECREF(m_impl->behaviorBase);
 	}
-	if (g_world == (m_impl ? m_impl->world : nullptr)) { g_world = nullptr; g_physics = nullptr; }
+	if (g_world == (m_impl ? m_impl->world : nullptr)) { g_world = nullptr; g_physics = nullptr; g_content = nullptr; }
 	// Py_Finalize is intentionally NOT called: the interpreter is a process
 	// singleton and may be reused by another backend instance.
 }
@@ -220,6 +242,12 @@ void PyScriptBackend::setPhysicsWorld(PhysicsWorld* pw)
 {
 	m_impl->physics = pw;
 	g_physics = pw;
+}
+
+void PyScriptBackend::setContentManager(ContentManager* cm)
+{
+	m_impl->content = cm;
+	g_content = cm;
 }
 
 // Exec `source`, find the single horizon.Behavior subclass, return it (new ref).
@@ -447,6 +475,7 @@ PyScriptBackend::PyScriptBackend(HorizonWorld&) : m_impl(nullptr)
 PyScriptBackend::~PyScriptBackend() = default;
 bool PyScriptBackend::available() { return false; }
 void PyScriptBackend::setPhysicsWorld(PhysicsWorld*) {}
+void PyScriptBackend::setContentManager(ContentManager*) {}
 bool PyScriptBackend::loadScript(const std::string&, const std::string&) { return false; }
 void PyScriptBackend::unloadScript(const std::string&) {}
 bool PyScriptBackend::isScriptLoaded(const std::string&) const { return false; }

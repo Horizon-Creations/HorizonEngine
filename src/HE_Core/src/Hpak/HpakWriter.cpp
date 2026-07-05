@@ -119,9 +119,10 @@ static std::vector<uint8_t> rewriteRefsForPack(
 
             // Walk the scalar/string tail (PBR scalars, custom shader, node graph,
             // params) WITHOUT re-serializing it — we only need the byte offset where the
-            // node-graph texture paths begin, so we can copy everything before verbatim
-            // and drop the paths (baked into MTLU as UUIDs). graphTexturePaths is the
-            // last field, so truncating there is safe (an absent trailing vec reads empty).
+            // node-graph texture paths begin, so we can copy everything before verbatim.
+            // graphTexturePaths is DROPPED (baked into MTLU as UUIDs) but graphParamNames
+            // (which follows it) must be KEPT so shipped games can setMaterialParam by
+            // name — so we re-emit an empty texturePaths vec + the real param names.
             size_t tailStart = o;
             std::string customShaderGlsl;
             { float f; std::string s; uint32_t n = 0;
@@ -134,11 +135,15 @@ static std::vector<uint8_t> rewriteRefsForPack(
             const size_t graphTexOffset = o;
             std::vector<std::string> graphTexPaths;
             HAsset::Reader::readVec(c.data, o, graphTexPaths); // node-graph textures (dropped)
+            std::vector<std::string> graphParamNames;
+            HAsset::Reader::readVec(c.data, o, graphParamNames); // param names (kept)
 
             std::vector<uint8_t> mtrl;
             HAsset::Writer::appendString(mtrl, std::string{});           // shaderPath dropped
             HAsset::Writer::appendVec(mtrl, std::vector<std::string>{}); // texturePaths dropped
-            mtrl.insert(mtrl.end(), c.data.begin() + tailStart, c.data.begin() + graphTexOffset); // tail verbatim, minus paths
+            mtrl.insert(mtrl.end(), c.data.begin() + tailStart, c.data.begin() + graphTexOffset); // scalar tail verbatim
+            HAsset::Writer::appendVec(mtrl, std::vector<std::string>{}); // graphTexturePaths dropped (baked to MTLU)
+            HAsset::Writer::appendVec(mtrl, graphParamNames);            // graphParamNames kept for runtime
             w.addChunk(HAsset::CHUNK_MTRL, mtrl.data(), mtrl.size());
 
             const HE::UUID sid = shaderPath.empty() ? HE::UUID{} : resolve(shaderPath);

@@ -1237,6 +1237,8 @@ TEST_CASE("Pack precompiles node-graph material shaders into CHUNK_PSHD")
     graphMat.path = "graphmat.hasset";
     graphMat.customShaderFragGlsl = "// generated\nvoid main(){ oColor = vec4(1.0); }";
     graphMat.nodeGraphJson        = "{\"nodes\":[]}";
+    graphMat.graphParamNames      = { "K", "Tint" }; // must survive packing (runtime setMaterialParam)
+    graphMat.shaderParamData      = { 1,0,0,0,  0.5f,0,0,0 };
     REQUIRE(cm.saveAsset(graphMat));
     const HE::UUID graphId = graphMat.id;
 
@@ -1282,6 +1284,7 @@ TEST_CASE("Pack precompiles node-graph material shaders into CHUNK_PSHD")
 
     const MaterialAsset* gm = loaded.getMaterial(graphId);
     REQUIRE(gm != nullptr);
+    CHECK(gm->graphParamNames == std::vector<std::string>{ "K", "Tint" }); // kept through packing
     REQUIRE(gm->precompiledShaders.size() == 2);
     CHECK(gm->precompiledShaders[0].backend == static_cast<uint8_t>(HE::RendererBackend::Metal));
     CHECK(gm->precompiledShaders[0].fragment == "MF");

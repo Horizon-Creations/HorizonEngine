@@ -5,6 +5,7 @@
 
 class HorizonWorld;
 class PhysicsWorld;
+class ContentManager;
 
 // Language-neutral gameplay-script API — the single implementation behind the
 // `horizon` module of every scripting backend (Lua today, Python next). Each
@@ -44,4 +45,14 @@ namespace ScriptApi
 	// Character-controller helpers; physics may be null (no-op / false).
 	void setVelocity(PhysicsWorld* physics, uint32_t entityId, const glm::vec3& v);
 	bool isGrounded(PhysicsWorld* physics, uint32_t entityId);
+
+	// Set/get a node-graph material parameter BY NAME on the entity's material at
+	// runtime (the MaterialComponent's asset). All 4 vec4 components are written;
+	// the shader reads only those its Param node uses, so passing a scalar as
+	// (x,0,0,0) is safe. content may be null (no-op / false). Returns false if the
+	// entity has no material or the parameter name is unknown.
+	bool setMaterialParam(HorizonWorld& world, ContentManager* content,
+	                      uint32_t entityId, const std::string& name, const glm::vec4& value);
+	glm::vec4 getMaterialParam(HorizonWorld& world, ContentManager* content,
+	                           uint32_t entityId, const std::string& name); // default (0,0,0,0)
 }

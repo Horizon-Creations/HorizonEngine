@@ -67,6 +67,16 @@ public:
 	// disk with saveAsset(). Returns nullptr when the UUID is not a material.
 	MaterialAsset*           getMaterialMutable(HE::UUID id);
 
+	// Set a node-graph material parameter BY NAME at runtime (the scripting entry
+	// point). Writes up to `count` (1..4) floats into the parameter's HeParams vec4
+	// slot in shaderParamData; the renderer uploads it next frame — no recompile.
+	// Returns false if the UUID is not a material or the name is not an exposed
+	// parameter. `name` is matched against MaterialAsset::graphParamNames.
+	bool setMaterialParam(HE::UUID id, const std::string& name, const float* values, int count);
+	// Reads a parameter's current vec4 (missing components → 0). Returns false on
+	// unknown material/param; on success writes 4 floats to `out`.
+	bool getMaterialParam(HE::UUID id, const std::string& name, float out[4]) const;
+
 	// ── Runtime (in-memory) assets ─────────────────────────────────────────
 	// Register a runtime-generated asset that has no .hasset file on disk:
 	// procedural meshes (e.g. terrain), generated/default textures, fallback or

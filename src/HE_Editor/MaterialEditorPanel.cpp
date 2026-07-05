@@ -123,9 +123,16 @@ void applyToMaterial(State& st, AppContext& ctx)
 	mat->customShaderFragGlsl = st.lastGlsl;
 	mat->nodeGraphJson        = HE::materialGraphToJson(st.graph);
 	mat->shaderParamData.clear();
+	mat->graphParamNames.clear();
 	for (const auto& slot : gen.params)
+	{
 		mat->shaderParamData.insert(mat->shaderParamData.end(),
 		                            slot.value, slot.value + 4);
+		mat->graphParamNames.push_back(slot.name); // parallel to slots → runtime setMaterialParam
+	}
+	// Project textures the graph samples, in slot order (heTexP0..) — the renderer
+	// binds these on loose materials; packing bakes them to graphTextureIds (MTLU).
+	mat->graphTexturePaths = gen.textures;
 	st.dirty = true;
 }
 
@@ -247,6 +254,38 @@ bool nodeParamWidgets(MatGraphNode& n)
 			if (ImGui::Combo("##type", &t, kTypes, 4)) { n.p[0] = (float)t; committed = true; }
 			break;
 		}
+		// ── v5: baked constant bool + new parameter types ──
+		case MatNodeType::ConstBool:
+		{
+			bool on = n.p[0] > 0.5f;
+			if (ImGui::Checkbox("True", &on)) { n.p[0] = on ? 1.0f : 0.0f; committed = true; }
+			break;
+		}
+		case MatNodeType::ParamVec2:
+			ImGui::SetNextItemWidth(kNodeW - 24.0f);
+			ImGui::InputText("##name", &n.s);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			ImGui::SetNextItemWidth(kNodeW - 24.0f);
+			ImGui::DragFloat2("##v2", n.p, 0.01f);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			break;
+		case MatNodeType::ParamVec4:
+			ImGui::SetNextItemWidth(kNodeW - 24.0f);
+			ImGui::InputText("##name", &n.s);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			ImGui::SetNextItemWidth(kNodeW - 24.0f);
+			ImGui::DragFloat4("##v4", n.p, 0.01f);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			break;
+		case MatNodeType::ParamBool:
+		{
+			ImGui::SetNextItemWidth(kNodeW - 24.0f);
+			ImGui::InputText("##name", &n.s);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			bool on = n.p[0] > 0.5f;
+			if (ImGui::Checkbox("Default", &on)) { n.p[0] = on ? 1.0f : 0.0f; committed = true; }
+			break;
+		}
 		default: break;
 	}
 	return committed;
@@ -258,7 +297,9 @@ float nodeParamHeight(MatNodeType type)
 	const HE::MatNodeDesc& d = HE::matNodeDesc(type);
 	if (d.paramCount == 0) return 0.0f;
 	if (type == MatNodeType::ConstVec4 || type == MatNodeType::TextureSample) return 44.0f;
+	if (type == MatNodeType::ParamVec4) return 70.0f;                 // name + vec4 rows
 	if (type == MatNodeType::ParamFloat || type == MatNodeType::ParamColor ||
+	    type == MatNodeType::ParamVec2  || type == MatNodeType::ParamBool  ||
 	    type == MatNodeType::FnInput    || type == MatNodeType::FnOutput) return 52.0f;
 	return 26.0f;
 }
