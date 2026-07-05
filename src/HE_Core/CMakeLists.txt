@@ -26,6 +26,7 @@ add_library(HorizonCore SHARED
 	src/Hpak/ProjectConfig.cpp
 	src/Hpak/ProjectExporter.cpp
 	src/Events/EventBus.cpp
+	src/MaterialGraph/MaterialGraph.cpp
  "include/ContentManager/ContentManager.h" "src/ContentManager/ContentManager.cpp" "include/ContentManager/Assets.h")
 
 target_include_directories(HorizonCore

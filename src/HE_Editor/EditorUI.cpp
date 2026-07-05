@@ -1,6 +1,7 @@
 #include "EditorUI.h"
 #include "EditorApplication.h"
 #include "ScriptEditorPanel.h"
+#include "MaterialEditorPanel.h"
 #include "HorizonVersion.h"
 #include <Hpak/ProjectExporter.h>
 #include <HorizonScene/HorizonScene.h>
@@ -2456,7 +2457,9 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                 bool pOpen = tab.closable ? tab.open : true;
                 // Stable ID (### + assetPath) so appending a dirty marker to the visible
                 // label never changes the tab's identity — which would reset its state.
-                const bool tabDirty = !tab.assetPath.empty() && ScriptEditorPanel::isDirty(tab.assetPath);
+                const bool tabDirty = !tab.assetPath.empty() &&
+                    (ScriptEditorPanel::isDirty(tab.assetPath) ||
+                     MaterialEditorPanel::isDirty(tab.assetPath));
                 const std::string shown = tab.label + (tabDirty ? " *" : "")
                     + "###tab_" + (tab.assetPath.empty() ? std::string("scene") : tab.assetPath);
                 if (ImGui::BeginTabItem(shown.c_str(), tab.closable ? &pOpen : nullptr, flags))
@@ -2499,9 +2502,15 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
     if (!sceneTabActive)
     {
         const ImGuiViewport* vpTab = ImGui::GetMainViewport();
-        ScriptEditorPanel::render(ctx, ctx.tabs[ctx.activeTab].assetPath,
-            ImVec2(vpTab->WorkPos.x, vpTab->WorkPos.y + kTabBarH),
-            ImVec2(vpTab->WorkSize.x, vpTab->WorkSize.y - kFooterH - kTabBarH));
+        const std::string& tabPath = ctx.tabs[ctx.activeTab].assetPath;
+        const ImVec2 tabPos(vpTab->WorkPos.x, vpTab->WorkPos.y + kTabBarH);
+        const ImVec2 tabSize(vpTab->WorkSize.x, vpTab->WorkSize.y - kFooterH - kTabBarH);
+        // Dispatch by asset type: material assets get the node-graph editor, script
+        // assets the code editor. (Cheap header sniff; both panels cache their state.)
+        if (MaterialEditorPanel::isMaterialAsset(tabPath))
+            MaterialEditorPanel::render(ctx, tabPath, tabPos, tabSize);
+        else
+            ScriptEditorPanel::render(ctx, tabPath, tabPos, tabSize);
         return;
     }
 
@@ -4140,9 +4149,10 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				{
 					requestGuarded(GuardedAction::OpenScenePath, file->fullPath);
 				}
-				// Script assets open a syntax-highlighting code editor tab. Other asset
-				// types have no dedicated editor yet, so a double-click on them is a no-op.
-				else if (ScriptEditorPanel::isScriptAsset(file->fullPath))
+				// Script assets open the code editor tab, material assets the node-graph
+				// editor tab. Other asset types have no dedicated editor yet → no-op.
+				else if (ScriptEditorPanel::isScriptAsset(file->fullPath) ||
+				         MaterialEditorPanel::isMaterialAsset(file->fullPath))
 				{
 				const std::string tabLabel = std::filesystem::path(file->name).stem().string();
 				auto it = std::find_if(ctx.tabs.begin(), ctx.tabs.end(),
