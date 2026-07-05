@@ -5,10 +5,46 @@
 #include "Diagnostics/Logger.h"
 #include "Diagnostics/Profiler.h"
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <fstream>
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
+
+// A mesh without texture coordinates (the built-in cube, or imported geometry that
+// carried none) leaves vUV = (0,0) at every vertex — which collapses UV-space material
+// nodes (Noise/FBM/Checker/TextureSample) and any texturing to a single point (e.g. noise
+// renders solid black). Generate box-projection UVs from position + normal so such meshes
+// still look right: each vertex projects onto the plane of its dominant normal axis
+// (triplanar-style), giving every cube face a clean unwrap. No-op when UVs already match.
+static void ensureMeshUVs(StaticMeshAsset& m)
+{
+    const size_t vcount = m.vertices.size() / 3;
+    if (vcount == 0 || m.uvs.size() == vcount * 2) return;
+
+    m.uvs.assign(vcount * 2, 0.0f);
+    const bool haveN = m.normals.size() == vcount * 3;
+    for (size_t i = 0; i < vcount; ++i)
+    {
+        const float px = m.vertices[i * 3 + 0];
+        const float py = m.vertices[i * 3 + 1];
+        const float pz = m.vertices[i * 3 + 2];
+        float ax = 0.0f, ay = 0.0f, az = 1.0f; // default to Z-projection when no normals
+        if (haveN)
+        {
+            ax = std::fabs(m.normals[i * 3 + 0]);
+            ay = std::fabs(m.normals[i * 3 + 1]);
+            az = std::fabs(m.normals[i * 3 + 2]);
+        }
+        float u, v;
+        if (ax >= ay && ax >= az)      { u = pz; v = py; } // X-facing face
+        else if (ay >= ax && ay >= az) { u = px; v = pz; } // Y-facing face
+        else                           { u = px; v = py; } // Z-facing face
+        // Unit primitives span [-0.5, 0.5] → map to [0, 1]; larger meshes just tile.
+        m.uvs[i * 2 + 0] = u + 0.5f;
+        m.uvs[i * 2 + 1] = v + 0.5f;
+    }
+}
 
 static std::vector<uint8_t> buildMetaChunk(const RuntimeAsset& a)
 {
@@ -115,6 +151,7 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 						a.boundsMax[k] = std::max(a.boundsMax[k], a.vertices[v + k]);
 					}
 			}
+			ensureMeshUVs(a); // loose meshes with no TEXC chunk get box-projected UVs
 		}
 		handle = m_staticMeshAssets.insert(std::move(a)); break;
 	}
@@ -856,7 +893,7 @@ bool ContentManager::replaceRuntimeAsset(SlotMap<T>& map, HE::UUID id, T asset)
 	return true;
 }
 
-HE::UUID ContentManager::registerStaticMesh(StaticMeshAsset asset)       { return registerRuntimeAsset(m_staticMeshAssets,  std::move(asset), HE::AssetType::StaticMesh);    }
+HE::UUID ContentManager::registerStaticMesh(StaticMeshAsset asset)       { ensureMeshUVs(asset); return registerRuntimeAsset(m_staticMeshAssets,  std::move(asset), HE::AssetType::StaticMesh);    }
 HE::UUID ContentManager::registerSkeletalMesh(SkeletalMeshAsset asset)   { return registerRuntimeAsset(m_skeletalMeshAssets, std::move(asset), HE::AssetType::SkeletalMesh); }
 HE::UUID ContentManager::registerTexture(TextureAsset asset)             { return registerRuntimeAsset(m_textureAssets,     std::move(asset), HE::AssetType::Texture);       }
 HE::UUID ContentManager::registerMaterial(MaterialAsset asset)           { return registerRuntimeAsset(m_materialAssets,    std::move(asset), HE::AssetType::Material);      }
