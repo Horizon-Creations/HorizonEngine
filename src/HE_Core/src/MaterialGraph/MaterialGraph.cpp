@@ -373,18 +373,21 @@ struct Scope
 std::string inputExpr(EmitCtx& c, const Scope& sc, const MatGraphNode& node,
                       int pinIdx, MatPinType wantType);
 
-// Allocate (or find) the HeParams slot for a named parameter. `keep` = how many of
-// the vec4's components carry the default value (1 float/bool, 2 vec2, 3 color, 4 vec4);
-// the rest stay 0. Same name reuses the slot so repeated Param nodes share one uniform.
-int paramSlot(EmitCtx& c, const MatGraphNode& n, bool isColor, int keep)
+// Allocate (or find) the HeParams slot for a named parameter. `kind` drives how many
+// of the vec4's components carry the default value (rest stay 0) AND the typed widget
+// shown outside the canvas. Same name reuses the slot so repeated Param nodes share
+// one uniform.
+int paramSlot(EmitCtx& c, const MatGraphNode& n, MatParamKind kind)
 {
     const std::string name = n.s.empty() ? ("param_" + std::to_string(n.id)) : n.s;
     for (size_t i = 0; i < c.params.size(); ++i)
         if (c.params[i].name == name)
             return (int)i;
+    const int keep = matParamKindComponents(kind);
     MatParamSlot slot;
     slot.name = name;
-    slot.isColor = isColor;
+    slot.kind = kind;
+    slot.isColor = (kind == MatParamKind::Color);
     for (int i = 0; i < 4; ++i) slot.value[i] = (i < keep) ? n.p[i] : 0.0f;
     c.params.push_back(std::move(slot));
     return (int)c.params.size() - 1;
@@ -473,14 +476,14 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
             decl = "vec3 " + v + " = normalize(heLight.camPos.xyz - vWorldPos);"; break;
         case MatNodeType::ParamFloat:
         {
-            const int slot = paramSlot(c, n, false, 1);
+            const int slot = paramSlot(c, n, MatParamKind::Float);
             decl = "float " + v + " = heParams.v[" + std::to_string(slot) + "].x; // param: "
                  + (n.s.empty() ? "?" : n.s);
             break;
         }
         case MatNodeType::ParamColor:
         {
-            const int slot = paramSlot(c, n, true, 3);
+            const int slot = paramSlot(c, n, MatParamKind::Color);
             decl = "vec3 " + v + " = heParams.v[" + std::to_string(slot) + "].xyz; // param: "
                  + (n.s.empty() ? "?" : n.s);
             break;
@@ -608,21 +611,21 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
             decl = "float " + v + " = " + (n.p[0] > 0.5f ? "1.0" : "0.0") + ";"; break;
         case MatNodeType::ParamVec2:
         {
-            const int slot = paramSlot(c, n, false, 2);
+            const int slot = paramSlot(c, n, MatParamKind::Vec2);
             decl = "vec2 " + v + " = heParams.v[" + std::to_string(slot) + "].xy; // param: "
                  + (n.s.empty() ? "?" : n.s);
             break;
         }
         case MatNodeType::ParamVec4:
         {
-            const int slot = paramSlot(c, n, false, 4);
+            const int slot = paramSlot(c, n, MatParamKind::Vec4);
             decl = "vec4 " + v + " = heParams.v[" + std::to_string(slot) + "]; // param: "
                  + (n.s.empty() ? "?" : n.s);
             break;
         }
         case MatNodeType::ParamBool:
         {
-            const int slot = paramSlot(c, n, false, 1);
+            const int slot = paramSlot(c, n, MatParamKind::Bool);
             // Threshold so a bool param reads cleanly as 0.0/1.0 even if set to e.g. 0.7.
             decl = "float " + v + " = step(0.5, heParams.v[" + std::to_string(slot) + "].x); // param: "
                  + (n.s.empty() ? "?" : n.s);

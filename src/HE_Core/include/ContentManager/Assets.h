@@ -129,6 +129,11 @@ struct MaterialAsset : public RuntimeAsset
 	// shaderParamData from the graph's Param nodes. Empty for hand-written shaders.
 	std::vector<std::string> graphParamNames;
 
+	// Parameter widget kinds (HE::MatParamKind as uint8) in slot order, parallel to
+	// graphParamNames — lets typed editors (central panel, entity Details) render the
+	// right widget (color picker / float / vec2 / vec4 / bool) without the node graph.
+	std::vector<uint8_t> graphParamTypes;
+
 	// Project textures the node graph's Texture Sample nodes reference, in slot order
 	// (heTexP0..). Loose assets keep paths; packing bakes them to graphTextureIds (MTLU).
 	std::vector<std::string> graphTexturePaths;

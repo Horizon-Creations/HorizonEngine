@@ -1,6 +1,7 @@
 #include "doctest.h"
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/DefaultAssets.h>
+#include <MaterialGraph/MaterialGraph.h> // HE::MatParamKind
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -158,13 +159,16 @@ TEST_CASE("ContentManager setMaterialParam sets node-graph params by name + roun
 	mat.name = "params"; mat.path = "params.hasset";
 	// Two exposed params: 'K' (scalar, slot 0) and 'Tint' (vec4, slot 1).
 	mat.graphParamNames = { "K", "Tint" };
+	mat.graphParamTypes = { (uint8_t)HE::MatParamKind::Float, (uint8_t)HE::MatParamKind::Vec4 };
 	mat.shaderParamData = { 1.0f, 0, 0, 0,   0.1f, 0.2f, 0.3f, 1.0f };
 	REQUIRE(cm.saveAsset(mat));
 	const HE::UUID id = cm.loadAsset("params.hasset");
 	REQUIRE(cm.getMaterial(id) != nullptr);
 
-	// Param names survive the MTRL-tail round-trip.
+	// Param names + widget kinds survive the MTRL-tail round-trip.
 	CHECK(cm.getMaterial(id)->graphParamNames == std::vector<std::string>{ "K", "Tint" });
+	CHECK(cm.getMaterial(id)->graphParamTypes == std::vector<uint8_t>{
+		(uint8_t)HE::MatParamKind::Float, (uint8_t)HE::MatParamKind::Vec4 });
 
 	// Set the scalar param by name → shaderParamData slot 0 updated.
 	const float kv[1] = { 0.42f };

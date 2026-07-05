@@ -189,6 +189,7 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 			}
 			HAsset::Reader::readVec(c->data,o,a.graphTexturePaths); // node-graph textures (paths)
 			HAsset::Reader::readVec(c->data,o,a.graphParamNames);  // param names (slot order)
+			HAsset::Reader::readVec(c->data,o,a.graphParamTypes);  // param widget kinds (slot order)
 		}
 		// Baked graph-texture UUIDs live in MTLU alongside shaderId/textureIds.
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_MTLU))
@@ -640,6 +641,7 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 		for (float f : a.shaderParamData) HAsset::Writer::appendPOD(b,f); // exposed params (HeParams)
 		HAsset::Writer::appendVec(b,a.graphTexturePaths);                 // node-graph textures (paths)
 		HAsset::Writer::appendVec(b,a.graphParamNames);                   // param names (slot order)
+		HAsset::Writer::appendVec(b,a.graphParamTypes);                   // param widget kinds (slot order)
 		w.addChunk(HAsset::CHUNK_MTRL,b.data(),b.size());
 		break;
 	}

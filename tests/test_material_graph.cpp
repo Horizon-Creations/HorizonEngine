@@ -371,11 +371,12 @@ TEST_CASE("MaterialGraph v5: logic nodes, If, and new parameter types")
 	bool sawTiling = false, sawTint = false, sawToggle = false;
 	for (const auto& sl : gen.params)
 	{
-		if (sl.name == "Tiling") { sawTiling = true;
+		if (sl.name == "Tiling") { sawTiling = true; CHECK(sl.kind == HE::MatParamKind::Vec2);
 			CHECK(sl.value[0] == doctest::Approx(4.0f)); CHECK(sl.value[1] == doctest::Approx(2.0f)); }
-		if (sl.name == "Tint")   { sawTint = true;
+		if (sl.name == "Tint")   { sawTint = true; CHECK(sl.kind == HE::MatParamKind::Vec4);
 			CHECK(sl.value[0] == doctest::Approx(0.3f)); CHECK(sl.value[3] == doctest::Approx(1.0f)); }
-		if (sl.name == "Toggle") { sawToggle = true; CHECK(sl.value[0] == doctest::Approx(1.0f)); }
+		if (sl.name == "Toggle") { sawToggle = true; CHECK(sl.kind == HE::MatParamKind::Bool);
+			CHECK(sl.value[0] == doctest::Approx(1.0f)); }
 	}
 	CHECK(sawTiling); CHECK(sawTint); CHECK(sawToggle);
 	CHECK(gen.glsl.find("step(0.5, heParams") != std::string::npos); // ParamBool threshold
