@@ -3988,7 +3988,7 @@ void OpenGLRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 }
 
 void* OpenGLRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& materialId,
-                                           uint32_t size, float yaw)
+                                           uint32_t size, float yaw, float pitch, float dist)
 {
 	const int S = std::clamp(static_cast<int>(size), 32, 1024);
 	if (!m_contentManager) m_contentManager = &cm;
@@ -4068,16 +4068,18 @@ void* OpenGLRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& 
 	GLint prevVP[4]; glGetIntegerv(GL_VIEWPORT, prevVP);
 	glBindFramebuffer(GL_FRAMEBUFFER, m_previewFBO);
 	glViewport(0, 0, S, S);
-	glClearColor(0.11f, 0.11f, 0.13f, 1.0f);
+	glClearColor(0.0f, 0.0f, 0.0f, 0.0f); // transparent — editor composites over its own backdrop
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 	glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LESS);
 	glDisable(GL_BLEND); glDisable(GL_CULL_FACE);
 
 	glUseProgram(prog);
-	const glm::vec3 camPos(0.0f, 0.0f, 3.1f);
+	// Orbit camera around the sphere at the origin (yaw/pitch/dist from the editor).
+	const float cp = std::cos(pitch), sp = std::sin(pitch);
+	const glm::vec3 camPos(std::sin(yaw) * cp * dist, sp * dist, std::cos(yaw) * cp * dist);
 	const glm::mat4 view = glm::lookAt(camPos, glm::vec3(0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
-	const glm::mat4 proj = glm::perspective(glm::radians(32.0f), 1.0f, 0.1f, 20.0f);
-	const glm::mat4 model = glm::rotate(glm::mat4(1.0f), yaw, glm::vec3(0.0f, 1.0f, 0.0f));
+	const glm::mat4 proj = glm::perspective(glm::radians(32.0f), 1.0f, 0.05f, 50.0f);
+	const glm::mat4 model(1.0f);
 	struct { glm::mat4 mvp, model; glm::vec4 color, flags, pbr; } obj;
 	obj.mvp = proj * view * model; obj.model = model;
 	obj.color = glm::vec4(ma ? glm::vec3(ma->baseColor[0], ma->baseColor[1], ma->baseColor[2]) : glm::vec3(1.0f), 1.0f);

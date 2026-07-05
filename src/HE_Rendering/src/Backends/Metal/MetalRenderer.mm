@@ -3539,7 +3539,7 @@ void MetalRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 }
 
 void* MetalRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& materialId,
-                                           uint32_t size, float yaw)
+                                           uint32_t size, float yaw, float pitch, float dist)
 {
 	const int S = std::clamp(static_cast<int>(size), 32, 1024);
 	if (!m_contentManager) m_contentManager = &cm;
@@ -3609,7 +3609,7 @@ void* MetalRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& m
 	rp.colorAttachments[0].texture     = colorTex;
 	rp.colorAttachments[0].loadAction  = MTLLoadActionClear;
 	rp.colorAttachments[0].storeAction = MTLStoreActionStore;
-	rp.colorAttachments[0].clearColor  = MTLClearColorMake(0.11, 0.11, 0.13, 1.0);
+	rp.colorAttachments[0].clearColor  = MTLClearColorMake(0.0, 0.0, 0.0, 0.0); // transparent
 	rp.depthAttachment.texture     = (__bridge id<MTLTexture>)m_previewDepthTex;
 	rp.depthAttachment.loadAction  = MTLLoadActionClear;
 	rp.depthAttachment.storeAction = MTLStoreActionDontCare;
@@ -3620,10 +3620,11 @@ void* MetalRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& m
 	[enc setRenderPipelineState:pso];
 	[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
 
-	const glm::vec3 camPos(0.0f, 0.0f, 3.1f);
+	const float cp = std::cos(pitch), sp = std::sin(pitch);
+	const glm::vec3 camPos(std::sin(yaw) * cp * dist, sp * dist, std::cos(yaw) * cp * dist);
 	const glm::mat4 view  = glm::lookAt(camPos, glm::vec3(0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
-	const glm::mat4 proj  = glm::perspective(glm::radians(32.0f), 1.0f, 0.1f, 20.0f);
-	const glm::mat4 model = glm::rotate(glm::mat4(1.0f), yaw, glm::vec3(0.0f, 1.0f, 0.0f));
+	const glm::mat4 proj  = glm::perspective(glm::radians(32.0f), 1.0f, 0.05f, 50.0f);
+	const glm::mat4 model(1.0f);
 	UnlitUniforms ui;
 	ui.mvp   = proj * view * model;
 	ui.model = model;

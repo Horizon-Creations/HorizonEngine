@@ -1462,7 +1462,34 @@ void EditorApplication::dumpFrameHeadless()
 	// Witness the material-preview offscreen path (HE_DUMP_PREVIEW + HE_PREVIEW_DUMP):
 	// render the test material's preview sphere and let the backend dump it.
 	if (const char* pv = std::getenv("HE_DUMP_PREVIEW"); pv && *pv && s_matTestId != HE::UUID{})
-		r->RenderMaterialPreview(contentManager(), s_matTestId, 512, 0.6f);
+	{
+		r->RenderMaterialPreview(contentManager(), s_matTestId, 512, 0.6f, 0.35f, 3.1f);
+		// Stress the property-change→re-preview path (repro for the side-panel crash):
+		// mutate the material's shader source + params like an editor edit would, then
+		// re-preview. HE_DUMP_PREVIEW_STRESS=N repeats N times.
+		if (const char* sp = std::getenv("HE_DUMP_PREVIEW_STRESS"); sp && *sp)
+		{
+			const int reps = std::max(1, std::atoi(sp));
+			for (int k = 0; k < reps; ++k)
+			{
+				if (MaterialAsset* m = contentManager().getMaterialMutable(s_matTestId))
+				{
+					// Rebuild the graph's shader with a changed constant → new source hash
+					// (forces a program/pipeline rebuild), and resize the preview target.
+					HE::MaterialGraph g;
+					if (!m->nodeGraphJson.empty()) HE::materialGraphFromJson(m->nodeGraphJson, g);
+					const HE::MatShaderGen gen = HE::generateFragment(g);
+					m->customShaderFragGlsl = gen.glsl + "\n// v" + std::to_string(k);
+					m->shaderParamData.clear();
+					for (const auto& slot : gen.params)
+						m->shaderParamData.insert(m->shaderParamData.end(), slot.value, slot.value + 4);
+				}
+				r->InvalidateMaterial(s_matTestId);
+				r->RenderMaterialPreview(contentManager(), s_matTestId, 200 + k * 16, 0.6f + k * 0.1f, 0.35f, 3.1f);
+			}
+			Logger::Log(Logger::LogLevel::Info, "EditorApplication: preview stress loop done");
+		}
+	}
 	for (int i = 0; i < 3; ++i)
 		r->Render();
 

@@ -40,6 +40,12 @@ struct State
 	bool          boxSel   = false;  // rubber-band box-select in progress
 	ImVec2        boxStart;          // box-select anchor (screen space)
 	int           viewMode = 0;      // right pane: 0 = graph canvas, 1 = generated shader code
+	// Preview orbit camera (drag to rotate, wheel to zoom). Re-rendered only when the
+	// camera, size, or material changes — the returned texture handle is reused otherwise.
+	float         previewYaw = 0.6f, previewPitch = 0.35f, previewDist = 3.1f;
+	void*         previewTex   = nullptr;
+	bool          previewDirty = true;
+	int           previewPx    = 0;
 	// Live link drag: source pin (node, pin index, output side?) or inactive (node == 0).
 	int  dragNode = 0, dragPin = 0;
 	bool dragFromOutput = true;
@@ -473,21 +479,36 @@ void render(AppContext& ctx, const std::string& assetPath,
 	ImGui::BeginChild("##matLeft", ImVec2(leftW, 0), ImGuiChildFlags_Borders);
 	{
 		ImGui::TextDisabled("Preview");
-		ImGui::BeginChild("##matPreview", ImVec2(0, 220), ImGuiChildFlags_Borders);
+		ImGui::BeginChild("##matPreview", ImVec2(0, 240), ImGuiChildFlags_Borders);
 		{
-			// Live material preview: a slowly-spinning sphere shaded with THIS material,
-			// rendered offscreen by the backend and shown via ImGui::Image. Falls back to
-			// a placeholder when the backend has no preview path (returns null).
-			const ImVec2 av = ImGui::GetContentRegionAvail();
+			// Live material preview: a sphere shaded with THIS material, rendered
+			// offscreen (transparent background) and composited over a gradient — an
+			// orbit camera you drag to rotate and wheel to zoom, like a mini viewport.
+			const ImVec2 org = ImGui::GetCursorScreenPos();
+			const ImVec2 av  = ImGui::GetContentRegionAvail();
+			ImDrawList* pdl = ImGui::GetWindowDrawList();
+			// Vertical gradient backdrop.
+			pdl->AddRectFilledMultiColor(org, ImVec2(org.x + av.x, org.y + av.y),
+				IM_COL32(58, 62, 74, 255), IM_COL32(58, 62, 74, 255),
+				IM_COL32(22, 24, 30, 255), IM_COL32(22, 24, 30, 255));
+
 			const int px = (int)std::min(av.x, av.y);
-			void* tex = nullptr;
-			if (!st.isFunction && ctx.renderer && ctx.contentManager &&
+			if (px != st.previewPx) { st.previewPx = px; st.previewDirty = true; }
+			// The preview target is shared across material tabs, so re-render whenever the
+			// last-drawn material isn't ours (e.g. after a tab switch), plus on any local
+			// change (camera/size/material edit). Reuse the handle otherwise.
+			static HE::UUID s_lastPreviewMat{};
+			if (s_lastPreviewMat != st.materialId) st.previewDirty = true;
+			if (st.previewDirty && !st.isFunction && ctx.renderer && ctx.contentManager &&
 			    st.materialId != HE::UUID{} && px >= 32)
 			{
-				const float yaw = (float)ImGui::GetTime() * 0.6f;
-				tex = ctx.renderer->RenderMaterialPreview(*ctx.contentManager, st.materialId,
-				                                          (uint32_t)px, yaw);
+				st.previewTex = ctx.renderer->RenderMaterialPreview(*ctx.contentManager, st.materialId,
+					(uint32_t)px, st.previewYaw, st.previewPitch, st.previewDist);
+				st.previewDirty  = false;
+				s_lastPreviewMat = st.materialId;
 			}
+			void* tex = st.previewTex;
+
 			if (tex)
 			{
 				const bool flipY = (ctx.backend == HE::RendererBackend::OpenGL);
@@ -498,11 +519,26 @@ void render(AppContext& ctx, const std::string& assetPath,
 					flipY ? ImVec2(1, 0) : ImVec2(1, 1));
 			}
 			else
+				pdl->AddText(ImVec2(org.x + av.x * 0.5f - 28.0f, org.y + av.y * 0.5f - 6.0f),
+					IM_COL32(150, 150, 150, 255), "(preview)");
+
+			// Orbit interaction over the whole preview area (an invisible button on top).
+			ImGui::SetCursorScreenPos(org);
+			ImGui::InvisibleButton("##orbit", ImVec2(std::max(av.x, 1.0f), std::max(av.y, 1.0f)));
+			if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
 			{
-				const ImVec2 cur = ImGui::GetCursorScreenPos();
-				ImGui::GetWindowDrawList()->AddText(
-					ImVec2(cur.x + av.x * 0.5f - 28.0f, cur.y + av.y * 0.5f - 6.0f),
-					IM_COL32(140, 140, 140, 255), "(preview)");
+				const ImVec2 md = ImGui::GetIO().MouseDelta;
+				if (md.x != 0.0f || md.y != 0.0f)
+				{
+					st.previewYaw   -= md.x * 0.01f;
+					st.previewPitch  = std::clamp(st.previewPitch + md.y * 0.01f, -1.45f, 1.45f);
+					st.previewDirty  = true;
+				}
+			}
+			if (ImGui::IsItemHovered() && ImGui::GetIO().MouseWheel != 0.0f)
+			{
+				st.previewDist  = std::clamp(st.previewDist - ImGui::GetIO().MouseWheel * 0.25f, 1.6f, 8.0f);
+				st.previewDirty = true;
 			}
 		}
 		ImGui::EndChild();
@@ -762,22 +798,34 @@ void render(AppContext& ctx, const std::string& assetPath,
 		}
 	}
 
-	// ── Pan (MMB drag), box-select (LMB drag on empty), add-node (RMB) ───────────
+	// ── Pan (drag empty space or MMB), box-select (Shift+LMB on empty), add (RMB) ─
 	const bool onEmpty = ImGui::IsWindowHovered() && !ImGui::IsAnyItemHovered()
 	                     && st.dragNode == 0 && !ImGui::IsAnyItemActive();
 	// Middle-drag pans regardless of what's under the cursor.
-	if (ImGui::IsWindowHovered() && st.dragNode == 0 &&
+	if (ImGui::IsWindowHovered() && st.dragNode == 0 && !st.boxSel &&
 	    ImGui::IsMouseDragging(ImGuiMouseButton_Middle))
 	{
 		st.scroll.x += ImGui::GetIO().MouseDelta.x;
 		st.scroll.y += ImGui::GetIO().MouseDelta.y;
 	}
-	// LMB press on empty canvas starts a rubber-band box-select (Shift = additive).
+	// Left-drag on empty canvas PANS the view (trackpad-friendly — no middle button
+	// needed); hold Shift to rubber-band box-select instead. Clicking empty (no drag,
+	// no Shift) clears the selection.
 	if (onEmpty && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
 	{
-		st.boxSel   = true;
-		st.boxStart = ImGui::GetIO().MousePos;
-		if (!ImGui::GetIO().KeyShift) st.selection.clear();
+		if (ImGui::GetIO().KeyShift)
+		{
+			st.boxSel   = true;
+			st.boxStart = ImGui::GetIO().MousePos;
+		}
+		else
+			st.selection.clear();
+	}
+	if (onEmpty && !st.boxSel && ImGui::IsMouseDragging(ImGuiMouseButton_Left) &&
+	    !ImGui::GetIO().KeyShift)
+	{
+		st.scroll.x += ImGui::GetIO().MouseDelta.x;
+		st.scroll.y += ImGui::GetIO().MouseDelta.y;
 	}
 	if (st.boxSel)
 	{
@@ -902,7 +950,10 @@ void render(AppContext& ctx, const std::string& assetPath,
 	// Structural / committed edits (either column) → regenerate + push into the live material.
 	if (deleteNode != 0) { st.graph.removeNode(deleteNode); structuralEdit = true; }
 	if ((structuralEdit || paramEdit || panelEdit) && assetOk)
+	{
 		applyToMaterial(st, ctx);
+		st.previewDirty = true; // material changed → refresh the preview
+	}
 
 	ImGui::End();
 }
