@@ -840,14 +840,70 @@ void render(AppContext& ctx, const std::string& assetPath,
 			if (pp.node == node && pp.pin == pin && pp.output == output) return &pp;
 		return nullptr;
 	};
-	for (const auto& l : st.graph.links)
+	// Point→segment distance + a cubic-bezier sampler, used to hit-test the mouse
+	// against a link so it can be hovered and clicked away.
+	auto segDist = [](ImVec2 pt, ImVec2 a, ImVec2 b) -> float {
+		const ImVec2 ab(b.x - a.x, b.y - a.y), ap(pt.x - a.x, pt.y - a.y);
+		const float len2 = ab.x * ab.x + ab.y * ab.y;
+		float u = len2 > 0.0f ? (ap.x * ab.x + ap.y * ab.y) / len2 : 0.0f;
+		u = u < 0.0f ? 0.0f : (u > 1.0f ? 1.0f : u);
+		const float dx = pt.x - (a.x + ab.x * u), dy = pt.y - (a.y + ab.y * u);
+		return std::sqrt(dx * dx + dy * dy);
+	};
+	auto bez = [](ImVec2 p0, ImVec2 p1, ImVec2 p2, ImVec2 p3, float t) -> ImVec2 {
+		const float w = 1.0f - t, w0 = w * w * w, w1 = 3 * w * w * t, w2 = 3 * w * t * t, w3 = t * t * t;
+		return ImVec2(w0 * p0.x + w1 * p1.x + w2 * p2.x + w3 * p3.x,
+		              w0 * p0.y + w1 * p1.y + w2 * p2.y + w3 * p3.y);
+	};
+
+	// A link is "pickable" only over the empty canvas (not while dragging/box-selecting).
+	const bool  canPickLink = canvasHovered && st.dragNode == 0 && !st.boxSel;
+	const ImVec2 lmouse = ImGui::GetIO().MousePos;
+	int   hoverLink  = -1;
+	float hoverLinkD = 1e9f;
+	bool  linkHot    = false; // gates box-select / add-node so a link click isn't stolen
+
+	for (size_t li = 0; li < st.graph.links.size(); ++li)
 	{
+		const HE::MatGraphLink& l = st.graph.links[li];
 		const PinPos* a = pinAt(l.srcNode, l.srcPin, true);
 		const PinPos* b = pinAt(l.dstNode, l.dstPin, false);
 		if (!a || !b) continue;
 		const float t = std::max(40.0f, fabsf(b->pos.x - a->pos.x) * 0.5f);
-		dl->AddBezierCubic(a->pos, ImVec2(a->pos.x + t, a->pos.y),
-		                   ImVec2(b->pos.x - t, b->pos.y), b->pos, pinColor(a->type), 2.0f);
+		const ImVec2 c1(a->pos.x + t, a->pos.y), c2(b->pos.x - t, b->pos.y);
+		dl->AddBezierCubic(a->pos, c1, c2, b->pos, pinColor(a->type), 2.0f);
+		if (canPickLink)
+		{
+			ImVec2 prev = a->pos;
+			for (int s = 1; s <= 20; ++s)
+			{
+				const ImVec2 cur = bez(a->pos, c1, c2, b->pos, s / 20.0f);
+				const float dd = segDist(lmouse, prev, cur);
+				if (dd < hoverLinkD) { hoverLinkD = dd; hoverLink = (int)li; }
+				prev = cur;
+			}
+		}
+	}
+	// Hovered link → highlight in red + click to sever it (disconnect its input pin).
+	if (canPickLink && hoverLink >= 0 && hoverLinkD <= 7.0f)
+	{
+		const HE::MatGraphLink& l = st.graph.links[hoverLink];
+		if (const PinPos* a = pinAt(l.srcNode, l.srcPin, true))
+		if (const PinPos* b = pinAt(l.dstNode, l.dstPin, false))
+		{
+			linkHot = true;
+			const float t = std::max(40.0f, fabsf(b->pos.x - a->pos.x) * 0.5f);
+			dl->AddBezierCubic(a->pos, ImVec2(a->pos.x + t, a->pos.y),
+			                   ImVec2(b->pos.x - t, b->pos.y), b->pos, IM_COL32(255, 90, 90, 255), 3.5f);
+			ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+			ImGui::SetTooltip("Click to remove link");
+			if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+			{
+				st.graph.disconnectInput(l.dstNode, l.dstPin);
+				structuralEdit = true;
+				linkHot = false; // link is gone this frame
+			}
+		}
 	}
 
 	// ── Live link drag ──
@@ -893,7 +949,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 	}
 	// Left-press on empty canvas begins a rubber-band box-select; a plain click (no
 	// drag) just clears the selection. Shift keeps the existing selection (additive).
-	if (canvasActive && st.dragNode == 0 && !st.boxSel &&
+	if (canvasActive && st.dragNode == 0 && !st.boxSel && !linkHot &&
 	    ImGui::IsMouseClicked(ImGuiMouseButton_Left))
 	{
 		st.boxSel   = true;
@@ -930,8 +986,8 @@ void render(AppContext& ctx, const std::string& assetPath,
 		st.selectedNode = 0;
 		structuralEdit = true;
 	}
-	// Right-click over empty canvas (the bg button is hovered, not a node) → add-node.
-	if (canvasHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right))
+	// Right-click over empty canvas (the bg button is hovered, not a node/link) → add-node.
+	if (canvasHovered && !linkHot && ImGui::IsMouseClicked(ImGuiMouseButton_Right))
 		ImGui::OpenPopup("##addNode");
 	// Fixed-size popup with an internal scroll region: the size never depends on the
 	// filtered result count, so the window can't grow/reposition (which shifted the
