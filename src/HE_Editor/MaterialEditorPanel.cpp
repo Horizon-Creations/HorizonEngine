@@ -257,6 +257,61 @@ bool pasteInto(State& st, const std::string& payload, float atX, float atY)
 	return true;
 }
 
+// Function tabs: edit the function's INTERFACE — its FnInput/FnOutput nodes — as one
+// list (rename, retype, add, remove) instead of hunting nodes on the canvas. The order
+// shown matches the call-node pin order (sorted by node id, same as matFunctionPins).
+bool drawFunctionInterfacePanel(MaterialGraph& g)
+{
+	bool committed = false;
+	static const char* kTypes[] = { "Float", "Vec2", "Vec3", "Vec4" };
+	int removeId = 0;
+
+	auto section = [&](const char* title, MatNodeType type, const char* addLabel,
+	                   const char* namePrefix)
+	{
+		ImGui::TextDisabled("%s", title);
+		ImGui::Separator();
+		std::vector<MatGraphNode*> rows;
+		for (auto& n : g.nodes) if (n.type == type) rows.push_back(&n);
+		std::sort(rows.begin(), rows.end(),
+		          [](const MatGraphNode* a, const MatGraphNode* b){ return a->id < b->id; });
+		for (MatGraphNode* n : rows)
+		{
+			ImGui::PushID(n->id);
+			ImGui::SetNextItemWidth(118.0f);
+			ImGui::InputText("##nm", &n->s);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			ImGui::SameLine();
+			int t = std::clamp(static_cast<int>(n->p[0]), 0, 3);
+			ImGui::SetNextItemWidth(66.0f);
+			if (ImGui::Combo("##ty", &t, kTypes, 4)) { n->p[0] = (float)t; committed = true; }
+			ImGui::SameLine();
+			// A function needs at least one output; inputs may go to zero.
+			const bool lastOutput = type == MatNodeType::FnOutput && rows.size() <= 1;
+			ImGui::BeginDisabled(lastOutput);
+			if (ImGui::SmallButton("x")) removeId = n->id;
+			ImGui::EndDisabled();
+			ImGui::PopID();
+		}
+		if (ImGui::SmallButton(addLabel))
+		{
+			// Drop the new node below the lowest sibling so it lands visibly on canvas.
+			float y = 40.0f; const float x = type == MatNodeType::FnInput ? 40.0f : 420.0f;
+			for (const MatGraphNode* n : rows) y = std::max(y, n->y + 90.0f);
+			const int id = g.addNode(type, x, y);
+			g.findNode(id)->s = std::string(namePrefix) + std::to_string(rows.size() + 1);
+			committed = true;
+		}
+	};
+
+	section("Inputs",  MatNodeType::FnInput,  "+ Add Input",  "In");
+	ImGui::Spacing(); ImGui::Spacing();
+	section("Outputs", MatNodeType::FnOutput, "+ Add Output", "Out");
+
+	if (removeId != 0) { g.removeNode(removeId); committed = true; }
+	return committed;
+}
+
 State& stateFor(const std::string& path, AppContext& ctx)
 {
 	State& st = g_states[path];
@@ -804,12 +859,13 @@ void render(AppContext& ctx, const std::string& assetPath,
 			{ st.previewNodeId = 0; st.previewDirty = true; }
 		}
 		ImGui::Spacing();
-		ImGui::TextDisabled("Properties");
+		ImGui::TextDisabled(st.isFunction ? "Interface" : "Properties");
 		ImGui::BeginChild("##matProps", ImVec2(0, 0), ImGuiChildFlags_Borders);
 		if (!st.isFunction)
 			panelEdit = drawParamConstPanel(st.graph);
 		else
-			ImGui::TextDisabled("(function graph — no exposed parameters)");
+			// Functions: edit the interface (named, typed inputs/outputs) centrally.
+			panelEdit = drawFunctionInterfacePanel(st.graph);
 		ImGui::EndChild();
 	}
 	ImGui::EndChild();
