@@ -1,4 +1,5 @@
 #include "ContentManager/ContentManager.h"
+#include "MaterialGraph/MaterialGraph.h" // instance sync: switch-permutation regenerate
 #include "ContentManager/HAsset.h"
 #include "Hpak/HpakReader.h"
 #include "JobSystem/JobSystem.h"
@@ -227,6 +228,14 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 			HAsset::Reader::readVec(c->data,o,a.graphTexturePaths); // node-graph textures (paths)
 			HAsset::Reader::readVec(c->data,o,a.graphParamNames);  // param names (slot order)
 			HAsset::Reader::readVec(c->data,o,a.graphParamTypes);  // param widget kinds (slot order)
+			// Param metadata + material-instance tail (absent in older files → defaults).
+			HAsset::Reader::readVec(c->data,o,a.graphParamMinMax);       // 2 floats per slot
+			HAsset::Reader::readVec(c->data,o,a.graphParamGroups);
+			HAsset::Reader::readVec(c->data,o,a.graphParamTooltips);
+			HAsset::Reader::readString(c->data,o,a.parentMaterialPath);  // non-empty = instance
+			HAsset::Reader::readVec(c->data,o,a.instanceOverriddenParams);
+			HAsset::Reader::readVec(c->data,o,a.instanceSwitchNames);
+			HAsset::Reader::readVec(c->data,o,a.instanceSwitchValues);
 		}
 		// Baked graph-texture UUIDs live in MTLU alongside shaderId/textureIds.
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_MTLU))
@@ -321,7 +330,121 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 		auto mtime = std::filesystem::last_write_time(fullPath, ec);
 		if (!ec) m_pathMtime[relativePath] = mtime;
 	}
+	// Material INSTANCES derive their effective shader/params from their parent —
+	// runs after the registry maps above so the recursive parent load is safe.
+	if (type == HE::AssetType::Material)
+		if (const MaterialAsset* m = getMaterial(id); m && !m->parentMaterialPath.empty())
+			syncMaterialInstance(id);
 	return id;
+}
+
+// ─── Material instances ───────────────────────────────────────────────────────
+void ContentManager::syncMaterialInstance(HE::UUID instanceId)
+{
+	// Instance chains (instance of an instance) are legal; a cycle would recurse
+	// forever through loadAsset → guard with a small depth cap.
+	static thread_local int s_depth = 0;
+	if (s_depth > 8) { Logger::Log(Logger::LogLevel::Warning,
+		"ContentManager: material-instance chain too deep / cyclic — sync aborted"); return; }
+	s_depth++;
+
+	MaterialAsset* inst = getMaterialMutable(instanceId);
+	const MaterialAsset* parent = nullptr;
+	if (inst && !inst->parentMaterialPath.empty())
+		parent = getMaterial(loadAsset(inst->parentMaterialPath));
+	if (!inst || !parent) { s_depth--; return; }
+
+	// Preserve the instance's current values for slots it overrides (matched BY NAME,
+	// so parent slot reordering can't mis-assign them).
+	auto overridden = [&](const std::string& nm)
+	{
+		return std::find(inst->instanceOverriddenParams.begin(),
+		                 inst->instanceOverriddenParams.end(), nm)
+		       != inst->instanceOverriddenParams.end();
+	};
+	std::map<std::string, std::array<float, 4>> oldValues;
+	for (size_t i = 0; i < inst->graphParamNames.size(); ++i)
+		if (i * 4 + 3 < inst->shaderParamData.size())
+			oldValues[inst->graphParamNames[i]] = { inst->shaderParamData[i*4+0],
+				inst->shaderParamData[i*4+1], inst->shaderParamData[i*4+2],
+				inst->shaderParamData[i*4+3] };
+
+	if (!inst->instanceSwitchNames.empty() && !parent->nodeGraphJson.empty())
+	{
+		// Switch overrides → REGENERATE from the parent's graph with the override map.
+		// The resulting source differs from the parent's → its own pipeline-cache entry;
+		// identical override sets across instances share one entry (hash-keyed).
+		HE::MaterialGraph g;
+		if (HE::materialGraphFromJson(parent->nodeGraphJson, g))
+		{
+			std::map<std::string, bool> ov;
+			for (size_t i = 0; i < inst->instanceSwitchNames.size() &&
+			                    i < inst->instanceSwitchValues.size(); ++i)
+				ov[inst->instanceSwitchNames[i]] = inst->instanceSwitchValues[i] != 0;
+			// Function graphs resolve through this manager; storage must outlive the call.
+			std::map<std::string, HE::MaterialGraph> fnStore;
+			HE::MatFunctionLoader loader = [&](const std::string& path) -> const HE::MaterialGraph*
+			{
+				if (auto it = fnStore.find(path); it != fnStore.end()) return &it->second;
+				const MaterialFunctionAsset* fn = getMaterialFunction(loadAsset(path));
+				if (!fn || fn->nodeGraphJson.empty()) return nullptr;
+				HE::MaterialGraph fg;
+				if (!HE::materialGraphFromJson(fn->nodeGraphJson, fg)) return nullptr;
+				return &(fnStore[path] = std::move(fg));
+			};
+			const HE::MatShaderGen gen = HE::generateFragment(g, loader, &ov);
+			inst->customShaderFragGlsl = gen.glsl;
+			inst->graphParamNames.clear(); inst->graphParamTypes.clear();
+			inst->graphParamMinMax.clear(); inst->graphParamGroups.clear();
+			inst->graphParamTooltips.clear(); inst->shaderParamData.clear();
+			for (const auto& slot : gen.params)
+			{
+				inst->graphParamNames.push_back(slot.name);
+				inst->graphParamTypes.push_back(static_cast<uint8_t>(slot.kind));
+				inst->graphParamMinMax.insert(inst->graphParamMinMax.end(), { slot.minV, slot.maxV });
+				inst->graphParamGroups.push_back(slot.group);
+				inst->graphParamTooltips.push_back(slot.tooltip);
+				for (int k = 0; k < 4; ++k) inst->shaderParamData.push_back(slot.value[k]);
+			}
+			inst->graphTexturePaths = gen.textures;
+			// A regenerated permutation invalidates any parent-baked shaders.
+			inst->precompiledShaders.clear();
+		}
+	}
+	else
+	{
+		// Pure param overrides: byte-identical shader → the SAME cached pipeline.
+		inst->customShaderFragGlsl = parent->customShaderFragGlsl;
+		inst->graphParamNames      = parent->graphParamNames;
+		inst->graphParamTypes      = parent->graphParamTypes;
+		inst->graphParamMinMax     = parent->graphParamMinMax;
+		inst->graphParamGroups     = parent->graphParamGroups;
+		inst->graphParamTooltips   = parent->graphParamTooltips;
+		inst->graphTexturePaths    = parent->graphTexturePaths;
+		inst->graphTextureIds      = parent->graphTextureIds;
+		inst->shaderParamData      = parent->shaderParamData;
+		inst->precompiledShaders   = parent->precompiledShaders;
+	}
+	// Re-apply the instance's own values on overridden slots.
+	for (size_t i = 0; i < inst->graphParamNames.size(); ++i)
+	{
+		if (!overridden(inst->graphParamNames[i])) continue;
+		auto it = oldValues.find(inst->graphParamNames[i]);
+		if (it == oldValues.end() || i * 4 + 3 >= inst->shaderParamData.size()) continue;
+		for (int k = 0; k < 4; ++k) inst->shaderParamData[i * 4 + k] = it->second[k];
+	}
+	// Base surface state follows the parent (instances only vary params/switches).
+	for (int k = 0; k < 3; ++k) inst->baseColor[k] = parent->baseColor[k];
+	inst->metallic = parent->metallic; inst->roughness = parent->roughness;
+	inst->opacity  = parent->opacity;  inst->doubleSided = parent->doubleSided;
+	s_depth--;
+}
+
+void ContentManager::syncMaterialInstancesOf(const std::string& parentRelPath)
+{
+	for (const HE::UUID& id : enumerateIds(HE::AssetType::Material))
+		if (const MaterialAsset* m = getMaterial(id); m && m->parentMaterialPath == parentRelPath)
+			syncMaterialInstance(id);
 }
 
 // ─── loadAsset ────────────────────────────────────────────────────────────────
@@ -679,6 +802,13 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 		HAsset::Writer::appendVec(b,a.graphTexturePaths);                 // node-graph textures (paths)
 		HAsset::Writer::appendVec(b,a.graphParamNames);                   // param names (slot order)
 		HAsset::Writer::appendVec(b,a.graphParamTypes);                   // param widget kinds (slot order)
+		HAsset::Writer::appendVec(b,a.graphParamMinMax);                  // slider ranges (2/slot)
+		HAsset::Writer::appendVec(b,a.graphParamGroups);                  // panel groups
+		HAsset::Writer::appendVec(b,a.graphParamTooltips);                // hover help
+		HAsset::Writer::appendString(b,a.parentMaterialPath);             // instance parent
+		HAsset::Writer::appendVec(b,a.instanceOverriddenParams);          // overridden slots (names)
+		HAsset::Writer::appendVec(b,a.instanceSwitchNames);               // switch overrides…
+		HAsset::Writer::appendVec(b,a.instanceSwitchValues);              // …(name + 0/1)
 		w.addChunk(HAsset::CHUNK_MTRL,b.data(),b.size());
 		break;
 	}

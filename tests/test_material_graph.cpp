@@ -386,7 +386,7 @@ TEST_CASE("Every node type has a registry entry and its emit matches its pins")
 {
 	// The registry (pins) drives both the editor UI and codegen; a type missing from
 	// it, or an emit case reading a pin the registry doesn't declare, is a bug.
-	for (int t = 0; t <= (int)MatNodeType::Reroute; ++t)
+	for (int t = 0; t <= (int)MatNodeType::StaticSwitch; ++t)
 	{
 		const auto type = static_cast<MatNodeType>(t);
 		const HE::MatNodeDesc& d = HE::matNodeDesc(type);
@@ -506,6 +506,65 @@ TEST_CASE("Material function with several NAMED inputs/outputs: pins + inlining 
 	CHECK(glsl.find("0.250000") != std::string::npos);
 	// Both outputs produce distinct expressions (the OneMinus branch is inlined too).
 	CHECK(glsl.find("vec3(1.0) - ") != std::string::npos);
+}
+
+TEST_CASE("Static Switch: untaken branch is CULLED; override map flips the permutation")
+{
+	// switch(True = red const, False = blue const) → BaseColor
+	MaterialGraph g;
+	const int out = g.addNode(MatNodeType::Output);
+	const int sw  = g.addNode(MatNodeType::StaticSwitch); // default ON
+	g.findNode(sw)->s = "UseRed";
+	const int red = g.addNode(MatNodeType::ConstColor);
+	g.findNode(red)->p[0] = 0.91f; g.findNode(red)->p[1] = 0.0f; g.findNode(red)->p[2] = 0.0f;
+	const int blu = g.addNode(MatNodeType::ConstColor);
+	g.findNode(blu)->p[0] = 0.0f; g.findNode(blu)->p[1] = 0.0f; g.findNode(blu)->p[2] = 0.87f;
+	CHECK(g.connect(red, 0, sw, 0));
+	CHECK(g.connect(blu, 0, sw, 1));
+	CHECK(g.connect(sw,  0, out, 0));
+
+	// Default (on): ONLY the red branch is in the shader — blue is culled entirely.
+	const HE::MatShaderGen onGen = HE::generateFragment(g);
+	CHECK(onGen.glsl.find("0.910000") != std::string::npos);
+	CHECK(onGen.glsl.find("0.870000") == std::string::npos);
+	REQUIRE(onGen.switches.size() == 1);
+	CHECK(onGen.switches[0].first  == "UseRed");
+	CHECK(onGen.switches[0].second == true);
+
+	// Override map → the OTHER permutation, with a different source (its own hash).
+	std::map<std::string, bool> ov{ { "UseRed", false } };
+	const HE::MatShaderGen offGen = HE::generateFragment(g, {}, &ov);
+	CHECK(offGen.glsl.find("0.870000") != std::string::npos);
+	CHECK(offGen.glsl.find("0.910000") == std::string::npos);
+	CHECK(offGen.switches[0].second == false);
+	CHECK(onGen.glsl != offGen.glsl);
+}
+
+TEST_CASE("Param metadata (range/group/tooltip) flows into slots and survives JSON")
+{
+	MaterialGraph g;
+	const int out = g.addNode(MatNodeType::Output);
+	const int pf  = g.addNode(MatNodeType::ParamFloat);
+	HE::MatGraphNode* n = g.findNode(pf);
+	n->s = "Roughness"; n->p[0] = 0.4f;
+	n->p[1] = 0.0f; n->p[2] = 1.0f;         // slider range
+	n->group = "Surface"; n->tooltip = "0 = mirror, 1 = chalk";
+	CHECK(g.connect(pf, 0, out, 2));
+
+	const HE::MatShaderGen gen = HE::generateFragment(g);
+	REQUIRE(gen.params.size() == 1);
+	CHECK(gen.params[0].minV == doctest::Approx(0.0f));
+	CHECK(gen.params[0].maxV == doctest::Approx(1.0f));
+	CHECK(gen.params[0].group   == "Surface");
+	CHECK(gen.params[0].tooltip == "0 = mirror, 1 = chalk");
+
+	MaterialGraph r;
+	REQUIRE(HE::materialGraphFromJson(HE::materialGraphToJson(g), r));
+	bool found = false;
+	for (const auto& rn : r.nodes)
+		if (rn.type == MatNodeType::ParamFloat)
+		{ found = rn.group == "Surface" && rn.tooltip == "0 = mirror, 1 = chalk"; break; }
+	CHECK(found);
 }
 
 TEST_CASE("Comment boxes round-trip through graph JSON (and old JSON still loads)")

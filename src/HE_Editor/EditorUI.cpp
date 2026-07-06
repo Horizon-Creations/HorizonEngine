@@ -4426,6 +4426,39 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 					ImGui::CloseCurrentPopup();
 				}
 
+				// ── Material → create a child INSTANCE (params/switches only) ──
+				if (ext == ".hasset" && ctx.contentManager &&
+				    MaterialEditorPanel::isMaterialAsset(s_ctxMenuItem) &&
+				    ImGui::MenuItem("Create Material Instance"))
+				{
+					std::error_code ec;
+					const std::filesystem::path root(contentFolder.fullPath);
+					const std::string parentRel =
+						std::filesystem::relative(srcPath, root, ec).generic_string();
+					if (!ec)
+					{
+						// Unique sibling: <stem>_Inst[.N].hasset
+						std::filesystem::path dst =
+							srcPath.parent_path() / (srcPath.stem().string() + "_Inst.hasset");
+						for (int k = 2; std::filesystem::exists(dst) && k < 100; ++k)
+							dst = srcPath.parent_path() /
+								(srcPath.stem().string() + "_Inst" + std::to_string(k) + ".hasset");
+						MaterialAsset inst;
+						inst.type = HE::AssetType::Material;
+						inst.name = dst.stem().string();
+						inst.path = std::filesystem::relative(dst, root, ec).generic_string();
+						inst.parentMaterialPath = parentRel;
+						const HE::UUID iid = ctx.contentManager->registerMaterial(std::move(inst));
+						ctx.contentManager->syncMaterialInstance(iid); // derive shader/params
+						if (MaterialAsset* mi = ctx.contentManager->getMaterialMutable(iid))
+							ctx.contentManager->saveAsset(*mi);
+						ctx.contentRefreshPending = true;
+						Logger::Log(Logger::LogLevel::Info,
+							("Editor: created material instance of '" + parentRel + "'").c_str());
+					}
+					ImGui::CloseCurrentPopup();
+				}
+
 				// ── Add a StaticMesh .hasset to the scene ─────────────────
 				if (ext == ".hasset" && ctx.world && ctx.contentManager &&
 				    ImGui::MenuItem("Add to Scene"))

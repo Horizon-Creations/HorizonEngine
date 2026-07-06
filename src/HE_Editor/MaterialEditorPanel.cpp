@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cfloat>
+#include <cstring>
 #include <cstdint>
 #include <filesystem>
 #include <map>
@@ -53,6 +54,10 @@ struct State
 	                                 // wraps this function in a FunctionCall for the preview
 	int           editingComment = 0;// comment id whose title is in edit mode (0 = none)
 	std::string   compileLog;        // last cross-compile error ("" = ok) → inline banner
+	std::string   complexity;        // "~N ALU · M tex" estimate of the generated shader
+	// Material INSTANCE tabs (parentMaterialPath set): no canvas — an override panel.
+	bool          isInstance = false;
+	std::vector<std::pair<std::string, bool>> parentSwitches; // parent's static switches (name, default)
 	// Undo/redo: JSON snapshots of the whole graph (incl. comments). undoPos indexes the
 	// snapshot the canvas currently shows; edits truncate the redo tail.
 	std::vector<std::string> undo;
@@ -121,6 +126,32 @@ ImU32 pinColor(MatPinType t)
 	return IM_COL32_WHITE;
 }
 
+// Rough cost estimate of a generated fragment: statements in main() plus weighted
+// texture/noise calls. Not a profiler — a relative gauge so authors see when a graph
+// change makes the shader meaningfully heavier.
+std::string estimateComplexity(const std::string& glsl)
+{
+	const size_t mainPos = glsl.find("void main()");
+	const std::string body = mainPos == std::string::npos ? glsl : glsl.substr(mainPos);
+	auto count = [](const std::string& hay, const char* needle)
+	{
+		size_t c = 0, pos = 0; const size_t len = std::strlen(needle);
+		while ((pos = hay.find(needle, pos)) != std::string::npos) { ++c; pos += len; }
+		return c;
+	};
+	const size_t ops   = count(body, ";");
+	const size_t tex   = count(body, "texture(");
+	const size_t fbm   = count(body, "heFbm(") + count(body, "heFbm3(");
+	const size_t noise = count(body, "heValueNoise(") + count(body, "heValueNoise3(");
+	const size_t alu   = ops + tex * 8 + fbm * 24 + noise * 6;
+	char buf[96];
+	if (fbm + noise)
+		std::snprintf(buf, sizeof buf, "~%zu ALU · %zu tex · %zu noise", alu, tex, fbm + noise);
+	else
+		std::snprintf(buf, sizeof buf, "~%zu ALU · %zu tex", alu, tex);
+	return buf;
+}
+
 // Regenerate the shader from the graph and push it into the live MaterialAsset. The
 // renderers re-resolve the material's shader every frame (pipeline cached per source
 // hash), so the scene updates immediately; Save persists to disk.
@@ -150,17 +181,26 @@ void applyToMaterial(State& st, AppContext& ctx)
 	mat->shaderParamData.clear();
 	mat->graphParamNames.clear();
 	mat->graphParamTypes.clear();
+	mat->graphParamMinMax.clear();
+	mat->graphParamGroups.clear();
+	mat->graphParamTooltips.clear();
 	for (const auto& slot : gen.params)
 	{
 		mat->shaderParamData.insert(mat->shaderParamData.end(),
 		                            slot.value, slot.value + 4);
 		mat->graphParamNames.push_back(slot.name); // parallel to slots → runtime setMaterialParam
 		mat->graphParamTypes.push_back(static_cast<uint8_t>(slot.kind)); // typed editors
+		mat->graphParamMinMax.insert(mat->graphParamMinMax.end(), { slot.minV, slot.maxV });
+		mat->graphParamGroups.push_back(slot.group);
+		mat->graphParamTooltips.push_back(slot.tooltip);
 	}
 	// Project textures the graph samples, in slot order (heTexP0..) — the renderer
 	// binds these on loose materials; packing bakes them to graphTextureIds (MTLU).
 	mat->graphTexturePaths = gen.textures;
 	st.dirty = true;
+	st.complexity = estimateComplexity(st.lastGlsl);
+	// Live master→variants propagation: re-derive every loaded instance of this material.
+	ctx.contentManager->syncMaterialInstancesOf(st.relPath);
 
 	// Inline error check: cross-compile the fresh GLSL (Metal target — host-independent,
 	// pure codegen) and keep the log for the canvas banner. The library caches results by
@@ -336,14 +376,32 @@ State& stateFor(const std::string& path, AppContext& ctx)
 	else
 	{
 		const MaterialAsset* mat = ctx.contentManager->getMaterial(st.materialId);
-		if (!mat || mat->nodeGraphJson.empty() ||
+		if (mat && !mat->parentMaterialPath.empty())
+		{
+			// Material INSTANCE: no graph of its own — the tab becomes an override
+			// panel. Cache the parent's static switches for the switch section.
+			st.isInstance = true;
+			st.lastGlsl   = mat->customShaderFragGlsl;
+			const HE::UUID pid = ctx.contentManager->loadAsset(mat->parentMaterialPath);
+			if (const MaterialAsset* par = ctx.contentManager->getMaterial(pid))
+			{
+				HE::MaterialGraph pg;
+				if (!par->nodeGraphJson.empty() && HE::materialGraphFromJson(par->nodeGraphJson, pg))
+					for (const auto& n : pg.nodes)
+						if (n.type == MatNodeType::StaticSwitch)
+							st.parentSwitches.push_back({
+								n.s.empty() ? ("switch_" + std::to_string(n.id)) : n.s,
+								n.p[0] > 0.5f });
+			}
+		}
+		else if (!mat || mat->nodeGraphJson.empty() ||
 		    !HE::materialGraphFromJson(mat->nodeGraphJson, st.graph))
 		{
 			// No graph yet (fresh material, or one with only a hand-written shader):
 			// start from the default. Nothing is written until the first edit.
 			st.graph = MaterialGraph::makeDefault();
 		}
-		st.lastGlsl = HE::generateFragmentGlsl(st.graph);
+		if (!st.isInstance) st.lastGlsl = HE::generateFragmentGlsl(st.graph);
 	}
 	st.loaded = true;
 	pushUndo(st); // seed the undo stack with the as-loaded state (undo floor)
@@ -434,7 +492,11 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true)
 				committed |= ImGui::IsItemDeactivatedAfterEdit();
 			}
 			ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
-			ImGui::DragFloat("##v", &n.p[0], 0.01f);
+			// Metadata slider range (p[1]/p[2]): min < max → bounded slider, else free drag.
+			if (n.p[1] < n.p[2])
+				ImGui::SliderFloat("##v", &n.p[0], n.p[1], n.p[2]);
+			else
+				ImGui::DragFloat("##v", &n.p[0], 0.01f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
 			break;
 		case MatNodeType::ParamColor:
@@ -499,6 +561,13 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true)
 			if (ImGui::Checkbox("Default", &on)) { n.p[0] = on ? 1.0f : 0.0f; committed = true; }
 			break;
 		}
+		// ── v8: compile-time switch — toggling REGENERATES the shader (that's the point) ──
+		case MatNodeType::StaticSwitch:
+		{
+			bool on = n.p[0] > 0.5f;
+			if (ImGui::Checkbox("On (default)", &on)) { n.p[0] = on ? 1.0f : 0.0f; committed = true; }
+			break;
+		}
 		// ── v6: procedural texture — inline Scale (bigger = finer speckle) ──
 		case MatNodeType::NoiseTexture:
 			ImGui::SetNextItemWidth((kNodeW - 60.0f) * scale);
@@ -540,7 +609,8 @@ bool isConstNode(MatNodeType t)
 bool isNamedNode(MatNodeType t)
 {
 	return isParamNode(t) || isConstNode(t) ||
-	       t == MatNodeType::FnInput || t == MatNodeType::FnOutput;
+	       t == MatNodeType::FnInput || t == MatNodeType::FnOutput ||
+	       t == MatNodeType::StaticSwitch; // switch NAME lives in the header too
 }
 
 // Central "Parameters & Constants" panel: every Param/Const node of the graph in
@@ -562,11 +632,56 @@ bool drawParamConstPanel(MaterialGraph& graph)
 	{
 		ImGui::TextDisabled("Parameters (runtime-settable uniforms)");
 		ImGui::Separator();
+		// Group by the params' metadata group (first-seen order; "" first as ungrouped).
+		std::vector<std::string> groupOrder;
+		auto groupOf = [](const MatGraphNode* n){ return n->group; };
 		for (MatGraphNode* n : params)
+			if (std::find(groupOrder.begin(), groupOrder.end(), groupOf(n)) == groupOrder.end())
+				groupOrder.push_back(groupOf(n));
+		std::stable_sort(groupOrder.begin(), groupOrder.end(),
+			[](const std::string& a, const std::string& b){ return a.empty() && !b.empty(); });
+		for (const std::string& grp : groupOrder)
 		{
-			ImGui::PushID(n->id);
-			committed |= nodeParamWidgets(*n);
-			ImGui::PopID();
+			if (!grp.empty()) { ImGui::Spacing(); ImGui::SeparatorText(grp.c_str()); }
+			for (MatGraphNode* n : params)
+			{
+				if (groupOf(n) != grp) continue;
+				ImGui::PushID(n->id);
+				committed |= nodeParamWidgets(*n);
+				// Tooltip marker + metadata editor ("⋯" popup: slider range/group/tooltip).
+				ImGui::SameLine();
+				if (ImGui::SmallButton("..")) ImGui::OpenPopup("##pmeta");
+				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Edit metadata (range / group / tooltip)");
+				if (!n->tooltip.empty())
+				{
+					ImGui::SameLine();
+					ImGui::TextDisabled("(?)");
+					if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", n->tooltip.c_str());
+				}
+				if (ImGui::BeginPopup("##pmeta"))
+				{
+					ImGui::TextDisabled("Parameter metadata");
+					if (n->type == MatNodeType::ParamFloat)
+					{
+						ImGui::SetNextItemWidth(64.0f);
+						ImGui::DragFloat("Min", &n->p[1], 0.05f);
+						committed |= ImGui::IsItemDeactivatedAfterEdit();
+						ImGui::SameLine();
+						ImGui::SetNextItemWidth(64.0f);
+						ImGui::DragFloat("Max", &n->p[2], 0.05f);
+						committed |= ImGui::IsItemDeactivatedAfterEdit();
+						ImGui::TextDisabled("(min < max shows a slider)");
+					}
+					ImGui::SetNextItemWidth(150.0f);
+					ImGui::InputText("Group", &n->group);
+					committed |= ImGui::IsItemDeactivatedAfterEdit();
+					ImGui::SetNextItemWidth(150.0f);
+					ImGui::InputText("Tooltip", &n->tooltip);
+					committed |= ImGui::IsItemDeactivatedAfterEdit();
+					ImGui::EndPopup();
+				}
+				ImGui::PopID();
+			}
 		}
 	}
 	if (!consts.empty())
@@ -639,6 +754,144 @@ std::string takeOpenRequest()
 	return r;
 }
 
+// Material-INSTANCE editor pane: one row per parent parameter (override checkbox +
+// typed widget honoring slider metadata + tooltip), grouped like the central panel,
+// plus the parent's static switches (overriding one REBUILDS this instance's shader —
+// its own permutation; that recompile is the feature, not an accident).
+bool drawInstanceOverridePanel(AppContext& ctx, State& st, MaterialAsset& inst)
+{
+	bool valueEdit = false, structureEdit = false;
+	auto ovIndex = [&](const std::string& nm) -> int
+	{
+		for (size_t i = 0; i < inst.instanceOverriddenParams.size(); ++i)
+			if (inst.instanceOverriddenParams[i] == nm) return (int)i;
+		return -1;
+	};
+
+	ImGui::TextDisabled("Parameter Overrides");
+	ImGui::SameLine();
+	ImGui::TextDisabled("(checked = this instance's own value)");
+	ImGui::Separator();
+
+	// Same grouping as the master's panel, from the synced metadata arrays.
+	std::vector<std::string> groupOrder;
+	auto groupOf = [&](size_t i) -> std::string
+	{ return i < inst.graphParamGroups.size() ? inst.graphParamGroups[i] : std::string(); };
+	for (size_t i = 0; i < inst.graphParamNames.size(); ++i)
+		if (std::find(groupOrder.begin(), groupOrder.end(), groupOf(i)) == groupOrder.end())
+			groupOrder.push_back(groupOf(i));
+	std::stable_sort(groupOrder.begin(), groupOrder.end(),
+		[](const std::string& a, const std::string& b){ return a.empty() && !b.empty(); });
+
+	for (const std::string& grp : groupOrder)
+	{
+		if (!grp.empty()) { ImGui::Spacing(); ImGui::SeparatorText(grp.c_str()); }
+		for (size_t i = 0; i < inst.graphParamNames.size(); ++i)
+		{
+			if (groupOf(i) != grp) continue;
+			if (i * 4 + 3 >= inst.shaderParamData.size()) continue;
+			const std::string& nm = inst.graphParamNames[i];
+			float* v = &inst.shaderParamData[i * 4];
+			const auto kind = i < inst.graphParamTypes.size()
+				? static_cast<HE::MatParamKind>(inst.graphParamTypes[i]) : HE::MatParamKind::Float;
+			ImGui::PushID((int)i);
+			bool ov = ovIndex(nm) >= 0;
+			if (ImGui::Checkbox("##ov", &ov))
+			{
+				if (ov) inst.instanceOverriddenParams.push_back(nm);
+				else    inst.instanceOverriddenParams.erase(
+					        inst.instanceOverriddenParams.begin() + ovIndex(nm));
+				structureEdit = true; // un-override → value falls back to the parent (sync)
+			}
+			ImGui::SameLine();
+			ImGui::BeginDisabled(!ov);
+			ImGui::SetNextItemWidth(190.0f);
+			switch (kind)
+			{
+				case HE::MatParamKind::Color: ImGui::ColorEdit3("##v", v, ImGuiColorEditFlags_Float); break;
+				case HE::MatParamKind::Vec2:  ImGui::DragFloat2("##v", v, 0.01f); break;
+				case HE::MatParamKind::Vec4:  ImGui::DragFloat4("##v", v, 0.01f); break;
+				case HE::MatParamKind::Bool:
+				{
+					bool on = v[0] > 0.5f;
+					if (ImGui::Checkbox("##v", &on)) { v[0] = on ? 1.0f : 0.0f; valueEdit = true; }
+					break;
+				}
+				default: // Float — bounded slider when the parent authored a range
+				{
+					const float mn = i * 2 + 1 < inst.graphParamMinMax.size() ? inst.graphParamMinMax[i*2]   : 0.0f;
+					const float mx = i * 2 + 1 < inst.graphParamMinMax.size() ? inst.graphParamMinMax[i*2+1] : 0.0f;
+					if (mn < mx) ImGui::SliderFloat("##v", v, mn, mx);
+					else         ImGui::DragFloat("##v", v, 0.01f);
+					break;
+				}
+			}
+			if (ImGui::IsItemDeactivatedAfterEdit()) valueEdit = true;
+			ImGui::EndDisabled();
+			ImGui::SameLine();
+			ImGui::TextUnformatted(nm.empty() ? "param" : nm.c_str());
+			if (i < inst.graphParamTooltips.size() && !inst.graphParamTooltips[i].empty())
+			{
+				ImGui::SameLine();
+				ImGui::TextDisabled("(?)");
+				if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", inst.graphParamTooltips[i].c_str());
+			}
+			ImGui::PopID();
+		}
+	}
+
+	// ── Static switches: overriding one bakes a different permutation. ──
+	bool switchEdit = false;
+	if (!st.parentSwitches.empty())
+	{
+		ImGui::Spacing();
+		ImGui::SeparatorText("Static Switches");
+		ImGui::TextDisabled("(compile-time — toggling rebuilds this instance's shader)");
+		for (const auto& [swName, swDefault] : st.parentSwitches)
+		{
+			ImGui::PushID(swName.c_str());
+			int idx = -1;
+			for (size_t i = 0; i < inst.instanceSwitchNames.size(); ++i)
+				if (inst.instanceSwitchNames[i] == swName) { idx = (int)i; break; }
+			bool ov = idx >= 0;
+			if (ImGui::Checkbox("##sov", &ov))
+			{
+				if (ov)
+				{
+					inst.instanceSwitchNames.push_back(swName);
+					inst.instanceSwitchValues.push_back(swDefault ? 1 : 0);
+				}
+				else
+				{
+					inst.instanceSwitchNames.erase(inst.instanceSwitchNames.begin() + idx);
+					inst.instanceSwitchValues.erase(inst.instanceSwitchValues.begin() + idx);
+				}
+				switchEdit = true;
+			}
+			ImGui::SameLine();
+			bool val = idx >= 0 ? inst.instanceSwitchValues[idx] != 0 : swDefault;
+			ImGui::BeginDisabled(idx < 0 && !ov);
+			if (ImGui::Checkbox(swName.c_str(), &val) && idx >= 0)
+			{
+				inst.instanceSwitchValues[idx] = val ? 1 : 0;
+				switchEdit = true;
+			}
+			ImGui::EndDisabled();
+			ImGui::PopID();
+		}
+	}
+
+	if (structureEdit || switchEdit)
+		ctx.contentManager->syncMaterialInstance(st.materialId); // re-derive from the parent
+	if (valueEdit || structureEdit || switchEdit)
+	{
+		st.dirty = true;
+		st.lastGlsl = inst.customShaderFragGlsl; // shader view follows permutation changes
+		return true;
+	}
+	return false;
+}
+
 void render(AppContext& ctx, const std::string& assetPath,
             const ImVec2& pos, const ImVec2& size)
 {
@@ -660,20 +913,40 @@ void render(AppContext& ctx, const std::string& assetPath,
 	// ── Header: name, view toggle, save ────────────────────────────────────────
 	ImGui::TextUnformatted(st.name.c_str());
 	ImGui::SameLine();
-	ImGui::TextDisabled("%s%s", st.isFunction ? "material function" : "material graph",
+	ImGui::TextDisabled("%s%s",
+	                    st.isInstance ? "material instance"
+	                                  : (st.isFunction ? "material function" : "material graph"),
 	                    st.dirty ? "  (unsaved)" : "");
-	// Graph / Shader-code toggle for the right pane (functions have no shader).
+	// Shader complexity gauge (updated on every regenerate).
+	if (!st.isFunction && !st.complexity.empty())
+	{
+		ImGui::SameLine();
+		ImGui::TextDisabled("·  %s", st.complexity.c_str());
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("Estimated cost of the generated shader\n"
+			                  "(statements + weighted texture/noise calls)");
+	}
+	// Graph|Overrides / Shader-code toggle for the right pane (functions have no shader).
 	if (!st.isFunction)
 	{
 		ImGui::SameLine(ImGui::GetContentRegionAvail().x - 330.0f);
-		if (ImGui::RadioButton("Graph", st.viewMode == 0)) st.viewMode = 0;
+		if (ImGui::RadioButton(st.isInstance ? "Overrides" : "Graph", st.viewMode == 0)) st.viewMode = 0;
 		ImGui::SameLine();
 		if (ImGui::RadioButton("Shader Code", st.viewMode == 1)) st.viewMode = 1;
+	}
+	if (st.isInstance && mat)
+	{
+		ImGui::SameLine(ImGui::GetContentRegionAvail().x - 250.0f);
+		if (ImGui::Button("Open Parent") && ctx.contentManager)
+			s_openAssetRequest = (std::filesystem::path(ctx.contentManager->contentRoot())
+			                      / mat->parentMaterialPath).string();
 	}
 	ImGui::SameLine(ImGui::GetContentRegionAvail().x - 140.0f);
 	if (ImGui::Button(st.isFunction ? "Save Function" : "Save Material") && assetOk)
 	{
-		applyToMaterial(st, ctx);
+		// Instances have no graph — their state is already live on the asset; masters
+		// regenerate first so the saved file always matches the canvas.
+		if (!st.isInstance) applyToMaterial(st, ctx);
 		RuntimeAsset* toSave = st.isFunction ? static_cast<RuntimeAsset*>(fnAsset)
 		                                     : static_cast<RuntimeAsset*>(mat);
 		if (toSave && ctx.contentManager->saveAsset(*toSave)) st.dirty = false;
@@ -861,7 +1134,9 @@ void render(AppContext& ctx, const std::string& assetPath,
 		ImGui::Spacing();
 		ImGui::TextDisabled(st.isFunction ? "Interface" : "Properties");
 		ImGui::BeginChild("##matProps", ImVec2(0, 0), ImGuiChildFlags_Borders);
-		if (!st.isFunction)
+		if (st.isInstance)
+			ImGui::TextDisabled("(instance — edit overrides on the right)");
+		else if (!st.isFunction)
 			panelEdit = drawParamConstPanel(st.graph);
 		else
 			// Functions: edit the interface (named, typed inputs/outputs) centrally.
@@ -873,8 +1148,15 @@ void render(AppContext& ctx, const std::string& assetPath,
 
 	// ── Right column: graph canvas OR generated shader code ──────────────────────
 	ImGui::BeginChild("##matRight", ImVec2(0, 0), ImGuiChildFlags_Borders);
-	const bool showGraph = st.isFunction || st.viewMode == 0;
-	if (!showGraph)
+	const bool showGraph = !st.isInstance && (st.isFunction || st.viewMode == 0);
+	if (st.isInstance && st.viewMode == 0)
+	{
+		// Instance tabs replace the canvas with the override panel; edits are applied
+		// straight to the live asset (no graph → no regenerate/undo machinery here).
+		if (mat && drawInstanceOverridePanel(ctx, st, *mat))
+			st.previewDirty = true;
+	}
+	else if (!showGraph)
 	{
 		// Read-only generated fragment GLSL.
 		ImGui::TextDisabled("Generated fragment GLSL (read-only)");
@@ -1636,7 +1918,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 
 	// Structural / committed edits (either column) → regenerate + push into the live material.
 	if (deleteNode != 0) { st.graph.removeNode(deleteNode); structuralEdit = true; }
-	if ((structuralEdit || paramEdit || panelEdit || commentEdit) && assetOk)
+	if ((structuralEdit || paramEdit || panelEdit || commentEdit) && assetOk && !st.isInstance)
 	{
 		applyToMaterial(st, ctx);
 		pushUndo(st);           // every committed edit becomes an undo step
