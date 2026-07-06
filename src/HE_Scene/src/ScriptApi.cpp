@@ -4,6 +4,10 @@
 #include "HorizonScene/Components/TransformComponent.h"
 #include "HorizonScene/Components/NameComponent.h"
 #include "HorizonScene/Components/MaterialComponent.h"
+#include "HorizonScene/Components/UIElementComponent.h"
+#include "HorizonScene/Components/UITextComponent.h"
+#include "HorizonScene/Components/UIImageComponent.h"
+#include "HorizonScene/Components/UIButtonComponent.h"
 #include "ContentManager/ContentManager.h"
 #include <cstdio>
 
@@ -138,4 +142,109 @@ glm::vec4 getMaterialParam(HorizonWorld& world, ContentManager* content,
 	return glm::vec4(out[0], out[1], out[2], out[3]);
 }
 
+// ── In-game UI ────────────────────────────────────────────────────────────────
+
+void setUIText(HorizonWorld& world, uint32_t entityId, const std::string& text)
+{
+	auto& reg = world.registry();
+	entt::entity e = toEntity(entityId);
+	if (!reg.valid(e)) return;
+	if (auto* t = reg.try_get<UITextComponent>(e)) t->text = text;
+}
+
+std::string getUIText(HorizonWorld& world, uint32_t entityId)
+{
+	auto& reg = world.registry();
+	entt::entity e = toEntity(entityId);
+	if (!reg.valid(e)) return {};
+	const auto* t = reg.try_get<UITextComponent>(e);
+	return t ? t->text : std::string();
+}
+
+void setUIColor(HorizonWorld& world, uint32_t entityId, const glm::vec4& c)
+{
+	auto& reg = world.registry();
+	entt::entity e = toEntity(entityId);
+	if (!reg.valid(e)) return;
+	if (auto* img = reg.try_get<UIImageComponent>(e))  { img->tint = c; return; }
+	if (auto* txt = reg.try_get<UITextComponent>(e))   { txt->color = c; return; }
+	if (auto* btn = reg.try_get<UIButtonComponent>(e)) { btn->normalColor = c; }
+}
+
+glm::vec4 getUIColor(HorizonWorld& world, uint32_t entityId)
+{
+	auto& reg = world.registry();
+	entt::entity e = toEntity(entityId);
+	if (!reg.valid(e)) return glm::vec4(1.0f);
+	if (const auto* img = reg.try_get<UIImageComponent>(e))  return img->tint;
+	if (const auto* txt = reg.try_get<UITextComponent>(e))   return txt->color;
+	if (const auto* btn = reg.try_get<UIButtonComponent>(e)) return btn->normalColor;
+	return glm::vec4(1.0f);
+}
+
+void setUIVisible(HorizonWorld& world, uint32_t entityId, bool visible)
+{
+	auto& reg = world.registry();
+	entt::entity e = toEntity(entityId);
+	if (!reg.valid(e)) return;
+	if (auto* el = reg.try_get<UIElementComponent>(e)) el->active = visible;
+}
+
+bool isUIVisible(HorizonWorld& world, uint32_t entityId)
+{
+	auto& reg = world.registry();
+	entt::entity e = toEntity(entityId);
+	if (!reg.valid(e)) return false;
+	const auto* el = reg.try_get<UIElementComponent>(e);
+	return el && el->active;
+}
+
+void setUIPosition(HorizonWorld& world, uint32_t entityId, const glm::vec2& p)
+{
+	auto& reg = world.registry();
+	entt::entity e = toEntity(entityId);
+	if (!reg.valid(e)) return;
+	if (auto* el = reg.try_get<UIElementComponent>(e)) el->position = p;
+}
+
+glm::vec2 getUIPosition(HorizonWorld& world, uint32_t entityId)
+{
+	auto& reg = world.registry();
+	entt::entity e = toEntity(entityId);
+	if (!reg.valid(e)) return glm::vec2(0.0f);
+	const auto* el = reg.try_get<UIElementComponent>(e);
+	return el ? el->position : glm::vec2(0.0f);
+}
+
+void setUISize(HorizonWorld& world, uint32_t entityId, const glm::vec2& sz)
+{
+	auto& reg = world.registry();
+	entt::entity e = toEntity(entityId);
+	if (!reg.valid(e)) return;
+	if (auto* el = reg.try_get<UIElementComponent>(e)) el->size = sz;
+}
+
+glm::vec2 getUISize(HorizonWorld& world, uint32_t entityId)
+{
+	auto& reg = world.registry();
+	entt::entity e = toEntity(entityId);
+	if (!reg.valid(e)) return glm::vec2(0.0f);
+	const auto* el = reg.try_get<UIElementComponent>(e);
+	return el ? el->size : glm::vec2(0.0f);
+}
+
+bool setUIMaterialParam(HorizonWorld& world, ContentManager* content,
+                        uint32_t entityId, const std::string& name, const glm::vec4& value)
+{
+	if (!content) return false;
+	auto& reg = world.registry();
+	entt::entity e = toEntity(entityId);
+	if (!reg.valid(e)) return false;
+	const auto* img = reg.try_get<UIImageComponent>(e);
+	if (!img) return false;
+	const float v[4] = { value.x, value.y, value.z, value.w };
+	return content->setMaterialParam(img->materialAssetId, name, v, 4);
+}
+
 } // namespace ScriptApi
+

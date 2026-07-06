@@ -8,6 +8,8 @@
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/SceneSystems.h>
 #include <HorizonScene/ScriptContext.h>
+#include <HorizonScene/UIWidgetInstantiator.h>
+#include <Scripting/ScriptTypes.h>
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/EnvironmentComponent.h>
@@ -203,6 +205,10 @@ void GameApplication::OnInit()
 		Logger::Log(Logger::LogLevel::Info, "GameApplication: native game logic started");
 	}
 
+	// Expand UI widget assets into live UI entities before scripts start, so
+	// widget-spawned ScriptComponents get instances like hand-placed ones.
+	UIWidgetInstantiator::instantiateAll(*m_world, contentManager());
+
 	// ECS gameplay scripts (Lua/Python): the packaged game drives them exactly like
 	// the editor's play mode, so a shipped game behaves like PIE.
 	startScripts();
@@ -243,6 +249,49 @@ void GameApplication::updateScripts(float dt)
 	HE_PROFILE_SCOPE_N("ScriptUpdate");
 	for (auto& [entityId, instId] : m_scriptInstances)
 		m_scriptContext->callOnUpdate(instId, dt);
+}
+
+void GameApplication::updateUIInput()
+{
+	if (!m_world) return;
+
+	SDL_Window* w = window() ? window()->GetNativeWindow() : nullptr;
+	float mx = 0.0f, my = 0.0f;
+	const SDL_MouseButtonFlags buttons = SDL_GetMouseState(&mx, &my);
+
+	// The UI pass renders at drawable resolution; SDL reports the mouse in
+	// window points — rescale (HiDPI).
+	int ww = 1, wh = 1, pw = 1, ph = 1;
+	if (w)
+	{
+		SDL_GetWindowSize(w, &ww, &wh);
+		SDL_GetWindowSizeInPixels(w, &pw, &ph);
+	}
+	const float sx = ww > 0 ? static_cast<float>(pw) / ww : 1.0f;
+	const float sy = wh > 0 ? static_cast<float>(ph) / wh : 1.0f;
+
+	// While the fly-look holds the mouse captive there is no visible cursor —
+	// hover states clear and nothing is clickable (Esc releases the mouse).
+	const bool pointerValid = !m_mouseCaptured && w != nullptr;
+
+	std::vector<UIInputSystem::PointerEvent> events;
+	UIInputSystem::update(*m_world, m_uiInput,
+	                      static_cast<float>(pw), static_cast<float>(ph),
+	                      mx * sx, my * sy,
+	                      (buttons & SDL_BUTTON_LMASK) != 0, pointerValid,
+	                      events);
+
+	if (!m_scriptContext) return;
+	for (const auto& ev : events)
+	{
+		auto it = m_scriptInstances.find(ev.entity);
+		if (it == m_scriptInstances.end()) continue;
+		const UIScriptEvent se =
+			ev.type == UIInputSystem::PointerEvent::Type::Click ? UIScriptEvent::Click :
+			ev.type == UIInputSystem::PointerEvent::Type::HoverEnter ? UIScriptEvent::HoverEnter
+			                                                         : UIScriptEvent::HoverExit;
+		m_scriptContext->callOnUIEvent(it->second, se);
+	}
 }
 
 void GameApplication::setMouseCaptured(bool captured)
@@ -376,6 +425,9 @@ void GameApplication::OnRender(float deltaTime)
 	// Per-frame ECS script update (Lua/Python onUpdate), before the systems tick so
 	// script-driven transforms/params are reflected the same frame.
 	updateScripts(deltaTime);
+
+	// In-game UI pointer input (hover/click on buttons + scripted elements).
+	updateUIInput();
 
 	// Tick the shared gameplay/visual systems (weather, animation, particles, …) so a
 	// shipped game animates exactly like the editor preview. Feed the active scene

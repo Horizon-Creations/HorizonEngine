@@ -71,6 +71,9 @@ public:
     // Call script.onCollisionExit(self, otherEntityId). No-op if not defined.
     bool callOnCollisionExit(InstanceId id, uint32_t otherEntityId) override;
 
+    // Call script.onClick/onHoverEnter/onHoverExit(self). No-op if not defined.
+    bool callOnUIEvent(InstanceId id, UIScriptEvent ev) override;
+
     // Last error string from any failed compile or call.
     const std::string& lastError() const override { return m_lastError; }
 

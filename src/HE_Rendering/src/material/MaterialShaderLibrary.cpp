@@ -265,6 +265,57 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::standardVertex(Bac
     return m_vertCache.emplace(key, std::move(out)).first->second;
 }
 
+namespace
+{
+// Attribute-less screen-space quad vertex for materials on in-game UI quads.
+// Same varyings + U bind point as the standard vertex, so any cached material
+// fragment links against it unchanged (see the header for the U field layout).
+constexpr const char* kUIVertex = R"(#version 450
+layout(std140, set = 0, binding = 1) uniform U {
+    mat4 mvp; mat4 model; vec4 color; vec4 flags; vec4 pbr;
+} u;
+layout(location = 0) out vec3 vNormal;
+layout(location = 1) out vec3 vColor;
+layout(location = 2) out vec2 vUV;
+layout(location = 3) out vec3 vWorldPos;
+void main() {
+    vec2 c[4] = vec2[](vec2(0.0,0.0), vec2(1.0,0.0), vec2(0.0,1.0), vec2(1.0,1.0));
+    vec2 corner = c[gl_VertexIndex];
+    vec4 rect = u.model[0];
+    vec4 uvr  = u.model[1];
+    vec2 vp   = max(u.model[2].xy, vec2(1.0));
+    vec2 sp   = rect.xy + corner * rect.zw;
+    gl_Position = vec4(sp.x / vp.x * 2.0 - 1.0,
+                       1.0 - sp.y / vp.y * 2.0, 0.0, 1.0);
+    vNormal   = vec3(0.0, 0.0, 1.0);
+    vColor    = u.color.rgb;
+    vUV       = mix(uvr.xy, uvr.zw, corner);
+    vWorldPos = vec3(sp, 0.0);
+}
+)";
+} // namespace
+
+const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::uiVertex(Backend backend)
+{
+    const int key = static_cast<int>(backend);
+    if (auto it = m_uiVertCache.find(key); it != m_uiVertCache.end()) return it->second;
+
+    using namespace he::shaderc;
+    Compiled out;
+    if (backend == Backend::Metal)
+    {
+        // Pin U to vertex buffer 1 — the same slot the mesh path uses, so the
+        // UI pass binds its repurposed U block at a familiar index.
+        out = toCompiled(compileMslPinned(kUIVertex, Stage::Vertex,
+            { { Stage::Vertex, 0, 1, 1 } }));
+    }
+    else
+    {
+        out = toCompiled(compile(kUIVertex, Stage::Vertex, toTarget(backend)));
+    }
+    return m_uiVertCache.emplace(key, std::move(out)).first->second;
+}
+
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragment(
     uint64_t sourceHash, const std::string& glsl, Backend backend)
 {

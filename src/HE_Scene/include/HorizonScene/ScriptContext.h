@@ -69,6 +69,10 @@ public:
     // Call onCollisionExit(self, otherEntityId). No-op if not defined.
     bool callOnCollisionExit(ScriptEngine::InstanceId id, uint32_t otherEntityId);
 
+    // Call the UI pointer-event handler (onClick / onHoverEnter / onHoverExit,
+    // snake_case in Python). No-op if not defined.
+    bool callOnUIEvent(ScriptEngine::InstanceId id, UIScriptEvent ev);
+
     // Hot-reload: recompile script and patch function fields in live instances.
     // Data fields (non-function keys in instance tables) are preserved. The
     // 2-arg form routes by which backend owns the name (ambiguous across

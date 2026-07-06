@@ -44,6 +44,8 @@ public:
     virtual bool callOnUpdate(InstanceId id, float dt) = 0;
     virtual bool callOnCollisionEnter(InstanceId id, uint32_t otherEntityId) = 0;
     virtual bool callOnCollisionExit(InstanceId id, uint32_t otherEntityId) = 0;
+    // UI pointer event on the instance's own entity (click / hover enter/exit).
+    virtual bool callOnUIEvent(InstanceId id, UIScriptEvent ev) = 0;
 
     // Declared properties of a loaded script (editor inspector surface) and
     // per-instance override injection (before callOnStart).

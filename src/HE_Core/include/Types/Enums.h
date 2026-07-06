@@ -86,7 +86,8 @@ namespace HE
         Prefab,
         AnimationClip,
         PropertyAnimClip, // property/transform/material animation clips
-        MaterialFunction  // reusable material sub-graph (node editor), inlined at codegen
+        MaterialFunction, // reusable material sub-graph (node editor), inlined at codegen
+        Widget            // UI widget tree (UMG-style widget editor), instantiated at play start
     };
 
     enum class TextureFormat : uint32_t

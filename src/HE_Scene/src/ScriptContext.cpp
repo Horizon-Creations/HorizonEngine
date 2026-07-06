@@ -195,6 +195,115 @@ static int lua_horizon_getMaterialParam(lua_State* L)
     return 4;
 }
 
+// ── In-game UI ────────────────────────────────────────────────────────────────
+
+// horizon.setUIText(entityId, text)
+static int lua_horizon_setUIText(lua_State* L)
+{
+    const auto id = static_cast<uint32_t>(luaL_checkinteger(L, 1));
+    ScriptApi::setUIText(*getWorld(L), id, luaL_checkstring(L, 2));
+    return 0;
+}
+
+// horizon.getUIText(entityId) → text
+static int lua_horizon_getUIText(lua_State* L)
+{
+    const auto id = static_cast<uint32_t>(luaL_checkinteger(L, 1));
+    lua_pushstring(L, ScriptApi::getUIText(*getWorld(L), id).c_str());
+    return 1;
+}
+
+// horizon.setUIColor(entityId, r, g, b [, a=1])
+static int lua_horizon_setUIColor(lua_State* L)
+{
+    const auto id = static_cast<uint32_t>(luaL_checkinteger(L, 1));
+    ScriptApi::setUIColor(*getWorld(L), id,
+        { static_cast<float>(luaL_checknumber(L, 2)),
+          static_cast<float>(luaL_checknumber(L, 3)),
+          static_cast<float>(luaL_checknumber(L, 4)),
+          static_cast<float>(luaL_optnumber(L, 5, 1.0)) });
+    return 0;
+}
+
+// horizon.getUIColor(entityId) → r, g, b, a
+static int lua_horizon_getUIColor(lua_State* L)
+{
+    const auto id = static_cast<uint32_t>(luaL_checkinteger(L, 1));
+    const glm::vec4 c = ScriptApi::getUIColor(*getWorld(L), id);
+    lua_pushnumber(L, c.r); lua_pushnumber(L, c.g);
+    lua_pushnumber(L, c.b); lua_pushnumber(L, c.a);
+    return 4;
+}
+
+// horizon.setUIVisible(entityId, visible)
+static int lua_horizon_setUIVisible(lua_State* L)
+{
+    const auto id = static_cast<uint32_t>(luaL_checkinteger(L, 1));
+    ScriptApi::setUIVisible(*getWorld(L), id, lua_toboolean(L, 2) != 0);
+    return 0;
+}
+
+// horizon.isUIVisible(entityId) → bool
+static int lua_horizon_isUIVisible(lua_State* L)
+{
+    const auto id = static_cast<uint32_t>(luaL_checkinteger(L, 1));
+    lua_pushboolean(L, ScriptApi::isUIVisible(*getWorld(L), id) ? 1 : 0);
+    return 1;
+}
+
+// horizon.setUIPosition(entityId, x, y) — canvas units
+static int lua_horizon_setUIPosition(lua_State* L)
+{
+    const auto id = static_cast<uint32_t>(luaL_checkinteger(L, 1));
+    ScriptApi::setUIPosition(*getWorld(L), id,
+        { static_cast<float>(luaL_checknumber(L, 2)),
+          static_cast<float>(luaL_checknumber(L, 3)) });
+    return 0;
+}
+
+// horizon.getUIPosition(entityId) → x, y
+static int lua_horizon_getUIPosition(lua_State* L)
+{
+    const auto id = static_cast<uint32_t>(luaL_checkinteger(L, 1));
+    const glm::vec2 v = ScriptApi::getUIPosition(*getWorld(L), id);
+    lua_pushnumber(L, v.x); lua_pushnumber(L, v.y);
+    return 2;
+}
+
+// horizon.setUISize(entityId, w, h) — canvas units
+static int lua_horizon_setUISize(lua_State* L)
+{
+    const auto id = static_cast<uint32_t>(luaL_checkinteger(L, 1));
+    ScriptApi::setUISize(*getWorld(L), id,
+        { static_cast<float>(luaL_checknumber(L, 2)),
+          static_cast<float>(luaL_checknumber(L, 3)) });
+    return 0;
+}
+
+// horizon.getUISize(entityId) → w, h
+static int lua_horizon_getUISize(lua_State* L)
+{
+    const auto id = static_cast<uint32_t>(luaL_checkinteger(L, 1));
+    const glm::vec2 v = ScriptApi::getUISize(*getWorld(L), id);
+    lua_pushnumber(L, v.x); lua_pushnumber(L, v.y);
+    return 2;
+}
+
+// horizon.setUIMaterialParam(entityId, name, x [, y, z, w]) → bool
+static int lua_horizon_setUIMaterialParam(lua_State* L)
+{
+    const auto id = static_cast<uint32_t>(luaL_checkinteger(L, 1));
+    const char* name = luaL_checkstring(L, 2);
+    glm::vec4 v(0.0f);
+    v.x = static_cast<float>(luaL_checknumber(L, 3));
+    v.y = static_cast<float>(luaL_optnumber(L, 4, 0.0));
+    v.z = static_cast<float>(luaL_optnumber(L, 5, 0.0));
+    v.w = static_cast<float>(luaL_optnumber(L, 6, 0.0));
+    const bool ok = ScriptApi::setUIMaterialParam(*getWorld(L), getContent(L), id, name, v);
+    lua_pushboolean(L, ok ? 1 : 0);
+    return 1;
+}
+
 // ─── Registration table ──────────────────────────────────────────────────────
 
 static const luaL_Reg kHorizonFuncs[] = {
@@ -213,6 +322,17 @@ static const luaL_Reg kHorizonFuncs[] = {
     { "isGrounded",  lua_horizon_isGrounded  },
     { "setMaterialParam", lua_horizon_setMaterialParam },
     { "getMaterialParam", lua_horizon_getMaterialParam },
+    { "setUIText",     lua_horizon_setUIText     },
+    { "getUIText",     lua_horizon_getUIText     },
+    { "setUIColor",    lua_horizon_setUIColor    },
+    { "getUIColor",    lua_horizon_getUIColor    },
+    { "setUIVisible",  lua_horizon_setUIVisible  },
+    { "isUIVisible",   lua_horizon_isUIVisible   },
+    { "setUIPosition", lua_horizon_setUIPosition },
+    { "getUIPosition", lua_horizon_getUIPosition },
+    { "setUISize",     lua_horizon_setUISize     },
+    { "getUISize",     lua_horizon_getUISize     },
+    { "setUIMaterialParam", lua_horizon_setUIMaterialParam },
     { nullptr, nullptr }
 };
 
@@ -345,6 +465,12 @@ bool ScriptContext::callOnCollisionExit(ScriptEngine::InstanceId id, uint32_t ot
 {
     IScriptBackend* b = backendForId(id); m_lastBackend = b;
     return b->callOnCollisionExit(rawId(id), otherEntityId);
+}
+
+bool ScriptContext::callOnUIEvent(ScriptEngine::InstanceId id, UIScriptEvent ev)
+{
+    IScriptBackend* b = backendForId(id); m_lastBackend = b;
+    return b->callOnUIEvent(rawId(id), ev);
 }
 
 bool ScriptContext::hotReloadScript(const std::string& name, const std::string& source)

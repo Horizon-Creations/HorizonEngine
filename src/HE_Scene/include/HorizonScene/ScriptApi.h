@@ -55,4 +55,25 @@ namespace ScriptApi
 	                      uint32_t entityId, const std::string& name, const glm::vec4& value);
 	glm::vec4 getMaterialParam(HorizonWorld& world, ContentManager* content,
 	                           uint32_t entityId, const std::string& name); // default (0,0,0,0)
+
+	// ── In-game UI (entities carrying UI components) ───────────────────────
+	// Text of a UITextComponent. Getter returns "" without one.
+	void        setUIText(HorizonWorld& world, uint32_t entityId, const std::string& text);
+	std::string getUIText(HorizonWorld& world, uint32_t entityId);
+	// Primary color: image tint, text color, or button normal color (whichever
+	// components exist — image first). Getter prefers the same order.
+	void      setUIColor(HorizonWorld& world, uint32_t entityId, const glm::vec4& c);
+	glm::vec4 getUIColor(HorizonWorld& world, uint32_t entityId); // default (1,1,1,1)
+	// UIElementComponent active flag (hides the whole subtree when false).
+	void setUIVisible(HorizonWorld& world, uint32_t entityId, bool visible);
+	bool isUIVisible(HorizonWorld& world, uint32_t entityId);
+	// UIElementComponent position/size in canvas units.
+	void      setUIPosition(HorizonWorld& world, uint32_t entityId, const glm::vec2& p);
+	glm::vec2 getUIPosition(HorizonWorld& world, uint32_t entityId);
+	void      setUISize(HorizonWorld& world, uint32_t entityId, const glm::vec2& s);
+	glm::vec2 getUISize(HorizonWorld& world, uint32_t entityId);
+	// Set a node-graph material parameter on the entity's UI IMAGE material
+	// (UIImageComponent.materialAssetId) — the UI counterpart of setMaterialParam.
+	bool setUIMaterialParam(HorizonWorld& world, ContentManager* content,
+	                        uint32_t entityId, const std::string& name, const glm::vec4& value);
 }

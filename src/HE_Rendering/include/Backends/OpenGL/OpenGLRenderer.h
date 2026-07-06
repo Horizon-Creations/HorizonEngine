@@ -211,6 +211,10 @@ private:
 	                                       const MaterialShaderVariant* precompiled = nullptr);
 	bool         resolveMaterialShader(const HE::UUID& materialId, uint64_t& key, std::string& frag,
 	                                   std::string& vertBody);
+	// UI-quad material programs: same fragment hash, but linked against the
+	// screen-space uiVertex instead of the mesh vertex → own cache.
+	std::unordered_map<uint64_t, unsigned int> m_uiMaterialPrograms; // hash → program (0 = failed)
+	unsigned int getOrBuildUIMaterialProgram(const HE::UUID& materialId);
 
 	int          m_uMVP           = -1;
 	int          m_uModel         = -1;
@@ -466,6 +470,9 @@ private:
 	int          m_uUIRect       = -1;
 	int          m_uUIViewport   = -1;
 	int          m_uUIColor      = -1;
+	int          m_uUIUVRect     = -1;  // glyph quads: atlas UV rect
+	int          m_uUIMode       = -1;  // 0 = solid color, 1 = font-atlas glyph
+	unsigned int m_uiFontTexture = 0;   // R8 UI font atlas (HE::sharedUIFont), lazy
 	void         RenderUIPass(int pw, int ph);
 
 	// ── Bloom (bright-pass + separable Gaussian blur on the HDR target) ──────

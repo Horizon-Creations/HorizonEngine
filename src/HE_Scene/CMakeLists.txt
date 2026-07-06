@@ -17,6 +17,8 @@ add_library(HorizonScene SHARED
     src/SceneSystems.cpp
     src/FoliageSystem.cpp
     src/UISystem.cpp
+    src/UIWidgetInstantiator.cpp
+    src/UIInputSystem.cpp
     src/ScriptContext.cpp
     src/ScriptApi.cpp
     src/PyScriptBackend.cpp

@@ -275,6 +275,13 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 			a.nodeGraphJson.assign(reinterpret_cast<const char*>(c->data.data()), c->data.size());
 		handle = m_materialFunctionAssets.insert(std::move(a)); break;
 	}
+	case HE::AssetType::Widget:
+	{
+		UIWidgetAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_UIWT))
+			a.treeJson.assign(reinterpret_cast<const char*>(c->data.data()), c->data.size());
+		handle = m_widgetAssets.insert(std::move(a)); break;
+	}
 	case HE::AssetType::Audio:
 	{
 		AudioAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
@@ -841,6 +848,12 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 		w.addChunk(HAsset::CHUNK_MGRF, a.nodeGraphJson.data(), a.nodeGraphJson.size());
 		break;
 	}
+	case HE::AssetType::Widget:
+	{
+		auto& a = static_cast<UIWidgetAsset&>(asset);
+		w.addChunk(HAsset::CHUNK_UIWT, a.treeJson.data(), a.treeJson.size());
+		break;
+	}
 	case HE::AssetType::Audio:
 	{
 		auto& a = static_cast<AudioAsset&>(asset);
@@ -947,6 +960,14 @@ MaterialFunctionAsset* ContentManager::getMaterialFunctionMutable(HE::UUID id)
 	MaterialFunctionAsset* a = m_materialFunctionAssets.get(it->second);
 	return (a && a->id == id) ? a : nullptr; // reject wrong-type aliasing
 }
+const UIWidgetAsset*      ContentManager::getWidget(HE::UUID id) const        { return lookupAsset(m_handleToUUID, m_widgetAssets, id); }
+UIWidgetAsset* ContentManager::getWidgetMutable(HE::UUID id)
+{
+	auto it = m_handleToUUID.find(id);
+	if (it == m_handleToUUID.end()) return nullptr;
+	UIWidgetAsset* a = m_widgetAssets.get(it->second);
+	return (a && a->id == id) ? a : nullptr; // reject wrong-type aliasing
+}
 const ShaderAsset*        ContentManager::getShader(HE::UUID id) const        { return lookupAsset(m_handleToUUID, m_shaderAssets, id); }
 const PrefabAsset*        ContentManager::getPrefab(HE::UUID id) const        { return lookupAsset(m_handleToUUID, m_prefabAssets, id); }
 const AnimationClipAsset*      ContentManager::getAnimationClip(HE::UUID id) const      { return lookupAsset(m_handleToUUID, m_animClipAssets,     id); }
@@ -1039,6 +1060,7 @@ HE::UUID ContentManager::registerPrefab(PrefabAsset asset)               { retur
 HE::UUID ContentManager::registerAudio(AudioAsset asset)                 { return registerRuntimeAsset(m_audioAssets,       std::move(asset), HE::AssetType::Audio);         }
 HE::UUID ContentManager::registerScript(ScriptAsset asset)               { return registerRuntimeAsset(m_scriptAssets,      std::move(asset), HE::AssetType::Script);        }
 HE::UUID ContentManager::registerMaterialFunction(MaterialFunctionAsset asset) { return registerRuntimeAsset(m_materialFunctionAssets, std::move(asset), HE::AssetType::MaterialFunction); }
+HE::UUID ContentManager::registerWidget(UIWidgetAsset asset) { return registerRuntimeAsset(m_widgetAssets, std::move(asset), HE::AssetType::Widget); }
 HE::UUID ContentManager::registerAnimationClip(AnimationClipAsset asset)       { return registerRuntimeAsset(m_animClipAssets,     std::move(asset), HE::AssetType::AnimationClip);     }
 HE::UUID ContentManager::registerPropertyAnimClip(PropertyAnimClipAsset asset) { return registerRuntimeAsset(m_propAnimClipAssets, std::move(asset), HE::AssetType::PropertyAnimClip); }
 
@@ -1092,7 +1114,8 @@ bool ContentManager::unloadAsset(HE::UUID id)
 		tryRemove(m_sceneAssets)        || tryRemove(m_scriptAssets)       ||
 		tryRemove(m_audioAssets)        || tryRemove(m_fontAssets)         ||
 		tryRemove(m_shaderAssets)       || tryRemove(m_animClipAssets) ||
-		tryRemove(m_propAnimClipAssets);
+		tryRemove(m_propAnimClipAssets) || tryRemove(m_materialFunctionAssets) ||
+		tryRemove(m_widgetAssets)       || tryRemove(m_prefabAssets);
 	if (!removed)
 		return false;
 

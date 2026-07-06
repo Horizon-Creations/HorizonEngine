@@ -13,6 +13,7 @@
 #include <HorizonScene/AudioSystem.h>
 #include <HorizonScene/ScriptContext.h>
 #include <HorizonScene/CollisionSystem.h>
+#include <HorizonScene/UIInputSystem.h>
 #include <functional>
 #include <future>
 #include <memory>
@@ -155,6 +156,10 @@ struct AppContext
 	// Play-in-editor: snapshot on play, restore on stop
 	bool isPlaying = false;
 	std::function<void(bool)> setPlayMode;
+	// PIE UI pointer feed: viewport-relative mouse in render-target pixels +
+	// viewport size + LMB state; valid=false while outside/captured.
+	std::function<void(float mx, float my, float vpW, float vpH,
+	                   bool down, bool valid)> reportPlayUIPointer;
 
 	// ── Scene file management ──────────────────────────────────────────────
 	// currentScenePath is empty for an unsaved/new scene. sceneDirty reflects
@@ -305,6 +310,14 @@ private:
 
 	// Editor scene-view camera
 	EditorCamera m_editorCamera;
+
+	// In-game UI pointer input during PIE. The viewport panel reports the
+	// mouse in render-target pixels each frame (reportPlayUIPointer); the
+	// update loop hit-tests + dispatches onClick/onHover* to scripts.
+	UIInputSystem::InputState m_uiInputState;
+	float m_uiPointerX = 0.0f, m_uiPointerY = 0.0f;
+	float m_uiViewportW = 0.0f, m_uiViewportH = 0.0f;
+	bool  m_uiPointerDown = false, m_uiPointerValid = false;
 
 	// Play-in-editor
 	bool m_isPlaying = false;

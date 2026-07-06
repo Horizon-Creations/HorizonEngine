@@ -92,6 +92,9 @@ inline constexpr uint32_t CHUNK_SLNG = makeChunkId('S','L','N','G'); // script l
 inline constexpr uint32_t CHUNK_MGRF = makeChunkId('M','G','R','F'); // material-function node graph (JSON)
 inline constexpr uint32_t CHUNK_PSHD = makeChunkId('P','S','H','D'); // precompiled per-backend material shaders
 
+// UI Widget
+inline constexpr uint32_t CHUNK_UIWT = makeChunkId('U','I','W','T'); // UI widget tree (JSON)
+
 // Font
 inline constexpr uint32_t CHUNK_FNTD = makeChunkId('F','N','T','D'); // raw font bytes
 inline constexpr uint32_t CHUNK_FNTI = makeChunkId('F','N','T','I'); // font meta (size)
