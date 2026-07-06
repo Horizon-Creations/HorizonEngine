@@ -309,16 +309,18 @@ public:
     virtual void WarmupMaterials(const std::vector<HE::UUID>& /*materialIds*/) {}
 
     // ── Material preview ───────────────────────────────────────────────────
-    // Render a single sphere shaded with material `materialId` into a small
+    // Render a single primitive shaded with material `materialId` into a small
     // dedicated offscreen target and return an ImGui-compatible texture handle
     // for ImGui::Image (GL: GLuint cast; Metal: id<MTLTexture>). `size` is the
-    // square edge in pixels. An orbit camera frames the sphere: `yaw`/`pitch` are
-    // radians, `dist` the camera distance. The background is left transparent
-    // (alpha 0) so the editor can composite the sphere over its own backdrop.
+    // square edge in pixels. An orbit camera frames the mesh: `yaw`/`pitch` are
+    // radians, `dist` the camera distance. `shape` picks the preview primitive:
+    // 0 = sphere, 1 = cube, 2 = plane (double-sided quad). The background is left
+    // transparent (alpha 0) so the editor can composite it over its own backdrop.
     // Returns nullptr on backends without a preview path or on failure — the
     // editor then shows a placeholder. Independent of the main viewport target.
     virtual void* RenderMaterialPreview(class ContentManager& /*cm*/, const HE::UUID& /*materialId*/,
-                                        uint32_t /*size*/, float /*yaw*/, float /*pitch*/, float /*dist*/)
+                                        uint32_t /*size*/, float /*yaw*/, float /*pitch*/, float /*dist*/,
+                                        int /*shape*/ = 0)
     { return nullptr; }
 
     // Drop cached GPU buffers for a mesh so ResolveMesh re-uploads from the

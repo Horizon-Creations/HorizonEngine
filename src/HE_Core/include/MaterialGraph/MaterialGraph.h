@@ -20,6 +20,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -85,7 +86,31 @@ enum class MatNodeType : uint8_t
     And,            // (A>0.5)&&(B>0.5) → 1/0
     Or,             // (A>0.5)||(B>0.5) → 1/0
     Not,            // A<=0.5 → 1/0
+
+    // ── v6: procedural texture ──
+    NoiseTexture,   // fbm(vUV*Scale) → grayscale RGB (Vec3) + Value (Float); drop-in to multiply for mottling
+
+    // ── v7: editor ergonomics ──
+    Reroute,        // vec4 pass-through pin for tidy link routing (no effect on the shader)
+
+    // ── v8: compile-time permutations ──
+    StaticSwitch,   // named COMPILE-TIME branch (s = name, p[0] = default on/off): codegen
+                    // emits ONLY the taken input — the other branch is culled entirely.
+                    // Material instances may override the value → their own permutation.
+
+    // ── v9: surface features ──
+    NormalMapSample,// tangent-space normal map → WORLD-space normal, using a screen-space
+                    // cotangent frame (dFdx/dFdy of vWorldPos+vUV, Mikkelsen) — no vertex
+                    // tangents needed. s = texture path (like TextureSample), p[0] = strength.
 };
+
+// Material blend modes (Output node p[1]; → MaterialAsset::blendMode). They change which
+// Output pins are meaningful — see matOutputPins:
+//   Opaque      — no Opacity pin; alpha forced to 1.
+//   Masked      — pin 4 becomes OpacityMask: fragments below the cutoff (p[2]) discard.
+//                 Stays in the OPAQUE pass (no sorting), holes are hard-edged.
+//   Translucent — pin 4 is Opacity: drawn in the sorted alpha-blend pass.
+enum class MatBlendMode : uint8_t { Opaque = 0, Masked = 1, Translucent = 2 };
 
 struct MatGraphNode
 {
@@ -94,6 +119,10 @@ struct MatGraphNode
     float       p[4] = { 0, 0, 0, 0 }; // node params (const values / lit flag / fresnel power)
     std::string s;                     // string param (parameter name / function asset path)
     float       x = 0.0f, y = 0.0f;    // canvas position (editor-only, serialized for layout)
+    // Param-node METADATA (meaningful on Param* nodes only; optional JSON keys "g"/"tt").
+    // ParamFloat additionally uses p[1]/p[2] as slider min/max (min<max → slider UI).
+    std::string group;                 // panel grouping header ("" = ungrouped)
+    std::string tooltip;               // hover help shown next to the parameter
 };
 
 // One connection: output pin (srcNode, srcPin) → input pin (dstNode, dstPin).
@@ -102,6 +131,17 @@ struct MatGraphLink
 {
     int srcNode = 0, srcPin = 0;
     int dstNode = 0, dstPin = 0;
+};
+
+// Editor-only comment/group box drawn behind the nodes it frames. Purely cosmetic —
+// never touches codegen — but serialized with the graph so layouts survive reloads.
+// Ids share the graph's `nextId` counter with nodes (uniqueness, not meaning).
+struct MatGraphComment
+{
+    int         id = 0;
+    std::string text;                       // header label
+    float       x = 0, y = 0;               // graph-space top-left
+    float       w = 260.0f, h = 180.0f;     // graph-space size
 };
 
 // Static description of a node type (name, pins, defaults) — drives both the codegen and
@@ -120,8 +160,9 @@ struct MatNodeDesc
 
 struct MaterialGraph
 {
-    std::vector<MatGraphNode> nodes;
-    std::vector<MatGraphLink> links;
+    std::vector<MatGraphNode>    nodes;
+    std::vector<MatGraphLink>    links;
+    std::vector<MatGraphComment> comments; // editor-only group boxes (see MatGraphComment)
     int nextId = 1;
 
     // Returns the new node's id (NOT a reference — the nodes vector reallocates).
@@ -140,6 +181,12 @@ struct MaterialGraph
 const std::vector<MatNodeDesc>& matNodeRegistry();
 const MatNodeDesc&              matNodeDesc(MatNodeType type);
 const MatNodeDesc*              matNodeDescByName(const std::string& name);
+
+// The Output node's DISPLAYED input pins for a blend mode, plus the registry pin index
+// each row maps to (indices stay stable across modes so serialized links never break:
+// 0 BaseColor, 1 Metallic, 2 Roughness, 3 Emissive, 4 Opacity/OpacityMask, 5 Normal,
+// 6 WPO). Opaque hides pin 4; Masked renames it to OpacityMask.
+void matOutputPins(int blendMode, std::vector<MatPinDesc>& pins, std::vector<int>& regIndex);
 
 // Interface pins of a FUNCTION graph: its FnInput nodes (sorted by id) become the call
 // node's inputs, FnOutput nodes its outputs. Used by codegen and the editor canvas.
@@ -170,6 +217,10 @@ struct MatParamSlot
     bool         isColor = false;             // color (xyz) vs scalar (x) — legacy proxy
     MatParamKind kind    = MatParamKind::Float; // full widget type (Float/Color/Vec2/Vec4/Bool)
     float        value[4] = { 0, 0, 0, 0 };
+    // Metadata from the Param node: slider range (min<max → slider), panel group, tooltip.
+    float        minV = 0.0f, maxV = 0.0f;
+    std::string  group;
+    std::string  tooltip;
 };
 
 struct MatShaderGen
@@ -179,6 +230,16 @@ struct MatShaderGen
     // Content-relative paths of the project textures referenced by Texture Sample nodes,
     // in slot order (heTexP0..heTexP3). → MaterialAsset::graphTexturePaths. Max 4.
     std::vector<std::string>  textures;
+    // Static switches reached during codegen: name + the EFFECTIVE value baked into this
+    // shader (node default, or the entry from generateFragment's override map).
+    std::vector<std::pair<std::string, bool>> switches;
+    // Blend mode baked from the Output node (→ MaterialAsset::blendMode; Translucent
+    // routes the material into the sorted alpha-blend pass).
+    uint8_t blendMode = 0;
+    // World-Position-Offset vertex BODY (canonical GLSL statements ending in `vec3 heWpo`).
+    // Empty when the WPO pin is unconnected → the standard vertex is used. The renderers
+    // wrap it into their per-backend vertex template (MaterialShaderLibrary::customVertex).
+    std::string vertexBody;
 };
 
 // Max project textures a single material graph may sample (fixed so the per-backend
@@ -187,8 +248,11 @@ inline constexpr int kMatMaxGraphTextures = 4;
 
 // Generate shader + parameter layout. Always succeeds (unconnected inputs fall back to
 // pin defaults; a missing Output node yields a magenta error shader; recursive function
-// calls emit magenta instead of hanging).
-MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoader& loader = {});
+// calls emit magenta instead of hanging). `switchOverrides` (name → on) replaces Static
+// Switch node defaults at COMPILE time — each distinct combination yields a distinct
+// shader source (its own pipeline-cache entry), which is the whole permutation system.
+MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoader& loader = {},
+                              const std::map<std::string, bool>* switchOverrides = nullptr);
 
 // Convenience wrapper (no function loader) — kept for existing callers/tests.
 std::string generateFragmentGlsl(const MaterialGraph& graph);

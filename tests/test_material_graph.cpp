@@ -171,8 +171,10 @@ TEST_CASE("MaterialGraph v2 nodes: noise helpers, view-dir fresnel, named params
 TEST_CASE("MaterialGraph v3: RGBA output, split/combine masks, param slots")
 {
 	// Opacity flows into oColor.a; texture alpha is a separate pin; split/combine round-trip.
+	// Since blend modes (v9), the Opacity pin only feeds alpha in TRANSLUCENT mode.
 	MaterialGraph g;
 	const int out   = g.addNode(MatNodeType::Output);
+	g.findNode(out)->p[1] = 2.0f; // Translucent
 	const int tex   = g.addNode(MatNodeType::TextureSample);
 	const int comb  = g.addNode(MatNodeType::CombineRGBA);
 	const int split = g.addNode(MatNodeType::SplitRGBA);
@@ -386,7 +388,7 @@ TEST_CASE("Every node type has a registry entry and its emit matches its pins")
 {
 	// The registry (pins) drives both the editor UI and codegen; a type missing from
 	// it, or an emit case reading a pin the registry doesn't declare, is a bug.
-	for (int t = 0; t <= (int)MatNodeType::Not; ++t)
+	for (int t = 0; t <= (int)MatNodeType::NormalMapSample; ++t)
 	{
 		const auto type = static_cast<MatNodeType>(t);
 		const HE::MatNodeDesc& d = HE::matNodeDesc(type);
@@ -396,6 +398,271 @@ TEST_CASE("Every node type has a registry entry and its emit matches its pins")
 		REQUIRE(byName != nullptr);
 		CHECK(byName->type == type);
 	}
+}
+
+TEST_CASE("Unconnected noise UV falls back to the mesh UV (vUV), not vec2(0)")
+{
+	// Regression: a Noise/FBM/Checker node with nothing wired to its UV pin used to
+	// default to vec2(0), producing a CONSTANT value that just darkened everything.
+	// It must now sample vUV so the pattern actually varies across the surface.
+	struct Case { MatNodeType type; const char* expect; };
+	for (Case cs : { Case{ MatNodeType::ValueNoise, "heValueNoise(vUV" },
+	                 Case{ MatNodeType::Fbm,        "heFbm(vUV" },
+	                 Case{ MatNodeType::Checker,    "floor(vUV" } })
+	{
+		MaterialGraph g;
+		const int out = g.addNode(MatNodeType::Output);
+		const int n   = g.addNode(cs.type);
+		CHECK(g.connect(n, 0, out, 0));
+		const std::string glsl = HE::generateFragment(g).glsl;
+		// The noise samples the mesh UV directly — no vec2(0) constant fed into it.
+		CHECK_MESSAGE(glsl.find(cs.expect) != std::string::npos,
+		              "expected '", cs.expect, "' in:\n", glsl);
+	}
+}
+
+TEST_CASE("Noise Texture node emits 3D world-space fbm as a vec3 (mesh-independent, drop-in)")
+{
+	MaterialGraph g;
+	const int out = g.addNode(MatNodeType::Output);
+	const int tex = g.addNode(MatNodeType::NoiseTexture); // default Scale = 6
+	const int col = g.addNode(MatNodeType::ConstColor);
+	const int mul = g.addNode(MatNodeType::Multiply);
+	CHECK(g.connect(col, 0, mul, 0));
+	CHECK(g.connect(tex, 0, mul, 1));                          // colour * noise → mottling
+	CHECK(g.connect(mul, 0, out, 0));
+	const std::string glsl = HE::generateFragment(g).glsl;
+	// World-space 3D noise so it varies on ANY mesh (a UV-less cube has vUV=0 everywhere,
+	// which would collapse UV noise to a single value → flat/black).
+	CHECK(glsl.find("heFbm3(vWorldPos") != std::string::npos);
+	CHECK(glsl.find("float heValueNoise3(vec3") != std::string::npos); // 3D helper injected
+	CHECK(glsl.find("vec3(") != std::string::npos);           // grayscale RGB for a clean multiply
+	CHECK(glsl.find("6.0") != std::string::npos);             // default Scale baked in
+}
+
+TEST_CASE("Reroute passes its input through unchanged (colour survives the dot)")
+{
+	MaterialGraph g;
+	const int out = g.addNode(MatNodeType::Output);
+	const int col = g.addNode(MatNodeType::ConstColor);
+	g.findNode(col)->p[0] = 0.9f; g.findNode(col)->p[1] = 0.1f; g.findNode(col)->p[2] = 0.2f;
+	const int rr  = g.addNode(MatNodeType::Reroute);
+	CHECK(g.connect(col, 0, rr, 0));
+	CHECK(g.connect(rr, 0, out, 0));
+	const std::string glsl = HE::generateFragment(g).glsl;
+	// The colour literal must reach the output THROUGH the reroute (vec4 round-trip).
+	CHECK(glsl.find("0.900000") != std::string::npos);
+	CHECK(glsl.find("0.100000") != std::string::npos);
+}
+
+TEST_CASE("Material function with several NAMED inputs/outputs: pins + inlining by index")
+{
+	// f(Base, Amount) → Doubled = Base*Amount, Inverted = 1-Base
+	MaterialGraph fn;
+	const int inA = fn.addNode(MatNodeType::FnInput);
+	fn.findNode(inA)->s = "Base";   fn.findNode(inA)->p[0] = 2.0f; // vec3
+	const int inB = fn.addNode(MatNodeType::FnInput);
+	fn.findNode(inB)->s = "Amount"; fn.findNode(inB)->p[0] = 0.0f; // float
+	const int mul = fn.addNode(MatNodeType::Multiply);
+	const int inv = fn.addNode(MatNodeType::OneMinus);
+	const int o1  = fn.addNode(MatNodeType::FnOutput);
+	fn.findNode(o1)->s = "Doubled";  fn.findNode(o1)->p[0] = 2.0f;
+	const int o2  = fn.addNode(MatNodeType::FnOutput);
+	fn.findNode(o2)->s = "Inverted"; fn.findNode(o2)->p[0] = 2.0f;
+	CHECK(fn.connect(inA, 0, mul, 0));
+	CHECK(fn.connect(inB, 0, mul, 1));
+	CHECK(fn.connect(mul, 0, o1, 0));
+	CHECK(fn.connect(inA, 0, inv, 0));
+	CHECK(fn.connect(inv, 0, o2, 0));
+
+	// The call node's pins carry the GIVEN names, in id order.
+	std::vector<HE::MatPinDesc> ins, outs;
+	HE::matFunctionPins(fn, ins, outs);
+	REQUIRE(ins.size() == 2);
+	REQUIRE(outs.size() == 2);
+	CHECK(std::string(ins[0].name)  == "Base");
+	CHECK(std::string(ins[1].name)  == "Amount");
+	CHECK(std::string(outs[0].name) == "Doubled");
+	CHECK(std::string(outs[1].name) == "Inverted");
+
+	// Material: two distinct constants into the call; BOTH outputs consumed.
+	MaterialGraph g;
+	const int out  = g.addNode(MatNodeType::Output);
+	const int col  = g.addNode(MatNodeType::ConstColor);
+	g.findNode(col)->p[0] = 0.7f; g.findNode(col)->p[1] = 0.3f; g.findNode(col)->p[2] = 0.1f;
+	const int amt  = g.addNode(MatNodeType::ConstFloat);
+	g.findNode(amt)->p[0] = 0.25f;
+	const int call = g.addNode(MatNodeType::FunctionCall);
+	g.findNode(call)->s = "fns/multi.hasset";
+	CHECK(g.connect(col,  0, call, 0)); // Base
+	CHECK(g.connect(amt,  0, call, 1)); // Amount
+	CHECK(g.connect(call, 0, out, 0));  // Doubled  → BaseColor
+	CHECK(g.connect(call, 1, out, 1));  // Inverted → Metallic
+
+	HE::MatFunctionLoader loader = [&](const std::string& path) -> const MaterialGraph*
+	{ return path == "fns/multi.hasset" ? &fn : nullptr; };
+	const std::string glsl = HE::generateFragment(g, loader).glsl;
+	// Both input values land in the inlined body, and the inputs resolve BY INDEX:
+	// Base gets the colour, Amount the scalar.
+	CHECK(glsl.find("0.700000") != std::string::npos);
+	CHECK(glsl.find("0.250000") != std::string::npos);
+	// Both outputs produce distinct expressions (the OneMinus branch is inlined too).
+	CHECK(glsl.find("vec3(1.0) - ") != std::string::npos);
+}
+
+TEST_CASE("Static Switch: untaken branch is CULLED; override map flips the permutation")
+{
+	// switch(True = red const, False = blue const) → BaseColor
+	MaterialGraph g;
+	const int out = g.addNode(MatNodeType::Output);
+	const int sw  = g.addNode(MatNodeType::StaticSwitch); // default ON
+	g.findNode(sw)->s = "UseRed";
+	const int red = g.addNode(MatNodeType::ConstColor);
+	g.findNode(red)->p[0] = 0.91f; g.findNode(red)->p[1] = 0.0f; g.findNode(red)->p[2] = 0.0f;
+	const int blu = g.addNode(MatNodeType::ConstColor);
+	g.findNode(blu)->p[0] = 0.0f; g.findNode(blu)->p[1] = 0.0f; g.findNode(blu)->p[2] = 0.87f;
+	CHECK(g.connect(red, 0, sw, 0));
+	CHECK(g.connect(blu, 0, sw, 1));
+	CHECK(g.connect(sw,  0, out, 0));
+
+	// Default (on): ONLY the red branch is in the shader — blue is culled entirely.
+	const HE::MatShaderGen onGen = HE::generateFragment(g);
+	CHECK(onGen.glsl.find("0.910000") != std::string::npos);
+	CHECK(onGen.glsl.find("0.870000") == std::string::npos);
+	REQUIRE(onGen.switches.size() == 1);
+	CHECK(onGen.switches[0].first  == "UseRed");
+	CHECK(onGen.switches[0].second == true);
+
+	// Override map → the OTHER permutation, with a different source (its own hash).
+	std::map<std::string, bool> ov{ { "UseRed", false } };
+	const HE::MatShaderGen offGen = HE::generateFragment(g, {}, &ov);
+	CHECK(offGen.glsl.find("0.870000") != std::string::npos);
+	CHECK(offGen.glsl.find("0.910000") == std::string::npos);
+	CHECK(offGen.switches[0].second == false);
+	CHECK(onGen.glsl != offGen.glsl);
+}
+
+TEST_CASE("Param metadata (range/group/tooltip) flows into slots and survives JSON")
+{
+	MaterialGraph g;
+	const int out = g.addNode(MatNodeType::Output);
+	const int pf  = g.addNode(MatNodeType::ParamFloat);
+	HE::MatGraphNode* n = g.findNode(pf);
+	n->s = "Roughness"; n->p[0] = 0.4f;
+	n->p[1] = 0.0f; n->p[2] = 1.0f;         // slider range
+	n->group = "Surface"; n->tooltip = "0 = mirror, 1 = chalk";
+	CHECK(g.connect(pf, 0, out, 2));
+
+	const HE::MatShaderGen gen = HE::generateFragment(g);
+	REQUIRE(gen.params.size() == 1);
+	CHECK(gen.params[0].minV == doctest::Approx(0.0f));
+	CHECK(gen.params[0].maxV == doctest::Approx(1.0f));
+	CHECK(gen.params[0].group   == "Surface");
+	CHECK(gen.params[0].tooltip == "0 = mirror, 1 = chalk");
+
+	MaterialGraph r;
+	REQUIRE(HE::materialGraphFromJson(HE::materialGraphToJson(g), r));
+	bool found = false;
+	for (const auto& rn : r.nodes)
+		if (rn.type == MatNodeType::ParamFloat)
+		{ found = rn.group == "Surface" && rn.tooltip == "0 = mirror, 1 = chalk"; break; }
+	CHECK(found);
+}
+
+TEST_CASE("Blend modes: opaque forces alpha 1, masked discards, translucent feeds alpha")
+{
+	auto makeG = [](float mode) {
+		MaterialGraph g;
+		const int out = g.addNode(MatNodeType::Output);
+		g.findNode(out)->p[1] = mode;
+		g.findNode(out)->p[2] = 0.33f; // mask cutoff
+		const int a = g.addNode(MatNodeType::ConstFloat);
+		g.findNode(a)->p[0] = 0.42f;
+		g.connect(a, 0, out, 4); // pin 4 = Opacity/OpacityMask
+		return g;
+	};
+	const std::string opq = HE::generateFragment(makeG(0.0f)).glsl;
+	CHECK(opq.find("discard") == std::string::npos);
+	CHECK(opq.find(", 1.0);") != std::string::npos);      // alpha forced solid
+	CHECK(opq.find("0.420000") == std::string::npos);     // pin 4 ignored → subtree culled
+
+	const HE::MatShaderGen msk = HE::generateFragment(makeG(1.0f));
+	CHECK(msk.glsl.find("discard") != std::string::npos);
+	CHECK(msk.glsl.find("< 0.330000") != std::string::npos); // authored cutoff
+	CHECK(msk.blendMode == 1);
+
+	const HE::MatShaderGen trn = HE::generateFragment(makeG(2.0f));
+	CHECK(trn.glsl.find("discard") == std::string::npos);
+	CHECK(trn.glsl.find("0.420000") != std::string::npos);   // opacity reaches alpha
+	CHECK(trn.blendMode == 2);
+}
+
+TEST_CASE("Normal pin replaces vNormal in heLit; Normal Map emits the perturb helper")
+{
+	// Unconnected → the interpolated vertex normal.
+	MaterialGraph g0 = MaterialGraph::makeDefault();
+	CHECK(HE::generateFragmentGlsl(g0).find("vec3 heN = normalize(vNormal);")
+	      != std::string::npos);
+
+	// Normal Map → hePerturbNormal + screen-space TBN helper, fed into heLit via heN.
+	MaterialGraph g;
+	const int out = g.addNode(MatNodeType::Output);
+	const int nm  = g.addNode(MatNodeType::NormalMapSample);
+	CHECK(g.connect(nm, 0, out, 5)); // Normal pin
+	const std::string glsl = HE::generateFragment(g).glsl;
+	CHECK(glsl.find("vec3 hePerturbNormal(") != std::string::npos);
+	CHECK(glsl.find("dFdx(") != std::string::npos);
+	CHECK(glsl.find("heLit(") != std::string::npos);
+	CHECK(glsl.find("heN") != std::string::npos);
+	CHECK(glsl.find("normalize(vNormal);") == std::string::npos); // replaced by the map
+}
+
+TEST_CASE("WPO pin generates a vertex body; its statements leave the fragment")
+{
+	MaterialGraph g = MaterialGraph::makeDefault();
+	int out = 0;
+	for (auto& n : g.nodes) if (n.type == MatNodeType::Output) out = n.id;
+	// Wind-ish offset: sin(time) into Combine3 → WPO. The 0.777 constant is a tracer.
+	const int t   = g.addNode(MatNodeType::Time);
+	const int sn  = g.addNode(MatNodeType::Sine);
+	const int amp = g.addNode(MatNodeType::ConstFloat);
+	g.findNode(amp)->p[0] = 0.777f;
+	const int mul = g.addNode(MatNodeType::Multiply);
+	const int cmb = g.addNode(MatNodeType::Combine3);
+	CHECK(g.connect(t,   0, sn,  0));
+	CHECK(g.connect(sn,  0, mul, 0));
+	CHECK(g.connect(amp, 0, mul, 1));
+	CHECK(g.connect(mul, 0, cmb, 0)); // offset in X
+	CHECK(g.connect(cmb, 0, out, 6)); // WPO pin
+
+	const HE::MatShaderGen gen = HE::generateFragment(g);
+	REQUIRE(!gen.vertexBody.empty());
+	CHECK(gen.vertexBody.find("vec3 heWpo") != std::string::npos);
+	CHECK(gen.vertexBody.find("0.777000") != std::string::npos); // tracer in the VS body…
+	CHECK(gen.glsl.find("0.777000") == std::string::npos);       // …and NOT in the fragment
+}
+
+TEST_CASE("Comment boxes round-trip through graph JSON (and old JSON still loads)")
+{
+	MaterialGraph g = MaterialGraph::makeDefault();
+	HE::MatGraphComment cb;
+	cb.id = g.nextId++;
+	cb.text = "shading section";
+	cb.x = -40.0f; cb.y = 12.5f; cb.w = 300.0f; cb.h = 210.0f;
+	g.comments.push_back(cb);
+
+	MaterialGraph r;
+	REQUIRE(HE::materialGraphFromJson(HE::materialGraphToJson(g), r));
+	REQUIRE(r.comments.size() == 1);
+	CHECK(r.comments[0].text == "shading section");
+	CHECK(r.comments[0].x == doctest::Approx(-40.0f));
+	CHECK(r.comments[0].w == doctest::Approx(300.0f));
+	CHECK(r.nextId > r.comments[0].id); // id space shared with nodes
+
+	// A pre-comment JSON (no "comments" key) must still parse to an empty list.
+	MaterialGraph old;
+	REQUIRE(HE::materialGraphFromJson(HE::materialGraphToJson(MaterialGraph::makeDefault()), old));
+	CHECK(old.comments.empty());
 }
 
 #if defined(HE_TESTS_HAVE_SHADERC)

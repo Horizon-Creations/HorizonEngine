@@ -1310,6 +1310,107 @@ void EditorApplication::dumpFrameHeadless()
 		// Graph: lerp(orange, blue, fresnel) → lit BaseColor; sin(time) → Metallic.
 		{
 			HE::MaterialGraph g;
+			if (std::string(mt) == "noisecube")
+			{
+				// Auto-UV witness: the user's exact graph — UV → FBM → (colour ×) → BaseColor
+				// on a cube WITHOUT texture coords. Without generated UVs this is solid black
+				// (vUV = 0 → heFbm(0) = 0); with box-projection UVs it mottles per face.
+				const int out = g.addNode(HE::MatNodeType::Output);
+				const int col = g.addNode(HE::MatNodeType::ConstColor);
+				g.findNode(col)->p[0] = 0.85f; g.findNode(col)->p[1] = 0.30f; g.findNode(col)->p[2] = 0.20f;
+				const int uv  = g.addNode(HE::MatNodeType::UV);
+				const int fbm = g.addNode(HE::MatNodeType::Fbm);
+				g.findNode(fbm)->p[0] = 8.0f;
+				const int mul = g.addNode(HE::MatNodeType::Multiply);
+				g.connect(uv,  0, fbm, 0);
+				g.connect(col, 0, mul, 0);
+				g.connect(fbm, 0, mul, 1);
+				g.connect(mul, 0, out, 0);
+			}
+			else if (std::string(mt) == "translucent")
+			{
+				// Translucent blend witness: constant 0.45 opacity → the sphere must be
+				// see-through (sorted blend pass with the material's OWN pipeline).
+				const int out = g.addNode(HE::MatNodeType::Output);
+				g.findNode(out)->p[1] = 2.0f; // Translucent
+				const int col = g.addNode(HE::MatNodeType::ConstColor);
+				g.findNode(col)->p[0] = 0.9f; g.findNode(col)->p[1] = 0.5f; g.findNode(col)->p[2] = 0.1f;
+				const int op  = g.addNode(HE::MatNodeType::ConstFloat);
+				g.findNode(op)->p[0] = 0.45f;
+				g.connect(col, 0, out, 0);
+				g.connect(op,  0, out, 4); // Opacity
+			}
+			else if (std::string(mt) == "masked")
+			{
+				// Masked blend witness: a checkerboard mask discards half the sphere's
+				// fragments — hard-edged holes, still in the opaque pass.
+				const int out = g.addNode(HE::MatNodeType::Output);
+				g.findNode(out)->p[1] = 1.0f; // Masked
+				g.findNode(out)->p[2] = 0.5f; // cutoff
+				const int col = g.addNode(HE::MatNodeType::ConstColor);
+				g.findNode(col)->p[0] = 0.85f; g.findNode(col)->p[1] = 0.25f; g.findNode(col)->p[2] = 0.2f;
+				const int chk = g.addNode(HE::MatNodeType::Checker); // UV falls back to vUV
+				g.connect(col, 0, out, 0);
+				g.connect(chk, 0, out, 4); // OpacityMask
+			}
+			else if (std::string(mt) == "wpo")
+			{
+				// WPO witness: sin(worldPos.y * 8) * 0.35 offsets X → a wavy sphere.
+				// The offset happens in the VERTEX stage (graph-generated custom VS).
+				const int out = g.addNode(HE::MatNodeType::Output);
+				const int col = g.addNode(HE::MatNodeType::ConstColor);
+				g.findNode(col)->p[0] = 0.3f; g.findNode(col)->p[1] = 0.75f; g.findNode(col)->p[2] = 0.35f;
+				g.connect(col, 0, out, 0);
+				const int wp   = g.addNode(HE::MatNodeType::WorldPos);
+				const int spl  = g.addNode(HE::MatNodeType::SplitRGBA);
+				const int freq = g.addNode(HE::MatNodeType::ConstFloat);
+				g.findNode(freq)->p[0] = 8.0f;
+				const int m1   = g.addNode(HE::MatNodeType::Multiply);
+				const int sn   = g.addNode(HE::MatNodeType::Sine);
+				const int amp  = g.addNode(HE::MatNodeType::ConstFloat);
+				g.findNode(amp)->p[0] = 0.35f;
+				const int m2   = g.addNode(HE::MatNodeType::Multiply);
+				const int cmb  = g.addNode(HE::MatNodeType::Combine3);
+				g.connect(wp,   0, spl, 0); // worldPos → split (G = y)
+				g.connect(spl,  1, m1,  0);
+				g.connect(freq, 0, m1,  1);
+				g.connect(m1,   0, sn,  0);
+				g.connect(sn,   0, m2,  0);
+				g.connect(amp,  0, m2,  1);
+				g.connect(m2,   0, cmb, 0); // offset in X
+				g.connect(cmb,  0, out, 6); // WPO
+			}
+			else if (std::string(mt) == "switchon" || std::string(mt) == "switchoff")
+			{
+				// Static-switch permutation witness: same graph, two baked permutations.
+				// ON → red branch only, OFF → blue branch only (the other is culled).
+				const int out = g.addNode(HE::MatNodeType::Output);
+				const int sw  = g.addNode(HE::MatNodeType::StaticSwitch);
+				g.findNode(sw)->s = "UseRed";
+				g.findNode(sw)->p[0] = std::string(mt) == "switchon" ? 1.0f : 0.0f;
+				const int red = g.addNode(HE::MatNodeType::ConstColor);
+				g.findNode(red)->p[0] = 0.9f; g.findNode(red)->p[1] = 0.1f; g.findNode(red)->p[2] = 0.1f;
+				const int blu = g.addNode(HE::MatNodeType::ConstColor);
+				g.findNode(blu)->p[0] = 0.1f; g.findNode(blu)->p[1] = 0.2f; g.findNode(blu)->p[2] = 0.9f;
+				g.connect(red, 0, sw, 0);
+				g.connect(blu, 0, sw, 1);
+				g.connect(sw,  0, out, 0);
+			}
+			else if (std::string(mt) == "noise")
+			{
+				// v6 witness: colour × Noise Texture → mottled ("fleckig") BaseColor.
+				const int out = g.addNode(HE::MatNodeType::Output);
+				const int col = g.addNode(HE::MatNodeType::ConstColor);
+				g.findNode(col)->p[0] = 0.85f; g.findNode(col)->p[1] = 0.30f; g.findNode(col)->p[2] = 0.20f;
+				const int tex = g.addNode(HE::MatNodeType::NoiseTexture);
+				g.findNode(tex)->p[0] = 10.0f; // Scale — fine speckle, obvious in a capture
+				const int mul = g.addNode(HE::MatNodeType::Multiply);
+				g.connect(col, 0, mul, 0);
+				g.connect(tex, 0, mul, 1);
+				g.connect(mul, 0, out, 0); // BaseColor
+			}
+			else
+			{
 			const int out  = g.addNode(HE::MatNodeType::Output);
 			// Base color as a NAMED PARAM → exercises the HeParams uniform path (the value
 			// reaches the shader through the UBO upload, not as a baked constant).
@@ -1329,9 +1430,12 @@ void EditorApplication::dumpFrameHeadless()
 			g.connect(lerp, 0, out,  0); // BaseColor
 			g.connect(time, 0, sine, 0);
 			g.connect(sine, 0, out,  1); // Metallic
+			}
 			mat.nodeGraphJson = HE::materialGraphToJson(g);
 			const HE::MatShaderGen gen = HE::generateFragment(g);
 			mat.customShaderFragGlsl = gen.glsl;
+			mat.customShaderVertGlsl = gen.vertexBody; // WPO vertex body (if the graph uses it)
+			mat.blendMode            = gen.blendMode;
 			for (const auto& slot : gen.params)
 			{
 				mat.shaderParamData.insert(mat.shaderParamData.end(),
@@ -1351,7 +1455,10 @@ void EditorApplication::dumpFrameHeadless()
 				HE::MaterialShaderLibrary lib;
 				const uint64_t h = std::hash<std::string>{}(gen.glsl);
 				auto bake = [&](HE::RendererBackend rb, LB lb) {
-					const auto& v = lib.standardVertex(lb);
+					const auto& v = gen.vertexBody.empty()
+						? lib.standardVertex(lb)
+						: lib.customVertex(std::hash<std::string>{}(gen.vertexBody),
+						                   gen.vertexBody, lb);
 					const auto& f = lib.fragment(h, gen.glsl, lb);
 					if (v.ok && f.ok) {
 						MaterialShaderVariant var;
@@ -1390,11 +1497,41 @@ void EditorApplication::dumpFrameHeadless()
 			}
 		}
 
-		// Procedural UV sphere (SoA loose asset) so the per-normal shader banding shows on
-		// a curved surface (a cube's flat faces have constant normals → uniform color).
+		// Test mesh (SoA loose asset). Default: a procedural UV sphere (curved surface shows
+		// per-normal shading). MATERIALTEST=noisecube: a UNIT CUBE with UVs all (0,0) — i.e.
+		// a mesh WITHOUT real UVs — to reproduce the "Noise Texture on a cube is black" case
+		// (UV noise collapses at vUV=0; world-space noise must still mottle it).
 		StaticMeshAsset sphere;
 		sphere.type = HE::AssetType::StaticMesh;
-		sphere.name = "MatTestSphere";
+		const bool cubeMesh = (std::string(mt) == "noisecube");
+		sphere.name = cubeMesh ? "MatTestCube" : "MatTestSphere";
+		if (cubeMesh)
+		{
+			const float h = 2.0f;
+			const glm::vec3 fn[6] = {{0,0,1},{0,0,-1},{1,0,0},{-1,0,0},{0,1,0},{0,-1,0}};
+			const glm::vec3 fq[6][4] = {
+				{{-h,-h, h},{ h,-h, h},{ h, h, h},{-h, h, h}}, // +Z
+				{{ h,-h,-h},{-h,-h,-h},{-h, h,-h},{ h, h,-h}}, // -Z
+				{{ h,-h, h},{ h,-h,-h},{ h, h,-h},{ h, h, h}}, // +X
+				{{-h,-h,-h},{-h,-h, h},{-h, h, h},{-h, h,-h}}, // -X
+				{{-h, h, h},{ h, h, h},{ h, h,-h},{-h, h,-h}}, // +Y
+				{{-h,-h,-h},{ h,-h,-h},{ h,-h, h},{-h,-h, h}}, // -Y
+			};
+			for (int f = 0; f < 6; ++f)
+			{
+				const uint32_t base = (uint32_t)(sphere.vertices.size() / 3);
+				for (int k = 0; k < 4; ++k)
+				{
+					sphere.vertices.insert(sphere.vertices.end(), { fq[f][k].x, fq[f][k].y, fq[f][k].z });
+					sphere.normals.insert(sphere.normals.end(),   { fn[f].x, fn[f].y, fn[f].z });
+					// NO uvs on purpose → exercises ContentManager's box-projection UV
+					// fallback (the real default cube also ships without texture coords).
+				}
+				sphere.indices.insert(sphere.indices.end(),
+					{ base, base + 1, base + 2, base, base + 2, base + 3 });
+			}
+		}
+		else
 		{
 			const int segU = 48, segV = 24; const float radius = 2.5f;
 			const float kPi = glm::pi<float>();
@@ -1463,7 +1600,9 @@ void EditorApplication::dumpFrameHeadless()
 	// render the test material's preview sphere and let the backend dump it.
 	if (const char* pv = std::getenv("HE_DUMP_PREVIEW"); pv && *pv && s_matTestId != HE::UUID{})
 	{
-		r->RenderMaterialPreview(contentManager(), s_matTestId, 512, 0.6f, 0.35f, 3.1f);
+		// HE_DUMP_PREVIEW=1 → sphere (default); =2 cube, =3 plane (the editor's shape combo).
+		const int shape = std::clamp(std::atoi(pv) - 1, 0, 2);
+		r->RenderMaterialPreview(contentManager(), s_matTestId, 512, 0.6f, 0.35f, 3.1f, shape);
 		// Stress the property-change→re-preview path (repro for the side-panel crash):
 		// mutate the material's shader source + params like an editor edit would, then
 		// re-preview. HE_DUMP_PREVIEW_STRESS=N repeats N times.

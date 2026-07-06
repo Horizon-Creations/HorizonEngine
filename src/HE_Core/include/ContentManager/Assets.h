@@ -119,6 +119,17 @@ struct MaterialAsset : public RuntimeAsset
 	// it on every change; shaders are not a user-facing asset type.
 	std::string nodeGraphJson;
 
+	// Blend mode baked from the graph's Output node (HE::MatBlendMode as uint8):
+	// 0 Opaque, 1 Masked (shader discards — stays in the opaque pass), 2 Translucent
+	// (routed into the sorted alpha-blend pass regardless of the scalar opacity).
+	uint8_t blendMode = 0;
+
+	// World-Position-Offset vertex BODY (canonical GLSL statements, ends in `vec3 heWpo`),
+	// generated when the graph's WPO pin is connected. Empty → the standard shared vertex.
+	// The renderers wrap it per backend (MaterialShaderLibrary::customVertex) and key the
+	// pipeline on fragment+vertex together.
+	std::string customShaderVertGlsl;
+
 	// Exposed graph parameters (Param nodes), 4 floats per HeParams UBO slot, in slot
 	// order. Generated alongside customShaderFragGlsl; the renderer uploads this per
 	// material — editing a parameter VALUE never recompiles the shader.
@@ -133,6 +144,27 @@ struct MaterialAsset : public RuntimeAsset
 	// graphParamNames — lets typed editors (central panel, entity Details) render the
 	// right widget (color picker / float / vec2 / vec4 / bool) without the node graph.
 	std::vector<uint8_t> graphParamTypes;
+
+	// Parameter METADATA in slot order, parallel to graphParamNames (all appended to the
+	// MTRL tail — older materials load with empty vectors → plain widgets, no groups):
+	// - graphParamMinMax: 2 floats per slot (min, max); min < max → slider UI.
+	// - graphParamGroups/Tooltips: panel group header ("" = ungrouped) + hover help.
+	std::vector<float>       graphParamMinMax;
+	std::vector<std::string> graphParamGroups;
+	std::vector<std::string> graphParamTooltips;
+
+	// ── Material INSTANCE ("ein Master-Material, viele Varianten") ─────────────────
+	// Non-empty parentMaterialPath marks this asset as an instance of that material: it
+	// has NO graph of its own — ContentManager::syncMaterialInstance copies the parent's
+	// generated shader (same source hash → the SAME cached pipeline, zero recompiles) and
+	// re-applies this instance's overrides. instanceOverriddenParams lists BY NAME which
+	// param slots keep the instance's own value; everything else follows the parent.
+	// Static-switch overrides bake a different PERMUTATION: sync regenerates the shader
+	// from the parent's graph with the override map (own hash → own cached pipeline).
+	std::string              parentMaterialPath;
+	std::vector<std::string> instanceOverriddenParams;
+	std::vector<std::string> instanceSwitchNames;   // switch overrides: name…
+	std::vector<uint8_t>     instanceSwitchValues;  // …+ value 0/1 (parallel)
 
 	// Project textures the node graph's Texture Sample nodes reference, in slot order
 	// (heTexP0..). Loose assets keep paths; packing bakes them to graphTextureIds (MTLU).

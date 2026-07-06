@@ -2,6 +2,7 @@
 #include <Window/Window.h>
 #include <ContentManager/ContentManager.h>
 #include <MaterialGraph/MaterialGraph.h> // kMatMaxGraphTextures
+#include <material/PreviewMesh.h> // shared preview primitives (sphere/cube/plane)
 #include <Diagnostics/Logger.h>
 #if defined(HE_HAVE_SHADERC)
 #include "ShaderCompiler.h" // he::shaderc — canonical GLSL → MSL (material-system M1)
@@ -3492,7 +3493,9 @@ bool MetalRenderer::ResolveMaterialParams(const HE::UUID& materialId,
 	outBaseColor = glm::vec3(mat->baseColor[0], mat->baseColor[1], mat->baseColor[2]);
 	outMetallic  = mat->metallic;
 	outRoughness = mat->roughness;
-	outOpacity   = mat->opacity;
+	// Translucent blend mode forces the sorted alpha-blend pass even at opacity 1 —
+	// the shader's own oColor.a then does the actual blending.
+	outOpacity   = mat->blendMode == 2 ? std::min(mat->opacity, 0.998f) : mat->opacity;
 	return true;
 }
 
@@ -3525,13 +3528,14 @@ void MetalRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 	for (const HE::UUID& id : materialIds)
 	{
 		uint64_t shKey; std::string shFrag;
-		if (!ResolveMaterialShader(id, shKey, shFrag)) continue;
+		std::string shVert;
+		if (!ResolveMaterialShader(id, shKey, shFrag, shVert)) continue;
 		if (m_materialPipelineCache.find(shKey) != m_materialPipelineCache.end()) continue; // warm
 		const MaterialShaderVariant* pre = nullptr;
 		if (const MaterialAsset* ma = m_contentManager ? m_contentManager->getMaterial(id) : nullptr)
 			for (const auto& var : ma->precompiledShaders)
 				if (var.backend == static_cast<uint8_t>(HE::RendererBackend::Metal)) { pre = &var; break; }
-		if (GetOrBuildMaterialPipeline(shKey, shFrag, pre)) ++built;
+		if (GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre)) ++built;
 	}
 	if (built > 0)
 		Logger::Log(Logger::LogLevel::Info,
@@ -3539,7 +3543,8 @@ void MetalRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 }
 
 void* MetalRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& materialId,
-                                           uint32_t size, float yaw, float pitch, float dist)
+                                           uint32_t size, float yaw, float pitch, float dist,
+                                           int shape)
 {
 	const int S = std::clamp(static_cast<int>(size), 32, 1024);
 	if (!m_contentManager) m_contentManager = &cm;
@@ -3548,38 +3553,27 @@ void* MetalRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& m
 	if (!device || !queue) return nullptr;
 
 	// Resolve the node-graph material pipeline (built-in-PBR materials have none).
-	uint64_t shKey; std::string shFrag;
-	if (!ResolveMaterialShader(materialId, shKey, shFrag)) return nullptr;
+	uint64_t shKey; std::string shFrag, shVert;
+	if (!ResolveMaterialShader(materialId, shKey, shFrag, shVert)) return nullptr;
 	const MaterialAsset* ma = m_contentManager->getMaterial(materialId);
 	const MaterialShaderVariant* pre = nullptr;
 	if (ma)
 		for (const auto& var : ma->precompiledShaders)
 			if (var.backend == static_cast<uint8_t>(HE::RendererBackend::Metal)) { pre = &var; break; }
-	id<MTLRenderPipelineState> pso = (__bridge id<MTLRenderPipelineState>)GetOrBuildMaterialPipeline(shKey, shFrag, pre);
+	id<MTLRenderPipelineState> pso = (__bridge id<MTLRenderPipelineState>)GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre);
 	if (!pso) return nullptr;
 
-	// ── Lazy unit sphere (interleaved pos3/normal3/uv2 + uint32 indices).
-	if (!m_previewVB)
+	// ── Lazy preview primitive (interleaved pos3/normal3/uv2 + uint32 indices),
+	// rebuilt when the requested shape changes. Geometry is shared with the GL path
+	// via buildPreviewMesh so the two backends can never drift apart.
+	if (!m_previewVB || m_previewShape != shape)
 	{
-		const int segU = 48, segV = 32;
-		std::vector<float>    verts; std::vector<uint32_t> idx;
-		for (int y = 0; y <= segV; ++y)
-		{
-			const float v = (float)y / segV, phi = v * (float)M_PI;
-			for (int x = 0; x <= segU; ++x)
-			{
-				const float u = (float)x / segU, th = u * 2.0f * (float)M_PI;
-				const glm::vec3 n(std::sin(phi) * std::cos(th), std::cos(phi), std::sin(phi) * std::sin(th));
-				verts.insert(verts.end(), { n.x, n.y, n.z, n.x, n.y, n.z, u, v });
-			}
-		}
-		for (int y = 0; y < segV; ++y)
-			for (int x = 0; x < segU; ++x)
-			{
-				const uint32_t a = y * (segU + 1) + x, b = a + segU + 1;
-				idx.insert(idx.end(), { a, b, a + 1, a + 1, b, b + 1 });
-			}
+		if (m_previewVB) { CFBridgingRelease(m_previewVB); m_previewVB = nullptr; }
+		if (m_previewIB) { CFBridgingRelease(m_previewIB); m_previewIB = nullptr; }
+		std::vector<float> verts; std::vector<uint32_t> idx;
+		HE::buildPreviewMesh(shape, verts, idx);
 		m_previewIdxCount = (int)idx.size();
+		m_previewShape    = shape;
 		m_previewVB = (void*)CFBridgingRetain([device newBufferWithBytes:verts.data()
 			length:verts.size() * sizeof(float) options:MTLResourceStorageModeShared]);
 		m_previewIB = (void*)CFBridgingRetain([device newBufferWithBytes:idx.data()
@@ -3641,6 +3635,16 @@ void* MetalRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& m
 	lit.ambient[0] = lit.ambient[1] = lit.ambient[2] = 0.28f;
 	lit.camPos[0] = camPos.x; lit.camPos[1] = camPos.y; lit.camPos[2] = camPos.z;
 	[enc setFragmentBytes:&lit length:sizeof(lit) atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
+	// WPO materials read HeLighting/HeParams in the VERTEX stage (buffers 2/3).
+	if (!shVert.empty())
+	{
+		[enc setVertexBytes:&lit length:sizeof(lit) atIndex:2];
+		float vpad[64] = { 0 };
+		if (ma && !ma->shaderParamData.empty())
+			std::memcpy(vpad, ma->shaderParamData.data(),
+			            std::min(ma->shaderParamData.size(), size_t(64)) * sizeof(float));
+		[enc setVertexBytes:vpad length:sizeof(vpad) atIndex:3];
+	}
 
 	if (ma && !ma->shaderParamData.empty())
 	{
@@ -4360,6 +4364,26 @@ void* MetalRenderer::ensureMaterialArchive()
 {
 	if (m_matArchiveTried) return m_matBinaryArchive;
 	m_matArchiveTried = true;
+
+	// MTLBinaryArchive's serializeToURL: segfaults inside Metal on macOS 26+ (Tahoe/beta)
+	// when a warmup re-serializes the growing archive. The on-disk archive is only a
+	// COLD-START optimization — in-session pipelines are still cached in
+	// m_materialPipelineCache — so disable it entirely on the affected systems to keep the
+	// editor from crashing at project load. HE_MTL_ARCHIVE=1 forces it back on (older/fixed
+	// OSes), =0 forces it off everywhere.
+	{
+		bool enable;
+		if (const char* e = std::getenv("HE_MTL_ARCHIVE")) enable = (std::atoi(e) != 0);
+		else enable = (NSProcessInfo.processInfo.operatingSystemVersion.majorVersion < 26);
+		if (!enable)
+		{
+			Logger::Log(Logger::LogLevel::Info,
+				"MetalRenderer: on-disk material pipeline archive disabled "
+				"(MTLBinaryArchive serialize is unstable on this macOS; in-session cache still active)");
+			return nullptr; // m_matBinaryArchive stays null → GetOrBuildMaterialPipeline skips it
+		}
+	}
+
 	if (@available(macOS 11.0, *))
 	{
 		id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
@@ -4406,8 +4430,11 @@ void* MetalRenderer::ensureMaterialArchive()
 // turns the emitted MSL into an MTLRenderPipelineState. Cached by `key` (fragment source
 // hash); a null result is cached too so a broken shader isn't rebuilt every frame.
 void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string& fragGlsl,
-                                               const MaterialShaderVariant* precompiled)
+                                               const std::string& vertBody,
+                                               const MaterialShaderVariant* precompiled,
+                                               bool blend)
 {
+	if (blend) key ^= 0xB1E4DB1E4DB1E4DULL; // blended variant gets its own cache slot
 	if (auto it = m_materialPipelineCache.find(key); it != m_materialPipelineCache.end())
 		return it->second;
 
@@ -4422,7 +4449,10 @@ void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string&
 	}
 	else
 	{
-		const auto& v = m_matShaderLib.standardVertex(Backend::Metal);       // shared, cached MSL
+		// WPO materials get the graph-generated vertex; everything else the shared one.
+		const auto& v = vertBody.empty()
+			? m_matShaderLib.standardVertex(Backend::Metal)
+			: m_matShaderLib.customVertex(std::hash<std::string>{}(vertBody), vertBody, Backend::Metal);
 		const auto& f = m_matShaderLib.fragment(key, fragGlsl, Backend::Metal); // shared, cached MSL
 		vertMSL = v.source; fragMSL = f.source; log = v.log + f.log;
 		ok = v.ok && f.ok;
@@ -4445,6 +4475,14 @@ void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string&
 			desc.fragmentFunction = [fLib newFunctionWithName:@"main0"];
 			desc.colorAttachments[0].pixelFormat = kSceneColorFormat; // same HDR target as m_scenePipeline
 			desc.depthAttachmentPixelFormat      = kDepthFormat;
+			if (blend) // transparency-pass variant: standard back-to-front alpha blending
+			{
+				desc.colorAttachments[0].blendingEnabled             = YES;
+				desc.colorAttachments[0].sourceRGBBlendFactor        = MTLBlendFactorSourceAlpha;
+				desc.colorAttachments[0].destinationRGBBlendFactor   = MTLBlendFactorOneMinusSourceAlpha;
+				desc.colorAttachments[0].sourceAlphaBlendFactor      = MTLBlendFactorSourceAlpha;
+				desc.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+			}
 			// On-disk pipeline cache: point the descriptor at the binary archive so
 			// Metal reuses previously-compiled functions (fast) when present. Best-
 			// effort — if the function isn't cached, Metal compiles it as usual.
@@ -4484,10 +4522,11 @@ void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string&
 }
 
 // Delegate to the shared, backend-agnostic library (reads the MaterialAsset).
-bool MetalRenderer::ResolveMaterialShader(const HE::UUID& materialId, uint64_t& key, std::string& frag)
+bool MetalRenderer::ResolveMaterialShader(const HE::UUID& materialId, uint64_t& key, std::string& frag,
+                                          std::string& vertBody)
 {
 	if (!m_contentManager) return false;
-	return m_matShaderLib.resolveFragment(*m_contentManager, materialId, key, frag);
+	return m_matShaderLib.resolveShaders(*m_contentManager, materialId, key, frag, vertBody);
 }
 
 void MetalRenderer::EnsureShadercTestMesh()
@@ -4978,9 +5017,9 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 	// Compact "material lighting ABI" for custom-shader materials (M2 std-lit). Bound at
 	// fragment buffer 1 so the shared MaterialShaderLibrary preamble's heLit() has sun +
 	// ambient. Harmless for the default PBR pipeline (which doesn't read buffer 1).
+	HE::MaterialShaderLibrary::Lighting matLight; // reused by WPO vertex-stage binds below
 	{
 		const glm::vec3 sc = GetEnvironment().sunColor, am = m_renderWorld.ambient;
-		HE::MaterialShaderLibrary::Lighting matLight;
 		matLight.sunDir[0]   = sunDir.x; matLight.sunDir[1]   = sunDir.y; matLight.sunDir[2]   = sunDir.z;
 		matLight.sunDir[3]   = skyClock; // engine seconds — the node graph's Time input
 		matLight.camPos[0]   = m_renderWorld.camera.position.x;
@@ -4995,7 +5034,11 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 
 	// Transparent (opacity < 1) draws collected during the opaque loop and replayed
 	// sorted back-to-front, alpha-blended, after the sky.
-	struct TPDraw { UnlitUniforms u; void* vbuf; void* ibuf; NSUInteger indexCount; void* tex; float distSq; };
+	struct TPDraw { UnlitUniforms u; void* vbuf; void* ibuf; NSUInteger indexCount; void* tex; float distSq;
+	                // Custom-material state (Translucent graph materials): a BLENDED variant
+	                // of the material pipeline + its params/textures; null → default blend PSO.
+	                void* pipeline = nullptr; std::vector<float> params; bool wpo = false;
+	                void* gtex[HE::kMatMaxGraphTextures] = { nullptr }; int gtexCount = 0; };
 	std::vector<TPDraw> transparent;
 	const glm::vec3 camPos = m_renderWorld.camera.position;
 
@@ -5026,7 +5069,9 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 		// Per-material pipeline (M1): resolved when the material changes; null = the
 		// default PBR pipeline. boundPipeline tracks what's set on the encoder so we
 		// only re-bind on an actual change (draws arrive sorted, so this is rare).
-		void*     cMaterialPipeline = nullptr;
+		void*     cMaterialPipeline      = nullptr;
+		void*     cMaterialPipelineBlend = nullptr; // alpha-blended variant (transparency pass)
+		bool      cMaterialWpo           = false;   // custom WPO vertex → vertex-stage binds
 		void*     boundPipeline     = defaultPipeline;
 		const std::vector<float>* cMaterialParams = nullptr; // HeParams data (buffer 2)
 		void* cGraphTex[HE::kMatMaxGraphTextures] = { nullptr }; // node-graph textures (units 1..4)
@@ -5051,11 +5096,13 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 				// Per-material shader: a MaterialAsset with customShaderFragGlsl gets its
 				// own cross-compiled pipeline (cached by source hash); else the default.
 				cMaterialPipeline = nullptr;
+				cMaterialPipelineBlend = nullptr;
+				cMaterialWpo      = false;
 				cMaterialParams   = nullptr;
 				cGraphTexCount    = 0;
 				{
-					uint64_t shKey; std::string shFrag;
-					if (ResolveMaterialShader(dc.materialAssetId, shKey, shFrag))
+					uint64_t shKey; std::string shFrag, shVert;
+					if (ResolveMaterialShader(dc.materialAssetId, shKey, shFrag, shVert))
 					{
 						// Prefer a shader precompiled into the pack for this backend (no
 						// runtime cross-compile); else cross-compile via the shared library.
@@ -5064,7 +5111,13 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 							? m_contentManager->getMaterial(dc.materialAssetId) : nullptr)
 							for (const auto& var : ma->precompiledShaders)
 								if (var.backend == static_cast<uint8_t>(HE::RendererBackend::Metal)) { pre = &var; break; }
-						cMaterialPipeline = GetOrBuildMaterialPipeline(shKey, shFrag, pre);
+						cMaterialWpo      = !shVert.empty();
+						cMaterialPipeline = GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre);
+						// Translucent-routed materials additionally need the alpha-blended
+						// pipeline variant for the transparency pass.
+						if (cOpacity < 0.999f && cMaterialPipeline)
+							cMaterialPipelineBlend =
+								GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre, /*blend=*/true);
 						if (const MaterialAsset* ma = m_contentManager
 							? m_contentManager->getMaterial(dc.materialAssetId) : nullptr)
 						{
@@ -5124,9 +5177,20 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 				if (cOpacity < 0.999f)
 				{
 					const glm::vec3 d = glm::vec3(xform[3]) - camPos;
-					transparent.push_back({ ui, (__bridge void*)vertexBuf, (__bridge void*)indexBuf,
-					                        indexCount, texPtr, glm::dot(d, d) });
-					return; // drawn in the transparency pass below (always the default pipeline)
+					TPDraw t{ ui, (__bridge void*)vertexBuf, (__bridge void*)indexBuf,
+					          indexCount, texPtr, glm::dot(d, d) };
+					// Translucent graph materials keep their own (blended) pipeline + state.
+					if (cMaterialPipelineBlend)
+					{
+						t.pipeline = cMaterialPipelineBlend;
+						t.wpo      = cMaterialWpo;
+						if (cMaterialParams) t.params = *cMaterialParams;
+						if (!dc.paramOverride.empty()) t.params = dc.paramOverride;
+						for (int i = 0; i < cGraphTexCount; ++i) t.gtex[i] = cGraphTex[i];
+						t.gtexCount = cGraphTexCount;
+					}
+					transparent.push_back(std::move(t));
+					return; // drawn in the transparency pass below
 				}
 				// M1: switch to this material's cross-compiled pipeline if it has one,
 				// else the default PBR pipeline. Re-bound only on a real change.
@@ -5162,6 +5226,19 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 						}
 				[encoder setVertexBuffer:vertexBuf offset:0 atIndex:0];
 				[encoder setVertexBytes:&ui length:sizeof(ui) atIndex:1];
+				// WPO materials read HeLighting (time) + HeParams in the VERTEX stage too
+				// (custom vertex pins them to buffers 2/3).
+				if (cMaterialPipeline && cMaterialWpo)
+				{
+					[encoder setVertexBytes:&matLight length:sizeof(matLight) atIndex:2];
+					float vpad[64] = { 0 };
+					const std::vector<float>* vsrc =
+						!dc.paramOverride.empty() ? &dc.paramOverride : cMaterialParams;
+					if (vsrc)
+						std::memcpy(vpad, vsrc->data(),
+						            std::min(vsrc->size(), size_t(64)) * sizeof(float));
+					[encoder setVertexBytes:vpad length:sizeof(vpad) atIndex:3];
+				}
 				[encoder setFragmentTexture:texture atIndex:0];
 				[encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
 				                    indexCount:indexCount
@@ -5206,8 +5283,37 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:2];
 		[encoder setFragmentTexture:(__bridge id<MTLTexture>)(ssaoActive ? m_ssaoResult : m_dummyTexture) atIndex:3];
 		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:3];
+		void* tpBound = (__bridge void*)(__bridge id<MTLRenderPipelineState>)m_sceneBlendPipeline;
 		for (const TPDraw& t : transparent)
 		{
+			// Custom translucent materials bind their own blended pipeline + state; the
+			// engine's default blend PSO covers everything else. matLight@1 is still bound.
+			void* want = t.pipeline ? t.pipeline : (__bridge void*)(__bridge id<MTLRenderPipelineState>)m_sceneBlendPipeline;
+			if (want != tpBound)
+			{
+				[encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)want];
+				tpBound = want;
+			}
+			if (t.pipeline)
+			{
+				[encoder setFragmentBytes:&matLight length:sizeof(matLight)
+				                  atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
+				float padded[64] = { 0 };
+				std::memcpy(padded, t.params.data(),
+				            std::min(t.params.size(), size_t(64)) * sizeof(float));
+				[encoder setFragmentBytes:padded length:sizeof(padded) atIndex:2];
+				for (int i = 0; i < t.gtexCount; ++i)
+					if (t.gtex[i])
+					{
+						[encoder setFragmentTexture:(__bridge id<MTLTexture>)t.gtex[i] atIndex:(i + 1)];
+						[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:(i + 1)];
+					}
+				if (t.wpo)
+				{
+					[encoder setVertexBytes:&matLight length:sizeof(matLight) atIndex:2];
+					[encoder setVertexBytes:padded length:sizeof(padded) atIndex:3];
+				}
+			}
 			[encoder setVertexBuffer:(__bridge id<MTLBuffer>)t.vbuf offset:0 atIndex:0];
 			[encoder setVertexBytes:&t.u length:sizeof(t.u) atIndex:1];
 			[encoder setFragmentTexture:(__bridge id<MTLTexture>)t.tex atIndex:0];
