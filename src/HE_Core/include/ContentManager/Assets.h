@@ -186,6 +186,14 @@ struct MaterialFunctionAsset : public RuntimeAsset
 	std::string nodeGraphJson;
 };
 
+// A UI widget tree (UMG-style widget editor asset). The JSON is the source of
+// truth (HE::UIWidgetTree round-trips it); instantiated into UI entities at
+// play start.
+struct UIWidgetAsset : public RuntimeAsset
+{
+	std::string treeJson;
+};
+
 struct SceneAsset : public RuntimeAsset
 {
 	std::vector<std::string> objectPaths;

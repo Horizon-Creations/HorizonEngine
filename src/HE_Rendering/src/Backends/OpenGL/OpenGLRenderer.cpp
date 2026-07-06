@@ -2,6 +2,7 @@
 #include <material/PreviewMesh.h> // shared preview primitives (sphere/cube/plane)
 #include <Window/Window.h>
 #include <ContentManager/ContentManager.h>
+#include <Renderer/UIFont.h>             // shared baked UI font atlas
 #include <glad/glad.h>
 #include <SDL3/SDL.h>
 #include <stdexcept>
@@ -2368,17 +2369,20 @@ void main()
 // ── In-Game UI (2D canvas) ──────────────────────────────────────────────────
 // Attribute-less: position is derived from gl_VertexID (0-3 for TRIANGLE_STRIP)
 // and the per-quad uniforms uRect (x,y,w,h pixels) + uViewport (vpW,vpH pixels).
+// uUVRect = {u0, v0, u1, v1} into the font atlas (glyph quads); uMode: 0 = solid
+// color, 1 = font-atlas glyph (alpha from the atlas R channel). Mirrors kUIMSL.
 static const char* kUIVS = R"GLSL(
 #version 410 core
 uniform vec4 uRect;
 uniform vec2 uViewport;
+uniform vec4 uUVRect;
 out vec2 vUV;
 void main()
 {
     const vec2 c[4] = vec2[](vec2(0,0), vec2(1,0), vec2(0,1), vec2(1,1));
     vec2 uv = c[gl_VertexID];
     vec2 sp = uRect.xy + uv * uRect.zw;
-    vUV = uv;
+    vUV = mix(uUVRect.xy, uUVRect.zw, uv);
     gl_Position = vec4(sp.x / uViewport.x * 2.0 - 1.0,
                        1.0 - sp.y / uViewport.y * 2.0,
                        0.0, 1.0);
@@ -2389,10 +2393,18 @@ static const char* kUIFS = R"GLSL(
 #version 410 core
 in vec2 vUV;
 uniform vec4 uColor;
+uniform float uMode;
+uniform sampler2D uFontAtlas;
 out vec4 FragColor;
 void main()
 {
-    FragColor = uColor;
+    if (uMode > 0.5)
+    {
+        float a = texture(uFontAtlas, vUV).r;
+        FragColor = vec4(uColor.rgb, uColor.a * a);
+    }
+    else
+        FragColor = uColor;
 }
 )GLSL";
 
@@ -2754,6 +2766,86 @@ unsigned int OpenGLRenderer::getOrBuildMaterialProgram(uint64_t key, const std::
 	m_materialPrograms[key] = program; // cache success AND failure (0)
 	return program;
 }
+
+// Build (or fetch) the GL program that draws a UI quad with a node-graph material:
+// the material's shared fragment paired with the screen-space uiVertex (its U block
+// repurposed — model[0]=rect px, model[1]=uvRect, model[2].xy=viewport px, color=
+// tint; see MaterialShaderLibrary::uiVertex). Same fragment hash as the mesh path,
+// but a different vertex → own cache. Cached by hash; 0 cached on failure.
+unsigned int OpenGLRenderer::getOrBuildUIMaterialProgram(const HE::UUID& materialId)
+{
+	uint64_t key = 0; std::string fragGlsl, vertBody;
+	if (!resolveMaterialShader(materialId, key, fragGlsl, vertBody))
+		return 0; // no custom shader → solid-color quad
+	if (auto it = m_uiMaterialPrograms.find(key); it != m_uiMaterialPrograms.end()) return it->second;
+
+	using Backend = HE::MaterialShaderLibrary::Backend;
+	const auto& v = m_matShaderLib.uiVertex(Backend::GLSL410);
+	const auto& f = m_matShaderLib.fragment(key, fragGlsl, Backend::GLSL410);
+
+	unsigned int program = 0;
+	if (v.ok && f.ok)
+	{
+		GLuint vs = CompileStage(GL_VERTEX_SHADER,   v.source.c_str());
+		GLuint fs = CompileStage(GL_FRAGMENT_SHADER, f.source.c_str());
+		GLuint prog = glCreateProgram();
+		glAttachShader(prog, vs);
+		glAttachShader(prog, fs);
+		glLinkProgram(prog);
+		glDeleteShader(vs); glDeleteShader(fs);
+		GLint ok = 0; glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+		if (ok)
+		{
+			// Same block bindings + sampler units as the mesh material path (GL 4.1
+			// has no layout(binding), so wire them by name post-link).
+			const GLuint uIdx = glGetUniformBlockIndex(prog, "U");
+			if (uIdx != GL_INVALID_INDEX) glUniformBlockBinding(prog, uIdx, 1);
+			const GLuint lIdx = glGetUniformBlockIndex(prog, "HeLighting");
+			if (lIdx != GL_INVALID_INDEX) glUniformBlockBinding(prog, lIdx, 0);
+			const GLuint pIdx = glGetUniformBlockIndex(prog, "HeParams");
+			if (pIdx != GL_INVALID_INDEX) glUniformBlockBinding(prog, pIdx, 2);
+			glUseProgram(prog);
+			if (GLint l = glGetUniformLocation(prog, "heTex0"); l >= 0) glUniform1i(l, 0);
+			for (int k = 0; k < 4; ++k)
+			{
+				const std::string nm = "heTexP" + std::to_string(k);
+				if (GLint l = glGetUniformLocation(prog, nm.c_str()); l >= 0) glUniform1i(l, k + 1);
+			}
+			glUseProgram(0);
+			program = prog;
+		}
+		else
+		{
+			char log[2048]; glGetProgramInfoLog(prog, sizeof(log), nullptr, log);
+			Logger::Log(Logger::LogLevel::Error,
+				(std::string("OpenGLRenderer: UI material program link failed: ") + log).c_str());
+			glDeleteProgram(prog);
+		}
+	}
+	else
+		Logger::Log(Logger::LogLevel::Error,
+			(std::string("OpenGLRenderer: UI material shader cross-compile failed\n") + v.log + f.log).c_str());
+
+	// Lazily create the shared per-object + lighting UBOs on first material (a UI
+	// quad can be the first material user of the session).
+	if (!m_matObjUBO)
+	{
+		glGenBuffers(1, &m_matObjUBO);
+		glBindBuffer(GL_UNIFORM_BUFFER, m_matObjUBO);
+		glBufferData(GL_UNIFORM_BUFFER, 176, nullptr, GL_DYNAMIC_DRAW); // mat4 mvp+model + 3×vec4
+		glGenBuffers(1, &m_matLightUBO);
+		glBindBuffer(GL_UNIFORM_BUFFER, m_matLightUBO);
+		glBufferData(GL_UNIFORM_BUFFER,
+			static_cast<GLsizeiptr>(sizeof(HE::MaterialShaderLibrary::Lighting)), nullptr, GL_DYNAMIC_DRAW);
+		glGenBuffers(1, &m_matParamUBO);
+		glBindBuffer(GL_UNIFORM_BUFFER, m_matParamUBO);
+		glBufferData(GL_UNIFORM_BUFFER, 256, nullptr, GL_DYNAMIC_DRAW); // vec4 v[16]
+		glBindBuffer(GL_UNIFORM_BUFFER, 0);
+	}
+
+	m_uiMaterialPrograms[key] = program; // cache success AND failure (0)
+	return program;
+}
 #endif // HE_HAVE_SHADERC
 
 void OpenGLRenderer::CreateSkinnedPipeline()
@@ -3086,6 +3178,12 @@ void OpenGLRenderer::CreateTonemapPipeline()
 		m_uUIRect     = glGetUniformLocation(m_uiProgram, "uRect");
 		m_uUIViewport = glGetUniformLocation(m_uiProgram, "uViewport");
 		m_uUIColor    = glGetUniformLocation(m_uiProgram, "uColor");
+		m_uUIUVRect   = glGetUniformLocation(m_uiProgram, "uUVRect");
+		m_uUIMode     = glGetUniformLocation(m_uiProgram, "uMode");
+		// Font atlas always samples from texture unit 0 (bound in RenderUIPass).
+		glUseProgram(m_uiProgram);
+		if (GLint l = glGetUniformLocation(m_uiProgram, "uFontAtlas"); l >= 0) glUniform1i(l, 0);
+		glUseProgram(0);
 	}
 }
 
@@ -3534,21 +3632,129 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 {
 	if (!m_uiProgram || m_renderWorld.uiObjects.empty()) return;
 
+	// Lazy one-time upload of the shared baked font atlas (R8, glyph alpha in .r).
+	if (!m_uiFontTexture)
+	{
+		const HE::BakedUIFont& uiFont = HE::sharedUIFont();
+		if (uiFont.ok)
+		{
+			glGenTextures(1, &m_uiFontTexture);
+			glBindTexture(GL_TEXTURE_2D, m_uiFontTexture);
+			glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, HE::BakedUIFont::kWidth, HE::BakedUIFont::kHeight,
+			             0, GL_RED, GL_UNSIGNED_BYTE, uiFont.pixels.data());
+			glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+			glBindTexture(GL_TEXTURE_2D, 0);
+		}
+	}
+
 	glDisable(GL_DEPTH_TEST);
 	glEnable(GL_BLEND);
 	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-	glUseProgram(m_uiProgram);
 	glBindVertexArray(m_fsVAO);
-	glUniform2f(m_uUIViewport, static_cast<float>(pw), static_cast<float>(ph));
 
+	bool         basicBound    = false; // solid/glyph program currently active?
+	unsigned int boundMaterial = 0;     // material program currently active
+#if defined(HE_HAVE_SHADERC)
+	bool uiLightUploaded = false;       // HeLighting uploaded once per UI pass
+#endif
 	for (const UIRenderObject& obj : m_renderWorld.uiObjects)
 	{
+#if defined(HE_HAVE_SHADERC)
+		// Custom material on an image quad → material program (the solid path below
+		// stays the fallback when the material has no custom shader / failed).
+		const unsigned int matProg = obj.type == 0 && obj.materialAssetId != HE::UUID{}
+			? getOrBuildUIMaterialProgram(obj.materialAssetId) : 0;
+		if (matProg)
+		{
+			if (boundMaterial != matProg)
+			{
+				glUseProgram(matProg);
+				boundMaterial = matProg; basicBound = false;
+			}
+			// The uiVertex's repurposed U block (see MaterialShaderLibrary::uiVertex).
+			struct { glm::mat4 mvp, model; glm::vec4 color, flags, pbr; } u{};
+			u.model[0] = glm::vec4(obj.position.x, obj.position.y, obj.size.x, obj.size.y);
+			u.model[1] = glm::vec4(0.0f, 0.0f, 1.0f, 1.0f);
+			u.model[2] = glm::vec4(static_cast<float>(pw), static_cast<float>(ph), 0.0f, 0.0f);
+			u.color    = obj.color;
+			glBindBuffer(GL_UNIFORM_BUFFER, m_matObjUBO);
+			glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(u), &u);
+			// Lighting block (heLit sun/ambient + the Time input) — identical for
+			// every UI quad this frame, so upload it once per pass.
+			if (!uiLightUploaded)
+			{
+				HE::MaterialShaderLibrary::Lighting lit;
+				const glm::vec3 sd = m_renderWorld.sunDirection;
+				const glm::vec3 sc = GetEnvironment().sunColor;
+				const glm::vec3 am = m_renderWorld.ambient;
+				lit.sunDir[0]   = sd.x; lit.sunDir[1] = sd.y; lit.sunDir[2] = sd.z;
+				lit.sunDir[3]   = static_cast<float>(SDL_GetTicks()) / 1000.0f;
+				lit.sunColor[0] = sc.r; lit.sunColor[1] = sc.g; lit.sunColor[2] = sc.b;
+				lit.ambient[0]  = am.r; lit.ambient[1]  = am.g; lit.ambient[2]  = am.b;
+				lit.camPos[0]   = m_renderWorld.camera.position.x;
+				lit.camPos[1]   = m_renderWorld.camera.position.y;
+				lit.camPos[2]   = m_renderWorld.camera.position.z;
+				glBindBuffer(GL_UNIFORM_BUFFER, m_matLightUBO);
+				glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(lit), &lit);
+				uiLightUploaded = true;
+				m_matLightUploadedThisFrame = false; // invalidate the mesh loop's per-frame dedup
+			}
+			glBindBufferBase(GL_UNIFORM_BUFFER, 1, m_matObjUBO);   // block "U"
+			glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_matLightUBO); // block "HeLighting"
+
+			// HeParams + graph textures, mirroring the mesh path's bind points.
+			if (const MaterialAsset* ma = m_contentManager
+				? m_contentManager->getMaterial(obj.materialAssetId) : nullptr)
+			{
+				float padded[64] = { 0 };
+				if (const size_t n = std::min(ma->shaderParamData.size(), size_t(64)))
+					std::memcpy(padded, ma->shaderParamData.data(), n * sizeof(float));
+				glBindBuffer(GL_UNIFORM_BUFFER, m_matParamUBO);
+				glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(padded), padded);
+				m_haveMatParams = false; // invalidate the mesh loop's content-skip
+				// Node-graph project textures on units 1..4 (heTexP0..3).
+				const size_t nTex = std::min<size_t>(4,
+					std::max(ma->graphTexturePaths.size(), ma->graphTextureIds.size()));
+				for (size_t i = 0; i < nTex; ++i)
+				{
+					const HE::UUID    gid = i < ma->graphTextureIds.size()   ? ma->graphTextureIds[i]   : HE::UUID{};
+					const std::string gp  = i < ma->graphTexturePaths.size() ? ma->graphTexturePaths[i] : std::string{};
+					glActiveTexture(GL_TEXTURE1 + (GLenum)i);
+					glBindTexture(GL_TEXTURE_2D, ResolveGraphTexture(gid, gp));
+				}
+			}
+			glBindBufferBase(GL_UNIFORM_BUFFER, 2, m_matParamUBO); // block "HeParams"
+			glBindBuffer(GL_UNIFORM_BUFFER, 0);
+			// Legacy/mesh texture slot 0 (heTex0) must be bound too — white dummy.
+			glActiveTexture(GL_TEXTURE0);
+			glBindTexture(GL_TEXTURE_2D, m_whiteTex);
+			glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+			continue;
+		}
+#endif
+		if (!basicBound)
+		{
+			glUseProgram(m_uiProgram);
+			glUniform2f(m_uUIViewport, static_cast<float>(pw), static_cast<float>(ph));
+			// Font atlas on unit 0 (uFontAtlas); glyphs sample it, solid quads ignore it.
+			glActiveTexture(GL_TEXTURE0);
+			glBindTexture(GL_TEXTURE_2D, m_uiFontTexture ? m_uiFontTexture : m_whiteTex);
+			basicBound = true; boundMaterial = 0;
+		}
 		glUniform4f(m_uUIRect,  obj.position.x, obj.position.y, obj.size.x, obj.size.y);
 		glUniform4f(m_uUIColor, obj.color.r, obj.color.g, obj.color.b, obj.color.a);
+		glUniform4f(m_uUIUVRect, obj.uvMin.x, obj.uvMin.y, obj.uvMax.x, obj.uvMax.y);
+		glUniform1f(m_uUIMode, obj.type == 2 ? 1.0f : 0.0f);
 		glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 	}
 
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, 0);
 	glDisable(GL_BLEND);
 	glEnable(GL_DEPTH_TEST);
 }
@@ -4256,6 +4462,8 @@ void OpenGLRenderer::Shutdown()
 #if defined(HE_HAVE_SHADERC)
 	for (auto& [k, prog] : m_materialPrograms) if (prog) glDeleteProgram(prog);
 	m_materialPrograms.clear();
+	for (auto& [k, prog] : m_uiMaterialPrograms) if (prog) glDeleteProgram(prog);
+	m_uiMaterialPrograms.clear();
 	if (m_matObjUBO)   { glDeleteBuffers(1, &m_matObjUBO);   m_matObjUBO = 0; }
 	if (m_matLightUBO) { glDeleteBuffers(1, &m_matLightUBO); m_matLightUBO = 0; }
 	if (m_matParamUBO) { glDeleteBuffers(1, &m_matParamUBO); m_matParamUBO = 0; }
@@ -4276,6 +4484,7 @@ void OpenGLRenderer::Shutdown()
 	if (m_tonemapProgram) { glDeleteProgram(m_tonemapProgram); m_tonemapProgram = 0; }
 	if (m_fxaaProgram)    { glDeleteProgram(m_fxaaProgram);    m_fxaaProgram = 0; }
 	if (m_uiProgram)      { glDeleteProgram(m_uiProgram);      m_uiProgram = 0; }
+	if (m_uiFontTexture)  { glDeleteTextures(1, &m_uiFontTexture); m_uiFontTexture = 0; }
 	if (m_bloomBrightProgram) { glDeleteProgram(m_bloomBrightProgram); m_bloomBrightProgram = 0; }
 	if (m_blurProgram)    { glDeleteProgram(m_blurProgram);    m_blurProgram = 0; }
 	if (m_fsVAO)          { glDeleteVertexArrays(1, &m_fsVAO);  m_fsVAO = 0; }

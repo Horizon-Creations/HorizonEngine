@@ -5010,6 +5010,7 @@ void VulkanRenderer::runUIPass(VkCommandBuffer cmd, int width, int height)
 
     for (const UIRenderObject& obj : m_renderWorld.uiObjects)
     {
+        if (obj.type == 2) continue; // font-atlas glyph quads: GL/Metal only for now
         UIPush push{};
         push.rect     = glm::vec4(obj.position.x, obj.position.y, obj.size.x, obj.size.y);
         push.color    = glm::vec4(obj.color.r, obj.color.g, obj.color.b, obj.color.a);

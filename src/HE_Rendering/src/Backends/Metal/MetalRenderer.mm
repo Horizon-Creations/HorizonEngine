@@ -2,6 +2,7 @@
 #include <Window/Window.h>
 #include <ContentManager/ContentManager.h>
 #include <MaterialGraph/MaterialGraph.h> // kMatMaxGraphTextures
+#include <Renderer/UIFont.h>             // shared baked UI font atlas
 #include <material/PreviewMesh.h> // shared preview primitives (sphere/cube/plane)
 #include <Diagnostics/Logger.h>
 #if defined(HE_HAVE_SHADERC)
@@ -705,15 +706,18 @@ fragment float4 fxaaFragment(FXOut in [[stage_in]],
 }
 )MSL";
 
-// In-Game UI 2D pass: solid-color quads derived from vertex_id + uniforms.
-// rect = {x, y, w, h} pixels;  viewport = {vpW, vpH} pixels.
+// In-Game UI 2D pass: quads derived from vertex_id + uniforms.
+// rect = {x, y, w, h} pixels;  viewport = {vpW, vpH} pixels;
+// uvrect = {u0, v0, u1, v1} into the font atlas (glyph quads).
+// mode: 0 = solid color, 1 = font-atlas glyph (alpha from atlas R channel).
 static const char* kUIMSL = R"MSL(
 #include <metal_stdlib>
 using namespace metal;
 struct UIVert { float4 position [[position]]; float2 uv; };
 vertex UIVert uiVertex(uint vid [[vertex_id]],
                        constant float4& rect     [[buffer(0)]],
-                       constant float2& viewport [[buffer(1)]])
+                       constant float2& viewport [[buffer(1)]],
+                       constant float4& uvrect   [[buffer(2)]])
 {
     const float2 c[4] = { float2(0,0), float2(1,0), float2(0,1), float2(1,1) };
     float2 uv = c[vid];
@@ -722,12 +726,19 @@ vertex UIVert uiVertex(uint vid [[vertex_id]],
                         1.0 - sp.y / viewport.y * 2.0);
     UIVert o;
     o.position = float4(ndc, 0.0, 1.0);
-    o.uv = uv;
+    o.uv = mix(uvrect.xy, uvrect.zw, uv);
     return o;
 }
 fragment float4 uiFragment(UIVert in [[stage_in]],
-                           constant float4& color [[buffer(0)]])
+                           constant float4& color [[buffer(0)]],
+                           constant float&  mode  [[buffer(1)]],
+                           texture2d<float> atlas [[texture(0)]])
 {
+    if (mode > 0.5) {
+        constexpr sampler s(filter::linear);
+        float a = atlas.sample(s, in.uv).r;
+        return float4(color.rgb, color.a * a);
+    }
     return color;
 }
 )MSL";
@@ -2577,6 +2588,9 @@ void MetalRenderer::Shutdown()
 	if (m_shadercTestIB)        { CFBridgingRelease(m_shadercTestIB);        m_shadercTestIB = nullptr; }
 	if (m_fxaaPipeline)         { CFBridgingRelease(m_fxaaPipeline);         m_fxaaPipeline = nullptr; }
 	if (m_uiPipeline)           { CFBridgingRelease(m_uiPipeline);           m_uiPipeline = nullptr; }
+	if (m_uiFontTexture)        { CFBridgingRelease(m_uiFontTexture);        m_uiFontTexture = nullptr; }
+	for (auto& [k, pso] : m_uiMaterialPipelines) if (pso) CFBridgingRelease(pso);
+	m_uiMaterialPipelines.clear();
 	if (m_bloomBrightPipeline)  { CFBridgingRelease(m_bloomBrightPipeline);  m_bloomBrightPipeline = nullptr; }
 	if (m_blurPipeline)         { CFBridgingRelease(m_blurPipeline);         m_blurPipeline = nullptr; }
 	if (m_skyPipeline)          { CFBridgingRelease(m_skyPipeline);          m_skyPipeline = nullptr; }
@@ -2967,6 +2981,28 @@ void MetalRenderer::CreateScenePipeline()
 		noiseSampDesc.tAddressMode = MTLSamplerAddressModeRepeat;
 		noiseSampDesc.rAddressMode = MTLSamplerAddressModeRepeat;
 		m_noiseSampler = (void*)CFBridgingRetain([device newSamplerStateWithDescriptor:noiseSampDesc]);
+
+		// UI font atlas (R8): the shared baked ProggyClean atlas glyph quads sample.
+		{
+			const HE::BakedUIFont& uiFont = HE::sharedUIFont();
+			if (uiFont.ok)
+			{
+				MTLTextureDescriptor* fontDesc = [MTLTextureDescriptor
+					texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm
+					                              width:HE::BakedUIFont::kWidth
+					                             height:HE::BakedUIFont::kHeight
+					                          mipmapped:NO];
+				fontDesc.usage       = MTLTextureUsageShaderRead;
+				fontDesc.storageMode = MTLStorageModeShared;
+				id<MTLTexture> fontTex = [device newTextureWithDescriptor:fontDesc];
+				[fontTex replaceRegion:MTLRegionMake2D(0, 0, HE::BakedUIFont::kWidth,
+				                                       HE::BakedUIFont::kHeight)
+				           mipmapLevel:0
+				             withBytes:uiFont.pixels.data()
+				           bytesPerRow:HE::BakedUIFont::kWidth];
+				m_uiFontTexture = (void*)CFBridgingRetain(fontTex);
+			}
+		}
 
 		// Empty image-based-ambient cubemap (RGBA32F); filled per frame from the
 		// analytic skyColor (SkyColorCPU) when the sun direction changes. The
@@ -4643,20 +4679,156 @@ void MetalRenderer::EncodeFxaa(void* renderEncoderPtr, int width, int height)
 }
 
 // 2D UI quads (solid color) into the bound render encoder's target.
+// Build (or fetch) the pipeline that draws a UI quad with a node-graph material:
+// the material's shared fragment MSL paired with the screen-space uiVertex, alpha-
+// blended into the LDR UI target. Cache key = the material's shader hash.
+void* MetalRenderer::GetOrBuildUIMaterialPipeline(const HE::UUID& materialId)
+{
+	uint64_t key = 0; std::string fragGlsl, vertBody;
+	if (!ResolveMaterialShader(materialId, key, fragGlsl, vertBody))
+		return nullptr; // no custom shader → solid-color quad
+	if (auto it = m_uiMaterialPipelines.find(key); it != m_uiMaterialPipelines.end())
+		return it->second;
+
+	using Backend = HE::MaterialShaderLibrary::Backend;
+	const auto& v = m_matShaderLib.uiVertex(Backend::Metal);
+	const auto& f = m_matShaderLib.fragment(key, fragGlsl, Backend::Metal);
+
+	void* result = nullptr;
+	if (v.ok && f.ok)
+	{
+		id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+		NSError* err = nil;
+		id<MTLLibrary> vLib = [device newLibraryWithSource:[NSString stringWithUTF8String:v.source.c_str()]
+		                                           options:nil error:&err];
+		id<MTLLibrary> fLib = err ? nil
+			: [device newLibraryWithSource:[NSString stringWithUTF8String:f.source.c_str()]
+			                       options:nil error:&err];
+		if (vLib && fLib)
+		{
+			MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
+			desc.vertexFunction   = [vLib newFunctionWithName:@"main0"];
+			desc.fragmentFunction = [fLib newFunctionWithName:@"main0"];
+			desc.colorAttachments[0].pixelFormat     = kSwapchainFormat; // UI target (LDR)
+			desc.colorAttachments[0].blendingEnabled = YES;
+			desc.colorAttachments[0].rgbBlendOperation         = MTLBlendOperationAdd;
+			desc.colorAttachments[0].alphaBlendOperation       = MTLBlendOperationAdd;
+			desc.colorAttachments[0].sourceRGBBlendFactor      = MTLBlendFactorSourceAlpha;
+			desc.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+			desc.colorAttachments[0].sourceAlphaBlendFactor    = MTLBlendFactorOne;
+			desc.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorZero;
+			desc.depthAttachmentPixelFormat = kDepthFormat;
+			id<MTLRenderPipelineState> pso = [device newRenderPipelineStateWithDescriptor:desc error:&err];
+			if (pso) result = (void*)CFBridgingRetain(pso);
+		}
+		if (!result)
+			Logger::Log(Logger::LogLevel::Error,
+				(std::string("MetalRenderer: UI material pipeline build failed: ")
+				 + (err ? err.localizedDescription.UTF8String : "?")).c_str());
+	}
+	else
+		Logger::Log(Logger::LogLevel::Error,
+			(std::string("MetalRenderer: UI material shader compile failed\n") + v.log + f.log).c_str());
+
+	m_uiMaterialPipelines[key] = result; // cache success AND failure (null)
+	return result;
+}
+
 void MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height)
 {
 	if (!m_uiPipeline || m_renderWorld.uiObjects.empty()) return;
 	id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoderPtr;
-	[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_uiPipeline];
-	[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_noDepthState];
 	const simd::float2 vp = { (float)std::max(1, width), (float)std::max(1, height) };
-	[enc setVertexBytes:&vp length:sizeof(vp) atIndex:1];
+
+	// Lighting block for material quads (heLit sun/ambient + the Time input).
+	HE::MaterialShaderLibrary::Lighting matLight;
+	{
+		const glm::vec3 sd = m_renderWorld.sunDirection;
+		const glm::vec3 sc = GetEnvironment().sunColor;
+		const glm::vec3 am = m_renderWorld.ambient;
+		matLight.sunDir[0]   = sd.x; matLight.sunDir[1] = sd.y; matLight.sunDir[2] = sd.z;
+		matLight.sunDir[3]   = static_cast<float>(SDL_GetTicks()) / 1000.0f;
+		matLight.sunColor[0] = sc.r; matLight.sunColor[1] = sc.g; matLight.sunColor[2] = sc.b;
+		matLight.ambient[0]  = am.r; matLight.ambient[1]  = am.g; matLight.ambient[2]  = am.b;
+		matLight.camPos[0]   = m_renderWorld.camera.position.x;
+		matLight.camPos[1]   = m_renderWorld.camera.position.y;
+		matLight.camPos[2]   = m_renderWorld.camera.position.z;
+	}
+
+	// The uiVertex's repurposed U block (see MaterialShaderLibrary::uiVertex).
+	struct UIU { glm::mat4 mvp; glm::mat4 model; glm::vec4 color; glm::vec4 flags; glm::vec4 pbr; };
+
+	bool basicBound = false;        // solid/glyph pipeline currently set?
+	void* boundMaterial = nullptr;  // material PSO currently set
 	for (const UIRenderObject& obj : m_renderWorld.uiObjects)
 	{
+		// Custom material on an image quad → material pipeline (solid path below
+		// stays the fallback when the material has no custom shader / failed).
+		void* matPso = obj.type == 0 && obj.materialAssetId != HE::UUID{}
+			? GetOrBuildUIMaterialPipeline(obj.materialAssetId) : nullptr;
+		if (matPso)
+		{
+			if (boundMaterial != matPso)
+			{
+				[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)matPso];
+				[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_noDepthState];
+				boundMaterial = matPso; basicBound = false;
+			}
+			UIU u{};
+			u.model[0] = glm::vec4(obj.position.x, obj.position.y, obj.size.x, obj.size.y);
+			u.model[1] = glm::vec4(0.0f, 0.0f, 1.0f, 1.0f);
+			u.model[2] = glm::vec4(vp.x, vp.y, 0.0f, 0.0f);
+			u.color    = obj.color;
+			[enc setVertexBytes:&u length:sizeof(u) atIndex:1];
+			[enc setFragmentBytes:&matLight length:sizeof(matLight)
+			              atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
+
+			// HeParams + graph textures, mirroring the mesh path's bind points.
+			if (const MaterialAsset* ma = m_contentManager
+				? m_contentManager->getMaterial(obj.materialAssetId) : nullptr)
+			{
+				float padded[64] = { 0 };
+				const size_t n = std::min(ma->shaderParamData.size(), size_t(64));
+				std::memcpy(padded, ma->shaderParamData.data(), n * sizeof(float));
+				[enc setFragmentBytes:padded length:sizeof(padded) atIndex:2];
+				for (size_t i = 0; i < HE::kMatMaxGraphTextures; ++i)
+				{
+					const HE::UUID tid = i < ma->graphTextureIds.size() ? ma->graphTextureIds[i] : HE::UUID{};
+					const std::string tp = i < ma->graphTexturePaths.size() ? ma->graphTexturePaths[i] : std::string();
+					void* gt = ResolveGraphTexture(tid, tp);
+					id<MTLTexture> tex = gt ? (__bridge id<MTLTexture>)gt
+					                        : (__bridge id<MTLTexture>)m_dummyTexture;
+					[enc setFragmentTexture:tex atIndex:(NSUInteger)(i + 1)];
+					[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler
+					                     atIndex:(NSUInteger)(i + 1)];
+				}
+				// Legacy/mesh texture slot 0 must be bound too (pinned unconditionally).
+				[enc setFragmentTexture:(__bridge id<MTLTexture>)m_dummyTexture atIndex:0];
+				[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
+			}
+			[enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+			continue;
+		}
+
+		if (!basicBound)
+		{
+			[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_uiPipeline];
+			[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_noDepthState];
+			[enc setVertexBytes:&vp length:sizeof(vp) atIndex:1];
+			id<MTLTexture> atlas = m_uiFontTexture
+				? (__bridge id<MTLTexture>)m_uiFontTexture
+				: (__bridge id<MTLTexture>)m_dummyTexture;
+			[enc setFragmentTexture:atlas atIndex:0];
+			basicBound = true; boundMaterial = nullptr;
+		}
 		const simd::float4 rect  = { obj.position.x, obj.position.y, obj.size.x, obj.size.y };
 		const simd::float4 color = { obj.color.r, obj.color.g, obj.color.b, obj.color.a };
+		const simd::float4 uvr   = { obj.uvMin.x, obj.uvMin.y, obj.uvMax.x, obj.uvMax.y };
+		const float mode = obj.type == 2 ? 1.0f : 0.0f;
 		[enc setVertexBytes:&rect  length:sizeof(rect)  atIndex:0];
+		[enc setVertexBytes:&uvr   length:sizeof(uvr)   atIndex:2];
 		[enc setFragmentBytes:&color length:sizeof(color) atIndex:0];
+		[enc setFragmentBytes:&mode  length:sizeof(mode)  atIndex:1];
 		[enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
 	}
 }

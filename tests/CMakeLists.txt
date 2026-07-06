@@ -33,6 +33,7 @@ add_executable(he_tests
     test_navigation.cpp
     test_particles.cpp
     test_ui.cpp
+    test_ui_widgets.cpp
     test_postfx.cpp
     test_hpak.cpp
     test_async_streaming.cpp

@@ -74,11 +74,23 @@ public:
     // the HeLighting/HeParams UBOs, and the offset is applied in world space.
     const Compiled& customVertex(uint64_t bodyHash, const std::string& body, Backend backend);
 
-    void clear() { m_vertCache.clear(); m_fragCache.clear(); m_cvertCache.clear(); }
+    // Screen-space quad vertex for materials on IN-GAME UI elements: emits the
+    // same varyings as standardVertex (so any material fragment drops in) from
+    // an attribute-less 4-vertex strip. Repurposes the standard U block (same
+    // bind point as the mesh path — Metal: vertex buffer 1):
+    //   u.model[0] = rect  (x, y, w, h — pixels, top-left origin)
+    //   u.model[1] = uvRect(u0, v0, u1, v1)
+    //   u.model[2].xy = viewport (w, h in pixels)
+    //   u.color   = tint (→ vColor)
+    // vNormal = +Z, vWorldPos = (screen px, 0) — sane defaults for UI shading.
+    const Compiled& uiVertex(Backend backend);
+
+    void clear() { m_vertCache.clear(); m_fragCache.clear(); m_cvertCache.clear(); m_uiVertCache.clear(); }
 
 private:
     std::unordered_map<int, Compiled>      m_vertCache;  // key = (int)backend
     std::unordered_map<uint64_t, Compiled> m_fragCache;  // key = mix(sourceHash, backend)
     std::unordered_map<uint64_t, Compiled> m_cvertCache; // key = mix(bodyHash, backend)
+    std::unordered_map<int, Compiled>      m_uiVertCache; // key = (int)backend
 };
 } // namespace HE

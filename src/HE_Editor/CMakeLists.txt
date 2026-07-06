@@ -104,6 +104,7 @@ add_executable(HorizonEditor WIN32
 	EditorCamera.cpp
 	ScriptEditorPanel.cpp
 	MaterialEditorPanel.cpp
+	UIEditorPanel.cpp
 	stb_image_impl.cpp
  "EditorUI.h" "EditorUI.cpp" "ScriptEditorPanel.h" "MaterialEditorPanel.h")
 

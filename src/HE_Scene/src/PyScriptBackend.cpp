@@ -104,6 +104,85 @@ PyObject* py_getMaterialParam(PyObject*, PyObject* args)
 	return Py_BuildValue("(ffff)", v.x, v.y, v.z, v.w);
 }
 
+// ── In-game UI ────────────────────────────────────────────────────────────────
+PyObject* py_setUIText(PyObject*, PyObject* args)
+{
+	long id; const char* text = nullptr;
+	if (!PyArg_ParseTuple(args, "ls", &id, &text)) return nullptr;
+	ScriptApi::setUIText(*g_world, (uint32_t)id, text);
+	Py_RETURN_NONE;
+}
+PyObject* py_getUIText(PyObject*, PyObject* args)
+{
+	long id;
+	if (!PyArg_ParseTuple(args, "l", &id)) return nullptr;
+	return PyUnicode_FromString(ScriptApi::getUIText(*g_world, (uint32_t)id).c_str());
+}
+PyObject* py_setUIColor(PyObject*, PyObject* args)
+{
+	long id; float r = 0, g = 0, b = 0, a = 1.0f;
+	if (!PyArg_ParseTuple(args, "lfff|f", &id, &r, &g, &b, &a)) return nullptr;
+	ScriptApi::setUIColor(*g_world, (uint32_t)id, {r, g, b, a});
+	Py_RETURN_NONE;
+}
+PyObject* py_getUIColor(PyObject*, PyObject* args)
+{
+	long id;
+	if (!PyArg_ParseTuple(args, "l", &id)) return nullptr;
+	const glm::vec4 c = ScriptApi::getUIColor(*g_world, (uint32_t)id);
+	return Py_BuildValue("(ffff)", c.r, c.g, c.b, c.a);
+}
+PyObject* py_setUIVisible(PyObject*, PyObject* args)
+{
+	long id; int vis = 1;
+	if (!PyArg_ParseTuple(args, "lp", &id, &vis)) return nullptr;
+	ScriptApi::setUIVisible(*g_world, (uint32_t)id, vis != 0);
+	Py_RETURN_NONE;
+}
+PyObject* py_isUIVisible(PyObject*, PyObject* args)
+{
+	long id;
+	if (!PyArg_ParseTuple(args, "l", &id)) return nullptr;
+	if (ScriptApi::isUIVisible(*g_world, (uint32_t)id)) Py_RETURN_TRUE;
+	Py_RETURN_FALSE;
+}
+PyObject* py_setUIPosition(PyObject*, PyObject* args)
+{
+	long id; float x = 0, y = 0;
+	if (!PyArg_ParseTuple(args, "lff", &id, &x, &y)) return nullptr;
+	ScriptApi::setUIPosition(*g_world, (uint32_t)id, {x, y});
+	Py_RETURN_NONE;
+}
+PyObject* py_getUIPosition(PyObject*, PyObject* args)
+{
+	long id;
+	if (!PyArg_ParseTuple(args, "l", &id)) return nullptr;
+	const glm::vec2 v = ScriptApi::getUIPosition(*g_world, (uint32_t)id);
+	return Py_BuildValue("(ff)", v.x, v.y);
+}
+PyObject* py_setUISize(PyObject*, PyObject* args)
+{
+	long id; float w = 0, h = 0;
+	if (!PyArg_ParseTuple(args, "lff", &id, &w, &h)) return nullptr;
+	ScriptApi::setUISize(*g_world, (uint32_t)id, {w, h});
+	Py_RETURN_NONE;
+}
+PyObject* py_getUISize(PyObject*, PyObject* args)
+{
+	long id;
+	if (!PyArg_ParseTuple(args, "l", &id)) return nullptr;
+	const glm::vec2 v = ScriptApi::getUISize(*g_world, (uint32_t)id);
+	return Py_BuildValue("(ff)", v.x, v.y);
+}
+PyObject* py_setUIMaterialParam(PyObject*, PyObject* args)
+{
+	long id; const char* name = nullptr; float x = 0, y = 0, z = 0, w = 0;
+	if (!PyArg_ParseTuple(args, "lsf|fff", &id, &name, &x, &y, &z, &w)) return nullptr;
+	const bool ok = ScriptApi::setUIMaterialParam(*g_world, g_content, (uint32_t)id, name, {x, y, z, w});
+	if (ok) Py_RETURN_TRUE;
+	Py_RETURN_FALSE;
+}
+
 PyMethodDef kHorizonMethods[] = {
 	{"log",         py_log,         METH_VARARGS, "log(message)"},
 	{"getName",     py_getName,     METH_VARARGS, "getName(entity) -> str"},
@@ -120,6 +199,17 @@ PyMethodDef kHorizonMethods[] = {
 	{"isGrounded",  py_isGrounded,  METH_VARARGS, "isGrounded(entity) -> bool"},
 	{"setMaterialParam", py_setMaterialParam, METH_VARARGS, "setMaterialParam(entity, name, x[,y,z,w]) -> bool"},
 	{"getMaterialParam", py_getMaterialParam, METH_VARARGS, "getMaterialParam(entity, name) -> (x,y,z,w)"},
+	{"setUIText",     py_setUIText,     METH_VARARGS, "setUIText(entity, text)"},
+	{"getUIText",     py_getUIText,     METH_VARARGS, "getUIText(entity) -> str"},
+	{"setUIColor",    py_setUIColor,    METH_VARARGS, "setUIColor(entity, r, g, b[, a])"},
+	{"getUIColor",    py_getUIColor,    METH_VARARGS, "getUIColor(entity) -> (r,g,b,a)"},
+	{"setUIVisible",  py_setUIVisible,  METH_VARARGS, "setUIVisible(entity, visible)"},
+	{"isUIVisible",   py_isUIVisible,   METH_VARARGS, "isUIVisible(entity) -> bool"},
+	{"setUIPosition", py_setUIPosition, METH_VARARGS, "setUIPosition(entity, x, y)"},
+	{"getUIPosition", py_getUIPosition, METH_VARARGS, "getUIPosition(entity) -> (x,y)"},
+	{"setUISize",     py_setUISize,     METH_VARARGS, "setUISize(entity, w, h)"},
+	{"getUISize",     py_getUISize,     METH_VARARGS, "getUISize(entity) -> (w,h)"},
+	{"setUIMaterialParam", py_setUIMaterialParam, METH_VARARGS, "setUIMaterialParam(entity, name, x[,y,z,w]) -> bool"},
 	{nullptr, nullptr, 0, nullptr}
 };
 PyModuleDef kHorizonModule = {
@@ -373,6 +463,17 @@ bool PyScriptBackend::callOnCollisionExit(InstanceId id, uint32_t other)
 	Py_DECREF(r); return true;
 }
 
+bool PyScriptBackend::callOnUIEvent(InstanceId id, UIScriptEvent ev)
+{
+	const char* fn = ev == UIScriptEvent::Click      ? "on_click" :
+	                 ev == UIScriptEvent::HoverEnter ? "on_hover_enter" : "on_hover_exit";
+	PyObject* obj = m_impl->findInstance(id);
+	if (!obj || !PyObject_HasAttrString(obj, fn)) return true;
+	PyObject* r = PyObject_CallMethod(obj, fn, nullptr);
+	if (!r) { m_lastError = takePyError(); return false; }
+	Py_DECREF(r); return true;
+}
+
 std::vector<ScriptPropDef> PyScriptBackend::getScriptProperties(const std::string& name) const
 {
 	std::vector<ScriptPropDef> out;
@@ -487,6 +588,7 @@ bool PyScriptBackend::callOnStart(InstanceId) { return false; }
 bool PyScriptBackend::callOnUpdate(InstanceId, float) { return false; }
 bool PyScriptBackend::callOnCollisionEnter(InstanceId, uint32_t) { return false; }
 bool PyScriptBackend::callOnCollisionExit(InstanceId, uint32_t) { return false; }
+bool PyScriptBackend::callOnUIEvent(InstanceId, UIScriptEvent) { return false; }
 std::vector<ScriptPropDef> PyScriptBackend::getScriptProperties(const std::string&) const { return {}; }
 void PyScriptBackend::injectProperties(InstanceId, const std::unordered_map<std::string, ScriptPropValue>&) {}
 bool PyScriptBackend::hotReloadScript(const std::string&, const std::string&) { return false; }

@@ -27,10 +27,13 @@ add_library(HorizonCore SHARED
 	src/Hpak/ProjectExporter.cpp
 	src/Events/EventBus.cpp
 	src/MaterialGraph/MaterialGraph.cpp
+	src/UIWidget/UIWidgetTree.cpp
+	src/Renderer/UIFont.cpp
  "include/ContentManager/ContentManager.h" "src/ContentManager/ContentManager.cpp" "include/ContentManager/Assets.h")
 
 target_include_directories(HorizonCore
 	PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/include
+	        ${CMAKE_CURRENT_SOURCE_DIR}/vendor
 	PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 

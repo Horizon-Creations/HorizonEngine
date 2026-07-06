@@ -2,6 +2,7 @@
 #include "EditorApplication.h"
 #include "ScriptEditorPanel.h"
 #include "MaterialEditorPanel.h"
+#include "UIEditorPanel.h"
 #include "HorizonVersion.h"
 #include <Hpak/ProjectExporter.h>
 #include <HorizonScene/HorizonScene.h>
@@ -13,6 +14,7 @@
 #include <ContentManager/Assets.h>
 #include <material/MaterialShaderLibrary.h>
 #include <MaterialGraph/MaterialGraph.h> // HE::MatParamKind for the entity param editor
+#include <UIWidget/UIWidgetTree.h>       // starter tree for freshly created UI widgets
 #include <Types/Enums.h>
 #include <HorizonRendering/RenderExtractor.h>
 #include <HorizonRendering/RenderWorld.h>
@@ -2636,7 +2638,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                 // label never changes the tab's identity — which would reset its state.
                 const bool tabDirty = !tab.assetPath.empty() &&
                     (ScriptEditorPanel::isDirty(tab.assetPath) ||
-                     MaterialEditorPanel::isDirty(tab.assetPath));
+                     MaterialEditorPanel::isDirty(tab.assetPath) ||
+                     UIEditorPanel::isDirty(tab.assetPath));
                 const std::string shown = tab.label + (tabDirty ? " *" : "")
                     + "###tab_" + (tab.assetPath.empty() ? std::string("scene") : tab.assetPath);
                 if (ImGui::BeginTabItem(shown.c_str(), tab.closable ? &pOpen : nullptr, flags))
@@ -2692,6 +2695,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
         if (MaterialEditorPanel::isMaterialAsset(tabPath) ||
             MaterialEditorPanel::isMaterialFunctionAsset(tabPath))
             MaterialEditorPanel::render(ctx, tabPath, tabPos, tabSize);
+        else if (UIEditorPanel::isWidgetAsset(tabPath))
+            UIEditorPanel::render(ctx, tabPath, tabPos, tabSize);
         else
             ScriptEditorPanel::render(ctx, tabPath, tabPos, tabSize);
         return;
@@ -2887,6 +2892,20 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				{
 					endLookCapture();
 					ctx.renderer->SetEditorCamera(EditorCameraOverride{}); // active=false
+
+					// Feed the in-game UI pointer: mouse relative to the viewport
+					// image, scaled to render-target pixels (the space the UI pass
+					// and UISystem hit-tests operate in).
+					if (ctx.reportPlayUIPointer)
+					{
+						const float mx = (io.MousePos.x - rectMin.x) * fbScale.x;
+						const float my = (io.MousePos.y - rectMin.y) * fbScale.y;
+						ctx.reportPlayUIPointer(mx, my,
+							static_cast<float>(s_viewportPxW),
+							static_cast<float>(s_viewportPxH),
+							ImGui::IsMouseDown(ImGuiMouseButton_Left),
+							viewportHovered);
+					}
 				}
 				else if (ctx.editorCamera)
 				{
@@ -4325,7 +4344,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				// editor tab. Other asset types have no dedicated editor yet → no-op.
 				else if (ScriptEditorPanel::isScriptAsset(file->fullPath) ||
 				         MaterialEditorPanel::isMaterialAsset(file->fullPath) ||
-				         MaterialEditorPanel::isMaterialFunctionAsset(file->fullPath))
+				         MaterialEditorPanel::isMaterialFunctionAsset(file->fullPath) ||
+				         UIEditorPanel::isWidgetAsset(file->fullPath))
 				{
 				const std::string tabLabel = std::filesystem::path(file->name).stem().string();
 				auto it = std::find_if(ctx.tabs.begin(), ctx.tabs.end(),
@@ -4668,6 +4688,13 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 						const uint8_t lb = static_cast<uint8_t>(lang);
 						w.addChunk(HAsset::CHUNK_SLNG, &lb, 1);
 					}
+					// UI widgets are born with an empty 1920×1080 tree so the widget
+					// editor has valid JSON to open straight away.
+					if (type == HE::AssetType::Widget)
+					{
+						const std::string tree = HE::uiWidgetTreeToJson(HE::UIWidgetTree{});
+						w.addChunk(HAsset::CHUNK_UIWT, tree.data(), tree.size());
+					}
 					w.write(path, static_cast<uint16_t>(type));
 				}
 
@@ -4688,6 +4715,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 			if (ImGui::MenuItem("Scene"))        tryCreate("NewScene",    ".hescene", HE::AssetType::Scene);
 			if (ImGui::MenuItem("Material"))     tryCreate("NewMaterial", ".hasset",  HE::AssetType::Material);
 			if (ImGui::MenuItem("Material Function")) tryCreate("NewMaterialFunction", ".hasset", HE::AssetType::MaterialFunction);
+			if (ImGui::MenuItem("UI Widget"))    tryCreate("NewWidget",   ".hasset",  HE::AssetType::Widget);
 			if (ImGui::MenuItem("Texture"))      tryCreate("NewTexture",  ".hasset",  HE::AssetType::Texture);
 			if (ImGui::MenuItem("Static Mesh"))  tryCreate("NewMesh",     ".hasset",  HE::AssetType::StaticMesh);
 			if (ImGui::MenuItem("Skeletal Mesh"))tryCreate("NewSkelMesh", ".hasset",  HE::AssetType::SkeletalMesh);
@@ -6111,6 +6139,45 @@ void EditorUI::RenderInspector(AppContext& ctx)
 		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<UIButtonComponent>(entity); }
 	}
 
+	// ── UI Widget ───────────────────────────────────────────────────────────
+	if (auto* wc = registry.try_get<UIWidgetComponent>(entity))
+	{
+		if (componentHeader("UI Widget", true, removed))
+		{
+			ImGui::TextUnformatted("Widget");
+			ImGui::SameLine();
+			const UIWidgetAsset* cur = (wc->widgetAssetId != HE::UUID{} && ctx.contentManager)
+				? ctx.contentManager->getWidget(wc->widgetAssetId) : nullptr;
+			const std::string label = cur ? cur->name
+				: (wc->widgetAssetId == HE::UUID{} ? "(none)" : "(not loaded)");
+			ImGui::Button((label + "##uiwslot").c_str());
+			if (ImGui::BeginDragDropTarget())
+			{
+				if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_ASSET_PATH"))
+				{
+					std::error_code ec;
+					std::string rel = std::filesystem::relative(
+						static_cast<const char*>(p->Data),
+						ctx.contentManager ? ctx.contentManager->contentRoot() : "",
+						ec).generic_string();
+					if (!ec && !rel.empty() && rel.rfind("..", 0) != 0)
+					{
+						const HE::UUID id = ctx.contentManager->loadAsset(rel);
+						if (id != HE::UUID{} && ctx.contentManager->getWidget(id))
+						{
+							if (ctx.undoSys) ctx.undoSys->snapshotNow();
+							wc->widgetAssetId = id;
+						}
+					}
+				}
+				ImGui::EndDragDropTarget();
+			}
+			ImGui::Checkbox("Active##uiw", &wc->active); trackEdit();
+			ImGui::TextDisabled("Expands into UI entities at play start");
+		}
+		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<UIWidgetComponent>(entity); }
+	}
+
 	// ── Add Component ───────────────────────────────────────────────────────
 	// Not for the World root — it only carries the scene's Environment, no
 	// arbitrary components (and the built-in sun/moon are managed automatically).
@@ -6162,6 +6229,7 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			addItem("UI Text",         UITextComponent{});
 			addItem("UI Image",        UIImageComponent{});
 			addItem("UI Button",       UIButtonComponent{});
+			addItem("UI Widget",       UIWidgetComponent{});
 			ImGui::EndPopup();
 		}
 	}

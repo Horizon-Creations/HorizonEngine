@@ -2272,6 +2272,7 @@ struct D3D11RendererImpl
         struct UICBData { glm::vec4 rect; glm::vec4 color; glm::vec2 viewport; glm::vec2 pad; };
         for (const UIRenderObject& obj : m_renderWorld.uiObjects)
         {
+            if (obj.type == 2) continue; // font-atlas glyph quads: GL/Metal only for now
             UICBData cb;
             cb.rect     = glm::vec4(obj.position.x, obj.position.y, obj.size.x, obj.size.y);
             cb.color    = obj.color;

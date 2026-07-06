@@ -50,6 +50,7 @@ public:
 	bool callOnUpdate(InstanceId id, float dt) override;
 	bool callOnCollisionEnter(InstanceId id, uint32_t otherEntityId) override;
 	bool callOnCollisionExit(InstanceId id, uint32_t otherEntityId) override;
+	bool callOnUIEvent(InstanceId id, UIScriptEvent ev) override;
 
 	std::vector<ScriptPropDef> getScriptProperties(const std::string& name) const override;
 	void injectProperties(InstanceId id,

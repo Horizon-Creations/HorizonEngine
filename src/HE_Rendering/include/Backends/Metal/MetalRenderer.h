@@ -354,6 +354,12 @@ private:
 
 	// ── In-Game UI (2D canvas elements, drawn after FXAA) ───────────────────
 	void* m_uiPipeline = nullptr; // id<MTLRenderPipelineState>
+	void* m_uiFontTexture = nullptr; // id<MTLTexture>, R8 UI font atlas (UISystem::sharedFont)
+	// Material-on-UI-quad pipelines: same material fragments as the mesh path,
+	// paired with the screen-space uiVertex and the LDR/blend target of the UI
+	// pass — so they need their own cache (key = material shader hash).
+	std::unordered_map<uint64_t, void*> m_uiMaterialPipelines;
+	void* GetOrBuildUIMaterialPipeline(const HE::UUID& materialId);
 	void  EncodeUIPass(void* renderEncoder, int width, int height);
 
 	// ── Bloom (bright-pass + separable Gaussian blur on the HDR target) ──────

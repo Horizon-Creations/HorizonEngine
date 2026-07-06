@@ -2315,6 +2315,7 @@ struct D3D12RendererImpl
         struct UICB { glm::vec4 rect; glm::vec4 color; glm::vec2 vp; glm::vec2 pad; };
         int qi = 0;
         for (const UIRenderObject& obj : m_renderWorld.uiObjects) {
+            if (obj.type == 2) continue; // font-atlas glyph quads: GL/Metal only for now
             if (qi >= static_cast<int>(k_maxUIQuads)) break;
             UICB cb;
             cb.rect  = glm::vec4(obj.position.x, obj.position.y, obj.size.x, obj.size.y);

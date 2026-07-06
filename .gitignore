@@ -35,3 +35,4 @@ CMakeUserPresets.json
 *.log
 config.json
 /.vs
+build-wt/

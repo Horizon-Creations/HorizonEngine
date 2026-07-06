@@ -876,3 +876,31 @@ TEST_CASE("PSHD encode/decode roundtrip preserves variants")
 	CHECK(HE::encodeMaterialShaderVariants({}).empty());
 	CHECK(HE::decodeMaterialShaderVariants({}).empty());
 }
+
+#if defined(HE_TESTS_HAVE_SHADERC)
+TEST_CASE("UI quad vertex cross-compiles for Metal and GL")
+{
+	// The screen-space vertex that pairs material fragments with in-game UI
+	// quads (MaterialShaderLibrary::uiVertex). A varying/binding mismatch or
+	// gl_VertexIndex misuse would fail cross-compilation here.
+	using B = HE::MaterialShaderLibrary::Backend;
+	HE::MaterialShaderLibrary lib;
+
+	const auto& msl = lib.uiVertex(B::Metal);
+	CHECK_MESSAGE(msl.ok, "uiVertex MSL compile failed: ", msl.log);
+	CHECK(!msl.source.empty());
+
+	const auto& gl = lib.uiVertex(B::GLSL410);
+	CHECK_MESSAGE(gl.ok, "uiVertex GLSL410 compile failed: ", gl.log);
+	CHECK(!gl.source.empty());
+
+	// A material fragment still cross-compiles alongside it (shared varyings).
+	MaterialGraph g;
+	const int out = g.addNode(MatNodeType::Output);
+	const int c   = g.addNode(MatNodeType::ConstColor);
+	CHECK(g.connect(c, 0, out, 0));
+	const std::string glsl = HE::generateFragment(g).glsl;
+	const auto& frag = lib.fragment(std::hash<std::string>{}(glsl), glsl, B::Metal);
+	CHECK_MESSAGE(frag.ok, "companion fragment failed: ", frag.log);
+}
+#endif

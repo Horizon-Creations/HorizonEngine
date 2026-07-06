@@ -149,12 +149,17 @@ TEST_CASE("UISystem::extract text element at TopLeft anchor, zero offset")
     std::vector<UIRenderObject> out;
     UISystem::extract(world, 1920.0f, 1080.0f, out);
 
-    REQUIRE(out.size() == 1);
-    CHECK(out[0].type == 1);
-    CHECK(out[0].text == "Hello");
-    // At TopLeft (0,0) + zero offset + zero pivot → screen pos (0,0)
-    CHECK(out[0].position.x == doctest::Approx(0.0f));
-    CHECK(out[0].position.y == doctest::Approx(0.0f));
+    // Text is emitted as one font-atlas glyph quad per character (type 2).
+    REQUIRE(out.size() == 5); // "Hello"
+    for (const auto& ro : out)
+    {
+        CHECK(ro.type == 2);
+        CHECK(ro.uvMax.x > ro.uvMin.x);
+        // Every glyph lies inside the element's rect (200×50 at origin),
+        // with a little slack for glyph overhang.
+        CHECK(ro.position.x >= -1.0f);
+        CHECK(ro.position.x < 200.0f);
+    }
 }
 
 TEST_CASE("UISystem::extract MiddleCenter anchor centers element")

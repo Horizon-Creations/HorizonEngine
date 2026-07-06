@@ -23,6 +23,7 @@
 #include <HorizonScene/SceneSystems.h>
 #include <HorizonScene/ScriptContext.h>
 #include <HorizonScene/CollisionSystem.h>
+#include <HorizonScene/UIWidgetInstantiator.h>
 #include <HorizonScene/Components/ScriptComponent.h>
 #include <ContentManager/Assets.h>
 #include <Renderer/RendererFactory.h>
@@ -984,6 +985,31 @@ void EditorApplication::OnRender(float dt)
 			CollisionSystem::dispatch(*m_physicsWorld, *m_scriptContext, m_scriptInstances);
 		}
 
+		// In-game UI pointer input (hover/click) + script event dispatch. The
+		// viewport panel feeds the pointer (reportPlayUIPointer); while the PIE
+		// mouse capture is engaged there is no cursor, so the pointer is invalid.
+		if (m_isPlaying && m_editorWorld && m_uiViewportW > 0.0f && m_uiViewportH > 0.0f)
+		{
+			std::vector<UIInputSystem::PointerEvent> uiEvents;
+			UIInputSystem::update(*m_editorWorld, m_uiInputState,
+			                      m_uiViewportW, m_uiViewportH,
+			                      m_uiPointerX, m_uiPointerY,
+			                      m_uiPointerDown,
+			                      m_uiPointerValid && !m_playMouseCaptured,
+			                      uiEvents);
+			if (m_scriptContext)
+				for (const auto& ev : uiEvents)
+				{
+					auto it = m_scriptInstances.find(ev.entity);
+					if (it == m_scriptInstances.end()) continue;
+					const UIScriptEvent se =
+						ev.type == UIInputSystem::PointerEvent::Type::Click ? UIScriptEvent::Click :
+						ev.type == UIInputSystem::PointerEvent::Type::HoverEnter ? UIScriptEvent::HoverEnter
+						                                                         : UIScriptEvent::HoverExit;
+					m_scriptContext->callOnUIEvent(it->second, se);
+				}
+		}
+
 		{
 			HE_PROFILE_SCOPE_N("EnvironmentPush");
 			pushEnvironment(dt); // auto-advances + pushes the World env component
@@ -1680,6 +1706,13 @@ AppContext EditorApplication::makeContext()
 		.selectedEntity      = m_selectedEntity,
 		.isPlaying           = m_isPlaying,
 		.setPlayMode         = [this](bool play){ setPlayMode(play); },
+		.reportPlayUIPointer = [this](float mx, float my, float vpW, float vpH,
+		                              bool down, bool valid)
+		{
+			m_uiPointerX = mx; m_uiPointerY = my;
+			m_uiViewportW = vpW; m_uiViewportH = vpH;
+			m_uiPointerDown = down; m_uiPointerValid = valid;
+		},
 		.currentScenePath    = m_currentScenePath,
 		.sceneDirty          = m_undo.revision() != m_savedRevision,
 		.exitRequested       = m_exitRequested,
@@ -1951,6 +1984,12 @@ void EditorApplication::setPlayMode(bool play)
 		m_physicsWorld->initialize(*m_editorWorld);
 		m_physicsAccum = 0.0f;
 
+		// Expand UI widget assets into live UI entities. Runs before script init
+		// so widget-spawned ScriptComponents start like hand-placed ones; the
+		// play-mode snapshot above already excludes them, so leaving play mode
+		// cleans them up with the restore.
+		UIWidgetInstantiator::instantiateAll(*m_editorWorld, contentManager());
+
 		// Start audio for sources marked playOnStart
 		AudioSystem::playOnStart(*m_editorWorld, m_audioEngine, &contentManager());
 
@@ -1999,6 +2038,7 @@ void EditorApplication::setPlayMode(bool play)
 		// Tear down scripts
 		m_scriptContext.reset();
 		m_scriptInstances.clear();
+		m_uiInputState = {};
 
 		// Stop all audio when exiting play mode
 		m_audioEngine.stopAll();

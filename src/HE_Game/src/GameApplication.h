@@ -6,6 +6,7 @@
 #include <unordered_map>
 #include <cstdint>
 #include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/UIInputSystem.h>
 
 class ScriptContext;
 
@@ -47,6 +48,10 @@ private:
     void startScripts();
     void updateScripts(float dt);
 
+    // In-game UI pointer input: hit-test the (uncaptured) mouse against UI
+    // elements, drive button states and dispatch onClick/onHover* to scripts.
+    void updateUIInput();
+
     ProjectConfig                 m_config;
     std::unique_ptr<HorizonWorld> m_world; // startup scene, ticked + rendered each frame
     bool m_mouseCaptured = false;          // set true in OnInit once the window exists
@@ -54,5 +59,6 @@ private:
 
     std::unique_ptr<ScriptContext> m_scriptContext; // ECS Lua/Python scripts (null until OnInit)
     std::unordered_map<uint32_t, ScriptEngine::InstanceId> m_scriptInstances; // entity → instance
+    UIInputSystem::InputState m_uiInput;   // frame-to-frame UI pointer tracking
 };
 
