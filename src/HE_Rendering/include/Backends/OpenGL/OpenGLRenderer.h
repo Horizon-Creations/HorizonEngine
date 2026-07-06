@@ -207,8 +207,10 @@ private:
 	float        m_lastMatParams[64] = { 0 };
 	bool         m_haveMatParams = false;
 	unsigned int getOrBuildMaterialProgram(uint64_t key, const std::string& fragGlsl,
+	                                       const std::string& vertBody = {},
 	                                       const MaterialShaderVariant* precompiled = nullptr);
-	bool         resolveMaterialShader(const HE::UUID& materialId, uint64_t& key, std::string& frag);
+	bool         resolveMaterialShader(const HE::UUID& materialId, uint64_t& key, std::string& frag,
+	                                   std::string& vertBody);
 
 	int          m_uMVP           = -1;
 	int          m_uModel         = -1;

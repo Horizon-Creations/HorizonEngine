@@ -97,7 +97,20 @@ enum class MatNodeType : uint8_t
     StaticSwitch,   // named COMPILE-TIME branch (s = name, p[0] = default on/off): codegen
                     // emits ONLY the taken input — the other branch is culled entirely.
                     // Material instances may override the value → their own permutation.
+
+    // ── v9: surface features ──
+    NormalMapSample,// tangent-space normal map → WORLD-space normal, using a screen-space
+                    // cotangent frame (dFdx/dFdy of vWorldPos+vUV, Mikkelsen) — no vertex
+                    // tangents needed. s = texture path (like TextureSample), p[0] = strength.
 };
+
+// Material blend modes (Output node p[1]; → MaterialAsset::blendMode). They change which
+// Output pins are meaningful — see matOutputPins:
+//   Opaque      — no Opacity pin; alpha forced to 1.
+//   Masked      — pin 4 becomes OpacityMask: fragments below the cutoff (p[2]) discard.
+//                 Stays in the OPAQUE pass (no sorting), holes are hard-edged.
+//   Translucent — pin 4 is Opacity: drawn in the sorted alpha-blend pass.
+enum class MatBlendMode : uint8_t { Opaque = 0, Masked = 1, Translucent = 2 };
 
 struct MatGraphNode
 {
@@ -169,6 +182,12 @@ const std::vector<MatNodeDesc>& matNodeRegistry();
 const MatNodeDesc&              matNodeDesc(MatNodeType type);
 const MatNodeDesc*              matNodeDescByName(const std::string& name);
 
+// The Output node's DISPLAYED input pins for a blend mode, plus the registry pin index
+// each row maps to (indices stay stable across modes so serialized links never break:
+// 0 BaseColor, 1 Metallic, 2 Roughness, 3 Emissive, 4 Opacity/OpacityMask, 5 Normal,
+// 6 WPO). Opaque hides pin 4; Masked renames it to OpacityMask.
+void matOutputPins(int blendMode, std::vector<MatPinDesc>& pins, std::vector<int>& regIndex);
+
 // Interface pins of a FUNCTION graph: its FnInput nodes (sorted by id) become the call
 // node's inputs, FnOutput nodes its outputs. Used by codegen and the editor canvas.
 void matFunctionPins(const MaterialGraph& fnGraph,
@@ -214,6 +233,13 @@ struct MatShaderGen
     // Static switches reached during codegen: name + the EFFECTIVE value baked into this
     // shader (node default, or the entry from generateFragment's override map).
     std::vector<std::pair<std::string, bool>> switches;
+    // Blend mode baked from the Output node (→ MaterialAsset::blendMode; Translucent
+    // routes the material into the sorted alpha-blend pass).
+    uint8_t blendMode = 0;
+    // World-Position-Offset vertex BODY (canonical GLSL statements ending in `vec3 heWpo`).
+    // Empty when the WPO pin is unconnected → the standard vertex is used. The renderers
+    // wrap it into their per-backend vertex template (MaterialShaderLibrary::customVertex).
+    std::string vertexBody;
 };
 
 // Max project textures a single material graph may sample (fixed so the per-backend

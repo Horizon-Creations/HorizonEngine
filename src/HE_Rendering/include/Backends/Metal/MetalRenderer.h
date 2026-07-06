@@ -330,10 +330,15 @@ private:
 	// Build (or fetch cached) a pipeline for a material's custom fragment GLSL, spliced
 	// onto the standard drop-in vertex. Returns null on compile/link failure (also cached).
 	// precompiled != null → build directly from baked MSL (no runtime cross-compile).
+	// vertBody = WPO vertex body ("" → standard vertex); blend = alpha-blended variant
+	// for the transparency pass (cached separately — same key space, blend bit mixed in).
 	void* GetOrBuildMaterialPipeline(uint64_t key, const std::string& fragGlsl,
-	                                 const MaterialShaderVariant* precompiled = nullptr);
+	                                 const std::string& vertBody = {},
+	                                 const MaterialShaderVariant* precompiled = nullptr,
+	                                 bool blend = false);
 	// Resolve a material's custom shader: true + (key,frag) if it has customShaderFragGlsl.
-	bool  ResolveMaterialShader(const HE::UUID& materialId, uint64_t& key, std::string& frag);
+	bool  ResolveMaterialShader(const HE::UUID& materialId, uint64_t& key, std::string& frag,
+	                            std::string& vertBody);
 #endif
 
 	// ── FXAA (edge antialiasing) ─────────────────────────────────────────────

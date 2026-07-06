@@ -119,6 +119,17 @@ struct MaterialAsset : public RuntimeAsset
 	// it on every change; shaders are not a user-facing asset type.
 	std::string nodeGraphJson;
 
+	// Blend mode baked from the graph's Output node (HE::MatBlendMode as uint8):
+	// 0 Opaque, 1 Masked (shader discards — stays in the opaque pass), 2 Translucent
+	// (routed into the sorted alpha-blend pass regardless of the scalar opacity).
+	uint8_t blendMode = 0;
+
+	// World-Position-Offset vertex BODY (canonical GLSL statements, ends in `vec3 heWpo`),
+	// generated when the graph's WPO pin is connected. Empty → the standard shared vertex.
+	// The renderers wrap it per backend (MaterialShaderLibrary::customVertex) and key the
+	// pipeline on fragment+vertex together.
+	std::string customShaderVertGlsl;
+
 	// Exposed graph parameters (Param nodes), 4 floats per HeParams UBO slot, in slot
 	// order. Generated alongside customShaderFragGlsl; the renderer uploads this per
 	// material — editing a parameter VALUE never recompiles the shader.

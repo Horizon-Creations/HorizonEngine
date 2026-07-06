@@ -130,6 +130,108 @@ std::string injectPreamble(const std::string& src)
 
 const char* MaterialShaderLibrary::standardVertexGlsl() { return kStandardVertexAttrib; }
 
+namespace
+{
+// Blocks the WPO body may reference (Time = heLight.sunDir.w, params). Vertex-stage
+// bindings 8/9 avoid the fragment slots; Metal pins them to vertex buffers 2/3.
+constexpr const char* kWpoUniforms = R"(layout(std140, set = 0, binding = 8) uniform HeLighting {
+    vec4 sunDir; vec4 sunColor; vec4 ambient; vec4 camPos;
+} heLight;
+layout(std140, set = 0, binding = 9) uniform HeParams { vec4 v[16]; } heParams;
+)";
+
+// Noise helpers, duplicated for the vertex stage (the fragment injects its own copies).
+// glslang dead-strips whatever the body doesn't call, so including them is free.
+constexpr const char* kWpoNoise = R"(float heHash21(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
+float heValueNoise(vec2 p) { vec2 i = floor(p); vec2 f = fract(p); vec2 u2 = f * f * (3.0 - 2.0 * f); float a = heHash21(i); float b = heHash21(i + vec2(1.0, 0.0)); float cc = heHash21(i + vec2(0.0, 1.0)); float d = heHash21(i + vec2(1.0, 1.0)); return mix(mix(a, b, u2.x), mix(cc, d, u2.x), u2.y); }
+float heFbm(vec2 p) { float v = 0.0; float a = 0.5; for (int i = 0; i < 4; i++) { v += a * heValueNoise(p); p *= 2.0; a *= 0.5; } return v; }
+float heHash31(vec3 p) { p = fract(p * 0.1031); p += dot(p, p.zyx + 31.32); return fract((p.x + p.y) * p.z); }
+float heValueNoise3(vec3 p) { vec3 i = floor(p); vec3 f = fract(p); vec3 u3 = f * f * (3.0 - 2.0 * f); float n000 = heHash31(i); float n100 = heHash31(i + vec3(1.0, 0.0, 0.0)); float n010 = heHash31(i + vec3(0.0, 1.0, 0.0)); float n110 = heHash31(i + vec3(1.0, 1.0, 0.0)); float n001 = heHash31(i + vec3(0.0, 0.0, 1.0)); float n101 = heHash31(i + vec3(1.0, 0.0, 1.0)); float n011 = heHash31(i + vec3(0.0, 1.0, 1.0)); float n111 = heHash31(i + vec3(1.0, 1.0, 1.0)); float x00 = mix(n000, n100, u3.x); float x10 = mix(n010, n110, u3.x); float x01 = mix(n001, n101, u3.x); float x11 = mix(n011, n111, u3.x); return mix(mix(x00, x10, u3.y), mix(x01, x11, u3.y), u3.z); }
+float heFbm3(vec3 p) { float v = 0.0; float a = 0.5; for (int i = 0; i < 4; i++) { v += a * heValueNoise3(p); p *= 2.0; a *= 0.5; } return v; }
+)";
+
+// Assemble the full canonical custom vertex around the graph body. The varyings are
+// WRITTEN first so the body may read them by their usual names; the world-space offset
+// is mapped back to object space with the transpose trick (exact for rigid transforms
+// with uniform scale — model^-1 ≈ model^T / |col0|²), so u.mvp keeps working.
+std::string buildCustomVertex(const std::string& body, bool ssbo)
+{
+    std::string src = "#version 450\n";
+    if (ssbo)
+        src += "layout(std430, set = 0, binding = 0) readonly buffer Verts { float d[]; };\n";
+    else
+        src += "layout(location = 0) in vec3 aPos;\n"
+               "layout(location = 1) in vec3 aNormal;\n"
+               "layout(location = 2) in vec2 aUV;\n";
+    src += "layout(std140, set = 0, binding = 1) uniform U {\n"
+           "    mat4 mvp; mat4 model; vec4 color; vec4 flags; vec4 pbr;\n"
+           "} u;\n";
+    src += kWpoUniforms;
+    src += kWpoNoise;
+    src += "layout(location = 0) out vec3 vNormal;\n"
+           "layout(location = 1) out vec3 vColor;\n"
+           "layout(location = 2) out vec2 vUV;\n"
+           "layout(location = 3) out vec3 vWorldPos;\n"
+           "void main() {\n";
+    if (ssbo)
+        src += "    int b = gl_VertexIndex * 8;\n"
+               "    vec3 pos = vec3(d[b + 0], d[b + 1], d[b + 2]);\n"
+               "    vec3 nrm = vec3(d[b + 3], d[b + 4], d[b + 5]);\n"
+               "    vec2 uv  = vec2(d[b + 6], d[b + 7]);\n";
+    else
+        src += "    vec3 pos = aPos;\n    vec3 nrm = aNormal;\n    vec2 uv = aUV;\n";
+    src += "    vec4 wp   = u.model * vec4(pos, 1.0);\n"
+           "    vNormal   = mat3(u.model) * nrm;\n"
+           "    vColor    = u.color.rgb;\n"
+           "    vUV       = uv;\n"
+           "    vWorldPos = wp.xyz;\n";
+    src += body; // graph statements (read the varyings above) → `vec3 heWpo`
+    src += "    vWorldPos += heWpo;\n"
+           "    vec3 heObjWpo = (transpose(mat3(u.model)) * heWpo)\n"
+           "                  / max(dot(u.model[0].xyz, u.model[0].xyz), 1e-8);\n"
+           "    gl_Position = u.mvp * vec4(pos + heObjWpo, 1.0);\n"
+           "}\n";
+    return src;
+}
+} // namespace
+
+const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::customVertex(
+    uint64_t bodyHash, const std::string& body, Backend backend)
+{
+    const uint64_t key = bodyHash ^ (0xC2B2AE3D27D4EB4FULL * (static_cast<uint64_t>(backend) + 1));
+    if (auto it = m_cvertCache.find(key); it != m_cvertCache.end()) return it->second;
+
+    using namespace he::shaderc;
+    Compiled out;
+    if (backend == Backend::Metal)
+    {
+        // verts@0, U@1 (the geometry pass's fixed binds) + HeLighting/HeParams pinned to
+        // vertex buffers 2/3, which the renderer binds for WPO materials.
+        out = toCompiled(compileMslPinned(buildCustomVertex(body, /*ssbo=*/true), Stage::Vertex,
+            { { Stage::Vertex, 0, 0, 0 }, { Stage::Vertex, 0, 1, 1 },
+              { Stage::Vertex, 0, 8, 2 }, { Stage::Vertex, 0, 9, 3 } }));
+    }
+    else
+    {
+        out = toCompiled(compile(buildCustomVertex(body, /*ssbo=*/false), Stage::Vertex,
+                                 toTarget(backend)));
+    }
+    return m_cvertCache.emplace(key, std::move(out)).first->second;
+}
+
+bool MaterialShaderLibrary::resolveShaders(const ContentManager& cm, const UUID& materialId,
+                                           uint64_t& hashOut, std::string& fragOut,
+                                           std::string& vertBodyOut) const
+{
+    if (!resolveFragment(cm, materialId, hashOut, fragOut)) return false;
+    vertBodyOut.clear();
+    if (const MaterialAsset* mat = cm.getMaterial(materialId))
+        vertBodyOut = mat->customShaderVertGlsl;
+    if (!vertBodyOut.empty()) // fold the vertex into the pipeline key
+        hashOut ^= std::hash<std::string>{}(vertBodyOut) * 0x9E3779B97F4A7C15ULL;
+    return true;
+}
+
 bool MaterialShaderLibrary::resolveFragment(const ContentManager& cm, const UUID& materialId,
                                             uint64_t& hashOut, std::string& glslOut) const
 {

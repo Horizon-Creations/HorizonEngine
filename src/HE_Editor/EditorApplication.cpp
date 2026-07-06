@@ -1327,6 +1327,59 @@ void EditorApplication::dumpFrameHeadless()
 				g.connect(fbm, 0, mul, 1);
 				g.connect(mul, 0, out, 0);
 			}
+			else if (std::string(mt) == "translucent")
+			{
+				// Translucent blend witness: constant 0.45 opacity → the sphere must be
+				// see-through (sorted blend pass with the material's OWN pipeline).
+				const int out = g.addNode(HE::MatNodeType::Output);
+				g.findNode(out)->p[1] = 2.0f; // Translucent
+				const int col = g.addNode(HE::MatNodeType::ConstColor);
+				g.findNode(col)->p[0] = 0.9f; g.findNode(col)->p[1] = 0.5f; g.findNode(col)->p[2] = 0.1f;
+				const int op  = g.addNode(HE::MatNodeType::ConstFloat);
+				g.findNode(op)->p[0] = 0.45f;
+				g.connect(col, 0, out, 0);
+				g.connect(op,  0, out, 4); // Opacity
+			}
+			else if (std::string(mt) == "masked")
+			{
+				// Masked blend witness: a checkerboard mask discards half the sphere's
+				// fragments — hard-edged holes, still in the opaque pass.
+				const int out = g.addNode(HE::MatNodeType::Output);
+				g.findNode(out)->p[1] = 1.0f; // Masked
+				g.findNode(out)->p[2] = 0.5f; // cutoff
+				const int col = g.addNode(HE::MatNodeType::ConstColor);
+				g.findNode(col)->p[0] = 0.85f; g.findNode(col)->p[1] = 0.25f; g.findNode(col)->p[2] = 0.2f;
+				const int chk = g.addNode(HE::MatNodeType::Checker); // UV falls back to vUV
+				g.connect(col, 0, out, 0);
+				g.connect(chk, 0, out, 4); // OpacityMask
+			}
+			else if (std::string(mt) == "wpo")
+			{
+				// WPO witness: sin(worldPos.y * 8) * 0.35 offsets X → a wavy sphere.
+				// The offset happens in the VERTEX stage (graph-generated custom VS).
+				const int out = g.addNode(HE::MatNodeType::Output);
+				const int col = g.addNode(HE::MatNodeType::ConstColor);
+				g.findNode(col)->p[0] = 0.3f; g.findNode(col)->p[1] = 0.75f; g.findNode(col)->p[2] = 0.35f;
+				g.connect(col, 0, out, 0);
+				const int wp   = g.addNode(HE::MatNodeType::WorldPos);
+				const int spl  = g.addNode(HE::MatNodeType::SplitRGBA);
+				const int freq = g.addNode(HE::MatNodeType::ConstFloat);
+				g.findNode(freq)->p[0] = 8.0f;
+				const int m1   = g.addNode(HE::MatNodeType::Multiply);
+				const int sn   = g.addNode(HE::MatNodeType::Sine);
+				const int amp  = g.addNode(HE::MatNodeType::ConstFloat);
+				g.findNode(amp)->p[0] = 0.35f;
+				const int m2   = g.addNode(HE::MatNodeType::Multiply);
+				const int cmb  = g.addNode(HE::MatNodeType::Combine3);
+				g.connect(wp,   0, spl, 0); // worldPos → split (G = y)
+				g.connect(spl,  1, m1,  0);
+				g.connect(freq, 0, m1,  1);
+				g.connect(m1,   0, sn,  0);
+				g.connect(sn,   0, m2,  0);
+				g.connect(amp,  0, m2,  1);
+				g.connect(m2,   0, cmb, 0); // offset in X
+				g.connect(cmb,  0, out, 6); // WPO
+			}
 			else if (std::string(mt) == "switchon" || std::string(mt) == "switchoff")
 			{
 				// Static-switch permutation witness: same graph, two baked permutations.
@@ -1381,6 +1434,8 @@ void EditorApplication::dumpFrameHeadless()
 			mat.nodeGraphJson = HE::materialGraphToJson(g);
 			const HE::MatShaderGen gen = HE::generateFragment(g);
 			mat.customShaderFragGlsl = gen.glsl;
+			mat.customShaderVertGlsl = gen.vertexBody; // WPO vertex body (if the graph uses it)
+			mat.blendMode            = gen.blendMode;
 			for (const auto& slot : gen.params)
 			{
 				mat.shaderParamData.insert(mat.shaderParamData.end(),
@@ -1400,7 +1455,10 @@ void EditorApplication::dumpFrameHeadless()
 				HE::MaterialShaderLibrary lib;
 				const uint64_t h = std::hash<std::string>{}(gen.glsl);
 				auto bake = [&](HE::RendererBackend rb, LB lb) {
-					const auto& v = lib.standardVertex(lb);
+					const auto& v = gen.vertexBody.empty()
+						? lib.standardVertex(lb)
+						: lib.customVertex(std::hash<std::string>{}(gen.vertexBody),
+						                   gen.vertexBody, lb);
 					const auto& f = lib.fragment(h, gen.glsl, lb);
 					if (v.ok && f.ok) {
 						MaterialShaderVariant var;
