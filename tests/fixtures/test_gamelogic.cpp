@@ -35,5 +35,5 @@ public:
 
 } // namespace
 
-extern "C" IGameLogic* HE_CreateGameLogic()            { return new TestGameLogic(); }
-extern "C" void        HE_DestroyGameLogic(IGameLogic* p) { delete p; }
+extern "C" HE_GAME_API IGameLogic* HE_CreateGameLogic()              { return new TestGameLogic(); }
+extern "C" HE_GAME_API void        HE_DestroyGameLogic(IGameLogic* p) { delete p; }
