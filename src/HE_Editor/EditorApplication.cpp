@@ -1327,6 +1327,22 @@ void EditorApplication::dumpFrameHeadless()
 				g.connect(fbm, 0, mul, 1);
 				g.connect(mul, 0, out, 0);
 			}
+			else if (std::string(mt) == "switchon" || std::string(mt) == "switchoff")
+			{
+				// Static-switch permutation witness: same graph, two baked permutations.
+				// ON → red branch only, OFF → blue branch only (the other is culled).
+				const int out = g.addNode(HE::MatNodeType::Output);
+				const int sw  = g.addNode(HE::MatNodeType::StaticSwitch);
+				g.findNode(sw)->s = "UseRed";
+				g.findNode(sw)->p[0] = std::string(mt) == "switchon" ? 1.0f : 0.0f;
+				const int red = g.addNode(HE::MatNodeType::ConstColor);
+				g.findNode(red)->p[0] = 0.9f; g.findNode(red)->p[1] = 0.1f; g.findNode(red)->p[2] = 0.1f;
+				const int blu = g.addNode(HE::MatNodeType::ConstColor);
+				g.findNode(blu)->p[0] = 0.1f; g.findNode(blu)->p[1] = 0.2f; g.findNode(blu)->p[2] = 0.9f;
+				g.connect(red, 0, sw, 0);
+				g.connect(blu, 0, sw, 1);
+				g.connect(sw,  0, out, 0);
+			}
 			else if (std::string(mt) == "noise")
 			{
 				// v6 witness: colour × Noise Texture → mottled ("fleckig") BaseColor.

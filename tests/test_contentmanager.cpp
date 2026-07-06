@@ -307,6 +307,90 @@ TEST_CASE("ContentManager pre-registers the default cube mesh")
 	CHECK(allInRange);  // box projection of a unit cube maps into [0,1]
 }
 
+TEST_CASE("Material instance: param override survives sync; switch override re-permutes")
+{
+	ContentManager cm;
+
+	// ── Master: graph with a named color param and a static switch. ──
+	HE::MaterialGraph g;
+	const int out = g.addNode(HE::MatNodeType::Output);
+	const int pc  = g.addNode(HE::MatNodeType::ParamColor);
+	g.findNode(pc)->s = "Tint";
+	g.findNode(pc)->p[0] = 0.5f; g.findNode(pc)->p[1] = 0.5f; g.findNode(pc)->p[2] = 0.5f;
+	const int sw  = g.addNode(HE::MatNodeType::StaticSwitch);
+	g.findNode(sw)->s = "Fancy"; // default ON
+	const int red = g.addNode(HE::MatNodeType::ConstColor);
+	g.findNode(red)->p[0] = 0.93f;
+	CHECK(g.connect(red, 0, sw, 0)); // True branch
+	CHECK(g.connect(pc,  0, sw, 1)); // False branch = the param
+	CHECK(g.connect(sw,  0, out, 0));
+	// The param ALSO drives Emissive so it exists in every permutation (the switch's
+	// default-ON culls the False branch — without this, the master would have 0 params).
+	CHECK(g.connect(pc,  0, out, 3));
+
+	MaterialAsset master;
+	master.type = HE::AssetType::Material;
+	master.name = "Master";
+	master.path = "mats/master.hasset";
+	master.nodeGraphJson = HE::materialGraphToJson(g);
+	const HE::MatShaderGen gen = HE::generateFragment(g);
+	master.customShaderFragGlsl = gen.glsl;
+	for (const auto& slot : gen.params)
+	{
+		master.shaderParamData.insert(master.shaderParamData.end(), slot.value, slot.value + 4);
+		master.graphParamNames.push_back(slot.name);
+		master.graphParamTypes.push_back(static_cast<uint8_t>(slot.kind));
+		master.graphParamMinMax.insert(master.graphParamMinMax.end(), { slot.minV, slot.maxV });
+		master.graphParamGroups.push_back(slot.group);
+		master.graphParamTooltips.push_back(slot.tooltip);
+	}
+	const HE::UUID masterId = cm.registerMaterial(std::move(master));
+	REQUIRE(cm.getMaterial(masterId) != nullptr);
+
+	// ── Instance: pure param override → byte-identical shader (same pipeline). ──
+	MaterialAsset instA;
+	instA.type = HE::AssetType::Material;
+	instA.name = "InstA";
+	instA.path = "mats/instA.hasset";
+	instA.parentMaterialPath = "mats/master.hasset";
+	const HE::UUID instAId = cm.registerMaterial(std::move(instA));
+	cm.syncMaterialInstance(instAId);
+	{
+		MaterialAsset* ia = cm.getMaterialMutable(instAId);
+		REQUIRE(ia != nullptr);
+		const MaterialAsset* ma = cm.getMaterial(masterId);
+		CHECK(ia->customShaderFragGlsl == ma->customShaderFragGlsl); // SAME source → same pipeline
+		REQUIRE(ia->graphParamNames.size() == 1);
+
+		// Override "Tint" on the instance, then re-sync: the override survives,
+		// non-overridden state keeps following the parent.
+		ia->instanceOverriddenParams.push_back("Tint");
+		ia->shaderParamData[0] = 0.11f; ia->shaderParamData[1] = 0.22f; ia->shaderParamData[2] = 0.33f;
+		cm.syncMaterialInstance(instAId);
+		ia = cm.getMaterialMutable(instAId);
+		CHECK(ia->shaderParamData[0] == doctest::Approx(0.11f)); // instance value kept
+		CHECK(ia->customShaderFragGlsl == cm.getMaterial(masterId)->customShaderFragGlsl);
+	}
+
+	// ── Instance with a SWITCH override → different permutation (own source). ──
+	MaterialAsset instB;
+	instB.type = HE::AssetType::Material;
+	instB.name = "InstB";
+	instB.path = "mats/instB.hasset";
+	instB.parentMaterialPath = "mats/master.hasset";
+	instB.instanceSwitchNames.push_back("Fancy");
+	instB.instanceSwitchValues.push_back(0); // force OFF → the param branch
+	const HE::UUID instBId = cm.registerMaterial(std::move(instB));
+	cm.syncMaterialInstance(instBId);
+	{
+		const MaterialAsset* ib = cm.getMaterial(instBId);
+		REQUIRE(ib != nullptr);
+		CHECK(ib->customShaderFragGlsl != cm.getMaterial(masterId)->customShaderFragGlsl);
+		CHECK(ib->customShaderFragGlsl.find("0.930000") == std::string::npos); // red branch culled
+		CHECK(ib->customShaderFragGlsl.find("param: Tint") != std::string::npos);
+	}
+}
+
 TEST_CASE("ContentManager box-projects UVs for a registered mesh that has none")
 {
 	ContentManager cm;

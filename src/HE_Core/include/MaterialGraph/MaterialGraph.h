@@ -20,6 +20,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -91,6 +92,11 @@ enum class MatNodeType : uint8_t
 
     // ── v7: editor ergonomics ──
     Reroute,        // vec4 pass-through pin for tidy link routing (no effect on the shader)
+
+    // ── v8: compile-time permutations ──
+    StaticSwitch,   // named COMPILE-TIME branch (s = name, p[0] = default on/off): codegen
+                    // emits ONLY the taken input — the other branch is culled entirely.
+                    // Material instances may override the value → their own permutation.
 };
 
 struct MatGraphNode
@@ -100,6 +106,10 @@ struct MatGraphNode
     float       p[4] = { 0, 0, 0, 0 }; // node params (const values / lit flag / fresnel power)
     std::string s;                     // string param (parameter name / function asset path)
     float       x = 0.0f, y = 0.0f;    // canvas position (editor-only, serialized for layout)
+    // Param-node METADATA (meaningful on Param* nodes only; optional JSON keys "g"/"tt").
+    // ParamFloat additionally uses p[1]/p[2] as slider min/max (min<max → slider UI).
+    std::string group;                 // panel grouping header ("" = ungrouped)
+    std::string tooltip;               // hover help shown next to the parameter
 };
 
 // One connection: output pin (srcNode, srcPin) → input pin (dstNode, dstPin).
@@ -188,6 +198,10 @@ struct MatParamSlot
     bool         isColor = false;             // color (xyz) vs scalar (x) — legacy proxy
     MatParamKind kind    = MatParamKind::Float; // full widget type (Float/Color/Vec2/Vec4/Bool)
     float        value[4] = { 0, 0, 0, 0 };
+    // Metadata from the Param node: slider range (min<max → slider), panel group, tooltip.
+    float        minV = 0.0f, maxV = 0.0f;
+    std::string  group;
+    std::string  tooltip;
 };
 
 struct MatShaderGen
@@ -197,6 +211,9 @@ struct MatShaderGen
     // Content-relative paths of the project textures referenced by Texture Sample nodes,
     // in slot order (heTexP0..heTexP3). → MaterialAsset::graphTexturePaths. Max 4.
     std::vector<std::string>  textures;
+    // Static switches reached during codegen: name + the EFFECTIVE value baked into this
+    // shader (node default, or the entry from generateFragment's override map).
+    std::vector<std::pair<std::string, bool>> switches;
 };
 
 // Max project textures a single material graph may sample (fixed so the per-backend
@@ -205,8 +222,11 @@ inline constexpr int kMatMaxGraphTextures = 4;
 
 // Generate shader + parameter layout. Always succeeds (unconnected inputs fall back to
 // pin defaults; a missing Output node yields a magenta error shader; recursive function
-// calls emit magenta instead of hanging).
-MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoader& loader = {});
+// calls emit magenta instead of hanging). `switchOverrides` (name → on) replaces Static
+// Switch node defaults at COMPILE time — each distinct combination yields a distinct
+// shader source (its own pipeline-cache entry), which is the whole permutation system.
+MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoader& loader = {},
+                              const std::map<std::string, bool>* switchOverrides = nullptr);
 
 // Convenience wrapper (no function loader) — kept for existing callers/tests.
 std::string generateFragmentGlsl(const MaterialGraph& graph);

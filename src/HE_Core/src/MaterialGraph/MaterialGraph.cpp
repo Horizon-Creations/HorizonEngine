@@ -160,6 +160,12 @@ const std::vector<MatNodeDesc>& registry()
         // (float→vec4 splat / vec3→vec4 alpha-1 round-trip cleanly back down).
         { MatNodeType::Reroute, "Reroute", "Misc",
           { { "", F::Vec4, 0 } }, { { "", F::Vec4, 0 } }, 0 },
+
+        // ── v8: compile-time permutations ──
+        // The UNTAKEN branch is culled at codegen time (never emitted), unlike the
+        // runtime If node. s = switch name, p[0] = default; instances may override.
+        { MatNodeType::StaticSwitch, "Static Switch", "Logic",
+          { { "True", F::Vec3, 1 }, { "False", F::Vec3, 0 } }, { { "Out", F::Vec3, 0 } }, 1 },
     };
     return kReg;
 }
@@ -278,6 +284,8 @@ int MaterialGraph::addNode(MatNodeType type, float x, float y)
     if (type == MatNodeType::ParamBool)  { n.p[0] = 1.0f; n.s = "MyBool"; }
     // v6: procedural texture
     if (type == MatNodeType::NoiseTexture) n.p[0] = 6.0f;                     // Scale
+    // v8: compile-time switch
+    if (type == MatNodeType::StaticSwitch) { n.p[0] = 1.0f; n.s = "MySwitch"; }
     nodes.push_back(n);
     return n.id;
 }
@@ -365,6 +373,8 @@ struct EmitCtx
     std::unordered_map<std::string, std::string> outVar; // scopeKey:node:pin → expr
     std::unordered_set<std::string> emitting;            // cycle guard (scoped)
     bool usesTexture = false;                            // legacy default sampler (heTex0)
+    const std::map<std::string, bool>* switchOv = nullptr;    // instance permutation values
+    std::vector<std::pair<std::string, bool>> switches;       // switches reached (effective)
     bool usesNoise   = false;                            // 2D value-noise/fbm helpers (UV-space)
     bool usesNoise3  = false;                            // 3D value-noise/fbm helpers (world-space)
     int  varCounter  = 0;
@@ -406,6 +416,11 @@ int paramSlot(EmitCtx& c, const MatGraphNode& n, MatParamKind kind)
     slot.kind = kind;
     slot.isColor = (kind == MatParamKind::Color);
     for (int i = 0; i < 4; ++i) slot.value[i] = (i < keep) ? n.p[i] : 0.0f;
+    // Metadata for typed editors: group/tooltip from the node; ParamFloat carries a
+    // slider range in p[1]/p[2] (min < max → slider UI instead of a free drag).
+    slot.group   = n.group;
+    slot.tooltip = n.tooltip;
+    if (kind == MatParamKind::Float) { slot.minV = n.p[1]; slot.maxV = n.p[2]; }
     c.params.push_back(std::move(slot));
     return (int)c.params.size() - 1;
 }
@@ -540,6 +555,23 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
             const std::string sc2 = inputExpr(c, sc, n, 1, F::Float);
             decl = "float " + v + " = mod(floor(" + uv + ".x * " + sc2 + ") + floor("
                  + uv + ".y * " + sc2 + "), 2.0);"; break;
+        }
+        case MatNodeType::StaticSwitch:
+        {
+            // COMPILE-TIME branch: resolve the value now (override map beats the node
+            // default; the FIRST resolution wins for repeated names so one switch can
+            // gate several spots consistently), then emit ONLY the taken input. The
+            // untaken branch is never visited — dead nodes cost nothing in the shader.
+            const std::string swName = n.s.empty() ? ("switch_" + std::to_string(n.id)) : n.s;
+            bool on = n.p[0] > 0.5f;
+            if (c.switchOv)
+                if (auto it = c.switchOv->find(swName); it != c.switchOv->end()) on = it->second;
+            bool seen = false;
+            for (const auto& sw : c.switches)
+                if (sw.first == swName) { on = sw.second; seen = true; break; }
+            if (!seen) c.switches.push_back({ swName, on });
+            decl = "vec3 " + v + " = " + inputExpr(c, sc, n, on ? 0 : 1, F::Vec3) + ";";
+            break;
         }
         case MatNodeType::Reroute:
             // Editor-only routing pin: emit a plain pass-through so downstream coercion
@@ -776,7 +808,8 @@ std::string uvInput(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pinI
 }
 } // namespace
 
-MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoader& loader)
+MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoader& loader,
+                              const std::map<std::string, bool>* switchOverrides)
 {
     const MatGraphNode* out = nullptr;
     for (const auto& n : graph.nodes)
@@ -799,7 +832,8 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
     }
 
     EmitCtx c;
-    c.loader = &loader;
+    c.loader   = &loader;
+    c.switchOv = switchOverrides;
     Scope root;
     root.g = &graph;
 
@@ -860,6 +894,7 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
     gen.glsl     = std::move(src);
     gen.params   = std::move(c.params);
     gen.textures = std::move(c.textures);
+    gen.switches = std::move(c.switches);
     return gen;
 }
 
@@ -879,7 +914,9 @@ std::string materialGraphToJson(const MaterialGraph& graph)
         nlohmann::json jn = { { "id", n.id }, { "type", matNodeDesc(n.type).name },
                               { "p", { n.p[0], n.p[1], n.p[2], n.p[3] } },
                               { "x", n.x }, { "y", n.y } };
-        if (!n.s.empty()) jn["s"] = n.s;
+        if (!n.s.empty())       jn["s"]  = n.s;
+        if (!n.group.empty())   jn["g"]  = n.group;   // param metadata (optional keys)
+        if (!n.tooltip.empty()) jn["tt"] = n.tooltip;
         j["nodes"].push_back(std::move(jn));
     }
     for (const auto& l : graph.links)
@@ -909,7 +946,9 @@ bool materialGraphFromJson(const std::string& json, MaterialGraph& out)
         n.type = d->type;
         if (auto p = jn.find("p"); p != jn.end() && p->is_array())
             for (size_t i = 0; i < 4 && i < p->size(); ++i) n.p[i] = (*p)[i].get<float>();
-        n.s = jn.value("s", std::string());
+        n.s       = jn.value("s", std::string());
+        n.group   = jn.value("g", std::string());
+        n.tooltip = jn.value("tt", std::string());
         n.x = jn.value("x", 0.0f);
         n.y = jn.value("y", 0.0f);
         g.nodes.push_back(n);

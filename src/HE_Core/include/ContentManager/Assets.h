@@ -134,6 +134,27 @@ struct MaterialAsset : public RuntimeAsset
 	// right widget (color picker / float / vec2 / vec4 / bool) without the node graph.
 	std::vector<uint8_t> graphParamTypes;
 
+	// Parameter METADATA in slot order, parallel to graphParamNames (all appended to the
+	// MTRL tail — older materials load with empty vectors → plain widgets, no groups):
+	// - graphParamMinMax: 2 floats per slot (min, max); min < max → slider UI.
+	// - graphParamGroups/Tooltips: panel group header ("" = ungrouped) + hover help.
+	std::vector<float>       graphParamMinMax;
+	std::vector<std::string> graphParamGroups;
+	std::vector<std::string> graphParamTooltips;
+
+	// ── Material INSTANCE ("ein Master-Material, viele Varianten") ─────────────────
+	// Non-empty parentMaterialPath marks this asset as an instance of that material: it
+	// has NO graph of its own — ContentManager::syncMaterialInstance copies the parent's
+	// generated shader (same source hash → the SAME cached pipeline, zero recompiles) and
+	// re-applies this instance's overrides. instanceOverriddenParams lists BY NAME which
+	// param slots keep the instance's own value; everything else follows the parent.
+	// Static-switch overrides bake a different PERMUTATION: sync regenerates the shader
+	// from the parent's graph with the override map (own hash → own cached pipeline).
+	std::string              parentMaterialPath;
+	std::vector<std::string> instanceOverriddenParams;
+	std::vector<std::string> instanceSwitchNames;   // switch overrides: name…
+	std::vector<uint8_t>     instanceSwitchValues;  // …+ value 0/1 (parallel)
+
 	// Project textures the node graph's Texture Sample nodes reference, in slot order
 	// (heTexP0..). Loose assets keep paths; packing bakes them to graphTextureIds (MTLU).
 	std::vector<std::string> graphTexturePaths;
