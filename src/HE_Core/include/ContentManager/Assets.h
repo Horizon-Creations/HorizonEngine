@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <array>
+#include "Types/Defines.h"
 #include "Types/Enums.h"
 #include "Types/UUID.h"
 #include "Scripting/ScriptTypes.h"
@@ -21,8 +22,8 @@ namespace HE
 {
 	// PSHD chunk (de)serialization — the single source of truth for the precompiled-
 	// shader byte layout, shared by the exporter (encode) and the runtime (decode).
-	std::vector<uint8_t> encodeMaterialShaderVariants(const std::vector<MaterialShaderVariant>& v);
-	std::vector<MaterialShaderVariant> decodeMaterialShaderVariants(const std::vector<uint8_t>& bytes);
+	HE_API std::vector<uint8_t> encodeMaterialShaderVariants(const std::vector<MaterialShaderVariant>& v);
+	HE_API std::vector<MaterialShaderVariant> decodeMaterialShaderVariants(const std::vector<uint8_t>& bytes);
 }
 
 struct ContentAsset

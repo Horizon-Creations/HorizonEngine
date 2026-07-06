@@ -18,6 +18,7 @@
 // model, tests exercise codegen headlessly.
 #pragma once
 
+#include <Types/Defines.h> // HE_API — HorizonCore.dll uses explicit exports on Windows
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -158,7 +159,7 @@ struct MatNodeDesc
     int         paramCount; // how many of p[] the node uses (drives inline widgets)
 };
 
-struct MaterialGraph
+struct HE_API MaterialGraph
 {
     std::vector<MatGraphNode>    nodes;
     std::vector<MatGraphLink>    links;
@@ -178,19 +179,19 @@ struct MaterialGraph
 };
 
 // Node-type registry (the standard library). Stable lookup by enum or serialized name.
-const std::vector<MatNodeDesc>& matNodeRegistry();
-const MatNodeDesc&              matNodeDesc(MatNodeType type);
-const MatNodeDesc*              matNodeDescByName(const std::string& name);
+HE_API const std::vector<MatNodeDesc>& matNodeRegistry();
+HE_API const MatNodeDesc&              matNodeDesc(MatNodeType type);
+HE_API const MatNodeDesc*              matNodeDescByName(const std::string& name);
 
 // The Output node's DISPLAYED input pins for a blend mode, plus the registry pin index
 // each row maps to (indices stay stable across modes so serialized links never break:
 // 0 BaseColor, 1 Metallic, 2 Roughness, 3 Emissive, 4 Opacity/OpacityMask, 5 Normal,
 // 6 WPO). Opaque hides pin 4; Masked renames it to OpacityMask.
-void matOutputPins(int blendMode, std::vector<MatPinDesc>& pins, std::vector<int>& regIndex);
+HE_API void matOutputPins(int blendMode, std::vector<MatPinDesc>& pins, std::vector<int>& regIndex);
 
 // Interface pins of a FUNCTION graph: its FnInput nodes (sorted by id) become the call
 // node's inputs, FnOutput nodes its outputs. Used by codegen and the editor canvas.
-void matFunctionPins(const MaterialGraph& fnGraph,
+HE_API void matFunctionPins(const MaterialGraph& fnGraph,
                      std::vector<MatPinDesc>& inputs, std::vector<MatPinDesc>& outputs);
 
 // Resolves a FunctionCall node's asset path to its graph (nullptr = unavailable; the
@@ -251,14 +252,14 @@ inline constexpr int kMatMaxGraphTextures = 4;
 // calls emit magenta instead of hanging). `switchOverrides` (name → on) replaces Static
 // Switch node defaults at COMPILE time — each distinct combination yields a distinct
 // shader source (its own pipeline-cache entry), which is the whole permutation system.
-MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoader& loader = {},
+HE_API MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoader& loader = {},
                               const std::map<std::string, bool>* switchOverrides = nullptr);
 
 // Convenience wrapper (no function loader) — kept for existing callers/tests.
-std::string generateFragmentGlsl(const MaterialGraph& graph);
+HE_API std::string generateFragmentGlsl(const MaterialGraph& graph);
 
 // JSON (de)serialization — stored in MaterialAsset::nodeGraphJson /
 // MaterialFunctionAsset::nodeGraphJson. Node types serialized by NAME.
-std::string materialGraphToJson(const MaterialGraph& graph);
-bool        materialGraphFromJson(const std::string& json, MaterialGraph& out);
+HE_API std::string materialGraphToJson(const MaterialGraph& graph);
+HE_API bool        materialGraphFromJson(const std::string& json, MaterialGraph& out);
 } // namespace HE
