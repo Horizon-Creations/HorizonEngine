@@ -453,6 +453,61 @@ TEST_CASE("Reroute passes its input through unchanged (colour survives the dot)"
 	CHECK(glsl.find("0.100000") != std::string::npos);
 }
 
+TEST_CASE("Material function with several NAMED inputs/outputs: pins + inlining by index")
+{
+	// f(Base, Amount) → Doubled = Base*Amount, Inverted = 1-Base
+	MaterialGraph fn;
+	const int inA = fn.addNode(MatNodeType::FnInput);
+	fn.findNode(inA)->s = "Base";   fn.findNode(inA)->p[0] = 2.0f; // vec3
+	const int inB = fn.addNode(MatNodeType::FnInput);
+	fn.findNode(inB)->s = "Amount"; fn.findNode(inB)->p[0] = 0.0f; // float
+	const int mul = fn.addNode(MatNodeType::Multiply);
+	const int inv = fn.addNode(MatNodeType::OneMinus);
+	const int o1  = fn.addNode(MatNodeType::FnOutput);
+	fn.findNode(o1)->s = "Doubled";  fn.findNode(o1)->p[0] = 2.0f;
+	const int o2  = fn.addNode(MatNodeType::FnOutput);
+	fn.findNode(o2)->s = "Inverted"; fn.findNode(o2)->p[0] = 2.0f;
+	CHECK(fn.connect(inA, 0, mul, 0));
+	CHECK(fn.connect(inB, 0, mul, 1));
+	CHECK(fn.connect(mul, 0, o1, 0));
+	CHECK(fn.connect(inA, 0, inv, 0));
+	CHECK(fn.connect(inv, 0, o2, 0));
+
+	// The call node's pins carry the GIVEN names, in id order.
+	std::vector<HE::MatPinDesc> ins, outs;
+	HE::matFunctionPins(fn, ins, outs);
+	REQUIRE(ins.size() == 2);
+	REQUIRE(outs.size() == 2);
+	CHECK(std::string(ins[0].name)  == "Base");
+	CHECK(std::string(ins[1].name)  == "Amount");
+	CHECK(std::string(outs[0].name) == "Doubled");
+	CHECK(std::string(outs[1].name) == "Inverted");
+
+	// Material: two distinct constants into the call; BOTH outputs consumed.
+	MaterialGraph g;
+	const int out  = g.addNode(MatNodeType::Output);
+	const int col  = g.addNode(MatNodeType::ConstColor);
+	g.findNode(col)->p[0] = 0.7f; g.findNode(col)->p[1] = 0.3f; g.findNode(col)->p[2] = 0.1f;
+	const int amt  = g.addNode(MatNodeType::ConstFloat);
+	g.findNode(amt)->p[0] = 0.25f;
+	const int call = g.addNode(MatNodeType::FunctionCall);
+	g.findNode(call)->s = "fns/multi.hasset";
+	CHECK(g.connect(col,  0, call, 0)); // Base
+	CHECK(g.connect(amt,  0, call, 1)); // Amount
+	CHECK(g.connect(call, 0, out, 0));  // Doubled  → BaseColor
+	CHECK(g.connect(call, 1, out, 1));  // Inverted → Metallic
+
+	HE::MatFunctionLoader loader = [&](const std::string& path) -> const MaterialGraph*
+	{ return path == "fns/multi.hasset" ? &fn : nullptr; };
+	const std::string glsl = HE::generateFragment(g, loader).glsl;
+	// Both input values land in the inlined body, and the inputs resolve BY INDEX:
+	// Base gets the colour, Amount the scalar.
+	CHECK(glsl.find("0.700000") != std::string::npos);
+	CHECK(glsl.find("0.250000") != std::string::npos);
+	// Both outputs produce distinct expressions (the OneMinus branch is inlined too).
+	CHECK(glsl.find("vec3(1.0) - ") != std::string::npos);
+}
+
 TEST_CASE("Comment boxes round-trip through graph JSON (and old JSON still loads)")
 {
 	MaterialGraph g = MaterialGraph::makeDefault();
