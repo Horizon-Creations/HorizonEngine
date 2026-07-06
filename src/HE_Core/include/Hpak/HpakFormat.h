@@ -135,7 +135,8 @@ struct PackSettings {
     // per-backend variants (already PSHD-encoded bytes). Null / 0 backends → no precompile
     // (the shipped game cross-compiles at runtime as before).
     uint32_t shaderBackends = 0;
-    std::function<std::vector<uint8_t>(const std::string& fragGlsl, uint32_t backends)>
+    std::function<std::vector<uint8_t>(const std::string& fragGlsl,
+                                       const std::string& vertBody, uint32_t backends)>
         compileShaderVariants;
 };
 

@@ -232,6 +232,7 @@ static std::vector<std::string> parseExcludeLines(const char* buf)
 // runtime decodes into MaterialAsset::precompiledShaders. Empty result → the
 // exporter simply omits the chunk and the shipped game cross-compiles at load.
 static std::vector<uint8_t> CompileMaterialShaderVariants(const std::string& fragGlsl,
+                                                          const std::string& vertBody,
                                                           uint32_t backends)
 {
 	using LB = HE::MaterialShaderLibrary::Backend;
@@ -268,7 +269,10 @@ static std::vector<uint8_t> CompileMaterialShaderVariants(const std::string& fra
 		LB lb;
 		if (!mapBackend(static_cast<HE::RendererBackend>(v), lb)) continue;
 
-		const auto& vert = lib.standardVertex(lb);
+		// WPO materials bake their graph-generated vertex; everything else the shared one.
+		const auto& vert = vertBody.empty()
+			? lib.standardVertex(lb)
+			: lib.customVertex(std::hash<std::string>{}(vertBody), vertBody, lb);
 		const auto& frag = lib.fragment(hash, fragGlsl, lb);
 		if (!vert.ok || !frag.ok)
 		{

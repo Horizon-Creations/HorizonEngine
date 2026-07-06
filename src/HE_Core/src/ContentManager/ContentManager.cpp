@@ -236,6 +236,8 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 			HAsset::Reader::readVec(c->data,o,a.instanceOverriddenParams);
 			HAsset::Reader::readVec(c->data,o,a.instanceSwitchNames);
 			HAsset::Reader::readVec(c->data,o,a.instanceSwitchValues);
+			HAsset::Reader::readPOD(c->data,o,a.blendMode);              // 0 opaque/1 masked/2 translucent
+			HAsset::Reader::readString(c->data,o,a.customShaderVertGlsl);// WPO vertex body
 		}
 		// Baked graph-texture UUIDs live in MTLU alongside shaderId/textureIds.
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_MTLU))
@@ -407,6 +409,8 @@ void ContentManager::syncMaterialInstance(HE::UUID instanceId)
 				for (int k = 0; k < 4; ++k) inst->shaderParamData.push_back(slot.value[k]);
 			}
 			inst->graphTexturePaths = gen.textures;
+			inst->blendMode            = gen.blendMode;
+			inst->customShaderVertGlsl = gen.vertexBody;
 			// A regenerated permutation invalidates any parent-baked shaders.
 			inst->precompiledShaders.clear();
 		}
@@ -424,6 +428,8 @@ void ContentManager::syncMaterialInstance(HE::UUID instanceId)
 		inst->graphTextureIds      = parent->graphTextureIds;
 		inst->shaderParamData      = parent->shaderParamData;
 		inst->precompiledShaders   = parent->precompiledShaders;
+		inst->blendMode            = parent->blendMode;
+		inst->customShaderVertGlsl = parent->customShaderVertGlsl;
 	}
 	// Re-apply the instance's own values on overridden slots.
 	for (size_t i = 0; i < inst->graphParamNames.size(); ++i)
@@ -809,6 +815,8 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 		HAsset::Writer::appendVec(b,a.instanceOverriddenParams);          // overridden slots (names)
 		HAsset::Writer::appendVec(b,a.instanceSwitchNames);               // switch overrides…
 		HAsset::Writer::appendVec(b,a.instanceSwitchValues);              // …(name + 0/1)
+		HAsset::Writer::appendPOD(b,a.blendMode);                         // blend mode
+		HAsset::Writer::appendString(b,a.customShaderVertGlsl);           // WPO vertex body
 		w.addChunk(HAsset::CHUNK_MTRL,b.data(),b.size());
 		break;
 	}

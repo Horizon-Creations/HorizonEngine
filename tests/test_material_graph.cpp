@@ -171,8 +171,10 @@ TEST_CASE("MaterialGraph v2 nodes: noise helpers, view-dir fresnel, named params
 TEST_CASE("MaterialGraph v3: RGBA output, split/combine masks, param slots")
 {
 	// Opacity flows into oColor.a; texture alpha is a separate pin; split/combine round-trip.
+	// Since blend modes (v9), the Opacity pin only feeds alpha in TRANSLUCENT mode.
 	MaterialGraph g;
 	const int out   = g.addNode(MatNodeType::Output);
+	g.findNode(out)->p[1] = 2.0f; // Translucent
 	const int tex   = g.addNode(MatNodeType::TextureSample);
 	const int comb  = g.addNode(MatNodeType::CombineRGBA);
 	const int split = g.addNode(MatNodeType::SplitRGBA);
@@ -386,7 +388,7 @@ TEST_CASE("Every node type has a registry entry and its emit matches its pins")
 {
 	// The registry (pins) drives both the editor UI and codegen; a type missing from
 	// it, or an emit case reading a pin the registry doesn't declare, is a bug.
-	for (int t = 0; t <= (int)MatNodeType::StaticSwitch; ++t)
+	for (int t = 0; t <= (int)MatNodeType::NormalMapSample; ++t)
 	{
 		const auto type = static_cast<MatNodeType>(t);
 		const HE::MatNodeDesc& d = HE::matNodeDesc(type);
@@ -565,6 +567,79 @@ TEST_CASE("Param metadata (range/group/tooltip) flows into slots and survives JS
 		if (rn.type == MatNodeType::ParamFloat)
 		{ found = rn.group == "Surface" && rn.tooltip == "0 = mirror, 1 = chalk"; break; }
 	CHECK(found);
+}
+
+TEST_CASE("Blend modes: opaque forces alpha 1, masked discards, translucent feeds alpha")
+{
+	auto makeG = [](float mode) {
+		MaterialGraph g;
+		const int out = g.addNode(MatNodeType::Output);
+		g.findNode(out)->p[1] = mode;
+		g.findNode(out)->p[2] = 0.33f; // mask cutoff
+		const int a = g.addNode(MatNodeType::ConstFloat);
+		g.findNode(a)->p[0] = 0.42f;
+		g.connect(a, 0, out, 4); // pin 4 = Opacity/OpacityMask
+		return g;
+	};
+	const std::string opq = HE::generateFragment(makeG(0.0f)).glsl;
+	CHECK(opq.find("discard") == std::string::npos);
+	CHECK(opq.find(", 1.0);") != std::string::npos);      // alpha forced solid
+	CHECK(opq.find("0.420000") == std::string::npos);     // pin 4 ignored → subtree culled
+
+	const HE::MatShaderGen msk = HE::generateFragment(makeG(1.0f));
+	CHECK(msk.glsl.find("discard") != std::string::npos);
+	CHECK(msk.glsl.find("< 0.330000") != std::string::npos); // authored cutoff
+	CHECK(msk.blendMode == 1);
+
+	const HE::MatShaderGen trn = HE::generateFragment(makeG(2.0f));
+	CHECK(trn.glsl.find("discard") == std::string::npos);
+	CHECK(trn.glsl.find("0.420000") != std::string::npos);   // opacity reaches alpha
+	CHECK(trn.blendMode == 2);
+}
+
+TEST_CASE("Normal pin replaces vNormal in heLit; Normal Map emits the perturb helper")
+{
+	// Unconnected → the interpolated vertex normal.
+	MaterialGraph g0 = MaterialGraph::makeDefault();
+	CHECK(HE::generateFragmentGlsl(g0).find("vec3 heN = normalize(vNormal);")
+	      != std::string::npos);
+
+	// Normal Map → hePerturbNormal + screen-space TBN helper, fed into heLit via heN.
+	MaterialGraph g;
+	const int out = g.addNode(MatNodeType::Output);
+	const int nm  = g.addNode(MatNodeType::NormalMapSample);
+	CHECK(g.connect(nm, 0, out, 5)); // Normal pin
+	const std::string glsl = HE::generateFragment(g).glsl;
+	CHECK(glsl.find("vec3 hePerturbNormal(") != std::string::npos);
+	CHECK(glsl.find("dFdx(") != std::string::npos);
+	CHECK(glsl.find("heLit(") != std::string::npos);
+	CHECK(glsl.find("heN") != std::string::npos);
+	CHECK(glsl.find("normalize(vNormal);") == std::string::npos); // replaced by the map
+}
+
+TEST_CASE("WPO pin generates a vertex body; its statements leave the fragment")
+{
+	MaterialGraph g = MaterialGraph::makeDefault();
+	int out = 0;
+	for (auto& n : g.nodes) if (n.type == MatNodeType::Output) out = n.id;
+	// Wind-ish offset: sin(time) into Combine3 → WPO. The 0.777 constant is a tracer.
+	const int t   = g.addNode(MatNodeType::Time);
+	const int sn  = g.addNode(MatNodeType::Sine);
+	const int amp = g.addNode(MatNodeType::ConstFloat);
+	g.findNode(amp)->p[0] = 0.777f;
+	const int mul = g.addNode(MatNodeType::Multiply);
+	const int cmb = g.addNode(MatNodeType::Combine3);
+	CHECK(g.connect(t,   0, sn,  0));
+	CHECK(g.connect(sn,  0, mul, 0));
+	CHECK(g.connect(amp, 0, mul, 1));
+	CHECK(g.connect(mul, 0, cmb, 0)); // offset in X
+	CHECK(g.connect(cmb, 0, out, 6)); // WPO pin
+
+	const HE::MatShaderGen gen = HE::generateFragment(g);
+	REQUIRE(!gen.vertexBody.empty());
+	CHECK(gen.vertexBody.find("vec3 heWpo") != std::string::npos);
+	CHECK(gen.vertexBody.find("0.777000") != std::string::npos); // tracer in the VS body…
+	CHECK(gen.glsl.find("0.777000") == std::string::npos);       // …and NOT in the fragment
 }
 
 TEST_CASE("Comment boxes round-trip through graph JSON (and old JSON still loads)")

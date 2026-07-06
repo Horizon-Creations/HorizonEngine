@@ -2551,10 +2551,11 @@ void OpenGLRenderer::CreateUnlitPipeline()
 
 #if defined(HE_HAVE_SHADERC)
 // Resolve a material's custom shader via the shared, backend-agnostic library.
-bool OpenGLRenderer::resolveMaterialShader(const HE::UUID& materialId, uint64_t& key, std::string& frag)
+bool OpenGLRenderer::resolveMaterialShader(const HE::UUID& materialId, uint64_t& key, std::string& frag,
+                                           std::string& vertBody)
 {
 	if (!m_contentManager) return false;
-	return m_matShaderLib.resolveFragment(*m_contentManager, materialId, key, frag);
+	return m_matShaderLib.resolveShaders(*m_contentManager, materialId, key, frag, vertBody);
 }
 
 // Build (or fetch) a GL program for a material's custom fragment. The shared library
@@ -2640,6 +2641,7 @@ void glSaveCachedProgram(const std::filesystem::path& path, GLuint prog)
 } // namespace
 
 unsigned int OpenGLRenderer::getOrBuildMaterialProgram(uint64_t key, const std::string& fragGlsl,
+                                                       const std::string& vertBody,
                                                        const MaterialShaderVariant* precompiled)
 {
 	if (auto it = m_materialPrograms.find(key); it != m_materialPrograms.end()) return it->second;
@@ -2653,7 +2655,12 @@ unsigned int OpenGLRenderer::getOrBuildMaterialProgram(uint64_t key, const std::
 	}
 	else
 	{
-		const auto& v = m_matShaderLib.standardVertex(Backend::GLSL410);       // attribute vertex (GL-4.1 safe)
+		// WPO materials use the graph-generated vertex; UBO blocks bind by NAME below,
+		// so the custom vertex's HeLighting/HeParams resolve without extra plumbing.
+		const auto& v = vertBody.empty()
+			? m_matShaderLib.standardVertex(Backend::GLSL410)
+			: m_matShaderLib.customVertex(std::hash<std::string>{}(vertBody), vertBody,
+			                              Backend::GLSL410);
 		const auto& f = m_matShaderLib.fragment(key, fragGlsl, Backend::GLSL410);
 		vertSrc = v.source; fragSrc = f.source; log = v.log + f.log; ok = v.ok && f.ok;
 	}
@@ -3947,7 +3954,9 @@ bool OpenGLRenderer::ResolveMaterialParams(const HE::UUID& materialId,
 	outBaseColor = glm::vec3(mat->baseColor[0], mat->baseColor[1], mat->baseColor[2]);
 	outMetallic  = mat->metallic;
 	outRoughness = mat->roughness;
-	outOpacity   = mat->opacity;
+	// Translucent blend mode forces the sorted alpha-blend pass even at opacity 1 —
+	// the shader's own oColor.a then does the actual blending.
+	outOpacity   = mat->blendMode == 2 ? std::min(mat->opacity, 0.998f) : mat->opacity;
 	return true;
 }
 
@@ -3975,13 +3984,14 @@ void OpenGLRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 	for (const HE::UUID& id : materialIds)
 	{
 		uint64_t shKey; std::string shFrag;
-		if (!resolveMaterialShader(id, shKey, shFrag)) continue;
+		std::string shVert;
+		if (!resolveMaterialShader(id, shKey, shFrag, shVert)) continue;
 		if (m_materialPrograms.count(shKey)) continue; // already warm
 		const MaterialShaderVariant* pre = nullptr;
 		if (const MaterialAsset* ma = m_contentManager ? m_contentManager->getMaterial(id) : nullptr)
 			for (const auto& var : ma->precompiledShaders)
 				if (var.backend == static_cast<uint8_t>(HE::RendererBackend::OpenGL)) { pre = &var; break; }
-		if (getOrBuildMaterialProgram(shKey, shFrag, pre)) ++built;
+		if (getOrBuildMaterialProgram(shKey, shFrag, shVert, pre)) ++built;
 	}
 	if (built > 0)
 		Logger::Log(Logger::LogLevel::Info,
@@ -3997,14 +4007,14 @@ void* OpenGLRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& 
 
 	// Resolve the material's node-graph program (built-in-PBR materials have none →
 	// nothing to preview). Reuses the same program cache + precompiled-variant path.
-	uint64_t shKey; std::string shFrag;
-	if (!resolveMaterialShader(materialId, shKey, shFrag)) return nullptr;
+	uint64_t shKey; std::string shFrag, shVert;
+	if (!resolveMaterialShader(materialId, shKey, shFrag, shVert)) return nullptr;
 	const MaterialShaderVariant* pre = nullptr;
 	const MaterialAsset* ma = m_contentManager->getMaterial(materialId);
 	if (ma)
 		for (const auto& var : ma->precompiledShaders)
 			if (var.backend == static_cast<uint8_t>(HE::RendererBackend::OpenGL)) { pre = &var; break; }
-	const unsigned int prog = getOrBuildMaterialProgram(shKey, shFrag, pre);
+	const unsigned int prog = getOrBuildMaterialProgram(shKey, shFrag, shVert, pre);
 	if (!prog) return nullptr;
 
 	// ── Lazy preview primitive (interleaved pos3/normal3/uv2 — the material vertex
@@ -4794,7 +4804,11 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		// Transparent (opacity < 1) draws are deferred to a sorted, alpha-blended
 		// pass after the opaque geometry + sky so they composite correctly.
 		struct TPDraw { glm::mat4 mvp, model; glm::vec3 baseColor; float metallic, roughness, opacity;
-		                unsigned int tex, vao; int indexCount; float distSq; };
+		                unsigned int tex, vao; int indexCount; float distSq;
+		                // Custom translucent material: its GL program + param block +
+		                // node-graph textures (0 → the built-in blend program).
+		                unsigned int matProg = 0; std::vector<float> params;
+		                unsigned int gtex[4] = { 0, 0, 0, 0 }; int gtexCount = 0; };
 		std::vector<TPDraw> transparent;
 		const glm::vec3 camPos = m_renderWorld.camera.position;
 
@@ -4836,13 +4850,49 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 
 			if (cOpacity < 0.999f)
 			{
+				// Translucent graph materials keep their own program + state in the pass.
+				unsigned int tpProg = 0; std::vector<float> tpParams;
+				unsigned int tpGtex[4] = { 0, 0, 0, 0 }; int tpGtexCount = 0;
+#if defined(HE_HAVE_SHADERC)
+				{
+					uint64_t shKey; std::string shFrag, shVert;
+					if (resolveMaterialShader(dc.materialAssetId, shKey, shFrag, shVert))
+					{
+						const MaterialShaderVariant* pre = nullptr;
+						const MaterialAsset* ma = m_contentManager
+							? m_contentManager->getMaterial(dc.materialAssetId) : nullptr;
+						if (ma)
+							for (const auto& var : ma->precompiledShaders)
+								if (var.backend == static_cast<uint8_t>(HE::RendererBackend::OpenGL)) { pre = &var; break; }
+						tpProg = getOrBuildMaterialProgram(shKey, shFrag, shVert, pre);
+						if (tpProg && ma)
+						{
+							tpParams = !dc.paramOverride.empty() ? dc.paramOverride
+							                                     : ma->shaderParamData;
+							const size_t nTex = std::min<size_t>(4,
+								std::max(ma->graphTexturePaths.size(), ma->graphTextureIds.size()));
+							for (size_t i = 0; i < nTex; ++i)
+							{
+								const HE::UUID    gid = i < ma->graphTextureIds.size()   ? ma->graphTextureIds[i]   : HE::UUID{};
+								const std::string gp  = i < ma->graphTexturePaths.size() ? ma->graphTexturePaths[i] : std::string{};
+								tpGtex[tpGtexCount++] = ResolveGraphTexture(gid, gp);
+							}
+						}
+					}
+				}
+#endif
 				// Transparent instanced batches: push one TPDraw per instance so
 				// each object is sorted individually by distance.
 				auto pushTP = [&](const glm::mat4& t) {
 					const glm::vec3 d = glm::vec3(t[3]) - camPos;
-					transparent.push_back({ viewProj * t, t, baseColor,
-					                        cMetallic, cRoughness, cOpacity, tex, vao, indexCount,
-					                        glm::dot(d, d) });
+					TPDraw tp{ viewProj * t, t, baseColor,
+					           cMetallic, cRoughness, cOpacity, tex, vao, indexCount,
+					           glm::dot(d, d) };
+					tp.matProg = tpProg;
+					tp.params  = tpParams;
+					for (int i = 0; i < tpGtexCount; ++i) tp.gtex[i] = tpGtex[i];
+					tp.gtexCount = tpGtexCount;
+					transparent.push_back(std::move(tp));
 				};
 				if (!dc.instanceTransforms.empty())
 					for (const glm::mat4& t : dc.instanceTransforms) pushTP(t);
@@ -4884,15 +4934,15 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				// canonical GLSL via the shared library. Feeds per-object + lighting through
 				// UBOs; same VAO/attribs as the unlit program. Materials without one fall
 				// through to the built-in shader below.
-				uint64_t shKey; std::string shFrag; unsigned int matProg = 0;
-				if (resolveMaterialShader(dc.materialAssetId, shKey, shFrag))
+				uint64_t shKey; std::string shFrag, shVert; unsigned int matProg = 0;
+				if (resolveMaterialShader(dc.materialAssetId, shKey, shFrag, shVert))
 				{
 					const MaterialShaderVariant* pre = nullptr;
 					if (const MaterialAsset* ma = m_contentManager
 						? m_contentManager->getMaterial(dc.materialAssetId) : nullptr)
 						for (const auto& var : ma->precompiledShaders)
 							if (var.backend == static_cast<uint8_t>(HE::RendererBackend::OpenGL)) { pre = &var; break; }
-					matProg = getOrBuildMaterialProgram(shKey, shFrag, pre);
+					matProg = getOrBuildMaterialProgram(shKey, shFrag, shVert, pre);
 				}
 				if (matProg)
 				{
@@ -5229,6 +5279,44 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glActiveTexture(GL_TEXTURE0);
 			for (const TPDraw& t : transparent)
 			{
+				if (t.matProg)
+				{
+					// Custom translucent material: its own program + UBOs (blend state is
+					// global GL state, already enabled for this pass).
+					glUseProgram(t.matProg);
+					struct { glm::mat4 mvp, model; glm::vec4 color, flags, pbr; } obj;
+					obj.mvp   = t.mvp;
+					obj.model = t.model;
+					obj.color = glm::vec4(t.baseColor, 1.0f);
+					obj.flags = glm::vec4(t.tex != 0 ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+					obj.pbr   = glm::vec4(t.metallic, t.roughness, t.opacity, 0.0f);
+					glBindBuffer(GL_UNIFORM_BUFFER, m_matObjUBO);
+					glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(obj), &obj);
+					float padded[64] = { 0 };
+					std::memcpy(padded, t.params.data(),
+					            std::min(t.params.size(), size_t(64)) * sizeof(float));
+					glBindBuffer(GL_UNIFORM_BUFFER, m_matParamUBO);
+					glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(padded), padded);
+					glBindBuffer(GL_UNIFORM_BUFFER, 0);
+					m_haveMatParams = false; // opaque-pass dedup cache no longer matches
+					glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_matLightUBO);
+					glBindBufferBase(GL_UNIFORM_BUFFER, 1, m_matObjUBO);
+					glBindBufferBase(GL_UNIFORM_BUFFER, 2, m_matParamUBO);
+					glBindVertexArray(t.vao);
+					glActiveTexture(GL_TEXTURE0);
+					glBindTexture(GL_TEXTURE_2D, t.tex);
+					for (int i = 0; i < t.gtexCount; ++i)
+					{
+						glActiveTexture(GL_TEXTURE1 + (GLenum)i);
+						glBindTexture(GL_TEXTURE_2D, t.gtex[i]);
+					}
+					glActiveTexture(GL_TEXTURE0);
+					glDrawElements(GL_TRIANGLES, t.indexCount, GL_UNSIGNED_INT, nullptr);
+					glUseProgram(m_unlitProgram); // restore the built-in blend program
+					++m_counters.draws;
+					m_counters.tris += static_cast<uint32_t>(t.indexCount / 3);
+					continue;
+				}
 				glUniformMatrix4fv(m_uMVP,   1, GL_FALSE, glm::value_ptr(t.mvp));
 				glUniformMatrix4fv(m_uModel, 1, GL_FALSE, glm::value_ptr(t.model));
 				glUniform3fv(m_uColor, 1, glm::value_ptr(t.baseColor));

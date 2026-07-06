@@ -20,8 +20,10 @@ const std::vector<MatNodeDesc>& registry()
         { MatNodeType::Output, "Output", "Material",
           { { "BaseColor", F::Vec3, 0.8f }, { "Metallic", F::Float, 0.0f },
             { "Roughness", F::Float, 0.5f }, { "Emissive", F::Vec3, 0.0f },
-            { "Opacity", F::Float, 1.0f } },
-          {}, 1 }, // p[0] = lit
+            { "Opacity", F::Float, 1.0f },   // pin 4 — meaning depends on the blend mode
+            { "Normal", F::Vec3, 0.0f },     // pin 5 — WORLD-space; unconnected = vNormal
+            { "WPO", F::Vec3, 0.0f } },      // pin 6 — world-space vertex offset (custom VS)
+          {}, 3 }, // p[0] = lit, p[1] = blend mode, p[2] = mask cutoff
         { MatNodeType::ConstFloat, "Float", "Input",
           {}, { { "Value", F::Float, 0 } }, 1 },
         { MatNodeType::ConstColor, "Color", "Input",
@@ -166,6 +168,10 @@ const std::vector<MatNodeDesc>& registry()
         // runtime If node. s = switch name, p[0] = default; instances may override.
         { MatNodeType::StaticSwitch, "Static Switch", "Logic",
           { { "True", F::Vec3, 1 }, { "False", F::Vec3, 0 } }, { { "Out", F::Vec3, 0 } }, 1 },
+
+        // ── v9: surface features ──
+        { MatNodeType::NormalMapSample, "Normal Map", "Texture",
+          { { "UV", F::Vec2, 0 } }, { { "N", F::Vec3, 0 } }, 1 }, // p[0] = strength, s = texture
     };
     return kReg;
 }
@@ -244,6 +250,27 @@ const MatNodeDesc* matNodeDescByName(const std::string& name)
     return nullptr;
 }
 
+void matOutputPins(int blendMode, std::vector<MatPinDesc>& pins, std::vector<int>& regIndex)
+{
+    const auto& reg = matNodeDesc(MatNodeType::Output).inputs;
+    pins.clear(); regIndex.clear();
+    for (int i = 0; i < (int)reg.size(); ++i)
+    {
+        if (i == 4) // the opacity slot is blend-mode dependent
+        {
+            if (blendMode == (int)MatBlendMode::Masked)
+                pins.push_back({ "OpacityMask", F::Float, 1.0f });
+            else if (blendMode == (int)MatBlendMode::Translucent)
+                pins.push_back({ "Opacity", F::Float, 1.0f });
+            else
+                continue; // Opaque: hidden (alpha is forced to 1)
+        }
+        else
+            pins.push_back(reg[i]);
+        regIndex.push_back(i);
+    }
+}
+
 void matFunctionPins(const MaterialGraph& fnGraph,
                      std::vector<MatPinDesc>& inputs, std::vector<MatPinDesc>& outputs)
 {
@@ -286,6 +313,9 @@ int MaterialGraph::addNode(MatNodeType type, float x, float y)
     if (type == MatNodeType::NoiseTexture) n.p[0] = 6.0f;                     // Scale
     // v8: compile-time switch
     if (type == MatNodeType::StaticSwitch) { n.p[0] = 1.0f; n.s = "MySwitch"; }
+    // v9: normal map strength; Output mask cutoff (p[1] blend mode stays 0 = Opaque)
+    if (type == MatNodeType::NormalMapSample) n.p[0] = 1.0f;
+    if (type == MatNodeType::Output) n.p[2] = 0.5f;
     nodes.push_back(n);
     return n.id;
 }
@@ -377,6 +407,7 @@ struct EmitCtx
     std::vector<std::pair<std::string, bool>> switches;       // switches reached (effective)
     bool usesNoise   = false;                            // 2D value-noise/fbm helpers (UV-space)
     bool usesNoise3  = false;                            // 3D value-noise/fbm helpers (world-space)
+    bool usesNormalPerturb = false;                      // hePerturbNormal (screen-space TBN)
     int  varCounter  = 0;
     std::vector<MatParamSlot> params;                    // exposed parameters, slot order
     std::vector<std::string>  textures;                  // project textures, slot order (max 4)
@@ -475,6 +506,33 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
                 c.usesTexture = true;
             decl = "vec4 " + v + " = texture(" + sampler + ", " + inputExpr(c, sc, n, 0, F::Vec2) + ");";
             pinExpr = { v + ".xyz", v + ".w" };
+            break;
+        }
+        case MatNodeType::NormalMapSample:
+        {
+            // Tangent-space normal map → world space WITHOUT vertex tangents: build the
+            // cotangent frame from screen-space derivatives of position+UV (Mikkelsen).
+            // Same slot machinery as Texture Sample (empty s → the mesh texture).
+            std::string sampler = "heTex0";
+            if (!n.s.empty())
+            {
+                int slot = -1;
+                for (size_t i = 0; i < c.textures.size(); ++i)
+                    if (c.textures[i] == n.s) { slot = (int)i; break; }
+                if (slot < 0 && (int)c.textures.size() < kMatMaxGraphTextures)
+                { slot = (int)c.textures.size(); c.textures.push_back(n.s); }
+                if (slot >= 0) sampler = "heTexP" + std::to_string(slot);
+                else           c.usesTexture = true;
+            }
+            else
+                c.usesTexture = true;
+            c.usesNormalPerturb = true;
+            const float strength = n.p[0] > 0.0f ? n.p[0] : 1.0f;
+            decl = "vec2 " + v + "_uv = " + uvInput(c, sc, n, 0) + ";"
+                 + " vec3 " + v + "_t = texture(" + sampler + ", " + v + "_uv).xyz * 2.0 - 1.0;"
+                 + " " + v + "_t.xy *= " + fmtF(strength) + ";"
+                 + " vec3 " + v + " = hePerturbNormal(normalize(vNormal), normalize(" + v
+                 + "_t), vWorldPos, " + v + "_uv);";
             break;
         }
         case MatNodeType::Add:
@@ -841,8 +899,37 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
     const std::string met     = inputExpr(c, root, *out, 1, F::Float);
     const std::string rough   = inputExpr(c, root, *out, 2, F::Float);
     const std::string emis    = inputExpr(c, root, *out, 3, F::Vec3);
-    const std::string opacity = inputExpr(c, root, *out, 4, F::Float);
     const bool lit = out->p[0] > 0.5f;
+
+    // ── Blend mode (Output p[1]) decides what pin 4 means and where alpha comes from. ──
+    const int   blendMode = std::clamp(static_cast<int>(out->p[1]), 0, 2);
+    const float cutoff    = out->p[2] > 0.0f ? out->p[2] : 0.5f; // mask threshold
+    std::string opacity   = "1.0";                                // Opaque/Masked → solid
+    std::string mask;
+    if (blendMode == (int)MatBlendMode::Masked)
+        mask = inputExpr(c, root, *out, 4, F::Float);
+    else if (blendMode == (int)MatBlendMode::Translucent)
+        opacity = inputExpr(c, root, *out, 4, F::Float);
+
+    // ── Surface normal (pin 5): unconnected → the interpolated vertex normal. ──
+    const std::string normalExpr = hasInput(root, *out, 5)
+        ? "normalize(" + inputExpr(c, root, *out, 5, F::Vec3) + ")"
+        : "normalize(vNormal)";
+
+    // ── World Position Offset (pin 6) → a VERTEX-stage body, emitted into a separate
+    // scope ("vs") so its statements never share variables with the fragment body. The
+    // same varying NAMES are readable in the vertex template, so the text is reusable. ──
+    if (hasInput(root, *out, 6))
+    {
+        Scope vs;
+        vs.g   = &graph;
+        vs.key = "vs";
+        const size_t mark = c.body.size();
+        const std::string wpoExpr = inputExpr(c, vs, *out, 6, F::Vec3);
+        gen.vertexBody = c.body.substr(mark)
+                       + "    vec3 heWpo = " + wpoExpr + ";\n";
+        c.body.resize(mark); // the WPO statements belong to the vertex stage only
+    }
 
     std::string src = header;
     if (c.usesTexture)
@@ -880,9 +967,23 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
             "float heFbm3(vec3 p) { float v = 0.0; float a = 0.5;"
             " for (int i = 0; i < 4; i++) { v += a * heValueNoise3(p); p *= 2.0; a *= 0.5; }"
             " return v; }\n";
+    if (c.usesNormalPerturb)
+        src +=
+            "vec3 hePerturbNormal(vec3 N, vec3 mapN, vec3 pos, vec2 uv) {\n"
+            "    vec3 dp1 = dFdx(pos); vec3 dp2 = dFdy(pos);\n"
+            "    vec2 duv1 = dFdx(uv); vec2 duv2 = dFdy(uv);\n"
+            "    vec3 dp2perp = cross(dp2, N); vec3 dp1perp = cross(N, dp1);\n"
+            "    vec3 T = dp2perp * duv1.x + dp1perp * duv2.x;\n"
+            "    vec3 B = dp2perp * duv1.y + dp1perp * duv2.y;\n"
+            "    float invmax = inversesqrt(max(dot(T, T), dot(B, B)));\n"
+            "    return normalize(mat3(T * invmax, B * invmax, N) * mapN); }\n";
     src += "void main() {\n" + c.body;
+    // Masked: kill sub-cutoff fragments BEFORE shading — hard-edged holes, opaque pass.
+    if (blendMode == (int)MatBlendMode::Masked)
+        src += "    if (" + mask + " < " + fmtF(cutoff) + ") discard;\n";
+    src += "    vec3 heN = " + normalExpr + ";\n";
     if (lit)
-        src += "    oColor = vec4(heLit(" + base + ", normalize(vNormal), " + met + ", " + rough + ") + "
+        src += "    oColor = vec4(heLit(" + base + ", heN, " + met + ", " + rough + ") + "
              + emis + ", " + opacity + ");\n";
     else
         src += "    oColor = vec4(" + base + " + " + emis + ", " + opacity + ");\n";
@@ -894,7 +995,8 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
     gen.glsl     = std::move(src);
     gen.params   = std::move(c.params);
     gen.textures = std::move(c.textures);
-    gen.switches = std::move(c.switches);
+    gen.switches  = std::move(c.switches);
+    gen.blendMode = static_cast<uint8_t>(blendMode);
     return gen;
 }
 

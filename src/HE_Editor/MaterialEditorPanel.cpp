@@ -197,6 +197,8 @@ void applyToMaterial(State& st, AppContext& ctx)
 	// Project textures the graph samples, in slot order (heTexP0..) — the renderer
 	// binds these on loose materials; packing bakes them to graphTextureIds (MTLU).
 	mat->graphTexturePaths = gen.textures;
+	mat->blendMode            = gen.blendMode;
+	mat->customShaderVertGlsl = gen.vertexBody; // WPO vertex body ("" = standard vertex)
 	st.dirty = true;
 	st.complexity = estimateComplexity(st.lastGlsl);
 	// Live master→variants propagation: re-derive every loaded instance of this material.
@@ -464,6 +466,20 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true)
 			ImGui::DragFloat4("##v4", n.p, 0.01f);
 			committed = ImGui::IsItemDeactivatedAfterEdit();
 			break;
+		case MatNodeType::NormalMapSample:
+		{
+			ImGui::SetNextItemWidth((kNodeW - 76.0f) * scale);
+			ImGui::DragFloat("Strength", &n.p[0], 0.05f, 0.0f, 4.0f);
+			committed = ImGui::IsItemDeactivatedAfterEdit();
+			const std::string label = n.s.empty()
+				? std::string("(mesh texture)")
+				: std::filesystem::path(n.s).filename().string();
+			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.8f, 0.85f, 1.0f, 1.0f));
+			ImGui::TextWrapped("%s", label.c_str());
+			ImGui::PopStyleColor();
+			if (!n.s.empty() && ImGui::SmallButton("Clear")) { n.s.clear(); committed = true; }
+			break;
+		}
 		case MatNodeType::TextureSample:
 		{
 			// A picked texture shows its filename + a clear button; the drop target
@@ -483,6 +499,23 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true)
 		{
 			bool lit = n.p[0] > 0.5f;
 			if (ImGui::Checkbox("Lit", &lit)) { n.p[0] = lit ? 1.0f : 0.0f; committed = true; }
+			// Blend mode changes the node's PINS (pin 4 = Opacity/OpacityMask/hidden)
+			// and where the material renders (Translucent → sorted blend pass).
+			static const char* kBlend[] = { "Opaque", "Masked", "Translucent" };
+			int bm = std::clamp(static_cast<int>(n.p[1]), 0, 2);
+			ImGui::SetNextItemWidth((kNodeW - 60.0f) * scale);
+			if (ImGui::Combo("Blend", &bm, kBlend, 3))
+			{
+				n.p[1] = (float)bm;
+				if (bm == 1 && n.p[2] <= 0.0f) n.p[2] = 0.5f; // sane default cutoff
+				committed = true;
+			}
+			if (bm == 1) // Masked → clip threshold
+			{
+				ImGui::SetNextItemWidth((kNodeW - 60.0f) * scale);
+				ImGui::DragFloat("Clip", &n.p[2], 0.01f, 0.01f, 1.0f);
+				committed |= ImGui::IsItemDeactivatedAfterEdit();
+			}
 			break;
 		}
 		case MatNodeType::ParamFloat:
@@ -581,11 +614,16 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true)
 
 // Vertical space the node reserves for its inline VALUE widgets (the name, for named
 // nodes, lives in the colored header now — not in the body).
-float nodeParamHeight(MatNodeType type)
+float nodeParamHeight(const MatGraphNode& n)
 {
+	const MatNodeType type = n.type;
 	const HE::MatNodeDesc& d = HE::matNodeDesc(type);
-	if (d.paramCount == 0 && type != MatNodeType::TextureSample) return 0.0f;
-	if (type == MatNodeType::TextureSample) return 44.0f;         // filename + hint rows
+	if (type == MatNodeType::Output)                              // lit + blend (+ clip)
+		return static_cast<int>(n.p[1]) == 1 ? 82.0f : 56.0f;
+	if (d.paramCount == 0 && type != MatNodeType::TextureSample &&
+	    type != MatNodeType::NormalMapSample) return 0.0f;
+	if (type == MatNodeType::TextureSample ||
+	    type == MatNodeType::NormalMapSample) return 44.0f;       // filename + hint rows
 	if (type == MatNodeType::ConstVec4 || type == MatNodeType::ParamVec4) return 30.0f; // vec4 drag row
 	return 26.0f;                                                 // one value/combo row
 }
@@ -1341,7 +1379,15 @@ void render(AppContext& ctx, const std::string& assetPath,
 		std::vector<HE::MatPinDesc> dynIn, dynOut;
 		const std::vector<HE::MatPinDesc>* nodeIns  = &d.inputs;
 		const std::vector<HE::MatPinDesc>* nodeOuts = &d.outputs;
+		// Row → registry-pin-index mapping. Identity except for the Output node, whose
+		// pin 4 is hidden/renamed by blend mode (indices stay stable for saved links).
+		std::vector<int> inPinIndex;
 		std::string titleOverride;
+		if (n.type == MatNodeType::Output)
+		{
+			HE::matOutputPins(std::clamp(static_cast<int>(n.p[1]), 0, 2), dynIn, inPinIndex);
+			nodeIns = &dynIn;
+		}
 		if (n.type == MatNodeType::FunctionCall)
 		{
 			if (const HE::MaterialGraph* fn = loadFunctionGraph(ctx, n.s))
@@ -1360,7 +1406,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 		const float rowH   = kRowH   * Z;
 		const float pad6   = 6.0f    * Z;
 		const int rows = std::max<int>((int)nodeIns->size(), (int)nodeOuts->size());
-		const float paramH = nodeParamHeight(n.type) * Z;
+		const float paramH = nodeParamHeight(n) * Z;
 		const float h = titleH + pad6 + rows * rowH + paramH;
 		nodeRects.push_back({ n.id, p, ImVec2(p.x + nodeW, p.y + h) });
 
@@ -1440,8 +1486,9 @@ void render(AppContext& ctx, const std::string& assetPath,
 			if (ImGui::MenuItem("Delete Node", nullptr, false, deletable)) deleteNode = n.id;
 			ImGui::EndPopup();
 		}
-		// Texture Sample: accept a texture dropped from the Content Browser onto the node.
-		if (n.type == MatNodeType::TextureSample && ImGui::BeginDragDropTarget())
+		// Texture Sample / Normal Map: accept a texture dropped from the Content Browser.
+		if ((n.type == MatNodeType::TextureSample || n.type == MatNodeType::NormalMapSample) &&
+		    ImGui::BeginDragDropTarget())
 		{
 			if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("HE_ASSET_PATH"))
 			{
@@ -1482,19 +1529,21 @@ void render(AppContext& ctx, const std::string& assetPath,
 
 		const float pinR = kPinR * Z;
 		const float hit  = 16.0f * Z;
-		// Input pins (left column)
+		// Input pins (left column). Row i displays registry pin `pinIdx` (differs from i
+		// only on the Output node, where blend mode hides/renames pin 4).
 		for (int i = 0; i < (int)nodeIns->size(); ++i)
 		{
+			const int pinIdx = i < (int)inPinIndex.size() ? inPinIndex[i] : i;
 			const ImVec2 pp(p.x, p.y + titleH + pad6 + i * rowH + rowH * 0.5f);
-			pins.push_back({ n.id, i, false, pp, (*nodeIns)[i].type });
+			pins.push_back({ n.id, pinIdx, false, pp, (*nodeIns)[i].type });
 			dl->AddCircleFilled(pp, pinR, pinColor((*nodeIns)[i].type));
 			dl->AddText(font, fsz, ImVec2(pp.x + 10.0f * Z, pp.y - fsz * 0.5f), IM_COL32(210, 210, 210, 255), (*nodeIns)[i].name);
 			ImGui::SetCursorScreenPos(ImVec2(pp.x - hit * 0.5f, pp.y - hit * 0.5f));
-			ImGui::InvisibleButton((std::string("##in") + std::to_string(i)).c_str(), ImVec2(hit, hit));
+			ImGui::InvisibleButton((std::string("##in") + std::to_string(pinIdx)).c_str(), ImVec2(hit, hit));
 			if (ImGui::IsItemActivated())
-			{ st.dragNode = n.id; st.dragPin = i; st.dragFromOutput = false; }
+			{ st.dragNode = n.id; st.dragPin = pinIdx; st.dragFromOutput = false; }
 			if (ImGui::IsItemClicked(ImGuiMouseButton_Right))
-			{ st.graph.disconnectInput(n.id, i); structuralEdit = true; }
+			{ st.graph.disconnectInput(n.id, pinIdx); structuralEdit = true; }
 		}
 		// Output pins (right column)
 		for (int i = 0; i < (int)nodeOuts->size(); ++i)
