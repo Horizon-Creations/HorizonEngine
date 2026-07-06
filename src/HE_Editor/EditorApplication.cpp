@@ -1526,7 +1526,9 @@ void EditorApplication::dumpFrameHeadless()
 	// render the test material's preview sphere and let the backend dump it.
 	if (const char* pv = std::getenv("HE_DUMP_PREVIEW"); pv && *pv && s_matTestId != HE::UUID{})
 	{
-		r->RenderMaterialPreview(contentManager(), s_matTestId, 512, 0.6f, 0.35f, 3.1f);
+		// HE_DUMP_PREVIEW=1 → sphere (default); =2 cube, =3 plane (the editor's shape combo).
+		const int shape = std::clamp(std::atoi(pv) - 1, 0, 2);
+		r->RenderMaterialPreview(contentManager(), s_matTestId, 512, 0.6f, 0.35f, 3.1f, shape);
 		// Stress the property-change→re-preview path (repro for the side-panel crash):
 		// mutate the material's shader source + params like an editor edit would, then
 		// re-preview. HE_DUMP_PREVIEW_STRESS=N repeats N times.

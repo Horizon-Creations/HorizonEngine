@@ -386,7 +386,7 @@ TEST_CASE("Every node type has a registry entry and its emit matches its pins")
 {
 	// The registry (pins) drives both the editor UI and codegen; a type missing from
 	// it, or an emit case reading a pin the registry doesn't declare, is a bug.
-	for (int t = 0; t <= (int)MatNodeType::NoiseTexture; ++t)
+	for (int t = 0; t <= (int)MatNodeType::Reroute; ++t)
 	{
 		const auto type = static_cast<MatNodeType>(t);
 		const HE::MatNodeDesc& d = HE::matNodeDesc(type);
@@ -436,6 +436,44 @@ TEST_CASE("Noise Texture node emits 3D world-space fbm as a vec3 (mesh-independe
 	CHECK(glsl.find("float heValueNoise3(vec3") != std::string::npos); // 3D helper injected
 	CHECK(glsl.find("vec3(") != std::string::npos);           // grayscale RGB for a clean multiply
 	CHECK(glsl.find("6.0") != std::string::npos);             // default Scale baked in
+}
+
+TEST_CASE("Reroute passes its input through unchanged (colour survives the dot)")
+{
+	MaterialGraph g;
+	const int out = g.addNode(MatNodeType::Output);
+	const int col = g.addNode(MatNodeType::ConstColor);
+	g.findNode(col)->p[0] = 0.9f; g.findNode(col)->p[1] = 0.1f; g.findNode(col)->p[2] = 0.2f;
+	const int rr  = g.addNode(MatNodeType::Reroute);
+	CHECK(g.connect(col, 0, rr, 0));
+	CHECK(g.connect(rr, 0, out, 0));
+	const std::string glsl = HE::generateFragment(g).glsl;
+	// The colour literal must reach the output THROUGH the reroute (vec4 round-trip).
+	CHECK(glsl.find("0.900000") != std::string::npos);
+	CHECK(glsl.find("0.100000") != std::string::npos);
+}
+
+TEST_CASE("Comment boxes round-trip through graph JSON (and old JSON still loads)")
+{
+	MaterialGraph g = MaterialGraph::makeDefault();
+	HE::MatGraphComment cb;
+	cb.id = g.nextId++;
+	cb.text = "shading section";
+	cb.x = -40.0f; cb.y = 12.5f; cb.w = 300.0f; cb.h = 210.0f;
+	g.comments.push_back(cb);
+
+	MaterialGraph r;
+	REQUIRE(HE::materialGraphFromJson(HE::materialGraphToJson(g), r));
+	REQUIRE(r.comments.size() == 1);
+	CHECK(r.comments[0].text == "shading section");
+	CHECK(r.comments[0].x == doctest::Approx(-40.0f));
+	CHECK(r.comments[0].w == doctest::Approx(300.0f));
+	CHECK(r.nextId > r.comments[0].id); // id space shared with nodes
+
+	// A pre-comment JSON (no "comments" key) must still parse to an empty list.
+	MaterialGraph old;
+	REQUIRE(HE::materialGraphFromJson(HE::materialGraphToJson(MaterialGraph::makeDefault()), old));
+	CHECK(old.comments.empty());
 }
 
 #if defined(HE_TESTS_HAVE_SHADERC)

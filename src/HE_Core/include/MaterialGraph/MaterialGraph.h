@@ -88,6 +88,9 @@ enum class MatNodeType : uint8_t
 
     // ── v6: procedural texture ──
     NoiseTexture,   // fbm(vUV*Scale) → grayscale RGB (Vec3) + Value (Float); drop-in to multiply for mottling
+
+    // ── v7: editor ergonomics ──
+    Reroute,        // vec4 pass-through pin for tidy link routing (no effect on the shader)
 };
 
 struct MatGraphNode
@@ -107,6 +110,17 @@ struct MatGraphLink
     int dstNode = 0, dstPin = 0;
 };
 
+// Editor-only comment/group box drawn behind the nodes it frames. Purely cosmetic —
+// never touches codegen — but serialized with the graph so layouts survive reloads.
+// Ids share the graph's `nextId` counter with nodes (uniqueness, not meaning).
+struct MatGraphComment
+{
+    int         id = 0;
+    std::string text;                       // header label
+    float       x = 0, y = 0;               // graph-space top-left
+    float       w = 260.0f, h = 180.0f;     // graph-space size
+};
+
 // Static description of a node type (name, pins, defaults) — drives both the codegen and
 // the editor UI (node palette, pin layout), so the two can never disagree. FunctionCall
 // nodes have DYNAMIC pins (from the referenced function graph) — see matFunctionPins.
@@ -123,8 +137,9 @@ struct MatNodeDesc
 
 struct MaterialGraph
 {
-    std::vector<MatGraphNode> nodes;
-    std::vector<MatGraphLink> links;
+    std::vector<MatGraphNode>    nodes;
+    std::vector<MatGraphLink>    links;
+    std::vector<MatGraphComment> comments; // editor-only group boxes (see MatGraphComment)
     int nextId = 1;
 
     // Returns the new node's id (NOT a reference — the nodes vector reallocates).
