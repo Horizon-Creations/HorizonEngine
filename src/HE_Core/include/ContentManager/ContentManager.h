@@ -90,6 +90,18 @@ public:
 	HE::UUID registerSkeletalMesh(SkeletalMeshAsset asset);
 	HE::UUID registerTexture(TextureAsset asset);
 	HE::UUID registerMaterial(MaterialAsset asset);
+
+	// ── Material instances ────────────────────────────────────────────────
+	// Re-derive an instance's effective state from its parent material: copies the
+	// parent's generated shader (same hash → same cached pipeline, no recompile) and
+	// param layout, keeping the instance's own values for slots listed in
+	// instanceOverriddenParams. Static-switch overrides instead REGENERATE the shader
+	// from the parent's graph with the override map (a distinct permutation). Called
+	// automatically when an instance loads; call again after editing the parent.
+	void syncMaterialInstance(HE::UUID instanceId);
+	// Sync every LOADED instance whose parentMaterialPath == parentRelPath (live
+	// master→variants propagation while editing).
+	void syncMaterialInstancesOf(const std::string& parentRelPath);
 	HE::UUID registerPrefab(PrefabAsset asset);
 	HE::UUID registerAudio(AudioAsset asset);
 	HE::UUID registerScript(ScriptAsset asset);

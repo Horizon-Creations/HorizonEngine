@@ -55,16 +55,30 @@ public:
     bool resolveFragment(const ContentManager& cm, const UUID& materialId,
                          uint64_t& hashOut, std::string& glslOut) const;
 
+    // Like resolveFragment, but also returns the material's WPO vertex BODY ("" = use the
+    // standard vertex) and folds it into the hash — a WPO material's pipeline is keyed on
+    // fragment + vertex together, so permutations never collide.
+    bool resolveShaders(const ContentManager& cm, const UUID& materialId,
+                        uint64_t& hashOut, std::string& fragOut, std::string& vertBodyOut) const;
+
     // Cross-compile, cached. The Metal backend pins the vertex to verts@0 / Uniforms@1 so
     // it drops into the fixed geometry-pass bind points; other backends use their natural
     // binding model. `sourceHash` keys the fragment cache (identical shaders share a slot).
     const Compiled& standardVertex(Backend backend);
     const Compiled& fragment(uint64_t sourceHash, const std::string& glsl, Backend backend);
 
-    void clear() { m_vertCache.clear(); m_fragCache.clear(); }
+    // Custom vertex for World-Position-Offset materials: wraps the graph-generated BODY
+    // (canonical statements ending in `vec3 heWpo`) into the per-backend vertex template
+    // (SSBO vertex-pull on Metal, attributes elsewhere — same split as standardVertex).
+    // The body reads the varying names (vNormal/vUV/vWorldPos/vColor, written first) plus
+    // the HeLighting/HeParams UBOs, and the offset is applied in world space.
+    const Compiled& customVertex(uint64_t bodyHash, const std::string& body, Backend backend);
+
+    void clear() { m_vertCache.clear(); m_fragCache.clear(); m_cvertCache.clear(); }
 
 private:
-    std::unordered_map<int, Compiled>      m_vertCache; // key = (int)backend
-    std::unordered_map<uint64_t, Compiled> m_fragCache; // key = mix(sourceHash, backend)
+    std::unordered_map<int, Compiled>      m_vertCache;  // key = (int)backend
+    std::unordered_map<uint64_t, Compiled> m_fragCache;  // key = mix(sourceHash, backend)
+    std::unordered_map<uint64_t, Compiled> m_cvertCache; // key = mix(bodyHash, backend)
 };
 } // namespace HE

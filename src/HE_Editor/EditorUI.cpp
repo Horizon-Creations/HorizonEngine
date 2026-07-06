@@ -52,6 +52,48 @@ namespace
 	int s_viewportPxW = 0;
 	int s_viewportPxH = 0;
 
+	// RMB fly-look capture state for the Scene viewport (SDL relative-mouse mode). File-
+	// scope (not a viewport-local static) so the capture can be force-released from paths
+	// that DON'T draw the viewport — e.g. switching to a material/script tab mid-look via a
+	// keyboard shortcut. Otherwise relative mode + the ImGui NoMouse flag stay latched and
+	// the cursor is hidden/pinned with no way out but quitting.
+	bool  s_rmbCaptured = false;
+	float s_rmbStartX   = 0.f;
+	float s_rmbStartY   = 0.f;
+
+	// Drop any active fly-look capture: warp the cursor back to where the look-drag began,
+	// leave relative mode, re-show the OS cursor, and hand mouse control back to ImGui.
+	// Safe to call every frame — a no-op unless a capture is actually active.
+	void releaseViewportLookCapture(SDL_Window* win)
+	{
+		if (!s_rmbCaptured) return;
+		ImGuiIO& io = ImGui::GetIO();
+		if (win)
+		{
+			SDL_WarpMouseInWindow(win, s_rmbStartX, s_rmbStartY);
+			SDL_SetWindowRelativeMouseMode(win, false);
+		}
+		SDL_ShowCursor();
+		io.ConfigFlags &= ~ImGuiConfigFlags_NoMouseCursorChange;
+		io.ConfigFlags &= ~ImGuiConfigFlags_NoMouse;
+		s_rmbCaptured = false;
+	}
+
+	// Belt-and-suspenders invariant, run once per frame BEFORE any early-out: fly-look
+	// capture must never outlive a physically-held right mouse button. If the OS reports RMB
+	// is not down but we're still flagged as captured, force-release — this recovers from any
+	// path that latched the capture without releasing it (tab switch, focus change, a stale
+	// ImGui button state that spuriously (re)engaged look). Reads the PHYSICAL SDL button
+	// state, not ImGui's io.MouseDown (which NoMouse zeroes during a real look), so an actual
+	// fly-look is never cut short.
+	void enforceViewportLookCaptureInvariant(SDL_Window* win)
+	{
+		if (!s_rmbCaptured) return;
+		const bool rmbDown =
+			(SDL_GetMouseState(nullptr, nullptr) & SDL_BUTTON_MASK(SDL_BUTTON_RIGHT)) != 0;
+		if (!rmbDown) releaseViewportLookCapture(win);
+	}
+
 	// The async SDL file slot (pendingFileReady/Result) is shared across project
 	// and scene operations; this records which one is currently in flight so the
 	// single result handler can dispatch correctly.
@@ -190,6 +232,7 @@ static std::vector<std::string> parseExcludeLines(const char* buf)
 // runtime decodes into MaterialAsset::precompiledShaders. Empty result → the
 // exporter simply omits the chunk and the shipped game cross-compiles at load.
 static std::vector<uint8_t> CompileMaterialShaderVariants(const std::string& fragGlsl,
+                                                          const std::string& vertBody,
                                                           uint32_t backends)
 {
 	using LB = HE::MaterialShaderLibrary::Backend;
@@ -226,7 +269,10 @@ static std::vector<uint8_t> CompileMaterialShaderVariants(const std::string& fra
 		LB lb;
 		if (!mapBackend(static_cast<HE::RendererBackend>(v), lb)) continue;
 
-		const auto& vert = lib.standardVertex(lb);
+		// WPO materials bake their graph-generated vertex; everything else the shared one.
+		const auto& vert = vertBody.empty()
+			? lib.standardVertex(lb)
+			: lib.customVertex(std::hash<std::string>{}(vertBody), vertBody, lb);
 		const auto& frag = lib.fragment(hash, fragGlsl, lb);
 		if (!vert.ok || !frag.ok)
 		{
@@ -1418,6 +1464,10 @@ static void rewriteScriptStubLanguage(const std::string& path, int lang)
 void EditorUI::RenderEditor(AppContext& ctx, float dt)
 {
 #ifdef HE_IMGUI_ENABLED
+	// Runs every frame regardless of which tab/panel is active (before any early-out):
+	// guarantees the RMB fly-look capture can never stay stuck once the button is released.
+	enforceViewportLookCaptureInvariant(ctx.window ? ctx.window->GetNativeWindow() : nullptr);
+
 	// ── Scene-file dialog helpers ──────────────────────────────────────────
 	static PendingFileOp s_pendingFileOp = PendingFileOp::OpenProject;
 
@@ -2546,6 +2596,22 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
         auto& s_tabs      = ctx.tabs;
         auto& s_activeTab = ctx.activeTab;
 
+        // Open request from inside an editor panel (e.g. double-clicking a Material
+        // Function node) — same find-or-push flow as the Content Browser double-click.
+        if (const std::string req = MaterialEditorPanel::takeOpenRequest(); !req.empty())
+        {
+            auto it = std::find_if(s_tabs.begin(), s_tabs.end(),
+                [&](const AppContext::EditorTab& t){ return t.assetPath == req; });
+            if (it == s_tabs.end())
+            {
+                s_tabs.push_back({ std::filesystem::path(req).stem().string(), req, true, true });
+                s_activeTab = static_cast<int>(s_tabs.size()) - 1;
+            }
+            else
+                s_activeTab = static_cast<int>(std::distance(s_tabs.begin(), it));
+            s_tabSelectRequest = s_activeTab;
+        }
+
         if (ctx.fontBody) ImGui::PushFont(ctx.fontBody);
 
         if (ImGui::BeginTabBar("##MainTabBar",
@@ -2612,6 +2678,11 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
         || ctx.tabs[ctx.activeTab].assetPath.empty();
     if (!sceneTabActive)
     {
+        // The scene viewport (and its RMB fly-look release) won't run this frame. If the
+        // user switched here mid-look via a keyboard shortcut, force-release the capture so
+        // the cursor isn't left hidden/pinned with ImGui mouse input disabled.
+        releaseViewportLookCapture(ctx.window ? ctx.window->GetNativeWindow() : nullptr);
+
         const ImGuiViewport* vpTab = ImGui::GetMainViewport();
         const std::string& tabPath = ctx.tabs[ctx.activeTab].assetPath;
         const ImVec2 tabPos(vpTab->WorkPos.x, vpTab->WorkPos.y + kTabBarH);
@@ -2806,28 +2877,12 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				// In play mode the game's scene camera takes over, so the
 				// override is cleared and editor navigation is disabled.
 				bool navigating = false;
-				// RMB fly-look capture state (relative-mouse mode). Hoisted above the
-				// play branch so entering play mode mid-drag releases the capture too,
-				// instead of stranding the window with a hidden/pinned cursor.
-				static bool  s_rmbCaptured = false;
-				static float s_rmbStartX   = 0.f;   // cursor pos at press, restored on release
-				static float s_rmbStartY   = 0.f;
 				SDL_Window* sdlWin = ctx.window ? ctx.window->GetNativeWindow() : nullptr;
 				// Drop fly-look capture: warp the cursor back to the press point BEFORE
 				// leaving relative mode (SDL applies the warp as the post-relative
-				// position, landing it exactly where the look-drag began).
-				auto endLookCapture = [&]()
-				{
-					if (s_rmbCaptured && sdlWin)
-					{
-						SDL_WarpMouseInWindow(sdlWin, s_rmbStartX, s_rmbStartY);
-						SDL_SetWindowRelativeMouseMode(sdlWin, false);
-						SDL_ShowCursor();                                        // restore the OS cursor
-						io.ConfigFlags &= ~ImGuiConfigFlags_NoMouseCursorChange; // hand cursor control back to ImGui
-						io.ConfigFlags &= ~ImGuiConfigFlags_NoMouse;             // re-enable ImGui mouse interaction
-						s_rmbCaptured = false;
-					}
-				};
+				// position, landing it exactly where the look-drag began). Shared with the
+				// tab-switch safety release (releaseViewportLookCapture, file scope).
+				auto endLookCapture = [&]() { releaseViewportLookCapture(sdlWin); };
 				if (ctx.editorCamera && ctx.isPlaying)
 				{
 					endLookCapture();
@@ -2864,7 +2919,12 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 					// freezes and the stale accumulator snaps the view when look resumes.
 					if (sdlWin)
 					{
-						if (rmb && !altLmb && imageHovered && !s_rmbCaptured)
+						// Engage on a FRESH right-press over the viewport (click edge), never on
+						// "RMB happens to be down" — otherwise arriving on the Scene tab with a
+						// stale/held button state would capture the cursor without the user
+						// starting a look here.
+						const bool rmbClicked = ImGui::IsMouseClicked(ImGuiMouseButton_Right);
+						if (rmbClicked && !altLmb && imageHovered && !s_rmbCaptured)
 						{
 							SDL_GetMouseState(&s_rmbStartX, &s_rmbStartY);
 							SDL_SetWindowRelativeMouseMode(sdlWin, true);
@@ -4367,6 +4427,39 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 						Logger::Log(Logger::LogLevel::Error,
 							("Editor: import failed for " + srcPath.string()).c_str());
 					ctx.contentRefreshPending = true;
+					ImGui::CloseCurrentPopup();
+				}
+
+				// ── Material → create a child INSTANCE (params/switches only) ──
+				if (ext == ".hasset" && ctx.contentManager &&
+				    MaterialEditorPanel::isMaterialAsset(s_ctxMenuItem) &&
+				    ImGui::MenuItem("Create Material Instance"))
+				{
+					std::error_code ec;
+					const std::filesystem::path root(contentFolder.fullPath);
+					const std::string parentRel =
+						std::filesystem::relative(srcPath, root, ec).generic_string();
+					if (!ec)
+					{
+						// Unique sibling: <stem>_Inst[.N].hasset
+						std::filesystem::path dst =
+							srcPath.parent_path() / (srcPath.stem().string() + "_Inst.hasset");
+						for (int k = 2; std::filesystem::exists(dst) && k < 100; ++k)
+							dst = srcPath.parent_path() /
+								(srcPath.stem().string() + "_Inst" + std::to_string(k) + ".hasset");
+						MaterialAsset inst;
+						inst.type = HE::AssetType::Material;
+						inst.name = dst.stem().string();
+						inst.path = std::filesystem::relative(dst, root, ec).generic_string();
+						inst.parentMaterialPath = parentRel;
+						const HE::UUID iid = ctx.contentManager->registerMaterial(std::move(inst));
+						ctx.contentManager->syncMaterialInstance(iid); // derive shader/params
+						if (MaterialAsset* mi = ctx.contentManager->getMaterialMutable(iid))
+							ctx.contentManager->saveAsset(*mi);
+						ctx.contentRefreshPending = true;
+						Logger::Log(Logger::LogLevel::Info,
+							("Editor: created material instance of '" + parentRel + "'").c_str());
+					}
 					ImGui::CloseCurrentPopup();
 				}
 

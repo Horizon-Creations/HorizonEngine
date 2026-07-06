@@ -81,7 +81,8 @@ public:
 	void  InvalidateMaterial(const HE::UUID& materialId) override;
 	void  WarmupMaterials(const std::vector<HE::UUID>& materialIds) override;
 	void* RenderMaterialPreview(ContentManager& cm, const HE::UUID& materialId,
-	                            uint32_t size, float yaw, float pitch, float dist) override;
+	                            uint32_t size, float yaw, float pitch, float dist,
+	                            int shape = 0) override;
 	void  InvalidateMesh    (const HE::UUID& meshId)     override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
 	void  SetSSAOSettings(const SSAOSettings& settings) override;
@@ -307,6 +308,7 @@ private:
 	int   m_previewSize     = 0;
 	void* m_previewVB = nullptr, *m_previewIB = nullptr; // id<MTLBuffer> (retained)
 	int   m_previewIdxCount = 0;
+	int   m_previewShape    = -1; // which primitive the VB/IB currently hold (-1 = none)
 	// A procedural sphere (interleaved pos3/normal3/uv2, matching VertexIn) so per-material
 	// pipelines are visible on real 3D geometry even in the empty headless dump scene.
 	// Built + drawn (two spheres, two materials) when HE_SHADERC_MATERIAL=1.
@@ -328,10 +330,15 @@ private:
 	// Build (or fetch cached) a pipeline for a material's custom fragment GLSL, spliced
 	// onto the standard drop-in vertex. Returns null on compile/link failure (also cached).
 	// precompiled != null → build directly from baked MSL (no runtime cross-compile).
+	// vertBody = WPO vertex body ("" → standard vertex); blend = alpha-blended variant
+	// for the transparency pass (cached separately — same key space, blend bit mixed in).
 	void* GetOrBuildMaterialPipeline(uint64_t key, const std::string& fragGlsl,
-	                                 const MaterialShaderVariant* precompiled = nullptr);
+	                                 const std::string& vertBody = {},
+	                                 const MaterialShaderVariant* precompiled = nullptr,
+	                                 bool blend = false);
 	// Resolve a material's custom shader: true + (key,frag) if it has customShaderFragGlsl.
-	bool  ResolveMaterialShader(const HE::UUID& materialId, uint64_t& key, std::string& frag);
+	bool  ResolveMaterialShader(const HE::UUID& materialId, uint64_t& key, std::string& frag,
+	                            std::string& vertBody);
 #endif
 
 	// ── FXAA (edge antialiasing) ─────────────────────────────────────────────

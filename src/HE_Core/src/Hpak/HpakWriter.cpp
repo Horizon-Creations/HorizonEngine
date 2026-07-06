@@ -139,6 +139,27 @@ static std::vector<uint8_t> rewriteRefsForPack(
             HAsset::Reader::readVec(c.data, o, graphParamNames); // param names (kept)
             std::vector<uint8_t> graphParamTypes;
             HAsset::Reader::readVec(c.data, o, graphParamTypes); // param widget kinds (kept)
+            const size_t afterTypes = o; // everything after is copied verbatim below
+
+            // Skim ahead (bounds-checked) to the WPO vertex body so PSHD can bake the
+            // matching custom vertex. Layout after graphParamTypes: minmax, groups,
+            // tooltips, parentPath, overriddenParams, switchNames, switchValues,
+            // blendMode, customShaderVertGlsl.
+            std::string customVertBody;
+            {
+                size_t o2 = afterTypes;
+                std::vector<float> mm; std::vector<std::string> sv; std::vector<uint8_t> bv;
+                std::string sp; uint8_t bm = 0;
+                HAsset::Reader::readVec(c.data, o2, mm);   // minmax
+                HAsset::Reader::readVec(c.data, o2, sv);   // groups
+                HAsset::Reader::readVec(c.data, o2, sv);   // tooltips
+                HAsset::Reader::readString(c.data, o2, sp);// parentMaterialPath
+                HAsset::Reader::readVec(c.data, o2, sv);   // overridden params
+                HAsset::Reader::readVec(c.data, o2, sv);   // switch names
+                HAsset::Reader::readVec(c.data, o2, bv);   // switch values
+                HAsset::Reader::readPOD(c.data, o2, bm);   // blend mode
+                HAsset::Reader::readString(c.data, o2, customVertBody);
+            }
 
             std::vector<uint8_t> mtrl;
             HAsset::Writer::appendString(mtrl, std::string{});           // shaderPath dropped
@@ -147,6 +168,9 @@ static std::vector<uint8_t> rewriteRefsForPack(
             HAsset::Writer::appendVec(mtrl, std::vector<std::string>{}); // graphTexturePaths dropped (baked to MTLU)
             HAsset::Writer::appendVec(mtrl, graphParamNames);            // graphParamNames kept for runtime
             HAsset::Writer::appendVec(mtrl, graphParamTypes);            // graphParamTypes kept for runtime
+            // Post-v9 tail (metadata, instance info, blend mode, WPO vertex body): copy
+            // BYTE-VERBATIM so new fields ship without the packer learning each one.
+            mtrl.insert(mtrl.end(), c.data.begin() + afterTypes, c.data.end());
             w.addChunk(HAsset::CHUNK_MTRL, mtrl.data(), mtrl.size());
 
             const HE::UUID sid = shaderPath.empty() ? HE::UUID{} : resolve(shaderPath);
@@ -165,7 +189,8 @@ static std::vector<uint8_t> rewriteRefsForPack(
             // the shipped game never cross-compiles. The editor supplies the compiler.
             if (!customShaderGlsl.empty() && settings.shaderBackends != 0 && settings.compileShaderVariants)
             {
-                std::vector<uint8_t> pshd = settings.compileShaderVariants(customShaderGlsl, settings.shaderBackends);
+                std::vector<uint8_t> pshd = settings.compileShaderVariants(
+                    customShaderGlsl, customVertBody, settings.shaderBackends);
                 if (!pshd.empty()) w.addChunk(HAsset::CHUNK_PSHD, pshd.data(), pshd.size());
             }
             continue;

@@ -1254,7 +1254,8 @@ TEST_CASE("Pack precompiles node-graph material shaders into CHUNK_PSHD")
     // deterministic two-variant PSHD blob — no real glslang needed in HE_Core tests.
     std::string   seenGlsl;
     uint32_t      seenBackends = 0;
-    auto stub = [&](const std::string& glsl, uint32_t backends) -> std::vector<uint8_t> {
+    auto stub = [&](const std::string& glsl, const std::string& /*vertBody*/,
+                    uint32_t backends) -> std::vector<uint8_t> {
         seenGlsl = glsl; seenBackends = backends;
         std::vector<MaterialShaderVariant> vs;
         MaterialShaderVariant a; a.backend = static_cast<uint8_t>(HE::RendererBackend::Metal);
@@ -1318,7 +1319,7 @@ TEST_CASE("Pack skips PSHD when no backends selected")
     Hpak::PackSettings s;
     s.codec = Hpak::Codec::Store;
     s.shaderBackends = 0; // ← nothing selected
-    s.compileShaderVariants = [&](const std::string&, uint32_t) {
+    s.compileShaderVariants = [&](const std::string&, const std::string&, uint32_t) {
         called = true; return std::vector<uint8_t>{};
     };
 

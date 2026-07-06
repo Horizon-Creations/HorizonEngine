@@ -40,7 +40,8 @@ public:
 	void  InvalidateMaterial(const HE::UUID& materialId) override;
 	void  WarmupMaterials(const std::vector<HE::UUID>& materialIds) override;
 	void* RenderMaterialPreview(ContentManager& cm, const HE::UUID& materialId,
-	                            uint32_t size, float yaw, float pitch, float dist) override;
+	                            uint32_t size, float yaw, float pitch, float dist,
+	                            int shape = 0) override;
 	void  InvalidateMesh    (const HE::UUID& meshId)     override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
 	void  SetSSAOSettings(const SSAOSettings& settings) override;
@@ -198,6 +199,7 @@ private:
 	int          m_previewSize = 0;
 	unsigned int m_previewVAO = 0, m_previewVBO = 0, m_previewIBO = 0;
 	int          m_previewIdxCount = 0;
+	int          m_previewShape    = -1; // which primitive the VBO/IBO hold (-1 = none)
 	// Per-draw UBO-upload dedup: the lighting UBO is frame-constant (upload once per
 	// frame), and HeParams rarely changes (upload only when its 64 floats differ from
 	// what the UBO already holds — still correct for per-entity param overrides).
@@ -205,8 +207,10 @@ private:
 	float        m_lastMatParams[64] = { 0 };
 	bool         m_haveMatParams = false;
 	unsigned int getOrBuildMaterialProgram(uint64_t key, const std::string& fragGlsl,
+	                                       const std::string& vertBody = {},
 	                                       const MaterialShaderVariant* precompiled = nullptr);
-	bool         resolveMaterialShader(const HE::UUID& materialId, uint64_t& key, std::string& frag);
+	bool         resolveMaterialShader(const HE::UUID& materialId, uint64_t& key, std::string& frag,
+	                                   std::string& vertBody);
 
 	int          m_uMVP           = -1;
 	int          m_uModel         = -1;
