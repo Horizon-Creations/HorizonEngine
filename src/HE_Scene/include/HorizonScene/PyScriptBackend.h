@@ -19,7 +19,10 @@ class ContentManager;
 // this backend drives it and must be used from the main thread (GIL). When the
 // engine is built without CPython (HE_HAVE_PYTHON off), all methods are safe
 // no-ops returning failure, so callers need no #ifdefs.
-class HE_API PyScriptBackend final : public IScriptBackend
+// NOTE: no HE_API here. HE_API is HE_Core's export macro — inside HorizonScene.dll it
+// expands to dllimport on Windows, which turned this class's OWN vtable/methods into
+// import references (LNK2019/LNK2001). HE_Scene exports via WINDOWS_EXPORT_ALL_SYMBOLS.
+class PyScriptBackend final : public IScriptBackend
 {
 public:
 	explicit PyScriptBackend(HorizonWorld& world);
