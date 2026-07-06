@@ -154,6 +154,12 @@ const std::vector<MatNodeDesc>& registry()
         // set Scale, wire RGB into a Multiply to mottle a colour.
         { MatNodeType::NoiseTexture, "Noise Texture", "Procedural",
           {}, { { "RGB", F::Vec3, 0 }, { "Value", F::Float, 0 } }, 1 }, // p[0] = Scale
+
+        // ── v7: editor ergonomics ──
+        // Vec4 pass-through preserves every channel through the coercion rules
+        // (float→vec4 splat / vec3→vec4 alpha-1 round-trip cleanly back down).
+        { MatNodeType::Reroute, "Reroute", "Misc",
+          { { "", F::Vec4, 0 } }, { { "", F::Vec4, 0 } }, 0 },
     };
     return kReg;
 }
@@ -535,6 +541,10 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
             decl = "float " + v + " = mod(floor(" + uv + ".x * " + sc2 + ") + floor("
                  + uv + ".y * " + sc2 + "), 2.0);"; break;
         }
+        case MatNodeType::Reroute:
+            // Editor-only routing pin: emit a plain pass-through so downstream coercion
+            // sees exactly what was fed in (memoized like any node, so no duplication).
+            decl = "vec4 " + v + " = " + inputExpr(c, sc, n, 0, F::Vec4) + ";"; break;
         case MatNodeType::NoiseTexture:
         {
             // Self-contained procedural texture: 3D fbm over WORLD-SPACE position, no input
@@ -875,6 +885,12 @@ std::string materialGraphToJson(const MaterialGraph& graph)
     for (const auto& l : graph.links)
         j["links"].push_back({ { "sn", l.srcNode }, { "sp", l.srcPin },
                                { "dn", l.dstNode }, { "dp", l.dstPin } });
+    // Editor-only comment boxes. Older parsers ignore the extra key (forward-compatible);
+    // absent key → no comments (backward-compatible).
+    for (const auto& cm : graph.comments)
+        j["comments"].push_back({ { "id", cm.id }, { "t", cm.text },
+                                  { "x", cm.x }, { "y", cm.y },
+                                  { "w", cm.w }, { "h", cm.h } });
     return j.dump();
 }
 
@@ -902,6 +918,16 @@ bool materialGraphFromJson(const std::string& json, MaterialGraph& out)
     for (const auto& jl : j.value("links", nlohmann::json::array()))
         g.links.push_back({ jl.value("sn", 0), jl.value("sp", 0),
                             jl.value("dn", 0), jl.value("dp", 0) });
+    for (const auto& jc : j.value("comments", nlohmann::json::array()))
+    {
+        MatGraphComment cm;
+        cm.id   = jc.value("id", 0);
+        cm.text = jc.value("t", std::string());
+        cm.x = jc.value("x", 0.0f); cm.y = jc.value("y", 0.0f);
+        cm.w = jc.value("w", 260.0f); cm.h = jc.value("h", 180.0f);
+        g.nextId = std::max(g.nextId, cm.id + 1);
+        g.comments.push_back(std::move(cm));
+    }
     out = std::move(g);
     return true;
 }

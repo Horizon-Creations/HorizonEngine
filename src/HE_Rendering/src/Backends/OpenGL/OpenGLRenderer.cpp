@@ -1,4 +1,5 @@
 #include "Backends/OpenGL/OpenGLRenderer.h"
+#include <material/PreviewMesh.h> // shared preview primitives (sphere/cube/plane)
 #include <Window/Window.h>
 #include <ContentManager/ContentManager.h>
 #include <glad/glad.h>
@@ -3988,7 +3989,8 @@ void OpenGLRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 }
 
 void* OpenGLRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& materialId,
-                                           uint32_t size, float yaw, float pitch, float dist)
+                                           uint32_t size, float yaw, float pitch, float dist,
+                                           int shape)
 {
 	const int S = std::clamp(static_cast<int>(size), 32, 1024);
 	if (!m_contentManager) m_contentManager = &cm;
@@ -4005,36 +4007,23 @@ void* OpenGLRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& 
 	const unsigned int prog = getOrBuildMaterialProgram(shKey, shFrag, pre);
 	if (!prog) return nullptr;
 
-	// ── Lazy unit sphere (interleaved pos3/normal3/uv2 — the material vertex layout).
-	if (!m_previewVAO)
+	// ── Lazy preview primitive (interleaved pos3/normal3/uv2 — the material vertex
+	// layout), rebuilt when the requested shape changes. Geometry is shared with the
+	// Metal path via buildPreviewMesh so the two backends can never drift apart.
+	if (!m_previewVAO || m_previewShape != shape)
 	{
-		const int segU = 48, segV = 32;
-		std::vector<float>    verts; std::vector<unsigned int> idx;
-		for (int y = 0; y <= segV; ++y)
-		{
-			const float v = (float)y / segV, phi = v * 3.14159265f;
-			for (int x = 0; x <= segU; ++x)
-			{
-				const float u = (float)x / segU, th = u * 6.2831853f;
-				const glm::vec3 n(std::sin(phi) * std::cos(th), std::cos(phi), std::sin(phi) * std::sin(th));
-				verts.insert(verts.end(), { n.x, n.y, n.z, n.x, n.y, n.z, u, v });
-			}
-		}
-		for (int y = 0; y < segV; ++y)
-			for (int x = 0; x < segU; ++x)
-			{
-				const unsigned int a = y * (segU + 1) + x, b = a + segU + 1;
-				idx.insert(idx.end(), { a, b, a + 1, a + 1, b, b + 1 });
-			}
+		std::vector<float> verts; std::vector<uint32_t> idx;
+		HE::buildPreviewMesh(shape, verts, idx);
 		m_previewIdxCount = (int)idx.size();
-		glGenVertexArrays(1, &m_previewVAO);
+		m_previewShape    = shape;
+		if (!m_previewVAO) glGenVertexArrays(1, &m_previewVAO);
 		glBindVertexArray(m_previewVAO);
-		glGenBuffers(1, &m_previewVBO);
+		if (!m_previewVBO) glGenBuffers(1, &m_previewVBO);
 		glBindBuffer(GL_ARRAY_BUFFER, m_previewVBO);
 		glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(), GL_STATIC_DRAW);
-		glGenBuffers(1, &m_previewIBO);
+		if (!m_previewIBO) glGenBuffers(1, &m_previewIBO);
 		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_previewIBO);
-		glBufferData(GL_ELEMENT_ARRAY_BUFFER, idx.size() * sizeof(unsigned int), idx.data(), GL_STATIC_DRAW);
+		glBufferData(GL_ELEMENT_ARRAY_BUFFER, idx.size() * sizeof(uint32_t), idx.data(), GL_STATIC_DRAW);
 		glEnableVertexAttribArray(0); glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
 		glEnableVertexAttribArray(1); glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(3 * sizeof(float)));
 		glEnableVertexAttribArray(2); glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(6 * sizeof(float)));

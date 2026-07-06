@@ -1,6 +1,7 @@
 #include "MaterialEditorPanel.h"
 #include "EditorApplication.h"                 // AppContext
 #include <MaterialGraph/MaterialGraph.h>
+#include <material/MaterialShaderLibrary.h> // inline compile check (canvas error banner)
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <ContentManager/HAsset.h>
@@ -46,6 +47,13 @@ struct State
 	void*         previewTex   = nullptr;
 	bool          previewDirty = true;
 	int           previewPx    = 0;
+	int           previewShape = 0;  // 0 sphere / 1 cube / 2 plane (RenderMaterialPreview)
+	int           previewNodeId = 0; // 0 = whole material; else preview THAT node's output, unlit
+	std::string   compileLog;        // last cross-compile error ("" = ok) → inline banner
+	// Undo/redo: JSON snapshots of the whole graph (incl. comments). undoPos indexes the
+	// snapshot the canvas currently shows; edits truncate the redo tail.
+	std::vector<std::string> undo;
+	int           undoPos = -1;
 	// Live link drag: source pin (node, pin index, output side?) or inactive (node == 0).
 	int  dragNode = 0, dragPin = 0;
 	bool dragFromOutput = true;
@@ -150,6 +158,97 @@ void applyToMaterial(State& st, AppContext& ctx)
 	// binds these on loose materials; packing bakes them to graphTextureIds (MTLU).
 	mat->graphTexturePaths = gen.textures;
 	st.dirty = true;
+
+	// Inline error check: cross-compile the fresh GLSL (Metal target — host-independent,
+	// pure codegen) and keep the log for the canvas banner. The library caches results by
+	// hash, so unchanged sources cost nothing. The renderers fall back to magenta on a
+	// broken shader; this tells the user WHY instead of leaving them guessing.
+	static HE::MaterialShaderLibrary s_checkLib;
+	const auto& chk = s_checkLib.fragment(std::hash<std::string>{}(st.lastGlsl),
+	                                      st.lastGlsl, HE::MaterialShaderLibrary::Backend::Metal);
+	st.compileLog = chk.ok ? std::string() : chk.log;
+}
+
+// ── Undo/redo (JSON snapshots — cheap at graph scale, and reuses the asset codec) ──
+constexpr size_t kUndoCap = 64;
+
+void pushUndo(State& st)
+{
+	const std::string snap = HE::materialGraphToJson(st.graph);
+	if (st.undoPos >= 0 && st.undoPos < (int)st.undo.size() && st.undo[st.undoPos] == snap)
+		return; // no-op edit → don't spam the stack
+	st.undo.resize(st.undoPos + 1); // drop the redo tail
+	st.undo.push_back(snap);
+	if (st.undo.size() > kUndoCap) st.undo.erase(st.undo.begin());
+	st.undoPos = (int)st.undo.size() - 1;
+}
+
+bool restoreSnapshot(State& st, int pos)
+{
+	if (pos < 0 || pos >= (int)st.undo.size()) return false;
+	HE::MaterialGraph g;
+	if (!HE::materialGraphFromJson(st.undo[pos], g)) return false;
+	st.graph  = std::move(g);
+	st.undoPos = pos;
+	// Prune references to nodes that no longer exist in this snapshot.
+	st.selection.erase(std::remove_if(st.selection.begin(), st.selection.end(),
+		[&](int id){ return st.graph.findNode(id) == nullptr; }), st.selection.end());
+	if (st.selectedNode  && !st.graph.findNode(st.selectedNode))  st.selectedNode  = 0;
+	if (st.previewNodeId && !st.graph.findNode(st.previewNodeId)) st.previewNodeId = 0;
+	return true;
+}
+
+// ── Node clipboard (process-wide → copy/paste works ACROSS material tabs) ──────────
+std::string g_matClipboard;
+
+// Link dragged into empty canvas: the source pin awaiting the node picked from the
+// add-popup (0 = none pending). Transient UI state, shared across tabs harmlessly.
+int  s_pendingLinkNode = 0, s_pendingLinkPin = 0;
+bool s_pendingLinkFromOutput = true;
+
+// Selected nodes + the links fully inside the selection, as graph JSON. Interface
+// nodes are excluded: Output/FnOutput are singletons, FnInput defines a function's
+// signature — duplicating either would corrupt the target graph.
+std::string serializeSelection(const State& st)
+{
+	HE::MaterialGraph tmp;
+	for (int id : st.selection)
+		if (const MatGraphNode* n = st.graph.findNode(id))
+			if (n->type != MatNodeType::Output && n->type != MatNodeType::FnOutput &&
+			    n->type != MatNodeType::FnInput)
+				tmp.nodes.push_back(*n);
+	if (tmp.nodes.empty()) return {};
+	auto inSel = [&](int id){ for (auto& n : tmp.nodes) if (n.id == id) return true; return false; };
+	for (const auto& l : st.graph.links)
+		if (inSel(l.srcNode) && inSel(l.dstNode)) tmp.links.push_back(l);
+	return HE::materialGraphToJson(tmp);
+}
+
+// Paste `payload` into st.graph with FRESH ids, the group's top-left at (atX, atY).
+// The pasted nodes become the new selection. Returns false on empty/invalid payload.
+bool pasteInto(State& st, const std::string& payload, float atX, float atY)
+{
+	HE::MaterialGraph tmp;
+	if (payload.empty() || !HE::materialGraphFromJson(payload, tmp) || tmp.nodes.empty())
+		return false;
+	float mnx = FLT_MAX, mny = FLT_MAX;
+	for (const auto& n : tmp.nodes) { mnx = std::min(mnx, n.x); mny = std::min(mny, n.y); }
+	std::map<int, int> remap;
+	st.selection.clear();
+	for (const auto& n : tmp.nodes)
+	{
+		MatGraphNode c = n;
+		c.id = st.graph.nextId++;
+		c.x  = n.x - mnx + atX;
+		c.y  = n.y - mny + atY;
+		remap[n.id] = c.id;
+		st.selection.push_back(c.id);
+		st.graph.nodes.push_back(std::move(c));
+	}
+	for (const auto& l : tmp.links)
+		st.graph.links.push_back({ remap[l.srcNode], l.srcPin, remap[l.dstNode], l.dstPin });
+	st.selectedNode = st.selection.empty() ? 0 : st.selection.front();
+	return true;
 }
 
 State& stateFor(const std::string& path, AppContext& ctx)
@@ -186,6 +285,7 @@ State& stateFor(const std::string& path, AppContext& ctx)
 		st.lastGlsl = HE::generateFragmentGlsl(st.graph);
 	}
 	st.loaded = true;
+	pushUndo(st); // seed the undo stack with the as-loaded state (undo floor)
 	return st;
 }
 
@@ -520,6 +620,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 	bool structuralEdit = false; // connect/disconnect/add/delete → apply immediately
 	bool paramEdit      = false; // committed inline widget edit → apply
 	bool panelEdit      = false; // committed edit in the side properties panel
+	bool commentEdit    = false; // comment box moved/resized/renamed → persist (no shader change)
 	int  deleteNode     = 0;
 
 	// ── Left column: material preview (top) + properties panel (scrollable) ──────
@@ -527,6 +628,11 @@ void render(AppContext& ctx, const std::string& assetPath,
 	ImGui::BeginChild("##matLeft", ImVec2(leftW, 0), ImGuiChildFlags_Borders);
 	{
 		ImGui::TextDisabled("Preview");
+		// Preview primitive selector (sphere shows curvature, cube face seams, plane UVs).
+		ImGui::SameLine(ImGui::GetContentRegionAvail().x - 92.0f);
+		ImGui::SetNextItemWidth(96.0f);
+		static const char* kShapes[] = { "Sphere", "Cube", "Plane" };
+		if (ImGui::Combo("##pshape", &st.previewShape, kShapes, 3)) st.previewDirty = true;
 		ImGui::BeginChild("##matPreview", ImVec2(0, 240), ImGuiChildFlags_Borders);
 		{
 			// Live material preview: a sphere shaded with THIS material, rendered
@@ -550,8 +656,47 @@ void render(AppContext& ctx, const std::string& assetPath,
 			if (st.previewDirty && !st.isFunction && ctx.renderer && ctx.contentManager &&
 			    st.materialId != HE::UUID{} && px >= 32)
 			{
+				// Per-node preview: route the flagged node's first output straight into an
+				// UNLIT BaseColor on a COPY of the graph, and swap the generated shader into
+				// the material just for this render. Pipelines are cached by source hash, so
+				// both variants coexist and swapping back costs nothing.
+				bool swapped = false;
+				std::string origGlsl; std::vector<float> origData; std::vector<std::string> origTex;
+				if (st.previewNodeId != 0 && !st.graph.findNode(st.previewNodeId))
+					st.previewNodeId = 0; // node got deleted → fall back to the material
+				if (st.previewNodeId != 0 && mat)
+				{
+					HE::MaterialGraph pg = st.graph;
+					int outId = 0;
+					for (auto& nn : pg.nodes)
+						if (nn.type == MatNodeType::Output) { outId = nn.id; nn.p[0] = 0.0f; break; }
+					if (outId)
+					{
+						for (int pin = 0; pin < 5; ++pin) pg.disconnectInput(outId, pin);
+						pg.connect(st.previewNodeId, 0, outId, 0);
+						HE::MatFunctionLoader loader = [&ctx](const std::string& path)
+						{ return loadFunctionGraph(ctx, path); };
+						const HE::MatShaderGen pgen = HE::generateFragment(pg, loader);
+						origGlsl = mat->customShaderFragGlsl;
+						origData = mat->shaderParamData;
+						origTex  = mat->graphTexturePaths;
+						mat->customShaderFragGlsl = pgen.glsl;
+						mat->shaderParamData.clear();
+						for (const auto& slot : pgen.params)
+							mat->shaderParamData.insert(mat->shaderParamData.end(),
+							                            slot.value, slot.value + 4);
+						mat->graphTexturePaths = pgen.textures;
+						swapped = true;
+					}
+				}
 				st.previewTex = ctx.renderer->RenderMaterialPreview(*ctx.contentManager, st.materialId,
-					(uint32_t)px, st.previewYaw, st.previewPitch, st.previewDist);
+					(uint32_t)px, st.previewYaw, st.previewPitch, st.previewDist, st.previewShape);
+				if (swapped && mat)
+				{
+					mat->customShaderFragGlsl = std::move(origGlsl);
+					mat->shaderParamData      = std::move(origData);
+					mat->graphTexturePaths    = std::move(origTex);
+				}
 				st.previewDirty  = false;
 				s_lastPreviewMat = st.materialId;
 			}
@@ -590,6 +735,17 @@ void render(AppContext& ctx, const std::string& assetPath,
 			}
 		}
 		ImGui::EndChild();
+		// Per-node preview indicator: shows WHICH node output the ball is displaying
+		// (unlit) and offers the way back to previewing the whole material.
+		if (st.previewNodeId != 0)
+		{
+			const MatGraphNode* pn = st.graph.findNode(st.previewNodeId);
+			ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.0f, 1.0f), "Previewing: %s",
+				pn ? HE::matNodeDesc(pn->type).name : "?");
+			ImGui::SameLine();
+			if (ImGui::SmallButton("Show Material"))
+			{ st.previewNodeId = 0; st.previewDirty = true; }
+		}
 		ImGui::Spacing();
 		ImGui::TextDisabled("Properties");
 		ImGui::BeginChild("##matProps", ImVec2(0, 0), ImGuiChildFlags_Borders);
@@ -614,6 +770,19 @@ void render(AppContext& ctx, const std::string& assetPath,
 	}
 	else
 	{
+	// Inline compile-error banner: the renderers fall back to magenta on a broken
+	// shader — this SHOWS the compiler log instead of leaving the user guessing.
+	if (!st.compileLog.empty())
+	{
+		ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.42f, 0.10f, 0.10f, 1.0f));
+		ImGui::BeginChild("##shaderErr", ImVec2(0, 26), ImGuiChildFlags_None);
+		ImGui::SetCursorPos(ImVec2(8, 5));
+		ImGui::TextUnformatted("Shader compile error — hover for details");
+		if (ImGui::IsWindowHovered())
+			ImGui::SetTooltip("%s", st.compileLog.c_str());
+		ImGui::EndChild();
+		ImGui::PopStyleColor();
+	}
 	ImGui::BeginChild("##graphCanvas", ImGui::GetContentRegionAvail(), ImGuiChildFlags_None,
 		ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoMove);
 
@@ -666,6 +835,82 @@ void render(AppContext& ctx, const std::string& assetPath,
 	const bool canvasActive  = ImGui::IsItemActive();
 	const bool canvasHovered = ImGui::IsItemHovered();
 
+	// ── Comment boxes (drawn + interacted BEFORE nodes → they sit behind them). ──
+	// Dragging the header moves the box AND every node whose center lies inside it
+	// (group semantics); the bottom-right grip resizes; the header text is editable.
+	{
+		int deleteComment = 0;
+		for (auto& cb : st.graph.comments)
+		{
+			const ImVec2 cp(origin.x + st.scroll.x + cb.x * Z, origin.y + st.scroll.y + cb.y * Z);
+			const ImVec2 cs(cb.w * Z, cb.h * Z);
+			const float  headH = 24.0f * Z;
+			ImGui::PushID(cb.id);
+			dl->AddRectFilled(cp, ImVec2(cp.x + cs.x, cp.y + cs.y), IM_COL32(255, 210, 110, 16), 6.0f);
+			dl->AddRectFilled(cp, ImVec2(cp.x + cs.x, cp.y + headH), IM_COL32(255, 210, 110, 48), 6.0f,
+			                  ImDrawFlags_RoundCornersTop);
+			dl->AddRect(cp, ImVec2(cp.x + cs.x, cp.y + cs.y), IM_COL32(255, 210, 110, 130), 6.0f);
+
+			// Header drag handle first (AllowOverlap) — the title field goes on top of it.
+			ImGui::SetCursorScreenPos(cp);
+			ImGui::SetNextItemAllowOverlap();
+			ImGui::InvisibleButton("##cmove", ImVec2(std::max(cs.x, 1.0f), headH));
+			if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
+			{
+				const float dxg = ImGui::GetIO().MouseDelta.x / Z;
+				const float dyg = ImGui::GetIO().MouseDelta.y / Z;
+				for (auto& nn : st.graph.nodes)
+				{
+					const float cxn = nn.x + kNodeW * 0.5f, cyn = nn.y + 40.0f; // ≈ node center
+					if (cxn >= cb.x && cxn <= cb.x + cb.w && cyn >= cb.y && cyn <= cb.y + cb.h)
+					{ nn.x += dxg; nn.y += dyg; }
+				}
+				cb.x += dxg; cb.y += dyg;
+			}
+			if (ImGui::IsItemDeactivated()) commentEdit = true; // move finished → persist
+			if (ImGui::BeginPopupContextItem("##cmtCtx"))
+			{
+				if (ImGui::MenuItem("Delete Comment")) deleteComment = cb.id;
+				ImGui::EndPopup();
+			}
+			// Editable title on top of the header strip.
+			ImGui::SetCursorScreenPos(ImVec2(cp.x + 6.0f * Z, cp.y + 2.0f * Z));
+			ImGui::SetNextItemWidth(std::max(cs.x - 12.0f * Z, 40.0f));
+			ImGui::PushStyleColor(ImGuiCol_FrameBg,        ImVec4(0, 0, 0, 0));
+			ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(1, 1, 1, 0.10f));
+			ImGui::PushStyleColor(ImGuiCol_FrameBgActive,  ImVec4(0, 0, 0, 0.25f));
+			pushWidgetScale(Z);
+			ImGui::InputTextWithHint("##ctitle", "comment", &cb.text);
+			if (ImGui::IsItemDeactivatedAfterEdit()) commentEdit = true;
+			popWidgetScale();
+			ImGui::PopStyleColor(3);
+			// Resize grip (bottom-right corner).
+			const float grip = 14.0f * Z;
+			ImGui::SetCursorScreenPos(ImVec2(cp.x + cs.x - grip, cp.y + cs.y - grip));
+			ImGui::InvisibleButton("##cresize", ImVec2(grip, grip));
+			if (ImGui::IsItemHovered() || ImGui::IsItemActive())
+				ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNWSE);
+			if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
+			{
+				cb.w = std::max(80.0f, cb.w + ImGui::GetIO().MouseDelta.x / Z);
+				cb.h = std::max(60.0f, cb.h + ImGui::GetIO().MouseDelta.y / Z);
+			}
+			if (ImGui::IsItemDeactivated()) commentEdit = true; // resize finished → persist
+			dl->AddTriangleFilled(ImVec2(cp.x + cs.x - 2, cp.y + cs.y - grip + 2),
+			                      ImVec2(cp.x + cs.x - 2, cp.y + cs.y - 2),
+			                      ImVec2(cp.x + cs.x - grip + 2, cp.y + cs.y - 2),
+			                      IM_COL32(255, 210, 110, 150));
+			ImGui::PopID();
+		}
+		if (deleteComment != 0)
+		{
+			st.graph.comments.erase(std::remove_if(st.graph.comments.begin(), st.graph.comments.end(),
+				[&](const HE::MatGraphComment& c){ return c.id == deleteComment; }),
+				st.graph.comments.end());
+			commentEdit = true;
+		}
+	}
+
 	std::vector<PinPos> pins;
 	pins.reserve(st.graph.nodes.size() * 4);
 	// Screen rects of each node this frame → box-select hit-testing at mouse-release.
@@ -693,8 +938,10 @@ void render(AppContext& ctx, const std::string& assetPath,
 			if (titleOverride.empty()) titleOverride = "Material Function";
 		}
 		const ImVec2 p(origin.x + st.scroll.x + n.x * Z, origin.y + st.scroll.y + n.y * Z);
-		const float nodeW  = kNodeW  * Z;
-		const float titleH = kTitleH * Z;
+		// Reroute nodes are deliberately tiny — just a dot with one in- and one out-pin.
+		const bool  isReroute = n.type == MatNodeType::Reroute;
+		const float nodeW  = (isReroute ? 42.0f : kNodeW)  * Z;
+		const float titleH = (isReroute ?  6.0f : kTitleH) * Z;
 		const float rowH   = kRowH   * Z;
 		const float pad6   = 6.0f    * Z;
 		const int rows = std::max<int>((int)nodeIns->size(), (int)nodeOuts->size());
@@ -713,6 +960,13 @@ void render(AppContext& ctx, const std::string& assetPath,
 		dl->AddRect(p, ImVec2(p.x + nodeW, p.y + h),
 		            selected ? IM_COL32(255, 200, 80, 255) : IM_COL32(0, 0, 0, 160), 5.0f, 0,
 		            selected ? 2.0f : 1.0f);
+		// Cyan halo + dot on the node whose output the preview ball is showing.
+		if (st.previewNodeId == n.id)
+		{
+			dl->AddRect(p, ImVec2(p.x + nodeW, p.y + h), IM_COL32(80, 200, 255, 220), 5.0f, 0, 2.0f);
+			dl->AddCircleFilled(ImVec2(p.x + nodeW - 2.0f * Z, p.y - 2.0f * Z), 5.0f * Z,
+			                    IM_COL32(80, 200, 255, 255));
+		}
 
 		// Full-node drag handle behind the title field / pins / widgets (AllowOverlap so
 		// those on-top items still get clicks; this only drags on empty node space) —
@@ -748,6 +1002,14 @@ void render(AppContext& ctx, const std::string& assetPath,
 		if (ImGui::BeginPopupContextItem("##nodeCtx"))
 		{
 			const bool deletable = n.type != MatNodeType::Output;
+			// Per-node preview: route THIS node's first output (unlit) onto the preview
+			// mesh — invaluable for debugging what an intermediate value looks like.
+			if (!st.isFunction && n.type != MatNodeType::Output && !nodeOuts->empty())
+			{
+				const bool on = st.previewNodeId == n.id;
+				if (ImGui::MenuItem("Preview This Node", nullptr, on))
+				{ st.previewNodeId = on ? 0 : n.id; st.previewDirty = true; }
+			}
 			if (ImGui::MenuItem("Delete Node", nullptr, false, deletable)) deleteNode = n.id;
 			ImGui::EndPopup();
 		}
@@ -770,7 +1032,9 @@ void render(AppContext& ctx, const std::string& assetPath,
 		}
 
 		// Header title: an editable name for Param/Const/Fn nodes, otherwise static text.
-		if (named)
+		// Reroute dots are too small for any title.
+		if (isReroute) {}
+		else if (named)
 		{
 			ImGui::SetCursorScreenPos(ImVec2(p.x + 5.0f * Z, p.y + 3.0f * Z));
 			ImGui::SetNextItemWidth(nodeW - 10.0f * Z);
@@ -884,10 +1148,11 @@ void render(AppContext& ctx, const std::string& assetPath,
 			}
 		}
 	}
-	// Hovered link → highlight in red + click to sever it (disconnect its input pin).
+	// Hovered link → highlight + interact: Alt+Click severs it, double-click splices a
+	// Reroute dot into it (both ends re-wired through the new node).
 	if (canPickLink && hoverLink >= 0 && hoverLinkD <= 7.0f)
 	{
-		const HE::MatGraphLink& l = st.graph.links[hoverLink];
+		const HE::MatGraphLink l = st.graph.links[hoverLink]; // COPY — edits below mutate links
 		if (const PinPos* a = pinAt(l.srcNode, l.srcPin, true))
 		if (const PinPos* b = pinAt(l.dstNode, l.dstPin, false))
 		{
@@ -896,8 +1161,19 @@ void render(AppContext& ctx, const std::string& assetPath,
 			dl->AddBezierCubic(a->pos, ImVec2(a->pos.x + t, a->pos.y),
 			                   ImVec2(b->pos.x - t, b->pos.y), b->pos, IM_COL32(255, 90, 90, 255), 3.5f);
 			ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-			ImGui::SetTooltip("Click to remove link");
-			if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+			ImGui::SetTooltip("Alt+Click: remove link\nDouble-click: insert reroute");
+			if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+			{
+				// Splice a reroute dot at the mouse: src → reroute → dst. connect() on the
+				// dst pin auto-drops the original link.
+				const float gx = (lmouse.x - origin.x - st.scroll.x) / Z - 21.0f;
+				const float gy = (lmouse.y - origin.y - st.scroll.y) / Z - 14.0f;
+				const int rid = st.graph.addNode(MatNodeType::Reroute, gx, gy);
+				st.graph.connect(l.srcNode, l.srcPin, rid, 0);
+				st.graph.connect(rid, 0, l.dstNode, l.dstPin);
+				structuralEdit = true;
+			}
+			else if (ImGui::GetIO().KeyAlt && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
 			{
 				st.graph.disconnectInput(l.dstNode, l.dstPin);
 				structuralEdit = true;
@@ -924,6 +1200,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 		{
 			// Drop on a compatible opposite-side pin → connect.
 			const ImVec2 m = ImGui::GetIO().MousePos;
+			bool onPin = false;
 			for (const auto& pp : pins)
 			{
 				const float dx = pp.pos.x - m.x, dy = pp.pos.y - m.y;
@@ -933,7 +1210,19 @@ void render(AppContext& ctx, const std::string& assetPath,
 					? st.graph.connect(st.dragNode, st.dragPin, pp.node, pp.pin)
 					: st.graph.connect(pp.node, pp.pin, st.dragNode, st.dragPin);
 				if (ok) structuralEdit = true;
+				onPin = true;
 				break;
+			}
+			// Dropped over EMPTY canvas → open the add-node palette filtered to nodes
+			// with a compatible opposite-side pin, and auto-wire the one that's picked.
+			if (!onPin &&
+			    m.x >= origin.x && m.x <= origin.x + avail.x &&
+			    m.y >= origin.y && m.y <= origin.y + avail.y)
+			{
+				s_pendingLinkNode = st.dragNode;
+				s_pendingLinkPin  = st.dragPin;
+				s_pendingLinkFromOutput = st.dragFromOutput;
+				ImGui::OpenPopup("##addNode");
 			}
 			st.dragNode = 0;
 		}
@@ -986,6 +1275,48 @@ void render(AppContext& ctx, const std::string& assetPath,
 		st.selectedNode = 0;
 		structuralEdit = true;
 	}
+	// ── Keyboard: undo/redo + node clipboard (Cmd on macOS, Ctrl elsewhere) ──────────
+	{
+		const ImGuiIO& kio = ImGui::GetIO();
+		const bool mod  = kio.KeyCtrl || kio.KeySuper;
+		const bool kbOk = ImGui::IsWindowHovered() && !kio.WantTextInput && !ImGui::IsAnyItemActive();
+		if (kbOk && mod && ImGui::IsKeyPressed(ImGuiKey_Z))
+		{
+			// Undo steps back one snapshot; Shift+Z (redo) steps forward.
+			const int target = kio.KeyShift ? st.undoPos + 1 : st.undoPos - 1;
+			if (restoreSnapshot(st, target) && assetOk)
+			{
+				applyToMaterial(st, ctx); // push into the live material WITHOUT a new snapshot
+				st.previewDirty = true;
+			}
+		}
+		if (kbOk && mod && ImGui::IsKeyPressed(ImGuiKey_C) && !st.selection.empty())
+		{
+			const std::string payload = serializeSelection(st);
+			if (!payload.empty()) g_matClipboard = payload;
+		}
+		if (kbOk && mod && ImGui::IsKeyPressed(ImGuiKey_V) && !g_matClipboard.empty())
+		{
+			// Paste at the mouse when it's over the canvas, else into the visible center.
+			const ImVec2 mp = kio.MousePos;
+			const bool overCanvas = mp.x >= origin.x && mp.x <= origin.x + avail.x &&
+			                        mp.y >= origin.y && mp.y <= origin.y + avail.y;
+			const float gx = ((overCanvas ? mp.x : origin.x + avail.x * 0.5f) - origin.x - st.scroll.x) / Z;
+			const float gy = ((overCanvas ? mp.y : origin.y + avail.y * 0.5f) - origin.y - st.scroll.y) / Z;
+			if (pasteInto(st, g_matClipboard, gx, gy)) structuralEdit = true;
+		}
+		if (kbOk && mod && ImGui::IsKeyPressed(ImGuiKey_D) && !st.selection.empty())
+		{
+			// Duplicate in place (slight offset), without touching the shared clipboard.
+			float mnx = FLT_MAX, mny = FLT_MAX;
+			for (int sid : st.selection)
+				if (const MatGraphNode* sn = st.graph.findNode(sid))
+				{ mnx = std::min(mnx, sn->x); mny = std::min(mny, sn->y); }
+			const std::string payload = serializeSelection(st);
+			if (mnx != FLT_MAX && pasteInto(st, payload, mnx + 28.0f, mny + 28.0f))
+				structuralEdit = true;
+		}
+	}
 	// Right-click over empty canvas (the bg button is hovered, not a node/link) → add-node.
 	if (canvasHovered && !linkHot && ImGui::IsMouseClicked(ImGuiMouseButton_Right))
 		ImGui::OpenPopup("##addNode");
@@ -1012,7 +1343,64 @@ void render(AppContext& ctx, const std::string& assetPath,
 		{ return q.empty() || lower(name).find(q) != std::string::npos
 		      || lower(cat).find(q) != std::string::npos; };
 
+		// Auto-wire helper: when this popup was opened by dragging a link into empty
+		// canvas, connect the freshly created node to the dragged pin — preferring an
+		// exact type match on the opposite side (coercion makes any pairing legal).
+		auto autoWire = [&](int newNode)
+		{
+			if (s_pendingLinkNode == 0) return;
+			const MatGraphNode* nn = st.graph.findNode(newNode);
+			if (!nn) { s_pendingLinkNode = 0; return; }
+			std::vector<HE::MatPinDesc> dIn, dOut;
+			const std::vector<HE::MatPinDesc>* ins  = &HE::matNodeDesc(nn->type).inputs;
+			const std::vector<HE::MatPinDesc>* outs = &HE::matNodeDesc(nn->type).outputs;
+			if (nn->type == MatNodeType::FunctionCall)
+				if (const HE::MaterialGraph* fn = loadFunctionGraph(ctx, nn->s))
+				{ HE::matFunctionPins(*fn, dIn, dOut); ins = &dIn; outs = &dOut; }
+			MatPinType want = MatPinType::Vec3;
+			if (const MatGraphNode* src = st.graph.findNode(s_pendingLinkNode))
+			{
+				std::vector<HE::MatPinDesc> sIn, sOut;
+				const std::vector<HE::MatPinDesc>* sp = s_pendingLinkFromOutput
+					? &HE::matNodeDesc(src->type).outputs : &HE::matNodeDesc(src->type).inputs;
+				if (src->type == MatNodeType::FunctionCall)
+					if (const HE::MaterialGraph* fn = loadFunctionGraph(ctx, src->s))
+					{ HE::matFunctionPins(*fn, sIn, sOut); sp = s_pendingLinkFromOutput ? &sOut : &sIn; }
+				if (s_pendingLinkPin >= 0 && s_pendingLinkPin < (int)sp->size())
+					want = (*sp)[s_pendingLinkPin].type;
+			}
+			const auto& cand = s_pendingLinkFromOutput ? *ins : *outs;
+			int pick = cand.empty() ? -1 : 0;
+			for (int i = 0; i < (int)cand.size(); ++i)
+				if (cand[i].type == want) { pick = i; break; }
+			if (pick >= 0)
+			{
+				if (s_pendingLinkFromOutput)
+					st.graph.connect(s_pendingLinkNode, s_pendingLinkPin, newNode, pick);
+				else
+					st.graph.connect(newNode, pick, s_pendingLinkNode, s_pendingLinkPin);
+			}
+			s_pendingLinkNode = 0;
+		};
+
 		ImGui::BeginChild("##nodeList", ImVec2(0, 0), ImGuiChildFlags_None);
+		// Comment boxes are pure editor chrome — offered only in the plain palette,
+		// not when the popup is completing a dragged link (a comment has no pins).
+		if (s_pendingLinkNode == 0 && matches("Comment Box", "Editor"))
+		{
+			ImGui::TextDisabled("Editor");
+			if (ImGui::Selectable("Comment Box"))
+			{
+				HE::MatGraphComment cbx;
+				cbx.id   = st.graph.nextId++;
+				cbx.text = "Comment";
+				cbx.x = gx; cbx.y = gy;
+				st.graph.comments.push_back(std::move(cbx));
+				commentEdit = true;
+				ImGui::CloseCurrentPopup();
+			}
+			ImGui::Spacing();
+		}
 		const char* lastCat = "";
 		for (const auto& d : HE::matNodeRegistry())
 		{
@@ -1022,6 +1410,9 @@ void render(AppContext& ctx, const std::string& assetPath,
 			if (d.type == MatNodeType::Output || d.type == MatNodeType::FunctionCall) continue;
 			const bool fnInterface = d.type == MatNodeType::FnInput || d.type == MatNodeType::FnOutput;
 			if (fnInterface && !st.isFunction) continue;
+			// Completing a dragged link → only nodes with a compatible opposite side.
+			if (s_pendingLinkNode != 0 &&
+			    (s_pendingLinkFromOutput ? d.inputs.empty() : d.outputs.empty())) continue;
 			if (!matches(d.name, d.category)) continue;
 			if (std::string(lastCat) != d.category)
 			{
@@ -1033,6 +1424,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 			{
 				st.selectedNode = st.graph.addNode(d.type, gx, gy);
 				st.selection = { st.selectedNode };
+				autoWire(st.selectedNode);
 				structuralEdit = true;
 				ImGui::CloseCurrentPopup();
 			}
@@ -1062,6 +1454,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 					st.graph.findNode(id)->s = fn->path;
 					st.selectedNode = id;
 					st.selection = { id };
+					autoWire(id);
 					structuralEdit = true;
 					ImGui::CloseCurrentPopup();
 				}
@@ -1070,6 +1463,8 @@ void render(AppContext& ctx, const std::string& assetPath,
 		ImGui::EndChild();
 		ImGui::EndPopup();
 	}
+	else
+		s_pendingLinkNode = 0; // popup closed without a pick → drop the pending link
 
 	ImGui::EndChild(); // ##graphCanvas
 	}                  // end graph-view branch
@@ -1078,9 +1473,10 @@ void render(AppContext& ctx, const std::string& assetPath,
 
 	// Structural / committed edits (either column) → regenerate + push into the live material.
 	if (deleteNode != 0) { st.graph.removeNode(deleteNode); structuralEdit = true; }
-	if ((structuralEdit || paramEdit || panelEdit) && assetOk)
+	if ((structuralEdit || paramEdit || panelEdit || commentEdit) && assetOk)
 	{
 		applyToMaterial(st, ctx);
+		pushUndo(st);           // every committed edit becomes an undo step
 		st.previewDirty = true; // material changed → refresh the preview
 	}
 

@@ -2,6 +2,7 @@
 #include <Window/Window.h>
 #include <ContentManager/ContentManager.h>
 #include <MaterialGraph/MaterialGraph.h> // kMatMaxGraphTextures
+#include <material/PreviewMesh.h> // shared preview primitives (sphere/cube/plane)
 #include <Diagnostics/Logger.h>
 #if defined(HE_HAVE_SHADERC)
 #include "ShaderCompiler.h" // he::shaderc — canonical GLSL → MSL (material-system M1)
@@ -3539,7 +3540,8 @@ void MetalRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 }
 
 void* MetalRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& materialId,
-                                           uint32_t size, float yaw, float pitch, float dist)
+                                           uint32_t size, float yaw, float pitch, float dist,
+                                           int shape)
 {
 	const int S = std::clamp(static_cast<int>(size), 32, 1024);
 	if (!m_contentManager) m_contentManager = &cm;
@@ -3558,28 +3560,17 @@ void* MetalRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& m
 	id<MTLRenderPipelineState> pso = (__bridge id<MTLRenderPipelineState>)GetOrBuildMaterialPipeline(shKey, shFrag, pre);
 	if (!pso) return nullptr;
 
-	// ── Lazy unit sphere (interleaved pos3/normal3/uv2 + uint32 indices).
-	if (!m_previewVB)
+	// ── Lazy preview primitive (interleaved pos3/normal3/uv2 + uint32 indices),
+	// rebuilt when the requested shape changes. Geometry is shared with the GL path
+	// via buildPreviewMesh so the two backends can never drift apart.
+	if (!m_previewVB || m_previewShape != shape)
 	{
-		const int segU = 48, segV = 32;
-		std::vector<float>    verts; std::vector<uint32_t> idx;
-		for (int y = 0; y <= segV; ++y)
-		{
-			const float v = (float)y / segV, phi = v * (float)M_PI;
-			for (int x = 0; x <= segU; ++x)
-			{
-				const float u = (float)x / segU, th = u * 2.0f * (float)M_PI;
-				const glm::vec3 n(std::sin(phi) * std::cos(th), std::cos(phi), std::sin(phi) * std::sin(th));
-				verts.insert(verts.end(), { n.x, n.y, n.z, n.x, n.y, n.z, u, v });
-			}
-		}
-		for (int y = 0; y < segV; ++y)
-			for (int x = 0; x < segU; ++x)
-			{
-				const uint32_t a = y * (segU + 1) + x, b = a + segU + 1;
-				idx.insert(idx.end(), { a, b, a + 1, a + 1, b, b + 1 });
-			}
+		if (m_previewVB) { CFBridgingRelease(m_previewVB); m_previewVB = nullptr; }
+		if (m_previewIB) { CFBridgingRelease(m_previewIB); m_previewIB = nullptr; }
+		std::vector<float> verts; std::vector<uint32_t> idx;
+		HE::buildPreviewMesh(shape, verts, idx);
 		m_previewIdxCount = (int)idx.size();
+		m_previewShape    = shape;
 		m_previewVB = (void*)CFBridgingRetain([device newBufferWithBytes:verts.data()
 			length:verts.size() * sizeof(float) options:MTLResourceStorageModeShared]);
 		m_previewIB = (void*)CFBridgingRetain([device newBufferWithBytes:idx.data()

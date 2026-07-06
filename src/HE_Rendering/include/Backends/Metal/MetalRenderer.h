@@ -81,7 +81,8 @@ public:
 	void  InvalidateMaterial(const HE::UUID& materialId) override;
 	void  WarmupMaterials(const std::vector<HE::UUID>& materialIds) override;
 	void* RenderMaterialPreview(ContentManager& cm, const HE::UUID& materialId,
-	                            uint32_t size, float yaw, float pitch, float dist) override;
+	                            uint32_t size, float yaw, float pitch, float dist,
+	                            int shape = 0) override;
 	void  InvalidateMesh    (const HE::UUID& meshId)     override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
 	void  SetSSAOSettings(const SSAOSettings& settings) override;
@@ -307,6 +308,7 @@ private:
 	int   m_previewSize     = 0;
 	void* m_previewVB = nullptr, *m_previewIB = nullptr; // id<MTLBuffer> (retained)
 	int   m_previewIdxCount = 0;
+	int   m_previewShape    = -1; // which primitive the VB/IB currently hold (-1 = none)
 	// A procedural sphere (interleaved pos3/normal3/uv2, matching VertexIn) so per-material
 	// pipelines are visible on real 3D geometry even in the empty headless dump scene.
 	// Built + drawn (two spheres, two materials) when HE_SHADERC_MATERIAL=1.
