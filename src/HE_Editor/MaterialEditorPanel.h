@@ -29,4 +29,9 @@ namespace MaterialEditorPanel
 
 	// Drop cached editor state for `path`.
 	void forget(const std::string& assetPath);
+
+	// One-shot "open this asset in an editor tab" request, set by the canvas (e.g.
+	// double-clicking a Material Function node) and consumed by EditorUI's tab bar.
+	// Returns the absolute asset path and clears the request; "" when none pending.
+	std::string takeOpenRequest();
 }
