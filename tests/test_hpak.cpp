@@ -24,6 +24,17 @@
 #include <thread>
 #include <cstring>
 
+// Windows cannot delete a file another handle still has open (HpakReader keeps a
+// persistent stream; mounted paks hold theirs through the ContentManager). POSIX
+// allows it, so these cleanups only ever throw on the Windows CI runner. Best-effort
+// removal: the uniquely named temp files are reclaimed with the runner's temp dir.
+static void removeQuiet(const std::filesystem::path& p)
+{
+    std::error_code ec;
+    std::filesystem::remove(p, ec);
+}
+
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 static std::vector<uint8_t> makeMaterialBlob(const HE::UUID& id,
@@ -95,7 +106,7 @@ TEST_CASE("HpakWriter/HpakReader round-trip single entry")
     const auto out = reader.readEntry(id);
     CHECK(out == blob);
 
-    std::filesystem::remove(tmp);
+    removeQuiet(tmp);
 }
 
 TEST_CASE("HpakWriter/HpakReader multiple entries, sorted TOC + binary search")
@@ -134,7 +145,7 @@ TEST_CASE("HpakWriter/HpakReader multiple entries, sorted TOC + binary search")
     CHECK(reader.readEntry(id3) == b3);
     CHECK(reader.readEntry(id4) == b4);
 
-    std::filesystem::remove(tmp);
+    removeQuiet(tmp);
 }
 
 TEST_CASE("HpakReader returns empty for missing entry")
@@ -155,7 +166,7 @@ TEST_CASE("HpakReader returns empty for missing entry")
     CHECK(!reader.hasEntry(missing));
     CHECK(reader.readEntry(missing).empty());
 
-    std::filesystem::remove(tmp);
+    removeQuiet(tmp);
 }
 
 TEST_CASE("Empty HpakWriter writes and reads back correctly")
@@ -168,7 +179,7 @@ TEST_CASE("Empty HpakWriter writes and reads back correctly")
     REQUIRE(reader.open(tmp.string()));
     CHECK(reader.enumerate().empty());
 
-    std::filesystem::remove(tmp);
+    removeQuiet(tmp);
 }
 
 // ─── Codec matrix ────────────────────────────────────────────────────────────
@@ -195,7 +206,7 @@ TEST_CASE("Codec round-trip: store / lz4 / zstd all reproduce the input")
         REQUIRE(reader.open(tmp.string()));
         const auto out = reader.readEntry(id);
         CHECK(out == data);   // round-trips regardless of codec availability
-        std::filesystem::remove(tmp);
+        removeQuiet(tmp);
     }
 }
 
@@ -214,7 +225,7 @@ TEST_CASE("LZ4 codec actually shrinks compressible data")
 
     HpakReader reader; REQUIRE(reader.open(tmp.string()));
     CHECK(reader.readEntry(id) == data);
-    std::filesystem::remove(tmp);
+    removeQuiet(tmp);
 }
 #endif
 
@@ -233,7 +244,7 @@ TEST_CASE("zstd codec actually shrinks compressible data")
 
     HpakReader reader; REQUIRE(reader.open(tmp.string()));
     CHECK(reader.readEntry(id) == data);
-    std::filesystem::remove(tmp);
+    removeQuiet(tmp);
 }
 #endif
 
@@ -262,7 +273,7 @@ TEST_CASE("AES-256-GCM round-trip (store + encrypt)")
     const auto decrypted = reader.readEntry(id, s.key);  // correct key
     CHECK(decrypted == data);
 
-    std::filesystem::remove(tmp);
+    removeQuiet(tmp);
 }
 
 TEST_CASE("AES-256-GCM uses a unique nonce per entry")
@@ -291,7 +302,7 @@ TEST_CASE("AES-256-GCM uses a unique nonce per entry")
     HpakReader reader; REQUIRE(reader.open(tmp.string()));
     CHECK(reader.readEntry(id1, s.key) == data);
     CHECK(reader.readEntry(id2, s.key) == data);
-    std::filesystem::remove(tmp);
+    removeQuiet(tmp);
 }
 
 TEST_CASE("Compression + encryption round-trip")
@@ -315,7 +326,7 @@ TEST_CASE("Compression + encryption round-trip")
     REQUIRE(out.size() == data.size());
     CHECK(out == data);
 
-    std::filesystem::remove(tmp);
+    removeQuiet(tmp);
 }
 #endif // HE_HAVE_OPENSSL
 
@@ -336,7 +347,7 @@ TEST_CASE("Corrupt TOC byte → open() fails (tocHash mismatch)")
     HpakReader reader;
     CHECK(!reader.open(tmp.string()));  // TOC hash no longer matches
 
-    std::filesystem::remove(tmp);
+    removeQuiet(tmp);
 }
 
 TEST_CASE("Corrupt data byte → readEntry() returns empty (contentHash mismatch)")
@@ -356,7 +367,7 @@ TEST_CASE("Corrupt data byte → readEntry() returns empty (contentHash mismatch
     REQUIRE(reader.open(tmp.string()));      // TOC still valid
     CHECK(reader.readEntry(id).empty());     // stored bytes fail their content hash
 
-    std::filesystem::remove(tmp);
+    removeQuiet(tmp);
 }
 
 TEST_CASE("A failed read does not poison subsequent reads on the same reader")
@@ -381,7 +392,7 @@ TEST_CASE("A failed read does not poison subsequent reads on the same reader")
     CHECK(reader.readEntry(hi).empty());     // truncated entry → short read fails
     CHECK(reader.readEntry(lo) == bLo);      // MUST still succeed (no failbit poisoning)
 
-    std::filesystem::remove(tmp);
+    removeQuiet(tmp);
 }
 
 // ─── KeyDerivation (unchanged in Phase A) ──────────────────────────────────────
@@ -568,7 +579,7 @@ static void verifyAllTypes(Hpak::Codec codec)
     CHECK(cm.isLoaded(ids.font));
     CHECK(cm.assetType(ids.font)  == HE::AssetType::Font);
 
-    std::filesystem::remove(pak);
+    removeQuiet(pak);
     std::filesystem::remove_all(dir);
 }
 
@@ -763,7 +774,7 @@ TEST_CASE("All asset types round-trip through an encrypted zstd pak")
     CHECK(cm.getAudio(ids.audio)     != nullptr);
     CHECK(cm.isLoaded(ids.font));
 
-    std::filesystem::remove(pak);
+    removeQuiet(pak);
     std::filesystem::remove_all(dir);
 }
 #endif // HE_HAVE_OPENSSL
@@ -799,7 +810,7 @@ TEST_CASE("mountPak loads assets on demand, not eagerly")
     CHECK(cm.ensureResident(id));
     CHECK(!cm.ensureResident(HE::UUID{0xDEAD, 0xDEAD}));
 
-    std::filesystem::remove(pak);
+    removeQuiet(pak);
 }
 
 TEST_CASE("mountPak overlay: later mount shadows earlier by UUID, adds new UUIDs")
@@ -834,8 +845,8 @@ TEST_CASE("mountPak overlay: later mount shadows earlier by UUID, adds new UUIDs
     CHECK(cm.getMaterial(baseOnly) != nullptr);
     CHECK(cm.getMaterial(modOnly)  != nullptr);
 
-    std::filesystem::remove(std::filesystem::temp_directory_path() / "he_base.hpak");
-    std::filesystem::remove(std::filesystem::temp_directory_path() / "he_mod.hpak");
+    removeQuiet(std::filesystem::temp_directory_path() / "he_base.hpak");
+    removeQuiet(std::filesystem::temp_directory_path() / "he_mod.hpak");
 }
 
 TEST_CASE("Disk registry: scanContentDirectory resolves UUIDs from loose content")
@@ -946,7 +957,7 @@ TEST_CASE("mountPakOverlays: Mods folder mounts alphabetically over the base pak
     // Missing directory → 0, no error.
     CHECK(cm.mountPakOverlays(tmp / "he_no_such_dir") == 0);
 
-    std::filesystem::remove(tmp / "he_modbase.hpak");
+    removeQuiet(tmp / "he_modbase.hpak");
     std::filesystem::remove_all(mods);
 }
 
@@ -1040,7 +1051,7 @@ TEST_CASE("Pack-time UUID-ref baking: mesh->material and material->texture")
       REQUIRE(viaPath != nullptr);
       CHECK(viaPath->id == mat.id); }
 
-    std::filesystem::remove(pak);
+    removeQuiet(pak);
     std::filesystem::remove_all(dir);
 }
 
@@ -1085,7 +1096,7 @@ TEST_CASE("Reference-graph streaming: seeding a mesh streams its closure only")
     for (int i = 0; i < 5; ++i) { cm.pollAsyncResults(); std::this_thread::sleep_for(std::chrono::milliseconds(2)); }
     CHECK(!cm.isLoaded(orphan.id));       // unreferenced asset never loaded
 
-    std::filesystem::remove(pak);
+    removeQuiet(pak);
     std::filesystem::remove_all(dir);
 }
 
@@ -1118,7 +1129,7 @@ TEST_CASE("Async streaming from a mounted pak (loadAssetAsync by UUID)")
     CHECK(cm.getMaterial(c) != nullptr);
     CHECK(cm.streamMountedAssets() == 0);  // all resident → nothing to submit
 
-    std::filesystem::remove(pak);
+    removeQuiet(pak);
 }
 
 TEST_CASE("Binary scene round-trips through a mounted pak (readMountedEntry)")
@@ -1159,7 +1170,7 @@ TEST_CASE("Binary scene round-trips through a mounted pak (readMountedEntry)")
     for (auto e : world2.registry().view<TransformComponent>()) { (void)e; ++transforms; }
     CHECK(transforms >= 3);
 
-    std::filesystem::remove(pak);
+    removeQuiet(pak);
 }
 
 TEST_CASE("pollAsyncResults honors the per-frame registration budget")
@@ -1194,7 +1205,7 @@ TEST_CASE("pollAsyncResults honors the per-frame registration budget")
     }
     CHECK(resident == 6);
 
-    std::filesystem::remove(pak);
+    removeQuiet(pak);
 }
 
 #ifdef HE_HAVE_OPENSSL
@@ -1215,7 +1226,7 @@ TEST_CASE("mountPak with an encrypted pak loads on demand with the key")
     REQUIRE(ref);
     CHECK(ref->baseColor[2] == doctest::Approx(0.8f));
 
-    std::filesystem::remove(pak);
+    removeQuiet(pak);
 }
 #endif // HE_HAVE_OPENSSL
 
@@ -1296,7 +1307,7 @@ TEST_CASE("Pack precompiles node-graph material shaders into CHUNK_PSHD")
     REQUIRE(pm != nullptr);
     CHECK(pm->precompiledShaders.empty());
 
-    std::filesystem::remove(pak);
+    removeQuiet(pak);
     std::filesystem::remove_all(dir);
 }
 
@@ -1336,6 +1347,6 @@ TEST_CASE("Pack skips PSHD when no backends selected")
     REQUIRE(m != nullptr);
     CHECK(m->precompiledShaders.empty());
 
-    std::filesystem::remove(pak);
+    removeQuiet(pak);
     std::filesystem::remove_all(dir);
 }
