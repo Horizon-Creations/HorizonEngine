@@ -497,25 +497,10 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true)
 		}
 		case MatNodeType::Output:
 		{
+			// Only the Lit toggle lives ON the node; the blend mode (which re-shapes the
+			// node's pins) is a MATERIAL-level setting edited in the tab header.
 			bool lit = n.p[0] > 0.5f;
 			if (ImGui::Checkbox("Lit", &lit)) { n.p[0] = lit ? 1.0f : 0.0f; committed = true; }
-			// Blend mode changes the node's PINS (pin 4 = Opacity/OpacityMask/hidden)
-			// and where the material renders (Translucent → sorted blend pass).
-			static const char* kBlend[] = { "Opaque", "Masked", "Translucent" };
-			int bm = std::clamp(static_cast<int>(n.p[1]), 0, 2);
-			ImGui::SetNextItemWidth((kNodeW - 60.0f) * scale);
-			if (ImGui::Combo("Blend", &bm, kBlend, 3))
-			{
-				n.p[1] = (float)bm;
-				if (bm == 1 && n.p[2] <= 0.0f) n.p[2] = 0.5f; // sane default cutoff
-				committed = true;
-			}
-			if (bm == 1) // Masked → clip threshold
-			{
-				ImGui::SetNextItemWidth((kNodeW - 60.0f) * scale);
-				ImGui::DragFloat("Clip", &n.p[2], 0.01f, 0.01f, 1.0f);
-				committed |= ImGui::IsItemDeactivatedAfterEdit();
-			}
 			break;
 		}
 		case MatNodeType::ParamFloat:
@@ -618,8 +603,6 @@ float nodeParamHeight(const MatGraphNode& n)
 {
 	const MatNodeType type = n.type;
 	const HE::MatNodeDesc& d = HE::matNodeDesc(type);
-	if (type == MatNodeType::Output)                              // lit + blend (+ clip)
-		return static_cast<int>(n.p[1]) == 1 ? 82.0f : 56.0f;
 	if (d.paramCount == 0 && type != MatNodeType::TextureSample &&
 	    type != MatNodeType::NormalMapSample) return 0.0f;
 	if (type == MatNodeType::TextureSample ||
@@ -964,6 +947,43 @@ void render(AppContext& ctx, const std::string& assetPath,
 			ImGui::SetTooltip("Estimated cost of the generated shader\n"
 			                  "(statements + weighted texture/noise calls)");
 	}
+	// Blend mode — a MATERIAL-level setting (changes the Output node's pins + which
+	// render pass the material uses), so it lives in the header, not on the canvas.
+	bool headerEdit = false;
+	if (!st.isFunction && !st.isInstance)
+	{
+		MatGraphNode* outN = nullptr;
+		for (auto& n : st.graph.nodes)
+			if (n.type == MatNodeType::Output) { outN = &n; break; }
+		if (outN)
+		{
+			const int  bmCur  = std::clamp(static_cast<int>(outN->p[1]), 0, 2);
+			const bool masked = bmCur == 1;
+			ImGui::SameLine(ImGui::GetContentRegionAvail().x - (masked ? 610.0f : 480.0f));
+			ImGui::TextDisabled("Blend");
+			ImGui::SameLine();
+			static const char* kBlend[] = { "Opaque", "Masked", "Translucent" };
+			int bm = bmCur;
+			ImGui::SetNextItemWidth(110.0f);
+			if (ImGui::Combo("##blend", &bm, kBlend, 3))
+			{
+				outN->p[1] = (float)bm;
+				if (bm == 1 && outN->p[2] <= 0.0f) outN->p[2] = 0.5f; // sane default cutoff
+				headerEdit = true;
+			}
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("Opaque: solid (no Opacity pin)\n"
+				                  "Masked: OpacityMask pin — fragments below Clip discard\n"
+				                  "Translucent: Opacity pin — sorted alpha-blend pass");
+			if (masked)
+			{
+				ImGui::SameLine();
+				ImGui::SetNextItemWidth(110.0f);
+				ImGui::DragFloat("Clip", &outN->p[2], 0.01f, 0.01f, 1.0f);
+				headerEdit |= ImGui::IsItemDeactivatedAfterEdit();
+			}
+		}
+	}
 	// Graph|Overrides / Shader-code toggle for the right pane (functions have no shader).
 	if (!st.isFunction)
 	{
@@ -1001,6 +1021,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 	bool panelEdit      = false; // committed edit in the side properties panel
 	bool commentEdit    = false; // comment box moved/resized/renamed → persist (no shader change)
 	int  deleteNode     = 0;
+	if (headerEdit) paramEdit = true; // blend-mode change in the header → regenerate
 
 	// ── Left column: material preview (top) + properties panel (scrollable) ──────
 	const float leftW = 300.0f;
