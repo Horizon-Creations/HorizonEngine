@@ -1,4 +1,5 @@
 #include "doctest.h"
+#include "TestFsUtil.h"
 #include <Hpak/ProjectConfig.h>
 #include <Hpak/ProjectExporter.h>
 #include <Hpak/HpakReader.h>
@@ -65,7 +66,7 @@ TEST_CASE("ProjectConfigLoader save/load round-trip")
     CHECK(std::memcmp(loaded.projectUuidBytes, cfg.projectUuidBytes, 16) == 0);
     CHECK(loaded.enableModSupport == cfg.enableModSupport);
 
-    std::filesystem::remove_all(tmpDir);
+    he_test::removeAllQuiet(tmpDir);
 }
 
 TEST_CASE("ProjectConfigLoader returns false for missing file")
@@ -84,7 +85,7 @@ TEST_CASE("ProjectConfigLoader returns false for corrupt data")
     ProjectConfig cfg;
     CHECK(!ProjectConfigLoader::load(tmpDir, cfg));
 
-    std::filesystem::remove_all(tmpDir);
+    he_test::removeAllQuiet(tmpDir);
 }
 
 TEST_CASE("ProjectConfigLoader empty strings round-trip")
@@ -107,7 +108,7 @@ TEST_CASE("ProjectConfigLoader empty strings round-trip")
     CHECK(loaded.mainSceneName.empty());
     CHECK(!loaded.enableModSupport);
 
-    std::filesystem::remove_all(tmpDir);
+    he_test::removeAllQuiet(tmpDir);
 }
 
 // ─── ProjectExporter ──────────────────────────────────────────────────────────
@@ -162,8 +163,8 @@ TEST_CASE("ProjectExporter packs .hasset files from content dir")
     CHECK(cfg.mainSceneName.empty()); // no scene specified
     CHECK(cfg.enableModSupport);      // export flag reaches the runtime config
 
-    std::filesystem::remove_all(contentDir);
-    std::filesystem::remove_all(outputDir);
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(outputDir);
 }
 
 TEST_CASE("ProjectExporter with empty content dir produces empty pak")
@@ -182,8 +183,8 @@ TEST_CASE("ProjectExporter with empty content dir produces empty pak")
     REQUIRE(std::filesystem::exists(outputDir / "EmptyGame.hpak"));
     REQUIRE(std::filesystem::exists(outputDir / "project.hcfg"));
 
-    std::filesystem::remove_all(contentDir);
-    std::filesystem::remove_all(outputDir);
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(outputDir);
 }
 
 TEST_CASE("ProjectExporter copies startup scene file")
@@ -210,8 +211,8 @@ TEST_CASE("ProjectExporter copies startup scene file")
     REQUIRE(ProjectConfigLoader::load(outputDir, cfg));
     CHECK(cfg.mainSceneName == "Main.hescene");
 
-    std::filesystem::remove_all(contentDir);
-    std::filesystem::remove_all(outputDir);
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(outputDir);
 }
 
 TEST_CASE("ProjectExporter copies game runtime binaries when gameRuntimeDir is set")
@@ -239,9 +240,9 @@ TEST_CASE("ProjectExporter copies game runtime binaries when gameRuntimeDir is s
     CHECK(std::filesystem::exists(outputDir / "libHorizonCore.dylib"));
     CHECK(std::filesystem::exists(outputDir / "libSDL3.0.dylib"));
 
-    std::filesystem::remove_all(runtimeDir);
-    std::filesystem::remove_all(contentDir);
-    std::filesystem::remove_all(outputDir);
+    he_test::removeAllQuiet(runtimeDir);
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(outputDir);
 }
 
 TEST_CASE("ProjectExporter skips binary copy when gameRuntimeDir is empty")
@@ -259,8 +260,8 @@ TEST_CASE("ProjectExporter skips binary copy when gameRuntimeDir is empty")
     REQUIRE(result.success);
     CHECK(result.binaryFilesCopied == 0);
 
-    std::filesystem::remove_all(contentDir);
-    std::filesystem::remove_all(outputDir);
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(outputDir);
 }
 
 // Contract CHANGED with the runnable-exports work: a runtime dir that is named
@@ -283,8 +284,8 @@ TEST_CASE("ProjectExporter fails when a named gameRuntimeDir does not exist")
     CHECK(result.errorMessage.find("not found") != std::string::npos);
     CHECK(result.binaryFilesCopied == 0);
 
-    std::filesystem::remove_all(contentDir);
-    std::filesystem::remove_all(outputDir);
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(outputDir);
 }
 
 TEST_CASE("ProjectExporter does not copy subdirectories from gameRuntimeDir")
@@ -308,9 +309,9 @@ TEST_CASE("ProjectExporter does not copy subdirectories from gameRuntimeDir")
     CHECK(std::filesystem::exists(outputDir / "HorizonGame"));
     CHECK(!std::filesystem::exists(outputDir / "subdir")); // subdirs not copied
 
-    std::filesystem::remove_all(runtimeDir);
-    std::filesystem::remove_all(contentDir);
-    std::filesystem::remove_all(outputDir);
+    he_test::removeAllQuiet(runtimeDir);
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(outputDir);
 }
 
 TEST_CASE("ProjectExporter returns error for invalid output dir (file in the way)")
@@ -331,8 +332,8 @@ TEST_CASE("ProjectExporter returns error for invalid output dir (file in the way
     // We don't assert success/failure here — just that it doesn't crash.
     (void)result;
 
-    std::filesystem::remove_all(contentDir);
-    std::filesystem::remove(outputPath);
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeQuiet(outputPath);
 }
 
 // Mirrors the GameApplication runtime sequence: export a project, then read the
@@ -343,8 +344,8 @@ TEST_CASE("ProjectExporter output mounts + streams like the game runtime")
 {
     auto contentDir = std::filesystem::temp_directory_path() / "he_export_stream_content";
     auto outputDir  = std::filesystem::temp_directory_path() / "he_export_stream_out";
-    std::filesystem::remove_all(contentDir);
-    std::filesystem::remove_all(outputDir);
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(outputDir);
     std::filesystem::create_directories(contentDir);
 
     const HE::UUID id1{0x5711,0x01}, id2{0x5711,0x02};
@@ -382,16 +383,16 @@ TEST_CASE("ProjectExporter output mounts + streams like the game runtime")
     CHECK(cm.getMaterial(id1) != nullptr);
     CHECK(cm.getMaterial(id2) != nullptr);
 
-    std::filesystem::remove_all(contentDir);
-    std::filesystem::remove_all(outputDir);
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(outputDir);
 }
 
 TEST_CASE("ProjectExporter packs a binary startup scene into the pak")
 {
     auto contentDir = std::filesystem::temp_directory_path() / "he_scene_pak_content";
     auto outputDir  = std::filesystem::temp_directory_path() / "he_scene_pak_out";
-    std::filesystem::remove_all(contentDir);
-    std::filesystem::remove_all(outputDir);
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(outputDir);
     std::filesystem::create_directories(contentDir);
 
     // One real asset so the pak isn't scene-only.
@@ -431,8 +432,8 @@ TEST_CASE("ProjectExporter packs a binary startup scene into the pak")
     std::unordered_set<HE::UUID> exclude{sceneUuid};
     CHECK(cm.streamMountedAssets(exclude) == 1);
 
-    std::filesystem::remove_all(contentDir);
-    std::filesystem::remove_all(outputDir);
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(outputDir);
 }
 
 #ifdef HE_HAVE_OPENSSL
@@ -443,8 +444,8 @@ TEST_CASE("ProjectExporter encrypts and the hcfg key decrypts the pak")
 {
     auto contentDir = std::filesystem::temp_directory_path() / "he_test_export_enc_content";
     auto outputDir  = std::filesystem::temp_directory_path() / "he_test_export_enc_out";
-    std::filesystem::remove_all(contentDir);
-    std::filesystem::remove_all(outputDir);
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(outputDir);
     std::filesystem::create_directories(contentDir);
 
     const HE::UUID id{0xFEED,0xBEEF};
@@ -473,7 +474,7 @@ TEST_CASE("ProjectExporter encrypts and the hcfg key decrypts the pak")
     { ContentManager cm; REQUIRE(cm.loadPak(pakPath)); CHECK(cm.getMaterial(id) == nullptr); }
     { ContentManager cm; REQUIRE(cm.loadPak(pakPath, cfg.encKey)); CHECK(cm.getMaterial(id) != nullptr); }
 
-    std::filesystem::remove_all(contentDir);
-    std::filesystem::remove_all(outputDir);
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(outputDir);
 }
 #endif // HE_HAVE_OPENSSL

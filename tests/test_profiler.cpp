@@ -1,4 +1,5 @@
 #include "doctest.h"
+#include "TestFsUtil.h"
 #include <Diagnostics/Profiler.h>
 #include <Diagnostics/EngineProfiler.h>
 #include <Diagnostics/GlobalState.h>
@@ -57,7 +58,7 @@ TEST_CASE("EngineProfiler scopes are zero-state when not recording")
 static fs::path setupTempDeploy(const char* tag)
 {
     fs::path dir = fs::temp_directory_path() / (std::string("he_prof_") + tag);
-    fs::remove_all(dir);
+    he_test::removeAllQuiet(dir);
     fs::create_directories(dir);
     // setLogFile stores startupPath; getDumpsDir() derives <parent>/dumps from it.
     GlobalState::getInstance().setLogFile((dir / "fakeexe").string());
@@ -153,7 +154,7 @@ TEST_CASE("EngineProfiler records frames, scopes and writes a parseable dump")
     CHECK_FALSE(j["summary"]["gpuPasses"]["Scene"].contains("approx"));
     CHECK(j["summary"]["gpuPasses"]["Sky+Clouds"].value("approx", false));
 
-    fs::remove_all(deploy);
+    he_test::removeAllQuiet(deploy);
 }
 
 TEST_CASE("EngineProfiler ring buffer caps retained frames")
