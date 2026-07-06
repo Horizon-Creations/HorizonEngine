@@ -49,6 +49,9 @@ struct State
 	int           previewPx    = 0;
 	int           previewShape = 0;  // 0 sphere / 1 cube / 2 plane (RenderMaterialPreview)
 	int           previewNodeId = 0; // 0 = whole material; else preview THAT node's output, unlit
+	HE::UUID      fnPreviewMatId{};  // function tabs: lazily registered scratch material that
+	                                 // wraps this function in a FunctionCall for the preview
+	int           editingComment = 0;// comment id whose title is in edit mode (0 = none)
 	std::string   compileLog;        // last cross-compile error ("" = ok) → inline banner
 	// Undo/redo: JSON snapshots of the whole graph (incl. comments). undoPos indexes the
 	// snapshot the canvas currently shows; edits truncate the redo tail.
@@ -205,6 +208,9 @@ std::string g_matClipboard;
 // add-popup (0 = none pending). Transient UI state, shared across tabs harmlessly.
 int  s_pendingLinkNode = 0, s_pendingLinkPin = 0;
 bool s_pendingLinkFromOutput = true;
+
+// One-shot open-asset request (double-clicked Material Function node → its editor tab).
+std::string s_openAssetRequest;
 
 // Selected nodes + the links fully inside the selection, as graph JSON. Interface
 // nodes are excluded: Output/FnOutput are singletons, FnInput defines a function's
@@ -571,6 +577,13 @@ bool isDirty(const std::string& assetPath)
 
 void forget(const std::string& assetPath) { g_states.erase(assetPath); }
 
+std::string takeOpenRequest()
+{
+	std::string r = std::move(s_openAssetRequest);
+	s_openAssetRequest.clear();
+	return r;
+}
+
 void render(AppContext& ctx, const std::string& assetPath,
             const ImVec2& pos, const ImVec2& size)
 {
@@ -696,6 +709,50 @@ void render(AppContext& ctx, const std::string& assetPath,
 					mat->customShaderFragGlsl = std::move(origGlsl);
 					mat->shaderParamData      = std::move(origData);
 					mat->graphTexturePaths    = std::move(origTex);
+				}
+				st.previewDirty  = false;
+				s_lastPreviewMat = st.materialId;
+			}
+			// Material FUNCTIONS preview too: wrap the function in a lazily registered
+			// scratch material (Output ← FunctionCall) and render that. The function's
+			// codegen cache is invalidated on every committed edit, so the scratch
+			// always reflects the current graph.
+			else if (st.previewDirty && st.isFunction && ctx.renderer && ctx.contentManager &&
+			         px >= 32)
+			{
+				bool hasOut = false;
+				for (const auto& nn : st.graph.nodes)
+					if (nn.type == MatNodeType::FnOutput) { hasOut = true; break; }
+				if (hasOut && !st.relPath.empty())
+				{
+					if (st.fnPreviewMatId == HE::UUID{})
+					{
+						MaterialAsset scratch;
+						scratch.type = HE::AssetType::Material;
+						scratch.name = "__fnPreview_" + st.name;
+						st.fnPreviewMatId = ctx.contentManager->registerMaterial(std::move(scratch));
+					}
+					HE::MaterialGraph pg;
+					const int out  = pg.addNode(MatNodeType::Output);
+					pg.findNode(out)->p[0] = 1.0f; // lit, so the function reads like a surface
+					const int call = pg.addNode(MatNodeType::FunctionCall);
+					pg.findNode(call)->s = st.relPath;
+					pg.connect(call, 0, out, 0);   // first FnOutput → BaseColor
+					HE::MatFunctionLoader loader = [&ctx](const std::string& path)
+					{ return loadFunctionGraph(ctx, path); };
+					const HE::MatShaderGen gen = HE::generateFragment(pg, loader);
+					if (MaterialAsset* sm = ctx.contentManager->getMaterialMutable(st.fnPreviewMatId))
+					{
+						sm->customShaderFragGlsl = gen.glsl;
+						sm->shaderParamData.clear();
+						for (const auto& slot : gen.params)
+							sm->shaderParamData.insert(sm->shaderParamData.end(),
+							                           slot.value, slot.value + 4);
+						sm->graphTexturePaths = gen.textures;
+						st.previewTex = ctx.renderer->RenderMaterialPreview(*ctx.contentManager,
+							st.fnPreviewMatId, (uint32_t)px, st.previewYaw, st.previewPitch,
+							st.previewDist, st.previewShape);
+					}
 				}
 				st.previewDirty  = false;
 				s_lastPreviewMat = st.materialId;
@@ -851,39 +908,59 @@ void render(AppContext& ctx, const std::string& assetPath,
 			                  ImDrawFlags_RoundCornersTop);
 			dl->AddRect(cp, ImVec2(cp.x + cs.x, cp.y + cs.y), IM_COL32(255, 210, 110, 130), 6.0f);
 
-			// Header drag handle first (AllowOverlap) — the title field goes on top of it.
-			ImGui::SetCursorScreenPos(cp);
-			ImGui::SetNextItemAllowOverlap();
-			ImGui::InvisibleButton("##cmove", ImVec2(std::max(cs.x, 1.0f), headH));
-			if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
+			// Header: NORMALLY a plain drag handle showing the title (so the whole strip
+			// moves the box); a DOUBLE-CLICK swaps in an InputText until it's committed.
+			// An always-on text field used to eat the drag — that's why this is modal.
+			const bool editingTitle = st.editingComment == cb.id;
+			if (!editingTitle)
 			{
-				const float dxg = ImGui::GetIO().MouseDelta.x / Z;
-				const float dyg = ImGui::GetIO().MouseDelta.y / Z;
-				for (auto& nn : st.graph.nodes)
+				ImGui::SetCursorScreenPos(cp);
+				ImGui::InvisibleButton("##cmove", ImVec2(std::max(cs.x, 1.0f), headH));
+				if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+					st.editingComment = cb.id; // enter title-edit mode
+				else if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
 				{
-					const float cxn = nn.x + kNodeW * 0.5f, cyn = nn.y + 40.0f; // ≈ node center
-					if (cxn >= cb.x && cxn <= cb.x + cb.w && cyn >= cb.y && cyn <= cb.y + cb.h)
-					{ nn.x += dxg; nn.y += dyg; }
+					const float dxg = ImGui::GetIO().MouseDelta.x / Z;
+					const float dyg = ImGui::GetIO().MouseDelta.y / Z;
+					for (auto& nn : st.graph.nodes)
+					{
+						const float cxn = nn.x + kNodeW * 0.5f, cyn = nn.y + 40.0f; // ≈ node center
+						if (cxn >= cb.x && cxn <= cb.x + cb.w && cyn >= cb.y && cyn <= cb.y + cb.h)
+						{ nn.x += dxg; nn.y += dyg; }
+					}
+					cb.x += dxg; cb.y += dyg;
 				}
-				cb.x += dxg; cb.y += dyg;
+				if (ImGui::IsItemDeactivated()) commentEdit = true; // move finished → persist
+				if (ImGui::BeginPopupContextItem("##cmtCtx"))
+				{
+					if (ImGui::MenuItem("Rename")) st.editingComment = cb.id;
+					if (ImGui::MenuItem("Delete Comment")) deleteComment = cb.id;
+					ImGui::EndPopup();
+				}
+				const char* title = cb.text.empty() ? "(double-click to name)" : cb.text.c_str();
+				dl->AddText(font, fsz, ImVec2(cp.x + 6.0f * Z, cp.y + 4.0f * Z),
+				            cb.text.empty() ? IM_COL32(230, 210, 160, 130)
+				                            : IM_COL32(240, 225, 190, 255), title);
 			}
-			if (ImGui::IsItemDeactivated()) commentEdit = true; // move finished → persist
-			if (ImGui::BeginPopupContextItem("##cmtCtx"))
+			else
 			{
-				if (ImGui::MenuItem("Delete Comment")) deleteComment = cb.id;
-				ImGui::EndPopup();
+				ImGui::SetCursorScreenPos(ImVec2(cp.x + 6.0f * Z, cp.y + 2.0f * Z));
+				ImGui::SetNextItemWidth(std::max(cs.x - 12.0f * Z, 40.0f));
+				ImGui::PushStyleColor(ImGuiCol_FrameBg,        ImVec4(0, 0, 0, 0.25f));
+				ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0, 0, 0, 0.30f));
+				ImGui::PushStyleColor(ImGuiCol_FrameBgActive,  ImVec4(0, 0, 0, 0.35f));
+				pushWidgetScale(Z);
+				if (ImGui::IsWindowAppearing() || !ImGui::IsAnyItemActive())
+					ImGui::SetKeyboardFocusHere(); // grab focus when edit mode starts
+				ImGui::InputTextWithHint("##ctitle", "comment", &cb.text);
+				if (ImGui::IsItemDeactivated()) // committed OR clicked away → leave edit mode
+				{
+					st.editingComment = 0;
+					commentEdit = true;
+				}
+				popWidgetScale();
+				ImGui::PopStyleColor(3);
 			}
-			// Editable title on top of the header strip.
-			ImGui::SetCursorScreenPos(ImVec2(cp.x + 6.0f * Z, cp.y + 2.0f * Z));
-			ImGui::SetNextItemWidth(std::max(cs.x - 12.0f * Z, 40.0f));
-			ImGui::PushStyleColor(ImGuiCol_FrameBg,        ImVec4(0, 0, 0, 0));
-			ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(1, 1, 1, 0.10f));
-			ImGui::PushStyleColor(ImGuiCol_FrameBgActive,  ImVec4(0, 0, 0, 0.25f));
-			pushWidgetScale(Z);
-			ImGui::InputTextWithHint("##ctitle", "comment", &cb.text);
-			if (ImGui::IsItemDeactivatedAfterEdit()) commentEdit = true;
-			popWidgetScale();
-			ImGui::PopStyleColor(3);
 			// Resize grip (bottom-right corner).
 			const float grip = 14.0f * Z;
 			ImGui::SetCursorScreenPos(ImVec2(cp.x + cs.x - grip, cp.y + cs.y - grip));
@@ -999,9 +1076,21 @@ void render(AppContext& ctx, const std::string& assetPath,
 			}
 			else { n.x += dxg; n.y += dyg; }
 		}
+		// Double-click a Material Function node → open that function's own editor tab.
+		if (n.type == MatNodeType::FunctionCall && !n.s.empty() && ctx.contentManager &&
+		    ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+		{
+			s_openAssetRequest =
+				(std::filesystem::path(ctx.contentManager->contentRoot()) / n.s).string();
+		}
 		if (ImGui::BeginPopupContextItem("##nodeCtx"))
 		{
 			const bool deletable = n.type != MatNodeType::Output;
+			// Open the referenced function from the context menu too (discoverable).
+			if (n.type == MatNodeType::FunctionCall && !n.s.empty() && ctx.contentManager)
+				if (ImGui::MenuItem("Open Function"))
+					s_openAssetRequest =
+						(std::filesystem::path(ctx.contentManager->contentRoot()) / n.s).string();
 			// Per-node preview: route THIS node's first output (unlit) onto the preview
 			// mesh — invaluable for debugging what an intermediate value looks like.
 			if (!st.isFunction && n.type != MatNodeType::Output && !nodeOuts->empty())
@@ -1294,6 +1383,24 @@ void render(AppContext& ctx, const std::string& assetPath,
 		{
 			const std::string payload = serializeSelection(st);
 			if (!payload.empty()) g_matClipboard = payload;
+		}
+		if (kbOk && mod && ImGui::IsKeyPressed(ImGuiKey_X) && !st.selection.empty())
+		{
+			// Cut = copy + delete (interface nodes are excluded from BOTH, so a cut can
+			// never remove the Output while still copying it).
+			const std::string payload = serializeSelection(st);
+			if (!payload.empty())
+			{
+				g_matClipboard = payload;
+				for (int sid : st.selection)
+					if (const MatGraphNode* sn = st.graph.findNode(sid);
+					    sn && sn->type != MatNodeType::Output &&
+					    sn->type != MatNodeType::FnOutput && sn->type != MatNodeType::FnInput)
+						st.graph.removeNode(sid);
+				st.selection.clear();
+				st.selectedNode = 0;
+				structuralEdit = true;
+			}
 		}
 		if (kbOk && mod && ImGui::IsKeyPressed(ImGuiKey_V) && !g_matClipboard.empty())
 		{

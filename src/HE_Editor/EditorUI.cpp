@@ -2592,6 +2592,22 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
         auto& s_tabs      = ctx.tabs;
         auto& s_activeTab = ctx.activeTab;
 
+        // Open request from inside an editor panel (e.g. double-clicking a Material
+        // Function node) — same find-or-push flow as the Content Browser double-click.
+        if (const std::string req = MaterialEditorPanel::takeOpenRequest(); !req.empty())
+        {
+            auto it = std::find_if(s_tabs.begin(), s_tabs.end(),
+                [&](const AppContext::EditorTab& t){ return t.assetPath == req; });
+            if (it == s_tabs.end())
+            {
+                s_tabs.push_back({ std::filesystem::path(req).stem().string(), req, true, true });
+                s_activeTab = static_cast<int>(s_tabs.size()) - 1;
+            }
+            else
+                s_activeTab = static_cast<int>(std::distance(s_tabs.begin(), it));
+            s_tabSelectRequest = s_activeTab;
+        }
+
         if (ctx.fontBody) ImGui::PushFont(ctx.fontBody);
 
         if (ImGui::BeginTabBar("##MainTabBar",
