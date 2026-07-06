@@ -1,4 +1,5 @@
 #include "doctest.h"
+#include "TestFsUtil.h"
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/HAsset.h>
 #include <filesystem>
@@ -99,7 +100,7 @@ TEST_CASE("loadAssetAsync: basic round-trip fires callback with valid UUID")
     CHECK(mat->baseColor[1] == doctest::Approx(0.2f));
     CHECK(mat->baseColor[2] == doctest::Approx(0.3f));
 
-    std::filesystem::remove(full);
+    he_test::removeQuiet(full);
 }
 
 TEST_CASE("loadAssetAsync: already-loaded asset fires callback immediately")
@@ -124,7 +125,7 @@ TEST_CASE("loadAssetAsync: already-loaded asset fires callback immediately")
     CHECK(gotId == id);
     CHECK(!cm.isAsyncPending("async_preloaded.hasset"));
 
-    std::filesystem::remove(full);
+    he_test::removeQuiet(full);
 }
 
 TEST_CASE("loadAssetAsync: nonexistent path fires callback with empty UUID")
@@ -177,9 +178,9 @@ TEST_CASE("loadAssetAsync: multiple concurrent requests all complete")
     CHECK(cm.getMaterial(id2) != nullptr);
     CHECK(cm.getMaterial(id3) != nullptr);
 
-    std::filesystem::remove(tmp / "async_multi1.hasset");
-    std::filesystem::remove(tmp / "async_multi2.hasset");
-    std::filesystem::remove(tmp / "async_multi3.hasset");
+    he_test::removeQuiet(tmp / "async_multi1.hasset");
+    he_test::removeQuiet(tmp / "async_multi2.hasset");
+    he_test::removeQuiet(tmp / "async_multi3.hasset");
 }
 
 TEST_CASE("loadAssetAsync: duplicate in-flight request is coalesced")
@@ -202,7 +203,7 @@ TEST_CASE("loadAssetAsync: duplicate in-flight request is coalesced")
     // Only one job was submitted — only one callback fires
     CHECK(firedCount == 1);
 
-    std::filesystem::remove(full);
+    he_test::removeQuiet(full);
 }
 
 TEST_CASE("pollAsyncResults returns UUIDs of registered assets")
@@ -225,7 +226,7 @@ TEST_CASE("pollAsyncResults returns UUIDs of registered assets")
     REQUIRE(collected.size() == 1);
     CHECK(collected[0] == id);
 
-    std::filesystem::remove(full);
+    he_test::removeQuiet(full);
 }
 
 TEST_CASE("isAsyncPending tracks in-flight state correctly")
@@ -249,5 +250,5 @@ TEST_CASE("isAsyncPending tracks in-flight state correctly")
     CHECK(!cm.isAsyncPending("async_pending.hasset"));
     CHECK(cm.isLoaded("async_pending.hasset"));
 
-    std::filesystem::remove(full);
+    he_test::removeQuiet(full);
 }

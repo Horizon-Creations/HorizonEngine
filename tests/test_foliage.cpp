@@ -1,4 +1,5 @@
 #include "doctest.h"
+#include "TestFsUtil.h"
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonScene/FoliageSystem.h>
 #include <HorizonScene/SceneSerializer.h>
@@ -190,5 +191,5 @@ TEST_CASE("FoliageComponent serializes and deserializes correctly")
     });
     CHECK(found);
 
-    std::filesystem::remove(tmp);
+    he_test::removeQuiet(tmp);
 }

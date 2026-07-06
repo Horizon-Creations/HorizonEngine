@@ -1,4 +1,5 @@
 #include "doctest.h"
+#include "TestFsUtil.h"
 #include <Hpak/HpakWriter.h>
 #include <Hpak/HpakReader.h>
 #include <Hpak/HpakFormat.h>
@@ -24,15 +25,8 @@
 #include <thread>
 #include <cstring>
 
-// Windows cannot delete a file another handle still has open (HpakReader keeps a
-// persistent stream; mounted paks hold theirs through the ContentManager). POSIX
-// allows it, so these cleanups only ever throw on the Windows CI runner. Best-effort
-// removal: the uniquely named temp files are reclaimed with the runner's temp dir.
-static void removeQuiet(const std::filesystem::path& p)
-{
-    std::error_code ec;
-    std::filesystem::remove(p, ec);
-}
+// Best-effort cleanup — see TestFsUtil.h (Windows can't delete open files).
+static void removeQuiet(const std::filesystem::path& p) { he_test::removeQuiet(p); }
 
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -418,7 +412,7 @@ TEST_CASE("KeyDerivation different secrets yield different keys")
 TEST_CASE("HpakWriter::addDirectory skips non-.hasset files")
 {
     auto tmpDir = std::filesystem::temp_directory_path() / "he_test_hpak_dir";
-    std::filesystem::remove_all(tmpDir);
+    he_test::removeAllQuiet(tmpDir);
     std::filesystem::create_directories(tmpDir);
     { std::ofstream f(tmpDir / "notes.txt"); f << "not an asset"; }
     { std::ofstream f(tmpDir / "dummy.hasset", std::ios::binary); f << "FAKE"; }
@@ -426,7 +420,7 @@ TEST_CASE("HpakWriter::addDirectory skips non-.hasset files")
     HpakWriter packer;
     const int added = packer.addDirectory(tmpDir);
     CHECK(added == 0);
-    std::filesystem::remove_all(tmpDir);
+    he_test::removeAllQuiet(tmpDir);
 }
 
 // ─── All asset types round-trip through ContentManager × codec ─────────────────
@@ -510,7 +504,7 @@ static void verifyAllTypes(Hpak::Codec codec)
 {
     auto dir = std::filesystem::temp_directory_path() /
                ("he_types_" + std::to_string(static_cast<int>(codec)));
-    std::filesystem::remove_all(dir);
+    he_test::removeAllQuiet(dir);
     std::filesystem::create_directories(dir);
 
     const TypeIds ids = authorAllTypes(dir);
@@ -580,7 +574,7 @@ static void verifyAllTypes(Hpak::Codec codec)
     CHECK(cm.assetType(ids.font)  == HE::AssetType::Font);
 
     removeQuiet(pak);
-    std::filesystem::remove_all(dir);
+    he_test::removeAllQuiet(dir);
 }
 
 } // namespace
@@ -605,7 +599,7 @@ static std::vector<uint8_t> decodeAstc4x4(const uint8_t* blocks, size_t len, uin
 TEST_CASE("Cook: ASTC texture round-trips and decodes close to the original")
 {
     auto dir = std::filesystem::temp_directory_path() / "he_astc_src";
-    std::filesystem::remove_all(dir);
+    he_test::removeAllQuiet(dir);
     std::filesystem::create_directories(dir);
     ContentManager cmw(dir.string());
     // 8x8 RGBA8, solid colour → ASTC encodes constant blocks near-losslessly.
@@ -636,7 +630,7 @@ TEST_CASE("Cook: ASTC texture round-trips and decodes close to the original")
     CHECK(std::abs(int(decoded[0]) - 200) <= 6);
     CHECK(std::abs(int(decoded[1]) - 100) <= 6);
     CHECK(std::abs(int(decoded[2]) -  50) <= 6);
-    std::filesystem::remove_all(dir);
+    he_test::removeAllQuiet(dir);
 }
 #endif
 
@@ -647,7 +641,7 @@ TEST_CASE("All asset types round-trip through a zstd pak")   { verifyAllTypes(Hp
 TEST_CASE("Cook: static mesh ships pre-interleaved + baked AABB; uncooked stays SoA")
 {
     auto dir = std::filesystem::temp_directory_path() / "he_cook_src";
-    std::filesystem::remove_all(dir);
+    he_test::removeAllQuiet(dir);
     std::filesystem::create_directories(dir);
     const TypeIds ids = authorAllTypes(dir);  // mesh: 3 verts, normals + uvs, indices {0,1,2}
 
@@ -708,7 +702,7 @@ TEST_CASE("Cook: static mesh ships pre-interleaved + baked AABB; uncooked stays 
         CHECK(t->mipLevels == 1);                 // no baked mips
         CHECK(t->data.size() == 2*2*4);
     }
-    std::filesystem::remove_all(dir);
+    he_test::removeAllQuiet(dir);
 }
 
 // Builds a Script .hasset blob in memory; omit the language to test back-compat.
@@ -755,7 +749,7 @@ TEST_CASE("Script language: CHUNK_SLNG round-trips, absent chunk defaults to Lua
 TEST_CASE("All asset types round-trip through an encrypted zstd pak")
 {
     auto dir = std::filesystem::temp_directory_path() / "he_types_enc";
-    std::filesystem::remove_all(dir);
+    he_test::removeAllQuiet(dir);
     std::filesystem::create_directories(dir);
     const TypeIds ids = authorAllTypes(dir);
 
@@ -775,7 +769,7 @@ TEST_CASE("All asset types round-trip through an encrypted zstd pak")
     CHECK(cm.isLoaded(ids.font));
 
     removeQuiet(pak);
-    std::filesystem::remove_all(dir);
+    he_test::removeAllQuiet(dir);
 }
 #endif // HE_HAVE_OPENSSL
 
@@ -852,7 +846,7 @@ TEST_CASE("mountPak overlay: later mount shadows earlier by UUID, adds new UUIDs
 TEST_CASE("Disk registry: scanContentDirectory resolves UUIDs from loose content")
 {
     auto dir = std::filesystem::temp_directory_path() / "he_registry";
-    std::filesystem::remove_all(dir);
+    he_test::removeAllQuiet(dir);
     std::filesystem::create_directories(dir / "sub");
 
     // Author two assets — one in a subfolder — with a FIRST manager, then resolve
@@ -893,13 +887,13 @@ TEST_CASE("Disk registry: scanContentDirectory resolves UUIDs from loose content
     REQUIRE(done);
     CHECK(cm.getStaticMesh(meshId) != nullptr);
 
-    std::filesystem::remove_all(dir);
+    he_test::removeAllQuiet(dir);
 }
 
 TEST_CASE("preloadAssetRefs makes scene-referenced loose assets resident")
 {
     auto dir = std::filesystem::temp_directory_path() / "he_preload";
-    std::filesystem::remove_all(dir);
+    he_test::removeAllQuiet(dir);
     std::filesystem::create_directories(dir);
 
     HE::UUID matId;
@@ -919,7 +913,7 @@ TEST_CASE("preloadAssetRefs makes scene-referenced loose assets resident")
     CHECK(SceneSystems::preloadAssetRefs(world, cm) == 1);
     CHECK(cm.getMaterial(matId) != nullptr);
 
-    std::filesystem::remove_all(dir);
+    he_test::removeAllQuiet(dir);
 }
 
 TEST_CASE("mountPakOverlays: Mods folder mounts alphabetically over the base pak")
@@ -928,7 +922,7 @@ TEST_CASE("mountPakOverlays: Mods folder mounts alphabetically over the base pak
     const HE::UUID addedByA{0x300, 0x2}; // only in a_mod
     auto tmp  = std::filesystem::temp_directory_path();
     auto mods = tmp / "he_mods_dir";
-    std::filesystem::remove_all(mods);
+    he_test::removeAllQuiet(mods);
     std::filesystem::create_directories(mods);
 
     { HpakWriter p; p.addEntry(shared, makeMaterialBlob(shared, "base", 1.f,0.f,0.f));
@@ -958,7 +952,7 @@ TEST_CASE("mountPakOverlays: Mods folder mounts alphabetically over the base pak
     CHECK(cm.mountPakOverlays(tmp / "he_no_such_dir") == 0);
 
     removeQuiet(tmp / "he_modbase.hpak");
-    std::filesystem::remove_all(mods);
+    he_test::removeAllQuiet(mods);
 }
 
 TEST_CASE("SceneSystems::collectAssetRefs gathers component asset UUIDs (the stream seed)")
@@ -986,7 +980,7 @@ TEST_CASE("SceneSystems::collectAssetRefs gathers component asset UUIDs (the str
 TEST_CASE("Pack-time UUID-ref baking: mesh->material and material->texture")
 {
     auto dir = std::filesystem::temp_directory_path() / "he_refbake";
-    std::filesystem::remove_all(dir);
+    he_test::removeAllQuiet(dir);
     std::filesystem::create_directories(dir);
 
     // Author a texture, a material referencing it by path, and a mesh referencing
@@ -1052,13 +1046,13 @@ TEST_CASE("Pack-time UUID-ref baking: mesh->material and material->texture")
       CHECK(viaPath->id == mat.id); }
 
     removeQuiet(pak);
-    std::filesystem::remove_all(dir);
+    he_test::removeAllQuiet(dir);
 }
 
 TEST_CASE("Reference-graph streaming: seeding a mesh streams its closure only")
 {
     auto dir = std::filesystem::temp_directory_path() / "he_closure";
-    std::filesystem::remove_all(dir);
+    he_test::removeAllQuiet(dir);
     std::filesystem::create_directories(dir);
 
     ContentManager cmSrc(dir.string());
@@ -1097,7 +1091,7 @@ TEST_CASE("Reference-graph streaming: seeding a mesh streams its closure only")
     CHECK(!cm.isLoaded(orphan.id));       // unreferenced asset never loaded
 
     removeQuiet(pak);
-    std::filesystem::remove_all(dir);
+    he_test::removeAllQuiet(dir);
 }
 
 TEST_CASE("Async streaming from a mounted pak (loadAssetAsync by UUID)")
@@ -1237,7 +1231,7 @@ TEST_CASE("mountPak with an encrypted pak loads on demand with the key")
 TEST_CASE("Pack precompiles node-graph material shaders into CHUNK_PSHD")
 {
     auto dir = std::filesystem::temp_directory_path() / "he_pshd_pack";
-    std::filesystem::remove_all(dir);
+    he_test::removeAllQuiet(dir);
     std::filesystem::create_directories(dir);
 
     ContentManager cm(dir.string());
@@ -1308,7 +1302,7 @@ TEST_CASE("Pack precompiles node-graph material shaders into CHUNK_PSHD")
     CHECK(pm->precompiledShaders.empty());
 
     removeQuiet(pak);
-    std::filesystem::remove_all(dir);
+    he_test::removeAllQuiet(dir);
 }
 
 // shaderBackends == 0 (or a null callback) must not bake any PSHD chunk — the
@@ -1316,7 +1310,7 @@ TEST_CASE("Pack precompiles node-graph material shaders into CHUNK_PSHD")
 TEST_CASE("Pack skips PSHD when no backends selected")
 {
     auto dir = std::filesystem::temp_directory_path() / "he_pshd_none";
-    std::filesystem::remove_all(dir);
+    he_test::removeAllQuiet(dir);
     std::filesystem::create_directories(dir);
 
     ContentManager cm(dir.string());
@@ -1348,5 +1342,5 @@ TEST_CASE("Pack skips PSHD when no backends selected")
     CHECK(m->precompiledShaders.empty());
 
     removeQuiet(pak);
-    std::filesystem::remove_all(dir);
+    he_test::removeAllQuiet(dir);
 }
