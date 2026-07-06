@@ -3,9 +3,18 @@
 
 class HorizonWorld;   // forward — GameLogic gets the world injected
 
+// Export decoration for the game DLL's factory functions. extern "C" alone does
+// NOT export a symbol from a Windows DLL — without __declspec(dllexport) the
+// GameLogicLoader's GetProcAddress finds nothing and load() fails. No-op elsewhere.
+#ifdef _WIN32
+#  define HE_GAME_API __declspec(dllexport)
+#else
+#  define HE_GAME_API
+#endif
+
 // Every game DLL must export a C-compatible factory function:
-//   extern "C" IGameLogic* HE_CreateGameLogic();
-//   extern "C" void        HE_DestroyGameLogic(IGameLogic*);
+//   extern "C" HE_GAME_API IGameLogic* HE_CreateGameLogic();
+//   extern "C" HE_GAME_API void        HE_DestroyGameLogic(IGameLogic*);
 //
 // Using C linkage prevents name-mangling issues across DLL boundaries.
 class IGameLogic {
