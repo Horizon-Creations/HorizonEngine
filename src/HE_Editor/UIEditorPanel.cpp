@@ -1208,22 +1208,36 @@ void drawGraphVariables(State& st, AppContext& ctx)
 	ImGui::TextWrapped("Drag an element onto the graph to read or write its properties.");
 	ImGui::Spacing();
 
-	for (const auto& ep : st.tree.elements)
+	// Grouped by widget type. Full-width Selectables (no Bullet + ImVec2(-1)
+	// combo, which clipped the label to one character).
+	static const UIWidgetType kTypeOrder[] = {
+		UIWidgetType::Panel, UIWidgetType::Image, UIWidgetType::Text,
+		UIWidgetType::Button, UIWidgetType::CheckBox, UIWidgetType::Slider,
+		UIWidgetType::ProgressBar, UIWidgetType::TextInput, UIWidgetType::ComboBox,
+	};
+	for (UIWidgetType t : kTypeOrder)
 	{
-		const UIElement& n = *ep;
-		const std::string label = elementName(n) + "##el" + std::to_string(n.id);
-		ImGui::Bullet();
-		ImGui::Selectable(label.c_str(), st.selected == n.id, 0, ImVec2(-1, 0));
-		if (ImGui::IsItemClicked()) st.selected = n.id;
-		if (ImGui::BeginDragDropSource())
+		bool header = false;
+		for (const auto& ep : st.tree.elements)
 		{
-			const int eid = n.id;
-			ImGui::SetDragDropPayload("HE_UIWGRAPH_ELEM", &eid, sizeof(int));
-			ImGui::Text("%s", elementName(n).c_str());
-			ImGui::EndDragDropSource();
+			const UIElement& n = *ep;
+			if (n.type() != t) continue;
+			if (!header) { ImGui::TextDisabled("%s", typeName(t)); header = true; }
+			ImGui::PushID(n.id);
+			if (ImGui::Selectable(elementName(n).c_str(), st.selected == n.id))
+				st.selected = n.id;
+			if (ImGui::BeginDragDropSource())
+			{
+				const int eid = n.id;
+				ImGui::SetDragDropPayload("HE_UIWGRAPH_ELEM", &eid, sizeof(int));
+				ImGui::Text("%s", elementName(n).c_str());
+				ImGui::EndDragDropSource();
+			}
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("%s — drag to graph for Get/Set", n.typeName());
+			ImGui::PopID();
 		}
-		if (ImGui::IsItemHovered())
-			ImGui::SetTooltip("%s — drag to graph for Get/Set", n.typeName());
+		if (header) ImGui::Spacing();
 	}
 
 	// ── Graph variables (user-defined, persistent per running widget) ─────────

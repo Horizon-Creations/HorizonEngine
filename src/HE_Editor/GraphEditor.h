@@ -59,6 +59,10 @@ struct State
     ImVec2 boxStart;                 // screen-space
     ImVec2 addMenuGraphPos;          // graph-space drop point for the add popup
     int    ctxNode = 0;              // node whose right-click context menu is open
+    // Source pin of a link drag that was released on empty canvas (opens the
+    // filtered drag-off menu next frame).
+    int    dragOffNode = 0, dragOffPin = 0;
+    bool   dragOffInput = false;
 };
 
 // The host bridges its graph to the canvas through these callbacks. Required
@@ -102,6 +106,12 @@ struct Model
     std::function<void(int nodeId)> drawNodeContextMenu;
     // Double-click on a node (e.g. open a referenced function).
     std::function<void(int nodeId)> onNodeDoubleClick;
+    // A link dragged off (srcNode, srcPin) and released on EMPTY canvas: the host
+    // shows a menu filtered to nodes compatible with that pin, creates one, and
+    // connects it. srcInput = the source pin is an input (so the new node feeds
+    // it). Returns the new node id (auto-selected), or 0. When unset, an empty
+    // drag just cancels.
+    std::function<int(int srcNode, int srcPin, bool srcInput, ImVec2 graphPos)> drawPinDragMenu;
 
     // Accept ImGui drag-drop payloads dropped onto the canvas (e.g. an element or
     // a variable). The component makes the canvas a drop target for each listed

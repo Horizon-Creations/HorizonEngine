@@ -301,6 +301,13 @@ private:
 	void saveGameInstanceGraph();  // write m_gameInstanceGraph → project file
 	std::string gameInstancePath(); // <projectDir>/GameInstance.hcode
 
+	// Per-project open-tab persistence (stored in the global config keyed by
+	// project path). restoreOpenTabs runs on project load; saveOpenTabs runs when
+	// the tab set changes (via the signature check each frame) + on shutdown.
+	void        saveOpenTabs();
+	void        restoreOpenTabs();
+	std::string m_lastTabSig; // change detection for the auto-save
+
 	// Scene world — created once, alive for the entire editor session
 	std::unique_ptr<HorizonWorld> m_editorWorld;
 

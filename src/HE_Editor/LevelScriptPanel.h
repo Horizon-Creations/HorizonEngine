@@ -13,7 +13,10 @@ struct AppContext;
 // edits snapshot through the editor undo system so they save with the scene.
 namespace LevelScriptPanel
 {
-	// Draw the window when `open`. Clears `open` when the user closes it. No-op
-	// without a world (no scene loaded).
-	void render(AppContext& ctx, bool& open);
+	// Sentinel "asset path" identifying the Level Script editor tab (it isn't a
+	// real .hasset — the graph lives in the scene).
+	constexpr const char* kTabPath = "::LevelScript::";
+
+	// Fill the given tab rect with the editor (borderless). No-op without a world.
+	void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size);
 }

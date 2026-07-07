@@ -12,5 +12,9 @@ struct AppContext;
 // persists it via AppContext::commitGameInstance. Togglable from the View menu.
 namespace GameInstancePanel
 {
-	void render(AppContext& ctx, bool& open);
+	// Sentinel "asset path" identifying the Game Instance editor tab.
+	constexpr const char* kTabPath = "::GameInstance::";
+
+	// Fill the given tab rect with the editor (borderless).
+	void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size);
 }

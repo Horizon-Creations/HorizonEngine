@@ -368,12 +368,25 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
         if (ImGui::IsMouseReleased(ImGuiMouseButton_Left))
         {
             int tn = 0, tp = 0; bool ti = false;
-            if (pinAt(mouse, tn, tp, ti) && tn != st.linkSrcNode && model.connect)
+            if (pinAt(mouse, tn, tp, ti))
             {
-                bool ok = false;
-                if (!st.linkSrcInput && ti)      ok = model.connect(st.linkSrcNode, st.linkSrcPin, tn, tp);
-                else if (st.linkSrcInput && !ti) ok = model.connect(tn, tp, st.linkSrcNode, st.linkSrcPin);
-                if (ok) changed = true;
+                if (tn != st.linkSrcNode && model.connect)
+                {
+                    bool ok = false;
+                    if (!st.linkSrcInput && ti)      ok = model.connect(st.linkSrcNode, st.linkSrcPin, tn, tp);
+                    else if (st.linkSrcInput && !ti) ok = model.connect(tn, tp, st.linkSrcNode, st.linkSrcPin);
+                    if (ok) changed = true;
+                }
+            }
+            else if (model.drawPinDragMenu)
+            {
+                // Released on empty canvas → offer a filtered "drag off a pin"
+                // menu, which creates a compatible node and connects it.
+                st.dragOffNode  = st.linkSrcNode;
+                st.dragOffPin   = st.linkSrcPin;
+                st.dragOffInput = st.linkSrcInput;
+                st.addMenuGraphPos = toGraph(mouse);
+                ImGui::OpenPopup("##ge_pindrag");
             }
             st.linkSrcNode = 0;
         }
@@ -443,6 +456,15 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
     if (ImGui::BeginPopup("##ge_add"))
     {
         const int created = model.drawAddMenu();
+        if (created != 0) { st.selected = created; st.selection = { created }; changed = true; }
+        ImGui::EndPopup();
+    }
+
+    // Filtered "drag off a pin" menu (opened above on an empty-canvas release).
+    if (model.drawPinDragMenu && ImGui::BeginPopup("##ge_pindrag"))
+    {
+        const int created = model.drawPinDragMenu(st.dragOffNode, st.dragOffPin,
+                                                  st.dragOffInput, st.addMenuGraphPos);
         if (created != 0) { st.selected = created; st.selection = { created }; changed = true; }
         ImGui::EndPopup();
     }

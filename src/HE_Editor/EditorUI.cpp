@@ -152,11 +152,7 @@ static bool s_showPreferences = false;
 // Toggled by View > Performance Profiler; drives the profiler panel.
 static bool s_showProfiler = false;
 
-// Toggled by View > Level Script; drives the per-scene HorizonCode editor window.
-static bool s_showLevelScript = false;
-
-// Toggled by View > Game Instance; drives the app-wide HorizonCode editor window.
-static bool s_showGameInstance = false;
+// (Level Script + Game Instance open as editor tabs, not toggled windows.)
 
 // Build > Export Project modal state. Editable fields mirror the selected
 // ExportProfile (persisted in the .heproj); the export itself runs on a worker
@@ -1657,10 +1653,20 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
         if (ImGui::MenuItem("Toggle Fullscreen", "F11")) {}
         if (ImGui::MenuItem("Reset Layout")) { s_resetLayoutRequested = true; }
         if (ImGui::MenuItem("Performance Profiler", nullptr, s_showProfiler)) s_showProfiler = !s_showProfiler;
-        if (ImGui::MenuItem("Level Script", nullptr, s_showLevelScript, ctx.projectLoaded))
-            s_showLevelScript = !s_showLevelScript;
-        if (ImGui::MenuItem("Game Instance", nullptr, s_showGameInstance, ctx.projectLoaded))
-            s_showGameInstance = !s_showGameInstance;
+        // Open (or focus) the Level Script / Game Instance as editor tabs.
+        auto openVirtualTab = [&](const char* label, const char* path)
+        {
+            auto it = std::find_if(ctx.tabs.begin(), ctx.tabs.end(),
+                [&](const AppContext::EditorTab& t){ return t.assetPath == path; });
+            if (it == ctx.tabs.end())
+            { ctx.tabs.push_back({ label, path, true, true }); ctx.activeTab = (int)ctx.tabs.size() - 1; }
+            else ctx.activeTab = (int)std::distance(ctx.tabs.begin(), it);
+            s_tabSelectRequest = ctx.activeTab;
+        };
+        if (ImGui::MenuItem("Level Script", nullptr, false, ctx.projectLoaded))
+            openVirtualTab("Level Script", LevelScriptPanel::kTabPath);
+        if (ImGui::MenuItem("Game Instance", nullptr, false, ctx.projectLoaded))
+            openVirtualTab("Game Instance", GameInstancePanel::kTabPath);
         ImGui::EndMenu();
     }
 	if (ImGui::BeginMenu("Assets"))
@@ -2704,7 +2710,12 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
         const ImVec2 tabSize(vpTab->WorkSize.x, vpTab->WorkSize.y - kFooterH - kTabBarH);
         // Dispatch by asset type: material assets get the node-graph editor, script
         // assets the code editor. (Cheap header sniff; both panels cache their state.)
-        if (MaterialEditorPanel::isMaterialAsset(tabPath) ||
+        // The Level Script + Game Instance are virtual tabs (no backing .hasset).
+        if (tabPath == LevelScriptPanel::kTabPath)
+            LevelScriptPanel::render(ctx, tabPos, tabSize);
+        else if (tabPath == GameInstancePanel::kTabPath)
+            GameInstancePanel::render(ctx, tabPos, tabSize);
+        else if (MaterialEditorPanel::isMaterialAsset(tabPath) ||
             MaterialEditorPanel::isMaterialFunctionAsset(tabPath))
             MaterialEditorPanel::render(ctx, tabPath, tabPos, tabSize);
         else if (UIEditorPanel::isWidgetAsset(tabPath))
@@ -3951,8 +3962,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 
     DrawPreferencesWindow(ctx, s_showPreferences);
     DrawProfilerWindow(ctx, s_showProfiler);
-    if (s_showLevelScript) LevelScriptPanel::render(ctx, s_showLevelScript);
-    if (s_showGameInstance) GameInstancePanel::render(ctx, s_showGameInstance);
+    // Level Script + Game Instance now render as editor tabs (see the tab dispatch).
 
     //Content Browser
 	auto [contentFolder, contentLock] = ctx.globalState->lockContentFolder();
