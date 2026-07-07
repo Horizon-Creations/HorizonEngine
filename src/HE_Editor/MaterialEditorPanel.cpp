@@ -838,7 +838,11 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 				ImGui::EndDragDropTarget();
 			}
 		}
-		ImGui::SetCursorScreenPos(ImVec2(bodyMin.x + 4.0f * zoom, bodyMin.y));
+		// Align the name field with the value widgets below it: both sit at the
+		// child window's content-left (= bodyMin.x). Flowed widgets reset to that
+		// X on each line break, so the name must use the same X (not an extra
+		// offset) or it ends up indented while the values sit flush-left.
+		ImGui::SetCursorScreenPos(ImVec2(bodyMin.x, bodyMin.y));
 		pushWidgetScale(zoom);
 		// Editable instance NAME (params/consts/fn-interface). The header carries the type.
 		if (isNamedNode(n->type))
