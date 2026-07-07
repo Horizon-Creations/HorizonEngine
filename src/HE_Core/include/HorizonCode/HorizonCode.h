@@ -19,7 +19,9 @@
 
 namespace HorizonCode {
 
-enum class PinType : uint8_t { Exec = 0, Float, Bool, Int, String, Vec2, Color };
+// Ref = a reference/handle to another running script instance (a Runtime
+// InstanceId). Appended last so existing serialized propType ints stay stable.
+enum class PinType : uint8_t { Exec = 0, Float, Bool, Int, String, Vec2, Color, Ref };
 
 struct Value
 {
@@ -30,6 +32,7 @@ struct Value
     glm::vec2   v2{ 0.0f };
     glm::vec4   col{ 0.0f, 0.0f, 0.0f, 1.0f };
     std::string s;
+    uint32_t    ref = 0;   // instance handle when type == Ref (0 = none)
 
     static Value ofFloat(float v)            { Value r; r.type = PinType::Float;  r.f = v;  return r; }
     static Value ofBool(bool v)              { Value r; r.type = PinType::Bool;   r.b = v;  return r; }
@@ -37,6 +40,7 @@ struct Value
     static Value ofString(std::string v)     { Value r; r.type = PinType::String; r.s = std::move(v); return r; }
     static Value ofVec2(const glm::vec2& v)  { Value r; r.type = PinType::Vec2;   r.v2 = v; return r; }
     static Value ofColor(const glm::vec4& v) { Value r; r.type = PinType::Color;  r.col = v; return r; }
+    static Value ofRef(uint32_t id)          { Value r; r.type = PinType::Ref;    r.ref = id; return r; }
 };
 
 enum class NodeType : uint8_t
@@ -59,6 +63,13 @@ enum class NodeType : uint8_t
     Concat, ToString,
     // Graph variables (persistent per-instance state; s = variable name).
     GetVariable, SetVariable,
+    // Reference-based delegation across script instances (s = event/function
+    // name; a Ref data input picks the target instance).
+    BindEvent,       // subscribe: when Target fires event s, this instance's Event s fires
+    EmitEvent,       // broadcast event s to everyone bound to this instance (optional arg)
+    CallExternal,    // call public function s on the Target instance
+    GetGameInstance, // Ref to the app-wide GameInstance
+    GetSelf,         // Ref to this instance
     // Debug.
     Print,
     COUNT
@@ -73,6 +84,7 @@ struct Variable
     PinType     type = PinType::Float;
     float       f[4] = {};
     std::string s;
+    int         access = 0;   // 0 public (readable via a reference), 1 private
 };
 
 struct Node
@@ -139,6 +151,17 @@ struct Context
     std::function<void(const std::string& var, const Value&)> setVariable;
     std::function<void()> showSelf;
     std::function<void()> hideSelf;
+
+    // Reference-based delegation (bound by the Runtime). All optional.
+    // emitEvent: broadcast an event from THIS instance to everyone bound to it.
+    std::function<void(const std::string& event, const Value& arg)>        emitEvent;
+    // bindEvent: subscribe THIS instance to `event` on the `target` instance.
+    std::function<void(uint32_t target, const std::string& event)>         bindEvent;
+    // callExternal: call a public function on the `target` instance.
+    std::function<void(uint32_t target, const std::string& fn)>            callExternal;
+    // References resolvable from any graph.
+    std::function<Value()> getSelf;         // this instance
+    std::function<Value()> getGameInstance; // the app-wide GameInstance (Ref 0 if none)
 };
 
 class HE_API Runner

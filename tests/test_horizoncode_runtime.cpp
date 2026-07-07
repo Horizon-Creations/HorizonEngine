@@ -42,6 +42,43 @@ namespace
 		g.variables.push_back(v);
 		return g;
 	}
+
+	// Event(event) exec → EmitEvent(emit).  EmitEvent: execIn 0 / execOut 1.
+	void eventEmits(Graph& g, const std::string& event, const std::string& emit)
+	{
+		Node ev; ev.type = NodeType::Event; ev.s = event; ev.elem = 0;
+		const int e = g.addNode(ev);
+		Node em; em.type = NodeType::EmitEvent; em.s = emit; em.hasArg = false;
+		const int m = g.addNode(em);
+		REQUIRE(g.connect(e, 0, m, 0));
+	}
+
+	// Event(event) exec → BindEvent(Target = GetGameInstance, bindName).
+	// BindEvent: execIn 0 / execOut 1 / Target(Ref) dataIn 2; GetGameInstance dataOut 0.
+	void eventBindsGameInstance(Graph& g, const std::string& event, const std::string& bindName)
+	{
+		Node ev; ev.type = NodeType::Event; ev.s = event; ev.elem = 0;
+		const int e = g.addNode(ev);
+		Node gi; gi.type = NodeType::GetGameInstance;
+		const int i = g.addNode(gi);
+		Node be; be.type = NodeType::BindEvent; be.s = bindName;
+		const int b = g.addNode(be);
+		REQUIRE(g.connect(e, 0, b, 0)); // exec
+		REQUIRE(g.connect(i, 0, b, 2)); // Ref → Target
+	}
+
+	// Event(event) exec → CallExternal(Target = GetSelf, fn).
+	void eventCallsSelf(Graph& g, const std::string& event, const std::string& fn)
+	{
+		Node ev; ev.type = NodeType::Event; ev.s = event; ev.elem = 0;
+		const int e = g.addNode(ev);
+		Node gs; gs.type = NodeType::GetSelf;
+		const int s = g.addNode(gs);
+		Node ce; ce.type = NodeType::CallExternal; ce.s = fn;
+		const int c = g.addNode(ce);
+		REQUIRE(g.connect(e, 0, c, 0)); // exec
+		REQUIRE(g.connect(s, 0, c, 2)); // Ref → Target
+	}
 }
 
 TEST_CASE("Runtime seeds variable defaults and keeps instances isolated")
@@ -156,4 +193,82 @@ TEST_CASE("Runtime remove drops an instance; unknown ids are safe")
 	rt.fireEvent(9999, "Ping"); // no-op
 	rt.clear();
 	CHECK(rt.count() == 0);
+}
+
+TEST_CASE("Runtime dispatches an event to bound listeners (reference delegation)")
+{
+	Runtime rt;
+	Graph owner;                                  // owner has no nodes of its own
+	Graph listener = boolVarGraph("heard");
+	eventSetsBool(listener, "Ping", "heard");     // handler: Event Ping → heard = true
+
+	const InstanceId O = rt.add(owner);
+	const InstanceId L = rt.add(listener);
+	rt.bindEvent(O, "Ping", L);
+
+	CHECK(rt.getVariable(L, "heard").b == false);
+	rt.fireEvent(O, "Ping");                       // owner fires → listener's Ping fires too
+	CHECK(rt.getVariable(L, "heard").b == true);
+
+	// emitEvent (dispatcher-only) reaches listeners as well.
+	rt.setVariable(L, "heard", Value::ofBool(false));
+	rt.emitEvent(O, "Ping");
+	CHECK(rt.getVariable(L, "heard").b == true);
+
+	// Removing the listener drops the binding — later fires are harmless no-ops.
+	rt.remove(L);
+	rt.fireEvent(O, "Ping");
+	CHECK(rt.count() == 1);
+}
+
+TEST_CASE("EmitEvent node broadcasts through the runtime to listeners")
+{
+	Runtime rt;
+	Graph owner;    eventEmits(owner, "Go", "Signal");        // Go → EmitEvent Signal
+	Graph listener = boolVarGraph("heard");
+	eventSetsBool(listener, "Signal", "heard");
+
+	const InstanceId O = rt.add(owner);
+	const InstanceId L = rt.add(listener);
+	rt.bindEvent(O, "Signal", L);
+
+	rt.fireEvent(O, "Go");
+	CHECK(rt.getVariable(L, "heard").b == true);
+}
+
+TEST_CASE("BindEvent + GetGameInstance let a script subscribe to the GameInstance")
+{
+	Runtime rt;
+	Graph gi;                                       // the GameInstance (fires Boom)
+	const InstanceId G = rt.setGameInstance(std::move(gi));
+	CHECK(rt.gameInstance() == G);
+
+	Graph listener = boolVarGraph("heard");
+	eventSetsBool(listener, "Boom", "heard");        // handler
+	eventBindsGameInstance(listener, "Setup", "Boom"); // Setup → bind to GameInstance.Boom
+	const InstanceId L = rt.add(listener);
+
+	rt.fireEvent(L, "Setup");   // subscribe
+	rt.fireEvent(G, "Boom");    // GameInstance broadcasts → listener reacts
+	CHECK(rt.getVariable(L, "heard").b == true);
+}
+
+TEST_CASE("CallExternal via GetSelf runs a public function but not a private one")
+{
+	Runtime rt;
+	Graph g = boolVarGraph("done");
+	{ Variable v; v.name = "secret"; v.type = PinType::Bool; g.variables.push_back(v); }
+	funcSetsBool(g, "Pub",  /*access=*/0, "done");
+	funcSetsBool(g, "Priv", /*access=*/1, "secret");
+	eventCallsSelf(g, "GoPub",  "Pub");
+	eventCallsSelf(g, "GoPriv", "Priv");
+
+	const InstanceId id = rt.add(std::move(g));
+
+	rt.fireEvent(id, "GoPub");
+	CHECK(rt.getVariable(id, "done").b == true);
+
+	// CallExternal always requires public → the private function stays unreached.
+	rt.fireEvent(id, "GoPriv");
+	CHECK(rt.getVariable(id, "secret").b == false);
 }

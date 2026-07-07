@@ -59,6 +59,19 @@ NodeSig signatureOf(const Node& n)
         s.execIns  = { { "", P::Exec } };
         s.execOuts = { { "", P::Exec } };
         break;
+    case T::BindEvent:
+    case T::CallExternal:
+        s.execIns  = { { "", P::Exec } };
+        s.execOuts = { { "", P::Exec } };
+        s.dataIns  = { { "Target", P::Ref } };
+        break;
+    case T::EmitEvent:
+        s.execIns  = { { "", P::Exec } };
+        s.execOuts = { { "", P::Exec } };
+        if (n.hasArg) s.dataIns = { { "Arg", n.propType } };
+        break;
+    case T::GetGameInstance: s.dataOuts = { { "Game Instance", P::Ref } }; break;
+    case T::GetSelf:         s.dataOuts = { { "Self", P::Ref } };          break;
     case T::ConstFloat:  s.dataOuts = { { "", P::Float } };  break;
     case T::ConstBool:   s.dataOuts = { { "", P::Bool } };   break;
     case T::ConstInt:    s.dataOuts = { { "", P::Int } };    break;
@@ -132,6 +145,11 @@ const char* nodeDisplayName(NodeType t)
         case T::Not:          return "Not";
         case T::Concat:       return "Concat";
         case T::ToString:     return "To String";
+        case T::BindEvent:      return "Bind Event";
+        case T::EmitEvent:      return "Emit Event";
+        case T::CallExternal:   return "Call Function (Ref)";
+        case T::GetGameInstance:return "Get Game Instance";
+        case T::GetSelf:        return "Get Self";
         case T::Print:        return "Print";
         default:              return "?";
     }
@@ -158,6 +176,11 @@ const char* nodeCategory(NodeType t)
         case T::Greater: case T::Less: case T::Equals: return "Math";
         case T::And: case T::Or: case T::Not: return "Logic";
         case T::Concat: case T::ToString: return "String";
+        case T::BindEvent:
+        case T::EmitEvent:      return "Events";
+        case T::CallExternal:
+        case T::GetGameInstance:
+        case T::GetSelf:        return "Reference";
         case T::Print: return "Debug";
         default: return "Misc";
     }
@@ -234,6 +257,7 @@ Value variableDefaultValue(const Variable& v)
         case P::String: return Value::ofString(v.s);
         case P::Vec2:   return Value::ofVec2({ v.f[0], v.f[1] });
         case P::Color:  return Value::ofColor({ v.f[0], v.f[1], v.f[2], v.f[3] });
+        case P::Ref:    return Value::ofRef(0);
         default:        return Value::ofFloat(v.f[0]);
     }
 }
@@ -307,6 +331,7 @@ std::string toJson(const Graph& g)
         nlohmann::json e = { { "name", v.name }, { "type", (int)v.type } };
         if (v.f[0] || v.f[1] || v.f[2] || v.f[3]) e["f"] = { v.f[0], v.f[1], v.f[2], v.f[3] };
         if (!v.s.empty()) e["s"] = v.s;
+        if (v.access)     e["access"] = v.access;
         jv.push_back(std::move(e));
     }
     j["variables"] = std::move(jv);
@@ -355,6 +380,7 @@ bool fromJson(const std::string& json, Graph& out)
         if (v.name.empty()) continue;
         v.type = (PinType)e.value("type", (int)P::Float);
         v.s    = e.value("s", std::string());
+        v.access = e.value("access", 0);
         if (const auto& f = e.value("f", nlohmann::json::array()); f.size() >= 4)
             for (int i = 0; i < 4; ++i) v.f[i] = f[i].get<float>();
         g.variables.push_back(std::move(v));
@@ -471,6 +497,18 @@ void Runner::execNode(const Node& n, int depth)
         break;
     case T::ShowWidget: if (m_ctx.showSelf) m_ctx.showSelf(); break;
     case T::HideWidget: if (m_ctx.hideSelf) m_ctx.hideSelf(); break;
+    case T::BindEvent:
+        if (m_ctx.bindEvent)
+            m_ctx.bindEvent(evalInput(n, 0, depth + 1).ref, n.s);
+        break;
+    case T::EmitEvent:
+        if (m_ctx.emitEvent)
+            m_ctx.emitEvent(n.s, n.hasArg ? coerce(evalInput(n, 0, depth + 1), n.propType) : Value{});
+        break;
+    case T::CallExternal:
+        if (m_ctx.callExternal)
+            m_ctx.callExternal(evalInput(n, 0, depth + 1).ref, n.s);
+        break;
     case T::FunctionCall:
         for (const auto& fn : m_graph.nodes)
             if (fn.type == T::FunctionEntry && fn.s == n.s)
@@ -524,6 +562,8 @@ Value Runner::evalData(const Node& n, int dataOutPin, int depth)
         Value v = m_ctx.getVariable ? m_ctx.getVariable(n.s) : Value{};
         return coerce(v, n.propType);
     }
+    case T::GetGameInstance: return m_ctx.getGameInstance ? m_ctx.getGameInstance() : Value::ofRef(0);
+    case T::GetSelf:         return m_ctx.getSelf ? m_ctx.getSelf() : Value::ofRef(0);
     case T::Add:      return Value::ofFloat(evalInput(n, 0, depth + 1).f + evalInput(n, 1, depth + 1).f);
     case T::Subtract: return Value::ofFloat(evalInput(n, 0, depth + 1).f - evalInput(n, 1, depth + 1).f);
     case T::Multiply: return Value::ofFloat(evalInput(n, 0, depth + 1).f * evalInput(n, 1, depth + 1).f);
