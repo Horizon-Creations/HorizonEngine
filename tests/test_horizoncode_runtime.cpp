@@ -253,6 +253,30 @@ TEST_CASE("BindEvent + GetGameInstance let a script subscribe to the GameInstanc
 	CHECK(rt.getVariable(L, "heard").b == true);
 }
 
+TEST_CASE("retainOnlyReachableFrom keeps GameInstance-held objects, drops the rest")
+{
+	Runtime rt;
+	Graph gi;
+	{ Variable v; v.name = "kept"; v.type = PinType::Ref; gi.variables.push_back(v); }
+	const InstanceId G = rt.setGameInstance(std::move(gi));
+
+	// Three plain objects (as Create Object would add them).
+	const InstanceId A = rt.add(Graph{});
+	const InstanceId B = rt.add(Graph{});
+	const InstanceId C = rt.add(Graph{});
+
+	rt.setVariable(G, "kept",  Value::ofRef(A)); // GameInstance holds A
+	rt.setVariable(A, "child", Value::ofRef(C)); // A holds C (transitive)
+	// nobody holds B
+
+	rt.retainOnlyReachableFrom(G);
+
+	CHECK(rt.alive(G));       // root
+	CHECK(rt.alive(A));       // held by the GameInstance
+	CHECK(rt.alive(C));       // reachable through A
+	CHECK_FALSE(rt.alive(B)); // unheld → swept
+}
+
 TEST_CASE("Get/Set External read + write a public variable but not a private one")
 {
 	Runtime rt;
