@@ -22,6 +22,40 @@ namespace HcEditorUtil
 	// Convenience wrapper for the Create Object class picker.
 	std::vector<ClassRef> listHorizonCodeClasses(ContentManager* cm);
 
+	// ── HC class registry ─────────────────────────────────────────────────────
+	// The public interface of one HorizonCode class the editor knows about — an
+	// asset (widget / HC class) or an in-memory graph (level / GameInstance). This
+	// is what the drag-off menu and the object-type pickers read.
+	struct MemberFn  { std::string name; std::vector<HorizonCode::PinType> paramTypes; bool hasResult = false; };
+	struct MemberVar { std::string name; HorizonCode::PinType type; std::string className; };
+	struct ClassInfo
+	{
+		std::string label;                 // display name
+		std::string path;                  // content-relative asset path ("" for level/GI)
+		enum Kind { Class, Widget, Level, GameInstance } kind = Class;
+		std::vector<MemberFn>  functions;  // public FunctionEntry nodes
+		std::vector<MemberVar> variables;  // public variables
+	};
+	// Reduce a graph to its public interface.
+	ClassInfo classInfoFromGraph(const HorizonCode::Graph& g, const std::string& label,
+	                             const std::string& path, ClassInfo::Kind kind);
+	// Load an asset (HC class or widget) and extract its public interface. False if
+	// the path resolves to no HorizonCode graph.
+	bool classInfoForPath(ContentManager* cm, const std::string& path, ClassInfo& out);
+	// Every HC class in the project (class + widget assets), plus the level and
+	// GameInstance graphs when supplied.
+	std::vector<ClassInfo> listClasses(ContentManager* cm,
+	                                   const HorizonCode::Graph* levelGraph,
+	                                   const HorizonCode::Graph* giGraph);
+
+	// Searchable type dropdown: default value types (Float/Bool/Int/…) plus object
+	// types (the project's HC classes). Writes `type` and, for an object type,
+	// `className` (the class path); clears className for a default type. Shows the
+	// class name for an object type instead of a bare "Object". Returns true when
+	// changed. Pass className=nullptr where object types aren't allowed.
+	bool drawTypePicker(const char* label, ContentManager* cm,
+	                    HorizonCode::PinType& type, std::string* className);
+
 	// Interface editor for a HorizonCode function: edit the FunctionEntry's typed
 	// Inputs (params) and Outputs (results). On any change it re-syncs the matching
 	// Call/Return nodes and prunes now-invalid links, then sets `edited`. Shared by

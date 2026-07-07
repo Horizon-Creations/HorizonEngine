@@ -191,7 +191,11 @@ void drawVariables(HC::Graph& graph, bool& edited)
 	for (const auto& v : graph.variables)
 	{
 		ImGui::PushID(v.name.c_str());
-		const std::string label = v.name + "  (" + pinTypeName(v.type) + ")";
+		// Object variables show their class name as the type, not a bare "Object".
+		const std::string typeStr = (v.type == PT::Ref && !v.className.empty())
+			? std::filesystem::path(v.className).stem().string()
+			: pinTypeName(v.type);
+		const std::string label = v.name + "  (" + typeStr + ")";
 		if (ImGui::Selectable(label.c_str(), g.selectedVar == v.name))
 		{
 			g.selectedVar = v.name;
@@ -278,45 +282,26 @@ void drawVariableDetails(HC::Graph& graph, ContentManager* content, bool& edited
 		}
 	}
 
-	int typeIdx = (int)v->type;
-	if (ImGui::Combo("Type", &typeIdx, "Exec\0Float\0Bool\0Int\0String\0Vec2\0Color\0Object\0"))
+	// One searchable type dropdown: default value types + object (class) types.
+	// Picking an object type sets v->className to the class; the label shows the
+	// class name instead of "Object".
+	const PT oldType = v->type;
+	if (HcEditorUtil::drawTypePicker("Type", content, v->type, &v->className))
 	{
-		const PT nt = (PT)typeIdx;
-		if (nt != PT::Exec && nt != v->type)
-		{
-			v->type = nt;
+		if (v->type != oldType)
 			for (auto& n : graph.nodes)
 				if ((n.type == NT::GetVariable || n.type == NT::SetVariable) && n.s == v->name)
 				{
-					n.propType = nt;
+					n.propType = v->type;
 					const PinRanges r = pinRanges(n);
 					const int valuePin = n.type == NT::GetVariable ? r.dataOut0 : r.dataIn0;
 					removePinLinks(graph, n.id, valuePin);
 				}
-			edited = true;
-		}
+		edited = true;
 	}
 
 	int vaccess = v->access;
 	if (ImGui::Combo("Access", &vaccess, "Public\0Private\0")) { v->access = vaccess; edited = true; }
-
-	// Object variables can be typed to a HorizonCode class (drives member menus).
-	if (v->type == PT::Ref)
-	{
-		if (ImGui::BeginCombo("Class", v->className.empty() ? "(any)" : v->className.c_str()))
-		{
-			if (ImGui::Selectable("(any)", v->className.empty())) { v->className.clear(); edited = true; }
-			ImGui::TextDisabled("Classes");
-			for (const auto& c : HcEditorUtil::listAssets(content, HE::AssetType::HorizonCodeClass))
-				if (ImGui::Selectable((c.label + "##" + c.path).c_str(), v->className == c.path))
-					{ v->className = c.path; edited = true; }
-			ImGui::TextDisabled("Widgets");
-			for (const auto& c : HcEditorUtil::listAssets(content, HE::AssetType::Widget))
-				if (ImGui::Selectable((c.label + "##" + c.path).c_str(), v->className == c.path))
-					{ v->className = c.path; edited = true; }
-			ImGui::EndCombo();
-		}
-	}
 
 	ImGui::SeparatorText("Default");
 	switch (v->type)
