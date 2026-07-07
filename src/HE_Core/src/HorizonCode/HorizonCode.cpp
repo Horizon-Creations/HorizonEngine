@@ -62,14 +62,14 @@ NodeSig signatureOf(const Node& n)
     case T::CreateWidget:
         s.execIns  = { { "", P::Exec } };
         s.execOuts = { { "", P::Exec } };
-        s.dataOuts = { { "Widget", P::Int } };
+        s.dataOuts = { { "Widget", P::Ref } };
         break;
     case T::ShowWidgetId:
     case T::HideWidgetId:
     case T::DestroyWidget:
         s.execIns  = { { "", P::Exec } };
         s.execOuts = { { "", P::Exec } };
-        s.dataIns  = { { "Widget", P::Int } };
+        s.dataIns  = { { "Widget", P::Ref } };
         break;
     case T::CreateObject:
         s.execIns  = { { "", P::Exec } };
@@ -550,13 +550,15 @@ void Runner::execNode(const Node& n, int depth)
     case T::HideWidget: if (m_ctx.hideSelf) m_ctx.hideSelf(); break;
     case T::CreateWidget:
     {
+        // The widget id doubles as its runtime reference (widget id == scriptId),
+        // so a created widget is a first-class Ref object.
         const int id = m_ctx.createWidget ? m_ctx.createWidget(n.s) : 0;
-        m_execOutputs[n.id] = Value::ofInt(id); // cached for the data output
+        m_execOutputs[n.id] = Value::ofRef((uint32_t)id); // cached for the data output
         break;
     }
-    case T::ShowWidgetId:  if (m_ctx.showWidget)    m_ctx.showWidget(evalInput(n, 0, depth + 1).i);    break;
-    case T::HideWidgetId:  if (m_ctx.hideWidget)    m_ctx.hideWidget(evalInput(n, 0, depth + 1).i);    break;
-    case T::DestroyWidget: if (m_ctx.destroyWidget) m_ctx.destroyWidget(evalInput(n, 0, depth + 1).i); break;
+    case T::ShowWidgetId:  if (m_ctx.showWidget)    m_ctx.showWidget((int)evalInput(n, 0, depth + 1).ref);    break;
+    case T::HideWidgetId:  if (m_ctx.hideWidget)    m_ctx.hideWidget((int)evalInput(n, 0, depth + 1).ref);    break;
+    case T::DestroyWidget: if (m_ctx.destroyWidget) m_ctx.destroyWidget((int)evalInput(n, 0, depth + 1).ref); break;
     case T::CreateObject:
     {
         const uint32_t ref = m_ctx.createObject ? m_ctx.createObject(n.s) : 0u;
@@ -638,9 +640,9 @@ Value Runner::evalData(const Node& n, int dataOutPin, int depth)
     case T::GetSelf:         return m_ctx.getSelf ? m_ctx.getSelf() : Value::ofRef(0);
     case T::CreateWidget:
     {
-        // Return the id produced when this node ran (don't create again).
+        // Return the ref produced when this node ran (don't create again).
         auto it = m_execOutputs.find(n.id);
-        return it != m_execOutputs.end() ? it->second : Value::ofInt(0);
+        return it != m_execOutputs.end() ? it->second : Value::ofRef(0);
     }
     case T::CreateObject:
     {
