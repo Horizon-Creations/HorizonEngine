@@ -1,5 +1,7 @@
 #include "HorizonCode/HorizonCodeRuntime.h"
 #include <algorithm>
+#include <unordered_set>
+#include <vector>
 
 namespace HorizonCode {
 
@@ -50,6 +52,29 @@ InstanceId Runtime::setGameInstance(Graph graph, HostBindings bindings)
     if (m_gameInstance) remove(m_gameInstance);
     m_gameInstance = add(std::move(graph), std::move(bindings));
     return m_gameInstance;
+}
+
+void Runtime::retainOnlyReachableFrom(InstanceId root)
+{
+    // Mark root + everything reachable through its Ref-typed variables.
+    std::unordered_set<InstanceId> keep;
+    std::vector<InstanceId>        stack;
+    if (find(root)) { keep.insert(root); stack.push_back(root); }
+    while (!stack.empty())
+    {
+        const InstanceId id = stack.back(); stack.pop_back();
+        const Inst* i = find(id);
+        if (!i) continue;
+        for (const auto& [name, val] : i->vars)
+            if (val.type == PinType::Ref && val.ref != 0 && !keep.count(val.ref) && find(val.ref))
+            { keep.insert(val.ref); stack.push_back(val.ref); }
+    }
+    // Sweep the unmarked (widgets + the level script are already gone by now, so
+    // this only drops scene-scoped Create-Object instances the root doesn't hold).
+    std::vector<InstanceId> doomed;
+    for (const auto& [id, inst] : m_insts)
+        if (!keep.count(id)) doomed.push_back(id);
+    for (const InstanceId id : doomed) remove(id);
 }
 
 const Graph& Runtime::graphOf(InstanceId id) const

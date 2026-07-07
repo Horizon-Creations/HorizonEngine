@@ -150,6 +150,11 @@ void HorizonWorld::clear()
     if (m_levelInstance) { scripts().remove(m_levelInstance); m_levelInstance = 0; }
     m_levelScript = HorizonCode::Graph{};
 
+    // Scope rule: with widgets + the level script gone, drop every Create-Object
+    // instance the GameInstance doesn't still hold (reachable via its Ref vars) —
+    // only GameInstance-held objects persist across scene switches.
+    scripts().retainOnlyReachableFrom(scripts().gameInstance());
+
     m_hierarchyDirty = true;
 }
 

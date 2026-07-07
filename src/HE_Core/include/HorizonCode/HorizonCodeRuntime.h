@@ -88,6 +88,12 @@ public:
     InstanceId setGameInstance(Graph graph, HostBindings bindings = {});
     InstanceId gameInstance() const { return m_gameInstance; }
 
+    // Scene-switch garbage collection: keep `root` and every instance reachable
+    // from it through Ref-typed variables, remove all others. Called on scene
+    // teardown with the GameInstance as root, so only objects the GameInstance
+    // still holds persist across levels — scene-scoped ones are dropped.
+    void retainOnlyReachableFrom(InstanceId root);
+
     // World-level services forwarded into every instance's Context so any graph
     // can spawn/manage widgets and instantiate HorizonCode classes. The app binds
     // these to the current world's WidgetManager + ContentManager (+ this runtime).
