@@ -3,6 +3,7 @@
 #include <glm/glm.hpp>
 #include <functional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 // ── HorizonCode ──────────────────────────────────────────────────────────────
@@ -52,8 +53,11 @@ enum class NodeType : uint8_t
     Branch, Sequence, FunctionCall,
     // Target property access (elem + s = property name + propType = value type).
     GetProperty, SetProperty,
-    // Host actions on the running widget.
+    // Host actions on the running widget itself ("self").
     ShowWidget, HideWidget,
+    // Create + manage widgets by id (from any graph — level, GameInstance, …).
+    CreateWidget,    // s = widget asset path; dataOut Widget (Int id)
+    ShowWidgetId, HideWidgetId, DestroyWidget, // dataIn Widget (Int id)
     // Literals (f[]/s).
     ConstFloat, ConstBool, ConstInt, ConstString, ConstVec2, ConstColor,
     // Math / logic.
@@ -152,6 +156,13 @@ struct Context
     std::function<void()> showSelf;
     std::function<void()> hideSelf;
 
+    // Widget management services (world-level; bound by the app). createWidget
+    // instantiates a widget asset and returns its id; the rest act on that id.
+    std::function<int(const std::string& assetPath)> createWidget;
+    std::function<void(int widgetId)> showWidget;
+    std::function<void(int widgetId)> hideWidget;
+    std::function<void(int widgetId)> destroyWidget;
+
     // Reference-based delegation (bound by the Runtime). All optional.
     // emitEvent: broadcast an event from THIS instance to everyone bound to it.
     std::function<void(const std::string& event, const Value& arg)>        emitEvent;
@@ -189,6 +200,10 @@ private:
     Context      m_ctx;
     Value        m_eventArg;
     int          m_steps = 0;
+    // Outputs produced by exec nodes with side effects (e.g. CreateWidget's id),
+    // so a downstream data read returns the value instead of re-running the node.
+    // Cleared at the start of every run.
+    std::unordered_map<int, Value> m_execOutputs;
 };
 
 } // namespace HorizonCode

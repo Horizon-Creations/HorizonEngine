@@ -150,6 +150,15 @@ void GameApplication::OnInit()
 	// Widgets + the level script join the app-wide runtime (shared with the
 	// GameInstance), so any scene script can Get Game Instance / bind its events.
 	m_world->setScriptRuntime(&m_gameInstance.runtime());
+	// Widget nodes route to this world's WidgetManager + ContentManager.
+	{
+		HorizonCode::Runtime::WidgetServices svc;
+		svc.create  = [this](const std::string& p){ return m_world ? m_world->widgets().createWidget(contentManager(), p) : 0; };
+		svc.show    = [this](int id){ if (m_world) m_world->widgets().showWidget(id); };
+		svc.hide    = [this](int id){ if (m_world) m_world->widgets().hideWidget(id); };
+		svc.destroy = [this](int id){ if (m_world) m_world->widgets().destroyWidget(id); };
+		m_gameInstance.runtime().setWidgetServices(std::move(svc));
+	}
 	SceneSerializer serializer;
 	bool sceneLoaded = false;
 	if (m_config.hasPackedScene)

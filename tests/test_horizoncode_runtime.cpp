@@ -253,6 +253,35 @@ TEST_CASE("BindEvent + GetGameInstance let a script subscribe to the GameInstanc
 	CHECK(rt.getVariable(L, "heard").b == true);
 }
 
+TEST_CASE("Widget nodes call the runtime services and cache CreateWidget's id")
+{
+	Runtime rt;
+	int createCount = 0, shownId = -1;
+	std::string createdPath;
+	Runtime::WidgetServices svc;
+	svc.create = [&](const std::string& p){ ++createCount; createdPath = p; return 42; };
+	svc.show   = [&](int id){ shownId = id; };
+	rt.setWidgetServices(svc);
+
+	// Event Go → CreateWidget("hud.ui") → ShowWidget(<created id>).
+	// CreateWidget: execIn 0 / execOut 1 / Widget dataOut 2.
+	// ShowWidget:   execIn 0 / execOut 1 / Widget dataIn 2.
+	Graph g;
+	Node ev; ev.type = NodeType::Event; ev.s = "Go"; const int e = g.addNode(ev);
+	Node cw; cw.type = NodeType::CreateWidget; cw.s = "hud.ui"; const int c = g.addNode(cw);
+	Node sw; sw.type = NodeType::ShowWidgetId; const int s = g.addNode(sw);
+	REQUIRE(g.connect(e, 0, c, 0)); // Event exec → CreateWidget exec-in
+	REQUIRE(g.connect(c, 1, s, 0)); // CreateWidget exec-out → ShowWidget exec-in
+	REQUIRE(g.connect(c, 2, s, 2)); // CreateWidget id → ShowWidget Widget
+
+	const InstanceId id = rt.add(std::move(g));
+	rt.fireEvent(id, "Go");
+
+	CHECK(createCount == 1);        // created exactly once — the id is cached, not re-run
+	CHECK(createdPath == "hud.ui");
+	CHECK(shownId == 42);           // the cached id flowed into Show Widget
+}
+
 TEST_CASE("CallExternal via GetSelf runs a public function but not a private one")
 {
 	Runtime rt;
