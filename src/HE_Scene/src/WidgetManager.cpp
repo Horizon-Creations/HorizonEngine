@@ -32,35 +32,34 @@ const WidgetManager::Instance* WidgetManager::find(int id) const
 	return nullptr;
 }
 
-// Context wires the interpreter to ONE instance. Capture by pointer (never a
-// reference to a vector element that can move) and only use the Runner locally,
-// so a concurrent m_instances reallocation can't dangle the bindings.
-HorizonCode::Context WidgetManager::makeContext(Instance& inst)
+WidgetManager::Instance* WidgetManager::findByScript(HorizonCode::InstanceId scriptId)
 {
-	Instance* i = &inst;
-	HorizonCode::Context ctx;
-	ctx.getProperty = [i](int elem, const std::string& prop) -> HorizonCode::Value
+	for (auto& w : m_instances) if (w.scriptId == scriptId) return &w;
+	return nullptr;
+}
+
+// Host bindings shared by every widget: the central runtime owns the graph +
+// variable state and hands back the InstanceId, so one binding set serves all
+// widgets. Property access + show/hide resolve the widget from the id and act on
+// its live tree / visibility. Variables are handled by the runtime, not here.
+HorizonCode::HostBindings WidgetManager::makeBindings()
+{
+	HorizonCode::HostBindings b;
+	b.getProperty = [this](HorizonCode::InstanceId id, int elem, const std::string& prop) -> HorizonCode::Value
 	{
-		const HE::UIElement* e = i->tree.find(elem);
+		Instance* w = findByScript(id);
+		const HE::UIElement* e = w ? w->tree.find(elem) : nullptr;
 		return e ? HE::uiPropToHcValue(e->getProp(prop)) : HorizonCode::Value{};
 	};
-	ctx.setProperty = [i](int elem, const std::string& prop, const HorizonCode::Value& v)
+	b.setProperty = [this](HorizonCode::InstanceId id, int elem, const std::string& prop, const HorizonCode::Value& v)
 	{
-		HE::UIElement* e = i->tree.find(elem);
+		Instance* w = findByScript(id);
+		HE::UIElement* e = w ? w->tree.find(elem) : nullptr;
 		if (e) e->setProp(prop, HE::uiHcValueToProp(v, e->getProp(prop).type));
 	};
-	ctx.getVariable = [i](const std::string& var) -> HorizonCode::Value
-	{
-		auto it = i->variables.find(var);
-		return it != i->variables.end() ? it->second : HorizonCode::Value{};
-	};
-	ctx.setVariable = [i](const std::string& var, const HorizonCode::Value& v)
-	{
-		i->variables[var] = v;
-	};
-	ctx.showSelf = [i] { i->visible = true; };
-	ctx.hideSelf = [i] { i->visible = false; };
-	return ctx;
+	b.showSelf = [this](HorizonCode::InstanceId id){ if (Instance* w = findByScript(id)) w->visible = true; };
+	b.hideSelf = [this](HorizonCode::InstanceId id){ if (Instance* w = findByScript(id)) w->visible = false; };
+	return b;
 }
 
 int WidgetManager::createWidget(ContentManager& content, const std::string& assetPath)
@@ -81,8 +80,9 @@ int WidgetManager::createWidget(ContentManager& content, const std::string& asse
 			("WidgetManager: invalid widget tree JSON in " + assetPath).c_str());
 		return 0;
 	}
+	HorizonCode::Graph graph;
 	if (!asset->graphJson.empty())
-		HorizonCode::fromJson(asset->graphJson, w.graph); // absent/broken → no logic
+		HorizonCode::fromJson(asset->graphJson, graph); // absent/broken → no logic
 
 	// Resolve per-element material references once (paths → UUIDs).
 	for (const auto& e : w.tree.elements)
@@ -93,24 +93,33 @@ int WidgetManager::createWidget(ContentManager& content, const std::string& asse
 		}
 
 	w.id = m_nextId++;
+	// Register the widget's logic with the central runtime, which takes the
+	// graph and seeds the private variable store from its declared defaults.
+	w.scriptId = rt().add(std::move(graph), makeBindings());
 	m_instances.push_back(std::move(w));
 
+	// Fire Construct AFTER the widget is in m_instances, so host callbacks can
+	// resolve it by scriptId during construction.
 	Instance& stored = m_instances.back();
-	// Seed the variable store from the graph's declared defaults before any
-	// logic runs, so GetVariable reads a valid value even before a SetVariable.
-	for (const auto& var : stored.graph.variables)
-		stored.variables[var.name] = HorizonCode::variableDefaultValue(var);
-
-	HorizonCode::Runner runner(stored.graph, makeContext(stored));
-	runner.fireEvent("Construct", 0);
+	rt().fireEvent(stored.scriptId, "Construct", 0);
 	return stored.id;
 }
 
 void WidgetManager::destroyWidget(int id)
 {
 	if (m_focusWidget == id) m_focusWidget = 0;
+	if (Instance* w = find(id)) rt().remove(w->scriptId); // drop its runtime instance
 	m_instances.erase(std::remove_if(m_instances.begin(), m_instances.end(),
 		[&](const Instance& w){ return w.id == id; }), m_instances.end());
+}
+
+void WidgetManager::clear()
+{
+	// Unregister every widget's script from the shared runtime (which may also
+	// host the level script / GameInstance — so remove per-instance, don't wipe).
+	for (auto& w : m_instances) rt().remove(w.scriptId);
+	m_instances.clear();
+	m_focusWidget = 0;
 }
 
 void WidgetManager::showWidget(int id)  { if (Instance* w = find(id)) w->visible = true; }
@@ -133,8 +142,7 @@ bool WidgetManager::callFunction(int id, const std::string& name)
 {
 	Instance* w = find(id);
 	if (!w) return false;
-	HorizonCode::Runner runner(w->graph, makeContext(*w));
-	return runner.callFunction(name, /*requirePublic=*/true);
+	return rt().callFunction(w->scriptId, name, /*requirePublic=*/true);
 }
 
 void WidgetManager::tick(float dt)
@@ -142,16 +150,15 @@ void WidgetManager::tick(float dt)
 	for (auto& w : m_instances)
 	{
 		if (!w.visible) continue;
-		HorizonCode::Runner runner(w.graph, makeContext(w));
-		runner.fireEvent("Tick", 0, HorizonCode::Value::ofFloat(dt));
+		rt().fireEvent(w.scriptId, "Tick", 0, HorizonCode::Value::ofFloat(dt));
 	}
 }
 
-bool WidgetManager::isInteractive(const Instance& w, const HE::UIElement& e)
+bool WidgetManager::isInteractive(const Instance& w, const HE::UIElement& e) const
 {
 	if (e.interactive()) return true;
 	// Bound by a pointer-event node? (Event node with elem 0 = any element.)
-	for (const auto& gn : w.graph.nodes)
+	for (const auto& gn : rt().graphOf(w.scriptId).nodes)
 		if (gn.type == HorizonCode::NodeType::Event && (gn.elem == 0 || gn.elem == e.id))
 		{
 			const std::string& n = gn.s;
@@ -205,7 +212,9 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 	{
 		const bool isTop = topW == &w;
 		const int  hot   = isTop ? topElem : 0;
-		HorizonCode::Runner runner(w.graph, makeContext(w));
+		auto fire = [&](const std::string& ev, int elem,
+		                const HorizonCode::Value& arg = {})
+		{ rt().fireEvent(w.scriptId, ev, elem, arg); };
 
 		// ── Hover transitions ────────────────────────────────────────────────
 		// Event names differ per type; fire BOTH candidate names — the Runner
@@ -214,13 +223,13 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 		{
 			if (w.hoveredElem != 0)
 			{
-				runner.fireEvent("OnUnhovered", w.hoveredElem);
-				runner.fireEvent("OnMouseLeave", w.hoveredElem);
+				fire("OnUnhovered", w.hoveredElem);
+				fire("OnMouseLeave", w.hoveredElem);
 			}
 			if (hot != 0)
 			{
-				runner.fireEvent("OnHovered", hot);
-				runner.fireEvent("OnMouseEnter", hot);
+				fire("OnHovered", hot);
+				fire("OnMouseEnter", hot);
 			}
 			w.hoveredElem = hot;
 		}
@@ -233,7 +242,7 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 			{
 				const HE::UIElement* e = w.tree.find(hot);
 				if (e && e->type() == HE::UIWidgetType::Button)
-					runner.fireEvent("OnPressed", hot);
+					fire("OnPressed", hot);
 				// Slider: start dragging (value updated below).
 				if (e && e->type() == HE::UIWidgetType::Slider)
 					w.draggingSlider = hot;
@@ -244,13 +253,13 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 					{
 						w.focusedElem = hot;
 						m_focusWidget = w.id;
-						runner.fireEvent("OnFocused", hot);
+						fire("OnFocused", hot);
 					}
 				}
 				else if (w.focusedElem != 0)
 				{
 					// Pressed something else in this widget → unfocus its field.
-					runner.fireEvent("OnUnfocused", w.focusedElem);
+					fire("OnUnfocused", w.focusedElem);
 					w.focusedElem = 0;
 					if (m_focusWidget == w.id) m_focusWidget = 0;
 				}
@@ -258,7 +267,7 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 			else if (w.focusedElem != 0)
 			{
 				// Pressed empty space → unfocus.
-				runner.fireEvent("OnUnfocused", w.focusedElem);
+				fire("OnUnfocused", w.focusedElem);
 				w.focusedElem = 0;
 				if (m_focusWidget == w.id) m_focusWidget = 0;
 			}
@@ -278,7 +287,7 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 				if (nv != s->value)
 				{
 					s->value = nv;
-					runner.fireEvent("OnValueChanged", w.draggingSlider,
+					fire("OnValueChanged", w.draggingSlider,
 					                 HorizonCode::Value::ofFloat(nv));
 				}
 			}
@@ -294,18 +303,18 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 				switch (e ? e->type() : HE::UIWidgetType::COUNT)
 				{
 				case HE::UIWidgetType::Button:
-					runner.fireEvent("OnClicked", hot);
-					runner.fireEvent("OnReleased", hot);
+					fire("OnClicked", hot);
+					fire("OnReleased", hot);
 					break;
 				case HE::UIWidgetType::Panel:
 				case HE::UIWidgetType::Image:
-					runner.fireEvent("OnClicked", hot);
+					fire("OnClicked", hot);
 					break;
 				case HE::UIWidgetType::CheckBox:
 					if (auto* cb = dynamic_cast<HE::UICheckBox*>(e))
 					{
 						cb->checked = !cb->checked;
-						runner.fireEvent("OnCheckChanged", hot,
+						fire("OnCheckChanged", hot,
 						                 HorizonCode::Value::ofBool(cb->checked));
 					}
 					break;
@@ -315,7 +324,7 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 						{
 							combo->selectedIndex =
 								(combo->selectedIndex + 1) % (int)combo->options.size();
-							runner.fireEvent("OnSelectionChanged", hot,
+							fire("OnSelectionChanged", hot,
 							                 HorizonCode::Value::ofInt(combo->selectedIndex));
 						}
 					break;
@@ -340,8 +349,7 @@ void WidgetManager::inputText(const std::string& utf8)
 	auto* ti = dynamic_cast<HE::UITextInput*>(w->tree.find(w->focusedElem));
 	if (!ti) return;
 	ti->text += utf8;
-	HorizonCode::Runner runner(w->graph, makeContext(*w));
-	runner.fireEvent("OnTextChanged", w->focusedElem, HorizonCode::Value::ofString(ti->text));
+	rt().fireEvent(w->scriptId, "OnTextChanged", w->focusedElem, HorizonCode::Value::ofString(ti->text));
 }
 
 void WidgetManager::inputBackspace()
@@ -355,8 +363,7 @@ void WidgetManager::inputBackspace()
 	size_t n = ti->text.size();
 	do { --n; } while (n > 0 && (static_cast<unsigned char>(ti->text[n]) & 0xC0) == 0x80);
 	ti->text.erase(n);
-	HorizonCode::Runner runner(w->graph, makeContext(*w));
-	runner.fireEvent("OnTextChanged", w->focusedElem, HorizonCode::Value::ofString(ti->text));
+	rt().fireEvent(w->scriptId, "OnTextChanged", w->focusedElem, HorizonCode::Value::ofString(ti->text));
 }
 
 void WidgetManager::inputSubmit()
@@ -366,8 +373,7 @@ void WidgetManager::inputSubmit()
 	if (!w || w->focusedElem == 0) return;
 	auto* ti = dynamic_cast<HE::UITextInput*>(w->tree.find(w->focusedElem));
 	if (!ti) return;
-	HorizonCode::Runner runner(w->graph, makeContext(*w));
-	runner.fireEvent("OnTextCommitted", w->focusedElem, HorizonCode::Value::ofString(ti->text));
+	rt().fireEvent(w->scriptId, "OnTextCommitted", w->focusedElem, HorizonCode::Value::ofString(ti->text));
 }
 
 void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderObject>& out)

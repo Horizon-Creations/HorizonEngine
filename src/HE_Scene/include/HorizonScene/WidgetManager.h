@@ -3,6 +3,7 @@
 #include <UIWidget/UIElements.h>
 #include <UIWidget/UIWidgetBinding.h>
 #include <HorizonCode/HorizonCode.h>
+#include <HorizonCode/HorizonCodeRuntime.h>
 #include <Renderer/UIRenderObject.h>
 #include <Types/UUID.h>
 #include <string>
@@ -67,15 +68,24 @@ public:
     // depth). Called AFTER the entity-UI extraction, so widgets draw on top.
     void extract(float vpWidth, float vpHeight, std::vector<UIRenderObject>& out);
 
-    void clear() { m_instances.clear(); m_focusWidget = 0; }
+    void clear();
+
+    // Route every widget's HorizonCode through this central runtime instead of
+    // the manager's own. HorizonWorld injects the scene-wide runtime so widgets,
+    // the level script (and later the GameInstance) share one interpreter and can
+    // reference each other. Null (the default) falls back to an internal runtime
+    // for standalone use / tests.
+    void setRuntime(HorizonCode::Runtime* r) { m_runtime = r; }
 
 private:
     struct Instance
     {
         int id = 0;
         int zOrder = 0;
-        HE::UIWidgetTree  tree;    // live deep copy (graph + scripts mutate it)
-        HorizonCode::Graph graph;
+        HE::UIWidgetTree  tree;    // live deep copy (scripts mutate it)
+        // This widget's script instance in the runtime (owns the graph + the
+        // private variable store); 0 = no logic graph.
+        HorizonCode::InstanceId scriptId = 0;
         bool visible = true;       // ShowWidget/HideWidget nodes flip this
         // Transient interaction state (element ids; 0 = none).
         int hoveredElem   = 0;
@@ -84,24 +94,29 @@ private:
         int draggingSlider = 0;    // slider being dragged
         // Resolved material references (element id → material asset).
         std::unordered_map<int, HE::UUID> materials;
-        // Live graph variables (persist across events), seeded from the graph's
-        // variable defaults at creation.
-        std::unordered_map<std::string, HorizonCode::Value> variables;
     };
 
     Instance*       find(int id);
     const Instance* find(int id) const;
+    Instance*       findByScript(HorizonCode::InstanceId scriptId);
 
-    // Build a HorizonCode Context over one instance (captures by pointer, so it
-    // must not outlive the instance / a vector reallocation).
-    HorizonCode::Context makeContext(Instance& inst);
+    // The runtime widgets run on: the injected shared one, else the internal
+    // fallback. Resolved on each call (never a stored self-pointer), so the
+    // manager stays movable.
+    HorizonCode::Runtime&       rt()       { return m_runtime ? *m_runtime : m_ownRuntime; }
+    const HorizonCode::Runtime& rt() const { return m_runtime ? *m_runtime : m_ownRuntime; }
+    // Host bindings shared by every widget instance (property get/set + show/
+    // hide), disambiguated by the runtime InstanceId.
+    HorizonCode::HostBindings makeBindings();
 
     // True when the element can receive pointer events: interactive by type, or
     // bound by a pointer-event Event node (an Event with elem 0 makes every
     // element hot).
-    static bool isInteractive(const Instance& w, const HE::UIElement& e);
+    bool isInteractive(const Instance& w, const HE::UIElement& e) const;
 
     std::vector<Instance> m_instances;
+    HorizonCode::Runtime  m_ownRuntime;        // fallback when none is injected
+    HorizonCode::Runtime* m_runtime = nullptr; // injected shared runtime (null → own)
     int  m_nextId  = 1;
     bool m_wasDown = false;
     int  m_focusWidget = 0;        // widget id owning the focused TextInput

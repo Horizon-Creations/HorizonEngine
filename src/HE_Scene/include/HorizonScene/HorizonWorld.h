@@ -3,6 +3,7 @@
 #include <string>
 #include <unordered_map>
 #include <HorizonCode/HorizonCode.h>
+#include <HorizonCode/HorizonCodeRuntime.h>
 #include "Components/NameComponent.h"
 #include "Components/HierarchyComponent.h"
 #include "WidgetManager.h"
@@ -63,6 +64,12 @@ public:
 	// (clear() drops them: PIE stop / scene load discards play-created widgets).
 	WidgetManager& widgets() { return m_widgets; }
 
+	// The scene's central HorizonCode interpreter: widgets and the level script
+	// register their running scripts here (rather than each running its own), so
+	// they share one execution engine + state and can reference each other.
+	HorizonCode::Runtime&       scripts()       { return m_scripts; }
+	const HorizonCode::Runtime& scripts() const { return m_scripts; }
+
 	// ── Level script ─────────────────────────────────────────────────────────
 	// One HorizonCode graph per level (like Unreal's Level Blueprint): intrinsic
 	// to the scene, authored in the Level Script editor, serialized with the
@@ -85,21 +92,22 @@ public:
 	void fireLevelUnloaded();
 	bool isLevelRunning() const { return m_levelRunning; }
 	// Live level-script variable store (seeded at load, mutated by Set nodes).
-	// Read-only view for tooling/tests.
-	const std::unordered_map<std::string, HorizonCode::Value>& levelVariables() const { return m_levelVars; }
+	// Read-only view for tooling/tests; backed by the runtime instance.
+	const std::unordered_map<std::string, HorizonCode::Value>& levelVariables() const
+	{ return m_scripts.variablesOf(m_levelInstance); }
 
 
 private:
-	// Bind a HorizonCode Context to the level script (Print → log, variable
-	// get/set → m_levelVars). Property/show/hide are widget concepts and no-op.
-	HorizonCode::Context makeLevelContext();
-
 	entt::registry registry_;
 	Entity         rootEntity_      = entt::null;
 	bool           m_hierarchyDirty = true;
-	WidgetManager  m_widgets;
+	// Declared before m_widgets so it outlives it (m_widgets points at it).
+	HorizonCode::Runtime m_scripts;
+	WidgetManager        m_widgets;
 
-	HorizonCode::Graph                                   m_levelScript;
-	std::unordered_map<std::string, HorizonCode::Value>  m_levelVars;
-	bool                                                 m_levelRunning = false;
+	// The level script's authored source graph (edited + serialized). At load a
+	// copy is registered in m_scripts as m_levelInstance (the running instance).
+	HorizonCode::Graph      m_levelScript;
+	HorizonCode::InstanceId m_levelInstance = 0;
+	bool                    m_levelRunning  = false;
 };
