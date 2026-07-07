@@ -5,6 +5,7 @@
 #include "UIEditorPanel.h"
 #include "LevelScriptPanel.h"
 #include "GameInstancePanel.h"
+#include "HorizonCodeClassPanel.h"
 #include "HorizonVersion.h"
 #include <Hpak/ProjectExporter.h>
 #include <HorizonScene/HorizonScene.h>
@@ -17,6 +18,7 @@
 #include <material/MaterialShaderLibrary.h>
 #include <MaterialGraph/MaterialGraph.h> // HE::MatParamKind for the entity param editor
 #include <UIWidget/UIWidgetTree.h>       // starter tree for freshly created UI widgets
+#include <HorizonCode/HorizonCode.h>     // starter graph for freshly created HorizonCode classes
 #include <Types/Enums.h>
 #include <HorizonRendering/RenderExtractor.h>
 #include <HorizonRendering/RenderWorld.h>
@@ -2657,7 +2659,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                 const bool tabDirty = !tab.assetPath.empty() &&
                     (ScriptEditorPanel::isDirty(tab.assetPath) ||
                      MaterialEditorPanel::isDirty(tab.assetPath) ||
-                     UIEditorPanel::isDirty(tab.assetPath));
+                     UIEditorPanel::isDirty(tab.assetPath) ||
+                     HorizonCodeClassPanel::isDirty(tab.assetPath));
                 const std::string shown = tab.label + (tabDirty ? " *" : "")
                     + "###tab_" + (tab.assetPath.empty() ? std::string("scene") : tab.assetPath);
                 if (ImGui::BeginTabItem(shown.c_str(), tab.closable ? &pOpen : nullptr, flags))
@@ -2720,6 +2723,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
             MaterialEditorPanel::render(ctx, tabPath, tabPos, tabSize);
         else if (UIEditorPanel::isWidgetAsset(tabPath))
             UIEditorPanel::render(ctx, tabPath, tabPos, tabSize);
+        else if (HorizonCodeClassPanel::isClassAsset(tabPath))
+            HorizonCodeClassPanel::render(ctx, tabPath, tabPos, tabSize);
         else
             ScriptEditorPanel::render(ctx, tabPath, tabPos, tabSize);
         return;
@@ -4369,7 +4374,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				else if (ScriptEditorPanel::isScriptAsset(file->fullPath) ||
 				         MaterialEditorPanel::isMaterialAsset(file->fullPath) ||
 				         MaterialEditorPanel::isMaterialFunctionAsset(file->fullPath) ||
-				         UIEditorPanel::isWidgetAsset(file->fullPath))
+				         UIEditorPanel::isWidgetAsset(file->fullPath) ||
+				         HorizonCodeClassPanel::isClassAsset(file->fullPath))
 				{
 				const std::string tabLabel = std::filesystem::path(file->name).stem().string();
 				auto it = std::find_if(ctx.tabs.begin(), ctx.tabs.end(),
@@ -4478,6 +4484,11 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 						const std::string tree = HE::uiWidgetTreeToJson(HE::UIWidgetTree{});
 						w.addChunk(HAsset::CHUNK_UIWT, tree.data(), tree.size());
 					}
+					if (type == HE::AssetType::HorizonCodeClass)
+					{
+						const std::string graph = HorizonCode::toJson(HorizonCode::Graph{});
+						w.addChunk(HAsset::CHUNK_HCGR, graph.data(), graph.size());
+					}
 					w.write(path, static_cast<uint16_t>(type));
 				}
 
@@ -4499,6 +4510,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 			if (ImGui::MenuItem("Material"))     tryCreate("NewMaterial", ".hasset",  HE::AssetType::Material);
 			if (ImGui::MenuItem("Material Function")) tryCreate("NewMaterialFunction", ".hasset", HE::AssetType::MaterialFunction);
 			if (ImGui::MenuItem("UI Widget"))    tryCreate("NewWidget",   ".hasset",  HE::AssetType::Widget);
+			if (ImGui::MenuItem("HorizonCode Class")) tryCreate("NewClass", ".hasset", HE::AssetType::HorizonCodeClass);
 			if (ImGui::MenuItem("Texture"))      tryCreate("NewTexture",  ".hasset",  HE::AssetType::Texture);
 			if (ImGui::MenuItem("Static Mesh"))  tryCreate("NewMesh",     ".hasset",  HE::AssetType::StaticMesh);
 			if (ImGui::MenuItem("Skeletal Mesh"))tryCreate("NewSkelMesh", ".hasset",  HE::AssetType::SkeletalMesh);

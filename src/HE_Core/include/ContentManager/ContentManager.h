@@ -49,6 +49,8 @@ public:
 	MaterialFunctionAsset*     getMaterialFunctionMutable(HE::UUID id);
 	const UIWidgetAsset*       getWidget(HE::UUID id) const;
 	UIWidgetAsset*             getWidgetMutable(HE::UUID id);
+	const HorizonCodeClassAsset* getHorizonCodeClass(HE::UUID id) const;
+	HorizonCodeClassAsset*       getHorizonCodeClassMutable(HE::UUID id);
 	const ShaderAsset*         getShader(HE::UUID id) const;
 	const PrefabAsset*         getPrefab(HE::UUID id) const;
 	const AnimationClipAsset*  getAnimationClip(HE::UUID id) const;
@@ -109,6 +111,7 @@ public:
 	HE::UUID registerScript(ScriptAsset asset);
 	HE::UUID registerMaterialFunction(MaterialFunctionAsset asset);
 	HE::UUID registerWidget(UIWidgetAsset asset);
+	HE::UUID registerHorizonCodeClass(HorizonCodeClassAsset asset);
 	HE::UUID registerAnimationClip(AnimationClipAsset asset);
 	HE::UUID registerPropertyAnimClip(PropertyAnimClipAsset asset);
 
@@ -293,6 +296,7 @@ private:
 	SlotMap<ScriptAsset>        m_scriptAssets;
 	SlotMap<MaterialFunctionAsset> m_materialFunctionAssets;
 	SlotMap<UIWidgetAsset>      m_widgetAssets;
+	SlotMap<HorizonCodeClassAsset> m_hcClassAssets;
 	SlotMap<AudioAsset>         m_audioAssets;
 	SlotMap<FontAsset>          m_fontAssets;
 	SlotMap<ShaderAsset>        m_shaderAssets;

@@ -65,6 +65,34 @@ TEST_CASE("ContentManager static mesh save/load round-trip preserves UUID")
 	}
 }
 
+TEST_CASE("ContentManager HorizonCode class round-trip")
+{
+	TempContentDir dir;
+	const std::string graph = R"({"nextId":3,"nodes":[],"links":[],"variables":[]})";
+	HE::UUID savedId;
+	{
+		ContentManager cm(dir.path.string());
+		HorizonCodeClassAsset a;
+		a.type      = HE::AssetType::HorizonCodeClass;
+		a.name      = "MyClass";
+		a.path      = "MyClass.hasset";
+		a.graphJson = graph;
+		REQUIRE(cm.saveAsset(a));
+		savedId = a.id;
+		REQUIRE_FALSE(savedId == HE::UUID{});
+	}
+	{
+		ContentManager cm(dir.path.string());
+		HE::UUID loadedId = cm.loadAsset("MyClass.hasset");
+		CHECK(loadedId == savedId);
+		const HorizonCodeClassAsset* a = cm.getHorizonCodeClass(loadedId);
+		REQUIRE(a != nullptr);
+		CHECK(a->name == "MyClass");
+		CHECK(a->graphJson == graph);
+		CHECK(cm.getWidget(loadedId) == nullptr); // wrong-type lookup must not alias
+	}
+}
+
 TEST_CASE("ContentManager texture round-trip")
 {
 	TempContentDir dir;

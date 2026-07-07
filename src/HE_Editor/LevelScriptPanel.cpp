@@ -1,10 +1,17 @@
 #include "LevelScriptPanel.h"
 #include "GameInstancePanel.h"
+#include "HorizonCodeClassPanel.h"
 #include "EditorApplication.h"   // AppContext
 #include "EditorUndo.h"          // scene-undo snapshots (dirty tracking + undo/redo)
 #include "GraphEditor.h"         // shared node-graph canvas
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonCode/HorizonCode.h>
+#include <ContentManager/ContentManager.h>
+#include <ContentManager/Assets.h>
+#include <ContentManager/HAsset.h>
+#include <Types/Enums.h>
+#include <filesystem>
+#include <map>
 #include <imgui.h>
 #include <misc/cpp/imgui_stdlib.h>
 #include <algorithm>
@@ -341,7 +348,14 @@ void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events, b
 	{
 	case NT::Event:
 	{
-		if (ImGui::BeginCombo("Event", n->s.empty() ? "(none)" : n->s.c_str()))
+		if (events.empty())
+		{
+			// A class with no fixed catalog (a HorizonCode class) names its own
+			// events freely; another class binds to them by name.
+			ImGui::InputText("Event", &n->s);
+			if (ImGui::IsItemDeactivatedAfterEdit()) edited = true;
+		}
+		else if (ImGui::BeginCombo("Event", n->s.empty() ? "(none)" : n->s.c_str()))
 		{
 			for (const std::string& ev : events)
 				if (ImGui::Selectable(ev.c_str(), n->s == ev))
@@ -486,9 +500,18 @@ bool drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, const 
 
 		ImGui::BeginChild("##nodeList", ImVec2(232.0f, 300.0f));
 
-		// Events (this class's event catalog).
+		// Events (this class's event catalog; empty = free-text, add a blank Event).
 		bool eh = false;
-		for (const std::string& ev : events)
+		if (events.empty())
+		{
+			if (matches("Event", "Events"))
+			{
+				ImGui::TextDisabled("Events"); eh = true;
+				if (ImGui::Selectable("Event"))
+				{ created = addNode(graph, NT::Event, g.ge.addMenuGraphPos); ImGui::CloseCurrentPopup(); }
+			}
+		}
+		else for (const std::string& ev : events)
 		{
 			if (!matches(ev, "Events")) continue;
 			if (!eh) { ImGui::TextDisabled("Events"); eh = true; }
@@ -678,5 +701,78 @@ void GameInstancePanel::render(AppContext& ctx, const ImVec2& pos, const ImVec2&
 	// The GameInstance graph isn't part of a scene — re-register it in the app
 	// runtime and persist it via the host callback.
 	if (edited && ctx.commitGameInstance) ctx.commitGameInstance();
+	ImGui::End();
+}
+
+// ── HorizonCode Class tab (a standalone .hasset graph) ────────────────────────
+namespace
+{
+struct ClassState
+{
+	HorizonCode::Graph graph;
+	bool        loaded = false;
+	bool        dirty  = false;
+	std::string name;
+	HE::UUID    assetId;
+};
+std::map<std::string, ClassState> g_classStates;
+}
+
+bool HorizonCodeClassPanel::isClassAsset(const std::string& path)
+{
+	static std::map<std::string, bool> cache;
+	if (auto it = cache.find(path); it != cache.end()) return it->second;
+	HAsset::Reader r;
+	const bool ok = r.open(path) &&
+		r.assetType() == static_cast<uint16_t>(HE::AssetType::HorizonCodeClass);
+	cache[path] = ok;
+	return ok;
+}
+
+bool HorizonCodeClassPanel::isDirty(const std::string& path)
+{
+	auto it = g_classStates.find(path);
+	return it != g_classStates.end() && it->second.dirty;
+}
+
+void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath,
+                                   const ImVec2& pos, const ImVec2& size)
+{
+	ClassState& st = g_classStates[assetPath];
+	if (!st.loaded && ctx.contentManager)
+	{
+		std::error_code ec;
+		const std::string rel = std::filesystem::relative(
+			assetPath, ctx.contentManager->contentRoot(), ec).generic_string();
+		st.assetId = ctx.contentManager->loadAsset(rel);
+		if (const HorizonCodeClassAsset* a = ctx.contentManager->getHorizonCodeClass(st.assetId))
+		{
+			if (!a->graphJson.empty()) HorizonCode::fromJson(a->graphJson, st.graph);
+			st.name = a->name;
+		}
+		st.loaded = true;
+	}
+
+	beginTabWindow(("##hcclass_" + assetPath).c_str(), pos, size);
+	ImGui::AlignTextToFramePadding();
+	ImGui::Text("%s", st.name.c_str());
+	ImGui::SameLine();
+	ImGui::TextDisabled("HorizonCode Class%s", st.dirty ? "  (unsaved)" : "");
+	ImGui::SameLine(ImGui::GetContentRegionAvail().x - 60.0f);
+	if (ImGui::Button("Save", ImVec2(56.0f, 0.0f)) && ctx.contentManager)
+	{
+		if (HorizonCodeClassAsset* a = ctx.contentManager->getHorizonCodeClassMutable(st.assetId))
+		{
+			a->graphJson = HorizonCode::toJson(st.graph);
+			if (ctx.contentManager->saveAsset(*a)) st.dirty = false;
+		}
+	}
+	ImGui::Separator();
+
+	static const std::vector<std::string> kFreeEvents; // empty → free-text event names
+	bool edited = false;
+	drawGraphBody(st.graph, kFreeEvents, "HorizonCode Class",
+	              "Reusable class; names its own events.", edited);
+	if (edited) st.dirty = true;
 	ImGui::End();
 }

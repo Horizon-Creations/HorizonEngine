@@ -195,6 +195,13 @@ struct UIWidgetAsset : public RuntimeAsset
 	std::string graphJson; // Blueprint-style logic graph (HorizonCode::Graph)
 };
 
+// A standalone HorizonCode class: a visual-scripting graph not bound to a widget
+// or scene. Authored in the HorizonCode editor, referenced by other graphs.
+struct HorizonCodeClassAsset : public RuntimeAsset
+{
+	std::string graphJson; // HorizonCode::Graph
+};
+
 struct SceneAsset : public RuntimeAsset
 {
 	std::vector<std::string> objectPaths;
