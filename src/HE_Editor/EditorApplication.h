@@ -318,6 +318,7 @@ private:
 	float m_uiPointerX = 0.0f, m_uiPointerY = 0.0f;
 	float m_uiViewportW = 0.0f, m_uiViewportH = 0.0f;
 	bool  m_uiPointerDown = false, m_uiPointerValid = false;
+	bool  m_widgetTextInputActive = false; // SDL text input toggled for a focused widget field
 
 	// Play-in-editor
 	bool m_isPlaying = false;

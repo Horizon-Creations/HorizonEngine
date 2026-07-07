@@ -62,6 +62,12 @@ void GameApplication::OnInit()
 	// cursor is always reachable. The window is already open by the time OnInit runs.
 	setMouseCaptured(true);
 
+	// Enable SDL text-input so focused in-game TextInput widgets receive
+	// SDL_EVENT_TEXT_INPUT. Harmless when no field is focused (OnEvent only
+	// routes text while a widget field has focus).
+	if (SDL_Window* w = window() ? window()->GetNativeWindow() : nullptr)
+		SDL_StartTextInput(w);
+
 	const char* baseRaw = SDL_GetBasePath();
 	if (!baseRaw)
 	{
@@ -385,6 +391,24 @@ void GameApplication::updateCameraController(float dt)
 
 bool GameApplication::OnEvent(const SDL_Event& event)
 {
+	// A focused in-game text field owns the keyboard: route text + edit keys to
+	// the widget and swallow them so they don't drive the camera/gameplay.
+	if (m_world && m_world->widgets().hasFocusedTextField())
+	{
+		if (event.type == SDL_EVENT_TEXT_INPUT)
+		{
+			m_world->widgets().inputText(event.text.text);
+			return true;
+		}
+		if (event.type == SDL_EVENT_KEY_DOWN)
+		{
+			if (event.key.key == SDLK_BACKSPACE) { m_world->widgets().inputBackspace(); return true; }
+			if (event.key.key == SDLK_RETURN || event.key.key == SDLK_KP_ENTER)
+				{ m_world->widgets().inputSubmit(); return true; }
+			if (event.key.key != SDLK_ESCAPE) return true; // swallow other keys while typing
+		}
+	}
+
 	if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat)
 	{
 		// V: static VSync toggle for packaged builds (no settings menu yet).

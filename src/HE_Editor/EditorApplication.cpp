@@ -987,7 +987,22 @@ void EditorApplication::OnRender(float dt)
 
 		// Live widgets: per-frame logic tick (EventTick).
 		if (m_isPlaying && m_editorWorld)
+		{
 			m_editorWorld->widgets().tick(dt);
+
+			// Toggle SDL text-input to match widget text-field focus, so a focused
+			// PIE text field receives SDL_EVENT_TEXT_INPUT. Only touched on a focus
+			// transition, so it doesn't fight ImGui's own text-input management.
+			if (SDL_Window* w = window() ? window()->GetNativeWindow() : nullptr)
+			{
+				const bool want = m_editorWorld->widgets().hasFocusedTextField();
+				if (want != m_widgetTextInputActive)
+				{
+					if (want) SDL_StartTextInput(w); else SDL_StopTextInput(w);
+					m_widgetTextInputActive = want;
+				}
+			}
+		}
 
 		// In-game UI pointer input (hover/click) + script event dispatch. The
 		// viewport panel feeds the pointer (reportPlayUIPointer); while the PIE
@@ -2047,6 +2062,12 @@ void EditorApplication::setPlayMode(bool play)
 		m_scriptInstances.clear();
 		m_uiInputState = {};
 		ScriptApi::setCursorHook(nullptr);
+		if (m_widgetTextInputActive)
+		{
+			if (SDL_Window* w = window() ? window()->GetNativeWindow() : nullptr)
+				SDL_StopTextInput(w);
+			m_widgetTextInputActive = false;
+		}
 
 		// Stop all audio when exiting play mode
 		m_audioEngine.stopAll();
@@ -2319,6 +2340,24 @@ bool EditorApplication::OnEvent(const SDL_Event& event)
 #endif
 	default:
 		break;
+	}
+
+	// A focused in-game text field (PIE) owns the keyboard: route text + edit keys
+	// to the widget. Checked before Esc so typing works, but Esc still releases.
+	if (m_isPlaying && m_editorWorld && m_editorWorld->widgets().hasFocusedTextField())
+	{
+		if (event.type == SDL_EVENT_TEXT_INPUT)
+		{
+			m_editorWorld->widgets().inputText(event.text.text);
+			return true;
+		}
+		if (event.type == SDL_EVENT_KEY_DOWN)
+		{
+			if (event.key.key == SDLK_BACKSPACE) { m_editorWorld->widgets().inputBackspace(); return true; }
+			if (event.key.key == SDLK_RETURN || event.key.key == SDLK_KP_ENTER)
+				{ m_editorWorld->widgets().inputSubmit(); return true; }
+			if (event.key.key != SDLK_ESCAPE) return true; // swallow other keys while typing
+		}
 	}
 
 	// Esc toggles the play-mode mouse capture (like the packaged game): release it to

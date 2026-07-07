@@ -1,7 +1,10 @@
 #include "UIEditorPanel.h"
 #include "EditorApplication.h"                 // AppContext
 #include <UIWidget/UIWidgetTree.h>
-#include <UIWidget/UIWidgetGraph.h>
+#include <UIWidget/UIElement.h>
+#include <UIWidget/UIElements.h>
+#include <UIWidget/UIWidgetBinding.h>
+#include <HorizonCode/HorizonCode.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <ContentManager/HAsset.h>
@@ -20,28 +23,33 @@
 
 namespace
 {
-using HE::UIWidgetNode;
+using HE::UIElement;
 using HE::UIWidgetTree;
 using HE::UIWidgetType;
-using GT = HE::UIGraphNodeType;
-using GP = HE::UIGraphPinType;
+using HE::UIPropDesc;
+using HE::UIPropType;
+using HE::UIPropValue;
+using HE::UIEventDesc;
+namespace HC = HorizonCode;
+using NT = HC::NodeType;
+using PT = HC::PinType;
 
 // ── Per-widget editor state (session-persistent, keyed by asset path) ─────────
 struct State
 {
-	UIWidgetTree      tree;
-	HE::UIWidgetGraph graph;          // Blueprint-style logic (Graph mode)
+	UIWidgetTree tree;
+	HC::Graph    graph;               // HorizonCode logic (Graph mode)
 	HE::UUID     assetId{};
 	bool         loaded = false;
 	bool         dirty  = false;     // unsaved-to-disk edits (tree OR graph)
 	int          viewMode = 0;       // 0 = Designer, 1 = Graph
-	int          selected = 0;       // Designer: selected tree node id (0 = none)
+	int          selected = 0;       // Designer: selected element id (0 = none)
 
 	// Designer canvas view: fit-to-window base scale × user zoom, plus pan px.
 	float  zoom = 1.0f;
 	ImVec2 pan  = ImVec2(0.0f, 0.0f);
 
-	// Designer drag. mode: 0 = none, 1 = move node, 2 = resize node.
+	// Designer drag. mode: 0 = none, 1 = move element, 2 = resize element.
 	int    dragMode = 0;
 	int    resizeHandle = -1;        // 0..7: corners+edges (see handleOffsets)
 	ImVec2 dragStartMouse;
@@ -73,7 +81,7 @@ struct State
 };
 std::map<std::string, State> g_states;
 
-// ── Layout math (must mirror UISystem::computeScreenRect) ─────────────────────
+// ── Layout math (via UIWidgetTree's shared layout, mirrors the runtime) ───────
 ImVec2 anchorPoint(uint8_t a)
 {
 	static const ImVec2 pts[9] = {
@@ -85,52 +93,65 @@ ImVec2 anchorPoint(uint8_t a)
 
 struct Rect { ImVec2 mn, mx; };
 
-// Node rect in CANVAS units, parent-relative anchoring (same math the runtime
-// uses with scale 1). Depth is bounded by tree size (reparent guards cycles).
-Rect nodeCanvasRect(const UIWidgetTree& tree, const UIWidgetNode& n)
+// Element rect in CANVAS units — thin wrapper over the shared layout helper so
+// the editor and runtime agree pixel-for-pixel.
+Rect elementCanvasRect(const UIWidgetTree& tree, const UIElement& e)
+{
+	const HE::UIWidgetRect r = HE::uiElementRect(tree, e);
+	return { { r.x, r.y }, { r.x + r.w, r.y + r.h } };
+}
+
+// Parent rect in CANVAS units (canvas root for parentId 0). Used to place the
+// anchor marker and drop point.
+Rect parentCanvasRect(const UIWidgetTree& tree, int parentId)
 {
 	Rect parent{ {0.0f, 0.0f}, { tree.canvasWidth, tree.canvasHeight } };
-	if (n.parentId != 0)
-		if (const UIWidgetNode* p = tree.findNode(n.parentId))
-			parent = nodeCanvasRect(tree, *p);
-
-	const ImVec2 ap = anchorPoint(n.anchor);
-	const ImVec2 parentSize(parent.mx.x - parent.mn.x, parent.mx.y - parent.mn.y);
-	const float x = parent.mn.x + ap.x * parentSize.x + n.posX - n.pivotX * n.sizeX;
-	const float y = parent.mn.y + ap.y * parentSize.y + n.posY - n.pivotY * n.sizeY;
-	return { { x, y }, { x + n.sizeX, y + n.sizeY } };
+	if (parentId != 0)
+		if (const UIElement* p = tree.find(parentId))
+			parent = elementCanvasRect(tree, *p);
+	return parent;
 }
 
-bool nodeVisibleInTree(const UIWidgetTree& tree, const UIWidgetNode& n)
+ImU32 toCol32(const glm::vec4& c)
 {
-	if (!n.visible) return false;
-	if (n.parentId == 0) return true;
-	const UIWidgetNode* p = tree.findNode(n.parentId);
-	return p ? nodeVisibleInTree(tree, *p) : true;
+	return IM_COL32(int(c.r * 255.0f), int(c.g * 255.0f),
+	                int(c.b * 255.0f), int(c.a * 255.0f));
 }
 
-ImU32 toCol32(const float c[4])
+const char* typeName(UIWidgetType t) { return HE::uiWidgetTypeName(t); }
+
+// Element display name (custom name, else type name).
+std::string elementName(const UIElement& e)
 {
-	return IM_COL32(int(c[0] * 255.0f), int(c[1] * 255.0f),
-	                int(c[2] * 255.0f), int(c[3] * 255.0f));
+	return e.name.empty() ? std::string(e.typeName()) : e.name;
 }
 
-const char* typeName(UIWidgetType t)
+// Generic property read helpers (return sensible fallbacks when absent).
+glm::vec4 propColorOr(const UIElement& e, const char* name, const glm::vec4& fb)
 {
-	switch (t)
-	{
-		case UIWidgetType::Panel:  return "Panel";
-		case UIWidgetType::Image:  return "Image";
-		case UIWidgetType::Text:   return "Text";
-		case UIWidgetType::Button: return "Button";
-	}
-	return "?";
+	const UIPropValue v = e.getProp(name);
+	return v.type == UIPropType::Color ? v.col : fb;
+}
+std::string propStringOr(const UIElement& e, const char* name, const std::string& fb)
+{
+	const UIPropValue v = e.getProp(name);
+	return v.type == UIPropType::String ? v.s : fb;
+}
+float propFloatOr(const UIElement& e, const char* name, float fb)
+{
+	const UIPropValue v = e.getProp(name);
+	return v.type == UIPropType::Float ? v.f : fb;
+}
+bool propBoolOr(const UIElement& e, const char* name, bool fb)
+{
+	const UIPropValue v = e.getProp(name);
+	return v.type == UIPropType::Bool ? v.b : fb;
 }
 
 // ── Undo (combined tree + graph snapshot; '\x1f' = ASCII Unit Separator) ──────
 std::string makeSnapshot(const State& st)
 {
-	return HE::uiWidgetTreeToJson(st.tree) + '\x1f' + HE::uiWidgetGraphToJson(st.graph);
+	return HE::uiWidgetTreeToJson(st.tree) + '\x1f' + HC::toJson(st.graph);
 }
 
 void pushUndo(State& st)
@@ -151,9 +172,9 @@ bool restoreSnapshot(State& st, int pos)
 	const size_t sep = snap.find('\x1f');
 	HE::uiWidgetTreeFromJson(snap.substr(0, sep), st.tree);
 	if (sep != std::string::npos)
-		HE::uiWidgetGraphFromJson(snap.substr(sep + 1), st.graph);
+		HC::fromJson(snap.substr(sep + 1), st.graph);
 	st.undoPos = pos;
-	if (st.selected != 0 && !st.tree.findNode(st.selected)) st.selected = 0;
+	if (st.selected != 0 && !st.tree.find(st.selected)) st.selected = 0;
 	if (st.selectedGraphNode != 0 && !st.graph.findNode(st.selectedGraphNode))
 		st.selectedGraphNode = 0;
 	st.dirty = true;
@@ -175,7 +196,7 @@ void loadState(State& st, AppContext& ctx, const std::string& assetPath)
 	if (const UIWidgetAsset* a = ctx.contentManager->getWidget(st.assetId))
 	{
 		if (!a->treeJson.empty())  HE::uiWidgetTreeFromJson(a->treeJson, st.tree);
-		if (!a->graphJson.empty()) HE::uiWidgetGraphFromJson(a->graphJson, st.graph);
+		if (!a->graphJson.empty()) HC::fromJson(a->graphJson, st.graph);
 	}
 
 	st.loaded = true;
@@ -194,7 +215,7 @@ void saveState(State& st, AppContext& ctx)
 		return;
 	}
 	a->treeJson  = HE::uiWidgetTreeToJson(st.tree);
-	a->graphJson = HE::uiWidgetGraphToJson(st.graph);
+	a->graphJson = HC::toJson(st.graph);
 	if (ctx.contentManager->saveAsset(*a)) st.dirty = false;
 }
 
@@ -206,7 +227,7 @@ void applyToAsset(State& st, AppContext& ctx)
 	if (UIWidgetAsset* a = ctx.contentManager->getWidgetMutable(st.assetId))
 	{
 		a->treeJson  = HE::uiWidgetTreeToJson(st.tree);
-		a->graphJson = HE::uiWidgetGraphToJson(st.graph);
+		a->graphJson = HC::toJson(st.graph);
 	}
 }
 
@@ -217,69 +238,40 @@ void commitEdit(State& st, AppContext& ctx)
 	applyToAsset(st, ctx);
 }
 
-// ── Node factory ───────────────────────────────────────────────────────────────
-UIWidgetNode makeNode(UIWidgetType type)
+// ── Element factory / placement ─────────────────────────────────────────────────
+// Add an element under `parentId`, centered in the parent (or at an explicit
+// canvas point when provided). Returns the new element id.
+int addElementAt(State& st, UIWidgetType type, int parentId, const ImVec2* canvasPt)
 {
-	UIWidgetNode n;
-	n.type = type;
-	switch (type)
-	{
-	case UIWidgetType::Panel:
-		n.sizeX = 300.0f; n.sizeY = 200.0f;
-		n.color[0] = n.color[1] = n.color[2] = 0.12f; n.color[3] = 0.85f;
-		break;
-	case UIWidgetType::Image:
-		n.sizeX = 128.0f; n.sizeY = 128.0f;
-		break;
-	case UIWidgetType::Text:
-		n.sizeX = 200.0f; n.sizeY = 30.0f;
-		n.text = "Text"; n.fontSize = 22.0f;
-		break;
-	case UIWidgetType::Button:
-		n.sizeX = 180.0f; n.sizeY = 48.0f;
-		n.color[0] = n.color[1] = n.color[2] = 0.20f; n.color[3] = 1.0f;
-		n.text = "Button"; n.fontSize = 20.0f;
-		break;
-	}
-	return n;
-}
+	std::unique_ptr<UIElement> e = HE::makeUIElement(type);
+	if (!e) return 0;
+	e->parentId = parentId;
+	e->name = std::string(typeName(type));
 
-// Add a node under `parentId`, centered in the parent (or at an explicit canvas
-// point when provided). Returns the new node id.
-int addNodeAt(State& st, UIWidgetType type, int parentId, const ImVec2* canvasPt)
-{
-	UIWidgetNode n = makeNode(type);
-	n.parentId = parentId;
-	n.name = std::string(typeName(type));
-
-	Rect parent{ {0,0}, { st.tree.canvasWidth, st.tree.canvasHeight } };
-	if (parentId != 0)
-		if (const UIWidgetNode* p = st.tree.findNode(parentId))
-			parent = nodeCanvasRect(st.tree, *p);
-
+	const Rect parent = parentCanvasRect(st.tree, parentId);
 	if (canvasPt)
 	{
 		// anchor TopLeft, pivot 0.5: position = drop point relative to parent TL.
-		n.anchor = 0;
-		n.posX = canvasPt->x - parent.mn.x;
-		n.posY = canvasPt->y - parent.mn.y;
+		e->anchor = 0;
+		e->posX = canvasPt->x - parent.mn.x;
+		e->posY = canvasPt->y - parent.mn.y;
 	}
 	else
 	{
-		n.anchor = 4; // MiddleCenter
-		n.posX = 0.0f; n.posY = 0.0f;
+		e->anchor = 4; // MiddleCenter
+		e->posX = 0.0f; e->posY = 0.0f;
 	}
-	return st.tree.addNode(std::move(n));
+	return st.tree.add(std::move(e));
 }
 
 int duplicateSubtree(State& st, int srcId, int parentId)
 {
-	const UIWidgetNode* src = st.tree.findNode(srcId);
+	const UIElement* src = st.tree.find(srcId);
 	if (!src) return 0;
-	UIWidgetNode copy = *src;
-	copy.parentId = parentId;
-	if (parentId == src->parentId) { copy.posX += 20.0f; copy.posY += 20.0f; }
-	const int newId = st.tree.addNode(std::move(copy));
+	std::unique_ptr<UIElement> copy = src->clone();
+	copy->parentId = parentId;
+	if (parentId == src->parentId) { copy->posX += 20.0f; copy->posY += 20.0f; }
+	const int newId = st.tree.add(std::move(copy));
 	for (int c : st.tree.childrenOf(srcId))
 		duplicateSubtree(st, c, newId);
 	return newId;
@@ -331,7 +323,7 @@ bool assetSlot(AppContext& ctx, const char* label, std::string& path,
 // ── Hierarchy panel (recursive tree) ───────────────────────────────────────────
 void drawHierarchyNode(State& st, AppContext& ctx, int nodeId, bool& structureEdit)
 {
-	UIWidgetNode* n = st.tree.findNode(nodeId);
+	UIElement* n = st.tree.find(nodeId);
 	if (!n) return;
 
 	const auto children = st.tree.childrenOf(nodeId);
@@ -341,8 +333,7 @@ void drawHierarchyNode(State& st, AppContext& ctx, int nodeId, bool& structureEd
 	if (children.empty())      flags |= ImGuiTreeNodeFlags_Leaf;
 	if (st.selected == nodeId) flags |= ImGuiTreeNodeFlags_Selected;
 
-	const std::string label = (n->name.empty() ? typeName(n->type) : n->name.c_str())
-		+ std::string("##hn") + std::to_string(nodeId);
+	const std::string label = elementName(*n) + "##hn" + std::to_string(nodeId);
 	const bool open = ImGui::TreeNodeEx(label.c_str(), flags);
 	if (ImGui::IsItemClicked(ImGuiMouseButton_Left) && !ImGui::IsItemToggledOpen())
 		st.selected = nodeId;
@@ -351,7 +342,7 @@ void drawHierarchyNode(State& st, AppContext& ctx, int nodeId, bool& structureEd
 	if (ImGui::BeginDragDropSource())
 	{
 		ImGui::SetDragDropPayload("HE_UIWIDGET_NODE", &nodeId, sizeof(int));
-		ImGui::TextUnformatted(n->name.empty() ? typeName(n->type) : n->name.c_str());
+		ImGui::TextUnformatted(elementName(*n).c_str());
 		ImGui::EndDragDropSource();
 	}
 	if (ImGui::BeginDragDropTarget())
@@ -359,9 +350,11 @@ void drawHierarchyNode(State& st, AppContext& ctx, int nodeId, bool& structureEd
 		if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_UIWIDGET_NODE"))
 		{
 			const int dragged = *static_cast<const int*>(p->Data);
-			if (dragged != nodeId && !st.tree.isDescendantOf(nodeId, dragged))
+			// Only Panels may contain children.
+			if (dragged != nodeId && !st.tree.isDescendantOf(nodeId, dragged) &&
+			    n->type() == UIWidgetType::Panel)
 			{
-				if (UIWidgetNode* d = st.tree.findNode(dragged))
+				if (UIElement* d = st.tree.find(dragged))
 				{
 					d->parentId = nodeId;
 					structureEdit = true;
@@ -371,7 +364,9 @@ void drawHierarchyNode(State& st, AppContext& ctx, int nodeId, bool& structureEd
 		if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_UIWIDGET_NEW"))
 		{
 			const int t = *static_cast<const int*>(p->Data);
-			st.selected = addNodeAt(st, static_cast<UIWidgetType>(t), nodeId, nullptr);
+			// New elements nest under Panels; otherwise share the target's parent.
+			const int parent = n->type() == UIWidgetType::Panel ? nodeId : n->parentId;
+			st.selected = addElementAt(st, static_cast<UIWidgetType>(t), parent, nullptr);
 			structureEdit = true;
 		}
 		ImGui::EndDragDropTarget();
@@ -402,10 +397,101 @@ void drawHierarchyNode(State& st, AppContext& ctx, int nodeId, bool& structureEd
 	}
 }
 
+// ── Generic property editor ─────────────────────────────────────────────────────
+// Draws one editable widget for a UIPropDesc; reads via getProp, writes via
+// setProp. `edit` set on any change this frame (live view), `committed` when an
+// edit finished (undo snapshot + live asset).
+void drawPropertyWidget(UIElement& e, const UIPropDesc& pd, bool& edit, bool& committed)
+{
+	const std::string id = "##p_" + pd.name;
+	switch (pd.type)
+	{
+	case UIPropType::Float:
+	{
+		float v = e.getProp(pd.name).f;
+		const bool ranged = pd.minV < pd.maxV;
+		const bool ch = ranged
+			? ImGui::SliderFloat((pd.name + id).c_str(), &v, pd.minV, pd.maxV)
+			: ImGui::DragFloat((pd.name + id).c_str(), &v, 0.5f);
+		if (ch) { e.setProp(pd.name, UIPropValue::ofFloat(v)); edit = true; }
+		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		break;
+	}
+	case UIPropType::Int:
+	{
+		int v = e.getProp(pd.name).i;
+		if (ImGui::DragInt((pd.name + id).c_str(), &v, 1))
+			{ e.setProp(pd.name, UIPropValue::ofInt(v)); edit = true; }
+		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		break;
+	}
+	case UIPropType::Bool:
+	{
+		bool v = e.getProp(pd.name).b;
+		if (ImGui::Checkbox((pd.name + id).c_str(), &v))
+			{ e.setProp(pd.name, UIPropValue::ofBool(v)); committed = true; }
+		break;
+	}
+	case UIPropType::String:
+	{
+		std::string v = e.getProp(pd.name).s;
+		if (ImGui::InputText((pd.name + id).c_str(), &v))
+			{ e.setProp(pd.name, UIPropValue::ofString(v)); edit = true; }
+		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		break;
+	}
+	case UIPropType::Color:
+	{
+		glm::vec4 v = e.getProp(pd.name).col;
+		if (ImGui::ColorEdit4((pd.name + id).c_str(), &v.x))
+			{ e.setProp(pd.name, UIPropValue::ofColor(v)); edit = true; }
+		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		break;
+	}
+	case UIPropType::Vec2:
+	{
+		glm::vec2 v = e.getProp(pd.name).v2;
+		if (ImGui::DragFloat2((pd.name + id).c_str(), &v.x, 0.5f))
+			{ e.setProp(pd.name, UIPropValue::ofVec2(v)); edit = true; }
+		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		break;
+	}
+	case UIPropType::StringList:
+	{
+		// Small list editor: one InputText + delete per row, plus an add button.
+		ImGui::TextUnformatted(pd.name.c_str());
+		std::vector<std::string> list = e.getProp(pd.name).list;
+		bool listEdit = false, listCommit = false;
+		int removeAt = -1;
+		for (int i = 0; i < (int)list.size(); ++i)
+		{
+			ImGui::PushID(i);
+			ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 28.0f);
+			if (ImGui::InputText((id + "_row").c_str(), &list[i])) listEdit = true;
+			listCommit |= ImGui::IsItemDeactivatedAfterEdit();
+			ImGui::SameLine();
+			if (ImGui::SmallButton("x")) { removeAt = i; listCommit = true; }
+			ImGui::PopID();
+		}
+		if (removeAt >= 0) list.erase(list.begin() + removeAt);
+		if (ImGui::SmallButton((std::string("+") + id + "_add").c_str()))
+			{ list.push_back("Item"); listCommit = true; }
+		if (listEdit || listCommit)
+		{
+			UIPropValue v; v.type = UIPropType::StringList; v.list = list;
+			e.setProp(pd.name, v);
+			if (listEdit) edit = true;
+			if (listCommit) committed = true;
+		}
+		break;
+	}
+	}
+}
+
 // ── Details panel ──────────────────────────────────────────────────────────────
 void drawDetails(State& st, AppContext& ctx)
 {
-	UIWidgetNode* n = st.tree.findNode(st.selected);
+	UIElement* n = st.tree.find(st.selected);
 	if (!n)
 	{
 		// Canvas settings when nothing is selected.
@@ -425,13 +511,13 @@ void drawDetails(State& st, AppContext& ctx)
 	bool edit      = false; // any value changed this frame (live view update)
 	bool committed = false; // an edit finished (undo snapshot + live asset)
 
-	ImGui::TextDisabled("%s", typeName(n->type));
+	ImGui::TextDisabled("%s", n->typeName());
 	ImGui::Separator();
 
 	ImGui::InputText("Name", &n->name);
 	committed |= ImGui::IsItemDeactivatedAfterEdit();
 
-	// Layout
+	// Layout — shared base fields.
 	ImGui::SeparatorText("Layout");
 	edit |= ImGui::DragFloat2("Position", &n->posX, 1.0f);
 	committed |= ImGui::IsItemDeactivatedAfterEdit();
@@ -469,41 +555,20 @@ void drawDetails(State& st, AppContext& ctx)
 	committed |= ImGui::IsItemDeactivatedAfterEdit();
 	if (ImGui::Checkbox("Visible", &n->visible)) committed = true;
 
-	// Appearance
-	ImGui::SeparatorText("Appearance");
-	const char* colorLabel =
-		n->type == UIWidgetType::Text   ? "Color" :
-		n->type == UIWidgetType::Button ? "Normal" : "Tint";
-	edit |= ImGui::ColorEdit4(colorLabel, n->color);
-	committed |= ImGui::IsItemDeactivatedAfterEdit();
-
-	if (n->type == UIWidgetType::Button)
+	// Type-specific properties (generic, driven by properties()).
+	const std::vector<UIPropDesc> props = n->properties();
+	if (!props.empty())
 	{
-		edit |= ImGui::ColorEdit4("Hovered", n->hoveredColor);
-		committed |= ImGui::IsItemDeactivatedAfterEdit();
-		edit |= ImGui::ColorEdit4("Pressed", n->pressedColor);
-		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		ImGui::SeparatorText("Properties");
+		for (const UIPropDesc& pd : props)
+			drawPropertyWidget(*n, pd, edit, committed);
 	}
 
-	if (n->type == UIWidgetType::Text || n->type == UIWidgetType::Button)
-	{
-		ImGui::SeparatorText("Text");
-		ImGui::InputText("Text", &n->text);
-		committed |= ImGui::IsItemDeactivatedAfterEdit();
-		edit |= ImGui::DragFloat("Font Size", &n->fontSize, 0.5f, 4.0f, 256.0f);
-		committed |= ImGui::IsItemDeactivatedAfterEdit();
-		if (n->type == UIWidgetType::Button)
-		{
-			edit |= ImGui::ColorEdit4("Text Color", n->textColor);
-			committed |= ImGui::IsItemDeactivatedAfterEdit();
-		}
-	}
-
-	// Material (quad types only — text runs have no quad to shade).
-	if (n->type != UIWidgetType::Text)
+	// Material slot (only types that expose one — text runs have no quad).
+	if (n->hasMaterialSlot())
 	{
 		ImGui::SeparatorText("Material");
-		committed |= assetSlot(ctx, "Material", n->materialPath,
+		committed |= assetSlot(ctx, "Material", n->material,
 		                       HE::AssetType::Material, "mat");
 	}
 
@@ -512,34 +577,37 @@ void drawDetails(State& st, AppContext& ctx)
 }
 
 // Forward-declared so the Designer details can spawn graph event nodes.
-void addOrFocusEvent(State& st, AppContext& ctx, GT eventType, int elem);
+void addOrFocusEvent(State& st, AppContext& ctx, const std::string& eventName,
+                     const UIEventDesc& desc, int elem);
 
 // Events section shown under the selected element in the Designer — each button
 // adds (or focuses) the matching event node in the logic graph and jumps to
-// Graph mode (Unreal-style "add event → wire it up in the graph").
+// Graph mode (Unreal-style "add event → wire it up in the graph"). Events come
+// from the element type's events() list.
 void drawDetailsEvents(State& st, AppContext& ctx)
 {
-	UIWidgetNode* n = st.tree.findNode(st.selected);
+	UIElement* n = st.tree.find(st.selected);
 	if (!n) return;
+	const std::vector<UIEventDesc> evs = n->events();
+	if (evs.empty()) return;
+
 	ImGui::SeparatorText("Events");
-	auto eventButton = [&](const char* label, GT type)
+	for (const UIEventDesc& d : evs)
 	{
 		const bool exists = [&]{
 			for (const auto& g : st.graph.nodes)
-				if (g.type == type && g.elem == n->id) return true;
+				if (g.type == NT::Event && g.s == d.name && g.elem == n->id) return true;
 			return false;
 		}();
-		if (ImGui::Button(label, ImVec2(-1.0f, 0)))
-			addOrFocusEvent(st, ctx, type, n->id);
+		const std::string label = "+ " + d.name + "##ev";
+		if (ImGui::Button(label.c_str(), ImVec2(-1.0f, 0)))
+			addOrFocusEvent(st, ctx, d.name, d, n->id);
 		if (exists)
 		{
 			ImGui::SameLine();
 			ImGui::TextDisabled("added");
 		}
-	};
-	eventButton("+ On Click##ev",      GT::EventClick);
-	eventButton("+ On Hover Enter##ev", GT::EventHoverEnter);
-	eventButton("+ On Hover Exit##ev",  GT::EventHoverExit);
+	}
 }
 
 // ── Canvas ─────────────────────────────────────────────────────────────────────
@@ -557,6 +625,150 @@ void handleDelta(int handle, const ImVec2& d, ImVec2& dMin, ImVec2& dMax)
 		case 5: dMax.y = d.y; break;                      // B
 		case 6: dMin.x = d.x; break;                      // L
 		case 7: dMax.x = d.x; break;                      // R
+	}
+}
+
+// Draw a simplified WYSIWYG preview of one element from its generic properties.
+void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
+                        const ImVec2& mx, float s)
+{
+	switch (n.type())
+	{
+	case UIWidgetType::Panel:
+	{
+		dl->AddRectFilled(mn, mx, toCol32(propColorOr(n, "Color", { 0.12f,0.12f,0.12f,0.85f })));
+		break;
+	}
+	case UIWidgetType::Image:
+	{
+		dl->AddRectFilled(mn, mx, toCol32(propColorOr(n, "Tint", { 1,1,1,1 })));
+		if (n.material.empty())
+		{
+			// Placeholder crossed box so an unstyled image is visible.
+			dl->AddRect(mn, mx, IM_COL32(160,160,170,120));
+			dl->AddLine(mn, mx, IM_COL32(160,160,170,90));
+			dl->AddLine(ImVec2(mn.x, mx.y), ImVec2(mx.x, mn.y), IM_COL32(160,160,170,90));
+		}
+		else
+		{
+			const std::string matName = std::filesystem::path(n.material).stem().string();
+			dl->AddText(nullptr, 12.0f * std::max(0.6f, s),
+				ImVec2(mn.x + 3, mn.y + 3), IM_COL32(220,220,230,140), matName.c_str());
+		}
+		break;
+	}
+	case UIWidgetType::Text:
+	{
+		const float fs = propFloatOr(n, "FontSize", 22.0f) * s;
+		const std::string txt = propStringOr(n, "Text", "");
+		dl->AddText(nullptr, fs, mn, toCol32(propColorOr(n, "Color", { 1,1,1,1 })),
+		            txt.empty() ? "(empty)" : txt.c_str());
+		break;
+	}
+	case UIWidgetType::Button:
+	{
+		dl->AddRectFilled(mn, mx, toCol32(propColorOr(n, "Normal Color", { 0.20f,0.20f,0.20f,1 })), 4.0f * s);
+		dl->AddRect(mn, mx, IM_COL32(200,200,210,60), 4.0f * s);
+		const std::string txt = propStringOr(n, "Text", "");
+		if (!txt.empty())
+		{
+			const float fs = propFloatOr(n, "FontSize", 20.0f) * s;
+			const ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, 0.0f, txt.c_str());
+			dl->AddText(nullptr, fs,
+				ImVec2((mn.x + mx.x - ts.x) * 0.5f, (mn.y + mx.y - ts.y) * 0.5f),
+				toCol32(propColorOr(n, "Text Color", { 1,1,1,1 })), txt.c_str());
+		}
+		break;
+	}
+	case UIWidgetType::CheckBox:
+	{
+		// Square box on the left + label to its right.
+		const float boxSz = mx.y - mn.y;
+		const ImVec2 bmx(mn.x + boxSz, mx.y);
+		dl->AddRectFilled(mn, bmx, toCol32(propColorOr(n, "Box Color", { 0.20f,0.20f,0.20f,1 })), 3.0f * s);
+		dl->AddRect(mn, bmx, IM_COL32(200,200,210,90), 3.0f * s);
+		if (propBoolOr(n, "Checked", false))
+		{
+			const float pad = boxSz * 0.22f;
+			dl->AddRectFilled(ImVec2(mn.x + pad, mn.y + pad), ImVec2(bmx.x - pad, bmx.y - pad),
+				toCol32(propColorOr(n, "Check Color", { 0.30f,0.80f,0.40f,1 })), 2.0f * s);
+		}
+		const std::string lbl = propStringOr(n, "Label", "");
+		if (!lbl.empty())
+		{
+			const float fs = propFloatOr(n, "FontSize", 18.0f) * s;
+			dl->AddText(nullptr, fs, ImVec2(bmx.x + 6 * s, (mn.y + mx.y - fs) * 0.5f),
+				toCol32(propColorOr(n, "Text Color", { 1,1,1,1 })), lbl.c_str());
+		}
+		break;
+	}
+	case UIWidgetType::Slider:
+	{
+		// Track, fill up to normalized value, round handle at the value.
+		const float minV = propFloatOr(n, "Min", 0.0f);
+		const float maxV = propFloatOr(n, "Max", 1.0f);
+		const float val  = propFloatOr(n, "Value", 0.5f);
+		const float span = maxV - minV;
+		float t = span > 0.0f ? (val - minV) / span : 0.0f;
+		t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+		const float cy = (mn.y + mx.y) * 0.5f;
+		const float trackH = std::max(2.0f, (mx.y - mn.y) * 0.28f);
+		dl->AddRectFilled(ImVec2(mn.x, cy - trackH * 0.5f), ImVec2(mx.x, cy + trackH * 0.5f),
+			toCol32(propColorOr(n, "Track Color", { 0.20f,0.20f,0.20f,1 })), trackH * 0.5f);
+		const float hx = mn.x + t * (mx.x - mn.x);
+		dl->AddRectFilled(ImVec2(mn.x, cy - trackH * 0.5f), ImVec2(hx, cy + trackH * 0.5f),
+			toCol32(propColorOr(n, "Fill Color", { 0.30f,0.60f,0.90f,1 })), trackH * 0.5f);
+		dl->AddCircleFilled(ImVec2(hx, cy), std::max(3.0f, (mx.y - mn.y) * 0.4f),
+			toCol32(propColorOr(n, "Handle Color", { 0.90f,0.90f,0.90f,1 })));
+		break;
+	}
+	case UIWidgetType::ProgressBar:
+	{
+		float val = propFloatOr(n, "Value", 0.5f);
+		val = val < 0.0f ? 0.0f : (val > 1.0f ? 1.0f : val);
+		dl->AddRectFilled(mn, mx, toCol32(propColorOr(n, "Back Color", { 0.15f,0.15f,0.15f,1 })), 3.0f * s);
+		dl->AddRectFilled(mn, ImVec2(mn.x + val * (mx.x - mn.x), mx.y),
+			toCol32(propColorOr(n, "Fill Color", { 0.30f,0.70f,0.40f,1 })), 3.0f * s);
+		break;
+	}
+	case UIWidgetType::TextInput:
+	{
+		dl->AddRectFilled(mn, mx, toCol32(propColorOr(n, "Back Color", { 0.10f,0.10f,0.10f,1 })), 3.0f * s);
+		dl->AddRect(mn, mx, IM_COL32(200,200,210,70), 3.0f * s);
+		const std::string txt = propStringOr(n, "Text", "");
+		const bool placeholder = txt.empty();
+		const std::string shown = placeholder ? propStringOr(n, "Placeholder", "") : txt;
+		if (!shown.empty())
+		{
+			const float fs = propFloatOr(n, "FontSize", 18.0f) * s;
+			dl->AddText(nullptr, fs, ImVec2(mn.x + 4 * s, (mn.y + mx.y - fs) * 0.5f),
+				placeholder ? IM_COL32(160,160,170,140)
+				            : toCol32(propColorOr(n, "Text Color", { 1,1,1,1 })), shown.c_str());
+		}
+		break;
+	}
+	case UIWidgetType::ComboBox:
+	{
+		dl->AddRectFilled(mn, mx, toCol32(propColorOr(n, "Back Color", { 0.15f,0.15f,0.15f,1 })), 3.0f * s);
+		dl->AddRect(mn, mx, IM_COL32(200,200,210,70), 3.0f * s);
+		// Current option = Options[Selected Index].
+		std::string shown;
+		const UIPropValue opts = n.getProp("Options");
+		const int idx = n.getProp("Selected Index").i;
+		if (opts.type == UIPropType::StringList && idx >= 0 && idx < (int)opts.list.size())
+			shown = opts.list[idx];
+		const float fs = propFloatOr(n, "FontSize", 18.0f) * s;
+		if (!shown.empty())
+			dl->AddText(nullptr, fs, ImVec2(mn.x + 4 * s, (mn.y + mx.y - fs) * 0.5f),
+				toCol32(propColorOr(n, "Text Color", { 1,1,1,1 })), shown.c_str());
+		// Dropdown arrow.
+		const float ax = mx.x - (mx.y - mn.y) * 0.5f, ay = (mn.y + mx.y) * 0.5f;
+		const float ar = std::max(2.0f, (mx.y - mn.y) * 0.14f);
+		dl->AddTriangleFilled(ImVec2(ax - ar, ay - ar * 0.6f), ImVec2(ax + ar, ay - ar * 0.6f),
+			ImVec2(ax, ay + ar * 0.6f), IM_COL32(200,200,210,180));
+		break;
+	}
+	default: break;
 	}
 }
 
@@ -623,19 +835,20 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	            IM_COL32(90, 90, 100, 255));
 
 	// Paint order: (layer, depth) ascending — same rule as the runtime.
-	struct DrawItem { const UIWidgetNode* n; int layer; int depth; Rect r; };
+	struct DrawItem { const UIElement* n; int layer; int depth; Rect r; };
 	std::vector<DrawItem> items;
-	for (const auto& n : st.tree.nodes)
+	for (const auto& ep : st.tree.elements)
 	{
-		if (!nodeVisibleInTree(st.tree, n)) continue;
+		const UIElement& n = *ep;
+		if (!HE::uiElementEffectiveVisible(st.tree, n)) continue;
 		int depth = 0;
-		for (const UIWidgetNode* c = &n; c->parentId != 0 && depth < 255; ++depth)
+		for (const UIElement* c = &n; c->parentId != 0 && depth < 255; ++depth)
 		{
-			const UIWidgetNode* p = st.tree.findNode(c->parentId);
+			const UIElement* p = st.tree.find(c->parentId);
 			if (!p) break;
 			c = p;
 		}
-		items.push_back({ &n, n.layer * 256 + depth, depth, nodeCanvasRect(st.tree, n) });
+		items.push_back({ &n, n.layer * 256 + depth, depth, elementCanvasRect(st.tree, n) });
 	}
 	std::stable_sort(items.begin(), items.end(),
 		[](const DrawItem& a, const DrawItem& b){ return a.layer < b.layer; });
@@ -644,68 +857,22 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	for (const DrawItem& it : items)
 	{
 		const ImVec2 mn = toScreen(it.r.mn), mx = toScreen(it.r.mx);
-		const UIWidgetNode& n = *it.n;
-		switch (n.type)
-		{
-		case UIWidgetType::Panel:
-		case UIWidgetType::Image:
-			dl->AddRectFilled(mn, mx, toCol32(n.color));
-			if (n.type == UIWidgetType::Image && n.materialPath.empty())
-			{
-				// Placeholder crossed box so an unstyled image is visible.
-				dl->AddRect(mn, mx, IM_COL32(160,160,170,120));
-				dl->AddLine(mn, mx, IM_COL32(160,160,170,90));
-				dl->AddLine(ImVec2(mn.x, mx.y), ImVec2(mx.x, mn.y), IM_COL32(160,160,170,90));
-			}
-			if (n.type == UIWidgetType::Image && !n.materialPath.empty())
-			{
-				const std::string matName =
-					std::filesystem::path(n.materialPath).stem().string();
-				dl->AddText(nullptr, 12.0f * std::max(0.6f, s),
-					ImVec2(mn.x + 3, mn.y + 3), IM_COL32(220,220,230,140), matName.c_str());
-			}
-			break;
-		case UIWidgetType::Button:
-		{
-			dl->AddRectFilled(mn, mx, toCol32(n.color), 4.0f * s);
-			dl->AddRect(mn, mx, IM_COL32(200,200,210,60), 4.0f * s);
-			if (!n.text.empty())
-			{
-				const float fs = n.fontSize * s;
-				const ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, 0.0f, n.text.c_str());
-				dl->AddText(nullptr, fs,
-					ImVec2((mn.x + mx.x - ts.x) * 0.5f, (mn.y + mx.y - ts.y) * 0.5f),
-					toCol32(n.textColor), n.text.c_str());
-			}
-			break;
-		}
-		case UIWidgetType::Text:
-		{
-			const float fs = n.fontSize * s;
-			dl->AddText(nullptr, fs, mn, toCol32(n.color),
-			            n.text.empty() ? "(empty)" : n.text.c_str());
-			break;
-		}
-		}
+		drawElementPreview(dl, *it.n, mn, mx, s);
 	}
 	dl->PopClipRect();
 
 	// ── Selection outline, resize handles, anchor marker ─────────────────────
 	const float hs = 4.0f; // handle half-size in px
 	int hoveredHandle = -1;
-	Rect selRect{};
-	UIWidgetNode* sel = st.tree.findNode(st.selected);
+	UIElement* sel = st.tree.find(st.selected);
 	if (sel)
 	{
-		selRect = nodeCanvasRect(st.tree, *sel);
+		const Rect selRect = elementCanvasRect(st.tree, *sel);
 		const ImVec2 mn = toScreen(selRect.mn), mx = toScreen(selRect.mx);
 		dl->AddRect(mn, mx, IM_COL32(255, 170, 40, 255), 0, 0, 2.0f);
 
 		// Anchor marker inside the parent rect.
-		Rect parent{ {0,0}, { st.tree.canvasWidth, st.tree.canvasHeight } };
-		if (sel->parentId != 0)
-			if (const UIWidgetNode* p = st.tree.findNode(sel->parentId))
-				parent = nodeCanvasRect(st.tree, *p);
+		const Rect parent = parentCanvasRect(st.tree, sel->parentId);
 		const ImVec2 ap = anchorPoint(sel->anchor);
 		const ImVec2 apos = toScreen(ImVec2(
 			parent.mn.x + ap.x * (parent.mx.x - parent.mn.x),
@@ -757,7 +924,7 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 			st.selected = hit;
 			if (hit != 0)
 			{
-				UIWidgetNode* n2 = st.tree.findNode(hit);
+				UIElement* n2 = st.tree.find(hit);
 				st.dragMode = 1;
 				st.dragStartMouse = mouse;
 				st.dragStartPos[0] = n2->posX; st.dragStartPos[1] = n2->posY;
@@ -768,7 +935,7 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 
 	if (st.dragMode != 0 && ImGui::IsMouseDown(ImGuiMouseButton_Left))
 	{
-		UIWidgetNode* n2 = st.tree.findNode(st.selected);
+		UIElement* n2 = st.tree.find(st.selected);
 		if (n2)
 		{
 			const ImVec2 d((mouse.x - st.dragStartMouse.x) / s,
@@ -813,11 +980,11 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 			// Drop into the topmost PANEL under the cursor (containers nest).
 			int parent = 0;
 			for (auto it = items.rbegin(); it != items.rend(); ++it)
-				if (it->n->type == UIWidgetType::Panel &&
+				if (it->n->type() == UIWidgetType::Panel &&
 				    cpt.x >= it->r.mn.x && cpt.x <= it->r.mx.x &&
 				    cpt.y >= it->r.mn.y && cpt.y <= it->r.mx.y)
 					{ parent = it->n->id; break; }
-			st.selected = addNodeAt(st, static_cast<UIWidgetType>(t), parent, &cpt);
+			st.selected = addElementAt(st, static_cast<UIWidgetType>(t), parent, &cpt);
 			commitEdit(st, ctx);
 		}
 		ImGui::EndDragDropTarget();
@@ -825,7 +992,7 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-//  Graph mode — Blueprint-style logic editor
+//  Graph mode — HorizonCode visual-scripting editor
 // ═══════════════════════════════════════════════════════════════════════════════
 
 constexpr float kGNodeW  = 168.0f;
@@ -833,48 +1000,34 @@ constexpr float kGTitleH = 22.0f;
 constexpr float kGRowH   = 18.0f;
 constexpr float kGPinR   = 4.5f;
 
-// Effective data-pin type (Get/SetProperty retype their value pin to the
-// selected property's type — mirrors UIWidgetGraph.cpp's dataPinType).
-GP graphDataPinType(const HE::UIGraphNode& n, bool input, int index)
-{
-	if (n.type == GT::GetProperty && !input && index == 0)
-		return HE::uiGraphPropType((HE::UIWidgetProp)n.prop);
-	if (n.type == GT::SetProperty && input && index == 0)
-		return HE::uiGraphPropType((HE::UIWidgetProp)n.prop);
-	const HE::UIGraphNodeDesc& d = HE::uiGraphNodeDesc(n.type);
-	const auto& pins = input ? d.dataIns : d.dataOuts;
-	if (index < 0 || index >= (int)pins.size()) return GP::Float;
-	return pins[index].type;
-}
-
 struct GPinRanges { int execIn0, execOut0, dataIn0, dataOut0, end; };
-GPinRanges graphPinRanges(GT t)
+GPinRanges graphPinRanges(const HC::Node& n)
 {
-	const HE::UIGraphNodeDesc& d = HE::uiGraphNodeDesc(t);
+	const HC::NodeSig sig = HC::signatureOf(n);
 	GPinRanges r;
 	r.execIn0  = 0;
-	r.execOut0 = r.execIn0  + (int)d.execIns.size();
-	r.dataIn0  = r.execOut0 + (int)d.execOuts.size();
-	r.dataOut0 = r.dataIn0  + (int)d.dataIns.size();
-	r.end      = r.dataOut0 + (int)d.dataOuts.size();
+	r.execOut0 = r.execIn0  + (int)sig.execIns.size();
+	r.dataIn0  = r.execOut0 + (int)sig.execOuts.size();
+	r.dataOut0 = r.dataIn0  + (int)sig.dataIns.size();
+	r.end      = r.dataOut0 + (int)sig.dataOuts.size();
 	return r;
 }
 
-int graphNodeRows(GT t)
+int graphNodeRows(const HC::Node& n)
 {
-	const HE::UIGraphNodeDesc& d = HE::uiGraphNodeDesc(t);
-	const int left  = (int)d.execIns.size()  + (int)d.dataIns.size();
-	const int right = (int)d.execOuts.size() + (int)d.dataOuts.size();
+	const HC::NodeSig sig = HC::signatureOf(n);
+	const int left  = (int)sig.execIns.size()  + (int)sig.dataIns.size();
+	const int right = (int)sig.execOuts.size() + (int)sig.dataOuts.size();
 	return std::max(left, right);
 }
-float graphNodeHeight(GT t) { return kGTitleH + graphNodeRows(t) * kGRowH + 6.0f; }
+float graphNodeHeight(const HC::Node& n) { return kGTitleH + graphNodeRows(n) * kGRowH + 6.0f; }
 
 ImU32 graphCatColor(const char* cat)
 {
 	const std::string c = cat;
 	if (c == "Events")    return IM_COL32(150, 55, 55, 255);
 	if (c == "Flow")      return IM_COL32( 92, 92, 98, 255);
-	if (c == "Element")   return IM_COL32( 58, 100, 150, 255);
+	if (c == "Property")  return IM_COL32( 58, 100, 150, 255);
 	if (c == "Widget")    return IM_COL32(150, 118, 55, 255);
 	if (c == "Literals")  return IM_COL32( 58, 128, 82, 255);
 	if (c == "Math")      return IM_COL32( 48, 108, 70, 255);
@@ -885,16 +1038,17 @@ ImU32 graphCatColor(const char* cat)
 	return IM_COL32(100, 100, 100, 255);
 }
 
-ImU32 graphPinColor(GP t)
+ImU32 graphPinColor(PT t)
 {
 	switch (t)
 	{
-		case GP::Exec:   return IM_COL32(235, 235, 235, 255);
-		case GP::Float:  return IM_COL32(160, 200, 120, 255);
-		case GP::Bool:   return IM_COL32(210,  90,  90, 255);
-		case GP::String: return IM_COL32(220, 130, 210, 255);
-		case GP::Vec2:   return IM_COL32(120, 200, 210, 255);
-		case GP::Color:  return IM_COL32(230, 210, 110, 255);
+		case PT::Exec:   return IM_COL32(235, 235, 235, 255);
+		case PT::Float:  return IM_COL32(160, 200, 120, 255);
+		case PT::Bool:   return IM_COL32(210,  90,  90, 255);
+		case PT::Int:    return IM_COL32(110, 200, 200, 255);
+		case PT::String: return IM_COL32(220, 130, 210, 255);
+		case PT::Vec2:   return IM_COL32(120, 200, 210, 255);
+		case PT::Color:  return IM_COL32(230, 210, 110, 255);
 	}
 	return IM_COL32_WHITE;
 }
@@ -902,43 +1056,41 @@ ImU32 graphPinColor(GP t)
 std::string elemLabel(const State& st, int elemId)
 {
 	if (elemId == 0) return "(Any)";
-	const UIWidgetNode* e = st.tree.findNode(elemId);
+	const UIElement* e = st.tree.find(elemId);
 	if (!e) return "(missing)";
-	return e->name.empty() ? typeName(e->type) : e->name;
+	return elementName(*e);
 }
 
-std::string graphNodeTitle(const State& st, const HE::UIGraphNode& n)
+std::string graphNodeTitle(const State& st, const HC::Node& n)
 {
-	const char* base = HE::uiGraphNodeDesc(n.type).name;
+	const char* base = HC::nodeDisplayName(n.type);
 	switch (n.type)
 	{
-		case GT::EventClick:
-		case GT::EventHoverEnter:
-		case GT::EventHoverExit:
-			return std::string(base) + " [" + elemLabel(st, n.elem) + "]";
-		case GT::GetProperty:
-		case GT::SetProperty:
-			return std::string(base) + ": " + HE::uiGraphPropName((HE::UIWidgetProp)n.prop);
-		case GT::FunctionEntry:
-		case GT::FunctionCall:
+		case NT::Event:
+			return (n.s.empty() ? std::string(base) : n.s) + " [" + elemLabel(st, n.elem) + "]";
+		case NT::GetProperty:
+		case NT::SetProperty:
+			return elemLabel(st, n.elem) + " " + (n.s.empty() ? std::string(base) : n.s);
+		case NT::FunctionEntry:
+		case NT::FunctionCall:
 			return std::string(base) + " " + n.s;
 		default:
 			return base;
 	}
 }
 
-ImVec2 graphNodeScreenPos(const State& st, const HE::UIGraphNode& n, const ImVec2& origin)
+ImVec2 graphNodeScreenPos(const State& st, const HC::Node& n, const ImVec2& origin)
 {
 	return ImVec2(origin.x + st.gPan.x + n.x * st.gZoom,
 	              origin.y + st.gPan.y + n.y * st.gZoom);
 }
 
-struct GPinInfo { ImVec2 pos; bool input; bool isExec; GP type; };
-bool graphPinInfo(const HE::UIGraphNode& n, int unifiedPin, const ImVec2& nodePos,
+struct GPinInfo { ImVec2 pos; bool input; bool isExec; PT type; };
+bool graphPinInfo(const HC::Node& n, int unifiedPin, const ImVec2& nodePos,
                   float s, GPinInfo& out)
 {
-	const GPinRanges r = graphPinRanges(n.type);
-	const HE::UIGraphNodeDesc& d = HE::uiGraphNodeDesc(n.type);
+	const GPinRanges r = graphPinRanges(n);
+	const HC::NodeSig sig = HC::signatureOf(n);
 	const float width  = kGNodeW * s;
 	const float titleH = kGTitleH * s, rowH = kGRowH * s;
 	auto rowCenter = [&](int row){ return nodePos.y + titleH + (row + 0.5f) * rowH; };
@@ -946,40 +1098,40 @@ bool graphPinInfo(const HE::UIGraphNode& n, int unifiedPin, const ImVec2& nodePo
 	if (unifiedPin >= r.execIn0 && unifiedPin < r.execOut0)
 	{
 		const int i = unifiedPin - r.execIn0;
-		out = { ImVec2(nodePos.x, rowCenter(i)), true, true, GP::Exec };
+		out = { ImVec2(nodePos.x, rowCenter(i)), true, true, PT::Exec };
 		return true;
 	}
 	if (unifiedPin >= r.execOut0 && unifiedPin < r.dataIn0)
 	{
 		const int i = unifiedPin - r.execOut0;
-		out = { ImVec2(nodePos.x + width, rowCenter(i)), false, true, GP::Exec };
+		out = { ImVec2(nodePos.x + width, rowCenter(i)), false, true, PT::Exec };
 		return true;
 	}
 	if (unifiedPin >= r.dataIn0 && unifiedPin < r.dataOut0)
 	{
 		const int i = unifiedPin - r.dataIn0;
-		const int row = (int)d.execIns.size() + i;
-		out = { ImVec2(nodePos.x, rowCenter(row)), true, false, graphDataPinType(n, true, i) };
+		const int row = (int)sig.execIns.size() + i;
+		out = { ImVec2(nodePos.x, rowCenter(row)), true, false, sig.dataIns[i].type };
 		return true;
 	}
 	if (unifiedPin >= r.dataOut0 && unifiedPin < r.end)
 	{
 		const int i = unifiedPin - r.dataOut0;
-		const int row = (int)d.execOuts.size() + i;
-		out = { ImVec2(nodePos.x + width, rowCenter(row)), false, false, graphDataPinType(n, false, i) };
+		const int row = (int)sig.execOuts.size() + i;
+		out = { ImVec2(nodePos.x + width, rowCenter(row)), false, false, sig.dataOuts[i].type };
 		return true;
 	}
 	return false;
 }
 
-const char* graphPinLabel(const HE::UIGraphNode& n, int unifiedPin)
+const char* graphPinLabel(const HC::Node& n, int unifiedPin)
 {
-	const GPinRanges r = graphPinRanges(n.type);
-	const HE::UIGraphNodeDesc& d = HE::uiGraphNodeDesc(n.type);
-	if (unifiedPin >= r.execIn0  && unifiedPin < r.execOut0) return d.execIns [unifiedPin - r.execIn0 ].name;
-	if (unifiedPin >= r.execOut0 && unifiedPin < r.dataIn0)  return d.execOuts[unifiedPin - r.execOut0].name;
-	if (unifiedPin >= r.dataIn0  && unifiedPin < r.dataOut0) return d.dataIns [unifiedPin - r.dataIn0 ].name;
-	if (unifiedPin >= r.dataOut0 && unifiedPin < r.end)      return d.dataOuts[unifiedPin - r.dataOut0].name;
+	const GPinRanges r = graphPinRanges(n);
+	const HC::NodeSig sig = HC::signatureOf(n);
+	if (unifiedPin >= r.execIn0  && unifiedPin < r.execOut0) return sig.execIns [unifiedPin - r.execIn0 ].name;
+	if (unifiedPin >= r.execOut0 && unifiedPin < r.dataIn0)  return sig.execOuts[unifiedPin - r.execOut0].name;
+	if (unifiedPin >= r.dataIn0  && unifiedPin < r.dataOut0) return sig.dataIns [unifiedPin - r.dataIn0 ].name;
+	if (unifiedPin >= r.dataOut0 && unifiedPin < r.end)      return sig.dataOuts[unifiedPin - r.dataOut0].name;
 	return "";
 }
 
@@ -990,36 +1142,37 @@ std::string uniqueFunctionName(const State& st)
 		const std::string name = i == 1 ? "NewFunction" : ("NewFunction" + std::to_string(i));
 		bool taken = false;
 		for (const auto& gn : st.graph.nodes)
-			if (gn.type == GT::FunctionEntry && gn.s == name) { taken = true; break; }
+			if (gn.type == NT::FunctionEntry && gn.s == name) { taken = true; break; }
 		if (!taken) return name;
 	}
 	return "NewFunction";
 }
 
-int addGraphNode(State& st, GT type, const ImVec2& graphPos)
+int addGraphNode(State& st, NT type, const ImVec2& graphPos)
 {
-	HE::UIGraphNode n;
+	HC::Node n;
 	n.type = type;
 	n.x = graphPos.x; n.y = graphPos.y;
-	if (type == GT::ConstColor) { n.f[0] = n.f[1] = n.f[2] = n.f[3] = 1.0f; }
-	if (type == GT::FunctionEntry) n.s = uniqueFunctionName(st);
+	if (type == NT::ConstColor) { n.f[0] = n.f[1] = n.f[2] = n.f[3] = 1.0f; }
+	if (type == NT::FunctionEntry) n.s = uniqueFunctionName(st);
 	return st.graph.addNode(std::move(n));
 }
 
-void removeGraphPinLinks(HE::UIWidgetGraph& g, int nodeId, int pin)
+void removeGraphPinLinks(HC::Graph& g, int nodeId, int pin)
 {
 	g.links.erase(std::remove_if(g.links.begin(), g.links.end(),
-		[&](const HE::UIGraphLink& l){
+		[&](const HC::Link& l){
 			return (l.srcNode == nodeId && l.srcPin == pin) ||
 			       (l.dstNode == nodeId && l.dstPin == pin);
 		}), g.links.end());
 }
 
-// Add or focus an event node for `elem` of the given type; switch to Graph mode.
-void addOrFocusEvent(State& st, AppContext& ctx, GT eventType, int elem)
+// Add or focus an Event node for `elem`/`eventName`; switch to Graph mode.
+void addOrFocusEvent(State& st, AppContext& ctx, const std::string& eventName,
+                     const UIEventDesc& desc, int elem)
 {
 	for (auto& gn : st.graph.nodes)
-		if (gn.type == eventType && gn.elem == elem)
+		if (gn.type == NT::Event && gn.s == eventName && gn.elem == elem)
 		{
 			st.selectedGraphNode = gn.id;
 			st.viewMode = 1;
@@ -1029,10 +1182,13 @@ void addOrFocusEvent(State& st, AppContext& ctx, GT eventType, int elem)
 	// Stagger new event nodes so they don't stack exactly.
 	int existing = 0;
 	for (const auto& gn : st.graph.nodes)
-		if (HE::uiGraphNodeDesc(gn.type).category == std::string("Events")) ++existing;
-	HE::UIGraphNode n;
-	n.type = eventType;
+		if (gn.type == NT::Event) ++existing;
+	HC::Node n;
+	n.type = NT::Event;
+	n.s = eventName;
 	n.elem = elem;
+	n.hasArg = desc.hasArg;
+	n.propType = HE::uiPropTypeToPin(desc.argType);
 	n.x = 40.0f;
 	n.y = 40.0f + existing * 120.0f;
 	st.selectedGraphNode = st.graph.addNode(std::move(n));
@@ -1050,21 +1206,22 @@ void drawGraphVariables(State& st, AppContext& ctx)
 	ImGui::Spacing();
 
 	// Every tree element, in creation order.
-	for (const auto& n : st.tree.nodes)
+	for (const auto& ep : st.tree.elements)
 	{
-		const std::string label = (n.name.empty() ? typeName(n.type) : n.name)
-			+ "##var" + std::to_string(n.id);
+		const UIElement& n = *ep;
+		const std::string label = elementName(n) + "##var" + std::to_string(n.id);
 		ImGui::Bullet();
 		ImGui::Selectable(label.c_str(), st.selected == n.id, 0, ImVec2(-1, 0));
 		if (ImGui::IsItemClicked()) st.selected = n.id;
 		if (ImGui::BeginDragDropSource())
 		{
-			ImGui::SetDragDropPayload("HE_UIWGRAPH_ELEM", &n.id, sizeof(int));
-			ImGui::Text("%s", n.name.empty() ? typeName(n.type) : n.name.c_str());
+			const int eid = n.id;
+			ImGui::SetDragDropPayload("HE_UIWGRAPH_ELEM", &eid, sizeof(int));
+			ImGui::Text("%s", elementName(n).c_str());
 			ImGui::EndDragDropSource();
 		}
 		if (ImGui::IsItemHovered())
-			ImGui::SetTooltip("%s — drag to graph for Get/Set", typeName(n.type));
+			ImGui::SetTooltip("%s — drag to graph for Get/Set", n.typeName());
 	}
 
 	ImGui::Spacing();
@@ -1073,9 +1230,9 @@ void drawGraphVariables(State& st, AppContext& ctx)
 	if (ImGui::SmallButton("+##addfn"))
 	{
 		const int existing = [&]{ int c = 0; for (const auto& g : st.graph.nodes)
-			if (g.type == GT::FunctionEntry) ++c; return c; }();
-		HE::UIGraphNode fn;
-		fn.type = GT::FunctionEntry;
+			if (g.type == NT::FunctionEntry) ++c; return c; }();
+		HC::Node fn;
+		fn.type = NT::FunctionEntry;
 		fn.s = uniqueFunctionName(st);
 		fn.x = 40.0f; fn.y = 40.0f + existing * 120.0f;
 		st.selectedGraphNode = st.graph.addNode(std::move(fn));
@@ -1086,7 +1243,7 @@ void drawGraphVariables(State& st, AppContext& ctx)
 
 	for (const auto& gn : st.graph.nodes)
 	{
-		if (gn.type != GT::FunctionEntry) continue;
+		if (gn.type != NT::FunctionEntry) continue;
 		const std::string label = (gn.s.empty() ? "(unnamed)" : gn.s)
 			+ "##fn" + std::to_string(gn.id);
 		if (ImGui::Selectable(label.c_str(), st.selectedGraphNode == gn.id))
@@ -1102,7 +1259,7 @@ void drawGraphVariables(State& st, AppContext& ctx)
 // ── Graph node details (right panel) ─────────────────────────────────────────
 void drawGraphNodeDetails(State& st, AppContext& ctx)
 {
-	HE::UIGraphNode* n = st.graph.findNode(st.selectedGraphNode);
+	HC::Node* n = st.graph.findNode(st.selectedGraphNode);
 	if (!n)
 	{
 		ImGui::TextDisabled("Graph");
@@ -1114,7 +1271,7 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 	}
 
 	bool committed = false;
-	ImGui::TextDisabled("%s", HE::uiGraphNodeDesc(n->type).name);
+	ImGui::TextDisabled("%s", HC::nodeDisplayName(n->type));
 	ImGui::Separator();
 
 	auto elementCombo = [&](const char* label, bool includeAny)
@@ -1125,9 +1282,10 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 		{
 			if (includeAny && ImGui::Selectable("(Any)", n->elem == 0))
 				{ n->elem = 0; committed = true; }
-			for (const auto& e : st.tree.nodes)
+			for (const auto& ep : st.tree.elements)
 			{
-				const std::string nm = e.name.empty() ? typeName(e.type) : e.name;
+				const UIElement& e = *ep;
+				const std::string nm = elementName(e);
 				if (ImGui::Selectable((nm + "##e" + std::to_string(e.id)).c_str(), n->elem == e.id))
 					{ n->elem = e.id; committed = true; }
 			}
@@ -1137,65 +1295,95 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 
 	switch (n->type)
 	{
-	case GT::EventClick:
-	case GT::EventHoverEnter:
-	case GT::EventHoverExit:
+	case NT::Event:
+	{
 		elementCombo("Element", /*includeAny=*/true);
-		ImGui::TextDisabled("Fires when the bound element is clicked/hovered.");
+		// Event name from the bound element's events() (or free text when Any).
+		const UIElement* tgt = st.tree.find(n->elem);
+		const std::vector<UIEventDesc> evs = tgt ? tgt->events() : std::vector<UIEventDesc>{};
+		if (!evs.empty())
+		{
+			if (ImGui::BeginCombo("Event", n->s.empty() ? "(none)" : n->s.c_str()))
+			{
+				for (const UIEventDesc& d : evs)
+					if (ImGui::Selectable(d.name.c_str(), n->s == d.name))
+					{
+						n->s = d.name;
+						n->hasArg = d.hasArg;
+						n->propType = HE::uiPropTypeToPin(d.argType);
+						committed = true;
+					}
+				ImGui::EndCombo();
+			}
+		}
+		else
+		{
+			ImGui::InputText("Event", &n->s);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+		}
+		ImGui::TextDisabled("Fires when the bound element raises this event.");
 		break;
+	}
 
-	case GT::GetProperty:
-	case GT::SetProperty:
+	case NT::GetProperty:
+	case NT::SetProperty:
 	{
 		elementCombo("Element", /*includeAny=*/false);
-		const HE::UIWidgetProp before = (HE::UIWidgetProp)n->prop;
-		if (ImGui::BeginCombo("Property", HE::uiGraphPropName(before)))
+		const UIElement* tgt = st.tree.find(n->elem);
+		const std::vector<UIPropDesc> props = tgt ? tgt->properties() : std::vector<UIPropDesc>{};
+		if (ImGui::BeginCombo("Property", n->s.empty() ? "(none)" : n->s.c_str()))
 		{
-			for (int p = 0; p < (int)HE::UIWidgetProp::COUNT; ++p)
-			{
-				const auto pp = (HE::UIWidgetProp)p;
-				if (ImGui::Selectable(HE::uiGraphPropName(pp), n->prop == p))
+			for (const UIPropDesc& pd : props)
+				if (ImGui::Selectable(pd.name.c_str(), n->s == pd.name))
 				{
-					n->prop = p;
+					const PT before = n->propType;
+					n->s = pd.name;
+					n->propType = HE::uiPropTypeToPin(pd.type);
 					// Value-pin type changed → drop links that no longer typecheck.
-					if (HE::uiGraphPropType(pp) != HE::uiGraphPropType(before))
+					if (n->propType != before)
 					{
-						const GPinRanges r = graphPinRanges(n->type);
-						const int valuePin = n->type == GT::GetProperty ? r.dataOut0 : r.dataIn0;
+						const GPinRanges r = graphPinRanges(*n);
+						const int valuePin = n->type == NT::GetProperty ? r.dataOut0 : r.dataIn0;
 						removeGraphPinLinks(st.graph, n->id, valuePin);
 					}
 					committed = true;
 				}
-			}
 			ImGui::EndCombo();
 		}
 		break;
 	}
 
-	case GT::ConstFloat:
+	case NT::ConstFloat:
 		if (ImGui::DragFloat("Value", &n->f[0], 0.1f)) st.dirty = true;
 		committed |= ImGui::IsItemDeactivatedAfterEdit();
 		break;
-	case GT::ConstBool:
+	case NT::ConstInt:
+	{
+		int v = (int)n->f[0];
+		if (ImGui::DragInt("Value", &v, 1)) { n->f[0] = (float)v; st.dirty = true; }
+		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		break;
+	}
+	case NT::ConstBool:
 	{
 		bool b = n->f[0] != 0.0f;
 		if (ImGui::Checkbox("Value", &b)) { n->f[0] = b ? 1.0f : 0.0f; committed = true; }
 		break;
 	}
-	case GT::ConstString:
+	case NT::ConstString:
 		ImGui::InputText("Value", &n->s);
 		committed |= ImGui::IsItemDeactivatedAfterEdit();
 		break;
-	case GT::ConstVec2:
+	case NT::ConstVec2:
 		if (ImGui::DragFloat2("Value", n->f, 0.1f)) st.dirty = true;
 		committed |= ImGui::IsItemDeactivatedAfterEdit();
 		break;
-	case GT::ConstColor:
+	case NT::ConstColor:
 		if (ImGui::ColorEdit4("Value", n->f)) st.dirty = true;
 		committed |= ImGui::IsItemDeactivatedAfterEdit();
 		break;
 
-	case GT::FunctionEntry:
+	case NT::FunctionEntry:
 	{
 		std::string oldName = n->s;
 		ImGui::InputText("Name", &n->s);
@@ -1204,7 +1392,7 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 			// Rename the matching FunctionCall nodes so the wiring stays valid.
 			if (!n->s.empty() && n->s != oldName)
 				for (auto& c : st.graph.nodes)
-					if (c.type == GT::FunctionCall && c.s == oldName) c.s = n->s;
+					if (c.type == NT::FunctionCall && c.s == oldName) c.s = n->s;
 			committed = true;
 		}
 		int access = n->access;
@@ -1216,12 +1404,12 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 		break;
 	}
 
-	case GT::FunctionCall:
+	case NT::FunctionCall:
 	{
 		if (ImGui::BeginCombo("Function", n->s.empty() ? "(none)" : n->s.c_str()))
 		{
 			for (const auto& fn : st.graph.nodes)
-				if (fn.type == GT::FunctionEntry)
+				if (fn.type == NT::FunctionEntry)
 					if (ImGui::Selectable(fn.s.c_str(), n->s == fn.s))
 						{ n->s = fn.s; committed = true; }
 			ImGui::EndCombo();
@@ -1254,7 +1442,7 @@ int graphPinAt(State& st, const ImVec2& origin, const ImVec2& mouse,
 	for (const auto& n : st.graph.nodes)
 	{
 		const ImVec2 np = graphNodeScreenPos(st, n, origin);
-		const GPinRanges r = graphPinRanges(n.type);
+		const GPinRanges r = graphPinRanges(n);
 		for (int pin = 0; pin < r.end; ++pin)
 		{
 			GPinInfo info;
@@ -1290,7 +1478,7 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	// Center on a freshly selected node (from the left panel / Designer events).
 	if (st.gFocusSelected)
 	{
-		if (const HE::UIGraphNode* n = st.graph.findNode(st.selectedGraphNode))
+		if (const HC::Node* n = st.graph.findNode(st.selectedGraphNode))
 		{
 			st.gPan.x = avail.x * 0.5f - n->x * st.gZoom - (kGNodeW * st.gZoom) * 0.5f;
 			st.gPan.y = avail.y * 0.4f - n->y * st.gZoom;
@@ -1335,13 +1523,13 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	// Links (behind nodes).
 	for (const auto& l : st.graph.links)
 	{
-		const HE::UIGraphNode* sn = st.graph.findNode(l.srcNode);
-		const HE::UIGraphNode* dn = st.graph.findNode(l.dstNode);
+		const HC::Node* sn = st.graph.findNode(l.srcNode);
+		const HC::Node* dn = st.graph.findNode(l.dstNode);
 		if (!sn || !dn) continue;
 		GPinInfo si, di;
 		if (!graphPinInfo(*sn, l.srcPin, graphNodeScreenPos(st, *sn, origin), st.gZoom, si)) continue;
 		if (!graphPinInfo(*dn, l.dstPin, graphNodeScreenPos(st, *dn, origin), st.gZoom, di)) continue;
-		const bool exec = si.type == GP::Exec;
+		const bool exec = si.type == PT::Exec;
 		drawGraphLink(dl, si.pos, di.pos, exec ? IM_COL32(235,235,235,220) : graphPinColor(si.type),
 		              exec ? 3.0f : 2.0f);
 	}
@@ -1352,13 +1540,13 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	{
 		const ImVec2 np = graphNodeScreenPos(st, n, origin);
 		const float w = kGNodeW * st.gZoom;
-		const float h = graphNodeHeight(n.type) * st.gZoom;
+		const float h = graphNodeHeight(n) * st.gZoom;
 		const ImVec2 br(np.x + w, np.y + h);
 		const bool sel = st.selectedGraphNode == n.id;
 
 		dl->AddRectFilled(np, br, IM_COL32(38, 38, 44, 245), 4.0f);
 		dl->AddRectFilled(np, ImVec2(br.x, np.y + kGTitleH * st.gZoom),
-		                  graphCatColor(HE::uiGraphNodeDesc(n.type).category), 4.0f,
+		                  graphCatColor(HC::nodeCategory(n.type)), 4.0f,
 		                  ImDrawFlags_RoundCornersTop);
 		dl->AddRect(np, br, sel ? IM_COL32(255, 170, 40, 255) : IM_COL32(20, 20, 24, 255),
 		            4.0f, 0, sel ? 2.0f : 1.0f);
@@ -1368,7 +1556,7 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 		            ImVec2(np.x + 6, np.y + 3 * st.gZoom), IM_COL32(240,240,240,255), title.c_str());
 
 		// Pins + labels.
-		const GPinRanges r = graphPinRanges(n.type);
+		const GPinRanges r = graphPinRanges(n);
 		for (int pin = 0; pin < r.end; ++pin)
 		{
 			GPinInfo info;
@@ -1432,7 +1620,7 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	// Node move.
 	if (st.gDragNode != 0 && ImGui::IsMouseDown(ImGuiMouseButton_Left))
 	{
-		if (HE::UIGraphNode* n = st.graph.findNode(st.gDragNode))
+		if (HC::Node* n = st.graph.findNode(st.gDragNode))
 		{
 			const float dx = (mouse.x - st.gDragStartMouse.x) / st.gZoom;
 			const float dy = (mouse.y - st.gDragStartMouse.y) / st.gZoom;
@@ -1451,7 +1639,7 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	// Active link drag: draw a rubber band, connect on release.
 	if (st.linkSrcNode != 0)
 	{
-		if (const HE::UIGraphNode* sn = st.graph.findNode(st.linkSrcNode))
+		if (const HC::Node* sn = st.graph.findNode(st.linkSrcNode))
 		{
 			GPinInfo si;
 			if (graphPinInfo(*sn, st.linkSrcPin, graphNodeScreenPos(st, *sn, origin), st.gZoom, si))
@@ -1499,17 +1687,16 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 		ImGui::Separator();
 		// Group registry entries by category; Events + FunctionEntry are created
 		// elsewhere (Designer events / the + Function button).
-		static const char* kCats[] = { "Element", "Flow", "Literals", "Math",
+		static const char* kCats[] = { "Property", "Flow", "Literals", "Math",
 		                               "Logic", "String", "Widget", "Functions", "Debug" };
 		for (const char* cat : kCats)
 		{
 			if (!ImGui::BeginMenu(cat)) continue;
-			for (GT t : HE::uiGraphNodeRegistry())
+			for (NT t : HC::nodeRegistry())
 			{
-				if (t == GT::FunctionEntry) continue; // via + Function
-				const HE::UIGraphNodeDesc& d = HE::uiGraphNodeDesc(t);
-				if (std::string(d.category) != cat) continue;
-				if (ImGui::MenuItem(d.name))
+				if (t == NT::Event || t == NT::FunctionEntry) continue; // created elsewhere
+				if (std::string(HC::nodeCategory(t)) != cat) continue;
+				if (ImGui::MenuItem(HC::nodeDisplayName(t)))
 				{
 					st.selectedGraphNode = addGraphNode(st, t, st.gAddNodePos);
 					commitEdit(st, ctx);
@@ -1536,19 +1723,30 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	{
 		ImGui::TextDisabled("%s", elemLabel(st, st.gDropElem).c_str());
 		ImGui::Separator();
-		if (ImGui::MenuItem("Get Property"))
+		// Offer a Get/Set node per property of the dropped element.
+		const UIElement* tgt = st.tree.find(st.gDropElem);
+		const std::vector<UIPropDesc> props = tgt ? tgt->properties() : std::vector<UIPropDesc>{};
+		auto makePropNode = [&](NT type, const UIPropDesc& pd)
 		{
-			const int id = addGraphNode(st, GT::GetProperty, st.gAddNodePos);
-			st.graph.findNode(id)->elem = st.gDropElem;
+			const int id = addGraphNode(st, type, st.gAddNodePos);
+			HC::Node* nn = st.graph.findNode(id);
+			nn->elem = st.gDropElem;
+			nn->s = pd.name;
+			nn->propType = HE::uiPropTypeToPin(pd.type);
 			st.selectedGraphNode = id;
 			commitEdit(st, ctx);
+		};
+		if (ImGui::BeginMenu("Get", !props.empty()))
+		{
+			for (const UIPropDesc& pd : props)
+				if (ImGui::MenuItem(pd.name.c_str())) makePropNode(NT::GetProperty, pd);
+			ImGui::EndMenu();
 		}
-		if (ImGui::MenuItem("Set Property"))
+		if (ImGui::BeginMenu("Set", !props.empty()))
 		{
-			const int id = addGraphNode(st, GT::SetProperty, st.gAddNodePos);
-			st.graph.findNode(id)->elem = st.gDropElem;
-			st.selectedGraphNode = id;
-			commitEdit(st, ctx);
+			for (const UIPropDesc& pd : props)
+				if (ImGui::MenuItem(pd.name.c_str())) makePropNode(NT::SetProperty, pd);
+			ImGui::EndMenu();
 		}
 		ImGui::EndPopup();
 	}
@@ -1639,7 +1837,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 				commitEdit(st, ctx);
 			}
 			if (ctrl && ImGui::IsKeyPressed(ImGuiKey_D) && st.selected != 0)
-				if (const UIWidgetNode* n = st.tree.findNode(st.selected))
+				if (const UIElement* n = st.tree.find(st.selected))
 				{
 					st.selected = duplicateSubtree(st, st.selected, n->parentId);
 					commitEdit(st, ctx);
@@ -1667,10 +1865,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 		{
 			ImGui::TextDisabled("Palette");
 			ImGui::Separator();
-			static const UIWidgetType kTypes[] = {
-				UIWidgetType::Panel, UIWidgetType::Image,
-				UIWidgetType::Text, UIWidgetType::Button };
-			for (UIWidgetType t : kTypes)
+			for (UIWidgetType t : HE::uiWidgetTypeRegistry())
 			{
 				// A plain click adds (centered on the canvas or under the selected
 				// panel); dragging the button onto the canvas/hierarchy places it there.
@@ -1685,9 +1880,9 @@ void render(AppContext& ctx, const std::string& assetPath,
 				if (clicked)
 				{
 					int parent = 0;
-					if (const UIWidgetNode* selN = st.tree.findNode(st.selected))
-						parent = selN->type == UIWidgetType::Panel ? selN->id : selN->parentId;
-					st.selected = addNodeAt(st, t, parent, nullptr);
+					if (const UIElement* selN = st.tree.find(st.selected))
+						parent = selN->type() == UIWidgetType::Panel ? selN->id : selN->parentId;
+					st.selected = addElementAt(st, t, parent, nullptr);
 					commitEdit(st, ctx);
 				}
 			}
@@ -1704,7 +1899,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 				if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_UIWIDGET_NODE"))
 				{
 					const int dragged = *static_cast<const int*>(p->Data);
-					if (UIWidgetNode* d = st.tree.findNode(dragged))
+					if (UIElement* d = st.tree.find(dragged))
 					{
 						d->parentId = 0;
 						commitEdit(st, ctx);
@@ -1713,7 +1908,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 				if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_UIWIDGET_NEW"))
 				{
 					const int t = *static_cast<const int*>(p->Data);
-					st.selected = addNodeAt(st, static_cast<UIWidgetType>(t), 0, nullptr);
+					st.selected = addElementAt(st, static_cast<UIWidgetType>(t), 0, nullptr);
 					commitEdit(st, ctx);
 				}
 				ImGui::EndDragDropTarget();
