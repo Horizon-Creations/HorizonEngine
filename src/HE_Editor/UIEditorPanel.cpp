@@ -15,6 +15,7 @@
 #include <misc/cpp/imgui_stdlib.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -64,7 +65,10 @@ struct State
 	bool   gFocusSelected = false;   // center on selectedGraphNode next frame
 	GraphEditor::State geState;
 	int    gDropElem = 0;            // element dragged onto the graph (Get/Set popup)
-	bool   gOpenDropPopup = false;   // request to open the Get/Set popup next frame
+	bool   gOpenDropPopup = false;   // request to open the element Get/Set popup next frame
+	std::string selectedVar;        // graph variable selected in the left panel (editing)
+	std::string gDropVar;           // variable dragged onto the graph
+	bool   gOpenVarDrop = false;     // request to open the variable Get/Set popup next frame
 
 	// Undo/redo: combined snapshots (treeJson + '\x1f' + graphJson).
 	std::vector<std::string> undo;
@@ -1040,6 +1044,10 @@ std::string graphNodeTitle(const State& st, const HC::Node& n)
 		case NT::GetProperty:
 		case NT::SetProperty:
 			return elemLabel(st, n.elem) + " " + (n.s.empty() ? std::string(base) : n.s);
+		case NT::GetVariable:
+			return "Get " + (n.s.empty() ? std::string("var") : n.s);
+		case NT::SetVariable:
+			return "Set " + (n.s.empty() ? std::string("var") : n.s);
 		case NT::FunctionEntry:
 		case NT::FunctionCall:
 			return std::string(base) + " " + n.s;
@@ -1111,6 +1119,31 @@ std::string uniqueFunctionName(const State& st)
 	return "NewFunction";
 }
 
+// Display name for a HorizonCode data pin type (used by the variables UI).
+const char* pinTypeName(PT t)
+{
+	switch (t)
+	{
+		case PT::Float:  return "Float";
+		case PT::Bool:   return "Bool";
+		case PT::Int:    return "Int";
+		case PT::String: return "String";
+		case PT::Vec2:   return "Vec2";
+		case PT::Color:  return "Color";
+		default:         return "Exec";
+	}
+}
+
+std::string uniqueVarName(const State& st)
+{
+	for (int i = 1; i < 1000; ++i)
+	{
+		const std::string name = i == 1 ? "NewVar" : ("NewVar" + std::to_string(i));
+		if (!st.graph.findVariable(name)) return name;
+	}
+	return "NewVar";
+}
+
 int addGraphNode(State& st, NT type, const ImVec2& graphPos)
 {
 	HC::Node n;
@@ -1163,16 +1196,16 @@ void addOrFocusEvent(State& st, AppContext& ctx, const std::string& eventName,
 // ── Graph left panel: element variables + functions ──────────────────────────
 void drawGraphVariables(State& st, AppContext& ctx)
 {
-	ImGui::TextDisabled("Variables");
+	// ── Widget elements (drag → Get/Set a UI element property) ────────────────
+	ImGui::TextDisabled("Widget Elements");
 	ImGui::Separator();
 	ImGui::TextWrapped("Drag an element onto the graph to read or write its properties.");
 	ImGui::Spacing();
 
-	// Every tree element, in creation order.
 	for (const auto& ep : st.tree.elements)
 	{
 		const UIElement& n = *ep;
-		const std::string label = elementName(n) + "##var" + std::to_string(n.id);
+		const std::string label = elementName(n) + "##el" + std::to_string(n.id);
 		ImGui::Bullet();
 		ImGui::Selectable(label.c_str(), st.selected == n.id, 0, ImVec2(-1, 0));
 		if (ImGui::IsItemClicked()) st.selected = n.id;
@@ -1187,6 +1220,47 @@ void drawGraphVariables(State& st, AppContext& ctx)
 			ImGui::SetTooltip("%s — drag to graph for Get/Set", n.typeName());
 	}
 
+	// ── Graph variables (user-defined, persistent per running widget) ─────────
+	ImGui::Spacing();
+	ImGui::TextDisabled("Variables");
+	ImGui::SameLine(ImGui::GetContentRegionAvail().x - 24.0f);
+	if (ImGui::SmallButton("+##addvar"))
+	{
+		HC::Variable v;
+		v.name = uniqueVarName(st);
+		v.type = PT::Float;
+		st.graph.variables.push_back(v);
+		st.selectedVar = v.name;
+		st.selectedGraphNode = 0;
+		commitEdit(st, ctx);
+	}
+	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Add a variable");
+	ImGui::Separator();
+
+	for (const auto& v : st.graph.variables)
+	{
+		const std::string label = v.name + "##v" + v.name;
+		if (ImGui::Selectable(label.c_str(), st.selectedVar == v.name))
+		{
+			st.selectedVar = v.name;
+			st.selectedGraphNode = 0; // editing the variable, not a node
+		}
+		if (ImGui::BeginDragDropSource())
+		{
+			// Payload = the variable name (fixed-size buffer for stable copy).
+			char buf[64] = {};
+			std::strncpy(buf, v.name.c_str(), sizeof(buf) - 1);
+			ImGui::SetDragDropPayload("HE_UIWGRAPH_VAR", buf, sizeof(buf));
+			ImGui::Text("%s", v.name.c_str());
+			ImGui::EndDragDropSource();
+		}
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("%s — drag to graph for Get/Set", pinTypeName(v.type));
+		ImGui::SameLine();
+		ImGui::TextDisabled("%s", pinTypeName(v.type));
+	}
+
+	// ── Functions ─────────────────────────────────────────────────────────────
 	ImGui::Spacing();
 	ImGui::TextDisabled("Functions");
 	ImGui::SameLine(ImGui::GetContentRegionAvail().x - 24.0f);
@@ -1199,9 +1273,11 @@ void drawGraphVariables(State& st, AppContext& ctx)
 		fn.s = uniqueFunctionName(st);
 		fn.x = 40.0f; fn.y = 40.0f + existing * 120.0f;
 		st.selectedGraphNode = st.graph.addNode(std::move(fn));
+		st.selectedVar.clear();
 		st.gFocusSelected = true;
 		commitEdit(st, ctx);
 	}
+	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Add a function");
 	ImGui::Separator();
 
 	for (const auto& gn : st.graph.nodes)
@@ -1212,6 +1288,7 @@ void drawGraphVariables(State& st, AppContext& ctx)
 		if (ImGui::Selectable(label.c_str(), st.selectedGraphNode == gn.id))
 		{
 			st.selectedGraphNode = gn.id;
+			st.selectedVar.clear();
 			st.gFocusSelected = true;
 		}
 		ImGui::SameLine();
@@ -1225,6 +1302,79 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 	HC::Node* n = st.graph.findNode(st.selectedGraphNode);
 	if (!n)
 	{
+		// A graph variable selected in the left panel → edit it here.
+		if (HC::Variable* v = !st.selectedVar.empty() ? st.graph.findVariable(st.selectedVar) : nullptr)
+		{
+			ImGui::TextDisabled("Variable");
+			ImGui::Separator();
+
+			std::string oldName = v->name;
+			ImGui::InputText("Name", &v->name);
+			if (ImGui::IsItemDeactivatedAfterEdit())
+			{
+				// Keep it unique + non-empty, and rename the Get/Set nodes using it.
+				if (v->name.empty() || (v->name != oldName && st.graph.findVariable(v->name)))
+					v->name = oldName; // reject clashes / blanks
+				else if (v->name != oldName)
+				{
+					for (auto& gn : st.graph.nodes)
+						if ((gn.type == NT::GetVariable || gn.type == NT::SetVariable) && gn.s == oldName)
+							gn.s = v->name;
+					st.selectedVar = v->name;
+				}
+				commitEdit(st, ctx);
+			}
+
+			int typeIdx = (int)v->type;
+			if (ImGui::Combo("Type", &typeIdx, "Exec\0Float\0Bool\0Int\0String\0Vec2\0Color\0"))
+			{
+				const PT nt = (PT)typeIdx;
+				if (nt != PT::Exec && nt != v->type)
+				{
+					v->type = nt;
+					// Retype the Get/Set nodes and drop links that no longer typecheck.
+					for (auto& gn : st.graph.nodes)
+						if ((gn.type == NT::GetVariable || gn.type == NT::SetVariable) && gn.s == v->name)
+						{
+							gn.propType = nt;
+							const GPinRanges r = graphPinRanges(gn);
+							const int valuePin = gn.type == NT::GetVariable ? r.dataOut0 : r.dataIn0;
+							removeGraphPinLinks(st.graph, gn.id, valuePin);
+						}
+					commitEdit(st, ctx);
+				}
+			}
+
+			// Default value editor (seeds the runtime store at widget creation).
+			ImGui::SeparatorText("Default");
+			bool ed = false;
+			switch (v->type)
+			{
+				case PT::Float:  ed = ImGui::DragFloat("##vdef", &v->f[0], 0.1f); break;
+				case PT::Int:  { int iv = (int)v->f[0]; if (ImGui::DragInt("##vdef", &iv)) { v->f[0] = (float)iv; ed = true; } break; }
+				case PT::Bool: { bool b = v->f[0] != 0.0f; if (ImGui::Checkbox("##vdef", &b)) { v->f[0] = b ? 1.0f : 0.0f; ed = true; } break; }
+				case PT::String: ImGui::InputText("##vdef", &v->s); break;
+				case PT::Vec2:   ed = ImGui::DragFloat2("##vdef", v->f, 0.1f); break;
+				case PT::Color:  ed = ImGui::ColorEdit4("##vdef", v->f); break;
+				default: break;
+			}
+			if (ed) st.dirty = true;
+			if (ImGui::IsItemDeactivatedAfterEdit()) commitEdit(st, ctx);
+
+			ImGui::Spacing();
+			ImGui::Separator();
+			if (ImGui::Button("Delete Variable"))
+			{
+				const std::string gone = v->name;
+				st.graph.variables.erase(std::remove_if(st.graph.variables.begin(), st.graph.variables.end(),
+					[&](const HC::Variable& vv){ return vv.name == gone; }), st.graph.variables.end());
+				// Leave orphaned Get/Set nodes in place (harmless; read a default).
+				st.selectedVar.clear();
+				commitEdit(st, ctx);
+			}
+			return;
+		}
+
 		ImGui::TextDisabled("Graph");
 		ImGui::Separator();
 		ImGui::TextWrapped("Right-click the canvas to add a node. Drag between pins to "
@@ -1380,6 +1530,31 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 		break;
 	}
 
+	case NT::GetVariable:
+	case NT::SetVariable:
+	{
+		if (ImGui::BeginCombo("Variable", n->s.empty() ? "(none)" : n->s.c_str()))
+		{
+			for (const auto& v : st.graph.variables)
+				if (ImGui::Selectable(v.name.c_str(), n->s == v.name))
+				{
+					const PT before = n->propType;
+					n->s = v.name;
+					n->propType = v.type;               // node takes the variable's type
+					if (n->propType != before)
+					{
+						const GPinRanges r = graphPinRanges(*n);
+						const int valuePin = n->type == NT::GetVariable ? r.dataOut0 : r.dataIn0;
+						removeGraphPinLinks(st.graph, n->id, valuePin);
+					}
+					committed = true;
+				}
+			ImGui::EndCombo();
+		}
+		if (n->s.empty()) ImGui::TextDisabled("Pick a variable from the list on the left.");
+		break;
+	}
+
 	default:
 		ImGui::TextDisabled("No editable properties.");
 		break;
@@ -1440,32 +1615,68 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	m.connect = [&st](int oN, int oP, int iN, int iP){ return st.graph.connect(oN, oP, iN, iP); };
 	m.clearPinLinks = [&st](int node, int pin, bool){ removeGraphPinLinks(st.graph, node, pin); };
 	m.removeNode = [&st](int id){ st.graph.removeNode(id); };
+	// Searchable add-node palette (mirrors the material editor's). Events +
+	// FunctionEntry are created elsewhere (Designer events / the + Function
+	// button); Get/Set Variable are offered per declared variable.
 	m.drawAddMenu = [&st]() -> int {
 		int created = 0;
-		ImGui::TextDisabled("Add Node");
+		static std::string s_search;
+		if (ImGui::IsWindowAppearing()) { s_search.clear(); ImGui::SetKeyboardFocusHere(); }
+		ImGui::SetNextItemWidth(220.0f);
+		ImGui::InputTextWithHint("##nodeSearch", "Search nodes...", &s_search);
 		ImGui::Separator();
-		// Events + FunctionEntry are created elsewhere (Designer / + Function).
+		auto lower = [](std::string v){ std::transform(v.begin(), v.end(), v.begin(),
+			[](unsigned char c){ return (char)std::tolower(c); }); return v; };
+		const std::string q = lower(s_search);
+		auto matches = [&](const std::string& name, const std::string& cat)
+		{ return q.empty() || lower(name).find(q) != std::string::npos
+		      || lower(cat).find(q) != std::string::npos; };
+
+		ImGui::BeginChild("##nodeList", ImVec2(232.0f, 300.0f));
 		static const char* kCats[] = { "Property", "Flow", "Literals", "Math",
-		                               "Logic", "String", "Widget", "Functions", "Debug" };
+		                               "Logic", "String", "Widget", "Debug" };
 		for (const char* cat : kCats)
 		{
-			if (!ImGui::BeginMenu(cat)) continue;
+			bool header = false;
 			for (NT t : HC::nodeRegistry())
 			{
-				if (t == NT::Event || t == NT::FunctionEntry) continue;
+				if (t == NT::Event || t == NT::FunctionEntry ||
+				    t == NT::GetVariable || t == NT::SetVariable) continue;
 				if (std::string(HC::nodeCategory(t)) != cat) continue;
-				if (ImGui::MenuItem(HC::nodeDisplayName(t)))
-					created = addGraphNode(st, t, st.geState.addMenuGraphPos);
+				if (!matches(HC::nodeDisplayName(t), cat)) continue;
+				if (!header) { ImGui::TextDisabled("%s", cat); header = true; }
+				if (ImGui::Selectable(HC::nodeDisplayName(t)))
+				{ created = addGraphNode(st, t, st.geState.addMenuGraphPos); ImGui::CloseCurrentPopup(); }
 			}
-			ImGui::EndMenu();
+			if (header) ImGui::Spacing();
 		}
+		// Get/Set for each declared variable.
+		bool vh = false;
+		for (const auto& v : st.graph.variables)
+			for (int k = 0; k < 2; ++k)
+			{
+				const std::string lbl = (k == 0 ? "Get " : "Set ") + v.name;
+				if (!matches(lbl, "Variables")) continue;
+				if (!vh) { ImGui::TextDisabled("Variables"); vh = true; }
+				if (ImGui::Selectable(lbl.c_str()))
+				{
+					const int id = addGraphNode(st, k == 0 ? NT::GetVariable : NT::SetVariable,
+					                            st.geState.addMenuGraphPos);
+					HC::Node* nn = st.graph.findNode(id);
+					nn->s = v.name; nn->propType = v.type;
+					created = id; ImGui::CloseCurrentPopup();
+				}
+			}
+		ImGui::EndChild();
 		return created;
 	};
-	m.dropPayload = "HE_UIWGRAPH_ELEM";
-	m.onDrop = [&st](const void* data, ImVec2 gp){
-		st.gDropElem = *static_cast<const int*>(data);
+	m.dropPayloads = { "HE_UIWGRAPH_ELEM", "HE_UIWGRAPH_VAR" };
+	m.onDrop = [&st](const char* type, const void* data, ImVec2 gp){
 		st.geState.addMenuGraphPos = gp;
-		st.gOpenDropPopup = true;
+		if (std::string(type) == "HE_UIWGRAPH_ELEM")
+			{ st.gDropElem = *static_cast<const int*>(data); st.gOpenDropPopup = true; }
+		else
+			{ st.gDropVar = static_cast<const char*>(data); st.gOpenVarDrop = true; }
 	};
 
 	const bool changed = GraphEditor::draw("##hc_graphcanvas", m, st.geState, avail);
@@ -1502,6 +1713,28 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 				if (ImGui::MenuItem(pd.name.c_str())) makePropNode(NT::SetProperty, pd);
 			ImGui::EndMenu();
 		}
+		ImGui::EndPopup();
+	}
+
+	// Variables-panel drop → Get/Set node for the dropped variable.
+	if (st.gOpenVarDrop) { ImGui::OpenPopup("##graph_var_drop"); st.gOpenVarDrop = false; }
+	if (ImGui::BeginPopup("##graph_var_drop"))
+	{
+		const HC::Variable* v = st.graph.findVariable(st.gDropVar);
+		ImGui::TextDisabled("%s", st.gDropVar.c_str());
+		ImGui::Separator();
+		auto makeVarNode = [&](NT type)
+		{
+			const int id = addGraphNode(st, type, st.geState.addMenuGraphPos);
+			HC::Node* nn = st.graph.findNode(id);
+			nn->s = st.gDropVar;
+			nn->propType = v ? v->type : PT::Float;
+			st.selectedGraphNode = id;
+			st.selectedVar.clear();
+			commitEdit(st, ctx);
+		};
+		if (ImGui::MenuItem("Get", nullptr, false, v != nullptr)) makeVarNode(NT::GetVariable);
+		if (ImGui::MenuItem("Set", nullptr, false, v != nullptr)) makeVarNode(NT::SetVariable);
 		ImGui::EndPopup();
 	}
 }

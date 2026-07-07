@@ -84,6 +84,9 @@ private:
         int draggingSlider = 0;    // slider being dragged
         // Resolved material references (element id → material asset).
         std::unordered_map<int, HE::UUID> materials;
+        // Live graph variables (persist across events), seeded from the graph's
+        // variable defaults at creation.
+        std::unordered_map<std::string, HorizonCode::Value> variables;
     };
 
     Instance*       find(int id);

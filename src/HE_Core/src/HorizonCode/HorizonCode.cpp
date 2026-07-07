@@ -46,6 +46,14 @@ NodeSig signatureOf(const Node& n)
         s.execOuts = { { "", P::Exec } };
         s.dataIns  = { { "Value", n.propType } };
         break;
+    case T::GetVariable:
+        s.dataOuts = { { "Value", n.propType } };
+        break;
+    case T::SetVariable:
+        s.execIns  = { { "", P::Exec } };
+        s.execOuts = { { "", P::Exec } };
+        s.dataIns  = { { "Value", n.propType } };
+        break;
     case T::ShowWidget:
     case T::HideWidget:
         s.execIns  = { { "", P::Exec } };
@@ -102,6 +110,8 @@ const char* nodeDisplayName(NodeType t)
         case T::Sequence:     return "Sequence";
         case T::GetProperty:  return "Get Property";
         case T::SetProperty:  return "Set Property";
+        case T::GetVariable:  return "Get Variable";
+        case T::SetVariable:  return "Set Variable";
         case T::ShowWidget:   return "Show Widget";
         case T::HideWidget:   return "Hide Widget";
         case T::ConstFloat:   return "Float";
@@ -138,6 +148,8 @@ const char* nodeCategory(NodeType t)
         case T::Sequence:      return "Flow";
         case T::GetProperty:
         case T::SetProperty:   return "Property";
+        case T::GetVariable:
+        case T::SetVariable:   return "Variables";
         case T::ShowWidget:
         case T::HideWidget:    return "Widget";
         case T::ConstFloat: case T::ConstBool: case T::ConstInt:
@@ -207,6 +219,25 @@ void Graph::removeNode(int id)
         [&](const Link& l){ return l.srcNode == id || l.dstNode == id; }), links.end());
 }
 
+Variable*       Graph::findVariable(const std::string& name)
+{ for (auto& v : variables) if (v.name == name) return &v; return nullptr; }
+const Variable* Graph::findVariable(const std::string& name) const
+{ for (const auto& v : variables) if (v.name == name) return &v; return nullptr; }
+
+Value variableDefaultValue(const Variable& v)
+{
+    switch (v.type)
+    {
+        case P::Float:  return Value::ofFloat(v.f[0]);
+        case P::Bool:   return Value::ofBool(v.f[0] != 0.0f);
+        case P::Int:    return Value::ofInt((int)v.f[0]);
+        case P::String: return Value::ofString(v.s);
+        case P::Vec2:   return Value::ofVec2({ v.f[0], v.f[1] });
+        case P::Color:  return Value::ofColor({ v.f[0], v.f[1], v.f[2], v.f[3] });
+        default:        return Value::ofFloat(v.f[0]);
+    }
+}
+
 bool Graph::connect(int srcNode, int srcPin, int dstNode, int dstPin)
 {
     const Node* s = findNode(srcNode);
@@ -269,6 +300,16 @@ std::string toJson(const Graph& g)
     for (const auto& l : g.links)
         jl.push_back({ l.srcNode, l.srcPin, l.dstNode, l.dstPin });
     j["links"] = std::move(jl);
+
+    nlohmann::json jv = nlohmann::json::array();
+    for (const auto& v : g.variables)
+    {
+        nlohmann::json e = { { "name", v.name }, { "type", (int)v.type } };
+        if (v.f[0] || v.f[1] || v.f[2] || v.f[3]) e["f"] = { v.f[0], v.f[1], v.f[2], v.f[3] };
+        if (!v.s.empty()) e["s"] = v.s;
+        jv.push_back(std::move(e));
+    }
+    j["variables"] = std::move(jv);
     return j.dump(2);
 }
 
@@ -306,6 +347,17 @@ bool fromJson(const std::string& json, Graph& out)
         Link l{ e[0].get<int>(), e[1].get<int>(), e[2].get<int>(), e[3].get<int>() };
         if (g.findNode(l.srcNode) && g.findNode(l.dstNode))
             g.links.push_back(l);
+    }
+    for (const auto& e : j.value("variables", nlohmann::json::array()))
+    {
+        Variable v;
+        v.name = e.value("name", std::string());
+        if (v.name.empty()) continue;
+        v.type = (PinType)e.value("type", (int)P::Float);
+        v.s    = e.value("s", std::string());
+        if (const auto& f = e.value("f", nlohmann::json::array()); f.size() >= 4)
+            for (int i = 0; i < 4; ++i) v.f[i] = f[i].get<float>();
+        g.variables.push_back(std::move(v));
     }
     out = std::move(g);
     return true;
@@ -413,6 +465,10 @@ void Runner::execNode(const Node& n, int depth)
         if (m_ctx.setProperty)
             m_ctx.setProperty(n.elem, n.s, coerce(evalInput(n, 0, depth + 1), n.propType));
         break;
+    case T::SetVariable:
+        if (m_ctx.setVariable)
+            m_ctx.setVariable(n.s, coerce(evalInput(n, 0, depth + 1), n.propType));
+        break;
     case T::ShowWidget: if (m_ctx.showSelf) m_ctx.showSelf(); break;
     case T::HideWidget: if (m_ctx.hideSelf) m_ctx.hideSelf(); break;
     case T::FunctionCall:
@@ -461,6 +517,11 @@ Value Runner::evalData(const Node& n, int dataOutPin, int depth)
     case T::GetProperty:
     {
         Value v = m_ctx.getProperty ? m_ctx.getProperty(n.elem, n.s) : Value{};
+        return coerce(v, n.propType);
+    }
+    case T::GetVariable:
+    {
+        Value v = m_ctx.getVariable ? m_ctx.getVariable(n.s) : Value{};
         return coerce(v, n.propType);
     }
     case T::Add:      return Value::ofFloat(evalInput(n, 0, depth + 1).f + evalInput(n, 1, depth + 1).f);

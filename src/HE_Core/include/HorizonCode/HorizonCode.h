@@ -57,9 +57,22 @@ enum class NodeType : uint8_t
     Greater, Less, Equals, And, Or, Not,
     // Strings.
     Concat, ToString,
+    // Graph variables (persistent per-instance state; s = variable name).
+    GetVariable, SetVariable,
     // Debug.
     Print,
     COUNT
+};
+
+// A user-defined graph variable: named, typed, persistent per running instance.
+// The default seeds the instance's variable store; Get/SetVariable nodes read
+// and write it. The default value lives in f[]/s like a literal node.
+struct Variable
+{
+    std::string name;
+    PinType     type = PinType::Float;
+    float       f[4] = {};
+    std::string s;
 };
 
 struct Node
@@ -91,8 +104,9 @@ HE_API const std::vector<NodeType>& nodeRegistry();
 
 struct HE_API Graph
 {
-    std::vector<Node> nodes;
-    std::vector<Link> links;
+    std::vector<Node>     nodes;
+    std::vector<Link>     links;
+    std::vector<Variable> variables;
     int nextId = 1;
 
     Node*       findNode(int id);
@@ -102,10 +116,17 @@ struct HE_API Graph
     // Validated connect: pins must exist, out→in, types must match (exec↔exec,
     // data type equal). Replaces an occupied exec-out / data-in.
     bool connect(int srcNode, int srcPin, int dstNode, int dstPin);
+
+    Variable*       findVariable(const std::string& name);
+    const Variable* findVariable(const std::string& name) const;
 };
 
 HE_API std::string toJson(const Graph& g);
 HE_API bool        fromJson(const std::string& json, Graph& out);
+
+// The runtime Value a variable starts at (from its stored default). Hosts seed
+// their per-instance variable store with this.
+HE_API Value variableDefaultValue(const Variable& v);
 
 // ── Interpreter ──────────────────────────────────────────────────────────────
 // The host binds these so HorizonCode can read/write target state without
@@ -114,6 +135,8 @@ struct Context
 {
     std::function<Value(int elem, const std::string& prop)>              getProperty;
     std::function<void(int elem, const std::string& prop, const Value&)> setProperty;
+    std::function<Value(const std::string& var)>              getVariable;
+    std::function<void(const std::string& var, const Value&)> setVariable;
     std::function<void()> showSelf;
     std::function<void()> hideSelf;
 };
