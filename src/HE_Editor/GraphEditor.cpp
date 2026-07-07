@@ -83,10 +83,14 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
     // returns true to consume the mouse for this frame.
     bool behindConsumed = false;
     if (model.interactBehind)
-        behindConsumed = model.interactBehind(origin, st.pan, st.zoom, hovered && !ImGui::IsAnyItemActive());
+        behindConsumed = model.interactBehind(origin, st.pan, st.zoom, hovered);
 
-    const bool interact = hovered && !st.suppressInteraction && !behindConsumed &&
-                          !ImGui::IsAnyItemActive();
+    // Deliberately NOT gated on IsAnyItemActive: the canvas InvisibleButton
+    // itself becomes the active item on press, so that guard would make
+    // `interact` false on the very click that should start a node drag /
+    // box-select. Hovering a node-body child window already turns `hovered`
+    // off, so editing a body widget doesn't trigger canvas interaction.
+    const bool interact = hovered && !st.suppressInteraction && !behindConsumed;
 
     // Canvas drop targets (elements, variables, …) — bound to the InvisibleButton.
     if (!model.dropPayloads.empty() && model.onDrop && ImGui::BeginDragDropTarget())
