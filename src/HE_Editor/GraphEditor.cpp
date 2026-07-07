@@ -398,8 +398,15 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
         if (!doomed.empty()) { st.selection.clear(); st.selected = 0; changed = true; }
     }
 
-    // ── Add-node popup (right-click on empty canvas, no pan drag) ─────────────
-    if (model.drawAddMenu && interact && ImGui::IsMouseReleased(ImGuiMouseButton_Right) &&
+    // ── Add-node popup (right-click on EMPTY canvas, no pan drag) ─────────────
+    // Skipped when the cursor is over a node (that opens the node context menu
+    // instead), so a node right-click never opens both popups.
+    bool overAnyNode = false;
+    for (const Drawn& n : nodes)
+        if (mouse.x >= n.pos.x && mouse.x <= n.pos.x + n.size.x &&
+            mouse.y >= n.pos.y && mouse.y <= n.pos.y + n.size.y) { overAnyNode = true; break; }
+    if (model.drawAddMenu && interact && !overAnyNode &&
+        ImGui::IsMouseReleased(ImGuiMouseButton_Right) &&
         ImGui::GetIO().MouseDragMaxDistanceSqr[ImGuiMouseButton_Right] < 36.0f)
     {
         st.addMenuGraphPos = toGraph(mouse);
