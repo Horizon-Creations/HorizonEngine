@@ -1032,8 +1032,9 @@ std::string graphNodeTitle(const State& st, const HC::Node& n)
 		case NT::Event:
 			return (n.s.empty() ? std::string(base) : n.s) + " [" + elemLabel(st, n.elem) + "]";
 		case NT::GetProperty:
+			return "Get " + elemLabel(st, n.elem) + "." + (n.s.empty() ? std::string("prop") : n.s);
 		case NT::SetProperty:
-			return elemLabel(st, n.elem) + " " + (n.s.empty() ? std::string(base) : n.s);
+			return "Set " + elemLabel(st, n.elem) + "." + (n.s.empty() ? std::string("prop") : n.s);
 		case NT::GetVariable:
 			return "Get " + (n.s.empty() ? std::string("var") : n.s);
 		case NT::SetVariable:
