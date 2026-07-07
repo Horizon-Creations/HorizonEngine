@@ -103,7 +103,7 @@ std::string nodeTitle(const HC::Node& n)
 		case NT::FunctionCall: return std::string(base) + " " + n.s;
 		case NT::BindEvent:    return "Bind " + (n.s.empty() ? std::string("event") : n.s);
 		case NT::EmitEvent:    return "Emit " + (n.s.empty() ? std::string("event") : n.s);
-		case NT::CallExternal: return "Call " + (n.s.empty() ? std::string("fn") : n.s) + " (Ref)";
+		case NT::CallExternal: return n.s.empty() ? std::string("Call (Ref)") : ("Call " + n.s);
 		default:               return base;
 	}
 }
