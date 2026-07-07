@@ -1,6 +1,7 @@
 #include "UIEditorPanel.h"
 #include "EditorApplication.h"                 // AppContext
 #include "GraphEditor.h"                        // shared node-graph canvas
+#include "HcClassList.h"                        // Create Object class picker
 #include <UIWidget/UIWidgetTree.h>
 #include <UIWidget/UIElement.h>
 #include <UIWidget/UIElements.h>
@@ -1618,6 +1619,18 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 		ImGui::InputText("Widget Asset", &n->s);
 		committed |= ImGui::IsItemDeactivatedAfterEdit();
 		ImGui::TextDisabled("Content-relative path to a UI Widget\nasset. Outputs the new widget's id.");
+		break;
+	}
+	case NT::CreateObject:
+	{
+		if (ImGui::BeginCombo("Class", n->s.empty() ? "(none)" : n->s.c_str()))
+		{
+			for (const auto& c : HcEditorUtil::listHorizonCodeClasses(ctx.contentManager))
+				if (ImGui::Selectable((c.label + "##" + c.path).c_str(), n->s == c.path))
+					{ n->s = c.path; committed = true; }
+			ImGui::EndCombo();
+		}
+		ImGui::TextDisabled("Instantiates a HorizonCode class as a\nlive object. Outputs a reference to it.");
 		break;
 	}
 

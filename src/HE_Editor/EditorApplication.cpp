@@ -762,15 +762,29 @@ void EditorApplication::OnInit()
 	// level script and the GameInstance share one interpreter (and the
 	// GameInstance survives scene switches).
 	m_editorWorld->setScriptRuntime(&m_gameInstance.runtime());
-	// Widget nodes (Create/Show/Hide/Destroy Widget) route to the editor world's
-	// WidgetManager + ContentManager.
+	// Widget + object nodes route to the editor world's WidgetManager and the
+	// app runtime (+ ContentManager to load assets).
 	{
-		HorizonCode::Runtime::WidgetServices svc;
-		svc.create  = [this](const std::string& p){ return m_editorWorld ? m_editorWorld->widgets().createWidget(contentManager(), p) : 0; };
-		svc.show    = [this](int id){ if (m_editorWorld) m_editorWorld->widgets().showWidget(id); };
-		svc.hide    = [this](int id){ if (m_editorWorld) m_editorWorld->widgets().hideWidget(id); };
-		svc.destroy = [this](int id){ if (m_editorWorld) m_editorWorld->widgets().destroyWidget(id); };
-		m_gameInstance.runtime().setWidgetServices(std::move(svc));
+		HorizonCode::Runtime::Services svc;
+		svc.createWidget  = [this](const std::string& p){ return m_editorWorld ? m_editorWorld->widgets().createWidget(contentManager(), p) : 0; };
+		svc.showWidget    = [this](int id){ if (m_editorWorld) m_editorWorld->widgets().showWidget(id); };
+		svc.hideWidget    = [this](int id){ if (m_editorWorld) m_editorWorld->widgets().hideWidget(id); };
+		svc.destroyWidget = [this](int id){ if (m_editorWorld) m_editorWorld->widgets().destroyWidget(id); };
+		svc.createObject  = [this](const std::string& p) -> uint32_t {
+			const HE::UUID id = contentManager().loadAsset(p);
+			const HorizonCodeClassAsset* a = contentManager().getHorizonCodeClass(id);
+			if (!a) return 0u;
+			HorizonCode::Graph g;
+			if (!a->graphJson.empty()) HorizonCode::fromJson(a->graphJson, g);
+			const HorizonCode::InstanceId inst = m_gameInstance.runtime().add(std::move(g));
+			m_gameInstance.runtime().fireEvent(inst, "Construct", 0); // let the object init
+			return inst;
+		};
+		svc.destroyObject = [this](uint32_t ref){
+			if (ref != 0 && ref != m_gameInstance.runtime().gameInstance())
+				m_gameInstance.runtime().remove(ref);
+		};
+		m_gameInstance.runtime().setServices(std::move(svc));
 	}
 	setWorld(m_editorWorld.get());
 	m_propScriptEngine = std::make_unique<ScriptEngine>();

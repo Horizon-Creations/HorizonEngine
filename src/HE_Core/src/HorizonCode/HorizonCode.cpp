@@ -71,6 +71,16 @@ NodeSig signatureOf(const Node& n)
         s.execOuts = { { "", P::Exec } };
         s.dataIns  = { { "Widget", P::Int } };
         break;
+    case T::CreateObject:
+        s.execIns  = { { "", P::Exec } };
+        s.execOuts = { { "", P::Exec } };
+        s.dataOuts = { { "Object", P::Ref } };
+        break;
+    case T::DestroyObject:
+        s.execIns  = { { "", P::Exec } };
+        s.execOuts = { { "", P::Exec } };
+        s.dataIns  = { { "Object", P::Ref } };
+        break;
     case T::BindEvent:
     case T::CallExternal:
         s.execIns  = { { "", P::Exec } };
@@ -143,6 +153,8 @@ const char* nodeDisplayName(NodeType t)
         case T::ShowWidgetId: return "Show Widget";
         case T::HideWidgetId: return "Hide Widget";
         case T::DestroyWidget:return "Destroy Widget";
+        case T::CreateObject: return "Create Object";
+        case T::DestroyObject:return "Destroy Object";
         case T::ConstFloat:   return "Float";
         case T::ConstBool:    return "Bool";
         case T::ConstInt:     return "Int";
@@ -200,7 +212,9 @@ const char* nodeCategory(NodeType t)
         case T::EmitEvent:      return "Events";
         case T::CallExternal:
         case T::GetGameInstance:
-        case T::GetSelf:        return "Reference";
+        case T::GetSelf:
+        case T::CreateObject:
+        case T::DestroyObject:  return "Reference";
         case T::Print: return "Debug";
         default: return "Misc";
     }
@@ -528,6 +542,13 @@ void Runner::execNode(const Node& n, int depth)
     case T::ShowWidgetId:  if (m_ctx.showWidget)    m_ctx.showWidget(evalInput(n, 0, depth + 1).i);    break;
     case T::HideWidgetId:  if (m_ctx.hideWidget)    m_ctx.hideWidget(evalInput(n, 0, depth + 1).i);    break;
     case T::DestroyWidget: if (m_ctx.destroyWidget) m_ctx.destroyWidget(evalInput(n, 0, depth + 1).i); break;
+    case T::CreateObject:
+    {
+        const uint32_t ref = m_ctx.createObject ? m_ctx.createObject(n.s) : 0u;
+        m_execOutputs[n.id] = Value::ofRef(ref); // cached for the data output
+        break;
+    }
+    case T::DestroyObject: if (m_ctx.destroyObject) m_ctx.destroyObject(evalInput(n, 0, depth + 1).ref); break;
     case T::BindEvent:
         if (m_ctx.bindEvent)
             m_ctx.bindEvent(evalInput(n, 0, depth + 1).ref, n.s);
@@ -600,6 +621,11 @@ Value Runner::evalData(const Node& n, int dataOutPin, int depth)
         // Return the id produced when this node ran (don't create again).
         auto it = m_execOutputs.find(n.id);
         return it != m_execOutputs.end() ? it->second : Value::ofInt(0);
+    }
+    case T::CreateObject:
+    {
+        auto it = m_execOutputs.find(n.id);
+        return it != m_execOutputs.end() ? it->second : Value::ofRef(0);
     }
     case T::Add:      return Value::ofFloat(evalInput(n, 0, depth + 1).f + evalInput(n, 1, depth + 1).f);
     case T::Subtract: return Value::ofFloat(evalInput(n, 0, depth + 1).f - evalInput(n, 1, depth + 1).f);

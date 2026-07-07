@@ -150,14 +150,29 @@ void GameApplication::OnInit()
 	// Widgets + the level script join the app-wide runtime (shared with the
 	// GameInstance), so any scene script can Get Game Instance / bind its events.
 	m_world->setScriptRuntime(&m_gameInstance.runtime());
-	// Widget nodes route to this world's WidgetManager + ContentManager.
+	// Widget + object nodes route to this world's WidgetManager and the app
+	// runtime (+ ContentManager to load assets).
 	{
-		HorizonCode::Runtime::WidgetServices svc;
-		svc.create  = [this](const std::string& p){ return m_world ? m_world->widgets().createWidget(contentManager(), p) : 0; };
-		svc.show    = [this](int id){ if (m_world) m_world->widgets().showWidget(id); };
-		svc.hide    = [this](int id){ if (m_world) m_world->widgets().hideWidget(id); };
-		svc.destroy = [this](int id){ if (m_world) m_world->widgets().destroyWidget(id); };
-		m_gameInstance.runtime().setWidgetServices(std::move(svc));
+		HorizonCode::Runtime::Services svc;
+		svc.createWidget  = [this](const std::string& p){ return m_world ? m_world->widgets().createWidget(contentManager(), p) : 0; };
+		svc.showWidget    = [this](int id){ if (m_world) m_world->widgets().showWidget(id); };
+		svc.hideWidget    = [this](int id){ if (m_world) m_world->widgets().hideWidget(id); };
+		svc.destroyWidget = [this](int id){ if (m_world) m_world->widgets().destroyWidget(id); };
+		svc.createObject  = [this](const std::string& p) -> uint32_t {
+			const HE::UUID id = contentManager().loadAsset(p);
+			const HorizonCodeClassAsset* a = contentManager().getHorizonCodeClass(id);
+			if (!a) return 0u;
+			HorizonCode::Graph g;
+			if (!a->graphJson.empty()) HorizonCode::fromJson(a->graphJson, g);
+			const HorizonCode::InstanceId inst = m_gameInstance.runtime().add(std::move(g));
+			m_gameInstance.runtime().fireEvent(inst, "Construct", 0);
+			return inst;
+		};
+		svc.destroyObject = [this](uint32_t ref){
+			if (ref != 0 && ref != m_gameInstance.runtime().gameInstance())
+				m_gameInstance.runtime().remove(ref);
+		};
+		m_gameInstance.runtime().setServices(std::move(svc));
 	}
 	SceneSerializer serializer;
 	bool sceneLoaded = false;
