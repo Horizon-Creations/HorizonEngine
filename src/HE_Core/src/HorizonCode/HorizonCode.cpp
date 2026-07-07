@@ -24,10 +24,17 @@ NodeSig signatureOf(const Node& n)
         break;
     case T::FunctionEntry:
         s.execOuts = { { "", P::Exec } };
+        for (const auto& p : n.params) s.dataOuts.push_back({ p.name.c_str(), p.type });
         break;
     case T::FunctionCall:
         s.execIns  = { { "", P::Exec } };
         s.execOuts = { { "", P::Exec } };
+        for (const auto& p : n.params)  s.dataIns.push_back({ p.name.c_str(), p.type });
+        for (const auto& r : n.results) s.dataOuts.push_back({ r.name.c_str(), r.type });
+        break;
+    case T::FunctionReturn:
+        s.execIns = { { "", P::Exec } };
+        for (const auto& r : n.results) s.dataIns.push_back({ r.name.c_str(), r.type });
         break;
     case T::Branch:
         s.execIns  = { { "", P::Exec } };
@@ -190,6 +197,7 @@ const char* nodeDisplayName(NodeType t)
         case T::GetGameInstance:return "Get Game Instance";
         case T::GetSelf:        return "Get Self";
         case T::Print:        return "Print";
+        case T::FunctionReturn:return "Return";
         default:              return "?";
     }
 }
@@ -201,6 +209,7 @@ const char* nodeCategory(NodeType t)
         case T::Event:         return "Events";
         case T::FunctionEntry: return "Functions";
         case T::FunctionCall:  return "Functions";
+        case T::FunctionReturn:return "Functions";
         case T::Branch:
         case T::Sequence:      return "Flow";
         case T::GetProperty:
@@ -363,6 +372,14 @@ std::string toJson(const Graph& g)
         if (n.access)            e["access"]   = n.access;
         if (n.f[0] || n.f[1] || n.f[2] || n.f[3])
             e["f"] = { n.f[0], n.f[1], n.f[2], n.f[3] };
+        auto dumpParams = [](const std::vector<FuncParam>& ps)
+        {
+            nlohmann::json a = nlohmann::json::array();
+            for (const auto& p : ps) a.push_back({ { "name", p.name }, { "type", (int)p.type } });
+            return a;
+        };
+        if (!n.params.empty())  e["params"]  = dumpParams(n.params);
+        if (!n.results.empty()) e["results"] = dumpParams(n.results);
         jn.push_back(std::move(e));
     }
     j["nodes"] = std::move(jn);
@@ -411,6 +428,18 @@ bool fromJson(const std::string& json, Graph& out)
         n.access   = e.value("access", 0);
         if (const auto& f = e.value("f", nlohmann::json::array()); f.size() >= 4)
             for (int i = 0; i < 4; ++i) n.f[i] = f[i].get<float>();
+        auto loadParams = [](const nlohmann::json& a, std::vector<FuncParam>& ps)
+        {
+            for (const auto& pe : a)
+            {
+                FuncParam p;
+                p.name = pe.value("name", std::string());
+                p.type = (PinType)pe.value("type", (int)P::Float);
+                ps.push_back(std::move(p));
+            }
+        };
+        loadParams(e.value("params",  nlohmann::json::array()), n.params);
+        loadParams(e.value("results", nlohmann::json::array()), n.results);
         if (n.id >= g.nextId) g.nextId = n.id + 1;
         g.nodes.push_back(std::move(n));
     }
@@ -434,8 +463,26 @@ bool fromJson(const std::string& json, Graph& out)
             for (int i = 0; i < 4; ++i) v.f[i] = f[i].get<float>();
         g.variables.push_back(std::move(v));
     }
+    syncFunctionSignatures(g); // reconcile call/return pins with their entries
     out = std::move(g);
     return true;
+}
+
+void syncFunctionSignatures(Graph& g)
+{
+    // The FunctionEntry owns each function's interface; mirror it onto the calls
+    // and returns of the same name so their pins match. Calls/returns whose
+    // function lives in another graph (no local entry) keep their own mirror.
+    for (Node& n : g.nodes)
+    {
+        if (n.type != NodeType::FunctionCall && n.type != NodeType::FunctionReturn) continue;
+        const Node* entry = nullptr;
+        for (const Node& e : g.nodes)
+            if (e.type == NodeType::FunctionEntry && e.s == n.s) { entry = &e; break; }
+        if (!entry) continue;
+        n.params  = entry->params;
+        n.results = entry->results;
+    }
 }
 
 // ── Interpreter ──────────────────────────────────────────────────────────────
@@ -477,6 +524,7 @@ void Runner::fireEvent(const std::string& eventName, int elem, const Value& arg)
     m_steps = 0;
     m_eventArg = arg;
     m_execOutputs.clear();
+    m_callStack.clear();
     for (const auto& n : m_graph.nodes)
     {
         if (n.type != T::Event || n.s != eventName) continue;
@@ -493,7 +541,17 @@ bool Runner::callFunction(const std::string& name, bool requirePublic)
         if (requirePublic && n.access != 0) return false;
         m_steps = 0;
         m_execOutputs.clear();
+        m_callStack.clear();
+        // External callers pass no arguments — seed a frame of typed defaults so
+        // the entry's param data-outs (and any Return) resolve cleanly.
+        CallFrame frame;
+        frame.args.resize(n.params.size());
+        for (size_t i = 0; i < n.params.size(); ++i) frame.args[i].type = n.params[i].type;
+        frame.results.resize(n.results.size());
+        for (size_t i = 0; i < n.results.size(); ++i) frame.results[i].type = n.results[i].type;
+        m_callStack.push_back(std::move(frame));
         runExecChain(n, pinRanges(n).execOut0, 0);
+        m_callStack.pop_back();
         return true;
     }
     return false;
@@ -553,7 +611,7 @@ void Runner::execNode(const Node& n, int depth)
         // The widget id doubles as its runtime reference (widget id == scriptId),
         // so a created widget is a first-class Ref object.
         const int id = m_ctx.createWidget ? m_ctx.createWidget(n.s) : 0;
-        m_execOutputs[n.id] = Value::ofRef((uint32_t)id); // cached for the data output
+        m_execOutputs[n.id] = { Value::ofRef((uint32_t)id) }; // cached for the data output
         break;
     }
     case T::ShowWidgetId:  if (m_ctx.showWidget)    m_ctx.showWidget((int)evalInput(n, 0, depth + 1).ref);    break;
@@ -562,7 +620,7 @@ void Runner::execNode(const Node& n, int depth)
     case T::CreateObject:
     {
         const uint32_t ref = m_ctx.createObject ? m_ctx.createObject(n.s) : 0u;
-        m_execOutputs[n.id] = Value::ofRef(ref); // cached for the data output
+        m_execOutputs[n.id] = { Value::ofRef(ref) }; // cached for the data output
         break;
     }
     case T::DestroyObject: if (m_ctx.destroyObject) m_ctx.destroyObject(evalInput(n, 0, depth + 1).ref); break;
@@ -584,12 +642,34 @@ void Runner::execNode(const Node& n, int depth)
             m_ctx.callExternal(evalInput(n, 0, depth + 1).ref, n.s);
         break;
     case T::FunctionCall:
+    {
+        const Node* entry = nullptr;
         for (const auto& fn : m_graph.nodes)
-            if (fn.type == T::FunctionEntry && fn.s == n.s)
-            {
-                runExecChain(fn, pinRanges(fn).execOut0, depth + 1);
-                break;
-            }
+            if (fn.type == T::FunctionEntry && fn.s == n.s) { entry = &fn; break; }
+        if (!entry) break;
+        // Build the call frame: evaluate arguments in the CALLER's context (before
+        // pushing, so the caller's own params still resolve), seed typed results.
+        CallFrame frame;
+        frame.args.resize(n.params.size());
+        for (size_t i = 0; i < n.params.size(); ++i)
+            frame.args[i] = coerce(evalInput(n, (int)i, depth + 1), n.params[i].type);
+        frame.results.resize(n.results.size());
+        for (size_t i = 0; i < n.results.size(); ++i) frame.results[i].type = n.results[i].type;
+        m_callStack.push_back(std::move(frame));
+        runExecChain(*entry, pinRanges(*entry).execOut0, depth + 1);
+        // Cache the returned values as this call's data outputs, then pop.
+        m_execOutputs[n.id] = std::move(m_callStack.back().results);
+        m_callStack.pop_back();
+        break;
+    }
+    case T::FunctionReturn:
+        // Write the current invocation's return values (read back by the call).
+        if (!m_callStack.empty())
+        {
+            CallFrame& f = m_callStack.back();
+            for (size_t i = 0; i < n.results.size() && i < f.results.size(); ++i)
+                f.results[i] = coerce(evalInput(n, (int)i, depth + 1), n.results[i].type);
+        }
         break;
     case T::Print:
         Logger::Log(Logger::LogLevel::Info,
@@ -639,15 +719,27 @@ Value Runner::evalData(const Node& n, int dataOutPin, int depth)
     case T::GetGameInstance: return m_ctx.getGameInstance ? m_ctx.getGameInstance() : Value::ofRef(0);
     case T::GetSelf:         return m_ctx.getSelf ? m_ctx.getSelf() : Value::ofRef(0);
     case T::CreateWidget:
+    case T::CreateObject:
     {
         // Return the ref produced when this node ran (don't create again).
         auto it = m_execOutputs.find(n.id);
-        return it != m_execOutputs.end() ? it->second : Value::ofRef(0);
+        return (it != m_execOutputs.end() && !it->second.empty()) ? it->second[0] : Value::ofRef(0);
     }
-    case T::CreateObject:
+    case T::FunctionEntry:
     {
+        // A function's input parameter: read it from the active call frame.
+        if (!m_callStack.empty() && dataOutPin >= 0 &&
+            dataOutPin < (int)m_callStack.back().args.size())
+            return m_callStack.back().args[dataOutPin];
+        return {};
+    }
+    case T::FunctionCall:
+    {
+        // A function's return value: read the cached results from when it ran.
         auto it = m_execOutputs.find(n.id);
-        return it != m_execOutputs.end() ? it->second : Value::ofRef(0);
+        if (it != m_execOutputs.end() && dataOutPin >= 0 && dataOutPin < (int)it->second.size())
+            return it->second[dataOutPin];
+        return {};
     }
     case T::GetExternal:
     {

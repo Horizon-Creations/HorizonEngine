@@ -48,9 +48,10 @@ enum class NodeType : uint8_t
 {
     // Host-fired entry points.
     Event = 0,      // s = event name, elem = target (0 = any); optional arg out
-    FunctionEntry,  // s = function name; access = 0 public / 1 private
+    FunctionEntry,  // s = function name; access; params = inputs (one data-out each)
     // Control flow.
-    Branch, Sequence, FunctionCall,
+    Branch, Sequence,
+    FunctionCall,   // s = function name; params → data-ins, results → data-outs
     // Target property access (elem + s = property name + propType = value type).
     GetProperty, SetProperty,
     // Host actions on the running widget itself ("self").
@@ -82,7 +83,20 @@ enum class NodeType : uint8_t
     GetSelf,         // Ref to this instance
     // Debug.
     Print,
+    // Writes the owning function's return values (s = function name); one data-in
+    // per declared result. Terminal in the exec chain (no exec-out).
+    FunctionReturn,
     COUNT
+};
+
+// One typed input or output of a HorizonCode function. The FunctionEntry owns
+// the interface (params + results); FunctionCall / FunctionReturn mirror it so
+// their pins resolve without a graph lookup (kept in sync by the editor and on
+// load via syncFunctionSignatures).
+struct FuncParam
+{
+    std::string name;
+    PinType     type = PinType::Float;
 };
 
 // A user-defined graph variable: named, typed, persistent per running instance.
@@ -112,6 +126,11 @@ struct Node
     int         access = 0;               // FunctionEntry: 0 public, 1 private
     float       f[4] = {};                // literal payload
     float       x = 0.0f, y = 0.0f;       // editor canvas position
+    // Function interface. FunctionEntry: params = inputs (data-outs). FunctionCall
+    // mirrors both (params = data-ins, results = data-outs). FunctionReturn mirrors
+    // results (data-ins). Empty on every other node type.
+    std::vector<FuncParam> params;
+    std::vector<FuncParam> results;
 };
 
 // Links connect unified pin indices (see pin ranges below).
@@ -149,6 +168,13 @@ struct HE_API Graph
 
 HE_API std::string toJson(const Graph& g);
 HE_API bool        fromJson(const std::string& json, Graph& out);
+
+// Propagate every function's interface (params + results, owned by its
+// FunctionEntry) onto the matching FunctionCall / FunctionReturn nodes by name,
+// so their pins resolve correctly. Call after editing an interface or loading a
+// graph. FunctionReturn mirrors results (its data-ins); a call with no matching
+// entry keeps its own mirror (the entry may live in another class's graph).
+HE_API void syncFunctionSignatures(Graph& g);
 
 // The runtime Value a variable starts at (from its stored default). Hosts seed
 // their per-instance variable store with this.
@@ -213,14 +239,21 @@ private:
     Value evalInput(const Node& n, int dataInIndex, int depth);
     const Link* execLinkFrom(int nodeId, int pin) const;
 
+    // One active function invocation: the argument values the call passed in
+    // (read by the FunctionEntry's data-outs) and the return values a
+    // FunctionReturn writes (read by the FunctionCall's data-outs).
+    struct CallFrame { std::vector<Value> args; std::vector<Value> results; };
+
     const Graph& m_graph;
     Context      m_ctx;
     Value        m_eventArg;
     int          m_steps = 0;
-    // Outputs produced by exec nodes with side effects (e.g. CreateWidget's id),
-    // so a downstream data read returns the value instead of re-running the node.
-    // Cleared at the start of every run.
-    std::unordered_map<int, Value> m_execOutputs;
+    // Outputs produced by exec nodes with side effects, per data-out pin
+    // (CreateWidget's id, a FunctionCall's return values), so a downstream data
+    // read returns the value instead of re-running the node. Cleared each run.
+    std::unordered_map<int, std::vector<Value>> m_execOutputs;
+    // Active function-call frames (innermost on top) — params in, results out.
+    std::vector<CallFrame> m_callStack;
 };
 
 } // namespace HorizonCode
