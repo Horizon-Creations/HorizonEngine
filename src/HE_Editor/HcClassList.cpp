@@ -1,11 +1,14 @@
 #include "HcClassList.h"
 #include <ContentManager/ContentManager.h>
+#include <ContentManager/Assets.h>
 #include <ContentManager/HAsset.h>
 #include <HorizonCode/HorizonCode.h>
 #include <Types/Enums.h>
 #include <filesystem>
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
+#include <string>
 #include <imgui.h>
 #include <misc/cpp/imgui_stdlib.h>
 
@@ -143,6 +146,106 @@ namespace
 			default: return P::Ref;
 		}
 	}
+}
+
+// ── HC class registry ────────────────────────────────────────────────────────
+ClassInfo classInfoFromGraph(const HorizonCode::Graph& g, const std::string& label,
+                             const std::string& path, ClassInfo::Kind kind)
+{
+	using T = HorizonCode::NodeType;
+	ClassInfo ci; ci.label = label; ci.path = path; ci.kind = kind;
+	for (const auto& n : g.nodes)
+		if (n.type == T::FunctionEntry && n.access == 0 && !n.s.empty())
+		{
+			MemberFn f; f.name = n.s; f.hasResult = !n.results.empty();
+			for (const auto& p : n.params) f.paramTypes.push_back(p.type);
+			ci.functions.push_back(std::move(f));
+		}
+	for (const auto& v : g.variables)
+		if (v.access == 0) ci.variables.push_back({ v.name, v.type, v.className });
+	return ci;
+}
+
+bool classInfoForPath(ContentManager* cm, const std::string& path, ClassInfo& out)
+{
+	if (!cm || path.empty()) return false;
+	const HE::UUID id = cm->loadAsset(path);
+	const std::string label = std::filesystem::path(path).stem().string();
+	HorizonCode::Graph g;
+	if (const HorizonCodeClassAsset* a = cm->getHorizonCodeClass(id);
+	    a && !a->graphJson.empty() && HorizonCode::fromJson(a->graphJson, g))
+		{ out = classInfoFromGraph(g, label, path, ClassInfo::Class); return true; }
+	if (const UIWidgetAsset* w = cm->getWidget(id);
+	    w && !w->graphJson.empty() && HorizonCode::fromJson(w->graphJson, g))
+		{ out = classInfoFromGraph(g, label, path, ClassInfo::Widget); return true; }
+	return false;
+}
+
+std::vector<ClassInfo> listClasses(ContentManager* cm,
+                                   const HorizonCode::Graph* levelGraph,
+                                   const HorizonCode::Graph* giGraph)
+{
+	std::vector<ClassInfo> out;
+	for (const auto& c : listAssets(cm, HE::AssetType::HorizonCodeClass))
+	{ ClassInfo ci; if (classInfoForPath(cm, c.path, ci)) out.push_back(std::move(ci)); }
+	for (const auto& c : listAssets(cm, HE::AssetType::Widget))
+	{ ClassInfo ci; if (classInfoForPath(cm, c.path, ci)) out.push_back(std::move(ci)); }
+	if (levelGraph) out.push_back(classInfoFromGraph(*levelGraph, "Level", "", ClassInfo::Level));
+	if (giGraph)    out.push_back(classInfoFromGraph(*giGraph, "Game Instance", "", ClassInfo::GameInstance));
+	return out;
+}
+
+namespace
+{
+	const char* valueTypeName(HorizonCode::PinType t)
+	{
+		using P = HorizonCode::PinType;
+		switch (t)
+		{
+			case P::Float:  return "Float";  case P::Bool:  return "Bool";
+			case P::Int:    return "Int";    case P::String:return "String";
+			case P::Vec2:   return "Vec2";   case P::Color: return "Color";
+			case P::Ref:    return "Object"; default:       return "Exec";
+		}
+	}
+	std::string lc(std::string s)
+	{ for (char& c : s) c = (char)std::tolower((unsigned char)c); return s; }
+}
+
+bool drawTypePicker(const char* label, ContentManager* cm,
+                    HorizonCode::PinType& type, std::string* className)
+{
+	using P = HorizonCode::PinType;
+	bool changed = false;
+	std::string cur = (type == P::Ref && className && !className->empty())
+		? std::filesystem::path(*className).stem().string()
+		: valueTypeName(type);
+	if (ImGui::BeginCombo(label, cur.c_str()))
+	{
+		static std::string search;
+		if (ImGui::IsWindowAppearing()) { search.clear(); ImGui::SetKeyboardFocusHere(); }
+		ImGui::SetNextItemWidth(180.0f);
+		ImGui::InputTextWithHint("##typesearch", "Search…", &search);
+		const std::string q = lc(search);
+		auto hit = [&](const std::string& s){ return q.empty() || lc(s).find(q) != std::string::npos; };
+
+		ImGui::TextDisabled("Default");
+		const P defs[] = { P::Float, P::Bool, P::Int, P::String, P::Vec2, P::Color };
+		for (P d : defs)
+			if (hit(valueTypeName(d)) && ImGui::Selectable(valueTypeName(d), type == d && (!className || className->empty())))
+			{ type = d; if (className) className->clear(); changed = true; }
+
+		if (className) // object types only where a class binding is allowed
+		{
+			ImGui::Separator();
+			ImGui::TextDisabled("Objects");
+			for (const auto& c : listClasses(cm, nullptr, nullptr))
+				if (hit(c.label) && ImGui::Selectable(c.label.c_str(), type == P::Ref && *className == c.path))
+				{ type = P::Ref; *className = c.path; changed = true; }
+		}
+		ImGui::EndCombo();
+	}
+	return changed;
 }
 
 std::uint32_t nodeHeaderColor(const HorizonCode::Node& n)

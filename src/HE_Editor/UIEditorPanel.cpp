@@ -1262,10 +1262,14 @@ void drawGraphVariables(State& st, AppContext& ctx)
 			ImGui::Text("%s", v.name.c_str());
 			ImGui::EndDragDropSource();
 		}
+		// Object variables show their class name as the type, not a bare "Object".
+		const std::string typeStr = (v.type == PT::Ref && !v.className.empty())
+			? std::filesystem::path(v.className).stem().string()
+			: std::string(pinTypeName(v.type));
 		if (ImGui::IsItemHovered())
-			ImGui::SetTooltip("%s — drag to graph for Get/Set", pinTypeName(v.type));
+			ImGui::SetTooltip("%s — drag to graph for Get/Set", typeStr.c_str());
 		ImGui::SameLine();
-		ImGui::TextDisabled("%s", pinTypeName(v.type));
+		ImGui::TextDisabled("%s", typeStr.c_str());
 	}
 
 	// ── Functions ─────────────────────────────────────────────────────────────
@@ -1350,47 +1354,26 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 				}
 			}
 
-			int typeIdx = (int)v->type;
-			if (ImGui::Combo("Type", &typeIdx, "Exec\0Float\0Bool\0Int\0String\0Vec2\0Color\0Object\0"))
+			// Searchable type dropdown: default value types + object (class) types.
+			const PT oldType = v->type;
+			if (HcEditorUtil::drawTypePicker("Type", ctx.contentManager, v->type, &v->className))
 			{
-				const PT nt = (PT)typeIdx;
-				if (nt != PT::Exec && nt != v->type)
-				{
-					v->type = nt;
+				if (v->type != oldType)
 					// Retype the Get/Set nodes and drop links that no longer typecheck.
 					for (auto& gn : st.graph.nodes)
 						if ((gn.type == NT::GetVariable || gn.type == NT::SetVariable) && gn.s == v->name)
 						{
-							gn.propType = nt;
+							gn.propType = v->type;
 							const GPinRanges r = graphPinRanges(gn);
 							const int valuePin = gn.type == NT::GetVariable ? r.dataOut0 : r.dataIn0;
 							removeGraphPinLinks(st.graph, gn.id, valuePin);
 						}
-					commitEdit(st, ctx);
-				}
+				commitEdit(st, ctx);
 			}
 
 			int vaccess = v->access;
 			if (ImGui::Combo("Access", &vaccess, "Public\0Private\0"))
 				{ v->access = vaccess; commitEdit(st, ctx); }
-
-			// Object variables can be typed to a HorizonCode class.
-			if (v->type == PT::Ref)
-			{
-				if (ImGui::BeginCombo("Class", v->className.empty() ? "(any)" : v->className.c_str()))
-				{
-					if (ImGui::Selectable("(any)", v->className.empty())) { v->className.clear(); commitEdit(st, ctx); }
-					ImGui::TextDisabled("Classes");
-					for (const auto& c : HcEditorUtil::listAssets(ctx.contentManager, HE::AssetType::HorizonCodeClass))
-						if (ImGui::Selectable((c.label + "##" + c.path).c_str(), v->className == c.path))
-							{ v->className = c.path; commitEdit(st, ctx); }
-					ImGui::TextDisabled("Widgets");
-					for (const auto& c : HcEditorUtil::listAssets(ctx.contentManager, HE::AssetType::Widget))
-						if (ImGui::Selectable((c.label + "##" + c.path).c_str(), v->className == c.path))
-							{ v->className = c.path; commitEdit(st, ctx); }
-					ImGui::EndCombo();
-				}
-			}
 
 			// Default value editor (seeds the runtime store at widget creation).
 			ImGui::SeparatorText("Default");
