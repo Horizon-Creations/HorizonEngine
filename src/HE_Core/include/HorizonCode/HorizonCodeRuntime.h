@@ -88,17 +88,19 @@ public:
     InstanceId setGameInstance(Graph graph, HostBindings bindings = {});
     InstanceId gameInstance() const { return m_gameInstance; }
 
-    // World-level widget services (createWidget/show/hide/destroy), forwarded
-    // into every instance's Context so any graph can spawn/manage widgets. The
-    // app binds these to the current world's WidgetManager + ContentManager.
-    struct WidgetServices
+    // World-level services forwarded into every instance's Context so any graph
+    // can spawn/manage widgets and instantiate HorizonCode classes. The app binds
+    // these to the current world's WidgetManager + ContentManager (+ this runtime).
+    struct Services
     {
-        std::function<int(const std::string& assetPath)> create;
-        std::function<void(int)> show;
-        std::function<void(int)> hide;
-        std::function<void(int)> destroy;
+        std::function<int(const std::string& assetPath)> createWidget;
+        std::function<void(int)> showWidget;
+        std::function<void(int)> hideWidget;
+        std::function<void(int)> destroyWidget;
+        std::function<uint32_t(const std::string& classPath)> createObject;
+        std::function<void(uint32_t)> destroyObject;
     };
-    void setWidgetServices(WidgetServices s) { m_widgetServices = std::move(s); }
+    void setServices(Services s) { m_services = std::move(s); }
 
 private:
     struct Inst
@@ -122,7 +124,7 @@ private:
     InstanceId m_next         = 1;
     InstanceId m_gameInstance = 0;
     int        m_dispatchDepth = 0;   // guards cross-instance event recursion
-    WidgetServices m_widgetServices;
+    Services   m_services;
 };
 
 } // namespace HorizonCode

@@ -1,6 +1,7 @@
 #include "LevelScriptPanel.h"
 #include "GameInstancePanel.h"
 #include "HorizonCodeClassPanel.h"
+#include "HcClassList.h"
 #include "EditorApplication.h"   // AppContext
 #include "EditorUndo.h"          // scene-undo snapshots (dirty tracking + undo/redo)
 #include "GraphEditor.h"         // shared node-graph canvas
@@ -336,7 +337,8 @@ void drawVariableDetails(HC::Graph& graph, bool& edited)
 }
 
 // Detail editor for the selected node.
-void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events, bool& edited)
+void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events,
+                     ContentManager* content, bool& edited)
 {
 	HC::Node* n = graph.findNode(g.selectedNode);
 	if (!n) { g.selectedNode = 0; return; }
@@ -458,6 +460,18 @@ void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events, b
 		if (ImGui::IsItemDeactivatedAfterEdit()) edited = true;
 		ImGui::TextDisabled("Content-relative path to a UI Widget\nasset. Outputs the new widget's id.");
 		break;
+	case NT::CreateObject:
+	{
+		if (ImGui::BeginCombo("Class", n->s.empty() ? "(none)" : n->s.c_str()))
+		{
+			for (const auto& c : HcEditorUtil::listHorizonCodeClasses(content))
+				if (ImGui::Selectable((c.label + "##" + c.path).c_str(), n->s == c.path))
+					{ n->s = c.path; edited = true; }
+			ImGui::EndCombo();
+		}
+		ImGui::TextDisabled("Instantiates a HorizonCode class as a\nlive object. Outputs a reference to it.");
+		break;
+	}
 	default:
 		ImGui::TextDisabled("No parameters.");
 		break;
@@ -619,7 +633,7 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, const 
 // Level Script and the Game Instance windows (they differ only in the graph,
 // the events, and how a change is committed).
 void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
-                   const char* title, const char* subtitle, bool& edited)
+                   const char* title, const char* subtitle, ContentManager* content, bool& edited)
 {
 	ImGui::BeginChild("##ls_side", ImVec2(220.0f, 0.0f), true);
 	ImGui::TextUnformatted(title);
@@ -630,7 +644,7 @@ void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
 	drawFunctions(graph, edited);
 	ImGui::Spacing();
 	ImGui::Separator();
-	if (g.selectedNode != 0)          drawNodeDetails(graph, events, edited);
+	if (g.selectedNode != 0)          drawNodeDetails(graph, events, content, edited);
 	else if (!g.selectedVar.empty())  drawVariableDetails(graph, edited);
 	else ImGui::TextDisabled("Select a node or variable.");
 	ImGui::EndChild();
@@ -693,7 +707,7 @@ void LevelScriptPanel::render(AppContext& ctx, const ImVec2& pos, const ImVec2& 
 	static const std::vector<std::string> kEvents = { "OnLevelLoaded", "OnLevelUnloaded" };
 	bool edited = false;
 	drawGraphBody(ctx.world->levelScript(), kEvents, "Level Script",
-	              "Reacts to world events.", edited);
+	              "Reacts to world events.", ctx.contentManager, edited);
 	// snapshotNow() bumps the undo revision so the level script saves with the
 	// scene; self-contained so it doesn't disturb the entity undo.
 	if (edited && ctx.undoSys) ctx.undoSys->snapshotNow();
@@ -712,7 +726,7 @@ void GameInstancePanel::render(AppContext& ctx, const ImVec2& pos, const ImVec2&
 	static const std::vector<std::string> kEvents = { "OnInit", "OnShutdown", "OnWindowFocusChanged" };
 	bool edited = false;
 	drawGraphBody(*ctx.gameInstanceGraph, kEvents, "Game Instance",
-	              "App-wide. Runs before anything loads.", edited);
+	              "App-wide. Runs before anything loads.", ctx.contentManager, edited);
 	// The GameInstance graph isn't part of a scene — re-register it in the app
 	// runtime and persist it via the host callback.
 	if (edited && ctx.commitGameInstance) ctx.commitGameInstance();
@@ -787,7 +801,7 @@ void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath
 	static const std::vector<std::string> kFreeEvents; // empty → free-text event names
 	bool edited = false;
 	drawGraphBody(st.graph, kFreeEvents, "HorizonCode Class",
-	              "Reusable class; names its own events.", edited);
+	              "Reusable class; names its own events.", ctx.contentManager, edited);
 	if (edited) st.dirty = true;
 	ImGui::End();
 }

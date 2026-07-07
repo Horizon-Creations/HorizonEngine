@@ -253,15 +253,57 @@ TEST_CASE("BindEvent + GetGameInstance let a script subscribe to the GameInstanc
 	CHECK(rt.getVariable(L, "heard").b == true);
 }
 
+TEST_CASE("Create/Destroy Object instantiate a class, run Construct, cache the ref")
+{
+	Runtime rt;
+
+	// The class this test spawns: Construct → built = true.
+	Graph classGraph = boolVarGraph("built");
+	eventSetsBool(classGraph, "Construct", "built");
+
+	int createCount = 0; InstanceId createdRef = 0, destroyedRef = 0; bool builtAfterConstruct = false;
+	Runtime::Services svc;
+	svc.createObject = [&](const std::string& /*path*/) -> uint32_t {
+		++createCount;
+		const InstanceId id = rt.add(classGraph);
+		rt.fireEvent(id, "Construct");
+		builtAfterConstruct = rt.getVariable(id, "built").b;
+		createdRef = id;
+		return id;
+	};
+	svc.destroyObject = [&](uint32_t ref){ destroyedRef = ref; rt.remove(ref); };
+	rt.setServices(svc);
+
+	// Caller: Go → CreateObject → DestroyObject(<created ref>).
+	// CreateObject: execIn 0 / execOut 1 / Object dataOut 2.
+	// DestroyObject: execIn 0 / execOut 1 / Object dataIn 2.
+	Graph caller;
+	Node ev; ev.type = NodeType::Event; ev.s = "Go"; const int e = caller.addNode(ev);
+	Node co; co.type = NodeType::CreateObject; co.s = "MyClass"; const int c = caller.addNode(co);
+	Node de; de.type = NodeType::DestroyObject; const int d = caller.addNode(de);
+	REQUIRE(caller.connect(e, 0, c, 0)); // exec
+	REQUIRE(caller.connect(c, 1, d, 0)); // exec
+	REQUIRE(caller.connect(c, 2, d, 2)); // ref out → ref in
+
+	const InstanceId callerId = rt.add(std::move(caller));
+	rt.fireEvent(callerId, "Go");
+
+	CHECK(createCount == 1);              // created once — the ref is cached, not re-run
+	CHECK(builtAfterConstruct == true);   // the class's Construct ran
+	CHECK(createdRef != 0);
+	CHECK(destroyedRef == createdRef);    // the cached ref flowed into Destroy Object
+	CHECK_FALSE(rt.alive(createdRef));    // and the instance is gone
+}
+
 TEST_CASE("Widget nodes call the runtime services and cache CreateWidget's id")
 {
 	Runtime rt;
 	int createCount = 0, shownId = -1;
 	std::string createdPath;
-	Runtime::WidgetServices svc;
-	svc.create = [&](const std::string& p){ ++createCount; createdPath = p; return 42; };
-	svc.show   = [&](int id){ shownId = id; };
-	rt.setWidgetServices(svc);
+	Runtime::Services svc;
+	svc.createWidget = [&](const std::string& p){ ++createCount; createdPath = p; return 42; };
+	svc.showWidget   = [&](int id){ shownId = id; };
+	rt.setServices(svc);
 
 	// Event Go → CreateWidget("hud.ui") → ShowWidget(<created id>).
 	// CreateWidget: execIn 0 / execOut 1 / Widget dataOut 2.

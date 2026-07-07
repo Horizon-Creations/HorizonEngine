@@ -58,6 +58,9 @@ enum class NodeType : uint8_t
     // Create + manage widgets by id (from any graph — level, GameInstance, …).
     CreateWidget,    // s = widget asset path; dataOut Widget (Int id)
     ShowWidgetId, HideWidgetId, DestroyWidget, // dataIn Widget (Int id)
+    // Instantiate a HorizonCode class asset as a live runtime object.
+    CreateObject,    // s = HorizonCode class asset path; dataOut Object (Ref)
+    DestroyObject,   // dataIn Object (Ref)
     // Literals (f[]/s).
     ConstFloat, ConstBool, ConstInt, ConstString, ConstVec2, ConstColor,
     // Math / logic.
@@ -162,6 +165,10 @@ struct Context
     std::function<void(int widgetId)> showWidget;
     std::function<void(int widgetId)> hideWidget;
     std::function<void(int widgetId)> destroyWidget;
+    // Instantiate a HorizonCode class asset → the new instance's Ref (0 on fail);
+    // destroyObject removes a live instance by Ref.
+    std::function<uint32_t(const std::string& classPath)> createObject;
+    std::function<void(uint32_t objectRef)>               destroyObject;
 
     // Reference-based delegation (bound by the Runtime). All optional.
     // emitEvent: broadcast an event from THIS instance to everyone bound to it.
