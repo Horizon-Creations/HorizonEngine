@@ -515,7 +515,51 @@ void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events,
 
 // ── Canvas ────────────────────────────────────────────────────────────────────
 
-void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, const ImVec2& avail, bool& edited)
+// Type of a node pin (exec pins report Exec). Used to filter the drag-off menu.
+PT pinTypeOf(const HC::Node& n, int pin)
+{
+	const HC::NodeSig sig = HC::signatureOf(n);
+	const PinRanges r = pinRanges(n);
+	if (pin >= r.dataIn0  && pin < r.dataOut0) return sig.dataIns [pin - r.dataIn0 ].type;
+	if (pin >= r.dataOut0 && pin < r.end)      return sig.dataOuts[pin - r.dataOut0].type;
+	return PT::Exec;
+}
+
+// Load a HorizonCode class asset's graph (for enumerating its public members).
+bool loadClassGraph(ContentManager* content, const std::string& path, HC::Graph& out)
+{
+	if (!content || path.empty()) return false;
+	const HE::UUID id = content->loadAsset(path);
+	const HorizonCodeClassAsset* a = content->getHorizonCodeClass(id);
+	if (!a || a->graphJson.empty()) return false;
+	return HC::fromJson(a->graphJson, out);
+}
+
+// The class graph the Ref output of `srcNode` points to (self / GameInstance /
+// a typed Object variable / Create Object), or null when the class is unknown.
+const HC::Graph* resolveClassGraph(const HC::Node& srcNode, const HC::Graph& selfGraph,
+                                   const HC::Graph* giGraph, ContentManager* content,
+                                   HC::Graph& scratch)
+{
+	switch (srcNode.type)
+	{
+		case NT::GetSelf:         return &selfGraph;
+		case NT::GetGameInstance: return giGraph;
+		case NT::CreateObject:
+			return loadClassGraph(content, srcNode.s, scratch) ? &scratch : nullptr;
+		case NT::GetVariable:
+		{
+			const HC::Variable* v = selfGraph.findVariable(srcNode.s);
+			if (v && v->type == PT::Ref && !v->className.empty())
+				return loadClassGraph(content, v->className, scratch) ? &scratch : nullptr;
+			return nullptr;
+		}
+		default: return nullptr;
+	}
+}
+
+void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, const ImVec2& avail,
+                ContentManager* content, const HC::Graph* giGraph, bool& edited)
 {
 	g.ge.selected = g.selectedNode;
 	if (g.focusSelected) { g.ge.focusNode = g.selectedNode; g.focusSelected = false; }
@@ -659,6 +703,60 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, const 
 		g.openVarDrop = true;
 	};
 
+	// Drag a wire off a pin → context-aware menu. For a Ref (object) output whose
+	// class is known, surface that class's public functions + variables; each
+	// entry creates the matching node and connects the object to its Target.
+	m.drawPinDragMenu = [&graph, content, giGraph](int srcNode, int srcPin, bool srcInput, ImVec2 pos) -> int {
+		HC::Node* sn = graph.findNode(srcNode);
+		if (!sn) return 0;
+		int created = 0;
+		ImGui::BeginChild("##pindrag", ImVec2(240.0f, 300.0f));
+
+		if (!srcInput && pinTypeOf(*sn, srcPin) == PT::Ref)
+		{
+			auto wire = [&](int newId){
+				HC::Node* nn = graph.findNode(newId);
+				if (nn) graph.connect(srcNode, srcPin, newId, pinRanges(*nn).dataIn0); // → Target
+			};
+			HC::Graph scratch;
+			const HC::Graph* cls = resolveClassGraph(*sn, graph, giGraph, content, scratch);
+			if (cls)
+			{
+				bool fh = false;
+				for (const auto& fn : cls->nodes)
+					if (fn.type == NT::FunctionEntry && fn.access == 0 && !fn.s.empty())
+					{
+						if (!fh) { ImGui::TextDisabled("Functions"); fh = true; }
+						if (ImGui::Selectable(("Call " + fn.s).c_str()))
+						{ const int id = addNode(graph, NT::CallExternal, pos); graph.findNode(id)->s = fn.s; wire(id); created = id; ImGui::CloseCurrentPopup(); }
+					}
+				bool vh = false;
+				for (const auto& var : cls->variables)
+					if (var.access == 0)
+					{
+						if (!vh) { ImGui::TextDisabled("Variables"); vh = true; }
+						if (ImGui::Selectable(("Get " + var.name).c_str()))
+						{ const int id = addNode(graph, NT::GetExternal, pos); HC::Node* nn = graph.findNode(id); nn->s = var.name; nn->propType = var.type; wire(id); created = id; ImGui::CloseCurrentPopup(); }
+						if (ImGui::Selectable(("Set " + var.name).c_str()))
+						{ const int id = addNode(graph, NT::SetExternal, pos); HC::Node* nn = graph.findNode(id); nn->s = var.name; nn->propType = var.type; wire(id); created = id; ImGui::CloseCurrentPopup(); }
+					}
+				if (fh || vh) ImGui::Separator();
+			}
+			else ImGui::TextDisabled("(untyped object)");
+
+			ImGui::TextDisabled("Reference");
+			if (ImGui::Selectable("Call Function (Ref)")) { const int id = addNode(graph, NT::CallExternal, pos); wire(id); created = id; ImGui::CloseCurrentPopup(); }
+			if (ImGui::Selectable("Bind Event"))          { const int id = addNode(graph, NT::BindEvent, pos);    wire(id); created = id; ImGui::CloseCurrentPopup(); }
+			if (ImGui::Selectable("Get (Ref)"))           { const int id = addNode(graph, NT::GetExternal, pos);  wire(id); created = id; ImGui::CloseCurrentPopup(); }
+			if (ImGui::Selectable("Set (Ref)"))           { const int id = addNode(graph, NT::SetExternal, pos);  wire(id); created = id; ImGui::CloseCurrentPopup(); }
+			if (ImGui::Selectable("Destroy Object"))      { const int id = addNode(graph, NT::DestroyObject, pos); wire(id); created = id; ImGui::CloseCurrentPopup(); }
+		}
+		else ImGui::TextDisabled("Release on a pin to connect,\nor here to cancel.");
+
+		ImGui::EndChild();
+		return created;
+	};
+
 	if (GraphEditor::draw("##ls_canvas", m, g.ge, avail)) edited = true;
 	g.selectedNode = g.ge.selected;
 }
@@ -668,7 +766,8 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, const 
 // Level Script and the Game Instance windows (they differ only in the graph,
 // the events, and how a change is committed).
 void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
-                   const char* title, const char* subtitle, ContentManager* content, bool& edited)
+                   const char* title, const char* subtitle, ContentManager* content,
+                   const HC::Graph* giGraph, bool& edited)
 {
 	ImGui::BeginChild("##ls_side", ImVec2(220.0f, 0.0f), true);
 	ImGui::TextUnformatted(title);
@@ -688,7 +787,7 @@ void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
 
 	ImGui::BeginChild("##ls_canvas_host", ImVec2(0.0f, 0.0f), true);
 	const ImVec2 avail = ImGui::GetContentRegionAvail();
-	drawCanvas(graph, events, avail, edited);
+	drawCanvas(graph, events, avail, content, giGraph, edited);
 
 	// Variable drop → Get/Set popup.
 	if (g.openVarDrop) { ImGui::OpenPopup("##ls_var_drop"); g.openVarDrop = false; }
@@ -742,7 +841,7 @@ void LevelScriptPanel::render(AppContext& ctx, const ImVec2& pos, const ImVec2& 
 	static const std::vector<std::string> kEvents = { "OnLevelLoaded", "OnLevelUnloaded" };
 	bool edited = false;
 	drawGraphBody(ctx.world->levelScript(), kEvents, "Level Script",
-	              "Reacts to world events.", ctx.contentManager, edited);
+	              "Reacts to world events.", ctx.contentManager, ctx.gameInstanceGraph, edited);
 	// snapshotNow() bumps the undo revision so the level script saves with the
 	// scene; self-contained so it doesn't disturb the entity undo.
 	if (edited && ctx.undoSys) ctx.undoSys->snapshotNow();
@@ -761,7 +860,7 @@ void GameInstancePanel::render(AppContext& ctx, const ImVec2& pos, const ImVec2&
 	static const std::vector<std::string> kEvents = { "OnInit", "OnShutdown", "OnWindowFocusChanged" };
 	bool edited = false;
 	drawGraphBody(*ctx.gameInstanceGraph, kEvents, "Game Instance",
-	              "App-wide. Runs before anything loads.", ctx.contentManager, edited);
+	              "App-wide. Runs before anything loads.", ctx.contentManager, ctx.gameInstanceGraph, edited);
 	// The GameInstance graph isn't part of a scene — re-register it in the app
 	// runtime and persist it via the host callback.
 	if (edited && ctx.commitGameInstance) ctx.commitGameInstance();
@@ -836,7 +935,7 @@ void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath
 	static const std::vector<std::string> kFreeEvents; // empty → free-text event names
 	bool edited = false;
 	drawGraphBody(st.graph, kFreeEvents, "HorizonCode Class",
-	              "Reusable class; names its own events.", ctx.contentManager, edited);
+	              "Reusable class; names its own events.", ctx.contentManager, ctx.gameInstanceGraph, edited);
 	if (edited) st.dirty = true;
 	ImGui::End();
 }
