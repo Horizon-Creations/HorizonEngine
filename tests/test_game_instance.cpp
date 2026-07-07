@@ -91,7 +91,9 @@ TEST_CASE("GameInstance fires lifecycle events and a scene can reference it")
 
 	host.fireShutdown();
 	CHECK_FALSE(host.isRunning());
-	CHECK(host.runtime().getVariable(gi, "phase").s == "shutdown");
+	// fireShutdown runs OnShutdown, then resets the GameInstance to a clean state
+	// (fresh defaults) so the next play session starts blank.
+	CHECK(host.runtime().getVariable(gi, "phase").s == "none");
 }
 
 TEST_CASE("Window focus fires only on a real change while running")

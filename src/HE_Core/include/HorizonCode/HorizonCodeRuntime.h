@@ -60,6 +60,9 @@ public:
     // Private per-instance variable state.
     Value getVariable(InstanceId id, const std::string& name) const;
     void  setVariable(InstanceId id, const std::string& name, const Value& v);
+    // Reset an instance's variables to its graph's declared defaults (used to
+    // give the persistent GameInstance a fresh start each play session).
+    void  reseedVariables(InstanceId id);
     // Read-only view of an instance's variable store (tooling / tests).
     const std::unordered_map<std::string, Value>& variablesOf(InstanceId id) const;
 
