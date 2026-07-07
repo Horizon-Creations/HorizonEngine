@@ -93,6 +93,83 @@ std::vector<ClassRef> listAssets(ContentManager* cm, HE::AssetType type)
 std::vector<ClassRef> listHorizonCodeClasses(ContentManager* cm)
 { return listAssets(cm, HE::AssetType::HorizonCodeClass); }
 
+// ── Shared graph colors ──────────────────────────────────────────────────────
+std::uint32_t pinTypeColor(HorizonCode::PinType t)
+{
+	using P = HorizonCode::PinType;
+	switch (t)
+	{
+		case P::Exec:   return IM_COL32(235, 235, 235, 255);
+		case P::Float:  return IM_COL32(160, 200, 120, 255);
+		case P::Bool:   return IM_COL32(210,  90,  90, 255);
+		case P::Int:    return IM_COL32(110, 200, 200, 255);
+		case P::String: return IM_COL32(220, 130, 210, 255);
+		case P::Vec2:   return IM_COL32(120, 200, 210, 255);
+		case P::Color:  return IM_COL32(230, 210, 110, 255);
+		case P::Ref:    return IM_COL32(180, 140, 240, 255);
+	}
+	return IM_COL32_WHITE;
+}
+
+namespace
+{
+	std::uint32_t darken(std::uint32_t c, float f)
+	{
+		const int r = (int)((c >> IM_COL32_R_SHIFT) & 0xFF);
+		const int g = (int)((c >> IM_COL32_G_SHIFT) & 0xFF);
+		const int b = (int)((c >> IM_COL32_B_SHIFT) & 0xFF);
+		return IM_COL32((int)(r * f), (int)(g * f), (int)(b * f), 255);
+	}
+	// The value type a data node's color should reflect (Get/Set → its propType,
+	// a literal → its own type, math/logic/string → their result type).
+	HorizonCode::PinType nodeValueType(const HorizonCode::Node& n)
+	{
+		using T = HorizonCode::NodeType; using P = HorizonCode::PinType;
+		switch (n.type)
+		{
+			case T::GetVariable: case T::SetVariable:
+			case T::GetProperty: case T::SetProperty:
+			case T::GetExternal: case T::SetExternal: return n.propType;
+			case T::ConstFloat:  return P::Float;
+			case T::ConstBool:   return P::Bool;
+			case T::ConstInt:    return P::Int;
+			case T::ConstString: return P::String;
+			case T::ConstVec2:   return P::Vec2;
+			case T::ConstColor:  return P::Color;
+			case T::Add: case T::Subtract: case T::Multiply: case T::Divide: return P::Float;
+			case T::Greater: case T::Less: case T::Equals:
+			case T::And: case T::Or: case T::Not: return P::Bool;
+			case T::Concat: case T::ToString: return P::String;
+			default: return P::Ref;
+		}
+	}
+}
+
+std::uint32_t nodeHeaderColor(const HorizonCode::Node& n)
+{
+	using T = HorizonCode::NodeType;
+	switch (n.type)
+	{
+		// Entry/exit + delegation are the "control" families with fixed colors.
+		case T::Event: case T::BindEvent: case T::EmitEvent:
+			return IM_COL32(172, 62, 62, 255);   // events → red
+		case T::FunctionEntry: case T::FunctionCall: case T::FunctionReturn:
+		case T::CallExternal:
+			return IM_COL32(140, 88, 184, 255);  // functions → purple
+		case T::Branch: case T::Sequence:
+			return IM_COL32(96, 96, 104, 255);   // flow → gray
+		// Reference/object producers carry the Ref (purple) tint.
+		case T::GetSelf: case T::GetGameInstance:
+		case T::CreateObject: case T::DestroyObject:
+		case T::CreateWidget: case T::ShowWidgetId: case T::HideWidgetId: case T::DestroyWidget:
+		case T::ShowWidget: case T::HideWidget:
+			return darken(pinTypeColor(HorizonCode::PinType::Ref), 0.78f);
+		// Everything data-ish is colored by its value type (Bool getter always red…).
+		default:
+			return darken(pinTypeColor(nodeValueType(n)), 0.72f);
+	}
+}
+
 void drawFunctionInterface(HorizonCode::Graph& g, HorizonCode::Node& entry, bool& edited)
 {
 	using namespace HorizonCode;

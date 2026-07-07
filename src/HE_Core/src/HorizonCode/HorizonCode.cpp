@@ -52,6 +52,7 @@ NodeSig signatureOf(const Node& n)
         s.execIns  = { { "", P::Exec } };
         s.execOuts = { { "", P::Exec } };
         s.dataIns  = { { "Value", n.propType } };
+        s.dataOuts = { { "Value", n.propType } }; // pass the set value through
         break;
     case T::GetVariable:
         s.dataOuts = { { "Value", n.propType } };
@@ -60,6 +61,7 @@ NodeSig signatureOf(const Node& n)
         s.execIns  = { { "", P::Exec } };
         s.execOuts = { { "", P::Exec } };
         s.dataIns  = { { "Value", n.propType } };
+        s.dataOuts = { { "Value", n.propType } }; // pass the set value through
         break;
     case T::ShowWidget:
     case T::HideWidget:
@@ -96,6 +98,7 @@ NodeSig signatureOf(const Node& n)
         s.execIns  = { { "", P::Exec } };
         s.execOuts = { { "", P::Exec } };
         s.dataIns  = { { "Target", P::Ref }, { "Value", n.propType } };
+        s.dataOuts = { { "Value", n.propType } }; // pass the set value through
         break;
     case T::BindEvent:
     case T::CallExternal:
@@ -716,6 +719,13 @@ Value Runner::evalData(const Node& n, int dataOutPin, int depth)
         Value v = m_ctx.getVariable ? m_ctx.getVariable(n.s) : Value{};
         return coerce(v, n.propType);
     }
+    // Set-node pass-through: the value output re-reads the Value input (like a
+    // C++ assignment expression returning the assigned value). No side effect.
+    case T::SetVariable:
+    case T::SetProperty:
+        return coerce(evalInput(n, 0, depth + 1), n.propType);
+    case T::SetExternal:
+        return coerce(evalInput(n, 1, depth + 1), n.propType); // dataIn 1 = Value (0 = Target)
     case T::GetGameInstance: return m_ctx.getGameInstance ? m_ctx.getGameInstance() : Value::ofRef(0);
     case T::GetSelf:         return m_ctx.getSelf ? m_ctx.getSelf() : Value::ofRef(0);
     case T::CreateWidget:
