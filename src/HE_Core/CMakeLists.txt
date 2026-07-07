@@ -31,6 +31,7 @@ add_library(HorizonCore SHARED
 	src/UIWidget/UIElement.cpp
 	src/UIWidget/UIWidgetBinding.cpp
 	src/HorizonCode/HorizonCode.cpp
+	src/HorizonCode/HorizonCodeRuntime.cpp
 	src/Renderer/UIFont.cpp
  "include/ContentManager/ContentManager.h" "src/ContentManager/ContentManager.cpp" "include/ContentManager/Assets.h")
 
