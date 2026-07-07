@@ -756,6 +756,10 @@ void EditorApplication::OnInit()
 
 	// Create the editor world and register it with the base Application
 	m_editorWorld = std::make_unique<HorizonWorld>();
+	// Route the world's HorizonCode through the app-wide runtime so widgets, the
+	// level script and the GameInstance share one interpreter (and the
+	// GameInstance survives scene switches).
+	m_editorWorld->setScriptRuntime(&m_gameInstance.runtime());
 	setWorld(m_editorWorld.get());
 	m_propScriptEngine = std::make_unique<ScriptEngine>();
 	m_undo.setWorld(m_editorWorld.get());
@@ -784,6 +788,10 @@ void EditorApplication::OnInit()
 			Logger::Log(Logger::LogLevel::Info,
 				("EditorApplication: indexed " + std::to_string(indexed) + " content assets").c_str());
 		}
+
+		// Load this project's app-wide GameInstance script (referenceable from
+		// any scene via Get Game Instance; OnInit fires when play mode starts).
+		loadGameInstanceGraph();
 
 		m_currentScenePath.clear();
 		if (!sceneAbsPath.empty())
@@ -1725,6 +1733,11 @@ AppContext EditorApplication::makeContext()
 		.window              = window(),
 		.world               = world(),
 		.contentManager      = &contentManager(),
+		.gameInstanceGraph   = &m_gameInstanceGraph,
+		.commitGameInstance  = [this]{
+			m_gameInstance.setGraph(HorizonCode::toJson(m_gameInstanceGraph));
+			saveGameInstanceGraph();
+		},
 		.propScriptEngine    = m_propScriptEngine.get(),
 		.editorCamera        = &m_editorCamera,
 		.selectedEntity      = m_selectedEntity,
@@ -1975,6 +1988,10 @@ void EditorApplication::setPlayMode(bool play)
 		m_isPlaying = true;
 		m_undo.clearHistory(); // edits made while playing are not undoable
 
+		// GameInstance OnInit fires first — before scripts, the level and any
+		// widgets — mirroring the packaged game's "before anything loads".
+		m_gameInstance.fireInit();
+
 		// PIE needs a camera to *drive* and to render through. Edit-mode scenes are
 		// navigated with the editor camera, so many have no CameraComponent at all — the
 		// packaged game handles that by adding a default one (GameApplication::OnInit), and
@@ -2048,6 +2065,10 @@ void EditorApplication::setPlayMode(bool play)
 	}
 	else
 	{
+		// GameInstance OnShutdown fires while the app runtime is still intact
+		// (it lives outside the world, so clear() below doesn't touch it).
+		m_gameInstance.fireShutdown();
+
 		setPlayMouseCaptured(false); // release the mouse when leaving play mode
 		m_editorWorld->clear();
 		if (!serializer.load(*m_editorWorld, snapshot, SerializeFormat::Binary))
@@ -2079,6 +2100,42 @@ void EditorApplication::setPlayMode(bool play)
 
 		Logger::Log(Logger::LogLevel::Info, "EditorApplication: returned to edit mode");
 	}
+}
+
+// ─── Game Instance (app-wide HorizonCode script) ────────────────────────────────
+std::string EditorApplication::gameInstancePath()
+{
+	std::filesystem::path p = m_projectManager.currentProject().path;
+	if (p.empty()) return {};
+	if (std::filesystem::is_regular_file(p)) p = p.parent_path();
+	return (p / "GameInstance.hcode").string();
+}
+
+void EditorApplication::loadGameInstanceGraph()
+{
+	m_gameInstanceGraph = HorizonCode::Graph{};
+	const std::string path = gameInstancePath();
+	if (!path.empty())
+	{
+		std::ifstream f(path);
+		if (f)
+		{
+			const std::string content((std::istreambuf_iterator<char>(f)),
+			                          std::istreambuf_iterator<char>());
+			HorizonCode::fromJson(content, m_gameInstanceGraph); // broken/absent → empty
+		}
+	}
+	// Register with the app runtime so Get Game Instance resolves and it can run
+	// (empty graph → an empty but referenceable GameInstance).
+	m_gameInstance.setGraph(HorizonCode::toJson(m_gameInstanceGraph));
+}
+
+void EditorApplication::saveGameInstanceGraph()
+{
+	const std::string path = gameInstancePath();
+	if (path.empty()) return;
+	std::ofstream f(path, std::ios::trunc);
+	if (f) f << HorizonCode::toJson(m_gameInstanceGraph);
 }
 
 // ─── Scene file management ──────────────────────────────────────────────────────
@@ -2346,6 +2403,11 @@ bool EditorApplication::OnEvent(const SDL_Event& event)
 	default:
 		break;
 	}
+
+	// Forward OS window focus changes to the GameInstance (fires
+	// OnWindowFocusChanged only while play mode is running).
+	if (event.type == SDL_EVENT_WINDOW_FOCUS_GAINED)      m_gameInstance.setWindowFocus(true);
+	else if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST)   m_gameInstance.setWindowFocus(false);
 
 	// A focused in-game text field (PIE) owns the keyboard: route text + edit keys
 	// to the widget. Checked before Esc so typing works, but Esc still releases.

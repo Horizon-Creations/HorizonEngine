@@ -64,11 +64,14 @@ public:
 	// (clear() drops them: PIE stop / scene load discards play-created widgets).
 	WidgetManager& widgets() { return m_widgets; }
 
-	// The scene's central HorizonCode interpreter: widgets and the level script
-	// register their running scripts here (rather than each running its own), so
-	// they share one execution engine + state and can reference each other.
-	HorizonCode::Runtime&       scripts()       { return m_scripts; }
-	const HorizonCode::Runtime& scripts() const { return m_scripts; }
+	// The central HorizonCode interpreter widgets and the level script run on.
+	// By default a world owns its own, but the application injects an app-wide
+	// runtime (setScriptRuntime, right after construction) so the GameInstance
+	// and its state survive scene switches and can be referenced from any scene.
+	HorizonCode::Runtime&       scripts()       { return m_scriptsPtr ? *m_scriptsPtr : m_ownScripts; }
+	const HorizonCode::Runtime& scripts() const { return m_scriptsPtr ? *m_scriptsPtr : m_ownScripts; }
+	void setScriptRuntime(HorizonCode::Runtime* r)
+	{ m_scriptsPtr = r; m_widgets.setRuntime(&scripts()); }
 
 	// ── Level script ─────────────────────────────────────────────────────────
 	// One HorizonCode graph per level (like Unreal's Level Blueprint): intrinsic
@@ -94,7 +97,7 @@ public:
 	// Live level-script variable store (seeded at load, mutated by Set nodes).
 	// Read-only view for tooling/tests; backed by the runtime instance.
 	const std::unordered_map<std::string, HorizonCode::Value>& levelVariables() const
-	{ return m_scripts.variablesOf(m_levelInstance); }
+	{ return scripts().variablesOf(m_levelInstance); }
 
 
 private:
@@ -102,8 +105,9 @@ private:
 	Entity         rootEntity_      = entt::null;
 	bool           m_hierarchyDirty = true;
 	// Declared before m_widgets so it outlives it (m_widgets points at it).
-	HorizonCode::Runtime m_scripts;
-	WidgetManager        m_widgets;
+	HorizonCode::Runtime  m_ownScripts;          // used unless an app runtime is injected
+	HorizonCode::Runtime* m_scriptsPtr = nullptr;
+	WidgetManager         m_widgets;
 
 	// The level script's authored source graph (edited + serialized). At load a
 	// copy is registered in m_scripts as m_levelInstance (the running instance).

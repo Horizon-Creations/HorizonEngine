@@ -1,4 +1,5 @@
 #include "LevelScriptPanel.h"
+#include "GameInstancePanel.h"
 #include "EditorApplication.h"   // AppContext
 #include "EditorUndo.h"          // scene-undo snapshots (dirty tracking + undo/redo)
 #include "GraphEditor.h"         // shared node-graph canvas
@@ -27,9 +28,6 @@ namespace
 namespace HC = HorizonCode;
 using PT = HC::PinType;
 using NT = HC::NodeType;
-
-// World events a level script can react to. Free-standing (no element target).
-const char* const kLevelEvents[] = { "OnLevelLoaded", "OnLevelUnloaded" };
 
 // ── Node plumbing (all derived from HC::signatureOf) ──────────────────────────
 
@@ -331,7 +329,7 @@ void drawVariableDetails(HC::Graph& graph, bool& edited)
 }
 
 // Detail editor for the selected node.
-void drawNodeDetails(HC::Graph& graph, bool& edited)
+void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events, bool& edited)
 {
 	HC::Node* n = graph.findNode(g.selectedNode);
 	if (!n) { g.selectedNode = 0; return; }
@@ -345,16 +343,16 @@ void drawNodeDetails(HC::Graph& graph, bool& edited)
 	{
 		if (ImGui::BeginCombo("Event", n->s.empty() ? "(none)" : n->s.c_str()))
 		{
-			for (const char* ev : kLevelEvents)
-				if (ImGui::Selectable(ev, n->s == ev))
+			for (const std::string& ev : events)
+				if (ImGui::Selectable(ev.c_str(), n->s == ev))
 				{
-					n->s = ev; n->hasArg = false; n->elem = 0;
+					n->s = ev; n->hasArg = (ev == "OnWindowFocusChanged");
+					n->propType = n->hasArg ? PT::Bool : PT::Float; n->elem = 0;
 					edited = true;
 				}
 			ImGui::EndCombo();
 		}
-		ImGui::TextDisabled("Fires once when the level %s.",
-			n->s == "OnLevelUnloaded" ? "unloads" : "loads");
+		ImGui::TextDisabled("Fires when this class raises this event.");
 		break;
 	}
 	case NT::FunctionEntry:
@@ -449,7 +447,7 @@ void drawNodeDetails(HC::Graph& graph, bool& edited)
 
 // ── Canvas ────────────────────────────────────────────────────────────────────
 
-bool drawCanvas(HC::Graph& graph, const ImVec2& avail)
+bool drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, const ImVec2& avail)
 {
 	g.ge.selected = g.selectedNode;
 	if (g.focusSelected) { g.ge.focusNode = g.selectedNode; g.focusSelected = false; }
@@ -474,7 +472,7 @@ bool drawCanvas(HC::Graph& graph, const ImVec2& avail)
 	// Searchable add-node palette: world events + generic node categories +
 	// per-variable Get/Set + per-function Call. Property/Widget nodes and the
 	// element machinery are intentionally absent.
-	m.drawAddMenu = [&graph]() -> int {
+	m.drawAddMenu = [&graph, &events]() -> int {
 		int created = 0;
 		static std::string s_search;
 		if (ImGui::IsWindowAppearing()) { s_search.clear(); ImGui::SetKeyboardFocusHere(); }
@@ -488,17 +486,18 @@ bool drawCanvas(HC::Graph& graph, const ImVec2& avail)
 
 		ImGui::BeginChild("##nodeList", ImVec2(232.0f, 300.0f));
 
-		// Events (world event catalog).
+		// Events (this class's event catalog).
 		bool eh = false;
-		for (const char* ev : kLevelEvents)
+		for (const std::string& ev : events)
 		{
 			if (!matches(ev, "Events")) continue;
 			if (!eh) { ImGui::TextDisabled("Events"); eh = true; }
-			if (ImGui::Selectable(ev))
+			if (ImGui::Selectable(ev.c_str()))
 			{
 				const int id = addNode(graph, NT::Event, g.ge.addMenuGraphPos);
 				HC::Node* nn = graph.findNode(id);
-				nn->s = ev; nn->hasArg = false; nn->elem = 0;
+				nn->s = ev; nn->hasArg = (ev == "OnWindowFocusChanged");
+				nn->propType = nn->hasArg ? PT::Bool : PT::Float; nn->elem = 0;
 				created = id; ImGui::CloseCurrentPopup();
 			}
 		}
@@ -577,42 +576,24 @@ bool drawCanvas(HC::Graph& graph, const ImVec2& avail)
 	return changed;
 }
 
-} // namespace
-
-void LevelScriptPanel::render(AppContext& ctx, bool& open)
+// Shared window body: left sidebar (variables + functions + details) + canvas,
+// over one HorizonCode graph with the given event catalog. Used for both the
+// Level Script and the Game Instance windows (they differ only in the graph,
+// the events, and how a change is committed).
+void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
+                   const char* title, const char* subtitle, bool& edited)
 {
-	if (!open) return;
-
-	ImGui::SetNextWindowSize(ImVec2(920.0f, 560.0f), ImGuiCond_FirstUseEver);
-	if (!ImGui::Begin("Level Script", &open))
-	{
-		ImGui::End();
-		return;
-	}
-
-	if (!ctx.world)
-	{
-		ImGui::TextDisabled("Open a scene to edit its level script.");
-		ImGui::End();
-		return;
-	}
-
-	HC::Graph& graph = ctx.world->levelScript();
-
-	bool edited = false;
-
 	ImGui::BeginChild("##ls_side", ImVec2(220.0f, 0.0f), true);
-	ImGui::TextUnformatted("Level Script");
-	ImGui::TextDisabled("Reacts to world events.");
+	ImGui::TextUnformatted(title);
+	ImGui::TextDisabled("%s", subtitle);
 	ImGui::Spacing();
 	drawVariables(graph, edited);
 	ImGui::Spacing();
 	drawFunctions(graph, edited);
 	ImGui::Spacing();
 	ImGui::Separator();
-	// Details for whatever is selected (a node takes priority over a variable).
-	if (g.selectedNode != 0)      drawNodeDetails(graph, edited);
-	else if (!g.selectedVar.empty()) drawVariableDetails(graph, edited);
+	if (g.selectedNode != 0)          drawNodeDetails(graph, events, edited);
+	else if (!g.selectedVar.empty())  drawVariableDetails(graph, edited);
 	else ImGui::TextDisabled("Select a node or variable.");
 	ImGui::EndChild();
 
@@ -620,7 +601,7 @@ void LevelScriptPanel::render(AppContext& ctx, bool& open)
 
 	ImGui::BeginChild("##ls_canvas_host", ImVec2(0.0f, 0.0f), true);
 	const ImVec2 avail = ImGui::GetContentRegionAvail();
-	if (drawCanvas(graph, avail)) edited = true;
+	if (drawCanvas(graph, events, avail)) edited = true;
 
 	// Variable drop → Get/Set popup.
 	if (g.openVarDrop) { ImGui::OpenPopup("##ls_var_drop"); g.openVarDrop = false; }
@@ -643,15 +624,49 @@ void LevelScriptPanel::render(AppContext& ctx, bool& open)
 		ImGui::EndPopup();
 	}
 	ImGui::EndChild();
+}
 
-	// Push a scene snapshot when the level graph changed. snapshotNow() is
-	// self-contained (it doesn't touch the shared capturePre scratch, so it can't
-	// disturb the main editor's entity undo) and bumps the undo revision, which
-	// marks the scene dirty so the level script saves with the scene (Ctrl+S).
-	// Trade-off: because it snapshots the post-edit state, undoing a level-graph
-	// change takes one extra Ctrl+Z. Acceptable until the two HorizonCode editors
-	// are unified onto a shared, finer-grained undo path.
+} // namespace
+
+void LevelScriptPanel::render(AppContext& ctx, bool& open)
+{
+	if (!open) return;
+	ImGui::SetNextWindowSize(ImVec2(920.0f, 560.0f), ImGuiCond_FirstUseEver);
+	if (!ImGui::Begin("Level Script", &open)) { ImGui::End(); return; }
+	if (!ctx.world)
+	{
+		ImGui::TextDisabled("Open a scene to edit its level script.");
+		ImGui::End();
+		return;
+	}
+	static const std::vector<std::string> kEvents = { "OnLevelLoaded", "OnLevelUnloaded" };
+	bool edited = false;
+	drawGraphBody(ctx.world->levelScript(), kEvents, "Level Script",
+	              "Reacts to world events.", edited);
+	// snapshotNow() bumps the undo revision so the level script saves with the
+	// scene; self-contained so it doesn't disturb the entity undo. (Undo of a
+	// graph change costs one extra Ctrl+Z — acceptable.)
 	if (edited && ctx.undoSys) ctx.undoSys->snapshotNow();
+	ImGui::End();
+}
 
+void GameInstancePanel::render(AppContext& ctx, bool& open)
+{
+	if (!open) return;
+	ImGui::SetNextWindowSize(ImVec2(920.0f, 560.0f), ImGuiCond_FirstUseEver);
+	if (!ImGui::Begin("Game Instance", &open)) { ImGui::End(); return; }
+	if (!ctx.gameInstanceGraph)
+	{
+		ImGui::TextDisabled("Open a project to edit its Game Instance.");
+		ImGui::End();
+		return;
+	}
+	static const std::vector<std::string> kEvents = { "OnInit", "OnShutdown", "OnWindowFocusChanged" };
+	bool edited = false;
+	drawGraphBody(*ctx.gameInstanceGraph, kEvents, "Game Instance",
+	              "App-wide. Runs before anything loads.", edited);
+	// The GameInstance graph isn't part of a scene — re-register it in the app
+	// runtime and persist it via the host callback.
+	if (edited && ctx.commitGameInstance) ctx.commitGameInstance();
 	ImGui::End();
 }

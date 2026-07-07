@@ -19,7 +19,7 @@ HorizonWorld::HorizonWorld()
     ensureEnvironmentLights();
     // Widgets and the level script share this world's central HorizonCode
     // interpreter (rather than each running its own).
-    m_widgets.setRuntime(&m_scripts);
+    m_widgets.setRuntime(&scripts());
 }
 
 bool HorizonWorld::isBuiltin(Entity entity) const
@@ -147,7 +147,7 @@ void HorizonWorld::clear()
     // its own via setLevelScriptJson; a scene without one starts empty).
     // fireLevelUnloaded above fired the event but kept the instance — remove it
     // now so a cleared world holds no level state.
-    if (m_levelInstance) { m_scripts.remove(m_levelInstance); m_levelInstance = 0; }
+    if (m_levelInstance) { scripts().remove(m_levelInstance); m_levelInstance = 0; }
     m_levelScript = HorizonCode::Graph{};
 
     m_hierarchyDirty = true;
@@ -236,9 +236,9 @@ void HorizonWorld::fireLevelLoaded()
     // runtime, which seeds its private variable store from the graph defaults.
     // The level has no host bindings (no widget target); Print goes to the log
     // and variables live in the runtime. Engine-system nodes come later.
-    if (m_levelInstance) m_scripts.remove(m_levelInstance);
-    m_levelInstance = m_scripts.add(m_levelScript, {});
-    m_scripts.fireEvent(m_levelInstance, "OnLevelLoaded", 0);
+    if (m_levelInstance) scripts().remove(m_levelInstance);
+    m_levelInstance = scripts().add(m_levelScript, {});
+    scripts().fireEvent(m_levelInstance, "OnLevelLoaded", 0);
 }
 
 void HorizonWorld::fireLevelUnloaded()
@@ -248,6 +248,6 @@ void HorizonWorld::fireLevelUnloaded()
 
     // Fire the event but KEEP the instance so its final variable state stays
     // readable after unload; it is dropped on the next load or on clear().
-    m_scripts.fireEvent(m_levelInstance, "OnLevelUnloaded", 0);
+    scripts().fireEvent(m_levelInstance, "OnLevelUnloaded", 0);
 }
 

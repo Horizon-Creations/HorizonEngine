@@ -4,6 +4,7 @@
 #include "MaterialEditorPanel.h"
 #include "UIEditorPanel.h"
 #include "LevelScriptPanel.h"
+#include "GameInstancePanel.h"
 #include "HorizonVersion.h"
 #include <Hpak/ProjectExporter.h>
 #include <HorizonScene/HorizonScene.h>
@@ -153,6 +154,9 @@ static bool s_showProfiler = false;
 
 // Toggled by View > Level Script; drives the per-scene HorizonCode editor window.
 static bool s_showLevelScript = false;
+
+// Toggled by View > Game Instance; drives the app-wide HorizonCode editor window.
+static bool s_showGameInstance = false;
 
 // Build > Export Project modal state. Editable fields mirror the selected
 // ExportProfile (persisted in the .heproj); the export itself runs on a worker
@@ -1655,6 +1659,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
         if (ImGui::MenuItem("Performance Profiler", nullptr, s_showProfiler)) s_showProfiler = !s_showProfiler;
         if (ImGui::MenuItem("Level Script", nullptr, s_showLevelScript, ctx.projectLoaded))
             s_showLevelScript = !s_showLevelScript;
+        if (ImGui::MenuItem("Game Instance", nullptr, s_showGameInstance, ctx.projectLoaded))
+            s_showGameInstance = !s_showGameInstance;
         ImGui::EndMenu();
     }
 	if (ImGui::BeginMenu("Assets"))
@@ -3946,6 +3952,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
     DrawPreferencesWindow(ctx, s_showPreferences);
     DrawProfilerWindow(ctx, s_showProfiler);
     if (s_showLevelScript) LevelScriptPanel::render(ctx, s_showLevelScript);
+    if (s_showGameInstance) GameInstancePanel::render(ctx, s_showGameInstance);
 
     //Content Browser
 	auto [contentFolder, contentLock] = ctx.globalState->lockContentFolder();
