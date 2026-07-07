@@ -116,6 +116,24 @@ Context Runtime::makeContext(InstanceId id)
     { bindEvent(target, event, id); };
     ctx.callExternal = [this](uint32_t target, const std::string& fn)
     { callFunction(target, fn, /*requirePublic=*/true); };
+    // Read/write a variable on another instance — only if it's declared public.
+    ctx.getExternal = [this](uint32_t target, const std::string& var) -> Value
+    {
+        const Inst* i = find(target);
+        if (!i) return {};
+        const Variable* v = i->graph.findVariable(var);
+        if (!v || v->access != 0) return {}; // missing or private
+        auto it = i->vars.find(var);
+        return it != i->vars.end() ? it->second : Value{};
+    };
+    ctx.setExternal = [this](uint32_t target, const std::string& var, const Value& val)
+    {
+        Inst* i = find(target);
+        if (!i) return;
+        const Variable* v = i->graph.findVariable(var);
+        if (!v || v->access != 0) return; // missing or private
+        i->vars[var] = val;
+    };
     ctx.getSelf = [id] { return Value::ofRef(id); };
     ctx.getGameInstance = [this] { return Value::ofRef(m_gameInstance); };
     // World-level services (shared by every instance).
