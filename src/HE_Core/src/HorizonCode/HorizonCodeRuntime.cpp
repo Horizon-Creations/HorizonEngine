@@ -97,6 +97,15 @@ void Runtime::setVariable(InstanceId id, const std::string& name, const Value& v
     if (Inst* i = find(id)) i->vars[name] = v;
 }
 
+void Runtime::reseedVariables(InstanceId id)
+{
+    Inst* i = find(id);
+    if (!i) return;
+    i->vars.clear();
+    for (const auto& var : i->graph.variables)
+        i->vars[var.name] = variableDefaultValue(var);
+}
+
 const std::unordered_map<std::string, Value>& Runtime::variablesOf(InstanceId id) const
 {
     static const std::unordered_map<std::string, Value> kEmpty;
