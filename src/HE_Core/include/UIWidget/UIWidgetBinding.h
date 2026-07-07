@@ -9,8 +9,8 @@
 
 namespace HE {
 
-HorizonCode::PinType uiPropTypeToPin(UIPropType t);
-HorizonCode::Value   uiPropToHcValue(const UIPropValue& v);
-UIPropValue          uiHcValueToProp(const HorizonCode::Value& v, UIPropType want);
+HE_API HorizonCode::PinType uiPropTypeToPin(UIPropType t);
+HE_API HorizonCode::Value   uiPropToHcValue(const UIPropValue& v);
+HE_API UIPropValue          uiHcValueToProp(const HorizonCode::Value& v, UIPropType want);
 
 } // namespace HE

@@ -12,7 +12,7 @@ inline UIPropValue propColor(const glm::vec4& c) { return UIPropValue::ofColor(c
 inline glm::vec4   asColor(const UIPropValue& v) { return v.col; }
 
 // ── Panel ─────────────────────────────────────────────────────────────────────
-class UIPanel final : public UIElement
+class HE_API UIPanel final : public UIElement
 {
 public:
     glm::vec4 color{ 0.12f, 0.12f, 0.12f, 0.85f };
@@ -39,7 +39,7 @@ public:
 };
 
 // ── Image ─────────────────────────────────────────────────────────────────────
-class UIImage final : public UIElement
+class HE_API UIImage final : public UIElement
 {
 public:
     glm::vec4 tint{ 1.0f, 1.0f, 1.0f, 1.0f };
@@ -67,7 +67,7 @@ public:
 };
 
 // ── Text ──────────────────────────────────────────────────────────────────────
-class UIText final : public UIElement
+class HE_API UIText final : public UIElement
 {
 public:
     std::string text = "Text";
@@ -105,7 +105,7 @@ public:
 };
 
 // ── Button ────────────────────────────────────────────────────────────────────
-class UIButton final : public UIElement
+class HE_API UIButton final : public UIElement
 {
 public:
     std::string text = "Button";
@@ -160,7 +160,7 @@ public:
 };
 
 // ── CheckBox ──────────────────────────────────────────────────────────────────
-class UICheckBox final : public UIElement
+class HE_API UICheckBox final : public UIElement
 {
 public:
     bool        checked = false;
@@ -214,7 +214,7 @@ public:
 };
 
 // ── Slider ────────────────────────────────────────────────────────────────────
-class UISlider final : public UIElement
+class HE_API UISlider final : public UIElement
 {
 public:
     float     value = 0.5f, minValue = 0.0f, maxValue = 1.0f;
@@ -274,7 +274,7 @@ public:
 };
 
 // ── ProgressBar ───────────────────────────────────────────────────────────────
-class UIProgressBar final : public UIElement
+class HE_API UIProgressBar final : public UIElement
 {
 public:
     float     value = 0.5f; // 0..1
@@ -312,7 +312,7 @@ public:
 };
 
 // ── TextInput ─────────────────────────────────────────────────────────────────
-class UITextInput final : public UIElement
+class HE_API UITextInput final : public UIElement
 {
 public:
     std::string text;
@@ -363,7 +363,7 @@ public:
 };
 
 // ── ComboBox ──────────────────────────────────────────────────────────────────
-class UIComboBox final : public UIElement
+class HE_API UIComboBox final : public UIElement
 {
 public:
     std::vector<std::string> options{ "Option A", "Option B", "Option C" };
