@@ -94,6 +94,7 @@ inline constexpr uint32_t CHUNK_PSHD = makeChunkId('P','S','H','D'); // precompi
 
 // UI Widget
 inline constexpr uint32_t CHUNK_UIWT = makeChunkId('U','I','W','T'); // UI widget tree (JSON)
+inline constexpr uint32_t CHUNK_UIWG = makeChunkId('U','I','W','G'); // UI widget logic graph (JSON)
 
 // Font
 inline constexpr uint32_t CHUNK_FNTD = makeChunkId('F','N','T','D'); // raw font bytes

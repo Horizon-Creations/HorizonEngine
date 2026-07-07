@@ -3,6 +3,7 @@
 #include <string>
 #include "Components/NameComponent.h"
 #include "Components/HierarchyComponent.h"
+#include "WidgetManager.h"
 
 using Entity = entt::entity;
 
@@ -55,8 +56,15 @@ public:
 
 	entt::registry& registry() { return registry_; }
 
+	// Live UI widgets (UMG-style) — NOT entities; they exist outside the scene
+	// graph and render directly. Owned here so their lifetime tracks the world
+	// (clear() drops them: PIE stop / scene load discards play-created widgets).
+	WidgetManager& widgets() { return m_widgets; }
+
+
 private:
 	entt::registry registry_;
 	Entity         rootEntity_      = entt::null;
 	bool           m_hierarchyDirty = true;
+	WidgetManager  m_widgets;
 };

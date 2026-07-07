@@ -110,6 +110,9 @@ void HorizonWorld::destroyEntity(Entity entity)
 
 void HorizonWorld::clear()
 {
+    // Live UI widgets track the world's lifetime (PIE stop / scene load).
+    m_widgets.clear();
+
     // Root children first (handles whole subtrees), then any strays that
     // were never parented into the hierarchy.
     if (auto* rh = registry_.try_get<HierarchyComponent>(rootEntity_))

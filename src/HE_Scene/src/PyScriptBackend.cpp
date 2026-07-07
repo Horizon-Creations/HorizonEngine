@@ -183,6 +183,66 @@ PyObject* py_setUIMaterialParam(PyObject*, PyObject* args)
 	Py_RETURN_FALSE;
 }
 
+// ── Live widgets + cursor ─────────────────────────────────────────────────────
+PyObject* py_createWidget(PyObject*, PyObject* args)
+{
+	const char* path = nullptr;
+	if (!PyArg_ParseTuple(args, "s", &path)) return nullptr;
+	return PyLong_FromLong(ScriptApi::createWidget(*g_world, g_content, path));
+}
+PyObject* py_destroyWidget(PyObject*, PyObject* args)
+{
+	long id;
+	if (!PyArg_ParseTuple(args, "l", &id)) return nullptr;
+	ScriptApi::destroyWidget(*g_world, (int)id);
+	Py_RETURN_NONE;
+}
+PyObject* py_showWidget(PyObject*, PyObject* args)
+{
+	long id;
+	if (!PyArg_ParseTuple(args, "l", &id)) return nullptr;
+	ScriptApi::showWidget(*g_world, (int)id);
+	Py_RETURN_NONE;
+}
+PyObject* py_hideWidget(PyObject*, PyObject* args)
+{
+	long id;
+	if (!PyArg_ParseTuple(args, "l", &id)) return nullptr;
+	ScriptApi::hideWidget(*g_world, (int)id);
+	Py_RETURN_NONE;
+}
+PyObject* py_setWidgetZOrder(PyObject*, PyObject* args)
+{
+	long id, z;
+	if (!PyArg_ParseTuple(args, "ll", &id, &z)) return nullptr;
+	ScriptApi::setWidgetZOrder(*g_world, (int)id, (int)z);
+	Py_RETURN_NONE;
+}
+PyObject* py_isWidgetVisible(PyObject*, PyObject* args)
+{
+	long id;
+	if (!PyArg_ParseTuple(args, "l", &id)) return nullptr;
+	if (ScriptApi::isWidgetVisible(*g_world, (int)id)) Py_RETURN_TRUE;
+	Py_RETURN_FALSE;
+}
+PyObject* py_callWidgetFunction(PyObject*, PyObject* args)
+{
+	long id; const char* name = nullptr;
+	if (!PyArg_ParseTuple(args, "ls", &id, &name)) return nullptr;
+	if (ScriptApi::callWidgetFunction(*g_world, (int)id, name)) Py_RETURN_TRUE;
+	Py_RETURN_FALSE;
+}
+PyObject* py_showCursor(PyObject*, PyObject*)
+{
+	ScriptApi::setCursorVisible(true);
+	Py_RETURN_NONE;
+}
+PyObject* py_hideCursor(PyObject*, PyObject*)
+{
+	ScriptApi::setCursorVisible(false);
+	Py_RETURN_NONE;
+}
+
 PyMethodDef kHorizonMethods[] = {
 	{"log",         py_log,         METH_VARARGS, "log(message)"},
 	{"getName",     py_getName,     METH_VARARGS, "getName(entity) -> str"},
@@ -210,6 +270,15 @@ PyMethodDef kHorizonMethods[] = {
 	{"setUISize",     py_setUISize,     METH_VARARGS, "setUISize(entity, w, h)"},
 	{"getUISize",     py_getUISize,     METH_VARARGS, "getUISize(entity) -> (w,h)"},
 	{"setUIMaterialParam", py_setUIMaterialParam, METH_VARARGS, "setUIMaterialParam(entity, name, x[,y,z,w]) -> bool"},
+	{"createWidget",       py_createWidget,       METH_VARARGS, "createWidget(assetPath) -> widgetId"},
+	{"destroyWidget",      py_destroyWidget,      METH_VARARGS, "destroyWidget(widgetId)"},
+	{"showWidget",         py_showWidget,         METH_VARARGS, "showWidget(widgetId)"},
+	{"hideWidget",         py_hideWidget,         METH_VARARGS, "hideWidget(widgetId)"},
+	{"setWidgetZOrder",    py_setWidgetZOrder,    METH_VARARGS, "setWidgetZOrder(widgetId, z)"},
+	{"isWidgetVisible",    py_isWidgetVisible,    METH_VARARGS, "isWidgetVisible(widgetId) -> bool"},
+	{"callWidgetFunction", py_callWidgetFunction, METH_VARARGS, "callWidgetFunction(widgetId, name) -> bool"},
+	{"showCursor",         py_showCursor,         METH_NOARGS,  "showCursor() — release the mouse for UI"},
+	{"hideCursor",         py_hideCursor,         METH_NOARGS,  "hideCursor() — capture the mouse for look"},
 	{nullptr, nullptr, 0, nullptr}
 };
 PyModuleDef kHorizonModule = {

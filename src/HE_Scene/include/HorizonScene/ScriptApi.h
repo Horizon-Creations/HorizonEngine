@@ -1,6 +1,7 @@
 #pragma once
 #include <glm/glm.hpp>
 #include <cstdint>
+#include <functional>
 #include <string>
 
 class HorizonWorld;
@@ -76,4 +77,23 @@ namespace ScriptApi
 	// (UIImageComponent.materialAssetId) — the UI counterpart of setMaterialParam.
 	bool setUIMaterialParam(HorizonWorld& world, ContentManager* content,
 	                        uint32_t entityId, const std::string& name, const glm::vec4& value);
+
+	// ── Live widgets (WidgetManager — exist OUTSIDE the entity world) ───────
+	// Instantiate a UI Widget asset by content-relative path; 0 on failure.
+	int  createWidget(HorizonWorld& world, ContentManager* content, const std::string& path);
+	void destroyWidget(HorizonWorld& world, int widgetId);
+	void showWidget(HorizonWorld& world, int widgetId);
+	void hideWidget(HorizonWorld& world, int widgetId);
+	void setWidgetZOrder(HorizonWorld& world, int widgetId, int z);
+	bool isWidgetVisible(HorizonWorld& world, int widgetId);
+	// Call a PUBLIC graph function on the widget (the engine routes the call;
+	// private functions and unknown names return false).
+	bool callWidgetFunction(HorizonWorld& world, int widgetId, const std::string& fn);
+
+	// ── Cursor (host-app hook) ──────────────────────────────────────────────
+	// show = release the mouse capture and show the OS cursor (UI interaction);
+	// hide = re-capture for FPS-style look. The host app (PIE / packaged game)
+	// registers the hook; without one the calls are no-ops.
+	void setCursorHook(std::function<void(bool)> hook);
+	void setCursorVisible(bool show);
 }

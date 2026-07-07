@@ -58,6 +58,46 @@ int UIWidgetTree::addNode(UIWidgetNode node)
     return nodes.back().id;
 }
 
+// ── Layout ───────────────────────────────────────────────────────────────────
+
+namespace
+{
+    void anchorPoint01(uint8_t a, float& ax, float& ay)
+    {
+        static const float pts[9][2] = {
+            {0.0f,0.0f},{0.5f,0.0f},{1.0f,0.0f},
+            {0.0f,0.5f},{0.5f,0.5f},{1.0f,0.5f},
+            {0.0f,1.0f},{0.5f,1.0f},{1.0f,1.0f} };
+        const int i = a > 8 ? 0 : a;
+        ax = pts[i][0]; ay = pts[i][1];
+    }
+}
+
+UIWidgetRect uiWidgetNodeRect(const UIWidgetTree& tree, const UIWidgetNode& n)
+{
+    UIWidgetRect parent{ 0.0f, 0.0f, tree.canvasWidth, tree.canvasHeight };
+    if (n.parentId != 0)
+        if (const UIWidgetNode* p = tree.findNode(n.parentId))
+            parent = uiWidgetNodeRect(tree, *p);
+
+    float ax, ay;
+    anchorPoint01(n.anchor, ax, ay);
+    UIWidgetRect r;
+    r.x = parent.x + ax * parent.w + n.posX - n.pivotX * n.sizeX;
+    r.y = parent.y + ay * parent.h + n.posY - n.pivotY * n.sizeY;
+    r.w = n.sizeX;
+    r.h = n.sizeY;
+    return r;
+}
+
+bool uiWidgetNodeEffectiveVisible(const UIWidgetTree& tree, const UIWidgetNode& n)
+{
+    if (!n.visible) return false;
+    if (n.parentId == 0) return true;
+    const UIWidgetNode* p = tree.findNode(n.parentId);
+    return p ? uiWidgetNodeEffectiveVisible(tree, *p) : true;
+}
+
 // ── JSON ─────────────────────────────────────────────────────────────────────
 
 namespace

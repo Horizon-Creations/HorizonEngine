@@ -280,6 +280,8 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 		UIWidgetAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_UIWT))
 			a.treeJson.assign(reinterpret_cast<const char*>(c->data.data()), c->data.size());
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_UIWG))
+			a.graphJson.assign(reinterpret_cast<const char*>(c->data.data()), c->data.size());
 		handle = m_widgetAssets.insert(std::move(a)); break;
 	}
 	case HE::AssetType::Audio:
@@ -852,6 +854,8 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 	{
 		auto& a = static_cast<UIWidgetAsset&>(asset);
 		w.addChunk(HAsset::CHUNK_UIWT, a.treeJson.data(), a.treeJson.size());
+		if (!a.graphJson.empty())
+			w.addChunk(HAsset::CHUNK_UIWG, a.graphJson.data(), a.graphJson.size());
 		break;
 	}
 	case HE::AssetType::Audio:

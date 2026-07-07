@@ -304,6 +304,72 @@ static int lua_horizon_setUIMaterialParam(lua_State* L)
     return 1;
 }
 
+// ── Live widgets + cursor ─────────────────────────────────────────────────────
+
+// horizon.createWidget(assetPath) → widgetId (0 = failed)
+static int lua_horizon_createWidget(lua_State* L)
+{
+    const int id = ScriptApi::createWidget(*getWorld(L), getContent(L), luaL_checkstring(L, 1));
+    lua_pushinteger(L, id);
+    return 1;
+}
+
+static int lua_horizon_destroyWidget(lua_State* L)
+{
+    ScriptApi::destroyWidget(*getWorld(L), (int)luaL_checkinteger(L, 1));
+    return 0;
+}
+
+static int lua_horizon_showWidget(lua_State* L)
+{
+    ScriptApi::showWidget(*getWorld(L), (int)luaL_checkinteger(L, 1));
+    return 0;
+}
+
+static int lua_horizon_hideWidget(lua_State* L)
+{
+    ScriptApi::hideWidget(*getWorld(L), (int)luaL_checkinteger(L, 1));
+    return 0;
+}
+
+// horizon.setWidgetZOrder(widgetId, z)
+static int lua_horizon_setWidgetZOrder(lua_State* L)
+{
+    ScriptApi::setWidgetZOrder(*getWorld(L), (int)luaL_checkinteger(L, 1),
+                               (int)luaL_checkinteger(L, 2));
+    return 0;
+}
+
+static int lua_horizon_isWidgetVisible(lua_State* L)
+{
+    lua_pushboolean(L, ScriptApi::isWidgetVisible(*getWorld(L), (int)luaL_checkinteger(L, 1)) ? 1 : 0);
+    return 1;
+}
+
+// horizon.callWidgetFunction(widgetId, name) → bool (public functions only)
+static int lua_horizon_callWidgetFunction(lua_State* L)
+{
+    const bool ok = ScriptApi::callWidgetFunction(*getWorld(L),
+        (int)luaL_checkinteger(L, 1), luaL_checkstring(L, 2));
+    lua_pushboolean(L, ok ? 1 : 0);
+    return 1;
+}
+
+// horizon.showCursor() / horizon.hideCursor() — release/re-grab the mouse.
+static int lua_horizon_showCursor(lua_State* L)
+{
+    (void)L;
+    ScriptApi::setCursorVisible(true);
+    return 0;
+}
+
+static int lua_horizon_hideCursor(lua_State* L)
+{
+    (void)L;
+    ScriptApi::setCursorVisible(false);
+    return 0;
+}
+
 // ─── Registration table ──────────────────────────────────────────────────────
 
 static const luaL_Reg kHorizonFuncs[] = {
@@ -333,6 +399,15 @@ static const luaL_Reg kHorizonFuncs[] = {
     { "setUISize",     lua_horizon_setUISize     },
     { "getUISize",     lua_horizon_getUISize     },
     { "setUIMaterialParam", lua_horizon_setUIMaterialParam },
+    { "createWidget",       lua_horizon_createWidget       },
+    { "destroyWidget",      lua_horizon_destroyWidget      },
+    { "showWidget",         lua_horizon_showWidget         },
+    { "hideWidget",         lua_horizon_hideWidget         },
+    { "setWidgetZOrder",    lua_horizon_setWidgetZOrder    },
+    { "isWidgetVisible",    lua_horizon_isWidgetVisible    },
+    { "callWidgetFunction", lua_horizon_callWidgetFunction },
+    { "showCursor",         lua_horizon_showCursor         },
+    { "hideCursor",         lua_horizon_hideCursor         },
     { nullptr, nullptr }
 };
 

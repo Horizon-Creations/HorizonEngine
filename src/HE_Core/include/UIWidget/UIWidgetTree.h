@@ -76,4 +76,13 @@ struct UIWidgetTree
 std::string uiWidgetTreeToJson(const UIWidgetTree& tree);
 bool        uiWidgetTreeFromJson(const std::string& json, UIWidgetTree& out);
 
+// ── Layout (shared by the widget editor and the runtime) ────────────────────
+// A node's rect in CANVAS units, resolved through the parent chain: the anchor
+// point lies inside the parent rect (roots anchor to the canvas), position is
+// the offset from it, pivot shifts the rect so the pivot point lands there.
+struct UIWidgetRect { float x = 0.0f, y = 0.0f, w = 0.0f, h = 0.0f; };
+UIWidgetRect uiWidgetNodeRect(const UIWidgetTree& tree, const UIWidgetNode& n);
+// False when the node or any ancestor is invisible.
+bool uiWidgetNodeEffectiveVisible(const UIWidgetTree& tree, const UIWidgetNode& n);
+
 } // namespace HE

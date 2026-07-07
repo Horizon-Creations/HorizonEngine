@@ -246,5 +246,32 @@ bool setUIMaterialParam(HorizonWorld& world, ContentManager* content,
 	return content->setMaterialParam(img->materialAssetId, name, v, 4);
 }
 
+// ── Live widgets ──────────────────────────────────────────────────────────────
+
+int createWidget(HorizonWorld& world, ContentManager* content, const std::string& path)
+{
+	if (!content) return 0;
+	return world.widgets().createWidget(*content, path);
+}
+
+void destroyWidget(HorizonWorld& world, int widgetId)   { world.widgets().destroyWidget(widgetId); }
+void showWidget(HorizonWorld& world, int widgetId)      { world.widgets().showWidget(widgetId); }
+void hideWidget(HorizonWorld& world, int widgetId)      { world.widgets().hideWidget(widgetId); }
+void setWidgetZOrder(HorizonWorld& world, int widgetId, int z) { world.widgets().setZOrder(widgetId, z); }
+bool isWidgetVisible(HorizonWorld& world, int widgetId) { return world.widgets().isVisible(widgetId); }
+
+bool callWidgetFunction(HorizonWorld& world, int widgetId, const std::string& fn)
+{
+	return world.widgets().callFunction(widgetId, fn);
+}
+
+// ── Cursor ────────────────────────────────────────────────────────────────────
+
+namespace { std::function<void(bool)> g_cursorHook; }
+
+void setCursorHook(std::function<void(bool)> hook) { g_cursorHook = std::move(hook); }
+void setCursorVisible(bool show) { if (g_cursorHook) g_cursorHook(show); }
+
 } // namespace ScriptApi
+
 

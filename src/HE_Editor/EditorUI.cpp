@@ -4400,6 +4400,90 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 		ImGui::PopStyleVar();
 
 		// ── Open item context menu after loops ────────────────────────────
+		// ── Shared "Create Asset" menu body ─────────────────────────────────
+		// Used by BOTH the background right-click popup and the item context
+		// menu's Create submenu, so creating an asset works wherever the user
+		// right-clicks in the Content Browser.
+		auto drawCreateAssetItems = [&](const std::string& targetFolder)
+		{
+			auto tryCreate = [&](const char* defaultName, const char* ext, HE::AssetType type,
+			                     ScriptLanguage scriptLang = ScriptLanguage::Lua)
+			{
+				// Build a path that does not yet exist
+				std::string base = targetFolder + "/" + defaultName;
+				std::string path = base + ext;
+				int counter = 1;
+				while (std::filesystem::exists(path))
+					path = base + std::to_string(counter++) + ext;
+
+				// Create an empty asset file via ContentManager
+				std::string relative = std::filesystem::relative(
+					path,
+					std::filesystem::path(ctx.projectManager->currentProject().path).parent_path()
+				).string();
+				std::replace(relative.begin(), relative.end(), '\\', '/');
+
+				// Write a minimal binary asset stub so the file exists on disk.
+				// The UUID minted here is the asset's permanent identity.
+				{
+					const HE::UUID assetId = HE::UUID::generate();
+					HAsset::Writer w;
+					std::vector<uint8_t> meta;
+					HAsset::Writer::appendPOD(meta, static_cast<uint16_t>(type));
+					HAsset::Writer::appendPOD(meta, assetId.hi);
+					HAsset::Writer::appendPOD(meta, assetId.lo);
+					HAsset::Writer::appendString(meta, defaultName);
+					HAsset::Writer::appendString(meta, relative);
+					w.addChunk(HAsset::CHUNK_META, meta.data(), meta.size());
+					// Scripts are born with a language and a starter template. The
+					// language byte (CHUNK_SLNG) is the single source of truth for
+					// routing Lua vs Python, so it must be written here at birth —
+					// this stub bypasses the ContentManager save path.
+					if (type == HE::AssetType::Script)
+					{
+						const int lang = static_cast<int>(scriptLang);
+						const char* starter = scriptStarterTemplate(lang);
+						w.addChunk(HAsset::CHUNK_SRC, starter, std::char_traits<char>::length(starter));
+						const uint8_t lb = static_cast<uint8_t>(lang);
+						w.addChunk(HAsset::CHUNK_SLNG, &lb, 1);
+					}
+					// UI widgets are born with an empty 1920×1080 tree so the widget
+					// editor has valid JSON to open straight away.
+					if (type == HE::AssetType::Widget)
+					{
+						const std::string tree = HE::uiWidgetTreeToJson(HE::UIWidgetTree{});
+						w.addChunk(HAsset::CHUNK_UIWT, tree.data(), tree.size());
+					}
+					w.write(path, static_cast<uint16_t>(type));
+				}
+
+				// Show it now (don't wait for the next auto-refresh) and let the
+				// user name it straight away via the rename/name dialog.
+				s_selectedItem    = path;
+				s_renameTarget    = path;
+				s_renameIsFolder  = false;
+				s_renameIsCreate  = true;
+				s_renameScriptLang = (type == HE::AssetType::Script) ? static_cast<int>(scriptLang) : -1;
+				std::strncpy(s_renameBuf, defaultName, sizeof(s_renameBuf) - 1);
+				s_renameBuf[sizeof(s_renameBuf) - 1] = '\0';
+				s_openRenamePopup = true;
+				s_quietContentRefresh = true;
+				ImGui::CloseCurrentPopup();
+			};
+
+			if (ImGui::MenuItem("Scene"))        tryCreate("NewScene",    ".hescene", HE::AssetType::Scene);
+			if (ImGui::MenuItem("Material"))     tryCreate("NewMaterial", ".hasset",  HE::AssetType::Material);
+			if (ImGui::MenuItem("Material Function")) tryCreate("NewMaterialFunction", ".hasset", HE::AssetType::MaterialFunction);
+			if (ImGui::MenuItem("UI Widget"))    tryCreate("NewWidget",   ".hasset",  HE::AssetType::Widget);
+			if (ImGui::MenuItem("Texture"))      tryCreate("NewTexture",  ".hasset",  HE::AssetType::Texture);
+			if (ImGui::MenuItem("Static Mesh"))  tryCreate("NewMesh",     ".hasset",  HE::AssetType::StaticMesh);
+			if (ImGui::MenuItem("Skeletal Mesh"))tryCreate("NewSkelMesh", ".hasset",  HE::AssetType::SkeletalMesh);
+			if (ImGui::MenuItem("Script"))       tryCreate("NewScript",   ".hasset",  HE::AssetType::Script, ScriptLanguage::Lua);
+			if (ImGui::MenuItem("Shader"))       tryCreate("NewShader",   ".hasset",  HE::AssetType::Shader);
+			if (ImGui::MenuItem("Audio"))        tryCreate("NewAudio",    ".hasset",  HE::AssetType::Audio);
+			if (ImGui::MenuItem("Font"))         tryCreate("NewFont",     ".hasset",  HE::AssetType::Font);
+		};
+
 		if (s_rightClickOnItem)
 		{
 			ImGui::OpenPopup("##cb_item_ctx");
@@ -4533,6 +4617,16 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				ImGui::CloseCurrentPopup();
 			}
 
+			ImGui::Separator();
+			if (ImGui::BeginMenu("Create Asset"))
+			{
+				const std::string createDir = s_ctxMenuIsFolder
+					? s_ctxMenuItem
+					: std::filesystem::path(s_ctxMenuItem).parent_path().string();
+				drawCreateAssetItems(createDir);
+				ImGui::EndMenu();
+			}
+
 			ImGui::EndPopup();
 		}
 
@@ -4646,83 +4740,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 
 			const std::string targetFolder = displayFolder ? displayFolder->fullPath
 														   : contentFolder.fullPath;
-
-			auto tryCreate = [&](const char* defaultName, const char* ext, HE::AssetType type,
-			                     ScriptLanguage scriptLang = ScriptLanguage::Lua)
-			{
-				// Build a path that does not yet exist
-				std::string base = targetFolder + "/" + defaultName;
-				std::string path = base + ext;
-				int counter = 1;
-				while (std::filesystem::exists(path))
-					path = base + std::to_string(counter++) + ext;
-
-				// Create an empty asset file via ContentManager
-				std::string relative = std::filesystem::relative(
-					path,
-					std::filesystem::path(ctx.projectManager->currentProject().path).parent_path()
-				).string();
-				std::replace(relative.begin(), relative.end(), '\\', '/');
-
-				// Write a minimal binary asset stub so the file exists on disk.
-				// The UUID minted here is the asset's permanent identity.
-				{
-					const HE::UUID assetId = HE::UUID::generate();
-					HAsset::Writer w;
-					std::vector<uint8_t> meta;
-					HAsset::Writer::appendPOD(meta, static_cast<uint16_t>(type));
-					HAsset::Writer::appendPOD(meta, assetId.hi);
-					HAsset::Writer::appendPOD(meta, assetId.lo);
-					HAsset::Writer::appendString(meta, defaultName);
-					HAsset::Writer::appendString(meta, relative);
-					w.addChunk(HAsset::CHUNK_META, meta.data(), meta.size());
-					// Scripts are born with a language and a starter template. The
-					// language byte (CHUNK_SLNG) is the single source of truth for
-					// routing Lua vs Python, so it must be written here at birth —
-					// this stub bypasses the ContentManager save path.
-					if (type == HE::AssetType::Script)
-					{
-						const int lang = static_cast<int>(scriptLang);
-						const char* starter = scriptStarterTemplate(lang);
-						w.addChunk(HAsset::CHUNK_SRC, starter, std::char_traits<char>::length(starter));
-						const uint8_t lb = static_cast<uint8_t>(lang);
-						w.addChunk(HAsset::CHUNK_SLNG, &lb, 1);
-					}
-					// UI widgets are born with an empty 1920×1080 tree so the widget
-					// editor has valid JSON to open straight away.
-					if (type == HE::AssetType::Widget)
-					{
-						const std::string tree = HE::uiWidgetTreeToJson(HE::UIWidgetTree{});
-						w.addChunk(HAsset::CHUNK_UIWT, tree.data(), tree.size());
-					}
-					w.write(path, static_cast<uint16_t>(type));
-				}
-
-				// Show it now (don't wait for the next auto-refresh) and let the
-				// user name it straight away via the rename/name dialog.
-				s_selectedItem    = path;
-				s_renameTarget    = path;
-				s_renameIsFolder  = false;
-				s_renameIsCreate  = true;
-				s_renameScriptLang = (type == HE::AssetType::Script) ? static_cast<int>(scriptLang) : -1;
-				std::strncpy(s_renameBuf, defaultName, sizeof(s_renameBuf) - 1);
-				s_renameBuf[sizeof(s_renameBuf) - 1] = '\0';
-				s_openRenamePopup = true;
-				s_quietContentRefresh = true;
-				ImGui::CloseCurrentPopup();
-			};
-
-			if (ImGui::MenuItem("Scene"))        tryCreate("NewScene",    ".hescene", HE::AssetType::Scene);
-			if (ImGui::MenuItem("Material"))     tryCreate("NewMaterial", ".hasset",  HE::AssetType::Material);
-			if (ImGui::MenuItem("Material Function")) tryCreate("NewMaterialFunction", ".hasset", HE::AssetType::MaterialFunction);
-			if (ImGui::MenuItem("UI Widget"))    tryCreate("NewWidget",   ".hasset",  HE::AssetType::Widget);
-			if (ImGui::MenuItem("Texture"))      tryCreate("NewTexture",  ".hasset",  HE::AssetType::Texture);
-			if (ImGui::MenuItem("Static Mesh"))  tryCreate("NewMesh",     ".hasset",  HE::AssetType::StaticMesh);
-			if (ImGui::MenuItem("Skeletal Mesh"))tryCreate("NewSkelMesh", ".hasset",  HE::AssetType::SkeletalMesh);
-				if (ImGui::MenuItem("Script"))       tryCreate("NewScript",   ".hasset",  HE::AssetType::Script, ScriptLanguage::Lua);
-			if (ImGui::MenuItem("Shader"))       tryCreate("NewShader",   ".hasset",  HE::AssetType::Shader);
-			if (ImGui::MenuItem("Audio"))        tryCreate("NewAudio",    ".hasset",  HE::AssetType::Audio);
-			if (ImGui::MenuItem("Font"))         tryCreate("NewFont",     ".hasset",  HE::AssetType::Font);
+			drawCreateAssetItems(targetFolder);
 			if (ImGui::MenuItem("Folder"))
 			{
 				std::string base = targetFolder + "/NewFolder";
@@ -6139,45 +6157,6 @@ void EditorUI::RenderInspector(AppContext& ctx)
 		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<UIButtonComponent>(entity); }
 	}
 
-	// ── UI Widget ───────────────────────────────────────────────────────────
-	if (auto* wc = registry.try_get<UIWidgetComponent>(entity))
-	{
-		if (componentHeader("UI Widget", true, removed))
-		{
-			ImGui::TextUnformatted("Widget");
-			ImGui::SameLine();
-			const UIWidgetAsset* cur = (wc->widgetAssetId != HE::UUID{} && ctx.contentManager)
-				? ctx.contentManager->getWidget(wc->widgetAssetId) : nullptr;
-			const std::string label = cur ? cur->name
-				: (wc->widgetAssetId == HE::UUID{} ? "(none)" : "(not loaded)");
-			ImGui::Button((label + "##uiwslot").c_str());
-			if (ImGui::BeginDragDropTarget())
-			{
-				if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_ASSET_PATH"))
-				{
-					std::error_code ec;
-					std::string rel = std::filesystem::relative(
-						static_cast<const char*>(p->Data),
-						ctx.contentManager ? ctx.contentManager->contentRoot() : "",
-						ec).generic_string();
-					if (!ec && !rel.empty() && rel.rfind("..", 0) != 0)
-					{
-						const HE::UUID id = ctx.contentManager->loadAsset(rel);
-						if (id != HE::UUID{} && ctx.contentManager->getWidget(id))
-						{
-							if (ctx.undoSys) ctx.undoSys->snapshotNow();
-							wc->widgetAssetId = id;
-						}
-					}
-				}
-				ImGui::EndDragDropTarget();
-			}
-			ImGui::Checkbox("Active##uiw", &wc->active); trackEdit();
-			ImGui::TextDisabled("Expands into UI entities at play start");
-		}
-		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<UIWidgetComponent>(entity); }
-	}
-
 	// ── Add Component ───────────────────────────────────────────────────────
 	// Not for the World root — it only carries the scene's Environment, no
 	// arbitrary components (and the built-in sun/moon are managed automatically).
@@ -6229,7 +6208,6 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			addItem("UI Text",         UITextComponent{});
 			addItem("UI Image",        UIImageComponent{});
 			addItem("UI Button",       UIButtonComponent{});
-			addItem("UI Widget",       UIWidgetComponent{});
 			ImGui::EndPopup();
 		}
 	}
