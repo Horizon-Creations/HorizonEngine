@@ -1137,6 +1137,7 @@ const char* pinTypeName(PT t)
 		case PT::String: return "String";
 		case PT::Vec2:   return "Vec2";
 		case PT::Color:  return "Color";
+		case PT::Ref:    return "Object";
 		default:         return "Exec";
 	}
 }
@@ -1364,7 +1365,7 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 			}
 
 			int typeIdx = (int)v->type;
-			if (ImGui::Combo("Type", &typeIdx, "Exec\0Float\0Bool\0Int\0String\0Vec2\0Color\0"))
+			if (ImGui::Combo("Type", &typeIdx, "Exec\0Float\0Bool\0Int\0String\0Vec2\0Color\0Object\0"))
 			{
 				const PT nt = (PT)typeIdx;
 				if (nt != PT::Exec && nt != v->type)
@@ -1386,6 +1387,19 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 			int vaccess = v->access;
 			if (ImGui::Combo("Access", &vaccess, "Public\0Private\0"))
 				{ v->access = vaccess; commitEdit(st, ctx); }
+
+			// Object variables can be typed to a HorizonCode class.
+			if (v->type == PT::Ref)
+			{
+				if (ImGui::BeginCombo("Class", v->className.empty() ? "(any)" : v->className.c_str()))
+				{
+					if (ImGui::Selectable("(any)", v->className.empty())) { v->className.clear(); commitEdit(st, ctx); }
+					for (const auto& c : HcEditorUtil::listHorizonCodeClasses(ctx.contentManager))
+						if (ImGui::Selectable((c.label + "##" + c.path).c_str(), v->className == c.path))
+							{ v->className = c.path; commitEdit(st, ctx); }
+					ImGui::EndCombo();
+				}
+			}
 
 			// Default value editor (seeds the runtime store at widget creation).
 			ImGui::SeparatorText("Default");
@@ -1631,6 +1645,27 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 			ImGui::EndCombo();
 		}
 		ImGui::TextDisabled("Instantiates a HorizonCode class as a\nlive object. Outputs a reference to it.");
+		break;
+	}
+	case NT::GetExternal:
+	case NT::SetExternal:
+	{
+		ImGui::InputText("Variable", &n->s);
+		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		int t = (int)n->propType;
+		if (ImGui::Combo("Type", &t, "Exec\0Float\0Bool\0Int\0String\0Vec2\0Color\0Object\0"))
+		{
+			const PT nt = (PT)t;
+			if (nt != PT::Exec && nt != n->propType)
+			{
+				n->propType = nt;
+				const GPinRanges r = graphPinRanges(*n);
+				const int valuePin = n->type == NT::GetExternal ? r.dataOut0 : (r.dataIn0 + 1);
+				removeGraphPinLinks(st.graph, n->id, valuePin);
+				committed = true;
+			}
+		}
+		ImGui::TextDisabled("Reads/writes a public variable on the\nTarget object.");
 		break;
 	}
 

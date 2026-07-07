@@ -65,6 +65,7 @@ const char* pinTypeName(PT t)
 		case PT::String: return "String";
 		case PT::Vec2:   return "Vec2";
 		case PT::Color:  return "Color";
+		case PT::Ref:    return "Object";
 		default:         return "Exec";
 	}
 }
@@ -253,7 +254,7 @@ void drawFunctions(HC::Graph& graph, bool& edited)
 }
 
 // Detail editor for the selected variable.
-void drawVariableDetails(HC::Graph& graph, bool& edited)
+void drawVariableDetails(HC::Graph& graph, ContentManager* content, bool& edited)
 {
 	HC::Variable* v = graph.findVariable(g.selectedVar);
 	if (!v) { g.selectedVar.clear(); return; }
@@ -292,7 +293,7 @@ void drawVariableDetails(HC::Graph& graph, bool& edited)
 	}
 
 	int typeIdx = (int)v->type;
-	if (ImGui::Combo("Type", &typeIdx, "Exec\0Float\0Bool\0Int\0String\0Vec2\0Color\0"))
+	if (ImGui::Combo("Type", &typeIdx, "Exec\0Float\0Bool\0Int\0String\0Vec2\0Color\0Object\0"))
 	{
 		const PT nt = (PT)typeIdx;
 		if (nt != PT::Exec && nt != v->type)
@@ -312,6 +313,19 @@ void drawVariableDetails(HC::Graph& graph, bool& edited)
 
 	int vaccess = v->access;
 	if (ImGui::Combo("Access", &vaccess, "Public\0Private\0")) { v->access = vaccess; edited = true; }
+
+	// Object variables can be typed to a HorizonCode class (drives member menus).
+	if (v->type == PT::Ref)
+	{
+		if (ImGui::BeginCombo("Class", v->className.empty() ? "(any)" : v->className.c_str()))
+		{
+			if (ImGui::Selectable("(any)", v->className.empty())) { v->className.clear(); edited = true; }
+			for (const auto& c : HcEditorUtil::listHorizonCodeClasses(content))
+				if (ImGui::Selectable((c.label + "##" + c.path).c_str(), v->className == c.path))
+					{ v->className = c.path; edited = true; }
+			ImGui::EndCombo();
+		}
+	}
 
 	ImGui::SeparatorText("Default");
 	switch (v->type)
@@ -470,6 +484,27 @@ void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events,
 			ImGui::EndCombo();
 		}
 		ImGui::TextDisabled("Instantiates a HorizonCode class as a\nlive object. Outputs a reference to it.");
+		break;
+	}
+	case NT::GetExternal:
+	case NT::SetExternal:
+	{
+		ImGui::InputText("Variable", &n->s);
+		if (ImGui::IsItemDeactivatedAfterEdit()) edited = true;
+		int t = (int)n->propType;
+		if (ImGui::Combo("Type", &t, "Exec\0Float\0Bool\0Int\0String\0Vec2\0Color\0Object\0"))
+		{
+			const PT nt = (PT)t;
+			if (nt != PT::Exec && nt != n->propType)
+			{
+				n->propType = nt;
+				const PinRanges r = pinRanges(*n);
+				const int valuePin = n->type == NT::GetExternal ? r.dataOut0 : (r.dataIn0 + 1);
+				removePinLinks(graph, n->id, valuePin);
+				edited = true;
+			}
+		}
+		ImGui::TextDisabled("Reads/writes a public variable on the\nTarget object.");
 		break;
 	}
 	default:
@@ -645,7 +680,7 @@ void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
 	ImGui::Spacing();
 	ImGui::Separator();
 	if (g.selectedNode != 0)          drawNodeDetails(graph, events, content, edited);
-	else if (!g.selectedVar.empty())  drawVariableDetails(graph, edited);
+	else if (!g.selectedVar.empty())  drawVariableDetails(graph, content, edited);
 	else ImGui::TextDisabled("Select a node or variable.");
 	ImGui::EndChild();
 

@@ -61,6 +61,9 @@ enum class NodeType : uint8_t
     // Instantiate a HorizonCode class asset as a live runtime object.
     CreateObject,    // s = HorizonCode class asset path; dataOut Object (Ref)
     DestroyObject,   // dataIn Object (Ref)
+    // Read/write a PUBLIC variable on a referenced instance (s = variable name).
+    GetExternal,     // dataIn Target (Ref); dataOut Value (propType)
+    SetExternal,     // dataIn Target (Ref) + Value (propType)
     // Literals (f[]/s).
     ConstFloat, ConstBool, ConstInt, ConstString, ConstVec2, ConstColor,
     // Math / logic.
@@ -92,6 +95,10 @@ struct Variable
     float       f[4] = {};
     std::string s;
     int         access = 0;   // 0 public (readable via a reference), 1 private
+    // For an Object (Ref) variable: which HorizonCode class it holds (asset
+    // path). Purely editor metadata — lets the context menu surface that class's
+    // public functions/variables. Empty = untyped object.
+    std::string className;
 };
 
 struct Node
@@ -177,6 +184,9 @@ struct Context
     std::function<void(uint32_t target, const std::string& event)>         bindEvent;
     // callExternal: call a public function on the `target` instance.
     std::function<void(uint32_t target, const std::string& fn)>            callExternal;
+    // get/setExternal: read/write a PUBLIC variable on the `target` instance.
+    std::function<Value(uint32_t target, const std::string& var)>              getExternal;
+    std::function<void(uint32_t target, const std::string& var, const Value&)> setExternal;
     // References resolvable from any graph.
     std::function<Value()> getSelf;         // this instance
     std::function<Value()> getGameInstance; // the app-wide GameInstance (Ref 0 if none)

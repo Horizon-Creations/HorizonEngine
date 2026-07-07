@@ -253,6 +253,52 @@ TEST_CASE("BindEvent + GetGameInstance let a script subscribe to the GameInstanc
 	CHECK(rt.getVariable(L, "heard").b == true);
 }
 
+TEST_CASE("Get/Set External read + write a public variable but not a private one")
+{
+	Runtime rt;
+
+	// Instance A exposes a public "hp" (Int=5) and a private "secret" (Bool).
+	Graph gA;
+	{ Variable v; v.name = "hp";     v.type = PinType::Int;  v.f[0] = 5; v.access = 0; gA.variables.push_back(v); }
+	{ Variable v; v.name = "secret"; v.type = PinType::Bool;             v.access = 1; gA.variables.push_back(v); }
+	const InstanceId A = rt.add(std::move(gA));
+
+	// Instance B holds a ref to A and reads/writes it through Get/Set External.
+	Graph gB;
+	{ Variable v; v.name = "target";   v.type = PinType::Ref; gB.variables.push_back(v); }
+	{ Variable v; v.name = "readback"; v.type = PinType::Int; gB.variables.push_back(v); }
+	Node ev; ev.type = NodeType::Event; ev.s = "Go"; const int e = gB.addNode(ev);
+	Node gt; gt.type = NodeType::GetVariable; gt.s = "target"; gt.propType = PinType::Ref; const int t = gB.addNode(gt);
+	Node ci; ci.type = NodeType::ConstInt; ci.f[0] = 99; const int c = gB.addNode(ci);
+	Node se; se.type = NodeType::SetExternal; se.s = "hp"; se.propType = PinType::Int; const int s = gB.addNode(se);
+	Node ge; ge.type = NodeType::GetExternal; ge.s = "hp"; ge.propType = PinType::Int; const int x = gB.addNode(ge);
+	Node rv; rv.type = NodeType::SetVariable; rv.s = "readback"; rv.propType = PinType::Int; const int r = gB.addNode(rv);
+	// Go → SetExternal(target,"hp",99) → SetVariable(readback, GetExternal(target,"hp")).
+	REQUIRE(gB.connect(e, 0, s, 0)); // exec
+	REQUIRE(gB.connect(t, 0, s, 2)); // target → SetExternal.Target
+	REQUIRE(gB.connect(c, 0, s, 3)); // 99 → SetExternal.Value
+	REQUIRE(gB.connect(s, 1, r, 0)); // exec
+	REQUIRE(gB.connect(t, 0, x, 0)); // target → GetExternal.Target
+	REQUIRE(gB.connect(x, 1, r, 2)); // GetExternal.Value → readback
+	// TrySecret → SetExternal(target,"secret",true) — must be blocked (private).
+	Node ev2; ev2.type = NodeType::Event; ev2.s = "TrySecret"; const int e2 = gB.addNode(ev2);
+	Node cb; cb.type = NodeType::ConstBool; cb.f[0] = 1.0f; const int cbId = gB.addNode(cb);
+	Node ss; ss.type = NodeType::SetExternal; ss.s = "secret"; ss.propType = PinType::Bool; const int s2 = gB.addNode(ss);
+	REQUIRE(gB.connect(e2,   0, s2, 0));
+	REQUIRE(gB.connect(t,    0, s2, 2));
+	REQUIRE(gB.connect(cbId, 0, s2, 3));
+
+	const InstanceId B = rt.add(std::move(gB));
+	rt.setVariable(B, "target", Value::ofRef(A));
+
+	rt.fireEvent(B, "Go");
+	CHECK(rt.getVariable(A, "hp").i == 99);        // wrote A's public var
+	CHECK(rt.getVariable(B, "readback").i == 99);  // read it back through the ref
+
+	rt.fireEvent(B, "TrySecret");
+	CHECK(rt.getVariable(A, "secret").b == false); // private var stayed untouched
+}
+
 TEST_CASE("Create/Destroy Object instantiate a class, run Construct, cache the ref")
 {
 	Runtime rt;

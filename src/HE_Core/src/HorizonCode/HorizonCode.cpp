@@ -81,6 +81,15 @@ NodeSig signatureOf(const Node& n)
         s.execOuts = { { "", P::Exec } };
         s.dataIns  = { { "Object", P::Ref } };
         break;
+    case T::GetExternal:
+        s.dataIns  = { { "Target", P::Ref } };
+        s.dataOuts = { { "Value", n.propType } };
+        break;
+    case T::SetExternal:
+        s.execIns  = { { "", P::Exec } };
+        s.execOuts = { { "", P::Exec } };
+        s.dataIns  = { { "Target", P::Ref }, { "Value", n.propType } };
+        break;
     case T::BindEvent:
     case T::CallExternal:
         s.execIns  = { { "", P::Exec } };
@@ -155,6 +164,8 @@ const char* nodeDisplayName(NodeType t)
         case T::DestroyWidget:return "Destroy Widget";
         case T::CreateObject: return "Create Object";
         case T::DestroyObject:return "Destroy Object";
+        case T::GetExternal:  return "Get (Ref)";
+        case T::SetExternal:  return "Set (Ref)";
         case T::ConstFloat:   return "Float";
         case T::ConstBool:    return "Bool";
         case T::ConstInt:     return "Int";
@@ -214,7 +225,9 @@ const char* nodeCategory(NodeType t)
         case T::GetGameInstance:
         case T::GetSelf:
         case T::CreateObject:
-        case T::DestroyObject:  return "Reference";
+        case T::DestroyObject:
+        case T::GetExternal:
+        case T::SetExternal:    return "Reference";
         case T::Print: return "Debug";
         default: return "Misc";
     }
@@ -366,6 +379,7 @@ std::string toJson(const Graph& g)
         if (v.f[0] || v.f[1] || v.f[2] || v.f[3]) e["f"] = { v.f[0], v.f[1], v.f[2], v.f[3] };
         if (!v.s.empty()) e["s"] = v.s;
         if (v.access)     e["access"] = v.access;
+        if (!v.className.empty()) e["className"] = v.className;
         jv.push_back(std::move(e));
     }
     j["variables"] = std::move(jv);
@@ -415,6 +429,7 @@ bool fromJson(const std::string& json, Graph& out)
         v.type = (PinType)e.value("type", (int)P::Float);
         v.s    = e.value("s", std::string());
         v.access = e.value("access", 0);
+        v.className = e.value("className", std::string());
         if (const auto& f = e.value("f", nlohmann::json::array()); f.size() >= 4)
             for (int i = 0; i < 4; ++i) v.f[i] = f[i].get<float>();
         g.variables.push_back(std::move(v));
@@ -549,6 +564,11 @@ void Runner::execNode(const Node& n, int depth)
         break;
     }
     case T::DestroyObject: if (m_ctx.destroyObject) m_ctx.destroyObject(evalInput(n, 0, depth + 1).ref); break;
+    case T::SetExternal:
+        if (m_ctx.setExternal)
+            m_ctx.setExternal(evalInput(n, 0, depth + 1).ref, n.s,
+                              coerce(evalInput(n, 1, depth + 1), n.propType));
+        break;
     case T::BindEvent:
         if (m_ctx.bindEvent)
             m_ctx.bindEvent(evalInput(n, 0, depth + 1).ref, n.s);
@@ -626,6 +646,11 @@ Value Runner::evalData(const Node& n, int dataOutPin, int depth)
     {
         auto it = m_execOutputs.find(n.id);
         return it != m_execOutputs.end() ? it->second : Value::ofRef(0);
+    }
+    case T::GetExternal:
+    {
+        Value v = m_ctx.getExternal ? m_ctx.getExternal(evalInput(n, 0, depth + 1).ref, n.s) : Value{};
+        return coerce(v, n.propType);
     }
     case T::Add:      return Value::ofFloat(evalInput(n, 0, depth + 1).f + evalInput(n, 1, depth + 1).f);
     case T::Subtract: return Value::ofFloat(evalInput(n, 0, depth + 1).f - evalInput(n, 1, depth + 1).f);
