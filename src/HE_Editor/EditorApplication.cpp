@@ -42,6 +42,8 @@
 #include <cstdint>
 #include <fstream>
 #include <vector>
+#include <algorithm>
+#include <nlohmann/json.hpp>
 
 // stb_image — declaration only (implementation in stb_image_impl.cpp)
 #include "vendor/stb_image.h"
@@ -793,6 +795,9 @@ void EditorApplication::OnInit()
 		// any scene via Get Game Instance; OnInit fires when play mode starts).
 		loadGameInstanceGraph();
 
+		// Restore the editor tabs that were open the last time this project was used.
+		restoreOpenTabs();
+
 		m_currentScenePath.clear();
 		if (!sceneAbsPath.empty())
 		{
@@ -1224,6 +1229,7 @@ void EditorApplication::OnRender(float dt)
 
 	AppContext ctx = makeContext();
 	EditorUI::render(ctx, dt);
+	saveOpenTabs(); // persists only when the tab set/active index actually changed
 
 	// ── FPS counter ───────────────────────────────────────────────────────
 	if (dt > 0.0f)
@@ -2136,6 +2142,56 @@ void EditorApplication::saveGameInstanceGraph()
 	if (path.empty()) return;
 	std::ofstream f(path, std::ios::trunc);
 	if (f) f << HorizonCode::toJson(m_gameInstanceGraph);
+}
+
+// ─── Per-project open-tab persistence ───────────────────────────────────────────
+void EditorApplication::saveOpenTabs()
+{
+	if (!m_projectLoaded) return;
+	// A cheap signature (paths + active index) so we only write on real changes.
+	std::string sig;
+	for (const auto& t : m_tabs) sig += t.assetPath + "|";
+	sig += std::to_string(m_activeTab);
+	if (sig == m_lastTabSig) return;
+	m_lastTabSig = sig;
+
+	nlohmann::json arr = nlohmann::json::array();
+	for (const auto& t : m_tabs)
+		if (!t.assetPath.empty()) // skip the built-in Viewport tab
+			arr.push_back({ { "label", t.label }, { "path", t.assetPath } });
+	const nlohmann::json state = { { "tabs", arr }, { "active", m_activeTab } };
+
+	if (m_globalState)
+	{
+		m_globalState->setCustomConfigEntry("openTabs:" + m_projectManager.currentProject().path, state.dump());
+		m_globalState->writeConfig();
+	}
+}
+
+void EditorApplication::restoreOpenTabs()
+{
+	if (!m_globalState) return;
+	const std::string raw = m_globalState->getCustomConfigString(
+		"openTabs:" + m_projectManager.currentProject().path, "");
+	if (raw.empty()) return;
+	nlohmann::json state = nlohmann::json::parse(raw, nullptr, /*allow_exceptions=*/false);
+	if (state.is_discarded() || !state.is_object()) return;
+
+	// Keep the Viewport tab (empty path); replace any prior asset tabs.
+	if (m_tabs.empty()) m_tabs.push_back({ "Viewport", "", false, true });
+	m_tabs.erase(std::remove_if(m_tabs.begin(), m_tabs.end(),
+		[](const AppContext::EditorTab& t){ return !t.assetPath.empty(); }), m_tabs.end());
+
+	for (const auto& t : state.value("tabs", nlohmann::json::array()))
+	{
+		const std::string path = t.value("path", std::string());
+		// Restore virtual tabs (":…") and assets that still exist on disk.
+		if (path.empty()) continue;
+		if (path[0] != ':' && !std::filesystem::exists(path)) continue;
+		m_tabs.push_back({ t.value("label", std::string()), path, true, true });
+	}
+	const int active = state.value("active", 0);
+	m_activeTab = (active >= 0 && active < (int)m_tabs.size()) ? active : 0;
 }
 
 // ─── Scene file management ──────────────────────────────────────────────────────

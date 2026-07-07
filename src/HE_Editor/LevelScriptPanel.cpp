@@ -628,11 +628,24 @@ void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
 
 } // namespace
 
-void LevelScriptPanel::render(AppContext& ctx, bool& open)
+// Wrap the shared body in a borderless window filling the tab rect (same
+// pattern as the other tab editors).
+namespace
 {
-	if (!open) return;
-	ImGui::SetNextWindowSize(ImVec2(920.0f, 560.0f), ImGuiCond_FirstUseEver);
-	if (!ImGui::Begin("Level Script", &open)) { ImGui::End(); return; }
+void beginTabWindow(const char* id, const ImVec2& pos, const ImVec2& size)
+{
+	ImGui::SetNextWindowPos(pos);
+	ImGui::SetNextWindowSize(size);
+	ImGui::Begin(id, nullptr,
+		ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+		ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
+		ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings);
+}
+}
+
+void LevelScriptPanel::render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
+{
+	beginTabWindow("##levelscript_tab", pos, size);
 	if (!ctx.world)
 	{
 		ImGui::TextDisabled("Open a scene to edit its level script.");
@@ -644,17 +657,14 @@ void LevelScriptPanel::render(AppContext& ctx, bool& open)
 	drawGraphBody(ctx.world->levelScript(), kEvents, "Level Script",
 	              "Reacts to world events.", edited);
 	// snapshotNow() bumps the undo revision so the level script saves with the
-	// scene; self-contained so it doesn't disturb the entity undo. (Undo of a
-	// graph change costs one extra Ctrl+Z — acceptable.)
+	// scene; self-contained so it doesn't disturb the entity undo.
 	if (edited && ctx.undoSys) ctx.undoSys->snapshotNow();
 	ImGui::End();
 }
 
-void GameInstancePanel::render(AppContext& ctx, bool& open)
+void GameInstancePanel::render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 {
-	if (!open) return;
-	ImGui::SetNextWindowSize(ImVec2(920.0f, 560.0f), ImGuiCond_FirstUseEver);
-	if (!ImGui::Begin("Game Instance", &open)) { ImGui::End(); return; }
+	beginTabWindow("##gameinstance_tab", pos, size);
 	if (!ctx.gameInstanceGraph)
 	{
 		ImGui::TextDisabled("Open a project to edit its Game Instance.");
