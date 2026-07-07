@@ -103,11 +103,11 @@ struct Model
     // Double-click on a node (e.g. open a referenced function).
     std::function<void(int nodeId)> onNodeDoubleClick;
 
-    // Accept an ImGui drag-drop payload dropped onto the canvas (e.g. an element
-    // variable). When `dropPayload` is set, the component makes the canvas a drop
-    // target for it and calls `onDrop` with the payload data + graph-space point.
-    const char* dropPayload = nullptr;
-    std::function<void(const void* data, ImVec2 graphPos)> onDrop;
+    // Accept ImGui drag-drop payloads dropped onto the canvas (e.g. an element or
+    // a variable). The component makes the canvas a drop target for each listed
+    // payload type and calls `onDrop` with the matched type + data + graph point.
+    std::vector<const char*> dropPayloads;
+    std::function<void(const char* type, const void* data, ImVec2 graphPos)> onDrop;
 
     // Feature flags.
     bool multiSelect = false;

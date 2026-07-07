@@ -88,12 +88,14 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
     const bool interact = hovered && !st.suppressInteraction && !behindConsumed &&
                           !ImGui::IsAnyItemActive();
 
-    // Canvas drop target (element variables etc.) — bound to the InvisibleButton.
-    if (model.dropPayload && model.onDrop && ImGui::BeginDragDropTarget())
+    // Canvas drop targets (elements, variables, …) — bound to the InvisibleButton.
+    if (!model.dropPayloads.empty() && model.onDrop && ImGui::BeginDragDropTarget())
     {
-        if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload(model.dropPayload))
-            model.onDrop(p->Data, ImVec2((mouse.x - origin.x - st.pan.x) / st.zoom,
-                                         (mouse.y - origin.y - st.pan.y) / st.zoom));
+        const ImVec2 gp((mouse.x - origin.x - st.pan.x) / st.zoom,
+                        (mouse.y - origin.y - st.pan.y) / st.zoom);
+        for (const char* pt : model.dropPayloads)
+            if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload(pt))
+                { model.onDrop(pt, p->Data, gp); break; }
         ImGui::EndDragDropTarget();
     }
 

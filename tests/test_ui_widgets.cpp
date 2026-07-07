@@ -560,3 +560,119 @@ return M
     ScriptApi::setCursorVisible(true);
     CHECK(calls == 2);
 }
+
+// ═══ HorizonCode variables ═══════════════════════════════════════════════════
+
+TEST_CASE("HorizonCode variables round-trip through JSON")
+{
+    HorizonCode::Graph g;
+    HorizonCode::Variable a; a.name = "score"; a.type = PinType::Int; a.f[0] = 5.0f;
+    HorizonCode::Variable b; b.name = "label"; b.type = PinType::String; b.s = "hi";
+    g.variables.push_back(a);
+    g.variables.push_back(b);
+
+    HorizonCode::Graph r;
+    REQUIRE(HorizonCode::fromJson(HorizonCode::toJson(g), r));
+    REQUIRE(r.variables.size() == 2);
+    const HorizonCode::Variable* rs = r.findVariable("score");
+    REQUIRE(rs);
+    CHECK(rs->type == PinType::Int);
+    CHECK(rs->f[0] == doctest::Approx(5.0f));
+    const HorizonCode::Variable* rl = r.findVariable("label");
+    REQUIRE(rl);
+    CHECK(rl->type == PinType::String);
+    CHECK(rl->s == "hi");
+    // Default value helper.
+    CHECK(HorizonCode::variableDefaultValue(*rs).i == 5);
+    CHECK(HorizonCode::variableDefaultValue(*rl).s == "hi");
+}
+
+TEST_CASE("HorizonCode Runner reads/writes variables via the Context")
+{
+    HorizonCode::Graph g;
+    // Event "Set" → SetVariable("x", 42).
+    HorizonCode::Node ev; ev.type = NodeType::Event; ev.s = "Set"; ev.elem = 0;
+    const int evId = g.addNode(ev);
+    HorizonCode::Node lit; lit.type = NodeType::ConstFloat; lit.f[0] = 42.0f;
+    const int litId = g.addNode(lit);
+    HorizonCode::Node setv; setv.type = NodeType::SetVariable; setv.s = "x"; setv.propType = PinType::Float;
+    const int setId = g.addNode(setv);
+    REQUIRE(g.connect(evId, 0, setId, 0));
+    REQUIRE(g.connect(litId, 0, setId, 2)); // value in
+
+    // Event "Read" → SetProperty(1,"Text", ToString(GetVariable("x"))).
+    HorizonCode::Node ev2; ev2.type = NodeType::Event; ev2.s = "Read"; ev2.elem = 0;
+    const int ev2Id = g.addNode(ev2);
+    HorizonCode::Node getv; getv.type = NodeType::GetVariable; getv.s = "x"; getv.propType = PinType::Float;
+    const int getId = g.addNode(getv);
+    HorizonCode::Node ts; ts.type = NodeType::ToString;
+    const int tsId = g.addNode(ts);
+    HorizonCode::Node setp; setp.type = NodeType::SetProperty; setp.elem = 1; setp.s = "Text"; setp.propType = PinType::String;
+    const int setpId = g.addNode(setp);
+    REQUIRE(g.connect(ev2Id, 0, setpId, 0));
+    REQUIRE(g.connect(getId, 0, tsId, 0));
+    REQUIRE(g.connect(tsId, 1, setpId, 2)); // ToString: dataIn 0, dataOut 1
+
+    std::unordered_map<std::string, HorizonCode::Value> store;
+    std::string written;
+    HorizonCode::Context ctx;
+    ctx.getVariable = [&](const std::string& v){ auto it = store.find(v); return it != store.end() ? it->second : HorizonCode::Value{}; };
+    ctx.setVariable = [&](const std::string& v, const HorizonCode::Value& val){ store[v] = val; };
+    ctx.setProperty = [&](int, const std::string&, const HorizonCode::Value& val){ written = val.s; };
+
+    HorizonCode::Runner runner(g, ctx);
+    runner.fireEvent("Read", 0);
+    CHECK(written == "0");     // unset variable → default 0
+    runner.fireEvent("Set", 0);
+    runner.fireEvent("Read", 0);
+    CHECK(written == "42");
+}
+
+TEST_CASE("WidgetManager variables persist across separate function calls")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree t;
+    const int txt = t.add(HE::UIWidgetType::Text);
+    t.find(txt)->setProp("Text", HE::UIPropValue::ofString(""));
+
+    HorizonCode::Graph g;
+    HorizonCode::Variable msg; msg.name = "msg"; msg.type = PinType::String; msg.s = "";
+    g.variables.push_back(msg);
+
+    // "SetIt": SetVariable("msg", "hello").
+    HorizonCode::Node fn1; fn1.type = NodeType::FunctionEntry; fn1.s = "SetIt"; fn1.access = 0;
+    const int fn1Id = g.addNode(fn1);
+    HorizonCode::Node lit; lit.type = NodeType::ConstString; lit.s = "hello";
+    const int litId = g.addNode(lit);
+    HorizonCode::Node sv; sv.type = NodeType::SetVariable; sv.s = "msg"; sv.propType = PinType::String;
+    const int svId = g.addNode(sv);
+    REQUIRE(g.connect(fn1Id, 0, svId, 0));
+    REQUIRE(g.connect(litId, 0, svId, 2));
+
+    // "ShowIt": SetProperty(txt,"Text", GetVariable("msg")).
+    HorizonCode::Node fn2; fn2.type = NodeType::FunctionEntry; fn2.s = "ShowIt"; fn2.access = 0;
+    const int fn2Id = g.addNode(fn2);
+    HorizonCode::Node gv; gv.type = NodeType::GetVariable; gv.s = "msg"; gv.propType = PinType::String;
+    const int gvId = g.addNode(gv);
+    HorizonCode::Node sp; sp.type = NodeType::SetProperty; sp.elem = txt; sp.s = "Text"; sp.propType = PinType::String;
+    const int spId = g.addNode(sp);
+    REQUIRE(g.connect(fn2Id, 0, spId, 0));
+    REQUIRE(g.connect(gvId, 0, spId, 2));
+
+    registerWidget(cm, t, &g);
+    WidgetManager wm;
+    const int id = wm.createWidget(cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+
+    std::vector<UIRenderObject> out;
+    wm.callFunction(id, "ShowIt");                 // reads the default ""
+    wm.extract(1920.0f, 1080.0f, out);
+    CHECK(countGlyphs(out) == 0);
+
+    CHECK(wm.callFunction(id, "SetIt"));           // writes msg = "hello"
+    CHECK(wm.callFunction(id, "ShowIt"));          // reads it back in a SEPARATE run
+    out.clear();
+    wm.extract(1920.0f, 1080.0f, out);
+    CHECK(countGlyphs(out) == 5);                  // "hello" persisted across calls
+}

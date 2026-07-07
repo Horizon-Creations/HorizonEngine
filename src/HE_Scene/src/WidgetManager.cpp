@@ -49,6 +49,15 @@ HorizonCode::Context WidgetManager::makeContext(Instance& inst)
 		HE::UIElement* e = i->tree.find(elem);
 		if (e) e->setProp(prop, HE::uiHcValueToProp(v, e->getProp(prop).type));
 	};
+	ctx.getVariable = [i](const std::string& var) -> HorizonCode::Value
+	{
+		auto it = i->variables.find(var);
+		return it != i->variables.end() ? it->second : HorizonCode::Value{};
+	};
+	ctx.setVariable = [i](const std::string& var, const HorizonCode::Value& v)
+	{
+		i->variables[var] = v;
+	};
 	ctx.showSelf = [i] { i->visible = true; };
 	ctx.hideSelf = [i] { i->visible = false; };
 	return ctx;
@@ -87,6 +96,11 @@ int WidgetManager::createWidget(ContentManager& content, const std::string& asse
 	m_instances.push_back(std::move(w));
 
 	Instance& stored = m_instances.back();
+	// Seed the variable store from the graph's declared defaults before any
+	// logic runs, so GetVariable reads a valid value even before a SetVariable.
+	for (const auto& var : stored.graph.variables)
+		stored.variables[var.name] = HorizonCode::variableDefaultValue(var);
+
 	HorizonCode::Runner runner(stored.graph, makeContext(stored));
 	runner.fireEvent("Construct", 0);
 	return stored.id;
