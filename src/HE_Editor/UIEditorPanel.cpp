@@ -1630,9 +1630,14 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 	}
 	case NT::CreateWidget:
 	{
-		ImGui::InputText("Widget Asset", &n->s);
-		committed |= ImGui::IsItemDeactivatedAfterEdit();
-		ImGui::TextDisabled("Content-relative path to a UI Widget\nasset. Outputs the new widget's id.");
+		if (ImGui::BeginCombo("Widget", n->s.empty() ? "(none)" : n->s.c_str()))
+		{
+			for (const auto& a : HcEditorUtil::listAssets(ctx.contentManager, HE::AssetType::Widget))
+				if (ImGui::Selectable((a.label + "##" + a.path).c_str(), n->s == a.path))
+					{ n->s = a.path; committed = true; }
+			ImGui::EndCombo();
+		}
+		ImGui::TextDisabled("Which UI Widget asset to instantiate.\nOutputs the new widget's id.");
 		break;
 	}
 	case NT::CreateObject:

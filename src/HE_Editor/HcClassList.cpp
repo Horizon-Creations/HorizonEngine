@@ -6,7 +6,7 @@
 
 namespace HcEditorUtil
 {
-std::vector<ClassRef> listHorizonCodeClasses(ContentManager* cm)
+std::vector<ClassRef> listAssets(ContentManager* cm, HE::AssetType type)
 {
 	std::vector<ClassRef> out;
 	if (!cm) return out;
@@ -22,7 +22,7 @@ std::vector<ClassRef> listHorizonCodeClasses(ContentManager* cm)
 		if (it->path().extension() != ".hasset") continue;
 		HAsset::Reader r;
 		if (r.open(it->path().string()) &&
-		    r.assetType() == static_cast<uint16_t>(HE::AssetType::HorizonCodeClass))
+		    r.assetType() == static_cast<uint16_t>(type))
 		{
 			ClassRef cr;
 			cr.label = it->path().stem().string();
@@ -32,4 +32,7 @@ std::vector<ClassRef> listHorizonCodeClasses(ContentManager* cm)
 	}
 	return out;
 }
+
+std::vector<ClassRef> listHorizonCodeClasses(ContentManager* cm)
+{ return listAssets(cm, HE::AssetType::HorizonCodeClass); }
 }
