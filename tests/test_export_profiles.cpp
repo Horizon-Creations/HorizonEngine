@@ -1,4 +1,5 @@
 #include "doctest.h"
+#include "TestFsUtil.h"
 #include <Hpak/HpakFormat.h>
 #include <Hpak/HpakWriter.h>
 #include <Hpak/HpakReader.h>
@@ -69,7 +70,7 @@ static void writeBlob(const fs::path& p, const std::vector<uint8_t>& bytes)
 TEST_CASE("addDirectory: excludePatterns skip matching assets, progress reports the rest")
 {
     const auto dir = fs::temp_directory_path() / "he_excl_test";
-    fs::remove_all(dir);
+    he_test::removeAllQuiet(dir);
     writeBlob(dir / "keep.hasset",            tinyHasset({0x1, 0x1}, "keep.hasset"));
     writeBlob(dir / "skip_test.hasset",       tinyHasset({0x2, 0x2}, "skip_test.hasset"));
     writeBlob(dir / "Debug" / "tool.hasset",  tinyHasset({0x3, 0x3}, "Debug/tool.hasset"));
@@ -95,14 +96,14 @@ TEST_CASE("addDirectory: excludePatterns skip matching assets, progress reports 
         CHECK(f.find("_test") == std::string::npos);
         CHECK(f.rfind("Debug/", 0) != 0);
     }
-    fs::remove_all(dir);
+    he_test::removeAllQuiet(dir);
 }
 
 TEST_CASE("ProjectExporter: excludePatterns reach the pak, progress fires")
 {
     const auto dir = fs::temp_directory_path() / "he_excl_export";
     const auto out = fs::temp_directory_path() / "he_excl_export_out";
-    fs::remove_all(dir); fs::remove_all(out);
+    he_test::removeAllQuiet(dir); he_test::removeAllQuiet(out);
     writeBlob(dir / "ship.hasset",      tinyHasset({0xA, 0xA}, "ship.hasset"));
     writeBlob(dir / "wip_test.hasset",  tinyHasset({0xB, 0xB}, "wip_test.hasset"));
 
@@ -121,7 +122,7 @@ TEST_CASE("ProjectExporter: excludePatterns reach the pak, progress fires")
     REQUIRE(reader.open((out / "Excl.hpak").string()));
     CHECK(reader.hasEntry(HE::UUID{0xA, 0xA}));
     CHECK_FALSE(reader.hasEntry(HE::UUID{0xB, 0xB}));
-    fs::remove_all(dir); fs::remove_all(out);
+    he_test::removeAllQuiet(dir); he_test::removeAllQuiet(out);
 }
 
 // ─── ExportProfile persistence in .heproj ─────────────────────────────────────
@@ -129,7 +130,7 @@ TEST_CASE("ProjectExporter: excludePatterns reach the pak, progress fires")
 TEST_CASE("ProjectManager: new projects are seeded with Development + Shipping profiles")
 {
     const auto dir = fs::temp_directory_path() / "he_prof_new";
-    fs::remove_all(dir);
+    he_test::removeAllQuiet(dir);
 
     ProjectManager pm;
     REQUIRE(pm.createNewProject(dir.string(), "ProfProj", ProjectPreset::Empty));
@@ -142,13 +143,13 @@ TEST_CASE("ProjectManager: new projects are seeded with Development + Shipping p
     CHECK(proj.exportProfiles[1].compress);
     CHECK(proj.exportProfiles[1].encrypt);
     CHECK(proj.activeExportProfile == "Development");
-    fs::remove_all(dir);
+    he_test::removeAllQuiet(dir);
 }
 
 TEST_CASE("ProjectManager: manifest without profiles loads seeded defaults")
 {
     const auto dir = fs::temp_directory_path() / "he_prof_legacy";
-    fs::remove_all(dir);
+    he_test::removeAllQuiet(dir);
     fs::create_directories(dir);
     // Legacy .heproj as written before profiles existed.
     {
@@ -160,13 +161,13 @@ TEST_CASE("ProjectManager: manifest without profiles loads seeded defaults")
     REQUIRE(pm.loadProject((dir / "Old.heproj").string()));
     REQUIRE(pm.currentProject().exportProfiles.size() == 2);
     CHECK(pm.currentProject().activeExportProfile == "Development");
-    fs::remove_all(dir);
+    he_test::removeAllQuiet(dir);
 }
 
 TEST_CASE("ProjectManager: profiles round-trip and unknown manifest keys survive save")
 {
     const auto dir = fs::temp_directory_path() / "he_prof_rt";
-    fs::remove_all(dir);
+    he_test::removeAllQuiet(dir);
 
     ProjectManager pm;
     REQUIRE(pm.createNewProject(dir.string(), "RT", ProjectPreset::Empty));
@@ -225,7 +226,7 @@ TEST_CASE("ProjectManager: profiles round-trip and unknown manifest keys survive
         CHECK(j.value("futureField", 0) == 42);
         CHECK(j.contains("preset"));
     }
-    fs::remove_all(dir);
+    he_test::removeAllQuiet(dir);
 }
 
 // ─── Incremental packing ──────────────────────────────────────────────────────
@@ -245,7 +246,7 @@ TEST_CASE("Incremental export: unchanged assets are reused, changes repack")
 {
     const auto dir = fs::temp_directory_path() / "he_inc_src";
     const auto out = fs::temp_directory_path() / "he_inc_out";
-    fs::remove_all(dir); fs::remove_all(out);
+    he_test::removeAllQuiet(dir); he_test::removeAllQuiet(out);
     writeBlob(dir / "a.hasset", tinyHasset({0x1, 0xA}, "a.hasset"));
     writeBlob(dir / "b.hasset", tinyHasset({0x2, 0xB}, "b.hasset"));
     writeBlob(dir / "c.hasset", tinyHasset({0x3, 0xC}, "c.hasset"));
@@ -278,7 +279,7 @@ TEST_CASE("Incremental export: unchanged assets are reused, changes repack")
     CHECK(r3.assetsReused == 2);
 
     // Manifest deleted → full repack (graceful fallback, still succeeds).
-    fs::remove(out / "Inc.hpak.manifest");
+    he_test::removeQuiet(out / "Inc.hpak.manifest");
     auto r4 = runExport(dir, out, true, false, true);
     REQUIRE(r4.success);
     CHECK(r4.assetsReused == 0);
@@ -297,7 +298,7 @@ TEST_CASE("Incremental export: unchanged assets are reused, changes repack")
     REQUIRE(r8.success);
     CHECK(r8.assetsReused == 0);
 
-    fs::remove_all(dir); fs::remove_all(out);
+    he_test::removeAllQuiet(dir); he_test::removeAllQuiet(out);
 }
 
 #ifdef HE_HAVE_OPENSSL
@@ -305,7 +306,7 @@ TEST_CASE("Incremental export: encryption reuses the previous key, pak stays rea
 {
     const auto dir = fs::temp_directory_path() / "he_inc_enc_src";
     const auto out = fs::temp_directory_path() / "he_inc_enc_out";
-    fs::remove_all(dir); fs::remove_all(out);
+    he_test::removeAllQuiet(dir); he_test::removeAllQuiet(out);
     writeBlob(dir / "a.hasset", tinyHasset({0x4, 0xD}, "a.hasset"));
     writeBlob(dir / "b.hasset", tinyHasset({0x5, 0xE}, "b.hasset"));
 
@@ -328,7 +329,7 @@ TEST_CASE("Incremental export: encryption reuses the previous key, pak stays rea
     CHECK(reader.readEntry(HE::UUID{0x4, 0xD}, cfg2.encKey)
           == tinyHasset({0x4, 0xD}, "a.hasset"));
 
-    fs::remove_all(dir); fs::remove_all(out);
+    he_test::removeAllQuiet(dir); he_test::removeAllQuiet(out);
 }
 #endif
 
@@ -356,7 +357,7 @@ static std::vector<uint8_t> fakeGameBinary(bool withBlock)
 TEST_CASE("patchEmbeddedPakKey: patches the block, readEmbeddedPakKey round-trips")
 {
     const auto dir = fs::temp_directory_path() / "he_embed_unit";
-    fs::remove_all(dir);
+    he_test::removeAllQuiet(dir);
     fs::create_directories(dir);
 
     uint8_t key[32];
@@ -391,7 +392,7 @@ TEST_CASE("patchEmbeddedPakKey: patches the block, readEmbeddedPakKey round-trip
         uint8_t got[32];
         CHECK_FALSE(readEmbeddedPakKey(dir / "fresh", got)); // hasKey still 0
     }
-    fs::remove_all(dir);
+    he_test::removeAllQuiet(dir);
 }
 
 #ifdef HE_HAVE_OPENSSL
@@ -400,7 +401,7 @@ TEST_CASE("Export with encryption embeds the key in the game binary, not the hcf
     const auto dir = fs::temp_directory_path() / "he_embed_src";
     const auto rt  = fs::temp_directory_path() / "he_embed_rt";
     const auto out = fs::temp_directory_path() / "he_embed_out";
-    fs::remove_all(dir); fs::remove_all(rt); fs::remove_all(out);
+    he_test::removeAllQuiet(dir); he_test::removeAllQuiet(rt); he_test::removeAllQuiet(out);
     writeBlob(dir / "a.hasset", tinyHasset({0xE, 0x1}, "a.hasset"));
     writeBlob(rt / "HorizonGame", fakeGameBinary(true));
     writeBlob(rt / "libFake.dylib", fakeGameBinary(false));
@@ -439,7 +440,7 @@ TEST_CASE("Export with encryption embeds the key in the game binary, not the hcf
     REQUIRE(readEmbeddedPakKey(out / "HorizonGame", key2));
     CHECK(std::memcmp(key, key2, 32) == 0);
 
-    fs::remove_all(dir); fs::remove_all(rt); fs::remove_all(out);
+    he_test::removeAllQuiet(dir); he_test::removeAllQuiet(rt); he_test::removeAllQuiet(out);
 }
 
 TEST_CASE("Export with encryption falls back to the hcfg key for a legacy runtime")
@@ -447,7 +448,7 @@ TEST_CASE("Export with encryption falls back to the hcfg key for a legacy runtim
     const auto dir = fs::temp_directory_path() / "he_embed_legacy_src";
     const auto rt  = fs::temp_directory_path() / "he_embed_legacy_rt";
     const auto out = fs::temp_directory_path() / "he_embed_legacy_out";
-    fs::remove_all(dir); fs::remove_all(rt); fs::remove_all(out);
+    he_test::removeAllQuiet(dir); he_test::removeAllQuiet(rt); he_test::removeAllQuiet(out);
     writeBlob(dir / "a.hasset", tinyHasset({0xE, 0x2}, "a.hasset"));
     writeBlob(rt / "HorizonGame", fakeGameBinary(false)); // no key block
 
@@ -469,7 +470,7 @@ TEST_CASE("Export with encryption falls back to the hcfg key for a legacy runtim
     REQUIRE(reader.open((out / "Leg.hpak").string()));
     CHECK(reader.readEntry(HE::UUID{0xE, 0x2}, cfg.encKey) == tinyHasset({0xE, 0x2}, "a.hasset"));
 
-    fs::remove_all(dir); fs::remove_all(rt); fs::remove_all(out);
+    he_test::removeAllQuiet(dir); he_test::removeAllQuiet(rt); he_test::removeAllQuiet(out);
 }
 #endif
 
@@ -477,7 +478,7 @@ TEST_CASE("Export fails when the runtime dir is named but missing")
 {
     const auto dir = fs::temp_directory_path() / "he_missrt_src";
     const auto out = fs::temp_directory_path() / "he_missrt_out";
-    fs::remove_all(dir); fs::remove_all(out);
+    he_test::removeAllQuiet(dir); he_test::removeAllQuiet(out);
     writeBlob(dir / "a.hasset", tinyHasset({0xE, 0x4}, "a.hasset"));
 
     ExportSettings s;
@@ -486,7 +487,7 @@ TEST_CASE("Export fails when the runtime dir is named but missing")
     auto r = ProjectExporter::exportProject(dir, "Miss", "", out, s);
     CHECK_FALSE(r.success);
     CHECK(r.errorMessage.find("not found") != std::string::npos);
-    fs::remove_all(dir); fs::remove_all(out);
+    he_test::removeAllQuiet(dir); he_test::removeAllQuiet(out);
 }
 
 TEST_CASE("Export fails hard when copying a runtime binary fails")
@@ -494,7 +495,7 @@ TEST_CASE("Export fails hard when copying a runtime binary fails")
     const auto dir = fs::temp_directory_path() / "he_cpyfail_src";
     const auto rt  = fs::temp_directory_path() / "he_cpyfail_rt";
     const auto out = fs::temp_directory_path() / "he_cpyfail_out";
-    fs::remove_all(dir); fs::remove_all(rt); fs::remove_all(out);
+    he_test::removeAllQuiet(dir); he_test::removeAllQuiet(rt); he_test::removeAllQuiet(out);
     writeBlob(dir / "a.hasset", tinyHasset({0xE, 0x5}, "a.hasset"));
     writeBlob(rt / "HorizonGame", fakeGameBinary(true));
     writeBlob(rt / "libFake.dylib", fakeGameBinary(false));
@@ -511,7 +512,7 @@ TEST_CASE("Export fails hard when copying a runtime binary fails")
     auto r = ProjectExporter::exportProject(dir, "CpyFail", "", out, s);
     CHECK_FALSE(r.success);
     CHECK(r.errorMessage.find("Failed to copy") != std::string::npos);
-    fs::remove_all(dir); fs::remove_all(rt); fs::remove_all(out);
+    he_test::removeAllQuiet(dir); he_test::removeAllQuiet(rt); he_test::removeAllQuiet(out);
 }
 
 #ifdef HE_HAVE_OPENSSL
@@ -520,7 +521,7 @@ TEST_CASE("Key patching preserves the executable bit")
     const auto dir = fs::temp_directory_path() / "he_perm_src";
     const auto rt  = fs::temp_directory_path() / "he_perm_rt";
     const auto out = fs::temp_directory_path() / "he_perm_out";
-    fs::remove_all(dir); fs::remove_all(rt); fs::remove_all(out);
+    he_test::removeAllQuiet(dir); he_test::removeAllQuiet(rt); he_test::removeAllQuiet(out);
     writeBlob(dir / "a.hasset", tinyHasset({0xE, 0x6}, "a.hasset"));
     writeBlob(rt / "HorizonGame", fakeGameBinary(true));
     fs::permissions(rt / "HorizonGame",
@@ -536,21 +537,21 @@ TEST_CASE("Key patching preserves the executable bit")
     // refuses to execute is just as broken as a missing one.
     const auto perms = fs::status(out / "HorizonGame").permissions();
     CHECK((perms & fs::perms::owner_exec) != fs::perms::none);
-    fs::remove_all(dir); fs::remove_all(rt); fs::remove_all(out);
+    he_test::removeAllQuiet(dir); he_test::removeAllQuiet(rt); he_test::removeAllQuiet(out);
 }
 #endif
 
 TEST_CASE("findRuntimeBundle: a previous export output is not a runtime bundle")
 {
     const auto root = fs::temp_directory_path() / "he_bundle_export_root";
-    fs::remove_all(root);
+    he_test::removeAllQuiet(root);
     // Looks like a bundle (has HorizonGame) but is an old EXPORT (has hcfg) —
     // shipping it would carry a stale patched key + stale binaries.
     writeBlob(root / "deploy" / "Game" / "HorizonGame", fakeGameBinary(false));
     writeBlob(root / "deploy" / "Game" / "project.hcfg", { 0x01, 0x02 });
     fs::create_directories(root / "deploy" / "Editor");
     CHECK(findRuntimeBundle(root / "deploy" / "Editor", ExportPlatform::Host).empty());
-    fs::remove_all(root);
+    he_test::removeAllQuiet(root);
 }
 
 TEST_CASE("Export fails when the runtime dir yields no binaries")
@@ -558,7 +559,7 @@ TEST_CASE("Export fails when the runtime dir yields no binaries")
     const auto dir = fs::temp_directory_path() / "he_nobin_src";
     const auto rt  = fs::temp_directory_path() / "he_nobin_rt";   // exists, empty
     const auto out = fs::temp_directory_path() / "he_nobin_out";
-    fs::remove_all(dir); fs::remove_all(rt); fs::remove_all(out);
+    he_test::removeAllQuiet(dir); he_test::removeAllQuiet(rt); he_test::removeAllQuiet(out);
     writeBlob(dir / "a.hasset", tinyHasset({0xE, 0x3}, "a.hasset"));
     fs::create_directories(rt);
 
@@ -569,13 +570,13 @@ TEST_CASE("Export fails when the runtime dir yields no binaries")
     CHECK_FALSE(r.success);
     CHECK(r.errorMessage.find("no files") != std::string::npos);
 
-    fs::remove_all(dir); fs::remove_all(rt); fs::remove_all(out);
+    he_test::removeAllQuiet(dir); he_test::removeAllQuiet(rt); he_test::removeAllQuiet(out);
 }
 
 TEST_CASE("findRuntimeBundle: deploy layout, build-tree layout, cross-platform")
 {
     const auto root = fs::temp_directory_path() / "he_bundle_root";
-    fs::remove_all(root);
+    he_test::removeAllQuiet(root);
 
     // Deploy layout: <root>/deploy/{Editor,Game}
     writeBlob(root / "deploy" / "Game" / "HorizonGame", fakeGameBinary(false));
@@ -601,7 +602,7 @@ TEST_CASE("findRuntimeBundle: deploy layout, build-tree layout, cross-platform")
     fs::create_directories(root / "empty" / "Editor");
     CHECK(findRuntimeBundle(root / "empty" / "Editor", ExportPlatform::Linux).empty());
 
-    fs::remove_all(root);
+    he_test::removeAllQuiet(root);
 }
 
 // ─── macOS .app bundle ────────────────────────────────────────────────────────
@@ -611,7 +612,7 @@ TEST_CASE("Export .app bundle: layout routes binaries vs data correctly")
     const auto dir = fs::temp_directory_path() / "he_app_src";
     const auto rt  = fs::temp_directory_path() / "he_app_rt";
     const auto out = fs::temp_directory_path() / "he_app_out";
-    fs::remove_all(dir); fs::remove_all(rt); fs::remove_all(out);
+    he_test::removeAllQuiet(dir); he_test::removeAllQuiet(rt); he_test::removeAllQuiet(out);
     writeBlob(dir / "a.hasset", tinyHasset({0xA9, 0x1}, "a.hasset"));
     // A runtime dir with the exe, an engine dylib, GameLogic, and a data file.
     writeBlob(rt / "HorizonGame",           fakeGameBinary(false));
@@ -651,7 +652,7 @@ TEST_CASE("Export .app bundle: layout routes binaries vs data correctly")
     CHECK(plist.find("<key>CFBundleExecutable</key><string>HorizonGame</string>") != std::string::npos);
     CHECK(plist.find("com.horizonengine.mygame") != std::string::npos);
 #endif
-    fs::remove_all(dir); fs::remove_all(rt); fs::remove_all(out);
+    he_test::removeAllQuiet(dir); he_test::removeAllQuiet(rt); he_test::removeAllQuiet(out);
 }
 
 #if defined(__APPLE__) && defined(HE_TEST_GAME_EXE)
@@ -660,7 +661,7 @@ TEST_CASE("Export .app bundle: real binary is bundled, signed, and (encrypted) k
     const auto dir = fs::temp_directory_path() / "he_app_real_src";
     const auto rt  = fs::temp_directory_path() / "he_app_real_rt";
     const auto out = fs::temp_directory_path() / "he_app_real_out";
-    fs::remove_all(dir); fs::remove_all(rt); fs::remove_all(out);
+    he_test::removeAllQuiet(dir); he_test::removeAllQuiet(rt); he_test::removeAllQuiet(out);
     writeBlob(dir / "a.hasset", tinyHasset({0xA9, 0x2}, "a.hasset"));
     fs::create_directories(rt);
     // The genuine HorizonGame Mach-O, so codesign + key patching operate on real
@@ -707,7 +708,7 @@ TEST_CASE("Export .app bundle: real binary is bundled, signed, and (encrypted) k
     for (int i = 0; i < 32; ++i) anyKeyByte |= (cfg.encKey[i] != 0);
     CHECK_FALSE(anyKeyByte);
 
-    fs::remove_all(dir); fs::remove_all(rt); fs::remove_all(out);
+    he_test::removeAllQuiet(dir); he_test::removeAllQuiet(rt); he_test::removeAllQuiet(out);
 }
 
 TEST_CASE("Export .app bundle: re-export over an existing signed bundle re-signs cleanly")
@@ -715,7 +716,7 @@ TEST_CASE("Export .app bundle: re-export over an existing signed bundle re-signs
     const auto dir = fs::temp_directory_path() / "he_app_reexp_src";
     const auto rt  = fs::temp_directory_path() / "he_app_reexp_rt";
     const auto out = fs::temp_directory_path() / "he_app_reexp_out";
-    fs::remove_all(dir); fs::remove_all(rt); fs::remove_all(out);
+    he_test::removeAllQuiet(dir); he_test::removeAllQuiet(rt); he_test::removeAllQuiet(out);
     writeBlob(dir / "a.hasset", tinyHasset({0xA9, 0x3}, "a.hasset"));
     fs::create_directories(rt);
     fs::copy_file(HE_TEST_GAME_EXE, rt / "HorizonGame");
@@ -736,7 +737,7 @@ TEST_CASE("Export .app bundle: re-export over an existing signed bundle re-signs
 
     // Drop the stray dylib, then re-export over the existing signed bundle —
     // this used to fail codesign (stale _CodeSignature + leftover binary).
-    fs::remove(rt / "libStale.dylib");
+    he_test::removeQuiet(rt / "libStale.dylib");
     auto r2 = ProjectExporter::exportProject(dir, "ReApp", "", out, s);
     REQUIRE_MESSAGE(r2.success, r2.errorMessage);
     CHECK(r2.assetsReused == 1);                       // incremental still worked
@@ -753,7 +754,7 @@ TEST_CASE("Export .app bundle: re-export over an existing signed bundle re-signs
     REQUIRE(reader.open((app / "Contents" / "Resources" / "ReApp.hpak").string()));
     CHECK(reader.readEntry(HE::UUID{0xA9, 0x3}, key) == tinyHasset({0xA9, 0x3}, "a.hasset"));
 
-    fs::remove_all(dir); fs::remove_all(rt); fs::remove_all(out);
+    he_test::removeAllQuiet(dir); he_test::removeAllQuiet(rt); he_test::removeAllQuiet(out);
 }
 #endif
 
@@ -787,7 +788,7 @@ TEST_CASE("ExportPlatform: name mapping and runtime-dir resolution")
 TEST_CASE("ProjectManager: type-malformed profile values load without throwing")
 {
     const auto dir = fs::temp_directory_path() / "he_prof_badtypes";
-    fs::remove_all(dir);
+    he_test::removeAllQuiet(dir);
     fs::create_directories(dir);
     {
         // name as number, compress as string, excludePatterns with mixed types,
@@ -809,13 +810,13 @@ TEST_CASE("ProjectManager: type-malformed profile values load without throwing")
           == std::vector<std::string>{ "ok", "also_ok" });
     CHECK(p.activeExportProfile == "Odd");                // number → fallback
     CHECK(p.name == "B");                                 // number → filename stem
-    fs::remove_all(dir);
+    he_test::removeAllQuiet(dir);
 }
 
 TEST_CASE("ProjectManager: saveProject refuses to clobber a corrupt manifest")
 {
     const auto dir = fs::temp_directory_path() / "he_prof_corrupt";
-    fs::remove_all(dir);
+    he_test::removeAllQuiet(dir);
     fs::create_directories(dir);
     const auto heproj = dir / "C.heproj";
     {
@@ -833,13 +834,13 @@ TEST_CASE("ProjectManager: saveProject refuses to clobber a corrupt manifest")
         CHECK(content == "{ this is not json");           // untouched
     }
     CHECK_FALSE(fs::exists(heproj.string() + ".tmp"));    // no temp left behind
-    fs::remove_all(dir);
+    he_test::removeAllQuiet(dir);
 }
 
 TEST_CASE("HpakWriter: unreadable subdirectory does not throw out of addDirectory")
 {
     const auto dir = fs::temp_directory_path() / "he_excl_denied";
-    fs::remove_all(dir);
+    he_test::removeAllQuiet(dir);
     writeBlob(dir / "ok.hasset", tinyHasset({0x7, 0x7}, "ok.hasset"));
     fs::create_directories(dir / "locked");
     writeBlob(dir / "locked" / "hidden.hasset", tinyHasset({0x8, 0x8}, "locked/hidden.hasset"));
@@ -853,7 +854,7 @@ TEST_CASE("HpakWriter: unreadable subdirectory does not throw out of addDirector
     CHECK(added >= 1);
 
     fs::permissions(dir / "locked", fs::perms::owner_all); // restore for cleanup
-    fs::remove_all(dir);
+    he_test::removeAllQuiet(dir);
 }
 
 TEST_CASE("HAsset::Reader: corrupt chunk size fails cleanly instead of allocating")
@@ -877,7 +878,7 @@ TEST_CASE("HAsset::Reader: corrupt chunk size fails cleanly instead of allocatin
 TEST_CASE("ProjectManager: unknown active profile falls back to the first")
 {
     const auto dir = fs::temp_directory_path() / "he_prof_fallback";
-    fs::remove_all(dir);
+    he_test::removeAllQuiet(dir);
     fs::create_directories(dir);
     {
         std::ofstream out(dir / "F.heproj");
@@ -886,5 +887,5 @@ TEST_CASE("ProjectManager: unknown active profile falls back to the first")
     ProjectManager pm;
     REQUIRE(pm.loadProject((dir / "F.heproj").string()));
     CHECK(pm.currentProject().activeExportProfile == "Only");
-    fs::remove_all(dir);
+    he_test::removeAllQuiet(dir);
 }

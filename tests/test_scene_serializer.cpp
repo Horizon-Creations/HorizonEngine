@@ -1,4 +1,5 @@
 #include "doctest.h"
+#include "TestFsUtil.h"
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/Components/TransformComponent.h>
@@ -136,7 +137,7 @@ TEST_CASE("SceneSerializer JSON round-trip with components")
 	REQUIRE(ser.load(loaded, file, SerializeFormat::JSON));
 	verify(loaded, meshId);
 
-	fs::remove(file);
+	he_test::removeQuiet(file);
 }
 
 TEST_CASE("SceneSerializer binary round-trip with components")
@@ -153,7 +154,7 @@ TEST_CASE("SceneSerializer binary round-trip with components")
 	REQUIRE(ser.load(loaded, file, SerializeFormat::Binary));
 	verify(loaded, meshId);
 
-	fs::remove(file);
+	he_test::removeQuiet(file);
 }
 
 TEST_CASE("SceneSerializer round-trips per-entity material param overrides")
@@ -187,7 +188,7 @@ TEST_CASE("SceneSerializer round-trips per-entity material param overrides")
 			CHECK(lm.paramOverrides[1].value[3] == doctest::Approx(1.0f));
 		}
 		CHECK(found);
-		fs::remove(file);
+		he_test::removeQuiet(file);
 	}
 }
 
@@ -222,7 +223,7 @@ TEST_CASE("World root identity survives round-trip with children")
 	}
 	CHECK(sceneChildren == 3); // Alpha/Beta/Gamma reparented to root
 
-	fs::remove(file);
+	he_test::removeQuiet(file);
 }
 
 TEST_CASE("EnvironmentComponent on the World root round-trips")
@@ -258,7 +259,7 @@ TEST_CASE("EnvironmentComponent on the World root round-trips")
 	CHECK(le.auroraIntensity == doctest::Approx(0.6f));
 	CHECK(le.nebulaColor.b  == doctest::Approx(0.3f));
 
-	fs::remove(file);
+	he_test::removeQuiet(file);
 }
 
 TEST_CASE("Play-mode cycle: snapshot, clear, restore")
@@ -291,7 +292,7 @@ TEST_CASE("Play-mode cycle: snapshot, clear, restore")
 	for (auto [e, name] : world.registry().view<NameComponent>().each())
 		CHECK(name.name != "SpawnedDuringPlay");
 
-	fs::remove(file);
+	he_test::removeQuiet(file);
 }
 
 TEST_CASE("SceneSerializer hierarchy survives round-trip")
@@ -328,7 +329,7 @@ TEST_CASE("SceneSerializer hierarchy survives round-trip")
 	REQUIRE(lHier->children.size() == 1);
 	CHECK(lreg.get<NameComponent>(lHier->children[0]).name == "Child");
 
-	fs::remove(file);
+	he_test::removeQuiet(file);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -369,7 +370,7 @@ TEST_CASE("SceneSerializer loadAdditive preserves existing entities")
     CHECK(foundExisting);
     CHECK(foundAdditive);
 
-    fs::remove(file);
+    he_test::removeQuiet(file);
 }
 
 TEST_CASE("SceneSerializer loadAdditive does not clear the world")
@@ -417,5 +418,5 @@ TEST_CASE("SceneSerializer loadAdditive does not clear the world")
     REQUIRE(tc != nullptr);
     CHECK(tc->position.x == doctest::Approx(3.0f));
 
-    fs::remove(file);
+    he_test::removeQuiet(file);
 }

@@ -1,4 +1,5 @@
 #include "doctest.h"
+#include "TestFsUtil.h"
 #include <Hpak/HpakWriter.h>
 #include <Hpak/HpakReader.h>
 #include <Hpak/HpakFormat.h>
@@ -23,6 +24,10 @@
 #include <fstream>
 #include <thread>
 #include <cstring>
+
+// Best-effort cleanup — see TestFsUtil.h (Windows can't delete open files).
+static void removeQuiet(const std::filesystem::path& p) { he_test::removeQuiet(p); }
+
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -95,7 +100,7 @@ TEST_CASE("HpakWriter/HpakReader round-trip single entry")
     const auto out = reader.readEntry(id);
     CHECK(out == blob);
 
-    std::filesystem::remove(tmp);
+    removeQuiet(tmp);
 }
 
 TEST_CASE("HpakWriter/HpakReader multiple entries, sorted TOC + binary search")
@@ -134,7 +139,7 @@ TEST_CASE("HpakWriter/HpakReader multiple entries, sorted TOC + binary search")
     CHECK(reader.readEntry(id3) == b3);
     CHECK(reader.readEntry(id4) == b4);
 
-    std::filesystem::remove(tmp);
+    removeQuiet(tmp);
 }
 
 TEST_CASE("HpakReader returns empty for missing entry")
@@ -155,7 +160,7 @@ TEST_CASE("HpakReader returns empty for missing entry")
     CHECK(!reader.hasEntry(missing));
     CHECK(reader.readEntry(missing).empty());
 
-    std::filesystem::remove(tmp);
+    removeQuiet(tmp);
 }
 
 TEST_CASE("Empty HpakWriter writes and reads back correctly")
@@ -168,7 +173,7 @@ TEST_CASE("Empty HpakWriter writes and reads back correctly")
     REQUIRE(reader.open(tmp.string()));
     CHECK(reader.enumerate().empty());
 
-    std::filesystem::remove(tmp);
+    removeQuiet(tmp);
 }
 
 // ─── Codec matrix ────────────────────────────────────────────────────────────
@@ -195,7 +200,7 @@ TEST_CASE("Codec round-trip: store / lz4 / zstd all reproduce the input")
         REQUIRE(reader.open(tmp.string()));
         const auto out = reader.readEntry(id);
         CHECK(out == data);   // round-trips regardless of codec availability
-        std::filesystem::remove(tmp);
+        removeQuiet(tmp);
     }
 }
 
@@ -214,7 +219,7 @@ TEST_CASE("LZ4 codec actually shrinks compressible data")
 
     HpakReader reader; REQUIRE(reader.open(tmp.string()));
     CHECK(reader.readEntry(id) == data);
-    std::filesystem::remove(tmp);
+    removeQuiet(tmp);
 }
 #endif
 
@@ -233,7 +238,7 @@ TEST_CASE("zstd codec actually shrinks compressible data")
 
     HpakReader reader; REQUIRE(reader.open(tmp.string()));
     CHECK(reader.readEntry(id) == data);
-    std::filesystem::remove(tmp);
+    removeQuiet(tmp);
 }
 #endif
 
@@ -262,7 +267,7 @@ TEST_CASE("AES-256-GCM round-trip (store + encrypt)")
     const auto decrypted = reader.readEntry(id, s.key);  // correct key
     CHECK(decrypted == data);
 
-    std::filesystem::remove(tmp);
+    removeQuiet(tmp);
 }
 
 TEST_CASE("AES-256-GCM uses a unique nonce per entry")
@@ -291,7 +296,7 @@ TEST_CASE("AES-256-GCM uses a unique nonce per entry")
     HpakReader reader; REQUIRE(reader.open(tmp.string()));
     CHECK(reader.readEntry(id1, s.key) == data);
     CHECK(reader.readEntry(id2, s.key) == data);
-    std::filesystem::remove(tmp);
+    removeQuiet(tmp);
 }
 
 TEST_CASE("Compression + encryption round-trip")
@@ -315,7 +320,7 @@ TEST_CASE("Compression + encryption round-trip")
     REQUIRE(out.size() == data.size());
     CHECK(out == data);
 
-    std::filesystem::remove(tmp);
+    removeQuiet(tmp);
 }
 #endif // HE_HAVE_OPENSSL
 
@@ -336,7 +341,7 @@ TEST_CASE("Corrupt TOC byte → open() fails (tocHash mismatch)")
     HpakReader reader;
     CHECK(!reader.open(tmp.string()));  // TOC hash no longer matches
 
-    std::filesystem::remove(tmp);
+    removeQuiet(tmp);
 }
 
 TEST_CASE("Corrupt data byte → readEntry() returns empty (contentHash mismatch)")
@@ -356,7 +361,7 @@ TEST_CASE("Corrupt data byte → readEntry() returns empty (contentHash mismatch
     REQUIRE(reader.open(tmp.string()));      // TOC still valid
     CHECK(reader.readEntry(id).empty());     // stored bytes fail their content hash
 
-    std::filesystem::remove(tmp);
+    removeQuiet(tmp);
 }
 
 TEST_CASE("A failed read does not poison subsequent reads on the same reader")
@@ -381,7 +386,7 @@ TEST_CASE("A failed read does not poison subsequent reads on the same reader")
     CHECK(reader.readEntry(hi).empty());     // truncated entry → short read fails
     CHECK(reader.readEntry(lo) == bLo);      // MUST still succeed (no failbit poisoning)
 
-    std::filesystem::remove(tmp);
+    removeQuiet(tmp);
 }
 
 // ─── KeyDerivation (unchanged in Phase A) ──────────────────────────────────────
@@ -407,7 +412,7 @@ TEST_CASE("KeyDerivation different secrets yield different keys")
 TEST_CASE("HpakWriter::addDirectory skips non-.hasset files")
 {
     auto tmpDir = std::filesystem::temp_directory_path() / "he_test_hpak_dir";
-    std::filesystem::remove_all(tmpDir);
+    he_test::removeAllQuiet(tmpDir);
     std::filesystem::create_directories(tmpDir);
     { std::ofstream f(tmpDir / "notes.txt"); f << "not an asset"; }
     { std::ofstream f(tmpDir / "dummy.hasset", std::ios::binary); f << "FAKE"; }
@@ -415,7 +420,7 @@ TEST_CASE("HpakWriter::addDirectory skips non-.hasset files")
     HpakWriter packer;
     const int added = packer.addDirectory(tmpDir);
     CHECK(added == 0);
-    std::filesystem::remove_all(tmpDir);
+    he_test::removeAllQuiet(tmpDir);
 }
 
 // ─── All asset types round-trip through ContentManager × codec ─────────────────
@@ -499,7 +504,7 @@ static void verifyAllTypes(Hpak::Codec codec)
 {
     auto dir = std::filesystem::temp_directory_path() /
                ("he_types_" + std::to_string(static_cast<int>(codec)));
-    std::filesystem::remove_all(dir);
+    he_test::removeAllQuiet(dir);
     std::filesystem::create_directories(dir);
 
     const TypeIds ids = authorAllTypes(dir);
@@ -568,8 +573,8 @@ static void verifyAllTypes(Hpak::Codec codec)
     CHECK(cm.isLoaded(ids.font));
     CHECK(cm.assetType(ids.font)  == HE::AssetType::Font);
 
-    std::filesystem::remove(pak);
-    std::filesystem::remove_all(dir);
+    removeQuiet(pak);
+    he_test::removeAllQuiet(dir);
 }
 
 } // namespace
@@ -594,7 +599,7 @@ static std::vector<uint8_t> decodeAstc4x4(const uint8_t* blocks, size_t len, uin
 TEST_CASE("Cook: ASTC texture round-trips and decodes close to the original")
 {
     auto dir = std::filesystem::temp_directory_path() / "he_astc_src";
-    std::filesystem::remove_all(dir);
+    he_test::removeAllQuiet(dir);
     std::filesystem::create_directories(dir);
     ContentManager cmw(dir.string());
     // 8x8 RGBA8, solid colour → ASTC encodes constant blocks near-losslessly.
@@ -625,7 +630,7 @@ TEST_CASE("Cook: ASTC texture round-trips and decodes close to the original")
     CHECK(std::abs(int(decoded[0]) - 200) <= 6);
     CHECK(std::abs(int(decoded[1]) - 100) <= 6);
     CHECK(std::abs(int(decoded[2]) -  50) <= 6);
-    std::filesystem::remove_all(dir);
+    he_test::removeAllQuiet(dir);
 }
 #endif
 
@@ -636,7 +641,7 @@ TEST_CASE("All asset types round-trip through a zstd pak")   { verifyAllTypes(Hp
 TEST_CASE("Cook: static mesh ships pre-interleaved + baked AABB; uncooked stays SoA")
 {
     auto dir = std::filesystem::temp_directory_path() / "he_cook_src";
-    std::filesystem::remove_all(dir);
+    he_test::removeAllQuiet(dir);
     std::filesystem::create_directories(dir);
     const TypeIds ids = authorAllTypes(dir);  // mesh: 3 verts, normals + uvs, indices {0,1,2}
 
@@ -697,7 +702,7 @@ TEST_CASE("Cook: static mesh ships pre-interleaved + baked AABB; uncooked stays 
         CHECK(t->mipLevels == 1);                 // no baked mips
         CHECK(t->data.size() == 2*2*4);
     }
-    std::filesystem::remove_all(dir);
+    he_test::removeAllQuiet(dir);
 }
 
 // Builds a Script .hasset blob in memory; omit the language to test back-compat.
@@ -744,7 +749,7 @@ TEST_CASE("Script language: CHUNK_SLNG round-trips, absent chunk defaults to Lua
 TEST_CASE("All asset types round-trip through an encrypted zstd pak")
 {
     auto dir = std::filesystem::temp_directory_path() / "he_types_enc";
-    std::filesystem::remove_all(dir);
+    he_test::removeAllQuiet(dir);
     std::filesystem::create_directories(dir);
     const TypeIds ids = authorAllTypes(dir);
 
@@ -763,8 +768,8 @@ TEST_CASE("All asset types round-trip through an encrypted zstd pak")
     CHECK(cm.getAudio(ids.audio)     != nullptr);
     CHECK(cm.isLoaded(ids.font));
 
-    std::filesystem::remove(pak);
-    std::filesystem::remove_all(dir);
+    removeQuiet(pak);
+    he_test::removeAllQuiet(dir);
 }
 #endif // HE_HAVE_OPENSSL
 
@@ -799,7 +804,7 @@ TEST_CASE("mountPak loads assets on demand, not eagerly")
     CHECK(cm.ensureResident(id));
     CHECK(!cm.ensureResident(HE::UUID{0xDEAD, 0xDEAD}));
 
-    std::filesystem::remove(pak);
+    removeQuiet(pak);
 }
 
 TEST_CASE("mountPak overlay: later mount shadows earlier by UUID, adds new UUIDs")
@@ -834,14 +839,14 @@ TEST_CASE("mountPak overlay: later mount shadows earlier by UUID, adds new UUIDs
     CHECK(cm.getMaterial(baseOnly) != nullptr);
     CHECK(cm.getMaterial(modOnly)  != nullptr);
 
-    std::filesystem::remove(std::filesystem::temp_directory_path() / "he_base.hpak");
-    std::filesystem::remove(std::filesystem::temp_directory_path() / "he_mod.hpak");
+    removeQuiet(std::filesystem::temp_directory_path() / "he_base.hpak");
+    removeQuiet(std::filesystem::temp_directory_path() / "he_mod.hpak");
 }
 
 TEST_CASE("Disk registry: scanContentDirectory resolves UUIDs from loose content")
 {
     auto dir = std::filesystem::temp_directory_path() / "he_registry";
-    std::filesystem::remove_all(dir);
+    he_test::removeAllQuiet(dir);
     std::filesystem::create_directories(dir / "sub");
 
     // Author two assets — one in a subfolder — with a FIRST manager, then resolve
@@ -882,13 +887,13 @@ TEST_CASE("Disk registry: scanContentDirectory resolves UUIDs from loose content
     REQUIRE(done);
     CHECK(cm.getStaticMesh(meshId) != nullptr);
 
-    std::filesystem::remove_all(dir);
+    he_test::removeAllQuiet(dir);
 }
 
 TEST_CASE("preloadAssetRefs makes scene-referenced loose assets resident")
 {
     auto dir = std::filesystem::temp_directory_path() / "he_preload";
-    std::filesystem::remove_all(dir);
+    he_test::removeAllQuiet(dir);
     std::filesystem::create_directories(dir);
 
     HE::UUID matId;
@@ -908,7 +913,7 @@ TEST_CASE("preloadAssetRefs makes scene-referenced loose assets resident")
     CHECK(SceneSystems::preloadAssetRefs(world, cm) == 1);
     CHECK(cm.getMaterial(matId) != nullptr);
 
-    std::filesystem::remove_all(dir);
+    he_test::removeAllQuiet(dir);
 }
 
 TEST_CASE("mountPakOverlays: Mods folder mounts alphabetically over the base pak")
@@ -917,7 +922,7 @@ TEST_CASE("mountPakOverlays: Mods folder mounts alphabetically over the base pak
     const HE::UUID addedByA{0x300, 0x2}; // only in a_mod
     auto tmp  = std::filesystem::temp_directory_path();
     auto mods = tmp / "he_mods_dir";
-    std::filesystem::remove_all(mods);
+    he_test::removeAllQuiet(mods);
     std::filesystem::create_directories(mods);
 
     { HpakWriter p; p.addEntry(shared, makeMaterialBlob(shared, "base", 1.f,0.f,0.f));
@@ -946,8 +951,8 @@ TEST_CASE("mountPakOverlays: Mods folder mounts alphabetically over the base pak
     // Missing directory → 0, no error.
     CHECK(cm.mountPakOverlays(tmp / "he_no_such_dir") == 0);
 
-    std::filesystem::remove(tmp / "he_modbase.hpak");
-    std::filesystem::remove_all(mods);
+    removeQuiet(tmp / "he_modbase.hpak");
+    he_test::removeAllQuiet(mods);
 }
 
 TEST_CASE("SceneSystems::collectAssetRefs gathers component asset UUIDs (the stream seed)")
@@ -975,7 +980,7 @@ TEST_CASE("SceneSystems::collectAssetRefs gathers component asset UUIDs (the str
 TEST_CASE("Pack-time UUID-ref baking: mesh->material and material->texture")
 {
     auto dir = std::filesystem::temp_directory_path() / "he_refbake";
-    std::filesystem::remove_all(dir);
+    he_test::removeAllQuiet(dir);
     std::filesystem::create_directories(dir);
 
     // Author a texture, a material referencing it by path, and a mesh referencing
@@ -1040,14 +1045,14 @@ TEST_CASE("Pack-time UUID-ref baking: mesh->material and material->texture")
       REQUIRE(viaPath != nullptr);
       CHECK(viaPath->id == mat.id); }
 
-    std::filesystem::remove(pak);
-    std::filesystem::remove_all(dir);
+    removeQuiet(pak);
+    he_test::removeAllQuiet(dir);
 }
 
 TEST_CASE("Reference-graph streaming: seeding a mesh streams its closure only")
 {
     auto dir = std::filesystem::temp_directory_path() / "he_closure";
-    std::filesystem::remove_all(dir);
+    he_test::removeAllQuiet(dir);
     std::filesystem::create_directories(dir);
 
     ContentManager cmSrc(dir.string());
@@ -1085,8 +1090,8 @@ TEST_CASE("Reference-graph streaming: seeding a mesh streams its closure only")
     for (int i = 0; i < 5; ++i) { cm.pollAsyncResults(); std::this_thread::sleep_for(std::chrono::milliseconds(2)); }
     CHECK(!cm.isLoaded(orphan.id));       // unreferenced asset never loaded
 
-    std::filesystem::remove(pak);
-    std::filesystem::remove_all(dir);
+    removeQuiet(pak);
+    he_test::removeAllQuiet(dir);
 }
 
 TEST_CASE("Async streaming from a mounted pak (loadAssetAsync by UUID)")
@@ -1118,7 +1123,7 @@ TEST_CASE("Async streaming from a mounted pak (loadAssetAsync by UUID)")
     CHECK(cm.getMaterial(c) != nullptr);
     CHECK(cm.streamMountedAssets() == 0);  // all resident → nothing to submit
 
-    std::filesystem::remove(pak);
+    removeQuiet(pak);
 }
 
 TEST_CASE("Binary scene round-trips through a mounted pak (readMountedEntry)")
@@ -1159,7 +1164,7 @@ TEST_CASE("Binary scene round-trips through a mounted pak (readMountedEntry)")
     for (auto e : world2.registry().view<TransformComponent>()) { (void)e; ++transforms; }
     CHECK(transforms >= 3);
 
-    std::filesystem::remove(pak);
+    removeQuiet(pak);
 }
 
 TEST_CASE("pollAsyncResults honors the per-frame registration budget")
@@ -1194,7 +1199,7 @@ TEST_CASE("pollAsyncResults honors the per-frame registration budget")
     }
     CHECK(resident == 6);
 
-    std::filesystem::remove(pak);
+    removeQuiet(pak);
 }
 
 #ifdef HE_HAVE_OPENSSL
@@ -1215,7 +1220,7 @@ TEST_CASE("mountPak with an encrypted pak loads on demand with the key")
     REQUIRE(ref);
     CHECK(ref->baseColor[2] == doctest::Approx(0.8f));
 
-    std::filesystem::remove(pak);
+    removeQuiet(pak);
 }
 #endif // HE_HAVE_OPENSSL
 
@@ -1226,7 +1231,7 @@ TEST_CASE("mountPak with an encrypted pak loads on demand with the key")
 TEST_CASE("Pack precompiles node-graph material shaders into CHUNK_PSHD")
 {
     auto dir = std::filesystem::temp_directory_path() / "he_pshd_pack";
-    std::filesystem::remove_all(dir);
+    he_test::removeAllQuiet(dir);
     std::filesystem::create_directories(dir);
 
     ContentManager cm(dir.string());
@@ -1296,8 +1301,8 @@ TEST_CASE("Pack precompiles node-graph material shaders into CHUNK_PSHD")
     REQUIRE(pm != nullptr);
     CHECK(pm->precompiledShaders.empty());
 
-    std::filesystem::remove(pak);
-    std::filesystem::remove_all(dir);
+    removeQuiet(pak);
+    he_test::removeAllQuiet(dir);
 }
 
 // shaderBackends == 0 (or a null callback) must not bake any PSHD chunk — the
@@ -1305,7 +1310,7 @@ TEST_CASE("Pack precompiles node-graph material shaders into CHUNK_PSHD")
 TEST_CASE("Pack skips PSHD when no backends selected")
 {
     auto dir = std::filesystem::temp_directory_path() / "he_pshd_none";
-    std::filesystem::remove_all(dir);
+    he_test::removeAllQuiet(dir);
     std::filesystem::create_directories(dir);
 
     ContentManager cm(dir.string());
@@ -1336,6 +1341,6 @@ TEST_CASE("Pack skips PSHD when no backends selected")
     REQUIRE(m != nullptr);
     CHECK(m->precompiledShaders.empty());
 
-    std::filesystem::remove(pak);
-    std::filesystem::remove_all(dir);
+    removeQuiet(pak);
+    he_test::removeAllQuiet(dir);
 }

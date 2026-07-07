@@ -1,4 +1,5 @@
 #include "doctest.h"
+#include "TestFsUtil.h"
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/DefaultAssets.h>
 #include <MaterialGraph/MaterialGraph.h> // HE::MatParamKind
@@ -16,10 +17,10 @@ namespace
 		TempContentDir()
 		{
 			path = fs::temp_directory_path() / "he_test_content";
-			fs::remove_all(path);
+			he_test::removeAllQuiet(path);
 			fs::create_directories(path);
 		}
-		~TempContentDir() { fs::remove_all(path); }
+		~TempContentDir() { he_test::removeAllQuiet(path); }
 	};
 }
 

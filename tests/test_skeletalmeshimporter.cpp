@@ -1,4 +1,5 @@
 #include "doctest.h"
+#include "TestFsUtil.h"
 #include "SkeletalMeshImporter.h"
 #include <ContentManager/Assets.h>
 #include <ContentManager/ContentManager.h>
@@ -131,7 +132,7 @@ TEST_CASE("SkeletalMeshImporter skeleton joint count and parent chain")
     CHECK(mesh->skeleton[1].name   == "hip");
     CHECK(mesh->skeleton[1].parent == 0);
 
-    fs::remove_all(dir);
+    he_test::removeAllQuiet(dir);
 }
 
 TEST_CASE("SkeletalMeshImporter inverse bind matrices")
@@ -159,7 +160,7 @@ TEST_CASE("SkeletalMeshImporter inverse bind matrices")
     CHECK(mesh->skeleton[1].inverseBindMatrix[14] == doctest::Approx(0.0f));
     CHECK(mesh->skeleton[1].inverseBindMatrix[15] == doctest::Approx(1.0f));
 
-    fs::remove_all(dir);
+    he_test::removeAllQuiet(dir);
 }
 
 TEST_CASE("SkeletalMeshImporter per-vertex bone IDs and weights")
@@ -184,7 +185,7 @@ TEST_CASE("SkeletalMeshImporter per-vertex bone IDs and weights")
     // vertex 2 → joint 0
     CHECK(mesh->boneIDs[8] == 0u);
 
-    fs::remove_all(dir);
+    he_test::removeAllQuiet(dir);
 }
 
 TEST_CASE("SkeletalMeshImporter geometry (vertices and indices)")
@@ -208,7 +209,7 @@ TEST_CASE("SkeletalMeshImporter geometry (vertices and indices)")
     CHECK(mesh->indices[1] == 1u);
     CHECK(mesh->indices[2] == 2u);
 
-    fs::remove_all(dir);
+    he_test::removeAllQuiet(dir);
 }
 
 TEST_CASE("SkeletalMeshImporter output is written to disk and loadable")
@@ -237,5 +238,5 @@ TEST_CASE("SkeletalMeshImporter output is written to disk and loadable")
     CHECK(loaded->skeleton[1].name == "hip");
     CHECK(loaded->skeleton[1].parent == 0);
 
-    fs::remove_all(dir);
+    he_test::removeAllQuiet(dir);
 }
