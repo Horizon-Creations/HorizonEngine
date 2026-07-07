@@ -110,6 +110,11 @@ void HorizonWorld::destroyEntity(Entity entity)
 
 void HorizonWorld::clear()
 {
+    // A running level ends here (PIE stop / scene switch / shutdown all route
+    // through clear()). No-op unless it was actually running, so the edit-time
+    // clear() at the start of openScene doesn't spuriously fire OnLevelUnloaded.
+    fireLevelUnloaded();
+
     // Live UI widgets track the world's lifetime (PIE stop / scene load).
     m_widgets.clear();
 
@@ -134,6 +139,12 @@ void HorizonWorld::clear()
     registry_.emplace_or_replace<EnvironmentComponent>(rootEntity_);
     registry_.emplace_or_replace<WeatherComponent>(rootEntity_);
     ensureEnvironmentLights(); // re-attach (or recreate) the built-in sun/moon
+
+    // Drop the level script too (like the environment, a loaded scene restores
+    // its own via setLevelScriptJson; a scene without one starts empty).
+    m_levelScript = HorizonCode::Graph{};
+    m_levelVars.clear();
+
     m_hierarchyDirty = true;
 }
 
@@ -191,5 +202,64 @@ void HorizonWorld::renameEntity(Entity entity, const std::string& newName)
         n->name = newName;
         m_hierarchyDirty = true;
     }
+}
+
+// ── Level script ─────────────────────────────────────────────────────────────
+
+std::string HorizonWorld::levelScriptJson() const
+{
+    // Empty graph → empty string, so scenes without a level script stay clean.
+    if (m_levelScript.nodes.empty() && m_levelScript.variables.empty())
+        return {};
+    return HorizonCode::toJson(m_levelScript);
+}
+
+void HorizonWorld::setLevelScriptJson(const std::string& json)
+{
+    m_levelScript = HorizonCode::Graph{};
+    m_levelVars.clear();
+    if (!json.empty())
+        HorizonCode::fromJson(json, m_levelScript); // broken/absent → empty graph
+}
+
+HorizonCode::Context HorizonWorld::makeLevelContext()
+{
+    HorizonCode::Context ctx;
+    ctx.getVariable = [this](const std::string& var) -> HorizonCode::Value
+    {
+        auto it = m_levelVars.find(var);
+        return it != m_levelVars.end() ? it->second : HorizonCode::Value{};
+    };
+    ctx.setVariable = [this](const std::string& var, const HorizonCode::Value& v)
+    {
+        m_levelVars[var] = v;
+    };
+    // getProperty/setProperty/showSelf/hideSelf are widget concepts — left
+    // unbound (the Runner null-checks them). Engine-system nodes come later.
+    return ctx;
+}
+
+void HorizonWorld::fireLevelLoaded()
+{
+    if (m_levelRunning) return; // already loaded — fire OnLevelLoaded exactly once
+    m_levelRunning = true;
+
+    // Seed the variable store from the graph's declared defaults so GetVariable
+    // reads a valid value even before any SetVariable runs.
+    m_levelVars.clear();
+    for (const auto& var : m_levelScript.variables)
+        m_levelVars[var.name] = HorizonCode::variableDefaultValue(var);
+
+    HorizonCode::Runner runner(m_levelScript, makeLevelContext());
+    runner.fireEvent("OnLevelLoaded", 0);
+}
+
+void HorizonWorld::fireLevelUnloaded()
+{
+    if (!m_levelRunning) return; // only fire for a level that actually loaded
+    m_levelRunning = false;
+
+    HorizonCode::Runner runner(m_levelScript, makeLevelContext());
+    runner.fireEvent("OnLevelUnloaded", 0);
 }
 
