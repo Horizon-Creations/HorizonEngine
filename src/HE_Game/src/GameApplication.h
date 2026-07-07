@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/UIInputSystem.h>
+#include <HorizonScene/GameInstanceHost.h>
 
 class ScriptContext;
 
@@ -53,6 +54,9 @@ private:
     void updateUIInput();
 
     ProjectConfig                 m_config;
+    // App-wide HorizonCode host: owns the runtime the world runs on and the
+    // GameInstance (OnInit fires before the scene loads; OnShutdown at exit).
+    GameInstanceHost m_gameInstance;
     std::unique_ptr<HorizonWorld> m_world; // startup scene, ticked + rendered each frame
     bool m_mouseCaptured = false;          // set true in OnInit once the window exists
     bool m_vsyncOn       = true;           // mirrors GetConfig().windowprops.vsync; V toggles it

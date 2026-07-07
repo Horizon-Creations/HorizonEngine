@@ -14,6 +14,7 @@
 #include <HorizonScene/ScriptContext.h>
 #include <HorizonScene/CollisionSystem.h>
 #include <HorizonScene/UIInputSystem.h>
+#include <HorizonScene/GameInstanceHost.h>
 #include <functional>
 #include <future>
 #include <memory>
@@ -144,6 +145,11 @@ struct AppContext
 	HE::Window*        window       = nullptr;
 	HorizonWorld*      world        = nullptr;
 	ContentManager*    contentManager = nullptr;
+
+	// The project's app-wide GameInstance graph (edited in the Game Instance
+	// window). commitGameInstance re-registers it with the app runtime + saves it.
+	HorizonCode::Graph*   gameInstanceGraph = nullptr;
+	std::function<void()> commitGameInstance;
 	ScriptEngine*      propScriptEngine = nullptr; // read-only, for inspector property reading
 
 	// Editor scene-view camera (orbit/fly/focus). Owned by EditorApplication;
@@ -284,6 +290,16 @@ private:
 	std::string m_backend_name;
 	ProjectManager m_projectManager;
 	EditorConfig m_editorConfig;
+
+	// App-wide HorizonCode host: owns the runtime the editor world runs on and
+	// the GameInstance script. m_gameInstanceGraph is the authored source (edited
+	// in the Game Instance window, saved to the project); the host holds the live
+	// running copy. Loaded per project; OnInit/OnShutdown fire around play mode.
+	GameInstanceHost   m_gameInstance;
+	HorizonCode::Graph m_gameInstanceGraph;
+	void loadGameInstanceGraph();  // read the project's GameInstance.hcode → host
+	void saveGameInstanceGraph();  // write m_gameInstanceGraph → project file
+	std::string gameInstancePath(); // <projectDir>/GameInstance.hcode
 
 	// Scene world — created once, alive for the entire editor session
 	std::unique_ptr<HorizonWorld> m_editorWorld;

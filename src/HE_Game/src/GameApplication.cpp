@@ -1,5 +1,6 @@
 #include "GameApplication.h"
 #include "EmbeddedPakKey.h"
+#include <fstream>
 #include <Hpak/ProjectConfig.h>
 #include <Diagnostics/Logger.h>
 #include <Diagnostics/Profiler.h>
@@ -131,9 +132,24 @@ void GameApplication::OnInit()
 	else
 		Logger::Log(Logger::LogLevel::Warning, ("GameApplication: pak not found: " + pakPath).c_str());
 
+	// App-wide GameInstance: load its graph (next to the exe) and fire OnInit
+	// FIRST — before the world/scene loads. Empty/missing → an empty but
+	// referenceable GameInstance.
+	{
+		std::string giJson;
+		std::ifstream gif(exeDir / "GameInstance.hcode");
+		if (gif)
+			giJson.assign(std::istreambuf_iterator<char>(gif), std::istreambuf_iterator<char>());
+		m_gameInstance.setGraph(giJson);
+		m_gameInstance.fireInit();
+	}
+
 	// Load the startup scene into a world and hand it to the renderer. The base
 	// Application renders m_world each frame; OnRender ticks its gameplay systems.
 	m_world = std::make_unique<HorizonWorld>();
+	// Widgets + the level script join the app-wide runtime (shared with the
+	// GameInstance), so any scene script can Get Game Instance / bind its events.
+	m_world->setScriptRuntime(&m_gameInstance.runtime());
 	SceneSerializer serializer;
 	bool sceneLoaded = false;
 	if (m_config.hasPackedScene)
@@ -395,6 +411,10 @@ void GameApplication::updateCameraController(float dt)
 
 bool GameApplication::OnEvent(const SDL_Event& event)
 {
+	// OS window focus → GameInstance OnWindowFocusChanged (while running).
+	if (event.type == SDL_EVENT_WINDOW_FOCUS_GAINED)      m_gameInstance.setWindowFocus(true);
+	else if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST)   m_gameInstance.setWindowFocus(false);
+
 	// A focused in-game text field owns the keyboard: route text + edit keys to
 	// the widget and swallow them so they don't drive the camera/gameplay.
 	if (m_world && m_world->widgets().hasFocusedTextField())
@@ -529,6 +549,9 @@ void GameApplication::OnShutdown()
 	// Level script "OnLevelUnloaded" runs while the world is still alive (the
 	// world's destructor is default and never calls clear(), so fire it here).
 	if (m_world) m_world->fireLevelUnloaded();
+
+	// GameInstance OnShutdown fires last (symmetric to OnInit firing first).
+	m_gameInstance.fireShutdown();
 
 	// Tear down ECS scripts before the world (their finalizers may touch entities).
 	m_scriptContext.reset();
