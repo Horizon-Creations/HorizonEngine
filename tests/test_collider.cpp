@@ -1,4 +1,5 @@
 #include "doctest.h"
+#include "TestFsUtil.h"
 #include <DebugDraw/DebugDraw.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/PhysicsWorld.h>
@@ -145,7 +146,7 @@ TEST_CASE("ColliderComponent: JSON round-trip preserves all fields")
     }
     CHECK(found);
 
-    std::filesystem::remove(file);
+    he_test::removeQuiet(file);
 }
 
 TEST_CASE("ColliderComponent: binary round-trip")
@@ -181,7 +182,7 @@ TEST_CASE("ColliderComponent: binary round-trip")
     }
     CHECK(found);
 
-    std::filesystem::remove(file);
+    he_test::removeQuiet(file);
 }
 
 // ─── DebugDraw capsule helper (compile-only smoke test) ───────────────────────
