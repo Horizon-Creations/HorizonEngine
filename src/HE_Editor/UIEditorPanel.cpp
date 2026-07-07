@@ -1394,7 +1394,12 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 				if (ImGui::BeginCombo("Class", v->className.empty() ? "(any)" : v->className.c_str()))
 				{
 					if (ImGui::Selectable("(any)", v->className.empty())) { v->className.clear(); commitEdit(st, ctx); }
-					for (const auto& c : HcEditorUtil::listHorizonCodeClasses(ctx.contentManager))
+					ImGui::TextDisabled("Classes");
+					for (const auto& c : HcEditorUtil::listAssets(ctx.contentManager, HE::AssetType::HorizonCodeClass))
+						if (ImGui::Selectable((c.label + "##" + c.path).c_str(), v->className == c.path))
+							{ v->className = c.path; commitEdit(st, ctx); }
+					ImGui::TextDisabled("Widgets");
+					for (const auto& c : HcEditorUtil::listAssets(ctx.contentManager, HE::AssetType::Widget))
 						if (ImGui::Selectable((c.label + "##" + c.path).c_str(), v->className == c.path))
 							{ v->className = c.path; commitEdit(st, ctx); }
 					ImGui::EndCombo();

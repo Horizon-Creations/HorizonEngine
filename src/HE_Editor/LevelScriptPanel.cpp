@@ -320,7 +320,12 @@ void drawVariableDetails(HC::Graph& graph, ContentManager* content, bool& edited
 		if (ImGui::BeginCombo("Class", v->className.empty() ? "(any)" : v->className.c_str()))
 		{
 			if (ImGui::Selectable("(any)", v->className.empty())) { v->className.clear(); edited = true; }
-			for (const auto& c : HcEditorUtil::listHorizonCodeClasses(content))
+			ImGui::TextDisabled("Classes");
+			for (const auto& c : HcEditorUtil::listAssets(content, HE::AssetType::HorizonCodeClass))
+				if (ImGui::Selectable((c.label + "##" + c.path).c_str(), v->className == c.path))
+					{ v->className = c.path; edited = true; }
+			ImGui::TextDisabled("Widgets");
+			for (const auto& c : HcEditorUtil::listAssets(content, HE::AssetType::Widget))
 				if (ImGui::Selectable((c.label + "##" + c.path).c_str(), v->className == c.path))
 					{ v->className = c.path; edited = true; }
 			ImGui::EndCombo();
@@ -532,14 +537,17 @@ PT pinTypeOf(const HC::Node& n, int pin)
 	return PT::Exec;
 }
 
-// Load a HorizonCode class asset's graph (for enumerating its public members).
+// Load a class/widget asset's graph (for enumerating its public members). A
+// widget is a first-class object too, so its logic graph counts as a "class".
 bool loadClassGraph(ContentManager* content, const std::string& path, HC::Graph& out)
 {
 	if (!content || path.empty()) return false;
 	const HE::UUID id = content->loadAsset(path);
-	const HorizonCodeClassAsset* a = content->getHorizonCodeClass(id);
-	if (!a || a->graphJson.empty()) return false;
-	return HC::fromJson(a->graphJson, out);
+	if (const HorizonCodeClassAsset* a = content->getHorizonCodeClass(id); a && !a->graphJson.empty())
+		return HC::fromJson(a->graphJson, out);
+	if (const UIWidgetAsset* w = content->getWidget(id); w && !w->graphJson.empty())
+		return HC::fromJson(w->graphJson, out);
+	return false;
 }
 
 // The class graph the Ref output of `srcNode` points to (self / GameInstance /
@@ -553,6 +561,7 @@ const HC::Graph* resolveClassGraph(const HC::Node& srcNode, const HC::Graph& sel
 		case NT::GetSelf:         return &selfGraph;
 		case NT::GetGameInstance: return giGraph;
 		case NT::CreateObject:
+		case NT::CreateWidget:
 			return loadClassGraph(content, srcNode.s, scratch) ? &scratch : nullptr;
 		case NT::GetVariable:
 		{

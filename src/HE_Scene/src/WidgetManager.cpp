@@ -92,10 +92,12 @@ int WidgetManager::createWidget(ContentManager& content, const std::string& asse
 			if (mid != HE::UUID{}) w.materials[e->id] = mid;
 		}
 
-	w.id = m_nextId++;
-	// Register the widget's logic with the central runtime, which takes the
-	// graph and seeds the private variable store from its declared defaults.
+	// Register the widget's logic with the central runtime, which takes the graph
+	// and seeds the private variable store from its declared defaults. The
+	// runtime instance id doubles as the widget's public handle (widget id ==
+	// scriptId), so a widget is a first-class Ref object.
 	w.scriptId = rt().add(std::move(graph), makeBindings());
+	w.id = (int)w.scriptId;
 	m_instances.push_back(std::move(w));
 
 	// Fire Construct AFTER the widget is in m_instances, so host callbacks can

@@ -117,7 +117,6 @@ private:
     std::vector<Instance> m_instances;
     HorizonCode::Runtime  m_ownRuntime;        // fallback when none is injected
     HorizonCode::Runtime* m_runtime = nullptr; // injected shared runtime (null → own)
-    int  m_nextId  = 1;
     bool m_wasDown = false;
     int  m_focusWidget = 0;        // widget id owning the focused TextInput
 };
