@@ -501,3 +501,64 @@ TEST_CASE("CallExternal via GetSelf runs a public function but not a private one
 	rt.fireEvent(id, "GoPriv");
 	CHECK(rt.getVariable(id, "secret").b == false);
 }
+
+TEST_CASE("Function with typed input + output passes an argument and returns a value")
+{
+	Runtime rt;
+	Graph g;
+	{ Variable v; v.name = "out"; v.type = PinType::Int; g.variables.push_back(v); }
+
+	// Function Double(x:Int) -> (y:Int) whose body just returns its input.
+	Node fe; fe.type = NodeType::FunctionEntry; fe.s = "Passthrough";
+	fe.params = { { "x", PinType::Int } }; fe.results = { { "y", PinType::Int } };
+	const int feId = g.addNode(fe);
+	Node fr; fr.type = NodeType::FunctionReturn; fr.s = "Passthrough"; const int frId = g.addNode(fr);
+
+	// Go → Passthrough(21) → out = returned y.
+	Node ev; ev.type = NodeType::Event; ev.s = "Go"; const int e = g.addNode(ev);
+	Node ci; ci.type = NodeType::ConstInt; ci.f[0] = 21; const int c = g.addNode(ci);
+	Node fc; fc.type = NodeType::FunctionCall; fc.s = "Passthrough"; const int fcId = g.addNode(fc);
+	Node sv; sv.type = NodeType::SetVariable; sv.s = "out"; sv.propType = PinType::Int; const int s = g.addNode(sv);
+
+	syncFunctionSignatures(g); // call + return mirror the entry's interface
+
+	// Body: entry.exec → return.exec ; entry.x → return.y
+	REQUIRE(g.connect(feId, 0, frId, 0));
+	REQUIRE(g.connect(feId, 1, frId, 1));
+	// Main: Go → call ; 21 → call.x ; call.exec → SetVariable ; call.y → SetVariable.Value
+	REQUIRE(g.connect(e,    0, fcId, 0));
+	REQUIRE(g.connect(c,    0, fcId, 2));
+	REQUIRE(g.connect(fcId, 1, s,    0));
+	REQUIRE(g.connect(fcId, 3, s,    2));
+
+	const InstanceId id = rt.add(std::move(g));
+	rt.fireEvent(id, "Go");
+	CHECK(rt.getVariable(id, "out").i == 21); // argument reached the body and came back out
+}
+
+TEST_CASE("syncFunctionSignatures mirrors a function's interface onto calls + survives JSON")
+{
+	Graph g;
+	Node fe; fe.type = NodeType::FunctionEntry; fe.s = "Calc";
+	fe.params  = { { "a", PinType::Float }, { "b", PinType::Int } };
+	fe.results = { { "r", PinType::Bool } };
+	g.addNode(fe);
+	Node fc; fc.type = NodeType::FunctionCall; fc.s = "Calc"; const int fcId = g.addNode(fc);
+
+	syncFunctionSignatures(g);
+	const Node* call = g.findNode(fcId);
+	REQUIRE(call);
+	CHECK(call->params.size()  == 2);
+	CHECK(call->results.size() == 1);
+	CHECK(call->params[1].type == PinType::Int);
+
+	// Round-trip through JSON keeps the interface (re-synced on load).
+	Graph g2;
+	REQUIRE(fromJson(toJson(g), g2));
+	const Node* call2 = nullptr;
+	for (const auto& n : g2.nodes) if (n.type == NodeType::FunctionCall) call2 = &n;
+	REQUIRE(call2);
+	CHECK(call2->params.size()  == 2);
+	CHECK(call2->results.size() == 1);
+	CHECK(call2->results[0].type == PinType::Bool);
+}

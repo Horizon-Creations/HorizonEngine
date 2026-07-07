@@ -1591,6 +1591,7 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 		ImGui::TextDisabled(n->access == 0
 			? "Callable from scripts via\nhorizon.callWidgetFunction()."
 			: "Internal — not script-callable.");
+		HcEditorUtil::drawFunctionInterface(st.graph, *n, committed);
 		break;
 	}
 
@@ -1601,11 +1602,15 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 			for (const auto& fn : st.graph.nodes)
 				if (fn.type == NT::FunctionEntry)
 					if (ImGui::Selectable(fn.s.c_str(), n->s == fn.s))
-						{ n->s = fn.s; committed = true; }
+						{ n->s = fn.s; HC::syncFunctionSignatures(st.graph); committed = true; }
 			ImGui::EndCombo();
 		}
 		break;
 	}
+
+	case NT::FunctionReturn:
+		if (HcEditorUtil::drawReturnFunctionPicker(st.graph, *n)) committed = true;
+		break;
 
 	case NT::GetVariable:
 	case NT::SetVariable:
@@ -1791,6 +1796,29 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 			}
 			if (header) ImGui::Spacing();
 		}
+		// Call <function> for each declared function, plus a Return node.
+		bool fh = false;
+		for (const auto& e : st.graph.nodes)
+		{
+			if (e.type != NT::FunctionEntry || e.s.empty()) continue;
+			const std::string lbl = "Call " + e.s;
+			if (!matches(lbl, "Functions")) continue;
+			if (!fh) { ImGui::TextDisabled("Functions"); fh = true; }
+			if (ImGui::Selectable(lbl.c_str()))
+			{
+				const int id = addGraphNode(st, NT::FunctionCall, st.geState.addMenuGraphPos);
+				st.graph.findNode(id)->s = e.s;
+				HC::syncFunctionSignatures(st.graph);
+				created = id; ImGui::CloseCurrentPopup();
+			}
+		}
+		if (matches("Return", "Functions"))
+		{
+			if (!fh) { ImGui::TextDisabled("Functions"); fh = true; }
+			if (ImGui::Selectable("Return"))
+			{ created = addGraphNode(st, NT::FunctionReturn, st.geState.addMenuGraphPos); ImGui::CloseCurrentPopup(); }
+		}
+		if (fh) ImGui::Spacing();
 		// Get/Set for each declared variable.
 		bool vh = false;
 		for (const auto& v : st.graph.variables)

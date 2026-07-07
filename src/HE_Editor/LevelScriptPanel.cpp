@@ -413,6 +413,7 @@ void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events,
 			n->access = access; edited = true;
 		}
 		ImGui::TextDisabled("public functions are callable from Lua/Python.");
+		HcEditorUtil::drawFunctionInterface(graph, *n, edited);
 		break;
 	}
 	case NT::FunctionCall:
@@ -421,11 +422,15 @@ void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events,
 		{
 			for (const auto& e : graph.nodes)
 				if (e.type == NT::FunctionEntry && !e.s.empty())
-					if (ImGui::Selectable(e.s.c_str(), n->s == e.s)) { n->s = e.s; edited = true; }
+					if (ImGui::Selectable(e.s.c_str(), n->s == e.s))
+					{ n->s = e.s; HC::syncFunctionSignatures(graph); edited = true; }
 			ImGui::EndCombo();
 		}
 		break;
 	}
+	case NT::FunctionReturn:
+		if (HcEditorUtil::drawReturnFunctionPicker(graph, *n)) edited = true;
+		break;
 	case NT::GetVariable:
 	case NT::SetVariable:
 	{
@@ -690,8 +695,16 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 			{
 				const int id = addNode(graph, NT::FunctionCall, g.ge.addMenuGraphPos);
 				graph.findNode(id)->s = e.s;
+				HC::syncFunctionSignatures(graph); // mirror the function's pins onto the call
 				created = id; ImGui::CloseCurrentPopup();
 			}
+		}
+		// A Return node (picks its owning function in the details panel).
+		if (matches("Return", "Functions"))
+		{
+			if (!fh) { ImGui::TextDisabled("Functions"); fh = true; }
+			if (ImGui::Selectable("Return"))
+			{ created = addNode(graph, NT::FunctionReturn, g.ge.addMenuGraphPos); ImGui::CloseCurrentPopup(); }
 		}
 		if (fh) ImGui::Spacing();
 
