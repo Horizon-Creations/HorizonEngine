@@ -453,6 +453,11 @@ void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events, b
 		if (ImGui::IsItemDeactivatedAfterEdit()) edited = true;
 		ImGui::TextDisabled("Calls a public function on the\nTarget instance (a reference).");
 		break;
+	case NT::CreateWidget:
+		ImGui::InputText("Widget Asset", &n->s);
+		if (ImGui::IsItemDeactivatedAfterEdit()) edited = true;
+		ImGui::TextDisabled("Content-relative path to a UI Widget\nasset. Outputs the new widget's id.");
+		break;
 	default:
 		ImGui::TextDisabled("No parameters.");
 		break;
@@ -461,7 +466,7 @@ void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events, b
 
 // ── Canvas ────────────────────────────────────────────────────────────────────
 
-bool drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, const ImVec2& avail)
+void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, const ImVec2& avail, bool& edited)
 {
 	g.ge.selected = g.selectedNode;
 	if (g.focusSelected) { g.ge.focusNode = g.selectedNode; g.focusSelected = false; }
@@ -482,6 +487,16 @@ bool drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, const 
 	m.connect = [&graph](int oN, int oP, int iN, int iP){ return graph.connect(oN, oP, iN, iP); };
 	m.clearPinLinks = [&graph](int node, int pin, bool){ removePinLinks(graph, node, pin); };
 	m.removeNode = [&graph](int id){ graph.removeNode(id); };
+	// Right-click a node → context menu.
+	m.drawNodeContextMenu = [&graph, &edited](int nodeId)
+	{
+		if (ImGui::MenuItem("Delete Node"))
+		{
+			graph.removeNode(nodeId);
+			if (g.selectedNode == nodeId) g.selectedNode = 0;
+			edited = true;
+		}
+	};
 
 	// Searchable add-node palette: world events + generic node categories +
 	// per-variable Get/Set + per-function Call. Property/Widget nodes and the
@@ -526,8 +541,9 @@ bool drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, const 
 		}
 		if (eh) ImGui::Spacing();
 
-		// Generic node categories (widget/property nodes excluded).
-		static const char* kCats[] = { "Flow", "Events", "Reference",
+		// Generic node categories (self-widget/property nodes excluded; the id-
+		// based widget nodes live under "UI").
+		static const char* kCats[] = { "Flow", "Events", "Reference", "UI",
 		                               "Literals", "Math", "Logic", "String", "Debug" };
 		for (const char* cat : kCats)
 		{
@@ -594,9 +610,8 @@ bool drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, const 
 		g.openVarDrop = true;
 	};
 
-	const bool changed = GraphEditor::draw("##ls_canvas", m, g.ge, avail);
+	if (GraphEditor::draw("##ls_canvas", m, g.ge, avail)) edited = true;
 	g.selectedNode = g.ge.selected;
-	return changed;
 }
 
 // Shared window body: left sidebar (variables + functions + details) + canvas,
@@ -624,7 +639,7 @@ void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
 
 	ImGui::BeginChild("##ls_canvas_host", ImVec2(0.0f, 0.0f), true);
 	const ImVec2 avail = ImGui::GetContentRegionAvail();
-	if (drawCanvas(graph, events, avail)) edited = true;
+	drawCanvas(graph, events, avail, edited);
 
 	// Variable drop → Get/Set popup.
 	if (g.openVarDrop) { ImGui::OpenPopup("##ls_var_drop"); g.openVarDrop = false; }

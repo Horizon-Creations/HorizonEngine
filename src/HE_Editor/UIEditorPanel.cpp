@@ -1613,6 +1613,13 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 		ImGui::TextDisabled("Calls a public function on the\nTarget instance (a reference).");
 		break;
 	}
+	case NT::CreateWidget:
+	{
+		ImGui::InputText("Widget Asset", &n->s);
+		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		ImGui::TextDisabled("Content-relative path to a UI Widget\nasset. Outputs the new widget's id.");
+		break;
+	}
 
 	default:
 		ImGui::TextDisabled("No editable properties.");
@@ -1694,7 +1701,7 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 		ImGui::BeginChild("##nodeList", ImVec2(232.0f, 300.0f));
 		static const char* kCats[] = { "Property", "Flow", "Events", "Reference",
 		                               "Literals", "Math", "Logic", "String",
-		                               "Widget", "Debug" };
+		                               "Widget", "UI", "Debug" };
 		for (const char* cat : kCats)
 		{
 			bool header = false;

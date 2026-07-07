@@ -59,6 +59,18 @@ NodeSig signatureOf(const Node& n)
         s.execIns  = { { "", P::Exec } };
         s.execOuts = { { "", P::Exec } };
         break;
+    case T::CreateWidget:
+        s.execIns  = { { "", P::Exec } };
+        s.execOuts = { { "", P::Exec } };
+        s.dataOuts = { { "Widget", P::Int } };
+        break;
+    case T::ShowWidgetId:
+    case T::HideWidgetId:
+    case T::DestroyWidget:
+        s.execIns  = { { "", P::Exec } };
+        s.execOuts = { { "", P::Exec } };
+        s.dataIns  = { { "Widget", P::Int } };
+        break;
     case T::BindEvent:
     case T::CallExternal:
         s.execIns  = { { "", P::Exec } };
@@ -125,8 +137,12 @@ const char* nodeDisplayName(NodeType t)
         case T::SetProperty:  return "Set Property";
         case T::GetVariable:  return "Get Variable";
         case T::SetVariable:  return "Set Variable";
-        case T::ShowWidget:   return "Show Widget";
-        case T::HideWidget:   return "Hide Widget";
+        case T::ShowWidget:   return "Show Self";
+        case T::HideWidget:   return "Hide Self";
+        case T::CreateWidget: return "Create Widget";
+        case T::ShowWidgetId: return "Show Widget";
+        case T::HideWidgetId: return "Hide Widget";
+        case T::DestroyWidget:return "Destroy Widget";
         case T::ConstFloat:   return "Float";
         case T::ConstBool:    return "Bool";
         case T::ConstInt:     return "Int";
@@ -170,6 +186,10 @@ const char* nodeCategory(NodeType t)
         case T::SetVariable:   return "Variables";
         case T::ShowWidget:
         case T::HideWidget:    return "Widget";
+        case T::CreateWidget:
+        case T::ShowWidgetId:
+        case T::HideWidgetId:
+        case T::DestroyWidget: return "UI";
         case T::ConstFloat: case T::ConstBool: case T::ConstInt:
         case T::ConstString: case T::ConstVec2: case T::ConstColor: return "Literals";
         case T::Add: case T::Subtract: case T::Multiply: case T::Divide:
@@ -427,6 +447,7 @@ void Runner::fireEvent(const std::string& eventName, int elem, const Value& arg)
 {
     m_steps = 0;
     m_eventArg = arg;
+    m_execOutputs.clear();
     for (const auto& n : m_graph.nodes)
     {
         if (n.type != T::Event || n.s != eventName) continue;
@@ -442,6 +463,7 @@ bool Runner::callFunction(const std::string& name, bool requirePublic)
         if (n.type != T::FunctionEntry || n.s != name) continue;
         if (requirePublic && n.access != 0) return false;
         m_steps = 0;
+        m_execOutputs.clear();
         runExecChain(n, pinRanges(n).execOut0, 0);
         return true;
     }
@@ -497,6 +519,15 @@ void Runner::execNode(const Node& n, int depth)
         break;
     case T::ShowWidget: if (m_ctx.showSelf) m_ctx.showSelf(); break;
     case T::HideWidget: if (m_ctx.hideSelf) m_ctx.hideSelf(); break;
+    case T::CreateWidget:
+    {
+        const int id = m_ctx.createWidget ? m_ctx.createWidget(n.s) : 0;
+        m_execOutputs[n.id] = Value::ofInt(id); // cached for the data output
+        break;
+    }
+    case T::ShowWidgetId:  if (m_ctx.showWidget)    m_ctx.showWidget(evalInput(n, 0, depth + 1).i);    break;
+    case T::HideWidgetId:  if (m_ctx.hideWidget)    m_ctx.hideWidget(evalInput(n, 0, depth + 1).i);    break;
+    case T::DestroyWidget: if (m_ctx.destroyWidget) m_ctx.destroyWidget(evalInput(n, 0, depth + 1).i); break;
     case T::BindEvent:
         if (m_ctx.bindEvent)
             m_ctx.bindEvent(evalInput(n, 0, depth + 1).ref, n.s);
@@ -564,6 +595,12 @@ Value Runner::evalData(const Node& n, int dataOutPin, int depth)
     }
     case T::GetGameInstance: return m_ctx.getGameInstance ? m_ctx.getGameInstance() : Value::ofRef(0);
     case T::GetSelf:         return m_ctx.getSelf ? m_ctx.getSelf() : Value::ofRef(0);
+    case T::CreateWidget:
+    {
+        // Return the id produced when this node ran (don't create again).
+        auto it = m_execOutputs.find(n.id);
+        return it != m_execOutputs.end() ? it->second : Value::ofInt(0);
+    }
     case T::Add:      return Value::ofFloat(evalInput(n, 0, depth + 1).f + evalInput(n, 1, depth + 1).f);
     case T::Subtract: return Value::ofFloat(evalInput(n, 0, depth + 1).f - evalInput(n, 1, depth + 1).f);
     case T::Multiply: return Value::ofFloat(evalInput(n, 0, depth + 1).f * evalInput(n, 1, depth + 1).f);

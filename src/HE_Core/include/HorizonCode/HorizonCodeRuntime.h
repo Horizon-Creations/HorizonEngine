@@ -88,6 +88,18 @@ public:
     InstanceId setGameInstance(Graph graph, HostBindings bindings = {});
     InstanceId gameInstance() const { return m_gameInstance; }
 
+    // World-level widget services (createWidget/show/hide/destroy), forwarded
+    // into every instance's Context so any graph can spawn/manage widgets. The
+    // app binds these to the current world's WidgetManager + ContentManager.
+    struct WidgetServices
+    {
+        std::function<int(const std::string& assetPath)> create;
+        std::function<void(int)> show;
+        std::function<void(int)> hide;
+        std::function<void(int)> destroy;
+    };
+    void setWidgetServices(WidgetServices s) { m_widgetServices = std::move(s); }
+
 private:
     struct Inst
     {
@@ -110,6 +122,7 @@ private:
     InstanceId m_next         = 1;
     InstanceId m_gameInstance = 0;
     int        m_dispatchDepth = 0;   // guards cross-instance event recursion
+    WidgetServices m_widgetServices;
 };
 
 } // namespace HorizonCode

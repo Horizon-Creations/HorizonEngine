@@ -762,6 +762,16 @@ void EditorApplication::OnInit()
 	// level script and the GameInstance share one interpreter (and the
 	// GameInstance survives scene switches).
 	m_editorWorld->setScriptRuntime(&m_gameInstance.runtime());
+	// Widget nodes (Create/Show/Hide/Destroy Widget) route to the editor world's
+	// WidgetManager + ContentManager.
+	{
+		HorizonCode::Runtime::WidgetServices svc;
+		svc.create  = [this](const std::string& p){ return m_editorWorld ? m_editorWorld->widgets().createWidget(contentManager(), p) : 0; };
+		svc.show    = [this](int id){ if (m_editorWorld) m_editorWorld->widgets().showWidget(id); };
+		svc.hide    = [this](int id){ if (m_editorWorld) m_editorWorld->widgets().hideWidget(id); };
+		svc.destroy = [this](int id){ if (m_editorWorld) m_editorWorld->widgets().destroyWidget(id); };
+		m_gameInstance.runtime().setWidgetServices(std::move(svc));
+	}
 	setWorld(m_editorWorld.get());
 	m_propScriptEngine = std::make_unique<ScriptEngine>();
 	m_undo.setWorld(m_editorWorld.get());

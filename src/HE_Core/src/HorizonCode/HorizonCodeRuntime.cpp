@@ -118,6 +118,11 @@ Context Runtime::makeContext(InstanceId id)
     { callFunction(target, fn, /*requirePublic=*/true); };
     ctx.getSelf = [id] { return Value::ofRef(id); };
     ctx.getGameInstance = [this] { return Value::ofRef(m_gameInstance); };
+    // World-level widget services (shared by every instance).
+    ctx.createWidget  = m_widgetServices.create;
+    ctx.showWidget    = m_widgetServices.show;
+    ctx.hideWidget    = m_widgetServices.hide;
+    ctx.destroyWidget = m_widgetServices.destroy;
     return ctx;
 }
 
