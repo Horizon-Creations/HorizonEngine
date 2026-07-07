@@ -110,16 +110,21 @@ int WidgetManager::createWidget(ContentManager& content, const std::string& asse
 void WidgetManager::destroyWidget(int id)
 {
 	if (m_focusWidget == id) m_focusWidget = 0;
-	if (Instance* w = find(id)) rt().remove(w->scriptId); // drop its runtime instance
+	if (Instance* w = find(id)) rt().destroy(w->scriptId); // fire "Destruct", then drop it
 	m_instances.erase(std::remove_if(m_instances.begin(), m_instances.end(),
 		[&](const Instance& w){ return w.id == id; }), m_instances.end());
 }
 
 void WidgetManager::clear()
 {
-	// Unregister every widget's script from the shared runtime (which may also
-	// host the level script / GameInstance — so remove per-instance, don't wipe).
-	for (auto& w : m_instances) rt().remove(w.scriptId);
+	// Fire each widget's "Destruct" and unregister it from the shared runtime
+	// (which may also host the level script / GameInstance — so tear down
+	// per-instance, don't wipe). Snapshot the ids first: a Destruct handler may
+	// itself destroy widgets, mutating m_instances mid-iteration.
+	std::vector<HorizonCode::InstanceId> ids;
+	ids.reserve(m_instances.size());
+	for (const auto& w : m_instances) ids.push_back(w.scriptId);
+	for (const HorizonCode::InstanceId sid : ids) rt().destroy(sid);
 	m_instances.clear();
 	m_focusWidget = 0;
 }

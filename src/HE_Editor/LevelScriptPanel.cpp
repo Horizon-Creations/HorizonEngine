@@ -357,7 +357,7 @@ void drawVariableDetails(HC::Graph& graph, ContentManager* content, bool& edited
 
 // Detail editor for the selected node.
 void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events,
-                     ContentManager* content, bool& edited)
+                     bool allowCustomEvents, ContentManager* content, bool& edited)
 {
 	HC::Node* n = graph.findNode(g.selectedNode);
 	if (!n) { g.selectedNode = 0; return; }
@@ -369,12 +369,18 @@ void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events,
 	{
 	case NT::Event:
 	{
-		if (events.empty())
+		if (events.empty() || allowCustomEvents)
 		{
-			// A class with no fixed catalog (a HorizonCode class) names its own
-			// events freely; another class binds to them by name.
+			// A HorizonCode class names its own events freely (another class binds
+			// to them by name), and can also react to the lifecycle events —
+			// "Construct" (fired on create) and "Destruct" (fired on destroy).
 			ImGui::InputText("Event", &n->s);
 			if (ImGui::IsItemDeactivatedAfterEdit()) edited = true;
+			for (size_t k = 0; k < events.size(); ++k)
+			{
+				if (k) ImGui::SameLine();
+				if (ImGui::SmallButton(events[k].c_str())) { n->s = events[k]; edited = true; }
+			}
 		}
 		else if (ImGui::BeginCombo("Event", n->s.empty() ? "(none)" : n->s.c_str()))
 		{
@@ -574,8 +580,8 @@ const HC::Graph* resolveClassGraph(const HC::Node& srcNode, const HC::Graph& sel
 	}
 }
 
-void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, const ImVec2& avail,
-                ContentManager* content, const HC::Graph* giGraph, bool& edited)
+void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool allowCustomEvents,
+                const ImVec2& avail, ContentManager* content, const HC::Graph* giGraph, bool& edited)
 {
 	g.ge.selected = g.selectedNode;
 	if (g.focusSelected) { g.ge.focusNode = g.selectedNode; g.focusSelected = false; }
@@ -610,7 +616,7 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, const 
 	// Searchable add-node palette: world events + generic node categories +
 	// per-variable Get/Set + per-function Call. Property/Widget nodes and the
 	// element machinery are intentionally absent.
-	m.drawAddMenu = [&graph, &events]() -> int {
+	m.drawAddMenu = [&graph, &events, allowCustomEvents]() -> int {
 		int created = 0;
 		static std::string s_search;
 		if (ImGui::IsWindowAppearing()) { s_search.clear(); ImGui::SetKeyboardFocusHere(); }
@@ -624,18 +630,12 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, const 
 
 		ImGui::BeginChild("##nodeList", ImVec2(232.0f, 300.0f));
 
-		// Events (this class's event catalog; empty = free-text, add a blank Event).
+		// Events. The catalog holds the fixed world events (level/GI) or the
+		// lifecycle events a class exposes (Construct/Destruct); each adds a
+		// pre-named Event node. A class (allowCustomEvents) can also add a blank
+		// custom Event to name its own dispatcher events.
 		bool eh = false;
-		if (events.empty())
-		{
-			if (matches("Event", "Events"))
-			{
-				ImGui::TextDisabled("Events"); eh = true;
-				if (ImGui::Selectable("Event"))
-				{ created = addNode(graph, NT::Event, g.ge.addMenuGraphPos); ImGui::CloseCurrentPopup(); }
-			}
-		}
-		else for (const std::string& ev : events)
+		for (const std::string& ev : events)
 		{
 			if (!matches(ev, "Events")) continue;
 			if (!eh) { ImGui::TextDisabled("Events"); eh = true; }
@@ -647,6 +647,12 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, const 
 				nn->propType = nn->hasArg ? PT::Bool : PT::Float; nn->elem = 0;
 				created = id; ImGui::CloseCurrentPopup();
 			}
+		}
+		if ((events.empty() || allowCustomEvents) && matches("Custom Event", "Events"))
+		{
+			if (!eh) { ImGui::TextDisabled("Events"); eh = true; }
+			if (ImGui::Selectable("Custom Event"))
+			{ created = addNode(graph, NT::Event, g.ge.addMenuGraphPos); ImGui::CloseCurrentPopup(); }
 		}
 		if (eh) ImGui::Spacing();
 
@@ -782,8 +788,8 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, const 
 // Level Script and the Game Instance windows (they differ only in the graph,
 // the events, and how a change is committed).
 void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
-                   const char* title, const char* subtitle, ContentManager* content,
-                   const HC::Graph* giGraph, bool& edited)
+                   bool allowCustomEvents, const char* title, const char* subtitle,
+                   ContentManager* content, const HC::Graph* giGraph, bool& edited)
 {
 	ImGui::BeginChild("##ls_side", ImVec2(220.0f, 0.0f), true);
 	ImGui::TextUnformatted(title);
@@ -794,7 +800,7 @@ void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
 	drawFunctions(graph, edited);
 	ImGui::Spacing();
 	ImGui::Separator();
-	if (g.selectedNode != 0)          drawNodeDetails(graph, events, content, edited);
+	if (g.selectedNode != 0)          drawNodeDetails(graph, events, allowCustomEvents, content, edited);
 	else if (!g.selectedVar.empty())  drawVariableDetails(graph, content, edited);
 	else ImGui::TextDisabled("Select a node or variable.");
 	ImGui::EndChild();
@@ -803,7 +809,7 @@ void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
 
 	ImGui::BeginChild("##ls_canvas_host", ImVec2(0.0f, 0.0f), true);
 	const ImVec2 avail = ImGui::GetContentRegionAvail();
-	drawCanvas(graph, events, avail, content, giGraph, edited);
+	drawCanvas(graph, events, allowCustomEvents, avail, content, giGraph, edited);
 
 	// Variable drop → Get/Set popup.
 	if (g.openVarDrop) { ImGui::OpenPopup("##ls_var_drop"); g.openVarDrop = false; }
@@ -856,7 +862,7 @@ void LevelScriptPanel::render(AppContext& ctx, const ImVec2& pos, const ImVec2& 
 	}
 	static const std::vector<std::string> kEvents = { "OnLevelLoaded", "OnLevelUnloaded" };
 	bool edited = false;
-	drawGraphBody(ctx.world->levelScript(), kEvents, "Level Script",
+	drawGraphBody(ctx.world->levelScript(), kEvents, /*allowCustomEvents=*/false, "Level Script",
 	              "Reacts to world events.", ctx.contentManager, ctx.gameInstanceGraph, edited);
 	// snapshotNow() bumps the undo revision so the level script saves with the
 	// scene; self-contained so it doesn't disturb the entity undo.
@@ -875,7 +881,7 @@ void GameInstancePanel::render(AppContext& ctx, const ImVec2& pos, const ImVec2&
 	}
 	static const std::vector<std::string> kEvents = { "OnInit", "OnShutdown", "OnWindowFocusChanged" };
 	bool edited = false;
-	drawGraphBody(*ctx.gameInstanceGraph, kEvents, "Game Instance",
+	drawGraphBody(*ctx.gameInstanceGraph, kEvents, /*allowCustomEvents=*/false, "Game Instance",
 	              "App-wide. Runs before anything loads.", ctx.contentManager, ctx.gameInstanceGraph, edited);
 	// The GameInstance graph isn't part of a scene — re-register it in the app
 	// runtime and persist it via the host callback.
@@ -948,10 +954,13 @@ void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath
 	}
 	ImGui::Separator();
 
-	static const std::vector<std::string> kFreeEvents; // empty → free-text event names
+	// Classes expose the lifecycle events (Construct on create, Destruct on
+	// destroy) as a catalog, and can also name their own custom dispatcher events.
+	static const std::vector<std::string> kClassEvents = { "Construct", "Destruct" };
 	bool edited = false;
-	drawGraphBody(st.graph, kFreeEvents, "HorizonCode Class",
-	              "Reusable class; names its own events.", ctx.contentManager, ctx.gameInstanceGraph, edited);
+	drawGraphBody(st.graph, kClassEvents, /*allowCustomEvents=*/true, "HorizonCode Class",
+	              "Reusable class; Construct/Destruct + its own events.", ctx.contentManager,
+	              ctx.gameInstanceGraph, edited);
 	if (edited) st.dirty = true;
 	ImGui::End();
 }

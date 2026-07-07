@@ -1492,8 +1492,24 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 		}
 		else
 		{
+			// Widget-scope (Any element): free text plus the lifecycle events every
+			// widget fires — Construct (on create), Tick (per frame, dt arg) and
+			// Destruct (on destroy).
 			ImGui::InputText("Event", &n->s);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			static const char* kLifecycle[] = { "Construct", "Tick", "Destruct" };
+			for (int k = 0; k < 3; ++k)
+			{
+				if (k) ImGui::SameLine();
+				if (ImGui::SmallButton(kLifecycle[k]))
+				{
+					n->s = kLifecycle[k];
+					n->hasArg = (n->s == "Tick");
+					n->propType = PT::Float;
+					n->elem = 0;
+					committed = true;
+				}
+			}
 		}
 		ImGui::TextDisabled("Fires when the bound element raises this event.");
 		break;
