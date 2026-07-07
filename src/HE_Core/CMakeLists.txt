@@ -28,7 +28,9 @@ add_library(HorizonCore SHARED
 	src/Events/EventBus.cpp
 	src/MaterialGraph/MaterialGraph.cpp
 	src/UIWidget/UIWidgetTree.cpp
-	src/UIWidget/UIWidgetGraph.cpp
+	src/UIWidget/UIElement.cpp
+	src/UIWidget/UIWidgetBinding.cpp
+	src/HorizonCode/HorizonCode.cpp
 	src/Renderer/UIFont.cpp
  "include/ContentManager/ContentManager.h" "src/ContentManager/ContentManager.cpp" "include/ContentManager/Assets.h")
 

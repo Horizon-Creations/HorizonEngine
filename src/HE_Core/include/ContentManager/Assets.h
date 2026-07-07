@@ -187,12 +187,12 @@ struct MaterialFunctionAsset : public RuntimeAsset
 };
 
 // A UI widget tree (UMG-style widget editor asset). The JSON is the source of
-// truth (HE::UIWidgetTree round-trips it); instantiated into UI entities at
-// play start.
+// truth (HE::UIWidgetTree round-trips it); the WidgetManager instantiates a live
+// widget from it at runtime (widgets exist outside the entity world).
 struct UIWidgetAsset : public RuntimeAsset
 {
 	std::string treeJson;
-	std::string graphJson; // Blueprint-style logic graph (HE::UIWidgetGraph)
+	std::string graphJson; // Blueprint-style logic graph (HorizonCode::Graph)
 };
 
 struct SceneAsset : public RuntimeAsset
