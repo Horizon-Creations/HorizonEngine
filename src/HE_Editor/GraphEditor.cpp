@@ -73,6 +73,10 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
         ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight |
         ImGuiButtonFlags_MouseButtonMiddle);
     const bool hovered = ImGui::IsItemHovered();
+    // The canvas button holds the active state while a right/middle drag that
+    // STARTED on empty canvas is in progress — so panning keeps working even as
+    // the cursor sweeps over nodes mid-drag.
+    const bool canvasHeld = ImGui::IsItemActive();
     const ImVec2 mouse = ImGui::GetMousePos();
 
     // Host chrome that must interact before the nodes (e.g. comment boxes). It
@@ -143,7 +147,7 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
         st.focusNode = 0;
     }
 
-    // ── Pan / zoom ───────────────────────────────────────────────────────────
+    // ── Zoom (wheel / touchpad over the canvas, about the cursor) ────────────
     if (interact)
     {
         const float wheel = ImGui::GetIO().MouseWheel;
@@ -154,12 +158,16 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
             st.pan.x = mouse.x - origin.x - before.x * st.zoom;
             st.pan.y = mouse.y - origin.y - before.y * st.zoom;
         }
-        if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle) ||
-            ImGui::IsMouseDragging(ImGuiMouseButton_Right))
-        {
-            st.pan.x += ImGui::GetIO().MouseDelta.x;
-            st.pan.y += ImGui::GetIO().MouseDelta.y;
-        }
+    }
+    // ── Pan (right / middle drag). Latched to the canvas button so it keeps
+    // panning as the cursor moves over nodes; not gated on `interact` so a
+    // node-body widget being active elsewhere doesn't freeze the drag.
+    if ((canvasHeld || (hovered && !st.suppressInteraction)) &&
+        (ImGui::IsMouseDragging(ImGuiMouseButton_Middle) ||
+         ImGui::IsMouseDragging(ImGuiMouseButton_Right)))
+    {
+        st.pan.x += ImGui::GetIO().MouseDelta.x;
+        st.pan.y += ImGui::GetIO().MouseDelta.y;
     }
 
     // ── Background + grid ────────────────────────────────────────────────────
@@ -173,8 +181,9 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
         for (float y = origin.y + oy; y < origin.y + size.y; y += grid)
             dl->AddLine(ImVec2(origin.x, y), ImVec2(origin.x + size.x, y), IM_COL32(255,255,255,10));
     }
-    dl->PushClipRect(origin, ImVec2(origin.x + size.x, origin.y + size.y), true);
-
+    // No manual clip rect here: the host already draws the canvas inside a
+    // clipping child window, and pushing a draw-list clip around the node loop
+    // would collide with the BeginChild used for on-node body widgets.
     if (model.drawBehind) model.drawBehind(dl, origin, st.pan, st.zoom);
 
     // ── Links (behind nodes) ─────────────────────────────────────────────────
@@ -250,14 +259,28 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
             }
         }
 
-        // On-node body widgets (material params etc.).
+        // On-node body widgets (material params etc.). Wrapped in a child window
+        // anchored to the node so ImGui line breaks reset the cursor to the
+        // node's left edge (not the canvas window's) — otherwise multi-widget
+        // bodies flow down the left margin instead of stacking on the node.
         if (model.drawNodeBody && model.nodeBodyHeight && model.nodeBodyHeight(n.id) > 0.0f)
         {
             int left = 0, right = 0;
             for (const auto& p : n.pins) (p.input ? left : right)++;
             const float pinsBottom = n.pos.y + (kTitleH + std::max(left, right) * kRowH) * st.zoom;
+            const ImVec2 bmin(n.pos.x + 6, pinsBottom + 2);
+            const ImVec2 bmax(br.x - 6, br.y - 4);
             ImGui::PushID(n.id);
-            model.drawNodeBody(n.id, ImVec2(n.pos.x + 6, pinsBottom + 2), ImVec2(br.x - 6, br.y - 4), st.zoom);
+            ImGui::SetCursorScreenPos(bmin);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+            ImGui::BeginChild("##nodebody",
+                ImVec2(std::max(bmax.x - bmin.x, 1.0f), std::max(bmax.y - bmin.y, 1.0f)),
+                ImGuiChildFlags_None,
+                ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
+                ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoSavedSettings);
+            model.drawNodeBody(n.id, bmin, bmax, st.zoom);
+            ImGui::EndChild();
+            ImGui::PopStyleVar();
             ImGui::PopID();
         }
 
@@ -386,7 +409,6 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
     }
 
     if (model.drawFront) model.drawFront(dl, origin, st.pan, st.zoom);
-    dl->PopClipRect();
 
     // ── Delete selection ─────────────────────────────────────────────────────
     if (interact && model.removeNode &&
