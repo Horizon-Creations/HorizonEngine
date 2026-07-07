@@ -1024,6 +1024,7 @@ ImU32 graphPinColor(PT t)
 		case PT::String: return IM_COL32(220, 130, 210, 255);
 		case PT::Vec2:   return IM_COL32(120, 200, 210, 255);
 		case PT::Color:  return IM_COL32(230, 210, 110, 255);
+		case PT::Ref:    return IM_COL32(180, 140, 240, 255);
 	}
 	return IM_COL32_WHITE;
 }
@@ -1053,6 +1054,9 @@ std::string graphNodeTitle(const State& st, const HC::Node& n)
 		case NT::FunctionEntry:
 		case NT::FunctionCall:
 			return std::string(base) + " " + n.s;
+		case NT::BindEvent:    return "Bind " + (n.s.empty() ? std::string("event") : n.s);
+		case NT::EmitEvent:    return "Emit " + (n.s.empty() ? std::string("event") : n.s);
+		case NT::CallExternal: return "Call " + (n.s.empty() ? std::string("fn") : n.s) + " (Ref)";
 		default:
 			return base;
 	}
@@ -1364,6 +1368,10 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 				}
 			}
 
+			int vaccess = v->access;
+			if (ImGui::Combo("Access", &vaccess, "Public\0Private\0"))
+				{ v->access = vaccess; commitEdit(st, ctx); }
+
 			// Default value editor (seeds the runtime store at widget creation).
 			ImGui::SeparatorText("Default");
 			bool ed = false;
@@ -1574,6 +1582,24 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 		break;
 	}
 
+	case NT::BindEvent:
+	case NT::EmitEvent:
+	{
+		ImGui::InputText("Event", &n->s);
+		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		ImGui::TextDisabled(n->type == NT::BindEvent
+			? "When Target fires this event, this\nwidget's Event of the same name runs."
+			: "Broadcast to everyone bound to this\nwidget's event of this name.");
+		break;
+	}
+	case NT::CallExternal:
+	{
+		ImGui::InputText("Function", &n->s);
+		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		ImGui::TextDisabled("Calls a public function on the\nTarget instance (a reference).");
+		break;
+	}
+
 	default:
 		ImGui::TextDisabled("No editable properties.");
 		break;
@@ -1652,8 +1678,9 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 		      || lower(cat).find(q) != std::string::npos; };
 
 		ImGui::BeginChild("##nodeList", ImVec2(232.0f, 300.0f));
-		static const char* kCats[] = { "Property", "Flow", "Literals", "Math",
-		                               "Logic", "String", "Widget", "Debug" };
+		static const char* kCats[] = { "Property", "Flow", "Events", "Reference",
+		                               "Literals", "Math", "Logic", "String",
+		                               "Widget", "Debug" };
 		for (const char* cat : kCats)
 		{
 			bool header = false;

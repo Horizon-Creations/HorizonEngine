@@ -4,6 +4,7 @@
 #include <functional>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 // ── HorizonCode::Runtime ─────────────────────────────────────────────────────
 // The single, central interpreter host for HorizonCode. Instead of each engine
@@ -72,6 +73,21 @@ public:
     // requirePublic is set.
     bool callFunction(InstanceId id, const std::string& fn, bool requirePublic = true);
 
+    // ── Reference-based delegation (Unreal-style event dispatchers) ───────────
+    // Subscribe `listener` to `owner`'s `event`: when the owner fires that event,
+    // the listener's own Event node of the same name fires too (with the arg).
+    // Both instances must exist; a listener is auto-unbound when removed.
+    void bindEvent(InstanceId owner, const std::string& event, InstanceId listener);
+    // Broadcast `event` from `owner` to everyone bound to it (does NOT fire the
+    // owner's own nodes — that is what fireEvent does). This is the EmitEvent node.
+    void emitEvent(InstanceId owner, const std::string& event, const Value& arg = {});
+
+    // The app-wide GameInstance: a single always-present script referenced from
+    // any graph via the Get Game Instance node. setGameInstance registers/
+    // replaces it; gameInstance() is its handle (0 when none).
+    InstanceId setGameInstance(Graph graph, HostBindings bindings = {});
+    InstanceId gameInstance() const { return m_gameInstance; }
+
 private:
     struct Inst
     {
@@ -82,11 +98,18 @@ private:
     Inst*       find(InstanceId id);
     const Inst* find(InstanceId id) const;
     // Build a Context that routes variable access to the instance's private
-    // store and property/show/hide to its host bindings.
+    // store, property/show/hide to its host bindings, and the delegation hooks
+    // (emit/bind/callExternal/self/gameInstance) back to the runtime.
     Context makeContext(InstanceId id);
+    // Fire `event` on every listener bound to (owner, event). Bounded recursion.
+    void dispatchToListeners(InstanceId owner, const std::string& event, const Value& arg);
 
     std::unordered_map<InstanceId, Inst> m_insts;
-    InstanceId                           m_next = 1;
+    // owner → event name → subscribed listener instances.
+    std::unordered_map<InstanceId, std::unordered_map<std::string, std::vector<InstanceId>>> m_listeners;
+    InstanceId m_next         = 1;
+    InstanceId m_gameInstance = 0;
+    int        m_dispatchDepth = 0;   // guards cross-instance event recursion
 };
 
 } // namespace HorizonCode
