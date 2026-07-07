@@ -1,5 +1,6 @@
 #include "UIEditorPanel.h"
 #include "EditorApplication.h"                 // AppContext
+#include "GraphEditor.h"                        // shared node-graph canvas
 #include <UIWidget/UIWidgetTree.h>
 #include <UIWidget/UIElement.h>
 #include <UIWidget/UIElements.h>
@@ -57,20 +58,13 @@ struct State
 	float  dragStartSize[2] = {};
 	bool   dragDidEdit = false;      // push one undo snapshot per completed drag
 
-	// Graph canvas view + interaction.
+	// Graph canvas — the shared GraphEditor component owns pan/zoom/selection/
+	// drag; these are the host-side bits it can't own.
 	int    selectedGraphNode = 0;
-	float  gZoom = 1.0f;
-	ImVec2 gPan  = ImVec2(60.0f, 60.0f);
-	int    gDragNode = 0;            // node being moved (0 = none)
-	ImVec2 gDragStartMouse;
-	float  gDragStartPos[2] = {};
-	bool   gDragDidEdit = false;
-	// Live link drag: source pin (node id + unified pin index) or inactive.
-	int    linkSrcNode = 0;
-	int    linkSrcPin  = 0;
-	bool   gFocusSelected = false;   // center the canvas on selectedGraphNode next frame
-	ImVec2 gAddNodePos;              // graph-space point for the add-node / drop popups
-	int    gDropElem = 0;            // element id dragged onto the canvas (Get/Set popup)
+	bool   gFocusSelected = false;   // center on selectedGraphNode next frame
+	GraphEditor::State geState;
+	int    gDropElem = 0;            // element dragged onto the graph (Get/Set popup)
+	bool   gOpenDropPopup = false;   // request to open the Get/Set popup next frame
 
 	// Undo/redo: combined snapshots (treeJson + '\x1f' + graphJson).
 	std::vector<std::string> undo;
@@ -1013,31 +1007,6 @@ GPinRanges graphPinRanges(const HC::Node& n)
 	return r;
 }
 
-int graphNodeRows(const HC::Node& n)
-{
-	const HC::NodeSig sig = HC::signatureOf(n);
-	const int left  = (int)sig.execIns.size()  + (int)sig.dataIns.size();
-	const int right = (int)sig.execOuts.size() + (int)sig.dataOuts.size();
-	return std::max(left, right);
-}
-float graphNodeHeight(const HC::Node& n) { return kGTitleH + graphNodeRows(n) * kGRowH + 6.0f; }
-
-ImU32 graphCatColor(const char* cat)
-{
-	const std::string c = cat;
-	if (c == "Events")    return IM_COL32(150, 55, 55, 255);
-	if (c == "Flow")      return IM_COL32( 92, 92, 98, 255);
-	if (c == "Property")  return IM_COL32( 58, 100, 150, 255);
-	if (c == "Widget")    return IM_COL32(150, 118, 55, 255);
-	if (c == "Literals")  return IM_COL32( 58, 128, 82, 255);
-	if (c == "Math")      return IM_COL32( 48, 108, 70, 255);
-	if (c == "Logic")     return IM_COL32( 48, 108, 70, 255);
-	if (c == "String")    return IM_COL32(118, 68, 140, 255);
-	if (c == "Functions") return IM_COL32(122, 58, 122, 255);
-	if (c == "Debug")     return IM_COL32(120, 120, 68, 255);
-	return IM_COL32(100, 100, 100, 255);
-}
-
 ImU32 graphPinColor(PT t)
 {
 	switch (t)
@@ -1077,12 +1046,6 @@ std::string graphNodeTitle(const State& st, const HC::Node& n)
 		default:
 			return base;
 	}
-}
-
-ImVec2 graphNodeScreenPos(const State& st, const HC::Node& n, const ImVec2& origin)
-{
-	return ImVec2(origin.x + st.gPan.x + n.x * st.gZoom,
-	              origin.y + st.gPan.y + n.y * st.gZoom);
 }
 
 struct GPinInfo { ImVec2 pos; bool input; bool isExec; PT type; };
@@ -1435,258 +1398,53 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 }
 
 // ── Graph node canvas ────────────────────────────────────────────────────────
-int graphPinAt(State& st, const ImVec2& origin, const ImVec2& mouse,
-               int& outPin, GPinInfo& outInfo)
+// Build the GraphEditor pin list for a HorizonCode node (unified pin index =
+// the Pin id; side/exec/type from the node signature).
+std::vector<GraphEditor::Pin> hcNodePins(const HC::Node& n)
 {
-	const float hitR = kGPinR * st.gZoom + 4.0f;
-	for (const auto& n : st.graph.nodes)
+	std::vector<GraphEditor::Pin> out;
+	const GPinRanges r = graphPinRanges(n);
+	for (int pin = 0; pin < r.end; ++pin)
 	{
-		const ImVec2 np = graphNodeScreenPos(st, n, origin);
-		const GPinRanges r = graphPinRanges(n);
-		for (int pin = 0; pin < r.end; ++pin)
-		{
-			GPinInfo info;
-			if (!graphPinInfo(n, pin, np, st.gZoom, info)) continue;
-			const float dx = mouse.x - info.pos.x, dy = mouse.y - info.pos.y;
-			if (dx * dx + dy * dy <= hitR * hitR)
-			{
-				outPin = pin; outInfo = info;
-				return n.id;
-			}
-		}
+		GPinInfo info;
+		if (!graphPinInfo(n, pin, ImVec2(0, 0), 1.0f, info)) continue; // pos unused here
+		GraphEditor::Pin p;
+		p.id     = pin;
+		p.label  = graphPinLabel(n, pin);
+		p.color  = graphPinColor(info.type);
+		p.input  = info.input;
+		p.isExec = info.isExec;
+		out.push_back(std::move(p));
 	}
-	return 0;
-}
-
-void drawGraphLink(ImDrawList* dl, const ImVec2& a, const ImVec2& b, ImU32 col, float thick)
-{
-	const float dx = std::max(30.0f, std::fabs(b.x - a.x) * 0.5f);
-	dl->AddBezierCubic(a, ImVec2(a.x + dx, a.y), ImVec2(b.x - dx, b.y), b, col, thick);
+	return out;
 }
 
 void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 {
-	ImDrawList* dl = ImGui::GetWindowDrawList();
-	const ImVec2 origin = ImGui::GetCursorScreenPos();
+	// Sync the host's selection/focus into the shared canvas state.
+	st.geState.selected = st.selectedGraphNode;
+	if (st.gFocusSelected) { st.geState.focusNode = st.selectedGraphNode; st.gFocusSelected = false; }
 
-	ImGui::InvisibleButton("##graphcanvas", avail,
-		ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight |
-		ImGuiButtonFlags_MouseButtonMiddle);
-	const bool hovered = ImGui::IsItemHovered();
-	const ImVec2 mouse = ImGui::GetMousePos();
-
-	// Center on a freshly selected node (from the left panel / Designer events).
-	if (st.gFocusSelected)
-	{
-		if (const HC::Node* n = st.graph.findNode(st.selectedGraphNode))
-		{
-			st.gPan.x = avail.x * 0.5f - n->x * st.gZoom - (kGNodeW * st.gZoom) * 0.5f;
-			st.gPan.y = avail.y * 0.4f - n->y * st.gZoom;
-		}
-		st.gFocusSelected = false;
-	}
-
-	// Pan / zoom.
-	if (hovered)
-	{
-		const float wheel = ImGui::GetIO().MouseWheel;
-		if (wheel != 0.0f)
-		{
-			const ImVec2 before((mouse.x - origin.x - st.gPan.x) / st.gZoom,
-			                    (mouse.y - origin.y - st.gPan.y) / st.gZoom);
-			st.gZoom = std::clamp(st.gZoom * (1.0f + wheel * 0.1f), 0.3f, 2.5f);
-			st.gPan.x = mouse.x - origin.x - before.x * st.gZoom;
-			st.gPan.y = mouse.y - origin.y - before.y * st.gZoom;
-		}
-		if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle) ||
-		    ImGui::IsMouseDragging(ImGuiMouseButton_Right))
-		{
-			st.gPan.x += ImGui::GetIO().MouseDelta.x;
-			st.gPan.y += ImGui::GetIO().MouseDelta.y;
-		}
-	}
-
-	// Background + grid.
-	dl->AddRectFilled(origin, ImVec2(origin.x + avail.x, origin.y + avail.y),
-	                  IM_COL32(22, 22, 26, 255));
-	const float grid = 48.0f * st.gZoom;
-	if (grid > 8.0f)
-	{
-		const float ox = std::fmod(st.gPan.x, grid), oy = std::fmod(st.gPan.y, grid);
-		for (float x = origin.x + ox; x < origin.x + avail.x; x += grid)
-			dl->AddLine(ImVec2(x, origin.y), ImVec2(x, origin.y + avail.y), IM_COL32(255,255,255,10));
-		for (float y = origin.y + oy; y < origin.y + avail.y; y += grid)
-			dl->AddLine(ImVec2(origin.x, y), ImVec2(origin.x + avail.x, y), IM_COL32(255,255,255,10));
-	}
-	dl->PushClipRect(origin, ImVec2(origin.x + avail.x, origin.y + avail.y), true);
-
-	// Links (behind nodes).
-	for (const auto& l : st.graph.links)
-	{
-		const HC::Node* sn = st.graph.findNode(l.srcNode);
-		const HC::Node* dn = st.graph.findNode(l.dstNode);
-		if (!sn || !dn) continue;
-		GPinInfo si, di;
-		if (!graphPinInfo(*sn, l.srcPin, graphNodeScreenPos(st, *sn, origin), st.gZoom, si)) continue;
-		if (!graphPinInfo(*dn, l.dstPin, graphNodeScreenPos(st, *dn, origin), st.gZoom, di)) continue;
-		const bool exec = si.type == PT::Exec;
-		drawGraphLink(dl, si.pos, di.pos, exec ? IM_COL32(235,235,235,220) : graphPinColor(si.type),
-		              exec ? 3.0f : 2.0f);
-	}
-
-	// Nodes.
-	bool consumedClick = false;
-	for (const auto& n : st.graph.nodes)
-	{
-		const ImVec2 np = graphNodeScreenPos(st, n, origin);
-		const float w = kGNodeW * st.gZoom;
-		const float h = graphNodeHeight(n) * st.gZoom;
-		const ImVec2 br(np.x + w, np.y + h);
-		const bool sel = st.selectedGraphNode == n.id;
-
-		dl->AddRectFilled(np, br, IM_COL32(38, 38, 44, 245), 4.0f);
-		dl->AddRectFilled(np, ImVec2(br.x, np.y + kGTitleH * st.gZoom),
-		                  graphCatColor(HC::nodeCategory(n.type)), 4.0f,
-		                  ImDrawFlags_RoundCornersTop);
-		dl->AddRect(np, br, sel ? IM_COL32(255, 170, 40, 255) : IM_COL32(20, 20, 24, 255),
-		            4.0f, 0, sel ? 2.0f : 1.0f);
-
-		const std::string title = graphNodeTitle(st, n);
-		dl->AddText(nullptr, 13.0f * std::max(0.7f, st.gZoom),
-		            ImVec2(np.x + 6, np.y + 3 * st.gZoom), IM_COL32(240,240,240,255), title.c_str());
-
-		// Pins + labels.
-		const GPinRanges r = graphPinRanges(n);
-		for (int pin = 0; pin < r.end; ++pin)
-		{
-			GPinInfo info;
-			if (!graphPinInfo(n, pin, np, st.gZoom, info)) continue;
-			const ImU32 col = graphPinColor(info.type);
-			if (info.isExec)
-			{
-				// Exec pins as small triangles.
-				const float s = kGPinR * st.gZoom;
-				const ImVec2 p = info.pos;
-				dl->AddTriangleFilled(ImVec2(p.x - s, p.y - s), ImVec2(p.x - s, p.y + s),
-				                      ImVec2(p.x + s, p.y), col);
-			}
-			else
-			{
-				dl->AddCircleFilled(info.pos, kGPinR * st.gZoom, col);
-			}
-			const char* lbl = graphPinLabel(n, pin);
-			if (lbl && lbl[0])
-			{
-				const ImVec2 ts = ImGui::CalcTextSize(lbl);
-				const float ty = info.pos.y - ts.y * 0.5f;
-				if (info.input)
-					dl->AddText(ImVec2(info.pos.x + 8, ty), IM_COL32(200,200,200,200), lbl);
-				else
-					dl->AddText(ImVec2(info.pos.x - 8 - ts.x, ty), IM_COL32(200,200,200,200), lbl);
-			}
-		}
-
-		// Node body interaction (select + drag), only when no pin drag is active.
-		if (hovered && st.linkSrcNode == 0 &&
-		    mouse.x >= np.x && mouse.x <= br.x && mouse.y >= np.y && mouse.y <= br.y)
-		{
-			if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))
-			{
-				// Pin under cursor? Start a link instead of moving the node.
-				int pin = 0; GPinInfo pinfo;
-				const int pinNode = graphPinAt(st, origin, mouse, pin, pinfo);
-				if (pinNode == n.id)
-				{
-					if (ImGui::GetIO().KeyAlt)
-					{
-						removeGraphPinLinks(st.graph, n.id, pin);
-						commitEdit(st, ctx);
-					}
-					else { st.linkSrcNode = n.id; st.linkSrcPin = pin; }
-				}
-				else
-				{
-					st.selectedGraphNode = n.id;
-					st.gDragNode = n.id;
-					st.gDragStartMouse = mouse;
-					st.gDragStartPos[0] = n.x; st.gDragStartPos[1] = n.y;
-					st.gDragDidEdit = false;
-				}
-				consumedClick = true;
-			}
-		}
-	}
-
-	// Node move.
-	if (st.gDragNode != 0 && ImGui::IsMouseDown(ImGuiMouseButton_Left))
-	{
-		if (HC::Node* n = st.graph.findNode(st.gDragNode))
-		{
-			const float dx = (mouse.x - st.gDragStartMouse.x) / st.gZoom;
-			const float dy = (mouse.y - st.gDragStartMouse.y) / st.gZoom;
-			if (std::fabs(dx) > 0.5f || std::fabs(dy) > 0.5f) st.gDragDidEdit = true;
-			n->x = st.gDragStartPos[0] + dx;
-			n->y = st.gDragStartPos[1] + dy;
-			st.dirty = true;
-		}
-	}
-	if (st.gDragNode != 0 && ImGui::IsMouseReleased(ImGuiMouseButton_Left))
-	{
-		if (st.gDragDidEdit) commitEdit(st, ctx);
-		st.gDragNode = 0;
-	}
-
-	// Active link drag: draw a rubber band, connect on release.
-	if (st.linkSrcNode != 0)
-	{
-		if (const HC::Node* sn = st.graph.findNode(st.linkSrcNode))
-		{
-			GPinInfo si;
-			if (graphPinInfo(*sn, st.linkSrcPin, graphNodeScreenPos(st, *sn, origin), st.gZoom, si))
-				drawGraphLink(dl, si.pos, mouse, IM_COL32(255, 210, 120, 220), 2.0f);
-
-			if (ImGui::IsMouseReleased(ImGuiMouseButton_Left))
-			{
-				int pin = 0; GPinInfo di;
-				const int dstNode = graphPinAt(st, origin, mouse, pin, di);
-				if (dstNode != 0 && dstNode != st.linkSrcNode)
-				{
-					// Orient: connect(outputNode, outputPin, inputNode, inputPin).
-					GPinInfo srcI = si;
-					bool ok = false;
-					if (!srcI.input && di.input)
-						ok = st.graph.connect(st.linkSrcNode, st.linkSrcPin, dstNode, pin);
-					else if (srcI.input && !di.input)
-						ok = st.graph.connect(dstNode, pin, st.linkSrcNode, st.linkSrcPin);
-					if (ok) commitEdit(st, ctx);
-				}
-				st.linkSrcNode = 0;
-			}
-		}
-		else st.linkSrcNode = 0;
-	}
-
-	// Empty-canvas click clears selection.
-	if (hovered && !consumedClick && st.linkSrcNode == 0 &&
-	    ImGui::IsMouseClicked(ImGuiMouseButton_Left))
-		st.selectedGraphNode = 0;
-
-	dl->PopClipRect();
-
-	// Add-node context menu (right-click; only when it wasn't a pan drag).
-	if (hovered && ImGui::IsMouseReleased(ImGuiMouseButton_Right) &&
-	    ImGui::GetIO().MouseDragMaxDistanceSqr[ImGuiMouseButton_Right] < 36.0f)
-	{
-		st.gAddNodePos = ImVec2((mouse.x - origin.x - st.gPan.x) / st.gZoom,
-		                        (mouse.y - origin.y - st.gPan.y) / st.gZoom);
-		ImGui::OpenPopup("##graph_add");
-	}
-	if (ImGui::BeginPopup("##graph_add"))
-	{
+	GraphEditor::Model m;
+	m.nodeIds = [&st]{ std::vector<int> ids; ids.reserve(st.graph.nodes.size());
+		for (const auto& n : st.graph.nodes) ids.push_back(n.id); return ids; };
+	m.getPos = [&st](int id, float& x, float& y){ if (const HC::Node* n = st.graph.findNode(id)) { x = n->x; y = n->y; } };
+	m.setPos = [&st](int id, float x, float y){ if (HC::Node* n = st.graph.findNode(id)) { n->x = x; n->y = y; } };
+	m.title  = [&st](int id){ const HC::Node* n = st.graph.findNode(id); return n ? graphNodeTitle(st, *n) : std::string(); };
+	m.headerColor = [&st](int id){ const HC::Node* n = st.graph.findNode(id);
+		return GraphEditor::categoryColor(n ? HC::nodeCategory(n->type) : ""); };
+	m.pins = [&st](int id){ const HC::Node* n = st.graph.findNode(id);
+		return n ? hcNodePins(*n) : std::vector<GraphEditor::Pin>{}; };
+	m.links = [&st]{ std::vector<std::array<int,4>> ls; ls.reserve(st.graph.links.size());
+		for (const auto& l : st.graph.links) ls.push_back({ l.srcNode, l.srcPin, l.dstNode, l.dstPin }); return ls; };
+	m.connect = [&st](int oN, int oP, int iN, int iP){ return st.graph.connect(oN, oP, iN, iP); };
+	m.clearPinLinks = [&st](int node, int pin, bool){ removeGraphPinLinks(st.graph, node, pin); };
+	m.removeNode = [&st](int id){ st.graph.removeNode(id); };
+	m.drawAddMenu = [&st]() -> int {
+		int created = 0;
 		ImGui::TextDisabled("Add Node");
 		ImGui::Separator();
-		// Group registry entries by category; Events + FunctionEntry are created
-		// elsewhere (Designer events / the + Function button).
+		// Events + FunctionEntry are created elsewhere (Designer / + Function).
 		static const char* kCats[] = { "Property", "Flow", "Literals", "Math",
 		                               "Logic", "String", "Widget", "Functions", "Debug" };
 		for (const char* cat : kCats)
@@ -1694,41 +1452,37 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 			if (!ImGui::BeginMenu(cat)) continue;
 			for (NT t : HC::nodeRegistry())
 			{
-				if (t == NT::Event || t == NT::FunctionEntry) continue; // created elsewhere
+				if (t == NT::Event || t == NT::FunctionEntry) continue;
 				if (std::string(HC::nodeCategory(t)) != cat) continue;
 				if (ImGui::MenuItem(HC::nodeDisplayName(t)))
-				{
-					st.selectedGraphNode = addGraphNode(st, t, st.gAddNodePos);
-					commitEdit(st, ctx);
-				}
+					created = addGraphNode(st, t, st.geState.addMenuGraphPos);
 			}
 			ImGui::EndMenu();
 		}
-		ImGui::EndPopup();
-	}
+		return created;
+	};
+	m.dropPayload = "HE_UIWGRAPH_ELEM";
+	m.onDrop = [&st](const void* data, ImVec2 gp){
+		st.gDropElem = *static_cast<const int*>(data);
+		st.geState.addMenuGraphPos = gp;
+		st.gOpenDropPopup = true;
+	};
 
-	// Drop an element variable → Get/Set popup at the drop point.
-	if (ImGui::BeginDragDropTarget())
-	{
-		if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_UIWGRAPH_ELEM"))
-		{
-			st.gDropElem = *static_cast<const int*>(p->Data);
-			st.gAddNodePos = ImVec2((mouse.x - origin.x - st.gPan.x) / st.gZoom,
-			                        (mouse.y - origin.y - st.gPan.y) / st.gZoom);
-			ImGui::OpenPopup("##graph_elem_drop");
-		}
-		ImGui::EndDragDropTarget();
-	}
+	const bool changed = GraphEditor::draw("##hc_graphcanvas", m, st.geState, avail);
+	st.selectedGraphNode = st.geState.selected;
+	if (changed) commitEdit(st, ctx);
+
+	// Variables-panel drop → Get/Set popup for the dropped element's properties.
+	if (st.gOpenDropPopup) { ImGui::OpenPopup("##graph_elem_drop"); st.gOpenDropPopup = false; }
 	if (ImGui::BeginPopup("##graph_elem_drop"))
 	{
 		ImGui::TextDisabled("%s", elemLabel(st, st.gDropElem).c_str());
 		ImGui::Separator();
-		// Offer a Get/Set node per property of the dropped element.
 		const UIElement* tgt = st.tree.find(st.gDropElem);
 		const std::vector<UIPropDesc> props = tgt ? tgt->properties() : std::vector<UIPropDesc>{};
 		auto makePropNode = [&](NT type, const UIPropDesc& pd)
 		{
-			const int id = addGraphNode(st, type, st.gAddNodePos);
+			const int id = addGraphNode(st, type, st.geState.addMenuGraphPos);
 			HC::Node* nn = st.graph.findNode(id);
 			nn->elem = st.gDropElem;
 			nn->s = pd.name;
@@ -1806,7 +1560,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 	if (ImGui::Button("Reset View"))
 	{
 		if (st.viewMode == 0) { st.zoom = 1.0f; st.pan = ImVec2(0, 0); }
-		else                  { st.gZoom = 1.0f; st.gPan = ImVec2(60, 60); }
+		else                  { st.geState.zoom = 1.0f; st.geState.pan = ImVec2(60, 60); }
 	}
 	ImGui::SameLine();
 	ImGui::BeginDisabled(!st.dirty);
