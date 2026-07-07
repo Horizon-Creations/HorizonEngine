@@ -1,10 +1,11 @@
 #pragma once
 #include <Types/Enums.h>
+#include <cstdint>
 #include <string>
 #include <vector>
 
 class ContentManager;
-namespace HorizonCode { struct Graph; struct Node; }
+namespace HorizonCode { enum class PinType : std::uint8_t; struct Graph; struct Node; }
 
 // Small editor helper: enumerate the project's assets of a given type (for the
 // asset/object picker dropdowns — HorizonCode classes, widgets, textures, …).
@@ -31,4 +32,12 @@ namespace HcEditorUtil
 	// functions declared in the graph (those with a FunctionEntry). Sets the node's
 	// owning function name + mirrors its result pins. Returns true if it changed.
 	bool drawReturnFunctionPicker(HorizonCode::Graph& g, HorizonCode::Node& ret);
+
+	// ── Shared graph colors (ImU32; keep every HC editor consistent) ──────────
+	// A stable color per value type — Bool always red, Float green, Ref purple, …
+	std::uint32_t pinTypeColor(HorizonCode::PinType t);
+	// A node's header/accent color: Events red, Functions purple, Branch/Sequence
+	// gray, reference/object nodes purple, and data nodes (Get/Set/Const) colored
+	// by their value type so a Bool getter is always red, a Float getter green, …
+	std::uint32_t nodeHeaderColor(const HorizonCode::Node& n);
 }

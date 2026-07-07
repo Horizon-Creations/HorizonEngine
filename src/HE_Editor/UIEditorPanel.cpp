@@ -1014,21 +1014,7 @@ GPinRanges graphPinRanges(const HC::Node& n)
 	return r;
 }
 
-ImU32 graphPinColor(PT t)
-{
-	switch (t)
-	{
-		case PT::Exec:   return IM_COL32(235, 235, 235, 255);
-		case PT::Float:  return IM_COL32(160, 200, 120, 255);
-		case PT::Bool:   return IM_COL32(210,  90,  90, 255);
-		case PT::Int:    return IM_COL32(110, 200, 200, 255);
-		case PT::String: return IM_COL32(220, 130, 210, 255);
-		case PT::Vec2:   return IM_COL32(120, 200, 210, 255);
-		case PT::Color:  return IM_COL32(230, 210, 110, 255);
-		case PT::Ref:    return IM_COL32(180, 140, 240, 255);
-	}
-	return IM_COL32_WHITE;
-}
+ImU32 graphPinColor(PT t) { return HcEditorUtil::pinTypeColor(t); }
 
 std::string elemLabel(const State& st, int elemId)
 {
@@ -1752,7 +1738,7 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	m.setPos = [&st](int id, float x, float y){ if (HC::Node* n = st.graph.findNode(id)) { n->x = x; n->y = y; } };
 	m.title  = [&st](int id){ const HC::Node* n = st.graph.findNode(id); return n ? graphNodeTitle(st, *n) : std::string(); };
 	m.headerColor = [&st](int id){ const HC::Node* n = st.graph.findNode(id);
-		return GraphEditor::categoryColor(n ? HC::nodeCategory(n->type) : ""); };
+		return n ? HcEditorUtil::nodeHeaderColor(*n) : GraphEditor::categoryColor(""); };
 	m.pins = [&st](int id){ const HC::Node* n = st.graph.findNode(id);
 		return n ? hcNodePins(*n) : std::vector<GraphEditor::Pin>{}; };
 	m.links = [&st]{ std::vector<std::array<int,4>> ls; ls.reserve(st.graph.links.size());

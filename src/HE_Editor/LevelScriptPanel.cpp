@@ -39,21 +39,7 @@ using NT = HC::NodeType;
 
 // ── Node plumbing (all derived from HC::signatureOf) ──────────────────────────
 
-ImU32 pinColor(PT t)
-{
-	switch (t)
-	{
-		case PT::Exec:   return IM_COL32(235, 235, 235, 255);
-		case PT::Float:  return IM_COL32(160, 200, 120, 255);
-		case PT::Bool:   return IM_COL32(210,  90,  90, 255);
-		case PT::Int:    return IM_COL32(110, 200, 200, 255);
-		case PT::String: return IM_COL32(220, 130, 210, 255);
-		case PT::Vec2:   return IM_COL32(120, 200, 210, 255);
-		case PT::Color:  return IM_COL32(230, 210, 110, 255);
-		case PT::Ref:    return IM_COL32(180, 140, 240, 255);
-	}
-	return IM_COL32_WHITE;
-}
+ImU32 pinColor(PT t) { return HcEditorUtil::pinTypeColor(t); }
 
 const char* pinTypeName(PT t)
 {
@@ -599,7 +585,7 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 	m.setPos = [&graph](int id, float x, float y){ if (HC::Node* n = graph.findNode(id)) { n->x = x; n->y = y; } };
 	m.title  = [&graph](int id){ const HC::Node* n = graph.findNode(id); return n ? nodeTitle(*n) : std::string(); };
 	m.headerColor = [&graph](int id){ const HC::Node* n = graph.findNode(id);
-		return GraphEditor::categoryColor(n ? HC::nodeCategory(n->type) : ""); };
+		return n ? HcEditorUtil::nodeHeaderColor(*n) : GraphEditor::categoryColor(""); };
 	m.pins = [&graph](int id){ const HC::Node* n = graph.findNode(id);
 		return n ? nodePins(*n) : std::vector<GraphEditor::Pin>{}; };
 	m.links = [&graph]{ std::vector<std::array<int,4>> ls; ls.reserve(graph.links.size());
