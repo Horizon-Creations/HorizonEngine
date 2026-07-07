@@ -39,6 +39,18 @@ void Runtime::remove(InstanceId id)
             vec.erase(std::remove(vec.begin(), vec.end(), id), vec.end());
     if (id == m_gameInstance) m_gameInstance = 0;
 }
+void Runtime::destroy(InstanceId id)
+{
+    // Symmetric teardown counterpart to Create Object / widget create (which fire
+    // "Construct"): let the instance run its destructor before it's unregistered.
+    if (!find(id)) return;
+    // Guard re-entrancy: a Destruct handler that destroys this same instance
+    // (e.g. Destroy Widget on Get Self) would otherwise re-fire Destruct forever.
+    if (!m_destructing.insert(id).second) return;
+    fireEvent(id, "Destruct", 0);
+    remove(id);
+    m_destructing.erase(id);
+}
 bool Runtime::alive(InstanceId id) const { return find(id) != nullptr; }
 void Runtime::clear()
 {
@@ -74,7 +86,7 @@ void Runtime::retainOnlyReachableFrom(InstanceId root)
     std::vector<InstanceId> doomed;
     for (const auto& [id, inst] : m_insts)
         if (!keep.count(id)) doomed.push_back(id);
-    for (const InstanceId id : doomed) remove(id);
+    for (const InstanceId id : doomed) destroy(id); // fire "Destruct" before GC
 }
 
 const Graph& Runtime::graphOf(InstanceId id) const

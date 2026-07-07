@@ -4,6 +4,7 @@
 #include <functional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 // ── HorizonCode::Runtime ─────────────────────────────────────────────────────
@@ -48,6 +49,11 @@ public:
     // instance's private variable store from the graph's declared defaults.
     InstanceId add(Graph graph, HostBindings bindings = {});
     void       remove(InstanceId id);
+    // Fire the instance's "Destruct" lifecycle event, then remove it — the
+    // teardown counterpart to the "Construct" fired on create. Use this (not
+    // remove) whenever an object/widget is intentionally destroyed so its
+    // destructor graph runs; no-op if the id is already gone.
+    void       destroy(InstanceId id);
     bool       alive(InstanceId id) const;
     // Drop every instance (whole-runtime teardown).
     void       clear();
@@ -133,6 +139,7 @@ private:
     InstanceId m_next         = 1;
     InstanceId m_gameInstance = 0;
     int        m_dispatchDepth = 0;   // guards cross-instance event recursion
+    std::unordered_set<InstanceId> m_destructing; // ids mid-destroy (self-destruct guard)
     Services   m_services;
 };
 

@@ -277,6 +277,94 @@ TEST_CASE("retainOnlyReachableFrom keeps GameInstance-held objects, drops the re
 	CHECK_FALSE(rt.alive(B)); // unheld → swept
 }
 
+namespace
+{
+	// Object whose "Destruct" event writes true to a public "died" bool on the
+	// instance referenced by its "logger" Ref variable (via SetExternal). Lets a
+	// destroyed object leave an observable trace on a surviving one.
+	Graph destructWritesLoggerGraph()
+	{
+		Graph g;
+		{ Variable v; v.name = "logger"; v.type = PinType::Ref; g.variables.push_back(v); }
+		Node ev; ev.type = NodeType::Event; ev.s = "Destruct"; const int e = g.addNode(ev);
+		Node gt; gt.type = NodeType::GetVariable; gt.s = "logger"; gt.propType = PinType::Ref; const int t = g.addNode(gt);
+		Node cb; cb.type = NodeType::ConstBool; cb.f[0] = 1.0f; const int c = g.addNode(cb);
+		Node se; se.type = NodeType::SetExternal; se.s = "died"; se.propType = PinType::Bool; const int s = g.addNode(se);
+		REQUIRE(g.connect(e, 0, s, 0)); // exec
+		REQUIRE(g.connect(t, 0, s, 2)); // logger → Target
+		REQUIRE(g.connect(c, 0, s, 3)); // true → Value
+		return g;
+	}
+
+	Graph publicBoolGraph(const std::string& name)
+	{
+		Graph g;
+		Variable v; v.name = name; v.type = PinType::Bool; v.access = 0;
+		g.variables.push_back(v);
+		return g;
+	}
+}
+
+TEST_CASE("destroy() fires the instance's Destruct before removing it")
+{
+	Runtime rt;
+	const InstanceId L = rt.add(publicBoolGraph("died"));   // surviving logger
+	const InstanceId A = rt.add(destructWritesLoggerGraph());
+	rt.setVariable(A, "logger", Value::ofRef(L));
+
+	CHECK(rt.getVariable(L, "died").b == false);
+	rt.destroy(A);
+	CHECK_FALSE(rt.alive(A));                     // gone
+	CHECK(rt.getVariable(L, "died").b == true);   // …but its Destruct ran first
+}
+
+TEST_CASE("destroy() is re-entrancy-safe when Destruct destroys the same instance")
+{
+	Runtime rt;
+	const InstanceId L = rt.add(publicBoolGraph("died"));
+
+	// A's Destruct writes the logger AND calls Destroy Object on Get Self — the
+	// self-destroy must not recurse into Destruct forever.
+	Graph gA = destructWritesLoggerGraph();
+	{
+		Node ev; ev.type = NodeType::Event; ev.s = "Destruct"; const int e = gA.addNode(ev);
+		Node gs; gs.type = NodeType::GetSelf; const int s = gA.addNode(gs);
+		Node du; du.type = NodeType::DestroyObject; const int d = gA.addNode(du);
+		REQUIRE(gA.connect(e, 0, d, 0)); // exec
+		REQUIRE(gA.connect(s, 0, d, 2)); // Self ref → DestroyObject.Target
+	}
+	const InstanceId A = rt.add(std::move(gA));
+	rt.setVariable(A, "logger", Value::ofRef(L));
+	// Route Destroy Object back through the runtime (as the app binds it).
+	Runtime::Services svc;
+	svc.destroyObject = [&](uint32_t ref){ rt.destroy(ref); };
+	rt.setServices(svc);
+
+	rt.destroy(A);                                // must terminate
+	CHECK_FALSE(rt.alive(A));
+	CHECK(rt.getVariable(L, "died").b == true);   // its Destruct still ran once
+}
+
+TEST_CASE("retainOnlyReachableFrom fires Destruct on the objects it sweeps")
+{
+	Runtime rt;
+	Graph gi;
+	{ Variable v; v.name = "logger"; v.type = PinType::Ref; gi.variables.push_back(v); }
+	const InstanceId G = rt.setGameInstance(std::move(gi));
+
+	const InstanceId L = rt.add(publicBoolGraph("died")); // kept by the GameInstance
+	rt.setVariable(G, "logger", Value::ofRef(L));
+
+	const InstanceId B = rt.add(destructWritesLoggerGraph()); // unheld → swept
+	rt.setVariable(B, "logger", Value::ofRef(L));
+
+	rt.retainOnlyReachableFrom(G);
+	CHECK(rt.alive(G));
+	CHECK(rt.alive(L));                           // held by the GameInstance
+	CHECK_FALSE(rt.alive(B));                     // unheld → swept…
+	CHECK(rt.getVariable(L, "died").b == true);   // …and its Destruct ran during the sweep
+}
+
 TEST_CASE("Get/Set External read + write a public variable but not a private one")
 {
 	Runtime rt;

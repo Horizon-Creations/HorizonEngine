@@ -782,7 +782,7 @@ void EditorApplication::OnInit()
 		};
 		svc.destroyObject = [this](uint32_t ref){
 			if (ref != 0 && ref != m_gameInstance.runtime().gameInstance())
-				m_gameInstance.runtime().remove(ref);
+				m_gameInstance.runtime().destroy(ref); // fires "Destruct"
 		};
 		m_gameInstance.runtime().setServices(std::move(svc));
 	}
