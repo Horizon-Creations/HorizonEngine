@@ -67,6 +67,8 @@ struct State
 	int    gDropElem = 0;            // element dragged onto the graph (Get/Set popup)
 	bool   gOpenDropPopup = false;   // request to open the element Get/Set popup next frame
 	std::string selectedVar;        // graph variable selected in the left panel (editing)
+	std::string varNameEdit;        // in-progress rename text for the selected variable
+	std::string varNameEditFor;     // which variable varNameEdit currently mirrors
 	std::string gDropVar;           // variable dragged onto the graph
 	bool   gOpenVarDrop = false;     // request to open the variable Get/Set popup next frame
 
@@ -1308,21 +1310,38 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 			ImGui::TextDisabled("Variable");
 			ImGui::Separator();
 
-			std::string oldName = v->name;
-			ImGui::InputText("Name", &v->name);
+			// Edit the name through a scratch buffer, NOT v->name directly: the
+			// variable is looked up by name (st.selectedVar), and Get/Set nodes
+			// reference it by name too. Mutating v->name per keystroke would make
+			// findVariable(selectedVar) miss on the next frame — the editor would
+			// vanish and only one character would land. Commit the rename atomically
+			// on deactivate instead. Re-seed the buffer whenever a different
+			// variable is shown.
+			if (st.varNameEditFor != v->name)
+			{
+				st.varNameEdit = v->name;
+				st.varNameEditFor = v->name;
+			}
+			ImGui::InputText("Name", &st.varNameEdit);
 			if (ImGui::IsItemDeactivatedAfterEdit())
 			{
+				const std::string oldName = v->name;
+				const std::string nn = st.varNameEdit;
 				// Keep it unique + non-empty, and rename the Get/Set nodes using it.
-				if (v->name.empty() || (v->name != oldName && st.graph.findVariable(v->name)))
-					v->name = oldName; // reject clashes / blanks
-				else if (v->name != oldName)
+				if (nn.empty() || (nn != oldName && st.graph.findVariable(nn)))
 				{
+					st.varNameEdit = oldName; // reject clashes / blanks → revert buffer
+				}
+				else if (nn != oldName)
+				{
+					v->name = nn;
 					for (auto& gn : st.graph.nodes)
 						if ((gn.type == NT::GetVariable || gn.type == NT::SetVariable) && gn.s == oldName)
-							gn.s = v->name;
-					st.selectedVar = v->name;
+							gn.s = nn;
+					st.selectedVar = nn;
+					st.varNameEditFor = nn;
+					commitEdit(st, ctx);
 				}
-				commitEdit(st, ctx);
 			}
 
 			int typeIdx = (int)v->type;
