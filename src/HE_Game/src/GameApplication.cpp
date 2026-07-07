@@ -217,6 +217,10 @@ void GameApplication::OnInit()
 	// ECS gameplay scripts (Lua/Python): the packaged game drives them exactly like
 	// the editor's play mode, so a shipped game behaves like PIE.
 	startScripts();
+
+	// Level script "OnLevelLoaded" fires once the world + scripts are up; the
+	// matching "OnLevelUnloaded" fires at shutdown.
+	if (m_world) m_world->fireLevelLoaded();
 }
 
 void GameApplication::startScripts()
@@ -522,6 +526,10 @@ void GameApplication::OnRender(float deltaTime)
 
 void GameApplication::OnShutdown()
 {
+	// Level script "OnLevelUnloaded" runs while the world is still alive (the
+	// world's destructor is default and never calls clear(), so fire it here).
+	if (m_world) m_world->fireLevelUnloaded();
+
 	// Tear down ECS scripts before the world (their finalizers may touch entities).
 	m_scriptContext.reset();
 	m_scriptInstances.clear();

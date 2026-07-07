@@ -2032,6 +2032,11 @@ void EditorApplication::setPlayMode(bool play)
 			}
 		}
 
+		// The level script's "OnLevelLoaded" fires once, after per-entity
+		// scripts have started. Leaving play mode routes through clear(), which
+		// fires the matching "OnLevelUnloaded".
+		m_editorWorld->fireLevelLoaded();
+
 		// horizon.showCursor()/hideCursor(): scripts release/re-grab the PIE
 		// mouse capture (visible cursor = UI interaction mode).
 		ScriptApi::setCursorHook([this](bool show){ setPlayMouseCaptured(!show); });

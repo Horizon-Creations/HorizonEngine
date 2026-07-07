@@ -496,6 +496,13 @@ namespace
 			entities.push_back(eJson);
 		}
 		scene["entities"] = entities;
+
+		// Level script (HorizonCode graph, one per scene). Stored as a nested
+		// object so the scene file stays readable; omitted when empty.
+		const std::string ls = world.levelScriptJson();
+		if (!ls.empty())
+			scene["levelScript"] = json::parse(ls, nullptr, /*allow_exceptions=*/false);
+
 		return scene;
 	}
 
@@ -854,6 +861,11 @@ namespace
 	// ── JSON → Scene ─────────────────────────────────────────────────────────
 	bool applySceneJson(HorizonWorld& world, const json& scene)
 	{
+		// Level script (scene-wide HorizonCode graph). Load it before the early
+		// return so an entity-less scene still restores its script.
+		if (scene.contains("levelScript"))
+			world.setLevelScriptJson(scene["levelScript"].dump());
+
 		if (!scene.contains("entities")) return true; // empty scene — valid
 
 		// Map serialised uint32 IDs to newly created entt entities.

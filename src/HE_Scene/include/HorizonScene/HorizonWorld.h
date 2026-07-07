@@ -1,6 +1,8 @@
 #pragma once
 #include <entt/entt.hpp>
 #include <string>
+#include <unordered_map>
+#include <HorizonCode/HorizonCode.h>
 #include "Components/NameComponent.h"
 #include "Components/HierarchyComponent.h"
 #include "WidgetManager.h"
@@ -61,10 +63,43 @@ public:
 	// (clear() drops them: PIE stop / scene load discards play-created widgets).
 	WidgetManager& widgets() { return m_widgets; }
 
+	// ── Level script ─────────────────────────────────────────────────────────
+	// One HorizonCode graph per level (like Unreal's Level Blueprint): intrinsic
+	// to the scene, authored in the Level Script editor, serialized with the
+	// scene. It reacts to world events — "OnLevelLoaded" fires once when the
+	// level starts (play-in-editor / game runtime), "OnLevelUnloaded" once when
+	// it ends. Not tied to any entity; holds its own persistent variable store.
+	HorizonCode::Graph&       levelScript()       { return m_levelScript; }
+	const HorizonCode::Graph& levelScript() const { return m_levelScript; }
+	// JSON accessors used by the scene serializer (empty when the graph has no
+	// nodes, so empty level scripts don't clutter the scene file).
+	std::string levelScriptJson() const;
+	void        setLevelScriptJson(const std::string& json);
+
+	// Run the level graph's "OnLevelLoaded" / "OnLevelUnloaded" events. Loaded
+	// seeds the variable store from the graph defaults and marks the level
+	// running; Unloaded is a no-op unless the level is running, so it fires
+	// exactly once per load regardless of which teardown path triggers it
+	// (PIE stop, scene switch, runtime shutdown). clear() calls Unloaded.
+	void fireLevelLoaded();
+	void fireLevelUnloaded();
+	bool isLevelRunning() const { return m_levelRunning; }
+	// Live level-script variable store (seeded at load, mutated by Set nodes).
+	// Read-only view for tooling/tests.
+	const std::unordered_map<std::string, HorizonCode::Value>& levelVariables() const { return m_levelVars; }
+
 
 private:
+	// Bind a HorizonCode Context to the level script (Print → log, variable
+	// get/set → m_levelVars). Property/show/hide are widget concepts and no-op.
+	HorizonCode::Context makeLevelContext();
+
 	entt::registry registry_;
 	Entity         rootEntity_      = entt::null;
 	bool           m_hierarchyDirty = true;
 	WidgetManager  m_widgets;
+
+	HorizonCode::Graph                                   m_levelScript;
+	std::unordered_map<std::string, HorizonCode::Value>  m_levelVars;
+	bool                                                 m_levelRunning = false;
 };

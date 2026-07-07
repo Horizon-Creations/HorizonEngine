@@ -5,6 +5,7 @@ add_executable(he_tests
     test_contentmanager.cpp
     test_material_graph.cpp
     test_scene_serializer.cpp
+    test_level_script.cpp
     test_culling.cpp
     test_undo.cpp
     test_editorcamera.cpp

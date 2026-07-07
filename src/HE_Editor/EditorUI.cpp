@@ -3,6 +3,7 @@
 #include "ScriptEditorPanel.h"
 #include "MaterialEditorPanel.h"
 #include "UIEditorPanel.h"
+#include "LevelScriptPanel.h"
 #include "HorizonVersion.h"
 #include <Hpak/ProjectExporter.h>
 #include <HorizonScene/HorizonScene.h>
@@ -149,6 +150,9 @@ static bool s_showPreferences = false;
 
 // Toggled by View > Performance Profiler; drives the profiler panel.
 static bool s_showProfiler = false;
+
+// Toggled by View > Level Script; drives the per-scene HorizonCode editor window.
+static bool s_showLevelScript = false;
 
 // Build > Export Project modal state. Editable fields mirror the selected
 // ExportProfile (persisted in the .heproj); the export itself runs on a worker
@@ -1649,6 +1653,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
         if (ImGui::MenuItem("Toggle Fullscreen", "F11")) {}
         if (ImGui::MenuItem("Reset Layout")) { s_resetLayoutRequested = true; }
         if (ImGui::MenuItem("Performance Profiler", nullptr, s_showProfiler)) s_showProfiler = !s_showProfiler;
+        if (ImGui::MenuItem("Level Script", nullptr, s_showLevelScript, ctx.projectLoaded))
+            s_showLevelScript = !s_showLevelScript;
         ImGui::EndMenu();
     }
 	if (ImGui::BeginMenu("Assets"))
@@ -3939,6 +3945,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 
     DrawPreferencesWindow(ctx, s_showPreferences);
     DrawProfilerWindow(ctx, s_showProfiler);
+    if (s_showLevelScript) LevelScriptPanel::render(ctx, s_showLevelScript);
 
     //Content Browser
 	auto [contentFolder, contentLock] = ctx.globalState->lockContentFolder();
