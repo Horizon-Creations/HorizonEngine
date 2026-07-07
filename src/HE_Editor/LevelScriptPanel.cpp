@@ -470,10 +470,17 @@ void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events,
 		ImGui::TextDisabled("Calls a public function on the\nTarget instance (a reference).");
 		break;
 	case NT::CreateWidget:
-		ImGui::InputText("Widget Asset", &n->s);
-		if (ImGui::IsItemDeactivatedAfterEdit()) edited = true;
-		ImGui::TextDisabled("Content-relative path to a UI Widget\nasset. Outputs the new widget's id.");
+	{
+		if (ImGui::BeginCombo("Widget", n->s.empty() ? "(none)" : n->s.c_str()))
+		{
+			for (const auto& a : HcEditorUtil::listAssets(content, HE::AssetType::Widget))
+				if (ImGui::Selectable((a.label + "##" + a.path).c_str(), n->s == a.path))
+					{ n->s = a.path; edited = true; }
+			ImGui::EndCombo();
+		}
+		ImGui::TextDisabled("Which UI Widget asset to instantiate.\nOutputs the new widget's id.");
 		break;
+	}
 	case NT::CreateObject:
 	{
 		if (ImGui::BeginCombo("Class", n->s.empty() ? "(none)" : n->s.c_str()))

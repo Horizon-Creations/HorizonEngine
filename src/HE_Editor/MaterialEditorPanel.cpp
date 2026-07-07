@@ -1,6 +1,7 @@
 #include "MaterialEditorPanel.h"
 #include "EditorApplication.h"                 // AppContext
 #include "GraphEditor.h"                        // shared node-graph canvas frontend
+#include "HcClassList.h"                        // asset dropdowns (texture picker)
 #include <MaterialGraph/MaterialGraph.h>
 #include <material/MaterialShaderLibrary.h> // inline compile check (canvas error banner)
 #include <ContentManager/ContentManager.h>
@@ -478,7 +479,7 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true)
 			ImGui::TextWrapped("%s", label.c_str());
 			ImGui::PopStyleColor();
 			if (!n.s.empty() && ImGui::SmallButton("Clear")) { n.s.clear(); committed = true; }
-			ImGui::TextDisabled("(drop a texture)");
+			ImGui::TextDisabled("(drop, or right-click → Set Texture)");
 			break;
 		}
 		case MatNodeType::Output:
@@ -994,11 +995,22 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 	};
 
 	// ── Per-node context menu (Open Function / Preview This Node / Delete). ──
-	m.drawNodeContextMenu = [&st, &deleteNode, &togglePreviewNode, &ctx](int nodeId)
+	m.drawNodeContextMenu = [&st, &deleteNode, &togglePreviewNode, &structuralEdit, &ctx](int nodeId)
 	{
 		const MatGraphNode* n = st.graph.findNode(nodeId);
 		if (!n) return;
 		const bool deletable = n->type != MatNodeType::Output;
+		// Pick a texture from a dropdown (no path typing; drag-drop still works).
+		if (n->type == MatNodeType::TextureSample || n->type == MatNodeType::NormalMapSample)
+			if (ImGui::BeginMenu("Set Texture"))
+			{
+				if (ImGui::MenuItem("(mesh texture)", nullptr, n->s.empty()))
+					if (MatGraphNode* mn = st.graph.findNode(nodeId)) { mn->s.clear(); structuralEdit = true; }
+				for (const auto& a : HcEditorUtil::listAssets(ctx.contentManager, HE::AssetType::Texture))
+					if (ImGui::MenuItem((a.label + "##" + a.path).c_str(), nullptr, n->s == a.path))
+						if (MatGraphNode* mn = st.graph.findNode(nodeId)) { mn->s = a.path; structuralEdit = true; }
+				ImGui::EndMenu();
+			}
 		if (n->type == MatNodeType::FunctionCall && !n->s.empty() && ctx.contentManager)
 			if (ImGui::MenuItem("Open Function"))
 				s_openAssetRequest =
