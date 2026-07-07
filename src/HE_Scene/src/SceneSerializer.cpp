@@ -23,7 +23,6 @@
 #include "HorizonScene/Components/LODComponent.h"
 #include "HorizonScene/Components/FoliageComponent.h"
 #include "HorizonScene/Components/UICanvasComponent.h"
-#include "HorizonScene/Components/UIWidgetComponent.h"
 #include "HorizonScene/Components/UIElementComponent.h"
 #include "HorizonScene/Components/UITextComponent.h"
 #include "HorizonScene/Components/UIImageComponent.h"
@@ -453,13 +452,6 @@ namespace
 				{ "onClickFunction", btn->onClickFunction },
 			};
 		}
-		if (auto* w = registry.try_get<UIWidgetComponent>(entity))
-		{
-			comps["uiwidget"] = {
-				{ "widget", uuidToJson(w->widgetAssetId) },
-				{ "active", w->active },
-			};
-		}
 		return comps;
 	}
 
@@ -856,14 +848,6 @@ namespace
 			btn.pressedColor     = jsonToVec4(c.value("pressedColor", json()), btn.pressedColor);
 			btn.onClickFunction  = c.value("onClickFunction", btn.onClickFunction);
 			registry.emplace_or_replace<UIButtonComponent>(entity, std::move(btn));
-		}
-		if (comps.contains("uiwidget"))
-		{
-			const json& c = comps["uiwidget"];
-			UIWidgetComponent w;
-			w.widgetAssetId = jsonToUuid(c.value("widget", json()));
-			w.active        = c.value("active", w.active);
-			registry.emplace_or_replace<UIWidgetComponent>(entity, w);
 		}
 	}
 

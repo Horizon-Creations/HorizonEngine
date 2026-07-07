@@ -8,7 +8,7 @@
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/SceneSystems.h>
 #include <HorizonScene/ScriptContext.h>
-#include <HorizonScene/UIWidgetInstantiator.h>
+#include <HorizonScene/ScriptApi.h>
 #include <Scripting/ScriptTypes.h>
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
@@ -205,9 +205,8 @@ void GameApplication::OnInit()
 		Logger::Log(Logger::LogLevel::Info, "GameApplication: native game logic started");
 	}
 
-	// Expand UI widget assets into live UI entities before scripts start, so
-	// widget-spawned ScriptComponents get instances like hand-placed ones.
-	UIWidgetInstantiator::instantiateAll(*m_world, contentManager());
+	// horizon.showCursor()/hideCursor(): scripts release/re-grab the mouse.
+	ScriptApi::setCursorHook([this](bool show){ setMouseCaptured(!show); });
 
 	// ECS gameplay scripts (Lua/Python): the packaged game drives them exactly like
 	// the editor's play mode, so a shipped game behaves like PIE.
@@ -273,6 +272,11 @@ void GameApplication::updateUIInput()
 	// While the fly-look holds the mouse captive there is no visible cursor —
 	// hover states clear and nothing is clickable (Esc releases the mouse).
 	const bool pointerValid = !m_mouseCaptured && w != nullptr;
+
+	// Widget pointer input first — widgets draw on top of entity UI.
+	m_world->widgets().processPointer(static_cast<float>(pw), static_cast<float>(ph),
+	                                  mx * sx, my * sy,
+	                                  (buttons & SDL_BUTTON_LMASK) != 0, pointerValid);
 
 	std::vector<UIInputSystem::PointerEvent> events;
 	UIInputSystem::update(*m_world, m_uiInput,
@@ -425,6 +429,9 @@ void GameApplication::OnRender(float deltaTime)
 	// Per-frame ECS script update (Lua/Python onUpdate), before the systems tick so
 	// script-driven transforms/params are reflected the same frame.
 	updateScripts(deltaTime);
+
+	// Live widgets: per-frame logic tick (EventTick).
+	if (m_world) m_world->widgets().tick(deltaTime);
 
 	// In-game UI pointer input (hover/click on buttons + scripted elements).
 	updateUIInput();

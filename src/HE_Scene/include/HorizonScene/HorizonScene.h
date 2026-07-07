@@ -40,9 +40,8 @@
 #include "Components/UITextComponent.h"
 #include "Components/UIImageComponent.h"
 #include "Components/UIButtonComponent.h"
-#include "Components/UIWidgetComponent.h"
 #include "UISystem.h"
-#include "UIWidgetInstantiator.h"
+#include "WidgetManager.h"
 #include "TerrainMeshGenerator.h"
 #include "TerrainSystem.h"
 

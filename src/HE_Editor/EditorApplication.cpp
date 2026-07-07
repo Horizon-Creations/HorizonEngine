@@ -23,7 +23,7 @@
 #include <HorizonScene/SceneSystems.h>
 #include <HorizonScene/ScriptContext.h>
 #include <HorizonScene/CollisionSystem.h>
-#include <HorizonScene/UIWidgetInstantiator.h>
+#include <HorizonScene/ScriptApi.h>
 #include <HorizonScene/Components/ScriptComponent.h>
 #include <ContentManager/Assets.h>
 #include <Renderer/RendererFactory.h>
@@ -985,11 +985,20 @@ void EditorApplication::OnRender(float dt)
 			CollisionSystem::dispatch(*m_physicsWorld, *m_scriptContext, m_scriptInstances);
 		}
 
+		// Live widgets: per-frame logic tick (EventTick).
+		if (m_isPlaying && m_editorWorld)
+			m_editorWorld->widgets().tick(dt);
+
 		// In-game UI pointer input (hover/click) + script event dispatch. The
 		// viewport panel feeds the pointer (reportPlayUIPointer); while the PIE
 		// mouse capture is engaged there is no cursor, so the pointer is invalid.
 		if (m_isPlaying && m_editorWorld && m_uiViewportW > 0.0f && m_uiViewportH > 0.0f)
 		{
+			// Widget pointer input first — widgets draw on top of entity UI.
+			m_editorWorld->widgets().processPointer(
+				m_uiViewportW, m_uiViewportH, m_uiPointerX, m_uiPointerY,
+				m_uiPointerDown, m_uiPointerValid && !m_playMouseCaptured);
+
 			std::vector<UIInputSystem::PointerEvent> uiEvents;
 			UIInputSystem::update(*m_editorWorld, m_uiInputState,
 			                      m_uiViewportW, m_uiViewportH,
@@ -1984,12 +1993,6 @@ void EditorApplication::setPlayMode(bool play)
 		m_physicsWorld->initialize(*m_editorWorld);
 		m_physicsAccum = 0.0f;
 
-		// Expand UI widget assets into live UI entities. Runs before script init
-		// so widget-spawned ScriptComponents start like hand-placed ones; the
-		// play-mode snapshot above already excludes them, so leaving play mode
-		// cleans them up with the restore.
-		UIWidgetInstantiator::instantiateAll(*m_editorWorld, contentManager());
-
 		// Start audio for sources marked playOnStart
 		AudioSystem::playOnStart(*m_editorWorld, m_audioEngine, &contentManager());
 
@@ -2013,6 +2016,10 @@ void EditorApplication::setPlayMode(bool play)
 				m_scriptInstances[static_cast<uint32_t>(entity)] = instId;
 			}
 		}
+
+		// horizon.showCursor()/hideCursor(): scripts release/re-grab the PIE
+		// mouse capture (visible cursor = UI interaction mode).
+		ScriptApi::setCursorHook([this](bool show){ setPlayMouseCaptured(!show); });
 
 		// Capture the mouse so PIE plays like the packaged game (Esc toggles it).
 		setPlayMouseCaptured(true);
@@ -2039,6 +2046,7 @@ void EditorApplication::setPlayMode(bool play)
 		m_scriptContext.reset();
 		m_scriptInstances.clear();
 		m_uiInputState = {};
+		ScriptApi::setCursorHook(nullptr);
 
 		// Stop all audio when exiting play mode
 		m_audioEngine.stopAll();

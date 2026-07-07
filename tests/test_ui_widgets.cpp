@@ -4,12 +4,14 @@
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <Scripting/ScriptEngine.h>
+#include <HorizonScene/ScriptContext.h>
+#include <HorizonScene/ScriptApi.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/UISystem.h>
 #include <HorizonScene/UIInputSystem.h>
-#include <HorizonScene/UIWidgetInstantiator.h>
+#include <HorizonScene/WidgetManager.h>
+#include <UIWidget/UIWidgetGraph.h>
 #include <HorizonScene/SceneSerializer.h>
-#include <HorizonScene/Components/UIWidgetComponent.h>
 #include <HorizonScene/Components/UICanvasComponent.h>
 #include <HorizonScene/Components/UIElementComponent.h>
 #include <HorizonScene/Components/UITextComponent.h>
@@ -127,128 +129,16 @@ TEST_CASE("UIWidgetTree subtree helpers")
 
 namespace
 {
-HE::UUID registerTestWidget(ContentManager& cm, const HE::UIWidgetTree& tree)
+HE::UUID registerTestWidget(ContentManager& cm, const HE::UIWidgetTree& tree,
+                            const HE::UIWidgetGraph* graph = nullptr,
+                            const char* path = "mem://test-widget.hasset")
 {
     UIWidgetAsset a;
     a.treeJson = HE::uiWidgetTreeToJson(tree);
-    a.path = "mem://test-widget.hasset";
+    if (graph) a.graphJson = HE::uiWidgetGraphToJson(*graph);
+    a.path = path;
     return cm.registerWidget(std::move(a));
 }
-}
-
-TEST_CASE("UIWidgetInstantiator expands a tree into UI entities")
-{
-    TempWidgetDir dir;
-    ContentManager cm(dir.path.string());
-
-    HE::UIWidgetTree t;
-    t.canvasWidth = 800.0f; t.canvasHeight = 600.0f;
-
-    HE::UIWidgetNode panel;
-    panel.type = HE::UIWidgetType::Panel;
-    panel.name = "HUD";
-    const int panelId = t.addNode(panel);
-
-    HE::UIWidgetNode label;
-    label.type = HE::UIWidgetType::Text;
-    label.parentId = panelId;
-    label.text = "Score";
-    t.addNode(label);
-
-    HE::UIWidgetNode btn;
-    btn.type = HE::UIWidgetType::Button;
-    btn.parentId = panelId;
-    btn.text = "OK";
-    t.addNode(btn);
-
-    const HE::UUID widgetId = registerTestWidget(cm, t);
-
-    HorizonWorld world;
-    auto& reg = world.registry();
-    auto host = world.createEntity("HudHost");
-    reg.emplace<UIWidgetComponent>(host, UIWidgetComponent{ widgetId, true });
-
-    const auto spawned = UIWidgetInstantiator::instantiateAll(world, cm);
-    REQUIRE(spawned.size() == 3);
-
-    // Host got a canvas sized from the tree.
-    const auto* canvas = reg.try_get<UICanvasComponent>(host);
-    REQUIRE(canvas);
-    CHECK(canvas->width  == doctest::Approx(800.0f));
-    CHECK(canvas->height == doctest::Approx(600.0f));
-
-    int panels = 0, texts = 0, buttons = 0, buttonLabels = 0;
-    for (Entity e : spawned)
-    {
-        REQUIRE(reg.all_of<UIElementComponent>(e));
-        if (reg.all_of<UIButtonComponent>(e))
-        {
-            ++buttons;
-            if (reg.all_of<UITextComponent>(e)) ++buttonLabels;
-        }
-        else if (reg.all_of<UITextComponent>(e)) ++texts;
-        else if (reg.all_of<UIImageComponent>(e)) ++panels;
-    }
-    CHECK(panels == 1);
-    CHECK(texts == 1);
-    CHECK(buttons == 1);
-    CHECK(buttonLabels == 1); // the button label rides on the button entity
-
-    // Children are parented under the panel entity, panel under the host.
-    int rootChildren = 0;
-    for (Entity e : spawned)
-    {
-        const auto* h = reg.try_get<HierarchyComponent>(e);
-        REQUIRE(h);
-        if (h->parent == host) ++rootChildren;
-    }
-    CHECK(rootChildren == 1);
-}
-
-TEST_CASE("UIWidgetInstantiator attaches ScriptComponents from scriptPath")
-{
-    TempWidgetDir dir;
-    ContentManager cm(dir.path.string());
-
-    ScriptAsset script;
-    script.sourceCode = "local M = {}\nreturn M\n";
-    script.path = "mem://Behavior.hasset";
-    const HE::UUID scriptId = cm.registerScript(std::move(script));
-    (void)scriptId;
-
-    HE::UIWidgetTree t;
-    HE::UIWidgetNode n;
-    n.type = HE::UIWidgetType::Button;
-    n.scriptPath = "mem://Behavior.hasset";
-    t.addNode(n);
-
-    const HE::UUID widgetId = registerTestWidget(cm, t);
-
-    HorizonWorld world;
-    auto& reg = world.registry();
-    auto host = world.createEntity("host");
-    reg.emplace<UIWidgetComponent>(host, UIWidgetComponent{ widgetId, true });
-
-    const auto spawned = UIWidgetInstantiator::instantiate(world, cm, host);
-    REQUIRE(spawned.size() == 1);
-    const auto* sc = reg.try_get<ScriptComponent>(spawned[0]);
-    REQUIRE(sc);
-    CHECK(sc->moduleName == "Behavior");
-}
-
-TEST_CASE("UIWidgetInstantiator skips inactive components and missing assets")
-{
-    TempWidgetDir dir;
-    ContentManager cm(dir.path.string());
-    HorizonWorld world;
-    auto& reg = world.registry();
-
-    auto e1 = world.createEntity("inactive");
-    reg.emplace<UIWidgetComponent>(e1, UIWidgetComponent{ HE::UUID::generate(), false });
-    auto e2 = world.createEntity("missing");
-    reg.emplace<UIWidgetComponent>(e2, UIWidgetComponent{ HE::UUID::generate(), true });
-
-    CHECK(UIWidgetInstantiator::instantiateAll(world, cm).empty());
 }
 
 // ── Parent-relative layout ───────────────────────────────────────────────────
@@ -493,33 +383,6 @@ TEST_CASE("ScriptEngine UI events on a script without handlers are no-ops")
 
 // ── Serialization ────────────────────────────────────────────────────────────
 
-TEST_CASE("UIWidgetComponent round-trips through SceneSerializer")
-{
-    HorizonWorld w1;
-    auto& r1 = w1.registry();
-    auto e1  = w1.createEntity("widgetHost");
-    UIWidgetComponent wc;
-    wc.widgetAssetId = HE::UUID::generate();
-    wc.active = false;
-    r1.emplace<UIWidgetComponent>(e1, wc);
-
-    SceneSerializer ser;
-    std::vector<uint8_t> blob;
-    REQUIRE(ser.saveToMemory(w1, blob));
-
-    HorizonWorld w2;
-    REQUIRE(ser.loadFromMemory(w2, blob));
-
-    bool found = false;
-    for (auto [e, c] : w2.registry().view<UIWidgetComponent>().each())
-    {
-        found = true;
-        CHECK(c.widgetAssetId == wc.widgetAssetId);
-        CHECK(!c.active);
-    }
-    CHECK(found);
-}
-
 // ── Widget asset through ContentManager save/load ────────────────────────────
 
 TEST_CASE("UIWidgetAsset persists through HAsset save/load")
@@ -555,4 +418,450 @@ TEST_CASE("UIWidgetAsset persists through HAsset save/load")
         REQUIRE(r.nodes.size() == 1);
         CHECK(r.nodes[0].materialPath == "Materials/M.hasset");
     }
+}
+
+// ── Logic graph model ────────────────────────────────────────────────────────
+
+TEST_CASE("UIWidgetGraph JSON round-trip and typed connect")
+{
+    HE::UIWidgetGraph g;
+
+    HE::UIGraphNode ev;
+    ev.type = HE::UIGraphNodeType::EventClick;
+    ev.elem = 7;
+    const int evId = g.addNode(ev);
+
+    HE::UIGraphNode lit;
+    lit.type = HE::UIGraphNodeType::ConstString;
+    lit.s = "Hello";
+    const int litId = g.addNode(lit);
+
+    HE::UIGraphNode set;
+    set.type = HE::UIGraphNodeType::SetProperty;
+    set.elem = 7;
+    set.prop = (int)HE::UIWidgetProp::Text;
+    const int setId = g.addNode(set);
+
+    // Pin space: EventClick has 1 exec-out at index 0.
+    // SetProperty: execIn 0, execOut 1, dataIn(Value) 2.
+    CHECK(g.connect(evId, 0, setId, 0));   // exec → exec
+    CHECK(g.connect(litId, 0, setId, 2));  // String → String (retyped by prop)
+
+    // Type mismatch is rejected: Float literal → String input.
+    HE::UIGraphNode f;
+    f.type = HE::UIGraphNodeType::ConstFloat;
+    const int fId = g.addNode(f);
+    CHECK(!g.connect(fId, 0, setId, 2));
+
+    const std::string json = HE::uiWidgetGraphToJson(g);
+    HE::UIWidgetGraph r;
+    REQUIRE(HE::uiWidgetGraphFromJson(json, r));
+    CHECK(r.nodes.size() == 4);
+    CHECK(r.links.size() == 2);
+    const HE::UIGraphNode* rev = r.findNode(evId);
+    REQUIRE(rev);
+    CHECK(rev->type == HE::UIGraphNodeType::EventClick);
+    CHECK(rev->elem == 7);
+}
+
+// ── Interpreter ──────────────────────────────────────────────────────────────
+
+namespace
+{
+// A tree with one text element (id 1) and one button (id 2).
+HE::UIWidgetTree makeGraphTestTree()
+{
+    HE::UIWidgetTree t;
+    HE::UIWidgetNode txt;
+    txt.type = HE::UIWidgetType::Text;
+    txt.text = "initial";
+    t.addNode(txt); // id 1
+    HE::UIWidgetNode btn;
+    btn.type = HE::UIWidgetType::Button;
+    btn.sizeX = 200.0f; btn.sizeY = 50.0f;
+    btn.anchor = 0; btn.pivotX = 0.0f; btn.pivotY = 0.0f;
+    t.addNode(btn); // id 2
+    return t;
+}
+}
+
+TEST_CASE("Graph runner: OnClick sets a property")
+{
+    HE::UIWidgetTree tree = makeGraphTestTree();
+    HE::UIWidgetGraph g;
+
+    HE::UIGraphNode ev;  ev.type = HE::UIGraphNodeType::EventClick; ev.elem = 2;
+    const int evId = g.addNode(ev);
+    HE::UIGraphNode lit; lit.type = HE::UIGraphNodeType::ConstString; lit.s = "clicked!";
+    const int litId = g.addNode(lit);
+    HE::UIGraphNode set; set.type = HE::UIGraphNodeType::SetProperty;
+    set.elem = 1; set.prop = (int)HE::UIWidgetProp::Text;
+    const int setId = g.addNode(set);
+    REQUIRE(g.connect(evId, 0, setId, 0));
+    REQUIRE(g.connect(litId, 0, setId, 2));
+
+    HE::UIWidgetSelfState self;
+    HE::UIWidgetGraphRunner runner(g, tree, self);
+
+    runner.fireEvent(HE::UIWidgetEvent::Click, /*elem=*/1); // wrong element
+    CHECK(tree.findNode(1)->text == "initial");
+    runner.fireEvent(HE::UIWidgetEvent::Click, /*elem=*/2);
+    CHECK(tree.findNode(1)->text == "clicked!");
+}
+
+TEST_CASE("Graph runner: Branch + math + GetProperty")
+{
+    HE::UIWidgetTree tree = makeGraphTestTree();
+    tree.findNode(1)->fontSize = 10.0f;
+    HE::UIWidgetGraph g;
+
+    // OnConstruct → Branch(fontSize > 5) → True: set text "big", False: "small"
+    HE::UIGraphNode ev; ev.type = HE::UIGraphNodeType::EventConstruct;
+    const int evId = g.addNode(ev);
+
+    HE::UIGraphNode get; get.type = HE::UIGraphNodeType::GetProperty;
+    get.elem = 1; get.prop = (int)HE::UIWidgetProp::FontSize;
+    const int getId = g.addNode(get);
+
+    HE::UIGraphNode five; five.type = HE::UIGraphNodeType::ConstFloat; five.f[0] = 5.0f;
+    const int fiveId = g.addNode(five);
+
+    HE::UIGraphNode gt; gt.type = HE::UIGraphNodeType::Greater;
+    const int gtId = g.addNode(gt);
+
+    HE::UIGraphNode br; br.type = HE::UIGraphNodeType::Branch;
+    const int brId = g.addNode(br);
+
+    HE::UIGraphNode sBig; sBig.type = HE::UIGraphNodeType::ConstString; sBig.s = "big";
+    const int sBigId = g.addNode(sBig);
+    HE::UIGraphNode setBig; setBig.type = HE::UIGraphNodeType::SetProperty;
+    setBig.elem = 1; setBig.prop = (int)HE::UIWidgetProp::Text;
+    const int setBigId = g.addNode(setBig);
+
+    HE::UIGraphNode sSmall; sSmall.type = HE::UIGraphNodeType::ConstString; sSmall.s = "small";
+    const int sSmallId = g.addNode(sSmall);
+    HE::UIGraphNode setSmall; setSmall.type = HE::UIGraphNodeType::SetProperty;
+    setSmall.elem = 1; setSmall.prop = (int)HE::UIWidgetProp::Text;
+    const int setSmallId = g.addNode(setSmall);
+
+    // Wiring. GetProperty: dataOut pin index 0. Greater: dataIns at 0/1, out 2.
+    // Branch: execIn 0, True 1, False 2, Cond 3.
+    REQUIRE(g.connect(evId, 0, brId, 0));       // exec
+    REQUIRE(g.connect(getId, 0, gtId, 0));      // fontSize → A
+    REQUIRE(g.connect(fiveId, 0, gtId, 1));     // 5 → B
+    REQUIRE(g.connect(gtId, 2, brId, 3));       // Bool → Cond
+    REQUIRE(g.connect(brId, 1, setBigId, 0));   // True → set "big"
+    REQUIRE(g.connect(brId, 2, setSmallId, 0)); // False → set "small"
+    REQUIRE(g.connect(sBigId, 0, setBigId, 2));
+    REQUIRE(g.connect(sSmallId, 0, setSmallId, 2));
+
+    HE::UIWidgetSelfState self;
+    HE::UIWidgetGraphRunner runner(g, tree, self);
+    runner.fireEvent(HE::UIWidgetEvent::Construct);
+    CHECK(tree.findNode(1)->text == "big");
+
+    tree.findNode(1)->fontSize = 2.0f;
+    runner.fireEvent(HE::UIWidgetEvent::Construct);
+    CHECK(tree.findNode(1)->text == "small");
+}
+
+TEST_CASE("Graph runner: functions honor the access modifier for script calls")
+{
+    HE::UIWidgetTree tree = makeGraphTestTree();
+    HE::UIWidgetGraph g;
+
+    HE::UIGraphNode fnPub; fnPub.type = HE::UIGraphNodeType::FunctionEntry;
+    fnPub.s = "SetIt"; fnPub.access = 0; // public
+    const int fnPubId = g.addNode(fnPub);
+    HE::UIGraphNode fnPriv; fnPriv.type = HE::UIGraphNodeType::FunctionEntry;
+    fnPriv.s = "Hidden"; fnPriv.access = 1; // private
+    g.addNode(fnPriv);
+
+    HE::UIGraphNode lit; lit.type = HE::UIGraphNodeType::ConstString; lit.s = "from-fn";
+    const int litId = g.addNode(lit);
+    HE::UIGraphNode set; set.type = HE::UIGraphNodeType::SetProperty;
+    set.elem = 1; set.prop = (int)HE::UIWidgetProp::Text;
+    const int setId = g.addNode(set);
+    REQUIRE(g.connect(fnPubId, 0, setId, 0));
+    REQUIRE(g.connect(litId, 0, setId, 2));
+
+    HE::UIWidgetSelfState self;
+    HE::UIWidgetGraphRunner runner(g, tree, self);
+
+    CHECK(!runner.callFunction("Hidden", /*requirePublic=*/true));  // gated
+    CHECK(runner.callFunction("Hidden", /*requirePublic=*/false));  // internal ok
+    CHECK(!runner.callFunction("Nope", true));                      // missing
+    CHECK(runner.callFunction("SetIt", true));
+    CHECK(tree.findNode(1)->text == "from-fn");
+}
+
+TEST_CASE("Graph runner: ShowSelf/HideSelf flip the widget flag")
+{
+    HE::UIWidgetTree tree = makeGraphTestTree();
+    HE::UIWidgetGraph g;
+    HE::UIGraphNode fn; fn.type = HE::UIGraphNodeType::FunctionEntry;
+    fn.s = "Hide"; fn.access = 0;
+    const int fnId = g.addNode(fn);
+    HE::UIGraphNode hide; hide.type = HE::UIGraphNodeType::HideSelf;
+    const int hideId = g.addNode(hide);
+    REQUIRE(g.connect(fnId, 0, hideId, 0));
+
+    HE::UIWidgetSelfState self;
+    HE::UIWidgetGraphRunner runner(g, tree, self);
+    CHECK(self.visible);
+    CHECK(runner.callFunction("Hide", true));
+    CHECK(!self.visible);
+}
+
+// ── WidgetManager (widgets live OUTSIDE the entity world) ────────────────────
+
+TEST_CASE("WidgetManager create/show/hide/zOrder/destroy lifecycle")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    HE::UIWidgetTree t = makeGraphTestTree();
+    registerTestWidget(cm, t);
+
+    WidgetManager wm;
+    const int id = wm.createWidget(cm, "mem://test-widget.hasset");
+    REQUIRE(id != 0);
+    CHECK(wm.isAlive(id));
+    CHECK(wm.isVisible(id));
+    CHECK(wm.count() == 1);
+
+    wm.hideWidget(id);
+    CHECK(!wm.isVisible(id));
+    wm.showWidget(id);
+    CHECK(wm.isVisible(id));
+
+    wm.setZOrder(id, 42);
+    CHECK(wm.zOrder(id) == 42);
+
+    // Hidden widgets produce no draw quads.
+    std::vector<UIRenderObject> out;
+    wm.extract(1920.0f, 1080.0f, out);
+    CHECK(!out.empty());
+    wm.hideWidget(id);
+    out.clear();
+    wm.extract(1920.0f, 1080.0f, out);
+    CHECK(out.empty());
+
+    wm.destroyWidget(id);
+    CHECK(!wm.isAlive(id));
+    CHECK(wm.count() == 0);
+
+    // Missing asset → id 0.
+    CHECK(wm.createWidget(cm, "mem://does-not-exist.hasset") == 0);
+}
+
+TEST_CASE("WidgetManager fires Construct and routes public function calls")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    HE::UIWidgetTree t = makeGraphTestTree();
+    HE::UIWidgetGraph g;
+    // OnConstruct sets text; a public function overwrites it later.
+    HE::UIGraphNode ev; ev.type = HE::UIGraphNodeType::EventConstruct;
+    const int evId = g.addNode(ev);
+    HE::UIGraphNode lit; lit.type = HE::UIGraphNodeType::ConstString; lit.s = "constructed";
+    const int litId = g.addNode(lit);
+    HE::UIGraphNode set; set.type = HE::UIGraphNodeType::SetProperty;
+    set.elem = 1; set.prop = (int)HE::UIWidgetProp::Text;
+    const int setId = g.addNode(set);
+    REQUIRE(g.connect(evId, 0, setId, 0));
+    REQUIRE(g.connect(litId, 0, setId, 2));
+
+    HE::UIGraphNode fn; fn.type = HE::UIGraphNodeType::FunctionEntry;
+    fn.s = "Reset"; fn.access = 0;
+    const int fnId = g.addNode(fn);
+    HE::UIGraphNode lit2; lit2.type = HE::UIGraphNodeType::ConstString; lit2.s = "reset";
+    const int lit2Id = g.addNode(lit2);
+    HE::UIGraphNode set2; set2.type = HE::UIGraphNodeType::SetProperty;
+    set2.elem = 1; set2.prop = (int)HE::UIWidgetProp::Text;
+    const int set2Id = g.addNode(set2);
+    REQUIRE(g.connect(fnId, 0, set2Id, 0));
+    REQUIRE(g.connect(lit2Id, 0, set2Id, 2));
+
+    registerTestWidget(cm, t, &g);
+
+    WidgetManager wm;
+    const int id = wm.createWidget(cm, "mem://test-widget.hasset");
+    REQUIRE(id != 0);
+
+    // Construct ran → the text glyphs spell "constructed" (11 glyph quads +
+    // 1 button quad).
+    std::vector<UIRenderObject> out;
+    wm.extract(1920.0f, 1080.0f, out);
+    int glyphs = 0;
+    for (const auto& ro : out) if (ro.type == 2) ++glyphs;
+    CHECK(glyphs == (int)std::string("constructed").size());
+
+    CHECK(wm.callFunction(id, "Reset"));
+    CHECK(!wm.callFunction(id, "Missing"));
+    out.clear();
+    wm.extract(1920.0f, 1080.0f, out);
+    glyphs = 0;
+    for (const auto& ro : out) if (ro.type == 2) ++glyphs;
+    CHECK(glyphs == (int)std::string("reset").size());
+}
+
+TEST_CASE("WidgetManager pointer input drives clicks and hover on the graph")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    // Button (id 2) at canvas top-left, 200×50 (see makeGraphTestTree).
+    HE::UIWidgetTree t = makeGraphTestTree();
+    HE::UIWidgetGraph g;
+    HE::UIGraphNode ev; ev.type = HE::UIGraphNodeType::EventClick; ev.elem = 2;
+    const int evId = g.addNode(ev);
+    HE::UIGraphNode lit; lit.type = HE::UIGraphNodeType::ConstString; lit.s = "hit";
+    const int litId = g.addNode(lit);
+    HE::UIGraphNode set; set.type = HE::UIGraphNodeType::SetProperty;
+    set.elem = 1; set.prop = (int)HE::UIWidgetProp::Text;
+    const int setId = g.addNode(set);
+    REQUIRE(g.connect(evId, 0, setId, 0));
+    REQUIRE(g.connect(litId, 0, setId, 2));
+
+    registerTestWidget(cm, t, &g);
+
+    WidgetManager wm;
+    const int id = wm.createWidget(cm, "mem://test-widget.hasset");
+    REQUIRE(id != 0);
+
+    // Press + release inside the button (canvas 1920×1080 at same viewport →
+    // scale 1; the button rect is 0,0..200,50).
+    CHECK(wm.processPointer(1920.0f, 1080.0f, 100.0f, 25.0f, true,  true));
+    CHECK(wm.processPointer(1920.0f, 1080.0f, 100.0f, 25.0f, false, true));
+
+    std::vector<UIRenderObject> out;
+    wm.extract(1920.0f, 1080.0f, out);
+    int glyphs = 0;
+    for (const auto& ro : out) if (ro.type == 2) ++glyphs;
+    CHECK(glyphs == 3); // "hit"
+
+    // Press on the button, release off it → no click.
+    HE::UIWidgetGraph g2 = g; // unchanged; reuse widget — set text back first
+    (void)g2;
+    CHECK(wm.processPointer(1920.0f, 1080.0f, 100.0f, 25.0f, true, true));
+    CHECK(!wm.processPointer(1920.0f, 1080.0f, 900.0f, 900.0f, false, true));
+
+    // Hidden widget is not hit-testable.
+    wm.hideWidget(id);
+    CHECK(!wm.processPointer(1920.0f, 1080.0f, 100.0f, 25.0f, false, true));
+}
+
+// ── Scripting round-trip (Lua drives the widget lifecycle + graph functions) ──
+
+TEST_CASE("Lua scripts create, drive and destroy widgets through horizon")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    // Widget with a public function that changes its text element.
+    HE::UIWidgetTree t = makeGraphTestTree();
+    HE::UIWidgetGraph g;
+    HE::UIGraphNode fn; fn.type = HE::UIGraphNodeType::FunctionEntry;
+    fn.s = "Refresh"; fn.access = 0;
+    const int fnId = g.addNode(fn);
+    HE::UIGraphNode priv; priv.type = HE::UIGraphNodeType::FunctionEntry;
+    priv.s = "Secret"; priv.access = 1;
+    g.addNode(priv);
+    HE::UIGraphNode lit; lit.type = HE::UIGraphNodeType::ConstString; lit.s = "ok";
+    const int litId = g.addNode(lit);
+    HE::UIGraphNode set; set.type = HE::UIGraphNodeType::SetProperty;
+    set.elem = 1; set.prop = (int)HE::UIWidgetProp::Text;
+    const int setId = g.addNode(set);
+    REQUIRE(g.connect(fnId, 0, setId, 0));
+    REQUIRE(g.connect(litId, 0, setId, 2));
+    registerTestWidget(cm, t, &g, "mem://hud.hasset");
+
+    HorizonWorld world;
+    ScriptContext ctx(world);
+    ctx.setContentManager(&cm);
+
+    REQUIRE(ctx.loadScript("hud", R"lua(
+local M = {}
+function M.onStart(self)
+    self.widget = horizon.createWidget("mem://hud.hasset")
+    horizon.setWidgetZOrder(self.widget, 5)
+    callOk    = horizon.callWidgetFunction(self.widget, "Refresh")
+    callPriv  = horizon.callWidgetFunction(self.widget, "Secret")
+    callNone  = horizon.callWidgetFunction(self.widget, "Missing")
+    horizon.hideWidget(self.widget)
+    hiddenNow = horizon.isWidgetVisible(self.widget)
+    horizon.showWidget(self.widget)
+    shownNow  = horizon.isWidgetVisible(self.widget)
+    widgetId  = self.widget
+end
+return M
+)lua", ScriptLanguage::Lua));
+
+    auto e = world.createEntity("driver");
+    const auto inst = ctx.createInstance("hud", e, ScriptLanguage::Lua);
+    REQUIRE(inst != ScriptEngine::kInvalidInstance);
+    REQUIRE(ctx.callOnStart(inst));
+
+    ScriptEngine& lua = ctx.engine();
+    const int widgetId = (int)lua.getGlobalNumber("widgetId");
+    CHECK(widgetId != 0);
+    CHECK(world.widgets().isAlive(widgetId));
+    CHECK(world.widgets().zOrder(widgetId) == 5);
+
+    // Public routed, private + missing rejected.
+    CHECK(lua.exec("assert(callOk == true)"));
+    CHECK(lua.exec("assert(callPriv == false)"));
+    CHECK(lua.exec("assert(callNone == false)"));
+    CHECK(lua.exec("assert(hiddenNow == false)"));
+    CHECK(lua.exec("assert(shownNow == true)"));
+
+    // The public function actually ran: the text element now spells "ok".
+    std::vector<UIRenderObject> out;
+    world.widgets().extract(1920.0f, 1080.0f, out);
+    int glyphs = 0;
+    for (const auto& ro : out) if (ro.type == 2) ++glyphs;
+    CHECK(glyphs == 2);
+
+    CHECK(lua.exec("horizon.destroyWidget(widgetId)"));
+    CHECK(!world.widgets().isAlive(widgetId));
+
+    // World clear (PIE stop / scene load) drops surviving widgets.
+    lua.exec("leftover = horizon.createWidget('mem://hud.hasset')");
+    CHECK(world.widgets().count() == 1);
+    world.clear();
+    CHECK(world.widgets().count() == 0);
+}
+
+TEST_CASE("showCursor/hideCursor route through the host-app hook")
+{
+    bool visible = false;
+    int calls = 0;
+    ScriptApi::setCursorHook([&](bool show){ visible = show; ++calls; });
+
+    HorizonWorld world;
+    ScriptContext ctx(world);
+    REQUIRE(ctx.loadScript("cur", R"lua(
+local M = {}
+function M.onStart(self)
+    horizon.showCursor()
+end
+function M.onUpdate(self, dt)
+    horizon.hideCursor()
+end
+return M
+)lua", ScriptLanguage::Lua));
+    auto e = world.createEntity("driver");
+    const auto inst = ctx.createInstance("cur", e, ScriptLanguage::Lua);
+    REQUIRE(ctx.callOnStart(inst));
+    CHECK(visible);
+    CHECK(calls == 1);
+    REQUIRE(ctx.callOnUpdate(inst, 0.016f));
+    CHECK(!visible);
+    CHECK(calls == 2);
+
+    ScriptApi::setCursorHook(nullptr); // never leak the hook into other tests
+    ScriptApi::setCursorVisible(true); // no-op without a hook
+    CHECK(calls == 2);
 }

@@ -192,6 +192,7 @@ struct MaterialFunctionAsset : public RuntimeAsset
 struct UIWidgetAsset : public RuntimeAsset
 {
 	std::string treeJson;
+	std::string graphJson; // Blueprint-style logic graph (HE::UIWidgetGraph)
 };
 
 struct SceneAsset : public RuntimeAsset
