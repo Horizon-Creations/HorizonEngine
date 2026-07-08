@@ -29,23 +29,51 @@ ImU32 categoryColor(const char* category)
 
 namespace
 {
+// Exec-less nodes (pure getters / literals) draw compactly: no colored header
+// bar, a slim title, and a fit-to-content width — Unreal-style compact getters.
+constexpr float kCompactTitleH = 15.0f;
+
 // One node laid out for this frame.
 struct Drawn
 {
     int    id;
-    ImVec2 pos;   // screen top-left
-    ImVec2 size;  // screen
+    ImVec2 pos;    // screen top-left
+    ImVec2 size;   // screen
+    float  gw = kNodeW;      // graph-space width
+    float  gTitleH = kTitleH;// graph-space title-bar height
+    bool   compact = false;  // no exec pins → compact style
     std::vector<Pin>    pins;
     std::vector<ImVec2> pinPos; // parallel to pins (screen)
 };
 
-float nodeGraphHeight(const Model& m, int id, const std::vector<Pin>& pins)
+bool isCompactNode(const std::vector<Pin>& pins)
+{
+    for (const auto& p : pins) if (p.isExec) return false;
+    return !pins.empty(); // a node with no pins at all keeps the normal frame
+}
+
+float nodeGraphHeight(const Model& m, int id, const std::vector<Pin>& pins, float titleH)
 {
     int left = 0, right = 0;
     for (const auto& p : pins) (p.input ? left : right)++;
     const int rows = std::max(left, right);
     float body = m.nodeBodyHeight ? m.nodeBodyHeight(id) : 0.0f;
-    return kTitleH + rows * kRowH + body + 6.0f;
+    return titleH + rows * kRowH + body + 6.0f;
+}
+
+// Fit-to-content width for a compact node (title + widest input/output labels),
+// clamped so it stays readable but never wider than a normal node.
+float compactGraphWidth(const std::string& title, const std::vector<Pin>& pins)
+{
+    float tw = ImGui::CalcTextSize(title.c_str()).x;
+    float maxL = 0.0f, maxR = 0.0f;
+    for (const auto& p : pins)
+    {
+        const float w = p.label.empty() ? 0.0f : ImGui::CalcTextSize(p.label.c_str()).x;
+        if (p.input) maxL = std::max(maxL, w); else maxR = std::max(maxR, w);
+    }
+    const float rowW = maxL + maxR + 30.0f; // pin circles + inner gap
+    return std::clamp(std::max(tw + 18.0f, rowW), 92.0f, kNodeW);
 }
 
 void drawLink(ImDrawList* dl, const ImVec2& a, const ImVec2& b, ImU32 col, float thick)
@@ -122,11 +150,15 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
         model.getPos(nid, gx, gy);
         d.pos  = toScreen(gx, gy);
         d.pins = model.pins(nid);
-        const float gh = nodeGraphHeight(model, nid, d.pins);
-        d.size = ImVec2(kNodeW * st.zoom, gh * st.zoom);
+        const bool hasBody = model.nodeBodyHeight && model.nodeBodyHeight(nid) > 0.0f;
+        d.compact = model.compactPureNodes && !hasBody && isCompactNode(d.pins);
+        d.gTitleH = d.compact ? kCompactTitleH : kTitleH;
+        d.gw = d.compact ? compactGraphWidth(model.title(nid), d.pins) : kNodeW;
+        const float gh = nodeGraphHeight(model, nid, d.pins, d.gTitleH);
+        d.size = ImVec2(d.gw * st.zoom, gh * st.zoom);
 
         // Pin screen positions (top-to-bottom per side).
-        const float w = kNodeW * st.zoom, titleH = kTitleH * st.zoom, rowH = kRowH * st.zoom;
+        const float w = d.gw * st.zoom, titleH = d.gTitleH * st.zoom, rowH = kRowH * st.zoom;
         int leftRow = 0, rightRow = 0;
         d.pinPos.resize(d.pins.size());
         for (size_t i = 0; i < d.pins.size(); ++i)
@@ -205,7 +237,7 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
         ImU32 col = IM_COL32(200,200,200,220);
         for (size_t i = 0; i < sn->pins.size(); ++i)
             if (!sn->pins[i].input && sn->pins[i].id == l[1]) { col = sn->pins[i].color; break; }
-        const bool exec = a->x == sn->pos.x + kNodeW * st.zoom &&
+        const bool exec = a->x == sn->pos.x + sn->size.x &&
                           [&]{ for (const auto& p : sn->pins) if (!p.input && p.id == l[1]) return p.isExec; return false; }();
         drawLink(dl, *a, *b, exec ? IM_COL32(235,235,235,220) : col, exec ? 3.0f : 2.0f);
     }
@@ -233,15 +265,35 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
         const bool sel = st.selected == n.id ||
             std::find(st.selection.begin(), st.selection.end(), n.id) != st.selection.end();
 
-        dl->AddRectFilled(n.pos, br, IM_COL32(52, 52, 56, 245), 5.0f);
-        dl->AddRectFilled(n.pos, ImVec2(br.x, n.pos.y + kTitleH * st.zoom),
-                          model.headerColor(n.id), 5.0f, ImDrawFlags_RoundCornersTop);
-        dl->AddRect(n.pos, br, sel ? IM_COL32(255, 170, 40, 255) : IM_COL32(20, 20, 24, 255),
-                    5.0f, 0, sel ? 2.0f : 1.0f);
-
         const std::string title = model.title(n.id);
-        dl->AddText(nullptr, 13.0f * std::max(0.7f, st.zoom),
-                    ImVec2(n.pos.x + 6, n.pos.y + 4 * st.zoom), IM_COL32(240,240,240,255), title.c_str());
+        if (n.compact)
+        {
+            // No colored header bar: a subtly accent-tinted rounded body + a small
+            // centered title, so pure getters/literals read as compact chips.
+            const ImU32 acc = model.headerColor(n.id);
+            const ImU32 bodyCol = IM_COL32(
+                40 + ((acc >> IM_COL32_R_SHIFT) & 0xFF) / 5,
+                40 + ((acc >> IM_COL32_G_SHIFT) & 0xFF) / 5,
+                44 + ((acc >> IM_COL32_B_SHIFT) & 0xFF) / 5, 245);
+            dl->AddRectFilled(n.pos, br, bodyCol, 6.0f);
+            dl->AddRect(n.pos, br, sel ? IM_COL32(255, 170, 40, 255) : IM_COL32(20, 20, 24, 255),
+                        6.0f, 0, sel ? 2.0f : 1.0f);
+            const float fs = 12.0f * std::max(0.7f, st.zoom);
+            const ImVec2 ts = ImGui::CalcTextSize(title.c_str());
+            dl->AddText(nullptr, fs,
+                        ImVec2(n.pos.x + (n.size.x - ts.x) * 0.5f, n.pos.y + 2 * st.zoom),
+                        IM_COL32(225, 225, 228, 255), title.c_str());
+        }
+        else
+        {
+            dl->AddRectFilled(n.pos, br, IM_COL32(52, 52, 56, 245), 5.0f);
+            dl->AddRectFilled(n.pos, ImVec2(br.x, n.pos.y + n.gTitleH * st.zoom),
+                              model.headerColor(n.id), 5.0f, ImDrawFlags_RoundCornersTop);
+            dl->AddRect(n.pos, br, sel ? IM_COL32(255, 170, 40, 255) : IM_COL32(20, 20, 24, 255),
+                        5.0f, 0, sel ? 2.0f : 1.0f);
+            dl->AddText(nullptr, 13.0f * std::max(0.7f, st.zoom),
+                        ImVec2(n.pos.x + 6, n.pos.y + 4 * st.zoom), IM_COL32(240,240,240,255), title.c_str());
+        }
 
         for (size_t i = 0; i < n.pins.size(); ++i)
         {
@@ -273,7 +325,7 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
         {
             int left = 0, right = 0;
             for (const auto& p : n.pins) (p.input ? left : right)++;
-            const float pinsBottom = n.pos.y + (kTitleH + std::max(left, right) * kRowH) * st.zoom;
+            const float pinsBottom = n.pos.y + (n.gTitleH + std::max(left, right) * kRowH) * st.zoom;
             const ImVec2 bmin(n.pos.x + 6, pinsBottom + 2);
             const ImVec2 bmax(br.x - 6, br.y - 4);
             ImGui::PushID(n.id);

@@ -564,6 +564,7 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 
 	GraphEditor::Model m;
 	m.multiSelect = true;
+	m.compactPureNodes = true; // getters/literals draw as compact chips
 	m.nodeIds = [&graph]{ std::vector<int> ids; ids.reserve(graph.nodes.size());
 		for (const auto& n : graph.nodes) ids.push_back(n.id); return ids; };
 	m.getPos = [&graph](int id, float& x, float& y){ if (const HC::Node* n = graph.findNode(id)) { x = n->x; y = n->y; } };

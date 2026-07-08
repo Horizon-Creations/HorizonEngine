@@ -1760,6 +1760,7 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	if (st.gFocusSelected) { st.geState.focusNode = st.selectedGraphNode; st.gFocusSelected = false; }
 
 	GraphEditor::Model m;
+	m.compactPureNodes = true; // getters/literals draw as compact chips
 	m.nodeIds = [&st]{ std::vector<int> ids; ids.reserve(st.graph.nodes.size());
 		for (const auto& n : st.graph.nodes) ids.push_back(n.id); return ids; };
 	m.getPos = [&st](int id, float& x, float& y){ if (const HC::Node* n = st.graph.findNode(id)) { x = n->x; y = n->y; } };

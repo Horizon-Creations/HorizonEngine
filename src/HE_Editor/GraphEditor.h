@@ -121,6 +121,10 @@ struct Model
 
     // Feature flags.
     bool multiSelect = false;
+    // Render exec-less, body-less nodes (pure getters / literals) as compact
+    // chips (no header bar, fit-to-content width). Off by default so data-flow
+    // graphs like the material editor keep their normal framed nodes.
+    bool compactPureNodes = false;
 };
 
 // Draw the canvas + handle interaction inside the current window, filling
