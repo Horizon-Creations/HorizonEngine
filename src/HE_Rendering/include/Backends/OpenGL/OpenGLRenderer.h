@@ -472,6 +472,7 @@ private:
 	int          m_uUIColor      = -1;
 	int          m_uUIUVRect     = -1;  // glyph quads: atlas UV rect
 	int          m_uUIMode       = -1;  // 0 = solid color, 1 = font-atlas glyph
+	int          m_uUICornerRadius = -1; // px; min(w,h)/2 → circle (rounded rects)
 	unsigned int m_uiFontTexture = 0;   // R8 UI font atlas (HE::sharedUIFont), lazy
 	void         RenderUIPass(int pw, int ph);
 

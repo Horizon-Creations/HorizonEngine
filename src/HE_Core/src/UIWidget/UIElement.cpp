@@ -51,7 +51,7 @@ UIWidgetType uiWidgetTypeFromName(const std::string& s)
 namespace
 {
     void quad(std::vector<UIRenderObject>& out, float x, float y, float w, float h,
-              const glm::vec4& color, const HE::UUID& mat = {})
+              const glm::vec4& color, const HE::UUID& mat = {}, float cornerRadius = 0.0f)
     {
         UIRenderObject ro;
         ro.position = { x, y };
@@ -59,8 +59,12 @@ namespace
         ro.color    = color;
         ro.materialAssetId = mat;
         ro.type     = 0;
+        ro.cornerRadius = cornerRadius;
         out.push_back(std::move(ro));
     }
+    // Corner radius that matches the editor preview: a small rounding clamped to
+    // never exceed half the smaller side.
+    float roundedR(float w, float h, float r) { return std::min(r, 0.5f * std::min(w, h)); }
 }
 
 // ── Panel / Image ────────────────────────────────────────────────────────────
@@ -94,7 +98,7 @@ void UIButton::render(const UIWidgetRect& px, const UIElementRenderState& st,
     glm::vec4 c = color;
     if (st.hovered) c = hoveredColor;
     if (st.pressed) c = pressedColor;
-    quad(out, px.x, px.y, px.w, px.h, c, mat);
+    quad(out, px.x, px.y, px.w, px.h, c, mat, roundedR(px.w, px.h, 6.0f));
     if (!text.empty())
         HE::emitUITextGlyphs(text, { px.x, px.y }, { px.w, px.h }, fontSize * pxScaleY,
                              textColor, 0, /*centerH=*/true, out);
@@ -108,11 +112,12 @@ void UICheckBox::render(const UIWidgetRect& px, const UIElementRenderState& st,
     const float box = px.h;
     glm::vec4 bc = boxColor;
     if (st.hovered) bc = glm::vec4(glm::vec3(boxColor) * 1.3f, boxColor.a);
-    quad(out, px.x, px.y, box, box, bc);
+    quad(out, px.x, px.y, box, box, bc, {}, roundedR(box, box, 4.0f));
     if (checked)
     {
         const float inset = box * 0.22f;
-        quad(out, px.x + inset, px.y + inset, box - 2 * inset, box - 2 * inset, checkColor);
+        const float cb = box - 2 * inset;
+        quad(out, px.x + inset, px.y + inset, cb, cb, checkColor, {}, roundedR(cb, cb, 2.0f));
     }
     const float lx = px.x + box + 8.0f;
     HE::emitUITextGlyphs(label, { lx, px.y }, { px.w - box - 8.0f, px.h },
@@ -127,15 +132,15 @@ void UISlider::render(const UIWidgetRect& px, const UIElementRenderState& st,
     const float t = normalized();
     const float trackH = std::max(4.0f, px.h * 0.35f);
     const float trackY = px.y + (px.h - trackH) * 0.5f;
-    quad(out, px.x, trackY, px.w, trackH, trackColor);
-    quad(out, px.x, trackY, px.w * t, trackH, fillColor);
-    // Handle: a square centered on the fill position.
+    quad(out, px.x, trackY, px.w,     trackH, trackColor, {}, trackH * 0.5f); // pill track
+    quad(out, px.x, trackY, px.w * t, trackH, fillColor,  {}, roundedR(px.w * t, trackH, trackH * 0.5f));
+    // Handle: a circle centered on the fill position (radius = half its size).
     const float hw = px.h * 0.9f;
     const float hx = px.x + px.w * t - hw * 0.5f;
     glm::vec4 hc = handleColor;
     if (st.pressed) hc = glm::vec4(glm::vec3(handleColor) * 0.85f, handleColor.a);
     else if (st.hovered) hc = glm::vec4(glm::min(glm::vec3(handleColor) * 1.1f, glm::vec3(1.0f)), handleColor.a);
-    quad(out, hx, px.y + (px.h - hw) * 0.5f, hw, hw, hc);
+    quad(out, hx, px.y + (px.h - hw) * 0.5f, hw, hw, hc, {}, hw * 0.5f);
 }
 
 // ── ProgressBar ──────────────────────────────────────────────────────────────
@@ -144,8 +149,8 @@ void UIProgressBar::render(const UIWidgetRect& px, const UIElementRenderState&,
                            const HE::UUID&, float, std::vector<UIRenderObject>& out) const
 {
     const float t = std::clamp(value, 0.0f, 1.0f);
-    quad(out, px.x, px.y, px.w, px.h, backColor);
-    quad(out, px.x, px.y, px.w * t, px.h, fillColor);
+    quad(out, px.x, px.y, px.w,     px.h, backColor, {}, roundedR(px.w, px.h, 4.0f));
+    quad(out, px.x, px.y, px.w * t, px.h, fillColor, {}, roundedR(px.w * t, px.h, 4.0f));
 }
 
 // ── TextInput ────────────────────────────────────────────────────────────────
@@ -155,7 +160,7 @@ void UITextInput::render(const UIWidgetRect& px, const UIElementRenderState& st,
 {
     glm::vec4 bg = backColor;
     if (st.focused) bg = glm::vec4(glm::min(glm::vec3(backColor) + 0.06f, glm::vec3(1.0f)), backColor.a);
-    quad(out, px.x, px.y, px.w, px.h, bg);
+    quad(out, px.x, px.y, px.w, px.h, bg, {}, roundedR(px.w, px.h, 4.0f));
     // Thin focus border (four edge quads).
     if (st.focused)
     {
@@ -186,7 +191,7 @@ void UIComboBox::render(const UIWidgetRect& px, const UIElementRenderState& st,
                         const HE::UUID&, float pxScaleY, std::vector<UIRenderObject>& out) const
 {
     glm::vec4 bg = st.hovered ? highlightColor : backColor;
-    quad(out, px.x, px.y, px.w, px.h, bg);
+    quad(out, px.x, px.y, px.w, px.h, bg, {}, roundedR(px.w, px.h, 4.0f));
     const float pad = 6.0f;
     HE::emitUITextGlyphs(currentText(), { px.x + pad, px.y }, { px.w - px.h - pad, px.h },
                          fontSize * pxScaleY, textColor, 0, false, out);

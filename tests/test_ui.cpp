@@ -1,6 +1,7 @@
 #include "doctest.h"
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/UISystem.h>
+#include <Renderer/UIFont.h>
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/Components/UICanvasComponent.h>
 #include <HorizonScene/Components/UIElementComponent.h>
@@ -73,6 +74,22 @@ TEST_CASE("UISystem::buildFontAtlas returns false for a zero-sized atlas")
     std::vector<uint8_t> pixels;
     bool ok = UISystem::buildFontAtlas(0, 0, 13.0f, pixels);
     CHECK(!ok);
+}
+
+// The shared runtime UI font (Roboto) must bake into its atlas and emit one
+// glyph quad per visible character — guards the atlas size vs. bake resolution.
+TEST_CASE("sharedUIFont bakes Roboto and emits glyph quads")
+{
+    const HE::BakedUIFont& f = HE::sharedUIFont();
+    REQUIRE(f.ok); // the font fit the atlas at kBakePx
+    CHECK(f.pixels.size() ==
+          static_cast<size_t>(HE::BakedUIFont::kWidth) * HE::BakedUIFont::kHeight);
+
+    std::vector<UIRenderObject> out;
+    HE::emitUITextGlyphs("Hi", { 0.0f, 0.0f }, { 100.0f, 20.0f }, 16.0f,
+                         { 1, 1, 1, 1 }, 0, /*centerH=*/false, out);
+    CHECK(out.size() == 2);                 // one quad per visible glyph
+    for (const auto& ro : out) CHECK(ro.type == 2); // glyph quads (atlas-sampled)
 }
 
 // ── UISystem::extract ────────────────────────────────────────────────────────

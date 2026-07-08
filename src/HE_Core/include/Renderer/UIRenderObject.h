@@ -18,4 +18,7 @@ struct UIRenderObject {
     int         layer     = 0;
     glm::vec2   uvMin     = {0.0f, 0.0f}; // glyph quads: atlas UV rect
     glm::vec2   uvMax     = {0.0f, 0.0f};
+    // Corner radius in pixels for solid quads (type 0); 0 = square. A value of
+    // min(w,h)/2 yields a circle — used for the slider handle. Ignored by glyphs.
+    float       cornerRadius = 0.0f;
 };

@@ -1,6 +1,8 @@
 #define STB_TRUETYPE_IMPLEMENTATION
 #include <stb_truetype.h>
-#include <ProggyClean_ttf.h>
+// Roboto Condensed Bold — the same smooth TTF the editor UI uses, so live
+// widgets render like the designer preview (was the blocky ProggyClean bitmap).
+#include <Roboto_ttf.h>
 
 #include <Renderer/UIFont.h>
 #include <algorithm>
@@ -21,13 +23,13 @@ const BakedUIFont& sharedUIFont()
         f.pixels.resize(static_cast<size_t>(BakedUIFont::kWidth) * BakedUIFont::kHeight, 0);
         s_glyphs.resize(96);
         const int r = stbtt_BakeFontBitmap(
-            ProggyClean_data, 0, BakedUIFont::kBakePx,
+            Roboto_data, 0, BakedUIFont::kBakePx,
             f.pixels.data(), BakedUIFont::kWidth, BakedUIFont::kHeight,
             32, 96, s_glyphs.data());
         f.ok = r > 0;
 
         stbtt_fontinfo info;
-        if (stbtt_InitFont(&info, ProggyClean_data, 0))
+        if (stbtt_InitFont(&info, Roboto_data, 0))
         {
             int ascent = 0, descent = 0, lineGap = 0;
             stbtt_GetFontVMetrics(&info, &ascent, &descent, &lineGap);

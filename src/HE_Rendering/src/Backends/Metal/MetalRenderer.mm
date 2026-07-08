@@ -713,7 +713,7 @@ fragment float4 fxaaFragment(FXOut in [[stage_in]],
 static const char* kUIMSL = R"MSL(
 #include <metal_stdlib>
 using namespace metal;
-struct UIVert { float4 position [[position]]; float2 uv; };
+struct UIVert { float4 position [[position]]; float2 uv; float2 luv; };
 vertex UIVert uiVertex(uint vid [[vertex_id]],
                        constant float4& rect     [[buffer(0)]],
                        constant float2& viewport [[buffer(1)]],
@@ -726,20 +726,30 @@ vertex UIVert uiVertex(uint vid [[vertex_id]],
                         1.0 - sp.y / viewport.y * 2.0);
     UIVert o;
     o.position = float4(ndc, 0.0, 1.0);
-    o.uv = mix(uvrect.xy, uvrect.zw, uv);
+    o.uv  = mix(uvrect.xy, uvrect.zw, uv);
+    o.luv = uv;                 // 0..1 across the quad (for the rounded-rect SDF)
     return o;
 }
+// shape = { mode, cornerRadius(px), rectW(px), rectH(px) }; mode>0.5 = glyph.
 fragment float4 uiFragment(UIVert in [[stage_in]],
                            constant float4& color [[buffer(0)]],
-                           constant float&  mode  [[buffer(1)]],
+                           constant float4& shape [[buffer(1)]],
                            texture2d<float> atlas [[texture(0)]])
 {
-    if (mode > 0.5) {
+    if (shape.x > 0.5) {
         constexpr sampler s(filter::linear);
         float a = atlas.sample(s, in.uv).r;
         return float4(color.rgb, color.a * a);
     }
-    return color;
+    if (shape.y <= 0.0) return color; // square quad → crisp, no SDF/AA
+    // Solid quad with rounded corners (radius = min(w,h)/2 → circle).
+    float2 halfSz = shape.zw * 0.5;
+    float  r      = min(shape.y, min(halfSz.x, halfSz.y));
+    float2 p      = (in.luv - 0.5) * shape.zw;
+    float2 q      = abs(p) - (halfSz - r);
+    float  d      = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+    float  cov  = clamp(0.5 - d, 0.0, 1.0); // ~1px antialiased edge (d is in pixels)
+    return float4(color.rgb, color.a * cov);
 }
 )MSL";
 
@@ -4824,11 +4834,12 @@ void MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height)
 		const simd::float4 rect  = { obj.position.x, obj.position.y, obj.size.x, obj.size.y };
 		const simd::float4 color = { obj.color.r, obj.color.g, obj.color.b, obj.color.a };
 		const simd::float4 uvr   = { obj.uvMin.x, obj.uvMin.y, obj.uvMax.x, obj.uvMax.y };
-		const float mode = obj.type == 2 ? 1.0f : 0.0f;
+		// shape = { mode, cornerRadius, rectW, rectH } (see uiFragment).
+		const simd::float4 shape = { obj.type == 2 ? 1.0f : 0.0f, obj.cornerRadius, obj.size.x, obj.size.y };
 		[enc setVertexBytes:&rect  length:sizeof(rect)  atIndex:0];
 		[enc setVertexBytes:&uvr   length:sizeof(uvr)   atIndex:2];
 		[enc setFragmentBytes:&color length:sizeof(color) atIndex:0];
-		[enc setFragmentBytes:&mode  length:sizeof(mode)  atIndex:1];
+		[enc setFragmentBytes:&shape length:sizeof(shape) atIndex:1];
 		[enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
 	}
 }

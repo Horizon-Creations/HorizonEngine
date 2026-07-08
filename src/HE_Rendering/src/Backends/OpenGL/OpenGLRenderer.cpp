@@ -2377,12 +2377,14 @@ uniform vec4 uRect;
 uniform vec2 uViewport;
 uniform vec4 uUVRect;
 out vec2 vUV;
+out vec2 vLocal;
 void main()
 {
     const vec2 c[4] = vec2[](vec2(0,0), vec2(1,0), vec2(0,1), vec2(1,1));
     vec2 uv = c[gl_VertexID];
     vec2 sp = uRect.xy + uv * uRect.zw;
     vUV = mix(uUVRect.xy, uUVRect.zw, uv);
+    vLocal = uv;                 // 0..1 across the quad (for the rounded-rect SDF)
     gl_Position = vec4(sp.x / uViewport.x * 2.0 - 1.0,
                        1.0 - sp.y / uViewport.y * 2.0,
                        0.0, 1.0);
@@ -2392,8 +2394,11 @@ void main()
 static const char* kUIFS = R"GLSL(
 #version 410 core
 in vec2 vUV;
+in vec2 vLocal;
 uniform vec4 uColor;
 uniform float uMode;
+uniform vec4 uRect;         // xy=pos, zw=size (px) — for the SDF
+uniform float uCornerRadius; // px; min(w,h)/2 → circle
 uniform sampler2D uFontAtlas;
 out vec4 FragColor;
 void main()
@@ -2402,9 +2407,17 @@ void main()
     {
         float a = texture(uFontAtlas, vUV).r;
         FragColor = vec4(uColor.rgb, uColor.a * a);
+        return;
     }
-    else
-        FragColor = uColor;
+    if (uCornerRadius <= 0.0) { FragColor = uColor; return; } // square → crisp
+    // Solid quad with rounded corners.
+    vec2 halfsz = uRect.zw * 0.5;
+    float r = min(uCornerRadius, min(halfsz.x, halfsz.y));
+    vec2 p = (vLocal - 0.5) * uRect.zw;
+    vec2 q = abs(p) - (halfsz - r);
+    float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+    float cov = clamp(0.5 - d, 0.0, 1.0); // ~1px antialiased edge (d in pixels)
+    FragColor = vec4(uColor.rgb, uColor.a * cov);
 }
 )GLSL";
 
@@ -3180,6 +3193,7 @@ void OpenGLRenderer::CreateTonemapPipeline()
 		m_uUIColor    = glGetUniformLocation(m_uiProgram, "uColor");
 		m_uUIUVRect   = glGetUniformLocation(m_uiProgram, "uUVRect");
 		m_uUIMode     = glGetUniformLocation(m_uiProgram, "uMode");
+		m_uUICornerRadius = glGetUniformLocation(m_uiProgram, "uCornerRadius");
 		// Font atlas always samples from texture unit 0 (bound in RenderUIPass).
 		glUseProgram(m_uiProgram);
 		if (GLint l = glGetUniformLocation(m_uiProgram, "uFontAtlas"); l >= 0) glUniform1i(l, 0);
@@ -3750,6 +3764,7 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 		glUniform4f(m_uUIColor, obj.color.r, obj.color.g, obj.color.b, obj.color.a);
 		glUniform4f(m_uUIUVRect, obj.uvMin.x, obj.uvMin.y, obj.uvMax.x, obj.uvMax.y);
 		glUniform1f(m_uUIMode, obj.type == 2 ? 1.0f : 0.0f);
+		glUniform1f(m_uUICornerRadius, obj.cornerRadius);
 		glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 	}
 
