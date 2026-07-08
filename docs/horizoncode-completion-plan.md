@@ -212,9 +212,17 @@ this is what keeps the interpreter and the compiled build permanently in lockste
    interpreter through the registry via a `Context::callApi` seam (bound by the app
    to an `HE::api::Ctx` over the current world/content); the shared editors offer it
    in the add-menu grouped by subsystem. So HorizonCode already reaches everything
-   Lua/Python can. **[next]** regenerate the Lua/Python bindings from the registry
-   (today they still call `ScriptApi`, which `HE::api` wraps, so they are
-   transitively on the central layer already).
+   Lua/Python can. **[in progress]** the Lua + Python frontends are now
+   *registry-driven* for whole groups: a single generic Value-marshalling
+   dispatcher (Lua `lua_engine_dispatch` / Python `_engineCall`) exposes a group
+   by iterating `registry()` — no per-function C shim — surfaced as
+   `horizon.<group>.<fn>` (spread ABI: a vec2 = 2 numbers, a Color = 4, matching
+   the hand-written bindings). First group live in both languages: the pure
+   **Math** library (`horizon.math.*`), which no frontend could reach before. The
+   gameplay groups keep their ergonomic hand-written shims (they still call
+   `ScriptApi`, which `HE::api` wraps, so they are transitively central already)
+   until `ScriptApi` is inverted onto `HE::api` — then each group widens the same
+   dispatcher's filter, a one-line change.
 2. **High-value gameplay**: Transform, Physics (+ collision events), Spawn/
    Lifecycle, Time/frame, Input, Math/Random. This is what most game logic needs.
 3. **Presentation**: Audio, Camera, Materials/Environment, Scene/level, debug draw.

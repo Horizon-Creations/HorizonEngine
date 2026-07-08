@@ -3,10 +3,13 @@
 #ifdef HE_HAVE_PYTHON
 
 #include "HorizonScene/ScriptApi.h"
+#include "HorizonScene/EngineApi.h"   // HE::api registry (registry-driven groups)
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 #include <algorithm>
 #include <limits>
+#include <string>
+#include <vector>
 
 // The interpreter is a process singleton driven from the main thread. A single
 // active backend feeds the module functions the current world/physics through
@@ -243,8 +246,80 @@ PyObject* py_hideCursor(PyObject*, PyObject*)
 	Py_RETURN_NONE;
 }
 
+// ── Registry-driven engine API (HE::api) ────────────────────────────────────
+// A single generic dispatcher marshals HorizonCode Values by pin type, so a whole
+// group of engine functions is exposed by iterating the registry — no per-function
+// C shim. Args after the id are read per the entry's param types (a vec2 = 2
+// numbers, a Color = 4 — the same spread as the hand-written bindings); results
+// spread the same way (1 → scalar, more → tuple). A Python bootstrap (built from
+// the registry) wraps each entry as horizon.<group>.<fn>. First group: the pure
+// Math library. Gameplay groups keep their ergonomic shims until ScriptApi is
+// inverted onto HE::api.
+HorizonCode::Value pyReadValue(PyObject* args, Py_ssize_t& idx, HorizonCode::PinType t)
+{
+	using P = HorizonCode::PinType; using V = HorizonCode::Value;
+	auto num = [&](){ PyObject* o = PyTuple_GetItem(args, idx++); return o ? (float)PyFloat_AsDouble(o) : 0.0f; };
+	switch (t)
+	{
+	case P::Bool:   { PyObject* o = PyTuple_GetItem(args, idx++); return V::ofBool(o && PyObject_IsTrue(o)); }
+	case P::Int:    { PyObject* o = PyTuple_GetItem(args, idx++); return V::ofInt(o ? (int)PyLong_AsLong(o) : 0); }
+	case P::String: { PyObject* o = PyTuple_GetItem(args, idx++); const char* s = o ? PyUnicode_AsUTF8(o) : nullptr; return V::ofString(s ? s : ""); }
+	case P::Vec2:   { float x = num(), y = num(); return V::ofVec2({ x, y }); }
+	case P::Color:  { float r = num(), g = num(), b = num(), a = num(); return V::ofColor({ r, g, b, a }); }
+	case P::Ref:    { PyObject* o = PyTuple_GetItem(args, idx++); return V::ofRef(o ? (uint32_t)PyLong_AsUnsignedLong(o) : 0u); }
+	case P::Float:
+	default:        return V::ofFloat(num());
+	}
+}
+
+// Append a Value's Python representation(s) to `out` (a list), spreading vecs.
+void pyAppendValue(PyObject* out, const HorizonCode::Value& v, HorizonCode::PinType t)
+{
+	using P = HorizonCode::PinType;
+	auto add = [&](PyObject* o){ PyList_Append(out, o); Py_XDECREF(o); };
+	switch (t)
+	{
+	case P::Bool:   add(PyBool_FromLong(v.b)); break;
+	case P::Int:    add(PyLong_FromLong(v.i)); break;
+	case P::String: add(PyUnicode_FromString(v.s.c_str())); break;
+	case P::Vec2:   add(PyFloat_FromDouble(v.v2.x)); add(PyFloat_FromDouble(v.v2.y)); break;
+	case P::Color:  add(PyFloat_FromDouble(v.col.x)); add(PyFloat_FromDouble(v.col.y));
+	                add(PyFloat_FromDouble(v.col.z)); add(PyFloat_FromDouble(v.col.w)); break;
+	case P::Ref:    add(PyLong_FromUnsignedLong(v.ref)); break;
+	case P::Float:
+	default:        add(PyFloat_FromDouble(v.f)); break;
+	}
+}
+
+// _engineCall(id, *args) → scalar | tuple | None. The Python bootstrap wraps this.
+PyObject* py_engineCall(PyObject*, PyObject* args)
+{
+	const Py_ssize_t n = PyTuple_Size(args);
+	if (n < 1) { PyErr_SetString(PyExc_TypeError, "_engineCall(id, ...) needs an id"); return nullptr; }
+	PyObject* idObj = PyTuple_GetItem(args, 0);
+	const char* id = idObj ? PyUnicode_AsUTF8(idObj) : nullptr;
+	const HE::api::ApiFn* fn = id ? HE::api::find(id) : nullptr;
+	if (!fn) { PyErr_Format(PyExc_KeyError, "unknown engine function '%s'", id ? id : "?"); return nullptr; }
+
+	HE::api::Ctx c{ g_world, g_physics, g_content };
+	std::vector<HorizonCode::Value> in; in.reserve(fn->params.size());
+	Py_ssize_t idx = 1;                                   // arg 0 is the id
+	for (const auto& p : fn->params) in.push_back(pyReadValue(args, idx, p.type));
+	if (PyErr_Occurred()) return nullptr;
+
+	const std::vector<HorizonCode::Value> res = fn->invoke(c, in);
+	PyObject* out = PyList_New(0);
+	for (size_t i = 0; i < fn->results.size(); ++i)
+		pyAppendValue(out, i < res.size() ? res[i] : HorizonCode::Value{}, fn->results[i].type);
+	const Py_ssize_t outN = PyList_Size(out);
+	if (outN == 0) { Py_DECREF(out); Py_RETURN_NONE; }
+	if (outN == 1) { PyObject* only = PyList_GetItem(out, 0); Py_INCREF(only); Py_DECREF(out); return only; }
+	PyObject* tup = PyList_AsTuple(out); Py_DECREF(out); return tup;
+}
+
 PyMethodDef kHorizonMethods[] = {
 	{"log",         py_log,         METH_VARARGS, "log(message)"},
+	{"_engineCall", py_engineCall,  METH_VARARGS, "_engineCall(id, *args) — dispatch through the HE::api registry"},
 	{"getName",     py_getName,     METH_VARARGS, "getName(entity) -> str"},
 	{"getPosition", py_getPosition, METH_VARARGS, "getPosition(entity) -> (x,y,z)"},
 	{"setPosition", py_setPosition, METH_VARARGS, "setPosition(entity, x, y, z)"},
@@ -286,6 +361,33 @@ PyModuleDef kHorizonModule = {
 	nullptr, nullptr, nullptr, nullptr
 };
 PyObject* PyInit_horizon() { return PyModule_Create(&kHorizonModule); }
+
+// Build horizon.<group>.<fn> wrappers from the registry (each forwards to
+// _engineCall). Run once, after the horizon module exists. Registry-driven:
+// adding an entry to a registered group exposes it here for free.
+void bootstrapEngineApiGroups()
+{
+	std::string src = "import horizon, types\n";
+	std::string lastGroup;
+	for (const HE::api::ApiFn& fn : HE::api::registry())
+	{
+		const std::string id = fn.id;
+		const auto dot = id.find('.');
+		if (dot == std::string::npos) continue;       // only namespaced ("math.clamp")
+		const std::string group = id.substr(0, dot), name = id.substr(dot + 1);
+		if (group != "math") continue;                // first registry-driven group; widen later
+		if (group != lastGroup)
+		{
+			src += "if not isinstance(getattr(horizon, '" + group + "', None), types.SimpleNamespace):\n"
+			       "    horizon." + group + " = types.SimpleNamespace()\n";
+			lastGroup = group;
+		}
+		src += "horizon." + group + "." + name +
+		       " = lambda *a, _id='" + id + "': horizon._engineCall(_id, *a)\n";
+	}
+	PyRun_SimpleString(src.c_str());
+	PyErr_Clear();
+}
 
 bool g_pyInited = false;
 
@@ -368,6 +470,10 @@ PyScriptBackend::PyScriptBackend(HorizonWorld& world)
 		m_impl->behaviorBase = PyObject_GetAttrString(mod, "Behavior"); // new ref
 		Py_DECREF(mod);
 	}
+
+	// Layer the registry-driven groups (horizon.math.*, …) onto the module once.
+	static bool s_engineApiBootstrapped = false;
+	if (!s_engineApiBootstrapped) { bootstrapEngineApiGroups(); s_engineApiBootstrapped = true; }
 }
 
 PyScriptBackend::~PyScriptBackend()

@@ -288,6 +288,38 @@ TEST_CASE("ScriptContext: Python script routes and reaches the world")
     CHECK(t.position.z == doctest::Approx(9.0f));
 }
 
+// Behavior that writes math-library results into its entity's position.
+static const char* kPyMath = R"py(
+import horizon
+
+class MathUser(horizon.Behavior):
+    def on_start(self):
+        c  = horizon.math.clamp(5, 0, 3)
+        l  = horizon.math.lerp(0, 10, 0.5)
+        mx = horizon.math.max(2, 9)
+        horizon.setPosition(self.entity_id, c, l, mx)
+)py";
+
+TEST_CASE("ScriptContext: registry-driven horizon.math.* (Python)")
+{
+    // The Math library reaches Python through the HE::api registry (via the
+    // generic _engineCall dispatcher) — proves the registry drives the Python
+    // frontend, matching the Lua horizon.math.* exposure.
+    HorizonWorld world;
+    ScriptContext ctx(world);
+    REQUIRE(ctx.loadScript("pymath", kPyMath, ScriptLanguage::Python));
+
+    auto e  = makeEntity(world, "MathHero");
+    auto id = ctx.createInstance("pymath", e);
+    REQUIRE(id != ScriptEngine::kInvalidInstance);
+    REQUIRE(ctx.callOnStart(id));
+
+    const auto& t = world.registry().get<TransformComponent>(e);
+    CHECK(t.position.x == doctest::Approx(3.0f));   // clamp(5, 0, 3)
+    CHECK(t.position.y == doctest::Approx(5.0f));   // lerp(0, 10, 0.5)
+    CHECK(t.position.z == doctest::Approx(9.0f));   // max(2, 9)
+}
+
 TEST_CASE("ScriptContext: Lua and Python coexist without id collision")
 {
     HorizonWorld world;
