@@ -5,6 +5,8 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <unordered_set>
+#include <vector>
 
 namespace HorizonCode {
 
@@ -389,6 +391,7 @@ std::string toJson(const Graph& g)
         };
         if (!n.params.empty())  e["params"]  = dumpParams(n.params);
         if (!n.results.empty()) e["results"] = dumpParams(n.results);
+        if (n.subgraph)         e["subgraph"] = n.subgraph;
         jn.push_back(std::move(e));
     }
     j["nodes"] = std::move(jn);
@@ -449,6 +452,7 @@ bool fromJson(const std::string& json, Graph& out)
         };
         loadParams(e.value("params",  nlohmann::json::array()), n.params);
         loadParams(e.value("results", nlohmann::json::array()), n.results);
+        n.subgraph = e.value("subgraph", 0);
         if (n.id >= g.nextId) g.nextId = n.id + 1;
         g.nodes.push_back(std::move(n));
     }
@@ -473,6 +477,7 @@ bool fromJson(const std::string& json, Graph& out)
         g.variables.push_back(std::move(v));
     }
     syncFunctionSignatures(g); // reconcile call/return pins with their entries
+    assignSubgraphs(g);        // migrate flat graphs → per-function sub-graphs
     out = std::move(g);
     return true;
 }
@@ -491,6 +496,74 @@ void syncFunctionSignatures(Graph& g)
         if (!entry) continue;
         n.params  = entry->params;
         n.results = entry->results;
+    }
+}
+
+namespace
+{
+// The exec-forward closure from `start` plus every data node feeding those exec
+// nodes — i.e. the body of the graph rooted at `start` (an Event or a
+// FunctionEntry). Used to partition a flat graph into per-function sub-graphs.
+std::unordered_set<int> traceBody(const Graph& g, int start)
+{
+    auto pinRangesOf = [](const Node& n, int& execOut0, int& execOutEnd, int& dataIn0, int& dataInEnd)
+    {
+        const NodeSig s = signatureOf(n);
+        execOut0  = (int)s.execIns.size();
+        execOutEnd = execOut0 + (int)s.execOuts.size();
+        dataIn0   = execOutEnd;
+        dataInEnd = dataIn0 + (int)s.dataIns.size();
+    };
+    std::unordered_set<int> body; std::vector<int> stack;
+    body.insert(start); stack.push_back(start);
+    // Exec-forward.
+    while (!stack.empty())
+    {
+        const int id = stack.back(); stack.pop_back();
+        const Node* n = g.findNode(id); if (!n) continue;
+        int eo0, eoE, di0, diE; pinRangesOf(*n, eo0, eoE, di0, diE);
+        for (const auto& l : g.links)
+            if (l.srcNode == id && l.srcPin >= eo0 && l.srcPin < eoE)
+                if (body.insert(l.dstNode).second) stack.push_back(l.dstNode);
+    }
+    // Data producers feeding any node already in the body.
+    stack.assign(body.begin(), body.end());
+    while (!stack.empty())
+    {
+        const int id = stack.back(); stack.pop_back();
+        const Node* n = g.findNode(id); if (!n) continue;
+        int eo0, eoE, di0, diE; pinRangesOf(*n, eo0, eoE, di0, diE);
+        for (const auto& l : g.links)
+            if (l.dstNode == id && l.dstPin >= di0 && l.dstPin < diE)
+                if (body.insert(l.srcNode).second) stack.push_back(l.srcNode);
+    }
+    return body;
+}
+} // namespace
+
+void assignSubgraphs(Graph& g)
+{
+    for (const Node& n : g.nodes) if (n.subgraph != 0) return; // already partitioned
+    bool hasFn = false;
+    for (const Node& n : g.nodes) if (n.type == NodeType::FunctionEntry) { hasFn = true; break; }
+    if (!hasFn) return;
+
+    // Nodes reachable from an Event stay in the event graph (subgraph 0).
+    std::unordered_set<int> eventOwned;
+    for (const Node& n : g.nodes)
+        if (n.type == NodeType::Event)
+        { auto b = traceBody(g, n.id); eventOwned.insert(b.begin(), b.end()); }
+
+    // Each function claims its own body (minus anything an event already owns).
+    for (Node& e : g.nodes)
+    {
+        if (e.type != NodeType::FunctionEntry) continue;
+        e.subgraph = e.id;
+        for (int m : traceBody(g, e.id))
+        {
+            if (m == e.id || eventOwned.count(m)) continue;
+            if (Node* mn = g.findNode(m); mn && mn->subgraph == 0) mn->subgraph = e.id;
+        }
     }
 }
 
