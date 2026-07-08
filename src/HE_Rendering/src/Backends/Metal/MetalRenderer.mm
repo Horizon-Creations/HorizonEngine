@@ -2867,7 +2867,12 @@ void MetalRenderer::CreateScenePipeline()
 		uiDesc.colorAttachments[0].sourceRGBBlendFactor    = MTLBlendFactorSourceAlpha;
 		uiDesc.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
 		uiDesc.colorAttachments[0].sourceAlphaBlendFactor  = MTLBlendFactorOne;
-		uiDesc.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorZero;
+		// Proper "over" for the alpha channel too — was Zero, which OVERWROTE the
+		// framebuffer alpha with the source coverage, punching alpha holes (0) in
+		// transparent UI regions (between glyphs, a rounded handle's corners). On a
+		// non-opaque Metal layer those holes composited to black. OneMinusSourceAlpha
+		// keeps the opaque scene's alpha = 1 where the UI is transparent.
+		uiDesc.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
 		uiDesc.depthAttachmentPixelFormat = kDepthFormat;
 		id<MTLRenderPipelineState> uiPso = [device newRenderPipelineStateWithDescriptor:uiDesc error:&uiError];
 		if (!uiPso)
@@ -3791,6 +3796,10 @@ void MetalRenderer::CreateTarget(SDL_Window* sdlWin, WindowTarget& out)
 	layer.device             = (__bridge id<MTLDevice>)m_device;
 	layer.pixelFormat        = kSwapchainFormat;
 	layer.framebufferOnly    = YES;
+	layer.opaque             = YES; // game window fully covers the framebuffer —
+	                                // ignore the alpha channel so transparent UI
+	                                // (glyph gaps, rounded corners) shows the scene
+	                                // behind it, not a black alpha hole.
 	layer.displaySyncEnabled = m_vsync;
 
 	out.metalView  = (void*)view;
