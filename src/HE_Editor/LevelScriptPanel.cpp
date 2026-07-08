@@ -140,6 +140,17 @@ std::string uniqueVarName(const HC::Graph& g)
 	return "NewVar";
 }
 
+// True if some Event node (other than exceptId) already handles `name`. Events
+// must be unique per graph — no two handlers of the same event, and lifecycle
+// events (OnLevelLoaded / OnInit / Construct / …) can't be added twice.
+bool eventNameUsed(const HC::Graph& g, const std::string& name, int exceptId = 0)
+{
+	if (name.empty()) return false;
+	for (const auto& n : g.nodes)
+		if (n.type == NT::Event && n.id != exceptId && n.s == name) return true;
+	return false;
+}
+
 int addNode(HC::Graph& g, NT type, const ImVec2& pos)
 {
 	HC::Node n;
@@ -159,6 +170,8 @@ struct LSState
 	std::string selectedVar;        // variable selected in the left panel
 	std::string varNameEdit;        // scratch rename buffer (see the widget editor bug)
 	std::string varNameEditFor;
+	std::string evtNameEdit;        // scratch buffer for a custom Event name (uniqueness)
+	int         evtNameEditFor = 0;
 	std::string dropVar;            // variable dragged onto the canvas
 	bool        openVarDrop = false;
 };
@@ -345,23 +358,39 @@ void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events,
 			// A HorizonCode class names its own events freely (another class binds
 			// to them by name), and can also react to the lifecycle events —
 			// "Construct" (fired on create) and "Destruct" (fired on destroy).
-			ImGui::InputText("Event", &n->s);
-			if (ImGui::IsItemDeactivatedAfterEdit()) edited = true;
+			// Edited via a scratch buffer + committed only when unique, so no two
+			// Event nodes ever share a name.
+			if (g.evtNameEditFor != n->id) { g.evtNameEdit = n->s; g.evtNameEditFor = n->id; }
+			ImGui::InputText("Event", &g.evtNameEdit);
+			if (ImGui::IsItemDeactivatedAfterEdit())
+			{
+				if (!g.evtNameEdit.empty() && eventNameUsed(graph, g.evtNameEdit, n->id))
+					g.evtNameEdit = n->s; // reject duplicate → keep the old name
+				else { n->s = g.evtNameEdit; edited = true; }
+			}
 			for (size_t k = 0; k < events.size(); ++k)
 			{
 				if (k) ImGui::SameLine();
-				if (ImGui::SmallButton(events[k].c_str())) { n->s = events[k]; edited = true; }
+				const bool used = eventNameUsed(graph, events[k], n->id);
+				if (used) ImGui::BeginDisabled();
+				if (ImGui::SmallButton(events[k].c_str()))
+				{ n->s = events[k]; g.evtNameEdit = n->s; edited = true; }
+				if (used) ImGui::EndDisabled();
 			}
 		}
 		else if (ImGui::BeginCombo("Event", n->s.empty() ? "(none)" : n->s.c_str()))
 		{
 			for (const std::string& ev : events)
-				if (ImGui::Selectable(ev.c_str(), n->s == ev))
+			{
+				const bool used = eventNameUsed(graph, ev, n->id); // no duplicate handlers
+				if (ImGui::Selectable(ev.c_str(), n->s == ev,
+				        used ? ImGuiSelectableFlags_Disabled : 0) && !used)
 				{
 					n->s = ev; n->hasArg = (ev == "OnWindowFocusChanged");
 					n->propType = n->hasArg ? PT::Bool : PT::Float; n->elem = 0;
 					edited = true;
 				}
+			}
 			ImGui::EndCombo();
 		}
 		ImGui::TextDisabled("Fires when this class raises this event.");
@@ -616,7 +645,11 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 		{
 			if (!matches(ev, "Events")) continue;
 			if (!eh) { ImGui::TextDisabled("Events"); eh = true; }
-			if (ImGui::Selectable(ev.c_str()))
+			// Each event handler is unique — a catalog event already present is
+			// disabled so lifecycle events can't be added twice.
+			const bool used = eventNameUsed(graph, ev);
+			if (ImGui::Selectable(ev.c_str(), false,
+			        used ? ImGuiSelectableFlags_Disabled : 0) && !used)
 			{
 				const int id = addNode(graph, NT::Event, g.ge.addMenuGraphPos);
 				HC::Node* nn = graph.findNode(id);
@@ -624,6 +657,7 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 				nn->propType = nn->hasArg ? PT::Bool : PT::Float; nn->elem = 0;
 				created = id; ImGui::CloseCurrentPopup();
 			}
+			if (used) { ImGui::SameLine(); ImGui::TextDisabled("(added)"); }
 		}
 		if ((events.empty() || allowCustomEvents) && matches("Custom Event", "Events"))
 		{

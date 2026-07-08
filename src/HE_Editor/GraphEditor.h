@@ -55,6 +55,7 @@ struct State
     bool   dragMoved = false;
     int    linkSrcNode = 0, linkSrcPin = 0;
     bool   linkSrcInput = false;
+    bool   linkGrab = false;         // this drag detached an existing link (removal)
     bool   boxSel = false;
     ImVec2 boxStart;                 // screen-space
     ImVec2 addMenuGraphPos;          // graph-space drop point for the add popup
