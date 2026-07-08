@@ -57,13 +57,13 @@ NodeSig signatureOf(const Node& n)
         s.dataOuts = { { "Value", n.propType } }; // pass the set value through
         break;
     case T::GetVariable:
-        s.dataOuts = { { "Value", n.propType } };
+        s.dataOuts = { { "Value", n.propType, n.isArray } };
         break;
     case T::SetVariable:
         s.execIns  = { { "", P::Exec } };
         s.execOuts = { { "", P::Exec } };
-        s.dataIns  = { { "Value", n.propType } };
-        s.dataOuts = { { "Value", n.propType } }; // pass the set value through
+        s.dataIns  = { { "Value", n.propType, n.isArray } };
+        s.dataOuts = { { "Value", n.propType, n.isArray } }; // pass the set value through
         break;
     case T::ShowWidget:
     case T::HideWidget:
@@ -136,6 +136,21 @@ NodeSig signatureOf(const Node& n)
     case T::ConstVec2:   s.dataOuts = { { "", P::Vec2 } };   break;
     case T::ConstColor:  s.dataOuts = { { "", P::Color } };  break;
     case T::ConstTransform: s.dataOuts = { { "", P::Transform } }; break;
+    case T::ArrayMake:
+        s.dataOuts = { { "Array", n.propType, true } };
+        break;
+    case T::ArrayLength:
+        s.dataIns  = { { "Array", n.propType, true } };
+        s.dataOuts = { { "Length", P::Int } };
+        break;
+    case T::ArrayGet:
+        s.dataIns  = { { "Array", n.propType, true }, { "Index", P::Int } };
+        s.dataOuts = { { "Element", n.propType } };
+        break;
+    case T::ArrayAdd:
+        s.dataIns  = { { "Array", n.propType, true }, { "Value", n.propType } };
+        s.dataOuts = { { "Array", n.propType, true } };
+        break;
     case T::Add: case T::Subtract: case T::Multiply: case T::Divide:
         s.dataIns  = { { "A", P::Float }, { "B", P::Float } };
         s.dataOuts = { { "", P::Float } };
@@ -200,6 +215,10 @@ const char* nodeDisplayName(NodeType t)
         case T::ConstVec2:    return "Vec2";
         case T::ConstColor:   return "Color";
         case T::ConstTransform: return "Transform";
+        case T::ArrayMake:    return "Make Array";
+        case T::ArrayLength:  return "Array Length";
+        case T::ArrayGet:     return "Array Get";
+        case T::ArrayAdd:     return "Array Add";
         case T::Add:          return "Add";
         case T::Subtract:     return "Subtract";
         case T::Multiply:     return "Multiply";
@@ -262,6 +281,7 @@ const char* nodeCategory(NodeType t)
         case T::SetExternal:    return "Reference";
         case T::Print: return "Debug";
         case T::EngineCall: return "Engine";
+        case T::ArrayMake: case T::ArrayLength: case T::ArrayGet: case T::ArrayAdd: return "Array";
         default: return "Misc";
     }
 }
@@ -300,6 +320,13 @@ PinType dataPinType(const Node& n, bool input, int index)
     if (index < 0 || index >= (int)pins.size()) return P::Float;
     return pins[index].type;
 }
+bool dataPinIsArray(const Node& n, bool input, int index)
+{
+    const NodeSig s = signatureOf(n);
+    const auto& pins = input ? s.dataIns : s.dataOuts;
+    if (index < 0 || index >= (int)pins.size()) return false;
+    return pins[index].isArray;
+}
 } // namespace
 
 // ── Graph container ──────────────────────────────────────────────────────────
@@ -329,6 +356,7 @@ const Variable* Graph::findVariable(const std::string& name) const
 
 Value variableDefaultValue(const Variable& v)
 {
+    if (v.isArray) { Value r; r.isArray = true; r.type = v.type; return r; } // empty array
     switch (v.type)
     {
         case P::Float:  return Value::ofFloat(v.f[0]);
@@ -366,7 +394,9 @@ bool Graph::connect(int srcNode, int srcPin, int dstNode, int dstPin)
     }
     if (srcIsDataOut && dstIsDataIn)
     {
-        if (dataPinType(*s, false, srcPin - sr.dataOut0) != dataPinType(*d, true, dstPin - dr.dataIn0))
+        const int si = srcPin - sr.dataOut0, di = dstPin - dr.dataIn0;
+        if (dataPinType(*s, false, si) != dataPinType(*d, true, di) ||
+            dataPinIsArray(*s, false, si) != dataPinIsArray(*d, true, di)) // array ≠ scalar
             return false;
         links.erase(std::remove_if(links.begin(), links.end(),
             [&](const Link& l){ return l.dstNode == dstNode && l.dstPin == dstPin; }), links.end());
@@ -409,6 +439,7 @@ std::string toJson(const Graph& g)
         if (!n.params.empty())  e["params"]  = dumpParams(n.params);
         if (!n.results.empty()) e["results"] = dumpParams(n.results);
         if (n.subgraph)         e["subgraph"] = n.subgraph;
+        if (n.isArray)          e["arr"]     = true;
         jn.push_back(std::move(e));
     }
     j["nodes"] = std::move(jn);
@@ -425,6 +456,7 @@ std::string toJson(const Graph& g)
         if (v.f[0] || v.f[1] || v.f[2] || v.f[3]) e["f"] = { v.f[0], v.f[1], v.f[2], v.f[3] };
         if (!v.s.empty()) e["s"] = v.s;
         if (v.access)     e["access"] = v.access;
+        if (v.isArray)    e["arr"] = true;
         if (!v.className.empty()) e["className"] = v.className;
         jv.push_back(std::move(e));
     }
@@ -476,6 +508,7 @@ bool fromJson(const std::string& json, Graph& out)
         loadParams(e.value("params",  nlohmann::json::array()), n.params);
         loadParams(e.value("results", nlohmann::json::array()), n.results);
         n.subgraph = e.value("subgraph", 0);
+        n.isArray  = e.value("arr", false);
         if (n.id >= g.nextId) g.nextId = n.id + 1;
         g.nodes.push_back(std::move(n));
     }
@@ -494,6 +527,7 @@ bool fromJson(const std::string& json, Graph& out)
         v.type = (PinType)e.value("type", (int)P::Float);
         v.s    = e.value("s", std::string());
         v.access = e.value("access", 0);
+        v.isArray = e.value("arr", false);
         v.className = e.value("className", std::string());
         if (const auto& f = e.value("f", nlohmann::json::array()); f.size() >= 4)
             for (int i = 0; i < 4; ++i) v.f[i] = f[i].get<float>();
@@ -599,6 +633,7 @@ constexpr int kMaxDepth = 64;
 
 Value coerce(Value v, PinType want)
 {
+    if (v.isArray) return v;   // arrays are never scalar-coerced (pass through whole)
     if (v.type == want) return v;
     Value r; r.type = want;
     switch (want)
@@ -836,6 +871,26 @@ Value Runner::evalData(const Node& n, int dataOutPin, int depth)
     case T::ConstVec2:   return Value::ofVec2({ n.f[0], n.f[1] });
     case T::ConstColor:  return Value::ofColor({ n.f[0], n.f[1], n.f[2], n.f[3] });
     case T::ConstTransform: return Value::ofTransform(n.tpos, n.trot, n.tscl);
+    case T::ArrayMake:
+    {
+        Value r; r.isArray = true; r.type = n.propType; return r;   // empty array of the element type
+    }
+    case T::ArrayLength:
+        return Value::ofInt((int)evalInput(n, 0, depth + 1).items.size());
+    case T::ArrayGet:
+    {
+        const Value arr = evalInput(n, 0, depth + 1);
+        const int idx = evalInput(n, 1, depth + 1).i;
+        if (idx >= 0 && idx < (int)arr.items.size()) return arr.items[idx];
+        Value def; def.type = n.propType; return def;   // out of range → element default
+    }
+    case T::ArrayAdd:
+    {
+        Value arr = evalInput(n, 0, depth + 1);          // a copy (pure: returns a new array)
+        arr.isArray = true; arr.type = n.propType;
+        arr.items.push_back(coerce(evalInput(n, 1, depth + 1), n.propType));
+        return arr;
+    }
     case T::GetProperty:
     {
         Value v = m_ctx.getProperty ? m_ctx.getProperty(n.elem, n.s) : Value{};

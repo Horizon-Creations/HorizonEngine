@@ -147,6 +147,8 @@ namespace
 			case T::Greater: case T::Less: case T::Equals:
 			case T::And: case T::Or: case T::Not: return P::Bool;
 			case T::Concat: case T::ToString: return P::String;
+			case T::ArrayMake: case T::ArrayGet: case T::ArrayAdd: return n.propType;
+			case T::ArrayLength: return P::Int;
 			default: return P::Ref;
 		}
 	}

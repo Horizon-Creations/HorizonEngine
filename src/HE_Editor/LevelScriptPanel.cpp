@@ -211,9 +211,9 @@ void drawVariables(HC::Graph& graph, bool& edited)
 	{
 		ImGui::PushID(v.name.c_str());
 		// Object variables show their class name as the type, not a bare "Object".
-		const std::string typeStr = (v.type == PT::Ref && !v.className.empty())
+		const std::string typeStr = ((v.type == PT::Ref && !v.className.empty())
 			? std::filesystem::path(v.className).stem().string()
-			: pinTypeName(v.type);
+			: std::string(pinTypeName(v.type))) + (v.isArray ? "[]" : "");
 		const std::string label = v.name + "  (" + typeStr + ")";
 		if (ImGui::Selectable(label.c_str(), g.selectedVar == v.name))
 		{
@@ -333,16 +333,36 @@ void drawVariableDetails(HC::Graph& graph, ContentManager* content, bool& edited
 	int vaccess = v->access;
 	if (ImGui::Combo("Access", &vaccess, "Public\0Private\0")) { v->access = vaccess; edited = true; }
 
-	ImGui::SeparatorText("Default");
-	switch (v->type)
+	// Single value vs an array of the type. Toggling re-types the matching Get/Set
+	// nodes' value pins and drops their now-mismatched links.
+	bool arr = v->isArray;
+	if (ImGui::Checkbox("Array", &arr))
 	{
-		case PT::Float:  if (ImGui::DragFloat("##vdef", &v->f[0], 0.1f)) edited = true; break;
-		case PT::Int:  { int iv = (int)v->f[0]; if (ImGui::DragInt("##vdef", &iv)) { v->f[0] = (float)iv; edited = true; } break; }
-		case PT::Bool: { bool b = v->f[0] != 0.0f; if (ImGui::Checkbox("##vdef", &b)) { v->f[0] = b ? 1.0f : 0.0f; edited = true; } break; }
-		case PT::String: ImGui::InputText("##vdef", &v->s); if (ImGui::IsItemDeactivatedAfterEdit()) edited = true; break;
-		case PT::Vec2:   if (ImGui::DragFloat2("##vdef", v->f, 0.1f)) edited = true; break;
-		case PT::Color:  if (ImGui::ColorEdit4("##vdef", v->f)) edited = true; break;
-		default: break;
+		v->isArray = arr;
+		for (auto& n : graph.nodes)
+			if ((n.type == NT::GetVariable || n.type == NT::SetVariable) && n.s == v->name)
+			{
+				n.isArray = arr;
+				const PinRanges r = pinRanges(n);
+				removePinLinks(graph, n.id, n.type == NT::GetVariable ? r.dataOut0 : r.dataIn0);
+			}
+		edited = true;
+	}
+	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Hold a list of values instead of a single one.");
+
+	if (!v->isArray) // an array variable defaults to empty (built with Make/Add nodes)
+	{
+		ImGui::SeparatorText("Default");
+		switch (v->type)
+		{
+			case PT::Float:  if (ImGui::DragFloat("##vdef", &v->f[0], 0.1f)) edited = true; break;
+			case PT::Int:  { int iv = (int)v->f[0]; if (ImGui::DragInt("##vdef", &iv)) { v->f[0] = (float)iv; edited = true; } break; }
+			case PT::Bool: { bool b = v->f[0] != 0.0f; if (ImGui::Checkbox("##vdef", &b)) { v->f[0] = b ? 1.0f : 0.0f; edited = true; } break; }
+			case PT::String: ImGui::InputText("##vdef", &v->s); if (ImGui::IsItemDeactivatedAfterEdit()) edited = true; break;
+			case PT::Vec2:   if (ImGui::DragFloat2("##vdef", v->f, 0.1f)) edited = true; break;
+			case PT::Color:  if (ImGui::ColorEdit4("##vdef", v->f)) edited = true; break;
+			default: break;
+		}
 	}
 
 	ImGui::Spacing();
@@ -457,9 +477,9 @@ void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events,
 			for (const auto& v : graph.variables)
 				if (ImGui::Selectable(v.name.c_str(), n->s == v.name))
 				{
-					const PT before = n->propType;
-					n->s = v.name; n->propType = v.type;
-					if (n->propType != before)
+					const PT before = n->propType; const bool wasArr = n->isArray;
+					n->s = v.name; n->propType = v.type; n->isArray = v.isArray;
+					if (n->propType != before || n->isArray != wasArr)
 					{
 						const PinRanges r = pinRanges(*n);
 						const int valuePin = n->type == NT::GetVariable ? r.dataOut0 : r.dataIn0;
@@ -469,6 +489,21 @@ void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events,
 				}
 			ImGui::EndCombo();
 		}
+		break;
+	}
+	case NT::ArrayMake:
+	case NT::ArrayLength:
+	case NT::ArrayGet:
+	case NT::ArrayAdd:
+	{
+		const PT before = n->propType;
+		if (HcEditorUtil::drawTypePicker("Element", content, n->propType, nullptr) && n->propType != before)
+		{
+			graph.links.erase(std::remove_if(graph.links.begin(), graph.links.end(),
+				[&](const HC::Link& l){ return l.srcNode == n->id || l.dstNode == n->id; }), graph.links.end());
+			edited = true;
+		}
+		ImGui::TextDisabled("Element type of the array.");
 		break;
 	}
 	case NT::ConstFloat:
@@ -698,7 +733,7 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 		// Generic node categories (self-widget/property nodes excluded; the id-
 		// based widget nodes live under "UI").
 		static const char* kCats[] = { "Flow", "Events", "Reference", "UI",
-		                               "Literals", "Math", "Logic", "String", "Debug" };
+		                               "Literals", "Math", "Logic", "String", "Array", "Debug" };
 		for (const char* cat : kCats)
 		{
 			bool header = false;
@@ -780,7 +815,7 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 					const int id = addNode(graph, k == 0 ? NT::GetVariable : NT::SetVariable,
 					                       g.ge.addMenuGraphPos);
 					HC::Node* nn = graph.findNode(id);
-					nn->s = v.name; nn->propType = v.type;
+					nn->s = v.name; nn->propType = v.type; nn->isArray = v.isArray;
 					created = id; ImGui::CloseCurrentPopup();
 				}
 			}

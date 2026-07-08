@@ -1298,9 +1298,9 @@ void drawGraphVariables(State& st, AppContext& ctx)
 			ImGui::EndDragDropSource();
 		}
 		// Object variables show their class name as the type, not a bare "Object".
-		const std::string typeStr = (v.type == PT::Ref && !v.className.empty())
+		const std::string typeStr = ((v.type == PT::Ref && !v.className.empty())
 			? std::filesystem::path(v.className).stem().string()
-			: std::string(pinTypeName(v.type));
+			: std::string(pinTypeName(v.type))) + (v.isArray ? "[]" : "");
 		if (ImGui::IsItemHovered())
 			ImGui::SetTooltip("%s — drag to graph for Get/Set", typeStr.c_str());
 		ImGui::SameLine();
@@ -1419,21 +1419,41 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 			if (ImGui::Combo("Access", &vaccess, "Public\0Private\0"))
 				{ v->access = vaccess; commitEdit(st, ctx); }
 
-			// Default value editor (seeds the runtime store at widget creation).
-			ImGui::SeparatorText("Default");
-			bool ed = false;
-			switch (v->type)
+			// Single value vs an array of the type. Toggling re-types the matching
+			// Get/Set nodes' value pins and drops now-mismatched links.
+			bool arr = v->isArray;
+			if (ImGui::Checkbox("Array", &arr))
 			{
-				case PT::Float:  ed = ImGui::DragFloat("##vdef", &v->f[0], 0.1f); break;
-				case PT::Int:  { int iv = (int)v->f[0]; if (ImGui::DragInt("##vdef", &iv)) { v->f[0] = (float)iv; ed = true; } break; }
-				case PT::Bool: { bool b = v->f[0] != 0.0f; if (ImGui::Checkbox("##vdef", &b)) { v->f[0] = b ? 1.0f : 0.0f; ed = true; } break; }
-				case PT::String: ImGui::InputText("##vdef", &v->s); break;
-				case PT::Vec2:   ed = ImGui::DragFloat2("##vdef", v->f, 0.1f); break;
-				case PT::Color:  ed = ImGui::ColorEdit4("##vdef", v->f); break;
-				default: break;
+				v->isArray = arr;
+				for (auto& gn : st.graph.nodes)
+					if ((gn.type == NT::GetVariable || gn.type == NT::SetVariable) && gn.s == v->name)
+					{
+						gn.isArray = arr;
+						const GPinRanges r = graphPinRanges(gn);
+						removeGraphPinLinks(st.graph, gn.id, gn.type == NT::GetVariable ? r.dataOut0 : r.dataIn0);
+					}
+				commitEdit(st, ctx);
 			}
-			if (ed) st.dirty = true;
-			if (ImGui::IsItemDeactivatedAfterEdit()) commitEdit(st, ctx);
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Hold a list of values instead of a single one.");
+
+			if (!v->isArray) // an array variable defaults to empty (built with Make/Add nodes)
+			{
+				// Default value editor (seeds the runtime store at widget creation).
+				ImGui::SeparatorText("Default");
+				bool ed = false;
+				switch (v->type)
+				{
+					case PT::Float:  ed = ImGui::DragFloat("##vdef", &v->f[0], 0.1f); break;
+					case PT::Int:  { int iv = (int)v->f[0]; if (ImGui::DragInt("##vdef", &iv)) { v->f[0] = (float)iv; ed = true; } break; }
+					case PT::Bool: { bool b = v->f[0] != 0.0f; if (ImGui::Checkbox("##vdef", &b)) { v->f[0] = b ? 1.0f : 0.0f; ed = true; } break; }
+					case PT::String: ImGui::InputText("##vdef", &v->s); break;
+					case PT::Vec2:   ed = ImGui::DragFloat2("##vdef", v->f, 0.1f); break;
+					case PT::Color:  ed = ImGui::ColorEdit4("##vdef", v->f); break;
+					default: break;
+				}
+				if (ed) st.dirty = true;
+				if (ImGui::IsItemDeactivatedAfterEdit()) commitEdit(st, ctx);
+			}
 
 			ImGui::Spacing();
 			ImGui::Separator();
@@ -1571,6 +1591,21 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 		break;
 	}
 
+	case NT::ArrayMake:
+	case NT::ArrayLength:
+	case NT::ArrayGet:
+	case NT::ArrayAdd:
+	{
+		const PT before = n->propType;
+		if (HcEditorUtil::drawTypePicker("Element", ctx.contentManager, n->propType, nullptr) && n->propType != before)
+		{
+			st.graph.links.erase(std::remove_if(st.graph.links.begin(), st.graph.links.end(),
+				[&](const HC::Link& l){ return l.srcNode == n->id || l.dstNode == n->id; }), st.graph.links.end());
+			committed = true;
+		}
+		ImGui::TextDisabled("Element type of the array.");
+		break;
+	}
 	case NT::ConstFloat:
 		if (ImGui::DragFloat("Value", &n->f[0], 0.1f)) st.dirty = true;
 		committed |= ImGui::IsItemDeactivatedAfterEdit();
@@ -1649,10 +1684,11 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 			for (const auto& v : st.graph.variables)
 				if (ImGui::Selectable(v.name.c_str(), n->s == v.name))
 				{
-					const PT before = n->propType;
+					const PT before = n->propType; const bool wasArr = n->isArray;
 					n->s = v.name;
 					n->propType = v.type;               // node takes the variable's type
-					if (n->propType != before)
+					n->isArray = v.isArray;             // …and its array-ness
+					if (n->propType != before || n->isArray != wasArr)
 					{
 						const GPinRanges r = graphPinRanges(*n);
 						const int valuePin = n->type == NT::GetVariable ? r.dataOut0 : r.dataIn0;
@@ -1918,7 +1954,7 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 		ImGui::BeginChild("##nodeList", ImVec2(232.0f, 300.0f));
 		static const char* kCats[] = { "Property", "Flow", "Events", "Reference",
 		                               "Literals", "Math", "Logic", "String",
-		                               "Widget", "UI", "Debug" };
+		                               "Widget", "UI", "Array", "Debug" };
 		for (const char* cat : kCats)
 		{
 			bool header = false;
@@ -1998,7 +2034,7 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 					const int id = addGraphNode(st, k == 0 ? NT::GetVariable : NT::SetVariable,
 					                            st.geState.addMenuGraphPos);
 					HC::Node* nn = st.graph.findNode(id);
-					nn->s = v.name; nn->propType = v.type;
+					nn->s = v.name; nn->propType = v.type; nn->isArray = v.isArray;
 					created = id; ImGui::CloseCurrentPopup();
 				}
 			}
