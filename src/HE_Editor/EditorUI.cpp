@@ -28,6 +28,7 @@
 #include "TextureImporter.h"
 #include "MaterialImporter.h"
 #include "AudioImporter.h"
+#include "FontImporter.h"
 
 #ifdef _WIN32
 #include <windows.h>  // must come before any header that pulls in rpcdce.h
@@ -2258,6 +2259,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                                            ext == ".tga"  || ext == ".bmp" || ext == ".hdr");
                 const bool isAudioSrc   = (ext == ".wav");
                 const bool isMatSrc     = (ext == ".hmat");
+                const bool isFontSrc    = (ext == ".ttf" || ext == ".otf");
 
                 const std::filesystem::path root(ctx.contentManager->contentRoot());
                 bool ok = false;
@@ -2265,6 +2267,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                 else if (isTextureSrc) ok = TextureImporter::import(srcPath, root)  != nullptr;
                 else if (isAudioSrc)   ok = AudioImporter::import(srcPath, root)    != nullptr;
                 else if (isMatSrc)     ok = MaterialImporter::import(srcPath, root) != nullptr;
+                else if (isFontSrc)    ok = FontImporter::import(srcPath, root)     != nullptr;
 
                 if (!ok)
                     Logger::Log(Logger::LogLevel::Error,
@@ -4547,8 +4550,9 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				                           ext == ".tga" || ext == ".bmp" || ext == ".hdr");
 				const bool isAudioSrc   = (ext == ".wav");
 				const bool isMatSrc     = (ext == ".hmat");
+				const bool isFontSrc    = (ext == ".ttf" || ext == ".otf");
 
-				if ((isMeshSrc || isTextureSrc || isAudioSrc || isMatSrc) &&
+				if ((isMeshSrc || isTextureSrc || isAudioSrc || isMatSrc || isFontSrc) &&
 				    ImGui::MenuItem("Import"))
 				{
 					const std::filesystem::path root = contentFolder.fullPath;
@@ -4562,6 +4566,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 					else if (isTextureSrc) ok = TextureImporter::import(srcPath, root, relDir)  != nullptr;
 					else if (isAudioSrc)   ok = AudioImporter::import(srcPath, root, relDir)    != nullptr;
 					else if (isMatSrc)     ok = MaterialImporter::import(srcPath, root, relDir) != nullptr;
+					else if (isFontSrc)    ok = FontImporter::import(srcPath, root, relDir)     != nullptr;
 
 					if (!ok)
 						Logger::Log(Logger::LogLevel::Error,
