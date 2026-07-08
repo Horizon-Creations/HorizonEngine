@@ -135,8 +135,12 @@ Status: **[api]** already in `ScriptApi` (just needs a registry row + node),
 - Math: extend beyond the current Add/Sub/Mul/Div/compare — `min/max/clamp/abs/
   floor/ceil/round/pow/sqrt/sin/cos/atan2/lerp`, vector ops (dot/cross/normalize/
   length/distance), `distance` **[api]**. All **pure**.
-- Random: `randomFloat(min,max)`, `randomInt`, `randomBool`, `seed(n)` — seeded
-  for determinism/parity. **[new]**.
+- Random: `random.seed(n)`, `random.value()` [0,1), `random.range(min,max)`,
+  `random.rangeInt(min,max)` (inclusive), `random.chance(p)` — **[done]** a seeded
+  process-global PRNG in `HE::api::random`. Stateful, so each is an exec node in
+  HorizonCode (caches one draw per run, not re-rolled per pin read); seeding makes
+  a run reproducible for the parity harness. Live in HC + Lua (`horizon.random.*`)
+  + Python via the registry-driven dispatcher.
 - String: `format`, `substring`, `find`, `split`, `toNumber`, `length`
   (have `Concat`/`ToString`). **pure**.
 

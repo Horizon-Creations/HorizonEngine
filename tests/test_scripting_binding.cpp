@@ -150,6 +150,28 @@ TEST_CASE("ScriptContext: registry-driven horizon.math.* (Lua)")
     CHECK(engine.getGlobalNumber("_d") == doctest::Approx(5.0));
 }
 
+TEST_CASE("ScriptContext: registry-driven horizon.random.* (Lua)")
+{
+    // The Random group reaches Lua through the same registry-driven dispatcher.
+    HorizonWorld world;
+    ScriptContext ctx(world);
+    auto& engine = ctx.engine();
+    REQUIRE(engine.exec(
+        "horizon.random.seed(99)\n"
+        "_G._rr = horizon.random.range(3, 3)\n"       // degenerate → 3
+        "_G._ri = horizon.random.rangeInt(4, 4)\n"    // degenerate → 4
+        "_G._ct = horizon.random.chance(1.0) and 1 or 0\n"
+        "_G._cf = horizon.random.chance(0.0) and 1 or 0\n"
+        "_G._v  = horizon.random.value()\n"));
+    CHECK(engine.getGlobalNumber("_rr") == doctest::Approx(3.0));
+    CHECK(engine.getGlobalNumber("_ri") == doctest::Approx(4.0));
+    CHECK(engine.getGlobalNumber("_ct") == doctest::Approx(1.0));
+    CHECK(engine.getGlobalNumber("_cf") == doctest::Approx(0.0));
+    const double v = engine.getGlobalNumber("_v");
+    CHECK(v >= 0.0);
+    CHECK(v < 1.0);
+}
+
 TEST_CASE("ScriptContext: setPosition modifies entity transform")
 {
     HorizonWorld world;

@@ -143,6 +143,19 @@ namespace math {
     float distance(const glm::vec2& a, const glm::vec2& b);
 }
 
+// ── Random (seeded PRNG; process-global state) ───────────────────────────────
+// Stateful — each draw advances the generator — so in HorizonCode these are exec
+// nodes (isExec) that cache one value per run, not pure data chips (which would
+// re-roll on every pin read). seed() makes a run reproducible, so the codegen
+// parity harness can pin a seed and compare. No engine state → no Ctx.
+namespace random {
+    void  seed(uint32_t s);
+    float value();                       // uniform [0, 1)
+    float range(float min, float max);   // uniform [min, max)  (swaps if min > max)
+    int   rangeInt(int min, int max);    // uniform [min, max]  inclusive
+    bool  chance(float p);               // true with probability p (clamped 0..1)
+}
+
 // ── Machine-readable registry ─────────────────────────────────────────────────
 // One ApiFn per function. The interpreter looks a function up by `id` and calls
 // `invoke`; the editor builds its add-menu from `category`/`params`/`results`;

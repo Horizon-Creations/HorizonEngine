@@ -1,6 +1,8 @@
 #include "HorizonScene/EngineApi.h"
 #include "HorizonScene/ScriptApi.h"
 #include <cmath>
+#include <random>
+#include <utility>
 
 // The engine surface (transform/physics/material/ui/widget/cursor/entity) is a
 // thin promotion of the language-neutral ScriptApi — same behavior, now bundled
@@ -105,6 +107,18 @@ float lerp(float a, float b, float t)    { return a + (b - a) * t; }
 float length(const glm::vec2& v)                   { return glm::length(v); }
 float distance(const glm::vec2& a, const glm::vec2& b) { return glm::length(a - b); }
 } // namespace math
+
+// ── Random ───────────────────────────────────────────────────────────────────
+namespace random {
+static std::mt19937& gen() { static std::mt19937 g(0x9E3779B9u); return g; } // fixed default seed → reproducible
+void  seed(uint32_t s)          { gen().seed(s); }
+float value()                   { return std::uniform_real_distribution<float>(0.0f, 1.0f)(gen()); }
+float range(float lo, float hi) { if (hi < lo) std::swap(lo, hi);
+                                  return lo == hi ? lo : std::uniform_real_distribution<float>(lo, hi)(gen()); }
+int   rangeInt(int lo, int hi)  { if (hi < lo) std::swap(lo, hi);
+                                  return std::uniform_int_distribution<int>(lo, hi)(gen()); }
+bool  chance(float p)           { return value() < (p < 0.0f ? 0.0f : (p > 1.0f ? 1.0f : p)); }
+} // namespace random
 
 // ── Registry ─────────────────────────────────────────────────────────────────
 namespace {
@@ -252,6 +266,18 @@ const std::vector<ApiFn>& registry()
             [](Ctx&, const VV& a){ return VV{ Value::ofFloat(math::length(aV2(a, 0))) }; } });
         t.push_back({ "math.distance", "Math", false, {{"a", P::Vec2}, {"b", P::Vec2}}, {{"result", P::Float}}, "HE::api::math::distance",
             [](Ctx&, const VV& a){ return VV{ Value::ofFloat(math::distance(aV2(a, 0), aV2(a, 1))) }; } });
+
+        // Random (stateful → isExec, so a HorizonCode node caches one draw per run)
+        t.push_back({ "random.seed", "Random", true, {{"seed", P::Int}}, {}, "HE::api::random::seed",
+            [](Ctx&, const VV& a){ random::seed((uint32_t)aI(a, 0)); return VV{}; } });
+        t.push_back({ "random.value", "Random", true, {}, {{"value", P::Float}}, "HE::api::random::value",
+            [](Ctx&, const VV&){ return VV{ Value::ofFloat(random::value()) }; } });
+        t.push_back({ "random.range", "Random", true, {{"min", P::Float}, {"max", P::Float}}, {{"value", P::Float}}, "HE::api::random::range",
+            [](Ctx&, const VV& a){ return VV{ Value::ofFloat(random::range(aF(a, 0), aF(a, 1))) }; } });
+        t.push_back({ "random.rangeInt", "Random", true, {{"min", P::Int}, {"max", P::Int}}, {{"value", P::Int}}, "HE::api::random::rangeInt",
+            [](Ctx&, const VV& a){ return VV{ Value::ofInt(random::rangeInt(aI(a, 0), aI(a, 1))) }; } });
+        t.push_back({ "random.chance", "Random", true, {{"p", P::Float}}, {{"value", P::Bool}}, "HE::api::random::chance",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(random::chance(aF(a, 0))) }; } });
 
         return t;
     }();

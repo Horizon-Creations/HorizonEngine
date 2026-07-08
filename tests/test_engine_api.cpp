@@ -302,3 +302,35 @@ TEST_CASE("EngineCall: round-trips through JSON (type by name + mirrored signatu
     REQUIRE(loaded.nodes[0].params.size() == 2);
     CHECK(loaded.nodes[0].params[1].type == P::Color);
 }
+
+// ═══ Random library (seeded, bounded, reproducible) ══════════════════════════
+
+TEST_CASE("Random: seeded → reproducible; ranges bounded; chance extremes")
+{
+    Ctx c{};   // no engine state needed
+    auto call = [&](const char* id, std::vector<Value> a){ return HE::api::find(id)->invoke(c, a); };
+
+    // Same seed → same sequence.
+    call("random.seed", { Value::ofInt(1234) });
+    const float a0 = call("random.value", {})[0].f;
+    const float a1 = call("random.value", {})[0].f;
+    call("random.seed", { Value::ofInt(1234) });
+    CHECK(call("random.value", {})[0].f == doctest::Approx(a0));
+    CHECK(call("random.value", {})[0].f == doctest::Approx(a1));
+
+    // value() ∈ [0, 1).
+    for (int i = 0; i < 200; ++i)
+    { const float v = call("random.value", {})[0].f; CHECK(v >= 0.0f); CHECK(v < 1.0f); }
+
+    // Degenerate ranges collapse to the endpoint.
+    CHECK(call("random.range",    { Value::ofFloat(5.0f), Value::ofFloat(5.0f) })[0].f == doctest::Approx(5.0f));
+    CHECK(call("random.rangeInt", { Value::ofInt(7),      Value::ofInt(7) })[0].i == 7);
+
+    // rangeInt is inclusive on both ends; swaps reversed bounds.
+    for (int i = 0; i < 200; ++i)
+    { const int v = call("random.rangeInt", { Value::ofInt(6), Value::ofInt(1) })[0].i; CHECK(v >= 1); CHECK(v <= 6); }
+
+    // chance(1) always true, chance(0) always false.
+    CHECK(call("random.chance", { Value::ofFloat(1.0f) })[0].b == true);
+    CHECK(call("random.chance", { Value::ofFloat(0.0f) })[0].b == false);
+}
