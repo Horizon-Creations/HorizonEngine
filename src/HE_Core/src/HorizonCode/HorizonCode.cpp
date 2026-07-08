@@ -119,6 +119,14 @@ NodeSig signatureOf(const Node& n)
         s.execOuts = { { "", P::Exec } };
         if (n.hasArg) s.dataIns = { { "Arg", n.propType } };
         break;
+    case T::EngineCall:
+        // hasArg = the registry entry's isExec: side-effecting calls get exec pins,
+        // pure calls (getters/math) are compact data nodes. params → data-ins,
+        // results → data-outs (mirrored on the node from the ApiFn descriptor).
+        if (n.hasArg) { s.execIns = { { "", P::Exec } }; s.execOuts = { { "", P::Exec } }; }
+        for (const auto& p : n.params)  s.dataIns.push_back({ p.name.c_str(), p.type });
+        for (const auto& r : n.results) s.dataOuts.push_back({ r.name.c_str(), r.type });
+        break;
     case T::GetGameInstance: s.dataOuts = { { "Game Instance", P::Ref } }; break;
     case T::GetSelf:         s.dataOuts = { { "Self", P::Ref } };          break;
     case T::ConstFloat:  s.dataOuts = { { "", P::Float } };  break;
@@ -209,6 +217,7 @@ const char* nodeDisplayName(NodeType t)
         case T::GetSelf:        return "Get Self";
         case T::Print:        return "Print";
         case T::FunctionReturn:return "Return";
+        case T::EngineCall:   return "Engine Call";
         default:              return "?";
     }
 }
@@ -249,6 +258,7 @@ const char* nodeCategory(NodeType t)
         case T::GetExternal:
         case T::SetExternal:    return "Reference";
         case T::Print: return "Debug";
+        case T::EngineCall: return "Engine";
         default: return "Misc";
     }
 }
@@ -765,6 +775,18 @@ void Runner::execNode(const Node& n, int depth)
                 f.results[i] = coerce(evalInput(n, (int)i, depth + 1), n.results[i].type);
         }
         break;
+    case T::EngineCall:
+        // Side-effecting engine call: evaluate the argument pins, dispatch through
+        // the registry, and cache the results for downstream data reads (like a
+        // FunctionCall). Pure engine calls have no exec pin and never reach here.
+        if (m_ctx.callApi)
+        {
+            std::vector<Value> args(n.params.size());
+            for (size_t i = 0; i < n.params.size(); ++i)
+                args[i] = coerce(evalInput(n, (int)i, depth + 1), n.params[i].type);
+            m_execOutputs[n.id] = m_ctx.callApi(n.s, args);
+        }
+        break;
     case T::Print:
         Logger::Log(Logger::LogLevel::Info,
             ("[Widget] " + coerce(evalInput(n, 0, depth + 1), P::String).s).c_str());
@@ -841,6 +863,28 @@ Value Runner::evalData(const Node& n, int dataOutPin, int depth)
         auto it = m_execOutputs.find(n.id);
         if (it != m_execOutputs.end() && dataOutPin >= 0 && dataOutPin < (int)it->second.size())
             return it->second[dataOutPin];
+        return {};
+    }
+    case T::EngineCall:
+    {
+        // Exec engine call: return the value cached when the node ran. Pure engine
+        // call (no exec pin): evaluate the inputs and dispatch now — re-evaluatable
+        // because it has no side effect.
+        if (n.hasArg)
+        {
+            auto it = m_execOutputs.find(n.id);
+            if (it != m_execOutputs.end() && dataOutPin >= 0 && dataOutPin < (int)it->second.size())
+                return it->second[dataOutPin];
+            return {};
+        }
+        if (m_ctx.callApi)
+        {
+            std::vector<Value> args(n.params.size());
+            for (size_t i = 0; i < n.params.size(); ++i)
+                args[i] = coerce(evalInput(n, (int)i, depth + 1), n.params[i].type);
+            std::vector<Value> res = m_ctx.callApi(n.s, args);
+            if (dataOutPin >= 0 && dataOutPin < (int)res.size()) return res[dataOutPin];
+        }
         return {};
     }
     case T::GetExternal:

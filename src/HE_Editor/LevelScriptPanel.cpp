@@ -6,6 +6,7 @@
 #include "EditorUndo.h"          // scene-undo snapshots (dirty tracking + undo/redo)
 #include "GraphEditor.h"         // shared node-graph canvas
 #include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/EngineApi.h>
 #include <HorizonCode/HorizonCode.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
@@ -106,6 +107,7 @@ std::string nodeTitle(const HC::Node& n)
 		case NT::CallExternal: return n.s.empty() ? std::string("Call (Ref)") : ("Call " + n.s);
 		case NT::GetExternal:  return n.s.empty() ? std::string("Get (Ref)")  : ("Get " + n.s);
 		case NT::SetExternal:  return n.s.empty() ? std::string("Set (Ref)")  : ("Set " + n.s);
+		case NT::EngineCall:   return n.s.empty() ? std::string("Engine Call") : n.s;
 		default:               return base;
 	}
 }
@@ -737,6 +739,25 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 			}
 		}
 		if (fh) ImGui::Spacing();
+
+		// Engine API calls — the HE::api registry surfaced as one generic
+		// EngineCall node per function, grouped by subsystem, same search box.
+		if (std::string picked = HcEditorUtil::drawEngineApiMenu(q); !picked.empty())
+		{
+			if (const HE::api::ApiFn* fn = HE::api::find(picked))
+			{
+				const int id = addNode(graph, NT::EngineCall, g.ge.addMenuGraphPos);
+				HC::Node* nn = graph.findNode(id);
+				nn->s = fn->id;
+				nn->hasArg = fn->isExec;             // exec node vs pure data node
+				nn->params.clear(); nn->results.clear();
+				for (const auto& p : fn->params)  nn->params.push_back({ p.name, p.type });
+				for (const auto& r : fn->results) nn->results.push_back({ r.name, r.type });
+				created = id;
+			}
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::Spacing();
 
 		// Get/Set for each declared variable.
 		bool vh = false;

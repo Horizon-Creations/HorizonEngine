@@ -11,6 +11,7 @@
 #include <HorizonScene/SceneSystems.h>
 #include <HorizonScene/ScriptContext.h>
 #include <HorizonScene/ScriptApi.h>
+#include <HorizonScene/EngineApi.h>
 #include <Scripting/ScriptTypes.h>
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
@@ -172,6 +173,16 @@ void GameApplication::OnInit()
 		svc.destroyObject = [this](uint32_t ref){
 			if (ref != 0 && ref != m_gameInstance.runtime().gameInstance())
 				m_gameInstance.runtime().destroy(ref); // fires "Destruct"
+		};
+		// EngineCall nodes dispatch through the HE::api registry against this
+		// world (+ content). No PhysicsWorld in the shipping runtime yet →
+		// physics nodes no-op (null-Ctx tolerance).
+		svc.callApi = [this](const std::string& id, const std::vector<HorizonCode::Value>& args)
+			-> std::vector<HorizonCode::Value> {
+			const HE::api::ApiFn* fn = HE::api::find(id);
+			if (!fn) return {};
+			HE::api::Ctx c{ m_world.get(), nullptr, &contentManager() };
+			return fn->invoke(c, args);
 		};
 		m_gameInstance.runtime().setServices(std::move(svc));
 	}

@@ -194,6 +194,7 @@ Context Runtime::makeContext(InstanceId id)
     ctx.destroyWidget = m_services.destroyWidget;
     ctx.createObject  = m_services.createObject;
     ctx.destroyObject = m_services.destroyObject;
+    ctx.callApi       = m_services.callApi;
     return ctx;
 }
 

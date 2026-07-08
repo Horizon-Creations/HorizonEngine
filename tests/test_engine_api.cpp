@@ -2,13 +2,16 @@
 #include <HorizonScene/EngineApi.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/Components/TransformComponent.h>
+#include <HorizonCode/HorizonCode.h>
 #include <glm/glm.hpp>
 #include <cmath>
+#include <unordered_map>
 #include <unordered_set>
 
 using HE::api::Ctx;
 using HE::api::Value;
-using P = HorizonCode::PinType;
+using P  = HorizonCode::PinType;
+using NT = HorizonCode::NodeType;
 
 namespace
 {
@@ -168,4 +171,134 @@ TEST_CASE("EngineApi: null handles return neutral defaults, never crash")
 
     // log with a null ctx must be safe too
     CHECK_NOTHROW(HE::api::find("log")->invoke(c, { Value::ofString("hello from a null ctx") }));
+}
+
+// ═══ EngineCall node: interpreter routes through the registry ═════════════════
+
+namespace
+{
+    namespace HC = HorizonCode;
+
+    // A Context whose callApi dispatches to the HE::api registry against `api`,
+    // with a local variable store for Get/SetVariable.
+    HC::Context makeApiContext(HE::api::Ctx& api, std::unordered_map<std::string, Value>& vars)
+    {
+        HC::Context ctx;
+        ctx.getVariable = [&vars](const std::string& n){ auto it = vars.find(n); return it != vars.end() ? it->second : Value{}; };
+        ctx.setVariable = [&vars](const std::string& n, const Value& v){ vars[n] = v; };
+        ctx.callApi = [&api](const std::string& id, const std::vector<Value>& args) -> std::vector<Value> {
+            const HE::api::ApiFn* fn = HE::api::find(id);
+            return fn ? fn->invoke(api, args) : std::vector<Value>{};
+        };
+        return ctx;
+    }
+}
+
+TEST_CASE("EngineCall: an exec engine call runs and feeds its result downstream")
+{
+    HorizonWorld world;
+    HE::api::Ctx api{ &world, nullptr, nullptr };
+
+    HC::Graph g;
+    // Event "Run" (exec out at pin 0)
+    HC::Node ev; ev.type = NT::Event; ev.s = "Run";
+    const int evId = g.addNode(ev);
+    // ConstInt 0 (parent) + ConstString "Made" (name)
+    HC::Node ci; ci.type = NT::ConstInt; ci.f[0] = 0.0f;   const int ciId = g.addNode(ci);
+    HC::Node cs; cs.type = NT::ConstString; cs.s = "Made"; const int csId = g.addNode(cs);
+    // EngineCall entity.spawn (exec): pins [execIn 0][execOut 1][parent 2][name 3][entity out 4]
+    HC::Node ec; ec.type = NT::EngineCall; ec.s = "entity.spawn"; ec.hasArg = true;
+    ec.params  = { { "parent", P::Int }, { "name", P::String } };
+    ec.results = { { "entity", P::Int } };
+    const int ecId = g.addNode(ec);
+    // SetVariable "spawned" (Int): pins [execIn 0][execOut 1][Value 2][Value out 3]
+    HC::Node sv; sv.type = NT::SetVariable; sv.s = "spawned"; sv.propType = P::Int;
+    const int svId = g.addNode(sv);
+
+    REQUIRE(g.connect(evId, 0, ecId, 0));   // event exec → spawn exec-in
+    REQUIRE(g.connect(ciId, 0, ecId, 2));   // 0 → parent
+    REQUIRE(g.connect(csId, 0, ecId, 3));   // "Made" → name
+    REQUIRE(g.connect(ecId, 1, svId, 0));   // spawn exec-out → setVar exec-in
+    REQUIRE(g.connect(ecId, 4, svId, 2));   // spawned entity → setVar value
+
+    std::unordered_map<std::string, Value> vars;
+    HC::Context ctx = makeApiContext(api, vars);
+    HC::Runner runner(g, ctx);
+    runner.fireEvent("Run", 0);
+
+    // The variable holds the spawned entity id, and the world knows that entity.
+    REQUIRE(vars.count("spawned") == 1);
+    const auto spawned = (HE::api::Entity)vars["spawned"].i;
+    CHECK(spawned != 0);
+    CHECK(HE::api::entity::getName(api, spawned) == "Made");
+}
+
+TEST_CASE("EngineCall: a pure engine call evaluates on demand (no exec pin)")
+{
+    HE::api::Ctx api{};   // math needs no world
+
+    HC::Graph g;
+    HC::Node ev; ev.type = NT::Event; ev.s = "Run"; const int evId = g.addNode(ev);
+    // Three constants feeding clamp(5, 0, 3)
+    HC::Node x;  x.type  = NT::ConstFloat; x.f[0]  = 5.0f; const int xId  = g.addNode(x);
+    HC::Node lo; lo.type = NT::ConstFloat; lo.f[0] = 0.0f; const int loId = g.addNode(lo);
+    HC::Node hi; hi.type = NT::ConstFloat; hi.f[0] = 3.0f; const int hiId = g.addNode(hi);
+    // Pure EngineCall math.clamp: no exec pins → dataIns [x 0][lo 1][hi 2], dataOut [result 3]
+    HC::Node ec; ec.type = NT::EngineCall; ec.s = "math.clamp"; ec.hasArg = false;
+    ec.params  = { { "x", P::Float }, { "lo", P::Float }, { "hi", P::Float } };
+    ec.results = { { "result", P::Float } };
+    const int ecId = g.addNode(ec);
+    // SetVariable "r": pins [execIn 0][execOut 1][Value 2][Value out 3]
+    HC::Node sv; sv.type = NT::SetVariable; sv.s = "r"; sv.propType = P::Float;
+    const int svId = g.addNode(sv);
+
+    REQUIRE(g.connect(evId, 0, svId, 0));   // event exec → setVar exec-in
+    REQUIRE(g.connect(xId,  0, ecId, 0));   // 5 → x
+    REQUIRE(g.connect(loId, 0, ecId, 1));   // 0 → lo
+    REQUIRE(g.connect(hiId, 0, ecId, 2));   // 3 → hi
+    REQUIRE(g.connect(ecId, 3, svId, 2));   // clamp result → setVar value
+
+    std::unordered_map<std::string, Value> vars;
+    HC::Context ctx = makeApiContext(api, vars);
+    HC::Runner runner(g, ctx);
+    runner.fireEvent("Run", 0);
+
+    REQUIRE(vars.count("r") == 1);
+    CHECK(vars["r"].f == doctest::Approx(3.0f));
+}
+
+TEST_CASE("EngineCall: signatureOf reflects isExec + mirrored params/results")
+{
+    HC::Node exec; exec.type = NT::EngineCall; exec.hasArg = true;
+    exec.params = { { "entity", P::Int }, { "position", P::Color } };
+    const auto es = HC::signatureOf(exec);
+    CHECK(es.execIns.size() == 1);          // exec node has flow pins
+    CHECK(es.execOuts.size() == 1);
+    CHECK(es.dataIns.size() == 2);
+
+    HC::Node pure; pure.type = NT::EngineCall; pure.hasArg = false;
+    pure.params  = { { "x", P::Float } };
+    pure.results = { { "result", P::Float } };
+    const auto ps = HC::signatureOf(pure);
+    CHECK(ps.execIns.empty());              // pure node is a compact data chip
+    CHECK(ps.execOuts.empty());
+    CHECK(ps.dataIns.size() == 1);
+    CHECK(ps.dataOuts.size() == 1);
+}
+
+TEST_CASE("EngineCall: round-trips through JSON (type by name + mirrored signature)")
+{
+    HC::Graph g;
+    HC::Node ec; ec.type = NT::EngineCall; ec.s = "transform.setPosition"; ec.hasArg = true;
+    ec.params = { { "entity", P::Int }, { "position", P::Color } };
+    g.addNode(ec);
+
+    HC::Graph loaded;
+    REQUIRE(HC::fromJson(HC::toJson(g), loaded));
+    REQUIRE(loaded.nodes.size() == 1);
+    CHECK(loaded.nodes[0].type == NT::EngineCall);
+    CHECK(loaded.nodes[0].s == "transform.setPosition");
+    CHECK(loaded.nodes[0].hasArg == true);            // isExec survives
+    REQUIRE(loaded.nodes[0].params.size() == 2);
+    CHECK(loaded.nodes[0].params[1].type == P::Color);
 }
