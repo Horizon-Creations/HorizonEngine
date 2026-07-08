@@ -1,0 +1,171 @@
+#include "doctest.h"
+#include <HorizonScene/EngineApi.h>
+#include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/Components/TransformComponent.h>
+#include <glm/glm.hpp>
+#include <cmath>
+#include <unordered_set>
+
+using HE::api::Ctx;
+using HE::api::Value;
+using P = HorizonCode::PinType;
+
+namespace
+{
+    // Spawn an entity that carries a TransformComponent (createEntity alone does
+    // not add one), so the transform api has something to read/write.
+    HE::api::Entity spawnWithTransform(HorizonWorld& world, const glm::vec3& pos = glm::vec3(0.0f))
+    {
+        auto e = world.createEntity("ApiTest");
+        TransformComponent tc;
+        tc.position = pos;
+        world.registry().emplace<TransformComponent>(e, tc);
+        return static_cast<HE::api::Entity>(e);
+    }
+}
+
+// ═══ Registry shape ═══════════════════════════════════════════════════════════
+
+TEST_CASE("EngineApi: registry is populated and well-formed")
+{
+    const auto& reg = HE::api::registry();
+    CHECK(reg.size() > 30);   // the promoted ScriptApi surface + the math library
+
+    std::unordered_set<std::string> ids;
+    for (const auto& fn : reg)
+    {
+        CHECK(fn.id != nullptr);
+        CHECK(fn.category != nullptr);
+        CHECK(fn.cppCall != nullptr);
+        CHECK(fn.invoke != nullptr);
+        CHECK(std::string(fn.id).length() > 0);
+        // ids are unique
+        CHECK(ids.insert(fn.id).second);
+    }
+}
+
+TEST_CASE("EngineApi: find() resolves ids, rejects unknown")
+{
+    CHECK(HE::api::find("transform.setPosition") != nullptr);
+    CHECK(HE::api::find("math.clamp") != nullptr);
+    CHECK(HE::api::find("does.not.exist") == nullptr);
+    CHECK(HE::api::find("") == nullptr);
+}
+
+TEST_CASE("EngineApi: side-effect classification is correct")
+{
+    // Getters / queries / pure math are data nodes; setters / actions are exec.
+    CHECK(HE::api::find("transform.getPosition")->isExec == false);
+    CHECK(HE::api::find("transform.setPosition")->isExec == true);
+    CHECK(HE::api::find("physics.raycast")->isExec == false);
+    CHECK(HE::api::find("math.clamp")->isExec == false);
+    CHECK(HE::api::find("entity.spawn")->isExec == true);
+    CHECK(HE::api::find("log")->isExec == true);
+
+    // Signatures carry typed params + results.
+    const auto* setPos = HE::api::find("transform.setPosition");
+    REQUIRE(setPos->params.size() == 2);
+    CHECK(setPos->params[0].type == P::Int);      // entity
+    CHECK(setPos->params[1].type == P::Color);    // position (vec3 carrier)
+    CHECK(setPos->results.empty());
+
+    const auto* ray = HE::api::find("physics.raycast");
+    REQUIRE(ray->results.size() == 5);
+    CHECK(ray->results[0].type == P::Bool);       // hit
+}
+
+// ═══ Marshalling round-trips against a real world ═════════════════════════════
+
+TEST_CASE("EngineApi: transform round-trips through the registry")
+{
+    HorizonWorld world;
+    Ctx c{ &world, nullptr, nullptr };
+    auto e = spawnWithTransform(world);
+
+    // set via the registry thunk
+    HE::api::find("transform.setPosition")->invoke(c,
+        { Value::ofInt((int)e), Value::ofColor(glm::vec4(1.0f, 2.0f, 3.0f, 0.0f)) });
+
+    // read back via the registry thunk
+    auto out = HE::api::find("transform.getPosition")->invoke(c, { Value::ofInt((int)e) });
+    REQUIRE(out.size() == 1);
+    CHECK(out[0].col.x == doctest::Approx(1.0f));
+    CHECK(out[0].col.y == doctest::Approx(2.0f));
+    CHECK(out[0].col.z == doctest::Approx(3.0f));
+
+    // and via the typed C++ api directly — same result
+    const glm::vec3 p = HE::api::transform::getPosition(c, e);
+    CHECK(p.x == doctest::Approx(1.0f));
+    CHECK(p.z == doctest::Approx(3.0f));
+}
+
+TEST_CASE("EngineApi: entity spawn + distance via the api")
+{
+    HorizonWorld world;
+    Ctx c{ &world, nullptr, nullptr };
+
+    auto a = spawnWithTransform(world, glm::vec3(0.0f));
+    auto b = spawnWithTransform(world, glm::vec3(3.0f, 4.0f, 0.0f));
+    CHECK(HE::api::entity::distance(c, a, b) == doctest::Approx(5.0f));
+
+    // spawn through the registry, then it should have a valid name
+    auto out = HE::api::find("entity.spawn")->invoke(c, { Value::ofInt(0), Value::ofString("Fresh") });
+    REQUIRE(out.size() == 1);
+    const auto spawned = (HE::api::Entity)out[0].i;
+    CHECK(HE::api::entity::getName(c, spawned) == "Fresh");
+}
+
+// ═══ Math library ═════════════════════════════════════════════════════════════
+
+TEST_CASE("EngineApi: pure math thunks compute correctly")
+{
+    Ctx c{};   // math needs no world
+
+    auto call1 = [&](const char* id, float x) {
+        return HE::api::find(id)->invoke(c, { Value::ofFloat(x) })[0].f; };
+    auto call2 = [&](const char* id, float a, float b) {
+        return HE::api::find(id)->invoke(c, { Value::ofFloat(a), Value::ofFloat(b) })[0].f; };
+
+    CHECK(call1("math.sqrt", 16.0f) == doctest::Approx(4.0f));
+    CHECK(call1("math.abs", -3.0f) == doctest::Approx(3.0f));
+    CHECK(call1("math.floor", 2.9f) == doctest::Approx(2.0f));
+    CHECK(call1("math.sign", -7.0f) == doctest::Approx(-1.0f));
+    CHECK(call2("math.pow", 2.0f, 10.0f) == doctest::Approx(1024.0f));
+    CHECK(call2("math.max", 3.0f, 8.0f) == doctest::Approx(8.0f));
+    CHECK(call2("math.mod", 7.0f, 0.0f) == doctest::Approx(0.0f));   // div-by-zero guard
+
+    auto clamp = HE::api::find("math.clamp")->invoke(c,
+        { Value::ofFloat(5.0f), Value::ofFloat(0.0f), Value::ofFloat(3.0f) });
+    CHECK(clamp[0].f == doctest::Approx(3.0f));
+
+    auto lerp = HE::api::find("math.lerp")->invoke(c,
+        { Value::ofFloat(0.0f), Value::ofFloat(10.0f), Value::ofFloat(0.5f) });
+    CHECK(lerp[0].f == doctest::Approx(5.0f));
+
+    auto dist = HE::api::find("math.distance")->invoke(c,
+        { Value::ofVec2(glm::vec2(0.0f)), Value::ofVec2(glm::vec2(3.0f, 4.0f)) });
+    CHECK(dist[0].f == doctest::Approx(5.0f));
+}
+
+// ═══ Null-Ctx tolerance ═══════════════════════════════════════════════════════
+
+TEST_CASE("EngineApi: null handles return neutral defaults, never crash")
+{
+    Ctx c{};   // no world / physics / content
+
+    CHECK(HE::api::entity::getName(c, 1) == "");
+    CHECK(HE::api::transform::getPosition(c, 1) == glm::vec3(0.0f));
+    CHECK(HE::api::transform::getScale(c, 1) == glm::vec3(1.0f));   // scale default (1,1,1)
+    CHECK(HE::api::widget::create(c, "x") == 0);
+    CHECK(HE::api::physics::isGrounded(c, 1) == false);
+
+    // through the registry: a setter on a null world is a no-op, a getter defaults
+    CHECK_NOTHROW(HE::api::find("transform.setPosition")->invoke(c,
+        { Value::ofInt(1), Value::ofColor(glm::vec4(9.0f)) }));
+    auto name = HE::api::find("entity.getName")->invoke(c, { Value::ofInt(1) });
+    REQUIRE(name.size() == 1);
+    CHECK(name[0].s == "");
+
+    // log with a null ctx must be safe too
+    CHECK_NOTHROW(HE::api::find("log")->invoke(c, { Value::ofString("hello from a null ctx") }));
+}
