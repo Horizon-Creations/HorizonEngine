@@ -126,6 +126,10 @@ struct Node
     int         access = 0;               // FunctionEntry: 0 public, 1 private
     float       f[4] = {};                // literal payload
     float       x = 0.0f, y = 0.0f;       // editor canvas position
+    // Which sub-graph this node lives in: 0 = the main event graph, else the id
+    // of the owning FunctionEntry (that function's own body sub-graph). Editor
+    // scoping only — the interpreter follows exec links regardless.
+    int         subgraph = 0;
     // Function interface. FunctionEntry: params = inputs (data-outs). FunctionCall
     // mirrors both (params = data-ins, results = data-outs). FunctionReturn mirrors
     // results (data-ins). Empty on every other node type.
@@ -175,6 +179,12 @@ HE_API bool        fromJson(const std::string& json, Graph& out);
 // graph. FunctionReturn mirrors results (its data-ins); a call with no matching
 // entry keeps its own mirror (the entry may live in another class's graph).
 HE_API void syncFunctionSignatures(Graph& g);
+
+// Partition a flat (pre-sub-graph) graph in place: assign every function-body
+// node the `subgraph` of its owning FunctionEntry, leaving event-graph nodes at
+// 0. No-op if the graph is already partitioned or has no functions. Called on
+// load so old assets open with functions in their own sub-graphs.
+HE_API void assignSubgraphs(Graph& g);
 
 // The runtime Value a variable starts at (from its stored default). Hosts seed
 // their per-instance variable store with this.

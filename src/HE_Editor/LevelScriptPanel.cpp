@@ -151,22 +151,13 @@ bool eventNameUsed(const HC::Graph& g, const std::string& name, int exceptId = 0
 	return false;
 }
 
-int addNode(HC::Graph& g, NT type, const ImVec2& pos)
-{
-	HC::Node n;
-	n.type = type;
-	n.x = pos.x; n.y = pos.y;
-	if (type == NT::ConstColor) { n.f[0] = n.f[1] = n.f[2] = n.f[3] = 1.0f; }
-	if (type == NT::FunctionEntry) n.s = uniqueFunctionName(g);
-	return g.addNode(std::move(n));
-}
-
 // ── Persistent panel state (the panel edits the current scene's graph) ────────
 struct LSState
 {
 	GraphEditor::State ge;
 	int         selectedNode = 0;
 	bool        focusSelected = false;
+	int         currentGraph = 0;   // visible sub-graph: 0 = event graph, else a FunctionEntry id
 	std::string selectedVar;        // variable selected in the left panel
 	std::string varNameEdit;        // scratch rename buffer (see the widget editor bug)
 	std::string varNameEditFor;
@@ -176,6 +167,17 @@ struct LSState
 	bool        openVarDrop = false;
 };
 LSState g;
+
+int addNode(HC::Graph& graph, NT type, const ImVec2& pos)
+{
+	HC::Node n;
+	n.type = type;
+	n.x = pos.x; n.y = pos.y;
+	n.subgraph = g.currentGraph;    // new nodes belong to the visible sub-graph
+	if (type == NT::ConstColor) { n.f[0] = n.f[1] = n.f[2] = n.f[3] = 1.0f; }
+	if (type == NT::FunctionEntry) n.s = uniqueFunctionName(graph);
+	return graph.addNode(std::move(n));
+}
 
 const char* kVarPayload = "HE_LSGRAPH_VAR";
 
@@ -228,14 +230,24 @@ void drawVariables(HC::Graph& graph, bool& edited)
 
 void drawFunctions(HC::Graph& graph, bool& edited)
 {
+	// The event graph (top-level Events) + one sub-graph per function; the list
+	// switches which sub-graph the canvas shows (Blueprint-style).
+	ImGui::SeparatorText("Graphs");
+	if (ImGui::Selectable("Event Graph", g.currentGraph == 0))
+	{ g.currentGraph = 0; g.selectedNode = 0; g.selectedVar.clear(); }
+
 	ImGui::SeparatorText("Functions");
 	if (ImGui::SmallButton("+ Add##fn"))
 	{
-		// Place new function entries in a tidy column near the origin.
-		int count = 0;
-		for (const auto& n : graph.nodes) if (n.type == NT::FunctionEntry) ++count;
-		const int id = addNode(graph, NT::FunctionEntry, ImVec2(40.0f, 260.0f + count * 90.0f));
-		g.selectedNode = id;
+		// A function is its own sub-graph: a start (FunctionEntry) + a Return node.
+		const int fnId = addNode(graph, NT::FunctionEntry, ImVec2(40.0f, 40.0f));
+		HC::Node* entry = graph.findNode(fnId);
+		entry->subgraph = fnId;                  // the function owns its sub-graph
+		const std::string fnName = entry->s;
+		g.currentGraph = fnId;                    // so addNode scopes the return here
+		const int retId = addNode(graph, NT::FunctionReturn, ImVec2(420.0f, 40.0f));
+		graph.findNode(retId)->s = fnName;        // bound to this function (results mirror on sync)
+		g.selectedNode = fnId;
 		g.selectedVar.clear();
 		g.focusSelected = true;
 		edited = true;
@@ -246,8 +258,9 @@ void drawFunctions(HC::Graph& graph, bool& edited)
 		ImGui::PushID(n.id);
 		const std::string label = (n.s.empty() ? "(unnamed)" : n.s) +
 		                          (n.access == 1 ? "  [private]" : "");
-		if (ImGui::Selectable(label.c_str(), g.selectedNode == n.id))
+		if (ImGui::Selectable(label.c_str(), g.currentGraph == n.id))
 		{
+			g.currentGraph = n.id;                // open the function's sub-graph
 			g.selectedNode = n.id;
 			g.selectedVar.clear();
 			g.focusSelected = true;
@@ -404,7 +417,8 @@ void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events,
 		{
 			if (!n->s.empty() && n->s != oldName)
 				for (auto& c : graph.nodes)
-					if (c.type == NT::FunctionCall && c.s == oldName) c.s = n->s;
+					if ((c.type == NT::FunctionCall || c.type == NT::FunctionReturn) && c.s == oldName)
+						c.s = n->s;
 			edited = true;
 		}
 		int access = n->access;
@@ -595,7 +609,7 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 	m.multiSelect = true;
 	m.compactPureNodes = true; // getters/literals draw as compact chips
 	m.nodeIds = [&graph]{ std::vector<int> ids; ids.reserve(graph.nodes.size());
-		for (const auto& n : graph.nodes) ids.push_back(n.id); return ids; };
+		for (const auto& n : graph.nodes) if (n.subgraph == g.currentGraph) ids.push_back(n.id); return ids; };
 	m.getPos = [&graph](int id, float& x, float& y){ if (const HC::Node* n = graph.findNode(id)) { x = n->x; y = n->y; } };
 	m.setPos = [&graph](int id, float x, float y){ if (HC::Node* n = graph.findNode(id)) { n->x = x; n->y = y; } };
 	m.title  = [&graph](int id){ const HC::Node* n = graph.findNode(id); return n ? nodeTitle(*n) : std::string(); };
@@ -604,7 +618,9 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 	m.pins = [&graph](int id){ const HC::Node* n = graph.findNode(id);
 		return n ? nodePins(*n) : std::vector<GraphEditor::Pin>{}; };
 	m.links = [&graph]{ std::vector<std::array<int,4>> ls; ls.reserve(graph.links.size());
-		for (const auto& l : graph.links) ls.push_back({ l.srcNode, l.srcPin, l.dstNode, l.dstPin }); return ls; };
+		for (const auto& l : graph.links) { const HC::Node* s = graph.findNode(l.srcNode);
+			if (s && s->subgraph == g.currentGraph) ls.push_back({ l.srcNode, l.srcPin, l.dstNode, l.dstPin }); }
+		return ls; };
 	m.connect = [&graph](int oN, int oP, int iN, int iP){ return graph.connect(oN, oP, iN, iP); };
 	m.clearPinLinks = [&graph](int node, int pin, bool){ removePinLinks(graph, node, pin); };
 	m.removeNode = [&graph](int id){ graph.removeNode(id); };
@@ -636,12 +652,12 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 
 		ImGui::BeginChild("##nodeList", ImVec2(232.0f, 300.0f));
 
-		// Events. The catalog holds the fixed world events (level/GI) or the
-		// lifecycle events a class exposes (Construct/Destruct); each adds a
-		// pre-named Event node. A class (allowCustomEvents) can also add a blank
-		// custom Event to name its own dispatcher events.
+		// Events live only in the event graph (sub-graph 0), never inside a
+		// function's sub-graph. The catalog holds the fixed world events (level/GI)
+		// or the lifecycle events a class exposes; a class (allowCustomEvents) can
+		// also add a blank custom Event.
 		bool eh = false;
-		for (const std::string& ev : events)
+		for (const std::string& ev : g.currentGraph == 0 ? events : std::vector<std::string>{})
 		{
 			if (!matches(ev, "Events")) continue;
 			if (!eh) { ImGui::TextDisabled("Events"); eh = true; }
@@ -659,7 +675,7 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 			}
 			if (used) { ImGui::SameLine(); ImGui::TextDisabled("(added)"); }
 		}
-		if ((events.empty() || allowCustomEvents) && matches("Custom Event", "Events"))
+		if (g.currentGraph == 0 && (events.empty() || allowCustomEvents) && matches("Custom Event", "Events"))
 		{
 			if (!eh) { ImGui::TextDisabled("Events"); eh = true; }
 			if (ImGui::Selectable("Custom Event"))
@@ -705,12 +721,18 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 				created = id; ImGui::CloseCurrentPopup();
 			}
 		}
-		// A Return node (picks its owning function in the details panel).
-		if (matches("Return", "Functions"))
+		// A Return node — only inside a function sub-graph, auto-bound to that
+		// function so it gets pins for the declared outputs.
+		if (g.currentGraph != 0 && matches("Return", "Functions"))
 		{
 			if (!fh) { ImGui::TextDisabled("Functions"); fh = true; }
 			if (ImGui::Selectable("Return"))
-			{ created = addNode(graph, NT::FunctionReturn, g.ge.addMenuGraphPos); ImGui::CloseCurrentPopup(); }
+			{
+				const int id = addNode(graph, NT::FunctionReturn, g.ge.addMenuGraphPos);
+				if (const HC::Node* owner = graph.findNode(g.currentGraph))
+				{ HC::Node* rn = graph.findNode(id); rn->s = owner->s; rn->results = owner->results; }
+				created = id; ImGui::CloseCurrentPopup();
+			}
 		}
 		if (fh) ImGui::Spacing();
 
@@ -815,6 +837,15 @@ void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
                    bool allowCustomEvents, const char* title, const char* subtitle,
                    ContentManager* content, const HC::Graph* giGraph, bool& edited)
 {
+	// The shared panel state is reused across the Level/GI/Class tabs, so a
+	// sub-graph id from another graph (or a deleted function) must reset to the
+	// event graph.
+	if (g.currentGraph != 0)
+	{
+		const HC::Node* e = graph.findNode(g.currentGraph);
+		if (!e || e->type != NT::FunctionEntry) g.currentGraph = 0;
+	}
+
 	ImGui::BeginChild("##ls_side", ImVec2(220.0f, 0.0f), true);
 	ImGui::TextUnformatted(title);
 	ImGui::TextDisabled("%s", subtitle);
@@ -832,6 +863,10 @@ void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
 	ImGui::SameLine();
 
 	ImGui::BeginChild("##ls_canvas_host", ImVec2(0.0f, 0.0f), true);
+	// Header: which sub-graph is shown.
+	if (g.currentGraph == 0) ImGui::TextDisabled("Event Graph");
+	else { const HC::Node* e = graph.findNode(g.currentGraph);
+		ImGui::TextDisabled("Function: %s", e && !e->s.empty() ? e->s.c_str() : "(unnamed)"); }
 	const ImVec2 avail = ImGui::GetContentRegionAvail();
 	drawCanvas(graph, events, allowCustomEvents, avail, content, giGraph, edited);
 

@@ -600,3 +600,36 @@ TEST_CASE("CallExternal passes an argument to a public function and reads its re
 	rt.fireEvent(B, "Go");
 	CHECK(rt.getVariable(B, "out").i == 42); // argument crossed the instance boundary and came back
 }
+
+TEST_CASE("assignSubgraphs partitions a flat graph into per-function sub-graphs")
+{
+	Graph g;
+	{ Variable v; v.name = "x"; v.type = PinType::Bool; g.variables.push_back(v); }
+	// Event graph: Go → SetVariable(x, true).
+	Node ev; ev.type = NodeType::Event; ev.s = "Go"; const int e = g.addNode(ev);
+	Node cb; cb.type = NodeType::ConstBool; cb.f[0] = 1.0f; const int c = g.addNode(cb);
+	Node sv; sv.type = NodeType::SetVariable; sv.s = "x"; sv.propType = PinType::Bool; const int s = g.addNode(sv);
+	REQUIRE(g.connect(e, 0, s, 0));
+	REQUIRE(g.connect(c, 0, s, 2));
+	// Function Fn(): entry → return, with a Const feeding the return value.
+	Node fe; fe.type = NodeType::FunctionEntry; fe.s = "Fn"; fe.results = { { "r", PinType::Bool } };
+	const int fnId = g.addNode(fe);
+	Node fr; fr.type = NodeType::FunctionReturn; fr.s = "Fn"; const int frId = g.addNode(fr);
+	syncFunctionSignatures(g);
+	Node ci; ci.type = NodeType::ConstBool; ci.f[0] = 1.0f; const int ci2 = g.addNode(ci);
+	REQUIRE(g.connect(fnId, 0, frId, 0)); // exec
+	REQUIRE(g.connect(ci2,  0, frId, 1)); // const → return.r
+
+	assignSubgraphs(g);
+
+	CHECK(g.findNode(e)->subgraph   == 0);      // event chain stays in the event graph
+	CHECK(g.findNode(s)->subgraph   == 0);
+	CHECK(g.findNode(c)->subgraph   == 0);
+	CHECK(g.findNode(fnId)->subgraph == fnId);  // function body → its own sub-graph
+	CHECK(g.findNode(frId)->subgraph == fnId);
+	CHECK(g.findNode(ci2)->subgraph  == fnId);
+
+	// Idempotent: a second pass (already partitioned) changes nothing.
+	assignSubgraphs(g);
+	CHECK(g.findNode(frId)->subgraph == fnId);
+}
