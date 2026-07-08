@@ -10,6 +10,14 @@
 
 namespace HE {
 
+// Mouse cursor shown while a UI element is hovered (backend-agnostic; the app
+// maps it to a system cursor). Default = leave the cursor unchanged.
+enum class UICursor : uint8_t
+{
+    Default = 0, Arrow, Hand, Text, Crosshair, ResizeWE, ResizeNS, Move, No, Wait, COUNT
+};
+HE_API const char* uiCursorName(UICursor c);
+
 // ── UI element model ─────────────────────────────────────────────────────────
 // A UI Widget asset is a tree of UIElements. UIElement is the BASE class shared
 // by every widget type (identity + layout); each concrete widget (Button,
@@ -108,6 +116,12 @@ public:
     std::string font;
     uint32_t    fontAtlasKey = 0; // transient: baked-atlas key (not serialized)
 
+    // Pointer interaction: hitTestable false = transparent to the mouse (never
+    // hovered/clicked, pointer passes through). hoverCursor = the cursor the app
+    // shows while this element is hovered (Default = unchanged).
+    bool        hitTestable = true;
+    UICursor    hoverCursor = UICursor::Default;
+
     virtual ~UIElement() = default;
 
     virtual UIWidgetType type() const = 0;
@@ -149,6 +163,7 @@ protected:
         dst.pivotX = pivotX; dst.pivotY = pivotY; dst.anchor = anchor;
         dst.layer = layer; dst.visible = visible; dst.material = material;
         dst.font = font; dst.fontAtlasKey = fontAtlasKey;
+        dst.hitTestable = hitTestable; dst.hoverCursor = hoverCursor;
     }
 };
 

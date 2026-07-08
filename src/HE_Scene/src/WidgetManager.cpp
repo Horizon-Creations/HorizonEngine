@@ -201,6 +201,7 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 	Instance* topW = nullptr;
 	int  topElem = 0;
 	long topKey  = 0;
+	HE::UICursor topCursor = HE::UICursor::Default;
 	if (valid)
 	{
 		for (auto& w : m_instances)
@@ -212,7 +213,11 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 			{
 				const HE::UIElement& e = *ep;
 				if (!HE::uiElementEffectiveVisible(w.tree, e)) continue;
-				if (!isInteractive(w, e)) continue;
+				// hitTestable false = transparent to the pointer. Otherwise an
+				// element is a hit candidate if it's interactive OR carries a custom
+				// hover cursor (so decorative elements can drive the cursor too).
+				if (!e.hitTestable) continue;
+				if (!isInteractive(w, e) && e.hoverCursor == HE::UICursor::Default) continue;
 				const HE::UIWidgetRect r = HE::uiElementRect(w.tree, e);
 				const float x0 = r.x * sx, y0 = r.y * sy;
 				const float x1 = (r.x + r.w) * sx, y1 = (r.y + r.h) * sy;
@@ -221,11 +226,12 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 				const long key = (long)w.zOrder * 1000000 + elementSortKey(w.tree, e);
 				if (!topW || key >= topKey)
 				{
-					topW = &w; topElem = e.id; topKey = key;
+					topW = &w; topElem = e.id; topKey = key; topCursor = e.hoverCursor;
 				}
 			}
 		}
 	}
+	m_hoverCursor = topCursor; // app maps this to a system cursor
 
 	const bool pressEdge   = primaryDown && !m_wasDown;
 	const bool releaseEdge = !primaryDown && m_wasDown;

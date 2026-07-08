@@ -64,6 +64,10 @@ public:
     // whether to route text/keys here instead of to gameplay/camera.
     bool hasFocusedTextField() const { return m_focusWidget != 0; }
 
+    // The cursor the currently-hovered element requests (set by processPointer;
+    // Default when nothing is hovered). The app maps it to a system cursor.
+    HE::UICursor hoverCursor() const { return m_hoverCursor; }
+
     // Append draw quads for all visible widgets, sorted by (zOrder, layer,
     // depth). Called AFTER the entity-UI extraction, so widgets draw on top.
     void extract(float vpWidth, float vpHeight, std::vector<UIRenderObject>& out);
@@ -119,4 +123,5 @@ private:
     HorizonCode::Runtime* m_runtime = nullptr; // injected shared runtime (null → own)
     bool m_wasDown = false;
     int  m_focusWidget = 0;        // widget id owning the focused TextInput
+    HE::UICursor m_hoverCursor = HE::UICursor::Default; // cursor the hovered element wants
 };
