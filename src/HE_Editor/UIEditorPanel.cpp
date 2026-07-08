@@ -63,6 +63,7 @@ struct State
 	// Graph canvas — the shared GraphEditor component owns pan/zoom/selection/
 	// drag; these are the host-side bits it can't own.
 	int    selectedGraphNode = 0;
+	int    currentGraph = 0;         // visible sub-graph: 0 = event graph, else a FunctionEntry id
 	bool   gFocusSelected = false;   // center on selectedGraphNode next frame
 	GraphEditor::State geState;
 	int    gDropElem = 0;            // element dragged onto the graph (Get/Set popup)
@@ -1169,6 +1170,7 @@ int addGraphNode(State& st, NT type, const ImVec2& graphPos)
 	HC::Node n;
 	n.type = type;
 	n.x = graphPos.x; n.y = graphPos.y;
+	n.subgraph = st.currentGraph;   // new nodes belong to the visible sub-graph
 	if (type == NT::ConstColor) { n.f[0] = n.f[1] = n.f[2] = n.f[3] = 1.0f; }
 	if (type == NT::FunctionEntry) n.s = uniqueFunctionName(st);
 	return st.graph.addNode(std::move(n));
@@ -1191,6 +1193,7 @@ void addOrFocusEvent(State& st, AppContext& ctx, const std::string& eventName,
 		if (gn.type == NT::Event && gn.s == eventName && gn.elem == elem)
 		{
 			st.selectedGraphNode = gn.id;
+			st.currentGraph = 0;   // events live in the event graph
 			st.viewMode = 1;
 			st.gFocusSelected = true;
 			return;
@@ -1207,7 +1210,9 @@ void addOrFocusEvent(State& st, AppContext& ctx, const std::string& eventName,
 	n.propType = HE::uiPropTypeToPin(desc.argType);
 	n.x = 40.0f;
 	n.y = 40.0f + existing * 120.0f;
+	n.subgraph = 0;   // events live in the event graph
 	st.selectedGraphNode = st.graph.addNode(std::move(n));
+	st.currentGraph = 0;
 	st.viewMode = 1;
 	st.gFocusSelected = true;
 	commitEdit(st, ctx);
@@ -1298,19 +1303,27 @@ void drawGraphVariables(State& st, AppContext& ctx)
 		ImGui::TextDisabled("%s", typeStr.c_str());
 	}
 
-	// ── Functions ─────────────────────────────────────────────────────────────
+	// ── Graphs: the event graph + one sub-graph per function ──────────────────
+	ImGui::Spacing();
+	if (ImGui::Selectable("Event Graph", st.currentGraph == 0))
+	{ st.currentGraph = 0; st.selectedGraphNode = 0; st.selectedVar.clear(); }
+
 	ImGui::Spacing();
 	ImGui::TextDisabled("Functions");
 	ImGui::SameLine(ImGui::GetContentRegionAvail().x - 24.0f);
 	if (ImGui::SmallButton("+##addfn"))
 	{
-		const int existing = [&]{ int c = 0; for (const auto& g : st.graph.nodes)
-			if (g.type == NT::FunctionEntry) ++c; return c; }();
-		HC::Node fn;
-		fn.type = NT::FunctionEntry;
-		fn.s = uniqueFunctionName(st);
-		fn.x = 40.0f; fn.y = 40.0f + existing * 120.0f;
-		st.selectedGraphNode = st.graph.addNode(std::move(fn));
+		// A function is its own sub-graph: a start (entry) + a Return node.
+		HC::Node fn; fn.type = NT::FunctionEntry; fn.s = uniqueFunctionName(st);
+		fn.x = 40.0f; fn.y = 40.0f;
+		const int fnId = st.graph.addNode(std::move(fn));
+		HC::Node* entry = st.graph.findNode(fnId);
+		entry->subgraph = fnId;
+		const std::string fnName = entry->s;
+		st.currentGraph = fnId;
+		const int retId = addGraphNode(st, NT::FunctionReturn, ImVec2(420.0f, 40.0f));
+		st.graph.findNode(retId)->s = fnName;
+		st.selectedGraphNode = fnId;
 		st.selectedVar.clear();
 		st.gFocusSelected = true;
 		commitEdit(st, ctx);
@@ -1323,8 +1336,9 @@ void drawGraphVariables(State& st, AppContext& ctx)
 		if (gn.type != NT::FunctionEntry) continue;
 		const std::string label = (gn.s.empty() ? "(unnamed)" : gn.s)
 			+ "##fn" + std::to_string(gn.id);
-		if (ImGui::Selectable(label.c_str(), st.selectedGraphNode == gn.id))
+		if (ImGui::Selectable(label.c_str(), st.currentGraph == gn.id))
 		{
+			st.currentGraph = gn.id;             // open the function's sub-graph
 			st.selectedGraphNode = gn.id;
 			st.selectedVar.clear();
 			st.gFocusSelected = true;
@@ -1589,10 +1603,11 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 		ImGui::InputText("Name", &n->s);
 		if (ImGui::IsItemDeactivatedAfterEdit())
 		{
-			// Rename the matching FunctionCall nodes so the wiring stays valid.
+			// Rename the matching Call + Return nodes so the wiring stays valid.
 			if (!n->s.empty() && n->s != oldName)
 				for (auto& c : st.graph.nodes)
-					if (c.type == NT::FunctionCall && c.s == oldName) c.s = n->s;
+					if ((c.type == NT::FunctionCall || c.type == NT::FunctionReturn) && c.s == oldName)
+						c.s = n->s;
 			committed = true;
 		}
 		int access = n->access;
@@ -1788,11 +1803,15 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	// Sync the host's selection/focus into the shared canvas state.
 	st.geState.selected = st.selectedGraphNode;
 	if (st.gFocusSelected) { st.geState.focusNode = st.selectedGraphNode; st.gFocusSelected = false; }
+	// Reset a stale sub-graph (e.g. its function was deleted).
+	if (st.currentGraph != 0)
+	{ const HC::Node* e = st.graph.findNode(st.currentGraph);
+	  if (!e || e->type != NT::FunctionEntry) st.currentGraph = 0; }
 
 	GraphEditor::Model m;
 	m.compactPureNodes = true; // getters/literals draw as compact chips
 	m.nodeIds = [&st]{ std::vector<int> ids; ids.reserve(st.graph.nodes.size());
-		for (const auto& n : st.graph.nodes) ids.push_back(n.id); return ids; };
+		for (const auto& n : st.graph.nodes) if (n.subgraph == st.currentGraph) ids.push_back(n.id); return ids; };
 	m.getPos = [&st](int id, float& x, float& y){ if (const HC::Node* n = st.graph.findNode(id)) { x = n->x; y = n->y; } };
 	m.setPos = [&st](int id, float x, float y){ if (HC::Node* n = st.graph.findNode(id)) { n->x = x; n->y = y; } };
 	m.title  = [&st](int id){ const HC::Node* n = st.graph.findNode(id); return n ? graphNodeTitle(st, *n) : std::string(); };
@@ -1801,7 +1820,9 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	m.pins = [&st](int id){ const HC::Node* n = st.graph.findNode(id);
 		return n ? hcNodePins(*n) : std::vector<GraphEditor::Pin>{}; };
 	m.links = [&st]{ std::vector<std::array<int,4>> ls; ls.reserve(st.graph.links.size());
-		for (const auto& l : st.graph.links) ls.push_back({ l.srcNode, l.srcPin, l.dstNode, l.dstPin }); return ls; };
+		for (const auto& l : st.graph.links) { const HC::Node* s = st.graph.findNode(l.srcNode);
+			if (s && s->subgraph == st.currentGraph) ls.push_back({ l.srcNode, l.srcPin, l.dstNode, l.dstPin }); }
+		return ls; };
 	m.connect = [&st](int oN, int oP, int iN, int iP){ return st.graph.connect(oN, oP, iN, iP); };
 	m.clearPinLinks = [&st](int node, int pin, bool){ removeGraphPinLinks(st.graph, node, pin); };
 	m.removeNode = [&st](int id){ st.graph.removeNode(id); };
@@ -1917,11 +1938,19 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 				created = id; ImGui::CloseCurrentPopup();
 			}
 		}
-		if (matches("Return", "Functions"))
+		// A Return node — only inside a function sub-graph, auto-bound to that
+		// function so its pins mirror the declared outputs.
+		if (st.currentGraph != 0 && matches("Return", "Functions"))
 		{
 			if (!fh) { ImGui::TextDisabled("Functions"); fh = true; }
 			if (ImGui::Selectable("Return"))
-			{ created = addGraphNode(st, NT::FunctionReturn, st.geState.addMenuGraphPos); ImGui::CloseCurrentPopup(); }
+			{
+				const int id = addGraphNode(st, NT::FunctionReturn, st.geState.addMenuGraphPos);
+				if (const HC::Node* owner = st.graph.findNode(st.currentGraph))
+				{ HC::Node* rn = st.graph.findNode(id); rn->s = owner->s; rn->results = owner->results; }
+				HC::syncFunctionSignatures(st.graph);
+				created = id; ImGui::CloseCurrentPopup();
+			}
 		}
 		if (fh) ImGui::Spacing();
 		// Get/Set for each declared variable.
@@ -2211,6 +2240,10 @@ void render(AppContext& ctx, const std::string& assetPath,
 			ImVec2(ImGui::GetContentRegionAvail().x - rightW - ImGui::GetStyle().ItemSpacing.x, 0),
 			ImGuiChildFlags_Borders,
 			ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+		// Header: which sub-graph is shown.
+		if (st.currentGraph == 0) ImGui::TextDisabled("Event Graph");
+		else { const HC::Node* e = st.graph.findNode(st.currentGraph);
+			ImGui::TextDisabled("Function: %s", e && !e->s.empty() ? e->s.c_str() : "(unnamed)"); }
 		drawGraphCanvas(st, ctx, ImGui::GetContentRegionAvail());
 		ImGui::EndChild();
 
