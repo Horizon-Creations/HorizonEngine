@@ -37,6 +37,10 @@ struct Value
     uint32_t    ref = 0;   // instance handle when type == Ref (0 = none)
     // Transform payload (type == Transform): rotation in euler degrees, identity scale.
     glm::vec3   tpos{ 0.0f }, trot{ 0.0f }, tscl{ 1.0f };
+    // Array payload: when isArray, `type` is the element type and `items` holds the
+    // elements (each a scalar Value of `type`). An array is never scalar-coerced.
+    bool               isArray = false;
+    std::vector<Value> items;
 
     static Value ofFloat(float v)            { Value r; r.type = PinType::Float;  r.f = v;  return r; }
     static Value ofBool(bool v)              { Value r; r.type = PinType::Bool;   r.b = v;  return r; }
@@ -101,6 +105,10 @@ enum class NodeType : uint8_t
     // Transform literal: editable position/rotation/scale on its body; one data-out
     // (Transform). Payload lives in the Node's tpos/trot/tscl.
     ConstTransform,
+    // Array operations (pure). propType = element type; the array pins are marked
+    // isArray in signatureOf. Make → empty array; Length → element count; Get →
+    // element at index; Add → a copy of the array with a value appended.
+    ArrayMake, ArrayLength, ArrayGet, ArrayAdd,
     COUNT
 };
 
@@ -121,6 +129,7 @@ struct Variable
 {
     std::string name;
     PinType     type = PinType::Float;
+    bool        isArray = false;   // when true the variable holds an array of `type`
     float       f[4] = {};
     std::string s;
     int         access = 0;   // 0 public (readable via a reference), 1 private
@@ -142,6 +151,10 @@ struct Node
     float       f[4] = {};                // literal payload
     // ConstTransform literal payload (rotation in euler degrees, identity scale).
     glm::vec3   tpos{ 0.0f }, trot{ 0.0f }, tscl{ 1.0f };
+    // Get/SetVariable: whether the bound variable is an array (mirrors it so the
+    // pins resolve). Array-op nodes (Make/Length/Get/Add): propType is the element
+    // type; the array pins are marked in signatureOf.
+    bool        isArray = false;
     float       x = 0.0f, y = 0.0f;       // editor canvas position
     // Which sub-graph this node lives in: 0 = the main event graph, else the id
     // of the owning FunctionEntry (that function's own body sub-graph). Editor
@@ -159,7 +172,7 @@ struct Link { int srcNode = 0, srcPin = 0, dstNode = 0, dstPin = 0; };
 
 // Pin metadata for one node instance (variable-pin nodes like Event/Get/Set
 // depend on the node's own fields, so this is computed per node, not per type).
-struct PinDesc { const char* name; PinType type; };
+struct PinDesc { const char* name; PinType type; bool isArray = false; };
 struct NodeSig { std::vector<PinDesc> execIns, execOuts, dataIns, dataOuts; };
 HE_API NodeSig signatureOf(const Node& n);
 

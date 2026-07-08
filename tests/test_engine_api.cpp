@@ -441,3 +441,76 @@ TEST_CASE("Transform: a Transform variable defaults to identity")
     CHECK(d.tscl.x == doctest::Approx(1.0f));
     CHECK(d.tscl.z == doctest::Approx(1.0f));
 }
+
+// ═══ Array variables + array-op nodes ═════════════════════════════════════════
+
+TEST_CASE("Array: an array variable defaults to empty; round-trips through JSON")
+{
+    HC::Graph g;
+    HC::Variable v; v.name = "nums"; v.type = P::Int; v.isArray = true;
+    g.variables.push_back(v);
+
+    const Value d = HC::variableDefaultValue(v);
+    CHECK(d.isArray == true);
+    CHECK(d.type == P::Int);
+    CHECK(d.items.empty());
+
+    HC::Graph loaded;
+    REQUIRE(HC::fromJson(HC::toJson(g), loaded));
+    REQUIRE(loaded.variables.size() == 1);
+    CHECK(loaded.variables[0].isArray == true);
+    CHECK(loaded.variables[0].type == P::Int);
+}
+
+TEST_CASE("Array: connect rejects an array pin joined to a scalar pin")
+{
+    HC::Graph g;
+    HC::Node mk; mk.type = NT::ArrayMake; mk.propType = P::Int; const int mkId = g.addNode(mk);
+    HC::Node sv; sv.type = NT::SetVariable; sv.s = "n"; sv.propType = P::Int; /* isArray=false */
+    const int svId = g.addNode(sv);
+    // mk out (Int[]) → SetVariable value (Int scalar) must be rejected.
+    CHECK(g.connect(mkId, 0, svId, 2) == false);
+    // But an Int[] SetVariable accepts it.
+    HC::Node sa; sa.type = NT::SetVariable; sa.s = "a"; sa.propType = P::Int; sa.isArray = true;
+    const int saId = g.addNode(sa);
+    CHECK(g.connect(mkId, 0, saId, 2) == true);
+}
+
+TEST_CASE("Array: Make → Add chain → Length + Get evaluate correctly")
+{
+    HC::Graph g;
+    HC::Node ev; ev.type = NT::Event; ev.s = "Run"; const int evId = g.addNode(ev);
+    auto konst = [&](int val){ HC::Node c; c.type = NT::ConstInt; c.f[0] = (float)val; return g.addNode(c); };
+    const int c10 = konst(10), c20 = konst(20), c30 = konst(30), ci1 = konst(1);
+    auto arrNode = [&](NT t){ HC::Node n; n.type = t; n.propType = P::Int; return g.addNode(n); };
+    const int mk  = arrNode(NT::ArrayMake);
+    const int a1  = arrNode(NT::ArrayAdd);
+    const int a2  = arrNode(NT::ArrayAdd);
+    const int a3  = arrNode(NT::ArrayAdd);
+    const int len = arrNode(NT::ArrayLength);
+    const int get = arrNode(NT::ArrayGet);
+    HC::Node sL; sL.type = NT::SetVariable; sL.s = "len"; sL.propType = P::Int; const int sLId = g.addNode(sL);
+    HC::Node sE; sE.type = NT::SetVariable; sE.s = "el";  sE.propType = P::Int; const int sEId = g.addNode(sE);
+
+    // Build the array: []→[10]→[10,20]→[10,20,30]. Add pins: array-in 0, value-in 1, array-out 2.
+    REQUIRE(g.connect(mk, 0, a1, 0)); REQUIRE(g.connect(c10, 0, a1, 1));
+    REQUIRE(g.connect(a1, 2, a2, 0)); REQUIRE(g.connect(c20, 0, a2, 1));
+    REQUIRE(g.connect(a2, 2, a3, 0)); REQUIRE(g.connect(c30, 0, a3, 1));
+    // Length (out pin 1) + Get index 1 (array-in 0, index-in 1, out pin 2).
+    REQUIRE(g.connect(a3, 2, len, 0));
+    REQUIRE(g.connect(a3, 2, get, 0)); REQUIRE(g.connect(ci1, 0, get, 1));
+    // Drive via exec: Run → set len → set el.
+    REQUIRE(g.connect(evId, 0, sLId, 0)); REQUIRE(g.connect(len, 1, sLId, 2));
+    REQUIRE(g.connect(sLId, 1, sEId, 0)); REQUIRE(g.connect(get, 2, sEId, 2));
+
+    std::unordered_map<std::string, Value> vars;
+    HC::Context ctx;
+    ctx.setVariable = [&vars](const std::string& n, const Value& v){ vars[n] = v; };
+    HC::Runner runner(g, ctx);
+    runner.fireEvent("Run", 0);
+
+    REQUIRE(vars.count("len") == 1);
+    REQUIRE(vars.count("el") == 1);
+    CHECK(vars["len"].i == 3);   // three elements
+    CHECK(vars["el"].i == 20);   // element at index 1
+}
