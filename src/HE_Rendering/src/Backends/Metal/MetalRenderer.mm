@@ -2599,6 +2599,8 @@ void MetalRenderer::Shutdown()
 	if (m_fxaaPipeline)         { CFBridgingRelease(m_fxaaPipeline);         m_fxaaPipeline = nullptr; }
 	if (m_uiPipeline)           { CFBridgingRelease(m_uiPipeline);           m_uiPipeline = nullptr; }
 	if (m_uiFontTexture)        { CFBridgingRelease(m_uiFontTexture);        m_uiFontTexture = nullptr; }
+	for (auto& [k, t] : m_uiFontAtlases) if (t) CFBridgingRelease(t);
+	m_uiFontAtlases.clear();
 	for (auto& [k, pso] : m_uiMaterialPipelines) if (pso) CFBridgingRelease(pso);
 	m_uiMaterialPipelines.clear();
 	if (m_bloomBrightPipeline)  { CFBridgingRelease(m_bloomBrightPipeline);  m_bloomBrightPipeline = nullptr; }
@@ -4744,6 +4746,25 @@ void* MetalRenderer::GetOrBuildUIMaterialPipeline(const HE::UUID& materialId)
 	return result;
 }
 
+void* MetalRenderer::uiFontAtlasTexture(uint32_t key)
+{
+	if (key == 0) return m_uiFontTexture;
+	if (auto it = m_uiFontAtlases.find(key); it != m_uiFontAtlases.end()) return it->second;
+	const HE::BakedUIFont* f = HE::UIFontCache::find(key);
+	if (!f || !f->ok) return m_uiFontTexture;
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	MTLTextureDescriptor* d = [MTLTextureDescriptor
+		texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm
+		                             width:f->atlasW height:f->atlasH mipmapped:NO];
+	d.usage = MTLTextureUsageShaderRead; d.storageMode = MTLStorageModeShared;
+	id<MTLTexture> tex = [device newTextureWithDescriptor:d];
+	[tex replaceRegion:MTLRegionMake2D(0, 0, f->atlasW, f->atlasH)
+	       mipmapLevel:0 withBytes:f->pixels.data() bytesPerRow:f->atlasW];
+	void* stored = (void*)CFBridgingRetain(tex);
+	m_uiFontAtlases[key] = stored;
+	return stored;
+}
+
 void MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height)
 {
 	if (!m_uiPipeline || m_renderWorld.uiObjects.empty()) return;
@@ -4770,6 +4791,7 @@ void MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height)
 
 	bool basicBound = false;        // solid/glyph pipeline currently set?
 	void* boundMaterial = nullptr;  // material PSO currently set
+	uint32_t boundAtlasKey = 0;     // font atlas currently bound at texture(0)
 	for (const UIRenderObject& obj : m_renderWorld.uiObjects)
 	{
 		// Custom material on an image quad → material pipeline (solid path below
@@ -4825,11 +4847,21 @@ void MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height)
 			[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_uiPipeline];
 			[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_noDepthState];
 			[enc setVertexBytes:&vp length:sizeof(vp) atIndex:1];
-			id<MTLTexture> atlas = m_uiFontTexture
-				? (__bridge id<MTLTexture>)m_uiFontTexture
-				: (__bridge id<MTLTexture>)m_dummyTexture;
+			void* a0 = uiFontAtlasTexture(0);
+			id<MTLTexture> atlas = a0 ? (__bridge id<MTLTexture>)a0
+			                          : (__bridge id<MTLTexture>)m_dummyTexture;
 			[enc setFragmentTexture:atlas atIndex:0];
+			boundAtlasKey = 0;
 			basicBound = true; boundMaterial = nullptr;
+		}
+		// A glyph quad may use an imported font's atlas — bind it at texture(0).
+		if (obj.type == 2 && obj.fontAtlasKey != boundAtlasKey)
+		{
+			void* a = uiFontAtlasTexture(obj.fontAtlasKey);
+			id<MTLTexture> atlas = a ? (__bridge id<MTLTexture>)a
+			                         : (__bridge id<MTLTexture>)m_dummyTexture;
+			[enc setFragmentTexture:atlas atIndex:0];
+			boundAtlasKey = obj.fontAtlasKey;
 		}
 		const simd::float4 rect  = { obj.position.x, obj.position.y, obj.size.x, obj.size.y };
 		const simd::float4 color = { obj.color.r, obj.color.g, obj.color.b, obj.color.a };

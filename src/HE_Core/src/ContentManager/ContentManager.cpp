@@ -934,6 +934,7 @@ const SkeletalMeshAsset*  ContentManager::getSkeletalMesh(HE::UUID id) const  { 
 const TextureAsset*       ContentManager::getTexture(HE::UUID id) const       { return lookupAsset(m_handleToUUID, m_textureAssets, id); }
 const MaterialAsset*      ContentManager::getMaterial(HE::UUID id) const      { return lookupAsset(m_handleToUUID, m_materialAssets, id); }
 const AudioAsset*         ContentManager::getAudio(HE::UUID id) const         { return lookupAsset(m_handleToUUID, m_audioAssets, id); }
+const FontAsset*          ContentManager::getFont(HE::UUID id) const          { return lookupAsset(m_handleToUUID, m_fontAssets, id); }
 namespace HE
 {
 std::vector<uint8_t> encodeMaterialShaderVariants(const std::vector<MaterialShaderVariant>& vars)

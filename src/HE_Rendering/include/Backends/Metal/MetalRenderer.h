@@ -355,6 +355,9 @@ private:
 	// ── In-Game UI (2D canvas elements, drawn after FXAA) ───────────────────
 	void* m_uiPipeline = nullptr; // id<MTLRenderPipelineState>
 	void* m_uiFontTexture = nullptr; // id<MTLTexture>, R8 UI font atlas (UISystem::sharedFont)
+	// Imported Font asset atlases, uploaded lazily on first sight (key → id<MTLTexture>).
+	std::unordered_map<uint32_t, void*> m_uiFontAtlases;
+	void* uiFontAtlasTexture(uint32_t key); // key 0 → the shared atlas
 	// Material-on-UI-quad pipelines: same material fragments as the mesh path,
 	// paired with the screen-space uiVertex and the LDR/blend target of the UI
 	// pass — so they need their own cache (key = material shader hash).

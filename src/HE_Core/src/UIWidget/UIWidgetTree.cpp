@@ -129,6 +129,7 @@ std::string uiWidgetTreeToJson(const UIWidgetTree& tree)
             { "visible", e->visible },
         };
         if (!e->material.empty()) o["material"] = e->material;
+        if (!e->font.empty())     o["font"]     = e->font;
         e->writeJson(o); // type-specific fields
         je.push_back(std::move(o));
     }
@@ -163,6 +164,7 @@ bool uiWidgetTreeFromJson(const std::string& json, UIWidgetTree& out)
         e->layer    = o.value("layer", 0);
         e->visible  = o.value("visible", true);
         e->material = o.value("material", std::string());
+        e->font     = o.value("font", std::string());
         e->readJson(o); // type-specific fields
 
         if (e->id >= t.nextId) t.nextId = e->id + 1;

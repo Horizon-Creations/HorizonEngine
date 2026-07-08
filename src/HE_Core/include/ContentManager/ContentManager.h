@@ -44,6 +44,7 @@ public:
 	const TextureAsset*        getTexture(HE::UUID id) const;
 	const MaterialAsset*       getMaterial(HE::UUID id) const;
 	const AudioAsset*          getAudio(HE::UUID id) const;
+	const FontAsset*           getFont(HE::UUID id) const;
 	const ScriptAsset*         getScript(HE::UUID id) const;
 	const MaterialFunctionAsset* getMaterialFunction(HE::UUID id) const;
 	MaterialFunctionAsset*     getMaterialFunctionMutable(HE::UUID id);

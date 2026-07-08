@@ -3642,6 +3642,29 @@ unsigned int OpenGLRenderer::RenderSSAO(const CommandBuffer& cmds, int pw, int p
 	return m_ssaoBlurTex;
 }
 
+// The R8 atlas texture for a font key (0 = the shared default), uploaded lazily
+// from UIFontCache the first time a glyph quad references it.
+unsigned int OpenGLRenderer::uiFontAtlasTexture(uint32_t key)
+{
+	if (key == 0) return m_uiFontTexture ? m_uiFontTexture : m_whiteTex;
+	if (auto it = m_uiFontAtlases.find(key); it != m_uiFontAtlases.end()) return it->second;
+	const HE::BakedUIFont* f = HE::UIFontCache::find(key);
+	if (!f || !f->ok) return m_uiFontTexture ? m_uiFontTexture : m_whiteTex;
+	unsigned int tex = 0;
+	glGenTextures(1, &tex);
+	glBindTexture(GL_TEXTURE_2D, tex);
+	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, f->atlasW, f->atlasH, 0, GL_RED, GL_UNSIGNED_BYTE, f->pixels.data());
+	glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	m_uiFontAtlases[key] = tex;
+	return tex;
+}
+
 void OpenGLRenderer::RenderUIPass(int pw, int ph)
 {
 	if (!m_uiProgram || m_renderWorld.uiObjects.empty()) return;
@@ -3672,6 +3695,7 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 	glBindVertexArray(m_fsVAO);
 
 	bool         basicBound    = false; // solid/glyph program currently active?
+	uint32_t     boundAtlasKey = 0;     // font atlas currently bound on unit 0
 	unsigned int boundMaterial = 0;     // material program currently active
 #if defined(HE_HAVE_SHADERC)
 	bool uiLightUploaded = false;       // HeLighting uploaded once per UI pass
@@ -3757,8 +3781,16 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 			glUniform2f(m_uUIViewport, static_cast<float>(pw), static_cast<float>(ph));
 			// Font atlas on unit 0 (uFontAtlas); glyphs sample it, solid quads ignore it.
 			glActiveTexture(GL_TEXTURE0);
-			glBindTexture(GL_TEXTURE_2D, m_uiFontTexture ? m_uiFontTexture : m_whiteTex);
+			glBindTexture(GL_TEXTURE_2D, uiFontAtlasTexture(0));
+			boundAtlasKey = 0;
 			basicBound = true; boundMaterial = 0;
+		}
+		// A glyph quad may use an imported font's atlas — bind it on unit 0.
+		if (obj.type == 2 && obj.fontAtlasKey != boundAtlasKey)
+		{
+			glActiveTexture(GL_TEXTURE0);
+			glBindTexture(GL_TEXTURE_2D, uiFontAtlasTexture(obj.fontAtlasKey));
+			boundAtlasKey = obj.fontAtlasKey;
 		}
 		glUniform4f(m_uUIRect,  obj.position.x, obj.position.y, obj.size.x, obj.size.y);
 		glUniform4f(m_uUIColor, obj.color.r, obj.color.g, obj.color.b, obj.color.a);
