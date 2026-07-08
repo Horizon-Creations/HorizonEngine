@@ -1071,6 +1071,8 @@ std::string graphNodeTitle(const State& st, const HC::Node& n)
 		case NT::BindEvent:    return "Bind " + (n.s.empty() ? std::string("event") : n.s);
 		case NT::EmitEvent:    return "Emit " + (n.s.empty() ? std::string("event") : n.s);
 		case NT::CallExternal: return n.s.empty() ? std::string("Call (Ref)") : ("Call " + n.s);
+		case NT::GetExternal:  return n.s.empty() ? std::string("Get (Ref)")  : ("Get " + n.s);
+		case NT::SetExternal:  return n.s.empty() ? std::string("Set (Ref)")  : ("Set " + n.s);
 		default:
 			return base;
 	}
