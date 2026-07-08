@@ -2,6 +2,10 @@
 #include "HorizonScene/HorizonWorld.h"
 #include "HorizonScene/PhysicsWorld.h"
 #include "HorizonScene/ScriptApi.h"
+#include "HorizonScene/EngineApi.h"   // HE::api registry (registry-driven groups)
+
+#include <string>
+#include <vector>
 
 extern "C" {
 #include <lua.h>
@@ -370,6 +374,94 @@ static int lua_horizon_hideCursor(lua_State* L)
     return 0;
 }
 
+// ─── Registry-driven engine API (HE::api) ─────────────────────────────────────
+// One generic dispatcher marshals HorizonCode Values by pin type, so a whole
+// group of engine functions is exposed by iterating the registry — no per-function
+// C shim. The Value ABI carries a vec2 as 2 numbers and a Color as 4 (the same
+// spread the hand-written bindings use), so scalars/vectors read and return the
+// familiar way. First registry-driven group: the pure Math library (horizon.math.*,
+// which no frontend could reach before). Gameplay groups keep their ergonomic
+// hand-written bindings until ScriptApi is inverted onto HE::api.
+
+static HorizonCode::Value luaReadValue(lua_State* L, int& idx, HorizonCode::PinType t)
+{
+    using P = HorizonCode::PinType; using V = HorizonCode::Value;
+    switch (t)
+    {
+    case P::Bool:   return V::ofBool(lua_toboolean(L, idx++) != 0);
+    case P::Int:    return V::ofInt(static_cast<int>(luaL_checkinteger(L, idx++)));
+    case P::String: return V::ofString(luaL_checkstring(L, idx++));
+    case P::Vec2:   { float x = (float)luaL_checknumber(L, idx++), y = (float)luaL_checknumber(L, idx++);
+                      return V::ofVec2({ x, y }); }
+    case P::Color:  { float r = (float)luaL_checknumber(L, idx++), g = (float)luaL_checknumber(L, idx++),
+                            b = (float)luaL_checknumber(L, idx++), a = (float)luaL_checknumber(L, idx++);
+                      return V::ofColor({ r, g, b, a }); }
+    case P::Ref:    return V::ofRef(static_cast<uint32_t>(luaL_checkinteger(L, idx++)));
+    case P::Float:
+    default:        return V::ofFloat((float)luaL_checknumber(L, idx++));
+    }
+}
+
+static int luaPushValue(lua_State* L, const HorizonCode::Value& v, HorizonCode::PinType t)
+{
+    using P = HorizonCode::PinType;
+    switch (t)
+    {
+    case P::Bool:   lua_pushboolean(L, v.b); return 1;
+    case P::Int:    lua_pushinteger(L, v.i); return 1;
+    case P::String: lua_pushstring(L, v.s.c_str()); return 1;
+    case P::Vec2:   lua_pushnumber(L, v.v2.x); lua_pushnumber(L, v.v2.y); return 2;
+    case P::Color:  lua_pushnumber(L, v.col.x); lua_pushnumber(L, v.col.y);
+                    lua_pushnumber(L, v.col.z); lua_pushnumber(L, v.col.w); return 4;
+    case P::Ref:    lua_pushinteger(L, static_cast<lua_Integer>(v.ref)); return 1;
+    case P::Float:
+    default:        lua_pushnumber(L, v.f); return 1;
+    }
+}
+
+// Upvalue 1 = the ApiFn* (a stable pointer into the process-lifetime registry).
+static int lua_engine_dispatch(lua_State* L)
+{
+    const auto* fn = static_cast<const HE::api::ApiFn*>(lua_touserdata(L, lua_upvalueindex(1)));
+    if (!fn) return 0;
+    HE::api::Ctx c{ getWorld(L), getPhysics(L), getContent(L) };
+    std::vector<HorizonCode::Value> args; args.reserve(fn->params.size());
+    int idx = 1;
+    for (const auto& p : fn->params) args.push_back(luaReadValue(L, idx, p.type));
+    const std::vector<HorizonCode::Value> res = fn->invoke(c, args);
+    int pushed = 0;
+    for (size_t i = 0; i < fn->results.size(); ++i)
+        pushed += luaPushValue(L, i < res.size() ? res[i] : HorizonCode::Value{}, fn->results[i].type);
+    return pushed;
+}
+
+// Expose namespaced HE::api entries as nested tables: horizon.<group>.<fn>.
+static void registerEngineApiGroups(lua_State* L)
+{
+    lua_getglobal(L, "horizon");                          // [horizon]
+    for (const HE::api::ApiFn& fn : HE::api::registry())
+    {
+        const std::string id = fn.id;
+        const auto dot = id.find('.');
+        if (dot == std::string::npos) continue;           // only namespaced ("math.clamp")
+        const std::string group = id.substr(0, dot), name = id.substr(dot + 1);
+        if (group != "math") continue;                    // first registry-driven group; widen later
+        lua_getfield(L, -1, group.c_str());               // [horizon, group?]
+        if (!lua_istable(L, -1))
+        {
+            lua_pop(L, 1);                                 // [horizon]
+            lua_newtable(L);                               // [horizon, group]
+            lua_pushvalue(L, -1);                          // [horizon, group, group]
+            lua_setfield(L, -3, group.c_str());            // horizon[group]=group → [horizon, group]
+        }
+        lua_pushlightuserdata(L, const_cast<HE::api::ApiFn*>(&fn));  // [horizon, group, fn*]
+        lua_pushcclosure(L, lua_engine_dispatch, 1);       // [horizon, group, closure]
+        lua_setfield(L, -2, name.c_str());                 // group[name]=closure → [horizon, group]
+        lua_pop(L, 1);                                     // [horizon]
+    }
+    lua_pop(L, 1);                                         // []
+}
+
 // ─── Registration table ──────────────────────────────────────────────────────
 
 static const luaL_Reg kHorizonFuncs[] = {
@@ -440,6 +532,9 @@ void ScriptContext::registerHorizonApi()
     // Create `horizon` global table and register all functions
     luaL_newlib(L, kHorizonFuncs);
     lua_setglobal(L, "horizon");
+
+    // Registry-driven groups (horizon.math.*, …) layered on top of the flat API.
+    registerEngineApiGroups(L);
 }
 
 void ScriptContext::setPhysicsWorld(PhysicsWorld* pw)

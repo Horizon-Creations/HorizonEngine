@@ -130,6 +130,26 @@ TEST_CASE("ScriptContext: getPosition reads entity transform")
     CHECK(engine.getGlobalNumber("_pz") == doctest::Approx(1.0));
 }
 
+TEST_CASE("ScriptContext: registry-driven horizon.math.* (Lua)")
+{
+    // The Math library reaches Lua through the HE::api registry (no per-function
+    // C shim) — proves the registry drives the Lua frontend.
+    HorizonWorld world;
+    ScriptContext ctx(world);
+    auto& engine = ctx.engine();
+    REQUIRE(engine.exec(
+        "_G._c = horizon.math.clamp(5, 0, 3)\n"
+        "_G._l = horizon.math.lerp(0, 10, 0.5)\n"
+        "_G._m = horizon.math.max(2, 9)\n"
+        "_G._s = horizon.math.sqrt(16)\n"
+        "_G._d = horizon.math.distance(0, 0, 3, 4)\n"));   // vec2 spread: (0,0)-(3,4)=5
+    CHECK(engine.getGlobalNumber("_c") == doctest::Approx(3.0));
+    CHECK(engine.getGlobalNumber("_l") == doctest::Approx(5.0));
+    CHECK(engine.getGlobalNumber("_m") == doctest::Approx(9.0));
+    CHECK(engine.getGlobalNumber("_s") == doctest::Approx(4.0));
+    CHECK(engine.getGlobalNumber("_d") == doctest::Approx(5.0));
+}
+
 TEST_CASE("ScriptContext: setPosition modifies entity transform")
 {
     HorizonWorld world;
