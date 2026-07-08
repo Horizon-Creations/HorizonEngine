@@ -1,8 +1,20 @@
 # HorizonCode Completion Plan: full engine + platform API coverage
 
-Status: **design only**. How HorizonCode grows from "widget/UI logic" into a
+Status: **in progress**. How HorizonCode grows from "widget/UI logic" into a
 general visual scripting language with **full parity to Lua/Python** (every
 engine subsystem) **plus platform APIs** (file I/O, time, persistence, …).
+
+**Landed (Phase 1, step 1 — the foundation):** the central `HE::api` namespace
+(HE_Scene `EngineApi.h/.cpp`) with an explicit `Ctx {world, physics, content}`
+and subsystem groups (entity / transform / physics / material / ui / widget /
+cursor + a pure math library), plus the machine-readable **`ApiFn` registry**
+(`registry()` / `find(id)`) — one row per function carrying `id`, `category`,
+`isExec`, typed `params`/`results`, `cppCall`, and a Value-marshalling `invoke`
+thunk. Covered by `tests/test_engine_api.cpp`. **Still ahead:** route the
+HorizonCode interpreter through it (a generic **Engine Call** node + a
+`Context::callApi` seam), regenerate the Lua/Python bindings from the registry,
+and add the subsystems that need new `Ctx` providers (audio/input/camera/time/
+scene/fs — see §3.4+ and §4).
 
 Companion to `horizoncode-cpp-codegen-plan.md`: everything here is designed so
 each new capability is *simultaneously* interpretable (editor/PIE) and
@@ -193,10 +205,13 @@ this is what keeps the interpreter and the compiled build permanently in lockste
 
 ## 7. Phasing
 
-1. **Unify + registry** (shared with codegen plan §8.1): promote `ScriptApi` →
-   `HE::api`, add `apiRegistry()`, regenerate Lua/Python from it, route the
-   HorizonCode `Context`/`Services` through it, add the generic **Engine Call**
-   node. Now HorizonCode instantly reaches everything Lua/Python already can.
+1. **Unify + registry** (shared with codegen plan §8.1): **[done]** the central
+   `HE::api` + `ApiFn` `registry()` exist (`EngineApi.h/.cpp`), promoted from
+   `ScriptApi` and seeded with the full engine surface + math. **[next]** add the
+   generic **Engine Call** node (`Context::callApi` → registry dispatch) so the
+   HorizonCode interpreter reaches everything; then regenerate the Lua/Python
+   bindings from the registry (today they still call `ScriptApi`, which `HE::api`
+   wraps, so they are transitively on the central layer already).
 2. **High-value gameplay**: Transform, Physics (+ collision events), Spawn/
    Lifecycle, Time/frame, Input, Math/Random. This is what most game logic needs.
 3. **Presentation**: Audio, Camera, Materials/Environment, Scene/level, debug draw.

@@ -22,6 +22,7 @@ add_library(HorizonScene SHARED
     src/WidgetManager.cpp
     src/ScriptContext.cpp
     src/ScriptApi.cpp
+    src/EngineApi.cpp
     src/PyScriptBackend.cpp
     src/AudioEngine.cpp
     src/PhysicsWorld.cpp
