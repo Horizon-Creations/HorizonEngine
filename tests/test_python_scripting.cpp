@@ -320,6 +320,36 @@ TEST_CASE("ScriptContext: registry-driven horizon.math.* (Python)")
     CHECK(t.position.z == doctest::Approx(9.0f));   // max(2, 9)
 }
 
+// Behavior that writes random-library results into its entity's position.
+static const char* kPyRandom = R"py(
+import horizon
+
+class RandUser(horizon.Behavior):
+    def on_start(self):
+        horizon.random.seed(5)
+        x = 1.0 if horizon.random.chance(1.0) else 0.0   # always true
+        y = horizon.random.range(2, 2)                   # degenerate → 2
+        z = float(horizon.random.rangeInt(7, 7))         # degenerate → 7
+        horizon.setPosition(self.entity_id, x, y, z)
+)py";
+
+TEST_CASE("ScriptContext: registry-driven horizon.random.* (Python)")
+{
+    HorizonWorld world;
+    ScriptContext ctx(world);
+    REQUIRE(ctx.loadScript("pyrand", kPyRandom, ScriptLanguage::Python));
+
+    auto e  = makeEntity(world, "RandHero");
+    auto id = ctx.createInstance("pyrand", e);
+    REQUIRE(id != ScriptEngine::kInvalidInstance);
+    REQUIRE(ctx.callOnStart(id));
+
+    const auto& t = world.registry().get<TransformComponent>(e);
+    CHECK(t.position.x == doctest::Approx(1.0f));   // chance(1.0)
+    CHECK(t.position.y == doctest::Approx(2.0f));   // range(2, 2)
+    CHECK(t.position.z == doctest::Approx(7.0f));   // rangeInt(7, 7)
+}
+
 TEST_CASE("ScriptContext: Lua and Python coexist without id collision")
 {
     HorizonWorld world;
