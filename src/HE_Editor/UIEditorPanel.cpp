@@ -1830,6 +1830,14 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	m.connect = [&st](int oN, int oP, int iN, int iP){ return st.graph.connect(oN, oP, iN, iP); };
 	m.clearPinLinks = [&st](int node, int pin, bool){ removeGraphPinLinks(st.graph, node, pin); };
 	m.removeNode = [&st](int id){ st.graph.removeNode(id); };
+	// Literal nodes edit their value inline on the node body.
+	m.nodeBodyHeight = [&st](int id){ const HC::Node* n = st.graph.findNode(id);
+		return n ? HcEditorUtil::literalNodeBodyHeight(*n) : 0.0f; };
+	m.drawNodeBody = [&st, &ctx](int id, ImVec2, ImVec2, float){
+		HC::Node* n = st.graph.findNode(id); if (!n) return;
+		bool committed = false;
+		if (HcEditorUtil::drawLiteralNodeBody(*n, committed)) st.dirty = true;
+		if (committed) commitEdit(st, ctx); };
 	// Drag off a Ref output pin → the target class's public functions (→ typed
 	// CallExternal) and variables (→ Get/Set External), resolved via the class.
 	m.drawPinDragMenu = [&st, &ctx](int srcNode, int srcPin, bool, ImVec2 pos) -> int {
