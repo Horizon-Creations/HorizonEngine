@@ -67,6 +67,21 @@ namespace
     float roundedR(float w, float h, float r) { return std::min(r, 0.5f * std::min(w, h)); }
 }
 
+// Text emit that honors the element's Font asset (fontAtlasKey) when set, else
+// the shared default font.
+static void emitText(const UIElement& e, const std::string& text, const glm::vec2& pos,
+                     const glm::vec2& size, float sizePx, const glm::vec4& color,
+                     bool centerH, std::vector<UIRenderObject>& out)
+{
+    if (e.fontAtlasKey != 0)
+        if (const HE::BakedUIFont* f = HE::UIFontCache::find(e.fontAtlasKey))
+        {
+            HE::emitUITextGlyphs(*f, e.fontAtlasKey, text, pos, size, sizePx, color, 0, centerH, out);
+            return;
+        }
+    HE::emitUITextGlyphs(text, pos, size, sizePx, color, 0, centerH, out);
+}
+
 // ── Panel / Image ────────────────────────────────────────────────────────────
 
 void UIPanel::render(const UIWidgetRect& px, const UIElementRenderState&,
@@ -86,8 +101,8 @@ void UIImage::render(const UIWidgetRect& px, const UIElementRenderState&,
 void UIText::render(const UIWidgetRect& px, const UIElementRenderState&,
                     const HE::UUID&, float pxScaleY, std::vector<UIRenderObject>& out) const
 {
-    HE::emitUITextGlyphs(text, { px.x, px.y }, { px.w, px.h }, fontSize * pxScaleY,
-                         color, 0, /*centerH=*/false, out);
+    emitText(*this, text, { px.x, px.y }, { px.w, px.h }, fontSize * pxScaleY,
+             color, /*centerH=*/false, out);
 }
 
 // ── Button ───────────────────────────────────────────────────────────────────
@@ -100,8 +115,8 @@ void UIButton::render(const UIWidgetRect& px, const UIElementRenderState& st,
     if (st.pressed) c = pressedColor;
     quad(out, px.x, px.y, px.w, px.h, c, mat, roundedR(px.w, px.h, 6.0f));
     if (!text.empty())
-        HE::emitUITextGlyphs(text, { px.x, px.y }, { px.w, px.h }, fontSize * pxScaleY,
-                             textColor, 0, /*centerH=*/true, out);
+        emitText(*this, text, { px.x, px.y }, { px.w, px.h }, fontSize * pxScaleY,
+                 textColor, /*centerH=*/true, out);
 }
 
 // ── CheckBox ─────────────────────────────────────────────────────────────────
@@ -120,8 +135,8 @@ void UICheckBox::render(const UIWidgetRect& px, const UIElementRenderState& st,
         quad(out, px.x + inset, px.y + inset, cb, cb, checkColor, {}, roundedR(cb, cb, 2.0f));
     }
     const float lx = px.x + box + 8.0f;
-    HE::emitUITextGlyphs(label, { lx, px.y }, { px.w - box - 8.0f, px.h },
-                         fontSize * pxScaleY, textColor, 0, /*centerH=*/false, out);
+    emitText(*this, label, { lx, px.y }, { px.w - box - 8.0f, px.h },
+             fontSize * pxScaleY, textColor, /*centerH=*/false, out);
 }
 
 // ── Slider ───────────────────────────────────────────────────────────────────
@@ -174,14 +189,13 @@ void UITextInput::render(const UIWidgetRect& px, const UIElementRenderState& st,
     const glm::vec2 tp{ px.x + pad, px.y };
     const glm::vec2 ts{ px.w - 2 * pad, px.h };
     if (text.empty() && !st.focused)
-        HE::emitUITextGlyphs(placeholder, tp, ts, fontSize * pxScaleY,
-                             glm::vec4(glm::vec3(textColor) * 0.5f, textColor.a * 0.7f),
-                             0, false, out);
+        emitText(*this, placeholder, tp, ts, fontSize * pxScaleY,
+                 glm::vec4(glm::vec3(textColor) * 0.5f, textColor.a * 0.7f), false, out);
     else
     {
         std::string shown = text;
         if (st.focused) shown += "|"; // caret
-        HE::emitUITextGlyphs(shown, tp, ts, fontSize * pxScaleY, textColor, 0, false, out);
+        emitText(*this, shown, tp, ts, fontSize * pxScaleY, textColor, false, out);
     }
 }
 
@@ -193,11 +207,11 @@ void UIComboBox::render(const UIWidgetRect& px, const UIElementRenderState& st,
     glm::vec4 bg = st.hovered ? highlightColor : backColor;
     quad(out, px.x, px.y, px.w, px.h, bg, {}, roundedR(px.w, px.h, 4.0f));
     const float pad = 6.0f;
-    HE::emitUITextGlyphs(currentText(), { px.x + pad, px.y }, { px.w - px.h - pad, px.h },
-                         fontSize * pxScaleY, textColor, 0, false, out);
+    emitText(*this, currentText(), { px.x + pad, px.y }, { px.w - px.h - pad, px.h },
+             fontSize * pxScaleY, textColor, false, out);
     // Dropdown indicator ("v") in the right box.
-    HE::emitUITextGlyphs("v", { px.x + px.w - px.h, px.y }, { px.h, px.h },
-                         fontSize * pxScaleY, textColor, 0, true, out);
+    emitText(*this, "v", { px.x + px.w - px.h, px.y }, { px.h, px.h },
+             fontSize * pxScaleY, textColor, true, out);
 }
 
 // ── JSON (type-specific fields; base fields handled by the tree serializer) ───

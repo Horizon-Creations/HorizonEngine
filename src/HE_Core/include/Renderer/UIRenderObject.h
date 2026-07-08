@@ -21,4 +21,7 @@ struct UIRenderObject {
     // Corner radius in pixels for solid quads (type 0); 0 = square. A value of
     // min(w,h)/2 yields a circle — used for the slider handle. Ignored by glyphs.
     float       cornerRadius = 0.0f;
+    // Glyph quads (type 2): which baked font atlas to sample. 0 = shared default
+    // font; other keys index UIFontCache (an imported Font asset).
+    uint32_t    fontAtlasKey = 0;
 };

@@ -474,6 +474,9 @@ private:
 	int          m_uUIMode       = -1;  // 0 = solid color, 1 = font-atlas glyph
 	int          m_uUICornerRadius = -1; // px; min(w,h)/2 → circle (rounded rects)
 	unsigned int m_uiFontTexture = 0;   // R8 UI font atlas (HE::sharedUIFont), lazy
+	// Imported Font asset atlases, uploaded lazily on first sight (key → R8 tex).
+	std::unordered_map<uint32_t, unsigned int> m_uiFontAtlases;
+	unsigned int uiFontAtlasTexture(uint32_t key); // key 0 → the shared atlas
 	void         RenderUIPass(int pw, int ph);
 
 	// ── Bloom (bright-pass + separable Gaussian blur on the HDR target) ──────

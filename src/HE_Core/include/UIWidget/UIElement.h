@@ -103,6 +103,11 @@ public:
     // storage; only types with hasMaterialSlot() expose it in the editor.
     std::string material;
 
+    // Optional Font asset (content-relative path) for this element's text; empty
+    // = the shared default UI font. Resolved to fontAtlasKey at widget creation.
+    std::string font;
+    uint32_t    fontAtlasKey = 0; // transient: baked-atlas key (not serialized)
+
     virtual ~UIElement() = default;
 
     virtual UIWidgetType type() const = 0;
@@ -143,6 +148,7 @@ protected:
         dst.posX = posX; dst.posY = posY; dst.sizeX = sizeX; dst.sizeY = sizeY;
         dst.pivotX = pivotX; dst.pivotY = pivotY; dst.anchor = anchor;
         dst.layer = layer; dst.visible = visible; dst.material = material;
+        dst.font = font; dst.fontAtlasKey = fontAtlasKey;
     }
 };
 

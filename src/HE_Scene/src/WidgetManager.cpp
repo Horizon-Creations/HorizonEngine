@@ -1,6 +1,7 @@
 #include <HorizonScene/WidgetManager.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
+#include <Renderer/UIFont.h>
 #include <Diagnostics/Logger.h>
 #include <algorithm>
 
@@ -91,6 +92,20 @@ int WidgetManager::createWidget(ContentManager& content, const std::string& asse
 			const HE::UUID mid = content.loadAsset(e->material);
 			if (mid != HE::UUID{}) w.materials[e->id] = mid;
 		}
+
+	// Resolve + bake each element's Font asset once → a stable atlas key the
+	// element's text emits with (0 = the shared default font).
+	for (const auto& e : w.tree.elements)
+	{
+		e->fontAtlasKey = 0;
+		if (e->font.empty()) continue;
+		const HE::UUID fid = content.loadAsset(e->font);
+		if (fid == HE::UUID{}) continue;
+		const FontAsset* fa = content.getFont(fid);
+		if (!fa || fa->fontData.empty()) continue;
+		const float bakePx = fa->size > 0 ? (float)fa->size : 48.0f;
+		e->fontAtlasKey = HE::UIFontCache::keyFor(fid.hi ^ fid.lo, fa->fontData, bakePx);
+	}
 
 	// Register the widget's logic with the central runtime, which takes the graph
 	// and seeds the private variable store from its declared defaults. The
