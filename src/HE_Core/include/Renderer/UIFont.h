@@ -14,9 +14,12 @@ namespace HE {
 // a scene dependency. Baked lazily on first use; `ok` false = baking failed.
 struct BakedUIFont
 {
-    static constexpr int   kWidth  = 512;
-    static constexpr int   kHeight = 256;
-    static constexpr float kBakePx = 32.0f;
+    // Baked at a high pixel size into a large atlas so scaled-up widget text stays
+    // crisp (Roboto is a smooth outline font; this fidelity makes live widgets
+    // match the editor preview).
+    static constexpr int   kWidth  = 1024;
+    static constexpr int   kHeight = 1024;
+    static constexpr float kBakePx = 64.0f;
     std::vector<uint8_t> pixels;   // kWidth × kHeight, single channel (alpha)
     float ascent = 0.0f;           // baseline offset from the top, at kBakePx
     bool  ok     = false;
