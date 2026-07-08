@@ -334,3 +334,56 @@ TEST_CASE("Random: seeded → reproducible; ranges bounded; chance extremes")
     CHECK(call("random.chance", { Value::ofFloat(1.0f) })[0].b == true);
     CHECK(call("random.chance", { Value::ofFloat(0.0f) })[0].b == false);
 }
+
+// ═══ Time / frame clock ═══════════════════════════════════════════════════════
+
+TEST_CASE("Time: advancing the clock reflects through the registry")
+{
+    Ctx c{};
+    auto call = [&](const char* id){ return HE::api::find(id)->invoke(c, {}); };
+
+    HE::api::time::reset();
+    CHECK(call("time.frameCount")[0].i == 0);
+    CHECK(call("time.elapsed")[0].f == doctest::Approx(0.0f));
+
+    HE::api::time::advance(0.5f);
+    HE::api::time::advance(0.25f);
+    CHECK(call("time.deltaTime")[0].f  == doctest::Approx(0.25f)); // last dt
+    CHECK(call("time.elapsed")[0].f    == doctest::Approx(0.75f)); // accumulated
+    CHECK(call("time.frameCount")[0].i == 2);
+
+    HE::api::time::reset();
+    CHECK(call("time.elapsed")[0].f    == doctest::Approx(0.0f));
+    CHECK(call("time.frameCount")[0].i == 0);
+}
+
+// ═══ Input snapshot ═══════════════════════════════════════════════════════════
+
+TEST_CASE("Input: the pushed snapshot reflects through the registry")
+{
+    Ctx c{};
+    auto call = [&](const char* id, std::vector<Value> a){ return HE::api::find(id)->invoke(c, a); };
+
+    HE::api::input::clear();
+    CHECK(call("input.keyDown", { Value::ofString("W") })[0].b == false);
+
+    HE::api::input::setKeysDown({ "W", "Space" });
+    HE::api::input::setMouse({ 12.0f, 34.0f }, { 1.0f, -2.0f }, (1u << 0) | (1u << 2), 3.0f);
+
+    CHECK(call("input.keyDown", { Value::ofString("W") })[0].b     == true);
+    CHECK(call("input.keyDown", { Value::ofString("Space") })[0].b == true);
+    CHECK(call("input.keyDown", { Value::ofString("A") })[0].b     == false);
+    CHECK(call("input.mouseButton", { Value::ofInt(0) })[0].b == true);   // left
+    CHECK(call("input.mouseButton", { Value::ofInt(1) })[0].b == false);  // right
+    CHECK(call("input.mouseButton", { Value::ofInt(2) })[0].b == true);   // middle
+
+    const Value pos = call("input.mousePosition", {})[0];
+    CHECK(pos.v2.x == doctest::Approx(12.0f));
+    CHECK(pos.v2.y == doctest::Approx(34.0f));
+    const Value d = call("input.mouseDelta", {})[0];
+    CHECK(d.v2.x == doctest::Approx(1.0f));
+    CHECK(d.v2.y == doctest::Approx(-2.0f));
+    CHECK(call("input.scrollDelta", {})[0].f == doctest::Approx(3.0f));
+
+    HE::api::input::clear();
+}

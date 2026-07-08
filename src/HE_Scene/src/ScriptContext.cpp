@@ -445,7 +445,10 @@ static void registerEngineApiGroups(lua_State* L)
         const auto dot = id.find('.');
         if (dot == std::string::npos) continue;           // only namespaced ("math.clamp")
         const std::string group = id.substr(0, dot), name = id.substr(dot + 1);
-        if (group != "math" && group != "random") continue;   // registry-driven pure groups; widen later
+        // Registry-driven pure/stateless groups (no vec-packing ambiguity). The
+        // gameplay groups keep their ergonomic hand-written bindings until
+        // ScriptApi is inverted onto HE::api. Widening = add a name here.
+        if (group != "math" && group != "random" && group != "time" && group != "input") continue;
         lua_getfield(L, -1, group.c_str());               // [horizon, group?]
         if (!lua_istable(L, -1))
         {

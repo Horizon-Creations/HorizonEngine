@@ -7,6 +7,7 @@
 
 #include <HorizonScene/PyScriptBackend.h>
 #include <HorizonScene/ScriptContext.h>
+#include <HorizonScene/EngineApi.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/PhysicsWorld.h>
 #include <HorizonScene/Components/TransformComponent.h>
@@ -348,6 +349,41 @@ TEST_CASE("ScriptContext: registry-driven horizon.random.* (Python)")
     CHECK(t.position.x == doctest::Approx(1.0f));   // chance(1.0)
     CHECK(t.position.y == doctest::Approx(2.0f));   // range(2, 2)
     CHECK(t.position.z == doctest::Approx(7.0f));   // rangeInt(7, 7)
+}
+
+// Behavior that reads the time + input snapshot into its entity's position.
+static const char* kPyTimeInput = R"py(
+import horizon
+
+class TimeInputUser(horizon.Behavior):
+    def on_start(self):
+        dt = horizon.time.deltaTime()
+        sp = 1.0 if horizon.input.keyDown("Space") else 0.0
+        mx, my = horizon.input.mousePosition()
+        horizon.setPosition(self.entity_id, dt, sp, mx)
+)py";
+
+TEST_CASE("ScriptContext: registry-driven horizon.time.*/input.* (Python)")
+{
+    HE::api::time::reset();
+    HE::api::time::advance(0.5f);
+    HE::api::input::setKeysDown({ "Space" });
+    HE::api::input::setMouse({ 7.0f, 8.0f }, { 0.0f, 0.0f }, 0u, 0.0f);
+
+    HorizonWorld world;
+    ScriptContext ctx(world);
+    REQUIRE(ctx.loadScript("pyti", kPyTimeInput, ScriptLanguage::Python));
+
+    auto e  = makeEntity(world, "TimeInputHero");
+    auto id = ctx.createInstance("pyti", e);
+    REQUIRE(id != ScriptEngine::kInvalidInstance);
+    REQUIRE(ctx.callOnStart(id));
+
+    const auto& t = world.registry().get<TransformComponent>(e);
+    CHECK(t.position.x == doctest::Approx(0.5f));   // time.deltaTime()
+    CHECK(t.position.y == doctest::Approx(1.0f));   // input.keyDown("Space")
+    CHECK(t.position.z == doctest::Approx(7.0f));   // input.mousePosition().x
+    HE::api::input::clear();
 }
 
 TEST_CASE("ScriptContext: Lua and Python coexist without id collision")

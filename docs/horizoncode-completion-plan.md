@@ -105,10 +105,16 @@ Status: **[api]** already in `ScriptApi` (just needs a registry row + node),
 - `playSound(asset, volume, pitch)`, `playSound3D(asset, pos, …)`, `stop`,
   `setListener`. **[new]** (audio engine exists via Audio-Play-Mode; expose it).
 
-### 3.5 Input  **[new]**
-- `keyDown/Pressed/Released(key)`, `mouseButton*`, `mousePosition`,
-  `mouseDelta`, `scrollDelta`, gamepad axis/buttons, action-map queries.
-- Mostly **pure** nodes (polled per frame); events for pressed/released edges.
+### 3.5 Input  **[done — core]**
+- **[done]** `input.keyDown(name)` (SDL scancode names — "W"/"Space"/…),
+  `input.mouseButton(i)` (0/1/2), `input.mousePosition`, `input.mouseDelta`,
+  `input.scrollDelta` — pure getters over a process-global snapshot in
+  `HE::api::input`, pushed each frame by the app (`GameApplication` always,
+  `EditorApplication` during PIE) from SDL's global keyboard/mouse state. Live in
+  HC + Lua/Python `horizon.input.*`. **[new]** mouseDelta/scrollDelta are wired but
+  left at 0 by the app push (to avoid consuming SDL's relative-motion accumulator
+  the camera controller owns); pressed/released edges, gamepad, and action maps
+  still to come.
 
 ### 3.6 Camera  **[new]**
 - Get/set active camera, position/rotation, FOV; `worldToScreen`/`screenToWorld`;
@@ -126,10 +132,13 @@ Status: **[api]** already in `ScriptApi` (just needs a registry row + node),
 - `loadScene(name)`, `loadSceneAdditive`, `unloadScene`, `getActiveScene`.
   (Level scripts already get OnLevelLoaded/Unloaded events.)
 
-### 3.9 Time / frame  **[new]**
-- `deltaTime()`, `time()` (since start), `realtime()`, `frameCount()`,
-  `timeScale get/set`; `setTimeout(seconds)` / timers → an event when elapsed.
-  Pure getters; timers are exec + an event.
+### 3.9 Time / frame  **[done — core]**
+- **[done]** `time.deltaTime()`, `time.elapsed()` (seconds since play-start),
+  `time.frameCount()` — pure getters over a process-global clock in `HE::api::time`
+  advanced once per frame by the app (`GameApplication` always,
+  `EditorApplication` during PIE; reset on play-start). Live in HC + Lua/Python
+  `horizon.time.*`. **[new]** `timeScale get/set` and `setTimeout`/timers (need an
+  event when elapsed) still to come.
 
 ### 3.10 Math / random / string
 - Math: extend beyond the current Add/Sub/Mul/Div/compare — `min/max/clamp/abs/

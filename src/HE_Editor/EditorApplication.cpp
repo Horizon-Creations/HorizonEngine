@@ -876,8 +876,38 @@ void EditorApplication::OnInit()
 		dumpFrameHeadless();
 }
 
+// Push the current SDL keyboard/mouse state into HE::api::input so input.* nodes
+// and scripts can poll it during play. Mouse delta + scroll stay 0 here (the play
+// camera controller owns SDL's relative-motion accumulator); position + buttons +
+// keys (by SDL scancode name, e.g. "W"/"Space") are polled.
+static void pushEngineInputSnapshot()
+{
+	int n = 0;
+	const bool* ks = SDL_GetKeyboardState(&n);
+	std::vector<std::string> down;
+	if (ks)
+		for (int sc = 0; sc < n; ++sc)
+			if (ks[sc]) { const char* name = SDL_GetScancodeName((SDL_Scancode)sc); if (name && name[0]) down.emplace_back(name); }
+	float mx = 0.0f, my = 0.0f;
+	const SDL_MouseButtonFlags mb = SDL_GetMouseState(&mx, &my);
+	uint32_t buttons = 0;
+	if (mb & SDL_BUTTON_MASK(SDL_BUTTON_LEFT))   buttons |= 1u << 0;
+	if (mb & SDL_BUTTON_MASK(SDL_BUTTON_RIGHT))  buttons |= 1u << 1;
+	if (mb & SDL_BUTTON_MASK(SDL_BUTTON_MIDDLE)) buttons |= 1u << 2;
+	HE::api::input::setMouse({ mx, my }, { 0.0f, 0.0f }, buttons, 0.0f);
+	HE::api::input::setKeysDown(down);
+}
+
 void EditorApplication::OnRender(float dt)
 {
+	// During play-in-editor, feed the engine clock + input snapshot so time.*/input.*
+	// nodes and scripts read fresh per-frame values (edit mode leaves them untouched).
+	if (m_isPlaying)
+	{
+		HE::api::time::advance(dt);
+		pushEngineInputSnapshot();
+	}
+
 	// ── Window title ─────────────────────────────────────────────────────
 	{
 		const std::string& projName = m_projectManager.currentProject().name;
@@ -2045,6 +2075,7 @@ void EditorApplication::setPlayMode(bool play)
 			return;
 		}
 		m_isPlaying = true;
+		HE::api::time::reset(); // play-relative clock (elapsed/frameCount start at 0)
 		m_undo.clearHistory(); // edits made while playing are not undoable
 
 		// GameInstance OnInit fires first — before scripts, the level and any
