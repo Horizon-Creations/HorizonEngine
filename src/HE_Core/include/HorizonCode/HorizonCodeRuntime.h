@@ -76,11 +76,13 @@ public:
     // `arg` feeds the event's data output when it has one.
     void fireEvent(InstanceId id, const std::string& event, int elem = 0, const Value& arg = {});
 
-    // Run a function on an instance. requirePublic enforces the access modifier
+    // Run a function on an instance, passing `args` and copying its return values
+    // into `results` (when non-null). requirePublic enforces the access modifier
     // for calls that cross a class boundary (another script / the scripting API).
     // Returns false when the instance/function is missing, or it is private and
     // requirePublic is set.
-    bool callFunction(InstanceId id, const std::string& fn, bool requirePublic = true);
+    bool callFunction(InstanceId id, const std::string& fn, bool requirePublic = true,
+                      const std::vector<Value>& args = {}, std::vector<Value>* results = nullptr);
 
     // ── Reference-based delegation (Unreal-style event dispatchers) ───────────
     // Subscribe `listener` to `owner`'s `event`: when the owner fires that event,

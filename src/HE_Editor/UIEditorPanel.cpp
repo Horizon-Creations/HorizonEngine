@@ -1709,6 +1709,40 @@ std::vector<GraphEditor::Pin> hcNodePins(const HC::Node& n)
 	return out;
 }
 
+// Load a HorizonCode class / widget asset's graph (for cross-class member menus).
+bool loadClassGraph(ContentManager* content, const std::string& path, HC::Graph& out)
+{
+	if (!content || path.empty()) return false;
+	const HE::UUID id = content->loadAsset(path);
+	if (const HorizonCodeClassAsset* a = content->getHorizonCodeClass(id); a && !a->graphJson.empty())
+		return HC::fromJson(a->graphJson, out);
+	if (const UIWidgetAsset* w = content->getWidget(id); w && !w->graphJson.empty())
+		return HC::fromJson(w->graphJson, out);
+	return false;
+}
+
+// The class graph a Ref-producing node points at (this widget's own graph for Get
+// Self, the GameInstance for Get Game Instance, an asset for Create/typed vars).
+const HC::Graph* resolveClassGraph(const HC::Node& src, const HC::Graph& self,
+                                   const HC::Graph* gi, ContentManager* cm, HC::Graph& scratch)
+{
+	switch (src.type)
+	{
+		case NT::GetSelf:         return &self;
+		case NT::GetGameInstance: return gi;
+		case NT::CreateObject:
+		case NT::CreateWidget:    return loadClassGraph(cm, src.s, scratch) ? &scratch : nullptr;
+		case NT::GetVariable:
+		{
+			const HC::Variable* v = self.findVariable(src.s);
+			if (v && v->type == PT::Ref && !v->className.empty())
+				return loadClassGraph(cm, v->className, scratch) ? &scratch : nullptr;
+			return nullptr;
+		}
+		default: return nullptr;
+	}
+}
+
 void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 {
 	// Sync the host's selection/focus into the shared canvas state.
@@ -1730,6 +1764,66 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	m.connect = [&st](int oN, int oP, int iN, int iP){ return st.graph.connect(oN, oP, iN, iP); };
 	m.clearPinLinks = [&st](int node, int pin, bool){ removeGraphPinLinks(st.graph, node, pin); };
 	m.removeNode = [&st](int id){ st.graph.removeNode(id); };
+	// Drag off a Ref output pin → the target class's public functions (→ typed
+	// CallExternal) and variables (→ Get/Set External), resolved via the class.
+	m.drawPinDragMenu = [&st, &ctx](int srcNode, int srcPin, bool, ImVec2 pos) -> int {
+		HC::Node* sn = st.graph.findNode(srcNode);
+		if (!sn) return 0;
+		int created = 0;
+		ImGui::BeginChild("##hcw_pindrag", ImVec2(240.0f, 300.0f));
+
+		const HC::NodeSig sig = HC::signatureOf(*sn);
+		const GPinRanges rr = graphPinRanges(*sn);
+		bool isRefOut = srcPin >= rr.dataOut0 && srcPin < rr.end &&
+		                sig.dataOuts[srcPin - rr.dataOut0].type == PT::Ref;
+		if (isRefOut)
+		{
+			auto wire = [&](int newId){ if (HC::Node* nn = st.graph.findNode(newId))
+				st.graph.connect(srcNode, srcPin, newId, graphPinRanges(*nn).dataIn0); };
+			HC::Graph scratch;
+			const HC::Graph* cls = resolveClassGraph(*sn, st.graph, ctx.gameInstanceGraph,
+			                                         ctx.contentManager, scratch);
+			if (cls)
+			{
+				bool fh = false;
+				for (const auto& fn : cls->nodes)
+					if (fn.type == NT::FunctionEntry && fn.access == 0 && !fn.s.empty())
+					{
+						if (!fh) { ImGui::TextDisabled("Functions"); fh = true; }
+						if (ImGui::Selectable(("Call " + fn.s).c_str()))
+						{
+							const int id = addGraphNode(st, NT::CallExternal, pos);
+							HC::Node* nn = st.graph.findNode(id);
+							nn->s = fn.s; nn->params = fn.params; nn->results = fn.results;
+							wire(id); created = id; ImGui::CloseCurrentPopup();
+						}
+					}
+				bool vh = false;
+				for (const auto& var : cls->variables)
+					if (var.access == 0)
+					{
+						if (!vh) { ImGui::TextDisabled("Variables"); vh = true; }
+						if (ImGui::Selectable(("Get " + var.name).c_str()))
+						{ const int id = addGraphNode(st, NT::GetExternal, pos); HC::Node* nn = st.graph.findNode(id); nn->s = var.name; nn->propType = var.type; wire(id); created = id; ImGui::CloseCurrentPopup(); }
+						if (ImGui::Selectable(("Set " + var.name).c_str()))
+						{ const int id = addGraphNode(st, NT::SetExternal, pos); HC::Node* nn = st.graph.findNode(id); nn->s = var.name; nn->propType = var.type; wire(id); created = id; ImGui::CloseCurrentPopup(); }
+					}
+				if (fh || vh) ImGui::Separator();
+			}
+			else ImGui::TextDisabled("(untyped object)");
+
+			ImGui::TextDisabled("Reference");
+			if (ImGui::Selectable("Call Function (Ref)")) { const int id = addGraphNode(st, NT::CallExternal, pos); wire(id); created = id; ImGui::CloseCurrentPopup(); }
+			if (ImGui::Selectable("Bind Event"))          { const int id = addGraphNode(st, NT::BindEvent, pos);    wire(id); created = id; ImGui::CloseCurrentPopup(); }
+			if (ImGui::Selectable("Get (Ref)"))           { const int id = addGraphNode(st, NT::GetExternal, pos);  wire(id); created = id; ImGui::CloseCurrentPopup(); }
+			if (ImGui::Selectable("Set (Ref)"))           { const int id = addGraphNode(st, NT::SetExternal, pos);  wire(id); created = id; ImGui::CloseCurrentPopup(); }
+			if (ImGui::Selectable("Destroy Object"))      { const int id = addGraphNode(st, NT::DestroyObject, pos); wire(id); created = id; ImGui::CloseCurrentPopup(); }
+		}
+		else ImGui::TextDisabled("Release on a pin to connect,\nor here to cancel.");
+
+		ImGui::EndChild();
+		return created;
+	};
 	// Searchable add-node palette (mirrors the material editor's). Events +
 	// FunctionEntry are created elsewhere (Designer events / the + Function
 	// button); Get/Set Variable are offered per declared variable.

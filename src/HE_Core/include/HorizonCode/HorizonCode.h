@@ -208,8 +208,10 @@ struct Context
     std::function<void(const std::string& event, const Value& arg)>        emitEvent;
     // bindEvent: subscribe THIS instance to `event` on the `target` instance.
     std::function<void(uint32_t target, const std::string& event)>         bindEvent;
-    // callExternal: call a public function on the `target` instance.
-    std::function<void(uint32_t target, const std::string& fn)>            callExternal;
+    // callExternal: call a public function on the `target` instance, passing
+    // `args` and returning its result values (empty if the fn has none / fails).
+    std::function<std::vector<Value>(uint32_t target, const std::string& fn,
+                                     const std::vector<Value>& args)>      callExternal;
     // get/setExternal: read/write a PUBLIC variable on the `target` instance.
     std::function<Value(uint32_t target, const std::string& var)>              getExternal;
     std::function<void(uint32_t target, const std::string& var, const Value&)> setExternal;
@@ -228,9 +230,11 @@ public:
     // data output when it has one.
     void fireEvent(const std::string& eventName, int elem = 0, const Value& arg = {});
 
-    // Run a named FunctionEntry. False when missing or (with requirePublic) the
-    // function is private — the gameplay-script routing check.
-    bool callFunction(const std::string& name, bool requirePublic);
+    // Run a named FunctionEntry, passing `args` to its parameters and copying its
+    // return values into `results` (when non-null). False when missing or (with
+    // requirePublic) the function is private — the gameplay-script routing check.
+    bool callFunction(const std::string& name, bool requirePublic,
+                      const std::vector<Value>& args = {}, std::vector<Value>* results = nullptr);
 
 private:
     void runExecChain(const Node& from, int execOutPin, int depth);

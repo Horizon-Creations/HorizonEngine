@@ -734,7 +734,12 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 					{
 						if (!fh) { ImGui::TextDisabled("Functions"); fh = true; }
 						if (ImGui::Selectable(("Call " + fn.s).c_str()))
-						{ const int id = addNode(graph, NT::CallExternal, pos); graph.findNode(id)->s = fn.s; wire(id); created = id; ImGui::CloseCurrentPopup(); }
+						{
+							const int id = addNode(graph, NT::CallExternal, pos);
+							HC::Node* nn = graph.findNode(id);
+							nn->s = fn.s; nn->params = fn.params; nn->results = fn.results; // typed signature
+							wire(id); created = id; ImGui::CloseCurrentPopup();
+						}
 					}
 				bool vh = false;
 				for (const auto& var : cls->variables)

@@ -160,8 +160,13 @@ Context Runtime::makeContext(InstanceId id)
     { emitEvent(id, event, arg); };
     ctx.bindEvent = [this, id](uint32_t target, const std::string& event)
     { bindEvent(target, event, id); };
-    ctx.callExternal = [this](uint32_t target, const std::string& fn)
-    { callFunction(target, fn, /*requirePublic=*/true); };
+    ctx.callExternal = [this](uint32_t target, const std::string& fn,
+                              const std::vector<Value>& args) -> std::vector<Value>
+    {
+        std::vector<Value> out;
+        callFunction(target, fn, /*requirePublic=*/true, args, &out);
+        return out;
+    };
     // Read/write a variable on another instance — only if it's declared public.
     ctx.getExternal = [this](uint32_t target, const std::string& var) -> Value
     {
@@ -232,12 +237,13 @@ void Runtime::dispatchToListeners(InstanceId owner, const std::string& event, co
     --m_dispatchDepth;
 }
 
-bool Runtime::callFunction(InstanceId id, const std::string& fn, bool requirePublic)
+bool Runtime::callFunction(InstanceId id, const std::string& fn, bool requirePublic,
+                           const std::vector<Value>& args, std::vector<Value>* results)
 {
     Inst* i = find(id);
     if (!i) return false;
     Runner runner(i->graph, makeContext(id));
-    return runner.callFunction(fn, requirePublic);
+    return runner.callFunction(fn, requirePublic, args, results);
 }
 
 } // namespace HorizonCode
