@@ -387,3 +387,57 @@ TEST_CASE("Input: the pushed snapshot reflects through the registry")
 
     HE::api::input::clear();
 }
+
+// ═══ Transform value type ═════════════════════════════════════════════════════
+
+TEST_CASE("Transform: ConstTransform flows through Set as a Transform value")
+{
+    HC::Graph g;
+    HC::Node ev; ev.type = NT::Event; ev.s = "Run"; const int evId = g.addNode(ev);
+    HC::Node ct; ct.type = NT::ConstTransform;
+    ct.tpos = { 1.0f, 2.0f, 3.0f }; ct.trot = { 10.0f, 20.0f, 30.0f }; ct.tscl = { 4.0f, 5.0f, 6.0f };
+    const int ctId = g.addNode(ct);
+    HC::Node sv; sv.type = NT::SetVariable; sv.s = "t"; sv.propType = P::Transform;
+    const int svId = g.addNode(sv);
+    REQUIRE(g.connect(evId, 0, svId, 0));   // exec
+    REQUIRE(g.connect(ctId, 0, svId, 2));   // ConstTransform out → SetVariable value
+
+    std::unordered_map<std::string, Value> vars;
+    HC::Context ctx;
+    ctx.setVariable = [&vars](const std::string& n, const Value& v){ vars[n] = v; };
+    HC::Runner runner(g, ctx);
+    runner.fireEvent("Run", 0);
+
+    REQUIRE(vars.count("t") == 1);
+    CHECK(vars["t"].type == P::Transform);
+    CHECK(vars["t"].tpos.x == doctest::Approx(1.0f));
+    CHECK(vars["t"].trot.y == doctest::Approx(20.0f));
+    CHECK(vars["t"].tscl.z == doctest::Approx(6.0f));
+}
+
+TEST_CASE("Transform: ConstTransform round-trips through JSON")
+{
+    HC::Graph g;
+    HC::Node ct; ct.type = NT::ConstTransform;
+    ct.tpos = { 1.0f, 2.0f, 3.0f }; ct.trot = { 4.0f, 5.0f, 6.0f }; ct.tscl = { 7.0f, 8.0f, 9.0f };
+    g.addNode(ct);
+
+    HC::Graph loaded;
+    REQUIRE(HC::fromJson(HC::toJson(g), loaded));
+    REQUIRE(loaded.nodes.size() == 1);
+    CHECK(loaded.nodes[0].type == NT::ConstTransform);
+    CHECK(loaded.nodes[0].tpos.y == doctest::Approx(2.0f));
+    CHECK(loaded.nodes[0].trot.z == doctest::Approx(6.0f));
+    CHECK(loaded.nodes[0].tscl.x == doctest::Approx(7.0f));
+}
+
+TEST_CASE("Transform: a Transform variable defaults to identity")
+{
+    HC::Variable v; v.name = "xf"; v.type = P::Transform;
+    const Value d = HC::variableDefaultValue(v);
+    CHECK(d.type == P::Transform);
+    CHECK(d.tpos.x == doctest::Approx(0.0f));
+    CHECK(d.trot.x == doctest::Approx(0.0f));
+    CHECK(d.tscl.x == doctest::Approx(1.0f));
+    CHECK(d.tscl.z == doctest::Approx(1.0f));
+}
