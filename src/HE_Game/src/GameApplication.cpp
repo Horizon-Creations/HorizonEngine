@@ -493,8 +493,35 @@ bool GameApplication::OnEvent(const SDL_Event& event)
 	return false;
 }
 
+// Push the current SDL keyboard/mouse state into HE::api::input so the input.*
+// registry nodes and scripts can poll it. Mouse delta + scroll are left at 0 here
+// to avoid consuming SDL's relative-motion accumulator the camera controller uses;
+// position + buttons + keys (by SDL scancode name, e.g. "W"/"Space") are polled.
+static void pushEngineInputSnapshot()
+{
+	int n = 0;
+	const bool* ks = SDL_GetKeyboardState(&n);
+	std::vector<std::string> down;
+	if (ks)
+		for (int sc = 0; sc < n; ++sc)
+			if (ks[sc]) { const char* name = SDL_GetScancodeName((SDL_Scancode)sc); if (name && name[0]) down.emplace_back(name); }
+	float mx = 0.0f, my = 0.0f;
+	const SDL_MouseButtonFlags mb = SDL_GetMouseState(&mx, &my);
+	uint32_t buttons = 0;
+	if (mb & SDL_BUTTON_MASK(SDL_BUTTON_LEFT))   buttons |= 1u << 0;
+	if (mb & SDL_BUTTON_MASK(SDL_BUTTON_RIGHT))  buttons |= 1u << 1;
+	if (mb & SDL_BUTTON_MASK(SDL_BUTTON_MIDDLE)) buttons |= 1u << 2;
+	HE::api::input::setMouse({ mx, my }, { 0.0f, 0.0f }, buttons, 0.0f);
+	HE::api::input::setKeysDown(down);
+}
+
 void GameApplication::OnRender(float deltaTime)
 {
+	// Feed the per-frame engine clock + input snapshot so time.*/input.* nodes and
+	// scripts read fresh values this frame (before the ECS/script updates below).
+	HE::api::time::advance(deltaTime);
+	pushEngineInputSnapshot();
+
 	// Register assets that finished streaming since last frame (main-thread insert —
 	// safe point for the SlotMaps, never during draw). Budgeted so a burst of
 	// simultaneously-finished loads is spread across frames instead of freezing one;

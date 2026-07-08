@@ -1,5 +1,6 @@
 #include "doctest.h"
 #include <HorizonScene/ScriptContext.h>
+#include <HorizonScene/EngineApi.h>
 #include <cstdint>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/Components/TransformComponent.h>
@@ -170,6 +171,30 @@ TEST_CASE("ScriptContext: registry-driven horizon.random.* (Lua)")
     const double v = engine.getGlobalNumber("_v");
     CHECK(v >= 0.0);
     CHECK(v < 1.0);
+}
+
+TEST_CASE("ScriptContext: registry-driven horizon.time.*/input.* (Lua)")
+{
+    // Push a frame's timing + input snapshot, then read it back through Lua.
+    HE::api::time::reset();
+    HE::api::time::advance(0.5f);
+    HE::api::input::setKeysDown({ "Space" });
+    HE::api::input::setMouse({ 7.0f, 8.0f }, { 0.0f, 0.0f }, (1u << 1), 0.0f); // right button
+
+    HorizonWorld world;
+    ScriptContext ctx(world);
+    auto& engine = ctx.engine();
+    REQUIRE(engine.exec(
+        "_G._dt = horizon.time.deltaTime()\n"
+        "_G._sp = horizon.input.keyDown('Space') and 1 or 0\n"
+        "_G._rb = horizon.input.mouseButton(1) and 1 or 0\n"
+        "_G._mx, _G._my = horizon.input.mousePosition()\n"));   // Vec2 → 2 return values
+    CHECK(engine.getGlobalNumber("_dt") == doctest::Approx(0.5));
+    CHECK(engine.getGlobalNumber("_sp") == doctest::Approx(1.0));
+    CHECK(engine.getGlobalNumber("_rb") == doctest::Approx(1.0));
+    CHECK(engine.getGlobalNumber("_mx") == doctest::Approx(7.0));
+    CHECK(engine.getGlobalNumber("_my") == doctest::Approx(8.0));
+    HE::api::input::clear();
 }
 
 TEST_CASE("ScriptContext: setPosition modifies entity transform")

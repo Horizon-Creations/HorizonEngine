@@ -3,6 +3,7 @@
 #include <cmath>
 #include <random>
 #include <utility>
+#include <unordered_set>
 
 // The engine surface (transform/physics/material/ui/widget/cursor/entity) is a
 // thin promotion of the language-neutral ScriptApi — same behavior, now bundled
@@ -119,6 +120,34 @@ int   rangeInt(int lo, int hi)  { if (hi < lo) std::swap(lo, hi);
                                   return std::uniform_int_distribution<int>(lo, hi)(gen()); }
 bool  chance(float p)           { return value() < (p < 0.0f ? 0.0f : (p > 1.0f ? 1.0f : p)); }
 } // namespace random
+
+// ── Time / frame ─────────────────────────────────────────────────────────────
+namespace time {
+namespace { struct Clock { float delta = 0.0f; double elapsed = 0.0; uint64_t frame = 0; }; Clock& clk() { static Clock c; return c; } }
+void  advance(float dt) { Clock& c = clk(); c.delta = dt; c.elapsed += dt; ++c.frame; }
+void  reset()           { clk() = Clock{}; }
+float deltaTime()       { return clk().delta; }
+float elapsed()         { return (float)clk().elapsed; }
+int   frameCount()      { return (int)clk().frame; }
+} // namespace time
+
+// ── Input ────────────────────────────────────────────────────────────────────
+namespace input {
+namespace {
+struct Snapshot { std::unordered_set<std::string> keys; uint32_t buttons = 0; glm::vec2 pos{0.0f}, delta{0.0f}; float scroll = 0.0f; };
+Snapshot& snap() { static Snapshot s; return s; }
+}
+void setMouse(const glm::vec2& p, const glm::vec2& d, uint32_t mask, float sc)
+{ Snapshot& s = snap(); s.pos = p; s.delta = d; s.buttons = mask; s.scroll = sc; }
+void setKeysDown(const std::vector<std::string>& names)
+{ Snapshot& s = snap(); s.keys.clear(); for (const auto& n : names) s.keys.insert(n); }
+void clear() { snap() = Snapshot{}; }
+bool      keyDown(const std::string& n) { return snap().keys.count(n) != 0; }
+bool      mouseButton(int i)            { return i >= 0 && i < 32 && (snap().buttons & (1u << i)) != 0; }
+glm::vec2 mousePosition()               { return snap().pos; }
+glm::vec2 mouseDelta()                  { return snap().delta; }
+float     scrollDelta()                 { return snap().scroll; }
+} // namespace input
 
 // ── Registry ─────────────────────────────────────────────────────────────────
 namespace {
@@ -278,6 +307,26 @@ const std::vector<ApiFn>& registry()
             [](Ctx&, const VV& a){ return VV{ Value::ofInt(random::rangeInt(aI(a, 0), aI(a, 1))) }; } });
         t.push_back({ "random.chance", "Random", true, {{"p", P::Float}}, {{"value", P::Bool}}, "HE::api::random::chance",
             [](Ctx&, const VV& a){ return VV{ Value::ofBool(random::chance(aF(a, 0))) }; } });
+
+        // Time / frame (pure getters; the app advances the clock each frame)
+        t.push_back({ "time.deltaTime", "Time", false, {}, {{"dt", P::Float}}, "HE::api::time::deltaTime",
+            [](Ctx&, const VV&){ return VV{ Value::ofFloat(time::deltaTime()) }; } });
+        t.push_back({ "time.elapsed", "Time", false, {}, {{"seconds", P::Float}}, "HE::api::time::elapsed",
+            [](Ctx&, const VV&){ return VV{ Value::ofFloat(time::elapsed()) }; } });
+        t.push_back({ "time.frameCount", "Time", false, {}, {{"frame", P::Int}}, "HE::api::time::frameCount",
+            [](Ctx&, const VV&){ return VV{ Value::ofInt(time::frameCount()) }; } });
+
+        // Input (pure getters; the app pushes the snapshot each frame)
+        t.push_back({ "input.keyDown", "Input", false, {{"key", P::String}}, {{"down", P::Bool}}, "HE::api::input::keyDown",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(input::keyDown(aS(a, 0))) }; } });
+        t.push_back({ "input.mouseButton", "Input", false, {{"button", P::Int}}, {{"down", P::Bool}}, "HE::api::input::mouseButton",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(input::mouseButton(aI(a, 0))) }; } });
+        t.push_back({ "input.mousePosition", "Input", false, {}, {{"position", P::Vec2}}, "HE::api::input::mousePosition",
+            [](Ctx&, const VV&){ return VV{ Value::ofVec2(input::mousePosition()) }; } });
+        t.push_back({ "input.mouseDelta", "Input", false, {}, {{"delta", P::Vec2}}, "HE::api::input::mouseDelta",
+            [](Ctx&, const VV&){ return VV{ Value::ofVec2(input::mouseDelta()) }; } });
+        t.push_back({ "input.scrollDelta", "Input", false, {}, {{"scroll", P::Float}}, "HE::api::input::scrollDelta",
+            [](Ctx&, const VV&){ return VV{ Value::ofFloat(input::scrollDelta()) }; } });
 
         return t;
     }();

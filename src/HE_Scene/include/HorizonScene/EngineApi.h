@@ -156,6 +156,33 @@ namespace random {
     bool  chance(float p);               // true with probability p (clamped 0..1)
 }
 
+// ── Time / frame (process-global clock; the app advances it once per frame) ───
+// Getters are pure (constant within a frame) → pure data nodes in HorizonCode.
+namespace time {
+    void  advance(float dtSeconds);      // app hook: called once per rendered frame
+    void  reset();                       // app hook: zero on play-start
+    float deltaTime();                   // last frame's dt (seconds)
+    float elapsed();                     // seconds since reset
+    int   frameCount();                  // frames since reset
+}
+
+// ── Input (process-global snapshot; the app pushes it each frame) ─────────────
+// Key names follow SDL scancode names ("W", "Space", "Left", "Escape", …) so the
+// query side stays SDL-free here while the app populates it from real devices.
+// Getters are pure (constant within a frame) → pure data nodes in HorizonCode.
+namespace input {
+    // App hooks (populate the snapshot).
+    void setMouse(const glm::vec2& pos, const glm::vec2& delta, uint32_t buttonMask, float scroll);
+    void setKeysDown(const std::vector<std::string>& downKeyNames);
+    void clear();
+    // Script queries.
+    bool      keyDown(const std::string& name);
+    bool      mouseButton(int index);    // 0 = left, 1 = right, 2 = middle
+    glm::vec2 mousePosition();
+    glm::vec2 mouseDelta();
+    float     scrollDelta();
+}
+
 // ── Machine-readable registry ─────────────────────────────────────────────────
 // One ApiFn per function. The interpreter looks a function up by `id` and calls
 // `invoke`; the editor builds its add-menu from `category`/`params`/`results`;
