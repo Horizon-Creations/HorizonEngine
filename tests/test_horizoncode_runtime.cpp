@@ -562,3 +562,41 @@ TEST_CASE("syncFunctionSignatures mirrors a function's interface onto calls + su
 	CHECK(call2->results.size() == 1);
 	CHECK(call2->results[0].type == PinType::Bool);
 }
+
+TEST_CASE("CallExternal passes an argument to a public function and reads its return")
+{
+	Runtime rt;
+	// A exposes a public Echo(x:Int) -> (y:Int) that returns its input.
+	Graph gA;
+	Node fe; fe.type = NodeType::FunctionEntry; fe.s = "Echo"; fe.access = 0;
+	fe.params = { { "x", PinType::Int } }; fe.results = { { "y", PinType::Int } };
+	const int feA = gA.addNode(fe);
+	Node fr; fr.type = NodeType::FunctionReturn; fr.s = "Echo"; const int frA = gA.addNode(fr);
+	syncFunctionSignatures(gA);
+	REQUIRE(gA.connect(feA, 0, frA, 0)); // exec
+	REQUIRE(gA.connect(feA, 1, frA, 1)); // x -> y
+	const InstanceId A = rt.add(std::move(gA));
+
+	// B: out = Echo(42) called on its "target" ref (→ A).
+	Graph gB;
+	{ Variable v; v.name = "target"; v.type = PinType::Ref; gB.variables.push_back(v); }
+	{ Variable v; v.name = "out";    v.type = PinType::Int; gB.variables.push_back(v); }
+	Node ev; ev.type = NodeType::Event; ev.s = "Go"; const int e = gB.addNode(ev);
+	Node gt; gt.type = NodeType::GetVariable; gt.s = "target"; gt.propType = PinType::Ref; const int t = gB.addNode(gt);
+	Node ci; ci.type = NodeType::ConstInt; ci.f[0] = 42; const int c = gB.addNode(ci);
+	Node ce; ce.type = NodeType::CallExternal; ce.s = "Echo";
+	ce.params = { { "x", PinType::Int } }; ce.results = { { "y", PinType::Int } }; // typed signature
+	const int ceId = gB.addNode(ce);
+	Node sv; sv.type = NodeType::SetVariable; sv.s = "out"; sv.propType = PinType::Int; const int s = gB.addNode(sv);
+	// Pins: CallExternal execIn 0 / execOut 1 / Target 2 / x 3 / y(out) 4.
+	REQUIRE(gB.connect(e,    0, ceId, 0)); // exec
+	REQUIRE(gB.connect(t,    0, ceId, 2)); // target -> Target
+	REQUIRE(gB.connect(c,    0, ceId, 3)); // 42 -> x
+	REQUIRE(gB.connect(ceId, 1, s,    0)); // exec -> SetVariable
+	REQUIRE(gB.connect(ceId, 4, s,    2)); // y -> out
+	const InstanceId B = rt.add(std::move(gB));
+	rt.setVariable(B, "target", Value::ofRef(A));
+
+	rt.fireEvent(B, "Go");
+	CHECK(rt.getVariable(B, "out").i == 42); // argument crossed the instance boundary and came back
+}

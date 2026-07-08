@@ -101,10 +101,16 @@ NodeSig signatureOf(const Node& n)
         s.dataOuts = { { "Value", n.propType } }; // pass the set value through
         break;
     case T::BindEvent:
+        s.execIns  = { { "", P::Exec } };
+        s.execOuts = { { "", P::Exec } };
+        s.dataIns  = { { "Target", P::Ref } };
+        break;
     case T::CallExternal:
         s.execIns  = { { "", P::Exec } };
         s.execOuts = { { "", P::Exec } };
         s.dataIns  = { { "Target", P::Ref } };
+        for (const auto& p : n.params)  s.dataIns.push_back({ p.name.c_str(), p.type });
+        for (const auto& r : n.results) s.dataOuts.push_back({ r.name.c_str(), r.type });
         break;
     case T::EmitEvent:
         s.execIns  = { { "", P::Exec } };
@@ -536,7 +542,8 @@ void Runner::fireEvent(const std::string& eventName, int elem, const Value& arg)
     }
 }
 
-bool Runner::callFunction(const std::string& name, bool requirePublic)
+bool Runner::callFunction(const std::string& name, bool requirePublic,
+                          const std::vector<Value>& args, std::vector<Value>* results)
 {
     for (const auto& n : m_graph.nodes)
     {
@@ -545,15 +552,20 @@ bool Runner::callFunction(const std::string& name, bool requirePublic)
         m_steps = 0;
         m_execOutputs.clear();
         m_callStack.clear();
-        // External callers pass no arguments — seed a frame of typed defaults so
-        // the entry's param data-outs (and any Return) resolve cleanly.
+        // Seed the frame: passed args coerced to the param types (missing ones fall
+        // back to a typed default), and typed result slots for any Return to fill.
         CallFrame frame;
         frame.args.resize(n.params.size());
-        for (size_t i = 0; i < n.params.size(); ++i) frame.args[i].type = n.params[i].type;
+        for (size_t i = 0; i < n.params.size(); ++i)
+        {
+            if (i < args.size()) frame.args[i] = coerce(args[i], n.params[i].type);
+            else                 frame.args[i].type = n.params[i].type; // typed default
+        }
         frame.results.resize(n.results.size());
         for (size_t i = 0; i < n.results.size(); ++i) frame.results[i].type = n.results[i].type;
         m_callStack.push_back(std::move(frame));
         runExecChain(n, pinRanges(n).execOut0, 0);
+        if (results) *results = m_callStack.back().results;
         m_callStack.pop_back();
         return true;
     }
@@ -642,7 +654,13 @@ void Runner::execNode(const Node& n, int depth)
         break;
     case T::CallExternal:
         if (m_ctx.callExternal)
-            m_ctx.callExternal(evalInput(n, 0, depth + 1).ref, n.s);
+        {
+            // dataIn 0 = Target (Ref); 1.. = the callee's parameters.
+            std::vector<Value> args(n.params.size());
+            for (size_t i = 0; i < n.params.size(); ++i)
+                args[i] = coerce(evalInput(n, (int)i + 1, depth + 1), n.params[i].type);
+            m_execOutputs[n.id] = m_ctx.callExternal(evalInput(n, 0, depth + 1).ref, n.s, args);
+        }
         break;
     case T::FunctionCall:
     {
@@ -744,8 +762,9 @@ Value Runner::evalData(const Node& n, int dataOutPin, int depth)
         return {};
     }
     case T::FunctionCall:
+    case T::CallExternal:
     {
-        // A function's return value: read the cached results from when it ran.
+        // A (local or cross-instance) call's return value: read the cached results.
         auto it = m_execOutputs.find(n.id);
         if (it != m_execOutputs.end() && dataOutPin >= 0 && dataOutPin < (int)it->second.size())
             return it->second[dataOutPin];
