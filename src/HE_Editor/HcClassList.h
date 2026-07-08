@@ -62,6 +62,13 @@ namespace HcEditorUtil
 	// the level/GI/class graph editor and the widget graph editor.
 	void drawFunctionInterface(HorizonCode::Graph& g, HorizonCode::Node& entry, bool& edited);
 
+	// Draws the HE::api engine registry as an add-menu section: entries grouped by
+	// category, filtered by `lowerQuery` (already lowercased; empty = show all).
+	// Returns the picked registry id when a selectable is clicked this frame, else
+	// "". The caller resolves it via HE::api::find and builds an EngineCall node
+	// (copying the descriptor's isExec → hasArg and params/results onto the node).
+	std::string drawEngineApiMenu(const std::string& lowerQuery);
+
 	// "Return from <fn>" picker for a FunctionReturn node's details — lists the
 	// functions declared in the graph (those with a FunctionEntry). Sets the node's
 	// owning function name + mirrors its result pins. Returns true if it changed.

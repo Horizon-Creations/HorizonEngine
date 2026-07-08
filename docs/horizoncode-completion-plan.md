@@ -207,11 +207,14 @@ this is what keeps the interpreter and the compiled build permanently in lockste
 
 1. **Unify + registry** (shared with codegen plan §8.1): **[done]** the central
    `HE::api` + `ApiFn` `registry()` exist (`EngineApi.h/.cpp`), promoted from
-   `ScriptApi` and seeded with the full engine surface + math. **[next]** add the
-   generic **Engine Call** node (`Context::callApi` → registry dispatch) so the
-   HorizonCode interpreter reaches everything; then regenerate the Lua/Python
-   bindings from the registry (today they still call `ScriptApi`, which `HE::api`
-   wraps, so they are transitively on the central layer already).
+   `ScriptApi` and seeded with the full engine surface + math. **[done]** the
+   generic **Engine Call** node (`NodeType::EngineCall`) now routes the HorizonCode
+   interpreter through the registry via a `Context::callApi` seam (bound by the app
+   to an `HE::api::Ctx` over the current world/content); the shared editors offer it
+   in the add-menu grouped by subsystem. So HorizonCode already reaches everything
+   Lua/Python can. **[next]** regenerate the Lua/Python bindings from the registry
+   (today they still call `ScriptApi`, which `HE::api` wraps, so they are
+   transitively on the central layer already).
 2. **High-value gameplay**: Transform, Physics (+ collision events), Spawn/
    Lifecycle, Time/frame, Input, Math/Random. This is what most game logic needs.
 3. **Presentation**: Audio, Camera, Materials/Environment, Scene/level, debug draw.

@@ -3,6 +3,7 @@
 #include <ContentManager/Assets.h>
 #include <ContentManager/HAsset.h>
 #include <HorizonCode/HorizonCode.h>
+#include <HorizonScene/EngineApi.h>
 #include <Types/Enums.h>
 #include <filesystem>
 #include <algorithm>
@@ -261,6 +262,8 @@ std::uint32_t nodeHeaderColor(const HorizonCode::Node& n)
 			return IM_COL32(140, 88, 184, 255);  // functions → purple
 		case T::Branch: case T::Sequence:
 			return IM_COL32(96, 96, 104, 255);   // flow → gray
+		case T::EngineCall:
+			return IM_COL32(56, 132, 132, 255);  // engine API → teal
 		// Reference/object producers carry the Ref (purple) tint.
 		case T::GetSelf: case T::GetGameInstance:
 		case T::CreateObject: case T::DestroyObject:
@@ -333,5 +336,24 @@ bool drawReturnFunctionPicker(HorizonCode::Graph& g, HorizonCode::Node& ret)
 	}
 	ImGui::TextDisabled("Feeds this function's return values.");
 	return changed;
+}
+
+std::string drawEngineApiMenu(const std::string& lowerQuery)
+{
+	auto lower = [](std::string v){ std::transform(v.begin(), v.end(), v.begin(),
+		[](unsigned char c){ return (char)std::tolower(c); }); return v; };
+	std::string picked;
+	const char* header = nullptr; // current category header, drawn lazily
+	for (const HE::api::ApiFn& fn : HE::api::registry())
+	{
+		const bool match = lowerQuery.empty()
+			|| lower(fn.id).find(lowerQuery) != std::string::npos
+			|| lower(fn.category).find(lowerQuery) != std::string::npos;
+		if (!match) continue;
+		if (!header || std::string(header) != fn.category)
+		{ ImGui::TextDisabled("Engine · %s", fn.category); header = fn.category; }
+		if (ImGui::Selectable(fn.id)) picked = fn.id;
+	}
+	return picked;
 }
 }

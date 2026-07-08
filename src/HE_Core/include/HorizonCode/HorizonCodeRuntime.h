@@ -116,6 +116,10 @@ public:
         std::function<void(int)> destroyWidget;
         std::function<uint32_t(const std::string& classPath)> createObject;
         std::function<void(uint32_t)> destroyObject;
+        // Generic engine-API dispatch, forwarded to every instance's Context so any
+        // EngineCall node reaches the HE::api registry. The app binds it to the
+        // current world's registry Ctx (world/physics/content).
+        std::function<std::vector<Value>(const std::string& apiId, const std::vector<Value>& args)> callApi;
     };
     void setServices(Services s) { m_services = std::move(s); }
 

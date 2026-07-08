@@ -24,6 +24,7 @@
 #include <HorizonScene/ScriptContext.h>
 #include <HorizonScene/CollisionSystem.h>
 #include <HorizonScene/ScriptApi.h>
+#include <HorizonScene/EngineApi.h>
 #include <HorizonScene/Components/ScriptComponent.h>
 #include <ContentManager/Assets.h>
 #include <Renderer/RendererFactory.h>
@@ -783,6 +784,16 @@ void EditorApplication::OnInit()
 		svc.destroyObject = [this](uint32_t ref){
 			if (ref != 0 && ref != m_gameInstance.runtime().gameInstance())
 				m_gameInstance.runtime().destroy(ref); // fires "Destruct"
+		};
+		// EngineCall nodes dispatch through the HE::api registry against the editor
+		// world (+ content). Physics is null here (no PIE physics threaded yet) →
+		// physics nodes no-op (null-Ctx tolerance).
+		svc.callApi = [this](const std::string& id, const std::vector<HorizonCode::Value>& args)
+			-> std::vector<HorizonCode::Value> {
+			const HE::api::ApiFn* fn = HE::api::find(id);
+			if (!fn) return {};
+			HE::api::Ctx c{ m_editorWorld.get(), nullptr, &contentManager() };
+			return fn->invoke(c, args);
 		};
 		m_gameInstance.runtime().setServices(std::move(svc));
 	}

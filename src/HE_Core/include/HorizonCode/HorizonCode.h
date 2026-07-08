@@ -86,6 +86,13 @@ enum class NodeType : uint8_t
     // Writes the owning function's return values (s = function name); one data-in
     // per declared result. Terminal in the exec chain (no exec-out).
     FunctionReturn,
+    // Generic engine-API call routed through the HE::api registry (the one node
+    // that exposes every engine subsystem without growing this enum). s = the
+    // registry id (e.g. "transform.setPosition"); params/results mirror the
+    // ApiFn descriptor (so pins resolve without the registry, which lives a layer
+    // up); hasArg carries the descriptor's isExec (true → exec node with cached
+    // side-effect outputs, false → pure data node re-evaluated on demand).
+    EngineCall,
     COUNT
 };
 
@@ -228,6 +235,13 @@ struct Context
     // References resolvable from any graph.
     std::function<Value()> getSelf;         // this instance
     std::function<Value()> getGameInstance; // the app-wide GameInstance (Ref 0 if none)
+
+    // Generic engine-API dispatch: the EngineCall node passes its registry id +
+    // evaluated argument Values and gets back the function's result Values. The
+    // app binds this to the HE::api registry (HE_Scene); empty when unbound or
+    // the id is unknown. This is the seam that keeps the interpreter (HE_Core)
+    // decoupled from the engine surface it drives.
+    std::function<std::vector<Value>(const std::string& apiId, const std::vector<Value>& args)> callApi;
 };
 
 class HE_API Runner
