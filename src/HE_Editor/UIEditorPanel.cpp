@@ -573,6 +573,16 @@ void drawDetails(State& st, AppContext& ctx)
 		                       HE::AssetType::Material, "mat");
 	}
 
+	// Font slot for text-bearing elements (a "FontSize" property marks them).
+	bool hasText = false;
+	for (const UIPropDesc& pd : props) if (pd.name == "FontSize") { hasText = true; break; }
+	if (hasText)
+	{
+		ImGui::SeparatorText("Font");
+		committed |= assetSlot(ctx, "Font", n->font, HE::AssetType::Font, "font");
+		ImGui::TextDisabled("Empty = default UI font.");
+	}
+
 	if (edit) st.dirty = true;
 	if (committed) commitEdit(st, ctx);
 }

@@ -28,6 +28,7 @@ add_library(HorizonImporters STATIC
     src/AssetImporter/SkeletalMeshImporter.cpp
     src/AssetImporter/MaterialImporter.cpp
     src/AssetImporter/AudioImporter.cpp
+    src/AssetImporter/FontImporter.cpp
 )
 set_target_properties(HorizonImporters PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(HorizonImporters
