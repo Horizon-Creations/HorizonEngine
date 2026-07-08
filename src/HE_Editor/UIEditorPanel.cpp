@@ -72,6 +72,8 @@ struct State
 	std::string varNameEditFor;     // which variable varNameEdit currently mirrors
 	std::string gDropVar;           // variable dragged onto the graph
 	bool   gOpenVarDrop = false;     // request to open the variable Get/Set popup next frame
+	std::string gEvtNameEdit;        // scratch buffer for a widget-scope Event name (uniqueness)
+	int    gEvtNameEditFor = 0;
 
 	// Undo/redo: combined snapshots (treeJson + '\x1f' + graphJson).
 	std::vector<std::string> undo;
@@ -1474,21 +1476,36 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 		{
 			// Widget-scope (Any element): free text plus the lifecycle events every
 			// widget fires — Construct (on create), Tick (per frame, dt arg) and
-			// Destruct (on destroy).
-			ImGui::InputText("Event", &n->s);
-			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			// Destruct (on destroy). Unique per element: no two handlers of the same
+			// (event, element), and a lifecycle event can't be added twice.
+			auto used = [&](const std::string& nm) {
+				for (const auto& g : st.graph.nodes)
+					if (g.type == NT::Event && g.id != n->id && g.elem == n->elem && g.s == nm)
+						return true;
+				return false;
+			};
+			if (st.gEvtNameEditFor != n->id) { st.gEvtNameEdit = n->s; st.gEvtNameEditFor = n->id; }
+			ImGui::InputText("Event", &st.gEvtNameEdit);
+			if (ImGui::IsItemDeactivatedAfterEdit())
+			{
+				if (!st.gEvtNameEdit.empty() && used(st.gEvtNameEdit)) st.gEvtNameEdit = n->s; // reject dup
+				else { n->s = st.gEvtNameEdit; committed = true; }
+			}
 			static const char* kLifecycle[] = { "Construct", "Tick", "Destruct" };
 			for (int k = 0; k < 3; ++k)
 			{
 				if (k) ImGui::SameLine();
+				const bool u = used(kLifecycle[k]);
+				if (u) ImGui::BeginDisabled();
 				if (ImGui::SmallButton(kLifecycle[k]))
 				{
-					n->s = kLifecycle[k];
+					n->s = kLifecycle[k]; st.gEvtNameEdit = n->s;
 					n->hasArg = (n->s == "Tick");
 					n->propType = PT::Float;
 					n->elem = 0;
 					committed = true;
 				}
+				if (u) ImGui::EndDisabled();
 			}
 		}
 		ImGui::TextDisabled("Fires when the bound element raises this event.");

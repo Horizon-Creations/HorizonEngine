@@ -367,8 +367,25 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
             int pn = 0, pp2 = 0; bool pin_in = false;
             if (pinAt(mouse, pn, pp2, pin_in) && pn == n.id)
             {
+                st.linkGrab = false;
                 if (ImGui::GetIO().KeyAlt) { if (model.clearPinLinks) { model.clearPinLinks(pn, pp2, pin_in); changed = true; } }
-                else { st.linkSrcNode = pn; st.linkSrcPin = pp2; st.linkSrcInput = pin_in; }
+                else if (pin_in)
+                {
+                    // Grab-and-drag: clicking a CONNECTED input pin detaches its
+                    // link and re-anchors the drag to the source, so you can drop
+                    // it elsewhere to rewire or on empty canvas to delete it.
+                    int srcN = 0, srcP = 0; bool found = false;
+                    for (const auto& l : links)
+                        if (l[2] == pn && l[3] == pp2) { srcN = l[0]; srcP = l[1]; found = true; break; }
+                    if (found)
+                    {
+                        if (model.clearPinLinks) model.clearPinLinks(pn, pp2, true);
+                        st.linkSrcNode = srcN; st.linkSrcPin = srcP; st.linkSrcInput = false;
+                        st.linkGrab = true; changed = true;
+                    }
+                    else { st.linkSrcNode = pn; st.linkSrcPin = pp2; st.linkSrcInput = true; }
+                }
+                else { st.linkSrcNode = pn; st.linkSrcPin = pp2; st.linkSrcInput = false; }
             }
             else
             {
@@ -430,10 +447,11 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
                     if (ok) changed = true;
                 }
             }
-            else if (model.drawPinDragMenu)
+            else if (model.drawPinDragMenu && !st.linkGrab)
             {
                 // Released on empty canvas → offer a filtered "drag off a pin"
-                // menu, which creates a compatible node and connects it.
+                // menu, which creates a compatible node and connects it. Skipped
+                // when this drag detached an existing link (that's a removal).
                 st.dragOffNode  = st.linkSrcNode;
                 st.dragOffPin   = st.linkSrcPin;
                 st.dragOffInput = st.linkSrcInput;
@@ -441,6 +459,7 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
                 ImGui::OpenPopup("##ge_pindrag");
             }
             st.linkSrcNode = 0;
+            st.linkGrab = false;
         }
     }
 
