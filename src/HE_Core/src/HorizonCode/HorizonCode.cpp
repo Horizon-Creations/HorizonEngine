@@ -135,6 +135,7 @@ NodeSig signatureOf(const Node& n)
     case T::ConstString: s.dataOuts = { { "", P::String } }; break;
     case T::ConstVec2:   s.dataOuts = { { "", P::Vec2 } };   break;
     case T::ConstColor:  s.dataOuts = { { "", P::Color } };  break;
+    case T::ConstTransform: s.dataOuts = { { "", P::Transform } }; break;
     case T::Add: case T::Subtract: case T::Multiply: case T::Divide:
         s.dataIns  = { { "A", P::Float }, { "B", P::Float } };
         s.dataOuts = { { "", P::Float } };
@@ -198,6 +199,7 @@ const char* nodeDisplayName(NodeType t)
         case T::ConstString:  return "String";
         case T::ConstVec2:    return "Vec2";
         case T::ConstColor:   return "Color";
+        case T::ConstTransform: return "Transform";
         case T::Add:          return "Add";
         case T::Subtract:     return "Subtract";
         case T::Multiply:     return "Multiply";
@@ -243,7 +245,8 @@ const char* nodeCategory(NodeType t)
         case T::HideWidgetId:
         case T::DestroyWidget: return "UI";
         case T::ConstFloat: case T::ConstBool: case T::ConstInt:
-        case T::ConstString: case T::ConstVec2: case T::ConstColor: return "Literals";
+        case T::ConstString: case T::ConstVec2: case T::ConstColor:
+        case T::ConstTransform: return "Literals";
         case T::Add: case T::Subtract: case T::Multiply: case T::Divide:
         case T::Greater: case T::Less: case T::Equals: return "Math";
         case T::And: case T::Or: case T::Not: return "Logic";
@@ -335,6 +338,7 @@ Value variableDefaultValue(const Variable& v)
         case P::Vec2:   return Value::ofVec2({ v.f[0], v.f[1] });
         case P::Color:  return Value::ofColor({ v.f[0], v.f[1], v.f[2], v.f[3] });
         case P::Ref:    return Value::ofRef(0);
+        case P::Transform: return Value::ofTransform({ 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, 0.0f }, { 1.0f, 1.0f, 1.0f });
         default:        return Value::ofFloat(v.f[0]);
     }
 }
@@ -393,6 +397,9 @@ std::string toJson(const Graph& g)
         if (n.access)            e["access"]   = n.access;
         if (n.f[0] || n.f[1] || n.f[2] || n.f[3])
             e["f"] = { n.f[0], n.f[1], n.f[2], n.f[3] };
+        if (n.type == NodeType::ConstTransform)
+            e["xform"] = { n.tpos.x, n.tpos.y, n.tpos.z, n.trot.x, n.trot.y, n.trot.z,
+                           n.tscl.x, n.tscl.y, n.tscl.z };
         auto dumpParams = [](const std::vector<FuncParam>& ps)
         {
             nlohmann::json a = nlohmann::json::array();
@@ -450,6 +457,12 @@ bool fromJson(const std::string& json, Graph& out)
         n.access   = e.value("access", 0);
         if (const auto& f = e.value("f", nlohmann::json::array()); f.size() >= 4)
             for (int i = 0; i < 4; ++i) n.f[i] = f[i].get<float>();
+        if (const auto& x = e.value("xform", nlohmann::json::array()); x.size() >= 9)
+        {
+            n.tpos = { x[0].get<float>(), x[1].get<float>(), x[2].get<float>() };
+            n.trot = { x[3].get<float>(), x[4].get<float>(), x[5].get<float>() };
+            n.tscl = { x[6].get<float>(), x[7].get<float>(), x[8].get<float>() };
+        }
         auto loadParams = [](const nlohmann::json& a, std::vector<FuncParam>& ps)
         {
             for (const auto& pe : a)
@@ -822,6 +835,7 @@ Value Runner::evalData(const Node& n, int dataOutPin, int depth)
     case T::ConstString: return Value::ofString(n.s);
     case T::ConstVec2:   return Value::ofVec2({ n.f[0], n.f[1] });
     case T::ConstColor:  return Value::ofColor({ n.f[0], n.f[1], n.f[2], n.f[3] });
+    case T::ConstTransform: return Value::ofTransform(n.tpos, n.trot, n.tscl);
     case T::GetProperty:
     {
         Value v = m_ctx.getProperty ? m_ctx.getProperty(n.elem, n.s) : Value{};

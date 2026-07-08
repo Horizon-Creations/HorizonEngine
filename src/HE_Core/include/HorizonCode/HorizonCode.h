@@ -21,8 +21,9 @@
 namespace HorizonCode {
 
 // Ref = a reference/handle to another running script instance (a Runtime
-// InstanceId). Appended last so existing serialized propType ints stay stable.
-enum class PinType : uint8_t { Exec = 0, Float, Bool, Int, String, Vec2, Color, Ref };
+// InstanceId). Transform = a position/rotation(euler)/scale bundle. Appended last
+// so existing serialized propType ints stay stable.
+enum class PinType : uint8_t { Exec = 0, Float, Bool, Int, String, Vec2, Color, Ref, Transform };
 
 struct Value
 {
@@ -34,6 +35,8 @@ struct Value
     glm::vec4   col{ 0.0f, 0.0f, 0.0f, 1.0f };
     std::string s;
     uint32_t    ref = 0;   // instance handle when type == Ref (0 = none)
+    // Transform payload (type == Transform): rotation in euler degrees, identity scale.
+    glm::vec3   tpos{ 0.0f }, trot{ 0.0f }, tscl{ 1.0f };
 
     static Value ofFloat(float v)            { Value r; r.type = PinType::Float;  r.f = v;  return r; }
     static Value ofBool(bool v)              { Value r; r.type = PinType::Bool;   r.b = v;  return r; }
@@ -42,6 +45,8 @@ struct Value
     static Value ofVec2(const glm::vec2& v)  { Value r; r.type = PinType::Vec2;   r.v2 = v; return r; }
     static Value ofColor(const glm::vec4& v) { Value r; r.type = PinType::Color;  r.col = v; return r; }
     static Value ofRef(uint32_t id)          { Value r; r.type = PinType::Ref;    r.ref = id; return r; }
+    static Value ofTransform(const glm::vec3& p, const glm::vec3& r_, const glm::vec3& s_)
+    { Value r; r.type = PinType::Transform; r.tpos = p; r.trot = r_; r.tscl = s_; return r; }
 };
 
 enum class NodeType : uint8_t
@@ -93,6 +98,9 @@ enum class NodeType : uint8_t
     // up); hasArg carries the descriptor's isExec (true → exec node with cached
     // side-effect outputs, false → pure data node re-evaluated on demand).
     EngineCall,
+    // Transform literal: editable position/rotation/scale on its body; one data-out
+    // (Transform). Payload lives in the Node's tpos/trot/tscl.
+    ConstTransform,
     COUNT
 };
 
@@ -132,6 +140,8 @@ struct Node
     bool        hasArg = false;           // Event carries a data arg output
     int         access = 0;               // FunctionEntry: 0 public, 1 private
     float       f[4] = {};                // literal payload
+    // ConstTransform literal payload (rotation in euler degrees, identity scale).
+    glm::vec3   tpos{ 0.0f }, trot{ 0.0f }, tscl{ 1.0f };
     float       x = 0.0f, y = 0.0f;       // editor canvas position
     // Which sub-graph this node lives in: 0 = the main event graph, else the id
     // of the owning FunctionEntry (that function's own body sub-graph). Editor

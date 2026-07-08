@@ -60,10 +60,10 @@ namespace
 	// starting at Float (=1). Returns true when changed.
 	bool pinTypeCombo(const char* id, HorizonCode::PinType& type)
 	{
-		int t = (int)type - 1; // PinType: Exec=0, Float=1, …, Ref=7
+		int t = (int)type - 1; // PinType: Exec=0, Float=1, …, Ref=7, Transform=8
 		if (t < 0) t = 0;
 		ImGui::SetNextItemWidth(78.0f);
-		if (ImGui::Combo(id, &t, "Float\0Bool\0Int\0String\0Vec2\0Color\0Object\0"))
+		if (ImGui::Combo(id, &t, "Float\0Bool\0Int\0String\0Vec2\0Color\0Object\0Transform\0"))
 		{ type = (HorizonCode::PinType)(t + 1); return true; }
 		return false;
 	}
@@ -112,6 +112,7 @@ std::uint32_t pinTypeColor(HorizonCode::PinType t)
 		case P::Vec2:   return IM_COL32(120, 200, 210, 255);
 		case P::Color:  return IM_COL32(230, 210, 110, 255);
 		case P::Ref:    return IM_COL32(180, 140, 240, 255);
+		case P::Transform: return IM_COL32(240, 160, 100, 255);   // orange
 	}
 	return IM_COL32_WHITE;
 }
@@ -141,6 +142,7 @@ namespace
 			case T::ConstString: return P::String;
 			case T::ConstVec2:   return P::Vec2;
 			case T::ConstColor:  return P::Color;
+			case T::ConstTransform: return P::Transform;
 			case T::Add: case T::Subtract: case T::Multiply: case T::Divide: return P::Float;
 			case T::Greater: case T::Less: case T::Equals:
 			case T::And: case T::Or: case T::Not: return P::Bool;
@@ -207,6 +209,7 @@ namespace
 			case P::Float:  return "Float";  case P::Bool:  return "Bool";
 			case P::Int:    return "Int";    case P::String:return "String";
 			case P::Vec2:   return "Vec2";   case P::Color: return "Color";
+			case P::Transform: return "Transform";
 			case P::Ref:    return "Object"; default:       return "Exec";
 		}
 	}
@@ -232,7 +235,7 @@ bool drawTypePicker(const char* label, ContentManager* cm,
 		auto hit = [&](const std::string& s){ return q.empty() || lc(s).find(q) != std::string::npos; };
 
 		ImGui::TextDisabled("Default");
-		const P defs[] = { P::Float, P::Bool, P::Int, P::String, P::Vec2, P::Color };
+		const P defs[] = { P::Float, P::Bool, P::Int, P::String, P::Vec2, P::Color, P::Transform };
 		for (P d : defs)
 			if (hit(valueTypeName(d)) && ImGui::Selectable(valueTypeName(d), type == d && (!className || className->empty())))
 			{ type = d; if (className) className->clear(); changed = true; }
@@ -349,6 +352,7 @@ float literalNodeBodyHeight(const HorizonCode::Node& n)
 		case T::ConstFloat:
 		case T::ConstVec2:   return 24.0f;
 		case T::ConstColor:  return 22.0f;
+		case T::ConstTransform: return 72.0f;   // three rows: position / rotation / scale
 		case T::ConstString:
 		{
 			// Grow with the line count up to a cap; past that the field scrolls.
@@ -409,6 +413,19 @@ bool drawLiteralNodeBody(HorizonCode::Node& n, bool& committed)
 			        ImGuiInputTextFlags_None))
 				changed = true;
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			break;
+		}
+		case T::ConstTransform:
+		{
+			auto row = [&](const char* lbl, glm::vec3& v)
+			{
+				ImGui::SetNextItemWidth(-FLT_MIN);
+				if (ImGui::InputFloat3(lbl, &v.x, "%.3g")) changed = true;
+				committed |= ImGui::IsItemDeactivatedAfterEdit();
+			};
+			row("##pos", n.tpos);   // position
+			row("##rot", n.trot);   // rotation (euler degrees)
+			row("##scl", n.tscl);   // scale
 			break;
 		}
 		default: break;
