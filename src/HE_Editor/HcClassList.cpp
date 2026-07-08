@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <algorithm>
 #include <cctype>
+#include <cfloat>
 #include <cstdio>
 #include <string>
 #include <imgui.h>
@@ -335,6 +336,83 @@ bool drawReturnFunctionPicker(HorizonCode::Graph& g, HorizonCode::Node& ret)
 		ImGui::EndCombo();
 	}
 	ImGui::TextDisabled("Feeds this function's return values.");
+	return changed;
+}
+
+float literalNodeBodyHeight(const HorizonCode::Node& n)
+{
+	using T = HorizonCode::NodeType;
+	switch (n.type)
+	{
+		case T::ConstBool:   return 22.0f;
+		case T::ConstInt:
+		case T::ConstFloat:
+		case T::ConstVec2:   return 24.0f;
+		case T::ConstColor:  return 22.0f;
+		case T::ConstString:
+		{
+			// Grow with the line count up to a cap; past that the field scrolls.
+			int lines = 1;
+			for (char c : n.s) if (c == '\n') ++lines;
+			if (lines > 5) lines = 5;
+			return 8.0f + (float)lines * 17.0f;
+		}
+		default: return 0.0f;
+	}
+}
+
+bool drawLiteralNodeBody(HorizonCode::Node& n, bool& committed)
+{
+	using T = HorizonCode::NodeType;
+	bool changed = false;
+	ImGui::SetNextItemWidth(-FLT_MIN);   // fill the body width
+	switch (n.type)
+	{
+		case T::ConstBool:
+		{
+			bool b = n.f[0] != 0.0f;
+			if (ImGui::Checkbox("##litv", &b)) { n.f[0] = b ? 1.0f : 0.0f; changed = true; committed = true; }
+			break;
+		}
+		case T::ConstInt:
+		{
+			int v = (int)n.f[0];
+			if (ImGui::InputInt("##litv", &v, 0, 0)) { n.f[0] = (float)v; changed = true; }
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			break;
+		}
+		case T::ConstFloat:
+		{
+			float v = n.f[0];
+			if (ImGui::InputFloat("##litv", &v, 0.0f, 0.0f, "%.4g")) { n.f[0] = v; changed = true; }
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			break;
+		}
+		case T::ConstVec2:
+		{
+			float v[2] = { n.f[0], n.f[1] };
+			if (ImGui::InputFloat2("##litv", v, "%.3g")) { n.f[0] = v[0]; n.f[1] = v[1]; changed = true; }
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			break;
+		}
+		case T::ConstColor:
+		{
+			if (ImGui::ColorEdit4("##litv", n.f,
+			        ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_AlphaBar))
+				changed = true;
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			break;
+		}
+		case T::ConstString:
+		{
+			if (ImGui::InputTextMultiline("##litv", &n.s, ImVec2(-FLT_MIN, -FLT_MIN),
+			        ImGuiInputTextFlags_None))
+				changed = true;
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			break;
+		}
+		default: break;
+	}
 	return changed;
 }
 

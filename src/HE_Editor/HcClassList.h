@@ -62,6 +62,17 @@ namespace HcEditorUtil
 	// the level/GI/class graph editor and the widget graph editor.
 	void drawFunctionInterface(HorizonCode::Graph& g, HorizonCode::Node& entry, bool& edited);
 
+	// ── Literal node bodies (inline value editors on the node) ────────────────
+	// Const/literal nodes show their value right on the node body: a checkbox for
+	// Bool, a number field for Int/Float, two fields for Vec2, a swatch for Color,
+	// and a multi-line entry for String that grows with the text up to a cap then
+	// scrolls. Height is in graph units (px at zoom 1); 0 for non-literal nodes so
+	// the node stays compact/body-less.
+	float literalNodeBodyHeight(const HorizonCode::Node& n);
+	// Draws the inline editor into the current body child. Returns true if the value
+	// changed this frame; sets `committed` when the edit finished (undo snapshot).
+	bool  drawLiteralNodeBody(HorizonCode::Node& n, bool& committed);
+
 	// Draws the HE::api engine registry as an add-menu section: entries grouped by
 	// category, filtered by `lowerQuery` (already lowercased; empty = show all).
 	// Returns the picked registry id when a selectable is clicked this frame, else

@@ -628,6 +628,14 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 	m.connect = [&graph](int oN, int oP, int iN, int iP){ return graph.connect(oN, oP, iN, iP); };
 	m.clearPinLinks = [&graph](int node, int pin, bool){ removePinLinks(graph, node, pin); };
 	m.removeNode = [&graph](int id){ graph.removeNode(id); };
+	// Literal nodes edit their value inline on the node body.
+	m.nodeBodyHeight = [&graph](int id){ const HC::Node* n = graph.findNode(id);
+		return n ? HcEditorUtil::literalNodeBodyHeight(*n) : 0.0f; };
+	m.drawNodeBody = [&graph, &edited](int id, ImVec2, ImVec2, float){
+		HC::Node* n = graph.findNode(id); if (!n) return;
+		bool committed = false;
+		HcEditorUtil::drawLiteralNodeBody(*n, committed);
+		if (committed) edited = true; };
 	// Right-click a node → context menu.
 	m.drawNodeContextMenu = [&graph, &edited](int nodeId)
 	{
