@@ -6,6 +6,7 @@
 #include <Diagnostics/Profiler.h>
 #include <Diagnostics/GlobalState.h>
 #include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/UICursorSDL.h>
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/SceneSystems.h>
 #include <HorizonScene/ScriptContext.h>
@@ -327,6 +328,9 @@ void GameApplication::updateUIInput()
 	m_world->widgets().processPointer(static_cast<float>(pw), static_cast<float>(ph),
 	                                  mx * sx, my * sy,
 	                                  (buttons & SDL_BUTTON_LMASK) != 0, pointerValid);
+
+	// Show the cursor the hovered widget element requested (default = arrow).
+	if (pointerValid) HE::applyUICursor(m_world->widgets().hoverCursor());
 
 	std::vector<UIInputSystem::PointerEvent> events;
 	UIInputSystem::update(*m_world, m_uiInput,

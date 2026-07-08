@@ -1051,6 +1051,24 @@ void EditorApplication::OnRender(float dt)
 				m_uiViewportW, m_uiViewportH, m_uiPointerX, m_uiPointerY,
 				m_uiPointerDown, m_uiPointerValid && !m_playMouseCaptured);
 
+			// Reflect the hovered element's cursor in the PIE viewport. ImGui owns
+			// the cursor in the editor, so route through ImGui::SetMouseCursor.
+			if (m_uiPointerValid && !m_playMouseCaptured)
+			{
+				ImGuiMouseCursor mc = ImGuiMouseCursor_Arrow;
+				switch (m_editorWorld->widgets().hoverCursor())
+				{
+					case HE::UICursor::Hand:      mc = ImGuiMouseCursor_Hand;      break;
+					case HE::UICursor::Text:      mc = ImGuiMouseCursor_TextInput; break;
+					case HE::UICursor::ResizeWE:  mc = ImGuiMouseCursor_ResizeEW;  break;
+					case HE::UICursor::ResizeNS:  mc = ImGuiMouseCursor_ResizeNS;  break;
+					case HE::UICursor::Move:      mc = ImGuiMouseCursor_ResizeAll; break;
+					case HE::UICursor::No:        mc = ImGuiMouseCursor_NotAllowed;break;
+					default:                      mc = ImGuiMouseCursor_Arrow;     break;
+				}
+				ImGui::SetMouseCursor(mc);
+			}
+
 			std::vector<UIInputSystem::PointerEvent> uiEvents;
 			UIInputSystem::update(*m_editorWorld, m_uiInputState,
 			                      m_uiViewportW, m_uiViewportH,

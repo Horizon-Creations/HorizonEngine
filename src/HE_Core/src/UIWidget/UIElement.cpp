@@ -46,6 +46,24 @@ UIWidgetType uiWidgetTypeFromName(const std::string& s)
     return UIWidgetType::Panel;
 }
 
+const char* uiCursorName(UICursor c)
+{
+    switch (c)
+    {
+        case UICursor::Default:   return "Default";
+        case UICursor::Arrow:     return "Arrow";
+        case UICursor::Hand:      return "Hand";
+        case UICursor::Text:      return "Text";
+        case UICursor::Crosshair: return "Crosshair";
+        case UICursor::ResizeWE:  return "Resize ⇔";
+        case UICursor::ResizeNS:  return "Resize ⇕";
+        case UICursor::Move:      return "Move";
+        case UICursor::No:        return "No";
+        case UICursor::Wait:      return "Wait";
+        default:                  return "Default";
+    }
+}
+
 // ── Render helpers ───────────────────────────────────────────────────────────
 
 namespace

@@ -585,6 +585,19 @@ void drawDetails(State& st, AppContext& ctx)
 		ImGui::TextDisabled("Empty = default UI font.");
 	}
 
+	// Pointer interaction: hit-testability + the cursor shown on hover.
+	ImGui::SeparatorText("Interaction");
+	if (ImGui::Checkbox("Hit-testable", &n->hitTestable)) committed = true;
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Off = transparent to the mouse (pointer passes through).");
+	if (ImGui::BeginCombo("Hover cursor", HE::uiCursorName(n->hoverCursor)))
+	{
+		for (int c = 0; c < (int)HE::UICursor::COUNT; ++c)
+			if (ImGui::Selectable(HE::uiCursorName((HE::UICursor)c), (int)n->hoverCursor == c))
+			{ n->hoverCursor = (HE::UICursor)c; committed = true; }
+		ImGui::EndCombo();
+	}
+
 	if (edit) st.dirty = true;
 	if (committed) commitEdit(st, ctx);
 }

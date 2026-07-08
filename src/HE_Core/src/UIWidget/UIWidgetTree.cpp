@@ -130,6 +130,9 @@ std::string uiWidgetTreeToJson(const UIWidgetTree& tree)
         };
         if (!e->material.empty()) o["material"] = e->material;
         if (!e->font.empty())     o["font"]     = e->font;
+        if (!e->hitTestable)      o["hitTestable"] = false;
+        if (e->hoverCursor != HE::UICursor::Default)
+            o["hoverCursor"] = static_cast<int>(e->hoverCursor);
         e->writeJson(o); // type-specific fields
         je.push_back(std::move(o));
     }
@@ -165,6 +168,9 @@ bool uiWidgetTreeFromJson(const std::string& json, UIWidgetTree& out)
         e->visible  = o.value("visible", true);
         e->material = o.value("material", std::string());
         e->font     = o.value("font", std::string());
+        e->hitTestable = o.value("hitTestable", true);
+        e->hoverCursor = static_cast<HE::UICursor>(
+            o.value("hoverCursor", static_cast<int>(HE::UICursor::Default)));
         e->readJson(o); // type-specific fields
 
         if (e->id >= t.nextId) t.nextId = e->id + 1;
