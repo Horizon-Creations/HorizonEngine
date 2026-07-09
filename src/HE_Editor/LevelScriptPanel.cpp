@@ -501,6 +501,12 @@ void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events,
 	case NT::ArrayLength:
 	case NT::ArrayGet:
 	case NT::ArrayAdd:
+	case NT::ArraySet:
+	case NT::ArrayInsert:
+	case NT::ArrayRemove:
+	case NT::ArrayContains:
+	case NT::ArrayIndexOf:
+	case NT::ForEach:
 	{
 		// Element type — object classes allowed too (the class path rides in s,
 		// which array-op nodes don't use otherwise).

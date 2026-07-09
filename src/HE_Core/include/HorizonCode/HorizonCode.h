@@ -109,6 +109,13 @@ enum class NodeType : uint8_t
     // isArray in signatureOf. Make → empty array; Length → element count; Get →
     // element at index; Add → a copy of the array with a value appended.
     ArrayMake, ArrayLength, ArrayGet, ArrayAdd,
+    // More pure array ops (all copy semantics, like Add): Set/Insert/Remove by
+    // index; Contains/IndexOf search by value (element-type comparison).
+    ArraySet, ArrayInsert, ArrayRemove, ArrayContains, ArrayIndexOf,
+    // Loop over an array: exec-outs Body (once per element, with Element + Index
+    // data-outs) then Done. The one sanctioned way to reach members of an
+    // object array's elements — the element pin is a scalar Ref.
+    ForEach,
     COUNT
 };
 

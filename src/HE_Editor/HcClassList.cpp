@@ -147,8 +147,10 @@ namespace
 			case T::Greater: case T::Less: case T::Equals:
 			case T::And: case T::Or: case T::Not: return P::Bool;
 			case T::Concat: case T::ToString: return P::String;
-			case T::ArrayMake: case T::ArrayGet: case T::ArrayAdd: return n.propType;
-			case T::ArrayLength: return P::Int;
+			case T::ArrayMake: case T::ArrayGet: case T::ArrayAdd:
+			case T::ArraySet: case T::ArrayInsert: case T::ArrayRemove: return n.propType;
+			case T::ArrayLength: case T::ArrayIndexOf: return P::Int;
+			case T::ArrayContains: return P::Bool;
 			default: return P::Ref;
 		}
 	}
@@ -266,7 +268,7 @@ std::uint32_t nodeHeaderColor(const HorizonCode::Node& n)
 		case T::FunctionEntry: case T::FunctionCall: case T::FunctionReturn:
 		case T::CallExternal:
 			return IM_COL32(140, 88, 184, 255);  // functions → purple
-		case T::Branch: case T::Sequence:
+		case T::Branch: case T::Sequence: case T::ForEach:
 			return IM_COL32(96, 96, 104, 255);   // flow → gray
 		case T::EngineCall:
 			return IM_COL32(56, 132, 132, 255);  // engine API → teal

@@ -151,6 +151,32 @@ NodeSig signatureOf(const Node& n)
         s.dataIns  = { { "Array", n.propType, true }, { "Value", n.propType } };
         s.dataOuts = { { "Array", n.propType, true } };
         break;
+    case T::ArraySet:
+        s.dataIns  = { { "Array", n.propType, true }, { "Index", P::Int }, { "Value", n.propType } };
+        s.dataOuts = { { "Array", n.propType, true } };
+        break;
+    case T::ArrayInsert:
+        s.dataIns  = { { "Array", n.propType, true }, { "Index", P::Int }, { "Value", n.propType } };
+        s.dataOuts = { { "Array", n.propType, true } };
+        break;
+    case T::ArrayRemove:
+        s.dataIns  = { { "Array", n.propType, true }, { "Index", P::Int } };
+        s.dataOuts = { { "Array", n.propType, true } };
+        break;
+    case T::ArrayContains:
+        s.dataIns  = { { "Array", n.propType, true }, { "Value", n.propType } };
+        s.dataOuts = { { "Contains", P::Bool } };
+        break;
+    case T::ArrayIndexOf:
+        s.dataIns  = { { "Array", n.propType, true }, { "Value", n.propType } };
+        s.dataOuts = { { "Index", P::Int } };
+        break;
+    case T::ForEach:
+        s.execIns  = { { "", P::Exec } };
+        s.execOuts = { { "Body", P::Exec }, { "Done", P::Exec } };
+        s.dataIns  = { { "Array", n.propType, true } };
+        s.dataOuts = { { "Element", n.propType }, { "Index", P::Int } };
+        break;
     case T::Add: case T::Subtract: case T::Multiply: case T::Divide:
         s.dataIns  = { { "A", P::Float }, { "B", P::Float } };
         s.dataOuts = { { "", P::Float } };
@@ -218,7 +244,13 @@ const char* nodeDisplayName(NodeType t)
         case T::ArrayMake:    return "Make Array";
         case T::ArrayLength:  return "Array Length";
         case T::ArrayGet:     return "Array Get";
-        case T::ArrayAdd:     return "Array Add";
+        case T::ArrayAdd:     return "Array Append";
+        case T::ArraySet:     return "Array Set";
+        case T::ArrayInsert:  return "Array Insert";
+        case T::ArrayRemove:  return "Array Remove";
+        case T::ArrayContains:return "Array Contains";
+        case T::ArrayIndexOf: return "Array Index Of";
+        case T::ForEach:      return "For Each";
         case T::Add:          return "Add";
         case T::Subtract:     return "Subtract";
         case T::Multiply:     return "Multiply";
@@ -281,7 +313,9 @@ const char* nodeCategory(NodeType t)
         case T::SetExternal:    return "Reference";
         case T::Print: return "Debug";
         case T::EngineCall: return "Engine";
-        case T::ArrayMake: case T::ArrayLength: case T::ArrayGet: case T::ArrayAdd: return "Array";
+        case T::ArrayMake: case T::ArrayLength: case T::ArrayGet: case T::ArrayAdd:
+        case T::ArraySet: case T::ArrayInsert: case T::ArrayRemove:
+        case T::ArrayContains: case T::ArrayIndexOf: case T::ForEach: return "Array";
         default: return "Misc";
     }
 }
@@ -482,6 +516,8 @@ bool fromJson(const std::string& json, Graph& out)
         bool known = false;
         for (NodeType t : nodeRegistry())
             if (typeName == nodeDisplayName(t)) { n.type = t; known = true; break; }
+        // Legacy display names (nodes serialize by name → renames need aliases).
+        if (!known && typeName == "Array Add") { n.type = NodeType::ArrayAdd; known = true; }
         if (!known) continue;
         if (const auto& p = e.value("pos", nlohmann::json::array()); p.size() >= 2)
         { n.x = p[0].get<float>(); n.y = p[1].get<float>(); }
@@ -640,6 +676,23 @@ namespace
 constexpr int kMaxSteps = 4096;
 constexpr int kMaxDepth = 64;
 
+// Element-type equality for Contains / IndexOf (scalar values only).
+bool valueEquals(const Value& a, const Value& b, PinType t)
+{
+    switch (t)
+    {
+        case P::Float:  return a.f == b.f;
+        case P::Bool:   return a.b == b.b;
+        case P::Int:    return a.i == b.i;
+        case P::String: return a.s == b.s;
+        case P::Vec2:   return a.v2 == b.v2;
+        case P::Color:  return a.col == b.col;
+        case P::Ref:    return a.ref == b.ref;
+        case P::Transform: return a.tpos == b.tpos && a.trot == b.trot && a.tscl == b.tscl;
+        default:        return false;
+    }
+}
+
 Value coerce(Value v, PinType want)
 {
     if (v.isArray) return v;   // arrays are never scalar-coerced (pass through whole)
@@ -727,7 +780,8 @@ void Runner::runExecChain(const Node& from, int execOutPin, int depth)
         const Node* n = m_graph.findNode(l->dstNode);
         if (!n) return;
         execNode(*n, depth);
-        if (n->type == T::Branch || n->type == T::Sequence) return; // they steer internally
+        if (n->type == T::Branch || n->type == T::Sequence || n->type == T::ForEach)
+            return; // they steer their own exec-outs internally
         l = execLinkFrom(n->id, pinRanges(*n).execOut0);
     }
 }
@@ -844,6 +898,21 @@ void Runner::execNode(const Node& n, int depth)
             m_execOutputs[n.id] = m_ctx.callApi(n.s, args);
         }
         break;
+    case T::ForEach:
+    {
+        // Evaluate the array once, then run the Body chain per element with the
+        // current Element + Index cached as this node's data outputs (read back
+        // by evalData, like a call's results). Done fires after the last element.
+        const Value arr = evalInput(n, 0, depth + 1);
+        const PinRanges r = pinRanges(n);
+        for (size_t i = 0; i < arr.items.size(); ++i)
+        {
+            m_execOutputs[n.id] = { arr.items[i], Value::ofInt((int)i) };
+            runExecChain(n, r.execOut0 + 0, depth + 1);   // Body
+        }
+        runExecChain(n, r.execOut0 + 1, depth + 1);        // Done
+        break;
+    }
     case T::Print:
         Logger::Log(Logger::LogLevel::Info,
             ("[Widget] " + coerce(evalInput(n, 0, depth + 1), P::String).s).c_str());
@@ -900,6 +969,50 @@ Value Runner::evalData(const Node& n, int dataOutPin, int depth)
         arr.items.push_back(coerce(evalInput(n, 1, depth + 1), n.propType));
         return arr;
     }
+    case T::ArraySet:
+    {
+        Value arr = evalInput(n, 0, depth + 1);
+        arr.isArray = true; arr.type = n.propType;
+        const int idx = evalInput(n, 1, depth + 1).i;
+        if (idx >= 0 && idx < (int)arr.items.size())
+            arr.items[idx] = coerce(evalInput(n, 2, depth + 1), n.propType);
+        return arr;                                       // out of range → unchanged copy
+    }
+    case T::ArrayInsert:
+    {
+        Value arr = evalInput(n, 0, depth + 1);
+        arr.isArray = true; arr.type = n.propType;
+        int idx = evalInput(n, 1, depth + 1).i;
+        if (idx < 0) idx = 0;
+        if (idx > (int)arr.items.size()) idx = (int)arr.items.size();  // clamp → append
+        arr.items.insert(arr.items.begin() + idx, coerce(evalInput(n, 2, depth + 1), n.propType));
+        return arr;
+    }
+    case T::ArrayRemove:
+    {
+        Value arr = evalInput(n, 0, depth + 1);
+        arr.isArray = true; arr.type = n.propType;
+        const int idx = evalInput(n, 1, depth + 1).i;
+        if (idx >= 0 && idx < (int)arr.items.size())
+            arr.items.erase(arr.items.begin() + idx);
+        return arr;                                       // out of range → unchanged copy
+    }
+    case T::ArrayContains:
+    {
+        const Value arr = evalInput(n, 0, depth + 1);
+        const Value key = coerce(evalInput(n, 1, depth + 1), n.propType);
+        for (const Value& v : arr.items)
+            if (valueEquals(v, key, n.propType)) return Value::ofBool(true);
+        return Value::ofBool(false);
+    }
+    case T::ArrayIndexOf:
+    {
+        const Value arr = evalInput(n, 0, depth + 1);
+        const Value key = coerce(evalInput(n, 1, depth + 1), n.propType);
+        for (size_t i = 0; i < arr.items.size(); ++i)
+            if (valueEquals(arr.items[i], key, n.propType)) return Value::ofInt((int)i);
+        return Value::ofInt(-1);                           // not found
+    }
     case T::GetProperty:
     {
         Value v = m_ctx.getProperty ? m_ctx.getProperty(n.elem, n.s) : Value{};
@@ -936,6 +1049,7 @@ Value Runner::evalData(const Node& n, int dataOutPin, int depth)
     }
     case T::FunctionCall:
     case T::CallExternal:
+    case T::ForEach: // Element + Index of the current iteration (cached per pass)
     {
         // A (local or cross-instance) call's return value: read the cached results.
         auto it = m_execOutputs.find(n.id);
