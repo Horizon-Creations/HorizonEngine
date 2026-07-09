@@ -169,6 +169,7 @@ static bool   s_exportModSupport  = false;
 static std::string s_exportExcludes;               // one glob pattern per line
 static bool   s_exportIncremental = true;
 static bool   s_exportAppBundle   = false;         // macOS .app bundle
+static bool   s_exportCompileHC   = false;         // compile HorizonCode → C++ (not implemented yet)
 static std::string s_exportPlatform = "Host";      // exportPlatformName() value
 static uint32_t s_exportShaderBackends = (1u << 4) | (1u << 0); // Metal|OpenGL bitmask of 1u<<RendererBackend
 
@@ -318,6 +319,7 @@ static void exportProfileToDialog(const ExportProfile& p, const std::filesystem:
 	s_exportStartupScene = p.startupScene;
 	s_exportIncremental  = p.incremental;
 	s_exportAppBundle    = p.appBundle;
+	s_exportCompileHC    = p.compileHorizonCode;
 	// Canonicalize via the enum round-trip: a hand-edited value like "windows"
 	// falls back to Host — showing "Host" in the combo makes that fallback
 	// visible BEFORE exporting host binaries somewhere unexpected.
@@ -340,6 +342,7 @@ static void exportDialogToProfile(ExportProfile& p)
 	p.targetPlatform   = s_exportPlatform;
 	p.appBundle        = s_exportAppBundle;
 	p.shaderBackends   = s_exportShaderBackends;
+	p.compileHorizonCode = s_exportCompileHC;
 }
 
 // Active manipulation tool, shared by the viewport toolbar buttons and the
@@ -1909,6 +1912,17 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                                   "directory instead of re-compressing them (via a .manifest sidecar).\n"
                                   "Falls back to a full pack automatically when settings changed.");
 
+            ImGui::Checkbox("Compile HorizonCode",   &s_exportCompileHC);
+            ImGui::SameLine();
+            ImGui::TextDisabled("(?)");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Translate HorizonCode graphs to native C++ in the packaged build.\n"
+                                  "NOT IMPLEMENTED YET — with this off (or until codegen ships) the\n"
+                                  "game bundles the HorizonCode interpreter and runs the graph assets\n"
+                                  "interpreted, exactly like in the editor.");
+            if (s_exportCompileHC)
+                ImGui::TextDisabled("Codegen is not implemented yet; this export still ships the interpreter.");
+
             if (exportAppBundleApplicable(s_exportPlatform))
             {
                 ImGui::Checkbox("macOS .app bundle", &s_exportAppBundle);
@@ -2001,6 +2015,14 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
             if (!canExport) ImGui::BeginDisabled();
             if (ImGui::Button("Export", ImVec2(110, 0)))
             {
+                // HorizonCode→C++ codegen is a planned feature (docs/horizoncode-
+                // cpp-codegen-plan.md); the profile toggle is honored loudly, not
+                // silently: the export proceeds interpreter-based either way.
+                if (s_exportCompileHC)
+                    Logger::Log(Logger::LogLevel::Warning,
+                        "Export: 'Compile HorizonCode' is enabled but codegen is not "
+                        "implemented yet — shipping the interpreter + HorizonCode assets.");
+
                 // Resolve the startup scene: the profile's project-relative choice,
                 // or the scene currently open in the editor.
                 std::string scenePath = ctx.currentScenePath;
@@ -2644,10 +2666,26 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
             ImGuiTabBarFlags_FittingPolicyScroll |
             ImGuiTabBarFlags_NoCloseWithMiddleMouseButton))
         {
+            // Closing a tab drops its cached editor state (text buffers, graphs,
+            // preview textures) so per-session cost stays flat no matter how many
+            // tabs were opened. Dirty states are kept: reopening the tab restores
+            // the unsaved edits instead of silently discarding them.
+            auto forgetTabState = [](const AppContext::EditorTab& t){
+                if (t.assetPath.empty()) return;
+                if (ScriptEditorPanel::isDirty(t.assetPath)   ||
+                    MaterialEditorPanel::isDirty(t.assetPath) ||
+                    UIEditorPanel::isDirty(t.assetPath)       ||
+                    HorizonCodeClassPanel::isDirty(t.assetPath)) return;
+                ScriptEditorPanel::forget(t.assetPath);
+                MaterialEditorPanel::forget(t.assetPath);
+                UIEditorPanel::forget(t.assetPath);
+                HorizonCodeClassPanel::forget(t.assetPath);
+            };
+
             for (int i = 0; i < static_cast<int>(s_tabs.size()); )
             {
                 auto& tab = s_tabs[i];
-                if (!tab.open) { s_tabs.erase(s_tabs.begin() + i); continue; }
+                if (!tab.open) { forgetTabState(tab); s_tabs.erase(s_tabs.begin() + i); continue; }
 
                 ImGuiTabItemFlags flags = ImGuiTabItemFlags_None;
                 // Force-select only on an explicit one-shot request (double-click). Using
@@ -2674,7 +2712,9 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                 if (tab.closable) tab.open = pOpen;
                 ++i;
             }
-            // Remove closed tabs
+            // Remove closed tabs (dropping their cached editor state)
+            for (const auto& t : s_tabs)
+                if (t.closable && !t.open) forgetTabState(t);
             s_tabs.erase(
                 std::remove_if(s_tabs.begin(), s_tabs.end(),
                     [](const AppContext::EditorTab& t){ return t.closable && !t.open; }),

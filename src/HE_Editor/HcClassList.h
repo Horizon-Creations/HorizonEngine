@@ -5,7 +5,9 @@
 #include <vector>
 
 class ContentManager;
-namespace HorizonCode { enum class PinType : std::uint8_t; struct Graph; struct Node; }
+namespace HorizonCode { enum class PinType : std::uint8_t; enum class NodeType : std::uint8_t;
+                        struct Graph; struct Node; }
+namespace HE::api { struct ApiFn; }
 
 // Small editor helper: enumerate the project's assets of a given type (for the
 // asset/object picker dropdowns — HorizonCode classes, widgets, textures, …).
@@ -79,6 +81,20 @@ namespace HcEditorUtil
 	// "". The caller resolves it via HE::api::find and builds an EngineCall node
 	// (copying the descriptor's isExec → hasArg and params/results onto the node).
 	std::string drawEngineApiMenu(const std::string& lowerQuery);
+	// Readable title for an EngineCall node ("Sine" for math.sin) — the registry's
+	// displayName, falling back to the raw id.
+	std::string engineCallTitle(const std::string& apiId);
+
+	// ── Drag-off compatibility ────────────────────────────────────────────────
+	// First unified pin index on a FRESH node of `t` (propType seeded with the
+	// dragged type) that accepts the dragged pin, or -1. srcIsInput = the drag
+	// started on an input pin (so the new node must OUTPUT into it); srcIsExec =
+	// the dragged pin is an exec pin (data type is ignored then).
+	int dragMatchPin(HorizonCode::NodeType t, HorizonCode::PinType dragType,
+	                 bool dragArray, bool srcIsInput, bool srcIsExec);
+	// Same for an HE::api registry entry (an EngineCall node built from it).
+	int dragMatchApiPin(const HE::api::ApiFn& fn, HorizonCode::PinType dragType,
+	                    bool dragArray, bool srcIsInput, bool srcIsExec);
 
 	// "Return from <fn>" picker for a FunctionReturn node's details — lists the
 	// functions declared in the graph (those with a FunctionEntry). Sets the node's

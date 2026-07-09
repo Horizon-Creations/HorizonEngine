@@ -108,7 +108,7 @@ std::string nodeTitle(const HC::Node& n)
 		case NT::CallExternal: return n.s.empty() ? std::string("Call (Ref)") : ("Call " + n.s);
 		case NT::GetExternal:  return n.s.empty() ? std::string("Get (Ref)")  : ("Get " + n.s);
 		case NT::SetExternal:  return n.s.empty() ? std::string("Set (Ref)")  : ("Set " + n.s);
-		case NT::EngineCall:   return n.s.empty() ? std::string("Engine Call") : n.s;
+		case NT::EngineCall:   return HcEditorUtil::engineCallTitle(n.s);
 		default:               return base;
 	}
 }
@@ -636,6 +636,7 @@ const HC::Graph* resolveClassGraph(const HC::Node& srcNode, const HC::Graph& sel
 		case NT::CreateWidget:
 			return loadClassGraph(content, srcNode.s, scratch) ? &scratch : nullptr;
 		case NT::GetVariable:
+		case NT::SetVariable: // the set node passes the value through as its output
 		{
 			const HC::Variable* v = selfGraph.findVariable(srcNode.s);
 			if (v && v->type == PT::Ref && !v->className.empty())
@@ -679,13 +680,19 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 		bool committed = false;
 		HcEditorUtil::drawLiteralNodeBody(*n, committed);
 		if (committed) edited = true; };
-	// Right-click a node → context menu.
+	// Right-click a node → context menu. When the clicked node is part of a
+	// multi-selection, Delete removes the whole selection.
 	m.drawNodeContextMenu = [&graph, &edited](int nodeId)
 	{
-		if (ImGui::MenuItem("Delete Node"))
+		const bool inSel = std::find(g.ge.selection.begin(), g.ge.selection.end(), nodeId)
+			!= g.ge.selection.end();
+		const bool multi = inSel && g.ge.selection.size() > 1;
+		if (ImGui::MenuItem(multi ? "Delete Selection" : "Delete Node"))
 		{
-			graph.removeNode(nodeId);
-			if (g.selectedNode == nodeId) g.selectedNode = 0;
+			const std::vector<int> doomed = multi ? g.ge.selection : std::vector<int>{ nodeId };
+			for (int id : doomed) graph.removeNode(id);
+			g.ge.selection.clear();
+			g.selectedNode = 0;
 			edited = true;
 		}
 	};
@@ -840,16 +847,44 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 		g.openVarDrop = true;
 	};
 
-	// Drag a wire off a pin → context-aware menu. For a Ref (object) output whose
-	// class is known, surface that class's public functions + variables; each
-	// entry creates the matching node and connects the object to its Target.
+	// Drag a wire off ANY pin → a filtered menu of everything that can take it.
+	// Ref outputs lead with the target class's public members; exec pins list
+	// every exec-capable node; data pins list nodes with a matching input (or
+	// output, when dragging backwards off an input). The pick is auto-wired.
 	m.drawPinDragMenu = [&graph, content, giGraph](int srcNode, int srcPin, bool srcInput, ImVec2 pos) -> int {
 		HC::Node* sn = graph.findNode(srcNode);
 		if (!sn) return 0;
 		int created = 0;
-		ImGui::BeginChild("##pindrag", ImVec2(240.0f, 300.0f));
 
-		if (!srcInput && pinTypeOf(*sn, srcPin) == PT::Ref)
+		// Classify the dragged pin (exec vs data; data type + array-ness).
+		const HC::NodeSig sig = HC::signatureOf(*sn);
+		const PinRanges rr = pinRanges(*sn);
+		const bool isExecPin = srcPin < rr.dataIn0;
+		PT dragType = PT::Float; bool dragArray = false;
+		if (!isExecPin)
+		{
+			if (srcPin >= rr.dataOut0 && srcPin - rr.dataOut0 < (int)sig.dataOuts.size())
+			{ const auto& pd = sig.dataOuts[srcPin - rr.dataOut0]; dragType = pd.type; dragArray = pd.isArray; }
+			else if (srcPin - rr.dataIn0 < (int)sig.dataIns.size())
+			{ const auto& pd = sig.dataIns[srcPin - rr.dataIn0];  dragType = pd.type; dragArray = pd.isArray; }
+		}
+
+		static std::string s_dragSearch;
+		if (ImGui::IsWindowAppearing()) { s_dragSearch.clear(); ImGui::SetKeyboardFocusHere(); }
+		ImGui::SetNextItemWidth(232.0f);
+		ImGui::InputTextWithHint("##dragSearch", "Search…", &s_dragSearch);
+		const std::string q = lower(s_dragSearch);
+		auto matches = [&](const std::string& name){ return q.empty() || lower(name).find(q) != std::string::npos; };
+
+		ImGui::BeginChild("##pindrag", ImVec2(240.0f, 320.0f));
+
+		// Wire the new node to the dragged pin (direction depends on the drag side).
+		auto wireAt = [&](int newId, int pin){
+			if (srcInput) graph.connect(newId, pin, srcNode, srcPin);
+			else          graph.connect(srcNode, srcPin, newId, pin); };
+
+		// ── Ref output: the target class's public members lead ────────────────
+		if (!isExecPin && !srcInput && dragType == PT::Ref && !dragArray)
 		{
 			auto wire = [&](int newId){
 				HC::Node* nn = graph.findNode(newId);
@@ -861,7 +896,8 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 			{
 				bool fh = false;
 				for (const auto& fn : cls->nodes)
-					if (fn.type == NT::FunctionEntry && fn.access == 0 && !fn.s.empty())
+					if (fn.type == NT::FunctionEntry && fn.access == 0 && !fn.s.empty() &&
+					    matches("Call " + fn.s))
 					{
 						if (!fh) { ImGui::TextDisabled("Functions"); fh = true; }
 						if (ImGui::Selectable(("Call " + fn.s).c_str()))
@@ -876,10 +912,11 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 				for (const auto& var : cls->variables)
 					if (var.access == 0)
 					{
-						if (!vh) { ImGui::TextDisabled("Variables"); vh = true; }
-						if (ImGui::Selectable(("Get " + var.name).c_str()))
+						if (!vh && (matches("Get " + var.name) || matches("Set " + var.name)))
+						{ ImGui::TextDisabled("Variables"); vh = true; }
+						if (matches("Get " + var.name) && ImGui::Selectable(("Get " + var.name).c_str()))
 						{ const int id = addNode(graph, NT::GetExternal, pos); HC::Node* nn = graph.findNode(id); nn->s = var.name; nn->propType = var.type; wire(id); created = id; ImGui::CloseCurrentPopup(); }
-						if (ImGui::Selectable(("Set " + var.name).c_str()))
+						if (matches("Set " + var.name) && ImGui::Selectable(("Set " + var.name).c_str()))
 						{ const int id = addNode(graph, NT::SetExternal, pos); HC::Node* nn = graph.findNode(id); nn->s = var.name; nn->propType = var.type; wire(id); created = id; ImGui::CloseCurrentPopup(); }
 					}
 				if (fh || vh) ImGui::Separator();
@@ -887,13 +924,113 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 			else ImGui::TextDisabled("(untyped object)");
 
 			ImGui::TextDisabled("Reference");
-			if (ImGui::Selectable("Call Function (Ref)")) { const int id = addNode(graph, NT::CallExternal, pos); wire(id); created = id; ImGui::CloseCurrentPopup(); }
-			if (ImGui::Selectable("Bind Event"))          { const int id = addNode(graph, NT::BindEvent, pos);    wire(id); created = id; ImGui::CloseCurrentPopup(); }
-			if (ImGui::Selectable("Get (Ref)"))           { const int id = addNode(graph, NT::GetExternal, pos);  wire(id); created = id; ImGui::CloseCurrentPopup(); }
-			if (ImGui::Selectable("Set (Ref)"))           { const int id = addNode(graph, NT::SetExternal, pos);  wire(id); created = id; ImGui::CloseCurrentPopup(); }
-			if (ImGui::Selectable("Destroy Object"))      { const int id = addNode(graph, NT::DestroyObject, pos); wire(id); created = id; ImGui::CloseCurrentPopup(); }
+			auto refItem = [&](const char* lbl, NT t){
+				if (matches(lbl) && ImGui::Selectable(lbl))
+				{ const int id = addNode(graph, t, pos); wire(id); created = id; ImGui::CloseCurrentPopup(); } };
+			refItem("Call Function (Ref)", NT::CallExternal);
+			refItem("Bind Event",          NT::BindEvent);
+			refItem("Get (Ref)",           NT::GetExternal);
+			refItem("Set (Ref)",           NT::SetExternal);
+			refItem("Destroy Object",      NT::DestroyObject);
+			ImGui::Separator();
 		}
-		else ImGui::TextDisabled("Release on a pin to connect,\nor here to cancel.");
+
+		// ── Generic nodes with a compatible pin ────────────────────────────────
+		{
+			bool gh = false;
+			for (NT t : HC::nodeRegistry())
+			{
+				if (t == NT::Event || t == NT::FunctionEntry || t == NT::FunctionCall ||
+				    t == NT::FunctionReturn || t == NT::GetVariable || t == NT::SetVariable ||
+				    t == NT::GetProperty || t == NT::SetProperty || t == NT::EngineCall ||
+				    t == NT::CallExternal || t == NT::GetExternal || t == NT::SetExternal ||
+				    t == NT::BindEvent || t == NT::ShowWidget || t == NT::HideWidget) continue;
+				const int pin = HcEditorUtil::dragMatchPin(t, dragType, dragArray, srcInput, isExecPin);
+				if (pin < 0 || !matches(HC::nodeDisplayName(t))) continue;
+				if (!gh) { ImGui::TextDisabled("Nodes"); gh = true; }
+				if (ImGui::Selectable(HC::nodeDisplayName(t)))
+				{
+					const int id = addNode(graph, t, pos);
+					HC::Node* nn = graph.findNode(id);
+					if (!isExecPin) nn->propType = dragType; // keep the matched signature
+					wireAt(id, pin); created = id; ImGui::CloseCurrentPopup();
+				}
+			}
+			if (gh) ImGui::Spacing();
+		}
+
+		// ── Engine API calls with a compatible pin ─────────────────────────────
+		{
+			bool eh = false;
+			for (const HE::api::ApiFn& fn : HE::api::registry())
+			{
+				const int pin = HcEditorUtil::dragMatchApiPin(fn, dragType, dragArray, srcInput, isExecPin);
+				const char* shown = fn.displayName ? fn.displayName : fn.id;
+				if (pin < 0 || !matches(shown)) continue;
+				if (!eh) { ImGui::TextDisabled("Engine"); eh = true; }
+				if (ImGui::Selectable((std::string(shown) + "##" + fn.id).c_str()))
+				{
+					const int id = addNode(graph, NT::EngineCall, pos);
+					HC::Node* nn = graph.findNode(id);
+					nn->s = fn.id; nn->hasArg = fn.isExec;
+					nn->params.clear(); nn->results.clear();
+					for (const auto& p : fn.params)  nn->params.push_back({ p.name, p.type });
+					for (const auto& r : fn.results) nn->results.push_back({ r.name, r.type });
+					wireAt(id, pin); created = id; ImGui::CloseCurrentPopup();
+				}
+			}
+			if (eh) ImGui::Spacing();
+		}
+
+		// ── This graph's variables (Set on exec/matching value; Get feeds inputs) ──
+		{
+			bool vh = false;
+			for (const auto& v : graph.variables)
+			{
+				const bool setOk = (isExecPin && !srcInput) ||
+					(!isExecPin && !srcInput && v.type == dragType && v.isArray == dragArray);
+				const bool getOk = !isExecPin && srcInput && v.type == dragType && v.isArray == dragArray;
+				auto add = [&](bool get){
+					const int id = addNode(graph, get ? NT::GetVariable : NT::SetVariable, pos);
+					HC::Node* nn = graph.findNode(id);
+					nn->s = v.name; nn->propType = v.type; nn->isArray = v.isArray;
+					const PinRanges r = pinRanges(*nn);
+					wireAt(id, get ? r.dataOut0 : (isExecPin ? r.execIn0 : r.dataIn0));
+					created = id; ImGui::CloseCurrentPopup(); };
+				if (setOk && matches("Set " + v.name))
+				{
+					if (!vh) { ImGui::TextDisabled("Variables"); vh = true; }
+					if (ImGui::Selectable(("Set " + v.name).c_str())) add(false);
+				}
+				if (getOk && matches("Get " + v.name))
+				{
+					if (!vh) { ImGui::TextDisabled("Variables"); vh = true; }
+					if (ImGui::Selectable(("Get " + v.name).c_str())) add(true);
+				}
+			}
+			if (vh) ImGui::Spacing();
+		}
+
+		// ── Declared functions (exec drags call them) ──────────────────────────
+		if (isExecPin)
+		{
+			bool fh = false;
+			for (const auto& e : graph.nodes)
+			{
+				if (e.type != NT::FunctionEntry || e.s.empty() || !matches("Call " + e.s)) continue;
+				if (!fh) { ImGui::TextDisabled("Functions"); fh = true; }
+				if (ImGui::Selectable(("Call " + e.s).c_str()))
+				{
+					const int id = addNode(graph, NT::FunctionCall, pos);
+					graph.findNode(id)->s = e.s;
+					HC::syncFunctionSignatures(graph);
+					HC::Node* nn = graph.findNode(id);
+					const PinRanges r = pinRanges(*nn);
+					wireAt(id, srcInput ? r.execOut0 : r.execIn0);
+					created = id; ImGui::CloseCurrentPopup();
+				}
+			}
+		}
 
 		ImGui::EndChild();
 		return created;
@@ -1046,6 +1183,8 @@ bool HorizonCodeClassPanel::isClassAsset(const std::string& path)
 	cache[path] = ok;
 	return ok;
 }
+
+void HorizonCodeClassPanel::forget(const std::string& path) { g_classStates.erase(path); }
 
 bool HorizonCodeClassPanel::isDirty(const std::string& path)
 {
