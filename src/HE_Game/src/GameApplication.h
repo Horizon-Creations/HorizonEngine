@@ -8,6 +8,7 @@
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/UIInputSystem.h>
 #include <HorizonScene/GameInstanceHost.h>
+#include <HorizonScene/AudioEngine.h>
 
 class ScriptContext;
 
@@ -64,5 +65,6 @@ private:
     std::unique_ptr<ScriptContext> m_scriptContext; // ECS Lua/Python scripts (null until OnInit)
     std::unordered_map<uint32_t, ScriptEngine::InstanceId> m_scriptInstances; // entity → instance
     UIInputSystem::InputState m_uiInput;   // frame-to-frame UI pointer tracking
+    AudioEngine m_audioEngine;             // game-runtime audio (playOnStart + audio.* API)
 };
 

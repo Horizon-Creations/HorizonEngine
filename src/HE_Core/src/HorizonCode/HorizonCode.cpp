@@ -412,6 +412,35 @@ Value variableDefaultValue(const Variable& v)
     }
 }
 
+std::vector<int> duplicateNodes(Graph& g, const std::vector<int>& ids, float dx, float dy)
+{
+    std::vector<int> fresh;
+    std::unordered_map<int, int> remap;   // old id → clone id
+    for (int id : ids)
+    {
+        const Node* src = g.findNode(id);
+        if (!src) continue;
+        // Handler/function names must stay unique per graph — don't clone those.
+        if (src->type == NodeType::Event || src->type == NodeType::FunctionEntry) continue;
+        Node copy = *src;                  // params/results/subgraph/payloads ride along
+        copy.x += dx; copy.y += dy;
+        const int nid = g.addNode(std::move(copy));
+        remap[id] = nid;
+        fresh.push_back(nid);
+    }
+    // Re-create the links INSIDE the duplicated set (external wires stay on the
+    // originals — a duplicate shouldn't steal or share the source's inputs).
+    std::vector<Link> cloned;
+    for (const Link& l : g.links)
+    {
+        auto s = remap.find(l.srcNode), d = remap.find(l.dstNode);
+        if (s != remap.end() && d != remap.end())
+            cloned.push_back({ s->second, l.srcPin, d->second, l.dstPin });
+    }
+    for (const Link& l : cloned) g.links.push_back(l);
+    return fresh;
+}
+
 void adoptForEachElementType(Graph& g, int srcNode, int srcPin, int dstNode, int dstPin)
 {
     Node* dst = g.findNode(dstNode);

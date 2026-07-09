@@ -102,8 +102,11 @@ Status: **[api]** already in `ScriptApi` (just needs a registry row + node),
   wired in EnvironmentComponent) → setter nodes. **[new]**.
 
 ### 3.4 Audio
-- `playSound(asset, volume, pitch)`, `playSound3D(asset, pos, …)`, `stop`,
-  `setListener`. **[new]** (audio engine exists via Audio-Play-Mode; expose it).
+- **[done]** `audio.play(asset, volume, pitch, loop)`, `audio.playAt(asset, pos,
+  …)`, `audio.stop/stopAll/isPlaying`, `audio.setBusVolume` — `Ctx` gained an
+  `AudioEngine*`; the GAME RUNTIME now owns an AudioEngine too (init +
+  playOnStart after scene load, updateSpatial per frame, shutdown), so packaged
+  games have sound. Listener follows the AudioListener entity (AudioSystem).
 
 ### 3.5 Input  **[done — core]**
 - **[done]** `input.keyDown(name)` (SDL scancode names — "W"/"Space"/…),

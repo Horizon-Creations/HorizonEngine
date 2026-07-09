@@ -1,6 +1,16 @@
 #include "HorizonScene/EngineApi.h"
 #include "HorizonScene/ScriptApi.h"
+#include "HorizonScene/HorizonWorld.h"
+#include "HorizonScene/AudioEngine.h"
+#include "HorizonScene/Components/CameraComponent.h"
+#include "HorizonScene/Components/TransformComponent.h"
+#include "HorizonScene/Components/EnvironmentComponent.h"
+#include "HorizonScene/Components/NameComponent.h"
+#include <ContentManager/ContentManager.h>
+#include <ContentManager/Assets.h>
+#include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <random>
 #include <utility>
@@ -27,6 +37,18 @@ float       distance(Ctx& c, Entity a, Entity b)
 {
     if (!c.world) return -1.0f;
     return glm::length(ScriptApi::getPosition(*c.world, a) - ScriptApi::getPosition(*c.world, b));
+}
+Entity findByName(Ctx& c, const std::string& name)
+{
+    if (!c.world || name.empty()) return 0u;
+    auto view = c.world->registry().view<NameComponent>();
+    for (auto [e, nc] : view.each())
+        if (nc.name == name) return (Entity)e;
+    return 0u;
+}
+bool exists(Ctx& c, Entity e)
+{
+    return c.world && c.world->registry().valid((entt::entity)e);
 }
 } // namespace entity
 
@@ -87,6 +109,175 @@ bool callFunction(Ctx& c, int id, const std::string& fn) { return c.world ? Scri
 namespace cursor {
 void setVisible(Ctx&, bool show) { ScriptApi::setCursorVisible(show); }
 } // namespace cursor
+
+// ── Camera ───────────────────────────────────────────────────────────────────
+namespace {
+// The world's main camera: isMain wins, else the first CameraComponent.
+entt::entity mainCameraEntity(HorizonWorld* w)
+{
+    if (!w) return entt::null;
+    entt::entity first = entt::null;
+    auto view = w->registry().view<CameraComponent>();
+    for (auto [e, cc] : view.each())
+    {
+        if (cc.isMain) return e;
+        if (first == entt::null) first = e;
+    }
+    return first;
+}
+} // namespace
+namespace camera {
+glm::vec3 getPosition(Ctx& c)
+{
+    const entt::entity e = mainCameraEntity(c.world);
+    if (e == entt::null) return glm::vec3(0.0f);
+    const auto* t = c.world->registry().try_get<TransformComponent>(e);
+    return t ? t->position : glm::vec3(0.0f);
+}
+void setPosition(Ctx& c, const glm::vec3& p)
+{
+    const entt::entity e = mainCameraEntity(c.world);
+    if (e == entt::null) return;
+    c.world->registry().get_or_emplace<TransformComponent>(e).position = p;
+}
+glm::vec3 getRotation(Ctx& c)
+{
+    const entt::entity e = mainCameraEntity(c.world);
+    if (e == entt::null) return glm::vec3(0.0f);
+    const auto* t = c.world->registry().try_get<TransformComponent>(e);
+    return t ? t->rotation : glm::vec3(0.0f);
+}
+void setRotation(Ctx& c, const glm::vec3& r)
+{
+    const entt::entity e = mainCameraEntity(c.world);
+    if (e == entt::null) return;
+    c.world->registry().get_or_emplace<TransformComponent>(e).rotation = r;
+}
+float getFov(Ctx& c)
+{
+    const entt::entity e = mainCameraEntity(c.world);
+    if (e == entt::null) return 0.0f;
+    return c.world->registry().get<CameraComponent>(e).fovDegrees;
+}
+void setFov(Ctx& c, float degrees)
+{
+    const entt::entity e = mainCameraEntity(c.world);
+    if (e == entt::null) return;
+    c.world->registry().get<CameraComponent>(e).fovDegrees = degrees;
+}
+} // namespace camera
+
+// ── Environment ──────────────────────────────────────────────────────────────
+namespace {
+EnvironmentComponent* envOf(HorizonWorld* w)
+{
+    if (!w) return nullptr;
+    auto view = w->registry().view<EnvironmentComponent>();
+    for (auto e : view) return &view.get<EnvironmentComponent>(e);
+    return nullptr;
+}
+} // namespace
+namespace env {
+float getTimeOfDay(Ctx& c)            { const auto* e = envOf(c.world); return e ? e->timeOfDay : 0.0f; }
+void  setTimeOfDay(Ctx& c, float t)   { if (auto* e = envOf(c.world)) e->timeOfDay = t; }
+float getCloudCoverage(Ctx& c)        { const auto* e = envOf(c.world); return e ? e->cloudCoverage : 0.0f; }
+void  setCloudCoverage(Ctx& c, float v){ if (auto* e = envOf(c.world)) e->cloudCoverage = v; }
+float getFogDensity(Ctx& c)           { const auto* e = envOf(c.world); return e ? e->fogDensity : 0.0f; }
+void  setFogDensity(Ctx& c, float v)  { if (auto* e = envOf(c.world)) e->fogDensity = v; }
+float getWindDirection(Ctx& c)        { const auto* e = envOf(c.world); return e ? e->windDirection : 0.0f; }
+void  setWindDirection(Ctx& c, float v){ if (auto* e = envOf(c.world)) e->windDirection = v; }
+float getWindSpeed(Ctx& c)            { const auto* e = envOf(c.world); return e ? e->windSpeed : 0.0f; }
+void  setWindSpeed(Ctx& c, float v)   { if (auto* e = envOf(c.world)) e->windSpeed = v; }
+} // namespace env
+
+// ── Audio ────────────────────────────────────────────────────────────────────
+namespace audio {
+namespace {
+const AudioAsset* audioAsset(Ctx& c, const std::string& path)
+{
+    if (!c.content || path.empty()) return nullptr;
+    const HE::UUID id = c.content->loadAsset(path);
+    const AudioAsset* a = c.content->getAudio(id);
+    return (a && !a->audioData.empty()) ? a : nullptr;
+}
+} // namespace
+int play(Ctx& c, const std::string& path, float volume, float pitch, bool loop)
+{
+    const AudioAsset* a = audioAsset(c, path);
+    if (!c.audio || !c.audio->isInitialized() || !a) return 0;
+    return (int)c.audio->play(a->audioData, a->sampleRate, a->channels, volume, pitch, loop);
+}
+int playAt(Ctx& c, const std::string& path, const glm::vec3& pos,
+           float volume, float pitch, bool loop, float minDist, float maxDist)
+{
+    const AudioAsset* a = audioAsset(c, path);
+    if (!c.audio || !c.audio->isInitialized() || !a) return 0;
+    return (int)c.audio->playSpatial(a->audioData, a->sampleRate, a->channels,
+                                     volume, pitch, loop, pos.x, pos.y, pos.z, minDist, maxDist);
+}
+void stop(Ctx& c, int handle)      { if (c.audio) c.audio->stop((uint64_t)(uint32_t)handle); }
+void stopAll(Ctx& c)               { if (c.audio) c.audio->stopAll(); }
+bool isPlaying(Ctx& c, int handle) { return c.audio && c.audio->isPlaying((uint64_t)(uint32_t)handle); }
+void setBusVolume(Ctx& c, const std::string& bus, float volume)
+{
+    if (!c.audio || !c.audio->isInitialized()) return;
+    if (!c.audio->hasBus(bus)) c.audio->createBus(bus, volume);
+    c.audio->setBusVolume(bus, volume);
+}
+} // namespace audio
+
+// ── String library ───────────────────────────────────────────────────────────
+namespace str {
+int length(const std::string& s) { return (int)s.size(); }
+std::string substring(const std::string& s, int start, int count)
+{
+    if (start < 0) { count += start; start = 0; }
+    if (start >= (int)s.size() || count <= 0) return {};
+    return s.substr((size_t)start, (size_t)count);
+}
+bool contains(const std::string& s, const std::string& needle)
+{ return needle.empty() || s.find(needle) != std::string::npos; }
+int find(const std::string& s, const std::string& needle)
+{
+    const size_t p = s.find(needle);
+    return p == std::string::npos ? -1 : (int)p;
+}
+std::string replace(const std::string& s, const std::string& from, const std::string& to)
+{
+    if (from.empty()) return s;
+    std::string out; out.reserve(s.size());
+    size_t pos = 0;
+    while (true)
+    {
+        const size_t hit = s.find(from, pos);
+        if (hit == std::string::npos) { out.append(s, pos, std::string::npos); return out; }
+        out.append(s, pos, hit - pos);
+        out += to;
+        pos = hit + from.size();
+    }
+}
+std::string toUpper(std::string const& s)
+{ std::string r = s; for (char& ch : r) ch = (char)std::toupper((unsigned char)ch); return r; }
+std::string toLower(std::string const& s)
+{ std::string r = s; for (char& ch : r) ch = (char)std::tolower((unsigned char)ch); return r; }
+std::string trim(const std::string& s)
+{
+    size_t b = 0, e = s.size();
+    while (b < e && std::isspace((unsigned char)s[b])) ++b;
+    while (e > b && std::isspace((unsigned char)s[e - 1])) --e;
+    return s.substr(b, e - b);
+}
+bool startsWith(const std::string& s, const std::string& p)
+{ return s.size() >= p.size() && s.compare(0, p.size(), p) == 0; }
+bool endsWith(const std::string& s, const std::string& p)
+{ return s.size() >= p.size() && s.compare(s.size() - p.size(), p.size(), p) == 0; }
+float toNumber(const std::string& s)
+{
+    char* end = nullptr;
+    const float v = std::strtof(s.c_str(), &end);
+    return end == s.c_str() ? 0.0f : v;
+}
+} // namespace str
 
 // ── Math ─────────────────────────────────────────────────────────────────────
 namespace math {
@@ -329,6 +520,96 @@ const std::vector<ApiFn>& registry()
         t.push_back({ "input.scrollDelta", "Input", false, {}, {{"scroll", P::Float}}, "HE::api::input::scrollDelta",
             [](Ctx&, const VV&){ return VV{ Value::ofFloat(input::scrollDelta()) }; } });
 
+        // Entity queries
+        t.push_back({ "entity.findByName", "Entity", false, {{"name", P::String}}, {{"entity", P::Int}}, "HE::api::entity::findByName",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt((int)entity::findByName(c, aS(a, 0))) }; } });
+        t.push_back({ "entity.exists", "Entity", false, {{"entity", P::Int}}, {{"exists", P::Bool}}, "HE::api::entity::exists",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(entity::exists(c, (Entity)aI(a, 0))) }; } });
+
+        // Camera (the world's main camera)
+        t.push_back({ "camera.getPosition", "Camera", false, {}, {{"position", P::Color}}, "HE::api::camera::getPosition",
+            [](Ctx& c, const VV&){ return VV{ v3(camera::getPosition(c)) }; } });
+        t.push_back({ "camera.setPosition", "Camera", true, {{"position", P::Color}}, {}, "HE::api::camera::setPosition",
+            [](Ctx& c, const VV& a){ camera::setPosition(c, aV3(a, 0)); return VV{}; } });
+        t.push_back({ "camera.getRotation", "Camera", false, {}, {{"rotation", P::Color}}, "HE::api::camera::getRotation",
+            [](Ctx& c, const VV&){ return VV{ v3(camera::getRotation(c)) }; } });
+        t.push_back({ "camera.setRotation", "Camera", true, {{"rotation", P::Color}}, {}, "HE::api::camera::setRotation",
+            [](Ctx& c, const VV& a){ camera::setRotation(c, aV3(a, 0)); return VV{}; } });
+        t.push_back({ "camera.getFov", "Camera", false, {}, {{"degrees", P::Float}}, "HE::api::camera::getFov",
+            [](Ctx& c, const VV&){ return VV{ Value::ofFloat(camera::getFov(c)) }; } });
+        t.push_back({ "camera.setFov", "Camera", true, {{"degrees", P::Float}}, {}, "HE::api::camera::setFov",
+            [](Ctx& c, const VV& a){ camera::setFov(c, aF(a, 0)); return VV{}; } });
+
+        // Environment (sky / fog / wind knobs)
+        auto envGet = [&](const char* id, const char* cpp, float(*fn)(Ctx&)) {
+            t.push_back({ id, "Environment", false, {}, {{"value", P::Float}}, cpp,
+                [fn](Ctx& c, const VV&){ return VV{ Value::ofFloat(fn(c)) }; } }); };
+        auto envSet = [&](const char* id, const char* cpp, void(*fn)(Ctx&, float)) {
+            t.push_back({ id, "Environment", true, {{"value", P::Float}}, {}, cpp,
+                [fn](Ctx& c, const VV& a){ fn(c, aF(a, 0)); return VV{}; } }); };
+        envGet("env.getTimeOfDay",     "HE::api::env::getTimeOfDay",     env::getTimeOfDay);
+        envSet("env.setTimeOfDay",     "HE::api::env::setTimeOfDay",     env::setTimeOfDay);
+        envGet("env.getCloudCoverage", "HE::api::env::getCloudCoverage", env::getCloudCoverage);
+        envSet("env.setCloudCoverage", "HE::api::env::setCloudCoverage", env::setCloudCoverage);
+        envGet("env.getFogDensity",    "HE::api::env::getFogDensity",    env::getFogDensity);
+        envSet("env.setFogDensity",    "HE::api::env::setFogDensity",    env::setFogDensity);
+        envGet("env.getWindDirection", "HE::api::env::getWindDirection", env::getWindDirection);
+        envSet("env.setWindDirection", "HE::api::env::setWindDirection", env::setWindDirection);
+        envGet("env.getWindSpeed",     "HE::api::env::getWindSpeed",     env::getWindSpeed);
+        envSet("env.setWindSpeed",     "HE::api::env::setWindSpeed",     env::setWindSpeed);
+
+        // Audio
+        t.push_back({ "audio.play", "Audio", true,
+            {{"asset", P::String}, {"volume", P::Float}, {"pitch", P::Float}, {"loop", P::Bool}},
+            {{"handle", P::Int}}, "HE::api::audio::play",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(audio::play(c, aS(a, 0),
+                a.size() > 1 ? aF(a, 1) : 1.0f, a.size() > 2 ? aF(a, 2) : 1.0f, aB(a, 3))) }; } });
+        t.push_back({ "audio.playAt", "Audio", true,
+            {{"asset", P::String}, {"position", P::Color}, {"volume", P::Float}, {"pitch", P::Float},
+             {"loop", P::Bool}, {"minDist", P::Float}, {"maxDist", P::Float}},
+            {{"handle", P::Int}}, "HE::api::audio::playAt",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(audio::playAt(c, aS(a, 0), aV3(a, 1),
+                a.size() > 2 ? aF(a, 2) : 1.0f, a.size() > 3 ? aF(a, 3) : 1.0f, aB(a, 4),
+                a.size() > 5 ? aF(a, 5) : 1.0f, a.size() > 6 ? aF(a, 6) : 20.0f)) }; } });
+        t.push_back({ "audio.stop", "Audio", true, {{"handle", P::Int}}, {}, "HE::api::audio::stop",
+            [](Ctx& c, const VV& a){ audio::stop(c, aI(a, 0)); return VV{}; } });
+        t.push_back({ "audio.stopAll", "Audio", true, {}, {}, "HE::api::audio::stopAll",
+            [](Ctx& c, const VV&){ audio::stopAll(c); return VV{}; } });
+        t.push_back({ "audio.isPlaying", "Audio", false, {{"handle", P::Int}}, {{"playing", P::Bool}}, "HE::api::audio::isPlaying",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(audio::isPlaying(c, aI(a, 0))) }; } });
+        t.push_back({ "audio.setBusVolume", "Audio", true, {{"bus", P::String}, {"volume", P::Float}}, {}, "HE::api::audio::setBusVolume",
+            [](Ctx& c, const VV& a){ audio::setBusVolume(c, aS(a, 0), aF(a, 1)); return VV{}; } });
+
+        // String library (pure)
+        t.push_back({ "string.length", "String", false, {{"s", P::String}}, {{"length", P::Int}}, "HE::api::str::length",
+            [](Ctx&, const VV& a){ return VV{ Value::ofInt(str::length(aS(a, 0))) }; } });
+        t.push_back({ "string.substring", "String", false,
+            {{"s", P::String}, {"start", P::Int}, {"count", P::Int}}, {{"result", P::String}}, "HE::api::str::substring",
+            [](Ctx&, const VV& a){ return VV{ Value::ofString(str::substring(aS(a, 0), aI(a, 1), aI(a, 2))) }; } });
+        t.push_back({ "string.contains", "String", false,
+            {{"s", P::String}, {"needle", P::String}}, {{"contains", P::Bool}}, "HE::api::str::contains",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(str::contains(aS(a, 0), aS(a, 1))) }; } });
+        t.push_back({ "string.find", "String", false,
+            {{"s", P::String}, {"needle", P::String}}, {{"index", P::Int}}, "HE::api::str::find",
+            [](Ctx&, const VV& a){ return VV{ Value::ofInt(str::find(aS(a, 0), aS(a, 1))) }; } });
+        t.push_back({ "string.replace", "String", false,
+            {{"s", P::String}, {"from", P::String}, {"to", P::String}}, {{"result", P::String}}, "HE::api::str::replace",
+            [](Ctx&, const VV& a){ return VV{ Value::ofString(str::replace(aS(a, 0), aS(a, 1), aS(a, 2))) }; } });
+        t.push_back({ "string.toUpper", "String", false, {{"s", P::String}}, {{"result", P::String}}, "HE::api::str::toUpper",
+            [](Ctx&, const VV& a){ return VV{ Value::ofString(str::toUpper(aS(a, 0))) }; } });
+        t.push_back({ "string.toLower", "String", false, {{"s", P::String}}, {{"result", P::String}}, "HE::api::str::toLower",
+            [](Ctx&, const VV& a){ return VV{ Value::ofString(str::toLower(aS(a, 0))) }; } });
+        t.push_back({ "string.trim", "String", false, {{"s", P::String}}, {{"result", P::String}}, "HE::api::str::trim",
+            [](Ctx&, const VV& a){ return VV{ Value::ofString(str::trim(aS(a, 0))) }; } });
+        t.push_back({ "string.startsWith", "String", false,
+            {{"s", P::String}, {"prefix", P::String}}, {{"result", P::Bool}}, "HE::api::str::startsWith",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(str::startsWith(aS(a, 0), aS(a, 1))) }; } });
+        t.push_back({ "string.endsWith", "String", false,
+            {{"s", P::String}, {"suffix", P::String}}, {{"result", P::Bool}}, "HE::api::str::endsWith",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(str::endsWith(aS(a, 0), aS(a, 1))) }; } });
+        t.push_back({ "string.toNumber", "String", false, {{"s", P::String}}, {{"number", P::Float}}, "HE::api::str::toNumber",
+            [](Ctx&, const VV& a){ return VV{ Value::ofFloat(str::toNumber(aS(a, 0))) }; } });
+
         // ── Readable editor names (post-pass; id stays the stable identifier) ──
         // What menus and node titles show — "Sine" under Math, not "math.sin".
         static const std::pair<const char*, const char*> kNames[] = {
@@ -367,6 +648,24 @@ const std::vector<ApiFn>& registry()
             { "input.keyDown", "Key Down" },          { "input.mouseButton", "Mouse Button" },
             { "input.mousePosition", "Mouse Position" }, { "input.mouseDelta", "Mouse Delta" },
             { "input.scrollDelta", "Scroll Delta" },
+            { "entity.findByName", "Find By Name" },  { "entity.exists", "Entity Exists" },
+            { "camera.getPosition", "Get Camera Position" }, { "camera.setPosition", "Set Camera Position" },
+            { "camera.getRotation", "Get Camera Rotation" }, { "camera.setRotation", "Set Camera Rotation" },
+            { "camera.getFov", "Get Camera FOV" },           { "camera.setFov", "Set Camera FOV" },
+            { "env.getTimeOfDay", "Get Time Of Day" },       { "env.setTimeOfDay", "Set Time Of Day" },
+            { "env.getCloudCoverage", "Get Cloud Coverage" },{ "env.setCloudCoverage", "Set Cloud Coverage" },
+            { "env.getFogDensity", "Get Fog Density" },      { "env.setFogDensity", "Set Fog Density" },
+            { "env.getWindDirection", "Get Wind Direction" },{ "env.setWindDirection", "Set Wind Direction" },
+            { "env.getWindSpeed", "Get Wind Speed" },        { "env.setWindSpeed", "Set Wind Speed" },
+            { "audio.play", "Play Sound" },        { "audio.playAt", "Play Sound At" },
+            { "audio.stop", "Stop Sound" },        { "audio.stopAll", "Stop All Sounds" },
+            { "audio.isPlaying", "Is Sound Playing" }, { "audio.setBusVolume", "Set Bus Volume" },
+            { "string.length", "String Length" },  { "string.substring", "Substring" },
+            { "string.contains", "String Contains" }, { "string.find", "String Find" },
+            { "string.replace", "String Replace" },   { "string.toUpper", "To Upper" },
+            { "string.toLower", "To Lower" },         { "string.trim", "Trim" },
+            { "string.startsWith", "Starts With" },   { "string.endsWith", "Ends With" },
+            { "string.toNumber", "To Number" },
         };
         for (auto& fn : t)
         {

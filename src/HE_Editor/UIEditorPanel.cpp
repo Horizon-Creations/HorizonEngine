@@ -1919,6 +1919,17 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 		const bool inSel = std::find(st.geState.selection.begin(), st.geState.selection.end(), nodeId)
 			!= st.geState.selection.end();
 		const bool multi = inSel && st.geState.selection.size() > 1;
+		if (ImGui::MenuItem(multi ? "Duplicate Selection" : "Duplicate Node"))
+		{
+			const std::vector<int> src = multi ? st.geState.selection : std::vector<int>{ nodeId };
+			const std::vector<int> fresh = HC::duplicateNodes(st.graph, src);
+			if (!fresh.empty())
+			{
+				st.geState.selection = fresh;    // select the clones (ready to drag)
+				st.selectedGraphNode = fresh.front();
+				commitEdit(st, ctx);
+			}
+		}
 		if (ImGui::MenuItem(multi ? "Delete Selection" : "Delete Node"))
 		{
 			const std::vector<int> doomed = multi ? st.geState.selection : std::vector<int>{ nodeId };
