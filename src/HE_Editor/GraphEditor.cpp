@@ -357,7 +357,17 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
                 ImGuiChildFlags_None,
                 ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
                 ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoSavedSettings);
+            // Body widgets scale with the canvas zoom like everything else on the
+            // node: font via the window font scale, paddings via style vars (the
+            // body rect is already zoom-sized, so unscaled widgets overflow it
+            // when zoomed out and rattle around in it when zoomed in).
+            ImGui::SetWindowFontScale(st.zoom);
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4.0f * st.zoom, 2.0f * st.zoom));
+            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,  ImVec2(8.0f * st.zoom, 4.0f * st.zoom));
+            ImGui::PushStyleVar(ImGuiStyleVar_ItemInnerSpacing, ImVec2(4.0f * st.zoom, 4.0f * st.zoom));
             model.drawNodeBody(n.id, bmin, bmax, st.zoom);
+            ImGui::PopStyleVar(3);
+            ImGui::SetWindowFontScale(1.0f);
             ImGui::EndChild();
             ImGui::PopStyleVar();
             ImGui::PopID();

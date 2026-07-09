@@ -112,9 +112,11 @@ add_executable(HorizonEditor WIN32
  "EditorUI.h" "EditorUI.cpp" "ScriptEditorPanel.h" "MaterialEditorPanel.h" "LevelScriptPanel.h" "GameInstancePanel.h" "HorizonCodeClassPanel.h" "HcClassList.h")
 
 if(APPLE)
-	target_sources(HorizonEditor PRIVATE ImGuiMetalBridge.mm ImGuiMetalBridge.h)
-	set_source_files_properties(ImGuiMetalBridge.mm
+	target_sources(HorizonEditor PRIVATE ImGuiMetalBridge.mm ImGuiMetalBridge.h
+	                                     MacMenuBar.mm MacMenuBar.h)
+	set_source_files_properties(ImGuiMetalBridge.mm MacMenuBar.mm
 		PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+	target_link_libraries(HorizonEditor PRIVATE "-framework Cocoa")
 endif()
 
 target_include_directories(HorizonEditor PRIVATE

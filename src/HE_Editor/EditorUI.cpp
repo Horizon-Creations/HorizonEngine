@@ -7,6 +7,9 @@
 #include "GameInstancePanel.h"
 #include "HorizonCodeClassPanel.h"
 #include "HorizonVersion.h"
+#ifdef __APPLE__
+#include "MacMenuBar.h"   // native system menu bar (replaces the ImGui menu row)
+#endif
 #include <Hpak/ProjectExporter.h>
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonScene/LODSystem.h>
@@ -1614,17 +1617,112 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 		requestGuarded(GuardedAction::Quit);
 	}
 
+	// ── Menu actions shared by the ImGui menu bar and the macOS native menu ────
+	// Open (or focus) the Level Script / Game Instance as editor tabs.
+	auto openVirtualTab = [&](const char* label, const char* path)
+	{
+		auto it = std::find_if(ctx.tabs.begin(), ctx.tabs.end(),
+			[&](const AppContext::EditorTab& t){ return t.assetPath == path; });
+		if (it == ctx.tabs.end())
+		{ ctx.tabs.push_back({ label, path, true, true }); ctx.activeTab = (int)ctx.tabs.size() - 1; }
+		else ctx.activeTab = (int)std::distance(ctx.tabs.begin(), it);
+		s_tabSelectRequest = ctx.activeTab;
+	};
+	auto openExportDialog = [&]()
+	{
+		if (!ctx.projectManager) return;
+		auto& proj = ctx.projectManager->currentProject();
+		const std::filesystem::path projectRoot =
+			std::filesystem::path(proj.path).parent_path();
+
+		// Select the last-used profile and mirror it into the dialog fields.
+		s_exportProfileIdx = 0;
+		for (int i = 0; i < static_cast<int>(proj.exportProfiles.size()); ++i)
+			if (proj.exportProfiles[i].name == proj.activeExportProfile)
+			{ s_exportProfileIdx = i; break; }
+		if (!proj.exportProfiles.empty())
+			exportProfileToDialog(proj.exportProfiles[s_exportProfileIdx], projectRoot);
+
+		// Offer every .hescene in the project as a startup-scene choice.
+		// Manual increment(ec): the range-for's operator++ throws on
+		// unreadable subdirectories.
+		s_exportSceneChoices.clear();
+		std::error_code ec;
+		std::filesystem::recursive_directory_iterator it(
+			projectRoot, std::filesystem::directory_options::skip_permission_denied, ec);
+		const std::filesystem::recursive_directory_iterator end;
+		while (!ec && it != end)
+		{
+			const bool regular = it->is_regular_file(ec);
+			if (!ec && regular && it->path().extension() == ".hescene")
+				s_exportSceneChoices.push_back(
+					it->path().lexically_relative(projectRoot).generic_string());
+			ec.clear();
+			it.increment(ec);
+		}
+
+		s_exportResult.clear();
+		s_exportBundleKey.clear(); // re-stat the runtime bundle on open
+		s_showExportModal = true;
+	};
+	auto beginNewProject = [&]()
+	{
+		ctx.hubProjectName[0] = '\0';
+		ctx.hubProjectDir[0]  = '\0';
+		ctx.hubSelectedPreset = 0;
+		ctx.hubCreateError.clear();
+	};
+
+	// On macOS the menu lives in the system menu bar (next to the Apple symbol)
+	// like any Mac app, and the in-window ImGui menu row is dropped entirely.
+	bool nativeMenu = false;
+	bool openNewProjectPopup = false;
+#ifdef __APPLE__
+	MacMenuBar::install();   // idempotent; needs NSApp, which SDL created long ago
+	nativeMenu = MacMenuBar::available();
+	if (nativeMenu)
+	{
+		MacMenuBar::setProjectLoaded(ctx.projectLoaded);
+		using MC = MacMenuBar::Cmd;
+		for (MC c; (c = MacMenuBar::take()) != MC::None; )
+		{
+			switch (c)
+			{
+			case MC::NewProject:      beginNewProject(); openNewProjectPopup = true;         break;
+			case MC::OpenProject:     requestGuarded(GuardedAction::OpenProjectDialog);      break;
+			case MC::CloseProject:    requestGuarded(GuardedAction::CloseProject);           break;
+			case MC::NewScene:        requestGuarded(GuardedAction::NewScene);               break;
+			case MC::OpenScene:       requestGuarded(GuardedAction::OpenSceneDialog);        break;
+			case MC::AddSceneAdditive:triggerAddSceneAdditive();                             break;
+			case MC::SaveScene:       doSaveScene();                                         break;
+			case MC::SaveSceneAs:     triggerSaveSceneAs();                                  break;
+			case MC::Quit:            requestGuarded(GuardedAction::Quit);                   break;
+			case MC::Preferences:     s_showPreferences = true;                              break;
+			case MC::ResetLayout:     s_resetLayoutRequested = true;                         break;
+			case MC::ToggleProfiler:  s_showProfiler = !s_showProfiler;                      break;
+			case MC::OpenLevelScript:
+				if (ctx.projectLoaded) openVirtualTab("Level Script", LevelScriptPanel::kTabPath);
+				break;
+			case MC::OpenGameInstance:
+				if (ctx.projectLoaded) openVirtualTab("Game Instance", GameInstancePanel::kTabPath);
+				break;
+			case MC::ImportAsset:     triggerImportAsset();                                  break;
+			case MC::ExportProject:   if (ctx.projectLoaded) openExportDialog();             break;
+			default: break;
+			}
+		}
+	}
+#endif
+
+	if (!nativeMenu)
+	{
 	ImGui::PushFont(ctx.fontSubheading);
 	ImGui::BeginMainMenuBar();
-	bool openNewProjectPopup = false;
 	if (ImGui::BeginMenu("File"))
 	{
 		if (ImGui::MenuItem("New Project", "Ctrl+N"))
 		{
-			ctx.hubProjectName[0] = '\0';
-			ctx.hubProjectDir[0]  = '\0';
-			ctx.hubSelectedPreset = 0;
-			ctx.hubCreateError.clear();
+			beginNewProject();
 			openNewProjectPopup = true;
 		}
         if (ImGui::MenuItem("Open Project", "Ctrl+O"))
@@ -1659,16 +1757,6 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
         if (ImGui::MenuItem("Toggle Fullscreen", "F11")) {}
         if (ImGui::MenuItem("Reset Layout")) { s_resetLayoutRequested = true; }
         if (ImGui::MenuItem("Performance Profiler", nullptr, s_showProfiler)) s_showProfiler = !s_showProfiler;
-        // Open (or focus) the Level Script / Game Instance as editor tabs.
-        auto openVirtualTab = [&](const char* label, const char* path)
-        {
-            auto it = std::find_if(ctx.tabs.begin(), ctx.tabs.end(),
-                [&](const AppContext::EditorTab& t){ return t.assetPath == path; });
-            if (it == ctx.tabs.end())
-            { ctx.tabs.push_back({ label, path, true, true }); ctx.activeTab = (int)ctx.tabs.size() - 1; }
-            else ctx.activeTab = (int)std::distance(ctx.tabs.begin(), it);
-            s_tabSelectRequest = ctx.activeTab;
-        };
         if (ImGui::MenuItem("Level Script", nullptr, false, ctx.projectLoaded))
             openVirtualTab("Level Script", LevelScriptPanel::kTabPath);
         if (ImGui::MenuItem("Game Instance", nullptr, false, ctx.projectLoaded))
@@ -1684,42 +1772,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 	}
 	if (ImGui::BeginMenu("Build", ctx.projectLoaded))
 	{
-		if (ImGui::MenuItem("Export Project...") && ctx.projectManager)
-		{
-			auto& proj = ctx.projectManager->currentProject();
-			const std::filesystem::path projectRoot =
-				std::filesystem::path(proj.path).parent_path();
-
-			// Select the last-used profile and mirror it into the dialog fields.
-			s_exportProfileIdx = 0;
-			for (int i = 0; i < static_cast<int>(proj.exportProfiles.size()); ++i)
-				if (proj.exportProfiles[i].name == proj.activeExportProfile)
-				{ s_exportProfileIdx = i; break; }
-			if (!proj.exportProfiles.empty())
-				exportProfileToDialog(proj.exportProfiles[s_exportProfileIdx], projectRoot);
-
-			// Offer every .hescene in the project as a startup-scene choice.
-			// Manual increment(ec): the range-for's operator++ throws on
-			// unreadable subdirectories.
-			s_exportSceneChoices.clear();
-			std::error_code ec;
-			std::filesystem::recursive_directory_iterator it(
-				projectRoot, std::filesystem::directory_options::skip_permission_denied, ec);
-			const std::filesystem::recursive_directory_iterator end;
-			while (!ec && it != end)
-			{
-				const bool regular = it->is_regular_file(ec);
-				if (!ec && regular && it->path().extension() == ".hescene")
-					s_exportSceneChoices.push_back(
-						it->path().lexically_relative(projectRoot).generic_string());
-				ec.clear();
-				it.increment(ec);
-			}
-
-			s_exportResult.clear();
-			s_exportBundleKey.clear(); // re-stat the runtime bundle on open
-			s_showExportModal = true;
-		}
+		if (ImGui::MenuItem("Export Project..."))
+			openExportDialog();
 		ImGui::EndMenu();
 	}
 	if (ImGui::BeginMenu("Help"))
@@ -1730,6 +1784,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 	}
     ImGui::EndMainMenuBar();
     ImGui::PopFont();
+	}
 
     if (openNewProjectPopup)
         ImGui::OpenPopup("##NewProjectPopup");
