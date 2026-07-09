@@ -534,3 +534,114 @@ TEST_CASE("Array: Make → Add chain → Length + Get evaluate correctly")
     CHECK(vars["len"].i == 3);   // three elements
     CHECK(vars["el"].i == 20);   // element at index 1
 }
+
+TEST_CASE("Array: Set / Insert / Remove / Contains / IndexOf evaluate correctly")
+{
+    HC::Graph g;
+    HC::Node ev; ev.type = NT::Event; ev.s = "Run"; const int evId = g.addNode(ev);
+    auto konst = [&](int val){ HC::Node c; c.type = NT::ConstInt; c.f[0] = (float)val; return g.addNode(c); };
+    auto arrNode = [&](NT t){ HC::Node n; n.type = t; n.propType = P::Int; return g.addNode(n); };
+    auto setVar = [&](const char* name){ HC::Node s; s.type = NT::SetVariable; s.s = name; s.propType = P::Int; return g.addNode(s); };
+
+    // Base array [10, 20, 30].
+    const int mk = arrNode(NT::ArrayMake);
+    const int a1 = arrNode(NT::ArrayAdd), a2 = arrNode(NT::ArrayAdd), a3 = arrNode(NT::ArrayAdd);
+    const int c10 = konst(10), c20 = konst(20), c30 = konst(30);
+    REQUIRE(g.connect(mk, 0, a1, 0)); REQUIRE(g.connect(c10, 0, a1, 1));
+    REQUIRE(g.connect(a1, 2, a2, 0)); REQUIRE(g.connect(c20, 0, a2, 1));
+    REQUIRE(g.connect(a2, 2, a3, 0)); REQUIRE(g.connect(c30, 0, a3, 1));
+
+    // Set [1] = 99 → [10,99,30]; Insert 55 at 0 → [55,10,99,30]; Remove [3] → [55,10,99].
+    const int st_ = arrNode(NT::ArraySet);    // pins: arr 0, idx 1, val 2, out 3
+    const int ins = arrNode(NT::ArrayInsert); // pins: arr 0, idx 1, val 2, out 3
+    const int rem = arrNode(NT::ArrayRemove); // pins: arr 0, idx 1, out 2
+    const int c0 = konst(0), c1 = konst(1), c3 = konst(3), c55 = konst(55), c99 = konst(99);
+    REQUIRE(g.connect(a3, 2, st_, 0)); REQUIRE(g.connect(c1, 0, st_, 1)); REQUIRE(g.connect(c99, 0, st_, 2));
+    REQUIRE(g.connect(st_, 3, ins, 0)); REQUIRE(g.connect(c0, 0, ins, 1)); REQUIRE(g.connect(c55, 0, ins, 2));
+    REQUIRE(g.connect(ins, 3, rem, 0)); REQUIRE(g.connect(c3, 0, rem, 1));
+
+    // Probe the result: len, element 2 (=99), IndexOf 55 (=0), Contains 30 (removed → false).
+    const int len = arrNode(NT::ArrayLength);   // arr 0, out 1
+    const int get = arrNode(NT::ArrayGet);      // arr 0, idx 1, out 2
+    const int idx = arrNode(NT::ArrayIndexOf);  // arr 0, val 1, out 2
+    const int has = arrNode(NT::ArrayContains); // arr 0, val 1, out 2
+    const int c2 = konst(2);
+    REQUIRE(g.connect(rem, 2, len, 0));
+    REQUIRE(g.connect(rem, 2, get, 0)); REQUIRE(g.connect(c2,  0, get, 1));
+    REQUIRE(g.connect(rem, 2, idx, 0)); REQUIRE(g.connect(c55, 0, idx, 1));
+    REQUIRE(g.connect(rem, 2, has, 0)); REQUIRE(g.connect(c30, 0, has, 1));
+
+    const int sLen = setVar("len"), sEl = setVar("el"), sIdx = setVar("idx");
+    HC::Node sb; sb.type = NT::SetVariable; sb.s = "has"; sb.propType = P::Bool; const int sHas = g.addNode(sb);
+    REQUIRE(g.connect(evId, 0, sLen, 0)); REQUIRE(g.connect(len, 1, sLen, 2));
+    REQUIRE(g.connect(sLen, 1, sEl, 0));  REQUIRE(g.connect(get, 2, sEl, 2));
+    REQUIRE(g.connect(sEl, 1, sIdx, 0));  REQUIRE(g.connect(idx, 2, sIdx, 2));
+    REQUIRE(g.connect(sIdx, 1, sHas, 0)); REQUIRE(g.connect(has, 2, sHas, 2));
+
+    std::unordered_map<std::string, Value> vars;
+    HC::Context ctx;
+    ctx.setVariable = [&vars](const std::string& n, const Value& v){ vars[n] = v; };
+    HC::Runner runner(g, ctx);
+    runner.fireEvent("Run", 0);
+
+    CHECK(vars["len"].i == 3);       // [55, 10, 99]
+    CHECK(vars["el"].i  == 99);      // element 2
+    CHECK(vars["idx"].i == 0);       // 55 is first
+    CHECK(vars["has"].b == false);   // 30 was removed
+}
+
+TEST_CASE("Array: For Each runs the body per element and Done afterwards")
+{
+    HC::Graph g;
+    HC::Node ev; ev.type = NT::Event; ev.s = "Run"; const int evId = g.addNode(ev);
+    auto konst = [&](int val){ HC::Node c; c.type = NT::ConstInt; c.f[0] = (float)val; return g.addNode(c); };
+    auto arrNode = [&](NT t){ HC::Node n; n.type = t; n.propType = P::Int; return g.addNode(n); };
+
+    // Array [5, 6, 7].
+    const int mk = arrNode(NT::ArrayMake);
+    const int a1 = arrNode(NT::ArrayAdd), a2 = arrNode(NT::ArrayAdd), a3 = arrNode(NT::ArrayAdd);
+    const int c5 = konst(5), c6 = konst(6), c7 = konst(7);
+    REQUIRE(g.connect(mk, 0, a1, 0)); REQUIRE(g.connect(c5, 0, a1, 1));
+    REQUIRE(g.connect(a1, 2, a2, 0)); REQUIRE(g.connect(c6, 0, a2, 1));
+    REQUIRE(g.connect(a2, 2, a3, 0)); REQUIRE(g.connect(c7, 0, a3, 1));
+
+    // ForEach pins: execIn 0, Body 1, Done 2, Array-in 3, Element-out 4, Index-out 5.
+    const int fe = arrNode(NT::ForEach);
+    REQUIRE(g.connect(evId, 0, fe, 0));
+    REQUIRE(g.connect(a3, 2, fe, 3));
+
+    // Body: el = Element (Int), then sum = sum + el (Add is Float-typed; the Int
+    // element coerces through the Float read of the variable).
+    HC::Node se; se.type = NT::SetVariable; se.s = "el"; se.propType = P::Int; const int seId = g.addNode(se);
+    HC::Node gv; gv.type = NT::GetVariable; gv.s = "sum"; gv.propType = P::Float; const int gvId = g.addNode(gv);
+    HC::Node ge; ge.type = NT::GetVariable; ge.s = "el";  ge.propType = P::Float; const int geId = g.addNode(ge);
+    HC::Node ad; ad.type = NT::Add; const int adId = g.addNode(ad);           // A 0, B 1, out 2
+    HC::Node sv; sv.type = NT::SetVariable; sv.s = "sum"; sv.propType = P::Float; const int svId = g.addNode(sv);
+    REQUIRE(g.connect(fe, 1, seId, 0));       // Body exec → set el
+    REQUIRE(g.connect(fe, 4, seId, 2));       // Element → el
+    REQUIRE(g.connect(seId, 1, svId, 0));     // then → set sum
+    REQUIRE(g.connect(gvId, 0, adId, 0));     // sum → A
+    REQUIRE(g.connect(geId, 0, adId, 1));     // el → B
+    REQUIRE(g.connect(adId, 2, svId, 2));     // sum + el → sum
+
+    // Done: set "done" = index count sentinel 1.
+    HC::Node sd; sd.type = NT::SetVariable; sd.s = "done"; sd.propType = P::Float; const int sdId = g.addNode(sd);
+    HC::Node c1f; c1f.type = NT::ConstFloat; c1f.f[0] = 1.0f; const int c1fId = g.addNode(c1f);
+    REQUIRE(g.connect(fe, 2, sdId, 0));
+    REQUIRE(g.connect(c1fId, 0, sdId, 2));
+
+    std::unordered_map<std::string, Value> vars;
+    vars["sum"] = Value::ofFloat(0.0f);
+    std::string history;
+    HC::Context ctx;
+    ctx.getVariable = [&vars](const std::string& n){ auto it = vars.find(n); return it != vars.end() ? it->second : Value{}; };
+    ctx.setVariable = [&vars, &history](const std::string& n, const Value& v){
+        vars[n] = v;
+        history += n + "=" + std::to_string(v.type == HorizonCode::PinType::Int ? (float)v.i : v.f) + ";"; };
+    HC::Runner runner(g, ctx);
+    runner.fireEvent("Run", 0);
+
+    INFO("history: ", history);
+    CHECK(vars["sum"].f == doctest::Approx(18.0f));   // 5 + 6 + 7
+    CHECK(vars["done"].f == doctest::Approx(1.0f));   // Done fired after the loop
+}
