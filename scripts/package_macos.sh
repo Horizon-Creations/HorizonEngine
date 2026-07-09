@@ -12,7 +12,7 @@ set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SOURCE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-VERSION="${1:-0.0.1}"
+VERSION="${1:-0.0.2} preview"
 
 # Sky-themed release codename — single source of truth is CMakeLists.txt. Shown in
 # the macOS About panel as "Version <VERSION> (<CODENAME>)", e.g. 0.0.1 (First Light).
@@ -20,7 +20,7 @@ CODENAME="${DMG_CODENAME:-$(grep -oE 'HE_VERSION_CODENAME "[^"]+"' "$SOURCE_DIR/
 [ -n "$CODENAME" ] || CODENAME="$VERSION"
 
 APP_NAME="HorizonEditor"
-DMG_NAME="${APP_NAME}-${VERSION}-macOS.dmg"
+DMG_NAME="${APP_NAME}-${VERSION}.dmg"
 
 DEPLOY_DIR="$SOURCE_DIR/out/deploy/Editor"
 STAGING="$SOURCE_DIR/out/dmg_staging"
