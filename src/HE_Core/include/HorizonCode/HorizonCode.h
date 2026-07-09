@@ -132,6 +132,8 @@ struct Variable
     bool        isArray = false;   // when true the variable holds an array of `type`
     float       f[4] = {};
     std::string s;
+    // Transform default (type == Transform): rotation in euler degrees, identity scale.
+    glm::vec3   tpos{ 0.0f }, trot{ 0.0f }, tscl{ 1.0f };
     int         access = 0;   // 0 public (readable via a reference), 1 private
     // For an Object (Ref) variable: which HorizonCode class it holds (asset
     // path). Purely editor metadata — lets the context menu surface that class's

@@ -1449,6 +1449,11 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 					case PT::String: ImGui::InputText("##vdef", &v->s); break;
 					case PT::Vec2:   ed = ImGui::DragFloat2("##vdef", v->f, 0.1f); break;
 					case PT::Color:  ed = ImGui::ColorEdit4("##vdef", v->f); break;
+					case PT::Transform:
+						ed |= ImGui::DragFloat3("Position##vdef", &v->tpos.x, 0.1f);
+						ed |= ImGui::DragFloat3("Rotation##vdef", &v->trot.x, 0.5f);
+						ed |= ImGui::DragFloat3("Scale##vdef",    &v->tscl.x, 0.05f);
+						break;
 					default: break;
 				}
 				if (ed) st.dirty = true;
@@ -1596,8 +1601,10 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 	case NT::ArrayGet:
 	case NT::ArrayAdd:
 	{
+		// Element type — object classes allowed too (the class path rides in s,
+		// which array-op nodes don't use otherwise).
 		const PT before = n->propType;
-		if (HcEditorUtil::drawTypePicker("Element", ctx.contentManager, n->propType, nullptr) && n->propType != before)
+		if (HcEditorUtil::drawTypePicker("Element", ctx.contentManager, n->propType, &n->s) && n->propType != before)
 		{
 			st.graph.links.erase(std::remove_if(st.graph.links.begin(), st.graph.links.end(),
 				[&](const HC::Link& l){ return l.srcNode == n->id || l.dstNode == n->id; }), st.graph.links.end());
@@ -1789,6 +1796,7 @@ std::vector<GraphEditor::Pin> hcNodePins(const HC::Node& n)
 {
 	std::vector<GraphEditor::Pin> out;
 	const GPinRanges r = graphPinRanges(n);
+	const HC::NodeSig sig = HC::signatureOf(n);
 	for (int pin = 0; pin < r.end; ++pin)
 	{
 		GPinInfo info;
@@ -1799,6 +1807,12 @@ std::vector<GraphEditor::Pin> hcNodePins(const HC::Node& n)
 		p.color  = graphPinColor(info.type);
 		p.input  = info.input;
 		p.isExec = info.isExec;
+		if (!info.isExec) // array data pins draw as a 2×2 grid
+		{
+			const int di = pin - (info.input ? r.dataIn0 : r.dataOut0);
+			const auto& pins = info.input ? sig.dataIns : sig.dataOuts;
+			if (di >= 0 && di < (int)pins.size()) p.isArray = pins[di].isArray;
+		}
 		out.push_back(std::move(p));
 	}
 	return out;
@@ -1952,6 +1966,43 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 		      || lower(cat).find(q) != std::string::npos; };
 
 		ImGui::BeginChild("##nodeList", ImVec2(232.0f, 300.0f));
+
+		// Widget lifecycle events (Construct on create, Tick per frame, Destruct on
+		// destroy) + Custom Event — addable straight from the menu, event graph only,
+		// unique per name (element events still come from the Designer).
+		if (st.currentGraph == 0)
+		{
+			auto used = [&st](const std::string& nm){
+				for (const auto& gn : st.graph.nodes)
+					if (gn.type == NT::Event && gn.elem == 0 && gn.s == nm) return true;
+				return false; };
+			bool eh = false;
+			static const char* kLifecycle[] = { "Construct", "Tick", "Destruct" };
+			for (const char* ev : kLifecycle)
+			{
+				if (!matches(ev, "Events")) continue;
+				if (!eh) { ImGui::TextDisabled("Events"); eh = true; }
+				const bool u = used(ev);
+				if (ImGui::Selectable(ev, false, u ? ImGuiSelectableFlags_Disabled : 0) && !u)
+				{
+					const int id = addGraphNode(st, NT::Event, st.geState.addMenuGraphPos);
+					HC::Node* nn = st.graph.findNode(id);
+					nn->s = ev; nn->elem = 0;
+					nn->hasArg = std::string(ev) == "Tick";   // Tick carries dt
+					nn->propType = PT::Float;
+					created = id; ImGui::CloseCurrentPopup();
+				}
+				if (u) { ImGui::SameLine(); ImGui::TextDisabled("(added)"); }
+			}
+			if (matches("Custom Event", "Events"))
+			{
+				if (!eh) { ImGui::TextDisabled("Events"); eh = true; }
+				if (ImGui::Selectable("Custom Event"))
+				{ created = addGraphNode(st, NT::Event, st.geState.addMenuGraphPos); ImGui::CloseCurrentPopup(); }
+			}
+			if (eh) ImGui::Spacing();
+		}
+
 		static const char* kCats[] = { "Property", "Flow", "Events", "Reference",
 		                               "Literals", "Math", "Logic", "String",
 		                               "Widget", "UI", "Array", "Debug" };

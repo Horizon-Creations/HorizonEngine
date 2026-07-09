@@ -442,6 +442,26 @@ TEST_CASE("Transform: a Transform variable defaults to identity")
     CHECK(d.tscl.z == doctest::Approx(1.0f));
 }
 
+TEST_CASE("Transform: an edited variable default seeds the value + survives JSON")
+{
+    HC::Graph g;
+    HC::Variable v; v.name = "spawnAt"; v.type = P::Transform;
+    v.tpos = { 5.0f, 6.0f, 7.0f }; v.trot = { 0.0f, 90.0f, 0.0f }; v.tscl = { 2.0f, 2.0f, 2.0f };
+    g.variables.push_back(v);
+
+    const Value d = HC::variableDefaultValue(g.variables[0]);
+    CHECK(d.tpos.x == doctest::Approx(5.0f));
+    CHECK(d.trot.y == doctest::Approx(90.0f));
+    CHECK(d.tscl.z == doctest::Approx(2.0f));
+
+    HC::Graph loaded;
+    REQUIRE(HC::fromJson(HC::toJson(g), loaded));
+    REQUIRE(loaded.variables.size() == 1);
+    CHECK(loaded.variables[0].tpos.z == doctest::Approx(7.0f));
+    CHECK(loaded.variables[0].trot.y == doctest::Approx(90.0f));
+    CHECK(loaded.variables[0].tscl.x == doctest::Approx(2.0f));
+}
+
 // ═══ Array variables + array-op nodes ═════════════════════════════════════════
 
 TEST_CASE("Array: an array variable defaults to empty; round-trips through JSON")
