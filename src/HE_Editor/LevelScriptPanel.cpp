@@ -320,6 +320,8 @@ void drawVariableDetails(HC::Graph& graph, ContentManager* content, bool& edited
 	if (HcEditorUtil::drawTypePicker("Type", content, v->type, &v->className))
 	{
 		if (v->type != oldType)
+		{
+			v->defaultItems.clear(); // array slots hold the OLD element type
 			for (auto& n : graph.nodes)
 				if ((n.type == NT::GetVariable || n.type == NT::SetVariable) && n.s == v->name)
 				{
@@ -328,6 +330,7 @@ void drawVariableDetails(HC::Graph& graph, ContentManager* content, bool& edited
 					const int valuePin = n.type == NT::GetVariable ? r.dataOut0 : r.dataIn0;
 					removePinLinks(graph, n.id, valuePin);
 				}
+		}
 		edited = true;
 	}
 
@@ -351,7 +354,7 @@ void drawVariableDetails(HC::Graph& graph, ContentManager* content, bool& edited
 	}
 	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Hold a list of values instead of a single one.");
 
-	if (!v->isArray) // an array variable defaults to empty (built with Make/Add nodes)
+	if (!v->isArray)
 	{
 		ImGui::SeparatorText("Default");
 		switch (v->type)
@@ -370,6 +373,8 @@ void drawVariableDetails(HC::Graph& graph, ContentManager* content, bool& edited
 			default: break;
 		}
 	}
+	else if (HcEditorUtil::drawArrayDefaultEditor(*v)) // slot list seeds the array
+		edited = true;
 
 	ImGui::Spacing();
 	if (ImGui::Button("Delete Variable"))
@@ -649,6 +654,10 @@ const HC::Graph* resolveClassGraph(const HC::Node& srcNode, const HC::Graph& sel
 				return loadClassGraph(content, v->className, scratch) ? &scratch : nullptr;
 			return nullptr;
 		}
+		case NT::ForEach: // Element of an object array (class adopted on connect)
+			if (srcNode.propType == PT::Ref && !srcNode.s.empty())
+				return loadClassGraph(content, srcNode.s, scratch) ? &scratch : nullptr;
+			return nullptr;
 		default: return nullptr;
 	}
 }
@@ -675,7 +684,11 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 		for (const auto& l : graph.links) { const HC::Node* s = graph.findNode(l.srcNode);
 			if (s && s->subgraph == g.currentGraph) ls.push_back({ l.srcNode, l.srcPin, l.dstNode, l.dstPin }); }
 		return ls; };
-	m.connect = [&graph](int oN, int oP, int iN, int iP){ return graph.connect(oN, oP, iN, iP); };
+	m.connect = [&graph](int oN, int oP, int iN, int iP){
+		// ForEach is generic until wired: adopt the source array's element type
+		// (Array/Element pins retype + recolor) before the typed connect.
+		HC::adoptForEachElementType(graph, oN, oP, iN, iP);
+		return graph.connect(oN, oP, iN, iP); };
 	m.clearPinLinks = [&graph](int node, int pin, bool){ removePinLinks(graph, node, pin); };
 	m.removeNode = [&graph](int id){ graph.removeNode(id); };
 	// Literal nodes edit their value inline on the node body.
@@ -885,9 +898,13 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 		ImGui::BeginChild("##pindrag", ImVec2(240.0f, 320.0f));
 
 		// Wire the new node to the dragged pin (direction depends on the drag side).
+		// adoptForEachElementType first: a ForEach on either end takes the array's
+		// element type (and class) before the typed connect.
 		auto wireAt = [&](int newId, int pin){
-			if (srcInput) graph.connect(newId, pin, srcNode, srcPin);
-			else          graph.connect(srcNode, srcPin, newId, pin); };
+			if (srcInput) { HC::adoptForEachElementType(graph, newId, pin, srcNode, srcPin);
+			                graph.connect(newId, pin, srcNode, srcPin); }
+			else          { HC::adoptForEachElementType(graph, srcNode, srcPin, newId, pin);
+			                graph.connect(srcNode, srcPin, newId, pin); } };
 
 		// ── Ref output: the target class's public members lead ────────────────
 		if (!isExecPin && !srcInput && dragType == PT::Ref && !dragArray)

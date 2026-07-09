@@ -390,7 +390,14 @@ const Variable* Graph::findVariable(const std::string& name) const
 
 Value variableDefaultValue(const Variable& v)
 {
-    if (v.isArray) { Value r; r.isArray = true; r.type = v.type; return r; } // empty array
+    if (v.isArray)
+    {
+        // Seed from the editor-authored slots (each already a scalar of v.type).
+        Value r; r.isArray = true; r.type = v.type;
+        r.items = v.defaultItems;
+        for (Value& it : r.items) { it.isArray = false; it.type = v.type; }
+        return r;
+    }
     switch (v.type)
     {
         case P::Float:  return Value::ofFloat(v.f[0]);
@@ -402,6 +409,40 @@ Value variableDefaultValue(const Variable& v)
         case P::Ref:    return Value::ofRef(0);
         case P::Transform: return Value::ofTransform(v.tpos, v.trot, v.tscl);
         default:        return Value::ofFloat(v.f[0]);
+    }
+}
+
+void adoptForEachElementType(Graph& g, int srcNode, int srcPin, int dstNode, int dstPin)
+{
+    Node* dst = g.findNode(dstNode);
+    const Node* src = g.findNode(srcNode);
+    if (!dst || !src || dst->type != NodeType::ForEach) return;
+    // ForEach unified pins: execIn 0, Body 1, Done 2, Array-in 3, Element-out 4.
+    if (dstPin != 3) return;
+    const NodeSig ss = signatureOf(*src);
+    const int di = srcPin - (int)(ss.execIns.size() + ss.execOuts.size() + ss.dataIns.size());
+    if (di < 0 || di >= (int)ss.dataOuts.size() || !ss.dataOuts[di].isArray) return;
+
+    const PinType elem = ss.dataOuts[di].type;
+    if (elem != dst->propType)
+    {
+        dst->propType = elem;
+        // The Element output changed type: drop its links (they no longer typecheck).
+        g.links.erase(std::remove_if(g.links.begin(), g.links.end(),
+            [&](const Link& l){ return l.srcNode == dstNode && l.srcPin == 4; }),
+            g.links.end());
+    }
+    // Object arrays: carry the element class along so the Element pin offers the
+    // class's members. GetVariable/SetVariable → the variable's class; the array
+    // ops keep their element class path in s.
+    if (elem == PinType::Ref)
+    {
+        std::string cls;
+        if (src->type == NodeType::GetVariable || src->type == NodeType::SetVariable)
+        { if (const Variable* v = g.findVariable(src->s)) cls = v->className; }
+        else if (src->type != NodeType::ForEach)
+            cls = src->s;
+        if (!cls.empty()) dst->s = cls;
     }
 }
 
@@ -441,6 +482,55 @@ bool Graph::connect(int srcNode, int srcPin, int dstNode, int dstPin)
 }
 
 // ── JSON ─────────────────────────────────────────────────────────────────────
+
+// ── Scalar Value ⇄ JSON (array-default slots) ────────────────────────────────
+namespace
+{
+nlohmann::json scalarValueToJson(const Value& v, PinType t)
+{
+    switch (t)
+    {
+        case P::Float:  return v.f;
+        case P::Bool:   return v.b;
+        case P::Int:    return v.i;
+        case P::String: return v.s;
+        case P::Vec2:   return nlohmann::json::array({ v.v2.x, v.v2.y });
+        case P::Color:  return nlohmann::json::array({ v.col.x, v.col.y, v.col.z, v.col.w });
+        case P::Ref:    return v.ref;
+        case P::Transform:
+            return nlohmann::json::array({ v.tpos.x, v.tpos.y, v.tpos.z,
+                                           v.trot.x, v.trot.y, v.trot.z,
+                                           v.tscl.x, v.tscl.y, v.tscl.z });
+        default:        return v.f;
+    }
+}
+Value scalarValueFromJson(const nlohmann::json& j, PinType t)
+{
+    Value v; v.type = t;
+    switch (t)
+    {
+        case P::Float:  if (j.is_number()) v.f = j.get<float>(); break;
+        case P::Bool:   if (j.is_boolean()) v.b = j.get<bool>(); break;
+        case P::Int:    if (j.is_number()) v.i = j.get<int>(); break;
+        case P::String: if (j.is_string()) v.s = j.get<std::string>(); break;
+        case P::Vec2:   if (j.is_array() && j.size() >= 2)
+                            v.v2 = { j[0].get<float>(), j[1].get<float>() }; break;
+        case P::Color:  if (j.is_array() && j.size() >= 4)
+                            v.col = { j[0].get<float>(), j[1].get<float>(), j[2].get<float>(), j[3].get<float>() }; break;
+        case P::Ref:    if (j.is_number()) v.ref = j.get<uint32_t>(); break;
+        case P::Transform:
+            if (j.is_array() && j.size() >= 9)
+            {
+                v.tpos = { j[0].get<float>(), j[1].get<float>(), j[2].get<float>() };
+                v.trot = { j[3].get<float>(), j[4].get<float>(), j[5].get<float>() };
+                v.tscl = { j[6].get<float>(), j[7].get<float>(), j[8].get<float>() };
+            }
+            break;
+        default: break;
+    }
+    return v;
+}
+} // namespace
 
 std::string toJson(const Graph& g)
 {
@@ -491,6 +581,12 @@ std::string toJson(const Graph& g)
         if (!v.s.empty()) e["s"] = v.s;
         if (v.access)     e["access"] = v.access;
         if (v.isArray)    e["arr"] = true;
+        if (v.isArray && !v.defaultItems.empty())
+        {
+            nlohmann::json items = nlohmann::json::array();
+            for (const Value& it : v.defaultItems) items.push_back(scalarValueToJson(it, v.type));
+            e["items"] = std::move(items);
+        }
         if (v.type == PinType::Transform)
             e["xform"] = { v.tpos.x, v.tpos.y, v.tpos.z, v.trot.x, v.trot.y, v.trot.z,
                            v.tscl.x, v.tscl.y, v.tscl.z };
@@ -567,6 +663,9 @@ bool fromJson(const std::string& json, Graph& out)
         v.s    = e.value("s", std::string());
         v.access = e.value("access", 0);
         v.isArray = e.value("arr", false);
+        if (v.isArray)
+            if (const auto& items = e.value("items", nlohmann::json::array()); items.is_array())
+                for (const auto& it : items) v.defaultItems.push_back(scalarValueFromJson(it, v.type));
         v.className = e.value("className", std::string());
         if (const auto& f = e.value("f", nlohmann::json::array()); f.size() >= 4)
             for (int i = 0; i < 4; ++i) v.f[i] = f[i].get<float>();

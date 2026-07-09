@@ -645,3 +645,75 @@ TEST_CASE("Array: For Each runs the body per element and Done afterwards")
     CHECK(vars["sum"].f == doctest::Approx(18.0f));   // 5 + 6 + 7
     CHECK(vars["done"].f == doctest::Approx(1.0f));   // Done fired after the loop
 }
+
+TEST_CASE("Array: default slots seed the variable and survive JSON")
+{
+    HC::Graph g;
+    HC::Variable v; v.name = "nums"; v.type = P::Int; v.isArray = true;
+    v.defaultItems.push_back(Value::ofInt(7));
+    v.defaultItems.push_back(Value::ofInt(8));
+    v.defaultItems.push_back(Value::ofInt(9));
+    g.variables.push_back(v);
+
+    // The default seeds a filled array (not an empty one anymore).
+    const Value d = HC::variableDefaultValue(g.variables[0]);
+    CHECK(d.isArray == true);
+    REQUIRE(d.items.size() == 3);
+    CHECK(d.items[0].i == 7);
+    CHECK(d.items[2].i == 9);
+
+    // Slots round-trip through JSON (typed per element).
+    HC::Graph loaded;
+    REQUIRE(HC::fromJson(HC::toJson(g), loaded));
+    REQUIRE(loaded.variables.size() == 1);
+    REQUIRE(loaded.variables[0].defaultItems.size() == 3);
+    CHECK(loaded.variables[0].defaultItems[1].i == 8);
+
+    // A Transform-element array round-trips its 9 components per slot.
+    HC::Graph g2;
+    HC::Variable t; t.name = "xfs"; t.type = P::Transform; t.isArray = true;
+    Value xf = Value::ofTransform({ 1, 2, 3 }, { 4, 5, 6 }, { 7, 8, 9 });
+    t.defaultItems.push_back(xf);
+    g2.variables.push_back(t);
+    HC::Graph loaded2;
+    REQUIRE(HC::fromJson(HC::toJson(g2), loaded2));
+    REQUIRE(loaded2.variables[0].defaultItems.size() == 1);
+    CHECK(loaded2.variables[0].defaultItems[0].trot.y == doctest::Approx(5.0f));
+    CHECK(loaded2.variables[0].defaultItems[0].tscl.z == doctest::Approx(9.0f));
+}
+
+TEST_CASE("Array: For Each adopts the wired array's element type + class")
+{
+    HC::Graph g;
+    // A String array source and a fresh (Float-default) ForEach.
+    HC::Node mk; mk.type = NT::ArrayMake; mk.propType = P::String; const int mkId = g.addNode(mk);
+    HC::Node fe; fe.type = NT::ForEach; /* propType defaults Float */ const int feId = g.addNode(fe);
+    // Pre-wire the Element output (Float) somewhere — it must drop on retype.
+    HC::Node sv; sv.type = NT::SetVariable; sv.s = "x"; sv.propType = P::Float; const int svId = g.addNode(sv);
+    REQUIRE(g.connect(feId, 4, svId, 2));   // Element (Float) → set x (Float)
+
+    // Without adoption a String[] → Float[] connect is rejected.
+    CHECK(g.connect(mkId, 0, feId, 3) == false);
+
+    // With adoption the ForEach retypes to String, the stale Element link drops,
+    // and the connect succeeds.
+    HC::adoptForEachElementType(g, mkId, 0, feId, 3);
+    CHECK(g.findNode(feId)->propType == P::String);
+    CHECK(g.connect(mkId, 0, feId, 3) == true);
+    bool elementLinkAlive = false;
+    for (const auto& l : g.links) if (l.srcNode == feId && l.srcPin == 4) elementLinkAlive = true;
+    CHECK(elementLinkAlive == false);
+
+    // Object arrays carry the element class onto the ForEach (member menus).
+    HC::Graph g2;
+    HC::Variable ov; ov.name = "objs"; ov.type = P::Ref; ov.isArray = true;
+    ov.className = "Classes/Enemy.hasset";
+    g2.variables.push_back(ov);
+    HC::Node gv; gv.type = NT::GetVariable; gv.s = "objs"; gv.propType = P::Ref; gv.isArray = true;
+    const int gvId = g2.addNode(gv);
+    HC::Node fe2; fe2.type = NT::ForEach; const int fe2Id = g2.addNode(fe2);
+    HC::adoptForEachElementType(g2, gvId, 0, fe2Id, 3);   // GetVariable dataOut = pin 0
+    CHECK(g2.findNode(fe2Id)->propType == P::Ref);
+    CHECK(g2.findNode(fe2Id)->s == "Classes/Enemy.hasset");
+    CHECK(g2.connect(gvId, 0, fe2Id, 3) == true);
+}
