@@ -202,6 +202,10 @@ struct ApiFn
     // Missing/extra args are tolerated (defaults fill in), mirroring the API's
     // null-Ctx forgiveness.
     std::function<std::vector<Value>(Ctx&, const std::vector<Value>&)> invoke;
+    // Human-readable editor name ("Sine", "Set Position") — what menus and node
+    // titles show; `id` stays the stable machine identifier. Assigned in a post-
+    // pass when the table is built (trailing member so rows stay positional).
+    const char* displayName = nullptr;
 };
 
 // The full table (built once). Order is stable and grouped by category.

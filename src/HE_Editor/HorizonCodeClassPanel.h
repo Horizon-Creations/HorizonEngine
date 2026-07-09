@@ -19,4 +19,6 @@ namespace HorizonCodeClassPanel
 	bool isClassAsset(const std::string& path);
 	// True if the cached editor for `path` has unsaved edits (tab dirty mark).
 	bool isDirty(const std::string& path);
+	// Drop the cached editor state (tab closed without unsaved edits).
+	void forget(const std::string& path);
 }

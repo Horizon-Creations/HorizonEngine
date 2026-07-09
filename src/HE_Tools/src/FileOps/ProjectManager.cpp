@@ -56,6 +56,7 @@ static json profileToJson(const ExportProfile& p)
 	j["targetPlatform"]   = p.targetPlatform;
 	j["appBundle"]        = p.appBundle;
 	j["shaderBackends"]   = p.shaderBackends;
+	j["compileHorizonCode"] = p.compileHorizonCode;
 	return j;
 }
 
@@ -74,6 +75,7 @@ static ExportProfile profileFromJson(const json& j)
 	p.appBundle        = jsonBool(j, "appBundle", false);
 	p.shaderBackends   = j.contains("shaderBackends") && j["shaderBackends"].is_number_unsigned()
 	                     ? j["shaderBackends"].get<uint32_t>() : ((1u << 4) | (1u << 0));
+	p.compileHorizonCode = jsonBool(j, "compileHorizonCode", false);
 	if (auto it = j.find("excludePatterns"); it != j.end() && it->is_array())
 		for (const auto& e : *it)
 			if (e.is_string()) p.excludePatterns.push_back(e.get<std::string>());

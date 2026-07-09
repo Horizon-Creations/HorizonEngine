@@ -443,14 +443,72 @@ std::string drawEngineApiMenu(const std::string& lowerQuery)
 	const char* header = nullptr; // current category header, drawn lazily
 	for (const HE::api::ApiFn& fn : HE::api::registry())
 	{
+		const char* shown = fn.displayName ? fn.displayName : fn.id; // readable name
 		const bool match = lowerQuery.empty()
+			|| lower(shown).find(lowerQuery) != std::string::npos
 			|| lower(fn.id).find(lowerQuery) != std::string::npos
 			|| lower(fn.category).find(lowerQuery) != std::string::npos;
 		if (!match) continue;
 		if (!header || std::string(header) != fn.category)
 		{ ImGui::TextDisabled("Engine · %s", fn.category); header = fn.category; }
-		if (ImGui::Selectable(fn.id)) picked = fn.id;
+		// Unique ImGui id via the stable api id (display names may repeat later).
+		if (ImGui::Selectable((std::string(shown) + "##" + fn.id).c_str())) picked = fn.id;
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", fn.id);
 	}
 	return picked;
+}
+
+std::string engineCallTitle(const std::string& apiId)
+{
+	if (const HE::api::ApiFn* fn = HE::api::find(apiId))
+		if (fn->displayName) return fn->displayName;
+	return apiId.empty() ? std::string("Engine Call") : apiId;
+}
+
+int dragMatchPin(HorizonCode::NodeType t, HorizonCode::PinType dragType,
+                 bool dragArray, bool srcIsInput, bool srcIsExec)
+{
+	// Probe a fresh node's signature. propType is seeded with the dragged type so
+	// type-parametric nodes (array ops, Print, …) match — the host seeds the real
+	// node the same way, keeping the computed pin index valid.
+	HorizonCode::Node tpl;
+	tpl.type = t; tpl.propType = dragType; tpl.isArray = dragArray;
+	const HorizonCode::NodeSig s = HorizonCode::signatureOf(tpl);
+	const int eIn = (int)s.execIns.size(), eOut = (int)s.execOuts.size();
+	const int dIn = (int)s.dataIns.size();
+	if (srcIsExec)
+	{
+		if (srcIsInput) return eOut ? eIn : -1;   // feed the dragged exec-in ← first exec-out
+		return eIn ? 0 : -1;                       // dragged exec-out → first exec-in
+	}
+	if (srcIsInput)                                // dragged data-in ← a matching data-out
+	{
+		for (size_t i = 0; i < s.dataOuts.size(); ++i)
+			if (s.dataOuts[i].type == dragType && s.dataOuts[i].isArray == dragArray)
+				return eIn + eOut + dIn + (int)i;
+		return -1;
+	}
+	for (size_t i = 0; i < s.dataIns.size(); ++i)  // dragged data-out → a matching data-in
+		if (s.dataIns[i].type == dragType && s.dataIns[i].isArray == dragArray)
+			return eIn + eOut + (int)i;
+	return -1;
+}
+
+int dragMatchApiPin(const HE::api::ApiFn& fn, HorizonCode::PinType dragType,
+                    bool dragArray, bool srcIsInput, bool srcIsExec)
+{
+	// EngineCall unified pins: [execIn?][execOut?][params…][results…].
+	const int e = fn.isExec ? 1 : 0;
+	if (srcIsExec) return fn.isExec ? (srcIsInput ? e : 0) : -1;
+	if (dragArray) return -1;                      // the registry has no array pins
+	if (srcIsInput)
+	{
+		for (size_t i = 0; i < fn.results.size(); ++i)
+			if (fn.results[i].type == dragType) return e + e + (int)fn.params.size() + (int)i;
+		return -1;
+	}
+	for (size_t i = 0; i < fn.params.size(); ++i)
+		if (fn.params[i].type == dragType) return e + e + (int)i;
+	return -1;
 }
 }

@@ -278,10 +278,13 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
             dl->AddRectFilled(n.pos, br, bodyCol, 6.0f);
             dl->AddRect(n.pos, br, sel ? IM_COL32(255, 170, 40, 255) : IM_COL32(20, 20, 24, 255),
                         6.0f, 0, sel ? 2.0f : 1.0f);
-            const float fs = 12.0f * std::max(0.7f, st.zoom);
-            const ImVec2 ts = ImGui::CalcTextSize(title.c_str());
+            // Title scales linearly with zoom (like the node box), and the centering
+            // uses the SCALED text width — mixing the default-size CalcTextSize with
+            // a scaled draw put the title off-center at any zoom ≠ 1.
+            const float fs = 12.0f * st.zoom;
+            const float tw = ImGui::CalcTextSize(title.c_str()).x * (fs / ImGui::GetFontSize());
             dl->AddText(nullptr, fs,
-                        ImVec2(n.pos.x + (n.size.x - ts.x) * 0.5f, n.pos.y + 2 * st.zoom),
+                        ImVec2(n.pos.x + (n.size.x - tw) * 0.5f, n.pos.y + 2 * st.zoom),
                         IM_COL32(225, 225, 228, 255), title.c_str());
         }
         else
@@ -291,8 +294,8 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
                               model.headerColor(n.id), 5.0f, ImDrawFlags_RoundCornersTop);
             dl->AddRect(n.pos, br, sel ? IM_COL32(255, 170, 40, 255) : IM_COL32(20, 20, 24, 255),
                         5.0f, 0, sel ? 2.0f : 1.0f);
-            dl->AddText(nullptr, 13.0f * std::max(0.7f, st.zoom),
-                        ImVec2(n.pos.x + 6, n.pos.y + 4 * st.zoom), IM_COL32(240,240,240,255), title.c_str());
+            dl->AddText(nullptr, 13.0f * st.zoom,
+                        ImVec2(n.pos.x + 6 * st.zoom, n.pos.y + 4 * st.zoom), IM_COL32(240,240,240,255), title.c_str());
         }
 
         for (size_t i = 0; i < n.pins.size(); ++i)
@@ -321,10 +324,17 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
 
             if (!p.label.empty())
             {
-                const ImVec2 ts = ImGui::CalcTextSize(p.label.c_str());
-                const float ty = pp.y - ts.y * 0.5f;
-                if (p.input) dl->AddText(ImVec2(pp.x + 8, ty), IM_COL32(200,200,200,200), p.label.c_str());
-                else         dl->AddText(ImVec2(pp.x - 8 - ts.x, ty), IM_COL32(200,200,200,200), p.label.c_str());
+                // Pin labels scale with zoom like everything else on the node (they
+                // were drawn at the fixed default font size before, so they overflowed
+                // the node when zoomed out and looked tiny when zoomed in).
+                const float fs = 13.0f * st.zoom;
+                const float scale = fs / ImGui::GetFontSize();
+                const ImVec2 ts0 = ImGui::CalcTextSize(p.label.c_str());
+                const float ty = pp.y - ts0.y * scale * 0.5f;
+                if (p.input) dl->AddText(nullptr, fs, ImVec2(pp.x + 8 * st.zoom, ty),
+                                         IM_COL32(200,200,200,200), p.label.c_str());
+                else         dl->AddText(nullptr, fs, ImVec2(pp.x - 8 * st.zoom - ts0.x * scale, ty),
+                                         IM_COL32(200,200,200,200), p.label.c_str());
             }
         }
 

@@ -1,6 +1,7 @@
 #include "HorizonScene/EngineApi.h"
 #include "HorizonScene/ScriptApi.h"
 #include <cmath>
+#include <cstring>
 #include <random>
 #include <utility>
 #include <unordered_set>
@@ -327,6 +328,52 @@ const std::vector<ApiFn>& registry()
             [](Ctx&, const VV&){ return VV{ Value::ofVec2(input::mouseDelta()) }; } });
         t.push_back({ "input.scrollDelta", "Input", false, {}, {{"scroll", P::Float}}, "HE::api::input::scrollDelta",
             [](Ctx&, const VV&){ return VV{ Value::ofFloat(input::scrollDelta()) }; } });
+
+        // ── Readable editor names (post-pass; id stays the stable identifier) ──
+        // What menus and node titles show — "Sine" under Math, not "math.sin".
+        static const std::pair<const char*, const char*> kNames[] = {
+            { "log", "Log" },
+            { "entity.getName", "Get Name" },       { "entity.spawn", "Spawn Entity" },
+            { "entity.destroy", "Destroy Entity" }, { "entity.distance", "Distance Between" },
+            { "transform.getPosition", "Get Position" }, { "transform.setPosition", "Set Position" },
+            { "transform.getRotation", "Get Rotation" }, { "transform.setRotation", "Set Rotation" },
+            { "transform.getScale", "Get Scale" },       { "transform.setScale", "Set Scale" },
+            { "physics.raycast", "Raycast" }, { "physics.setVelocity", "Set Velocity" },
+            { "physics.isGrounded", "Is Grounded" },
+            { "material.getParam", "Get Material Param" }, { "material.setParam", "Set Material Param" },
+            { "ui.getText", "Get UI Text" },        { "ui.setText", "Set UI Text" },
+            { "ui.getColor", "Get UI Color" },      { "ui.setColor", "Set UI Color" },
+            { "ui.getVisible", "Get UI Visible" },  { "ui.setVisible", "Set UI Visible" },
+            { "ui.getPosition", "Get UI Position" },{ "ui.setPosition", "Set UI Position" },
+            { "ui.getSize", "Get UI Size" },        { "ui.setSize", "Set UI Size" },
+            { "ui.setMaterialParam", "Set UI Material Param" },
+            { "widget.create", "Create Widget" },   { "widget.destroy", "Destroy Widget" },
+            { "widget.show", "Show Widget" },       { "widget.hide", "Hide Widget" },
+            { "widget.setZOrder", "Set Widget Z-Order" }, { "widget.isVisible", "Is Widget Visible" },
+            { "widget.callFunction", "Call Widget Function" },
+            { "cursor.setVisible", "Set Cursor Visible" },
+            { "math.sin", "Sine" },   { "math.cos", "Cosine" }, { "math.tan", "Tangent" },
+            { "math.sqrt", "Square Root" }, { "math.abs", "Absolute" },
+            { "math.floor", "Floor" }, { "math.ceil", "Ceil" }, { "math.round", "Round" },
+            { "math.sign", "Sign" },   { "math.pow", "Power" }, { "math.mod", "Modulo" },
+            { "math.atan2", "Atan2" }, { "math.min", "Min" },   { "math.max", "Max" },
+            { "math.clamp", "Clamp" }, { "math.lerp", "Lerp" },
+            { "math.length", "Length (Vec2)" }, { "math.distance", "Distance (Vec2)" },
+            { "random.seed", "Seed Random" },   { "random.value", "Random Value" },
+            { "random.range", "Random Range" }, { "random.rangeInt", "Random Range (Int)" },
+            { "random.chance", "Random Chance" },
+            { "time.deltaTime", "Delta Time" }, { "time.elapsed", "Elapsed Time" },
+            { "time.frameCount", "Frame Count" },
+            { "input.keyDown", "Key Down" },          { "input.mouseButton", "Mouse Button" },
+            { "input.mousePosition", "Mouse Position" }, { "input.mouseDelta", "Mouse Delta" },
+            { "input.scrollDelta", "Scroll Delta" },
+        };
+        for (auto& fn : t)
+        {
+            fn.displayName = fn.id; // fallback: never null, worst case the id shows
+            for (const auto& [id, name] : kNames)
+                if (std::strcmp(fn.id, id) == 0) { fn.displayName = name; break; }
+        }
 
         return t;
     }();
