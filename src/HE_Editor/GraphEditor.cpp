@@ -305,6 +305,17 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
                 dl->AddTriangleFilled(ImVec2(pp.x - s, pp.y - s), ImVec2(pp.x - s, pp.y + s),
                                       ImVec2(pp.x + s, pp.y), p.color);
             }
+            else if (p.isArray)
+            {
+                // Array pin: a 2×2 grid of small squares (Unreal-style container pin)
+                // so a list-of-T is visually distinct from a scalar T of the same color.
+                const float o = kPinR * st.zoom * 0.55f;   // center offset of each square
+                const float h = kPinR * st.zoom * 0.42f;   // square half-size
+                for (int gy = -1; gy <= 1; gy += 2)
+                    for (int gx = -1; gx <= 1; gx += 2)
+                        dl->AddRectFilled(ImVec2(pp.x + gx * o - h, pp.y + gy * o - h),
+                                          ImVec2(pp.x + gx * o + h, pp.y + gy * o + h), p.color);
+            }
             else
                 dl->AddCircleFilled(pp, kPinR * st.zoom, p.color);
 

@@ -366,7 +366,7 @@ Value variableDefaultValue(const Variable& v)
         case P::Vec2:   return Value::ofVec2({ v.f[0], v.f[1] });
         case P::Color:  return Value::ofColor({ v.f[0], v.f[1], v.f[2], v.f[3] });
         case P::Ref:    return Value::ofRef(0);
-        case P::Transform: return Value::ofTransform({ 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, 0.0f }, { 1.0f, 1.0f, 1.0f });
+        case P::Transform: return Value::ofTransform(v.tpos, v.trot, v.tscl);
         default:        return Value::ofFloat(v.f[0]);
     }
 }
@@ -457,6 +457,9 @@ std::string toJson(const Graph& g)
         if (!v.s.empty()) e["s"] = v.s;
         if (v.access)     e["access"] = v.access;
         if (v.isArray)    e["arr"] = true;
+        if (v.type == PinType::Transform)
+            e["xform"] = { v.tpos.x, v.tpos.y, v.tpos.z, v.trot.x, v.trot.y, v.trot.z,
+                           v.tscl.x, v.tscl.y, v.tscl.z };
         if (!v.className.empty()) e["className"] = v.className;
         jv.push_back(std::move(e));
     }
@@ -531,6 +534,12 @@ bool fromJson(const std::string& json, Graph& out)
         v.className = e.value("className", std::string());
         if (const auto& f = e.value("f", nlohmann::json::array()); f.size() >= 4)
             for (int i = 0; i < 4; ++i) v.f[i] = f[i].get<float>();
+        if (const auto& x = e.value("xform", nlohmann::json::array()); x.size() >= 9)
+        {
+            v.tpos = { x[0].get<float>(), x[1].get<float>(), x[2].get<float>() };
+            v.trot = { x[3].get<float>(), x[4].get<float>(), x[5].get<float>() };
+            v.tscl = { x[6].get<float>(), x[7].get<float>(), x[8].get<float>() };
+        }
         g.variables.push_back(std::move(v));
     }
     syncFunctionSignatures(g); // reconcile call/return pins with their entries

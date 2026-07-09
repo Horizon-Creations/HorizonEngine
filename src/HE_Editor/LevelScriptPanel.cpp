@@ -83,6 +83,7 @@ std::vector<GraphEditor::Pin> nodePins(const HC::Node& n)
 		GraphEditor::Pin p;
 		p.id = id++; p.label = pd.name ? pd.name : "";
 		p.color = pinColor(pd.type); p.input = input; p.isExec = isExec;
+		p.isArray = pd.isArray;   // array pins draw as a 2×2 grid
 		out.push_back(std::move(p));
 	};
 	for (const auto& pd : s.execIns)  push(pd, true,  true);
@@ -361,6 +362,11 @@ void drawVariableDetails(HC::Graph& graph, ContentManager* content, bool& edited
 			case PT::String: ImGui::InputText("##vdef", &v->s); if (ImGui::IsItemDeactivatedAfterEdit()) edited = true; break;
 			case PT::Vec2:   if (ImGui::DragFloat2("##vdef", v->f, 0.1f)) edited = true; break;
 			case PT::Color:  if (ImGui::ColorEdit4("##vdef", v->f)) edited = true; break;
+			case PT::Transform:
+				if (ImGui::DragFloat3("Position##vdef", &v->tpos.x, 0.1f)) edited = true;
+				if (ImGui::DragFloat3("Rotation##vdef", &v->trot.x, 0.5f)) edited = true;
+				if (ImGui::DragFloat3("Scale##vdef",    &v->tscl.x, 0.05f)) edited = true;
+				break;
 			default: break;
 		}
 	}
@@ -496,8 +502,10 @@ void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events,
 	case NT::ArrayGet:
 	case NT::ArrayAdd:
 	{
+		// Element type — object classes allowed too (the class path rides in s,
+		// which array-op nodes don't use otherwise).
 		const PT before = n->propType;
-		if (HcEditorUtil::drawTypePicker("Element", content, n->propType, nullptr) && n->propType != before)
+		if (HcEditorUtil::drawTypePicker("Element", content, n->propType, &n->s) && n->propType != before)
 		{
 			graph.links.erase(std::remove_if(graph.links.begin(), graph.links.end(),
 				[&](const HC::Link& l){ return l.srcNode == n->id || l.dstNode == n->id; }), graph.links.end());

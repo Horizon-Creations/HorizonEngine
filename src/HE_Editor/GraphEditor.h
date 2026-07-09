@@ -29,6 +29,7 @@ struct Pin
     ImU32       color;
     bool        input;   // left column (true) or right column (false)
     bool        isExec;  // draw as a triangle (exec flow) vs a circle (data)
+    bool        isArray = false; // draw as a 2×2 grid (array of the data type)
 };
 
 // Persistent per-graph canvas state. The host owns one and passes it each frame;
