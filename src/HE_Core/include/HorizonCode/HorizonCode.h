@@ -232,6 +232,13 @@ HE_API void assignSubgraphs(Graph& g);
 // their per-instance variable store with this.
 HE_API Value variableDefaultValue(const Variable& v);
 
+// Editor convenience: clone the given nodes (fresh ids, positions offset by
+// dx/dy) plus every link whose BOTH endpoints are in the set. Event and
+// FunctionEntry nodes are skipped (handler/function names must stay unique).
+// Returns the new ids in input order (skipped/unknown ids are omitted).
+HE_API std::vector<int> duplicateNodes(Graph& g, const std::vector<int>& ids,
+                                       float dx = 28.0f, float dy = 28.0f);
+
 // Editor convenience: a ForEach node is generic until wired. When (dstNode,
 // dstPin) is a ForEach's Array input and (srcNode, srcPin) is an ARRAY data
 // output, adopt the source's element type onto the ForEach (its Array/Element

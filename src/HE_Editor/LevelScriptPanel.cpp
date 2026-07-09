@@ -706,6 +706,17 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 		const bool inSel = std::find(g.ge.selection.begin(), g.ge.selection.end(), nodeId)
 			!= g.ge.selection.end();
 		const bool multi = inSel && g.ge.selection.size() > 1;
+		if (ImGui::MenuItem(multi ? "Duplicate Selection" : "Duplicate Node"))
+		{
+			const std::vector<int> src = multi ? g.ge.selection : std::vector<int>{ nodeId };
+			const std::vector<int> fresh = HC::duplicateNodes(graph, src);
+			if (!fresh.empty())
+			{
+				g.ge.selection = fresh;          // select the clones (ready to drag)
+				g.selectedNode = fresh.front();
+				edited = true;
+			}
+		}
 		if (ImGui::MenuItem(multi ? "Delete Selection" : "Delete Node"))
 		{
 			const std::vector<int> doomed = multi ? g.ge.selection : std::vector<int>{ nodeId };

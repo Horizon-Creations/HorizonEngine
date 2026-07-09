@@ -792,7 +792,7 @@ void EditorApplication::OnInit()
 			-> std::vector<HorizonCode::Value> {
 			const HE::api::ApiFn* fn = HE::api::find(id);
 			if (!fn) return {};
-			HE::api::Ctx c{ m_editorWorld.get(), nullptr, &contentManager() };
+			HE::api::Ctx c{ m_editorWorld.get(), nullptr, &contentManager(), &m_audioEngine };
 			return fn->invoke(c, args);
 		};
 		m_gameInstance.runtime().setServices(std::move(svc));

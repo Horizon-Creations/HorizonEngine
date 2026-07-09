@@ -1,7 +1,10 @@
 #include "doctest.h"
 #include <HorizonScene/EngineApi.h>
 #include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/AudioEngine.h>
 #include <HorizonScene/Components/TransformComponent.h>
+#include <HorizonScene/Components/CameraComponent.h>
+#include <HorizonScene/Components/EnvironmentComponent.h>
 #include <HorizonCode/HorizonCode.h>
 #include <glm/glm.hpp>
 #include <cmath>
@@ -716,4 +719,127 @@ TEST_CASE("Array: For Each adopts the wired array's element type + class")
     CHECK(g2.findNode(fe2Id)->propType == P::Ref);
     CHECK(g2.findNode(fe2Id)->s == "Classes/Enemy.hasset");
     CHECK(g2.connect(gvId, 0, fe2Id, 3) == true);
+}
+
+// ═══ String / Camera / Environment / Entity-query / Audio groups ══════════════
+
+TEST_CASE("String: the registry's string library evaluates correctly")
+{
+    Ctx c{};
+    auto call = [&](const char* id, std::vector<Value> a){ return HE::api::find(id)->invoke(c, a); };
+    auto S = [](const char* s){ return Value::ofString(s); };
+
+    CHECK(call("string.length",    { S("hello") })[0].i == 5);
+    CHECK(call("string.substring", { S("hello world"), Value::ofInt(6), Value::ofInt(5) })[0].s == "world");
+    CHECK(call("string.contains",  { S("hello"), S("ell") })[0].b == true);
+    CHECK(call("string.find",      { S("hello"), S("lo") })[0].i == 3);
+    CHECK(call("string.find",      { S("hello"), S("xyz") })[0].i == -1);
+    CHECK(call("string.replace",   { S("a-b-c"), S("-"), S("+") })[0].s == "a+b+c");
+    CHECK(call("string.toUpper",   { S("MiXeD") })[0].s == "MIXED");
+    CHECK(call("string.toLower",   { S("MiXeD") })[0].s == "mixed");
+    CHECK(call("string.trim",      { S("  pad  ") })[0].s == "pad");
+    CHECK(call("string.startsWith",{ S("hello"), S("he") })[0].b == true);
+    CHECK(call("string.endsWith",  { S("hello"), S("lo") })[0].b == true);
+    CHECK(call("string.toNumber",  { S("3.5") })[0].f == doctest::Approx(3.5f));
+    CHECK(call("string.toNumber",  { S("nope") })[0].f == doctest::Approx(0.0f));
+}
+
+TEST_CASE("Camera + Environment: registry knobs reach the world's components")
+{
+    HorizonWorld world;
+    auto camE = world.createEntity("Cam");
+    TransformComponent tc; tc.position = { 1, 2, 3 };
+    world.registry().emplace<TransformComponent>(camE, tc);
+    CameraComponent cc; cc.isMain = true; cc.fovDegrees = 60.0f;
+    world.registry().emplace<CameraComponent>(camE, cc);
+    auto envE = world.createEntity("Env");
+    world.registry().emplace<EnvironmentComponent>(envE);
+
+    Ctx c{ &world, nullptr, nullptr };
+    auto call = [&](const char* id, std::vector<Value> a){ return HE::api::find(id)->invoke(c, a); };
+
+    // Camera transform + fov round-trip through the registry (vec3 packed in Color).
+    CHECK(call("camera.getPosition", {})[0].col.y == doctest::Approx(2.0f));
+    call("camera.setPosition", { Value::ofColor({ 9, 8, 7, 0 }) });
+    CHECK(world.registry().get<TransformComponent>(camE).position.x == doctest::Approx(9.0f));
+    call("camera.setFov", { Value::ofFloat(90.0f) });
+    CHECK(call("camera.getFov", {})[0].f == doctest::Approx(90.0f));
+
+    // Environment knobs write into the EnvironmentComponent.
+    call("env.setTimeOfDay",     { Value::ofFloat(0.25f) });
+    call("env.setCloudCoverage", { Value::ofFloat(0.8f) });
+    call("env.setFogDensity",    { Value::ofFloat(0.1f) });
+    call("env.setWindSpeed",     { Value::ofFloat(4.0f) });
+    const auto& env = world.registry().get<EnvironmentComponent>(envE);
+    CHECK(env.timeOfDay == doctest::Approx(0.25f));
+    CHECK(env.cloudCoverage == doctest::Approx(0.8f));
+    CHECK(env.fogDensity == doctest::Approx(0.1f));
+    CHECK(call("env.getWindSpeed", {})[0].f == doctest::Approx(4.0f));
+}
+
+TEST_CASE("Entity query: findByName + exists through the registry")
+{
+    HorizonWorld world;
+    auto hero = world.createEntity("Hero");
+    Ctx c{ &world, nullptr, nullptr };
+    auto call = [&](const char* id, std::vector<Value> a){ return HE::api::find(id)->invoke(c, a); };
+
+    CHECK((uint32_t)call("entity.findByName", { Value::ofString("Hero") })[0].i == (uint32_t)hero);
+    CHECK(call("entity.findByName", { Value::ofString("Nobody") })[0].i == 0);
+    CHECK(call("entity.exists", { Value::ofInt((int)(uint32_t)hero) })[0].b == true);
+    CHECK(call("entity.exists", { Value::ofInt(123456) })[0].b == false);
+}
+
+TEST_CASE("Audio: null-tolerant without an engine; headless engine answers queries")
+{
+    // No engine bound → everything no-ops / returns neutral.
+    Ctx none{};
+    auto calln = [&](const char* id, std::vector<Value> a){ return HE::api::find(id)->invoke(none, a); };
+    CHECK(calln("audio.play", { Value::ofString("Sounds/x.hasset") })[0].i == 0);
+    CHECK(calln("audio.isPlaying", { Value::ofInt(1) })[0].b == false);
+    CHECK_NOTHROW(calln("audio.stopAll", {}));
+
+    // Headless engine (no device): bus + query paths run without touching assets.
+    AudioEngine engine;
+    REQUIRE(engine.init(/*noDevice=*/true));
+    Ctx c{}; c.audio = &engine;
+    auto call = [&](const char* id, std::vector<Value> a){ return HE::api::find(id)->invoke(c, a); };
+    CHECK_NOTHROW(call("audio.setBusVolume", { Value::ofString("SFX"), Value::ofFloat(0.5f) }));
+    CHECK(call("audio.isPlaying", { Value::ofInt(42) })[0].b == false);
+    CHECK_NOTHROW(call("audio.stopAll", {}));
+    engine.shutdown();
+}
+
+// ═══ Duplicate nodes (editor Duplicate command) ═══════════════════════════════
+
+TEST_CASE("duplicateNodes clones the set + internal links, skips Event/FunctionEntry")
+{
+    HC::Graph g;
+    HC::Node ev; ev.type = NT::Event; ev.s = "Run"; const int evId = g.addNode(ev);
+    HC::Node cf; cf.type = NT::ConstFloat; cf.f[0] = 5.0f; const int cfId = g.addNode(cf);
+    HC::Node sv; sv.type = NT::SetVariable; sv.s = "x"; sv.propType = P::Float; const int svId = g.addNode(sv);
+    REQUIRE(g.connect(evId, 0, svId, 0));   // external exec (event → set)
+    REQUIRE(g.connect(cfId, 0, svId, 2));   // internal data (const → set), both cloned
+
+    const size_t linksBefore = g.links.size();
+    const std::vector<int> fresh = HC::duplicateNodes(g, { evId, cfId, svId });
+
+    // Event skipped; two clones with fresh ids and offset positions.
+    REQUIRE(fresh.size() == 2);
+    CHECK(fresh[0] != cfId);
+    const HC::Node* cfClone = g.findNode(fresh[0]);
+    const HC::Node* svClone = g.findNode(fresh[1]);
+    REQUIRE(cfClone); REQUIRE(svClone);
+    CHECK(cfClone->type == NT::ConstFloat);
+    CHECK(cfClone->f[0] == doctest::Approx(5.0f));       // payload rides along
+    CHECK(cfClone->x == doctest::Approx(28.0f));          // offset from 0
+    CHECK(svClone->s == "x");
+
+    // Exactly ONE new link: the internal const→set. The event→set exec link is
+    // NOT cloned (the event was skipped, and externals stay on the originals).
+    CHECK(g.links.size() == linksBefore + 1);
+    bool cloneLink = false;
+    for (const auto& l : g.links)
+        if (l.srcNode == fresh[0] && l.dstNode == fresh[1]) cloneLink = true;
+    CHECK(cloneLink == true);
 }

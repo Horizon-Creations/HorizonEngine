@@ -9,6 +9,7 @@
 class HorizonWorld;
 class PhysicsWorld;
 class ContentManager;
+class AudioEngine;
 
 // ── HE::api ──────────────────────────────────────────────────────────────────
 // The single, engine-wide C++ gameplay API. Every scripting frontend reaches the
@@ -44,17 +45,20 @@ struct Ctx
     HorizonWorld*   world   = nullptr;
     PhysicsWorld*   physics = nullptr;
     ContentManager* content = nullptr;
+    AudioEngine*    audio   = nullptr;
 };
 
 // ── Debug ────────────────────────────────────────────────────────────────────
 void log(Ctx&, const std::string& message);
 
-// ── Entities: identity / lifecycle ───────────────────────────────────────────
+// ── Entities: identity / lifecycle / query ───────────────────────────────────
 namespace entity {
     std::string getName(Ctx&, Entity e);                              // "" if invalid
     Entity      spawn(Ctx&, Entity parent, const std::string& name);  // 0 on failure
     void        destroy(Ctx&, Entity e);
     float       distance(Ctx&, Entity a, Entity b);                   // -1 if either invalid
+    Entity      findByName(Ctx&, const std::string& name);            // first match, 0 if none
+    bool        exists(Ctx&, Entity e);
 }
 
 // ── Transform (Euler degrees for rotation) ───────────────────────────────────
@@ -116,6 +120,55 @@ namespace widget {
 // ── Cursor (host-app hook) ───────────────────────────────────────────────────
 namespace cursor {
     void setVisible(Ctx&, bool show);
+}
+
+// ── Camera (the world's main camera: isMain, else the first CameraComponent) ──
+namespace camera {
+    glm::vec3 getPosition(Ctx&);
+    void      setPosition(Ctx&, const glm::vec3& p);
+    glm::vec3 getRotation(Ctx&);                      // euler degrees
+    void      setRotation(Ctx&, const glm::vec3& r);
+    float     getFov(Ctx&);                           // degrees; 0 when no camera
+    void      setFov(Ctx&, float degrees);
+}
+
+// ── Environment (the world's EnvironmentComponent — sky/fog/wind knobs) ───────
+namespace env {
+    float getTimeOfDay(Ctx&);        void setTimeOfDay(Ctx&, float t);       // 0..1
+    float getCloudCoverage(Ctx&);    void setCloudCoverage(Ctx&, float c);   // 0..1
+    float getFogDensity(Ctx&);       void setFogDensity(Ctx&, float d);
+    float getWindDirection(Ctx&);    void setWindDirection(Ctx&, float deg);
+    float getWindSpeed(Ctx&);        void setWindSpeed(Ctx&, float s);
+}
+
+// ── Audio (Ctx.audio — the app's AudioEngine; null → no-ops) ─────────────────
+namespace audio {
+    // Play an audio ASSET (content-relative .hasset path). Returns a handle
+    // (0 on failure) for stop/isPlaying.
+    int  play(Ctx&, const std::string& path, float volume, float pitch, bool loop);
+    int  playAt(Ctx&, const std::string& path, const glm::vec3& pos,
+                float volume, float pitch, bool loop, float minDist, float maxDist);
+    void stop(Ctx&, int handle);
+    void stopAll(Ctx&);
+    bool isPlaying(Ctx&, int handle);
+    void setBusVolume(Ctx&, const std::string& bus, float volume);
+}
+
+// ── String library (pure; complements the Concat/ToString nodes) ─────────────
+// C++ namespace `str`, registry ids "string.*" (namespace `string` would shadow
+// std::string in this header's users).
+namespace str {
+    int         length(const std::string& s);
+    std::string substring(const std::string& s, int start, int count); // clamped
+    bool        contains(const std::string& s, const std::string& needle);
+    int         find(const std::string& s, const std::string& needle);   // -1 if absent
+    std::string replace(const std::string& s, const std::string& from, const std::string& to); // all
+    std::string toUpper(const std::string& s);   // ASCII
+    std::string toLower(const std::string& s);   // ASCII
+    std::string trim(const std::string& s);      // ASCII whitespace both ends
+    bool        startsWith(const std::string& s, const std::string& prefix);
+    bool        endsWith(const std::string& s, const std::string& suffix);
+    float       toNumber(const std::string& s);  // 0 when unparsable
 }
 
 // ── Math library (pure; no engine state) ─────────────────────────────────────

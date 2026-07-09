@@ -9,6 +9,7 @@
 #include <HorizonScene/UICursorSDL.h>
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/SceneSystems.h>
+#include <HorizonScene/AudioSystem.h>
 #include <HorizonScene/ScriptContext.h>
 #include <HorizonScene/ScriptApi.h>
 #include <HorizonScene/EngineApi.h>
@@ -181,7 +182,7 @@ void GameApplication::OnInit()
 			-> std::vector<HorizonCode::Value> {
 			const HE::api::ApiFn* fn = HE::api::find(id);
 			if (!fn) return {};
-			HE::api::Ctx c{ m_world.get(), nullptr, &contentManager() };
+			HE::api::Ctx c{ m_world.get(), nullptr, &contentManager(), &m_audioEngine };
 			return fn->invoke(c, args);
 		};
 		m_gameInstance.runtime().setServices(std::move(svc));
@@ -231,6 +232,14 @@ void GameApplication::OnInit()
 				"GameApplication: added a default free-fly camera (scene had none)");
 		}
 	}
+
+	// Audio: init the engine and start playOnStart sources, mirroring the editor's
+	// play mode — packaged games get sound too (HC/script audio.* routes here).
+	if (m_audioEngine.init())
+		AudioSystem::playOnStart(*m_world, m_audioEngine, &contentManager());
+	else
+		Logger::Log(Logger::LogLevel::Warning,
+			"GameApplication: audio device init failed — running silent");
 
 	// Reference-graph streaming seed: kick off async loads for the assets this scene
 	// actually references. Their baked transitive dependencies (materials → textures)
@@ -544,6 +553,10 @@ void GameApplication::OnRender(float deltaTime)
 	// script-driven transforms/params are reflected the same frame.
 	updateScripts(deltaTime);
 
+	// Keep the audio listener + spatial sources tracking their entities.
+	if (m_world && m_audioEngine.isInitialized())
+		AudioSystem::updateSpatial(*m_world, m_audioEngine);
+
 	// Live widgets: per-frame logic tick (EventTick).
 	if (m_world) m_world->widgets().tick(deltaTime);
 
@@ -612,6 +625,9 @@ void GameApplication::OnRender(float deltaTime)
 
 void GameApplication::OnShutdown()
 {
+	// Stop audio first: sounds reference asset PCM the ContentManager owns.
+	m_audioEngine.shutdown();
+
 	// Level script "OnLevelUnloaded" runs while the world is still alive (the
 	// world's destructor is default and never calls clear(), so fire it here).
 	if (m_world) m_world->fireLevelUnloaded();
