@@ -6,7 +6,7 @@
 
 class ContentManager;
 namespace HorizonCode { enum class PinType : std::uint8_t; enum class NodeType : std::uint8_t;
-                        struct Graph; struct Node; }
+                        struct Graph; struct Node; struct Variable; }
 namespace HE::api { struct ApiFn; }
 
 // Small editor helper: enumerate the project's assets of a given type (for the
@@ -84,6 +84,11 @@ namespace HcEditorUtil
 	// Readable title for an EngineCall node ("Sine" for math.sin) — the registry's
 	// displayName, falling back to the raw id.
 	std::string engineCallTitle(const std::string& apiId);
+
+	// Default-value slots for an ARRAY variable: add/remove/edit elements, each
+	// with the element type's editor (drag-float, checkbox, color swatch, …).
+	// Returns true when anything changed (the caller commits for undo).
+	bool drawArrayDefaultEditor(HorizonCode::Variable& v);
 
 	// ── Drag-off compatibility ────────────────────────────────────────────────
 	// First unified pin index on a FRESH node of `t` (propType seeded with the

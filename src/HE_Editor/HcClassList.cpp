@@ -467,6 +467,57 @@ std::string engineCallTitle(const std::string& apiId)
 	return apiId.empty() ? std::string("Engine Call") : apiId;
 }
 
+bool drawArrayDefaultEditor(HorizonCode::Variable& v)
+{
+	using P = HorizonCode::PinType; using V = HorizonCode::Value;
+	bool changed = false;
+	ImGui::SeparatorText("Default");
+	ImGui::TextDisabled("%d element%s seed the array on creation.",
+	                    (int)v.defaultItems.size(), v.defaultItems.size() == 1 ? "" : "s");
+	int removeIdx = -1;
+	for (size_t i = 0; i < v.defaultItems.size(); ++i)
+	{
+		V& it = v.defaultItems[i];
+		ImGui::PushID((int)i);
+		ImGui::Text("%d", (int)i);
+		ImGui::SameLine(28.0f);
+		// Leave room for the remove button on the right.
+		ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 30.0f);
+		switch (v.type)
+		{
+			case P::Float:  if (ImGui::DragFloat("##el", &it.f, 0.1f)) changed = true; break;
+			case P::Int:  { int tmp = it.i; if (ImGui::DragInt("##el", &tmp)) { it.i = tmp; changed = true; } break; }
+			case P::Bool: { bool b = it.b; if (ImGui::Checkbox("##el", &b)) { it.b = b; changed = true; } break; }
+			case P::String: ImGui::InputText("##el", &it.s);
+			                if (ImGui::IsItemDeactivatedAfterEdit()) changed = true; break;
+			case P::Vec2:   if (ImGui::DragFloat2("##el", &it.v2.x, 0.1f)) changed = true; break;
+			case P::Color:  if (ImGui::ColorEdit4("##el", &it.col.x)) changed = true; break;
+			case P::Transform:
+				if (ImGui::DragFloat3("Pos##el", &it.tpos.x, 0.1f))  changed = true;
+				if (ImGui::DragFloat3("Rot##el", &it.trot.x, 0.5f))  changed = true;
+				if (ImGui::DragFloat3("Scl##el", &it.tscl.x, 0.05f)) changed = true;
+				break;
+			case P::Ref:    ImGui::TextDisabled("(object — resolved at runtime)"); break;
+			default: break;
+		}
+		ImGui::SameLine();
+		if (ImGui::SmallButton("X")) removeIdx = (int)i;
+		ImGui::PopID();
+	}
+	if (removeIdx >= 0)
+	{
+		v.defaultItems.erase(v.defaultItems.begin() + removeIdx);
+		changed = true;
+	}
+	if (ImGui::Button("+ Add Slot"))
+	{
+		V nv; nv.type = v.type;   // Value defaults are the per-type zeros (scale 1)
+		v.defaultItems.push_back(std::move(nv));
+		changed = true;
+	}
+	return changed;
+}
+
 int dragMatchPin(HorizonCode::NodeType t, HorizonCode::PinType dragType,
                  bool dragArray, bool srcIsInput, bool srcIsExec)
 {

@@ -141,6 +141,9 @@ struct Variable
     std::string s;
     // Transform default (type == Transform): rotation in euler degrees, identity scale.
     glm::vec3   tpos{ 0.0f }, trot{ 0.0f }, tscl{ 1.0f };
+    // Array default (isArray): the editor-authored slots that seed the instance's
+    // array on creation. Each item is a scalar Value of `type`.
+    std::vector<Value> defaultItems;
     int         access = 0;   // 0 public (readable via a reference), 1 private
     // For an Object (Ref) variable: which HorizonCode class it holds (asset
     // path). Purely editor metadata — lets the context menu surface that class's
@@ -228,6 +231,15 @@ HE_API void assignSubgraphs(Graph& g);
 // The runtime Value a variable starts at (from its stored default). Hosts seed
 // their per-instance variable store with this.
 HE_API Value variableDefaultValue(const Variable& v);
+
+// Editor convenience: a ForEach node is generic until wired. When (dstNode,
+// dstPin) is a ForEach's Array input and (srcNode, srcPin) is an ARRAY data
+// output, adopt the source's element type onto the ForEach (its Array/Element
+// pins recolor + retype), dropping Element-out links that no longer typecheck.
+// For object arrays the element class rides along in the ForEach's s (member
+// menus on the Element pin). Call BEFORE Graph::connect. No-op otherwise.
+HE_API void adoptForEachElementType(Graph& g, int srcNode, int srcPin,
+                                    int dstNode, int dstPin);
 
 // ── Interpreter ──────────────────────────────────────────────────────────────
 // The host binds these so HorizonCode can read/write target state without

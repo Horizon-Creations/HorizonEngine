@@ -1403,6 +1403,8 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 			if (HcEditorUtil::drawTypePicker("Type", ctx.contentManager, v->type, &v->className))
 			{
 				if (v->type != oldType)
+				{
+					v->defaultItems.clear(); // array slots hold the OLD element type
 					// Retype the Get/Set nodes and drop links that no longer typecheck.
 					for (auto& gn : st.graph.nodes)
 						if ((gn.type == NT::GetVariable || gn.type == NT::SetVariable) && gn.s == v->name)
@@ -1412,6 +1414,7 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 							const int valuePin = gn.type == NT::GetVariable ? r.dataOut0 : r.dataIn0;
 							removeGraphPinLinks(st.graph, gn.id, valuePin);
 						}
+				}
 				commitEdit(st, ctx);
 			}
 
@@ -1436,7 +1439,7 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 			}
 			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Hold a list of values instead of a single one.");
 
-			if (!v->isArray) // an array variable defaults to empty (built with Make/Add nodes)
+			if (!v->isArray)
 			{
 				// Default value editor (seeds the runtime store at widget creation).
 				ImGui::SeparatorText("Default");
@@ -1458,6 +1461,11 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 				}
 				if (ed) st.dirty = true;
 				if (ImGui::IsItemDeactivatedAfterEdit()) commitEdit(st, ctx);
+			}
+			else if (HcEditorUtil::drawArrayDefaultEditor(*v)) // slot list seeds the array
+			{
+				st.dirty = true;
+				commitEdit(st, ctx);
 			}
 
 			ImGui::Spacing();
@@ -1855,6 +1863,10 @@ const HC::Graph* resolveClassGraph(const HC::Node& src, const HC::Graph& self,
 				return loadClassGraph(cm, v->className, scratch) ? &scratch : nullptr;
 			return nullptr;
 		}
+		case NT::ForEach: // Element of an object array (class adopted on connect)
+			if (src.propType == PT::Ref && !src.s.empty())
+				return loadClassGraph(cm, src.s, scratch) ? &scratch : nullptr;
+			return nullptr;
 		default: return nullptr;
 	}
 }
@@ -1884,7 +1896,11 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 		for (const auto& l : st.graph.links) { const HC::Node* s = st.graph.findNode(l.srcNode);
 			if (s && s->subgraph == st.currentGraph) ls.push_back({ l.srcNode, l.srcPin, l.dstNode, l.dstPin }); }
 		return ls; };
-	m.connect = [&st](int oN, int oP, int iN, int iP){ return st.graph.connect(oN, oP, iN, iP); };
+	m.connect = [&st](int oN, int oP, int iN, int iP){
+		// ForEach is generic until wired: adopt the source array's element type
+		// (Array/Element pins retype + recolor) before the typed connect.
+		HC::adoptForEachElementType(st.graph, oN, oP, iN, iP);
+		return st.graph.connect(oN, oP, iN, iP); };
 	m.clearPinLinks = [&st](int node, int pin, bool){ removeGraphPinLinks(st.graph, node, pin); };
 	m.removeNode = [&st](int id){ st.graph.removeNode(id); };
 	// Literal nodes edit their value inline on the node body.
@@ -1946,9 +1962,13 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 		ImGui::BeginChild("##hcw_pindrag", ImVec2(240.0f, 320.0f));
 
 		// Wire the new node to the dragged pin (direction depends on the drag side).
+		// adoptForEachElementType first: a ForEach on either end takes the array's
+		// element type (and class) before the typed connect.
 		auto wireAt = [&](int newId, int pin){
-			if (srcInput) st.graph.connect(newId, pin, srcNode, srcPin);
-			else          st.graph.connect(srcNode, srcPin, newId, pin); };
+			if (srcInput) { HC::adoptForEachElementType(st.graph, newId, pin, srcNode, srcPin);
+			                st.graph.connect(newId, pin, srcNode, srcPin); }
+			else          { HC::adoptForEachElementType(st.graph, srcNode, srcPin, newId, pin);
+			                st.graph.connect(srcNode, srcPin, newId, pin); } };
 
 		// ── Ref output: the target class's public members lead ────────────────
 		const bool isRefOut = !isExecPin && !srcInput && dragType == PT::Ref && !dragArray;
