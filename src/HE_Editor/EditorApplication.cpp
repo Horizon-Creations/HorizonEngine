@@ -912,15 +912,67 @@ void EditorApplication::OnRender(float dt)
 	{
 		HE::api::time::advance(dt);
 		pushEngineInputSnapshot();
-		// Scene transitions are a game-runtime feature: PIE keeps the editor scene
-		// (its play snapshot belongs to THIS scene). Consume requests loudly so a
-		// graph author sees why nothing happened.
+		// Zone requests (additive load / unload / show / hide / move) run in PIE
+		// against the editor world — leaving play mode restores the pre-play
+		// snapshot, which drops zone entities again. Only the FULL level switch
+		// and activate stay game-runtime-only (the play snapshot belongs to THIS
+		// scene), consumed loudly so a graph author sees why nothing happened.
 		for (const auto& r : HE::api::scene::takeRequests())
-			Logger::Log(Logger::LogLevel::Warning,
-				("scene." + std::string(r.kind == 0 ? "load" : r.kind == 1 ? "loadAdditive"
-			                         : r.kind == 2 ? "unloadZone" : "activate")
-				 + (r.path.empty() ? "" : " ('" + r.path + "')")
-				 + " runs in the packaged game — play-in-editor keeps the current scene.").c_str());
+		{
+			HE::api::Ctx c{ m_editorWorld.get(), nullptr, &contentManager(), &m_audioEngine };
+			if (r.kind == 1 && m_editorWorld) // additive zone
+			{
+				const std::filesystem::path projRoot =
+					std::filesystem::path(m_projectManager.currentProject().path).parent_path();
+				const auto scenePath = projRoot / r.path;
+				SceneSerializer ser;
+				std::vector<entt::entity> created;
+				std::error_code ec;
+				if (!std::filesystem::exists(scenePath, ec) ||
+				    !ser.loadAdditive(*m_editorWorld, scenePath, SerializeFormat::JSON, &created))
+				{
+					Logger::Log(Logger::LogLevel::Warning,
+						("PIE: scene.loadAdditive failed — '" + r.path + "' not found in the project").c_str());
+					continue;
+				}
+				HE::api::scene::ZoneInfo info;
+				info.path = r.path;
+				info.entities.reserve(created.size());
+				for (entt::entity e : created) info.entities.push_back((uint32_t)e);
+				for (entt::entity e : created)
+				{
+					const auto* h = m_editorWorld->registry().try_get<HierarchyComponent>(e);
+					if (h && h->parent == m_editorWorld->rootEntity()) { info.root = (uint32_t)e; break; }
+				}
+				if (info.root == 0 && !created.empty()) info.root = (uint32_t)created.front();
+				HE::api::scene::noteZoneLoaded(r.zone, std::move(info));
+				if (r.pos != glm::vec3(0.0f)) HE::api::scene::setZonePosition(c, r.zone, r.pos);
+				if (r.hidden)                 HE::api::scene::setZoneVisible(c, r.zone, false);
+				SceneSystems::preloadAssetRefs(*m_editorWorld, contentManager());
+				Logger::Log(Logger::LogLevel::Info,
+					("PIE: zone " + std::to_string(r.zone) + " loaded ('" + r.path + "', "
+					 + std::to_string(created.size()) + " entities"
+					 + (r.hidden ? ", hidden" : "") + ")").c_str());
+			}
+			else if (r.kind == 2 && m_editorWorld) // unload zone
+			{
+				if (const auto* z = HE::api::scene::zoneInfo(r.zone))
+				{
+					auto& reg = m_editorWorld->registry();
+					for (uint32_t id : z->entities)
+						if (reg.valid((entt::entity)id))
+							ScriptApi::destroy(*m_editorWorld, id);
+					HE::api::scene::noteZoneUnloaded(r.zone);
+				}
+			}
+			else if (r.kind == 4) HE::api::scene::setZoneVisible(c, r.zone, r.flag);
+			else if (r.kind == 5) HE::api::scene::setZonePosition(c, r.zone, r.pos);
+			else
+				Logger::Log(Logger::LogLevel::Warning,
+					("scene." + std::string(r.kind == 0 ? "load" : "activate")
+					 + (r.path.empty() ? "" : " ('" + r.path + "')")
+					 + " runs in the packaged game — play-in-editor keeps the current scene.").c_str());
+		}
 	}
 
 	// ── Window title ─────────────────────────────────────────────────────
@@ -2190,6 +2242,9 @@ void EditorApplication::setPlayMode(bool play)
 		m_editorWorld->markHierarchyDirty();
 		m_isPlaying = false;
 		m_undo.clearHistory();
+		// PIE-loaded zones die with the snapshot restore below — drop the table
+		// so stale zone ids don't survive into the next play session.
+		HE::api::scene::clearZones();
 
 		// Tear down physics
 		m_physicsWorld.reset();

@@ -7,6 +7,10 @@
 #include "HorizonScene/Components/EnvironmentComponent.h"
 #include "HorizonScene/Components/NameComponent.h"
 #include "HorizonScene/Components/MeshComponent.h"
+#include "HorizonScene/Components/SkeletalMeshComponent.h"
+#include "HorizonScene/Components/LightComponent.h"
+#include "HorizonScene/Components/ParticleSystemComponent.h"
+#include "HorizonScene/Components/FoliageComponent.h"
 #include <Hpak/ProjectExporter.h>   // sceneUuidForPath (packed scene index)
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
@@ -57,6 +61,29 @@ Entity findByName(Ctx& c, const std::string& name)
 bool exists(Ctx& c, Entity e)
 {
     return c.world && c.world->registry().valid((entt::entity)e);
+}
+void setVisible(Ctx& c, Entity e, bool visible)
+{
+    if (!c.world || !c.world->registry().valid((entt::entity)e)) return;
+    auto& reg = c.world->registry();
+    const auto en = (entt::entity)e;
+    if (auto* m  = reg.try_get<MeshComponent>(en))           m->visible  = visible;
+    if (auto* sm = reg.try_get<SkeletalMeshComponent>(en))   sm->visible = visible;
+    if (auto* l  = reg.try_get<LightComponent>(en))          l->visible  = visible;
+    if (auto* ps = reg.try_get<ParticleSystemComponent>(en)) ps->visible = visible;
+    if (auto* f  = reg.try_get<FoliageComponent>(en))        f->visible  = visible;
+}
+bool getVisible(Ctx& c, Entity e)
+{
+    if (!c.world || !c.world->registry().valid((entt::entity)e)) return true;
+    auto& reg = c.world->registry();
+    const auto en = (entt::entity)e;
+    if (const auto* m  = reg.try_get<MeshComponent>(en))           return m->visible;
+    if (const auto* sm = reg.try_get<SkeletalMeshComponent>(en))   return sm->visible;
+    if (const auto* l  = reg.try_get<LightComponent>(en))          return l->visible;
+    if (const auto* ps = reg.try_get<ParticleSystemComponent>(en)) return ps->visible;
+    if (const auto* f  = reg.try_get<FoliageComponent>(en))        return f->visible;
+    return true;
 }
 } // namespace entity
 
@@ -393,17 +420,22 @@ std::unordered_map<int, ZoneInfo>& zones() { static std::unordered_map<int, Zone
 bool& pendingLevel() { static bool p = false; return p; }
 } // namespace
 void load(const std::string& scenePath, bool hidden)
-{ requests().push_back({ 0, scenePath, 0, hidden }); }
-int loadAdditive(const std::string& scenePath, bool hidden)
+{ Request r; r.kind = 0; r.path = scenePath; r.hidden = hidden; requests().push_back(std::move(r)); }
+int loadAdditive(const std::string& scenePath, bool hidden, const glm::vec3& position)
 {
-    const int zone = nextZone()++;
-    requests().push_back({ 1, scenePath, zone, hidden });
-    return zone;
+    Request r; r.kind = 1; r.path = scenePath; r.zone = nextZone()++;
+    r.hidden = hidden; r.pos = position;
+    requests().push_back(r);
+    return r.zone;
 }
 void unloadZone(int zone)
-{ requests().push_back({ 2, {}, zone, false }); }
+{ Request r; r.kind = 2; r.zone = zone; requests().push_back(std::move(r)); }
 void activate()
-{ requests().push_back({ 3, {}, 0, false }); }
+{ Request r; r.kind = 3; requests().push_back(std::move(r)); }
+void requestZoneVisible(int zone, bool visible)
+{ Request r; r.kind = 4; r.zone = zone; r.flag = visible; requests().push_back(std::move(r)); }
+void requestZonePosition(int zone, const glm::vec3& p)
+{ Request r; r.kind = 5; r.zone = zone; r.pos = p; requests().push_back(std::move(r)); }
 std::vector<Request> takeRequests()
 {
     std::vector<Request> out = std::move(requests());
@@ -455,6 +487,18 @@ void setZonePosition(Ctx& c, int zone, const glm::vec3& p)
     // zone's sub-root moves the whole zone.
     c.world->registry().get_or_emplace<TransformComponent>(e).position = p;
 }
+namespace {
+// Flip every renderable component the entity carries (zone hiding and the
+// per-entity visibility toggle share this).
+void setEntityVisible(entt::registry& reg, entt::entity e, bool visible)
+{
+    if (auto* m  = reg.try_get<MeshComponent>(e))           m->visible  = visible;
+    if (auto* sm = reg.try_get<SkeletalMeshComponent>(e))   sm->visible = visible;
+    if (auto* l  = reg.try_get<LightComponent>(e))          l->visible  = visible;
+    if (auto* ps = reg.try_get<ParticleSystemComponent>(e)) ps->visible = visible;
+    if (auto* f  = reg.try_get<FoliageComponent>(e))        f->visible  = visible;
+}
+} // namespace
 void setZoneVisible(Ctx& c, int zone, bool visible)
 {
     const ZoneInfo* z = zoneInfo(zone);
@@ -463,8 +507,7 @@ void setZoneVisible(Ctx& c, int zone, bool visible)
     for (uint32_t id : z->entities)
     {
         const auto e = (entt::entity)id;
-        if (!reg.valid(e)) continue;
-        if (auto* m = reg.try_get<MeshComponent>(e)) m->visible = visible;
+        if (reg.valid(e)) setEntityVisible(reg, e, visible);
     }
 }
 std::vector<std::string> availableScenes(Ctx& c)
@@ -802,6 +845,10 @@ const std::vector<ApiFn>& registry()
             [](Ctx& c, const VV& a){ return VV{ Value::ofInt((int)entity::findByName(c, aS(a, 0))) }; } });
         t.push_back({ "entity.exists", "Entity", false, {{"entity", P::Int}}, {{"exists", P::Bool}}, "HE::api::entity::exists",
             [](Ctx& c, const VV& a){ return VV{ Value::ofBool(entity::exists(c, (Entity)aI(a, 0))) }; } });
+        t.push_back({ "entity.setVisible", "Entity", true, {{"entity", P::Int}, {"visible", P::Bool}}, {}, "HE::api::entity::setVisible",
+            [](Ctx& c, const VV& a){ entity::setVisible(c, (Entity)aI(a, 0), aB(a, 1)); return VV{}; } });
+        t.push_back({ "entity.getVisible", "Entity", false, {{"entity", P::Int}}, {{"visible", P::Bool}}, "HE::api::entity::getVisible",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(entity::getVisible(c, (Entity)aI(a, 0))) }; } });
 
         // Camera (the world's main camera)
         t.push_back({ "camera.getPosition", "Camera", false, {}, {{"position", P::Color}}, "HE::api::camera::getPosition",
@@ -917,22 +964,25 @@ const std::vector<ApiFn>& registry()
         // hidden level PRELOADS and swaps in on Activate.
         t.push_back({ "scene.load", "Scene", true, {{"scene", P::String}, {"hidden", P::Bool}}, {}, "HE::api::scene::load",
             [](Ctx&, const VV& a){ scene::load(aS(a, 0), aB(a, 1)); return VV{}; } });
-        t.push_back({ "scene.loadAdditive", "Scene", true, {{"scene", P::String}, {"hidden", P::Bool}}, {{"zone", P::Int}}, "HE::api::scene::loadAdditive",
-            [](Ctx&, const VV& a){ return VV{ Value::ofInt(scene::loadAdditive(aS(a, 0), aB(a, 1))) }; } });
+        t.push_back({ "scene.loadAdditive", "Scene", true,
+            {{"scene", P::String}, {"hidden", P::Bool}, {"position", P::Color}}, {{"zone", P::Int}}, "HE::api::scene::loadAdditive",
+            [](Ctx&, const VV& a){ return VV{ Value::ofInt(scene::loadAdditive(aS(a, 0), aB(a, 1), aV3(a, 2))) }; } });
         t.push_back({ "scene.unloadZone", "Scene", true, {{"zone", P::Int}}, {}, "HE::api::scene::unloadZone",
             [](Ctx&, const VV& a){ scene::unloadZone(aI(a, 0)); return VV{}; } });
         t.push_back({ "scene.activate", "Scene", true, {}, {}, "HE::api::scene::activate",
             [](Ctx&, const VV&){ scene::activate(); return VV{}; } });
         t.push_back({ "scene.hasPendingLevel", "Scene", false, {}, {{"pending", P::Bool}}, "HE::api::scene::hasPendingLevel",
             [](Ctx&, const VV&){ return VV{ Value::ofBool(scene::hasPendingLevel()) }; } });
-        t.push_back({ "scene.showZone", "Scene", true, {{"zone", P::Int}}, {}, "HE::api::scene::setZoneVisible",
-            [](Ctx& c, const VV& a){ scene::setZoneVisible(c, aI(a, 0), true); return VV{}; } });
-        t.push_back({ "scene.hideZone", "Scene", true, {{"zone", P::Int}}, {}, "HE::api::scene::setZoneVisible",
-            [](Ctx& c, const VV& a){ scene::setZoneVisible(c, aI(a, 0), false); return VV{}; } });
+        // Show/Hide/Move queue as requests so they order correctly with a Load
+        // Additive in the SAME exec chain (the load itself is deferred).
+        t.push_back({ "scene.showZone", "Scene", true, {{"zone", P::Int}}, {}, "HE::api::scene::requestZoneVisible",
+            [](Ctx&, const VV& a){ scene::requestZoneVisible(aI(a, 0), true); return VV{}; } });
+        t.push_back({ "scene.hideZone", "Scene", true, {{"zone", P::Int}}, {}, "HE::api::scene::requestZoneVisible",
+            [](Ctx&, const VV& a){ scene::requestZoneVisible(aI(a, 0), false); return VV{}; } });
         t.push_back({ "scene.zonePosition", "Scene", false, {{"zone", P::Int}}, {{"position", P::Color}}, "HE::api::scene::zonePosition",
             [](Ctx& c, const VV& a){ return VV{ v3(scene::zonePosition(c, aI(a, 0))) }; } });
-        t.push_back({ "scene.setZonePosition", "Scene", true, {{"zone", P::Int}, {"position", P::Color}}, {}, "HE::api::scene::setZonePosition",
-            [](Ctx& c, const VV& a){ scene::setZonePosition(c, aI(a, 0), aV3(a, 1)); return VV{}; } });
+        t.push_back({ "scene.setZonePosition", "Scene", true, {{"zone", P::Int}, {"position", P::Color}}, {}, "HE::api::scene::requestZonePosition",
+            [](Ctx&, const VV& a){ scene::requestZonePosition(aI(a, 0), aV3(a, 1)); return VV{}; } });
         t.push_back({ "scene.zoneScene", "Scene", false, {{"zone", P::Int}}, {{"scene", P::String}}, "HE::api::scene::zoneScene",
             [](Ctx&, const VV& a){ return VV{ Value::ofString(scene::zoneScene(aI(a, 0))) }; } });
         t.push_back({ "scene.loadedZones", "Scene", false, {}, {{"zones", P::Int, /*isArray=*/true}}, "HE::api::scene::loadedZones",
@@ -1015,6 +1065,7 @@ const std::vector<ApiFn>& registry()
             { "input.mousePosition", "Mouse Position" }, { "input.mouseDelta", "Mouse Delta" },
             { "input.scrollDelta", "Scroll Delta" },
             { "entity.findByName", "Find By Name" },  { "entity.exists", "Entity Exists" },
+            { "entity.setVisible", "Set Entity Visible" }, { "entity.getVisible", "Get Entity Visible" },
             { "camera.getPosition", "Get Camera Position" }, { "camera.setPosition", "Set Camera Position" },
             { "camera.getRotation", "Get Camera Rotation" }, { "camera.setRotation", "Set Camera Rotation" },
             { "camera.getFov", "Get Camera FOV" },           { "camera.setFov", "Set Camera FOV" },

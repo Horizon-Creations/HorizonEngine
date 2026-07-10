@@ -455,12 +455,14 @@ void GameApplication::executeSceneRequests()
 			if (info.root == 0 && !created.empty()) info.root = (uint32_t)created.front();
 			HE::api::scene::noteZoneLoaded(r.zone, std::move(info));
 
-			// Hidden zones load with their meshes invisible until Show Zone.
+			HE::api::Ctx c{ m_world.get(), nullptr, &contentManager(), &m_audioEngine };
+			// Placement: move the zone's root to the requested position (zero =
+			// as authored; the merge root is a fresh identity entity).
+			if (r.pos != glm::vec3(0.0f))
+				HE::api::scene::setZonePosition(c, r.zone, r.pos);
+			// Hidden zones load with their renderables invisible until Show Zone.
 			if (r.hidden)
-			{
-				HE::api::Ctx c{ m_world.get(), nullptr, &contentManager(), &m_audioEngine };
 				HE::api::scene::setZoneVisible(c, r.zone, false);
-			}
 
 			// Stream the merged zone's assets + start its ECS scripts. playOnStart
 			// audio is deliberately NOT re-fired (it would restart existing
@@ -472,6 +474,18 @@ void GameApplication::executeSceneRequests()
 				("GameApplication: zone " + std::to_string(r.zone) + " loaded ('" + r.path +
 				 "', " + std::to_string(created.size()) + " entities, " +
 				 std::to_string(started) + " scripts" + (r.hidden ? ", hidden" : "") + ")").c_str());
+		}
+		else if (r.kind == 4) // show/hide a zone (queued so it orders after a load)
+		{
+			if (!m_world) continue;
+			HE::api::Ctx c{ m_world.get(), nullptr, &contentManager(), &m_audioEngine };
+			HE::api::scene::setZoneVisible(c, r.zone, r.flag);
+		}
+		else if (r.kind == 5) // move a zone (queued so it orders after a load)
+		{
+			if (!m_world) continue;
+			HE::api::Ctx c{ m_world.get(), nullptr, &contentManager(), &m_audioEngine };
+			HE::api::scene::setZonePosition(c, r.zone, r.pos);
 		}
 		else if (r.kind == 2) // unload additive zone
 		{

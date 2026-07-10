@@ -60,6 +60,11 @@ namespace entity {
     float       distance(Ctx&, Entity a, Entity b);                   // -1 if either invalid
     Entity      findByName(Ctx&, const std::string& name);            // first match, 0 if none
     bool        exists(Ctx&, Entity e);
+    // Per-entity visibility: flips every renderable component the entity carries
+    // (mesh, skeletal mesh, light, particles, foliage). getVisible reads the
+    // first renderable found (true when the entity has none).
+    void        setVisible(Ctx&, Entity e, bool visible);
+    bool        getVisible(Ctx&, Entity e);
 }
 
 // ── Transform (Euler degrees for rotation) ───────────────────────────────────
@@ -211,9 +216,17 @@ namespace save {
 // Editor PIE consumes the requests with a notice (game-runtime feature).
 namespace scene {
     void load(const std::string& scenePath, bool hidden = false);
-    int  loadAdditive(const std::string& scenePath, bool hidden = false); // → zone id
+    // `position` places the zone's root when it loads (unwired/zero = as
+    // authored — the merge root is a fresh identity entity, so zero is a no-op).
+    int  loadAdditive(const std::string& scenePath, bool hidden = false,
+                      const glm::vec3& position = glm::vec3(0.0f)); // → zone id
     void unloadZone(int zone);
     void activate();   // swap in the level preloaded with load(path, hidden=true)
+    // Queued variants of show/hide/move — they order correctly with a load
+    // requested the SAME frame (the direct setters below only see zones that
+    // already finished loading).
+    void requestZoneVisible(int zone, bool visible);
+    void requestZonePosition(int zone, const glm::vec3& p);
 
     // ── Zone queries / control (direct; operate on the app-maintained table) ──
     std::vector<int>         loadedZones();
@@ -227,8 +240,16 @@ namespace scene {
     bool                     hasPendingLevel();              // a hidden load awaits activate()
 
     // ── App hooks ─────────────────────────────────────────────────────────────
-    struct Request { int kind = 0; std::string path; int zone = 0; bool hidden = false; };
-    // kinds: 0 switch, 1 additive, 2 unloadZone, 3 activate
+    struct Request
+    {
+        int         kind = 0;
+        std::string path;
+        int         zone = 0;
+        bool        hidden = false;          // load: defer presentation
+        bool        flag = false;            // kind 4: target visibility
+        glm::vec3   pos{ 0.0f };             // kind 1: placement; kind 5: target position
+    };
+    // kinds: 0 switch, 1 additive, 2 unloadZone, 3 activate, 4 zoneVisible, 5 zonePosition
     std::vector<Request> takeRequests();
     struct ZoneInfo { std::string path; uint32_t root = 0; std::vector<uint32_t> entities; };
     void            noteZoneLoaded(int zone, ZoneInfo info);
