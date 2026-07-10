@@ -1,5 +1,10 @@
 # HorizonCode Completion Plan: full engine + platform API coverage
 
+> **Reference:** for the current, complete list of every built-in node and every
+> engine subsystem (19 groups / 122 functions), see
+> [`horizoncode-reference.md`](horizoncode-reference.md). This file is the roadmap;
+> that file is the API reference.
+
 Status: **in progress**. How HorizonCode grows from "widget/UI logic" into a
 general visual scripting language with **full parity to Lua/Python** (every
 engine subsystem) **plus platform APIs** (file I/O, time, persistence, …).

@@ -138,16 +138,31 @@ void GameApplication::OnInit()
 	else
 		Logger::Log(Logger::LogLevel::Warning, ("GameApplication: pak not found: " + pakPath).c_str());
 
-	// App-wide GameInstance: load its graph (next to the exe) and fire OnInit
-	// FIRST — before the world/scene loads. Empty/missing → an empty but
-	// referenceable GameInstance.
+	// App-wide GameInstance: load its graph now (referenceable), but fire OnInit
+	// only AFTER the world exists and the runtime services are wired below — its
+	// OnInit commonly creates the game's UI (OnInit → Create Object → createWidget)
+	// and both need m_world + the createObject/createWidget services. The graph
+	// MUST be present. Preferred source: packed into the .hpak (ships with the same
+	// codec/encryption/bundle layout); fallback: a loose GameInstance.hcode next to
+	// the exe (dev runs on loose content). Empty → an empty but referenceable
+	// GameInstance.
 	{
 		std::string giJson;
-		std::ifstream gif(exeDir / "GameInstance.hcode");
-		if (gif)
+		const auto giBytes = contentManager().readMountedEntry(sceneUuidForPath(kGameInstanceEntry));
+		if (!giBytes.empty())
+		{
+			giJson.assign(giBytes.begin(), giBytes.end());
+			Logger::Log(Logger::LogLevel::Info, "GameApplication: loaded packed GameInstance graph");
+		}
+		else if (std::ifstream gif(exeDir / "GameInstance.hcode"); gif)
+		{
 			giJson.assign(std::istreambuf_iterator<char>(gif), std::istreambuf_iterator<char>());
+			Logger::Log(Logger::LogLevel::Info, "GameApplication: loaded loose GameInstance.hcode");
+		}
+		else
+			Logger::Log(Logger::LogLevel::Warning,
+				"GameApplication: no GameInstance graph found — app lifecycle/UI scripts will not run");
 		m_gameInstance.setGraph(giJson);
-		m_gameInstance.fireInit();
 	}
 
 	// Load the startup scene into a world and hand it to the renderer. The base
@@ -190,6 +205,12 @@ void GameApplication::OnInit()
 		};
 		m_gameInstance.runtime().setServices(std::move(svc));
 	}
+
+	// GameInstance OnInit — now that m_world + services exist. Fires before the
+	// scene loads (its widgets/objects are standalone, not scene entities), so a
+	// game's UI is up from frame one. Mirrors the editor's PIE start order.
+	m_gameInstance.fireInit();
+
 	SceneSerializer serializer;
 	bool sceneLoaded = false;
 	if (m_config.hasPackedScene)

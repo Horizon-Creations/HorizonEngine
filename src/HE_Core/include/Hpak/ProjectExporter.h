@@ -112,6 +112,13 @@ HE_API HE::UUID sceneUuidForPath(const std::string& projectRelPath);
 // the scene's UUID reference closure never reaches). "__asset_index__".
 inline constexpr const char* kAssetPathIndexEntry = "__asset_index__";
 
+// Well-known name (→ sceneUuidForPath UUID) of the packed app-wide GameInstance
+// graph (the project's GameInstance.hcode). It drives OnInit → app lifecycle and
+// commonly creates the game's UI, so it MUST ship — packed into the .hpak it
+// rides the same codec + encryption + bundle layout as everything else, instead
+// of a loose file the exporter used to drop nowhere. "__game_instance__".
+inline constexpr const char* kGameInstanceEntry = "__game_instance__";
+
 // Packs a project's content directory into a distributable output folder:
 //   • All .hasset files → projectName.hpak (with optional LZ4 + encryption)
 //   • The startup .hescene file → copied next to the pak
@@ -132,6 +139,10 @@ public:
         // Every OTHER project scene, pre-serialized to CBOR, keyed by its project-
         // relative path. Packed under sceneUuidForPath(path) so the game runtime can
         // scene.load("<path>") them for level transitions.
-        const std::vector<std::pair<std::string, std::vector<uint8_t>>>& extraScenes = {}
+        const std::vector<std::pair<std::string, std::vector<uint8_t>>>& extraScenes = {},
+        // The app-wide GameInstance graph JSON (project GameInstance.hcode). Packed
+        // under sceneUuidForPath(kGameInstanceEntry) so the game runs OnInit + app
+        // lifecycle (and whatever UI it creates). Empty → no GameInstance shipped.
+        const std::string&           gameInstanceJson = {}
     );
 };
