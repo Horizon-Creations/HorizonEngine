@@ -116,6 +116,18 @@ enum class NodeType : uint8_t
     // data-outs) then Done. The one sanctioned way to reach members of an
     // object array's elements — the element pin is a scalar Ref.
     ForEach,
+    // Latent flow: pause the exec chain, resume from this node's exec-out after
+    // Duration seconds (driven by Runtime::update). Retriggering while already
+    // pending is ignored (like Unreal's Delay). The resumed chain is a FRESH
+    // run: the event arg and exec-output caches of the original run are gone.
+    Delay,
+    // Is the Ref a live instance? (pure; dataIn Target, dataOut Bool). The
+    // guard to run before touching an object that may have been destroyed.
+    IsValid,
+    // Stateful flow (per-instance node state, persists across runs; reset by
+    // reseedVariables): DoOnce lets the chain through only the FIRST time;
+    // FlipFlop alternates its A/B exec-outs (IsA data-out = which one just ran).
+    DoOnce, FlipFlop,
     COUNT
 };
 
@@ -306,6 +318,18 @@ struct Context
     // the id is unknown. This is the seam that keeps the interpreter (HE_Core)
     // decoupled from the engine surface it drives.
     std::function<std::vector<Value>(const std::string& apiId, const std::vector<Value>& args)> callApi;
+
+    // Latent flow (bound by the Runtime): schedule THIS instance's exec chain to
+    // resume from `nodeId`'s exec-out after `seconds` (Delay node). Unbound →
+    // the Delay is a dead end (never resumes).
+    std::function<void(int nodeId, float seconds)> scheduleResume;
+    // Is `target` a live instance? (Is Valid node.) Unbound → false.
+    std::function<bool(uint32_t target)> isValid;
+    // Per-instance NODE state (DoOnce fired?, FlipFlop side) — persistent across
+    // runs like variables, but never part of the variable store/public surface.
+    // Reset together with the variables (reseedVariables).
+    std::function<Value(int nodeId)>              getNodeState;
+    std::function<void(int nodeId, const Value&)> setNodeState;
 };
 
 class HE_API Runner
@@ -323,6 +347,11 @@ public:
     // requirePublic) the function is private — the gameplay-script routing check.
     bool callFunction(const std::string& name, bool requirePublic,
                       const std::vector<Value>& args = {}, std::vector<Value>* results = nullptr);
+
+    // Resume the exec chain from `nodeId`'s first exec-out — the second half of
+    // a Delay (called by the Runtime when the timer expires). A FRESH run: event
+    // arg and exec-output caches start empty.
+    void resumeFrom(int nodeId);
 
 private:
     void runExecChain(const Node& from, int execOutPin, int depth);

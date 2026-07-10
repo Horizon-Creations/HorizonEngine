@@ -909,6 +909,67 @@ inline HE::hccg::ClassSource fxDispatchSink()
     return f.done("dispatch_sink");
 }
 
+// 16 — latent_flow: Delay (latent continuation via Runtime::update, retrigger
+// ignored), Do Once (fires once per instance, reset by reseed), Flip Flop
+// (alternating A/B + IsA data-out), Is Valid (Ref liveness).
+inline HE::hccg::ClassSource fxLatentFlow()
+{
+    Fx f;
+    f.var("n", PT::Float);
+    f.var("once", PT::Float);
+    f.var("flip", PT::String);
+    f.var("isA", PT::Bool);
+    f.var("valid", PT::Bool);
+
+    // Once: DoOnce → once += 1 (only the first fire).
+    const int evO = f.event("Once");
+    const int doOnce = f.op(NT::DoOnce);
+    f.exec(evO, doOnce);
+    const int sOnce = f.setVar("once", PT::Float);
+    { const int a = f.op(NT::Add); f.data(f.getVar("once", PT::Float), 0, a, 0);
+      f.data(f.constF(1.0f), 0, a, 1); f.data(a, 0, sOnce, 0); }
+    f.exec(doOnce, sOnce, 0);
+
+    // Flip: FlipFlop → A appends "A" (and stores IsA), B appends "B".
+    const int evF = f.event("Flip");
+    const int ff = f.op(NT::FlipFlop);
+    f.exec(evF, ff);
+    const int sA = f.setVar("flip", PT::String);
+    { const int cat = f.op(NT::Concat); f.data(f.getVar("flip", PT::String), 0, cat, 0);
+      f.data(f.constS("A"), 0, cat, 1); f.data(cat, 0, sA, 0); }
+    f.exec(ff, sA, 0);
+    const int sIsA = f.setVar("isA", PT::Bool);
+    f.data(ff, 0, sIsA, 0);   // IsA data-out (state of the side just taken)
+    f.exec(sA, sIsA);
+    const int sB = f.setVar("flip", PT::String);
+    { const int cat = f.op(NT::Concat); f.data(f.getVar("flip", PT::String), 0, cat, 0);
+      f.data(f.constS("B"), 0, cat, 1); f.data(cat, 0, sB, 0); }
+    f.exec(ff, sB, 1);
+
+    // Check(arg Ref): valid = Is Valid(arg).
+    const int evC = f.event("Check", 0, true, PT::Ref);
+    const int iv = f.op(NT::IsValid);
+    f.data(evC, 0, iv, 0);
+    const int sV = f.setVar("valid", PT::Bool);
+    f.data(iv, 0, sV, 0);
+    f.exec(evC, sV);
+
+    // Wait: n += 1, then Delay(1s) → n += 10 (the latent continuation).
+    const int evW = f.event("Wait");
+    const int s1 = f.setVar("n", PT::Float);
+    { const int a = f.op(NT::Add); f.data(f.getVar("n", PT::Float), 0, a, 0);
+      f.data(f.constF(1.0f), 0, a, 1); f.data(a, 0, s1, 0); }
+    f.exec(evW, s1);
+    const int delay = f.op(NT::Delay);
+    f.g.findNode(delay)->pinDefaults[0] = Value::ofFloat(1.0f);
+    f.exec(s1, delay);
+    const int s2 = f.setVar("n", PT::Float);
+    { const int a = f.op(NT::Add); f.data(f.getVar("n", PT::Float), 0, a, 0);
+      f.data(f.constF(10.0f), 0, a, 1); f.data(a, 0, s2, 0); }
+    f.exec(delay, s2, 0);   // Completed
+    return f.done("latent_flow");
+}
+
 inline std::vector<HE::hccg::ClassSource> all()
 {
     return {
@@ -917,7 +978,7 @@ inline std::vector<HE::hccg::ClassSource> all()
         fxWidgetProps(), fxLimitsSmoke(), fxFunctionsLocals(),
         fxEnginePureMultiout(), fxEngineExecCached(),
         fxRefTarget(), fxRefsObjects(), fxDispatchOwner(), fxDispatchListener(),
-        fxDispatchSink(),
+        fxDispatchSink(), fxLatentFlow(),
     };
 }
 

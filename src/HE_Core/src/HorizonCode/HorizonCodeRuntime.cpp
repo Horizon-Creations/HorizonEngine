@@ -71,6 +71,9 @@ void Runtime::remove(InstanceId id)
     for (auto& [owner, events] : m_listeners)    // its subscriptions to others
         for (auto& [ev, vec] : events)
             vec.erase(std::remove(vec.begin(), vec.end(), id), vec.end());
+    // Its scheduled Delay continuations die with it (never resume a ghost).
+    m_pending.erase(std::remove_if(m_pending.begin(), m_pending.end(),
+        [&](const PendingResume& p){ return p.id == id; }), m_pending.end());
     if (id == m_gameInstance) m_gameInstance = 0;
 }
 void Runtime::destroy(InstanceId id)
@@ -90,6 +93,7 @@ void Runtime::clear()
 {
     m_insts.clear();
     m_listeners.clear();
+    m_pending.clear();
     m_gameInstance = 0;
 }
 
@@ -179,6 +183,7 @@ void Runtime::reseedVariables(InstanceId id)
     Inst* i = find(id);
     if (!i) return;
     i->vars.clear();
+    i->nodeState.clear();   // DoOnce/FlipFlop start over with the fresh state
     if (i->compiled) { i->compiled->reseedVariables(); return; }
     for (const auto& var : i->graph.variables)
         if (var.scope == 0) i->vars[var.name] = variableDefaultValue(var);
@@ -319,7 +324,56 @@ Context Runtime::makeContext(InstanceId id)
     ctx.destroyObject = [this](uint32_t ref) { if (m_services.destroyObject) m_services.destroyObject(ref); };
     ctx.callApi       = [this](const std::string& apiId, const std::vector<Value>& args) -> std::vector<Value>
     { return m_services.callApi ? m_services.callApi(apiId, args) : std::vector<Value>{}; };
+    // Latent flow + liveness + per-node state (all runtime-side).
+    ctx.scheduleResume = [this, id](int nodeId, float seconds)
+    {
+        if (!find(id)) return;
+        // Retriggering a pending Delay is ignored (Unreal semantics) — the
+        // running timer wins; a tick-driven Delay can't stack continuations.
+        for (const auto& p : m_pending)
+            if (p.id == id && p.node == nodeId) return;
+        m_pending.push_back({ id, nodeId, seconds > 0.0f ? seconds : 0.0f });
+    };
+    ctx.isValid = [this](uint32_t target) { return find(target) != nullptr; };
+    ctx.getNodeState = [this, id](int nodeId) -> Value
+    {
+        const Inst* i = find(id);
+        if (!i) return {};
+        auto it = i->nodeState.find(nodeId);
+        return it != i->nodeState.end() ? it->second : Value{};
+    };
+    ctx.setNodeState = [this, id](int nodeId, const Value& v)
+    {
+        if (Inst* i = find(id)) i->nodeState[nodeId] = v;
+    };
     return ctx;
+}
+
+void Runtime::update(float dt)
+{
+    if (m_pending.empty()) return;
+    // Decrement first, then snapshot the expired set: a resumed chain may
+    // schedule NEW delays (they must wait at least one tick), destroy
+    // instances (remove() prunes m_pending), or re-enter update indirectly.
+    std::vector<PendingResume> expired;
+    for (auto& p : m_pending) p.remaining -= dt;
+    for (const auto& p : m_pending)
+        if (p.remaining <= 0.0f) expired.push_back(p);
+    m_pending.erase(std::remove_if(m_pending.begin(), m_pending.end(),
+        [](const PendingResume& p){ return p.remaining <= 0.0f; }), m_pending.end());
+
+    for (const auto& p : expired)
+    {
+        Inst* i = find(p.id);
+        if (!i) continue;   // destroyed while waiting
+        if (i->compiled)
+            i->compiled->resumeFrom(p.node);
+        else
+        {
+            Runner runner(i->graph, makeContext(p.id));
+            runner.resumeFrom(p.node);
+        }
+    }
 }
 
 void Runtime::fireEvent(InstanceId id, const std::string& event, int elem, const Value& arg)

@@ -177,6 +177,24 @@ NodeSig signatureOf(const Node& n)
         s.dataIns  = { { "Array", n.propType, true } };
         s.dataOuts = { { "Element", n.propType }, { "Index", P::Int } };
         break;
+    case T::Delay:
+        s.execIns  = { { "", P::Exec } };
+        s.execOuts = { { "Completed", P::Exec } };
+        s.dataIns  = { { "Duration", P::Float } };
+        break;
+    case T::IsValid:
+        s.dataIns  = { { "Target", P::Ref } };
+        s.dataOuts = { { "Valid", P::Bool } };
+        break;
+    case T::DoOnce:
+        s.execIns  = { { "", P::Exec } };
+        s.execOuts = { { "Then", P::Exec } };
+        break;
+    case T::FlipFlop:
+        s.execIns  = { { "", P::Exec } };
+        s.execOuts = { { "A", P::Exec }, { "B", P::Exec } };
+        s.dataOuts = { { "Is A", P::Bool } };
+        break;
     case T::Add: case T::Subtract: case T::Multiply: case T::Divide:
         s.dataIns  = { { "A", P::Float }, { "B", P::Float } };
         s.dataOuts = { { "", P::Float } };
@@ -251,6 +269,10 @@ const char* nodeDisplayName(NodeType t)
         case T::ArrayContains:return "Array Contains";
         case T::ArrayIndexOf: return "Array Index Of";
         case T::ForEach:      return "For Each";
+        case T::Delay:        return "Delay";
+        case T::IsValid:      return "Is Valid";
+        case T::DoOnce:       return "Do Once";
+        case T::FlipFlop:     return "Flip Flop";
         case T::Add:          return "Add";
         case T::Subtract:     return "Subtract";
         case T::Multiply:     return "Multiply";
@@ -284,7 +306,11 @@ const char* nodeCategory(NodeType t)
         case T::FunctionCall:  return "Functions";
         case T::FunctionReturn:return "Functions";
         case T::Branch:
-        case T::Sequence:      return "Flow";
+        case T::Sequence:
+        case T::Delay:
+        case T::DoOnce:
+        case T::FlipFlop:      return "Flow";
+        case T::IsValid:       return "Reference";
         case T::GetProperty:
         case T::SetProperty:   return "Property";
         case T::GetVariable:
@@ -912,6 +938,19 @@ void Runner::fireEvent(const std::string& eventName, int elem, const Value& arg)
     }
 }
 
+void Runner::resumeFrom(int nodeId)
+{
+    const Node* n = m_graph.findNode(nodeId);
+    if (!n) return;
+    // A fresh run, exactly like a fire: the original run's event arg and
+    // exec-output caches are gone (the chain re-reads live state instead).
+    m_steps = 0;
+    m_eventArg = Value{};
+    m_execOutputs.clear();
+    m_callStack.clear();
+    runExecChain(*n, pinRanges(*n).execOut0, 0);
+}
+
 bool Runner::callFunction(const std::string& name, bool requirePublic,
                           const std::vector<Value>& args, std::vector<Value>* results)
 {
@@ -960,8 +999,9 @@ void Runner::runExecChain(const Node& from, int execOutPin, int depth)
         const Node* n = m_graph.findNode(l->dstNode);
         if (!n) return;
         execNode(*n, depth);
-        if (n->type == T::Branch || n->type == T::Sequence || n->type == T::ForEach)
-            return; // they steer their own exec-outs internally
+        if (n->type == T::Branch || n->type == T::Sequence || n->type == T::ForEach ||
+            n->type == T::Delay || n->type == T::DoOnce || n->type == T::FlipFlop)
+            return; // they steer their own exec-outs internally (Delay: later)
         l = execLinkFrom(n->id, pinRanges(*n).execOut0);
     }
 }
@@ -1111,6 +1151,29 @@ void Runner::execNode(const Node& n, int depth)
         Logger::Log(Logger::LogLevel::Info,
             ("[Widget] " + coerce(evalInput(n, 0, depth + 1), P::String).s).c_str());
         break;
+    case T::Delay:
+        // Latent: hand the continuation to the host scheduler and stop the
+        // chain here — Runtime::update resumes from our exec-out later.
+        if (m_ctx.scheduleResume)
+            m_ctx.scheduleResume(n.id, evalInput(n, 0, depth + 1).f);
+        break;
+    case T::DoOnce:
+        // Let the chain through only the first time (per instance; node state
+        // persists across runs and resets with reseedVariables).
+        if (m_ctx.getNodeState && m_ctx.getNodeState(n.id).b) break;
+        if (m_ctx.setNodeState) m_ctx.setNodeState(n.id, Value::ofBool(true));
+        runExecChain(n, pinRanges(n).execOut0, depth + 1);
+        break;
+    case T::FlipFlop:
+    {
+        // Alternate A/B, starting with A. The IsA data-out reports which side
+        // THIS execution took (stored state = the side just taken).
+        const bool wasA = m_ctx.getNodeState && m_ctx.getNodeState(n.id).b;
+        const bool isA  = !wasA;
+        if (m_ctx.setNodeState) m_ctx.setNodeState(n.id, Value::ofBool(isA));
+        runExecChain(n, pinRanges(n).execOut0 + (isA ? 0 : 1), depth + 1);
+        break;
+    }
     default: break;
     }
 }
@@ -1293,6 +1356,11 @@ Value Runner::evalData(const Node& n, int dataOutPin, int depth)
         Value v = m_ctx.getExternal ? m_ctx.getExternal(evalInput(n, 0, depth + 1).ref, n.s) : Value{};
         return coerce(v, n.propType);
     }
+    case T::IsValid:
+        return Value::ofBool(m_ctx.isValid && m_ctx.isValid(evalInput(n, 0, depth + 1).ref));
+    case T::FlipFlop:
+        // Which side the last execution took (A = true); false before any run.
+        return Value::ofBool(m_ctx.getNodeState ? m_ctx.getNodeState(n.id).b : false);
     case T::Add:      return Value::ofFloat(evalInput(n, 0, depth + 1).f + evalInput(n, 1, depth + 1).f);
     case T::Subtract: return Value::ofFloat(evalInput(n, 0, depth + 1).f - evalInput(n, 1, depth + 1).f);
     case T::Multiply: return Value::ofFloat(evalInput(n, 0, depth + 1).f * evalInput(n, 1, depth + 1).f);
