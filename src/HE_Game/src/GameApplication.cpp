@@ -138,14 +138,10 @@ void GameApplication::OnInit()
 	else
 		Logger::Log(Logger::LogLevel::Warning, ("GameApplication: pak not found: " + pakPath).c_str());
 
-	// App-wide GameInstance: load its graph now (referenceable), but fire OnInit
-	// only AFTER the world exists and the runtime services are wired below — its
-	// OnInit commonly creates the game's UI (OnInit → Create Object → createWidget)
-	// and both need m_world + the createObject/createWidget services. The graph
-	// MUST be present. Preferred source: packed into the .hpak (ships with the same
-	// codec/encryption/bundle layout); fallback: a loose GameInstance.hcode next to
-	// the exe (dev runs on loose content). Empty → an empty but referenceable
-	// GameInstance.
+	// App-wide GameInstance: load its graph. Preferred source: packed into the
+	// .hpak (ships with the same codec/encryption/bundle layout); fallback: a loose
+	// GameInstance.hcode next to the exe (dev runs on loose content). Empty → an
+	// empty but referenceable GameInstance.
 	{
 		std::string giJson;
 		const auto giBytes = contentManager().readMountedEntry(sceneUuidForPath(kGameInstanceEntry));
@@ -165,20 +161,20 @@ void GameApplication::OnInit()
 		m_gameInstance.setGraph(giJson);
 	}
 
-	// Load the startup scene into a world and hand it to the renderer. The base
-	// Application renders m_world each frame; OnRender ticks its gameplay systems.
-	m_world = std::make_unique<HorizonWorld>();
-	// Widgets + the level script join the app-wide runtime (shared with the
-	// GameInstance), so any scene script can Get Game Instance / bind its events.
-	m_world->setScriptRuntime(&m_gameInstance.runtime());
-	// Widget + object nodes route to this world's WidgetManager and the app
-	// runtime (+ ContentManager to load assets).
+	// The GameInstance's UI is APP-LEVEL: widgets live in m_widgets (owned here,
+	// not by any world), so they exist before the first world and PERSIST across
+	// scene switches — the world only holds the 3D scene. Wire it onto the app
+	// runtime, then wire the runtime services (widget/object/engine calls) so the
+	// GameInstance's OnInit can create UI. Services target m_widgets + the app
+	// runtime directly (not m_world), which is what lets OnInit fire FIRST — before
+	// any world exists.
+	m_widgets.setRuntime(&m_gameInstance.runtime());
 	{
 		HorizonCode::Runtime::Services svc;
-		svc.createWidget  = [this](const std::string& p){ return m_world ? m_world->widgets().createWidget(contentManager(), p) : 0; };
-		svc.showWidget    = [this](int id){ if (m_world) m_world->widgets().showWidget(id); };
-		svc.hideWidget    = [this](int id){ if (m_world) m_world->widgets().hideWidget(id); };
-		svc.destroyWidget = [this](int id){ if (m_world) m_world->widgets().destroyWidget(id); };
+		svc.createWidget  = [this](const std::string& p){ return m_widgets.createWidget(contentManager(), p); };
+		svc.showWidget    = [this](int id){ m_widgets.showWidget(id); };
+		svc.hideWidget    = [this](int id){ m_widgets.hideWidget(id); };
+		svc.destroyWidget = [this](int id){ m_widgets.destroyWidget(id); };
 		svc.createObject  = [this](const std::string& p) -> uint32_t {
 			const HE::UUID id = contentManager().loadAsset(p);
 			const HorizonCodeClassAsset* a = contentManager().getHorizonCodeClass(id);
@@ -193,9 +189,10 @@ void GameApplication::OnInit()
 			if (ref != 0 && ref != m_gameInstance.runtime().gameInstance())
 				m_gameInstance.runtime().destroy(ref); // fires "Destruct"
 		};
-		// EngineCall nodes dispatch through the HE::api registry against this
-		// world (+ content). No PhysicsWorld in the shipping runtime yet →
-		// physics nodes no-op (null-Ctx tolerance).
+		// EngineCall nodes dispatch through the HE::api registry against the CURRENT
+		// world (+ content) — resolved at call time, so it's null-tolerant while
+		// OnInit runs before the world exists. No PhysicsWorld in the shipping
+		// runtime yet → physics nodes no-op (null-Ctx tolerance).
 		svc.callApi = [this](const std::string& id, const std::vector<HorizonCode::Value>& args)
 			-> std::vector<HorizonCode::Value> {
 			const HE::api::ApiFn* fn = HE::api::find(id);
@@ -206,10 +203,20 @@ void GameApplication::OnInit()
 		m_gameInstance.runtime().setServices(std::move(svc));
 	}
 
-	// GameInstance OnInit — now that m_world + services exist. Fires before the
-	// scene loads (its widgets/objects are standalone, not scene entities), so a
-	// game's UI is up from frame one. Mirrors the editor's PIE start order.
+	// GameInstance OnInit fires FIRST — before any world/scene. Its UI (m_widgets)
+	// and objects are app-level, so they're up from frame one and survive scene
+	// loads.
 	m_gameInstance.fireInit();
+
+	// Load the startup scene into a world and hand it to the renderer. The base
+	// Application renders m_world each frame; OnRender ticks its gameplay systems.
+	// The world borrows the app-level WidgetManager (setWidgetManager) so the
+	// renderer + input see the GameInstance's UI, and a scene switch never clears it.
+	m_world = std::make_unique<HorizonWorld>();
+	// Widgets + the level script join the app-wide runtime (shared with the
+	// GameInstance), so any scene script can Get Game Instance / bind its events.
+	m_world->setScriptRuntime(&m_gameInstance.runtime());
+	m_world->setWidgetManager(&m_widgets);   // borrow the app-level UI
 
 	SceneSerializer serializer;
 	bool sceneLoaded = false;
@@ -366,13 +373,11 @@ bool GameApplication::performSceneSwitch(const std::string& scenePath)
 void GameApplication::swapToWorld(std::unique_ptr<HorizonWorld> newWorld, const std::string& label)
 {
 	// Tear down the old scene: unload event first (handlers still see the world),
-	// then widgets (unregister from the shared HorizonCode runtime), scripts
-	// (finalizers may touch entities), sounds, zones.
+	// then scripts (finalizers may touch entities), sounds, zones. The app-level
+	// UI (m_widgets, the GameInstance's widgets) is deliberately NOT cleared — it
+	// persists across scene switches (a HUD created in OnInit stays up).
 	if (m_world)
-	{
 		m_world->fireLevelUnloaded();
-		m_world->widgets().clear();
-	}
 	m_scriptContext.reset();
 	m_scriptInstances.clear();
 	m_audioEngine.stopAll();
@@ -380,6 +385,7 @@ void GameApplication::swapToWorld(std::unique_ptr<HorizonWorld> newWorld, const 
 
 	// Swap + bring the new scene up exactly like OnInit does for the startup scene.
 	m_world = std::move(newWorld);
+	m_world->setWidgetManager(&m_widgets);   // keep the app-level UI on the new world
 	m_world->setScriptRuntime(&m_gameInstance.runtime());
 	setWorld(m_world.get());
 
@@ -916,6 +922,11 @@ void GameApplication::OnShutdown()
 
 	// GameInstance OnShutdown fires last (symmetric to OnInit firing first).
 	m_gameInstance.fireShutdown();
+
+	// Clear the app-level UI while the runtime it registered on is still alive
+	// (fires each widget's Destruct). It's a member destroyed before m_gameInstance
+	// anyway, but the destructor doesn't fire Destruct — do it explicitly.
+	m_widgets.clear();
 
 	// Tear down ECS scripts before the world (their finalizers may touch entities).
 	m_scriptContext.reset();

@@ -23,6 +23,17 @@ namespace HcEditorUtil
 	std::vector<ClassRef> listAssets(ContentManager* cm, HE::AssetType type);
 	// Convenience wrapper for the Create Object class picker.
 	std::vector<ClassRef> listHorizonCodeClasses(ContentManager* cm);
+	// Every .hescene under the project root, as project-relative paths (e.g.
+	// "Content/123.hescene") — the exact string scene.load expects. Feeds the
+	// scene-path dropdown on scene.* Engine Call nodes.
+	std::vector<ClassRef> listScenes(ContentManager* cm);
+
+	// If `n` is an Engine Call with a String "scene"/"path" param (scene.load /
+	// scene.loadAdditive), draw a dropdown of project scenes and write the pick to
+	// that param's inline pin default — so the level to load is CHOSEN, not typed
+	// (a bare "123.hescene" mismatches the packed/resolved project-relative path).
+	// Returns true when changed; no-op (returns false, draws nothing) otherwise.
+	bool drawSceneParamPicker(HorizonCode::Node& n, ContentManager* cm);
 
 	// ── HC class registry ─────────────────────────────────────────────────────
 	// The public interface of one HorizonCode class the editor knows about — an

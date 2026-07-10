@@ -60,9 +60,15 @@ public:
 	entt::registry& registry() { return registry_; }
 
 	// Live UI widgets (UMG-style) — NOT entities; they exist outside the scene
-	// graph and render directly. Owned here so their lifetime tracks the world
-	// (clear() drops them: PIE stop / scene load discards play-created widgets).
-	WidgetManager& widgets() { return m_widgets; }
+	// graph and render directly. By default a world owns its widgets (clear()
+	// drops them: PIE stop / scene load discards play-created widgets). The game
+	// injects an APP-LEVEL WidgetManager (setWidgetManager) so the GameInstance's
+	// UI lives above any single world and survives scene switches; an external WM
+	// is never cleared by the world.
+	WidgetManager& widgets() { return m_widgetsPtr ? *m_widgetsPtr : m_ownWidgets; }
+	void setWidgetManager(WidgetManager* wm)
+	{ m_widgetsPtr = wm; if (m_widgetsPtr) m_widgetsPtr->setRuntime(&scripts());
+	  else m_ownWidgets.setRuntime(&scripts()); }
 
 	// The central HorizonCode interpreter widgets and the level script run on.
 	// By default a world owns its own, but the application injects an app-wide
@@ -71,7 +77,7 @@ public:
 	HorizonCode::Runtime&       scripts()       { return m_scriptsPtr ? *m_scriptsPtr : m_ownScripts; }
 	const HorizonCode::Runtime& scripts() const { return m_scriptsPtr ? *m_scriptsPtr : m_ownScripts; }
 	void setScriptRuntime(HorizonCode::Runtime* r)
-	{ m_scriptsPtr = r; m_widgets.setRuntime(&scripts()); }
+	{ m_scriptsPtr = r; widgets().setRuntime(&scripts()); }
 
 	// ── Level script ─────────────────────────────────────────────────────────
 	// One HorizonCode graph per level (like Unreal's Level Blueprint): intrinsic
@@ -104,10 +110,11 @@ private:
 	entt::registry registry_;
 	Entity         rootEntity_      = entt::null;
 	bool           m_hierarchyDirty = true;
-	// Declared before m_widgets so it outlives it (m_widgets points at it).
+	// Declared before the widget managers so it outlives them (they point at it).
 	HorizonCode::Runtime  m_ownScripts;          // used unless an app runtime is injected
 	HorizonCode::Runtime* m_scriptsPtr = nullptr;
-	WidgetManager         m_widgets;
+	WidgetManager         m_ownWidgets;          // used unless an app-level WM is injected
+	WidgetManager*        m_widgetsPtr = nullptr; // set → app-level UI (persists across worlds)
 
 	// The level script's authored source graph (edited + serialized). At load a
 	// copy is registered in m_scripts as m_levelInstance (the running instance).

@@ -364,6 +364,40 @@ TEST_CASE("WidgetManager lifecycle and z-order")
     CHECK(wm.createWidget(cm, "mem://missing.hasset") == 0);
 }
 
+TEST_CASE("HorizonWorld: injected app-level WidgetManager persists across clear()")
+{
+    // The game's GameInstance UI lives in an APP-LEVEL WidgetManager that each
+    // world borrows (setWidgetManager). A world clear()/scene switch must NOT drop
+    // it — a HUD created in OnInit stays up — whereas a world-OWNED WM clears as
+    // before (PIE stop / scene load discard play-created widgets).
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree t; t.add(HE::UIWidgetType::Button);
+    registerWidget(cm, t);
+
+    // World-owned WM: created in the world, dropped with it.
+    {
+        HorizonWorld w;
+        REQUIRE(w.widgets().createWidget(cm, "mem://w.hasset") != 0);
+        CHECK(w.widgets().count() == 1);
+        w.clear();
+        CHECK(w.widgets().count() == 0);
+    }
+
+    // Injected app-level WM: identity preserved, survives the world's clear().
+    {
+        WidgetManager app;
+        HorizonWorld w;
+        w.setWidgetManager(&app);
+        CHECK(&w.widgets() == &app);
+        REQUIRE(w.widgets().createWidget(cm, "mem://w.hasset") != 0);
+        CHECK(app.count() == 1);
+        w.clear();
+        CHECK(&w.widgets() == &app);   // still the same external WM
+        CHECK(app.count() == 1);       // app-level UI NOT dropped by the world
+    }
+}
+
 TEST_CASE("WidgetManager renders every element type")
 {
     TempWidgetDir dir;

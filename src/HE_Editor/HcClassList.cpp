@@ -98,6 +98,34 @@ std::vector<ClassRef> listAssets(ContentManager* cm, HE::AssetType type)
 std::vector<ClassRef> listHorizonCodeClasses(ContentManager* cm)
 { return listAssets(cm, HE::AssetType::HorizonCodeClass); }
 
+std::vector<ClassRef> listScenes(ContentManager* cm)
+{
+	std::vector<ClassRef> out;
+	if (!cm) return out;
+	const std::string root = cm->contentRoot();
+	if (root.empty()) return out;
+	// Scenes live anywhere under the PROJECT root (parent of Content/), and the
+	// path we store must be project-relative (e.g. "Content/123.hescene") — that
+	// is exactly the key the exporter packs each scene under (sceneUuidForPath)
+	// and what the game's loadSceneInto resolves. Typing a bare "123.hescene"
+	// mismatches both → this dropdown removes that failure mode.
+	const std::filesystem::path projectRoot = std::filesystem::path(root).parent_path();
+	std::error_code ec;
+	std::filesystem::recursive_directory_iterator it(
+		projectRoot, std::filesystem::directory_options::skip_permission_denied, ec), end;
+	for (; !ec && it != end; it.increment(ec))
+	{
+		if (!it->is_regular_file(ec) || it->path().extension() != ".hescene") { ec.clear(); continue; }
+		ClassRef cr;
+		cr.label = it->path().stem().string();
+		cr.path  = it->path().lexically_relative(projectRoot).generic_string();
+		out.push_back(std::move(cr));
+	}
+	std::sort(out.begin(), out.end(),
+	          [](const ClassRef& a, const ClassRef& b) { return a.path < b.path; });
+	return out;
+}
+
 // ── Shared graph colors ──────────────────────────────────────────────────────
 std::uint32_t pinTypeColor(HorizonCode::PinType t)
 {
@@ -575,6 +603,41 @@ void drawPinDefaultEditor(HorizonCode::Node& n, int unifiedPin, bool& committed)
 			break;
 		default: break;
 	}
+}
+
+bool drawSceneParamPicker(HorizonCode::Node& n, ContentManager* cm)
+{
+	using P = HorizonCode::PinType; using V = HorizonCode::Value;
+	if (n.type != HorizonCode::NodeType::EngineCall) return false;
+	// The scene-path param on scene.load / scene.loadAdditive (a String named
+	// "scene"). Its pin-default key is the data-in index == the param index (an
+	// EngineCall's data-ins are exactly its params, in order).
+	int di = -1;
+	for (size_t i = 0; i < n.params.size(); ++i)
+		if (n.params[i].type == P::String && !n.params[i].isArray &&
+		    (n.params[i].name == "scene" || n.params[i].name == "path"))
+			{ di = (int)i; break; }
+	if (di < 0) return false;
+
+	std::string cur;
+	if (auto it = n.pinDefaults.find(di); it != n.pinDefaults.end() && it->second.type == P::String)
+		cur = it->second.s;
+
+	bool changed = false;
+	ImGui::SetNextItemWidth(-FLT_MIN);
+	if (ImGui::BeginCombo("Scene", cur.empty() ? "(pick a scene)" : cur.c_str()))
+	{
+		for (const auto& s : listScenes(cm))
+			if (ImGui::Selectable((s.label + "##" + s.path).c_str(), cur == s.path))
+			{
+				V v; v.type = P::String; v.s = s.path;
+				n.pinDefaults[di] = std::move(v);
+				changed = true;
+			}
+		ImGui::EndCombo();
+	}
+	ImGui::TextDisabled("Project-relative scene path — packed + resolved\nby this exact string (no manual typing).");
+	return changed;
 }
 
 int dragMatchPin(HorizonCode::NodeType t, HorizonCode::PinType dragType,

@@ -58,6 +58,11 @@ private:
     // App-wide HorizonCode host: owns the runtime the world runs on and the
     // GameInstance (OnInit fires before the scene loads; OnShutdown at exit).
     GameInstanceHost m_gameInstance;
+    // App-level UI: the GameInstance's widgets live here (not in any world), so a
+    // HUD created in OnInit exists before the first scene and survives scene
+    // switches. Each world borrows it via setWidgetManager. Declared after
+    // m_gameInstance so it is destroyed BEFORE the runtime it references.
+    WidgetManager m_widgets;
     std::unique_ptr<HorizonWorld> m_world; // startup scene, ticked + rendered each frame
     bool m_mouseCaptured = false;          // set true in OnInit once the window exists
     bool m_vsyncOn       = true;           // mirrors GetConfig().windowprops.vsync; V toggles it

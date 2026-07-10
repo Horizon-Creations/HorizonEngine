@@ -1786,6 +1786,13 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 		break;
 	}
 
+	case NT::EngineCall:
+		// scene.load / scene.loadAdditive: pick the scene from a dropdown
+		// instead of typing the path.
+		if (HcEditorUtil::drawSceneParamPicker(*n, ctx.contentManager)) committed = true;
+		else ImGui::TextDisabled("Engine call — inputs are set on the node's pins.");
+		break;
+
 	default:
 		ImGui::TextDisabled("No editable properties.");
 		break;

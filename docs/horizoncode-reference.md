@@ -26,7 +26,11 @@ A HorizonCode graph is always owned by exactly one host. All hosts share one
 
 The GameInstance persists across scene switches and is reachable from any graph via
 **Get Game Instance**. Objects created with **Create Object** live on the runtime;
-only those held by the GameInstance survive a scene change.
+only those held by the GameInstance survive a scene change. In the packaged game the
+GameInstance's UI is **app-level**: widgets it creates in `OnInit` live in a
+WidgetManager owned by the app (not any world), so they appear from frame one and
+**persist across `scene.load`** — a HUD stays up through level changes. (`OnInit`
+therefore fires before the first world is even built.)
 
 ---
 
@@ -137,7 +141,11 @@ Notes:
 - **Scene** enables seamless transitions: `load(path, hidden)` swaps the world only
   after the new one builds; `loadAdditive` streams a zone in at a position (hidden or
   visible), later toggled by `showZone`/`hideZone`/`setZonePosition`;
-  `loadedZones`/`available` enumerate zones and shippable scenes.
+  `loadedZones`/`available` enumerate zones and shippable scenes. The `scene` input on
+  `scene.load`/`scene.loadAdditive` is **picked from a dropdown** in the node inspector
+  (project scenes by their project-relative path, e.g. `Content/123.hescene`) — that
+  exact string is what the exporter packs the scene under and what the game resolves,
+  so a hand-typed path can't silently miss.
 - **File**/**Save** are sandboxed to `<user pref>/Saved`; absolute paths and `..` are
   rejected.
 - `vec3` values ride in a `Color` value on the boundary (spread as 4 numbers in

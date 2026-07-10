@@ -18,8 +18,9 @@ HorizonWorld::HorizonWorld()
     registry_.emplace<WeatherComponent>(rootEntity_);
     ensureEnvironmentLights();
     // Widgets and the level script share this world's central HorizonCode
-    // interpreter (rather than each running its own).
-    m_widgets.setRuntime(&scripts());
+    // interpreter (rather than each running its own). Only the OWN widget
+    // manager — an app-level one (setWidgetManager) manages its own runtime.
+    m_ownWidgets.setRuntime(&scripts());
 }
 
 bool HorizonWorld::isBuiltin(Entity entity) const
@@ -118,8 +119,10 @@ void HorizonWorld::clear()
     // clear() at the start of openScene doesn't spuriously fire OnLevelUnloaded.
     fireLevelUnloaded();
 
-    // Live UI widgets track the world's lifetime (PIE stop / scene load).
-    m_widgets.clear();
+    // Live UI widgets track the world's lifetime (PIE stop / scene load) — but
+    // ONLY a world-owned WM. An injected app-level WM (the game's persistent
+    // GameInstance UI) outlives the world and is never cleared here.
+    if (!m_widgetsPtr) m_ownWidgets.clear();
 
     // Root children first (handles whole subtrees), then any strays that
     // were never parented into the hierarchy.
