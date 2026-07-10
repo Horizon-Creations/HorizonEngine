@@ -134,6 +134,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 	items.reserve(meshView.size_hint());
 	for (auto [e, t, mesh] : meshView.each())
 	{
+		if (!mesh.visible) continue; // hidden (e.g. a preloaded zone)
 		EntityData d;
 		d.world  = t.worldMatrix;
 		d.meshId = mesh.meshAssetId;

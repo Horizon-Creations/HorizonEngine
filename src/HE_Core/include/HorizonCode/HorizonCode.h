@@ -127,6 +127,7 @@ struct FuncParam
 {
     std::string name;
     PinType     type = PinType::Float;
+    bool        isArray = false;   // the pin carries an array of `type`
 };
 
 // A user-defined graph variable: named, typed, persistent per running instance.

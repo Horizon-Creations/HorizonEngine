@@ -2072,8 +2072,8 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 					HC::Node* nn = st.graph.findNode(id);
 					nn->s = fn.id; nn->hasArg = fn.isExec;
 					nn->params.clear(); nn->results.clear();
-					for (const auto& p : fn.params)  nn->params.push_back({ p.name, p.type });
-					for (const auto& r : fn.results) nn->results.push_back({ r.name, r.type });
+					for (const auto& p : fn.params)  nn->params.push_back({ p.name, p.type, p.isArray });
+					for (const auto& r : fn.results) nn->results.push_back({ r.name, r.type, r.isArray });
 					wireAt(id, pin); created = id; ImGui::CloseCurrentPopup();
 				}
 			}
@@ -2249,8 +2249,8 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 				nn->s = fn->id;
 				nn->hasArg = fn->isExec;             // exec node vs pure data node
 				nn->params.clear(); nn->results.clear();
-				for (const auto& p : fn->params)  nn->params.push_back({ p.name, p.type });
-				for (const auto& r : fn->results) nn->results.push_back({ r.name, r.type });
+				for (const auto& p : fn->params)  nn->params.push_back({ p.name, p.type, p.isArray });
+				for (const auto& r : fn->results) nn->results.push_back({ r.name, r.type, r.isArray });
 				created = id;
 			}
 			ImGui::CloseCurrentPopup();

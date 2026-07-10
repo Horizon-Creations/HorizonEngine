@@ -20,6 +20,7 @@
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/EnvironmentComponent.h>
 #include <HorizonScene/Components/ScriptComponent.h>
+#include <HorizonScene/Components/HierarchyComponent.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <Types/UUID.h>
@@ -337,7 +338,12 @@ bool GameApplication::performSceneSwitch(const std::string& scenePath)
 			 "(packed entry, project file, exe dir)").c_str());
 		return false;
 	}
+	swapToWorld(std::move(newWorld), scenePath);
+	return true;
+}
 
+void GameApplication::swapToWorld(std::unique_ptr<HorizonWorld> newWorld, const std::string& label)
+{
 	// Tear down the old scene: unload event first (handlers still see the world),
 	// then widgets (unregister from the shared HorizonCode runtime), scripts
 	// (finalizers may touch entities), sounds, zones.
@@ -349,7 +355,7 @@ bool GameApplication::performSceneSwitch(const std::string& scenePath)
 	m_scriptContext.reset();
 	m_scriptInstances.clear();
 	m_audioEngine.stopAll();
-	m_zones.clear();
+	HE::api::scene::clearZones();
 
 	// Swap + bring the new scene up exactly like OnInit does for the startup scene.
 	m_world = std::move(newWorld);
@@ -379,9 +385,8 @@ bool GameApplication::performSceneSwitch(const std::string& scenePath)
 	startScripts();
 	m_world->fireLevelLoaded();
 	Logger::Log(Logger::LogLevel::Info,
-		("GameApplication: switched to scene '" + scenePath + "' ("
+		("GameApplication: switched to scene '" + label + "' ("
 		 + std::to_string(refs.size()) + " asset roots streaming)").c_str());
-	return true;
 }
 
 void GameApplication::executeSceneRequests()
@@ -389,8 +394,42 @@ void GameApplication::executeSceneRequests()
 	const auto requests = HE::api::scene::takeRequests();
 	for (const auto& r : requests)
 	{
-		if (r.kind == 0)      // full switch
-			performSceneSwitch(r.path);
+		if (r.kind == 0)      // full switch — or, hidden, a background PRELOAD
+		{
+			if (!r.hidden) { performSceneSwitch(r.path); continue; }
+			auto pending = std::make_unique<HorizonWorld>();
+			if (!loadSceneInto(*pending, r.path, /*additive=*/false, nullptr))
+			{
+				Logger::Log(Logger::LogLevel::Warning,
+					("GameApplication: scene.load (hidden) failed — '" + r.path + "' not found").c_str());
+				continue;
+			}
+			// Warm the pending scene's assets NOW so the later activate() swap
+			// presents without a streaming pop.
+			const auto refs = SceneSystems::collectAssetRefs(*pending);
+			for (HE::UUID ar : refs) contentManager().loadAssetAsync(ar);
+			if (m_pendingWorld)
+				Logger::Log(Logger::LogLevel::Warning,
+					("GameApplication: replacing pending scene '" + m_pendingScenePath + "'").c_str());
+			m_pendingWorld     = std::move(pending);
+			m_pendingScenePath = r.path;
+			HE::api::scene::notePendingLevel(true);
+			Logger::Log(Logger::LogLevel::Info,
+				("GameApplication: preloaded scene '" + r.path + "' ("
+				 + std::to_string(refs.size()) + " asset roots streaming) — awaiting activate").c_str());
+		}
+		else if (r.kind == 3) // activate the preloaded level
+		{
+			if (!m_pendingWorld)
+			{
+				Logger::Log(Logger::LogLevel::Warning,
+					"GameApplication: scene.activate with no pending scene (load hidden first)");
+				continue;
+			}
+			swapToWorld(std::move(m_pendingWorld), m_pendingScenePath);
+			m_pendingScenePath.clear();
+			HE::api::scene::notePendingLevel(false);
+		}
 		else if (r.kind == 1) // additive zone
 		{
 			if (!m_world) continue;
@@ -401,7 +440,28 @@ void GameApplication::executeSceneRequests()
 					("GameApplication: scene.loadAdditive failed — '" + r.path + "' not found").c_str());
 				continue;
 			}
-			m_zones[r.zone] = created;
+			// Register the zone centrally (queries/show/hide/position work off it).
+			// Root = the merged scene's fresh sub-root: the created entity parented
+			// directly under the world root.
+			HE::api::scene::ZoneInfo info;
+			info.path = r.path;
+			info.entities.reserve(created.size());
+			for (entt::entity e : created) info.entities.push_back((uint32_t)e);
+			for (entt::entity e : created)
+			{
+				const auto* h = m_world->registry().try_get<HierarchyComponent>(e);
+				if (h && h->parent == m_world->rootEntity()) { info.root = (uint32_t)e; break; }
+			}
+			if (info.root == 0 && !created.empty()) info.root = (uint32_t)created.front();
+			HE::api::scene::noteZoneLoaded(r.zone, std::move(info));
+
+			// Hidden zones load with their meshes invisible until Show Zone.
+			if (r.hidden)
+			{
+				HE::api::Ctx c{ m_world.get(), nullptr, &contentManager(), &m_audioEngine };
+				HE::api::scene::setZoneVisible(c, r.zone, false);
+			}
+
 			// Stream the merged zone's assets + start its ECS scripts. playOnStart
 			// audio is deliberately NOT re-fired (it would restart existing
 			// sources); zone audio starts from its scripts/graphs.
@@ -411,23 +471,24 @@ void GameApplication::executeSceneRequests()
 			Logger::Log(Logger::LogLevel::Info,
 				("GameApplication: zone " + std::to_string(r.zone) + " loaded ('" + r.path +
 				 "', " + std::to_string(created.size()) + " entities, " +
-				 std::to_string(started) + " scripts)").c_str());
+				 std::to_string(started) + " scripts" + (r.hidden ? ", hidden" : "") + ")").c_str());
 		}
 		else if (r.kind == 2) // unload additive zone
 		{
-			auto it = m_zones.find(r.zone);
-			if (it == m_zones.end() || !m_world) continue;
+			const HE::api::scene::ZoneInfo* z = HE::api::scene::zoneInfo(r.zone);
+			if (!z || !m_world) continue;
 			auto& reg = m_world->registry();
 			int gone = 0;
-			for (entt::entity e : it->second)
+			for (uint32_t id : z->entities)
 			{
+				const auto e = (entt::entity)id;
 				if (!reg.valid(e)) continue;
 				// Drop the per-entity script instance before the entity dies.
-				m_scriptInstances.erase((uint32_t)e);
-				ScriptApi::destroy(*m_world, (uint32_t)e);
+				m_scriptInstances.erase(id);
+				ScriptApi::destroy(*m_world, id);
 				++gone;
 			}
-			m_zones.erase(it);
+			HE::api::scene::noteZoneUnloaded(r.zone);
 			Logger::Log(Logger::LogLevel::Info,
 				("GameApplication: zone " + std::to_string(r.zone) + " unloaded ("
 				 + std::to_string(gone) + " entities)").c_str());

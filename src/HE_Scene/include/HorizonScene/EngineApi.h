@@ -204,14 +204,40 @@ namespace save {
 // loadAdditive() streams another scene INTO the running world (returns a zone id
 // so it can be unloaded again) — together they give seamless level transitions:
 // additively load the next zone, move the player, unload the zone behind.
+// `hidden` defers presentation: a hidden zone loads with its meshes invisible
+// until showZone; a hidden level PRELOADS in the background and swaps in on
+// activate(). Zone queries (loaded zones, their scene + position) read a
+// process-global zone table the app maintains after executing requests.
 // Editor PIE consumes the requests with a notice (game-runtime feature).
 namespace scene {
-    void load(const std::string& scenePath);          // project-relative .hescene
-    int  loadAdditive(const std::string& scenePath);  // → zone id (immediately)
+    void load(const std::string& scenePath, bool hidden = false);
+    int  loadAdditive(const std::string& scenePath, bool hidden = false); // → zone id
     void unloadZone(int zone);
-    // App hook: drain pending requests in submission order.
-    struct Request { int kind = 0; std::string path; int zone = 0; }; // 0 switch, 1 additive, 2 unload
+    void activate();   // swap in the level preloaded with load(path, hidden=true)
+
+    // ── Zone queries / control (direct; operate on the app-maintained table) ──
+    std::vector<int>         loadedZones();
+    std::string              zoneScene(int zone);            // "" unknown
+    glm::vec3                zonePosition(Ctx&, int zone);   // the zone root's position
+    void                     setZonePosition(Ctx&, int zone, const glm::vec3& p); // move the whole zone
+    void                     setZoneVisible(Ctx&, int zone, bool visible);        // flip its meshes
+    // Every scene the game can load: the packed scene index in shipped builds,
+    // a project scan (.hescene, project-relative) in dev builds.
+    std::vector<std::string> availableScenes(Ctx&);
+    bool                     hasPendingLevel();              // a hidden load awaits activate()
+
+    // ── App hooks ─────────────────────────────────────────────────────────────
+    struct Request { int kind = 0; std::string path; int zone = 0; bool hidden = false; };
+    // kinds: 0 switch, 1 additive, 2 unloadZone, 3 activate
     std::vector<Request> takeRequests();
+    struct ZoneInfo { std::string path; uint32_t root = 0; std::vector<uint32_t> entities; };
+    void            noteZoneLoaded(int zone, ZoneInfo info);
+    void            noteZoneUnloaded(int zone);
+    void            clearZones();          // world switched — zones are gone
+    const ZoneInfo* zoneInfo(int zone);    // nullptr unknown
+    void            notePendingLevel(bool pending);
+    // The well-known scene-index name (packed under sceneUuidForPath(this)).
+    inline const char* kSceneIndexEntry = "__scene_index__";
 }
 
 // ── String library (pure; complements the Concat/ToString nodes) ─────────────
@@ -301,7 +327,7 @@ namespace input {
 // `invoke`; the editor builds its add-menu from `category`/`params`/`results`;
 // codegen emits `cppCall(args…)`. This is the single source of truth.
 
-struct ApiParam { const char* name; PinType type; };
+struct ApiParam { const char* name; PinType type; bool isArray = false; };
 
 struct ApiFn
 {

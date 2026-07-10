@@ -4,6 +4,7 @@
 struct MeshComponent {
     HE::UUID meshAssetId;
     uint8_t lodBias        = 0;     // 0 = auto LOD
+    bool    visible        = true;  // extractor skips invisible meshes (zone hiding)
     bool    castsShadow    = true;
     bool    receivesShadow = true;
     bool    dirty          = true;

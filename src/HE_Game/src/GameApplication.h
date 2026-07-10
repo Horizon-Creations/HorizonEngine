@@ -70,11 +70,16 @@ private:
     // ── Scene transitions (HE::api::scene requests, executed at frame start) ──
     void executeSceneRequests();
     bool performSceneSwitch(const std::string& scenePath);
+    // Swap the running world for an already-loaded one (shared by switch + activate).
+    void swapToWorld(std::unique_ptr<HorizonWorld> newWorld, const std::string& label);
     // Resolve a project-relative .hescene: packed pak entry (path-derived UUID)
     // → loose JSON in the project → loose JSON next to the executable.
     bool loadSceneInto(HorizonWorld& world, const std::string& scenePath,
                        bool additive, std::vector<entt::entity>* outCreated);
     int  startScriptsFor(const std::vector<entt::entity>& entities); // additive zones
-    std::unordered_map<int, std::vector<entt::entity>> m_zones; // additive-load bookkeeping
+    // Level preload (scene.load with hidden=true): built here, swapped in on
+    // scene.activate(). Zone bookkeeping lives centrally in HE::api::scene.
+    std::unique_ptr<HorizonWorld> m_pendingWorld;
+    std::string                   m_pendingScenePath;
 };
 

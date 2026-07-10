@@ -6,6 +6,8 @@
 #include "HorizonScene/Components/TransformComponent.h"
 #include "HorizonScene/Components/EnvironmentComponent.h"
 #include "HorizonScene/Components/NameComponent.h"
+#include "HorizonScene/Components/MeshComponent.h"
+#include <Hpak/ProjectExporter.h>   // sceneUuidForPath (packed scene index)
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <DebugDraw/DebugDraw.h>
@@ -387,21 +389,116 @@ namespace scene {
 namespace {
 std::vector<Request>& requests() { static std::vector<Request> q; return q; }
 int& nextZone() { static int z = 1; return z; }
+std::unordered_map<int, ZoneInfo>& zones() { static std::unordered_map<int, ZoneInfo> z; return z; }
+bool& pendingLevel() { static bool p = false; return p; }
 } // namespace
-void load(const std::string& scenePath)
-{ requests().push_back({ 0, scenePath, 0 }); }
-int loadAdditive(const std::string& scenePath)
+void load(const std::string& scenePath, bool hidden)
+{ requests().push_back({ 0, scenePath, 0, hidden }); }
+int loadAdditive(const std::string& scenePath, bool hidden)
 {
     const int zone = nextZone()++;
-    requests().push_back({ 1, scenePath, zone });
+    requests().push_back({ 1, scenePath, zone, hidden });
     return zone;
 }
 void unloadZone(int zone)
-{ requests().push_back({ 2, {}, zone }); }
+{ requests().push_back({ 2, {}, zone, false }); }
+void activate()
+{ requests().push_back({ 3, {}, 0, false }); }
 std::vector<Request> takeRequests()
 {
     std::vector<Request> out = std::move(requests());
     requests().clear();
+    return out;
+}
+
+// ── Zone table (maintained by the app after executing requests) ──────────────
+void noteZoneLoaded(int zone, ZoneInfo info) { zones()[zone] = std::move(info); }
+void noteZoneUnloaded(int zone)              { zones().erase(zone); }
+void clearZones()                            { zones().clear(); }
+const ZoneInfo* zoneInfo(int zone)
+{
+    auto it = zones().find(zone);
+    return it == zones().end() ? nullptr : &it->second;
+}
+void notePendingLevel(bool pending) { pendingLevel() = pending; }
+bool hasPendingLevel()              { return pendingLevel(); }
+
+std::vector<int> loadedZones()
+{
+    std::vector<int> out;
+    out.reserve(zones().size());
+    for (const auto& [id, z] : zones()) out.push_back(id);
+    std::sort(out.begin(), out.end());
+    return out;
+}
+std::string zoneScene(int zone)
+{
+    const ZoneInfo* z = zoneInfo(zone);
+    return z ? z->path : std::string();
+}
+glm::vec3 zonePosition(Ctx& c, int zone)
+{
+    const ZoneInfo* z = zoneInfo(zone);
+    if (!z || !c.world) return glm::vec3(0.0f);
+    const auto e = (entt::entity)z->root;
+    if (!c.world->registry().valid(e)) return glm::vec3(0.0f);
+    const auto* t = c.world->registry().try_get<TransformComponent>(e);
+    return t ? t->position : glm::vec3(0.0f);
+}
+void setZonePosition(Ctx& c, int zone, const glm::vec3& p)
+{
+    const ZoneInfo* z = zoneInfo(zone);
+    if (!z || !c.world) return;
+    const auto e = (entt::entity)z->root;
+    if (!c.world->registry().valid(e)) return;
+    // Children follow via the hierarchy's world-matrix composition — moving the
+    // zone's sub-root moves the whole zone.
+    c.world->registry().get_or_emplace<TransformComponent>(e).position = p;
+}
+void setZoneVisible(Ctx& c, int zone, bool visible)
+{
+    const ZoneInfo* z = zoneInfo(zone);
+    if (!z || !c.world) return;
+    auto& reg = c.world->registry();
+    for (uint32_t id : z->entities)
+    {
+        const auto e = (entt::entity)id;
+        if (!reg.valid(e)) continue;
+        if (auto* m = reg.try_get<MeshComponent>(e)) m->visible = visible;
+    }
+}
+std::vector<std::string> availableScenes(Ctx& c)
+{
+    std::vector<std::string> out;
+    if (!c.content) return out;
+    // Shipped builds: the packed scene index (a JSON string array).
+    const auto bytes = c.content->readMountedEntry(sceneUuidForPath(kSceneIndexEntry));
+    if (!bytes.empty())
+    {
+        const auto j = nlohmann::json::parse(bytes.begin(), bytes.end(), nullptr, false);
+        if (j.is_array())
+        {
+            for (const auto& e : j) if (e.is_string()) out.push_back(e.get<std::string>());
+            return out;
+        }
+    }
+    // Dev builds: scan the project (parent of the content root) for .hescene.
+    const std::string root = c.content->contentRoot();
+    if (root.empty()) return out;
+    const auto projRoot = std::filesystem::path(root).parent_path();
+    std::error_code ec;
+    std::filesystem::recursive_directory_iterator it(
+        projRoot, std::filesystem::directory_options::skip_permission_denied, ec);
+    const std::filesystem::recursive_directory_iterator end;
+    while (!ec && it != end)
+    {
+        const bool regular = it->is_regular_file(ec);
+        if (!ec && regular && it->path().extension() == ".hescene")
+            out.push_back(it->path().lexically_relative(projRoot).generic_string());
+        ec.clear();
+        it.increment(ec);
+    }
+    std::sort(out.begin(), out.end());
     return out;
 }
 } // namespace scene
@@ -814,13 +911,40 @@ const std::vector<ApiFn>& registry()
         t.push_back({ "save.slotExists", "Save", false, {{"slot", P::Int}}, {{"exists", P::Bool}}, "HE::api::save::slotExists",
             [](Ctx&, const VV& a){ return VV{ Value::ofBool(save::slotExists(aI(a, 0))) }; } });
 
-        // Scene transitions (deferred; the app runtime executes the requests)
-        t.push_back({ "scene.load", "Scene", true, {{"scene", P::String}}, {}, "HE::api::scene::load",
-            [](Ctx&, const VV& a){ scene::load(aS(a, 0)); return VV{}; } });
-        t.push_back({ "scene.loadAdditive", "Scene", true, {{"scene", P::String}}, {{"zone", P::Int}}, "HE::api::scene::loadAdditive",
-            [](Ctx&, const VV& a){ return VV{ Value::ofInt(scene::loadAdditive(aS(a, 0))) }; } });
+        // Scene transitions (deferred; the app runtime executes the requests).
+        // "hidden": unwired = false = present immediately (today's behavior); true
+        // defers presentation — a hidden zone loads invisible until Show Zone, a
+        // hidden level PRELOADS and swaps in on Activate.
+        t.push_back({ "scene.load", "Scene", true, {{"scene", P::String}, {"hidden", P::Bool}}, {}, "HE::api::scene::load",
+            [](Ctx&, const VV& a){ scene::load(aS(a, 0), aB(a, 1)); return VV{}; } });
+        t.push_back({ "scene.loadAdditive", "Scene", true, {{"scene", P::String}, {"hidden", P::Bool}}, {{"zone", P::Int}}, "HE::api::scene::loadAdditive",
+            [](Ctx&, const VV& a){ return VV{ Value::ofInt(scene::loadAdditive(aS(a, 0), aB(a, 1))) }; } });
         t.push_back({ "scene.unloadZone", "Scene", true, {{"zone", P::Int}}, {}, "HE::api::scene::unloadZone",
             [](Ctx&, const VV& a){ scene::unloadZone(aI(a, 0)); return VV{}; } });
+        t.push_back({ "scene.activate", "Scene", true, {}, {}, "HE::api::scene::activate",
+            [](Ctx&, const VV&){ scene::activate(); return VV{}; } });
+        t.push_back({ "scene.hasPendingLevel", "Scene", false, {}, {{"pending", P::Bool}}, "HE::api::scene::hasPendingLevel",
+            [](Ctx&, const VV&){ return VV{ Value::ofBool(scene::hasPendingLevel()) }; } });
+        t.push_back({ "scene.showZone", "Scene", true, {{"zone", P::Int}}, {}, "HE::api::scene::setZoneVisible",
+            [](Ctx& c, const VV& a){ scene::setZoneVisible(c, aI(a, 0), true); return VV{}; } });
+        t.push_back({ "scene.hideZone", "Scene", true, {{"zone", P::Int}}, {}, "HE::api::scene::setZoneVisible",
+            [](Ctx& c, const VV& a){ scene::setZoneVisible(c, aI(a, 0), false); return VV{}; } });
+        t.push_back({ "scene.zonePosition", "Scene", false, {{"zone", P::Int}}, {{"position", P::Color}}, "HE::api::scene::zonePosition",
+            [](Ctx& c, const VV& a){ return VV{ v3(scene::zonePosition(c, aI(a, 0))) }; } });
+        t.push_back({ "scene.setZonePosition", "Scene", true, {{"zone", P::Int}, {"position", P::Color}}, {}, "HE::api::scene::setZonePosition",
+            [](Ctx& c, const VV& a){ scene::setZonePosition(c, aI(a, 0), aV3(a, 1)); return VV{}; } });
+        t.push_back({ "scene.zoneScene", "Scene", false, {{"zone", P::Int}}, {{"scene", P::String}}, "HE::api::scene::zoneScene",
+            [](Ctx&, const VV& a){ return VV{ Value::ofString(scene::zoneScene(aI(a, 0))) }; } });
+        t.push_back({ "scene.loadedZones", "Scene", false, {}, {{"zones", P::Int, /*isArray=*/true}}, "HE::api::scene::loadedZones",
+            [](Ctx&, const VV&){
+                Value arr; arr.isArray = true; arr.type = P::Int;
+                for (int z : scene::loadedZones()) arr.items.push_back(Value::ofInt(z));
+                return VV{ std::move(arr) }; } });
+        t.push_back({ "scene.available", "Scene", false, {}, {{"scenes", P::String, /*isArray=*/true}}, "HE::api::scene::availableScenes",
+            [](Ctx& c, const VV&){
+                Value arr; arr.isArray = true; arr.type = P::String;
+                for (auto& s : scene::availableScenes(c)) arr.items.push_back(Value::ofString(std::move(s)));
+                return VV{ std::move(arr) }; } });
 
         // String library (pure)
         t.push_back({ "string.length", "String", false, {{"s", P::String}}, {{"length", P::Int}}, "HE::api::str::length",
@@ -921,7 +1045,13 @@ const std::vector<ApiFn>& registry()
             { "save.saveToSlot", "Save To Slot" },   { "save.loadFromSlot", "Load From Slot" },
             { "save.slotExists", "Save Slot Exists" },
             { "scene.load", "Load Scene" },          { "scene.loadAdditive", "Load Scene Additive" },
-            { "scene.unloadZone", "Unload Zone" },
+            { "scene.unloadZone", "Unload Zone" },   { "scene.activate", "Activate Loaded Scene" },
+            { "scene.hasPendingLevel", "Has Pending Scene" },
+            { "scene.showZone", "Show Zone" },       { "scene.hideZone", "Hide Zone" },
+            { "scene.zonePosition", "Get Zone Position" },
+            { "scene.setZonePosition", "Set Zone Position" },
+            { "scene.zoneScene", "Get Zone Scene" }, { "scene.loadedZones", "Loaded Zones" },
+            { "scene.available", "Available Scenes" },
         };
         for (auto& fn : t)
         {

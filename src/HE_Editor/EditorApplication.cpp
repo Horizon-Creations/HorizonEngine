@@ -917,7 +917,8 @@ void EditorApplication::OnRender(float dt)
 		// graph author sees why nothing happened.
 		for (const auto& r : HE::api::scene::takeRequests())
 			Logger::Log(Logger::LogLevel::Warning,
-				("scene." + std::string(r.kind == 0 ? "load" : r.kind == 1 ? "loadAdditive" : "unloadZone")
+				("scene." + std::string(r.kind == 0 ? "load" : r.kind == 1 ? "loadAdditive"
+			                         : r.kind == 2 ? "unloadZone" : "activate")
 				 + (r.path.empty() ? "" : " ('" + r.path + "')")
 				 + " runs in the packaged game — play-in-editor keeps the current scene.").c_str());
 	}

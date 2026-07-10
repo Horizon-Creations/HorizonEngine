@@ -168,6 +168,7 @@ namespace
 			comps["mesh"] = {
 				{ "asset",          uuidToJson(m->meshAssetId) },
 				{ "lodBias",        m->lodBias },
+				{ "visible",        m->visible },
 				{ "castsShadow",    m->castsShadow },
 				{ "receivesShadow", m->receivesShadow },
 			};
@@ -533,6 +534,7 @@ namespace
 			MeshComponent m;
 			m.meshAssetId    = jsonToUuid(c.value("asset", json()));
 			m.lodBias        = c.value("lodBias", m.lodBias);
+			m.visible        = c.value("visible", m.visible);
 			m.castsShadow    = c.value("castsShadow", m.castsShadow);
 			m.receivesShadow = c.value("receivesShadow", m.receivesShadow);
 			registry.emplace_or_replace<MeshComponent>(entity, m);
