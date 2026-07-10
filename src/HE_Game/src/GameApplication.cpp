@@ -892,6 +892,10 @@ void GameApplication::OnRender(float deltaTime)
 	// Live widgets: per-frame logic tick (EventTick).
 	if (m_world) m_world->widgets().tick(deltaTime);
 
+	// Latent HorizonCode flow (Delay nodes): resume expired continuations on
+	// the app-wide runtime (GameInstance + widgets + level + objects share it).
+	m_gameInstance.runtime().update(deltaTime);
+
 	// In-game UI pointer input (hover/click on buttons + scripted elements).
 	updateUIInput();
 

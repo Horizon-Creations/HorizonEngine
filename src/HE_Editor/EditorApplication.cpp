@@ -1159,6 +1159,8 @@ void EditorApplication::OnRender(float dt)
 		if (m_isPlaying && m_editorWorld)
 		{
 			m_editorWorld->widgets().tick(dt);
+			// Latent HorizonCode flow (Delay nodes) — PIE only, like the tick.
+			m_editorWorld->scripts().update(dt);
 
 			// Toggle SDL text-input to match widget text-field focus, so a focused
 			// PIE text field receives SDL_EVENT_TEXT_INPUT. Only touched on a focus

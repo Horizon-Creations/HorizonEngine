@@ -228,6 +228,10 @@ inline std::vector<Value> callApi(const Context& c, const char* id, const std::v
 { return c.callApi ? c.callApi(id, args) : std::vector<Value>{}; }
 inline uint32_t self(const Context& c)         { return c.getSelf ? c.getSelf().ref : 0u; }
 inline uint32_t gameInstance(const Context& c) { return c.getGameInstance ? c.getGameInstance().ref : 0u; }
+inline void scheduleResume(const Context& c, int nodeId, float seconds)
+{ if (c.scheduleResume) c.scheduleResume(nodeId, seconds); }
+inline bool isValidRef(const Context& c, uint32_t target)
+{ return c.isValid && c.isValid(target); }
 HE_API void print(const std::string& s);       // "[Widget] " + Logger Info, like Print
 
 // ── run guards (§3.6, sharpened) ─────────────────────────────────────────────

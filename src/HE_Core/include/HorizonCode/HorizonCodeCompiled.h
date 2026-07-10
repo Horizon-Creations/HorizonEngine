@@ -49,6 +49,10 @@ public:
     virtual bool callFunction(const std::string& name, bool requirePublic,
                               const std::vector<Value>& args,
                               std::vector<Value>* results) = 0;
+    // Resume the exec chain after a Delay node (Runner::resumeFrom's mirror,
+    // called by the Runtime when the timer expires). Default no-op — only
+    // classes containing Delay nodes override it.
+    virtual void resumeFrom(int nodeId) { (void)nodeId; }
 
     // ── variable reflection (Get/SetExternal, GC, reseed, tooling) ──────────
     // getVariable is only meaningful for declared names (see varInfos);

@@ -246,6 +246,21 @@ namespace
 			if (compare) checkParity();
 		}
 
+		// Advance latent flow (Delay) on both backends in lockstep.
+		void update(float dt, bool compare = true)
+		{
+			interp.rt.update(dt);
+			comp.rt.update(dt);
+			if (compare) checkParity();
+		}
+
+		void reseed()
+		{
+			interp.rt.reseedVariables(interp.id);
+			comp.rt.reseedVariables(comp.id);
+			checkParity();
+		}
+
 		// Returns the interpreted result row (after asserting it equals the
 		// compiled one, incl. the success flag).
 		std::pair<bool, std::vector<Value>> call(const std::string& fn, bool requirePublic,
@@ -615,6 +630,57 @@ TEST_CASE("codegen parity: dispatchers (mixed compiled↔interpreted in ONE Runt
 	CHECK(rc.second == rr.second);
 	CHECK(rm.first == rr.first);
 	CHECK(rm.second == rr.second);
+}
+
+TEST_CASE("codegen parity: latent_flow (Delay, Do Once, Flip Flop, Is Valid)")
+{
+	ParityPair p("fix/latent_flow");
+
+	// Do Once: only the first fire passes (per instance).
+	p.fire("Once");
+	p.fire("Once");
+	p.fire("Once");
+	CHECK(p.var("once").f == 1.0f);
+	// reseedVariables also resets node state — Do Once fires again.
+	p.reseed();
+	p.fire("Once");
+	CHECK(p.var("once").f == 1.0f);   // vars were reseeded too: 0 + 1
+
+	// Flip Flop alternates starting with A; IsA reports the side just taken.
+	p.fire("Flip");
+	CHECK(p.var("isA").b == true);
+	p.fire("Flip");
+	p.fire("Flip");
+	CHECK(p.var("flip").s == "ABA");
+
+	// Is Valid: own ref lives, a made-up one doesn't.
+	p.fire("Check", 0, Value::ofRef(p.interp.id));
+	CHECK(p.var("valid").b == true);
+	p.fire("Check", 0, Value::ofRef(999999));
+	CHECK(p.var("valid").b == false);
+
+	// Delay: fire runs the chain up TO the Delay; the continuation runs when
+	// Runtime::update crosses the duration. Retriggering while pending is
+	// ignored (one continuation, not two).
+	p.fire("Wait");
+	CHECK(p.var("n").f == 1.0f);      // pre-Delay half ran
+	p.update(0.5f);
+	CHECK(p.var("n").f == 1.0f);      // not yet
+	p.fire("Wait");                    // re-trigger: pre-half again, schedule IGNORED
+	CHECK(p.var("n").f == 2.0f);
+	p.update(0.6f);
+	CHECK(p.var("n").f == 12.0f);     // ONE continuation (+10), not two
+	p.update(5.0f);
+	CHECK(p.var("n").f == 12.0f);     // nothing pending anymore
+
+	// A destroyed instance never resumes (no ghost continuation).
+	p.fire("Wait", 0, {}, /*compare=*/true);
+	p.interp.rt.destroy(p.interp.id);
+	p.comp.rt.destroy(p.comp.id);
+	p.interp.rt.update(2.0f);
+	p.comp.rt.update(2.0f);
+	CHECK_FALSE(p.interp.rt.alive(p.interp.id));
+	CHECK_FALSE(p.comp.rt.alive(p.comp.id));
 }
 
 TEST_CASE("codegen parity: functions_locals (§13.4)")

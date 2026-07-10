@@ -349,6 +349,9 @@ private:
             const PinRanges sr = pinRanges(*s);
             const bool isExec = l.srcPin >= sr.execOut0 && l.srcPin < sr.dataIn0;
             if (execEdges != isExec) continue;
+            // A Delay breaks the chain (its exec-out runs via resumeFrom, a
+            // fresh tick) — loops THROUGH a Delay are the legit timer pattern.
+            if (execEdges && s->type == NT::Delay) continue;
             if (execEdges) adj[l.srcNode].push_back(l.dstNode);
             else if (!cachedOut(*s)) adj[l.dstNode].push_back(l.srcNode); // reader depends on producer
         }
@@ -445,6 +448,24 @@ private:
         if (auto it = n.pinDefaults.find(inIdx); it != n.pinDefaults.end() && !want.arr)
             return valueLit(coerceValue(it->second, want.t));
         return zeroLit(want);
+    }
+
+    // Per-instance node state (DoOnce fired?, FlipFlop side) → a bool member.
+    static std::string stateMember(int nodeId)
+    { return "n" + std::to_string(nodeId) + "_state"; }
+    std::vector<int> stateNodeIds() const
+    {
+        std::vector<int> ids;
+        for (const Node& n : m_g.nodes)
+            if (n.type == NT::DoOnce || n.type == NT::FlipFlop) ids.push_back(n.id);
+        return ids;
+    }
+    std::vector<int> delayNodeIds() const
+    {
+        std::vector<int> ids;
+        for (const Node& n : m_g.nodes)
+            if (n.type == NT::Delay) ids.push_back(n.id);
+        return ids;
     }
 
     std::string slotRef(const Node& n, int outIdx) const
@@ -556,6 +577,11 @@ private:
             return "hc::arrContains(" + input(n, 0, fnCtx) + ", " + input(n, 1, fnCtx) + ")";
         case NT::ArrayIndexOf:
             return "hc::arrIndexOf(" + input(n, 0, fnCtx) + ", " + input(n, 1, fnCtx) + ")";
+        case NT::IsValid:
+            return "hc::isValidRef(m_ctx, " + input(n, 0, fnCtx) + ")";
+        case NT::FlipFlop:
+            // IsA = the side the LAST execution took (false before any run).
+            return stateMember(n.id);
         case NT::Add:      return "(" + input(n, 0, fnCtx) + " + " + input(n, 1, fnCtx) + ")";
         case NT::Subtract: return "(" + input(n, 0, fnCtx) + " - " + input(n, 1, fnCtx) + ")";
         case NT::Multiply: return "(" + input(n, 0, fnCtx) + " * " + input(n, 1, fnCtx) + ")";
@@ -598,9 +624,11 @@ private:
             const Node* n = m_g.findNode(l->dstNode);
             if (!n) return;
             stmt(*n, fnCtx, b);
-            // Branch/Sequence/ForEach steer their own exec-outs; Return is terminal.
+            // Branch/Sequence/ForEach/DoOnce/FlipFlop steer their own exec-outs;
+            // Return and Delay (latent — resumes via resumeFrom) are terminal.
             if (n->type == NT::Branch || n->type == NT::Sequence || n->type == NT::ForEach ||
-                n->type == NT::FunctionReturn)
+                n->type == NT::FunctionReturn || n->type == NT::Delay ||
+                n->type == NT::DoOnce || n->type == NT::FlipFlop)
                 return;
             l = execLinkFrom(n->id, pinRanges(*n).execOut0);
         }
@@ -825,6 +853,36 @@ private:
         case NT::Print:
             b.line("hc::print(" + input(n, 0, fnCtx) + ");");
             break;
+        case NT::Delay:
+            // Latent: schedule the continuation (resume_<id> via resumeFrom)
+            // and stop the chain — like the interpreter's runExecChain break.
+            b.line("hc::scheduleResume(m_ctx, " + std::to_string(n.id) + ", " +
+                   input(n, 0, fnCtx) + ");");
+            break;
+        case NT::DoOnce:
+            b.line("if (!" + stateMember(n.id) + ")");
+            b.line("{");
+            ++b.indent;
+            b.line(stateMember(n.id) + " = true;");
+            chain(n, r.execOut0 + 0, fnCtx, b);
+            --b.indent;
+            b.line("}");
+            break;
+        case NT::FlipFlop:
+            b.line(stateMember(n.id) + " = !" + stateMember(n.id) + ";   // A first");
+            b.line("if (" + stateMember(n.id) + ")");
+            b.line("{");
+            ++b.indent;
+            chain(n, r.execOut0 + 0, fnCtx, b);   // A
+            --b.indent;
+            b.line("}");
+            b.line("else");
+            b.line("{");
+            ++b.indent;
+            chain(n, r.execOut0 + 1, fnCtx, b);   // B
+            --b.indent;
+            b.line("}");
+            break;
         default:
             // Event/FunctionEntry never appear mid-chain; anything else is a
             // pure node that can't be exec-wired.
@@ -931,10 +989,23 @@ private:
                 h += "        " + cppType(s.tr) + " " + s.field + " = " + zeroLit(s.tr) + ";\n";
         h += "    };\n\n";
 
+        // Per-instance node state (DoOnce/FlipFlop) — persists like variables,
+        // reset by reseedVariables, never part of the public surface.
+        for (const int id : stateNodeIds())
+            h += "    bool " + stateMember(id) + " = false;\n";
+
         for (const auto& [id, name] : sortedEvNames())
             h += "    void " + name + "(RunState& rs);\n";
         for (const Node* fn : functionEntries())
             h += "    " + fnSignature(*fn, false) + ";\n";
+        if (!delayNodeIds().empty())
+        {
+            h += "public:\n";
+            h += "    void resumeFrom(int nodeId) override;\n";
+            h += "private:\n";
+            for (const int id : delayNodeIds())
+                h += "    void resume_" + std::to_string(id) + "(RunState& rs);\n";
+        }
         h += "};\n\n";
         h += "} // namespace " + m_opt.namespaceName + "\n";
     }
@@ -1045,6 +1116,8 @@ private:
         for (const auto& v : m_g.variables)
             if (v.scope == 0)
                 c += "    " + m_varMember.at(v.name) + " = " + memberDefault(v) + ";\n";
+        for (const int id : stateNodeIds())
+            c += "    " + stateMember(id) + " = false;\n";   // DoOnce/FlipFlop start over
         c += "}\n\n";
 
         c += "void " + m_cls + "::collectRefs(std::vector<uint32_t>& out) const\n{\n";
@@ -1060,6 +1133,27 @@ private:
                      m_varMember.at(v.name) + ");\n";
         }
         c += "}\n\n";
+
+        // ── Delay continuations (Runner::resumeFrom's mirror): a FRESH run.
+        if (const auto delays = delayNodeIds(); !delays.empty())
+        {
+            c += "void " + m_cls + "::resumeFrom(int nodeId)\n{\n";
+            c += "    RunState rs;\n";
+            for (const int id : delays)
+                c += "    if (nodeId == " + std::to_string(id) + ") { resume_" +
+                     std::to_string(id) + "(rs); return; }\n";
+            c += "}\n\n";
+            for (const int id : delays)
+            {
+                const Node* dn = m_g.findNode(id);
+                c += "void " + m_cls + "::resume_" + std::to_string(id) + "(RunState& rs)\n{\n";
+                c += "    (void)rs;\n";
+                Body b;
+                if (dn) chain(*dn, pinRanges(*dn).execOut0, /*fnCtx=*/0, b);
+                c += b.text;
+                c += "}\n\n";
+            }
+        }
 
         // ── event handler bodies.
         for (const Node& n : m_g.nodes)

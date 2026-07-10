@@ -51,6 +51,9 @@ therefore fires before the first world is even built.)
 | **Branch** (`Branch`) | `if` — True / False exec-outs from a Bool. |
 | **Sequence** (`Sequence`) | Run several exec-outs in order. |
 | **For Each** (`ForEach`) | Loop an array: `Body` (Element + Index) per element, then `Done`. Accepts any array type and re-types its pins to the connected array. The sanctioned way to reach elements of an object array. |
+| **Delay** (`Delay`) | Latent: pause the chain, resume from `Completed` after `Duration` seconds (driven per frame by the runtime). Retriggering while pending is ignored. The continuation is a FRESH run — event args and cached exec outputs of the original run are gone; wire through variables instead. Loops back into a Delay are the sanctioned "timer loop". |
+| **Do Once** (`DoOnce`) | Lets the chain through only the FIRST time per instance. Resets with the instance's variables (fresh play session). |
+| **Flip Flop** (`FlipFlop`) | Alternates its `A` / `B` exec-outs (A first); the `Is A` data-out reports which side just ran. State persists per instance like Do Once. |
 
 ### Variables (typed, persistent per instance)
 | Node | Purpose |
@@ -97,6 +100,7 @@ Array pins draw as a 2×2 grid to distinguish a list-of-T from a scalar T.
 | **Get Property** / **Set Property** | Read/write a property on the graph's target element. |
 | **Bind Event** (`BindEvent`) | Subscribe: when the target fires an event, this instance's matching Event fires. |
 | **Emit Event** (`EmitEvent`) | Broadcast an event to everyone bound to this instance. |
+| **Is Valid** (`IsValid`) | Bool: is the `Ref` a LIVE instance? The guard before touching an object that may have been destroyed (a dead Ref otherwise null-refs with an error log). |
 
 ### Debug
 **Print** (`Print`) — log a value.

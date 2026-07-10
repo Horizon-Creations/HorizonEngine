@@ -94,6 +94,11 @@ public:
     // `arg` feeds the event's data output when it has one.
     void fireEvent(InstanceId id, const std::string& event, int elem = 0, const Value& arg = {});
 
+    // Advance latent flow (Delay nodes): decrement every pending resume and run
+    // the expired ones. The app calls this once per frame (game update / PIE
+    // tick) on its runtime; an un-ticked runtime simply never resumes.
+    void update(float dt);
+
     // Run a function on an instance, passing `args` and copying its return values
     // into `results` (when non-null). requirePublic enforces the access modifier
     // for calls that cross a class boundary (another script / the scripting API).
@@ -151,7 +156,13 @@ private:
         // Interpreted: the private variable store. Compiled: OVERFLOW store for
         // undeclared names only (Set on an undeclared name still creates an entry).
         std::unordered_map<std::string, Value>  vars;
+        // Per-node state (DoOnce fired?, FlipFlop side) — persistent like vars
+        // but never part of the variable store/public surface; cleared by
+        // reseedVariables. Interpreted only (compiled classes keep members).
+        std::unordered_map<int, Value>          nodeState;
     };
+    // One scheduled Delay continuation (Runtime::update drives these).
+    struct PendingResume { InstanceId id; int node; float remaining; };
     Inst*       find(InstanceId id);
     const Inst* find(InstanceId id) const;
     // Build a Context that routes variable access to the instance's private
@@ -174,6 +185,8 @@ private:
     // cascade unwinds to depth 0; exceeding it aborts the cascade with an error.
     static constexpr int kMaxDispatchFires = 256;
     int        m_dispatchFires = 0;
+    // Pending Delay continuations (append order preserved on expiry).
+    std::vector<PendingResume> m_pending;
     std::unordered_set<InstanceId> m_destructing; // ids mid-destroy (self-destruct guard)
     Services   m_services;
 };
