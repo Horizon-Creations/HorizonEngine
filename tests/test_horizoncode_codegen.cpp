@@ -590,6 +590,31 @@ TEST_CASE("codegen parity: dispatchers (mixed compiled↔interpreted in ONE Runt
 	CHECK(a.second == refCycle.got(refCycle.l2));
 	CHECK(b.first == refCycle.got(refCycle.l1));
 	CHECK(b.second == refCycle.got(refCycle.l2));
+
+	// The dispatch BUDGET: a bind cycle of RELAYING listeners branches the
+	// dispatch tree exponentially (~2^32 fires with the depth guard alone) —
+	// the per-cascade budget must cut it off quickly and identically for every
+	// population. Before the budget existed this case effectively hung.
+	auto relayCycleGot = [](bool l1Compiled, bool l2Compiled) -> std::pair<float, float>
+	{
+		Mixed m;
+		m.l1 = m.make("fix/dispatch_listener", l1Compiled);
+		m.l2 = m.make("fix/dispatch_listener", l2Compiled);
+		m.rt.fireEvent(m.l1, "Setup", 0, Value::ofRef(m.l2));
+		m.rt.fireEvent(m.l2, "Setup", 0, Value::ofRef(m.l1));
+		m.rt.fireEvent(m.l1, "Sig", 0, Value::ofFloat(1.0f));
+		// A second cascade gets a FRESH budget (reset at depth 0).
+		m.rt.fireEvent(m.l1, "Sig", 0, Value::ofFloat(0.0f));
+		return { m.got(m.l1), m.got(m.l2) };
+	};
+	const auto rr = relayCycleGot(false, false);
+	CHECK(rr.first > 0.0f);
+	const auto rc = relayCycleGot(true, true);
+	const auto rm = relayCycleGot(true, false);
+	CHECK(rc.first == rr.first);
+	CHECK(rc.second == rr.second);
+	CHECK(rm.first == rr.first);
+	CHECK(rm.second == rr.second);
 }
 
 TEST_CASE("codegen parity: functions_locals (§13.4)")

@@ -297,6 +297,10 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
             dl->AddRectFilled(n.pos, br, bodyCol, 6.0f);
             dl->AddRect(n.pos, br, sel ? IM_COL32(255, 170, 40, 255) : IM_COL32(20, 20, 24, 255),
                         6.0f, 0, sel ? 2.0f : 1.0f);
+            if (model.nodeOutline)
+                if (const ImU32 oc = model.nodeOutline(n.id))
+                    dl->AddRect(ImVec2(n.pos.x - 3, n.pos.y - 3), ImVec2(br.x + 3, br.y + 3),
+                                oc, 7.0f, 0, 3.0f);
             // Title scales linearly with zoom (like the node box), and the centering
             // uses the SCALED text width — mixing the default-size CalcTextSize with
             // a scaled draw put the title off-center at any zoom ≠ 1.
@@ -313,6 +317,10 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
                               model.headerColor(n.id), 5.0f, ImDrawFlags_RoundCornersTop);
             dl->AddRect(n.pos, br, sel ? IM_COL32(255, 170, 40, 255) : IM_COL32(20, 20, 24, 255),
                         5.0f, 0, sel ? 2.0f : 1.0f);
+            if (model.nodeOutline)
+                if (const ImU32 oc = model.nodeOutline(n.id))
+                    dl->AddRect(ImVec2(n.pos.x - 3, n.pos.y - 3), ImVec2(br.x + 3, br.y + 3),
+                                oc, 7.0f, 0, 3.0f);
             dl->AddText(nullptr, 13.0f * st.zoom,
                         ImVec2(n.pos.x + 6 * st.zoom, n.pos.y + 4 * st.zoom), IM_COL32(240,240,240,255), title.c_str());
         }

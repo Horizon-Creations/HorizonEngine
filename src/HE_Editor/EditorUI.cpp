@@ -2418,6 +2418,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 
                             const int total    = (int)hcSources.size();
                             const int fellBack = (int)gen.fallbacks.size();
+                            std::string buildLine;
                             if (!gen.ok || !wroteAll)
                                 hcMsg = " — HorizonCode: generation failed, shipped interpreted";
                             else
@@ -2432,6 +2433,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                                         + (fellBack ? ", " + std::to_string(fellBack)
                                                       + " interpreted (validation)"
                                                     : std::string());
+                                    buildLine = "build: OK (" + built.artifact.filename().string() + ")";
                                 }
                                 else
                                 {
@@ -2439,7 +2441,39 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                                         ("HorizonCode codegen: " + built.message).c_str());
                                     hcMsg = " — HorizonCode: compile failed, shipped "
                                             "interpreted (" + built.message + ")";
+                                    buildLine = "build: FAILED — " + built.message;
                                 }
+                            }
+
+                            // Persist the per-class report beside the generated
+                            // sources — the durable answer to "what compiled,
+                            // what fell back, and why" (the result line only
+                            // carries the counts).
+                            {
+                                std::string rep = "HorizonCode compile report\n";
+                                rep += "==========================\n";
+                                rep += "classes: " + std::to_string(total)
+                                     + ", compiled: " + std::to_string(total - fellBack)
+                                     + ", interpreted: " + std::to_string(fellBack) + "\n";
+                                if (!buildLine.empty()) rep += buildLine + "\n";
+                                rep += "\n";
+                                for (const auto& s : hcSources)
+                                {
+                                    const auto fb = std::find_if(gen.fallbacks.begin(), gen.fallbacks.end(),
+                                        [&](const auto& f) { return f.key == s.key; });
+                                    if (fb == gen.fallbacks.end())
+                                        rep += "  COMPILED     " + s.key + "\n";
+                                    else
+                                        rep += "  INTERPRETED  " + s.key + " — " + fb->reason
+                                             + (fb->node ? " (node " + std::to_string(fb->node) + ")" : std::string())
+                                             + "\n";
+                                }
+                                if (!gen.warnings.empty())
+                                {
+                                    rep += "\nwarnings:\n";
+                                    for (const auto& w : gen.warnings) rep += "  " + w + "\n";
+                                }
+                                writeIfChanged(genDir / "hc_report.txt", rep);
                             }
                         }
 

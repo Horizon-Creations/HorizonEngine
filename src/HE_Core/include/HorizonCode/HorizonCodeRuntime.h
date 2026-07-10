@@ -166,7 +166,14 @@ private:
     std::unordered_map<InstanceId, std::unordered_map<std::string, std::vector<InstanceId>>> m_listeners;
     InstanceId m_next         = 1;
     InstanceId m_gameInstance = 0;
-    int        m_dispatchDepth = 0;   // guards cross-instance event recursion
+    int        m_dispatchDepth = 0;   // guards cross-instance event recursion (depth)
+    // Total listener fires per top-level event cascade. The depth guard bounds
+    // RECURSION only — a bind cycle of re-emitting listeners branches the
+    // dispatch tree exponentially (every fire spawns an emit-dispatch AND a
+    // trailing dispatch), so total work needs its own cap. Reset when the
+    // cascade unwinds to depth 0; exceeding it aborts the cascade with an error.
+    static constexpr int kMaxDispatchFires = 256;
+    int        m_dispatchFires = 0;
     std::unordered_set<InstanceId> m_destructing; // ids mid-destroy (self-destruct guard)
     Services   m_services;
 };

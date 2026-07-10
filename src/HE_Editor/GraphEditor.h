@@ -114,6 +114,10 @@ struct Model
     // `hovered` = the canvas is hovered this frame; return true to consume the
     // mouse so the component skips its own node/selection/pan handling.
     std::function<bool(ImVec2 origin, ImVec2 pan, float zoom, bool hovered)> interactBehind;
+    // Optional per-node outline color (0 = none): drawn as a thick halo around
+    // the node box, over the normal border. Used for error/status markers
+    // (e.g. a HorizonCode compile error anchored to a node).
+    std::function<ImU32(int nodeId)> nodeOutline;
     // Right-click on a node opens a popup; the host draws its items here.
     std::function<void(int nodeId)> drawNodeContextMenu;
     // Double-click on a node (e.g. open a referenced function).

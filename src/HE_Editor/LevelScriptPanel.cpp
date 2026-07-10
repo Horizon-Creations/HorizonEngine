@@ -4,9 +4,11 @@
 #include "HcClassList.h"
 #include "EditorApplication.h"   // AppContext
 #include "EditorUndo.h"          // scene-undo snapshots (dirty tracking + undo/redo)
+#include <Diagnostics/Logger.h>
 #include "GraphEditor.h"         // shared node-graph canvas
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/EngineApi.h>
+#include <HorizonScene/HcCodegen.h>   // in-editor compile check (Compile button)
 #include <HorizonCode/HorizonCode.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
@@ -170,8 +172,58 @@ struct LSState
 	int         evtNameEditFor = 0;
 	std::string dropVar;            // variable dragged onto the canvas
 	bool        openVarDrop = false;
+	// In-editor compile check (the Compile button): the last result for the
+	// graph identified by compileFor. An error anchors to a node — highlighted
+	// on the canvas and focused when the check ran.
+	bool        compileHas = false;
+	bool        compileOk  = false;
+	std::string compileMsg;
+	int         compileNode = 0;
+	std::string compileFor;         // panel title the result belongs to
 };
 LSState g;
+
+// Run the SINGLE-class compile check the export would run: JSON round-trip
+// (what a shipped asset contains), then HE::hccg::generate. Success = the class
+// would compile on export; a fallback carries the reason + offending node.
+void runCompileCheck(const HC::Graph& graph, const char* title)
+{
+	HE::hccg::ClassSource src;
+	src.key   = title;
+	src.label = title;
+	HorizonCode::fromJson(HorizonCode::toJson(graph), src.graph);
+	const HE::hccg::Result res = HE::hccg::generate({ src }, {});
+
+	g.compileHas  = true;
+	g.compileFor  = title;
+	g.compileNode = 0;
+	if (!res.fallbacks.empty())
+	{
+		g.compileOk   = false;
+		g.compileMsg  = res.fallbacks[0].reason;
+		g.compileNode = res.fallbacks[0].node;
+		// Jump to the offending node: open its sub-graph and center on it.
+		if (const HC::Node* n = graph.findNode(g.compileNode))
+		{
+			g.currentGraph   = n->subgraph;
+			g.selectedNode   = n->id;
+			g.ge.focusNode   = n->id;
+			g.ge.selected    = n->id;
+		}
+	}
+	else
+	{
+		size_t lines = 0;
+		for (const auto& f : res.files)
+			lines += (size_t)std::count(f.contents.begin(), f.contents.end(), '\n');
+		g.compileOk  = true;
+		g.compileMsg = "compiles clean — " + std::to_string(lines) + " lines of C++";
+		if (!res.warnings.empty())
+			g.compileMsg += " (" + std::to_string(res.warnings.size()) + " warning(s), see log)";
+		for (const auto& w : res.warnings)
+			Logger::Log(Logger::LogLevel::Warning, ("HorizonCode compile check: " + w).c_str());
+	}
+}
 
 int addNode(HC::Graph& graph, NT type, const ImVec2& pos)
 {
@@ -717,6 +769,12 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 	GraphEditor::Model m;
 	m.multiSelect = true;
 	m.compactPureNodes = true; // getters/literals draw as compact chips
+	// The last compile check's error node gets a red halo.
+	m.nodeOutline = [](int id) -> ImU32
+	{
+		return (g.compileHas && !g.compileOk && id == g.compileNode)
+			? IM_COL32(230, 70, 70, 255) : 0;
+	};
 	m.nodeIds = [&graph]{ std::vector<int> ids; ids.reserve(graph.nodes.size());
 		for (const auto& n : graph.nodes) if (n.subgraph == g.currentGraph) ids.push_back(n.id); return ids; };
 	m.getPos = [&graph](int id, float& x, float& y){ if (const HC::Node* n = graph.findNode(id)) { x = n->x; y = n->y; } };
@@ -1167,10 +1225,42 @@ void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
 	ImGui::SameLine();
 
 	ImGui::BeginChild("##ls_canvas_host", ImVec2(0.0f, 0.0f), true);
-	// Header: which sub-graph is shown.
+	// A stale compile result from another tab must not anchor to this graph.
+	if (g.compileHas && g.compileFor != title) g.compileHas = false;
+	// Header: which sub-graph is shown + the compile check.
+	ImGui::AlignTextToFramePadding();
 	if (g.currentGraph == 0) ImGui::TextDisabled("Event Graph");
 	else { const HC::Node* e = graph.findNode(g.currentGraph);
 		ImGui::TextDisabled("Function: %s", e && !e->s.empty() ? e->s.c_str() : "(unnamed)"); }
+	ImGui::SameLine(ImGui::GetContentRegionAvail().x - 64.0f);
+	if (ImGui::SmallButton("Compile"))
+		runCompileCheck(graph, title);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Translate this class to C++ the way a packaged export would.\n"
+		                  "Errors highlight the offending node; a clean result means the\n"
+		                  "class ships compiled (everything else runs interpreted).");
+	if (g.compileHas)
+	{
+		if (g.compileOk)
+			ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.35f, 1.0f), "Compile: %s", g.compileMsg.c_str());
+		else
+		{
+			ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.35f, 1.0f),
+			                   "Compile error: %s — runs interpreted", g.compileMsg.c_str());
+			if (g.compileNode != 0)
+			{
+				ImGui::SameLine();
+				if (ImGui::SmallButton("Show node"))
+					if (const HC::Node* n = graph.findNode(g.compileNode))
+					{
+						g.currentGraph = n->subgraph;
+						g.selectedNode = n->id;
+						g.ge.focusNode = n->id;
+						g.ge.selected  = n->id;
+					}
+			}
+		}
+	}
 	const ImVec2 avail = ImGui::GetContentRegionAvail();
 	drawCanvas(graph, events, allowCustomEvents, avail, content, giGraph, edited);
 

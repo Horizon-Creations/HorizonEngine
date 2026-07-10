@@ -3,6 +3,7 @@
 #include "GraphEditor.h"                        // shared node-graph canvas
 #include "HcClassList.h"                        // Create Object class picker
 #include <HorizonScene/EngineApi.h>             // HE::api registry (Engine Call nodes)
+#include <HorizonScene/HcCodegen.h>             // in-editor compile check (Compile button)
 #include <UIWidget/UIWidgetTree.h>
 #include <UIWidget/UIElement.h>
 #include <UIWidget/UIElements.h>
@@ -76,6 +77,12 @@ struct State
 	bool   gOpenVarDrop = false;     // request to open the variable Get/Set popup next frame
 	std::string gEvtNameEdit;        // scratch buffer for a widget-scope Event name (uniqueness)
 	int    gEvtNameEditFor = 0;
+	// In-editor compile check (Compile button in the graph header): the last
+	// result for THIS widget's graph; an error anchors to a node (red halo).
+	bool        compileHas = false;
+	bool        compileOk  = false;
+	std::string compileMsg;
+	int         compileNode = 0;
 
 	// Undo/redo: combined snapshots (treeJson + '\x1f' + graphJson).
 	std::vector<std::string> undo;
@@ -1931,6 +1938,12 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 
 	GraphEditor::Model m;
 	m.compactPureNodes = true; // getters/literals draw as compact chips
+	// The last compile check's error node gets a red halo.
+	m.nodeOutline = [&st](int id) -> ImU32
+	{
+		return (st.compileHas && !st.compileOk && id == st.compileNode)
+			? IM_COL32(230, 70, 70, 255) : 0;
+	};
 	m.nodeIds = [&st]{ std::vector<int> ids; ids.reserve(st.graph.nodes.size());
 		for (const auto& n : st.graph.nodes) if (n.subgraph == st.currentGraph) ids.push_back(n.id); return ids; };
 	m.getPos = [&st](int id, float& x, float& y){ if (const HC::Node* n = st.graph.findNode(id)) { x = n->x; y = n->y; } };
@@ -2610,10 +2623,74 @@ void render(AppContext& ctx, const std::string& assetPath,
 			ImVec2(ImGui::GetContentRegionAvail().x - rightW - ImGui::GetStyle().ItemSpacing.x, 0),
 			ImGuiChildFlags_Borders,
 			ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-		// Header: which sub-graph is shown.
+		// Header: which sub-graph is shown + the compile check.
+		ImGui::AlignTextToFramePadding();
 		if (st.currentGraph == 0) ImGui::TextDisabled("Event Graph");
 		else { const HC::Node* e = st.graph.findNode(st.currentGraph);
 			ImGui::TextDisabled("Function: %s", e && !e->s.empty() ? e->s.c_str() : "(unnamed)"); }
+		ImGui::SameLine(ImGui::GetContentRegionAvail().x - 64.0f);
+		if (ImGui::SmallButton("Compile"))
+		{
+			// The single-class check a packaged export would run (JSON round
+			// trip, then generate); key = the content-relative asset path.
+			HE::hccg::ClassSource src;
+			src.key   = st.relPath.empty() ? st.name : st.relPath;
+			src.label = st.name;
+			HorizonCode::fromJson(HorizonCode::toJson(st.graph), src.graph);
+			const HE::hccg::Result res = HE::hccg::generate({ src }, {});
+			st.compileHas  = true;
+			st.compileNode = 0;
+			if (!res.fallbacks.empty())
+			{
+				st.compileOk   = false;
+				st.compileMsg  = res.fallbacks[0].reason;
+				st.compileNode = res.fallbacks[0].node;
+				if (const HC::Node* n = st.graph.findNode(st.compileNode))
+				{
+					st.currentGraph      = n->subgraph;
+					st.selectedGraphNode = n->id;
+					st.geState.focusNode = n->id;
+					st.geState.selected  = n->id;
+				}
+			}
+			else
+			{
+				size_t lines = 0;
+				for (const auto& f : res.files)
+					lines += (size_t)std::count(f.contents.begin(), f.contents.end(), '\n');
+				st.compileOk  = true;
+				st.compileMsg = "compiles clean — " + std::to_string(lines) + " lines of C++";
+				for (const auto& w : res.warnings)
+					Logger::Log(Logger::LogLevel::Warning,
+						("HorizonCode compile check: " + w).c_str());
+			}
+		}
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("Translate this widget's script to C++ the way a packaged export\n"
+			                  "would. Errors highlight the offending node; a clean result means\n"
+			                  "the script ships compiled (otherwise it runs interpreted).");
+		if (st.compileHas)
+		{
+			if (st.compileOk)
+				ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.35f, 1.0f), "Compile: %s", st.compileMsg.c_str());
+			else
+			{
+				ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.35f, 1.0f),
+				                   "Compile error: %s — runs interpreted", st.compileMsg.c_str());
+				if (st.compileNode != 0)
+				{
+					ImGui::SameLine();
+					if (ImGui::SmallButton("Show node"))
+						if (const HC::Node* n = st.graph.findNode(st.compileNode))
+						{
+							st.currentGraph      = n->subgraph;
+							st.selectedGraphNode = n->id;
+							st.geState.focusNode = n->id;
+							st.geState.selected  = n->id;
+						}
+				}
+			}
+		}
 		drawGraphCanvas(st, ctx, ImGui::GetContentRegionAvail());
 		ImGui::EndChild();
 

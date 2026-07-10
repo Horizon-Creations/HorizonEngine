@@ -35,8 +35,9 @@ using PT = PinType;
 
 namespace {
 
-// A class that can't compile bails out to the interpreter with a reason.
-struct FallbackError { std::string reason; };
+// A class that can't compile bails out to the interpreter with a reason and,
+// when known, the graph node it anchors to (editor error highlighting).
+struct FallbackError { std::string reason; int node = 0; };
 
 // ── pin range helpers (same unified index space as the interpreter) ──────────
 struct PinRanges { int execIn0, execOut0, dataIn0, dataOut0, end; };
@@ -293,7 +294,7 @@ private:
         {
             if (n.type != NT::EngineCall) continue;
             const HE::api::ApiFn* fn = HE::api::find(n.s);
-            if (!fn) throw FallbackError{ "unknown engine api '" + n.s + "'" };
+            if (!fn) throw FallbackError{ "unknown engine api '" + n.s + "'", n.id };
             auto mirrors = [](const std::vector<HorizonCode::FuncParam>& have,
                               const std::vector<HE::api::ApiParam>& want)
             {
@@ -357,7 +358,7 @@ private:
             state[id] = 1;
             for (const int next : adj[id])
             {
-                if (state[next] == 1) throw FallbackError{ reasonPrefix + std::to_string(next) };
+                if (state[next] == 1) throw FallbackError{ reasonPrefix + std::to_string(next), next };
                 if (state[next] == 0) dfs(next);
             }
             state[id] = 2;
@@ -468,7 +469,7 @@ private:
             // is the enclosing function's parameter. A read from outside the
             // owning function has no equivalent symbol → interpreted fallback.
             if (n.id != fnCtx)
-                throw FallbackError{ "function parameter of '" + n.s + "' read outside its function" };
+                throw FallbackError{ "function parameter of '" + n.s + "' read outside its function", n.id };
             return "p_" + std::to_string(outIdx);
         }
         case NT::ConstFloat:  return floatLit(n.f[0]);
@@ -490,7 +491,7 @@ private:
             {
                 // §13.4: locals are stack locals of the owning function only.
                 if (v->scope != fnCtx)
-                    throw FallbackError{ "local '" + n.s + "' read outside its function" };
+                    throw FallbackError{ "local '" + n.s + "' read outside its function", n.id };
                 return convertExpr(m_localName.at(n.s), { v->type, v->isArray },
                                    { n.propType, n.isArray });
             }
@@ -1154,7 +1155,7 @@ Result generate(const std::vector<ClassSource>& sources, const Options& opt)
         catch (const FallbackError& e)
         {
             usedNames.erase(className);   // name freed — the class ships interpreted
-            res.fallbacks.push_back({ src.key, e.reason });
+            res.fallbacks.push_back({ src.key, e.reason, e.node });
         }
     }
 

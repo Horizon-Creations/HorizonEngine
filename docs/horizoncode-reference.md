@@ -174,9 +174,54 @@ writes `project.hcfg`. Everything the shipped game needs is inside the pak:
 
 ---
 
-## 5. Related design docs
+## 5. Compiled HorizonCode (the C++ codegen)
+
+With the export profile's **Compile HorizonCode** toggle on (Host platform only),
+the export translates every graph — HC classes, widget scripts, level scripts and
+the GameInstance — to native C++, builds them into `HorizonCodeGen.<dylib|dll|so>`
+with the host toolchain (needs `cmake` on PATH), and ships that library beside the
+game data. `project.hcfg` records `horizonCodeCompiled`.
+
+- **The editor always interprets.** Compilation is an export-time step only; PIE
+  behavior never changes.
+- **Per-asset hybrid.** Graphs always ship in the pak too. At runtime every host
+  (Create Object, widget create, level load, GameInstance) first consults the
+  loaded `CompiledClassTable`; a miss — the class failed validation, the library
+  is absent, or the engine version handshake rejected it — runs that one graph
+  interpreted, exactly as before. Nothing ever breaks because of codegen.
+- **Semantics are contract-tested.** A parity harness runs every fixture graph
+  interpreted AND compiled against identical hosts and asserts equal traces
+  (order/count/args/results), variable stores and function results — including
+  the per-run exec-output cache under recursion, per-read dispatch of pure
+  Engine Calls, and mixed compiled↔interpreted populations in one runtime
+  (`tests/test_horizoncode_codegen.cpp`).
+- **Compile check in the editor.** Every graph editor (widget Graph mode, Level
+  Script, Game Instance, HC Class tab) has a **Compile** button in the canvas
+  header: it runs the same translation the export would and either reports
+  "compiles clean" or shows the reason and highlights the offending node with a
+  red halo (e.g. an exec cycle, an unknown Engine Call id, a function-local read
+  outside its function).
+- **Reports.** The export result line shows "HorizonCode: N compiled, M
+  interpreted (validation)"; the full per-class breakdown with reasons lands in
+  `<output>/_hcgen/hc_report.txt`, the C++ build log in `_hcgen/build.log`.
+- **Adding engine API functions costs nothing extra**: one `ApiFn` registry row
+  serves the editor menu, the interpreter, Lua/Python AND the codegen (generated
+  code dispatches through the same `callApi` seam).
+
+Dispatch safety note: event cascades are bounded twice — recursion depth 32 and
+a total budget of 256 listener fires per cascade. The budget exists because a
+Bind/Emit **cycle** of re-emitting listeners would otherwise branch into ~2^32
+fires (each fire spawns an emit dispatch AND the fired instance's own trailing
+listener dispatch); exceeding it aborts the cascade with a "dispatch budget
+exceeded" error in the log.
+
+---
+
+## 6. Related design docs
 
 - `horizoncode-completion-plan.md` — feature roadmap / status tracker.
-- `horizoncode-cpp-codegen-plan.md` — planned HorizonCode → C++ codegen for shipped builds.
+- `horizoncode-cpp-codegen-plan.md` — the codegen design (implemented; see below).
+- `horizoncode-cpp-codegen-implementation-plan.md` — the implemented codegen's
+  semantic contract, lowering tables, packaging + runtime integration (WP0–WP5).
 - `material-system-design.md` — the shared node-graph frontend + cross-backend shader codegen.
 - `hpak-format-plan.md` — the pak container format.
