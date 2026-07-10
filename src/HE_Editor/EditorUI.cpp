@@ -626,6 +626,68 @@ static void DrawPreferencesWindow(AppContext& ctx, bool& open)
 #endif // HE_IMGUI_ENABLED
 
 // ─── render ───────────────────────────────────────────────────────────────────
+// ── Post-PIE report ───────────────────────────────────────────────────────────
+// Opens automatically when a play session ends with captured warnings/errors
+// (EditorApplication installs a Logger sink for the duration of play).
+static void drawPlayReport(AppContext& ctx)
+{
+    if (!ctx.playReportOpen || !*ctx.playReportOpen || !ctx.playLog || !ctx.playLogMutex)
+        return;
+
+    static bool s_showWarnings = true;
+    ImGui::SetNextWindowSize(ImVec2(580.0f, 380.0f), ImGuiCond_Appearing);
+    bool open = true;
+    if (ImGui::Begin("Play Session Report", &open, ImGuiWindowFlags_NoCollapse))
+    {
+        std::lock_guard<std::mutex> lk(*ctx.playLogMutex);
+        int errors = 0, warnings = 0;
+        for (const auto& e : *ctx.playLog)
+            (e.level == HE::LogLevel::Warning ? warnings : errors)++;
+
+        if (errors > 0)
+            ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f),
+                "%d error(s), %d warning(s) during the last play session", errors, warnings);
+        else
+            ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.45f, 1.0f),
+                "%d warning(s) during the last play session", warnings);
+
+        ImGui::Checkbox("Show warnings", &s_showWarnings);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Copy All"))
+        {
+            std::string all;
+            for (const auto& e : *ctx.playLog)
+            {
+                char head[48];
+                std::snprintf(head, sizeof head, "[%7.2fs] [%s] ", e.time,
+                    e.level == HE::LogLevel::Warning ? "WARN" : "ERROR");
+                all += head; all += e.message; all += '\n';
+            }
+            ImGui::SetClipboardText(all.c_str());
+        }
+        ImGui::Separator();
+
+        ImGui::BeginChild("##playlog", ImVec2(0.0f, -34.0f), ImGuiChildFlags_Borders);
+        for (const auto& e : *ctx.playLog)
+        {
+            const bool isWarn = e.level == HE::LogLevel::Warning;
+            if (isWarn && !s_showWarnings) continue;
+            ImGui::PushStyleColor(ImGuiCol_Text, isWarn
+                ? ImVec4(1.0f, 0.85f, 0.45f, 1.0f)      // warning → yellow
+                : ImVec4(1.0f, 0.45f, 0.45f, 1.0f));    // error/critical → red
+            ImGui::TextWrapped("[%7.2fs] %s", e.time, e.message.c_str());
+            ImGui::PopStyleColor();
+        }
+        if (ctx.playLog->size() >= 2000)
+            ImGui::TextDisabled("(capture capped at 2000 entries)");
+        ImGui::EndChild();
+
+        if (ImGui::Button("Close", ImVec2(90.0f, 0.0f))) open = false;
+    }
+    ImGui::End();
+    if (!open) *ctx.playReportOpen = false;
+}
+
 void EditorUI::render(AppContext& ctx, float dt)
 {
 #ifdef HE_IMGUI_ENABLED
@@ -2825,6 +2887,9 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 
         ImGui::End();
     }
+
+    // Post-PIE report window (drawn before the tab gating so it shows on any tab).
+    drawPlayReport(ctx);
 
     // ── Top-level tab gating ───────────────────────────────────────────────────
     // The built-in "Scene" tab (empty assetPath) shows the dockspace + all panels

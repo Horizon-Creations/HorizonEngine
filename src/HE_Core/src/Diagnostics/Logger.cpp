@@ -2,6 +2,7 @@
 #include "Diagnostics/GlobalState.h"
 #include <fstream>
 #include <ctime>
+#include <atomic>
 
 static const char* levelName(Logger::LogLevel level)
 {
@@ -17,8 +18,22 @@ static const char* levelName(Logger::LogLevel level)
 	}
 }
 
+// Secondary sink (editor play-session capture). Atomics: setSink is called from
+// the main thread; Log() may run on workers concurrently.
+static std::atomic<Logger::Sink> s_sink{ nullptr };
+static std::atomic<void*>        s_sinkUser{ nullptr };
+
+void Logger::setSink(Sink sink, void* user)
+{
+	s_sinkUser.store(user);
+	s_sink.store(sink);
+}
+
 void Logger::Log(Logger::LogLevel level, const char* message)
 {
+	if (const Sink sink = s_sink.load())
+		sink(level, message, s_sinkUser.load());
+
 	GlobalState& globalState = GlobalState::getInstance();
 	std::ofstream& logFile = globalState.getLogFileStream();
 	if (!logFile.is_open()) return;

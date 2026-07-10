@@ -16,6 +16,7 @@
 #include <HorizonScene/UIInputSystem.h>
 #include <HorizonScene/GameInstanceHost.h>
 #include <functional>
+#include <mutex>
 #include <future>
 #include <memory>
 #include <unordered_map>
@@ -109,6 +110,14 @@ struct EditorConfig
 	}
 };
 
+// One captured warning/error from a play session (post-PIE report).
+struct PlayLogEntry
+{
+	HE::LogLevel level;      // Warning or Error/Critical
+	std::string  message;
+	float        time = 0.0f; // play-clock seconds when it was logged
+};
+
 // All data the UI layer needs — assembled by EditorApplication each frame.
 // No raw application pointer; UI code only sees this context.
 struct AppContext
@@ -161,6 +170,12 @@ struct AppContext
 
 	// Play-in-editor: snapshot on play, restore on stop
 	bool isPlaying = false;
+	// Post-PIE report: the warnings/errors captured during the last play session
+	// (guarded by playLogMutex — workers may still append while the UI reads),
+	// and the open-flag for the report window (set when play stops with entries).
+	std::vector<PlayLogEntry>* playLog = nullptr;
+	std::mutex*                playLogMutex = nullptr;
+	bool*                      playReportOpen = nullptr;
 	std::function<void(bool)> setPlayMode;
 	// PIE UI pointer feed: viewport-relative mouse in render-target pixels +
 	// viewport size + LMB state; valid=false while outside/captured.
@@ -272,6 +287,10 @@ public:
 		: HE::Application(std::move(startupPath)) {}
 	~EditorApplication() override; // defined in .cpp where ScriptEngine is complete
 
+public:
+	// Logger sink target: appends a play-session warning/error (any thread).
+	void appendPlayLog(HE::LogLevel level, const char* message);
+
 protected:
 	HE::ApplicationConfig GetConfig()          const override;
 	void OnInit()                                    override;
@@ -345,6 +364,10 @@ private:
 
 	// Play-in-editor
 	bool m_isPlaying = false;
+	// Play-session log capture (see PlayLogEntry / the post-PIE report window).
+	std::vector<PlayLogEntry> m_playLog;
+	std::mutex                m_playLogMutex;
+	bool                      m_playReportOpen = false;
 	void setPlayMode(bool play);
 
 	// Mouse-captured free-fly camera while playing in the editor — mirrors the
