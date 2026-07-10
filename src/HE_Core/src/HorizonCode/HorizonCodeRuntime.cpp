@@ -343,18 +343,33 @@ void Runtime::bindEvent(InstanceId owner, const std::string& event, InstanceId l
 
 void Runtime::dispatchToListeners(InstanceId owner, const std::string& event, const Value& arg)
 {
-    if (m_dispatchDepth >= 32) return; // guard cross-instance event cycles
+    if (m_dispatchDepth >= 32) return; // guard cross-instance event cycles (DEPTH)
     auto oit = m_listeners.find(owner);
-    if (oit == m_listeners.end()) return;
+    if (oit == m_listeners.end()) { if (m_dispatchDepth == 0) m_dispatchFires = 0; return; }
     auto eit = oit->second.find(event);
-    if (eit == oit->second.end()) return;
+    if (eit == oit->second.end()) { if (m_dispatchDepth == 0) m_dispatchFires = 0; return; }
 
     const std::vector<InstanceId> listeners = eit->second; // copy: fireEvent may re-bind
     ++m_dispatchDepth;
     for (InstanceId l : listeners)
-        if (l != owner && find(l))
-            fireEvent(l, event, 0, arg); // fires the listener's own Event node of that name
+    {
+        if (l == owner || !find(l)) continue;
+        // TOTAL budget per top-level cascade: the depth guard alone doesn't
+        // bound work — each fireEvent can spawn TWO dispatch subtrees (an
+        // EmitEvent in the handler + fireEvent's own trailing dispatch), so a
+        // bind CYCLE of re-emitting listeners branches into ~2^32 fires. Cut
+        // the whole cascade once the budget is spent, loudly.
+        if (++m_dispatchFires > kMaxDispatchFires)
+        {
+            if (m_dispatchFires == kMaxDispatchFires + 1) // warn once per cascade
+                hcError("event dispatch budget exceeded while dispatching '" + event +
+                        "' — Bind/Emit cycle? aborting the event cascade");
+            break;
+        }
+        fireEvent(l, event, 0, arg); // fires the listener's own Event node of that name
+    }
     --m_dispatchDepth;
+    if (m_dispatchDepth == 0) m_dispatchFires = 0; // cascade over — fresh budget
 }
 
 bool Runtime::callFunction(InstanceId id, const std::string& fn, bool requirePublic,

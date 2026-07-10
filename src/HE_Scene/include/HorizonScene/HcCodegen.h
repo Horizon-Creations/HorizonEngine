@@ -38,7 +38,9 @@ struct Result
 {
     bool ok = false;                        // false only on internal errors
     std::vector<GeneratedFile> files;       // hcgen_<Class>.h/.cpp per class + hc_registry.h/.cpp
-    struct Fallback { std::string key, reason; };
+    // node = the graph node the reason anchors to (0 = whole graph) — lets the
+    // editor highlight the offending node ("compile error in the graph").
+    struct Fallback { std::string key, reason; int node = 0; };
     std::vector<Fallback> fallbacks;        // validated-out graphs (ship interpreted)
     std::vector<std::string> warnings;
 };

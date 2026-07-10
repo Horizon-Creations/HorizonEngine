@@ -1,12 +1,16 @@
 # HorizonCode → C++ Codegen: Implementation Plan
 
-Status: **WP0–WP5 IMPLEMENTED** (this branch). The codegen ships: 15 parity
+Status: **WP0–WP6 IMPLEMENTED** (this branch). The codegen ships: 15 parity
 fixtures trace-exact interpreted↔compiled, the export builds + ships
 `HorizonCodeGen.dylib`, the game loads it through `CompiledClassTable` with the
-version handshake, all four hosts consult it. Remaining: WP6 (docs/CI polish,
-deployed-editor SDK staging) and the WP7 optimizations; plus a manual HW smoke
-of a real packaged export. Implementation deviations from this plan are marked
-inline with **[impl]**. This is the concrete, step-by-step successor to
+version handshake, all four hosts consult it. Beyond the plan: an in-editor
+**Compile** button in every graph editor (single-class check, errors highlight
+the offending node), a per-class `_hcgen/hc_report.txt` export report, and a
+per-cascade event **dispatch budget** (256 fires) fixing the pre-existing
+exponential Bind/Emit-cycle blowup. Remaining: deployed-editor SDK staging
+(dev builds use he_sdk_config.json), Windows-CI fixture generation soak, the
+WP7 optimizations, and a manual HW smoke of a real packaged export.
+Implementation deviations from this plan are marked inline with **[impl]**. This is the concrete, step-by-step successor to
 the design doc `horizoncode-cpp-codegen-plan.md` (§ references to "design doc"
 point there). It is grounded in the code as of this branch — every file, type
 and behavior named below was verified against the sources.
