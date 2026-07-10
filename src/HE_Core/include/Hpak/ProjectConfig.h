@@ -22,6 +22,11 @@ struct HE_API ProjectConfig {
     // pak and deserializes it, instead of loading a loose mainSceneName file.
     bool         hasPackedScene = false;
     uint8_t      startupSceneUuid[16] = {};
+    // The export compiled HorizonCode to native C++ (HorizonCodeGen library
+    // shipped beside the executable). Purely diagnostic: the runtime falls back
+    // to the interpreter either way, but a missing/rejected library becomes a
+    // LOUD warning instead of a silent slowdown.
+    bool         horizonCodeCompiled = false;
 };
 
 class HE_API ProjectConfigLoader {

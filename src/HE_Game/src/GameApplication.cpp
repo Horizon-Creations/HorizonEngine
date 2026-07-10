@@ -12,6 +12,8 @@
 #include <HorizonScene/AudioSystem.h>
 #include <DebugDraw/DebugDraw.h>     // DebugLine (HE::api::debug drain)
 #include <Hpak/ProjectExporter.h>    // sceneUuidForPath (packed scene lookup)
+#include <HorizonCode/HcCompiledLoader.h> // compiled HorizonCode classes (hybrid)
+#include "HorizonVersion.h"          // HE_VERSION_STRING (compiled-classes handshake)
 #include <HorizonScene/ScriptContext.h>
 #include <HorizonScene/ScriptApi.h>
 #include <HorizonScene/EngineApi.h>
@@ -138,6 +140,21 @@ void GameApplication::OnInit()
 	else
 		Logger::Log(Logger::LogLevel::Warning, ("GameApplication: pak not found: " + pakPath).c_str());
 
+	// Compiled HorizonCode classes: the export may have translated the project's
+	// graphs to native C++ (HorizonCodeGen library beside the executable). Loaded
+	// once for process lifetime; every host below (GameInstance, createObject,
+	// widgets, level scripts) consults the table and falls back to the
+	// interpreter on a miss. A misconfiguration (hcfg says compiled, library
+	// missing/rejected) is loud, not a silent slowdown.
+	{
+		HorizonCode::compiledClasses().load(exeDir / HorizonCode::compiledLibraryName(),
+		                                    HE_VERSION_STRING);
+		if (m_config.horizonCodeCompiled && !HorizonCode::compiledClasses().loaded())
+			Logger::Log(Logger::LogLevel::Warning,
+				"GameApplication: project.hcfg says HorizonCode is compiled, but the "
+				"HorizonCodeGen library is missing or was rejected — running interpreted");
+	}
+
 	// App-wide GameInstance: load its graph. Preferred source: packed into the
 	// .hpak (ships with the same codec/encryption/bundle layout); fallback: a loose
 	// GameInstance.hcode next to the exe (dev runs on loose content). Empty → an
@@ -158,7 +175,15 @@ void GameApplication::OnInit()
 		else
 			Logger::Log(Logger::LogLevel::Warning,
 				"GameApplication: no GameInstance graph found — app lifecycle/UI scripts will not run");
-		m_gameInstance.setGraph(giJson);
+		// Compiled GameInstance takes precedence; the graph still ships in the
+		// pak, so a fallback (or an older runtime) interprets it unchanged.
+		if (auto compiled = HorizonCode::compiledClasses().create(kGameInstanceEntry))
+		{
+			m_gameInstance.runtime().setGameInstanceCompiled(std::move(compiled));
+			Logger::Log(Logger::LogLevel::Info, "GameApplication: GameInstance running compiled");
+		}
+		else
+			m_gameInstance.setGraph(giJson);
 	}
 
 	// The GameInstance's UI is APP-LEVEL: widgets live in m_widgets (owned here,
@@ -176,6 +201,15 @@ void GameApplication::OnInit()
 		svc.hideWidget    = [this](int id){ m_widgets.hideWidget(id); };
 		svc.destroyWidget = [this](int id){ m_widgets.destroyWidget(id); };
 		svc.createObject  = [this](const std::string& p) -> uint32_t {
+			// Compiled class first (the whole per-asset hybrid is this lookup);
+			// miss → the interpreted asset path, unchanged.
+			if (auto compiled = HorizonCode::compiledClasses().create(p))
+			{
+				const HorizonCode::InstanceId inst =
+					m_gameInstance.runtime().addCompiled(std::move(compiled));
+				m_gameInstance.runtime().fireEvent(inst, "Construct", 0);
+				return inst;
+			}
 			const HE::UUID id = contentManager().loadAsset(p);
 			const HorizonCodeClassAsset* a = contentManager().getHorizonCodeClass(id);
 			if (!a) return 0u;
@@ -227,6 +261,9 @@ void GameApplication::OnInit()
 		if (!sceneBytes.empty() && serializer.loadFromMemory(*m_world, sceneBytes))
 		{
 			sceneLoaded = true;
+			// Key the level script by the packed scene's UUID so a compiled one
+			// (if the export shipped it) is picked up at fireLevelLoaded.
+			m_world->setLevelScriptKey(levelScriptKeyForUuid(sceneUuid));
 			Logger::Log(Logger::LogLevel::Info, "GameApplication: loaded packed startup scene");
 		}
 		else
@@ -334,10 +371,17 @@ bool GameApplication::loadSceneInto(HorizonWorld& world, const std::string& scen
 {
 	SceneSerializer ser;
 	// 1) Packed pak entry under the path-derived UUID (shipped builds).
-	const auto bytes = contentManager().readMountedEntry(sceneUuidForPath(scenePath));
+	const HE::UUID pathUuid = sceneUuidForPath(scenePath);
+	const auto bytes = contentManager().readMountedEntry(pathUuid);
 	if (!bytes.empty())
-		return additive ? ser.loadAdditiveFromMemory(world, bytes, outCreated)
-		                : ser.loadFromMemory(world, bytes);
+	{
+		const bool ok = additive ? ser.loadAdditiveFromMemory(world, bytes, outCreated)
+		                         : ser.loadFromMemory(world, bytes);
+		// A full load owns the world's level script — key it so fireLevelLoaded
+		// can pick this scene's COMPILED level script when the export shipped one.
+		if (ok && !additive) world.setLevelScriptKey(levelScriptKeyForUuid(pathUuid));
+		return ok;
+	}
 	// 2) Loose JSON in the project (dev / WIP builds running on loose content),
 	//    then 3) next to the executable. Scene paths are project-relative.
 	std::filesystem::path candidates[2];

@@ -202,6 +202,14 @@ add_custom_command(TARGET HorizonEditor POST_BUILD
 	VERBATIM
 )
 
+# he_sdk_config.json: tells the HorizonCode → C++ export codegen where the
+# engine headers + libraries live when exporting from a DEVELOPMENT build (the
+# dev fallback of plan §8.3 — deployed editors ship a staged SDK/ instead).
+# Written beside the editor binary; resolveSdk() reads it at export time.
+file(GENERATE
+	OUTPUT "$<TARGET_FILE_DIR:HorizonEditor>/he_sdk_config.json"
+	CONTENT "{\n  \"includeDirs\": [\"${CMAKE_SOURCE_DIR}/src/HE_Core/include\", \"${glm_SOURCE_DIR}\"],\n  \"libDir\": \"$<TARGET_FILE_DIR:HorizonCore>\"\n}\n")
+
 # The Vulkan backend loads <exe dir>/Shaders/*.spv at runtime. They are compiled
 # to ${CMAKE_BINARY_DIR}/Shaders by the VulkanShaders target (a dependency of
 # RendererVulkan). Without this copy the editor crashes/falls over on the Vulkan

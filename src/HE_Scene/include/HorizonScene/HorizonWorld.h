@@ -91,6 +91,12 @@ public:
 	// nodes, so empty level scripts don't clutter the scene file).
 	std::string levelScriptJson() const;
 	void        setLevelScriptJson(const std::string& json);
+	// The scene's compiled-class key ("level:<uuid>", levelScriptKeyForUuid).
+	// Set by the game runtime after loading a packed scene; when the process's
+	// CompiledClassTable has an entry for it, fireLevelLoaded runs the COMPILED
+	// level script instead of interpreting m_levelScript. Empty (the editor,
+	// loose-scene dev runs) → always interpreted.
+	void setLevelScriptKey(std::string key) { m_levelScriptKey = std::move(key); }
 
 	// Run the level graph's "OnLevelLoaded" / "OnLevelUnloaded" events. Loaded
 	// seeds the variable store from the graph defaults and marks the level
@@ -121,4 +127,5 @@ private:
 	HorizonCode::Graph      m_levelScript;
 	HorizonCode::InstanceId m_levelInstance = 0;
 	bool                    m_levelRunning  = false;
+	std::string             m_levelScriptKey;   // compiled lookup key (packaged builds)
 };

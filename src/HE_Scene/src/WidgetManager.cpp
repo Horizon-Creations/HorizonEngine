@@ -1,4 +1,5 @@
 #include <HorizonScene/WidgetManager.h>
+#include <HorizonCode/HcCompiledLoader.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <Renderer/UIFont.h>
@@ -110,8 +111,13 @@ int WidgetManager::createWidget(ContentManager& content, const std::string& asse
 	// Register the widget's logic with the central runtime, which takes the graph
 	// and seeds the private variable store from its declared defaults. The
 	// runtime instance id doubles as the widget's public handle (widget id ==
-	// scriptId), so a widget is a first-class Ref object.
-	w.scriptId = rt().add(std::move(graph), makeBindings());
+	// scriptId), so a widget is a first-class Ref object. Packaged builds may
+	// carry this widget's script compiled to native C++ (keyed by the same asset
+	// path); a table miss runs the graph interpreted, exactly as before.
+	if (auto compiled = HorizonCode::compiledClasses().create(assetPath))
+		w.scriptId = rt().addCompiled(std::move(compiled), makeBindings());
+	else
+		w.scriptId = rt().add(std::move(graph), makeBindings());
 	w.id = (int)w.scriptId;
 	m_instances.push_back(std::move(w));
 
@@ -179,11 +185,12 @@ void WidgetManager::tick(float dt)
 bool WidgetManager::isInteractive(const Instance& w, const HE::UIElement& e) const
 {
 	if (e.interactive()) return true;
-	// Bound by a pointer-event node? (Event node with elem 0 = any element.)
-	for (const auto& gn : rt().graphOf(w.scriptId).nodes)
-		if (gn.type == HorizonCode::NodeType::Event && (gn.elem == 0 || gn.elem == e.id))
+	// Bound by a pointer-event node? (elem 0 = any element.) eventBindingsOf
+	// serves interpreted (Event nodes) and compiled (static tables) scripts alike.
+	for (const auto& b : rt().eventBindingsOf(w.scriptId))
+		if (b.elem == 0 || b.elem == e.id)
 		{
-			const std::string& n = gn.s;
+			const std::string& n = b.name;
 			if (n == "OnClicked" || n == "OnPressed"    || n == "OnReleased" ||
 			    n == "OnHovered" || n == "OnUnhovered"  ||
 			    n == "OnMouseEnter" || n == "OnMouseLeave")

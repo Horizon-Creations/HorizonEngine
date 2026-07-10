@@ -1,5 +1,6 @@
 #include <Hpak/ProjectExporter.h>
 #include <Hpak/ProjectConfig.h>
+#include <HorizonCode/HcCompiledLoader.h>   // compiledLibraryName (artifact naming)
 #include <Hpak/HpakWriter.h>
 #include <Hpak/HpakReader.h>
 #include <Hpak/HpakFormat.h>
@@ -376,6 +377,14 @@ HE::UUID sceneUuidForPath(const std::string& projectRelPath)
     return u;
 }
 
+std::string levelScriptKeyForUuid(const HE::UUID& sceneUuid)
+{
+    char buf[64];
+    std::snprintf(buf, sizeof buf, "level:%016llx%016llx",
+                  (unsigned long long)sceneUuid.hi, (unsigned long long)sceneUuid.lo);
+    return buf;
+}
+
 ExportResult ProjectExporter::exportProject(
     const std::filesystem::path& contentDir,
     const std::string&           projectName,
@@ -687,6 +696,24 @@ ExportResult ProjectExporter::exportProject(
         }
     }
 
+    // Compiled HorizonCode classes: ship the generated library with the data
+    // (base path — same load location as GameLogic), under the canonical name
+    // the runtime loader probes. A copy failure is a hard error: hcfg would
+    // otherwise claim "compiled" for a library that never shipped.
+    bool hcGenShipped = false;
+    if (!settings.horizonCodeGenLib.empty())
+    {
+        const auto dst = dataDir / HorizonCode::compiledLibraryName();
+        std::filesystem::remove(dst, ec); ec.clear();
+        std::filesystem::copy_file(settings.horizonCodeGenLib, dst,
+            std::filesystem::copy_options::overwrite_existing, ec);
+        if (ec)
+            return {false, "Failed to copy the compiled HorizonCode library: "
+                           + ec.message(), added};
+        ++binaryCopied;
+        hcGenShipped = true;
+    }
+
     ProjectConfig cfg;
     cfg.projectName   = projectName;
     cfg.hpakFilename  = hpakFilename;
@@ -694,6 +721,7 @@ ExportResult ProjectExporter::exportProject(
     std::memset(cfg.projectUuidBytes, 0, 16);
     cfg.enableModSupport = settings.enableModSupport;
     cfg.encrypted = settings.encrypt;
+    cfg.horizonCodeCompiled = hcGenShipped;
     // Key placement: inside the game executable when the patch succeeded (the
     // hcfg then carries only the encrypted flag), in the hcfg otherwise.
     if (settings.encrypt && !keyEmbedded)

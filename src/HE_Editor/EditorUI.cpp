@@ -11,6 +11,8 @@
 #include "MacMenuBar.h"   // native system menu bar (replaces the ImGui menu row)
 #endif
 #include <Hpak/ProjectExporter.h>
+#include <HorizonScene/HcCodegen.h>      // HorizonCode → C++ codegen (compile-on-export)
+#include "HcClassList.h"                 // asset enumeration for the codegen source set
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonScene/LODSystem.h>
 #include <HorizonScene/NavigationSystem.h>
@@ -2038,12 +2040,12 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
             ImGui::SameLine();
             ImGui::TextDisabled("(?)");
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Translate HorizonCode graphs to native C++ in the packaged build.\n"
-                                  "NOT IMPLEMENTED YET — with this off (or until codegen ships) the\n"
-                                  "game bundles the HorizonCode interpreter and runs the graph assets\n"
-                                  "interpreted, exactly like in the editor.");
-            if (s_exportCompileHC)
-                ImGui::TextDisabled("Codegen is not implemented yet; this export still ships the interpreter.");
+                ImGui::SetTooltip("Translate HorizonCode graphs (classes, widgets, level scripts,\n"
+                                  "GameInstance) to native C++ and ship them as a compiled library.\n"
+                                  "Needs cmake + a C++ toolchain on this machine, matching this\n"
+                                  "editor build. Graphs always ship too: anything that fails\n"
+                                  "validation or compilation runs interpreted, per asset.\n"
+                                  "Host platform only (cross-targets ship interpreted).");
 
             if (exportAppBundleApplicable(s_exportPlatform))
             {
@@ -2137,13 +2139,15 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
             if (!canExport) ImGui::BeginDisabled();
             if (ImGui::Button("Export", ImVec2(110, 0)))
             {
-                // HorizonCode→C++ codegen is a planned feature (docs/horizoncode-
-                // cpp-codegen-plan.md); the profile toggle is honored loudly, not
-                // silently: the export proceeds interpreter-based either way.
-                if (s_exportCompileHC)
+                // HorizonCode → C++ codegen runs for Host exports only (v1: the
+                // generated dylib is built with the host toolchain, plan §8.4).
+                // Cross-platform targets ship interpreted with an explicit note.
+                const bool hcCompile = s_exportCompileHC
+                    && exportPlatformFromName(s_exportPlatform) == ExportPlatform::Host;
+                if (s_exportCompileHC && !hcCompile)
                     Logger::Log(Logger::LogLevel::Warning,
-                        "Export: 'Compile HorizonCode' is enabled but codegen is not "
-                        "implemented yet — shipping the interpreter + HorizonCode assets.");
+                        "Export: HorizonCode compile skipped — target platform != host; "
+                        "shipping interpreted.");
 
                 // Resolve the startup scene: the profile's project-relative choice,
                 // or the scene currently open in the editor.
@@ -2181,6 +2185,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                 // than failing the whole export — only the STARTUP scene is
                 // boot-critical.
                 std::vector<std::pair<std::string, std::vector<uint8_t>>> extraScenes;
+                std::vector<HE::hccg::ClassSource> hcSources;   // codegen inputs (hcCompile)
                 {
                     const std::filesystem::path projectRoot2 =
                         std::filesystem::path(ctx.projectManager->currentProject().path).parent_path();
@@ -2198,9 +2203,22 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                             std::vector<uint8_t> bytes;
                             if (ser2.load(w2, sit->path(), SerializeFormat::JSON) &&
                                 ser2.saveToMemory(w2, bytes))
-                                extraScenes.emplace_back(
-                                    sit->path().lexically_relative(projectRoot2).generic_string(),
-                                    std::move(bytes));
+                            {
+                                const std::string rel =
+                                    sit->path().lexically_relative(projectRoot2).generic_string();
+                                // Level script → codegen source, keyed by the scene's
+                                // pak UUID (the same key the runtime derives, §9.1).
+                                if (hcCompile)
+                                    if (const std::string ls = w2.levelScriptJson(); !ls.empty())
+                                    {
+                                        HE::hccg::ClassSource src;
+                                        src.key   = levelScriptKeyForUuid(sceneUuidForPath(rel));
+                                        src.label = rel + " (level script)";
+                                        if (HorizonCode::fromJson(ls, src.graph))
+                                            hcSources.push_back(std::move(src));
+                                    }
+                                extraScenes.emplace_back(rel, std::move(bytes));
+                            }
                             else
                                 Logger::Log(Logger::LogLevel::Warning,
                                     ("Export: skipping unreadable scene " + sit->path().string()).c_str());
@@ -2223,6 +2241,46 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                     if (gif)
                         gameInstanceJson.assign(std::istreambuf_iterator<char>(gif),
                                                 std::istreambuf_iterator<char>());
+                }
+
+                // Remaining codegen sources: every HC class + widget asset (keyed
+                // by the content-relative path Create Object/Widget nodes store)
+                // and the GameInstance graph. Collected on the main thread (they
+                // need the ContentManager); generation + the C++ build run on
+                // the export worker below.
+                if (hcCompile)
+                {
+                    auto collectAssets = [&](HE::AssetType type)
+                    {
+                        for (const auto& c : HcEditorUtil::listAssets(ctx.contentManager, type))
+                        {
+                            const HE::UUID id = ctx.contentManager->loadAsset(c.path);
+                            std::string json;
+                            if (type == HE::AssetType::HorizonCodeClass)
+                            {
+                                if (const auto* a = ctx.contentManager->getHorizonCodeClass(id))
+                                    json = a->graphJson;
+                            }
+                            else if (const auto* w = ctx.contentManager->getWidget(id))
+                                json = w->graphJson;
+                            if (json.empty()) continue;   // no logic → nothing to compile
+                            HE::hccg::ClassSource src;
+                            src.key   = c.path;
+                            src.label = c.path;
+                            if (HorizonCode::fromJson(json, src.graph))
+                                hcSources.push_back(std::move(src));
+                        }
+                    };
+                    collectAssets(HE::AssetType::HorizonCodeClass);
+                    collectAssets(HE::AssetType::Widget);
+                    if (!gameInstanceJson.empty())
+                    {
+                        HE::hccg::ClassSource src;
+                        src.key   = kGameInstanceEntry;
+                        src.label = "GameInstance.hcode";
+                        if (HorizonCode::fromJson(gameInstanceJson, src.graph))
+                            hcSources.push_back(std::move(src));
+                    }
                 }
 
                 // Resolve the target platform: a COMPLETE runtime bundle (found
@@ -2298,7 +2356,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                 if (s_exportThread.joinable()) s_exportThread.join(); // defensive; reaped above
                 s_exportThread = std::thread([es, contentDir, projName, sceneName,
                                               outDir, sceneBinary, extraScenes,
-                                              gameInstanceJson]()
+                                              gameInstanceJson, hcCompile, hcSources,
+                                              hcBase = base]()
                 {
                     // An exception escaping a std::thread is std::terminate — and
                     // exportProject touches the filesystem (unreadable dirs,
@@ -2306,9 +2365,87 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                     std::string msg;
                     try
                     {
+                        // ── HorizonCode → C++ (plan §8.1): generate + build the
+                        // classes dylib BEFORE packing, so the exporter can ship
+                        // it and the result line can report the outcome. Any
+                        // failure here falls back to the interpreter loudly —
+                        // the export itself never fails because of codegen
+                        // (graphs are packed regardless).
+                        ExportSettings esEff = es;
+                        std::string hcMsg;
+                        if (hcCompile && !hcSources.empty())
+                        {
+                            HE::hccg::Options opt;
+                            opt.engineVersion = HE_VERSION_STRING;
+                            const auto gen = HE::hccg::generate(hcSources, opt);
+                            for (const auto& w : gen.warnings)
+                                Logger::Log(Logger::LogLevel::Warning,
+                                    ("HorizonCode codegen: " + w).c_str());
+                            for (const auto& fb : gen.fallbacks)
+                                Logger::Log(Logger::LogLevel::Warning,
+                                    ("HorizonCode codegen: '" + fb.key +
+                                     "' ships interpreted — " + fb.reason).c_str());
+
+                            const std::filesystem::path genDir =
+                                std::filesystem::path(outDir) / "_hcgen";
+                            std::error_code hcEc;
+                            std::filesystem::create_directories(genDir, hcEc);
+                            auto writeIfChanged = [](const std::filesystem::path& p,
+                                                     const std::string& contents)
+                            {
+                                if (std::ifstream in(p, std::ios::binary); in)
+                                {
+                                    std::stringstream ss;
+                                    ss << in.rdbuf();
+                                    if (ss.str() == contents) return true;
+                                }
+                                std::ofstream f(p, std::ios::binary | std::ios::trunc);
+                                if (!f) return false;
+                                f << contents;
+                                return (bool)f;
+                            };
+                            bool wroteAll = !hcEc;
+                            std::vector<std::string> cppFiles;
+                            for (const auto& file : gen.files)
+                            {
+                                if (file.name.size() > 4 &&
+                                    file.name.compare(file.name.size() - 4, 4, ".cpp") == 0)
+                                    cppFiles.push_back(file.name);
+                                wroteAll &= writeIfChanged(genDir / file.name, file.contents);
+                            }
+                            wroteAll &= writeIfChanged(genDir / "CMakeLists.txt",
+                                HE::hccg::generateCMakeLists(opt, cppFiles));
+
+                            const int total    = (int)hcSources.size();
+                            const int fellBack = (int)gen.fallbacks.size();
+                            if (!gen.ok || !wroteAll)
+                                hcMsg = " — HorizonCode: generation failed, shipped interpreted";
+                            else
+                            {
+                                const auto sdk   = HE::hccg::resolveSdk(hcBase);
+                                const auto built = HE::hccg::buildDylib(genDir, sdk);
+                                if (built.ok)
+                                {
+                                    esEff.horizonCodeGenLib = built.artifact;
+                                    hcMsg = " — HorizonCode: "
+                                        + std::to_string(total - fellBack) + " compiled"
+                                        + (fellBack ? ", " + std::to_string(fellBack)
+                                                      + " interpreted (validation)"
+                                                    : std::string());
+                                }
+                                else
+                                {
+                                    Logger::Log(Logger::LogLevel::Warning,
+                                        ("HorizonCode codegen: " + built.message).c_str());
+                                    hcMsg = " — HorizonCode: compile failed, shipped "
+                                            "interpreted (" + built.message + ")";
+                                }
+                            }
+                        }
+
                         const auto res = ProjectExporter::exportProject(
                             contentDir, projName, sceneName,
-                            std::filesystem::path(outDir), es, sceneBinary, extraScenes,
+                            std::filesystem::path(outDir), esEff, sceneBinary, extraScenes,
                             gameInstanceJson);
                         msg = res.success
                             ? "OK: " + std::to_string(res.assetsPacked)
@@ -2323,6 +2460,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                             msg += res.keyEmbedded
                                 ? " — key embedded in the game binary"
                                 : " — key in project.hcfg (runtime has no key block)";
+                        if (res.success) msg += hcMsg;
                     }
                     catch (const std::exception& e)
                     {

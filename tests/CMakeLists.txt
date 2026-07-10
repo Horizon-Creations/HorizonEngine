@@ -7,6 +7,7 @@ add_executable(he_tests
     test_scene_serializer.cpp
     test_level_script.cpp
     test_horizoncode_runtime.cpp
+    test_horizoncode_compiled.cpp
     test_game_instance.cpp
     test_culling.cpp
     test_undo.cpp
@@ -95,6 +96,40 @@ endif()
 if(HE_HAVE_PYTHON)
     target_compile_definitions(he_tests PRIVATE HE_HAVE_PYTHON)
 endif()
+
+# ─── HorizonCode → C++ parity fixtures (plan §10.1) ───────────────────────────
+# hc_codegen builds the shared fixture graphs (fixtures/hcodegen/fixtures.h) and
+# emits the compiled classes at BUILD time; they are compiled INTO he_tests so
+# no compiler is needed at test runtime.
+set(HCGEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/hcgen_fixtures)
+set(HCGEN_CLASSES
+    flow_branch_sequence coerce_matrix math_ops variables functions_basic
+    functions_recursive foreach_arrays events_multi widget_props limits_smoke
+    functions_locals engine_pure_multiout engine_exec_cached
+    ref_target refs_objects dispatch_owner dispatch_listener dispatch_sink
+)
+set(HCGEN_SOURCES ${HCGEN_DIR}/hc_registry.cpp)
+foreach(c ${HCGEN_CLASSES})
+    list(APPEND HCGEN_SOURCES ${HCGEN_DIR}/hcgen_C_${c}.cpp)
+endforeach()
+add_custom_command(OUTPUT ${HCGEN_SOURCES}
+    COMMAND hc_codegen --fixtures --out ${HCGEN_DIR}
+    DEPENDS hc_codegen ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/hcodegen/fixtures.h
+    COMMENT "hc_codegen: generating HorizonCode parity fixtures")
+target_sources(he_tests PRIVATE ${HCGEN_SOURCES} test_horizoncode_codegen.cpp)
+target_include_directories(he_tests PRIVATE ${HCGEN_DIR} fixtures/hcodegen)
+
+# The same generated sources also become a REAL shared library with the C
+# manifest export — test_hccompiled_loader.cpp loads it through
+# CompiledClassTable, the exact path the shipped game takes (plan §10.4).
+add_library(test_hcgen SHARED ${HCGEN_SOURCES})
+target_compile_definitions(test_hcgen PRIVATE HCGEN_BUILD_DYLIB)
+target_link_libraries(test_hcgen PRIVATE HorizonCore)
+target_include_directories(test_hcgen PRIVATE ${HCGEN_DIR})
+add_dependencies(he_tests test_hcgen)
+target_sources(he_tests PRIVATE test_hccompiled_loader.cpp)
+target_compile_definitions(he_tests PRIVATE
+    HE_TEST_HCGEN_LIB="$<TARGET_FILE:test_hcgen>")
 
 # ─── Native game-logic fixture ─────────────────────────────────────────────────
 # A real shared library implementing IGameLogic, loaded at runtime by

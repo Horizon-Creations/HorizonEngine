@@ -1,4 +1,5 @@
 #include "HorizonScene/HorizonWorld.h"
+#include <HorizonCode/HcCompiledLoader.h>
 #include "HorizonScene/Components/EnvironmentComponent.h"
 #include "HorizonScene/Components/WeatherComponent.h"
 #include "HorizonScene/Components/EnvironmentLightComponent.h"
@@ -245,6 +246,16 @@ void HorizonWorld::fireLevelLoaded()
     // The level has no host bindings (no widget target); Print goes to the log
     // and variables live in the runtime. Engine-system nodes come later.
     if (m_levelInstance) scripts().remove(m_levelInstance);
+    // Packaged builds: the export may have compiled this scene's level script to
+    // native C++ — the key was set by the game runtime at scene load; a table
+    // miss (editor, dev runs, per-asset fallback) interprets the graph as always.
+    if (!m_levelScriptKey.empty())
+        if (auto compiled = HorizonCode::compiledClasses().create(m_levelScriptKey))
+        {
+            m_levelInstance = scripts().addCompiled(std::move(compiled));
+            scripts().fireEvent(m_levelInstance, "OnLevelLoaded", 0);
+            return;
+        }
     m_levelInstance = scripts().add(m_levelScript, {});
     scripts().fireEvent(m_levelInstance, "OnLevelLoaded", 0);
 }

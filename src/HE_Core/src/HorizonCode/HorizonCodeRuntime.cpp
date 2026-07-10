@@ -13,6 +13,15 @@ namespace {
 // (PIE / the shipped game), never at edit time.
 void hcError(const std::string& msg)   { Logger::Log(Logger::LogLevel::Error,   ("HorizonCode: " + msg).c_str()); }
 void hcWarn (const std::string& msg)   { Logger::Log(Logger::LogLevel::Warning, ("HorizonCode: " + msg).c_str()); }
+
+// The compiled counterpart to Graph::findVariable — locals never appear in
+// varInfos, so (unlike the interpreted path) no scope check is needed here.
+const CompiledVarInfo* findVarInfo(const CompiledInstance& c, const std::string& name)
+{
+    for (const auto& vi : c.varInfos())
+        if (name == vi.name) return &vi;
+    return nullptr;
+}
 }
 
 Runtime::Inst* Runtime::find(InstanceId id)
@@ -38,6 +47,20 @@ InstanceId Runtime::add(Graph graph, HostBindings bindings)
     for (const auto& var : inst.graph.variables)
         if (var.scope == 0) inst.vars[var.name] = variableDefaultValue(var);
     m_insts.emplace(id, std::move(inst));
+    return id;
+}
+
+InstanceId Runtime::addCompiled(CompiledPtr inst, HostBindings bindings)
+{
+    if (!inst) return 0;
+    const InstanceId id = m_next++;
+    Inst rec;
+    rec.compiled = std::move(inst);
+    rec.host     = std::move(bindings);
+    auto [it, ok] = m_insts.emplace(id, std::move(rec));
+    // No var seeding: the generated constructor initializes its members to the
+    // declared defaults. Wire the same Context the interpreter would get.
+    it->second.compiled->bindContext(makeContext(id));
     return id;
 }
 
@@ -77,6 +100,14 @@ InstanceId Runtime::setGameInstance(Graph graph, HostBindings bindings)
     return m_gameInstance;
 }
 
+InstanceId Runtime::setGameInstanceCompiled(CompiledPtr inst, HostBindings bindings)
+{
+    if (!inst) return m_gameInstance; // don't drop a working GameInstance for a null one
+    if (m_gameInstance) remove(m_gameInstance);
+    m_gameInstance = addCompiled(std::move(inst), std::move(bindings));
+    return m_gameInstance;
+}
+
 void Runtime::retainOnlyReachableFrom(InstanceId root)
 {
     // Mark root + everything reachable through its Ref-typed variables.
@@ -88,9 +119,25 @@ void Runtime::retainOnlyReachableFrom(InstanceId root)
         const InstanceId id = stack.back(); stack.pop_back();
         const Inst* i = find(id);
         if (!i) continue;
+        // i->vars covers the interpreted store — and, for compiled instances,
+        // the overflow store (undeclared names can hold Refs too).
         for (const auto& [name, val] : i->vars)
-            if (val.type == PinType::Ref && val.ref != 0 && !keep.count(val.ref) && find(val.ref))
+        {
+            if (val.type != PinType::Ref) continue;
+            if (val.ref != 0 && !keep.count(val.ref) && find(val.ref))
             { keep.insert(val.ref); stack.push_back(val.ref); }
+            for (const auto& item : val.items)   // Ref arrays
+                if (item.ref != 0 && !keep.count(item.ref) && find(item.ref))
+                { keep.insert(item.ref); stack.push_back(item.ref); }
+        }
+        if (i->compiled)
+        {
+            std::vector<uint32_t> refs;
+            i->compiled->collectRefs(refs);
+            for (const uint32_t r : refs)
+                if (r != 0 && !keep.count(r) && find(r))
+                { keep.insert(r); stack.push_back(r); }
+        }
     }
     // Sweep the unmarked (widgets + the level script are already gone by now, so
     // this only drops scene-scoped Create-Object instances the root doesn't hold).
@@ -111,13 +158,20 @@ Value Runtime::getVariable(InstanceId id, const std::string& name) const
 {
     const Inst* i = find(id);
     if (!i) return {};
+    if (i->compiled && findVarInfo(*i->compiled, name))
+        return i->compiled->getVariable(name);
     auto it = i->vars.find(name);
     return it != i->vars.end() ? it->second : Value{};
 }
 
 void Runtime::setVariable(InstanceId id, const std::string& name, const Value& v)
 {
-    if (Inst* i = find(id)) i->vars[name] = v;
+    Inst* i = find(id);
+    if (!i) return;
+    // Compiled: declared members through reflection; unknown names fall through
+    // to the overflow store — Set on an undeclared name still creates an entry.
+    if (i->compiled && i->compiled->setVariable(name, v)) return;
+    i->vars[name] = v;
 }
 
 void Runtime::reseedVariables(InstanceId id)
@@ -125,6 +179,7 @@ void Runtime::reseedVariables(InstanceId id)
     Inst* i = find(id);
     if (!i) return;
     i->vars.clear();
+    if (i->compiled) { i->compiled->reseedVariables(); return; }
     for (const auto& var : i->graph.variables)
         if (var.scope == 0) i->vars[var.name] = variableDefaultValue(var);
 }
@@ -134,6 +189,34 @@ const std::unordered_map<std::string, Value>& Runtime::variablesOf(InstanceId id
     static const std::unordered_map<std::string, Value> kEmpty;
     const Inst* i = find(id);
     return i ? i->vars : kEmpty;
+}
+
+std::unordered_map<std::string, Value> Runtime::variablesSnapshot(InstanceId id) const
+{
+    const Inst* i = find(id);
+    if (!i) return {};
+    std::unordered_map<std::string, Value> out = i->vars; // full store / overflow
+    if (i->compiled)
+        for (const auto& vi : i->compiled->varInfos())
+            out[vi.name] = i->compiled->getVariable(vi.name);
+    return out;
+}
+
+std::vector<Runtime::EventBinding> Runtime::eventBindingsOf(InstanceId id) const
+{
+    std::vector<EventBinding> out;
+    const Inst* i = find(id);
+    if (!i) return out;
+    if (i->compiled)
+    {
+        for (const auto& e : i->compiled->eventInfos())
+            out.push_back({ e.name, e.elem });
+        return out;
+    }
+    for (const auto& n : i->graph.nodes)
+        if (n.type == NodeType::Event)
+            out.push_back({ n.s, n.elem });
+    return out;
 }
 
 // The Context binds variable access to the instance's private store and
@@ -188,6 +271,13 @@ Context Runtime::makeContext(InstanceId id)
     {
         const Inst* i = find(target);
         if (!i) { hcError("null reference — Get '" + var + "' on a null/destroyed object"); return {}; }
+        if (i->compiled)
+        {
+            const CompiledVarInfo* vi = findVarInfo(*i->compiled, var);
+            if (!vi || vi->access != 0)
+            { hcWarn("variable '" + var + "' not found or not public on the target object"); return {}; }
+            return i->compiled->getVariable(var);
+        }
         const Variable* v = i->graph.findVariable(var);
         if (!v || v->access != 0 || v->scope != 0) // locals are never externally visible
         { hcWarn("variable '" + var + "' not found or not public on the target object"); return {}; }
@@ -198,6 +288,14 @@ Context Runtime::makeContext(InstanceId id)
     {
         Inst* i = find(target);
         if (!i) { hcError("null reference — Set '" + var + "' on a null/destroyed object"); return; }
+        if (i->compiled)
+        {
+            const CompiledVarInfo* vi = findVarInfo(*i->compiled, var);
+            if (!vi || vi->access != 0)
+            { hcWarn("variable '" + var + "' not found or not public on the target object"); return; }
+            i->compiled->setVariable(var, val);
+            return;
+        }
         const Variable* v = i->graph.findVariable(var);
         if (!v || v->access != 0 || v->scope != 0) // locals are never externally visible
         { hcWarn("variable '" + var + "' not found or not public on the target object"); return; }
@@ -220,6 +318,9 @@ void Runtime::fireEvent(InstanceId id, const std::string& event, int elem, const
 {
     Inst* i = find(id);
     if (!i) return;
+    if (i->compiled)
+        i->compiled->fireEvent(event, elem, arg);
+    else
     { Runner runner(i->graph, makeContext(id)); runner.fireEvent(event, elem, arg); }
     // An event firing on an instance also reaches everyone bound to it, so
     // another class holding a reference can react (Unreal-style dispatchers).
@@ -261,6 +362,8 @@ bool Runtime::callFunction(InstanceId id, const std::string& fn, bool requirePub
 {
     Inst* i = find(id);
     if (!i) return false;
+    if (i->compiled)
+        return i->compiled->callFunction(fn, requirePublic, args, results);
     Runner runner(i->graph, makeContext(id));
     return runner.callFunction(fn, requirePublic, args, results);
 }
