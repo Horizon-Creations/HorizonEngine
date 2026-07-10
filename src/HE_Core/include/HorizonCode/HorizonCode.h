@@ -146,6 +146,13 @@ struct Variable
     // array on creation. Each item is a scalar Value of `type`.
     std::vector<Value> defaultItems;
     int         access = 0;   // 0 public (readable via a reference), 1 private
+    // Scope: 0 = instance variable (persistent per running instance, seeded by
+    // the Runtime — today's behavior). Non-zero = FUNCTION-LOCAL: the id of the
+    // owning FunctionEntry node (matching Node::subgraph). Locals live in the
+    // interpreter's call frame — fresh per invocation, never in the instance
+    // store, never visible to Get/SetExternal or the public class interface.
+    // Variable names stay unique across the whole graph (no shadowing).
+    int         scope = 0;
     // For an Object (Ref) variable: which HorizonCode class it holds (asset
     // path). Purely editor metadata — lets the context menu surface that class's
     // public functions/variables. Empty = untyped object.
@@ -325,9 +332,21 @@ private:
     const Link* execLinkFrom(int nodeId, int pin) const;
 
     // One active function invocation: the argument values the call passed in
-    // (read by the FunctionEntry's data-outs) and the return values a
-    // FunctionReturn writes (read by the FunctionCall's data-outs).
-    struct CallFrame { std::vector<Value> args; std::vector<Value> results; };
+    // (read by the FunctionEntry's data-outs), the return values a
+    // FunctionReturn writes (read by the FunctionCall's data-outs), and the
+    // function's LOCAL variables (Variable::scope == fnEntryId), seeded from
+    // their declared defaults when the frame is pushed.
+    struct CallFrame
+    {
+        int                                    fnEntryId = 0;
+        std::vector<Value>                     args;
+        std::vector<Value>                     results;
+        std::unordered_map<std::string, Value> locals;
+    };
+    // The innermost frame of the function that declares a given local (by its
+    // FunctionEntry id), or null when that function isn't on the call stack
+    // (a local's Get/Set node executing outside its function).
+    CallFrame* frameFor(int fnEntryId);
 
     const Graph& m_graph;
     Context      m_ctx;

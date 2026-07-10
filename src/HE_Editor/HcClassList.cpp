@@ -198,7 +198,8 @@ ClassInfo classInfoFromGraph(const HorizonCode::Graph& g, const std::string& lab
 			ci.functions.push_back(std::move(f));
 		}
 	for (const auto& v : g.variables)
-		if (v.access == 0) ci.variables.push_back({ v.name, v.type, v.className });
+		if (v.access == 0 && v.scope == 0) // function-locals are never part of the interface
+			ci.variables.push_back({ v.name, v.type, v.className });
 	return ci;
 }
 

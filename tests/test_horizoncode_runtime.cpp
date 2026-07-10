@@ -668,3 +668,215 @@ TEST_CASE("HorizonCode logs a null-reference error for a Call on a null target")
 			{ found = true; break; }
 	CHECK(found);
 }
+
+// ── Function-local variables (Variable::scope != 0) ──────────────────────────
+
+TEST_CASE("Function-locals seed from their default per call and stay out of the instance store")
+{
+	Graph g;
+	Variable out; out.name = "out"; out.type = PinType::Float;
+	g.variables.push_back(out);
+
+	// Function F: Set out = Get l  (l = local of F, default 5).
+	Node fe; fe.type = NodeType::FunctionEntry; fe.s = "F"; fe.access = 0;
+	const int f = g.addNode(fe);
+	Variable l; l.name = "l"; l.type = PinType::Float; l.f[0] = 5.0f; l.scope = f;
+	g.variables.push_back(l);
+	Node gv; gv.type = NodeType::GetVariable; gv.s = "l"; gv.propType = PinType::Float;
+	const int r = g.addNode(gv);
+	Node sv; sv.type = NodeType::SetVariable; sv.s = "out"; sv.propType = PinType::Float;
+	const int s = g.addNode(sv);
+	REQUIRE(g.connect(f, 0, s, 0));   // exec
+	REQUIRE(g.connect(r, 0, s, 2));   // Get l → Value
+
+	Runtime rt;
+	const InstanceId id = rt.add(g);
+	// The local is NOT part of the instance store (only scope-0 vars are seeded).
+	CHECK(rt.variablesOf(id).count("l") == 0);
+	CHECK(rt.callFunction(id, "F", true));
+	CHECK(rt.getVariable(id, "out").f == doctest::Approx(5.0f));
+	CHECK(rt.variablesOf(id).count("l") == 0); // a Set inside F must not create it either
+}
+
+TEST_CASE("Function-locals reset on every invocation (no persistence across calls)")
+{
+	Graph g;
+	Variable seen; seen.name = "seen"; seen.type = PinType::Float;
+	g.variables.push_back(seen);
+
+	// F: Set c = (Get c) + 1  →  Set seen = Get c.   c = local, default 0.
+	Node fe; fe.type = NodeType::FunctionEntry; fe.s = "F"; fe.access = 0;
+	const int f = g.addNode(fe);
+	Variable c; c.name = "c"; c.type = PinType::Float; c.scope = f;
+	g.variables.push_back(c);
+
+	Node g1; g1.type = NodeType::GetVariable; g1.s = "c"; g1.propType = PinType::Float;
+	const int gc1 = g.addNode(g1);
+	Node one; one.type = NodeType::ConstFloat; one.f[0] = 1.0f;
+	const int k1 = g.addNode(one);
+	Node add; add.type = NodeType::Add;
+	const int a = g.addNode(add);
+	Node s1; s1.type = NodeType::SetVariable; s1.s = "c"; s1.propType = PinType::Float;
+	const int sc = g.addNode(s1);
+	Node g2; g2.type = NodeType::GetVariable; g2.s = "c"; g2.propType = PinType::Float;
+	const int gc2 = g.addNode(g2);
+	Node s2; s2.type = NodeType::SetVariable; s2.s = "seen"; s2.propType = PinType::Float;
+	const int ss = g.addNode(s2);
+
+	REQUIRE(g.connect(f, 0, sc, 0));     // exec: F → Set c
+	REQUIRE(g.connect(gc1, 0, a, 0));    // Get c → Add.A
+	REQUIRE(g.connect(k1, 0, a, 1));     // 1 → Add.B
+	REQUIRE(g.connect(a, 2, sc, 2));     // Add → Set c.Value
+	REQUIRE(g.connect(sc, 1, ss, 0));    // exec: Set c → Set seen
+	REQUIRE(g.connect(gc2, 0, ss, 2));   // Get c → Set seen.Value
+
+	Runtime rt;
+	const InstanceId id = rt.add(g);
+	CHECK(rt.callFunction(id, "F", true));
+	CHECK(rt.getVariable(id, "seen").f == doctest::Approx(1.0f));
+	CHECK(rt.callFunction(id, "F", true));
+	// A persistent (instance) c would read 2 here; a per-call local reads 1.
+	CHECK(rt.getVariable(id, "seen").f == doctest::Approx(1.0f));
+	CHECK(rt.variablesOf(id).count("c") == 0);
+}
+
+TEST_CASE("Recursion keeps a fresh local per call frame")
+{
+	// R(n): Set mine = n; if (n > 0.5) { R(n - 1); Set final = Get mine; }
+	//                     else          Set final = Get mine;
+	// With per-frame locals, the OUTERMOST write wins → final == the original n.
+	// With a shared store the inner frames would clobber `mine` → final == 0.
+	Graph g;
+	Variable fin; fin.name = "final"; fin.type = PinType::Float;
+	g.variables.push_back(fin);
+
+	Node fe; fe.type = NodeType::FunctionEntry; fe.s = "R"; fe.access = 0;
+	fe.params.push_back({ "n", PinType::Float });
+	const int f = g.addNode(fe);
+	Variable mine; mine.name = "mine"; mine.type = PinType::Float; mine.scope = f;
+	g.variables.push_back(mine);
+
+	Node sm; sm.type = NodeType::SetVariable; sm.s = "mine"; sm.propType = PinType::Float;
+	const int smId = g.addNode(sm);
+	Node gt; gt.type = NodeType::Greater;
+	const int gtId = g.addNode(gt);
+	Node half; half.type = NodeType::ConstFloat; half.f[0] = 0.5f;
+	const int halfId = g.addNode(half);
+	Node br; br.type = NodeType::Branch;
+	const int brId = g.addNode(br);
+	Node sub; sub.type = NodeType::Subtract;
+	const int subId = g.addNode(sub);
+	Node one; one.type = NodeType::ConstFloat; one.f[0] = 1.0f;
+	const int oneId = g.addNode(one);
+	Node call; call.type = NodeType::FunctionCall; call.s = "R";
+	const int callId = g.addNode(call);
+	Node gm1; gm1.type = NodeType::GetVariable; gm1.s = "mine"; gm1.propType = PinType::Float;
+	const int gm1Id = g.addNode(gm1);
+	Node sf1; sf1.type = NodeType::SetVariable; sf1.s = "final"; sf1.propType = PinType::Float;
+	const int sf1Id = g.addNode(sf1);
+	Node gm2; gm2.type = NodeType::GetVariable; gm2.s = "mine"; gm2.propType = PinType::Float;
+	const int gm2Id = g.addNode(gm2);
+	Node sf2; sf2.type = NodeType::SetVariable; sf2.s = "final"; sf2.propType = PinType::Float;
+	const int sf2Id = g.addNode(sf2);
+
+	syncFunctionSignatures(g);           // FunctionCall mirrors R's params
+
+	REQUIRE(g.connect(f, 0, smId, 0));       // exec: R → Set mine
+	REQUIRE(g.connect(f, 1, smId, 2));       // n → Set mine.Value
+	REQUIRE(g.connect(smId, 1, brId, 0));    // exec: Set mine → Branch
+	REQUIRE(g.connect(f, 1, gtId, 0));       // n → Greater.A
+	REQUIRE(g.connect(halfId, 0, gtId, 1));  // 0.5 → Greater.B
+	REQUIRE(g.connect(gtId, 2, brId, 3));    // cond
+	REQUIRE(g.connect(brId, 1, callId, 0));  // True → Call R
+	REQUIRE(g.connect(f, 1, subId, 0));      // n → Sub.A
+	REQUIRE(g.connect(oneId, 0, subId, 1));  // 1 → Sub.B
+	REQUIRE(g.connect(subId, 2, callId, 2)); // n-1 → Call arg
+	REQUIRE(g.connect(callId, 1, sf1Id, 0)); // exec after the call
+	REQUIRE(g.connect(gm1Id, 0, sf1Id, 2));  // Get mine → Set final
+	REQUIRE(g.connect(brId, 2, sf2Id, 0));   // False → Set final
+	REQUIRE(g.connect(gm2Id, 0, sf2Id, 2));  // Get mine → Set final
+
+	Runtime rt;
+	const InstanceId id = rt.add(g);
+	CHECK(rt.callFunction(id, "R", true, { Value::ofFloat(2.0f) }));
+	CHECK(rt.getVariable(id, "final").f == doctest::Approx(2.0f));
+}
+
+TEST_CASE("A local read outside its function yields the type's default")
+{
+	Graph g;
+	Variable out; out.name = "out"; out.type = PinType::Float;
+	g.variables.push_back(out);
+	Node fe; fe.type = NodeType::FunctionEntry; fe.s = "F"; fe.access = 0;
+	const int f = g.addNode(fe);
+	Variable l; l.name = "l"; l.type = PinType::Float; l.f[0] = 7.0f; l.scope = f;
+	g.variables.push_back(l);
+
+	// Event graph reads the local — no frame of F is active → 0, not 7.
+	Node ev; ev.type = NodeType::Event; ev.s = "Go"; ev.elem = 0;
+	const int e = g.addNode(ev);
+	Node gv; gv.type = NodeType::GetVariable; gv.s = "l"; gv.propType = PinType::Float;
+	const int r = g.addNode(gv);
+	Node sv; sv.type = NodeType::SetVariable; sv.s = "out"; sv.propType = PinType::Float;
+	const int s = g.addNode(sv);
+	REQUIRE(g.connect(e, 0, s, 0));
+	REQUIRE(g.connect(r, 0, s, 2));
+
+	Runtime rt;
+	const InstanceId id = rt.add(g);
+	rt.fireEvent(id, "Go", 0);
+	CHECK(rt.getVariable(id, "out").f == doctest::Approx(0.0f));
+}
+
+TEST_CASE("Locals are never visible through Get (Ref) — even when marked public")
+{
+	Graph g;
+	Variable out; out.name = "out"; out.type = PinType::Float;
+	g.variables.push_back(out);
+	Node fe; fe.type = NodeType::FunctionEntry; fe.s = "F"; fe.access = 0;
+	const int f = g.addNode(fe);
+	Variable l; l.name = "l"; l.type = PinType::Float; l.f[0] = 7.0f;
+	l.scope = f; l.access = 0;   // "public" — must still be invisible externally
+	g.variables.push_back(l);
+
+	// Event Go: Set out = GetExternal(Target = Self, "l") — warns, yields 0.
+	Node ev; ev.type = NodeType::Event; ev.s = "Go"; ev.elem = 0;
+	const int e = g.addNode(ev);
+	Node self; self.type = NodeType::GetSelf;
+	const int selfId = g.addNode(self);
+	Node ge; ge.type = NodeType::GetExternal; ge.s = "l"; ge.propType = PinType::Float;
+	const int geId = g.addNode(ge);
+	Node sv; sv.type = NodeType::SetVariable; sv.s = "out"; sv.propType = PinType::Float;
+	const int s = g.addNode(sv);
+	REQUIRE(g.connect(e, 0, s, 0));         // exec
+	REQUIRE(g.connect(selfId, 0, geId, 0)); // Self → Target
+	REQUIRE(g.connect(geId, 1, s, 2));      // external value → Set out
+
+	Runtime rt;
+	const InstanceId id = rt.add(g);
+	rt.fireEvent(id, "Go", 0);
+	CHECK(rt.getVariable(id, "out").f == doctest::Approx(0.0f));
+}
+
+TEST_CASE("Variable scope survives the JSON round-trip and dies with its function")
+{
+	Graph g;
+	Node fe; fe.type = NodeType::FunctionEntry; fe.s = "F";
+	const int f = g.addNode(fe);
+	Variable inst; inst.name = "keep"; inst.type = PinType::Int;
+	g.variables.push_back(inst);
+	Variable l; l.name = "l"; l.type = PinType::Float; l.f[0] = 3.0f; l.scope = f;
+	g.variables.push_back(l);
+
+	Graph back;
+	REQUIRE(fromJson(toJson(g), back));
+	const Variable* lv = back.findVariable("l");
+	REQUIRE(lv != nullptr);
+	CHECK(lv->scope == f);
+	CHECK(back.findVariable("keep")->scope == 0);
+
+	// Deleting the function removes its locals (but not instance variables).
+	back.removeNode(f);
+	CHECK(back.findVariable("l") == nullptr);
+	CHECK(back.findVariable("keep") != nullptr);
+}
