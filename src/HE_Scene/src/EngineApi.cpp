@@ -8,12 +8,18 @@
 #include "HorizonScene/Components/NameComponent.h"
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
+#include <DebugDraw/DebugDraw.h>
+#include <nlohmann/json.hpp>
+#include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <random>
 #include <utility>
+#include <unordered_map>
 #include <unordered_set>
 
 // The engine surface (transform/physics/material/ui/widget/cursor/entity) is a
@@ -224,7 +230,181 @@ void setBusVolume(Ctx& c, const std::string& bus, float volume)
     if (!c.audio->hasBus(bus)) c.audio->createBus(bus, volume);
     c.audio->setBusVolume(bus, volume);
 }
+void setSoundPosition(Ctx& c, int handle, const glm::vec3& pos)
+{
+    if (c.audio) c.audio->setSoundPosition((uint64_t)(uint32_t)handle, pos.x, pos.y, pos.z);
+}
 } // namespace audio
+
+// ── Debug draw ───────────────────────────────────────────────────────────────
+namespace debug {
+namespace {
+struct Timed { DebugLine seg; float ttl; };
+std::vector<Timed>& queue() { static std::vector<Timed> q; return q; }
+void push(const glm::vec3& a, const glm::vec3& b, const glm::vec3& col, float ttl)
+{ queue().push_back({ { a, b, col }, ttl }); }
+} // namespace
+void line(const glm::vec3& a, const glm::vec3& b, const glm::vec3& color, float seconds)
+{ push(a, b, color, seconds); }
+void sphere(const glm::vec3& c0, float r, const glm::vec3& color, float seconds)
+{
+    // Expand to segments at submit time (three great circles), sharing one ttl.
+    DebugDrawBuffer buf;
+    buf.sphere(c0, r, color);
+    for (const DebugLine& l : buf.lines()) queue().push_back({ l, seconds });
+}
+void box(const glm::vec3& mn, const glm::vec3& mx, const glm::vec3& color, float seconds)
+{
+    DebugDrawBuffer buf;
+    buf.aabb(mn, mx, color);
+    for (const DebugLine& l : buf.lines()) queue().push_back({ l, seconds });
+}
+void clear() { queue().clear(); }
+void collect(float dt, std::vector<DebugLine>& out)
+{
+    auto& q = queue();
+    for (const Timed& t : q) out.push_back(t.seg);     // draw everything alive NOW
+    for (Timed& t : q) t.ttl -= dt;                     // then age
+    q.erase(std::remove_if(q.begin(), q.end(),
+        [](const Timed& t){ return t.ttl < 0.0f; }), q.end());
+}
+} // namespace debug
+
+// ── Sandboxed fs + save store ────────────────────────────────────────────────
+namespace fs {
+namespace {
+std::string& root() { static std::string r; return r; }
+// A sandbox-relative path is valid when it has no root and no ".." component.
+bool validRel(const std::string& rel)
+{
+    if (rel.empty()) return false;
+    const std::filesystem::path p(rel);
+    if (p.is_absolute() || p.has_root_name()) return false;
+    for (const auto& part : p)
+        if (part == "..") return false;
+    return true;
+}
+std::filesystem::path resolved(const std::string& rel)
+{
+    if (root().empty() || !validRel(rel)) return {};
+    return std::filesystem::path(root()) / rel;
+}
+} // namespace
+void setSandboxRoot(const std::string& absDir) { root() = absDir; }
+std::string sandboxRoot() { return root(); }
+bool writeText(const std::string& rel, const std::string& text)
+{
+    const auto p = resolved(rel);
+    if (p.empty()) return false;
+    std::error_code ec;
+    std::filesystem::create_directories(p.parent_path(), ec);
+    std::ofstream f(p, std::ios::binary | std::ios::trunc);
+    if (!f) return false;
+    f.write(text.data(), (std::streamsize)text.size());
+    return f.good();
+}
+std::string readText(const std::string& rel)
+{
+    const auto p = resolved(rel);
+    if (p.empty()) return {};
+    std::ifstream f(p, std::ios::binary);
+    if (!f) return {};
+    std::string out((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    return out;
+}
+bool exists(const std::string& rel)
+{
+    const auto p = resolved(rel);
+    std::error_code ec;
+    return !p.empty() && std::filesystem::exists(p, ec);
+}
+bool remove(const std::string& rel)
+{
+    const auto p = resolved(rel);
+    std::error_code ec;
+    return !p.empty() && std::filesystem::is_regular_file(p, ec)
+        && std::filesystem::remove(p, ec);
+}
+bool makeDir(const std::string& rel)
+{
+    const auto p = resolved(rel);
+    std::error_code ec;
+    return !p.empty() && (std::filesystem::create_directories(p, ec) ||
+                          std::filesystem::is_directory(p, ec));
+}
+} // namespace fs
+
+namespace save {
+namespace {
+// One in-memory store; values kept as tagged strings for a trivial JSON shape.
+struct Entry { int kind; float f; bool b; std::string s; }; // 0 num, 1 str, 2 bool
+std::unordered_map<std::string, Entry>& store() { static std::unordered_map<std::string, Entry> s; return s; }
+std::string slotPath(int slot) { return "Saves/slot" + std::to_string(slot) + ".json"; }
+} // namespace
+void  setNumber(const std::string& k, float v)                { store()[k] = { 0, v, false, {} }; }
+float getNumber(const std::string& k, float def)
+{ auto it = store().find(k); return it != store().end() && it->second.kind == 0 ? it->second.f : def; }
+void  setString(const std::string& k, const std::string& v)   { store()[k] = { 1, 0, false, v }; }
+std::string getString(const std::string& k, const std::string& def)
+{ auto it = store().find(k); return it != store().end() && it->second.kind == 1 ? it->second.s : def; }
+void  setBool(const std::string& k, bool v)                   { store()[k] = { 2, 0, v, {} }; }
+bool  getBool(const std::string& k, bool def)
+{ auto it = store().find(k); return it != store().end() && it->second.kind == 2 ? it->second.b : def; }
+bool  hasKey(const std::string& k)     { return store().count(k) != 0; }
+void  deleteKey(const std::string& k)  { store().erase(k); }
+void  clearAll()                       { store().clear(); }
+bool saveToSlot(int slot)
+{
+    nlohmann::json j;
+    for (const auto& [k, e] : store())
+    {
+        if (e.kind == 0)      j[k] = e.f;
+        else if (e.kind == 1) j[k] = e.s;
+        else                  j[k] = e.b;
+    }
+    return fs::writeText(slotPath(slot), j.dump(2));
+}
+bool loadFromSlot(int slot)
+{
+    const std::string text = fs::readText(slotPath(slot));
+    if (text.empty()) return false;
+    nlohmann::json j = nlohmann::json::parse(text, nullptr, /*allow_exceptions=*/false);
+    if (j.is_discarded() || !j.is_object()) return false;
+    store().clear();
+    for (auto it = j.begin(); it != j.end(); ++it)
+    {
+        if (it->is_number())      setNumber(it.key(), it->get<float>());
+        else if (it->is_string()) setString(it.key(), it->get<std::string>());
+        else if (it->is_boolean()) setBool(it.key(), it->get<bool>());
+    }
+    return true;
+}
+bool slotExists(int slot) { return fs::exists(slotPath(slot)); }
+} // namespace save
+
+// ── Scene transitions ────────────────────────────────────────────────────────
+namespace scene {
+namespace {
+std::vector<Request>& requests() { static std::vector<Request> q; return q; }
+int& nextZone() { static int z = 1; return z; }
+} // namespace
+void load(const std::string& scenePath)
+{ requests().push_back({ 0, scenePath, 0 }); }
+int loadAdditive(const std::string& scenePath)
+{
+    const int zone = nextZone()++;
+    requests().push_back({ 1, scenePath, zone });
+    return zone;
+}
+void unloadZone(int zone)
+{ requests().push_back({ 2, {}, zone }); }
+std::vector<Request> takeRequests()
+{
+    std::vector<Request> out = std::move(requests());
+    requests().clear();
+    return out;
+}
+} // namespace scene
 
 // ── String library ───────────────────────────────────────────────────────────
 namespace str {
@@ -579,6 +759,68 @@ const std::vector<ApiFn>& registry()
             [](Ctx& c, const VV& a){ return VV{ Value::ofBool(audio::isPlaying(c, aI(a, 0))) }; } });
         t.push_back({ "audio.setBusVolume", "Audio", true, {{"bus", P::String}, {"volume", P::Float}}, {}, "HE::api::audio::setBusVolume",
             [](Ctx& c, const VV& a){ audio::setBusVolume(c, aS(a, 0), aF(a, 1)); return VV{}; } });
+        t.push_back({ "audio.setSoundPosition", "Audio", true, {{"handle", P::Int}, {"position", P::Color}}, {}, "HE::api::audio::setSoundPosition",
+            [](Ctx& c, const VV& a){ audio::setSoundPosition(c, aI(a, 0), aV3(a, 1)); return VV{}; } });
+
+        // Debug draw (timed world-space primitives; drained by the app per frame)
+        t.push_back({ "debug.line", "Debug", true,
+            {{"from", P::Color}, {"to", P::Color}, {"color", P::Color}, {"seconds", P::Float}}, {}, "HE::api::debug::line",
+            [](Ctx&, const VV& a){ debug::line(aV3(a, 0), aV3(a, 1),
+                a.size() > 2 ? aV3(a, 2) : glm::vec3(1.0f, 1.0f, 0.0f), aF(a, 3)); return VV{}; } });
+        t.push_back({ "debug.sphere", "Debug", true,
+            {{"center", P::Color}, {"radius", P::Float}, {"color", P::Color}, {"seconds", P::Float}}, {}, "HE::api::debug::sphere",
+            [](Ctx&, const VV& a){ debug::sphere(aV3(a, 0), a.size() > 1 ? aF(a, 1) : 1.0f,
+                a.size() > 2 ? aV3(a, 2) : glm::vec3(1.0f, 1.0f, 0.0f), aF(a, 3)); return VV{}; } });
+        t.push_back({ "debug.box", "Debug", true,
+            {{"min", P::Color}, {"max", P::Color}, {"color", P::Color}, {"seconds", P::Float}}, {}, "HE::api::debug::box",
+            [](Ctx&, const VV& a){ debug::box(aV3(a, 0), aV3(a, 1),
+                a.size() > 2 ? aV3(a, 2) : glm::vec3(1.0f, 1.0f, 0.0f), aF(a, 3)); return VV{}; } });
+        t.push_back({ "debug.clear", "Debug", true, {}, {}, "HE::api::debug::clear",
+            [](Ctx&, const VV&){ debug::clear(); return VV{}; } });
+
+        // Sandboxed file I/O
+        t.push_back({ "fs.writeText", "File", true, {{"path", P::String}, {"text", P::String}}, {{"ok", P::Bool}}, "HE::api::fs::writeText",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(fs::writeText(aS(a, 0), aS(a, 1))) }; } });
+        t.push_back({ "fs.readText", "File", true, {{"path", P::String}}, {{"text", P::String}}, "HE::api::fs::readText",
+            [](Ctx&, const VV& a){ return VV{ Value::ofString(fs::readText(aS(a, 0))) }; } });
+        t.push_back({ "fs.exists", "File", false, {{"path", P::String}}, {{"exists", P::Bool}}, "HE::api::fs::exists",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(fs::exists(aS(a, 0))) }; } });
+        t.push_back({ "fs.remove", "File", true, {{"path", P::String}}, {{"ok", P::Bool}}, "HE::api::fs::remove",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(fs::remove(aS(a, 0))) }; } });
+        t.push_back({ "fs.makeDir", "File", true, {{"path", P::String}}, {{"ok", P::Bool}}, "HE::api::fs::makeDir",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(fs::makeDir(aS(a, 0))) }; } });
+
+        // Save-game store
+        t.push_back({ "save.setNumber", "Save", true, {{"key", P::String}, {"value", P::Float}}, {}, "HE::api::save::setNumber",
+            [](Ctx&, const VV& a){ save::setNumber(aS(a, 0), aF(a, 1)); return VV{}; } });
+        t.push_back({ "save.getNumber", "Save", false, {{"key", P::String}, {"default", P::Float}}, {{"value", P::Float}}, "HE::api::save::getNumber",
+            [](Ctx&, const VV& a){ return VV{ Value::ofFloat(save::getNumber(aS(a, 0), aF(a, 1))) }; } });
+        t.push_back({ "save.setString", "Save", true, {{"key", P::String}, {"value", P::String}}, {}, "HE::api::save::setString",
+            [](Ctx&, const VV& a){ save::setString(aS(a, 0), aS(a, 1)); return VV{}; } });
+        t.push_back({ "save.getString", "Save", false, {{"key", P::String}, {"default", P::String}}, {{"value", P::String}}, "HE::api::save::getString",
+            [](Ctx&, const VV& a){ return VV{ Value::ofString(save::getString(aS(a, 0), aS(a, 1))) }; } });
+        t.push_back({ "save.setBool", "Save", true, {{"key", P::String}, {"value", P::Bool}}, {}, "HE::api::save::setBool",
+            [](Ctx&, const VV& a){ save::setBool(aS(a, 0), aB(a, 1)); return VV{}; } });
+        t.push_back({ "save.getBool", "Save", false, {{"key", P::String}, {"default", P::Bool}}, {{"value", P::Bool}}, "HE::api::save::getBool",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(save::getBool(aS(a, 0), aB(a, 1))) }; } });
+        t.push_back({ "save.hasKey", "Save", false, {{"key", P::String}}, {{"has", P::Bool}}, "HE::api::save::hasKey",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(save::hasKey(aS(a, 0))) }; } });
+        t.push_back({ "save.deleteKey", "Save", true, {{"key", P::String}}, {}, "HE::api::save::deleteKey",
+            [](Ctx&, const VV& a){ save::deleteKey(aS(a, 0)); return VV{}; } });
+        t.push_back({ "save.saveToSlot", "Save", true, {{"slot", P::Int}}, {{"ok", P::Bool}}, "HE::api::save::saveToSlot",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(save::saveToSlot(aI(a, 0))) }; } });
+        t.push_back({ "save.loadFromSlot", "Save", true, {{"slot", P::Int}}, {{"ok", P::Bool}}, "HE::api::save::loadFromSlot",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(save::loadFromSlot(aI(a, 0))) }; } });
+        t.push_back({ "save.slotExists", "Save", false, {{"slot", P::Int}}, {{"exists", P::Bool}}, "HE::api::save::slotExists",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(save::slotExists(aI(a, 0))) }; } });
+
+        // Scene transitions (deferred; the app runtime executes the requests)
+        t.push_back({ "scene.load", "Scene", true, {{"scene", P::String}}, {}, "HE::api::scene::load",
+            [](Ctx&, const VV& a){ scene::load(aS(a, 0)); return VV{}; } });
+        t.push_back({ "scene.loadAdditive", "Scene", true, {{"scene", P::String}}, {{"zone", P::Int}}, "HE::api::scene::loadAdditive",
+            [](Ctx&, const VV& a){ return VV{ Value::ofInt(scene::loadAdditive(aS(a, 0))) }; } });
+        t.push_back({ "scene.unloadZone", "Scene", true, {{"zone", P::Int}}, {}, "HE::api::scene::unloadZone",
+            [](Ctx&, const VV& a){ scene::unloadZone(aI(a, 0)); return VV{}; } });
 
         // String library (pure)
         t.push_back({ "string.length", "String", false, {{"s", P::String}}, {{"length", P::Int}}, "HE::api::str::length",
@@ -666,6 +908,20 @@ const std::vector<ApiFn>& registry()
             { "string.toLower", "To Lower" },         { "string.trim", "Trim" },
             { "string.startsWith", "Starts With" },   { "string.endsWith", "Ends With" },
             { "string.toNumber", "To Number" },
+            { "audio.setSoundPosition", "Set Sound Position" },
+            { "debug.line", "Draw Debug Line" },   { "debug.sphere", "Draw Debug Sphere" },
+            { "debug.box", "Draw Debug Box" },     { "debug.clear", "Clear Debug Draw" },
+            { "fs.writeText", "Write Text File" }, { "fs.readText", "Read Text File" },
+            { "fs.exists", "File Exists" },        { "fs.remove", "Delete File" },
+            { "fs.makeDir", "Make Directory" },
+            { "save.setNumber", "Save Set Number" }, { "save.getNumber", "Save Get Number" },
+            { "save.setString", "Save Set String" }, { "save.getString", "Save Get String" },
+            { "save.setBool", "Save Set Bool" },     { "save.getBool", "Save Get Bool" },
+            { "save.hasKey", "Save Has Key" },       { "save.deleteKey", "Save Delete Key" },
+            { "save.saveToSlot", "Save To Slot" },   { "save.loadFromSlot", "Load From Slot" },
+            { "save.slotExists", "Save Slot Exists" },
+            { "scene.load", "Load Scene" },          { "scene.loadAdditive", "Load Scene Additive" },
+            { "scene.unloadZone", "Unload Zone" },
         };
         for (auto& fn : t)
         {

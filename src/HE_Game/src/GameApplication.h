@@ -66,5 +66,15 @@ private:
     std::unordered_map<uint32_t, ScriptEngine::InstanceId> m_scriptInstances; // entity → instance
     UIInputSystem::InputState m_uiInput;   // frame-to-frame UI pointer tracking
     AudioEngine m_audioEngine;             // game-runtime audio (playOnStart + audio.* API)
+
+    // ── Scene transitions (HE::api::scene requests, executed at frame start) ──
+    void executeSceneRequests();
+    bool performSceneSwitch(const std::string& scenePath);
+    // Resolve a project-relative .hescene: packed pak entry (path-derived UUID)
+    // → loose JSON in the project → loose JSON next to the executable.
+    bool loadSceneInto(HorizonWorld& world, const std::string& scenePath,
+                       bool additive, std::vector<entt::entity>* outCreated);
+    int  startScriptsFor(const std::vector<entt::entity>& entities); // additive zones
+    std::unordered_map<int, std::vector<entt::entity>> m_zones; // additive-load bookkeeping
 };
 

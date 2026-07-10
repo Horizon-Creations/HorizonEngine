@@ -10,6 +10,8 @@
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/SceneSystems.h>
 #include <HorizonScene/AudioSystem.h>
+#include <DebugDraw/DebugDraw.h>     // DebugLine (HE::api::debug drain)
+#include <Hpak/ProjectExporter.h>    // sceneUuidForPath (packed scene lookup)
 #include <HorizonScene/ScriptContext.h>
 #include <HorizonScene/ScriptApi.h>
 #include <HorizonScene/EngineApi.h>
@@ -241,6 +243,18 @@ void GameApplication::OnInit()
 		Logger::Log(Logger::LogLevel::Warning,
 			"GameApplication: audio device init failed — running silent");
 
+	// fs/save sandbox: the per-user pref dir (never the install dir, which may be
+	// read-only). All script/graph file I/O is jailed under <pref>/Saved.
+	{
+		const std::string org = "HorizonCreations";
+		const std::string app = m_config.projectName.empty() ? "HorizonGame" : m_config.projectName;
+		if (char* pref = SDL_GetPrefPath(org.c_str(), app.c_str()))
+		{
+			HE::api::fs::setSandboxRoot((std::filesystem::path(pref) / "Saved").string());
+			SDL_free(pref);
+		}
+	}
+
 	// Reference-graph streaming seed: kick off async loads for the assets this scene
 	// actually references. Their baked transitive dependencies (materials → textures)
 	// follow automatically via the frontier in pollAsyncResults, so the loader pulls
@@ -282,6 +296,167 @@ void GameApplication::OnInit()
 	// Level script "OnLevelLoaded" fires once the world + scripts are up; the
 	// matching "OnLevelUnloaded" fires at shutdown.
 	if (m_world) m_world->fireLevelLoaded();
+}
+
+// ── Scene transitions ────────────────────────────────────────────────────────
+
+bool GameApplication::loadSceneInto(HorizonWorld& world, const std::string& scenePath,
+                                    bool additive, std::vector<entt::entity>* outCreated)
+{
+	SceneSerializer ser;
+	// 1) Packed pak entry under the path-derived UUID (shipped builds).
+	const auto bytes = contentManager().readMountedEntry(sceneUuidForPath(scenePath));
+	if (!bytes.empty())
+		return additive ? ser.loadAdditiveFromMemory(world, bytes, outCreated)
+		                : ser.loadFromMemory(world, bytes);
+	// 2) Loose JSON in the project (dev / WIP builds running on loose content),
+	//    then 3) next to the executable. Scene paths are project-relative.
+	std::filesystem::path candidates[2];
+	int n = 0;
+	if (!contentManager().contentRoot().empty())
+		candidates[n++] = std::filesystem::path(contentManager().contentRoot()).parent_path() / scenePath;
+	if (const char* base = SDL_GetBasePath())
+		candidates[n++] = std::filesystem::path(base) / scenePath;
+	std::error_code ec;
+	for (int i = 0; i < n; ++i)
+		if (std::filesystem::exists(candidates[i], ec))
+			return additive ? ser.loadAdditive(world, candidates[i], SerializeFormat::JSON, outCreated)
+			                : ser.load(world, candidates[i], SerializeFormat::JSON);
+	return false;
+}
+
+bool GameApplication::performSceneSwitch(const std::string& scenePath)
+{
+	// Build the NEW world first: a failed load must leave the running scene
+	// untouched (no half-torn-down state).
+	auto newWorld = std::make_unique<HorizonWorld>();
+	if (!loadSceneInto(*newWorld, scenePath, /*additive=*/false, nullptr))
+	{
+		Logger::Log(Logger::LogLevel::Warning,
+			("GameApplication: scene.load failed — '" + scenePath + "' not found "
+			 "(packed entry, project file, exe dir)").c_str());
+		return false;
+	}
+
+	// Tear down the old scene: unload event first (handlers still see the world),
+	// then widgets (unregister from the shared HorizonCode runtime), scripts
+	// (finalizers may touch entities), sounds, zones.
+	if (m_world)
+	{
+		m_world->fireLevelUnloaded();
+		m_world->widgets().clear();
+	}
+	m_scriptContext.reset();
+	m_scriptInstances.clear();
+	m_audioEngine.stopAll();
+	m_zones.clear();
+
+	// Swap + bring the new scene up exactly like OnInit does for the startup scene.
+	m_world = std::move(newWorld);
+	m_world->setScriptRuntime(&m_gameInstance.runtime());
+	setWorld(m_world.get());
+
+	auto& reg = m_world->registry();
+	bool hasCamera = false;
+	for (auto e : reg.view<CameraComponent>()) { (void)e; hasCamera = true; break; }
+	if (!hasCamera)
+	{
+		auto camE = m_world->createEntity("GameCamera");
+		TransformComponent tc; tc.position = glm::vec3(0.0f, 2.0f, 8.0f);
+		reg.emplace<TransformComponent>(camE, tc);
+		CameraComponent cc; cc.isMain = true;
+		reg.emplace<CameraComponent>(camE, cc);
+	}
+
+	if (m_audioEngine.isInitialized())
+		AudioSystem::playOnStart(*m_world, m_audioEngine, &contentManager());
+
+	// Seamlessness comes from the async streaming pipeline: the swap itself is a
+	// cheap main-thread deserialize; meshes/textures stream in the background.
+	const auto refs = SceneSystems::collectAssetRefs(*m_world);
+	for (HE::UUID r : refs) contentManager().loadAssetAsync(r);
+
+	startScripts();
+	m_world->fireLevelLoaded();
+	Logger::Log(Logger::LogLevel::Info,
+		("GameApplication: switched to scene '" + scenePath + "' ("
+		 + std::to_string(refs.size()) + " asset roots streaming)").c_str());
+	return true;
+}
+
+void GameApplication::executeSceneRequests()
+{
+	const auto requests = HE::api::scene::takeRequests();
+	for (const auto& r : requests)
+	{
+		if (r.kind == 0)      // full switch
+			performSceneSwitch(r.path);
+		else if (r.kind == 1) // additive zone
+		{
+			if (!m_world) continue;
+			std::vector<entt::entity> created;
+			if (!loadSceneInto(*m_world, r.path, /*additive=*/true, &created))
+			{
+				Logger::Log(Logger::LogLevel::Warning,
+					("GameApplication: scene.loadAdditive failed — '" + r.path + "' not found").c_str());
+				continue;
+			}
+			m_zones[r.zone] = created;
+			// Stream the merged zone's assets + start its ECS scripts. playOnStart
+			// audio is deliberately NOT re-fired (it would restart existing
+			// sources); zone audio starts from its scripts/graphs.
+			const auto refs = SceneSystems::collectAssetRefs(*m_world);
+			for (HE::UUID ar : refs) contentManager().loadAssetAsync(ar);
+			const int started = startScriptsFor(created);
+			Logger::Log(Logger::LogLevel::Info,
+				("GameApplication: zone " + std::to_string(r.zone) + " loaded ('" + r.path +
+				 "', " + std::to_string(created.size()) + " entities, " +
+				 std::to_string(started) + " scripts)").c_str());
+		}
+		else if (r.kind == 2) // unload additive zone
+		{
+			auto it = m_zones.find(r.zone);
+			if (it == m_zones.end() || !m_world) continue;
+			auto& reg = m_world->registry();
+			int gone = 0;
+			for (entt::entity e : it->second)
+			{
+				if (!reg.valid(e)) continue;
+				// Drop the per-entity script instance before the entity dies.
+				m_scriptInstances.erase((uint32_t)e);
+				ScriptApi::destroy(*m_world, (uint32_t)e);
+				++gone;
+			}
+			m_zones.erase(it);
+			Logger::Log(Logger::LogLevel::Info,
+				("GameApplication: zone " + std::to_string(r.zone) + " unloaded ("
+				 + std::to_string(gone) + " entities)").c_str());
+		}
+	}
+}
+
+int GameApplication::startScriptsFor(const std::vector<entt::entity>& entities)
+{
+	if (!m_world || !m_scriptContext) return 0;
+	auto& reg = m_world->registry();
+	int started = 0;
+	for (entt::entity entity : entities)
+	{
+		if (!reg.valid(entity)) continue;
+		auto* sc = reg.try_get<ScriptComponent>(entity);
+		if (!sc || !sc->enabled) continue;
+		const ScriptAsset* asset = contentManager().getScript(sc->scriptAssetId);
+		if (!asset || asset->sourceCode.empty()) continue;
+		if (!m_scriptContext->isScriptLoaded(sc->moduleName, asset->language))
+			m_scriptContext->loadScript(sc->moduleName, asset->sourceCode, asset->language);
+		auto instId = m_scriptContext->createInstance(sc->moduleName, entity, asset->language);
+		if (instId == ScriptEngine::kInvalidInstance) continue;
+		m_scriptContext->injectProperties(instId, sc->properties);
+		m_scriptContext->callOnStart(instId);
+		m_scriptInstances[static_cast<uint32_t>(entity)] = instId;
+		++started;
+	}
+	return started;
 }
 
 void GameApplication::startScripts()
@@ -530,6 +705,17 @@ void GameApplication::OnRender(float deltaTime)
 	// scripts read fresh values this frame (before the ECS/script updates below).
 	HE::api::time::advance(deltaTime);
 	pushEngineInputSnapshot();
+
+	// Deferred scene transitions requested by scripts/graphs last frame: executed
+	// at the frame START so nothing downstream touches a half-swapped world.
+	executeSceneRequests();
+
+	// Timed debug primitives (debug.* nodes/scripts) → the renderer's line pass.
+	{
+		std::vector<DebugLine> dbg;
+		HE::api::debug::collect(deltaTime, dbg);
+		if (renderer()) renderer()->SetDebugLines(dbg);
+	}
 
 	// Register assets that finished streaming since last frame (main-thread insert —
 	// safe point for the SlotMaps, never during draw). Budgeted so a burst of

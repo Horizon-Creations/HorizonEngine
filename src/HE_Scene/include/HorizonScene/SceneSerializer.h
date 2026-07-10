@@ -23,9 +23,17 @@ public:
     // Additive load: merges the entities from a .hescene file into the existing
     // world without clearing it first. The loaded scene's root entity becomes
     // a new child of the current world root, preserving all existing entities.
+    // outCreated (optional) receives every entity the merge created — the
+    // runtime's zone system uses this to unload an additively-loaded scene again.
     bool loadAdditive(HorizonWorld& world,
                       const std::filesystem::path& path,
-                      SerializeFormat format);
+                      SerializeFormat format,
+                      std::vector<Entity>* outCreated = nullptr);
+
+    // Additive merge from an in-memory CBOR snapshot (a packed scene entry).
+    bool loadAdditiveFromMemory(HorizonWorld& world,
+                                const std::vector<uint8_t>& data,
+                                std::vector<Entity>* outCreated = nullptr);
 
     // In-memory snapshot (CBOR, same structure as the binary file format).
     // Used by play-in-editor and the undo system. load does not clear the

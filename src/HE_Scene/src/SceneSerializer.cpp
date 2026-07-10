@@ -941,7 +941,8 @@ namespace
 	// Additive variant: creates ALL entities fresh (including the loaded scene's
 	// root, which is parented to world.rootEntity() by createEntity). The loaded
 	// scene's children are grafted under the existing world root without clearing it.
-	bool applyAdditiveJson(HorizonWorld& world, const json& scene)
+	bool applyAdditiveJson(HorizonWorld& world, const json& scene,
+	                       std::vector<Entity>* outCreated = nullptr)
 	{
 		if (!scene.contains("entities")) return true;
 
@@ -965,6 +966,7 @@ namespace
 				e = world.createEntity(name);
 
 			idMap[serialId] = e;
+			if (outCreated) outCreated->push_back(e);
 
 			if (eJson.contains("components"))
 				applyComponents(registry, e, eJson["components"]);
@@ -1144,7 +1146,8 @@ bool SceneSerializer::load(HorizonWorld& world,
 
 bool SceneSerializer::loadAdditive(HorizonWorld& world,
                                     const std::filesystem::path& path,
-                                    SerializeFormat format)
+                                    SerializeFormat format,
+                                    std::vector<Entity>* outCreated)
 {
     if (format == SerializeFormat::Binary)
     {
@@ -1154,14 +1157,23 @@ bool SceneSerializer::loadAdditive(HorizonWorld& world,
                                           std::istreambuf_iterator<char>());
         json scene = json::from_cbor(bytes, true, false);
         if (scene.is_discarded()) return false;
-        return applyAdditiveJson(world, scene);
+        return applyAdditiveJson(world, scene, outCreated);
     }
     // Default: JSON
     std::ifstream in(path);
     if (!in.is_open()) return false;
     json scene = json::parse(in, nullptr, false);
     if (scene.is_discarded()) return false;
-    return applyAdditiveJson(world, scene);
+    return applyAdditiveJson(world, scene, outCreated);
+}
+
+bool SceneSerializer::loadAdditiveFromMemory(HorizonWorld& world,
+                                             const std::vector<uint8_t>& data,
+                                             std::vector<Entity>* outCreated)
+{
+    json scene = json::from_cbor(data, true, false);
+    if (scene.is_discarded()) return false;
+    return applyAdditiveJson(world, scene, outCreated);
 }
 
 // ── JSON ──────────────────────────────────────────────────────────────────────
