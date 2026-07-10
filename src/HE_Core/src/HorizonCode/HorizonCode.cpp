@@ -980,6 +980,9 @@ void Runner::execNode(const Node& n, int depth)
     case T::CreateObject:
     {
         const uint32_t ref = m_ctx.createObject ? m_ctx.createObject(n.s) : 0u;
+        if (ref == 0u)
+            Logger::Log(Logger::LogLevel::Error,
+                ("HorizonCode: Create Object failed — class '" + n.s + "' not found").c_str());
         m_execOutputs[n.id] = { Value::ofRef(ref) }; // cached for the data output
         break;
     }
@@ -1114,6 +1117,9 @@ Value Runner::evalData(const Node& n, int dataOutPin, int depth)
         const Value arr = evalInput(n, 0, depth + 1);
         const int idx = evalInput(n, 1, depth + 1).i;
         if (idx >= 0 && idx < (int)arr.items.size()) return arr.items[idx];
+        Logger::Log(Logger::LogLevel::Warning,
+            ("HorizonCode: Array Get index " + std::to_string(idx) + " out of range (size " +
+             std::to_string(arr.items.size()) + ")").c_str());
         Value def; def.type = n.propType; return def;   // out of range → element default
     }
     case T::ArrayAdd:

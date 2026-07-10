@@ -661,7 +661,9 @@ static void drawPlayReport(AppContext& ctx)
                 char head[48];
                 std::snprintf(head, sizeof head, "[%7.2fs] [%s] ", e.time,
                     e.level == HE::LogLevel::Warning ? "WARN" : "ERROR");
-                all += head; all += e.message; all += '\n';
+                all += head; all += e.message;
+                if (e.count > 1) { char rep[24]; std::snprintf(rep, sizeof rep, " (x%d)", e.count); all += rep; }
+                all += '\n';
             }
             ImGui::SetClipboardText(all.c_str());
         }
@@ -675,7 +677,10 @@ static void drawPlayReport(AppContext& ctx)
             ImGui::PushStyleColor(ImGuiCol_Text, isWarn
                 ? ImVec4(1.0f, 0.85f, 0.45f, 1.0f)      // warning → yellow
                 : ImVec4(1.0f, 0.45f, 0.45f, 1.0f));    // error/critical → red
-            ImGui::TextWrapped("[%7.2fs] %s", e.time, e.message.c_str());
+            if (e.count > 1)
+                ImGui::TextWrapped("[%7.2fs] %s  (x%d)", e.time, e.message.c_str(), e.count);
+            else
+                ImGui::TextWrapped("[%7.2fs] %s", e.time, e.message.c_str());
             ImGui::PopStyleColor();
         }
         if (ctx.playLog->size() >= 2000)

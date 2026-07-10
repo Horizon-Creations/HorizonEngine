@@ -915,9 +915,18 @@ static void hePlayLogSink(HE::LogLevel level, const char* message, void* user)
 
 void EditorApplication::appendPlayLog(HE::LogLevel level, const char* message)
 {
+	const std::string msg = message ? message : "";
 	std::lock_guard<std::mutex> lk(m_playLogMutex);
-	if (m_playLog.size() >= 2000) return; // cap a runaway error loop
-	m_playLog.push_back({ level, message ? message : "", HE::api::time::elapsed() });
+	// Collapse a repeated error (e.g. a null-reference in a Tick that fires every
+	// frame) into a single entry with a repeat count, so it doesn't drown the
+	// report or hit the cap — the user still sees it happened, and how often.
+	if (!m_playLog.empty() && m_playLog.back().level == level && m_playLog.back().message == msg)
+	{
+		++m_playLog.back().count;
+		return;
+	}
+	if (m_playLog.size() >= 2000) return; // cap a runaway error loop of DISTINCT messages
+	m_playLog.push_back({ level, msg, HE::api::time::elapsed(), 1 });
 }
 
 void EditorApplication::OnRender(float dt)

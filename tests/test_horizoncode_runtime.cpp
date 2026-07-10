@@ -1,7 +1,9 @@
 #include "doctest.h"
 #include <HorizonCode/HorizonCode.h>
 #include <HorizonCode/HorizonCodeRuntime.h>
+#include <Diagnostics/Logger.h>
 #include <string>
+#include <vector>
 
 using namespace HorizonCode;
 
@@ -632,4 +634,37 @@ TEST_CASE("assignSubgraphs partitions a flat graph into per-function sub-graphs"
 	// Idempotent: a second pass (already partitioned) changes nothing.
 	assignSubgraphs(g);
 	CHECK(g.findNode(frId)->subgraph == fnId);
+}
+
+namespace {
+	std::vector<std::string> g_hcErrors;
+	void hcErrorSink(HE::LogLevel level, const char* msg, void*)
+	{ if (level == HE::LogLevel::Error) g_hcErrors.emplace_back(msg ? msg : ""); }
+}
+
+TEST_CASE("HorizonCode logs a null-reference error for a Call on a null target")
+{
+	// Calling a function through an unwired (null) Ref is the classic "Accessed
+	// None" runtime error — it must be logged (Error) so it surfaces in the game
+	// log and the editor's post-PIE report, not silently swallowed.
+	g_hcErrors.clear();
+	Logger::setSink(&hcErrorSink, nullptr);
+
+	Runtime rt;
+	Graph g;
+	Node ev; ev.type = NodeType::Event; ev.s = "Go"; ev.elem = 0;
+	const int e = g.addNode(ev);
+	Node ce; ce.type = NodeType::CallExternal; ce.s = "DoThing";
+	const int c = g.addNode(ce);
+	REQUIRE(g.connect(e, 0, c, 0));   // exec only; Target (Ref, dataIn 2) left unwired → null
+	const InstanceId inst = rt.add(g);
+	rt.fireEvent(inst, "Go", 0);
+
+	Logger::setSink(nullptr, nullptr);
+
+	bool found = false;
+	for (const auto& m : g_hcErrors)
+		if (m.find("null reference") != std::string::npos && m.find("DoThing") != std::string::npos)
+			{ found = true; break; }
+	CHECK(found);
 }

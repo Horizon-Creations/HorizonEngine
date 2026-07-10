@@ -1,9 +1,19 @@
 #include "HorizonCode/HorizonCodeRuntime.h"
+#include <Diagnostics/Logger.h>
 #include <algorithm>
 #include <unordered_set>
 #include <vector>
 
 namespace HorizonCode {
+
+namespace {
+// A HorizonCode runtime error (null reference, missing member, …). Logged at
+// Error so it surfaces in the game log AND the editor's post-PIE report — the
+// equivalent of Unreal's "Accessed None". Called only while a graph is executing
+// (PIE / the shipped game), never at edit time.
+void hcError(const std::string& msg)   { Logger::Log(Logger::LogLevel::Error,   ("HorizonCode: " + msg).c_str()); }
+void hcWarn (const std::string& msg)   { Logger::Log(Logger::LogLevel::Warning, ("HorizonCode: " + msg).c_str()); }
+}
 
 Runtime::Inst* Runtime::find(InstanceId id)
 {
@@ -159,30 +169,35 @@ Context Runtime::makeContext(InstanceId id)
     ctx.emitEvent = [this, id](const std::string& event, const Value& arg)
     { emitEvent(id, event, arg); };
     ctx.bindEvent = [this, id](uint32_t target, const std::string& event)
-    { bindEvent(target, event, id); };
+    {
+        if (!find(target)) { hcError("null reference — Bind Event '" + event + "' on a null/destroyed object"); return; }
+        bindEvent(target, event, id);
+    };
     ctx.callExternal = [this](uint32_t target, const std::string& fn,
                               const std::vector<Value>& args) -> std::vector<Value>
     {
+        if (!find(target)) { hcError("null reference — Call Function '" + fn + "' on a null/destroyed object"); return {}; }
         std::vector<Value> out;
-        callFunction(target, fn, /*requirePublic=*/true, args, &out);
+        if (!callFunction(target, fn, /*requirePublic=*/true, args, &out))
+            hcWarn("function '" + fn + "' not found or not public on the target object");
         return out;
     };
     // Read/write a variable on another instance — only if it's declared public.
     ctx.getExternal = [this](uint32_t target, const std::string& var) -> Value
     {
         const Inst* i = find(target);
-        if (!i) return {};
+        if (!i) { hcError("null reference — Get '" + var + "' on a null/destroyed object"); return {}; }
         const Variable* v = i->graph.findVariable(var);
-        if (!v || v->access != 0) return {}; // missing or private
+        if (!v || v->access != 0) { hcWarn("variable '" + var + "' not found or not public on the target object"); return {}; }
         auto it = i->vars.find(var);
         return it != i->vars.end() ? it->second : Value{};
     };
     ctx.setExternal = [this](uint32_t target, const std::string& var, const Value& val)
     {
         Inst* i = find(target);
-        if (!i) return;
+        if (!i) { hcError("null reference — Set '" + var + "' on a null/destroyed object"); return; }
         const Variable* v = i->graph.findVariable(var);
-        if (!v || v->access != 0) return; // missing or private
+        if (!v || v->access != 0) { hcWarn("variable '" + var + "' not found or not public on the target object"); return; }
         i->vars[var] = val;
     };
     ctx.getSelf = [id] { return Value::ofRef(id); };
