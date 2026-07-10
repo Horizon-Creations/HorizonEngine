@@ -12,6 +12,7 @@ struct Particle {
 };
 
 struct ParticleSystemComponent {
+    bool      visible = true;   // extractor skips invisible (zone hiding)
     // ── Emitter config ──────────────────────────────────────────────────────────
     HE::UUID  meshAssetId;              // kDefaultQuadMeshId when null
     HE::UUID  materialAssetId;

@@ -5348,6 +5348,7 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			int lod = m->lodBias;
 			if (ImGui::InputInt("LOD Bias", &lod))
 				m->lodBias = static_cast<uint8_t>(std::clamp(lod, 0, 255));
+			ImGui::Checkbox("Visible",         &m->visible); trackEdit();
 			ImGui::Checkbox("Casts Shadow",    &m->castsShadow); trackEdit();
 			ImGui::Checkbox("Receives Shadow", &m->receivesShadow); trackEdit();
 		}
@@ -5369,6 +5370,7 @@ void EditorUI::RenderInspector(AppContext& ctx)
 					ImGui::Text("Joints: %d | Bone matrices: %d",
 					    (int)asset->skeleton.size(), (int)sm->boneMatrices.size());
 			}
+			ImGui::Checkbox("Visible",         &sm->visible);        trackEdit();
 			ImGui::Checkbox("Casts Shadow",    &sm->castsShadow);    trackEdit();
 			ImGui::Checkbox("Receives Shadow", &sm->receivesShadow); trackEdit();
 
@@ -5958,6 +5960,7 @@ void EditorUI::RenderInspector(AppContext& ctx)
 				ImGui::DragFloat("Range", &l->range, 0.1f, 0.0f, 10000.0f); trackEdit();
 			if (l->type == LightType::Spot)
 				ImGui::DragFloat("Spot Angle", &l->spotAngle, 0.5f, 1.0f, 179.0f); trackEdit();
+			ImGui::Checkbox("Visible##light",      &l->visible);     trackEdit();
 			ImGui::Checkbox("Casts Shadow##light", &l->castsShadow); trackEdit();
 		}
 		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<LightComponent>(entity); }

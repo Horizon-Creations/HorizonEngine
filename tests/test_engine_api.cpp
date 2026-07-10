@@ -7,6 +7,9 @@
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/EnvironmentComponent.h>
 #include <HorizonScene/Components/MeshComponent.h>
+#include <HorizonScene/Components/SkeletalMeshComponent.h>
+#include <HorizonScene/Components/LightComponent.h>
+#include <HorizonScene/Components/ParticleSystemComponent.h>
 #include <HorizonCode/HorizonCode.h>
 #include <DebugDraw/DebugDraw.h>
 #include <Hpak/ProjectExporter.h>
@@ -985,6 +988,51 @@ TEST_CASE("scene: hidden flag rides the requests; registry rows expose zones as 
     CHECK(res[0].items[1].i == 5);
     // …and the descriptor marks the result pin as an array (editor pins follow).
     CHECK(HE::api::find("scene.loadedZones")->results[0].isArray == true);
+    HE::api::scene::clearZones();
+}
+
+TEST_CASE("scene: queued show/move requests + additive placement ride the queue")
+{
+    (void)HE::api::scene::takeRequests();
+    const int z = HE::api::scene::loadAdditive("Scenes/Z.hescene", /*hidden=*/true, { 100, 0, 50 });
+    HE::api::scene::requestZoneVisible(z, true);        // Show Zone (queued)
+    HE::api::scene::requestZonePosition(z, { 5, 6, 7 });// Set Zone Position (queued)
+    const auto reqs = HE::api::scene::takeRequests();
+    REQUIRE(reqs.size() == 3);
+    CHECK(reqs[0].kind == 1);
+    CHECK(reqs[0].pos.x == doctest::Approx(100.0f));    // placement rides the load
+    CHECK(reqs[1].kind == 4); CHECK(reqs[1].zone == z); CHECK(reqs[1].flag == true);
+    CHECK(reqs[2].kind == 5); CHECK(reqs[2].pos.z == doctest::Approx(7.0f));
+}
+
+TEST_CASE("Visibility: zone hiding + entity.setVisible cover every renderable type")
+{
+    HE::api::scene::clearZones();
+    HorizonWorld world;
+    auto e = world.createEntity("Multi");
+    world.registry().emplace<MeshComponent>(e);
+    world.registry().emplace<SkeletalMeshComponent>(e);
+    world.registry().emplace<LightComponent>(e);
+    world.registry().emplace<ParticleSystemComponent>(e);
+
+    Ctx c{ &world, nullptr, nullptr };
+    // Per-entity toggle through the registry flips all renderables at once.
+    HE::api::find("entity.setVisible")->invoke(c, { Value::ofInt((int)(uint32_t)e), Value::ofBool(false) });
+    CHECK(world.registry().get<MeshComponent>(e).visible == false);
+    CHECK(world.registry().get<SkeletalMeshComponent>(e).visible == false);
+    CHECK(world.registry().get<LightComponent>(e).visible == false);
+    CHECK(world.registry().get<ParticleSystemComponent>(e).visible == false);
+    CHECK(HE::api::find("entity.getVisible")->invoke(c, { Value::ofInt((int)(uint32_t)e) })[0].b == false);
+
+    // Zone-level show restores them all.
+    HE::api::scene::ZoneInfo info;
+    info.root = (uint32_t)e;
+    info.entities = { (uint32_t)e };
+    HE::api::scene::noteZoneLoaded(11, std::move(info));
+    HE::api::scene::setZoneVisible(c, 11, true);
+    CHECK(world.registry().get<SkeletalMeshComponent>(e).visible == true);
+    CHECK(world.registry().get<LightComponent>(e).visible == true);
+    CHECK(world.registry().get<ParticleSystemComponent>(e).visible == true);
     HE::api::scene::clearZones();
 }
 

@@ -8,6 +8,7 @@
 // RenderExtractor reads cachedInstances and pushes them as RenderObjects
 // (existing same-mesh batching handles the GPU instancing automatically).
 struct FoliageComponent {
+    bool     visible = true;    // extractor skips invisible (zone hiding)
     HE::UUID meshAssetId;
     HE::UUID materialAssetId;
     float    density      = 0.1f;    // instances per unit area

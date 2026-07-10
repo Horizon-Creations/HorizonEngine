@@ -222,6 +222,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 
 	for (auto [e, tc, ps] : reg.view<TransformComponent, ParticleSystemComponent>().each())
 	{
+		if (!ps.visible) continue; // hidden (e.g. a preloaded zone)
 		if (ps.particles.empty()) continue;
 		const HE::UUID meshId = (ps.meshAssetId == HE::UUID{}) ? HE::kDefaultQuadMeshId : ps.meshAssetId;
 		pin.reserve(pin.size() + ps.particles.size());
@@ -310,6 +311,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 	// one DrawCall with instanceTransforms automatically.
 	for (auto [e, fol] : reg.view<FoliageComponent>().each())
 	{
+		if (!fol.visible) continue; // hidden (e.g. a preloaded zone)
 		if (fol.meshAssetId == HE::UUID{}) continue;
 		const float dd2 = fol.drawDistance * fol.drawDistance;
 		const glm::vec3 camPos = out.camera.position;
@@ -338,6 +340,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 	out.skinnedObjects.clear();
 	for (auto [e, t, smc] : reg.view<TransformComponent, SkeletalMeshComponent>().each())
 	{
+		if (!smc.visible) continue; // hidden (e.g. a preloaded zone)
 		SkinnedRenderObject obj;
 		obj.meshAssetId     = smc.meshAssetId;
 		obj.transform       = t.worldMatrix;
@@ -355,6 +358,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 	out.lights.reserve(reg.view<LightComponent>().size() + 1); // +1 for the day-night moon
 	for (auto [e, t, light] : reg.view<TransformComponent, LightComponent>().each())
 	{
+		if (!light.visible) continue; // hidden (e.g. a preloaded zone)
 		LightData l;
 		l.position     = glm::vec3(t.worldMatrix[3]);
 		// Lights shine along their local -Z (third column of the world matrix)

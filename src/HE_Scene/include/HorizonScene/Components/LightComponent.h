@@ -11,4 +11,5 @@ struct LightComponent {
     float     range       = 10.0f;    // point/spot only
     float     spotAngle   = 30.0f;    // spot only, degrees
     bool      castsShadow = false;
+    bool      visible     = true;   // extractor skips invisible (zone hiding)
 };

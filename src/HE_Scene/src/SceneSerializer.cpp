@@ -206,6 +206,7 @@ namespace
 				{ "intensity",   l->intensity },
 				{ "range",       l->range },
 				{ "spotAngle",   l->spotAngle },
+				{ "visible",     l->visible },
 				{ "castsShadow", l->castsShadow },
 			};
 		}
@@ -371,6 +372,7 @@ namespace
 			comps["particlesystem"] = {
 				{ "mesh",             uuidToJson(ps->meshAssetId) },
 				{ "material",         uuidToJson(ps->materialAssetId) },
+				{ "visible",          ps->visible },
 				{ "emitRate",         ps->emitRate },
 				{ "lifetimeMin",      ps->lifetimeMin },
 				{ "lifetimeMax",      ps->lifetimeMax },
@@ -399,6 +401,7 @@ namespace
 		if (auto* fol = registry.try_get<FoliageComponent>(entity))
 		{
 			comps["foliage"] = {
+				{ "visible",      fol->visible },
 				{ "mesh",         uuidToJson(fol->meshAssetId) },
 				{ "material",     uuidToJson(fol->materialAssetId) },
 				{ "density",      fol->density },
@@ -575,6 +578,7 @@ namespace
 			l.intensity   = c.value("intensity",   l.intensity);
 			l.range       = c.value("range",       l.range);
 			l.spotAngle   = c.value("spotAngle",   l.spotAngle);
+			l.visible     = c.value("visible",     l.visible);
 			l.castsShadow = c.value("castsShadow", l.castsShadow);
 			registry.emplace_or_replace<LightComponent>(entity, l);
 		}
@@ -761,6 +765,7 @@ namespace
 			ParticleSystemComponent ps;
 			ps.meshAssetId      = jsonToUuid(c.value("mesh",     json()));
 			ps.materialAssetId  = jsonToUuid(c.value("material", json()));
+			ps.visible          = c.value("visible",         ps.visible);
 			ps.emitRate         = c.value("emitRate",        ps.emitRate);
 			ps.lifetimeMin      = c.value("lifetimeMin",     ps.lifetimeMin);
 			ps.lifetimeMax      = c.value("lifetimeMax",     ps.lifetimeMax);
@@ -782,6 +787,7 @@ namespace
 		{
 			const json& c = comps["foliage"];
 			FoliageComponent fol;
+			fol.visible         = c.value("visible",      fol.visible);
 			fol.meshAssetId     = jsonToUuid(c.value("mesh",     json()));
 			fol.materialAssetId = jsonToUuid(c.value("material", json()));
 			fol.density         = c.value("density",      fol.density);
