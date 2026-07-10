@@ -904,6 +904,22 @@ static void pushEngineInputSnapshot()
 	HE::api::input::setKeysDown(down);
 }
 
+// Logger sink: capture play-session warnings/errors for the post-PIE report.
+// May run on ANY thread (streaming/export workers log too) — appendPlayLog locks.
+static void hePlayLogSink(HE::LogLevel level, const char* message, void* user)
+{
+	if (level != HE::LogLevel::Warning && level != HE::LogLevel::Error &&
+	    level != HE::LogLevel::Critical) return;
+	static_cast<EditorApplication*>(user)->appendPlayLog(level, message);
+}
+
+void EditorApplication::appendPlayLog(HE::LogLevel level, const char* message)
+{
+	std::lock_guard<std::mutex> lk(m_playLogMutex);
+	if (m_playLog.size() >= 2000) return; // cap a runaway error loop
+	m_playLog.push_back({ level, message ? message : "", HE::api::time::elapsed() });
+}
+
 void EditorApplication::OnRender(float dt)
 {
 	// During play-in-editor, feed the engine clock + input snapshot so time.*/input.*
@@ -1905,6 +1921,9 @@ AppContext EditorApplication::makeContext()
 		.editorCamera        = &m_editorCamera,
 		.selectedEntity      = m_selectedEntity,
 		.isPlaying           = m_isPlaying,
+		.playLog             = &m_playLog,
+		.playLogMutex        = &m_playLogMutex,
+		.playReportOpen      = &m_playReportOpen,
 		.setPlayMode         = [this](bool play){ setPlayMode(play); },
 		.reportPlayUIPointer = [this](float mx, float my, float vpW, float vpH,
 		                              bool down, bool valid)
@@ -2150,6 +2169,13 @@ void EditorApplication::setPlayMode(bool play)
 		}
 		m_isPlaying = true;
 		HE::api::time::reset(); // play-relative clock (elapsed/frameCount start at 0)
+		// Capture warnings/errors for the post-PIE report.
+		{
+			std::lock_guard<std::mutex> lk(m_playLogMutex);
+			m_playLog.clear();
+		}
+		m_playReportOpen = false;
+		Logger::setSink(&hePlayLogSink, this);
 		m_undo.clearHistory(); // edits made while playing are not undoable
 
 		// GameInstance OnInit fires first — before scripts, the level and any
@@ -2242,6 +2268,12 @@ void EditorApplication::setPlayMode(bool play)
 		m_editorWorld->markHierarchyDirty();
 		m_isPlaying = false;
 		m_undo.clearHistory();
+		// Stop capturing; anything collected pops the post-PIE report window.
+		Logger::setSink(nullptr, nullptr);
+		{
+			std::lock_guard<std::mutex> lk(m_playLogMutex);
+			m_playReportOpen = !m_playLog.empty();
+		}
 		// PIE-loaded zones die with the snapshot restore below — drop the table
 		// so stale zone ids don't survive into the next play session.
 		HE::api::scene::clearZones();
