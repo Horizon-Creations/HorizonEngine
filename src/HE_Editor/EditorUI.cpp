@@ -2106,6 +2106,42 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                         sceneOk = false;
                 }
 
+                // Serialize every OTHER project scene too: packed under path-
+                // derived UUIDs, they make scene.load("<path>") work in the
+                // shipped game (level transitions). A scene that fails to load
+                // is skipped with a note rather than failing the whole export —
+                // only the STARTUP scene is boot-critical.
+                std::vector<std::pair<std::string, std::vector<uint8_t>>> extraScenes;
+                {
+                    const std::filesystem::path projectRoot2 =
+                        std::filesystem::path(ctx.projectManager->currentProject().path).parent_path();
+                    std::error_code ec2;
+                    std::filesystem::recursive_directory_iterator sit(
+                        projectRoot2, std::filesystem::directory_options::skip_permission_denied, ec2);
+                    const std::filesystem::recursive_directory_iterator send;
+                    while (!ec2 && sit != send)
+                    {
+                        const bool regular = sit->is_regular_file(ec2);
+                        if (!ec2 && regular && sit->path().extension() == ".hescene" &&
+                            sit->path() != std::filesystem::path(scenePath))
+                        {
+                            HorizonWorld w2;
+                            SceneSerializer ser2;
+                            std::vector<uint8_t> bytes;
+                            if (ser2.load(w2, sit->path(), SerializeFormat::JSON) &&
+                                ser2.saveToMemory(w2, bytes))
+                                extraScenes.emplace_back(
+                                    sit->path().lexically_relative(projectRoot2).generic_string(),
+                                    std::move(bytes));
+                            else
+                                Logger::Log(Logger::LogLevel::Warning,
+                                    ("Export: skipping unreadable scene " + sit->path().string()).c_str());
+                        }
+                        ec2.clear();
+                        sit.increment(ec2);
+                    }
+                }
+
                 // Resolve the target platform: a COMPLETE runtime bundle (found
                 // via findRuntimeBundle, which also handles running the editor
                 // from a build tree) + per-platform output sub-folder. An export
@@ -2178,7 +2214,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                 s_exportRunning.store(true);
                 if (s_exportThread.joinable()) s_exportThread.join(); // defensive; reaped above
                 s_exportThread = std::thread([es, contentDir, projName, sceneName,
-                                              outDir, sceneBinary]()
+                                              outDir, sceneBinary, extraScenes]()
                 {
                     // An exception escaping a std::thread is std::terminate — and
                     // exportProject touches the filesystem (unreadable dirs,
@@ -2188,7 +2224,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                     {
                         const auto res = ProjectExporter::exportProject(
                             contentDir, projName, sceneName,
-                            std::filesystem::path(outDir), es, sceneBinary);
+                            std::filesystem::path(outDir), es, sceneBinary, extraScenes);
                         msg = res.success
                             ? "OK: " + std::to_string(res.assetsPacked)
                               + " asset(s) packed ("

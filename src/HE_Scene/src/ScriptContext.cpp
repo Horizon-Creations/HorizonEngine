@@ -450,7 +450,8 @@ static void registerEngineApiGroups(lua_State* L)
         // ScriptApi is inverted onto HE::api. NB: a packed vec3 (Color) param
         // spreads as 4 numbers (x, y, z, _) on this path. Widening = add a name.
         static const char* kGroups[] = { "math", "random", "time", "input",
-                                         "string", "camera", "env", "entity", "audio" };
+                                         "string", "camera", "env", "entity", "audio",
+	                                 "debug", "fs", "save", "scene" };
         bool exposed = false;
         for (const char* gname : kGroups) if (group == gname) { exposed = true; break; }
         if (!exposed) continue;

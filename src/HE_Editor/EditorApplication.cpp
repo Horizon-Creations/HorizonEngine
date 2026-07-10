@@ -792,6 +792,12 @@ void EditorApplication::OnInit()
 			-> std::vector<HorizonCode::Value> {
 			const HE::api::ApiFn* fn = HE::api::find(id);
 			if (!fn) return {};
+			// fs/save sandbox: the project's Saved/ directory (follows the loaded
+			// project; setSandboxRoot is a cheap string assign).
+			const std::string& projPath = m_projectManager.currentProject().path;
+			if (!projPath.empty())
+				HE::api::fs::setSandboxRoot(
+					(std::filesystem::path(projPath).parent_path() / "Saved").string());
 			HE::api::Ctx c{ m_editorWorld.get(), nullptr, &contentManager(), &m_audioEngine };
 			return fn->invoke(c, args);
 		};
@@ -906,6 +912,14 @@ void EditorApplication::OnRender(float dt)
 	{
 		HE::api::time::advance(dt);
 		pushEngineInputSnapshot();
+		// Scene transitions are a game-runtime feature: PIE keeps the editor scene
+		// (its play snapshot belongs to THIS scene). Consume requests loudly so a
+		// graph author sees why nothing happened.
+		for (const auto& r : HE::api::scene::takeRequests())
+			Logger::Log(Logger::LogLevel::Warning,
+				("scene." + std::string(r.kind == 0 ? "load" : r.kind == 1 ? "loadAdditive" : "unloadZone")
+				 + (r.path.empty() ? "" : " ('" + r.path + "')")
+				 + " runs in the packaged game — play-in-editor keeps the current scene.").c_str());
 	}
 
 	// ── Window title ─────────────────────────────────────────────────────
@@ -1227,11 +1241,18 @@ void EditorApplication::OnRender(float dt)
 					}
 			}
 
-			renderer()->SetDebugLines(dbg.lines());
+			// Timed debug primitives from HC/script debug.* calls ride along with
+			// the editor's own gizmo lines (they age with real dt in play mode,
+			// and stay frozen while paused/editing).
+			std::vector<DebugLine> merged = dbg.lines();
+			HE::api::debug::collect(m_isPlaying ? dt : 0.0f, merged);
+			renderer()->SetDebugLines(merged);
 		}
 		else
 		{
-			renderer()->SetDebugLines({});
+			std::vector<DebugLine> apiDbg;
+			HE::api::debug::collect(m_isPlaying ? dt : 0.0f, apiDbg);
+			renderer()->SetDebugLines(apiDbg);
 		}
 	}
 

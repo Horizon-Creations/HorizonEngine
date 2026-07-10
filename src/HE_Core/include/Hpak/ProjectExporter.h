@@ -1,8 +1,10 @@
 #pragma once
 #include <Types/Defines.h>
+#include <Types/UUID.h>
 #include <filesystem>
 #include <functional>
 #include <string>
+#include <utility>
 #include <vector>
 #include <cstdint>
 
@@ -97,6 +99,12 @@ HE_API std::filesystem::path findRuntimeBundle(const std::filesystem::path& edit
 HE_API int  patchEmbeddedPakKey(const std::filesystem::path& binary, const uint8_t key[32]);
 HE_API bool readEmbeddedPakKey(const std::filesystem::path& binary, uint8_t outKey[32]);
 
+// Deterministic pak-entry UUID for a scene, derived from its PROJECT-RELATIVE
+// path (forward slashes). The exporter keys every packed scene with it and the
+// game runtime derives the same UUID from scene.load("<path>") — no lookup
+// table ships. FNV-1a 64 over the path (hi) and over the reversed path (lo).
+HE_API HE::UUID sceneUuidForPath(const std::string& projectRelPath);
+
 // Packs a project's content directory into a distributable output folder:
 //   • All .hasset files → projectName.hpak (with optional LZ4 + encryption)
 //   • The startup .hescene file → copied next to the pak
@@ -113,6 +121,10 @@ public:
         // by the caller (which has HorizonScene). When non-empty it is packed INTO the
         // .hpak under a generated UUID and referenced from project.hcfg, and the loose
         // scene copy is skipped. Empty → fall back to copying the loose startupSceneName.
-        const std::vector<uint8_t>&  startupSceneBinary = {}
+        const std::vector<uint8_t>&  startupSceneBinary = {},
+        // Every OTHER project scene, pre-serialized to CBOR, keyed by its project-
+        // relative path. Packed under sceneUuidForPath(path) so the game runtime can
+        // scene.load("<path>") them for level transitions.
+        const std::vector<std::pair<std::string, std::vector<uint8_t>>>& extraScenes = {}
     );
 };

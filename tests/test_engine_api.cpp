@@ -2,10 +2,15 @@
 #include <HorizonScene/EngineApi.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/AudioEngine.h>
+#include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/EnvironmentComponent.h>
 #include <HorizonCode/HorizonCode.h>
+#include <DebugDraw/DebugDraw.h>
+#include <Hpak/ProjectExporter.h>
+#include <cstring>
+#include <filesystem>
 #include <glm/glm.hpp>
 #include <cmath>
 #include <unordered_map>
@@ -807,6 +812,163 @@ TEST_CASE("Audio: null-tolerant without an engine; headless engine answers queri
     CHECK_NOTHROW(call("audio.setBusVolume", { Value::ofString("SFX"), Value::ofFloat(0.5f) }));
     CHECK(call("audio.isPlaying", { Value::ofInt(42) })[0].b == false);
     CHECK_NOTHROW(call("audio.stopAll", {}));
+    engine.shutdown();
+}
+
+// ═══ Debug draw queue ═════════════════════════════════════════════════════════
+
+TEST_CASE("Debug draw: timed primitives live for their duration, then expire")
+{
+    HE::api::debug::clear();
+    HE::api::debug::line({ 0, 0, 0 }, { 1, 0, 0 }, { 1, 0, 0 }, 0.0f);   // one frame
+    HE::api::debug::sphere({ 0, 0, 0 }, 1.0f, { 0, 1, 0 }, 0.5f);        // half a second
+    std::vector<DebugLine> out;
+    HE::api::debug::collect(0.1f, out);
+    const size_t firstFrame = out.size();
+    CHECK(firstFrame > 1);                        // the line + the sphere's segments
+
+    out.clear();
+    HE::api::debug::collect(0.1f, out);
+    CHECK(out.size() == firstFrame - 1);          // the 0s line expired, sphere lives
+
+    out.clear();
+    HE::api::debug::collect(1.0f, out);           // sphere still alive THIS collect
+    CHECK(out.size() == firstFrame - 1);
+    out.clear();
+    HE::api::debug::collect(0.0f, out);           // now everything has expired
+    CHECK(out.empty());
+}
+
+// ═══ fs sandbox + save store ══════════════════════════════════════════════════
+
+TEST_CASE("fs: sandboxed I/O works inside the root and rejects escapes")
+{
+    const auto root = std::filesystem::temp_directory_path() / "he_api_fs_test";
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    HE::api::fs::setSandboxRoot(root.string());
+
+    CHECK(HE::api::fs::writeText("notes/hello.txt", "hi there"));
+    CHECK(HE::api::fs::exists("notes/hello.txt"));
+    CHECK(HE::api::fs::readText("notes/hello.txt") == "hi there");
+    CHECK(HE::api::fs::makeDir("sub/dir"));
+    CHECK(HE::api::fs::remove("notes/hello.txt"));
+    CHECK(!HE::api::fs::exists("notes/hello.txt"));
+
+    // Escapes are rejected outright.
+    CHECK(!HE::api::fs::writeText("../outside.txt", "nope"));
+    CHECK(!HE::api::fs::writeText("a/../../outside.txt", "nope"));
+    CHECK(!HE::api::fs::writeText("/tmp/abs.txt", "nope"));
+    CHECK(HE::api::fs::readText("../secret").empty());
+
+    std::filesystem::remove_all(root, ec);
+}
+
+TEST_CASE("save: typed KV store round-trips through a slot file")
+{
+    const auto root = std::filesystem::temp_directory_path() / "he_api_save_test";
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    HE::api::fs::setSandboxRoot(root.string());
+
+    HE::api::save::clearAll();
+    HE::api::save::setNumber("score", 42.5f);
+    HE::api::save::setString("name", "Hero");
+    HE::api::save::setBool("hardcore", true);
+    CHECK(HE::api::save::hasKey("score"));
+    CHECK(HE::api::save::getNumber("score", 0) == doctest::Approx(42.5f));
+    CHECK(!HE::api::save::slotExists(3));
+    CHECK(HE::api::save::saveToSlot(3));
+    CHECK(HE::api::save::slotExists(3));
+
+    // A fresh store loads the slot back with types intact.
+    HE::api::save::clearAll();
+    CHECK(!HE::api::save::hasKey("score"));
+    CHECK(HE::api::save::loadFromSlot(3));
+    CHECK(HE::api::save::getNumber("score", 0) == doctest::Approx(42.5f));
+    CHECK(HE::api::save::getString("name", "") == "Hero");
+    CHECK(HE::api::save::getBool("hardcore", false) == true);
+    HE::api::save::deleteKey("score");
+    CHECK(!HE::api::save::hasKey("score"));
+
+    HE::api::save::clearAll();
+    std::filesystem::remove_all(root, ec);
+}
+
+// ═══ Scene transition requests + packed-scene UUIDs + additive tracking ═══════
+
+TEST_CASE("scene: requests queue in order; zone ids are unique")
+{
+    (void)HE::api::scene::takeRequests();   // drain leftovers
+    HE::api::scene::load("Scenes/B.hescene");
+    const int z1 = HE::api::scene::loadAdditive("Scenes/Zone1.hescene");
+    const int z2 = HE::api::scene::loadAdditive("Scenes/Zone2.hescene");
+    HE::api::scene::unloadZone(z1);
+    CHECK(z1 != z2);
+
+    const auto reqs = HE::api::scene::takeRequests();
+    REQUIRE(reqs.size() == 4);
+    CHECK(reqs[0].kind == 0); CHECK(reqs[0].path == "Scenes/B.hescene");
+    CHECK(reqs[1].kind == 1); CHECK(reqs[1].zone == z1);
+    CHECK(reqs[2].kind == 1); CHECK(reqs[2].zone == z2);
+    CHECK(reqs[3].kind == 2); CHECK(reqs[3].zone == z1);
+    CHECK(HE::api::scene::takeRequests().empty());   // drained
+}
+
+TEST_CASE("sceneUuidForPath: deterministic, path-sensitive, separator-normalized")
+{
+    const HE::UUID a  = sceneUuidForPath("Scenes/Level1.hescene");
+    const HE::UUID a2 = sceneUuidForPath("Scenes/Level1.hescene");
+    const HE::UUID b  = sceneUuidForPath("Scenes/Level2.hescene");
+    const HE::UUID w  = sceneUuidForPath("Scenes\\Level1.hescene");   // Windows separators
+    CHECK(a.hi == a2.hi); CHECK(a.lo == a2.lo);
+    CHECK((a.hi != b.hi || a.lo != b.lo));
+    CHECK(a.hi == w.hi);  CHECK(a.lo == w.lo);
+}
+
+TEST_CASE("SceneSerializer: additive load reports the created entities")
+{
+    // Author a small scene and snapshot it.
+    HorizonWorld src;
+    src.createEntity("A");
+    src.createEntity("B");
+    SceneSerializer ser;
+    std::vector<uint8_t> bytes;
+    REQUIRE(ser.saveToMemory(src, bytes));
+
+    // Merge it additively into a world that already has content.
+    HorizonWorld dst;
+    dst.createEntity("Existing");
+    std::vector<Entity> created;
+    REQUIRE(ser.loadAdditiveFromMemory(dst, bytes, &created));
+    CHECK(created.size() >= 2);   // A + B (+ the merged scene's sub-root)
+    for (Entity e : created) CHECK(dst.registry().valid(e));
+}
+
+// ═══ Real audio playback (guarded: passes silently where no device exists) ═════
+
+TEST_CASE("Audio: real-device playback of a generated tone (skipped without a device)")
+{
+    AudioEngine engine;
+    if (!engine.init(/*noDevice=*/false))
+    {
+        MESSAGE("no audio device — playback smoke skipped");
+        return;
+    }
+    // 100ms 440Hz sine, mono int16 @ 44100.
+    const int rate = 44100, samples = rate / 10;
+    std::vector<uint8_t> pcm(samples * 2);
+    for (int i = 0; i < samples; ++i)
+    {
+        const float s = std::sin(2.0f * 3.14159265f * 440.0f * (float)i / (float)rate);
+        const int16_t v = (int16_t)(s * 12000.0f);
+        std::memcpy(&pcm[i * 2], &v, 2);
+    }
+    const uint64_t h = engine.play(pcm, rate, 1, 0.3f);
+    CHECK(h != 0);
+    CHECK(engine.isPlaying(h));
+    engine.stop(h);
+    CHECK(!engine.isPlaying(h));
     engine.shutdown();
 }
 

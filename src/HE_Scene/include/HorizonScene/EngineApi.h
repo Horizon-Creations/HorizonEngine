@@ -10,6 +10,7 @@ class HorizonWorld;
 class PhysicsWorld;
 class ContentManager;
 class AudioEngine;
+struct DebugLine;   // HE_Core DebugDraw.h (renderer debug-line vertex pair)
 
 // ── HE::api ──────────────────────────────────────────────────────────────────
 // The single, engine-wide C++ gameplay API. Every scripting frontend reaches the
@@ -152,6 +153,65 @@ namespace audio {
     void stopAll(Ctx&);
     bool isPlaying(Ctx&, int handle);
     void setBusVolume(Ctx&, const std::string& bus, float volume);
+    void setSoundPosition(Ctx&, int handle, const glm::vec3& pos); // move a spatial sound
+}
+
+// ── Debug draw (process-global timed queue; the app drains it each frame) ─────
+// Submissions live for `seconds` (0 = exactly one frame). collect() advances the
+// timers and appends the alive primitives as line segments — the app forwards
+// them to IRenderer::SetDebugLines.
+namespace debug {
+    void line(const glm::vec3& a, const glm::vec3& b, const glm::vec3& color, float seconds);
+    void sphere(const glm::vec3& center, float radius, const glm::vec3& color, float seconds);
+    void box(const glm::vec3& mn, const glm::vec3& mx, const glm::vec3& color, float seconds);
+    void clear();
+    // App hook: advance by dt, append alive segments to `out` (DebugLine from
+    // HE_Core DebugDraw.h), drop expired entries.
+    void collect(float dt, std::vector<DebugLine>& out);
+}
+
+// ── Sandboxed file I/O (fs) + save-game store (save) ─────────────────────────
+// All paths are RELATIVE to a per-project sandbox root the app sets (editor: the
+// project's Saved/ dir; game: the per-user pref dir). Absolute paths and ".."
+// are rejected — scripts can never leave the sandbox.
+namespace fs {
+    void        setSandboxRoot(const std::string& absDir);  // app hook (created on demand)
+    std::string sandboxRoot();
+    bool        writeText(const std::string& rel, const std::string& text);
+    std::string readText(const std::string& rel);            // "" when missing/invalid
+    bool        exists(const std::string& rel);
+    bool        remove(const std::string& rel);               // files only
+    bool        makeDir(const std::string& rel);
+}
+// Key/value save store (in-memory; persisted to Saves/slot<N>.json via fs).
+namespace save {
+    void        setNumber(const std::string& key, float v);
+    float       getNumber(const std::string& key, float def);
+    void        setString(const std::string& key, const std::string& v);
+    std::string getString(const std::string& key, const std::string& def);
+    void        setBool(const std::string& key, bool v);
+    bool        getBool(const std::string& key, bool def);
+    bool        hasKey(const std::string& key);
+    void        deleteKey(const std::string& key);
+    void        clearAll();
+    bool        saveToSlot(int slot);    // persists the store
+    bool        loadFromSlot(int slot);  // replaces the store
+    bool        slotExists(int slot);
+}
+
+// ── Scene transitions (process-global request queue; the app executes) ────────
+// load() requests a full deferred world switch at a safe frame boundary;
+// loadAdditive() streams another scene INTO the running world (returns a zone id
+// so it can be unloaded again) — together they give seamless level transitions:
+// additively load the next zone, move the player, unload the zone behind.
+// Editor PIE consumes the requests with a notice (game-runtime feature).
+namespace scene {
+    void load(const std::string& scenePath);          // project-relative .hescene
+    int  loadAdditive(const std::string& scenePath);  // → zone id (immediately)
+    void unloadZone(int zone);
+    // App hook: drain pending requests in submission order.
+    struct Request { int kind = 0; std::string path; int zone = 0; }; // 0 switch, 1 additive, 2 unload
+    std::vector<Request> takeRequests();
 }
 
 // ── String library (pure; complements the Concat/ToString nodes) ─────────────

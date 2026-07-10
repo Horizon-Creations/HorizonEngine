@@ -358,13 +358,32 @@ static bool signAppBundle(const std::filesystem::path& appPath)
 }
 #endif
 
+HE::UUID sceneUuidForPath(const std::string& projectRelPath)
+{
+    // Normalize to forward slashes so the SAME path always hashes the same on
+    // every platform and caller.
+    std::string p = projectRelPath;
+    for (char& c : p) if (c == '\\') c = '/';
+    auto fnv1a = [](const char* s, size_t n, uint64_t seed) {
+        uint64_t h = seed;
+        for (size_t i = 0; i < n; ++i) { h ^= (uint8_t)s[i]; h *= 1099511628211ull; }
+        return h;
+    };
+    HE::UUID u{};
+    u.hi = fnv1a(p.data(), p.size(), 14695981039346656037ull);
+    const std::string r(p.rbegin(), p.rend());
+    u.lo = fnv1a(r.data(), r.size(), 1099511628211ull ^ 14695981039346656037ull);
+    return u;
+}
+
 ExportResult ProjectExporter::exportProject(
     const std::filesystem::path& contentDir,
     const std::string&           projectName,
     const std::string&           startupSceneName,
     const std::filesystem::path& outputDir,
     const ExportSettings&        settings,
-    const std::vector<uint8_t>&  startupSceneBinary)
+    const std::vector<uint8_t>&  startupSceneBinary,
+    const std::vector<std::pair<std::string, std::vector<uint8_t>>>& extraScenes)
 {
     std::error_code ec;
 
@@ -479,6 +498,13 @@ ExportResult ProjectExporter::exportProject(
         sceneUuid = HE::UUID::generate();
         packer.addEntry(sceneUuid, startupSceneBinary, packSettings);
     }
+
+    // Every other project scene rides along under a path-derived UUID so the
+    // game runtime can scene.load("<project-relative path>") for level
+    // transitions. Same codec + encryption as the assets.
+    for (const auto& [relPath, bytes] : extraScenes)
+        if (!bytes.empty())
+            packer.addEntry(sceneUuidForPath(relPath), bytes, packSettings);
 
     if (!packer.write(pakPath.string()))
         return {false, "Failed to write " + hpakFilename, 0};

@@ -131,9 +131,15 @@ Status: **[api]** already in `ScriptApi` (just needs a registry row + node),
 - Cursor: show/hide/visible **[api]**; set hover cursor/hit-test at runtime
   (the new per-element props) **[new]**.
 
-### 3.8 Scene / level  **[new]**
-- `loadScene(name)`, `loadSceneAdditive`, `unloadScene`, `getActiveScene`.
-  (Level scripts already get OnLevelLoaded/Unloaded events.)
+### 3.8 Scene / level  **[done]**
+- `scene.load(path)` — deferred full world switch at the frame boundary;
+  `scene.loadAdditive(path)` → zone id (merges into the running world);
+  `scene.unloadZone(id)` destroys the zone's entities. Executed by the GAME
+  RUNTIME (editor PIE consumes with a notice). Scene resolution: packed pak
+  entry under a PATH-DERIVED UUID (the exporter now packs EVERY project scene
+  as CBOR), then loose project file, then exe dir. Seamless transitions =
+  additive-load the next zone (assets stream async), move the player, unload
+  the zone behind; level events fire on switch (Unloaded → swap → Loaded).
 
 ### 3.9 Time / frame  **[done — core]**
 - **[done]** `time.deltaTime()`, `time.elapsed()` (seconds since play-start),
@@ -163,6 +169,14 @@ Status: **[api]** already in `ScriptApi` (just needs a registry row + node),
 ## 4. Platform APIs (`HE::api::fs`, `save`, `sys`, `time`, `net`)
 
 Games need host services, but with a **sandbox** (§5). All new.
+
+> **Status:** §4.1 fs + §4.2 save are **[done]** in their v1 shape: one sandbox
+> root (editor: `<project>/Saved`; game: the per-user pref dir `…/Saved`), all
+> paths jailed (no absolute, no `..`); `save.*` is a typed KV store persisted to
+> `Saves/slot<N>.json` through fs. Content-side reads through the hpak VFS (the
+> read-only half described below) remain future work. §3.11 debug draw is
+> **[done]** (timed line/sphere/box queue → the renderer's debug-line pass,
+> drained by both apps).
 
 ### 4.1 File I/O — `HE::api::fs`, sandboxed
 - `readText(rel) → string`, `writeText(rel, string)`, `readBytes`/`writeBytes`,
