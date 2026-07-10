@@ -315,6 +315,11 @@ private:
 	std::vector<MountedPak>                       m_mounts;        // overlay stack (later = higher priority)
 	std::unordered_map<HE::UUID, size_t>          m_pakResidency;  // UUID → index into m_mounts
 	std::unordered_map<HE::UUID, std::string>     m_diskRegistry;  // UUID → relative path (loose content)
+	// Content-relative path → UUID for assets that live ONLY in a mounted pak,
+	// loaded from each pak's __asset_index__ at mount. Lets loadAsset("<path>")
+	// resolve a pak asset that no UUID reference closure reached (e.g. a widget a
+	// HorizonCode script creates by path). Later mounts overwrite (overlay).
+	std::unordered_map<std::string, HE::UUID>     m_pakPathIndex;
 
 	std::unordered_map<HE::UUID, SlotHandle>                              m_handleToUUID;
 	std::unordered_map<HE::UUID, HE::AssetType>                          m_assetTypeIndex; // mirrors m_handleToUUID with type info

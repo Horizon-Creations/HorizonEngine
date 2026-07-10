@@ -62,6 +62,11 @@ public:
     const std::vector<std::pair<HE::UUID, uint64_t>>& sourceHashes() const { return m_srcHashes; }
     // How many addDirectory entries were carried over verbatim from the cache.
     int reusedCount() const { return m_reused; }
+    // After addDirectory: content-relative path → baked asset UUID for every
+    // scanned .hasset. The exporter serializes this as the pak's __asset_index__
+    // so the game can resolve loadAsset("<path>") to a mounted-pak UUID (pak
+    // entries are UUID-keyed — the path is otherwise unrecoverable at runtime).
+    const std::unordered_map<std::string, HE::UUID>& packedPaths() const { return m_packedPaths; }
 
 private:
     struct PendingEntry {
@@ -75,5 +80,6 @@ private:
     };
     std::vector<PendingEntry> m_entries;
     std::vector<std::pair<HE::UUID, uint64_t>> m_srcHashes; // filled by addDirectory
+    std::unordered_map<std::string, HE::UUID>  m_packedPaths; // filled by addDirectory
     int m_reused = 0;
 };

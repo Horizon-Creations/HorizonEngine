@@ -54,6 +54,10 @@ struct State
     ImVec2 dragStartMouse;
     ImVec2 dragStartPos;             // graph-space
     bool   dragMoved = false;
+    // Pressed a node that was ALREADY part of the multi-selection (no shift): the
+    // whole group drags; a click with no drag collapses to just this node on
+    // release. 0 = the press started a fresh single selection.
+    int    selectClickNode = 0;
     int    linkSrcNode = 0, linkSrcPin = 0;
     bool   linkSrcInput = false;
     bool   linkGrab = false;         // this drag detached an existing link (removal)

@@ -105,6 +105,13 @@ HE_API bool readEmbeddedPakKey(const std::filesystem::path& binary, uint8_t outK
 // table ships. FNV-1a 64 over the path (hi) and over the reversed path (lo).
 HE_API HE::UUID sceneUuidForPath(const std::string& projectRelPath);
 
+// Well-known name (→ sceneUuidForPath UUID) of the pak's asset path index: a
+// JSON object mapping each packed asset's content-relative path → "hi:lo" UUID.
+// The game loads it at mount so loadAsset("<path>") resolves assets that live
+// only in the pak (e.g. a widget a HorizonCode script creates by path, which
+// the scene's UUID reference closure never reaches). "__asset_index__".
+inline constexpr const char* kAssetPathIndexEntry = "__asset_index__";
+
 // Packs a project's content directory into a distributable output folder:
 //   • All .hasset files → projectName.hpak (with optional LZ4 + encryption)
 //   • The startup .hescene file → copied next to the pak
