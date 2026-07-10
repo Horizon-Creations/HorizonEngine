@@ -1110,6 +1110,40 @@ TEST_CASE("Audio: real-device playback of a generated tone (skipped without a de
     engine.shutdown();
 }
 
+// ═══ Inline pin defaults (constants without literal nodes) ════════════════════
+
+TEST_CASE("Pin defaults: unwired inputs use their inline default; wires win")
+{
+    HC::Graph g;
+    HC::Node ev; ev.type = NT::Event; ev.s = "Run"; const int evId = g.addNode(ev);
+    // Add node (A + B, both unwired): A defaults to 4, B to 2.5 → 6.5.
+    HC::Node ad; ad.type = NT::Add; const int adId = g.addNode(ad);
+    g.findNode(adId)->pinDefaults[0] = Value::ofFloat(4.0f);
+    g.findNode(adId)->pinDefaults[1] = Value::ofFloat(2.5f);
+    HC::Node sv; sv.type = NT::SetVariable; sv.s = "r"; sv.propType = P::Float; const int svId = g.addNode(sv);
+    REQUIRE(g.connect(evId, 0, svId, 0));
+    REQUIRE(g.connect(adId, 2, svId, 2));
+
+    // Wire A from a literal — the wire must beat the default.
+    HC::Node cf; cf.type = NT::ConstFloat; cf.f[0] = 10.0f; const int cfId = g.addNode(cf);
+    REQUIRE(g.connect(cfId, 0, adId, 0));
+
+    std::unordered_map<std::string, Value> vars;
+    HC::Context ctx;
+    ctx.setVariable = [&vars](const std::string& n, const Value& v){ vars[n] = v; };
+    HC::Runner runner(g, ctx);
+    runner.fireEvent("Run", 0);
+    CHECK(vars["r"].f == doctest::Approx(12.5f));   // wired 10 + default 2.5
+
+    // Defaults survive the JSON round-trip (typed per entry).
+    HC::Graph loaded;
+    REQUIRE(HC::fromJson(HC::toJson(g), loaded));
+    const HC::Node* addLoaded = loaded.findNode(adId);
+    REQUIRE(addLoaded);
+    REQUIRE(addLoaded->pinDefaults.count(1) == 1);
+    CHECK(addLoaded->pinDefaults.at(1).f == doctest::Approx(2.5f));
+}
+
 // ═══ Duplicate nodes (editor Duplicate command) ═══════════════════════════════
 
 TEST_CASE("duplicateNodes clones the set + internal links, skips Event/FunctionEntry")

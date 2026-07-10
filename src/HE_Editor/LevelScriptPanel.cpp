@@ -699,6 +699,16 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 		bool committed = false;
 		HcEditorUtil::drawLiteralNodeBody(*n, committed);
 		if (committed) edited = true; };
+	// Unwired simple inputs (Bool/Int/Float/String) edit their default right on
+	// the pin — no literal node needed for a constant.
+	m.pinHasInlineEditor = [&graph](int nid, int pin){
+		const HC::Node* n = graph.findNode(nid);
+		return n && HcEditorUtil::pinSupportsInlineDefault(*n, pin); };
+	m.drawPinInlineEditor = [&graph, &edited](int nid, int pin){
+		HC::Node* n = graph.findNode(nid); if (!n) return;
+		bool committed = false;
+		HcEditorUtil::drawPinDefaultEditor(*n, pin, committed);
+		if (committed) edited = true; };
 	// Right-click a node → context menu. When the clicked node is part of a
 	// multi-selection, Delete removes the whole selection.
 	m.drawNodeContextMenu = [&graph, &edited](int nodeId)

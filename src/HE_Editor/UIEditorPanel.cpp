@@ -1911,6 +1911,16 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 		bool committed = false;
 		if (HcEditorUtil::drawLiteralNodeBody(*n, committed)) st.dirty = true;
 		if (committed) commitEdit(st, ctx); };
+	// Unwired simple inputs (Bool/Int/Float/String) edit their default right on
+	// the pin — no literal node needed for a constant.
+	m.pinHasInlineEditor = [&st](int nid, int pin){
+		const HC::Node* n = st.graph.findNode(nid);
+		return n && HcEditorUtil::pinSupportsInlineDefault(*n, pin); };
+	m.drawPinInlineEditor = [&st, &ctx](int nid, int pin){
+		HC::Node* n = st.graph.findNode(nid); if (!n) return;
+		bool committed = false;
+		HcEditorUtil::drawPinDefaultEditor(*n, pin, committed);
+		if (committed) { st.dirty = true; commitEdit(st, ctx); } };
 	m.multiSelect = true; // shift-click / box-select; drag + Delete act on all
 	// Right-click a node → context menu. When the clicked node is part of a
 	// multi-selection, Delete removes the whole selection.
