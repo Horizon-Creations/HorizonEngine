@@ -115,7 +115,8 @@ struct PlayLogEntry
 {
 	HE::LogLevel level;      // Warning or Error/Critical
 	std::string  message;
-	float        time = 0.0f; // play-clock seconds when it was logged
+	float        time = 0.0f; // play-clock seconds it was FIRST logged
+	int          count = 1;   // consecutive identical repeats collapsed into this entry
 };
 
 // All data the UI layer needs — assembled by EditorApplication each frame.
