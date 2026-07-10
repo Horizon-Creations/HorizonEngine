@@ -527,6 +527,22 @@ ExportResult ProjectExporter::exportProject(
                         std::vector<uint8_t>(index.begin(), index.end()), packSettings);
     }
 
+    // Asset path index: content-relative path → "hi:lo" UUID for every packed
+    // asset, so the game can resolve loadAsset("<path>") to a mounted-pak entry.
+    // Without it, an asset the scene's UUID reference closure never reaches — the
+    // classic case being a widget a HorizonCode script creates by path — can't be
+    // found in a pak-only build (pak entries are UUID-keyed; the path is gone),
+    // and its UI silently never appears. Same codec + encryption as the assets.
+    if (!packer.packedPaths().empty())
+    {
+        nlohmann::json idx = nlohmann::json::object();
+        for (const auto& [relPath, id] : packer.packedPaths())
+            idx[relPath] = std::to_string(id.hi) + ":" + std::to_string(id.lo);
+        const std::string s = idx.dump();
+        packer.addEntry(sceneUuidForPath(kAssetPathIndexEntry),
+                        std::vector<uint8_t>(s.begin(), s.end()), packSettings);
+    }
+
     if (!packer.write(pakPath.string()))
         return {false, "Failed to write " + hpakFilename, 0};
 

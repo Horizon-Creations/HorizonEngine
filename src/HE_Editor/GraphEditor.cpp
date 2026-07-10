@@ -425,12 +425,17 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
             ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
             model.onNodeDoubleClick(n.id);
 
-        // Right-click a node → per-node context menu.
+        // Right-click a node → per-node context menu. If the node is already part
+        // of a multi-selection, keep the whole group so the menu (Delete/Duplicate
+        // Selection) acts on all of them; otherwise select just this one.
         if (interact && overNode && model.drawNodeContextMenu &&
             ImGui::IsMouseClicked(ImGuiMouseButton_Right))
         {
             st.ctxNode = n.id;
-            if (st.selected != n.id) { st.selected = n.id; st.selection = { n.id }; }
+            const bool inSel =
+                std::find(st.selection.begin(), st.selection.end(), n.id) != st.selection.end();
+            if (!inSel) { st.selected = n.id; st.selection = { n.id }; }
+            else        { st.selected = n.id; }
             ImGui::OpenPopup("##ge_nodectx");
             consumed = true;
         }
@@ -465,10 +470,19 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
             else
             {
                 const bool add = ImGui::GetIO().KeyShift && model.multiSelect;
+                const bool inSel =
+                    std::find(st.selection.begin(), st.selection.end(), n.id) != st.selection.end();
+                st.selectClickNode = 0;
                 if (add)
                 {
-                    if (std::find(st.selection.begin(), st.selection.end(), n.id) == st.selection.end())
-                        st.selection.push_back(n.id);
+                    if (!inSel) st.selection.push_back(n.id);
+                }
+                else if (inSel)
+                {
+                    // Clicked a node already in the multi-selection: keep the whole
+                    // group so the drag moves all of it. A click with no drag
+                    // collapses to just this node (on mouse release).
+                    st.selectClickNode = n.id;
                 }
                 else { st.selection.clear(); st.selection.push_back(n.id); }
                 st.selected = n.id;
@@ -499,7 +513,15 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
     if (st.dragNode != 0 && ImGui::IsMouseReleased(ImGuiMouseButton_Left))
     {
         if (st.dragMoved) changed = true;
+        else if (st.selectClickNode == st.dragNode)
+        {
+            // A plain click (no drag) on a group member → collapse to just it.
+            st.selection.clear();
+            st.selection.push_back(st.dragNode);
+            st.selected = st.dragNode;
+        }
         st.dragNode = 0;
+        st.selectClickNode = 0;
     }
 
     // ── Active link drag ─────────────────────────────────────────────────────

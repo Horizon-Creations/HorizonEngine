@@ -167,6 +167,50 @@ TEST_CASE("ProjectExporter packs .hasset files from content dir")
     he_test::removeAllQuiet(outputDir);
 }
 
+TEST_CASE("Lazy-mounted pak resolves loadAsset by content path via the asset index")
+{
+    // The regression this guards: a shipped game LAZY-mounts its pak (mountPak
+    // registers UUID→mount residency only). An asset the scene's UUID reference
+    // closure never reaches — the classic case being a widget a HorizonCode
+    // script creates by PATH — must still resolve through loadAsset("<path>").
+    // Before the __asset_index__ entry, that path lookup fell through to a disk
+    // read that fails in a pak-only build, so the widget's UI silently vanished.
+    auto contentDir = std::filesystem::temp_directory_path() / "he_test_pathidx_content";
+    auto outputDir  = std::filesystem::temp_directory_path() / "he_test_pathidx_out";
+    std::filesystem::create_directories(contentDir / "UI");
+
+    // Full 64-bit hi/lo so the "hi:lo" index round-trip is exercised past 2^53.
+    const HE::UUID matId{0x1122334455667788ULL, 0x99AABBCCDDEEFF00ULL};
+    const auto blob = makeMinimalMaterialBlob(matId, "menu_mat");
+    { std::ofstream f(contentDir / "UI" / "menu_mat.hasset", std::ios::binary);
+      f.write(reinterpret_cast<const char*>(blob.data()), blob.size()); }
+
+    ExportSettings settings;
+    settings.compress = false;
+    const auto result = ProjectExporter::exportProject(
+        contentDir, "PathIdxGame", "", outputDir, settings);
+    REQUIRE(result.success);
+
+    const auto pakPath = outputDir / "PathIdxGame.hpak";
+    REQUIRE(std::filesystem::exists(pakPath));
+
+    ContentManager cm;
+    REQUIRE(cm.mountPak(pakPath.string()));      // lazy, like the game — NOT loadPak
+    CHECK(cm.getMaterial(matId) == nullptr);     // nothing streamed/registered yet
+
+    // Resolve by the content-relative path the editor + HorizonCode store.
+    const HE::UUID resolved = cm.loadAsset("UI/menu_mat.hasset");
+    CHECK(resolved == matId);
+    CHECK(cm.getMaterial(matId) != nullptr);
+    // Second lookup hits the path cache and returns the same id.
+    CHECK(cm.loadAsset("UI/menu_mat.hasset") == matId);
+    // An unknown path still fails cleanly (no index entry, no loose file).
+    CHECK(cm.loadAsset("UI/nope.hasset") == HE::UUID{});
+
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(outputDir);
+}
+
 TEST_CASE("ProjectExporter with empty content dir produces empty pak")
 {
     auto contentDir = std::filesystem::temp_directory_path() / "he_test_export_empty_content";

@@ -537,6 +537,7 @@ int HpakWriter::addDirectory(const std::filesystem::path& rootDir,
     struct Pending { std::vector<uint8_t> bytes; HE::UUID id; std::string relPath; };
     std::vector<Pending> pending;
     std::unordered_map<std::string, HE::UUID> pathToUuid;
+    m_packedPaths.clear();
     // Manual iteration with increment(ec): the range-for's operator++ THROWS on
     // unreadable subdirectories (this runs on the editor's export worker thread,
     // where an escaped exception is std::terminate). skip_permission_denied
@@ -571,6 +572,12 @@ int HpakWriter::addDirectory(const std::filesystem::path& rootDir,
             HE::UUID id; std::string path;
             if (!metaFromHasset(bytes, id, path) || id == HE::UUID{}) break;
             if (!path.empty()) pathToUuid[path] = id;
+            // Runtime path→UUID index: key by the content-relative path (what the
+            // editor + HorizonCode store and hand to loadAsset), and also by the
+            // asset's embedded META path when it differs, so either form resolves
+            // a mounted-pak asset that wasn't reached via the scene's UUID closure.
+            m_packedPaths[rel] = id;
+            if (!path.empty() && path != rel) m_packedPaths[path] = id;
             pending.push_back({std::move(bytes), id, std::move(rel)});
         } while (false);
         it.increment(ec);

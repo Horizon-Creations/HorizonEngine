@@ -2,9 +2,11 @@
 #include "MaterialGraph/MaterialGraph.h" // instance sync: switch-permutation regenerate
 #include "ContentManager/HAsset.h"
 #include "Hpak/HpakReader.h"
+#include "Hpak/ProjectExporter.h"        // sceneUuidForPath + kAssetPathIndexEntry
 #include "JobSystem/JobSystem.h"
 #include "Diagnostics/Logger.h"
 #include "Diagnostics/Profiler.h"
+#include <nlohmann/json.hpp>             // parse the pak's __asset_index__
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -476,6 +478,23 @@ HE::UUID ContentManager::loadAsset(const std::string& relativePath)
 	if (isLoaded(relativePath))
 		return m_pathToUUID.at(relativePath);
 
+	// Packed build: resolve the content path to a mounted-pak UUID via the asset
+	// index, then load that entry synchronously (registers it under its embedded
+	// path). This is what makes a HorizonCode-created widget — referenced only by
+	// path, never reached by the scene's UUID reference closure — resolve in a
+	// pak-only build. Loose files on disk still take the path below.
+	if (const auto it = m_pakPathIndex.find(relativePath); it != m_pakPathIndex.end())
+	{
+		const HE::UUID id = it->second;
+		if (isLoaded(id)) { m_pathToUUID[relativePath] = id; return id; }
+		const auto bytes = readMountedEntry(id);
+		if (!bytes.empty())
+		{
+			const HE::UUID rid = loadAssetFromMemory(bytes);
+			if (rid != HE::UUID{}) { m_pathToUUID[relativePath] = rid; return rid; }
+		}
+	}
+
 	const std::string fullPath = m_contentRoot + "/" + relativePath;
 
 	HAsset::Reader reader;
@@ -492,6 +511,14 @@ void ContentManager::loadAssetAsync(const std::string& relativePath,
 	if (isLoaded(relativePath))
 	{
 		if (callback) callback(m_pathToUUID.at(relativePath));
+		return;
+	}
+
+	// Packed build: a path that only exists in a mounted pak streams by UUID (the
+	// worker-thread disk read below would fail — there's no loose file).
+	if (const auto it = m_pakPathIndex.find(relativePath); it != m_pakPathIndex.end())
+	{
+		loadAssetAsync(it->second, std::move(callback));
 		return;
 	}
 
@@ -659,11 +686,18 @@ void ContentManager::loadAssetAsync(HE::UUID id, std::function<void(HE::UUID)> c
 // ─── streamMountedAssets ──────────────────────────────────────────────────────
 size_t ContentManager::streamMountedAssets(const std::unordered_set<HE::UUID>& exclude)
 {
+	// Reserved pak entries are NOT streamable assets: the asset path index and the
+	// scene index are JSON metadata blobs read directly by their known UUID (via
+	// readMountedEntry), never parsed as .hasset. Streaming them would burn an
+	// async job on a guaranteed parse failure. (kAssetPathIndexEntry lives here in
+	// ProjectExporter.h; "__scene_index__" mirrors HE::api::scene::kSceneIndexEntry.)
+	const HE::UUID assetIdx = sceneUuidForPath(kAssetPathIndexEntry);
+	const HE::UUID sceneIdx = sceneUuidForPath("__scene_index__");
 	size_t submitted = 0;
 	for (const auto& [id, mountIdx] : m_pakResidency)
 	{
 		(void)mountIdx;
-		if (isLoaded(id) || exclude.count(id)) continue;
+		if (isLoaded(id) || exclude.count(id) || id == assetIdx || id == sceneIdx) continue;
 		loadAssetAsync(id);
 		++submitted;
 	}
@@ -1293,6 +1327,36 @@ bool ContentManager::mountPak(const std::string& path, const uint8_t key[32])
 	// while new UUIDs are simply added.
 	for (const auto& id : reader->enumerate())
 		m_pakResidency[id] = index;
+
+	// Merge this pak's asset path index (path → UUID) so loadAsset("<path>") can
+	// resolve a pak-only asset. Later mounts overwrite (overlay priority), matching
+	// the residency rule above. Best-effort: an older pak without the index (or a
+	// mod pak) simply contributes nothing here.
+	{
+		const HE::UUID idxId = sceneUuidForPath(kAssetPathIndexEntry);
+		if (reader->hasEntry(idxId))
+		{
+			const auto bytes = reader->readEntry(idxId, key);
+			if (!bytes.empty())
+			{
+				const auto j = nlohmann::json::parse(bytes.begin(), bytes.end(), nullptr, false);
+				if (j.is_object())
+					for (auto it = j.begin(); it != j.end(); ++it)
+					{
+						if (!it.value().is_string()) continue;
+						const std::string v = it.value().get<std::string>();
+						const auto colon = v.find(':');
+						if (colon == std::string::npos) continue;
+						HE::UUID id{};
+						try {
+							id.hi = std::stoull(v.substr(0, colon));
+							id.lo = std::stoull(v.substr(colon + 1));
+						} catch (...) { continue; }
+						m_pakPathIndex[it.key()] = id;
+					}
+			}
+		}
+	}
 
 	mount.reader = std::move(reader);
 	m_mounts.push_back(std::move(mount));
