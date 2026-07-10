@@ -1234,8 +1234,11 @@ Result generate(const std::vector<ClassSource>& sources, const Options& opt)
     struct Entry { std::string key, className; };
     std::vector<Entry> compiled;
 
-    for (const ClassSource& src : sources)
+    for (size_t si = 0; si < sources.size(); ++si)
     {
+        const ClassSource& src = sources[si];
+        if (opt.onClass)
+            opt.onClass(src.label.empty() ? src.key : src.label, si, sources.size());
         const std::string className = classNameFor(src.key, usedNames);
         try
         {
@@ -1394,7 +1397,39 @@ bool toolchainAvailable()
 #endif
 }
 
-BuildOutcome buildDylib(const std::filesystem::path& genDir, const SdkInfo& sdk)
+namespace {
+// Run a shell command, streaming each output line (stdout+stderr merged) to
+// `onLine` and appending everything to `captured`. Returns the exit status.
+int runStreaming(const std::string& cmd, const std::function<void(const std::string&)>& onLine,
+                 std::string& captured)
+{
+#if defined(_WIN32)
+    FILE* pipe = _popen((cmd + " 2>&1").c_str(), "r");
+#else
+    FILE* pipe = popen((cmd + " 2>&1").c_str(), "r");
+#endif
+    if (!pipe) return -1;
+    char buf[1024];
+    while (std::fgets(buf, sizeof buf, pipe))
+    {
+        captured += buf;
+        if (onLine)
+        {
+            std::string line(buf);
+            while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
+            onLine(line);
+        }
+    }
+#if defined(_WIN32)
+    return _pclose(pipe);
+#else
+    return pclose(pipe);
+#endif
+}
+} // namespace
+
+BuildOutcome buildDylib(const std::filesystem::path& genDir, const SdkInfo& sdk,
+                        const std::function<void(const std::string& line)>& onLine)
 {
     namespace fs = std::filesystem;
     BuildOutcome out;
@@ -1417,25 +1452,31 @@ BuildOutcome buildDylib(const std::filesystem::path& genDir, const SdkInfo& sdk)
         includes += sdk.includeDirs[i].string();
     }
     const fs::path buildDir = genDir / "build";
-    const std::string log = shq(out.logFile);
+    std::string captured;
+    const auto flushLog = [&]
+    {
+        std::ofstream f(out.logFile, std::ios::binary | std::ios::trunc);
+        if (f) f << captured;
+    };
     const std::string configure =
         "cmake -S " + shq(genDir) + " -B " + shq(buildDir) +
         " -DCMAKE_BUILD_TYPE=Release"
         " \"-DHE_SDK_INCLUDE_DIRS=" + includes + "\""
-        " -DHE_SDK_LIB_DIR=" + shq(sdk.libDir) +
-        " > " + log + " 2>&1";
-    if (std::system(configure.c_str()) != 0)
+        " -DHE_SDK_LIB_DIR=" + shq(sdk.libDir);
+    if (runStreaming(configure, onLine, captured) != 0)
     {
+        flushLog();
         out.message = "cmake configure failed (see " + out.logFile.string() + ")";
         return out;
     }
-    const std::string build =
-        "cmake --build " + shq(buildDir) + " --config Release >> " + log + " 2>&1";
-    if (std::system(build.c_str()) != 0)
+    const std::string build = "cmake --build " + shq(buildDir) + " --config Release";
+    if (runStreaming(build, onLine, captured) != 0)
     {
+        flushLog();
         out.message = "compile failed (see " + out.logFile.string() + ")";
         return out;
     }
+    flushLog();
 
     // Locate the artifact (single-config generators put it flat; MSVC under
     // Release/).
