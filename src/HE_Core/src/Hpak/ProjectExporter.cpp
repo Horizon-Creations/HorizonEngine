@@ -505,6 +505,27 @@ ExportResult ProjectExporter::exportProject(
     for (const auto& [relPath, bytes] : extraScenes)
         if (!bytes.empty())
             packer.addEntry(sceneUuidForPath(relPath), bytes, packSettings);
+    // …plus a scene INDEX (a JSON string array of those paths) under a
+    // well-known name, so scene.available() can enumerate scenes in shipped
+    // builds (pak entries are UUID-keyed — paths aren't recoverable from them).
+    if (!extraScenes.empty())
+    {
+        std::string index = "[";
+        for (size_t i = 0; i < extraScenes.size(); ++i)
+        {
+            if (i) index += ",";
+            index += "\"";
+            for (char ch : extraScenes[i].first)   // minimal JSON string escape
+            {
+                if (ch == '"' || ch == '\\') index += '\\';
+                index += ch;
+            }
+            index += "\"";
+        }
+        index += "]";
+        packer.addEntry(sceneUuidForPath("__scene_index__"),
+                        std::vector<uint8_t>(index.begin(), index.end()), packSettings);
+    }
 
     if (!packer.write(pakPath.string()))
         return {false, "Failed to write " + hpakFilename, 0};

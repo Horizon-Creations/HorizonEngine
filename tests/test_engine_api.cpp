@@ -6,6 +6,7 @@
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/EnvironmentComponent.h>
+#include <HorizonScene/Components/MeshComponent.h>
 #include <HorizonCode/HorizonCode.h>
 #include <DebugDraw/DebugDraw.h>
 #include <Hpak/ProjectExporter.h>
@@ -913,6 +914,95 @@ TEST_CASE("scene: requests queue in order; zone ids are unique")
     CHECK(reqs[2].kind == 1); CHECK(reqs[2].zone == z2);
     CHECK(reqs[3].kind == 2); CHECK(reqs[3].zone == z1);
     CHECK(HE::api::scene::takeRequests().empty());   // drained
+}
+
+TEST_CASE("scene: zone table drives queries, visibility and position")
+{
+    HE::api::scene::clearZones();
+    HorizonWorld world;
+    // A fake zone: a root + two mesh children.
+    auto root = world.createEntity("ZoneRoot");
+    auto m1 = world.createEntity("M1");
+    auto m2 = world.createEntity("M2");
+    world.registry().emplace<TransformComponent>(root);
+    world.registry().emplace<MeshComponent>(m1);
+    world.registry().emplace<MeshComponent>(m2);
+
+    HE::api::scene::ZoneInfo info;
+    info.path = "Scenes/Zone.hescene";
+    info.root = (uint32_t)root;
+    info.entities = { (uint32_t)root, (uint32_t)m1, (uint32_t)m2 };
+    HE::api::scene::noteZoneLoaded(7, std::move(info));
+
+    Ctx c{ &world, nullptr, nullptr };
+    // Queries.
+    const auto zones = HE::api::scene::loadedZones();
+    REQUIRE(zones.size() == 1);
+    CHECK(zones[0] == 7);
+    CHECK(HE::api::scene::zoneScene(7) == "Scenes/Zone.hescene");
+    CHECK(HE::api::scene::zoneScene(99).empty());
+
+    // Position: read + move the whole zone via its root.
+    CHECK(HE::api::scene::zonePosition(c, 7).x == doctest::Approx(0.0f));
+    HE::api::scene::setZonePosition(c, 7, { 100, 0, 50 });
+    CHECK(world.registry().get<TransformComponent>(root).position.x == doctest::Approx(100.0f));
+    CHECK(HE::api::scene::zonePosition(c, 7).z == doctest::Approx(50.0f));
+
+    // Visibility: hide flips every mesh in the zone, show restores.
+    HE::api::scene::setZoneVisible(c, 7, false);
+    CHECK(world.registry().get<MeshComponent>(m1).visible == false);
+    CHECK(world.registry().get<MeshComponent>(m2).visible == false);
+    HE::api::scene::setZoneVisible(c, 7, true);
+    CHECK(world.registry().get<MeshComponent>(m1).visible == true);
+
+    HE::api::scene::noteZoneUnloaded(7);
+    CHECK(HE::api::scene::loadedZones().empty());
+}
+
+TEST_CASE("scene: hidden flag rides the requests; registry rows expose zones as arrays")
+{
+    (void)HE::api::scene::takeRequests();
+    HE::api::scene::load("Scenes/Next.hescene", /*hidden=*/true);
+    const int z = HE::api::scene::loadAdditive("Scenes/Zone.hescene", /*hidden=*/true);
+    HE::api::scene::activate();
+    const auto reqs = HE::api::scene::takeRequests();
+    REQUIRE(reqs.size() == 3);
+    CHECK(reqs[0].kind == 0); CHECK(reqs[0].hidden == true);
+    CHECK(reqs[1].kind == 1); CHECK(reqs[1].hidden == true); CHECK(reqs[1].zone == z);
+    CHECK(reqs[2].kind == 3);
+
+    // loadedZones through the REGISTRY returns an Int array Value.
+    HE::api::scene::clearZones();
+    HE::api::scene::noteZoneLoaded(3, { "A.hescene", 0, {} });
+    HE::api::scene::noteZoneLoaded(5, { "B.hescene", 0, {} });
+    Ctx c{};
+    const auto res = HE::api::find("scene.loadedZones")->invoke(c, {});
+    REQUIRE(res.size() == 1);
+    CHECK(res[0].isArray == true);
+    CHECK(res[0].type == P::Int);
+    REQUIRE(res[0].items.size() == 2);
+    CHECK(res[0].items[0].i == 3);
+    CHECK(res[0].items[1].i == 5);
+    // …and the descriptor marks the result pin as an array (editor pins follow).
+    CHECK(HE::api::find("scene.loadedZones")->results[0].isArray == true);
+    HE::api::scene::clearZones();
+}
+
+TEST_CASE("EngineCall: array-typed result pins mirror onto the node signature")
+{
+    HC::Node n; n.type = NT::EngineCall; n.s = "scene.loadedZones"; n.hasArg = false;
+    n.results.push_back({ "zones", P::Int, /*isArray=*/true });
+    const auto sig = HC::signatureOf(n);
+    REQUIRE(sig.dataOuts.size() == 1);
+    CHECK(sig.dataOuts[0].isArray == true);   // wires straight into For Each / array ops
+
+    // The flag survives the params/results JSON round-trip.
+    HC::Graph g; g.addNode(n);
+    HC::Graph loaded;
+    REQUIRE(HC::fromJson(HC::toJson(g), loaded));
+    REQUIRE(loaded.nodes.size() == 1);
+    REQUIRE(loaded.nodes[0].results.size() == 1);
+    CHECK(loaded.nodes[0].results[0].isArray == true);
 }
 
 TEST_CASE("sceneUuidForPath: deterministic, path-sensitive, separator-normalized")

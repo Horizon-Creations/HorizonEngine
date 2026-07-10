@@ -2106,11 +2106,13 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                         sceneOk = false;
                 }
 
-                // Serialize every OTHER project scene too: packed under path-
-                // derived UUIDs, they make scene.load("<path>") work in the
-                // shipped game (level transitions). A scene that fails to load
-                // is skipped with a note rather than failing the whole export —
-                // only the STARTUP scene is boot-critical.
+                // Serialize EVERY project scene (incl. the startup one, so the
+                // game can transition back to it): packed under path-derived
+                // UUIDs + listed in the packed scene index, they make
+                // scene.load("<path>") and scene.available() work in the shipped
+                // game. A scene that fails to load is skipped with a note rather
+                // than failing the whole export — only the STARTUP scene is
+                // boot-critical.
                 std::vector<std::pair<std::string, std::vector<uint8_t>>> extraScenes;
                 {
                     const std::filesystem::path projectRoot2 =
@@ -2122,8 +2124,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                     while (!ec2 && sit != send)
                     {
                         const bool regular = sit->is_regular_file(ec2);
-                        if (!ec2 && regular && sit->path().extension() == ".hescene" &&
-                            sit->path() != std::filesystem::path(scenePath))
+                        if (!ec2 && regular && sit->path().extension() == ".hescene")
                         {
                             HorizonWorld w2;
                             SceneSerializer ser2;

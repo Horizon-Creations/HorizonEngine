@@ -553,15 +553,16 @@ int dragMatchApiPin(const HE::api::ApiFn& fn, HorizonCode::PinType dragType,
 	// EngineCall unified pins: [execIn?][execOut?][params…][results…].
 	const int e = fn.isExec ? 1 : 0;
 	if (srcIsExec) return fn.isExec ? (srcIsInput ? e : 0) : -1;
-	if (dragArray) return -1;                      // the registry has no array pins
 	if (srcIsInput)
 	{
 		for (size_t i = 0; i < fn.results.size(); ++i)
-			if (fn.results[i].type == dragType) return e + e + (int)fn.params.size() + (int)i;
+			if (fn.results[i].type == dragType && fn.results[i].isArray == dragArray)
+				return e + e + (int)fn.params.size() + (int)i;
 		return -1;
 	}
 	for (size_t i = 0; i < fn.params.size(); ++i)
-		if (fn.params[i].type == dragType) return e + e + (int)i;
+		if (fn.params[i].type == dragType && fn.params[i].isArray == dragArray)
+			return e + e + (int)i;
 	return -1;
 }
 }

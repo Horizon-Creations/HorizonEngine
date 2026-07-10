@@ -26,17 +26,17 @@ NodeSig signatureOf(const Node& n)
         break;
     case T::FunctionEntry:
         s.execOuts = { { "", P::Exec } };
-        for (const auto& p : n.params) s.dataOuts.push_back({ p.name.c_str(), p.type });
+        for (const auto& p : n.params) s.dataOuts.push_back({ p.name.c_str(), p.type, p.isArray });
         break;
     case T::FunctionCall:
         s.execIns  = { { "", P::Exec } };
         s.execOuts = { { "", P::Exec } };
-        for (const auto& p : n.params)  s.dataIns.push_back({ p.name.c_str(), p.type });
-        for (const auto& r : n.results) s.dataOuts.push_back({ r.name.c_str(), r.type });
+        for (const auto& p : n.params)  s.dataIns.push_back({ p.name.c_str(), p.type, p.isArray });
+        for (const auto& r : n.results) s.dataOuts.push_back({ r.name.c_str(), r.type, r.isArray });
         break;
     case T::FunctionReturn:
         s.execIns = { { "", P::Exec } };
-        for (const auto& r : n.results) s.dataIns.push_back({ r.name.c_str(), r.type });
+        for (const auto& r : n.results) s.dataIns.push_back({ r.name.c_str(), r.type, r.isArray });
         break;
     case T::Branch:
         s.execIns  = { { "", P::Exec } };
@@ -111,8 +111,8 @@ NodeSig signatureOf(const Node& n)
         s.execIns  = { { "", P::Exec } };
         s.execOuts = { { "", P::Exec } };
         s.dataIns  = { { "Target", P::Ref } };
-        for (const auto& p : n.params)  s.dataIns.push_back({ p.name.c_str(), p.type });
-        for (const auto& r : n.results) s.dataOuts.push_back({ r.name.c_str(), r.type });
+        for (const auto& p : n.params)  s.dataIns.push_back({ p.name.c_str(), p.type, p.isArray });
+        for (const auto& r : n.results) s.dataOuts.push_back({ r.name.c_str(), r.type, r.isArray });
         break;
     case T::EmitEvent:
         s.execIns  = { { "", P::Exec } };
@@ -124,8 +124,8 @@ NodeSig signatureOf(const Node& n)
         // pure calls (getters/math) are compact data nodes. params → data-ins,
         // results → data-outs (mirrored on the node from the ApiFn descriptor).
         if (n.hasArg) { s.execIns = { { "", P::Exec } }; s.execOuts = { { "", P::Exec } }; }
-        for (const auto& p : n.params)  s.dataIns.push_back({ p.name.c_str(), p.type });
-        for (const auto& r : n.results) s.dataOuts.push_back({ r.name.c_str(), r.type });
+        for (const auto& p : n.params)  s.dataIns.push_back({ p.name.c_str(), p.type, p.isArray });
+        for (const auto& r : n.results) s.dataOuts.push_back({ r.name.c_str(), r.type, r.isArray });
         break;
     case T::GetGameInstance: s.dataOuts = { { "Game Instance", P::Ref } }; break;
     case T::GetSelf:         s.dataOuts = { { "Self", P::Ref } };          break;
@@ -586,7 +586,12 @@ std::string toJson(const Graph& g)
         auto dumpParams = [](const std::vector<FuncParam>& ps)
         {
             nlohmann::json a = nlohmann::json::array();
-            for (const auto& p : ps) a.push_back({ { "name", p.name }, { "type", (int)p.type } });
+            for (const auto& p : ps)
+            {
+                nlohmann::json pe = { { "name", p.name }, { "type", (int)p.type } };
+                if (p.isArray) pe["arr"] = true;
+                a.push_back(std::move(pe));
+            }
             return a;
         };
         if (!n.params.empty())  e["params"]  = dumpParams(n.params);
@@ -666,6 +671,7 @@ bool fromJson(const std::string& json, Graph& out)
                 FuncParam p;
                 p.name = pe.value("name", std::string());
                 p.type = (PinType)pe.value("type", (int)P::Float);
+                p.isArray = pe.value("arr", false);
                 ps.push_back(std::move(p));
             }
         };
