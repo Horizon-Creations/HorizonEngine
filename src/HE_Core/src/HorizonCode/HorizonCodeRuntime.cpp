@@ -303,14 +303,22 @@ Context Runtime::makeContext(InstanceId id)
     };
     ctx.getSelf = [id] { return Value::ofRef(id); };
     ctx.getGameInstance = [this] { return Value::ofRef(m_gameInstance); };
-    // World-level services (shared by every instance).
-    ctx.createWidget  = m_services.createWidget;
-    ctx.showWidget    = m_services.showWidget;
-    ctx.hideWidget    = m_services.hideWidget;
-    ctx.destroyWidget = m_services.destroyWidget;
-    ctx.createObject  = m_services.createObject;
-    ctx.destroyObject = m_services.destroyObject;
-    ctx.callApi       = m_services.callApi;
+    // World-level services (shared by every instance) — forwarded through the
+    // runtime at CALL time, never copied. A copy would freeze whatever was
+    // bound at context creation: interpreted instances rebuild their Context
+    // every fire so they never noticed, but a COMPILED instance binds its
+    // Context once at addCompiled — registering it before setServices (the
+    // GameInstance boot order) would leave it with dead services forever.
+    ctx.createWidget  = [this](const std::string& path) -> int
+    { return m_services.createWidget ? m_services.createWidget(path) : 0; };
+    ctx.showWidget    = [this](int id_) { if (m_services.showWidget) m_services.showWidget(id_); };
+    ctx.hideWidget    = [this](int id_) { if (m_services.hideWidget) m_services.hideWidget(id_); };
+    ctx.destroyWidget = [this](int id_) { if (m_services.destroyWidget) m_services.destroyWidget(id_); };
+    ctx.createObject  = [this](const std::string& path) -> uint32_t
+    { return m_services.createObject ? m_services.createObject(path) : 0u; };
+    ctx.destroyObject = [this](uint32_t ref) { if (m_services.destroyObject) m_services.destroyObject(ref); };
+    ctx.callApi       = [this](const std::string& apiId, const std::vector<Value>& args) -> std::vector<Value>
+    { return m_services.callApi ? m_services.callApi(apiId, args) : std::vector<Value>{}; };
     return ctx;
 }
 

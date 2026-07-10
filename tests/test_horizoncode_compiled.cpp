@@ -121,6 +121,8 @@ namespace
 		}
 
 		// Test taps into the bound Context (what generated code calls internally).
+		uint32_t ctxCreateObject(const std::string& path)
+		{ return m_ctx.createObject ? m_ctx.createObject(path) : 0u; }
 		Value ctxGetExternal(uint32_t target, const std::string& var)
 		{ return m_ctx.getExternal ? m_ctx.getExternal(target, var) : Value{}; }
 		void ctxSetExternal(uint32_t target, const std::string& var, const Value& v)
@@ -333,6 +335,26 @@ TEST_CASE("destroy fires Destruct on a compiled instance before removing it")
 	rt.destroy(id);
 	CHECK(probe.destructs == 1);
 	CHECK_FALSE(rt.alive(id));
+}
+
+TEST_CASE("Services bound AFTER addCompiled still reach the compiled instance")
+{
+	// The packaged-game boot order: the compiled GameInstance registers (and
+	// gets its Context) BEFORE setServices runs. The Context must forward to
+	// the runtime's CURRENT services at call time — a copy taken at bind time
+	// left compiled instances with dead services forever ("Create Object
+	// failed" on a perfectly shipped class).
+	Runtime rt;
+	auto owned = makeCompiled<MockCompiled>();
+	auto* m = static_cast<MockCompiled*>(owned.get());
+	rt.addCompiled(std::move(owned));            // context bound here…
+
+	CHECK(m->ctxCreateObject("Content/X.hasset") == 0u);   // …no services yet
+
+	Runtime::Services svc;                       // …services arrive afterwards
+	svc.createObject = [](const std::string&) -> uint32_t { return 77u; };
+	rt.setServices(std::move(svc));
+	CHECK(m->ctxCreateObject("Content/X.hasset") == 77u);
 }
 
 TEST_CASE("setGameInstanceCompiled installs the handle; a null instance keeps the old one")
