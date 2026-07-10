@@ -51,6 +51,11 @@ struct HE_API ExportSettings {
     // (fragment GLSL, backend bitmask) → PSHD-encoded bytes.
     uint32_t shaderBackends = 0;
     std::function<std::vector<uint8_t>(const std::string&, const std::string&, uint32_t)> compileShaderVariants;
+    // Path of the freshly built HorizonCodeGen shared library (the compiled
+    // HorizonCode classes). When non-empty it is copied beside the data under
+    // the canonical loader name and project.hcfg records horizonCodeCompiled.
+    // Empty = interpreted export (the default and the fallback).
+    std::filesystem::path horizonCodeGenLib;
 };
 
 struct HE_API ExportResult {
@@ -118,6 +123,13 @@ inline constexpr const char* kAssetPathIndexEntry = "__asset_index__";
 // rides the same codec + encryption + bundle layout as everything else, instead
 // of a loose file the exporter used to drop nowhere. "__game_instance__".
 inline constexpr const char* kGameInstanceEntry = "__game_instance__";
+
+// Canonical compiled-class key of a scene's LEVEL SCRIPT, derived from the
+// scene's pak-entry UUID rather than its path: the exporter knows the path, but
+// the booting game only has the startup scene's UUID (project.hcfg) — deriving
+// the key from the UUID lets both ends agree without shipping a lookup. The
+// scene.load path derives it via sceneUuidForPath(path) → this.
+HE_API std::string levelScriptKeyForUuid(const HE::UUID& sceneUuid);
 
 // Packs a project's content directory into a distributable output folder:
 //   • All .hasset files → projectName.hpak (with optional LZ4 + encryption)

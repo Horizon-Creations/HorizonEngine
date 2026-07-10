@@ -1,6 +1,7 @@
 #pragma once
 #include <Types/Defines.h>
 #include "HorizonCode.h"
+#include "HorizonCodeCompiled.h"
 #include <functional>
 #include <string>
 #include <unordered_map>
@@ -48,6 +49,10 @@ public:
     // caller's container reallocating can't dangle execution) and seeds the
     // instance's private variable store from the graph's declared defaults.
     InstanceId add(Graph graph, HostBindings bindings = {});
+    // Register a COMPILED script instance (ahead-of-time generated C++, see
+    // HorizonCodeCompiled.h). Behaves exactly like add(): same id space, same
+    // Context wiring, same delegation/GC participation. Returns 0 on null.
+    InstanceId addCompiled(CompiledPtr inst, HostBindings bindings = {});
     void       remove(InstanceId id);
     // Fire the instance's "Destruct" lifecycle event, then remove it — the
     // teardown counterpart to the "Construct" fired on create. Use this (not
@@ -59,9 +64,17 @@ public:
     void       clear();
     size_t     count() const { return m_insts.size(); }
 
-    // The instance's graph (for hosts that inspect it, e.g. which elements are
-    // interactive). Returns a shared empty graph when the id is unknown.
+    // The instance's graph (for hosts that inspect it). Returns a shared empty
+    // graph when the id is unknown — and for compiled instances, which carry no
+    // graph. Hosts that only need the Event bindings use eventBindingsOf, which
+    // serves both backends.
     const Graph& graphOf(InstanceId id) const;
+
+    // The instance's host-firable events — one entry per Event node (interpreted)
+    // or per CompiledEventInfo (compiled). Backend-agnostic replacement for
+    // scanning graphOf(...).nodes (e.g. WidgetManager interactivity).
+    struct EventBinding { std::string name; int elem = 0; };
+    std::vector<EventBinding> eventBindingsOf(InstanceId id) const;
 
     // Private per-instance variable state.
     Value getVariable(InstanceId id, const std::string& name) const;
@@ -70,7 +83,12 @@ public:
     // give the persistent GameInstance a fresh start each play session).
     void  reseedVariables(InstanceId id);
     // Read-only view of an instance's variable store (tooling / tests).
+    // Interpreted instances only — for a compiled instance this exposes just the
+    // overflow store; use variablesSnapshot for the full backend-agnostic view.
     const std::unordered_map<std::string, Value>& variablesOf(InstanceId id) const;
+    // Materialized name→value map for either backend (compiled: declared members
+    // via reflection + overflow entries). Tooling/tests; not for hot paths.
+    std::unordered_map<std::string, Value> variablesSnapshot(InstanceId id) const;
 
     // Fire an event on ONE instance. `elem` targets a widget element (0 = any).
     // `arg` feeds the event's data output when it has one.
@@ -97,6 +115,7 @@ public:
     // any graph via the Get Game Instance node. setGameInstance registers/
     // replaces it; gameInstance() is its handle (0 when none).
     InstanceId setGameInstance(Graph graph, HostBindings bindings = {});
+    InstanceId setGameInstanceCompiled(CompiledPtr inst, HostBindings bindings = {});
     InstanceId gameInstance() const { return m_gameInstance; }
 
     // Scene-switch garbage collection: keep `root` and every instance reachable
@@ -126,8 +145,11 @@ public:
 private:
     struct Inst
     {
-        Graph                                   graph;
+        Graph                                   graph;      // interpreted; empty for compiled
+        CompiledPtr                             compiled;   // compiled backend (null = interpreted)
         HostBindings                            host;
+        // Interpreted: the private variable store. Compiled: OVERFLOW store for
+        // undeclared names only (Set on an undeclared name still creates an entry).
         std::unordered_map<std::string, Value>  vars;
     };
     Inst*       find(InstanceId id);

@@ -78,6 +78,18 @@ target_include_directories(hpak_packer
     PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_Core/include
 )
 
+# ─── hc_codegen.exe (HorizonCode → C++ generation CLI, plan §10.2) ────────────
+add_executable(hc_codegen
+    src/HcCodegenCli/main.cpp
+)
+target_link_libraries(hc_codegen
+    PRIVATE HorizonCore
+    PRIVATE HorizonScene
+)
+target_include_directories(hc_codegen
+    PRIVATE ${CMAKE_SOURCE_DIR}/tests/fixtures/hcodegen   # the shared parity fixtures
+)
+
 # ─── shader_compiler.exe ───────────────────────────────────────────────────────
 add_executable(shader_compiler
     src/ShaderCompiler/main.cpp

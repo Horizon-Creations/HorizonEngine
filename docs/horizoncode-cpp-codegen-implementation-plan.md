@@ -1,6 +1,12 @@
 # HorizonCode → C++ Codegen: Implementation Plan
 
-Status: **ready to implement**. This is the concrete, step-by-step successor to
+Status: **WP0–WP5 IMPLEMENTED** (this branch). The codegen ships: 15 parity
+fixtures trace-exact interpreted↔compiled, the export builds + ships
+`HorizonCodeGen.dylib`, the game loads it through `CompiledClassTable` with the
+version handshake, all four hosts consult it. Remaining: WP6 (docs/CI polish,
+deployed-editor SDK staging) and the WP7 optimizations; plus a manual HW smoke
+of a real packaged export. Implementation deviations from this plan are marked
+inline with **[impl]**. This is the concrete, step-by-step successor to
 the design doc `horizoncode-cpp-codegen-plan.md` (§ references to "design doc"
 point there). It is grounded in the code as of this branch — every file, type
 and behavior named below was verified against the sources.
@@ -848,7 +854,7 @@ differ).
 |---|---|---|
 | HC class asset | content-relative path (e.g. `Content/Logic/Enemy.hasset`) | `svc.createObject` (`GameApplication.cpp:178`) |
 | Widget asset | content-relative path | `WidgetManager::createWidget` |
-| Level script | `"level:" + projectRelativeScenePath` (the same string `scene.load` takes / `sceneUuidForPath` hashes) | world scene-load path (where the level graph is registered today) |
+| Level script | **[impl]** `levelScriptKeyForUuid(sceneUuidForPath(path))` = `"level:<32-hex-uuid>"` — UUID-derived instead of the plan's path form, because the BOOTING game only has the startup scene's UUID (project.hcfg), not its project-relative path; `scene.load(path)` derives the same key via `sceneUuidForPath`. Both ends share the one helper in `ProjectExporter.h` | `HorizonWorld::fireLevelLoaded` (key set by `GameApplication` at scene load) |
 | GameInstance | `"__game_instance__"` | `GameApplication` GameInstance setup (`:141`) |
 
 Path normalization: forward slashes, exactly the string stored in nodes /
@@ -980,6 +986,21 @@ against mocks. Plus a manual HW smoke: packaged game logs
 ## 11. Work packages & order
 
 Strictly ordered; each has a hard gate. (Estimates are relative sizes.)
+**Status: WP0–WP5 DONE** (all gates green: 15 fixtures trace-parity incl.
+mixed-mode + the real-dylib loader test; the generated project builds against
+the dev SDK end-to-end). Implementation notes:
+- **[impl]** Stage B's explicit IR was folded into the emitter (validate →
+  direct exec-walk emission); the stages A/C behave exactly as specced.
+- **[impl]** `Options.traceHooks` is accepted but not emitted — the parity
+  harness records at the shared Context/host seam instead, which captures the
+  same observables (order, count, coerced args, results) on both backends.
+- **[impl]** The dispatch semantics of §3.5 hide an exponential landmine the
+  fixtures exposed: each fireEvent can spawn TWO dispatch subtrees (a
+  handler's EmitEvent + fireEvent's own trailing listener dispatch). A
+  bind CYCLE of relaying listeners therefore branches into ~2^32 fires — the
+  depth guard bounds depth, not total work. Backend-agnostic (Runtime-side),
+  pre-existing; fixture 12's cycle case uses non-relaying sinks. A total
+  per-fire dispatch budget is a candidate WP6/engine fix.
 
 **WP0 — Compiled object model (M).** `HorizonCodeCompiled.h`, Runtime compiled
 backend (§4.2: addCompiled, reflection paths, overflow store, GC via
