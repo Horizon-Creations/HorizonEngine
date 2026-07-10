@@ -211,6 +211,52 @@ TEST_CASE("Lazy-mounted pak resolves loadAsset by content path via the asset ind
     he_test::removeAllQuiet(outputDir);
 }
 
+TEST_CASE("ProjectExporter packs the GameInstance graph into the pak")
+{
+    // Regression: GameInstance.hcode (project root, .hcode ext) was never shipped,
+    // so the packaged game ran OnInit on an empty graph — and any UI the
+    // GameInstance creates (OnInit → Create Object → createWidget) never appeared.
+    auto contentDir = std::filesystem::temp_directory_path() / "he_test_gi_content";
+    auto outputDir  = std::filesystem::temp_directory_path() / "he_test_gi_out";
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(outputDir);
+    std::filesystem::create_directories(contentDir);
+
+    const HE::UUID matId{0xBEEF, 0xF00D};
+    { const auto blob = makeMinimalMaterialBlob(matId, "gi_mat");
+      std::ofstream f(contentDir / "gi_mat.hasset", std::ios::binary);
+      f.write(reinterpret_cast<const char*>(blob.data()), blob.size()); }
+
+    const std::string giJson =
+        R"({"nodes":[{"id":1,"type":"Event","s":"OnInit"}],"links":[],"variables":[],"nextId":2})";
+
+    ExportSettings settings; settings.compress = false;
+    const auto result = ProjectExporter::exportProject(
+        contentDir, "GiGame", "", outputDir, settings, /*startupSceneBinary=*/{},
+        /*extraScenes=*/{}, giJson);
+    REQUIRE(result.success);
+
+    ContentManager cm;
+    REQUIRE(cm.mountPak((outputDir / "GiGame.hpak").string()));
+    const auto giBytes = cm.readMountedEntry(sceneUuidForPath(kGameInstanceEntry));
+    REQUIRE(!giBytes.empty());
+    CHECK(std::string(giBytes.begin(), giBytes.end()) == giJson);
+
+    // Empty GameInstance → no entry packed (game falls back / runs empty).
+    auto outputDir2 = std::filesystem::temp_directory_path() / "he_test_gi_out2";
+    he_test::removeAllQuiet(outputDir2);
+    const auto result2 = ProjectExporter::exportProject(
+        contentDir, "GiGame2", "", outputDir2, settings);
+    REQUIRE(result2.success);
+    ContentManager cm2;
+    REQUIRE(cm2.mountPak((outputDir2 / "GiGame2.hpak").string()));
+    CHECK(cm2.readMountedEntry(sceneUuidForPath(kGameInstanceEntry)).empty());
+
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(outputDir);
+    he_test::removeAllQuiet(outputDir2);
+}
+
 TEST_CASE("ProjectExporter with empty content dir produces empty pak")
 {
     auto contentDir = std::filesystem::temp_directory_path() / "he_test_export_empty_content";

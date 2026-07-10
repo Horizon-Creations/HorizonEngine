@@ -2205,6 +2205,21 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                     }
                 }
 
+                // App-wide GameInstance graph (project GameInstance.hcode). Packed
+                // into the hpak so the shipped game runs OnInit + the app lifecycle
+                // (and whatever UI it creates). Read from the project root — the
+                // same file the editor edits via the Game Instance tab.
+                std::string gameInstanceJson;
+                {
+                    const std::filesystem::path giPath =
+                        std::filesystem::path(ctx.projectManager->currentProject().path).parent_path()
+                        / "GameInstance.hcode";
+                    std::ifstream gif(giPath, std::ios::binary);
+                    if (gif)
+                        gameInstanceJson.assign(std::istreambuf_iterator<char>(gif),
+                                                std::istreambuf_iterator<char>());
+                }
+
                 // Resolve the target platform: a COMPLETE runtime bundle (found
                 // via findRuntimeBundle, which also handles running the editor
                 // from a build tree) + per-platform output sub-folder. An export
@@ -2277,7 +2292,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                 s_exportRunning.store(true);
                 if (s_exportThread.joinable()) s_exportThread.join(); // defensive; reaped above
                 s_exportThread = std::thread([es, contentDir, projName, sceneName,
-                                              outDir, sceneBinary, extraScenes]()
+                                              outDir, sceneBinary, extraScenes,
+                                              gameInstanceJson]()
                 {
                     // An exception escaping a std::thread is std::terminate — and
                     // exportProject touches the filesystem (unreadable dirs,
@@ -2287,7 +2303,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                     {
                         const auto res = ProjectExporter::exportProject(
                             contentDir, projName, sceneName,
-                            std::filesystem::path(outDir), es, sceneBinary, extraScenes);
+                            std::filesystem::path(outDir), es, sceneBinary, extraScenes,
+                            gameInstanceJson);
                         msg = res.success
                             ? "OK: " + std::to_string(res.assetsPacked)
                               + " asset(s) packed ("

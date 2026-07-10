@@ -693,11 +693,13 @@ size_t ContentManager::streamMountedAssets(const std::unordered_set<HE::UUID>& e
 	// ProjectExporter.h; "__scene_index__" mirrors HE::api::scene::kSceneIndexEntry.)
 	const HE::UUID assetIdx = sceneUuidForPath(kAssetPathIndexEntry);
 	const HE::UUID sceneIdx = sceneUuidForPath("__scene_index__");
+	const HE::UUID giIdx    = sceneUuidForPath(kGameInstanceEntry);
 	size_t submitted = 0;
 	for (const auto& [id, mountIdx] : m_pakResidency)
 	{
 		(void)mountIdx;
-		if (isLoaded(id) || exclude.count(id) || id == assetIdx || id == sceneIdx) continue;
+		if (isLoaded(id) || exclude.count(id) ||
+		    id == assetIdx || id == sceneIdx || id == giIdx) continue;
 		loadAssetAsync(id);
 		++submitted;
 	}

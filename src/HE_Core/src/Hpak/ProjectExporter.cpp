@@ -383,7 +383,8 @@ ExportResult ProjectExporter::exportProject(
     const std::filesystem::path& outputDir,
     const ExportSettings&        settings,
     const std::vector<uint8_t>&  startupSceneBinary,
-    const std::vector<std::pair<std::string, std::vector<uint8_t>>>& extraScenes)
+    const std::vector<std::pair<std::string, std::vector<uint8_t>>>& extraScenes,
+    const std::string&           gameInstanceJson)
 {
     std::error_code ec;
 
@@ -526,6 +527,17 @@ ExportResult ProjectExporter::exportProject(
         packer.addEntry(sceneUuidForPath("__scene_index__"),
                         std::vector<uint8_t>(index.begin(), index.end()), packSettings);
     }
+
+    // App-wide GameInstance graph (project GameInstance.hcode). It drives OnInit
+    // and the app lifecycle — and, crucially, is where a game commonly creates
+    // its UI (OnInit → Create Object → createWidget). Packed into the .hpak it
+    // ships with the same codec/encryption/bundle layout; the game loads it via
+    // readMountedEntry, falling back to a loose file for dev. Was never shipped
+    // before → OnInit ran on an empty graph → no UI in packaged builds.
+    if (!gameInstanceJson.empty())
+        packer.addEntry(sceneUuidForPath(kGameInstanceEntry),
+                        std::vector<uint8_t>(gameInstanceJson.begin(), gameInstanceJson.end()),
+                        packSettings);
 
     // Asset path index: content-relative path → "hi:lo" UUID for every packed
     // asset, so the game can resolve loadAsset("<path>") to a mounted-pak entry.
