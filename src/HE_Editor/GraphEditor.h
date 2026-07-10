@@ -95,6 +95,12 @@ struct Model
     // widgets, and the callback that draws them. bodyMin/Max are screen px.
     std::function<float(int id)> nodeBodyHeight;
     std::function<void(int id, ImVec2 bodyMin, ImVec2 bodyMax, float zoom)> drawNodeBody;
+    // Inline default editors on UNCONNECTED data-input pins (simple types): the
+    // component places a small widget next to the pin label and calls the draw
+    // callback inside it (font already scaled to the zoom). Wired pins never
+    // show one. `pinHasInlineEditor` decides per (node, pin).
+    std::function<bool(int node, int pin)> pinHasInlineEditor;
+    std::function<void(int node, int pin)> drawPinInlineEditor;
     // Decorations drawn behind / in front of the nodes in the canvas transform
     // (comments, preview halos). origin/pan/zoom map graph→screen:
     // screen = origin + pan + graph*zoom.

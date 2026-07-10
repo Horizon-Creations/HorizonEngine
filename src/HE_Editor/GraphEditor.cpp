@@ -1,5 +1,6 @@
 #include "GraphEditor.h"
 #include <algorithm>
+#include <unordered_set>
 #include <cmath>
 #include <unordered_map>
 
@@ -140,6 +141,21 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
 
     // ── Layout every node for this frame ─────────────────────────────────────
     const std::vector<int> ids = model.nodeIds ? model.nodeIds() : std::vector<int>{};
+
+    // Links are needed twice: for the wires and to know which INPUT pins are
+    // wired (unwired simple inputs show an inline default editor).
+    const std::vector<std::array<int,4>> links =
+        model.links ? model.links() : std::vector<std::array<int,4>>{};
+    std::unordered_set<uint64_t> wiredInputs;
+    wiredInputs.reserve(links.size());
+    for (const auto& l : links)
+        wiredInputs.insert(((uint64_t)(uint32_t)l[2] << 32) | (uint32_t)l[3]);
+    auto pinInlineEditor = [&](int nid, int pin) {
+        return model.pinHasInlineEditor && model.drawPinInlineEditor &&
+               !wiredInputs.count(((uint64_t)(uint32_t)nid << 32) | (uint32_t)pin) &&
+               model.pinHasInlineEditor(nid, pin);
+    };
+
     std::vector<Drawn> nodes;
     nodes.reserve(ids.size());
     for (int nid : ids)
@@ -154,6 +170,9 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
         d.compact = model.compactPureNodes && !hasBody && isCompactNode(d.pins);
         d.gTitleH = d.compact ? kCompactTitleH : kTitleH;
         d.gw = d.compact ? compactGraphWidth(model.title(nid), d.pins) : kNodeW;
+        if (d.compact)
+            for (const auto& p : d.pins)
+                if (p.input && !p.isExec && pinInlineEditor(nid, p.id)) { d.gw += 64.0f; break; }
         const float gh = nodeGraphHeight(model, nid, d.pins, d.gTitleH);
         d.size = ImVec2(d.gw * st.zoom, gh * st.zoom);
 
@@ -225,7 +244,7 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
     if (model.drawBehind) model.drawBehind(dl, origin, st.pan, st.zoom);
 
     // ── Links (behind nodes) ─────────────────────────────────────────────────
-    const std::vector<std::array<int,4>> links = model.links ? model.links() : std::vector<std::array<int,4>>{};
+    // (links were fetched before the node loop)
     for (const auto& l : links)
     {
         const Drawn* sn = findNode(l[0]);
@@ -322,6 +341,7 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
             else
                 dl->AddCircleFilled(pp, kPinR * st.zoom, p.color);
 
+            float labelEndX = pp.x + 8 * st.zoom;   // where an inline editor may start
             if (!p.label.empty())
             {
                 // Pin labels scale with zoom like everything else on the node (they
@@ -335,6 +355,30 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
                                          IM_COL32(200,200,200,200), p.label.c_str());
                 else         dl->AddText(nullptr, fs, ImVec2(pp.x - 8 * st.zoom - ts0.x * scale, ty),
                                          IM_COL32(200,200,200,200), p.label.c_str());
+                if (p.input) labelEndX = pp.x + 8 * st.zoom + ts0.x * scale + 5 * st.zoom;
+            }
+
+            // Inline default editor on an unwired simple input: a small widget
+            // right next to the pin label, so constants don't need literal nodes.
+            // Hosted in a child window (like node bodies) so it gets the mouse
+            // before the canvas and edits don't start a node drag.
+            if (p.input && !p.isExec && pinInlineEditor(n.id, p.id))
+            {
+                const float ew = 58.0f * st.zoom, eh = 17.0f * st.zoom;
+                ImGui::PushID(n.id * 4096 + p.id);
+                ImGui::SetCursorScreenPos(ImVec2(labelEndX, pp.y - eh * 0.5f));
+                ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+                ImGui::BeginChild("##pindefault", ImVec2(ew, eh), ImGuiChildFlags_None,
+                    ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
+                    ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoSavedSettings);
+                ImGui::SetWindowFontScale(st.zoom);
+                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(3.0f * st.zoom, 1.0f * st.zoom));
+                model.drawPinInlineEditor(n.id, p.id);
+                ImGui::PopStyleVar();
+                ImGui::SetWindowFontScale(1.0f);
+                ImGui::EndChild();
+                ImGui::PopStyleVar();
+                ImGui::PopID();
             }
         }
 

@@ -90,6 +90,13 @@ namespace HcEditorUtil
 	// Returns true when anything changed (the caller commits for undo).
 	bool drawArrayDefaultEditor(HorizonCode::Variable& v);
 
+	// Inline pin defaults: simple UNWIRED data inputs (Bool/Int/Float/String, no
+	// arrays) show a small entry right on the node — no literal node needed.
+	// `pinSupportsInlineDefault` gates per unified pin; the editor draws inside
+	// the GraphEditor's positioned per-pin child. `committed` = snapshot time.
+	bool pinSupportsInlineDefault(const HorizonCode::Node& n, int unifiedPin);
+	void drawPinDefaultEditor(HorizonCode::Node& n, int unifiedPin, bool& committed);
+
 	// ── Drag-off compatibility ────────────────────────────────────────────────
 	// First unified pin index on a FRESH node of `t` (propType seeded with the
 	// dragged type) that accepts the dragged pin, or -1. srcIsInput = the drag

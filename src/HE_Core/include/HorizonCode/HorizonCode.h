@@ -178,6 +178,11 @@ struct Node
     // results (data-ins). Empty on every other node type.
     std::vector<FuncParam> params;
     std::vector<FuncParam> results;
+    // Inline pin defaults: editor-authored constants for UNWIRED simple data
+    // inputs (Bool/Int/Float/String), keyed by DATA-IN INDEX (stable across the
+    // exec-pin prefix). A wired pin ignores its default; evalInput falls back to
+    // it before the type's zero. Spares a literal node per constant.
+    std::unordered_map<int, Value> pinDefaults;
 };
 
 // Links connect unified pin indices (see pin ranges below).

@@ -598,6 +598,14 @@ std::string toJson(const Graph& g)
         if (!n.results.empty()) e["results"] = dumpParams(n.results);
         if (n.subgraph)         e["subgraph"] = n.subgraph;
         if (n.isArray)          e["arr"]     = true;
+        if (!n.pinDefaults.empty())
+        {
+            nlohmann::json pd = nlohmann::json::array();
+            for (const auto& [idx, val] : n.pinDefaults)
+                pd.push_back({ { "i", idx }, { "t", (int)val.type },
+                               { "v", scalarValueToJson(val, val.type) } });
+            e["pinDefaults"] = std::move(pd);
+        }
         jn.push_back(std::move(e));
     }
     j["nodes"] = std::move(jn);
@@ -679,6 +687,15 @@ bool fromJson(const std::string& json, Graph& out)
         loadParams(e.value("results", nlohmann::json::array()), n.results);
         n.subgraph = e.value("subgraph", 0);
         n.isArray  = e.value("arr", false);
+        if (const auto& pd = e.value("pinDefaults", nlohmann::json::array()); pd.is_array())
+            for (const auto& entry : pd)
+            {
+                if (!entry.is_object()) continue;
+                const int idx = entry.value("i", -1);
+                if (idx < 0) continue;
+                const PinType t = (PinType)entry.value("t", (int)P::Float);
+                n.pinDefaults[idx] = scalarValueFromJson(entry.value("v", nlohmann::json()), t);
+            }
         if (n.id >= g.nextId) g.nextId = n.id + 1;
         g.nodes.push_back(std::move(n));
     }
@@ -1066,6 +1083,9 @@ Value Runner::evalInput(const Node& n, int dataInIndex, int depth)
         if (!src) break;
         return evalData(*src, l.srcPin - pinRanges(*src).dataOut0, depth);
     }
+    // Unwired: the pin's inline default (editor-authored) before the type's zero.
+    if (auto it = n.pinDefaults.find(dataInIndex); it != n.pinDefaults.end())
+        return coerce(it->second, dataPinType(n, true, dataInIndex));
     Value v; v.type = dataPinType(n, true, dataInIndex);
     return v;
 }

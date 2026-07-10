@@ -518,6 +518,65 @@ bool drawArrayDefaultEditor(HorizonCode::Variable& v)
 	return changed;
 }
 
+namespace
+{
+	// Resolve a unified pin to its data-in index + descriptor (or -1 when the
+	// pin isn't a data input).
+	int dataInIndexOf(const HorizonCode::Node& n, int unifiedPin, HorizonCode::PinDesc& outDesc)
+	{
+		const HorizonCode::NodeSig s = HorizonCode::signatureOf(n);
+		const int dataIn0 = (int)(s.execIns.size() + s.execOuts.size());
+		const int di = unifiedPin - dataIn0;
+		if (di < 0 || di >= (int)s.dataIns.size()) return -1;
+		outDesc = s.dataIns[di];
+		return di;
+	}
+}
+
+bool pinSupportsInlineDefault(const HorizonCode::Node& n, int unifiedPin)
+{
+	using P = HorizonCode::PinType;
+	HorizonCode::PinDesc pd{};
+	const int di = dataInIndexOf(n, unifiedPin, pd);
+	if (di < 0 || pd.isArray) return false;
+	return pd.type == P::Bool || pd.type == P::Int ||
+	       pd.type == P::Float || pd.type == P::String;
+}
+
+void drawPinDefaultEditor(HorizonCode::Node& n, int unifiedPin, bool& committed)
+{
+	using P = HorizonCode::PinType; using V = HorizonCode::Value;
+	HorizonCode::PinDesc pd{};
+	const int di = dataInIndexOf(n, unifiedPin, pd);
+	if (di < 0) return;
+	// The stored default keeps the PIN's type (retypes re-seed on next edit).
+	V& v = n.pinDefaults[di];
+	if (v.type != pd.type) { v = V{}; v.type = pd.type; }
+	ImGui::SetNextItemWidth(-FLT_MIN);
+	switch (pd.type)
+	{
+		case P::Bool:
+			if (ImGui::Checkbox("##pd", &v.b)) committed = true;
+			break;
+		case P::Int:
+		{
+			int tmp = v.i;
+			if (ImGui::DragInt("##pd", &tmp)) v.i = tmp;
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			break;
+		}
+		case P::Float:
+			ImGui::DragFloat("##pd", &v.f, 0.1f, 0.0f, 0.0f, "%.3g");
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			break;
+		case P::String:
+			ImGui::InputText("##pd", &v.s);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			break;
+		default: break;
+	}
+}
+
 int dragMatchPin(HorizonCode::NodeType t, HorizonCode::PinType dragType,
                  bool dragArray, bool srcIsInput, bool srcIsExec)
 {
