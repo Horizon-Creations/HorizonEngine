@@ -602,6 +602,12 @@ void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events,
 		ImGui::TextDisabled("Reads/writes a public variable on the\nTarget object.");
 		break;
 	}
+	case NT::EngineCall:
+		// scene.load / scene.loadAdditive: choose the scene from a dropdown
+		// instead of typing the path (a typo silently fails to load).
+		if (HcEditorUtil::drawSceneParamPicker(*n, content)) edited = true;
+		else ImGui::TextDisabled("Engine call — inputs are set on the node's pins.");
+		break;
 	default:
 		ImGui::TextDisabled("No parameters.");
 		break;
