@@ -34,8 +34,9 @@ InstanceId Runtime::add(Graph graph, HostBindings bindings)
     inst.host  = std::move(bindings);
     // Seed the private variable store from the graph's declared defaults so
     // GetVariable reads a valid value even before the first SetVariable.
+    // Function-locals (scope != 0) live in the Runner's call frames, not here.
     for (const auto& var : inst.graph.variables)
-        inst.vars[var.name] = variableDefaultValue(var);
+        if (var.scope == 0) inst.vars[var.name] = variableDefaultValue(var);
     m_insts.emplace(id, std::move(inst));
     return id;
 }
@@ -125,7 +126,7 @@ void Runtime::reseedVariables(InstanceId id)
     if (!i) return;
     i->vars.clear();
     for (const auto& var : i->graph.variables)
-        i->vars[var.name] = variableDefaultValue(var);
+        if (var.scope == 0) i->vars[var.name] = variableDefaultValue(var);
 }
 
 const std::unordered_map<std::string, Value>& Runtime::variablesOf(InstanceId id) const
@@ -188,7 +189,8 @@ Context Runtime::makeContext(InstanceId id)
         const Inst* i = find(target);
         if (!i) { hcError("null reference — Get '" + var + "' on a null/destroyed object"); return {}; }
         const Variable* v = i->graph.findVariable(var);
-        if (!v || v->access != 0) { hcWarn("variable '" + var + "' not found or not public on the target object"); return {}; }
+        if (!v || v->access != 0 || v->scope != 0) // locals are never externally visible
+        { hcWarn("variable '" + var + "' not found or not public on the target object"); return {}; }
         auto it = i->vars.find(var);
         return it != i->vars.end() ? it->second : Value{};
     };
@@ -197,7 +199,8 @@ Context Runtime::makeContext(InstanceId id)
         Inst* i = find(target);
         if (!i) { hcError("null reference — Set '" + var + "' on a null/destroyed object"); return; }
         const Variable* v = i->graph.findVariable(var);
-        if (!v || v->access != 0) { hcWarn("variable '" + var + "' not found or not public on the target object"); return; }
+        if (!v || v->access != 0 || v->scope != 0) // locals are never externally visible
+        { hcWarn("variable '" + var + "' not found or not public on the target object"); return; }
         i->vars[var] = val;
     };
     ctx.getSelf = [id] { return Value::ofRef(id); };

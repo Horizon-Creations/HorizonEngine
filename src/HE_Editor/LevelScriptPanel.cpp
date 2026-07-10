@@ -198,17 +198,9 @@ std::string lower(std::string v)
 
 void drawVariables(HC::Graph& graph, bool& edited)
 {
-	ImGui::SeparatorText("Variables");
-	if (ImGui::SmallButton("+ Add##var"))
-	{
-		HC::Variable v;
-		v.name = uniqueVarName(graph);
-		graph.variables.push_back(v);
-		g.selectedVar = v.name;
-		g.selectedNode = 0;
-		edited = true;
-	}
-	for (const auto& v : graph.variables)
+	// One row: selectable + drag source. Shared by the instance list and the
+	// per-function locals list below it.
+	auto varRow = [&](const HC::Variable& v)
 	{
 		ImGui::PushID(v.name.c_str());
 		// Object variables show their class name as the type, not a bare "Object".
@@ -230,6 +222,40 @@ void drawVariables(HC::Graph& graph, bool& edited)
 			ImGui::EndDragDropSource();
 		}
 		ImGui::PopID();
+	};
+
+	ImGui::SeparatorText("Variables");
+	if (ImGui::SmallButton("+ Add##var"))
+	{
+		HC::Variable v;
+		v.name = uniqueVarName(graph);
+		graph.variables.push_back(v);
+		g.selectedVar = v.name;
+		g.selectedNode = 0;
+		edited = true;
+	}
+	for (const auto& v : graph.variables)
+		if (v.scope == 0) varRow(v);
+
+	// Function-locals of the OPEN function sub-graph: fresh per invocation,
+	// usable only inside that function (menus/drops elsewhere won't offer them).
+	if (g.currentGraph != 0)
+	{
+		ImGui::SeparatorText("Local Variables");
+		if (ImGui::SmallButton("+ Add##lvar"))
+		{
+			HC::Variable v;
+			v.name = uniqueVarName(graph);
+			v.scope = g.currentGraph;   // owned by the open function
+			graph.variables.push_back(v);
+			g.selectedVar = v.name;
+			g.selectedNode = 0;
+			edited = true;
+		}
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("Local to this function — reset to its default on every call.");
+		for (const auto& v : graph.variables)
+			if (v.scope == g.currentGraph) varRow(v);
 	}
 }
 
@@ -334,8 +360,18 @@ void drawVariableDetails(HC::Graph& graph, ContentManager* content, bool& edited
 		edited = true;
 	}
 
-	int vaccess = v->access;
-	if (ImGui::Combo("Access", &vaccess, "Public\0Private\0")) { v->access = vaccess; edited = true; }
+	// Locals have no access modifier — they are never visible outside their
+	// function, let alone through a reference.
+	if (v->scope != 0)
+	{
+		const HC::Node* fn = graph.findNode(v->scope);
+		ImGui::TextDisabled("Local to: %s", fn && !fn->s.empty() ? fn->s.c_str() : "(function)");
+	}
+	else
+	{
+		int vaccess = v->access;
+		if (ImGui::Combo("Access", &vaccess, "Public\0Private\0")) { v->access = vaccess; edited = true; }
+	}
 
 	// Single value vs an array of the type. Toggling re-types the matching Get/Set
 	// nodes' value pins and drops their now-mismatched links.
@@ -486,6 +522,9 @@ void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events,
 		if (ImGui::BeginCombo("Variable", n->s.empty() ? "(none)" : n->s.c_str()))
 		{
 			for (const auto& v : graph.variables)
+			{
+				// A function-local is only usable inside its owning sub-graph.
+				if (v.scope != 0 && v.scope != n->subgraph) continue;
 				if (ImGui::Selectable(v.name.c_str(), n->s == v.name))
 				{
 					const PT before = n->propType; const bool wasArr = n->isArray;
@@ -498,6 +537,7 @@ void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events,
 					}
 					edited = true;
 				}
+			}
 			ImGui::EndCombo();
 		}
 		break;
@@ -863,11 +903,12 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 		}
 		ImGui::Spacing();
 
-		// Get/Set for each declared variable.
+		// Get/Set for each declared variable (locals only inside their function).
 		bool vh = false;
 		for (const auto& v : graph.variables)
 			for (int k = 0; k < 2; ++k)
 			{
+				if (v.scope != 0 && v.scope != g.currentGraph) continue;
 				const std::string lbl = (k == 0 ? "Get " : "Set ") + v.name;
 				if (!matches(lbl, "Variables")) continue;
 				if (!vh) { ImGui::TextDisabled("Variables"); vh = true; }
@@ -1032,11 +1073,13 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 			if (eh) ImGui::Spacing();
 		}
 
-		// ── This graph's variables (Set on exec/matching value; Get feeds inputs) ──
+		// ── This graph's variables (Set on exec/matching value; Get feeds inputs;
+		//    locals only inside their owning function) ──
 		{
 			bool vh = false;
 			for (const auto& v : graph.variables)
 			{
+				if (v.scope != 0 && v.scope != g.currentGraph) continue;
 				const bool setOk = (isExecPin && !srcInput) ||
 					(!isExecPin && !srcInput && v.type == dragType && v.isArray == dragArray);
 				const bool getOk = !isExecPin && srcInput && v.type == dragType && v.isArray == dragArray;
@@ -1136,6 +1179,8 @@ void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
 	if (ImGui::BeginPopup("##ls_var_drop"))
 	{
 		const HC::Variable* v = graph.findVariable(g.dropVar);
+		// A function-local can only be placed inside its owning function's graph.
+		const bool scopeOk = v && (v->scope == 0 || v->scope == g.currentGraph);
 		ImGui::TextDisabled("%s", g.dropVar.c_str());
 		ImGui::Separator();
 		auto make = [&](NT type)
@@ -1143,12 +1188,14 @@ void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
 			const int id = addNode(graph, type, g.ge.addMenuGraphPos);
 			HC::Node* nn = graph.findNode(id);
 			nn->s = g.dropVar;
-			if (v) nn->propType = v->type;
+			if (v) { nn->propType = v->type; nn->isArray = v->isArray; }
 			g.selectedNode = id;
 			edited = true;
 		};
-		if (ImGui::MenuItem("Get", nullptr, false, v != nullptr)) make(NT::GetVariable);
-		if (ImGui::MenuItem("Set", nullptr, false, v != nullptr)) make(NT::SetVariable);
+		if (ImGui::MenuItem("Get", nullptr, false, scopeOk)) make(NT::GetVariable);
+		if (ImGui::MenuItem("Set", nullptr, false, scopeOk)) make(NT::SetVariable);
+		if (v && !scopeOk)
+			ImGui::TextDisabled("Local to another function.");
 		ImGui::EndPopup();
 	}
 	ImGui::EndChild();

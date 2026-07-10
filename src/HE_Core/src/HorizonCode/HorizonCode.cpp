@@ -377,6 +377,10 @@ int Graph::addNode(Node n)
 
 void Graph::removeNode(int id)
 {
+    // A deleted function takes its local variables with it.
+    if (const Node* n = findNode(id); n && n->type == NodeType::FunctionEntry)
+        variables.erase(std::remove_if(variables.begin(), variables.end(),
+            [&](const Variable& v){ return v.scope == id; }), variables.end());
     nodes.erase(std::remove_if(nodes.begin(), nodes.end(),
         [&](const Node& n){ return n.id == id; }), nodes.end());
     links.erase(std::remove_if(links.begin(), links.end(),
@@ -622,6 +626,7 @@ std::string toJson(const Graph& g)
         if (v.f[0] || v.f[1] || v.f[2] || v.f[3]) e["f"] = { v.f[0], v.f[1], v.f[2], v.f[3] };
         if (!v.s.empty()) e["s"] = v.s;
         if (v.access)     e["access"] = v.access;
+        if (v.scope)      e["scope"] = v.scope;   // function-local (FunctionEntry id)
         if (v.isArray)    e["arr"] = true;
         if (v.isArray && !v.defaultItems.empty())
         {
@@ -714,6 +719,7 @@ bool fromJson(const std::string& json, Graph& out)
         v.type = (PinType)e.value("type", (int)P::Float);
         v.s    = e.value("s", std::string());
         v.access = e.value("access", 0);
+        v.scope  = e.value("scope", 0);
         v.isArray = e.value("arr", false);
         if (v.isArray)
             if (const auto& items = e.value("items", nlohmann::json::array()); items.is_array())
@@ -865,6 +871,26 @@ Value coerce(Value v, PinType want)
 
 Runner::Runner(const Graph& graph, Context ctx) : m_graph(graph), m_ctx(std::move(ctx)) {}
 
+Runner::CallFrame* Runner::frameFor(int fnEntryId)
+{
+    for (auto it = m_callStack.rbegin(); it != m_callStack.rend(); ++it)
+        if (it->fnEntryId == fnEntryId) return &*it;
+    return nullptr;
+}
+
+namespace
+{
+// Seed a fresh frame's local-variable store from the function's declared
+// locals (Variable::scope == the FunctionEntry's id) — per invocation, like
+// Runtime::add seeds the instance store from the scope-0 variables.
+void seedLocals(const Graph& g, int fnEntryId,
+                std::unordered_map<std::string, Value>& locals)
+{
+    for (const auto& v : g.variables)
+        if (v.scope == fnEntryId) locals[v.name] = variableDefaultValue(v);
+}
+} // namespace
+
 const Link* Runner::execLinkFrom(int nodeId, int pin) const
 {
     for (const auto& l : m_graph.links)
@@ -897,8 +923,11 @@ bool Runner::callFunction(const std::string& name, bool requirePublic,
         m_execOutputs.clear();
         m_callStack.clear();
         // Seed the frame: passed args coerced to the param types (missing ones fall
-        // back to a typed default), and typed result slots for any Return to fill.
+        // back to a typed default), typed result slots for any Return to fill, and
+        // the function's locals at their declared defaults.
         CallFrame frame;
+        frame.fnEntryId = n.id;
+        seedLocals(m_graph, n.id, frame.locals);
         frame.args.resize(n.params.size());
         for (size_t i = 0; i < n.params.size(); ++i)
         {
@@ -961,7 +990,15 @@ void Runner::execNode(const Node& n, int depth)
             m_ctx.setProperty(n.elem, n.s, coerce(evalInput(n, 0, depth + 1), n.propType));
         break;
     case T::SetVariable:
-        if (m_ctx.setVariable)
+        // A function-local writes the innermost frame of its owning function;
+        // outside that function the write is dropped. Everything else goes to
+        // the instance store (which also creates undeclared names, as before).
+        if (const Variable* v = m_graph.findVariable(n.s); v && v->scope != 0)
+        {
+            if (CallFrame* f = frameFor(v->scope))
+                f->locals[n.s] = coerce(evalInput(n, 0, depth + 1), n.propType);
+        }
+        else if (m_ctx.setVariable)
             m_ctx.setVariable(n.s, coerce(evalInput(n, 0, depth + 1), n.propType));
         break;
     case T::ShowWidget: if (m_ctx.showSelf) m_ctx.showSelf(); break;
@@ -1017,8 +1054,11 @@ void Runner::execNode(const Node& n, int depth)
             if (fn.type == T::FunctionEntry && fn.s == n.s) { entry = &fn; break; }
         if (!entry) break;
         // Build the call frame: evaluate arguments in the CALLER's context (before
-        // pushing, so the caller's own params still resolve), seed typed results.
+        // pushing, so the caller's own params still resolve), seed typed results
+        // and the callee's locals at their declared defaults.
         CallFrame frame;
+        frame.fnEntryId = entry->id;
+        seedLocals(m_graph, entry->id, frame.locals);
         frame.args.resize(n.params.size());
         for (size_t i = 0; i < n.params.size(); ++i)
             frame.args[i] = coerce(evalInput(n, (int)i, depth + 1), n.params[i].type);
@@ -1180,6 +1220,15 @@ Value Runner::evalData(const Node& n, int dataOutPin, int depth)
     }
     case T::GetVariable:
     {
+        // Function-local: read the innermost frame of the owning function;
+        // no frame (node ran outside its function) → the type's default.
+        if (const Variable* var = m_graph.findVariable(n.s); var && var->scope != 0)
+        {
+            if (CallFrame* f = frameFor(var->scope))
+                if (auto it = f->locals.find(n.s); it != f->locals.end())
+                    return coerce(it->second, n.propType);
+            return coerce(Value{}, n.propType);
+        }
         Value v = m_ctx.getVariable ? m_ctx.getVariable(n.s) : Value{};
         return coerce(v, n.propType);
     }
