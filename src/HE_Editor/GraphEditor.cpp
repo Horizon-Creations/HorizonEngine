@@ -529,7 +529,15 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
     {
         if (const Drawn* sn = findNode(st.linkSrcNode))
             if (const ImVec2* a = findPin(*sn, st.linkSrcPin, st.linkSrcInput))
-                drawLink(dl, *a, mouse, IM_COL32(255, 210, 120, 220), 2.0f);
+            {
+                // drawLink()'s first arg always tangents rightward (departure),
+                // its second tangents leftward (arrival) — correct for a normal
+                // output→input link. Dragging off an INPUT (left side of a node)
+                // searches backward for a source, so the pin is the arrival end:
+                // swap the args or the preview curve bulges the wrong way.
+                if (st.linkSrcInput) drawLink(dl, mouse, *a, IM_COL32(255, 210, 120, 220), 2.0f);
+                else                 drawLink(dl, *a, mouse, IM_COL32(255, 210, 120, 220), 2.0f);
+            }
 
         if (ImGui::IsMouseReleased(ImGuiMouseButton_Left))
         {
@@ -558,6 +566,22 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
             st.linkSrcNode = 0;
             st.linkGrab = false;
         }
+    }
+
+    // Ghost link while the filtered "drag off a pin" popup is open: the drag
+    // itself already ended (linkSrcNode was cleared above), but the drop point
+    // survives in dragOffNode/Pin/Input + addMenuGraphPos — keep the pending
+    // connection visible while the user is still picking what to create, not
+    // just during the drag, so it doesn't look like the drag was abandoned.
+    if (st.dragOffNode != 0 && ImGui::IsPopupOpen("##ge_pindrag"))
+    {
+        if (const Drawn* sn = findNode(st.dragOffNode))
+            if (const ImVec2* a = findPin(*sn, st.dragOffPin, st.dragOffInput))
+            {
+                const ImVec2 drop = toScreen(st.addMenuGraphPos.x, st.addMenuGraphPos.y);
+                if (st.dragOffInput) drawLink(dl, drop, *a, IM_COL32(255, 210, 120, 220), 2.0f);
+                else                 drawLink(dl, *a, drop, IM_COL32(255, 210, 120, 220), 2.0f);
+            }
     }
 
     // ── Box-select ───────────────────────────────────────────────────────────
