@@ -6,6 +6,7 @@
 #include "LevelScriptPanel.h"
 #include "GameInstancePanel.h"
 #include "HorizonCodeClassPanel.h"
+#include "InputAssetPanel.h"
 #include "HorizonVersion.h"
 #ifdef __APPLE__
 #include "MacMenuBar.h"   // native system menu bar (replaces the ImGui menu row)
@@ -1136,6 +1137,19 @@ void EditorUI::RenderProjectHub(AppContext& ctx)
         "Assets, Scenes and Data folders.",
         "Assets and Source folders.",
     };
+    // Index order MUST match ProjectScriptLanguage (HorizonCode, Lua, Python, Cpp).
+    static const std::array<const char*, 4> kLangNames = {
+        "HorizonCode (Visual Scripting)",
+        "Lua",
+        "Python",
+        "C++",
+    };
+    static const std::array<const char*, 4> kLangDesc = {
+        "Node graphs; compiles to native C++ on export.",
+        "Lightweight text scripting (default script backend).",
+        "CPython scripting (needs a Python install on dev machines).",
+        "Native GameLogic library, built with your own toolchain.",
+    };
 
     // ════════════════════════════════════════════════════════════════════
     // PANEL 1 — Create Project
@@ -1166,6 +1180,17 @@ void EditorUI::RenderProjectHub(AppContext& ctx)
 
     ImGui::SetCursorPosX(padding);
     ImGui::TextDisabled("%s", kPresetDesc[ctx.hubSelectedPreset]);
+
+    ImGui::Spacing();
+    ImGui::SetCursorPosX(padding);
+    ImGui::Text("Scripting Language");
+    ImGui::SetCursorPosX(padding);
+    ImGui::PushItemWidth(panelW - padding * 2.0f);
+    ImGui::Combo("##HubLang", &ctx.hubSelectedLang,
+        kLangNames.data(), static_cast<int>(kLangNames.size()));
+    ImGui::PopItemWidth();
+    ImGui::SetCursorPosX(padding);
+    ImGui::TextDisabled("%s", kLangDesc[ctx.hubSelectedLang]);
 
     ImGui::Spacing();
     ImGui::SetCursorPosX(padding);
@@ -1284,7 +1309,8 @@ void EditorUI::RenderProjectHub(AppContext& ctx)
             std::filesystem::path projRoot = std::filesystem::path(dir) / name;
             bool ok = ctx.projectManager->createNewProject(
                 projRoot.string(), name,
-                static_cast<ProjectPreset>(ctx.hubSelectedPreset));
+                static_cast<ProjectPreset>(ctx.hubSelectedPreset),
+                static_cast<ProjectScriptLanguage>(ctx.hubSelectedLang));
             if (ok)
             {
                 const std::string& heprojPath = ctx.projectManager->currentProject().path;
@@ -1739,6 +1765,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 		ctx.hubProjectName[0] = '\0';
 		ctx.hubProjectDir[0]  = '\0';
 		ctx.hubSelectedPreset = 0;
+		ctx.hubSelectedLang   = 0; // HorizonCode
 		ctx.hubCreateError.clear();
 	};
 
@@ -2708,6 +2735,16 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
             "Assets, Scenes and Data folders.",
             "Assets and Source folders.",
         };
+        // Index order MUST match ProjectScriptLanguage (HorizonCode, Lua, Python, Cpp).
+        static const std::array<const char*, 4> kLangNames = {
+            "HorizonCode (Visual Scripting)", "Lua", "Python", "C++",
+        };
+        static const std::array<const char*, 4> kLangDesc = {
+            "Node graphs; compiles to native C++ on export.",
+            "Lightweight text scripting (default script backend).",
+            "CPython scripting (needs a Python install on dev machines).",
+            "Native GameLogic library, built with your own toolchain.",
+        };
 
         ImVec2 center = ImGui::GetMainViewport()->GetCenter();
         ImGui::SetNextWindowPos(center, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
@@ -2802,6 +2839,13 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
             ImGui::TextDisabled("%s", kPresetDesc[ctx.hubSelectedPreset]);
 
             ImGui::Spacing();
+            ImGui::Text("Scripting Language");
+            ImGui::SetNextItemWidth(-1);
+            ImGui::Combo("##npLang", &ctx.hubSelectedLang,
+                kLangNames.data(), static_cast<int>(kLangNames.size()));
+            ImGui::TextDisabled("%s", kLangDesc[ctx.hubSelectedLang]);
+
+            ImGui::Spacing();
             if (!ctx.hubCreateError.empty())
             {
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.4f, 1.0f));
@@ -2827,7 +2871,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                     std::filesystem::path projRoot = std::filesystem::path(dir) / name;
                     bool ok = ctx.projectManager->createNewProject(
                         projRoot.string(), name,
-                        static_cast<ProjectPreset>(ctx.hubSelectedPreset));
+                        static_cast<ProjectPreset>(ctx.hubSelectedPreset),
+                        static_cast<ProjectScriptLanguage>(ctx.hubSelectedLang));
                     if (ok)
                     {
                         const std::string& heprojPath = ctx.projectManager->currentProject().path;
@@ -3023,11 +3068,13 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                 if (ScriptEditorPanel::isDirty(t.assetPath)   ||
                     MaterialEditorPanel::isDirty(t.assetPath) ||
                     UIEditorPanel::isDirty(t.assetPath)       ||
-                    HorizonCodeClassPanel::isDirty(t.assetPath)) return;
+                    HorizonCodeClassPanel::isDirty(t.assetPath) ||
+                    InputAssetPanel::isDirty(t.assetPath)) return;
                 ScriptEditorPanel::forget(t.assetPath);
                 MaterialEditorPanel::forget(t.assetPath);
                 UIEditorPanel::forget(t.assetPath);
                 HorizonCodeClassPanel::forget(t.assetPath);
+                InputAssetPanel::forget(t.assetPath);
             };
 
             for (int i = 0; i < static_cast<int>(s_tabs.size()); )
@@ -3049,7 +3096,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                     (ScriptEditorPanel::isDirty(tab.assetPath) ||
                      MaterialEditorPanel::isDirty(tab.assetPath) ||
                      UIEditorPanel::isDirty(tab.assetPath) ||
-                     HorizonCodeClassPanel::isDirty(tab.assetPath));
+                     HorizonCodeClassPanel::isDirty(tab.assetPath) ||
+                     InputAssetPanel::isDirty(tab.assetPath));
                 const std::string shown = tab.label + (tabDirty ? " *" : "")
                     + "###tab_" + (tab.assetPath.empty() ? std::string("scene") : tab.assetPath);
                 if (ImGui::BeginTabItem(shown.c_str(), tab.closable ? &pOpen : nullptr, flags))
@@ -3119,6 +3167,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
             UIEditorPanel::render(ctx, tabPath, tabPos, tabSize);
         else if (HorizonCodeClassPanel::isClassAsset(tabPath))
             HorizonCodeClassPanel::render(ctx, tabPath, tabPos, tabSize);
+        else if (InputAssetPanel::isInputAsset(tabPath))
+            InputAssetPanel::render(ctx, tabPath, tabPos, tabSize);
         else
             ScriptEditorPanel::render(ctx, tabPath, tabPos, tabSize);
         return;
@@ -4390,6 +4440,24 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 		// ── Tree: single-click = expand/collapse, double-click = navigate ──
 		static const Folder* s_selectedTreeFolder = nullptr;
 
+		// Drag-to-move: an asset dragged from the grid ("HE_ASSET_PATH") and
+		// dropped onto a folder — a grid folder item or a tree node — records
+		// the request here. It executes AFTER the draw loops (below the file
+		// grid), so the folder tree is never mutated mid-iteration and the
+		// Folder* pointers stay valid for the whole frame.
+		static std::string s_pendingMoveSrc; // absolute path of the dragged asset
+		static std::string s_pendingMoveDst; // absolute path of the target folder
+		auto folderDropTarget = [&](const std::string& folderAbs)
+		{
+			if (!ImGui::BeginDragDropTarget()) return;
+			if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_ASSET_PATH"))
+			{
+				s_pendingMoveSrc.assign(static_cast<const char*>(p->Data));
+				s_pendingMoveDst = folderAbs;
+			}
+			ImGui::EndDragDropTarget();
+		};
+
 		std::function<void(const Folder*, int)> renderTree = [&](const Folder* folder, int depth)
 		{
 			ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow
@@ -4397,7 +4465,11 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 			if (folder->subfolders.empty())
 				flags |= ImGuiTreeNodeFlags_Leaf;
 
+			// ID by full path: sibling subtrees may repeat folder names, and the
+			// drop target below must land on THIS node, not a same-named twin.
+			ImGui::PushID(folder->fullPath.c_str());
 			bool open = ImGui::TreeNodeEx(folder->name.c_str(), flags);
+			folderDropTarget(folder->fullPath); // move dragged assets into this folder
 
 			// Double-click anywhere on the item → navigate grid to this folder
 			if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
@@ -4409,6 +4481,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 					renderTree(sub, depth + 1);
 				ImGui::TreePop();
 			}
+			ImGui::PopID();
 		};
 
 		// Root "Content" node
@@ -4417,6 +4490,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 										 | ImGuiTreeNodeFlags_DefaultOpen
 										 | ImGuiTreeNodeFlags_SpanAvailWidth;
 			bool rootOpen = ImGui::TreeNodeEx("Content", rootFlags);
+			folderDropTarget(contentFolder.fullPath); // move to the content root
 			if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
 				s_selectedTreeFolder = nullptr; // back to root
 			if (rootOpen)
@@ -4561,9 +4635,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 		constexpr float k_cellSize    = 72.0f;
 		constexpr float k_iconPad     = 6.0f;   // padding inside ImageButton
 		constexpr float k_iconSize    = k_cellSize - k_iconPad * 2.0f;
-		constexpr float k_labelHeight = 16.0f;
 		constexpr float k_padding     = 8.0f;
-		constexpr float k_itemSize    = k_cellSize + k_labelHeight + k_padding;
 
 		// Helper: pick an asset icon based on file extension
 		auto pickAssetIcon = [&](const std::string& ext) -> ImTextureID
@@ -4584,8 +4656,13 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				return 0;
 		};
 
+		// Column count from the HORIZONTAL stride only: an item is k_cellSize
+		// wide (icon button = icon + 2×frame padding) with k_padding ItemSpacing
+		// between columns; the label renders BELOW the icon and adds height, not
+		// width. N items fit when N*cell + (N-1)*spacing <= avail.
 		const float availW     = ImGui::GetContentRegionAvail().x;
-		const int   columns    = (std::max)(1, static_cast<int>(availW / k_itemSize));
+		const int   columns    = (std::max)(1, static_cast<int>(
+			(availW + k_padding) / (k_cellSize + k_padding)));
 
 		ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(k_padding, k_padding));
 
@@ -4641,6 +4718,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 			{
 				ImGui::Button("##icon", ImVec2(k_cellSize, k_cellSize));
 			}
+			folderDropTarget(sub->fullPath); // move dragged assets into this folder
 
 			// Left click → select
 			if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
@@ -4769,7 +4847,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				         MaterialEditorPanel::isMaterialAsset(file->fullPath) ||
 				         MaterialEditorPanel::isMaterialFunctionAsset(file->fullPath) ||
 				         UIEditorPanel::isWidgetAsset(file->fullPath) ||
-				         HorizonCodeClassPanel::isClassAsset(file->fullPath))
+				         HorizonCodeClassPanel::isClassAsset(file->fullPath) ||
+				         InputAssetPanel::isInputAsset(file->fullPath))
 				{
 				const std::string tabLabel = std::filesystem::path(file->name).stem().string();
 				auto it = std::find_if(ctx.tabs.begin(), ctx.tabs.end(),
@@ -4823,6 +4902,38 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 
 		ImGui::PopStyleVar();
 
+		// ── Execute a drag-to-move recorded by a folder drop target ───────
+		// Same operation as the rename popup's OK handler (a rename IS a move
+		// within one folder): plain disk rename + selection/tab fixups + a
+		// quiet content refresh. Skipped when the drop lands on the asset's
+		// own folder or the name already exists in the target.
+		if (!s_pendingMoveSrc.empty() && !s_pendingMoveDst.empty())
+		{
+			const std::filesystem::path src(s_pendingMoveSrc);
+			const std::filesystem::path dst =
+				std::filesystem::path(s_pendingMoveDst) / src.filename();
+			std::error_code ec;
+			const bool sameFolder =
+				std::filesystem::equivalent(src.parent_path(), s_pendingMoveDst, ec);
+			if (!sameFolder && std::filesystem::exists(src) &&
+			    !std::filesystem::exists(dst))
+			{
+				ec.clear();
+				std::filesystem::rename(src, dst, ec);
+				if (!ec)
+				{
+					if (s_selectedItem == s_pendingMoveSrc)
+						s_selectedItem = dst.string();
+					for (auto& t : ctx.tabs)
+						if (t.assetPath == s_pendingMoveSrc)
+							t.assetPath = dst.string();
+					s_quietContentRefresh = true;
+				}
+			}
+			s_pendingMoveSrc.clear();
+			s_pendingMoveDst.clear();
+		}
+
 		// ── Open item context menu after loops ────────────────────────────
 		// ── Shared "Create Asset" menu body ─────────────────────────────────
 		// Used by BOTH the background right-click popup and the item context
@@ -4831,7 +4942,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 		auto drawCreateAssetItems = [&](const std::string& targetFolder)
 		{
 			auto tryCreate = [&](const char* defaultName, const char* ext, HE::AssetType type,
-			                     ScriptLanguage scriptLang = ScriptLanguage::Lua)
+			                     ScriptLanguage scriptLang = ScriptLanguage::Lua,
+			                     const char* hcBaseClass = nullptr)
 			{
 				// Build a path that does not yet exist
 				std::string base = targetFolder + "/" + defaultName;
@@ -4882,6 +4994,23 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 					{
 						const std::string graph = HorizonCode::toJson(HorizonCode::Graph{});
 						w.addChunk(HAsset::CHUNK_HCGR, graph.data(), graph.size());
+						// The base class decides the event catalog (e.g. input events on
+						// PlayerController/PlayerCharacter), so it is part of the asset's
+						// identity from birth. Absent chunk = plain Object.
+						if (hcBaseClass && *hcBaseClass)
+							w.addChunk(HAsset::CHUNK_HCBC, hcBaseClass, std::strlen(hcBaseClass));
+					}
+					// Input assets are born with valid minimal JSON so their editors and
+					// the runtime parser never see an empty payload.
+					if (type == HE::AssetType::InputAction)
+					{
+						const char* json = "{\"valueType\":\"Button\"}";
+						w.addChunk(HAsset::CHUNK_IACT, json, std::strlen(json));
+					}
+					if (type == HE::AssetType::InputMappingContext)
+					{
+						const char* json = "{\"entries\":[]}";
+						w.addChunk(HAsset::CHUNK_IMAP, json, std::strlen(json));
 					}
 					w.write(path, static_cast<uint16_t>(type));
 				}
@@ -4905,6 +5034,16 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 			if (ImGui::MenuItem("Material Function")) tryCreate("NewMaterialFunction", ".hasset", HE::AssetType::MaterialFunction);
 			if (ImGui::MenuItem("UI Widget"))    tryCreate("NewWidget",   ".hasset",  HE::AssetType::Widget);
 			if (ImGui::MenuItem("HorizonCode Class")) tryCreate("NewClass", ".hasset", HE::AssetType::HorizonCodeClass);
+			if (ImGui::BeginMenu("HorizonCode Player"))
+			{
+				if (ImGui::MenuItem("Player Controller"))
+					tryCreate("NewPlayerController", ".hasset", HE::AssetType::HorizonCodeClass, ScriptLanguage::Lua, "PlayerController");
+				if (ImGui::MenuItem("Player Character"))
+					tryCreate("NewPlayerCharacter", ".hasset", HE::AssetType::HorizonCodeClass, ScriptLanguage::Lua, "PlayerCharacter");
+				ImGui::EndMenu();
+			}
+			if (ImGui::MenuItem("Input Action"))          tryCreate("NewInputAction",  ".hasset", HE::AssetType::InputAction);
+			if (ImGui::MenuItem("Input Mapping Context")) tryCreate("NewInputMapping", ".hasset", HE::AssetType::InputMappingContext);
 			if (ImGui::MenuItem("Texture"))      tryCreate("NewTexture",  ".hasset",  HE::AssetType::Texture);
 			if (ImGui::MenuItem("Static Mesh"))  tryCreate("NewMesh",     ".hasset",  HE::AssetType::StaticMesh);
 			if (ImGui::MenuItem("Skeletal Mesh"))tryCreate("NewSkelMesh", ".hasset",  HE::AssetType::SkeletalMesh);

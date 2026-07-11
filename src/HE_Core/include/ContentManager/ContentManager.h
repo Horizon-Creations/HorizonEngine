@@ -52,6 +52,10 @@ public:
 	UIWidgetAsset*             getWidgetMutable(HE::UUID id);
 	const HorizonCodeClassAsset* getHorizonCodeClass(HE::UUID id) const;
 	HorizonCodeClassAsset*       getHorizonCodeClassMutable(HE::UUID id);
+	const InputActionAsset*        getInputAction(HE::UUID id) const;
+	InputActionAsset*              getInputActionMutable(HE::UUID id);
+	const InputMappingContextAsset* getInputMappingContext(HE::UUID id) const;
+	InputMappingContextAsset*       getInputMappingContextMutable(HE::UUID id);
 	const ShaderAsset*         getShader(HE::UUID id) const;
 	const PrefabAsset*         getPrefab(HE::UUID id) const;
 	const AnimationClipAsset*  getAnimationClip(HE::UUID id) const;
@@ -113,6 +117,8 @@ public:
 	HE::UUID registerMaterialFunction(MaterialFunctionAsset asset);
 	HE::UUID registerWidget(UIWidgetAsset asset);
 	HE::UUID registerHorizonCodeClass(HorizonCodeClassAsset asset);
+	HE::UUID registerInputAction(InputActionAsset asset);
+	HE::UUID registerInputMappingContext(InputMappingContextAsset asset);
 	HE::UUID registerAnimationClip(AnimationClipAsset asset);
 	HE::UUID registerPropertyAnimClip(PropertyAnimClipAsset asset);
 
@@ -298,6 +304,8 @@ private:
 	SlotMap<MaterialFunctionAsset> m_materialFunctionAssets;
 	SlotMap<UIWidgetAsset>      m_widgetAssets;
 	SlotMap<HorizonCodeClassAsset> m_hcClassAssets;
+	SlotMap<InputActionAsset>        m_inputActionAssets;
+	SlotMap<InputMappingContextAsset> m_inputMappingAssets;
 	SlotMap<AudioAsset>         m_audioAssets;
 	SlotMap<FontAsset>          m_fontAssets;
 	SlotMap<ShaderAsset>        m_shaderAssets;

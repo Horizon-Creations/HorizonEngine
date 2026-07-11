@@ -4,6 +4,7 @@ add_library(HorizonCore SHARED
 	src/Application/GameLogicLoader.cpp
 	src/Application/Input.cpp
 	src/Application/InputMapping.cpp
+	src/Application/InputAssets.cpp
 	src/Diagnostics/GlobalState.cpp
 	src/Diagnostics/Logger.cpp
 	src/Diagnostics/Profiler.cpp

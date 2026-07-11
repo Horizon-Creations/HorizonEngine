@@ -710,3 +710,76 @@ TEST_CASE("WidgetManager variables persist across separate function calls")
     wm.extract(1920.0f, 1080.0f, out);
     CHECK(countGlyphs(out) == 5);                  // "hello" persisted across calls
 }
+
+// ── Shared base properties (getPropAny/setPropAny/allProperties) ─────────────
+
+TEST_CASE("base properties are gettable and settable on every element type")
+{
+    using namespace HE;
+    for (UIWidgetType t : uiWidgetTypeRegistry())
+    {
+        auto e = makeUIElement(t);
+        REQUIRE(e != nullptr);
+
+        // Visible / Hit Testable round-trip
+        e->setPropAny("Visible", UIPropValue::ofBool(false));
+        CHECK(!e->getPropAny("Visible").b);
+        CHECK(!e->visible);
+        e->setPropAny("Hit Testable", UIPropValue::ofBool(false));
+        CHECK(!e->getPropAny("Hit Testable").b);
+        CHECK(!e->hitTestable);
+
+        // Position / Size / Layer
+        e->setPropAny("Position", UIPropValue::ofVec2({ 11.0f, 22.0f }));
+        CHECK(e->posX == doctest::Approx(11.0f));
+        CHECK(e->posY == doctest::Approx(22.0f));
+        e->setPropAny("Size", UIPropValue::ofVec2({ 200.0f, 40.0f }));
+        CHECK(e->getPropAny("Size").v2.x == doctest::Approx(200.0f));
+        e->setPropAny("Layer", UIPropValue::ofInt(7));
+        CHECK(e->getPropAny("Layer").i == 7);
+
+        // Hover Cursor: valid index sticks, out-of-range falls back to Default
+        e->setPropAny("Hover Cursor", UIPropValue::ofInt((int)UICursor::Hand));
+        CHECK(e->hoverCursor == UICursor::Hand);
+        e->setPropAny("Hover Cursor", UIPropValue::ofInt(999));
+        CHECK(e->hoverCursor == UICursor::Default);
+
+        // Base names must be listed by allProperties (after the type's own)
+        const auto all = e->allProperties();
+        auto has = [&](const char* n) {
+            for (const auto& pd : all) if (pd.name == n) return true;
+            return false;
+        };
+        CHECK(has("Visible"));
+        CHECK(has("Hit Testable"));
+        CHECK(has("Position"));
+        CHECK(has("Size"));
+        CHECK(has("Layer"));
+        CHECK(has("Hover Cursor"));
+        CHECK(has("Material") == e->hasMaterialSlot());
+
+        // Type-specific props still route through the Any accessors
+        for (const auto& pd : e->properties())
+            CHECK(e->getPropAny(pd.name).type == e->getProp(pd.name).type);
+    }
+}
+
+TEST_CASE("Material/Font base properties round-trip as strings")
+{
+    using namespace HE;
+    auto e = makeUIElement(UIWidgetType::Button); // has material slot + text
+    e->setPropAny("Material", UIPropValue::ofString("Content/M.hasset"));
+    CHECK(e->getPropAny("Material").s == "Content/M.hasset");
+    CHECK(e->material == "Content/M.hasset");
+    e->setPropAny("Font", UIPropValue::ofString("Content/F.hasset"));
+    CHECK(e->getPropAny("Font").s == "Content/F.hasset");
+    CHECK(e->font == "Content/F.hasset");
+
+    // Font is enumerated only for text-bearing types
+    auto hasFont = [](const UIElement& el) {
+        for (const auto& pd : el.allProperties()) if (pd.name == "Font") return true;
+        return false;
+    };
+    CHECK(hasFont(*e));
+    CHECK(!hasFont(*makeUIElement(UIWidgetType::Panel)));
+}

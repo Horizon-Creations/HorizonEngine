@@ -90,6 +90,24 @@ target_include_directories(hc_codegen
     PRIVATE ${CMAKE_SOURCE_DIR}/tests/fixtures/hcodegen   # the shared parity fixtures
 )
 
+# hc_codegen runs as a build-time custom command (tests/CMakeLists.txt: parity
+# fixture generation) with no rpath equivalent and nothing guaranteeing
+# HorizonCore.dll/HorizonScene.dll are on PATH — Windows can otherwise resolve a
+# stale copy from an unrelated directory (e.g. a leftover tests/ build output)
+# and crash with STATUS_ENTRYPOINT_NOT_FOUND after an ABI change. Copying next
+# to the exe guarantees it's found first (mirrors tests/CMakeLists.txt's he_tests).
+if(WIN32)
+    add_custom_command(TARGET hc_codegen POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:HorizonCore>  $<TARGET_FILE_DIR:hc_codegen>
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:HorizonScene> $<TARGET_FILE_DIR:hc_codegen>
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:SDL3-shared>  $<TARGET_FILE_DIR:hc_codegen>
+        VERBATIM
+    )
+endif()
+
 # ─── shader_compiler.exe ───────────────────────────────────────────────────────
 add_executable(shader_compiler
     src/ShaderCompiler/main.cpp

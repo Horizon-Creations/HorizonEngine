@@ -247,3 +247,55 @@ TEST_CASE("InputMapping: re-mapping an action replaces its bindings")
     im.tick(input);
     CHECK(im.isPressed("Jump"));
 }
+
+// ─── Input asset glue (Application/InputAssets.h) ─────────────────────────────
+
+#include <Application/InputAssets.h>
+
+TEST_CASE("InputAssets: event names + action name from path")
+{
+    CHECK(HE::inputEventPressed("IA_Jump")  == "Input.IA_Jump.Pressed");
+    CHECK(HE::inputEventReleased("IA_Jump") == "Input.IA_Jump.Released");
+    CHECK(HE::inputEventAxis("IA_Move")     == "Input.IA_Move.Axis");
+    CHECK(HE::inputActionNameFromPath("Content/Input/IA_Jump.hasset") == "IA_Jump");
+}
+
+TEST_CASE("InputAssets: action value type parse is tolerant")
+{
+    CHECK(HE::inputActionIsAxis(R"({"valueType":"Axis"})"));
+    CHECK(!HE::inputActionIsAxis(R"({"valueType":"Button"})"));
+    CHECK(!HE::inputActionIsAxis(R"({})"));        // missing → Button
+    CHECK(!HE::inputActionIsAxis("not json"));     // malformed → Button
+}
+
+TEST_CASE("InputAssets: applyInputMappingContext binds keys and axes")
+{
+    InputMapping im;
+    const std::string json = R"({"entries":[
+        {"action":"Content/Input/IA_Jump.hasset","keys":["Space"]},
+        {"action":"Content/Input/IA_Move.hasset",
+         "axes":[{"positive":"W","negative":"S","scale":1.0}]}
+    ]})";
+    CHECK(HE::applyInputMappingContext(im, json) == 2);
+    CHECK(im.actionCount() == 1);
+    CHECK(im.axisCount()   == 1);
+
+    // The bound names are the action-path stems; drive them via a real Input.
+    Input input;
+    pressKey(input, SDL_SCANCODE_SPACE);
+    pressKey(input, SDL_SCANCODE_W);
+    im.tick(input);
+    CHECK(im.isPressed("IA_Jump"));
+    CHECK(im.axisValue("IA_Move") == doctest::Approx(1.0f));
+}
+
+TEST_CASE("InputAssets: malformed mapping JSON binds nothing")
+{
+    InputMapping im;
+    CHECK(HE::applyInputMappingContext(im, "nope") == 0);
+    CHECK(HE::applyInputMappingContext(im, R"({"entries":"x"})") == 0);
+    // Unknown key names are skipped; an entry with no valid binding counts 0.
+    CHECK(HE::applyInputMappingContext(im,
+        R"({"entries":[{"action":"IA_X.hasset","keys":["NoSuchKey_123"]}]})") == 0);
+    CHECK(im.actionCount() == 0);
+}

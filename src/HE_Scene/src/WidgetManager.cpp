@@ -51,21 +51,56 @@ HorizonCode::HostBindings WidgetManager::makeBindings()
 	{
 		Instance* w = findByScript(id);
 		const HE::UIElement* e = w ? w->tree.find(elem) : nullptr;
-		return e ? HE::uiPropToHcValue(e->getProp(prop)) : HorizonCode::Value{};
+		// getPropAny/setPropAny: base properties (Visible, Hit Testable,
+		// Position, Size, Layer, Hover Cursor, Material, Font) plus the
+		// type-specific ones — every property is both gettable and settable.
+		return e ? HE::uiPropToHcValue(e->getPropAny(prop)) : HorizonCode::Value{};
 	};
 	b.setProperty = [this](HorizonCode::InstanceId id, int elem, const std::string& prop, const HorizonCode::Value& v)
 	{
 		Instance* w = findByScript(id);
 		HE::UIElement* e = w ? w->tree.find(elem) : nullptr;
-		if (e) e->setProp(prop, HE::uiHcValueToProp(v, e->getProp(prop).type));
+		if (!e) return;
+		e->setPropAny(prop, HE::uiHcValueToProp(v, e->getPropAny(prop).type));
+		// Asset-path properties change what the element draws with — re-resolve
+		// immediately so the set is visible this frame, not on the next reload.
+		if (prop == "Material" || prop == "Font")
+			refreshElementAssets(*w, *e);
 	};
 	b.showSelf = [this](HorizonCode::InstanceId id){ if (Instance* w = findByScript(id)) w->visible = true; };
 	b.hideSelf = [this](HorizonCode::InstanceId id){ if (Instance* w = findByScript(id)) w->visible = false; };
 	return b;
 }
 
+void WidgetManager::refreshElementAssets(Instance& w, HE::UIElement& e)
+{
+	if (!m_content) return;
+	// Material path → UUID (mirrors the createWidget loop for one element).
+	if (e.material.empty())
+		w.materials.erase(e.id);
+	else
+	{
+		const HE::UUID mid = m_content->loadAsset(e.material);
+		if (mid == HE::UUID{}) w.materials.erase(e.id);
+		else                   w.materials[e.id] = mid;
+	}
+	// Font path → baked atlas key (0 = shared default font).
+	e.fontAtlasKey = 0;
+	if (!e.font.empty())
+	{
+		const HE::UUID fid = m_content->loadAsset(e.font);
+		if (const FontAsset* fa = fid == HE::UUID{} ? nullptr : m_content->getFont(fid);
+		    fa && !fa->fontData.empty())
+		{
+			const float bakePx = fa->size > 0 ? (float)fa->size : 48.0f;
+			e.fontAtlasKey = HE::UIFontCache::keyFor(fid.hi ^ fid.lo, fa->fontData, bakePx);
+		}
+	}
+}
+
 int WidgetManager::createWidget(ContentManager& content, const std::string& assetPath)
 {
+	m_content = &content; // kept for runtime Material/Font re-resolution
 	const HE::UUID assetId = content.loadAsset(assetPath);
 	const UIWidgetAsset* asset = content.getWidget(assetId);
 	if (!asset)

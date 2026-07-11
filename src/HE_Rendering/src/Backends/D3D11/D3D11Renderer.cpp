@@ -3,6 +3,8 @@
 #include <ContentManager/ContentManager.h>
 #include <HorizonRendering/RenderWorld.h>
 #include <Renderer/UIRenderObject.h>
+#include <Renderer/UIFont.h>
+#include <Diagnostics/EngineProfiler.h>
 #include <HorizonRendering/RenderExtractor.h>
 #include <HorizonRendering/FrustumCuller.h>
 #include <HorizonRendering/RenderSorter.h>
@@ -976,14 +978,21 @@ float4 main(In i) : SV_Target {
 
 // ─── 2D UI canvas HLSL ──────────────────────────────────────────────────────
 // Generates a screen-space quad from SV_VertexID (0-3, TRIANGLESTRIP).
-// cbuffer layout: rect(16) + color(16) + viewport(8) + pad(8) = 48 bytes.
+// cbuffer layout: rect(16) + color(16) + uvRect(16) + viewport(8) + mode(4) +
+// pad(4) = 64 bytes.  uUVRect = {u0, v0, u1, v1} into the font atlas (glyph
+// quads); uMode: 0 = solid color, 1 = font-atlas glyph (alpha from the atlas R
+// channel).  Mirrors kUIVS/kUIFS on the GL backend.
 static const char* kUIHLSL = R"HLSL(
 cbuffer UICB : register(b0) {
     float4 uRect;      // xy = top-left in pixels, zw = size in pixels
     float4 uColor;     // rgba
+    float4 uUVRect;    // glyph atlas UVs: xy = min, zw = max
     float2 uViewport;  // w, h in pixels
-    float2 _upad;
+    float  uMode;      // 0 = solid quad, 1 = font-atlas glyph
+    float  _upad;
 };
+Texture2D    uFontAtlas : register(t0);
+SamplerState uSamp      : register(s0);
 struct UIOut { float4 clip : SV_POSITION; float2 uv : TEXCOORD0; };
 UIOut UIVSMain(uint vid : SV_VertexID)
 {
@@ -994,10 +1003,15 @@ UIOut UIVSMain(uint vid : SV_VertexID)
     o.clip = float4(sp.x / uViewport.x * 2.0f - 1.0f,
                     1.0f - sp.y / uViewport.y * 2.0f,
                     0.0f, 1.0f);
-    o.uv = uv;
+    o.uv = lerp(uUVRect.xy, uUVRect.zw, uv);
     return o;
 }
-float4 UIPSMain(UIOut i) : SV_TARGET { return uColor; }
+float4 UIPSMain(UIOut i) : SV_TARGET
+{
+    if (uMode > 0.5f)
+        return float4(uColor.rgb, uColor.a * uFontAtlas.Sample(uSamp, i.uv).r);
+    return uColor;
+}
 )HLSL";
 
 namespace
@@ -1235,9 +1249,174 @@ struct D3D11RendererImpl
     // ── UI canvas pipeline ────────────────────────────────────────────────────
     ComPtr<ID3D11VertexShader>      uiVS;
     ComPtr<ID3D11PixelShader>       uiPS;
-    ComPtr<ID3D11Buffer>            uiCB;       // 48 bytes: rect(16)+color(16)+viewport(8)+pad(8)
+    ComPtr<ID3D11Buffer>            uiCB;       // 64 bytes: rect(16)+color(16)+uvRect(16)+viewport(8)+mode(4)+pad(4)
     ComPtr<ID3D11BlendState>        uiBlend;    // alpha blend
     ComPtr<ID3D11DepthStencilState> uiDepth;    // depth test off
+    ComPtr<ID3D11SamplerState>      uiSampler;  // linear + clamp, for the font atlas
+    // R8 font atlases uploaded lazily from UIFontCache (key 0 = shared default
+    // font). Atlas bitmaps are immutable once baked, so a one-time upload per
+    // key is safe; failed bakes are NOT cached so a late-baking font still lands.
+    struct UIFontAtlas { ComPtr<ID3D11Texture2D> tex; ComPtr<ID3D11ShaderResourceView> srv; };
+    std::unordered_map<uint32_t, UIFontAtlas> uiFontAtlases;
+
+    // The atlas SRV for a font key, uploaded on first use. Falls back to the 1x1
+    // white dummy (glyphs render as solid boxes) so the pass never binds null.
+    ID3D11ShaderResourceView* uiFontAtlasSRV(uint32_t key)
+    {
+        if (auto it = uiFontAtlases.find(key); it != uiFontAtlases.end())
+            return it->second.srv.Get();
+        const HE::BakedUIFont* f = (key == 0) ? &HE::sharedUIFont() : HE::UIFontCache::find(key);
+        if (!f || !f->ok || f->pixels.empty())
+            return dummyTexture.Get();
+
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width  = static_cast<UINT>(f->atlasW);
+        td.Height = static_cast<UINT>(f->atlasH);
+        td.MipLevels = td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_R8_UNORM;
+        td.SampleDesc.Count = 1;
+        td.Usage     = D3D11_USAGE_IMMUTABLE;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        D3D11_SUBRESOURCE_DATA srd{};
+        srd.pSysMem     = f->pixels.data();
+        srd.SysMemPitch = static_cast<UINT>(f->atlasW); // R8 = 1 byte/texel
+
+        UIFontAtlas a;
+        if (FAILED(device->CreateTexture2D(&td, &srd, &a.tex)) ||
+            FAILED(device->CreateShaderResourceView(a.tex.Get(), nullptr, &a.srv)))
+            return dummyTexture.Get();
+        ID3D11ShaderResourceView* raw = a.srv.Get();
+        uiFontAtlases.emplace(key, std::move(a));
+        return raw;
+    }
+
+    // ── Profiler GPU timing (whole-frame) ─────────────────────────────────────
+    // One D3D11_QUERY_TIMESTAMP pair inside a TIMESTAMP_DISJOINT per frame, kept
+    // in a small ring so a slot is only read back kGpuTimerRing frames after it
+    // was issued — GetData(flags=0) at that age never blocks in practice, and a
+    // not-yet-ready slot is dropped rather than stalling the pipeline. Queries
+    // are only issued while the profiler is recording / live (never on the hot
+    // path otherwise, mirroring the GL backend).
+    static constexpr int kGpuTimerRing = 4;
+    struct GpuTimerSlot
+    {
+        ComPtr<ID3D11Query> disjoint, tsStart, tsEnd;
+        bool pending = false; // issued, result not consumed yet
+    };
+    GpuTimerSlot gpuSlots[kGpuTimerRing];
+    uint64_t gpuFrameIdx     = 0;
+    int      gpuCurSlot      = -1;
+    bool     gpuTimerInit    = false;
+    bool     gpuTimingActive = false;
+    bool     gpuWasActive    = false;
+    bool     gpuDetailed     = false;
+    IRenderer::FrameGpuStats lastGpuStats;
+    // CPU counters merged into GetFrameGpuStats (scene draws only, like GL:
+    // instanced batches count per instance drawn, tris scaled accordingly).
+    struct FrameCounters { uint32_t draws = 0, tris = 0, visible = 0, total = 0; };
+    FrameCounters counters;
+
+    void gpuTimerReap(GpuTimerSlot& slot, bool block)
+    {
+        if (!slot.pending) return;
+        if (block) context->Flush(); // make sure the queries can complete
+        auto fetch = [&](ID3D11Query* q, void* out, UINT size) -> bool
+        {
+            HRESULT hr = context->GetData(q, out, size, 0);
+            while (block && hr == S_FALSE)
+                hr = context->GetData(q, out, size, 0);
+            return hr == S_OK;
+        };
+        D3D11_QUERY_DATA_TIMESTAMP_DISJOINT dj{};
+        UINT64 t0 = 0, t1 = 0;
+        if (!fetch(slot.disjoint.Get(), &dj, sizeof(dj)) ||
+            !fetch(slot.tsStart.Get(),  &t0, sizeof(t0)) ||
+            !fetch(slot.tsEnd.Get(),    &t1, sizeof(t1)))
+        {
+            slot.pending = false; // slot is about to be reused — drop the sample
+            return;
+        }
+        slot.pending = false;
+        // Disjoint frames (clock change / power event) yield garbage deltas —
+        // keep the previous reading rather than publishing one.
+        if (dj.Disjoint || dj.Frequency == 0 || t1 < t0) return;
+        lastGpuStats.gpuFrameMs    = static_cast<double>(t1 - t0) * 1000.0
+                                   / static_cast<double>(dj.Frequency);
+        lastGpuStats.passes.clear(); // whole-frame timing: no per-pass breakdown
+        lastGpuStats.gpuTimingMode = "whole-frame";
+    }
+
+    void gpuTimerBeginFrame()
+    {
+        // Latch the profiler decision once per frame so Begin/EndFrame agree
+        // (a mid-frame toggle can never unbalance a Begin/End pair).
+        EngineProfiler& prof = EngineProfiler::instance();
+        const bool rec  = prof.isRecording();
+        const bool live = prof.liveEnabled();
+        gpuTimingActive = device && (rec || live);
+        // Same-frame reap (one Flush + spin) for detailed / single-frame capture:
+        // the profiler reads that frame's stats immediately, so the async ring
+        // would attribute a different frame's GPU time to it (mirrors GL's glFinish).
+        gpuDetailed = gpuTimingActive && rec
+                   && (prof.detailedGpuCapture() || prof.isSingleFrameCapture());
+        const bool freshActivation = gpuTimingActive && !gpuWasActive;
+        gpuWasActive = gpuTimingActive;
+        gpuCurSlot   = -1;
+        if (!gpuTimingActive) return;
+
+        if (!gpuTimerInit)
+        {
+            const D3D11_QUERY_DESC dq{ D3D11_QUERY_TIMESTAMP_DISJOINT, 0 };
+            const D3D11_QUERY_DESC tq{ D3D11_QUERY_TIMESTAMP, 0 };
+            bool ok = true;
+            for (GpuTimerSlot& s : gpuSlots)
+                ok = ok && SUCCEEDED(device->CreateQuery(&dq, &s.disjoint))
+                        && SUCCEEDED(device->CreateQuery(&tq, &s.tsStart))
+                        && SUCCEEDED(device->CreateQuery(&tq, &s.tsEnd));
+            if (!ok)
+            {
+                for (GpuTimerSlot& s : gpuSlots) s = GpuTimerSlot{};
+                gpuTimingActive = false; // GetFrameGpuStats keeps gpuFrameMs = -1
+                return;
+            }
+            gpuTimerInit = true;
+        }
+        // On (re)activation, drop stale in-flight slots so the profiler shows
+        // "no data yet" (gpuFrameMs = -1) instead of cross-session numbers.
+        if (freshActivation)
+        {
+            for (GpuTimerSlot& s : gpuSlots) s.pending = false;
+            lastGpuStats = IRenderer::FrameGpuStats{};
+        }
+
+        const int idx = static_cast<int>(gpuFrameIdx % kGpuTimerRing);
+        GpuTimerSlot& slot = gpuSlots[idx];
+        gpuTimerReap(slot, /*block=*/false); // issued kGpuTimerRing frames ago
+        gpuCurSlot = idx;
+        context->Begin(slot.disjoint.Get());
+        context->End(slot.tsStart.Get()); // timestamps have no Begin, only End
+    }
+
+    void gpuTimerEndFrame()
+    {
+        if (!gpuTimingActive || gpuCurSlot < 0) { ++gpuFrameIdx; return; }
+        GpuTimerSlot& slot = gpuSlots[gpuCurSlot];
+        context->End(slot.tsEnd.Get());
+        context->End(slot.disjoint.Get());
+        slot.pending = true;
+        if (gpuDetailed)
+            gpuTimerReap(slot, /*block=*/true);
+        gpuCurSlot = -1;
+        ++gpuFrameIdx;
+    }
+
+    void gpuTimerShutdown()
+    {
+        for (GpuTimerSlot& s : gpuSlots) s = GpuTimerSlot{};
+        gpuTimerInit = false;
+        gpuWasActive = false;
+        lastGpuStats = IRenderer::FrameGpuStats{};
+    }
 
     void createHDRTargets(uint32_t w, uint32_t h)
     {
@@ -2228,13 +2407,21 @@ struct D3D11RendererImpl
         dev.CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &uiVS);
         dev.CreatePixelShader (psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &uiPS);
 
-        // cbuffer: float4 rect(16) + float4 color(16) + float2 viewport(8) + float2 pad(8) = 48 bytes
+        // cbuffer: rect(16) + color(16) + uvRect(16) + viewport(8) + mode(4) + pad(4) = 64 bytes
         D3D11_BUFFER_DESC bd{};
-        bd.ByteWidth      = 48u;
+        bd.ByteWidth      = 64u;
         bd.Usage          = D3D11_USAGE_DYNAMIC;
         bd.BindFlags      = D3D11_BIND_CONSTANT_BUFFER;
         bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
         dev.CreateBuffer(&bd, nullptr, &uiCB);
+
+        // Atlas sampler: linear + clamp so glyph edges never wrap-bleed into
+        // neighbouring atlas cells.
+        D3D11_SAMPLER_DESC sd{};
+        sd.Filter   = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+        sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+        sd.MaxLOD   = D3D11_FLOAT32_MAX;
+        dev.CreateSamplerState(&sd, &uiSampler);
 
         D3D11_BLEND_DESC bd2{};
         bd2.RenderTarget[0].BlendEnable            = TRUE;
@@ -2269,15 +2456,29 @@ struct D3D11RendererImpl
         ctx->OMSetBlendState(uiBlend.Get(), blendFactor, 0xFFFFFFFF);
         ctx->OMSetDepthStencilState(uiDepth.Get(), 0);
 
-        struct UICBData { glm::vec4 rect; glm::vec4 color; glm::vec2 viewport; glm::vec2 pad; };
+        // Font atlas on t0 (uFontAtlas); glyphs sample it, solid quads ignore it.
+        ctx->PSSetSamplers(0, 1, uiSampler.GetAddressOf());
+        ID3D11ShaderResourceView* atlas = uiFontAtlasSRV(0);
+        ctx->PSSetShaderResources(0, 1, &atlas);
+        uint32_t boundAtlasKey = 0;
+
+        struct UICBData { glm::vec4 rect; glm::vec4 color; glm::vec4 uvRect; glm::vec2 viewport; float mode; float pad; };
         for (const UIRenderObject& obj : m_renderWorld.uiObjects)
         {
-            if (obj.type == 2) continue; // font-atlas glyph quads: GL/Metal only for now
+            // A glyph quad may use an imported font's atlas — bind it on t0.
+            if (obj.type == 2 && obj.fontAtlasKey != boundAtlasKey)
+            {
+                atlas = uiFontAtlasSRV(obj.fontAtlasKey);
+                ctx->PSSetShaderResources(0, 1, &atlas);
+                boundAtlasKey = obj.fontAtlasKey;
+            }
             UICBData cb;
             cb.rect     = glm::vec4(obj.position.x, obj.position.y, obj.size.x, obj.size.y);
             cb.color    = obj.color;
+            cb.uvRect   = glm::vec4(obj.uvMin.x, obj.uvMin.y, obj.uvMax.x, obj.uvMax.y);
             cb.viewport = glm::vec2(float(width), float(height));
-            cb.pad      = glm::vec2(0.0f, 0.0f);
+            cb.mode     = obj.type == 2 ? 1.0f : 0.0f;
+            cb.pad      = 0.0f;
             D3D11_MAPPED_SUBRESOURCE mr{};
             if (SUCCEEDED(ctx->Map(uiCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mr)))
             {
@@ -2287,7 +2488,8 @@ struct D3D11RendererImpl
             ctx->Draw(4, 0);
         }
 
-        // Restore: opaque blend, depth on
+        // Restore: no atlas SRV, opaque blend, depth on
+        { ID3D11ShaderResourceView* nullSrv = nullptr; ctx->PSSetShaderResources(0, 1, &nullSrv); }
         ctx->OMSetBlendState(nullptr, blendFactor, 0xFFFFFFFF);
         ctx->OMSetDepthStencilState(nullptr, 0);
     }
@@ -2439,6 +2641,9 @@ void D3D11Renderer::Shutdown()
 {
     Logger::Log(Logger::LogLevel::Info, "D3D11Renderer: shutdown");
     m_impl->meshCache.clear();
+    m_impl->uiFontAtlases.clear();
+    m_impl->uiSampler.Reset();
+    m_impl->gpuTimerShutdown();
     m_impl->skyVS.Reset(); m_impl->skyPS.Reset(); m_impl->skyCB.Reset();
     m_impl->moonSRV.Reset(); m_impl->moonTex2D.Reset();
     m_impl->noiseSRV.Reset(); m_impl->noiseTex3D.Reset(); m_impl->skyNoiseSampler.Reset();
@@ -2499,6 +2704,8 @@ void D3D11Renderer::DrawScene(int width, int height)
 
     p.m_culler.cull(p.m_renderWorld, p.m_visible);
     p.m_sorter.sort(p.m_renderWorld, p.m_visible, p.m_sortedIndices);
+    p.counters.total   = static_cast<uint32_t>(p.m_renderWorld.objects.size());
+    p.counters.visible = static_cast<uint32_t>(p.m_sortedIndices.size());
     if (p.m_sortedIndices.empty()) return;
 
     if (p.m_renderGraph.empty())
@@ -2688,11 +2895,15 @@ void D3D11Renderer::DrawScene(int width, int height)
                     uploadObject(viewProj * t, t, dc.baseColor, hasTex,
                                  dc.metallic, dc.roughness, dc.opacity);
                     ctx->DrawIndexed(m.indexCount, 0, 0);
+                    ++p.counters.draws;
+                    p.counters.tris += m.indexCount / 3;
                 }
             else {
                 uploadObject(viewProj * dc.transform, dc.transform,
                              dc.baseColor, hasTex, dc.metallic, dc.roughness, dc.opacity);
                 ctx->DrawIndexed(m.indexCount, 0, 0);
+                ++p.counters.draws;
+                p.counters.tris += m.indexCount / 3;
             }
         };
 
@@ -2744,6 +2955,8 @@ void D3D11Renderer::DrawScene(int width, int height)
                 ctx->PSSetShaderResources(0, 1, &albedoSrv);
 
                 ctx->DrawIndexed(static_cast<UINT>(sm->indexCount), 0, 0);
+                ++p.counters.draws;
+                p.counters.tris += static_cast<uint32_t>(sm->indexCount / 3);
             }
 
             // Restore scene VS + layout for the transparent pass
@@ -2770,6 +2983,8 @@ void D3D11Renderer::Render()
 {
     auto& p = *m_impl;
     p.m_wallTime = static_cast<float>(SDL_GetTicks()) * 0.001f;
+    p.counters = D3D11RendererImpl::FrameCounters{};
+    p.gpuTimerBeginFrame();
     const float bgColor[4] = { 0.18f, 0.18f, 0.20f, 1.0f };
 
     // Recreate the viewport RT if the editor requested a different size.
@@ -2878,6 +3093,7 @@ void D3D11Renderer::Render()
     }
 
     if (m_overlayCallback) m_overlayCallback(nullptr);
+    p.gpuTimerEndFrame();
     p.swapchain->Present(p.vsync ? 1 : 0, 0);
 }
 
@@ -2982,6 +3198,28 @@ void D3D11Renderer::SetSSAOSettings(const SSAOSettings& s)
     m_impl->ssaoRadius    = s.radius;
     m_impl->ssaoIntensity = s.intensity;
     m_impl->ssaoMethod    = s.method;
+}
+
+void D3D11Renderer::SetBloomSettings(const BloomSettings& s)
+{
+    // Same field mapping as GL: threshold feeds the bright pass, intensity is
+    // the tonemap's bloom add-back weight. The soft-knee stays at its default.
+    m_impl->bloomEnabled   = s.enabled;
+    m_impl->bloomThreshold = s.threshold;
+    m_impl->bloomStrength  = s.intensity;
+}
+
+IRenderer::FrameGpuStats D3D11Renderer::GetFrameGpuStats() const
+{
+    // GPU time comes from the newest reaped timestamp slot (1–N frames late;
+    // -1 before the first reap / while timing is inactive). CPU counters are
+    // this frame's.
+    FrameGpuStats s = m_impl->lastGpuStats;
+    s.drawCalls      = m_impl->counters.draws;
+    s.triangles      = m_impl->counters.tris;
+    s.visibleObjects = m_impl->counters.visible;
+    s.totalObjects   = m_impl->counters.total;
+    return s;
 }
 
 void D3D11Renderer::SetMoonTexture(const void* rgba8Pixels, int width, int height)

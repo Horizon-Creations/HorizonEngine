@@ -15,6 +15,7 @@
 #include <HorizonScene/CollisionSystem.h>
 #include <HorizonScene/UIInputSystem.h>
 #include <HorizonScene/GameInstanceHost.h>
+#include <HorizonScene/PlayerHost.h>
 #include <functional>
 #include <mutex>
 #include <future>
@@ -265,6 +266,7 @@ struct AppContext
 
 	// Project hub transient state
 	int&   hubSelectedPreset;
+	int&   hubSelectedLang;   // scripting-language pick (ProjectScriptLanguage order)
 	char*  hubProjectName = nullptr;  // points into EditorApplication's char array
 	int    hubProjectNameSize = 0;
 	char*  hubProjectDir  = nullptr;
@@ -316,6 +318,9 @@ private:
 	// in the Game Instance window, saved to the project); the host holds the live
 	// running copy. Loaded per project; OnInit/OnShutdown fire around play mode.
 	GameInstanceHost   m_gameInstance;
+	// Player controller/character instances + input pump — PIE only (begun on
+	// entering play mode, ended on leaving). Shares m_gameInstance's runtime.
+	PlayerHost         m_playerHost;
 	HorizonCode::Graph m_gameInstanceGraph;
 	void loadGameInstanceGraph();  // read the project's GameInstance.hcode → host
 	void saveGameInstanceGraph();  // write m_gameInstanceGraph → project file
@@ -471,6 +476,7 @@ private:
 
 	// Project Hub transient state
 	int         m_hubSelectedPreset  = 0;
+	int         m_hubSelectedLang    = 0;  // index into the wizard's ProjectScriptLanguage order
 	char        m_hubProjectName[256]= {};
 	char        m_hubProjectDir[512] = {};
 	std::string m_hubCreateError;

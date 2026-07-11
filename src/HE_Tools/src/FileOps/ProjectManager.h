@@ -12,6 +12,25 @@ enum class ProjectPreset
 	Tool,        // Assets, Source sub-folders
 };
 
+// The gameplay scripting language a project is primarily authored in, chosen
+// at creation and persisted in the .heproj manifest ("scriptLanguage"). Lua and
+// Python map onto the IScriptBackend script routing, HorizonCode onto the
+// visual graphs, Cpp onto a native GameLogic library. Informational for now:
+// it drives wizard scaffolding and editor defaults, not a hard restriction —
+// per-script language is still decided by each Script asset.
+enum class ProjectScriptLanguage
+{
+	HorizonCode, // default: visual scripting graphs
+	Lua,
+	Python,
+	Cpp,
+};
+
+// Manifest spelling of the language ("HorizonCode"/"Lua"/"Python"/"Cpp") and
+// its tolerant inverse (unknown/missing → HorizonCode).
+HE_TOOLS_API const char*           toString(ProjectScriptLanguage lang);
+HE_TOOLS_API ProjectScriptLanguage projectScriptLanguageFromString(const std::string& s);
+
 // A named, persisted packaging preset (Build > Export Project). Stored in the
 // .heproj manifest so export settings survive editor restarts. The editor maps
 // the selected profile onto ExportSettings (HE_Core) when exporting.
@@ -62,6 +81,9 @@ struct ProjectData
 
 	std::vector<ExportProfile> exportProfiles;      // never empty after load/create
 	std::string                activeExportProfile; // name of the last-used profile
+
+	// Primary gameplay scripting language (chosen in the new-project wizard).
+	ProjectScriptLanguage scriptLanguage = ProjectScriptLanguage::HorizonCode;
 };
 
 class HE_TOOLS_API ProjectManager
@@ -74,9 +96,11 @@ public:
 	// projectDir  – absolute path to the new project root folder
 	// projectName – display name (also used as .heproj filename)
 	// preset      – which folder template to apply
+	// scriptLanguage – the project's primary gameplay scripting language
 	bool createNewProject(const std::string& projectDir,
 						  const std::string& projectName,
-						  ProjectPreset preset = ProjectPreset::Empty);
+						  ProjectPreset preset = ProjectPreset::Empty,
+						  ProjectScriptLanguage scriptLanguage = ProjectScriptLanguage::HorizonCode);
 
 	bool loadProject(const std::string& projectPath);
 	bool saveProject(const std::string& projectPath);

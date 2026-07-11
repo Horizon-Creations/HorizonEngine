@@ -308,7 +308,10 @@ bool validRel(const std::string& rel)
 {
     if (rel.empty()) return false;
     const std::filesystem::path p(rel);
-    if (p.is_absolute() || p.has_root_name()) return false;
+    // has_root_directory too: on Windows "/tmp/x" is NOT is_absolute() (no
+    // drive) yet root()/"/tmp/x" replaces everything after the drive letter —
+    // a sandbox escape to C:\tmp. Rooted-anything is rejected.
+    if (p.is_absolute() || p.has_root_name() || p.has_root_directory()) return false;
     for (const auto& part : p)
         if (part == "..") return false;
     return true;

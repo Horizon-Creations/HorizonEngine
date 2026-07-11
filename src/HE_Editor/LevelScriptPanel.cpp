@@ -13,6 +13,7 @@
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <ContentManager/HAsset.h>
+#include <Application/InputAssets.h>  // shared Input.<Action>.* event naming
 #include <Types/Enums.h>
 #include <filesystem>
 #include <map>
@@ -875,8 +876,15 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 			{
 				const int id = addNode(graph, NT::Event, g.ge.addMenuGraphPos);
 				HC::Node* nn = graph.findNode(id);
-				nn->s = ev; nn->hasArg = (ev == "OnWindowFocusChanged");
-				nn->propType = nn->hasArg ? PT::Bool : PT::Float; nn->elem = 0;
+				nn->s = ev;
+				// Events with a data-out: window focus (Bool), Tick (delta seconds),
+				// and Input.<Action>.Axis (the axis value). Names come from the
+				// shared HE::inputEvent* helpers so the runtime pump matches.
+				const bool axisEvent = ev.rfind("Input.", 0) == 0 && ev.size() >= 5 &&
+					ev.compare(ev.size() - 5, 5, ".Axis") == 0;
+				nn->hasArg = (ev == "OnWindowFocusChanged") || (ev == "Tick") || axisEvent;
+				nn->propType = (ev == "OnWindowFocusChanged") ? PT::Bool : PT::Float;
+				nn->elem = 0;
 				created = id; ImGui::CloseCurrentPopup();
 			}
 			if (used) { ImGui::SameLine(); ImGui::TextDisabled("(added)"); }
@@ -1355,9 +1363,38 @@ struct ClassState
 	bool        loaded = false;
 	bool        dirty  = false;
 	std::string name;
+	std::string baseClass;              // "" = plain Object; "PlayerController"/"PlayerCharacter"
 	HE::UUID    assetId;
+	std::vector<std::string> events;    // event catalog (lifecycle + player input events)
+	double      eventsScanTime = -1.0;  // last catalog (re)build, ImGui time
 };
 std::map<std::string, ClassState> g_classStates;
+
+// Input.<Action>.* event names for every InputAction asset in the project —
+// the input-event catalog player classes offer. Walks the content dir (cheap
+// header sniffs), so callers cache the result and refresh on a coarse timer.
+std::vector<std::string> scanInputEvents(ContentManager* cm)
+{
+	std::vector<std::string> out;
+	if (!cm) return out;
+	for (const auto& ref : HcEditorUtil::listAssets(cm, HE::AssetType::InputAction))
+	{
+		bool axis = false;
+		HAsset::Reader r;
+		if (r.open((std::filesystem::path(cm->contentRoot()) / ref.path).string()))
+			if (const auto* c = r.findChunk(HAsset::CHUNK_IACT))
+				axis = HE::inputActionIsAxis(std::string(
+					reinterpret_cast<const char*>(c->data.data()), c->data.size()));
+		if (axis)
+			out.push_back(HE::inputEventAxis(ref.label));
+		else
+		{
+			out.push_back(HE::inputEventPressed(ref.label));
+			out.push_back(HE::inputEventReleased(ref.label));
+		}
+	}
+	return out;
+}
 }
 
 bool HorizonCodeClassPanel::isClassAsset(const std::string& path)
@@ -1392,16 +1429,22 @@ void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath
 		if (const HorizonCodeClassAsset* a = ctx.contentManager->getHorizonCodeClass(st.assetId))
 		{
 			if (!a->graphJson.empty()) HorizonCode::fromJson(a->graphJson, st.graph);
-			st.name = a->name;
+			st.name      = a->name;
+			st.baseClass = a->baseClass;
 		}
 		st.loaded = true;
 	}
+
+	const bool isPlayer = st.baseClass == "PlayerController" || st.baseClass == "PlayerCharacter";
+	const char* kindLabel = st.baseClass == "PlayerController" ? "Player Controller"
+	                      : st.baseClass == "PlayerCharacter"  ? "Player Character"
+	                      : "HorizonCode Class";
 
 	beginTabWindow(("##hcclass_" + assetPath).c_str(), pos, size);
 	ImGui::AlignTextToFramePadding();
 	ImGui::Text("%s", st.name.c_str());
 	ImGui::SameLine();
-	ImGui::TextDisabled("HorizonCode Class%s", st.dirty ? "  (unsaved)" : "");
+	ImGui::TextDisabled("%s%s", kindLabel, st.dirty ? "  (unsaved)" : "");
 	ImGui::SameLine(ImGui::GetContentRegionAvail().x - 60.0f);
 	if (ImGui::Button("Save", ImVec2(56.0f, 0.0f)) && ctx.contentManager)
 	{
@@ -1415,11 +1458,27 @@ void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath
 
 	// Classes expose the lifecycle events (Construct on create, Destruct on
 	// destroy) as a catalog, and can also name their own custom dispatcher events.
-	static const std::vector<std::string> kClassEvents = { "Construct", "Destruct" };
+	// Player classes additionally get the game lifecycle (BeginPlay/Tick) and one
+	// event set per InputAction asset in the project. Actions can be created while
+	// this tab is open, so the input catalog rescans on a coarse timer.
+	const double now = ImGui::GetTime();
+	if (st.eventsScanTime < 0.0 || (isPlayer && now - st.eventsScanTime > 3.0))
+	{
+		if (isPlayer)
+		{
+			st.events = { "Construct", "BeginPlay", "Tick", "Destruct" };
+			for (auto& ev : scanInputEvents(ctx.contentManager))
+				st.events.push_back(std::move(ev));
+		}
+		else
+			st.events = { "Construct", "Destruct" };
+		st.eventsScanTime = now;
+	}
 	bool edited = false;
-	drawGraphBody(st.graph, kClassEvents, /*allowCustomEvents=*/true, "HorizonCode Class",
-	              "Reusable class; Construct/Destruct + its own events.", ctx.contentManager,
-	              ctx.gameInstanceGraph, edited);
+	drawGraphBody(st.graph, st.events, /*allowCustomEvents=*/true, kindLabel,
+	              isPlayer ? "Player class; lifecycle + input events."
+	                       : "Reusable class; Construct/Destruct + its own events.",
+	              ctx.contentManager, ctx.gameInstanceGraph, edited);
 	if (edited) st.dirty = true;
 	ImGui::End();
 }

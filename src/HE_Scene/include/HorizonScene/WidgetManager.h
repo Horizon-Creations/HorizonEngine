@@ -118,7 +118,17 @@ private:
     // element hot).
     bool isInteractive(const Instance& w, const HE::UIElement& e) const;
 
+    // Re-resolve one element's Material/Font path to its runtime state (material
+    // UUID in w.materials, baked fontAtlasKey) — the same resolution createWidget
+    // does for the whole tree. Called when a graph SETS those properties so the
+    // change is visible immediately. No-op without a content manager.
+    void refreshElementAssets(Instance& w, HE::UIElement& e);
+
     std::vector<Instance> m_instances;
+    // The content manager of the last createWidget call — used to re-resolve
+    // Material/Font when a graph sets those properties at runtime. All callers
+    // pass the app's single ContentManager, which outlives this manager.
+    ContentManager*       m_content = nullptr;
     HorizonCode::Runtime  m_ownRuntime;        // fallback when none is injected
     HorizonCode::Runtime* m_runtime = nullptr; // injected shared runtime (null → own)
     bool m_wasDown = false;

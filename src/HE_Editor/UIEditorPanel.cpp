@@ -289,8 +289,11 @@ int duplicateSubtree(State& st, int srcId, int parentId)
 	return newId;
 }
 
-// ── Asset-slot widget (drag&drop a content-browser asset of a given type) ─────
-// Returns true when the path was changed.
+// ── Asset-slot widget: dropdown over the project's assets of a given type ─────
+// A combo listing every matching asset (picked by content-relative path), with
+// a "(none)" entry to clear the slot. The combo is also a drag-drop target for
+// content-browser assets ("HE_ASSET_PATH"), so both workflows write the same
+// content-relative path. Returns true when the path was changed.
 bool assetSlot(AppContext& ctx, const char* label, std::string& path,
                HE::AssetType wantType, const char* idSuffix)
 {
@@ -299,8 +302,22 @@ bool assetSlot(AppContext& ctx, const char* label, std::string& path,
 	ImGui::SameLine(80.0f);
 	const std::string shown = path.empty()
 		? "(none)" : std::filesystem::path(path).stem().string();
-	ImGui::Button((shown + "##" + idSuffix).c_str(),
-	              ImVec2(ImGui::GetContentRegionAvail().x - 28.0f, 0));
+	ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+	if (ImGui::BeginCombo((std::string("##combo_") + idSuffix).c_str(), shown.c_str()))
+	{
+		if (ImGui::Selectable("(none)", path.empty()) && !path.empty())
+		{
+			path.clear();
+			changed = true;
+		}
+		for (const auto& a : HcEditorUtil::listAssets(ctx.contentManager, wantType))
+			if (ImGui::Selectable((a.label + "##" + a.path).c_str(), path == a.path))
+			{
+				path    = a.path;
+				changed = true;
+			}
+		ImGui::EndCombo();
+	}
 	if (ImGui::IsItemHovered() && !path.empty()) ImGui::SetTooltip("%s", path.c_str());
 	if (ImGui::BeginDragDropTarget())
 	{
@@ -322,12 +339,6 @@ bool assetSlot(AppContext& ctx, const char* label, std::string& path,
 			}
 		}
 		ImGui::EndDragDropTarget();
-	}
-	ImGui::SameLine();
-	if (ImGui::SmallButton((std::string("x##clr") + idSuffix).c_str()) && !path.empty())
-	{
-		path.clear();
-		changed = true;
 	}
 	return changed;
 }
@@ -1625,7 +1636,9 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 	{
 		elementCombo("Element", /*includeAny=*/false);
 		const UIElement* tgt = st.tree.find(n->elem);
-		const std::vector<UIPropDesc> props = tgt ? tgt->properties() : std::vector<UIPropDesc>{};
+		// allProperties: type-specific props + the shared base ones (Visible,
+		// Hit Testable, Position, Size, Layer, Hover Cursor, Material, Font).
+		const std::vector<UIPropDesc> props = tgt ? tgt->allProperties() : std::vector<UIPropDesc>{};
 		if (ImGui::BeginCombo("Property", n->s.empty() ? "(none)" : n->s.c_str()))
 		{
 			for (const UIPropDesc& pd : props)

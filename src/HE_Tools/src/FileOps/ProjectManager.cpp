@@ -103,9 +103,30 @@ static void readProfiles(const json& j, ProjectData& data)
 	if (!known) data.activeExportProfile = data.exportProfiles.front().name;
 }
 
+const char* toString(ProjectScriptLanguage lang)
+{
+	switch (lang)
+	{
+	case ProjectScriptLanguage::Lua:    return "Lua";
+	case ProjectScriptLanguage::Python: return "Python";
+	case ProjectScriptLanguage::Cpp:    return "Cpp";
+	case ProjectScriptLanguage::HorizonCode:
+	default:                            return "HorizonCode";
+	}
+}
+
+ProjectScriptLanguage projectScriptLanguageFromString(const std::string& s)
+{
+	if (s == "Lua")    return ProjectScriptLanguage::Lua;
+	if (s == "Python") return ProjectScriptLanguage::Python;
+	if (s == "Cpp")    return ProjectScriptLanguage::Cpp;
+	return ProjectScriptLanguage::HorizonCode; // unknown/missing → default
+}
+
 bool ProjectManager::createNewProject(const std::string& projectDir,
 									  const std::string& projectName,
-									  ProjectPreset preset)
+									  ProjectPreset preset,
+									  ProjectScriptLanguage scriptLanguage)
 {
 	fs::path root(projectDir);
 	if (!fs::exists(root))
@@ -142,6 +163,12 @@ bool ProjectManager::createNewProject(const std::string& projectDir,
 		break;
 	}
 
+	// Text-scripting languages get a Scripts folder regardless of preset — the
+	// natural home for the project's first .hasset script assets.
+	if (scriptLanguage == ProjectScriptLanguage::Lua ||
+	    scriptLanguage == ProjectScriptLanguage::Python)
+		fs::create_directories(root / "Content" / "Scripts");
+
 	// ── Write .heproj manifest ─────────────────────────────────────────────────
 	// Default startup scene: Content/StartupScene.hescene
 	fs::path scenePath = root / "Content" / "StartupScene.hescene";
@@ -167,10 +194,11 @@ bool ProjectManager::createNewProject(const std::string& projectDir,
 	}
 
 	json j;
-	j["name"]         = projectName;
-	j["version"]      = "1.0";
-	j["preset"]       = static_cast<int>(preset);
-	j["startupScene"] = "Content/StartupScene.hescene";
+	j["name"]           = projectName;
+	j["version"]        = "1.0";
+	j["preset"]         = static_cast<int>(preset);
+	j["startupScene"]   = "Content/StartupScene.hescene";
+	j["scriptLanguage"] = toString(scriptLanguage);
 
 	// Seed the default packaging profiles so Build > Export works out of the box.
 	const auto profiles = defaultExportProfiles();
@@ -191,6 +219,7 @@ bool ProjectManager::createNewProject(const std::string& projectDir,
 	m_currentProject.startupScene        = scenePath.string();
 	m_currentProject.exportProfiles      = profiles;
 	m_currentProject.activeExportProfile = profiles.front().name;
+	m_currentProject.scriptLanguage      = scriptLanguage;
 	if (m_onProjectLoaded)
 		m_onProjectLoaded(m_currentProject.startupScene);
 	return true;
@@ -226,6 +255,8 @@ bool ProjectManager::loadProject(const std::string& projectPath)
 	}
 
 	readProfiles(j, m_currentProject);
+	m_currentProject.scriptLanguage =
+		projectScriptLanguageFromString(jsonString(j, "scriptLanguage"));
 
 	if (m_onProjectLoaded)
 		m_onProjectLoaded(m_currentProject.startupScene);
@@ -256,6 +287,7 @@ bool ProjectManager::saveProject(const std::string& projectPath)
 		jp.push_back(profileToJson(p));
 	j["exportProfiles"]      = std::move(jp);
 	j["activeExportProfile"] = m_currentProject.activeExportProfile;
+	j["scriptLanguage"]      = toString(m_currentProject.scriptLanguage);
 
 	// Write temp + rename: an in-place ofstream truncates the only copy before
 	// the new content is durable, so disk-full/kill mid-write would leave an

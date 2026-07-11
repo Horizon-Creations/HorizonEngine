@@ -5,7 +5,19 @@
 #include "HorizonScene/ScriptApi.h"
 #include "HorizonScene/EngineApi.h"   // HE::api registry (registry-driven groups)
 #define PY_SSIZE_T_CLEAN
+// Most Windows Python installs (incl. python.org's) ship release-only libs — no
+// python3xx_d.lib. Debug builds define _DEBUG, which makes Python.h demand the
+// debug-only refcount-tracking symbols (Py_REF_DEBUG) and fail to link. Hide
+// _DEBUG from Python.h only; the rest of this TU still builds as Debug.
+#ifdef _DEBUG
+#define HE_PY_UNDEF_DEBUG
+#undef _DEBUG
+#endif
 #include <Python.h>
+#ifdef HE_PY_UNDEF_DEBUG
+#define _DEBUG
+#undef HE_PY_UNDEF_DEBUG
+#endif
 #include <algorithm>
 #include <limits>
 #include <string>

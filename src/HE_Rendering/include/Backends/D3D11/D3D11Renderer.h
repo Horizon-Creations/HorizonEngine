@@ -32,6 +32,11 @@ public:
     void SetDebugLines(const std::vector<DebugLine>& lines) override;
     void SetMoonTexture(const void* rgba8Pixels, int width, int height) override;
     void SetSSAOSettings(const SSAOSettings& settings) override;
+    void SetBloomSettings(const BloomSettings& settings) override;
+
+    // Whole-frame D3D11 timestamp timing (double-buffered ring, never stalls)
+    // + this frame's CPU draw/triangle/visibility counters.
+    FrameGpuStats GetFrameGpuStats() const override;
 
 private:
     // Extract → cull → sort → RenderGraph → replay into the currently bound targets.

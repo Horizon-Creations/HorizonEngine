@@ -96,6 +96,11 @@ inline constexpr uint32_t CHUNK_PSHD = makeChunkId('P','S','H','D'); // precompi
 inline constexpr uint32_t CHUNK_UIWT = makeChunkId('U','I','W','T'); // UI widget tree (JSON)
 inline constexpr uint32_t CHUNK_UIWG = makeChunkId('U','I','W','G'); // UI widget logic graph (JSON)
 inline constexpr uint32_t CHUNK_HCGR = makeChunkId('H','C','G','R'); // HorizonCode class graph (JSON)
+inline constexpr uint32_t CHUNK_HCBC = makeChunkId('H','C','B','C'); // HorizonCode base class name (UTF-8; absent → plain Object)
+
+// Input
+inline constexpr uint32_t CHUNK_IACT = makeChunkId('I','A','C','T'); // input action definition (JSON)
+inline constexpr uint32_t CHUNK_IMAP = makeChunkId('I','M','A','P'); // input mapping context (JSON)
 
 // Font
 inline constexpr uint32_t CHUNK_FNTD = makeChunkId('F','N','T','D'); // raw font bytes

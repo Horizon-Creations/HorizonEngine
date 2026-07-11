@@ -35,6 +35,11 @@ public:
     void SetDebugLines(const std::vector<DebugLine>& lines) override;
     void SetMoonTexture(const void* rgba8Pixels, int width, int height) override;
     void SetSSAOSettings(const SSAOSettings& settings) override;
+    void SetBloomSettings(const BloomSettings& settings) override;
+
+    // Whole-frame GPU time from a per-frame-in-flight timestamp query pair
+    // (read back k_frameCount frames late so it never stalls) + CPU counters.
+    FrameGpuStats GetFrameGpuStats() const override;
 
     // ImGui editor textures (content-browser icons + logo). Uploads the RGBA8
     // pixels to a GPU texture, then hands the resource to the editor-installed

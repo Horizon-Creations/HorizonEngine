@@ -1,6 +1,7 @@
 #include "Backends/D3D12/D3D12Renderer.h"
 #include <Window/Window.h>
 #include <ContentManager/ContentManager.h>
+#include <Renderer/UIFont.h>
 #include <HorizonRendering/RenderWorld.h>
 #include <HorizonRendering/RenderExtractor.h>
 #include <HorizonRendering/FrustumCuller.h>
@@ -823,9 +824,13 @@ static const char* kUIHLSL12 = R"HLSL(
 cbuffer UICB : register(b0) {
     float4 uRect;      // xy=top-left px, zw=size px
     float4 uColor;
+    float4 uUVRect;    // glyph atlas UVs: xy=uvMin, zw=uvMax
     float2 uViewport;
-    float2 _upad;
+    float  uMode;      // 0 = solid color, 1 = font-atlas glyph
+    float  _upad;
 };
+Texture2D    uFontAtlas : register(t0);
+SamplerState uSamp      : register(s0);
 struct UIOut { float4 clip : SV_POSITION; float2 uv : TEXCOORD0; };
 UIOut UIVSMain(uint vid : SV_VertexID)
 {
@@ -837,7 +842,16 @@ UIOut UIVSMain(uint vid : SV_VertexID)
     o.uv = uv;
     return o;
 }
-float4 UIPSMain(UIOut i) : SV_TARGET { return uColor; }
+float4 UIPSMain(UIOut i) : SV_TARGET
+{
+    if (uMode > 0.5f)
+    {
+        // Glyph coverage lives in the atlas R channel; tint by uColor (mirrors GL).
+        float a = uFontAtlas.Sample(uSamp, lerp(uUVRect.xy, uUVRect.zw, i.uv)).r;
+        return float4(uColor.rgb, uColor.a * a);
+    }
+    return uColor;
+}
 )HLSL";
 
 static const char* kSSAOBlurHLSL12 = R"HLSL(
@@ -1138,6 +1152,63 @@ struct D3D12RendererImpl
     bool                              drawCountsLogged = false;    // log pass draw counts once
     int                               width = 0, height = 0;
     ComPtr<ID3D12InfoQueue>           infoQueue;  // drained to Logger each frame when gpuDebug
+
+    // ── GPU frame timing (timestamp query heap) ─────────────────────────────
+    // Two timestamps per frame-in-flight slot (list begin/end), resolved into a
+    // persistently-mapped READBACK buffer at end-of-list. A slot is only read the
+    // next time that slot is reused — i.e. after waitForFrame(slot) — so the value
+    // consumed is k_frameCount frames old and the readback never stalls the CPU.
+    ComPtr<ID3D12QueryHeap> tsQueryHeap;              // 2 × k_frameCount timestamps
+    ComPtr<ID3D12Resource>  tsReadback;               // 2 × k_frameCount × uint64
+    const uint64_t*         tsReadbackPtr = nullptr;  // READBACK buffers may stay mapped
+    UINT64                  tsFrequency   = 0;        // ticks/s; 0 → timing unavailable
+    bool                    tsPending[k_frameCount]{};
+    double                  lastGpuFrameMs = -1.0;    // newest reaped whole-frame time
+    // CPU counters (draws/tris this frame, cull results) merged by GetFrameGpuStats.
+    uint32_t statDraws = 0, statTris = 0, statVisible = 0, statTotal = 0;
+
+    void createGpuTimer()
+    {
+        if (FAILED(cmdQueue->GetTimestampFrequency(&tsFrequency)) || tsFrequency == 0)
+        {
+            tsFrequency = 0;
+            return;
+        }
+        D3D12_QUERY_HEAP_DESC qd{};
+        qd.Type  = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+        qd.Count = 2 * k_frameCount;
+        if (FAILED(device->CreateQueryHeap(&qd, IID_PPV_ARGS(&tsQueryHeap))))
+        {
+            tsFrequency = 0;
+            return;
+        }
+        D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_READBACK;
+        D3D12_RESOURCE_DESC rd{};
+        rd.Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER;
+        rd.Width            = 2ull * k_frameCount * sizeof(uint64_t);
+        rd.Height           = 1;
+        rd.DepthOrArraySize = 1;
+        rd.MipLevels        = 1;
+        rd.Format           = DXGI_FORMAT_UNKNOWN;
+        rd.SampleDesc.Count = 1;
+        rd.Layout           = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+                   D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&tsReadback))))
+        {
+            tsQueryHeap.Reset();
+            tsFrequency = 0;
+            return;
+        }
+        void* mapped = nullptr;
+        D3D12_RANGE all{ 0, static_cast<SIZE_T>(rd.Width) };
+        if (FAILED(tsReadback->Map(0, &all, &mapped)) || !mapped)
+        {
+            tsReadback.Reset(); tsQueryHeap.Reset();
+            tsFrequency = 0;
+            return;
+        }
+        tsReadbackPtr = static_cast<const uint64_t*>(mapped);
+    }
 
     // ── Depth ───────────────────────────────────────────────────────────────
     ComPtr<ID3D12DescriptorHeap> dsvHeap; // [0] = scene depth, [1] = shadow depth
@@ -2031,6 +2102,100 @@ struct D3D12RendererImpl
     ComPtr<ID3D12Resource>  m_uiCB[k_frameCount];
     uint8_t*                m_uiCBPtr[k_frameCount]{};
 
+    // ── UI font atlas textures (glyph quads, type 2) ─────────────────────────
+    // One R8 texture + SRV heap slot per UIFontCache key (0 = the shared default
+    // font), created lazily the first frame a glyph references the key. The copy
+    // is recorded into the frame's command list ahead of the UI draws (copies are
+    // legal mid-frame on a direct list), so the staging buffer must outlive the
+    // frames in flight — it is retired and freed a few frames later, the same
+    // scheme as the resized viewport RTs.
+    static constexpr UINT k_maxUIFontAtlases = 16;
+    struct UIFontAtlas12 { ComPtr<ID3D12Resource> tex; UINT slot = 0; };
+    ComPtr<ID3D12DescriptorHeap> m_uiAtlasHeap;   // shader-visible SRV heap
+    UINT m_uiAtlasDescSize = 0;
+    UINT m_uiAtlasNextSlot = 0;
+    std::unordered_map<uint32_t, UIFontAtlas12> m_uiFontAtlases;
+    std::vector<std::pair<ComPtr<ID3D12Resource>, int>> m_uiAtlasUploads; // retire countdown
+
+    D3D12_CPU_DESCRIPTOR_HANDLE uiAtlasCpu(UINT slot) const
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE h = m_uiAtlasHeap->GetCPUDescriptorHandleForHeapStart();
+        h.ptr += static_cast<SIZE_T>(slot) * m_uiAtlasDescSize;
+        return h;
+    }
+    D3D12_GPU_DESCRIPTOR_HANDLE uiAtlasGpu(UINT slot) const
+    {
+        D3D12_GPU_DESCRIPTOR_HANDLE h = m_uiAtlasHeap->GetGPUDescriptorHandleForHeapStart();
+        h.ptr += static_cast<UINT64>(slot) * m_uiAtlasDescSize;
+        return h;
+    }
+
+    // Heap slot holding `key`'s atlas SRV, creating the R8 texture and recording
+    // its upload on `cmd` the first time. Returns -1 when the key is unknown, its
+    // bake failed, or the heap is full — callers fall back to the default atlas.
+    int uiAtlasSlotFor(ID3D12GraphicsCommandList* cmd, uint32_t key)
+    {
+        if (auto it = m_uiFontAtlases.find(key); it != m_uiFontAtlases.end())
+            return static_cast<int>(it->second.slot);
+        if (!m_uiAtlasHeap || m_uiAtlasNextSlot >= k_maxUIFontAtlases) return -1;
+        const HE::BakedUIFont* f = key == 0 ? &HE::sharedUIFont() : HE::UIFontCache::find(key);
+        if (!f || !f->ok || f->atlasW <= 0 || f->atlasH <= 0 ||
+            f->pixels.size() < static_cast<size_t>(f->atlasW) * f->atlasH)
+            return -1;
+
+        D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+        D3D12_RESOURCE_DESC td{};
+        td.Dimension        = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        td.Width            = static_cast<UINT64>(f->atlasW);
+        td.Height           = static_cast<UINT>(f->atlasH);
+        td.DepthOrArraySize = 1;
+        td.MipLevels        = 1;
+        td.Format           = DXGI_FORMAT_R8_UNORM;
+        td.SampleDesc.Count = 1;
+        ComPtr<ID3D12Resource> tex;
+        if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td,
+                   D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&tex))))
+            return -1;
+
+        // Row-pitched staging copy (R8: one byte per texel).
+        const UINT rowPitch = alignUp(static_cast<UINT>(f->atlasW), D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
+        void* mapped = nullptr;
+        ComPtr<ID3D12Resource> uploadBuf =
+            createUploadBuffer(static_cast<UINT64>(rowPitch) * f->atlasH, &mapped);
+        if (!uploadBuf || !mapped) return -1;
+        for (int y = 0; y < f->atlasH; ++y)
+            std::memcpy(static_cast<uint8_t*>(mapped) + static_cast<size_t>(y) * rowPitch,
+                        f->pixels.data() + static_cast<size_t>(y) * f->atlasW,
+                        static_cast<size_t>(f->atlasW));
+        uploadBuf->Unmap(0, nullptr);
+
+        D3D12_TEXTURE_COPY_LOCATION src{};
+        src.pResource = uploadBuf.Get();
+        src.Type      = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        src.PlacedFootprint.Footprint = { DXGI_FORMAT_R8_UNORM,
+            static_cast<UINT>(f->atlasW), static_cast<UINT>(f->atlasH), 1, rowPitch };
+        D3D12_TEXTURE_COPY_LOCATION dst{};
+        dst.pResource = tex.Get();
+        dst.Type      = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        barrier12(cmd, tex.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                  D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+
+        D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+        sv.Format                  = DXGI_FORMAT_R8_UNORM;
+        sv.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
+        sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sv.Texture2D.MipLevels     = 1;
+        const UINT slot = m_uiAtlasNextSlot++;
+        device->CreateShaderResourceView(tex.Get(), &sv, uiAtlasCpu(slot));
+
+        // The staging buffer is read at execute time — keep it alive past every
+        // frame in flight before releasing it (swept in Render()).
+        m_uiAtlasUploads.emplace_back(std::move(uploadBuf), static_cast<int>(k_frameCount) + 2);
+        m_uiFontAtlases[key] = { std::move(tex), slot };
+        return static_cast<int>(slot);
+    }
+
     // ── Combined scene SRV heap (shadow t0, AO-blur t2, white-fallback t2) ──
     // [0]=shadow, [1]=AO-blur, [2]=white-fallback
     ComPtr<ID3D12DescriptorHeap> sceneSrvHeap;    // CBV_SRV_UAV shader-visible, 3 slots
@@ -2239,14 +2404,31 @@ struct D3D12RendererImpl
             return false;
         }
 
-        // Root signature: single root CBV at b0, visible to VS and PS.
+        // Root signature: root CBV at b0 (VS+PS) + SRV table t0 (font atlas, PS)
+        // + static sampler s0 (linear-clamp; glyphs scale the atlas both ways).
         {
-            D3D12_ROOT_PARAMETER param{};
-            param.ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
-            param.Descriptor       = { 0, 0 }; // b0
-            param.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+            D3D12_DESCRIPTOR_RANGE srvRange{};
+            srvRange.RangeType          = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+            srvRange.NumDescriptors     = 1;
+            srvRange.BaseShaderRegister = 0; // t0
+
+            D3D12_ROOT_PARAMETER params[2]{};
+            params[0].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
+            params[0].Descriptor       = { 0, 0 }; // b0
+            params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+            params[1].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            params[1].DescriptorTable  = { 1, &srvRange };
+            params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+            D3D12_STATIC_SAMPLER_DESC samp{};
+            samp.Filter           = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+            samp.AddressU = samp.AddressV = samp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+            samp.ShaderRegister   = 0; // s0
+            samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
             D3D12_ROOT_SIGNATURE_DESC rsd{};
-            rsd.NumParameters = 1; rsd.pParameters = &param;
+            rsd.NumParameters     = 2; rsd.pParameters     = params;
+            rsd.NumStaticSamplers = 1; rsd.pStaticSamplers = &samp;
             rsd.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
             ComPtr<ID3DBlob> sig, sigErr;
             if (FAILED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &sigErr)) ||
@@ -2302,26 +2484,79 @@ struct D3D12RendererImpl
             }
         }
 
+        // Shader-visible font-atlas SRV heap. Every slot starts as a null SRV so
+        // the root table is always valid to bind, even before any atlas uploads.
+        {
+            m_uiAtlasDescSize =
+                device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+            D3D12_DESCRIPTOR_HEAP_DESC hd{};
+            hd.NumDescriptors = k_maxUIFontAtlases;
+            hd.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+            hd.Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+            if (FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_uiAtlasHeap))))
+            {
+                Logger::Log(Logger::LogLevel::Error, "D3D12 UI atlas heap creation failed");
+                return false;
+            }
+            D3D12_SHADER_RESOURCE_VIEW_DESC nullSrv{};
+            nullSrv.Format                  = DXGI_FORMAT_R8_UNORM;
+            nullSrv.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
+            nullSrv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            nullSrv.Texture2D.MipLevels     = 1;
+            for (UINT s = 0; s < k_maxUIFontAtlases; ++s)
+                device->CreateShaderResourceView(nullptr, &nullSrv, uiAtlasCpu(s));
+        }
+
         return true;
     }
 
     void renderUIPass12(ID3D12GraphicsCommandList* cmd, int fi, int w, int h)
     {
-        if (!m_uiPSO || m_renderWorld.uiObjects.empty()) return;
+        if (!m_uiPSO || !m_uiAtlasHeap || m_renderWorld.uiObjects.empty()) return;
+
+        // Record any missing atlas uploads BEFORE the pass state is bound so the
+        // copies + COPY_DEST→PSR barriers sit ahead of the draws that sample them.
+        const int defaultSlot = uiAtlasSlotFor(cmd, 0);
+        for (const UIRenderObject& obj : m_renderWorld.uiObjects)
+            if (obj.type == 2 && obj.fontAtlasKey != 0)
+                uiAtlasSlotFor(cmd, obj.fontAtlasKey);
+
         cmd->SetPipelineState(m_uiPSO.Get());
         cmd->SetGraphicsRootSignature(m_uiRootSig.Get());
         cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        ID3D12DescriptorHeap* heaps[] = { m_uiAtlasHeap.Get() };
+        cmd->SetDescriptorHeaps(1, heaps);
+        // Solid quads never sample the atlas, but the table must still point at a
+        // valid descriptor — slot 0 is at worst a null SRV.
+        int boundSlot = std::max(defaultSlot, 0);
+        cmd->SetGraphicsRootDescriptorTable(1, uiAtlasGpu(static_cast<UINT>(boundSlot)));
 
-        struct UICB { glm::vec4 rect; glm::vec4 color; glm::vec2 vp; glm::vec2 pad; };
+        struct UICB { glm::vec4 rect; glm::vec4 color; glm::vec4 uvRect;
+                      glm::vec2 vp; float mode; float pad; };
         int qi = 0;
         for (const UIRenderObject& obj : m_renderWorld.uiObjects) {
-            if (obj.type == 2) continue; // font-atlas glyph quads: GL/Metal only for now
             if (qi >= static_cast<int>(k_maxUIQuads)) break;
+            if (obj.type == 2)
+            {
+                // A glyph may use an imported font's atlas; unknown keys fall back
+                // to the shared font, and if even that failed to bake, skip.
+                const auto it = m_uiFontAtlases.find(obj.fontAtlasKey);
+                const int slot = it != m_uiFontAtlases.end()
+                    ? static_cast<int>(it->second.slot) : defaultSlot;
+                if (slot < 0) continue;
+                if (slot != boundSlot)
+                {
+                    cmd->SetGraphicsRootDescriptorTable(1, uiAtlasGpu(static_cast<UINT>(slot)));
+                    boundSlot = slot;
+                }
+            }
             UICB cb;
-            cb.rect  = glm::vec4(obj.position.x, obj.position.y, obj.size.x, obj.size.y);
-            cb.color = glm::vec4(obj.color.r, obj.color.g, obj.color.b, obj.color.a);
-            cb.vp    = glm::vec2(float(w), float(h));
-            cb.pad   = {};
+            cb.rect   = glm::vec4(obj.position.x, obj.position.y, obj.size.x, obj.size.y);
+            cb.color  = glm::vec4(obj.color.r, obj.color.g, obj.color.b, obj.color.a);
+            cb.uvRect = glm::vec4(obj.uvMin.x, obj.uvMin.y, obj.uvMax.x, obj.uvMax.y);
+            cb.vp     = glm::vec2(float(w), float(h));
+            cb.mode   = obj.type == 2 ? 1.0f : 0.0f;
+            cb.pad    = 0.0f;
             std::memcpy(m_uiCBPtr[fi] + static_cast<size_t>(qi) * k_uiCBSlot, &cb, sizeof(cb));
             D3D12_GPU_VIRTUAL_ADDRESS addr = m_uiCB[fi]->GetGPUVirtualAddress()
                                            + static_cast<UINT64>(qi) * k_uiCBSlot;
@@ -3594,6 +3829,8 @@ void D3D12Renderer::Initialize(HE::Window* window)
     if (!m_impl->fenceEvent)
         throw std::runtime_error("D3D12Renderer: CreateEvent failed");
 
+    m_impl->createGpuTimer();
+
     m_impl->createDepth(m_impl->width, m_impl->height);
     if (!m_impl->createPipeline())
         Logger::Log(Logger::LogLevel::Error, "D3D12Renderer: scene pipeline creation failed — only clear will work");
@@ -3617,6 +3854,9 @@ void D3D12Renderer::Shutdown()
     m_impl->viewportReadback.Reset();
     m_impl->viewportRtvHeap.Reset();
     m_impl->viewportDsvHeap.Reset();
+    m_impl->m_uiFontAtlases.clear();
+    m_impl->m_uiAtlasUploads.clear();
+    m_impl->m_uiAtlasHeap.Reset();
     m_impl->m_skinnedPSO.Reset();
     m_impl->m_skinnedHdrPSO.Reset();
     m_impl->skinnedRootSig.Reset();
@@ -3635,6 +3875,9 @@ void D3D12Renderer::Shutdown()
         m_impl->perFrameCB[i].Reset();
         m_impl->perObjectRing[i].Reset();
     }
+    if (m_impl->tsReadbackPtr) { m_impl->tsReadback->Unmap(0, nullptr); m_impl->tsReadbackPtr = nullptr; }
+    m_impl->tsReadback.Reset();
+    m_impl->tsQueryHeap.Reset();
     m_impl->cmdList.Reset();
     for (UINT i = 0; i < k_frameCount; ++i)
     {
@@ -3697,6 +3940,8 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
 
     p.m_culler.cull(p.m_renderWorld, p.m_visible);
     p.m_sorter.sort(p.m_renderWorld, p.m_visible, p.m_sortedIndices);
+    p.statTotal   = static_cast<uint32_t>(p.m_renderWorld.objects.size());
+    p.statVisible = static_cast<uint32_t>(p.m_sortedIndices.size());
     if (p.m_sortedIndices.empty()) return;
 
     if (p.m_renderGraph.empty())
@@ -3786,6 +4031,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 cl->IASetVertexBuffers(0, 1, &m.vbv);
                 cl->IASetIndexBuffer(&m.ibv);
                 cl->DrawIndexedInstanced(m.indexCount, 1, 0, 0, 0);
+                ++p.statDraws; p.statTris += m.indexCount / 3;
                 ++drawIdx;
             }
             transition(p.shadowDepth.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE,
@@ -3907,6 +4153,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                     std::memcpy(ringPtr + static_cast<size_t>(drawIdx) * k_cbSlot, &o, sizeof(o));
                 cl->SetGraphicsRootConstantBufferView(0, ringBase + static_cast<UINT64>(drawIdx) * k_cbSlot);
                 cl->DrawIndexedInstanced(m.indexCount, 1, 0, 0, 0);
+                ++p.statDraws; p.statTris += m.indexCount / 3;
                 ++drawIdx;
             };
             if (!dc.instanceTransforms.empty())
@@ -3974,6 +4221,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 cl->IASetVertexBuffers(0, 3, vbvs);
                 cl->IASetIndexBuffer(&skm->ibv);
                 cl->DrawIndexedInstanced(skm->indexCount, 1, 0, 0, 0);
+                ++p.statDraws; p.statTris += skm->indexCount / 3;
 
                 ++drawIdx;
                 ++skinnedIdx;
@@ -4020,6 +4268,12 @@ void D3D12Renderer::Render()
         if (--it->second <= 0) it = p.retiredViewportRTs.erase(it);
         else                   ++it;
     }
+    // Same for font-atlas staging buffers recorded into an earlier frame's list.
+    for (auto it = p.m_uiAtlasUploads.begin(); it != p.m_uiAtlasUploads.end(); )
+    {
+        if (--it->second <= 0) it = p.m_uiAtlasUploads.erase(it);
+        else                   ++it;
+    }
 
     // Resize viewport RT if the editor requested a different size.
     if (p.viewportReqW > 0 && p.viewportReqH > 0 &&
@@ -4029,8 +4283,26 @@ void D3D12Renderer::Render()
     const bool useViewport = p.viewportRT && p.viewportW > 0 && p.viewportH > 0;
 
     p.waitForFrame(p.frameIndex);
+
+    // Reap this slot's timestamps from k_frameCount frames ago: the fence wait
+    // above guarantees the resolve completed, so the mapped read never stalls.
+    if (p.tsPending[p.frameIndex] && p.tsReadbackPtr && p.tsFrequency)
+    {
+        const uint64_t t0 = p.tsReadbackPtr[2 * p.frameIndex];
+        const uint64_t t1 = p.tsReadbackPtr[2 * p.frameIndex + 1];
+        p.lastGpuFrameMs = (t1 > t0)
+            ? static_cast<double>(t1 - t0) * 1000.0 / static_cast<double>(p.tsFrequency)
+            : 0.0;
+        p.tsPending[p.frameIndex] = false;
+    }
+
     p.cmdAllocators[p.frameIndex]->Reset();
     p.cmdList->Reset(p.cmdAllocators[p.frameIndex].Get(), nullptr);
+    if (p.tsQueryHeap)
+        p.cmdList->EndQuery(p.tsQueryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 2 * p.frameIndex);
+
+    // CPU counters restart each frame; DrawScene fills them back in.
+    p.statDraws = p.statTris = p.statVisible = p.statTotal = 0;
 
     const float bgColor[4] = { 0.18f, 0.18f, 0.20f, 1.0f };
 
@@ -4159,6 +4431,14 @@ void D3D12Renderer::Render()
     swapBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
     swapBarrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_PRESENT;
     p.cmdList->ResourceBarrier(1, &swapBarrier);
+    if (p.tsQueryHeap && p.tsReadback)
+    {
+        p.cmdList->EndQuery(p.tsQueryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 2 * p.frameIndex + 1);
+        p.cmdList->ResolveQueryData(p.tsQueryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
+            2 * p.frameIndex, 2, p.tsReadback.Get(),
+            static_cast<UINT64>(2 * p.frameIndex) * sizeof(uint64_t));
+        p.tsPending[p.frameIndex] = true;
+    }
     p.cmdList->Close();
 
     ID3D12CommandList* lists[] = { p.cmdList.Get() };
@@ -4485,4 +4765,28 @@ void D3D12Renderer::SetSSAOSettings(const SSAOSettings& s)
     m_impl->ssaoBias      = 0.025f;   // no bias field in SSAOSettings; keep default
     m_impl->ssaoIntensity = s.intensity;
     m_impl->ssaoMethod    = s.method;
+}
+
+void D3D12Renderer::SetBloomSettings(const BloomSettings& s)
+{
+    // Same field mapping as OpenGL: intensity drives the tonemap add-back strength.
+    // bloomKnee stays at its default — the settings struct has no knee field.
+    m_impl->bloomEnabled   = s.enabled;
+    m_impl->bloomThreshold = s.threshold;
+    m_impl->bloomStrength  = s.intensity;
+}
+
+IRenderer::FrameGpuStats D3D12Renderer::GetFrameGpuStats() const
+{
+    // GPU time comes from the newest reaped timestamp pair (k_frameCount frames
+    // late; -1 before the first reap / when timestamps are unavailable). CPU
+    // counters are this frame's — mirrors OpenGL's merge in GetFrameGpuStats.
+    FrameGpuStats s;
+    s.gpuFrameMs     = m_impl->lastGpuFrameMs;
+    s.gpuTimingMode  = m_impl->lastGpuFrameMs >= 0.0 ? "whole-frame" : "";
+    s.drawCalls      = m_impl->statDraws;
+    s.triangles      = m_impl->statTris;
+    s.visibleObjects = m_impl->statVisible;
+    s.totalObjects   = m_impl->statTotal;
+    return s;
 }
