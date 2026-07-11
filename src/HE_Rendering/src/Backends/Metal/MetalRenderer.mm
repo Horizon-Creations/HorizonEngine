@@ -1826,7 +1826,7 @@ float3 nebula(float3 dir, float3 cdir, float3 sunDir, float intensity, float3 ne
 	// most of the visible piece count at mid coverage; one extra tap).
 	pd = max(pd, (worleyNoise3(Pp * 4.4 + 91.0, noiseTex, noiseSamp) + ero * 0.36 - thr - 0.05) * 0.92);
 	pd -= (1.0 - exist) * 0.35;              // gated-out clusters never surface
-	float core   = smoothstep(0.000, 0.055, pd);   // solid chunk body
+	float core   = smoothstep(0.000, 0.030, pd);   // solid chunk body (crisp silhouette)
 	float depth  = smoothstep(0.030, 0.240, pd);   // deep interior (brightens/whitens)
 	float border = smoothstep(-0.018, 0.010, pd) * (1.0 - smoothstep(0.035, 0.095, pd)); // the piece's RIM band
 	float skirt  = smoothstep(-0.110, -0.015, pd); // dilated halo — fuses into necks
@@ -1965,8 +1965,18 @@ float3 nebula(float3 dir, float3 cdir, float3 sunDir, float intensity, float3 ne
 	float3 C = veilCol * (skirt * (1.0 - core) * 0.06)
 	         + mix(veilCol, filBase, 0.30) * (neck * 0.09);
 	C += mix(veilCol, filBase, 0.55) * (back * 0.22);            // (Max) dim web behind the pieces
-	C += veilCol * hiCov * (core * (0.50 + 0.62 * depth) * (0.40 + 0.60 * silk) * (0.55 + 0.45 * mott))
-	   + float3(0.88, 0.94, 1.06) * hiCov * (depth * depth * (0.14 + 0.34 * silk) * (0.60 + 0.40 * mott));
+	// Dark contrast ring just OUTSIDE the border: pinches the halo fog at the
+	// silhouette so every piece reads as a clearly defined, solid form.
+	float ring = smoothstep(-0.055, -0.014, pd) * (1.0 - smoothstep(-0.014, 0.000, pd));
+	C *= 1.0 - ring * 0.45;
+	// FILLED interior: the shape reads solid (high base fill), and its colour
+	// varies WITHIN the user colour — a deep shade blended toward a pale tint
+	// of colour 1 by the mottle — while silk/veins pattern the fill on top.
+	float3 innerDeep = veilCol * float3(0.60, 0.70, 1.02);
+	float3 innerPale = veilCol * float3(1.28, 1.16, 0.96) + float3(0.05, 0.05, 0.06);
+	float3 innerCol  = mix(innerDeep, innerPale, clamp(mott * 0.75, 0.0, 1.0));
+	C += innerCol * hiCov * (core * (0.62 + 0.50 * depth) * (0.68 + 0.32 * silk))
+	   + float3(0.88, 0.94, 1.06) * hiCov * (depth * depth * (0.12 + 0.30 * silk) * (0.60 + 0.40 * mott));
 	C *= Td;                                                      // ... absorbed by the dust ...
 	C += (nebColor2 * float3(1.10, 0.72, 0.45)) * (dustA * (0.45 + 0.40 * grain)); // thick amber glow
 	// Backlit dust edges: warm translucent rim where a lane crosses the glow behind it.
