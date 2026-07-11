@@ -1512,6 +1512,7 @@ void EditorApplication::dumpFrameHeadless()
 			e->cloudHeight    = static_cast<float>(envF("HE_DUMP_CLOUDHEIGHT", 200.0f));
 			e->nebulaIntensity   = static_cast<float>(envF("HE_DUMP_NEBULA",   e->nebulaIntensity));
 			e->nebulaSeed        = static_cast<float>(envF("HE_DUMP_NEBSEED",  e->nebulaSeed));
+			e->nebulaCoverage    = static_cast<float>(envF("HE_DUMP_NEBCOVER", e->nebulaCoverage));
 			e->nebulaQuality     = static_cast<int>(envF("HE_DUMP_NEBQUALITY", e->nebulaQuality));
 			// Nebula colours as "r,g,b" (0..1). The loaded scene carries SERIALIZED colours,
 			// so new component defaults never show up in a dump without these overrides.
@@ -2457,6 +2458,7 @@ void EditorApplication::pushEnvironment(float dt)
 		.milkyWayIntensity = env->milkyWayIntensity, .nebulaIntensity = env->nebulaIntensity,
 		.nebulaColor = env->nebulaColor, .nebulaColor2 = env->nebulaColor2,
 		.nebulaColor3 = env->nebulaColor3, .nebulaSeed = env->nebulaSeed,
+		.nebulaCoverage = env->nebulaCoverage,
 		.nebulaQuality = env->nebulaQuality,
 		.auroraColor = env->auroraColor,
 		.auroraColorTop = env->auroraColorTop,
