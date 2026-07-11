@@ -1775,6 +1775,7 @@ float3 nebula(float3 dir, float3 cdir, float3 sunDir, float intensity, float3 ne
 	float tau, rim;            // dust optical depth over the veil + backlit edge zone
 	float knots = 0.0;         // (Max) embedded star-cluster knots
 	float grain;               // fine matte texture (anti-shiny)
+	float chunkRim = 0.0, chunkCore = 0.0, chunkHalo = 0.0; // (Max) banded gas pieces
 	if (hifi)
 	{
 		// ===== HIGH FIDELITY: ridged-multifractal filament nebula (astrophoto detail) =====
@@ -1899,6 +1900,21 @@ float3 nebula(float3 dir, float3 cdir, float3 sunDir, float intensity, float3 ne
 			float w2 = worleyNoise3(P*52.0 + 77.0, noiseTex, noiseSamp);
 			knots = (pow(smoothstep(0.60, 0.95, w1), 4.0)
 			       + pow(smoothstep(0.64, 0.96, w2), 4.5) * 0.7) * (veilCore*0.9 + region*0.60) * 1.8;
+			// (10) BANDED GAS CHUNKS: discrete pieces with a crisp defined border, an OUTER
+			// rim colour and a different INNER colour (Eagle/Crab clump look). One warped
+			// field, banded by its signed distance to the chunk iso — the fractal wobble
+			// term keeps the borders irregular, the tight smoothsteps keep them DEFINED.
+			float cf = starFbm3(Pw*1.55 + 640.0 + hfSeed*0.41, 3, noiseTex, noiseSamp)
+			         + 0.30 * (starFbm3(Pw*4.1 + 55.0, 2, noiseTex, noiseSamp) - 0.375);
+			float cd = cf - 0.52;                                   // signed distance to the edge
+			float inChunk = smoothstep(0.000, 0.010, cd);           // crisp border
+			float gate = 0.15 + 0.85 * region;                      // pieces cluster near complexes
+			// Rim brightness VARIES along the border (lit vs shadowed sections) — a flat
+			// rim reads as a cartoon outline.
+			float rimGlow = smoothstep(0.30, 0.95, starFbm3(Pw*2.2 + 371.0 + hfSeed*0.6, 2, noiseTex, noiseSamp) * 1.6);
+			chunkRim  = inChunk * (1.0 - smoothstep(0.012, 0.048, cd)) * gate * (0.25 + 0.95 * rimGlow);
+			chunkCore = smoothstep(0.050, 0.140, cd) * gate;                     // interior
+			chunkHalo = smoothstep(-0.030, -0.005, cd) * (1.0 - inChunk) * gate; // dark contrast line outside
 		}
 	}
 	else
@@ -1945,6 +1961,11 @@ float3 nebula(float3 dir, float3 cdir, float3 sunDir, float intensity, float3 ne
 	float3 C = veilCol * (veil * 0.60 + veilCore * 0.75)
 	         + float3(0.90, 0.95, 1.05) * (veilCore * veilCore * 0.14)   // hot centre whitens
 	         + mix(veilCol, filBase, 0.40) * (filBack * 0.30);
+	// Banded gas chunks (Max): warm bright RIM + cooler bright INTERIOR, separated by
+	// the crisp border; a thin dark halo outside the rim keeps the edge defined.
+	C += (filBase * 1.05 + float3(0.14, 0.07, 0.03)) * (chunkRim * 1.05 * mix(1.0, grain, 0.30))
+	   + (veilCol * 0.75 + float3(0.22, 0.24, 0.26)) * (chunkCore * 0.30 * mix(1.0, grain, 0.45));
+	C *= 1.0 - chunkHalo * 0.45;
 	C *= Td;
 	// Backlit dust edges: warm translucent rim where a lane crosses the glow behind it.
 	C += (filBase * 0.55 + float3(0.30, 0.16, 0.06)) * (rim * 0.35 * (veil * 0.9 + veilCore * 0.5));
