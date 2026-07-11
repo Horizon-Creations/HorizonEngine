@@ -1312,7 +1312,7 @@ vec3 nebula(vec3 dir, vec3 cdir, vec3 sunDir, float intensity, vec3 nebColor)
 	float tau, rim;            // dust optical depth over the veil + backlit edge zone
 	float knots = 0.0;         // (Max) embedded star-cluster knots
 	float grain;               // fine matte texture (anti-shiny)
-	float chunkRim = 0.0, chunkCore = 0.0, chunkHalo = 0.0; // (Max) banded gas pieces
+	float pieceBody = 0.0, pieceRim = 0.0, pieceCore = 0.0, pieceHalo = 0.0; // (Max) large gas pieces
 	if (hifi)
 	{
 		// ===== HIGH FIDELITY: ridged-multifractal filament nebula (astrophoto detail) =====
@@ -1436,21 +1436,24 @@ vec3 nebula(vec3 dir, vec3 cdir, vec3 sunDir, float intensity, vec3 nebColor)
 			float w2 = worleyNoise3(P*52.0 + 77.0);
 			knots = (pow(smoothstep(0.60, 0.95, w1), 4.0)
 			       + pow(smoothstep(0.64, 0.96, w2), 4.5) * 0.7) * (veilCore*0.9 + region*0.60) * 1.8;
-			// (10) BANDED GAS CHUNKS: discrete pieces with a crisp defined border, an OUTER
-			// rim colour and a different INNER colour (Eagle/Crab clump look). One warped
-			// field, banded by its signed distance to the chunk iso — the fractal wobble
-			// term keeps the borders irregular, the tight smoothsteps keep them DEFINED.
-			float cf = starFbm3(Pw*1.55 + 640.0 + hfSeed*0.41, 3)
-			         + 0.30 * (starFbm3(Pw*4.1 + 55.0, 2) - 0.375);
-			float cd = cf - 0.52;                                   // signed distance to the edge
-			float inChunk = smoothstep(0.000, 0.010, cd);           // crisp border
-			float gate = 0.15 + 0.85 * region;                      // pieces cluster near complexes
-			// Rim brightness VARIES along the border (lit vs shadowed sections) — a flat
-			// rim reads as a cartoon outline.
-			float rimGlow = smoothstep(0.30, 0.95, starFbm3(Pw*2.2 + 371.0 + hfSeed*0.6, 2) * 1.6);
-			chunkRim  = inChunk * (1.0 - smoothstep(0.012, 0.048, cd)) * gate * (0.25 + 0.95 * rimGlow);
-			chunkCore = smoothstep(0.050, 0.140, cd) * gate;                     // interior
-			chunkHalo = smoothstep(-0.030, -0.005, cd) * (1.0 - inChunk) * gate; // dark contrast line outside
+			// (10) LARGE GAS PIECES — one candidate piece per LOW-frequency Worley cell
+			// (warped + fractally eroded), so the sky gets a handful of BIG discrete
+			// clumps the size of a complex, not confetti. Composited OCCLUDING (mix,
+			// not add) in the shared section → solid, defined silhouettes with a bright
+			// outer rim and a darker textured interior (Eagle pillar / Crab shell look).
+			vec3 Pp2 = P + 0.70 * hfQ1 + 0.30 * hfQ2;                // warped piece coords
+			float ero    = starFbm3(Pw*2.6 + 431.0, 2) - 0.375;      // boundary erosion
+			float exist  = smoothstep(0.28, 0.70, starFbm3(Pp2*0.85 + 777.7, 2) * 1.6);
+			float rimVar = smoothstep(0.25, 0.95, starFbm3(Pw*2.2 + 371.0 + hfSeed*0.6, 2) * 1.6);
+			float pdA = worleyNoise3(Pp2*2.6 + hfSeed*17.0) + ero*0.40 - 0.62; // big pieces
+			float pdB = worleyNoise3(Pp2*5.2 + 91.0)        + ero*0.30 - 0.68; // half-size pieces
+			float pd  = max(pdA, pdB * 0.85);                        // union, big dominates
+			pieceBody = smoothstep(0.000, 0.028, pd) * exist * (0.35 + 0.65 * region);
+			pieceRim  = smoothstep(0.000, 0.018, pd) * (1.0 - smoothstep(0.025, 0.105, pd))
+			          * (0.20 + 1.00 * rimVar);                      // lit vs dark rim sections
+			pieceCore = smoothstep(0.09, 0.24, pd);                  // deep interior
+			pieceHalo = smoothstep(-0.045, -0.008, pd) * (1.0 - smoothstep(0.000, 0.010, pd))
+			          * exist * (0.35 + 0.65 * region);              // dark contrast line outside
 		}
 	}
 	else
@@ -1497,11 +1500,15 @@ vec3 nebula(vec3 dir, vec3 cdir, vec3 sunDir, float intensity, vec3 nebColor)
 	vec3 C = veilCol * (veil * 0.60 + veilCore * 0.75)
 	       + vec3(0.90, 0.95, 1.05) * (veilCore * veilCore * 0.14)   // hot centre whitens
 	       + mix(veilCol, filBase, 0.40) * (filBack * 0.30);
-	// Banded gas chunks (Max): warm bright RIM + cooler bright INTERIOR, separated by
-	// the crisp border; a thin dark halo outside the rim keeps the edge defined.
-	C += (filBase * 1.05 + vec3(0.14, 0.07, 0.03)) * (chunkRim * 1.05 * mix(1.0, grain, 0.30))
-	   + (veilCol * 0.75 + vec3(0.22, 0.24, 0.26)) * (chunkCore * 0.30 * mix(1.0, grain, 0.45));
-	C *= 1.0 - chunkHalo * 0.45;
+	// Large gas pieces (Max): OCCLUDING composite — the piece replaces the background
+	// instead of adding to it, so its silhouette stays solid and defined. Interior is
+	// a darker, grain-textured cool tone; the rim band glows in the cage colours.
+	vec3 pInner = (veilCol * 0.62 + filBase * 0.24 + vec3(0.07, 0.07, 0.08))
+	            * (0.60 + 0.40 * grain) * (0.60 + 0.40 * pieceCore);
+	vec3 pRimC  = (filBase * 1.25 + vec3(0.16, 0.08, 0.03)) * mix(1.0, grain, 0.25);
+	vec3 pieceCol = mix(pInner, pRimC, clamp(pieceRim, 0.0, 1.0));
+	C = mix(C, pieceCol, clamp(pieceBody, 0.0, 1.0) * 0.92);
+	C *= 1.0 - pieceHalo * 0.55;
 	C *= Td;
 	// Backlit dust edges: warm translucent rim where a lane crosses the glow behind it.
 	C += (filBase * 0.55 + vec3(0.30, 0.16, 0.06)) * (rim * 0.35 * (veil * 0.9 + veilCore * 0.5));
