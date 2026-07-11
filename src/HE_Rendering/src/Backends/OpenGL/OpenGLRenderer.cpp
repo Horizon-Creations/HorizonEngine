@@ -1425,18 +1425,42 @@ vec3 nebula(vec3 dir, vec3 cdir, vec3 sunDir, float intensity, vec3 nebColor)
 	// Fine GRAIN → matte, fibrous texture on gas and filaments (anti-shiny).
 	float grain = clamp(starFbm3(Pw * 6.5 + 400.0, hifi ? 2 : 1) * (hifi ? 2.0 : 4.0), 0.0, 1.4);
 	cage *= lenFade * (0.62 + 0.48 * grain);
-	// Web reach: veins inside the piece + dense on its rim + strands in the necks.
-	float reach = border * 1.15 + neck * 0.80 + depth * 0.42 + core * 0.10;
+	// STRIPES — a sky-wide random pattern of long vein strands: stretched ridged
+	// layers at crossing orientations. Computed for the WHOLE sky so the pattern
+	// runs seamlessly from piece to piece — the pieces merely act as its alpha
+	// mask in the composite below.
+	// Thin flank ISO lines (not ridge peaks — those are fat at the noise mode)
+	// on axis-stretched fbm → long crisp strands.
+	float sA = starFbm3(vec3(Pw.x, Pw.y * 0.22, Pw.z) * 2.4 + 1300.0 + sd, 2);
+	float stripes = nebIso(sA, 0.55, 0.018);
+	if (hifi)
+	{
+		float sB = starFbm3(vec3(Pw.x * 0.22, Pw.y, Pw.z) * 2.9 + 1450.0, 2);
+		stripes = max(stripes, nebIso(sB, 0.55, 0.016) * 0.85);
+	}
+	stripes *= 0.55 + 0.40 * grain;
+	cage = max(cage, stripes);
+	// Interior MOTTLE — mid-frequency patchiness so the gas inside a piece has
+	// visible texture instead of a flat airbrush fill.
+	float mott = clamp(starFbm3(Pw * 3.8 + 271.0 + sd, hifi ? 3 : 2) * 2.3, 0.0, 1.5);
+	// ALPHA mask: the global vein/stripe pattern shows through the piece BODY
+	// (uniformly, not just the rim) and through the necks; the border only adds
+	// a mild extra so the rim web still reads a touch denser.
+	float reach = core * 0.95 + neck * 0.80 + border * 0.30;
+	// At high coverage the piece body approaches the whole sky — ease the vein
+	// alpha back so a full nebula sky doesn't drown in web (0.5 unchanged).
+	float covWeb = mix(1.0, 0.62, smoothstep(0.60, 1.00, cover));
+	reach *= covWeb;
 	float fil = cage * reach * (maxq ? 1.60 : (hifi ? 1.50 : 1.30));
 	// Ionization: the strongest wall centres run cream-hot, mostly on the rim.
-	float ion = (1.0 - smoothstep(0.003, 0.010, abs(nC - 0.260))) * smoothstep(0.50, 1.00, border * 1.20 + depth * 0.30);
+	float ion = (1.0 - smoothstep(0.003, 0.010, abs(nC - 0.260))) * smoothstep(0.50, 1.00, core * 0.90 + border * 0.40);
 
 	// (5) BEADS — Worley corner pockets (far-from-all-features) land at cell
 	// junctions; masked by the cage so they read as knots ON the filaments.
 	float beads = 0.0;
 	if (hifi)  beads  = pow(smoothstep(0.34, 0.16, worleyNoise3(Pk * 26.0 + sd * 31.0)), 2.0) * 0.9;
 	if (maxq)  beads += pow(smoothstep(0.32, 0.14, worleyNoise3(Pk * 46.0 + 77.0)), 2.0) * 0.6;
-	beads *= smoothstep(0.30, 0.90, cage) * (border + neck * 0.5 + depth * 0.4) * aaFine;
+	beads *= smoothstep(0.30, 0.90, cage) * (core * 0.8 + neck * 0.5 + border * 0.3) * aaFine;
 
 	// (6) Max extras: dim BACK web across the halo zone (depth cue) + extra
 	// fray strands riding the necks so the connections read fibrous.
@@ -1455,7 +1479,8 @@ vec3 nebula(vec3 dir, vec3 cdir, vec3 sunDir, float intensity, vec3 nebColor)
 	// distribution's mode on the low side and flood the piece with warm rim.
 	float rim = smoothstep(0.015, 0.045, dLn) * (1.0 - smoothstep(0.060, 0.100, dLn));
 	float dustA = smoothstep(0.72, 0.94, starFbm3(Pc * 0.95 + 313.0 + sd * 0.4, hifi ? 3 : 2) + border * 0.08);
-	dustA *= 0.45 + 0.55 * smoothstep(0.20, 0.60, core + border);
+	dustA *= (0.45 + 0.55 * smoothstep(0.20, 0.60, core + border))
+	       * mix(1.0, 0.55, smoothstep(0.60, 1.00, cover)); // high cover: don't drown the sky in amber
 	tau += dustA * 1.5;                       // the thick patches also redden the gas behind
 
 	// ---- shared astro composition (all tiers) ----
@@ -1477,8 +1502,8 @@ vec3 nebula(vec3 dir, vec3 cdir, vec3 sunDir, float intensity, vec3 nebColor)
 	vec3 C = veilCol * (skirt * (1.0 - core) * 0.06)
 	         + mix(veilCol, filBase, 0.30) * (neck * 0.09);
 	C += mix(veilCol, filBase, 0.55) * (back * 0.22);            // (Max) dim web behind the pieces
-	C += veilCol * hiCov * (core * (0.50 + 0.62 * depth) * (0.45 + 0.80 * silk))
-	   + vec3(0.88, 0.94, 1.06) * hiCov * (depth * depth * (0.14 + 0.38 * silk));
+	C += veilCol * hiCov * (core * (0.50 + 0.62 * depth) * (0.40 + 0.60 * silk) * (0.55 + 0.45 * mott))
+	   + vec3(0.88, 0.94, 1.06) * hiCov * (depth * depth * (0.14 + 0.34 * silk) * (0.60 + 0.40 * mott));
 	C *= Td;                                                      // ... absorbed by the dust ...
 	C += (uNebulaColor2 * vec3(1.10, 0.72, 0.45)) * (dustA * (0.45 + 0.40 * grain)); // thick amber glow
 	// Backlit dust edges: warm translucent rim where a lane crosses the glow behind it.
