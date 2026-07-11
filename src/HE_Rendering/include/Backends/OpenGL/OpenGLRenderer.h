@@ -391,6 +391,7 @@ private:
 	int          m_uSkyNebulaColor3 = -1; // space-nebula colour 3
 	int          m_uSkyNebulaSeed  = -1;  // space-nebula seed
 	int          m_uSkyNebulaHiFi  = -1;  // space-nebula fidelity mode
+	int          m_uSkyNebulaCover = -1;  // space-nebula sky coverage
 	int          m_uSkyAuroraColor = -1;  // aurora base colour
 	int          m_uSkyAuroraColorTop = -1; // aurora upper colour
 	int          m_uSkyAuroraHeight   = -1; // aurora band elevation

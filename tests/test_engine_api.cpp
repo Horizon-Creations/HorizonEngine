@@ -784,6 +784,26 @@ TEST_CASE("Camera + Environment: registry knobs reach the world's components")
     CHECK(env.cloudCoverage == doctest::Approx(0.8f));
     CHECK(env.fogDensity == doctest::Approx(0.1f));
     CHECK(call("env.getWindSpeed", {})[0].f == doctest::Approx(4.0f));
+
+    // The X-list generation covers EVERY component field and all four kinds:
+    // float (above), bool, int and vec3-colour (packed in a Color value).
+    call("env.setNebulaCoverage", { Value::ofFloat(0.9f) });
+    CHECK(env.nebulaCoverage == doctest::Approx(0.9f));
+    CHECK(call("env.getNebulaCoverage", {})[0].f == doctest::Approx(0.9f));
+    call("env.setDayNightCycle", { Value::ofBool(true) });
+    CHECK(env.dayNightCycle == true);
+    CHECK(call("env.getDayNightCycle", {})[0].b == true);
+    call("env.setNebulaQuality", { Value::ofInt(2) });
+    CHECK(env.nebulaQuality == 2);
+    CHECK(call("env.getNebulaQuality", {})[0].i == 2);
+    call("env.setNebulaColor2", { Value::ofColor({ 0.1f, 0.2f, 0.3f, 0.0f }) });
+    CHECK(env.nebulaColor2.y == doctest::Approx(0.2f));
+    CHECK(call("env.getNebulaColor2", {})[0].col.z == doctest::Approx(0.3f));
+    // Registry sanity: one Get + one Set row per field, all in "Environment".
+    int envRows = 0;
+    for (const auto& fn : HE::api::registry())
+        if (std::string(fn.id).rfind("env.", 0) == 0) ++envRows;
+    CHECK(envRows == 2 * (37 + 4 + 3 + 9));   // float + bool + int + colour fields
 }
 
 TEST_CASE("Entity query: findByName + exists through the registry")
