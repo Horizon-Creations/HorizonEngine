@@ -841,6 +841,10 @@ vec3 shootingStars(vec3 dir, vec3 sunDir, float time, float rate)
 		// along the great circle AWAY from it (real shower geometry).
 		float phiS = starHash(seed) * 6.2831853;
 		float dst  = 0.35 + 0.75 * starHash(seed + 2.1);  // angular distance from the radiant
+		// Meteor size follows the star settings: uStarSize scales width/head,
+		// uStarSizeVar spreads individual meteors between small and large.
+		float mSz  = clamp(uStarSize, 0.25, 3.0)
+		           * mix(1.0, mix(0.6, 1.8, starHash(seed + 7.7)), clamp(uStarSizeVar, 0.0, 1.0));
 		vec3  p0   = normalize(R * cos(dst) + (Ru * cos(phiS) + Rv * sin(phiS)) * sin(dst));
 		vec3  tdir = normalize(p0 * dot(R, p0) - R);      // tangent pointing away from the radiant
 		// Tiny per-meteor tilt so the trails aren't machine-parallel.
@@ -853,13 +857,14 @@ vec3 shootingStars(vec3 dir, vec3 sunDir, float time, float rate)
 		vec3  seg = tail - head;
 		float s   = clamp(dot(dir - head, seg) / max(dot(seg, seg), 1e-5), 0.0, 1.0);
 		float dd  = length(dir - (head + seg * s));
-		float w      = mix(0.0045, 0.0014, s);                       // taper: wider at head, thin at tail
+		float w      = mix(0.0045, 0.0014, s) * mSz;                 // taper: wider at head, thin at tail
 		float streak = exp(-(dd * dd) / (w * w)) * pow(1.0 - s, 1.6); // brightest at the head
 		float dh     = length(dir - head);
-		float headG  = exp(-(dh * dh) / 0.00006);                    // small sharp head (≈0.45°)
+		float headG  = exp(-(dh * dh) / (0.00006 * mSz * mSz));      // small sharp head (≈0.45° at size 1)
 		float life   = smoothstep(0.0, 0.08, t) * (1.0 - smoothstep(0.55, 1.0, t));
-		vec3  mcol   = vec3(0.78, 0.88, 1.0);                        // cool blue-white meteor
-		col += mcol * ((streak * 1.7 + headG * 1.1) * life);
+		// Colour + brightness follow the star settings (same knobs as starField).
+		vec3  mcol   = vec3(0.78, 0.88, 1.0) * uStarColor;           // cool blue-white meteor, user-tinted
+		col += mcol * ((streak * 1.7 + headG * 1.1) * life * uStarBright);
 	}
 	float horizon = smoothstep(0.0, 0.12, dir.y);
 	return col * night * horizon;
