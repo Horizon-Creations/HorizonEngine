@@ -64,6 +64,80 @@ const char* uiCursorName(UICursor c)
     }
 }
 
+// ── Shared base properties ────────────────────────────────────────────────────
+// Get/set of the base fields by name. Kept in one place so allProperties/
+// getPropAny/setPropAny stay in step; returns false for non-base names.
+namespace
+{
+bool getBaseProp(const UIElement& e, const std::string& n, UIPropValue& out)
+{
+    if (n == "Visible")      { out = UIPropValue::ofBool(e.visible);            return true; }
+    if (n == "Hit Testable") { out = UIPropValue::ofBool(e.hitTestable);        return true; }
+    if (n == "Position")     { out = UIPropValue::ofVec2({ e.posX, e.posY });   return true; }
+    if (n == "Size")         { out = UIPropValue::ofVec2({ e.sizeX, e.sizeY }); return true; }
+    if (n == "Layer")        { out = UIPropValue::ofInt(e.layer);               return true; }
+    if (n == "Hover Cursor") { out = UIPropValue::ofInt((int)e.hoverCursor);    return true; }
+    if (n == "Material")     { out = UIPropValue::ofString(e.material);         return true; }
+    if (n == "Font")         { out = UIPropValue::ofString(e.font);             return true; }
+    return false;
+}
+
+bool setBaseProp(UIElement& e, const std::string& n, const UIPropValue& v)
+{
+    if (n == "Visible")      { e.visible     = v.b; return true; }
+    if (n == "Hit Testable") { e.hitTestable = v.b; return true; }
+    if (n == "Position")     { e.posX  = v.v2.x; e.posY  = v.v2.y; return true; }
+    if (n == "Size")         { e.sizeX = v.v2.x; e.sizeY = v.v2.y; return true; }
+    if (n == "Layer")        { e.layer = v.i; return true; }
+    if (n == "Hover Cursor")
+    {
+        const int c = v.i;
+        e.hoverCursor = (c >= 0 && c < (int)UICursor::COUNT)
+            ? (UICursor)c : UICursor::Default;
+        return true;
+    }
+    if (n == "Material")     { e.material = v.s; return true; }
+    if (n == "Font")         { e.font = v.s; return true; }
+    return false;
+}
+} // namespace
+
+std::vector<UIPropDesc> UIElement::allProperties() const
+{
+    std::vector<UIPropDesc> out = properties();
+    out.push_back({ "Visible",      UIPropType::Bool });
+    out.push_back({ "Hit Testable", UIPropType::Bool });
+    out.push_back({ "Position",     UIPropType::Vec2 });
+    out.push_back({ "Size",         UIPropType::Vec2 });
+    out.push_back({ "Layer",        UIPropType::Int });
+    out.push_back({ "Hover Cursor", UIPropType::Int });
+    // Asset slots only where the editor exposes them: Material behind
+    // hasMaterialSlot(), Font on text-bearing types (same FontSize heuristic
+    // the details panel uses).
+    if (hasMaterialSlot())
+        out.push_back({ "Material", UIPropType::String });
+    for (const UIPropDesc& pd : properties())
+        if (pd.name == "FontSize")
+        {
+            out.push_back({ "Font", UIPropType::String });
+            break;
+        }
+    return out;
+}
+
+UIPropValue UIElement::getPropAny(const std::string& name) const
+{
+    UIPropValue v;
+    if (getBaseProp(*this, name, v)) return v;
+    return getProp(name);
+}
+
+void UIElement::setPropAny(const std::string& name, const UIPropValue& v)
+{
+    if (setBaseProp(*this, name, v)) return;
+    setProp(name, v);
+}
+
 // ── Render helpers ───────────────────────────────────────────────────────────
 
 namespace

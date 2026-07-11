@@ -199,7 +199,31 @@ struct UIWidgetAsset : public RuntimeAsset
 // or scene. Authored in the HorizonCode editor, referenced by other graphs.
 struct HorizonCodeClassAsset : public RuntimeAsset
 {
-	std::string graphJson; // HorizonCode::Graph
+	std::string graphJson;  // HorizonCode::Graph
+	// Engine base class this graph derives from. Decides the event catalog the
+	// editor offers and how the runtime hosts the instance. Empty = plain Object
+	// (pre-existing assets carry no CHUNK_HCBC and keep loading as before).
+	// Known values: "PlayerController", "PlayerCharacter".
+	std::string baseClass;
+};
+
+// A named logical input (e.g. "Jump", "MoveForward"). JSON payload:
+//   { "valueType": "Button" | "Axis" }
+// Button actions surface Pressed/Released events in HorizonCode graphs; Axis
+// actions surface a per-frame Axis event with a Float value.
+struct InputActionAsset : public RuntimeAsset
+{
+	std::string json;
+};
+
+// Key bindings that drive InputAction states. JSON payload:
+//   { "entries": [ { "action": "<content-relative InputAction path>",
+//                    "keys":  ["Space", ...],                                  // Button form
+//                    "axes":  [{"positive":"W","negative":"S","scale":1.0}] } ] } // Axis form
+// Key names are SDL scancode names (SDL_GetScancodeFromName).
+struct InputMappingContextAsset : public RuntimeAsset
+{
+	std::string json;
 };
 
 struct SceneAsset : public RuntimeAsset

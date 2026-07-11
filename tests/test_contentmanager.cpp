@@ -93,6 +93,73 @@ TEST_CASE("ContentManager HorizonCode class round-trip")
 	}
 }
 
+TEST_CASE("ContentManager HorizonCode class baseClass round-trip")
+{
+	TempContentDir dir;
+	HE::UUID savedId;
+	{
+		ContentManager cm(dir.path.string());
+		HorizonCodeClassAsset a;
+		a.type      = HE::AssetType::HorizonCodeClass;
+		a.name      = "PC";
+		a.path      = "PC.hasset";
+		a.graphJson = R"({"nextId":1,"nodes":[],"links":[],"variables":[]})";
+		a.baseClass = "PlayerController";
+		REQUIRE(cm.saveAsset(a));
+		savedId = a.id;
+	}
+	{
+		ContentManager cm(dir.path.string());
+		const HorizonCodeClassAsset* a = cm.getHorizonCodeClass(cm.loadAsset("PC.hasset"));
+		REQUIRE(a != nullptr);
+		CHECK(a->baseClass == "PlayerController");
+	}
+}
+
+TEST_CASE("ContentManager input action + mapping context round-trip")
+{
+	TempContentDir dir;
+	const std::string actionJson  = R"({"valueType":"Axis"})";
+	const std::string mappingJson =
+		R"({"entries":[{"action":"IA_Move.hasset","axes":[{"positive":"W","negative":"S","scale":1.0}]}]})";
+	HE::UUID actionId, mappingId;
+	{
+		ContentManager cm(dir.path.string());
+		InputActionAsset ia;
+		ia.type = HE::AssetType::InputAction;
+		ia.name = "IA_Move";
+		ia.path = "IA_Move.hasset";
+		ia.json = actionJson;
+		REQUIRE(cm.saveAsset(ia));
+		actionId = ia.id;
+
+		InputMappingContextAsset mc;
+		mc.type = HE::AssetType::InputMappingContext;
+		mc.name = "IMC_Default";
+		mc.path = "IMC_Default.hasset";
+		mc.json = mappingJson;
+		REQUIRE(cm.saveAsset(mc));
+		mappingId = mc.id;
+	}
+	{
+		ContentManager cm(dir.path.string());
+		const InputActionAsset* ia = cm.getInputAction(cm.loadAsset("IA_Move.hasset"));
+		REQUIRE(ia != nullptr);
+		CHECK(ia->id == actionId);
+		CHECK(ia->json == actionJson);
+
+		const InputMappingContextAsset* mc =
+			cm.getInputMappingContext(cm.loadAsset("IMC_Default.hasset"));
+		REQUIRE(mc != nullptr);
+		CHECK(mc->id == mappingId);
+		CHECK(mc->json == mappingJson);
+
+		// Wrong-type lookups must not alias
+		CHECK(cm.getInputAction(mappingId) == nullptr);
+		CHECK(cm.getInputMappingContext(actionId) == nullptr);
+	}
+}
+
 TEST_CASE("ContentManager texture round-trip")
 {
 	TempContentDir dir;

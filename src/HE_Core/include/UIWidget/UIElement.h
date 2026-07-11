@@ -133,6 +133,16 @@ public:
     virtual UIPropValue getProp(const std::string& name) const = 0;
     virtual void        setProp(const std::string& name, const UIPropValue& v) = 0;
 
+    // ── Shared base properties (every element) ────────────────────────────
+    // The base fields (Visible, Hit Testable, Position, Size, Layer, Hover
+    // Cursor, Material, Font) unified with the subclass's own list, so generic
+    // consumers — Get/Set Property nodes, the runtime bindings, scripting —
+    // can read and write EVERY property by name, not just the type-specific
+    // ones. Base names are checked first; no subclass reuses them.
+    std::vector<UIPropDesc> allProperties() const;
+    UIPropValue getPropAny(const std::string& name) const;
+    void        setPropAny(const std::string& name, const UIPropValue& v);
+
     // Events this type can fire (Designer "add event" + HorizonCode).
     virtual std::vector<UIEventDesc> events() const { return {}; }
     virtual bool hasMaterialSlot() const { return false; }

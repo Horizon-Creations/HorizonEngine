@@ -88,7 +88,9 @@ namespace HE
         PropertyAnimClip, // property/transform/material animation clips
         MaterialFunction, // reusable material sub-graph (node editor), inlined at codegen
         Widget,           // UI widget tree (UMG-style widget editor), instantiated at play start
-        HorizonCodeClass  // standalone HorizonCode graph (visual-scripting class)
+        HorizonCodeClass, // standalone HorizonCode graph (visual-scripting class)
+        InputAction,      // named logical input (Button or Axis), referenced by mapping contexts
+        InputMappingContext // key/axis bindings that drive InputAction states at runtime
     };
 
     enum class TextureFormat : uint32_t

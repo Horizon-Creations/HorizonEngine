@@ -1161,6 +1161,8 @@ void EditorApplication::OnRender(float dt)
 			m_editorWorld->widgets().tick(dt);
 			// Latent HorizonCode flow (Delay nodes) — PIE only, like the tick.
 			m_editorWorld->scripts().update(dt);
+			// Player instances: Tick + Input.<Action>.* events.
+			m_playerHost.tick(input(), dt);
 
 			// Toggle SDL text-input to match widget text-field focus, so a focused
 			// PIE text field receives SDL_EVENT_TEXT_INPUT. Only touched on a focus
@@ -1990,6 +1992,7 @@ AppContext EditorApplication::makeContext()
 		},
 		.cbTreeWidth         = m_editorConfig.CbTreeWidth,
 		.hubSelectedPreset   = m_hubSelectedPreset,
+		.hubSelectedLang     = m_hubSelectedLang,
 		.hubProjectName      = m_hubProjectName,
 		.hubProjectNameSize  = (int)sizeof(m_hubProjectName),
 		.hubProjectDir       = m_hubProjectDir,
@@ -2255,6 +2258,11 @@ void EditorApplication::setPlayMode(bool play)
 		// fires the matching "OnLevelUnloaded".
 		m_editorWorld->fireLevelLoaded();
 
+		// Player controller/character classes + input events, mirroring the
+		// packaged game: spawn after the level is up (Construct + BeginPlay),
+		// pump Tick/Input.* per frame while playing.
+		m_playerHost.begin(m_gameInstance.runtime(), contentManager());
+
 		// horizon.showCursor()/hideCursor(): scripts release/re-grab the PIE
 		// mouse capture (visible cursor = UI interaction mode).
 		ScriptApi::setCursorHook([this](bool show){ setPlayMouseCaptured(!show); });
@@ -2266,8 +2274,11 @@ void EditorApplication::setPlayMode(bool play)
 	}
 	else
 	{
-		// GameInstance OnShutdown fires while the app runtime is still intact
-		// (it lives outside the world, so clear() below doesn't touch it).
+		// Player instances go down first (their Destruct may still reference the
+		// GameInstance), then the GameInstance fires OnShutdown while the app
+		// runtime is still intact (it lives outside the world, so clear() below
+		// doesn't touch it).
+		m_playerHost.end();
 		m_gameInstance.fireShutdown();
 
 		setPlayMouseCaptured(false); // release the mouse when leaving play mode

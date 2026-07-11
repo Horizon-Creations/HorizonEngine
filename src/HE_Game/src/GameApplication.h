@@ -8,6 +8,7 @@
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/UIInputSystem.h>
 #include <HorizonScene/GameInstanceHost.h>
+#include <HorizonScene/PlayerHost.h>
 #include <HorizonScene/AudioEngine.h>
 
 class ScriptContext;
@@ -58,6 +59,10 @@ private:
     // App-wide HorizonCode host: owns the runtime the world runs on and the
     // GameInstance (OnInit fires before the scene loads; OnShutdown at exit).
     GameInstanceHost m_gameInstance;
+    // Player controller/character HorizonCode instances + their input pump.
+    // Runs on m_gameInstance's runtime; begun after the startup scene loads,
+    // ended in OnShutdown before the GameInstance fires OnShutdown.
+    PlayerHost m_playerHost;
     // App-level UI: the GameInstance's widgets live here (not in any world), so a
     // HUD created in OnInit exists before the first scene and survives scene
     // switches. Each world borrows it via setWidgetManager. Declared after

@@ -291,7 +291,23 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 		HorizonCodeClassAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_HCGR))
 			a.graphJson.assign(reinterpret_cast<const char*>(c->data.data()), c->data.size());
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_HCBC)) // absent → plain Object
+			a.baseClass.assign(reinterpret_cast<const char*>(c->data.data()), c->data.size());
 		handle = m_hcClassAssets.insert(std::move(a)); break;
+	}
+	case HE::AssetType::InputAction:
+	{
+		InputActionAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_IACT))
+			a.json.assign(reinterpret_cast<const char*>(c->data.data()), c->data.size());
+		handle = m_inputActionAssets.insert(std::move(a)); break;
+	}
+	case HE::AssetType::InputMappingContext:
+	{
+		InputMappingContextAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_IMAP))
+			a.json.assign(reinterpret_cast<const char*>(c->data.data()), c->data.size());
+		handle = m_inputMappingAssets.insert(std::move(a)); break;
 	}
 	case HE::AssetType::Audio:
 	{
@@ -906,6 +922,22 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 		auto& a = static_cast<HorizonCodeClassAsset&>(asset);
 		if (!a.graphJson.empty())
 			w.addChunk(HAsset::CHUNK_HCGR, a.graphJson.data(), a.graphJson.size());
+		if (!a.baseClass.empty())
+			w.addChunk(HAsset::CHUNK_HCBC, a.baseClass.data(), a.baseClass.size());
+		break;
+	}
+	case HE::AssetType::InputAction:
+	{
+		auto& a = static_cast<InputActionAsset&>(asset);
+		if (!a.json.empty())
+			w.addChunk(HAsset::CHUNK_IACT, a.json.data(), a.json.size());
+		break;
+	}
+	case HE::AssetType::InputMappingContext:
+	{
+		auto& a = static_cast<InputMappingContextAsset&>(asset);
+		if (!a.json.empty())
+			w.addChunk(HAsset::CHUNK_IMAP, a.json.data(), a.json.size());
 		break;
 	}
 	case HE::AssetType::Audio:
@@ -1031,6 +1063,22 @@ HorizonCodeClassAsset* ContentManager::getHorizonCodeClassMutable(HE::UUID id)
 	HorizonCodeClassAsset* a = m_hcClassAssets.get(it->second);
 	return (a && a->id == id) ? a : nullptr; // reject wrong-type aliasing
 }
+const InputActionAsset* ContentManager::getInputAction(HE::UUID id) const { return lookupAsset(m_handleToUUID, m_inputActionAssets, id); }
+InputActionAsset* ContentManager::getInputActionMutable(HE::UUID id)
+{
+	auto it = m_handleToUUID.find(id);
+	if (it == m_handleToUUID.end()) return nullptr;
+	InputActionAsset* a = m_inputActionAssets.get(it->second);
+	return (a && a->id == id) ? a : nullptr; // reject wrong-type aliasing
+}
+const InputMappingContextAsset* ContentManager::getInputMappingContext(HE::UUID id) const { return lookupAsset(m_handleToUUID, m_inputMappingAssets, id); }
+InputMappingContextAsset* ContentManager::getInputMappingContextMutable(HE::UUID id)
+{
+	auto it = m_handleToUUID.find(id);
+	if (it == m_handleToUUID.end()) return nullptr;
+	InputMappingContextAsset* a = m_inputMappingAssets.get(it->second);
+	return (a && a->id == id) ? a : nullptr; // reject wrong-type aliasing
+}
 const ShaderAsset*        ContentManager::getShader(HE::UUID id) const        { return lookupAsset(m_handleToUUID, m_shaderAssets, id); }
 const PrefabAsset*        ContentManager::getPrefab(HE::UUID id) const        { return lookupAsset(m_handleToUUID, m_prefabAssets, id); }
 const AnimationClipAsset*      ContentManager::getAnimationClip(HE::UUID id) const      { return lookupAsset(m_handleToUUID, m_animClipAssets,     id); }
@@ -1125,6 +1173,8 @@ HE::UUID ContentManager::registerScript(ScriptAsset asset)               { retur
 HE::UUID ContentManager::registerMaterialFunction(MaterialFunctionAsset asset) { return registerRuntimeAsset(m_materialFunctionAssets, std::move(asset), HE::AssetType::MaterialFunction); }
 HE::UUID ContentManager::registerWidget(UIWidgetAsset asset) { return registerRuntimeAsset(m_widgetAssets, std::move(asset), HE::AssetType::Widget); }
 HE::UUID ContentManager::registerHorizonCodeClass(HorizonCodeClassAsset asset) { return registerRuntimeAsset(m_hcClassAssets, std::move(asset), HE::AssetType::HorizonCodeClass); }
+HE::UUID ContentManager::registerInputAction(InputActionAsset asset)                 { return registerRuntimeAsset(m_inputActionAssets,  std::move(asset), HE::AssetType::InputAction); }
+HE::UUID ContentManager::registerInputMappingContext(InputMappingContextAsset asset) { return registerRuntimeAsset(m_inputMappingAssets, std::move(asset), HE::AssetType::InputMappingContext); }
 HE::UUID ContentManager::registerAnimationClip(AnimationClipAsset asset)       { return registerRuntimeAsset(m_animClipAssets,     std::move(asset), HE::AssetType::AnimationClip);     }
 HE::UUID ContentManager::registerPropertyAnimClip(PropertyAnimClipAsset asset) { return registerRuntimeAsset(m_propAnimClipAssets, std::move(asset), HE::AssetType::PropertyAnimClip); }
 

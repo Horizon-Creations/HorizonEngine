@@ -106,6 +106,7 @@ add_executable(HorizonEditor WIN32
 	MaterialEditorPanel.cpp
 	UIEditorPanel.cpp
 	LevelScriptPanel.cpp
+	InputAssetPanel.cpp
 	HcClassList.cpp
 	GraphEditor.cpp
 	stb_image_impl.cpp

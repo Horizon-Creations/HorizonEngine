@@ -43,6 +43,8 @@ public:
 	void SetDebugLines(const std::vector<DebugLine>& lines) override;
 	void SetMoonTexture(const void* rgba8Pixels, int width, int height) override;
 	void SetSSAOSettings(const SSAOSettings& s) override;
+	void SetBloomSettings(const BloomSettings& s) override;
+	FrameGpuStats GetFrameGpuStats() const override;
 
 	// ImGui editor textures (content-browser icons + logo). Uploads the RGBA8
 	// pixels to a sampled VkImage (+ view + linear sampler), then hands the view +
@@ -260,6 +262,7 @@ private:
 
 	bool   m_postFxReady     = false;
 	float  m_exposure        = 1.0f;
+	bool   m_bloomEnabled    = true;
 	float  m_bloomStrength   = 0.25f;
 	float  m_bloomThreshold  = 1.0f;
 	float  m_bloomKnee       = 0.1f;
@@ -498,4 +501,44 @@ private:
 	VkRenderPass     m_uiViewportRP        = VK_NULL_HANDLE;
 	// Single-frame framebuffer wrapping m_viewportView for the UI viewport pass.
 	VkFramebuffer    m_uiViewportFB        = VK_NULL_HANDLE;
+
+	// ── UI font atlases (glyph quads, obj.type == 2) ────────────────────────
+	// One R8 VkImage per UIFontCache atlas key (0 = the shared default font),
+	// uploaded lazily from the CPU-baked bitmap the first time a glyph quad
+	// references the key. Each atlas gets a descriptor set (set=0 binding=0,
+	// immutable m_uiFontSampler) that runUIPass binds per glyph run; solid
+	// quads keep whatever atlas is bound (the shader ignores it in mode 0).
+	struct UIFontAtlas
+	{
+		VkImage         image  = VK_NULL_HANDLE;
+		VkDeviceMemory  memory = VK_NULL_HANDLE;
+		VkImageView     view   = VK_NULL_HANDLE;
+		VkDescriptorSet set    = VK_NULL_HANDLE;
+	};
+	VkDescriptorSet uiFontAtlasSet(uint32_t key);   // creates/caches on demand
+	void            destroyUIFontAtlases();
+	VkDescriptorSetLayout m_uiAtlasDSLayout = VK_NULL_HANDLE;
+	VkDescriptorPool      m_uiAtlasDescPool = VK_NULL_HANDLE;
+	VkSampler             m_uiFontSampler   = VK_NULL_HANDLE;
+	std::unordered_map<uint32_t, UIFontAtlas> m_uiFontAtlases;
+
+	// ── GPU frame timing (VkQueryPool timestamps) ───────────────────────────
+	// Two timestamps (frame begin/end) per ring slot. The ring is deeper than
+	// k_maxFramesInFlight so the slot reused each frame finished at least one
+	// fence-wait ago — its readback (availability-checked, no RESULT_WAIT)
+	// never stalls. GetFrameGpuStats therefore reports 1–N frames late,
+	// matching the OpenGL backend's async timer ring.
+	void gpuTimerInit();                       // after device creation
+	void gpuTimerBegin(VkCommandBuffer cmd);   // reap oldest slot + start stamp
+	void gpuTimerEnd(VkCommandBuffer cmd);     // end stamp + advance the ring
+	static constexpr uint32_t kGpuTimerRing = 4;
+	VkQueryPool m_tsQueryPool = VK_NULL_HANDLE;
+	bool        m_tsSupported = false;
+	float       m_tsPeriodNs  = 0.0f;               // ns per timestamp tick
+	uint64_t    m_tsValidMask = 0;                  // queue timestampValidBits mask
+	bool        m_tsPending[kGpuTimerRing] = {};    // slot has unread results
+	uint64_t    m_tsFrameIdx  = 0;
+	FrameGpuStats m_lastGpuStats;                   // newest reaped GPU time
+	// CPU-side per-frame counters (reset in Render, merged by GetFrameGpuStats).
+	uint32_t m_statDraws = 0, m_statTris = 0, m_statVisible = 0, m_statTotal = 0;
 };

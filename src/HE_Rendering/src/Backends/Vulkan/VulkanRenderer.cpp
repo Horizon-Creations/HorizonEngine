@@ -1,6 +1,7 @@
 #include "Backends/Vulkan/VulkanRenderer.h"
 #include <Window/Window.h>
 #include <ContentManager/ContentManager.h>
+#include <Renderer/UIFont.h>
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
 #include <vulkan/vulkan.h>
@@ -180,6 +181,7 @@ void VulkanRenderer::Initialize(HE::Window* window)
     createSurface();        Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: surface created");
     pickPhysicalDevice();   Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: physical device selected");
     createDevice();         Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: logical device created");
+    gpuTimerInit();
     createSwapchain(window->GetWidth(), window->GetHeight()); Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: swapchain created");
     createRenderPass();     Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: render pass created");
     createFramebuffers();   Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: framebuffers created");
@@ -249,12 +251,17 @@ void VulkanRenderer::Shutdown()
     if (m_skinnedPipeLayout)   { vkDestroyPipelineLayout(m_device, m_skinnedPipeLayout,  nullptr);  m_skinnedPipeLayout   = VK_NULL_HANDLE; }
     if (m_skinnedDescPool)     { vkDestroyDescriptorPool(m_device, m_skinnedDescPool,    nullptr);  m_skinnedDescPool     = VK_NULL_HANDLE; }
     if (m_skinnedBonesDSL)     { vkDestroyDescriptorSetLayout(m_device, m_skinnedBonesDSL, nullptr); m_skinnedBonesDSL    = VK_NULL_HANDLE; }
-    // UI canvas pipeline
+    // UI canvas pipeline + font atlases
+    destroyUIFontAtlases();
     if (m_uiViewportFB)       { vkDestroyFramebuffer    (m_device, m_uiViewportFB,      nullptr); m_uiViewportFB      = VK_NULL_HANDLE; }
     if (m_uiViewportPipeline) { vkDestroyPipeline       (m_device, m_uiViewportPipeline,nullptr); m_uiViewportPipeline = VK_NULL_HANDLE; }
     if (m_uiPipeline)         { vkDestroyPipeline       (m_device, m_uiPipeline,        nullptr); m_uiPipeline        = VK_NULL_HANDLE; }
     if (m_uiPipeLayout)       { vkDestroyPipelineLayout (m_device, m_uiPipeLayout,      nullptr); m_uiPipeLayout      = VK_NULL_HANDLE; }
     if (m_uiViewportRP)       { vkDestroyRenderPass     (m_device, m_uiViewportRP,      nullptr); m_uiViewportRP      = VK_NULL_HANDLE; }
+    if (m_uiAtlasDescPool)    { vkDestroyDescriptorPool (m_device, m_uiAtlasDescPool,   nullptr); m_uiAtlasDescPool   = VK_NULL_HANDLE; }
+    if (m_uiAtlasDSLayout)    { vkDestroyDescriptorSetLayout(m_device, m_uiAtlasDSLayout, nullptr); m_uiAtlasDSLayout = VK_NULL_HANDLE; }
+    if (m_uiFontSampler)      { vkDestroySampler        (m_device, m_uiFontSampler,     nullptr); m_uiFontSampler     = VK_NULL_HANDLE; }
+    if (m_tsQueryPool)        { vkDestroyQueryPool      (m_device, m_tsQueryPool,       nullptr); m_tsQueryPool       = VK_NULL_HANDLE; }
     for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
     {
         if (m_boneUBOPtr[i])  { vkUnmapMemory(m_device, m_boneUBOMem[i]); m_boneUBOPtr[i] = nullptr; }
@@ -317,6 +324,7 @@ void VulkanRenderer::Render()
 {
     m_wallTime = static_cast<float>(SDL_GetTicks()) * 0.001f;
     m_ssaoRanThisFrame = false;  // cleared each frame; set true only inside runSSAO()
+    m_statDraws = m_statTris = m_statVisible = m_statTotal = 0;  // rebuilt by DrawScene
 
     // Free retired viewport color images once enough frames have passed (GPU done).
     for (auto it = m_retiredViewports.begin(); it != m_retiredViewports.end(); )
@@ -371,6 +379,9 @@ void VulkanRenderer::Render()
     VkCommandBufferBeginInfo bi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
     vkBeginCommandBuffer(cmd, &bi);
 
+    // Frame-begin timestamp (also reaps the slot's previous results — no stall).
+    gpuTimerBegin(cmd);
+
     // Shadow map first, in its own render pass (before the scene/swapchain pass).
     EncodeShadowMap(cmd);
 
@@ -424,34 +435,51 @@ void VulkanRenderer::Render()
 
             const uint32_t bw = std::max(1u, m_viewportW/2), bh = std::max(1u, m_viewportH/2);
 
-            // ── Bloom bright pass ──────────────────────────────────────────
-            { const float p[4]={m_bloomThreshold,m_bloomKnee,0,0};
-              blitPass(m_postFxBlitF16, m_bloomFB[0], bw, bh, m_bloomBrightPipe, m_postFxDS[0], p); }
-            m_bloomLayout[0] = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-            // ── 10 ping-pong blur passes ───────────────────────────────────
-            bool horiz = true;
-            for (int pass = 0; pass < 10; ++pass)
+            if (m_bloomEnabled)
             {
-                const int dst = horiz?1:0, src = horiz?0:1;
-                runPostFXBarrier(cmd, m_bloomImage[src],
-                    m_bloomLayout[src], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                // ── Bloom bright pass ──────────────────────────────────────
+                { const float p[4]={m_bloomThreshold,m_bloomKnee,0,0};
+                  blitPass(m_postFxBlitF16, m_bloomFB[0], bw, bh, m_bloomBrightPipe, m_postFxDS[0], p); }
+                m_bloomLayout[0] = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+                // ── 10 ping-pong blur passes ───────────────────────────────
+                bool horiz = true;
+                for (int pass = 0; pass < 10; ++pass)
+                {
+                    const int dst = horiz?1:0, src = horiz?0:1;
+                    runPostFXBarrier(cmd, m_bloomImage[src],
+                        m_bloomLayout[src], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+                    m_bloomLayout[src] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                    const float p[4]={1.0f/float(bw),1.0f/float(bh),horiz?1.0f:0.0f,0};
+                    blitPass(m_postFxBlitF16, m_bloomFB[dst], bw, bh, m_bloomBlurPipe,
+                             m_postFxDS[1+src], p);
+                    m_bloomLayout[dst] = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+                    horiz = !horiz;
+                }
+                // After 10 passes: result in bloom[0] (COLOR_ATTACHMENT_OPTIMAL).
+                runPostFXBarrier(cmd, m_bloomImage[0],
+                    m_bloomLayout[0], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                     VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-                m_bloomLayout[src] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-                const float p[4]={1.0f/float(bw),1.0f/float(bh),horiz?1.0f:0.0f,0};
-                blitPass(m_postFxBlitF16, m_bloomFB[dst], bw, bh, m_bloomBlurPipe,
-                         m_postFxDS[1+src], p);
-                m_bloomLayout[dst] = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-                horiz = !horiz;
+                m_bloomLayout[0] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
             }
-            // After 10 passes: result in bloom[0] (COLOR_ATTACHMENT_OPTIMAL).
-            runPostFXBarrier(cmd, m_bloomImage[0],
-                m_bloomLayout[0], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-            m_bloomLayout[0] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            else if (m_bloomLayout[0] != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+            {
+                // Bloom disabled: bright/blur are skipped, but the tonemap set
+                // still samples bloom[0]. Fill it once with black (bright pass,
+                // unreachable threshold → contrib 0) so uninitialized F16 memory
+                // (possibly NaN — which survives the strength-0 multiply) never
+                // reaches the tonemapper, then park it in SHADER_READ_ONLY.
+                { const float p[4]={3.4e38f, m_bloomKnee, 0, 0};
+                  blitPass(m_postFxBlitF16, m_bloomFB[0], bw, bh, m_bloomBrightPipe, m_postFxDS[0], p); }
+                runPostFXBarrier(cmd, m_bloomImage[0],
+                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+                m_bloomLayout[0] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            }
 
             // ── Tonemap: hdr+bloom[0] → ldrFB ─────────────────────────────
-            { const float p[4]={m_exposure, m_bloomStrength, 0, 0};
+            { const float p[4]={m_exposure, m_bloomEnabled ? m_bloomStrength : 0.0f, 0, 0};
               blitPass(m_postFxBlitF8, m_ldrFB, m_viewportW, m_viewportH, m_tonemapPipe, m_postFxDS[3], p); }
             m_ldrLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
@@ -580,6 +608,7 @@ void VulkanRenderer::Render()
     }
     if (m_overlayCallback) m_overlayCallback(cmd);
     vkCmdEndRenderPass(cmd);
+    gpuTimerEnd(cmd);   // frame-end timestamp (after all GPU work this frame)
     vkEndCommandBuffer(cmd);
 
     VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
@@ -2544,6 +2573,8 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
 
     m_culler.cull(m_renderWorld, m_visible);
     m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
+    m_statTotal   = static_cast<uint32_t>(m_renderWorld.objects.size());
+    m_statVisible = static_cast<uint32_t>(m_sortedIndices.size());
     if (m_sortedIndices.empty()) return;
 
     if (m_renderGraph.empty())
@@ -2644,6 +2675,8 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                 vkCmdPushConstants(cmd, m_scenePipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
                                    0, sizeof(pc2), &pc2);
                 vkCmdDrawIndexed(cmd, m.indexCount, 1, 0, 0, 0);
+                ++m_statDraws;
+                m_statTris += m.indexCount / 3;
             };
             if (!dc.instanceTransforms.empty())
                 for (const glm::mat4& t : dc.instanceTransforms) drawOne(t);
@@ -2740,6 +2773,8 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                                    0, sizeof(pc2), &pc2);
 
                 vkCmdDrawIndexed(cmd, static_cast<uint32_t>(smesh->indexCount), 1, 0, 0, 0);
+                ++m_statDraws;
+                m_statTris += static_cast<uint32_t>(smesh->indexCount) / 3;
                 ++skinnedIdx;
             }
 
@@ -3710,6 +3745,13 @@ void VulkanRenderer::SetSSAOSettings(const SSAOSettings& s)
     m_ssaoRadius    = s.radius;
     m_ssaoIntensity = s.intensity;
     m_ssaoMethod    = s.method;
+}
+
+void VulkanRenderer::SetBloomSettings(const BloomSettings& s)
+{
+    m_bloomEnabled   = s.enabled;
+    m_bloomThreshold = s.threshold;
+    m_bloomStrength  = s.intensity;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4865,13 +4907,48 @@ void VulkanRenderer::createUIPipeline()
         return;
     }
 
-    // Push constant layout: UIPush (48 bytes) visible to both stages.
+    // Linear clamp sampler for the R8 font atlases (immutable in the set layout).
+    {
+        VkSamplerCreateInfo sci{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+        sci.magFilter    = VK_FILTER_LINEAR;
+        sci.minFilter    = VK_FILTER_LINEAR;
+        sci.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        vkCheck(vkCreateSampler(m_device, &sci, nullptr, &m_uiFontSampler), "ui font sampler");
+    }
+
+    // set=0 binding=0: the font atlas (uFontAtlas). One descriptor set per atlas
+    // key, allocated lazily by uiFontAtlasSet().
+    {
+        VkDescriptorSetLayoutBinding bind{};
+        bind.binding            = 0;
+        bind.descriptorType     = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        bind.descriptorCount    = 1;
+        bind.stageFlags         = VK_SHADER_STAGE_FRAGMENT_BIT;
+        bind.pImmutableSamplers = &m_uiFontSampler;
+        VkDescriptorSetLayoutCreateInfo dslci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+        dslci.bindingCount = 1;
+        dslci.pBindings    = &bind;
+        vkCheck(vkCreateDescriptorSetLayout(m_device, &dslci, nullptr, &m_uiAtlasDSLayout), "ui atlas DS layout");
+
+        VkDescriptorPoolSize ps{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 32 };
+        VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+        dpci.maxSets       = 32;   // shared font + up to 31 imported fonts
+        dpci.poolSizeCount = 1;
+        dpci.pPoolSizes    = &ps;
+        vkCheck(vkCreateDescriptorPool(m_device, &dpci, nullptr, &m_uiAtlasDescPool), "ui atlas desc pool");
+    }
+
+    // Push constant layout: UIPush (64 bytes) visible to both stages.
     VkPushConstantRange pcr{};
     pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     pcr.offset     = 0;
-    pcr.size       = 48; // vec4 rect + vec4 color + vec2 viewport + vec2 pad
+    pcr.size       = 64; // vec4 rect + vec4 color + vec4 uvRect + vec2 viewport + vec2 params
 
     VkPipelineLayoutCreateInfo plci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    plci.setLayoutCount         = 1;
+    plci.pSetLayouts            = &m_uiAtlasDSLayout;
     plci.pushConstantRangeCount = 1;
     plci.pPushConstantRanges    = &pcr;
     vkCheck(vkCreatePipelineLayout(m_device, &plci, nullptr, &m_uiPipeLayout), "ui pipe layout");
@@ -5006,18 +5083,322 @@ void VulkanRenderer::runUIPass(VkCommandBuffer cmd, int width, int height)
     // Caller is responsible for binding the correct pipeline and setting
     // viewport/scissor before calling. This function only loops over UI objects
     // and issues draw calls — it does NOT begin/end a render pass.
-    struct UIPush { glm::vec4 rect; glm::vec4 color; glm::vec2 viewport; glm::vec2 pad; };
+    struct UIPush { glm::vec4 rect; glm::vec4 color; glm::vec4 uvRect; glm::vec2 viewport; glm::vec2 params; };
+
+    // The atlas set must be bound for EVERY draw (the fragment shader statically
+    // uses the sampler even for solid quads). Default to the shared font (key 0);
+    // glyph quads re-bind when they reference an imported font's atlas.
+    VkDescriptorSet atlasSet = uiFontAtlasSet(0);
+    if (!atlasSet) return;  // device-level upload failure — nothing valid to bind
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_uiPipeLayout,
+                            0, 1, &atlasSet, 0, nullptr);
+    uint32_t boundAtlasKey = 0;
 
     for (const UIRenderObject& obj : m_renderWorld.uiObjects)
     {
-        if (obj.type == 2) continue; // font-atlas glyph quads: GL/Metal only for now
+        // A glyph quad may use an imported font's atlas — bind its set.
+        if (obj.type == 2 && obj.fontAtlasKey != boundAtlasKey)
+        {
+            if (VkDescriptorSet s = uiFontAtlasSet(obj.fontAtlasKey))
+            {
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_uiPipeLayout,
+                                        0, 1, &s, 0, nullptr);
+                boundAtlasKey = obj.fontAtlasKey;
+            }
+        }
         UIPush push{};
         push.rect     = glm::vec4(obj.position.x, obj.position.y, obj.size.x, obj.size.y);
         push.color    = glm::vec4(obj.color.r, obj.color.g, obj.color.b, obj.color.a);
+        push.uvRect   = glm::vec4(obj.uvMin.x, obj.uvMin.y, obj.uvMax.x, obj.uvMax.y);
         push.viewport = glm::vec2(float(width), float(height));
+        push.params   = glm::vec2(obj.type == 2 ? 1.0f : 0.0f, 0.0f);
         vkCmdPushConstants(cmd, m_uiPipeLayout,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(UIPush), &push);
         vkCmdDraw(cmd, 4, 1, 0, 0);
     }
+}
+
+// The descriptor set (R8 atlas image + immutable sampler) for a font key
+// (0 = the shared default), uploaded lazily from the CPU-baked bitmap the first
+// time a glyph quad references it. Unknown / failed keys fall back to the shared
+// font's set so the pipeline always has a valid binding. The upload runs on its
+// own one-shot command buffer (mirrors SetMoonTexture), which is safe mid-frame:
+// the primary command buffer is still recording, not submitted.
+VkDescriptorSet VulkanRenderer::uiFontAtlasSet(uint32_t key)
+{
+    if (auto it = m_uiFontAtlases.find(key); it != m_uiFontAtlases.end())
+        return it->second.set;
+    if (!m_uiAtlasDSLayout || !m_uiAtlasDescPool) return VK_NULL_HANDLE;
+
+    const uint8_t* pixels = nullptr;
+    int w = 0, h = 0;
+    if (key == 0)
+    {
+        if (const HE::BakedUIFont& f = HE::sharedUIFont(); f.ok)
+        {
+            pixels = f.pixels.data();
+            w = f.atlasW; h = f.atlasH;
+        }
+    }
+    else if (const HE::BakedUIFont* f = HE::UIFontCache::find(key); f && f->ok)
+    {
+        pixels = f->pixels.data();
+        w = f->atlasW; h = f->atlasH;
+    }
+    // Imported-font key without a baked atlas → shared font (don't cache the
+    // fallback: GL re-resolves each frame too). A missing SHARED font is cached
+    // as a 1×1 transparent atlas so glyphs simply don't render.
+    static const uint8_t kZeroPixel = 0;
+    if (!pixels)
+    {
+        if (key != 0) return uiFontAtlasSet(0);
+        pixels = &kZeroPixel; w = h = 1;
+    }
+
+    UIFontAtlas atlas;
+
+    // ── Staging buffer ───────────────────────────────────────────────────────
+    const VkDeviceSize dataSize = static_cast<VkDeviceSize>(w) * h;
+    VkBuffer       stageBuf = VK_NULL_HANDLE;
+    VkDeviceMemory stageMem = VK_NULL_HANDLE;
+    {
+        VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        bci.size  = dataSize;
+        bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        vkCreateBuffer(m_device, &bci, nullptr, &stageBuf);
+        VkMemoryRequirements mr;
+        vkGetBufferMemoryRequirements(m_device, stageBuf, &mr);
+        VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        mai.allocationSize  = mr.size;
+        mai.memoryTypeIndex = findMemoryType(mr.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        vkAllocateMemory(m_device, &mai, nullptr, &stageMem);
+        vkBindBufferMemory(m_device, stageBuf, stageMem, 0);
+        void* ptr = nullptr;
+        vkMapMemory(m_device, stageMem, 0, dataSize, 0, &ptr);
+        std::memcpy(ptr, pixels, static_cast<size_t>(dataSize));
+        vkUnmapMemory(m_device, stageMem);
+    }
+
+    // ── Device-local R8 image (glyph coverage in .r, like GL's GL_R8 atlas) ──
+    VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+    ici.imageType     = VK_IMAGE_TYPE_2D;
+    ici.format        = VK_FORMAT_R8_UNORM;
+    ici.extent        = { static_cast<uint32_t>(w), static_cast<uint32_t>(h), 1 };
+    ici.mipLevels     = 1;
+    ici.arrayLayers   = 1;
+    ici.samples       = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling        = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage         = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (vkCreateImage(m_device, &ici, nullptr, &atlas.image) != VK_SUCCESS)
+    {
+        vkDestroyBuffer(m_device, stageBuf, nullptr);
+        vkFreeMemory(m_device, stageMem, nullptr);
+        return VK_NULL_HANDLE;
+    }
+    VkMemoryRequirements imr;
+    vkGetImageMemoryRequirements(m_device, atlas.image, &imr);
+    VkMemoryAllocateInfo imal{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    imal.allocationSize  = imr.size;
+    imal.memoryTypeIndex = findMemoryType(imr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    vkAllocateMemory(m_device, &imal, nullptr, &atlas.memory);
+    vkBindImageMemory(m_device, atlas.image, atlas.memory, 0);
+
+    // ── One-shot command buffer: transition + copy ───────────────────────────
+    VkCommandBufferAllocateInfo cbai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+    cbai.commandPool        = m_cmdPool;
+    cbai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cbai.commandBufferCount = 1;
+    VkCommandBuffer oneCB = VK_NULL_HANDLE;
+    vkAllocateCommandBuffers(m_device, &cbai, &oneCB);
+    VkCommandBufferBeginInfo oneBI{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    oneBI.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(oneCB, &oneBI);
+
+    // UNDEFINED → TRANSFER_DST
+    {
+        VkImageMemoryBarrier bar{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+        bar.oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED;
+        bar.newLayout           = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bar.image               = atlas.image;
+        bar.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        bar.srcAccessMask       = 0;
+        bar.dstAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(oneCB,
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &bar);
+    }
+
+    VkBufferImageCopy region{};
+    region.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    region.imageExtent      = { static_cast<uint32_t>(w), static_cast<uint32_t>(h), 1 };
+    vkCmdCopyBufferToImage(oneCB, stageBuf, atlas.image,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+    // TRANSFER_DST → SHADER_READ_ONLY
+    {
+        VkImageMemoryBarrier bar{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+        bar.oldLayout           = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        bar.newLayout           = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bar.image               = atlas.image;
+        bar.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        bar.srcAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
+        bar.dstAccessMask       = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(oneCB,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &bar);
+    }
+
+    vkEndCommandBuffer(oneCB);
+    VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    si.commandBufferCount = 1;
+    si.pCommandBuffers    = &oneCB;
+    vkQueueSubmit(m_graphicsQueue, 1, &si, VK_NULL_HANDLE);
+    vkQueueWaitIdle(m_graphicsQueue);
+    vkFreeCommandBuffers(m_device, m_cmdPool, 1, &oneCB);
+
+    vkDestroyBuffer(m_device, stageBuf, nullptr);
+    vkFreeMemory(m_device, stageMem, nullptr);
+
+    // ── Image view + descriptor set ──────────────────────────────────────────
+    VkImageViewCreateInfo ivci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+    ivci.image            = atlas.image;
+    ivci.viewType         = VK_IMAGE_VIEW_TYPE_2D;
+    ivci.format           = VK_FORMAT_R8_UNORM;
+    ivci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    vkCreateImageView(m_device, &ivci, nullptr, &atlas.view);
+
+    VkDescriptorSetAllocateInfo dsai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+    dsai.descriptorPool     = m_uiAtlasDescPool;
+    dsai.descriptorSetCount = 1;
+    dsai.pSetLayouts        = &m_uiAtlasDSLayout;
+    if (vkAllocateDescriptorSets(m_device, &dsai, &atlas.set) != VK_SUCCESS)
+    {
+        // Pool exhausted (>32 fonts): keep the shared font working, drop this one.
+        Logger::Log(Logger::LogLevel::Warning, "VulkanRenderer: UI font atlas descriptor pool exhausted");
+        vkDestroyImageView(m_device, atlas.view, nullptr);
+        vkDestroyImage(m_device, atlas.image, nullptr);
+        vkFreeMemory(m_device, atlas.memory, nullptr);
+        return key != 0 ? uiFontAtlasSet(0) : VK_NULL_HANDLE;
+    }
+    VkDescriptorImageInfo dii{ VK_NULL_HANDLE, atlas.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    VkWriteDescriptorSet wr{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+    wr.dstSet          = atlas.set;
+    wr.dstBinding      = 0;
+    wr.descriptorCount = 1;
+    wr.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    wr.pImageInfo      = &dii;
+    vkUpdateDescriptorSets(m_device, 1, &wr, 0, nullptr);
+
+    m_uiFontAtlases[key] = atlas;
+    return atlas.set;
+}
+
+void VulkanRenderer::destroyUIFontAtlases()
+{
+    for (auto& [key, a] : m_uiFontAtlases)
+    {
+        if (a.view)   vkDestroyImageView(m_device, a.view,   nullptr);
+        if (a.image)  vkDestroyImage    (m_device, a.image,  nullptr);
+        if (a.memory) vkFreeMemory      (m_device, a.memory, nullptr);
+        // Descriptor sets are freed with m_uiAtlasDescPool in Shutdown().
+    }
+    m_uiFontAtlases.clear();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GPU frame timing (VkQueryPool timestamps)
+// ─────────────────────────────────────────────────────────────────────────────
+
+void VulkanRenderer::gpuTimerInit()
+{
+    VkPhysicalDeviceProperties props{};
+    vkGetPhysicalDeviceProperties(m_physDevice, &props);
+    uint32_t n = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(m_physDevice, &n, nullptr);
+    std::vector<VkQueueFamilyProperties> families(n);
+    vkGetPhysicalDeviceQueueFamilyProperties(m_physDevice, &n, families.data());
+    const uint32_t validBits =
+        m_graphicsFamily < n ? families[m_graphicsFamily].timestampValidBits : 0;
+
+    // timestampValidBits == 0 → this queue cannot write timestamps at all;
+    // timestampPeriod == 0 would make the tick→ns conversion meaningless.
+    if (validBits == 0 || props.limits.timestampPeriod <= 0.0f)
+    {
+        Logger::Log(Logger::LogLevel::Info,
+            "VulkanRenderer: GPU timestamps unsupported on this queue — gpuFrameMs stays -1");
+        return;
+    }
+    m_tsPeriodNs  = props.limits.timestampPeriod;
+    m_tsValidMask = validBits >= 64 ? ~0ull : ((1ull << validBits) - 1ull);
+
+    VkQueryPoolCreateInfo qpci{ VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
+    qpci.queryType  = VK_QUERY_TYPE_TIMESTAMP;
+    qpci.queryCount = kGpuTimerRing * 2;   // begin/end per ring slot
+    if (vkCreateQueryPool(m_device, &qpci, nullptr, &m_tsQueryPool) != VK_SUCCESS)
+    {
+        m_tsQueryPool = VK_NULL_HANDLE;
+        return;
+    }
+    m_tsSupported = true;
+}
+
+void VulkanRenderer::gpuTimerBegin(VkCommandBuffer cmd)
+{
+    if (!m_tsSupported) return;
+    const uint32_t slot = static_cast<uint32_t>(m_tsFrameIdx % kGpuTimerRing);
+
+    // This slot was written kGpuTimerRing frames ago; with only
+    // k_maxFramesInFlight frames in flight its submit has been fence-waited, so
+    // the availability check succeeds without ever using VK_QUERY_RESULT_WAIT.
+    if (m_tsPending[slot])
+    {
+        uint64_t r[4] = {};   // {value, availability} × {begin, end}
+        const VkResult res = vkGetQueryPoolResults(m_device, m_tsQueryPool, slot * 2, 2,
+            sizeof(r), r, 2 * sizeof(uint64_t),
+            VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+        if (res == VK_SUCCESS && r[1] && r[3])
+        {
+            const uint64_t t0 = r[0] & m_tsValidMask;
+            const uint64_t t1 = r[2] & m_tsValidMask;
+            FrameGpuStats fs;
+            fs.gpuFrameMs = (t1 > t0)
+                ? static_cast<double>(t1 - t0) * static_cast<double>(m_tsPeriodNs) * 1e-6
+                : 0.0;
+            fs.gpuTimingMode = "whole-frame";   // no per-pass breakdown on Vulkan yet
+            m_lastGpuStats = fs;                // CPU counters merged by GetFrameGpuStats
+        }
+        m_tsPending[slot] = false;   // reset below invalidates the old results either way
+    }
+
+    vkCmdResetQueryPool(cmd, m_tsQueryPool, slot * 2, 2);
+    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, m_tsQueryPool, slot * 2);
+}
+
+void VulkanRenderer::gpuTimerEnd(VkCommandBuffer cmd)
+{
+    if (!m_tsSupported) return;
+    const uint32_t slot = static_cast<uint32_t>(m_tsFrameIdx % kGpuTimerRing);
+    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, m_tsQueryPool, slot * 2 + 1);
+    m_tsPending[slot] = true;
+    ++m_tsFrameIdx;
+}
+
+IRenderer::FrameGpuStats VulkanRenderer::GetFrameGpuStats() const
+{
+    // GPU time comes from the newest reaped timestamp slot (1–N frames late; -1
+    // before the first reap / when timestamps are unsupported). CPU counters are
+    // this frame's — the same split the OpenGL backend reports.
+    FrameGpuStats s = m_lastGpuStats;
+    s.drawCalls      = m_statDraws;
+    s.triangles      = m_statTris;
+    s.visibleObjects = m_statVisible;
+    s.totalObjects   = m_statTotal;
+    return s;
 }

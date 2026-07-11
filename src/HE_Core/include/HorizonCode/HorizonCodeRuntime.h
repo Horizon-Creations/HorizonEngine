@@ -45,6 +45,15 @@ struct HostBindings
 class HE_API Runtime
 {
 public:
+    Runtime() = default;
+    // Instances hold move-only compiled backends (CompiledPtr); spell that out
+    // explicitly rather than relying on implicit deletion — MSVC's STL hard-errors
+    // deep in <list> trying to instantiate unordered_map's copy-assign otherwise.
+    Runtime(const Runtime&)            = delete;
+    Runtime& operator=(const Runtime&) = delete;
+    Runtime(Runtime&&)                 = default;
+    Runtime& operator=(Runtime&&)      = default;
+
     // Register a running script. The runtime takes ownership of the graph (so a
     // caller's container reallocating can't dangle execution) and seeds the
     // instance's private variable store from the graph's declared defaults.
@@ -150,6 +159,15 @@ public:
 private:
     struct Inst
     {
+        Inst() = default;
+        // CompiledPtr (unique_ptr) makes this move-only; spell that out explicitly
+        // to match Runtime's own explicit move-only declaration (see the class-level
+        // comment above) rather than leaving it implicit.
+        Inst(const Inst&)            = delete;
+        Inst& operator=(const Inst&) = delete;
+        Inst(Inst&&)                 = default;
+        Inst& operator=(Inst&&)      = default;
+
         Graph                                   graph;      // interpreted; empty for compiled
         CompiledPtr                             compiled;   // compiled backend (null = interpreted)
         HostBindings                            host;
