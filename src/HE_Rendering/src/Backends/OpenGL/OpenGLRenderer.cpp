@@ -817,6 +817,15 @@ vec3 shootingStars(vec3 dir, vec3 sunDir, float time, float rate)
 	float r      = clamp(rate, 0.0, 1.0);
 	int   slots  = 1 + int(r * 3.0);                  // 1..4 concurrent meteor slots
 	float period = mix(9.0, 3.5, r);                  // seconds between meteors per slot
+	// ONE shared RADIANT per "shower" (re-rolled every few minutes): all meteors
+	// stream away from the same sky point — near-parallel trails far from it,
+	// gently diverging around it — instead of criss-crossing at random.
+	float shower = floor(time / 700.0);
+	float azR = starHash(vec3(shower + 0.5, 4.2, 9.1)) * 6.2831853;
+	float elR = 0.45 + 0.75 * starHash(vec3(shower + 0.5, 2.8, 5.5));
+	vec3  R   = normalize(vec3(cos(azR) * cos(elR), sin(elR), sin(azR) * cos(elR)));
+	vec3  Ru  = normalize(cross(vec3(0.0, 1.0, 0.0), R));   // tangent basis at the radiant
+	vec3  Rv  = cross(R, Ru);
 	vec3  col    = vec3(0.0);
 	for (int k = 0; k < slots; ++k)
 	{
@@ -828,12 +837,14 @@ vec3 shootingStars(vec3 dir, vec3 sunDir, float time, float rate)
 		float t = ph / dur;                           // 0..1 along the streak's life
 
 		vec3  seed = vec3(idx * 1.7 + 0.3, float(k) * 7.3 + 1.1, idx * 0.31 + float(k) * 3.9);
-		float az   = starHash(seed)        * 6.2831853;
-		float el   = 0.25 + starHash(seed + 2.1) * 0.6;   // upper sky
-		vec3  p0   = normalize(vec3(cos(az) * cos(el), sin(el), sin(az) * cos(el)));
-		vec3  rnd  = vec3(starHash(seed + 3.3) - 0.5, starHash(seed + 5.7) - 0.5,
-		                  starHash(seed + 8.1) - 0.5);
-		vec3  tdir = normalize(cross(p0, normalize(rnd + vec3(0.001))));
+		// Spawn at a random bearing/distance AROUND the radiant, then travel
+		// along the great circle AWAY from it (real shower geometry).
+		float phiS = starHash(seed) * 6.2831853;
+		float dst  = 0.35 + 0.75 * starHash(seed + 2.1);  // angular distance from the radiant
+		vec3  p0   = normalize(R * cos(dst) + (Ru * cos(phiS) + Rv * sin(phiS)) * sin(dst));
+		vec3  tdir = normalize(p0 * dot(R, p0) - R);      // tangent pointing away from the radiant
+		// Tiny per-meteor tilt so the trails aren't machine-parallel.
+		tdir = normalize(tdir + cross(p0, tdir) * ((starHash(seed + 5.7) - 0.5) * 0.12));
 		float arc  = 0.5 + 0.4 * starHash(seed + 9.9); // angular travel over the life
 		vec3  head = normalize(p0 + tdir * (t * arc));
 		vec3  tail = normalize(p0 + tdir * (t * arc - 0.30)); // tail end trailing behind the head
