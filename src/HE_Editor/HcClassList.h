@@ -124,6 +124,16 @@ namespace HcEditorUtil
 	// owning function name + mirrors its result pins. Returns true if it changed.
 	bool drawReturnFunctionPicker(HorizonCode::Graph& g, HorizonCode::Node& ret);
 
+	// ── Hover tooltips ────────────────────────────────────────────────────────
+	// Full hover-tooltip text for a node instance: what it does (HC::nodeTooltip,
+	// or the engine registry entry for an Engine Call), then its inputs and
+	// outputs with their value types, derived from HC::signatureOf. Shared by the
+	// level/class and widget graph editors so every node documents itself the
+	// same way.
+	std::string nodeTooltipText(const HorizonCode::Node& n);
+	// Same, for a bare node type (add-menu items — no configured instance yet).
+	std::string nodeTooltipText(HorizonCode::NodeType t);
+
 	// ── Shared graph colors (ImU32; keep every HC editor consistent) ──────────
 	// A stable color per value type — Bool always red, Float green, Ref purple, …
 	std::uint32_t pinTypeColor(HorizonCode::PinType t);

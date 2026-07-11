@@ -814,6 +814,10 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 		bool committed = false;
 		HcEditorUtil::drawPinDefaultEditor(*n, pin, committed);
 		if (committed) edited = true; };
+	// Hovering a node shows what it does + its inputs/outputs.
+	m.nodeTooltip = [&graph](int id){
+		const HC::Node* n = graph.findNode(id);
+		return n ? HcEditorUtil::nodeTooltipText(*n) : std::string(); };
 	// Right-click a node → context menu. When the clicked node is part of a
 	// multi-selection, Delete removes the whole selection.
 	m.drawNodeContextMenu = [&graph, &edited](int nodeId)
@@ -915,6 +919,8 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 				if (!header) { ImGui::TextDisabled("%s", cat); header = true; }
 				if (ImGui::Selectable(HC::nodeDisplayName(t)))
 				{ created = addNode(graph, t, g.ge.addMenuGraphPos); ImGui::CloseCurrentPopup(); }
+				if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip))
+					ImGui::SetTooltip("%s", HcEditorUtil::nodeTooltipText(t).c_str());
 			}
 			if (header) ImGui::Spacing();
 		}
@@ -1112,6 +1118,8 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 					if (!isExecPin) nn->propType = dragType; // keep the matched signature
 					wireAt(id, pin); created = id; ImGui::CloseCurrentPopup();
 				}
+				if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip))
+					ImGui::SetTooltip("%s", HcEditorUtil::nodeTooltipText(t).c_str());
 			}
 			if (gh) ImGui::Spacing();
 		}

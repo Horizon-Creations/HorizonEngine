@@ -65,6 +65,10 @@ struct State
     ImVec2 boxStart;                 // screen-space
     ImVec2 addMenuGraphPos;          // graph-space drop point for the add popup
     int    ctxNode = 0;              // node whose right-click context menu is open
+    // Hover-tooltip bookkeeping: node under the cursor last frame + how long
+    // the cursor has rested on it (the tooltip shows after a short delay).
+    int    hoverNode = 0;
+    float  hoverTime = 0.0f;
     // Source pin of a link drag that was released on empty canvas (opens the
     // filtered drag-off menu next frame).
     int    dragOffNode = 0, dragOffPin = 0;
@@ -118,6 +122,9 @@ struct Model
     // the node box, over the normal border. Used for error/status markers
     // (e.g. a HorizonCode compile error anchored to a node).
     std::function<ImU32(int nodeId)> nodeOutline;
+    // Hover tooltip: text shown after the cursor rests on a node for a moment
+    // (what the node does, its inputs/outputs). Empty string = no tooltip.
+    std::function<std::string(int nodeId)> nodeTooltip;
     // Right-click on a node opens a popup; the host draws its items here.
     std::function<void(int nodeId)> drawNodeContextMenu;
     // Double-click on a node (e.g. open a referenced function).
