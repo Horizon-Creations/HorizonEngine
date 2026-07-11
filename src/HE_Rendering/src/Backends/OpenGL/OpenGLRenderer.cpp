@@ -82,38 +82,89 @@ static std::vector<uint16_t> BuildSkyNoise3D(int n)
 
 // CPU port of the shader's analytic skyColor(dir,sunDir) — used to bake the
 // image-based-ambient cubemap so the scene shader samples it once instead of
-// re-evaluating this function twice per lit pixel. Mirrors kSkyFuncGLSL exactly.
+// re-evaluating this function twice per lit pixel. Mirrors kSkyFuncGLSL exactly
+// (except the sun terms: the IBL keeps a disk so the ambient carries sun energy).
+static glm::vec2 AtmoRaySphereCPU(glm::vec3 ro, glm::vec3 rd, float R)
+{
+	float b = glm::dot(ro, rd);
+	float c = glm::dot(ro, ro) - R * R;
+	float d = b * b - c;
+	if (d < 0.0f) return glm::vec2(1.0e9f, -1.0e9f);
+	d = std::sqrt(d);
+	return glm::vec2(-b - d, -b + d);
+}
+// Mirror of the shader atmoScatter() — see kSkyFuncGLSL for the model notes.
+static glm::vec3 AtmoScatterCPU(glm::vec3 dir, glm::vec3 sunDir)
+{
+	const float Rg = 6360.0e3f, Ra = 6440.0e3f;
+	const glm::vec3 bR(5.802e-6f, 13.558e-6f, 33.1e-6f);
+	const float bM = 3.996e-6f;
+	const glm::vec3 bO(0.650e-6f, 1.881e-6f, 0.085e-6f);
+	const float HR = 8500.0f, HM = 1200.0f;
+	glm::vec3 ro(0.0f, Rg + 200.0f, 0.0f);
+	glm::vec2 tA = AtmoRaySphereCPU(ro, dir, Ra);
+	if (tA.y <= 0.0f) return glm::vec3(0.0f);
+	float t0 = std::max(tA.x, 0.0f), t1 = tA.y;
+	glm::vec2 tG = AtmoRaySphereCPU(ro, dir, Rg);
+	if (tG.x > 0.0f) t1 = std::min(t1, tG.x);
+	float ds = (t1 - t0) / 12.0f;
+	float mu = glm::dot(dir, sunDir);
+	float phR = 0.05968310f * (1.0f + mu * mu);
+	const float g = 0.76f, g2 = g * g;
+	float phM = 0.11936620f * ((1.0f - g2) * (1.0f + mu * mu)) /
+	            ((2.0f + g2) * std::pow(1.0f + g2 - 2.0f * g * mu, 1.5f));
+	glm::vec3 sumR(0.0f), sumM(0.0f);
+	float odR = 0.0f, odM = 0.0f, odO = 0.0f;
+	for (int i = 0; i < 12; ++i)
+	{
+		glm::vec3 p = ro + dir * (t0 + (float(i) + 0.5f) * ds);
+		float hgt = glm::length(p) - Rg;
+		float dR  = std::exp(-hgt / HR) * ds;
+		float dM  = std::exp(-hgt / HM) * ds;
+		float dO  = std::max(0.0f, 1.0f - std::abs(hgt - 25.0e3f) / 15.0e3f) * ds;
+		odR += dR; odM += dM; odO += dO;
+		if (AtmoRaySphereCPU(p, sunDir, Rg).x > 0.0f) continue;
+		float sl = AtmoRaySphereCPU(p, sunDir, Ra).y * 0.2f;
+		float sR = 0.0f, sM = 0.0f, sO = 0.0f;
+		for (int j = 0; j < 5; ++j)
+		{
+			glm::vec3 q = p + sunDir * ((float(j) + 0.5f) * sl);
+			float hq = glm::length(q) - Rg;
+			sR += std::exp(-hq / HR) * sl;
+			sM += std::exp(-hq / HM) * sl;
+			sO += std::max(0.0f, 1.0f - std::abs(hq - 25.0e3f) / 15.0e3f) * sl;
+		}
+		glm::vec3 tau = bR * (odR + sR) + (bM * 1.11f) * (odM + sM) + bO * (odO + sO);
+		glm::vec3 tr  = glm::exp(-tau);
+		sumR += tr * dR;
+		sumM += tr * dM;
+	}
+	glm::vec3 L = (sumR * bR * phR + sumM * bM * phM) * 20.0f;
+	// Fake multiple-scatter in-fill — mirrors the shader atmoScatter().
+	glm::vec3 Tcam = glm::exp(-(bR * odR + (bM * 1.11f) * odM + bO * odO));
+	L += (glm::vec3(1.0f) - Tcam) * glm::vec3(0.30f, 0.42f, 0.60f) * (0.35f * glm::smoothstep(0.0f, 0.35f, sunDir.y));
+	return L;
+}
 static glm::vec3 SkyColorCPU(glm::vec3 dir, glm::vec3 sunDir)
 {
 	dir = glm::normalize(dir); sunDir = glm::normalize(sunDir);
 	float sunY = glm::clamp(sunDir.y, -0.3f, 1.0f);
 	float day  = glm::smoothstep(-0.10f, 0.10f, sunY);
-	// Mirror the GLSL skyColor: extended warm-horizon + 3-stage day→blue-hour→night blend
-	// so the baked ambient/reflection lighting matches the visible sky (incl. the blue hour).
 	float dusk = glm::smoothstep(-0.14f, 0.04f, sunY) * (1.0f - glm::smoothstep(0.04f, 0.26f, sunY));
-	float toDay   = glm::smoothstep(-0.08f, 0.10f, sunY);
 	float toNight = 1.0f - glm::smoothstep(-0.24f, -0.06f, sunY);
-	glm::vec3 zenith  = glm::mix(glm::mix(glm::vec3(0.030f,0.055f,0.17f), glm::vec3(0.09f,0.30f,0.78f), toDay), glm::vec3(0.003f,0.005f,0.015f), toNight);
-	glm::vec3 horizon = glm::mix(glm::mix(glm::vec3(0.055f,0.075f,0.19f), glm::vec3(0.50f,0.66f,0.90f), toDay), glm::vec3(0.006f,0.009f,0.024f), toNight);
-	glm::vec2 sunAz = glm::normalize(glm::vec2(sunDir.x, sunDir.z) + glm::vec2(1e-5f));
-	float toward = glm::dot(glm::normalize(glm::vec2(dir.x, dir.z) + glm::vec2(1e-5f)), sunAz) * 0.5f + 0.5f;
-	toward = std::pow(glm::clamp(toward, 0.0f, 1.0f), 1.8f);
-	glm::vec3 duskHoriz = glm::mix(glm::vec3(0.26f,0.18f,0.40f), glm::vec3(0.92f,0.42f,0.14f), toward);
-	horizon = glm::mix(horizon, duskHoriz, dusk);
-	zenith  = glm::mix(zenith, glm::vec3(0.11f,0.11f,0.30f), dusk * 0.6f);
+	// Physically-based base sky (mirrors the shader), plus the deep-night floor.
+	glm::vec3 sky = AtmoScatterCPU(glm::normalize(glm::vec3(dir.x, std::max(dir.y, 0.004f), dir.z)), sunDir); // horizon clamp (see shader)
 	float h = glm::clamp(dir.y, 0.0f, 1.0f);
-	glm::vec3 sky = glm::mix(zenith, horizon, std::pow(1.0f - h, 2.5f));
-	sky += glm::vec3(0.95f,0.50f,0.16f) * (std::pow(1.0f - h, 8.0f) * toward * dusk * 0.70f);
-	sky += glm::vec3(0.60f,0.34f,0.14f) * (std::pow(1.0f - h, 3.5f) * toward * dusk * 0.30f);
+	sky += glm::mix(glm::vec3(0.006f,0.009f,0.024f), glm::vec3(0.003f,0.005f,0.015f), h) * toNight;
 	glm::vec3 ground = glm::mix(glm::vec3(0.02f,0.02f,0.03f), glm::vec3(0.24f,0.23f,0.21f), day);
-	sky = glm::mix(sky, ground, glm::smoothstep(0.0f, -0.25f, dir.y));
+	sky = glm::mix(sky, ground, glm::smoothstep(0.0f, -0.12f, dir.y));
+	// CPU mirror deliberately keeps a sun DISK (IBL ambient carries sun energy).
 	glm::vec3 sunTint = glm::mix(glm::vec3(1.0f,0.42f,0.20f), glm::vec3(1.0f,0.96f,0.88f), glm::smoothstep(0.0f,0.25f,sunY));
 	float s = std::max(glm::dot(dir, sunDir), 0.0f);
 	float sunVis = std::max(day, dusk);
 	sky += sunTint * (std::pow(s,1800.0f) * 14.0f * day);
 	sky += sunTint * (std::pow(s,180.0f)  * 2.2f * sunVis);
 	sky += sunTint * (std::pow(s,22.0f)   * 0.7f * sunVis);
-	sky += glm::vec3(1.0f,0.5f,0.25f) * (std::pow(s,5.0f) * 0.5f * dusk);
 	float night = 1.0f - day;
 	glm::vec3 moonDir = glm::normalize(glm::vec3(-sunDir.x, -sunDir.y, sunDir.z));
 	float mdot = std::max(glm::dot(dir, moonDir), 0.0f);
@@ -1911,76 +1962,109 @@ void main()
 // sky's mood is driven by the sun's elevation (sunDir.y): a daytime blue sky
 // warms and reddens at the horizon as the sun sets and dims into night.
 static const char* kSkyFuncGLSL = R"GLSL(
+// ---- Physically-based single-scattering atmosphere (Rayleigh + Mie + ozone) ----
+// Compact fixed-step single scatter for a ground-level camera: 12 view samples,
+// each with a 5-sample sun-transmittance march. Sunset reddening, the blue hour
+// and the horizon's pale saturation all EMERGE from the optical-depth integrals
+// instead of hand-tuned gradient blends. Mirrored in MSL + the CPU IBL bakes —
+// keep all four copies in sync.
+vec2 atmoRaySphere(vec3 ro, vec3 rd, float R)
+{
+	float b = dot(ro, rd);
+	float c = dot(ro, ro) - R * R;
+	float d = b * b - c;
+	if (d < 0.0) return vec2(1.0e9, -1.0e9);
+	d = sqrt(d);
+	return vec2(-b - d, -b + d);
+}
+vec3 atmoScatter(vec3 dir, vec3 sunDir)
+{
+	const float Rg = 6360.0e3, Ra = 6440.0e3;                // ground / atmosphere-top radius
+	const vec3  bR = vec3(5.802e-6, 13.558e-6, 33.1e-6);     // Rayleigh scattering
+	const float bM = 3.996e-6;                               // Mie scattering
+	const vec3  bO = vec3(0.650e-6, 1.881e-6, 0.085e-6);     // ozone absorption
+	const float HR = 8500.0, HM = 1200.0;                    // scale heights
+	vec3 ro = vec3(0.0, Rg + 200.0, 0.0);
+	vec2 tA = atmoRaySphere(ro, dir, Ra);
+	if (tA.y <= 0.0) return vec3(0.0);
+	float t0 = max(tA.x, 0.0), t1 = tA.y;
+	vec2 tG = atmoRaySphere(ro, dir, Rg);
+	if (tG.x > 0.0) t1 = min(t1, tG.x);                      // stop at the ground
+	float ds = (t1 - t0) / 12.0;
+	float mu = dot(dir, sunDir);
+	float phR = 0.05968310 * (1.0 + mu * mu);                // Rayleigh phase 3/(16π)
+	const float g = 0.76, g2 = g * g;
+	float phM = 0.11936620 * ((1.0 - g2) * (1.0 + mu * mu)) /   // Cornette-Shanks
+	            ((2.0 + g2) * pow(1.0 + g2 - 2.0 * g * mu, 1.5));
+	vec3  sumR = vec3(0.0), sumM = vec3(0.0);
+	float odR = 0.0, odM = 0.0, odO = 0.0;                   // view-path optical depths
+	for (int i = 0; i < 12; ++i)
+	{
+		vec3  p   = ro + dir * (t0 + (float(i) + 0.5) * ds);
+		float hgt = length(p) - Rg;
+		float dR  = exp(-hgt / HR) * ds;
+		float dM  = exp(-hgt / HM) * ds;
+		float dO  = max(0.0, 1.0 - abs(hgt - 25.0e3) / 15.0e3) * ds;  // ozone tent layer @25km
+		odR += dR; odM += dM; odO += dO;
+		if (atmoRaySphere(p, sunDir, Rg).x > 0.0) continue;  // sun below local horizon → shadowed
+		float sl = atmoRaySphere(p, sunDir, Ra).y * 0.2;     // 5-sample sun march
+		float sR = 0.0, sM = 0.0, sO = 0.0;
+		for (int j = 0; j < 5; ++j)
+		{
+			vec3  q  = p + sunDir * ((float(j) + 0.5) * sl);
+			float hq = length(q) - Rg;
+			sR += exp(-hq / HR) * sl;
+			sM += exp(-hq / HM) * sl;
+			sO += max(0.0, 1.0 - abs(hq - 25.0e3) / 15.0e3) * sl;
+		}
+		vec3 tau = bR * (odR + sR) + (bM * 1.11) * (odM + sM) + bO * (odO + sO);
+		vec3 tr  = exp(-tau);
+		sumR += tr * dR;
+		sumM += tr * dM;
+	}
+	vec3 L = (sumR * bR * phR + sumM * bM * phM) * 20.0;     // sun irradiance → engine exposure
+	// Fake MULTIPLE scattering: single scatter alone leaves long grazing paths
+	// yellow/dark at noon (the in-filled skylight is missing). Fill proportional
+	// to how opaque the view path is, fading out toward sunset so dusk stays warm.
+	vec3 Tcam = exp(-(bR * odR + (bM * 1.11) * odM + bO * odO));
+	L += (vec3(1.0) - Tcam) * vec3(0.30, 0.42, 0.60) * (0.35 * smoothstep(0.0, 0.35, sunDir.y));
+	return L;
+}
 vec3 skyColor(vec3 dir, vec3 sunDir)
 {
 	dir    = normalize(dir);
 	sunDir = normalize(sunDir);
 	float sunY = clamp(sunDir.y, -0.3, 1.0);
 	float day  = smoothstep(-0.10, 0.10, sunY);                 // 0 night → 1 day
-	// Warm-horizon (sunset/sunrise) factor — extended a touch BELOW the horizon so the
-	// golden band lingers into the early blue hour like it does in reality.
 	float dusk = smoothstep(-0.14, 0.04, sunY)
 	           * (1.0 - smoothstep(0.04, 0.26, sunY));
+	float toNight = 1.0 - smoothstep(-0.24, -0.06, sunY);       // twilight vs deep night
 
-	vec3 zenithDay  = vec3(0.09, 0.30, 0.78);                   // richer noon blue
-	vec3 horizDay   = vec3(0.50, 0.66, 0.90);
-	vec3 zenithTwi  = vec3(0.030, 0.055, 0.17);                 // blue-hour zenith (deep blue)
-	vec3 horizTwi   = vec3(0.055, 0.075, 0.19);                 // blue-hour horizon base
-	vec3 zenithNite = vec3(0.003, 0.005, 0.015);
-	vec3 horizNite  = vec3(0.006, 0.009, 0.024);
-	// 3-stage blend: full day → BLUE HOUR → deep night. The extended twilight range
-	// (sun 0 → ~-0.24) keeps the sky a deep blue for a while after sunset instead of
-	// snapping to black the instant the sun dips below the horizon.
-	float toDay   = smoothstep(-0.08, 0.10, sunY);             // day vs twilight
-	float toNight = 1.0 - smoothstep(-0.24, -0.06, sunY);      // twilight vs deep night
-	vec3 zenith  = mix(mix(zenithTwi, zenithDay, toDay), zenithNite, toNight);
-	vec3 horizon = mix(mix(horizTwi,  horizDay,  toDay), horizNite,  toNight);
+	// Physically-based base sky: day blue, sunset reddening and the blue hour all
+	// come from the single-scattering integral above. Below-horizon rays reuse the
+	// horizon colour (the ground-haze blend takes over there) — without the clamp a
+	// hard navy "ocean band" appears where the ray hits the planet after a short path.
+	vec3 sky = atmoScatter(normalize(vec3(dir.x, max(dir.y, 0.004), dir.z)), sunDir);
 
-	// Directional sunset warmth: the warm band is concentrated toward the sun's
-	// azimuth (golden near the sun, cooler magenta away) instead of a flat ring,
-	// and the zenith picks up a touch of dusk purple for atmospheric depth.
-	vec2  sunAz  = normalize(sunDir.xz + vec2(1e-5));
-	float toward = dot(normalize(dir.xz + vec2(1e-5)), sunAz) * 0.5 + 0.5; // 0 away → 1 toward
-	toward = pow(clamp(toward, 0.0, 1.0), 1.8);                 // tighter warm wedge: only near the sun glows
-	// Deep blue-purple away from the sun, burnt orange toward it. Kept well under 1.0 so
-	// the ACES tonemap renders COLOUR, not a washed white.
-	vec3  duskHoriz = mix(vec3(0.26, 0.18, 0.40), vec3(0.92, 0.42, 0.14), toward);
-	horizon = mix(horizon, duskHoriz, dusk);                    // warm directional sunset band
-	zenith  = mix(zenith,  vec3(0.11, 0.11, 0.30), dusk * 0.6); // dusk purple at zenith
-
-	float h    = clamp(dir.y, 0.0, 1.0);
-	float grad = pow(1.0 - h, 2.5);                             // horizon-weighted
-	vec3 sky = mix(zenith, horizon, grad);
-
-	// Warm horizon bands — modest so the sky stays a rich golden, not a bright wash.
-	float band  = pow(1.0 - h, 8.0) * toward;
-	float band2 = pow(1.0 - h, 3.5) * toward;
-	sky += vec3(0.95, 0.50, 0.16) * (band  * dusk * 0.70);
-	sky += vec3(0.60, 0.34, 0.14) * (band2 * dusk * 0.30);
+	// Deep-night floor (the scattering term → 0 once the sun is far below the
+	// horizon): faint blue gradient so night reflections aren't pitch black.
+	float h = clamp(dir.y, 0.0, 1.0);
+	sky += mix(vec3(0.006, 0.009, 0.024), vec3(0.003, 0.005, 0.015), h) * toNight;
 
 	// Below the horizon: ease into a soft ground haze over a wide band so the
 	// sky stays atmospheric just under the horizon line.
 	vec3 ground = mix(vec3(0.02, 0.02, 0.03), vec3(0.24, 0.23, 0.21), day);
-	sky = mix(sky, ground, smoothstep(0.0, -0.25, dir.y));
+	sky = mix(sky, ground, smoothstep(0.0, -0.12, dir.y));
 
-	// Layered sun aureole — a crisp disk plus tight/mid blooms and a broad warm
-	// scatter that survive through sunset for a cinematic, volumetric glow.
-	// Warm golden-orange at low sun, easing to white when high. Low-sun tint is a
-	// yellow-gold (not a hot near-white) so sunrise/sunset reads as COLOUR, not glare.
+	// Sun aureole ON TOP of the physical Mie glow — just the tight glare blooms now;
+	// the broad golden scatter comes from the Cornette-Shanks phase itself.
 	vec3  sunTint = mix(vec3(1.0, 0.58, 0.24), vec3(1.0, 0.96, 0.88),
 	                    smoothstep(0.0, 0.28, sunY));
 	float s = max(dot(dir, sunDir), 0.0);
 	float sunVis = max(day, dusk);
-	// Tame the near-sun bloom toward the horizon so it GLOWS instead of blinding; the
-	// crisp daytime disk is unaffected (it is gated by `day`).
-	float bloomDamp = mix(1.0, 0.28, dusk);                        // bloom much dimmer at dusk → no white blob
-	// Crisp disk removed — the sun is now a geometric body (sunDisk in the sky FS),
-	// kept out of skyColor so the shared IBL/fog reference isn't a razor-thin spike.
-	sky += sunTint * (pow(s, 220.0)  * 1.1 * bloomDamp) * sunVis;  // tight bloom
-	sky += sunTint * (pow(s, 30.0)   * 0.22 * bloomDamp) * sunVis; // mid aureole
-	// Broad golden scatter — saturated + modest, so it tints the sun side gold instead
-	// of blowing it out to white.
-	sky += vec3(1.10, 0.46, 0.13) * (pow(s, 4.0) * 0.40) * dusk;
+	float bloomDamp = mix(1.0, 0.28, dusk);                        // dimmer at dusk → no white blob
+	sky += sunTint * (pow(s, 220.0)  * 0.9  * bloomDamp) * sunVis; // tight bloom
+	sky += sunTint * (pow(s, 30.0)   * 0.12 * bloomDamp) * sunVis; // mid aureole
 
 	// Moon: opposite the sun, fading in at night. The lit disk itself is drawn
 	// (textured) in the sky pass; here we keep only the soft halo and a faint
