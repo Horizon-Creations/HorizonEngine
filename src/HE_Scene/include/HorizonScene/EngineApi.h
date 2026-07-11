@@ -138,13 +138,86 @@ namespace camera {
     void      setFov(Ctx&, float degrees);
 }
 
-// ── Environment (the world's EnvironmentComponent — sky/fog/wind knobs) ───────
+// ── Environment (the world's EnvironmentComponent) ───────────────────────────
+// EVERY EnvironmentComponent field is scriptable. The X-lists below are the
+// single source of truth: one row per field generates the typed get/set pair
+// declared here, the implementation, the registry rows — which are what the
+// HorizonCode interpreter, the editor's add-menu AND the generated-C++ path
+// (hc::callApi by id) consume — and the editor display names. Adding a field
+// to the component = adding one row to the matching list.
+//   X(member, Name, "Display")  →  env::get<Name>/set<Name>, ids "env.get<Name>"…
+// vec3 colours ride the wire as Color values (xyz, w unused), like camera/ui.
+#define HE_ENV_FIELDS_FLOAT(X) \
+    X(timeOfDay,           TimeOfDay,           "Time Of Day") \
+    X(cycleSeconds,        CycleSeconds,        "Day Cycle Seconds") \
+    X(sunIntensity,        SunIntensity,        "Sun Intensity") \
+    X(moonIntensity,       MoonIntensity,       "Moon Intensity") \
+    X(moonPhase,           MoonPhase,           "Moon Phase") \
+    X(moonCycleDays,       MoonCycleDays,       "Moon Cycle Days") \
+    X(cloudCoverage,       CloudCoverage,       "Cloud Coverage") \
+    X(windDirection,       WindDirection,       "Wind Direction") \
+    X(windSpeed,           WindSpeed,           "Wind Speed") \
+    X(cloudHeight,         CloudHeight,         "Cloud Height") \
+    X(cloudDensity,        CloudDensity,        "Cloud Density") \
+    X(cloudFluffiness,     CloudFluffiness,     "Cloud Fluffiness") \
+    X(contrailAmount,      ContrailAmount,      "Contrail Amount") \
+    X(cirrusAmount,        CirrusAmount,        "Cirrus Amount") \
+    X(cirrusSeed,          CirrusSeed,          "Cirrus Seed") \
+    X(godRays,             GodRays,             "God Rays") \
+    X(shootingStars,       ShootingStars,       "Shooting Stars") \
+    X(lensFlare,           LensFlare,           "Lens Flare") \
+    X(fogDensity,          FogDensity,          "Fog Density") \
+    X(fogHeightFalloff,    FogHeightFalloff,    "Fog Height Falloff") \
+    X(rainAmount,          RainAmount,          "Rain Amount") \
+    X(snowAmount,          SnowAmount,          "Snow Amount") \
+    X(wetness,             Wetness,             "Wetness") \
+    X(flash,               Flash,               "Lightning Flash") \
+    X(auroraIntensity,     AuroraIntensity,     "Aurora Intensity") \
+    X(milkyWayIntensity,   MilkyWayIntensity,   "Milky Way Intensity") \
+    X(nebulaIntensity,     NebulaIntensity,     "Nebula Intensity") \
+    X(nebulaSeed,          NebulaSeed,          "Nebula Seed") \
+    X(nebulaCoverage,      NebulaCoverage,      "Nebula Coverage") \
+    X(auroraHeight,        AuroraHeight,        "Aurora Height") \
+    X(auroraFragmentation, AuroraFragmentation, "Aurora Fragmentation") \
+    X(starBrightness,      StarBrightness,      "Star Brightness") \
+    X(starSize,            StarSize,            "Star Size") \
+    X(starSizeVariation,   StarSizeVariation,   "Star Size Variation") \
+    X(starGlow,            StarGlow,            "Star Glow") \
+    X(starTwinkle,         StarTwinkle,         "Star Twinkle") \
+    X(starDensity,         StarDensity,         "Star Density")
+#define HE_ENV_FIELDS_BOOL(X) \
+    X(dayNightCycle,       DayNightCycle,       "Day Night Cycle") \
+    X(autoAdvance,         AutoAdvance,         "Auto Advance Time") \
+    X(moonPhaseAuto,       MoonPhaseAuto,       "Moon Phase Auto") \
+    X(lowResClouds,        LowResClouds,        "Low Res Clouds")
+#define HE_ENV_FIELDS_INT(X) \
+    X(cloudMode,           CloudMode,           "Cloud Mode") \
+    X(cloudQuality,        CloudQuality,        "Cloud Quality") \
+    X(nebulaQuality,       NebulaQuality,       "Nebula Quality")
+#define HE_ENV_FIELDS_COLOR(X) \
+    X(sunColor,            SunColor,            "Sun Color") \
+    X(moonColor,           MoonColor,           "Moon Color") \
+    X(cloudTint,           CloudTint,           "Cloud Tint") \
+    X(nebulaColor,         NebulaColor,         "Nebula Color 1") \
+    X(nebulaColor2,        NebulaColor2,        "Nebula Color 2") \
+    X(nebulaColor3,        NebulaColor3,        "Nebula Color 3") \
+    X(auroraColor,         AuroraColor,         "Aurora Color") \
+    X(auroraColorTop,      AuroraColorTop,      "Aurora Color Top") \
+    X(starColor,           StarColor,           "Star Color")
+
 namespace env {
-    float getTimeOfDay(Ctx&);        void setTimeOfDay(Ctx&, float t);       // 0..1
-    float getCloudCoverage(Ctx&);    void setCloudCoverage(Ctx&, float c);   // 0..1
-    float getFogDensity(Ctx&);       void setFogDensity(Ctx&, float d);
-    float getWindDirection(Ctx&);    void setWindDirection(Ctx&, float deg);
-    float getWindSpeed(Ctx&);        void setWindSpeed(Ctx&, float s);
+#define HE_ENV_DECL_FLOAT(m, Name, disp) float     get##Name(Ctx&); void set##Name(Ctx&, float);
+#define HE_ENV_DECL_BOOL(m, Name, disp)  bool      get##Name(Ctx&); void set##Name(Ctx&, bool);
+#define HE_ENV_DECL_INT(m, Name, disp)   int       get##Name(Ctx&); void set##Name(Ctx&, int);
+#define HE_ENV_DECL_COLOR(m, Name, disp) glm::vec3 get##Name(Ctx&); void set##Name(Ctx&, const glm::vec3&);
+HE_ENV_FIELDS_FLOAT(HE_ENV_DECL_FLOAT)
+HE_ENV_FIELDS_BOOL(HE_ENV_DECL_BOOL)
+HE_ENV_FIELDS_INT(HE_ENV_DECL_INT)
+HE_ENV_FIELDS_COLOR(HE_ENV_DECL_COLOR)
+#undef HE_ENV_DECL_FLOAT
+#undef HE_ENV_DECL_BOOL
+#undef HE_ENV_DECL_INT
+#undef HE_ENV_DECL_COLOR
 }
 
 // ── Audio (Ctx.audio — the app's AudioEngine; null → no-ops) ─────────────────
