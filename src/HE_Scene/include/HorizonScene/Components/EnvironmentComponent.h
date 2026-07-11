@@ -99,10 +99,11 @@ struct EnvironmentComponent
     float     auroraIntensity   = 0.0f;
     float     milkyWayIntensity = 0.6f;
     float     nebulaIntensity   = 0.3f;
-    glm::vec3 nebulaColor       = glm::vec3(0.42f, 0.45f, 0.92f); // colour 1 (cool regions)
-    glm::vec3 nebulaColor2      = glm::vec3(0.85f, 0.40f, 1.00f); // colour 2 (mid regions)
-    glm::vec3 nebulaColor3      = glm::vec3(1.00f, 0.52f, 0.72f); // colour 3 (warm regions)
+    glm::vec3 nebulaColor       = glm::vec3(0.36f, 0.60f, 1.00f); // colour 1: interior synchrotron veil (cool blue)
+    glm::vec3 nebulaColor2      = glm::vec3(1.00f, 0.60f, 0.28f); // colour 2: filament cage (gold/amber regions)
+    glm::vec3 nebulaColor3      = glm::vec3(0.90f, 0.30f, 0.16f); // colour 3: filament cage (rust/red regions)
     float     nebulaSeed        = 0.0f;                           // randomisation seed
+    float     nebulaCoverage    = 0.5f;                           // sky coverage: 0 = none .. 1 = nearly the whole band
     int       nebulaQuality      = 1;                             // 0 = Performance (cheap), 1 = High (detailed), 2 = Max (most detail)
     glm::vec3 auroraColor       = glm::vec3(0.25f, 0.95f, 0.50f); // lower/base colour (green)
     glm::vec3 auroraColorTop     = glm::vec3(0.62f, 0.26f, 0.95f); // upper colour (purple)

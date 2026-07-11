@@ -82,38 +82,89 @@ static std::vector<uint16_t> BuildSkyNoise3D(int n)
 
 // CPU port of the shader's analytic skyColor(dir,sunDir) — used to bake the
 // image-based-ambient cubemap so the scene shader samples it once instead of
-// re-evaluating this function twice per lit pixel. Mirrors kSkyFuncGLSL exactly.
+// re-evaluating this function twice per lit pixel. Mirrors kSkyFuncGLSL exactly
+// (except the sun terms: the IBL keeps a disk so the ambient carries sun energy).
+static glm::vec2 AtmoRaySphereCPU(glm::vec3 ro, glm::vec3 rd, float R)
+{
+	float b = glm::dot(ro, rd);
+	float c = glm::dot(ro, ro) - R * R;
+	float d = b * b - c;
+	if (d < 0.0f) return glm::vec2(1.0e9f, -1.0e9f);
+	d = std::sqrt(d);
+	return glm::vec2(-b - d, -b + d);
+}
+// Mirror of the shader atmoScatter() — see kSkyFuncGLSL for the model notes.
+static glm::vec3 AtmoScatterCPU(glm::vec3 dir, glm::vec3 sunDir)
+{
+	const float Rg = 6360.0e3f, Ra = 6440.0e3f;
+	const glm::vec3 bR(5.802e-6f, 13.558e-6f, 33.1e-6f);
+	const float bM = 3.996e-6f;
+	const glm::vec3 bO(0.650e-6f, 1.881e-6f, 0.085e-6f);
+	const float HR = 8500.0f, HM = 1200.0f;
+	glm::vec3 ro(0.0f, Rg + 200.0f, 0.0f);
+	glm::vec2 tA = AtmoRaySphereCPU(ro, dir, Ra);
+	if (tA.y <= 0.0f) return glm::vec3(0.0f);
+	float t0 = std::max(tA.x, 0.0f), t1 = tA.y;
+	glm::vec2 tG = AtmoRaySphereCPU(ro, dir, Rg);
+	if (tG.x > 0.0f) t1 = std::min(t1, tG.x);
+	float ds = (t1 - t0) / 12.0f;
+	float mu = glm::dot(dir, sunDir);
+	float phR = 0.05968310f * (1.0f + mu * mu);
+	const float g = 0.76f, g2 = g * g;
+	float phM = 0.11936620f * ((1.0f - g2) * (1.0f + mu * mu)) /
+	            ((2.0f + g2) * std::pow(1.0f + g2 - 2.0f * g * mu, 1.5f));
+	glm::vec3 sumR(0.0f), sumM(0.0f);
+	float odR = 0.0f, odM = 0.0f, odO = 0.0f;
+	for (int i = 0; i < 12; ++i)
+	{
+		glm::vec3 p = ro + dir * (t0 + (float(i) + 0.5f) * ds);
+		float hgt = glm::length(p) - Rg;
+		float dR  = std::exp(-hgt / HR) * ds;
+		float dM  = std::exp(-hgt / HM) * ds;
+		float dO  = std::max(0.0f, 1.0f - std::abs(hgt - 25.0e3f) / 15.0e3f) * ds;
+		odR += dR; odM += dM; odO += dO;
+		if (AtmoRaySphereCPU(p, sunDir, Rg).x > 0.0f) continue;
+		float sl = AtmoRaySphereCPU(p, sunDir, Ra).y * 0.2f;
+		float sR = 0.0f, sM = 0.0f, sO = 0.0f;
+		for (int j = 0; j < 5; ++j)
+		{
+			glm::vec3 q = p + sunDir * ((float(j) + 0.5f) * sl);
+			float hq = glm::length(q) - Rg;
+			sR += std::exp(-hq / HR) * sl;
+			sM += std::exp(-hq / HM) * sl;
+			sO += std::max(0.0f, 1.0f - std::abs(hq - 25.0e3f) / 15.0e3f) * sl;
+		}
+		glm::vec3 tau = bR * (odR + sR) + (bM * 1.11f) * (odM + sM) + bO * (odO + sO);
+		glm::vec3 tr  = glm::exp(-tau);
+		sumR += tr * dR;
+		sumM += tr * dM;
+	}
+	glm::vec3 L = (sumR * bR * phR + sumM * bM * phM) * 20.0f;
+	// Fake multiple-scatter in-fill — mirrors the shader atmoScatter().
+	glm::vec3 Tcam = glm::exp(-(bR * odR + (bM * 1.11f) * odM + bO * odO));
+	L += (glm::vec3(1.0f) - Tcam) * glm::vec3(0.30f, 0.42f, 0.60f) * (0.35f * glm::smoothstep(0.0f, 0.35f, sunDir.y));
+	return L;
+}
 static glm::vec3 SkyColorCPU(glm::vec3 dir, glm::vec3 sunDir)
 {
 	dir = glm::normalize(dir); sunDir = glm::normalize(sunDir);
 	float sunY = glm::clamp(sunDir.y, -0.3f, 1.0f);
 	float day  = glm::smoothstep(-0.10f, 0.10f, sunY);
-	// Mirror the GLSL skyColor: extended warm-horizon + 3-stage day→blue-hour→night blend
-	// so the baked ambient/reflection lighting matches the visible sky (incl. the blue hour).
 	float dusk = glm::smoothstep(-0.14f, 0.04f, sunY) * (1.0f - glm::smoothstep(0.04f, 0.26f, sunY));
-	float toDay   = glm::smoothstep(-0.08f, 0.10f, sunY);
 	float toNight = 1.0f - glm::smoothstep(-0.24f, -0.06f, sunY);
-	glm::vec3 zenith  = glm::mix(glm::mix(glm::vec3(0.030f,0.055f,0.17f), glm::vec3(0.09f,0.30f,0.78f), toDay), glm::vec3(0.003f,0.005f,0.015f), toNight);
-	glm::vec3 horizon = glm::mix(glm::mix(glm::vec3(0.055f,0.075f,0.19f), glm::vec3(0.50f,0.66f,0.90f), toDay), glm::vec3(0.006f,0.009f,0.024f), toNight);
-	glm::vec2 sunAz = glm::normalize(glm::vec2(sunDir.x, sunDir.z) + glm::vec2(1e-5f));
-	float toward = glm::dot(glm::normalize(glm::vec2(dir.x, dir.z) + glm::vec2(1e-5f)), sunAz) * 0.5f + 0.5f;
-	toward = std::pow(glm::clamp(toward, 0.0f, 1.0f), 1.8f);
-	glm::vec3 duskHoriz = glm::mix(glm::vec3(0.26f,0.18f,0.40f), glm::vec3(0.92f,0.42f,0.14f), toward);
-	horizon = glm::mix(horizon, duskHoriz, dusk);
-	zenith  = glm::mix(zenith, glm::vec3(0.11f,0.11f,0.30f), dusk * 0.6f);
+	// Physically-based base sky (mirrors the shader), plus the deep-night floor.
+	glm::vec3 sky = AtmoScatterCPU(glm::normalize(glm::vec3(dir.x, std::max(dir.y, 0.004f), dir.z)), sunDir); // horizon clamp (see shader)
 	float h = glm::clamp(dir.y, 0.0f, 1.0f);
-	glm::vec3 sky = glm::mix(zenith, horizon, std::pow(1.0f - h, 2.5f));
-	sky += glm::vec3(0.95f,0.50f,0.16f) * (std::pow(1.0f - h, 8.0f) * toward * dusk * 0.70f);
-	sky += glm::vec3(0.60f,0.34f,0.14f) * (std::pow(1.0f - h, 3.5f) * toward * dusk * 0.30f);
+	sky += glm::mix(glm::vec3(0.006f,0.009f,0.024f), glm::vec3(0.003f,0.005f,0.015f), h) * toNight;
 	glm::vec3 ground = glm::mix(glm::vec3(0.02f,0.02f,0.03f), glm::vec3(0.24f,0.23f,0.21f), day);
-	sky = glm::mix(sky, ground, glm::smoothstep(0.0f, -0.25f, dir.y));
+	sky = glm::mix(sky, ground, glm::smoothstep(0.0f, -0.12f, dir.y));
+	// CPU mirror deliberately keeps a sun DISK (IBL ambient carries sun energy).
 	glm::vec3 sunTint = glm::mix(glm::vec3(1.0f,0.42f,0.20f), glm::vec3(1.0f,0.96f,0.88f), glm::smoothstep(0.0f,0.25f,sunY));
 	float s = std::max(glm::dot(dir, sunDir), 0.0f);
 	float sunVis = std::max(day, dusk);
 	sky += sunTint * (std::pow(s,1800.0f) * 14.0f * day);
 	sky += sunTint * (std::pow(s,180.0f)  * 2.2f * sunVis);
 	sky += sunTint * (std::pow(s,22.0f)   * 0.7f * sunVis);
-	sky += glm::vec3(1.0f,0.5f,0.25f) * (std::pow(s,5.0f) * 0.5f * dusk);
 	float night = 1.0f - day;
 	glm::vec3 moonDir = glm::normalize(glm::vec3(-sunDir.x, -sunDir.y, sunDir.z));
 	float mdot = std::max(glm::dot(dir, moonDir), 0.0f);
@@ -491,11 +542,12 @@ uniform float     uAuroraHeight;   // aurora band elevation (0 low … 1 high)
 uniform float     uAuroraFragment; // aurora streak fragmentation (0 solid … 1 broken)
 uniform float     uMilkyWay;    // milky-way star-lane density/brightness
 uniform float     uNebula;      // space-nebula intensity (0 = off)
-uniform vec3      uNebulaColor; // space-nebula colour 1 (cool regions)
-uniform vec3      uNebulaColor2; // space-nebula colour 2 (mid regions)
-uniform vec3      uNebulaColor3; // space-nebula colour 3 (warm regions)
+uniform vec3      uNebulaColor; // space-nebula colour 1 (interior synchrotron veil)
+uniform vec3      uNebulaColor2; // space-nebula colour 2 (filament cage, gold/amber)
+uniform vec3      uNebulaColor3; // space-nebula colour 3 (filament cage, rust/red)
 uniform float     uNebulaSeed;  // space-nebula randomisation seed
-uniform float     uNebulaHiFi;  // 0 = high-performance nebula, 1 = high-fidelity (sharp forms)
+uniform float     uNebulaHiFi;  // nebula quality: 0 Performance / 1 High / 2 Max
+uniform float     uNebulaCover; // nebula sky coverage: 0 none .. 1 nearly the whole band
 uniform vec3      uAuroraColor;    // aurora lower/base colour (e.g. green)
 uniform vec3      uAuroraColorTop; // aurora upper colour (e.g. purple)
 uniform vec3      uWind;        // cloud drift vector (world units / s, horizontal)
@@ -765,6 +817,15 @@ vec3 shootingStars(vec3 dir, vec3 sunDir, float time, float rate)
 	float r      = clamp(rate, 0.0, 1.0);
 	int   slots  = 1 + int(r * 3.0);                  // 1..4 concurrent meteor slots
 	float period = mix(9.0, 3.5, r);                  // seconds between meteors per slot
+	// ONE shared RADIANT per "shower" (re-rolled every few minutes): all meteors
+	// stream away from the same sky point — near-parallel trails far from it,
+	// gently diverging around it — instead of criss-crossing at random.
+	float shower = floor(time / 700.0);
+	float azR = starHash(vec3(shower + 0.5, 4.2, 9.1)) * 6.2831853;
+	float elR = 0.45 + 0.75 * starHash(vec3(shower + 0.5, 2.8, 5.5));
+	vec3  R   = normalize(vec3(cos(azR) * cos(elR), sin(elR), sin(azR) * cos(elR)));
+	vec3  Ru  = normalize(cross(vec3(0.0, 1.0, 0.0), R));   // tangent basis at the radiant
+	vec3  Rv  = cross(R, Ru);
 	vec3  col    = vec3(0.0);
 	for (int k = 0; k < slots; ++k)
 	{
@@ -776,12 +837,18 @@ vec3 shootingStars(vec3 dir, vec3 sunDir, float time, float rate)
 		float t = ph / dur;                           // 0..1 along the streak's life
 
 		vec3  seed = vec3(idx * 1.7 + 0.3, float(k) * 7.3 + 1.1, idx * 0.31 + float(k) * 3.9);
-		float az   = starHash(seed)        * 6.2831853;
-		float el   = 0.25 + starHash(seed + 2.1) * 0.6;   // upper sky
-		vec3  p0   = normalize(vec3(cos(az) * cos(el), sin(el), sin(az) * cos(el)));
-		vec3  rnd  = vec3(starHash(seed + 3.3) - 0.5, starHash(seed + 5.7) - 0.5,
-		                  starHash(seed + 8.1) - 0.5);
-		vec3  tdir = normalize(cross(p0, normalize(rnd + vec3(0.001))));
+		// Spawn at a random bearing/distance AROUND the radiant, then travel
+		// along the great circle AWAY from it (real shower geometry).
+		float phiS = starHash(seed) * 6.2831853;
+		float dst  = 0.35 + 0.75 * starHash(seed + 2.1);  // angular distance from the radiant
+		// Meteor size follows the star settings: uStarSize scales width/head,
+		// uStarSizeVar spreads individual meteors between small and large.
+		float mSz  = clamp(uStarSize, 0.25, 3.0)
+		           * mix(1.0, mix(0.6, 1.8, starHash(seed + 7.7)), clamp(uStarSizeVar, 0.0, 1.0));
+		vec3  p0   = normalize(R * cos(dst) + (Ru * cos(phiS) + Rv * sin(phiS)) * sin(dst));
+		vec3  tdir = normalize(p0 * dot(R, p0) - R);      // tangent pointing away from the radiant
+		// Tiny per-meteor tilt so the trails aren't machine-parallel.
+		tdir = normalize(tdir + cross(p0, tdir) * ((starHash(seed + 5.7) - 0.5) * 0.12));
 		float arc  = 0.5 + 0.4 * starHash(seed + 9.9); // angular travel over the life
 		vec3  head = normalize(p0 + tdir * (t * arc));
 		vec3  tail = normalize(p0 + tdir * (t * arc - 0.30)); // tail end trailing behind the head
@@ -790,13 +857,14 @@ vec3 shootingStars(vec3 dir, vec3 sunDir, float time, float rate)
 		vec3  seg = tail - head;
 		float s   = clamp(dot(dir - head, seg) / max(dot(seg, seg), 1e-5), 0.0, 1.0);
 		float dd  = length(dir - (head + seg * s));
-		float w      = mix(0.0045, 0.0014, s);                       // taper: wider at head, thin at tail
+		float w      = mix(0.0045, 0.0014, s) * mSz;                 // taper: wider at head, thin at tail
 		float streak = exp(-(dd * dd) / (w * w)) * pow(1.0 - s, 1.6); // brightest at the head
 		float dh     = length(dir - head);
-		float headG  = exp(-(dh * dh) / 0.00006);                    // small sharp head (≈0.45°)
+		float headG  = exp(-(dh * dh) / (0.00006 * mSz * mSz));      // small sharp head (≈0.45° at size 1)
 		float life   = smoothstep(0.0, 0.08, t) * (1.0 - smoothstep(0.55, 1.0, t));
-		vec3  mcol   = vec3(0.78, 0.88, 1.0);                        // cool blue-white meteor
-		col += mcol * ((streak * 1.7 + headG * 1.1) * life);
+		// Colour + brightness follow the star settings (same knobs as starField).
+		vec3  mcol   = vec3(0.78, 0.88, 1.0) * uStarColor;           // cool blue-white meteor, user-tinted
+		col += mcol * ((streak * 1.7 + headG * 1.1) * life * uStarBright);
 	}
 	float horizon = smoothstep(0.0, 0.12, dir.y);
 	return col * night * horizon;
@@ -1221,14 +1289,40 @@ vec3 applyClouds3D(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float time,
 	return baseSky * T + L;
 }
 
-// Space nebula — drifting coloured emission clouds gathered toward the galactic
-// band. Sampled as 3D blobs on the celestial sphere (rotates with the stars):
-// isolated rounded patches of varying size with bright cores, dark dust lanes,
-// and a blue->magenta->teal hue wheel so neighbouring blobs differ in colour and
-// bleed into one another. Night/horizon gated, occluded by clouds. Mirrors Metal.
+// Nebula filament line: a single thin iso-contour of a value-noise field.
+// Level sets of a smooth field are closed loops around its extrema; the web is
+// built from the UNION of several INDEPENDENT single-iso families (different
+// fetches/offsets) so loops cross instead of nesting — crossing walls read as
+// a cracked cellular cage (JWST-Crab), never as concentric onion rings.
+// starFbm3(p,1) is bell-shaped around ~0.25, so the iso sits on the histogram
+// FLANK (thin loops; an iso at the mode would flood). Mirrors the Metal helper.
+float nebIso(float n, float iso, float w)
+{
+	return 1.0 - smoothstep(w * 0.7, w * 1.7, abs(n - iso));
+}
+
+// Space nebula v3 — DISCRETE GAS PIECES, modelled on the JWST Crab image:
+//   * the nebula is a set of solid Worley-cell CHUNKS (warped + eroded), each
+//     with a defined RIM band in the warm cage colours, a cool interior that
+//     whitens toward the centre, and SILK striations layered along the piece's
+//     own silhouette (fixed constellations inside the formation),
+//   * a CRACKLE CAGE of thin warm filaments — iso-contour cell webs at 2/3/4
+//     scales (Perf/High/Max) — forms the VEINS threading each interior and
+//     runs densest on the rim; the strongest wall centres run ionization-hot,
+//   * COVERAGE sets how MANY pieces exist and how BIG they grow; as pieces
+//     densify, their F1 skirts fuse at the cell saddles → NECKS with fibrous
+//     strands CONNECT neighbouring pieces automatically,
+//   * BEADS — Worley corner knots — stud the filament junctions (High/Max),
+//   * thick emissive AMBER DUST concentrations sit on the pieces in rare
+//     patches, plus thin reddening lanes with a warm backlit rim,
+//   * (Max) a dimmed BACK web across the halo zone and extra neck fray.
+// Night/horizon gated, band-gated, seeded; occluded by clouds. Mirrors Metal.
 vec3 nebula(vec3 dir, vec3 cdir, vec3 sunDir, float intensity, vec3 nebColor)
 {
-	if (intensity <= 0.0) return vec3(0.0);
+	bool hifi = uNebulaHiFi >= 0.5;   // 1 High, 2 Max → richer warp/web/silk
+	bool maxq = uNebulaHiFi >= 1.5;   // 2 Max → back web + neck fray + extra silk/beads
+	float cover = clamp(uNebulaCover, 0.0, 1.0);
+	if (intensity <= 0.0 || cover <= 0.0) return vec3(0.0);
 	dir    = normalize(dir);
 	sunDir = normalize(sunDir);
 	// DEEP-night gate: real Milky-Way nebulosity is only visible once the sun is well
@@ -1240,153 +1334,227 @@ vec3 nebula(vec3 dir, vec3 cdir, vec3 sunDir, float intensity, vec3 nebColor)
 	vec3  cN   = normalize(cdir);
 	const vec3 galN = normalize(vec3(0.46, 0.52, -0.72));
 	float bd   = dot(cN, galN);
-	float band = exp(-bd * bd * 4.5);           // TIGHT milky-way lane (not a full-sky glow)
+	// COVERAGE widens the galactic lane: 0.5 = the classic tight band (exp 4.5),
+	// 0 → a narrow sliver, 1 → nebulosity spreads across most of the sky.
+	float band = exp(-bd * bd * mix(8.2, 0.8, cover));
 	vec3  P    = cN * 3.4;
-	// SEED: shift the sample window into the noise field so the cloud SHAPES (and the colour
-	// layout below) re-randomise. The band stays put — it comes from cN — only the gas moves.
+	// SEED: shift the sample window into the noise field so the piece layout (and the
+	// colour layout below) re-randomises. The band stays put — it comes from cN.
 	P += vec3(uNebulaSeed * 13.1, uNebulaSeed * 7.7, uNebulaSeed * 19.3);
-	bool  hifi = uNebulaHiFi >= 0.5;   // 1 High, 2 Max → detailed filament branch
-	bool  maxq = uNebulaHiFi >= 1.5;   // 2 Max → extra crisping + faded fine octaves
-	float density, core;
+	float sd = uNebulaSeed;
+
+	// (1) FLOW WARP — advects every later field so chunks/wisps shear organically.
+	vec3 w1p = P * 0.55 + sd * 0.31;
+	vec3 Q1 = vec3(starFbm3(w1p,                          2),
+	                   starFbm3(w1p + vec3(19.3, 7.1, 3.7), 2),
+	                   starFbm3(w1p + vec3(5.2, 1.9, 11.4), 2)) - 0.5;
+	vec3 Q2 = vec3(0.0);
 	if (hifi)
 	{
-		// ===== HIGH FIDELITY: ridged-multifractal filament nebula (astrophoto detail) =====
-		// Flowing 2-level domain warp (swirling gas) + offset-weighted ridged MULTIFRACTAL
-		// (Musgrave) so fine detail RIDES the filament crests; two crossing ridge fields → a
-		// Crab-like web; low-freq bodies cluster the gas into discrete regions; ridged dust
-		// lanes carve dark absorption channels. NB starFbm3(p,1) is value noise in [0,0.5], so
-		// the ridge fold uses 4·n−1 to span ±1 (a bare 2·n−1 would barely fire). ~37 fetches.
-		float hfSeed = uNebulaSeed;
-		// (1) Flowing domain warp: swirling / sheared gas (IQ 2-level advection)
-		vec3 hfw1 = P * 0.55 + hfSeed * 0.31;
-		vec3 hfQ1 = vec3(starFbm3(hfw1 + vec3( 0.0,  0.0,  0.0), 2),
-		                 starFbm3(hfw1 + vec3(19.3,  7.1,  3.7), 2),
-		                 starFbm3(hfw1 + vec3( 5.2,  1.9, 11.4), 2)) - 0.5;
-		vec3 hfw2 = P * 1.10 + 3.1 * hfQ1 + hfSeed * 1.7 + 41.0;
-		vec3 hfQ2 = vec3(starFbm3(hfw2 + vec3( 0.0,  0.0,  0.0), 2),
-		                 starFbm3(hfw2 + vec3(27.6, 13.2,  8.8), 2),
-		                 starFbm3(hfw2 + vec3( 3.3, 21.7,  5.1), 2)) - 0.5;
-		vec3 Pw = P + 0.90 * hfQ1 + 0.42 * hfQ2;   // advected → flowing tendrils
-		vec3 Pc = P + 0.30 * hfQ1;                  // steadier coord for cloud bodies
-		// Max-only anti-alias weight for the extra fine octaves: fade them toward 0 where
-		// the finest sample's screen footprint nears pixel-Nyquist, so they add detail when
-		// the nebula fills the view but never shimmer on camera rotation.
-		float aaFine = maxq ? (1.0 - smoothstep(0.30, 0.70, length(fwidth(Pw)) * 520.0)) : 0.0;
-		// (2) Ridged MULTIFRACTAL #1: fine filament network (each octave gated by the prev ridge)
-		vec3  rp = Pw * 1.45 + hfSeed * 0.37;
-		float rsum = 0.0, ramp = 1.0, rw = 1.0, rs, rn;
-		const float RLAC = 1.93, ROFF = 1.0, RGAIN = 2.10, RSW = 0.60;
-		rn = starFbm3(rp, 1); rs = ROFF - abs(4.0*rn - 1.0); rs *= rs;            rsum += ramp*rs; ramp *= RSW;
-		rp *= RLAC; rw = clamp(rs*RGAIN,0.0,1.0); rn = starFbm3(rp,1); rs = ROFF-abs(4.0*rn-1.0); rs*=rs; rs*=rw; rsum += ramp*rs; ramp*=RSW;
-		rp *= RLAC; rw = clamp(rs*RGAIN,0.0,1.0); rn = starFbm3(rp,1); rs = ROFF-abs(4.0*rn-1.0); rs*=rs; rs*=rw; rsum += ramp*rs; ramp*=RSW;
-		rp *= RLAC; rw = clamp(rs*RGAIN,0.0,1.0); rn = starFbm3(rp,1); rs = ROFF-abs(4.0*rn-1.0); rs*=rs; rs*=rw; rsum += ramp*rs; ramp*=RSW;
-		rp *= RLAC; rw = clamp(rs*RGAIN,0.0,1.0); rn = starFbm3(rp,1); rs = ROFF-abs(4.0*rn-1.0); rs*=rs; rs*=rw; rsum += ramp*rs; ramp*=RSW;
-		rp *= RLAC; rw = clamp(rs*RGAIN,0.0,1.0); rn = starFbm3(rp,1); rs = ROFF-abs(4.0*rn-1.0); rs*=rs; rs*=rw; rsum += ramp*rs; ramp*=RSW;
-		rp *= RLAC; rw = clamp(rs*RGAIN,0.0,1.0); rn = starFbm3(rp,1); rs = ROFF-abs(4.0*rn-1.0); rs*=rs; rs*=rw; rsum += ramp*rs; ramp*=RSW;
-		rp *= RLAC; rw = clamp(rs*RGAIN,0.0,1.0); rn = starFbm3(rp,1); rs = ROFF-abs(4.0*rn-1.0); rs*=rs; rs*=rw; rsum += ramp*rs; ramp*=RSW;
-		if (maxq)   // Max: two extra fine octaves, fwidth-faded so they never alias
-		{
-			rp *= RLAC; rw = clamp(rs*RGAIN,0.0,1.0); rn = starFbm3(rp,1); rs = ROFF-abs(4.0*rn-1.0); rs*=rs; rs*=rw; rsum += ramp*rs*aaFine; ramp*=RSW;
-			rp *= RLAC; rw = clamp(rs*RGAIN,0.0,1.0); rn = starFbm3(rp,1); rs = ROFF-abs(4.0*rn-1.0); rs*=rs; rs*=rw; rsum += ramp*rs*aaFine; ramp*=RSW;
-		}
-		// (3) Ridged MULTIFRACTAL #2: broad crossing tendrils (lower freq)
-		vec3  rp2 = Pw * 0.78 + hfSeed * 0.19 + 113.0;
-		float r2sum = 0.0, r2amp = 1.0, r2w = 1.0, r2s, r2n;
-		const float R2LAC = 2.02, R2OFF = 1.0, R2GAIN = 2.20, R2SW = 0.62;
-		r2n = starFbm3(rp2,1); r2s = R2OFF-abs(4.0*r2n-1.0); r2s*=r2s;                 r2sum += r2amp*r2s; r2amp*=R2SW;
-		rp2*=R2LAC; r2w=clamp(r2s*R2GAIN,0.0,1.0); r2n=starFbm3(rp2,1); r2s=R2OFF-abs(4.0*r2n-1.0); r2s*=r2s; r2s*=r2w; r2sum+=r2amp*r2s; r2amp*=R2SW;
-		rp2*=R2LAC; r2w=clamp(r2s*R2GAIN,0.0,1.0); r2n=starFbm3(rp2,1); r2s=R2OFF-abs(4.0*r2n-1.0); r2s*=r2s; r2s*=r2w; r2sum+=r2amp*r2s; r2amp*=R2SW;
-		rp2*=R2LAC; r2w=clamp(r2s*R2GAIN,0.0,1.0); r2n=starFbm3(rp2,1); r2s=R2OFF-abs(4.0*r2n-1.0); r2s*=r2s; r2s*=r2w; r2sum+=r2amp*r2s; r2amp*=R2SW;
-		rp2*=R2LAC; r2w=clamp(r2s*R2GAIN,0.0,1.0); r2n=starFbm3(rp2,1); r2s=R2OFF-abs(4.0*r2n-1.0); r2s*=r2s; r2s*=r2w; r2sum+=r2amp*r2s; r2amp*=R2SW;
-		rp2*=R2LAC; r2w=clamp(r2s*R2GAIN,0.0,1.0); r2n=starFbm3(rp2,1); r2s=R2OFF-abs(4.0*r2n-1.0); r2s*=r2s; r2s*=r2w; r2sum+=r2amp*r2s; r2amp*=R2SW;
-		if (maxq)   // Max: two extra fine octaves, fwidth-faded
-		{
-			rp2*=R2LAC; r2w=clamp(r2s*R2GAIN,0.0,1.0); r2n=starFbm3(rp2,1); r2s=R2OFF-abs(4.0*r2n-1.0); r2s*=r2s; r2s*=r2w; r2sum+=r2amp*r2s*aaFine; r2amp*=R2SW;
-			rp2*=R2LAC; r2w=clamp(r2s*R2GAIN,0.0,1.0); r2n=starFbm3(rp2,1); r2s=R2OFF-abs(4.0*r2n-1.0); r2s*=r2s; r2s*=r2w; r2sum+=r2amp*r2s*aaFine; r2amp*=R2SW;
-		}
-		float hfFil = max(rsum, r2sum);                 // union → crossing filament web
-		float filN  = clamp(hfFil / 1.45, 0.0, 1.0);
-		float lines = pow(smoothstep(maxq ? 0.33 : 0.30, maxq ? 0.55 : 0.58, filN), maxq ? 3.5 : 3.2);  // crisper thin filaments at Max
-		float wisp  = smoothstep(0.05, 0.40, filN);            // faint diffuse halo around them
-		// Anisotropic STREAKS: ridged noise sampled with a stretched axis → elongated filament
-		// lines that the domain warp bends into curves — reads more line-like than round ridges.
-		vec3  sp = vec3(Pw.x, Pw.y * 4.5, Pw.z) * 1.3 + 500.0 + hfSeed;
-		float streak = 1.0 - abs(4.0 * starFbm3(sp, 2) - 1.0);
-		streak = pow(smoothstep(0.45, 0.82, streak), 2.6);
-		lines = max(lines, streak * 0.9);                      // merge into the filament line field
-		// (4) FINE VOID DETAIL: a high-freq ridged layer that fills the dark GAPS with faint thin
-		// structure (so the voids aren't smooth/empty) → finer lines + more depth.
-		vec3  vp = Pw * 3.3 + hfSeed * 0.7 + 250.0;
-		float vd = 0.0, va = 0.55, vn, vs;
-		vn=starFbm3(vp,1); vs=1.0-abs(4.0*vn-1.0); vs*=vs; vd+=va*vs; vp*=2.07; va*=0.55;
-		vn=starFbm3(vp,1); vs=1.0-abs(4.0*vn-1.0); vs*=vs; vd+=va*vs; vp*=2.07; va*=0.55;
-		vn=starFbm3(vp,1); vs=1.0-abs(4.0*vn-1.0); vs*=vs; vd+=va*vs; vp*=2.07; va*=0.55;
-		vn=starFbm3(vp,1); vs=1.0-abs(4.0*vn-1.0); vs*=vs; vd+=va*vs;
-		float voidDetail = pow(clamp(vd*1.25, 0.0, 1.0), 1.7);
-		// (5) Fine GRAIN → breaks up smooth gas so it reads matte/dusty, not shiny.
-		float grain = clamp(starFbm3(Pw*6.5 + 400.0, 2) * 2.0, 0.0, 1.4);
-		// (6) Cloud bodies / regions + dense centres (low-freq billows)
-		float hfBodyLo = starFbm3(Pc*0.46 + hfSeed*0.60 + 60.0, 4);
-		float hfBodyMi = starFbm3(Pc*1.12 + 88.0, 3);
-		float hfCloud  = smoothstep(0.32, 0.76, hfBodyLo*0.72 + hfBodyMi*0.42);
-		float hfCoreM  = smoothstep(0.60, 0.93, hfBodyLo*0.70 + hfBodyMi*0.50);
-		// (7) LAYERED dust at two scales (broad + fine) → overlapping dark structure = DEPTH.
-		float dBroad = 1.0 - abs(4.0*starFbm3(Pw*1.05 + 130.0 + hfSeed*0.9, 2) - 1.0);
-		float dFine  = 1.0 - abs(4.0*starFbm3(Pw*2.9  + 311.0 + hfSeed*0.5, 1) - 1.0);
-		float hfDust = (1.0 - 0.62*smoothstep(0.52,0.90,dBroad)) * (1.0 - 0.42*smoothstep(0.60,0.95,dFine));
-		// (8) Compose — filament-DOMINANT crisp lines + faint halo + fine detail in the gaps,
-		// textured by grain (matte), then layered dust absorption for depth. Matte cores (no bloom).
-		float reach = hfCloud*0.85 + 0.15;
-		float gas = lines * (maxq ? 1.5 : 1.35) * reach // BRIGHT crisp filaments (dominant; bolder at Max)
-		          + wisp  * 0.30 * reach
-		          + voidDetail * (maxq ? 0.60 : 0.42) * (1.0 - hfCloud*0.35) // more fine gap detail at Max
-		          + hfCloud * 0.13;
-		gas *= mix(1.0, grain, 0.70);                   // strong matte texture (anti-shiny)
-		gas *= hfDust;                                  // layered absorption → depth
-		density = clamp(gas, 0.0, 1.2);
-		core    = clamp(hfCoreM * (0.26 + 0.5*lines) + 0.18*hfCoreM*filN, 0.0, 0.65); // dim matte cores
+		vec3 w2p = P * 1.10 + 3.1 * Q1 + sd * 1.7 + 41.0;
+		Q2 = vec3(starFbm3(w2p,                            2),
+		            starFbm3(w2p + vec3(27.6, 13.2, 8.8),  2),
+		            starFbm3(w2p + vec3(3.3, 21.7, 5.1),   2)) - 0.5;
 	}
-	else
-	{
-		// ===== HIGH PERFORMANCE: ridged filaments (the FORMER high-fidelity — it cost almost the
-		// same as plain clouds, so it's the baseline-quality path now). 2-level warp + two ridged
-		// samples + fine grain + dust lanes. =====
-		vec3  w1 = vec3(starFbm3(P * 0.6 + 17.0, 3), starFbm3(P * 0.6 + 53.0, 3),
-		                starFbm3(P * 0.6 + 91.0, 3)) - 0.5;
-		vec3  Pp = P + w1 * 2.0;
-		vec3  w2 = vec3(starFbm3(Pp * 1.9 + 211.0, 2), starFbm3(Pp * 1.9 + 167.0, 2),
-		                starFbm3(Pp * 1.9 + 123.0, 2)) - 0.5;
-		Pp += w2 * 0.7;
-		float big    = starFbm3(Pp * 0.7 + 11.0, 4);
-		float med    = starFbm3(Pp * 1.6 + 27.0, 3);
-		float baseN  = big * 0.55 + med * 0.55;
-		float blob   = smoothstep(0.30, 0.62, baseN);
-		float ridge1 = 1.0 - abs(2.0 * starFbm3(Pp * 2.4 + 97.0,  3) - 1.0);
-		float ridge2 = 1.0 - abs(2.0 * starFbm3(Pp * 5.2 + 131.0, 2) - 1.0);
-		float fil    = pow(ridge1, 2.2) * 0.85 + pow(ridge2, 3.0) * 0.55;
-		float fine   = clamp(0.62 + 0.7 * (starFbm3(Pp * 8.5 + 59.0, 2) - 0.35), 0.2, 1.4);
-		float dust   = 1.0 - 0.55 * smoothstep(0.50, 0.85, starFbm3(Pp * 2.6 + 63.0, 2));
-		density = blob * (0.30 + 0.95 * fil) * fine * dust;
-		core    = smoothstep(0.54, 0.88, baseN);
-	}
-	float glow   = (band * 1.05 + 0.05) * (density + 0.7 * core);         // more concentrated in the band
-	glow *= 1.0 - 0.90 * mwRift(cN);                                      // dark dust lanes cut through
-	glow = max(glow, 0.0);
-	if (glow <= 0.0) return vec3(0.0);
+	vec3 Pw = P + 0.90 * Q1 + 0.42 * Q2;   // advected → flowing structure
+	vec3 Pc = P + 0.30 * Q1;               // steadier coord for the cluster gate
+	// Anti-alias weight for the finest layers: fade toward 0 where their screen
+	// footprint nears pixel-Nyquist so they never shimmer on camera rotation.
+	float aaFine = 1.0 - smoothstep(0.30, 0.70, length(fwidth(Pw)) * 520.0);
 
-	// Per-region hue field → blend the THREE user-adjustable colours so neighbouring regions
-	// differ clearly in colour. Seeded so the colour layout also re-randomises.
-	float h = clamp(starFbm3(P * 0.5 + 71.0 + uNebulaSeed * 5.0, maxq ? 4 : (hifi ? 3 : 2)) * 1.7 - 0.35, 0.0, 1.0);
-	vec3 col = mix(nebColor, uNebulaColor2, smoothstep(0.05, 0.50, h));   // colour 1 → 2
-	col = mix(col, uNebulaColor3, smoothstep(0.50, 0.95, h));             // → colour 3
-	// Light desaturation only (the user wants VISIBLE colour contrast, not a whitish glow).
-	float lum = dot(col, vec3(0.3, 0.59, 0.11));
-	col = mix(col, vec3(lum), 0.18);
-	col = mix(col, col + vec3(0.55), core * 0.35);                        // dense cores brighten toward white
+	// (2) GAS PIECES — the nebula is a set of DISCRETE Worley-cell chunks, not a
+	// diffuse fBm field. pd = signed "depth into the piece" (F1 blob, warped and
+	// fractally eroded). COVERAGE drives BOTH the piece count (cluster-existence
+	// gate) and the piece size (radius threshold). Because F1 rises toward the
+	// saddle between two nearby features, the dilated SKIRTS of close pieces
+	// meet there first → NECKS form and neighbouring pieces connect
+	// automatically as coverage grows, before their cores ever merge.
+	vec3 Pp = P + 0.65 * Q1 + 0.30 * Q2;   // warped piece coords (organic silhouettes)
+	float ero = starFbm3(Pw * 2.3 + 33.0, 2) - 0.375;
+	float thr   = mix(0.72, 0.40, cover);    // piece radius: cover 0 tiny .. 1 huge
+	float exist = smoothstep(mix(0.44, 0.10, cover), mix(0.74, 0.40, cover),
+	                         starFbm3(Pc * 0.60 + sd * 0.60 + 60.0, hifi ? 4 : 3));
+	float pd = worleyNoise3(Pp * 2.2 + sd * 17.0) + ero * 0.45 - thr;
+	// Half-size satellite pieces between the big ones — ALL tiers (they carry
+	// most of the visible piece count at mid coverage; one extra tap).
+	pd = max(pd, (worleyNoise3(Pp * 4.4 + 91.0) + ero * 0.36 - thr - 0.05) * 0.92);
+	pd -= (1.0 - exist) * 0.35;              // gated-out clusters never surface
+	float core   = smoothstep(0.000, 0.030, pd);   // solid chunk body (crisp silhouette)
+	float depth  = smoothstep(0.030, 0.240, pd);   // deep interior (brightens/whitens)
+	float border = smoothstep(-0.018, 0.010, pd) * (1.0 - smoothstep(0.035, 0.095, pd)); // the piece's RIM band
+	float skirt  = smoothstep(-0.110, -0.015, pd); // dilated halo — fuses into necks
+	float neck   = skirt * (1.0 - core);           // connection zone between close pieces
+
+	// (3) SILK — interior schlieren as soft level sets of the PIECE field itself,
+	// so every streak layers along its chunk's own silhouette (fixed
+	// constellations inside the piece, they live and re-randomise with it). The
+	// ridged wisps only feather brightness ALONG each striation, and a hard gate
+	// gives true zero-crossings → arcs, never closed onion rings.
+	float stri = 1.0 - smoothstep(0.012, 0.050, abs(pd - 0.060));
+	stri = max(stri, (1.0 - smoothstep(0.012, 0.050, abs(pd - 0.125))) * 0.85);
+	stri = max(stri, (1.0 - smoothstep(0.012, 0.050, abs(pd - 0.190))) * 0.70);
+	if (maxq)
+		stri = max(stri, (1.0 - smoothstep(0.010, 0.042, abs(pd - 0.255))) * 0.55);
+	vec3 Ps = P + 0.55 * Q1;
+	float r1 = 1.0 - abs(4.0 * starFbm3(vec3(Ps.x, Ps.y * 0.25, Ps.z) * 3.2 + 210.0 + sd, 2) - 1.0);
+	float wisp = smoothstep(0.35, 0.95, r1);
+	if (hifi)
+	{
+		float r2 = 1.0 - abs(4.0 * starFbm3(vec3(Ps.x * 0.25, Ps.y, Ps.z) * 4.6 + 610.0 + sd, 2) - 1.0);
+		wisp = max(wisp, smoothstep(0.40, 0.95, r2) * 0.85);
+	}
+	if (maxq)
+	{
+		float r3 = 1.0 - abs(4.0 * starFbm3(vec3(Pw.x, Pw.y * 0.30, Pw.z) * 7.3 + 950.0, 2) - 1.0);
+		wisp = max(wisp, smoothstep(0.45, 0.95, r3) * 0.70 * aaFine);
+	}
+	float silk = clamp(stri * smoothstep(0.10, 0.45, wisp) * (0.35 + 0.65 * wisp) + wisp * 0.28, 0.0, 1.2);
+
+	// (4) CRACKLE CAGE — the filament web: the VEINS (Adern) threading each
+	// piece's interior, densest along the border, and the strands that bridge
+	// the necks. Each scale is TWO independent single-iso families (nebIso)
+	// whose loops CROSS → cellular walls, no concentric nesting. A high-freq
+	// CRINKLE warp (High/Max) wiggles the walls at small scale.
+	vec3 Pk = Pw;
+	if (hifi)
+		Pk += (vec3(starFbm3(Pw * 7.5 + 331.0, 1),
+		              starFbm3(Pw * 7.5 + 337.7, 1),
+		              starFbm3(Pw * 7.5 + 343.3, 1)) - 0.25) * 0.40;
+	float nC    = starFbm3(Pk * 2.6 + 501.0 + sd * 0.5, 1);
+	float cage  = nebIso(nC, 0.260, 0.014);
+	cage        = max(cage, nebIso(starFbm3(Pk * 3.1 + 517.7, 1), 0.245, 0.012) * 0.90);
+	cage       += nebIso(starFbm3(Pk * 5.3 + 622.0, 1), 0.262, 0.010) * 0.65;
+	if (hifi)
+		cage   += nebIso(starFbm3(Pk * 6.4 + 651.3 + sd * 0.8, 1), 0.248, 0.009) * 0.55;
+	float cF = 0.0;
+	if (hifi)
+	{
+		cF = nebIso(starFbm3(Pk * 10.7 + 743.0, 1), 0.255, 0.008);
+		cage += cF * 0.55;
+	}
+	if (maxq)
+		cage += nebIso(starFbm3(Pk * 20.6 + 864.0, 1), 0.258, 0.007) * 0.48 * aaFine;
+	// TWO independent length-breakers fade walls in/out ALONG their run → broken
+	// arcs and braids instead of closed onion rings around every noise extremum.
+	float lenFade = smoothstep(0.30, 0.72, starFbm3(Pw * 2.6 + 777.0, hifi ? 2 : 1) * (hifi ? 1.6 : 3.2));
+	lenFade *= smoothstep(0.20, 0.62, starFbm3(Pw * 1.15 + 888.0 + sd * 0.3, hifi ? 2 : 1) * (hifi ? 1.8 : 3.6));
+	// Fine GRAIN → matte, fibrous texture on gas and filaments (anti-shiny).
+	float grain = clamp(starFbm3(Pw * 6.5 + 400.0, hifi ? 2 : 1) * (hifi ? 2.0 : 4.0), 0.0, 1.4);
+	cage *= lenFade * (0.62 + 0.48 * grain);
+	// STRIPES — a sky-wide random pattern of long vein strands: stretched ridged
+	// layers at crossing orientations. Computed for the WHOLE sky so the pattern
+	// runs seamlessly from piece to piece — the pieces merely act as its alpha
+	// mask in the composite below.
+	// Thin flank ISO lines (not ridge peaks — those are fat at the noise mode)
+	// on axis-stretched fbm → long crisp strands.
+	float sA = starFbm3(vec3(Pw.x, Pw.y * 0.22, Pw.z) * 2.4 + 1300.0 + sd, 2);
+	float stripes = nebIso(sA, 0.55, 0.018);
+	if (hifi)
+	{
+		float sB = starFbm3(vec3(Pw.x * 0.22, Pw.y, Pw.z) * 2.9 + 1450.0, 2);
+		stripes = max(stripes, nebIso(sB, 0.55, 0.016) * 0.85);
+	}
+	stripes *= 0.55 + 0.40 * grain;
+	cage = max(cage, stripes);
+	// Interior MOTTLE — mid-frequency patchiness so the gas inside a piece has
+	// visible texture instead of a flat airbrush fill.
+	float mott = clamp(starFbm3(Pw * 3.8 + 271.0 + sd, hifi ? 3 : 2) * 2.3, 0.0, 1.5);
+	// ALPHA mask: the global vein/stripe pattern shows through the piece BODY
+	// (uniformly, not just the rim) and through the necks; the border only adds
+	// a mild extra so the rim web still reads a touch denser.
+	float reach = core * 0.95 + neck * 0.80 + border * 0.30;
+	// At high coverage the piece body approaches the whole sky — ease the vein
+	// alpha back so a full nebula sky doesn't drown in web (0.5 unchanged).
+	float covWeb = mix(1.0, 0.62, smoothstep(0.60, 1.00, cover));
+	reach *= covWeb;
+	float fil = cage * reach * (maxq ? 1.60 : (hifi ? 1.50 : 1.30));
+	// Ionization: the strongest wall centres run cream-hot, mostly on the rim.
+	float ion = (1.0 - smoothstep(0.003, 0.010, abs(nC - 0.260))) * smoothstep(0.50, 1.00, core * 0.90 + border * 0.40);
+
+	// (5) BEADS — Worley corner pockets (far-from-all-features) land at cell
+	// junctions; masked by the cage so they read as knots ON the filaments.
+	float beads = 0.0;
+	if (hifi)  beads  = pow(smoothstep(0.34, 0.16, worleyNoise3(Pk * 26.0 + sd * 31.0)), 2.0) * 0.9;
+	if (maxq)  beads += pow(smoothstep(0.32, 0.14, worleyNoise3(Pk * 46.0 + 77.0)), 2.0) * 0.6;
+	beads *= smoothstep(0.30, 0.90, cage) * (core * 0.8 + neck * 0.5 + border * 0.3) * aaFine;
+
+	// (6) Max extras: dim BACK web across the halo zone (depth cue) + extra
+	// fray strands riding the necks so the connections read fibrous.
+	float back = 0.0, neckFray = 0.0;
+	if (maxq)
+	{
+		back     = nebIso(starFbm3(Pw * 1.7 + 953.0 + sd * 0.7, 1), 0.252, 0.020) * skirt * lenFade;
+		neckFray = cF * neck * lenFade;
+	}
+
+	// (7) DUST — thin reddening lanes (one-sided backlit rim, see below) + rare
+	// THICK emissive amber concentrations sitting ON the pieces (MIRI's warm dust).
+	float dLn = starFbm3(Pw * 0.85 + 130.0 + sd * 0.9, 2) - 0.55;
+	float tau = (1.0 - smoothstep(0.015, 0.060, abs(dLn))) * (hifi ? 2.0 : 1.7);
+	// ONE-SIDED edge band (n > iso only): a |n−iso| annulus would cross the noise
+	// distribution's mode on the low side and flood the piece with warm rim.
+	float rim = smoothstep(0.015, 0.045, dLn) * (1.0 - smoothstep(0.060, 0.100, dLn));
+	float dustA = smoothstep(0.72, 0.94, starFbm3(Pc * 0.95 + 313.0 + sd * 0.4, hifi ? 3 : 2) + border * 0.08);
+	dustA *= (0.45 + 0.55 * smoothstep(0.20, 0.60, core + border))
+	       * mix(1.0, 0.55, smoothstep(0.60, 1.00, cover)); // high cover: don't drown the sky in amber
+	tau += dustA * 1.5;                       // the thick patches also redden the gas behind
+
+	// ---- shared astro composition (all tiers) ----
+	// Region colour field: which piece leans colour-2 vs colour-3 on its veins.
+	float h = clamp(starFbm3(P * 0.5 + 71.0 + sd * 5.0, maxq ? 4 : (hifi ? 3 : 2)) * 1.7 - 0.35, 0.0, 1.0);
+	float regionW = smoothstep(0.12, 0.88, h);
+	vec3 veilCol = nebColor;                                   // interior gas colour (colour 1)
+	vec3 filBase = mix(uNebulaColor2, uNebulaColor3, regionW);         // vein/rim colours (colour 2 ↔ 3)
+	vec3 hotCol  = vec3(1.02, 0.96, 0.80) * 0.85 + filBase * 0.25; // ionized crests → cream
+	vec3 filCol  = mix(filBase, hotCol, clamp(ion, 0.0, 1.0));
+	// Wavelength-dependent dust extinction: blue is extinguished first, so the lanes
+	// silhouette the gas in brown/amber instead of flat grey (interstellar reddening).
+	vec3 Td = exp(-tau * vec3(0.55, 1.05, 1.90));
+	// High coverage floods the sky with gas — pull the interior gain down a little
+	// so a full nebula sky keeps depth instead of washing to white (0.5 unchanged).
+	float hiCov = 1.0 - 0.40 * smoothstep(0.60, 1.00, cover);
+	// BACK→FRONT: faint halo fog + glowing neck haze (the connections), then the
+	// solid piece — blue silk-layered interior that whitens toward the centre ...
+	vec3 C = veilCol * (skirt * (1.0 - core) * 0.06)
+	         + mix(veilCol, filBase, 0.30) * (neck * 0.09);
+	C += mix(veilCol, filBase, 0.55) * (back * 0.22);            // (Max) dim web behind the pieces
+	// Dark contrast ring just OUTSIDE the border: pinches the halo fog at the
+	// silhouette so every piece reads as a clearly defined, solid form.
+	float ring = smoothstep(-0.055, -0.014, pd) * (1.0 - smoothstep(-0.014, 0.000, pd));
+	C *= 1.0 - ring * 0.45;
+	// FILLED interior: the shape reads solid (high base fill), and its colour
+	// varies WITHIN the user colour — a deep shade blended toward a pale tint
+	// of colour 1 by the mottle — while silk/veins pattern the fill on top.
+	vec3 innerDeep = veilCol * vec3(0.60, 0.70, 1.02);
+	vec3 innerPale = veilCol * vec3(1.28, 1.16, 0.96) + vec3(0.05, 0.05, 0.06);
+	vec3 innerCol  = mix(innerDeep, innerPale, clamp(mott * 0.75, 0.0, 1.0));
+	C += innerCol * hiCov * (core * (0.62 + 0.50 * depth) * (0.68 + 0.32 * silk))
+	   + vec3(0.88, 0.94, 1.06) * hiCov * (depth * depth * (0.12 + 0.30 * silk) * (0.60 + 0.40 * mott));
+	C *= Td;                                                      // ... absorbed by the dust ...
+	C += (uNebulaColor2 * vec3(1.10, 0.72, 0.45)) * (dustA * (0.45 + 0.40 * grain)); // thick amber glow
+	// Backlit dust edges: warm translucent rim where a lane crosses the glow behind it.
+	C += (filBase * 0.55 + vec3(0.30, 0.16, 0.06)) * (rim * 0.30 * (core * 0.9 + depth * 0.5));
+	// The RAND: a soft solid glow under the rim web so the border reads
+	// continuous even where the web momentarily thins.
+	C += filBase * (border * (0.22 + 0.30 * grain));
+	// ... then the VEINS + rim web thread over everything. The filaments are
+	// quasi-OPAQUE (they occlude the glow behind before adding their own
+	// emission) so they stay saturated over the bright interior instead of
+	// washing to pastel — in the JWST image the cage reads solid.
+	C *= 1.0 - clamp(cage * reach, 0.0, 1.0) * 0.45;
+	C += filCol * (fil * (0.80 + 0.20 * grain) * mix(1.0, (Td.x + Td.y + Td.z) * (1.0 / 3.0), 0.25));
+	C += hotCol * (ion * fil * 0.25);                             // extra punch on the hot crests
+	C += hotCol * (beads * 0.55);                                 // junction knots
+	C += filBase * (neckFray * 0.12);                             // (Max) fibrous connection strands
+
+	// Band/rift gating, intensity, then a LUMINANCE-preserving rolloff (a per-channel
+	// rolloff would wash dense areas into pastel — this compresses brightness, keeps hue).
+	C *= (band * 1.05 + 0.05) * (1.0 - 0.90 * mwRift(cN));
+	C *= 2.05 * intensity * smoothstep(0.0, 0.05, cover);   // smooth kill toward cover = 0
+	float lum = dot(C, vec3(0.30, 0.59, 0.11));
+	if (lum > 1e-5) C *= (lum / (1.0 + lum * 0.22)) / lum;
 	float horizon = smoothstep(0.0, 0.16, dir.y);
-	float neb = glow * 2.05 * intensity;
-	neb = neb / (1.0 + neb * 0.22);   // gentle highlight rolloff → dense cores keep colour, don't clip flat-white
-	return col * (neb * horizon * night);
+	return max(C, vec3(0.0)) * (horizon * night);
 }
 
 // Meander offset of an aurora band as a function of world X (the band RUNS along world-X;
@@ -1852,76 +2020,109 @@ void main()
 // sky's mood is driven by the sun's elevation (sunDir.y): a daytime blue sky
 // warms and reddens at the horizon as the sun sets and dims into night.
 static const char* kSkyFuncGLSL = R"GLSL(
+// ---- Physically-based single-scattering atmosphere (Rayleigh + Mie + ozone) ----
+// Compact fixed-step single scatter for a ground-level camera: 12 view samples,
+// each with a 5-sample sun-transmittance march. Sunset reddening, the blue hour
+// and the horizon's pale saturation all EMERGE from the optical-depth integrals
+// instead of hand-tuned gradient blends. Mirrored in MSL + the CPU IBL bakes —
+// keep all four copies in sync.
+vec2 atmoRaySphere(vec3 ro, vec3 rd, float R)
+{
+	float b = dot(ro, rd);
+	float c = dot(ro, ro) - R * R;
+	float d = b * b - c;
+	if (d < 0.0) return vec2(1.0e9, -1.0e9);
+	d = sqrt(d);
+	return vec2(-b - d, -b + d);
+}
+vec3 atmoScatter(vec3 dir, vec3 sunDir)
+{
+	const float Rg = 6360.0e3, Ra = 6440.0e3;                // ground / atmosphere-top radius
+	const vec3  bR = vec3(5.802e-6, 13.558e-6, 33.1e-6);     // Rayleigh scattering
+	const float bM = 3.996e-6;                               // Mie scattering
+	const vec3  bO = vec3(0.650e-6, 1.881e-6, 0.085e-6);     // ozone absorption
+	const float HR = 8500.0, HM = 1200.0;                    // scale heights
+	vec3 ro = vec3(0.0, Rg + 200.0, 0.0);
+	vec2 tA = atmoRaySphere(ro, dir, Ra);
+	if (tA.y <= 0.0) return vec3(0.0);
+	float t0 = max(tA.x, 0.0), t1 = tA.y;
+	vec2 tG = atmoRaySphere(ro, dir, Rg);
+	if (tG.x > 0.0) t1 = min(t1, tG.x);                      // stop at the ground
+	float ds = (t1 - t0) / 12.0;
+	float mu = dot(dir, sunDir);
+	float phR = 0.05968310 * (1.0 + mu * mu);                // Rayleigh phase 3/(16π)
+	const float g = 0.76, g2 = g * g;
+	float phM = 0.11936620 * ((1.0 - g2) * (1.0 + mu * mu)) /   // Cornette-Shanks
+	            ((2.0 + g2) * pow(1.0 + g2 - 2.0 * g * mu, 1.5));
+	vec3  sumR = vec3(0.0), sumM = vec3(0.0);
+	float odR = 0.0, odM = 0.0, odO = 0.0;                   // view-path optical depths
+	for (int i = 0; i < 12; ++i)
+	{
+		vec3  p   = ro + dir * (t0 + (float(i) + 0.5) * ds);
+		float hgt = length(p) - Rg;
+		float dR  = exp(-hgt / HR) * ds;
+		float dM  = exp(-hgt / HM) * ds;
+		float dO  = max(0.0, 1.0 - abs(hgt - 25.0e3) / 15.0e3) * ds;  // ozone tent layer @25km
+		odR += dR; odM += dM; odO += dO;
+		if (atmoRaySphere(p, sunDir, Rg).x > 0.0) continue;  // sun below local horizon → shadowed
+		float sl = atmoRaySphere(p, sunDir, Ra).y * 0.2;     // 5-sample sun march
+		float sR = 0.0, sM = 0.0, sO = 0.0;
+		for (int j = 0; j < 5; ++j)
+		{
+			vec3  q  = p + sunDir * ((float(j) + 0.5) * sl);
+			float hq = length(q) - Rg;
+			sR += exp(-hq / HR) * sl;
+			sM += exp(-hq / HM) * sl;
+			sO += max(0.0, 1.0 - abs(hq - 25.0e3) / 15.0e3) * sl;
+		}
+		vec3 tau = bR * (odR + sR) + (bM * 1.11) * (odM + sM) + bO * (odO + sO);
+		vec3 tr  = exp(-tau);
+		sumR += tr * dR;
+		sumM += tr * dM;
+	}
+	vec3 L = (sumR * bR * phR + sumM * bM * phM) * 20.0;     // sun irradiance → engine exposure
+	// Fake MULTIPLE scattering: single scatter alone leaves long grazing paths
+	// yellow/dark at noon (the in-filled skylight is missing). Fill proportional
+	// to how opaque the view path is, fading out toward sunset so dusk stays warm.
+	vec3 Tcam = exp(-(bR * odR + (bM * 1.11) * odM + bO * odO));
+	L += (vec3(1.0) - Tcam) * vec3(0.30, 0.42, 0.60) * (0.35 * smoothstep(0.0, 0.35, sunDir.y));
+	return L;
+}
 vec3 skyColor(vec3 dir, vec3 sunDir)
 {
 	dir    = normalize(dir);
 	sunDir = normalize(sunDir);
 	float sunY = clamp(sunDir.y, -0.3, 1.0);
 	float day  = smoothstep(-0.10, 0.10, sunY);                 // 0 night → 1 day
-	// Warm-horizon (sunset/sunrise) factor — extended a touch BELOW the horizon so the
-	// golden band lingers into the early blue hour like it does in reality.
 	float dusk = smoothstep(-0.14, 0.04, sunY)
 	           * (1.0 - smoothstep(0.04, 0.26, sunY));
+	float toNight = 1.0 - smoothstep(-0.24, -0.06, sunY);       // twilight vs deep night
 
-	vec3 zenithDay  = vec3(0.09, 0.30, 0.78);                   // richer noon blue
-	vec3 horizDay   = vec3(0.50, 0.66, 0.90);
-	vec3 zenithTwi  = vec3(0.030, 0.055, 0.17);                 // blue-hour zenith (deep blue)
-	vec3 horizTwi   = vec3(0.055, 0.075, 0.19);                 // blue-hour horizon base
-	vec3 zenithNite = vec3(0.003, 0.005, 0.015);
-	vec3 horizNite  = vec3(0.006, 0.009, 0.024);
-	// 3-stage blend: full day → BLUE HOUR → deep night. The extended twilight range
-	// (sun 0 → ~-0.24) keeps the sky a deep blue for a while after sunset instead of
-	// snapping to black the instant the sun dips below the horizon.
-	float toDay   = smoothstep(-0.08, 0.10, sunY);             // day vs twilight
-	float toNight = 1.0 - smoothstep(-0.24, -0.06, sunY);      // twilight vs deep night
-	vec3 zenith  = mix(mix(zenithTwi, zenithDay, toDay), zenithNite, toNight);
-	vec3 horizon = mix(mix(horizTwi,  horizDay,  toDay), horizNite,  toNight);
+	// Physically-based base sky: day blue, sunset reddening and the blue hour all
+	// come from the single-scattering integral above. Below-horizon rays reuse the
+	// horizon colour (the ground-haze blend takes over there) — without the clamp a
+	// hard navy "ocean band" appears where the ray hits the planet after a short path.
+	vec3 sky = atmoScatter(normalize(vec3(dir.x, max(dir.y, 0.004), dir.z)), sunDir);
 
-	// Directional sunset warmth: the warm band is concentrated toward the sun's
-	// azimuth (golden near the sun, cooler magenta away) instead of a flat ring,
-	// and the zenith picks up a touch of dusk purple for atmospheric depth.
-	vec2  sunAz  = normalize(sunDir.xz + vec2(1e-5));
-	float toward = dot(normalize(dir.xz + vec2(1e-5)), sunAz) * 0.5 + 0.5; // 0 away → 1 toward
-	toward = pow(clamp(toward, 0.0, 1.0), 1.8);                 // tighter warm wedge: only near the sun glows
-	// Deep blue-purple away from the sun, burnt orange toward it. Kept well under 1.0 so
-	// the ACES tonemap renders COLOUR, not a washed white.
-	vec3  duskHoriz = mix(vec3(0.26, 0.18, 0.40), vec3(0.92, 0.42, 0.14), toward);
-	horizon = mix(horizon, duskHoriz, dusk);                    // warm directional sunset band
-	zenith  = mix(zenith,  vec3(0.11, 0.11, 0.30), dusk * 0.6); // dusk purple at zenith
-
-	float h    = clamp(dir.y, 0.0, 1.0);
-	float grad = pow(1.0 - h, 2.5);                             // horizon-weighted
-	vec3 sky = mix(zenith, horizon, grad);
-
-	// Warm horizon bands — modest so the sky stays a rich golden, not a bright wash.
-	float band  = pow(1.0 - h, 8.0) * toward;
-	float band2 = pow(1.0 - h, 3.5) * toward;
-	sky += vec3(0.95, 0.50, 0.16) * (band  * dusk * 0.70);
-	sky += vec3(0.60, 0.34, 0.14) * (band2 * dusk * 0.30);
+	// Deep-night floor (the scattering term → 0 once the sun is far below the
+	// horizon): faint blue gradient so night reflections aren't pitch black.
+	float h = clamp(dir.y, 0.0, 1.0);
+	sky += mix(vec3(0.006, 0.009, 0.024), vec3(0.003, 0.005, 0.015), h) * toNight;
 
 	// Below the horizon: ease into a soft ground haze over a wide band so the
 	// sky stays atmospheric just under the horizon line.
 	vec3 ground = mix(vec3(0.02, 0.02, 0.03), vec3(0.24, 0.23, 0.21), day);
-	sky = mix(sky, ground, smoothstep(0.0, -0.25, dir.y));
+	sky = mix(sky, ground, smoothstep(0.0, -0.12, dir.y));
 
-	// Layered sun aureole — a crisp disk plus tight/mid blooms and a broad warm
-	// scatter that survive through sunset for a cinematic, volumetric glow.
-	// Warm golden-orange at low sun, easing to white when high. Low-sun tint is a
-	// yellow-gold (not a hot near-white) so sunrise/sunset reads as COLOUR, not glare.
+	// Sun aureole ON TOP of the physical Mie glow — just the tight glare blooms now;
+	// the broad golden scatter comes from the Cornette-Shanks phase itself.
 	vec3  sunTint = mix(vec3(1.0, 0.58, 0.24), vec3(1.0, 0.96, 0.88),
 	                    smoothstep(0.0, 0.28, sunY));
 	float s = max(dot(dir, sunDir), 0.0);
 	float sunVis = max(day, dusk);
-	// Tame the near-sun bloom toward the horizon so it GLOWS instead of blinding; the
-	// crisp daytime disk is unaffected (it is gated by `day`).
-	float bloomDamp = mix(1.0, 0.28, dusk);                        // bloom much dimmer at dusk → no white blob
-	// Crisp disk removed — the sun is now a geometric body (sunDisk in the sky FS),
-	// kept out of skyColor so the shared IBL/fog reference isn't a razor-thin spike.
-	sky += sunTint * (pow(s, 220.0)  * 1.1 * bloomDamp) * sunVis;  // tight bloom
-	sky += sunTint * (pow(s, 30.0)   * 0.22 * bloomDamp) * sunVis; // mid aureole
-	// Broad golden scatter — saturated + modest, so it tints the sun side gold instead
-	// of blowing it out to white.
-	sky += vec3(1.10, 0.46, 0.13) * (pow(s, 4.0) * 0.40) * dusk;
+	float bloomDamp = mix(1.0, 0.28, dusk);                        // dimmer at dusk → no white blob
+	sky += sunTint * (pow(s, 220.0)  * 0.9  * bloomDamp) * sunVis; // tight bloom
+	sky += sunTint * (pow(s, 30.0)   * 0.12 * bloomDamp) * sunVis; // mid aureole
 
 	// Moon: opposite the sun, fading in at night. The lit disk itself is drawn
 	// (textured) in the sky pass; here we keep only the soft halo and a faint
@@ -3065,6 +3266,7 @@ void OpenGLRenderer::CreateSkyPipeline()
 	m_uSkyNebulaColor3 = glGetUniformLocation(m_skyProgram, "uNebulaColor3");
 	m_uSkyNebulaSeed  = glGetUniformLocation(m_skyProgram, "uNebulaSeed");
 	m_uSkyNebulaHiFi  = glGetUniformLocation(m_skyProgram, "uNebulaHiFi");
+	m_uSkyNebulaCover = glGetUniformLocation(m_skyProgram, "uNebulaCover");
 	m_uSkyAuroraColor = glGetUniformLocation(m_skyProgram, "uAuroraColor");
 	m_uSkyAuroraColorTop = glGetUniformLocation(m_skyProgram, "uAuroraColorTop");
 	m_uSkyAuroraHeight   = glGetUniformLocation(m_skyProgram, "uAuroraHeight");
@@ -5460,6 +5662,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glUniform3fv(m_uSkyNebulaColor3, 1, glm::value_ptr(GetEnvironment().nebulaColor3));
 			glUniform1f(m_uSkyNebulaSeed, GetEnvironment().nebulaSeed);
 			glUniform1f(m_uSkyNebulaHiFi, (float)GetEnvironment().nebulaQuality); // 0/1/2 (carried in uNebulaHiFi)
+			glUniform1f(m_uSkyNebulaCover, GetEnvironment().nebulaCoverage);
 			glUniform3fv(m_uSkyAuroraColor, 1, glm::value_ptr(GetEnvironment().auroraColor));
 			glUniform3fv(m_uSkyAuroraColorTop, 1, glm::value_ptr(GetEnvironment().auroraColorTop));
 			glUniform1f(m_uSkyFlash, GetEnvironment().flash);

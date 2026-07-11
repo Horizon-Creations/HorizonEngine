@@ -30,6 +30,8 @@ struct Options
     bool        traceHooks = false;        // reserved (parity tracing; v1 records at the Context seam)
     std::string namespaceName = "hcgen";   // namespace of the generated classes + registry
     std::string engineVersion;             // baked into the manifest, checked at load
+    // Progress: invoked before each class is translated (build-output UI).
+    std::function<void(const std::string& label, size_t index, size_t count)> onClass;
 };
 
 struct GeneratedFile { std::string name; std::string contents; };
@@ -77,6 +79,9 @@ struct BuildOutcome
 };
 // Configure + build the generated project (genDir holds the files from
 // generate() + generateCMakeLists()). Blocking — run it on the export worker.
-BuildOutcome buildDylib(const std::filesystem::path& genDir, const SdkInfo& sdk);
+// `onLine` (optional) streams every toolchain output line as it appears (the
+// build-output UI); the full output is written to genDir/build.log either way.
+BuildOutcome buildDylib(const std::filesystem::path& genDir, const SdkInfo& sdk,
+                        const std::function<void(const std::string& line)>& onLine = {});
 
 } // namespace HE::hccg
