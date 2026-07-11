@@ -294,6 +294,7 @@ namespace
 				{ "nebulaColor2",      vec3ToJson(e->nebulaColor2) },
 				{ "nebulaColor3",      vec3ToJson(e->nebulaColor3) },
 				{ "nebulaSeed",        e->nebulaSeed },
+				{ "nebulaCoverage",    e->nebulaCoverage },
 				{ "nebulaQuality",     e->nebulaQuality },
 				{ "auroraColor",       vec3ToJson(e->auroraColor) },
 				{ "auroraColorTop",    vec3ToJson(e->auroraColorTop) },
@@ -673,6 +674,7 @@ namespace
 			e.nebulaColor2      = jsonToVec3(c.value("nebulaColor2", json()), e.nebulaColor2);
 			e.nebulaColor3      = jsonToVec3(c.value("nebulaColor3", json()), e.nebulaColor3);
 			e.nebulaSeed        = c.value("nebulaSeed",        e.nebulaSeed);
+			e.nebulaCoverage    = c.value("nebulaCoverage",    e.nebulaCoverage);
 			// nebulaQuality (0/1/2) replaced the old nebulaHighFidelity bool — fall back to it
 			// for scenes saved before the change (true → High=1, false → Performance=0).
 			if (c.contains("nebulaQuality"))

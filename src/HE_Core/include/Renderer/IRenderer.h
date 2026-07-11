@@ -193,10 +193,11 @@ public:
         // rotate with time-of-day to mimic Earth's rotation.
         float     milkyWayIntensity = 0.6f;
         float     nebulaIntensity   = 0.3f;
-        glm::vec3 nebulaColor       = glm::vec3(0.42f, 0.45f, 0.92f);
-        glm::vec3 nebulaColor2      = glm::vec3(0.85f, 0.40f, 1.00f);
-        glm::vec3 nebulaColor3      = glm::vec3(1.00f, 0.52f, 0.72f);
+        glm::vec3 nebulaColor       = glm::vec3(0.36f, 0.60f, 1.00f);
+        glm::vec3 nebulaColor2      = glm::vec3(1.00f, 0.60f, 0.28f);
+        glm::vec3 nebulaColor3      = glm::vec3(0.90f, 0.30f, 0.16f);
         float     nebulaSeed        = 0.0f;
+        float     nebulaCoverage    = 0.5f; // 0 = none .. 1 = nearly the whole band covered
         int       nebulaQuality      = 1;   // 0 Performance, 1 High, 2 Max (Metal + OpenGL)
         glm::vec3 auroraColor       = glm::vec3(0.25f, 0.95f, 0.50f);
         glm::vec3 auroraColorTop     = glm::vec3(0.62f, 0.26f, 0.95f);

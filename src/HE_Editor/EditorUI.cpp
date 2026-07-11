@@ -5603,6 +5603,8 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			if (ImGui::TreeNodeEx("Nebula")) {
 			ImGui::SetNextItemWidth(-1.0f);
 			ImGui::SliderFloat("##nebula", &env->nebulaIntensity, 0.0f, 1.0f, "Intensity: %.2f"); trackEdit();
+			ImGui::SetNextItemWidth(-1.0f);
+			ImGui::SliderFloat("##nebulacover", &env->nebulaCoverage, 0.0f, 1.0f, "Coverage: %.2f"); trackEdit();
 			{
 				// Combo index == nebulaQuality (0 Performance, 1 High, 2 Max).
 				int nebQ = env->nebulaQuality < 0 ? 0 : (env->nebulaQuality > 2 ? 2 : env->nebulaQuality);

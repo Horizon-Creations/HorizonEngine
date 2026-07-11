@@ -14,7 +14,7 @@ Each KEY=VAL becomes HE_DUMP_<KEY>. Common keys (see dumpFrameHeadless):
     COVERAGE=0.6      cloud coverage 0..1
     CLOUDMODE=1       0 dome / 1 volumetric clouds
     PITCH=12 YAW=40   camera look (degrees); CAMX/CAMY/CAMZ position
-    NEBULA=0.4 NEBQUALITY=2 MILKYWAY=1 AURORA=0.5 MOONPHASE=0.5
+    NEBULA=0.4 NEBQUALITY=2 NEBCOVER=0.5 MILKYWAY=1 AURORA=0.5 MOONPHASE=0.5
     STARSIZE=1 STARDENS=0.5 STARGLOW=1 CONTRAILS=0 CIRRUS=0
     RHI=Metal         backend to force (default Metal — the user's platform)
 

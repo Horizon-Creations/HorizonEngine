@@ -1111,7 +1111,8 @@ struct SkyParams {
 	float4 auroraColorTop;// xyz = aurora top colour, w = shooting-star (meteor) frequency
 	float4 starColor;     // xyz = star colour, w = starBrightness
 	float4 star;          // x = starSize, y = starSizeVariation, z = starDensity, w = starGlow
-	float4 star2;         // x = starTwinkle
+	float4 star2;         // x = starTwinkle, y = cloudQuality, z = low-res-cloud flag, w = rainAmount
+	float4 neb2;          // x = nebulaCoverage (0 none .. 1 whole band)
 };
 
 vertex SkyOut skyVertex(uint vid [[vertex_id]])
@@ -1733,25 +1734,42 @@ float3 applyClouds3D(float3 baseSky, float3 dir, float3 camPos, float3 sunDir, f
 	return baseSky * T + L;
 }
 
-// Space nebula v2 — layered emission-nebula complexes on the celestial sphere,
-// modelled after astrophotography (Crab / Eagle / Tarantula):
-//   * a smooth cool EMISSION VEIL fills each complex's interior (synchrotron glow),
-//   * a crisp warm FILAMENT CAGE threads OVER the veil, with an ionization gradient
-//     (hot whitish crests → deep warm edges, JWST-Crab style),
-//   * foreground DUST absorbs the veil with wavelength-dependent extinction (blue
-//     dies first → brown/amber pillar silhouettes, Eagle style) and its backlit
-//     edges catch a warm translucent rim,
-//   * (Max) a dimmed BACK filament shell behind the dust and embedded star-cluster
-//     KNOTS (Worley cores, Tarantula style) → real depth ordering:
-//     back shell → dust → front web → knots.
+// Nebula filament line: a single thin iso-contour of a value-noise field.
+// Level sets of a smooth field are closed loops around its extrema; the web is
+// built from the UNION of several INDEPENDENT single-iso families (different
+// fetches/offsets) so loops cross instead of nesting — crossing walls read as
+// a cracked cellular cage (JWST-Crab), never as concentric onion rings.
+// starFbm3(p,1) is bell-shaped around ~0.25, so the iso sits on the histogram
+// FLANK (thin loops; an iso at the mode would flood). Mirrors the GL helper.
+float nebIso(float n, float iso, float w)
+{
+	return 1.0 - smoothstep(w * 0.7, w * 1.7, abs(n - iso));
+}
+
+// Space nebula v3 — DISCRETE GAS PIECES, modelled on the JWST Crab image:
+//   * the nebula is a set of solid Worley-cell CHUNKS (warped + eroded), each
+//     with a defined RIM band in the warm cage colours, a cool interior that
+//     whitens toward the centre, and SILK striations layered along the piece's
+//     own silhouette (fixed constellations inside the formation),
+//   * a CRACKLE CAGE of thin warm filaments — iso-contour cell webs at 2/3/4
+//     scales (Perf/High/Max) — forms the VEINS threading each interior and
+//     runs densest on the rim; the strongest wall centres run ionization-hot,
+//   * COVERAGE sets how MANY pieces exist and how BIG they grow; as pieces
+//     densify, their F1 skirts fuse at the cell saddles → NECKS with fibrous
+//     strands CONNECT neighbouring pieces automatically,
+//   * BEADS — Worley corner knots — stud the filament junctions (High/Max),
+//   * thick emissive AMBER DUST concentrations sit on the pieces in rare
+//     patches, plus thin reddening lanes with a warm backlit rim,
+//   * (Max) a dimmed BACK web across the halo zone and extra neck fray.
 // Night/horizon gated, band-gated, seeded; occluded by clouds. Mirrors GL.
 float3 nebula(float3 dir, float3 cdir, float3 sunDir, float intensity, float3 nebColor,
               float3 nebColor2, float3 nebColor3, float nebulaSeed, float nebQuality,
-              texture3d<float> noiseTex, sampler noiseSamp)
+              float nebCover, texture3d<float> noiseTex, sampler noiseSamp)
 {
-	bool hifi = nebQuality >= 0.5;   // 1 High, 2 Max → detailed filament branch
-	bool maxq = nebQuality >= 1.5;   // 2 Max → depth shell + knots + fine octaves
-	if (intensity <= 0.0) return float3(0.0);
+	bool hifi = nebQuality >= 0.5;   // 1 High, 2 Max → richer warp/web/silk
+	bool maxq = nebQuality >= 1.5;   // 2 Max → back web + neck fray + extra silk/beads
+	float cover = clamp(nebCover, 0.0, 1.0);
+	if (intensity <= 0.0 || cover <= 0.0) return float3(0.0);
 	dir    = normalize(dir);
 	sunDir = normalize(sunDir);
 	// DEEP-night gate: real Milky-Way nebulosity is only visible once the sun is well
@@ -1763,228 +1781,188 @@ float3 nebula(float3 dir, float3 cdir, float3 sunDir, float intensity, float3 ne
 	float3  cN   = normalize(cdir);
 	const float3 galN = normalize(float3(0.46, 0.52, -0.72));
 	float bd   = dot(cN, galN);
-	float band = exp(-bd * bd * 4.5);           // TIGHT milky-way lane (not a full-sky glow)
+	// COVERAGE widens the galactic lane: 0.5 = the classic tight band (exp 4.5),
+	// 0 → a narrow sliver, 1 → nebulosity spreads across most of the sky.
+	float band = exp(-bd * bd * mix(8.2, 0.8, cover));
 	float3  P    = cN * 3.4;
-	// SEED: shift the sample window into the noise field so the cloud SHAPES (and the colour
-	// layout below) re-randomise. The band stays put — it comes from cN — only the gas moves.
+	// SEED: shift the sample window into the noise field so the piece layout (and the
+	// colour layout below) re-randomises. The band stays put — it comes from cN.
 	P += float3(nebulaSeed * 13.1, nebulaSeed * 7.7, nebulaSeed * 19.3);
-	// Component fields the quality branches must fill for the shared composition:
-	float veil, veilCore;      // smooth interior emission + dense hot centre
-	float fil, ion;            // front filament web + its ionization (crest heat)
-	float filBack = 0.0;       // (Max) dimmed second web BEHIND the dust
-	float tau, rim;            // dust optical depth over the veil + backlit edge zone
-	float knots = 0.0;         // (Max) embedded star-cluster knots
-	float grain;               // fine matte texture (anti-shiny)
-	float pieceBody = 0.0, pieceRim = 0.0, pieceCore = 0.0, pieceHalo = 0.0; // (Max) large gas pieces
+	float sd = nebulaSeed;
+
+	// (1) FLOW WARP — advects every later field so chunks/wisps shear organically.
+	float3 w1p = P * 0.55 + sd * 0.31;
+	float3 Q1 = float3(starFbm3(w1p,                          2, noiseTex, noiseSamp),
+	                   starFbm3(w1p + float3(19.3, 7.1, 3.7), 2, noiseTex, noiseSamp),
+	                   starFbm3(w1p + float3(5.2, 1.9, 11.4), 2, noiseTex, noiseSamp)) - 0.5;
+	float3 Q2 = float3(0.0);
 	if (hifi)
 	{
-		// ===== HIGH FIDELITY: ridged-multifractal filament nebula (astrophoto detail) =====
-		// Flowing 2-level domain warp (swirling gas) + offset-weighted ridged MULTIFRACTAL
-		// (Musgrave) so fine detail RIDES the filament crests; two crossing ridge fields → a
-		// Crab-like web; low-freq bodies cluster the gas into discrete regions; ridged dust
-		// lanes carve dark absorption channels. NB starFbm3(p,1, noiseTex, noiseSamp) is value noise in [0,0.5], so
-		// the ridge fold uses 4·n−1 to span ±1 (a bare 2·n−1 would barely fire). ~37 fetches.
-		float hfSeed = nebulaSeed;
-		// (1) Flowing domain warp: swirling / sheared gas (IQ 2-level advection)
-		float3 hfw1 = P * 0.55 + hfSeed * 0.31;
-		float3 hfQ1 = float3(starFbm3(hfw1 + float3( 0.0,  0.0,  0.0), 2, noiseTex, noiseSamp),
-		                 starFbm3(hfw1 + float3(19.3,  7.1,  3.7), 2, noiseTex, noiseSamp),
-		                 starFbm3(hfw1 + float3( 5.2,  1.9, 11.4), 2, noiseTex, noiseSamp)) - 0.5;
-		float3 hfw2 = P * 1.10 + 3.1 * hfQ1 + hfSeed * 1.7 + 41.0;
-		float3 hfQ2 = float3(starFbm3(hfw2 + float3( 0.0,  0.0,  0.0), 2, noiseTex, noiseSamp),
-		                 starFbm3(hfw2 + float3(27.6, 13.2,  8.8), 2, noiseTex, noiseSamp),
-		                 starFbm3(hfw2 + float3( 3.3, 21.7,  5.1), 2, noiseTex, noiseSamp)) - 0.5;
-		float3 Pw = P + 0.90 * hfQ1 + 0.42 * hfQ2;   // advected → flowing tendrils
-		float3 Pc = P + 0.30 * hfQ1;                  // steadier coord for cloud bodies
-		// Max-only anti-alias weight for the extra fine octaves: fade them toward 0 where
-		// the finest sample's screen footprint nears pixel-Nyquist, so they add detail when
-		// the nebula fills the view but never shimmer on camera rotation.
-		float aaFine = maxq ? (1.0 - smoothstep(0.30, 0.70, length(fwidth(Pw)) * 520.0)) : 0.0;
-		// (2) Ridged MULTIFRACTAL #1: fine filament network (each octave gated by the prev ridge)
-		float3  rp = Pw * 2.20 + hfSeed * 0.37;
-		float rsum = 0.0, ramp = 1.0, rw = 1.0, rs, rn;
-		const float RLAC = 1.93, ROFF = 1.0, RGAIN = 2.10, RSW = 0.60;
-		rn = starFbm3(rp, 1, noiseTex, noiseSamp); rs = ROFF - abs(4.0*rn - 1.0); rs *= rs;            rsum += ramp*rs; ramp *= RSW;
-		rp *= RLAC; rw = clamp(rs*RGAIN,0.0,1.0); rn = starFbm3(rp,1, noiseTex, noiseSamp); rs = ROFF-abs(4.0*rn-1.0); rs*=rs; rs*=rw; rsum += ramp*rs; ramp*=RSW;
-		rp *= RLAC; rw = clamp(rs*RGAIN,0.0,1.0); rn = starFbm3(rp,1, noiseTex, noiseSamp); rs = ROFF-abs(4.0*rn-1.0); rs*=rs; rs*=rw; rsum += ramp*rs; ramp*=RSW;
-		rp *= RLAC; rw = clamp(rs*RGAIN,0.0,1.0); rn = starFbm3(rp,1, noiseTex, noiseSamp); rs = ROFF-abs(4.0*rn-1.0); rs*=rs; rs*=rw; rsum += ramp*rs; ramp*=RSW;
-		rp *= RLAC; rw = clamp(rs*RGAIN,0.0,1.0); rn = starFbm3(rp,1, noiseTex, noiseSamp); rs = ROFF-abs(4.0*rn-1.0); rs*=rs; rs*=rw; rsum += ramp*rs; ramp*=RSW;
-		rp *= RLAC; rw = clamp(rs*RGAIN,0.0,1.0); rn = starFbm3(rp,1, noiseTex, noiseSamp); rs = ROFF-abs(4.0*rn-1.0); rs*=rs; rs*=rw; rsum += ramp*rs; ramp*=RSW;
-		rp *= RLAC; rw = clamp(rs*RGAIN,0.0,1.0); rn = starFbm3(rp,1, noiseTex, noiseSamp); rs = ROFF-abs(4.0*rn-1.0); rs*=rs; rs*=rw; rsum += ramp*rs; ramp*=RSW;
-		rp *= RLAC; rw = clamp(rs*RGAIN,0.0,1.0); rn = starFbm3(rp,1, noiseTex, noiseSamp); rs = ROFF-abs(4.0*rn-1.0); rs*=rs; rs*=rw; rsum += ramp*rs; ramp*=RSW;
-		if (maxq)   // Max: two extra fine octaves, fwidth-faded so they never alias
-		{
-			rp *= RLAC; rw = clamp(rs*RGAIN,0.0,1.0); rn = starFbm3(rp,1, noiseTex, noiseSamp); rs = ROFF-abs(4.0*rn-1.0); rs*=rs; rs*=rw; rsum += ramp*rs*aaFine; ramp*=RSW;
-			rp *= RLAC; rw = clamp(rs*RGAIN,0.0,1.0); rn = starFbm3(rp,1, noiseTex, noiseSamp); rs = ROFF-abs(4.0*rn-1.0); rs*=rs; rs*=rw; rsum += ramp*rs*aaFine; ramp*=RSW;
-		}
-		// (3) Ridged MULTIFRACTAL #2: broad crossing tendrils (lower freq)
-		float3  rp2 = Pw * 1.15 + hfSeed * 0.19 + 113.0;
-		float r2sum = 0.0, r2amp = 1.0, r2w = 1.0, r2s, r2n;
-		const float R2LAC = 2.02, R2OFF = 1.0, R2GAIN = 2.20, R2SW = 0.62;
-		r2n = starFbm3(rp2,1, noiseTex, noiseSamp); r2s = R2OFF-abs(4.0*r2n-1.0); r2s*=r2s;                 r2sum += r2amp*r2s; r2amp*=R2SW;
-		rp2*=R2LAC; r2w=clamp(r2s*R2GAIN,0.0,1.0); r2n=starFbm3(rp2,1, noiseTex, noiseSamp); r2s=R2OFF-abs(4.0*r2n-1.0); r2s*=r2s; r2s*=r2w; r2sum+=r2amp*r2s; r2amp*=R2SW;
-		rp2*=R2LAC; r2w=clamp(r2s*R2GAIN,0.0,1.0); r2n=starFbm3(rp2,1, noiseTex, noiseSamp); r2s=R2OFF-abs(4.0*r2n-1.0); r2s*=r2s; r2s*=r2w; r2sum+=r2amp*r2s; r2amp*=R2SW;
-		rp2*=R2LAC; r2w=clamp(r2s*R2GAIN,0.0,1.0); r2n=starFbm3(rp2,1, noiseTex, noiseSamp); r2s=R2OFF-abs(4.0*r2n-1.0); r2s*=r2s; r2s*=r2w; r2sum+=r2amp*r2s; r2amp*=R2SW;
-		rp2*=R2LAC; r2w=clamp(r2s*R2GAIN,0.0,1.0); r2n=starFbm3(rp2,1, noiseTex, noiseSamp); r2s=R2OFF-abs(4.0*r2n-1.0); r2s*=r2s; r2s*=r2w; r2sum+=r2amp*r2s; r2amp*=R2SW;
-		rp2*=R2LAC; r2w=clamp(r2s*R2GAIN,0.0,1.0); r2n=starFbm3(rp2,1, noiseTex, noiseSamp); r2s=R2OFF-abs(4.0*r2n-1.0); r2s*=r2s; r2s*=r2w; r2sum+=r2amp*r2s; r2amp*=R2SW;
-		if (maxq)   // Max: two extra fine octaves, fwidth-faded
-		{
-			rp2*=R2LAC; r2w=clamp(r2s*R2GAIN,0.0,1.0); r2n=starFbm3(rp2,1, noiseTex, noiseSamp); r2s=R2OFF-abs(4.0*r2n-1.0); r2s*=r2s; r2s*=r2w; r2sum+=r2amp*r2s*aaFine; r2amp*=R2SW;
-			rp2*=R2LAC; r2w=clamp(r2s*R2GAIN,0.0,1.0); r2n=starFbm3(rp2,1, noiseTex, noiseSamp); r2s=R2OFF-abs(4.0*r2n-1.0); r2s*=r2s; r2s*=r2w; r2sum+=r2amp*r2s*aaFine; r2amp*=R2SW;
-		}
-		float hfFil = max(rsum, r2sum);                 // union → crossing filament web
-		float filN  = clamp(hfFil / 2.20, 0.0, 1.0);
-		// Value noise is bell-shaped around its mid, so the ridge fold maps the DISTRIBUTION
-		// MODE to ~1 → the crest zone is fat. Only the very top of the sum reads as a thin
-		// line, hence the window sits just below the max.
-		float lines = pow(smoothstep(maxq ? 0.88 : 0.90, 0.985, filN), 1.5);
-		float wisp  = smoothstep(0.05, 0.40, filN);            // faint diffuse halo around them
-		// Anisotropic STREAKS: ridged noise sampled with a stretched axis → elongated filament
-		// lines that the domain warp bends into curves — reads more line-like than round ridges.
-		float3  sp = float3(Pw.x, Pw.y * 4.5, Pw.z) * 1.3 + 500.0 + hfSeed;
-		float streak = 1.0 - abs(4.0 * starFbm3(sp, 2, noiseTex, noiseSamp) - 1.0);
-		streak = pow(smoothstep(0.82, 0.97, streak), 2.6);
-		lines = max(lines, streak * 0.75);                     // merge into the filament line field
-		// (4) Max-only FINE VOID DETAIL: a high-freq ridged layer that fills the dark GAPS
-		// with faint thin structure (so the voids aren't smooth/empty) → finer lines + depth.
-		float voidDetail = 0.0;
-		if (maxq)
-		{
-			float3  vp = Pw * 3.3 + hfSeed * 0.7 + 250.0;
-			float vd = 0.0, va = 0.55, vn, vs;
-			vn=starFbm3(vp,1, noiseTex, noiseSamp); vs=1.0-abs(4.0*vn-1.0); vs*=vs; vd+=va*vs; vp*=2.07; va*=0.55;
-			vn=starFbm3(vp,1, noiseTex, noiseSamp); vs=1.0-abs(4.0*vn-1.0); vs*=vs; vd+=va*vs; vp*=2.07; va*=0.55;
-			vn=starFbm3(vp,1, noiseTex, noiseSamp); vs=1.0-abs(4.0*vn-1.0); vs*=vs; vd+=va*vs; vp*=2.07; va*=0.55;
-			vn=starFbm3(vp,1, noiseTex, noiseSamp); vs=1.0-abs(4.0*vn-1.0); vs*=vs; vd+=va*vs;
-			voidDetail = pow(clamp(vd*1.25, 0.0, 1.0), 1.7);
-		}
-		// (5) Fine GRAIN → breaks up smooth gas so it reads matte/dusty, not shiny.
-		grain = clamp(starFbm3(Pw*6.5 + 400.0, 2, noiseTex, noiseSamp) * 2.0, 0.0, 1.4);
-		// (6) Cloud bodies → DISCRETE complexes with dark sky between them. The body field
-		// gates the veil AND the web's reach, so nebulae read as objects, not wallpaper.
-		float hfBodyLo = starFbm3(Pc*0.46 + hfSeed*0.60 + 60.0, 4, noiseTex, noiseSamp);
-		float hfBodyMi = starFbm3(Pc*1.12 + 88.0, 3, noiseTex, noiseSamp);
-		float body   = hfBodyLo*0.72 + hfBodyMi*0.42
-		             + (starFbm3(Pw*2.3 + 33.0, 2, noiseTex, noiseSamp) - 0.375) * 0.22; // fractal edge erosion
-		float region = smoothstep(0.36, 0.62, body);
-		veil     = pow(smoothstep(0.38, 0.85, body), 1.25);   // smooth interior glow
-		veilCore = smoothstep(0.62, 0.93, body);              // hot dense centre
-		// (7) DUST as ISO-CONTOUR lanes: value noise is bell-shaped, so ridge folds are FAT
-		// at the distribution mode. An iso-surface on the distribution's FLANK (|n−iso| small,
-		// away from the mode) is thin — the gradient doesn't vanish there → winding lanes.
-		float dLn = starFbm3(Pw*0.85 + 130.0 + hfSeed*0.9, 2, noiseTex, noiseSamp) - 0.55;
-		float dL  = 1.0 - smoothstep(0.015, 0.060, abs(dLn));
-		float dF  = 1.0 - smoothstep(0.020, 0.055, abs(starFbm3(Pw*2.9 + 311.0 + hfSeed*0.5, 2, noiseTex, noiseSamp) - 0.58));
-		tau = dL * 3.4 + dF * (0.5 + 1.3 * dL);
-		// ONE-SIDED edge band (n > iso only): the |n−iso| annulus would cross the noise
-		// distribution's mode on the low side and flood the complex with warm rim.
-		rim = smoothstep(0.015, 0.045, dLn) * (1.0 - smoothstep(0.060, 0.100, dLn));
-		// (8) Web reach + ionization: the cage lives in/around the complexes; crests run hot.
-		float reach = 0.03 + 0.97 * smoothstep(0.18, 0.60, region + veil * 0.8);
-		lines *= 0.70 + 0.60 * grain;                       // fray the ribbons (fibrous, not glossy)
-		if (maxq) lines *= 0.80 + 0.45 * voidDetail;        // Max: micro-frays ride the crests
-		// Fade strands in/out ALONG their length → broken arcs and braids (astrophoto look),
-		// not continuous airbrushed eels.
-		lines *= smoothstep(0.30, 0.85, starFbm3(Pw*2.6 + 777.0, 2, noiseTex, noiseSamp) * 1.6);
-		fil = lines * (maxq ? 2.30 : 2.10) * reach
-		    + wisp * 0.04 * reach
-		    + voidDetail * 0.15 * reach * (1.0 - veil * 0.6);
-		ion = smoothstep(0.93, 0.995, filN);                // only the very crest peaks run hot
-		// (9) Max: BACK filament shell (drawn behind the dust, cooled/dimmed → depth cue
-		// without parallax) + embedded star-cluster knots on the dense cores (Worley cores).
-		if (maxq)
-		{
-			float rb = 1.0 - abs(4.0*starFbm3(Pw*0.62 + 57.0 + hfSeed*0.23, 2, noiseTex, noiseSamp) - 1.0);
-			filBack = pow(smoothstep(0.80, 0.97, rb), 2.0) * region;
-			float w1 = worleyNoise3(P*30.0 + hfSeed*31.0, noiseTex, noiseSamp);
-			float w2 = worleyNoise3(P*52.0 + 77.0, noiseTex, noiseSamp);
-			knots = (pow(smoothstep(0.60, 0.95, w1), 4.0)
-			       + pow(smoothstep(0.64, 0.96, w2), 4.5) * 0.7) * (veilCore*0.9 + region*0.60) * 1.8;
-			// (10) LARGE GAS PIECES — one candidate piece per LOW-frequency Worley cell
-			// (warped + fractally eroded), so the sky gets a handful of BIG discrete
-			// clumps the size of a complex, not confetti. Composited OCCLUDING (mix,
-			// not add) in the shared section → solid, defined silhouettes with a bright
-			// outer rim and a darker textured interior (Eagle pillar / Crab shell look).
-			float3 Pp2 = P + 0.70 * hfQ1 + 0.30 * hfQ2;              // warped piece coords
-			float ero    = starFbm3(Pw*2.6 + 431.0, 2, noiseTex, noiseSamp) - 0.375; // boundary erosion
-			float exist  = smoothstep(0.28, 0.70, starFbm3(Pp2*0.85 + 777.7, 2, noiseTex, noiseSamp) * 1.6);
-			float rimVar = smoothstep(0.25, 0.95, starFbm3(Pw*2.2 + 371.0 + hfSeed*0.6, 2, noiseTex, noiseSamp) * 1.6);
-			float pdA = worleyNoise3(Pp2*2.6 + hfSeed*17.0, noiseTex, noiseSamp) + ero*0.40 - 0.62; // big pieces
-			float pdB = worleyNoise3(Pp2*5.2 + 91.0,        noiseTex, noiseSamp) + ero*0.30 - 0.68; // half-size pieces
-			float pd  = max(pdA, pdB * 0.85);                        // union, big dominates
-			pieceBody = smoothstep(0.000, 0.028, pd) * exist * (0.35 + 0.65 * region);
-			pieceRim  = smoothstep(0.000, 0.018, pd) * (1.0 - smoothstep(0.025, 0.105, pd))
-			          * (0.20 + 1.00 * rimVar);                      // lit vs dark rim sections
-			pieceCore = smoothstep(0.09, 0.24, pd);                  // deep interior
-			pieceHalo = smoothstep(-0.045, -0.008, pd) * (1.0 - smoothstep(0.000, 0.010, pd))
-			          * exist * (0.35 + 0.65 * region);              // dark contrast line outside
-		}
+		float3 w2p = P * 1.10 + 3.1 * Q1 + sd * 1.7 + 41.0;
+		Q2 = float3(starFbm3(w2p,                            2, noiseTex, noiseSamp),
+		            starFbm3(w2p + float3(27.6, 13.2, 8.8),  2, noiseTex, noiseSamp),
+		            starFbm3(w2p + float3(3.3, 21.7, 5.1),   2, noiseTex, noiseSamp)) - 0.5;
 	}
-	else
+	float3 Pw = P + 0.90 * Q1 + 0.42 * Q2;   // advected → flowing structure
+	float3 Pc = P + 0.30 * Q1;               // steadier coord for the cluster gate
+	// Anti-alias weight for the finest layers: fade toward 0 where their screen
+	// footprint nears pixel-Nyquist so they never shimmer on camera rotation.
+	float aaFine = 1.0 - smoothstep(0.30, 0.70, length(fwidth(Pw)) * 520.0);
+
+	// (2) GAS PIECES — the nebula is a set of DISCRETE Worley-cell chunks, not a
+	// diffuse fBm field. pd = signed "depth into the piece" (F1 blob, warped and
+	// fractally eroded). COVERAGE drives BOTH the piece count (cluster-existence
+	// gate) and the piece size (radius threshold). Because F1 rises toward the
+	// saddle between two nearby features, the dilated SKIRTS of close pieces
+	// meet there first → NECKS form and neighbouring pieces connect
+	// automatically as coverage grows, before their cores ever merge.
+	float3 Pp = P + 0.65 * Q1 + 0.30 * Q2;   // warped piece coords (organic silhouettes)
+	float ero = starFbm3(Pw * 2.3 + 33.0, 2, noiseTex, noiseSamp) - 0.375;
+	float thr   = mix(0.72, 0.40, cover);    // piece radius: cover 0 tiny .. 1 huge
+	float exist = smoothstep(mix(0.44, 0.10, cover), mix(0.74, 0.40, cover),
+	                         starFbm3(Pc * 0.60 + sd * 0.60 + 60.0, hifi ? 4 : 3, noiseTex, noiseSamp));
+	float pd = worleyNoise3(Pp * 2.2 + sd * 17.0, noiseTex, noiseSamp) + ero * 0.45 - thr;
+	// Half-size satellite pieces between the big ones — ALL tiers (they carry
+	// most of the visible piece count at mid coverage; one extra tap).
+	pd = max(pd, (worleyNoise3(Pp * 4.4 + 91.0, noiseTex, noiseSamp) + ero * 0.36 - thr - 0.05) * 0.92);
+	pd -= (1.0 - exist) * 0.35;              // gated-out clusters never surface
+	float core   = smoothstep(0.000, 0.055, pd);   // solid chunk body
+	float depth  = smoothstep(0.030, 0.240, pd);   // deep interior (brightens/whitens)
+	float border = smoothstep(-0.018, 0.010, pd) * (1.0 - smoothstep(0.035, 0.095, pd)); // the piece's RIM band
+	float skirt  = smoothstep(-0.110, -0.015, pd); // dilated halo — fuses into necks
+	float neck   = skirt * (1.0 - core);           // connection zone between close pieces
+
+	// (3) SILK — interior schlieren as soft level sets of the PIECE field itself,
+	// so every streak layers along its chunk's own silhouette (fixed
+	// constellations inside the piece, they live and re-randomise with it). The
+	// ridged wisps only feather brightness ALONG each striation, and a hard gate
+	// gives true zero-crossings → arcs, never closed onion rings.
+	float stri = 1.0 - smoothstep(0.012, 0.050, abs(pd - 0.060));
+	stri = max(stri, (1.0 - smoothstep(0.012, 0.050, abs(pd - 0.125))) * 0.85);
+	stri = max(stri, (1.0 - smoothstep(0.012, 0.050, abs(pd - 0.190))) * 0.70);
+	if (maxq)
+		stri = max(stri, (1.0 - smoothstep(0.010, 0.042, abs(pd - 0.255))) * 0.55);
+	float3 Ps = P + 0.55 * Q1;
+	float r1 = 1.0 - abs(4.0 * starFbm3(float3(Ps.x, Ps.y * 0.25, Ps.z) * 3.2 + 210.0 + sd, 2, noiseTex, noiseSamp) - 1.0);
+	float wisp = smoothstep(0.35, 0.95, r1);
+	if (hifi)
 	{
-		// ===== HIGH PERFORMANCE: the same component model from a cheaper field set (2-level
-		// warp + two ridged samples + one dust ridge) — cost parity with the old cheap path. =====
-		float3  w1 = float3(starFbm3(P * 0.6 + 17.0, 3, noiseTex, noiseSamp), starFbm3(P * 0.6 + 53.0, 3, noiseTex, noiseSamp),
-		                starFbm3(P * 0.6 + 91.0, 3, noiseTex, noiseSamp)) - 0.5;
-		float3  Pp = P + w1 * 2.0;
-		float3  w2 = float3(starFbm3(Pp * 1.9 + 211.0, 2, noiseTex, noiseSamp), starFbm3(Pp * 1.9 + 167.0, 2, noiseTex, noiseSamp),
-		                starFbm3(Pp * 1.9 + 123.0, 2, noiseTex, noiseSamp)) - 0.5;
-		Pp += w2 * 0.7;
-		float big    = starFbm3(Pp * 0.7 + 11.0, 4, noiseTex, noiseSamp);
-		float med    = starFbm3(Pp * 1.6 + 27.0, 3, noiseTex, noiseSamp);
-		float baseN  = big * 0.55 + med * 0.55;
-		float region = smoothstep(0.36, 0.66, baseN);
-		veil     = pow(smoothstep(0.40, 0.90, baseN), 1.4);
-		veilCore = smoothstep(0.62, 0.95, baseN);
-		// ISO-CONTOUR filament lines (see the hifi dust note: ridge folds of value noise are
-		// fat at the distribution mode; iso-surfaces on the flank stay thin).
-		float l1 = 1.0 - smoothstep(0.015, 0.055, abs(starFbm3(Pp * 2.4 + 97.0,  3, noiseTex, noiseSamp) - 0.60));
-		float l2 = 1.0 - smoothstep(0.015, 0.050, abs(starFbm3(Pp * 5.2 + 131.0, 2, noiseTex, noiseSamp) - 0.58));
-		float reach  = 0.06 + 0.94 * smoothstep(0.12, 0.55, region + veil * 0.8);
-		grain = clamp(0.62 + 0.7 * (starFbm3(Pp * 8.5 + 59.0, 2, noiseTex, noiseSamp) - 0.35), 0.2, 1.4);
-		fil = (l1 * 0.90 + l2 * 0.55) * reach * 1.5 * smoothstep(0.35, 1.05, grain);
-		ion = l1;
-		float dLn = starFbm3(Pp * 1.3 + 63.0, 2, noiseTex, noiseSamp) - 0.55;
-		tau = (1.0 - smoothstep(0.015, 0.060, abs(dLn))) * 3.0;
-		rim = smoothstep(0.015, 0.045, dLn) * (1.0 - smoothstep(0.060, 0.100, dLn)); // one-sided (see hifi note)
+		float r2 = 1.0 - abs(4.0 * starFbm3(float3(Ps.x * 0.25, Ps.y, Ps.z) * 4.6 + 610.0 + sd, 2, noiseTex, noiseSamp) - 1.0);
+		wisp = max(wisp, smoothstep(0.40, 0.95, r2) * 0.85);
 	}
+	if (maxq)
+	{
+		float r3 = 1.0 - abs(4.0 * starFbm3(float3(Pw.x, Pw.y * 0.30, Pw.z) * 7.3 + 950.0, 2, noiseTex, noiseSamp) - 1.0);
+		wisp = max(wisp, smoothstep(0.45, 0.95, r3) * 0.70 * aaFine);
+	}
+	float silk = clamp(stri * smoothstep(0.10, 0.45, wisp) * (0.35 + 0.65 * wisp) + wisp * 0.28, 0.0, 1.2);
+
+	// (4) CRACKLE CAGE — the filament web: the VEINS (Adern) threading each
+	// piece's interior, densest along the border, and the strands that bridge
+	// the necks. Each scale is TWO independent single-iso families (nebIso)
+	// whose loops CROSS → cellular walls, no concentric nesting. A high-freq
+	// CRINKLE warp (High/Max) wiggles the walls at small scale.
+	float3 Pk = Pw;
+	if (hifi)
+		Pk += (float3(starFbm3(Pw * 7.5 + 331.0, 1, noiseTex, noiseSamp),
+		              starFbm3(Pw * 7.5 + 337.7, 1, noiseTex, noiseSamp),
+		              starFbm3(Pw * 7.5 + 343.3, 1, noiseTex, noiseSamp)) - 0.25) * 0.40;
+	float nC    = starFbm3(Pk * 2.6 + 501.0 + sd * 0.5, 1, noiseTex, noiseSamp);
+	float cage  = nebIso(nC, 0.260, 0.014);
+	cage        = max(cage, nebIso(starFbm3(Pk * 3.1 + 517.7, 1, noiseTex, noiseSamp), 0.245, 0.012) * 0.90);
+	cage       += nebIso(starFbm3(Pk * 5.3 + 622.0, 1, noiseTex, noiseSamp), 0.262, 0.010) * 0.65;
+	if (hifi)
+		cage   += nebIso(starFbm3(Pk * 6.4 + 651.3 + sd * 0.8, 1, noiseTex, noiseSamp), 0.248, 0.009) * 0.55;
+	float cF = 0.0;
+	if (hifi)
+	{
+		cF = nebIso(starFbm3(Pk * 10.7 + 743.0, 1, noiseTex, noiseSamp), 0.255, 0.008);
+		cage += cF * 0.55;
+	}
+	if (maxq)
+		cage += nebIso(starFbm3(Pk * 20.6 + 864.0, 1, noiseTex, noiseSamp), 0.258, 0.007) * 0.48 * aaFine;
+	// TWO independent length-breakers fade walls in/out ALONG their run → broken
+	// arcs and braids instead of closed onion rings around every noise extremum.
+	float lenFade = smoothstep(0.30, 0.72, starFbm3(Pw * 2.6 + 777.0, hifi ? 2 : 1, noiseTex, noiseSamp) * (hifi ? 1.6 : 3.2));
+	lenFade *= smoothstep(0.20, 0.62, starFbm3(Pw * 1.15 + 888.0 + sd * 0.3, hifi ? 2 : 1, noiseTex, noiseSamp) * (hifi ? 1.8 : 3.6));
+	// Fine GRAIN → matte, fibrous texture on gas and filaments (anti-shiny).
+	float grain = clamp(starFbm3(Pw * 6.5 + 400.0, hifi ? 2 : 1, noiseTex, noiseSamp) * (hifi ? 2.0 : 4.0), 0.0, 1.4);
+	cage *= lenFade * (0.62 + 0.48 * grain);
+	// Web reach: veins inside the piece + dense on its rim + strands in the necks.
+	float reach = border * 1.15 + neck * 0.80 + depth * 0.42 + core * 0.10;
+	float fil = cage * reach * (maxq ? 1.60 : (hifi ? 1.50 : 1.30));
+	// Ionization: the strongest wall centres run cream-hot, mostly on the rim.
+	float ion = (1.0 - smoothstep(0.003, 0.010, abs(nC - 0.260))) * smoothstep(0.50, 1.00, border * 1.20 + depth * 0.30);
+
+	// (5) BEADS — Worley corner pockets (far-from-all-features) land at cell
+	// junctions; masked by the cage so they read as knots ON the filaments.
+	float beads = 0.0;
+	if (hifi)  beads  = pow(smoothstep(0.34, 0.16, worleyNoise3(Pk * 26.0 + sd * 31.0, noiseTex, noiseSamp)), 2.0) * 0.9;
+	if (maxq)  beads += pow(smoothstep(0.32, 0.14, worleyNoise3(Pk * 46.0 + 77.0, noiseTex, noiseSamp)), 2.0) * 0.6;
+	beads *= smoothstep(0.30, 0.90, cage) * (border + neck * 0.5 + depth * 0.4) * aaFine;
+
+	// (6) Max extras: dim BACK web across the halo zone (depth cue) + extra
+	// fray strands riding the necks so the connections read fibrous.
+	float back = 0.0, neckFray = 0.0;
+	if (maxq)
+	{
+		back     = nebIso(starFbm3(Pw * 1.7 + 953.0 + sd * 0.7, 1, noiseTex, noiseSamp), 0.252, 0.020) * skirt * lenFade;
+		neckFray = cF * neck * lenFade;
+	}
+
+	// (7) DUST — thin reddening lanes (one-sided backlit rim, see below) + rare
+	// THICK emissive amber concentrations sitting ON the pieces (MIRI's warm dust).
+	float dLn = starFbm3(Pw * 0.85 + 130.0 + sd * 0.9, 2, noiseTex, noiseSamp) - 0.55;
+	float tau = (1.0 - smoothstep(0.015, 0.060, abs(dLn))) * (hifi ? 2.0 : 1.7);
+	// ONE-SIDED edge band (n > iso only): a |n−iso| annulus would cross the noise
+	// distribution's mode on the low side and flood the piece with warm rim.
+	float rim = smoothstep(0.015, 0.045, dLn) * (1.0 - smoothstep(0.060, 0.100, dLn));
+	float dustA = smoothstep(0.72, 0.94, starFbm3(Pc * 0.95 + 313.0 + sd * 0.4, hifi ? 3 : 2, noiseTex, noiseSamp) + border * 0.08);
+	dustA *= 0.45 + 0.55 * smoothstep(0.20, 0.60, core + border);
+	tau += dustA * 1.5;                       // the thick patches also redden the gas behind
 
 	// ---- shared astro composition (all tiers) ----
-	// Region colour field: which complex leans colour-2 vs colour-3 on its filaments.
-	float h = clamp(starFbm3(P * 0.5 + 71.0 + nebulaSeed * 5.0, maxq ? 4 : (hifi ? 3 : 2), noiseTex, noiseSamp) * 1.7 - 0.35, 0.0, 1.0);
+	// Region colour field: which piece leans colour-2 vs colour-3 on its veins.
+	float h = clamp(starFbm3(P * 0.5 + 71.0 + sd * 5.0, maxq ? 4 : (hifi ? 3 : 2), noiseTex, noiseSamp) * 1.7 - 0.35, 0.0, 1.0);
 	float regionW = smoothstep(0.12, 0.88, h);
-	float3 veilCol = nebColor;                                   // cool interior glow (colour 1)
-	float3 filBase = mix(nebColor2, nebColor3, regionW);         // warm cage (colour 2 ↔ 3)
-	float3 hotCol  = filBase * 0.55 + float3(0.45, 0.42, 0.38);  // ionized crests → warm white
-	float3 filCol  = mix(filBase, hotCol, ion * 0.55);
+	float3 veilCol = nebColor;                                   // interior gas colour (colour 1)
+	float3 filBase = mix(nebColor2, nebColor3, regionW);         // vein/rim colours (colour 2 ↔ 3)
+	float3 hotCol  = float3(1.02, 0.96, 0.80) * 0.85 + filBase * 0.25; // ionized crests → cream
+	float3 filCol  = mix(filBase, hotCol, clamp(ion, 0.0, 1.0));
 	// Wavelength-dependent dust extinction: blue is extinguished first, so the lanes
-	// silhouette the veil in brown/amber instead of flat grey (interstellar reddening).
+	// silhouette the gas in brown/amber instead of flat grey (interstellar reddening).
 	float3 Td = exp(-tau * float3(0.55, 1.05, 1.90));
-	// BACK layer: veil (+ Max back shell, pulled toward the veil colour) absorbed by dust.
-	float3 C = veilCol * (veil * 0.60 + veilCore * 0.75)
-	         + float3(0.90, 0.95, 1.05) * (veilCore * veilCore * 0.14)   // hot centre whitens
-	         + mix(veilCol, filBase, 0.40) * (filBack * 0.30);
-	// Large gas pieces (Max): OCCLUDING composite — the piece replaces the background
-	// instead of adding to it, so its silhouette stays solid and defined. Interior is
-	// a darker, grain-textured cool tone; the rim band glows in the cage colours.
-	float3 pInner = (veilCol * 0.62 + filBase * 0.24 + float3(0.07, 0.07, 0.08))
-	              * (0.60 + 0.40 * grain) * (0.60 + 0.40 * pieceCore);
-	float3 pRimC  = (filBase * 1.25 + float3(0.16, 0.08, 0.03)) * mix(1.0, grain, 0.25);
-	float3 pieceCol = mix(pInner, pRimC, clamp(pieceRim, 0.0, 1.0));
-	C = mix(C, pieceCol, clamp(pieceBody, 0.0, 1.0) * 0.92);
-	C *= 1.0 - pieceHalo * 0.55;
-	C *= Td;
+	// High coverage floods the sky with gas — pull the interior gain down a little
+	// so a full nebula sky keeps depth instead of washing to white (0.5 unchanged).
+	float hiCov = 1.0 - 0.40 * smoothstep(0.60, 1.00, cover);
+	// BACK→FRONT: faint halo fog + glowing neck haze (the connections), then the
+	// solid piece — blue silk-layered interior that whitens toward the centre ...
+	float3 C = veilCol * (skirt * (1.0 - core) * 0.06)
+	         + mix(veilCol, filBase, 0.30) * (neck * 0.09);
+	C += mix(veilCol, filBase, 0.55) * (back * 0.22);            // (Max) dim web behind the pieces
+	C += veilCol * hiCov * (core * (0.50 + 0.62 * depth) * (0.45 + 0.80 * silk))
+	   + float3(0.88, 0.94, 1.06) * hiCov * (depth * depth * (0.14 + 0.38 * silk));
+	C *= Td;                                                      // ... absorbed by the dust ...
+	C += (nebColor2 * float3(1.10, 0.72, 0.45)) * (dustA * (0.45 + 0.40 * grain)); // thick amber glow
 	// Backlit dust edges: warm translucent rim where a lane crosses the glow behind it.
-	C += (filBase * 0.55 + float3(0.30, 0.16, 0.06)) * (rim * 0.35 * (veil * 0.9 + veilCore * 0.5));
-	// FRONT: the filament cage threads over the dust (only mildly attenuated), matte-textured.
-	C += filCol * (fil * mix(1.0, grain, 0.25) * mix(1.0, (Td.x + Td.y + Td.z) * (1.0/3.0), 0.25));
-	// Embedded star-cluster knots (Max): tiny blue-white cores on the dense regions.
-	C += (float3(0.85, 0.92, 1.10) + veilCol * 0.25) * knots;
+	C += (filBase * 0.55 + float3(0.30, 0.16, 0.06)) * (rim * 0.30 * (core * 0.9 + depth * 0.5));
+	// The RAND: a soft solid glow under the rim web so the border reads
+	// continuous even where the web momentarily thins.
+	C += filBase * (border * (0.22 + 0.30 * grain));
+	// ... then the VEINS + rim web thread over everything. The filaments are
+	// quasi-OPAQUE (they occlude the glow behind before adding their own
+	// emission) so they stay saturated over the bright interior instead of
+	// washing to pastel — in the JWST image the cage reads solid.
+	C *= 1.0 - clamp(cage * reach, 0.0, 1.0) * 0.45;
+	C += filCol * (fil * (0.80 + 0.20 * grain) * mix(1.0, (Td.x + Td.y + Td.z) * (1.0 / 3.0), 0.25));
+	C += hotCol * (ion * fil * 0.25);                             // extra punch on the hot crests
+	C += hotCol * (beads * 0.55);                                 // junction knots
+	C += filBase * (neckFray * 0.12);                             // (Max) fibrous connection strands
 
-	// Band/rift gating, intensity, then a LUMINANCE-preserving rolloff (the old per-channel
-	// rolloff washed dense areas into pastel — this compresses brightness but keeps the hue).
+	// Band/rift gating, intensity, then a LUMINANCE-preserving rolloff (a per-channel
+	// rolloff would wash dense areas into pastel — this compresses brightness, keeps hue).
 	C *= (band * 1.05 + 0.05) * (1.0 - 0.90 * mwRift(cN, noiseTex, noiseSamp));
-	C *= 2.05 * intensity;
+	C *= 2.05 * intensity * smoothstep(0.0, 0.05, cover);   // smooth kill toward cover = 0
 	float lum = dot(C, float3(0.30, 0.59, 0.11));
 	if (lum > 1e-5) C *= (lum / (1.0 + lum * 0.22)) / lum;
 	float horizon = smoothstep(0.0, 0.16, dir.y);
@@ -2396,7 +2374,7 @@ fragment float4 skyFragment(SkyOut in [[stage_in]],
 		                 noiseTex, noiseSamp) * p.starColor.xyz * p.starColor.w;
 		col += nebula(dir, cdir, p.sunDir.xyz, p.nebulaColor.w, p.nebulaColor.xyz,
 		              p.nebulaColor2.xyz, p.nebulaColor3.xyz, p.cirrus.w, p.nebulaColor2.w,
-		              noiseTex, noiseSamp);
+		              p.neb2.x, noiseTex, noiseSamp);
 		col += applyAurora3D(dir, p.cameraPos.xyz, p.params.z, p.params.w,
 		                     p.auroraColor.xyz, p.auroraColorTop.xyz, p.sunDir.xyz,
 		                     p.cirrus.y, p.cirrus.z, in.position.xy);
@@ -2631,7 +2609,7 @@ struct SkyParams
 	glm::vec4 sunDir      = glm::vec4(0.0f, 1.0f, 0.0f, 0.0f);
 	glm::vec4 sunColor    = glm::vec4(1.0f);
 	glm::vec4 params      = glm::vec4(0.0f); // x = timeOfDay (cloud scroll), y = coverage, z = wall-clock time, w = aurora
-	glm::vec4 nebulaColor = glm::vec4(0.42f, 0.45f, 0.92f, 0.5f); // xyz = colour, w = nebula intensity
+	glm::vec4 nebulaColor = glm::vec4(0.36f, 0.60f, 1.00f, 0.5f); // xyz = colour, w = nebula intensity
 	glm::vec4 auroraColor = glm::vec4(0.25f, 0.95f, 0.50f, 0.6f); // xyz = colour, w = milky-way intensity
 	glm::vec4 wind        = glm::vec4(0.0f); // xyz = horizontal cloud drift (world units / s); w = lightning flash
 	// ── Night-sky / cloud overhaul (mirrors the GL sky uniforms) ──────────────────
@@ -2639,16 +2617,17 @@ struct SkyParams
 	glm::vec4 cloud          = glm::vec4(200.0f, 1.0f, 0.6f, 0.0f);  // height, density, fluffiness, contrailAmount
 	glm::vec4 cloudTint      = glm::vec4(1.0f, 1.0f, 1.0f, 0.0f);    // xyz = tint, w = cirrusAmount
 	glm::vec4 cirrus         = glm::vec4(0.0f, 0.18f, 0.4f, 0.0f);   // cirrusSeed, auroraHeight, auroraFragmentation, nebulaSeed
-	glm::vec4 nebulaColor2   = glm::vec4(0.85f, 0.40f, 1.00f, 1.0f); // xyz = colour 2, w = highFidelity
-	glm::vec4 nebulaColor3   = glm::vec4(1.00f, 0.52f, 0.72f, 0.0f); // xyz = colour 3
+	glm::vec4 nebulaColor2   = glm::vec4(1.00f, 0.60f, 0.28f, 1.0f); // xyz = colour 2, w = nebula quality 0/1/2
+	glm::vec4 nebulaColor3   = glm::vec4(0.90f, 0.30f, 0.16f, 0.0f); // xyz = colour 3
 	glm::vec4 auroraColorTop = glm::vec4(0.62f, 0.26f, 0.95f, 0.0f); // xyz = aurora top colour
 	glm::vec4 starColor      = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f);    // xyz = tint, w = brightness
 	glm::vec4 star           = glm::vec4(1.0f, 0.5f, 0.5f, 1.0f);    // size, sizeVariation, density, glow
-	glm::vec4 star2          = glm::vec4(0.6f, 0.0f, 0.0f, 0.0f);    // twinkle
+	glm::vec4 star2          = glm::vec4(0.6f, 0.0f, 0.0f, 0.0f);    // twinkle, cloudQuality, lowResClouds, rain
+	glm::vec4 neb2           = glm::vec4(0.5f, 0.0f, 0.0f, 0.0f);    // x = nebulaCoverage
 };
-// Byte layout must stay identical to the MSL SkyParams (mat4 + 16×float4): the whole
+// Byte layout must stay identical to the MSL SkyParams (mat4 + 17×float4): the whole
 // struct is uploaded via setFragmentBytes(&p, sizeof(p)). Guard against silent drift.
-static_assert(sizeof(SkyParams) == 64 + 16 * 16, "SkyParams must match the MSL layout (320 bytes)");
+static_assert(sizeof(SkyParams) == 64 + 17 * 16, "SkyParams must match the MSL layout (336 bytes)");
 
 // Remaps the extractor's GL-convention light projection (depth -1..1) to Metal
 // clip space (depth 0..1). Metal NDC y is up like GL, so no y flip here — the
@@ -4280,6 +4259,7 @@ void MetalRenderer::EncodeCloudPrepass(void* cmdBufPtr, const glm::mat4& invView
 	p.starColor      = glm::vec4(env.starColor, env.starBrightness);
 	p.star           = glm::vec4(env.starSize, env.starSizeVariation, env.starDensity, env.starGlow);
 	p.star2          = glm::vec4(env.starTwinkle, (float)env.cloudQuality, 1.0f, 0.0f);
+	p.neb2           = glm::vec4(env.nebulaCoverage, 0.0f, 0.0f, 0.0f);
 	[enc setFragmentBytes:&p length:sizeof(p) atIndex:0];
 	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
 	[enc endEncoding];
@@ -5112,6 +5092,7 @@ void MetalRenderer::EncodeSky(void* renderEncoder, const glm::mat4& invViewProj,
 	p.star2          = glm::vec4(env.starTwinkle, (float)env.cloudQuality,
 	                             (env.lowResClouds && m_cloudColor) ? 1.0f : 0.0f,
 	                             env.rainAmount); // w = rain amount (rainbow)
+	p.neb2           = glm::vec4(env.nebulaCoverage, 0.0f, 0.0f, 0.0f);
 	// Quarter-res cloud buffer (rgb=L, a=T) on slot 2; dummy when unused (must be bound).
 	[enc setFragmentTexture:(__bridge id<MTLTexture>)(m_cloudColor ? m_cloudColor : m_dummyTexture) atIndex:2];
 	[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:2];
