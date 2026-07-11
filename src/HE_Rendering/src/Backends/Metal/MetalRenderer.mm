@@ -1323,7 +1323,8 @@ float3 starField(float3 dir, float3 cdir, float3 sunDir, float time, float milky
 // fades over its short life. Deterministic from the sky clock so it animates smoothly and
 // reproduces in headless captures. Night-only. rate (0..1) scales frequency + concurrency.
 // Mirrors the GL shootingStars().
-float3 shootingStars(float3 dir, float3 sunDir, float time, float rate)
+float3 shootingStars(float3 dir, float3 sunDir, float time, float rate,
+                     float3 starTint, float starBright, float starSize, float starSizeVar)
 {
 	if (rate <= 0.0) return float3(0.0);
 	dir = normalize(dir); sunDir = normalize(sunDir);
@@ -1357,6 +1358,10 @@ float3 shootingStars(float3 dir, float3 sunDir, float time, float rate)
 		// along the great circle AWAY from it (real shower geometry).
 		float  phiS = starHash(seed) * 6.2831853;
 		float  dst  = 0.35 + 0.75 * starHash(seed + 2.1);  // angular distance from the radiant
+		// Meteor size follows the star settings: starSize scales width/head,
+		// starSizeVar spreads individual meteors between small and large.
+		float  mSz  = clamp(starSize, 0.25, 3.0)
+		            * mix(1.0, mix(0.6, 1.8, starHash(seed + 7.7)), clamp(starSizeVar, 0.0, 1.0));
 		float3 p0   = normalize(R * cos(dst) + (Ru * cos(phiS) + Rv * sin(phiS)) * sin(dst));
 		float3 tdir = normalize(p0 * dot(R, p0) - R);      // tangent pointing away from the radiant
 		// Tiny per-meteor tilt so the trails aren't machine-parallel.
@@ -1369,13 +1374,14 @@ float3 shootingStars(float3 dir, float3 sunDir, float time, float rate)
 		float3 seg = tail - head;
 		float  s   = clamp(dot(dir - head, seg) / max(dot(seg, seg), 1e-5), 0.0, 1.0);
 		float  dd  = length(dir - (head + seg * s));
-		float  w      = mix(0.0045, 0.0014, s);                        // taper: wider at the head, thin at the tail
+		float  w      = mix(0.0045, 0.0014, s) * mSz;                  // taper: wider at the head, thin at the tail
 		float  streak = exp(-(dd * dd) / (w * w)) * pow(1.0 - s, 1.6); // brightest at the head, fading down the tail
 		float  dh     = length(dir - head);
-		float  headG  = exp(-(dh * dh) / 0.00006);                     // small sharp head (≈0.45°)
+		float  headG  = exp(-(dh * dh) / (0.00006 * mSz * mSz));       // small sharp head (≈0.45° at size 1)
 		float  life   = smoothstep(0.0, 0.08, t) * (1.0 - smoothstep(0.55, 1.0, t));
-		float3 mcol   = float3(0.78, 0.88, 1.0);                       // cool blue-white meteor
-		col += mcol * ((streak * 1.7 + headG * 1.1) * life);
+		// Colour + brightness follow the star settings (same knobs as starField).
+		float3 mcol   = float3(0.78, 0.88, 1.0) * starTint;            // cool blue-white meteor, user-tinted
+		col += mcol * ((streak * 1.7 + headG * 1.1) * life * starBright);
 	}
 	float horizon = smoothstep(0.0, 0.12, dir.y);
 	return col * night * horizon;
@@ -2425,7 +2431,8 @@ fragment float4 skyFragment(SkyOut in [[stage_in]],
 		                     p.auroraColor.xyz, p.auroraColorTop.xyz, p.sunDir.xyz,
 		                     p.cirrus.y, p.cirrus.z, in.position.xy);
 		col += moonDisk(dir, p.sunDir.xyz, p.sunDir.w > 0.5, p.sunColor.w, moonTex, moonSamp);
-		col += shootingStars(dir, p.sunDir.xyz, p.params.z, p.auroraColorTop.w); // meteors (clouds occlude below)
+		col += shootingStars(dir, p.sunDir.xyz, p.params.z, p.auroraColorTop.w,
+		                     p.starColor.xyz, p.starColor.w, p.star.x, p.star.y); // meteors (clouds occlude below)
 	}
 	// High thin layers first, then the cumulus clouds in front so lower clouds occlude them.
 	col = cirrus(col, dir, p.sunDir.xyz, p.sunColor.xyz, p.cloudTint.w, p.cirrus.x, p.params.z, p.wind.xz);
