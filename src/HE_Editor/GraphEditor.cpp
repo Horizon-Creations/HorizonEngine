@@ -278,6 +278,7 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
 
     // ── Nodes ────────────────────────────────────────────────────────────────
     bool consumed = false;
+    int hoverNodeNow = 0; // topmost node under the cursor (nodes draw back-to-front)
     for (const Drawn& n : nodes)
     {
         const ImVec2 br(n.pos.x + n.size.x, n.pos.y + n.size.y);
@@ -427,6 +428,7 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
 
         const bool overNode = mouse.x >= n.pos.x && mouse.x <= br.x &&
                               mouse.y >= n.pos.y && mouse.y <= br.y;
+        if (overNode) hoverNodeNow = n.id;
 
         // Double-click a node (open a referenced function, …).
         if (interact && overNode && model.onNodeDoubleClick &&
@@ -500,6 +502,28 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
             }
             consumed = true;
         }
+    }
+
+    // ── Hover tooltip (after the cursor rests on a node briefly) ─────────────
+    if (model.nodeTooltip)
+    {
+        const bool idle = interact && st.dragNode == 0 && st.linkSrcNode == 0 && !st.boxSel;
+        if (idle && hoverNodeNow != 0)
+        {
+            if (st.hoverNode != hoverNodeNow) { st.hoverNode = hoverNodeNow; st.hoverTime = 0.0f; }
+            else st.hoverTime += ImGui::GetIO().DeltaTime;
+            if (st.hoverTime > 0.6f)
+            {
+                const std::string tip = model.nodeTooltip(hoverNodeNow);
+                if (!tip.empty())
+                {
+                    ImGui::BeginTooltip();
+                    ImGui::TextUnformatted(tip.c_str());
+                    ImGui::EndTooltip();
+                }
+            }
+        }
+        else { st.hoverNode = 0; st.hoverTime = 0.0f; }
     }
 
     // ── Node move (moves the whole selection) ────────────────────────────────

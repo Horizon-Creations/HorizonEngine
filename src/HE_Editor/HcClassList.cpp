@@ -126,6 +126,98 @@ std::vector<ClassRef> listScenes(ContentManager* cm)
 	return out;
 }
 
+// ── Hover tooltips ────────────────────────────────────────────────────────────
+namespace
+{
+	const char* tooltipTypeName(HorizonCode::PinType t)
+	{
+		using P = HorizonCode::PinType;
+		switch (t)
+		{
+			case P::Float:     return "Float";
+			case P::Bool:      return "Bool";
+			case P::Int:       return "Int";
+			case P::String:    return "String";
+			case P::Vec2:      return "Vec2";
+			case P::Color:     return "Color";
+			case P::Ref:       return "Object";
+			case P::Transform: return "Transform";
+			default:           return "Exec";
+		}
+	}
+
+	// One "  Name: Type[]" line per pin; exec pins draw as "  ▶ Name".
+	void appendPinLines(std::string& out, const std::vector<HorizonCode::PinDesc>& execPins,
+	                    const std::vector<HorizonCode::PinDesc>& dataPins, const char* execFallback)
+	{
+		for (const auto& p : execPins)
+		{
+			out += "  > ";
+			out += (p.name && *p.name) ? p.name : execFallback;
+			out += " (exec)\n";
+		}
+		for (const auto& p : dataPins)
+		{
+			out += "  ";
+			if (p.name && *p.name) { out += p.name; out += ": "; }
+			out += tooltipTypeName(p.type);
+			if (p.isArray) out += "[]";
+			out += '\n';
+		}
+	}
+} // namespace
+
+std::string nodeTooltipText(const HorizonCode::Node& n)
+{
+	using T = HorizonCode::NodeType;
+	std::string out;
+
+	// Description: the static per-type text; an Engine Call names its registry
+	// entry instead (the generic EngineCall blurb says less than the id does).
+	if (n.type == T::EngineCall && !n.s.empty())
+	{
+		if (const HE::api::ApiFn* fn = HE::api::find(n.s))
+		{
+			out += "Engine API call: ";
+			out += fn->category; out += " - "; out += fn->id;
+			out += fn->isExec ? "\nRuns when executed." : "\nPure — evaluated whenever an output is used.";
+		}
+		else { out += "Engine API call: "; out += n.s; out += " (unknown registry id)"; }
+	}
+	else
+	{
+		const char* d = HorizonCode::nodeTooltip(n.type);
+		if (d && *d) out += d;
+	}
+
+	const HorizonCode::NodeSig sig = HorizonCode::signatureOf(n);
+	std::string pins;
+	if (!sig.execIns.empty() || !sig.dataIns.empty())
+	{
+		pins += "Inputs:\n";
+		appendPinLines(pins, sig.execIns, sig.dataIns, "In");
+	}
+	if (!sig.execOuts.empty() || !sig.dataOuts.empty())
+	{
+		pins += "Outputs:\n";
+		appendPinLines(pins, sig.execOuts, sig.dataOuts, "Out");
+	}
+	if (!pins.empty())
+	{
+		if (!out.empty()) out += "\n\n";
+		out += pins;
+	}
+	if (!out.empty() && out.back() == '\n') out.pop_back();
+	return out;
+}
+
+std::string nodeTooltipText(HorizonCode::NodeType t)
+{
+	HorizonCode::Node tmp;
+	tmp.type = t;
+	return nodeTooltipText(tmp);
+}
+
 // ── Shared graph colors ──────────────────────────────────────────────────────
 std::uint32_t pinTypeColor(HorizonCode::PinType t)
 {
@@ -484,7 +576,17 @@ std::string drawEngineApiMenu(const std::string& lowerQuery)
 		{ ImGui::TextDisabled("Engine · %s", fn.category); header = fn.category; }
 		// Unique ImGui id via the stable api id (display names may repeat later).
 		if (ImGui::Selectable((std::string(shown) + "##" + fn.id).c_str())) picked = fn.id;
-		if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", fn.id);
+		if (ImGui::IsItemHovered())
+		{
+			// Same self-documentation as the canvas hover: build the EngineCall
+			// node this pick would create and show its full tooltip.
+			HorizonCode::Node tmp;
+			tmp.type = HorizonCode::NodeType::EngineCall;
+			tmp.s = fn.id; tmp.hasArg = fn.isExec;
+			for (const auto& p : fn.params)  tmp.params.push_back({ p.name, p.type, p.isArray });
+			for (const auto& r : fn.results) tmp.results.push_back({ r.name, r.type, r.isArray });
+			ImGui::SetTooltip("%s", nodeTooltipText(tmp).c_str());
+		}
 	}
 	return picked;
 }

@@ -216,6 +216,9 @@ HE_API NodeSig signatureOf(const Node& n);
 // Static metadata for the editor add-menu (category + display name).
 HE_API const char* nodeDisplayName(NodeType t);
 HE_API const char* nodeCategory(NodeType t);
+// One-or-two-sentence usage description for the editor's hover tooltips
+// (what the node does, what its inputs expect, what comes out).
+HE_API const char* nodeTooltip(NodeType t);
 HE_API const std::vector<NodeType>& nodeRegistry();
 
 struct HE_API Graph

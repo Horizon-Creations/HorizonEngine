@@ -297,6 +297,141 @@ const char* nodeDisplayName(NodeType t)
     }
 }
 
+const char* nodeTooltip(NodeType t)
+{
+    switch (t)
+    {
+        case T::Event:
+            return "Entry point: starts an exec chain when the host fires the named event.\n"
+                   "Events with a payload expose it as a data output.";
+        case T::FunctionEntry:
+            return "Entry of a user-defined function. Its declared inputs appear as data\n"
+                   "outputs here; add a Return node to hand results back to the caller.";
+        case T::FunctionCall:
+            return "Calls a function declared in this graph. Wire its inputs, run it via the\n"
+                   "exec pin, and read the declared results from the data outputs.";
+        case T::FunctionReturn:
+            return "Writes the owning function's results and ends the exec chain.\n"
+                   "One data input per declared result.";
+        case T::Branch:
+            return "If/else: routes execution to True or False depending on the Bool input.";
+        case T::Sequence:
+            return "Runs its exec outputs in order (Then 0, Then 1, …), one after another.";
+        case T::Delay:
+            return "Pauses the exec chain and resumes from Completed after Duration seconds.\n"
+                   "Retriggering while already pending is ignored.";
+        case T::DoOnce:
+            return "Lets execution through only the FIRST time it is reached;\n"
+                   "every later trigger is swallowed.";
+        case T::FlipFlop:
+            return "Alternates between its A and B exec outputs on each trigger.\n"
+                   "The Is A output tells which side just ran.";
+        case T::GetProperty:
+            return "Reads a property of the chosen target element; the value type follows\n"
+                   "the property. Pure — evaluated whenever the output is used.";
+        case T::SetProperty:
+            return "Writes the wired value to a property of the chosen target element\n"
+                   "when executed.";
+        case T::GetVariable:
+            return "Reads a graph variable (persistent per running instance).\n"
+                   "Pure — evaluated whenever the output is used.";
+        case T::SetVariable:
+            return "Writes the wired value to a graph variable when executed.";
+        case T::ShowWidget:
+            return "Makes THIS widget visible (only meaningful inside a widget graph).";
+        case T::HideWidget:
+            return "Hides THIS widget (only meaningful inside a widget graph).";
+        case T::CreateWidget:
+            return "Instantiates the chosen widget asset and outputs its Widget id —\n"
+                   "feed that into Show/Hide/Destroy Widget.";
+        case T::ShowWidgetId:
+            return "Shows the widget identified by the Widget input (from Create Widget).";
+        case T::HideWidgetId:
+            return "Hides the widget identified by the Widget input (from Create Widget).";
+        case T::DestroyWidget:
+            return "Destroys the widget identified by the Widget input; its id becomes invalid.";
+        case T::CreateObject:
+            return "Instantiates the chosen HorizonCode class as a live object and outputs\n"
+                   "a reference to it (its Construct event fires).";
+        case T::DestroyObject:
+            return "Destroys the object referenced by the input (its Destruct event fires);\n"
+                   "the reference becomes invalid.";
+        case T::GetExternal:
+            return "Reads a PUBLIC variable on the referenced instance.\n"
+                   "Target expects an object reference; the output takes the variable's type.";
+        case T::SetExternal:
+            return "Writes a PUBLIC variable on the referenced instance when executed.\n"
+                   "Target expects an object reference.";
+        case T::ConstFloat:  return "Float literal. Edit the value on the node body.";
+        case T::ConstBool:   return "Bool literal. Edit the value on the node body.";
+        case T::ConstInt:    return "Int literal. Edit the value on the node body.";
+        case T::ConstString: return "String literal. Edit the text on the node body.";
+        case T::ConstVec2:   return "Vec2 literal (x, y). Edit the values on the node body.";
+        case T::ConstColor:  return "Color literal (RGBA). Edit the swatch on the node body.";
+        case T::ConstTransform:
+            return "Transform literal: position, rotation (euler degrees) and scale,\n"
+                   "edited on the node body.";
+        case T::Add:      return "A + B (Float).";
+        case T::Subtract: return "A - B (Float).";
+        case T::Multiply: return "A * B (Float).";
+        case T::Divide:   return "A / B (Float). Division by zero yields 0.";
+        case T::Greater:  return "True when A > B.";
+        case T::Less:     return "True when A < B.";
+        case T::Equals:   return "True when A equals B.";
+        case T::And:      return "True when both A and B are true.";
+        case T::Or:       return "True when A or B (or both) is true.";
+        case T::Not:      return "Inverts the Bool input.";
+        case T::Concat:   return "Joins strings A and B into one string.";
+        case T::ToString: return "Converts the input value to its text representation.";
+        case T::Print:
+            return "Writes the input string to the engine log when executed. Debug aid.";
+        case T::BindEvent:
+            return "Subscribes: when the Target instance emits the named event, this\n"
+                   "instance's matching Event node fires.";
+        case T::EmitEvent:
+            return "Broadcasts the named event (with an optional payload) to every\n"
+                   "instance bound to this one via Bind Event.";
+        case T::CallExternal:
+            return "Calls a PUBLIC function on the referenced instance. Target expects an\n"
+                   "object reference; params and results mirror that function's signature.";
+        case T::GetGameInstance:
+            return "Outputs a reference to the app-wide GameInstance — global state and\n"
+                   "functions that outlive scene changes.";
+        case T::GetSelf:
+            return "Outputs a reference to this running instance (e.g. to pass to Bind\n"
+                   "Event or store in a variable).";
+        case T::EngineCall:
+            return "Calls an engine API function (transform, input, scene, math, …).\n"
+                   "Pins mirror the function's parameters and results.";
+        case T::ArrayMake:   return "Outputs a new empty array of the chosen element type.";
+        case T::ArrayLength: return "Outputs the number of elements in the input array.";
+        case T::ArrayGet:
+            return "Outputs the element at Index (0-based). Out-of-range yields the\n"
+                   "element type's default value.";
+        case T::ArrayAdd:
+            return "Outputs a COPY of the input array with Value appended at the end.\n"
+                   "The original array is not modified.";
+        case T::ArraySet:
+            return "Outputs a COPY of the array with the element at Index replaced by Value.";
+        case T::ArrayInsert:
+            return "Outputs a COPY of the array with Value inserted at Index\n"
+                   "(later elements shift right).";
+        case T::ArrayRemove:
+            return "Outputs a COPY of the array with the element at Index removed.";
+        case T::ArrayContains:
+            return "True when the array holds an element equal to Value.";
+        case T::ArrayIndexOf:
+            return "Outputs the index of the first element equal to Value, or -1 if absent.";
+        case T::ForEach:
+            return "Runs Body once per array element (Element + Index data outputs),\n"
+                   "then continues from Done.";
+        case T::IsValid:
+            return "True when the Target reference points to a live instance — the guard\n"
+                   "to run before touching an object that may have been destroyed.";
+        default: return "";
+    }
+}
+
 const char* nodeCategory(NodeType t)
 {
     switch (t)

@@ -1996,6 +1996,10 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 		HcEditorUtil::drawPinDefaultEditor(*n, pin, committed);
 		if (committed) { st.dirty = true; commitEdit(st, ctx); } };
 	m.multiSelect = true; // shift-click / box-select; drag + Delete act on all
+	// Hovering a node shows what it does + its inputs/outputs.
+	m.nodeTooltip = [&st](int id){
+		const HC::Node* n = st.graph.findNode(id);
+		return n ? HcEditorUtil::nodeTooltipText(*n) : std::string(); };
 	// Right-click a node → context menu. When the clicked node is part of a
 	// multi-selection, Delete removes the whole selection.
 	m.drawNodeContextMenu = [&st, &ctx](int nodeId)
@@ -2137,6 +2141,8 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 					if (!isExecPin) nn->propType = dragType; // keep the matched signature
 					wireAt(id, pin); created = id; ImGui::CloseCurrentPopup();
 				}
+				if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip))
+					ImGui::SetTooltip("%s", HcEditorUtil::nodeTooltipText(t).c_str());
 			}
 			if (gh) ImGui::Spacing();
 		}
@@ -2289,6 +2295,8 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 				if (!header) { ImGui::TextDisabled("%s", cat); header = true; }
 				if (ImGui::Selectable(HC::nodeDisplayName(t)))
 				{ created = addGraphNode(st, t, st.geState.addMenuGraphPos); ImGui::CloseCurrentPopup(); }
+				if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip))
+					ImGui::SetTooltip("%s", HcEditorUtil::nodeTooltipText(t).c_str());
 			}
 			if (header) ImGui::Spacing();
 		}
