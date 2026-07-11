@@ -212,17 +212,29 @@ EnvironmentComponent* envOf(HorizonWorld* w)
     return nullptr;
 }
 } // namespace
+// Implementations generated from the HE_ENV_FIELDS_* X-lists (EngineApi.h) —
+// one get/set pair per component field, all with the null-tolerant contract.
 namespace env {
-float getTimeOfDay(Ctx& c)            { const auto* e = envOf(c.world); return e ? e->timeOfDay : 0.0f; }
-void  setTimeOfDay(Ctx& c, float t)   { if (auto* e = envOf(c.world)) e->timeOfDay = t; }
-float getCloudCoverage(Ctx& c)        { const auto* e = envOf(c.world); return e ? e->cloudCoverage : 0.0f; }
-void  setCloudCoverage(Ctx& c, float v){ if (auto* e = envOf(c.world)) e->cloudCoverage = v; }
-float getFogDensity(Ctx& c)           { const auto* e = envOf(c.world); return e ? e->fogDensity : 0.0f; }
-void  setFogDensity(Ctx& c, float v)  { if (auto* e = envOf(c.world)) e->fogDensity = v; }
-float getWindDirection(Ctx& c)        { const auto* e = envOf(c.world); return e ? e->windDirection : 0.0f; }
-void  setWindDirection(Ctx& c, float v){ if (auto* e = envOf(c.world)) e->windDirection = v; }
-float getWindSpeed(Ctx& c)            { const auto* e = envOf(c.world); return e ? e->windSpeed : 0.0f; }
-void  setWindSpeed(Ctx& c, float v)   { if (auto* e = envOf(c.world)) e->windSpeed = v; }
+#define HE_ENV_IMPL_FLOAT(m, Name, disp) \
+	float get##Name(Ctx& c)          { const auto* e = envOf(c.world); return e ? e->m : 0.0f; } \
+	void  set##Name(Ctx& c, float v) { if (auto* e = envOf(c.world)) e->m = v; }
+#define HE_ENV_IMPL_BOOL(m, Name, disp) \
+	bool  get##Name(Ctx& c)          { const auto* e = envOf(c.world); return e && e->m; } \
+	void  set##Name(Ctx& c, bool v)  { if (auto* e = envOf(c.world)) e->m = v; }
+#define HE_ENV_IMPL_INT(m, Name, disp) \
+	int   get##Name(Ctx& c)          { const auto* e = envOf(c.world); return e ? e->m : 0; } \
+	void  set##Name(Ctx& c, int v)   { if (auto* e = envOf(c.world)) e->m = v; }
+#define HE_ENV_IMPL_COLOR(m, Name, disp) \
+	glm::vec3 get##Name(Ctx& c)                     { const auto* e = envOf(c.world); return e ? e->m : glm::vec3(0.0f); } \
+	void      set##Name(Ctx& c, const glm::vec3& v) { if (auto* e = envOf(c.world)) e->m = v; }
+HE_ENV_FIELDS_FLOAT(HE_ENV_IMPL_FLOAT)
+HE_ENV_FIELDS_BOOL(HE_ENV_IMPL_BOOL)
+HE_ENV_FIELDS_INT(HE_ENV_IMPL_INT)
+HE_ENV_FIELDS_COLOR(HE_ENV_IMPL_COLOR)
+#undef HE_ENV_IMPL_FLOAT
+#undef HE_ENV_IMPL_BOOL
+#undef HE_ENV_IMPL_INT
+#undef HE_ENV_IMPL_COLOR
 } // namespace env
 
 // ── Audio ────────────────────────────────────────────────────────────────────
@@ -864,23 +876,36 @@ const std::vector<ApiFn>& registry()
         t.push_back({ "camera.setFov", "Camera", true, {{"degrees", P::Float}}, {}, "HE::api::camera::setFov",
             [](Ctx& c, const VV& a){ camera::setFov(c, aF(a, 0)); return VV{}; } });
 
-        // Environment (sky / fog / wind knobs)
-        auto envGet = [&](const char* id, const char* cpp, float(*fn)(Ctx&)) {
-            t.push_back({ id, "Environment", false, {}, {{"value", P::Float}}, cpp,
-                [fn](Ctx& c, const VV&){ return VV{ Value::ofFloat(fn(c)) }; } }); };
-        auto envSet = [&](const char* id, const char* cpp, void(*fn)(Ctx&, float)) {
-            t.push_back({ id, "Environment", true, {{"value", P::Float}}, {}, cpp,
-                [fn](Ctx& c, const VV& a){ fn(c, aF(a, 0)); return VV{}; } }); };
-        envGet("env.getTimeOfDay",     "HE::api::env::getTimeOfDay",     env::getTimeOfDay);
-        envSet("env.setTimeOfDay",     "HE::api::env::setTimeOfDay",     env::setTimeOfDay);
-        envGet("env.getCloudCoverage", "HE::api::env::getCloudCoverage", env::getCloudCoverage);
-        envSet("env.setCloudCoverage", "HE::api::env::setCloudCoverage", env::setCloudCoverage);
-        envGet("env.getFogDensity",    "HE::api::env::getFogDensity",    env::getFogDensity);
-        envSet("env.setFogDensity",    "HE::api::env::setFogDensity",    env::setFogDensity);
-        envGet("env.getWindDirection", "HE::api::env::getWindDirection", env::getWindDirection);
-        envSet("env.setWindDirection", "HE::api::env::setWindDirection", env::setWindDirection);
-        envGet("env.getWindSpeed",     "HE::api::env::getWindSpeed",     env::getWindSpeed);
-        envSet("env.setWindSpeed",     "HE::api::env::setWindSpeed",     env::setWindSpeed);
+        // Environment — EVERY EnvironmentComponent field, generated from the
+        // HE_ENV_FIELDS_* X-lists in EngineApi.h (get = pure read, set = exec).
+#define HE_ENV_ROW_FLOAT(m, Name, disp) \
+        t.push_back({ "env.get" #Name, "Environment", false, {}, {{"value", P::Float}}, "HE::api::env::get" #Name, \
+            [](Ctx& c, const VV&){ return VV{ Value::ofFloat(env::get##Name(c)) }; } }); \
+        t.push_back({ "env.set" #Name, "Environment", true, {{"value", P::Float}}, {}, "HE::api::env::set" #Name, \
+            [](Ctx& c, const VV& a){ env::set##Name(c, aF(a, 0)); return VV{}; } });
+#define HE_ENV_ROW_BOOL(m, Name, disp) \
+        t.push_back({ "env.get" #Name, "Environment", false, {}, {{"value", P::Bool}}, "HE::api::env::get" #Name, \
+            [](Ctx& c, const VV&){ return VV{ Value::ofBool(env::get##Name(c)) }; } }); \
+        t.push_back({ "env.set" #Name, "Environment", true, {{"value", P::Bool}}, {}, "HE::api::env::set" #Name, \
+            [](Ctx& c, const VV& a){ env::set##Name(c, aB(a, 0)); return VV{}; } });
+#define HE_ENV_ROW_INT(m, Name, disp) \
+        t.push_back({ "env.get" #Name, "Environment", false, {}, {{"value", P::Int}}, "HE::api::env::get" #Name, \
+            [](Ctx& c, const VV&){ return VV{ Value::ofInt(env::get##Name(c)) }; } }); \
+        t.push_back({ "env.set" #Name, "Environment", true, {{"value", P::Int}}, {}, "HE::api::env::set" #Name, \
+            [](Ctx& c, const VV& a){ env::set##Name(c, aI(a, 0)); return VV{}; } });
+#define HE_ENV_ROW_COLOR(m, Name, disp) \
+        t.push_back({ "env.get" #Name, "Environment", false, {}, {{"color", P::Color}}, "HE::api::env::get" #Name, \
+            [](Ctx& c, const VV&){ return VV{ v3(env::get##Name(c)) }; } }); \
+        t.push_back({ "env.set" #Name, "Environment", true, {{"color", P::Color}}, {}, "HE::api::env::set" #Name, \
+            [](Ctx& c, const VV& a){ env::set##Name(c, aV3(a, 0)); return VV{}; } });
+        HE_ENV_FIELDS_FLOAT(HE_ENV_ROW_FLOAT)
+        HE_ENV_FIELDS_BOOL(HE_ENV_ROW_BOOL)
+        HE_ENV_FIELDS_INT(HE_ENV_ROW_INT)
+        HE_ENV_FIELDS_COLOR(HE_ENV_ROW_COLOR)
+#undef HE_ENV_ROW_FLOAT
+#undef HE_ENV_ROW_BOOL
+#undef HE_ENV_ROW_INT
+#undef HE_ENV_ROW_COLOR
 
         // Audio
         t.push_back({ "audio.play", "Audio", true,
@@ -1069,11 +1094,14 @@ const std::vector<ApiFn>& registry()
             { "camera.getPosition", "Get Camera Position" }, { "camera.setPosition", "Set Camera Position" },
             { "camera.getRotation", "Get Camera Rotation" }, { "camera.setRotation", "Set Camera Rotation" },
             { "camera.getFov", "Get Camera FOV" },           { "camera.setFov", "Set Camera FOV" },
-            { "env.getTimeOfDay", "Get Time Of Day" },       { "env.setTimeOfDay", "Set Time Of Day" },
-            { "env.getCloudCoverage", "Get Cloud Coverage" },{ "env.setCloudCoverage", "Set Cloud Coverage" },
-            { "env.getFogDensity", "Get Fog Density" },      { "env.setFogDensity", "Set Fog Density" },
-            { "env.getWindDirection", "Get Wind Direction" },{ "env.setWindDirection", "Set Wind Direction" },
-            { "env.getWindSpeed", "Get Wind Speed" },        { "env.setWindSpeed", "Set Wind Speed" },
+            // Environment display names — generated from the same X-lists as
+            // the functions ("Get "/"Set " + the display string per field).
+#define HE_ENV_NAME_ROW(m, Name, disp) { "env.get" #Name, "Get " disp }, { "env.set" #Name, "Set " disp },
+            HE_ENV_FIELDS_FLOAT(HE_ENV_NAME_ROW)
+            HE_ENV_FIELDS_BOOL(HE_ENV_NAME_ROW)
+            HE_ENV_FIELDS_INT(HE_ENV_NAME_ROW)
+            HE_ENV_FIELDS_COLOR(HE_ENV_NAME_ROW)
+#undef HE_ENV_NAME_ROW
             { "audio.play", "Play Sound" },        { "audio.playAt", "Play Sound At" },
             { "audio.stop", "Stop Sound" },        { "audio.stopAll", "Stop All Sounds" },
             { "audio.isPlaying", "Is Sound Playing" }, { "audio.setBusVolume", "Set Bus Volume" },
