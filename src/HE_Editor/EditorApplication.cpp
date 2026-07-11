@@ -1513,6 +1513,16 @@ void EditorApplication::dumpFrameHeadless()
 			e->nebulaIntensity   = static_cast<float>(envF("HE_DUMP_NEBULA",   e->nebulaIntensity));
 			e->nebulaSeed        = static_cast<float>(envF("HE_DUMP_NEBSEED",  e->nebulaSeed));
 			e->nebulaQuality     = static_cast<int>(envF("HE_DUMP_NEBQUALITY", e->nebulaQuality));
+			// Nebula colours as "r,g,b" (0..1). The loaded scene carries SERIALIZED colours,
+			// so new component defaults never show up in a dump without these overrides.
+			auto envV3 = [](const char* k, glm::vec3 d){
+				const char* v = std::getenv(k); glm::vec3 c;
+				if (v && *v && std::sscanf(v, "%f,%f,%f", &c.x, &c.y, &c.z) == 3) return c;
+				return d;
+			};
+			e->nebulaColor  = envV3("HE_DUMP_NEBCOL1", e->nebulaColor);
+			e->nebulaColor2 = envV3("HE_DUMP_NEBCOL2", e->nebulaColor2);
+			e->nebulaColor3 = envV3("HE_DUMP_NEBCOL3", e->nebulaColor3);
 			e->moonPhase         = static_cast<float>(envF("HE_DUMP_MOONPHASE", e->moonPhase));
 			e->milkyWayIntensity = static_cast<float>(envF("HE_DUMP_MILKYWAY", e->milkyWayIntensity));
 			e->starSizeVariation = static_cast<float>(envF("HE_DUMP_STARVAR",  e->starSizeVariation));
