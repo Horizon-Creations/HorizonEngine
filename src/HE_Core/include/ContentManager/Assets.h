@@ -186,6 +186,15 @@ struct MaterialFunctionAsset : public RuntimeAsset
 	std::string nodeGraphJson;
 };
 
+// A particle emitter authored via the Particle Graph Editor (HE::ParticleGraph):
+// Emitter Output + const/random/math nodes. ParticleSystemComponent references one
+// by UUID (particleAssetId) instead of embedding emitter config inline — the same
+// asset-instead-of-inline-fields move Material made for MaterialComponent.
+struct ParticleGraphAsset : public RuntimeAsset
+{
+	std::string nodeGraphJson;
+};
+
 // A UI widget tree (UMG-style widget editor asset). The JSON is the source of
 // truth (HE::UIWidgetTree round-trips it); the WidgetManager instantiates a live
 // widget from it at runtime (widgets exist outside the entity world).

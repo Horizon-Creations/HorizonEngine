@@ -46,6 +46,9 @@ public:
 	                            const std::vector<glm::mat4>& boneMatrices,
 	                            uint32_t size, float yaw, float pitch, float dist,
 	                            bool showSkeleton = true) override;
+	void* RenderParticlePreview(ContentManager& cm, const HE::UUID& meshId, const HE::UUID& materialId,
+	                            const std::vector<ParticlePreviewInstance>& particles,
+	                            uint32_t size, float yaw, float pitch, float dist) override;
 	void  InvalidateMesh    (const HE::UUID& meshId)     override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
 	void  SetSSAOSettings(const SSAOSettings& settings) override;
@@ -227,6 +230,15 @@ private:
 	// pipeline targets the backbuffer scene, not an arbitrary offscreen FBO).
 	unsigned int m_skelPreviewLineProgram = 0, m_skelPreviewLineVAO = 0, m_skelPreviewLineVBO = 0;
 	int          m_uSkelPvLineMVP = -1;
+
+	// Particle-preview target (RenderParticlePreview) — own dedicated FBO; camera-
+	// facing billboard quads via gl_VertexID (no per-vertex buffer, matching the
+	// fullscreen-tri convention used elsewhere in this file), one dynamic instance
+	// buffer of {pos3,size1,color3,alpha1} re-uploaded every call.
+	unsigned int m_particlePreviewFBO = 0, m_particlePreviewColor = 0, m_particlePreviewDepth = 0;
+	int          m_particlePreviewSize = 0;
+	unsigned int m_particlePreviewProgram = 0, m_particlePreviewInstVBO = 0, m_particlePreviewVAO = 0;
+	int          m_uPPvViewProj = -1, m_uPPvCamRight = -1, m_uPPvCamUp = -1, m_uPPvHasTex = -1;
 
 	unsigned int getOrBuildMaterialProgram(uint64_t key, const std::string& fragGlsl,
 	                                       const std::string& vertBody = {},

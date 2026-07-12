@@ -224,15 +224,16 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 	{
 		if (!ps.visible) continue; // hidden (e.g. a preloaded zone)
 		if (ps.particles.empty()) continue;
-		const HE::UUID meshId = (ps.meshAssetId == HE::UUID{}) ? HE::kDefaultQuadMeshId : ps.meshAssetId;
+		const HE::ParticleEmitterConfig& config = ps.resolvedConfig; // (re)resolved by ParticleSystem::update
+		const HE::UUID meshId = (config.meshAssetId == HE::UUID{}) ? HE::kDefaultQuadMeshId : config.meshAssetId;
 		pin.reserve(pin.size() + ps.particles.size());
 		for (const Particle& p : ps.particles)
 		{
 			if (p.lifetime <= 0.0f) continue;
 			const float t01  = 1.0f - p.lifetime / p.maxLifetime;  // 0=born, 1=dead
-			const float size = ps.startSize + (ps.endSize - ps.startSize) * t01;
+			const float size = config.startSize + (config.endSize - config.startSize) * t01;
 			if (size <= 0.0f) continue;
-			pin.push_back({ p.position, glm::vec3(0.0f), size, meshId, ps.materialAssetId,
+			pin.push_back({ p.position, glm::vec3(0.0f), size, meshId, config.materialAssetId,
 			                static_cast<uint32_t>(e), BillboardKind::Camera });
 		}
 	}

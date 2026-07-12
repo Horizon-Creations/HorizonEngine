@@ -29,6 +29,18 @@ struct EditorCameraOverride
     bool      orthographic = false;
 };
 
+// One fully-resolved particle for RenderParticlePreview — position/size/color/
+// alpha already interpolated over the particle's lifetime by the caller (the
+// Particle Graph Editor, which owns the live scratch simulation via
+// ParticleSystem::stepPool). The renderer just draws camera-facing billboards.
+struct ParticlePreviewInstance
+{
+    glm::vec3 position;
+    float     size  = 0.0f;
+    glm::vec3 color = glm::vec3(1.0f);
+    float     alpha = 1.0f;
+};
+
 // ─── IRenderer ────────────────────────────────────────────────────────────────
 // Pure interface — lives in HorizonCore so Application can hold a renderer
 // without creating a circular dependency with HorizonRendering.
@@ -339,6 +351,23 @@ public:
                                         const std::vector<glm::mat4>& /*boneMatrices*/,
                                         uint32_t /*size*/, float /*yaw*/, float /*pitch*/, float /*dist*/,
                                         bool /*showSkeleton*/ = true)
+    { return nullptr; }
+
+    // ── Particle system preview ────────────────────────────────────────────
+    // Render a live-simulated particle pool into a small dedicated offscreen
+    // target — same conventions as RenderMaterialPreview/RenderSkeletalPreview.
+    // The Particle Graph Editor owns the actual simulation (ParticleSystem::
+    // stepPool, HE_Scene, has no business living in the renderer) and hands
+    // over one fully-resolved instance per live particle each frame; the mesh
+    // is typically the default billboard quad unless the graph's Emitter
+    // Output references one. Camera auto-frames around the particles' bounds
+    // (yaw/pitch orbit, dist scales that bound — same as RenderSkeletalPreview,
+    // since a cloud's extent varies wildly with velocity/gravity, unlike
+    // Material's fixed-size primitives).
+    virtual void* RenderParticlePreview(class ContentManager& /*cm*/, const HE::UUID& /*meshId*/,
+                                        const HE::UUID& /*materialId*/,
+                                        const std::vector<ParticlePreviewInstance>& /*particles*/,
+                                        uint32_t /*size*/, float /*yaw*/, float /*pitch*/, float /*dist*/)
     { return nullptr; }
 
     // Drop cached GPU buffers for a mesh so ResolveMesh re-uploads from the

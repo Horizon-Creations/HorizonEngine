@@ -309,6 +309,13 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 			a.json.assign(reinterpret_cast<const char*>(c->data.data()), c->data.size());
 		handle = m_inputMappingAssets.insert(std::move(a)); break;
 	}
+	case HE::AssetType::ParticleSystem:
+	{
+		ParticleGraphAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_PTGR))
+			a.nodeGraphJson.assign(reinterpret_cast<const char*>(c->data.data()), c->data.size());
+		handle = m_particleGraphAssets.insert(std::move(a)); break;
+	}
 	case HE::AssetType::Audio:
 	{
 		AudioAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
@@ -940,6 +947,12 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 			w.addChunk(HAsset::CHUNK_IMAP, a.json.data(), a.json.size());
 		break;
 	}
+	case HE::AssetType::ParticleSystem:
+	{
+		auto& a = static_cast<ParticleGraphAsset&>(asset);
+		w.addChunk(HAsset::CHUNK_PTGR, a.nodeGraphJson.data(), a.nodeGraphJson.size());
+		break;
+	}
 	case HE::AssetType::Audio:
 	{
 		auto& a = static_cast<AudioAsset&>(asset);
@@ -1079,6 +1092,14 @@ InputMappingContextAsset* ContentManager::getInputMappingContextMutable(HE::UUID
 	InputMappingContextAsset* a = m_inputMappingAssets.get(it->second);
 	return (a && a->id == id) ? a : nullptr; // reject wrong-type aliasing
 }
+const ParticleGraphAsset* ContentManager::getParticleGraph(HE::UUID id) const { return lookupAsset(m_handleToUUID, m_particleGraphAssets, id); }
+ParticleGraphAsset* ContentManager::getParticleGraphMutable(HE::UUID id)
+{
+	auto it = m_handleToUUID.find(id);
+	if (it == m_handleToUUID.end()) return nullptr;
+	ParticleGraphAsset* a = m_particleGraphAssets.get(it->second);
+	return (a && a->id == id) ? a : nullptr; // reject wrong-type aliasing
+}
 const ShaderAsset*        ContentManager::getShader(HE::UUID id) const        { return lookupAsset(m_handleToUUID, m_shaderAssets, id); }
 const PrefabAsset*        ContentManager::getPrefab(HE::UUID id) const        { return lookupAsset(m_handleToUUID, m_prefabAssets, id); }
 const AnimationClipAsset*      ContentManager::getAnimationClip(HE::UUID id) const      { return lookupAsset(m_handleToUUID, m_animClipAssets,     id); }
@@ -1175,6 +1196,7 @@ HE::UUID ContentManager::registerWidget(UIWidgetAsset asset) { return registerRu
 HE::UUID ContentManager::registerHorizonCodeClass(HorizonCodeClassAsset asset) { return registerRuntimeAsset(m_hcClassAssets, std::move(asset), HE::AssetType::HorizonCodeClass); }
 HE::UUID ContentManager::registerInputAction(InputActionAsset asset)                 { return registerRuntimeAsset(m_inputActionAssets,  std::move(asset), HE::AssetType::InputAction); }
 HE::UUID ContentManager::registerInputMappingContext(InputMappingContextAsset asset) { return registerRuntimeAsset(m_inputMappingAssets, std::move(asset), HE::AssetType::InputMappingContext); }
+HE::UUID ContentManager::registerParticleGraph(ParticleGraphAsset asset) { return registerRuntimeAsset(m_particleGraphAssets, std::move(asset), HE::AssetType::ParticleSystem); }
 HE::UUID ContentManager::registerAnimationClip(AnimationClipAsset asset)       { return registerRuntimeAsset(m_animClipAssets,     std::move(asset), HE::AssetType::AnimationClip);     }
 HE::UUID ContentManager::registerPropertyAnimClip(PropertyAnimClipAsset asset) { return registerRuntimeAsset(m_propAnimClipAssets, std::move(asset), HE::AssetType::PropertyAnimClip); }
 
