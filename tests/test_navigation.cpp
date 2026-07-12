@@ -4,7 +4,9 @@
 #include <HorizonScene/Components/NavMeshComponent.h>
 #include <HorizonScene/Components/NavAgentComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
+#include <DebugDraw/DebugDraw.h>
 #include <glm/glm.hpp>
+#include <cmath>
 
 // Build a flat 10×10 floor in the XZ plane (Y=0) for nav tests.
 // Vertices: 4 corners; triangles: 2 covering the quad.
@@ -116,4 +118,35 @@ TEST_CASE("NavigationSystem::update does not move agent when moving=false")
 
     const auto& updTc = world.registry().get<TransformComponent>(agentE);
     CHECK(updTc.position.x == doctest::Approx(0.0f).epsilon(0.01f));
+}
+
+TEST_CASE("NavigationSystem::extractNavMeshWireframe is empty when not baked")
+{
+    NavMeshComponent nmc;
+    DebugDrawBuffer dbg;
+    NavigationSystem::extractNavMeshWireframe(nmc, dbg);
+    CHECK(dbg.lines().empty());
+}
+
+TEST_CASE("NavigationSystem::extractNavMeshWireframe emits lines after a successful bake")
+{
+    NavMeshComponent nmc;
+    nmc.geometry = makeFlatFloor();
+    REQUIRE(NavigationSystem::bake(nmc));
+
+    DebugDrawBuffer dbg;
+    NavigationSystem::extractNavMeshWireframe(nmc, dbg);
+    CHECK(!dbg.lines().empty());
+
+    // Every emitted segment should stay close to the flat floor's Y=0 plane
+    // (Recast snaps the walkable surface to the voxel grid, so it is not
+    // exactly 0 — within a couple of cellHeight steps is the right bound)
+    // and within the floor's XZ footprint (half=5, generous margin).
+    for (const auto& l : dbg.lines())
+    {
+        CHECK(std::abs(l.start.y) < nmc.config.cellHeight * 3.0f);
+        CHECK(std::abs(l.end.y)   < nmc.config.cellHeight * 3.0f);
+        CHECK(std::abs(l.start.x) < 6.0f);
+        CHECK(std::abs(l.start.z) < 6.0f);
+    }
 }

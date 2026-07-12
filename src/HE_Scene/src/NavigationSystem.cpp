@@ -9,6 +9,8 @@
 #include <DetourNavMeshBuilder.h>
 #include <DetourNavMeshQuery.h>
 
+#include <DebugDraw/DebugDraw.h>
+
 #include <algorithm>
 #include <cstring>
 #include <cmath>
@@ -257,6 +259,35 @@ void NavigationSystem::update(HorizonWorld& world, float dt)
             const glm::vec3 dir = diff / dist;
             tc.position += dir * agent.speed * dt;
             tc.dirty = true;
+        }
+    }
+}
+
+// ── Debug visualization ────────────────────────────────────────────────────
+void NavigationSystem::extractNavMeshWireframe(const NavMeshComponent& nmc, DebugDrawBuffer& out,
+                                               const glm::vec3& color)
+{
+    const dtNavMesh* mesh = nmc.navMesh.get();
+    if (!mesh) return;
+
+    for (int ti = 0; ti < mesh->getMaxTiles(); ++ti)
+    {
+        const dtMeshTile* tile = mesh->getTile(ti);
+        if (!tile || !tile->header) continue;
+
+        for (int pi = 0; pi < tile->header->polyCount; ++pi)
+        {
+            const dtPoly& poly = tile->polys[pi];
+            if (poly.getType() == DT_POLYTYPE_OFFMESH_CONNECTION) continue;
+
+            for (int vi = 0; vi < poly.vertCount; ++vi)
+            {
+                const int v0 = poly.verts[vi];
+                const int v1 = poly.verts[(vi + 1) % poly.vertCount];
+                const glm::vec3 a(tile->verts[v0 * 3 + 0], tile->verts[v0 * 3 + 1], tile->verts[v0 * 3 + 2]);
+                const glm::vec3 b(tile->verts[v1 * 3 + 0], tile->verts[v1 * 3 + 1], tile->verts[v1 * 3 + 2]);
+                out.line(a, b, color);
+            }
         }
     }
 }
