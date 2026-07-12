@@ -42,6 +42,10 @@ public:
 	void* RenderMaterialPreview(ContentManager& cm, const HE::UUID& materialId,
 	                            uint32_t size, float yaw, float pitch, float dist,
 	                            int shape = 0) override;
+	void* RenderSkeletalPreview(ContentManager& cm, const HE::UUID& meshId,
+	                            const std::vector<glm::mat4>& boneMatrices,
+	                            uint32_t size, float yaw, float pitch, float dist,
+	                            bool showSkeleton = true) override;
 	void  InvalidateMesh    (const HE::UUID& meshId)     override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
 	void  SetSSAOSettings(const SSAOSettings& settings) override;
@@ -206,6 +210,24 @@ private:
 	bool         m_matLightUploadedThisFrame = false;
 	float        m_lastMatParams[64] = { 0 };
 	bool         m_haveMatParams = false;
+
+	// Skeletal-mesh-preview target (RenderSkeletalPreview) — own dedicated FBO,
+	// independent of both the main viewport and the material-preview target
+	// (different vertex layout/program, may be a different size). Deliberately a
+	// MINIMAL self-contained skinning shader (fixed sun+ambient, no shadow/SSAO/
+	// fog/sky-env) rather than the full scene-integrated m_skinnedProgram — same
+	// "isolated preview, own tiny lighting model" idea as the material preview.
+	unsigned int m_skelPreviewFBO = 0, m_skelPreviewColor = 0, m_skelPreviewDepth = 0;
+	int          m_skelPreviewSize = 0;
+	unsigned int m_skelPreviewProgram = 0;
+	int          m_uSkelPvMVP = -1, m_uSkelPvModel = -1, m_uSkelPvBones = -1;
+	int          m_uSkelPvColor = -1, m_uSkelPvHasTex = -1;
+	// Simple immediate-mode line pass for the bone overlay, drawn into the same
+	// target right after the skinned mesh (own tiny program — DebugDrawBuffer's
+	// pipeline targets the backbuffer scene, not an arbitrary offscreen FBO).
+	unsigned int m_skelPreviewLineProgram = 0, m_skelPreviewLineVAO = 0, m_skelPreviewLineVBO = 0;
+	int          m_uSkelPvLineMVP = -1;
+
 	unsigned int getOrBuildMaterialProgram(uint64_t key, const std::string& fragGlsl,
 	                                       const std::string& vertBody = {},
 	                                       const MaterialShaderVariant* precompiled = nullptr);

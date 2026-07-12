@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp> // glm::translate (shaderc test mesh)
+#include <glm/gtc/type_ptr.hpp>         // glm::make_mat4 (skeletal-preview bone overlay)
 #include <simd/simd.h>
 
 #import <Metal/Metal.h>
@@ -3990,6 +3991,270 @@ void* MetalRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& m
 		}
 	}
 	return m_previewColorTex; // id<MTLTexture> for ImGui::Image
+}
+
+void* MetalRenderer::RenderSkeletalPreview(ContentManager& cm, const HE::UUID& meshId,
+                                           const std::vector<glm::mat4>& boneMatrices,
+                                           uint32_t size, float yaw, float pitch, float dist,
+                                           bool showSkeleton)
+{
+	const int S = std::clamp(static_cast<int>(size), 32, 1024);
+	if (!m_contentManager) m_contentManager = &cm;
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)m_commandQueue;
+	if (!device || !queue) return nullptr;
+
+	const GpuSkeletalMesh* smesh = ResolveSkeletalMesh(meshId);
+	if (!smesh) return nullptr;
+
+	// ── Lazy minimal skinning pipeline — own fixed sun+ambient lighting (no
+	// shadow/SSAO/fog/sky-env), same "isolated preview" idea as the material
+	// preview. Raw-buffer-indexed (no [[stage_in]]), matching skinnedVertex.
+	if (!m_skelPreviewPipeline)
+	{
+		@autoreleasepool
+		{
+			NSError* error = nil;
+			NSString* src = @R"(
+#include <metal_stdlib>
+using namespace metal;
+struct VertexIn { packed_float3 position; packed_float3 normal; packed_float2 uv; };
+struct Uniforms { float4x4 mvp; float4x4 model; float4 color; float4 flags; float4 pbr; };
+struct VOut { float4 position [[position]]; float3 normal; float2 uv; };
+
+vertex VOut skelPreviewVertex(uint vid [[vertex_id]],
+                               const device VertexIn* verts       [[buffer(0)]],
+                               constant Uniforms&      u          [[buffer(1)]],
+                               const device uint4*     boneIds     [[buffer(2)]],
+                               const device float4*    boneWeights [[buffer(3)]],
+                               constant float4x4*      boneMats    [[buffer(4)]])
+{
+    uint4  ids  = boneIds[vid];
+    float4 wgts = boneWeights[vid];
+    float4x4 skin = wgts.x * boneMats[ids.x] + wgts.y * boneMats[ids.y]
+                  + wgts.z * boneMats[ids.z] + wgts.w * boneMats[ids.w];
+    float4 skinnedPos = skin * float4(float3(verts[vid].position), 1.0);
+    float3x3 m3 = float3x3(u.model[0].xyz, u.model[1].xyz, u.model[2].xyz);
+    float3x3 s3 = float3x3(skin[0].xyz,    skin[1].xyz,    skin[2].xyz);
+    VOut o;
+    o.position = u.mvp * skinnedPos;
+    o.normal   = normalize(m3 * (s3 * float3(verts[vid].normal)));
+    o.uv       = float2(verts[vid].uv);
+    return o;
+}
+
+fragment float4 skelPreviewFragment(VOut in [[stage_in]],
+                                     constant Uniforms& u [[buffer(1)]],
+                                     texture2d<float> tex [[texture(0)]],
+                                     sampler samp [[sampler(0)]])
+{
+    float3 N = normalize(in.normal);
+    float3 L = normalize(float3(0.45, 0.75, 0.55));
+    float diff = max(dot(N, L), 0.0);
+    float3 albedo = u.flags.x > 0.5 ? tex.sample(samp, in.uv).rgb * u.color.rgb : u.color.rgb;
+    return float4(albedo * (0.35 + 0.65 * diff), 1.0);
+}
+)";
+			id<MTLLibrary> lib = [device newLibraryWithSource:src options:nil error:&error];
+			if (lib)
+			{
+				MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
+				desc.vertexFunction   = [lib newFunctionWithName:@"skelPreviewVertex"];
+				desc.fragmentFunction = [lib newFunctionWithName:@"skelPreviewFragment"];
+				desc.colorAttachments[0].pixelFormat = kSceneColorFormat;
+				desc.depthAttachmentPixelFormat      = kDepthFormat;
+				id<MTLRenderPipelineState> pso = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+				if (pso) m_skelPreviewPipeline = (void*)CFBridgingRetain(pso);
+				else
+					Logger::Log(Logger::LogLevel::Error,
+						(std::string("MetalRenderer: skeletal-preview pipeline creation failed: ")
+							+ (error ? [[error localizedDescription] UTF8String] : "unknown")).c_str());
+			}
+			else
+				Logger::Log(Logger::LogLevel::Error, "MetalRenderer: skeletal-preview shader compile failed");
+		}
+	}
+	if (!m_skelPreviewPipeline) return nullptr;
+
+	// ── Lazy / resized target: RGBA16F color (same format as m_debugLinePipeline
+	// expects, so the bone overlay below can reuse it verbatim) + depth.
+	if (!m_skelPreviewColorTex || m_skelPreviewSize != S)
+	{
+		if (m_skelPreviewColorTex) { CFBridgingRelease(m_skelPreviewColorTex); m_skelPreviewColorTex = nullptr; }
+		if (m_skelPreviewDepthTex) { CFBridgingRelease(m_skelPreviewDepthTex); m_skelPreviewDepthTex = nullptr; }
+		MTLTextureDescriptor* cd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kSceneColorFormat
+			width:S height:S mipmapped:NO];
+		cd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+		cd.storageMode = MTLStorageModePrivate;
+		m_skelPreviewColorTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:cd]);
+		MTLTextureDescriptor* dd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kDepthFormat
+			width:S height:S mipmapped:NO];
+		dd.usage = MTLTextureUsageRenderTarget; dd.storageMode = MTLStorageModePrivate;
+		m_skelPreviewDepthTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:dd]);
+		m_skelPreviewSize = S;
+	}
+	id<MTLTexture> colorTex = (__bridge id<MTLTexture>)m_skelPreviewColorTex;
+
+	MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+	rp.colorAttachments[0].texture     = colorTex;
+	rp.colorAttachments[0].loadAction  = MTLLoadActionClear;
+	rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+	rp.colorAttachments[0].clearColor  = MTLClearColorMake(0.0, 0.0, 0.0, 0.0); // transparent
+	rp.depthAttachment.texture     = (__bridge id<MTLTexture>)m_skelPreviewDepthTex;
+	rp.depthAttachment.loadAction  = MTLLoadActionClear;
+	rp.depthAttachment.storeAction = MTLStoreActionDontCare;
+	rp.depthAttachment.clearDepth  = 1.0;
+
+	id<MTLCommandBuffer> cb = [queue commandBuffer];
+	id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+	[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_skelPreviewPipeline];
+	[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
+
+	// ── Orbit camera auto-framed around the mesh's local bounds (arbitrary
+	// meshes vary in size/pivot, unlike the material preview's fixed unit shapes).
+	const HE::AABB& b = smesh->localBounds;
+	const glm::vec3 center = b.isValid() ? (b.min + b.max) * 0.5f : glm::vec3(0.0f);
+	const float extent = b.isValid() ? glm::length(b.max - b.min) * 0.5f : 1.0f;
+	const float camDist = std::max(0.05f, dist) * std::max(extent, 0.05f);
+	const float cp = std::cos(pitch), sp = std::sin(pitch);
+	const glm::vec3 camPos = center + glm::vec3(std::sin(yaw) * cp, sp, std::cos(yaw) * cp) * camDist;
+	const glm::mat4 view = glm::lookAt(camPos, center, glm::vec3(0.0f, 1.0f, 0.0f));
+	const glm::mat4 proj = glm::perspective(glm::radians(35.0f), 1.0f, 0.01f, camDist * 20.0f + 10.0f);
+	const glm::mat4 model(1.0f);
+
+	UnlitUniforms u;
+	u.mvp   = proj * view * model;
+	u.model = model;
+	u.color = glm::vec4(0.75f, 0.75f, 0.75f, 1.0f);
+	u.flags = glm::vec4(smesh->texture ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+	u.pbr   = glm::vec4(0.0f);
+
+	constexpr int kMaxBones = 128;
+	std::vector<glm::mat4> boneScratch(kMaxBones, glm::mat4(1.0f));
+	const int boneCount = static_cast<int>(std::min(boneMatrices.size(), static_cast<size_t>(kMaxBones)));
+	if (boneCount > 0) std::copy_n(boneMatrices.begin(), boneCount, boneScratch.begin());
+	id<MTLBuffer> boneBuf = [device newBufferWithBytes:boneScratch.data()
+	                                            length:kMaxBones * sizeof(glm::mat4)
+	                                           options:MTLResourceStorageModeShared];
+
+	[enc setVertexBuffer:(__bridge id<MTLBuffer>)smesh->vertexBuf  offset:0 atIndex:0];
+	[enc setVertexBytes:&u length:sizeof(u) atIndex:1];
+	[enc setVertexBuffer:(__bridge id<MTLBuffer>)smesh->boneIdBuf  offset:0 atIndex:2];
+	[enc setVertexBuffer:(__bridge id<MTLBuffer>)smesh->boneWgtBuf offset:0 atIndex:3];
+	[enc setVertexBuffer:boneBuf                                   offset:0 atIndex:4];
+	[enc setFragmentBytes:&u length:sizeof(u) atIndex:1];
+	[enc setFragmentTexture:(__bridge id<MTLTexture>)(smesh->texture ? smesh->texture : m_dummyTexture) atIndex:0];
+	[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
+	[enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+	                indexCount:(NSUInteger)smesh->indexCount
+	                 indexType:MTLIndexTypeUInt32
+	               indexBuffer:(__bridge id<MTLBuffer>)smesh->indexBuf
+	         indexBufferOffset:0];
+
+	// ── Bone overlay: joint markers + parent→child segments, reusing the
+	// existing debug-line pipeline verbatim (same RGBA16F/depth pixel formats).
+	// World joint xform = boneMatrix * inverse(inverseBindMatrix), since
+	// boneMatrix is defined as globalJointXform * invBind (composeBoneMatrices).
+	if (showSkeleton && m_debugLinePipeline)
+	{
+		if (const SkeletalMeshAsset* asset = m_contentManager->getSkeletalMesh(meshId))
+		{
+			std::vector<glm::vec3> jointWorld(asset->skeleton.size(), glm::vec3(0.0f));
+			for (size_t i = 0; i < asset->skeleton.size(); ++i)
+			{
+				const glm::mat4 invBind = glm::make_mat4(asset->skeleton[i].inverseBindMatrix.data());
+				const glm::mat4 world =
+					(i < boneScratch.size() ? boneScratch[i] : glm::mat4(1.0f)) * glm::inverse(invBind);
+				jointWorld[i] = glm::vec3(world[3]);
+			}
+
+			std::vector<float> lineVerts; // pos3 + color3 per vertex
+			const glm::vec3 jointColor(1.0f, 0.85f, 0.15f), boneColor(0.2f, 0.9f, 1.0f);
+			auto pushVert = [&](const glm::vec3& p, const glm::vec3& c) {
+				lineVerts.insert(lineVerts.end(), { p.x, p.y, p.z, c.x, c.y, c.z });
+			};
+			const float markerSize = std::max(extent * 0.015f, 0.005f);
+			for (size_t i = 0; i < asset->skeleton.size(); ++i)
+			{
+				const glm::vec3 p = jointWorld[i];
+				pushVert(p - glm::vec3(markerSize, 0, 0), jointColor); pushVert(p + glm::vec3(markerSize, 0, 0), jointColor);
+				pushVert(p - glm::vec3(0, markerSize, 0), jointColor); pushVert(p + glm::vec3(0, markerSize, 0), jointColor);
+				pushVert(p - glm::vec3(0, 0, markerSize), jointColor); pushVert(p + glm::vec3(0, 0, markerSize), jointColor);
+
+				const int32_t parent = asset->skeleton[i].parent;
+				if (parent >= 0 && static_cast<size_t>(parent) < jointWorld.size())
+				{
+					pushVert(jointWorld[parent], boneColor);
+					pushVert(p, boneColor);
+				}
+			}
+
+			if (!lineVerts.empty())
+			{
+				id<MTLBuffer> lineBuf = [device newBufferWithBytes:lineVerts.data()
+				                                             length:lineVerts.size() * sizeof(float)
+				                                            options:MTLResourceStorageModeShared];
+				const glm::mat4 lineMvp = u.mvp; // same camera — preview-local, no scene NDC clip-fix needed
+				[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_debugLinePipeline];
+				[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
+				[enc setVertexBuffer:lineBuf offset:0 atIndex:0];
+				[enc setVertexBytes:&lineMvp length:sizeof(lineMvp) atIndex:1];
+				[enc drawPrimitives:MTLPrimitiveTypeLine vertexStart:0 vertexCount:(NSUInteger)(lineVerts.size() / 6)];
+			}
+		}
+	}
+
+	[enc endEncoding];
+
+	// Headless witness (HE_SKEL_PREVIEW_DUMP=path) — same blit+half-float readback
+	// convention as RenderMaterialPreview.
+	const char* dp = std::getenv("HE_SKEL_PREVIEW_DUMP");
+	id<MTLTexture> staging = nil;
+	if (dp && *dp)
+	{
+		MTLTextureDescriptor* sd2 = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kSceneColorFormat
+			width:S height:S mipmapped:NO];
+		sd2.storageMode = MTLStorageModeManaged; sd2.usage = MTLTextureUsageShaderRead;
+		staging = [device newTextureWithDescriptor:sd2];
+		id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+		[blit copyFromTexture:colorTex sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0)
+		           sourceSize:MTLSizeMake(S,S,1) toTexture:staging destinationSlice:0 destinationLevel:0
+		    destinationOrigin:MTLOriginMake(0,0,0)];
+		[blit synchronizeResource:staging];
+		[blit endEncoding];
+	}
+	[cb commit];
+	[cb waitUntilCompleted];
+
+	if (staging)
+	{
+		std::vector<uint16_t> half((size_t)S * S * 4);
+		[staging getBytes:half.data() bytesPerRow:S * 4 * sizeof(uint16_t)
+		       fromRegion:MTLRegionMake2D(0, 0, S, S) mipmapLevel:0];
+		auto h2f = [](uint16_t h) -> float {
+			uint32_t s = (h >> 15) & 1, e = (h >> 10) & 0x1f, m = h & 0x3ff, f;
+			if (e == 0) { if (m == 0) f = s << 31; else { e = 127 - 15 + 1; while (!(m & 0x400)) { m <<= 1; e--; } m &= 0x3ff; f = (s << 31) | (e << 23) | (m << 13); } }
+			else if (e == 0x1f) f = (s << 31) | (0xffu << 23) | (m << 13);
+			else f = (s << 31) | ((e - 15 + 127) << 23) | (m << 13);
+			float o; std::memcpy(&o, &f, 4); return o;
+		};
+		if (std::ofstream fo(dp, std::ios::binary); fo)
+		{
+			fo << "P6\n" << S << " " << S << "\n255\n";
+			for (int y = 0; y < S; ++y)
+				for (int x = 0; x < S; ++x)
+				{
+					const uint16_t* pxl = &half[((size_t)y * S + x) * 4];
+					for (int c = 0; c < 3; ++c)
+					{
+						float v = h2f(pxl[c]); v = v < 0 ? 0 : (v > 1 ? 1 : v);
+						uint8_t b = (uint8_t)(v * 255.0f + 0.5f);
+						fo.write(reinterpret_cast<const char*>(&b), 1);
+					}
+				}
+		}
+	}
+	return m_skelPreviewColorTex; // id<MTLTexture> for ImGui::Image
 }
 
 // ─── Window targets ───────────────────────────────────────────────────────────

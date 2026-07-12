@@ -324,6 +324,23 @@ public:
                                         int /*shape*/ = 0)
     { return nullptr; }
 
+    // ── Skeletal mesh preview ──────────────────────────────────────────────
+    // Render a skeletal mesh (skinned with `boneMatrices`, or the bind pose if
+    // empty) into a small dedicated offscreen target — same conventions as
+    // RenderMaterialPreview (ImGui-compatible handle, transparent background,
+    // orbit camera via yaw/pitch/dist, independent of the main viewport).
+    // `boneMatrices` is one mat4 per joint (see AnimationPreview::evaluateClipPose
+    // in HE_Scene, which the Skeletal Mesh Editor uses to turn a clip + scrub
+    // time into this array — the renderer never evaluates animation itself).
+    // `showSkeleton` overlays joint markers + parent-child bone lines drawn
+    // directly into this preview target (independent of the main viewport's
+    // DebugDrawBuffer). Returns nullptr on backends without a preview path.
+    virtual void* RenderSkeletalPreview(class ContentManager& /*cm*/, const HE::UUID& /*meshId*/,
+                                        const std::vector<glm::mat4>& /*boneMatrices*/,
+                                        uint32_t /*size*/, float /*yaw*/, float /*pitch*/, float /*dist*/,
+                                        bool /*showSkeleton*/ = true)
+    { return nullptr; }
+
     // Drop cached GPU buffers for a mesh so ResolveMesh re-uploads from the
     // ContentManager next frame. Call after replaceStaticMesh so sculpt/edit
     // changes are not masked by the renderer's VBO cache.

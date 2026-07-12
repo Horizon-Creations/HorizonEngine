@@ -483,6 +483,74 @@ void main()
 }
 )GLSL";
 
+// ─── Skeletal-mesh-preview shaders (RenderSkeletalPreview) ──────────────────
+// Deliberately separate from kSkinnedVS+kUnlitFS: the preview is an isolated
+// offscreen target with no shadow map / SSAO / sky-IBL / fog bound, so it uses
+// its own minimal fixed sun+ambient lighting (same philosophy as the material
+// preview's own small Lighting UBO instead of the full scene pipeline).
+static const char* kSkelPreviewVS = R"GLSL(
+#version 410 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec2 aUV;
+layout(location = 3) in uvec4 aBoneIDs;
+layout(location = 4) in vec4  aBoneWeights;
+uniform mat4 uMVP;
+uniform mat4 uModel;
+uniform mat4 uBoneMatrices[128];
+out vec3 vNormal;
+out vec2 vUV;
+void main()
+{
+    mat4 skin = aBoneWeights.x * uBoneMatrices[aBoneIDs.x]
+              + aBoneWeights.y * uBoneMatrices[aBoneIDs.y]
+              + aBoneWeights.z * uBoneMatrices[aBoneIDs.z]
+              + aBoneWeights.w * uBoneMatrices[aBoneIDs.w];
+    vec4 skinnedPos = skin * vec4(aPos, 1.0);
+    vNormal     = mat3(uModel) * mat3(skin) * aNormal;
+    vUV         = aUV;
+    gl_Position = uMVP * skinnedPos;
+}
+)GLSL";
+
+static const char* kSkelPreviewFS = R"GLSL(
+#version 410 core
+in vec3 vNormal;
+in vec2 vUV;
+out vec4 FragColor;
+uniform vec3 uColor;
+uniform bool uHasTex;
+uniform sampler2D uTex;
+void main()
+{
+    vec3 N = normalize(vNormal);
+    vec3 L = normalize(vec3(0.45, 0.75, 0.55));
+    float diff = max(dot(N, L), 0.0);
+    vec3 albedo = uHasTex ? texture(uTex, vUV).rgb * uColor : uColor;
+    FragColor = vec4(albedo * (0.35 + 0.65 * diff), 1.0);
+}
+)GLSL";
+
+// Immediate-mode line pass for the bone overlay (joint markers drawn as tiny
+// crosses + parent→child segments) — its own tiny program, since the shared
+// DebugDrawBuffer pipeline targets the backbuffer scene, not an arbitrary
+// offscreen preview FBO.
+static const char* kSkelPreviewLineVS = R"GLSL(
+#version 410 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aColor;
+uniform mat4 uMVP;
+out vec3 vColor;
+void main() { vColor = aColor; gl_Position = uMVP * vec4(aPos, 1.0); }
+)GLSL";
+
+static const char* kSkelPreviewLineFS = R"GLSL(
+#version 410 core
+in vec3 vColor;
+out vec4 FragColor;
+void main() { FragColor = vec4(vColor, 1.0); }
+)GLSL";
+
 // ─── GPU-instanced vertex shader ─────────────────────────────────────────────
 // Per-instance model matrix supplied via a VBO at attribute locations 4–7
 // (one mat4 = 4 × vec4, divisor = 1). The fragment shader is kUnlitFS (shared).
@@ -4602,6 +4670,189 @@ void* OpenGLRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& 
 	glViewport(prevVP[0], prevVP[1], prevVP[2], prevVP[3]);
 	glUseProgram(0);
 	return reinterpret_cast<void*>(static_cast<intptr_t>(m_previewColor));
+}
+
+void* OpenGLRenderer::RenderSkeletalPreview(ContentManager& cm, const HE::UUID& meshId,
+                                           const std::vector<glm::mat4>& boneMatrices,
+                                           uint32_t size, float yaw, float pitch, float dist,
+                                           bool showSkeleton)
+{
+	const int S = std::clamp(static_cast<int>(size), 32, 1024);
+	if (!m_contentManager) m_contentManager = &cm;
+
+	const GpuSkeletalMesh* smesh = ResolveSkeletalMesh(meshId);
+	if (!smesh) return nullptr;
+
+	// ── Lazy minimal skinning + line programs.
+	if (!m_skelPreviewProgram)
+	{
+		GLuint vs = CompileStage(GL_VERTEX_SHADER,   kSkelPreviewVS);
+		GLuint fs = CompileStage(GL_FRAGMENT_SHADER, kSkelPreviewFS);
+		m_skelPreviewProgram = glCreateProgram();
+		glAttachShader(m_skelPreviewProgram, vs);
+		glAttachShader(m_skelPreviewProgram, fs);
+		glLinkProgram(m_skelPreviewProgram);
+		glDeleteShader(vs); glDeleteShader(fs);
+		m_uSkelPvMVP    = glGetUniformLocation(m_skelPreviewProgram, "uMVP");
+		m_uSkelPvModel  = glGetUniformLocation(m_skelPreviewProgram, "uModel");
+		m_uSkelPvBones  = glGetUniformLocation(m_skelPreviewProgram, "uBoneMatrices");
+		m_uSkelPvColor  = glGetUniformLocation(m_skelPreviewProgram, "uColor");
+		m_uSkelPvHasTex = glGetUniformLocation(m_skelPreviewProgram, "uHasTex");
+
+		GLuint lvs = CompileStage(GL_VERTEX_SHADER,   kSkelPreviewLineVS);
+		GLuint lfs = CompileStage(GL_FRAGMENT_SHADER, kSkelPreviewLineFS);
+		m_skelPreviewLineProgram = glCreateProgram();
+		glAttachShader(m_skelPreviewLineProgram, lvs);
+		glAttachShader(m_skelPreviewLineProgram, lfs);
+		glLinkProgram(m_skelPreviewLineProgram);
+		glDeleteShader(lvs); glDeleteShader(lfs);
+		m_uSkelPvLineMVP = glGetUniformLocation(m_skelPreviewLineProgram, "uMVP");
+
+		glGenVertexArrays(1, &m_skelPreviewLineVAO);
+		glGenBuffers(1, &m_skelPreviewLineVBO);
+		glBindVertexArray(m_skelPreviewLineVAO);
+		glBindBuffer(GL_ARRAY_BUFFER, m_skelPreviewLineVBO);
+		glEnableVertexAttribArray(0);
+		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)0);
+		glEnableVertexAttribArray(1);
+		glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
+		glBindVertexArray(0);
+	}
+	if (!m_skelPreviewProgram || !m_skelPreviewLineProgram) return nullptr;
+
+	// ── Lazy / resized offscreen target.
+	if (!m_skelPreviewFBO || m_skelPreviewSize != S)
+	{
+		if (m_skelPreviewColor) glDeleteTextures(1, &m_skelPreviewColor);
+		if (m_skelPreviewDepth) glDeleteRenderbuffers(1, &m_skelPreviewDepth);
+		if (!m_skelPreviewFBO) glGenFramebuffers(1, &m_skelPreviewFBO);
+		glBindFramebuffer(GL_FRAMEBUFFER, m_skelPreviewFBO);
+		glGenTextures(1, &m_skelPreviewColor);
+		glBindTexture(GL_TEXTURE_2D, m_skelPreviewColor);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, S, S, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_skelPreviewColor, 0);
+		glGenRenderbuffers(1, &m_skelPreviewDepth);
+		glBindRenderbuffer(GL_RENDERBUFFER, m_skelPreviewDepth);
+		glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, S, S);
+		glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, m_skelPreviewDepth);
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		glBindTexture(GL_TEXTURE_2D, 0);
+		m_skelPreviewSize = S;
+	}
+
+	// ── Orbit camera auto-framed around the mesh's local bounds (arbitrary
+	// meshes vary in size/pivot, unlike the material preview's fixed unit shapes).
+	const HE::AABB& b = smesh->localBounds;
+	const glm::vec3 center = b.isValid() ? (b.min + b.max) * 0.5f : glm::vec3(0.0f);
+	const float extent = b.isValid() ? glm::length(b.max - b.min) * 0.5f : 1.0f;
+	const float camDist = std::max(0.05f, dist) * std::max(extent, 0.05f);
+
+	GLint prevFBO = 0; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
+	GLint prevVP[4]; glGetIntegerv(GL_VIEWPORT, prevVP);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_skelPreviewFBO);
+	glViewport(0, 0, S, S);
+	glClearColor(0.0f, 0.0f, 0.0f, 0.0f); // transparent — editor composites over its own backdrop
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+	glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LESS);
+	glDisable(GL_BLEND); glDisable(GL_CULL_FACE);
+
+	const float cp = std::cos(pitch), sp = std::sin(pitch);
+	const glm::vec3 camPos = center + glm::vec3(std::sin(yaw) * cp, sp, std::cos(yaw) * cp) * camDist;
+	const glm::mat4 view = glm::lookAt(camPos, center, glm::vec3(0.0f, 1.0f, 0.0f));
+	const glm::mat4 proj = glm::perspective(glm::radians(35.0f), 1.0f, 0.01f, camDist * 20.0f + 10.0f);
+	const glm::mat4 model(1.0f);
+	const glm::mat4 mvp = proj * view * model;
+
+	constexpr int kMaxBones = 128;
+	std::vector<glm::mat4> boneScratch(kMaxBones, glm::mat4(1.0f));
+	const int boneCount = static_cast<int>(std::min(boneMatrices.size(), static_cast<size_t>(kMaxBones)));
+	if (boneCount > 0) std::copy_n(boneMatrices.begin(), boneCount, boneScratch.begin());
+
+	glUseProgram(m_skelPreviewProgram);
+	glUniformMatrix4fv(m_uSkelPvMVP,   1, GL_FALSE, glm::value_ptr(mvp));
+	glUniformMatrix4fv(m_uSkelPvModel, 1, GL_FALSE, glm::value_ptr(model));
+	glUniformMatrix4fv(m_uSkelPvBones, kMaxBones, GL_FALSE, glm::value_ptr(boneScratch[0]));
+	glUniform3fv(m_uSkelPvColor, 1, glm::value_ptr(glm::vec3(0.75f)));
+	glUniform1i(m_uSkelPvHasTex, smesh->texture != 0);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, smesh->texture);
+	glBindVertexArray(smesh->vao);
+	glDrawElements(GL_TRIANGLES, smesh->indexCount, GL_UNSIGNED_INT, nullptr);
+	glBindVertexArray(0);
+
+	// ── Bone overlay: joint markers + parent→child segments. World joint xform
+	// = boneMatrix * inverse(inverseBindMatrix), since boneMatrix is defined as
+	// globalJointXform * invBind (composeBoneMatrices, AnimationEval.cpp).
+	if (showSkeleton)
+	{
+		if (const SkeletalMeshAsset* asset = m_contentManager->getSkeletalMesh(meshId))
+		{
+			std::vector<glm::vec3> jointWorld(asset->skeleton.size(), glm::vec3(0.0f));
+			for (size_t i = 0; i < asset->skeleton.size(); ++i)
+			{
+				const glm::mat4 invBind = glm::make_mat4(asset->skeleton[i].inverseBindMatrix.data());
+				const glm::mat4 world =
+					(i < boneScratch.size() ? boneScratch[i] : glm::mat4(1.0f)) * glm::inverse(invBind);
+				jointWorld[i] = glm::vec3(world[3]);
+			}
+
+			std::vector<float> lineVerts; // pos3 + color3 per vertex
+			const glm::vec3 jointColor(1.0f, 0.85f, 0.15f), boneColor(0.2f, 0.9f, 1.0f);
+			auto pushVert = [&](const glm::vec3& p, const glm::vec3& c) {
+				lineVerts.insert(lineVerts.end(), { p.x, p.y, p.z, c.x, c.y, c.z });
+			};
+			const float markerSize = std::max(extent * 0.015f, 0.005f);
+			for (size_t i = 0; i < asset->skeleton.size(); ++i)
+			{
+				const glm::vec3 p = jointWorld[i];
+				pushVert(p - glm::vec3(markerSize, 0, 0), jointColor); pushVert(p + glm::vec3(markerSize, 0, 0), jointColor);
+				pushVert(p - glm::vec3(0, markerSize, 0), jointColor); pushVert(p + glm::vec3(0, markerSize, 0), jointColor);
+				pushVert(p - glm::vec3(0, 0, markerSize), jointColor); pushVert(p + glm::vec3(0, 0, markerSize), jointColor);
+
+				const int32_t parent = asset->skeleton[i].parent;
+				if (parent >= 0 && static_cast<size_t>(parent) < jointWorld.size())
+				{
+					pushVert(jointWorld[parent], boneColor);
+					pushVert(p, boneColor);
+				}
+			}
+
+			if (!lineVerts.empty())
+			{
+				glBindBuffer(GL_ARRAY_BUFFER, m_skelPreviewLineVBO);
+				glBufferData(GL_ARRAY_BUFFER,
+				             static_cast<GLsizeiptr>(lineVerts.size() * sizeof(float)),
+				             lineVerts.data(), GL_DYNAMIC_DRAW);
+				glUseProgram(m_skelPreviewLineProgram);
+				glUniformMatrix4fv(m_uSkelPvLineMVP, 1, GL_FALSE, glm::value_ptr(mvp));
+				glBindVertexArray(m_skelPreviewLineVAO);
+				glLineWidth(2.0f);
+				glDrawArrays(GL_LINES, 0, static_cast<GLsizei>(lineVerts.size() / 6));
+				glBindVertexArray(0);
+			}
+		}
+	}
+
+	// Headless witness (same convention as RenderMaterialPreview): HE_SKEL_PREVIEW_DUMP=path.
+	if (const char* dp = std::getenv("HE_SKEL_PREVIEW_DUMP"); dp && *dp)
+	{
+		std::vector<uint8_t> px((size_t)S * S * 3);
+		glPixelStorei(GL_PACK_ALIGNMENT, 1);
+		glReadPixels(0, 0, S, S, GL_RGB, GL_UNSIGNED_BYTE, px.data());
+		if (std::ofstream f(dp, std::ios::binary); f)
+		{
+			f << "P6\n" << S << " " << S << "\n255\n";
+			for (int y = S - 1; y >= 0; --y) // flip to top-down
+				f.write(reinterpret_cast<const char*>(px.data() + (size_t)y * S * 3), (std::streamsize)S * 3);
+		}
+	}
+
+	glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prevFBO);
+	glViewport(prevVP[0], prevVP[1], prevVP[2], prevVP[3]);
+	glUseProgram(0);
+	return reinterpret_cast<void*>(static_cast<intptr_t>(m_skelPreviewColor));
 }
 
 void OpenGLRenderer::SetDebugLines(const std::vector<DebugLine>& lines)
