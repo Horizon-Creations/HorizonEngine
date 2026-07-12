@@ -1273,6 +1273,14 @@ void EditorApplication::OnRender(float dt)
 				}
 			}
 
+			// NavMesh wireframe(s): baked polygons, per-component toggle
+			{
+				auto& reg = m_editorWorld->registry();
+				for (auto [entity, nmc] : reg.view<NavMeshComponent>().each())
+					if (nmc.showDebugMesh)
+						NavigationSystem::extractNavMeshWireframe(nmc, dbg);
+			}
+
 			// New-landscape grid preview: while the Landscape creation form is
 			// open (no terrain yet) draw a green wireframe of the terrain-to-be.
 			// Emitting it as debug lines means it's depth-tested by the backend —

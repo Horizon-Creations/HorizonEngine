@@ -6236,6 +6236,8 @@ void EditorUI::RenderInspector(AppContext& ctx)
 				if (ctx.undoSys) ctx.undoSys->snapshotNow();
 				NavigationSystem::bake(*nmc);
 			}
+			ImGui::SameLine();
+			ImGui::Checkbox("Show NavMesh##nm", &nmc->showDebugMesh);
 		}
 		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<NavMeshComponent>(entity); }
 	}

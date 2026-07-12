@@ -40,4 +40,9 @@ struct NavMeshComponent {
     std::shared_ptr<dtNavMeshQuery> navQuery;
 
     bool isDirty = true; // rebuild needed
+
+    // Editor-only: draw the baked NavMesh as a wireframe in the viewport
+    // (NavigationSystem::extractNavMeshWireframe). Not serialized — same as
+    // navMesh/navQuery, this is session-local like the rest of the runtime state.
+    bool showDebugMesh = true;
 };
