@@ -87,6 +87,9 @@ public:
 	                            const std::vector<glm::mat4>& boneMatrices,
 	                            uint32_t size, float yaw, float pitch, float dist,
 	                            bool showSkeleton = true) override;
+	void* RenderParticlePreview(ContentManager& cm, const HE::UUID& meshId, const HE::UUID& materialId,
+	                            const std::vector<ParticlePreviewInstance>& particles,
+	                            uint32_t size, float yaw, float pitch, float dist) override;
 	void  InvalidateMesh    (const HE::UUID& meshId)     override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
 	void  SetSSAOSettings(const SSAOSettings& settings) override;
@@ -323,6 +326,15 @@ private:
 	void* m_skelPreviewDepthTex = nullptr; // id<MTLTexture> (retained)
 	int   m_skelPreviewSize     = 0;
 	void* m_skelPreviewPipeline = nullptr; // id<MTLRenderPipelineState> (retained)
+
+	// Particle-preview target (RenderParticlePreview) — own dedicated RGBA16F
+	// color + depth texture; camera-facing billboards via vertex_id (no vertex
+	// buffer needed for the corners, matching the debug-line/skinned-preview
+	// "raw buffer indexed by id" convention already used in this file).
+	void* m_particlePreviewColorTex = nullptr; // id<MTLTexture> (retained)
+	void* m_particlePreviewDepthTex = nullptr; // id<MTLTexture> (retained)
+	int   m_particlePreviewSize     = 0;
+	void* m_particlePreviewPipeline = nullptr; // id<MTLRenderPipelineState> (retained)
 
 	// A procedural sphere (interleaved pos3/normal3/uv2, matching VertexIn) so per-material
 	// pipelines are visible on real 3D geometry even in the empty headless dump scene.

@@ -551,6 +551,57 @@ out vec4 FragColor;
 void main() { FragColor = vec4(vColor, 1.0); }
 )GLSL";
 
+// ─── Particle-preview shaders (RenderParticlePreview) ───────────────────────
+// Camera-facing billboards, attribute-less (gl_VertexID picks one of 6 corner
+// verts per instance — same "no per-vertex buffer" trick as the sky/fullscreen
+// passes), one instance = one already-simulated particle (position/size/color/
+// alpha resolved by the Particle Graph Editor's live preview, ParticleSystem::
+// stepPool — this shader only draws, it never simulates).
+static const char* kParticlePreviewVS = R"GLSL(
+#version 410 core
+layout(location = 0) in vec3  iPos;
+layout(location = 1) in float iSize;
+layout(location = 2) in vec3  iColor;
+layout(location = 3) in float iAlpha;
+uniform mat4 uViewProj;
+uniform vec3 uCamRight;
+uniform vec3 uCamUp;
+out vec3  vColor;
+out float vAlpha;
+out vec2  vUV;
+const vec2 kCorners[6] = vec2[](
+    vec2(-1,-1), vec2(1,-1), vec2(1,1),
+    vec2(-1,-1), vec2(1,1),  vec2(-1,1)
+);
+void main()
+{
+    vec2 corner = kCorners[gl_VertexID % 6];
+    vec3 worldPos = iPos + (uCamRight * corner.x + uCamUp * corner.y) * (iSize * 0.5);
+    gl_Position = uViewProj * vec4(worldPos, 1.0);
+    vUV    = corner * 0.5 + 0.5;
+    vColor = iColor;
+    vAlpha = iAlpha;
+}
+)GLSL";
+
+static const char* kParticlePreviewFS = R"GLSL(
+#version 410 core
+in vec3  vColor;
+in float vAlpha;
+in vec2  vUV;
+out vec4 FragColor;
+uniform bool      uHasTex;
+uniform sampler2D uTex;
+void main()
+{
+    vec4  texc  = uHasTex ? texture(uTex, vUV) : vec4(1.0);
+    // No texture → soft circular sprite instead of a flat square, so a bare
+    // particle system still reads as "particles" rather than "confetti".
+    float shape = uHasTex ? texc.a : smoothstep(1.0, 0.0, length(vUV * 2.0 - 1.0));
+    FragColor = vec4(vColor * texc.rgb, vAlpha * shape);
+}
+)GLSL";
+
 // ─── GPU-instanced vertex shader ─────────────────────────────────────────────
 // Per-instance model matrix supplied via a VBO at attribute locations 4–7
 // (one mat4 = 4 × vec4, divisor = 1). The fragment shader is kUnlitFS (shared).
@@ -4853,6 +4904,149 @@ void* OpenGLRenderer::RenderSkeletalPreview(ContentManager& cm, const HE::UUID& 
 	glViewport(prevVP[0], prevVP[1], prevVP[2], prevVP[3]);
 	glUseProgram(0);
 	return reinterpret_cast<void*>(static_cast<intptr_t>(m_skelPreviewColor));
+}
+
+void* OpenGLRenderer::RenderParticlePreview(ContentManager& cm, const HE::UUID& /*meshId*/,
+                                           const HE::UUID& materialId,
+                                           const std::vector<ParticlePreviewInstance>& particles,
+                                           uint32_t size, float yaw, float pitch, float dist)
+{
+	const int S = std::clamp(static_cast<int>(size), 32, 1024);
+	if (!m_contentManager) m_contentManager = &cm;
+
+	// ── Lazy billboard program.
+	if (!m_particlePreviewProgram)
+	{
+		GLuint vs = CompileStage(GL_VERTEX_SHADER,   kParticlePreviewVS);
+		GLuint fs = CompileStage(GL_FRAGMENT_SHADER, kParticlePreviewFS);
+		m_particlePreviewProgram = glCreateProgram();
+		glAttachShader(m_particlePreviewProgram, vs);
+		glAttachShader(m_particlePreviewProgram, fs);
+		glLinkProgram(m_particlePreviewProgram);
+		glDeleteShader(vs); glDeleteShader(fs);
+		m_uPPvViewProj = glGetUniformLocation(m_particlePreviewProgram, "uViewProj");
+		m_uPPvCamRight = glGetUniformLocation(m_particlePreviewProgram, "uCamRight");
+		m_uPPvCamUp    = glGetUniformLocation(m_particlePreviewProgram, "uCamUp");
+		m_uPPvHasTex   = glGetUniformLocation(m_particlePreviewProgram, "uHasTex");
+
+		glGenVertexArrays(1, &m_particlePreviewVAO);
+		glGenBuffers(1, &m_particlePreviewInstVBO);
+		glBindVertexArray(m_particlePreviewVAO);
+		glBindBuffer(GL_ARRAY_BUFFER, m_particlePreviewInstVBO);
+		constexpr GLsizei kStride = 8 * sizeof(float); // pos3 + size1 + color3 + alpha1
+		glEnableVertexAttribArray(0);
+		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, kStride, (void*)0);
+		glVertexAttribDivisor(0, 1);
+		glEnableVertexAttribArray(1);
+		glVertexAttribPointer(1, 1, GL_FLOAT, GL_FALSE, kStride, (void*)(3 * sizeof(float)));
+		glVertexAttribDivisor(1, 1);
+		glEnableVertexAttribArray(2);
+		glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, kStride, (void*)(4 * sizeof(float)));
+		glVertexAttribDivisor(2, 1);
+		glEnableVertexAttribArray(3);
+		glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, kStride, (void*)(7 * sizeof(float)));
+		glVertexAttribDivisor(3, 1);
+		glBindVertexArray(0);
+	}
+	if (!m_particlePreviewProgram) return nullptr;
+
+	// ── Lazy / resized offscreen target.
+	if (!m_particlePreviewFBO || m_particlePreviewSize != S)
+	{
+		if (m_particlePreviewColor) glDeleteTextures(1, &m_particlePreviewColor);
+		if (m_particlePreviewDepth) glDeleteRenderbuffers(1, &m_particlePreviewDepth);
+		if (!m_particlePreviewFBO) glGenFramebuffers(1, &m_particlePreviewFBO);
+		glBindFramebuffer(GL_FRAMEBUFFER, m_particlePreviewFBO);
+		glGenTextures(1, &m_particlePreviewColor);
+		glBindTexture(GL_TEXTURE_2D, m_particlePreviewColor);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, S, S, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_particlePreviewColor, 0);
+		glGenRenderbuffers(1, &m_particlePreviewDepth);
+		glBindRenderbuffer(GL_RENDERBUFFER, m_particlePreviewDepth);
+		glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, S, S);
+		glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, m_particlePreviewDepth);
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		glBindTexture(GL_TEXTURE_2D, 0);
+		m_particlePreviewSize = S;
+	}
+
+	// ── Orbit camera auto-framed around the LIVE particles' bounds (an emitter's
+	// extent depends entirely on velocity/gravity/lifetime, unlike a fixed mesh).
+	glm::vec3 bmin(1e30f), bmax(-1e30f);
+	for (const auto& p : particles) { bmin = glm::min(bmin, p.position); bmax = glm::max(bmax, p.position); }
+	const bool valid = !particles.empty() && bmin.x <= bmax.x;
+	const glm::vec3 center = valid ? (bmin + bmax) * 0.5f : glm::vec3(0.0f);
+	const float extent = valid ? glm::max(glm::length(bmax - bmin) * 0.5f, 0.1f) : 1.0f;
+	const float camDist = std::max(0.05f, dist) * std::max(extent, 0.1f);
+
+	GLint prevFBO = 0; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
+	GLint prevVP[4]; glGetIntegerv(GL_VIEWPORT, prevVP);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_particlePreviewFBO);
+	glViewport(0, 0, S, S);
+	glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+	glEnable(GL_DEPTH_TEST); glDepthMask(GL_FALSE); glDepthFunc(GL_LESS);
+	glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+	glDisable(GL_CULL_FACE);
+
+	const float cp = std::cos(pitch), sp = std::sin(pitch);
+	const glm::vec3 camPos = center + glm::vec3(std::sin(yaw) * cp, sp, std::cos(yaw) * cp) * camDist;
+	const glm::mat4 view = glm::lookAt(camPos, center, glm::vec3(0.0f, 1.0f, 0.0f));
+	const glm::mat4 proj = glm::perspective(glm::radians(35.0f), 1.0f, 0.01f, camDist * 20.0f + 10.0f);
+	const glm::mat4 viewProj = proj * view;
+	// Camera-facing basis for billboard expansion (right = view row 0, up = view row 1).
+	const glm::vec3 camRight(view[0][0], view[1][0], view[2][0]);
+	const glm::vec3 camUp   (view[0][1], view[1][1], view[2][1]);
+
+	unsigned int tex = 0;
+	const bool hasTex = ResolveMaterialTexture(materialId, tex);
+
+	if (!particles.empty())
+	{
+		std::vector<float> inst;
+		inst.reserve(particles.size() * 8);
+		for (const auto& p : particles)
+			inst.insert(inst.end(), { p.position.x, p.position.y, p.position.z, p.size,
+			                          p.color.r, p.color.g, p.color.b, p.alpha });
+
+		glBindBuffer(GL_ARRAY_BUFFER, m_particlePreviewInstVBO);
+		glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(inst.size() * sizeof(float)),
+		             inst.data(), GL_DYNAMIC_DRAW);
+
+		glUseProgram(m_particlePreviewProgram);
+		glUniformMatrix4fv(m_uPPvViewProj, 1, GL_FALSE, glm::value_ptr(viewProj));
+		glUniform3fv(m_uPPvCamRight, 1, glm::value_ptr(camRight));
+		glUniform3fv(m_uPPvCamUp,    1, glm::value_ptr(camUp));
+		glUniform1i(m_uPPvHasTex, hasTex);
+		glActiveTexture(GL_TEXTURE0);
+		glBindTexture(GL_TEXTURE_2D, hasTex ? tex : 0);
+		glBindVertexArray(m_particlePreviewVAO);
+		glDrawArraysInstanced(GL_TRIANGLES, 0, 6, static_cast<GLsizei>(particles.size()));
+		glBindVertexArray(0);
+	}
+
+	glDepthMask(GL_TRUE);
+	glDisable(GL_BLEND);
+
+	if (const char* dp = std::getenv("HE_PARTICLE_PREVIEW_DUMP"); dp && *dp)
+	{
+		std::vector<uint8_t> px((size_t)S * S * 3);
+		glPixelStorei(GL_PACK_ALIGNMENT, 1);
+		glReadPixels(0, 0, S, S, GL_RGB, GL_UNSIGNED_BYTE, px.data());
+		if (std::ofstream f(dp, std::ios::binary); f)
+		{
+			f << "P6\n" << S << " " << S << "\n255\n";
+			for (int y = S - 1; y >= 0; --y)
+				f.write(reinterpret_cast<const char*>(px.data() + (size_t)y * S * 3), (std::streamsize)S * 3);
+		}
+	}
+
+	glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prevFBO);
+	glViewport(prevVP[0], prevVP[1], prevVP[2], prevVP[3]);
+	glUseProgram(0);
+	return reinterpret_cast<void*>(static_cast<intptr_t>(m_particlePreviewColor));
 }
 
 void OpenGLRenderer::SetDebugLines(const std::vector<DebugLine>& lines)

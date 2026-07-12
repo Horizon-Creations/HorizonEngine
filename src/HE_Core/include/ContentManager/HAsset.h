@@ -102,6 +102,9 @@ inline constexpr uint32_t CHUNK_HCBC = makeChunkId('H','C','B','C'); // HorizonC
 inline constexpr uint32_t CHUNK_IACT = makeChunkId('I','A','C','T'); // input action definition (JSON)
 inline constexpr uint32_t CHUNK_IMAP = makeChunkId('I','M','A','P'); // input mapping context (JSON)
 
+// Particle System
+inline constexpr uint32_t CHUNK_PTGR = makeChunkId('P','T','G','R'); // particle emitter node graph (JSON)
+
 // Font
 inline constexpr uint32_t CHUNK_FNTD = makeChunkId('F','N','T','D'); // raw font bytes
 inline constexpr uint32_t CHUNK_FNTI = makeChunkId('F','N','T','I'); // font meta (size)

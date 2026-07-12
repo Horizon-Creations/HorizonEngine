@@ -371,24 +371,9 @@ namespace
 		if (auto* ps = registry.try_get<ParticleSystemComponent>(entity))
 		{
 			comps["particlesystem"] = {
-				{ "mesh",             uuidToJson(ps->meshAssetId) },
-				{ "material",         uuidToJson(ps->materialAssetId) },
-				{ "visible",          ps->visible },
-				{ "emitRate",         ps->emitRate },
-				{ "lifetimeMin",      ps->lifetimeMin },
-				{ "lifetimeMax",      ps->lifetimeMax },
-				{ "startSize",        ps->startSize },
-				{ "endSize",          ps->endSize },
-				{ "startColor",       vec3ToJson(ps->startColor) },
-				{ "endColor",         vec3ToJson(ps->endColor) },
-				{ "startAlpha",       ps->startAlpha },
-				{ "endAlpha",         ps->endAlpha },
-				{ "initialVelocity",  vec3ToJson(ps->initialVelocity) },
-				{ "velocitySpread",   ps->velocitySpread },
-				{ "gravity",          vec3ToJson(ps->gravity) },
-				{ "maxParticles",     ps->maxParticles },
-				{ "playing",          ps->playing },
-				{ "looping",          ps->looping },
+				{ "particleAsset", uuidToJson(ps->particleAssetId) },
+				{ "visible",       ps->visible },
+				{ "playing",       ps->playing },
 			};
 		}
 		if (auto* lod = registry.try_get<LODComponent>(entity))
@@ -765,24 +750,37 @@ namespace
 		{
 			const json& c = comps["particlesystem"];
 			ParticleSystemComponent ps;
-			ps.meshAssetId      = jsonToUuid(c.value("mesh",     json()));
-			ps.materialAssetId  = jsonToUuid(c.value("material", json()));
-			ps.visible          = c.value("visible",         ps.visible);
-			ps.emitRate         = c.value("emitRate",        ps.emitRate);
-			ps.lifetimeMin      = c.value("lifetimeMin",     ps.lifetimeMin);
-			ps.lifetimeMax      = c.value("lifetimeMax",     ps.lifetimeMax);
-			ps.startSize        = c.value("startSize",       ps.startSize);
-			ps.endSize          = c.value("endSize",         ps.endSize);
-			ps.startColor       = jsonToVec3(c.value("startColor",      json()), ps.startColor);
-			ps.endColor         = jsonToVec3(c.value("endColor",        json()), ps.endColor);
-			ps.startAlpha       = c.value("startAlpha",      ps.startAlpha);
-			ps.endAlpha         = c.value("endAlpha",        ps.endAlpha);
-			ps.initialVelocity  = jsonToVec3(c.value("initialVelocity", json()), ps.initialVelocity);
-			ps.velocitySpread   = c.value("velocitySpread",  ps.velocitySpread);
-			ps.gravity          = jsonToVec3(c.value("gravity",         json()), ps.gravity);
-			ps.maxParticles     = c.value("maxParticles",    ps.maxParticles);
-			ps.playing          = c.value("playing",         ps.playing);
-			ps.looping          = c.value("looping",         ps.looping);
+			ps.visible = c.value("visible", ps.visible);
+			ps.playing = c.value("playing", ps.playing);
+			if (c.contains("particleAsset"))
+			{
+				// Current format: the emitter config lives in a ParticleGraphAsset.
+				ps.particleAssetId = jsonToUuid(c.value("particleAsset", json()));
+			}
+			else
+			{
+				// Pre-asset format: config was inline on the component. Stage it for
+				// ParticleSystem::update to migrate into a real asset on first tick
+				// (the serializer has no ContentManager to register one itself).
+				auto& lg = ps.legacy;
+				lg.hasData         = true;
+				lg.meshAssetId     = jsonToUuid(c.value("mesh",     json()));
+				lg.materialAssetId = jsonToUuid(c.value("material", json()));
+				lg.emitRate        = c.value("emitRate",        lg.emitRate);
+				lg.lifetimeMin     = c.value("lifetimeMin",     lg.lifetimeMin);
+				lg.lifetimeMax     = c.value("lifetimeMax",     lg.lifetimeMax);
+				lg.startSize       = c.value("startSize",       lg.startSize);
+				lg.endSize         = c.value("endSize",         lg.endSize);
+				lg.startColor      = jsonToVec3(c.value("startColor",      json()), lg.startColor);
+				lg.endColor        = jsonToVec3(c.value("endColor",        json()), lg.endColor);
+				lg.startAlpha      = c.value("startAlpha",      lg.startAlpha);
+				lg.endAlpha        = c.value("endAlpha",        lg.endAlpha);
+				lg.initialVelocity = jsonToVec3(c.value("initialVelocity", json()), lg.initialVelocity);
+				lg.velocitySpread  = c.value("velocitySpread",  lg.velocitySpread);
+				lg.gravity         = jsonToVec3(c.value("gravity",         json()), lg.gravity);
+				lg.maxParticles    = c.value("maxParticles",    lg.maxParticles);
+				lg.looping         = c.value("looping",         lg.looping);
+			}
 			registry.emplace_or_replace<ParticleSystemComponent>(entity, std::move(ps));
 		}
 		if (comps.contains("foliage"))

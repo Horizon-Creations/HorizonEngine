@@ -90,7 +90,8 @@ namespace HE
         Widget,           // UI widget tree (UMG-style widget editor), instantiated at play start
         HorizonCodeClass, // standalone HorizonCode graph (visual-scripting class)
         InputAction,      // named logical input (Button or Axis), referenced by mapping contexts
-        InputMappingContext // key/axis bindings that drive InputAction states at runtime
+        InputMappingContext, // key/axis bindings that drive InputAction states at runtime
+        ParticleSystem    // particle emitter node graph (Emitter Output + math/const/random nodes)
     };
 
     enum class TextureFormat : uint32_t

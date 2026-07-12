@@ -4257,6 +4257,213 @@ fragment float4 skelPreviewFragment(VOut in [[stage_in]],
 	return m_skelPreviewColorTex; // id<MTLTexture> for ImGui::Image
 }
 
+void* MetalRenderer::RenderParticlePreview(ContentManager& cm, const HE::UUID& /*meshId*/,
+                                           const HE::UUID& materialId,
+                                           const std::vector<ParticlePreviewInstance>& particles,
+                                           uint32_t size, float yaw, float pitch, float dist)
+{
+	const int S = std::clamp(static_cast<int>(size), 32, 1024);
+	if (!m_contentManager) m_contentManager = &cm;
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)m_commandQueue;
+	if (!device || !queue) return nullptr;
+
+	// ── Lazy billboard pipeline — camera-facing quads via vertex_id (no vertex
+	// buffer for the corners), alpha-blended (unlike the opaque skeletal preview).
+	if (!m_particlePreviewPipeline)
+	{
+		@autoreleasepool
+		{
+			NSError* error = nil;
+			NSString* src = @R"(
+#include <metal_stdlib>
+using namespace metal;
+struct Instance { packed_float3 pos; float size; packed_float3 color; float alpha; };
+struct VOut { float4 position [[position]]; float3 color; float alpha; float2 uv; };
+
+constant float2 kCorners[6] = {
+    float2(-1,-1), float2(1,-1), float2(1,1),
+    float2(-1,-1), float2(1,1),  float2(-1,1)
+};
+
+vertex VOut particlePreviewVertex(uint vid [[vertex_id]], uint iid [[instance_id]],
+                                   const device Instance* insts [[buffer(0)]],
+                                   constant float4x4& viewProj [[buffer(1)]],
+                                   constant float3&   camRight [[buffer(2)]],
+                                   constant float3&   camUp    [[buffer(3)]])
+{
+    Instance inst = insts[iid];
+    float2 corner = kCorners[vid % 6];
+    float3 worldPos = float3(inst.pos) + (camRight * corner.x + camUp * corner.y) * (inst.size * 0.5);
+    VOut o;
+    o.position = viewProj * float4(worldPos, 1.0);
+    o.color = float3(inst.color);
+    o.alpha = inst.alpha;
+    o.uv = corner * 0.5 + 0.5;
+    return o;
+}
+
+fragment float4 particlePreviewFragment(VOut in [[stage_in]],
+                                         constant bool& hasTex [[buffer(1)]],
+                                         texture2d<float> tex [[texture(0)]],
+                                         sampler samp [[sampler(0)]])
+{
+    float4 texc  = hasTex ? tex.sample(samp, in.uv) : float4(1.0);
+    float  shape = hasTex ? texc.a : smoothstep(1.0, 0.0, length(in.uv * 2.0 - 1.0));
+    return float4(in.color * texc.rgb, in.alpha * shape);
+}
+)";
+			id<MTLLibrary> lib = [device newLibraryWithSource:src options:nil error:&error];
+			if (lib)
+			{
+				MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
+				desc.vertexFunction   = [lib newFunctionWithName:@"particlePreviewVertex"];
+				desc.fragmentFunction = [lib newFunctionWithName:@"particlePreviewFragment"];
+				desc.colorAttachments[0].pixelFormat = kSceneColorFormat;
+				desc.depthAttachmentPixelFormat      = kDepthFormat;
+				desc.colorAttachments[0].blendingEnabled             = YES;
+				desc.colorAttachments[0].rgbBlendOperation           = MTLBlendOperationAdd;
+				desc.colorAttachments[0].alphaBlendOperation         = MTLBlendOperationAdd;
+				desc.colorAttachments[0].sourceRGBBlendFactor        = MTLBlendFactorSourceAlpha;
+				desc.colorAttachments[0].sourceAlphaBlendFactor      = MTLBlendFactorSourceAlpha;
+				desc.colorAttachments[0].destinationRGBBlendFactor   = MTLBlendFactorOneMinusSourceAlpha;
+				desc.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+				id<MTLRenderPipelineState> pso = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+				if (pso) m_particlePreviewPipeline = (void*)CFBridgingRetain(pso);
+				else
+					Logger::Log(Logger::LogLevel::Error,
+						(std::string("MetalRenderer: particle-preview pipeline creation failed: ")
+							+ (error ? [[error localizedDescription] UTF8String] : "unknown")).c_str());
+			}
+			else
+				Logger::Log(Logger::LogLevel::Error, "MetalRenderer: particle-preview shader compile failed");
+		}
+	}
+	if (!m_particlePreviewPipeline) return nullptr;
+
+	// ── Lazy / resized target.
+	if (!m_particlePreviewColorTex || m_particlePreviewSize != S)
+	{
+		if (m_particlePreviewColorTex) { CFBridgingRelease(m_particlePreviewColorTex); m_particlePreviewColorTex = nullptr; }
+		if (m_particlePreviewDepthTex) { CFBridgingRelease(m_particlePreviewDepthTex); m_particlePreviewDepthTex = nullptr; }
+		MTLTextureDescriptor* cd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kSceneColorFormat
+			width:S height:S mipmapped:NO];
+		cd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+		cd.storageMode = MTLStorageModePrivate;
+		m_particlePreviewColorTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:cd]);
+		MTLTextureDescriptor* dd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kDepthFormat
+			width:S height:S mipmapped:NO];
+		dd.usage = MTLTextureUsageRenderTarget; dd.storageMode = MTLStorageModePrivate;
+		m_particlePreviewDepthTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:dd]);
+		m_particlePreviewSize = S;
+	}
+	id<MTLTexture> colorTex = (__bridge id<MTLTexture>)m_particlePreviewColorTex;
+
+	// ── Orbit camera auto-framed around the LIVE particles' bounds.
+	glm::vec3 bmin(1e30f), bmax(-1e30f);
+	for (const auto& p : particles) { bmin = glm::min(bmin, p.position); bmax = glm::max(bmax, p.position); }
+	const bool valid = !particles.empty() && bmin.x <= bmax.x;
+	const glm::vec3 center = valid ? (bmin + bmax) * 0.5f : glm::vec3(0.0f);
+	const float extent = valid ? glm::max(glm::length(bmax - bmin) * 0.5f, 0.1f) : 1.0f;
+	const float camDist = std::max(0.05f, dist) * std::max(extent, 0.1f);
+	const float cp = std::cos(pitch), sp = std::sin(pitch);
+	const glm::vec3 camPos = center + glm::vec3(std::sin(yaw) * cp, sp, std::cos(yaw) * cp) * camDist;
+	const glm::mat4 view = glm::lookAt(camPos, center, glm::vec3(0.0f, 1.0f, 0.0f));
+	const glm::mat4 proj = glm::perspective(glm::radians(35.0f), 1.0f, 0.01f, camDist * 20.0f + 10.0f);
+	const glm::mat4 viewProj = kMetalClipFix * proj * view;
+	const glm::vec3 camRight(view[0][0], view[1][0], view[2][0]);
+	const glm::vec3 camUp   (view[0][1], view[1][1], view[2][1]);
+
+	MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+	rp.colorAttachments[0].texture     = colorTex;
+	rp.colorAttachments[0].loadAction  = MTLLoadActionClear;
+	rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+	rp.colorAttachments[0].clearColor  = MTLClearColorMake(0.0, 0.0, 0.0, 0.0);
+	rp.depthAttachment.texture     = (__bridge id<MTLTexture>)m_particlePreviewDepthTex;
+	rp.depthAttachment.loadAction  = MTLLoadActionClear;
+	rp.depthAttachment.storeAction = MTLStoreActionDontCare;
+	rp.depthAttachment.clearDepth  = 1.0;
+
+	id<MTLCommandBuffer> cb = [queue commandBuffer];
+	id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+
+	if (!particles.empty())
+	{
+		std::vector<float> inst;
+		inst.reserve(particles.size() * 8);
+		for (const auto& p : particles)
+			inst.insert(inst.end(), { p.position.x, p.position.y, p.position.z, p.size,
+			                          p.color.r, p.color.g, p.color.b, p.alpha });
+		id<MTLBuffer> instBuf = [device newBufferWithBytes:inst.data()
+		                                            length:inst.size() * sizeof(float)
+		                                           options:MTLResourceStorageModeShared];
+
+		void* matTex = nullptr;
+		const bool hasTex = ResolveMaterialTexture(materialId, matTex);
+
+		[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_particlePreviewPipeline];
+		[enc setVertexBuffer:instBuf offset:0 atIndex:0];
+		[enc setVertexBytes:&viewProj length:sizeof(viewProj) atIndex:1];
+		[enc setVertexBytes:&camRight length:sizeof(camRight) atIndex:2];
+		[enc setVertexBytes:&camUp    length:sizeof(camUp)    atIndex:3];
+		bool hasTexFlag = hasTex;
+		[enc setFragmentBytes:&hasTexFlag length:sizeof(hasTexFlag) atIndex:1];
+		[enc setFragmentTexture:(__bridge id<MTLTexture>)(hasTex ? matTex : m_dummyTexture) atIndex:0];
+		[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
+		[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6
+		      instanceCount:static_cast<NSUInteger>(particles.size())];
+	}
+	[enc endEncoding];
+
+	const char* dp = std::getenv("HE_PARTICLE_PREVIEW_DUMP");
+	id<MTLTexture> staging = nil;
+	if (dp && *dp)
+	{
+		MTLTextureDescriptor* sd2 = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kSceneColorFormat
+			width:S height:S mipmapped:NO];
+		sd2.storageMode = MTLStorageModeManaged; sd2.usage = MTLTextureUsageShaderRead;
+		staging = [device newTextureWithDescriptor:sd2];
+		id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+		[blit copyFromTexture:colorTex sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0)
+		           sourceSize:MTLSizeMake(S,S,1) toTexture:staging destinationSlice:0 destinationLevel:0
+		    destinationOrigin:MTLOriginMake(0,0,0)];
+		[blit synchronizeResource:staging];
+		[blit endEncoding];
+	}
+	[cb commit];
+	[cb waitUntilCompleted];
+
+	if (staging)
+	{
+		std::vector<uint16_t> half((size_t)S * S * 4);
+		[staging getBytes:half.data() bytesPerRow:S * 4 * sizeof(uint16_t)
+		       fromRegion:MTLRegionMake2D(0, 0, S, S) mipmapLevel:0];
+		auto h2f = [](uint16_t h) -> float {
+			uint32_t s = (h >> 15) & 1, e = (h >> 10) & 0x1f, m = h & 0x3ff, f;
+			if (e == 0) { if (m == 0) f = s << 31; else { e = 127 - 15 + 1; while (!(m & 0x400)) { m <<= 1; e--; } m &= 0x3ff; f = (s << 31) | (e << 23) | (m << 13); } }
+			else if (e == 0x1f) f = (s << 31) | (0xffu << 23) | (m << 13);
+			else f = (s << 31) | ((e - 15 + 127) << 23) | (m << 13);
+			float o; std::memcpy(&o, &f, 4); return o;
+		};
+		if (std::ofstream fo(dp, std::ios::binary); fo)
+		{
+			fo << "P6\n" << S << " " << S << "\n255\n";
+			for (int y = 0; y < S; ++y)
+				for (int x = 0; x < S; ++x)
+				{
+					const uint16_t* pxl = &half[((size_t)y * S + x) * 4];
+					for (int c = 0; c < 3; ++c)
+					{
+						float v = h2f(pxl[c]); v = v < 0 ? 0 : (v > 1 ? 1 : v);
+						uint8_t b = (uint8_t)(v * 255.0f + 0.5f);
+						fo.write(reinterpret_cast<const char*>(&b), 1);
+					}
+				}
+		}
+	}
+	return m_particlePreviewColorTex;
+}
+
 // ─── Window targets ───────────────────────────────────────────────────────────
 
 void MetalRenderer::CreateTarget(SDL_Window* sdlWin, WindowTarget& out)

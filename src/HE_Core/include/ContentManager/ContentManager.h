@@ -56,6 +56,8 @@ public:
 	InputActionAsset*              getInputActionMutable(HE::UUID id);
 	const InputMappingContextAsset* getInputMappingContext(HE::UUID id) const;
 	InputMappingContextAsset*       getInputMappingContextMutable(HE::UUID id);
+	const ParticleGraphAsset*  getParticleGraph(HE::UUID id) const;
+	ParticleGraphAsset*        getParticleGraphMutable(HE::UUID id);
 	const ShaderAsset*         getShader(HE::UUID id) const;
 	const PrefabAsset*         getPrefab(HE::UUID id) const;
 	const AnimationClipAsset*  getAnimationClip(HE::UUID id) const;
@@ -121,6 +123,7 @@ public:
 	HE::UUID registerInputMappingContext(InputMappingContextAsset asset);
 	HE::UUID registerAnimationClip(AnimationClipAsset asset);
 	HE::UUID registerPropertyAnimClip(PropertyAnimClipAsset asset);
+	HE::UUID registerParticleGraph(ParticleGraphAsset asset);
 
 	// Replace a registered asset's payload in place, keeping its UUID so existing
 	// references stay valid (e.g. regenerating a procedural terrain mesh after a
@@ -306,6 +309,7 @@ private:
 	SlotMap<HorizonCodeClassAsset> m_hcClassAssets;
 	SlotMap<InputActionAsset>        m_inputActionAssets;
 	SlotMap<InputMappingContextAsset> m_inputMappingAssets;
+	SlotMap<ParticleGraphAsset>      m_particleGraphAssets;
 	SlotMap<AudioAsset>         m_audioAssets;
 	SlotMap<FontAsset>          m_fontAssets;
 	SlotMap<ShaderAsset>        m_shaderAssets;

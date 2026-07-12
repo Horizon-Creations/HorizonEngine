@@ -8,6 +8,7 @@
 #include "HorizonCodeClassPanel.h"
 #include "InputAssetPanel.h"
 #include "SkeletalMeshEditorPanel.h"
+#include "ParticleGraphEditorPanel.h"
 #include "HorizonVersion.h"
 #ifdef __APPLE__
 #include "MacMenuBar.h"   // native system menu bar (replaces the ImGui menu row)
@@ -18,6 +19,7 @@
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonScene/LODSystem.h>
 #include <HorizonScene/NavigationSystem.h>
+#include <HorizonScene/ParticleSystem.h>
 #include <Scripting/ScriptEngine.h>
 #include <ContentManager/HAsset.h>
 #include <ContentManager/ContentManager.h>
@@ -3339,6 +3341,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
             InputAssetPanel::render(ctx, tabPath, tabPos, tabSize);
         else if (SkeletalMeshEditorPanel::isSkeletalMeshAsset(tabPath))
             SkeletalMeshEditorPanel::render(ctx, tabPath, tabPos, tabSize);
+        else if (ParticleGraphEditorPanel::isParticleAsset(tabPath))
+            ParticleGraphEditorPanel::render(ctx, tabPath, tabPos, tabSize);
         else
             ScriptEditorPanel::render(ctx, tabPath, tabPos, tabSize);
         return;
@@ -5019,7 +5023,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				         UIEditorPanel::isWidgetAsset(file->fullPath) ||
 				         HorizonCodeClassPanel::isClassAsset(file->fullPath) ||
 				         InputAssetPanel::isInputAsset(file->fullPath) ||
-				         SkeletalMeshEditorPanel::isSkeletalMeshAsset(file->fullPath))
+				         SkeletalMeshEditorPanel::isSkeletalMeshAsset(file->fullPath) ||
+				         ParticleGraphEditorPanel::isParticleAsset(file->fullPath))
 				{
 				const std::string tabLabel = std::filesystem::path(file->name).stem().string();
 				auto it = std::find_if(ctx.tabs.begin(), ctx.tabs.end(),
@@ -5203,6 +5208,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 			if (ImGui::MenuItem("Scene"))        tryCreate("NewScene",    ".hescene", HE::AssetType::Scene);
 			if (ImGui::MenuItem("Material"))     tryCreate("NewMaterial", ".hasset",  HE::AssetType::Material);
 			if (ImGui::MenuItem("Material Function")) tryCreate("NewMaterialFunction", ".hasset", HE::AssetType::MaterialFunction);
+			if (ImGui::MenuItem("Particle System")) tryCreate("NewParticleSystem", ".hasset", HE::AssetType::ParticleSystem);
 			if (ImGui::MenuItem("UI Widget"))    tryCreate("NewWidget",   ".hasset",  HE::AssetType::Widget);
 			if (ImGui::MenuItem("HorizonCode Class")) tryCreate("NewClass", ".hasset", HE::AssetType::HorizonCodeClass);
 			if (ImGui::BeginMenu("HorizonCode Player"))
@@ -6755,27 +6761,58 @@ void EditorUI::RenderInspector(AppContext& ctx)
 	}
 
 	// ── Particle System ─────────────────────────────────────────────────────
+	// The emitter config lives in a ParticleGraphAsset (authored in the Particle
+	// Graph Editor tab, same "asset instead of inline fields" move Material made) —
+	// this section is just the asset slot + per-instance runtime controls.
 	if (auto* ps = registry.try_get<ParticleSystemComponent>(entity))
 	{
 		if (componentHeader("Particle System", true, removed))
 		{
-			ImGui::DragFloat("Emit Rate##ps",      &ps->emitRate,      0.5f, 0.0f, 10000.0f); trackEdit();
-			ImGui::DragFloat("Lifetime Min##ps",   &ps->lifetimeMin,   0.05f, 0.01f, 100.0f); trackEdit();
-			ImGui::DragFloat("Lifetime Max##ps",   &ps->lifetimeMax,   0.05f, 0.01f, 100.0f); trackEdit();
-			ImGui::DragFloat("Start Size##ps",     &ps->startSize,     0.01f, 0.0f, 100.0f); trackEdit();
-			ImGui::DragFloat("End Size##ps",       &ps->endSize,       0.01f, 0.0f, 100.0f); trackEdit();
-			ImGui::ColorEdit3("Start Color##ps",   glm::value_ptr(ps->startColor)); trackEdit();
-			ImGui::ColorEdit3("End Color##ps",     glm::value_ptr(ps->endColor)); trackEdit();
-			ImGui::DragFloat("Start Alpha##ps",    &ps->startAlpha,    0.01f, 0.0f, 1.0f); trackEdit();
-			ImGui::DragFloat("End Alpha##ps",      &ps->endAlpha,      0.01f, 0.0f, 1.0f); trackEdit();
-			ImGui::DragFloat3("Velocity##ps",      glm::value_ptr(ps->initialVelocity), 0.1f); trackEdit();
-			ImGui::DragFloat("Spread (rad)##ps",   &ps->velocitySpread, 0.01f, 0.0f, 3.14f); trackEdit();
-			ImGui::DragFloat3("Gravity##ps",       glm::value_ptr(ps->gravity), 0.1f); trackEdit();
-			ImGui::DragInt("Max Particles##ps",    &ps->maxParticles, 1, 1, 10000); trackEdit();
-			ImGui::Checkbox("Playing##ps",         &ps->playing); trackEdit();
+			const ParticleGraphAsset* asset = (ps->particleAssetId == HE::UUID{} || !ctx.contentManager)
+				? nullptr : ctx.contentManager->getParticleGraph(ps->particleAssetId);
+			const std::string slotLabel = (ps->particleAssetId == HE::UUID{})
+				? std::string("(none — drop a particle system here)")
+				: (asset ? asset->name : std::string("(not loaded)"));
+
+			ImGui::TextUnformatted("Asset");
 			ImGui::SameLine();
-			ImGui::Checkbox("Looping##ps",         &ps->looping); trackEdit();
-			// Live particle count (read-only info).
+			ImGui::Button((slotLabel + "##psslot").c_str());
+			if (ImGui::BeginDragDropTarget())
+			{
+				if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_ASSET_PATH"))
+				{
+					std::error_code ec;
+					const std::string rel = std::filesystem::relative(
+						static_cast<const char*>(p->Data),
+						ctx.contentManager ? ctx.contentManager->contentRoot() : "", ec).generic_string();
+					if (!ec && !rel.empty() && rel.rfind("..", 0) != 0)
+					{
+						const HE::UUID id = ctx.contentManager->loadAsset(rel);
+						if (id != HE::UUID{} && ctx.contentManager->getParticleGraph(id))
+						{
+							if (ctx.undoSys) ctx.undoSys->snapshotNow();
+							ps->particleAssetId = id;
+							ParticleSystem::markConfigDirty(*ps);
+						}
+						else
+							Logger::Log(Logger::LogLevel::Warning,
+								"Editor: dropped asset is not a particle system");
+					}
+				}
+				ImGui::EndDragDropTarget();
+			}
+			if (ps->particleAssetId != HE::UUID{})
+			{
+				ImGui::SameLine();
+				if (ImGui::SmallButton("Clear##ps"))
+				{
+					if (ctx.undoSys) ctx.undoSys->snapshotNow();
+					ps->particleAssetId = HE::UUID{};
+					ParticleSystem::markConfigDirty(*ps);
+				}
+			}
+
+			ImGui::Checkbox("Playing##ps", &ps->playing); trackEdit();
 			ImGui::Text("Live: %zu", ps->particles.size());
 		}
 		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<ParticleSystemComponent>(entity); }

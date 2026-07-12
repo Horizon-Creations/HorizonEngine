@@ -93,7 +93,7 @@ void SceneSystems::tick(HorizonWorld& world, ContentManager& cm, IRenderer* rend
         for (auto [e, wc] : world.registry().view<WeatherComponent>().each()) { clock = wc.weatherTime; break; }
         pushGpuParticleParams(world, renderer, cameraPos, dt, gpuParticles, clock);
     }
-    { HE_PROFILE_SCOPE_N("ParticleSystem"); ParticleSystem::update(world, dt, cameraPos); } // camera-following precipitation volume (Phase 2)
+    { HE_PROFILE_SCOPE_N("ParticleSystem"); ParticleSystem::update(world, cm, dt, cameraPos); } // camera-following precipitation volume (Phase 2)
     { HE_PROFILE_SCOPE_N("Foliage");        FoliageSystem::update(world); }
     { HE_PROFILE_SCOPE_N("LOD");            LODSystem::update(world, cameraPos); }
 }
@@ -109,7 +109,7 @@ std::vector<HE::UUID> SceneSystems::collectAssetRefs(HorizonWorld& world)
     for (auto [e, c] : reg.view<SkeletalMeshComponent>().each())    add(c.meshAssetId);
     for (auto [e, c] : reg.view<ScriptComponent>().each())          add(c.scriptAssetId);
     for (auto [e, c] : reg.view<FoliageComponent>().each())         { add(c.meshAssetId); add(c.materialAssetId); }
-    for (auto [e, c] : reg.view<ParticleSystemComponent>().each())  { add(c.meshAssetId); add(c.materialAssetId); }
+    for (auto [e, c] : reg.view<ParticleSystemComponent>().each())  add(c.particleAssetId);
     for (auto [e, c] : reg.view<AnimatorComponent>().each())        add(c.clipAssetId);
     for (auto [e, c] : reg.view<AnimatorBlendComponent>().each())   { add(c.clipAId); add(c.clipBId); }
     for (auto [e, c] : reg.view<PropertyAnimatorComponent>().each()) add(c.clipId);
