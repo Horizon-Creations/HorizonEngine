@@ -10,6 +10,7 @@
 #include <HorizonScene/AnimationBlendSystem.h>
 #include <HorizonScene/Components/AnimatorStateMachineComponent.h>
 #include <HorizonScene/AnimationStateMachineSystem.h>
+#include <HorizonScene/AnimationPreview.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -920,4 +921,39 @@ TEST_CASE("PropertyAnimationSystem skips when playing=false")
 
     const auto& updPa = world.registry().get<PropertyAnimatorComponent>(e);
     CHECK(updPa.playbackTime == doctest::Approx(0.4f));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  AnimationPreview::evaluateClipPose (Skeletal Mesh Editor clip-scrub preview)
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST_CASE("AnimationPreview::evaluateClipPose matches the ECS-driven pose at the same time")
+{
+    // Same fixtures as the ECS-driven AnimationSystem tests above, but evaluated
+    // directly against the assets — this is exactly what the Skeletal Mesh
+    // Editor's clip-scrub preview does (no entity involved).
+    const SkeletalMeshAsset  mesh = makeOneBoneSkeletalMesh(HE::UUID::generate());
+    const AnimationClipAsset clip = makeTranslationClip(1.0f);
+
+    std::vector<glm::mat4> bones;
+    AnimationPreview::evaluateClipPose(mesh, clip, 0.5f, bones);
+
+    REQUIRE(bones.size() == 1);
+    // makeTranslationClip goes from (0,0,0) at t=0 to (1,0,0) at t=duration,
+    // identity IBM → the bone matrix IS the joint's world translation at t.
+    CHECK(bones[0][3][0] == doctest::Approx(0.5f));
+    CHECK(bones[0][3][1] == doctest::Approx(0.0f));
+    CHECK(bones[0][3][2] == doctest::Approx(0.0f));
+}
+
+TEST_CASE("AnimationPreview::evaluateClipPose at t=0 is the bind pose (identity, identity IBM)")
+{
+    const SkeletalMeshAsset  mesh = makeOneBoneSkeletalMesh(HE::UUID::generate());
+    const AnimationClipAsset clip = makeTranslationClip(1.0f);
+
+    std::vector<glm::mat4> bones;
+    AnimationPreview::evaluateClipPose(mesh, clip, 0.0f, bones);
+
+    REQUIRE(bones.size() == 1);
+    CHECK(bones[0] == glm::mat4(1.0f));
 }

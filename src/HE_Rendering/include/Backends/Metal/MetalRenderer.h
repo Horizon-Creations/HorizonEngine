@@ -83,6 +83,10 @@ public:
 	void* RenderMaterialPreview(ContentManager& cm, const HE::UUID& materialId,
 	                            uint32_t size, float yaw, float pitch, float dist,
 	                            int shape = 0) override;
+	void* RenderSkeletalPreview(ContentManager& cm, const HE::UUID& meshId,
+	                            const std::vector<glm::mat4>& boneMatrices,
+	                            uint32_t size, float yaw, float pitch, float dist,
+	                            bool showSkeleton = true) override;
 	void  InvalidateMesh    (const HE::UUID& meshId)     override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
 	void  SetSSAOSettings(const SSAOSettings& settings) override;
@@ -309,6 +313,17 @@ private:
 	void* m_previewVB = nullptr, *m_previewIB = nullptr; // id<MTLBuffer> (retained)
 	int   m_previewIdxCount = 0;
 	int   m_previewShape    = -1; // which primitive the VB/IB currently hold (-1 = none)
+
+	// Skeletal-mesh-preview target (RenderSkeletalPreview) — own dedicated RGBA16F
+	// color + depth texture (same format as the material preview, so the bone-line
+	// overlay can reuse m_debugLinePipeline/m_sceneDepthState verbatim). Deliberately
+	// a MINIMAL self-contained skinning pipeline (fixed sun+ambient, no shadow/SSAO/
+	// fog/sky-env) rather than the scene-integrated skinnedVertex+fragmentMain pair.
+	void* m_skelPreviewColorTex = nullptr; // id<MTLTexture> (retained)
+	void* m_skelPreviewDepthTex = nullptr; // id<MTLTexture> (retained)
+	int   m_skelPreviewSize     = 0;
+	void* m_skelPreviewPipeline = nullptr; // id<MTLRenderPipelineState> (retained)
+
 	// A procedural sphere (interleaved pos3/normal3/uv2, matching VertexIn) so per-material
 	// pipelines are visible on real 3D geometry even in the empty headless dump scene.
 	// Built + drawn (two spheres, two materials) when HE_SHADERC_MATERIAL=1.

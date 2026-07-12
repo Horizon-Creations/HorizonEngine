@@ -7,6 +7,7 @@
 #include "GameInstancePanel.h"
 #include "HorizonCodeClassPanel.h"
 #include "InputAssetPanel.h"
+#include "SkeletalMeshEditorPanel.h"
 #include "HorizonVersion.h"
 #ifdef __APPLE__
 #include "MacMenuBar.h"   // native system menu bar (replaces the ImGui menu row)
@@ -3336,6 +3337,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
             HorizonCodeClassPanel::render(ctx, tabPath, tabPos, tabSize);
         else if (InputAssetPanel::isInputAsset(tabPath))
             InputAssetPanel::render(ctx, tabPath, tabPos, tabSize);
+        else if (SkeletalMeshEditorPanel::isSkeletalMeshAsset(tabPath))
+            SkeletalMeshEditorPanel::render(ctx, tabPath, tabPos, tabSize);
         else
             ScriptEditorPanel::render(ctx, tabPath, tabPos, tabSize);
         return;
@@ -5015,7 +5018,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				         MaterialEditorPanel::isMaterialFunctionAsset(file->fullPath) ||
 				         UIEditorPanel::isWidgetAsset(file->fullPath) ||
 				         HorizonCodeClassPanel::isClassAsset(file->fullPath) ||
-				         InputAssetPanel::isInputAsset(file->fullPath))
+				         InputAssetPanel::isInputAsset(file->fullPath) ||
+				         SkeletalMeshEditorPanel::isSkeletalMeshAsset(file->fullPath))
 				{
 				const std::string tabLabel = std::filesystem::path(file->name).stem().string();
 				auto it = std::find_if(ctx.tabs.begin(), ctx.tabs.end(),
