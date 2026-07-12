@@ -1,5 +1,11 @@
 # Horizon Engine — Roadmap
 
+> **Archiviert (12.07.2026):** Dieses Dokument beschreibt den Stand vor dem ersten
+> Render-Pfad (Juni 2026, Meilenstein 1–2) und ist durch [`MASTERPLAN.md`](MASTERPLAN.md)
+> vollständig abgelöst — jeder hier genannte Meilenstein ist längst erledigt und
+> dort mit aktuellem Stand nachgeführt. Nur zur historischen Einordnung stehen lassen,
+> nicht mehr als Arbeitsgrundlage nutzen.
+
 Stand: Juni 2026. Basis: Code-Audit nach dem Metal-Backend-Merge.
 Leitidee: **jeder Meilenstein endet mit etwas Sichtbarem im Editor** — kein
 monatelanges Infrastruktur-Graben ohne Feedback.

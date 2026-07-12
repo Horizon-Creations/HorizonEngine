@@ -8,19 +8,27 @@ Unity/Godot-Featureset, nicht Unreal-AAA).
 
 ## Ist-Zustand (was schon fertig ist)
 
+> **Nachtrag 12.07.2026:** Die Tabelle unten war seit Erstellung des Dokuments (12.06.2026) nie
+> aktualisiert worden und beschrieb noch den Stand VOR fast allem, was in diesem Dokument steht
+> (Importer als „Stubs", SceneSerializer „nur Name+Hierarchie", Physik/Scripting/Audio/Animation/
+> Partikel/Navigation/In-Game-UI „fehlen komplett" — alles längst fertig). Korrigiert per
+> Doku-Audit, Details siehe Forts. 68 ganz unten.
+
 | Bereich | Status |
 |---|---|
-| Core: Window, App-Loop, Input, Logger, ContentManager, .hasset-Format | ✅ |
-| UUID-Persistenz im META-Chunk (v2) | ✅ |
-| Erster Render-Pfad: ECS-Welt → sichtbares Mesh auf GL **und** Metal (CommandBuffer, RenderWorld, RenderExtractor, Kamera) | ✅ |
-| Editor-Shell: Hub, Docking, Outliner, Content Browser | ✅ |
-| Backend-Gerüste GL/Metal/Vulkan/D3D11/D3D12 | 🟡 Alle 5 zeichnen Szene + Directional-Schatten; **GL+Metal sind das Vollausbau-Paar** (alle Rendering-Features); D3D11/D3D12/Vulkan nur auf Windows für Szene+Schatten validiert — alle weiteren Features fehlen dort (vollständige Lückenliste in Phase 6.2) |
-| Asset-Importer (Texture/Mesh/Material/Audio), asset_compiler, Packer | 🔴 Stubs |
-| SceneSerializer | 🔴 nur Name + Hierarchie |
-| RenderGraph, RenderPass, RenderResourceManager, GPUMemoryAllocator | 🔴 leer |
-| Memory (Ref\<T\>, Allocatoren) | 🔴 leer |
-| Physik, Scripting, Audio, Animation, Partikel, Navigation, In-Game-UI | 🔴 fehlen komplett |
-| Tests, CI, Profiling | 🔴 fehlen |
+| Core: Window, App-Loop, Input, Logger, ContentManager, `.hasset` v2 (UUID-persistent) | ✅ |
+| Rendering GL+Metal (Vollausbau-Paar) — RenderGraph/Passes, PBR, CSM-Schatten, HDR/Bloom/FXAA, SSAO+HBAO+GTAO, sortierte Transparenz, Skybox+IBL, GPU-Instancing, Skeletal-GPU-Skinning, volumetrische Wolken, Nebula v3.4 + physikalische Atmosphären-Streuung, Material-Node-Graph-Editor | ✅ |
+| Rendering D3D11/D3D12/Vulkan | 🟡 fast auf GL/Metal-Parität (HDR/Bloom/FXAA/SSAO+HBAO+GTAO/Skybox+IBL/Skinning/In-Game-UI-Pass/Transparenz/PBR-Skalare ✅ auf allen drei); offen: Basecolor-Texturen auf D3D12/Vulkan, MaterialComponent-Override, echtes GPU-Instancing, Material-Graph-Shader, Nebula v2+/Atmosphären-Sky — siehe Phase 6.2 |
+| Editor: Hub, Docking, Outliner, Content Browser, Inspector, Gizmos, Undo/Redo, Play-Mode, gemeinsamer `GraphEditor`-Canvas (Material- + HorizonCode-Graph) | ✅ |
+| Asset-Pipeline: Importer (Textur/Mesh/Material/Audio), `asset_compiler`, hpak v2 (LZ4HC/zstd, AES-256-GCM, On-Demand-Streaming, Overlays), Export-Pipeline (Profile, Async, Inkrementell, Plattform-Ziele, lauffähige Exporte inkl. macOS-.app-Bundle) | ✅ |
+| SceneSerializer (alle Komponenten, JSON+CBOR) | ✅ |
+| RenderGraph, RenderResourceManager, GPUMemoryAllocator | ✅ |
+| Memory (`Ref<T>`, Job-System) | ✅ |
+| Engine-Systeme: Physik (Jolt), Scripting (Lua + Python + natives C++ `GameLogicLoader` + HorizonCode-Interpreter + HorizonCode-C++-Codegen), Audio (miniaudio), Animation (Skinning/Blending/State-Machine/Property-Anim), Navigation (Recast/Detour), Partikel, In-Game-UI/Widget-System v3, Input-Mapping + Input-Assets + PlayerHost | ✅ |
+| Textur-Kompression | 🟡 ASTC 4×4 (Metal/Apple-Silicon-Export) ✅ — BCn (D3D/Vulkan/GL) 🔴 |
+| Linux-Window/Input-Pfad | 🔴 kein Engine-Code |
+| Tests (645+), CI (macOS+Windows-Matrix), Profiling (Tracy) | ✅ |
+| Dokumentation (dieses Dokument, Website-Docs) | 🟡 dieses Dokument war bis 12.07.2026 ~230 Commits im Rückstand (jetzt nachgezogen, Forts. 68); Website-Script-API-Referenz (`horizon.*`) weiterhin unvollständig |
 
 ---
 
@@ -133,7 +141,7 @@ und P4d (Skelette kommen aus dem Mesh-Import).
 | 1.3 | **MaterialImporter** | 1.1 | ✅ JSON + glTF metallic/roughness → MTRL-Chunk; PBR-Skalare |
 | 1.4 | **asset_compiler verdrahten** | 1.1–1.3 | ✅ Verzeichnis-Walk, Endung → Importer, mtime-Inkrementalität |
 | 1.5 | **Editor-Import**: Button + Drag&Drop in den Content Browser | 1.4 | ✅ Import-Kontextmenü + „Add to Scene" für Meshes im Content Browser |
-| 1.6 | **Textur-Kompression** (BCn/ASTC, z. B. via bc7enc o. ä.) | 1.1 | kann nach hinten rutschen, aber vor Shipping (P6) nötig |
+| 1.6 | **Textur-Kompression** (BCn/ASTC, z. B. via bc7enc o. ä.) | 1.1 | 🟡 ASTC 4×4 für Metal/Apple-Silicon-Export fertig (Commits `7c288b4`/`4160429`); **BCn für D3D11/D3D12/Vulkan/GL fehlt weiterhin** — nötig vor Shipping auf diesen Plattformen |
 | 1.7 | **AudioImporter** (PCMD-Chunks, WAV/OGG via dr_libs/stb_vorbis) | — | ✅ dr_wav → PCMD-Chunk, AudioImporter.cpp in asset_compiler |
 
 **DoD:** Heruntergeladenes glTF-Modell mit Texturen importieren und im Editor gerendert sehen.
@@ -180,6 +188,7 @@ Reihenfolge nach Sichtbarkeit pro Aufwand. Braucht P1 für Materialien/Texturen;
 | 3.10 | **Transparenz-Pass** (sortiertes Alpha-Blending) | 3.1, 3.4 | ✅ Forts. 15 — material-getriebenes opacity<1 → sortierte Transparenz-Liste, back-to-front |
 | 3.11 | **Anti-Aliasing**: FXAA zuerst | 3.6 | ✅ FXAA-PostProcess-Pass (GL+Metal); TAA ist Kür (P7) |
 | 3.12 | **SSAO** | 3.4 | ✅ Forts. 14 — view-space Position-Prepass → Hemisphären-Occlusion → Blur; GL+Metal |
+| 3.13 | **Material-Node-Graph-Editor** (Unreal-artige Attribut-Graphen: BaseColor/Metallic/Roughness/Emissive/Opacity/Normal/WPO → 1 Lighting-Modell) | 3.2, 3.3 | ✅ Forts. 68 — `HE::MaterialGraph`, ~45 Node-Typen, Blend-Modes, Material-Functions/-Instances, Live-Preview im geteilten `GraphEditor`; **nur GL+Metal verdrahtet** (D3D/Vulkan-Renderer rufen `MaterialShaderLibrary` nirgends auf — echte Lücke, s. Phase 6.2) |
 
 **DoD:** PBR-Szene mit Schatten, HDR, Skybox bei stabilen Frametimes; Frustum-Culling messbar via Tracy.
 
@@ -209,6 +218,9 @@ profitieren von P2.8 (Play-Mode zum Testen).
 | 4b.5 | C#/.NET-Hosting — später oder nie | 4b.2 | erst evaluieren, wenn Lua nicht reicht |
 | 4b.6 | **Python (CPython) als zweite Gameplay-Sprache** | 4b.2 | ✅ Forts. 63 (02.07.2026) — `IScriptBackend` + `ScriptApi` (13 Fn) extrahiert; `PyScriptBackend` (echtes CPython 3.14 via `find_package(Python3 Development.Embed)`→`HE_HAVE_PYTHON`, pImpl versteckt `<Python.h>`, sonst No-op-Stubs): `horizon`-Inittab-Modul marshallt gegen `ScriptApi`, Skripte erben `horizon.Behavior`, `self.entity_id`, on_start/on_update/on_collision_enter/on_collision_exit, Properties (typisierte Klassenattribute)+Injection, Hot-Reload via `__class__`-Patch. `ScriptContext` routet pro Sprache (Sprache im High-Byte der InstanceId, Lua==0 bit-identisch; `backendForName`). Sprache am Asset (`ScriptAsset::language`, 1-Byte `CHUNK_SLNG`, fehlt→Lua, back-compat; Roundtrip Store/LZ4/Zstd getestet). Editor-Create-Menü „Script (Lua)/(Python)" mit Starter-Template. 16 Python-Tests (12 backend + 4 Routing) + SLNG-Roundtrip; 529 Tests grün. Zurückgestellt: Editor-Property-*Preview* für Python, GameApplication-Script-Driving (pre-existing Editor-Play-Mode-only). Design: `docs/scripting-python-cpp-design.md` §4b |
 
+| 4b.7 | **HorizonCode** — drittes Scripting-Frontend: visuelles Node-Scripting (bislang nur Interpreter), zentralisiert über EINE `HorizonCode::Runtime` (HE_Core) für alle Host-Systeme (UI-Widgets, Level-Script pro Szene, GameInstance app-weit, PlayerController/-Character) | 4b.2 | ✅ Forts. 68 — Graph/Node/Link/Variable-Datenmodell; Access-Modifier, Referenz-Pins (Bind/Emit-Events, CallExternal), Get/Set-Variable; gemeinsamer `GraphEditor`-Canvas mit dem Material-Editor; Engine-Zugriff über dieselbe `HE::api`-Registry wie Lua/Python (X-Macro-Feldtabellen, z. B. alle 53 EnvironmentComponent-Felder scriptbar über 1 Registry) |
+| 4b.8 | **HorizonCode → C++-Codegen** (WP0-WP6) | 4b.7 | ✅ Forts. 68 — Graph-Export erzeugt zusätzlich zur interpretierten `graphJson` eine kompilierte `CompiledInstance`-Subklasse (`HcCodegen`) in `HorizonCodeGen.{dylib,dll,so}`; teilt Runtime/InstanceId/GC mit dem Interpreter (gemischte Populationen möglich), 15-Fixture-Paritätstest interpretiert==kompiliert byte-exakt; In-Editor-Compile-Check + Export-Report + Dispatch-Budget (256-Cascade-Cap gegen Bind/Emit-Exponentialblowup); neue duale Nodes Delay/Is-Valid/Do-Once/Flip-Flop. **OFFEN:** nur Host-Plattform kompiliert (Cross-Export fällt auf Interpreter zurück), WP7 (direkte typisierte Calls/Optimierung) nicht begonnen, noch kein manueller HW-Smoke-Test eines gepackten Builds |
+
 ### 4c — Audio
 | # | Aufgabe | Hängt ab von | Details |
 |---|---|---|---|
@@ -236,10 +248,11 @@ Macht aus „Renderer + Systeme" eine Engine, in der man ein Spiel *baut*.
 | 5.1 | **Prefabs** (Entity-Hierarchie als Asset, Instanzen + Overrides) | 2.2 | ✅ Forts. 31 — serializeSubtree/instantiatePrefab, PrefabAsset, ContentManager-Integration, Editor-Kontextmenü, 9 Tests |
 | 5.2 | **Input-Mapping** (Actions/Axes statt Roh-Keys, Gamepad) | — | ✅ Forts. 32 — InputMapping (Actions+Axes, mapAction/mapAxis/tick/isPressed/axisValue), 17 Tests |
 | 5.3 | **Partikelsystem** (CPU-Sim zuerst, instanziertes Rendering) | 3.8 | ✅ Forts. 53 — ParticleSystemComponent (Emitter-Config + Particle-Pool), ParticleSystem::update (Euler-Integration, Emission, Culling), Billboard-Rendering via GPU-Instancing, kDefaultQuadMeshId, SceneSerializer, EditorUI-Panel, 8 Tests |
-| 5.4 | **In-Game-UI-Runtime** (Canvas, Text via MSDF/stb_truetype, Buttons, Anchoring) | Render-Pfad ✅ | ✅ Forts. 54 — UICanvas/Element/Text/Image/Button-Components; UISystem::extract (Anchor-Layout, Pivot, Layer-Sort); stb_truetype ProggyClean-Atlas; GL+Metal 2D-Quad-Pass nach FXAA (attrib-los, vertex_id); UIRenderObject in HorizonCore; RenderExtractor::extractUI; SceneSerializer; EditorUI-Inspector; 14 Tests |
+| 5.4 | **In-Game-UI-Runtime** (Canvas, Text via MSDF/stb_truetype, Buttons, Anchoring) | Render-Pfad ✅ | ✅ Forts. 54 (v1: UICanvas/Element/Text/Image/Button-Components, GL+Metal 2D-Quad-Pass). **Seither zu UI-Widget-System v2/v3 ausgebaut (Forts. 68):** Widgets sind jetzt eigenständige `WidgetManager`-Objekte außerhalb der ECS-Welt (UMG-artig, Designer+Graph), Element-Klassenhierarchie (`UIElement`-Basis + 9 Unterklassen Panel/Image/Text/Button/CheckBox/Slider/ProgressBar/TextInput/ComboBox), Widget-Logik läuft über HorizonCode (4b.7) statt fester C++-Callbacks |
 | 5.5 | **Navigation**: Recast/Detour-NavMesh-Baking + Agenten | 4a.1 | ✅ Forts. 52 |
 | 5.6 | **Szenen-Streaming/Additive-Load** (mehrere Szenen gleichzeitig) | 2.2 | ✅ Forts. 51 |
 | 5.7 | **Event-/Messaging-System** für Gameplay-Code | 4b.2 | ✅ Forts. 33 — EventBus (typed publish/subscribe, RAII Subscription, re-entrancy-safe snapshot), 15 Tests |
+| 5.8 | **Input-Assets** (editor-authorierte `InputActionAsset`/`InputMappingContextAsset`) **+ PlayerHost** | 5.2 | ✅ Forts. 68 — `InputAssetPanel` (Action Button/Axis, SDL-Scancode-Bindings) resolved zu `InputMapping`-Bindings + HorizonCode-Events `Input.<name>.Pressed/Released/Axis`; `PlayerHost` spawnt bei Play-Start automatisch 1 Instanz pro `PlayerController`/`PlayerCharacter`-HorizonCode-Klasse (Construct+BeginPlay, pumpt Input-Events+Tick), teilt sich die `GameInstanceHost`-Runtime (keine eigene). **Bewusst simpel:** kein Possession-/Pawn-Swap-Modell, keine Spieler-Indizes — „spawn automatisch alles, was als Spieler-Klasse markiert ist". Glue-Funktionen getestet (`test_inputmapping.cpp`), Host-Wiring (Spawn/Tick-Pump) noch ohne dedizierten Test |
 
 ---
 
@@ -274,38 +287,72 @@ anschließend **deployt** (`python3 deploy.py` im Website-Repo). Nicht aufschieb
 veraltete Doku ist schlimmer als keine (Warnbeispiel: die stale ROADMAP.md /
 „Ist-Zustand"-Tabelle, die dem Code monatelang widersprach).
 
-### D3D11 / D3D12 / Vulkan — was zur GL/Metal-Parität fehlt (Stand 18.06.2026)
+### D3D11 / D3D12 / Vulkan — was zur GL/Metal-Parität fehlt (Stand 12.07.2026, korrigiert)
 
-Die drei Nicht-macOS-Backends wurden am 14.06. auf Windows nur für **Szene-Draw +
-Directional-Schatten** validiert (`_shots/{d3d11,d3d12,vulkan}.png`). **Jedes Rendering-Feature
-seither wurde nur auf GL+Metal gebaut**; auf D3D/Vulkan ist es ein noch offener (blinder) Port.
-Verifiziert per Code-Scan (D3D11Renderer.cpp 715 Z., D3D12Renderer.cpp 844 Z., VulkanRenderer.cpp
-1288 Z.): **keines** der drei Backends hat eines der folgenden Features.
+> **Korrektur-Hinweis:** Die Tabelle unten wurde am 18.06.2026 geschrieben und danach nie
+> nachgezogen, obwohl fast jede Zeile bereits **6 Tage später** (Commits `fa353c3`…`a53ebe3`,
+> 20.06.2026, VOR jeder weiteren Zeile dieses Dokuments) geschlossen wurde. Ein Doku-Audit am
+> 12.07.2026 (HEAD `d3c411f`) hat den Code direkt gegengeprüft — siehe Forts. 68 unten für die
+> Commit-Liste. Diese Version der Tabelle ist der korrigierte Ist-Stand.
 
 | Feature (GL+Metal ✅) | D3D11 | D3D12 | Vulkan | Plan-Ref |
 |---|:--:|:--:|:--:|---|
 | Basecolor-Texturen | ✅ | 🔴 (Flat) | 🔴 (Flat) | — |
-| HDR + ACES-Tonemapping | 🔴 | 🔴 | 🔴 | 3.6 |
-| Bloom | 🔴 | 🔴 | 🔴 | 3.6 |
-| SSAO / HBAO | 🔴 | 🔴 | 🔴 | 3.12 |
-| FXAA | 🔴 | 🔴 | 🔴 | 3.11 |
-| Skybox + IBL-Ambient/Specular | 🔴 | 🔴 | 🔴 | 3.9 |
-| Tag-Nacht / Atmosphäre / Mond / Sterne / Wolken / Aurora | 🔴 | 🔴 | 🔴 | 3.9 |
-| Sortierte Transparenz (opacity<1) | 🔴 | 🔴 | 🔴 | 3.10 |
-| GPU-Instancing (same-mesh-Batch) | 🔴 | 🔴 | 🔴 | 3.8 |
+| HDR + ACES-Tonemapping | ✅ | ✅ | ✅ | 3.6 |
+| Bloom | ✅ | ✅ | ✅ | 3.6 |
+| FXAA | ✅ | ✅ | ✅ | 3.11 |
+| Sortierte Transparenz (opacity<1) | ✅ | ✅ | ✅ | 3.10 |
+| PBR-Skalare (baseColor/metallic/roughness) | ✅ | ✅ | ✅ | 3.3 |
+| SSAO / HBAO / GTAO | ✅ | ✅ | ✅ | 3.12 |
+| Skybox + IBL-Ambient/Specular + Fog + Debug-Lines | ✅ | ✅ | ✅ | 3.9 |
+| Skeletal-Mesh GPU-Skinning (Bone-Matrizen) | ✅ | ✅ | ✅ | 4d.2 |
+| In-Game-UI-Pass (Canvas/Text/Button) | ✅ | ✅ | ✅ | 5.4 |
+| PostProcessPass im RenderGraph verdrahtet | ✅ | ✅ | ✅ | 3.4 |
+| Volumetrische Wolken (3D-Noise) | ✅ | ✅ | ✅ | Kür |
 | Material-Override (MaterialComponent) | 🔴 | 🔴 | 🔴 | #Mat |
-| PBR-Skalare (baseColor/metallic/roughness) | 🔴 | 🔴 | 🔴 | 3.3 |
-| Debug-Draw (Linien/AABB/Sphere) | 🔴 | 🔴 | 🔴 | 0.7 |
-| In-Game-UI-Pass (Canvas/Text/Button) | 🔴 | 🔴 | 🔴 | 5.4 |
-| Skeletal-Mesh GPU-Skinning (Bone-Matrizen) | 🔴 | 🔴 | 🔴 | 4d.2 |
-| PostProcessPass im RenderGraph verdrahtet | 🔴 | 🔴 | 🔴 | 3.4 |
+| GPU-Instancing (echter Instanced-Draw statt Loop) | 🟡 (?) | 🔴 (loopt `DrawIndexedInstanced`) | 🟡 (?) | 3.8 |
+| **Material-Node-Graph-Shader** (Forts. 68) | 🔴 | 🔴 | 🔴 | #Mat |
+| **Nebula v2–v3.4 / Atmosphären-Streuung / Halos / God-Rays / Regenbogen** (Forts. 68) | 🔴 (v1 only) | 🔴 (v1 only) | 🔴 (v1 only) | 3.9 |
 
-Außerdem offen: **Textur-Kompression** (1.6, BCn/ASTC — Enum existiert, kein Encoder; Importer
-speichert RGBA8 roh) und **Linux-Window/Input-Pfad** (6.6 — nur `__APPLE__`/`_WIN32`-Branches im
-Code, kein `__linux__`). Hinweis: alle Post-FX-Pässe brauchen auf D3D/Vulkan zuerst die
-Offscreen-Render-Target-Allokation (RTV/DSV-Pool bzw. VkImage-Pool), die GL/Metal mit HDR
-eingeführt haben — der `RenderPassIO`-Seam (3.4) ist dafür bereits da, der Backend-Sink muss die
-Targets nur noch anlegen + binden.
+**Echte verbleibende Lücken (Stand 12.07.2026):**
+- **Basecolor-Texturen auf D3D12/Vulkan** — beide zeichnen weiterhin Flat-Color
+  (`D3D12Renderer.cpp:96-99` hat den TODO-Kommentar dazu explizit im Code stehen).
+- **MaterialComponent-Override** — `IRenderer::InvalidateMaterial` ist nur in
+  `OpenGLRenderer.h`/`MetalRenderer.h` überschrieben; D3D11/D3D12/Vulkan ignorieren das Feld
+  weiterhin komplett (nicht additiv nachgezogen, obwohl PBR-Skalare + Texturen zum Teil schon da sind).
+- **Echte GPU-Instancing-Parität** — D3D12 issued pro Instanz einen eigenen
+  `DrawIndexedInstanced`-Call in einer Schleife statt eines echten Instance-Buffers wie
+  GL (`glDrawArraysInstanced`)/Metal — funktional ok, aber kein Performance-Gewinn. D3D11/Vulkan
+  nicht im Detail nachgeprüft (⚠️ TODO beim nächsten Audit).
+- **Material-Node-Graph-Editor** (Forts. 68, komplett neu seit 18.06. und bisher nirgends in
+  diesem Dokument erwähnt) rendert seine kompilierten Shader nur über `MaterialShaderLibrary`,
+  die ausschließlich von `MetalRenderer.mm`/`OpenGLRenderer.cpp` angesprochen wird — der
+  `Backend`-Enum kennt zwar `HLSL`/`SpirV`, aber **kein D3D/Vulkan-Renderer ruft die Library
+  überhaupt auf**. Jedes über den Material-Graph gebaute Material ist auf D3D/Vulkan also nicht
+  nur "nicht optimal", sondern schlicht **nicht darstellbar** wie im Graph gebaut.
+- **Sky/Nebula seit 18.06.**: `sky.frag` (Vulkan/D3D, HLSL-Pendant) hat noch die ALTE
+  Nebula v1 + das alte einfache Gradient-`skyColor` — Nebula v2→v3.4 (Piece-Modell,
+  Auto-Connections, Stripes/Mottle), die physikalisch-basierte Atmosphären-Streuung
+  (Rayleigh+Mie+Ozon), 22°-Halo-Experimente/Mond-Corona, God-Rays und der Regenbogen-Effekt
+  existieren nur auf GL+Metal.
+
+**Bereits erledigt, aber weiterhin offen (unverändert aus der alten Tabelle):**
+- **Textur-Kompression** (1.6): ASTC 4×4 für Metal/Apple-Silicon-Export ist fertig
+  (Commits `7c288b4`/`4160429`); **BCn für D3D11/D3D12/Vulkan/GL fehlt weiterhin** (kein
+  bc7/dxt/compressonator-Code im Repo).
+- **Linux-Window/Input-Pfad** (6.6): weiterhin 0 Engine-Code — nur vendorte Third-Party-Libs
+  (`miniaudio.h`, ImGui-Backends) haben `__linux__`-Zweige.
+
+Hinweis: alle Post-FX-Pässe brauchen auf D3D/Vulkan zuerst die Offscreen-Render-Target-Allokation
+(RTV/DSV-Pool bzw. VkImage-Pool), die GL/Metal mit HDR eingeführt haben — dieser Teil ist laut
+Audit inzwischen ebenfalls auf allen drei Backends vorhanden (sonst könnten HDR/Bloom/SSAO/FXAA
+dort nicht laufen).
+
+**CI-Hinweis:** `.github/workflows/ci.yml` baut eine Matrix aus macOS **und** Windows (MSVC via
+`ilammy/msvc-dev-cmd`, Ninja, `ctest`) — D3D11/D3D12 werden also bei jedem Push kompilier- und
+unit-test-verifiziert. Das ist **kein** GPU-Render-Output-Check (Windows-CI-Runner hat keine GPU);
+Vulkan hat keinen eigenen CI-Job, kompiliert aber im selben Windows-Job mit. Echte visuelle
+Verifikation bleibt Sache eines manuellen Windows-Durchgangs (letzter war 14.06.2026).
 
 ---
 
@@ -569,7 +616,9 @@ aus dem im Mesh eingebetteten Material). Neuer Datenfluss:
   (heute nur on-demand beim Drag&Drop). Es gibt noch keinen Bulk-Preload/Asset-
   Registry (UUID→Pfad) — betrifft genauso Mesh-UUIDs und gehört zu P6 (6.4
   Asset-Streaming). In-Session funktioniert alles.
-- **HDR auf D3D/Vulkan (Top-5 #1) bleibt offen** (blinder Windows-Port).
+- **HDR auf D3D/Vulkan (Top-5 #1) bleibt offen** (blinder Windows-Port). *[Nachtrag
+  12.07.2026: erledigt, siehe Commit `706354b` bzw. Forts. 68 unten — dieser Absatz
+  ist historisch stehen gelassen.]*
 
 **Preferences-Fenster (Edit ▸ Preferences / Ctrl+,):** Das vorhandene, aber nie
 aufgerufene `DrawPreferencesWindow` ist jetzt in `RenderEditor` verdrahtet +
@@ -579,8 +628,7 @@ config.json.
 
 **Nächste Schritte (Top 5):**
 
-1. **HDR + Bloom auf D3D11/D3D12/Vulkan** (blind, auf Windows zu validieren) —
-   analog GL/Metal: RGBA16F-SceneColor + Tonemap/Bloom-PostProcess in den Sinks.
+1. ✅ **HDR + Bloom auf D3D11/D3D12/Vulkan** — erledigt (Commit `706354b`, s. Forts. 68).
 2. ✅ **Material-Inspector** — erledigt (GL+Metal, s.o.).
 3. ✅ **Save-Prompt bei ungesicherten Änderungen** — erledigt (s.u.).
 4. ✅ **Bloom** (3.6 Forts.) — erledigt (GL+Metal, s.u.).
@@ -2028,3 +2076,188 @@ Lifetime-sicher mit der bestehenden `SlotMap`/`m_handleToUUID`-Buchführung inte
 - `OnContactRemoved` liefert nur BodyID-Paare ohne UserData-Zugriff → Exit-Events werden über den `m_exited`-Buffer implementiert aber vorerst leer gelassen (Enter reicht für Gameplay).
 - ScriptContext ist play-mode-only (`unique_ptr`, wird auf stop zerstört) — keine Runtime-Zustandslecks in den Editor-Zustand.
 - **411 Tests grün**. Commit `2b0ddd9`.
+
+---
+
+## Forts. 68 — Dokumentations-Catch-up: sechs unbeschriebene Feature-Bereiche (18.06.–12.07.2026)
+
+> **Warum dieser Eintrag existiert:** Zwischen Forts. 60 (`2b0ddd9`, 18.06.2026) und HEAD
+> (`d3c411f`, 12.07.2026) sind **~230 Commits** gelandet, ohne dass dieses Dokument nachgezogen
+> wurde — inklusive der D3D/Vulkan-Paritätstabelle, die schon 6 Tage nach ihrer eigenen
+> Erstellung überholt war. Ein Audit (3 parallele Recherche-Agenten + Cross-Check gegen Code/Git)
+> hat den Rückstand aufgearbeitet. Was an Packaging/Export/hpak-Arbeit in diesem Zeitraum
+> passierte (Forts.-Nummern 55/57/58/59/62/64/65/66/67 — hpak v2, Export-Profile, Inkrementelles
+> Packen, Plattform-Ziele, lauffähige Exporte + Embedded-Key, macOS-.app-Bundle) steht bereits
+> **inline in den Phase-6-Tabellenzellen oben** und wird hier nicht wiederholt. Ebenso bereits
+> oben eingepflegt: GameLogicLoader C1/C2 (natives C++-Gameplay) und Python-Scripting 4b.6.
+> Die folgenden sechs Bereiche fehlten dagegen komplett.
+
+### 61.1 — UI-Widget-System v2/v3
+
+Aus dem in 5.4 dokumentierten v1 (ECS-gebundenes `UICanvas`) wurde ein eigenständiges,
+UMG-artiges System: Widgets leben als `WidgetManager`-Objekte **außerhalb** der ECS-Welt
+(Designer + Graph pro Widget-Asset). Element-Klassenhierarchie: `UIElement`-Basis + 9
+Unterklassen (Panel/Image/Text/Button/CheckBox/Slider/ProgressBar/TextInput/ComboBox), jede mit
+eigenen Properties/Events/`render()`. Widget-Logik läuft nicht mehr über feste C++-Callbacks,
+sondern über **HorizonCode** (61.2) — Lua/Python haben Bindings dafür
+(`horizon.createWidget/show/hide/destroy/setZOrder/callWidgetFunction/showCursor/hideCursor`).
+Text- + Material-Rendering auf GL+Metal; stb_truetype-Font-Pipeline. Bekannter Metal-Stolperstein
+(bereits als eigenes Memory dokumentiert, [[metal-ui-alpha-compositing]]): transparente UI wurde
+schwarz, weil der UI-Pass den Framebuffer-Alpha überschrieb + `CAMetalLayer` nicht opaque war.
+**Auf main gepusht** (`1197e13`, 621 Tests zum Zeitpunkt des Merges). Offen: D3D/Vulkan-Parität
+für Text/Material-Rendering; Real-HW-Visual-Verify (kein GUI-Display in dieser Session/Sandbox).
+
+### 61.2 — HorizonCode: von entkoppeltem Widget-Interpreter zu zentralisierter Runtime
+
+Vier Ausbaustufen, alle im Session-Memory im Detail nacherzählt, hier konsolidiert:
+1. **Geteilter `GraphEditor`-Canvas** (`src/HE_Editor/GraphEditor.h/.cpp`): Material-Graph UND
+   HorizonCode-Graph nutzen dieselbe daten-getriebene Node-Canvas-Komponente (Pan/Zoom/Select/
+   Link/Kontextmenü/Add-Popup), pro Host über ein `Model`-Struct aus `std::function`-Callbacks
+   adaptiert. Ersetzt zwei vorher unabhängige ~1900- bzw. ~290-Zeilen-Eigencanvasse.
+2. **Graph-Variablen**: typisiert, persistent pro Widget-Instanz, Get/Set-Nodes, durchsuchbares
+   Add-Menü (wie im Material-Editor).
+3. **Level-Script**: eine HorizonCode-Graph pro Szene (Analogon zu Unreals Level-Blueprint) —
+   erste Nicht-Widget-Verwendung von HorizonCode; feuert `OnLevelLoaded`/`OnLevelUnloaded` exakt
+   einmal pro Load/Unload unabhängig vom Teardown-Pfad.
+4. **Zentralisierung**: `HorizonCode::Runtime` (HE_Core) ist jetzt der EINZIGE Interpreter —
+   Systeme registrieren ihre Skripte nur noch als Instanzen (InstanceId = Referenz), Runtime hält
+   Graph + privaten Var-Store pro Instanz. Referenz-Pins (`PinType::Ref`) erlauben
+   Bind-/Emit-Event zwischen Instanzen sowie `CallExternal`/`GetGameInstance`/`GetSelf`;
+   Variablen bekamen Access-Modifier (private/public). **GameInstance**
+   (`GameInstanceHost`, HE_Scene) hält eine app-weite Runtime + Skript mit Lifecycle
+   `OnInit`/`OnShutdown`/`OnWindowFocusChanged`, persistiert über Szenenwechsel; Editor speichert
+   `<project>/GameInstance.hcode`. Export bakte dieses File anfangs nicht mit ein (Fixture-Lücke,
+   gepackte Runtime erwartete es) — **inzwischen behoben** (`fad0c27`, 10.07.2026, vor dem
+   C++-Codegen als dessen Voraussetzung).
+5. **Engine-API durchgängig**: `HE::api`-Registry (`[[engine-api-registry]]`) ist jetzt die
+   gemeinsame Schnittstelle für Lua/Python/HorizonCode/Codegen. X-Macro-Feldtabellen
+   (`HE_ENV_FIELDS_FLOAT/BOOL/INT/COLOR`) machen z. B. alle 53 EnvironmentComponent-Felder über
+   eine einzige Deklarationszeile scriptbar — neue Registry-Zeilen laufen automatisch überall mit
+   (Interpreter, Editor-Add-Menü, generiertes C++), ohne Codegen-Änderung.
+
+Offen (durchgängig): Real-HW-Visual beider Graph-Editoren (kein GUI-Display in dieser Sandbox);
+Engine-System-Nodes (spawn/setPosition/etc.) für HorizonCode teilweise noch offen — siehe
+[[horizoncode-vision]].
+
+### 61.3 — HorizonCode → C++-Codegen (WP0–WP6)
+
+Zusätzlich zur interpretierten `graphJson` kann ein Graph beim Export in eine kompilierte
+**`CompiledInstance`**-Subklasse übersetzt werden (`HE::hccg`, `src/HE_Scene/src/HcCodegen.cpp`),
+gebaut in `HorizonCodeGen.{dylib,dll,so}` neben `GameLogic.*`. Kompilierte und interpretierte
+Instanzen teilen sich dieselbe `Runtime`/`InstanceId`/GC — Refs, Bind/Emit und gemischte
+Populationen funktionieren transparent; ein 15-Fixture-Paritätstest belegt Interpreter==Codegen
+byte-exakt. Engine-Calls laufen über denselben `hc::callApi`-Seam wie der Interpreter (neue
+Engine-API = 1 Registry-Zeile, 0 Codegen-Änderung). Neue duale Nodes (funktionieren in BEIDEN
+Backends): **Delay** (echter Latent-Node über `Context::scheduleResume`), **Is Valid**,
+**Do Once**, **Flip Flop** (Node-lokaler State, kein Variablen-Store). Arbeitspakete: WP0
+(kompiliertes Objektmodell), WP1 (Codegen-Kern: Variablen/Literale/Math/Logik/Arrays/
+ForEach/Branch/Sequence/Funktionen/Events), WP2 (Engine-Call-Lowering), WP3 (Referenzen/
+Dispatcher), WP4 (Packaging — Export-Worker generiert `_hcgen/`, treibt CMake, liefert
+`HorizonCodeGen.*` mit aus), WP5 (Runtime-Integration über `HcCompiledLoader` in alle vier Hosts:
+GameInstance/`createObject`/WidgetManager/Level-Scripts — Miss bei fehlender Lib/Versions-
+Mismatch fällt **klanglos auf Interpreter zurück**, kein harter Fehler), WP6 (In-Editor-Compile-
+Check mit Fehler-Halo, Export-Report `_hcgen/hc_report.txt`, Dispatch-Budget: 256
+Listener-Fires/Kaskade als Deckel gegen einen vorbestehenden exponentiellen Bind/Emit-Zyklus-Bug
+— backend-unabhängig, kein Codegen-spezifischer Fix). Design-Doc:
+`docs/horizoncode-cpp-codegen-implementation-plan.md`.
+**Offen:** nur die Host-Plattform kompiliert (Cross-Export-Profile fallen auf Interpreter zurück
+mit Hinweis), WP7 (direkte typisierte Calls, Optimierung) nicht begonnen, **noch kein manueller
+HW-Smoke-Test eines echten gepackten Exports** (laut Plan-Doc selbst offen).
+
+### 61.4 — Material-Node-Graph-Editor
+
+`HE::MaterialGraph` (`src/HE_Core/include/MaterialGraph/MaterialGraph.h`) — kein freier
+Shader-Editor, sondern ein Graph, der feste Material-Attribute berechnet (BaseColor/Metallic/
+Roughness/Emissive/Opacity/Normal/WPO), die in EIN engine-eigenes Lighting-Modell einfließen.
+Der Graph (JSON, `MaterialAsset::nodeGraphJson`) ist die Quelle der Wahrheit und wird
+(`generateFragment`) zu kanonischem GLSL kompiliert, das per Backend cross-kompiliert + per
+Hash gecacht wird — **verfeinert die Phase-3.2-Entscheidung** (Core-Engine-Shader bleiben
+handgeschrieben; Cross-Compile ist jetzt konkret auf User-/Material-Shader gescoped, genau wie
+dort als mögliche Ausnahme vorgesehen). Design-Doc: `docs/material-system-design.md`
+(Meilenstein-Plan M0–M4, danach informelle Wellen ohne strikte Nummerierung).
+Editor: `src/HE_Editor/MaterialEditorPanel.h/.cpp`, seit der GraphEditor-Migration auf dem
+geteilten Canvas (61.2); Undo/Redo, Clipboard, Kommentar-Boxen, Reroute-Nodes, Per-Node-Preview,
+Shader-Komplexitäts-Anzeige, Live-Preview via Offscreen-Render (Sphere/Cube/Plane) in
+`ImGui::Image`. ~45 Node-Typen (Math, Texture-Sample, prozedurale Noise/FBM/Checker, Fresnel,
+Panner, Logik/Vergleich, Static-Switches für Compile-Time-Permutationen, Normal-Mapping,
+WPO). Blend-Modes Opaque/Masked/Translucent; Material-Functions (wiederverwendbare Sub-Graphen,
+beim Codegen geinlined); Material-Instanzen (Parent + Parameter-/Switch-Overrides, kein
+Recompile) + leichte Per-Entity-`MaterialParamOverride`s. Export bakt vorkompilierte
+Per-Backend-Shader in den `.hpak` (`CHUNK_PSHD`). Pipeline-Warmup (`WarmupMaterials`) vermeidet
+First-Draw-Stalls auf Metal+GL. Tests von 567→645+ grün über die Commit-Serie.
+**Echte Lücke: nur Metal+GL sind angeschlossen** — `MaterialShaderLibrary` kennt zwar einen
+`HLSL`/`SpirV`-Backend-Enum, aber kein D3D11/D3D12/Vulkan-Renderer ruft die Library überhaupt
+auf. Ein im Graph gebautes Material ist auf diesen drei Backends nicht darstellbar (nicht nur
+„nicht optimal" wie in der alten Paritätstabelle suggeriert).
+
+### 61.5 — Sky/Nebula-Rework v2 (Nebula) + physikalische Atmosphäre + Zusatzeffekte
+
+Fortsetzung des in der alten Tabelle als „Tag-Nacht/Atmosphäre/Mond/Sterne/Wolken/Aurora" schon
+verzeichneten Sky-Systems, aber mit einem kompletten Nebula- und Atmosphären-Rewrite (GL+Metal):
+- **Nebula v2→v3.4**: Schicht-Modell (Veil+Filament-Käfig+wellenlängenabhängiger Staub) →
+  Worley-Piece-Modell mit automatischen Verbindungen zwischen Gas-„Stücken" → himmelweite
+  Ader-Stripes als Piece-Alpha + Interieur-Mottle-Textur → klar definierte gefüllte Formen mit
+  Farbvariation. Kern-Lektion (mehrfach im Shader dokumentiert): Value-Noise-Ridge-Folds sind am
+  Verteilungs-Modus zwangsläufig breit — dünne Linien brauchen Iso-Konturen auf der
+  Verteilungs-Flanke, nicht Ridge-Peaks; jedes Einzel-Feld-Iso nestet Ringe um Extrema, daher
+  immer unabhängige Feld-Familien/Length-Breaker/Gates gegen dieses Nesting.
+- **Physikalisch-basierte Atmosphären-Streuung** (`atmoScatter`, `1121bce`): echtes
+  Single-Scattering (Rayleigh+Mie Cornette-Shanks+Ozon-Tent), 12×5-Sample-Integral,
+  Sonnenrot/Blue-Hour/Horizont-Effekte emergieren aus der Physik statt aus Handkurven.
+- **22°-Halo-Experimente** (`9140dd6`/`6a10961`) wurden wieder verworfen zugunsten einer
+  **Mond-Corona** (`f71becc`), dann weiter vereinfacht zu einem einzelnen Glow-Ring
+  (`b1a4bbc`) — Halo wirkte als Linsenartefakt und erschlug die Mondscheibe.
+- **God-Rays** (`710f72a`, default off) — Krepuskular-Strahlen durch Wolkenlücken, inline im
+  Sky-Shader ohne eigenen Pass.
+- **Regenbogen** (`44aba6c`) — prozeduraler Primär-/Sekundärbogen um den Antisolar-Punkt,
+  nur bei Regen + niedrigem Sonnenstand, korrekt hinter Wolken einsortiert.
+- **Low-Res-Cloud-Perf-Pass** (`0ac05d8` + Fixes `0b5c8f5`/`3500e37`) — Wolken werden in
+  Viertel-Auflösung geraymarcht und hochskaliert-kompositiert; zwei Nachbesserungen gegen
+  Kamera-Lag-Artefakte und (Metal-spezifisches) Kantenreißen bei schnellen Schwenks.
+- Alle 4 Spiegel-Implementierungen (`kSkyFuncGLSL`, `kSkyFuncMSL`, `SkyColorCPU` in
+  OpenGLRenderer.cpp UND MetalRenderer.mm) müssen synchron gehalten werden — GLSL wird offline
+  per `glslangValidator` geprüft (kein Display in dieser Sandbox), Metal per `he_shot`-Runtime-
+  Compile real gerendert.
+
+**Echte Lücke:** `sky.frag` (Vulkan/D3D-Pendant) hat weiterhin die ALTE Nebula v1 + das alte
+einfache Gradient-`skyColor` — nichts aus 61.5 ist auf D3D/Vulkan portiert.
+
+### 61.6 — Input-Assets + PlayerHost
+
+Neue, editor-authorierbare Asset-Schicht über dem bestehenden `InputMapping` (5.2): Content-
+Browser-Erstellmenü bietet jetzt `InputActionAsset` (Name, Typ Button/Axis) und
+`InputMappingContextAsset` (Bindings auf SDL-Scancodes). `InputAssets.h/.cpp` (HE_Core) löst
+diese JSON-Assets zu `InputMapping`-Bindings **und** zu HorizonCode-Events
+(`Input.<name>.Pressed/Released/Axis`) auf.
+**PlayerHost** (`src/HE_Scene/src/PlayerHost.cpp`, HE_Scene) ist ein neuer, bewusst simpler
+„Player"-Mechanismus: Content-Browser bietet `NewPlayerController`/`NewPlayerCharacter`
+HorizonCode-Klassen an; bei Play-Start spawnt `PlayerHost::begin()` automatisch **eine Instanz
+von jeder** so getaggten Klasse (Construct+BeginPlay), pumpt pro Frame Input-Events + Tick. Kein
+Possession-/Pawn-Swap-Modell, keine Spieler-Indizes, kein Multiplayer-Slot-Konzept — kein
+vierter eigener HorizonCode-Host, sondern nutzt per Referenz dieselbe `GameInstanceHost`-Runtime
+(teilt Widgets/`createObject`/Engine-Calls/Latent-Node-Update). Gleich verdrahtet in
+`EditorApplication` (PIE) und `GameApplication` (gepackt).
+**Getestet:** die Glue-Funktionen (`inputEventPressed/Released/Axis`, `applyInputMappingContext`
+etc.) in `tests/test_inputmapping.cpp`; **nicht getestet:** das PlayerHost-Wiring selbst
+(Spawn/BeginPlay/Tick-Pump hat keine dedizierte Testabdeckung).
+
+### Sonstiges
+
+Paketierung: macOS-Default-Version auf 0.2.0 gehoben (`e2c5bfc`, behebt nebenbei den latenten
+Bug, dass der alte Default wörtlich `"0.0.2 preview"` lautete). Windows-CI-Fixes (lz4/zstd-
+Linking, Export-Makros, non-throwing fs-Cleanup) liefen nebenher, ohne Funktionsänderung.
+
+**Nächste sinnvolle Schritte (aktualisiert, ersetzt alle älteren „Nächste Schritte"-Blöcke
+oben):**
+1. D3D12/Vulkan: Basecolor-Texturen + MaterialComponent-Override + echtes GPU-Instancing
+   nachziehen (letzte echte Cross-Backend-Lücke bei den „alten" Rendering-Features).
+2. Material-Node-Graph-Shader + Nebula-v2+/Atmosphären-Sky auf D3D/Vulkan portieren (neue
+   Lücken aus 61.4/61.5 — inhaltlich groß, aber demselben Muster wie die bereits erledigten
+   Ports folgend).
+3. BCn-Textur-Kompression (D3D/Vulkan/GL) vor jedem Nicht-Mac-Shipping.
+4. Ein Windows-Real-HW-Verify-Durchgang für den ganzen seit 14.06. blind gebauten Stapel
+   (Nebula/Atmosphäre, D3D/Vulkan-Sky-Parität sobald 2. erledigt, HorizonCode/Material-
+   GraphEditor-UI, UI-Widget-System v2/v3 auf D3D/Vulkan).
+5. Linux-Window/Input-Pfad (6.6) — noch 0 Engine-Code.
+6. Kleinere Posten: HorizonCode-Codegen-WP7, Editor-Property-Preview für Python, Script-API-
+   Referenz (`horizon.*`) auf der Docs-Site vervollständigen, PlayerHost-Host-Wiring testen.
