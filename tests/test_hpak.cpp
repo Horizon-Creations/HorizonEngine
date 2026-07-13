@@ -244,7 +244,7 @@ TEST_CASE("zstd codec actually shrinks compressible data")
 
 // ─── Encryption (AES-256-GCM, Phase B) ─────────────────────────────────────────
 
-#ifdef HE_HAVE_OPENSSL
+#ifdef HE_HAVE_CRYPTO
 TEST_CASE("AES-256-GCM round-trip (store + encrypt)")
 {
     const HE::UUID id{0xABCD,0xEF01};
@@ -322,7 +322,7 @@ TEST_CASE("Compression + encryption round-trip")
 
     removeQuiet(tmp);
 }
-#endif // HE_HAVE_OPENSSL
+#endif // HE_HAVE_CRYPTO
 
 // ─── Integrity ──────────────────────────────────────────────────────────────
 
@@ -745,7 +745,7 @@ TEST_CASE("Script language: CHUNK_SLNG round-trips, absent chunk defaults to Lua
     }
 }
 
-#ifdef HE_HAVE_OPENSSL
+#ifdef HE_HAVE_CRYPTO
 TEST_CASE("All asset types round-trip through an encrypted zstd pak")
 {
     auto dir = std::filesystem::temp_directory_path() / "he_types_enc";
@@ -771,7 +771,7 @@ TEST_CASE("All asset types round-trip through an encrypted zstd pak")
     removeQuiet(pak);
     he_test::removeAllQuiet(dir);
 }
-#endif // HE_HAVE_OPENSSL
+#endif // HE_HAVE_CRYPTO
 
 // ─── On-demand mounting + overlay ──────────────────────────────────────────────
 
@@ -1202,7 +1202,7 @@ TEST_CASE("pollAsyncResults honors the per-frame registration budget")
     removeQuiet(pak);
 }
 
-#ifdef HE_HAVE_OPENSSL
+#ifdef HE_HAVE_CRYPTO
 TEST_CASE("mountPak with an encrypted pak loads on demand with the key")
 {
     const HE::UUID id{0x0E,0x0C};
@@ -1222,7 +1222,7 @@ TEST_CASE("mountPak with an encrypted pak loads on demand with the key")
 
     removeQuiet(pak);
 }
-#endif // HE_HAVE_OPENSSL
+#endif // HE_HAVE_CRYPTO
 
 // A node-graph material carries customShaderFragGlsl; packing with a shaderBackends
 // bitmask + compileShaderVariants callback must bake a CHUNK_PSHD that the runtime

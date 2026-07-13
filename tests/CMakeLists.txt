@@ -84,8 +84,11 @@ endif()
 if(HE_HAVE_ZSTD)
     target_compile_definitions(he_tests PRIVATE HE_HAVE_ZSTD)
 endif()
-if(HE_HAVE_OPENSSL)
-    target_compile_definitions(he_tests PRIVATE HE_HAVE_OPENSSL)
+# hpak encryption tests run whenever a crypto backend (system OpenSSL or the
+# fetched mbedTLS fallback) is compiled in — the round-trips go through
+# HorizonCore's backend-agnostic Hpak::aesGcm* API.
+if(HE_HAVE_OPENSSL OR HE_HAVE_MBEDTLS)
+    target_compile_definitions(he_tests PRIVATE HE_HAVE_CRYPTO)
 endif()
 # astcenc for the ASTC cook round-trip test (encode → decode → compare).
 if(HE_HAVE_ASTCENC)

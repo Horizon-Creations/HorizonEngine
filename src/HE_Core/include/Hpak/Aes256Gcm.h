@@ -5,7 +5,8 @@
 #include <vector>
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  AES-256-GCM (AEAD) wrapper over OpenSSL for hpak entry encryption.
+//  AES-256-GCM (AEAD) wrapper for hpak entry encryption. Backed by system OpenSSL
+//  when available, otherwise a fetched mbedTLS (libmbedcrypto); see Aes256Gcm.cpp.
 //
 //  IMPORTANT — threat model: this obfuscates shipped assets against casual
 //  ripping. It is NOT a security boundary: a shipped game must decrypt its own
@@ -20,7 +21,7 @@
 
 namespace Hpak
 {
-// True when the build has a crypto backend (OpenSSL). When false, encrypt
+// True when the build has a crypto backend (OpenSSL or mbedTLS). When false, encrypt
 // requests fall back to storing plaintext and encrypted entries cannot be read.
 HE_API bool cryptoAvailable();
 
