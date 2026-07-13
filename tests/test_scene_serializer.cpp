@@ -11,6 +11,8 @@
 #include <HorizonScene/Components/ScriptComponent.h>
 #include <HorizonScene/Components/EnvironmentComponent.h>
 #include <HorizonScene/Components/EnvironmentLightComponent.h>
+#include <HorizonScene/Components/AnimatorStateMachineComponent.h>
+#include <algorithm>
 #include <filesystem>
 
 namespace fs = std::filesystem;
@@ -190,6 +192,111 @@ TEST_CASE("SceneSerializer round-trips per-entity material param overrides")
 		CHECK(found);
 		he_test::removeQuiet(file);
 	}
+}
+
+TEST_CASE("SceneSerializer round-trips AnimatorStateMachineComponent (states with id/x/y, transitions, params)")
+{
+	for (SerializeFormat fmt : { SerializeFormat::JSON, SerializeFormat::Binary })
+	{
+		const fs::path file = fs::temp_directory_path() / "he_test_animsm.hescene";
+		HorizonWorld world;
+		auto e = world.createEntity("Character");
+
+		AnimatorStateMachineComponent sm;
+		AnimationState idle; idle.id = 1; idle.name = "Idle"; idle.clipId = HE::UUID::generate();
+		idle.looping = true; idle.x = 10.0f; idle.y = 20.0f;
+		AnimationState walk; walk.id = 2; walk.name = "Walk"; walk.clipId = HE::UUID::generate();
+		walk.looping = true; walk.x = 210.0f; walk.y = 20.0f;
+		sm.states = { idle, walk };
+
+		AnimationTransition t;
+		t.fromState = "Idle"; t.toState = "Walk"; t.paramName = "speed";
+		t.op = TransitionOp::Greater; t.threshold = 0.1f; t.duration = 0.25f;
+		sm.transitions = { t };
+		sm.params["speed"] = 1.5f;
+		sm.currentStateName = "Idle";
+		world.registry().emplace<AnimatorStateMachineComponent>(e, sm);
+
+		SceneSerializer ser;
+		REQUIRE(ser.save(world, file, fmt));
+		HorizonWorld loaded;
+		REQUIRE(ser.load(loaded, file, fmt));
+
+		bool found = false;
+		for (auto [le, lsm] : loaded.registry().view<AnimatorStateMachineComponent>().each())
+		{
+			found = true;
+			REQUIRE(lsm.states.size() == 2);
+			CHECK(lsm.states[0].id == 1);
+			CHECK(lsm.states[0].name == "Idle");
+			CHECK(lsm.states[0].clipId == idle.clipId);
+			CHECK(lsm.states[0].x == doctest::Approx(10.0f));
+			CHECK(lsm.states[0].y == doctest::Approx(20.0f));
+			CHECK(lsm.states[1].id == 2);
+			CHECK(lsm.states[1].x == doctest::Approx(210.0f));
+
+			REQUIRE(lsm.transitions.size() == 1);
+			CHECK(lsm.transitions[0].fromState == "Idle");
+			CHECK(lsm.transitions[0].toState   == "Walk");
+			CHECK(lsm.transitions[0].paramName == "speed");
+			CHECK(lsm.transitions[0].op == TransitionOp::Greater);
+			CHECK(lsm.transitions[0].threshold == doctest::Approx(0.1f));
+			CHECK(lsm.transitions[0].duration  == doctest::Approx(0.25f));
+
+			REQUIRE(lsm.params.count("speed"));
+			CHECK(lsm.params.at("speed") == doctest::Approx(1.5f));
+			CHECK(lsm.currentStateName == "Idle");
+		}
+		CHECK(found);
+		he_test::removeQuiet(file);
+	}
+}
+
+TEST_CASE("SceneSerializer auto-assigns ids + grid layout for a state machine saved before the id/x/y fields existed")
+{
+	// A state left at its struct default (id=0, x=0, y=0) is indistinguishable
+	// from — and exercises the exact same load-time path as — a state entirely
+	// missing "id" in hand-written/pre-GraphEditor-tab JSON (see SceneSerializer's
+	// AnimatorStateMachineComponent load: `sj.value("id", 0)` treats an absent key
+	// and an explicit 0 identically).
+	const fs::path file = fs::temp_directory_path() / "he_test_animsm_legacy.hescene";
+	HorizonWorld world;
+	auto e = world.createEntity("Character");
+
+	AnimatorStateMachineComponent sm;
+	for (const char* name : { "Idle", "Walk", "Run", "Jump", "Fall" })
+	{
+		AnimationState s; // id/x/y left at their struct defaults (0)
+		s.name = name;
+		sm.states.push_back(s);
+	}
+	world.registry().emplace<AnimatorStateMachineComponent>(e, sm);
+
+	SceneSerializer ser;
+	REQUIRE(ser.save(world, file, SerializeFormat::JSON));
+	HorizonWorld loaded;
+	REQUIRE(ser.load(loaded, file, SerializeFormat::JSON));
+
+	bool found = false;
+	for (auto [le, lsm] : loaded.registry().view<AnimatorStateMachineComponent>().each())
+	{
+		found = true;
+		REQUIRE(lsm.states.size() == 5);
+		// Every id must now be non-zero and unique.
+		std::vector<int> ids;
+		for (const auto& s : lsm.states) { CHECK(s.id != 0); ids.push_back(s.id); }
+		std::sort(ids.begin(), ids.end());
+		CHECK(std::adjacent_find(ids.begin(), ids.end()) == ids.end()); // no duplicates
+		// Simple grid auto-layout: 4 columns, 200/150-unit spacing, first 4 in row 0.
+		CHECK(lsm.states[0].x == doctest::Approx(0.0f));
+		CHECK(lsm.states[0].y == doctest::Approx(0.0f));
+		CHECK(lsm.states[3].x == doctest::Approx(600.0f));
+		CHECK(lsm.states[3].y == doctest::Approx(0.0f));
+		CHECK(lsm.states[4].x == doctest::Approx(0.0f));
+		CHECK(lsm.states[4].y == doctest::Approx(150.0f));
+	}
+	CHECK(found);
+	he_test::removeQuiet(file);
 }
 
 TEST_CASE("World root identity survives round-trip with children")

@@ -7,9 +7,11 @@
 enum class TransitionOp : uint8_t { Greater = 0, Less = 1, Equal = 2 };
 
 struct AnimationState {
+    int         id = 0;      // stable id for the GraphEditor canvas (0 = unassigned)
     std::string name;
     HE::UUID    clipId;
     bool        looping = true;
+    float       x = 0.0f, y = 0.0f;  // persisted canvas position
 };
 
 struct AnimationTransition {
