@@ -1194,3 +1194,45 @@ TEST_CASE("ContentManager isEngineDefaultPath / isEngineOverridePath classify ab
 	CHECK_FALSE(cm.isEngineDefaultPath(unrelated));
 	CHECK_FALSE(cm.isEngineOverridePath(unrelated));
 }
+
+TEST_CASE("ContentManager scanContentDirectory indexes engine assets so UUID refs resolve")
+{
+	// Reproduces the "spawned sphere reloads as a cube" bug: a scene references
+	// an engine mesh purely by UUID; on reload ensureResident(uuid) must find it
+	// on disk. Before the engine root was scanned, only the default cube's UUID
+	// resolved, so every engine mesh fell back to the cube.
+	TempContentDir dir;
+	TempContentDir engineDir("he_test_engine_content");
+	fs::create_directories(engineDir.path / "Meshes");
+
+	// A minimal engine-default StaticMesh, saved through the engine root.
+	HE::UUID meshId;
+	{
+		ContentManager gen(engineDir.path.string());
+		StaticMeshAsset mesh;
+		mesh.type     = HE::AssetType::StaticMesh;
+		mesh.name     = "Sphere";
+		mesh.path     = "Meshes/Sphere.hasset"; // relative to the engine root here
+		mesh.vertices = { 0,0,0, 1,0,0, 0,1,0 };
+		mesh.indices  = { 0, 1, 2 };
+		mesh.normals  = { 0,0,1, 0,0,1, 0,0,1 };
+		REQUIRE(gen.saveAsset(mesh));
+		meshId = mesh.id;
+		REQUIRE_FALSE(meshId == HE::UUID{});
+	}
+
+	// A fresh manager pointed at the project (empty) + engine roots — exactly the
+	// editor's setup after a restart, before any scene loads.
+	ContentManager cm(dir.path.string());
+	cm.setEngineContentRoot(engineDir.path.string());
+	const size_t indexed = cm.scanContentDirectory();
+	CHECK(indexed >= 1);
+
+	// The UUID-only reference (what a MeshComponent stores) must now resolve from
+	// disk, loading the real sphere — not fall through to nothing/the cube.
+	CHECK(cm.ensureResident(meshId));
+	const StaticMeshAsset* loaded = cm.getStaticMesh(meshId);
+	REQUIRE(loaded != nullptr);
+	CHECK(loaded->name == "Sphere");
+	CHECK(loaded->indices.size() == 3);
+}
