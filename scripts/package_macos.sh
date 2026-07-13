@@ -15,7 +15,7 @@ SOURCE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 VERSION="${1:-0.2.0}"
 
 # Sky-themed release codename — single source of truth is CMakeLists.txt. Shown in
-# the macOS About panel as "Version <VERSION> (<CODENAME>)", e.g. 0.0.1 (First Light).
+# the macOS About panel as "Version <VERSION> (<CODENAME>)", e.g. 0.2.0 (Sunrise).
 CODENAME="${DMG_CODENAME:-$(grep -oE 'HE_VERSION_CODENAME "[^"]+"' "$SOURCE_DIR/CMakeLists.txt" 2>/dev/null | head -1 | sed -E 's/.*"([^"]+)".*/\1/')}"
 [ -n "$CODENAME" ] || CODENAME="$VERSION"
 
@@ -53,7 +53,7 @@ fi
 ASSETS_DIR="$SCRIPT_DIR/dmg_assets"
 ICON_SRC="$SOURCE_DIR/EditorDeps/Images/HC_Logo.png"
 # Procedural backdrop theme — keep this tracking the release codename in
-# docs/version-codenames.md (0.0.1 "First Light" → dawn → sunrise).
+# docs/version-codenames.md (0.2.0 "Sunrise" → sunrise).
 DMG_THEME="${DMG_THEME:-sunrise}"           # twilight | midnight | sunrise
 DMG_PHOTO="${DMG_PHOTO:-}"                   # optional: a screenshot backdrop (overrides DMG_THEME)
 DMG_VENV="$SOURCE_DIR/out/.dmgvenv"

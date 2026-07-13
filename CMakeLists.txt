@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(HorizonEngine VERSION 0.0.1 LANGUAGES CXX)
+project(HorizonEngine VERSION 0.2.0 LANGUAGES CXX)
 
 # ─── Architecture guard ──────────────────────────────────────────────────────
 # This engine is built and shipped as x64. If CMake is configured from an x86
@@ -431,7 +431,10 @@ endfunction()
 # ─── Version header (codename + version → generated HorizonVersion.h) ────────────
 # Sky-themed release codename (see docs/version-codenames.md). Change this one line
 # per release; it surfaces in the editor title/Project Hub and drives the DMG theme.
-set(HE_VERSION_CODENAME "First Light" CACHE STRING "Sky-themed codename for this release")
+# FORCE so editing this line always wins over a value already stored in the CMake
+# cache — without it, a reconfigure keeps the old cached codename (the version from
+# project() updates, but the codename would silently stay stale).
+set(HE_VERSION_CODENAME "Sunrise" CACHE STRING "Sky-themed codename for this release" FORCE)
 configure_file(
     "${CMAKE_SOURCE_DIR}/cmake/HorizonVersion.h.in"
     "${CMAKE_BINARY_DIR}/generated/HorizonVersion.h"

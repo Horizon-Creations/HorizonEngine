@@ -12,5 +12,5 @@
 // Sky-themed release codename, e.g. "First Light", "Sunrise", "Midnight".
 #define HE_VERSION_CODENAME "@HE_VERSION_CODENAME@"
 
-// Convenience: e.g.  0.0.1 "First Light"
+// Convenience: e.g.  0.2.0 "Sunrise"
 #define HE_VERSION_FULL     HE_VERSION_STRING " \"" HE_VERSION_CODENAME "\""
