@@ -472,6 +472,7 @@ ExportResult ProjectExporter::exportProject(
     packSettings.astcTextures = settings.astcTextures;
     packSettings.shaderBackends        = settings.shaderBackends;        // precompile material shaders
     packSettings.compileShaderVariants = settings.compileShaderVariants;
+    packSettings.compileParticleShaderVariants = settings.compileParticleShaderVariants;
 
     const std::string hpakFilename = projectName + ".hpak";
     const auto pakPath      = dataDir / hpakFilename;

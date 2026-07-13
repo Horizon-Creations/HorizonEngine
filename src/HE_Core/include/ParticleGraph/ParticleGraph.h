@@ -133,4 +133,37 @@ struct ParticleEmitterConfig
 
 HE_API ParticleEmitterConfig evaluateParticleGraph(const ParticleGraph& graph, std::mt19937& rng);
 
+// ── Export-time shader baking ──────────────────────────────────────────────
+// Size stays a trivial CPU-side lerp (see ParticleSystem::stepPool/RenderExtractor)
+// — moving one scalar to the GPU buys nothing. Color/alpha-over-life is the part
+// worth baking: today the CPU computes a 4-component lerp for every live particle
+// every frame (RenderExtractor's instanceTint); baking it into real shader code
+// lets a GPU-instanced draw compute it per-vertex instead, and — as importantly —
+// removes the per-particle DrawCall (particles at different life points differ in
+// instanceTint and therefore can't batch, see RenderPass.cpp's batching guard) in
+// favour of one instanced draw per emitter, driven by raw per-particle data
+// (position/size/lifetime-fraction) rather than a pre-lerped color.
+//
+// No node in the v1 registry can depend on a per-particle "time" input (only
+// Const/RandomRange feed the Start/End Color/Alpha pins, and RandomRange already
+// resolves once per evaluate() — see the KNOWN LIMITATION above), so there is no
+// real per-vertex graph topology to walk: baking reduces to emitting the SAME four
+// values evaluateParticleGraph() already resolved into ParticleEmitterConfig as
+// GLSL/MSL literals inside a fixed mix()-based function body.
+//
+// Takes the already-RESOLVED config, not the graph — a RandomRange-driven Start/
+// End Color must bake the EXACT value ParticleSystem::update's simulation already
+// committed to (ps.resolvedConfig), not a fresh independent draw from re-evaluating
+// the graph with a different rng state (which would visually desync the shader's
+// baked color from the CPU-simulated one).
+struct ParticleShaderGen
+{
+    std::string colorFn; // `vec3 heParticleColor(float t01)` / `float3 heParticleColor(float t01)`
+    std::string alphaFn; // `float heParticleAlpha(float t01)`
+};
+
+// metalSyntax=false emits GLSL (vec3/vec4, used verbatim by the GL backend);
+// metalSyntax=true emits MSL (float3/float4, used verbatim by the Metal backend).
+HE_API ParticleShaderGen generateParticleShaderSource(const ParticleEmitterConfig& config, bool metalSyntax);
+
 } // namespace HE

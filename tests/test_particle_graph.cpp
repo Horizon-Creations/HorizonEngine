@@ -1,5 +1,6 @@
 #include "doctest.h"
 #include <ParticleGraph/ParticleGraph.h>
+#include <ContentManager/Assets.h>
 #include <random>
 #include <cmath>
 
@@ -261,4 +262,83 @@ TEST_CASE("evaluateParticleGraph copies mesh/material UUIDs from the Emitter Out
     const ParticleEmitterConfig cfg = evaluateParticleGraph(g, rng);
     CHECK(cfg.meshAssetId     == mesh);
     CHECK(cfg.materialAssetId == mat);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  generateParticleShaderSource — export-time color/alpha-over-life baking
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST_CASE("generateParticleShaderSource bakes start/end color+alpha as GLSL literals")
+{
+    ParticleEmitterConfig cfg;
+    cfg.startColor[0] = 1.0f; cfg.startColor[1] = 0.0f; cfg.startColor[2] = 0.25f;
+    cfg.endColor[0]   = 0.0f; cfg.endColor[1]   = 1.0f; cfg.endColor[2]   = 0.5f;
+    cfg.startAlpha = 0.8f;
+    cfg.endAlpha   = 0.1f;
+
+    const ParticleShaderGen gen = generateParticleShaderSource(cfg, /*metalSyntax*/false);
+
+    CHECK(gen.colorFn.find("vec3 heParticleColor(float t01)") != std::string::npos);
+    CHECK(gen.colorFn.find("vec3(1.000000, 0.000000, 0.250000)") != std::string::npos);
+    CHECK(gen.colorFn.find("vec3(0.000000, 1.000000, 0.500000)") != std::string::npos);
+    CHECK(gen.colorFn.find("mix(") != std::string::npos);
+    CHECK(gen.alphaFn.find("float heParticleAlpha(float t01)") != std::string::npos);
+    CHECK(gen.alphaFn.find("0.800000") != std::string::npos);
+    CHECK(gen.alphaFn.find("0.100000") != std::string::npos);
+    // No Metal-only type name leaked into the GLSL variant.
+    CHECK(gen.colorFn.find("float3") == std::string::npos);
+}
+
+TEST_CASE("generateParticleShaderSource emits MSL (float3) syntax when metalSyntax is set")
+{
+    ParticleEmitterConfig cfg;
+    const ParticleShaderGen gen = generateParticleShaderSource(cfg, /*metalSyntax*/true);
+
+    CHECK(gen.colorFn.find("float3 heParticleColor(float t01)") != std::string::npos);
+    CHECK(gen.colorFn.find("float3(") != std::string::npos);
+    CHECK(gen.colorFn.find("vec3") == std::string::npos);
+}
+
+TEST_CASE("generateParticleShaderSource is a pure function of the resolved config (no rng, no I/O)")
+{
+    ParticleEmitterConfig cfg;
+    cfg.startAlpha = 0.42f;
+    const ParticleShaderGen a = generateParticleShaderSource(cfg, false);
+    const ParticleShaderGen b = generateParticleShaderSource(cfg, false);
+    CHECK(a.colorFn == b.colorFn);
+    CHECK(a.alphaFn == b.alphaFn);
+}
+
+TEST_CASE("PPSD encode/decode roundtrip preserves particle shader variants")
+{
+    std::vector<ParticleShaderVariant> in;
+    {
+        ParticleShaderVariant v;
+        v.backend  = static_cast<uint8_t>(HE::RendererBackend::OpenGL);
+        v.vertex   = "void main() { gl_Position = vec4(0.0); }";
+        v.fragment = "void main() { fragColor = vec4(1.0); }";
+        in.push_back(v);
+    }
+    {
+        ParticleShaderVariant v;
+        v.backend  = static_cast<uint8_t>(HE::RendererBackend::Metal);
+        v.vertex   = "vertex float4 v_main() { return 0; }";
+        v.fragment = "fragment float4 f_main() { return 1; }";
+        in.push_back(v);
+    }
+
+    const std::vector<uint8_t> bytes = HE::encodeParticleShaderVariants(in);
+    CHECK(!bytes.empty());
+
+    const std::vector<ParticleShaderVariant> out = HE::decodeParticleShaderVariants(bytes);
+    REQUIRE(out.size() == in.size());
+    for (size_t i = 0; i < in.size(); ++i)
+    {
+        CHECK(out[i].backend  == in[i].backend);
+        CHECK(out[i].vertex   == in[i].vertex);
+        CHECK(out[i].fragment == in[i].fragment);
+    }
+
+    CHECK(HE::encodeParticleShaderVariants({}).empty());
+    CHECK(HE::decodeParticleShaderVariants({}).empty());
 }

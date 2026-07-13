@@ -51,6 +51,10 @@ struct HE_API ExportSettings {
     // (fragment GLSL, backend bitmask) → PSHD-encoded bytes.
     uint32_t shaderBackends = 0;
     std::function<std::vector<uint8_t>(const std::string&, const std::string&, uint32_t)> compileShaderVariants;
+    // Precompile particle color/alpha-over-life shaders (CHUNK_PPSD), reusing
+    // shaderBackends above. (nodeGraphJson, backend bitmask) → PPSD-encoded bytes —
+    // see Hpak::PackSettings::compileParticleShaderVariants.
+    std::function<std::vector<uint8_t>(const std::string&, uint32_t)> compileParticleShaderVariants;
     // Path of the freshly built HorizonCodeGen shared library (the compiled
     // HorizonCode classes). When non-empty it is copied beside the data under
     // the canonical loader name and project.hcfg records horizonCodeCompiled.

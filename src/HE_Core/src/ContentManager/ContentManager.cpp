@@ -314,6 +314,8 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 		ParticleGraphAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_PTGR))
 			a.nodeGraphJson.assign(reinterpret_cast<const char*>(c->data.data()), c->data.size());
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_PPSD)) // precompiled shaders (packed)
+			a.precompiledShaders = HE::decodeParticleShaderVariants(c->data);
 		handle = m_particleGraphAssets.insert(std::move(a)); break;
 	}
 	case HE::AssetType::Audio:
@@ -1042,6 +1044,38 @@ std::vector<MaterialShaderVariant> decodeMaterialShaderVariants(const std::vecto
 	for (uint8_t i = 0; i < count; ++i)
 	{
 		MaterialShaderVariant v;
+		if (!HAsset::Reader::readPOD(bytes, o, v.backend))     break;
+		if (!HAsset::Reader::readString(bytes, o, v.vertex))   break;
+		if (!HAsset::Reader::readString(bytes, o, v.fragment)) break;
+		out.push_back(std::move(v));
+	}
+	return out;
+}
+
+// PPSD — identical wire shape to encode/decodeMaterialShaderVariants above, distinct
+// type only (see ParticleShaderVariant in Assets.h).
+std::vector<uint8_t> encodeParticleShaderVariants(const std::vector<ParticleShaderVariant>& vars)
+{
+	if (vars.empty()) return {};
+	std::vector<uint8_t> b;
+	HAsset::Writer::appendPOD(b, static_cast<uint8_t>(std::min<size_t>(vars.size(), 255)));
+	for (const auto& v : vars)
+	{
+		HAsset::Writer::appendPOD(b, v.backend);
+		HAsset::Writer::appendString(b, v.vertex);
+		HAsset::Writer::appendString(b, v.fragment);
+	}
+	return b;
+}
+std::vector<ParticleShaderVariant> decodeParticleShaderVariants(const std::vector<uint8_t>& bytes)
+{
+	std::vector<ParticleShaderVariant> out;
+	size_t o = 0; uint8_t count = 0;
+	if (!HAsset::Reader::readPOD(bytes, o, count)) return out;
+	out.reserve(count);
+	for (uint8_t i = 0; i < count; ++i)
+	{
+		ParticleShaderVariant v;
 		if (!HAsset::Reader::readPOD(bytes, o, v.backend))     break;
 		if (!HAsset::Reader::readString(bytes, o, v.vertex))   break;
 		if (!HAsset::Reader::readString(bytes, o, v.fragment)) break;

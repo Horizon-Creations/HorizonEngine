@@ -26,6 +26,27 @@ namespace HE
 	HE_API std::vector<MaterialShaderVariant> decodeMaterialShaderVariants(const std::vector<uint8_t>& bytes);
 }
 
+// One precompiled particle color/alpha-over-life shader variant for a specific
+// graphics backend — the particle-system analogue of MaterialShaderVariant, baked
+// at export time (CHUNK_PPSD). Only ever produced for OpenGL/Metal (GL+Metal-first);
+// `vertex`/`fragment` are hand-templated backend-native source text (see
+// HorizonRendering::ParticleShaderTemplates) with the graph's resolved color/alpha
+// literals spliced in by HE::generateParticleShaderSource — no cross-compile step,
+// so unlike MaterialShaderVariant there is no SPIR-V-bytes-in-a-string case.
+struct ParticleShaderVariant
+{
+	uint8_t     backend = 0; // HE::RendererBackend
+	std::string vertex;
+	std::string fragment;
+};
+
+namespace HE
+{
+	// PPSD chunk (de)serialization — same shape/purpose as encode/decodeMaterialShaderVariants.
+	HE_API std::vector<uint8_t> encodeParticleShaderVariants(const std::vector<ParticleShaderVariant>& v);
+	HE_API std::vector<ParticleShaderVariant> decodeParticleShaderVariants(const std::vector<uint8_t>& bytes);
+}
+
 struct ContentAsset
 {
 	// Stable identity — written into the META chunk on save and reused on
@@ -193,6 +214,7 @@ struct MaterialFunctionAsset : public RuntimeAsset
 struct ParticleGraphAsset : public RuntimeAsset
 {
 	std::string nodeGraphJson;
+	std::vector<ParticleShaderVariant> precompiledShaders; // CHUNK_PPSD — pack-time only, see ParticleShaderVariant
 };
 
 // A UI widget tree (UMG-style widget editor asset). The JSON is the source of
