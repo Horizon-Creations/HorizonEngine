@@ -87,6 +87,20 @@ public:
 	{
 		return { engineFolder, std::shared_lock<std::shared_mutex>(m_engineFolderMutex) };
 	}
+
+	// Project-local native C++ source tree (<projectRoot>/Source), a sibling of
+	// Content that only C++ projects have. Mirrors contentFolder/
+	// refreshContentFolder(); the root is derived from lastProjectPath. An absent
+	// Source folder yields an empty tree (root fullPath still set) rather than an
+	// error, so the browser can simply choose not to show the root.
+	bool refreshSourceFolder();
+
+	std::atomic<uint64_t> sourceFolderVersion{0};
+
+	std::pair<const Folder&, std::shared_lock<std::shared_mutex>> lockSourceFolder() const
+	{
+		return { sourceFolder, std::shared_lock<std::shared_mutex>(m_sourceFolderMutex) };
+	}
 private:
 	// Private constructor to prevent instantiation
 	GlobalState() {}
@@ -98,6 +112,9 @@ private:
 
 	Folder engineFolder;
 	mutable std::shared_mutex m_engineFolderMutex;
+
+	Folder sourceFolder;
+	mutable std::shared_mutex m_sourceFolderMutex;
 
 	//Custom config entries
 	json customConfig;

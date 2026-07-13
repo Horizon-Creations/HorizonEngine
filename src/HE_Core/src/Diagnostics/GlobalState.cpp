@@ -294,6 +294,35 @@ bool GlobalState::refreshContentFolder()
 	return true;
 }
 
+bool GlobalState::refreshSourceFolder()
+{
+	if (engineStatus.lastProjectPath.empty())
+		return false;
+
+	fs::path projectPath = engineStatus.lastProjectPath;
+	if (fs::is_regular_file(projectPath))
+		projectPath = projectPath.parent_path();
+
+	fs::path sourcePath = projectPath / "Source";
+
+	// Build off-lock. An absent Source/ (non-C++ project, or not scaffolded yet)
+	// is not an error — leave the tree empty; the root's fullPath is still set so
+	// the browser's drop/create targets resolve.
+	Folder fresh;
+	fresh.name     = "Source";
+	fresh.fullPath = sourcePath.string();
+	if (fs::exists(sourcePath) && fs::is_directory(sourcePath))
+		populateFolder(&fresh, sourcePath);
+
+	{
+		std::unique_lock lock(m_sourceFolderMutex);
+		clearFolder(&sourceFolder);
+		sourceFolder = std::move(fresh);
+	}
+	sourceFolderVersion.fetch_add(1, std::memory_order_release);
+	return true;
+}
+
 // Merges a project's per-asset overrides (<contentRoot>/Engine/<rest>, see
 // ContentManager::resolveSavePath) into the displayed default tree: a file
 // that already exists in `base` at the same relative position has its
