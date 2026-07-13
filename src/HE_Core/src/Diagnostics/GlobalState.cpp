@@ -80,11 +80,42 @@ void GlobalState::readConfig()
 		Logger::Log(Logger::LogLevel::Error, "Failed to open config file.");
 		return;
 	}
-	json j = json::parse(configFile);
+	// config.json is written on many events (project open, RHI change, …); a crash
+	// or kill mid-write, a disk issue, or a hand-edit can leave it truncated or
+	// malformed. json::parse would then THROW, and since this runs in the
+	// Application constructor with no handler, it aborts the whole editor at
+	// startup — a crash-loop, because the bad file is still there next launch.
+	// Parse non-throwing and, on a corrupt file, reset to defaults and rewrite a
+	// clean config so the next start is clean (mirrors ProjectManager::loadProject).
+	json j = json::parse(configFile, nullptr, /*allow_exceptions=*/false);
+	if (j.is_discarded() || !j.is_object())
+	{
+		Logger::Log(Logger::LogLevel::Warning,
+			"config.json is corrupt or unreadable — resetting to defaults");
+		engineStatus.selectedRHI     = defaultRHI();
+		engineStatus.currentOS       = HE::OS::Windows;
+		engineStatus.lastProjectPath = "";
+		engineStatus.knownProjects.clear();
+		customConfig.clear();
+		writeConfig();
+		return;
+	}
+	// Type-checked scalar reads: value<>() throws type_error when a key exists with
+	// the wrong type, which would defeat the guard above — so never let it throw.
+	auto intField = [&](const char* key, int def) -> int
+	{
+		auto it = j.find(key);
+		return (it != j.end() && it->is_number_integer()) ? it->get<int>() : def;
+	};
+	auto strField = [&](const char* key) -> std::string
+	{
+		auto it = j.find(key);
+		return (it != j.end() && it->is_string()) ? it->get<std::string>() : std::string{};
+	};
 	engineStatus.selectedRHI      = sanitizeRHI(static_cast<HE::GraphicsAPI>(
-		j.value("RHI", static_cast<int>(defaultRHI()))));
-	engineStatus.currentOS        = static_cast<HE::OS>(j.value("OS",  static_cast<int>(HE::OS::Windows)));
-	engineStatus.lastProjectPath  = j.value("LastProjectPath", std::string{});
+		intField("RHI", static_cast<int>(defaultRHI()))));
+	engineStatus.currentOS        = static_cast<HE::OS>(intField("OS", static_cast<int>(HE::OS::Windows)));
+	engineStatus.lastProjectPath  = strField("LastProjectPath");
 	engineStatus.knownProjects.clear();
 	if (j.contains("KnownProjects") && j["KnownProjects"].is_array())
 	{
