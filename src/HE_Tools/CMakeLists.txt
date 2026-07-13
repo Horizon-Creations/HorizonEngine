@@ -115,5 +115,16 @@ add_executable(shader_compiler
 # Note: shader_compiler requires glslc (from Vulkan SDK) in PATH
 target_include_directories(shader_compiler PRIVATE src/ShaderCompiler)
 
+# ─── mesh_gen.exe (generates the built-in default primitive meshes) ───────────
+# One-shot generator: mesh_gen <out-dir> writes Cube/Sphere/Cylinder/… .hasset
+# files (StaticMesh) via ContentManager, byte-identical to editor-authored ones.
+# Run manually to (re)populate EditorDeps/EngineContent/Meshes; the outputs are
+# committed, so this is not part of the normal build graph.
+add_executable(mesh_gen
+    src/MeshGen/main.cpp
+)
+target_link_libraries(mesh_gen PRIVATE HorizonCore)
+target_include_directories(mesh_gen PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_Core/include)
+
 # HorizonTools is NEVER linked into HorizonGame or any runtime target.
 # It is an editor/build-time only dependency.
