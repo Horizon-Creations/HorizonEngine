@@ -81,6 +81,13 @@ namespace
 	float s_rmbStartX   = 0.f;
 	float s_rmbStartY   = 0.f;
 
+	// A StaticMesh .hasset dropped from the Content Browser onto the Scene
+	// viewport image. Captured at the drop (the drop target must bind to the
+	// Image item), then processed AFTER the scene extract this frame, once the
+	// fresh camera view/projection are available to unproject the drop point.
+	std::string s_viewportDropPath;   // absolute asset path ("" = nothing pending)
+	ImVec2      s_viewportDropMouse{};// screen pos of the drop
+
 	// Drop any active fly-look capture: warp the cursor back to where the look-drag began,
 	// leave relative mode, re-show the OS cursor, and hand mouse control back to ImGui.
 	// Safe to call every frame — a no-op unless a capture is actually active.
@@ -3749,6 +3756,21 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				             flipY ? ImVec2(0, 1) : ImVec2(0, 0),
 				             flipY ? ImVec2(1, 0) : ImVec2(1, 1));
 
+				// Drag a mesh (or any asset) from the Content Browser onto the
+				// viewport to spawn it. The drop target must bind to the Image
+				// item, but placing it needs this frame's camera matrices (built
+				// by the extract below), so just RECORD the drop here and process
+				// it after the extract.
+				if (ImGui::BeginDragDropTarget())
+				{
+					if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_ASSET_PATH"))
+					{
+						s_viewportDropPath.assign(static_cast<const char*>(p->Data));
+						s_viewportDropMouse = ImGui::GetMousePos();
+					}
+					ImGui::EndDragDropTarget();
+				}
+
 				const ImVec2 rectMin = ImGui::GetItemRectMin();
 				const ImVec2 rectMax = ImGui::GetItemRectMax();
 				const bool viewportHovered = ImGui::IsItemHovered();
@@ -3901,6 +3923,64 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				if (ctx.world)
 					s_extractor.extract(*ctx.world, s_sceneSnapshot, avail.x / avail.y,
 					                    camOverride.active ? &camOverride : nullptr);
+
+				// ── Spawn a mesh dropped onto the viewport ──────────────────
+				// Placed where the drop ray meets the ground plane (Y=0); if the
+				// ray points away from it (looking up), fall back to a fixed
+				// distance in front of the camera. Non-mesh assets are ignored.
+				if (!s_viewportDropPath.empty())
+				{
+					if (ctx.world && ctx.contentManager)
+					{
+						const std::string rel = ctx.contentManager->toContentRelativePath(s_viewportDropPath);
+						const HE::UUID id = rel.empty() ? HE::UUID{} : ctx.contentManager->loadAsset(rel);
+						const StaticMeshAsset* mesh = (id != HE::UUID{}) ? ctx.contentManager->getStaticMesh(id) : nullptr;
+						if (mesh)
+						{
+							glm::vec3 spawnPos(0.0f);
+							bool placed = false;
+							const glm::mat4 invVP = glm::inverse(
+								s_sceneSnapshot.camera.projection * s_sceneSnapshot.camera.view);
+							const float du = (s_viewportDropMouse.x - rectMin.x) / std::max(rectMax.x - rectMin.x, 1.0f);
+							const float dv = (s_viewportDropMouse.y - rectMin.y) / std::max(rectMax.y - rectMin.y, 1.0f);
+							glm::vec4 pNear = invVP * glm::vec4(2.0f*du-1.0f, 1.0f-2.0f*dv, -1.0f, 1.0f);
+							glm::vec4 pFar  = invVP * glm::vec4(2.0f*du-1.0f, 1.0f-2.0f*dv,  1.0f, 1.0f);
+							if (std::abs(pNear.w) > 1e-6f && std::abs(pFar.w) > 1e-6f)
+							{
+								pNear /= pNear.w; pFar /= pFar.w;
+								const glm::vec3 ro(pNear);
+								const glm::vec3 rd = glm::normalize(glm::vec3(pFar) - glm::vec3(pNear));
+								if (std::abs(rd.y) > 1e-5f)
+								{
+									const float t = -ro.y / rd.y;
+									if (t > 0.0f) { spawnPos = ro + t * rd; placed = true; }
+								}
+							}
+							if (!placed && ctx.editorCamera)
+							{
+								// EditorCamera::forward() is private — derive it from the
+								// public yaw/pitch (same convention as HE_DUMP_MATERIALTEST).
+								const float cp = std::cos(ctx.editorCamera->pitch()), sp = std::sin(ctx.editorCamera->pitch());
+								const float cy = std::cos(ctx.editorCamera->yaw()),   sy = std::sin(ctx.editorCamera->yaw());
+								spawnPos = ctx.editorCamera->position() + glm::vec3(cp*sy, sp, -cp*cy) * 8.0f;
+							}
+
+							if (ctx.undoSys) ctx.undoSys->snapshotNow();
+							Entity e = ctx.world->createEntity(mesh->name);
+							TransformComponent tc; tc.position = spawnPos;
+							ctx.world->addComponent(e, tc);
+							ctx.world->addComponent(e, MeshComponent{ .meshAssetId = id });
+							ctx.world->markHierarchyDirty();
+							ctx.selectedEntity = e; // select the freshly spawned mesh
+							Logger::Log(Logger::LogLevel::Info,
+								("Editor: spawned '" + mesh->name + "' into the scene via drag-drop").c_str());
+						}
+						else
+							Logger::Log(Logger::LogLevel::Info,
+								"Editor: dropped asset is not a static mesh — nothing spawned");
+					}
+					s_viewportDropPath.clear();
+				}
 
 
 				// Suppress the gizmo while the camera is being driven so Alt+LMB
