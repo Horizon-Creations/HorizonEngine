@@ -2380,3 +2380,47 @@ Alt-Format ohne `id`). GL+Metal-Build + `HorizonEditor`-Link sauber.
 **Reale Verifikation offen** (wie immer, kein Display in der Sandbox): Graph-Canvas-Interaktion,
 Node-Outline beim laufenden Zustand, Clip-Drop. Damit ist der komplette Vier-Tabs-Plan aus
 Forts. 69 (NavMesh/Skeletal-Mesh/Partikel/Animation-State-Machine) abgeschlossen.
+
+## Forts. 71 — Animator State Machine wird eigener Asset-Typ (13.07.2026, `218e5ee`)
+
+User-Korrektur direkt nach Forts. 70: „eine State Machine sollte ein eigenes Asset sein und
+nicht als Komponente den Scene-Entities hinzugefügt werden" — dieselbe Asset-statt-Inline-
+Bewegung, die Material und Partikel-System in dieser Session schon durchlaufen haben, jetzt
+auch für den State-Machine-Graphen.
+
+- **Neues HE_Core-Modul** `HE::AnimatorStateMachineGraph` (states/transitions/defaultParams,
+  `AnimationState`/`AnimationTransition`/`TransitionOp` — vorher in
+  `AnimatorStateMachineComponent.h`, HE_Scene) + `animatorStateMachineToJson/FromJson`. Musste
+  nach HE_Core wandern, weil `ContentManager` (HE_Core) nicht von HE_Scene-Typen abhängen darf
+  — exakt dieselbe Schicht-Regel, die `HE::ParticleGraph` schon vorgibt.
+- **`AnimatorStateMachineAsset`** (`graphJson`, `CHUNK_ASMG`) + volle ContentManager-Anbindung
+  (get/getMutable/register/SlotMap/Load-Save-Cases), neuer `AssetType::AnimatorStateMachine`.
+- **`AnimatorStateMachineComponent` geschrumpft** auf `stateMachineAssetId` + Laufzeit-Zustand
+  (aktueller State, Crossfade, **live Param-Werte** — bleiben pro Entity, da zwei Entities
+  denselben State-Machine-Asset teilen aber unterschiedliche Zustände/Parameter haben können).
+  Resolved-Graph-Cache (`resolvedGraph`/`resolvedFromAssetId`/`configDirty`) spiegelt
+  `ParticleSystemComponent::resolvedConfig` 1:1.
+- **Migration:** alte Szenen (Forts. 70, `e82137f` — Inline-States/Transitions auf der
+  Komponente) landen in einem `LegacyConfig`-Staging (Serializer hat keinen ContentManager-
+  Zugriff), `AnimationStateMachineSystem::update` bakt daraus beim ersten Tick einen echten
+  Asset — exakt `ParticleSystem::migrateLegacyConfig`s Muster.
+- **`AnimatorStateMachineEditorPanel` von Entity-Tab auf Asset-Tab umgebaut**: Doppelklick auf
+  `.hasset` im Content Browser statt „Open"-Button im Inspector; Inspector schrumpft auf
+  Asset-Slot (Drag-Drop) + Laufzeit-Readout (Current/Speed/Crossfade).
+- **16 neue Tests**: HE_Core-Graph-JSON-Roundtrip, ContentManager-Roundtrip,
+  SceneSerializer-Roundtrip (neues Asset-Referenz-Format) + Legacy-Migrations-Staging,
+  AnimationStateMachineSystem-Migration-in-echten-Asset. 796 Tests grün.
+
+**Nebenbei im selben Commit** (parallele, zeitgleich in derselben Working Copy laufende
+Session/Refactor, auf User-Anweisung mit committet): „Engine/"-reserviertes Content-Root-
+Namespace (`GlobalState`+`ContentManager::resolveAbsolutePath/toContentRelativePath`, spiegelt
+Unreals `/Engine/` vs. `/Game/`), Add-Component-Menu-Aufräumung (Animator-Familie + UI-
+Komponenten nicht mehr für Ad-hoc-Anhängen angeboten — laufen über ihren jeweiligen Asset-/
+Widget-Workflow), „Press a key to bind"-Aufnahme-UX im Input-Mapping-Editor.
+
+**Offen:** der separat gespawnte Folge-Task (SceneSerializer-Lücke bei `AnimatorComponent`/
+`AnimatorBlendComponent`/`SkeletalMeshComponent`/`PropertyAnimatorComponent`/`NavMeshComponent`/
+`NavAgentComponent`) lief in einem ISOLIERTEN Worktree auf altem Stand (`e82137f`) weiter, als
+dieser Commit auf `main` landete — sein eigener `SceneSerializer.cpp`-Diff wird beim Zusammen-
+führen mit dem hier neu geschriebenen `AnimatorStateMachineComponent`-Serialisierungs-Block
+kollidieren (Merge-Konflikt absehbar, nicht mehr).
