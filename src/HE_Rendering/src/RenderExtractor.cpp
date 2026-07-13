@@ -200,49 +200,53 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 		obj.paramOverride   = d.paramOverride; // per-entity HeParams block (empty = none)
 	});
 
-	// ── Particles + weather precipitation ─────────────────────────────────────
-	// Both sources turn each live particle into a camera-facing billboard. The
-	// per-particle cost is the billboard basis (cross products + normalises), so we
-	// first gather lightweight inputs (cheap, serial) and then build the matrices
-	// across all cores — the same gather→parallel_for pattern as the mesh path. At
-	// high precipitation caps this turns a serial tens-of-thousands stall into a
-	// parallel sweep. Same-emitter particles keep one mesh+material so the geometry
-	// pass still instances them.
-	enum class BillboardKind : uint8_t { Camera, Snow, RainStreak };
-	struct ParticleInput {
-		glm::vec3     position;
-		glm::vec3     velocity;   // RainStreak only
-		float         size;       // Camera / Snow
-		HE::UUID      meshId;
-		HE::UUID      matId;
-		uint32_t      entityId;
-		BillboardKind kind;
-		glm::vec4     tint = { 1.0f, 1.0f, 1.0f, 1.0f };  // color/alpha-over-life (Camera kind only)
-	};
-	std::vector<ParticleInput> pin;
-
+	// ── ParticleGraph particles ────────────────────────────────────────────────
+	// One ParticleBatch per emitter: raw position/size/t01 per particle, GPU-
+	// instanced (see HorizonRendering::ParticleShaderTemplates) — the backend picks
+	// a shader baked from `config`'s color/alpha-over-life endpoints (compiled once,
+	// cached by content hash, not per-particle CPU work). Size stays CPU-lerped (one
+	// scalar; moving it to the GPU buys nothing — see ParticleShaderGen's comment).
 	for (auto [e, tc, ps] : reg.view<TransformComponent, ParticleSystemComponent>().each())
 	{
 		if (!ps.visible) continue; // hidden (e.g. a preloaded zone)
 		if (ps.particles.empty()) continue;
 		const HE::ParticleEmitterConfig& config = ps.resolvedConfig; // (re)resolved by ParticleSystem::update
-		const HE::UUID meshId = (config.meshAssetId == HE::UUID{}) ? HE::kDefaultQuadMeshId : config.meshAssetId;
-		pin.reserve(pin.size() + ps.particles.size());
+
+		ParticleBatch batch;
+		batch.meshAssetId     = (config.meshAssetId == HE::UUID{}) ? HE::kDefaultQuadMeshId : config.meshAssetId;
+		batch.materialAssetId = config.materialAssetId;
+		batch.config          = config;
+		batch.entityId        = static_cast<uint32_t>(e);
+		batch.instances.reserve(ps.particles.size());
 		for (const Particle& p : ps.particles)
 		{
 			if (p.lifetime <= 0.0f) continue;
 			const float t01  = 1.0f - p.lifetime / p.maxLifetime;  // 0=born, 1=dead
 			const float size = config.startSize + (config.endSize - config.startSize) * t01;
 			if (size <= 0.0f) continue;
-			glm::vec4 tint;
-			tint.r = config.startColor[0] + (config.endColor[0] - config.startColor[0]) * t01;
-			tint.g = config.startColor[1] + (config.endColor[1] - config.startColor[1]) * t01;
-			tint.b = config.startColor[2] + (config.endColor[2] - config.startColor[2]) * t01;
-			tint.a = config.startAlpha    + (config.endAlpha    - config.startAlpha)    * t01;
-			pin.push_back({ p.position, glm::vec3(0.0f), size, meshId, config.materialAssetId,
-			                static_cast<uint32_t>(e), BillboardKind::Camera, tint });
+			batch.instances.push_back({ p.position, size, t01 });
 		}
+		if (!batch.instances.empty()) out.particleBatches.push_back(std::move(batch));
 	}
+
+	// ── Weather precipitation ──────────────────────────────────────────────────
+	// Turns each live precip drop into a camera-facing billboard. The per-particle
+	// cost is the billboard basis (cross products + normalises), so we first gather
+	// lightweight inputs (cheap, serial) and then build the matrices across all
+	// cores — the same gather→parallel_for pattern as the mesh path. At high
+	// precipitation caps this turns a serial tens-of-thousands stall into a
+	// parallel sweep. Same-emitter particles keep one mesh+material so the geometry
+	// pass still instances them.
+	enum class BillboardKind : uint8_t { Snow, RainStreak };
+	struct ParticleInput {
+		glm::vec3     position;
+		glm::vec3     velocity;   // RainStreak only
+		HE::UUID      meshId;
+		HE::UUID      matId;
+		uint32_t      entityId;
+		BillboardKind kind;
+	};
+	std::vector<ParticleInput> pin;
 
 	for (auto [e, wx] : reg.view<WeatherComponent>().each())
 	{
@@ -253,7 +257,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 		const BillboardKind kind       = isSnow ? BillboardKind::Snow : BillboardKind::RainStreak;
 		pin.reserve(pin.size() + wx.precip.size());
 		for (const Particle& p : wx.precip)
-			pin.push_back({ p.position, p.velocity, 0.0f, precipMesh, HE::UUID{},
+			pin.push_back({ p.position, p.velocity, precipMesh, HE::UUID{},
 			                static_cast<uint32_t>(e), kind });
 	}
 
@@ -271,7 +275,6 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 			obj.lod             = 0;
 			obj.castsShadow     = false;  // billboards: no shadow / AO contribution
 			obj.contributesAO   = false;
-			obj.instanceTint    = in.tint;
 
 			glm::vec3   look = camPos - in.position;
 			const float d    = glm::length(look);
@@ -295,10 +298,10 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 				world[1] = glm::vec4(up    * len,  0.0f);
 				world[2] = glm::vec4(look,         0.0f);
 			}
-			else  // Camera-facing quad (general particle) or snow flake
+			else  // Snow flake (the only remaining kind reaching this branch)
 			{
 				look /= d;
-				const float s = (in.kind == BillboardKind::Snow) ? 0.16f : in.size;
+				const float s = 0.16f;
 				glm::vec3 right = glm::cross(glm::vec3(0, 1, 0), look);
 				if (glm::length(right) < 1e-4f) right = glm::vec3(1, 0, 0);
 				right = glm::normalize(right);
