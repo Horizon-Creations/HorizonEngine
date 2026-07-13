@@ -243,8 +243,27 @@ public:
 	// against — every loose-file read/write in this class, and every editor
 	// panel that turns an absolute path into a storable relative one, must
 	// go through these two functions so "Engine/..." paths round-trip.
+	// Engine defaults are read-only from a project's perspective: reads here
+	// prefer a per-project override (Content/Engine/<rest>) when one exists,
+	// else fall back to the shared default.
 	std::string resolveAbsolutePath(const std::string& relativePath) const;
 	std::string toContentRelativePath(const std::string& absolutePath) const;
+
+	// Where saveAsset() should WRITE a given relative path — distinct from
+	// resolveAbsolutePath's read-side override-preference. Normal mode always
+	// targets the per-project override for "Engine/..." paths (the shared
+	// default is never touched by a plain Save); isEngineContentDevMode()
+	// makes this target the shared default directly instead, for building out
+	// the engine's own default-asset library with the same graph editors.
+	std::string resolveSavePath(const std::string& relativePath) const;
+	static bool isEngineContentDevMode();
+
+	// Classify an ABSOLUTE disk path: is it the shared engine default, or a
+	// per-project override of one (Content/Engine/...)? Used by the editor to
+	// decide what Content-Browser mutation UI (rename/delete/create/"Revert
+	// to Default") to offer for a given item.
+	bool isEngineDefaultPath(const std::string& absolutePath) const;
+	bool isEngineOverridePath(const std::string& absolutePath) const;
 
 	// ── Pin-based ref-counted access ──────────────────────────────────────
 	// Returns a handle that keeps the asset pinned in memory for as long as it

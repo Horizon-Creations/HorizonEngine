@@ -230,7 +230,54 @@ bool GlobalState::refreshContentFolder()
 	return true;
 }
 
-bool GlobalState::refreshEngineFolder(const std::string& engineContentAbsPath)
+// Merges a project's per-asset overrides (<contentRoot>/Engine/<rest>, see
+// ContentManager::resolveSavePath) into the displayed default tree: a file
+// that already exists in `base` at the same relative position has its
+// fullPath swapped to the override's (so opening/loading it picks up the
+// override transparently — see ContentManager::resolveAbsolutePath, which
+// makes the same override-preferred decision independently); an override
+// with no matching default is simply added. Folder nodes that already exist
+// keep pointing at the default directory — only LEAF files are ever
+// "overridden" here, never the folder's own identity.
+static void mergeOverrideInto(Folder* base, const fs::path& overrideDir)
+{
+	for (const auto& entry : fs::directory_iterator(overrideDir))
+	{
+		if (entry.is_directory())
+		{
+			Folder* sub = nullptr;
+			for (Folder* s : base->subfolders)
+				if (s->name == entry.path().filename().string()) { sub = s; break; }
+			if (!sub)
+			{
+				sub = new Folder();
+				sub->name     = entry.path().filename().string();
+				sub->fullPath = entry.path().string();
+				base->subfolders.push_back(sub);
+			}
+			mergeOverrideInto(sub, entry.path());
+		}
+		else if (entry.is_regular_file())
+		{
+			File* match = nullptr;
+			for (File* f : base->files)
+				if (f->name == entry.path().filename().string()) { match = f; break; }
+			if (match)
+				match->fullPath = entry.path().string(); // override shadows the default
+			else
+			{
+				File* file      = new File();
+				file->name      = entry.path().filename().string();
+				file->fullPath  = entry.path().string();
+				file->extension = entry.path().extension().string();
+				base->files.push_back(file);
+			}
+		}
+	}
+}
+
+bool GlobalState::refreshEngineFolder(const std::string& engineContentAbsPath,
+                                       const std::string& projectContentRoot)
 {
 	fs::path enginePath = engineContentAbsPath;
 	if (!fs::exists(enginePath) || !fs::is_directory(enginePath))
@@ -243,6 +290,17 @@ bool GlobalState::refreshEngineFolder(const std::string& engineContentAbsPath)
 	fresh.name     = "Engine";
 	fresh.fullPath = enginePath.string();
 	populateFolder(&fresh, enginePath);
+
+	// Project-level overrides (Content/Engine/...) merge in on top, so the
+	// Content Browser's "Engine" tree shows one unified, effective view —
+	// same tree position as the default, just backed by the override file.
+	if (!projectContentRoot.empty())
+	{
+		const fs::path overrideRoot = fs::path(projectContentRoot) / "Engine";
+		std::error_code ec;
+		if (fs::is_directory(overrideRoot, ec))
+			mergeOverrideInto(&fresh, overrideRoot);
+	}
 
 	{
 		std::unique_lock lock(m_engineFolderMutex);
