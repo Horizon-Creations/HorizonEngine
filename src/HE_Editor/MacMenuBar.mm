@@ -1,5 +1,6 @@
 // macOS native menu bar (see MacMenuBar.h). ObjC++ — compiled on APPLE only.
 #include "MacMenuBar.h"
+#include "HorizonVersion.h"   // HE_VERSION_STRING / HE_VERSION_CODENAME
 
 #import <Cocoa/Cocoa.h>
 #include <deque>
@@ -21,6 +22,18 @@ namespace
 - (void)fire:(id)sender
 {
 	s_queue.push_back(static_cast<MacMenuBar::Cmd>([(NSMenuItem*)sender tag]));
+}
+// About panel driven by the compile-time version macros so it shows the right
+// release regardless of whether the editor runs as a bare exe (no Info.plist) or
+// the packaged .app. Renders as: "Horizon Editor  /  Version 0.2.0 (Sunrise)".
+- (void)showAbout:(id)sender
+{
+	NSDictionary* opts = @{
+		NSAboutPanelOptionApplicationName    : @"Horizon Editor",
+		NSAboutPanelOptionApplicationVersion : @HE_VERSION_STRING,   // → "Version 0.2.0"
+		NSAboutPanelOptionVersion            : @HE_VERSION_CODENAME, // → "(Sunrise)"
+	};
+	[NSApp orderFrontStandardAboutPanelWithOptions:opts];
 }
 @end
 
@@ -65,9 +78,9 @@ void install()
 	{
 		NSMenu* app = heAddSubmenu(main, @"HorizonEditor");
 		NSMenuItem* about = [[NSMenuItem alloc]
-			initWithTitle:@"About HorizonEditor"
-			       action:@selector(orderFrontStandardAboutPanel:) keyEquivalent:@""];
-		about.target = NSApp;
+			initWithTitle:@"About Horizon Editor"
+			       action:@selector(showAbout:) keyEquivalent:@""];
+		about.target = s_target;
 		[app addItem:about];
 		[app addItem:[NSMenuItem separatorItem]];
 		heAddItem(app, @"Preferences…", C::Preferences, @",", NSEventModifierFlagCommand, false);
