@@ -109,9 +109,19 @@ void install()
 		hideOthers.target = NSApp;
 		[app addItem:hideOthers];
 		[app addItem:[NSMenuItem separatorItem]];
-		// Quit routes through OUR guarded quit (unsaved-changes prompt), not
-		// -terminate: — the editor decides when to actually exit.
-		heAddItem(app, @"Quit HorizonEditor", C::Quit, @"q", NSEventModifierFlagCommand, false);
+		// Quit uses the standard -terminate:, which SDL overrides to post
+		// SDL_EVENT_QUIT. That is the ONE path both a menu click AND the ⌘Q
+		// key-equivalent reliably trigger — a custom action (via fire:) fires only
+		// on click, never on the key-equivalent, which is why ⌘Q did nothing. The
+		// editor's unsaved-changes guard keys off SDL_EVENT_QUIT (see
+		// EditorApplication::OnEvent), so the save prompt still appears; this does
+		// not bypass it.
+		NSMenuItem* quit = [[NSMenuItem alloc]
+			initWithTitle:@"Quit HorizonEditor"
+			       action:@selector(terminate:) keyEquivalent:@"q"];
+		quit.keyEquivalentModifierMask = NSEventModifierFlagCommand;
+		quit.target = NSApp;
+		[app addItem:quit];
 	}
 
 	// ── File ───────────────────────────────────────────────────────────────
