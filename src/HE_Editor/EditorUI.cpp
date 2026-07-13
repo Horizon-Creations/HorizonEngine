@@ -1468,6 +1468,12 @@ void EditorUI::RenderProjectHub(AppContext& ctx)
     ImGui::PopItemWidth();
     ImGui::SetCursorPosX(padding);
     ImGui::TextDisabled("%s", kLangDesc[ctx.hubSelectedLang]);
+    ImGui::SetCursorPosX(padding);
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.75f, 0.45f, 1.0f));
+    ImGui::PushTextWrapPos(padding + (panelW - padding * 2.0f));
+    ImGui::TextWrapped("Applies to the whole project and can't be changed after it's created.");
+    ImGui::PopTextWrapPos();
+    ImGui::PopStyleColor();
 
     ImGui::Spacing();
     ImGui::SetCursorPosX(padding);
@@ -3230,6 +3236,9 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
             ImGui::Combo("##npLang", &ctx.hubSelectedLang,
                 kLangNames.data(), static_cast<int>(kLangNames.size()));
             ImGui::TextDisabled("%s", kLangDesc[ctx.hubSelectedLang]);
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.75f, 0.45f, 1.0f));
+            ImGui::TextWrapped("Applies to the whole project and can't be changed after it's created.");
+            ImGui::PopStyleColor();
 
             ImGui::Spacing();
             if (!ctx.hubCreateError.empty())
