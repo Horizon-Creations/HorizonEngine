@@ -5,6 +5,7 @@ add_executable(he_tests
     test_contentmanager.cpp
     test_material_graph.cpp
     test_particle_graph.cpp
+    test_animator_state_machine_graph.cpp
     test_scene_serializer.cpp
     test_level_script.cpp
     test_horizoncode_runtime.cpp

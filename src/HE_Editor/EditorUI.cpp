@@ -21,6 +21,7 @@
 #include <HorizonScene/LODSystem.h>
 #include <HorizonScene/NavigationSystem.h>
 #include <HorizonScene/ParticleSystem.h>
+#include <HorizonScene/AnimationStateMachineSystem.h>
 #include <Scripting/ScriptEngine.h>
 #include <ContentManager/HAsset.h>
 #include <ContentManager/ContentManager.h>
@@ -855,6 +856,8 @@ void EditorUI::render(AppContext& ctx, float dt)
             if (ctx.contentRefreshPending)
             {
                 ctx.globalState->refreshContentFolder();
+                if (ctx.contentManager)
+                    ctx.globalState->refreshEngineFolder(ctx.contentManager->engineContentRoot());
                 ctx.contentRefreshPending = false;
                 ctx.contentRefreshDone    = true;
             }
@@ -878,6 +881,8 @@ void EditorUI::render(AppContext& ctx, float dt)
     if (s_quietContentRefresh && ctx.globalState)
     {
         ctx.globalState->refreshContentFolder();
+        if (ctx.contentManager)
+            ctx.globalState->refreshEngineFolder(ctx.contentManager->engineContentRoot());
         s_quietContentRefresh = false;
     }
 
@@ -3392,7 +3397,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
             SkeletalMeshEditorPanel::render(ctx, tabPath, tabPos, tabSize);
         else if (ParticleGraphEditorPanel::isParticleAsset(tabPath))
             ParticleGraphEditorPanel::render(ctx, tabPath, tabPos, tabSize);
-        else if (AnimatorStateMachineEditorPanel::isStateMachineTab(tabPath))
+        else if (AnimatorStateMachineEditorPanel::isAnimatorStateMachineAsset(tabPath))
             AnimatorStateMachineEditorPanel::render(ctx, tabPath, tabPos, tabSize);
         else
             ScriptEditorPanel::render(ctx, tabPath, tabPos, tabSize);
@@ -4640,6 +4645,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 
     //Content Browser
 	auto [contentFolder, contentLock] = ctx.globalState->lockContentFolder();
+	auto [engineFolder, engineLock]   = ctx.globalState->lockEngineFolder();
     if (ctx.fontHeading) ImGui::PushFont(ctx.fontHeading);
     ImGui::Begin("Content Browser", nullptr, ImGuiWindowFlags_NoTitleBar);
     if (ctx.fontHeading) ImGui::PopFont();
@@ -4664,6 +4670,11 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 
 		// ── Tree: single-click = expand/collapse, double-click = navigate ──
 		static const Folder* s_selectedTreeFolder = nullptr;
+		// Which root s_selectedTreeFolder/s_gridFolder belongs to. Needed because
+		// nullptr used to unambiguously mean "the Content root" — now two roots
+		// exist, so nullptr is ambiguous and every place that treats it as a
+		// root sentinel must also check this tag.
+		static bool s_selectedIsEngine = false;
 
 		// Drag-to-move: an asset dragged from the grid ("HE_ASSET_PATH") and
 		// dropped onto a folder — a grid folder item or a tree node — records
@@ -4683,7 +4694,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 			ImGui::EndDragDropTarget();
 		};
 
-		std::function<void(const Folder*, int)> renderTree = [&](const Folder* folder, int depth)
+		std::function<void(const Folder*, int, bool)> renderTree = [&](const Folder* folder, int depth, bool isEngine)
 		{
 			ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow
 									 | ImGuiTreeNodeFlags_SpanAvailWidth;
@@ -4698,12 +4709,15 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 
 			// Double-click anywhere on the item → navigate grid to this folder
 			if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+			{
 				s_selectedTreeFolder = folder;
+				s_selectedIsEngine   = isEngine;
+			}
 
 			if (open)
 			{
 				for (auto* sub : folder->subfolders)
-					renderTree(sub, depth + 1);
+					renderTree(sub, depth + 1, isEngine);
 				ImGui::TreePop();
 			}
 			ImGui::PopID();
@@ -4717,11 +4731,35 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 			bool rootOpen = ImGui::TreeNodeEx("Content", rootFlags);
 			folderDropTarget(contentFolder.fullPath); // move to the content root
 			if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+			{
 				s_selectedTreeFolder = nullptr; // back to root
+				s_selectedIsEngine   = false;
+			}
 			if (rootOpen)
 			{
 				for (auto* sub : contentFolder.subfolders)
-					renderTree(sub, 1);
+					renderTree(sub, 1, false);
+				ImGui::TreePop();
+			}
+		}
+
+		// Root "Engine" node — engine-wide default content (EditorDeps/EngineContent),
+		// sibling of "Content". Same tree/drag-drop/create/rename/delete machinery;
+		// only the backing Folder differs.
+		{
+			ImGuiTreeNodeFlags rootFlags = ImGuiTreeNodeFlags_OpenOnArrow
+										 | ImGuiTreeNodeFlags_SpanAvailWidth;
+			bool rootOpen = ImGui::TreeNodeEx("Engine", rootFlags);
+			folderDropTarget(engineFolder.fullPath); // move to the engine root
+			if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+			{
+				s_selectedTreeFolder = nullptr; // back to engine root
+				s_selectedIsEngine   = true;
+			}
+			if (rootOpen)
+			{
+				for (auto* sub : engineFolder.subfolders)
+					renderTree(sub, 1, true);
 				ImGui::TreePop();
 			}
 		}
@@ -4752,18 +4790,27 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 		// s_selectedTreeFolder nullptr → root; otherwise the selected sub-folder
 		static const Folder* s_gridFolder = nullptr;
 
-		// refreshContentFolder() (asset create/rename/delete, project load) deletes
-		// and rebuilds every Folder node, so the navigation statics above dangle
+		// refreshContentFolder()/refreshEngineFolder() (asset create/rename/delete,
+		// project load, periodic external-change poll) delete and rebuild every
+		// Folder node of THEIR OWN tree, so the navigation statics above dangle
 		// after each refresh — dereferencing them was a use-after-free crash when
 		// creating an asset inside a sub-folder. Re-resolve the remembered path in
 		// the fresh tree; if the folder no longer exists, fall back to the root.
-		static uint64_t    s_treeVersionSeen = ~0ull;
+		// Two independent version counters (Content/Engine refresh independently),
+		// re-resolution triggers if EITHER changed; s_selectedIsEngine (set by the
+		// tree above) says which tree to search — the two roots never share a
+		// fullPath, so there is no ambiguity in picking one.
+		static uint64_t    s_treeVersionSeen   = ~0ull;
+		static uint64_t    s_engineVersionSeen = ~0ull;
 		static std::string s_gridFolderPath;
 		const uint64_t treeVersion =
 			ctx.globalState ? ctx.globalState->contentFolderVersion.load(std::memory_order_acquire) : 0;
-		if (treeVersion != s_treeVersionSeen)
+		const uint64_t engineVersion =
+			ctx.globalState ? ctx.globalState->engineFolderVersion.load(std::memory_order_acquire) : 0;
+		if (treeVersion != s_treeVersionSeen || engineVersion != s_engineVersionSeen)
 		{
-			s_treeVersionSeen = treeVersion;
+			s_treeVersionSeen   = treeVersion;
+			s_engineVersionSeen = engineVersion;
 			const Folder* fresh = nullptr;
 			if (!s_gridFolderPath.empty())
 			{
@@ -4775,8 +4822,9 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 						if (const Folder* hit = findByPath(sub)) return hit;
 					return nullptr;
 				};
-				fresh = findByPath(&contentFolder);
-				if (fresh == &contentFolder) fresh = nullptr; // root is the null state
+				const Folder& searchRoot = s_selectedIsEngine ? engineFolder : contentFolder;
+				fresh = findByPath(&searchRoot);
+				if (fresh == &searchRoot) fresh = nullptr; // root is the null state
 			}
 			s_gridFolder         = fresh;
 			s_selectedTreeFolder = fresh;
@@ -4786,7 +4834,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 		if (s_selectedTreeFolder != s_gridFolder)
 			s_gridFolder = s_selectedTreeFolder;
 
-		const Folder* displayFolder = s_gridFolder ? s_gridFolder : &contentFolder;
+		const Folder* displayFolder = s_gridFolder ? s_gridFolder : (s_selectedIsEngine ? &engineFolder : &contentFolder);
 		s_gridFolderPath = s_gridFolder ? s_gridFolder->fullPath : std::string{};
 
 		// ── Breadcrumb ────────────────────────────────────────────────────
@@ -4816,10 +4864,10 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 					}
 					return false;
 				};
-				findPath(&contentFolder);
+				findPath(s_selectedIsEngine ? &engineFolder : &contentFolder);
 			}
 
-			if (ImGui::SmallButton("Content##bc_root"))
+			if (ImGui::SmallButton(s_selectedIsEngine ? "Engine##bc_root" : "Content##bc_root"))
 			{
 				s_gridFolder         = nullptr;
 				s_selectedTreeFolder = nullptr;
@@ -5075,7 +5123,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				         HorizonCodeClassPanel::isClassAsset(file->fullPath) ||
 				         InputAssetPanel::isInputAsset(file->fullPath) ||
 				         SkeletalMeshEditorPanel::isSkeletalMeshAsset(file->fullPath) ||
-				         ParticleGraphEditorPanel::isParticleAsset(file->fullPath))
+				         ParticleGraphEditorPanel::isParticleAsset(file->fullPath) ||
+				         AnimatorStateMachineEditorPanel::isAnimatorStateMachineAsset(file->fullPath))
 				{
 				const std::string tabLabel = std::filesystem::path(file->name).stem().string();
 				auto it = std::find_if(ctx.tabs.begin(), ctx.tabs.end(),
@@ -5179,12 +5228,10 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				while (std::filesystem::exists(path))
 					path = base + std::to_string(counter++) + ext;
 
-				// Create an empty asset file via ContentManager
-				std::string relative = std::filesystem::relative(
-					path,
-					std::filesystem::path(ctx.projectManager->currentProject().path).parent_path()
-				).string();
-				std::replace(relative.begin(), relative.end(), '\\', '/');
+				// Create an empty asset file via ContentManager. Root-aware (Content
+				// vs. reserved "Engine/" namespace) so an asset created inside the
+				// Engine tree gets a path other panels' pickers can resolve back.
+				std::string relative = ctx.contentManager->toContentRelativePath(path);
 
 				// Write a minimal binary asset stub so the file exists on disk.
 				// The UUID minted here is the asset's permanent identity.
@@ -5260,6 +5307,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 			if (ImGui::MenuItem("Material"))     tryCreate("NewMaterial", ".hasset",  HE::AssetType::Material);
 			if (ImGui::MenuItem("Material Function")) tryCreate("NewMaterialFunction", ".hasset", HE::AssetType::MaterialFunction);
 			if (ImGui::MenuItem("Particle System")) tryCreate("NewParticleSystem", ".hasset", HE::AssetType::ParticleSystem);
+			if (ImGui::MenuItem("Animator State Machine")) tryCreate("NewStateMachine", ".hasset", HE::AssetType::AnimatorStateMachine);
 			if (ImGui::MenuItem("UI Widget"))    tryCreate("NewWidget",   ".hasset",  HE::AssetType::Widget);
 			if (ImGui::MenuItem("HorizonCode Class")) tryCreate("NewClass", ".hasset", HE::AssetType::HorizonCodeClass);
 			if (ImGui::BeginMenu("HorizonCode Player"))
@@ -5313,7 +5361,9 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				if ((isMeshSrc || isTextureSrc || isAudioSrc || isMatSrc || isFontSrc) &&
 				    ImGui::MenuItem("Import"))
 				{
-					const std::filesystem::path root = contentFolder.fullPath;
+					// The item being imported lives in whichever root is currently
+					// browsed (s_selectedIsEngine) — NOT always Content.
+					const std::filesystem::path root = s_selectedIsEngine ? engineFolder.fullPath : contentFolder.fullPath;
 					std::error_code ec;
 					std::filesystem::path relDir =
 						std::filesystem::relative(srcPath.parent_path(), root, ec);
@@ -5338,11 +5388,12 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				    MaterialEditorPanel::isMaterialAsset(s_ctxMenuItem) &&
 				    ImGui::MenuItem("Create Material Instance"))
 				{
-					std::error_code ec;
-					const std::filesystem::path root(contentFolder.fullPath);
-					const std::string parentRel =
-						std::filesystem::relative(srcPath, root, ec).generic_string();
-					if (!ec)
+					// registerMaterial() below stores inst.path directly (no later
+					// loadAsset() to correct it), so it MUST carry the "Engine/"
+					// prefix already when the parent lives under the engine root —
+					// toContentRelativePath(), not a manual root-relative fs::relative.
+					const std::string parentRel = ctx.contentManager->toContentRelativePath(srcPath.string());
+					if (!parentRel.empty())
 					{
 						// Unique sibling: <stem>_Inst[.N].hasset
 						std::filesystem::path dst =
@@ -5353,7 +5404,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 						MaterialAsset inst;
 						inst.type = HE::AssetType::Material;
 						inst.name = dst.stem().string();
-						inst.path = std::filesystem::relative(dst, root, ec).generic_string();
+						inst.path = ctx.contentManager->toContentRelativePath(dst.string());
 						inst.parentMaterialPath = parentRel;
 						const HE::UUID iid = ctx.contentManager->registerMaterial(std::move(inst));
 						ctx.contentManager->syncMaterialInstance(iid); // derive shader/params
@@ -5370,10 +5421,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				if (ext == ".hasset" && ctx.world && ctx.contentManager &&
 				    ImGui::MenuItem("Add to Scene"))
 				{
-					std::error_code ec;
-					std::string rel = std::filesystem::relative(
-						srcPath, std::filesystem::path(contentFolder.fullPath), ec).generic_string();
-					if (!ec)
+					std::string rel = ctx.contentManager->toContentRelativePath(srcPath.string());
+					if (!rel.empty())
 					{
 						const HE::UUID id = ctx.contentManager->loadAsset(rel);
 						if (const StaticMeshAsset* mesh = ctx.contentManager->getStaticMesh(id))
@@ -5891,11 +5940,9 @@ void EditorUI::RenderInspector(AppContext& ctx)
 						const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_ASSET_PATH");
 						if (p && ctx.contentManager)
 						{
-							std::error_code ec;
-							const std::string rel = std::filesystem::relative(
-								static_cast<const char*>(p->Data),
-								ctx.contentManager->contentRoot(), ec).generic_string();
-							const HE::UUID id = (ec || rel.empty())
+							const std::string rel = ctx.contentManager->toContentRelativePath(
+								static_cast<const char*>(p->Data));
+							const HE::UUID id = rel.empty()
 								? HE::UUID{} : ctx.contentManager->loadAsset(rel);
 							if (id != HE::UUID{} && ctx.contentManager->getAudio(id))
 							{
@@ -6013,12 +6060,10 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			{
 				if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_ASSET_PATH"))
 				{
-					std::error_code ec;
-					std::string rel = std::filesystem::relative(
-					    static_cast<const char*>(p->Data),
-					    ctx.contentManager ? ctx.contentManager->contentRoot() : "",
-					    ec).generic_string();
-					if (!ec && !rel.empty() && rel.rfind("..", 0) != 0)
+					std::string rel = ctx.contentManager
+					    ? ctx.contentManager->toContentRelativePath(static_cast<const char*>(p->Data))
+					    : std::string();
+					if (!rel.empty())
 					{
 						const HE::UUID id = ctx.contentManager->loadAsset(rel);
 						if (id != HE::UUID{} && ctx.contentManager->getSkeletalMesh(id))
@@ -6052,12 +6097,10 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			{
 				if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_ASSET_PATH"))
 				{
-					std::error_code ec;
-					std::string rel = std::filesystem::relative(
-						static_cast<const char*>(p->Data),
-						ctx.contentManager ? ctx.contentManager->contentRoot() : "",
-						ec).generic_string();
-					if (!ec && !rel.empty() && rel.rfind("..", 0) != 0)
+					std::string rel = ctx.contentManager
+						? ctx.contentManager->toContentRelativePath(static_cast<const char*>(p->Data))
+						: std::string();
+					if (!rel.empty())
 					{
 						const HE::UUID id = ctx.contentManager->loadAsset(rel);
 						if (id != HE::UUID{} && ctx.contentManager->getAnimationClip(id))
@@ -6102,12 +6145,10 @@ void EditorUI::RenderInspector(AppContext& ctx)
 				{
 					if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_ASSET_PATH"))
 					{
-						std::error_code ec;
-						std::string rel = std::filesystem::relative(
-							static_cast<const char*>(p->Data),
-							ctx.contentManager ? ctx.contentManager->contentRoot() : "",
-							ec).generic_string();
-						if (!ec && !rel.empty() && rel.rfind("..", 0) != 0)
+						std::string rel = ctx.contentManager
+							? ctx.contentManager->toContentRelativePath(static_cast<const char*>(p->Data))
+							: std::string();
+						if (!rel.empty())
 						{
 							const HE::UUID id = ctx.contentManager->loadAsset(rel);
 							if (id != HE::UUID{} && ctx.contentManager->getAnimationClip(id))
@@ -6134,26 +6175,67 @@ void EditorUI::RenderInspector(AppContext& ctx)
 	}
 
 	// ── Animator State Machine ──────────────────────────────────────────────
-	// Full authoring (states/transitions/params) moved to a dedicated graph-editor
-	// tab (states as nodes, transitions as links, shares the GraphEditor canvas
-	// with Material/HorizonCode/Particle) — the flat Inspector lists this used to
-	// be don't scale past a handful of states/transitions. This section is now
-	// just a summary + a link to that tab.
+	// The graph (states/transitions/default params) lives in an
+	// AnimatorStateMachineAsset (authored in the Animator State Machine Editor
+	// tab, opened by double-clicking the .hasset in the Content Browser — same
+	// "asset instead of inline fields" move Material/ParticleSystem made) — this
+	// section is just the asset slot + per-instance runtime state.
 	if (auto* asm_ = registry.try_get<AnimatorStateMachineComponent>(entity))
 	{
 		if (componentHeader("Animator State Machine", true, removed))
 		{
-			ImGui::Text("%zu state(s), %zu transition(s)", asm_->states.size(), asm_->transitions.size());
+			const AnimatorStateMachineAsset* asset = (asm_->stateMachineAssetId == HE::UUID{} || !ctx.contentManager)
+				? nullptr : ctx.contentManager->getAnimatorStateMachine(asm_->stateMachineAssetId);
+			const std::string slotLabel = (asm_->stateMachineAssetId == HE::UUID{})
+				? std::string("(none — drop a state machine here)")
+				: (asset ? asset->name : std::string("(not loaded)"));
+
+			ImGui::TextUnformatted("Asset");
+			ImGui::SameLine();
+			ImGui::Button((slotLabel + "##smslot").c_str());
+			if (ImGui::BeginDragDropTarget())
+			{
+				if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_ASSET_PATH"))
+				{
+					const std::string rel = ctx.contentManager
+						? ctx.contentManager->toContentRelativePath(static_cast<const char*>(p->Data))
+						: std::string();
+					if (!rel.empty())
+					{
+						const HE::UUID id = ctx.contentManager->loadAsset(rel);
+						if (id != HE::UUID{} && ctx.contentManager->getAnimatorStateMachine(id))
+						{
+							if (ctx.undoSys) ctx.undoSys->snapshotNow();
+							asm_->stateMachineAssetId = id;
+							AnimationStateMachineSystem::markConfigDirty(*asm_);
+						}
+						else
+							Logger::Log(Logger::LogLevel::Warning,
+								"Editor: dropped asset is not an animator state machine");
+					}
+				}
+				ImGui::EndDragDropTarget();
+			}
+			if (asm_->stateMachineAssetId != HE::UUID{})
+			{
+				ImGui::SameLine();
+				if (ImGui::SmallButton("Clear##sm"))
+				{
+					if (ctx.undoSys) ctx.undoSys->snapshotNow();
+					asm_->stateMachineAssetId = HE::UUID{};
+					AnimationStateMachineSystem::markConfigDirty(*asm_);
+				}
+			}
+
 			ImGui::LabelText("Current##sm", "%s",
 				asm_->currentStateName.empty() ? "(none)" : asm_->currentStateName.c_str());
-			if (ImGui::Button("Open in State Machine Editor##sm"))
+			ImGui::DragFloat("Speed##sm", &asm_->playbackSpeed, 0.01f, -4.0f, 4.0f, "%.2f"); trackEdit();
+			if (asm_->inTransition)
 			{
-				const std::string path = AnimatorStateMachineEditorPanel::tabPathFor(entity);
-				auto tabIt = std::find_if(ctx.tabs.begin(), ctx.tabs.end(),
-					[&](const AppContext::EditorTab& t) { return t.assetPath == path; });
-				if (tabIt == ctx.tabs.end())
-				{ ctx.tabs.push_back({ "State Machine", path, true, true }); ctx.activeTab = (int)ctx.tabs.size() - 1; }
-				else ctx.activeTab = (int)std::distance(ctx.tabs.begin(), tabIt);
+				ImGui::LabelText("-> ##sm", "%s", asm_->transitionTarget.c_str());
+				const float pct = asm_->transitionDuration > 0.0f
+					? asm_->transitionElapsed / asm_->transitionDuration : 0.0f;
+				ImGui::ProgressBar(std::min(pct, 1.0f), ImVec2(-1, 0), "crossfade");
 			}
 		}
 		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<AnimatorStateMachineComponent>(entity); }
@@ -6175,12 +6257,10 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			{
 				if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_ASSET_PATH"))
 				{
-					std::error_code ec;
-					std::string rel = std::filesystem::relative(
-						static_cast<const char*>(p->Data),
-						ctx.contentManager ? ctx.contentManager->contentRoot() : "",
-						ec).generic_string();
-					if (!ec && !rel.empty() && rel.rfind("..", 0) != 0)
+					std::string rel = ctx.contentManager
+						? ctx.contentManager->toContentRelativePath(static_cast<const char*>(p->Data))
+						: std::string();
+					if (!rel.empty())
 					{
 						const HE::UUID id = ctx.contentManager->loadAsset(rel);
 						if (id != HE::UUID{} && ctx.contentManager->getPropertyAnimClip(id))
@@ -6262,16 +6342,12 @@ void EditorUI::RenderInspector(AppContext& ctx)
 	{
 		if (componentHeader("Material", true, removed))
 		{
-			// Resolve a Content-Browser drag (absolute path) to a content-root-
-			// relative path, returning empty if it lives outside the root.
+			// Resolve a Content-Browser drag (absolute path) to a content- or
+			// engine-root-relative path, empty if it lives outside both roots.
 			auto toRelative = [&](const char* absPath) -> std::string
 			{
 				if (!ctx.contentManager) return {};
-				std::error_code ec;
-				std::string rel = std::filesystem::relative(
-					absPath, ctx.contentManager->contentRoot(), ec).generic_string();
-				if (ec || rel.empty() || rel.rfind("..", 0) == 0) return {};
-				return rel;
+				return ctx.contentManager->toContentRelativePath(absPath);
 			};
 
 			// ── Material asset slot — drop a material .hasset here ────────────
@@ -6765,11 +6841,10 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			{
 				if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_ASSET_PATH"))
 				{
-					std::error_code ec;
-					const std::string rel = std::filesystem::relative(
-						static_cast<const char*>(p->Data),
-						ctx.contentManager ? ctx.contentManager->contentRoot() : "", ec).generic_string();
-					if (!ec && !rel.empty() && rel.rfind("..", 0) != 0)
+					const std::string rel = ctx.contentManager
+						? ctx.contentManager->toContentRelativePath(static_cast<const char*>(p->Data))
+						: std::string();
+					if (!rel.empty())
 					{
 						const HE::UUID id = ctx.contentManager->loadAsset(rel);
 						if (id != HE::UUID{} && ctx.contentManager->getParticleGraph(id))
@@ -6955,10 +7030,6 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			addItem("Transform 2D", Transform2DComponent{});
 			addItem("Mesh",          MeshComponent{});
 			addItem("Skeletal Mesh", SkeletalMeshComponent{});
-			addItem("Animator",       AnimatorComponent{});
-			addItem("Animator Blend",          AnimatorBlendComponent{});
-			addItem("Animator State Machine",  AnimatorStateMachineComponent{});
-			addItem("Property Animator",       PropertyAnimatorComponent{});
 			addItem("Nav Mesh",                NavMeshComponent{});
 			addItem("Nav Agent",               NavAgentComponent{});
 			addItem("Material",     MaterialComponent{});
@@ -6966,18 +7037,20 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			addItem("Light",        LightComponent{});
 			addItem("Rigid Body",          RigidBodyComponent{});
 			addItem("Collider",            ColliderComponent{});
-			addItem("Character Controller", CharacterControllerComponent{});
 			addItem("Script",         ScriptComponent{});
 			addItem("Audio Source",    AudioSourceComponent{});
 			addItem("Audio Listener",  AudioListenerComponent{});
 			addItem("Particle System", ParticleSystemComponent{});
 			addItem("LOD",             LODComponent{});
 			addItem("Foliage",         FoliageComponent{});
-			addItem("UI Canvas",       UICanvasComponent{});
-			addItem("UI Element",      UIElementComponent{});
-			addItem("UI Text",         UITextComponent{});
-			addItem("UI Image",        UIImageComponent{});
-			addItem("UI Button",       UIButtonComponent{});
+			// Animator / Animator Blend / Animator State Machine / Property
+			// Animator, Character Controller, and the UI components are
+			// intentionally not offered here — they're meaningless bolted onto
+			// an arbitrary entity and are set up through their owning asset
+			// workflow instead (Skeletal Mesh + Animation State Machine editor
+			// tabs, the player/character setup, the UI Widget designer). The
+			// component types and their Inspector panels above still work for
+			// entities that already carry them (e.g. older scenes).
 			ImGui::EndPopup();
 		}
 	}

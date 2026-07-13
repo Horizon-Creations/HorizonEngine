@@ -3,32 +3,95 @@
 #include <HorizonScene/Components/AnimatorStateMachineComponent.h>
 #include <HorizonScene/Components/SkeletalMeshComponent.h>
 #include <ContentManager/ContentManager.h>
+#include <ContentManager/Assets.h>
 #include "AnimationEval.h"
 
 #include <algorithm>
 #include <cmath>
 
-static const AnimationState* findState(const AnimatorStateMachineComponent& sm,
-                                        const std::string& name)
+namespace
 {
-    for (const auto& s : sm.states)
+// One-off migration for scenes saved before AnimatorStateMachineComponent
+// referenced an AnimatorStateMachineAsset: bake the legacy inline
+// states/transitions/params into a real asset — same "asset instead of inline
+// fields" move Material/ParticleSystem made for their own components, just
+// resolved lazily here instead of in SceneSerializer (which has no
+// ContentManager access).
+HE::UUID migrateLegacyConfig(const AnimatorStateMachineComponent::LegacyConfig& legacy, ContentManager& cm)
+{
+    HE::AnimatorStateMachineGraph g;
+    g.states       = legacy.states;
+    g.transitions  = legacy.transitions;
+    g.defaultParams = legacy.params;
+    g.startState   = legacy.currentStateName;
+
+    AnimatorStateMachineAsset asset;
+    asset.name      = "Migrated State Machine";
+    asset.graphJson = HE::animatorStateMachineToJson(g);
+    return cm.registerAnimatorStateMachine(std::move(asset));
+}
+
+void resolveConfigIfNeeded(AnimatorStateMachineComponent& sm, ContentManager& cm)
+{
+    if (sm.legacy.hasData)
+    {
+        sm.stateMachineAssetId = migrateLegacyConfig(sm.legacy, cm);
+        sm.legacy.hasData      = false;
+        sm.configDirty         = true;
+    }
+
+    if (!sm.configDirty && sm.resolvedFromAssetId == sm.stateMachineAssetId) return;
+
+    HE::AnimatorStateMachineGraph graph;
+    if (const AnimatorStateMachineAsset* asset = cm.getAnimatorStateMachine(sm.stateMachineAssetId);
+        asset && !asset->graphJson.empty())
+    {
+        HE::AnimatorStateMachineGraph parsed;
+        if (HE::animatorStateMachineFromJson(asset->graphJson, parsed)) graph = std::move(parsed);
+    }
+
+    sm.resolvedGraph       = graph;
+    sm.resolvedFromAssetId = sm.stateMachineAssetId;
+    sm.configDirty         = false;
+
+    // Seed live params from the graph's defaults (only newly-appeared keys —
+    // an in-flight edit shouldn't clobber a param a script already tweaked at
+    // runtime, e.g. re-resolving after the graph gained a NEW param).
+    for (const auto& [k, v] : sm.resolvedGraph.defaultParams)
+        sm.params.try_emplace(k, v);
+
+    // First resolve for this entity (no current state yet) — enter the
+    // graph's start state (or its first state, if any).
+    if (sm.currentStateName.empty())
+    {
+        sm.currentStateName = !sm.resolvedGraph.startState.empty()
+            ? sm.resolvedGraph.startState
+            : (sm.resolvedGraph.states.empty() ? std::string() : sm.resolvedGraph.states.front().name);
+    }
+}
+
+const HE::AnimationState* findState(const AnimatorStateMachineComponent& sm, const std::string& name)
+{
+    for (const auto& s : sm.resolvedGraph.states)
         if (s.name == name) return &s;
     return nullptr;
 }
 
-static bool evalTransition(const AnimatorStateMachineComponent& sm,
-                             const AnimationTransition& t)
+bool evalTransition(const AnimatorStateMachineComponent& sm, const HE::AnimationTransition& t)
 {
     auto it = sm.params.find(t.paramName);
     if (it == sm.params.end()) return false;
     const float v = it->second;
     switch (t.op) {
-        case TransitionOp::Greater: return v >  t.threshold;
-        case TransitionOp::Less:    return v <  t.threshold;
-        case TransitionOp::Equal:   return v == t.threshold;
+        case HE::TransitionOp::Greater: return v >  t.threshold;
+        case HE::TransitionOp::Less:    return v <  t.threshold;
+        case HE::TransitionOp::Equal:   return v == t.threshold;
     }
     return false;
 }
+} // namespace
+
+void AnimationStateMachineSystem::markConfigDirty(AnimatorStateMachineComponent& sm) { sm.configDirty = true; }
 
 void AnimationStateMachineSystem::update(HorizonWorld& world, ContentManager& cm, float dt)
 {
@@ -37,7 +100,9 @@ void AnimationStateMachineSystem::update(HorizonWorld& world, ContentManager& cm
 
     for (auto [e, sm, smc] : view.each())
     {
-        const AnimationState* curState = findState(sm, sm.currentStateName);
+        resolveConfigIfNeeded(sm, cm);
+
+        const HE::AnimationState* curState = findState(sm, sm.currentStateName);
         if (!curState) continue;
 
         const SkeletalMeshAsset* mesh = cm.getSkeletalMesh(smc.meshAssetId);
@@ -63,7 +128,7 @@ void AnimationStateMachineSystem::update(HorizonWorld& world, ContentManager& cm
         // Check transitions (only when not mid-transition)
         if (!sm.inTransition)
         {
-            for (const auto& t : sm.transitions)
+            for (const auto& t : sm.resolvedGraph.transitions)
             {
                 if (t.fromState != sm.currentStateName) continue;
                 if (!evalTransition(sm, t)) continue;
@@ -93,7 +158,7 @@ void AnimationStateMachineSystem::update(HorizonWorld& world, ContentManager& cm
             const float alpha = std::min(sm.transitionElapsed / sm.transitionDuration, 1.0f);
 
             // Sample incoming clip at transitionElapsed
-            const AnimationState* nextState = findState(sm, sm.transitionTarget);
+            const HE::AnimationState* nextState = findState(sm, sm.transitionTarget);
             const AnimationClipAsset* nextClip = nextState ? cm.getAnimationClip(nextState->clipId) : nullptr;
 
             std::vector<JointTRS> trsIn(jointCount);

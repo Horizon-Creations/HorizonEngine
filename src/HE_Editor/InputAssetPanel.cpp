@@ -9,6 +9,8 @@
 #include <nlohmann/json.hpp>
 #include <imgui.h>
 #include <misc/cpp/imgui_stdlib.h>
+#include <SDL3/SDL.h>
+#include <cstring>
 #include <filesystem>
 #include <map>
 #include <string>
@@ -41,6 +43,32 @@ struct PanelState
 	std::vector<MapEntry> entries;
 };
 std::map<std::string, PanelState> g_states;
+
+// ── "Press a key to bind" capture ───────────────────────────────────────────
+// At most one key field across all open tabs can be "listening" at a time.
+// It's identified by (assetPath, entryIndex, subIndex, kind) rather than a
+// pointer into the entry's vectors, since those can reallocate/shift while
+// the capture is waiting (multiple frames) for a key press.
+enum class CaptureKind { None, Key, AxisPositive, AxisNegative };
+struct CaptureState
+{
+	std::string  assetPath;
+	int          entryIndex = -1;
+	int          subIndex   = -1;
+	CaptureKind  kind       = CaptureKind::None;
+	bool         primed     = false;                    // snapshot-only first frame
+	bool         prevKeys[SDL_SCANCODE_COUNT] = {};      // last frame's held-key snapshot
+};
+CaptureState g_capture;
+
+void beginCapture(const std::string& assetPath, int entryIndex, int subIndex, CaptureKind kind)
+{
+	g_capture.assetPath  = assetPath;
+	g_capture.entryIndex = entryIndex;
+	g_capture.subIndex   = subIndex;
+	g_capture.kind       = kind;
+	g_capture.primed     = false;
+}
 
 bool sniffType(const std::string& path, HE::AssetType type)
 {
@@ -96,6 +124,72 @@ std::string encodeMapping(const std::vector<MapEntry>& entries)
 	return j.dump();
 }
 
+// A "(?)" marker that shows an explanatory tooltip on hover.
+void helpMarker(const char* desc)
+{
+	ImGui::TextDisabled("(?)");
+	if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
+	{
+		ImGui::BeginTooltip();
+		ImGui::PushTextWrapPos(ImGui::GetFontSize() * 35.0f);
+		ImGui::TextUnformatted(desc);
+		ImGui::PopTextWrapPos();
+		ImGui::EndTooltip();
+	}
+}
+
+// One key-name field: a "<label> [text box] [Bind]" row. The text box still
+// accepts free-typed SDL scancode names (and gets a red outline + tooltip if
+// the typed name doesn't resolve), but "Bind" lets the user just press the
+// physical key instead of having to know its exact name.
+//
+// `capturedName`/`captureCancelled` are this frame's poll result (computed
+// once per render() call, see the call site) — applied here only if this
+// field is the one g_capture is currently pointed at.
+void keyBindField(const char* label, std::string& value, bool& dirty,
+                   const std::string& assetPath, int entryIndex, int subIndex, CaptureKind kind,
+                   const std::string& capturedName, bool captureCancelled)
+{
+	// Scope IDs by `label` too: an axis row calls this twice ("+" and "-")
+	// under the same outer PushID, so the Bind/Press-a-key buttons would
+	// otherwise collide (both just say "Bind").
+	ImGui::PushID(label);
+
+	const bool mine = g_capture.kind == kind && g_capture.assetPath == assetPath &&
+	                   g_capture.entryIndex == entryIndex && g_capture.subIndex == subIndex;
+	if (mine)
+	{
+		if (!capturedName.empty()) { value = capturedName; dirty = true; g_capture.kind = CaptureKind::None; }
+		else if (captureCancelled)  { g_capture.kind = CaptureKind::None; }
+	}
+
+	ImGui::SetNextItemWidth(100.0f);
+	if (ImGui::InputText(label, &value)) dirty = true;
+	const bool known = value.empty() || SDL_GetScancodeFromName(value.c_str()) != SDL_SCANCODE_UNKNOWN;
+	if (!known)
+	{
+		ImGui::GetWindowDrawList()->AddRect(
+			ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), IM_COL32(220, 70, 70, 255));
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("\"%s\" isn't a recognized SDL key name — it won't bind to\n"
+			                   "anything at runtime. Click Bind and press the key instead.", value.c_str());
+	}
+	ImGui::SameLine();
+	if (mine)
+	{
+		ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(214, 122, 30, 255));
+		ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(230, 140, 40, 255));
+		if (ImGui::SmallButton("Press a key\xE2\x80\xA6 (click to cancel)")) g_capture.kind = CaptureKind::None;
+		ImGui::PopStyleColor(2);
+	}
+	else if (ImGui::SmallButton("Bind"))
+	{
+		beginCapture(assetPath, entryIndex, subIndex, kind);
+	}
+
+	ImGui::PopID();
+}
+
 } // namespace
 
 bool InputAssetPanel::isInputActionAsset(const std::string& path)
@@ -111,7 +205,11 @@ bool InputAssetPanel::isDirty(const std::string& path)
 	return it != g_states.end() && it->second.dirty;
 }
 
-void InputAssetPanel::forget(const std::string& path) { g_states.erase(path); }
+void InputAssetPanel::forget(const std::string& path)
+{
+	g_states.erase(path);
+	if (g_capture.assetPath == path) g_capture.kind = CaptureKind::None;
+}
 
 void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
                              const ImVec2& pos, const ImVec2& size)
@@ -119,9 +217,7 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 	PanelState& st = g_states[assetPath];
 	if (!st.loaded && ctx.contentManager)
 	{
-		std::error_code ec;
-		const std::string rel = std::filesystem::relative(
-			assetPath, ctx.contentManager->contentRoot(), ec).generic_string();
+		const std::string rel = ctx.contentManager->toContentRelativePath(assetPath);
 		st.assetId   = ctx.contentManager->loadAsset(rel);
 		st.isMapping = isInputMappingAsset(assetPath);
 		if (const InputActionAsset* a = ctx.contentManager->getInputAction(st.assetId))
@@ -183,9 +279,57 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 	}
 
 	// ── Input Mapping Context: one block per action entry ──────────────────
-	ImGui::TextDisabled("Binds keys to Input Actions. Key names are SDL scancode names");
-	ImGui::TextDisabled("(\"W\", \"Space\", \"Left Shift\", ...).");
+	ImGui::TextDisabled("Binds keys to Input Actions.");
+	ImGui::SameLine();
+	helpMarker(
+		"Click \"Bind\" next to a key field, then press the physical key you want "
+		"to use \xe2\x80\x94 it fills in the exact name for you. Press Esc, or click "
+		"the button again, to cancel.\n\n"
+		"You can still type a name by hand; they're SDL key names (e.g. \"W\", "
+		"\"Space\", \"Left Shift\"). A red outline means the typed name isn't "
+		"recognized and won't bind to anything at runtime.\n\n"
+		"An Axis reads -1..+1 each frame: holding the \"+\" key drives it toward "
+		"+1, the \"-\" key toward -1. Either can be left blank for a one-sided "
+		"axis (e.g. a trigger). Scale multiplies that raw value \xe2\x80\x94 try "
+		"-1 to invert, or a higher value for a faster response.");
 	ImGui::Spacing();
+
+	// Poll SDL's live keyboard state once per frame while a field on THIS tab
+	// is listening for the next key press. g_capture is global across all open
+	// tabs; only the tab it targets does anything with the poll result below.
+	std::string capturedKeyName;
+	bool captureWasCancelled = false;
+	if (g_capture.kind != CaptureKind::None && g_capture.assetPath == assetPath)
+	{
+		int numKeys = 0;
+		const bool* keyState = SDL_GetKeyboardState(&numKeys);
+		numKeys = std::min(numKeys, static_cast<int>(SDL_SCANCODE_COUNT));
+		if (!g_capture.primed)
+		{
+			// First active frame is snapshot-only, so a key still held down from
+			// the click that opened the capture isn't mistaken for a fresh press.
+			std::memcpy(g_capture.prevKeys, keyState, sizeof(bool) * numKeys);
+			g_capture.primed = true;
+		}
+		else
+		{
+			for (int sc = 0; sc < numKeys; ++sc)
+			{
+				if (keyState[sc] && !g_capture.prevKeys[sc])
+				{
+					if (sc == SDL_SCANCODE_ESCAPE) captureWasCancelled = true;
+					else if (const char* n = SDL_GetScancodeName(static_cast<SDL_Scancode>(sc)); n && n[0])
+						capturedKeyName = n;
+					break;
+				}
+			}
+			std::memcpy(g_capture.prevKeys, keyState, sizeof(bool) * numKeys);
+		}
+	}
+	// Any structural edit below (add/remove key, axis or entry) can shift the
+	// indices g_capture is pointed at — just drop an in-flight capture rather
+	// than risk it landing on the wrong field.
+	auto cancelCaptureForThisAsset = [&]() { if (g_capture.assetPath == assetPath) g_capture.kind = CaptureKind::None; };
 
 	const auto actions = HcEditorUtil::listAssets(ctx.contentManager, HE::AssetType::InputAction);
 	int removeEntry = -1;
@@ -215,13 +359,13 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 		for (int k = 0; k < static_cast<int>(e.keys.size()); ++k)
 		{
 			ImGui::PushID(1000 + k);
-			ImGui::SetNextItemWidth(160.0f);
-			if (ImGui::InputText("Key", &e.keys[k])) st.dirty = true;
+			keyBindField("Key", e.keys[k], st.dirty, assetPath, i, k, CaptureKind::Key,
+			             capturedKeyName, captureWasCancelled);
 			ImGui::SameLine();
 			if (ImGui::SmallButton("x")) removeKey = k;
 			ImGui::PopID();
 		}
-		if (removeKey >= 0) { e.keys.erase(e.keys.begin() + removeKey); st.dirty = true; }
+		if (removeKey >= 0) { e.keys.erase(e.keys.begin() + removeKey); st.dirty = true; cancelCaptureForThisAsset(); }
 		if (ImGui::SmallButton("+ Key")) { e.keys.emplace_back(); st.dirty = true; }
 
 		// Axis bindings
@@ -230,11 +374,11 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 		{
 			AxisRow& a = e.axes[k];
 			ImGui::PushID(2000 + k);
-			ImGui::SetNextItemWidth(100.0f);
-			if (ImGui::InputText("+", &a.positive)) st.dirty = true;
+			keyBindField("+", a.positive, st.dirty, assetPath, i, k, CaptureKind::AxisPositive,
+			             capturedKeyName, captureWasCancelled);
 			ImGui::SameLine();
-			ImGui::SetNextItemWidth(100.0f);
-			if (ImGui::InputText("-", &a.negative)) st.dirty = true;
+			keyBindField("-", a.negative, st.dirty, assetPath, i, k, CaptureKind::AxisNegative,
+			             capturedKeyName, captureWasCancelled);
 			ImGui::SameLine();
 			ImGui::SetNextItemWidth(70.0f);
 			if (ImGui::DragFloat("Scale", &a.scale, 0.05f)) st.dirty = true;
@@ -242,13 +386,13 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 			if (ImGui::SmallButton("x")) removeAxis = k;
 			ImGui::PopID();
 		}
-		if (removeAxis >= 0) { e.axes.erase(e.axes.begin() + removeAxis); st.dirty = true; }
+		if (removeAxis >= 0) { e.axes.erase(e.axes.begin() + removeAxis); st.dirty = true; cancelCaptureForThisAsset(); }
 		ImGui::SameLine();
 		if (ImGui::SmallButton("+ Axis")) { e.axes.emplace_back(); st.dirty = true; }
 
 		ImGui::PopID();
 	}
-	if (removeEntry >= 0) { st.entries.erase(st.entries.begin() + removeEntry); st.dirty = true; }
+	if (removeEntry >= 0) { st.entries.erase(st.entries.begin() + removeEntry); st.dirty = true; cancelCaptureForThisAsset(); }
 
 	ImGui::Separator();
 	if (ImGui::Button("+ Add Action Entry")) { st.entries.emplace_back(); st.dirty = true; }

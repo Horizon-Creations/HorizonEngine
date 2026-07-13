@@ -1389,7 +1389,7 @@ std::vector<std::string> scanInputEvents(ContentManager* cm)
 	{
 		bool axis = false;
 		HAsset::Reader r;
-		if (r.open((std::filesystem::path(cm->contentRoot()) / ref.path).string()))
+		if (r.open(cm->resolveAbsolutePath(ref.path)))
 			if (const auto* c = r.findChunk(HAsset::CHUNK_IACT))
 				axis = HE::inputActionIsAxis(std::string(
 					reinterpret_cast<const char*>(c->data.data()), c->data.size()));
@@ -1430,9 +1430,7 @@ void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath
 	ClassState& st = g_classStates[assetPath];
 	if (!st.loaded && ctx.contentManager)
 	{
-		std::error_code ec;
-		const std::string rel = std::filesystem::relative(
-			assetPath, ctx.contentManager->contentRoot(), ec).generic_string();
+		const std::string rel = ctx.contentManager->toContentRelativePath(assetPath);
 		st.assetId = ctx.contentManager->loadAsset(rel);
 		if (const HorizonCodeClassAsset* a = ctx.contentManager->getHorizonCodeClass(st.assetId))
 		{

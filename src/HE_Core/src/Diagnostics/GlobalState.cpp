@@ -230,6 +230,31 @@ bool GlobalState::refreshContentFolder()
 	return true;
 }
 
+bool GlobalState::refreshEngineFolder(const std::string& engineContentAbsPath)
+{
+	fs::path enginePath = engineContentAbsPath;
+	if (!fs::exists(enginePath) || !fs::is_directory(enginePath))
+	{
+		Logger::Log(Logger::LogLevel::Warning, ("Engine content folder not found at " + enginePath.string()).c_str());
+		return false;
+	}
+
+	Folder fresh;
+	fresh.name     = "Engine";
+	fresh.fullPath = enginePath.string();
+	populateFolder(&fresh, enginePath);
+
+	{
+		std::unique_lock lock(m_engineFolderMutex);
+		clearFolder(&engineFolder);
+		engineFolder = std::move(fresh);
+	}
+	engineFolderVersion.fetch_add(1, std::memory_order_release);
+
+	Logger::Log(Logger::LogLevel::Info, "Engine content folder refreshed.");
+	return true;
+}
+
 void GlobalState::setCustomConfigEntry(const std::string& key, const json& value)
 {
 	customConfig[key] = value;

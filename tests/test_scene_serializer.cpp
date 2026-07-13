@@ -12,8 +12,10 @@
 #include <HorizonScene/Components/EnvironmentComponent.h>
 #include <HorizonScene/Components/EnvironmentLightComponent.h>
 #include <HorizonScene/Components/AnimatorStateMachineComponent.h>
+#include <nlohmann/json.hpp>
 #include <algorithm>
 #include <filesystem>
+#include <fstream>
 
 namespace fs = std::filesystem;
 
@@ -194,8 +196,12 @@ TEST_CASE("SceneSerializer round-trips per-entity material param overrides")
 	}
 }
 
-TEST_CASE("SceneSerializer round-trips AnimatorStateMachineComponent (states with id/x/y, transitions, params)")
+TEST_CASE("SceneSerializer round-trips AnimatorStateMachineComponent (asset reference + per-entity runtime state)")
 {
+	// The graph itself (states/transitions/default params) lives in the
+	// referenced AnimatorStateMachineAsset (see ContentManager tests for that
+	// round-trip) — SceneSerializer only owns the per-entity runtime slice:
+	// which asset, which state it's currently in, and live param overrides.
 	for (SerializeFormat fmt : { SerializeFormat::JSON, SerializeFormat::Binary })
 	{
 		const fs::path file = fs::temp_directory_path() / "he_test_animsm.hescene";
@@ -203,16 +209,7 @@ TEST_CASE("SceneSerializer round-trips AnimatorStateMachineComponent (states wit
 		auto e = world.createEntity("Character");
 
 		AnimatorStateMachineComponent sm;
-		AnimationState idle; idle.id = 1; idle.name = "Idle"; idle.clipId = HE::UUID::generate();
-		idle.looping = true; idle.x = 10.0f; idle.y = 20.0f;
-		AnimationState walk; walk.id = 2; walk.name = "Walk"; walk.clipId = HE::UUID::generate();
-		walk.looping = true; walk.x = 210.0f; walk.y = 20.0f;
-		sm.states = { idle, walk };
-
-		AnimationTransition t;
-		t.fromState = "Idle"; t.toState = "Walk"; t.paramName = "speed";
-		t.op = TransitionOp::Greater; t.threshold = 0.1f; t.duration = 0.25f;
-		sm.transitions = { t };
+		sm.stateMachineAssetId = HE::UUID::generate();
 		sm.params["speed"] = 1.5f;
 		sm.currentStateName = "Idle";
 		world.registry().emplace<AnimatorStateMachineComponent>(e, sm);
@@ -226,74 +223,93 @@ TEST_CASE("SceneSerializer round-trips AnimatorStateMachineComponent (states wit
 		for (auto [le, lsm] : loaded.registry().view<AnimatorStateMachineComponent>().each())
 		{
 			found = true;
-			REQUIRE(lsm.states.size() == 2);
-			CHECK(lsm.states[0].id == 1);
-			CHECK(lsm.states[0].name == "Idle");
-			CHECK(lsm.states[0].clipId == idle.clipId);
-			CHECK(lsm.states[0].x == doctest::Approx(10.0f));
-			CHECK(lsm.states[0].y == doctest::Approx(20.0f));
-			CHECK(lsm.states[1].id == 2);
-			CHECK(lsm.states[1].x == doctest::Approx(210.0f));
-
-			REQUIRE(lsm.transitions.size() == 1);
-			CHECK(lsm.transitions[0].fromState == "Idle");
-			CHECK(lsm.transitions[0].toState   == "Walk");
-			CHECK(lsm.transitions[0].paramName == "speed");
-			CHECK(lsm.transitions[0].op == TransitionOp::Greater);
-			CHECK(lsm.transitions[0].threshold == doctest::Approx(0.1f));
-			CHECK(lsm.transitions[0].duration  == doctest::Approx(0.25f));
-
+			CHECK(lsm.stateMachineAssetId == sm.stateMachineAssetId);
 			REQUIRE(lsm.params.count("speed"));
 			CHECK(lsm.params.at("speed") == doctest::Approx(1.5f));
 			CHECK(lsm.currentStateName == "Idle");
+			CHECK_FALSE(lsm.legacy.hasData);
 		}
 		CHECK(found);
 		he_test::removeQuiet(file);
 	}
 }
 
-TEST_CASE("SceneSerializer auto-assigns ids + grid layout for a state machine saved before the id/x/y fields existed")
+TEST_CASE("SceneSerializer stages a legacy inline state machine (pre-asset format) for migration, auto-assigning ids")
 {
-	// A state left at its struct default (id=0, x=0, y=0) is indistinguishable
-	// from — and exercises the exact same load-time path as — a state entirely
-	// missing "id" in hand-written/pre-GraphEditor-tab JSON (see SceneSerializer's
-	// AnimatorStateMachineComponent load: `sj.value("id", 0)` treats an absent key
-	// and an explicit 0 identically).
+	// Scenes saved before Forts. 71 (this asset conversion) had the whole graph
+	// INLINE on the component, no "stateMachineAsset" key, states with no id/x/y
+	// at all. There's no code path left that WRITES that shape any more (the
+	// component doesn't have states/transitions fields to write), so build it by
+	// hand-rewriting a freshly saved file's "animstatemachine" block — same
+	// technique as testing any other hand-edited/ancient save file.
 	const fs::path file = fs::temp_directory_path() / "he_test_animsm_legacy.hescene";
-	HorizonWorld world;
-	auto e = world.createEntity("Character");
-
-	AnimatorStateMachineComponent sm;
-	for (const char* name : { "Idle", "Walk", "Run", "Jump", "Fall" })
 	{
-		AnimationState s; // id/x/y left at their struct defaults (0)
-		s.name = name;
-		sm.states.push_back(s);
+		HorizonWorld world;
+		auto e = world.createEntity("Character");
+		world.registry().emplace<AnimatorStateMachineComponent>(e);
+		SceneSerializer ser;
+		REQUIRE(ser.save(world, file, SerializeFormat::JSON));
 	}
-	world.registry().emplace<AnimatorStateMachineComponent>(e, sm);
+	{
+		std::ifstream in(file);
+		nlohmann::json scene; in >> scene; in.close();
+		REQUIRE(scene.contains("entities"));
+		REQUIRE(!scene["entities"].empty());
 
-	SceneSerializer ser;
-	REQUIRE(ser.save(world, file, SerializeFormat::JSON));
+		nlohmann::json legacyStates = nlohmann::json::array();
+		for (const char* name : { "Idle", "Walk", "Run", "Jump", "Fall" }) // no "id"/"x"/"y" at all
+			legacyStates.push_back({ { "name", name }, { "looping", true } });
+		nlohmann::json legacyTransitions = nlohmann::json::array();
+		legacyTransitions.push_back({ { "fromState", "Idle" }, { "toState", "Walk" },
+		                              { "paramName", "speed" }, { "op", 0 },
+		                              { "threshold", 0.1f }, { "duration", 0.25f } });
+
+		scene["entities"][0]["components"]["animstatemachine"] = {
+			{ "states",           legacyStates },
+			{ "transitions",      legacyTransitions },
+			{ "params",           { { "speed", 1.5f } } },
+			{ "currentStateName", "Idle" },
+		};
+		std::ofstream out(file);
+		out << scene.dump();
+	}
+
 	HorizonWorld loaded;
+	SceneSerializer ser;
 	REQUIRE(ser.load(loaded, file, SerializeFormat::JSON));
 
 	bool found = false;
 	for (auto [le, lsm] : loaded.registry().view<AnimatorStateMachineComponent>().each())
 	{
 		found = true;
-		REQUIRE(lsm.states.size() == 5);
+		CHECK(lsm.stateMachineAssetId == HE::UUID{}); // not migrated yet — needs
+		                                               // AnimationStateMachineSystem::update + a ContentManager
+		REQUIRE(lsm.legacy.hasData);
+		REQUIRE(lsm.legacy.states.size() == 5);
 		// Every id must now be non-zero and unique.
 		std::vector<int> ids;
-		for (const auto& s : lsm.states) { CHECK(s.id != 0); ids.push_back(s.id); }
+		for (const auto& s : lsm.legacy.states) { CHECK(s.id != 0); ids.push_back(s.id); }
 		std::sort(ids.begin(), ids.end());
 		CHECK(std::adjacent_find(ids.begin(), ids.end()) == ids.end()); // no duplicates
 		// Simple grid auto-layout: 4 columns, 200/150-unit spacing, first 4 in row 0.
-		CHECK(lsm.states[0].x == doctest::Approx(0.0f));
-		CHECK(lsm.states[0].y == doctest::Approx(0.0f));
-		CHECK(lsm.states[3].x == doctest::Approx(600.0f));
-		CHECK(lsm.states[3].y == doctest::Approx(0.0f));
-		CHECK(lsm.states[4].x == doctest::Approx(0.0f));
-		CHECK(lsm.states[4].y == doctest::Approx(150.0f));
+		CHECK(lsm.legacy.states[0].x == doctest::Approx(0.0f));
+		CHECK(lsm.legacy.states[0].y == doctest::Approx(0.0f));
+		CHECK(lsm.legacy.states[3].x == doctest::Approx(600.0f));
+		CHECK(lsm.legacy.states[3].y == doctest::Approx(0.0f));
+		CHECK(lsm.legacy.states[4].x == doctest::Approx(0.0f));
+		CHECK(lsm.legacy.states[4].y == doctest::Approx(150.0f));
+
+		REQUIRE(lsm.legacy.transitions.size() == 1);
+		CHECK(lsm.legacy.transitions[0].fromState == "Idle");
+		CHECK(lsm.legacy.transitions[0].toState   == "Walk");
+		CHECK(lsm.legacy.transitions[0].paramName == "speed");
+		CHECK(lsm.legacy.transitions[0].op == HE::TransitionOp::Greater);
+		CHECK(lsm.legacy.transitions[0].threshold == doctest::Approx(0.1f));
+		CHECK(lsm.legacy.transitions[0].duration  == doctest::Approx(0.25f));
+
+		REQUIRE(lsm.legacy.params.count("speed"));
+		CHECK(lsm.legacy.params.at("speed") == doctest::Approx(1.5f));
+		CHECK(lsm.legacy.currentStateName == "Idle");
 	}
 	CHECK(found);
 	he_test::removeQuiet(file);

@@ -118,7 +118,7 @@ std::vector<HE::UUID> SceneSystems::collectAssetRefs(HorizonWorld& world)
     for (auto [e, c] : reg.view<TerrainComponent>().each())         add(c.heightmapTexture);
     for (auto [e, c] : reg.view<WeatherComponent>().each())         add(c.thunderSound);
     for (auto [e, c] : reg.view<LODComponent>().each())             for (const auto& lvl : c.levels) add(lvl.meshId);
-    for (auto [e, c] : reg.view<AnimatorStateMachineComponent>().each()) for (const auto& st : c.states) add(st.clipId);
+    for (auto [e, c] : reg.view<AnimatorStateMachineComponent>().each()) add(c.stateMachineAssetId);
 
     return out;
 }

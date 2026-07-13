@@ -217,6 +217,16 @@ struct ParticleGraphAsset : public RuntimeAsset
 	std::vector<ParticleShaderVariant> precompiledShaders; // CHUNK_PPSD — pack-time only, see ParticleShaderVariant
 };
 
+// An authored Animator State Machine (states + transitions + default param
+// values, HE::AnimatorStateMachineGraph) — referenced by
+// AnimatorStateMachineComponent::stateMachineAssetId instead of embedding the
+// graph inline, the same asset-instead-of-inline-fields move Material and
+// ParticleSystem made for their own components.
+struct AnimatorStateMachineAsset : public RuntimeAsset
+{
+	std::string graphJson;
+};
+
 // A UI widget tree (UMG-style widget editor asset). The JSON is the source of
 // truth (HE::UIWidgetTree round-trips it); the WidgetManager instantiates a live
 // widget from it at runtime (widgets exist outside the entity world).

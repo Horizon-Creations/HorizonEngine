@@ -58,6 +58,8 @@ public:
 	InputMappingContextAsset*       getInputMappingContextMutable(HE::UUID id);
 	const ParticleGraphAsset*  getParticleGraph(HE::UUID id) const;
 	ParticleGraphAsset*        getParticleGraphMutable(HE::UUID id);
+	const AnimatorStateMachineAsset* getAnimatorStateMachine(HE::UUID id) const;
+	AnimatorStateMachineAsset*       getAnimatorStateMachineMutable(HE::UUID id);
 	const ShaderAsset*         getShader(HE::UUID id) const;
 	const PrefabAsset*         getPrefab(HE::UUID id) const;
 	const AnimationClipAsset*  getAnimationClip(HE::UUID id) const;
@@ -124,6 +126,7 @@ public:
 	HE::UUID registerAnimationClip(AnimationClipAsset asset);
 	HE::UUID registerPropertyAnimClip(PropertyAnimClipAsset asset);
 	HE::UUID registerParticleGraph(ParticleGraphAsset asset);
+	HE::UUID registerAnimatorStateMachine(AnimatorStateMachineAsset asset);
 
 	// Replace a registered asset's payload in place, keeping its UUID so existing
 	// references stay valid (e.g. regenerating a procedural terrain mesh after a
@@ -227,6 +230,22 @@ public:
 	// editor opens a project). Previously loaded assets stay registered.
 	void setContentRoot(std::string root) { m_contentRoot = std::move(root); }
 
+	// The engine-wide default-content root (EditorDeps/EngineContent, next to
+	// the editor executable — NOT project-specific). Empty when unset (e.g. in
+	// the packaged Game, which has no EditorDeps at all).
+	const std::string& engineContentRoot() const { return m_engineContentRoot; }
+	void setEngineContentRoot(std::string root) { m_engineContentRoot = std::move(root); }
+
+	// Reserved-namespace path resolution: any relative path starting with the
+	// literal prefix "Engine/" addresses the engine content root instead of
+	// the project's Content root (mirrors Unreal's /Engine/ vs /Game/). This
+	// is the ONE place that decides which root a relative path resolves
+	// against — every loose-file read/write in this class, and every editor
+	// panel that turns an absolute path into a storable relative one, must
+	// go through these two functions so "Engine/..." paths round-trip.
+	std::string resolveAbsolutePath(const std::string& relativePath) const;
+	std::string toContentRelativePath(const std::string& absolutePath) const;
+
 	// ── Pin-based ref-counted access ──────────────────────────────────────
 	// Returns a handle that keeps the asset pinned in memory for as long as it
 	// is alive (RAII). unloadAsset() returns false while any handle is alive,
@@ -297,6 +316,7 @@ private:
 	std::queue<AsyncResult>         m_asyncResults;  // ready to register (main thread)
 
 	std::string m_contentRoot;
+	std::string m_engineContentRoot;
 
 	SlotMap<StaticMeshAsset>    m_staticMeshAssets;
 	SlotMap<SkeletalMeshAsset>  m_skeletalMeshAssets;
@@ -310,6 +330,7 @@ private:
 	SlotMap<InputActionAsset>        m_inputActionAssets;
 	SlotMap<InputMappingContextAsset> m_inputMappingAssets;
 	SlotMap<ParticleGraphAsset>      m_particleGraphAssets;
+	SlotMap<AnimatorStateMachineAsset> m_animatorStateMachineAssets;
 	SlotMap<AudioAsset>         m_audioAssets;
 	SlotMap<FontAsset>          m_fontAssets;
 	SlotMap<ShaderAsset>        m_shaderAssets;

@@ -106,6 +106,9 @@ inline constexpr uint32_t CHUNK_IMAP = makeChunkId('I','M','A','P'); // input ma
 inline constexpr uint32_t CHUNK_PTGR = makeChunkId('P','T','G','R'); // particle emitter node graph (JSON)
 inline constexpr uint32_t CHUNK_PPSD = makeChunkId('P','P','S','D'); // precompiled per-backend particle color/alpha-over-life shaders
 
+// Animator State Machine
+inline constexpr uint32_t CHUNK_ASMG = makeChunkId('A','S','M','G'); // states/transitions/params graph (JSON)
+
 // Font
 inline constexpr uint32_t CHUNK_FNTD = makeChunkId('F','N','T','D'); // raw font bytes
 inline constexpr uint32_t CHUNK_FNTI = makeChunkId('F','N','T','I'); // font meta (size)

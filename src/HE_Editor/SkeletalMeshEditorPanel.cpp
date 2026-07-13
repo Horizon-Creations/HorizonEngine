@@ -41,10 +41,8 @@ static State& stateFor(const std::string& path, AppContext& ctx)
 	if (st.loaded || !ctx.contentManager) return st;
 
 	st.name = std::filesystem::path(path).filename().string();
-	std::error_code ec;
-	const std::string rel = std::filesystem::relative(
-		path, ctx.contentManager->contentRoot(), ec).generic_string();
-	st.relPath = ec ? path : rel;
+	const std::string rel = ctx.contentManager->toContentRelativePath(path);
+	st.relPath = rel.empty() ? path : rel;
 	st.meshId  = ctx.contentManager->loadAsset(st.relPath);
 	st.loaded  = true;
 	return st;
@@ -141,11 +139,10 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 	{
 		if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_ASSET_PATH"))
 		{
-			std::error_code ec;
-			const std::string rel = std::filesystem::relative(
-				static_cast<const char*>(p->Data),
-				ctx.contentManager ? ctx.contentManager->contentRoot() : "", ec).generic_string();
-			if (!ec && !rel.empty() && rel.rfind("..", 0) != 0)
+			const std::string rel = ctx.contentManager
+				? ctx.contentManager->toContentRelativePath(static_cast<const char*>(p->Data))
+				: std::string();
+			if (!rel.empty())
 			{
 				const HE::UUID id = ctx.contentManager->loadAsset(rel);
 				if (id != HE::UUID{} && ctx.contentManager->getAnimationClip(id))
