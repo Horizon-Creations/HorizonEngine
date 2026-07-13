@@ -2,8 +2,11 @@
 #include "TestFsUtil.h"
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/DefaultAssets.h>
+#include <ContentManager/HAsset.h>
+#include <Diagnostics/GlobalState.h>
 #include <MaterialGraph/MaterialGraph.h> // HE::MatParamKind
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 
@@ -21,6 +24,33 @@ namespace
 			fs::create_directories(path);
 		}
 		~TempContentDir() { he_test::removeAllQuiet(path); }
+	};
+
+	// RAII env-var override for HE_ENGINE_CONTENT_EDITABLE — restores whatever
+	// was there before (or unsets it) so this never leaks into another test.
+	struct ScopedEnv
+	{
+		std::string name;
+		bool hadPrev = false;
+		std::string prev;
+		ScopedEnv(const char* n, const char* value) : name(n)
+		{
+			if (const char* p = std::getenv(n)) { hadPrev = true; prev = p; }
+#ifdef _WIN32
+			_putenv_s(n, value);
+#else
+			setenv(n, value, 1);
+#endif
+		}
+		~ScopedEnv()
+		{
+#ifdef _WIN32
+			_putenv_s(name.c_str(), hadPrev ? prev.c_str() : "");
+#else
+			if (hadPrev) setenv(name.c_str(), prev.c_str(), 1);
+			else         unsetenv(name.c_str());
+#endif
+		}
 	};
 }
 
@@ -1022,33 +1052,51 @@ TEST_CASE("ContentManager toContentRelativePath round-trips both roots")
 	CHECK(cm.toContentRelativePath("/some/unrelated/path.png") == "");
 }
 
-TEST_CASE("ContentManager loadAsset/saveAsset resolve an \"Engine/\"-prefixed path against the engine root")
+TEST_CASE("ContentManager saveAsset on an \"Engine/\" path writes a project override, not the shared default")
 {
 	TempContentDir dir;
 	TempContentDir engineDir("he_test_engine_content");
 	fs::create_directories(engineDir.path / "MaterialFunctions");
+	// The shared default this override shadows — same UUID, same path identity.
+	HE::UUID defaultId;
+	{
+		HAsset::Writer w;
+		std::vector<uint8_t> meta;
+		defaultId = HE::UUID::generate();
+		HAsset::Writer::appendPOD(meta, static_cast<uint16_t>(HE::AssetType::MaterialFunction));
+		HAsset::Writer::appendPOD(meta, defaultId.hi);
+		HAsset::Writer::appendPOD(meta, defaultId.lo);
+		HAsset::Writer::appendString(meta, "FresnelRimLight");
+		HAsset::Writer::appendString(meta, "Engine/MaterialFunctions/FresnelRimLight.hasset");
+		w.addChunk(HAsset::CHUNK_META, meta.data(), meta.size());
+		REQUIRE(w.write((engineDir.path / "MaterialFunctions" / "FresnelRimLight.hasset").string(),
+		                 static_cast<uint16_t>(HE::AssetType::MaterialFunction)));
+	}
 
 	HE::UUID savedId;
 	{
 		ContentManager cm(dir.path.string());
 		cm.setEngineContentRoot(engineDir.path.string());
 
+		HE::UUID loadedDefault = cm.loadAsset("Engine/MaterialFunctions/FresnelRimLight.hasset");
+		REQUIRE(loadedDefault == defaultId); // loaded from the shared default (no override yet)
+
 		MaterialFunctionAsset fn;
+		fn.id   = loadedDefault; // "editing" the already-loaded default in place
 		fn.type = HE::AssetType::MaterialFunction;
 		fn.name = "FresnelRimLight";
 		fn.path = "Engine/MaterialFunctions/FresnelRimLight.hasset";
 		REQUIRE(cm.saveAsset(fn));
 		savedId = fn.id;
-		REQUIRE_FALSE(savedId == HE::UUID{});
 	}
 
-	// The file must physically live under the ENGINE root, not the project's
-	// Content root — proves saveAsset() actually routed through resolveAbsolutePath().
-	CHECK(fs::exists(engineDir.path / "MaterialFunctions" / "FresnelRimLight.hasset"));
-	CHECK_FALSE(fs::exists(dir.path / "Engine" / "MaterialFunctions" / "FresnelRimLight.hasset"));
+	// Same identity (UUID) as the default — but written to the PROJECT's own
+	// Content/Engine override location, never touching the shared default file.
+	CHECK(savedId == defaultId);
+	CHECK(fs::exists(dir.path / "Engine" / "MaterialFunctions" / "FresnelRimLight.hasset"));
 
-	// Fresh manager (simulates reopening the project) — loadAsset() must find
-	// it again purely from the "Engine/"-prefixed path.
+	// Fresh manager (simulates reopening the project) — loadAsset() now prefers
+	// the override over the shared default it shadows.
 	ContentManager cm2(dir.path.string());
 	cm2.setEngineContentRoot(engineDir.path.string());
 	HE::UUID loadedId = cm2.loadAsset("Engine/MaterialFunctions/FresnelRimLight.hasset");
@@ -1056,4 +1104,93 @@ TEST_CASE("ContentManager loadAsset/saveAsset resolve an \"Engine/\"-prefixed pa
 	const MaterialFunctionAsset* fn = cm2.getMaterialFunction(loadedId);
 	REQUIRE(fn != nullptr);
 	CHECK(fn->name == "FresnelRimLight");
+}
+
+TEST_CASE("ContentManager HE_ENGINE_CONTENT_EDITABLE=1 saves \"Engine/\" paths straight to the shared default")
+{
+	ScopedEnv devMode("HE_ENGINE_CONTENT_EDITABLE", "1");
+	REQUIRE(ContentManager::isEngineContentDevMode());
+
+	TempContentDir dir;
+	TempContentDir engineDir("he_test_engine_content");
+	fs::create_directories(engineDir.path / "MaterialFunctions");
+	ContentManager cm(dir.path.string());
+	cm.setEngineContentRoot(engineDir.path.string());
+
+	MaterialFunctionAsset fn;
+	fn.type = HE::AssetType::MaterialFunction;
+	fn.name = "NewDefault";
+	fn.path = "Engine/MaterialFunctions/NewDefault.hasset";
+	REQUIRE(cm.saveAsset(fn));
+
+	CHECK(fs::exists(engineDir.path / "MaterialFunctions" / "NewDefault.hasset"));
+	CHECK_FALSE(fs::exists(dir.path / "Engine" / "MaterialFunctions" / "NewDefault.hasset"));
+}
+
+TEST_CASE("GlobalState::refreshEngineFolder merges project overrides into the displayed Engine tree")
+{
+	TempContentDir dir;                                  // project's Content/ root
+	TempContentDir engineDir("he_test_engine_content");   // shared engine defaults
+
+	fs::create_directories(engineDir.path / "MaterialFunctions");
+	fs::create_directories(engineDir.path / "Meshes");
+	std::ofstream(engineDir.path / "MaterialFunctions" / "Fresnel.hasset") << "default-bytes";
+	std::ofstream(engineDir.path / "Meshes" / "Cube.hasset") << "default-bytes";
+
+	// A project-level override of Fresnel.hasset, plus an override-only file
+	// with no matching default at all.
+	fs::create_directories(dir.path / "Engine" / "MaterialFunctions");
+	std::ofstream(dir.path / "Engine" / "MaterialFunctions" / "Fresnel.hasset") << "override-bytes";
+	std::ofstream(dir.path / "Engine" / "MaterialFunctions" / "OnlyInProject.hasset") << "override-only";
+
+	GlobalState& gs = GlobalState::getInstance();
+	REQUIRE(gs.refreshEngineFolder(engineDir.path.string(), dir.path.string()));
+
+	auto [engineFolder, lock] = gs.lockEngineFolder();
+	const Folder* matFns = nullptr;
+	const Folder* meshes = nullptr;
+	for (const Folder* f : engineFolder.subfolders)
+	{
+		if (f->name == "MaterialFunctions") matFns = f;
+		if (f->name == "Meshes")            meshes = f;
+	}
+	REQUIRE(matFns != nullptr);
+	REQUIRE(meshes != nullptr);
+
+	// Fresnel.hasset's node now points at the OVERRIDE file, not the default.
+	const File* fresnel = nullptr;
+	const File* onlyInProject = nullptr;
+	for (const File* f : matFns->files)
+	{
+		if (f->name == "Fresnel.hasset")       fresnel = f;
+		if (f->name == "OnlyInProject.hasset") onlyInProject = f;
+	}
+	REQUIRE(fresnel != nullptr);
+	CHECK(fresnel->fullPath == (dir.path / "Engine" / "MaterialFunctions" / "Fresnel.hasset").string());
+	REQUIRE(onlyInProject != nullptr); // override-only file still shows up
+
+	// Cube.hasset has no override — untouched, still points at the default.
+	REQUIRE(meshes->files.size() == 1);
+	CHECK(meshes->files[0]->fullPath == (engineDir.path / "Meshes" / "Cube.hasset").string());
+}
+
+TEST_CASE("ContentManager isEngineDefaultPath / isEngineOverridePath classify absolute paths")
+{
+	TempContentDir dir;
+	TempContentDir engineDir("he_test_engine_content");
+	ContentManager cm(dir.path.string());
+	cm.setEngineContentRoot(engineDir.path.string());
+
+	const std::string defaultPath  = (engineDir.path / "MaterialFunctions" / "Fresnel.hasset").string();
+	const std::string overridePath = (dir.path / "Engine" / "MaterialFunctions" / "Fresnel.hasset").string();
+	const std::string unrelated    = (dir.path / "Materials" / "Foo.hasset").string();
+
+	CHECK(cm.isEngineDefaultPath(defaultPath));
+	CHECK_FALSE(cm.isEngineOverridePath(defaultPath));
+
+	CHECK(cm.isEngineOverridePath(overridePath));
+	CHECK_FALSE(cm.isEngineDefaultPath(overridePath));
+
+	CHECK_FALSE(cm.isEngineDefaultPath(unrelated));
+	CHECK_FALSE(cm.isEngineOverridePath(unrelated));
 }

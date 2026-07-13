@@ -73,7 +73,13 @@ public:
 	// refreshContentFolder() exactly; the only difference is the root path is
 	// passed in directly instead of derived from lastProjectPath, since the
 	// engine content root never changes for the life of the process.
-	bool refreshEngineFolder(const std::string& engineContentAbsPath);
+	// projectContentRoot (optional): the CURRENT project's Content root — any
+	// project-level overrides sitting at "<projectContentRoot>/Engine/..."
+	// (see ContentManager::resolveSavePath) are merged into the displayed
+	// tree, shadowing the default they override. Pass empty to skip merging
+	// (e.g. before any project is loaded).
+	bool refreshEngineFolder(const std::string& engineContentAbsPath,
+	                          const std::string& projectContentRoot = std::string());
 
 	std::atomic<uint64_t> engineFolderVersion{0};
 

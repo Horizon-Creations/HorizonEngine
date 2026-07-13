@@ -9,6 +9,7 @@
 #include <nlohmann/json.hpp>             // parse the pak's __asset_index__
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 
@@ -505,20 +506,66 @@ void ContentManager::syncMaterialInstancesOf(const std::string& parentRelPath)
 
 // ─── resolveAbsolutePath / toContentRelativePath ──────────────────────────────
 // The reserved "Engine/" prefix addresses m_engineContentRoot instead of the
-// project's m_contentRoot (mirrors Unreal's /Engine/ vs /Game/). This pair is
-// the ONE place that decides which root a relative path resolves against —
-// every loose-file read/write below goes through resolveAbsolutePath, and
-// every editor call site that turns an absolute path back into a storable
-// relative one must go through toContentRelativePath so "Engine/..." paths
-// round-trip correctly.
+// project's m_contentRoot (mirrors Unreal's /Engine/ vs /Game/). Engine
+// defaults are read-only from a project's point of view: editing one and
+// hitting Save does NOT touch the shared default — it writes a per-project
+// override to "<contentRoot>/Engine/<rest>" (a plain subfolder of the
+// project's own Content/, so the existing Content folder tree/scan already
+// sees it — see refreshEngineFolder's merge for how the Content Browser
+// shows it back under the "Engine" tree instead). Reads prefer the override
+// when one exists, else fall back to the shared default — same identity
+// (UUID/path), just a different physical file backing it for this project.
+//
+// HE_ENGINE_CONTENT_EDITABLE=1 is the engine-authoring escape hatch: with it
+// set, saves of "Engine/..." paths go straight to the shared default instead
+// of creating an override — that's how the default library itself gets
+// built/edited, since there's no other path from the same graph editors.
 static constexpr char kEnginePrefix[] = "Engine/";
 static constexpr size_t kEnginePrefixLen = sizeof(kEnginePrefix) - 1;
+
+bool ContentManager::isEngineContentDevMode()
+{
+	const char* v = std::getenv("HE_ENGINE_CONTENT_EDITABLE");
+	return v && *v && std::atoi(v) != 0;
+}
 
 std::string ContentManager::resolveAbsolutePath(const std::string& relativePath) const
 {
 	if (!m_engineContentRoot.empty() && relativePath.rfind(kEnginePrefix, 0) == 0)
+	{
+		// A project override (plain "Content/Engine/..." file) shadows the
+		// shared default when present.
+		const std::string overridePath = m_contentRoot + "/" + relativePath;
+		if (std::filesystem::exists(overridePath)) return overridePath;
 		return m_engineContentRoot + "/" + relativePath.substr(kEnginePrefixLen);
+	}
 	return m_contentRoot + "/" + relativePath;
+}
+
+std::string ContentManager::resolveSavePath(const std::string& relativePath) const
+{
+	if (!m_engineContentRoot.empty() && relativePath.rfind(kEnginePrefix, 0) == 0 && isEngineContentDevMode())
+		return m_engineContentRoot + "/" + relativePath.substr(kEnginePrefixLen);
+	// Normal mode (and every non-"Engine/" path, always): the project's own
+	// Content root — for "Engine/..." this IS the override location.
+	return m_contentRoot + "/" + relativePath;
+}
+
+bool ContentManager::isEngineDefaultPath(const std::string& absolutePath) const
+{
+	if (m_engineContentRoot.empty()) return false;
+	std::error_code ec;
+	const std::filesystem::path rel = std::filesystem::relative(absolutePath, m_engineContentRoot, ec);
+	return !ec && !rel.empty() && rel.native()[0] != '.';
+}
+
+bool ContentManager::isEngineOverridePath(const std::string& absolutePath) const
+{
+	if (m_contentRoot.empty()) return false;
+	const std::string overrideRoot = m_contentRoot + "/" + kEnginePrefix; // "<contentRoot>/Engine/"
+	std::error_code ec;
+	const std::filesystem::path rel = std::filesystem::relative(absolutePath, overrideRoot, ec);
+	return !ec && !rel.empty() && rel.native()[0] != '.';
 }
 
 std::string ContentManager::toContentRelativePath(const std::string& absolutePath) const
@@ -843,8 +890,11 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 	if (asset.id == HE::UUID{})
 		asset.id = HE::UUID::generate();
 
-	const std::string fullPath = resolveAbsolutePath(asset.path);
+	const std::string fullPath = resolveSavePath(asset.path);
 	const uint16_t    typeId   = static_cast<uint16_t>(asset.type);
+	if (!m_engineContentRoot.empty() && asset.path.rfind(kEnginePrefix, 0) == 0 && !isEngineContentDevMode())
+		Logger::Log(Logger::LogLevel::Info,
+			("ContentManager: '" + asset.path + "' is an engine default — saved a project-local copy to " + fullPath).c_str());
 
 	HAsset::Writer w;
 
@@ -1040,6 +1090,14 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 	}
 	default:
 		return false;
+	}
+
+	// The override location (Content/Engine/<rest>) may not exist yet on the
+	// first save of a given engine default — unlike ordinary project saves,
+	// which are always into an already-browsed (thus already-existing) folder.
+	{
+		std::error_code ec;
+		std::filesystem::create_directories(std::filesystem::path(fullPath).parent_path(), ec);
 	}
 
 	return w.write(fullPath, typeId);

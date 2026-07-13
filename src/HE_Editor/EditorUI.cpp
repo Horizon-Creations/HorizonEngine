@@ -1026,7 +1026,8 @@ void EditorUI::render(AppContext& ctx, float dt)
             {
                 ctx.globalState->refreshContentFolder();
                 if (ctx.contentManager)
-                    ctx.globalState->refreshEngineFolder(ctx.contentManager->engineContentRoot());
+                    ctx.globalState->refreshEngineFolder(ctx.contentManager->engineContentRoot(),
+                                                          ctx.contentManager->contentRoot());
                 ctx.contentRefreshPending = false;
                 ctx.contentRefreshDone    = true;
             }
@@ -1051,7 +1052,8 @@ void EditorUI::render(AppContext& ctx, float dt)
     {
         ctx.globalState->refreshContentFolder();
         if (ctx.contentManager)
-            ctx.globalState->refreshEngineFolder(ctx.contentManager->engineContentRoot());
+            ctx.globalState->refreshEngineFolder(ctx.contentManager->engineContentRoot(),
+                                                  ctx.contentManager->contentRoot());
         s_quietContentRefresh = false;
     }
 
@@ -5363,7 +5365,14 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 			std::error_code ec;
 			const bool sameFolder =
 				std::filesystem::equivalent(src.parent_path(), s_pendingMoveDst, ec);
-			if (!sameFolder && std::filesystem::exists(src) &&
+			// Engine defaults/overrides don't move via drag in normal mode —
+			// same "read-only ground" rule as create/rename/delete above.
+			const bool engineLocked = ctx.contentManager && !ContentManager::isEngineContentDevMode() &&
+				(ctx.contentManager->isEngineDefaultPath(s_pendingMoveSrc)  ||
+				 ctx.contentManager->isEngineOverridePath(s_pendingMoveSrc) ||
+				 ctx.contentManager->isEngineDefaultPath(s_pendingMoveDst)  ||
+				 ctx.contentManager->isEngineOverridePath(s_pendingMoveDst));
+			if (!engineLocked && !sameFolder && std::filesystem::exists(src) &&
 			    !std::filesystem::exists(dst))
 			{
 				ec.clear();
@@ -5514,7 +5523,43 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				? std::filesystem::path(s_ctxMenuItem).filename().string()
 				: std::filesystem::path(s_ctxMenuItem).stem().string();
 			ImGui::TextDisabled("%s", displayName.c_str());
+
+			// Engine default assets are read-only from a project's point of view
+			// (HE_ENGINE_CONTENT_EDITABLE=1 lifts this for engine-authoring
+			// builds): no create/rename/delete on the shared default or its
+			// project override — "Revert to Default" is the only mutation an
+			// override gets, and editing+Saving one (in its own graph/asset
+			// editor tab) is what CREATES an override in the first place, via
+			// ContentManager::saveAsset's redirect, not through this menu.
+			const bool isEngineOverride = ctx.contentManager && ctx.contentManager->isEngineOverridePath(s_ctxMenuItem);
+			const bool isEngineDefault  = ctx.contentManager && ctx.contentManager->isEngineDefaultPath(s_ctxMenuItem);
+			const bool engineLocked     = (isEngineOverride || isEngineDefault) && !ContentManager::isEngineContentDevMode();
+			if (engineLocked)
+				ImGui::TextDisabled(isEngineOverride ? "project override of an engine default" : "engine default asset (read-only)");
 			ImGui::Separator();
+
+			if (isEngineOverride && !ContentManager::isEngineContentDevMode() && !s_ctxMenuIsFolder &&
+			    ImGui::MenuItem("Revert to Default"))
+			{
+				const std::string relPath = ctx.contentManager->toContentRelativePath(s_ctxMenuItem);
+				if (!relPath.empty())
+				{
+					const HE::UUID id = ctx.contentManager->loadAsset(relPath); // current (override) id
+					std::error_code ec;
+					std::filesystem::remove(s_ctxMenuItem, ec);
+					if (!ec)
+					{
+						if (id != HE::UUID{}) ctx.contentManager->unloadAsset(id);
+						if (s_selectedItem == s_ctxMenuItem) s_selectedItem.clear();
+						s_ctxMenuItem.clear();
+						ctx.contentRefreshPending = true;
+						Logger::Log(Logger::LogLevel::Info, ("Editor: reverted '" + relPath + "' to its engine default").c_str());
+					}
+					else
+						Logger::Log(Logger::LogLevel::Error, ("Editor: could not remove override for '" + relPath + "'").c_str());
+				}
+				ImGui::CloseCurrentPopup();
+			}
 
 			// ── Import source file → .hasset ─────────────────────────────
 			if (!s_ctxMenuIsFolder)
@@ -5530,7 +5575,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				const bool isMatSrc     = (ext == ".hmat");
 				const bool isFontSrc    = (ext == ".ttf" || ext == ".otf");
 
-				if ((isMeshSrc || isTextureSrc || isAudioSrc || isMatSrc || isFontSrc) &&
+				if (!engineLocked && (isMeshSrc || isTextureSrc || isAudioSrc || isMatSrc || isFontSrc) &&
 				    ImGui::MenuItem("Import"))
 				{
 					// The item being imported lives in whichever root is currently
@@ -5556,6 +5601,9 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				}
 
 				// ── Material → create a child INSTANCE (params/switches only) ──
+				// Allowed even for an engine-default material: it creates a NEW,
+				// separate asset (a plain project one, not "Engine/..."-namespaced)
+				// rather than mutating the default.
 				if (ext == ".hasset" && ctx.contentManager &&
 				    MaterialEditorPanel::isMaterialAsset(s_ctxMenuItem) &&
 				    ImGui::MenuItem("Create Material Instance"))
@@ -5615,7 +5663,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				}
 			}
 
-			if (ImGui::MenuItem("Rename"))
+			if (!engineLocked && ImGui::MenuItem("Rename"))
 			{
 				s_renameTarget   = s_ctxMenuItem;
 				s_renameIsFolder = s_ctxMenuIsFolder;
@@ -5626,7 +5674,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				s_openRenamePopup = true;
 				ImGui::CloseCurrentPopup();
 			}
-			if (!s_ctxMenuIsFolder && ImGui::MenuItem("Delete"))
+			if (!engineLocked && !s_ctxMenuIsFolder && ImGui::MenuItem("Delete"))
 			{
 				std::error_code ec;
 				std::filesystem::remove(s_ctxMenuItem, ec);
@@ -5637,14 +5685,17 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				ImGui::CloseCurrentPopup();
 			}
 
-			ImGui::Separator();
-			if (ImGui::BeginMenu("Create Asset"))
+			if (!engineLocked)
 			{
-				const std::string createDir = s_ctxMenuIsFolder
-					? s_ctxMenuItem
-					: std::filesystem::path(s_ctxMenuItem).parent_path().string();
-				drawCreateAssetItems(createDir);
-				ImGui::EndMenu();
+				ImGui::Separator();
+				if (ImGui::BeginMenu("Create Asset"))
+				{
+					const std::string createDir = s_ctxMenuIsFolder
+						? s_ctxMenuItem
+						: std::filesystem::path(s_ctxMenuItem).parent_path().string();
+					drawCreateAssetItems(createDir);
+					ImGui::EndMenu();
+				}
 			}
 
 			ImGui::EndPopup();
@@ -5755,32 +5806,46 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 
 		if (ImGui::BeginPopup("##cb_create_ctx"))
 		{
-			ImGui::TextDisabled("Create Asset");
-			ImGui::Separator();
-
-			const std::string targetFolder = displayFolder ? displayFolder->fullPath
-														   : contentFolder.fullPath;
-			drawCreateAssetItems(targetFolder);
-			if (ImGui::MenuItem("Folder"))
+			// Normal mode: the Engine tree is read-only ground — no creating
+			// new "default" content from a project. (HE_ENGINE_CONTENT_EDITABLE=1
+			// lifts this for engine-authoring builds.) Editing an existing
+			// default and hitting Save is what creates a project override —
+			// see ContentManager::saveAsset's redirect, not this menu.
+			if (s_selectedIsEngine && !ContentManager::isEngineContentDevMode())
 			{
-				std::string base = targetFolder + "/NewFolder";
-				std::string dir  = base;
-				int counter = 1;
-				while (std::filesystem::exists(dir))
-					dir = base + std::to_string(counter++);
-				std::filesystem::create_directory(dir);
+				ImGui::TextDisabled("Engine default assets are read-only here.");
+				ImGui::TextDisabled("Open one in its editor tab and Save to");
+				ImGui::TextDisabled("create a project-local override instead.");
+			}
+			else
+			{
+				ImGui::TextDisabled("Create Asset");
+				ImGui::Separator();
 
-				// Show it now and let the user name it straight away.
-				const std::string folderName = std::filesystem::path(dir).filename().string();
-				s_selectedItem    = dir;
-				s_renameTarget    = dir;
-				s_renameIsFolder  = true;
-				s_renameIsCreate  = true;
-				std::strncpy(s_renameBuf, folderName.c_str(), sizeof(s_renameBuf) - 1);
-				s_renameBuf[sizeof(s_renameBuf) - 1] = '\0';
-				s_openRenamePopup = true;
-				s_quietContentRefresh = true;
-				ImGui::CloseCurrentPopup();
+				const std::string targetFolder = displayFolder ? displayFolder->fullPath
+															   : contentFolder.fullPath;
+				drawCreateAssetItems(targetFolder);
+				if (ImGui::MenuItem("Folder"))
+				{
+					std::string base = targetFolder + "/NewFolder";
+					std::string dir  = base;
+					int counter = 1;
+					while (std::filesystem::exists(dir))
+						dir = base + std::to_string(counter++);
+					std::filesystem::create_directory(dir);
+
+					// Show it now and let the user name it straight away.
+					const std::string folderName = std::filesystem::path(dir).filename().string();
+					s_selectedItem    = dir;
+					s_renameTarget    = dir;
+					s_renameIsFolder  = true;
+					s_renameIsCreate  = true;
+					std::strncpy(s_renameBuf, folderName.c_str(), sizeof(s_renameBuf) - 1);
+					s_renameBuf[sizeof(s_renameBuf) - 1] = '\0';
+					s_openRenamePopup = true;
+					s_quietContentRefresh = true;
+					ImGui::CloseCurrentPopup();
+				}
 			}
 
 			ImGui::EndPopup();
