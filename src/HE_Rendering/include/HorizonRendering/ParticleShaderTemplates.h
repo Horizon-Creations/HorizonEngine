@@ -11,12 +11,15 @@
 // plumbing across every consumer (both backends + the editor's export-time
 // compiler + he_tests). Pure string-building has no reason to pay that cost.
 //
-// Instance layout (3 floats... 5 floats/instance, matches RenderWorld::ParticleInstance):
+// Instance layout (5 floats/instance, matches RenderWorld::ParticleInstance):
 //   position (vec3), size (float), t01 (float) — GL: attributes with divisor=1 at
 //   locations 0-2; Metal: a `device Instance*` buffer indexed by [[instance_id]].
 // Per-draw-call uniforms: viewProj, camera right/up (billboard basis), whether a
 // base texture is bound. No per-particle color/alpha uniform — that's what the
 // spliced-in heParticleColor/heParticleAlpha functions replace.
+#include <ParticleGraph/ParticleGraph.h>
+#include <cstdint>
+#include <cstring>
 #include <string>
 
 namespace HE
@@ -119,6 +122,27 @@ fragment float4 heParticleGraphFragment(VOut in [[stage_in]],
     return result;
 }
 )MSL";
+}
+
+// Cache key for the on-demand-compiled shader path (RendererOpenGL::m_particlePrograms /
+// RendererMetal::m_particlePipelineCache) — an FNV-1a fold over the 8 floats the
+// generated shader actually varies on. Purely a runtime, in-memory, per-backend cache
+// key: never serialized, unrelated to the export-time CHUNK_PPSD lookup (which is
+// keyed by ParticleBatch::particleAssetId + backend, not this hash). A collision here
+// only means two different color/alpha configs share a compiled program — never
+// observed by the user as anything worse than one skipped recompile, so a fast,
+// simple, non-cryptographic hash is the right tool.
+inline uint64_t hashParticleShaderConfig(const ParticleEmitterConfig& c)
+{
+    uint64_t h = 1469598103934665603ull; // FNV-1a offset basis
+    auto mix = [&](float f) {
+        uint32_t bits; std::memcpy(&bits, &f, sizeof(bits));
+        h = (h ^ bits) * 1099511628211ull; // FNV-1a prime
+    };
+    mix(c.startColor[0]); mix(c.startColor[1]); mix(c.startColor[2]);
+    mix(c.endColor[0]);   mix(c.endColor[1]);   mix(c.endColor[2]);
+    mix(c.startAlpha);    mix(c.endAlpha);
+    return h;
 }
 
 } // namespace HE

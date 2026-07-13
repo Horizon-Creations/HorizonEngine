@@ -2,6 +2,7 @@
 #include <material/PreviewMesh.h> // shared preview primitives (sphere/cube/plane)
 #include <Window/Window.h>
 #include <ContentManager/ContentManager.h>
+#include <HorizonRendering/ParticleShaderTemplates.h>
 #include <Renderer/UIFont.h>             // shared baked UI font atlas
 #include <glad/glad.h>
 #include <SDL3/SDL.h>
@@ -3100,6 +3101,58 @@ unsigned int OpenGLRenderer::getOrBuildMaterialProgram(uint64_t key, const std::
 	return program;
 }
 
+// Build (or fetch) the GL program that draws GPU-instanced ParticleGraph particles
+// (RenderWorld::particleBatches — the real scene path, not RenderParticlePreview).
+// `precompiled` (an export-baked ParticleShaderVariant for OpenGL) skips template
+// splicing + relies on the driver compiler only; null → generate the templates from
+// `config` right now via HE::generateParticleShaderSource (see that function's
+// comment on why it takes the resolved config, not the graph).
+unsigned int OpenGLRenderer::getOrBuildParticleProgram(uint64_t key, const HE::ParticleEmitterConfig& config,
+                                                       const ParticleShaderVariant* precompiled)
+{
+	if (auto it = m_particlePrograms.find(key); it != m_particlePrograms.end()) return it->second;
+
+	std::string vertSrc, fragSrc;
+	if (precompiled)
+	{
+		vertSrc = precompiled->vertex;
+		fragSrc = precompiled->fragment;
+	}
+	else
+	{
+		const HE::ParticleShaderGen gen = HE::generateParticleShaderSource(config, /*metalSyntax*/false);
+		vertSrc = HE::buildParticleVertexGLSL(gen.colorFn, gen.alphaFn);
+		fragSrc = HE::buildParticleFragmentGLSL();
+	}
+
+	GLuint vs = CompileStage(GL_VERTEX_SHADER,   vertSrc.c_str());
+	GLuint fs = CompileStage(GL_FRAGMENT_SHADER, fragSrc.c_str());
+	GLuint prog = glCreateProgram();
+	glAttachShader(prog, vs);
+	glAttachShader(prog, fs);
+	glLinkProgram(prog);
+	glDeleteShader(vs);
+	glDeleteShader(fs);
+	GLint ok = 0; glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+	unsigned int program = 0;
+	if (ok)
+	{
+		program = prog;
+		Logger::Log(Logger::LogLevel::Info, precompiled
+			? "OpenGLRenderer: built a particle program from a PRECOMPILED variant"
+			: "OpenGLRenderer: built a particle program from a freshly baked template");
+	}
+	else
+	{
+		char log[1024]; glGetProgramInfoLog(prog, sizeof(log), nullptr, log);
+		Logger::Log(Logger::LogLevel::Error,
+			(std::string("OpenGLRenderer: particle program link failed: ") + log).c_str());
+		glDeleteProgram(prog);
+	}
+	m_particlePrograms[key] = program; // cache success AND failure (0)
+	return program;
+}
+
 // Build (or fetch) the GL program that draws a UI quad with a node-graph material:
 // the material's shared fragment paired with the screen-space uiVertex (its U block
 // repurposed — model[0]=rect px, model[1]=uvRect, model[2].xy=viewport px, color=
@@ -5172,6 +5225,10 @@ void OpenGLRenderer::Shutdown()
 #endif
 	if (m_instancedProgram) { glDeleteProgram(m_instancedProgram); m_instancedProgram = 0; }
 	if (m_instanceVBO)      { glDeleteBuffers(1, &m_instanceVBO);  m_instanceVBO = 0; }
+	for (auto& [k, prog] : m_particlePrograms) if (prog) glDeleteProgram(prog);
+	m_particlePrograms.clear();
+	if (m_particleVAO)     { glDeleteVertexArrays(1, &m_particleVAO);  m_particleVAO = 0; }
+	if (m_particleInstVBO) { glDeleteBuffers(1, &m_particleInstVBO);   m_particleInstVBO = 0; }
 	DestroyParticleResources();
 	if (m_depthProgram) { glDeleteProgram(m_depthProgram);     m_depthProgram = 0; }
 	if (m_skyProgram)   { glDeleteProgram(m_skyProgram);       m_skyProgram = 0; }
@@ -6250,6 +6307,10 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		// frame in Render), drawn here as alpha-blended billboards over the scene.
 		DrawGpuParticles(viewProj, m_renderWorld.camera.position);
 
+		// ── ParticleGraph particles: GPU-instanced billboards, one draw call per
+		// emitter (see RenderWorld::particleBatches / HE::generateParticleShaderSource).
+		DrawParticleGraphBatches(viewProj, m_renderWorld.camera.view);
+
 		// ── Debug line overlay: world-space segments over the opaque scene ────
 		// Depth-test on so lines are occluded by geometry; depth-write off so
 		// they don't mask later transparent objects.
@@ -6606,6 +6667,87 @@ void OpenGLRenderer::DrawGpuParticles(const glm::mat4& viewProj, const glm::vec3
     glDepthMask(GL_TRUE);
     glDisable(GL_BLEND);
     glUseProgram(0);
+}
+
+void OpenGLRenderer::DrawParticleGraphBatches(const glm::mat4& viewProj, const glm::mat4& view)
+{
+	if (m_renderWorld.particleBatches.empty()) return;
+
+	if (!m_particleVAO)
+	{
+		glGenVertexArrays(1, &m_particleVAO);
+		glGenBuffers(1, &m_particleInstVBO);
+		glBindVertexArray(m_particleVAO);
+		glBindBuffer(GL_ARRAY_BUFFER, m_particleInstVBO);
+		constexpr GLsizei kStride = 5 * sizeof(float); // pos3 + size1 + t01(1)
+		glEnableVertexAttribArray(0);
+		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, kStride, (void*)0);
+		glVertexAttribDivisor(0, 1);
+		glEnableVertexAttribArray(1);
+		glVertexAttribPointer(1, 1, GL_FLOAT, GL_FALSE, kStride, (void*)(3 * sizeof(float)));
+		glVertexAttribDivisor(1, 1);
+		glEnableVertexAttribArray(2);
+		glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, kStride, (void*)(4 * sizeof(float)));
+		glVertexAttribDivisor(2, 1);
+		glBindVertexArray(0);
+	}
+
+	// Camera-facing basis for billboard expansion (right = view row 0, up = view row 1) —
+	// same convention as RenderParticlePreview.
+	const glm::vec3 camRight(view[0][0], view[1][0], view[2][0]);
+	const glm::vec3 camUp   (view[0][1], view[1][1], view[2][1]);
+
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+	glDepthMask(GL_FALSE); // blend over the scene, occluded by (but doesn't occlude) opaque geometry
+	glBindVertexArray(m_particleVAO);
+	glActiveTexture(GL_TEXTURE0);
+
+	std::vector<float> inst;
+	for (const ParticleBatch& batch : m_renderWorld.particleBatches)
+	{
+		if (batch.instances.empty()) continue;
+
+		// A precompiled OpenGL variant (export-baked, CHUNK_PPSD) wins over an
+		// on-demand-compiled + hash-cached one — see getOrBuildParticleProgram.
+		const ParticleShaderVariant* precompiled = nullptr;
+		if (const ParticleGraphAsset* asset = m_contentManager ? m_contentManager->getParticleGraph(batch.particleAssetId) : nullptr)
+			for (const auto& var : asset->precompiledShaders)
+				if (var.backend == static_cast<uint8_t>(HE::RendererBackend::OpenGL)) { precompiled = &var; break; }
+
+		const uint64_t key = precompiled
+			? (0x50505344ull /*"PPSD"*/ ^ (static_cast<uint64_t>(batch.particleAssetId.hi) * 0x9E3779B97F4A7C15ULL) ^ batch.particleAssetId.lo)
+			: HE::hashParticleShaderConfig(batch.config);
+		const unsigned int program = getOrBuildParticleProgram(key, batch.config, precompiled);
+		if (!program) continue;
+
+		unsigned int tex = 0;
+		const bool hasTex = ResolveMaterialTexture(batch.materialAssetId, tex);
+
+		inst.clear();
+		inst.reserve(batch.instances.size() * 5);
+		for (const ParticleInstance& p : batch.instances)
+			inst.insert(inst.end(), { p.position.x, p.position.y, p.position.z, p.size, p.t01 });
+
+		glBindBuffer(GL_ARRAY_BUFFER, m_particleInstVBO);
+		glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(inst.size() * sizeof(float)),
+		             inst.data(), GL_DYNAMIC_DRAW);
+
+		glUseProgram(program);
+		glUniformMatrix4fv(glGetUniformLocation(program, "uViewProj"), 1, GL_FALSE, glm::value_ptr(viewProj));
+		glUniform3fv(glGetUniformLocation(program, "uCamRight"), 1, glm::value_ptr(camRight));
+		glUniform3fv(glGetUniformLocation(program, "uCamUp"),    1, glm::value_ptr(camUp));
+		glUniform1i(glGetUniformLocation(program, "uHasTex"), hasTex);
+		glBindTexture(GL_TEXTURE_2D, hasTex ? tex : 0);
+		glDrawArraysInstanced(GL_TRIANGLES, 0, 6, static_cast<GLsizei>(batch.instances.size()));
+		++m_counters.draws;
+		m_counters.tris += static_cast<uint32_t>(batch.instances.size()) * 2;
+	}
+
+	glBindVertexArray(0);
+	glDepthMask(GL_TRUE);
+	glDisable(GL_BLEND);
+	glUseProgram(0);
 }
 
 void OpenGLRenderer::DestroyParticleResources()

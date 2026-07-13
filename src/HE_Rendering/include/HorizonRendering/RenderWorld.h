@@ -62,6 +62,10 @@ struct ParticleInstance {
 // config) — NOT re-evaluated from the graph, so it always matches what the CPU
 // simulation (ParticleSystem::stepPool) already committed to.
 struct ParticleBatch {
+    HE::UUID                      particleAssetId; // the ParticleGraphAsset — backend looks up
+                                                    // ContentManager::getParticleGraph(id)->
+                                                    // precompiledShaders here before falling
+                                                    // back to an on-demand-compiled + cached shader
     HE::UUID                      meshAssetId;     // usually the default quad
     HE::UUID                      materialAssetId; // base texture (heTex0), optional
     HE::ParticleEmitterConfig     config;
