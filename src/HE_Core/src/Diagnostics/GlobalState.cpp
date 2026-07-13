@@ -172,6 +172,13 @@ static void populateFolder(Folder* folder, const fs::path& path)
 {
 	for (const auto& entry : fs::directory_iterator(path))
 	{
+		// Hide dotfiles/dotfolders (.gitkeep, .DS_Store, .git, …) — they are
+		// VCS/OS bookkeeping, never browsable content. (A ".gitkeep" is how the
+		// engine's empty category folders survive in git; it must not surface as
+		// a fake asset in the Content Browser.)
+		if (entry.path().filename().string().rfind('.', 0) == 0)
+			continue;
+
 		if (entry.is_directory())
 		{
 			Folder* sub   = new Folder();
@@ -243,6 +250,9 @@ static void mergeOverrideInto(Folder* base, const fs::path& overrideDir)
 {
 	for (const auto& entry : fs::directory_iterator(overrideDir))
 	{
+		if (entry.path().filename().string().rfind('.', 0) == 0)
+			continue; // same dotfile filter as populateFolder
+
 		if (entry.is_directory())
 		{
 			Folder* sub = nullptr;
