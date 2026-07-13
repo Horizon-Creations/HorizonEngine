@@ -67,6 +67,20 @@ public:
 	{
 		return { contentFolder, std::shared_lock<std::shared_mutex>(m_contentFolderMutex) };
 	}
+
+	// Engine-wide default-content tree (EditorDeps/EngineContent, next to the
+	// editor executable — NOT project-specific). Mirrors contentFolder/
+	// refreshContentFolder() exactly; the only difference is the root path is
+	// passed in directly instead of derived from lastProjectPath, since the
+	// engine content root never changes for the life of the process.
+	bool refreshEngineFolder(const std::string& engineContentAbsPath);
+
+	std::atomic<uint64_t> engineFolderVersion{0};
+
+	std::pair<const Folder&, std::shared_lock<std::shared_mutex>> lockEngineFolder() const
+	{
+		return { engineFolder, std::shared_lock<std::shared_mutex>(m_engineFolderMutex) };
+	}
 private:
 	// Private constructor to prevent instantiation
 	GlobalState() {}
@@ -75,6 +89,9 @@ private:
 	EngineStatus engineStatus;
 	Folder contentFolder;
 	mutable std::shared_mutex m_contentFolderMutex;
+
+	Folder engineFolder;
+	mutable std::shared_mutex m_engineFolderMutex;
 
 	//Custom config entries
 	json customConfig;

@@ -54,10 +54,8 @@ static State& stateFor(const std::string& path, AppContext& ctx)
 	if (st.loaded || !ctx.contentManager) return st;
 
 	st.name = std::filesystem::path(path).filename().string();
-	std::error_code ec;
-	const std::string rel = std::filesystem::relative(
-		path, ctx.contentManager->contentRoot(), ec).generic_string();
-	st.relPath = ec ? path : rel;
+	const std::string rel = ctx.contentManager->toContentRelativePath(path);
+	st.relPath = rel.empty() ? path : rel;
 	st.assetId = ctx.contentManager->loadAsset(st.relPath);
 
 	st.graph = HE::ParticleGraph::makeDefault();
@@ -362,11 +360,10 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 				{
 					if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("HE_ASSET_PATH"))
 					{
-						std::error_code ec;
-						const std::string rel = std::filesystem::relative(
-							static_cast<const char*>(pl->Data),
-							ctx.contentManager ? ctx.contentManager->contentRoot() : "", ec).generic_string();
-						if (!ec && !rel.empty() && rel.rfind("..", 0) != 0 && ctx.contentManager)
+						const std::string rel = ctx.contentManager
+							? ctx.contentManager->toContentRelativePath(static_cast<const char*>(pl->Data))
+							: std::string();
+						if (!rel.empty() && ctx.contentManager)
 						{
 							const HE::UUID dropped = ctx.contentManager->loadAsset(rel);
 							if (dropped != HE::UUID{} && ctx.contentManager->assetType(dropped) == want)

@@ -318,6 +318,13 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 			a.precompiledShaders = HE::decodeParticleShaderVariants(c->data);
 		handle = m_particleGraphAssets.insert(std::move(a)); break;
 	}
+	case HE::AssetType::AnimatorStateMachine:
+	{
+		AnimatorStateMachineAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_ASMG))
+			a.graphJson.assign(reinterpret_cast<const char*>(c->data.data()), c->data.size());
+		handle = m_animatorStateMachineAssets.insert(std::move(a)); break;
+	}
 	case HE::AssetType::Audio:
 	{
 		AudioAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
@@ -496,6 +503,40 @@ void ContentManager::syncMaterialInstancesOf(const std::string& parentRelPath)
 			syncMaterialInstance(id);
 }
 
+// ─── resolveAbsolutePath / toContentRelativePath ──────────────────────────────
+// The reserved "Engine/" prefix addresses m_engineContentRoot instead of the
+// project's m_contentRoot (mirrors Unreal's /Engine/ vs /Game/). This pair is
+// the ONE place that decides which root a relative path resolves against —
+// every loose-file read/write below goes through resolveAbsolutePath, and
+// every editor call site that turns an absolute path back into a storable
+// relative one must go through toContentRelativePath so "Engine/..." paths
+// round-trip correctly.
+static constexpr char kEnginePrefix[] = "Engine/";
+static constexpr size_t kEnginePrefixLen = sizeof(kEnginePrefix) - 1;
+
+std::string ContentManager::resolveAbsolutePath(const std::string& relativePath) const
+{
+	if (!m_engineContentRoot.empty() && relativePath.rfind(kEnginePrefix, 0) == 0)
+		return m_engineContentRoot + "/" + relativePath.substr(kEnginePrefixLen);
+	return m_contentRoot + "/" + relativePath;
+}
+
+std::string ContentManager::toContentRelativePath(const std::string& absolutePath) const
+{
+	namespace fs = std::filesystem;
+	std::error_code ec;
+	if (!m_engineContentRoot.empty())
+	{
+		const fs::path rel = fs::relative(absolutePath, m_engineContentRoot, ec);
+		if (!ec && !rel.empty() && rel.native()[0] != '.')
+			return std::string(kEnginePrefix) + rel.generic_string();
+	}
+	ec.clear();
+	const fs::path rel = fs::relative(absolutePath, m_contentRoot, ec);
+	if (ec || rel.empty() || rel.native()[0] == '.') return std::string(); // outside both roots
+	return rel.generic_string();
+}
+
 // ─── loadAsset ────────────────────────────────────────────────────────────────
 HE::UUID ContentManager::loadAsset(const std::string& relativePath)
 {
@@ -520,7 +561,7 @@ HE::UUID ContentManager::loadAsset(const std::string& relativePath)
 		}
 	}
 
-	const std::string fullPath = m_contentRoot + "/" + relativePath;
+	const std::string fullPath = resolveAbsolutePath(relativePath);
 
 	HAsset::Reader reader;
 	if (!reader.open(fullPath))
@@ -554,7 +595,7 @@ void ContentManager::loadAssetAsync(const std::string& relativePath,
 		m_pendingPaths.insert(relativePath);
 	}
 
-	const std::string fullPath = m_contentRoot + "/" + relativePath;
+	const std::string fullPath = resolveAbsolutePath(relativePath);
 
 	globalPool().submit([this, relativePath, fullPath,
 	                     cb = std::move(callback)]() mutable
@@ -802,7 +843,7 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 	if (asset.id == HE::UUID{})
 		asset.id = HE::UUID::generate();
 
-	const std::string fullPath = m_contentRoot + "/" + asset.path;
+	const std::string fullPath = resolveAbsolutePath(asset.path);
 	const uint16_t    typeId   = static_cast<uint16_t>(asset.type);
 
 	HAsset::Writer w;
@@ -953,6 +994,12 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 	{
 		auto& a = static_cast<ParticleGraphAsset&>(asset);
 		w.addChunk(HAsset::CHUNK_PTGR, a.nodeGraphJson.data(), a.nodeGraphJson.size());
+		break;
+	}
+	case HE::AssetType::AnimatorStateMachine:
+	{
+		auto& a = static_cast<AnimatorStateMachineAsset&>(asset);
+		w.addChunk(HAsset::CHUNK_ASMG, a.graphJson.data(), a.graphJson.size());
 		break;
 	}
 	case HE::AssetType::Audio:
@@ -1134,6 +1181,14 @@ ParticleGraphAsset* ContentManager::getParticleGraphMutable(HE::UUID id)
 	ParticleGraphAsset* a = m_particleGraphAssets.get(it->second);
 	return (a && a->id == id) ? a : nullptr; // reject wrong-type aliasing
 }
+const AnimatorStateMachineAsset* ContentManager::getAnimatorStateMachine(HE::UUID id) const { return lookupAsset(m_handleToUUID, m_animatorStateMachineAssets, id); }
+AnimatorStateMachineAsset* ContentManager::getAnimatorStateMachineMutable(HE::UUID id)
+{
+	auto it = m_handleToUUID.find(id);
+	if (it == m_handleToUUID.end()) return nullptr;
+	AnimatorStateMachineAsset* a = m_animatorStateMachineAssets.get(it->second);
+	return (a && a->id == id) ? a : nullptr; // reject wrong-type aliasing
+}
 const ShaderAsset*        ContentManager::getShader(HE::UUID id) const        { return lookupAsset(m_handleToUUID, m_shaderAssets, id); }
 const PrefabAsset*        ContentManager::getPrefab(HE::UUID id) const        { return lookupAsset(m_handleToUUID, m_prefabAssets, id); }
 const AnimationClipAsset*      ContentManager::getAnimationClip(HE::UUID id) const      { return lookupAsset(m_handleToUUID, m_animClipAssets,     id); }
@@ -1231,6 +1286,7 @@ HE::UUID ContentManager::registerHorizonCodeClass(HorizonCodeClassAsset asset) {
 HE::UUID ContentManager::registerInputAction(InputActionAsset asset)                 { return registerRuntimeAsset(m_inputActionAssets,  std::move(asset), HE::AssetType::InputAction); }
 HE::UUID ContentManager::registerInputMappingContext(InputMappingContextAsset asset) { return registerRuntimeAsset(m_inputMappingAssets, std::move(asset), HE::AssetType::InputMappingContext); }
 HE::UUID ContentManager::registerParticleGraph(ParticleGraphAsset asset) { return registerRuntimeAsset(m_particleGraphAssets, std::move(asset), HE::AssetType::ParticleSystem); }
+HE::UUID ContentManager::registerAnimatorStateMachine(AnimatorStateMachineAsset asset) { return registerRuntimeAsset(m_animatorStateMachineAssets, std::move(asset), HE::AssetType::AnimatorStateMachine); }
 HE::UUID ContentManager::registerAnimationClip(AnimationClipAsset asset)       { return registerRuntimeAsset(m_animClipAssets,     std::move(asset), HE::AssetType::AnimationClip);     }
 HE::UUID ContentManager::registerPropertyAnimClip(PropertyAnimClipAsset asset) { return registerRuntimeAsset(m_propAnimClipAssets, std::move(asset), HE::AssetType::PropertyAnimClip); }
 
@@ -1348,7 +1404,7 @@ std::vector<HE::UUID> ContentManager::pollHotReload()
 
 	for (const auto& relPath : paths)
 	{
-		const std::string fullPath = m_contentRoot + "/" + relPath;
+		const std::string fullPath = resolveAbsolutePath(relPath);
 		std::error_code ec;
 		const auto mtime = fs::last_write_time(fullPath, ec);
 		if (ec) continue; // file deleted or inaccessible

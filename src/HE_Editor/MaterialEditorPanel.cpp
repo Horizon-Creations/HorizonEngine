@@ -347,11 +347,10 @@ State& stateFor(const std::string& path, AppContext& ctx)
 	if (st.loaded || !ctx.contentManager) return st;
 
 	st.name = std::filesystem::path(path).filename().string();
-	// The ContentManager addresses assets by content-root-relative path.
-	std::error_code ec;
-	const std::string rel = std::filesystem::relative(
-		path, ctx.contentManager->contentRoot(), ec).generic_string();
-	st.relPath    = ec ? path : rel;
+	// The ContentManager addresses assets by content-root-relative path (or the
+	// reserved "Engine/"-prefixed path for engine-content-root assets).
+	const std::string rel = ctx.contentManager->toContentRelativePath(path);
+	st.relPath    = rel.empty() ? path : rel;
 	st.materialId = ctx.contentManager->loadAsset(st.relPath);
 	st.isFunction = ctx.contentManager->assetType(st.materialId) == HE::AssetType::MaterialFunction;
 
@@ -829,10 +828,8 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 					const std::string abs(static_cast<const char*>(pl->Data));
 					if (MaterialEditorPanel::isTextureAsset(abs) && ctx.contentManager)
 					{
-						std::error_code ec;
-						const std::string rel = std::filesystem::relative(
-							abs, ctx.contentManager->contentRoot(), ec).generic_string();
-						n->s = ec ? abs : rel;
+						const std::string rel = ctx.contentManager->toContentRelativePath(abs);
+						n->s = rel.empty() ? abs : rel;
 						structuralEdit = true; // texture list changed → regenerate
 					}
 				}
@@ -1013,8 +1010,7 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 			}
 		if (n->type == MatNodeType::FunctionCall && !n->s.empty() && ctx.contentManager)
 			if (ImGui::MenuItem("Open Function"))
-				s_openAssetRequest =
-					(std::filesystem::path(ctx.contentManager->contentRoot()) / n->s).string();
+				s_openAssetRequest = ctx.contentManager->resolveAbsolutePath(n->s);
 		// Route THIS node's first output (unlit) onto the preview mesh.
 		std::vector<HE::MatPinDesc> dIn, dOut;
 		const std::vector<HE::MatPinDesc>* outs = &HE::matNodeDesc(n->type).outputs;
@@ -1034,8 +1030,7 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 	{
 		const MatGraphNode* n = st.graph.findNode(nodeId);
 		if (n && n->type == MatNodeType::FunctionCall && !n->s.empty() && ctx.contentManager)
-			s_openAssetRequest =
-				(std::filesystem::path(ctx.contentManager->contentRoot()) / n->s).string();
+			s_openAssetRequest = ctx.contentManager->resolveAbsolutePath(n->s);
 	};
 
 	// ── Add-node palette (searchable; ports the original popup body). ──
@@ -1483,8 +1478,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 	{
 		ImGui::SameLine(ImGui::GetContentRegionAvail().x - 250.0f);
 		if (ImGui::Button("Open Parent") && ctx.contentManager)
-			s_openAssetRequest = (std::filesystem::path(ctx.contentManager->contentRoot())
-			                      / mat->parentMaterialPath).string();
+			s_openAssetRequest = ctx.contentManager->resolveAbsolutePath(mat->parentMaterialPath);
 	}
 	ImGui::SameLine(ImGui::GetContentRegionAvail().x - 140.0f);
 	if (ImGui::Button(st.isFunction ? "Save Function" : "Save Material") && assetOk)

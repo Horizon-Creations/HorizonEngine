@@ -91,7 +91,8 @@ namespace HE
         HorizonCodeClass, // standalone HorizonCode graph (visual-scripting class)
         InputAction,      // named logical input (Button or Axis), referenced by mapping contexts
         InputMappingContext, // key/axis bindings that drive InputAction states at runtime
-        ParticleSystem    // particle emitter node graph (Emitter Output + math/const/random nodes)
+        ParticleSystem,   // particle emitter node graph (Emitter Output + math/const/random nodes)
+        AnimatorStateMachine // authored states/transitions graph, referenced by AnimatorStateMachineComponent
     };
 
     enum class TextureFormat : uint32_t

@@ -29,6 +29,7 @@ add_library(HorizonCore SHARED
 	src/Events/EventBus.cpp
 	src/MaterialGraph/MaterialGraph.cpp
 	src/ParticleGraph/ParticleGraph.cpp
+	src/AnimatorStateMachine/AnimatorStateMachineGraph.cpp
 	src/UIWidget/UIWidgetTree.cpp
 	src/UIWidget/UIElement.cpp
 	src/UIWidget/UIWidgetBinding.cpp

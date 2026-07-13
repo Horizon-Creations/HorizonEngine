@@ -199,10 +199,7 @@ void loadState(State& st, AppContext& ctx, const std::string& assetPath)
 	st.name = std::filesystem::path(assetPath).stem().string();
 	if (!ctx.contentManager) return;
 
-	std::error_code ec;
-	st.relPath = std::filesystem::relative(
-		assetPath, ctx.contentManager->contentRoot(), ec).generic_string();
-	if (ec) st.relPath.clear();
+	st.relPath = ctx.contentManager->toContentRelativePath(assetPath);
 
 	st.assetId = ctx.contentManager->loadAsset(st.relPath);
 	if (const UIWidgetAsset* a = ctx.contentManager->getWidget(st.assetId))
@@ -323,12 +320,10 @@ bool assetSlot(AppContext& ctx, const char* label, std::string& path,
 	{
 		if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_ASSET_PATH"))
 		{
-			std::error_code ec;
-			std::string rel = std::filesystem::relative(
-				static_cast<const char*>(p->Data),
-				ctx.contentManager ? ctx.contentManager->contentRoot() : "",
-				ec).generic_string();
-			if (!ec && !rel.empty() && rel.rfind("..", 0) != 0 && ctx.contentManager)
+			std::string rel = ctx.contentManager
+				? ctx.contentManager->toContentRelativePath(static_cast<const char*>(p->Data))
+				: std::string();
+			if (!rel.empty() && ctx.contentManager)
 			{
 				const HE::UUID id = ctx.contentManager->loadAsset(rel);
 				if (id != HE::UUID{} && ctx.contentManager->assetType(id) == wantType)

@@ -68,30 +68,42 @@ namespace
 		return false;
 	}
 }
+namespace
+{
+	// Scans one root directory for .hasset files of the given type, appending
+	// ClassRefs whose path is prefixed exactly as toContentRelativePath() would
+	// (pathPrefix is "" for the project Content root, "Engine/" for the engine
+	// content root) so the result is directly usable with loadAsset()/pickers.
+	void scanAssetsInto(std::vector<ClassRef>& out, const std::string& root,
+	                     const std::string& pathPrefix, HE::AssetType type)
+	{
+		if (root.empty()) return;
+		std::error_code ec;
+		std::filesystem::recursive_directory_iterator it(root, ec), end;
+		for (; it != end; it.increment(ec))
+		{
+			if (ec) break;
+			if (!it->is_regular_file(ec)) continue;
+			if (it->path().extension() != ".hasset") continue;
+			HAsset::Reader r;
+			if (r.open(it->path().string()) &&
+			    r.assetType() == static_cast<uint16_t>(type))
+			{
+				ClassRef cr;
+				cr.label = it->path().stem().string();
+				cr.path  = pathPrefix + std::filesystem::relative(it->path(), root, ec).generic_string();
+				out.push_back(std::move(cr));
+			}
+		}
+	}
+}
+
 std::vector<ClassRef> listAssets(ContentManager* cm, HE::AssetType type)
 {
 	std::vector<ClassRef> out;
 	if (!cm) return out;
-	const std::string root = cm->contentRoot();
-	if (root.empty()) return out;
-
-	std::error_code ec;
-	std::filesystem::recursive_directory_iterator it(root, ec), end;
-	for (; it != end; it.increment(ec))
-	{
-		if (ec) break;
-		if (!it->is_regular_file(ec)) continue;
-		if (it->path().extension() != ".hasset") continue;
-		HAsset::Reader r;
-		if (r.open(it->path().string()) &&
-		    r.assetType() == static_cast<uint16_t>(type))
-		{
-			ClassRef cr;
-			cr.label = it->path().stem().string();
-			cr.path  = std::filesystem::relative(it->path(), root, ec).generic_string();
-			out.push_back(std::move(cr));
-		}
-	}
+	scanAssetsInto(out, cm->contentRoot(), "", type);
+	scanAssetsInto(out, cm->engineContentRoot(), "Engine/", type);
 	return out;
 }
 

@@ -10,6 +10,7 @@
 #include <HorizonScene/AnimationBlendSystem.h>
 #include <HorizonScene/Components/AnimatorStateMachineComponent.h>
 #include <HorizonScene/AnimationStateMachineSystem.h>
+#include <AnimatorStateMachine/AnimatorStateMachineGraph.h>
 #include <HorizonScene/AnimationPreview.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -566,8 +567,9 @@ TEST_CASE("AnimationBlendSystem skips when playing=false")
 TEST_CASE("AnimatorStateMachineComponent defaults")
 {
     AnimatorStateMachineComponent sm;
-    CHECK(sm.states.empty());
-    CHECK(sm.transitions.empty());
+    CHECK(sm.stateMachineAssetId == HE::UUID{});
+    CHECK(sm.resolvedGraph.states.empty());
+    CHECK(sm.resolvedGraph.transitions.empty());
     CHECK(sm.params.empty());
     CHECK(sm.currentStateName.empty());
     CHECK(sm.clipTime      == doctest::Approx(0.0f));
@@ -575,20 +577,33 @@ TEST_CASE("AnimatorStateMachineComponent defaults")
     CHECK(!sm.inTransition);
     CHECK(sm.transitionElapsed  == doctest::Approx(0.0f));
     CHECK(sm.transitionDuration == doctest::Approx(0.2f));
+    CHECK(sm.configDirty); // resolves to an empty graph on first update() until an asset is assigned
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  AnimationStateMachineSystem: integration helpers
 // ─────────────────────────────────────────────────────────────────────────────
+// Builds an AnimatorStateMachineAsset (Idle/Walk + one Idle->Walk transition
+// gated on "speed") and registers it, returning a component that references it
+// — the graph-authored equivalent of directly setting the old inline fields.
 static AnimatorStateMachineComponent makeSimpleSM(
-    HE::UUID clipIdA, HE::UUID clipIdB,
+    ContentManager& cm, HE::UUID clipIdA, HE::UUID clipIdB,
     float transitionDuration = 0.2f)
 {
+    HE::AnimatorStateMachineGraph g;
+    g.states.push_back({ 1, "Idle", clipIdA, true, 0.0f, 0.0f });
+    g.states.push_back({ 2, "Walk", clipIdB, true, 0.0f, 0.0f });
+    g.transitions.push_back({ "Idle", "Walk", "speed",
+                               HE::TransitionOp::Greater, 0.5f, transitionDuration });
+    g.startState = "Idle";
+
+    AnimatorStateMachineAsset asset;
+    asset.name      = "TestStateMachine";
+    asset.graphJson = HE::animatorStateMachineToJson(g);
+    const HE::UUID assetId = cm.registerAnimatorStateMachine(std::move(asset));
+
     AnimatorStateMachineComponent sm;
-    sm.states.push_back({1, "Idle",  clipIdA, true, 0.0f, 0.0f});
-    sm.states.push_back({2, "Walk",  clipIdB, true, 0.0f, 0.0f});
-    sm.transitions.push_back({"Idle", "Walk", "speed",
-                               TransitionOp::Greater, 0.5f, transitionDuration});
+    sm.stateMachineAssetId = assetId;
     sm.params["speed"]     = 0.0f;
     sm.currentStateName    = "Idle";
     sm.playbackSpeed       = 1.0f;
@@ -609,7 +624,7 @@ TEST_CASE("AnimationStateMachineSystem plays current state clip")
     world.addComponent(e, TransformComponent{ .position = {}, .rotation = {}, .scale = glm::vec3(1.0f) });
     SkeletalMeshComponent smc; smc.meshAssetId = meshId;
     world.addComponent(e, smc);
-    world.addComponent(e, makeSimpleSM(clipAId, clipBId));
+    world.addComponent(e, makeSimpleSM(cm, clipAId, clipBId));
 
     AnimationStateMachineSystem::update(world, cm, 0.0f);
 
@@ -634,7 +649,7 @@ TEST_CASE("AnimationStateMachineSystem transition fires when param exceeds thres
     world.addComponent(e, TransformComponent{ .position = {}, .rotation = {}, .scale = glm::vec3(1.0f) });
     SkeletalMeshComponent smc; smc.meshAssetId = meshId;
     world.addComponent(e, smc);
-    auto sm = makeSimpleSM(clipAId, clipBId, 0.4f);
+    auto sm = makeSimpleSM(cm, clipAId, clipBId, 0.4f);
     sm.params["speed"] = 1.0f; // exceeds 0.5 threshold → transition should fire
     world.addComponent(e, sm);
 
@@ -659,7 +674,7 @@ TEST_CASE("AnimationStateMachineSystem does NOT transition when param below thre
     world.addComponent(e, TransformComponent{ .position = {}, .rotation = {}, .scale = glm::vec3(1.0f) });
     SkeletalMeshComponent smc; smc.meshAssetId = meshId;
     world.addComponent(e, smc);
-    auto sm = makeSimpleSM(clipAId, clipBId);
+    auto sm = makeSimpleSM(cm, clipAId, clipBId);
     sm.params["speed"] = 0.2f; // below threshold
     world.addComponent(e, sm);
 
@@ -684,7 +699,7 @@ TEST_CASE("AnimationStateMachineSystem crossfade midpoint blends 50/50")
     world.addComponent(e, TransformComponent{ .position = {}, .rotation = {}, .scale = glm::vec3(1.0f) });
     SkeletalMeshComponent smc; smc.meshAssetId = meshId;
     world.addComponent(e, smc);
-    auto sm = makeSimpleSM(clipAId, clipBId, 0.4f);
+    auto sm = makeSimpleSM(cm, clipAId, clipBId, 0.4f);
     sm.params["speed"]     = 1.0f;
     sm.inTransition        = true;
     sm.transitionTarget    = "Walk";
@@ -714,7 +729,7 @@ TEST_CASE("AnimationStateMachineSystem completes transition after full duration"
     world.addComponent(e, TransformComponent{ .position = {}, .rotation = {}, .scale = glm::vec3(1.0f) });
     SkeletalMeshComponent smc; smc.meshAssetId = meshId;
     world.addComponent(e, smc);
-    auto sm = makeSimpleSM(clipAId, clipBId, 0.2f);
+    auto sm = makeSimpleSM(cm, clipAId, clipBId, 0.2f);
     sm.params["speed"]    = 1.0f;
     sm.inTransition       = true;
     sm.transitionTarget   = "Walk";
@@ -744,12 +759,53 @@ TEST_CASE("AnimationStateMachineSystem advances clipTime")
     world.addComponent(e, TransformComponent{ .position = {}, .rotation = {}, .scale = glm::vec3(1.0f) });
     SkeletalMeshComponent smc; smc.meshAssetId = meshId;
     world.addComponent(e, smc);
-    world.addComponent(e, makeSimpleSM(clipAId, clipBId));
+    world.addComponent(e, makeSimpleSM(cm, clipAId, clipBId));
 
     AnimationStateMachineSystem::update(world, cm, 0.3f);
 
     const auto& updatedSm = world.registry().get<AnimatorStateMachineComponent>(e);
     CHECK(updatedSm.clipTime == doctest::Approx(0.3f));
+}
+
+TEST_CASE("AnimationStateMachineSystem migrates a legacy inline-graph entity into a real asset")
+{
+    ContentManager cm;
+    HorizonWorld   world;
+    auto& reg = world.registry();
+
+    const HE::UUID meshId  = HE::UUID::generate();
+    cm.registerSkeletalMesh(makeOneBoneSkeletalMesh(meshId));
+    const HE::UUID clipAId = cm.registerAnimationClip(makeConstantClip({3.0f, 0.0f, 0.0f}));
+
+    auto e = world.createEntity();
+    world.addComponent(e, TransformComponent{ .position = {}, .rotation = {}, .scale = glm::vec3(1.0f) });
+    SkeletalMeshComponent smc; smc.meshAssetId = meshId;
+    world.addComponent(e, smc);
+
+    // Simulate what SceneSerializer::load does for a pre-asset-format scene: no
+    // stateMachineAssetId, legacy graph staged instead (see AnimatorStateMachine-
+    // Component::LegacyConfig).
+    AnimatorStateMachineComponent sm;
+    sm.legacy.hasData = true;
+    sm.legacy.states.push_back({ 1, "Idle", clipAId, true, 5.0f, 5.0f });
+    sm.legacy.currentStateName = "Idle";
+    reg.emplace<AnimatorStateMachineComponent>(e, sm);
+
+    AnimationStateMachineSystem::update(world, cm, 0.0f);
+
+    const auto& updatedSm = reg.get<AnimatorStateMachineComponent>(e);
+    CHECK(!updatedSm.legacy.hasData);                       // migrated exactly once
+    CHECK(updatedSm.stateMachineAssetId != HE::UUID{});      // now points at a real asset
+    REQUIRE(cm.getAnimatorStateMachine(updatedSm.stateMachineAssetId) != nullptr);
+    REQUIRE(updatedSm.resolvedGraph.states.size() == 1);
+    CHECK(updatedSm.resolvedGraph.states[0].name == "Idle");
+    CHECK(updatedSm.resolvedGraph.states[0].x == doctest::Approx(5.0f));
+    CHECK(updatedSm.currentStateName == "Idle");
+
+    // The migrated asset actually drives playback (not just a dangling reference).
+    const auto& boneMatrices = reg.get<SkeletalMeshComponent>(e).boneMatrices;
+    REQUIRE(!boneMatrices.empty());
+    CHECK(boneMatrices[0][3][0] == doctest::Approx(3.0f).epsilon(0.01f));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

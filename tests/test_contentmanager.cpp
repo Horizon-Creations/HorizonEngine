@@ -14,9 +14,9 @@ namespace
 	struct TempContentDir
 	{
 		fs::path path;
-		TempContentDir()
+		explicit TempContentDir(const char* name = "he_test_content")
 		{
-			path = fs::temp_directory_path() / "he_test_content";
+			path = fs::temp_directory_path() / name;
 			he_test::removeAllQuiet(path);
 			fs::create_directories(path);
 		}
@@ -975,4 +975,85 @@ TEST_CASE("ContentManager skeletal mesh wrong-type lookup returns null")
 	CHECK(cm.getSkeletalMesh(id) != nullptr);
 	CHECK(cm.getStaticMesh(id)   == nullptr);
 	CHECK(cm.getTexture(id)      == nullptr);
+}
+
+// ─── Engine content root ("Engine/" reserved path prefix) ─────────────────────
+// The Content Browser's new "Engine" tree (EditorDeps/EngineContent) is a
+// SECOND filesystem root, addressed via the reserved "Engine/" path prefix —
+// mirrors Unreal's /Engine/ vs /Game/. resolveAbsolutePath()/
+// toContentRelativePath() are the one choke point deciding which root a path
+// resolves against; these tests pin that behavior directly.
+
+TEST_CASE("ContentManager resolveAbsolutePath routes \"Engine/\" to the engine root")
+{
+	TempContentDir dir;
+	TempContentDir engineDir("he_test_engine_content");
+	ContentManager cm(dir.path.string());
+	cm.setEngineContentRoot(engineDir.path.string());
+
+	CHECK(cm.resolveAbsolutePath("Materials/Foo.hasset") ==
+	      dir.path.string() + "/Materials/Foo.hasset");
+	CHECK(cm.resolveAbsolutePath("Engine/MaterialFunctions/Fresnel.hasset") ==
+	      engineDir.path.string() + "/MaterialFunctions/Fresnel.hasset");
+}
+
+TEST_CASE("ContentManager resolveAbsolutePath falls back to content root when no engine root is set")
+{
+	TempContentDir dir;
+	ContentManager cm(dir.path.string());
+	// Never called setEngineContentRoot() — a literal "Engine/" segment in a
+	// project's own Content folder must not be swallowed by an empty root.
+	CHECK(cm.resolveAbsolutePath("Engine/Foo.hasset") ==
+	      dir.path.string() + "/Engine/Foo.hasset");
+}
+
+TEST_CASE("ContentManager toContentRelativePath round-trips both roots")
+{
+	TempContentDir dir;
+	TempContentDir engineDir("he_test_engine_content");
+	ContentManager cm(dir.path.string());
+	cm.setEngineContentRoot(engineDir.path.string());
+
+	CHECK(cm.toContentRelativePath(dir.path.string() + "/Materials/Foo.hasset") ==
+	      "Materials/Foo.hasset");
+	CHECK(cm.toContentRelativePath(engineDir.path.string() + "/MaterialFunctions/Fresnel.hasset") ==
+	      "Engine/MaterialFunctions/Fresnel.hasset");
+	// Outside both roots entirely → empty, not a garbage "../.." path.
+	CHECK(cm.toContentRelativePath("/some/unrelated/path.png") == "");
+}
+
+TEST_CASE("ContentManager loadAsset/saveAsset resolve an \"Engine/\"-prefixed path against the engine root")
+{
+	TempContentDir dir;
+	TempContentDir engineDir("he_test_engine_content");
+	fs::create_directories(engineDir.path / "MaterialFunctions");
+
+	HE::UUID savedId;
+	{
+		ContentManager cm(dir.path.string());
+		cm.setEngineContentRoot(engineDir.path.string());
+
+		MaterialFunctionAsset fn;
+		fn.type = HE::AssetType::MaterialFunction;
+		fn.name = "FresnelRimLight";
+		fn.path = "Engine/MaterialFunctions/FresnelRimLight.hasset";
+		REQUIRE(cm.saveAsset(fn));
+		savedId = fn.id;
+		REQUIRE_FALSE(savedId == HE::UUID{});
+	}
+
+	// The file must physically live under the ENGINE root, not the project's
+	// Content root — proves saveAsset() actually routed through resolveAbsolutePath().
+	CHECK(fs::exists(engineDir.path / "MaterialFunctions" / "FresnelRimLight.hasset"));
+	CHECK_FALSE(fs::exists(dir.path / "Engine" / "MaterialFunctions" / "FresnelRimLight.hasset"));
+
+	// Fresh manager (simulates reopening the project) — loadAsset() must find
+	// it again purely from the "Engine/"-prefixed path.
+	ContentManager cm2(dir.path.string());
+	cm2.setEngineContentRoot(engineDir.path.string());
+	HE::UUID loadedId = cm2.loadAsset("Engine/MaterialFunctions/FresnelRimLight.hasset");
+	CHECK(loadedId == savedId);
+	const MaterialFunctionAsset* fn = cm2.getMaterialFunction(loadedId);
+	REQUIRE(fn != nullptr);
+	CHECK(fn->name == "FresnelRimLight");
 }

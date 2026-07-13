@@ -339,6 +339,19 @@ void EditorApplication::OnInit()
 		io.FontDefault = m_fontBody;
 	}
 
+	// ── Engine-wide default content (EditorDeps/EngineContent) ────────────────
+	// Deployed next to the editor executable exactly like Fonts/Images (see the
+	// copy_directory of EditorDeps in HE_Editor's CMakeLists.txt) — NOT part of
+	// any project's Content/ folder, so it's resolved once here, independent of
+	// which project gets loaded afterwards. Content Browser shows it as the
+	// "Engine" root, sibling to "Content" (see EditorUI.cpp).
+	{
+		const char* basePath = SDL_GetBasePath();
+		std::string engineContentPath = std::string(basePath ? basePath : "") + "EngineContent";
+		contentManager().setEngineContentRoot(engineContentPath);
+		m_globalState->refreshEngineFolder(engineContentPath);
+	}
+
 	switch (m_backend)
 	{
 	// ── OpenGL ────────────────────────────────────────────────────────────────
@@ -1038,9 +1051,11 @@ void EditorApplication::OnRender(float dt)
 				m_contentRefreshFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
 			{
 				GlobalState* gs = m_globalState;
-				m_contentRefreshFuture = std::async(std::launch::async, [gs]()
+				std::string engineContentPath = contentManager().engineContentRoot();
+				m_contentRefreshFuture = std::async(std::launch::async, [gs, engineContentPath]()
 				{
 					gs->refreshContentFolder();
+					if (!engineContentPath.empty()) gs->refreshEngineFolder(engineContentPath);
 				});
 			}
 		}
