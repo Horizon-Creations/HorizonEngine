@@ -3,6 +3,7 @@
 #include <HorizonScene/WeatherSystem.h>
 #include <HorizonScene/Components/WeatherComponent.h>
 #include <HorizonScene/Components/EnvironmentComponent.h>
+#include <HorizonScene/Components/EnvironmentLightComponent.h>
 #include <HorizonRendering/RenderWorld.h>
 #include <HorizonRendering/RenderExtractor.h>
 #include <HorizonRendering/RenderPass.h>
@@ -162,7 +163,7 @@ TEST_CASE("WeatherSystem is a no-op without a WeatherComponent")
 {
     HorizonWorld world;
     auto& reg = world.registry();
-    reg.remove<WeatherComponent>(world.rootEntity()); // World root carries one by default
+    // A bare world has no weather; give it a sky to check weather leaves env alone.
     auto& env = reg.emplace_or_replace<EnvironmentComponent>(world.rootEntity());
     env.cloudCoverage = 0.33f;
 
@@ -171,13 +172,69 @@ TEST_CASE("WeatherSystem is a no-op without a WeatherComponent")
     CHECK(env.cloudCoverage == doctest::Approx(0.33f)); // untouched
 }
 
-TEST_CASE("every World root has a WeatherComponent by default")
+static int envLightCount(HorizonWorld& w)
+{
+    int n = 0;
+    for (auto e : w.registry().view<EnvironmentLightComponent>()) { (void)e; ++n; }
+    return n;
+}
+
+TEST_CASE("a bare world has no Sky/Weather; add/remove create and destroy them")
 {
     HorizonWorld world;
-    CHECK(world.registry().all_of<WeatherComponent>(world.rootEntity()));
+    // A fresh world starts empty — Sky/Weather come from the project templates or
+    // the Environment window, not by default.
+    CHECK((world.environmentEntity() == entt::null));
+    CHECK((world.weatherEntity()     == entt::null));
+    CHECK(envLightCount(world) == 0);
 
-    world.clear(); // New Scene must keep weather on the root
-    CHECK(world.registry().all_of<WeatherComponent>(world.rootEntity()));
+    const Entity sky = world.addSky();
+    CHECK(sky == world.environmentEntity());
+    CHECK(world.registry().all_of<EnvironmentComponent>(sky));
+    CHECK(envLightCount(world) == 2); // sun + moon, as children of the Sky entity
+
+    const Entity weather = world.addWeather();
+    CHECK(weather == world.weatherEntity());
+    CHECK(world.registry().all_of<WeatherComponent>(weather));
+
+    // add* are idempotent — never a second entity.
+    CHECK(world.addSky()     == sky);
+    CHECK(world.addWeather() == weather);
+
+    // removeSky takes the sun/moon child lights with it.
+    world.removeSky();
+    CHECK((world.environmentEntity() == entt::null));
+    CHECK(envLightCount(world) == 0);
+    world.removeWeather();
+    CHECK((world.weatherEntity() == entt::null));
+
+    // New Scene (clear) leaves a bare world too.
+    world.addSky();
+    world.addWeather();
+    world.clear();
+    CHECK((world.environmentEntity() == entt::null));
+    CHECK((world.weatherEntity()     == entt::null));
+    CHECK(envLightCount(world) == 0);
+}
+
+TEST_CASE("legacy root Environment/Weather migrate onto dedicated entities on load")
+{
+    HorizonWorld world;
+    auto& reg = world.registry();
+    // Simulate a legacy scene: Environment + Weather sitting on the World root.
+    reg.emplace_or_replace<EnvironmentComponent>(world.rootEntity());
+    reg.emplace_or_replace<WeatherComponent>(world.rootEntity());
+
+    world.migrateLegacyRootEnvironment();
+
+    CHECK_FALSE(reg.all_of<EnvironmentComponent>(world.rootEntity()));
+    CHECK_FALSE(reg.all_of<WeatherComponent>(world.rootEntity()));
+    const Entity sky = world.environmentEntity();
+    const Entity weather = world.weatherEntity();
+    CHECK((sky     != entt::null));
+    CHECK((weather != entt::null));
+    CHECK(sky     != world.rootEntity());
+    CHECK(weather != world.rootEntity());
 }
 
 TEST_CASE("rain spawns a camera-following precipitation volume")

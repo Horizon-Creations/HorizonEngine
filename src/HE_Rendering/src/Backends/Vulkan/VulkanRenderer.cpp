@@ -3153,6 +3153,7 @@ void VulkanRenderer::drawSky(VkCommandBuffer cmd, uint32_t /*width*/, uint32_t /
 {
     VkPipeline pipe = hdr && m_skyPipelineHDR ? m_skyPipelineHDR : m_skyPipeline;
     if (!pipe || !m_skyPipelineLayout) return;
+    if (!m_environment.skyEnabled) return; // no Sky entity → leave the cleared background
 
     const glm::mat4 vp = kVulkanClipFix * m_renderWorld.camera.projection * m_renderWorld.camera.view;
 

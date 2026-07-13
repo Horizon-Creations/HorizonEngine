@@ -38,10 +38,33 @@ public:
 	// Built-in entities (the root and the environment sun/moon lights) cannot be
 	// deleted or have arbitrary components managed; they belong to the World.
 	bool isBuiltin(Entity entity) const;
-	// Ensures the hidden, built-in sun + moon directional lights exist on the root
-	// (creating them if missing). Idempotent; called on construction, clear() and
-	// after scene load (the lights are never serialised, so they are recreated).
+	// Ensures the hidden, built-in sun + moon directional lights exist as children
+	// of the Sky entity (creating them if missing) — or, when the scene has no Sky
+	// entity, destroys any stray lights. Idempotent; called from addSky() and after
+	// scene load (the lights are never serialised, so they are recreated).
 	void ensureEnvironmentLights();
+
+	// ── Sky & Weather scene entities ───────────────────────────────────────────
+	// Sky (EnvironmentComponent) and Weather (WeatherComponent) are ordinary,
+	// deletable scene entities — added/removed via the editor's Environment window
+	// (View menu) and visible in the Outliner. There is at most one of each. A bare
+	// world has neither: the Game/Simulation project templates seed them, everything
+	// else starts empty.
+	//   * environmentEntity() / weatherEntity(): the entity carrying the component,
+	//     or entt::null when the scene has none (scans the registry).
+	//   * addSky() creates the "Sky" entity (+ the built-in sun/moon child lights)
+	//     if absent and returns it; removeSky() destroys it (and its lights).
+	//     addWeather()/removeWeather() do the same for the "Weather" entity.
+	Entity environmentEntity() const;
+	Entity weatherEntity() const;
+	Entity addSky();
+	void   removeSky();
+	Entity addWeather();
+	void   removeWeather();
+	// Legacy scenes serialised Environment/Weather on the World root; move them onto
+	// dedicated "Sky"/"Weather" entities so every scene uses the same model. Called
+	// by the scene loader after applying components. No-op when nothing is on root.
+	void   migrateLegacyRootEnvironment();
 
 	// Template helpers — must stay in header
 	void addComponent(Entity entity, auto&& component)
@@ -113,6 +136,16 @@ public:
 
 
 private:
+	// Destroy an entire subtree (children first), ignoring the built-in guard — the
+	// caller has already vetted the top-level entity. Lets removeSky() take its
+	// hidden sun/moon child lights down with it.
+	void destroyRecursive(Entity entity);
+
+	// Force-create the core component pools so they belong to this module, not a
+	// hot-loaded native game-logic dylib (which would dangle them on unload). Called
+	// once from the constructor. See the .cpp for the full rationale.
+	void reserveComponentStorage();
+
 	entt::registry registry_;
 	Entity         rootEntity_      = entt::null;
 	bool           m_hierarchyDirty = true;

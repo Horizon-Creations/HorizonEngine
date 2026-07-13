@@ -181,6 +181,9 @@ static bool s_forceShowToolchainDialog = false;
 // Toggled by View > Performance Profiler; drives the profiler panel.
 static bool s_showProfiler = false;
 
+// Toggled by View > Environment; drives the Sky/Weather add-remove window.
+static bool s_showEnvironment = false;
+
 // (Level Script + Game Instance open as editor tabs, not toggled windows.)
 
 // Build > Export Project modal state. Editable fields mirror the selected
@@ -1192,6 +1195,87 @@ static void DrawFrameDetail(const ProfFrameRecord& f)
 }
 #endif // HE_IMGUI_ENABLED
 
+// View ▸ Environment — add / remove the scene's Sky and Weather entities. The sky and
+// weather *settings* are edited in the Details panel when the "Sky" / "Weather" entity
+// is selected in the Outliner; this window only manages their presence (and offers a
+// shortcut to select each). Sky = an EnvironmentComponent entity, Weather = a
+// WeatherComponent entity; removing the Sky leaves a flat background.
+static void DrawEnvironmentWindow(AppContext& ctx, bool& open)
+{
+#ifdef HE_IMGUI_ENABLED
+    if (!open) return;
+
+    ImGui::SetNextWindowSize(ImVec2(320, 220), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Environment", &open)) { ImGui::End(); return; }
+
+    if (!ctx.world)
+    {
+        ImGui::TextDisabled("(no world loaded)");
+        ImGui::End();
+        return;
+    }
+    HorizonWorld& world = *ctx.world;
+    auto snapshot = [&]{ if (ctx.undoSys) ctx.undoSys->snapshotNow(); };
+
+    ImGui::TextWrapped("Add or remove the scene's Sky and Weather. Select one to edit "
+                       "its settings in the Details panel.");
+
+    // ── Sky ──────────────────────────────────────────────────────────────────
+    ImGui::SeparatorText("Sky");
+    if (const Entity sky = world.environmentEntity(); sky != entt::null)
+    {
+        ImGui::TextUnformatted("Sky is in the scene.");
+        if (ImGui::Button("Select##sky")) ctx.selectedEntity = sky;
+        ImGui::SameLine();
+        if (ImGui::Button("Remove##sky"))
+        {
+            snapshot();
+            if (ctx.selectedEntity == sky) ctx.selectedEntity = entt::null;
+            world.removeSky();
+        }
+    }
+    else
+    {
+        ImGui::TextDisabled("No sky — the background is flat.");
+        if (ImGui::Button("Add Sky"))
+        {
+            snapshot();
+            ctx.selectedEntity = world.addSky();
+        }
+    }
+
+    // ── Weather ───────────────────────────────────────────────────────────────
+    ImGui::SeparatorText("Weather");
+    if (const Entity weather = world.weatherEntity(); weather != entt::null)
+    {
+        ImGui::TextUnformatted("Weather is in the scene.");
+        if (world.environmentEntity() == entt::null)
+            ImGui::TextDisabled("(needs a Sky to drive — add one above)");
+        if (ImGui::Button("Select##weather")) ctx.selectedEntity = weather;
+        ImGui::SameLine();
+        if (ImGui::Button("Remove##weather"))
+        {
+            snapshot();
+            if (ctx.selectedEntity == weather) ctx.selectedEntity = entt::null;
+            world.removeWeather();
+        }
+    }
+    else
+    {
+        ImGui::TextDisabled("No weather system.");
+        if (ImGui::Button("Add Weather"))
+        {
+            snapshot();
+            ctx.selectedEntity = world.addWeather();
+        }
+    }
+
+    ImGui::End();
+#else
+    (void)ctx; (void)open;
+#endif
+}
+
 static void DrawProfilerWindow(AppContext& ctx, bool& open)
 {
 #ifdef HE_IMGUI_ENABLED
@@ -2063,6 +2147,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 			case MC::Preferences:     s_showPreferences = true;                              break;
 			case MC::ResetLayout:     s_resetLayoutRequested = true;                         break;
 			case MC::ToggleProfiler:  s_showProfiler = !s_showProfiler;                      break;
+			case MC::ToggleEnvironment: s_showEnvironment = !s_showEnvironment;              break;
 			case MC::OpenLevelScript:
 				if (ctx.projectLoaded) openVirtualTab("Level Script", LevelScriptPanel::kTabPath);
 				break;
@@ -2120,6 +2205,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
         if (ImGui::MenuItem("Toggle Fullscreen", "F11")) {}
         if (ImGui::MenuItem("Reset Layout")) { s_resetLayoutRequested = true; }
         if (ImGui::MenuItem("Performance Profiler", nullptr, s_showProfiler)) s_showProfiler = !s_showProfiler;
+        if (ImGui::MenuItem("Environment", nullptr, s_showEnvironment)) s_showEnvironment = !s_showEnvironment;
         if (ImGui::MenuItem("Level Script", nullptr, false, ctx.projectLoaded))
             openVirtualTab("Level Script", LevelScriptPanel::kTabPath);
         if (ImGui::MenuItem("Game Instance", nullptr, false, ctx.projectLoaded))
@@ -4918,6 +5004,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 
     DrawPreferencesWindow(ctx, s_showPreferences);
     DrawProfilerWindow(ctx, s_showProfiler);
+    DrawEnvironmentWindow(ctx, s_showEnvironment);
     // Level Script + Game Instance now render as editor tabs (see the tab dispatch).
 
     //Content Browser
@@ -6204,9 +6291,11 @@ void EditorUI::RenderInspector(AppContext& ctx)
 	}
 	ImGui::Separator();
 
-	// ── Environment (scene-wide sky settings, on the World root entity) ──────
-	// Edited here so it persists with the scene; pushed to the renderer each frame
-	// by EditorApplication::pushEnvironment.
+	// ── Environment / Sky (the "Sky" scene entity's EnvironmentComponent) ────
+	// Shown whenever the selected entity carries an EnvironmentComponent (the Sky
+	// entity). Edited here so it persists with the scene; pushed to the renderer each
+	// frame by EditorApplication::pushEnvironment. Add/remove the Sky entity itself
+	// from the View ▸ Environment window.
 	if (auto* env = registry.try_get<EnvironmentComponent>(entity))
 	{
 		if (ImGui::CollapsingHeader("Environment", ImGuiTreeNodeFlags_DefaultOpen))
@@ -6421,8 +6510,8 @@ void EditorUI::RenderInspector(AppContext& ctx)
 		ImGui::Separator();
 	}
 
-	// ── Weather (scene-wide; drives the sky's clouds / fog / wind) ──────────
-	if (registry.all_of<EnvironmentComponent>(entity))
+	// ── Weather (its own "Weather" scene entity; drives the Sky's clouds/fog/wind) ──
+	if (registry.all_of<WeatherComponent>(entity))
 	{
 		if (auto* w = registry.try_get<WeatherComponent>(entity))
 		{
