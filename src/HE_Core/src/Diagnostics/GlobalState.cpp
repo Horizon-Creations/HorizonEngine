@@ -155,13 +155,39 @@ bool GlobalState::writeConfig()
 	}
 	j["CustomConfig"] = customEntries;
 
-	std::ofstream configFile("config.json");
-	if (!configFile.is_open())
+	// Write temp + atomic rename. A plain in-place ofstream truncates the only copy
+	// before the new content is durable, so a crash or kill mid-write (e.g. an abort
+	// during shutdown) leaves a half-written config that then crash-loops the next
+	// startup. rename() swaps atomically on POSIX and the old config stays intact on
+	// any failure. (Same pattern as ProjectManager::saveProject.)
+	const std::string tmp = "config.json.tmp";
 	{
-		Logger::Log(Logger::LogLevel::Error, "Failed to open config file.");
+		std::ofstream out(tmp, std::ios::trunc);
+		if (!out.is_open())
+		{
+			Logger::Log(Logger::LogLevel::Error, "Failed to open config file for writing.");
+			return false;
+		}
+		out << j.dump(4);
+		out.flush();
+		if (!out.good())
+		{
+			out.close();
+			std::error_code ec;
+			fs::remove(tmp, ec);
+			Logger::Log(Logger::LogLevel::Error, "Failed to write config file.");
+			return false;
+		}
 	}
-	configFile << j.dump(4);
-	configFile.close();
+	std::error_code ec;
+	fs::rename(tmp, "config.json", ec);
+	if (ec)
+	{
+		std::error_code ec2;
+		fs::remove(tmp, ec2);
+		Logger::Log(Logger::LogLevel::Error, "Failed to commit config file.");
+		return false;
+	}
 	return true;
 }
 
