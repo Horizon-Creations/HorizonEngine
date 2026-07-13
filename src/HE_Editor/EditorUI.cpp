@@ -1,6 +1,7 @@
 #include "EditorUI.h"
 #include "EditorApplication.h"
 #include "ScriptEditorPanel.h"
+#include "CppClassEditorPanel.h"
 #include "MaterialEditorPanel.h"
 #include "UIEditorPanel.h"
 #include "LevelScriptPanel.h"
@@ -1032,6 +1033,7 @@ void EditorUI::render(AppContext& ctx, float dt)
             if (ctx.contentRefreshPending)
             {
                 ctx.globalState->refreshContentFolder();
+                ctx.globalState->refreshSourceFolder();
                 if (ctx.contentManager)
                     ctx.globalState->refreshEngineFolder(ctx.contentManager->engineContentRoot(),
                                                           ctx.contentManager->contentRoot());
@@ -1058,6 +1060,7 @@ void EditorUI::render(AppContext& ctx, float dt)
     if (s_quietContentRefresh && ctx.globalState)
     {
         ctx.globalState->refreshContentFolder();
+        ctx.globalState->refreshSourceFolder();
         if (ctx.contentManager)
             ctx.globalState->refreshEngineFolder(ctx.contentManager->engineContentRoot(),
                                                   ctx.contentManager->contentRoot());
@@ -3461,11 +3464,13 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
             auto forgetTabState = [](const AppContext::EditorTab& t){
                 if (t.assetPath.empty()) return;
                 if (ScriptEditorPanel::isDirty(t.assetPath)   ||
+                    CppClassEditorPanel::isDirty(t.assetPath) ||
                     MaterialEditorPanel::isDirty(t.assetPath) ||
                     UIEditorPanel::isDirty(t.assetPath)       ||
                     HorizonCodeClassPanel::isDirty(t.assetPath) ||
                     InputAssetPanel::isDirty(t.assetPath)) return;
                 ScriptEditorPanel::forget(t.assetPath);
+                CppClassEditorPanel::forget(t.assetPath);
                 MaterialEditorPanel::forget(t.assetPath);
                 UIEditorPanel::forget(t.assetPath);
                 HorizonCodeClassPanel::forget(t.assetPath);
@@ -3489,6 +3494,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                 // label never changes the tab's identity — which would reset its state.
                 const bool tabDirty = !tab.assetPath.empty() &&
                     (ScriptEditorPanel::isDirty(tab.assetPath) ||
+                     CppClassEditorPanel::isDirty(tab.assetPath) ||
                      MaterialEditorPanel::isDirty(tab.assetPath) ||
                      UIEditorPanel::isDirty(tab.assetPath) ||
                      HorizonCodeClassPanel::isDirty(tab.assetPath) ||
@@ -3570,6 +3576,10 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
             ParticleGraphEditorPanel::render(ctx, tabPath, tabPos, tabSize);
         else if (AnimatorStateMachineEditorPanel::isAnimatorStateMachineAsset(tabPath))
             AnimatorStateMachineEditorPanel::render(ctx, tabPath, tabPos, tabSize);
+        // C++ source/header (raw files, extension-based) → h/cpp class viewer. Must
+        // come before the ScriptEditorPanel fallthrough, which assumes an HAsset.
+        else if (CppClassEditorPanel::isCppSourceAsset(tabPath))
+            CppClassEditorPanel::render(ctx, tabPath, tabPos, tabSize);
         else
             ScriptEditorPanel::render(ctx, tabPath, tabPos, tabSize);
         return;
@@ -4913,6 +4923,11 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
     //Content Browser
 	auto [contentFolder, contentLock] = ctx.globalState->lockContentFolder();
 	auto [engineFolder, engineLock]   = ctx.globalState->lockEngineFolder();
+	auto [sourceFolder, sourceLock]   = ctx.globalState->lockSourceFolder();
+	// Only C++ projects author gameplay as native source, so only they show the
+	// Source root (its .h/.cpp classes + the h/cpp viewer).
+	const bool cbShowSource = ctx.projectManager &&
+		ctx.projectManager->currentProject().scriptLanguage == ProjectScriptLanguage::Cpp;
     if (ctx.fontHeading) ImGui::PushFont(ctx.fontHeading);
     ImGui::Begin("Content Browser", nullptr, ImGuiWindowFlags_NoTitleBar);
     if (ctx.fontHeading) ImGui::PopFont();
@@ -4937,11 +4952,17 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 
 		// ── Tree: single-click = expand/collapse, double-click = navigate ──
 		static const Folder* s_selectedTreeFolder = nullptr;
-		// Which root s_selectedTreeFolder/s_gridFolder belongs to. Needed because
-		// nullptr used to unambiguously mean "the Content root" — now two roots
-		// exist, so nullptr is ambiguous and every place that treats it as a
-		// root sentinel must also check this tag.
-		static bool s_selectedIsEngine = false;
+		// Which root s_selectedTreeFolder/s_gridFolder belongs to: 0=Content,
+		// 1=Engine, 2=Source. Needed because nullptr used to unambiguously mean
+		// "the Content root" — three roots now exist, so nullptr is ambiguous and
+		// every place that treats it as a root sentinel must also check this tag.
+		static int s_selectedRootKind = 0;
+		// The Folder backing each root kind (structured-binding refs captured above).
+		auto cbRootFolder = [&](int kind) -> const Folder&
+		{ return kind == 1 ? engineFolder : kind == 2 ? sourceFolder : contentFolder; };
+		// If the Source root is hidden (non-C++ project) but was last selected,
+		// fall back to Content so the grid never shows a stale/empty Source view.
+		if (s_selectedRootKind == 2 && !cbShowSource) { s_selectedRootKind = 0; s_selectedTreeFolder = nullptr; }
 
 		// Drag-to-move: an asset dragged from the grid ("HE_ASSET_PATH") and
 		// dropped onto a folder — a grid folder item or a tree node — records
@@ -4961,7 +4982,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 			ImGui::EndDragDropTarget();
 		};
 
-		std::function<void(const Folder*, int, bool)> renderTree = [&](const Folder* folder, int depth, bool isEngine)
+		std::function<void(const Folder*, int, int)> renderTree = [&](const Folder* folder, int depth, int rootKind)
 		{
 			ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow
 									 | ImGuiTreeNodeFlags_SpanAvailWidth;
@@ -4978,13 +4999,13 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 			if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
 			{
 				s_selectedTreeFolder = folder;
-				s_selectedIsEngine   = isEngine;
+				s_selectedRootKind   = rootKind;
 			}
 
 			if (open)
 			{
 				for (auto* sub : folder->subfolders)
-					renderTree(sub, depth + 1, isEngine);
+					renderTree(sub, depth + 1, rootKind);
 				ImGui::TreePop();
 			}
 			ImGui::PopID();
@@ -5000,12 +5021,12 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 			if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
 			{
 				s_selectedTreeFolder = nullptr; // back to root
-				s_selectedIsEngine   = false;
+				s_selectedRootKind   = 0;
 			}
 			if (rootOpen)
 			{
 				for (auto* sub : contentFolder.subfolders)
-					renderTree(sub, 1, false);
+					renderTree(sub, 1, 0);
 				ImGui::TreePop();
 			}
 		}
@@ -5021,12 +5042,33 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 			if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
 			{
 				s_selectedTreeFolder = nullptr; // back to engine root
-				s_selectedIsEngine   = true;
+				s_selectedRootKind   = 1;
 			}
 			if (rootOpen)
 			{
 				for (auto* sub : engineFolder.subfolders)
-					renderTree(sub, 1, true);
+					renderTree(sub, 1, 1);
+				ImGui::TreePop();
+			}
+		}
+
+		// Root "Source" node — the C++ project's native gameplay tree (<root>/Source),
+		// sibling of Content. Only shown for C++ projects. Same tree machinery; the
+		// grid groups each class's .h/.cpp into one item (see the file loop).
+		if (cbShowSource)
+		{
+			ImGuiTreeNodeFlags rootFlags = ImGuiTreeNodeFlags_OpenOnArrow
+										 | ImGuiTreeNodeFlags_SpanAvailWidth;
+			bool rootOpen = ImGui::TreeNodeEx("Source", rootFlags);
+			if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+			{
+				s_selectedTreeFolder = nullptr; // back to source root
+				s_selectedRootKind   = 2;
+			}
+			if (rootOpen)
+			{
+				for (auto* sub : sourceFolder.subfolders)
+					renderTree(sub, 1, 2);
 				ImGui::TreePop();
 			}
 		}
@@ -5069,15 +5111,20 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 		// fullPath, so there is no ambiguity in picking one.
 		static uint64_t    s_treeVersionSeen   = ~0ull;
 		static uint64_t    s_engineVersionSeen = ~0ull;
+		static uint64_t    s_sourceVersionSeen = ~0ull;
 		static std::string s_gridFolderPath;
 		const uint64_t treeVersion =
 			ctx.globalState ? ctx.globalState->contentFolderVersion.load(std::memory_order_acquire) : 0;
 		const uint64_t engineVersion =
 			ctx.globalState ? ctx.globalState->engineFolderVersion.load(std::memory_order_acquire) : 0;
-		if (treeVersion != s_treeVersionSeen || engineVersion != s_engineVersionSeen)
+		const uint64_t sourceVersion =
+			ctx.globalState ? ctx.globalState->sourceFolderVersion.load(std::memory_order_acquire) : 0;
+		if (treeVersion != s_treeVersionSeen || engineVersion != s_engineVersionSeen ||
+		    sourceVersion != s_sourceVersionSeen)
 		{
 			s_treeVersionSeen   = treeVersion;
 			s_engineVersionSeen = engineVersion;
+			s_sourceVersionSeen = sourceVersion;
 			const Folder* fresh = nullptr;
 			if (!s_gridFolderPath.empty())
 			{
@@ -5089,7 +5136,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 						if (const Folder* hit = findByPath(sub)) return hit;
 					return nullptr;
 				};
-				const Folder& searchRoot = s_selectedIsEngine ? engineFolder : contentFolder;
+				const Folder& searchRoot = cbRootFolder(s_selectedRootKind);
 				fresh = findByPath(&searchRoot);
 				if (fresh == &searchRoot) fresh = nullptr; // root is the null state
 			}
@@ -5101,7 +5148,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 		if (s_selectedTreeFolder != s_gridFolder)
 			s_gridFolder = s_selectedTreeFolder;
 
-		const Folder* displayFolder = s_gridFolder ? s_gridFolder : (s_selectedIsEngine ? &engineFolder : &contentFolder);
+		const Folder* displayFolder = s_gridFolder ? s_gridFolder : &cbRootFolder(s_selectedRootKind);
 		s_gridFolderPath = s_gridFolder ? s_gridFolder->fullPath : std::string{};
 
 		// ── Breadcrumb ────────────────────────────────────────────────────
@@ -5131,10 +5178,13 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 					}
 					return false;
 				};
-				findPath(s_selectedIsEngine ? &engineFolder : &contentFolder);
+				findPath(&cbRootFolder(s_selectedRootKind));
 			}
 
-			if (ImGui::SmallButton(s_selectedIsEngine ? "Engine##bc_root" : "Content##bc_root"))
+			const char* rootBtnLabel = s_selectedRootKind == 1 ? "Engine##bc_root"
+			                         : s_selectedRootKind == 2 ? "Source##bc_root"
+			                         : "Content##bc_root";
+			if (ImGui::SmallButton(rootBtnLabel))
 			{
 				s_gridFolder         = nullptr;
 				s_selectedTreeFolder = nullptr;
@@ -5188,6 +5238,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 			if (e == ".svg" || e == ".ai")                     return ctx.cbIcons.model2d;
 			if (e == ".cs"  || e == ".lua" || e == ".py"
 				|| e == ".js")                                  return ctx.cbIcons.script;
+			if (e == ".h"   || e == ".hpp" || e == ".hh" || e == ".hxx"
+				|| e == ".cpp" || e == ".cc" || e == ".cxx" || e == ".c") return ctx.cbIcons.script;
 			if (e == ".wav" || e == ".mp3" || e == ".ogg"
 				|| e == ".flac")                                return ctx.cbIcons.sound;
 			if (e == ".png" || e == ".jpg" || e == ".jpeg"
@@ -5312,7 +5364,31 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 		}
 
 		// ── Files ─────────────────────────────────────────────────────────
-		for (auto* file : displayFolder->files)
+		// In the Source root a class's header and .cpp are ONE item: drop a .cpp
+		// when a same-stem header sits in the same folder, so the header stands in
+		// for the pair (double-click opens both in the C++ viewer). Lone .cpp files
+		// (e.g. GameLogic.cpp) and non-C++ files pass through unchanged.
+		auto cbLowerExt = [](const std::string& e){ std::string s=e; for(auto&c:s) c=(char)::tolower((unsigned char)c); return s; };
+		auto cbIsHeaderExt = [&](const std::string& e){ std::string s=cbLowerExt(e); return s==".h"||s==".hpp"||s==".hh"||s==".hxx"; };
+		auto cbIsSourceExt = [&](const std::string& e){ std::string s=cbLowerExt(e); return s==".cpp"||s==".cc"||s==".cxx"||s==".c"; };
+		std::vector<const File*> gridFiles;
+		gridFiles.reserve(displayFolder->files.size());
+		for (auto* f : displayFolder->files)
+		{
+			if (s_selectedRootKind == 2 && cbIsSourceExt(f->extension))
+			{
+				const std::string stem = std::filesystem::path(f->name).stem().string();
+				bool headerSibling = false;
+				for (auto* g : displayFolder->files)
+					if (cbIsHeaderExt(g->extension) &&
+					    std::filesystem::path(g->name).stem().string() == stem)
+					{ headerSibling = true; break; }
+				if (headerSibling) continue; // collapsed into its header item
+			}
+			gridFiles.push_back(f);
+		}
+
+		for (auto* file : gridFiles)
 		{
 			if (col > 0 && col < columns) ImGui::SameLine();
 			if (col >= columns) col = 0;
@@ -5362,8 +5438,10 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 			ImGui::PopStyleColor(3);
 
 			// Drag source — carries the asset's absolute path so drop targets
-			// (e.g. the Material slot in the inspector) can load it.
-			if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_None))
+			// (e.g. the Material slot in the inspector) can load it. Disabled in the
+			// Source root: a class item stands for a .h/.cpp pair, and moving just
+			// the one file would orphan its sibling.
+			if (s_selectedRootKind != 2 && ImGui::BeginDragDropSource(ImGuiDragDropFlags_None))
 			{
 				ImGui::SetDragDropPayload("HE_ASSET_PATH",
 					file->fullPath.c_str(), file->fullPath.size() + 1);
@@ -5387,7 +5465,12 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				}
 				// Script assets open the code editor tab, material assets the node-graph
 				// editor tab. Other asset types have no dedicated editor yet → no-op.
-				else if (ScriptEditorPanel::isScriptAsset(file->fullPath) ||
+				// C++ source/header (Source root) opens the h/cpp class viewer; the
+				// grid item's path is the class's canonical file (its header when the
+				// pair has one). The predicate is a raw extension check, not an HAsset
+				// sniff, so it must be tested explicitly here.
+				else if (CppClassEditorPanel::isCppSourceAsset(file->fullPath) ||
+				         ScriptEditorPanel::isScriptAsset(file->fullPath) ||
 				         MaterialEditorPanel::isMaterialAsset(file->fullPath) ||
 				         MaterialEditorPanel::isMaterialFunctionAsset(file->fullPath) ||
 				         UIEditorPanel::isWidgetAsset(file->fullPath) ||
@@ -5708,8 +5791,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				    ImGui::MenuItem("Import"))
 				{
 					// The item being imported lives in whichever root is currently
-					// browsed (s_selectedIsEngine) — NOT always Content.
-					const std::filesystem::path root = s_selectedIsEngine ? engineFolder.fullPath : contentFolder.fullPath;
+					// browsed (s_selectedRootKind) — NOT always Content.
+					const std::filesystem::path root = cbRootFolder(s_selectedRootKind).fullPath;
 					std::error_code ec;
 					std::filesystem::path relDir =
 						std::filesystem::relative(srcPath.parent_path(), root, ec);
@@ -5792,7 +5875,10 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				}
 			}
 
-			if (!engineLocked && ImGui::MenuItem("Rename"))
+			// In the Source root a C++ class is a .h/.cpp pair; renaming it means
+			// renaming both files AND rewriting the class name/registration inside —
+			// a refactor best left to the user's C++ toolchain, so Rename is hidden.
+			if (!engineLocked && s_selectedRootKind != 2 && ImGui::MenuItem("Rename"))
 			{
 				s_renameTarget   = s_ctxMenuItem;
 				s_renameIsFolder = s_ctxMenuIsFolder;
@@ -5807,6 +5893,18 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 			{
 				std::error_code ec;
 				std::filesystem::remove(s_ctxMenuItem, ec);
+				// In the Source root, delete BOTH halves of the class's .h/.cpp pair.
+				if (s_selectedRootKind == 2)
+				{
+					const std::filesystem::path p(s_ctxMenuItem);
+					const std::string stem = p.stem().string();
+					const std::filesystem::path dir = p.parent_path();
+					for (const char* e : { ".h", ".hpp", ".hh", ".hxx", ".cpp", ".cc", ".cxx", ".c" })
+					{
+						std::filesystem::path sib = dir / (stem + e);
+						if (sib != p) { std::error_code e2; std::filesystem::remove(sib, e2); }
+					}
+				}
 				if (s_selectedItem == s_ctxMenuItem)
 					s_selectedItem.clear();
 				s_ctxMenuItem.clear();
@@ -5814,7 +5912,10 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				ImGui::CloseCurrentPopup();
 			}
 
-			if (!engineLocked)
+			// The asset-create submenu makes no sense in the Source root (it would
+			// write .hasset files there) — the background right-click there offers
+			// "C++ Class" instead.
+			if (!engineLocked && s_selectedRootKind != 2)
 			{
 				ImGui::Separator();
 				if (ImGui::BeginMenu("Create Asset"))
@@ -5990,11 +6091,26 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 			// lifts this for engine-authoring builds.) Editing an existing
 			// default and hitting Save is what creates a project override —
 			// see ContentManager::saveAsset's redirect, not this menu.
-			if (s_selectedIsEngine && !ContentManager::isEngineContentDevMode())
+			if (s_selectedRootKind == 1 && !ContentManager::isEngineContentDevMode())
 			{
 				ImGui::TextDisabled("Engine default assets are read-only here.");
 				ImGui::TextDisabled("Open one in its editor tab and Save to");
 				ImGui::TextDisabled("create a project-local override instead.");
+			}
+			else if (s_selectedRootKind == 2)
+			{
+				// Source root holds native C++ files, not engine assets — offer only
+				// "C++ Class" (writes to this project's Source/). The .hasset list
+				// would create engine assets under Source/, which doesn't belong here.
+				ImGui::TextDisabled("Create C++");
+				ImGui::Separator();
+				if (ImGui::MenuItem("C++ Class"))
+				{
+					std::strncpy(s_cppClassName, "GameplayClass", sizeof(s_cppClassName) - 1);
+					s_cppClassName[sizeof(s_cppClassName) - 1] = '\0';
+					s_openCppClassPopup = true;
+					ImGui::CloseCurrentPopup();
+				}
 			}
 			else
 			{

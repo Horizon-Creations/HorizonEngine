@@ -841,8 +841,11 @@ void EditorApplication::OnInit()
 			// Re-merge the Engine tree against THIS project's overrides (a
 			// different project may have different Content/Engine/... files).
 			if (m_globalState)
+			{
 				m_globalState->refreshEngineFolder(contentManager().engineContentRoot(),
 				                                    contentManager().contentRoot());
+				m_globalState->refreshSourceFolder(); // C++ Source/ tree (empty for non-C++)
+			}
 			// Index every .hasset's (UUID → path) so scene component references
 			// (mesh/material UUIDs) resolve after a reload without a bulk preload.
 			const size_t indexed = contentManager().scanContentDirectory();
@@ -1079,6 +1082,7 @@ void EditorApplication::OnRender(float dt)
 				m_contentRefreshFuture = std::async(std::launch::async, [gs, engineContentPath, projectContentRoot]()
 				{
 					gs->refreshContentFolder();
+					gs->refreshSourceFolder();
 					if (!engineContentPath.empty()) gs->refreshEngineFolder(engineContentPath, projectContentRoot);
 				});
 			}
