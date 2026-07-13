@@ -2261,3 +2261,79 @@ oben):**
 5. Linux-Window/Input-Pfad (6.6) — noch 0 Engine-Code.
 6. Kleinere Posten: HorizonCode-Codegen-WP7, Editor-Property-Preview für Python, Script-API-
    Referenz (`horizon.*`) auf der Docs-Site vervollständigen, PlayerHost-Host-Wiring testen.
+
+## Forts. 69 — Editor-Tabs für Animation/Skeletal Meshes/NavMesh/Partikel + Partikel-Shader-Baking (13.07.2026)
+
+Vier zuvor Inspector-only-Bereiche bekommen dasselbe Niveau wie Material/HorizonCode
+(dedizierte Content-Browser-Tabs mit Live-Preview statt flacher Slider-Panels):
+
+- **NavMesh-Debug-Overlay** (`978b241`): `NavigationSystem::extractNavMeshWireframe` liest
+  `dtNavMesh`-Tiles/Polygone direkt aus und zeichnet sie über die bestehende
+  `DebugDrawBuffer`-Pipeline; Toggle im Inspector neben dem Bake-Button.
+- **Skeletal-Mesh-Editor-Tab** (`a26b1f9`): Bone-Baum (`ImGui::TreeNode` über Parent-Indizes)
+  + Live-Preview via neuem `IRenderer::RenderSkeletalPreview` (GL+Metal, eigenes Offscreen-
+  Target, minimales Fixed-Sun-Lighting) + Bone-Overlay (Gelenk-Weltmatrizen aus
+  `composeBoneMatrices`s FK-Zwischenschritt, als Kreuze+Linien gezeichnet) + Clip-Scrubbing.
+- **Partikel-System als vollwertiger Asset-Typ** (`1dd39cc`, User-Korrektur gegenüber dem
+  ursprünglichen Plan „nur Inspector-Feature"): neues `HE::ParticleGraph`-Modul (HE_Core,
+  UI-frei) — Emitter-Output-Sink-Node + Const/RandomRange/Add/Multiply/Lerp, `evaluate()` zu
+  `ParticleEmitterConfig` (spiegelt die alten Inline-Felder 1:1). `ParticleGraphEditorPanel`
+  auf der gemeinsamen `GraphEditor`-Canvas + `IRenderer::RenderParticlePreview` (GL+Metal,
+  Billboard-Instancing via `gl_VertexID`/SSBO-Index). Alte Szenen migrieren verlustfrei: die
+  Inline-Felder landen in `ParticleSystemComponent::LegacyConfig` (vom Serializer befüllt, der
+  keinen ContentManager-Zugriff hat) und werden von `ParticleSystem::update` beim ersten Tick
+  in ein Einweg-Asset umgewandelt.
+- **Physik-Kollision** (`61d56e6`): `ParticleEmitterConfig::collisionEnabled/restitution/
+  killOnCollision` — `ParticleSystem::stepPool` raycastet bei Aktivierung pro Partikel/Schritt
+  entlang des Geschwindigkeitsvektors (`PhysicsWorld::raycast`, Forts. 41, unverändert
+  wiederverwendet) und killt oder reflektiert (`glm::reflect` × Restitution). Kein neuer
+  Physik-Code.
+
+**Instance-Tint-Mechanismus** (`61d56e6`): beim Bauen fiel auf, dass Partikel-Farbe/Alpha-über-
+Lebenszeit zwar in der Editor-Preview korrekt berechnet wurde, aber nie im echten Spiel-
+Renderer ankam — die GL/Metal-Opaque-Loops lasen `baseColor`/`opacity` ausschließlich aus dem
+zugewiesenen Material, nie aus einem Per-Instance-Override. Der User entschied sich (statt
+Zurückstellen oder Minimal-Variante) für den vollen Mechanismus: `RenderObject`/
+`DrawCall::instanceTint` (rgb multipliziert baseColor, a multipliziert opacity, Identity =
+No-op), `GeometryPass` batcht nur noch Läufe mit identischem Tint. Dieser Pfad wurde einen
+Commit später für Partikel bereits wieder abgelöst (siehe unten) — bleibt aber als generischer,
+getesteter Mechanismus für künftige Per-Instance-Varianz-Bedürfnisse stehen.
+
+**Partikel-Export-Shader-Baking** (`05eec9d`…`02fefe4`, User-Ergänzung „so nativ wie möglich"):
+- `HE::generateParticleShaderSource(config, metalSyntax)` bäckt die vier bereits aufgelösten
+  Start/End-Color/Alpha-Werte als GLSL/MSL-Literale in zwei kleine `heParticleColor(t01)`/
+  `heParticleAlpha(t01)`-Funktionen — bewusst **kein** Re-Evaluate des Graphen (eine
+  RandomRange-gespeiste Farbe würde sonst mit einem anderen RNG-Stand vom bereits simulierten
+  `ps.resolvedConfig` abweichen).
+- `ParticleGraphAsset::precompiledShaders` (`ParticleShaderVariant`, `CHUNK_PPSD` — gleiches
+  Wire-Format wie Materials `CHUNK_PSHD`, aber ohne Cross-Compile-Schritt: die Shader sind
+  Hand-Templates (`HorizonRendering::ParticleShaderTemplates`, header-only, da die Backends nur
+  HE_Rendering' Include-Pfad mitnutzen statt die Shared Library zu linken), keine beliebige
+  Node-Graph-GLSL wie bei Material.
+- **Echter GPU-instanced Zeichenpfad** (löst den Instance-Tint-Pfad für Partikel ab):
+  `RenderWorld::particleBatches` trägt jetzt rohe Pro-Partikel-Daten (Position/Größe/t01) statt
+  vorinterpolierter Farbe; `RenderExtractor` füllt einen Batch pro Emitter statt eines
+  `RenderObject` pro Partikel. `OpenGLRenderer::DrawParticleGraphBatches`/
+  `MetalRenderer::DrawParticleGraphBatches` ziehen daraus **einen** `glDrawArraysInstanced`/
+  `drawPrimitives(instanceCount:)`-Call pro Emitter (vorher: ein Draw Call pro Partikel).
+  `getOrBuildParticleProgram`/`GetOrBuildParticlePipeline` bevorzugen eine vorgebackene
+  Variante (`CHUNK_PPSD`), sonst wird on-demand generiert + Hash-gecacht (Schema wie
+  `WarmupMaterials`/`getOrBuildMaterialProgram`, aber ohne Shaderc-Abhängigkeit).
+- **Export-Wiring**: `Hpak::PackSettings::compileParticleShaderVariants` (neuer Callback,
+  analog zu `compileShaderVariants`), `HpakWriter::rewriteRefsForPack` bäckt `CHUNK_PPSD` beim
+  Packen (braucht anders als Material **kein** Pfad→UUID-Rewriting — `ParticleGraph`s Mesh-/
+  Material-Referenzen sind schon UUIDs im JSON), `ProjectExporter` reicht es durch,
+  `EditorUI::CompileParticleShaderVariants` ist die tatsächliche Editor-Implementierung
+  (nutzt denselben Backend-Auswahl-Checkbox wie Material-Baking).
+- Weather-Niederschlag (Regen/Schnee) bleibt unverändert auf dem alten `RenderObject`-
+  Billboard-Pfad — nur `ParticleSystemComponent`-Partikel (Kamera-Billboards) wechseln.
+
+**Tests:** 781 grün (von 773 zu Sessionbeginn) — NavMesh-Wireframe-Extraktion,
+`generateParticleShaderSource`-Formatierung (GLSL vs. MSL, Reinheit), `CHUNK_PPSD`-Encode/
+Decode-Roundtrip, `GeometryPass`-Batching-Guard für `instanceTint`, `RenderExtractor`→
+`particleBatches`-Extraktion, Kollisions-Physik (Kill/Bounce/Restitution deterministisch).
+
+**Reale Verifikation offen** (wie bei jedem GraphEditor/Preview/Rendering-Feature zuvor — kein
+Display in dieser Sandbox): Bone-Overlay-Korrektheit, Partikel-Preview-Optik, das neue
+GPU-instanced Draw tatsächlich auf Bildschirm, NavMesh-Wireframe-Lage. D3D/Vulkan haben wie
+immer noch keine Partikel-Graph-Rendering-Anbindung (GL+Metal-first-Konvention).
