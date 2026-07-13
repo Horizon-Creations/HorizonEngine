@@ -31,6 +31,7 @@
 #include <Types/Enums.h>
 #include <HorizonRendering/RenderExtractor.h>
 #include <HorizonRendering/RenderWorld.h>
+#include <HorizonRendering/ParticleShaderTemplates.h>
 #include <Math/AABB.h>
 #include <glm/gtc/type_ptr.hpp>
 #include "MeshImporter.h"
@@ -354,6 +355,49 @@ static std::vector<uint8_t> CompileMaterialShaderVariants(const std::string& fra
 
 	if (variants.empty()) return {};
 	return HE::encodeMaterialShaderVariants(variants);
+}
+
+// Particle-system analogue of CompileMaterialShaderVariants above — but needs no
+// shader cross-compiler at all: HE::generateParticleShaderSource hand-templates
+// GLSL/MSL directly (see HorizonRendering::ParticleShaderTemplates), so this is
+// pure text formatting. Only OpenGL/Metal are ever produced (GL+Metal-first, same
+// as the rest of the particle system); other requested bits are silently skipped —
+// the shipped game falls back to on-demand-compiling the same templates at
+// runtime for those backends (HE_Rendering's getOrBuildParticleProgram).
+static std::vector<uint8_t> CompileParticleShaderVariants(const std::string& nodeGraphJson, uint32_t backends)
+{
+	if (nodeGraphJson.empty() || backends == 0) return {};
+
+	HE::ParticleGraph graph;
+	if (!HE::particleGraphFromJson(nodeGraphJson, graph)) return {};
+	// Deterministic seed so a RandomRange-driven Start/End Color bakes the SAME
+	// value on every export — reproducible builds, matching how ParticleSystem-
+	// Component seeds its own simulation rng ({42}) by default.
+	std::mt19937 rng{ 42 };
+	const HE::ParticleEmitterConfig config = HE::evaluateParticleGraph(graph, rng);
+
+	std::vector<ParticleShaderVariant> variants;
+	if (backends & (1u << static_cast<uint8_t>(HE::RendererBackend::OpenGL)))
+	{
+		const HE::ParticleShaderGen gen = HE::generateParticleShaderSource(config, /*metalSyntax*/false);
+		ParticleShaderVariant var;
+		var.backend  = static_cast<uint8_t>(HE::RendererBackend::OpenGL);
+		var.vertex   = HE::buildParticleVertexGLSL(gen.colorFn, gen.alphaFn);
+		var.fragment = HE::buildParticleFragmentGLSL();
+		variants.push_back(std::move(var));
+	}
+	if (backends & (1u << static_cast<uint8_t>(HE::RendererBackend::Metal)))
+	{
+		const HE::ParticleShaderGen gen = HE::generateParticleShaderSource(config, /*metalSyntax*/true);
+		ParticleShaderVariant var;
+		var.backend  = static_cast<uint8_t>(HE::RendererBackend::Metal);
+		var.vertex   = HE::buildParticleVertexMSL(gen.colorFn, gen.alphaFn);
+		var.fragment = HE::buildParticleFragmentMSL();
+		variants.push_back(std::move(var));
+	}
+
+	if (variants.empty()) return {};
+	return HE::encodeParticleShaderVariants(variants);
 }
 
 // Fill the export dialog fields from a profile. An empty profile outputDir
@@ -2458,6 +2502,10 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                 // selected backends (0 → runtime cross-compiles as before).
                 es.shaderBackends        = s_exportShaderBackends;
                 es.compileShaderVariants = &CompileMaterialShaderVariants;
+                // Same bitmask + toggle UI as materials — particles only ever bake
+                // OpenGL/Metal variants (see CompileParticleShaderVariants), so
+                // selecting D3D/Vulkan here has no effect on particles.
+                es.compileParticleShaderVariants = &CompileParticleShaderVariants;
                 // Worker → UI progress: atomics + a mutex-guarded filename.
                 es.progress = [](int done, int total, const std::string& current)
                 {
