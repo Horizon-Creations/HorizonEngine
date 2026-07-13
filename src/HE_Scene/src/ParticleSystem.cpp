@@ -1,10 +1,12 @@
 #include <HorizonScene/ParticleSystem.h>
 #include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/PhysicsWorld.h>
 #include <HorizonScene/Components/ParticleSystemComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <glm/gtc/constants.hpp>
+#include <glm/geometric.hpp>
 #include <algorithm>
 #include <cmath>
 
@@ -82,16 +84,40 @@ void resolveConfigIfNeeded(ParticleSystemComponent& ps, ContentManager& cm)
 void ParticleSystem::markConfigDirty(ParticleSystemComponent& ps) { ps.configDirty = true; }
 
 bool ParticleSystem::stepPool(std::vector<Particle>& particles, float& emitAccumulator, std::mt19937& rng,
-                              const HE::ParticleEmitterConfig& config, const glm::vec3& emitterPos, float dt)
+                              const HE::ParticleEmitterConfig& config, const glm::vec3& emitterPos, float dt,
+                              const PhysicsWorld* physics)
 {
     // Integrate existing particles.
     const glm::vec3 gravity(config.gravity[0], config.gravity[1], config.gravity[2]);
+    const bool collide = physics && config.collisionEnabled;
     for (Particle& p : particles)
     {
         p.lifetime -= dt;
         if (p.lifetime <= 0.0f) continue;
-        p.velocity  += gravity * dt;
-        p.position  += p.velocity * dt;
+        p.velocity += gravity * dt;
+
+        const glm::vec3 oldPos = p.position;
+        glm::vec3       newPos = oldPos + p.velocity * dt;
+
+        if (collide)
+        {
+            const glm::vec3 delta = newPos - oldPos;
+            const float     dist  = glm::length(delta);
+            if (dist > 1e-6f)
+            {
+                const PhysicsWorld::RaycastHit hit = physics->raycast(oldPos, delta, dist);
+                if (hit.hit)
+                {
+                    if (config.killOnCollision) { p.lifetime = 0.0f; continue; }
+                    // Reflect the velocity around the surface normal, scaled by
+                    // restitution, and snap to the hit point (nudged along the
+                    // normal) so the particle doesn't tunnel through next step.
+                    p.velocity = glm::reflect(p.velocity, hit.normal) * config.restitution;
+                    newPos     = hit.point + hit.normal * 0.001f;
+                }
+            }
+        }
+        p.position = newPos;
     }
 
     // Remove dead particles (swap with back for O(1) removal).
@@ -152,7 +178,8 @@ bool ParticleSystem::stepPool(std::vector<Particle>& particles, float& emitAccum
     return !config.looping && particles.empty() && emitAccumulator < interval;
 }
 
-void ParticleSystem::update(HorizonWorld& world, ContentManager& cm, float dt, const glm::vec3& cameraPos)
+void ParticleSystem::update(HorizonWorld& world, ContentManager& cm, float dt, const glm::vec3& cameraPos,
+                            const PhysicsWorld* physics)
 {
     (void)cameraPos; // used by camera-following volume emitters (Phase 2)
     auto& reg = world.registry();
@@ -163,7 +190,7 @@ void ParticleSystem::update(HorizonWorld& world, ContentManager& cm, float dt, c
         if (!ps.playing) continue;
 
         const glm::vec3 emitterPos = glm::vec3(tc.worldMatrix[3]);
-        const bool finished = stepPool(ps.particles, ps.emitAccumulator, ps.rng, ps.resolvedConfig, emitterPos, dt);
+        const bool finished = stepPool(ps.particles, ps.emitAccumulator, ps.rng, ps.resolvedConfig, emitterPos, dt, physics);
         if (finished) ps.playing = false;
     }
 }

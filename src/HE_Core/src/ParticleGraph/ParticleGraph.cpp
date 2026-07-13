@@ -18,6 +18,10 @@ const std::vector<ParticleNodeDesc>& registry()
         // Fixed sink — every field a today's ParticleSystemComponent used to hold
         // inline, now resolved from the graph. Mesh/Material are node-body slots
         // (meshAssetId/materialAssetId), not pins — see ParticleGraphNode.
+        // Pins 14-16 (Collision Enabled/Restitution/Kill On Collision) were added
+        // after the first 14 shipped — appended at the END so existing pin
+        // indices (hardcoded in evaluateParticleGraph and the editor's slot UI)
+        // never shift under already-saved graphs.
         { ParticleNodeType::EmitterOutput, "Emitter Output",
           { { "Emit Rate", F::Float, 10.0f }, { "Lifetime Min", F::Float, 1.0f },
             { "Lifetime Max", F::Float, 2.0f }, { "Start Size", F::Float, 0.3f },
@@ -25,7 +29,9 @@ const std::vector<ParticleNodeDesc>& registry()
             { "End Color", F::Vec3, 1.0f }, { "Start Alpha", F::Float, 1.0f },
             { "End Alpha", F::Float, 0.0f }, { "Initial Velocity", F::Vec3, 0.0f },
             { "Velocity Spread", F::Float, 0.5f }, { "Gravity", F::Vec3, 0.0f },
-            { "Max Particles", F::Float, 100.0f }, { "Looping", F::Float, 1.0f } },
+            { "Max Particles", F::Float, 100.0f }, { "Looping", F::Float, 1.0f },
+            { "Collision Enabled", F::Float, 0.0f }, { "Restitution", F::Float, 0.4f },
+            { "Kill On Collision", F::Float, 0.0f } },
           {}, 0 },
 
         { ParticleNodeType::ConstFloat,  "Const Float",  {}, { { "Out", F::Float, 0 } }, 1 },
@@ -319,6 +325,10 @@ ParticleEmitterConfig evaluateParticleGraph(const ParticleGraph& graph, std::mt1
 
     cfg.maxParticles = std::max(0, static_cast<int>(std::lround(evalInputFloat(graph, out->id, 12, rng, 0))));
     cfg.looping      = evalInputFloat(graph, out->id, 13, rng, 0) > 0.5f;
+
+    cfg.collisionEnabled = evalInputFloat(graph, out->id, 14, rng, 0) > 0.5f;
+    cfg.restitution      = evalInputFloat(graph, out->id, 15, rng, 0);
+    cfg.killOnCollision  = evalInputFloat(graph, out->id, 16, rng, 0) > 0.5f;
 
     cfg.meshAssetId     = out->meshAssetId;
     cfg.materialAssetId = out->materialAssetId;

@@ -5746,12 +5746,20 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			if (!cHasMat)
 				baseColor = (tex != 0) ? glm::vec3(1.0f) : glm::vec3(0.55f, 0.55f, 0.55f);
 
+			// Per-instance tint (particle color/alpha-over-life, see
+			// RenderObject::instanceTint) — identity for everything else, so this
+			// is a no-op outside particles. Applied to a per-draw copy, never to
+			// the memoised cBaseColor/cOpacity (those are cached across draws that
+			// share a material and must stay untinted).
+			baseColor *= glm::vec3(dc.instanceTint);
+			const float opacity = cOpacity * dc.instanceTint.a;
+
 			const GpuMesh* drawMesh  = mesh ? mesh : ResolveMesh(HE::kDefaultCubeMeshId);
 			if (!drawMesh) continue;
 			const unsigned int vao        = drawMesh->vao;
 			const int          indexCount = drawMesh->indexCount;
 
-			if (cOpacity < 0.999f)
+			if (opacity < 0.999f)
 			{
 				// Translucent graph materials keep their own program + state in the pass.
 				unsigned int tpProg = 0; std::vector<float> tpParams;
@@ -5789,7 +5797,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				auto pushTP = [&](const glm::mat4& t) {
 					const glm::vec3 d = glm::vec3(t[3]) - camPos;
 					TPDraw tp{ viewProj * t, t, baseColor,
-					           cMetallic, cRoughness, cOpacity, tex, vao, indexCount,
+					           cMetallic, cRoughness, opacity, tex, vao, indexCount,
 					           glm::dot(d, d) };
 					tp.matProg = tpProg;
 					tp.params  = tpParams;
@@ -5855,7 +5863,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					obj.model = dc.transform;
 					obj.color = glm::vec4(baseColor, 1.0f);
 					obj.flags = glm::vec4(tex != 0 ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
-					obj.pbr   = glm::vec4(cMetallic, cRoughness, cOpacity, 0.0f);
+					obj.pbr   = glm::vec4(cMetallic, cRoughness, opacity, 0.0f);
 					glBindBuffer(GL_UNIFORM_BUFFER, m_matObjUBO);
 					glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(obj), &obj);
 					HE::MaterialShaderLibrary::Lighting lit;

@@ -217,6 +217,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 		HE::UUID      matId;
 		uint32_t      entityId;
 		BillboardKind kind;
+		glm::vec4     tint = { 1.0f, 1.0f, 1.0f, 1.0f };  // color/alpha-over-life (Camera kind only)
 	};
 	std::vector<ParticleInput> pin;
 
@@ -233,8 +234,13 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 			const float t01  = 1.0f - p.lifetime / p.maxLifetime;  // 0=born, 1=dead
 			const float size = config.startSize + (config.endSize - config.startSize) * t01;
 			if (size <= 0.0f) continue;
+			glm::vec4 tint;
+			tint.r = config.startColor[0] + (config.endColor[0] - config.startColor[0]) * t01;
+			tint.g = config.startColor[1] + (config.endColor[1] - config.startColor[1]) * t01;
+			tint.b = config.startColor[2] + (config.endColor[2] - config.startColor[2]) * t01;
+			tint.a = config.startAlpha    + (config.endAlpha    - config.startAlpha)    * t01;
 			pin.push_back({ p.position, glm::vec3(0.0f), size, meshId, config.materialAssetId,
-			                static_cast<uint32_t>(e), BillboardKind::Camera });
+			                static_cast<uint32_t>(e), BillboardKind::Camera, tint });
 		}
 	}
 
@@ -265,6 +271,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 			obj.lod             = 0;
 			obj.castsShadow     = false;  // billboards: no shadow / AO contribution
 			obj.contributesAO   = false;
+			obj.instanceTint    = in.tint;
 
 			glm::vec3   look = camPos - in.position;
 			const float d    = glm::length(look);

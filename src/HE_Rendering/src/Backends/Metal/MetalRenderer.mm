@@ -6026,8 +6026,12 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 						cMaterialWpo      = !shVert.empty();
 						cMaterialPipeline = GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre);
 						// Translucent-routed materials additionally need the alpha-blended
-						// pipeline variant for the transparency pass.
-						if (cOpacity < 0.999f && cMaterialPipeline)
+						// pipeline variant for the transparency pass. Built unconditionally
+						// (not gated on this material's own opacity): a per-instance tint
+						// (RenderObject::instanceTint — particle color/alpha-over-life) can
+						// push an otherwise-opaque material's effective alpha below 1 on a
+						// per-draw basis, after this cache-miss-only block has already run.
+						if (cMaterialPipeline)
 							cMaterialPipelineBlend =
 								GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre, /*blend=*/true);
 						if (const MaterialAsset* ma = m_contentManager
@@ -6073,6 +6077,12 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 			glm::vec3 baseColor = cBaseColor;
 			if (!cHasMat)
 				baseColor = effectiveTex ? glm::vec3(1.0f) : glm::vec3(0.55f, 0.55f, 0.55f);
+			// Per-instance tint (particle color/alpha-over-life, see
+			// RenderObject::instanceTint) — identity for everything else, so this is
+			// a no-op outside particles. u/u.pbr are per-draw-call locals (not the
+			// memoised cBaseColor/cOpacity), so mutating them here is safe.
+			baseColor *= glm::vec3(dc.instanceTint);
+			u.pbr.z   *= dc.instanceTint.a;
 			u.color = glm::vec4(baseColor, 1.0f);
 
 			// Draw one instance at its own world transform. GeometryPass batches consecutive
@@ -6086,7 +6096,7 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 				UnlitUniforms ui = u;
 				ui.mvp   = viewProj * xform;
 				ui.model = xform;
-				if (cOpacity < 0.999f)
+				if (ui.pbr.z < 0.999f) // tinted opacity (u.pbr.z), not the raw material cOpacity
 				{
 					const glm::vec3 d = glm::vec3(xform[3]) - camPos;
 					TPDraw t{ ui, (__bridge void*)vertexBuf, (__bridge void*)indexBuf,

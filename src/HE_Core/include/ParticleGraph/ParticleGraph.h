@@ -121,6 +121,14 @@ struct ParticleEmitterConfig
     float gravity[3]     = { 0.0f, -2.0f, 0.0f };
     int   maxParticles   = 100;
     bool  looping        = true;
+
+    // Physics collision (ParticleSystem::stepPool, when given a PhysicsWorld) —
+    // a per-particle raycast along its motion each step; reuses Jolt raycasts
+    // (Forts. 41) verbatim, no new physics code. collisionEnabled gates the
+    // raycast entirely (skipped by default: a cost you don't pay unless asked).
+    bool  collisionEnabled = false;
+    float restitution      = 0.4f;  // bounce speed retained (0..1); ignored if killOnCollision
+    bool  killOnCollision  = false; // true → the particle dies on its first hit instead of bouncing
 };
 
 HE_API ParticleEmitterConfig evaluateParticleGraph(const ParticleGraph& graph, std::mt19937& rng);

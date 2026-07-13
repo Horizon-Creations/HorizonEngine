@@ -27,6 +27,10 @@ struct DrawCall {
     float        metallic      = 0.0f;
     float        roughness     = 0.5f;
     float        opacity       = 1.0f;
+    // Per-instance tint (see RenderObject::instanceTint) — identity = no-op.
+    // Shared across the whole batch when instanceTransforms is non-empty:
+    // GeometryPass only batches runs that share this value.
+    glm::vec4    instanceTint  = { 1.0f, 1.0f, 1.0f, 1.0f };
     // Non-empty when GeometryPass batched multiple same-mesh+same-material objects.
     // The backend uploads these to the instance VBO and calls glDrawElementsInstanced.
     std::vector<glm::mat4> instanceTransforms;
