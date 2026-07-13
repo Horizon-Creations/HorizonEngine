@@ -104,6 +104,7 @@ inline constexpr uint32_t CHUNK_IMAP = makeChunkId('I','M','A','P'); // input ma
 
 // Particle System
 inline constexpr uint32_t CHUNK_PTGR = makeChunkId('P','T','G','R'); // particle emitter node graph (JSON)
+inline constexpr uint32_t CHUNK_PPSD = makeChunkId('P','P','S','D'); // precompiled per-backend particle color/alpha-over-life shaders
 
 // Font
 inline constexpr uint32_t CHUNK_FNTD = makeChunkId('F','N','T','D'); // raw font bytes

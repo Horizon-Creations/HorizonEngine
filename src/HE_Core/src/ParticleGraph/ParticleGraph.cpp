@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 
 namespace HE
 {
@@ -333,6 +334,25 @@ ParticleEmitterConfig evaluateParticleGraph(const ParticleGraph& graph, std::mt1
     cfg.meshAssetId     = out->meshAssetId;
     cfg.materialAssetId = out->materialAssetId;
     return cfg;
+}
+
+// ── Shader baking ─────────────────────────────────────────────────────────────
+
+ParticleShaderGen generateParticleShaderSource(const ParticleEmitterConfig& config, bool metalSyntax)
+{
+    const char* vecType = metalSyntax ? "float3" : "vec3";
+    char buf[512];
+    ParticleShaderGen gen;
+    std::snprintf(buf, sizeof(buf),
+        "%s heParticleColor(float t01) { return mix(%s(%.6f, %.6f, %.6f), %s(%.6f, %.6f, %.6f), clamp(t01, 0.0, 1.0)); }",
+        vecType, vecType, config.startColor[0], config.startColor[1], config.startColor[2],
+        vecType, config.endColor[0], config.endColor[1], config.endColor[2]);
+    gen.colorFn = buf;
+    std::snprintf(buf, sizeof(buf),
+        "float heParticleAlpha(float t01) { return mix(%.6f, %.6f, clamp(t01, 0.0, 1.0)); }",
+        config.startAlpha, config.endAlpha);
+    gen.alphaFn = buf;
+    return gen;
 }
 
 } // namespace HE

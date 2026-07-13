@@ -83,10 +83,11 @@ static std::vector<uint8_t> rewriteRefsForPack(
     if (!r.openData(blob)) return blob;
     const auto type = static_cast<HE::AssetType>(r.assetType());
 
-    const bool isMesh  = type == HE::AssetType::StaticMesh || type == HE::AssetType::SkeletalMesh;
-    const bool isMat   = type == HE::AssetType::Material;
-    const bool isScene = type == HE::AssetType::Scene;
-    if (!isMesh && !isMat && !isScene) return blob; // no refs to rewrite
+    const bool isMesh      = type == HE::AssetType::StaticMesh || type == HE::AssetType::SkeletalMesh;
+    const bool isMat       = type == HE::AssetType::Material;
+    const bool isScene     = type == HE::AssetType::Scene;
+    const bool isParticles = type == HE::AssetType::ParticleSystem;
+    if (!isMesh && !isMat && !isScene && !isParticles) return blob; // no refs to rewrite
 
     auto resolve = [&](const std::string& p) -> HE::UUID {
         auto it = pathToUuid.find(p);
@@ -192,6 +193,21 @@ static std::vector<uint8_t> rewriteRefsForPack(
                 std::vector<uint8_t> pshd = settings.compileShaderVariants(
                     customShaderGlsl, customVertBody, settings.shaderBackends);
                 if (!pshd.empty()) w.addChunk(HAsset::CHUNK_PSHD, pshd.data(), pshd.size());
+            }
+            continue;
+        }
+        if (isParticles && c.id == HAsset::CHUNK_PTGR)
+        {
+            // The node graph carries meshAssetId/materialAssetId as UUIDs already
+            // (particleGraphToJson never stores paths) — nothing to rewrite, unlike
+            // Material's MTRL. Pass through verbatim, then additionally bake the
+            // color/alpha-over-life shader for the chosen backends (CHUNK_PPSD).
+            w.addChunk(c.id, c.data.data(), c.data.size());
+            if (settings.shaderBackends != 0 && settings.compileParticleShaderVariants)
+            {
+                const std::string json(reinterpret_cast<const char*>(c.data.data()), c.data.size());
+                std::vector<uint8_t> ppsd = settings.compileParticleShaderVariants(json, settings.shaderBackends);
+                if (!ppsd.empty()) w.addChunk(HAsset::CHUNK_PPSD, ppsd.data(), ppsd.size());
             }
             continue;
         }

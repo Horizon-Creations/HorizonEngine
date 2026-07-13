@@ -138,6 +138,17 @@ struct PackSettings {
     std::function<std::vector<uint8_t>(const std::string& fragGlsl,
                                        const std::string& vertBody, uint32_t backends)>
         compileShaderVariants;
+
+    // Precompile particle color/alpha-over-life shaders into the pak (CHUNK_PPSD),
+    // reusing `shaderBackends` above. The callback — also editor-supplied — takes a
+    // ParticleGraphAsset's raw nodeGraphJson and returns already-PPSD-encoded bytes
+    // (empty → skip, e.g. a backend this particle system has no baked variant for).
+    // Unlike materials there is no cross-compile step (see ParticleShaderVariant):
+    // the callback hand-templates GL/Metal source directly, so it does not need the
+    // shader-compiler library — only linked into the editor for consistency with
+    // compileShaderVariants above.
+    std::function<std::vector<uint8_t>(const std::string& nodeGraphJson, uint32_t backends)>
+        compileParticleShaderVariants;
 };
 
 // Glob match used by PackSettings::excludePatterns (see semantics there).
