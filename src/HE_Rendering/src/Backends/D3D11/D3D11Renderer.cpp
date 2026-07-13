@@ -2985,7 +2985,7 @@ void D3D11Renderer::Render()
     p.m_wallTime = static_cast<float>(SDL_GetTicks()) * 0.001f;
     p.counters = D3D11RendererImpl::FrameCounters{};
     p.gpuTimerBeginFrame();
-    const float bgColor[4] = { 0.18f, 0.18f, 0.20f, 1.0f };
+    const float bgColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
 
     // Recreate the viewport RT if the editor requested a different size.
     if (p.viewportReqW > 0 && p.viewportReqH > 0 &&

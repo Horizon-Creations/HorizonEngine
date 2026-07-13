@@ -1278,7 +1278,7 @@ struct D3D12RendererImpl
         cd.Flags            = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
         D3D12_CLEAR_VALUE ccv{};
         ccv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        ccv.Color[0] = 0.18f; ccv.Color[1] = 0.18f; ccv.Color[2] = 0.20f; ccv.Color[3] = 1.0f;
+        ccv.Color[0] = 0.0f; ccv.Color[1] = 0.0f; ccv.Color[2] = 0.0f; ccv.Color[3] = 1.0f;
         if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &cd,
                    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &ccv, IID_PPV_ARGS(&viewportRT))))
             return;
@@ -4304,7 +4304,7 @@ void D3D12Renderer::Render()
     // CPU counters restart each frame; DrawScene fills them back in.
     p.statDraws = p.statTris = p.statVisible = p.statTotal = 0;
 
-    const float bgColor[4] = { 0.18f, 0.18f, 0.20f, 1.0f };
+    const float bgColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
 
     if (useViewport)
     {

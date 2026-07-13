@@ -386,7 +386,7 @@ void VulkanRenderer::Render()
     EncodeShadowMap(cmd);
 
     VkClearValue clears[2]{};
-    clears[0].color        = { { 0.18f, 0.18f, 0.20f, 1.0f } };
+    clears[0].color        = { { 0.0f, 0.0f, 0.0f, 1.0f } };
     clears[1].depthStencil = { 1.0f, 0 };
 
     if (useViewport)
@@ -1230,7 +1230,7 @@ void VulkanRenderer::renderWindowData(WindowData& wd)
     vkBeginCommandBuffer(cmd, &bi);
 
     VkClearValue clear{};
-    clear.color = { { 0.18f, 0.18f, 0.20f, 1.0f } };
+    clear.color = { { 0.0f, 0.0f, 0.0f, 1.0f } };
     VkRenderPassBeginInfo rpbi{};
     rpbi.sType             = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
     rpbi.renderPass        = wd.renderPass;

@@ -5634,7 +5634,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		glEnable(GL_DEPTH_TEST);
 		glDepthFunc(GL_LESS);
 		glDepthMask(GL_TRUE);
-		glClearColor(0.18f, 0.18f, 0.20f, 1.0f);
+		glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
 		// (The procedural skybox is drawn AFTER the geometry below, with a
@@ -6368,7 +6368,7 @@ void OpenGLRenderer::Render()
 		// Scene → offscreen viewport target (shown by the editor as an image)
 		EnsureViewportTarget();
 		glBindFramebuffer(GL_FRAMEBUFFER, m_viewportFBO);
-		glClearColor(0.18f, 0.18f, 0.20f, 1.0f);
+		glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 		DrawScene(m_viewportW, m_viewportH);
 		glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -6376,7 +6376,7 @@ void OpenGLRenderer::Render()
 	else if (m_viewportFBO)
 		DestroyViewportTarget();
 
-	glClearColor(0.18f, 0.18f, 0.20f, 1.0f);
+	glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 	if (!offscreen)
 	{
@@ -6973,7 +6973,7 @@ void OpenGLRenderer::RenderWindow(HE::Window* window)
 	if (it == m_secondaryContexts.end()) return;
 
 	SDL_GL_MakeCurrent(window->GetNativeWindow(), static_cast<SDL_GLContext>(it->second));
-	glClearColor(0.18f, 0.18f, 0.20f, 1.0f);
+	glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 	// TODO: secondary-window draw calls
 	// SwapBuffers is called by Application::Run after this method returns
