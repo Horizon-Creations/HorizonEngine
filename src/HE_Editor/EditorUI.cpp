@@ -4093,8 +4093,17 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 						HE::AABB b; b.expand({-0.5f,-0.5f,-0.5f}); b.expand({0.5f,0.5f,0.5f}); return b;
 					}();
 
-					Entity hit     = entt::null;
-					float  hitDist = std::numeric_limits<float>::max();
+					// Real mesh entities take priority over terrain: a terrain
+					// chunk's bounding box is huge and loose (its near face sits
+					// closer to the camera than a small mesh resting on the
+					// surface), so an AABB pick would otherwise select the ground
+					// under every object. Track the two categories separately and
+					// only fall back to terrain when nothing else is under the
+					// cursor — and then select the owning Landscape entity, never
+					// a raw auto-generated chunk.
+					auto& reg = ctx.world->registry();
+					Entity meshHit    = entt::null; float meshDist    = std::numeric_limits<float>::max();
+					Entity terrainHit = entt::null; float terrainDist = std::numeric_limits<float>::max();
 					for (const RenderObject& obj : s_sceneSnapshot.objects)
 					{
 						HE::AABB box = s_cubeBox;
@@ -4119,13 +4128,27 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 						const glm::vec3 d = glm::vec3(invModel * glm::vec4(rayDir,    0.0f));
 
 						float t = 0.0f;
-						if (box.intersectRay(o, d, t) && t < hitDist)
+						if (!box.intersectRay(o, d, t)) continue;
+
+						const Entity e = static_cast<Entity>(obj.entityId);
+						Entity terrainOwner = entt::null;
+						if (reg.valid(e))
 						{
-							hitDist = t;
-							hit     = static_cast<Entity>(obj.entityId);
+							if (auto* cc = reg.try_get<TerrainChunkComponent>(e)) terrainOwner = cc->terrain;
+							else if (reg.all_of<TerrainComponent>(e))            terrainOwner = e;
+						}
+
+						if (terrainOwner != entt::null)
+						{
+							if (t < terrainDist) { terrainDist = t; terrainHit = terrainOwner; }
+						}
+						else if (t < meshDist)
+						{
+							meshDist = t; meshHit = e;
 						}
 					}
-					ctx.selectedEntity = hit; // miss = deselect
+					// miss = deselect
+					ctx.selectedEntity = (meshHit != entt::null) ? meshHit : terrainHit;
 				}
 
 				// ── Landscape brush cursor + sculpt ────────────────────────
