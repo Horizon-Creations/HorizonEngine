@@ -9,6 +9,7 @@
 #include "InputAssetPanel.h"
 #include "SkeletalMeshEditorPanel.h"
 #include "ParticleGraphEditorPanel.h"
+#include "AnimatorStateMachineEditorPanel.h"
 #include "HorizonVersion.h"
 #ifdef __APPLE__
 #include "MacMenuBar.h"   // native system menu bar (replaces the ImGui menu row)
@@ -3391,6 +3392,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
             SkeletalMeshEditorPanel::render(ctx, tabPath, tabPos, tabSize);
         else if (ParticleGraphEditorPanel::isParticleAsset(tabPath))
             ParticleGraphEditorPanel::render(ctx, tabPath, tabPos, tabSize);
+        else if (AnimatorStateMachineEditorPanel::isStateMachineTab(tabPath))
+            AnimatorStateMachineEditorPanel::render(ctx, tabPath, tabPos, tabSize);
         else
             ScriptEditorPanel::render(ctx, tabPath, tabPos, tabSize);
         return;
@@ -6131,93 +6134,26 @@ void EditorUI::RenderInspector(AppContext& ctx)
 	}
 
 	// ── Animator State Machine ──────────────────────────────────────────────
+	// Full authoring (states/transitions/params) moved to a dedicated graph-editor
+	// tab (states as nodes, transitions as links, shares the GraphEditor canvas
+	// with Material/HorizonCode/Particle) — the flat Inspector lists this used to
+	// be don't scale past a handful of states/transitions. This section is now
+	// just a summary + a link to that tab.
 	if (auto* asm_ = registry.try_get<AnimatorStateMachineComponent>(entity))
 	{
 		if (componentHeader("Animator State Machine", true, removed))
 		{
-			// Current state + params read-out
-			ImGui::LabelText("State##sm",  asm_->currentStateName.empty() ? "(none)" : asm_->currentStateName.c_str());
-			ImGui::DragFloat("Speed##sm",  &asm_->playbackSpeed, 0.01f, -4.0f, 4.0f, "%.2f"); trackEdit();
-			ImGui::DragFloat("Time##sm",   &asm_->clipTime,      0.01f,  0.0f, 999.0f, "%.3f s"); trackEdit();
-			if (asm_->inTransition)
+			ImGui::Text("%zu state(s), %zu transition(s)", asm_->states.size(), asm_->transitions.size());
+			ImGui::LabelText("Current##sm", "%s",
+				asm_->currentStateName.empty() ? "(none)" : asm_->currentStateName.c_str());
+			if (ImGui::Button("Open in State Machine Editor##sm"))
 			{
-				ImGui::LabelText("→##sm", asm_->transitionTarget.c_str());
-				float pct = asm_->transitionDuration > 0.0f
-					? asm_->transitionElapsed / asm_->transitionDuration : 0.0f;
-				ImGui::ProgressBar(std::min(pct, 1.0f), ImVec2(-1, 0), "crossfade");
-			}
-
-			// States list
-			if (ImGui::TreeNodeEx("States##sm", ImGuiTreeNodeFlags_DefaultOpen))
-			{
-				int stateToDelete = -1;
-				for (int i = 0; i < static_cast<int>(asm_->states.size()); ++i)
-				{
-					auto& s = asm_->states[i];
-					ImGui::PushID(i);
-					char buf[128]; std::snprintf(buf, sizeof(buf), "%s", s.name.c_str());
-					if (ImGui::InputText("Name##s", buf, sizeof(buf)))
-					{ s.name = buf; trackEdit(); }
-					ImGui::SameLine();
-					ImGui::Checkbox("Loop##s", &s.looping); trackEdit();
-					ImGui::SameLine();
-					if (ImGui::SmallButton("Set##s"))
-					{ if (ctx.undoSys) ctx.undoSys->snapshotNow(); asm_->currentStateName = s.name; }
-					ImGui::SameLine();
-					if (ImGui::SmallButton("X##s")) stateToDelete = i;
-					ImGui::PopID();
-				}
-				if (stateToDelete >= 0)
-				{ if (ctx.undoSys) ctx.undoSys->snapshotNow(); asm_->states.erase(asm_->states.begin() + stateToDelete); }
-				if (ImGui::SmallButton("+ State##sm"))
-				{ if (ctx.undoSys) ctx.undoSys->snapshotNow(); asm_->states.push_back({"NewState", HE::UUID{}, true}); }
-				ImGui::TreePop();
-			}
-
-			// Transitions list
-			if (ImGui::TreeNodeEx("Transitions##sm", ImGuiTreeNodeFlags_None))
-			{
-				const char* opNames[] = { ">", "<", "==" };
-				int transToDelete = -1;
-				for (int i = 0; i < static_cast<int>(asm_->transitions.size()); ++i)
-				{
-					auto& t = asm_->transitions[i];
-					ImGui::PushID(i + 1000);
-					char fb[64], tb[64], pb[64];
-					std::snprintf(fb, sizeof(fb), "%s", t.fromState.c_str());
-					std::snprintf(tb, sizeof(tb), "%s", t.toState.c_str());
-					std::snprintf(pb, sizeof(pb), "%s", t.paramName.c_str());
-					if (ImGui::InputText("From##t", fb, sizeof(fb)))  { t.fromState  = fb; trackEdit(); }
-					ImGui::SameLine();
-					if (ImGui::InputText("To##t",   tb, sizeof(tb)))  { t.toState    = tb; trackEdit(); }
-					int opIdx = static_cast<int>(t.op);
-					if (ImGui::Combo("Op##t", &opIdx, opNames, 3))
-					{ t.op = static_cast<TransitionOp>(opIdx); trackEdit(); }
-					ImGui::SameLine();
-					if (ImGui::InputText("Param##t", pb, sizeof(pb))) { t.paramName  = pb; trackEdit(); }
-					ImGui::DragFloat("Thresh##t", &t.threshold, 0.01f, -999.0f, 999.0f, "%.2f"); trackEdit();
-					ImGui::DragFloat("Duration##t", &t.duration, 0.01f, 0.0f, 10.0f, "%.2f s"); trackEdit();
-					ImGui::SameLine();
-					if (ImGui::SmallButton("X##t")) transToDelete = i;
-					ImGui::PopID();
-				}
-				if (transToDelete >= 0)
-				{ if (ctx.undoSys) ctx.undoSys->snapshotNow(); asm_->transitions.erase(asm_->transitions.begin() + transToDelete); }
-				if (ImGui::SmallButton("+ Transition##sm"))
-				{ if (ctx.undoSys) ctx.undoSys->snapshotNow(); asm_->transitions.push_back({}); }
-				ImGui::TreePop();
-			}
-
-			// Float params
-			if (ImGui::TreeNodeEx("Params##sm", ImGuiTreeNodeFlags_None))
-			{
-				for (auto& [k, v] : asm_->params)
-				{
-					ImGui::PushID(k.c_str());
-					ImGui::DragFloat(k.c_str(), &v, 0.01f, -999.0f, 999.0f, "%.2f"); trackEdit();
-					ImGui::PopID();
-				}
-				ImGui::TreePop();
+				const std::string path = AnimatorStateMachineEditorPanel::tabPathFor(entity);
+				auto tabIt = std::find_if(ctx.tabs.begin(), ctx.tabs.end(),
+					[&](const AppContext::EditorTab& t) { return t.assetPath == path; });
+				if (tabIt == ctx.tabs.end())
+				{ ctx.tabs.push_back({ "State Machine", path, true, true }); ctx.activeTab = (int)ctx.tabs.size() - 1; }
+				else ctx.activeTab = (int)std::distance(ctx.tabs.begin(), tabIt);
 			}
 		}
 		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<AnimatorStateMachineComponent>(entity); }

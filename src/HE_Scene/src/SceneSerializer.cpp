@@ -27,6 +27,7 @@
 #include "HorizonScene/Components/UITextComponent.h"
 #include "HorizonScene/Components/UIImageComponent.h"
 #include "HorizonScene/Components/UIButtonComponent.h"
+#include "HorizonScene/Components/AnimatorStateMachineComponent.h"
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <cstring>
@@ -374,6 +375,26 @@ namespace
 				{ "particleAsset", uuidToJson(ps->particleAssetId) },
 				{ "visible",       ps->visible },
 				{ "playing",       ps->playing },
+			};
+		}
+		if (auto* sm = registry.try_get<AnimatorStateMachineComponent>(entity))
+		{
+			json states = json::array();
+			for (const auto& s : sm->states)
+				states.push_back({ { "id", s.id }, { "name", s.name }, { "clipId", uuidToJson(s.clipId) },
+				                   { "looping", s.looping }, { "x", s.x }, { "y", s.y } });
+			json transitions = json::array();
+			for (const auto& t : sm->transitions)
+				transitions.push_back({ { "fromState", t.fromState }, { "toState", t.toState },
+				                        { "paramName", t.paramName }, { "op", static_cast<int>(t.op) },
+				                        { "threshold", t.threshold }, { "duration", t.duration } });
+			json params = json::object();
+			for (const auto& [k, v] : sm->params) params[k] = v;
+			comps["animstatemachine"] = {
+				{ "states",           states },
+				{ "transitions",      transitions },
+				{ "params",           params },
+				{ "currentStateName", sm->currentStateName },
 			};
 		}
 		if (auto* lod = registry.try_get<LODComponent>(entity))
@@ -797,6 +818,60 @@ namespace
 			fol.drawDistance    = c.value("drawDistance", fol.drawDistance);
 			fol.dirty           = true; // regenerate instances after load
 			registry.emplace_or_replace<FoliageComponent>(entity, std::move(fol));
+		}
+		if (comps.contains("animstatemachine"))
+		{
+			const json& c = comps["animstatemachine"];
+			AnimatorStateMachineComponent sm;
+			bool anyMissingId = false;
+			if (c.contains("states") && c["states"].is_array())
+			{
+				for (const auto& sj : c["states"])
+				{
+					AnimationState s;
+					s.id      = sj.value("id", 0);
+					s.name    = sj.value("name", std::string());
+					s.clipId  = jsonToUuid(sj.value("clipId", json()));
+					s.looping = sj.value("looping", true);
+					s.x       = sj.value("x", 0.0f);
+					s.y       = sj.value("y", 0.0f);
+					if (s.id == 0) anyMissingId = true;
+					sm.states.push_back(std::move(s));
+				}
+			}
+			// A saved state entirely missing "id" means the WHOLE array predates the
+			// GraphEditor tab (id/x/y didn't exist yet) — auto-assign sequential ids
+			// + a simple grid layout so the new editor still gets stable nodes.
+			if (anyMissingId)
+			{
+				int col = 0, row = 0, nextId = 1;
+				for (auto& s : sm.states)
+				{
+					s.id = nextId++;
+					s.x  = static_cast<float>(col) * 200.0f;
+					s.y  = static_cast<float>(row) * 150.0f;
+					if (++col >= 4) { col = 0; ++row; }
+				}
+			}
+			if (c.contains("transitions") && c["transitions"].is_array())
+			{
+				for (const auto& tj : c["transitions"])
+				{
+					AnimationTransition t;
+					t.fromState = tj.value("fromState", std::string());
+					t.toState   = tj.value("toState",   std::string());
+					t.paramName = tj.value("paramName", std::string());
+					t.op        = static_cast<TransitionOp>(tj.value("op", 0));
+					t.threshold = tj.value("threshold", 0.5f);
+					t.duration  = tj.value("duration",  0.2f);
+					sm.transitions.push_back(std::move(t));
+				}
+			}
+			if (c.contains("params") && c["params"].is_object())
+				for (auto it = c["params"].begin(); it != c["params"].end(); ++it)
+					sm.params[it.key()] = it.value().get<float>();
+			sm.currentStateName = c.value("currentStateName", std::string());
+			registry.emplace_or_replace<AnimatorStateMachineComponent>(entity, std::move(sm));
 		}
 		if (comps.contains("lod"))
 		{

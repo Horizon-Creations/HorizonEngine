@@ -585,8 +585,8 @@ static AnimatorStateMachineComponent makeSimpleSM(
     float transitionDuration = 0.2f)
 {
     AnimatorStateMachineComponent sm;
-    sm.states.push_back({"Idle",  clipIdA, true});
-    sm.states.push_back({"Walk",  clipIdB, true});
+    sm.states.push_back({1, "Idle",  clipIdA, true, 0.0f, 0.0f});
+    sm.states.push_back({2, "Walk",  clipIdB, true, 0.0f, 0.0f});
     sm.transitions.push_back({"Idle", "Walk", "speed",
                                TransitionOp::Greater, 0.5f, transitionDuration});
     sm.params["speed"]     = 0.0f;
