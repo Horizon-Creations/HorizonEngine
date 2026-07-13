@@ -6,12 +6,18 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
+#if defined(_WIN32)
+#include <process.h>  // _getpid — avoids pulling in windows.h just for a pid
+#else
+#include <unistd.h>   // getpid
+#endif
 
 // The HorizonCode → C++ emitter. Structure (plan §5): Stage A validates a graph
 // (or sends it back to the interpreter as a Fallback), Stage B/C walk the exec
@@ -1395,6 +1401,81 @@ bool toolchainAvailable()
 #else
     return std::system("cmake --version >/dev/null 2>&1") == 0;
 #endif
+}
+
+namespace {
+// Run a shell command, streaming each output line (stdout+stderr merged) to
+// `onLine` and appending everything to `captured`. Returns the exit status.
+int runStreaming(const std::string& cmd, const std::function<void(const std::string&)>& onLine,
+                 std::string& captured);
+} // namespace
+
+ToolchainProbe probeToolchain()
+{
+    namespace fs = std::filesystem;
+    ToolchainProbe p;
+
+    std::string versionOut;
+    if (runStreaming("cmake --version", nullptr, versionOut) != 0)
+        return p; // cmake missing entirely — nothing further to probe
+    p.cmakeFound = true;
+    // First line looks like "cmake version 3.28.3".
+    if (const size_t pos = versionOut.find("cmake version "); pos != std::string::npos)
+    {
+        const size_t start = pos + std::strlen("cmake version ");
+        const size_t end   = versionOut.find_first_of("\r\n", start);
+        p.cmakeVersion = versionOut.substr(start, end == std::string::npos ? end : end - start);
+    }
+
+    // A real (buildless) configure of a throwaway CXX project — this is the
+    // only reliable way to know whether cmake will find a working compiler,
+    // since detection (MSVC on Windows especially) doesn't just read PATH.
+    // PID-suffixed so two editor instances probing concurrently don't race on
+    // the same directory.
+#if defined(_WIN32)
+    const int pid = _getpid();
+#else
+    const long pid = static_cast<long>(getpid());
+#endif
+    std::error_code ec;
+    const fs::path dir = fs::temp_directory_path(ec) /
+        ("he_toolchain_probe_" + std::to_string(pid));
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir, ec);
+    if (ec)
+    {
+        p.detail = "could not create probe directory: " + ec.message();
+        return p;
+    }
+    {
+        std::ofstream f(dir / "CMakeLists.txt", std::ios::binary | std::ios::trunc);
+        f << "cmake_minimum_required(VERSION 3.20)\nproject(he_toolchain_probe CXX)\n";
+    }
+    std::string captured;
+    const int rc = runStreaming(
+        "cmake -S " + shq(dir) + " -B " + shq(dir / "build"), nullptr, captured);
+    p.compilerFound = (rc == 0);
+    if (p.compilerFound)
+    {
+        if (const size_t pos = captured.find("CXX compiler identification is ");
+            pos != std::string::npos)
+        {
+            const size_t start = pos + std::strlen("CXX compiler identification is ");
+            const size_t end   = captured.find_first_of("\r\n", start);
+            p.compilerId = captured.substr(start, end == std::string::npos ? end : end - start);
+        }
+    }
+    else
+    {
+        // Tail of the log (last ~15 lines) — enough to show the user why.
+        std::vector<std::string> lines;
+        std::istringstream iss(captured);
+        for (std::string line; std::getline(iss, line); ) lines.push_back(line);
+        const size_t from = lines.size() > 15 ? lines.size() - 15 : 0;
+        for (size_t i = from; i < lines.size(); ++i) { p.detail += lines[i]; p.detail += '\n'; }
+    }
+    fs::remove_all(dir, ec);
+    return p;
 }
 
 namespace {

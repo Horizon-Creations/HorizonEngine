@@ -70,6 +70,23 @@ SdkInfo resolveSdk(const std::filesystem::path& editorBaseDir);
 // True when a `cmake` executable answers --version (the toolchain probe).
 bool toolchainAvailable();
 
+// ── startup toolchain diagnostics ────────────────────────────────────────────
+// Richer probe for the editor's startup check (EditorApplication): unlike
+// toolchainAvailable() this also verifies a WORKING C++ compiler by running a
+// real (buildless) CMake configure of a throwaway project — the only reliable
+// cross-platform way to know a compiler will actually be found (Windows in
+// particular: cmake locates MSVC itself, independent of what's on PATH).
+// Slow-ish (compiler detection, up to ~1-2s) — call off the UI thread.
+struct ToolchainProbe
+{
+    bool        cmakeFound    = false;
+    std::string cmakeVersion;    // e.g. "3.28.3", empty if not found
+    bool        compilerFound = false;
+    std::string compilerId;      // e.g. "AppleClang 15.0.0", empty if not detected
+    std::string detail;          // tail of the probe log when compilerFound == false
+};
+ToolchainProbe probeToolchain();
+
 struct BuildOutcome
 {
     bool                  ok = false;
