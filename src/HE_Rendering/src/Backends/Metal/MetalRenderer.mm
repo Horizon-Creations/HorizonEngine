@@ -6506,7 +6506,7 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			hdrPass.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_hdrColor;
 			hdrPass.colorAttachments[0].loadAction  = MTLLoadActionClear;
 			hdrPass.colorAttachments[0].storeAction = MTLStoreActionStore;
-			hdrPass.colorAttachments[0].clearColor  = MTLClearColorMake(0.18, 0.18, 0.20, 1.0);
+			hdrPass.colorAttachments[0].clearColor  = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
 			hdrPass.depthAttachment.texture     = (__bridge id<MTLTexture>)m_hdrDepth;
 			hdrPass.depthAttachment.loadAction  = MTLLoadActionClear;
 			hdrPass.depthAttachment.storeAction = MTLStoreActionDontCare;
@@ -6655,7 +6655,7 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			pass.colorAttachments[0].texture     = drawable.texture;
 			pass.colorAttachments[0].loadAction  = MTLLoadActionClear;
 			pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-			pass.colorAttachments[0].clearColor  = MTLClearColorMake(0.18, 0.18, 0.20, 1.0);
+			pass.colorAttachments[0].clearColor  = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
 			pass.depthAttachment.texture     = (__bridge id<MTLTexture>)target.depthTexture;
 			pass.depthAttachment.loadAction  = MTLLoadActionClear;
 			pass.depthAttachment.storeAction = MTLStoreActionDontCare;
