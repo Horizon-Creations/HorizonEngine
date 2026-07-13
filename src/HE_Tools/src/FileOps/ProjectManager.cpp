@@ -173,21 +173,53 @@ bool ProjectManager::createNewProject(const std::string& projectDir,
 	// Default startup scene: Content/StartupScene.hescene
 	fs::path scenePath = root / "Content" / "StartupScene.hescene";
 
-	// Write a minimal empty scene JSON (root entity "World", no children)
+	// Game/Simulation projects ship with a sky & weather out of the box; Empty/Tool
+	// projects start with a bare world (add a Sky via the editor's Environment window).
+	const bool seedEnvironment = (preset == ProjectPreset::Game ||
+	                              preset == ProjectPreset::Simulation);
+
+	// Write the startup scene JSON. Root entity "World" (id 0, no parent); when seeding,
+	// add dedicated "Sky" (EnvironmentComponent) and "Weather" (WeatherComponent) child
+	// entities. An empty component object lets the scene loader fill every field from the
+	// struct defaults, so this stays decoupled from the components' exact field lists.
 	{
 		std::ofstream sceneOut(scenePath);
 		if (sceneOut.is_open())
 		{
-			// Root entity — id 0, no parent (entt::null = UINT32_MAX), no children
+			constexpr uint32_t kNull = std::numeric_limits<uint32_t>::max();
+			json entities = json::array();
+
 			json rootEntity;
-			rootEntity["id"]       = 0;
-			rootEntity["name"]     = "World";
-			rootEntity["parent"]   = std::numeric_limits<uint32_t>::max();
-			rootEntity["children"] = json::array();
+			rootEntity["id"]     = 0;
+			rootEntity["name"]   = "World";
+			rootEntity["parent"] = kNull;
+			json rootChildren = json::array();
+			if (seedEnvironment) { rootChildren.push_back(1); rootChildren.push_back(2); }
+			rootEntity["children"] = rootChildren;
+			entities.push_back(rootEntity);
+
+			if (seedEnvironment)
+			{
+				json sky;
+				sky["id"]         = 1;
+				sky["name"]       = "Sky";
+				sky["parent"]     = 0;
+				sky["children"]   = json::array();
+				sky["components"] = { { "environment", json::object() } };
+				entities.push_back(sky);
+
+				json weather;
+				weather["id"]         = 2;
+				weather["name"]       = "Weather";
+				weather["parent"]     = 0;
+				weather["children"]   = json::array();
+				weather["components"] = { { "weather", json::object() } };
+				entities.push_back(weather);
+			}
 
 			json scene;
-			scene["version"]  = "1.0";
-			scene["entities"] = json::array({ rootEntity });
+			scene["version"]  = "1.1";
+			scene["entities"] = entities;
 
 			sceneOut << scene.dump(4);
 		}

@@ -929,7 +929,13 @@ void GameApplication::OnRender(float deltaTime)
 		// Push the scene environment to the renderer. The base Application renders the
 		// world but never pushes EnvironmentSettings (that lived only in the editor), so
 		// without this the weather sky / clouds / fog / flash would not show in-game.
-		if (auto* env = m_world->registry().try_get<EnvironmentComponent>(m_world->rootEntity()))
+		// The Sky is a scene entity now — no Sky entity → skip the sky pass.
+		const Entity gEnvEntity = m_world->environmentEntity();
+		auto* env = (gEnvEntity == entt::null)
+			? nullptr : m_world->registry().try_get<EnvironmentComponent>(gEnvEntity);
+		if (!env)
+			renderer()->SetEnvironmentSettings(IRenderer::EnvironmentSettings{ .skyEnabled = false });
+		if (env)
 		{
 			if (env->dayNightCycle && env->autoAdvance && deltaTime > 0.0f)
 			{

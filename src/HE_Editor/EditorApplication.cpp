@@ -1548,7 +1548,16 @@ void EditorApplication::dumpFrameHeadless()
 	if (const char* st = std::getenv("HE_DUMP_SKYTEST"); st && *st && m_editorWorld)
 	{
 		auto envF = [](const char* k, float d){ const char* v = std::getenv(k); return v && *v ? std::atof(v) : d; };
-		if (auto* e = m_editorWorld->registry().try_get<EnvironmentComponent>(m_editorWorld->rootEntity()))
+		// HE_DUMP_NOSKY: exercise the "no Sky entity" path (flat background, no sky pass).
+		if (envF("HE_DUMP_NOSKY", 0.0f) > 0.5f)
+			m_editorWorld->removeSky();
+		// Otherwise make sure there IS a Sky entity to configure — the world/scene may
+		// have started empty (only the Game/Simulation templates seed a sky).
+		else if (m_editorWorld->environmentEntity() == entt::null)
+			m_editorWorld->addSky();
+		Entity dumpSky = m_editorWorld->environmentEntity();
+		if (auto* e = dumpSky == entt::null ? nullptr
+		            : m_editorWorld->registry().try_get<EnvironmentComponent>(dumpSky))
 		{
 			e->dayNightCycle  = true;
 			e->timeOfDay      = static_cast<float>(envF("HE_DUMP_TOD", 0.0f));        // 0 = midnight
@@ -2491,8 +2500,16 @@ void EditorApplication::saveSceneToPath(const std::string& path)
 void EditorApplication::pushEnvironment(float dt)
 {
 	if (!renderer() || !m_editorWorld) return;
-	auto* env = m_editorWorld->registry().try_get<EnvironmentComponent>(m_editorWorld->rootEntity());
-	if (!env) return;
+	// The Sky (EnvironmentComponent) is a scene entity now, not a fixed root component.
+	// No Sky entity → tell the renderer to skip the sky pass (flat background).
+	const Entity envEntity = m_editorWorld->environmentEntity();
+	auto* env = (envEntity == entt::null)
+		? nullptr : m_editorWorld->registry().try_get<EnvironmentComponent>(envEntity);
+	if (!env)
+	{
+		renderer()->SetEnvironmentSettings(IRenderer::EnvironmentSettings{ .skyEnabled = false });
+		return;
+	}
 
 	// Auto-advance the day-night cycle (time flows with real time).
 	if (env->dayNightCycle && env->autoAdvance && dt > 0.0f)

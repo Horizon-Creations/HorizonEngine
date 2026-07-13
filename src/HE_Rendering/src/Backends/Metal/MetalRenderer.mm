@@ -5646,6 +5646,7 @@ void MetalRenderer::EncodeSky(void* renderEncoder, const glm::mat4& invViewProj,
                              float milkyWayIntensity, const glm::vec3& wind)
 {
 	if (!m_skyPipeline) return;
+	if (!GetEnvironment().skyEnabled) return; // no Sky entity → leave the cleared background
 	id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
 	[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_skyPipeline];
 	// Depth-test == far, no write — only fills background pixels (drawn after scene).
