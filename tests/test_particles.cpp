@@ -259,10 +259,14 @@ TEST_CASE("ParticleSystem::update migrates a legacy inline-config entity into a 
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  RenderExtractor — particle color/alpha-over-life → RenderObject::instanceTint
+//  RenderExtractor — ParticleSystemComponent particles → RenderWorld::particleBatches
 // ─────────────────────────────────────────────────────────────────────────────
+// Color/alpha-over-life is no longer CPU-lerped per particle here (that moved to
+// the GPU-instanced draw path, see HE::generateParticleShaderSource) — the
+// extractor now hands the backend raw position/size/t01 plus the resolved
+// config's color/alpha endpoints (once per batch, not per particle).
 
-TEST_CASE("RenderExtractor resolves particle color/alpha-over-life into instanceTint")
+TEST_CASE("RenderExtractor batches a ParticleSystemComponent's particles with raw position/size/t01")
 {
     HorizonWorld world;
     auto& reg = world.registry();
@@ -283,10 +287,10 @@ TEST_CASE("RenderExtractor resolves particle color/alpha-over-life into instance
     psc.resolvedConfig.startAlpha = 1.0f;
     psc.resolvedConfig.endAlpha   = 0.0f;
     psc.resolvedConfig.startSize  = 1.0f;
-    psc.resolvedConfig.endSize    = 1.0f;
+    psc.resolvedConfig.endSize    = 3.0f;
 
     Particle p;
-    p.position    = {0, 0, 0};
+    p.position    = {2, 0, 0};
     p.maxLifetime = 10.0f;
     p.lifetime    = 5.0f; // t01 = 1 - lifetime/maxLifetime = 0.5 → halfway through its life
     psc.particles.push_back(p);
@@ -295,15 +299,21 @@ TEST_CASE("RenderExtractor resolves particle color/alpha-over-life into instance
     RenderExtractor extractor;
     extractor.extract(world, rw, 16.0f / 9.0f);
 
-    REQUIRE(rw.objects.size() == 1);
-    const glm::vec4& tint = rw.objects[0].instanceTint;
-    CHECK(tint.r == doctest::Approx(0.5f)); // lerp(1,0,0.5)
-    CHECK(tint.g == doctest::Approx(0.0f));
-    CHECK(tint.b == doctest::Approx(0.5f)); // lerp(0,1,0.5)
-    CHECK(tint.a == doctest::Approx(0.5f)); // lerp(1,0,0.5)
+    CHECK(rw.objects.empty()); // no more one-RenderObject-per-particle
+    REQUIRE(rw.particleBatches.size() == 1);
+    const ParticleBatch& batch = rw.particleBatches[0];
+    REQUIRE(batch.instances.size() == 1);
+    CHECK(batch.instances[0].position == glm::vec3(2, 0, 0));
+    CHECK(batch.instances[0].t01  == doctest::Approx(0.5f));
+    CHECK(batch.instances[0].size == doctest::Approx(2.0f)); // lerp(1,3,0.5) — still CPU-lerped
+    // Color/alpha endpoints travel once per batch, not pre-lerped per particle.
+    CHECK(batch.config.startColor[0] == doctest::Approx(1.0f));
+    CHECK(batch.config.endColor[2]   == doctest::Approx(1.0f));
+    CHECK(batch.config.startAlpha    == doctest::Approx(1.0f));
+    CHECK(batch.config.endAlpha      == doctest::Approx(0.0f));
 }
 
-TEST_CASE("RenderExtractor: a fresh particle (lifetime==maxLifetime) gets the pure start tint")
+TEST_CASE("RenderExtractor: a fresh particle (lifetime==maxLifetime) gets t01=0")
 {
     HorizonWorld world;
     auto& reg = world.registry();
@@ -317,10 +327,6 @@ TEST_CASE("RenderExtractor: a fresh particle (lifetime==maxLifetime) gets the pu
     ParticleSystemComponent ps;
     reg.emplace<ParticleSystemComponent>(e, ps);
     auto& psc = reg.get<ParticleSystemComponent>(e);
-    psc.resolvedConfig.startColor[0] = 0.2f; psc.resolvedConfig.startColor[1] = 0.4f; psc.resolvedConfig.startColor[2] = 0.6f;
-    psc.resolvedConfig.endColor[0]   = 0.9f; psc.resolvedConfig.endColor[1]   = 0.9f; psc.resolvedConfig.endColor[2]   = 0.9f;
-    psc.resolvedConfig.startAlpha = 1.0f;
-    psc.resolvedConfig.endAlpha   = 0.0f;
     psc.resolvedConfig.startSize  = 1.0f;
     psc.resolvedConfig.endSize    = 1.0f;
 
@@ -334,12 +340,9 @@ TEST_CASE("RenderExtractor: a fresh particle (lifetime==maxLifetime) gets the pu
     RenderExtractor extractor;
     extractor.extract(world, rw, 16.0f / 9.0f);
 
-    REQUIRE(rw.objects.size() == 1);
-    const glm::vec4& tint = rw.objects[0].instanceTint;
-    CHECK(tint.r == doctest::Approx(0.2f));
-    CHECK(tint.g == doctest::Approx(0.4f));
-    CHECK(tint.b == doctest::Approx(0.6f));
-    CHECK(tint.a == doctest::Approx(1.0f));
+    REQUIRE(rw.particleBatches.size() == 1);
+    REQUIRE(rw.particleBatches[0].instances.size() == 1);
+    CHECK(rw.particleBatches[0].instances[0].t01 == doctest::Approx(0.0f));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -1,6 +1,7 @@
 #pragma once
 #include "RenderObject.h"
 #include <Renderer/UIRenderObject.h>
+#include <ParticleGraph/ParticleGraph.h>
 #include <Math/Math.h>
 #include <vector>
 #include <cstdint>
@@ -41,6 +42,33 @@ struct ShadowData {
     float     cascadeSplit[kMaxCascades]    = { 0.0f, 0.0f, 0.0f, 0.0f };
 };
 
+// One live particle's raw GPU-instanced draw data — position/size (still CPU-lerped,
+// a single scalar isn't worth moving to the GPU) plus t01 (0=born..1=dead), which the
+// backend's baked/on-demand-compiled ParticleGraph shader turns into color+alpha via
+// HE::generateParticleShaderSource's heParticleColor/heParticleAlpha (see
+// HorizonRendering::ParticleShaderTemplates). Replaces the old one-RenderObject-per-
+// particle path (RenderObject::instanceTint) for camera-billboard ParticleSystemComponent
+// particles specifically — that field/path stays valid for everything else (weather
+// precipitation billboards, foliage, future per-instance-varying-appearance needs).
+struct ParticleInstance {
+    glm::vec3 position;
+    float     size;
+    float     t01;
+};
+
+// One ParticleSystemComponent's live particles, batched for ONE GPU-instanced draw
+// call. `config` carries the resolved color/alpha-over-life endpoints the backend
+// hashes/bakes a shader from (see ContentManager::getParticleGraph's resolved
+// config) — NOT re-evaluated from the graph, so it always matches what the CPU
+// simulation (ParticleSystem::stepPool) already committed to.
+struct ParticleBatch {
+    HE::UUID                      meshAssetId;     // usually the default quad
+    HE::UUID                      materialAssetId; // base texture (heTex0), optional
+    HE::ParticleEmitterConfig     config;
+    uint32_t                      entityId = 0;
+    std::vector<ParticleInstance> instances;
+};
+
 class RenderWorld {
 public:
     void clear();
@@ -49,6 +77,7 @@ public:
     std::vector<SkinnedRenderObject> skinnedObjects;
     std::vector<LightData>           lights;
     std::vector<UIRenderObject>      uiObjects;
+    std::vector<ParticleBatch>       particleBatches;
     CameraData                camera;
     ShadowData                shadow;
 
