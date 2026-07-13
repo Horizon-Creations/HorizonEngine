@@ -893,6 +893,24 @@ void EditorApplication::OnInit()
 	// main loop (which throttles when the window is occluded), then quit.
 	if (!m_dumpPath.empty())
 		dumpFrameHeadless();
+
+	// Startup toolchain check (cmake + a working C++ compiler) — needed for
+	// HorizonCode C++ export codegen and C++-language projects. Skipped for
+	// the headless dump path, which never reaches the UI that shows it.
+	if (m_dumpPath.empty())
+		startToolchainProbe();
+}
+
+void EditorApplication::startToolchainProbe()
+{
+	if (m_toolchainThread.joinable()) m_toolchainThread.join();
+	m_toolchainChecked.store(false, std::memory_order_release);
+	m_toolchainThread = std::thread([this]
+	{
+		HE::hccg::ToolchainProbe probe = HE::hccg::probeToolchain();
+		m_toolchainProbe = std::move(probe);
+		m_toolchainChecked.store(true, std::memory_order_release);
+	});
 }
 
 // Push the current SDL keyboard/mouse state into HE::api::input so input.* nodes
@@ -1992,6 +2010,9 @@ AppContext EditorApplication::makeContext()
 		.projectLoaded       = m_projectLoaded,
 		.contentRefreshPending = m_contentRefreshPending,
 		.contentRefreshDone  = m_contentRefreshDone,
+		.toolchainProbe      = m_toolchainChecked.load(std::memory_order_acquire)
+		                           ? &m_toolchainProbe : nullptr,
+		.recheckToolchain    = [this]{ startToolchainProbe(); },
 		.frametimeHistory    = m_frametimeHistory,
 		.fpsHistorySize      = k_fpsHistorySize,
 		.fpsHistoryOffset    = m_fpsHistoryOffset,
@@ -2583,6 +2604,10 @@ void EditorApplication::OnShutdown()
 	// A project export may still be packing on its worker thread — wait for it
 	// (destroying a joinable std::thread would terminate the process).
 	EditorUI::joinPendingExport();
+
+	// Same rule for the toolchain probe (destroying a joinable std::thread
+	// terminates the process).
+	if (m_toolchainThread.joinable()) m_toolchainThread.join();
 
 #ifdef HE_IMGUI_ENABLED
 	if (!m_imguiReady) return;

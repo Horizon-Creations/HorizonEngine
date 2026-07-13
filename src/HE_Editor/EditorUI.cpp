@@ -53,6 +53,7 @@
 #include <string>
 #include <sstream>
 #include <vector>
+#include <cstdlib>
 #include <cstring>
 #include <array>
 #include <unordered_map>
@@ -163,6 +164,11 @@ static bool s_resetLayoutRequested = false;
 
 // Toggled by Edit > Preferences (Ctrl+,); drives the Preferences window.
 static bool s_showPreferences = false;
+
+// Set by the Preferences "Recheck" button to force the toolchain dialog open
+// even when the persistent "don't show again" suppression is set — an
+// explicit user request should always show the result.
+static bool s_forceShowToolchainDialog = false;
 
 // Toggled by View > Performance Profiler; drives the profiler panel.
 static bool s_showProfiler = false;
@@ -696,6 +702,28 @@ static void DrawPreferencesWindow(AppContext& ctx, bool& open)
 		DrawEngineSettings(ctx, SettingsMode::Preferences);
 
 		ImGui::Separator();
+		ImGui::TextDisabled("C++ Toolchain");
+		if (ctx.toolchainProbe)
+		{
+			const HE::hccg::ToolchainProbe& p = *ctx.toolchainProbe;
+			if (p.cmakeFound && p.compilerFound)
+				ImGui::TextColored(ImVec4(0.4f, 0.85f, 0.4f, 1.0f), "OK — cmake %s, %s",
+					p.cmakeVersion.c_str(), p.compilerId.c_str());
+			else
+				ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
+					"Not found — needed for HorizonCode C++ export codegen and C++ GameLogic projects.");
+		}
+		else
+		{
+			ImGui::TextDisabled("Checking...");
+		}
+		if (ImGui::Button("Recheck##toolchain") && ctx.recheckToolchain)
+		{
+			ctx.recheckToolchain();
+			s_forceShowToolchainDialog = true;
+		}
+
+		ImGui::Separator();
 		ImGui::TextDisabled("Preferences are saved when the editor exits.");
 		if (ImGui::Button("Restore Defaults"))
 		{
@@ -715,6 +743,147 @@ static void DrawPreferencesWindow(AppContext& ctx, bool& open)
 		}
 		ImGui::SameLine();
 		if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
+		ImGui::EndPopup();
+	}
+}
+
+// Startup toolchain check (cmake + a working C++ compiler, see HcCodegen). The
+// probe runs once on a background thread (EditorApplication::startToolchainProbe);
+// this only reacts to its result. Self-triggering (no `open` flag like the other
+// dialogs here) — it watches ctx.toolchainProbe transition from null (checking)
+// to non-null (done) and opens itself the first time that happens, unless the
+// user has permanently suppressed it (Preferences > C++ Toolchain > Recheck
+// bypasses the suppression, since that's an explicit request to see the result).
+static void DrawToolchainDialog(AppContext& ctx)
+{
+	static bool s_awaitingFirstResult = true; // consume exactly one auto-open per completed probe
+	static bool s_dontShowAgain       = false;
+	static bool s_checking            = false; // a Recheck is in flight — keep showing the last result
+	static HE::hccg::ToolchainProbe s_last;
+	static bool s_haveLast = false;
+
+	if (ctx.toolchainProbe)
+	{
+		s_checking = false;
+		s_last     = *ctx.toolchainProbe;
+		s_haveLast = true;
+		if (s_awaitingFirstResult)
+		{
+			s_awaitingFirstResult = false;
+			const bool missing = !s_last.cmakeFound || !s_last.compilerFound;
+			const bool suppressed = ctx.globalState &&
+				ctx.globalState->getCustomConfigBool("SuppressToolchainWarning", false);
+			if (missing && (s_forceShowToolchainDialog || !suppressed))
+			{
+				s_dontShowAgain = false;
+				ImGui::OpenPopup("##ToolchainMissing");
+			}
+			s_forceShowToolchainDialog = false;
+		}
+	}
+	else if (s_haveLast)
+	{
+		s_checking = true; // Recheck in flight; the popup (if open) stays up on stale data
+	}
+
+	if (!s_haveLast) return;
+
+	ImGui::SetNextWindowSize(ImVec2(520.0f, 0.0f), ImGuiCond_Appearing);
+	ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+	if (ImGui::BeginPopupModal("##ToolchainMissing", nullptr,
+		ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize))
+	{
+		const bool missing = !s_last.cmakeFound || !s_last.compilerFound;
+		if (!missing)
+		{
+			// Resolved (Recheck came back clean) — nothing left to show.
+			ImGui::CloseCurrentPopup();
+			ImGui::EndPopup();
+			return;
+		}
+
+		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
+		ImGui::TextUnformatted("C++ Toolchain Not Found");
+		ImGui::PopStyleColor();
+		ImGui::Separator();
+		ImGui::Spacing();
+
+		ImGui::TextWrapped(
+			"HorizonCode C++ export codegen and native C++ GameLogic projects need "
+			"cmake and a C++ compiler on this machine. Without them, those features "
+			"fall back to interpreted execution or are unavailable.");
+		ImGui::Spacing();
+
+		if (!s_last.cmakeFound)
+		{
+			ImGui::BulletText("cmake was not found on PATH.");
+		}
+		else
+		{
+			ImGui::BulletText("cmake %s found.", s_last.cmakeVersion.c_str());
+			ImGui::BulletText("No working C++ compiler was detected.");
+			if (!s_last.detail.empty() && ImGui::TreeNode("Details"))
+			{
+				ImGui::TextUnformatted(s_last.detail.c_str());
+				ImGui::TreePop();
+			}
+		}
+
+		ImGui::Spacing();
+		ImGui::Separator();
+		ImGui::Spacing();
+
+#if defined(__APPLE__)
+		ImGui::TextWrapped("Install the Xcode Command Line Tools (clang + make; cmake still "
+			"needs its own install, e.g. via Homebrew):");
+		if (ImGui::Button("Run Installer"))
+			std::system("xcode-select --install &");
+		ImGui::SameLine();
+		if (ImGui::Button("Open cmake.org/download"))
+			SDL_OpenURL("https://cmake.org/download/");
+#elif defined(_WIN32)
+		ImGui::TextWrapped("Install CMake and the \"Desktop development with C++\" workload "
+			"(Visual Studio Build Tools):");
+		static const char* kWinCmd =
+			"winget install --id Kitware.CMake -e ; "
+			"winget install --id Microsoft.VisualStudio.2022.BuildTools -e "
+			"--override \"--add Microsoft.VisualStudio.Workload.VCTools --quiet\"";
+		if (ImGui::Button("Copy Install Command")) ImGui::SetClipboardText(kWinCmd);
+		ImGui::SameLine();
+		if (ImGui::Button("Open Download Page"))
+			SDL_OpenURL("https://visualstudio.microsoft.com/visual-cpp-build-tools/");
+#else
+		ImGui::TextWrapped("Install a C++ compiler and cmake, e.g. on Debian/Ubuntu:");
+		static const char* kLinuxCmd = "sudo apt install build-essential cmake";
+		if (ImGui::Button("Copy Install Command")) ImGui::SetClipboardText(kLinuxCmd);
+		ImGui::SameLine();
+		if (ImGui::Button("Open cmake.org/download"))
+			SDL_OpenURL("https://cmake.org/download/");
+#endif
+
+		ImGui::Spacing();
+		ImGui::Separator();
+		ImGui::Checkbox("Don't show this again", &s_dontShowAgain);
+		ImGui::Spacing();
+
+		if (s_checking) ImGui::BeginDisabled();
+		if (ImGui::Button("Recheck") && ctx.recheckToolchain)
+			ctx.recheckToolchain();
+		if (s_checking) ImGui::EndDisabled();
+		ImGui::SameLine();
+		if (s_checking) ImGui::TextDisabled("Rechecking...");
+		else
+		{
+			if (ImGui::Button("Close"))
+			{
+				if (s_dontShowAgain && ctx.globalState)
+				{
+					ctx.globalState->setCustomConfigEntry("SuppressToolchainWarning", true);
+					ctx.globalState->writeConfig();
+				}
+				ImGui::CloseCurrentPopup();
+			}
+		}
 		ImGui::EndPopup();
 	}
 }
@@ -885,6 +1054,9 @@ void EditorUI::render(AppContext& ctx, float dt)
             ctx.globalState->refreshEngineFolder(ctx.contentManager->engineContentRoot());
         s_quietContentRefresh = false;
     }
+
+    // ── Startup toolchain check — overlays either screen below ───────────────
+    DrawToolchainDialog(ctx);
 
     // ── Route to either the Project Hub or the full Editor UI ─────────────────
     if (ctx.projectLoaded)

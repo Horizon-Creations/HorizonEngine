@@ -16,10 +16,13 @@
 #include <HorizonScene/UIInputSystem.h>
 #include <HorizonScene/GameInstanceHost.h>
 #include <HorizonScene/PlayerHost.h>
+#include <HorizonScene/HcCodegen.h>
+#include <atomic>
 #include <functional>
 #include <mutex>
 #include <future>
 #include <memory>
+#include <thread>
 #include <unordered_map>
 
 #ifdef HE_IMGUI_ENABLED
@@ -207,6 +210,13 @@ struct AppContext
 	bool& projectLoaded;
 	bool& contentRefreshPending;
 	bool& contentRefreshDone;
+
+	// Startup toolchain probe (cmake + C++ compiler), run once on a background
+	// thread so a slow/missing toolchain never blocks editor init. Null until
+	// the probe finishes. The "Toolchain Missing" dialog (EditorUI) opens when
+	// it's non-null and something's missing, unless suppressed in preferences.
+	const HE::hccg::ToolchainProbe* toolchainProbe = nullptr;
+	std::function<void()> recheckToolchain; // re-runs the probe (after the user installs something)
 
 	// Performance counters (mutable, updated each frame by UI)
 	float* frametimeHistory = nullptr;
@@ -414,6 +424,14 @@ private:
 	// Asynchroner Content-Refresh-Timer
 	float m_contentRefreshTimer = 0.0f;
 	std::future<void> m_contentRefreshFuture;
+
+	// Startup toolchain probe (cmake + real C++ compiler check, see HcCodegen).
+	// Runs once on a detached-but-joined-at-shutdown worker; the UI polls
+	// m_toolchainChecked and reads m_toolchainProbe once it flips true.
+	std::thread              m_toolchainThread;
+	std::atomic<bool>        m_toolchainChecked{false};
+	HE::hccg::ToolchainProbe m_toolchainProbe;
+	void startToolchainProbe(); // (re)launches m_toolchainThread
 
 	// Hot-reload: disk-asset change detection
 	float m_hotReloadTimer = 0.0f;
