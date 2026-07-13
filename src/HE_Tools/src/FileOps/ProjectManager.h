@@ -12,12 +12,13 @@ enum class ProjectPreset
 	Tool,        // Assets, Source sub-folders
 };
 
-// The gameplay scripting language a project is primarily authored in, chosen
-// at creation and persisted in the .heproj manifest ("scriptLanguage"). Lua and
-// Python map onto the IScriptBackend script routing, HorizonCode onto the
-// visual graphs, Cpp onto a native GameLogic library. Informational for now:
-// it drives wizard scaffolding and editor defaults, not a hard restriction —
-// per-script language is still decided by each Script asset.
+// The gameplay scripting language a project is authored in, chosen at creation
+// and persisted in the .heproj manifest ("scriptLanguage"). Lua and Python map
+// onto the IScriptBackend script routing, HorizonCode onto the visual graphs,
+// Cpp onto a native GameLogic library. This is a HARD restriction: the editor
+// only offers the matching logic-authoring assets (the Content Browser hides the
+// other languages' creators), and a Cpp project is scaffolded with a compilable
+// Source/ tree instead of engine assets.
 enum class ProjectScriptLanguage
 {
 	HorizonCode, // default: visual scripting graphs
@@ -30,6 +31,42 @@ enum class ProjectScriptLanguage
 // its tolerant inverse (unknown/missing → HorizonCode).
 HE_TOOLS_API const char*           toString(ProjectScriptLanguage lang);
 HE_TOOLS_API ProjectScriptLanguage projectScriptLanguageFromString(const std::string& s);
+
+// ─── Native C++ gameplay scaffolding ─────────────────────────────────────────
+// A Cpp project authors gameplay as a native GameLogic shared library instead of
+// engine assets. These generators emit self-contained C++ source (under the
+// project's Source/ folder) that compiles against only <IGameLogic.h> — every
+// generated method is an empty stub, so the tree builds before the user writes a
+// line. The CMakeLists globs Source/*.cpp into a GameLogic library, and per-level
+// scripts self-register by scene name, so adding a class or a level needs no
+// hand-editing of the existing files. projectRoot is the project folder (the
+// parent of the .heproj), not the Content folder.
+
+// Turn an arbitrary asset/scene name into a valid C++ identifier (leading digit
+// prefixed with '_', non-alnum → '_'); empty → "Unnamed".
+HE_TOOLS_API std::string cppIdentifier(const std::string& name);
+
+// Create the whole Source/ tree for a freshly created Cpp project: the runtime
+// header/impl, a GameInstance class, a LevelScript for the startup scene, the
+// IGameLogic entry point, a CMakeLists and a README. Existing files are left
+// untouched. Returns false only on a filesystem failure.
+HE_TOOLS_API bool scaffoldCppProject(const std::string& projectRoot,
+                                     const std::string& projectName,
+                                     const std::string& startupSceneName);
+
+// Emit Source/<Scene>LevelScript.{h,cpp} with the level event stubs
+// (OnLevelLoaded / OnLevelUnloaded / OnUpdate) and a REGISTER_LEVEL_SCRIPT for
+// the scene. Called when a scene is created in a Cpp project. No-op (returns
+// true) if the files already exist. Returns false only on a write failure.
+HE_TOOLS_API bool writeCppLevelScript(const std::string& projectRoot,
+                                      const std::string& sceneName);
+
+// Emit Source/<Class>.{h,cpp} — a plain gameplay-class stub. Auto-uniquifies the
+// file name if it exists. On success, outCreatedPath (when non-null) receives the
+// absolute path of the generated header. Returns false only on a write failure.
+HE_TOOLS_API bool writeCppClass(const std::string& projectRoot,
+                                const std::string& className,
+                                std::string* outCreatedHeaderPath = nullptr);
 
 // A named, persisted packaging preset (Build > Export Project). Stored in the
 // .heproj manifest so export settings survive editor restarts. The editor maps
