@@ -1216,8 +1216,11 @@ namespace
 			}
 		}
 
-		// Built-in sun/moon lights aren't serialised — recreate / re-attach them so
-		// every loaded scene has them on the root.
+		// Legacy scenes stored Environment/Weather on the World root; move them onto
+		// dedicated Sky/Weather entities so the whole engine sees one uniform model.
+		world.migrateLegacyRootEnvironment();
+		// Built-in sun/moon lights aren't serialised — recreate / re-attach them under
+		// the Sky entity (or tear down strays when the scene has no sky).
 		world.ensureEnvironmentLights();
 		world.markHierarchyDirty();
 		return true;

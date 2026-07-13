@@ -2251,6 +2251,7 @@ struct D3D11RendererImpl
                  const glm::vec3& sunDir, const IRenderer::EnvironmentSettings& env)
     {
         if (!skyReady) return;
+        if (!env.skyEnabled) return; // no Sky entity → leave the cleared background
         SkyCB cb{};
         cb.invViewProj = invVP;
         cb.sunDir      = sunDir; cb.timeOfDay = env.timeOfDay;

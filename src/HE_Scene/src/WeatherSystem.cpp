@@ -111,7 +111,12 @@ void WeatherSystem::update(HorizonWorld& world, float dt, const glm::vec3& camer
     // always editable, no toggle needed. Selecting a (new) preset reclaims every value.
     const float tRain = (tp.precipType == PrecipType::Rain) ? tPrec : 0.0f;
     const float tSnow = (tp.precipType == PrecipType::Snow) ? tPrec : 0.0f;
-    EnvironmentComponent* env = reg.try_get<EnvironmentComponent>(world.rootEntity());
+    // Weather drives the scene's Sky (EnvironmentComponent) wherever it lives — its
+    // own dedicated entity, not necessarily the root. Null when the scene has no sky
+    // (weather then just runs its own blend/precip with nothing to write into).
+    const Entity envEntity = world.environmentEntity();
+    EnvironmentComponent* env = (envEntity == entt::null)
+        ? nullptr : reg.try_get<EnvironmentComponent>(envEntity);
     float windDirDeg = env ? env->windDirection : 30.0f;
     const bool reclaim = (wx.targetKind != wx.prevTarget);
 

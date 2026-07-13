@@ -1958,6 +1958,7 @@ struct D3D12RendererImpl
                  const IRenderer::EnvironmentSettings& env)
     {
         if (!skyReady) return;
+        if (!env.skyEnabled) return; // no Sky entity → leave the cleared background
         auto* pso12 = usingHDR ? skyHdrPso.Get() : (skyLdrPso ? skyLdrPso.Get() : nullptr);
         if (!pso12) return;
         SkyCB cb{};

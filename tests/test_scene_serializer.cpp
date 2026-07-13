@@ -611,13 +611,14 @@ TEST_CASE("World root identity survives round-trip with children")
 	he_test::removeQuiet(file);
 }
 
-TEST_CASE("EnvironmentComponent on the World root round-trips")
+TEST_CASE("EnvironmentComponent round-trips on a dedicated Sky entity")
 {
 	const fs::path file = fs::temp_directory_path() / "he_test_env.hescene";
 
 	HorizonWorld world;
 	world.createEntity("Decoy"); // ensure the root is not the only/first entity
-	auto& env = world.registry().get<EnvironmentComponent>(world.rootEntity());
+	const Entity sky = world.addSky(); // Sky is its own entity now, not a root component
+	auto& env = world.registry().get<EnvironmentComponent>(sky);
 	env.dayNightCycle  = true;
 	env.timeOfDay      = 0.73f;
 	env.autoAdvance    = true;
@@ -633,7 +634,10 @@ TEST_CASE("EnvironmentComponent on the World root round-trips")
 
 	HorizonWorld loaded;
 	REQUIRE(ser.load(loaded, file, SerializeFormat::JSON));
-	const auto& le = loaded.registry().get<EnvironmentComponent>(loaded.rootEntity());
+	const Entity lsky = loaded.environmentEntity();
+	REQUIRE((lsky != entt::null));
+	CHECK(lsky != loaded.rootEntity()); // dedicated entity, not the World root
+	const auto& le = loaded.registry().get<EnvironmentComponent>(lsky);
 	CHECK(le.dayNightCycle  == true);
 	CHECK(le.timeOfDay      == doctest::Approx(0.73f));
 	CHECK(le.autoAdvance    == true);
@@ -661,8 +665,8 @@ TEST_CASE("Play-mode cycle: snapshot, clear, restore")
 	world.createEntity("SpawnedDuringPlay");
 	world.clear();
 
-	// Only the root + the two built-in environment lights survive the clear; no
-	// authored scene entity may remain.
+	// Only the root survives the clear; no authored scene entity may remain. (A
+	// cleared world is bare — no Sky/Weather and hence no built-in env lights.)
 	auto& creg = world.registry();
 	int sceneEntities = 0;
 	for (auto e : creg.view<entt::entity>())
