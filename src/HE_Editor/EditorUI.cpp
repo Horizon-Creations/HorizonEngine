@@ -1436,6 +1436,41 @@ void EditorUI::RenderProjectHub(AppContext& ctx)
 #ifdef HE_IMGUI_ENABLED
     const ImGuiViewport* vp = ImGui::GetMainViewport();
 
+    // Set by the native File ▸ Open Project menu item below; consumed by the
+    // "Browse .heproj…" button handler in Panel 3, so the menu triggers the
+    // same file dialog. Unconditional so the button condition compiles on all
+    // platforms (only ever set on macOS).
+    static bool s_hubOpenBrowseRequested = false;
+
+#ifdef __APPLE__
+    // The macOS App-menu (Quit/About/New/Open) is installed AND pumped here too:
+    // RenderEditor — which normally does this — only runs once a project is
+    // loaded, so on the Hub the menu queue was never drained and Cmd+Q (and the
+    // other items) did nothing after a project had been opened and closed.
+    MacMenuBar::install();                       // idempotent
+    if (MacMenuBar::available())
+    {
+        MacMenuBar::setProjectLoaded(false);     // grey out project-only items
+        using MC = MacMenuBar::Cmd;
+        for (MC c; (c = MacMenuBar::take()) != MC::None; )
+        {
+            switch (c)
+            {
+            case MC::Quit:        if (ctx.quit) ctx.quit();          break;
+            case MC::NewProject:  // fresh Create form (Panel 1)
+                ctx.hubProjectName[0] = '\0';
+                ctx.hubProjectDir[0]  = '\0';
+                ctx.hubSelectedPreset = 0;
+                ctx.hubSelectedLang   = 0;
+                ctx.hubCreateError.clear();
+                break;
+            case MC::OpenProject: s_hubOpenBrowseRequested = true;   break;
+            default: break;   // project-scoped / editor-only items: no-op here
+            }
+        }
+    }
+#endif
+
     ImGui::SetNextWindowPos(vp->Pos,  ImGuiCond_Always);
     ImGui::SetNextWindowSize(vp->Size, ImGuiCond_Always);
     ImGui::SetNextWindowViewport(vp->ID);
@@ -1857,8 +1892,10 @@ void EditorUI::RenderProjectHub(AppContext& ctx)
     }
 
     ImGui::SetCursorPosX(padding);
-    if (ImGui::Button("Browse .heproj...", ImVec2(panelW - padding * 2.0f, 36.0f)))
+    if (ImGui::Button("Browse .heproj...", ImVec2(panelW - padding * 2.0f, 36.0f))
+        || s_hubOpenBrowseRequested)
     {
+        s_hubOpenBrowseRequested = false;
         ctx.hubOpenError.clear();
         SDL_DialogFileFilter filters[] = {
             { "HorizonEngine Project", "heproj" },
