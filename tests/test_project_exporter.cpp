@@ -526,7 +526,7 @@ TEST_CASE("ProjectExporter packs a binary startup scene into the pak")
     he_test::removeAllQuiet(outputDir);
 }
 
-#ifdef HE_HAVE_OPENSSL
+#ifdef HE_HAVE_CRYPTO
 // End-to-end: exporting with encryption generates a random key, ships it in
 // project.hcfg, and the runtime path (loadPak with that key) decrypts correctly.
 // This is the fix for the bug where the game never passed a key to loadPak.
@@ -567,4 +567,4 @@ TEST_CASE("ProjectExporter encrypts and the hcfg key decrypts the pak")
     he_test::removeAllQuiet(contentDir);
     he_test::removeAllQuiet(outputDir);
 }
-#endif // HE_HAVE_OPENSSL
+#endif // HE_HAVE_CRYPTO

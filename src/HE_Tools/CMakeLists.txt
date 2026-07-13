@@ -59,7 +59,6 @@ add_executable(hpak_packer
 target_link_libraries(hpak_packer
     PRIVATE HorizonCore
     PRIVATE HorizonScene
-    # PRIVATE mbedtls  # FetchContent — replace XOR with AES-256-CBC
 )
 if(HE_HAVE_LZ4)
     target_link_libraries(hpak_packer PRIVATE lz4::lz4)
@@ -69,10 +68,8 @@ if(HE_HAVE_ZSTD)
     target_link_libraries(hpak_packer PRIVATE zstd::zstd)
     target_compile_definitions(hpak_packer PRIVATE HE_HAVE_ZSTD)
 endif()
-if(HE_HAVE_OPENSSL)
-    target_link_libraries(hpak_packer PRIVATE OpenSSL::Crypto)
-    target_compile_definitions(hpak_packer PRIVATE HE_HAVE_OPENSSL)
-endif()
+# Crypto backend (OpenSSL, or fetched mbedTLS fallback) — see root CMakeLists.
+target_link_libraries(hpak_packer PRIVATE he_crypto)
 target_include_directories(hpak_packer
     PRIVATE src/Packer
     PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_Core/include

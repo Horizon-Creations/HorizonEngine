@@ -252,19 +252,55 @@ else()
     set(HE_HAVE_ZSTD TRUE)
 endif()
 
-# ─── OpenSSL (hpak AES-256-GCM encryption) ────────────────────────────────────
+# ─── Crypto backend (hpak AES-256-GCM encryption) ─────────────────────────────
 # Encryption of shipped assets is obfuscation against casual ripping, NOT a
-# security boundary (the key ships with the game). Optional: without OpenSSL the
-# hpak encrypt path is simply unavailable (assets pack unencrypted).
+# security boundary (the key ships with the game). The primary backend is system
+# OpenSSL; if it isn't installed we fetch mbedTLS from source so AES-256-GCM is
+# ALWAYS available and encryption is never silently disabled. Both feed the same
+# backend-agnostic wrapper (src/HE_Core/src/Hpak/Aes256Gcm.cpp), selected at
+# compile time via HE_HAVE_OPENSSL / HE_HAVE_MBEDTLS.
 if(NOT OPENSSL_ROOT_DIR AND EXISTS "/opt/homebrew/opt/openssl@3")
     set(OPENSSL_ROOT_DIR "/opt/homebrew/opt/openssl@3")
 endif()
 find_package(OpenSSL QUIET COMPONENTS Crypto)
 if(OPENSSL_FOUND)
-    message(STATUS "HorizonEngine: OpenSSL found — hpak AES-256-GCM enabled")
+    message(STATUS "HorizonEngine: OpenSSL found (system) — hpak AES-256-GCM enabled")
     set(HE_HAVE_OPENSSL TRUE)
 else()
-    message(STATUS "HorizonEngine: OpenSSL not found — hpak encryption disabled")
+    # No system OpenSSL — build mbedTLS instead (CMake-native, unlike OpenSSL's
+    # Perl/nasm build). We fetch the RELEASE TARBALL, not the git tag: the tarball
+    # ships the pre-generated sources so GEN_FILES can be OFF and no Python/Jinja2
+    # codegen toolchain is needed. Only libmbedcrypto is used (GCM + CTR-DRBG).
+    message(STATUS "HorizonEngine: OpenSSL not found — fetching mbedTLS for AES-256-GCM")
+    FetchContent_Declare(
+        mbedtls
+        URL      https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.7/mbedtls-3.6.7.tar.bz2
+        URL_HASH SHA256=a7e8bcbec0e6f761b4af24f25677626b35f762f68eef79c08677a363212d11f6
+    )
+    set(ENABLE_PROGRAMS        OFF CACHE BOOL "" FORCE) # no sample apps
+    set(ENABLE_TESTING         OFF CACHE BOOL "" FORCE) # no test suites (needs framework submodule)
+    set(GEN_FILES              OFF CACHE BOOL "" FORCE) # tarball ships generated sources
+    set(MBEDTLS_FATAL_WARNINGS OFF CACHE BOOL "" FORCE) # don't -Werror mbedTLS on new MSVC
+    FetchContent_MakeAvailable(mbedtls)
+    if(TARGET mbedcrypto)
+        set(HE_HAVE_MBEDTLS TRUE)
+        message(STATUS "HorizonEngine: mbedTLS fetched — hpak AES-256-GCM enabled (mbedcrypto)")
+    else()
+        message(STATUS "HorizonEngine: mbedTLS target not found — hpak encryption disabled")
+    endif()
+endif()
+
+# Backend-agnostic crypto usage requirements. Consumers (HorizonCore, hpak_packer)
+# link `he_crypto` and get the right library plus HE_HAVE_CRYPTO and the concrete
+# backend macro. Linking it is a no-op when neither backend resolved, in which case
+# encryption is compiled out (Hpak::cryptoAvailable() returns false).
+add_library(he_crypto INTERFACE)
+if(HE_HAVE_OPENSSL)
+    target_link_libraries(he_crypto INTERFACE OpenSSL::Crypto)
+    target_compile_definitions(he_crypto INTERFACE HE_HAVE_CRYPTO HE_HAVE_OPENSSL)
+elseif(HE_HAVE_MBEDTLS)
+    target_link_libraries(he_crypto INTERFACE mbedcrypto)
+    target_compile_definitions(he_crypto INTERFACE HE_HAVE_CRYPTO HE_HAVE_MBEDTLS)
 endif()
 
 # ─── Python (optional: CPython embedding for Python gameplay scripting) ───────

@@ -305,7 +305,7 @@ TEST_CASE("Incremental export: unchanged assets are reused, changes repack")
     he_test::removeAllQuiet(dir); he_test::removeAllQuiet(out);
 }
 
-#ifdef HE_HAVE_OPENSSL
+#ifdef HE_HAVE_CRYPTO
 TEST_CASE("Incremental export: encryption reuses the previous key, pak stays readable")
 {
     const auto dir = fs::temp_directory_path() / "he_inc_enc_src";
@@ -399,7 +399,7 @@ TEST_CASE("patchEmbeddedPakKey: patches the block, readEmbeddedPakKey round-trip
     he_test::removeAllQuiet(dir);
 }
 
-#ifdef HE_HAVE_OPENSSL
+#ifdef HE_HAVE_CRYPTO
 TEST_CASE("Export with encryption embeds the key in the game binary, not the hcfg")
 {
     const auto dir = fs::temp_directory_path() / "he_embed_src";
@@ -519,7 +519,7 @@ TEST_CASE("Export fails hard when copying a runtime binary fails")
     he_test::removeAllQuiet(dir); he_test::removeAllQuiet(rt); he_test::removeAllQuiet(out);
 }
 
-#ifdef HE_HAVE_OPENSSL
+#ifdef HE_HAVE_CRYPTO
 TEST_CASE("Key patching preserves the executable bit")
 {
     const auto dir = fs::temp_directory_path() / "he_perm_src";

@@ -1,6 +1,6 @@
 #include <Hpak/Aes256Gcm.h>
 
-#ifdef HE_HAVE_OPENSSL
+#if defined(HE_HAVE_OPENSSL)
 #  include <openssl/evp.h>
 #  include <openssl/rand.h>
 
@@ -94,7 +94,101 @@ bool aesGcmDecrypt(const uint8_t key[32], const uint8_t nonce[12],
 
 } // namespace Hpak
 
-#else // !HE_HAVE_OPENSSL — no crypto backend
+#elif defined(HE_HAVE_MBEDTLS) // ── mbedTLS fallback (fetched when no system OpenSSL) ──
+#  include <mbedtls/gcm.h>
+#  include <mbedtls/ctr_drbg.h>
+#  include <mbedtls/entropy.h>
+
+namespace Hpak
+{
+static constexpr int kTagLen   = 16;
+static constexpr int kNonceLen = 12;
+
+bool cryptoAvailable() { return true; }
+
+bool randomBytes(uint8_t* out, size_t n)
+{
+    if (n == 0) return true;
+    if (!out)   return false;
+
+    // A fresh entropy-seeded CTR-DRBG per call (mirrors OpenSSL's RAND_bytes and
+    // avoids shared mutable state); this path runs at pack time, not in a hot loop.
+    mbedtls_entropy_context  entropy;
+    mbedtls_ctr_drbg_context drbg;
+    mbedtls_entropy_init(&entropy);
+    mbedtls_ctr_drbg_init(&drbg);
+
+    bool ok = mbedtls_ctr_drbg_seed(&drbg, mbedtls_entropy_func, &entropy,
+                                    nullptr, 0) == 0;
+    // ctr_drbg caps one request at MBEDTLS_CTR_DRBG_MAX_REQUEST (1024) bytes.
+    while (ok && n > 0)
+    {
+        const size_t chunk = n < MBEDTLS_CTR_DRBG_MAX_REQUEST
+                                 ? n : static_cast<size_t>(MBEDTLS_CTR_DRBG_MAX_REQUEST);
+        if (mbedtls_ctr_drbg_random(&drbg, out, chunk) != 0) { ok = false; break; }
+        out += chunk;
+        n   -= chunk;
+    }
+
+    mbedtls_ctr_drbg_free(&drbg);
+    mbedtls_entropy_free(&entropy);
+    return ok;
+}
+
+bool aesGcmEncrypt(const uint8_t key[32], const uint8_t nonce[12],
+                   const uint8_t* plaintext, size_t len,
+                   std::vector<uint8_t>& out)
+{
+    mbedtls_gcm_context gcm;
+    mbedtls_gcm_init(&gcm);
+
+    bool ok = false;
+    do {
+        if (mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, key, 256) != 0) break;
+        out.resize(len + kTagLen);
+        // One-shot: ciphertext → out[0..len), 16-byte tag → out[len..len+16).
+        if (mbedtls_gcm_crypt_and_tag(&gcm, MBEDTLS_GCM_ENCRYPT, len,
+                                      nonce, kNonceLen, nullptr, 0,
+                                      plaintext, out.data(),
+                                      kTagLen, out.data() + len) != 0) break;
+        ok = true;
+    } while (false);
+
+    mbedtls_gcm_free(&gcm);
+    if (!ok) out.clear();
+    return ok;
+}
+
+bool aesGcmDecrypt(const uint8_t key[32], const uint8_t nonce[12],
+                   const uint8_t* data, size_t len,
+                   std::vector<uint8_t>& out)
+{
+    if (len < static_cast<size_t>(kTagLen)) return false;
+    const size_t   ctLen = len - kTagLen;
+    const uint8_t* tag   = data + ctLen;
+
+    mbedtls_gcm_context gcm;
+    mbedtls_gcm_init(&gcm);
+
+    bool ok = false;
+    do {
+        if (mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, key, 256) != 0) break;
+        out.resize(ctLen);
+        // Returns MBEDTLS_ERR_GCM_AUTH_FAILED on tag mismatch (wrong key / tampered).
+        if (mbedtls_gcm_auth_decrypt(&gcm, ctLen, nonce, kNonceLen,
+                                     nullptr, 0, tag, kTagLen,
+                                     data, out.data()) != 0) break;
+        ok = true;
+    } while (false);
+
+    mbedtls_gcm_free(&gcm);
+    if (!ok) out.clear();
+    return ok;
+}
+
+} // namespace Hpak
+
+#else // no crypto backend
 
 namespace Hpak
 {
