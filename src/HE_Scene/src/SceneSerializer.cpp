@@ -28,6 +28,13 @@
 #include "HorizonScene/Components/UIImageComponent.h"
 #include "HorizonScene/Components/UIButtonComponent.h"
 #include "HorizonScene/Components/AnimatorStateMachineComponent.h"
+#include "HorizonScene/Components/AnimatorComponent.h"
+#include "HorizonScene/Components/AnimatorBlendComponent.h"
+#include "HorizonScene/Components/SkeletalMeshComponent.h"
+#include "HorizonScene/Components/PropertyAnimatorComponent.h"
+#include "HorizonScene/Components/NavMeshComponent.h"
+#include "HorizonScene/Components/NavAgentComponent.h"
+#include "HorizonScene/NavigationSystem.h"
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <cstring>
@@ -375,6 +382,87 @@ namespace
 				{ "particleAsset", uuidToJson(ps->particleAssetId) },
 				{ "visible",       ps->visible },
 				{ "playing",       ps->playing },
+			};
+		}
+		if (auto* sk = registry.try_get<SkeletalMeshComponent>(entity))
+		{
+			comps["skeletalmesh"] = {
+				{ "mesh",           uuidToJson(sk->meshAssetId) },
+				{ "visible",        sk->visible },
+				{ "castsShadow",    sk->castsShadow },
+				{ "receivesShadow", sk->receivesShadow },
+			};
+		}
+		if (auto* an = registry.try_get<AnimatorComponent>(entity))
+		{
+			comps["animator"] = {
+				{ "clip",          uuidToJson(an->clipAssetId) },
+				{ "playbackTime",  an->playbackTime },
+				{ "playbackSpeed", an->playbackSpeed },
+				{ "looping",       an->looping },
+				{ "playing",       an->playing },
+			};
+		}
+		if (auto* ab = registry.try_get<AnimatorBlendComponent>(entity))
+		{
+			comps["animatorblend"] = {
+				{ "clipA",         uuidToJson(ab->clipAId) },
+				{ "clipB",         uuidToJson(ab->clipBId) },
+				{ "blendAlpha",    ab->blendAlpha },
+				{ "playbackTime",  ab->playbackTime },
+				{ "playbackSpeed", ab->playbackSpeed },
+				{ "looping",       ab->looping },
+				{ "playing",       ab->playing },
+			};
+		}
+		if (auto* pa = registry.try_get<PropertyAnimatorComponent>(entity))
+		{
+			comps["propertyanimator"] = {
+				{ "clip",          uuidToJson(pa->clipId) },
+				{ "playbackTime",  pa->playbackTime },
+				{ "playbackSpeed", pa->playbackSpeed },
+				{ "looping",       pa->looping },
+				{ "playing",       pa->playing },
+			};
+		}
+		if (auto* nm = registry.try_get<NavMeshComponent>(entity))
+		{
+			json nmJson = {
+				{ "config", {
+					{ "cellSize",          nm->config.cellSize },
+					{ "cellHeight",        nm->config.cellHeight },
+					{ "walkableHeight",    nm->config.walkableHeight },
+					{ "walkableClimb",     nm->config.walkableClimb },
+					{ "walkableRadius",    nm->config.walkableRadius },
+					{ "maxSlope",          nm->config.maxSlope },
+					{ "maxEdgeLen",        nm->config.maxEdgeLen },
+					{ "maxSimplification", nm->config.maxSimplification },
+					{ "minRegionArea",     nm->config.minRegionArea },
+					{ "mergeRegionArea",   nm->config.mergeRegionArea },
+					{ "detailSampleDist",  nm->config.detailSampleDist },
+					{ "detailMaxError",    nm->config.detailMaxError },
+				} },
+			};
+			// Baked navMesh/navQuery are runtime-only (re-baked on load, see
+			// applyComponents) — only the source geometry needs to survive the
+			// round-trip, as base64 blobs like terrain's sculptHeights (a JSON
+			// array of thousands of floats/ints would otherwise dominate the file).
+			if (!nm->geometry.verts.empty())
+				nmJson["geometry"]["vertsB64"] = base64Encode(
+					reinterpret_cast<const uint8_t*>(nm->geometry.verts.data()),
+					nm->geometry.verts.size() * sizeof(float));
+			if (!nm->geometry.tris.empty())
+				nmJson["geometry"]["trisB64"] = base64Encode(
+					reinterpret_cast<const uint8_t*>(nm->geometry.tris.data()),
+					nm->geometry.tris.size() * sizeof(int));
+			comps["navmesh"] = std::move(nmJson);
+		}
+		if (auto* na = registry.try_get<NavAgentComponent>(entity))
+		{
+			comps["navagent"] = {
+				{ "targetPos",    vec3ToJson(na->targetPos) },
+				{ "speed",        na->speed },
+				{ "stoppingDist", na->stoppingDist },
 			};
 		}
 		if (auto* sm = registry.try_get<AnimatorStateMachineComponent>(entity))
@@ -798,6 +886,107 @@ namespace
 				lg.looping         = c.value("looping",         lg.looping);
 			}
 			registry.emplace_or_replace<ParticleSystemComponent>(entity, std::move(ps));
+		}
+		if (comps.contains("skeletalmesh"))
+		{
+			const json& c = comps["skeletalmesh"];
+			SkeletalMeshComponent sk;
+			sk.meshAssetId    = jsonToUuid(c.value("mesh", json()));
+			sk.visible        = c.value("visible",        sk.visible);
+			sk.castsShadow    = c.value("castsShadow",    sk.castsShadow);
+			sk.receivesShadow = c.value("receivesShadow", sk.receivesShadow);
+			registry.emplace_or_replace<SkeletalMeshComponent>(entity, std::move(sk));
+		}
+		if (comps.contains("animator"))
+		{
+			const json& c = comps["animator"];
+			AnimatorComponent an;
+			an.clipAssetId   = jsonToUuid(c.value("clip", json()));
+			an.playbackTime  = c.value("playbackTime",  an.playbackTime);
+			an.playbackSpeed = c.value("playbackSpeed", an.playbackSpeed);
+			an.looping       = c.value("looping",       an.looping);
+			an.playing       = c.value("playing",       an.playing);
+			registry.emplace_or_replace<AnimatorComponent>(entity, an);
+		}
+		if (comps.contains("animatorblend"))
+		{
+			const json& c = comps["animatorblend"];
+			AnimatorBlendComponent ab;
+			ab.clipAId       = jsonToUuid(c.value("clipA", json()));
+			ab.clipBId       = jsonToUuid(c.value("clipB", json()));
+			ab.blendAlpha    = c.value("blendAlpha",    ab.blendAlpha);
+			ab.playbackTime  = c.value("playbackTime",  ab.playbackTime);
+			ab.playbackSpeed = c.value("playbackSpeed", ab.playbackSpeed);
+			ab.looping       = c.value("looping",       ab.looping);
+			ab.playing       = c.value("playing",       ab.playing);
+			registry.emplace_or_replace<AnimatorBlendComponent>(entity, ab);
+		}
+		if (comps.contains("propertyanimator"))
+		{
+			const json& c = comps["propertyanimator"];
+			PropertyAnimatorComponent pa;
+			pa.clipId        = jsonToUuid(c.value("clip", json()));
+			pa.playbackTime  = c.value("playbackTime",  pa.playbackTime);
+			pa.playbackSpeed = c.value("playbackSpeed", pa.playbackSpeed);
+			pa.looping       = c.value("looping",       pa.looping);
+			pa.playing       = c.value("playing",       pa.playing);
+			registry.emplace_or_replace<PropertyAnimatorComponent>(entity, pa);
+		}
+		if (comps.contains("navmesh"))
+		{
+			const json& c = comps["navmesh"];
+			NavMeshComponent nm;
+			if (c.contains("config"))
+			{
+				const json& cc = c["config"];
+				nm.config.cellSize          = cc.value("cellSize",          nm.config.cellSize);
+				nm.config.cellHeight        = cc.value("cellHeight",        nm.config.cellHeight);
+				nm.config.walkableHeight    = cc.value("walkableHeight",    nm.config.walkableHeight);
+				nm.config.walkableClimb     = cc.value("walkableClimb",     nm.config.walkableClimb);
+				nm.config.walkableRadius    = cc.value("walkableRadius",    nm.config.walkableRadius);
+				nm.config.maxSlope          = cc.value("maxSlope",          nm.config.maxSlope);
+				nm.config.maxEdgeLen        = cc.value("maxEdgeLen",        nm.config.maxEdgeLen);
+				nm.config.maxSimplification = cc.value("maxSimplification", nm.config.maxSimplification);
+				nm.config.minRegionArea     = cc.value("minRegionArea",     nm.config.minRegionArea);
+				nm.config.mergeRegionArea   = cc.value("mergeRegionArea",   nm.config.mergeRegionArea);
+				nm.config.detailSampleDist  = cc.value("detailSampleDist",  nm.config.detailSampleDist);
+				nm.config.detailMaxError    = cc.value("detailMaxError",    nm.config.detailMaxError);
+			}
+			if (c.contains("geometry"))
+			{
+				const json& gj = c["geometry"];
+				if (gj.contains("vertsB64") && gj["vertsB64"].is_string())
+				{
+					const std::vector<uint8_t> bytes = base64Decode(gj["vertsB64"].get<std::string>());
+					nm.geometry.verts.resize(bytes.size() / sizeof(float));
+					if (!nm.geometry.verts.empty())
+						std::memcpy(nm.geometry.verts.data(), bytes.data(),
+						            nm.geometry.verts.size() * sizeof(float));
+				}
+				if (gj.contains("trisB64") && gj["trisB64"].is_string())
+				{
+					const std::vector<uint8_t> bytes = base64Decode(gj["trisB64"].get<std::string>());
+					nm.geometry.tris.resize(bytes.size() / sizeof(int));
+					if (!nm.geometry.tris.empty())
+						std::memcpy(nm.geometry.tris.data(), bytes.data(),
+						            nm.geometry.tris.size() * sizeof(int));
+				}
+			}
+			// navMesh/navQuery weren't persisted (see serializeComponents) — re-bake
+			// immediately from the restored geometry so a loaded scene has a working
+			// NavMesh without requiring a manual re-bake in the editor.
+			if (!nm.geometry.verts.empty() && !nm.geometry.tris.empty())
+				NavigationSystem::bake(nm);
+			registry.emplace_or_replace<NavMeshComponent>(entity, std::move(nm));
+		}
+		if (comps.contains("navagent"))
+		{
+			const json& c = comps["navagent"];
+			NavAgentComponent na;
+			na.targetPos    = jsonToVec3(c.value("targetPos", json()), na.targetPos);
+			na.speed        = c.value("speed",        na.speed);
+			na.stoppingDist = c.value("stoppingDist", na.stoppingDist);
+			registry.emplace_or_replace<NavAgentComponent>(entity, na);
 		}
 		if (comps.contains("foliage"))
 		{
