@@ -14,7 +14,8 @@
 #include <string>
 
 struct SDL_Window;
-struct MaterialShaderVariant; // ContentManager/Assets.h — baked per-backend shader
+struct MaterialShaderVariant; // ContentManager/Assets.h — baked per-backend material shader
+struct ParticleShaderVariant; // ContentManager/Assets.h — baked per-backend particle shader
 
 class OpenGLRenderer : public IRenderer
 {
@@ -240,6 +241,16 @@ private:
 	unsigned int m_particlePreviewProgram = 0, m_particlePreviewInstVBO = 0, m_particlePreviewVAO = 0;
 	int          m_uPPvViewProj = -1, m_uPPvCamRight = -1, m_uPPvCamUp = -1, m_uPPvHasTex = -1;
 
+	// GPU-instanced ParticleGraph particle rendering (the real scene draw path, see
+	// RenderWorld::particleBatches) — one compiled program per unique color/alpha-
+	// over-life config, hash-keyed cache mirroring m_materialPrograms; a single
+	// shared instance VAO/VBO re-uploaded per batch (batches don't overlap within a
+	// frame, so one scratch buffer suffices). Drawn in the transparent pass.
+	std::unordered_map<uint64_t, unsigned int> m_particlePrograms; // hash → program (0 = failed)
+	unsigned int m_particleInstVBO = 0, m_particleVAO = 0;
+	unsigned int getOrBuildParticleProgram(uint64_t key, const HE::ParticleEmitterConfig& config,
+	                                       const ParticleShaderVariant* precompiled);
+
 	unsigned int getOrBuildMaterialProgram(uint64_t key, const std::string& fragGlsl,
 	                                       const std::string& vertBody = {},
 	                                       const MaterialShaderVariant* precompiled = nullptr);
@@ -380,6 +391,9 @@ private:
 	void DestroyParticleResources();
 	void SimulateGpuParticles();
 	void DrawGpuParticles(const glm::mat4& viewProj, const glm::vec3& camPos);
+	// Draws RenderWorld::particleBatches (ParticleGraph particles), one GPU-
+	// instanced glDrawArraysInstanced per batch — see getOrBuildParticleProgram.
+	void DrawParticleGraphBatches(const glm::mat4& viewProj, const glm::mat4& view);
 
 	// Base-color textures for MaterialComponent overrides, keyed by material
 	// UUID. A present entry of 0 means "resolved, no texture". Drained/cleared

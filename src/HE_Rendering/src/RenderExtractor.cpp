@@ -213,6 +213,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 		const HE::ParticleEmitterConfig& config = ps.resolvedConfig; // (re)resolved by ParticleSystem::update
 
 		ParticleBatch batch;
+		batch.particleAssetId = ps.particleAssetId;
 		batch.meshAssetId     = (config.meshAssetId == HE::UUID{}) ? HE::kDefaultQuadMeshId : config.meshAssetId;
 		batch.materialAssetId = config.materialAssetId;
 		batch.config          = config;
