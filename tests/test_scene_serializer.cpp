@@ -12,6 +12,12 @@
 #include <HorizonScene/Components/EnvironmentComponent.h>
 #include <HorizonScene/Components/EnvironmentLightComponent.h>
 #include <HorizonScene/Components/AnimatorStateMachineComponent.h>
+#include <HorizonScene/Components/AnimatorComponent.h>
+#include <HorizonScene/Components/AnimatorBlendComponent.h>
+#include <HorizonScene/Components/SkeletalMeshComponent.h>
+#include <HorizonScene/Components/PropertyAnimatorComponent.h>
+#include <HorizonScene/Components/NavMeshComponent.h>
+#include <HorizonScene/Components/NavAgentComponent.h>
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <filesystem>
@@ -313,6 +319,262 @@ TEST_CASE("SceneSerializer stages a legacy inline state machine (pre-asset forma
 	}
 	CHECK(found);
 	he_test::removeQuiet(file);
+}
+
+TEST_CASE("SceneSerializer round-trips SkeletalMeshComponent")
+{
+	for (SerializeFormat fmt : { SerializeFormat::JSON, SerializeFormat::Binary })
+	{
+		const fs::path file = fs::temp_directory_path() / "he_test_skeletalmesh.hescene";
+		HorizonWorld world;
+		auto e = world.createEntity("Character");
+
+		SkeletalMeshComponent sk;
+		sk.meshAssetId     = HE::UUID::generate();
+		sk.visible         = false;
+		sk.castsShadow     = false;
+		sk.receivesShadow  = false;
+		world.registry().emplace<SkeletalMeshComponent>(e, sk);
+
+		SceneSerializer ser;
+		REQUIRE(ser.save(world, file, fmt));
+		HorizonWorld loaded;
+		REQUIRE(ser.load(loaded, file, fmt));
+
+		bool found = false;
+		for (auto [le, lsk] : loaded.registry().view<SkeletalMeshComponent>().each())
+		{
+			found = true;
+			CHECK(lsk.meshAssetId == sk.meshAssetId);
+			CHECK(lsk.visible        == false);
+			CHECK(lsk.castsShadow    == false);
+			CHECK(lsk.receivesShadow == false);
+		}
+		CHECK(found);
+		he_test::removeQuiet(file);
+	}
+}
+
+TEST_CASE("SceneSerializer round-trips AnimatorComponent")
+{
+	for (SerializeFormat fmt : { SerializeFormat::JSON, SerializeFormat::Binary })
+	{
+		const fs::path file = fs::temp_directory_path() / "he_test_animator.hescene";
+		HorizonWorld world;
+		auto e = world.createEntity("Character");
+
+		AnimatorComponent an;
+		an.clipAssetId   = HE::UUID::generate();
+		an.playbackTime  = 1.25f;
+		an.playbackSpeed = 2.0f;
+		an.looping       = false;
+		an.playing       = false;
+		world.registry().emplace<AnimatorComponent>(e, an);
+
+		SceneSerializer ser;
+		REQUIRE(ser.save(world, file, fmt));
+		HorizonWorld loaded;
+		REQUIRE(ser.load(loaded, file, fmt));
+
+		bool found = false;
+		for (auto [le, lan] : loaded.registry().view<AnimatorComponent>().each())
+		{
+			found = true;
+			CHECK(lan.clipAssetId == an.clipAssetId);
+			CHECK(lan.playbackTime  == doctest::Approx(1.25f));
+			CHECK(lan.playbackSpeed == doctest::Approx(2.0f));
+			CHECK(lan.looping == false);
+			CHECK(lan.playing == false);
+		}
+		CHECK(found);
+		he_test::removeQuiet(file);
+	}
+}
+
+TEST_CASE("SceneSerializer round-trips AnimatorBlendComponent")
+{
+	for (SerializeFormat fmt : { SerializeFormat::JSON, SerializeFormat::Binary })
+	{
+		const fs::path file = fs::temp_directory_path() / "he_test_animatorblend.hescene";
+		HorizonWorld world;
+		auto e = world.createEntity("Character");
+
+		AnimatorBlendComponent ab;
+		ab.clipAId       = HE::UUID::generate();
+		ab.clipBId       = HE::UUID::generate();
+		ab.blendAlpha    = 0.75f;
+		ab.playbackTime  = 3.5f;
+		ab.playbackSpeed = 0.5f;
+		ab.looping       = false;
+		ab.playing       = false;
+		world.registry().emplace<AnimatorBlendComponent>(e, ab);
+
+		SceneSerializer ser;
+		REQUIRE(ser.save(world, file, fmt));
+		HorizonWorld loaded;
+		REQUIRE(ser.load(loaded, file, fmt));
+
+		bool found = false;
+		for (auto [le, lab] : loaded.registry().view<AnimatorBlendComponent>().each())
+		{
+			found = true;
+			CHECK(lab.clipAId == ab.clipAId);
+			CHECK(lab.clipBId == ab.clipBId);
+			CHECK(lab.blendAlpha    == doctest::Approx(0.75f));
+			CHECK(lab.playbackTime  == doctest::Approx(3.5f));
+			CHECK(lab.playbackSpeed == doctest::Approx(0.5f));
+			CHECK(lab.looping == false);
+			CHECK(lab.playing == false);
+		}
+		CHECK(found);
+		he_test::removeQuiet(file);
+	}
+}
+
+TEST_CASE("SceneSerializer round-trips PropertyAnimatorComponent")
+{
+	for (SerializeFormat fmt : { SerializeFormat::JSON, SerializeFormat::Binary })
+	{
+		const fs::path file = fs::temp_directory_path() / "he_test_propertyanimator.hescene";
+		HorizonWorld world;
+		auto e = world.createEntity("Door");
+
+		PropertyAnimatorComponent pa;
+		pa.clipId        = HE::UUID::generate();
+		pa.playbackTime  = 0.4f;
+		pa.playbackSpeed = 1.5f;
+		pa.looping       = false;
+		pa.playing       = false;
+		world.registry().emplace<PropertyAnimatorComponent>(e, pa);
+
+		SceneSerializer ser;
+		REQUIRE(ser.save(world, file, fmt));
+		HorizonWorld loaded;
+		REQUIRE(ser.load(loaded, file, fmt));
+
+		bool found = false;
+		for (auto [le, lpa] : loaded.registry().view<PropertyAnimatorComponent>().each())
+		{
+			found = true;
+			CHECK(lpa.clipId == pa.clipId);
+			CHECK(lpa.playbackTime  == doctest::Approx(0.4f));
+			CHECK(lpa.playbackSpeed == doctest::Approx(1.5f));
+			CHECK(lpa.looping == false);
+			CHECK(lpa.playing == false);
+		}
+		CHECK(found);
+		he_test::removeQuiet(file);
+	}
+}
+
+TEST_CASE("SceneSerializer round-trips NavMeshComponent (config + geometry, re-bakes on load)")
+{
+	// Flat 10x10 floor in the XZ plane — same shape used by test_navigation.cpp's
+	// makeFlatFloor, small enough to bake instantly and exercise a real re-bake.
+	NavMeshGeometry geo;
+	geo.verts = {
+		-5.0f, 0.0f,  5.0f,
+		 5.0f, 0.0f,  5.0f,
+		 5.0f, 0.0f, -5.0f,
+		-5.0f, 0.0f, -5.0f,
+	};
+	geo.tris = { 0, 1, 2, 0, 2, 3 };
+
+	for (SerializeFormat fmt : { SerializeFormat::JSON, SerializeFormat::Binary })
+	{
+		const fs::path file = fs::temp_directory_path() / "he_test_navmesh.hescene";
+		HorizonWorld world;
+		auto e = world.createEntity("Ground");
+
+		NavMeshComponent nm;
+		nm.config.cellSize          = 0.5f;
+		nm.config.cellHeight        = 0.25f;
+		nm.config.walkableHeight    = 1.8f;
+		nm.config.walkableClimb     = 0.5f;
+		nm.config.walkableRadius    = 0.4f;
+		nm.config.maxSlope          = 30.0f;
+		nm.config.maxEdgeLen        = 10.0f;
+		nm.config.maxSimplification = 1.0f;
+		nm.config.minRegionArea     = 6.0f;
+		nm.config.mergeRegionArea   = 15.0f;
+		nm.config.detailSampleDist  = 5.0f;
+		nm.config.detailMaxError    = 0.8f;
+		nm.geometry = geo;
+		world.registry().emplace<NavMeshComponent>(e, nm);
+
+		SceneSerializer ser;
+		REQUIRE(ser.save(world, file, fmt));
+		HorizonWorld loaded;
+		REQUIRE(ser.load(loaded, file, fmt));
+
+		bool found = false;
+		for (auto [le, lnm] : loaded.registry().view<NavMeshComponent>().each())
+		{
+			found = true;
+			CHECK(lnm.config.cellSize          == doctest::Approx(0.5f));
+			CHECK(lnm.config.cellHeight        == doctest::Approx(0.25f));
+			CHECK(lnm.config.walkableHeight    == doctest::Approx(1.8f));
+			CHECK(lnm.config.walkableClimb     == doctest::Approx(0.5f));
+			CHECK(lnm.config.walkableRadius    == doctest::Approx(0.4f));
+			CHECK(lnm.config.maxSlope          == doctest::Approx(30.0f));
+			CHECK(lnm.config.maxEdgeLen        == doctest::Approx(10.0f));
+			CHECK(lnm.config.maxSimplification == doctest::Approx(1.0f));
+			CHECK(lnm.config.minRegionArea     == doctest::Approx(6.0f));
+			CHECK(lnm.config.mergeRegionArea   == doctest::Approx(15.0f));
+			CHECK(lnm.config.detailSampleDist  == doctest::Approx(5.0f));
+			CHECK(lnm.config.detailMaxError    == doctest::Approx(0.8f));
+
+			REQUIRE(lnm.geometry.verts.size() == geo.verts.size());
+			for (size_t i = 0; i < geo.verts.size(); ++i)
+				CHECK(lnm.geometry.verts[i] == doctest::Approx(geo.verts[i]));
+			REQUIRE(lnm.geometry.tris == geo.tris);
+
+			// navMesh/navQuery aren't persisted — SceneSerializer re-bakes from the
+			// restored geometry on load, so a loaded scene has a working NavMesh.
+			CHECK((bool)lnm.navMesh);
+			CHECK(!lnm.isDirty);
+		}
+		CHECK(found);
+		he_test::removeQuiet(file);
+	}
+}
+
+TEST_CASE("SceneSerializer round-trips NavAgentComponent")
+{
+	for (SerializeFormat fmt : { SerializeFormat::JSON, SerializeFormat::Binary })
+	{
+		const fs::path file = fs::temp_directory_path() / "he_test_navagent.hescene";
+		HorizonWorld world;
+		auto e = world.createEntity("Enemy");
+
+		NavAgentComponent na;
+		na.targetPos    = { 4.0f, 0.0f, -2.0f };
+		na.speed        = 6.0f;
+		na.stoppingDist = 0.5f;
+		world.registry().emplace<NavAgentComponent>(e, na);
+
+		SceneSerializer ser;
+		REQUIRE(ser.save(world, file, fmt));
+		HorizonWorld loaded;
+		REQUIRE(ser.load(loaded, file, fmt));
+
+		bool found = false;
+		for (auto [le, lna] : loaded.registry().view<NavAgentComponent>().each())
+		{
+			found = true;
+			CHECK(lna.targetPos.x == doctest::Approx(4.0f));
+			CHECK(lna.targetPos.y == doctest::Approx(0.0f));
+			CHECK(lna.targetPos.z == doctest::Approx(-2.0f));
+			CHECK(lna.speed        == doctest::Approx(6.0f));
+			CHECK(lna.stoppingDist == doctest::Approx(0.5f));
+			// Runtime path state is not persisted — always reset on load.
+			CHECK(lna.path.empty());
+			CHECK(!lna.hasPath);
+			CHECK(!lna.moving);
+		}
+		CHECK(found);
+		he_test::removeQuiet(file);
+	}
 }
 
 TEST_CASE("World root identity survives round-trip with children")
