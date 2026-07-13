@@ -2337,3 +2337,46 @@ Decode-Roundtrip, `GeometryPass`-Batching-Guard für `instanceTint`, `RenderExtr
 Display in dieser Sandbox): Bone-Overlay-Korrektheit, Partikel-Preview-Optik, das neue
 GPU-instanced Draw tatsächlich auf Bildschirm, NavMesh-Wireframe-Lage. D3D/Vulkan haben wie
 immer noch keine Partikel-Graph-Rendering-Anbindung (GL+Metal-first-Konvention).
+
+## Forts. 70 — Animation-State-Machine-Graph-Editor-Tab (13.07.2026, `e82137f`)
+
+Letztes Stück des Vier-Tabs-Plans aus Forts. 69: `AnimatorStateMachineComponent` bekommt
+dieselbe Graph-Editor-Behandlung wie Material/HorizonCode/Partikel — Zustände als Nodes,
+Übergänge als Links, auf der gemeinsamen `GraphEditor`-Canvas.
+
+- **Schema-Erweiterung**: `AnimationState` bekommt `id` (stabile Node-Id) + `x`/`y`
+  (persistierte Canvas-Position). `AnimationTransition` unverändert (matched weiter per
+  State-Name — keine Laufzeit-Änderung an `AnimationStateMachineSystem` nötig).
+- **Entdeckter Bestandslücke (nicht Teil des ursprünglichen Plans, musste aber gefixt werden,
+  damit der neue Tab überhaupt etwas bringt): `AnimatorStateMachineComponent` hatte GAR KEINE
+  `SceneSerializer`-Anbindung** — weder JSON- noch Binary-Pfad kannten diese Komponente, sie
+  wurde beim Speichern/Laden stillschweigend verworfen. Jetzt vollständig verdrahtet (States
+  inkl. id/x/y, Transitions, Params, currentStateName); CBOR ist ohnehin nur `json::to_cbor()`
+  desselben Baums, also EIN Codepfad deckt beide Formate ab. Migrationsstrategie: fehlt `id`
+  bei irgendeinem gespeicherten State komplett, gilt das GANZE Array als Alt-Format → beim
+  Laden sequenzielle IDs + einfaches Grid-Auto-Layout (4 Spalten, 200×150-Raster) für ALLE
+  States (kein Teil-Patching). **Derselbe Lücken-Typ betrifft auch `AnimatorComponent`,
+  `AnimatorBlendComponent`, `SkeletalMeshComponent`, `PropertyAnimatorComponent`,
+  `NavMeshComponent`, `NavAgentComponent` — bewusst NICHT mitgefixt (Scope-Explosion), als
+  eigene Folgeaufgabe gespawnt.** Bis das behoben ist, überlebt z. B. eine Skeletal-Mesh-Figur
+  mit State-Machine einen Szenen-Reload NICHT vollständig (das Mesh selbst verschwindet).
+- **`AnimatorStateMachineEditorPanel`** (neu, `src/HE_Editor/`): pro-Entity virtueller Tab
+  (Sentinel `"::AnimStateMachine::" + entityId`, kein Content-Browser-Bezug wie bei den
+  Asset-basierten Tabs — eine Szene kann mehrere State-Machines haben). Node-Body zeigt
+  Name-Feld (Rename schreibt automatisch alle referenzierenden Transitions um, sonst würden
+  Links dangling), Loop-Checkbox, Clip-Drag-Drop-Slot (gleiches Muster wie Material-Textur-
+  Slots/Partikel-Mesh-Slots). `connect()` legt eine neue Transition mit Default-Regel an;
+  `removeNode` löscht State + referenzierende Transitions; rechter Seitenpanel behält die
+  bestehende flache Transitions-Liste (from/to/op/param/threshold/duration) UND die
+  Params-Liste aus dem alten Inspector-Block — `GraphEditor`-Links haben keine Inline-Widgets,
+  eine Kern-Erweiterung dafür wäre unnötiges Risiko für Material/HorizonCode/Partikel. Aktuell
+  laufender Zustand bekommt einen grünen Node-Outline-Ring (nur währenddessen PIE aussagekräftig).
+  Inspector-Sektion schrumpft auf Zusammenfassung + „Open in State Machine Editor"-Button
+  (gleiches Muster wie beim Material-/Partikel-Umbau zuvor).
+
+**Tests:** 783 grün (voller Roundtrip mit id/x/y/Transitions/Params; Migrations-Test für
+Alt-Format ohne `id`). GL+Metal-Build + `HorizonEditor`-Link sauber.
+
+**Reale Verifikation offen** (wie immer, kein Display in der Sandbox): Graph-Canvas-Interaktion,
+Node-Outline beim laufenden Zustand, Clip-Drop. Damit ist der komplette Vier-Tabs-Plan aus
+Forts. 69 (NavMesh/Skeletal-Mesh/Partikel/Animation-State-Machine) abgeschlossen.
