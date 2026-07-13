@@ -9,6 +9,10 @@
 #include <Types/Enums.h>
 #include <Types/UUID.h>
 #include "ProjectManager.h"
+#include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/SceneSerializer.h>
+#include <HorizonScene/Components/EnvironmentComponent.h>
+#include <HorizonScene/Components/WeatherComponent.h>
 #include <cstring>
 
 #include <nlohmann/json.hpp>
@@ -888,4 +892,45 @@ TEST_CASE("ProjectManager: unknown active profile falls back to the first")
     REQUIRE(pm.loadProject((dir / "F.heproj").string()));
     CHECK(pm.currentProject().activeExportProfile == "Only");
     he_test::removeAllQuiet(dir);
+}
+
+// The Game/Simulation templates seed a Sky + Weather entity into their StartupScene;
+// Empty/Tool start bare. Verify by loading the generated scene into a world.
+static void checkTemplateScene(ProjectPreset preset, const char* name, bool expectSky)
+{
+    const auto dir = fs::temp_directory_path() / name;
+    he_test::removeAllQuiet(dir);
+
+    ProjectManager pm;
+    REQUIRE(pm.createNewProject(dir.string(), "T", preset));
+    const fs::path scene = dir / "Content" / "StartupScene.hescene";
+    REQUIRE(fs::exists(scene));
+
+    HorizonWorld world;
+    SceneSerializer ser;
+    REQUIRE(ser.load(world, scene.string(), SerializeFormat::JSON));
+
+    if (expectSky)
+    {
+        const Entity sky = world.environmentEntity();
+        const Entity weather = world.weatherEntity();
+        CHECK((sky != entt::null));
+        CHECK((weather != entt::null));
+        CHECK(sky != world.rootEntity());        // dedicated entities, not the root
+        CHECK(weather != world.rootEntity());
+    }
+    else
+    {
+        CHECK((world.environmentEntity() == entt::null));
+        CHECK((world.weatherEntity()     == entt::null));
+    }
+    he_test::removeAllQuiet(dir);
+}
+
+TEST_CASE("Game/Simulation templates seed Sky+Weather; Empty/Tool start bare")
+{
+    checkTemplateScene(ProjectPreset::Game,       "he_tpl_game",  true);
+    checkTemplateScene(ProjectPreset::Simulation, "he_tpl_sim",   true);
+    checkTemplateScene(ProjectPreset::Empty,      "he_tpl_empty", false);
+    checkTemplateScene(ProjectPreset::Tool,       "he_tpl_tool",  false);
 }

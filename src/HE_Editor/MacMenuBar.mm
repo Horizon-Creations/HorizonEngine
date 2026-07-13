@@ -111,6 +111,7 @@ void install()
 		[view addItem:fs];   // responder chain → the key window
 		heAddItem(view, @"Reset Layout",          C::ResetLayout,    nil, 0, false);
 		heAddItem(view, @"Performance Profiler",  C::ToggleProfiler, nil, 0, false);
+		heAddItem(view, @"Environment",           C::ToggleEnvironment, nil, 0, false);
 		[view addItem:[NSMenuItem separatorItem]];
 		heAddItem(view, @"Level Script",   C::OpenLevelScript,  nil, 0, true);
 		heAddItem(view, @"Game Instance",  C::OpenGameInstance, nil, 0, true);

@@ -177,6 +177,11 @@ public:
     // together. Off = the scene's own directional light is used.
     struct EnvironmentSettings
     {
+        // Master sky switch. False when the scene has no Sky entity (removed via the
+        // Environment window): the backend skips the procedural sky pass entirely and
+        // the background is left at the frame's clear colour. Defaults true so any
+        // code path that forgets to set it keeps rendering the sky as before.
+        bool  skyEnabled    = true;
         bool  dayNightCycle = false;
         float timeOfDay     = 0.5f; // noon
         // Sun & moon directional lights driven by the day-night cycle. Colour and

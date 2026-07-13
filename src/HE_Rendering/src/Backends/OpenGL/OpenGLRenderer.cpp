@@ -6121,7 +6121,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		// no depth write it passes only where the geometry left depth == 1 (i.e. the
 		// background), so the heavy sky shader is never paid for behind solid
 		// objects. With no geometry the whole frame is background → full sky.
-		if (m_skyProgram)
+		// skyEnabled == false (no Sky entity) skips the pass → the cleared background shows.
+		if (m_skyProgram && GetEnvironment().skyEnabled)
 		{
 			glUseProgram(m_skyProgram);
 			glDepthFunc(GL_LEQUAL);

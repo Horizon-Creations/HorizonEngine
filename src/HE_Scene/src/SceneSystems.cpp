@@ -40,7 +40,9 @@ void pushGpuParticleParams(HorizonWorld& world, IRenderer* renderer,
 {
     IRenderer::GpuParticleParams gp;
     auto& reg = world.registry();
-    const EnvironmentComponent* env = reg.try_get<EnvironmentComponent>(world.rootEntity());
+    const Entity envEntity = world.environmentEntity();
+    const EnvironmentComponent* env = (envEntity == entt::null)
+        ? nullptr : reg.try_get<EnvironmentComponent>(envEntity);
     const float rain = env ? env->rainAmount : 0.0f;
     const float snow = env ? env->snowAmount : 0.0f;
     const float amount = std::max(rain, snow);
