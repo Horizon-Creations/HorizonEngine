@@ -33,6 +33,12 @@ void GeometryPass::execute(const RenderWorld&           world,
 			// Per-entity param overrides make objects visually distinct even when
 			// they share mesh+material — they must not be instanced together.
 			if (!next.paramOverride.empty() || !first.paramOverride.empty()) break;
+			// Same for a per-instance tint (particle color/alpha-over-life): two
+			// particles at different points in their life share mesh+material but
+			// must NOT be instanced together, or they'd all draw with one shared
+			// tint. Identity tint (the default for everything else) always matches
+			// identity, so non-particle batching is unaffected.
+			if (next.instanceTint != first.instanceTint) break;
 			++j;
 		}
 
@@ -50,6 +56,7 @@ void GeometryPass::execute(const RenderWorld&           world,
 		dc.metallic        = first.metallic;
 		dc.roughness       = first.roughness;
 		dc.opacity         = first.opacity;
+		dc.instanceTint    = first.instanceTint; // batching guarantees the whole run shares this
 		dc.paramOverride   = first.paramOverride; // per-entity HeParams block (empty = none)
 
 		if (runLen > 1)

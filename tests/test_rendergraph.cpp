@@ -297,6 +297,60 @@ TEST_CASE("GeometryPass produces one batch + one single for partial run (A A B)"
 	CHECK(cmds.drawCalls()[1].instanceTransforms.empty());
 }
 
+TEST_CASE("GeometryPass does not batch objects with different instanceTint")
+{
+	// Two particles at different points in their life share mesh + material but
+	// carry distinct color/alpha-over-life tints — must not be instanced together,
+	// or they would all draw with one shared tint (see RenderObject::instanceTint).
+	HE::UUID sharedMesh; sharedMesh.hi = 11; sharedMesh.lo = 3;
+
+	RenderWorld world;
+	for (int i = 0; i < 2; ++i)
+	{
+		RenderObject o;
+		o.meshAssetId  = sharedMesh;
+		o.transform    = glm::mat4(1.0f);
+		o.entityId     = static_cast<uint32_t>(i);
+		o.instanceTint = (i == 0) ? glm::vec4(1.0f, 1.0f, 1.0f, 1.0f) : glm::vec4(1.0f, 0.5f, 0.2f, 0.6f);
+		world.objects.push_back(o);
+	}
+	std::vector<uint32_t> sorted = { 0, 1 };
+
+	CommandBuffer cmds;
+	GeometryPass{}.execute(world, sorted, cmds);
+
+	REQUIRE(cmds.drawCalls().size() == 2);
+	CHECK(cmds.drawCalls()[0].instanceCount == 1);
+	CHECK(cmds.drawCalls()[0].instanceTint == glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
+	CHECK(cmds.drawCalls()[1].instanceCount == 1);
+	CHECK(cmds.drawCalls()[1].instanceTint == glm::vec4(1.0f, 0.5f, 0.2f, 0.6f));
+}
+
+TEST_CASE("GeometryPass batches objects that share the same non-identity instanceTint")
+{
+	HE::UUID sharedMesh; sharedMesh.hi = 11; sharedMesh.lo = 4;
+	const glm::vec4 tint(0.8f, 0.3f, 0.1f, 0.9f);
+
+	RenderWorld world;
+	for (int i = 0; i < 3; ++i)
+	{
+		RenderObject o;
+		o.meshAssetId  = sharedMesh;
+		o.transform    = glm::translate(glm::mat4(1.0f), glm::vec3(float(i), 0.0f, 0.0f));
+		o.entityId     = static_cast<uint32_t>(i);
+		o.instanceTint = tint;
+		world.objects.push_back(o);
+	}
+	std::vector<uint32_t> sorted = { 0, 1, 2 };
+
+	CommandBuffer cmds;
+	GeometryPass{}.execute(world, sorted, cmds);
+
+	REQUIRE(cmds.drawCalls().size() == 1);
+	CHECK(cmds.drawCalls()[0].instanceCount == 3);
+	CHECK(cmds.drawCalls()[0].instanceTint == tint);
+}
+
 TEST_CASE("RenderPass declares its render-target I/O")
 {
 	CHECK(GeometryPass{}.describe().output.id == kBackbufferTarget);

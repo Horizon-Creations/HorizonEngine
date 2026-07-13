@@ -30,6 +30,15 @@ struct RenderObject {
     float        metallic       = 0.0f;
     float        roughness      = 0.5f;
     float        opacity        = 1.0f;
+    // Per-instance tint multiplied into the resolved material color/opacity at
+    // draw time (rgb multiplies baseColor, a multiplies opacity) — identity
+    // (1,1,1,1) is a complete no-op, so this only affects objects that actually
+    // set it. Used for particle color/alpha-over-life (RenderExtractor resolves
+    // it from ParticleEmitterConfig's Start/End Color/Alpha + each particle's
+    // lifetime fraction); free for other per-instance-varying-appearance needs
+    // later. GeometryPass only batches same-mesh+same-material runs that ALSO
+    // share this value, so a shared DrawCall::instanceTint is always correct.
+    glm::vec4    instanceTint   = { 1.0f, 1.0f, 1.0f, 1.0f };
     // Cheap-billboard opt-outs. Precipitation/particles set these false so thousands of
     // them skip the per-object shadow-map depth pass and the SSAO position prepass (where
     // they are NOT instanced) — and so rain/snow don't wrongly cast shadows or darken AO.

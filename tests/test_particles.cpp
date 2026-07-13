@@ -5,8 +5,13 @@
 #include <ParticleGraph/ParticleGraph.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/ParticleSystem.h>
+#include <HorizonScene/PhysicsWorld.h>
 #include <HorizonScene/Components/ParticleSystemComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
+#include <HorizonScene/Components/RigidBodyComponent.h>
+#include <HorizonScene/Components/ColliderComponent.h>
+#include <HorizonRendering/RenderWorld.h>
+#include <HorizonRendering/RenderExtractor.h>
 
 // Builds a ParticleGraphAsset wiring Const nodes onto every Emitter Output pin —
 // the graph-authored equivalent of directly setting the old inline component
@@ -251,6 +256,195 @@ TEST_CASE("ParticleSystem::update migrates a legacy inline-config entity into a 
     // ~10 particles expected over 0.5s at emitRate=20.
     CHECK(psc.particles.size() >= 8);
     CHECK(psc.particles.size() <= 12);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  RenderExtractor — particle color/alpha-over-life → RenderObject::instanceTint
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST_CASE("RenderExtractor resolves particle color/alpha-over-life into instanceTint")
+{
+    HorizonWorld world;
+    auto& reg = world.registry();
+
+    auto e = world.createEntity("emitter");
+    TransformComponent t;
+    t.position    = {0, 0, 0};
+    t.worldMatrix = glm::mat4(1.0f);
+    reg.emplace<TransformComponent>(e, t);
+
+    ParticleSystemComponent ps;
+    reg.emplace<ParticleSystemComponent>(e, ps);
+    auto& psc = reg.get<ParticleSystemComponent>(e);
+    // Bypass graph resolution entirely — set the resolved config directly, the
+    // same way ParticleSystem::update would after evaluating the graph.
+    psc.resolvedConfig.startColor[0] = 1.0f; psc.resolvedConfig.startColor[1] = 0.0f; psc.resolvedConfig.startColor[2] = 0.0f;
+    psc.resolvedConfig.endColor[0]   = 0.0f; psc.resolvedConfig.endColor[1]   = 0.0f; psc.resolvedConfig.endColor[2]   = 1.0f;
+    psc.resolvedConfig.startAlpha = 1.0f;
+    psc.resolvedConfig.endAlpha   = 0.0f;
+    psc.resolvedConfig.startSize  = 1.0f;
+    psc.resolvedConfig.endSize    = 1.0f;
+
+    Particle p;
+    p.position    = {0, 0, 0};
+    p.maxLifetime = 10.0f;
+    p.lifetime    = 5.0f; // t01 = 1 - lifetime/maxLifetime = 0.5 → halfway through its life
+    psc.particles.push_back(p);
+
+    RenderWorld rw;
+    RenderExtractor extractor;
+    extractor.extract(world, rw, 16.0f / 9.0f);
+
+    REQUIRE(rw.objects.size() == 1);
+    const glm::vec4& tint = rw.objects[0].instanceTint;
+    CHECK(tint.r == doctest::Approx(0.5f)); // lerp(1,0,0.5)
+    CHECK(tint.g == doctest::Approx(0.0f));
+    CHECK(tint.b == doctest::Approx(0.5f)); // lerp(0,1,0.5)
+    CHECK(tint.a == doctest::Approx(0.5f)); // lerp(1,0,0.5)
+}
+
+TEST_CASE("RenderExtractor: a fresh particle (lifetime==maxLifetime) gets the pure start tint")
+{
+    HorizonWorld world;
+    auto& reg = world.registry();
+
+    auto e = world.createEntity("emitter");
+    TransformComponent t;
+    t.position    = {0, 0, 0};
+    t.worldMatrix = glm::mat4(1.0f);
+    reg.emplace<TransformComponent>(e, t);
+
+    ParticleSystemComponent ps;
+    reg.emplace<ParticleSystemComponent>(e, ps);
+    auto& psc = reg.get<ParticleSystemComponent>(e);
+    psc.resolvedConfig.startColor[0] = 0.2f; psc.resolvedConfig.startColor[1] = 0.4f; psc.resolvedConfig.startColor[2] = 0.6f;
+    psc.resolvedConfig.endColor[0]   = 0.9f; psc.resolvedConfig.endColor[1]   = 0.9f; psc.resolvedConfig.endColor[2]   = 0.9f;
+    psc.resolvedConfig.startAlpha = 1.0f;
+    psc.resolvedConfig.endAlpha   = 0.0f;
+    psc.resolvedConfig.startSize  = 1.0f;
+    psc.resolvedConfig.endSize    = 1.0f;
+
+    Particle p;
+    p.position    = {0, 0, 0};
+    p.maxLifetime = 4.0f;
+    p.lifetime    = 4.0f; // just born → t01 = 0
+    psc.particles.push_back(p);
+
+    RenderWorld rw;
+    RenderExtractor extractor;
+    extractor.extract(world, rw, 16.0f / 9.0f);
+
+    REQUIRE(rw.objects.size() == 1);
+    const glm::vec4& tint = rw.objects[0].instanceTint;
+    CHECK(tint.r == doctest::Approx(0.2f));
+    CHECK(tint.g == doctest::Approx(0.4f));
+    CHECK(tint.b == doctest::Approx(0.6f));
+    CHECK(tint.a == doctest::Approx(1.0f));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  ParticleSystem::stepPool — physics collision (config.collisionEnabled)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// A static 1×1×1 box at the origin (top surface at y=0.5) — same fixture shape
+// as tests/test_raycast.cpp's buildBoxWorld.
+static Entity buildFloorWorld(HorizonWorld& world)
+{
+    Entity floor = world.createEntity("Floor");
+    TransformComponent t;
+    t.position = { 0.0f, 0.0f, 0.0f };
+    t.scale    = { 1.0f, 1.0f, 1.0f };
+    world.addComponent(floor, t);
+    RigidBodyComponent rb; rb.type = RigidBodyType::Static;
+    world.addComponent(floor, rb);
+    ColliderComponent col;
+    col.shape       = ColliderShape::Box;
+    col.halfExtents = { 0.5f, 0.5f, 0.5f };
+    world.addComponent(floor, col);
+    return floor;
+}
+
+TEST_CASE("ParticleSystem::stepPool: killOnCollision removes the particle on hit")
+{
+    HorizonWorld world;
+    buildFloorWorld(world);
+    PhysicsWorld phys;
+    phys.initialize(world);
+
+    HE::ParticleEmitterConfig config;
+    config.emitRate          = 0.0f; // no new spawns — simulate only the one we push
+    config.gravity[0] = config.gravity[1] = config.gravity[2] = 0.0f;
+    config.collisionEnabled  = true;
+    config.killOnCollision   = true;
+
+    std::vector<Particle> particles;
+    Particle p; p.position = { 0.0f, 2.0f, 0.0f }; p.velocity = { 0.0f, -10.0f, 0.0f };
+    p.lifetime = 10.0f; p.maxLifetime = 10.0f;
+    particles.push_back(p);
+
+    float acc = 0.0f;
+    std::mt19937 rng{ 1 };
+    ParticleSystem::stepPool(particles, acc, rng, config, glm::vec3(0.0f), 1.0f, &phys);
+
+    CHECK(particles.empty());
+}
+
+TEST_CASE("ParticleSystem::stepPool: bounces and scales velocity by restitution on hit")
+{
+    HorizonWorld world;
+    buildFloorWorld(world);
+    PhysicsWorld phys;
+    phys.initialize(world);
+
+    HE::ParticleEmitterConfig config;
+    config.emitRate          = 0.0f;
+    config.gravity[0] = config.gravity[1] = config.gravity[2] = 0.0f;
+    config.collisionEnabled  = true;
+    config.killOnCollision   = false;
+    config.restitution       = 0.5f;
+
+    std::vector<Particle> particles;
+    Particle p; p.position = { 0.0f, 2.0f, 0.0f }; p.velocity = { 0.0f, -10.0f, 0.0f };
+    p.lifetime = 10.0f; p.maxLifetime = 10.0f;
+    particles.push_back(p);
+
+    float acc = 0.0f;
+    std::mt19937 rng{ 1 };
+    ParticleSystem::stepPool(particles, acc, rng, config, glm::vec3(0.0f), 1.0f, &phys);
+
+    REQUIRE(particles.size() == 1);
+    // Reflected off the upward-facing floor normal → velocity.y flips positive,
+    // scaled by restitution (0.5 × the 10 m/s incoming speed).
+    CHECK(particles[0].velocity.y > 0.0f);
+    CHECK(particles[0].velocity.y == doctest::Approx(5.0f).epsilon(0.2f));
+    // Snapped to just above the hit surface, not still tunneling downward.
+    CHECK(particles[0].position.y >= 0.5f);
+}
+
+TEST_CASE("ParticleSystem::stepPool: collisionEnabled=false ignores the physics world entirely")
+{
+    HorizonWorld world;
+    buildFloorWorld(world);
+    PhysicsWorld phys;
+    phys.initialize(world);
+
+    HE::ParticleEmitterConfig config;
+    config.emitRate          = 0.0f;
+    config.gravity[0] = config.gravity[1] = config.gravity[2] = 0.0f;
+    config.collisionEnabled  = false; // default
+
+    std::vector<Particle> particles;
+    Particle p; p.position = { 0.0f, 2.0f, 0.0f }; p.velocity = { 0.0f, -10.0f, 0.0f };
+    p.lifetime = 10.0f; p.maxLifetime = 10.0f;
+    particles.push_back(p);
+
+    float acc = 0.0f;
+    std::mt19937 rng{ 1 };
+    ParticleSystem::stepPool(particles, acc, rng, config, glm::vec3(0.0f), 1.0f, &phys);
+
+    REQUIRE(particles.size() == 1);
+    // Passed straight through the floor — no collision check performed.
+    CHECK(particles[0].position.y == doctest::Approx(-8.0f));
 }
 
 TEST_CASE("kDefaultQuadMeshId is registered in ContentManager")
