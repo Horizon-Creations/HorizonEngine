@@ -43,7 +43,8 @@ struct GpuTimedPair  { const char* name; uint32_t base; };
 struct GpuTimedPoint { const char* name; uint32_t slot; };
 
 struct SDL_Window;
-struct MaterialShaderVariant; // ContentManager/Assets.h — baked per-backend shader
+struct MaterialShaderVariant; // ContentManager/Assets.h — baked per-backend material shader
+struct ParticleShaderVariant; // ContentManager/Assets.h — baked per-backend particle shader
 
 // Passed as the overlay-callback context so ImGui (or any other overlay) can
 // encode into the active render pass. All pointers are Objective-C objects
@@ -335,6 +336,24 @@ private:
 	void* m_particlePreviewDepthTex = nullptr; // id<MTLTexture> (retained)
 	int   m_particlePreviewSize     = 0;
 	void* m_particlePreviewPipeline = nullptr; // id<MTLRenderPipelineState> (retained)
+
+	// GPU-instanced ParticleGraph particle rendering (the real scene draw path, see
+	// RenderWorld::particleBatches) — one compiled pipeline per unique color/alpha-
+	// over-life config, hash-keyed cache mirroring m_materialPipelineCache. Each
+	// batch's instance MTLBuffer is allocated fresh per draw (newBufferWithBytes,
+	// same convention as RenderParticlePreview) rather than reusing one persistent
+	// buffer across frames — Metal gives no implicit CPU/GPU sync on a shared-mode
+	// buffer, so overwriting one in flight would race the previous frame's draw; a
+	// few emitters' worth of small per-frame allocations is a non-issue. No
+	// HE_HAVE_SHADERC dependency: the source is hand-templated (HorizonRendering::
+	// ParticleShaderTemplates), never cross-compiled. Drawn in the transparency
+	// pass, alpha-blended.
+	std::unordered_map<uint64_t, void*> m_particlePipelineCache; // hash → id<MTLRenderPipelineState>
+	// precompiled != null → build directly from a baked MSL source (CHUNK_PPSD),
+	// no template splice. Returns null on compile/link failure (also cached).
+	void* GetOrBuildParticlePipeline(uint64_t key, const HE::ParticleEmitterConfig& config,
+	                                 const ParticleShaderVariant* precompiled = nullptr);
+	void  DrawParticleGraphBatches(void* renderEncoder, const glm::mat4& viewProj, const glm::mat4& view);
 
 	// A procedural sphere (interleaved pos3/normal3/uv2, matching VertexIn) so per-material
 	// pipelines are visible on real 3D geometry even in the empty headless dump scene.

@@ -79,8 +79,15 @@ void main()
 )GLSL";
 }
 
-inline std::string buildParticleShaderMSL(const std::string& colorFn, const std::string& alphaFn)
+inline std::string buildParticleVertexMSL(const std::string& colorFn, const std::string& alphaFn)
 {
+    // Metal compiles vertex/fragment as two independent library sources (same
+    // convention MaterialShaderLibrary uses for SPIRV-Cross output — see
+    // GetOrBuildMaterialPipeline's vLib/fLib) — the [[stage_in]] VOut struct just
+    // needs to match byte-for-byte between the two, which the duplicated struct
+    // definition below guarantees. heParticleColor/heParticleAlpha are only called
+    // from the vertex stage (the fragment stage only reads the interpolated
+    // colorAlpha), so the fragment source needs no splice point at all.
     return std::string(R"MSL(
 #include <metal_stdlib>
 using namespace metal;
@@ -110,6 +117,16 @@ vertex VOut heParticleGraphVertex(uint vid [[vertex_id]], uint iid [[instance_id
     o.colorAlpha = float4(heParticleColor(inst.t01), heParticleAlpha(inst.t01));
     return o;
 }
+)MSL";
+}
+
+inline std::string buildParticleFragmentMSL()
+{
+    return R"MSL(
+#include <metal_stdlib>
+using namespace metal;
+
+struct VOut { float4 position [[position]]; float2 uv; float4 colorAlpha; };
 
 fragment float4 heParticleGraphFragment(VOut in [[stage_in]],
                                          constant bool& hasTex [[buffer(0)]],

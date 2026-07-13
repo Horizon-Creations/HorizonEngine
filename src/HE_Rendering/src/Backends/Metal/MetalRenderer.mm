@@ -1,6 +1,7 @@
 #include "Backends/Metal/MetalRenderer.h"
 #include <Window/Window.h>
 #include <ContentManager/ContentManager.h>
+#include <HorizonRendering/ParticleShaderTemplates.h>
 #include <MaterialGraph/MaterialGraph.h> // kMatMaxGraphTextures
 #include <Renderer/UIFont.h>             // shared baked UI font atlas
 #include <material/PreviewMesh.h> // shared preview primitives (sphere/cube/plane)
@@ -2802,6 +2803,8 @@ void MetalRenderer::Shutdown()
 	if (m_shadercDemoPipeline)  { CFBridgingRelease(m_shadercDemoPipeline);  m_shadercDemoPipeline = nullptr; }
 	for (auto& [k, pso] : m_materialPipelineCache) if (pso) CFBridgingRelease(pso);
 	m_materialPipelineCache.clear();
+	for (auto& [k, pso] : m_particlePipelineCache) if (pso) CFBridgingRelease(pso);
+	m_particlePipelineCache.clear();
 	if (m_matBinaryArchive) { CFBridgingRelease(m_matBinaryArchive); m_matBinaryArchive = nullptr; }
 	m_matArchiveTried = false;
 	if (m_previewColorTex) { CFBridgingRelease(m_previewColorTex); m_previewColorTex = nullptr; }
@@ -5317,6 +5320,67 @@ void MetalRenderer::EnsureShadercTestMesh()
 }
 #endif // HE_HAVE_SHADERC
 
+// Build (or fetch) a Metal pipeline for GPU-instanced ParticleGraph particle
+// rendering (RenderWorld::particleBatches — the real scene path, not
+// RenderParticlePreview). Unlike GetOrBuildMaterialPipeline this needs no
+// HE_HAVE_SHADERC / cross-compile step: the MSL is hand-templated, either baked
+// at export time (`precompiled`) or generated right now from `config` via
+// HE::generateParticleShaderSource + ParticleShaderTemplates. Always alpha-
+// blended (particles have no opaque variant). Cached by `key`; null cached too.
+void* MetalRenderer::GetOrBuildParticlePipeline(uint64_t key, const HE::ParticleEmitterConfig& config,
+                                                const ParticleShaderVariant* precompiled)
+{
+	if (auto it = m_particlePipelineCache.find(key); it != m_particlePipelineCache.end())
+		return it->second;
+
+	std::string vertMSL, fragMSL;
+	if (precompiled)
+	{
+		vertMSL = precompiled->vertex;
+		fragMSL = precompiled->fragment;
+	}
+	else
+	{
+		const HE::ParticleShaderGen gen = HE::generateParticleShaderSource(config, /*metalSyntax*/true);
+		vertMSL = HE::buildParticleVertexMSL(gen.colorFn, gen.alphaFn);
+		fragMSL = HE::buildParticleFragmentMSL();
+	}
+
+	void* result = nullptr;
+	if (!vertMSL.empty() && !fragMSL.empty())
+	{
+		id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+		NSError* err = nil;
+		id<MTLLibrary> vLib = [device newLibraryWithSource:[NSString stringWithUTF8String:vertMSL.c_str()]
+		                                           options:nil error:&err];
+		id<MTLLibrary> fLib = err ? nil
+			: [device newLibraryWithSource:[NSString stringWithUTF8String:fragMSL.c_str()]
+			                       options:nil error:&err];
+		if (vLib && fLib)
+		{
+			MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
+			desc.vertexFunction   = [vLib newFunctionWithName:@"heParticleGraphVertex"];
+			desc.fragmentFunction = [fLib newFunctionWithName:@"heParticleGraphFragment"];
+			desc.colorAttachments[0].pixelFormat = kSceneColorFormat;
+			desc.depthAttachmentPixelFormat      = kDepthFormat;
+			desc.colorAttachments[0].blendingEnabled             = YES;
+			desc.colorAttachments[0].sourceRGBBlendFactor        = MTLBlendFactorSourceAlpha;
+			desc.colorAttachments[0].destinationRGBBlendFactor   = MTLBlendFactorOneMinusSourceAlpha;
+			desc.colorAttachments[0].sourceAlphaBlendFactor      = MTLBlendFactorSourceAlpha;
+			desc.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+			id<MTLRenderPipelineState> pso = [device newRenderPipelineStateWithDescriptor:desc error:&err];
+			if (pso) result = (void*)CFBridgingRetain(pso);
+		}
+		if (!result)
+			Logger::Log(Logger::LogLevel::Error,
+				(std::string("MetalRenderer: particle pipeline build failed: ")
+				 + (err ? err.localizedDescription.UTF8String : "?")).c_str());
+	}
+
+	m_particlePipelineCache[key] = result; // cache success AND failure (null)
+	return result;
+}
+
 // Fullscreen tonemap of the HDR scene color (+ bloom) into the bound encoder's target.
 void MetalRenderer::EncodeTonemap(void* renderEncoderPtr)
 {
@@ -6253,6 +6317,7 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 	// GPU weather particles: simulated by the compute pass (EncodeFrame), drawn here
 	// as alpha-blended billboards over the opaque scene + sky.
 	DrawGpuParticles(renderEncoder, viewProj, m_renderWorld.camera.position);
+	DrawParticleGraphBatches(renderEncoder, viewProj, m_renderWorld.camera.view);
 	SamplePoint(renderEncoder, "Particles");
 }
 
@@ -7020,6 +7085,62 @@ void MetalRenderer::DrawGpuParticles(void* renderEncoder, const glm::mat4& viewP
 	[enc setVertexBuffer:(__bridge id<MTLBuffer>)m_particleBuffer offset:0 atIndex:0];
 	[enc setVertexBytes:&u length:sizeof(u) atIndex:1];
 	[enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4 instanceCount:(NSUInteger)count];
+}
+
+void MetalRenderer::DrawParticleGraphBatches(void* renderEncoder, const glm::mat4& viewProj, const glm::mat4& view)
+{
+	if (m_renderWorld.particleBatches.empty()) return;
+	id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+
+	// Camera-facing basis for billboard expansion — same convention as RenderParticlePreview.
+	const glm::vec3 camRight(view[0][0], view[1][0], view[2][0]);
+	const glm::vec3 camUp   (view[0][1], view[1][1], view[2][1]);
+
+	[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_skyDepthState]; // LessEqual, no write
+
+	for (const ParticleBatch& batch : m_renderWorld.particleBatches)
+	{
+		if (batch.instances.empty()) continue;
+
+		// A precompiled Metal variant (export-baked, CHUNK_PPSD) wins over an
+		// on-demand-compiled + hash-cached one — see GetOrBuildParticlePipeline.
+		const ParticleShaderVariant* precompiled = nullptr;
+		if (const ParticleGraphAsset* asset = m_contentManager ? m_contentManager->getParticleGraph(batch.particleAssetId) : nullptr)
+			for (const auto& var : asset->precompiledShaders)
+				if (var.backend == static_cast<uint8_t>(HE::RendererBackend::Metal)) { precompiled = &var; break; }
+
+		const uint64_t key = precompiled
+			? (0x50505344ull /*"PPSD"*/ ^ (static_cast<uint64_t>(batch.particleAssetId.hi) * 0x9E3779B97F4A7C15ULL) ^ batch.particleAssetId.lo)
+			: HE::hashParticleShaderConfig(batch.config);
+		id<MTLRenderPipelineState> pso = (__bridge id<MTLRenderPipelineState>)GetOrBuildParticlePipeline(key, batch.config, precompiled);
+		if (!pso) continue;
+
+		void* matTex = nullptr;
+		const bool hasTex = ResolveMaterialTexture(batch.materialAssetId, matTex);
+
+		std::vector<float> inst;
+		inst.reserve(batch.instances.size() * 5);
+		for (const ParticleInstance& p : batch.instances)
+			inst.insert(inst.end(), { p.position.x, p.position.y, p.position.z, p.size, p.t01 });
+		id<MTLBuffer> instBuf = [device newBufferWithBytes:inst.data()
+			length:inst.size() * sizeof(float) options:MTLResourceStorageModeShared];
+
+		glm::mat4 vp = viewProj;
+		[enc setRenderPipelineState:pso];
+		[enc setVertexBuffer:instBuf offset:0 atIndex:0];
+		[enc setVertexBytes:&vp       length:sizeof(vp)       atIndex:1];
+		[enc setVertexBytes:&camRight length:sizeof(camRight) atIndex:2];
+		[enc setVertexBytes:&camUp    length:sizeof(camUp)    atIndex:3];
+		bool hasTexFlag = hasTex;
+		[enc setFragmentBytes:&hasTexFlag length:sizeof(hasTexFlag) atIndex:0];
+		[enc setFragmentTexture:(__bridge id<MTLTexture>)(hasTex ? matTex : m_dummyTexture) atIndex:0];
+		[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
+		[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6
+		      instanceCount:(NSUInteger)batch.instances.size()];
+		++m_counters.draws;
+		m_counters.tris += static_cast<uint32_t>(batch.instances.size()) * 2;
+	}
 }
 
 IRenderer::Capabilities MetalRenderer::GetCapabilities() const
