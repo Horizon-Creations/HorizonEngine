@@ -1828,25 +1828,6 @@ static const char* scriptStarterTemplate(int lang)
 	return (lang == 1) ? kPy : kLua;
 }
 
-// Rewrite a just-created script stub's language byte (SLNG) + starter (SRC), keeping
-// every other chunk (META → the UUID). Used when the user flips the language in the
-// name-on-create dialog, before they've opened/edited the file.
-static void rewriteScriptStubLanguage(const std::string& path, int lang)
-{
-	HAsset::Reader r;
-	if (!r.open(path)) return;
-	const uint16_t type = r.assetType();
-	HAsset::Writer w;
-	for (const auto& c : r.chunks())
-		if (c.id != HAsset::CHUNK_SRC && c.id != HAsset::CHUNK_SLNG)
-			w.addChunk(c.id, c.data.data(), c.data.size());
-	const char* starter = scriptStarterTemplate(lang);
-	w.addChunk(HAsset::CHUNK_SRC, starter, std::char_traits<char>::length(starter));
-	const uint8_t lb = static_cast<uint8_t>(lang);
-	w.addChunk(HAsset::CHUNK_SLNG, &lb, 1);
-	w.write(path, type);
-}
-
 // ─── Full Editor UI ───────────────────────────────────────────────────────────
 void EditorUI::RenderEditor(AppContext& ctx, float dt)
 {
@@ -5230,6 +5211,10 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 		static bool        s_renameIsCreate   = false; // naming a freshly created item
 		static int         s_renameScriptLang = -1;    // creating a script: 0=Lua 1=Python; -1=not a script
 		static bool        s_rightClickOnItem = false;
+		// Name-a-C++-class popup (C++ projects only): the create menu stages a
+		// class name here, then this popup writes Source/<Name>.{h,cpp}.
+		static bool        s_openCppClassPopup = false;
+		static char        s_cppClassName[128] = "GameplayClass";
 
 		// ── Folders first ─────────────────────────────────────────────────
 		for (auto* sub : displayFolder->subfolders)
@@ -5579,7 +5564,9 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				s_renameTarget    = path;
 				s_renameIsFolder  = false;
 				s_renameIsCreate  = true;
-				s_renameScriptLang = (type == HE::AssetType::Script) ? static_cast<int>(scriptLang) : -1;
+				// A script is born in the project's fixed language (Lua or Python) —
+				// no per-asset language picker, so this stays -1 (combo hidden).
+				s_renameScriptLang = -1;
 				std::strncpy(s_renameBuf, defaultName, sizeof(s_renameBuf) - 1);
 				s_renameBuf[sizeof(s_renameBuf) - 1] = '\0';
 				s_openRenamePopup = true;
@@ -5593,21 +5580,51 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 			if (ImGui::MenuItem("Particle System")) tryCreate("NewParticleSystem", ".hasset", HE::AssetType::ParticleSystem);
 			if (ImGui::MenuItem("Animator State Machine")) tryCreate("NewStateMachine", ".hasset", HE::AssetType::AnimatorStateMachine);
 			if (ImGui::MenuItem("UI Widget"))    tryCreate("NewWidget",   ".hasset",  HE::AssetType::Widget);
-			if (ImGui::MenuItem("HorizonCode Class")) tryCreate("NewClass", ".hasset", HE::AssetType::HorizonCodeClass);
-			if (ImGui::BeginMenu("HorizonCode Player"))
-			{
-				if (ImGui::MenuItem("Player Controller"))
-					tryCreate("NewPlayerController", ".hasset", HE::AssetType::HorizonCodeClass, ScriptLanguage::Lua, "PlayerController");
-				if (ImGui::MenuItem("Player Character"))
-					tryCreate("NewPlayerCharacter", ".hasset", HE::AssetType::HorizonCodeClass, ScriptLanguage::Lua, "PlayerCharacter");
-				ImGui::EndMenu();
-			}
 			if (ImGui::MenuItem("Input Action"))          tryCreate("NewInputAction",  ".hasset", HE::AssetType::InputAction);
 			if (ImGui::MenuItem("Input Mapping Context")) tryCreate("NewInputMapping", ".hasset", HE::AssetType::InputMappingContext);
 			if (ImGui::MenuItem("Texture"))      tryCreate("NewTexture",  ".hasset",  HE::AssetType::Texture);
 			if (ImGui::MenuItem("Static Mesh"))  tryCreate("NewMesh",     ".hasset",  HE::AssetType::StaticMesh);
 			if (ImGui::MenuItem("Skeletal Mesh"))tryCreate("NewSkelMesh", ".hasset",  HE::AssetType::SkeletalMesh);
-			if (ImGui::MenuItem("Script"))       tryCreate("NewScript",   ".hasset",  HE::AssetType::Script, ScriptLanguage::Lua);
+
+			// ── Gameplay logic — restricted to the project's chosen language ──────
+			// The project's scriptLanguage (picked in the New Project wizard) is
+			// authoritative: only the matching logic creator appears, so a project
+			// stays single-language. HorizonCode → class/player graph assets; Lua/
+			// Python → a Script asset born in that language (no per-asset picker);
+			// C++ → a native source class under Source/ (see the C++ Class popup).
+			const ProjectScriptLanguage projLang = ctx.projectManager
+				? ctx.projectManager->currentProject().scriptLanguage
+				: ProjectScriptLanguage::HorizonCode;
+			switch (projLang)
+			{
+			case ProjectScriptLanguage::HorizonCode:
+				if (ImGui::MenuItem("HorizonCode Class")) tryCreate("NewClass", ".hasset", HE::AssetType::HorizonCodeClass);
+				if (ImGui::BeginMenu("HorizonCode Player"))
+				{
+					if (ImGui::MenuItem("Player Controller"))
+						tryCreate("NewPlayerController", ".hasset", HE::AssetType::HorizonCodeClass, ScriptLanguage::Lua, "PlayerController");
+					if (ImGui::MenuItem("Player Character"))
+						tryCreate("NewPlayerCharacter", ".hasset", HE::AssetType::HorizonCodeClass, ScriptLanguage::Lua, "PlayerCharacter");
+					ImGui::EndMenu();
+				}
+				break;
+			case ProjectScriptLanguage::Lua:
+				if (ImGui::MenuItem("Script")) tryCreate("NewScript", ".hasset", HE::AssetType::Script, ScriptLanguage::Lua);
+				break;
+			case ProjectScriptLanguage::Python:
+				if (ImGui::MenuItem("Script")) tryCreate("NewScript", ".hasset", HE::AssetType::Script, ScriptLanguage::Python);
+				break;
+			case ProjectScriptLanguage::Cpp:
+				if (ImGui::MenuItem("C++ Class"))
+				{
+					std::strncpy(s_cppClassName, "GameplayClass", sizeof(s_cppClassName) - 1);
+					s_cppClassName[sizeof(s_cppClassName) - 1] = '\0';
+					s_openCppClassPopup = true;
+					ImGui::CloseCurrentPopup();
+				}
+				break;
+			}
+
 			if (ImGui::MenuItem("Shader"))       tryCreate("NewShader",   ".hasset",  HE::AssetType::Shader);
 			if (ImGui::MenuItem("Audio"))        tryCreate("NewAudio",    ".hasset",  HE::AssetType::Audio);
 			if (ImGui::MenuItem("Font"))         tryCreate("NewFont",     ".hasset",  HE::AssetType::Font);
@@ -5831,16 +5848,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
 			ImGui::Spacing();
 
-			// Language picker for a script being created — flipping it rewrites the
-			// stub starter + language byte in place (the UUID in META is kept).
-			if (s_renameScriptLang >= 0)
-			{
-				ImGui::TextUnformatted("Language"); ImGui::SameLine();
-				ImGui::SetNextItemWidth(-1.0f);
-				if (ImGui::Combo("##script_lang", &s_renameScriptLang, "Lua\0Python\0"))
-					rewriteScriptStubLanguage(s_renameTarget, s_renameScriptLang);
-				ImGui::Spacing();
-			}
+			// (A script's language is fixed by the project, chosen in the New
+			// Project wizard — there is no per-asset language picker here.)
 
 			if (ImGui::Button("OK", ImVec2(140, 0)) || confirm)
 			{
@@ -5869,6 +5878,21 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 								}
 						}
 						s_quietContentRefresh = true;
+
+						// In a C++ project, a freshly created scene gets a matching
+						// native level script (Source/<Scene>LevelScript.{h,cpp}) with
+						// event stubs — the C++ mirror of the HorizonCode Level Script
+						// graph. Uses the scene's final name.
+						if (s_renameIsCreate && ctx.projectManager &&
+						    ctx.projectManager->currentProject().scriptLanguage == ProjectScriptLanguage::Cpp &&
+						    newPath.extension() == ".hescene")
+						{
+							const std::filesystem::path projRoot =
+								std::filesystem::path(ctx.projectManager->currentProject().path).parent_path();
+							if (writeCppLevelScript(projRoot.string(), newName))
+								Logger::Log(Logger::LogLevel::Info,
+									("Editor: generated C++ level script for scene '" + newName + "'").c_str());
+						}
 					}
 				}
 				s_renameTarget.clear();
@@ -5887,6 +5911,49 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				ImGui::CloseCurrentPopup();
 			}
 
+			ImGui::EndPopup();
+		}
+
+		// ── Name-a-C++-class popup (C++ projects only) ────────────────────
+		// The Create menu's "C++ Class" item stages a default name and raises
+		// this; on confirm it writes Source/<Name>.{h,cpp}. Those files live
+		// outside Content/, so they don't appear in the browser — the user edits
+		// them in their own C++ toolchain (which is the C++ workflow).
+		if (s_openCppClassPopup && !ctx.contentRefreshPending && !ctx.contentRefreshDone)
+		{
+			ImGui::OpenPopup("##cb_cpp_class_popup");
+			s_openCppClassPopup = false;
+		}
+		ImGui::SetNextWindowSize(ImVec2(340, 0), ImGuiCond_Always);
+		if (ImGui::BeginPopupModal("##cb_cpp_class_popup", nullptr,
+			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
+		{
+			ImGui::TextUnformatted("New C++ Class");
+			ImGui::Separator();
+			ImGui::Spacing();
+			if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+			ImGui::SetNextItemWidth(-1.0f);
+			bool confirm = ImGui::InputText("##cpp_class_input", s_cppClassName, sizeof(s_cppClassName),
+				ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
+			ImGui::TextDisabled("Creates Source/<Name>.h and .cpp");
+			ImGui::Spacing();
+			const bool canCreate = s_cppClassName[0] != '\0' && ctx.projectManager &&
+				!ctx.projectManager->currentProject().path.empty();
+			if ((ImGui::Button("Create", ImVec2(150, 0)) || confirm) && canCreate)
+			{
+				const std::filesystem::path projRoot =
+					std::filesystem::path(ctx.projectManager->currentProject().path).parent_path();
+				std::string created;
+				if (writeCppClass(projRoot.string(), s_cppClassName, &created))
+					Logger::Log(Logger::LogLevel::Info,
+						("Editor: created C++ class at " + created).c_str());
+				else
+					Logger::Log(Logger::LogLevel::Error, "Editor: failed to create C++ class");
+				ImGui::CloseCurrentPopup();
+			}
+			ImGui::SameLine();
+			if (ImGui::Button("Cancel", ImVec2(150, 0)))
+				ImGui::CloseCurrentPopup();
 			ImGui::EndPopup();
 		}
 
@@ -7377,7 +7444,17 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			addItem("Light",        LightComponent{});
 			addItem("Rigid Body",          RigidBodyComponent{});
 			addItem("Collider",            ColliderComponent{});
-			addItem("Script",         ScriptComponent{});
+			// A ScriptComponent points at a Lua/Python Script asset, so it's only
+			// offered when the project is authored in one of those languages
+			// (HorizonCode drives entities via player/level graphs; C++ via native
+			// GameLogic). Entities that already carry the component still edit fine.
+			{
+				const ProjectScriptLanguage plang = ctx.projectManager
+					? ctx.projectManager->currentProject().scriptLanguage
+					: ProjectScriptLanguage::HorizonCode;
+				if (plang == ProjectScriptLanguage::Lua || plang == ProjectScriptLanguage::Python)
+					addItem("Script",         ScriptComponent{});
+			}
 			addItem("Audio Source",    AudioSourceComponent{});
 			addItem("Audio Listener",  AudioListenerComponent{});
 			addItem("Particle System", ParticleSystemComponent{});
