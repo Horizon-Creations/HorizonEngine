@@ -172,8 +172,11 @@ public:
 	// chunk are read; payload chunks are skipped). Afterwards ensureResident() and
 	// loadAssetAsync(UUID) can resolve UUID references from loose content — this is
 	// what lets scene references (mesh/material component UUIDs) resolve after an
-	// editor restart or scene reload without a bulk preload. Call after
-	// setContentRoot(); rescans replace the previous registry. Returns entry count.
+	// editor restart or scene reload without a bulk preload. Also indexes the
+	// engine content root (keys prefixed "Engine/"), so scenes referencing a
+	// built-in mesh/material by UUID resolve on reload instead of falling back to
+	// the default cube. Call after setContentRoot(); rescans replace the previous
+	// registry. Returns entry count.
 	size_t scanContentDirectory();
 
 	// Ensure the asset is resident, loading it from the highest-priority mounted
@@ -300,6 +303,11 @@ private:
 
 	HE::AssetType getAssetType(const std::string path) const;
 	void          initDefaultAssets();
+
+	// scanContentDirectory() worker: index one root's .hasset META into
+	// m_diskRegistry, keys prefixed with pathPrefix ("" for content, "Engine/"
+	// for the engine defaults).
+	void          scanDirInto(const std::string& root, const std::string& pathPrefix);
 
 	// Shared indexing for runtime asset registration / in-place replacement.
 	// Defined in the .cpp; only instantiated by the typed wrappers above.

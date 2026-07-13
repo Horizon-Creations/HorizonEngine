@@ -1606,12 +1606,15 @@ size_t ContentManager::mountPakOverlays(const std::filesystem::path& dir)
 	return mounted;
 }
 
-size_t ContentManager::scanContentDirectory()
+// Index every .hasset under `root` into m_diskRegistry (UUID → relative path),
+// each key prefixed with `pathPrefix` so loadAsset()/resolveAbsolutePath() route
+// it back to the right root. Cheap header-only META sniff per file.
+void ContentManager::scanDirInto(const std::string& rootStr, const std::string& pathPrefix)
 {
-	m_diskRegistry.clear();
+	if (rootStr.empty()) return;
 	std::error_code ec;
-	const std::filesystem::path root(m_contentRoot);
-	if (!std::filesystem::is_directory(root, ec)) return 0;
+	const std::filesystem::path root(rootStr);
+	if (!std::filesystem::is_directory(root, ec)) return;
 
 	for (const auto& p : std::filesystem::recursive_directory_iterator(root, ec))
 	{
@@ -1643,14 +1646,30 @@ size_t ContentManager::scanContentDirectory()
 			HE::UUID id; std::string name, metaPath;
 			if (f && readMetaChunk(meta, hdr.version, id, name, metaPath) && id != HE::UUID{})
 			{
-				// Key by the file's ACTUAL location relative to the content root
-				// (not the META-embedded path) so moved/renamed files still resolve.
+				// Key by the file's ACTUAL location relative to its root (not the
+				// META-embedded path) so moved/renamed files still resolve.
 				const auto rel = std::filesystem::relative(p.path(), root, ec);
-				if (!ec) m_diskRegistry[id] = rel.generic_string();
+				if (!ec) m_diskRegistry[id] = pathPrefix + rel.generic_string();
 			}
 			break; // META handled — done with this file
 		}
 	}
+}
+
+size_t ContentManager::scanContentDirectory()
+{
+	m_diskRegistry.clear();
+	// Project content first, then engine defaults. A project override
+	// (Content/Engine/...) is picked up by the FIRST scan as "Engine/<rest>"
+	// (its content-relative path already carries the prefix), and the engine
+	// scan writes the same "Engine/<rest>" key for the shared default it
+	// shadows — identical value, so order is immaterial; resolveAbsolutePath
+	// still prefers the override at load time. Engine defaults with no override
+	// are what the engine scan uniquely adds — WITHOUT it, a scene that
+	// references a built-in mesh/material by UUID falls back to the default
+	// cube on reload (the UUID resolves to nothing on disk).
+	scanDirInto(m_contentRoot, "");
+	scanDirInto(m_engineContentRoot, std::string(kEnginePrefix));
 	return m_diskRegistry.size();
 }
 
