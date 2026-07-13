@@ -3,7 +3,9 @@
 #include "HorizonVersion.h"   // HE_VERSION_STRING / HE_VERSION_CODENAME
 
 #import <Cocoa/Cocoa.h>
+#include <SDL3/SDL.h>         // SDL_GetBasePath — locate the bundled logo
 #include <deque>
+#include <string>
 #include <vector>
 
 namespace
@@ -28,11 +30,23 @@ namespace
 // the packaged .app. Renders as: "Horizon Editor  /  Version 0.2.0 (Sunrise)".
 - (void)showAbout:(id)sender
 {
-	NSDictionary* opts = @{
+	NSMutableDictionary* opts = [@{
 		NSAboutPanelOptionApplicationName    : @"Horizon Editor",
 		NSAboutPanelOptionApplicationVersion : @HE_VERSION_STRING,   // → "Version 0.2.0"
 		NSAboutPanelOptionVersion            : @HE_VERSION_CODENAME, // → "(Sunrise)"
-	};
+	} mutableCopy];
+
+	// Run as a bare exe (no .app bundle) the panel would fall back to the generic
+	// application icon (a blank document/folder). Show the editor's own logo — the
+	// same HC_Logo.png the Project Hub loads — when we can find and decode it.
+	if (const char* base = SDL_GetBasePath())
+	{
+		NSString* logoPath = [NSString stringWithUTF8String:base];
+		logoPath = [logoPath stringByAppendingString:@"Images/HC_Logo.png"];
+		if (NSImage* logo = [[NSImage alloc] initWithContentsOfFile:logoPath])
+			opts[NSAboutPanelOptionApplicationIcon] = logo;
+	}
+
 	[NSApp orderFrontStandardAboutPanelWithOptions:opts];
 }
 @end
