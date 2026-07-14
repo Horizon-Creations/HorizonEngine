@@ -240,8 +240,20 @@ if(HE_BUNDLE_CMAKE)
 endif()
 
 # The editor also links HorizonScene (→ HorizonScene.dll imports python3XY.dll at load),
-# so a distributed editor needs the Python runtime next to it exactly like the game does.
+# so a distributed editor needs the Python runtime + the MSVC C++ runtime next to it,
+# exactly like the game does.
 he_bundle_python(HorizonEditor "${DEPLOY_EDITOR}")
+he_bundle_crt(HorizonEditor "${DEPLOY_EDITOR}")
+
+# Bundle the game runtime INTO the editor package (<editor>/Game) so exporting a game
+# works from a downloaded editor: the exporter's findRuntimeBundle() looks for
+# <editorBaseDir>/Game/HorizonGame[.exe]. HorizonEditor depends on HorizonGame
+# (add_dependencies in the root CMakeLists), so DEPLOY_GAME is fully populated (exe +
+# engine DLLs + SDL3 + Python + CRT) by the time this POST_BUILD runs. Copy it wholesale.
+add_custom_command(TARGET HorizonEditor POST_BUILD
+	COMMAND ${CMAKE_COMMAND} -E copy_directory "${DEPLOY_GAME}" "${DEPLOY_EDITOR}/Game"
+	COMMENT "Bundling the game runtime into ${DEPLOY_EDITOR}/Game (for in-editor export)"
+	VERBATIM)
 
 # he_sdk_config.json: tells the HorizonCode → C++ export codegen where the
 # engine headers + libraries live when exporting from a DEVELOPMENT build (the

@@ -62,3 +62,6 @@ add_custom_command(TARGET HorizonGame POST_BUILD
 # a python3XY._pth (isolated path mode). The Editor's exporter carries these flat files
 # next to the exe on a Windows export (see ProjectExporter).
 he_bundle_python(HorizonGame "${DEPLOY_GAME}")
+
+# Bundle the MSVC C++ runtime so the game runs on a clean PC without the VC++ redist.
+he_bundle_crt(HorizonGame "${DEPLOY_GAME}")
