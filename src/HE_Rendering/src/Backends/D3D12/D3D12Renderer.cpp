@@ -2226,6 +2226,26 @@ struct D3D12RendererImpl
     // record (the GPU copy runs at execute time), then swept in Render().
     std::vector<std::pair<ComPtr<ID3D12Resource>, int>> meshTexUploads;
 
+    // ── MaterialComponent override + hot-reload (A2) ─────────────────────────
+    // Override-material textures cached by material UUID (parallel to the baked per-mesh
+    // texture on GpuMesh): a draw's dc.materialAssetId, when it resolves to a texture,
+    // wins over the mesh's baked texture — mirrors GL/Metal. slot = -1 means "resolved,
+    // no texture" (cached so it isn't re-resolved every frame). Editor edits push UUIDs
+    // to the pending lists, drained at the top of the next DrawScene where it is safe to
+    // touch the heap. Retired GPU resources are freed a few frames later (past frames in
+    // flight). Descriptor-heap slots are monotonic, so an invalidated slot leaks (bounded).
+    struct MaterialTex { ComPtr<ID3D12Resource> tex; int slot = -1; };
+    std::unordered_map<HE::UUID, MaterialTex> m_materialTexCache;
+    std::vector<HE::UUID> m_pendingMatInval;
+    std::vector<HE::UUID> m_pendingMeshInval;
+    std::vector<std::pair<ComPtr<ID3D12Resource>, int>> m_retiredTextures;
+    // Recycle mesh-texture heap slots freed by invalidation so a repeatedly-edited mesh
+    // (e.g. per-frame terrain sculpt, TerrainSystem::InvalidateMesh) can't exhaust the
+    // 1024-slot region. A freed slot is only reusable once past frames in flight (its old
+    // descriptor may still be referenced), so it waits out the same countdown as the resource.
+    std::vector<std::pair<UINT, int>> m_freeSlotPending; // (slot, countdown)
+    std::vector<UINT>                 m_freeSlots;        // ready to reuse
+
     D3D12_CPU_DESCRIPTOR_HANDLE sceneSrvCpu(UINT slot) const
     {
         D3D12_CPU_DESCRIPTOR_HANDLE h = sceneSrvHeap->GetCPUDescriptorHandleForHeapStart();
@@ -2265,7 +2285,9 @@ struct D3D12RendererImpl
         if (tex->width == 0 || tex->height == 0) return -1;
         const UINT rowBytes = static_cast<UINT>(tex->width) * 4u;
         if (tex->data.size() < static_cast<size_t>(rowBytes) * tex->height) return -1; // truncated
-        if (meshTexNextSlot >= k_sceneStaticSrvs + k_maxMeshTextures) return -1;        // heap full → flat
+        // A recycled slot (freed by invalidation, past frames in flight) or the next fresh one.
+        if (m_freeSlots.empty() && meshTexNextSlot >= k_sceneStaticSrvs + k_maxMeshTextures)
+            return -1; // heap full → flat
 
         D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
         D3D12_RESOURCE_DESC td{};
@@ -2305,7 +2327,9 @@ struct D3D12RendererImpl
         barrier12(cl, gpuTex.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 
-        const UINT slot = meshTexNextSlot++;
+        UINT slot;
+        if (!m_freeSlots.empty()) { slot = m_freeSlots.back(); m_freeSlots.pop_back(); }
+        else                      { slot = meshTexNextSlot++; }
         D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
         sv.Format                  = DXGI_FORMAT_R8G8B8A8_UNORM;
         sv.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
@@ -2341,6 +2365,77 @@ struct D3D12RendererImpl
         if (!asset) return;
         const TextureAsset* tex = resolveAlbedoAsset(asset->materialId, asset->materialPath, cm);
         mesh.albedoSlot = allocAlbedoSlot(cl, tex, mesh.albedoTex);
+    }
+
+    // Resolve + upload an OVERRIDE material's base-color texture (dc.materialAssetId), cached
+    // by material UUID. Returns true iff the material asset is loaded (so the override applies,
+    // fully replacing the mesh's baked texture — exactly like GL's ResolveMaterialTexture);
+    // outSlot is the sceneSrvHeap slot, or -1 when the override material has no usable texture
+    // (→ the draw is flat, NOT the baked texture). Returns false only while the material asset
+    // isn't loaded yet (retry next frame; the baked texture stays until then). Uses getMaterial
+    // (the override is an explicit asset id) and caches even the no-texture result.
+    bool resolveMaterialAlbedo(ID3D12GraphicsCommandList* cl, const HE::UUID& materialId,
+                               ContentManager* cm, int& outSlot)
+    {
+        outSlot = -1;
+        if (materialId == HE::UUID{} || !cl || !cm || !sceneSrvHeap) return false;
+        if (auto it = m_materialTexCache.find(materialId); it != m_materialTexCache.end())
+        { outSlot = it->second.slot; return true; }
+        const MaterialAsset* mat = cm->getMaterial(materialId);
+        if (!mat) return false; // not loaded yet — retry next frame without caching
+        const HE::UUID    texId0   = mat->textureIds.empty()   ? HE::UUID{}    : mat->textureIds[0];
+        const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
+        const TextureAsset* tex = cm->resolveTextureRef(texId0, texPath0);
+        MaterialTex entry;
+        entry.slot = allocAlbedoSlot(cl, tex, entry.tex); // -1 if the material has no usable texture
+        outSlot = entry.slot;
+        m_materialTexCache.emplace(materialId, std::move(entry));
+        return true;
+    }
+
+    // Drain the editor's material/mesh hot-reload requests. Called at the top of DrawScene
+    // (render thread, before any draw records) so touching the heap/caches is safe. Retired
+    // GPU resources are freed a few frames later; the freed descriptor-heap slot is abandoned
+    // (monotonic allocator), a bounded leak acceptable for edit-time invalidation.
+    void processPendingInvalidations()
+    {
+        const int retireN = static_cast<int>(k_frameCount) + 2;
+        auto retire     = [&](ComPtr<ID3D12Resource>&& r) { if (r) m_retiredTextures.emplace_back(std::move(r), retireN); };
+        auto freeSlot   = [&](int slot) { if (slot >= 0) m_freeSlotPending.emplace_back(static_cast<UINT>(slot), retireN); };
+
+        for (const HE::UUID& id : m_pendingMatInval)
+            if (auto it = m_materialTexCache.find(id); it != m_materialTexCache.end())
+            {
+                freeSlot(it->second.slot);
+                retire(std::move(it->second.tex));
+                m_materialTexCache.erase(it);
+            }
+        m_pendingMatInval.clear();
+
+        for (const HE::UUID& id : m_pendingMeshInval)
+        {
+            if (auto it = meshCache.find(id); it != meshCache.end())
+            {
+                GpuMesh& m = it->second;
+                freeSlot(m.albedoSlot);
+                retire(std::move(m.albedoTex));
+                retire(std::move(m.vbuf));
+                retire(std::move(m.ibuf));
+                meshCache.erase(it);
+            }
+            if (auto it = m_skeletalMeshCache.find(id); it != m_skeletalMeshCache.end())
+            {
+                GpuSkeletalMesh12& m = it->second;
+                freeSlot(m.albedoSlot);
+                retire(std::move(m.albedoTex));
+                retire(std::move(m.vbuf));
+                retire(std::move(m.boneIdVb));
+                retire(std::move(m.boneWgtVb));
+                retire(std::move(m.ibuf));
+                m_skeletalMeshCache.erase(it);
+            }
+        }
+        m_pendingMeshInval.clear();
     }
 
     // ── SSAO ────────────────────────────────────────────────────────────────
@@ -4033,6 +4128,12 @@ void D3D12Renderer::Shutdown()
     m_impl->m_uiAtlasHeap.Reset();
     m_impl->meshTexUploads.clear(); // per-mesh base-color staging buffers (GpuMesh SRVs die with meshCache)
     m_impl->meshTexNextSlot = D3D12RendererImpl::k_sceneStaticSrvs; // reset the albedo-slot allocator for a possible re-Initialize
+    m_impl->m_materialTexCache.clear(); // override-material textures
+    m_impl->m_retiredTextures.clear();  // hot-reload retire list
+    m_impl->m_pendingMatInval.clear();
+    m_impl->m_pendingMeshInval.clear();
+    m_impl->m_freeSlotPending.clear();
+    m_impl->m_freeSlots.clear();
     m_impl->m_skinnedPSO.Reset();
     m_impl->m_skinnedHdrPSO.Reset();
     m_impl->skinnedRootSig.Reset();
@@ -4073,6 +4174,10 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     if (!m_world || !m_impl->pso || width <= 0 || height <= 0) return;
     auto& p = *m_impl;
     auto* cl = static_cast<ID3D12GraphicsCommandList*>(cmdListPtr);
+
+    // Drop caches for materials/meshes edited since last frame (before the mesh-resolve
+    // pre-pass below re-creates them fresh). Safe here: render thread, no draws recorded yet.
+    p.processPendingInvalidations();
 
     // Feed time-of-day to the extractor so it recomputes the sun/moon direction from the
     // day-night clock (otherwise m_timeOfDay stays at its 0.5 default and the sky never
@@ -4316,12 +4421,16 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             GpuMesh* mesh = p.resolveMesh(dc.meshAssetId, m_contentManager);
             GpuMesh& m    = mesh ? *mesh : p.cube;
             if (!m.indexCount) return;
-            // Upload this mesh's base-color texture on first sight, then bind it at t1
-            // (or the null fallback when untextured).  The fallback cube stays flat.
+            // Base color: an explicit MaterialComponent override (dc.materialAssetId) wins
+            // over the mesh's own baked texture; else the mesh's baked texture (A1); else flat.
             if (mesh) p.ensureMeshAlbedo(cl, m, dc.meshAssetId, m_contentManager);
-            const bool textured = mesh && m.albedoSlot >= 0;
+            int albedoSlot = (mesh && m.albedoSlot >= 0) ? m.albedoSlot : -1; // baked (A1)
+            int ovrSlot = -1;
+            if (p.resolveMaterialAlbedo(cl, dc.materialAssetId, m_contentManager, ovrSlot))
+                albedoSlot = ovrSlot; // override fully replaces the baked texture (may be flat)
+            const bool textured = albedoSlot >= 0;
             cl->SetGraphicsRootDescriptorTable(3, p.sceneSrvGpu(
-                textured ? static_cast<UINT>(m.albedoSlot) : p.k_albedoNullSlot));
+                textured ? static_cast<UINT>(albedoSlot) : p.k_albedoNullSlot));
             cl->IASetVertexBuffers(0, 1, &m.vbv);
             cl->IASetIndexBuffer(&m.ibv);
             auto drawOne = [&](const glm::mat4& model) {
@@ -4376,11 +4485,15 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 GpuSkeletalMesh12* skm = p.resolveSkeletalMesh12(sdc.meshAssetId, m_contentManager);
                 if (!skm || !skm->indexCount) continue;
 
-                // Upload this skeletal mesh's base-color texture on first sight, bind at t1.
+                // Base color: MaterialComponent override wins over the baked texture, else baked, else flat.
                 p.ensureSkeletalAlbedo(cl, *skm, sdc.meshAssetId, m_contentManager);
-                const bool textured = skm->albedoSlot >= 0;
+                int albedoSlot = skm->albedoSlot; // baked (A1)
+                int ovrSlot = -1;
+                if (p.resolveMaterialAlbedo(cl, sdc.materialAssetId, m_contentManager, ovrSlot))
+                    albedoSlot = ovrSlot; // override fully replaces the baked texture
+                const bool textured = albedoSlot >= 0;
                 cl->SetGraphicsRootDescriptorTable(4, p.sceneSrvGpu(
-                    textured ? static_cast<UINT>(skm->albedoSlot) : p.k_albedoNullSlot));
+                    textured ? static_cast<UINT>(albedoSlot) : p.k_albedoNullSlot));
 
                 // Upload bone matrices (clamped to 128) into the bones ring slot.
                 if (bonesPtr && bonesBase)
@@ -4466,6 +4579,18 @@ void D3D12Renderer::Render()
     for (auto it = p.meshTexUploads.begin(); it != p.meshTexUploads.end(); )
     {
         if (--it->second <= 0) it = p.meshTexUploads.erase(it);
+        else                   ++it;
+    }
+    // GPU resources retired by material/mesh hot-reload — free once past frames in flight.
+    for (auto it = p.m_retiredTextures.begin(); it != p.m_retiredTextures.end(); )
+    {
+        if (--it->second <= 0) it = p.m_retiredTextures.erase(it);
+        else                   ++it;
+    }
+    // Heap slots freed by invalidation become reusable once past frames in flight.
+    for (auto it = p.m_freeSlotPending.begin(); it != p.m_freeSlotPending.end(); )
+    {
+        if (--it->second <= 0) { p.m_freeSlots.push_back(it->first); it = p.m_freeSlotPending.erase(it); }
         else                   ++it;
     }
 
@@ -4968,6 +5093,19 @@ void D3D12Renderer::SetBloomSettings(const BloomSettings& s)
     m_impl->bloomEnabled   = s.enabled;
     m_impl->bloomThreshold = s.threshold;
     m_impl->bloomStrength  = s.intensity;
+}
+
+void D3D12Renderer::InvalidateMaterial(const HE::UUID& materialId)
+{
+    // Deferred to the next DrawScene (render thread), where touching the heap is safe.
+    if (m_impl && materialId != HE::UUID{})
+        m_impl->m_pendingMatInval.push_back(materialId);
+}
+
+void D3D12Renderer::InvalidateMesh(const HE::UUID& meshId)
+{
+    if (m_impl && meshId != HE::UUID{})
+        m_impl->m_pendingMeshInval.push_back(meshId);
 }
 
 IRenderer::FrameGpuStats D3D12Renderer::GetFrameGpuStats() const
