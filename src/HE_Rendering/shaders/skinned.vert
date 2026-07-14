@@ -25,6 +25,7 @@ layout(set = 1, binding = 0) uniform BonesCB {
 
 layout(location = 0) out vec3 vWorldPos;
 layout(location = 1) out vec3 vNormal;
+layout(location = 2) out vec2 vUV;
 
 void main()
 {
@@ -40,5 +41,6 @@ void main()
 
     vWorldPos   = (pc.uModel * skinnedPos).xyz;
     vNormal     = mat3(pc.uModel) * skinnedNormal;
+    vUV         = aUV;
     gl_Position = pc.uMVP * skinnedPos;
 }

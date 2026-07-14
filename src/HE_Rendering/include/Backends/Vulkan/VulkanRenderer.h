@@ -156,10 +156,26 @@ private:
 	};
 	FrameUBO m_frameUBO[2];
 
-	// Per-draw material data (32 bytes: baseColor(rgb)+metallic(a) + roughness + pad).
-	// Updated per-draw via vkCmdUpdateBuffer; binding 2 in scene descriptor set.
+	// Per-draw material data (32 bytes: baseColor(rgb)+metallic(a) + roughness + opacity
+	// + hasTexture). Updated per-draw via vkCmdUpdateBuffer; binding 2 in scene descriptor set.
 	VkBuffer       m_matUBO    = VK_NULL_HANDLE;
 	VkDeviceMemory m_matMem    = VK_NULL_HANDLE;
+
+	// ── Per-mesh base-color texture (descriptor set = 2) ─────────────────────
+	// Each textured mesh owns a device-local RGBA8 image + view + a single combined-
+	// image-sampler descriptor set, bound per draw. Untextured meshes share
+	// m_whiteAlbedoSet (a 1x1 white default; MatUBO.roughPad.z = 0 selects flat colour).
+	// m_emptySetLayout fills the scene pipeline's set-1 slot (skinned uses set 1 for bones),
+	// so the shared scene.frag can reference uAlbedo at set 2 in both pipelines.
+	static constexpr uint32_t k_maxMeshTextures = 1024; // per-mesh albedo descriptor-set cap
+	VkDescriptorSetLayout m_albedoSetLayout = VK_NULL_HANDLE;
+	VkDescriptorSetLayout m_emptySetLayout  = VK_NULL_HANDLE;
+	VkSampler             m_albedoSampler   = VK_NULL_HANDLE; // linear + repeat
+	VkDescriptorPool      m_albedoPool      = VK_NULL_HANDLE; // per-mesh albedo sets
+	VkImage         m_whiteAlbedoImage = VK_NULL_HANDLE;
+	VkDeviceMemory  m_whiteAlbedoMem   = VK_NULL_HANDLE;
+	VkImageView     m_whiteAlbedoView  = VK_NULL_HANDLE;
+	VkDescriptorSet m_whiteAlbedoSet   = VK_NULL_HANDLE;
 
 	struct GpuMesh
 	{
@@ -169,11 +185,27 @@ private:
 		VkDeviceMemory imem       = VK_NULL_HANDLE;
 		uint32_t       indexCount = 0;
 		HE::AABB       localBounds;
+		// Base-color texture (null → untextured, draws with m_whiteAlbedoSet + flat colour).
+		VkImage         albedoImage = VK_NULL_HANDLE;
+		VkDeviceMemory  albedoMem   = VK_NULL_HANDLE;
+		VkImageView     albedoView  = VK_NULL_HANDLE;
+		VkDescriptorSet albedoSet   = VK_NULL_HANDLE; // set=2, owned by m_albedoPool
 	};
 	GpuMesh                               m_cube;
 	std::unordered_map<HE::UUID, GpuMesh> m_meshCache;
 	bool createMeshBuffers(GpuMesh& mesh, const std::vector<float>& interleaved,
 	                       const std::vector<uint32_t>& indices);
+	// Upload tightly-packed RGBA8 pixels to a device-local sampled image + view via a
+	// one-shot command buffer (transition → copy → transition), mirroring the moon upload.
+	bool uploadRGBA8Image(const uint8_t* rgba, uint32_t w, uint32_t h,
+	                      VkImage& image, VkDeviceMemory& mem, VkImageView& view);
+	// Resolve a mesh/skeletal asset's baked base-color texture (material → textureIds[0]) and
+	// upload it to a device-local image + a set=2 descriptor set (shared by static + skinned).
+	// Fills the out-params and returns true on success; leaves them null and returns false on
+	// any miss, so the caller draws untextured. Mirrors D3D11/D3D12.
+	bool resolveAndUploadAlbedo(const HE::UUID& materialId, const std::string& materialPath,
+	                            VkImage& image, VkDeviceMemory& mem, VkImageView& view,
+	                            VkDescriptorSet& set);
 	const GpuMesh* resolveMesh(const HE::UUID& assetId);
 	void createCube();
 
@@ -455,9 +487,10 @@ private:
 		VkDeviceMemory boneWgtMem  = VK_NULL_HANDLE;
 		VkBuffer       ib          = VK_NULL_HANDLE;
 		VkDeviceMemory ibMem       = VK_NULL_HANDLE;
-		VkImageView    texView     = VK_NULL_HANDLE;  // reserved for future texture support
+		VkImageView    texView     = VK_NULL_HANDLE;  // base-color texture (set=2)
 		VkImage        texImage    = VK_NULL_HANDLE;
 		VkDeviceMemory texMem      = VK_NULL_HANDLE;
+		VkDescriptorSet albedoSet  = VK_NULL_HANDLE;  // set=2, owned by m_albedoPool
 		bool           hasTex      = false;
 		int            indexCount  = 0;
 	};

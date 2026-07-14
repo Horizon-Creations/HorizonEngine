@@ -287,6 +287,10 @@ void VulkanRenderer::Shutdown()
         if (mesh.vmem) vkFreeMemory   (m_device, mesh.vmem, nullptr);
         if (mesh.ibuf) vkDestroyBuffer(m_device, mesh.ibuf, nullptr);
         if (mesh.imem) vkFreeMemory   (m_device, mesh.imem, nullptr);
+        // Base-color texture (descriptor set is freed with m_albedoPool in destroyScenePipeline).
+        if (mesh.albedoView)  vkDestroyImageView(m_device, mesh.albedoView,  nullptr);
+        if (mesh.albedoImage) vkDestroyImage    (m_device, mesh.albedoImage, nullptr);
+        if (mesh.albedoMem)   vkFreeMemory      (m_device, mesh.albedoMem,   nullptr);
     }
     m_meshCache.clear();
     if (m_cube.vbuf) vkDestroyBuffer(m_device, m_cube.vbuf, nullptr);
@@ -1364,14 +1368,34 @@ void VulkanRenderer::createScenePipeline()
         vkBindBufferMemory(m_device, m_matUBO, m_matMem, 0);
     }
 
-    // Pipeline layout: the set above + per-object push constants (MVP + model).
+    // Base-color descriptor set layout (set = 2: one combined image sampler, fragment stage)
+    // + an empty layout to fill the scene pipeline's unused set-1 slot (skinned uses set 1
+    // for its bones UBO, so uAlbedo lives at set 2 in the shared scene.frag).
+    {
+        VkDescriptorSetLayoutBinding ab{};
+        ab.binding         = 0;
+        ab.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        ab.descriptorCount = 1;
+        ab.stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
+        VkDescriptorSetLayoutCreateInfo aslci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+        aslci.bindingCount = 1;
+        aslci.pBindings    = &ab;
+        vkCheck(vkCreateDescriptorSetLayout(m_device, &aslci, nullptr, &m_albedoSetLayout), "albedo set layout");
+
+        VkDescriptorSetLayoutCreateInfo eslci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+        eslci.bindingCount = 0;
+        vkCheck(vkCreateDescriptorSetLayout(m_device, &eslci, nullptr, &m_emptySetLayout), "empty set layout");
+    }
+
+    // Pipeline layout: scene set (0) + empty (1) + albedo (2) + per-object push constants.
     VkPushConstantRange pcr{};
     pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
     pcr.offset     = 0;
     pcr.size       = sizeof(PushConstants);
+    VkDescriptorSetLayout sceneSets[3] = { m_sceneSetLayout, m_emptySetLayout, m_albedoSetLayout };
     VkPipelineLayoutCreateInfo plci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
-    plci.setLayoutCount         = 1;
-    plci.pSetLayouts            = &m_sceneSetLayout;
+    plci.setLayoutCount         = 3;
+    plci.pSetLayouts            = sceneSets;
     plci.pushConstantRangeCount = 1;
     plci.pPushConstantRanges    = &pcr;
     vkCheck(vkCreatePipelineLayout(m_device, &plci, nullptr, &m_scenePipelineLayout), "pipeline layout");
@@ -1434,6 +1458,52 @@ void VulkanRenderer::createScenePipeline()
         w[2].descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         w[2].pBufferInfo     = &matDbi;
         vkUpdateDescriptorSets(m_device, m_shadowView ? 3 : 2, w, 0, nullptr);
+    }
+
+    // ── Base-color texture sampler, per-mesh descriptor pool, and 1x1 white default ──
+    {
+        VkSamplerCreateInfo sci{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+        sci.magFilter    = VK_FILTER_LINEAR;
+        sci.minFilter    = VK_FILTER_LINEAR;
+        sci.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        sci.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        sci.mipmapMode   = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+        sci.maxLod       = VK_LOD_CLAMP_NONE;
+        vkCheck(vkCreateSampler(m_device, &sci, nullptr, &m_albedoSampler), "albedo sampler");
+
+        // One combined-image-sampler set per unique textured mesh (+1 for the white default).
+        VkDescriptorPoolSize aps{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, k_maxMeshTextures + 1 };
+        VkDescriptorPoolCreateInfo adp{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+        adp.maxSets       = k_maxMeshTextures + 1;
+        adp.poolSizeCount = 1;
+        adp.pPoolSizes    = &aps;
+        vkCheck(vkCreateDescriptorPool(m_device, &adp, nullptr, &m_albedoPool), "albedo pool");
+
+        // 1x1 opaque-white default so untextured meshes still bind a valid set-2 descriptor.
+        const uint8_t white[4] = { 255, 255, 255, 255 };
+        if (uploadRGBA8Image(white, 1, 1, m_whiteAlbedoImage, m_whiteAlbedoMem, m_whiteAlbedoView))
+        {
+            VkDescriptorSetAllocateInfo dsai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+            dsai.descriptorPool     = m_albedoPool;
+            dsai.descriptorSetCount = 1;
+            dsai.pSetLayouts        = &m_albedoSetLayout;
+            if (vkAllocateDescriptorSets(m_device, &dsai, &m_whiteAlbedoSet) == VK_SUCCESS)
+            {
+                VkDescriptorImageInfo dii{ m_albedoSampler, m_whiteAlbedoView,
+                                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                VkWriteDescriptorSet ww{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+                ww.dstSet          = m_whiteAlbedoSet;
+                ww.dstBinding      = 0;
+                ww.descriptorCount = 1;
+                ww.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                ww.pImageInfo      = &dii;
+                vkUpdateDescriptorSets(m_device, 1, &ww, 0, nullptr);
+            }
+        }
+        if (!m_whiteAlbedoSet)
+            Logger::Log(Logger::LogLevel::Error,
+                "VulkanRenderer: white base-color default failed — untextured meshes will be skipped");
     }
 
     VkShaderModule vs = loadShaderModule("scene.vert.spv");
@@ -1580,6 +1650,15 @@ void VulkanRenderer::destroyScenePipeline()
     if (m_matUBO)              { vkDestroyBuffer(m_device, m_matUBO, nullptr); m_matUBO = VK_NULL_HANDLE; }
     if (m_matMem)              { vkFreeMemory   (m_device, m_matMem, nullptr); m_matMem = VK_NULL_HANDLE; }
     if (m_descPool)            { vkDestroyDescriptorPool(m_device, m_descPool, nullptr);            m_descPool = VK_NULL_HANDLE; }
+    // Base-color texture resources (per-mesh images are freed with their caches; the pool
+    // destroy frees every albedo descriptor set incl. m_whiteAlbedoSet).
+    if (m_albedoPool)          { vkDestroyDescriptorPool(m_device, m_albedoPool, nullptr);          m_albedoPool = VK_NULL_HANDLE; }
+    if (m_whiteAlbedoView)     { vkDestroyImageView(m_device, m_whiteAlbedoView, nullptr);          m_whiteAlbedoView = VK_NULL_HANDLE; }
+    if (m_whiteAlbedoImage)    { vkDestroyImage(m_device, m_whiteAlbedoImage, nullptr);             m_whiteAlbedoImage = VK_NULL_HANDLE; }
+    if (m_whiteAlbedoMem)      { vkFreeMemory(m_device, m_whiteAlbedoMem, nullptr);                 m_whiteAlbedoMem = VK_NULL_HANDLE; }
+    if (m_albedoSampler)       { vkDestroySampler(m_device, m_albedoSampler, nullptr);              m_albedoSampler = VK_NULL_HANDLE; }
+    if (m_albedoSetLayout)     { vkDestroyDescriptorSetLayout(m_device, m_albedoSetLayout, nullptr); m_albedoSetLayout = VK_NULL_HANDLE; }
+    if (m_emptySetLayout)      { vkDestroyDescriptorSetLayout(m_device, m_emptySetLayout, nullptr);  m_emptySetLayout = VK_NULL_HANDLE; }
     if (m_shadowPipeline)                { vkDestroyPipeline(m_device, m_shadowPipeline, nullptr);                m_shadowPipeline = VK_NULL_HANDLE; }
     if (m_sceneTransparentPipelineHDR)   { vkDestroyPipeline(m_device, m_sceneTransparentPipelineHDR, nullptr);   m_sceneTransparentPipelineHDR = VK_NULL_HANDLE; }
     if (m_scenePipelineHDR)              { vkDestroyPipeline(m_device, m_scenePipelineHDR, nullptr);              m_scenePipelineHDR = VK_NULL_HANDLE; }
@@ -2456,6 +2535,166 @@ bool VulkanRenderer::createMeshBuffers(GpuMesh& mesh, const std::vector<float>& 
     return true;
 }
 
+bool VulkanRenderer::uploadRGBA8Image(const uint8_t* rgba, uint32_t width, uint32_t height,
+                                      VkImage& image, VkDeviceMemory& memory, VkImageView& view)
+{
+    if (!rgba || width == 0 || height == 0) return false;
+    const VkDeviceSize dataSize = static_cast<VkDeviceSize>(width) * height * 4u;
+
+    // Staging buffer (tightly packed — vkCmdCopyBufferToImage handles the row layout).
+    VkBuffer       stageBuf = VK_NULL_HANDLE;
+    VkDeviceMemory stageMem = VK_NULL_HANDLE;
+    {
+        VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        bci.size  = dataSize;
+        bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        if (vkCreateBuffer(m_device, &bci, nullptr, &stageBuf) != VK_SUCCESS) return false;
+        VkMemoryRequirements req{}; vkGetBufferMemoryRequirements(m_device, stageBuf, &req);
+        VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        mai.allocationSize  = req.size;
+        mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if (vkAllocateMemory(m_device, &mai, nullptr, &stageMem) != VK_SUCCESS)
+        { vkDestroyBuffer(m_device, stageBuf, nullptr); return false; }
+        vkBindBufferMemory(m_device, stageBuf, stageMem, 0);
+        void* ptr = nullptr;
+        vkMapMemory(m_device, stageMem, 0, dataSize, 0, &ptr);
+        std::memcpy(ptr, rgba, static_cast<size_t>(dataSize));
+        vkUnmapMemory(m_device, stageMem);
+    }
+
+    VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+    ici.imageType     = VK_IMAGE_TYPE_2D;
+    ici.format        = VK_FORMAT_R8G8B8A8_UNORM;
+    ici.extent        = { width, height, 1 };
+    ici.mipLevels     = 1;
+    ici.arrayLayers   = 1;
+    ici.samples       = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling        = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage         = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (vkCreateImage(m_device, &ici, nullptr, &image) != VK_SUCCESS)
+    { image = VK_NULL_HANDLE; vkDestroyBuffer(m_device, stageBuf, nullptr); vkFreeMemory(m_device, stageMem, nullptr); return false; }
+    VkMemoryRequirements imr{}; vkGetImageMemoryRequirements(m_device, image, &imr);
+    VkMemoryAllocateInfo imal{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    imal.allocationSize  = imr.size;
+    imal.memoryTypeIndex = findMemoryType(imr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (vkAllocateMemory(m_device, &imal, nullptr, &memory) != VK_SUCCESS)
+    {
+        vkDestroyImage(m_device, image, nullptr); image = VK_NULL_HANDLE;
+        vkDestroyBuffer(m_device, stageBuf, nullptr); vkFreeMemory(m_device, stageMem, nullptr);
+        return false;
+    }
+    vkBindImageMemory(m_device, image, memory, 0);
+
+    // One-shot command buffer: UNDEFINED → TRANSFER_DST → copy → SHADER_READ_ONLY.
+    VkCommandBufferAllocateInfo cbai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+    cbai.commandPool        = m_cmdPool;
+    cbai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cbai.commandBufferCount = 1;
+    VkCommandBuffer oneCB = VK_NULL_HANDLE;
+    vkAllocateCommandBuffers(m_device, &cbai, &oneCB);
+    VkCommandBufferBeginInfo oneBI{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    oneBI.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(oneCB, &oneBI);
+    {
+        VkImageMemoryBarrier bar{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+        bar.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        bar.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bar.image            = image;
+        bar.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        bar.srcAccessMask    = 0;
+        bar.dstAccessMask    = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(oneCB, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &bar);
+    }
+    VkBufferImageCopy region{};
+    region.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    region.imageExtent      = { width, height, 1 };
+    vkCmdCopyBufferToImage(oneCB, stageBuf, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    {
+        VkImageMemoryBarrier bar{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+        bar.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        bar.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bar.image            = image;
+        bar.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        bar.srcAccessMask    = VK_ACCESS_TRANSFER_WRITE_BIT;
+        bar.dstAccessMask    = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(oneCB, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &bar);
+    }
+    vkEndCommandBuffer(oneCB);
+    VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    si.commandBufferCount = 1;
+    si.pCommandBuffers    = &oneCB;
+    vkQueueSubmit(m_graphicsQueue, 1, &si, VK_NULL_HANDLE);
+    vkQueueWaitIdle(m_graphicsQueue);
+    vkFreeCommandBuffers(m_device, m_cmdPool, 1, &oneCB);
+    vkDestroyBuffer(m_device, stageBuf, nullptr);
+    vkFreeMemory(m_device, stageMem, nullptr);
+
+    VkImageViewCreateInfo ivci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+    ivci.image            = image;
+    ivci.viewType         = VK_IMAGE_VIEW_TYPE_2D;
+    ivci.format           = VK_FORMAT_R8G8B8A8_UNORM;
+    ivci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    if (vkCreateImageView(m_device, &ivci, nullptr, &view) != VK_SUCCESS)
+    {
+        view = VK_NULL_HANDLE;
+        vkDestroyImage(m_device, image, nullptr); image = VK_NULL_HANDLE;
+        vkFreeMemory(m_device, memory, nullptr);  memory = VK_NULL_HANDLE;
+        return false;
+    }
+    return true;
+}
+
+bool VulkanRenderer::resolveAndUploadAlbedo(const HE::UUID& materialId, const std::string& materialPath,
+                                            VkImage& image, VkDeviceMemory& memory, VkImageView& view,
+                                            VkDescriptorSet& set)
+{
+    image = VK_NULL_HANDLE; memory = VK_NULL_HANDLE; view = VK_NULL_HANDLE; set = VK_NULL_HANDLE;
+    if (!m_contentManager || !m_albedoPool || !m_albedoSetLayout) return false;
+    const MaterialAsset* mat = m_contentManager->resolveMaterialRef(materialId, materialPath);
+    if (!mat) return false;
+    const HE::UUID    texId0   = mat->textureIds.empty()   ? HE::UUID{}    : mat->textureIds[0];
+    const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
+    const TextureAsset* tex = m_contentManager->resolveTextureRef(texId0, texPath0);
+    if (!tex || tex->data.empty() || tex->channels != 4 || tex->format != TextureFormat::RGBA8) return false;
+    if (tex->width == 0 || tex->height == 0) return false;
+    if (tex->data.size() < static_cast<size_t>(tex->width) * tex->height * 4u) return false; // truncated
+
+    if (!uploadRGBA8Image(tex->data.data(), static_cast<uint32_t>(tex->width),
+                          static_cast<uint32_t>(tex->height), image, memory, view))
+        return false;
+
+    VkDescriptorSetAllocateInfo dsai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+    dsai.descriptorPool     = m_albedoPool;
+    dsai.descriptorSetCount = 1;
+    dsai.pSetLayouts        = &m_albedoSetLayout;
+    if (vkAllocateDescriptorSets(m_device, &dsai, &set) != VK_SUCCESS)
+    {
+        // Pool exhausted (> k_maxMeshTextures unique textured meshes) — drop to flat.
+        vkDestroyImageView(m_device, view, nullptr);  view = VK_NULL_HANDLE;
+        vkDestroyImage(m_device, image, nullptr);     image = VK_NULL_HANDLE;
+        vkFreeMemory(m_device, memory, nullptr);      memory = VK_NULL_HANDLE;
+        set = VK_NULL_HANDLE;
+        return false;
+    }
+    VkDescriptorImageInfo dii{ m_albedoSampler, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    VkWriteDescriptorSet ww{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+    ww.dstSet          = set;
+    ww.dstBinding      = 0;
+    ww.descriptorCount = 1;
+    ww.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    ww.pImageInfo      = &dii;
+    vkUpdateDescriptorSets(m_device, 1, &ww, 0, nullptr);
+    return true;
+}
+
 void VulkanRenderer::createCube()
 {
     static const float v[] = {
@@ -2519,6 +2758,11 @@ const VulkanRenderer::GpuMesh* VulkanRenderer::resolveMesh(const HE::UUID& asset
     }
     const std::vector<float>& interleaved = *vtx;
     if (!createMeshBuffers(mesh, interleaved, asset->indices)) return nullptr;
+    // Upload the mesh's baked base-color texture (if any) up front, so the cache entry is
+    // fully resolved on insert. NOTE: this uses a blocking one-shot submit + vkQueueWaitIdle
+    // (see uploadRGBA8Image), a one-time GPU stall on first sight of each textured mesh.
+    resolveAndUploadAlbedo(asset->materialId, asset->materialPath,
+                           mesh.albedoImage, mesh.albedoMem, mesh.albedoView, mesh.albedoSet);
     return &m_meshCache.emplace(assetId, mesh).first->second;
 }
 
@@ -2648,12 +2892,13 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
             const GpuMesh* mesh = resolveMesh(dc.meshAssetId);
             const GpuMesh& m    = mesh ? *mesh : m_cube;
             if (!m.indexCount) return;
+            const bool textured = m.albedoSet != VK_NULL_HANDLE;
 
             if (m_matUBO)
             {
-                struct MatData { float r,g,b,met; float rough,opacity; float pad[2]; } md{
+                struct MatData { float r,g,b,met; float rough,opacity,hasTex,pad; } md{
                     dc.baseColor.r, dc.baseColor.g, dc.baseColor.b, dc.metallic,
-                    dc.roughness, dc.opacity
+                    dc.roughness, dc.opacity, textured ? 1.0f : 0.0f, 0.0f
                 };
                 vkCmdUpdateBuffer(cmd, m_matUBO, 0, sizeof(md), &md);
                 VkBufferMemoryBarrier bar{ VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER };
@@ -2666,6 +2911,15 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                     VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                     0, 0, nullptr, 1, &bar, 0, nullptr);
             }
+
+            // Bind the base-color texture at set 2 (or the 1x1 white default when untextured).
+            // scene.frag samples set 2 unconditionally, so a valid descriptor MUST be bound;
+            // if the white default failed to initialize, skip the draw rather than sample an
+            // unbound descriptor (undefined behaviour / device-lost).
+            VkDescriptorSet albedoSet = textured ? m.albedoSet : m_whiteAlbedoSet;
+            if (!albedoSet) return;
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_scenePipelineLayout,
+                                    2, 1, &albedoSet, 0, nullptr);
 
             VkDeviceSize offset = 0;
             vkCmdBindVertexBuffers(cmd, 0, 1, &m.vbuf, &offset);
@@ -2743,11 +2997,12 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                                         1, 1, &m_boneDescSet[m_currentFrame], 1, &dynOffset);
 
                 // Update material UBO (same as drawDCVk).
+                const bool textured = smesh->albedoSet != VK_NULL_HANDLE;
                 if (m_matUBO)
                 {
-                    struct MatData { float r,g,b,met; float rough,opacity; float pad[2]; } md{
+                    struct MatData { float r,g,b,met; float rough,opacity,hasTex,pad; } md{
                         dc.baseColor.r, dc.baseColor.g, dc.baseColor.b, dc.metallic,
-                        dc.roughness, dc.opacity
+                        dc.roughness, dc.opacity, textured ? 1.0f : 0.0f, 0.0f
                     };
                     vkCmdUpdateBuffer(cmd, m_matUBO, 0, sizeof(md), &md);
                     VkBufferMemoryBarrier bar{ VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER };
@@ -2760,6 +3015,13 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                         0, 0, nullptr, 1, &bar, 0, nullptr);
                 }
+
+                // Bind the base-color texture at set 2 (or the 1x1 white default when untextured).
+                // Skip the draw if no valid set-2 descriptor exists (see drawDCVk).
+                VkDescriptorSet albedoSet = textured ? smesh->albedoSet : m_whiteAlbedoSet;
+                if (!albedoSet) continue;
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skinnedPipeLayout,
+                                        2, 1, &albedoSet, 0, nullptr);
 
                 // Bind the three vertex buffer slots and index buffer.
                 const VkBuffer    vbs[3]     = { smesh->vb, smesh->boneIdVb, smesh->boneWgtVb };
@@ -4601,14 +4863,15 @@ void VulkanRenderer::createSkinnedPipeline()
         return;
     }
 
-    // ── Pipeline layout: set=0 (scene.frag data) + set=1 (bones) + push const ─
-    VkDescriptorSetLayout sets[2] = { m_sceneSetLayout, m_skinnedBonesDSL };
+    // ── Pipeline layout: set=0 (scene.frag data) + set=1 (bones) + set=2 (albedo) + push const ─
+    // Set 2 = base-color table, shared with the scene pipeline (same shared scene.frag).
+    VkDescriptorSetLayout sets[3] = { m_sceneSetLayout, m_skinnedBonesDSL, m_albedoSetLayout };
     VkPushConstantRange pcr{};
     pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
     pcr.offset     = 0;
     pcr.size       = sizeof(PushConstants);
     VkPipelineLayoutCreateInfo plci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
-    plci.setLayoutCount         = 2;
+    plci.setLayoutCount         = 3;
     plci.pSetLayouts            = sets;
     plci.pushConstantRangeCount = 1;
     plci.pPushConstantRanges    = &pcr;
@@ -4878,6 +5141,9 @@ VulkanRenderer::resolveSkeletalMesh(const HE::UUID& id)
     }
 
     sm.indexCount = static_cast<int>(asset->indices.size());
+    // Upload the skeletal mesh's baked base-color texture (if any), same as static meshes.
+    sm.hasTex = resolveAndUploadAlbedo(asset->materialId, asset->materialPath,
+                                       sm.texImage, sm.texMem, sm.texView, sm.albedoSet);
     return &m_skeletalMeshCache.emplace(id, sm).first->second;
 }
 
@@ -4889,7 +5155,10 @@ void VulkanRenderer::destroySkeletalMeshCache()
         if (sm.boneIdVb)  { vkDestroyBuffer(m_device, sm.boneIdVb,  nullptr); vkFreeMemory(m_device, sm.boneIdMem,   nullptr); }
         if (sm.boneWgtVb) { vkDestroyBuffer(m_device, sm.boneWgtVb, nullptr); vkFreeMemory(m_device, sm.boneWgtMem,  nullptr); }
         if (sm.ib)        { vkDestroyBuffer(m_device, sm.ib,        nullptr); vkFreeMemory(m_device, sm.ibMem,        nullptr); }
-        // texImage/texView/texMem reserved for future texture support; hasTex is always false here.
+        // Base-color texture (descriptor set freed with m_albedoPool in destroyScenePipeline).
+        if (sm.texView)   vkDestroyImageView(m_device, sm.texView,  nullptr);
+        if (sm.texImage)  vkDestroyImage    (m_device, sm.texImage, nullptr);
+        if (sm.texMem)    vkFreeMemory      (m_device, sm.texMem,   nullptr);
     }
     m_skeletalMeshCache.clear();
 }

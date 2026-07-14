@@ -2,6 +2,7 @@
 
 layout(location = 0) in vec3 vWorldPos;
 layout(location = 1) in vec3 vNormal;
+layout(location = 2) in vec2 vUV;
 layout(location = 0) out vec4 FragColor;
 
 layout(set = 0, binding = 0) uniform Frame {
@@ -23,8 +24,14 @@ layout(set = 0, binding = 1) uniform sampler2D uShadowMap;
 // Per-draw PBR material scalars uploaded via vkCmdUpdateBuffer before each draw.
 layout(set = 0, binding = 2) uniform MatUBO {
     vec4 baseColorMet;  // rgb = baseColor, a = metallic
-    vec4 roughPad;      // x = roughness, y = opacity
+    vec4 roughPad;      // x = roughness, y = opacity, z = hasTexture (0/1)
 } mat_ubo;
+
+// Per-mesh base-color texture (set = 2, binding = 0), bound per draw. Untextured
+// meshes bind a 1x1 white default, and roughPad.z = 0 selects the flat colour, so
+// sampling is always safe. Set index 2 is shared by the scene + skinned pipelines
+// (skinned keeps its bones UBO at set 1).
+layout(set = 2, binding = 0) uniform sampler2D uAlbedo;
 
 // SSAO occlusion texture (1x1 white when SSAO is disabled so ao = 1.0).
 // Binding 3 must match the scene descriptor set layout in VulkanRenderer.cpp.
@@ -111,7 +118,10 @@ float shadowFactor(vec3 worldPos, vec3 N, vec3 L)
 
 void main()
 {
-    vec3  base  = mat_ubo.baseColorMet.rgb;
+    // A base-color texture (flagged by roughPad.z) replaces the flat colour, mirroring
+    // GL/Metal/D3D11. PBR scalars still come from the material UBO.
+    vec3  base  = (mat_ubo.roughPad.z > 0.5) ? texture(uAlbedo, vUV).rgb
+                                             : mat_ubo.baseColorMet.rgb;
     float met   = mat_ubo.baseColorMet.a;
     float rough = max(mat_ubo.roughPad.x, 0.04);
     vec3  N     = normalize(vNormal);
