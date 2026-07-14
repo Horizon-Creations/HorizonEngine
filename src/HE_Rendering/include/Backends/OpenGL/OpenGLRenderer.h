@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include <Renderer/IRenderer.h>
 #include "OpenGLShaderManager.h"
 #include <HorizonRendering/RenderWorld.h>

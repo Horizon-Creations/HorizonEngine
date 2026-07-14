@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include "../HE_RENDERING_API.h"
 #include "RenderWorld.h"
 #include <Math/AABB.h>

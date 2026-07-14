@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include <Scripting/ScriptEngine.h>
 #include <Scripting/ScriptTypes.h>
 #include <HorizonScene/PyScriptBackend.h>

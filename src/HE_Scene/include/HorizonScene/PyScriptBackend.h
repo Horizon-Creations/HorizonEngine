@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include <Scripting/IScriptBackend.h>
 #include <memory>
 #include <string>

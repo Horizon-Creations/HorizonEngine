@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include <Renderer/IRenderer.h>
 
 struct D3D12RendererImpl;

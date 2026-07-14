@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include <Renderer/UIRenderObject.h>
 #include <Types/UUID.h>
 #include <Types/Defines.h>

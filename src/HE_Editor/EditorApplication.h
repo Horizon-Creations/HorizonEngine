@@ -27,6 +27,7 @@
 
 #ifdef HE_IMGUI_ENABLED
 #include <imgui.h>
+#include <cstdint>
 #endif
 
 // Stable userdata struct for SDL async dialog callbacks.

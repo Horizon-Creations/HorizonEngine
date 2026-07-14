@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include "HE_TOOLS_API.h"
 #include <string>
 #include <vector>

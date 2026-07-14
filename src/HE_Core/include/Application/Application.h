@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include "Types/Defines.h"
 #include "Application/GameLoop.h"
 #include "Application/GameLogicLoader.h"
