@@ -239,6 +239,10 @@ if(HE_BUNDLE_CMAKE)
 	endif()
 endif()
 
+# The editor also links HorizonScene (→ HorizonScene.dll imports python3XY.dll at load),
+# so a distributed editor needs the Python runtime next to it exactly like the game does.
+he_bundle_python(HorizonEditor "${DEPLOY_EDITOR}")
+
 # he_sdk_config.json: tells the HorizonCode → C++ export codegen where the
 # engine headers + libraries live when exporting from a DEVELOPMENT build (the
 # dev fallback of plan §8.3 — deployed editors ship a staged SDK/ instead).

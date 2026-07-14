@@ -442,13 +442,19 @@ else()
 endif()
 
 # ─── Deploy directories ────────────────────────────────────────────────────────
+# Overridable with -DDEPLOY_DIR=... (CI packaging points it at the workspace; the
+# default is the local dev deploy layout).
 if(WIN32)
-    set(DEPLOY_DIR    "C:/Users/conno/source/repos/HorizonEngineBuild")
+    set(_default_deploy_dir "C:/Users/conno/source/repos/HorizonEngineBuild")
 else()
-    set(DEPLOY_DIR    "${CMAKE_SOURCE_DIR}/out/deploy")
+    set(_default_deploy_dir "${CMAKE_SOURCE_DIR}/out/deploy")
 endif()
+set(DEPLOY_DIR "${_default_deploy_dir}" CACHE PATH "Where the editor/game POST_BUILD deploys")
 set(DEPLOY_GAME   "${DEPLOY_DIR}/Game")
 set(DEPLOY_EDITOR "${DEPLOY_DIR}/Editor")
+
+# Reusable CPython-runtime bundling (he_bundle_python) for the shipped game + editor.
+include("${CMAKE_SOURCE_DIR}/cmake/BundlePython.cmake")
 
 # ─── Deploy helper ─────────────────────────────────────────────────────────────
 # Usage: he_deploy_dll(<target>)
