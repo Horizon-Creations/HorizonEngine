@@ -1394,13 +1394,54 @@ std::string shq(const std::filesystem::path& p)
 }
 } // namespace
 
-bool toolchainAvailable()
+namespace {
+std::filesystem::path g_bundledCmakeDir; // set by the editor to <app>/cmake (SDL_GetBasePath)
+
+bool cmakeAnswers(const std::string& cmd)
 {
 #if defined(_WIN32)
-    return std::system("cmake --version >NUL 2>&1") == 0;
+    return std::system((cmd + " --version >NUL 2>&1").c_str()) == 0;
 #else
-    return std::system("cmake --version >/dev/null 2>&1") == 0;
+    return std::system((cmd + " --version >/dev/null 2>&1").c_str()) == 0;
 #endif
+}
+
+// Resolve the cmake command to use, preferring a cmake bundled next to the editor
+// (<app>/cmake/bin/cmake[.exe]) so a user only has to install a C++ compiler, then
+// falling back to a system cmake on PATH. Returns a shell-ready token (a quoted path,
+// or the bare word "cmake"), or empty when neither answers --version — the caller then
+// surfaces the Toolchain-Missing dialog. Resolved once and cached.
+const std::string& resolveCmake()
+{
+    static std::string s_cmake;
+    static bool s_done = false;
+    if (s_done) return s_cmake;
+    s_done = true;
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (!g_bundledCmakeDir.empty())
+    {
+#if defined(_WIN32)
+        const fs::path exe = g_bundledCmakeDir / "bin" / "cmake.exe";
+#else
+        const fs::path exe = g_bundledCmakeDir / "bin" / "cmake";
+#endif
+        if (fs::is_regular_file(exe, ec))
+        {
+            const std::string quoted = shq(exe);
+            if (cmakeAnswers(quoted)) { s_cmake = quoted; return s_cmake; }
+        }
+    }
+    if (cmakeAnswers("cmake")) s_cmake = "cmake";
+    return s_cmake; // empty ⇒ not found anywhere
+}
+} // namespace
+
+void setBundledCmakeDir(const std::filesystem::path& dir) { g_bundledCmakeDir = dir; }
+
+bool toolchainAvailable()
+{
+    return !resolveCmake().empty();
 }
 
 namespace {
@@ -1415,9 +1456,11 @@ ToolchainProbe probeToolchain()
     namespace fs = std::filesystem;
     ToolchainProbe p;
 
+    const std::string cmake = resolveCmake();
+    if (cmake.empty())
+        return p; // cmake missing entirely (bundled + PATH both absent) — nothing to probe
     std::string versionOut;
-    if (runStreaming("cmake --version", nullptr, versionOut) != 0)
-        return p; // cmake missing entirely — nothing further to probe
+    runStreaming(cmake + " --version", nullptr, versionOut);
     p.cmakeFound = true;
     // First line looks like "cmake version 3.28.3".
     if (const size_t pos = versionOut.find("cmake version "); pos != std::string::npos)
@@ -1453,7 +1496,7 @@ ToolchainProbe probeToolchain()
     }
     std::string captured;
     const int rc = runStreaming(
-        "cmake -S " + shq(dir) + " -B " + shq(dir / "build"), nullptr, captured);
+        cmake + " -S " + shq(dir) + " -B " + shq(dir / "build"), nullptr, captured);
     p.compilerFound = (rc == 0);
     if (p.compilerFound)
     {
@@ -1520,9 +1563,10 @@ BuildOutcome buildDylib(const std::filesystem::path& genDir, const SdkInfo& sdk,
         out.message = "no codegen SDK found (HE_HCGEN_SDK, <editor>/SDK, he_sdk_config.json)";
         return out;
     }
-    if (!toolchainAvailable())
+    const std::string cmake = resolveCmake();
+    if (cmake.empty())
     {
-        out.message = "cmake not found on PATH";
+        out.message = "cmake not found (bundled next to the editor or on PATH)";
         return out;
     }
 
@@ -1540,7 +1584,7 @@ BuildOutcome buildDylib(const std::filesystem::path& genDir, const SdkInfo& sdk,
         if (f) f << captured;
     };
     const std::string configure =
-        "cmake -S " + shq(genDir) + " -B " + shq(buildDir) +
+        cmake + " -S " + shq(genDir) + " -B " + shq(buildDir) +
         " -DCMAKE_BUILD_TYPE=Release"
         " \"-DHE_SDK_INCLUDE_DIRS=" + includes + "\""
         " -DHE_SDK_LIB_DIR=" + shq(sdk.libDir);
@@ -1550,7 +1594,7 @@ BuildOutcome buildDylib(const std::filesystem::path& genDir, const SdkInfo& sdk,
         out.message = "cmake configure failed (see " + out.logFile.string() + ")";
         return out;
     }
-    const std::string build = "cmake --build " + shq(buildDir) + " --config Release";
+    const std::string build = cmake + " --build " + shq(buildDir) + " --config Release";
     if (runStreaming(build, onLine, captured) != 0)
     {
         flushLog();

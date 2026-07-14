@@ -67,7 +67,13 @@ struct SdkInfo
 };
 SdkInfo resolveSdk(const std::filesystem::path& editorBaseDir);
 
-// True when a `cmake` executable answers --version (the toolchain probe).
+// Point the codegen at a cmake bundled next to the editor (<dir>/bin/cmake[.exe]).
+// Call once at startup (before probeToolchain/buildDylib): cmake resolution then
+// prefers the bundle over a system cmake on PATH, so a user only needs a C++ compiler.
+// Empty/unset ⇒ system cmake only. Resolution is cached on first use.
+void setBundledCmakeDir(const std::filesystem::path& dir);
+
+// True when a cmake executable (bundled or on PATH) answers --version.
 bool toolchainAvailable();
 
 // ── startup toolchain diagnostics ────────────────────────────────────────────

@@ -207,6 +207,38 @@ add_custom_command(TARGET HorizonEditor POST_BUILD
 	VERBATIM
 )
 
+# ── Optional: bundle cmake next to the editor (ship with the engine) ──────────
+# So a user who downloads the editor only needs to install a C++ compiler, not
+# cmake. We bundle the very cmake that built the engine (CMAKE_COMMAND) — its exe
+# plus its own data dir (share/cmake-<major.minor>, the Modules/Templates cmake
+# needs), NOT all of share/ (which on Homebrew/system installs is shared with
+# other tools). HcCodegen::resolveCmake() then finds <app>/cmake/bin/cmake[.exe]
+# first, falling back to a system cmake on PATH. Opt-in (a ~40-80 MB copy) — turn
+# it ON for the editor build you distribute: -DHE_BUNDLE_CMAKE=ON.
+option(HE_BUNDLE_CMAKE "Bundle cmake next to the editor so users only need a C++ compiler" OFF)
+if(HE_BUNDLE_CMAKE)
+	# CMAKE_ROOT is the running cmake's data dir (Modules/Templates), located reliably
+	# across install layouts (official, Homebrew keg, system package) — unlike guessing
+	# <exe>/../share/cmake-X.Y. The bundled cmake finds its data relative to its own exe
+	# at ../share/cmake-<major.minor>, so we copy CMAKE_ROOT into exactly that layout.
+	if(EXISTS "${CMAKE_ROOT}/Modules")
+		# Preserve CMAKE_ROOT's own dir name (upstream: cmake-<major.minor>; Homebrew: cmake)
+		# so the relocated exe finds its data with the layout it was built to expect.
+		get_filename_component(_cm_dataname "${CMAKE_ROOT}" NAME)
+		foreach(_dst "$<TARGET_FILE_DIR:HorizonEditor>" "${DEPLOY_EDITOR}")
+			add_custom_command(TARGET HorizonEditor POST_BUILD
+				COMMAND ${CMAKE_COMMAND} -E make_directory "${_dst}/cmake/bin"
+				COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_COMMAND}" "${_dst}/cmake/bin"
+				COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_ROOT}"
+					"${_dst}/cmake/share/${_cm_dataname}"
+				COMMENT "Bundling cmake into ${_dst}/cmake"
+				VERBATIM)
+		endforeach()
+	else()
+		message(WARNING "HE_BUNDLE_CMAKE: CMAKE_ROOT data dir not found (${CMAKE_ROOT}) — cmake will not be bundled")
+	endif()
+endif()
+
 # he_sdk_config.json: tells the HorizonCode → C++ export codegen where the
 # engine headers + libraries live when exporting from a DEVELOPMENT build (the
 # dev fallback of plan §8.3 — deployed editors ship a staged SDK/ instead).
