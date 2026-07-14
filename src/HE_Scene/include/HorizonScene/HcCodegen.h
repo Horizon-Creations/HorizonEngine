@@ -93,6 +93,25 @@ struct ToolchainProbe
 };
 ToolchainProbe probeToolchain();
 
+// ── automatic toolchain install ──────────────────────────────────────────────
+// Best-effort, platform-specific install of the missing toolchain pieces so the
+// user doesn't have to copy a command into a terminal. Installer output is
+// streamed line-by-line to `onLine` as it runs (for a live progress view).
+// BLOCKING — run on a background thread. Only installs what's missing
+// (needCmake/needCompiler come from a prior probeToolchain()). Package managers:
+// macOS → Homebrew (cmake) + `xcode-select --install` (clang; hands off to the
+// system GUI installer, so its progress is limited); Windows → winget; Linux →
+// pkexec + the distro's apt/dnf/pacman/zypper. When no route is available it
+// returns attempted=false with an explanatory message instead of failing hard.
+struct ToolchainInstall
+{
+    bool        attempted = false; // did we actually launch any installer?
+    int         exitCode  = 0;     // last installer's exit code (0 = success)
+    std::string message;           // human summary / why nothing could run
+};
+ToolchainInstall installToolchain(bool needCmake, bool needCompiler,
+                                  const std::function<void(const std::string&)>& onLine);
+
 struct BuildOutcome
 {
     bool                  ok = false;
