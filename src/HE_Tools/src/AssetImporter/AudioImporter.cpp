@@ -1,4 +1,5 @@
 #include "AudioImporter.h"
+#include <cstdint>
 #include "ImporterCommon.h"
 #include "Diagnostics/Logger.h"
 

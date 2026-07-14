@@ -1,4 +1,5 @@
 #include "HorizonScene/EngineApi.h"
+#include <cstdint>
 #include "HorizonScene/ScriptApi.h"
 #include "HorizonScene/HorizonWorld.h"
 #include "HorizonScene/AudioEngine.h"

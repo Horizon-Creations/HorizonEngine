@@ -1,4 +1,5 @@
 #include "Backends/Vulkan/VulkanShaderManager.h"
+#include <cstdint>
 #include <fstream>
 #include <sstream>
 

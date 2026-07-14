@@ -1,4 +1,5 @@
 #include "HcClassList.h"
+#include <cstdint>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <ContentManager/HAsset.h>

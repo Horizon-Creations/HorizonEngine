@@ -6,6 +6,7 @@
 // ContentManager::loadPak() at runtime.
 
 #include "HpakWriter.h"
+#include <cstdint>
 #include "KeyDerivation.h"
 #include <iostream>
 #include <string>

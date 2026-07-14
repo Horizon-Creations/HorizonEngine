@@ -1,4 +1,6 @@
 #include "MeshImporter.h"
+#include <algorithm>
+#include <cstdint>
 #include "TextureImporter.h"
 #include "ImporterCommon.h"
 #include "Diagnostics/Logger.h"

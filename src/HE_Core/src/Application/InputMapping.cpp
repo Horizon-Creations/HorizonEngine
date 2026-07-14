@@ -1,4 +1,5 @@
 #include "Application/InputMapping.h"
+#include <algorithm>
 #include "Application/Input.h"
 
 void InputMapping::mapAction(std::string name, std::vector<ActionBinding> bindings)

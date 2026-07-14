@@ -1,4 +1,5 @@
 #include "HorizonRendering/GPUMemoryAllocator.h"
+#include <cstdint>
 
 GPUMemoryAllocator::GPUMemoryAllocator(uint64_t budgetBytes)
     : m_budget(budgetBytes)

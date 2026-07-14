@@ -1,4 +1,5 @@
 #include "Diagnostics/EngineProfiler.h"
+#include <cstdint>
 #include "Diagnostics/GlobalState.h"
 #include "Diagnostics/Logger.h"
 

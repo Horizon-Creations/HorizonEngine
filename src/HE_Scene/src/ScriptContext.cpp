@@ -1,4 +1,5 @@
 #include "HorizonScene/ScriptContext.h"
+#include <cstdint>
 #include "HorizonScene/HorizonWorld.h"
 #include "HorizonScene/PhysicsWorld.h"
 #include "HorizonScene/ScriptApi.h"

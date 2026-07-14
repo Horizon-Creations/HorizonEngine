@@ -1,4 +1,5 @@
 #include "HorizonRendering/RenderExtractor.h"
+#include <cstdint>
 #include "HorizonRendering/RenderWorld.h"
 #include <Diagnostics/Profiler.h>
 #include <Renderer/IRenderer.h>

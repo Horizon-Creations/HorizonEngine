@@ -1,4 +1,5 @@
 #include "Scripting/ScriptEngine.h"
+#include <cstdint>
 
 extern "C" {
 #include <lua.h>

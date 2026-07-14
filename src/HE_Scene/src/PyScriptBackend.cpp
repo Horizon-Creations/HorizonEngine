@@ -1,4 +1,5 @@
 #include "HorizonScene/PyScriptBackend.h"
+#include <cstdint>
 
 #ifdef HE_HAVE_PYTHON
 

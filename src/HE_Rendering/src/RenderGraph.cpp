@@ -1,4 +1,5 @@
 #include "HorizonRendering/RenderGraph.h"
+#include <cstdint>
 
 void RenderGraph::addPass(std::unique_ptr<RenderPass> pass)
 {

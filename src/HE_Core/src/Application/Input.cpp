@@ -1,4 +1,5 @@
 #include "Application/Input.h"
+#include <cstdint>
 
 void Input::ProcessEvent(const SDL_Event& event)
 {

@@ -1,5 +1,6 @@
 #define STB_TRUETYPE_IMPLEMENTATION
 #include <stb_truetype.h>
+#include <cstdint>
 
 #include <HorizonScene/UISystem.h>
 #include <Renderer/UIFont.h>

@@ -1,4 +1,5 @@
 #include "SkeletalMeshEditorPanel.h"
+#include <cstdint>
 #include "EditorApplication.h" // AppContext
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>

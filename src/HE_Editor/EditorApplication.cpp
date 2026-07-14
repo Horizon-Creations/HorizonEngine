@@ -1,4 +1,5 @@
 #include "EditorApplication.h"
+#include <cstring>
 #include "EditorUI.h"
 #include "HorizonVersion.h"
 #include <Diagnostics/Profiler.h>

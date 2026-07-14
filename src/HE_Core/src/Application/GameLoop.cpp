@@ -1,4 +1,5 @@
 #include "Application/GameLoop.h"
+#include <cstdint>
 #include "IGameLogic.h"
 
 namespace HE {

@@ -1,4 +1,5 @@
 #include "ParticleGraph/ParticleGraph.h"
+#include <cstdint>
 
 #include <nlohmann/json.hpp>
 

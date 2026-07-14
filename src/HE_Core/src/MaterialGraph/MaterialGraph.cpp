@@ -1,4 +1,5 @@
 #include "MaterialGraph/MaterialGraph.h"
+#include <cstdint>
 
 #include <nlohmann/json.hpp>
 

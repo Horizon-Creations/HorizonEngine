@@ -1,4 +1,5 @@
 #include "AnimatorStateMachine/AnimatorStateMachineGraph.h"
+#include <cstdint>
 
 #include <nlohmann/json.hpp>
 

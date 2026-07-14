@@ -1,4 +1,5 @@
 #include "HorizonScene/LODSystem.h"
+#include <cstdint>
 #include "HorizonScene/HorizonWorld.h"
 #include "HorizonScene/Components/LODComponent.h"
 #include "HorizonScene/Components/MeshComponent.h"

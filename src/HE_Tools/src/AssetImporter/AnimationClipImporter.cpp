@@ -1,4 +1,5 @@
 #include "AnimationClipImporter.h"
+#include <cstdint>
 #include "Diagnostics/Logger.h"
 #include "cgltf.h"
 

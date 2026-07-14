@@ -1,4 +1,5 @@
 #include "Backends/Vulkan/VulkanRenderer.h"
+#include <cstdint>
 #include <Window/Window.h>
 #include <ContentManager/ContentManager.h>
 #include <Renderer/UIFont.h>

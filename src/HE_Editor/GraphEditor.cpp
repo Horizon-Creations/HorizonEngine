@@ -1,4 +1,5 @@
 #include "GraphEditor.h"
+#include <cstdint>
 #include <algorithm>
 #include <unordered_set>
 #include <cmath>

@@ -1,4 +1,5 @@
 #include "HorizonRendering/FrustumCuller.h"
+#include <cstdint>
 #include <Diagnostics/Profiler.h>
 #include <JobSystem/JobSystem.h>
 

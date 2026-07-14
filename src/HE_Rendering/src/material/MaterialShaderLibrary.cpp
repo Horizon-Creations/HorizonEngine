@@ -1,4 +1,5 @@
 #include "material/MaterialShaderLibrary.h"
+#include <cstdint>
 
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>

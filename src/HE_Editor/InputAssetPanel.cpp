@@ -1,4 +1,6 @@
 #include "InputAssetPanel.h"
+#include <algorithm>
+#include <cstdint>
 #include "EditorApplication.h"   // AppContext
 #include "HcClassList.h"         // HcEditorUtil::listAssets (action picker)
 #include <ContentManager/ContentManager.h>

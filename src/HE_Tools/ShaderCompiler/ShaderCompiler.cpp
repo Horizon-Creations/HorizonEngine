@@ -1,4 +1,5 @@
 #include "ShaderCompiler.h"
+#include <cstdint>
 
 #include <glslang/Public/ShaderLang.h>
 #include <glslang/Public/ResourceLimits.h>

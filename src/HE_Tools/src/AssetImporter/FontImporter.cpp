@@ -1,4 +1,6 @@
 #include "FontImporter.h"
+#include <algorithm>
+#include <cstdint>
 #include "ImporterCommon.h"
 #include "Diagnostics/Logger.h"
 #include <fstream>

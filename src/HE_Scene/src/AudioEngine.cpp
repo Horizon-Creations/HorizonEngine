@@ -3,6 +3,7 @@
 #define MA_NO_MP3
 #define MA_NO_ENCODING
 #include <miniaudio.h>
+#include <cstdint>
 
 #include "HorizonScene/AudioEngine.h"
 #include <unordered_map>

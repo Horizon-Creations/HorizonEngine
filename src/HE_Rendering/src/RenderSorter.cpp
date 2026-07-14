@@ -1,4 +1,5 @@
 #include "HorizonRendering/RenderSorter.h"
+#include <cstdint>
 #include <algorithm>
 
 // Sort key: group by mesh asset (minimises GPU state changes), then
