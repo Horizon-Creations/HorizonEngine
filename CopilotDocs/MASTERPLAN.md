@@ -331,7 +331,7 @@ veraltete Doku ist schlimmer als keine (Warnbeispiel: die stale ROADMAP.md /
 | PostProcessPass im RenderGraph verdrahtet | ✅ | ✅ | ✅ | 3.4 |
 | Volumetrische Wolken (3D-Noise) | ✅ | ✅ | ✅ | Kür |
 | Material-Override (MaterialComponent) + Invalidate | ✅ (A2) | ✅ (A2) | ✅ (A2) | A2 |
-| GPU-Instancing (echter Instanced-Draw statt Loop) | 🟡 (?) | 🔴 (loopt `DrawIndexedInstanced`) | 🟡 (?) | 3.8 |
+| GPU-Instancing (echter Instanced-Draw statt Loop) | ✅ A3 | ✅ A3 | ✅ A3 | 3.8 (Windows-GPU-Visual/Perf offen = B3) |
 | **Material-Node-Graph-Shader** (Forts. 68) | 🔴 | 🔴 | 🔴 | #Mat |
 | **Nebula v2–v3.4 / Atmosphären-Streuung / Halos / God-Rays / Regenbogen** (Forts. 68) | 🔴 (v1 only) | 🔴 (v1 only) | 🔴 (v1 only) | 3.9 |
 
@@ -2823,3 +2823,37 @@ separate Session). Auf `77c34bf`s eigenem Run scheiterte Linux noch am `-fPIC`/`
 Build-Green-Session; die Schritte aktivierten sich automatisch, sobald deren Fixes oben drauf landeten. **Offen/
 bekannt:** macOS-`.app` Editor-only; Linux-Python-stdlib nicht gebündelt; echte Linux-GPU-/Runtime-Verifikation
 (analog B3) weiter offen. Vulkan-Linux + BCn-Kompression bleiben separat.
+
+---
+
+## Forts. 81 — A3: Echtes GPU-Instancing auf D3D12/D3D11/Vulkan (opaker Geometrie-Pass) (14.07.2026)
+
+**Block A3 erledigt.** Vorher „instanzierten" alle drei D3D/Vulkan-Backends per Schleife (ein
+`DrawIndexedInstanced(…,1,…)` / `vkCmdDrawIndexed(…,1,…)` **pro** Instanz) — funktional korrekt, aber
+**kein** Perf-Gewinn (GL/Metal machten schon echtes Instancing). Jetzt setzt der **opake** Geometrie-Pass
+**einen** instanzierten Draw pro Batch ab, gespeist aus einem Per-Instanz-`{mvp,model}`-Puffer:
+
+- **D3D12** (`D3D12Renderer.cpp`): `StructuredBuffer<InstXform>` an `t3` (Root-SRV, neuer Root-Param 4),
+  indexiert per `SV_InstanceID`; `VSMainInstanced` + LDR/HDR-Instanced-PSOs; Per-Frame-Instance-Ring
+  (`perInstanceRing`, 65536×128 B); ein `DrawIndexedInstanced(indexCount, count)`.
+- **D3D11** (`D3D11Renderer.cpp`): dynamischer Structured-Buffer + SRV an VS-`t3`, `VSMainInstanced` per
+  `SV_InstanceID`; `MAP_WRITE_DISCARD` pro Batch; ein `DrawIndexedInstanced`.
+- **Vulkan** (`VulkanRenderer.cpp` + neuer `shaders/scene_instanced.vert`): Per-Instanz-mvp/model als
+  **Vertex-Attribute an Binding 1** (`VK_VERTEX_INPUT_RATE_INSTANCE`); Per-Frame-gemappter Instance-VB;
+  LDR/HDR-Instanced-Pipelines nutzen `m_scenePipelineLayout` wieder (Descriptor-Sets bleiben gültig); ein
+  `vkCmdDrawIndexed`. CMake glslc-Liste um `scene_instanced.vert` erweitert.
+
+**Design-Entscheidungen:** Matrizen bleiben **column-major** (glm) — HLSL-Default-Packing gilt identisch für
+cbuffer + StructuredBuffer, GLSL-`mat4(c0..c3)` ist column-major → **kein Transpose**, gleiche `mul()`-Mathe
+wie der bestehende cbuffer/Push-Constant-Pfad. Instancing ist auf den **opaken** Pass beschränkt (der
+transparente Pass behält die Schleife: per-Instanz-Depth-Sort + Blend, `allowInstancing=false`); Ring-Overflow
+fällt auf die Schleife zurück. Non-instanced-Pfad unverändert.
+
+**Verifikation:** Windows-CI-**Compile grün** für D3D11+D3D12+Vulkan (+glslc; Run 29365814699, Windows-Leg
+success) — Vulkan-GLSL zusätzlich offline `glslangValidator`-validiert. **Adversarielle Subagent-Review:
+„funktional korrekt in allen drei"** (kein Transpose-Bug, keine Overflow/Alignment/Descriptor-Fehler, keine
+Regression im Non-instanced-Pfad); 2 Low-Severity-Härtungen umgesetzt (Instanced-PSO/Pipeline-Auswahl an
+`usingHDR && hdrPso` gekoppelt gegen Format-Mismatch beim Fallback; `static_assert` Instance-Stride ==
+2×`sizeof(glm::mat4)`). Commits `a82ab82` (Kern) + `5038615` (Härtung). **Offen: echte Windows-GPU-Visual-/
+Perf-Prüfung (B3)** — blind Windows, auf dem Mac nicht messbar. **Nächster Plan-Schritt: A4 (Material-Node-
+Graph-Shader auf D3D/Vulkan — HLSL/SPIR-V-Codegen, echte funktionale Lücke, größter Brocken ~5–8 PT).**
