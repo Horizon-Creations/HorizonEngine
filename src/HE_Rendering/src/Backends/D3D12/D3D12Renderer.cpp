@@ -473,7 +473,7 @@ cbuffer PerObject : register(b0)
 {
     float4x4 uMVP;
     float4x4 uModel;
-    float4   uColor;    // rgb = base color, a unused
+    float4   uColor;    // rgb = base color, a = hasTexture (0/1)
     float4   uPBR;      // x = metallic, y = roughness, z = opacity
 };
 cbuffer PerFrame : register(b1)
@@ -491,18 +491,21 @@ cbuffer PerFrame : register(b1)
     float4   uViewport;  // x=W, y=H, z=ssaoEnabled
 };
 Texture2D    uShadowMap : register(t0);
+Texture2D    uAlbedo    : register(t1); // base-color texture (bound per draw; null when untextured)
 Texture2D    uAO        : register(t2);
 SamplerState uShadowSamp : register(s0);
 SamplerState uAOSampler  : register(s1);
+SamplerState uAlbedoSamp : register(s2); // linear + wrap, for tiling base-color textures
 
 struct VSIn  { float3 pos : POSITION; float3 normal : NORMAL; float2 uv : TEXCOORD0; };
-struct VSOut { float4 clip : SV_POSITION; float3 worldPos : TEXCOORD0; float3 normal : TEXCOORD1; };
+struct VSOut { float4 clip : SV_POSITION; float3 worldPos : TEXCOORD0; float3 normal : TEXCOORD1; float2 uv : TEXCOORD2; };
 
 VSOut VSMain(VSIn i)
 {
     VSOut o;
     o.worldPos = mul(uModel, float4(i.pos, 1.0)).xyz;
     o.normal   = mul((float3x3)uModel, i.normal);
+    o.uv       = i.uv;
     o.clip     = mul(uMVP, float4(i.pos, 1.0));
     return o;
 }
@@ -542,7 +545,9 @@ float3 BRDF12(float3 L, float3 V, float3 N, float3 base, float met, float rough)
 }
 float4 PSMain(VSOut i) : SV_TARGET
 {
-    float3 base  = uColor.rgb;
+    // Mirrors GL/Metal/D3D11: a base-color texture (when present, flagged by uColor.a)
+    // replaces the flat colour; PBR scalars still come from uPBR.
+    float3 base  = (uColor.a > 0.5) ? uAlbedo.Sample(uAlbedoSamp, i.uv).rgb : uColor.rgb;
     float  met   = uPBR.x, rough = max(uPBR.y, 0.04);
     float3 N     = normalize(i.normal);
     if (uLightCount.x == 0)
@@ -994,6 +999,13 @@ namespace
         D3D12_INDEX_BUFFER_VIEW  ibv{};
         UINT                     indexCount = 0;
         HE::AABB                 localBounds;
+        // Base-color texture, resolved from the mesh's baked material on first draw
+        // (needs a recording command list to upload).  albedoSlot indexes the mesh-texture
+        // region of sceneSrvHeap; -1 = untextured (flat uColor).  albedoTried gates the
+        // one-shot resolve so a failed/absent texture isn't retried every frame.
+        ComPtr<ID3D12Resource>   albedoTex;
+        int                      albedoSlot  = -1;
+        bool                     albedoTried = false;
     };
 
     // GPU buffers for a skeletal mesh — three vertex-buffer slots plus an index buffer.
@@ -1010,6 +1022,9 @@ namespace
         D3D12_VERTEX_BUFFER_VIEW boneWgtVbv{};
         D3D12_INDEX_BUFFER_VIEW  ibv{};
         UINT                     indexCount = 0;
+        ComPtr<ID3D12Resource>   albedoTex;             // base-color texture (see GpuMesh)
+        int                      albedoSlot  = -1;
+        bool                     albedoTried = false;
     };
 
     UINT alignUp(UINT v, UINT a) { return (v + a - 1u) & ~(a - 1u); }
@@ -2197,10 +2212,19 @@ struct D3D12RendererImpl
         return static_cast<int>(slot);
     }
 
-    // ── Combined scene SRV heap (shadow t0, AO-blur t2, white-fallback t2) ──
-    // [0]=shadow, [1]=AO-blur, [2]=white-fallback
-    ComPtr<ID3D12DescriptorHeap> sceneSrvHeap;    // CBV_SRV_UAV shader-visible, 3 slots
+    // ── Combined scene SRV heap ──────────────────────────────────────────────
+    // Static region: [0]=shadow(t0), [1]=AO-blur(t2), [2]=white-fallback(t2),
+    // [3]=null albedo fallback(t1).  Mesh-texture region: [k_sceneStaticSrvs ..]
+    // hold one base-color SRV per uploaded mesh, bound per draw as the t1 table.
+    static constexpr UINT k_sceneStaticSrvs = 4;   // slots [0..3] above
+    static constexpr UINT k_albedoNullSlot  = 3;   // t1 fallback for untextured draws
+    static constexpr UINT k_maxMeshTextures = 1024;
+    ComPtr<ID3D12DescriptorHeap> sceneSrvHeap;    // CBV_SRV_UAV shader-visible
     UINT                         sceneSrvDescSize = 0;
+    UINT                         meshTexNextSlot  = k_sceneStaticSrvs; // running allocator
+    // Staging buffers for per-mesh texture uploads, kept alive a few frames past
+    // record (the GPU copy runs at execute time), then swept in Render().
+    std::vector<std::pair<ComPtr<ID3D12Resource>, int>> meshTexUploads;
 
     D3D12_CPU_DESCRIPTOR_HANDLE sceneSrvCpu(UINT slot) const
     {
@@ -2213,6 +2237,110 @@ struct D3D12RendererImpl
         D3D12_GPU_DESCRIPTOR_HANDLE h = sceneSrvHeap->GetGPUDescriptorHandleForHeapStart();
         h.ptr += static_cast<UINT64>(slot) * sceneSrvDescSize;
         return h;
+    }
+
+    // Resolve a mesh/skeletal asset's baked base-color texture (material → textureIds[0]),
+    // matching D3D11's resolveMesh()/skeletal path. Returns null when the mesh is untextured.
+    const TextureAsset* resolveAlbedoAsset(const HE::UUID& materialId, const std::string& materialPath,
+                                           ContentManager* cm)
+    {
+        if (!cm) return nullptr;
+        const MaterialAsset* mat = cm->resolveMaterialRef(materialId, materialPath);
+        if (!mat) return nullptr;
+        const HE::UUID    texId0   = mat->textureIds.empty()   ? HE::UUID{}    : mat->textureIds[0];
+        const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
+        return cm->resolveTextureRef(texId0, texPath0);
+    }
+
+    // Upload a decoded RGBA8 texture to a DEFAULT-heap texture + SRV in the mesh-texture
+    // region of sceneSrvHeap, using the frame's recording command list. Mirrors uiAtlasSlotFor
+    // (row-pitched staging copy, COPY_DEST→PIXEL_SHADER_RESOURCE). Returns the heap slot, or -1
+    // on any miss / heap full. The DEFAULT texture is handed back via outTex so the caller keeps
+    // it alive for the mesh's lifetime.
+    int allocAlbedoSlot(ID3D12GraphicsCommandList* cl, const TextureAsset* tex,
+                        ComPtr<ID3D12Resource>& outTex)
+    {
+        if (!cl || !sceneSrvHeap || !tex) return -1;
+        if (tex->data.empty() || tex->channels != 4 || tex->format != TextureFormat::RGBA8) return -1;
+        if (tex->width == 0 || tex->height == 0) return -1;
+        const UINT rowBytes = static_cast<UINT>(tex->width) * 4u;
+        if (tex->data.size() < static_cast<size_t>(rowBytes) * tex->height) return -1; // truncated
+        if (meshTexNextSlot >= k_sceneStaticSrvs + k_maxMeshTextures) return -1;        // heap full → flat
+
+        D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+        D3D12_RESOURCE_DESC td{};
+        td.Dimension        = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        td.Width            = static_cast<UINT64>(tex->width);
+        td.Height           = static_cast<UINT>(tex->height);
+        td.DepthOrArraySize = 1;
+        td.MipLevels        = 1;
+        td.Format           = DXGI_FORMAT_R8G8B8A8_UNORM;
+        td.SampleDesc.Count = 1;
+        ComPtr<ID3D12Resource> gpuTex;
+        if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td,
+                   D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&gpuTex))))
+            return -1;
+
+        // Row-pitched staging copy (RGBA8: 4 bytes per texel).
+        const UINT rowPitch = alignUp(rowBytes, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
+        void* mapped = nullptr;
+        ComPtr<ID3D12Resource> uploadBuf =
+            createUploadBuffer(static_cast<UINT64>(rowPitch) * tex->height, &mapped);
+        if (!uploadBuf || !mapped) return -1;
+        for (size_t y = 0; y < tex->height; ++y)
+            std::memcpy(static_cast<uint8_t*>(mapped) + y * rowPitch,
+                        tex->data.data() + y * rowBytes,
+                        rowBytes);
+        uploadBuf->Unmap(0, nullptr);
+
+        D3D12_TEXTURE_COPY_LOCATION src{};
+        src.pResource = uploadBuf.Get();
+        src.Type      = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        src.PlacedFootprint.Footprint = { DXGI_FORMAT_R8G8B8A8_UNORM,
+            static_cast<UINT>(tex->width), static_cast<UINT>(tex->height), 1, rowPitch };
+        D3D12_TEXTURE_COPY_LOCATION dst{};
+        dst.pResource = gpuTex.Get();
+        dst.Type      = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        barrier12(cl, gpuTex.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                  D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+
+        const UINT slot = meshTexNextSlot++;
+        D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+        sv.Format                  = DXGI_FORMAT_R8G8B8A8_UNORM;
+        sv.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
+        sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sv.Texture2D.MipLevels     = 1;
+        device->CreateShaderResourceView(gpuTex.Get(), &sv, sceneSrvCpu(slot));
+
+        meshTexUploads.emplace_back(std::move(uploadBuf), static_cast<int>(k_frameCount) + 2);
+        outTex = std::move(gpuTex);
+        return static_cast<int>(slot);
+    }
+
+    // Resolve + upload a static mesh's base-color texture the first time it is drawn (needs a
+    // recording command list). On any miss the mesh stays flat (albedoSlot = -1).
+    void ensureMeshAlbedo(ID3D12GraphicsCommandList* cl, GpuMesh& mesh,
+                          const HE::UUID& assetId, ContentManager* cm)
+    {
+        if (mesh.albedoTried || !cl || !cm || !sceneSrvHeap) return;
+        mesh.albedoTried = true;
+        const StaticMeshAsset* asset = cm->getStaticMesh(assetId);
+        if (!asset) return;
+        const TextureAsset* tex = resolveAlbedoAsset(asset->materialId, asset->materialPath, cm);
+        mesh.albedoSlot = allocAlbedoSlot(cl, tex, mesh.albedoTex);
+    }
+
+    // Same as ensureMeshAlbedo for a skeletal mesh's baked material.
+    void ensureSkeletalAlbedo(ID3D12GraphicsCommandList* cl, GpuSkeletalMesh12& mesh,
+                              const HE::UUID& assetId, ContentManager* cm)
+    {
+        if (mesh.albedoTried || !cl || !cm || !sceneSrvHeap) return;
+        mesh.albedoTried = true;
+        const SkeletalMeshAsset* asset = cm->getSkeletalMesh(assetId);
+        if (!asset) return;
+        const TextureAsset* tex = resolveAlbedoAsset(asset->materialId, asset->materialPath, cm);
+        mesh.albedoSlot = allocAlbedoSlot(cl, tex, mesh.albedoTex);
     }
 
     // ── SSAO ────────────────────────────────────────────────────────────────
@@ -2591,7 +2719,16 @@ struct D3D12RendererImpl
         srvRanges[1].RegisterSpace                     = 0;
         srvRanges[1].OffsetInDescriptorsFromTableStart = 1; // heap slot 1
 
-        D3D12_ROOT_PARAMETER params[3]{};
+        // Per-draw base-color table (t1): its own single-descriptor table so the base can be
+        // pointed at each mesh's slot (or the null fallback) independently of the shadow/AO table.
+        D3D12_DESCRIPTOR_RANGE albedoRange{};
+        albedoRange.RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        albedoRange.NumDescriptors                    = 1;
+        albedoRange.BaseShaderRegister                = 1; // t1
+        albedoRange.RegisterSpace                     = 0;
+        albedoRange.OffsetInDescriptorsFromTableStart = 0;
+
+        D3D12_ROOT_PARAMETER params[4]{};
         params[0].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
         params[0].Descriptor       = { 0, 0 }; // b0
         params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
@@ -2602,9 +2739,14 @@ struct D3D12RendererImpl
         params[2].DescriptorTable.NumDescriptorRanges = 2; // t0 + t2
         params[2].DescriptorTable.pDescriptorRanges   = srvRanges;
         params[2].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
+        params[3].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        params[3].DescriptorTable.NumDescriptorRanges = 1; // t1 (albedo)
+        params[3].DescriptorTable.pDescriptorRanges   = &albedoRange;
+        params[3].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
 
-        // s0 = shadow sampler (linear-clamp), s1 = AO sampler (point-clamp)
-        D3D12_STATIC_SAMPLER_DESC samplers[2]{};
+        // s0 = shadow sampler (linear-clamp), s1 = AO sampler (point-clamp),
+        // s2 = base-color sampler (linear-wrap, for tiling textures)
+        D3D12_STATIC_SAMPLER_DESC samplers[3]{};
         samplers[0].Filter         = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
         samplers[0].AddressU = samplers[0].AddressV = samplers[0].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
         samplers[0].ShaderRegister = 0; // s0
@@ -2613,11 +2755,15 @@ struct D3D12RendererImpl
         samplers[1].AddressU = samplers[1].AddressV = samplers[1].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
         samplers[1].ShaderRegister = 1; // s1
         samplers[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        samplers[2].Filter         = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+        samplers[2].AddressU = samplers[2].AddressV = samplers[2].AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+        samplers[2].ShaderRegister = 2; // s2
+        samplers[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
         D3D12_ROOT_SIGNATURE_DESC rsd{};
-        rsd.NumParameters     = 3;
+        rsd.NumParameters     = 4;
         rsd.pParameters       = params;
-        rsd.NumStaticSamplers = 2;
+        rsd.NumStaticSamplers = 3;
         rsd.pStaticSamplers   = samplers;
         rsd.Flags             = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
@@ -2638,7 +2784,7 @@ struct D3D12RendererImpl
         {
             sceneSrvDescSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
             D3D12_DESCRIPTOR_HEAP_DESC hd{};
-            hd.NumDescriptors = 3;
+            hd.NumDescriptors = k_sceneStaticSrvs + k_maxMeshTextures; // static slots + per-mesh albedo region
             hd.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
             hd.Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
             if (FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&sceneSrvHeap))))
@@ -2661,6 +2807,15 @@ struct D3D12RendererImpl
             nullSrvR8.Texture2D.MipLevels = 1;
             device->CreateShaderResourceView(nullptr, &nullSrvR8, sceneSrvCpu(1));
             device->CreateShaderResourceView(nullptr, &nullSrvR8, sceneSrvCpu(2));
+            // Slot 3: null RGBA8 SRV — the t1 albedo fallback bound for untextured draws.
+            // The shader never samples it (uColor.a = 0 selects the flat colour), but the
+            // descriptor table must point at a valid descriptor.
+            D3D12_SHADER_RESOURCE_VIEW_DESC nullSrvRGBA{};
+            nullSrvRGBA.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            nullSrvRGBA.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            nullSrvRGBA.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            nullSrvRGBA.Texture2D.MipLevels = 1;
+            device->CreateShaderResourceView(nullptr, &nullSrvRGBA, sceneSrvCpu(k_albedoNullSlot));
         }
 
         UINT flags = 0;
@@ -3439,7 +3594,7 @@ struct D3D12RendererImpl
         cube.localBounds.expand({  0.5f,  0.5f,  0.5f });
     }
 
-    const GpuMesh* resolveMesh(const HE::UUID& assetId, ContentManager* cm)
+    GpuMesh* resolveMesh(const HE::UUID& assetId, ContentManager* cm)
     {
         if (assetId == HE::UUID{} || !cm) return nullptr;
         if (auto it = meshCache.find(assetId); it != meshCache.end()) return &it->second;
@@ -3487,7 +3642,8 @@ struct D3D12RendererImpl
     bool createSkinnedPipeline()
     {
         // Root signature = scene root sig + an extra root CBV at param[3] for b2 (bones).
-        // Params [0..2] are byte-identical to the scene root sig so the shared PS works.
+        // Params [0..2] and [4] (the t1 base-color table) match the scene root sig so the
+        // shared PS works; param[3] (bones) is the skinned-only addition.
         D3D12_DESCRIPTOR_RANGE srvRanges[2]{};
         srvRanges[0].RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
         srvRanges[0].NumDescriptors                    = 1;
@@ -3500,7 +3656,15 @@ struct D3D12RendererImpl
         srvRanges[1].RegisterSpace                     = 0;
         srvRanges[1].OffsetInDescriptorsFromTableStart = 1;
 
-        D3D12_ROOT_PARAMETER params[4]{};
+        // Per-draw base-color table (t1) — matches the scene root sig's param[3].
+        D3D12_DESCRIPTOR_RANGE albedoRange{};
+        albedoRange.RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        albedoRange.NumDescriptors                    = 1;
+        albedoRange.BaseShaderRegister                = 1; // t1
+        albedoRange.RegisterSpace                     = 0;
+        albedoRange.OffsetInDescriptorsFromTableStart = 0;
+
+        D3D12_ROOT_PARAMETER params[5]{};
         params[0].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
         params[0].Descriptor       = { 0, 0 }; // b0 per-object
         params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
@@ -3514,9 +3678,14 @@ struct D3D12RendererImpl
         params[3].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
         params[3].Descriptor       = { 2, 0 }; // b2 bones
         params[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+        params[4].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        params[4].DescriptorTable.NumDescriptorRanges = 1; // t1 (albedo)
+        params[4].DescriptorTable.pDescriptorRanges   = &albedoRange;
+        params[4].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
 
-        // Same static samplers as the scene root sig (s0 shadow linear-clamp, s1 AO point-clamp).
-        D3D12_STATIC_SAMPLER_DESC samplers[2]{};
+        // Same static samplers as the scene root sig: s0 shadow linear-clamp, s1 AO point-clamp,
+        // s2 base-color linear-wrap. The shared PS references all three.
+        D3D12_STATIC_SAMPLER_DESC samplers[3]{};
         samplers[0].Filter         = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
         samplers[0].AddressU = samplers[0].AddressV = samplers[0].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
         samplers[0].ShaderRegister = 0;
@@ -3525,11 +3694,15 @@ struct D3D12RendererImpl
         samplers[1].AddressU = samplers[1].AddressV = samplers[1].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
         samplers[1].ShaderRegister = 1;
         samplers[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        samplers[2].Filter         = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+        samplers[2].AddressU = samplers[2].AddressV = samplers[2].AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+        samplers[2].ShaderRegister = 2;
+        samplers[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
         D3D12_ROOT_SIGNATURE_DESC rsd{};
-        rsd.NumParameters     = 4;
+        rsd.NumParameters     = 5;
         rsd.pParameters       = params;
-        rsd.NumStaticSamplers = 2;
+        rsd.NumStaticSamplers = 3;
         rsd.pStaticSamplers   = samplers;
         rsd.Flags             = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
@@ -3547,7 +3720,7 @@ struct D3D12RendererImpl
 #ifdef _DEBUG
         flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
 #endif
-        // Reuse the scene PS (PSMain from kSceneHLSL — it references b0, b1, t0, t2, s0, s1).
+        // Reuse the scene PS (PSMain from kSceneHLSL — it references b0, b1, t0, t1, t2, s0, s1, s2).
         const std::string sceneSource = std::string(kSkyFuncHLSL12) + kSceneHLSL;
         ComPtr<ID3DBlob> ps, cerr;
         if (FAILED(D3DCompile(sceneSource.c_str(), sceneSource.size(), "scene", nullptr, nullptr,
@@ -3618,7 +3791,7 @@ struct D3D12RendererImpl
     }
 
     // ── Upload + cache a SkeletalMeshAsset → GpuSkeletalMesh12 ──────────────
-    const GpuSkeletalMesh12* resolveSkeletalMesh12(const HE::UUID& assetId, ContentManager* cm)
+    GpuSkeletalMesh12* resolveSkeletalMesh12(const HE::UUID& assetId, ContentManager* cm)
     {
         if (assetId == HE::UUID{} || !cm) return nullptr;
         if (auto it = m_skeletalMeshCache.find(assetId); it != m_skeletalMeshCache.end())
@@ -3858,6 +4031,8 @@ void D3D12Renderer::Shutdown()
     m_impl->m_uiFontAtlases.clear();
     m_impl->m_uiAtlasUploads.clear();
     m_impl->m_uiAtlasHeap.Reset();
+    m_impl->meshTexUploads.clear(); // per-mesh base-color staging buffers (GpuMesh SRVs die with meshCache)
+    m_impl->meshTexNextSlot = D3D12RendererImpl::k_sceneStaticSrvs; // reset the albedo-slot allocator for a possible re-Initialize
     m_impl->m_skinnedPSO.Reset();
     m_impl->m_skinnedHdrPSO.Reset();
     m_impl->skinnedRootSig.Reset();
@@ -4138,9 +4313,15 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
 
         auto drawDC12 = [&](const DrawCall& dc) {
             if (drawIdx >= k_maxDraws) return;
-            const GpuMesh* mesh = p.resolveMesh(dc.meshAssetId, m_contentManager);
-            const GpuMesh& m    = mesh ? *mesh : p.cube;
+            GpuMesh* mesh = p.resolveMesh(dc.meshAssetId, m_contentManager);
+            GpuMesh& m    = mesh ? *mesh : p.cube;
             if (!m.indexCount) return;
+            // Upload this mesh's base-color texture on first sight, then bind it at t1
+            // (or the null fallback when untextured).  The fallback cube stays flat.
+            if (mesh) p.ensureMeshAlbedo(cl, m, dc.meshAssetId, m_contentManager);
+            const bool textured = mesh && m.albedoSlot >= 0;
+            cl->SetGraphicsRootDescriptorTable(3, p.sceneSrvGpu(
+                textured ? static_cast<UINT>(m.albedoSlot) : p.k_albedoNullSlot));
             cl->IASetVertexBuffers(0, 1, &m.vbv);
             cl->IASetIndexBuffer(&m.ibv);
             auto drawOne = [&](const glm::mat4& model) {
@@ -4148,7 +4329,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 PerObjectCB o{};
                 o.mvp   = viewProj * model;
                 o.model = model;
-                o.color = glm::vec4(dc.baseColor, 0.0f);
+                o.color = glm::vec4(dc.baseColor, textured ? 1.0f : 0.0f);
                 o.pbr   = glm::vec4(dc.metallic, dc.roughness, dc.opacity, 0.0f);
                 if (ringPtr)
                     std::memcpy(ringPtr + static_cast<size_t>(drawIdx) * k_cbSlot, &o, sizeof(o));
@@ -4192,8 +4373,14 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 if (drawIdx >= k_maxDraws) break;
                 if (skinnedIdx >= p.k_maxSkinnedDraws) break;
 
-                const GpuSkeletalMesh12* skm = p.resolveSkeletalMesh12(sdc.meshAssetId, m_contentManager);
+                GpuSkeletalMesh12* skm = p.resolveSkeletalMesh12(sdc.meshAssetId, m_contentManager);
                 if (!skm || !skm->indexCount) continue;
+
+                // Upload this skeletal mesh's base-color texture on first sight, bind at t1.
+                p.ensureSkeletalAlbedo(cl, *skm, sdc.meshAssetId, m_contentManager);
+                const bool textured = skm->albedoSlot >= 0;
+                cl->SetGraphicsRootDescriptorTable(4, p.sceneSrvGpu(
+                    textured ? static_cast<UINT>(skm->albedoSlot) : p.k_albedoNullSlot));
 
                 // Upload bone matrices (clamped to 128) into the bones ring slot.
                 if (bonesPtr && bonesBase)
@@ -4207,7 +4394,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 PerObjectCB o{};
                 o.mvp   = viewProj * sdc.transform;
                 o.model = sdc.transform;
-                o.color = glm::vec4(sdc.baseColor, 0.0f);
+                o.color = glm::vec4(sdc.baseColor, textured ? 1.0f : 0.0f);
                 o.pbr   = glm::vec4(sdc.metallic, sdc.roughness, sdc.opacity, 0.0f);
                 if (ringPtr)
                     std::memcpy(ringPtr + static_cast<size_t>(drawIdx) * k_cbSlot, &o, sizeof(o));
@@ -4273,6 +4460,12 @@ void D3D12Renderer::Render()
     for (auto it = p.m_uiAtlasUploads.begin(); it != p.m_uiAtlasUploads.end(); )
     {
         if (--it->second <= 0) it = p.m_uiAtlasUploads.erase(it);
+        else                   ++it;
+    }
+    // Same for per-mesh base-color texture staging buffers.
+    for (auto it = p.meshTexUploads.begin(); it != p.meshTexUploads.end(); )
+    {
+        if (--it->second <= 0) it = p.meshTexUploads.erase(it);
         else                   ++it;
     }
 
