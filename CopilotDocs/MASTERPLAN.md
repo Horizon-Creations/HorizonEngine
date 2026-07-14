@@ -28,7 +28,7 @@ Unity/Godot-Featureset, nicht Unreal-AAA).
 |---|---|
 | Core: Window, App-Loop, Input, Logger, ContentManager, `.hasset` v2 (UUID-persistent), Engine-Content-Root (`/Engine/` Read-only-Defaults + Copy-on-Write-Override, Primitiv-Meshes) | ✅ |
 | Rendering GL+Metal (Vollausbau-Paar) — RenderGraph/Passes, PBR, CSM-Schatten, HDR/Bloom/FXAA, SSAO+HBAO+GTAO, sortierte Transparenz, Skybox+IBL, GPU-Instancing, Skeletal-GPU-Skinning, volumetrische Wolken, Nebula v3.4 + physikalische Atmosphären-Streuung, Material-Node-Graph-Editor | ✅ |
-| Rendering D3D11/D3D12/Vulkan | 🟡 fast auf GL/Metal-Parität (HDR/Bloom/FXAA/SSAO+HBAO+GTAO/Skybox+IBL/Skinning/In-Game-UI-Pass/Transparenz/PBR-Skalare/**Basecolor-Texturen** ✅ auf allen drei — Basecolor A1 seit 14.07., Windows-GPU-Visual offen); offen: MaterialComponent-Override, echtes GPU-Instancing, Material-Graph-Shader, Nebula v2+/Atmosphären-Sky — siehe Phase 6.2 + Forts. 78 |
+| Rendering D3D11/D3D12/Vulkan | 🟡 fast auf GL/Metal-Parität (HDR/Bloom/FXAA/SSAO+HBAO+GTAO/Skybox+IBL/Skinning/In-Game-UI-Pass/Transparenz/PBR-Skalare/**Basecolor-Texturen** (A1)/**MaterialComponent-Override + Invalidate** (A2) ✅ auf allen drei — A1+A2 seit 14.07., Windows-GPU-Visual offen); offen: echtes GPU-Instancing (A3), Material-Graph-Shader (A4), Nebula v2+/Atmosphären-Sky (A5) — siehe Phase 6.2 + Forts. 78 |
 | Editor: Hub, Docking, Outliner, Content Browser (Content/Engine/Source-Roots, Viewport-Drag-Drop-Spawn), Inspector, Gizmos, Undo/Redo, Play-Mode, gemeinsamer `GraphEditor`-Canvas (Material- + HorizonCode-Graph), View ▸ Environment-Fenster, C++-`Source/`-Tree + `CppClassEditorPanel`, Toolchain-Startup-Check, crash-fester config.json | ✅ |
 | Asset-Pipeline: Importer (Textur/Mesh/Material/Audio), `asset_compiler`, hpak v2 (LZ4HC/zstd, AES-256-GCM, On-Demand-Streaming, Overlays), Export-Pipeline (Profile, Async, Inkrementell, Plattform-Ziele, lauffähige Exporte inkl. macOS-.app-Bundle) | ✅ |
 | SceneSerializer (alle Komponenten inkl. Animator/AnimatorBlend/SkeletalMesh/PropertyAnimator/NavMesh/NavAgent, JSON+CBOR) | ✅ |
@@ -330,7 +330,7 @@ veraltete Doku ist schlimmer als keine (Warnbeispiel: die stale ROADMAP.md /
 | In-Game-UI-Pass (Canvas/Text/Button) | ✅ | ✅ | ✅ | 5.4 |
 | PostProcessPass im RenderGraph verdrahtet | ✅ | ✅ | ✅ | 3.4 |
 | Volumetrische Wolken (3D-Noise) | ✅ | ✅ | ✅ | Kür |
-| Material-Override (MaterialComponent) | 🔴 | 🔴 | 🔴 | #Mat |
+| Material-Override (MaterialComponent) + Invalidate | ✅ (A2) | ✅ (A2) | ✅ (A2) | A2 |
 | GPU-Instancing (echter Instanced-Draw statt Loop) | 🟡 (?) | 🔴 (loopt `DrawIndexedInstanced`) | 🟡 (?) | 3.8 |
 | **Material-Node-Graph-Shader** (Forts. 68) | 🔴 | 🔴 | 🔴 | #Mat |
 | **Nebula v2–v3.4 / Atmosphären-Streuung / Halos / God-Rays / Regenbogen** (Forts. 68) | 🔴 (v1 only) | 🔴 (v1 only) | 🔴 (v1 only) | 3.9 |
@@ -341,9 +341,12 @@ veraltete Doku ist schlimmer als keine (Warnbeispiel: die stale ROADMAP.md /
   (set=2-Albedo-Descriptor-Set, per-Mesh-Upload, 1×1-White-Default) zeichnen jetzt die gebackene
   Material-Textur wie GL/Metal/D3D11. Windows-CI-Compile grün auf beiden; Vulkan-GLSL zusätzlich
   offline mit `glslc` validiert. **Visuelle Windows-GPU-Verifikation offen (Block B3).**
-- **MaterialComponent-Override** — `IRenderer::InvalidateMaterial` ist nur in
-  `OpenGLRenderer.h`/`MetalRenderer.h` überschrieben; D3D11/D3D12/Vulkan ignorieren das Feld
-  weiterhin komplett (nicht additiv nachgezogen, obwohl PBR-Skalare + Texturen zum Teil schon da sind).
+- ~~**MaterialComponent-Override**~~ — ✅ **erledigt (A2, 14.07.2026, `09abba7`+`bbc84e6`+`9c5edcd`)**:
+  D3D11/D3D12/Vulkan überschreiben jetzt `InvalidateMaterial`/`InvalidateMesh` und honorieren die
+  Override-Material-Textur (`dc.materialAssetId` schlägt die gebackene Mesh-Textur, wie GL — auch zu
+  „flach", wenn das Override kein Textur hat). Cache pro Material-UUID; Lifetime backend-idiomatisch
+  (D3D12 Retire+Slot-Recycle, Vulkan Device-Idle+FREE-Bit, D3D11 ComPtr-Auto-Defer). Windows-CI grün
+  (D3D12+Vulkan bestätigt; D3D11 läuft). **Visuelle Windows-GPU-Prüfung offen (Block B3).**
 - **Echte GPU-Instancing-Parität** — D3D12 issued pro Instanz einen eigenen
   `DrawIndexedInstanced`-Call in einer Schleife statt eines echten Instance-Buffers wie
   GL (`glDrawArraysInstanced`)/Metal — funktional ok, aber kein Performance-Gewinn. D3D11/Vulkan
@@ -2656,9 +2659,15 @@ Reihenfolge bewusst: erst die **Fundament-Fähigkeiten** (Texturen, Material-Ove
    Empty-Set-1 für die Scene-Pipeline (Skinned nutzt set 1 für Bones). Beide adversariell reviewt
    (D3D11-Referenz), Windows-CI-Compile grün, Vulkan-GLSL offline `glslc`-validiert. **Offen: nur
    noch die visuelle Windows-GPU-Prüfung (Block B3).**
-2. **A2 — MaterialComponent-Override auf D3D11/D3D12/Vulkan** 🔴 (~2 PT). `IRenderer::InvalidateMaterial`
-   ist nur in `OpenGLRenderer.h`/`MetalRenderer.h` überschrieben; die drei anderen ignorieren das Feld.
-   Additiv nachziehen (Per-Instance-Material-Uniform/Push-Constant-Pfad, den PBR-Skalare schon nutzen).
+2. **A2 — MaterialComponent-Override auf D3D11/D3D12/Vulkan** ✅ **erledigt (14.07.2026,
+   `09abba7`+`bbc84e6`+`9c5edcd`)**. Alle drei überschreiben jetzt `InvalidateMaterial`/`Invalidate
+   Mesh` und honorieren die Override-Material-Textur (`dc.materialAssetId` schlägt die gebackene
+   Textur wie GL, auch zu „flach"). Override-Texturen pro Material-UUID gecacht; GPU-Lifetime backend-
+   idiomatisch: D3D12 Retire-Liste + Slot-Free-List (fixt eine im Review gefundene Terrain-Sculpt-Slot-
+   Erschöpfung), Vulkan `vkDeviceWaitIdle` + `FREE_DESCRIPTOR_SET_BIT`-Recycling, D3D11 immediate-context
+   ComPtr-Auto-Defer. D3D12+Vulkan adversariell reviewt (0 kritische Findings). Windows-CI grün. **Offen:
+   visuelle Windows-GPU-Prüfung (Block B3).** (Hinweis: Override-*Skalare* laufen weiter über den obj-
+   Material-Pre-Pass, unverändert.)
 3. **A3 — Echtes GPU-Instancing D3D12 (+ Vulkan-Audit)** 🟡 (~2 PT). D3D12 issued pro Instanz einen
    eigenen `DrawIndexedInstanced` in einer Schleife statt eines echten Instance-Buffers → funktional ok,
    kein Perf-Gewinn. Instance-Buffer + ein Draw-Call wie GL/Metal. D3D11/Vulkan-Instancing-Pfad im
@@ -2723,11 +2732,13 @@ mit sauberem GL-Fallback (Policy, siehe [[ao-gi-roadmap]]):
 
 ### Empfohlene Sofort-Reihenfolge
 
-**~~A1~~ ✅ → A2 → A3 → A4 → A5** (Windows/Vulkan auf volle Render-Parität bringen) **→ B3** (Windows-HW-Verify)
-**→ B2** (Linux, hängt an A) **→ B1** (BCn) **→ B4** (Docs). Block C + D laufen unabhängig nebenher, wenn
-ein konkreter Bedarf entsteht. Begründung: Block A ist der einzige *kritische Pfad* — er blockiert
-sowohl die Windows-Auslieferbarkeit als auch (über Vulkan) ganz Linux; alles andere ist additiv.
+**~~A1~~ ✅ → ~~A2~~ ✅ → A3 → A4 → A5** (Windows/Vulkan auf volle Render-Parität bringen) **→ B3**
+(Windows-HW-Verify) **→ B2** (Linux, hängt an A) **→ B1** (BCn) **→ B4** (Docs). Block C + D laufen
+unabhängig nebenher, wenn ein konkreter Bedarf entsteht. Begründung: Block A ist der einzige *kritische
+Pfad* — er blockiert sowohl die Windows-Auslieferbarkeit als auch (über Vulkan) ganz Linux.
 
-> **Fortschritt 14.07.2026:** **A1 erledigt** auf D3D12 (`fa6b8ce`) + Vulkan (`dfcf594`), beide Windows-
-> CI-Compile-grün + adversariell reviewt; Vulkan-GLSL `glslc`-validiert. Visuelle Windows-GPU-Prüfung
-> (B3) für A1 noch offen. **Nächster Schritt: A2 (MaterialComponent-Override auf D3D11/D3D12/Vulkan).**
+> **Fortschritt 14.07.2026:** **A1 erledigt** (Basecolor-Texturen) auf D3D12 (`fa6b8ce`) + Vulkan
+> (`dfcf594`); **A2 erledigt** (MaterialComponent-Override + Invalidate) auf D3D12 (`09abba7`) + Vulkan
+> (`bbc84e6`) + D3D11 (`9c5edcd`). Alle Windows-CI-Compile-grün + adversariell reviewt (D3D12/Vulkan je
+> 0 kritische Findings); Vulkan-GLSL `glslc`-validiert. Visuelle Windows-GPU-Prüfung (B3) für A1+A2 noch
+> offen. **Nächster Schritt: A3 (echtes GPU-Instancing auf D3D12/Vulkan).**
