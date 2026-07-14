@@ -38,11 +38,36 @@ jobs:
           path: build/_deps
           key: deps-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
 
-      - name: Configure
+      - name: Configure (macOS)
+        if: runner.os == 'macOS'
         run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      # Windows: build a self-contained editor package — bundle cmake, deploy into the
+      # workspace for the packaging step, and use static mbedTLS so there's no external
+      # OpenSSL DLL dependency (a clean PC then needs only the C++ toolchain at build time).
+      - name: Configure (Windows)
+        if: runner.os == 'Windows'
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DHE_BUNDLE_CMAKE=ON -DHE_PREFER_MBEDTLS=ON "-DDEPLOY_DIR=${{ github.workspace }}/package"
 
       - name: Build
         run: cmake --build build -j 4
+
+      # The editor POST_BUILD deployed a self-contained bundle into package/Editor:
+      # HorizonEditor.exe + engine DLLs + SDL3 + EngineContent/Fonts/Images + Vulkan
+      # Shaders + the bundled cmake + the CPython runtime (python3XY.dll/.zip/._pth).
+      # Zip it and upload as a downloadable artifact (the "Artifacts" box on the run).
+      - name: Package Windows editor
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path "package/Editor/*" -DestinationPath "HorizonEditor-windows-x64.zip" -Force
+
+      - name: Upload Windows editor package
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: HorizonEditor-windows-x64
+          path: HorizonEditor-windows-x64.zip
+          if-no-files-found: error
 
       - name: Run tests
         run: ctest --test-dir build --output-on-failure
