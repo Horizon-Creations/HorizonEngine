@@ -298,6 +298,12 @@ void VulkanRenderer::Shutdown()
     if (m_cube.ibuf) vkDestroyBuffer(m_device, m_cube.ibuf, nullptr);
     if (m_cube.imem) vkFreeMemory   (m_device, m_cube.imem, nullptr);
     m_cube = {};
+    // Override-material textures (before destroyScenePipeline destroys m_albedoPool, since
+    // destroyMaterialTex frees descriptor sets from it). Device is already idle here.
+    for (auto& [id, mt] : m_materialTexCache) destroyMaterialTex(mt);
+    m_materialTexCache.clear();
+    m_pendingMatInval.clear();
+    m_pendingMeshInval.clear();
     destroyScenePipeline();
 
     destroyViewportResources();
@@ -329,6 +335,10 @@ void VulkanRenderer::Render()
     m_wallTime = static_cast<float>(SDL_GetTicks()) * 0.001f;
     m_ssaoRanThisFrame = false;  // cleared each frame; set true only inside runSSAO()
     m_statDraws = m_statTris = m_statVisible = m_statTotal = 0;  // rebuilt by DrawScene
+
+    // Drop caches for materials/meshes edited since last frame, before any recording — the
+    // frame's DrawScene then re-resolves them fresh from the ContentManager.
+    processPendingInvalidations();
 
     // Free retired viewport color images once enough frames have passed (GPU done).
     for (auto it = m_retiredViewports.begin(); it != m_retiredViewports.end(); )
@@ -1472,9 +1482,11 @@ void VulkanRenderer::createScenePipeline()
         sci.maxLod       = VK_LOD_CLAMP_NONE;
         vkCheck(vkCreateSampler(m_device, &sci, nullptr, &m_albedoSampler), "albedo sampler");
 
-        // One combined-image-sampler set per unique textured mesh (+1 for the white default).
+        // One combined-image-sampler set per unique textured mesh + override material
+        // (+1 for the white default). FREE bit so hot-reload can recycle invalidated sets.
         VkDescriptorPoolSize aps{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, k_maxMeshTextures + 1 };
         VkDescriptorPoolCreateInfo adp{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+        adp.flags         = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
         adp.maxSets       = k_maxMeshTextures + 1;
         adp.poolSizeCount = 1;
         adp.pPoolSizes    = &aps;
@@ -2695,6 +2707,76 @@ bool VulkanRenderer::resolveAndUploadAlbedo(const HE::UUID& materialId, const st
     return true;
 }
 
+void VulkanRenderer::destroyMaterialTex(MaterialTexVk& mt)
+{
+    if (mt.set)   vkFreeDescriptorSets(m_device, m_albedoPool, 1, &mt.set); // pool has the FREE bit
+    if (mt.view)  vkDestroyImageView(m_device, mt.view, nullptr);
+    if (mt.image) vkDestroyImage(m_device, mt.image, nullptr);
+    if (mt.mem)   vkFreeMemory(m_device, mt.mem, nullptr);
+    mt = MaterialTexVk{};
+}
+
+bool VulkanRenderer::resolveMaterialOverride(const HE::UUID& materialId, const MaterialTexVk*& out)
+{
+    out = nullptr;
+    if (materialId == HE::UUID{} || !m_contentManager || !m_albedoPool) return false;
+    if (auto it = m_materialTexCache.find(materialId); it != m_materialTexCache.end())
+    { out = &it->second; return true; }
+    // Only cache once the material asset is loaded (mirrors GL: getMaterial null → retry).
+    if (!m_contentManager->getMaterial(materialId)) return false;
+    // Loaded → resolve its texture (set stays null when the material has no texture → flat).
+    MaterialTexVk mt;
+    resolveAndUploadAlbedo(materialId, std::string{}, mt.image, mt.mem, mt.view, mt.set);
+    auto res = m_materialTexCache.emplace(materialId, mt);
+    out = &res.first->second;
+    return true;
+}
+
+void VulkanRenderer::processPendingInvalidations()
+{
+    if (m_pendingMatInval.empty() && m_pendingMeshInval.empty()) return;
+    // Editor-only path; a full device idle keeps the frees below trivially safe (no in-flight
+    // frame references the dropped resources). The idle is a stall, but invalidation is rare
+    // outside a terrain-sculpt drag — a documented follow-up (D3D12 uses a per-frame retire list).
+    vkDeviceWaitIdle(m_device);
+
+    for (const HE::UUID& id : m_pendingMatInval)
+        if (auto it = m_materialTexCache.find(id); it != m_materialTexCache.end())
+        { destroyMaterialTex(it->second); m_materialTexCache.erase(it); }
+    m_pendingMatInval.clear();
+
+    for (const HE::UUID& id : m_pendingMeshInval)
+    {
+        if (auto it = m_meshCache.find(id); it != m_meshCache.end())
+        {
+            GpuMesh& m = it->second;
+            if (m.vbuf)       vkDestroyBuffer(m_device, m.vbuf, nullptr);
+            if (m.vmem)       vkFreeMemory(m_device, m.vmem, nullptr);
+            if (m.ibuf)       vkDestroyBuffer(m_device, m.ibuf, nullptr);
+            if (m.imem)       vkFreeMemory(m_device, m.imem, nullptr);
+            if (m.albedoSet)  vkFreeDescriptorSets(m_device, m_albedoPool, 1, &m.albedoSet);
+            if (m.albedoView) vkDestroyImageView(m_device, m.albedoView, nullptr);
+            if (m.albedoImage)vkDestroyImage(m_device, m.albedoImage, nullptr);
+            if (m.albedoMem)  vkFreeMemory(m_device, m.albedoMem, nullptr);
+            m_meshCache.erase(it);
+        }
+        if (auto it = m_skeletalMeshCache.find(id); it != m_skeletalMeshCache.end())
+        {
+            GpuSkeletalMesh& m = it->second;
+            if (m.vb)         { vkDestroyBuffer(m_device, m.vb, nullptr);        vkFreeMemory(m_device, m.vbMem, nullptr); }
+            if (m.boneIdVb)   { vkDestroyBuffer(m_device, m.boneIdVb, nullptr);  vkFreeMemory(m_device, m.boneIdMem, nullptr); }
+            if (m.boneWgtVb)  { vkDestroyBuffer(m_device, m.boneWgtVb, nullptr); vkFreeMemory(m_device, m.boneWgtMem, nullptr); }
+            if (m.ib)         { vkDestroyBuffer(m_device, m.ib, nullptr);        vkFreeMemory(m_device, m.ibMem, nullptr); }
+            if (m.albedoSet)  vkFreeDescriptorSets(m_device, m_albedoPool, 1, &m.albedoSet);
+            if (m.texView)    vkDestroyImageView(m_device, m.texView, nullptr);
+            if (m.texImage)   vkDestroyImage(m_device, m.texImage, nullptr);
+            if (m.texMem)     vkFreeMemory(m_device, m.texMem, nullptr);
+            m_skeletalMeshCache.erase(it);
+        }
+    }
+    m_pendingMeshInval.clear();
+}
+
 void VulkanRenderer::createCube()
 {
     static const float v[] = {
@@ -2892,7 +2974,17 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
             const GpuMesh* mesh = resolveMesh(dc.meshAssetId);
             const GpuMesh& m    = mesh ? *mesh : m_cube;
             if (!m.indexCount) return;
-            const bool textured = m.albedoSet != VK_NULL_HANDLE;
+            // Base color: an explicit MaterialComponent override (dc.materialAssetId), once its
+            // material is loaded, fully replaces the mesh's baked texture — even to flat.
+            VkDescriptorSet albedoSet = m.albedoSet;             // baked (A1); null → flat
+            bool textured = (m.albedoSet != VK_NULL_HANDLE);
+            const MaterialTexVk* ovr = nullptr;
+            if (resolveMaterialOverride(dc.materialAssetId, ovr))
+            {
+                albedoSet = ovr->set;                           // null when override has no texture
+                textured  = (ovr->set != VK_NULL_HANDLE);
+            }
+            if (!albedoSet) albedoSet = m_whiteAlbedoSet;       // flat draws bind the white default
 
             if (m_matUBO)
             {
@@ -2912,11 +3004,9 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                     0, 0, nullptr, 1, &bar, 0, nullptr);
             }
 
-            // Bind the base-color texture at set 2 (or the 1x1 white default when untextured).
+            // Bind the effective base-color texture at set 2 (albedoSet resolved above).
             // scene.frag samples set 2 unconditionally, so a valid descriptor MUST be bound;
-            // if the white default failed to initialize, skip the draw rather than sample an
-            // unbound descriptor (undefined behaviour / device-lost).
-            VkDescriptorSet albedoSet = textured ? m.albedoSet : m_whiteAlbedoSet;
+            // if even the white default is missing, skip the draw rather than sample unbound.
             if (!albedoSet) return;
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_scenePipelineLayout,
                                     2, 1, &albedoSet, 0, nullptr);
@@ -2996,8 +3086,18 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skinnedPipeLayout,
                                         1, 1, &m_boneDescSet[m_currentFrame], 1, &dynOffset);
 
+                // Base color: MaterialComponent override wins over the baked texture (see drawDCVk).
+                VkDescriptorSet albedoSet = smesh->albedoSet;
+                bool textured = (smesh->albedoSet != VK_NULL_HANDLE);
+                const MaterialTexVk* ovr = nullptr;
+                if (resolveMaterialOverride(dc.materialAssetId, ovr))
+                {
+                    albedoSet = ovr->set;
+                    textured  = (ovr->set != VK_NULL_HANDLE);
+                }
+                if (!albedoSet) albedoSet = m_whiteAlbedoSet;
+
                 // Update material UBO (same as drawDCVk).
-                const bool textured = smesh->albedoSet != VK_NULL_HANDLE;
                 if (m_matUBO)
                 {
                     struct MatData { float r,g,b,met; float rough,opacity,hasTex,pad; } md{
@@ -3016,9 +3116,8 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                         0, 0, nullptr, 1, &bar, 0, nullptr);
                 }
 
-                // Bind the base-color texture at set 2 (or the 1x1 white default when untextured).
+                // Bind the effective base-color texture at set 2 (albedoSet resolved above).
                 // Skip the draw if no valid set-2 descriptor exists (see drawDCVk).
-                VkDescriptorSet albedoSet = textured ? smesh->albedoSet : m_whiteAlbedoSet;
                 if (!albedoSet) continue;
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skinnedPipeLayout,
                                         2, 1, &albedoSet, 0, nullptr);
@@ -4015,6 +4114,19 @@ void VulkanRenderer::SetBloomSettings(const BloomSettings& s)
     m_bloomEnabled   = s.enabled;
     m_bloomThreshold = s.threshold;
     m_bloomStrength  = s.intensity;
+}
+
+void VulkanRenderer::InvalidateMaterial(const HE::UUID& materialId)
+{
+    // Deferred to the next Render() (render thread), drained under a device idle.
+    if (materialId != HE::UUID{})
+        m_pendingMatInval.push_back(materialId);
+}
+
+void VulkanRenderer::InvalidateMesh(const HE::UUID& meshId)
+{
+    if (meshId != HE::UUID{})
+        m_pendingMeshInval.push_back(meshId);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

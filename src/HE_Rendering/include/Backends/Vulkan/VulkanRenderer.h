@@ -44,6 +44,12 @@ public:
 	void SetMoonTexture(const void* rgba8Pixels, int width, int height) override;
 	void SetSSAOSettings(const SSAOSettings& s) override;
 	void SetBloomSettings(const BloomSettings& s) override;
+
+	// Editor material/mesh hot-reload: drop the cached override-material texture / mesh GPU
+	// state so the next frame re-resolves it from the ContentManager (mirrors GL/Metal).
+	void InvalidateMaterial(const HE::UUID& materialId) override;
+	void InvalidateMesh(const HE::UUID& meshId) override;
+
 	FrameGpuStats GetFrameGpuStats() const override;
 
 	// ImGui editor textures (content-browser icons + logo). Uploads the RGBA8
@@ -176,6 +182,30 @@ private:
 	VkDeviceMemory  m_whiteAlbedoMem   = VK_NULL_HANDLE;
 	VkImageView     m_whiteAlbedoView  = VK_NULL_HANDLE;
 	VkDescriptorSet m_whiteAlbedoSet   = VK_NULL_HANDLE;
+
+	// ── MaterialComponent override + hot-reload (A2) ─────────────────────────
+	// Override-material textures cached by material UUID (parallel to the baked per-mesh
+	// texture): a draw's dc.materialAssetId, when its material asset is loaded, fully replaces
+	// the mesh's baked texture — even to flat when the override has no texture (set == null →
+	// m_whiteAlbedoSet), mirroring GL. Editor edits push UUIDs to the pending lists, drained by
+	// processPendingInvalidations() at Render() top under a vkDeviceWaitIdle (invalidation is
+	// editor-only; the idle keeps the free trivially safe). m_albedoPool has the FREE bit so
+	// invalidated sets are recycled — no leak. slot placeholder in MaterialTexVk unused on Vk.
+	struct MaterialTexVk {
+		VkImage         image = VK_NULL_HANDLE;
+		VkDeviceMemory  mem   = VK_NULL_HANDLE;
+		VkImageView     view  = VK_NULL_HANDLE;
+		VkDescriptorSet set   = VK_NULL_HANDLE; // null → override material has no texture (draw flat)
+	};
+	std::unordered_map<HE::UUID, MaterialTexVk> m_materialTexCache;
+	std::vector<HE::UUID> m_pendingMatInval;
+	std::vector<HE::UUID> m_pendingMeshInval;
+	// Resolve an override material's texture (dc.materialAssetId), cached by UUID. Returns true
+	// iff the material asset is loaded (out->set may be null = no texture → flat); false while
+	// still loading (retry next frame, baked texture stays). Mirrors GL's ResolveMaterialTexture.
+	bool resolveMaterialOverride(const HE::UUID& materialId, const MaterialTexVk*& out);
+	void processPendingInvalidations();
+	void destroyMaterialTex(MaterialTexVk& mt);
 
 	struct GpuMesh
 	{
