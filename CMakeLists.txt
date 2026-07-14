@@ -307,7 +307,9 @@ endif()
 # Gameplay scripts can be written in Python (in addition to Lua). Dev builds link
 # libpython; without it, the Python script backend is compiled out and only Lua
 # is available. Shipping needs a bundled interpreter (see docs/scripting design).
-find_package(Python3 QUIET COMPONENTS Development.Embed)
+# Interpreter is requested alongside Development.Embed so the shipping bundle step
+# (src/HE_Game) can locate the stdlib (Python3_STDLIB) and run the interpreter to zip it.
+find_package(Python3 QUIET COMPONENTS Interpreter Development.Embed)
 if(Python3_Development.Embed_FOUND)
     message(STATUS "HorizonEngine: Python3 found (${Python3_VERSION}) — Python scripting enabled")
     set(HE_HAVE_PYTHON TRUE)
