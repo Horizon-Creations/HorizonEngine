@@ -911,6 +911,11 @@ void EditorApplication::OnInit()
 
 void EditorApplication::startToolchainProbe()
 {
+	// Prefer a cmake bundled next to the editor (<app>/cmake) over a system cmake, so a
+	// user only needs a C++ compiler. Set before probing (and any later export build).
+	if (const char* base = SDL_GetBasePath())
+		HE::hccg::setBundledCmakeDir(std::filesystem::path(base) / "cmake");
+
 	if (m_toolchainThread.joinable()) m_toolchainThread.join();
 	m_toolchainChecked.store(false, std::memory_order_release);
 	m_toolchainThread = std::thread([this]
