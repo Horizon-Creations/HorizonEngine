@@ -1,4 +1,5 @@
 #include <Hpak/ProjectConfig.h>
+#include <cstdint>
 #include <ContentManager/HAsset.h>
 #include <fstream>
 #include <cstring>

@@ -1,5 +1,7 @@
 // Must come first — Jolt requires this before any other Jolt include.
 #include <Jolt/Jolt.h>
+#include <algorithm>
+#include <cstdint>
 
 JPH_SUPPRESS_WARNINGS
 

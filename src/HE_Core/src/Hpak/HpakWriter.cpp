@@ -1,4 +1,5 @@
 #include <Hpak/HpakWriter.h>
+#include <cstdint>
 #include <Hpak/Aes256Gcm.h>
 #include <ContentManager/HAsset.h>
 #include <Types/Enums.h>

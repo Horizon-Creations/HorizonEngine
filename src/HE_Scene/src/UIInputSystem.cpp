@@ -1,4 +1,5 @@
 #include <HorizonScene/UIInputSystem.h>
+#include <cstdint>
 #include <HorizonScene/UISystem.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/Components/UICanvasComponent.h>

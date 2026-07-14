@@ -1,4 +1,5 @@
 #include <Hpak/ProjectExporter.h>
+#include <cstdint>
 #include <Hpak/ProjectConfig.h>
 #include <HorizonCode/HcCompiledLoader.h>   // compiledLibraryName (artifact naming)
 #include <Hpak/HpakWriter.h>

@@ -1,4 +1,5 @@
 #include "ImporterCommon.h"
+#include <cstdint>
 #include "ContentManager/ContentManager.h"
 #include "ContentManager/HAsset.h"
 #include "Diagnostics/Logger.h"

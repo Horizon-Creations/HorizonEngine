@@ -1,4 +1,5 @@
 #include "AnimatorStateMachineEditorPanel.h"
+#include <cstdint>
 #include "EditorApplication.h" // AppContext
 #include "GraphEditor.h"       // shared node-graph canvas frontend
 #include <ContentManager/ContentManager.h>

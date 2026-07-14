@@ -1,4 +1,5 @@
 #include "HorizonRendering/RenderResourceManager.h"
+#include <cstdint>
 
 RenderResourceManager::RenderResourceManager(GPUMemoryAllocator& allocator)
     : allocator_(allocator)

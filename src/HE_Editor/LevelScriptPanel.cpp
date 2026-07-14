@@ -1,4 +1,5 @@
 #include "LevelScriptPanel.h"
+#include <cstdint>
 #include "GameInstancePanel.h"
 #include "HorizonCodeClassPanel.h"
 #include "HcClassList.h"

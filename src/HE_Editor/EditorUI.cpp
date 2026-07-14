@@ -1,4 +1,6 @@
 #include "EditorUI.h"
+#include <algorithm>
+#include <cstdint>
 #include "EditorApplication.h"
 #include "ScriptEditorPanel.h"
 #include "CppClassEditorPanel.h"

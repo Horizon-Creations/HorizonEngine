@@ -1,4 +1,5 @@
 #include "HorizonScene/HcCodegen.h"
+#include <cstdint>
 #include "HorizonScene/EngineApi.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>

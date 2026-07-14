@@ -1,4 +1,5 @@
 #include "HorizonScene/PlayerHost.h"
+#include <cstdint>
 #include <HorizonCode/HorizonCode.h>
 #include <HorizonCode/HcCompiledLoader.h>   // HorizonCode::compiledClasses()
 #include <ContentManager/ContentManager.h>

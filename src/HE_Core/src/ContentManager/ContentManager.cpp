@@ -1,4 +1,5 @@
 #include "ContentManager/ContentManager.h"
+#include <cstdint>
 #include "MaterialGraph/MaterialGraph.h" // instance sync: switch-permutation regenerate
 #include "ContentManager/HAsset.h"
 #include "Hpak/HpakReader.h"

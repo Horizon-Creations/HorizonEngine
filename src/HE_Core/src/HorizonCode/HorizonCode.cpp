@@ -1,4 +1,5 @@
 #include <HorizonCode/HorizonCode.h>
+#include <cstdint>
 #include <Diagnostics/Logger.h>
 #include <nlohmann/json.hpp>
 #include <algorithm>

@@ -1,4 +1,5 @@
 #include "UIEditorPanel.h"
+#include <cstdint>
 #include "EditorApplication.h"                 // AppContext
 #include "GraphEditor.h"                        // shared node-graph canvas
 #include "HcClassList.h"                        // Create Object class picker

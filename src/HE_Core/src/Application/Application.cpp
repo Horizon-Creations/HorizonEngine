@@ -1,4 +1,5 @@
 #include "Application/Application.h"
+#include <cstdint>
 #include "Window/Window.h"
 #include "Diagnostics/Logger.h"
 #include "Diagnostics/Profiler.h"

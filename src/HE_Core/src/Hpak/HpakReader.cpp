@@ -1,4 +1,5 @@
 #include <Hpak/HpakReader.h>
+#include <cstdint>
 #include <Hpak/Aes256Gcm.h>
 #ifdef HE_HAVE_LZ4
 #  include <lz4.h>

@@ -1,4 +1,5 @@
 #include <Hpak/Aes256Gcm.h>
+#include <cstdint>
 
 #if defined(HE_HAVE_OPENSSL)
 #  include <openssl/evp.h>

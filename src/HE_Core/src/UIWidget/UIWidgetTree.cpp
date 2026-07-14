@@ -1,4 +1,5 @@
 #include <UIWidget/UIWidgetTree.h>
+#include <cstdint>
 #include <UIWidget/UIElements.h>
 #include <nlohmann/json.hpp>
 #include <algorithm>

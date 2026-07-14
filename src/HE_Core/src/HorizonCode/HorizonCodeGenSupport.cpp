@@ -1,4 +1,5 @@
 #include "HorizonCode/HorizonCodeGenSupport.h"
+#include <cstdint>
 #include <Diagnostics/Logger.h>
 
 // The out-of-line pieces of hc:: — everything that needs the Logger. Each log

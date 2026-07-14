@@ -1,5 +1,6 @@
 #define STB_TRUETYPE_IMPLEMENTATION
 #include <stb_truetype.h>
+#include <cstdint>
 // Roboto Condensed Bold — the same smooth TTF the editor UI uses, so live
 // widgets render like the designer preview (was the blocky ProggyClean bitmap).
 #include <Roboto_ttf.h>

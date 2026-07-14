@@ -1,4 +1,5 @@
 #include "HorizonCode/HorizonCodeRuntime.h"
+#include <cstdint>
 #include <Diagnostics/Logger.h>
 #include <algorithm>
 #include <unordered_set>

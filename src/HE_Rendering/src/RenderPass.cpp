@@ -1,4 +1,5 @@
 #include "HorizonRendering/RenderPass.h"
+#include <cstdint>
 #include "HorizonRendering/RenderObject.h"
 #include "HorizonRendering/FrustumCuller.h"
 

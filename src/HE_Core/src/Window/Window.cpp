@@ -1,4 +1,5 @@
 #include "Window/Window.h"
+#include <cstdint>
 #include <SDL3/SDL.h>
 #include <stdexcept>
 

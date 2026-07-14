@@ -1,4 +1,5 @@
 #include "HorizonScene/SceneSystems.h"
+#include <algorithm>
 #include "HorizonScene/TerrainSystem.h"
 #include "HorizonScene/AnimationSystem.h"
 #include "HorizonScene/AnimationBlendSystem.h"

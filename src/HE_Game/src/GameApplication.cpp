@@ -1,4 +1,5 @@
 #include "GameApplication.h"
+#include <cstdint>
 #include "EmbeddedPakKey.h"
 #include <fstream>
 #include <Hpak/ProjectConfig.h>
