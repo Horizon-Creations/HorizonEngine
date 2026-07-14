@@ -927,6 +927,40 @@ void EditorApplication::startToolchainProbe()
 	});
 }
 
+// Kick off a best-effort auto-install of the missing toolchain pieces on a worker
+// thread (see HcCodegen::installToolchain). Installer output streams into m_installLog
+// (guarded by m_installLogMutex); the "Toolchain Missing" dialog shows it live and,
+// on completion, re-runs the probe. No-op if an install is already running.
+void EditorApplication::startToolchainInstall(bool needCmake, bool needCompiler)
+{
+	if (m_installRunning.load(std::memory_order_acquire))
+		return;
+	if (m_installThread.joinable()) m_installThread.join();
+	{
+		std::lock_guard<std::mutex> lk(m_installLogMutex);
+		m_installLog.clear();
+	}
+	m_installFinished.store(false, std::memory_order_release);
+	m_installAttempted.store(false, std::memory_order_release);
+	m_installExit.store(0, std::memory_order_release);
+	m_installRunning.store(true, std::memory_order_release);
+	m_installThread = std::thread([this, needCmake, needCompiler]
+	{
+		const auto onLine = [this](const std::string& line)
+		{
+			std::lock_guard<std::mutex> lk(m_installLogMutex);
+			m_installLog += line;
+			m_installLog += '\n';
+		};
+		const HE::hccg::ToolchainInstall res =
+			HE::hccg::installToolchain(needCmake, needCompiler, onLine);
+		m_installAttempted.store(res.attempted, std::memory_order_release);
+		m_installExit.store(res.exitCode, std::memory_order_release);
+		m_installRunning.store(false, std::memory_order_release);
+		m_installFinished.store(true, std::memory_order_release);
+	});
+}
+
 // Push the current SDL keyboard/mouse state into HE::api::input so input.* nodes
 // and scripts can poll it during play. Mouse delta + scroll stay 0 here (the play
 // camera controller owns SDL's relative-motion accumulator); position + buttons +
@@ -2038,6 +2072,13 @@ AppContext EditorApplication::makeContext()
 		.toolchainProbe      = m_toolchainChecked.load(std::memory_order_acquire)
 		                           ? &m_toolchainProbe : nullptr,
 		.recheckToolchain    = [this]{ startToolchainProbe(); },
+		.startToolchainInstall = [this](bool needCmake, bool needCompiler){ startToolchainInstall(needCmake, needCompiler); },
+		.toolchainInstallLog = [this]{ std::lock_guard<std::mutex> lk(m_installLogMutex); return m_installLog; },
+		.toolchainInstalling = m_installRunning.load(std::memory_order_acquire),
+		.toolchainInstallDone = m_installFinished.load(std::memory_order_acquire),
+		.toolchainInstallOk  = m_installFinished.load(std::memory_order_acquire)
+		                           && m_installAttempted.load(std::memory_order_acquire)
+		                           && m_installExit.load(std::memory_order_acquire) == 0,
 		.frametimeHistory    = m_frametimeHistory,
 		.fpsHistorySize      = k_fpsHistorySize,
 		.fpsHistoryOffset    = m_fpsHistoryOffset,
@@ -2641,6 +2682,9 @@ void EditorApplication::OnShutdown()
 	// Same rule for the toolchain probe (destroying a joinable std::thread
 	// terminates the process).
 	if (m_toolchainThread.joinable()) m_toolchainThread.join();
+	// The auto-install worker can outlive the dialog (installs take minutes); join
+	// it too so we never destroy it joinable.
+	if (m_installThread.joinable()) m_installThread.join();
 
 #ifdef HE_IMGUI_ENABLED
 	if (!m_imguiReady) return;

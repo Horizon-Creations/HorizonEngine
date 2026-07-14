@@ -1551,7 +1551,104 @@ int runStreaming(const std::string& cmd, const std::function<void(const std::str
     return pclose(pipe);
 #endif
 }
+
+// True if <exe> resolves on PATH — used to pick an available package manager.
+bool commandExists(const std::string& exe)
+{
+    std::string cap;
+#if defined(_WIN32)
+    return runStreaming("where " + exe, nullptr, cap) == 0;
+#else
+    return runStreaming("command -v " + exe, nullptr, cap) == 0;
+#endif
+}
 } // namespace
+
+ToolchainInstall installToolchain(bool needCmake, bool needCompiler,
+                                  const std::function<void(const std::string&)>& onLine)
+{
+    ToolchainInstall r;
+    const auto emit = [&](const std::string& s) { if (onLine) onLine(s); };
+    const auto run  = [&](const std::string& cmd) -> int
+    {
+        emit("$ " + cmd);
+        std::string cap;
+        const int rc = runStreaming(cmd, onLine, cap);
+        emit(rc == 0 ? "[done]" : "[exit code " + std::to_string(rc) + "]");
+        return rc;
+    };
+
+#if defined(__APPLE__)
+    if (needCompiler)
+    {
+        r.attempted = true;
+        emit("Requesting the Xcode Command Line Tools installer…");
+        emit("Complete the macOS dialog that appears, then click Recheck.");
+        run("xcode-select --install"); // triggers the system GUI installer, returns fast
+    }
+    if (needCmake)
+    {
+        if (commandExists("brew"))
+        {
+            r.attempted = true;
+            if (const int rc = run("brew install cmake")) r.exitCode = rc;
+        }
+        else
+        {
+            r.message = "Homebrew not found — install cmake from cmake.org/download, "
+                        "or install Homebrew (brew.sh) first and retry.";
+            emit(r.message);
+        }
+    }
+#elif defined(_WIN32)
+    if (!commandExists("winget"))
+    {
+        r.message = "winget (App Installer) not found — update Windows or install it "
+                    "from the Microsoft Store, then retry.";
+        emit(r.message);
+        return r;
+    }
+    const std::string agree = " --accept-source-agreements --accept-package-agreements";
+    if (needCmake)
+    {
+        r.attempted = true;
+        if (const int rc = run("winget install --id Kitware.CMake -e" + agree)) r.exitCode = rc;
+    }
+    if (needCompiler)
+    {
+        r.attempted = true;
+        if (const int rc = run(
+                "winget install --id Microsoft.VisualStudio.2022.BuildTools -e"
+                " --override \"--add Microsoft.VisualStudio.Workload.VCTools "
+                "--includeRecommended --quiet --wait --norestart\"" + agree)) r.exitCode = rc;
+    }
+#else // Linux / other Unix
+    std::string install;
+    if      (commandExists("apt-get")) install = "apt-get update && apt-get install -y build-essential cmake";
+    else if (commandExists("dnf"))     install = "dnf install -y gcc-c++ make cmake";
+    else if (commandExists("pacman"))  install = "pacman -S --needed --noconfirm base-devel cmake";
+    else if (commandExists("zypper"))  install = "zypper install -y gcc-c++ make cmake";
+    if (install.empty())
+    {
+        r.message = "No supported package manager (apt/dnf/pacman/zypper) found — "
+                    "install a C++ compiler and cmake manually.";
+        emit(r.message);
+        return r;
+    }
+    if (!commandExists("pkexec"))
+    {
+        r.message = "pkexec (polkit) not found — run in a terminal: sudo " + install;
+        emit(r.message);
+        return r;
+    }
+    r.attempted = true;
+    emit("A graphical prompt (pkexec) will ask for administrator access…");
+    if (const int rc = run("pkexec sh -c " + shq(install))) r.exitCode = rc;
+#endif
+
+    (void)needCmake; (void)needCompiler; // not every platform branch uses both
+    return r;
+}
 
 BuildOutcome buildDylib(const std::filesystem::path& genDir, const SdkInfo& sdk,
                         const std::function<void(const std::string& line)>& onLine)

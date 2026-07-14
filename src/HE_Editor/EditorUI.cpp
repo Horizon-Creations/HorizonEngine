@@ -774,6 +774,8 @@ static void DrawToolchainDialog(AppContext& ctx)
 	static bool s_checking            = false; // a Recheck is in flight — keep showing the last result
 	static HE::hccg::ToolchainProbe s_last;
 	static bool s_haveLast = false;
+	static bool s_installTriggered = false; // an auto-install has been started at least once
+	static bool s_installConsumed  = false; // the last install's "done" transition was handled
 
 	if (ctx.toolchainProbe)
 	{
@@ -846,33 +848,84 @@ static void DrawToolchainDialog(AppContext& ctx)
 		ImGui::Separator();
 		ImGui::Spacing();
 
+		const bool needCmake    = !s_last.cmakeFound;
+		const bool needCompiler = !s_last.compilerFound;
+		const bool installing   = ctx.toolchainInstalling;
+
+		// ── Auto-install (primary path) ──────────────────────────────────────
+		ImGui::TextWrapped(
+			"The engine can install these for you using this system's package manager "
 #if defined(__APPLE__)
-		ImGui::TextWrapped("Install the Xcode Command Line Tools (clang + make; cmake still "
-			"needs its own install, e.g. via Homebrew):");
-		if (ImGui::Button("Run Installer"))
-			std::system("xcode-select --install &");
-		ImGui::SameLine();
-		if (ImGui::Button("Open cmake.org/download"))
-			SDL_OpenURL("https://cmake.org/download/");
+			"(Homebrew for cmake, the Xcode Command Line Tools for the compiler). "
 #elif defined(_WIN32)
-		ImGui::TextWrapped("Install CMake and the \"Desktop development with C++\" workload "
-			"(Visual Studio Build Tools):");
+			"(winget: CMake + the Visual Studio C++ Build Tools). "
+#else
+			"(pkexec + apt/dnf/pacman). You may be prompted for your password. "
+#endif
+			"A download of several hundred MB can take a few minutes.");
+		ImGui::Spacing();
+
+		if (installing) ImGui::BeginDisabled();
+		if (ImGui::Button("Install Automatically") && ctx.startToolchainInstall)
+		{
+			s_installTriggered = true;
+			s_installConsumed  = false;
+			ctx.startToolchainInstall(needCmake, needCompiler);
+		}
+		if (installing) ImGui::EndDisabled();
+		ImGui::SameLine();
+		if (installing)
+			ImGui::TextDisabled("Installing… (progress below)");
+		else
+			ImGui::TextDisabled("or do it yourself:");
+
+		// Manual fallbacks — copy the command / open the download page.
+#if defined(__APPLE__)
+		if (ImGui::SmallButton("Copy 'brew install cmake'")) ImGui::SetClipboardText("brew install cmake");
+		ImGui::SameLine();
+		if (ImGui::SmallButton("cmake.org")) SDL_OpenURL("https://cmake.org/download/");
+#elif defined(_WIN32)
 		static const char* kWinCmd =
 			"winget install --id Kitware.CMake -e ; "
 			"winget install --id Microsoft.VisualStudio.2022.BuildTools -e "
 			"--override \"--add Microsoft.VisualStudio.Workload.VCTools --quiet\"";
-		if (ImGui::Button("Copy Install Command")) ImGui::SetClipboardText(kWinCmd);
+		if (ImGui::SmallButton("Copy winget Command")) ImGui::SetClipboardText(kWinCmd);
 		ImGui::SameLine();
-		if (ImGui::Button("Open Download Page"))
+		if (ImGui::SmallButton("Download Page"))
 			SDL_OpenURL("https://visualstudio.microsoft.com/visual-cpp-build-tools/");
 #else
-		ImGui::TextWrapped("Install a C++ compiler and cmake, e.g. on Debian/Ubuntu:");
-		static const char* kLinuxCmd = "sudo apt install build-essential cmake";
-		if (ImGui::Button("Copy Install Command")) ImGui::SetClipboardText(kLinuxCmd);
+		if (ImGui::SmallButton("Copy 'sudo apt install build-essential cmake'"))
+			ImGui::SetClipboardText("sudo apt install build-essential cmake");
 		ImGui::SameLine();
-		if (ImGui::Button("Open cmake.org/download"))
-			SDL_OpenURL("https://cmake.org/download/");
+		if (ImGui::SmallButton("cmake.org")) SDL_OpenURL("https://cmake.org/download/");
 #endif
+
+		// ── Live progress log ────────────────────────────────────────────────
+		if (s_installTriggered && ctx.toolchainInstallLog)
+		{
+			const std::string log = ctx.toolchainInstallLog();
+			if (!log.empty())
+			{
+				ImGui::Spacing();
+				ImGui::BeginChild("##installlog", ImVec2(0.0f, 150.0f), true,
+					ImGuiWindowFlags_HorizontalScrollbar);
+				ImGui::TextUnformatted(log.c_str());
+				if (installing) ImGui::SetScrollHereY(1.0f); // autoscroll while running
+				ImGui::EndChild();
+			}
+			if (!installing && ctx.toolchainInstallDone)
+				ImGui::TextDisabled(ctx.toolchainInstallOk
+					? "Install finished — rechecking…"
+					: "Install did not complete — see the log above, then retry or install manually.");
+		}
+
+		// Re-run the probe once when an install finishes; a clean result auto-closes
+		// this dialog (see the !missing branch at the top).
+		if (s_installTriggered && ctx.toolchainInstallDone && !installing && !s_installConsumed)
+		{
+			s_installConsumed = true;
+			if (ctx.recheckToolchain) ctx.recheckToolchain();
+		}
 
 		ImGui::Spacing();
 		ImGui::Separator();

@@ -219,6 +219,16 @@ struct AppContext
 	const HE::hccg::ToolchainProbe* toolchainProbe = nullptr;
 	std::function<void()> recheckToolchain; // re-runs the probe (after the user installs something)
 
+	// Auto-install of the missing toolchain (see HcCodegen::installToolchain). The
+	// "Toolchain Missing" dialog calls startToolchainInstall(needCmake, needCompiler);
+	// the install runs on a background thread and streams output, which the dialog
+	// shows live by polling toolchainInstallLog() each frame.
+	std::function<void(bool needCmake, bool needCompiler)> startToolchainInstall;
+	std::function<std::string()> toolchainInstallLog; // thread-safe snapshot of the streamed output
+	bool toolchainInstalling  = false; // an install is currently running
+	bool toolchainInstallDone = false; // the last install finished (success or failure)
+	bool toolchainInstallOk   = false; // finished, launched an installer, and it exited 0
+
 	// Performance counters (mutable, updated each frame by UI)
 	float* frametimeHistory = nullptr;
 	int    fpsHistorySize   = 0;
@@ -433,6 +443,17 @@ private:
 	std::atomic<bool>        m_toolchainChecked{false};
 	HE::hccg::ToolchainProbe m_toolchainProbe;
 	void startToolchainProbe(); // (re)launches m_toolchainThread
+
+	// Auto-install worker (see startToolchainInstall / HcCodegen::installToolchain).
+	// Streams installer output into m_installLog under m_installLogMutex; the UI polls.
+	std::thread       m_installThread;
+	std::atomic<bool> m_installRunning{false};
+	std::atomic<bool> m_installFinished{false};
+	std::atomic<int>  m_installExit{0};
+	std::atomic<bool> m_installAttempted{false};
+	std::mutex        m_installLogMutex;
+	std::string       m_installLog;
+	void startToolchainInstall(bool needCmake, bool needCompiler);
 
 	// Hot-reload: disk-asset change detection
 	float m_hotReloadTimer = 0.0f;
