@@ -13,22 +13,34 @@ Unity/Godot-Featureset, nicht Unreal-AAA).
 > (Importer als „Stubs", SceneSerializer „nur Name+Hierarchie", Physik/Scripting/Audio/Animation/
 > Partikel/Navigation/In-Game-UI „fehlen komplett" — alles längst fertig). Korrigiert per
 > Doku-Audit, Details siehe Forts. 68 ganz unten.
+>
+> **Nachtrag 14.07.2026 (Version 0.2.0 „Sunrise", HEAD `c93d1ca`):** 21 weitere Commits seit Forts. 71
+> nachgezogen — Engine-Content-System (Read-only-Defaults + Copy-on-Write + Primitiv-Meshes +
+> Viewport-Drag-Drop), SceneSerializer-6-Komponenten-Lücke geschlossen, Projekt-Sprache als harte
+> Restriktion + C++-Source-Scaffold, Editor-Robustheit (Toolchain-Check + crash-fester config.json),
+> **Sky & Weather als eigene löschbare Szenen-Entities**, schwarzer Hintergrund auf allen 5 Backends,
+> mbedTLS-Crypto-Fallback, macOS-Politur. Details **Forts. 72–77**; der aktuelle, vorwärtsgerichtete
+> **Umsetzungsplan der offenen Punkte steht in Forts. 78** ganz unten. Phasen 0–5 sind
+> feature-complete; offen bleibt im Kern die D3D/Vulkan-Render-Parität (Block A), Reife-Schulden
+> (BCn, Linux, Docs) und die optionale Phase-7-Kür.
 
 | Bereich | Status |
 |---|---|
-| Core: Window, App-Loop, Input, Logger, ContentManager, `.hasset` v2 (UUID-persistent) | ✅ |
+| Core: Window, App-Loop, Input, Logger, ContentManager, `.hasset` v2 (UUID-persistent), Engine-Content-Root (`/Engine/` Read-only-Defaults + Copy-on-Write-Override, Primitiv-Meshes) | ✅ |
 | Rendering GL+Metal (Vollausbau-Paar) — RenderGraph/Passes, PBR, CSM-Schatten, HDR/Bloom/FXAA, SSAO+HBAO+GTAO, sortierte Transparenz, Skybox+IBL, GPU-Instancing, Skeletal-GPU-Skinning, volumetrische Wolken, Nebula v3.4 + physikalische Atmosphären-Streuung, Material-Node-Graph-Editor | ✅ |
 | Rendering D3D11/D3D12/Vulkan | 🟡 fast auf GL/Metal-Parität (HDR/Bloom/FXAA/SSAO+HBAO+GTAO/Skybox+IBL/Skinning/In-Game-UI-Pass/Transparenz/PBR-Skalare ✅ auf allen drei); offen: Basecolor-Texturen auf D3D12/Vulkan, MaterialComponent-Override, echtes GPU-Instancing, Material-Graph-Shader, Nebula v2+/Atmosphären-Sky — siehe Phase 6.2 |
-| Editor: Hub, Docking, Outliner, Content Browser, Inspector, Gizmos, Undo/Redo, Play-Mode, gemeinsamer `GraphEditor`-Canvas (Material- + HorizonCode-Graph) | ✅ |
+| Editor: Hub, Docking, Outliner, Content Browser (Content/Engine/Source-Roots, Viewport-Drag-Drop-Spawn), Inspector, Gizmos, Undo/Redo, Play-Mode, gemeinsamer `GraphEditor`-Canvas (Material- + HorizonCode-Graph), View ▸ Environment-Fenster, C++-`Source/`-Tree + `CppClassEditorPanel`, Toolchain-Startup-Check, crash-fester config.json | ✅ |
 | Asset-Pipeline: Importer (Textur/Mesh/Material/Audio), `asset_compiler`, hpak v2 (LZ4HC/zstd, AES-256-GCM, On-Demand-Streaming, Overlays), Export-Pipeline (Profile, Async, Inkrementell, Plattform-Ziele, lauffähige Exporte inkl. macOS-.app-Bundle) | ✅ |
-| SceneSerializer (alle Komponenten, JSON+CBOR) | ✅ |
+| SceneSerializer (alle Komponenten inkl. Animator/AnimatorBlend/SkeletalMesh/PropertyAnimator/NavMesh/NavAgent, JSON+CBOR) | ✅ |
 | RenderGraph, RenderResourceManager, GPUMemoryAllocator | ✅ |
 | Memory (`Ref<T>`, Job-System) | ✅ |
-| Engine-Systeme: Physik (Jolt), Scripting (Lua + Python + natives C++ `GameLogicLoader` + HorizonCode-Interpreter + HorizonCode-C++-Codegen), Audio (miniaudio), Animation (Skinning/Blending/State-Machine/Property-Anim), Navigation (Recast/Detour), Partikel, In-Game-UI/Widget-System v3, Input-Mapping + Input-Assets + PlayerHost | ✅ |
+| Engine-Systeme: Physik (Jolt), Scripting (Lua + Python + natives C++ `GameLogicLoader` + HorizonCode-Interpreter + HorizonCode-C++-Codegen; **Projekt-Sprache jetzt harte, einsprachige Restriktion** — C++-Projekte mit kompilierbarem `Source/`-Scaffold), Audio (miniaudio), Animation (Skinning/Blending/State-Machine/Property-Anim), Navigation (Recast/Detour), Partikel, In-Game-UI/Widget-System v3, Input-Mapping + Input-Assets + PlayerHost | ✅ |
 | Textur-Kompression | 🟡 ASTC 4×4 (Metal/Apple-Silicon-Export) ✅ — BCn (D3D/Vulkan/GL) 🔴 |
 | Linux-Window/Input-Pfad | 🔴 kein Engine-Code |
-| Tests (645+), CI (macOS+Windows-Matrix), Profiling (Tracy) | ✅ |
-| Dokumentation (dieses Dokument, Website-Docs) | 🟡 dieses Dokument war bis 12.07.2026 ~230 Commits im Rückstand (jetzt nachgezogen, Forts. 68); Website-Script-API-Referenz (`horizon.*`) weiterhin unvollständig |
+| Tests (810), CI (macOS+Windows-Matrix), Profiling (Tracy) | ✅ |
+| Crypto: hpak AES-256-GCM — System-OpenSSL primär, mbedTLS-Fetch-Fallback ohne OpenSSL (Encryption nie mehr still deaktiviert) | ✅ |
+| Version 0.2.0 „Sunrise" (Fenstertitel/Hub/About/Export/Info.plist via `HorizonVersion.h`) | ✅ |
+| Dokumentation (dieses Dokument, Website-Docs) | 🟡 dieses Dokument bis 14.07.2026 nachgezogen (Forts. 72–78); Website-Script-API-Referenz (`horizon.*`) weiterhin unvollständig (Umsetzungsplan: Forts. 78 B4) |
 
 ---
 
@@ -287,7 +299,16 @@ anschließend **deployt** (`python3 deploy.py` im Website-Repo). Nicht aufschieb
 veraltete Doku ist schlimmer als keine (Warnbeispiel: die stale ROADMAP.md /
 „Ist-Zustand"-Tabelle, die dem Code monatelang widersprach).
 
-### D3D11 / D3D12 / Vulkan — was zur GL/Metal-Parität fehlt (Stand 12.07.2026, korrigiert)
+### D3D11 / D3D12 / Vulkan — was zur GL/Metal-Parität fehlt (Stand 14.07.2026, korrigiert)
+
+> **Umsetzung:** Die konkreten, priorisierten Arbeitsschritte zum Schließen dieser Lücken stehen in
+> **Forts. 78, Block A** (A1 Basecolor-Texturen → A2 Material-Override → A3 GPU-Instancing → A4
+> Material-Graph-Shader → A5 Sky/Nebula). Block A ist der kritische Pfad für Windows-Auslieferbarkeit
+> und (über Vulkan) für Linux.
+>
+> **Neu seit 12.07.:** der flache Hintergrund (ohne Sky-Pass) ist jetzt opakes Schwarz statt Dunkelgrau
+> auf **allen 5 Backends** (`48c2ed2`); und da Sky nun eine löschbare Entity ist (Forts. 76), überspringt
+> jedes Backend den Sky-Pass sauber via `skyEnabled=false`, wenn keine Sky-Entity existiert.
 
 > **Korrektur-Hinweis:** Die Tabelle unten wurde am 18.06.2026 geschrieben und danach nie
 > nachgezogen, obwohl fast jede Zeile bereits **6 Tage später** (Commits `fa353c3`…`a53ebe3`,
@@ -2424,3 +2445,277 @@ Widget-Workflow), „Press a key to bind"-Aufnahme-UX im Input-Mapping-Editor.
 dieser Commit auf `main` landete — sein eigener `SceneSerializer.cpp`-Diff wird beim Zusammen-
 führen mit dem hier neu geschriebenen `AnimatorStateMachineComponent`-Serialisierungs-Block
 kollidieren (Merge-Konflikt absehbar, nicht mehr).
+
+> **Nachtrag 14.07.2026:** erledigt — die SceneSerializer-Lücke wurde in `7382031`
+> frisch neu implementiert (nicht der isolierte Worktree-Diff, sondern sauber gegen den
+> aktuellen `main`), siehe **Forts. 73**. Der befürchtete Merge-Konflikt ist damit
+> gegenstandslos.
+
+---
+
+## Forts. 72 — Engine-Content-System: Read-only-Defaults + Copy-on-Write + Primitiv-Meshes + Viewport-Drag-Drop (13.07.2026)
+
+Sechs Commits bauen das mit Forts. 71 begonnene **„Engine/"-Content-Root** zu einem echten,
+Unreal-artigen `/Engine/`-vs-`/Game/`-System aus. Kernidee: mitgelieferte Standard-Assets sind
+projektübergreifend geteilt, **read-only**, und werden beim Editieren pro Projekt **copy-on-write**
+überschrieben.
+
+- **`b995ed0` — Read-only-Defaults + Per-Projekt-Override (Copy-on-Write):** Engine-Tree-Assets
+  (`EditorDeps/EngineContent`) sind aus einem Projekt nicht mehr direkt editierbar (Content-Browser
+  Create/Rename/Delete/Move blockiert für alles, was auf ein Default oder dessen Override auflöst;
+  `HE_ENGINE_CONTENT_EDITABLE=1` hebt das für Engine-Authoring-Builds auf). Editieren+Speichern
+  eines Defaults schreibt stattdessen eine projektlokale Kopie nach `Content/Engine/<rest>`
+  (`ContentManager::resolveSavePath`, gleiche UUID/Identität; `resolveAbsolutePath` bevorzugt den
+  Override beim Laden). Der „Engine"-Tree merged die Overrides eines Projekts in den Default-Tree
+  (`GlobalState::refreshEngineFolder`), „Revert to Default" entfernt den Override. 9 neue
+  ContentManager-Tests, 799 gesamt.
+- **`2d14967` — Default-Primitiv-Meshes + `mesh_gen`-Tool:** Cube/Sphere/Cylinder/Cone/Plane/Quad/
+  Capsule/Torus als `StaticMesh`-`.hasset` unter `EditorDeps/EngineContent/Meshes` (Blockout-
+  Primitive out-of-the-box, read-only mit Copy-on-Write). Generiert von neuem `HE_Tools`-Executable
+  `mesh_gen <out-dir>` (prozedural, outward Normals, UVs, CCW-Winding per Triangle-Normal-Check,
+  über `ContentManager::saveAsset` → byte-identisch zu editor-authorierten Meshes; deterministisch:
+  stabile well-known UUIDs → reproduzierbar). Alle origin-zentriert, ~1 Unit.
+- **`65a4bc4` — Engine-Assets in der UUID-Registry indiziert (Bugfix):** `scanContentDirectory()`
+  scannte nur den Projekt-`Content`-Root → eine Szene, die einen Built-in-Engine-Mesh per UUID
+  referenzierte (z. B. per Drag-Drop platzierte Sphere), konnte ihn beim Reload nicht auflösen →
+  Backend zeichnete den Default-Cube-Fallback. **Das war der Grund, warum platzierte Cones/Spheres
+  nach einem Neustart als Cubes zurückkamen** (Cubes „überlebten" nur, weil der Fallback zufällig
+  ein Cube ist). Fix indiziert auch den Engine-Content-Root mit reserviertem `Engine/`-Prefix; keine
+  Szenen-Migration nötig (die gespeicherten UUIDs waren immer korrekt, nur die Auflösung schlug fehl).
+- **`da4bd03` — Mesh per Drag-Drop aus dem Content Browser ins Viewport spawnen:** das Scene-Viewport-
+  Image ist Drop-Target für `HE_ASSET_PATH`-Payloads; ein fallengelassener `StaticMesh`-`.hasset`
+  spawnt eine Entity (Transform + MeshComponent) dort, wo der Drop-Ray die Bodenebene (Y=0) trifft
+  (unprojiziert aus den Kameramatrizen dieses Frames — dieselbe Mathematik wie der Terrain-Sculpt-
+  Cursor), Fallback auf feste Distanz beim Nach-oben-Schauen. Ein Undo-Schritt, Auto-Select; das
+  bestehende Rechtsklick-„Add to Scene" bleibt.
+- **`3ce2dbc` — Mesh-Entities schlagen Terrain beim Klick-Picking:** ein Terrain-Chunk hat eine
+  riesige, lose AABB (Nahfläche näher an der Kamera als ein kleines Mesh darauf) → Klick auf ein
+  Objekt selektierte den Boden darunter. Jetzt gewinnen Nicht-Terrain-Treffer immer; ein Terrain-
+  Treffer selektiert die besitzende Landscape-Entity (via `TerrainChunkComponent::terrain`), nie
+  einen Chunk.
+- **`5279e5e` — Dotfiles im Content Browser ausgeblendet:** `populateFolder`/`mergeOverrideInto`
+  überspringen Einträge mit `.`-Prefix (die `.gitkeep`, die die leeren Engine-Kategorie-Ordner
+  Meshes/Materials/MaterialFunctions/Particles in git halten, plus `.DS_Store` etc.).
+
+## Forts. 73 — SceneSerializer schließt die 6-Komponenten-Lücke (13.07.2026, `7382031`)
+
+Sechs Komponenten hatten **überhaupt keine** SceneSerializer-Abdeckung (entdeckt beim Bau des
+Animator-State-Machine-Tabs, siehe Forts. 70): `AnimatorComponent`, `AnimatorBlendComponent`,
+`SkeletalMeshComponent`, `PropertyAnimatorComponent`, `NavMeshComponent`, `NavAgentComponent`. Eine
+Szene mit einem Skeletal-Mesh-Charakter verlor also bei jedem Save/Reload ihre Mesh-Referenz, den
+Animations-Zustand und jedes NavMesh/NavAgent-Setup.
+
+- Folgt dem bestehenden Per-Komponente-JSON-Block-Muster; CBOR bleibt `to_cbor()` desselben JSON-
+  Baums → ein Codepfad deckt beide Formate.
+- **Bewusst nicht persistiert** (Laufzeit-abgeleitet): `SkeletalMeshComponent.boneMatrices`,
+  `NavAgentComponent.path/hasPath/moving`.
+- `NavMeshComponent` persistiert Config + Geometrie (base64, wie Terrains `sculptHeights`) und
+  **re-baked sofort beim Laden** via `NavigationSystem::bake()`, weil sonst nichts in der Engine
+  automatisch einen Rebuild auslöst (nur der manuelle „Bake"-Button des Editors).
+- 6 neue Round-Trip-Tests (JSON + Binary je). 789 Tests grün.
+
+**Damit ist der in Forts. 71 befürchtete Merge-Konflikt gegenstandslos** — die Lücke wurde sauber
+gegen den aktuellen `main` neu geschrieben, nicht der alte isolierte Worktree-Diff gemerged.
+
+## Forts. 74 — Projekt-Sprache als harte Restriktion + C++-Source-Scaffold + Content-Browser-Source-Tree (13.07.2026)
+
+Die mit dem New-Project-Wizard gewählte Scripting-Sprache war bisher „nur informativ" — jedes
+Projekt konnte weiterhin Lua/Python/HorizonCode-Logik nebeneinander anlegen. Drei Commits machen
+die Sprache **autoritativ und ein Projekt einsprachig**.
+
+- **`f97d0f3` — Sprache wird harte Restriktion + C++-`Source/`-Scaffold:** Content-Browser-„Create"-
+  Menü (`drawCreateAssetItems`) zeigt nur noch den passenden Gameplay-Logik-Creator — HorizonCode →
+  HorizonCode Class + Player; Lua → Script-Asset als Lua geboren; Python → als Python; C++ → „C++
+  Class" schreibt `Source/<Name>.{h,cpp}`. Der Per-Asset-Lua/Python-Picker ist weg (Sprache gehört
+  dem Projekt), Add-Component-„Script" erscheint nur für Lua/Python-Projekte. Widgets, Level-Script,
+  Game-Instance und die Daten-/Graph-Assets bleiben sprachübergreifend. **Native C++-Projekte
+  bekommen einen kompilierbaren `Source/`-Baum** statt Engine-Assets (`HE_Tools/ProjectManager`):
+  GameLogic-Runtime (LevelScript + GameInstanceBase + Scene-Name-Registry), eine GameInstance, ein
+  Per-Level-LevelScript für die Startup-Szene (Event-Stubs spiegeln den HorizonCode-Katalog), der
+  `IGameLogic`-Entry-Point, plus globbing-`CMakeLists` + README. Jede generierte Methode ist ein
+  leerer Stub → der Baum kompiliert von Geburt an gegen nur `<IGameLogic.h>`; Level-Scripts
+  self-registrieren per Szenen-Name (`REGISTER_LEVEL_SCRIPT`), d. h. eine Klasse/ein Level hinzufügen
+  heißt nie, bestehende Dateien von Hand editieren. Verifiziert: generierter Baum kompiliert unter
+  `-Wall -Wextra`, `CMakeLists` baut `GameLogic.dylib` mit Factory-Exports, Level-Script-Lookup per
+  Szenen-Name löst zur Laufzeit auf. 810 Tests (4 neu).
+- **`a1e5aec` — C++-`Source/`-Tree im Content Browser + `CppClassEditorPanel`:** dritter „Source"-
+  Root neben Content/Engine (nur C++-Projekte; `GlobalState.sourceFolder`/`refreshSourceFolder`,
+  Root = `<project>/Source`, leer wenn abwesend). Jede Klasse zeigt `.h` und `.cpp` als **ein**
+  Grid-Item (`.cpp` kollabiert in den gleichnamigen Header; einsame `.cpp` wie `GameLogic.cpp` stehen
+  allein). Doppelklick öffnet `CppClassEditorPanel` — Cpp-Highlighted-Viewer, lädt beide Dateien
+  (roher Text, kein HAsset) mit `.h`/`.cpp`-Toggle, Dirty-Tracking, Ctrl/Cmd+S pro Hälfte. Source-
+  Root-Kontext-Aktionen sicher gehalten (Create bietet nur „C++ Class"; Rename versteckt = IDE-Level-
+  Refactor; Delete entfernt beide Hälften; Drag-Move deaktiviert).
+- **`75f744b` — New-Project-Hinweis:** Amber-Hint unter dem Sprach-Dropdown (Hub-Create-Panel +
+  New-Project-Modal): die Sprache gilt projektweit und ist nach dem Anlegen nicht mehr änderbar.
+
+## Forts. 75 — Editor-Robustheit: Toolchain-Startup-Check + korruptions-fester config.json (13.07.2026)
+
+- **`f23c7a7` — Startup-Check für cmake + funktionierenden C++-Compiler:** HorizonCode-C++-Export-
+  Codegen und native C++-GameLogic-Projekte brauchen cmake + echten Compiler auf der Dev-Maschine;
+  vorher gab es keinen proaktiven Check (eine fehlende Toolchain tauchte erst als Build-Fehler tief
+  in einem Export auf). `HE::hccg::probeToolchain()` (HcCodegen) prüft jetzt sauber: `cmake
+  --version`, dann eine buildless CMake-Konfigurationsprobe (der einzige zuverlässige, plattform-
+  übergreifende Weg zu wissen, ob ein Compiler wirklich gefunden wird — besonders MSVC auf Windows).
+  Läuft einmal auf einem Background-Thread beim Editor-Start (blockiert Init nie); Ergebnis treibt
+  einen „Toolchain Missing"-Dialog mit plattform-spezifischer Install-Guidance (Xcode-CLT-Installer
+  macOS, kopierbarer winget-Befehl Windows, apt-Befehl Linux) + persistentem „don't show again" +
+  manuellem Recheck (auch aus Preferences erreichbar).
+- **`f2ca2cf` + `487fc1e` — config.json crash-fest gemacht (Startup-Crash-Loop-Fix):** `readConfig()`
+  rief `json::parse()` mit Exceptions und ohne Handler im Application-Konstruktor auf. Eine per
+  Crash/Kill mitten im Schreiben abgeschnittene config.json (sie wird bei vielen Events neu
+  geschrieben) ließ parse werfen → `std::terminate` → SIGABRT beim Start, und da die kaputte Datei
+  liegen blieb, brach **jeder Neustart** erneut ab (Crash-Loop; passt zur gemeldeten „error on engine
+  start"). Fix (`f2ca2cf`): non-throwing Parse — verworfene/nicht-Objekt-Config resettet auf Defaults
+  und schreibt eine saubere Datei; skalare Reads typ-geprüft. Fix (`487fc1e`): `writeConfig()` schrieb
+  vorher plain-`ofstream` in-place (truncate vor dem Schreiben) und `OnShutdown()` ruft es zuletzt →
+  ein Abort während Shutdown ließ die Config truncated zurück. Jetzt atomar: nach `config.json.tmp`
+  schreiben, `good()` prüfen, `rename()` über `config.json` (POSIX-atomar) → Crash mitten im Schreiben
+  lässt die alte gültige Config intakt. Beide reproduziert (SIGABRT, exit 134) + Recovery verifiziert.
+
+## Forts. 76 — Sky & Weather als eigene Szenen-Entities + Environment-Fenster + schwarzer Hintergrund (13.–14.07.2026, PR #4)
+
+Sky (`EnvironmentComponent`) und Weather (`WeatherComponent`) waren feste Komponenten auf dem
+World-Root. Sie sind jetzt **gewöhnliche, löschbare Szenen-Entities** („Sky" / „Weather") im Outliner,
+hinzugefügt/entfernt über ein neues **View ▸ Environment**-Fenster (`335afef`, gemerged als PR #4 in
+`39d038c`).
+
+- **HorizonWorld:** Ctor erzeugt keine env/weather/lights mehr — **eine bare World startet leer**.
+  Neue API `environmentEntity()`/`weatherEntity()`, `addSky()/removeSky()`, `addWeather()/
+  removeWeather()`; Sonne/Mond sind **Kinder der Sky-Entity** (`removeSky()` nimmt sie per Subtree-
+  Force-Destroy mit). `migrateLegacyRootEnvironment()` upgraded Szenen mit Root-gespeichertem
+  env/weather beim Laden zu eigenen Entities.
+- **`reserveComponentStorage()`:** legt die Kern-Komponenten-Pools in diesem Modul vorab an, damit ein
+  hot-geladenes natives Game-Logic-dylib sie nie besitzt (und danglet) — eine bare World bekam das
+  vorher implizit über ihre Default-Lights (siehe [[entt-dlopen-pool-ownership]]).
+- **Konsumenten** scannen nach der env/weather-Entity statt den Root hart zu kodieren (Editor + Game-
+  Push, `WeatherSystem`, `SceneSystems`-GPU-Precip). Ohne Sky-Entity wird dem Renderer `skyEnabled=
+  false` gesagt und **jedes Backend überspringt den Sky-Pass** (flacher Hintergrund) —
+  Metal/OpenGL/Vulkan/D3D11/D3D12.
+- **Projekt-Templates:** Game & Simulation seeden eine Sky- + Weather-Entity in die StartupScene;
+  Empty/Tool starten bare.
+- **Editor:** View ▸ Environment (ImGui + macOS-Native-Menü) fügt Sky & Weather mit Undo hinzu/
+  entfernt sie; das Details-Panel editiert beide weiter bei Auswahl.
+- **`48c2ed2` — schwarzer Hintergrund:** die flache Scene/Background-Clear-Farbe (gezeigt, wenn kein
+  Sky-Pass läuft) war Dunkelgrau `{0.18,0.18,0.20,1}` → jetzt opakes Schwarz `{0,0,0,1}` auf allen 5
+  Backends (inkl. D3D12-Optimized-Clear-Value am Viewport-RT). Verifiziert: 808 Tests grün; Metal-
+  Headless-Dumps prüfen Sky-vorhanden + Sky-entfernt.
+
+## Forts. 77 — Version 0.2.0 „Sunrise" + mbedTLS-Crypto-Fallback + macOS-About/Menu/Quit-Politur (14.07.2026)
+
+- **`afaba52` — Version-Bump 0.0.1 → 0.2.0, Codename „First Light" → „Sunrise":** beides über das
+  generierte `HorizonVersion.h` in Editor-Fenstertitel, Project Hub, Export-Metadaten, macOS-Info.plist/
+  DMG. `set(... FORCE)` beim Codename-Cache-Eintrag — sonst hielt ein Reconfigure den alten gecachten
+  Codename (Version aktualisierte, Codename blieb stale, Windows-Titelleiste zeigte weiter „First
+  Light").
+- **`6f93abe` — mbedTLS als AES-256-GCM-Fallback ohne System-OpenSSL:** vorher wurde hpak-Encryption
+  still deaktiviert, wenn kein OpenSSL installiert war (`find_package` scheiterte → Assets unverschlüsselt
+  gepackt). Jetzt ist **immer** ein Crypto-Backend verfügbar: System-OpenSSL bleibt Primärpfad, bei
+  Abwesenheit wird mbedTLS 3.6.7 (SHA256-gepinnt, `GEN_FILES OFF` → keine Python/Perl/nasm-Toolchain
+  nötig) aus Source gefetcht + gebaut. Neues `he_crypto`-INTERFACE-Target trägt Lib + `HE_HAVE_CRYPTO`
+  + Backend-Makro (HorizonCore + hpak_packer duplizieren die Backend-Wahl nicht mehr). `Aes256Gcm.cpp`
+  bekommt einen `#elif HE_HAVE_MBEDTLS`-Zweig (one-shot `mbedtls_gcm_crypt_and_tag`/`_auth_decrypt` +
+  entropy-seeded CTR-DRBG); OpenSSL-Zweig unverändert. Tests gaten auf backend-neutrales `HE_HAVE_CRYPTO`.
+  Auf einer OpenSSL-losen Maschine verifiziert: mbedTLS-Pfad fetcht+baut, volle Suite 810/810 (inkl.
+  Wrong-Key-Rejection).
+- **macOS-Politur** (`0a507a9`, `dd94997`, `c93d1ca`): About-Panel zeigt Version+Codename aus den
+  Compile-Zeit-Makros (`HE_VERSION_STRING`/`HE_VERSION_CODENAME` via `orderFrontStandardAboutPanelWith
+  Options:`) statt aus einer fehlenden Info.plist des bare-exe; macOS-Menü + Command-Queue-Pump laufen
+  jetzt **auch auf dem Project Hub** (`RenderProjectHub`), sodass Cmd+Q / New / Open dort funktionieren
+  (vorher tot, weil `MacMenuBar::install()` + Pump nur in `RenderEditor` lagen); About-Panel bekommt das
+  echte `HC_Logo.png`-Icon; **Cmd+Q** quittet jetzt zuverlässig über das Standard-`-terminate:` (SDL3
+  postet `SDL_EVENT_QUIT`, der eine Pfad, den Klick **und** Key-Equivalent triggern — der Unsaved-
+  Changes-Guard keyt weiter auf `SDL_EVENT_QUIT`, bleibt also erhalten).
+
+---
+
+## Forts. 78 — Aktualisierter Umsetzungsplan der offenen Punkte (Stand 14.07.2026)
+
+> **Zweck:** Die historische „Empfohlene Reihenfolge der nächsten 5 Arbeitsschritte" (oben) ist ein
+> abgeschlossenes Log vom 12.–14.06.2026. Dieser Eintrag ist der **aktuelle, vorwärtsgerichtete
+> Umsetzungsplan** der noch offenen Punkte — priorisiert, mit Abhängigkeiten. Die Engine ist in den
+> Phasen 0–5 **feature-complete**; was bleibt, ist im Kern (A) Cross-Backend-Parität für Windows/Linux,
+> (B) Reife-/Politur-Schulden und (C) die optionale Phase-7-Kür.
+
+**Legende:** 🔴 nicht begonnen · 🟡 teilweise · Aufwand grob in Personentagen (PT).
+
+### Block A — Rendering-Parität D3D11/D3D12/Vulkan (kritischer Pfad für Windows/Linux)
+
+Reihenfolge bewusst: erst die **Fundament-Fähigkeiten** (Texturen, Material-Override), dann der
+**Codegen-Brocken** (Material-Graph-Shader), dann **Sky/Nebula** als reine Fragment-Shader-Portierung.
+
+1. **A1 — Basecolor-Texturen auf D3D12 + Vulkan** 🔴 (~2–3 PT). Beide zeichnen weiter Flat-Color
+   (`D3D12Renderer.cpp:96-99` hat den TODO explizit im Code). D3D11 hat es bereits → Muster kopieren
+   (SRV/Descriptor-Heap-Slot für die Basecolor-Textur, Sampler, Binding im PS). **Schaltet frei:** alles
+   Weitere in Block A wird sichtbar erst mit korrekten Texturen sinnvoll testbar.
+2. **A2 — MaterialComponent-Override auf D3D11/D3D12/Vulkan** 🔴 (~2 PT). `IRenderer::InvalidateMaterial`
+   ist nur in `OpenGLRenderer.h`/`MetalRenderer.h` überschrieben; die drei anderen ignorieren das Feld.
+   Additiv nachziehen (Per-Instance-Material-Uniform/Push-Constant-Pfad, den PBR-Skalare schon nutzen).
+3. **A3 — Echtes GPU-Instancing D3D12 (+ Vulkan-Audit)** 🟡 (~2 PT). D3D12 issued pro Instanz einen
+   eigenen `DrawIndexedInstanced` in einer Schleife statt eines echten Instance-Buffers → funktional ok,
+   kein Perf-Gewinn. Instance-Buffer + ein Draw-Call wie GL/Metal. D3D11/Vulkan-Instancing-Pfad im
+   selben Zug prüfen (im letzten Audit nicht im Detail nachgeprüft).
+4. **A4 — Material-Node-Graph-Shader auf D3D/Vulkan** 🔴 (~5–8 PT, größter Brocken). Der Material-Graph
+   (Forts. 68) rendert seine kompilierten Shader nur über `MaterialShaderLibrary`, die ausschließlich
+   `MetalRenderer.mm`/`OpenGLRenderer.cpp` aufrufen. Der `Backend`-Enum kennt `HLSL`/`SpirV`, aber **kein
+   D3D/Vulkan-Renderer ruft die Library auf** → jedes Graph-Material ist auf D3D/Vulkan schlicht nicht
+   wie gebaut darstellbar. Plan: HLSL-/SPIR-V-Codegen im `MaterialShaderLibrary` scharfschalten (glslang/
+   SPIRV-Cross ist Teil der Material-System-Vision, siehe [[material-system-vision]]), dann die drei
+   Renderer an die Library anschließen. Hängt an A1/A2 (Textur- + Material-Binding-Pfad muss stehen).
+5. **A5 — Sky/Nebula v2–v3.4 + physikalische Atmosphäre auf D3D/Vulkan** 🔴 (~4–6 PT). `sky.frag`
+   (HLSL/Vulkan-Pendant) hat noch Nebula v1 + altes Gradient-`skyColor`. Zu portieren: Nebula v2→v3.4
+   (Piece-Modell, Auto-Connections, Stripes/Mottle), Rayleigh+Mie+Ozon-Streuung, 22°-Halo/Mond-Corona,
+   God-Rays, Regenbogen — existieren nur GL+Metal. **Reine Fragment-Shader-Arbeit** (kein Compute) →
+   Parität ist Pflicht (Compute-Policy greift hier nicht). Byte-Layout des `SkyParams`-UBO gegen die
+   GL/Metal-Referenz spiegeln (siehe [[metal-sky-port]]).
+
+### Block B — Reife & Plattform-Breite
+
+6. **B1 — BCn-Texturkompression (D3D/Vulkan/GL)** 🔴 (~3–4 PT, Phase 1.6). ASTC 4×4 (Metal/Apple-
+   Silicon) ist fertig; BC7/BC5-Encoder fehlen komplett (kein bc7/dxt/compressonator-Code im Repo).
+   Encoder vendoren (z. B. bc7enc/ISPC-Texcomp) → in den `asset_compiler` + Export-Codec-Wahl.
+7. **B2 — Linux-Window/Input-Pfad + CI-Leg** 🔴 (~3–5 PT, Phase 6.6). **0 Engine-Code** (nur vendorte
+   Third-Party hat `__linux__`-Zweige). SDL3 macht das Fenster/Input plattformneutral → Hauptarbeit ist
+   Build-Verifikation (Vulkan als Primär-Backend, GL als Fallback), Bundle-/Deploy-Layout und ein
+   Ubuntu-CI-Job. **Hängt an Block A** (Vulkan-Parität ist Linux' Render-Pfad).
+8. **B3 — Windows-Real-HW-Visual-Verifikation nachholen** 🟡 (~1–2 PT). Letzter manueller Windows-
+   Durchgang war 14.06.2026 — seither D3D/Vulkan-Sky-Parität, Material-/HorizonCode-GraphEditor,
+   Nebula v3.x noch nie auf echter Windows-GPU gesehen. CI kompiliert + unit-testet, prüft aber **keinen**
+   Render-Output (Runner ohne GPU). Nach jedem Block-A-Schritt einplanen.
+9. **B4 — Vollständige Script-API-Referenz (`horizon.*`) in den Docs** 🟡 (~2 PT, Phase 6.7). Docs-Site
+   ist live + gegen den Code verifiziert (Overview/Getting-Started/Advanced), aber die vollständige
+   `horizon.*`-Referenz (Lua/Python/HorizonCode) fehlt. Aus der `HE::api`-Registry (X-Macro-Feldtabellen,
+   siehe [[engine-api-registry]]) generierbar. Doku-Policy: im selben Zug deployen ([[website-roadmap-deploy]]).
+
+### Block C — Scripting/Editor-Restschulden (klein, unabhängig)
+
+10. **C1 — Editor-Property-*Preview* für Python** 🔴 (~1 PT, 4b.6 zurückgestellt). Lua zeigt exportierte
+    Properties im Inspector; für Python nachziehen (typisierte Klassenattribute → Inspector-Controls).
+11. **C2 — HorizonCode-C++-Codegen WP7 + Cross-Platform-Compile** 🟡 (4b.8 offen). Aktuell kompiliert nur
+    die Host-Plattform (Cross-Export fällt auf den Interpreter zurück); WP7 (direkte typisierte Calls/
+    Optimierung) nicht begonnen; noch kein manueller HW-Smoke-Test eines gepackten Builds. Siehe
+    [[horizoncode-vision]].
+12. **C3 — Natives C++-Scripting C3–C5** 🟡. `GameLogicLoader` (dlopen-Hot-Copy) + C++-`Source/`-Scaffold
+    stehen; die höheren C++-Gameplay-Stufen (weitergehende Engine-API-Abdeckung über [[engine-api-registry]])
+    sind noch offen.
+
+### Block D — Phase-7-Kür (nur bei Bedarf ziehen, von Catania getrieben)
+
+Kein fester Plan — einzeln ziehen, wenn das Spiel es verlangt. Compute-abhängige Features **Metal-first**
+mit sauberem GL-Fallback (Policy, siehe [[ao-gi-roadmap]]):
+
+- **GPU-Upload-Budgeting pro Frame** 🔴 — der *letzte* Main-Thread-Kostenpunkt beim Streaming: Renderer
+  lädt Meshes/Texturen beim ersten Sehen synchron zur GPU hoch → großer Pop-in-Schub kann rucken.
+  Upload-Queue mit Per-Frame-Deckel (analog zum CPU-seitigen `pollAsyncResults(16)`), GL+Metal zuerst.
+- **GPU-Partikel** (Metal-Compute; CPU-Partikel 5.3 als Fallback), **Global Illumination** (Probes/DDGI/
+  Voxel, Metal-Compute) — greenlit auf Metal.
+- **TAA**, **OIT**, **SSR** — reine Fragment-Shader, GL+Metal-Parität.
+- **Impostors** (LOD-System steht), **Networking/Replikation** (nur falls Multiplayer), **Virtual
+  Texturing/Bindless** (nur bei nachgewiesenem Bedarf).
+
+### Empfohlene Sofort-Reihenfolge
+
+**A1 → A2 → A3 → A4 → A5** (Windows/Vulkan auf volle Render-Parität bringen) **→ B3** (Windows-HW-Verify)
+**→ B2** (Linux, hängt an A) **→ B1** (BCn) **→ B4** (Docs). Block C + D laufen unabhängig nebenher, wenn
+ein konkreter Bedarf entsteht. Begründung: Block A ist der einzige *kritische Pfad* — er blockiert
+sowohl die Windows-Auslieferbarkeit als auch (über Vulkan) ganz Linux; alles andere ist additiv.
