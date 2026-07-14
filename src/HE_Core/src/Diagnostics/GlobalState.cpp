@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <fstream>
 #include <filesystem>
+#include <mutex>
 #include <shared_mutex>
 #include <nlohmann/json.hpp>
 
