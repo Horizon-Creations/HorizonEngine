@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include <Renderer/IRenderer.h>
 #include <Renderer/GpuPassAccumulator.h>
 #include "MetalShaderManager.h"

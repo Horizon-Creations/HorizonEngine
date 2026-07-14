@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include "DiagnosticsStructs.h"
 #include "../Types/Defines.h"
 #include <string>

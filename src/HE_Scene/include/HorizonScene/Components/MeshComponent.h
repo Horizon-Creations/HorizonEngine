@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include <Types/UUID.h>
 
 struct MeshComponent {
