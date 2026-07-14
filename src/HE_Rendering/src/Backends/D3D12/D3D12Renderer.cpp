@@ -4513,9 +4513,13 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 // instance ring and issue ONE DrawIndexedInstanced. Falls back to the
                 // per-instance loop when instancing isn't allowed (transparent pass) or
                 // a ring is exhausted.
+                static_assert(k_instStride == 2 * sizeof(glm::mat4), "instance stride must be mvp+model");
                 const UINT count = static_cast<UINT>(dc.instanceTransforms.size());
-                auto* instPso = (p.usingHDR && p.hdrPsoInstanced) ? p.hdrPsoInstanced.Get()
-                                                                  : p.psoInstanced.Get();
+                // Pick the instanced PSO matching the active scene target — must equal the
+                // format scenePso resolves to. If that variant is null → fits=false → the
+                // per-instance fallback (never bind an LDR PSO to the HDR target).
+                const bool useHdrInst = p.usingHDR && p.hdrPso;
+                auto* instPso = useHdrInst ? p.hdrPsoInstanced.Get() : p.psoInstanced.Get();
                 const bool fits = allowInstancing && instPso && ringPtr && instRingPtr
                                   && (static_cast<UINT64>(instCursor) + count) <= k_maxInstances
                                   && drawIdx < k_maxDraws;
