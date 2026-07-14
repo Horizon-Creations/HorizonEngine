@@ -1519,6 +1519,24 @@ void VulkanRenderer::createScenePipeline()
                 "VulkanRenderer: white base-color default failed — untextured meshes will be skipped");
     }
 
+    // A3: per-frame instance-transform vertex buffer (host-visible + mapped), used by
+    // the instanced scene pipeline at binding 1.
+    for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
+    {
+        VkBufferCreateInfo ibci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        ibci.size  = static_cast<VkDeviceSize>(k_maxInstances) * k_instStride;
+        ibci.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+        vkCheck(vkCreateBuffer(m_device, &ibci, nullptr, &m_instanceBuf[i].buf), "instance buffer");
+        VkMemoryRequirements ireq{}; vkGetBufferMemoryRequirements(m_device, m_instanceBuf[i].buf, &ireq);
+        VkMemoryAllocateInfo imai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        imai.allocationSize  = ireq.size;
+        imai.memoryTypeIndex = findMemoryType(ireq.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        vkCheck(vkAllocateMemory(m_device, &imai, nullptr, &m_instanceBuf[i].mem), "instance memory");
+        vkBindBufferMemory(m_device, m_instanceBuf[i].buf, m_instanceBuf[i].mem, 0);
+        vkMapMemory(m_device, m_instanceBuf[i].mem, 0, ibci.size, 0, &m_instanceBuf[i].mapped);
+    }
+
     VkShaderModule vs = loadShaderModule("scene.vert.spv");
     VkShaderModule fs = loadShaderModule("scene.frag.spv");
     if (vs == VK_NULL_HANDLE || fs == VK_NULL_HANDLE)
@@ -1600,6 +1618,43 @@ void VulkanRenderer::createScenePipeline()
     if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &m_scenePipeline) != VK_SUCCESS)
         Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: graphics pipeline creation failed");
 
+    // A3: instanced variant — same fragment shader + states, VS reads per-instance
+    // mvp+model from binding 1 (VK_VERTEX_INPUT_RATE_INSTANCE). Created from `pci`
+    // BEFORE the transparent block below mutates it (opaque config).
+    if (VkShaderModule ivs = loadShaderModule("scene_instanced.vert.spv"))
+    {
+        VkPipelineShaderStageCreateInfo istages[2] = { stages[0], stages[1] };
+        istages[0].module = ivs;
+        VkVertexInputBindingDescription ibinds[2] = {
+            { 0, 8u * sizeof(float), VK_VERTEX_INPUT_RATE_VERTEX },
+            { 1, k_instStride,       VK_VERTEX_INPUT_RATE_INSTANCE },
+        };
+        VkVertexInputAttributeDescription iattrs[11] = {
+            { 0, 0, VK_FORMAT_R32G32B32_SFLOAT,    0 },
+            { 1, 0, VK_FORMAT_R32G32B32_SFLOAT,   12 },
+            { 2, 0, VK_FORMAT_R32G32_SFLOAT,      24 },
+            { 3,  1, VK_FORMAT_R32G32B32A32_SFLOAT,   0 },
+            { 4,  1, VK_FORMAT_R32G32B32A32_SFLOAT,  16 },
+            { 5,  1, VK_FORMAT_R32G32B32A32_SFLOAT,  32 },
+            { 6,  1, VK_FORMAT_R32G32B32A32_SFLOAT,  48 },
+            { 7,  1, VK_FORMAT_R32G32B32A32_SFLOAT,  64 },
+            { 8,  1, VK_FORMAT_R32G32B32A32_SFLOAT,  80 },
+            { 9,  1, VK_FORMAT_R32G32B32A32_SFLOAT,  96 },
+            { 10, 1, VK_FORMAT_R32G32B32A32_SFLOAT, 112 },
+        };
+        VkPipelineVertexInputStateCreateInfo ivi{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+        ivi.vertexBindingDescriptionCount   = 2;
+        ivi.pVertexBindingDescriptions      = ibinds;
+        ivi.vertexAttributeDescriptionCount = 11;
+        ivi.pVertexAttributeDescriptions    = iattrs;
+        VkGraphicsPipelineCreateInfo ipci = pci;
+        ipci.pStages           = istages;
+        ipci.pVertexInputState = &ivi;
+        if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &ipci, nullptr, &m_sceneInstancedPipeline) != VK_SUCCESS)
+            Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: instanced scene pipeline creation failed");
+        vkDestroyShaderModule(m_device, ivs, nullptr);
+    }
+
     // Alpha-blend pipeline for sorted transparency (depth test, no depth write).
     {
         VkPipelineColorBlendAttachmentState tcba{};
@@ -1659,6 +1714,10 @@ void VulkanRenderer::destroyScenePipeline()
         if (m_frameUBO[i].buf) vkDestroyBuffer(m_device, m_frameUBO[i].buf, nullptr);
         if (m_frameUBO[i].mem) vkFreeMemory   (m_device, m_frameUBO[i].mem, nullptr);
         m_frameUBO[i] = {};
+        if (m_instanceBuf[i].mem)    vkUnmapMemory(m_device, m_instanceBuf[i].mem);
+        if (m_instanceBuf[i].buf)    vkDestroyBuffer(m_device, m_instanceBuf[i].buf, nullptr);
+        if (m_instanceBuf[i].mem)    vkFreeMemory   (m_device, m_instanceBuf[i].mem, nullptr);
+        m_instanceBuf[i] = {};
     }
     if (m_matUBO)              { vkDestroyBuffer(m_device, m_matUBO, nullptr); m_matUBO = VK_NULL_HANDLE; }
     if (m_matMem)              { vkFreeMemory   (m_device, m_matMem, nullptr); m_matMem = VK_NULL_HANDLE; }
@@ -1674,6 +1733,8 @@ void VulkanRenderer::destroyScenePipeline()
     if (m_emptySetLayout)      { vkDestroyDescriptorSetLayout(m_device, m_emptySetLayout, nullptr);  m_emptySetLayout = VK_NULL_HANDLE; }
     if (m_shadowPipeline)                { vkDestroyPipeline(m_device, m_shadowPipeline, nullptr);                m_shadowPipeline = VK_NULL_HANDLE; }
     if (m_sceneTransparentPipelineHDR)   { vkDestroyPipeline(m_device, m_sceneTransparentPipelineHDR, nullptr);   m_sceneTransparentPipelineHDR = VK_NULL_HANDLE; }
+    if (m_sceneInstancedPipelineHDR)     { vkDestroyPipeline(m_device, m_sceneInstancedPipelineHDR, nullptr);     m_sceneInstancedPipelineHDR = VK_NULL_HANDLE; }
+    if (m_sceneInstancedPipeline)        { vkDestroyPipeline(m_device, m_sceneInstancedPipeline, nullptr);        m_sceneInstancedPipeline = VK_NULL_HANDLE; }
     if (m_scenePipelineHDR)              { vkDestroyPipeline(m_device, m_scenePipelineHDR, nullptr);              m_scenePipelineHDR = VK_NULL_HANDLE; }
     if (m_sceneTransparentPipeline)      { vkDestroyPipeline(m_device, m_sceneTransparentPipeline, nullptr);      m_sceneTransparentPipeline = VK_NULL_HANDLE; }
     if (m_scenePipeline)                 { vkDestroyPipeline(m_device, m_scenePipeline, nullptr);                 m_scenePipeline = VK_NULL_HANDLE; }
@@ -2037,6 +2098,31 @@ void VulkanRenderer::createPostFXPipelines()
             pci2.layout=m_scenePipelineLayout; pci2.renderPass=m_postFxSceneRP;
             if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci2, nullptr, &m_scenePipelineHDR) != VK_SUCCESS)
                 Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: HDR scene pipeline failed");
+            // A3: instanced HDR variant (per-instance mvp+model at binding 1).
+            if (VkShaderModule ivs2 = loadShaderModule("scene_instanced.vert.spv"))
+            {
+                VkPipelineShaderStageCreateInfo ist[2] = { st[0], st[1] };
+                ist[0].module = ivs2;
+                VkVertexInputBindingDescription ibnd[2] = {
+                    { 0, 8u*sizeof(float), VK_VERTEX_INPUT_RATE_VERTEX },
+                    { 1, k_instStride,     VK_VERTEX_INPUT_RATE_INSTANCE },
+                };
+                VkVertexInputAttributeDescription iat[11] = {
+                    { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0 }, { 1, 0, VK_FORMAT_R32G32B32_SFLOAT, 12 },
+                    { 2, 0, VK_FORMAT_R32G32_SFLOAT, 24 },
+                    { 3,1,VK_FORMAT_R32G32B32A32_SFLOAT,0 }, { 4,1,VK_FORMAT_R32G32B32A32_SFLOAT,16 },
+                    { 5,1,VK_FORMAT_R32G32B32A32_SFLOAT,32 }, { 6,1,VK_FORMAT_R32G32B32A32_SFLOAT,48 },
+                    { 7,1,VK_FORMAT_R32G32B32A32_SFLOAT,64 }, { 8,1,VK_FORMAT_R32G32B32A32_SFLOAT,80 },
+                    { 9,1,VK_FORMAT_R32G32B32A32_SFLOAT,96 }, { 10,1,VK_FORMAT_R32G32B32A32_SFLOAT,112 },
+                };
+                VkPipelineVertexInputStateCreateInfo ivi2{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+                ivi2.vertexBindingDescriptionCount=2; ivi2.pVertexBindingDescriptions=ibnd;
+                ivi2.vertexAttributeDescriptionCount=11; ivi2.pVertexAttributeDescriptions=iat;
+                VkGraphicsPipelineCreateInfo ipci2=pci2; ipci2.pStages=ist; ipci2.pVertexInputState=&ivi2;
+                if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &ipci2, nullptr, &m_sceneInstancedPipelineHDR) != VK_SUCCESS)
+                    Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: instanced HDR scene pipeline failed");
+                vkDestroyShaderModule(m_device, ivs2, nullptr);
+            }
             // Alpha-blend transparent variant
             {
                 VkPipelineColorBlendAttachmentState tcba2=cba2;
@@ -2971,6 +3057,11 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                        glm::length(glm::vec3(b->transform[3]) - camPos);
             });
 
+        // A3: real instancing applies to the opaque pass only (transparent keeps the
+        // per-instance loop for blend + depth sort). instCursor sub-allocates the
+        // per-frame instance buffer across the frame's instanced batches.
+        bool allowInstancing = true;
+        uint32_t instCursor = 0;
         auto drawDCVk = [&](const DrawCall& dc) {
             const GpuMesh* mesh = resolveMesh(dc.meshAssetId);
             const GpuMesh& m    = mesh ? *mesh : m_cube;
@@ -3024,7 +3115,41 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                 m_statTris += m.indexCount / 3;
             };
             if (!dc.instanceTransforms.empty())
-                for (const glm::mat4& t : dc.instanceTransforms) drawOne(t);
+            {
+                // A3: real instancing — fill the per-frame instance buffer with every
+                // instance's {mvp,model}, bind the instanced pipeline + binding 1, ONE draw.
+                const uint32_t count = static_cast<uint32_t>(dc.instanceTransforms.size());
+                InstanceBuf& ib = m_instanceBuf[m_currentFrame];
+                VkPipeline instPipe = hdr && m_sceneInstancedPipelineHDR
+                                    ? m_sceneInstancedPipelineHDR : m_sceneInstancedPipeline;
+                const bool fits = allowInstancing && instPipe && ib.mapped
+                                  && (static_cast<uint64_t>(instCursor) + count) <= k_maxInstances;
+                if (fits)
+                {
+                    auto* dst = static_cast<uint8_t*>(ib.mapped)
+                              + static_cast<size_t>(instCursor) * k_instStride;
+                    for (uint32_t k = 0; k < count; ++k)
+                    {
+                        const glm::mat4& t = dc.instanceTransforms[k];
+                        const glm::mat4 xf[2] = { viewProj * t, t }; // mvp, model (column-major)
+                        std::memcpy(dst + static_cast<size_t>(k) * k_instStride, xf, sizeof(xf));
+                    }
+                    const VkDeviceSize instOff = static_cast<VkDeviceSize>(instCursor) * k_instStride;
+                    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, instPipe);
+                    vkCmdBindVertexBuffers(cmd, 1, 1, &ib.buf, &instOff);
+                    vkCmdDrawIndexed(cmd, m.indexCount, count, 0, 0, 0);
+                    // Restore the non-instanced pipeline for subsequent (non-instanced) draws.
+                    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        hdr && m_scenePipelineHDR ? m_scenePipelineHDR : m_scenePipeline);
+                    ++m_statDraws;
+                    m_statTris += (m.indexCount / 3) * count;
+                    instCursor += count;
+                }
+                else
+                {
+                    for (const glm::mat4& t : dc.instanceTransforms) drawOne(t); // fallback
+                }
+            }
             else
                 drawOne(dc.transform);
         };
@@ -3036,6 +3161,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         const VkPipeline transPipe = hdr && m_sceneTransparentPipelineHDR
             ? m_sceneTransparentPipelineHDR : m_sceneTransparentPipeline;
         if (!transparentDCs.empty() && transPipe) {
+            allowInstancing = false; // transparent batches keep the per-instance loop (blend + depth sort)
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, transPipe);
             for (const DrawCall* dc : transparentDCs) drawDCVk(*dc);
         }

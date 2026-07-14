@@ -153,6 +153,14 @@ private:
 	VkPipeline            m_sceneTransparentPipeline   = VK_NULL_HANDLE;
 	VkPipeline            m_scenePipelineHDR           = VK_NULL_HANDLE;
 	VkPipeline            m_sceneTransparentPipelineHDR= VK_NULL_HANDLE;
+	VkPipeline            m_sceneInstancedPipeline     = VK_NULL_HANDLE; // A3: real GPU instancing
+	VkPipeline            m_sceneInstancedPipelineHDR  = VK_NULL_HANDLE; // A3
+	// A3: per-frame instance-transform vertex buffer (host-visible, mapped; binding 1,
+	// VK_VERTEX_INPUT_RATE_INSTANCE for the instanced scene pipeline). Ring per frame.
+	struct InstanceBuf { VkBuffer buf = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE; void* mapped = nullptr; };
+	InstanceBuf           m_instanceBuf[2];
+	static constexpr uint32_t k_maxInstances = 65536; // instance-buffer capacity (A3)
+	static constexpr uint32_t k_instStride   = 128;   // bytes per instance = 2 × mat4 (mvp, model)
 	VkDescriptorPool      m_descPool            = VK_NULL_HANDLE;
 	struct FrameUBO
 	{

@@ -38,6 +38,8 @@ using Microsoft::WRL::ComPtr;
 static constexpr UINT k_frameCount = 3;
 static constexpr UINT k_maxDraws   = 4096;          // per-object CB ring capacity
 static constexpr UINT k_cbSlot     = 256;           // CBV alignment
+static constexpr UINT k_maxInstances = 65536;       // instance-transform ring capacity (A3)
+static constexpr UINT k_instStride   = 128;         // bytes per instance = 2 × float4x4 (mvp, model)
 
 // ─── Sky 3D noise volume bake ───────────────────────────────────────────────
 // CPU-baked RG16 volume the sky's starFbm3 (.r value noise) and worleyFbm
@@ -507,6 +509,23 @@ VSOut VSMain(VSIn i)
     o.normal   = mul((float3x3)uModel, i.normal);
     o.uv       = i.uv;
     o.clip     = mul(uMVP, float4(i.pos, 1.0));
+    return o;
+}
+// Instanced geometry (A3): one DrawIndexedInstanced replaces the per-instance draw
+// loop. Per-instance mvp + model live in a structured buffer at t3, indexed by
+// SV_InstanceID, filled by the CPU exactly like the non-instanced drawOne path
+// (same column-major glm bytes as the PerObject cbuffer → identical mul() math).
+// uColor/uPBR stay in the shared PerObject cbuffer (batch-constant). Reuses PSMain.
+struct InstXform { float4x4 mvp; float4x4 model; };
+StructuredBuffer<InstXform> gInstances : register(t3);
+VSOut VSMainInstanced(VSIn i, uint iid : SV_InstanceID)
+{
+    InstXform x = gInstances[iid];
+    VSOut o;
+    o.worldPos = mul(x.model, float4(i.pos, 1.0)).xyz;
+    o.normal   = mul((float3x3)x.model, i.normal);
+    o.uv       = i.uv;
+    o.clip     = mul(x.mvp, float4(i.pos, 1.0));
     return o;
 }
 // Depth-only vertex shader for the shadow pass: uMVP carries lightVP * model.
@@ -2047,11 +2066,15 @@ struct D3D12RendererImpl
     // ── Scene pipeline ──────────────────────────────────────────────────────
     ComPtr<ID3D12RootSignature>  rootSig;
     ComPtr<ID3D12PipelineState>  pso;
+    ComPtr<ID3D12PipelineState>  psoInstanced;    // RGBA8, instanced geometry (A3)
+    ComPtr<ID3D12PipelineState>  hdrPsoInstanced; // RGBA16F, instanced geometry (A3)
     ComPtr<ID3D12PipelineState>  transparentPSO; // alpha-blend, depth read-only
     ComPtr<ID3D12Resource>       perFrameCB[k_frameCount];   // upload, persistently mapped
     uint8_t*                     perFramePtr[k_frameCount]{};
     ComPtr<ID3D12Resource>       perObjectRing[k_frameCount]; // upload, persistently mapped
     uint8_t*                     perObjectPtr[k_frameCount]{};
+    ComPtr<ID3D12Resource>       perInstanceRing[k_frameCount]; // upload: instance {mvp,model} (A3)
+    uint8_t*                     perInstancePtr[k_frameCount]{};
 
     GpuMesh cube;
 
@@ -2823,7 +2846,7 @@ struct D3D12RendererImpl
         albedoRange.RegisterSpace                     = 0;
         albedoRange.OffsetInDescriptorsFromTableStart = 0;
 
-        D3D12_ROOT_PARAMETER params[4]{};
+        D3D12_ROOT_PARAMETER params[5]{};
         params[0].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
         params[0].Descriptor       = { 0, 0 }; // b0
         params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
@@ -2838,6 +2861,11 @@ struct D3D12RendererImpl
         params[3].DescriptorTable.NumDescriptorRanges = 1; // t1 (albedo)
         params[3].DescriptorTable.pDescriptorRanges   = &albedoRange;
         params[3].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
+        // param[4]: root SRV (t3) = per-instance {mvp,model} structured buffer for the
+        // instanced geometry path (A3). Vertex-only; unused/unbound by non-instanced draws.
+        params[4].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_SRV;
+        params[4].Descriptor       = { 3, 0 }; // t3, space0
+        params[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
 
         // s0 = shadow sampler (linear-clamp), s1 = AO sampler (point-clamp),
         // s2 = base-color sampler (linear-wrap, for tiling textures)
@@ -2856,7 +2884,7 @@ struct D3D12RendererImpl
         samplers[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
         D3D12_ROOT_SIGNATURE_DESC rsd{};
-        rsd.NumParameters     = 4;
+        rsd.NumParameters     = 5;
         rsd.pParameters       = params;
         rsd.NumStaticSamplers = 3;
         rsd.pStaticSamplers   = samplers;
@@ -2975,6 +3003,27 @@ struct D3D12RendererImpl
             device->CreateGraphicsPipelineState(&hp, IID_PPV_ARGS(&hdrPso));
         }
 
+        // Instanced geometry variants (A3): same PS / input layout / root sig, VS =
+        // VSMainInstanced (reads per-instance mvp/model from the t3 structured buffer).
+        // LDR (RGBA8) + HDR (RGBA16F) to match the two scene targets.
+        {
+            ComPtr<ID3DBlob> vsi, ierr;
+            if (SUCCEEDED(D3DCompile(sceneSource.c_str(), sceneSource.size(), "scene", nullptr, nullptr,
+                                     "VSMainInstanced", "vs_5_0", flags, 0, &vsi, &ierr)))
+            {
+                D3D12_GRAPHICS_PIPELINE_STATE_DESC ip = pd; // pd still RGBA8 here
+                ip.VS = { vsi->GetBufferPointer(), vsi->GetBufferSize() };
+                device->CreateGraphicsPipelineState(&ip, IID_PPV_ARGS(&psoInstanced));
+                ip.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+                device->CreateGraphicsPipelineState(&ip, IID_PPV_ARGS(&hdrPsoInstanced));
+            }
+            else
+            {
+                Logger::Log(Logger::LogLevel::Error, (std::string("D3D12Renderer: VSMainInstanced "
+                    "compile failed: ") + (ierr ? static_cast<const char*>(ierr->GetBufferPointer()) : "")).c_str());
+            }
+        }
+
         // Depth-only PSO for the shadow pass (VSDepth, no PS / RTV).
         {
             ComPtr<ID3DBlob> dvs;
@@ -3030,6 +3079,8 @@ struct D3D12RendererImpl
                                                   reinterpret_cast<void**>(&perFramePtr[f]));
             perObjectRing[f] = createUploadBuffer(static_cast<UINT64>(k_maxDraws) * k_cbSlot,
                                                   reinterpret_cast<void**>(&perObjectPtr[f]));
+            perInstanceRing[f] = createUploadBuffer(static_cast<UINT64>(k_maxInstances) * k_instStride,
+                                                    reinterpret_cast<void**>(&perInstancePtr[f]));
         }
         createSkyPipeline();
         createDebugLinePipeline();
@@ -4151,6 +4202,7 @@ void D3D12Renderer::Shutdown()
     {
         m_impl->perFrameCB[i].Reset();
         m_impl->perObjectRing[i].Reset();
+        m_impl->perInstanceRing[i].Reset();
     }
     if (m_impl->tsReadbackPtr) { m_impl->tsReadback->Unmap(0, nullptr); m_impl->tsReadbackPtr = nullptr; }
     m_impl->tsReadback.Reset();
@@ -4265,6 +4317,10 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
 
     const D3D12_GPU_VIRTUAL_ADDRESS ringBase = p.perObjectRing[p.frameIndex]->GetGPUVirtualAddress();
     uint8_t* ringPtr = p.perObjectPtr[p.frameIndex];
+    // Instance-transform ring (A3): sub-allocated per instanced batch, one instanced draw each.
+    const D3D12_GPU_VIRTUAL_ADDRESS instRingBase = p.perInstanceRing[p.frameIndex]->GetGPUVirtualAddress();
+    uint8_t* instRingPtr = p.perInstancePtr[p.frameIndex];
+    UINT instCursor = 0; // next free instance slot in the ring
 
     auto transition = [&](ID3D12Resource* res, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after)
     {
@@ -4416,6 +4472,10 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                        glm::length(glm::vec3(b->transform[3]) - camPos);
             });
 
+        // Real GPU instancing (A3) applies to the opaque pass only; the transparent
+        // pass reuses drawDC12 with a blend PSO + per-instance depth sort, so it keeps
+        // the per-instance loop (allowInstancing is set false before that pass).
+        bool allowInstancing = true;
         auto drawDC12 = [&](const DrawCall& dc) {
             if (drawIdx >= k_maxDraws) return;
             GpuMesh* mesh = p.resolveMesh(dc.meshAssetId, m_contentManager);
@@ -4448,7 +4508,48 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 ++drawIdx;
             };
             if (!dc.instanceTransforms.empty())
-                for (const glm::mat4& t : dc.instanceTransforms) drawOne(t);
+            {
+                // A3: real instancing — upload every instance's {mvp,model} to the
+                // instance ring and issue ONE DrawIndexedInstanced. Falls back to the
+                // per-instance loop when instancing isn't allowed (transparent pass) or
+                // a ring is exhausted.
+                const UINT count = static_cast<UINT>(dc.instanceTransforms.size());
+                auto* instPso = (p.usingHDR && p.hdrPsoInstanced) ? p.hdrPsoInstanced.Get()
+                                                                  : p.psoInstanced.Get();
+                const bool fits = allowInstancing && instPso && ringPtr && instRingPtr
+                                  && (static_cast<UINT64>(instCursor) + count) <= k_maxInstances
+                                  && drawIdx < k_maxDraws;
+                if (fits)
+                {
+                    uint8_t* dst = instRingPtr + static_cast<size_t>(instCursor) * k_instStride;
+                    for (UINT k = 0; k < count; ++k)
+                    {
+                        const glm::mat4& t = dc.instanceTransforms[k];
+                        const glm::mat4 xf[2] = { viewProj * t, t }; // mvp, model (column-major, as InstXform)
+                        std::memcpy(dst + static_cast<size_t>(k) * k_instStride, xf, sizeof(xf));
+                    }
+                    // One PerObject CB carries the batch-constant colour/pbr (the instanced
+                    // VS reads mvp/model from t3, so the CB's mvp/model are unused here).
+                    PerObjectCB o{};
+                    o.color = glm::vec4(dc.baseColor, textured ? 1.0f : 0.0f);
+                    o.pbr   = glm::vec4(dc.metallic, dc.roughness, dc.opacity, 0.0f);
+                    std::memcpy(ringPtr + static_cast<size_t>(drawIdx) * k_cbSlot, &o, sizeof(o));
+                    cl->SetGraphicsRootConstantBufferView(0, ringBase + static_cast<UINT64>(drawIdx) * k_cbSlot);
+                    cl->SetGraphicsRootShaderResourceView(4,
+                        instRingBase + static_cast<UINT64>(instCursor) * k_instStride);
+                    cl->SetPipelineState(instPso);
+                    cl->DrawIndexedInstanced(m.indexCount, count, 0, 0, 0);
+                    // Restore the opaque scene PSO (instancing runs in the opaque pass only).
+                    cl->SetPipelineState((p.usingHDR && p.hdrPso) ? p.hdrPso.Get() : p.pso.Get());
+                    ++p.statDraws; p.statTris += (m.indexCount / 3) * count;
+                    ++drawIdx;
+                    instCursor += count;
+                }
+                else
+                {
+                    for (const glm::mat4& t : dc.instanceTransforms) drawOne(t); // fallback
+                }
+            }
             else
                 drawOne(dc.transform);
         };
@@ -4538,6 +4639,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         }
 
         if (!transparentDCs.empty() && transePso) {
+            allowInstancing = false; // transparent batches keep the per-instance loop (blend + depth sort)
             cl->SetPipelineState(transePso);
             for (const DrawCall* dc : transparentDCs) drawDC12(*dc);
             cl->SetPipelineState(scenePso); // restore for next draw
