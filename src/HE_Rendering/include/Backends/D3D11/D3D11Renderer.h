@@ -34,6 +34,11 @@ public:
     void SetSSAOSettings(const SSAOSettings& settings) override;
     void SetBloomSettings(const BloomSettings& settings) override;
 
+    // Editor material/mesh hot-reload: drop the cached override-material texture / mesh
+    // GPU state so the next frame re-resolves it from the ContentManager (mirrors GL/Metal).
+    void InvalidateMaterial(const HE::UUID& materialId) override;
+    void InvalidateMesh(const HE::UUID& meshId) override;
+
     // Whole-frame D3D11 timestamp timing (double-buffered ring, never stalls)
     // + this frame's CPU draw/triangle/visibility counters.
     FrameGpuStats GetFrameGpuStats() const override;

@@ -1868,6 +1868,18 @@ struct D3D11RendererImpl
     std::vector<uint32_t> m_sortedIndices;
     std::unordered_map<HE::UUID, GpuMesh> meshCache;
 
+    // ── MaterialComponent override + hot-reload (A2) ─────────────────────────
+    // Override-material base-color textures cached by material UUID (parallel to the mesh's
+    // baked texture): a draw's dc.materialAssetId, when its material is loaded, wins over the
+    // mesh's baked texture — mirrors GL/Metal. srv==null caches the "loaded, no texture" result
+    // (flat) so it isn't re-resolved every frame. Editor edits push UUIDs to the pending lists,
+    // drained at DrawScene top; dropping the ComPtr is GPU-safe (the D3D11 runtime defers the
+    // release until the GPU is done), so no manual retire is needed unlike D3D12/Vulkan.
+    struct MaterialTex { ComPtr<ID3D11Texture2D> tex; ComPtr<ID3D11ShaderResourceView> srv; };
+    std::unordered_map<HE::UUID, MaterialTex> materialTexCache;
+    std::vector<HE::UUID> pendingMatInval;
+    std::vector<HE::UUID> pendingMeshInval;
+
     void createRTV()
     {
         ComPtr<ID3D11Texture2D> bb;
@@ -2063,6 +2075,58 @@ struct D3D11RendererImpl
         uploadBuffers(cube, verts, indices);
         cube.localBounds.expand({ -0.5f, -0.5f, -0.5f });
         cube.localBounds.expand({  0.5f,  0.5f,  0.5f });
+    }
+
+    // Resolve an OVERRIDE material's base-color texture (dc.materialAssetId), cached by material
+    // UUID. Returns true iff the material asset is loaded (outSrv is its SRV, or null when the
+    // override material has no texture → flat, NOT the baked texture — exactly like GL); false
+    // only while the material asset isn't loaded (retry next frame). Mirrors GL's
+    // ResolveMaterialTexture: getMaterial + cache even the no-texture result.
+    bool resolveMaterialOverride(const HE::UUID& materialId, ContentManager* cm,
+                                 ID3D11ShaderResourceView*& outSrv)
+    {
+        outSrv = nullptr;
+        if (materialId == HE::UUID{} || !cm) return false;
+        if (auto it = materialTexCache.find(materialId); it != materialTexCache.end())
+        { outSrv = it->second.srv.Get(); return true; }
+        const MaterialAsset* mat = cm->getMaterial(materialId);
+        if (!mat) return false; // not loaded yet — retry next frame without caching
+        MaterialTex entry;
+        const HE::UUID    texId0   = mat->textureIds.empty()   ? HE::UUID{}    : mat->textureIds[0];
+        const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
+        if (const TextureAsset* tex = cm->resolveTextureRef(texId0, texPath0);
+            tex && !tex->data.empty() && tex->channels == 4 && tex->format == TextureFormat::RGBA8)
+        {
+            D3D11_TEXTURE2D_DESC td{};
+            td.Width = tex->width; td.Height = tex->height;
+            td.MipLevels = 1; td.ArraySize = 1;
+            td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1;
+            td.Usage = D3D11_USAGE_IMMUTABLE; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            D3D11_SUBRESOURCE_DATA srd{};
+            srd.pSysMem = tex->data.data();
+            srd.SysMemPitch = tex->width * 4;
+            if (SUCCEEDED(device->CreateTexture2D(&td, &srd, &entry.tex)))
+                device->CreateShaderResourceView(entry.tex.Get(), nullptr, &entry.srv);
+        }
+        outSrv = entry.srv.Get(); // null when the override material has no usable texture
+        materialTexCache.emplace(materialId, std::move(entry));
+        return true;
+    }
+
+    // Drain the editor's material/mesh hot-reload requests at DrawScene top. Dropping the ComPtr
+    // is GPU-safe (the D3D11 runtime keeps the resource alive until pending GPU work finishes),
+    // so the entry can be erased immediately; the mesh/material re-resolves next frame.
+    void processPendingInvalidations()
+    {
+        for (const HE::UUID& id : pendingMatInval)
+            materialTexCache.erase(id);
+        pendingMatInval.clear();
+        for (const HE::UUID& id : pendingMeshInval)
+        {
+            meshCache.erase(id);
+            skeletalMeshCache.erase(id);
+        }
+        pendingMeshInval.clear();
     }
 
     const GpuMesh* resolveMesh(const HE::UUID& assetId, ContentManager* cm)
@@ -2642,6 +2706,9 @@ void D3D11Renderer::Shutdown()
 {
     Logger::Log(Logger::LogLevel::Info, "D3D11Renderer: shutdown");
     m_impl->meshCache.clear();
+    m_impl->materialTexCache.clear(); // override-material textures (ComPtr auto-release)
+    m_impl->pendingMatInval.clear();
+    m_impl->pendingMeshInval.clear();
     m_impl->uiFontAtlases.clear();
     m_impl->uiSampler.Reset();
     m_impl->gpuTimerShutdown();
@@ -2662,6 +2729,9 @@ void D3D11Renderer::DrawScene(int width, int height)
 {
     if (!m_world || !m_impl->vs || width <= 0 || height <= 0) return;
     auto& p = *m_impl;
+
+    // Drop caches for materials/meshes edited since last frame; they re-resolve this frame.
+    p.processPendingInvalidations();
 
     // Feed time-of-day so the extractor recomputes the sun/moon direction (otherwise the
     // sky never responds to the time slider). Mirrors OpenGL/Metal.
@@ -2886,11 +2956,17 @@ void D3D11Renderer::DrawScene(int width, int height)
             const GpuMesh* mesh = p.resolveMesh(dc.meshAssetId, m_contentManager);
             const GpuMesh& m    = mesh ? *mesh : p.cube;
             if (!m.vbuf || !m.ibuf) return;
-            ID3D11ShaderResourceView* srv = m.texture ? m.texture.Get() : p.dummyTexture.Get();
+            // Base color: an explicit MaterialComponent override (dc.materialAssetId), once its
+            // material is loaded, fully replaces the mesh's baked texture — even to flat.
+            ID3D11ShaderResourceView* albedo = m.texture.Get(); // baked (may be null)
+            ID3D11ShaderResourceView* ovr = nullptr;
+            if (p.resolveMaterialOverride(dc.materialAssetId, m_contentManager, ovr))
+                albedo = ovr; // override replaces the baked texture (null = flat)
+            const float hasTex = albedo ? 1.0f : 0.0f;
+            ID3D11ShaderResourceView* srv = albedo ? albedo : p.dummyTexture.Get();
             ctx->PSSetShaderResources(0, 1, &srv);
             ctx->IASetVertexBuffers(0, 1, m.vbuf.GetAddressOf(), &stride, &offset);
             ctx->IASetIndexBuffer(m.ibuf.Get(), DXGI_FORMAT_R32_UINT, 0);
-            const float hasTex = m.texture ? 1.0f : 0.0f;
             if (!dc.instanceTransforms.empty())
                 for (const glm::mat4& t : dc.instanceTransforms) {
                     uploadObject(viewProj * t, t, dc.baseColor, hasTex,
@@ -2927,6 +3003,12 @@ void D3D11Renderer::DrawScene(int width, int height)
                 const GpuSkeletalMesh* sm = p.resolveSkeletalMesh(dc.meshAssetId, m_contentManager);
                 if (!sm || !sm->vb || !sm->ib) continue;
 
+                // Base color: MaterialComponent override wins over the baked texture (see drawDC).
+                ID3D11ShaderResourceView* albedo = sm->srv.Get(); // baked (may be null)
+                ID3D11ShaderResourceView* ovr = nullptr;
+                if (p.resolveMaterialOverride(dc.materialAssetId, m_contentManager, ovr))
+                    albedo = ovr;
+
                 // Upload bone matrices to b2
                 std::fill(boneScratch.begin(), boneScratch.end(), glm::mat4(1.0f));
                 const int n = std::min(static_cast<int>(dc.boneMatrices.size()), kMaxBones);
@@ -2941,7 +3023,7 @@ void D3D11Renderer::DrawScene(int width, int height)
                 }
 
                 // Per-object CB (reuse the uploadObject lambda in scope)
-                const float hasTex = sm->srv ? 1.0f : 0.0f;
+                const float hasTex = albedo ? 1.0f : 0.0f;
                 uploadObject(viewProj * dc.transform, dc.transform,
                              dc.baseColor, hasTex, dc.metallic, dc.roughness, dc.opacity);
 
@@ -2952,7 +3034,7 @@ void D3D11Renderer::DrawScene(int width, int height)
                 ctx->IASetVertexBuffers(0, 3, vbs, strides, offs);
                 ctx->IASetIndexBuffer(sm->ib.Get(), DXGI_FORMAT_R32_UINT, 0);
 
-                ID3D11ShaderResourceView* albedoSrv = sm->srv ? sm->srv.Get() : p.dummyTexture.Get();
+                ID3D11ShaderResourceView* albedoSrv = albedo ? albedo : p.dummyTexture.Get();
                 ctx->PSSetShaderResources(0, 1, &albedoSrv);
 
                 ctx->DrawIndexed(static_cast<UINT>(sm->indexCount), 0, 0);
@@ -3208,6 +3290,19 @@ void D3D11Renderer::SetBloomSettings(const BloomSettings& s)
     m_impl->bloomEnabled   = s.enabled;
     m_impl->bloomThreshold = s.threshold;
     m_impl->bloomStrength  = s.intensity;
+}
+
+void D3D11Renderer::InvalidateMaterial(const HE::UUID& materialId)
+{
+    // Deferred to the next DrawScene (same thread), where the cache is safe to touch.
+    if (m_impl && materialId != HE::UUID{})
+        m_impl->pendingMatInval.push_back(materialId);
+}
+
+void D3D11Renderer::InvalidateMesh(const HE::UUID& meshId)
+{
+    if (m_impl && meshId != HE::UUID{})
+        m_impl->pendingMeshInval.push_back(meshId);
 }
 
 IRenderer::FrameGpuStats D3D11Renderer::GetFrameGpuStats() const
