@@ -3025,6 +3025,8 @@ void D3D11Renderer::DrawScene(int width, int height)
             ctx->IASetIndexBuffer(m.ibuf.Get(), DXGI_FORMAT_R32_UINT, 0);
             if (!dc.instanceTransforms.empty())
             {
+                static_assert(D3D11RendererImpl::k_instStride == 2 * sizeof(glm::mat4),
+                              "instance stride must be mvp+model");
                 const UINT count = static_cast<UINT>(dc.instanceTransforms.size());
                 const bool fits = allowInstancing && p.vsInstanced && p.instanceSRV
                                   && count <= p.k_maxInstances;

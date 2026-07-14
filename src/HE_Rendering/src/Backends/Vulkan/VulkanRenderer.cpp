@@ -3118,9 +3118,13 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
             {
                 // A3: real instancing — fill the per-frame instance buffer with every
                 // instance's {mvp,model}, bind the instanced pipeline + binding 1, ONE draw.
+                static_assert(k_instStride == 2 * sizeof(glm::mat4), "instance stride must be mvp+model");
                 const uint32_t count = static_cast<uint32_t>(dc.instanceTransforms.size());
                 InstanceBuf& ib = m_instanceBuf[m_currentFrame];
-                VkPipeline instPipe = hdr && m_sceneInstancedPipelineHDR
+                // Match the instanced pipeline to the active scene target (= what the
+                // non-instanced bind resolves to). Null → fits=false → per-instance fallback
+                // (never bind an LDR pipeline to the HDR render pass).
+                VkPipeline instPipe = (hdr && m_scenePipelineHDR)
                                     ? m_sceneInstancedPipelineHDR : m_sceneInstancedPipeline;
                 const bool fits = allowInstancing && instPipe && ib.mapped
                                   && (static_cast<uint64_t>(instCursor) + count) <= k_maxInstances;
