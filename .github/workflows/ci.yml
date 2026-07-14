@@ -59,9 +59,12 @@ jobs:
         if: runner.os == 'macOS'
         run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 
+      # Linux: build a self-contained editor package like Windows — bundle cmake so a
+      # user only needs a C++ compiler, use static mbedTLS so there's no external
+      # libcrypto/OpenSSL dependency, and deploy into the workspace for packaging.
       - name: Configure (Linux)
         if: runner.os == 'Linux'
-        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DHE_BUNDLE_CMAKE=ON -DHE_PREFER_MBEDTLS=ON "-DDEPLOY_DIR=${{ github.workspace }}/package"
 
       # Windows: build a self-contained editor package — bundle cmake, deploy into the
       # workspace for the packaging step, and use static mbedTLS so there's no external
@@ -92,3 +95,38 @@ jobs:
 
       - name: Run tests
         run: ctest --test-dir build --output-on-failure
+
+      # ── macOS: build the self-contained .app + DMG installer ────────────────────
+      # The `dmg` custom target runs scripts/package_macos.sh, which stages
+      # out/deploy/Editor into HorizonEditor.app (engine dylibs BFS-bundled + rpaths
+      # rewritten), ad-hoc code-signs it (no Developer ID / secrets — cert-free), and
+      # produces out/HorizonEditor-<version>.dmg. Runs after the tests so a packaging
+      # failure surfaces without masking the build+test result.
+      - name: Package macOS editor (DMG)
+        if: runner.os == 'macOS'
+        run: cmake --build build --target dmg
+
+      - name: Upload macOS editor package
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: HorizonEditor-macos-arm64
+          path: out/HorizonEditor-*.dmg
+          if-no-files-found: error
+
+      # ── Linux: tarball the self-contained editor bundle ─────────────────────────
+      # The editor POST_BUILD deployed package/Editor: HorizonEditor + engine .so
+      # (found next to it via the $ORIGIN rpath) + SDL3 + EngineContent/Fonts/Images +
+      # bundled cmake + libpython + the Game runtime. tar (not zip) preserves the
+      # executable bit on the binaries.
+      - name: Package Linux editor
+        if: runner.os == 'Linux'
+        run: tar czf HorizonEditor-linux-x64.tar.gz -C package Editor
+
+      - name: Upload Linux editor package
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: HorizonEditor-linux-x64
+          path: HorizonEditor-linux-x64.tar.gz
+          if-no-files-found: error

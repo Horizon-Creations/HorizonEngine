@@ -9,7 +9,42 @@
 # clean PC ("python314.dll fehlt"). No-op unless WIN32 + HE_HAVE_PYTHON and the DLL/stdlib
 # are located. Requires the Python3 find_package (Interpreter + Development.Embed).
 function(he_bundle_python target dest)
-	if(NOT (WIN32 AND HE_HAVE_PYTHON))
+	if(NOT HE_HAVE_PYTHON)
+		return()
+	endif()
+
+	# ── Linux: bundle libpython next to the executable ──────────────────────────
+	# The editor/game link Python3::Python (via HorizonScene), so libpythonMAJ.MIN.so
+	# is a LOAD-TIME dependency — a downloaded package must carry it or it won't even
+	# launch on a machine without a system Python. Copy the versioned SONAME file into
+	# <dest>; the $ORIGIN rpath (see root CMakeLists) finds it. (The pure-Python stdlib
+	# is not bundled here: embedded Py_Initialize() resolves it from the system python3
+	# install — running Python scripts on Linux needs a matching system python3.)
+	if(UNIX AND NOT APPLE)
+		set(_py_maj "${Python3_VERSION_MAJOR}")
+		set(_py_min "${Python3_VERSION_MINOR}")
+		set(_py_soname "libpython${_py_maj}.${_py_min}.so.1.0")
+		find_file(HE_PYTHON_SO
+			NAMES "${_py_soname}" "libpython${_py_maj}.${_py_min}.so"
+			HINTS ${Python3_RUNTIME_LIBRARY_DIRS} ${Python3_LIBRARY_DIRS}
+			      /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu
+			      /usr/lib /usr/local/lib)
+		if(HE_PYTHON_SO)
+			add_custom_command(TARGET ${target} POST_BUILD
+				COMMAND ${CMAKE_COMMAND} -E make_directory "${dest}"
+				COMMAND ${CMAKE_COMMAND} -E copy_if_different
+					"${HE_PYTHON_SO}" "${dest}/${_py_soname}"
+				COMMENT "Bundling CPython runtime (${_py_soname}) into ${dest}"
+				VERBATIM)
+		else()
+			message(WARNING "he_bundle_python(${target}): libpython not located on Linux — "
+				"the shipped editor will rely on a system Python install "
+				"(searched for ${_py_soname})")
+		endif()
+		return()
+	endif()
+
+	if(NOT WIN32)
 		return()
 	endif()
 	set(_py_tag "python${Python3_VERSION_MAJOR}${Python3_VERSION_MINOR}") # e.g. python314
