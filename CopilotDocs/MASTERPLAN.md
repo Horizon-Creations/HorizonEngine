@@ -2742,3 +2742,40 @@ Pfad* — er blockiert sowohl die Windows-Auslieferbarkeit als auch (über Vulka
 > (`bbc84e6`) + D3D11 (`9c5edcd`). Alle Windows-CI-Compile-grün + adversariell reviewt (D3D12/Vulkan je
 > 0 kritische Findings); Vulkan-GLSL `glslc`-validiert. Visuelle Windows-GPU-Prüfung (B3) für A1+A2 noch
 > offen. **Nächster Schritt: A3 (echtes GPU-Instancing auf D3D12/Vulkan).**
+
+---
+
+## Forts. 79 — Erster Linux-Build (Block B2 / 6.6): Engine kompiliert + Tests grün auf ubuntu-latest (14.07.2026)
+
+**Ausgangslage:** „6.6 Linux" war laut Masterplan bei *0 Code* — die Engine war nie auf Linux gebaut worden
+(nur macOS+Windows in der CI). Da B2 im Plan „hängt an A" steht, war das eigentlich für später vorgesehen;
+auf Zuruf trotzdem vorgezogen. Ergebnis: **das Linux-CI-Bein ist voll grün** (Configure → Build → `ctest`),
+und via der parallelen Packaging-Arbeit (Forts. der Packaging-Session, `77c34bf`) fällt sogar ein
+lauffähiges `HorizonEditor-linux-x64`-Tarball-Artefakt (~65 MB) ab. Backends auf Linux: **OpenGL** (Vulkan
+optional, in der CI aus — kein SDK). Metal/D3D sind sauber via `if(APPLE)`/`if(WIN32)` ausgegated.
+
+**CI (`.github/workflows/ci.yml`):** neuer `ubuntu-latest`-Matrix-Eintrag (`fail-fast: false`), plus ein
+apt-Schritt für die SDL3-Build-Deps (X11/Wayland/EGL/GL/ALSA/udev/dbus) + `python3-dev` + `liblz4/zstd-dev`.
+Configure/Build/Test laufen wie auf den anderen Beinen. (`bf91211`)
+
+**Portabilitäts-Fixes — alles No-op/redundant auf macOS+Windows, also für die grünen Beine ungefährlich:**
+1. **`<mutex>` in `GlobalState.cpp`** (`3ea720d`): libstdc++/GCC zieht `std::unique_lock` nicht über
+   `<shared_mutex>` rein wie MSVC/AppleClang. (Rest der Mutex/Thread-Nutzung bekam die Includes bereits über
+   die gepaarten Header — geprüft.)
+2. **`set(CMAKE_POSITION_INDEPENDENT_CODE ON)` global** (`9ea1b0a`): statische Deps (`lua_static`, astcenc,
+   Jolt, Recast, …) werden in die Shared-Libs (`libHorizonCore.so` etc.) gelinkt; auf Linux verlangt `ld`
+   dafür `-fPIC` (`relocation R_X86_64_PC32 … recompile with -fPIC`). Global gesetzt statt jede Lib einzeln
+   (der Autor hatte das für `lz4_static`/`zstd_static` schon per-Target). No-op auf macOS (PIC default) +
+   MSVC (ignoriert).
+3. **`<cstdint>`/`<cstring>`/`<algorithm>` in ~84 Dateien** (20 Header `b6add0a`, 64 TUs `917a5be`): die
+   Codebasis war auf MSVC/AppleClang entwickelt, die diese Header transitiv mitziehen — GCC nicht. Fehlte
+   z. B. `<cstdint>` für `uint32_t`, scheiterte schon die Struct-Member-Deklaration (`ProjectManager.h` →
+   Kaskade „`ExportProfile` has no member `shaderBackends`"; `GraphEditor.cpp` → `uint64_t not declared`).
+   Codebasis-weit gescannt + „include-what-you-use"-korrekt ergänzt (Header sind jetzt self-contained).
+
+**Verifikation:** rein compile-/test-getrieben über die CI (kein Linux-Build auf dem Mac möglich, kein
+Docker im Sandbox). Iteriert Runde für Runde am Linux-Fehlerlog (`gh api …/jobs/<id>/logs`), jeweils modul-
+weise: HE_Core (Compile + PIC-Link) → HE_Tools → HE_Rendering → HE_Editor → grün. **Offen:** echte Linux-
+GPU-/Runtime-Verifikation (analog B3 für Windows) — die CI prüft nur Compile+Unit-Tests, nicht die Optik.
+Vulkan-Backend auf Linux (SDK in der CI nachziehen) und 6.6-Packaging-Politur laufen separat in der
+Packaging-Session.
