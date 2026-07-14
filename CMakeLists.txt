@@ -37,6 +37,17 @@ if(WIN32)
     add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN)
 endif()
 
+# ─── Position-independent code ───────────────────────────────────────────────
+# The engine modules (HorizonCore/Scene/Rendering) are shared libraries. On Linux,
+# any static library linked into a shared object must be built with -fPIC, or ld
+# aborts with "relocation R_X86_64_PC32 against symbol '…' can not be used when
+# making a shared object; recompile with -fPIC" (hit first via lua_static, then
+# astcenc). Enable PIC globally so every FetchContent static dependency (lua_static,
+# astcenc, Jolt, Recast, glm, …) is position-independent. This is a no-op on macOS
+# (PIC is the default there) and ignored by MSVC on Windows, so it is safe on all
+# platforms and subsumes the per-target settings on lz4_static/zstd_static below.
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
 # ─── SDL3 ──────────────────────────────────────────────────────────────────────
 include(FetchContent)
 FetchContent_Declare(
