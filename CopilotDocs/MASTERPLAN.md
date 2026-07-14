@@ -2779,3 +2779,47 @@ weise: HE_Core (Compile + PIC-Link) → HE_Tools → HE_Rendering → HE_Editor 
 GPU-/Runtime-Verifikation (analog B3 für Windows) — die CI prüft nur Compile+Unit-Tests, nicht die Optik.
 Vulkan-Backend auf Linux (SDK in der CI nachziehen) und 6.6-Packaging-Politur laufen separat in der
 Packaging-Session.
+
+## Forts. 80 — Download-Artefakt für den Editor auf ALLEN drei CI-Plattformen (macOS-DMG, Linux-tar.gz) (14.07.2026)
+
+**Ziel:** jedes CI-Bein lädt ein herunterladbares, self-contained `HorizonEditor`-Paket hoch. Windows war
+schon fertig (Forts. der Windows-Packaging-Session, `8025829` → Zip `HorizonEditor-windows-x64`); jetzt ziehen
+macOS + Linux nach. Namensschema: `HorizonEditor-<os>-<arch>`. Alles in **einem** Commit (`77c34bf`), voll grün
+auf Run `29339269634` — **alle drei Artefakte live:** `HorizonEditor-windows-x64` (36 MB) + `HorizonEditor-linux-x64`
+(65 MB) + `HorizonEditor-macos-arm64` (14 MB). Windows-Paket + Build+Test aller Beine unverändert (keine Regression).
+
+**macOS — nur CI-Verdrahtung, kein Skript-Umbau.** `scripts/package_macos.sh` (via CMake-Target `dmg`) ist
+bereits **ad-hoc-signiert** (`codesign --sign -`, keine Developer-ID, keine Secrets) und headless (`dmgbuild`,
+kein Finder/AppleScript → kein TCC-Prompt). Neuer Schritt **nach** `Run tests` (damit ein Packaging-Fehler das
+Build+Test-Signal nicht verdeckt): `cmake --build build --target dmg` → `out/HorizonEditor-<version>.dmg` →
+Upload `HorizonEditor-macos-arm64`. macOS-`Configure` bewusst **ohne** `DEPLOY_DIR`-Override gelassen, damit der
+Editor in den Default `out/deploy/Editor` deployt — genau dort liest das Skript. In der CI verifiziert: pip-Venv
+(dmgbuild+Pillow) installiert, „Signed.", **„Styled DMG created"** (nicht mal der Plain-Fallback), inkl. per
+BFS gebündeltem `libcrypto/liblz4/libzstd` im `.app`. (Das `.app` ist bewusst Editor-only — kein gebündeltes
+cmake/Game/Python-stdlib; das ist der bestehende Scope von `package_macos.sh`.)
+
+**Linux — CMake-Änderungen, strikt auf `UNIX AND NOT APPLE` gegatet (No-op auf macOS/Windows):**
+1. **`$ORIGIN`-RPATH** (`set(CMAKE_BUILD_RPATH "$ORIGIN")` global): das Editor-Binary, die vier Engine-`.so`
+   (Core/Scene/Rendering/Tools) **und** die Game-Exe finden ihre Libs neben sich selbst. `DT_RUNPATH` ist NICHT
+   transitiv → `$ORIGIN` muss auf JEDEM Objekt stehen; global *angehängt* (nicht ersetzend) an den Auto-Build-
+   Tree-RPATH, damit `ctest` im Build-Tree weiter auflöst. Verifiziert: im Artefakt steht `$ORIGIN` als **erster**
+   RUNPATH-Eintrag auf `HorizonEditor` + `libHorizonScene.so` + `libHorizonCore.so`.
+2. **`he_bundle_python` Linux-Zweig** (`cmake/BundlePython.cmake`): bündelt `libpython3.12.so.1.0` neben Editor +
+   Game (Load-Time-Dep via `HorizonScene`) → das Paket startet ohne System-Python. Verifiziert: `libHorizonScene.so`
+   hat exakt diese SONAME als `NEEDED`; die Datei liegt im Tarball. (Die reine-Python-**stdlib** ist NICHT gebündelt
+   — `Py_Initialize()` löst sie vom System-`python3` auf; Python-Skripte auf Linux brauchen ein passendes System-
+   `python3`. Bewusster v1-Kompromiss.)
+3. **`HE_BUNDLE_CMAKE`-Härtung** (`src/HE_Editor/CMakeLists.txt`): der `Templates/`-Copy nur noch `if(EXISTS …)`,
+   damit ein Distro-cmake ohne `Templates/` nicht den POST_BUILD abbricht. (Auf dem Ubuntu-Runner vorhanden → mit
+   drin.)
+   CI: Linux-`Configure` jetzt wie Windows — `-DHE_BUNDLE_CMAKE=ON -DHE_PREFER_MBEDTLS=ON -DDEPLOY_DIR=…/package`
+   (mbedTLS statisch → keine externe `libcrypto`-Abhängigkeit, self-contained), dann `tar czf … -C package Editor`
+   (tar, nicht zip → Exec-Bits bleiben) → Upload `HorizonEditor-linux-x64`. **Tarball-Inhalt geprüft:** Editor +
+   4 Engine-`.so` + SDL3 + `libpython3.12.so.1.0` + `cmake/` (Modules+Templates) + `Game/` (mit eigener libpython)
+   + EngineContent/Fonts/Images.
+
+**Sequenzierung:** die Linux-Packaging-Schritte waren „dormant", bis das Linux-Bein grün kompilierte (Forts. 79,
+separate Session). Auf `77c34bf`s eigenem Run scheiterte Linux noch am `-fPIC`/`<cstdint>`-Whack-a-mole der
+Build-Green-Session; die Schritte aktivierten sich automatisch, sobald deren Fixes oben drauf landeten. **Offen/
+bekannt:** macOS-`.app` Editor-only; Linux-Python-stdlib nicht gebündelt; echte Linux-GPU-/Runtime-Verifikation
+(analog B3) weiter offen. Vulkan-Linux + BCn-Kompression bleiben separat.
