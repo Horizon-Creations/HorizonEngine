@@ -346,7 +346,7 @@ veraltete Doku ist schlimmer als keine (Warnbeispiel: die stale ROADMAP.md /
   Override-Material-Textur (`dc.materialAssetId` schlägt die gebackene Mesh-Textur, wie GL — auch zu
   „flach", wenn das Override kein Textur hat). Cache pro Material-UUID; Lifetime backend-idiomatisch
   (D3D12 Retire+Slot-Recycle, Vulkan Device-Idle+FREE-Bit, D3D11 ComPtr-Auto-Defer). Windows-CI grün
-  (D3D12+Vulkan bestätigt; D3D11 läuft). **Visuelle Windows-GPU-Prüfung offen (Block B3).**
+  auf allen drei (Runs 29324888466/29326049684/29326445773). **Visuelle Windows-GPU-Prüfung offen (Block B3).**
 - **Echte GPU-Instancing-Parität** — D3D12 issued pro Instanz einen eigenen
   `DrawIndexedInstanced`-Call in einer Schleife statt eines echten Instance-Buffers wie
   GL (`glDrawArraysInstanced`)/Metal — funktional ok, aber kein Performance-Gewinn. D3D11/Vulkan
