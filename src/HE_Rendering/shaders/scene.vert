@@ -15,10 +15,12 @@ layout(push_constant) uniform PushConstants {
 
 layout(location = 0) out vec3 vWorldPos;
 layout(location = 1) out vec3 vNormal;
+layout(location = 2) out vec2 vUV;
 
 void main()
 {
     vWorldPos   = (pc.uModel * vec4(aPos, 1.0)).xyz;
     vNormal     = mat3(pc.uModel) * aNormal;
+    vUV         = aUV;
     gl_Position = pc.uMVP * vec4(aPos, 1.0);
 }
