@@ -612,8 +612,13 @@ ExportResult ProjectExporter::exportProject(
         // outputDir, so the routing is a no-op there.
         auto routeRuntime = [&](const std::string& n) -> std::filesystem::path {
             const bool gameLogic = n.rfind("GameLogic.", 0) == 0; // loaded from base path
+            // The bundled CPython runtime (python3XY.dll/.zip + python3XY._pth) must sit next
+            // to the executable so embedded Python's isolated-path lookup finds it; route any
+            // "python*" file to binDir. (Flat exports collapse binDir==dataDir, so this only
+            // matters for the macOS .app split.)
+            const bool pythonRuntime = n.rfind("python", 0) == 0;
             const bool engineBin = !gameLogic
-                && (n == "HorizonGame" || n == "HorizonGame.exe"
+                && (n == "HorizonGame" || n == "HorizonGame.exe" || pythonRuntime
                     || n.size() > 4 && (n.compare(n.size() - 4, 4, ".dll") == 0)
                     || n.size() > 3 && (n.compare(n.size() - 3, 3, ".so") == 0)
                     || n.size() > 6 && (n.compare(n.size() - 6, 6, ".dylib") == 0));
