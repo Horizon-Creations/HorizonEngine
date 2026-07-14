@@ -28,7 +28,7 @@ Unity/Godot-Featureset, nicht Unreal-AAA).
 |---|---|
 | Core: Window, App-Loop, Input, Logger, ContentManager, `.hasset` v2 (UUID-persistent), Engine-Content-Root (`/Engine/` Read-only-Defaults + Copy-on-Write-Override, Primitiv-Meshes) | ✅ |
 | Rendering GL+Metal (Vollausbau-Paar) — RenderGraph/Passes, PBR, CSM-Schatten, HDR/Bloom/FXAA, SSAO+HBAO+GTAO, sortierte Transparenz, Skybox+IBL, GPU-Instancing, Skeletal-GPU-Skinning, volumetrische Wolken, Nebula v3.4 + physikalische Atmosphären-Streuung, Material-Node-Graph-Editor | ✅ |
-| Rendering D3D11/D3D12/Vulkan | 🟡 fast auf GL/Metal-Parität (HDR/Bloom/FXAA/SSAO+HBAO+GTAO/Skybox+IBL/Skinning/In-Game-UI-Pass/Transparenz/PBR-Skalare ✅ auf allen drei); offen: Basecolor-Texturen auf D3D12/Vulkan, MaterialComponent-Override, echtes GPU-Instancing, Material-Graph-Shader, Nebula v2+/Atmosphären-Sky — siehe Phase 6.2 |
+| Rendering D3D11/D3D12/Vulkan | 🟡 fast auf GL/Metal-Parität (HDR/Bloom/FXAA/SSAO+HBAO+GTAO/Skybox+IBL/Skinning/In-Game-UI-Pass/Transparenz/PBR-Skalare/**Basecolor-Texturen** ✅ auf allen drei — Basecolor A1 seit 14.07., Windows-GPU-Visual offen); offen: MaterialComponent-Override, echtes GPU-Instancing, Material-Graph-Shader, Nebula v2+/Atmosphären-Sky — siehe Phase 6.2 + Forts. 78 |
 | Editor: Hub, Docking, Outliner, Content Browser (Content/Engine/Source-Roots, Viewport-Drag-Drop-Spawn), Inspector, Gizmos, Undo/Redo, Play-Mode, gemeinsamer `GraphEditor`-Canvas (Material- + HorizonCode-Graph), View ▸ Environment-Fenster, C++-`Source/`-Tree + `CppClassEditorPanel`, Toolchain-Startup-Check, crash-fester config.json | ✅ |
 | Asset-Pipeline: Importer (Textur/Mesh/Material/Audio), `asset_compiler`, hpak v2 (LZ4HC/zstd, AES-256-GCM, On-Demand-Streaming, Overlays), Export-Pipeline (Profile, Async, Inkrementell, Plattform-Ziele, lauffähige Exporte inkl. macOS-.app-Bundle) | ✅ |
 | SceneSerializer (alle Komponenten inkl. Animator/AnimatorBlend/SkeletalMesh/PropertyAnimator/NavMesh/NavAgent, JSON+CBOR) | ✅ |
@@ -318,7 +318,7 @@ veraltete Doku ist schlimmer als keine (Warnbeispiel: die stale ROADMAP.md /
 
 | Feature (GL+Metal ✅) | D3D11 | D3D12 | Vulkan | Plan-Ref |
 |---|:--:|:--:|:--:|---|
-| Basecolor-Texturen | ✅ | 🔴 (Flat) | 🔴 (Flat) | — |
+| Basecolor-Texturen | ✅ | ✅ (A1, `fa6b8ce`) | ✅ (A1, `dfcf594`) | A1 |
 | HDR + ACES-Tonemapping | ✅ | ✅ | ✅ | 3.6 |
 | Bloom | ✅ | ✅ | ✅ | 3.6 |
 | FXAA | ✅ | ✅ | ✅ | 3.11 |
@@ -335,9 +335,12 @@ veraltete Doku ist schlimmer als keine (Warnbeispiel: die stale ROADMAP.md /
 | **Material-Node-Graph-Shader** (Forts. 68) | 🔴 | 🔴 | 🔴 | #Mat |
 | **Nebula v2–v3.4 / Atmosphären-Streuung / Halos / God-Rays / Regenbogen** (Forts. 68) | 🔴 (v1 only) | 🔴 (v1 only) | 🔴 (v1 only) | 3.9 |
 
-**Echte verbleibende Lücken (Stand 12.07.2026):**
-- **Basecolor-Texturen auf D3D12/Vulkan** — beide zeichnen weiterhin Flat-Color
-  (`D3D12Renderer.cpp:96-99` hat den TODO-Kommentar dazu explizit im Code stehen).
+**Echte verbleibende Lücken (Stand 14.07.2026):**
+- ~~**Basecolor-Texturen auf D3D12/Vulkan**~~ — ✅ **erledigt (A1, 14.07.2026, `fa6b8ce`+`dfcf594`)**:
+  D3D12 (static+skeletal, sceneSrvHeap-Albedo-Region + t1-Table in beiden Root-Sigs) und Vulkan
+  (set=2-Albedo-Descriptor-Set, per-Mesh-Upload, 1×1-White-Default) zeichnen jetzt die gebackene
+  Material-Textur wie GL/Metal/D3D11. Windows-CI-Compile grün auf beiden; Vulkan-GLSL zusätzlich
+  offline mit `glslc` validiert. **Visuelle Windows-GPU-Verifikation offen (Block B3).**
 - **MaterialComponent-Override** — `IRenderer::InvalidateMaterial` ist nur in
   `OpenGLRenderer.h`/`MetalRenderer.h` überschrieben; D3D11/D3D12/Vulkan ignorieren das Feld
   weiterhin komplett (nicht additiv nachgezogen, obwohl PBR-Skalare + Texturen zum Teil schon da sind).
@@ -2644,10 +2647,15 @@ hinzugefügt/entfernt über ein neues **View ▸ Environment**-Fenster (`335afef
 Reihenfolge bewusst: erst die **Fundament-Fähigkeiten** (Texturen, Material-Override), dann der
 **Codegen-Brocken** (Material-Graph-Shader), dann **Sky/Nebula** als reine Fragment-Shader-Portierung.
 
-1. **A1 — Basecolor-Texturen auf D3D12 + Vulkan** 🔴 (~2–3 PT). Beide zeichnen weiter Flat-Color
-   (`D3D12Renderer.cpp:96-99` hat den TODO explizit im Code). D3D11 hat es bereits → Muster kopieren
-   (SRV/Descriptor-Heap-Slot für die Basecolor-Textur, Sampler, Binding im PS). **Schaltet frei:** alles
-   Weitere in Block A wird sichtbar erst mit korrekten Texturen sinnvoll testbar.
+1. **A1 — Basecolor-Texturen auf D3D12 + Vulkan** ✅ **erledigt (14.07.2026, `fa6b8ce`+`dfcf594`)**.
+   Static + skeletal auf beiden. **D3D12:** `sceneSrvHeap` um eine Per-Mesh-Albedo-Region + Null-
+   Fallback erweitert, `t1`-Table + `s2`-Sampler in Scene- **und** Skinned-Root-Sig, Upload-on-first-
+   sight nach dem `uiAtlasSlotFor`-Muster; shared PSMain sampelt `uAlbedo` bei `uColor.a>0.5`.
+   **Vulkan:** `scene.vert`/`skinned.vert` reichen `vUV` durch, `scene.frag` sampelt `uAlbedo`
+   (set=2) bei `roughPad.z>0.5`; per-Mesh-Descriptor-Set aus `m_albedoPool` + 1×1-White-Default,
+   Empty-Set-1 für die Scene-Pipeline (Skinned nutzt set 1 für Bones). Beide adversariell reviewt
+   (D3D11-Referenz), Windows-CI-Compile grün, Vulkan-GLSL offline `glslc`-validiert. **Offen: nur
+   noch die visuelle Windows-GPU-Prüfung (Block B3).**
 2. **A2 — MaterialComponent-Override auf D3D11/D3D12/Vulkan** 🔴 (~2 PT). `IRenderer::InvalidateMaterial`
    ist nur in `OpenGLRenderer.h`/`MetalRenderer.h` überschrieben; die drei anderen ignorieren das Feld.
    Additiv nachziehen (Per-Instance-Material-Uniform/Push-Constant-Pfad, den PBR-Skalare schon nutzen).
@@ -2715,7 +2723,11 @@ mit sauberem GL-Fallback (Policy, siehe [[ao-gi-roadmap]]):
 
 ### Empfohlene Sofort-Reihenfolge
 
-**A1 → A2 → A3 → A4 → A5** (Windows/Vulkan auf volle Render-Parität bringen) **→ B3** (Windows-HW-Verify)
+**~~A1~~ ✅ → A2 → A3 → A4 → A5** (Windows/Vulkan auf volle Render-Parität bringen) **→ B3** (Windows-HW-Verify)
 **→ B2** (Linux, hängt an A) **→ B1** (BCn) **→ B4** (Docs). Block C + D laufen unabhängig nebenher, wenn
 ein konkreter Bedarf entsteht. Begründung: Block A ist der einzige *kritische Pfad* — er blockiert
 sowohl die Windows-Auslieferbarkeit als auch (über Vulkan) ganz Linux; alles andere ist additiv.
+
+> **Fortschritt 14.07.2026:** **A1 erledigt** auf D3D12 (`fa6b8ce`) + Vulkan (`dfcf594`), beide Windows-
+> CI-Compile-grün + adversariell reviewt; Vulkan-GLSL `glslc`-validiert. Visuelle Windows-GPU-Prüfung
+> (B3) für A1 noch offen. **Nächster Schritt: A2 (MaterialComponent-Override auf D3D11/D3D12/Vulkan).**
