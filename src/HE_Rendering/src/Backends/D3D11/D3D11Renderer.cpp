@@ -510,6 +510,23 @@ VSOut VSMain(VSIn i)
     o.clip     = mul(uMVP, float4(i.pos, 1.0));
     return o;
 }
+// Instanced geometry (A3): one DrawIndexedInstanced replaces the per-instance draw
+// loop. Per-instance mvp + model live in a structured buffer at t3, indexed by
+// SV_InstanceID, filled by the CPU exactly like uploadObject (same column-major glm
+// bytes as the PerObject cbuffer → identical mul() math). uColor/uPBR stay in the
+// shared PerObject cbuffer (batch-constant). Reuses PSMain.
+struct InstXform { float4x4 mvp; float4x4 model; };
+StructuredBuffer<InstXform> gInstances : register(t3);
+VSOut VSMainInstanced(VSIn i, uint iid : SV_InstanceID)
+{
+    InstXform x = gInstances[iid];
+    VSOut o;
+    o.worldPos = mul(x.model, float4(i.pos, 1.0)).xyz;
+    o.normal   = mul((float3x3)x.model, i.normal);
+    o.uv       = i.uv;
+    o.clip     = mul(x.mvp, float4(i.pos, 1.0));
+    return o;
+}
 
 // Depth-only vertex shader for the shadow pass: uMVP carries lightVP * model.
 float4 VSDepth(VSIn i) : SV_POSITION
@@ -1120,6 +1137,11 @@ struct D3D11RendererImpl
 
     // ── Scene pipeline ──────────────────────────────────────────────────────
     ComPtr<ID3D11VertexShader>   vs;
+    ComPtr<ID3D11VertexShader>       vsInstanced; // A3: instanced geometry VS (reads t3 structured buffer)
+    ComPtr<ID3D11Buffer>             instanceSB;  // A3: per-instance {mvp,model}, dynamic structured buffer
+    ComPtr<ID3D11ShaderResourceView> instanceSRV; // A3: SRV over instanceSB, bound at VS t3
+    static constexpr UINT k_maxInstances = 65536; // instance-buffer capacity (A3)
+    static constexpr UINT k_instStride   = 128;   // bytes per instance = 2 × float4x4 (mvp, model)
     ComPtr<ID3D11PixelShader>    ps;
     ComPtr<ID3D11InputLayout>    inputLayout;
     ComPtr<ID3D11Buffer>         perObjectCB;
@@ -1942,6 +1964,36 @@ struct D3D11RendererImpl
         if (SUCCEEDED(D3DCompile(sceneSource.c_str(), sceneSource.size(), "scene", nullptr, nullptr,
                                  "VSDepth", "vs_5_0", flags, 0, &dvsBlob, &err)))
             device->CreateVertexShader(dvsBlob->GetBufferPointer(), dvsBlob->GetBufferSize(), nullptr, &depthVS);
+
+        // Instanced geometry VS (A3) + the per-instance {mvp,model} structured buffer
+        // it reads at t3 (dynamic, refilled per instanced batch via MAP_WRITE_DISCARD).
+        ComPtr<ID3DBlob> ivsBlob;
+        if (SUCCEEDED(D3DCompile(sceneSource.c_str(), sceneSource.size(), "scene", nullptr, nullptr,
+                                 "VSMainInstanced", "vs_5_0", flags, 0, &ivsBlob, &err)))
+        {
+            device->CreateVertexShader(ivsBlob->GetBufferPointer(), ivsBlob->GetBufferSize(), nullptr, &vsInstanced);
+            D3D11_BUFFER_DESC ibd{};
+            ibd.ByteWidth           = k_maxInstances * k_instStride;
+            ibd.Usage               = D3D11_USAGE_DYNAMIC;
+            ibd.BindFlags           = D3D11_BIND_SHADER_RESOURCE;
+            ibd.CPUAccessFlags      = D3D11_CPU_ACCESS_WRITE;
+            ibd.MiscFlags           = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+            ibd.StructureByteStride = k_instStride;
+            if (SUCCEEDED(device->CreateBuffer(&ibd, nullptr, &instanceSB)))
+            {
+                D3D11_SHADER_RESOURCE_VIEW_DESC isd{};
+                isd.Format              = DXGI_FORMAT_UNKNOWN; // required for a structured-buffer SRV
+                isd.ViewDimension       = D3D11_SRV_DIMENSION_BUFFER;
+                isd.Buffer.FirstElement = 0;
+                isd.Buffer.NumElements  = k_maxInstances;
+                device->CreateShaderResourceView(instanceSB.Get(), &isd, &instanceSRV);
+            }
+        }
+        else
+        {
+            Logger::Log(Logger::LogLevel::Error, (std::string("D3D11Renderer: VSMainInstanced compile "
+                "failed: ") + (err ? static_cast<const char*>(err->GetBufferPointer()) : "")).c_str());
+        }
 
         // Shadow map: R32_TYPELESS so it can be both a depth target and an SRV.
         {
@@ -2952,6 +3004,10 @@ void D3D11Renderer::DrawScene(int width, int height)
                 return glm::length(pa - camPos) > glm::length(pb - camPos);
             });
 
+        // A3: real instancing applies to the opaque pass only; the transparent pass
+        // reuses drawDC with a blend state + per-instance depth sort, so it keeps the
+        // per-instance loop (allowInstancing is set false before that pass).
+        bool allowInstancing = true;
         auto drawDC = [&](const DrawCall& dc) {
             const GpuMesh* mesh = p.resolveMesh(dc.meshAssetId, m_contentManager);
             const GpuMesh& m    = mesh ? *mesh : p.cube;
@@ -2968,13 +3024,50 @@ void D3D11Renderer::DrawScene(int width, int height)
             ctx->IASetVertexBuffers(0, 1, m.vbuf.GetAddressOf(), &stride, &offset);
             ctx->IASetIndexBuffer(m.ibuf.Get(), DXGI_FORMAT_R32_UINT, 0);
             if (!dc.instanceTransforms.empty())
-                for (const glm::mat4& t : dc.instanceTransforms) {
-                    uploadObject(viewProj * t, t, dc.baseColor, hasTex,
+            {
+                const UINT count = static_cast<UINT>(dc.instanceTransforms.size());
+                const bool fits = allowInstancing && p.vsInstanced && p.instanceSRV
+                                  && count <= p.k_maxInstances;
+                if (fits)
+                {
+                    // A3: upload every instance's {mvp,model} to the structured buffer …
+                    D3D11_MAPPED_SUBRESOURCE im{};
+                    if (SUCCEEDED(ctx->Map(p.instanceSB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &im)))
+                    {
+                        auto* dst = static_cast<uint8_t*>(im.pData);
+                        for (UINT k = 0; k < count; ++k)
+                        {
+                            const glm::mat4& t = dc.instanceTransforms[k];
+                            const glm::mat4 xf[2] = { viewProj * t, t }; // mvp, model (column-major)
+                            std::memcpy(dst + static_cast<size_t>(k) * p.k_instStride, xf, sizeof(xf));
+                        }
+                        ctx->Unmap(p.instanceSB.Get(), 0);
+                    }
+                    // … one PerObject CB (batch-constant colour/pbr; the instanced VS reads
+                    // mvp/model from t3) … then ONE instanced draw.
+                    uploadObject(glm::mat4(1.0f), glm::mat4(1.0f), dc.baseColor, hasTex,
                                  dc.metallic, dc.roughness, dc.opacity);
-                    ctx->DrawIndexed(m.indexCount, 0, 0);
+                    ctx->VSSetShader(p.vsInstanced.Get(), nullptr, 0);
+                    ctx->VSSetShaderResources(3, 1, p.instanceSRV.GetAddressOf());
+                    ctx->DrawIndexedInstanced(m.indexCount, count, 0, 0, 0);
+                    // Restore the non-instanced VS and unbind t3 before the next draw/Map.
+                    ctx->VSSetShader(p.vs.Get(), nullptr, 0);
+                    ID3D11ShaderResourceView* nullSRV = nullptr;
+                    ctx->VSSetShaderResources(3, 1, &nullSRV);
                     ++p.counters.draws;
-                    p.counters.tris += m.indexCount / 3;
+                    p.counters.tris += (m.indexCount / 3) * count;
                 }
+                else
+                {
+                    for (const glm::mat4& t : dc.instanceTransforms) { // fallback: transparent / ring full
+                        uploadObject(viewProj * t, t, dc.baseColor, hasTex,
+                                     dc.metallic, dc.roughness, dc.opacity);
+                        ctx->DrawIndexed(m.indexCount, 0, 0);
+                        ++p.counters.draws;
+                        p.counters.tris += m.indexCount / 3;
+                    }
+                }
+            }
             else {
                 uploadObject(viewProj * dc.transform, dc.transform,
                              dc.baseColor, hasTex, dc.metallic, dc.roughness, dc.opacity);
@@ -3048,6 +3141,7 @@ void D3D11Renderer::DrawScene(int width, int height)
         }
 
         if (!transparentDCs.empty()) {
+            allowInstancing = false; // transparent batches keep the per-instance loop (blend + depth sort)
             ctx->OMSetBlendState(p.alphaBlendState.Get(), nullptr, 0xFFFFFFFF);
             ctx->OMSetDepthStencilState(p.depthReadOnlyState.Get(), 0);
             for (const DrawCall* dc : transparentDCs) drawDC(*dc);

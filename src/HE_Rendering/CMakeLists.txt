@@ -100,7 +100,7 @@ if(HE_VULKAN_ENABLED)
         set(HE_SHADER_OUT_DIR "${CMAKE_BINARY_DIR}/Shaders")
         file(MAKE_DIRECTORY "${HE_SHADER_OUT_DIR}")
         set(HE_VULKAN_SPV "")
-        foreach(stage scene.vert scene.frag scene_shadow.vert
+        foreach(stage scene.vert scene_instanced.vert scene.frag scene_shadow.vert
                       postfx.vert postfx_tonemap.frag postfx_fxaa.frag
                       postfx_bloom_bright.frag postfx_bloom_blur.frag
                       sky.vert sky.frag
