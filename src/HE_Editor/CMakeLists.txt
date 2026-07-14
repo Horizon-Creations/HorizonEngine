@@ -231,10 +231,18 @@ if(HE_BUNDLE_CMAKE)
 				COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_COMMAND}" "${_dst}/cmake/bin"
 				COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_ROOT}/Modules"
 					"${_dst}/cmake/share/${_cm_dataname}/Modules"
-				COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_ROOT}/Templates"
-					"${_dst}/cmake/share/${_cm_dataname}/Templates"
-				COMMENT "Bundling minimal cmake (exe + Modules + Templates) into ${_dst}/cmake"
+				COMMENT "Bundling minimal cmake (exe + Modules) into ${_dst}/cmake"
 				VERBATIM)
+			# Templates/ ships with upstream + Homebrew cmake but can be absent on some
+			# distro-packaged cmake installs (Linux). Copy it only if present so the
+			# deploy degrades gracefully instead of failing the POST_BUILD.
+			if(EXISTS "${CMAKE_ROOT}/Templates")
+				add_custom_command(TARGET HorizonEditor POST_BUILD
+					COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_ROOT}/Templates"
+						"${_dst}/cmake/share/${_cm_dataname}/Templates"
+					COMMENT "Bundling cmake Templates into ${_dst}/cmake"
+					VERBATIM)
+			endif()
 		endforeach()
 	else()
 		message(WARNING "HE_BUNDLE_CMAKE: CMAKE_ROOT data dir not found (${CMAKE_ROOT}) — cmake will not be bundled")

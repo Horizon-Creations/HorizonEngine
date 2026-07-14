@@ -463,6 +463,19 @@ set(DEPLOY_DIR "${_default_deploy_dir}" CACHE PATH "Where the editor/game POST_B
 set(DEPLOY_GAME   "${DEPLOY_DIR}/Game")
 set(DEPLOY_EDITOR "${DEPLOY_DIR}/Editor")
 
+# ─── Linux: find bundled .so next to the executable ($ORIGIN) ───────────────────
+# The editor/game POST_BUILD copies the engine .so (HorizonCore/Scene/Rendering/
+# Tools) flat next to the binary. For a downloaded package to run, each binary must
+# look beside itself for its libraries. DT_RUNPATH is NOT transitive, so $ORIGIN has
+# to be on the executable AND every shared lib. Appending to CMAKE_BUILD_RPATH adds
+# $ORIGIN to every target configured below (it is added to — not replacing — the
+# auto build-tree rpath, so the build-tree binaries and ctest still resolve libs).
+# macOS uses @executable_path rpaths set per-target + install_name_tool in
+# package_macos.sh; Windows has no rpath concept.
+if(UNIX AND NOT APPLE)
+    set(CMAKE_BUILD_RPATH "$ORIGIN")
+endif()
+
 # Reusable CPython-runtime bundling (he_bundle_python) for the shipped game + editor.
 include("${CMAKE_SOURCE_DIR}/cmake/BundlePython.cmake")
 
