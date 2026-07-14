@@ -16,6 +16,8 @@ jobs:
             name: macOS
           - os: windows-latest
             name: Windows
+          - os: ubuntu-latest
+            name: Linux
 
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
@@ -30,6 +32,21 @@ jobs:
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
 
+      # Linux: SDL3 is compiled from source (FetchContent) and needs the X11/Wayland,
+      # OpenGL/EGL, audio and udev/dbus dev headers; the engine also links Python and
+      # uses lz4/zstd. Install the dev packages before configuring. (Vulkan is optional
+      # and left out — the Linux build uses the OpenGL backend.)
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev \
+            libxfixes-dev libxss-dev libwayland-dev wayland-protocols libdecor-0-dev \
+            libxkbcommon-dev libegl1-mesa-dev libgl1-mesa-dev libglu1-mesa-dev \
+            libasound2-dev libpulse-dev libudev-dev libdbus-1-dev libibus-1.0-dev \
+            liblz4-dev libzstd-dev python3-dev
+
       # FetchContent checkouts (SDL3, glm, nlohmann_json) are cached on the
       # configure hash so CI does not re-clone them on every run.
       - name: Cache FetchContent dependencies
@@ -40,6 +57,10 @@ jobs:
 
       - name: Configure (macOS)
         if: runner.os == 'macOS'
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Configure (Linux)
+        if: runner.os == 'Linux'
         run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 
       # Windows: build a self-contained editor package — bundle cmake, deploy into the
