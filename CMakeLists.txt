@@ -259,10 +259,16 @@ endif()
 # ALWAYS available and encryption is never silently disabled. Both feed the same
 # backend-agnostic wrapper (src/HE_Core/src/Hpak/Aes256Gcm.cpp), selected at
 # compile time via HE_HAVE_OPENSSL / HE_HAVE_MBEDTLS.
+# Prefer the fetched, statically-linked mbedTLS over system OpenSSL for a fully
+# self-contained build (no external libcrypto DLL on Windows). Set for the shipping /
+# CI package build (-DHE_PREFER_MBEDTLS=ON); default keeps the faster system OpenSSL.
+option(HE_PREFER_MBEDTLS "Use static mbedTLS for hpak crypto instead of system OpenSSL (self-contained)" OFF)
 if(NOT OPENSSL_ROOT_DIR AND EXISTS "/opt/homebrew/opt/openssl@3")
     set(OPENSSL_ROOT_DIR "/opt/homebrew/opt/openssl@3")
 endif()
-find_package(OpenSSL QUIET COMPONENTS Crypto)
+if(NOT HE_PREFER_MBEDTLS)
+    find_package(OpenSSL QUIET COMPONENTS Crypto)
+endif()
 if(OPENSSL_FOUND)
     message(STATUS "HorizonEngine: OpenSSL found (system) — hpak AES-256-GCM enabled")
     set(HE_HAVE_OPENSSL TRUE)
@@ -271,7 +277,11 @@ else()
     # Perl/nasm build). We fetch the RELEASE TARBALL, not the git tag: the tarball
     # ships the pre-generated sources so GEN_FILES can be OFF and no Python/Jinja2
     # codegen toolchain is needed. Only libmbedcrypto is used (GCM + CTR-DRBG).
-    message(STATUS "HorizonEngine: OpenSSL not found — fetching mbedTLS for AES-256-GCM")
+    if(HE_PREFER_MBEDTLS)
+        message(STATUS "HorizonEngine: HE_PREFER_MBEDTLS — fetching static mbedTLS for AES-256-GCM (self-contained)")
+    else()
+        message(STATUS "HorizonEngine: OpenSSL not found — fetching mbedTLS for AES-256-GCM")
+    endif()
     FetchContent_Declare(
         mbedtls
         URL      https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.7/mbedtls-3.6.7.tar.bz2
@@ -455,6 +465,28 @@ set(DEPLOY_EDITOR "${DEPLOY_DIR}/Editor")
 
 # Reusable CPython-runtime bundling (he_bundle_python) for the shipped game + editor.
 include("${CMAKE_SOURCE_DIR}/cmake/BundlePython.cmake")
+
+# ─── MSVC C++ runtime bundling ─────────────────────────────────────────────────
+# The engine ships multiple DLLs (HorizonCore/Scene/Rendering/Tools, SDL3) that must
+# share one CRT heap, so it links the dynamic CRT (/MD) — meaning a clean Windows PC
+# would otherwise need the VC++ redistributable. Static-linking (/MT) is NOT an option
+# here: each DLL would get its own CRT heap and a malloc-in-one/free-in-another across
+# a DLL boundary crashes. So we bundle the redist DLLs (vcruntime140.dll, msvcp140.dll,
+# …) next to the executable instead — self-contained, no redist install.
+if(WIN32)
+    set(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS_SKIP ON) # we copy manually — no install() rule
+    include(InstallRequiredSystemLibraries)
+endif()
+# he_bundle_crt(<target> <dest>): POST_BUILD-copy the MSVC runtime DLLs into <dest>.
+function(he_bundle_crt target dest)
+    if(WIN32 AND CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS)
+        add_custom_command(TARGET ${target} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${dest}"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS} "${dest}"
+            COMMENT "Bundling the MSVC C++ runtime into ${dest}"
+            VERBATIM)
+    endif()
+endfunction()
 
 # ─── Deploy helper ─────────────────────────────────────────────────────────────
 # Usage: he_deploy_dll(<target>)
