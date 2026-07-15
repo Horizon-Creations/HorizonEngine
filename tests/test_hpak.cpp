@@ -690,6 +690,83 @@ TEST_CASE("Cook: BC3 texture round-trips with the baked mip chain")
 {
     verifyBlockCook(static_cast<uint8_t>(TextureFormat::BC3), TextureFormat::BC3);
 }
+
+// Decode texel (0,0) of one BC3/DXT5 block (16 B): color from the DXT1 sub-block,
+// alpha from the interpolated alpha sub-block. Enough to confirm the cook wrote
+// valid blocks in the right RGBA channel order (the main risk in our encoder glue —
+// gatherRGBA8Block is shared with BC7, so this transitively covers that path).
+static void decodeDxt5Texel0(const uint8_t* blk, uint8_t out[4])
+{
+    // Alpha: a0,a1 endpoints; texel 0 uses the low 3 bits of the 48-bit index field.
+    const int a0 = blk[0], a1 = blk[1];
+    const int aIdx = blk[2] & 0x7;
+    int alpha;
+    if (a0 > a1)
+        alpha = aIdx == 0 ? a0 : aIdx == 1 ? a1 : ((8 - aIdx) * a0 + (aIdx - 1) * a1) / 7;
+    else
+        alpha = aIdx == 0 ? a0 : aIdx == 1 ? a1 : aIdx == 6 ? 0 : aIdx == 7 ? 255
+                                                              : ((6 - aIdx) * a0 + (aIdx - 1) * a1) / 5;
+    // Color: two RGB565 endpoints at bytes 8..11; texel 0 uses low 2 bits at byte 12.
+    auto rgb565 = [](uint16_t c, uint8_t rgb[3]) {
+        rgb[0] = static_cast<uint8_t>(((c >> 11) & 0x1F) * 255 / 31);
+        rgb[1] = static_cast<uint8_t>(((c >> 5)  & 0x3F) * 255 / 63);
+        rgb[2] = static_cast<uint8_t>(( c        & 0x1F) * 255 / 31);
+    };
+    const uint16_t c0 = static_cast<uint16_t>(blk[8]  | (blk[9]  << 8));
+    const uint16_t c1 = static_cast<uint16_t>(blk[10] | (blk[11] << 8));
+    uint8_t e0[3], e1[3]; rgb565(c0, e0); rgb565(c1, e1);
+    const int cIdx = blk[12] & 0x3;
+    for (int i = 0; i < 3; ++i)
+    {
+        int v;
+        switch (cIdx)
+        {
+        case 0:  v = e0[i]; break;
+        case 1:  v = e1[i]; break;
+        case 2:  v = (2 * e0[i] + e1[i]) / 3; break;
+        default: v = (e0[i] + 2 * e1[i]) / 3; break;
+        }
+        out[i] = static_cast<uint8_t>(v);
+    }
+    out[3] = static_cast<uint8_t>(alpha);
+}
+
+TEST_CASE("Cook: BC3 block decodes close to the original (RGBA channel order)")
+{
+    auto dir = std::filesystem::temp_directory_path() / "he_bc3_dec";
+    he_test::removeAllQuiet(dir);
+    std::filesystem::create_directories(dir);
+    ContentManager cmw(dir.string());
+    // 8x8 solid colour (distinct R/G/B + non-255 alpha) → DXT5 encodes near-losslessly,
+    // and a wrong channel order would show up immediately in the decode.
+    TextureAsset tex; tex.type = HE::AssetType::Texture; tex.name = "t"; tex.path = "t.hasset";
+    tex.width = 8; tex.height = 8; tex.channels = 4;
+    tex.data.assign(8 * 8 * 4, 0);
+    for (size_t p = 0; p < 8 * 8; ++p)
+    { tex.data[p*4+0] = 200; tex.data[p*4+1] = 100; tex.data[p*4+2] = 40; tex.data[p*4+3] = 160; }
+    REQUIRE(cmw.saveAsset(tex));
+    const HE::UUID texId = tex.id;
+
+    Hpak::PackSettings s; s.codec = Hpak::Codec::Store; s.cook = true;
+    s.textureCompression = static_cast<uint8_t>(TextureFormat::BC3);
+    HpakWriter packer; packer.addDirectory(dir, s);
+    auto pak = std::filesystem::temp_directory_path() / "he_bc3_dec.hpak";
+    REQUIRE(packer.write(pak.string()));
+
+    ContentManager cm;
+    REQUIRE(cm.loadPak(pak.string()));
+    const TextureAsset* t = cm.getTexture(texId);
+    REQUIRE(t != nullptr);
+    REQUIRE(t->format == TextureFormat::BC3);
+    REQUIRE(t->data.size() >= 16);
+
+    uint8_t px[4]; decodeDxt5Texel0(t->data.data(), px); // level 0, block 0, texel (0,0)
+    CHECK(std::abs(int(px[0]) - 200) <= 8);
+    CHECK(std::abs(int(px[1]) - 100) <= 8);
+    CHECK(std::abs(int(px[2]) -  40) <= 8);
+    CHECK(std::abs(int(px[3]) - 160) <= 8);
+    he_test::removeAllQuiet(dir);
+}
 #endif
 
 TEST_CASE("All asset types round-trip through a Store pak")  { verifyAllTypes(Hpak::Codec::Store); }
