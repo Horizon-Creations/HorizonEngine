@@ -10,6 +10,7 @@
 #include <HorizonRendering/CommandBuffer.h>
 #include <Math/AABB.h>
 #include <Types/UUID.h>
+#include <material/MaterialShaderLibrary.h> // A4: shared cross-backend material shader layer (unguarded, like Vulkan/GL)
 #include <SDL3/SDL.h>
 #include <d3d12.h>
 #include <d3d12sdklayers.h>
@@ -28,6 +29,7 @@
 #include <cstdlib>
 #include <string>
 #include <cmath>
+#include <functional> // A4: std::hash<std::string> for the WPO custom-vertex cache key
 #include <Diagnostics/Logger.h>
 
 using Microsoft::WRL::ComPtr;
@@ -2076,6 +2078,33 @@ struct D3D12RendererImpl
     ComPtr<ID3D12Resource>       perInstanceRing[k_frameCount]; // upload: instance {mvp,model} (A3)
     uint8_t*                     perInstancePtr[k_frameCount]{};
 
+    // ── A4: node-graph material PSOs ─────────────────────────────────────────
+    // Graph materials (Material-Node editor) render through per-material PSOs the engine
+    // builds at draw time from MaterialShaderLibrary HLSL (SPIRV-Cross). They share ONE
+    // root signature + a dedicated 5-slot white SRV heap, and per frame in flight a
+    // HeLighting CB (filled once/frame) + U ring + HeParams ring (one 256-B slot per draw).
+    // All of this is inert (never touched) when HE_HAVE_SHADERC is off: m_matReady stays
+    // false and the draw path skips it, so behaviour equals today's built-in PBR path.
+    // Canonical SPIRV-Cross HLSL register mapping (shader_model=50, binding→register):
+    //   b0 HeLighting(FS) | b1 U(VS) | b3 HeParams(FS) | b8/b9 HeLighting/HeParams(WPO VS)
+    //   t2 heTex0, t4..t7 heTexP0..3 (+ SamplerState s2, s4..s7).
+    HE::MaterialShaderLibrary m_matShaderLib;
+    std::unordered_map<uint64_t, ComPtr<ID3D12PipelineState>> m_materialPSOs; // key = hash^hdr^transparent
+    ComPtr<ID3D12RootSignature>  m_matRootSig;
+    ComPtr<ID3D12DescriptorHeap> m_matSrvHeap;   // 5 slots, all null RGBA8 (heTex0 + heTexP0..3)
+    ComPtr<ID3D12Resource>       m_matLightCB[k_frameCount];   uint8_t* m_matLightPtr[k_frameCount]{}; // HeLighting (64 B/frame)
+    ComPtr<ID3D12Resource>       m_matObjRing[k_frameCount];   uint8_t* m_matObjPtr[k_frameCount]{};   // U ring (176 B/slot)
+    ComPtr<ID3D12Resource>       m_matParamRing[k_frameCount]; uint8_t* m_matParamPtr[k_frameCount]{}; // HeParams ring (256 B/slot)
+    UINT                         m_matDrawCursor[k_frameCount] = {}; // per-frame ring/slot cursor
+    bool                         m_matReady      = false;            // true once createMaterialResources() succeeded
+    bool                         m_matHlslLogged = false;            // one-time dump of generated HLSL for HW verify
+    static constexpr UINT        k_matMaxDraws   = 1024;             // U/HeParams ring slots per frame
+    static constexpr UINT        k_matSlot       = 256;              // 256-B stride/slot (U=176, HeParams=256)
+
+    void createMaterialResources();
+    ID3D12PipelineState* getOrBuildMaterialPSO(uint64_t hash, const std::string& frag,
+                                               const std::string& vertBody, bool hdr, bool transparent);
+
     GpuMesh cube;
 
     // ── Sky pipeline ─────────────────────────────────────────────────────────
@@ -3087,6 +3116,10 @@ struct D3D12RendererImpl
         createSSAOPipeline();
         createSkinnedPipeline();
         createUIPipeline();
+        // A4: build the material-graph root signature, white SRV heap and per-frame UBO
+        // rings once (no-op when HE_HAVE_SHADERC is off). Failure leaves m_matReady false,
+        // so the draw path silently stays on the built-in PBR path.
+        createMaterialResources();
         return rootSig && pso;
     }
 
@@ -4008,6 +4041,237 @@ struct D3D12RendererImpl
     }
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// A4: node-graph material PSOs
+//
+// Graph materials render through per-material PSOs built at draw time from
+// MaterialShaderLibrary HLSL (VS + PS). They share ONE root signature + a dedicated
+// 5-slot white SRV heap, and per frame in flight: a HeLighting CB (filled once/frame)
+// plus U and HeParams rings (one 256-B slot per draw). Mirrors the Vulkan A4 path
+// (VulkanRenderer::createMaterialResources + getOrBuildMaterialPipeline). No-op when
+// HE_HAVE_SHADERC is off (m_matReady stays false, so the draw path skips it).
+// ─────────────────────────────────────────────────────────────────────────────
+void D3D12RendererImpl::createMaterialResources()
+{
+#if defined(HE_HAVE_SHADERC)
+    // Root signature: root CBVs b0/b1/b3/b8/b9 + one SRV table for t2 + t4..t7 + static
+    // samplers s2 + s4..s7 (linear-wrap). Registers match SPIRV-Cross HLSL (binding→register,
+    // shader_model=50, no remap — verified in ShaderCompiler.cpp / spirv_hlsl.cpp).
+    D3D12_ROOT_PARAMETER params[6]{};
+    auto cbv = [&](int i, UINT reg) {
+        params[i].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
+        params[i].Descriptor       = { reg, 0 };
+        params[i].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    };
+    cbv(0, 0); // b0 HeLighting (FS)
+    cbv(1, 1); // b1 U (VS)
+    cbv(2, 3); // b3 HeParams (FS)
+    cbv(3, 8); // b8 HeLighting (WPO VS)
+    cbv(4, 9); // b9 HeParams   (WPO VS)
+
+    // Texture table: t2 (heTex0) then t4..t7 (heTexP0..3), two ranges → 5 consecutive heap
+    // slots. t3 is intentionally skipped (SPIRV-Cross leaves it unused for the mesh path).
+    D3D12_DESCRIPTOR_RANGE texRanges[2]{};
+    texRanges[0].RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    texRanges[0].NumDescriptors                    = 1;
+    texRanges[0].BaseShaderRegister                = 2; // t2
+    texRanges[0].RegisterSpace                     = 0;
+    texRanges[0].OffsetInDescriptorsFromTableStart = 0; // heap slot 0
+    texRanges[1].RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    texRanges[1].NumDescriptors                    = 4;
+    texRanges[1].BaseShaderRegister                = 4; // t4..t7
+    texRanges[1].RegisterSpace                     = 0;
+    texRanges[1].OffsetInDescriptorsFromTableStart = 1; // heap slots 1..4
+    params[5].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    params[5].DescriptorTable.NumDescriptorRanges = 2;
+    params[5].DescriptorTable.pDescriptorRanges   = texRanges;
+    params[5].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    D3D12_STATIC_SAMPLER_DESC samp[5]{};
+    const UINT sregs[5] = { 2, 4, 5, 6, 7 };
+    for (int i = 0; i < 5; ++i)
+    {
+        samp[i].Filter         = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+        samp[i].AddressU = samp[i].AddressV = samp[i].AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+        samp[i].ShaderRegister   = sregs[i];
+        samp[i].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        samp[i].MaxLOD           = D3D12_FLOAT32_MAX;
+    }
+
+    D3D12_ROOT_SIGNATURE_DESC rsd{};
+    rsd.NumParameters     = 6;
+    rsd.pParameters       = params;
+    rsd.NumStaticSamplers = 5;
+    rsd.pStaticSamplers   = samp;
+    rsd.Flags             = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+    ComPtr<ID3DBlob> sig, err;
+    if (FAILED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err)) ||
+        FAILED(device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
+               IID_PPV_ARGS(&m_matRootSig))))
+    {
+        Logger::Log(Logger::LogLevel::Error, "D3D12Renderer: A4 material root signature failed");
+        m_matRootSig.Reset();
+        return;
+    }
+
+    // Dedicated 5-slot shader-visible SRV heap, all null RGBA8 → heTex0 + heTexP0..3 sample
+    // as (0,0,0,0) this increment. TODO A4-followup: real heTex0 (material/mesh texture) +
+    // heTexP0..3 (graph project textures). Kept separate from sceneSrvHeap so the material
+    // draw doesn't disturb the A1/A2/A3 mesh-texture slot allocator; the draw path switches
+    // the bound descriptor heap to this one and restores sceneSrvHeap afterwards.
+    {
+        D3D12_DESCRIPTOR_HEAP_DESC hd{};
+        hd.NumDescriptors = 5;
+        hd.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        hd.Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        if (FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_matSrvHeap))))
+        {
+            Logger::Log(Logger::LogLevel::Error, "D3D12Renderer: A4 material SRV heap failed");
+            m_matRootSig.Reset();
+            return;
+        }
+        D3D12_SHADER_RESOURCE_VIEW_DESC nullSrv{};
+        nullSrv.Format                  = DXGI_FORMAT_R8G8B8A8_UNORM;
+        nullSrv.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
+        nullSrv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        nullSrv.Texture2D.MipLevels     = 1;
+        const UINT inc = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        D3D12_CPU_DESCRIPTOR_HANDLE h = m_matSrvHeap->GetCPUDescriptorHandleForHeapStart();
+        for (int i = 0; i < 5; ++i) { device->CreateShaderResourceView(nullptr, &nullSrv, h); h.ptr += inc; }
+    }
+
+    // Per-frame rings: HeLighting (once/frame) + U ring + HeParams ring (per draw, 256-B slots).
+    for (UINT f = 0; f < k_frameCount; ++f)
+    {
+        m_matLightCB[f]   = createUploadBuffer(k_matSlot, reinterpret_cast<void**>(&m_matLightPtr[f]));
+        m_matObjRing[f]   = createUploadBuffer(static_cast<UINT64>(k_matMaxDraws) * k_matSlot,
+                                               reinterpret_cast<void**>(&m_matObjPtr[f]));
+        m_matParamRing[f] = createUploadBuffer(static_cast<UINT64>(k_matMaxDraws) * k_matSlot,
+                                               reinterpret_cast<void**>(&m_matParamPtr[f]));
+        if (!m_matLightCB[f] || !m_matObjRing[f] || !m_matParamRing[f])
+        {
+            Logger::Log(Logger::LogLevel::Error, "D3D12Renderer: A4 material ring allocation failed");
+            return; // m_matReady stays false → draw path stays on the built-in PBR path
+        }
+    }
+
+    m_matReady = true;
+    Logger::Log(Logger::LogLevel::Info, "D3D12Renderer: A4 material resources created");
+#endif
+}
+
+ID3D12PipelineState* D3D12RendererImpl::getOrBuildMaterialPSO(uint64_t hash, const std::string& frag,
+                                                              const std::string& vertBody, bool hdr,
+                                                              bool transparent)
+{
+#if defined(HE_HAVE_SHADERC)
+    // Cache key mixes the shader hash with the render-target + blend variant so LDR (RGBA8) /
+    // HDR (RGBA16F) / opaque / transparent PSOs never collide (same constants as Vulkan A4).
+    const uint64_t key = hash ^ (hdr ? 0x9E3779B97F4A7C15ULL : 0ULL)
+                              ^ (transparent ? 0xD1B54A32D192ED03ULL : 0ULL);
+    if (auto it = m_materialPSOs.find(key); it != m_materialPSOs.end()) return it->second.Get();
+
+    using Backend = HE::MaterialShaderLibrary::Backend;
+    // Standard vertex (no WPO) or the graph's custom vertex body, cross-compiled to HLSL.
+    const HE::MaterialShaderLibrary::Compiled& vc = vertBody.empty()
+        ? m_matShaderLib.standardVertex(Backend::HLSL)
+        : m_matShaderLib.customVertex(std::hash<std::string>{}(vertBody), vertBody, Backend::HLSL);
+    const HE::MaterialShaderLibrary::Compiled& fc = m_matShaderLib.fragment(hash, frag, Backend::HLSL);
+    if (!vc.ok || !fc.ok || vc.source.empty() || fc.source.empty())
+    {
+        Logger::Log(Logger::LogLevel::Warning, "D3D12Renderer: A4 material shader cross-compile failed");
+        m_materialPSOs.emplace(key, nullptr); // cache the miss — don't retry every draw
+        return nullptr;
+    }
+
+    // One-time: dump the generated HLSL so a Windows-GPU run can confirm the register /
+    // vertex-semantic mapping the material root signature + input layout assume.
+    if (!m_matHlslLogged)
+    {
+        m_matHlslLogged = true;
+        Logger::Log(Logger::LogLevel::Info, (std::string("D3D12 A4 material VS HLSL:\n") + vc.source).c_str());
+        Logger::Log(Logger::LogLevel::Info, (std::string("D3D12 A4 material PS HLSL:\n") + fc.source).c_str());
+    }
+
+    UINT cflags = 0;
+#ifdef _DEBUG
+    cflags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+    // SPIRV-Cross emits the GLSL-sourced entry point as `main` (not VSMain/PSMain).
+    ComPtr<ID3DBlob> vs, ps, cerr;
+    if (FAILED(D3DCompile(vc.source.c_str(), vc.source.size(), "matVS", nullptr, nullptr,
+                          "main", "vs_5_0", cflags, 0, &vs, &cerr)))
+    {
+        Logger::Log(Logger::LogLevel::Warning, (std::string("D3D12Renderer: A4 material VS compile failed: ")
+            + (cerr ? static_cast<const char*>(cerr->GetBufferPointer()) : "")).c_str());
+        m_materialPSOs.emplace(key, nullptr);
+        return nullptr;
+    }
+    if (FAILED(D3DCompile(fc.source.c_str(), fc.source.size(), "matPS", nullptr, nullptr,
+                          "main", "ps_5_0", cflags, 0, &ps, &cerr)))
+    {
+        Logger::Log(Logger::LogLevel::Warning, (std::string("D3D12Renderer: A4 material PS compile failed: ")
+            + (cerr ? static_cast<const char*>(cerr->GetBufferPointer()) : "")).c_str());
+        m_materialPSOs.emplace(key, nullptr);
+        return nullptr;
+    }
+
+    // IMPORTANT: SPIRV-Cross names GLSL vertex inputs by location as TEXCOORD{location}
+    // (no remap_vertex_attributes is registered in ShaderCompiler.cpp), so the material
+    // input layout uses TEXCOORD0/1/2 — NOT the scene's POSITION/NORMAL/TEXCOORD. Same
+    // interleaved 32-B pos/normal/uv vertex buffer the scene meshes use.
+    const D3D12_INPUT_ELEMENT_DESC layout[] = {
+        { "TEXCOORD", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "TEXCOORD", 1, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "TEXCOORD", 2, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+    };
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+    pd.pRootSignature        = m_matRootSig.Get();
+    pd.VS                    = { vs->GetBufferPointer(), vs->GetBufferSize() };
+    pd.PS                    = { ps->GetBufferPointer(), ps->GetBufferSize() };
+    pd.InputLayout           = { layout, 3 };
+    pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pd.NumRenderTargets      = 1;
+    pd.RTVFormats[0]         = hdr ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM;
+    pd.DSVFormat             = DXGI_FORMAT_D32_FLOAT;
+    pd.SampleDesc.Count      = 1;
+    pd.SampleMask            = UINT_MAX;
+    pd.RasterizerState.FillMode        = D3D12_FILL_MODE_SOLID;
+    pd.RasterizerState.CullMode        = D3D12_CULL_MODE_NONE;
+    pd.RasterizerState.DepthClipEnable = TRUE;
+    pd.DepthStencilState.DepthEnable    = TRUE;
+    // Transparent graph materials: depth-test but no depth-write + alpha blend, matching the
+    // built-in transparentPSO.
+    pd.DepthStencilState.DepthWriteMask = transparent ? D3D12_DEPTH_WRITE_MASK_ZERO : D3D12_DEPTH_WRITE_MASK_ALL;
+    pd.DepthStencilState.DepthFunc      = D3D12_COMPARISON_FUNC_LESS;
+    auto& rt = pd.BlendState.RenderTarget[0];
+    rt.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    if (transparent)
+    {
+        rt.BlendEnable    = TRUE;
+        rt.SrcBlend       = D3D12_BLEND_SRC_ALPHA;
+        rt.DestBlend      = D3D12_BLEND_INV_SRC_ALPHA;
+        rt.BlendOp        = D3D12_BLEND_OP_ADD;
+        rt.SrcBlendAlpha  = D3D12_BLEND_ONE;
+        rt.DestBlendAlpha = D3D12_BLEND_ZERO;
+        rt.BlendOpAlpha   = D3D12_BLEND_OP_ADD;
+    }
+
+    ComPtr<ID3D12PipelineState> pso12;
+    if (FAILED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&pso12))))
+    {
+        Logger::Log(Logger::LogLevel::Error, "D3D12Renderer: A4 material PSO creation failed");
+        m_materialPSOs.emplace(key, nullptr); // cache the failure → no per-draw retry
+        return nullptr;
+    }
+    return m_materialPSOs.emplace(key, pso12).first->second.Get();
+#else
+    (void)hash; (void)frag; (void)vertBody; (void)hdr; (void)transparent;
+    return nullptr;
+#endif
+}
+
 D3D12Renderer::D3D12Renderer()  : m_impl(new D3D12RendererImpl{}) {}
 D3D12Renderer::~D3D12Renderer() { delete m_impl; }
 
@@ -4196,6 +4460,20 @@ void D3D12Renderer::Shutdown()
     m_impl->shadowDepth.Reset();
     m_impl->shadowSrvHeap.Reset();
     m_impl->rootSig.Reset();
+    // A4: node-graph material resources.
+    m_impl->m_matReady = false;
+    m_impl->m_matHlslLogged = false;
+    m_impl->m_materialPSOs.clear();
+    m_impl->m_matSrvHeap.Reset();
+    m_impl->m_matRootSig.Reset();
+    m_impl->m_matShaderLib.clear();
+    for (UINT i = 0; i < k_frameCount; ++i)
+    {
+        m_impl->m_matLightCB[i].Reset();   m_impl->m_matLightPtr[i] = nullptr;
+        m_impl->m_matObjRing[i].Reset();   m_impl->m_matObjPtr[i]   = nullptr;
+        m_impl->m_matParamRing[i].Reset(); m_impl->m_matParamPtr[i] = nullptr;
+        m_impl->m_matDrawCursor[i] = 0;
+    }
     m_impl->depthBuffer.Reset();
     m_impl->dsvHeap.Reset();
     for (UINT i = 0; i < k_frameCount; ++i)
@@ -4310,6 +4588,36 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         if (p.perFramePtr[p.frameIndex])
             std::memcpy(p.perFramePtr[p.frameIndex], &f, sizeof(f));
     }
+
+#if defined(HE_HAVE_SHADERC)
+    // A4: reset this frame slot's material ring/descriptor cursor + fill the shared
+    // HeLighting CB once (identical for every graph-material draw this frame). DrawScene
+    // runs once per frame, so this resets exactly once. Mirrors the Vulkan A4 HeLighting fill.
+    if (p.m_matReady)
+    {
+        p.m_matDrawCursor[p.frameIndex] = 0;
+        HE::MaterialShaderLibrary::Lighting lit{};
+        lit.sunDir[0] = p.m_renderWorld.sunDirection.x;
+        lit.sunDir[1] = p.m_renderWorld.sunDirection.y;
+        lit.sunDir[2] = p.m_renderWorld.sunDirection.z;
+        // Engine seconds for the node graph's Time input (HE_SKY_TIME pins it for
+        // deterministic headless captures, mirroring the sky clock + GL/Vulkan exactly).
+        static const char* s_timeOv = std::getenv("HE_SKY_TIME");
+        lit.sunDir[3] = (s_timeOv && *s_timeOv)
+            ? static_cast<float>(std::atof(s_timeOv))
+            : static_cast<float>(SDL_GetTicks()) / 1000.0f;
+        const glm::vec3 sc = m_environment.sunColor;
+        lit.sunColor[0] = sc.r; lit.sunColor[1] = sc.g; lit.sunColor[2] = sc.b;
+        lit.ambient[0] = p.m_renderWorld.ambient.r;
+        lit.ambient[1] = p.m_renderWorld.ambient.g;
+        lit.ambient[2] = p.m_renderWorld.ambient.b;
+        lit.camPos[0] = p.m_renderWorld.camera.position.x;
+        lit.camPos[1] = p.m_renderWorld.camera.position.y;
+        lit.camPos[2] = p.m_renderWorld.camera.position.z;
+        if (p.m_matLightPtr[p.frameIndex])
+            std::memcpy(p.m_matLightPtr[p.frameIndex], &lit, sizeof(lit));
+    }
+#endif
 
     cl->SetGraphicsRootSignature(p.rootSig.Get());
     cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -4476,11 +4784,118 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         // pass reuses drawDC12 with a blend PSO + per-instance depth sort, so it keeps
         // the per-instance loop (allowInstancing is set false before that pass).
         bool allowInstancing = true;
+        // A4: the scene PSO the CURRENT pass expects bound. A graph-material draw binds its own
+        // per-material PSO + material root sig, so it restores THIS (and the scene root sig /
+        // per-frame CBV / scene SRV table / scene heap) after itself — otherwise the next
+        // built-in draw would inherit the material state. Set to the opaque scene PSO below,
+        // and to the transparent PSO before the transparent pass.
+        ID3D12PipelineState* activeScenePso = nullptr;
         auto drawDC12 = [&](const DrawCall& dc) {
             if (drawIdx >= k_maxDraws) return;
             GpuMesh* mesh = p.resolveMesh(dc.meshAssetId, m_contentManager);
             GpuMesh& m    = mesh ? *mesh : p.cube;
             if (!m.indexCount) return;
+
+#if defined(HE_HAVE_SHADERC)
+            // A4: node-graph material? Render through a per-material PSO built from the
+            // MaterialShaderLibrary HLSL, bypassing the built-in PBR path entirely. Falls
+            // through unchanged when the material has no graph shader OR resources are down.
+            if (p.m_matReady && m_contentManager)
+            {
+                uint64_t matHash = 0; std::string matFrag, matVertBody;
+                if (p.m_matShaderLib.resolveShaders(*m_contentManager, dc.materialAssetId,
+                                                    matHash, matFrag, matVertBody))
+                {
+                    const bool matTransp = dc.opacity < 0.999f;
+                    ID3D12PipelineState* matPso = p.getOrBuildMaterialPSO(matHash, matFrag,
+                                                                          matVertBody, p.usingHDR, matTransp);
+                    if (matPso && p.m_matDrawCursor[p.frameIndex] < D3D12RendererImpl::k_matMaxDraws)
+                    {
+                        // Per-entity HeParams override wins over the material's shared params.
+                        const MaterialAsset* ma = m_contentManager->getMaterial(dc.materialAssetId);
+                        const std::vector<float>* params =
+                            !dc.paramOverride.empty() ? &dc.paramOverride
+                            : (ma && !ma->shaderParamData.empty() ? &ma->shaderParamData : nullptr);
+
+                        // Switch to the material root sig + white SRV heap + material PSO.
+                        ID3D12DescriptorHeap* mheaps[] = { p.m_matSrvHeap.Get() };
+                        cl->SetDescriptorHeaps(1, mheaps);
+                        cl->SetGraphicsRootSignature(p.m_matRootSig.Get());
+                        cl->SetPipelineState(matPso);
+                        cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+                        cl->SetGraphicsRootDescriptorTable(5, p.m_matSrvHeap->GetGPUDescriptorHandleForHeapStart());
+                        cl->IASetVertexBuffers(0, 1, &m.vbv);
+                        cl->IASetIndexBuffer(&m.ibv);
+
+                        // HeLighting (b0 FS, b8 WPO VS) — same buffer, filled once per frame.
+                        const D3D12_GPU_VIRTUAL_ADDRESS lightVA = p.m_matLightCB[p.frameIndex]->GetGPUVirtualAddress();
+                        cl->SetGraphicsRootConstantBufferView(0, lightVA);
+                        cl->SetGraphicsRootConstantBufferView(3, lightVA);
+                        const D3D12_GPU_VIRTUAL_ADDRESS objBase = p.m_matObjRing[p.frameIndex]->GetGPUVirtualAddress();
+                        const D3D12_GPU_VIRTUAL_ADDRESS parBase = p.m_matParamRing[p.frameIndex]->GetGPUVirtualAddress();
+
+                        auto drawMatInstance = [&](const glm::mat4& model) {
+                            UINT& cur = p.m_matDrawCursor[p.frameIndex];
+                            if (cur >= D3D12RendererImpl::k_matMaxDraws) return;
+                            const UINT i = cur++;
+                            // std140 U block (176 B) into obj-ring slot i (256-B stride).
+                            struct MatU { glm::mat4 mvp; glm::mat4 model; glm::vec4 color; glm::vec4 flags; glm::vec4 pbr; };
+                            static_assert(sizeof(MatU) == 176, "material U block must be std140 176 B");
+                            MatU u;
+                            u.mvp   = viewProj * model;
+                            u.model = model;
+                            u.color = glm::vec4(dc.baseColor, 1.0f);
+                            // heTex0 is a null/white placeholder this increment → tell the shader
+                            // "no texture" (flags is unused by the standard vertex/fragment anyway).
+                            u.flags = glm::vec4(0.0f);
+                            u.pbr   = glm::vec4(dc.metallic, dc.roughness, dc.opacity, 0.0f);
+                            if (p.m_matObjPtr[p.frameIndex])
+                                std::memcpy(p.m_matObjPtr[p.frameIndex] + static_cast<size_t>(i) * D3D12RendererImpl::k_matSlot,
+                                            &u, sizeof(u));
+                            // HeParams (16 vec4 = 64 floats = 256 B) into param-ring slot i, zero-padded.
+                            float padded[64] = { 0.0f };
+                            if (params)
+                                std::memcpy(padded, params->data(),
+                                            std::min(params->size(), size_t(64)) * sizeof(float));
+                            if (p.m_matParamPtr[p.frameIndex])
+                                std::memcpy(p.m_matParamPtr[p.frameIndex] + static_cast<size_t>(i) * D3D12RendererImpl::k_matSlot,
+                                            padded, sizeof(padded));
+                            const D3D12_GPU_VIRTUAL_ADDRESS objVA = objBase + static_cast<UINT64>(i) * D3D12RendererImpl::k_matSlot;
+                            const D3D12_GPU_VIRTUAL_ADDRESS parVA = parBase + static_cast<UINT64>(i) * D3D12RendererImpl::k_matSlot;
+                            cl->SetGraphicsRootConstantBufferView(1, objVA); // b1 U (VS)
+                            cl->SetGraphicsRootConstantBufferView(2, parVA); // b3 HeParams (FS)
+                            cl->SetGraphicsRootConstantBufferView(4, parVA); // b9 HeParams (WPO VS)
+                            cl->DrawIndexedInstanced(m.indexCount, 1, 0, 0, 0);
+                            ++p.statDraws; p.statTris += m.indexCount / 3;
+                        };
+                        // Instanced graph materials draw each instance via the material path
+                        // (this increment does NOT combine graph materials with A3 instancing).
+                        if (!dc.instanceTransforms.empty())
+                            for (const glm::mat4& t : dc.instanceTransforms) drawMatInstance(t);
+                        else
+                            drawMatInstance(dc.transform);
+
+                        // CRITICAL: restore scene state for subsequent built-in draws — scene root
+                        // sig + scene descriptor heap + scene SRV table (param 2) + per-frame CBV
+                        // (param 1) + the pass's scene PSO. Changing the root sig invalidates ALL
+                        // root args, and param 2 is bound once before the opaque loop, so it MUST
+                        // be re-bound here; per-object (param 0) + albedo table (param 3) are set
+                        // per draw by the built-in path, so they don't need restoring.
+                        cl->SetGraphicsRootSignature(p.rootSig.Get());
+                        cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+                        if (p.sceneSrvHeap)
+                        {
+                            ID3D12DescriptorHeap* sheaps[] = { p.sceneSrvHeap.Get() };
+                            cl->SetDescriptorHeaps(1, sheaps);
+                            cl->SetGraphicsRootDescriptorTable(2, p.sceneSrvHeap->GetGPUDescriptorHandleForHeapStart());
+                        }
+                        cl->SetGraphicsRootConstantBufferView(1, p.perFrameCB[p.frameIndex]->GetGPUVirtualAddress());
+                        if (activeScenePso) cl->SetPipelineState(activeScenePso);
+                        return;
+                    }
+                }
+            }
+#endif
             // Base color: an explicit MaterialComponent override (dc.materialAssetId) wins
             // over the mesh's own baked texture; else the mesh's baked texture (A1); else flat.
             if (mesh) p.ensureMeshAlbedo(cl, m, dc.meshAssetId, m_contentManager);
@@ -4560,6 +4975,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
 
         auto* scenePso = p.usingHDR && p.hdrPso ? p.hdrPso.Get() : p.pso.Get();
         auto* transePso = p.usingHDR && p.hdrTransparentPso ? p.hdrTransparentPso.Get() : p.transparentPSO.Get();
+        activeScenePso = scenePso; // A4: graph-material draws in the opaque pass restore THIS
         cl->SetPipelineState(scenePso);
         for (const DrawCall* dc : opaqueDCs) drawDC12(*dc);
 
@@ -4644,6 +5060,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
 
         if (!transparentDCs.empty() && transePso) {
             allowInstancing = false; // transparent batches keep the per-instance loop (blend + depth sort)
+            activeScenePso = transePso; // A4: graph-material draws in the transparent pass restore THIS
             cl->SetPipelineState(transePso);
             for (const DrawCall* dc : transparentDCs) drawDC12(*dc);
             cl->SetPipelineState(scenePso); // restore for next draw
