@@ -2716,6 +2716,16 @@ void EditorApplication::OnShutdown()
 	switch (m_backend)
 	{
 	case RendererFactory::Backend::OpenGL:
+		// ImGui_ImplOpenGL3_Shutdown() re-inits the GL3W loader inside
+		// DestroyDeviceObjects(); its parse_version() then reads glGetString/
+		// glGetIntegerv. If no GL context is current on this thread, those return
+		// null and parse_version dereferences it -> SIGSEGV during shutdown. The
+		// render loop leaves the context current on the happy path, but nothing
+		// guarantees it here (e.g. after an error or a secondary-window teardown),
+		// so re-assert it explicitly before tearing ImGui down.
+		if (window() && window()->GetNativeWindow() && window()->GetGLContext())
+			SDL_GL_MakeCurrent(window()->GetNativeWindow(),
+				static_cast<SDL_GLContext>(window()->GetGLContext()));
 		ImGui_ImplOpenGL3_Shutdown();
 		ImGui_ImplSDL3_Shutdown();
 		break;
