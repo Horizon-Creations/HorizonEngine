@@ -295,11 +295,24 @@ struct FontAsset : public RuntimeAsset
 	int                  size = 0;
 };
 
-// GPU pixel format of a TextureAsset's `data`. RGBA8 is the raw/editor form;
-// ASTC_4x4 is the pack-time cook target for GPUs that sample it (Apple-Silicon
-// Metal). Each ASTC 4x4 block is 16 bytes; a level's byte size is
-// ceil(w/4)*ceil(h/4)*16, levels concatenated in `data` like RGBA8 mips.
-enum class TextureFormat : uint8_t { RGBA8 = 0, ASTC_4x4 = 1 };
+// GPU pixel format of a TextureAsset's `data`. RGBA8 is the raw/editor form; the
+// others are pack-time cook targets (block-compressed), chosen by the export
+// target's GPU family (see HpakWriter cookTexture / EditorUI auto-selection):
+//   ASTC_4x4 — Apple-Silicon Metal (the only family it samples).
+//   BC7      — desktop D3D11/D3D12/Vulkan + OpenGL 4.2+ (Windows/Linux); best RGBA quality.
+//   BC3      — DXT5; the universal desktop fallback, incl. macOS OpenGL 4.1 (S3TC),
+//              which samples neither ASTC nor BC7.
+// Every block format here is 16 bytes per 4x4 block, so a level's byte size is
+// ceil(w/4)*ceil(h/4)*16 and the row stride is ceil(w/4)*16 — identical math for
+// all three. Levels are concatenated in `data` exactly like the RGBA8 mip chain
+// (level 0 first), so a backend that can't sample the format just ignores it.
+enum class TextureFormat : uint8_t { RGBA8 = 0, ASTC_4x4 = 1, BC7 = 2, BC3 = 3 };
+
+// True for the block-compressed TextureFormat values (all 16 B / 4x4 block).
+inline bool textureFormatIsBlock4x4(TextureFormat f)
+{
+	return f == TextureFormat::ASTC_4x4 || f == TextureFormat::BC7 || f == TextureFormat::BC3;
+}
 
 struct TextureAsset : public RuntimeAsset
 {

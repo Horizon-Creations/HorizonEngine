@@ -124,10 +124,13 @@ struct PackSettings {
     // cookForPack): today, static meshes are pre-interleaved into the GPU vertex
     // layout with a baked AABB. Off for editor/loose saves (which stay editable).
     bool cook = false;
-    // Additionally transcode RGBA8 textures to ASTC 4x4 (needs HE_HAVE_ASTCENC).
-    // Only set for targets whose GPU samples ASTC (Apple-Silicon Metal); other
-    // targets keep RGBA8 + baked mipmaps.
-    bool astcTextures = false;
+    // Additionally block-compress RGBA8 textures at pack time to this HE::TextureFormat
+    // value (kept as a raw uint8_t so this low-level header needn't include Assets.h):
+    //   0 = RGBA8 (none), 1 = ASTC_4x4, 2 = BC7, 3 = BC3. Each needs its encoder in the
+    // build (HE_HAVE_ASTCENC / HE_HAVE_BC7ENC / HE_HAVE_STB_DXT); on a missing encoder or
+    // an encode failure the cook silently keeps RGBA8 + baked mipmaps. The chosen format
+    // must match what the target's GPU can sample — the editor picks it per target/backend.
+    uint8_t textureCompression = 0;
 
     // Precompile node-graph material shaders into the pak (CHUNK_PSHD). `shaderBackends`
     // is a bitmask of (1u << HE::RendererBackend). The callback — supplied by the editor,
