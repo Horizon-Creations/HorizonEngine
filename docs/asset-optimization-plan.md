@@ -35,13 +35,29 @@ der Packaged-Build die gekochte.
   Textur-Rollen-Info aus dem Material).
 - ✅ **GPU-Textur-Kompression: ASTC 4×4** (Tier 1 #3, VRAM-Gewinn): `astcenc` (ARM astc-encoder
   5.3.0) via FetchContent (native single-arch, `HE_HAVE_ASTCENC`). Der Textur-Cook encodet jede
-  RGBA8-Mip-Stufe pack-time zu ASTC_4x4_LDR (4:1 gegenüber RGBA8, `format`-Byte im `TXMI`-Tail),
-  gated auf `PackSettings::astcTextures` — die der Editor für Apple-Silicon-Metal-Targets (Host/
-  macOS) setzt. **Metal** lädt ASTC direkt (`MTLPixelFormatASTC_4x4_LDR`, Block-`bytesPerRow` =
-  `ceil(w/4)*16`), mit `supportsFamily:Apple2`-Guard → Intel-Macs überspringen es sauber. GL 4.1/
-  D3D11 überspringen ASTC-Texturen (`format == RGBA8`-Guard); D3D12/Vulkan laden eh keine Content-
-  Texturen. **Encode round-trip-verifiziert** (Cook→ASTC→Decode innerhalb Toleranz); die *GPU-
-  Sampling-Qualität* auf Apple Silicon braucht einen echten Fenster-Run (headless nicht prüfbar).
+  RGBA8-Mip-Stufe pack-time zu ASTC_4x4_LDR (4:1 gegenüber RGBA8, `format`-Byte im `TXMI`-Tail).
+  **Metal** lädt ASTC direkt (`MTLPixelFormatASTC_4x4_LDR`, Block-`bytesPerRow` = `ceil(w/4)*16`),
+  mit `supportsFamily:Apple2`-Guard → Intel-Macs überspringen es sauber. **Encode round-trip-
+  verifiziert** (Cook→ASTC→Decode innerhalb Toleranz); die *GPU-Sampling-Qualität* auf Apple
+  Silicon braucht einen echten Fenster-Run (headless nicht prüfbar).
+- ✅ **GPU-Textur-Kompression: BCn (BC7 + BC3)** (Tier 1 #3, Desktop/GL): vendored, dependency-
+  freie Encoder unter `vendor/bc7enc/` — `bc7enc` (BC7, MIT/PD) in `HorizonCore` kompiliert
+  (`HE_HAVE_BC7ENC`), `stb_dxt` (BC3/DXT5, header-only, `HE_HAVE_STB_DXT`). Alle drei Block-Formate
+  (ASTC/BC7/BC3) sind 16 B/4×4-Block → identische Mip-Byte-Mathematik. `cookTexture(target)`
+  encodet pack-time jede Mip-Stufe; jeder fehlende Encoder/Fehlschlag degradiert die Textur zurück
+  auf RGBA8. `PackSettings::astcTextures` (bool) ersetzt durch `textureCompression` (uint8 =
+  `TextureFormat`), das der Editor automatisch aus Ziel+Backend wählt: **Apple+Metal → ASTC,
+  Apple+OpenGL → BC3** (macOS GL 4.1 sampelt S3TC, weder ASTC noch BC7), **Windows/Linux-Desktop
+  → BC7**. Runtime: **GL** (`GL_COMPRESSED_RGBA_BPTC_UNORM` / `…S3TC_DXT5_EXT` via
+  `glCompressedTexImage2D`, BPTC hinter GL-4.2/ARB-Extension-Check, S3TC via `glGetStringi`),
+  **Vulkan** (`VK_FORMAT_BC7/BC3_UNORM_BLOCK` mit voller Mip-Kette, `vkGetPhysicalDeviceFormat­
+  Properties`-Guard), **D3D11** (`DXGI_FORMAT_BC7/BC3_UNORM`, ein Subresource pro Mip), **D3D12**
+  (`allocAlbedoSlot` via `GetCopyableFootprints`, Mip-Kette), **Metal** (BC7/BC3 auf Intel-Macs via
+  `supportsBCTextureCompression`). Ein Backend, dessen GPU das gelieferte Format nicht sampeln kann,
+  fällt sauber auf flach zurück (nie Crash). **Cook byte-exakt + BC3-Decode-round-trip unit-getestet**
+  (Kanal-Reihenfolge); GL+Metal kompilieren lokal, D3D/Vulkan über Windows/Linux-CI (blind).
+  **Offen:** ein Pak trägt EIN Format pro Textur → auf Apple Silicon können Metal (ASTC) und GL (BC3)
+  nicht gleichzeitig bedient werden; echtes Multi-Variant-Packing wäre ein eigenes Feature.
 - ✅ **Echte-Bounds-Culling** (Tier 2 #7): der Extractor cullt Mesh-Renderables jetzt gegen die
   echte Objekt-AABB (per UUID aus dem ContentManager) statt eines Unit-Cube-Proxys — weniger
   Overdraw/Popping + engere Shadow-Frustum-Fit. Backend-neutral (nur `RenderExtractor` + 1 Setter
@@ -50,9 +66,6 @@ der Packaged-Build die gekochte.
 
 **Bewusst noch NICHT umgesetzt (jeweils mit echtem Blocker — brauchen einen eigenen, verifizierbaren
 Durchgang):**
-- **BC-Textur-Kompression (Desktop/Intel/GL)**: ASTC deckt Apple Silicon ab; für Desktop-GL/D3D/
-  Intel-Mac fehlt noch BC via `stb_dxt` (anderes Cook-Target). Niedrigere Priorität, solange das
-  primäre Ziel Apple-Silicon-Metal ist.
 - **sRGB-Aktivierung**: ändert sichtbare Farben (Albedo sRGB→linear) → braucht visuelle Abnahme +
   Textur-Rollen-Info aus dem Material.
 - **Vertex-/Skinning-Quantisierung**: Shader-Änderungen in allen 5 Backends + visuelle Abnahme.
