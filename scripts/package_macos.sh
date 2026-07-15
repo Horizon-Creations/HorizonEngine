@@ -126,12 +126,39 @@ while [ "$BFS_IDX" -lt "${#BFS_ITEMS[@]}" ]; do
     done < <(otool -L "$CUR" 2>/dev/null | tail -n +2 | awk '{print $1}')
 done
 
-# ─── 6. Resources (Fonts + Images) ────────────────────────────────────────────
-# SDL_GetBasePath() returns Contents/Resources/ for a bundled .app.
+# ─── 6. Resources (Fonts + Images + EngineContent + Game runtime + cmake) ─────
+# SDL_GetBasePath() returns Contents/Resources/ for a bundled .app, so everything the
+# editor loads at runtime — AND the game runtime it copies when EXPORTING a game —
+# must live here. The flat deploy in $DEPLOY_DIR holds the built game runtime + the
+# bundled cmake; the static editor content comes from EditorDeps/.
 echo "--> Copying resources to Contents/Resources/ ..."
 EDITOR_DEPS="$SOURCE_DIR/EditorDeps"
-[ -d "$EDITOR_DEPS/Fonts"  ] && cp -R "$EDITOR_DEPS/Fonts"  "$RES_PATH/"
-[ -d "$EDITOR_DEPS/Images" ] && cp -R "$EDITOR_DEPS/Images" "$RES_PATH/"
+[ -d "$EDITOR_DEPS/Fonts"         ] && cp -R "$EDITOR_DEPS/Fonts"         "$RES_PATH/"
+[ -d "$EDITOR_DEPS/Images"        ] && cp -R "$EDITOR_DEPS/Images"        "$RES_PATH/"
+# EngineContent: the engine's read-only default assets (primitives, default material,
+# fonts, …) the editor loads relative to its base path. Missing it → broken editor.
+[ -d "$EDITOR_DEPS/EngineContent" ] && cp -R "$EDITOR_DEPS/EngineContent" "$RES_PATH/"
+
+# The game runtime: exe + engine dylibs + SDL3 + Python + native deps, already
+# @rpath-relocated + self-contained by the build (scripts/bundle_native_deps.sh).
+# findRuntimeBundle() walks up from SDL_GetBasePath() looking for <dir>/Game, so it
+# goes to Resources/Game. Without it a downloaded editor cannot export a runnable
+# game — the exporter finds no runtime bundle and produces a data-only export.
+if [ -d "$DEPLOY_DIR/Game" ]; then
+    echo "    Game/ runtime → Resources/Game"
+    rm -rf "$RES_PATH/Game"
+    cp -R "$DEPLOY_DIR/Game" "$RES_PATH/Game"
+    # Drop dev-time run artifacts that the deploy may have accumulated.
+    rm -f "$RES_PATH/Game/HorizonEngine.log" "$RES_PATH/Game/imgui.ini"
+else
+    echo "    WARNING: $DEPLOY_DIR/Game not found — the .app will NOT be able to export games."
+    echo "             Build HorizonEditor first (it deploys the game runtime alongside)."
+fi
+
+# Bundled cmake (present only when built with -DHE_BUNDLE_CMAKE=ON) so C++ codegen
+# export works from a downloaded editor without the user installing cmake. resolveCmake()
+# looks for <base>/cmake/bin/cmake, and <base> = SDL_GetBasePath() = Resources.
+[ -d "$DEPLOY_DIR/cmake" ] && { echo "    bundled cmake → Resources/cmake"; cp -R "$DEPLOY_DIR/cmake" "$RES_PATH/cmake"; }
 
 # ─── 6b. App icon (.icns from the HC logo) ────────────────────────────────────
 # Must land in Resources/ and be referenced in Info.plist BEFORE codesign so the
