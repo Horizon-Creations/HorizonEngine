@@ -524,6 +524,46 @@ private:
 	// from the current frame's caster set. No-op (early return) unless GI is
 	// enabled and supported. Shares cmdBuf with EncodeShadowMap/SimulateGpuParticles.
 	void  EncodeGIAccelBuild(void* cmdBuf);
+	// Unique BLAS instances the TLAS built this frame actually references (set by
+	// EncodeGIAccelBuild, consumed by EncodeGIShadowRays/EncodeGIProbeUpdate) — every
+	// compute encoder that traces against m_giTlas must useResource: each of these,
+	// since Metal doesn't auto-track residency through an acceleration structure.
+	std::vector<void*> m_giUniqueBlas;
+
+	// ── Global Illumination: ray-traced shadow pass (Checkpoint B) ──────────────
+	// Replaces CSM's shadowFactor() sampling when GI is active: a half-res
+	// world-space G-buffer (position+normal) pre-pass, one ray-traced occlusion
+	// sample per pixel (jittered within a cone around the sun for a soft
+	// penumbra), temporally accumulated against a ping-pong history (reprojected
+	// via the true previous frame's view-proj — NOT the same-frame m_prepassViewProj
+	// pattern), then a small spatial blur. Result sampled by fragmentMain exactly
+	// like aoTex (screen-space UV, free bilinear upsample from half-res).
+	void* m_giGBufPipeline        = nullptr; // id<MTLRenderPipelineState> (MRT: world pos + normal)
+	void* m_giShadowRayPipeline   = nullptr; // id<MTLComputePipelineState>
+	void* m_giShadowTemporalPipeline = nullptr; // id<MTLRenderPipelineState>
+	void* m_giShadowBlurPipeline  = nullptr; // id<MTLRenderPipelineState>
+	void* m_giGBufPosTex  = nullptr; // id<MTLTexture> RGBA16F world pos, a=1 valid geometry
+	void* m_giGBufNormTex = nullptr; // id<MTLTexture> RGBA16F world normal
+	void* m_giGBufDepth   = nullptr; // id<MTLTexture> depth for the prepass only
+	void* m_giShadowRawTex = nullptr; // id<MTLTexture> R16F raw 1-ray/pixel result (compute-written)
+	void* m_giShadowHistory[2] = { nullptr, nullptr }; // id<MTLTexture> R16F ping-pong temporal history
+	int   m_giShadowHistoryIdx   = 0;
+	bool  m_giShadowHistoryValid = false; // false right after (re)alloc — first frame skips history blend
+	void* m_giShadowResult = nullptr; // id<MTLTexture> R16F final blurred result, sampled by fragmentMain
+	int   m_giShadowW = 0, m_giShadowH = 0;
+	// TRUE previous-frame view-proj (unlike m_prepassViewProj, which is written and
+	// read within the SAME frame for the low-res cloud pre-pass) — written at the
+	// END of EncodeGIShadowRays from the value used THIS frame, so next frame's
+	// reprojection reads last frame's camera, not this frame's.
+	glm::mat4 m_giPrevViewProj    = glm::mat4(1.0f);
+	float     m_giShadowFrameSeed = 0.0f; // increments every GI-active frame, drives cone jitter
+	void  EnsureGIShadowPipelines();              // builds the 4 pipelines above once, only if m_giSupported
+	void  EnsureGIShadowTargets(int width, int height);
+	void  DestroyGIShadowTargets();
+	// No-op (early return) unless GI is enabled/supported/has a built TLAS. Shares
+	// m_renderWorld/m_sortedIndices with EncodeGIAccelBuild (called immediately
+	// before this in the frame, same extract).
+	void  EncodeGIShadowRays(void* cmdBuf, int width, int height);
 
 	// Uploaded asset meshes, keyed by asset UUID
 	std::unordered_map<HE::UUID, GpuMesh>         m_meshCache;

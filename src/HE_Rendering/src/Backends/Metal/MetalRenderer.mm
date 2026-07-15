@@ -34,8 +34,8 @@ namespace {
 constexpr NSUInteger kMaxGpuSamples = 32;
 constexpr uint32_t   kInvalidSlot   = 0xFFFFFFFFu;   // ftPair/ftPoint when over capacity
 // Detailed capture submits the frame as this many command buffers, one per pass:
-// Shadow, GIAccel, SSAO, Scene, Bloom, Tonemap, Present (some may be empty → 0 ms).
-constexpr int        kDetailedPassCount = 7;
+// Shadow, GIAccel, GIShadow, SSAO, Scene, Bloom, Tonemap, Present (some may be empty → 0 ms).
+constexpr int        kDetailedPassCount = 8;
 // Cascaded shadow maps: layer count of the shadow depth-texture array. Must match
 // the extractor's kCascadeCount and the shader's cascade arrays (3).
 constexpr int        kCsmCascades = 3;
@@ -366,6 +366,13 @@ struct SceneUniforms {
 	float4   weather;        // x = wetness, y = snow cover (ground response)
 };
 
+// GI (Checkpoint B): fragmentMain buffer(3). Deliberately separate from
+// SceneUniforms — buffer(1) is claimed by the custom-material lighting path
+// (HE::MaterialShaderLibrary::kMetalLightingBufferIndex).
+struct GIUniforms {
+	int enabled; int pad0, pad1, pad2;
+};
+
 // shared skyColor() injected at the marker below (newLibraryWithSource)
 //#SKYFUNC#
 
@@ -511,7 +518,10 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
                              texturecube<float> skyEnv  [[texture(2)]],
                              sampler          skyEnvSmp [[sampler(2)]],
                              texture2d<float> aoTex     [[texture(3)]],
-                             sampler          aoSmp     [[sampler(3)]])
+                             sampler          aoSmp     [[sampler(3)]],
+                             constant GIUniforms& gi     [[buffer(3)]],
+                             texture2d<float> giShadowTex [[texture(5)]],
+                             sampler          giShadowSmp [[sampler(5)]])
 {
 	float3 albedo = (in.hasTexture > 0.5)
 		? baseColor.sample(smp, float2(in.uv.x, 1.0 - in.uv.y)).rgb * in.color
@@ -593,10 +603,13 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
 		// which are planar view-Z far distances (NOT euclidean radius). Using euclidean
 		// distance here pushes screen-edge pixels into a too-coarse cascade → dropouts.
 		float viewZ = dot(in.worldPos - scene.cameraPos.xyz, scene.cameraFwd.xyz);
-		float sh = (type == 0)
-			? shadowFactor(scene, in.worldPos, N, L, viewZ,
-			               shadowMap, shadowSmp, dbgCascade)
-			: 1.0;
+		// GI replaces CSM entirely when active: a ray-traced, temporally-accumulated
+		// shadow mask (EncodeGIShadowRays) sampled at the same screen-space UV
+		// convention aoTex already uses, instead of the cascade/PCF lookup.
+		float sh = (type != 0) ? 1.0
+			: (gi.enabled != 0
+				? giShadowTex.sample(giShadowSmp, in.position.xy / scene.viewport.xy).r
+				: shadowFactor(scene, in.worldPos, N, L, viewZ, shadowMap, shadowSmp, dbgCascade));
 
 		float diff = max(dot(N, L), 0.0);
 		float3 H   = normalize(L + V);
@@ -1087,6 +1100,165 @@ fragment float4 ssaoBlurFragment(SSAOOut in [[stage_in]],
 			sum += ao.sample(s, in.uv + float2(float(x), float(y)) * texel).r;
 	float v = sum / 16.0;
 	return float4(v, v, v, 1.0);
+}
+)MSL";
+
+// ─── Global Illumination: ray-traced shadow pass ─────────────────────────────
+// World-space G-buffer pre-pass + 1-ray/pixel occlusion query against the TLAS
+// EncodeGIAccelBuild built this frame + temporal accumulation + spatial blur.
+// Requires MSL 2.4 (macOS 12+) for intersection_query — matches the capability
+// gate MetalRenderer::EnsureRaytracingSupport already enforces.
+static const char* kGIShadowMSL = R"MSL(
+#include <metal_stdlib>
+#include <metal_raytracing>
+using namespace metal;
+using namespace raytracing;
+
+struct GIVertexIn { packed_float3 position; packed_float3 normal; packed_float2 uv; };
+struct GIPosUniforms { float4x4 mvp; float4x4 model; };
+struct GIPosOut { float4 position [[position]]; float3 worldPos; float3 normal; };
+
+// World-space position + normal, unlike ssaoPosVertex (view-space, no normal) —
+// ray tracing needs a world-space origin/direction.
+vertex GIPosOut giGBufVertex(uint vid [[vertex_id]],
+                             const device GIVertexIn* verts [[buffer(0)]],
+                             constant GIPosUniforms&  u     [[buffer(1)]])
+{
+	GIPosOut o;
+	float4 p = float4(float3(verts[vid].position), 1.0);
+	o.position = u.mvp * p;
+	o.worldPos = (u.model * p).xyz;
+	float3x3 m3 = float3x3(u.model[0].xyz, u.model[1].xyz, u.model[2].xyz);
+	o.normal   = m3 * float3(verts[vid].normal);
+	return o;
+}
+struct GIGBufOut { float4 posOut [[color(0)]]; float4 normOut [[color(1)]]; };
+fragment GIGBufOut giGBufFragment(GIPosOut in [[stage_in]])
+{
+	GIGBufOut o;
+	o.posOut  = float4(in.worldPos, 1.0);            // a = 1 → valid geometry
+	o.normOut = float4(normalize(in.normal), 0.0);
+	return o;
+}
+
+struct GIShadowParams {
+	float4 sunDirRadius; // xyz = direction TOWARD the light (world space), w = angular radius (radians)
+	float4 frame;        // x = jitter seed, y = tex width, z = tex height, w unused
+};
+
+// Interleaved-gradient-noise-style hash → two independent [0,1) values per
+// pixel/frame, so successive frames sample different points in the light cone
+// (the temporal pass turns this into a soft penumbra without more rays/pixel).
+static float2 giHash2(uint2 gid, float seed)
+{
+	float2 p = float2(gid) + seed * 13.37;
+	return float2(fract(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453),
+	              fract(sin(dot(p, float2(39.3468, 11.1352))) * 24634.6345));
+}
+// Uniform disk sample mapped into a cone around L (small-angle approximation —
+// fine for the sun's ~0.25-3° angular radius this drives).
+static float3 giConeSample(float3 L, float angleRad, float2 xi)
+{
+	float3 up = (abs(L.y) < 0.99) ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
+	float3 T  = normalize(cross(up, L));
+	float3 B  = cross(L, T);
+	float  r   = sin(angleRad) * sqrt(xi.x);
+	float  phi = 6.28318530718 * xi.y;
+	return normalize(L + T * (r * cos(phi)) + B * (r * sin(phi)));
+}
+
+// One shadow ray per pixel toward the dominant directional light. Every BLAS in
+// the TLAS is opaque (BuildBLAS sets geom.opaque=YES) and accept_any_intersection
+// is set, so the first hit commits — a boolean occlusion test, no closest-hit
+// search needed.
+kernel void giShadowRay(uint2 gid [[thread_position_in_grid]],
+                        texture2d<float, access::read>  gPos      [[texture(0)]],
+                        texture2d<float, access::read>  gNorm     [[texture(1)]],
+                        texture2d<float, access::write> outShadow [[texture(2)]],
+                        instance_acceleration_structure accel     [[buffer(0)]],
+                        constant GIShadowParams&         P         [[buffer(1)]])
+{
+	if (float(gid.x) >= P.frame.y || float(gid.y) >= P.frame.z) return;
+	float4 pv = gPos.read(gid);
+	if (pv.a < 0.5) { outShadow.write(float4(1.0), gid); return; } // background → unoccluded
+	float3 N = normalize(gNorm.read(gid).xyz);
+	float3 L = P.sunDirRadius.xyz;
+	// Grazing/back-facing relative to the light: direct lighting's dot(N,L) term
+	// already zeroes this out, so skip the trace entirely.
+	if (dot(N, L) <= 0.0) { outShadow.write(float4(0.0), gid); return; }
+
+	float2 xi  = giHash2(gid, P.frame.x);
+	float3 dir = giConeSample(L, max(P.sunDirRadius.w, 1e-4), xi);
+
+	ray r;
+	r.origin       = pv.xyz + N * 0.02; // normal-offset bias, world units
+	r.direction    = dir;
+	r.min_distance = 0.001;
+	r.max_distance = 10000.0;
+
+	intersection_params params;
+	params.accept_any_intersection(true);
+	intersection_query<triangle_data, instancing> q;
+	q.reset(r, accel, params);
+	q.next();
+	const float shadow = (q.get_committed_intersection_type() == intersection_type::none) ? 1.0 : 0.0;
+	outShadow.write(float4(shadow), gid);
+}
+
+struct GIFsOut { float4 position [[position]]; float2 uv; };
+vertex GIFsOut giFsVertex(uint vid [[vertex_id]])
+{
+	float x = float((vid & 1) << 2) - 1.0;
+	float y = float((vid & 2) << 1) - 1.0;
+	GIFsOut o;
+	o.position = float4(x, y, 0.0, 1.0);
+	o.uv       = float2(x * 0.5 + 0.5, 1.0 - (y * 0.5 + 0.5));
+	return o;
+}
+
+struct GITemporalParams { float4x4 prevViewProj; float4 blend; }; // blend.x = history weight (0 on first activation frame)
+
+// Reproject last frame's accumulated shadow value via this pixel's world
+// position and blend it with the new raw sample. Validity test is UV-bounds
+// only (no world-position match against the previous frame's G-buffer) — a v1
+// simplification: a bad reproject costs one frame of lag/ghosting on disocclusion,
+// never a crash or a stuck result. Matches the project's "faithful base
+// algorithm, not the fully hardened version" scope for this GI slice.
+fragment float4 giShadowTemporal(GIFsOut in [[stage_in]],
+                                 texture2d<float> gPos    [[texture(0)]],
+                                 texture2d<float> raw     [[texture(1)]],
+                                 texture2d<float> history [[texture(2)]],
+                                 sampler          smp     [[sampler(0)]],
+                                 constant GITemporalParams& P [[buffer(0)]])
+{
+	float4 pv   = gPos.sample(smp, in.uv);
+	float  rawV = raw.sample(smp, in.uv).r;
+	if (pv.a < 0.5) return float4(rawV, 0.0, 0.0, 1.0); // background: no history to reproject
+
+	float4 clip = P.prevViewProj * float4(pv.xyz, 1.0);
+	if (clip.w <= 0.0) return float4(rawV, 0.0, 0.0, 1.0);
+	float2 ndc    = clip.xy / clip.w;
+	float2 prevUV = float2(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
+	if (any(prevUV < 0.0) || any(prevUV > 1.0))
+		return float4(rawV, 0.0, 0.0, 1.0); // off-screen last frame → no history
+
+	float histV  = history.sample(smp, prevUV).r;
+	float w      = clamp(P.blend.x, 0.0, 0.98);
+	float result = mix(rawV, histV, w);
+	return float4(result, 0.0, 0.0, 1.0);
+}
+
+fragment float4 giShadowBlur(GIFsOut in [[stage_in]],
+                             texture2d<float> src [[texture(0)]],
+                             sampler          smp [[sampler(0)]])
+{
+	float2 texel = 1.0 / float2(src.get_width(), src.get_height());
+	float sum = 0.0;
+	for (int x = -1; x <= 1; ++x)
+		for (int y = -1; y <= 1; ++y)
+			sum += src.sample(smp, in.uv + float2(float(x), float(y)) * texel).r;
+	float v = sum / 9.0;
+	return float4(v, 0.0, 0.0, 1.0);
 }
 )MSL";
 
@@ -2657,6 +2829,32 @@ struct SSAOParamsCPU
 	glm::vec4 samples[32];  // hemisphere kernel (xyz)
 };
 
+// GI (Checkpoint B): matches the MSL GIUniforms struct at fragmentMain's
+// buffer(3). Deliberately a SEPARATE struct from SceneUniforms (not grown into
+// it) — buffer(1) is already claimed by HE::MaterialShaderLibrary::
+// kMetalLightingBufferIndex for the custom-material path, so GI uses buffer(3)
+// (verified free — see EncodeScene's binding table).
+struct GIUniforms
+{
+	int32_t enabled = 0;
+	int32_t pad0 = 0, pad1 = 0, pad2 = 0;
+};
+static_assert(sizeof(GIUniforms) == 16, "GIUniforms must stay byte-identical to its MSL twin");
+
+// Matches the MSL GIPosUniforms / GIShadowParams / GITemporalParams structs
+// (kGIShadowMSL, used only by EncodeGIShadowRays).
+struct GIPosUniformsCPU { glm::mat4 mvp; glm::mat4 model; };
+struct GIShadowParamsCPU
+{
+	glm::vec4 sunDirRadius; // xyz = direction TOWARD the light, w = angular radius (radians)
+	glm::vec4 frame;        // x = jitter seed, y = tex width, z = tex height, w unused
+};
+struct GITemporalParamsCPU
+{
+	glm::mat4 prevViewProj;
+	glm::vec4 blend; // x = history weight (0 on first activation frame), y/z = tex width/height, w unused
+};
+
 // Matches the MSL SkyParams struct.
 struct SkyParams
 {
@@ -2717,6 +2915,10 @@ void MetalRenderer::Initialize(HE::Window* window)
 	CreateDebugLinePipeline();
 	CreateParticlePipeline();
 	EnsureShadowResources();
+	// GI shadow-ray pipelines use MSL 2.4 (intersection_query, macOS 12+) — only
+	// build them on devices/OS that actually support it, so unsupported systems
+	// never pay the compile cost or risk a compile failure on older toolchains.
+	if (m_giSupported) EnsureGIShadowPipelines();
 
 	// Persistent pass descriptor describing the swapchain attachment layout.
 	// ImGui_ImplMetal_NewFrame() only inspects attachment formats / sample
@@ -2800,10 +3002,16 @@ void MetalRenderer::Shutdown()
 	DestroyCloudTarget();
 	DestroyLdrTarget();
 	DestroySSAOTargets();
+	DestroyGIShadowTargets();
 	DrainRetiredTextures();
 	DrainRetiredGIObjects();
 	if (m_giTlas)           { CFBridgingRelease(m_giTlas);           m_giTlas = nullptr; }
 	if (m_giInstanceBuffer) { CFBridgingRelease(m_giInstanceBuffer); m_giInstanceBuffer = nullptr; }
+	m_giUniqueBlas.clear();
+	if (m_giGBufPipeline)           { CFBridgingRelease(m_giGBufPipeline);           m_giGBufPipeline = nullptr; }
+	if (m_giShadowRayPipeline)      { CFBridgingRelease(m_giShadowRayPipeline);      m_giShadowRayPipeline = nullptr; }
+	if (m_giShadowTemporalPipeline) { CFBridgingRelease(m_giShadowTemporalPipeline); m_giShadowTemporalPipeline = nullptr; }
+	if (m_giShadowBlurPipeline)     { CFBridgingRelease(m_giShadowBlurPipeline);     m_giShadowBlurPipeline = nullptr; }
 	// Reset so a re-Initialize() re-probes ray-tracing support instead of keeping
 	// a stale (possibly wrong-device) cached result.
 	m_giRaytracingChecked = false;
@@ -3521,6 +3729,7 @@ void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr)
 		// until Shutdown(). No-op (RetireGIObject ignores null) once already clear.
 		RetireGIObject(m_giTlas);           m_giTlas           = nullptr;
 		RetireGIObject(m_giInstanceBuffer); m_giInstanceBuffer = nullptr;
+		m_giUniqueBlas.clear();
 		return;
 	}
 
@@ -3538,6 +3747,7 @@ void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr)
 
 	RetireGIObject(m_giTlas);           m_giTlas           = nullptr;
 	RetireGIObject(m_giInstanceBuffer); m_giInstanceBuffer = nullptr;
+	m_giUniqueBlas.clear();
 	if (m_renderWorld.objects.empty()) return;
 
 	if (@available(macOS 12.0, *))
@@ -3624,6 +3834,251 @@ void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr)
 
 		m_giTlas           = (void*)CFBridgingRetain(tlas);
 		m_giInstanceBuffer = (void*)CFBridgingRetain(instanceBuf);
+		// Cache the unique-BLAS set for EncodeGIShadowRays/EncodeGIProbeUpdate — every
+		// compute encoder that traces against m_giTlas must useResource: each of
+		// these too (same residency requirement as the build encoder above).
+		m_giUniqueBlas.clear();
+		m_giUniqueBlas.reserve(uniqueBlas.size());
+		for (id<MTLAccelerationStructure> b : uniqueBlas)
+			m_giUniqueBlas.push_back((__bridge void*)b);
+	}
+}
+
+void MetalRenderer::EnsureGIShadowPipelines()
+{
+	if (m_giGBufPipeline) return; // already built
+	@autoreleasepool
+	{
+		id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+		NSError* error = nil;
+		id<MTLLibrary> lib = [device newLibraryWithSource:
+			[NSString stringWithUTF8String:kGIShadowMSL] options:nil error:&error];
+		if (!lib)
+		{
+			Logger::Log(Logger::LogLevel::Error,
+				(std::string("MetalRenderer: GI shadow shader compile failed: ")
+				 + (error ? [[error localizedDescription] UTF8String] : "unknown")).c_str());
+			return;
+		}
+
+		// G-buffer pre-pass: MRT (world pos + normal), own small depth target.
+		MTLRenderPipelineDescriptor* gDesc = [[MTLRenderPipelineDescriptor alloc] init];
+		gDesc.vertexFunction   = [lib newFunctionWithName:@"giGBufVertex"];
+		gDesc.fragmentFunction = [lib newFunctionWithName:@"giGBufFragment"];
+		gDesc.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
+		gDesc.colorAttachments[1].pixelFormat = MTLPixelFormatRGBA16Float;
+		gDesc.depthAttachmentPixelFormat      = kDepthFormat;
+		id<MTLRenderPipelineState> gPso = [device newRenderPipelineStateWithDescriptor:gDesc error:&error];
+		if (gPso) m_giGBufPipeline = (void*)CFBridgingRetain(gPso);
+		else      Logger::Log(Logger::LogLevel::Error, "MetalRenderer: GI G-buffer pipeline creation failed");
+
+		// Ray-traced shadow compute kernel.
+		id<MTLFunction> rayFn = [lib newFunctionWithName:@"giShadowRay"];
+		id<MTLComputePipelineState> rayPso = [device newComputePipelineStateWithFunction:rayFn error:&error];
+		if (rayPso) m_giShadowRayPipeline = (void*)CFBridgingRetain(rayPso);
+		else        Logger::Log(Logger::LogLevel::Error, "MetalRenderer: GI shadow-ray pipeline creation failed");
+
+		// Temporal accumulation (fullscreen triangle, single R-channel output).
+		MTLRenderPipelineDescriptor* tDesc = [[MTLRenderPipelineDescriptor alloc] init];
+		tDesc.vertexFunction   = [lib newFunctionWithName:@"giFsVertex"];
+		tDesc.fragmentFunction = [lib newFunctionWithName:@"giShadowTemporal"];
+		tDesc.colorAttachments[0].pixelFormat = MTLPixelFormatR16Float;
+		id<MTLRenderPipelineState> tPso = [device newRenderPipelineStateWithDescriptor:tDesc error:&error];
+		if (tPso) m_giShadowTemporalPipeline = (void*)CFBridgingRetain(tPso);
+		else      Logger::Log(Logger::LogLevel::Error, "MetalRenderer: GI shadow-temporal pipeline creation failed");
+
+		// Spatial blur (fullscreen triangle, single R-channel output).
+		MTLRenderPipelineDescriptor* bDesc = [[MTLRenderPipelineDescriptor alloc] init];
+		bDesc.vertexFunction   = [lib newFunctionWithName:@"giFsVertex"];
+		bDesc.fragmentFunction = [lib newFunctionWithName:@"giShadowBlur"];
+		bDesc.colorAttachments[0].pixelFormat = MTLPixelFormatR16Float;
+		id<MTLRenderPipelineState> bPso = [device newRenderPipelineStateWithDescriptor:bDesc error:&error];
+		if (bPso) m_giShadowBlurPipeline = (void*)CFBridgingRetain(bPso);
+		else      Logger::Log(Logger::LogLevel::Error, "MetalRenderer: GI shadow-blur pipeline creation failed");
+	}
+}
+
+void MetalRenderer::EnsureGIShadowTargets(int width, int height)
+{
+	width  = std::max(1, width);
+	height = std::max(1, height);
+	if (m_giGBufPosTex && width == m_giShadowW && height == m_giShadowH) return;
+	DestroyGIShadowTargets();
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+
+	MTLTextureDescriptor* posDesc = [MTLTextureDescriptor
+		texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float width:width height:height mipmapped:NO];
+	posDesc.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+	posDesc.storageMode = MTLStorageModePrivate;
+	m_giGBufPosTex  = (void*)CFBridgingRetain([device newTextureWithDescriptor:posDesc]);
+	m_giGBufNormTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:posDesc]);
+
+	MTLTextureDescriptor* dDesc = [MTLTextureDescriptor
+		texture2DDescriptorWithPixelFormat:kDepthFormat width:width height:height mipmapped:NO];
+	dDesc.usage       = MTLTextureUsageRenderTarget;
+	dDesc.storageMode = MTLStorageModePrivate;
+	m_giGBufDepth = (void*)CFBridgingRetain([device newTextureWithDescriptor:dDesc]);
+
+	MTLTextureDescriptor* rawDesc = [MTLTextureDescriptor
+		texture2DDescriptorWithPixelFormat:MTLPixelFormatR16Float width:width height:height mipmapped:NO];
+	rawDesc.usage       = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+	rawDesc.storageMode = MTLStorageModePrivate;
+	m_giShadowRawTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:rawDesc]);
+
+	MTLTextureDescriptor* histDesc = [MTLTextureDescriptor
+		texture2DDescriptorWithPixelFormat:MTLPixelFormatR16Float width:width height:height mipmapped:NO];
+	histDesc.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+	histDesc.storageMode = MTLStorageModePrivate;
+	m_giShadowHistory[0] = (void*)CFBridgingRetain([device newTextureWithDescriptor:histDesc]);
+	m_giShadowHistory[1] = (void*)CFBridgingRetain([device newTextureWithDescriptor:histDesc]);
+	m_giShadowResult     = (void*)CFBridgingRetain([device newTextureWithDescriptor:histDesc]);
+
+	m_giShadowHistoryIdx   = 0;
+	m_giShadowHistoryValid = false; // fresh (undefined-content) textures — first frame skips the history blend
+	m_giShadowW = width; m_giShadowH = height;
+}
+
+void MetalRenderer::DestroyGIShadowTargets()
+{
+	if (m_giGBufPosTex)       { CFBridgingRelease(m_giGBufPosTex);       m_giGBufPosTex = nullptr; }
+	if (m_giGBufNormTex)      { CFBridgingRelease(m_giGBufNormTex);      m_giGBufNormTex = nullptr; }
+	if (m_giGBufDepth)        { CFBridgingRelease(m_giGBufDepth);        m_giGBufDepth = nullptr; }
+	if (m_giShadowRawTex)     { CFBridgingRelease(m_giShadowRawTex);     m_giShadowRawTex = nullptr; }
+	if (m_giShadowHistory[0]) { CFBridgingRelease(m_giShadowHistory[0]); m_giShadowHistory[0] = nullptr; }
+	if (m_giShadowHistory[1]) { CFBridgingRelease(m_giShadowHistory[1]); m_giShadowHistory[1] = nullptr; }
+	if (m_giShadowResult)     { CFBridgingRelease(m_giShadowResult);     m_giShadowResult = nullptr; }
+	m_giShadowHistoryValid = false;
+	m_giShadowW = m_giShadowH = 0;
+}
+
+void MetalRenderer::EncodeGIShadowRays(void* cmdBufPtr, int width, int height)
+{
+	if (!m_giEnabled || !m_giSupported || !m_giTlas || !m_world) return;
+	EnsureGIShadowPipelines();
+	if (!m_giGBufPipeline || !m_giShadowRayPipeline || !m_giShadowTemporalPipeline || !m_giShadowBlurPipeline)
+		return;
+	if (width <= 0 || height <= 0) return;
+
+	EnsureGIShadowTargets(width, height);
+
+	// m_renderWorld was already extracted this frame by EncodeGIAccelBuild (same
+	// day-night/camera state); this pass just needs its own frustum cull/sort for
+	// the G-buffer rasterization (EncodeGIAccelBuild's caster loop is unculled —
+	// rays go in arbitrary directions — but the G-buffer is a normal camera-facing
+	// raster pass, and covers ALL objects, not just casters, since every shaded
+	// pixel needs a shadow value, not just occluders).
+	m_culler.cull(m_renderWorld, m_visible);
+	m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
+	if (m_sortedIndices.empty()) return;
+
+	const glm::mat4 viewProj = m_renderWorld.camera.projection * m_renderWorld.camera.view;
+
+	@autoreleasepool
+	{
+		id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
+
+		// ── 1. World-space G-buffer pre-pass (position + normal, half-res) ──────
+		MTLRenderPassDescriptor* gp = [MTLRenderPassDescriptor renderPassDescriptor];
+		gp.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_giGBufPosTex;
+		gp.colorAttachments[0].loadAction  = MTLLoadActionClear;
+		gp.colorAttachments[0].storeAction = MTLStoreActionStore;
+		gp.colorAttachments[0].clearColor  = MTLClearColorMake(0.0, 0.0, 0.0, 0.0); // a = 0 → background
+		gp.colorAttachments[1].texture     = (__bridge id<MTLTexture>)m_giGBufNormTex;
+		gp.colorAttachments[1].loadAction  = MTLLoadActionClear;
+		gp.colorAttachments[1].storeAction = MTLStoreActionStore;
+		gp.depthAttachment.texture     = (__bridge id<MTLTexture>)m_giGBufDepth;
+		gp.depthAttachment.loadAction  = MTLLoadActionClear;
+		gp.depthAttachment.storeAction = MTLStoreActionDontCare;
+		gp.depthAttachment.clearDepth  = 1.0;
+		id<MTLRenderCommandEncoder> genc = [cmdBuf renderCommandEncoderWithDescriptor:gp];
+		[genc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_giGBufPipeline];
+		[genc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
+		HE::UUID lastId{}; const GpuMesh* cMesh = nullptr; bool valid = false;
+		for (uint32_t idx : m_sortedIndices)
+		{
+			const RenderObject& obj = m_renderWorld.objects[idx];
+			GIPosUniformsCPU u;
+			u.mvp   = viewProj * obj.transform;
+			u.model = obj.transform;
+			if (!valid || obj.meshAssetId != lastId)
+			{ cMesh = ResolveMesh(obj.meshAssetId); lastId = obj.meshAssetId; valid = true; }
+			const GpuMesh* drawMesh = cMesh ? cMesh : ResolveMesh(HE::kDefaultCubeMeshId);
+			if (!drawMesh) continue;
+			id<MTLBuffer> vbuf = (__bridge id<MTLBuffer>)drawMesh->vertexBuf;
+			id<MTLBuffer> ibuf = (__bridge id<MTLBuffer>)drawMesh->indexBuf;
+			NSUInteger    ic   = (NSUInteger)drawMesh->indexCount;
+			[genc setVertexBuffer:vbuf offset:0 atIndex:0];
+			[genc setVertexBytes:&u length:sizeof(u) atIndex:1];
+			[genc drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:ic
+			                  indexType:MTLIndexTypeUInt32 indexBuffer:ibuf indexBufferOffset:0];
+		}
+		[genc endEncoding];
+
+		// ── 2. Ray-traced occlusion (compute) ───────────────────────────────
+		id<MTLComputeCommandEncoder> cenc = [cmdBuf computeCommandEncoder];
+		[cenc setComputePipelineState:(__bridge id<MTLComputePipelineState>)m_giShadowRayPipeline];
+		[cenc setTexture:(__bridge id<MTLTexture>)m_giGBufPosTex atIndex:0];
+		[cenc setTexture:(__bridge id<MTLTexture>)m_giGBufNormTex atIndex:1];
+		[cenc setTexture:(__bridge id<MTLTexture>)m_giShadowRawTex atIndex:2];
+		[cenc setAccelerationStructure:(__bridge id<MTLAccelerationStructure>)m_giTlas atBufferIndex:0];
+		GIShadowParamsCPU sp;
+		// m_renderWorld.sunDirection is already "direction TOWARD the sun" (see the
+		// extractor's own comment above EncodeScene's sky pass) — unlike a light
+		// entry's dirSpot.xyz (light travel direction, negated in fragmentMain's
+		// L = normalize(-l.dirSpot.xyz)). No negation needed here.
+		sp.sunDirRadius = glm::vec4(glm::normalize(m_renderWorld.sunDirection), glm::radians(m_giLightRadius));
+		m_giShadowFrameSeed += 1.0f;
+		sp.frame = glm::vec4(m_giShadowFrameSeed, static_cast<float>(width), static_cast<float>(height), 0.0f);
+		[cenc setBytes:&sp length:sizeof(sp) atIndex:1];
+		// Every BLAS the TLAS references must be explicitly declared used — Metal
+		// does not auto-track residency through an acceleration structure.
+		[cenc useResource:(__bridge id<MTLAccelerationStructure>)m_giTlas usage:MTLResourceUsageRead];
+		for (void* b : m_giUniqueBlas)
+			[cenc useResource:(__bridge id<MTLAccelerationStructure>)b usage:MTLResourceUsageRead];
+		const MTLSize tgSize  = MTLSizeMake(8, 8, 1);
+		const MTLSize tgCount = MTLSizeMake((NSUInteger)((width + 7) / 8), (NSUInteger)((height + 7) / 8), 1);
+		[cenc dispatchThreadgroups:tgCount threadsPerThreadgroup:tgSize];
+		[cenc endEncoding];
+
+		// ── 3. Temporal accumulation (reproject + blend into ping-pong history) ─
+		const int curIdx  = m_giShadowHistoryIdx;
+		const int prevIdx = 1 - curIdx;
+		{
+			MTLRenderPassDescriptor* tp = [MTLRenderPassDescriptor renderPassDescriptor];
+			tp.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_giShadowHistory[curIdx];
+			tp.colorAttachments[0].loadAction  = MTLLoadActionDontCare;
+			tp.colorAttachments[0].storeAction = MTLStoreActionStore;
+			id<MTLRenderCommandEncoder> tenc = [cmdBuf renderCommandEncoderWithDescriptor:tp];
+			[tenc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_giShadowTemporalPipeline];
+			[tenc setFragmentTexture:(__bridge id<MTLTexture>)m_giGBufPosTex atIndex:0];
+			[tenc setFragmentTexture:(__bridge id<MTLTexture>)m_giShadowRawTex atIndex:1];
+			[tenc setFragmentTexture:(__bridge id<MTLTexture>)m_giShadowHistory[prevIdx] atIndex:2];
+			[tenc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_ssaoPointSampler atIndex:0];
+			GITemporalParamsCPU tparams;
+			tparams.prevViewProj = m_giPrevViewProj;
+			tparams.blend = glm::vec4(m_giShadowHistoryValid ? 0.9f : 0.0f,
+			                          static_cast<float>(width), static_cast<float>(height), 0.0f);
+			[tenc setFragmentBytes:&tparams length:sizeof(tparams) atIndex:0];
+			[tenc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+			[tenc endEncoding];
+		}
+		m_giShadowHistoryValid = true;
+		m_giShadowHistoryIdx   = prevIdx;
+		m_giPrevViewProj       = viewProj; // for NEXT frame's reprojection
+
+		// ── 4. Spatial blur → final result fragmentMain samples ─────────────
+		{
+			MTLRenderPassDescriptor* bp = [MTLRenderPassDescriptor renderPassDescriptor];
+			bp.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_giShadowResult;
+			bp.colorAttachments[0].loadAction  = MTLLoadActionDontCare;
+			bp.colorAttachments[0].storeAction = MTLStoreActionStore;
+			id<MTLRenderCommandEncoder> benc = [cmdBuf renderCommandEncoderWithDescriptor:bp];
+			[benc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_giShadowBlurPipeline];
+			[benc setFragmentTexture:(__bridge id<MTLTexture>)m_giShadowHistory[curIdx] atIndex:0];
+			[benc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
+			[benc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+			[benc endEncoding];
+		}
 	}
 }
 
@@ -5916,6 +6371,12 @@ void MetalRenderer::EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& v
 	const bool ssaoActive = m_ssaoEnabled && m_ssaoResult;
 	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(ssaoActive ? m_ssaoResult : m_dummyTexture) atIndex:3];
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:3];
+	const bool giActive = m_giEnabled && m_giSupported && m_giShadowResult;
+	GIUniforms giUniforms{};
+	giUniforms.enabled = giActive ? 1 : 0;
+	[encoder setFragmentBytes:&giUniforms length:sizeof(giUniforms) atIndex:3];
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giShadowResult : m_dummyTexture) atIndex:5];
+	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:5];
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
 
 	constexpr int kMaxBones = 128;
@@ -6131,6 +6592,14 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(ssaoActive ? m_ssaoResult : m_dummyTexture) atIndex:3];
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:3];
 
+	// GI shadow mask on slot 5 (filled by EncodeGIShadowRays before this pass, only
+	// when GI is active). Bound to the white dummy otherwise, same convention as
+	// aoTex. Slot 4 deliberately skipped — custom-material node graphs can occupy
+	// fragment texture/sampler 1-4 with up to kMatMaxGraphTextures graph textures.
+	const bool giActive = m_giEnabled && m_giSupported && m_giShadowResult;
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giShadowResult : m_dummyTexture) atIndex:5];
+	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:5];
+
 	// ── Lights (clamped to the shader's 8) ──────────────────────────────────
 	// Kept at function scope so the transparency pass below can re-bind it after
 	// the sky pass clobbers the fragment buffer.
@@ -6170,6 +6639,10 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 	                                ssaoActive ? 1.0f : 0.0f, 0.0f);
 	scene.weather       = glm::vec4(GetEnvironment().wetness, GetEnvironment().snowAmount, 0.0f, 0.0f);
 	[encoder setFragmentBytes:&scene length:sizeof(scene) atIndex:0];
+
+	GIUniforms giUniforms{};
+	giUniforms.enabled = giActive ? 1 : 0;
+	[encoder setFragmentBytes:&giUniforms length:sizeof(giUniforms) atIndex:3];
 
 #if defined(HE_HAVE_SHADERC)
 	// Compact "material lighting ABI" for custom-shader materials (M2 std-lit). Bound at
@@ -6451,6 +6924,9 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:2];
 		[encoder setFragmentTexture:(__bridge id<MTLTexture>)(ssaoActive ? m_ssaoResult : m_dummyTexture) atIndex:3];
 		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:3];
+		[encoder setFragmentBytes:&giUniforms length:sizeof(giUniforms) atIndex:3];
+		[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giShadowResult : m_dummyTexture) atIndex:5];
+		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:5];
 		void* tpBound = (__bridge void*)(__bridge id<MTLRenderPipelineState>)m_sceneBlendPipeline;
 		for (const TPDraw& t : transparent)
 		{
@@ -6648,13 +7124,17 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 		// Encoded before acquiring the drawable so the editor viewport texture
 		// is produced even when the window has no drawable (occluded/background).
 		// Only the swapchain present below needs the drawable.
+		// Hoisted out of the isPrimary block below (not just const-local there) so
+		// EncodeGIShadowRays further down can reuse the same offscreen-viewport-or-
+		// window sizing without recomputing it — harmless (== pw/ph) when !isPrimary.
+		int shW = pw, shH = ph;
 		if (isPrimary)
 		{
 			// Shadow cascades MUST be fit with the SAME aspect the scene pass uses
 			// (below), else render≠sample cascade matrices → shadow swimming.
-			const bool  shOff = m_viewportReqW > 0 && m_viewportReqH > 0;
-			const int   shW   = shOff ? (int)m_viewportReqW : pw;
-			const int   shH   = shOff ? (int)m_viewportReqH : ph;
+			const bool shOff = m_viewportReqW > 0 && m_viewportReqH > 0;
+			shW = shOff ? (int)m_viewportReqW : pw;
+			shH = shOff ? (int)m_viewportReqH : ph;
 			EncodeShadowMap((__bridge void*)cmdBuf,
 			                shH > 0 ? static_cast<float>(shW) / static_cast<float>(shH) : 1.0f);
 		}
@@ -6669,11 +7149,21 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 		// Ray-traced GI acceleration structures (BLAS/TLAS): lazy per-mesh BLAS +
 		// a full TLAS rebuild from this frame's caster set. No-op (early return)
 		// unless GI is enabled and the device/OS supports ray tracing — CSM/AO stay
-		// byte-identical to today in that case. Nothing consumes the TLAS yet; the
-		// ray-traced shadow and DDGI probe passes that do land in later checkpoints.
+		// byte-identical to today in that case.
 		if (isPrimary)
 			EncodeGIAccelBuild((__bridge void*)cmdBuf);
-		flushPass("SSAO");   // detailed: commit the GIAccel command buffer (empty if GI off)
+		flushPass("GIShadow");   // detailed: commit the GIAccel command buffer (empty if GI off)
+
+		// Ray-traced shadows (replaces CSM's shadowFactor() sampling when GI is
+		// active): half-res world-space G-buffer + 1 ray/pixel + temporal
+		// accumulation + spatial blur — same half-res convention as EncodeSSAO
+		// below (halved at the call site, not inside the function). shW/shH match
+		// what the scene pass will use (offscreen-viewport-or-window sizing),
+		// computed above for the CSM cascade fit. No-op (early return) unless GI
+		// is enabled/supported and EncodeGIAccelBuild actually built a TLAS.
+		if (isPrimary)
+			EncodeGIShadowRays((__bridge void*)cmdBuf, std::max(1, shW / 2), std::max(1, shH / 2));
+		flushPass("SSAO");   // detailed: commit the GIShadow command buffer (empty if GI off)
 
 		const bool offscreen = isPrimary && m_viewportReqW > 0 && m_viewportReqH > 0;
 		if (isPrimary)
