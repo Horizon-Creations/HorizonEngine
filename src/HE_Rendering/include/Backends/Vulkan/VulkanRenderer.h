@@ -103,7 +103,8 @@ private:
 	void           createMaterialResources();
 	void           destroyMaterialResources();
 	VkPipeline     getOrBuildMaterialPipeline(uint64_t hash, const std::string& frag,
-	                                           const std::string& vertBody, bool hdr);
+	                                           const std::string& vertBody, bool hdr,
+	                                           bool transparent);
 	void           DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t height, bool hdr = false);
 	VkShaderModule loadShaderModule(const char* spvFileName);
 	uint32_t       findMemoryType(uint32_t typeBits, VkMemoryPropertyFlags props) const;

@@ -1880,12 +1880,14 @@ void VulkanRenderer::destroyMaterialResources()
 }
 
 VkPipeline VulkanRenderer::getOrBuildMaterialPipeline(uint64_t hash, const std::string& frag,
-                                                      const std::string& vertBody, bool hdr)
+                                                      const std::string& vertBody, bool hdr,
+                                                      bool transparent)
 {
 #if defined(HE_HAVE_SHADERC)
-    // Cache key mixes the shader hash with the render-target variant so LDR (swapchain)
-    // and HDR (RGBA16F offscreen) pipelines never collide — they use incompatible passes.
-    const uint64_t key = hash ^ (hdr ? 0x9E3779B97F4A7C15ULL : 0ULL);
+    // Cache key mixes the shader hash with the render-target + blend variant so LDR (swapchain)
+    // / HDR (RGBA16F offscreen) / opaque / transparent pipelines never collide.
+    const uint64_t key = hash ^ (hdr ? 0x9E3779B97F4A7C15ULL : 0ULL)
+                              ^ (transparent ? 0xD1B54A32D192ED03ULL : 0ULL);
     if (auto it = m_materialPipelines.find(key); it != m_materialPipelines.end()) return it->second;
 
     VkRenderPass rp = hdr ? m_postFxSceneRP : m_renderPass;
@@ -1957,11 +1959,23 @@ VkPipeline VulkanRenderer::getOrBuildMaterialPipeline(uint64_t hash, const std::
     ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
     VkPipelineDepthStencilStateCreateInfo ds{ VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
     ds.depthTestEnable  = VK_TRUE;
-    ds.depthWriteEnable = VK_TRUE;
+    // Transparent graph materials: depth-test but no depth-write + alpha blend, matching the
+    // built-in transparent pipeline (m_sceneTransparentPipeline).
+    ds.depthWriteEnable = transparent ? VK_FALSE : VK_TRUE;
     ds.depthCompareOp   = VK_COMPARE_OP_LESS;
     VkPipelineColorBlendAttachmentState cba{};
     cba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT
                        | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    if (transparent)
+    {
+        cba.blendEnable         = VK_TRUE;
+        cba.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+        cba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        cba.colorBlendOp        = VK_BLEND_OP_ADD;
+        cba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+        cba.alphaBlendOp        = VK_BLEND_OP_ADD;
+    }
     VkPipelineColorBlendStateCreateInfo cb{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
     cb.attachmentCount = 1;
     cb.pAttachments    = &cba;
@@ -3376,7 +3390,11 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                 if (m_matShaderLib.resolveShaders(*m_contentManager, dc.materialAssetId,
                                                   matHash, matFrag, matVertBody))
                 {
-                    VkPipeline matPipe = getOrBuildMaterialPipeline(matHash, matFrag, matVertBody, hdr);
+                    // Transparent graph materials (opacity < 1, matching the DC classification)
+                    // get a blend-on / depth-write-off pipeline variant.
+                    const bool matTransp = dc.opacity < 0.999f;
+                    VkPipeline matPipe = getOrBuildMaterialPipeline(matHash, matFrag, matVertBody,
+                                                                    hdr, matTransp);
                     uint32_t& cursor = m_matDrawCursor[m_currentFrame];
                     if (matPipe != VK_NULL_HANDLE && cursor < k_matMaxDraws)
                     {
@@ -3476,6 +3494,14 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
 
                         // Restore the pass's scene pipeline for subsequent built-in draws.
                         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, activeMatScenePipe);
+                        // The material path bound set 0 via m_matPipelineLayout, which is NOT
+                        // compatible with m_scenePipelineLayout for set 0 (10-binding material set
+                        // vs 4-binding scene set) → binding it disturbed the scene's per-frame set 0.
+                        // Re-bind it so any built-in draw after a graph material reads the correct
+                        // per-frame UBO (view-proj/lighting/shadow/AO), not the material descriptors.
+                        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                                m_scenePipelineLayout, 0, 1,
+                                                &m_frameUBO[m_currentFrame].set, 0, nullptr);
                         return;
                     }
                 }
