@@ -75,3 +75,48 @@ function(he_bundle_python target dest)
 			"(HE_PYTHON_DLL='${HE_PYTHON_DLL}', Python3_STDLIB='${Python3_STDLIB}')")
 	endif()
 endfunction()
+
+# he_bundle_python_stdlib(<target> <dest> <exe_name>)
+#
+# GAME-ONLY, macOS + Linux: bundle the pure-Python stdlib so a Python-language export
+# runs embedded Python on a clean machine. Produces two files in <dest>:
+#   • pythonXY.zip  — curated pure-Python stdlib, ZIP_STORED (uncompressed). MUST be
+#     stored: a deflate zip can't be read at interpreter bootstrap there (zlib is an
+#     unbundled lib-dynload extension → "Failed to import encodings module").
+#   • lib-dynload/  — the C-extension modules (struct/datetime/random/socket/… need
+#     these; they can't live in a zip). copy_pydynload.py copies all except the few
+#     that pull in extra native libs a game doesn't need (tkinter/curses/ssl/…).
+#   • <exe_name>._pth — "pythonXY.zip\n.\nlib-dynload\n". On POSIX getpath looks for a
+#     <executable-name>._pth next to the exe (NOT pythonXY._pth — that's the Windows
+#     DLL landmark) and, when present, runs isolated with exactly those paths. Plain
+#     Py_Initialize() then boots from the bundle — no runtime code change.
+# The libpython dylib/.so itself is bundled elsewhere (macOS: bundle_native_deps BFS;
+# Linux: he_bundle_python). Windows ships its own zip + pythonXY._pth via he_bundle_python.
+# Call ONLY for the game — never the editor (a ._pth would force the editor onto the
+# curated stdlib instead of the full system Python). The exporter ships these files
+# only when the project's language is Python (ExportSettings::bundlePythonStdlib).
+function(he_bundle_python_stdlib target dest exe_name)
+	if(NOT HE_HAVE_PYTHON)
+		return()
+	endif()
+	if(NOT UNIX)               # Windows handled by he_bundle_python (frozen zlib → deflate + DLL landmark)
+		return()
+	endif()
+	if(NOT (Python3_Interpreter_FOUND AND Python3_STDLIB))
+		message(WARNING "he_bundle_python_stdlib(${target}): no Python interpreter/stdlib located — "
+			"a Python-language game export will be missing its stdlib")
+		return()
+	endif()
+	set(_py_tag "python${Python3_VERSION_MAJOR}${Python3_VERSION_MINOR}")
+	set(_pth "${CMAKE_BINARY_DIR}/${exe_name}._pth")
+	file(WRITE "${_pth}" "${_py_tag}.zip\n.\nlib-dynload\n")
+	add_custom_command(TARGET ${target} POST_BUILD
+		COMMAND ${CMAKE_COMMAND} -E make_directory "${dest}"
+		COMMAND ${Python3_EXECUTABLE} "${CMAKE_SOURCE_DIR}/cmake/zip_stdlib.py"
+			"${Python3_STDLIB}" "${dest}/${_py_tag}.zip" store
+		COMMAND ${Python3_EXECUTABLE} "${CMAKE_SOURCE_DIR}/cmake/copy_pydynload.py"
+			"${Python3_STDLIB}/lib-dynload" "${dest}/lib-dynload"
+		COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_pth}" "${dest}/${exe_name}._pth"
+		COMMENT "Bundling curated Python stdlib (${_py_tag}.zip + lib-dynload) + ${exe_name}._pth into ${dest}"
+		VERBATIM)
+endfunction()

@@ -63,6 +63,12 @@ add_custom_command(TARGET HorizonGame POST_BUILD
 # next to the exe on a Windows export (see ProjectExporter).
 he_bundle_python(HorizonGame "${DEPLOY_GAME}")
 
+# macOS + Linux: also stage the curated stdlib zip + HorizonGame._pth next to the game,
+# so a Python-language export runs embedded Python from the bundle on a clean machine.
+# The exporter only ships these when the project's language is Python (Windows stages
+# its own zip + pythonXY._pth via he_bundle_python above).
+he_bundle_python_stdlib(HorizonGame "${DEPLOY_GAME}" "HorizonGame")
+
 # Bundle the MSVC C++ runtime so the game runs on a clean PC without the VC++ redist.
 he_bundle_crt(HorizonGame "${DEPLOY_GAME}")
 

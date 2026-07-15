@@ -618,8 +618,11 @@ ExportResult ProjectExporter::exportProject(
             // "python*" file to binDir. (Flat exports collapse binDir==dataDir, so this only
             // matters for the macOS .app split.)
             const bool pythonRuntime = n.rfind("python", 0) == 0;
+            // The POSIX stdlib path file is named after the executable (HorizonGame._pth), so
+            // it doesn't match the "python*" rule — but it too must sit next to the exe.
+            const bool pthFile = n.size() > 5 && n.compare(n.size() - 5, 5, "._pth") == 0;
             const bool engineBin = !gameLogic
-                && (n == "HorizonGame" || n == "HorizonGame.exe" || pythonRuntime
+                && (n == "HorizonGame" || n == "HorizonGame.exe" || pythonRuntime || pthFile
                     || n.size() > 4 && (n.compare(n.size() - 4, 4, ".dll") == 0)
                     || n.size() > 3 && (n.compare(n.size() - 3, 3, ".so") == 0)
                     || n.size() > 6 && (n.compare(n.size() - 6, 6, ".dylib") == 0));
@@ -655,7 +658,18 @@ ExportResult ProjectExporter::exportProject(
             if (ec) { ec.clear(); dit.increment(ec); continue; }
             if (regular)
             {
-                const auto dst = routeRuntime(dit->path().filename().string());
+                const std::string fname = dit->path().filename().string();
+                // The Python stdlib (pythonXY.zip + <Exe>._pth) ships only for Python-
+                // language projects. Skip both otherwise — the libpython DLL/dylib/.so
+                // itself is a load-time dependency and is NOT matched here, so it always
+                // ships (its name ends in .dll/.dylib/.so, not .zip/._pth).
+                if (!settings.bundlePythonStdlib)
+                {
+                    const bool isZip = fname.size() > 4 && fname.compare(fname.size() - 4, 4, ".zip")  == 0;
+                    const bool isPth = fname.size() > 5 && fname.compare(fname.size() - 5, 5, "._pth") == 0;
+                    if (isZip || isPth) { dit.increment(ec); continue; }
+                }
+                const auto dst = routeRuntime(fname);
                 // Delete any existing file first (fresh inode): copying over a
                 // code-signed / currently-mapped binary in place can leave a
                 // stale signature or a busy-file error on re-export.
@@ -700,6 +714,28 @@ ExportResult ProjectExporter::exportProject(
                                    + " after embedding the pak key (codesign)", added};
                 if (patched > 0) keyEmbedded = true;
             }
+        }
+
+        // Python C-extension modules live in a lib-dynload/ SUBDIRECTORY, which the
+        // flat file loop above skipped. Ship it next to the executable (the
+        // <Exe>._pth lists "lib-dynload") — only for Python-language projects, so a
+        // non-Python game doesn't carry ~15 MB of unused .so. macOS: these are
+        // signed framework binaries copied verbatim (signature intact); the .app's
+        // final --deep sign re-seals them.
+        if (settings.bundlePythonStdlib)
+        {
+            const auto srcDyn = settings.gameRuntimeDir / "lib-dynload";
+            if (std::filesystem::is_directory(srcDyn, ec))
+            {
+                const auto dstDyn = binDir / "lib-dynload";
+                std::filesystem::remove_all(dstDyn, ec); ec.clear();
+                std::filesystem::copy(srcDyn, dstDyn,
+                    std::filesystem::copy_options::recursive
+                    | std::filesystem::copy_options::overwrite_existing, ec);
+                if (ec)
+                    return {false, "Failed to copy Python lib-dynload: " + ec.message(), added};
+            }
+            ec.clear();
         }
     }
 
