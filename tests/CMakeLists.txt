@@ -96,6 +96,14 @@ if(HE_HAVE_ASTCENC)
     target_include_directories(he_tests PRIVATE ${astcenc_SOURCE_DIR}/Source)
     target_compile_definitions(he_tests PRIVATE HE_HAVE_ASTCENC)
 endif()
+# BC7 / BC3 cook tests only need the HE_HAVE_* flag to gate on (the encoders live
+# inside HorizonCore; the tests just check the cooked format/mip/size structurally).
+if(HE_ENABLE_BC7)
+    target_compile_definitions(he_tests PRIVATE HE_HAVE_BC7ENC)
+endif()
+if(HE_ENABLE_STB_DXT)
+    target_compile_definitions(he_tests PRIVATE HE_HAVE_STB_DXT)
+endif()
 # Compile the Python scripting tests only when CPython is embedded. The tests use
 # only PyScriptBackend's public API (linked via HorizonScene), so no direct
 # libpython link is needed here.
