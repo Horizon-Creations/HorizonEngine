@@ -34,8 +34,9 @@ namespace {
 constexpr NSUInteger kMaxGpuSamples = 32;
 constexpr uint32_t   kInvalidSlot   = 0xFFFFFFFFu;   // ftPair/ftPoint when over capacity
 // Detailed capture submits the frame as this many command buffers, one per pass:
-// Shadow, GIAccel, GIShadow, SSAO, Scene, Bloom, Tonemap, Present (some may be empty → 0 ms).
-constexpr int        kDetailedPassCount = 8;
+// Shadow, GIAccel, GIShadow, GIProbes, SSAO, Scene, Bloom, Tonemap, Present
+// (some may be empty → 0 ms).
+constexpr int        kDetailedPassCount = 9;
 // Cascaded shadow maps: layer count of the shadow depth-texture array. Must match
 // the extractor's kCascadeCount and the shader's cascade arrays (3).
 constexpr int        kCsmCascades = 3;
@@ -366,11 +367,14 @@ struct SceneUniforms {
 	float4   weather;        // x = wetness, y = snow cover (ground response)
 };
 
-// GI (Checkpoint B): fragmentMain buffer(3). Deliberately separate from
+// GI (Checkpoint B/C): fragmentMain buffer(3). Deliberately separate from
 // SceneUniforms — buffer(1) is claimed by the custom-material lighting path
 // (HE::MaterialShaderLibrary::kMetalLightingBufferIndex).
 struct GIUniforms {
 	int enabled; int pad0, pad1, pad2;
+	float4 gridOrigin; // xyz = world-space probe-grid origin, w = spacing
+	float4 gridCounts; // xyz = probe counts per axis, w = probesPerRow (atlas tile layout)
+	float4 params;     // x = indirectIntensity, y/z/w reserved
 };
 
 // shared skyColor() injected at the marker below (newLibraryWithSource)
@@ -489,6 +493,94 @@ float shadowFactor(constant SceneUniforms& scene, float3 worldPos, float3 N, flo
 	return vis / 9.0;
 }
 
+// Standard signed-octahedral mapping (Meyer et al. 2010) — direction -> texel
+// UV. Duplicated from kGIProbeMSL's octDecode (direction<-texel): each embedded
+// MSL string is compiled as its own library, no shared headers between them.
+static float2 octEncode(float3 n)
+{
+	float2 p = n.xy * (1.0 / (abs(n.x) + abs(n.y) + abs(n.z)));
+	float2 signP = float2(p.x >= 0.0 ? 1.0 : -1.0, p.y >= 0.0 ? 1.0 : -1.0);
+	return (n.z <= 0.0) ? ((1.0 - abs(p.yx)) * signP) : p;
+}
+
+constant int kGIProbeOctSizeShade = 8; // must match MetalRenderer::kGIProbeOctSize
+
+// DDGI probe sampling (Majercik et al. 2019, minus adaptive probe relocation/
+// classification and bicubic filtering — v1 simplifications). Trilinearly
+// blends the 8 probes surrounding P, weighted by a soft backface term and a
+// Chebyshev visibility test (suppresses light leaking through thin occluders).
+// NOTE on what "irradiance" means here: EncodeGIProbeUpdate stores ONE raw
+// radiance sample per octahedral direction (a gather, not the DDGI paper's
+// cosine-weighted hemisphere-integral scatter+resolve), so this is closer to a
+// small per-probe environment map than true pre-integrated irradiance — still
+// directionally correct and energy-plausible (brighter/tinted near lit/coloured
+// surfaces), just not radiometrically exact. A documented follow-up, not a bug.
+static float3 sampleDDGIIrradiance(constant GIUniforms& gi,
+                                   texture2d<float> irrAtlas, sampler irrSmp,
+                                   texture2d<float> visAtlas, sampler visSmp,
+                                   float3 P, float3 N)
+{
+	const int gx = int(gi.gridCounts.x), gy = int(gi.gridCounts.y), gz = int(gi.gridCounts.z);
+	if (gx <= 0 || gy <= 0 || gz <= 0) return float3(0.0);
+	const int probesPerRow = max(1, int(gi.gridCounts.w));
+	const int probeRows    = int(ceil(float(gx * gy * gz) / float(probesPerRow)));
+	const float2 atlasSizeTexels = float2(float(probesPerRow), float(probeRows)) * float(kGIProbeOctSizeShade);
+	const float spacing = max(gi.gridOrigin.w, 1e-4);
+
+	const float3 gridSpace = (P - gi.gridOrigin.xyz) / spacing;
+	const float3 base      = floor(gridSpace);
+	const float3 frac      = gridSpace - base;
+
+	float3 sumColor  = float3(0.0);
+	float  sumWeight = 0.0;
+	for (int i = 0; i < 8; ++i)
+	{
+		const float3 offs = float3(float(i & 1), float((i >> 1) & 1), float((i >> 2) & 1));
+		const float3 cell = base + offs;
+		if (any(cell < 0.0) || cell.x >= float(gx) || cell.y >= float(gy) || cell.z >= float(gz))
+			continue;
+		const int probeIndex = int(cell.x) + int(cell.y) * gx + int(cell.z) * gx * gy;
+
+		const float3 trilinear = mix(1.0 - frac, frac, offs);
+		float weight = trilinear.x * trilinear.y * trilinear.z;
+		if (weight <= 1e-5) continue;
+
+		const float3 probePos  = gi.gridOrigin.xyz + cell * spacing;
+		const float3 toProbe   = probePos - P;
+		const float  dist      = max(length(toProbe), 1e-4);
+		const float3 dirToProbe = toProbe / dist;
+
+		// Soft backface term (never fully zero) — avoids the classic hard-cutoff
+		// DDGI seam at the normal's tangent plane.
+		weight *= max(0.05, dot(N, dirToProbe) * 0.5 + 0.5);
+
+		const int   tileX = probeIndex % probesPerRow;
+		const int   tileY = probeIndex / probesPerRow;
+		const float2 tileOrigin = float2(float(tileX), float(tileY)) * float(kGIProbeOctSizeShade);
+
+		// Visibility (Chebyshev): sample THIS probe's own recorded distance in the
+		// direction from the probe toward P (-dirToProbe), compare against the
+		// actual probe-to-P distance to down-weight probes that see through walls.
+		const float2 visUV = (tileOrigin + (octEncode(-dirToProbe) * 0.5 + 0.5) * float(kGIProbeOctSizeShade)) / atlasSizeTexels;
+		const float2 visSample = visAtlas.sample(visSmp, visUV).rg;
+		const float mean = visSample.x, mean2 = visSample.y;
+		const float variance = abs(mean2 - mean * mean);
+		float chebyshev = 1.0;
+		if (dist > mean)
+		{
+			const float d = dist - mean;
+			chebyshev = variance / (variance + d * d);
+			chebyshev = chebyshev * chebyshev * chebyshev; // cube to sharpen the falloff, per the DDGI paper
+		}
+		weight *= max(chebyshev, 0.05);
+
+		const float2 irrUV = (tileOrigin + (octEncode(N) * 0.5 + 0.5) * float(kGIProbeOctSizeShade)) / atlasSizeTexels;
+		sumColor  += irrAtlas.sample(irrSmp, irrUV).rgb * weight;
+		sumWeight += weight;
+	}
+	return sumColor / max(sumWeight, 1e-4);
+}
+
 // Atmospheric fog / aerial perspective (mirrors the GL applyFog()): blend the
 // lit colour toward the sky in the fragment's view direction so distant geometry
 // melts into the horizon. The opacity is an analytic exponential height-fog
@@ -521,7 +613,11 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
                              sampler          aoSmp     [[sampler(3)]],
                              constant GIUniforms& gi     [[buffer(3)]],
                              texture2d<float> giShadowTex [[texture(5)]],
-                             sampler          giShadowSmp [[sampler(5)]])
+                             sampler          giShadowSmp [[sampler(5)]],
+                             texture2d<float> giIrrTex    [[texture(6)]],
+                             sampler          giIrrSmp    [[sampler(6)]],
+                             texture2d<float> giVisTex    [[texture(7)]],
+                             sampler          giVisSmp    [[sampler(7)]])
 {
 	float3 albedo = (in.hasTexture > 0.5)
 		? baseColor.sample(smp, float2(in.uv.x, 1.0 - in.uv.y)).rgb * in.color
@@ -570,7 +666,14 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
 		? aoTex.sample(aoSmp, in.position.xy / scene.viewport.xy).r : 1.0;
 	// Flat ambient fill (never-black floor + overcast replacement) kept outside AO
 	// so grazing-angle SSAO over-darkening cannot zero it out.
-	float3 result  = ambient * ao + scene.ambient.xyz * diffuseColor;
+	// GI (Checkpoint C) replaces BOTH terms above with probe-sampled indirect
+	// diffuse when active — AO is bypassed entirely (EncodeSSAO isn't even
+	// dispatched; aoTex/ao above are dummy-bound and unused in this branch).
+	// Specular IBL (ambSpec) is kept either way — this GI slice is diffuse-only.
+	float3 result = (gi.enabled != 0)
+		? sampleDDGIIrradiance(gi, giIrrTex, giIrrSmp, giVisTex, giVisSmp, in.worldPos, N)
+		      * diffuseColor * gi.params.x + ambSpec * (1.0 - 0.6 * wRough)
+		: ambient * ao + scene.ambient.xyz * diffuseColor;
 
 	int dbgCascade = 0;   // cascade chosen by the directional shadow (debug tint)
 	for (int i = 0; i < scene.lightCount; ++i)
@@ -1259,6 +1362,123 @@ fragment float4 giShadowBlur(GIFsOut in [[stage_in]],
 			sum += src.sample(smp, in.uv + float2(float(x), float(y)) * texel).r;
 	float v = sum / 9.0;
 	return float4(v, 0.0, 0.0, 1.0);
+}
+)MSL";
+
+// ─── Global Illumination: DDGI probe update ──────────────────────────────────
+// One thread per octahedral-map output texel ("gather": each thread traces its
+// OWN ray in its own texel's direction) rather than scattering N random rays
+// into M texels — needs no atomics/resolve pass, since every thread in a
+// probe's update owns exactly one texel this dispatch. Both irradiance and
+// visibility are written from the SAME ray (v1 simplification — see the header
+// comment on EncodeGIProbeUpdate for the full list of documented shortcuts).
+// read_write texture access needs MTLReadWriteTextureTier2 for RGBA16Float/
+// RG16Float — universal on Apple Silicon, and this kernel is already gated on
+// device.supportsRaytracing (effectively Apple-Silicon-only), so no separate
+// runtime check.
+static const char* kGIProbeMSL = R"MSL(
+#include <metal_stdlib>
+#include <metal_raytracing>
+using namespace metal;
+using namespace raytracing;
+
+struct GIProbeParams {
+	float4 gridOrigin;   // xyz = world-space grid origin, w = spacing
+	float4 gridCounts;   // xyz = probe counts per axis (float, cast in-shader), w = probesPerRow
+	float4 rayParams;    // x = max ray distance, y = hysteresis (EMA blend), z = cursor start, w = probes this batch
+	float4 sunDirRadius; // xyz = direction TOWARD the sun, w unused
+	float4 sunColor;     // rgb = sun colour * intensity, w unused
+	float4 skyAmbient;   // rgb = flat ambient/sky colour used on ray miss, w unused
+};
+
+// Standard signed-octahedral mapping (Meyer et al. 2010, Clarberg-style). This
+// kernel only ever goes texel -> direction (octDecode); octEncode (direction ->
+// texel) is only needed at shading time, in kUnlitMSL's sampleDDGIIrradiance.
+static float3 octDecode(float2 e)
+{
+	float3 n = float3(e.xy, 1.0 - abs(e.x) - abs(e.y));
+	if (n.z < 0.0)
+	{
+		float2 signN = float2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+		n.xy = (1.0 - abs(n.yx)) * signN;
+	}
+	return normalize(n);
+}
+
+constant int kGIProbeOctSize = 8; // must match MetalRenderer::kGIProbeOctSize
+
+kernel void giProbeUpdate(uint2 texel   [[thread_position_in_threadgroup]],
+                          uint2 batchIdx [[threadgroup_position_in_grid]],
+                          texture2d<float, access::read_write> irradiance [[texture(0)]],
+                          texture2d<float, access::read_write> visibility [[texture(1)]],
+                          instance_acceleration_structure accel [[buffer(0)]],
+                          const device float4* instanceColors  [[buffer(1)]],
+                          constant GIProbeParams& P             [[buffer(2)]])
+{
+	const int gx = int(P.gridCounts.x), gy = int(P.gridCounts.y), gz = int(P.gridCounts.z);
+	const int probeCount = gx * gy * gz;
+	const int budget = int(P.rayParams.w);
+	if (probeCount <= 0 || int(batchIdx.x) >= budget) return;
+	const int cursorStart = int(P.rayParams.z);
+	const int probeIndex  = (cursorStart + int(batchIdx.x)) % probeCount;
+
+	// 1D probe index -> 3D grid cell -> world-space probe centre.
+	const int pz = probeIndex / (gx * gy);
+	const int py = (probeIndex / gx) % gy;
+	const int px = probeIndex % gx;
+	const float3 probePos = P.gridOrigin.xyz + float3(float(px), float(py), float(pz)) * P.gridOrigin.w;
+
+	// Texel -> octahedral direction (texel-centre UV in [-1,1]).
+	const float2 uv  = (float2(texel) + 0.5) / float(kGIProbeOctSize) * 2.0 - 1.0;
+	const float3 dir = octDecode(uv);
+
+	ray r;
+	r.origin       = probePos;
+	r.direction    = dir;
+	r.min_distance = 0.01;
+	r.max_distance = max(P.rayParams.x, 1.0);
+
+	intersection_params params;
+	intersection_query<triangle_data, instancing> q;
+	q.reset(r, accel, params);
+	q.next();
+
+	float3 radiance;
+	float  dist;
+	if (q.get_committed_intersection_type() == intersection_type::none)
+	{
+		radiance = P.skyAmbient.rgb;
+		dist     = P.rayParams.x; // sentinel: "far" for the visibility test
+	}
+	else
+	{
+		const uint instId  = q.get_committed_instance_id();
+		const float3 albedo = instanceColors[instId].rgb;
+		// One-bounce direct-light estimate: the hit normal is approximated as
+		// facing back along the ray (no per-triangle normal fetch — that needs
+		// binding each mesh's vertex buffer to this kernel too, a follow-up), and
+		// the hit surface is treated as fully sun-lit (no secondary shadow ray).
+		// Good enough for a diffuse, low-frequency bounce estimate; not
+		// physically exact — see EncodeGIProbeUpdate's header comment.
+		const float3 hitNormal = -dir;
+		const float ndl = max(dot(hitNormal, P.sunDirRadius.xyz), 0.0);
+		radiance = albedo * P.sunColor.rgb * ndl;
+		dist     = q.get_committed_distance();
+	}
+
+	const int probesPerRow = max(1, int(P.gridCounts.w));
+	const int tileX = probeIndex % probesPerRow;
+	const int tileY = probeIndex / probesPerRow;
+	const uint2 outCoord = uint2(uint(tileX * kGIProbeOctSize) + texel.x,
+	                             uint(tileY * kGIProbeOctSize) + texel.y);
+
+	const float hysteresis = clamp(P.rayParams.y, 0.0, 0.98);
+	const float4 oldIrr = irradiance.read(outCoord);
+	irradiance.write(float4(mix(radiance, oldIrr.rgb, hysteresis), 1.0), outCoord);
+
+	const float4 oldVis = visibility.read(outCoord);
+	const float2 newVisSample = float2(dist, dist * dist);
+	visibility.write(float4(mix(newVisSample, oldVis.rg, hysteresis), 0.0, 0.0), outCoord);
 }
 )MSL";
 
@@ -2838,8 +3058,25 @@ struct GIUniforms
 {
 	int32_t enabled = 0;
 	int32_t pad0 = 0, pad1 = 0, pad2 = 0;
+	glm::vec4 gridOrigin = glm::vec4(0.0f); // xyz = world-space probe-grid origin, w = spacing
+	glm::vec4 gridCounts = glm::vec4(0.0f); // xyz = probe counts per axis, w = probesPerRow
+	glm::vec4 params     = glm::vec4(1.0f, 0.0f, 0.0f, 0.0f); // x = indirectIntensity
 };
-static_assert(sizeof(GIUniforms) == 16, "GIUniforms must stay byte-identical to its MSL twin");
+static_assert(sizeof(GIUniforms) == 64, "GIUniforms must stay byte-identical to its MSL twin");
+
+// Shared by all 3 GIUniforms call sites (EncodeScene's opaque + transparency
+// passes, EncodeSkinnedObjects) so the grid fields can't drift between them.
+static GIUniforms BuildGIUniforms(bool active, const glm::vec3& gridOrigin, float spacing,
+                                  const glm::ivec3& gridCounts, int probesPerRow, float indirectIntensity)
+{
+	GIUniforms gi{};
+	gi.enabled    = active ? 1 : 0;
+	gi.gridOrigin = glm::vec4(gridOrigin, spacing);
+	gi.gridCounts = glm::vec4(static_cast<float>(gridCounts.x), static_cast<float>(gridCounts.y),
+	                         static_cast<float>(gridCounts.z), static_cast<float>(probesPerRow));
+	gi.params     = glm::vec4(indirectIntensity, 0.0f, 0.0f, 0.0f);
+	return gi;
+}
 
 // Matches the MSL GIPosUniforms / GIShadowParams / GITemporalParams structs
 // (kGIShadowMSL, used only by EncodeGIShadowRays).
@@ -2853,6 +3090,17 @@ struct GITemporalParamsCPU
 {
 	glm::mat4 prevViewProj;
 	glm::vec4 blend; // x = history weight (0 on first activation frame), y/z = tex width/height, w unused
+};
+
+// Matches the MSL GIProbeParams struct (kGIProbeMSL, EncodeGIProbeUpdate only).
+struct GIProbeParamsCPU
+{
+	glm::vec4 gridOrigin;   // xyz = world-space grid origin, w = spacing
+	glm::vec4 gridCounts;   // xyz = probe counts per axis, w = probesPerRow
+	glm::vec4 rayParams;    // x = max ray distance, y = hysteresis, z = cursor start, w = probes this batch
+	glm::vec4 sunDirRadius; // xyz = direction TOWARD the sun, w unused
+	glm::vec4 sunColor;     // rgb = sun colour * intensity, w unused
+	glm::vec4 skyAmbient;   // rgb = flat ambient/sky colour used on ray miss, w unused
 };
 
 // Matches the MSL SkyParams struct.
@@ -2915,10 +3163,12 @@ void MetalRenderer::Initialize(HE::Window* window)
 	CreateDebugLinePipeline();
 	CreateParticlePipeline();
 	EnsureShadowResources();
-	// GI shadow-ray pipelines use MSL 2.4 (intersection_query, macOS 12+) — only
-	// build them on devices/OS that actually support it, so unsupported systems
-	// never pay the compile cost or risk a compile failure on older toolchains.
-	if (m_giSupported) EnsureGIShadowPipelines();
+	// GI shadow-ray / probe-update pipelines use MSL 2.4 (intersection_query,
+	// macOS 12+) — only build them on devices/OS that actually support it, so
+	// unsupported systems never pay the compile cost or risk a compile failure on
+	// older toolchains. (Probe atlases + grid are still built lazily on first use,
+	// same as before — only the pipeline is warmed up eagerly here.)
+	if (m_giSupported) { EnsureGIShadowPipelines(); EnsureGIProbePipeline(); }
 
 	// Persistent pass descriptor describing the swapchain attachment layout.
 	// ImGui_ImplMetal_NewFrame() only inspects attachment formats / sample
@@ -3003,19 +3253,25 @@ void MetalRenderer::Shutdown()
 	DestroyLdrTarget();
 	DestroySSAOTargets();
 	DestroyGIShadowTargets();
+	DestroyGIProbeAtlas();
 	DrainRetiredTextures();
 	DrainRetiredGIObjects();
-	if (m_giTlas)           { CFBridgingRelease(m_giTlas);           m_giTlas = nullptr; }
-	if (m_giInstanceBuffer) { CFBridgingRelease(m_giInstanceBuffer); m_giInstanceBuffer = nullptr; }
+	if (m_giTlas)                { CFBridgingRelease(m_giTlas);                m_giTlas = nullptr; }
+	if (m_giInstanceBuffer)      { CFBridgingRelease(m_giInstanceBuffer);      m_giInstanceBuffer = nullptr; }
+	if (m_giInstanceColorBuffer) { CFBridgingRelease(m_giInstanceColorBuffer); m_giInstanceColorBuffer = nullptr; }
 	m_giUniqueBlas.clear();
 	if (m_giGBufPipeline)           { CFBridgingRelease(m_giGBufPipeline);           m_giGBufPipeline = nullptr; }
 	if (m_giShadowRayPipeline)      { CFBridgingRelease(m_giShadowRayPipeline);      m_giShadowRayPipeline = nullptr; }
 	if (m_giShadowTemporalPipeline) { CFBridgingRelease(m_giShadowTemporalPipeline); m_giShadowTemporalPipeline = nullptr; }
 	if (m_giShadowBlurPipeline)     { CFBridgingRelease(m_giShadowBlurPipeline);     m_giShadowBlurPipeline = nullptr; }
-	// Reset so a re-Initialize() re-probes ray-tracing support instead of keeping
-	// a stale (possibly wrong-device) cached result.
+	if (m_giProbeUpdatePipeline)    { CFBridgingRelease(m_giProbeUpdatePipeline);    m_giProbeUpdatePipeline = nullptr; }
+	// Reset so a re-Initialize() rebuilds the grid/re-probes support instead of
+	// keeping a stale (possibly wrong-device, wrong-scene) cached result.
 	m_giRaytracingChecked = false;
 	m_giSupported         = false;
+	m_giProbeGridBuilt    = false;
+	m_giProbeCount        = 0;
+	m_giProbeUpdateCursor = 0;
 	if (m_tonemapPipeline)      { CFBridgingRelease(m_tonemapPipeline);      m_tonemapPipeline = nullptr; }
 	if (m_shadercDemoPipeline)  { CFBridgingRelease(m_shadercDemoPipeline);  m_shadercDemoPipeline = nullptr; }
 	for (auto& [k, pso] : m_materialPipelineCache) if (pso) CFBridgingRelease(pso);
@@ -3727,8 +3983,9 @@ void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr)
 		// GI just turned off (or was never on this run): release any TLAS/instance
 		// buffer left over from the last GI-active frame instead of holding them
 		// until Shutdown(). No-op (RetireGIObject ignores null) once already clear.
-		RetireGIObject(m_giTlas);           m_giTlas           = nullptr;
-		RetireGIObject(m_giInstanceBuffer); m_giInstanceBuffer = nullptr;
+		RetireGIObject(m_giTlas);              m_giTlas               = nullptr;
+		RetireGIObject(m_giInstanceBuffer);    m_giInstanceBuffer     = nullptr;
+		RetireGIObject(m_giInstanceColorBuffer); m_giInstanceColorBuffer = nullptr;
 		m_giUniqueBlas.clear();
 		return;
 	}
@@ -3745,8 +4002,9 @@ void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr)
 	m_extractor.setContentManager(m_contentManager);
 	m_extractor.extract(*m_world, m_renderWorld, 1.0f, &m_editorCamera);
 
-	RetireGIObject(m_giTlas);           m_giTlas           = nullptr;
-	RetireGIObject(m_giInstanceBuffer); m_giInstanceBuffer = nullptr;
+	RetireGIObject(m_giTlas);                m_giTlas                 = nullptr;
+	RetireGIObject(m_giInstanceBuffer);      m_giInstanceBuffer       = nullptr;
+	RetireGIObject(m_giInstanceColorBuffer); m_giInstanceColorBuffer  = nullptr;
 	m_giUniqueBlas.clear();
 	if (m_renderWorld.objects.empty()) return;
 
@@ -3761,8 +4019,10 @@ void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr)
 		std::vector<id<MTLAccelerationStructure>> uniqueBlas;
 		std::vector<uint32_t> instanceBlasIndex;
 		std::vector<glm::mat4> instanceTransform;
+		std::vector<glm::vec4> instanceBaseColor; // for EncodeGIProbeUpdate's one-bounce tint (Checkpoint C)
 		instanceBlasIndex.reserve(m_renderWorld.objects.size());
 		instanceTransform.reserve(m_renderWorld.objects.size());
+		instanceBaseColor.reserve(m_renderWorld.objects.size());
 
 		for (RenderObject& obj : m_renderWorld.objects)
 		{
@@ -3781,6 +4041,7 @@ void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr)
 
 			instanceBlasIndex.push_back((uint32_t)idx);
 			instanceTransform.push_back(obj.transform);
+			instanceBaseColor.push_back(glm::vec4(obj.baseColor, 1.0f));
 		}
 		if (uniqueBlas.empty()) return;
 
@@ -3789,6 +4050,12 @@ void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr)
 			newBufferWithLength:sizeof(MTLAccelerationStructureInstanceDescriptor) * count
 			            options:MTLResourceStorageModeShared];
 		auto* instances = (MTLAccelerationStructureInstanceDescriptor*)instanceBuf.contents;
+		// Parallel per-instance colour buffer, SAME index order — see the header
+		// comment on m_giInstanceColorBuffer for why get_committed_instance_id()
+		// reliably matches this array's position.
+		id<MTLBuffer> colorBuf = [device newBufferWithBytes:instanceBaseColor.data()
+		                                              length:sizeof(glm::vec4) * count
+		                                             options:MTLResourceStorageModeShared];
 		for (NSUInteger i = 0; i < count; ++i)
 		{
 			instances[i].accelerationStructureIndex        = instanceBlasIndex[i];
@@ -3832,8 +4099,9 @@ void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr)
 		                  scratchBuffer:scratch scratchBufferOffset:0];
 		[enc endEncoding];
 
-		m_giTlas           = (void*)CFBridgingRetain(tlas);
-		m_giInstanceBuffer = (void*)CFBridgingRetain(instanceBuf);
+		m_giTlas                = (void*)CFBridgingRetain(tlas);
+		m_giInstanceBuffer      = (void*)CFBridgingRetain(instanceBuf);
+		m_giInstanceColorBuffer = (void*)CFBridgingRetain(colorBuf);
 		// Cache the unique-BLAS set for EncodeGIShadowRays/EncodeGIProbeUpdate — every
 		// compute encoder that traces against m_giTlas must useResource: each of
 		// these too (same residency requirement as the build encoder above).
@@ -4080,6 +4348,174 @@ void MetalRenderer::EncodeGIShadowRays(void* cmdBufPtr, int width, int height)
 			[benc endEncoding];
 		}
 	}
+}
+
+void MetalRenderer::EnsureGIProbeGrid()
+{
+	if (m_giProbeGridBuilt) return;
+	if (m_renderWorld.objects.empty()) return; // wait for real geometry before committing to a grid
+
+	// m_renderWorld was re-extracted by EncodeGIAccelBuild's m_extractor.extract()
+	// call earlier this frame, which creates BRAND NEW RenderObjects seeded with
+	// only the extractor's small fallback-cube worldBounds (see RenderObject.h) —
+	// NOT the real per-mesh bounds EncodeShadowMap/EncodeSSAO refresh in their own
+	// passes. Those refreshes don't survive the re-extraction, so refresh here too
+	// before unioning, or the grid ends up sized to a handful of unit cubes
+	// instead of the actual scene.
+	for (RenderObject& obj : m_renderWorld.objects)
+		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId); mesh && mesh->localBounds.isValid())
+			obj.worldBounds = mesh->localBounds.transformed(obj.transform);
+
+	// KNOWN v1 LIMITATION: this only unions m_renderWorld.objects (the generic
+	// mesh-asset RenderObject set) — Landscape/Terrain chunks are a separate
+	// rendering system (see [[terrain-lod-chunking]]) and are NOT included, so a
+	// scene dominated by terrain will get a probe grid sized to its small props
+	// only, leaving the terrain surfaces themselves outside grid coverage (they
+	// sample zero indirect diffuse — safe, just visibly under-lit, not a crash).
+	// Confirmed empirically: the ShadowValidation test scene's large background
+	// surface stays outside the grid even after the worldBounds refresh above.
+	// Extending probe coverage to terrain is a follow-up, not in this slice.
+	//
+	// Union of every object's (now-correct) world bounds.
+	HE::AABB bounds;
+	for (const RenderObject& obj : m_renderWorld.objects)
+		if (obj.worldBounds.isValid())
+			bounds.expand(obj.worldBounds);
+	if (!bounds.isValid())
+	{
+		// Fallback: a modest default volume around the origin so GI still does
+		// something sane in an empty/primitive-only scene.
+		bounds.min = glm::vec3(-10.0f);
+		bounds.max = glm::vec3(10.0f);
+	}
+
+	const glm::vec3 extent = bounds.max - bounds.min;
+	glm::ivec3 counts;
+	counts.x = std::clamp(static_cast<int>(std::ceil(extent.x / kGIProbeSpacing)) + 1, 1, kGIMaxProbesPerAxis);
+	counts.y = std::clamp(static_cast<int>(std::ceil(extent.y / kGIProbeSpacing)) + 1, 1, kGIMaxProbesPerAxis);
+	counts.z = std::clamp(static_cast<int>(std::ceil(extent.z / kGIProbeSpacing)) + 1, 1, kGIMaxProbesPerAxis);
+
+	m_giGridOrigin        = bounds.min;
+	m_giGridCounts        = counts;
+	m_giProbeCount        = counts.x * counts.y * counts.z;
+	m_giProbesPerRow      = static_cast<int>(std::ceil(std::sqrt(static_cast<float>(m_giProbeCount))));
+	m_giProbeUpdateCursor = 0;
+	m_giProbeGridBuilt    = true;
+
+	EnsureGIProbeAtlas();
+
+	Logger::Log(Logger::LogLevel::Info,
+		("MetalRenderer: GI probe grid built — " + std::to_string(m_giProbeCount) + " probes ("
+		 + std::to_string(counts.x) + "x" + std::to_string(counts.y) + "x" + std::to_string(counts.z)
+		 + "), spacing " + std::to_string(kGIProbeSpacing)).c_str());
+}
+
+void MetalRenderer::EnsureGIProbePipeline()
+{
+	if (m_giProbeUpdatePipeline) return; // already built
+	@autoreleasepool
+	{
+		id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+		NSError* error = nil;
+		id<MTLLibrary> lib = [device newLibraryWithSource:
+			[NSString stringWithUTF8String:kGIProbeMSL] options:nil error:&error];
+		if (!lib)
+		{
+			Logger::Log(Logger::LogLevel::Error,
+				(std::string("MetalRenderer: GI probe shader compile failed: ")
+				 + (error ? [[error localizedDescription] UTF8String] : "unknown")).c_str());
+			return;
+		}
+		id<MTLFunction> fn = [lib newFunctionWithName:@"giProbeUpdate"];
+		id<MTLComputePipelineState> pso = [device newComputePipelineStateWithFunction:fn error:&error];
+		if (pso) m_giProbeUpdatePipeline = (void*)CFBridgingRetain(pso);
+		else     Logger::Log(Logger::LogLevel::Error, "MetalRenderer: GI probe-update pipeline creation failed");
+	}
+}
+
+void MetalRenderer::EnsureGIProbeAtlas()
+{
+	if (m_giProbeCount <= 0) return;
+	const int probeRows = static_cast<int>(std::ceil(static_cast<float>(m_giProbeCount) / static_cast<float>(m_giProbesPerRow)));
+	const int atlasW = m_giProbesPerRow * kGIProbeOctSize;
+	const int atlasH = probeRows * kGIProbeOctSize;
+
+	DestroyGIProbeAtlas();
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+
+	// read_write access (in-place EMA blend, one thread per texel, no cross-thread
+	// aliasing within a dispatch — see kGIProbeMSL's header comment) needs
+	// MTLReadWriteTextureTier2 for these 16-bit float formats; universal on the
+	// Apple Silicon this path is already gated to (device.supportsRaytracing).
+	MTLTextureDescriptor* irrDesc = [MTLTextureDescriptor
+		texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float width:atlasW height:atlasH mipmapped:NO];
+	irrDesc.usage       = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+	irrDesc.storageMode = MTLStorageModePrivate;
+	m_giIrradianceAtlas = (void*)CFBridgingRetain([device newTextureWithDescriptor:irrDesc]);
+
+	MTLTextureDescriptor* visDesc = [MTLTextureDescriptor
+		texture2DDescriptorWithPixelFormat:MTLPixelFormatRG16Float width:atlasW height:atlasH mipmapped:NO];
+	visDesc.usage       = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+	visDesc.storageMode = MTLStorageModePrivate;
+	m_giVisibilityAtlas = (void*)CFBridgingRetain([device newTextureWithDescriptor:visDesc]);
+}
+
+void MetalRenderer::DestroyGIProbeAtlas()
+{
+	if (m_giIrradianceAtlas) { CFBridgingRelease(m_giIrradianceAtlas); m_giIrradianceAtlas = nullptr; }
+	if (m_giVisibilityAtlas) { CFBridgingRelease(m_giVisibilityAtlas); m_giVisibilityAtlas = nullptr; }
+}
+
+void MetalRenderer::EncodeGIProbeUpdate(void* cmdBufPtr)
+{
+	if (!m_giEnabled || !m_giSupported || !m_giTlas || !m_world) return;
+	EnsureGIProbeGrid();
+	if (!m_giProbeGridBuilt || m_giProbeCount <= 0) return;
+	EnsureGIProbePipeline();
+	if (!m_giProbeUpdatePipeline || !m_giIrradianceAtlas || !m_giVisibilityAtlas) return;
+
+	const int budget = std::min(m_giProbeBudgetPerFrame > 0 ? m_giProbeBudgetPerFrame : 1, m_giProbeCount);
+
+	@autoreleasepool
+	{
+		id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
+		id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
+		[enc setComputePipelineState:(__bridge id<MTLComputePipelineState>)m_giProbeUpdatePipeline];
+		[enc setTexture:(__bridge id<MTLTexture>)m_giIrradianceAtlas atIndex:0];
+		[enc setTexture:(__bridge id<MTLTexture>)m_giVisibilityAtlas atIndex:1];
+		[enc setAccelerationStructure:(__bridge id<MTLAccelerationStructure>)m_giTlas atBufferIndex:0];
+		[enc setBuffer:(__bridge id<MTLBuffer>)m_giInstanceColorBuffer offset:0 atIndex:1];
+
+		GIProbeParamsCPU pp;
+		pp.gridOrigin = glm::vec4(m_giGridOrigin, kGIProbeSpacing);
+		pp.gridCounts = glm::vec4(static_cast<float>(m_giGridCounts.x), static_cast<float>(m_giGridCounts.y),
+		                         static_cast<float>(m_giGridCounts.z), static_cast<float>(m_giProbesPerRow));
+		// Max ray distance: comfortably covers the grid's own diagonal so rays can
+		// reach across the whole probed volume; hysteresis matches the shadow
+		// pass's temporal-accumulation feel (converges over ~1-2s at 60fps).
+		const float maxDist = glm::length(glm::vec3(m_giGridCounts) * kGIProbeSpacing) + kGIProbeSpacing;
+		pp.rayParams    = glm::vec4(maxDist, 0.92f, static_cast<float>(m_giProbeUpdateCursor), static_cast<float>(budget));
+		pp.sunDirRadius = glm::vec4(glm::normalize(m_renderWorld.sunDirection), 0.0f);
+		pp.sunColor     = glm::vec4(GetEnvironment().sunColor * GetEnvironment().sunIntensity, 0.0f);
+		pp.skyAmbient   = glm::vec4(m_renderWorld.ambient, 0.0f);
+		[enc setBytes:&pp length:sizeof(pp) atIndex:2];
+
+		// Every BLAS the TLAS references must be explicitly declared used — Metal
+		// does not auto-track residency through an acceleration structure.
+		[enc useResource:(__bridge id<MTLAccelerationStructure>)m_giTlas usage:MTLResourceUsageRead];
+		for (void* b : m_giUniqueBlas)
+			[enc useResource:(__bridge id<MTLAccelerationStructure>)b usage:MTLResourceUsageRead];
+
+		// One threadgroup per probe in this frame's batch (kGIProbeOctSize^2
+		// threads/group = one thread per output texel — the "gather", see
+		// kGIProbeMSL's header comment).
+		const MTLSize tgSize  = MTLSizeMake(kGIProbeOctSize, kGIProbeOctSize, 1);
+		const MTLSize tgCount = MTLSizeMake(static_cast<NSUInteger>(budget), 1, 1);
+		[enc dispatchThreadgroups:tgCount threadsPerThreadgroup:tgSize];
+		[enc endEncoding];
+	}
+
+	m_giProbeUpdateCursor = (m_giProbeUpdateCursor + budget) % m_giProbeCount;
 }
 
 // ─── Asset mesh upload ────────────────────────────────────────────────────────
@@ -6371,12 +6807,17 @@ void MetalRenderer::EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& v
 	const bool ssaoActive = m_ssaoEnabled && m_ssaoResult;
 	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(ssaoActive ? m_ssaoResult : m_dummyTexture) atIndex:3];
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:3];
-	const bool giActive = m_giEnabled && m_giSupported && m_giShadowResult;
-	GIUniforms giUniforms{};
-	giUniforms.enabled = giActive ? 1 : 0;
+	const bool giActive = m_giEnabled && m_giSupported && m_giShadowResult
+	                    && m_giIrradianceAtlas && m_giVisibilityAtlas;
+	GIUniforms giUniforms = BuildGIUniforms(giActive, m_giGridOrigin, kGIProbeSpacing,
+	                                        m_giGridCounts, m_giProbesPerRow, m_giIndirectIntensity);
 	[encoder setFragmentBytes:&giUniforms length:sizeof(giUniforms) atIndex:3];
 	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giShadowResult : m_dummyTexture) atIndex:5];
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:5];
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giIrradianceAtlas : m_dummyTexture) atIndex:6];
+	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:6];
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giVisibilityAtlas : m_dummyTexture) atIndex:7];
+	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:7];
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
 
 	constexpr int kMaxBones = 128;
@@ -6592,13 +7033,23 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(ssaoActive ? m_ssaoResult : m_dummyTexture) atIndex:3];
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:3];
 
-	// GI shadow mask on slot 5 (filled by EncodeGIShadowRays before this pass, only
-	// when GI is active). Bound to the white dummy otherwise, same convention as
-	// aoTex. Slot 4 deliberately skipped — custom-material node graphs can occupy
+	// GI shadow mask + probe atlases on slots 5/6/7 (filled by EncodeGIShadowRays/
+	// EncodeGIProbeUpdate before this pass, only when GI is active). Bound to the
+	// white dummy otherwise, same convention as aoTex. giActive gates whether the
+	// shader's gi.enabled branch actually samples these — it MUST require the
+	// probe atlases too, not just the shadow result: on the first GI-active frame
+	// (before EnsureGIProbeGrid has run), the atlases can still be null, and
+	// letting the shader sample a null-bound texture would be a GPU-side bug.
+	// Slot 4 deliberately skipped — custom-material node graphs can occupy
 	// fragment texture/sampler 1-4 with up to kMatMaxGraphTextures graph textures.
-	const bool giActive = m_giEnabled && m_giSupported && m_giShadowResult;
+	const bool giActive = m_giEnabled && m_giSupported && m_giShadowResult
+	                    && m_giIrradianceAtlas && m_giVisibilityAtlas;
 	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giShadowResult : m_dummyTexture) atIndex:5];
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:5];
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giIrradianceAtlas : m_dummyTexture) atIndex:6];
+	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:6];
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giVisibilityAtlas : m_dummyTexture) atIndex:7];
+	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:7];
 
 	// ── Lights (clamped to the shader's 8) ──────────────────────────────────
 	// Kept at function scope so the transparency pass below can re-bind it after
@@ -6640,8 +7091,8 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 	scene.weather       = glm::vec4(GetEnvironment().wetness, GetEnvironment().snowAmount, 0.0f, 0.0f);
 	[encoder setFragmentBytes:&scene length:sizeof(scene) atIndex:0];
 
-	GIUniforms giUniforms{};
-	giUniforms.enabled = giActive ? 1 : 0;
+	GIUniforms giUniforms = BuildGIUniforms(giActive, m_giGridOrigin, kGIProbeSpacing,
+	                                        m_giGridCounts, m_giProbesPerRow, m_giIndirectIntensity);
 	[encoder setFragmentBytes:&giUniforms length:sizeof(giUniforms) atIndex:3];
 
 #if defined(HE_HAVE_SHADERC)
@@ -6927,6 +7378,10 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 		[encoder setFragmentBytes:&giUniforms length:sizeof(giUniforms) atIndex:3];
 		[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giShadowResult : m_dummyTexture) atIndex:5];
 		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:5];
+		[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giIrradianceAtlas : m_dummyTexture) atIndex:6];
+		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:6];
+		[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giVisibilityAtlas : m_dummyTexture) atIndex:7];
+		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:7];
 		void* tpBound = (__bridge void*)(__bridge id<MTLRenderPipelineState>)m_sceneBlendPipeline;
 		for (const TPDraw& t : transparent)
 		{
@@ -7163,7 +7618,16 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 		// is enabled/supported and EncodeGIAccelBuild actually built a TLAS.
 		if (isPrimary)
 			EncodeGIShadowRays((__bridge void*)cmdBuf, std::max(1, shW / 2), std::max(1, shH / 2));
-		flushPass("SSAO");   // detailed: commit the GIShadow command buffer (empty if GI off)
+		flushPass("GIProbes");   // detailed: commit the GIShadow command buffer (empty if GI off)
+
+		// DDGI probe update (Checkpoint C): frame-sliced — updates up to
+		// probeBudgetPerFrame probes/frame, round-robin. No-op (early return)
+		// unless GI is enabled/supported/has a built TLAS; lazily builds the probe
+		// grid + atlases on first call. Replaces AO + flat/IBL ambient in
+		// fragmentMain when active — see EncodeScene's giActive gate below.
+		if (isPrimary)
+			EncodeGIProbeUpdate((__bridge void*)cmdBuf);
+		flushPass("SSAO");   // detailed: commit the GIProbes command buffer (empty if GI off)
 
 		const bool offscreen = isPrimary && m_viewportReqW > 0 && m_viewportReqH > 0;
 		if (isPrimary)
@@ -7173,13 +7637,16 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			EnsureHDRTarget(sceneW, sceneH);
 
 			// SSAO occlusion (its own pre-pass + encoders) before the shading pass,
-			// so the scene shader can darken its ambient. Skipped (zero cost) off.
+			// so the scene shader can darken its ambient. Skipped (zero cost) off —
+			// including when GI is active, since GI's probe-sampled indirect diffuse
+			// replaces AO entirely (EncodeScene's giActive gate skips aoTex too).
 			// Rendered at HALF resolution: SSAO was by far the biggest GPU pass
 			// (~1.8 ms, spiking with visible terrain) because its geometry pre-pass +
 			// 32-sample occlusion ran full-res. AO is low-frequency and gets blurred,
 			// so half-res (¼ the pixels) is ~4× cheaper with no visible quality loss;
 			// the scene shader samples it with normalized coords (bilinear upsample).
-			if (m_ssaoEnabled) EncodeSSAO((__bridge void*)cmdBuf,
+			const bool giReplacesAO = m_giEnabled && m_giSupported;
+			if (m_ssaoEnabled && !giReplacesAO) EncodeSSAO((__bridge void*)cmdBuf,
 			                              std::max(1, sceneW / 2), std::max(1, sceneH / 2));
 			else               m_ssaoResult = nullptr;
 			flushPass("Scene");   // detailed: commit the SSAO command buffer (empty if SSAO off)

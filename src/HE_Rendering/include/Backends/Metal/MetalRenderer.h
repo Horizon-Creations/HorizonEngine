@@ -508,6 +508,13 @@ private:
 	// than tracking capacity/growth; instance buffers are tiny (tens of KB).
 	void* m_giTlas           = nullptr; // id<MTLAccelerationStructure> (retained), this frame's build
 	void* m_giInstanceBuffer = nullptr; // id<MTLBuffer> (retained), this frame's build
+	// Per-instance flat baseColor (float4), SAME index order as the TLAS instance
+	// array — get_committed_instance_id() in a ray hit returns that array index
+	// (confirmed: MTLAccelerationStructureInstanceDescriptorTypeDefault has no
+	// separate user-ID field, so the id IS the array position), letting the DDGI
+	// probe-update kernel (Checkpoint C) look up which object it hit and tint the
+	// one-bounce estimate by that object's own colour instead of a flat grey.
+	void* m_giInstanceColorBuffer = nullptr; // id<MTLBuffer> (retained), this frame's build
 	// Objects a build just replaced (old TLAS/instance/scratch buffers). GPU work
 	// from this frame's build (or a still in-flight prior frame) may still
 	// reference them, so they are released a few frames later — same lifetime
@@ -564,6 +571,42 @@ private:
 	// m_renderWorld/m_sortedIndices with EncodeGIAccelBuild (called immediately
 	// before this in the frame, same extract).
 	void  EncodeGIShadowRays(void* cmdBuf, int width, int height);
+
+	// ── Global Illumination: DDGI probes (Checkpoint C) ──────────────────────────
+	// Replaces AO + flat/IBL ambient when GI is active: a fixed probe grid over the
+	// scene AABB (built once, not every frame — probes encode static indirect
+	// light), each probe an 8x8-texel octahedral map. v1 simplifications
+	// (documented, not the fully hardened DDGI paper): irradiance AND visibility
+	// share ONE octahedral resolution/ray set (not separately super-sampled) —
+	// each output texel traces its OWN ray in its own octahedral direction (a
+	// "gather", one thread per texel) rather than scattering N random rays into M
+	// texels, which needs no atomics/resolve pass since every thread in a probe's
+	// update owns exactly one texel; bounce colour is the hit object's flat
+	// baseColor (m_giInstanceColorBuffer), not a per-texel material/UV sample; no
+	// secondary shadow ray at the hit point (hit surfaces are treated as fully
+	// sun-lit); no border-texel wrap (accepts minor bilinear seams at probe tile
+	// edges). All are straightforward follow-ups once the base algorithm is
+	// visually verified, not correctness bugs.
+	static constexpr float kGIProbeSpacing      = 4.0f; // world units between probes
+	static constexpr int   kGIMaxProbesPerAxis  = 10;   // caps total probes/memory/cost
+	static constexpr int   kGIProbeOctSize      = 8;    // texels/side of each probe's octahedral tile (no border)
+	glm::vec3 m_giGridOrigin  = glm::vec3(0.0f); // world-space position of probe (0,0,0)
+	glm::ivec3 m_giGridCounts = glm::ivec3(0);   // probe counts per axis
+	int   m_giProbeCount   = 0;                  // gridCounts.x*y*z
+	int   m_giProbesPerRow = 0;                  // atlas tile layout (ceil(sqrt(probeCount)))
+	bool  m_giProbeGridBuilt = false;            // built lazily once; NOT rebuilt on scene change (v1 limitation)
+	int   m_giProbeUpdateCursor = 0;             // round-robin index into [0, probeCount) for frame-sliced updates
+	void* m_giProbeUpdatePipeline = nullptr;     // id<MTLComputePipelineState>
+	void* m_giIrradianceAtlas = nullptr;         // id<MTLTexture> RGBA16F, read_write (in-place EMA blend)
+	void* m_giVisibilityAtlas = nullptr;         // id<MTLTexture> RG16F (mean, mean^2 hit distance), read_write
+	void  EnsureGIProbeGrid();                   // computes the grid from the scene AABB, once
+	void  EnsureGIProbePipeline();                // builds m_giProbeUpdatePipeline once, only if m_giSupported
+	void  EnsureGIProbeAtlas();                   // (re)allocates the 2 atlas textures for the current grid
+	void  DestroyGIProbeAtlas();
+	// No-op (early return) unless GI is enabled/supported/has a built TLAS. Updates
+	// up to probeBudgetPerFrame probes this frame (round-robin), tracing
+	// raysPerProbe-ish rays each (== kGIProbeOctSize^2, the gather formulation).
+	void  EncodeGIProbeUpdate(void* cmdBuf);
 
 	// Uploaded asset meshes, keyed by asset UUID
 	std::unordered_map<HE::UUID, GpuMesh>         m_meshCache;
