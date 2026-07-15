@@ -3450,9 +3450,16 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             VkDescriptorBufferInfo lightBI{ m_matLightBuf[m_currentFrame].buf, 0, 64 };
                             VkDescriptorBufferInfo objBI  { m_matObjBuf[m_currentFrame].buf, slot, 176 };
                             VkDescriptorBufferInfo parBI  { m_matParBuf[m_currentFrame].buf, slot, 256 };
-                            // TODO A4-followup: bind heTex0 = material/mesh texture, heTexP0-3 =
-                            // graph project textures. This increment binds the 1x1 white default to
-                            // all five sampler slots so the shader samples something valid.
+                            // heTex0 = the material's base texture: an override material's texture
+                            // wins (A2), else the mesh's baked texture (A1), else the white default —
+                            // matching the built-in path's texture selection + matTextured flag.
+                            VkImageView tex0View = m_whiteAlbedoView;
+                            if (matOvr) { if (matOvr->view) tex0View = matOvr->view; }
+                            else if (m.albedoView) tex0View = m.albedoView;
+                            VkDescriptorImageInfo tex0II{ m_albedoSampler, tex0View,
+                                                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                            // TODO A4-followup: heTexP0-3 = the graph's picked project textures
+                            // (needs a UUID→view cache); bound to the white default for now.
                             VkDescriptorImageInfo whiteII{ m_albedoSampler, m_whiteAlbedoView,
                                                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
                             VkWriteDescriptorSet w[10]{};
@@ -3468,7 +3475,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             };
                             wr(0, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         &lightBI, nullptr);
                             wr(1, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         &objBI,   nullptr);
-                            wr(2, 2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &whiteII);
+                            wr(2, 2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &tex0II);
                             wr(3, 3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         &parBI,   nullptr);
                             wr(4, 4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &whiteII);
                             wr(5, 5, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &whiteII);
