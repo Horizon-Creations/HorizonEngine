@@ -209,13 +209,14 @@ namespace
 		if (auto* l = registry.try_get<LightComponent>(entity))
 		{
 			comps["light"] = {
-				{ "type",        static_cast<uint8_t>(l->type) },
-				{ "color",       vec3ToJson(l->color) },
-				{ "intensity",   l->intensity },
-				{ "range",       l->range },
-				{ "spotAngle",   l->spotAngle },
-				{ "visible",     l->visible },
-				{ "castsShadow", l->castsShadow },
+				{ "type",         static_cast<uint8_t>(l->type) },
+				{ "color",        vec3ToJson(l->color) },
+				{ "intensity",    l->intensity },
+				{ "range",        l->range },
+				{ "spotAngle",    l->spotAngle },
+				{ "cullDistance", l->cullDistance },
+				{ "visible",      l->visible },
+				{ "castsShadow",  l->castsShadow },
 			};
 		}
 		if (auto* r = registry.try_get<RigidBodyComponent>(entity))
@@ -663,13 +664,14 @@ namespace
 		{
 			const json& c = comps["light"];
 			LightComponent l;
-			l.type        = static_cast<LightType>(c.value("type", static_cast<uint8_t>(l.type)));
-			l.color       = jsonToVec3(c.value("color", json()), l.color);
-			l.intensity   = c.value("intensity",   l.intensity);
-			l.range       = c.value("range",       l.range);
-			l.spotAngle   = c.value("spotAngle",   l.spotAngle);
-			l.visible     = c.value("visible",     l.visible);
-			l.castsShadow = c.value("castsShadow", l.castsShadow);
+			l.type         = static_cast<LightType>(c.value("type", static_cast<uint8_t>(l.type)));
+			l.color        = jsonToVec3(c.value("color", json()), l.color);
+			l.intensity    = c.value("intensity",    l.intensity);
+			l.range        = c.value("range",        l.range);
+			l.spotAngle    = c.value("spotAngle",    l.spotAngle);
+			l.cullDistance = c.value("cullDistance", l.cullDistance);
+			l.visible      = c.value("visible",      l.visible);
+			l.castsShadow  = c.value("castsShadow",  l.castsShadow);
 			registry.emplace_or_replace<LightComponent>(entity, l);
 		}
 		if (comps.contains("rigidbody"))

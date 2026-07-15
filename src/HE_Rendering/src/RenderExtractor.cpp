@@ -372,6 +372,13 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 	for (auto [e, t, light] : reg.view<TransformComponent, LightComponent>().each())
 	{
 		if (!light.visible) continue; // hidden (e.g. a preloaded zone)
+		// Per-light distance culling (point/spot only): beyond cullDistance from
+		// the camera the light is dropped from the extracted set entirely, so
+		// direct shading AND the GI probe bounce ignore it consistently on every
+		// backend. 0 = never cull. Directional lights are global by nature.
+		if (light.type != HE::LightType::Directional && light.cullDistance > 0.0f
+		    && glm::distance(glm::vec3(t.worldMatrix[3]), out.camera.position) > light.cullDistance)
+			continue;
 		LightData l;
 		l.position     = glm::vec3(t.worldMatrix[3]);
 		// Lights shine along their local -Z (third column of the world matrix)

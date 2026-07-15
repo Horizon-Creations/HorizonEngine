@@ -7386,6 +7386,12 @@ void EditorUI::RenderInspector(AppContext& ctx)
 				ImGui::DragFloat("Range", &l->range, 0.1f, 0.0f, 10000.0f); trackEdit();
 			if (l->type == LightType::Spot)
 				ImGui::DragFloat("Spot Angle", &l->spotAngle, 0.5f, 1.0f, 179.0f); trackEdit();
+			if (l->type != LightType::Directional)
+			{
+				ImGui::DragFloat("Cull Distance", &l->cullDistance, 0.5f, 0.0f, 100000.0f); trackEdit();
+				if (ImGui::IsItemHovered())
+					ImGui::SetTooltip("Deactivate this light beyond this camera distance (0 = never)");
+			}
 			ImGui::Checkbox("Visible##light",      &l->visible);     trackEdit();
 			ImGui::Checkbox("Casts Shadow##light", &l->castsShadow); trackEdit();
 		}
