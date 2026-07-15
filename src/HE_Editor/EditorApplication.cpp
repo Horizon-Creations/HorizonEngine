@@ -2008,6 +2008,39 @@ void EditorApplication::dumpFrameHeadless()
 			Logger::Log(Logger::LogLevel::Info, "EditorApplication: preview stress loop done");
 		}
 	}
+	// DIAGNOSTIC (HE_DUMP_GIROTATE): sweep the camera through an orbit before the
+	// final static settle below, to directly exercise GI's temporal reprojection
+	// under camera rotation (disocclusion). The plain 3x static-render capture
+	// this harness otherwise does can NEVER trigger this — every he_shot.py call
+	// is a fresh process (no accumulated history) and the camera never moves
+	// within a single dump. "<deg>" (one value) sweeps start==end, i.e. a STATIC
+	// control at that angle for every frame; "<start>,<end>" sweeps between them
+	// — comparing the two final captures isolates whether an in-flight rotation
+	// (not just the final angle) changes the result.
+	if (const char* rot = std::getenv("HE_DUMP_GIROTATE"); rot && *rot && m_editorWorld)
+	{
+		float startDeg = 0.0f, endDeg = 0.0f;
+		if (std::sscanf(rot, "%f,%f", &startDeg, &endDeg) != 2)
+		{ endDeg = static_cast<float>(std::atof(rot)); startDeg = endDeg; }
+		const int steps = 12;
+		const glm::vec3 pivot(0.0f, 1.0f, 0.0f);
+		const float dist = 14.0f;
+		const float pitchRad = glm::radians(-20.0f);
+		const float cp = std::cos(pitchRad), sp = std::sin(pitchRad);
+		for (int i = 0; i <= steps; ++i)
+		{
+			const float t      = static_cast<float>(i) / static_cast<float>(steps);
+			const float yawRad = glm::radians(startDeg + (endDeg - startDeg) * t);
+			const glm::vec3 camPos = pivot + glm::vec3(std::sin(yawRad) * cp, sp, std::cos(yawRad) * cp) * dist;
+			m_editorCamera.setOrientation(camPos, glm::normalize(pivot - camPos));
+			r->SetEditorCamera(m_editorCamera.makeOverride());
+			r->Render();
+		}
+		Logger::Log(Logger::LogLevel::Info,
+			("EditorApplication: GI rotate diagnostic swept yaw " + std::to_string(startDeg)
+			 + "° -> " + std::to_string(endDeg) + "°").c_str());
+	}
+
 	for (int i = 0; i < 3; ++i)
 		r->Render();
 
