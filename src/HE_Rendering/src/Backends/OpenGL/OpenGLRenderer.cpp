@@ -4220,6 +4220,124 @@ void OpenGLRenderer::DestroyHDRTarget()
 	m_hdrW = m_hdrH = 0;
 }
 
+// ─── Block-compressed texture support ─────────────────────────────────────────
+// glad only exposes the BPTC enum; S3TC comes from an EXT so define it locally.
+#ifndef GL_COMPRESSED_RGBA_S3TC_DXT5_EXT
+#  define GL_COMPRESSED_RGBA_S3TC_DXT5_EXT 0x83F3
+#endif
+
+namespace {
+
+// Whether the current GL context exposes a named extension (core-profile safe:
+// GL_EXTENSIONS-as-a-string was removed, so enumerate via glGetStringi). Cached.
+bool glHasExtension(const char* name)
+{
+	GLint n = 0;
+	glGetIntegerv(GL_NUM_EXTENSIONS, &n);
+	for (GLint i = 0; i < n; ++i)
+	{
+		const GLubyte* e = glGetStringi(GL_EXTENSIONS, static_cast<GLuint>(i));
+		if (e && std::strcmp(reinterpret_cast<const char*>(e), name) == 0) return true;
+	}
+	return false;
+}
+
+// BC7/BPTC: core in GL 4.2, else the ARB extension. macOS GL is 4.1 → false
+// (which is why Apple GL targets ship BC3, not BC7 — see EditorUI selection).
+bool glSupportsBptc()
+{
+	static const bool has = [] {
+		GLint major = 0, minor = 0;
+		glGetIntegerv(GL_MAJOR_VERSION, &major);
+		glGetIntegerv(GL_MINOR_VERSION, &minor);
+		if (major > 4 || (major == 4 && minor >= 2)) return true;
+		return glHasExtension("GL_ARB_texture_compression_bptc");
+	}();
+	return has;
+}
+
+// BC3/S3TC: the DXT5 EXT — present on effectively every desktop GL incl. macOS 4.1.
+bool glSupportsS3tc()
+{
+	static const bool has = glHasExtension("GL_EXT_texture_compression_s3tc")
+	                     || glHasExtension("GL_ANGLE_texture_compression_dxt5");
+	return has;
+}
+
+// Upload a TextureAsset (RGBA8 or a cooked block format) to a fresh GL texture and
+// return its id (0 if unusable / the GPU can't sample the shipped format). Cooked
+// textures ship a pre-baked mip chain — for block formats there is no runtime mip
+// generation (impossible on compressed data); the cook baked every level. Shared by
+// every base-color upload site (static/skeletal mesh, material override, graph tex).
+unsigned int uploadTextureAssetGL(const TextureAsset* tex)
+{
+	if (!tex || tex->data.empty() || tex->channels != 4 || tex->width == 0 || tex->height == 0)
+		return 0;
+	const uint32_t mips = tex->mipLevels > 0 ? tex->mipLevels : 1;
+
+	// Resolve the block format's GL internalformat, or bail (→ flat) when this GL
+	// context can't sample it. ASTC is Metal-only and never shipped to GL.
+	GLenum blockFmt = 0;
+	switch (tex->format)
+	{
+	case TextureFormat::RGBA8: break;
+	case TextureFormat::BC7:
+		if (!glSupportsBptc()) return 0;
+		blockFmt = GL_COMPRESSED_RGBA_BPTC_UNORM; break;
+	case TextureFormat::BC3:
+		if (!glSupportsS3tc()) return 0;
+		blockFmt = GL_COMPRESSED_RGBA_S3TC_DXT5_EXT; break;
+	default: return 0; // ASTC_4x4 / unknown → GL can't sample it
+	}
+
+	unsigned int id = 0;
+	glGenTextures(1, &id);
+	glBindTexture(GL_TEXTURE_2D, id);
+
+	if (blockFmt != 0)
+	{
+		// Pre-baked, pre-compressed mip chain (16 B / 4x4 block, level 0 first).
+		size_t off = 0; uint32_t lw = static_cast<uint32_t>(tex->width), lh = static_cast<uint32_t>(tex->height);
+		for (uint32_t l = 0; l < mips; ++l)
+		{
+			const size_t bytes = static_cast<size_t>((lw + 3) / 4) * ((lh + 3) / 4) * 16;
+			if (off + bytes > tex->data.size()) break; // truncated payload guard
+			glCompressedTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(l), blockFmt,
+			                       static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), 0,
+			                       static_cast<GLsizei>(bytes), tex->data.data() + off);
+			off += bytes; lw = std::max<uint32_t>(1, lw >> 1); lh = std::max<uint32_t>(1, lh >> 1);
+		}
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, static_cast<GLint>(mips - 1));
+	}
+	else if (mips > 1)
+	{
+		// Cooked RGBA8: pre-baked mip chain, no runtime glGenerateMipmap.
+		size_t off = 0; uint32_t lw = static_cast<uint32_t>(tex->width), lh = static_cast<uint32_t>(tex->height);
+		for (uint32_t l = 0; l < mips; ++l)
+		{
+			glTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(l), GL_RGBA8,
+			             static_cast<GLsizei>(lw), static_cast<GLsizei>(lh),
+			             0, GL_RGBA, GL_UNSIGNED_BYTE, tex->data.data() + off);
+			off += static_cast<size_t>(lw) * lh * 4; lw = std::max<uint32_t>(1, lw >> 1); lh = std::max<uint32_t>(1, lh >> 1);
+		}
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, static_cast<GLint>(mips - 1));
+	}
+	else
+	{
+		// Loose/editor RGBA8: single level + GPU-generated mips.
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
+		             static_cast<GLsizei>(tex->width), static_cast<GLsizei>(tex->height),
+		             0, GL_RGBA, GL_UNSIGNED_BYTE, tex->data.data());
+		glGenerateMipmap(GL_TEXTURE_2D);
+	}
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	return id;
+}
+
+} // namespace
+
 // ─── Asset mesh upload ────────────────────────────────────────────────────────
 const OpenGLRenderer::GpuMesh* OpenGLRenderer::ResolveMesh(const HE::UUID& assetId)
 {
@@ -4315,40 +4433,8 @@ const OpenGLRenderer::GpuMesh* OpenGLRenderer::ResolveMesh(const HE::UUID& asset
 	{
 		const HE::UUID    texId0   = mat->textureIds.empty()   ? HE::UUID{}    : mat->textureIds[0];
 		const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
-		if (const TextureAsset* tex = m_contentManager->resolveTextureRef(texId0, texPath0);
-		    tex && !tex->data.empty() && tex->channels == 4 && tex->format == TextureFormat::RGBA8)
-		{
-			glGenTextures(1, &mesh.texture);
-			glBindTexture(GL_TEXTURE_2D, mesh.texture);
-			if (tex->mipLevels > 1)
-			{
-				// Cooked: upload the pre-baked mip chain (level 0 first), no
-				// runtime glGenerateMipmap.
-				size_t   off = 0;
-				uint32_t lw = static_cast<uint32_t>(tex->width);
-				uint32_t lh = static_cast<uint32_t>(tex->height);
-				for (uint32_t l = 0; l < tex->mipLevels; ++l)
-				{
-					glTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(l), GL_RGBA8,
-					             static_cast<GLsizei>(lw), static_cast<GLsizei>(lh),
-					             0, GL_RGBA, GL_UNSIGNED_BYTE, tex->data.data() + off);
-					off += static_cast<size_t>(lw) * lh * 4;
-					lw = std::max<uint32_t>(1, lw >> 1);
-					lh = std::max<uint32_t>(1, lh >> 1);
-				}
-				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, static_cast<GLint>(tex->mipLevels - 1));
-			}
-			else
-			{
-				glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
-				             static_cast<GLsizei>(tex->width), static_cast<GLsizei>(tex->height),
-				             0, GL_RGBA, GL_UNSIGNED_BYTE, tex->data.data());
-				glGenerateMipmap(GL_TEXTURE_2D);
-			}
-			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-			glBindTexture(GL_TEXTURE_2D, 0);
-		}
+		// Handles RGBA8 + cooked BC7/BC3 (skips a block format this GL can't sample).
+		mesh.texture = uploadTextureAssetGL(m_contentManager->resolveTextureRef(texId0, texPath0));
 	}
 
 	Logger::Log(Logger::LogLevel::Info,
@@ -4460,40 +4546,8 @@ OpenGLRenderer::ResolveSkeletalMesh(const HE::UUID& assetId)
 	{
 		const HE::UUID    texId0   = mat->textureIds.empty()   ? HE::UUID{}    : mat->textureIds[0];
 		const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
-		if (const TextureAsset* tex = m_contentManager->resolveTextureRef(texId0, texPath0);
-		    tex && !tex->data.empty() && tex->channels == 4 && tex->format == TextureFormat::RGBA8)
-		{
-			glGenTextures(1, &mesh.texture);
-			glBindTexture(GL_TEXTURE_2D, mesh.texture);
-			if (tex->mipLevels > 1)
-			{
-				// Cooked: upload the pre-baked mip chain (level 0 first), no
-				// runtime glGenerateMipmap.
-				size_t   off = 0;
-				uint32_t lw = static_cast<uint32_t>(tex->width);
-				uint32_t lh = static_cast<uint32_t>(tex->height);
-				for (uint32_t l = 0; l < tex->mipLevels; ++l)
-				{
-					glTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(l), GL_RGBA8,
-					             static_cast<GLsizei>(lw), static_cast<GLsizei>(lh),
-					             0, GL_RGBA, GL_UNSIGNED_BYTE, tex->data.data() + off);
-					off += static_cast<size_t>(lw) * lh * 4;
-					lw = std::max<uint32_t>(1, lw >> 1);
-					lh = std::max<uint32_t>(1, lh >> 1);
-				}
-				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, static_cast<GLint>(tex->mipLevels - 1));
-			}
-			else
-			{
-				glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
-				             static_cast<GLsizei>(tex->width), static_cast<GLsizei>(tex->height),
-				             0, GL_RGBA, GL_UNSIGNED_BYTE, tex->data.data());
-				glGenerateMipmap(GL_TEXTURE_2D);
-			}
-			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-			glBindTexture(GL_TEXTURE_2D, 0);
-		}
+		// Handles RGBA8 + cooked BC7/BC3 (skips a block format this GL can't sample).
+		mesh.texture = uploadTextureAssetGL(m_contentManager->resolveTextureRef(texId0, texPath0));
 	}
 
 	Logger::Log(Logger::LogLevel::Info,
@@ -4525,19 +4579,9 @@ bool OpenGLRenderer::ResolveMaterialTexture(const HE::UUID& materialId, unsigned
 	{
 		const HE::UUID    texId0   = mat->textureIds.empty()   ? HE::UUID{}    : mat->textureIds[0];
 		const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
-		if (const TextureAsset* t = m_contentManager->resolveTextureRef(texId0, texPath0);
-		    t && !t->data.empty() && t->channels == 4)
-		{
-			glGenTextures(1, &tex);
-			glBindTexture(GL_TEXTURE_2D, tex);
-			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
-			             static_cast<GLsizei>(t->width), static_cast<GLsizei>(t->height),
-			             0, GL_RGBA, GL_UNSIGNED_BYTE, t->data.data());
-			glGenerateMipmap(GL_TEXTURE_2D);
-			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-			glBindTexture(GL_TEXTURE_2D, 0);
-		}
+		// RGBA8 + cooked BC7/BC3 (previously this override path assumed RGBA8 and
+		// would have uploaded a compressed payload as garbage — now handled).
+		tex = uploadTextureAssetGL(m_contentManager->resolveTextureRef(texId0, texPath0));
 	}
 
 	m_materialTexCache.emplace(materialId, tex);
@@ -4553,19 +4597,8 @@ unsigned int OpenGLRenderer::ResolveGraphTexture(const HE::UUID& id, const std::
 		? (std::to_string(id.hi) + ":" + std::to_string(id.lo)) : path;
 	if (key.empty() || !m_contentManager) return 0;
 	if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end()) return it->second;
-	unsigned int tex = 0;
-	if (const TextureAsset* t = m_contentManager->resolveTextureRef(id, path);
-	    t && !t->data.empty() && t->channels == 4)
-	{
-		glGenTextures(1, &tex);
-		glBindTexture(GL_TEXTURE_2D, tex);
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)t->width, (GLsizei)t->height,
-		             0, GL_RGBA, GL_UNSIGNED_BYTE, t->data.data());
-		glGenerateMipmap(GL_TEXTURE_2D);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-		glBindTexture(GL_TEXTURE_2D, 0);
-	}
+	// RGBA8 + cooked BC7/BC3 (skips a block format this GL context can't sample).
+	unsigned int tex = uploadTextureAssetGL(m_contentManager->resolveTextureRef(id, path));
 	m_graphTexCache.emplace(key, tex);
 	return tex;
 }

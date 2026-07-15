@@ -76,6 +76,23 @@ if(HE_HAVE_ASTCENC)
     target_compile_definitions(HorizonCore PRIVATE HE_HAVE_ASTCENC)
 endif()
 
+# ── Block-compression texture encoders (pack-time cook) ────────────────────────
+# Both are vendored under vendor/bc7enc/, dependency-free and dual MIT/public-domain:
+#   bc7enc  → BC7 (RGBA, best desktop quality) — compiled from vendor/bc7enc/bc7enc.cpp
+#   stb_dxt → BC1/BC3 (DXT1/DXT5, universal incl. macOS GL 4.1) — header-only, its
+#             implementation is emitted inside HpakWriter.cpp (STB_DXT_IMPLEMENTATION).
+# All texture compression happens at EXPORT time (see HpakWriter cookTexture); the
+# shipped game only ever uploads the resulting pre-compressed blocks + pre-baked mips.
+option(HE_ENABLE_BC7     "Compile the vendored bc7enc BC7 encoder for texture cooking"   ON)
+option(HE_ENABLE_STB_DXT "Enable the vendored stb_dxt BC1/BC3 encoder for texture cooking" ON)
+if(HE_ENABLE_BC7)
+    target_sources(HorizonCore PRIVATE vendor/bc7enc/bc7enc.cpp)
+    target_compile_definitions(HorizonCore PRIVATE HE_HAVE_BC7ENC)
+endif()
+if(HE_ENABLE_STB_DXT)
+    target_compile_definitions(HorizonCore PRIVATE HE_HAVE_STB_DXT)
+endif()
+
 # Tracy::TracyClient propagates TRACY_ENABLE define + include dir to all
 # downstream consumers (HorizonRendering, HorizonEditor, etc.) via PUBLIC linkage.
 if(HE_ENABLE_TRACY)

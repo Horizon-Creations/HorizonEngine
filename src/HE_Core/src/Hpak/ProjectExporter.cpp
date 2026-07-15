@@ -232,7 +232,8 @@ static uint64_t settingsFingerprint(const Hpak::PackSettings& s)
     buf[0] = static_cast<uint8_t>(s.codec);
     buf[1] = static_cast<uint8_t>(s.level);
     buf[2] = s.encrypt ? 1 : 0;
-    buf[3] = static_cast<uint8_t>((s.cook ? 1 : 0) | (s.astcTextures ? 2 : 0)); // cook/astc toggles re-pack
+    // cook toggle (bit0) + texture-compression target (bits1-3) → changing either re-packs.
+    buf[3] = static_cast<uint8_t>((s.cook ? 1 : 0) | ((s.textureCompression & 0x7) << 1));
     std::memcpy(buf + 4, &s.shaderBackends, 4); // precompiled-shader backend set → re-pack materials
     std::memcpy(buf + 8, s.key, 32);  // all-zero when not encrypting
     return Hpak::hash64(buf, sizeof(buf));
@@ -470,7 +471,7 @@ ExportResult ProjectExporter::exportProject(
 
     packSettings.excludePatterns = settings.excludePatterns;
     packSettings.cook = true; // always cook exports into the runtime-optimal form
-    packSettings.astcTextures = settings.astcTextures;
+    packSettings.textureCompression = settings.textureCompression;
     packSettings.shaderBackends        = settings.shaderBackends;        // precompile material shaders
     packSettings.compileShaderVariants = settings.compileShaderVariants;
     packSettings.compileParticleShaderVariants = settings.compileParticleShaderVariants;

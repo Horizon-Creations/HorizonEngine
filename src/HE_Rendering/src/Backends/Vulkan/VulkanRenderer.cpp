@@ -3024,6 +3024,165 @@ bool VulkanRenderer::uploadRGBA8Image(const uint8_t* rgba, uint32_t width, uint3
     return true;
 }
 
+// Upload a cooked TextureAsset (RGBA8 or block-compressed BC7/BC3) with its full
+// pre-baked mip chain to a device-local sampled image + view. All levels are staged
+// into one buffer and copied per-mip; block formats use no runtime mip generation.
+// Returns false when the device can't sample the shipped format (→ untextured draw).
+bool VulkanRenderer::uploadTextureImage(const TextureAsset* tex,
+                                        VkImage& image, VkDeviceMemory& memory, VkImageView& view)
+{
+    image = VK_NULL_HANDLE; memory = VK_NULL_HANDLE; view = VK_NULL_HANDLE;
+    if (!tex || tex->data.empty() || tex->channels != 4 || tex->width == 0 || tex->height == 0)
+        return false;
+    const uint32_t width  = static_cast<uint32_t>(tex->width);
+    const uint32_t height = static_cast<uint32_t>(tex->height);
+    const uint32_t mips   = tex->mipLevels > 0 ? tex->mipLevels : 1;
+
+    // Resolve the shipped format to a VkFormat + block flag. ASTC is Metal-only and
+    // never packed for Vulkan; treat it (and anything unknown) as unsupported.
+    VkFormat vkFmt; bool isBlock;
+    switch (tex->format)
+    {
+    case TextureFormat::RGBA8: vkFmt = VK_FORMAT_R8G8B8A8_UNORM; isBlock = false; break;
+    case TextureFormat::BC7:   vkFmt = VK_FORMAT_BC7_UNORM_BLOCK; isBlock = true;  break;
+    case TextureFormat::BC3:   vkFmt = VK_FORMAT_BC3_UNORM_BLOCK; isBlock = true;  break;
+    default: return false;
+    }
+    // Device must actually sample this format (BC support is optional in Vulkan).
+    VkFormatProperties fp{};
+    vkGetPhysicalDeviceFormatProperties(m_physDevice, vkFmt, &fp);
+    if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)) return false;
+
+    // Per-level byte size + running offsets (level 0 first). Block: 16 B/4x4 block.
+    auto levelBytes = [isBlock](uint32_t w, uint32_t h) -> VkDeviceSize {
+        return isBlock ? static_cast<VkDeviceSize>((w + 3) / 4) * ((h + 3) / 4) * 16
+                       : static_cast<VkDeviceSize>(w) * h * 4;
+    };
+    std::vector<VkDeviceSize> offsets(mips);
+    VkDeviceSize total = 0;
+    { uint32_t lw = width, lh = height;
+      for (uint32_t l = 0; l < mips; ++l)
+      { offsets[l] = total; total += levelBytes(lw, lh);
+        lw = lw > 1 ? (lw >> 1) : 1; lh = lh > 1 ? (lh >> 1) : 1; } }
+    if (tex->data.size() < total) return false; // truncated payload
+
+    // Staging buffer holding the whole (already tightly packed) mip chain.
+    VkBuffer       stageBuf = VK_NULL_HANDLE;
+    VkDeviceMemory stageMem = VK_NULL_HANDLE;
+    {
+        VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        bci.size  = total;
+        bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        if (vkCreateBuffer(m_device, &bci, nullptr, &stageBuf) != VK_SUCCESS) return false;
+        VkMemoryRequirements req{}; vkGetBufferMemoryRequirements(m_device, stageBuf, &req);
+        VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        mai.allocationSize  = req.size;
+        mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if (vkAllocateMemory(m_device, &mai, nullptr, &stageMem) != VK_SUCCESS)
+        { vkDestroyBuffer(m_device, stageBuf, nullptr); return false; }
+        vkBindBufferMemory(m_device, stageBuf, stageMem, 0);
+        void* ptr = nullptr;
+        vkMapMemory(m_device, stageMem, 0, total, 0, &ptr);
+        std::memcpy(ptr, tex->data.data(), static_cast<size_t>(total));
+        vkUnmapMemory(m_device, stageMem);
+    }
+
+    VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+    ici.imageType     = VK_IMAGE_TYPE_2D;
+    ici.format        = vkFmt;
+    ici.extent        = { width, height, 1 };
+    ici.mipLevels     = mips;
+    ici.arrayLayers   = 1;
+    ici.samples       = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling        = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage         = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (vkCreateImage(m_device, &ici, nullptr, &image) != VK_SUCCESS)
+    { image = VK_NULL_HANDLE; vkDestroyBuffer(m_device, stageBuf, nullptr); vkFreeMemory(m_device, stageMem, nullptr); return false; }
+    VkMemoryRequirements imr{}; vkGetImageMemoryRequirements(m_device, image, &imr);
+    VkMemoryAllocateInfo imal{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    imal.allocationSize  = imr.size;
+    imal.memoryTypeIndex = findMemoryType(imr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (vkAllocateMemory(m_device, &imal, nullptr, &memory) != VK_SUCCESS)
+    {
+        vkDestroyImage(m_device, image, nullptr); image = VK_NULL_HANDLE;
+        vkDestroyBuffer(m_device, stageBuf, nullptr); vkFreeMemory(m_device, stageMem, nullptr);
+        return false;
+    }
+    vkBindImageMemory(m_device, image, memory, 0);
+
+    // One-shot command buffer: UNDEFINED → TRANSFER_DST → copy every mip → SHADER_READ.
+    VkCommandBufferAllocateInfo cbai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+    cbai.commandPool        = m_cmdPool;
+    cbai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cbai.commandBufferCount = 1;
+    VkCommandBuffer oneCB = VK_NULL_HANDLE;
+    vkAllocateCommandBuffers(m_device, &cbai, &oneCB);
+    VkCommandBufferBeginInfo oneBI{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    oneBI.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(oneCB, &oneBI);
+    {
+        VkImageMemoryBarrier bar{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+        bar.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        bar.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bar.image            = image;
+        bar.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, mips, 0, 1 };
+        bar.srcAccessMask    = 0;
+        bar.dstAccessMask    = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(oneCB, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &bar);
+    }
+    { uint32_t lw = width, lh = height;
+      for (uint32_t l = 0; l < mips; ++l)
+      {
+        VkBufferImageCopy region{};
+        region.bufferOffset     = offsets[l]; // multiple of 16 → satisfies block/4-byte alignment
+        region.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, l, 0, 1 };
+        region.imageExtent      = { lw, lh, 1 };
+        vkCmdCopyBufferToImage(oneCB, stageBuf, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+        lw = lw > 1 ? (lw >> 1) : 1; lh = lh > 1 ? (lh >> 1) : 1;
+      } }
+    {
+        VkImageMemoryBarrier bar{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+        bar.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        bar.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bar.image            = image;
+        bar.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, mips, 0, 1 };
+        bar.srcAccessMask    = VK_ACCESS_TRANSFER_WRITE_BIT;
+        bar.dstAccessMask    = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(oneCB, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &bar);
+    }
+    vkEndCommandBuffer(oneCB);
+    VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    si.commandBufferCount = 1;
+    si.pCommandBuffers    = &oneCB;
+    vkQueueSubmit(m_graphicsQueue, 1, &si, VK_NULL_HANDLE);
+    vkQueueWaitIdle(m_graphicsQueue);
+    vkFreeCommandBuffers(m_device, m_cmdPool, 1, &oneCB);
+    vkDestroyBuffer(m_device, stageBuf, nullptr);
+    vkFreeMemory(m_device, stageMem, nullptr);
+
+    VkImageViewCreateInfo ivci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+    ivci.image            = image;
+    ivci.viewType         = VK_IMAGE_VIEW_TYPE_2D;
+    ivci.format           = vkFmt;
+    ivci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, mips, 0, 1 };
+    if (vkCreateImageView(m_device, &ivci, nullptr, &view) != VK_SUCCESS)
+    {
+        view = VK_NULL_HANDLE;
+        vkDestroyImage(m_device, image, nullptr); image = VK_NULL_HANDLE;
+        vkFreeMemory(m_device, memory, nullptr);  memory = VK_NULL_HANDLE;
+        return false;
+    }
+    return true;
+}
+
 bool VulkanRenderer::resolveAndUploadAlbedo(const HE::UUID& materialId, const std::string& materialPath,
                                             VkImage& image, VkDeviceMemory& memory, VkImageView& view,
                                             VkDescriptorSet& set)
@@ -3035,12 +3194,10 @@ bool VulkanRenderer::resolveAndUploadAlbedo(const HE::UUID& materialId, const st
     const HE::UUID    texId0   = mat->textureIds.empty()   ? HE::UUID{}    : mat->textureIds[0];
     const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
     const TextureAsset* tex = m_contentManager->resolveTextureRef(texId0, texPath0);
-    if (!tex || tex->data.empty() || tex->channels != 4 || tex->format != TextureFormat::RGBA8) return false;
-    if (tex->width == 0 || tex->height == 0) return false;
-    if (tex->data.size() < static_cast<size_t>(tex->width) * tex->height * 4u) return false; // truncated
 
-    if (!uploadRGBA8Image(tex->data.data(), static_cast<uint32_t>(tex->width),
-                          static_cast<uint32_t>(tex->height), image, memory, view))
+    // RGBA8 + cooked BC7/BC3 (full pre-baked mip chain); uploadTextureImage returns
+    // false when this device can't sample the shipped format → untextured fallback.
+    if (!uploadTextureImage(tex, image, memory, view))
         return false;
 
     VkDescriptorSetAllocateInfo dsai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
