@@ -2129,6 +2129,63 @@ struct D3D11RendererImpl
         cube.localBounds.expand({  0.5f,  0.5f,  0.5f });
     }
 
+    // Create an immutable base-color texture + SRV from a cooked TextureAsset — RGBA8
+    // or a block format (BC7/BC3) — with its full pre-baked mip chain (one immutable
+    // subresource per level). Returns a null SRV when the asset is unusable or this
+    // device can't sample the shipped format (→ flat). Shared by every base-color
+    // upload site (static/skeletal mesh, override material). Block formats need no
+    // runtime mip generation; the cook baked every level.
+    ComPtr<ID3D11ShaderResourceView> createAlbedoSRV(const TextureAsset* tex)
+    {
+        ComPtr<ID3D11ShaderResourceView> srv;
+        if (!tex || tex->data.empty() || tex->channels != 4 || tex->width == 0 || tex->height == 0)
+            return srv;
+
+        DXGI_FORMAT fmt; bool isBlock; UINT blockBytes = 16;
+        switch (tex->format)
+        {
+        case TextureFormat::RGBA8: fmt = DXGI_FORMAT_R8G8B8A8_UNORM; isBlock = false; break;
+        case TextureFormat::BC7:   fmt = DXGI_FORMAT_BC7_UNORM;      isBlock = true;  break;
+        case TextureFormat::BC3:   fmt = DXGI_FORMAT_BC3_UNORM;      isBlock = true;  break;
+        default: return srv; // ASTC / unknown → D3D can't sample it
+        }
+        // BC is core on FL11, but stay defensive: skip if the driver can't sample it.
+        if (isBlock)
+        {
+            UINT sup = 0;
+            if (FAILED(device->CheckFormatSupport(fmt, &sup)) ||
+                !(sup & D3D11_FORMAT_SUPPORT_TEXTURE2D))
+                return srv;
+        }
+
+        const UINT mips = tex->mipLevels > 0 ? tex->mipLevels : 1;
+        // One immutable subresource per mip (level 0 first). Row pitch: block formats
+        // are blocks-per-row × 16 B; RGBA8 is width × 4 B.
+        std::vector<D3D11_SUBRESOURCE_DATA> srd(mips);
+        size_t off = 0; UINT lw = static_cast<UINT>(tex->width), lh = static_cast<UINT>(tex->height);
+        for (UINT l = 0; l < mips; ++l)
+        {
+            const UINT rowPitch = isBlock ? ((lw + 3) / 4) * blockBytes : lw * 4;
+            const size_t bytes  = isBlock ? static_cast<size_t>((lw + 3) / 4) * ((lh + 3) / 4) * blockBytes
+                                          : static_cast<size_t>(lw) * lh * 4;
+            if (off + bytes > tex->data.size()) return {}; // truncated payload
+            srd[l].pSysMem          = tex->data.data() + off;
+            srd[l].SysMemPitch      = rowPitch;
+            srd[l].SysMemSlicePitch = 0;
+            off += bytes; lw = lw > 1 ? (lw >> 1) : 1; lh = lh > 1 ? (lh >> 1) : 1;
+        }
+
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width = static_cast<UINT>(tex->width); td.Height = static_cast<UINT>(tex->height);
+        td.MipLevels = mips; td.ArraySize = 1;
+        td.Format = fmt; td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_IMMUTABLE; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        ComPtr<ID3D11Texture2D> t;
+        if (SUCCEEDED(device->CreateTexture2D(&td, srd.data(), &t)))
+            device->CreateShaderResourceView(t.Get(), nullptr, &srv);
+        return srv;
+    }
+
     // Resolve an OVERRIDE material's base-color texture (dc.materialAssetId), cached by material
     // UUID. Returns true iff the material asset is loaded (outSrv is its SRV, or null when the
     // override material has no texture → flat, NOT the baked texture — exactly like GL); false
@@ -2146,20 +2203,9 @@ struct D3D11RendererImpl
         MaterialTex entry;
         const HE::UUID    texId0   = mat->textureIds.empty()   ? HE::UUID{}    : mat->textureIds[0];
         const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
-        if (const TextureAsset* tex = cm->resolveTextureRef(texId0, texPath0);
-            tex && !tex->data.empty() && tex->channels == 4 && tex->format == TextureFormat::RGBA8)
-        {
-            D3D11_TEXTURE2D_DESC td{};
-            td.Width = tex->width; td.Height = tex->height;
-            td.MipLevels = 1; td.ArraySize = 1;
-            td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1;
-            td.Usage = D3D11_USAGE_IMMUTABLE; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-            D3D11_SUBRESOURCE_DATA srd{};
-            srd.pSysMem = tex->data.data();
-            srd.SysMemPitch = tex->width * 4;
-            if (SUCCEEDED(device->CreateTexture2D(&td, &srd, &entry.tex)))
-                device->CreateShaderResourceView(entry.tex.Get(), nullptr, &entry.srv);
-        }
+        // RGBA8 + cooked BC7/BC3 with the pre-baked mip chain (skips a block format
+        // this device can't sample).
+        entry.srv = createAlbedoSRV(cm->resolveTextureRef(texId0, texPath0));
         outSrv = entry.srv.Get(); // null when the override material has no usable texture
         materialTexCache.emplace(materialId, std::move(entry));
         return true;
@@ -2228,21 +2274,8 @@ struct D3D11RendererImpl
         {
             const HE::UUID    texId0   = mat->textureIds.empty()   ? HE::UUID{}    : mat->textureIds[0];
             const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
-            if (const TextureAsset* tex = cm->resolveTextureRef(texId0, texPath0);
-                tex && !tex->data.empty() && tex->channels == 4 && tex->format == TextureFormat::RGBA8)
-            {
-                D3D11_TEXTURE2D_DESC td{};
-                td.Width = tex->width; td.Height = tex->height;
-                td.MipLevels = 1; td.ArraySize = 1;
-                td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1;
-                td.Usage = D3D11_USAGE_IMMUTABLE; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-                D3D11_SUBRESOURCE_DATA srd{};
-                srd.pSysMem = tex->data.data();
-                srd.SysMemPitch = tex->width * 4;
-                ComPtr<ID3D11Texture2D> t;
-                if (SUCCEEDED(device->CreateTexture2D(&td, &srd, &t)))
-                    device->CreateShaderResourceView(t.Get(), nullptr, &mesh.texture);
-            }
+            // RGBA8 + cooked BC7/BC3 with the pre-baked mip chain.
+            mesh.texture = createAlbedoSRV(cm->resolveTextureRef(texId0, texPath0));
         }
         return &meshCache.emplace(assetId, mesh).first->second;
     }
@@ -2688,21 +2721,8 @@ struct D3D11RendererImpl
         {
             const HE::UUID    texId0   = mat->textureIds.empty()   ? HE::UUID{}    : mat->textureIds[0];
             const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
-            if (const TextureAsset* tex = cm->resolveTextureRef(texId0, texPath0);
-                tex && !tex->data.empty() && tex->channels == 4 && tex->format == TextureFormat::RGBA8)
-            {
-                D3D11_TEXTURE2D_DESC td{};
-                td.Width = tex->width; td.Height = tex->height;
-                td.MipLevels = 1; td.ArraySize = 1;
-                td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1;
-                td.Usage = D3D11_USAGE_IMMUTABLE; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-                D3D11_SUBRESOURCE_DATA srd{};
-                srd.pSysMem = tex->data.data();
-                srd.SysMemPitch = tex->width * 4;
-                ComPtr<ID3D11Texture2D> t;
-                if (SUCCEEDED(device->CreateTexture2D(&td, &srd, &t)))
-                    device->CreateShaderResourceView(t.Get(), nullptr, &mesh.srv);
-            }
+            // RGBA8 + cooked BC7/BC3 with the pre-baked mip chain.
+            mesh.srv = createAlbedoSRV(cm->resolveTextureRef(texId0, texPath0));
         }
 
         return &skeletalMeshCache.emplace(assetId, std::move(mesh)).first->second;

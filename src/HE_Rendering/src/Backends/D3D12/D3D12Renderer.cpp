@@ -2324,58 +2324,94 @@ struct D3D12RendererImpl
         return cm->resolveTextureRef(texId0, texPath0);
     }
 
-    // Upload a decoded RGBA8 texture to a DEFAULT-heap texture + SRV in the mesh-texture
-    // region of sceneSrvHeap, using the frame's recording command list. Mirrors uiAtlasSlotFor
-    // (row-pitched staging copy, COPY_DEST→PIXEL_SHADER_RESOURCE). Returns the heap slot, or -1
-    // on any miss / heap full. The DEFAULT texture is handed back via outTex so the caller keeps
-    // it alive for the mesh's lifetime.
+    // Upload a cooked TextureAsset — RGBA8 or a block format (BC7/BC3) — with its full
+    // pre-baked mip chain to a DEFAULT-heap texture + SRV in the mesh-texture region of
+    // sceneSrvHeap, using the frame's recording command list. GetCopyableFootprints
+    // sizes the row-pitched staging copy for every subresource (COPY_DEST→PIXEL_SHADER_
+    // RESOURCE). Returns the heap slot, or -1 on any miss / heap full / unsupported
+    // format. The DEFAULT texture is handed back via outTex so the caller keeps it alive.
     int allocAlbedoSlot(ID3D12GraphicsCommandList* cl, const TextureAsset* tex,
                         ComPtr<ID3D12Resource>& outTex)
     {
         if (!cl || !sceneSrvHeap || !tex) return -1;
-        if (tex->data.empty() || tex->channels != 4 || tex->format != TextureFormat::RGBA8) return -1;
-        if (tex->width == 0 || tex->height == 0) return -1;
-        const UINT rowBytes = static_cast<UINT>(tex->width) * 4u;
-        if (tex->data.size() < static_cast<size_t>(rowBytes) * tex->height) return -1; // truncated
+        if (tex->data.empty() || tex->channels != 4 || tex->width == 0 || tex->height == 0) return -1;
+
+        DXGI_FORMAT fmt; bool isBlock;
+        switch (tex->format)
+        {
+        case TextureFormat::RGBA8: fmt = DXGI_FORMAT_R8G8B8A8_UNORM; isBlock = false; break;
+        case TextureFormat::BC7:   fmt = DXGI_FORMAT_BC7_UNORM;      isBlock = true;  break;
+        case TextureFormat::BC3:   fmt = DXGI_FORMAT_BC3_UNORM;      isBlock = true;  break;
+        default: return -1; // ASTC / unknown → D3D can't sample it
+        }
+        if (isBlock) // BC is core on FL11, but stay defensive.
+        {
+            D3D12_FEATURE_DATA_FORMAT_SUPPORT fs{ fmt };
+            if (FAILED(device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &fs, sizeof(fs))) ||
+                !(fs.Support1 & D3D12_FORMAT_SUPPORT1_TEXTURE2D))
+                return -1;
+        }
         // A recycled slot (freed by invalidation, past frames in flight) or the next fresh one.
         if (m_freeSlots.empty() && meshTexNextSlot >= k_sceneStaticSrvs + k_maxMeshTextures)
             return -1; // heap full → flat
 
+        const UINT mips = tex->mipLevels > 0 ? tex->mipLevels : 1;
         D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
         D3D12_RESOURCE_DESC td{};
         td.Dimension        = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
         td.Width            = static_cast<UINT64>(tex->width);
         td.Height           = static_cast<UINT>(tex->height);
         td.DepthOrArraySize = 1;
-        td.MipLevels        = 1;
-        td.Format           = DXGI_FORMAT_R8G8B8A8_UNORM;
+        td.MipLevels        = static_cast<UINT16>(mips);
+        td.Format           = fmt;
         td.SampleDesc.Count = 1;
         ComPtr<ID3D12Resource> gpuTex;
         if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td,
                    D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&gpuTex))))
             return -1;
 
-        // Row-pitched staging copy (RGBA8: 4 bytes per texel).
-        const UINT rowPitch = alignUp(rowBytes, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
+        // Per-subresource footprints (D3D-aligned dest row pitch) + total upload size.
+        std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> footprints(mips);
+        std::vector<UINT>   numRows(mips);
+        std::vector<UINT64> rowSizes(mips);
+        UINT64 uploadSize = 0;
+        device->GetCopyableFootprints(&td, 0, mips, 0,
+            footprints.data(), numRows.data(), rowSizes.data(), &uploadSize);
+
+        // Guard the source payload holds every mip tightly (numRows × rowSize each).
+        size_t need = 0;
+        for (UINT s = 0; s < mips; ++s) need += static_cast<size_t>(numRows[s]) * rowSizes[s];
+        if (tex->data.size() < need) return -1; // truncated
+
         void* mapped = nullptr;
-        ComPtr<ID3D12Resource> uploadBuf =
-            createUploadBuffer(static_cast<UINT64>(rowPitch) * tex->height, &mapped);
+        ComPtr<ID3D12Resource> uploadBuf = createUploadBuffer(uploadSize, &mapped);
         if (!uploadBuf || !mapped) return -1;
-        for (size_t y = 0; y < tex->height; ++y)
-            std::memcpy(static_cast<uint8_t*>(mapped) + y * rowPitch,
-                        tex->data.data() + y * rowBytes,
-                        rowBytes);
+        // Copy each mip's tightly-packed source rows into the aligned upload layout.
+        size_t srcOff = 0;
+        for (UINT s = 0; s < mips; ++s)
+        {
+            const UINT64 srcPitch = rowSizes[s];                       // tight source row bytes
+            const UINT64 dstPitch = footprints[s].Footprint.RowPitch;  // aligned dest row bytes
+            for (UINT r = 0; r < numRows[s]; ++r)
+                std::memcpy(static_cast<uint8_t*>(mapped) + footprints[s].Offset + r * dstPitch,
+                            tex->data.data() + srcOff + r * srcPitch,
+                            static_cast<size_t>(srcPitch));
+            srcOff += static_cast<size_t>(numRows[s]) * srcPitch;
+        }
         uploadBuf->Unmap(0, nullptr);
 
-        D3D12_TEXTURE_COPY_LOCATION src{};
-        src.pResource = uploadBuf.Get();
-        src.Type      = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-        src.PlacedFootprint.Footprint = { DXGI_FORMAT_R8G8B8A8_UNORM,
-            static_cast<UINT>(tex->width), static_cast<UINT>(tex->height), 1, rowPitch };
-        D3D12_TEXTURE_COPY_LOCATION dst{};
-        dst.pResource = gpuTex.Get();
-        dst.Type      = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        for (UINT s = 0; s < mips; ++s)
+        {
+            D3D12_TEXTURE_COPY_LOCATION src{};
+            src.pResource       = uploadBuf.Get();
+            src.Type            = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            src.PlacedFootprint = footprints[s];
+            D3D12_TEXTURE_COPY_LOCATION dst{};
+            dst.pResource        = gpuTex.Get();
+            dst.Type             = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            dst.SubresourceIndex = s;
+            cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        }
         barrier12(cl, gpuTex.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 
@@ -2383,10 +2419,10 @@ struct D3D12RendererImpl
         if (!m_freeSlots.empty()) { slot = m_freeSlots.back(); m_freeSlots.pop_back(); }
         else                      { slot = meshTexNextSlot++; }
         D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
-        sv.Format                  = DXGI_FORMAT_R8G8B8A8_UNORM;
+        sv.Format                  = fmt;
         sv.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
         sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        sv.Texture2D.MipLevels     = 1;
+        sv.Texture2D.MipLevels     = mips;
         device->CreateShaderResourceView(gpuTex.Get(), &sv, sceneSrvCpu(slot));
 
         meshTexUploads.emplace_back(std::move(uploadBuf), static_cast<int>(k_frameCount) + 2);
