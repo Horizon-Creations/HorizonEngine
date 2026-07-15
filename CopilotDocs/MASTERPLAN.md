@@ -2918,3 +2918,18 @@ das Archiv nimmt sie mit). `scripts/package_macos.sh` (`29ca9c4`) kopiert jetzt 
 **Lokal verifiziert:** `.app` hat `Resources/Game/HorizonGame` (+ zip/lib-dynload/`._pth`) + EngineContent,
 `codesign --verify --deep --strict` grün (arm64-startfähig — verschachtelter Mach-O in Resources signiert sauber
 mit ad-hoc `--deep`), Editor lädt über dyld hinaus. Fixt auch die CI-DMG (baut via `dmg`-Target dasselbe Skript).
+
+## Forts. 84 — `ssl`/`hashlib` (OpenSSL) im Python-Spiel-Bundle (macOS) (15.07.2026)
+
+Forts. 82 hatte `_ssl`/`_hashlib` ausgeschlossen (ziehen OpenSSL rein) → ein Python-Spiel konnte `ssl` (TLS) auf
+einer sauberen Maschine nicht nutzen. Auf User-Wunsch nachgezogen (`41173fe`):
+- `copy_pydynload.py` schließt jetzt nur noch tkinter/curses/zstd aus → `_ssl`+`_hashlib` kommen mit (73 statt 71
+  Module). (`hashlib.sha256` ging eh schon über das libSystem-only `_sha2`; `_hashlib` gibt volle Abdeckung.)
+- `bundle_native_deps.sh` bekommt eine **lib-dynload-Relocation-Stufe** (macOS): BFS der Nicht-System-Deps jedes
+  C-Extension-Moduls NACH `lib-dynload/` daneben + Rewrite auf `@loader_path`, dann nur die angefassten Dateien
+  re-signen. Nur `_ssl`/`_hashlib` ziehen was rein (ein **gematchtes** libssl+libcrypto-Paar), bewusst getrennt
+  vom engine-eigenen (Homebrew-)libcrypto im Bundle-Root gehalten (macOS Two-Level-Namespace → kein Mix).
+- **Verifiziert (macOS, `env -i`, echte Deploy-Artefakte):** `import ssl` → OpenSSL 3.0.20,
+  `ssl.create_default_context()` läuft; `hashlib`/`hmac` gehen; die 4 relozierten Binaries `codesign --verify
+  --strict` grün. Tests grün. **Linux:** `_ssl`/`_hashlib` lösen gegen das System-OpenSSL auf (auf ~allen Linux da);
+  volle Linux-Self-Containment bräuchte `patchelf` (`$ORIGIN/..` im Subdir) — Follow-up falls nötig.
