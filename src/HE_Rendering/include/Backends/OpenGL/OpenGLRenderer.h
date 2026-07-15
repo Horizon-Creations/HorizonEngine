@@ -8,6 +8,7 @@
 #include <HorizonRendering/RenderSorter.h>
 #include <HorizonRendering/RenderGraph.h>
 #include <HorizonRendering/CommandBuffer.h>
+#include <HorizonRendering/GiBvh.h>
 #include <Math/AABB.h>
 #include <Types/UUID.h>
 #include <material/MaterialShaderLibrary.h> // shared cross-backend material shader layer
@@ -54,6 +55,7 @@ public:
 	void  InvalidateMesh    (const HE::UUID& meshId)     override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
 	void  SetSSAOSettings(const SSAOSettings& settings) override;
+	void  SetGISettings(const GISettings& settings) override;
 	void  SetShadowDebug(bool on) override { m_debugShadowCascades = on; }
 	void  SetGpuParticleParams(const GpuParticleParams& p) override;
 	void  SetDebugLines(const std::vector<DebugLine>& lines) override;
@@ -616,6 +618,47 @@ private:
 	unsigned int RenderSSAO(const CommandBuffer& cmds, int pw, int ph,
 	                        const glm::mat4& viewProj, const glm::mat4& view,
 	                        const glm::mat4& proj);
+
+	// ── Global Illumination (GL 4.3+ compute port, Windows/Linux — blind) ──────
+	// Software counterpart of the Metal ray-traced DDGI path: CPU-built BVH
+	// (HE::GiBvh, unit-tested BLAS per mesh) concatenated into shared SSBOs +
+	// a flat per-frame instance array (the TLAS analogue; kernels transform the
+	// ray by invTransform and traverse the referenced BLAS range). Gated on a
+	// GL 4.3 context (GLAD_GL_VERSION_4_3) — macOS GL is 4.1 and never enters.
+	// Checkpoint GL-A: capability + settings + accel upload only, nothing
+	// samples these buffers yet (GI-off rendering stays byte-identical).
+	struct GiBlasRange
+	{
+		int32_t nodeOffset = 0, nodeCount = 0;
+		int32_t triOffset  = 0, triCount  = 0;
+		bool    valid      = false;
+	};
+	// Matches the std430 GiInstance block the GL-B kernels will declare: two
+	// mat4 rows + colour + BLAS offsets (16-byte aligned).
+	struct GiInstanceGpu
+	{
+		glm::mat4 invTransform{1.0f};   // world → object (rays enter BLAS space)
+		glm::vec4 baseColor{1.0f};      // probe one-bounce tint (GL-C)
+		int32_t   nodeOffset = 0, triOffset = 0, pad0 = 0, pad1 = 0;
+	};
+	GiBlasRange  BuildGiBlas(const HE::UUID& meshId); // CPU build from ContentManager data
+	void         UpdateGiAccel();                     // lazy BLAS append + per-frame instance upload
+	void         DestroyGiAccel();
+	std::unordered_map<HE::UUID, GiBlasRange> m_giBlasCache;
+	std::vector<HE::GiBvhNode>     m_giNodesCpu;      // concatenated BLAS nodes (all meshes)
+	std::vector<HE::GiBvhTriangle> m_giTrisCpu;       // concatenated BLAS triangles
+	std::vector<GiInstanceGpu>     m_giInstancesCpu;  // rebuilt per frame
+	bool         m_giBlasDirty       = false;         // node/tri SSBOs need re-upload
+	unsigned int m_giNodeSSBO        = 0;
+	unsigned int m_giTriSSBO         = 0;
+	unsigned int m_giInstanceSSBO    = 0;
+	int          m_giInstanceCount   = 0;
+	bool         m_giSupported       = false;         // GL >= 4.3, cached at Initialize
+	bool         m_giEnabled         = false;
+	float        m_giIndirectIntensity = 1.0f;
+	float        m_giLightRadius       = 0.5f;        // degrees, shadow-ray cone
+	int          m_giRaysPerProbe        = 128;
+	int          m_giProbeBudgetPerFrame = 256;
 
 	// ── Offscreen viewport (editor scene view) ──────────────────────────────
 	uint32_t     m_viewportReqW  = 0;   // requested by the UI, 0 = direct to window

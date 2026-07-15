@@ -224,6 +224,7 @@ add_library(HorizonRendering SHARED
     src/RenderPass.cpp
     src/CommandBuffer.cpp
     src/IRenderer.cpp
+    src/GiBvh.cpp
     src/RendererFactory.cpp)
 
 target_include_directories(HorizonRendering

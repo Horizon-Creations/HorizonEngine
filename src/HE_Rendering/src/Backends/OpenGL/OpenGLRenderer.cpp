@@ -2784,6 +2784,14 @@ void OpenGLRenderer::Initialize(HE::Window* window)
 	if (!gladLoadGLLoader(reinterpret_cast<GLADloadproc>(SDL_GL_GetProcAddress)))
 		throw std::runtime_error("OpenGLRenderer: gladLoadGLLoader failed");
 
+	// Ray-traced GI needs compute shaders + SSBOs + image load/store — all core
+	// in GL 4.3. Windows/Linux drivers give 4.3+; macOS GL is capped at 4.1, so
+	// this stays false there and the Metal backend covers GI on Apple instead.
+	m_giSupported = (GLAD_GL_VERSION_4_3 != 0);
+	Logger::Log(Logger::LogLevel::Info,
+	            m_giSupported ? "OpenGLRenderer: GL 4.3+ — GI (compute) supported"
+	                          : "OpenGLRenderer: GL < 4.3 — GI unavailable (CSM/AO fallback)");
+
 	m_shaderManager = OpenGLShaderManager();
 
 	glEnable(GL_DEPTH_TEST);
@@ -3871,6 +3879,116 @@ void OpenGLRenderer::SetSSAOSettings(const SSAOSettings& s)
 	m_ssaoRadius    = s.radius;
 	m_ssaoIntensity = s.intensity;
 	m_ssaoMethod    = s.method;
+}
+
+void OpenGLRenderer::SetGISettings(const GISettings& s)
+{
+	m_giEnabled            = s.enabled && m_giSupported;
+	m_giIndirectIntensity  = std::max(0.0f, s.indirectIntensity);
+	m_giLightRadius        = std::clamp(s.lightRadius, 0.0f, 10.0f);
+	m_giRaysPerProbe       = std::clamp(s.raysPerProbe, 8, 1024);
+	m_giProbeBudgetPerFrame = std::clamp(s.probeBudgetPerFrame, 1, 4096);
+}
+
+// ─── Global Illumination: CPU BVH acceleration structures (GL-A) ─────────────
+// The software counterpart of Metal's EncodeGIAccelBuild: per-mesh BLASes are
+// built once on the CPU (HE::buildGiBvh — the traversal the GLSL kernels will
+// mirror is unit-tested in test_gi_bvh.cpp) and concatenated into two shared
+// SSBOs; instances are a flat per-frame array referencing BLAS ranges. In
+// GL-A nothing samples these yet — upload only, zero visual change.
+
+OpenGLRenderer::GiBlasRange OpenGLRenderer::BuildGiBlas(const HE::UUID& meshId)
+{
+	GiBlasRange range;
+	if (!m_contentManager) return range;
+	const StaticMeshAsset* asset = m_contentManager->getStaticMesh(meshId);
+	if (!asset || asset->indices.empty()) return range;
+
+	// Same two layouts ResolveMesh uploads: cooked = interleaved 8-float
+	// (position at offset 0, matching Metal's BLAS vertex descriptor), loose =
+	// tightly packed 3-float positions.
+	HE::GiBvh bvh;
+	if (asset->cooked && !asset->interleaved.empty())
+		bvh = HE::buildGiBvh(asset->interleaved.data(), asset->vertexCount, 8,
+		                     asset->indices.data(), asset->indices.size());
+	else if (!asset->vertices.empty())
+		bvh = HE::buildGiBvh(asset->vertices.data(), asset->vertices.size() / 3, 3,
+		                     asset->indices.data(), asset->indices.size());
+	if (!bvh.valid()) return range;
+
+	range.nodeOffset = static_cast<int32_t>(m_giNodesCpu.size());
+	range.nodeCount  = static_cast<int32_t>(bvh.nodes.size());
+	range.triOffset  = static_cast<int32_t>(m_giTrisCpu.size());
+	range.triCount   = static_cast<int32_t>(bvh.triangles.size());
+	range.valid      = true;
+	m_giNodesCpu.insert(m_giNodesCpu.end(), bvh.nodes.begin(), bvh.nodes.end());
+	m_giTrisCpu.insert(m_giTrisCpu.end(), bvh.triangles.begin(), bvh.triangles.end());
+	m_giBlasDirty = true;
+	return range;
+}
+
+void OpenGLRenderer::UpdateGiAccel()
+{
+	m_giInstanceCount = 0;
+	if (!m_giEnabled || !m_giSupported) return;
+
+	// Same caster filter as the shadow pass / Metal's TLAS: castsShadow only,
+	// skinned meshes are never in m_renderWorld.objects. Unculled — rays go in
+	// arbitrary directions, an off-screen caster still occludes/bounces.
+	m_giInstancesCpu.clear();
+	for (const RenderObject& obj : m_renderWorld.objects)
+	{
+		if (!obj.castsShadow) continue;
+		auto it = m_giBlasCache.find(obj.meshAssetId);
+		if (it == m_giBlasCache.end())
+			it = m_giBlasCache.emplace(obj.meshAssetId, BuildGiBlas(obj.meshAssetId)).first;
+		if (!it->second.valid) continue;
+		GiInstanceGpu inst;
+		inst.invTransform = glm::inverse(obj.transform);
+		inst.baseColor    = glm::vec4(obj.baseColor, 1.0f);
+		inst.nodeOffset   = it->second.nodeOffset;
+		inst.triOffset    = it->second.triOffset;
+		m_giInstancesCpu.push_back(inst);
+	}
+	m_giInstanceCount = static_cast<int>(m_giInstancesCpu.size());
+	if (m_giInstanceCount == 0) return;
+
+	// SSBO uploads: nodes/tris only when a new BLAS was appended, instances
+	// every frame (transforms move). GL_SHADER_STORAGE_BUFFER is a 4.3 enum but
+	// only reached behind m_giSupported.
+	if (!m_giNodeSSBO)     glGenBuffers(1, &m_giNodeSSBO);
+	if (!m_giTriSSBO)      glGenBuffers(1, &m_giTriSSBO);
+	if (!m_giInstanceSSBO) glGenBuffers(1, &m_giInstanceSSBO);
+	if (m_giBlasDirty)
+	{
+		glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_giNodeSSBO);
+		glBufferData(GL_SHADER_STORAGE_BUFFER,
+		             static_cast<GLsizeiptr>(m_giNodesCpu.size() * sizeof(HE::GiBvhNode)),
+		             m_giNodesCpu.data(), GL_STATIC_DRAW);
+		glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_giTriSSBO);
+		glBufferData(GL_SHADER_STORAGE_BUFFER,
+		             static_cast<GLsizeiptr>(m_giTrisCpu.size() * sizeof(HE::GiBvhTriangle)),
+		             m_giTrisCpu.data(), GL_STATIC_DRAW);
+		m_giBlasDirty = false;
+	}
+	glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_giInstanceSSBO);
+	glBufferData(GL_SHADER_STORAGE_BUFFER,
+	             static_cast<GLsizeiptr>(m_giInstancesCpu.size() * sizeof(GiInstanceGpu)),
+	             m_giInstancesCpu.data(), GL_DYNAMIC_DRAW);
+	glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+}
+
+void OpenGLRenderer::DestroyGiAccel()
+{
+	if (m_giNodeSSBO)     { glDeleteBuffers(1, &m_giNodeSSBO);     m_giNodeSSBO = 0; }
+	if (m_giTriSSBO)      { glDeleteBuffers(1, &m_giTriSSBO);      m_giTriSSBO = 0; }
+	if (m_giInstanceSSBO) { glDeleteBuffers(1, &m_giInstanceSSBO); m_giInstanceSSBO = 0; }
+	m_giBlasCache.clear();
+	m_giNodesCpu.clear();
+	m_giTrisCpu.clear();
+	m_giInstancesCpu.clear();
+	m_giInstanceCount = 0;
+	m_giBlasDirty     = false;
 }
 
 void OpenGLRenderer::EnsureSSAOTargets(int width, int height)
@@ -5224,6 +5342,7 @@ void OpenGLRenderer::Shutdown()
 		if (mesh.texture) glDeleteTextures(1, &mesh.texture);
 	}
 	m_meshCache.clear();
+	DestroyGiAccel();
 	for (auto& [id, tex] : m_materialTexCache)
 		if (tex) glDeleteTextures(1, &tex);
 	m_materialTexCache.clear();
@@ -5420,6 +5539,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	m_pendingMaterialInvalidations.clear();
 
 	for (const HE::UUID& id : m_pendingMeshInvalidations)
+	{
 		if (auto it = m_meshCache.find(id); it != m_meshCache.end())
 		{
 			auto& m = it->second;
@@ -5428,6 +5548,18 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			if (m.ebo) glDeleteBuffers(1, &m.ebo);
 			m_meshCache.erase(it);
 		}
+		// GI BLAS ranges live in concatenated arrays — a single mesh can't be
+		// spliced out cheaply, so an edited mesh drops the whole cache; it
+		// rebuilds lazily on the next GI-active frame (mirrors Metal's per-mesh
+		// BLAS release, just coarser).
+		if (m_giBlasCache.count(id))
+		{
+			m_giBlasCache.clear();
+			m_giNodesCpu.clear();
+			m_giTrisCpu.clear();
+			m_giBlasDirty = true;
+		}
+	}
 	m_pendingMeshInvalidations.clear();
 
 	const IRenderer::EnvironmentSettings& env = GetEnvironment();
@@ -5441,6 +5573,12 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	                    &m_editorCamera);
 	m_extractor.extractUI(*m_world, static_cast<float>(pw), static_cast<float>(ph),
 	                      m_renderWorld);
+
+	// GI acceleration structures (GL 4.3 compute port, Checkpoint GL-A): CPU
+	// BLAS build + SSBO upload from THIS extraction — no-op unless GI is on and
+	// the context is 4.3+. Nothing samples the buffers yet (GL-B adds the
+	// shadow-ray kernel), so GI-off rendering stays byte-identical.
+	UpdateGiAccel();
 	// NB: do NOT early-out when there are no (visible) objects — the skybox is the
 	// background and must still be drawn, or the viewport falls back to a stale
 	// gray clear when the camera looks away from the scene.
@@ -6807,6 +6945,9 @@ IRenderer::Capabilities OpenGLRenderer::GetCapabilities() const
 	// Transform feedback is core in GL 4.1, so the GPU precipitation path runs on
 	// every GL context this backend creates (incl. macOS 4.1).
 	c.supportsGpuParticles   = true;
+	// Ray-traced GI via compute + CPU BVH: needs a GL 4.3 context (Windows/
+	// Linux). macOS GL is 4.1 → false there (Metal covers GI on Apple).
+	c.supportsGlobalIllumination = m_giSupported;
 	return c;
 }
 
