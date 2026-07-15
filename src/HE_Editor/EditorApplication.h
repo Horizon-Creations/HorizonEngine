@@ -76,6 +76,14 @@ struct EditorConfig
 	// (GL + Metal = yes, so it's the path used unless the user turns it off).
 	bool  GpuParticles  = true;
 
+	// Global Illumination: ray-traced DDGI (pushed to the renderer each frame via
+	// SetGISettings). Metal-only; the backend's supportsGlobalIllumination gates
+	// it (needs a ray-tracing-capable GPU + macOS 12+). Off by default — strictly
+	// opt-in. When on and supported, COMPLETELY REPLACES CSM shadows and AO/ambient.
+	bool  GlobalIlluminationEnabled = false;
+	float GIIndirectIntensity       = 1.0f;
+	float GILightRadius             = 0.5f;   // degrees — sun angular radius (shadow penumbra softness)
+
 	// NOTE: environment / sky settings (day-night, sun, moon, clouds, fog, night
 	// sky, wind) are scene data now — they live on the World root entity as an
 	// EnvironmentComponent, are edited in its Details panel and persist with the

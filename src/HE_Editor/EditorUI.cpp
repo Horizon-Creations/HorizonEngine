@@ -664,6 +664,22 @@ static void DrawEngineSettings(AppContext& ctx, SettingsMode mode)
 		else if (supported)
 			ImGui::TextDisabled("Simulate rain/snow on the GPU (transform feedback).");
 	});
+	row("gi", "Renderer", [&]{
+		const bool supported = ctx.renderer && ctx.renderer->GetCapabilities().supportsGlobalIllumination;
+		ImGui::BeginDisabled(!supported);
+		ImGui::Checkbox("Global Illumination (ray-traced, Metal)", &cfg.GlobalIlluminationEnabled);
+		ImGui::BeginDisabled(!cfg.GlobalIlluminationEnabled);
+		ImGui::SetNextItemWidth(220.0f);
+		ImGui::SliderFloat("GI Indirect Intensity", &cfg.GIIndirectIntensity, 0.0f, 3.0f, "%.2f");
+		ImGui::SetNextItemWidth(220.0f);
+		ImGui::SliderFloat("GI Light Radius (deg)", &cfg.GILightRadius, 0.05f, 3.0f, "%.2f");
+		ImGui::EndDisabled();
+		ImGui::EndDisabled();
+		if (!supported && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+			ImGui::SetTooltip("Metal-only; needs a ray-tracing-capable GPU + macOS 12+.");
+		else if (supported)
+			ImGui::TextDisabled("Replaces CSM shadows + AO/ambient with ray-traced DDGI.");
+	});
 
 	row("camspeed", "Viewport", [&]{
 		ImGui::SetNextItemWidth(220.0f);

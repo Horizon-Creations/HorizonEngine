@@ -927,6 +927,18 @@ void GameApplication::OnRender(float deltaTime)
 		SceneSystems::tick(*m_world, contentManager(), renderer(), camPos, deltaTime,
 		                   nullptr, gpuParticles);
 
+		// Global Illumination: same GlobalState config.json key the editor's
+		// Preferences checkbox writes (GlobalIlluminationEnabled/GIIndirectIntensity/
+		// GILightRadius), read directly here — mirrors the GpuParticles pattern above,
+		// NOT the SSAO/Bloom gap (those settings are never pushed by the packaged
+		// game at all). Capability-gated so non-Metal/non-raytracing builds no-op.
+		const bool giEnabled = GlobalState::getInstance().getCustomConfigBool("GlobalIlluminationEnabled", false) &&
+		                       renderer()->GetCapabilities().supportsGlobalIllumination;
+		renderer()->SetGISettings(IRenderer::GISettings{
+			giEnabled,
+			static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("GIIndirectIntensity", 1.0f)),
+			static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("GILightRadius", 0.5f))});
+
 		// Push the scene environment to the renderer. The base Application renders the
 		// world but never pushes EnvironmentSettings (that lived only in the editor), so
 		// without this the weather sky / clouds / fog / flash would not show in-game.

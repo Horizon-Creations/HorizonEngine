@@ -58,6 +58,12 @@ public:
         // backends + drivers that can run the GPU precipitation path; the editor
         // greys out the toggle when false. GL reports true (TF is core in 4.1).
         bool supportsGpuParticles   = false;
+        // Ray-traced DDGI (dynamic diffuse global illumination). Metal-only, and
+        // only when the device + OS actually support GPU ray tracing (checked once
+        // at Initialize() — see MetalRenderer::QueryRaytracingSupport). False on
+        // every other backend; the editor greys out the GI toggle when false and
+        // the backend keeps rendering CSM shadows + AO/ambient as today.
+        bool supportsGlobalIllumination = false;
     };
 
     // Overlay callback: called by the backend at the correct point inside the
@@ -165,6 +171,26 @@ public:
         int   method    = 0;     // AO method: 0 = SSAO, 1 = HBAO, 2 = GTAO (planned)
     };
     virtual void SetSSAOSettings(const SSAOSettings& /*settings*/) {}
+
+    // ── Global Illumination (ray-traced DDGI) ───────────────────────────────
+    // Pushed every frame by the editor's preferences and by the packaged game
+    // (see GameApplication's GlobalState config read, mirroring GpuParticles).
+    // Only the Metal backend implements this (Capabilities::supportsGlobalIllumination
+    // gates it); other backends silently ignore it and keep CSM shadows + AO. When
+    // enabled on a supported device, GI COMPLETELY REPLACES both CSM shadows and
+    // AO/ambient with one ray-traced pipeline: 1 shadow ray/pixel toward the
+    // dominant directional light (soft, temporally accumulated) plus DDGI probes
+    // sampled for indirect diffuse. Disabled = zero cost and the image is
+    // byte-identical to GI never having existed.
+    struct GISettings
+    {
+        bool  enabled             = false;
+        float indirectIntensity  = 1.0f;   // multiplier on probe-sampled indirect diffuse
+        float lightRadius        = 0.5f;   // degrees — sun angular radius, drives shadow penumbra softness
+        int   raysPerProbe       = 128;    // rays traced per probe on the frame it's updated
+        int   probeBudgetPerFrame = 256;   // probes relit per frame (round-robin over the grid)
+    };
+    virtual void SetGISettings(const GISettings& /*settings*/) {}
 
     // Debug: tint each lit fragment by its shadow cascade index (Metal CSM) so the
     // cascade split placement can be verified visually. No-op on other backends.
