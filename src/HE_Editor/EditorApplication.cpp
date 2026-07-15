@@ -2517,7 +2517,10 @@ void EditorApplication::saveOpenTabs()
 
 	if (m_globalState)
 	{
-		m_globalState->setCustomConfigEntry("openTabs:" + m_projectManager.currentProject().path, state.dump());
+		// "replace" handler: dump() throws on invalid UTF-8 in a tab label/path,
+		// which would abort the editor; substitute U+FFFD rather than crash.
+		m_globalState->setCustomConfigEntry("openTabs:" + m_projectManager.currentProject().path,
+			state.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
 		m_globalState->writeConfig();
 	}
 }
