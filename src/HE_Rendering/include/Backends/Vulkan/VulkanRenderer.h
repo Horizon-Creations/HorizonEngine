@@ -17,6 +17,7 @@
 #include <unordered_map>
 
 struct SDL_Window;
+struct TextureAsset; // ContentManager/Assets.h (full def included in the .cpp)
 
 class VulkanRenderer : public IRenderer
 {
@@ -270,6 +271,12 @@ private:
 	// one-shot command buffer (transition → copy → transition), mirroring the moon upload.
 	bool uploadRGBA8Image(const uint8_t* rgba, uint32_t w, uint32_t h,
 	                      VkImage& image, VkDeviceMemory& mem, VkImageView& view);
+	// Upload a cooked TextureAsset — RGBA8 or a block format (BC7/BC3) — with its full
+	// pre-baked mip chain to a device-local sampled image + view. Returns false when the
+	// format isn't RGBA8/BC and this device can't sample it (caller then draws untextured).
+	// Block formats need no runtime mip generation; the cook baked every level.
+	bool uploadTextureImage(const TextureAsset* tex,
+	                        VkImage& image, VkDeviceMemory& mem, VkImageView& view);
 	// Resolve a mesh/skeletal asset's baked base-color texture (material → textureIds[0]) and
 	// upload it to a device-local image + a set=2 descriptor set (shared by static + skinned).
 	// Fills the out-params and returns true on success; leaves them null and returns false on
