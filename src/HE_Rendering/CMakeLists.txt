@@ -174,6 +174,12 @@ if(WIN32)
         ${HE_CORE_INCLUDE}
     )
     target_link_libraries(RendererD3D11 PRIVATE d3d11 dxgi d3dcompiler glm::glm HorizonCore)
+    # A4: shared material-graph shader layer (GLSL→HLSL via glslang/SPIRV-Cross) so the
+    # D3D11 backend can build per-material VS/PS from node-graph materials. Propagates
+    # HE_HAVE_SHADERC=1 (mirrors RendererVulkan/D3D12).
+    if(TARGET he_materialshader)
+        target_link_libraries(RendererD3D11 PRIVATE he_materialshader he_shadercompiler)
+    endif()
     target_compile_definitions(RendererD3D11 PRIVATE GLM_FORCE_DEPTH_ZERO_TO_ONE HE_RENDERING_BUILD_DLL)
 endif()
 

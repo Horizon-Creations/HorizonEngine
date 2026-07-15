@@ -12,6 +12,7 @@
 #include <HorizonRendering/CommandBuffer.h>
 #include <Math/AABB.h>
 #include <Types/UUID.h>
+#include <material/MaterialShaderLibrary.h> // A4: shared cross-backend material shader layer (unguarded, like Vulkan/D3D12)
 #include <SDL3/SDL.h>
 #include <d3d11.h>
 #include <d3dcompiler.h>
@@ -27,6 +28,7 @@
 #include <memory>
 #include <cstring>
 #include <cstdint>
+#include <cstdlib>
 #include <cmath>
 #include <Diagnostics/Logger.h>
 
@@ -1153,6 +1155,32 @@ struct D3D11RendererImpl
     ComPtr<ID3D11RasterizerState>   rasterState;
     ComPtr<ID3D11ShaderResourceView> dummyTexture; // 1x1 white, for untextured meshes
 
+    // ── A4: node-graph material shaders ──────────────────────────────────────
+    // Graph materials (Material-Node editor) render through per-material VS/PS the engine
+    // builds at draw time from MaterialShaderLibrary HLSL (SPIRV-Cross). Unlike D3D12/Vulkan
+    // there is NO PSO / pipeline object: blend + depth + render-target format are separate
+    // D3D11 states set at draw time, so a graph material's VS/PS/InputLayout are identical
+    // for opaque/transparent/HDR — the draw path simply inherits the pass's blend + depth.
+    // All of this is inert (m_matReady stays false) when HE_HAVE_SHADERC is off, so behaviour
+    // equals today's built-in PBR path. Canonical SPIRV-Cross HLSL register mapping
+    // (shader_model=50, binding→register, verified for D3D12):
+    //   b0 HeLighting(PS) | b1 U(VS) | b3 HeParams(PS) | b8/b9 HeLighting/HeParams(WPO VS)
+    //   t2 heTex0, t4..t7 heTexP0..3 (+ SamplerState s2, s4..s7, linear-wrap).
+    HE::MaterialShaderLibrary m_matShaderLib; // unguarded member (like Vulkan/D3D12)
+    struct MatShaders {
+        ComPtr<ID3D11VertexShader> vs;
+        ComPtr<ID3D11PixelShader>  ps;
+        ComPtr<ID3D11InputLayout>  il;
+    };
+    std::unordered_map<uint64_t, MatShaders> m_materialShaders; // key = hash ^ transparentbit
+    ComPtr<ID3D11Buffer>       m_matLightCB;  // HeLighting (64 B) — b0 PS / b8 WPO VS, filled once/frame
+    ComPtr<ID3D11Buffer>       m_matObjCB;    // U (176 B)         — b1 VS,          filled per draw
+    ComPtr<ID3D11Buffer>       m_matParamCB;  // HeParams (256 B)  — b3 PS / b9 WPO VS, filled per draw
+    ComPtr<ID3D11SamplerState> m_matSampler;  // linear-wrap, bound at s2 + s4..s7
+    bool m_matReady      = false; // true once createMaterialResources() succeeded
+    bool m_matHlslLogged = false; // one-time dump of generated HLSL for HW verify
+    // createMaterialResources() + getOrBuildMaterialShaders() are defined inline below.
+
     // ── Shadow map ──────────────────────────────────────────────────────────
     ComPtr<ID3D11VertexShader>       depthVS;    // depth-only pass
     ComPtr<ID3D11Texture2D>          shadowTex;
@@ -2083,6 +2111,7 @@ struct D3D11RendererImpl
         createDebugLinePipeline();
         createSkinnedPipeline();
         createUIPipeline();
+        createMaterialResources(); // A4: node-graph material CBs + sampler (no-op w/o HE_HAVE_SHADERC)
         return vs && ps && inputLayout && perObjectCB && perFrameCB && sampler;
     }
 
@@ -2163,6 +2192,123 @@ struct D3D11RendererImpl
         outSrv = entry.srv.Get(); // null when the override material has no usable texture
         materialTexCache.emplace(materialId, std::move(entry));
         return true;
+    }
+
+    // ── A4: node-graph material resources ────────────────────────────────────
+    // Three dynamic constant buffers (HeLighting 64 B, U 176 B, HeParams 256 B) filled via
+    // Map(WRITE_DISCARD) exactly like the built-in perObject/perFrame CBs, plus a linear-wrap
+    // sampler for heTex0 + heTexP0..3. No PSO/root-sig — D3D11 sets shaders/CBs/SRVs/samplers
+    // individually. No-op (m_matReady stays false) when HE_HAVE_SHADERC is off.
+    void createMaterialResources()
+    {
+#if defined(HE_HAVE_SHADERC)
+        auto makeCB = [&](UINT bytes, ComPtr<ID3D11Buffer>& out) -> bool {
+            D3D11_BUFFER_DESC bd{};
+            bd.ByteWidth      = (bytes + 15u) & ~15u; // 16-byte multiple (64/176/256 already aligned)
+            bd.Usage          = D3D11_USAGE_DYNAMIC;
+            bd.BindFlags      = D3D11_BIND_CONSTANT_BUFFER;
+            bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+            return SUCCEEDED(device->CreateBuffer(&bd, nullptr, &out));
+        };
+        // Create all three unconditionally (no short-circuit), then AND the results.
+        const bool cbLight = makeCB(64,  m_matLightCB); // HeLighting
+        const bool cbObj   = makeCB(176, m_matObjCB);   // U
+        const bool cbParam = makeCB(256, m_matParamCB); // HeParams
+        D3D11_SAMPLER_DESC sd{};
+        sd.Filter   = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+        sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+        sd.MaxLOD   = D3D11_FLOAT32_MAX;
+        const bool sampOk = SUCCEEDED(device->CreateSamplerState(&sd, &m_matSampler));
+        m_matReady = cbLight && cbObj && cbParam && sampOk;
+        Logger::Log(m_matReady ? Logger::LogLevel::Info : Logger::LogLevel::Error,
+            m_matReady ? "D3D11Renderer: A4 material resources created"
+                       : "D3D11Renderer: A4 material resource allocation failed");
+#endif
+    }
+
+    // Build (or fetch from cache) the per-material VS + PS + input layout from the
+    // MaterialShaderLibrary HLSL. Cached by hash^transparentbit for signature parity with
+    // the D3D12/Vulkan getOrBuild* (the transparent bit is redundant on D3D11 — the shader
+    // objects don't bake blend/depth — but kept so the cache key matches the other backends).
+    // Returns nullptr (and caches the miss so it never retries per-draw) on any failure.
+    MatShaders* getOrBuildMaterialShaders(uint64_t hash, const std::string& frag,
+                                          const std::string& vertBody, bool transparent)
+    {
+#if defined(HE_HAVE_SHADERC)
+        const uint64_t key = hash ^ (transparent ? 0xD1B54A32D192ED03ULL : 0ULL);
+        if (auto it = m_materialShaders.find(key); it != m_materialShaders.end())
+            return it->second.vs ? &it->second : nullptr; // null vs == cached miss
+
+        using Backend = HE::MaterialShaderLibrary::Backend;
+        const HE::MaterialShaderLibrary::Compiled& vc = vertBody.empty()
+            ? m_matShaderLib.standardVertex(Backend::HLSL)
+            : m_matShaderLib.customVertex(std::hash<std::string>{}(vertBody), vertBody, Backend::HLSL);
+        const HE::MaterialShaderLibrary::Compiled& fc = m_matShaderLib.fragment(hash, frag, Backend::HLSL);
+        if (!vc.ok || !fc.ok || vc.source.empty() || fc.source.empty())
+        {
+            Logger::Log(Logger::LogLevel::Warning, "D3D11Renderer: A4 material shader cross-compile failed");
+            m_materialShaders.emplace(key, MatShaders{});
+            return nullptr;
+        }
+        if (!m_matHlslLogged)
+        {
+            m_matHlslLogged = true;
+            Logger::Log(Logger::LogLevel::Info, (std::string("D3D11 A4 material VS HLSL:\n") + vc.source).c_str());
+            Logger::Log(Logger::LogLevel::Info, (std::string("D3D11 A4 material PS HLSL:\n") + fc.source).c_str());
+        }
+
+        UINT cflags = 0;
+#ifdef _DEBUG
+        cflags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+        // SPIRV-Cross emits the GLSL-sourced entry point as `main` (not VSMain/PSMain).
+        ComPtr<ID3DBlob> vsb, psb, cerr;
+        if (FAILED(D3DCompile(vc.source.c_str(), vc.source.size(), "matVS", nullptr, nullptr,
+                              "main", "vs_5_0", cflags, 0, &vsb, &cerr)))
+        {
+            Logger::Log(Logger::LogLevel::Warning, (std::string("D3D11Renderer: A4 material VS compile failed: ")
+                + (cerr ? static_cast<const char*>(cerr->GetBufferPointer()) : "")).c_str());
+            m_materialShaders.emplace(key, MatShaders{});
+            return nullptr;
+        }
+        if (FAILED(D3DCompile(fc.source.c_str(), fc.source.size(), "matPS", nullptr, nullptr,
+                              "main", "ps_5_0", cflags, 0, &psb, &cerr)))
+        {
+            Logger::Log(Logger::LogLevel::Warning, (std::string("D3D11Renderer: A4 material PS compile failed: ")
+                + (cerr ? static_cast<const char*>(cerr->GetBufferPointer()) : "")).c_str());
+            m_materialShaders.emplace(key, MatShaders{});
+            return nullptr;
+        }
+
+        MatShaders sh;
+        if (FAILED(device->CreateVertexShader(vsb->GetBufferPointer(), vsb->GetBufferSize(), nullptr, &sh.vs)) ||
+            FAILED(device->CreatePixelShader (psb->GetBufferPointer(), psb->GetBufferSize(), nullptr, &sh.ps)))
+        {
+            Logger::Log(Logger::LogLevel::Error, "D3D11Renderer: A4 material shader-object creation failed");
+            m_materialShaders.emplace(key, MatShaders{});
+            return nullptr;
+        }
+
+        // IMPORTANT: SPIRV-Cross names GLSL vertex inputs by location as TEXCOORD{location}
+        // (no remap_vertex_attributes registered in ShaderCompiler.cpp), so the material input
+        // layout uses TEXCOORD0/1/2 — NOT the scene's POSITION/NORMAL/TEXCOORD. Same interleaved
+        // 32-B pos/normal/uv vertex buffer the scene meshes use.
+        const D3D11_INPUT_ELEMENT_DESC layout[] = {
+            { "TEXCOORD", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+            { "TEXCOORD", 1, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+            { "TEXCOORD", 2, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        };
+        if (FAILED(device->CreateInputLayout(layout, 3, vsb->GetBufferPointer(), vsb->GetBufferSize(), &sh.il)))
+        {
+            Logger::Log(Logger::LogLevel::Error, "D3D11Renderer: A4 material input layout creation failed");
+            m_materialShaders.emplace(key, MatShaders{});
+            return nullptr;
+        }
+        return &m_materialShaders.emplace(key, std::move(sh)).first->second;
+#else
+        (void)hash; (void)frag; (void)vertBody; (void)transparent;
+        return nullptr;
+#endif
     }
 
     // Drain the editor's material/mesh hot-reload requests at DrawScene top. Dropping the ComPtr
@@ -2761,6 +2907,16 @@ void D3D11Renderer::Shutdown()
     m_impl->materialTexCache.clear(); // override-material textures (ComPtr auto-release)
     m_impl->pendingMatInval.clear();
     m_impl->pendingMeshInval.clear();
+    // A4: node-graph material resources (m_matShaderLib.clear() is header-inline → safe
+    // unguarded; the shader/CB/sampler ComPtrs auto-release).
+    m_impl->m_matReady = false;
+    m_impl->m_matHlslLogged = false;
+    m_impl->m_materialShaders.clear();
+    m_impl->m_matShaderLib.clear();
+    m_impl->m_matLightCB.Reset();
+    m_impl->m_matObjCB.Reset();
+    m_impl->m_matParamCB.Reset();
+    m_impl->m_matSampler.Reset();
     m_impl->uiFontAtlases.clear();
     m_impl->uiSampler.Reset();
     m_impl->gpuTimerShutdown();
@@ -2880,6 +3036,39 @@ void D3D11Renderer::DrawScene(int width, int height)
         ctx->VSSetConstantBuffers(1, 1, p.perFrameCB.GetAddressOf());
         ctx->PSSetConstantBuffers(1, 1, p.perFrameCB.GetAddressOf());
     }
+
+#if defined(HE_HAVE_SHADERC)
+    // A4: fill the shared HeLighting CB once — identical for every graph-material draw this
+    // frame (bound at b0 PS + b8 WPO VS in the material draw path). Mirrors the D3D12/Vulkan
+    // A4 HeLighting fill; DrawScene runs once per frame, so this fills exactly once.
+    if (p.m_matReady && p.m_matLightCB)
+    {
+        HE::MaterialShaderLibrary::Lighting lit{};
+        lit.sunDir[0] = p.m_renderWorld.sunDirection.x;
+        lit.sunDir[1] = p.m_renderWorld.sunDirection.y;
+        lit.sunDir[2] = p.m_renderWorld.sunDirection.z;
+        // Engine seconds for the node graph's Time input (HE_SKY_TIME pins it for deterministic
+        // headless captures, mirroring the sky clock + GL/D3D12/Vulkan exactly).
+        static const char* s_timeOv = std::getenv("HE_SKY_TIME");
+        lit.sunDir[3] = (s_timeOv && *s_timeOv)
+            ? static_cast<float>(std::atof(s_timeOv))
+            : static_cast<float>(SDL_GetTicks()) / 1000.0f;
+        const glm::vec3 sc = m_environment.sunColor;
+        lit.sunColor[0] = sc.r; lit.sunColor[1] = sc.g; lit.sunColor[2] = sc.b;
+        lit.ambient[0] = p.m_renderWorld.ambient.r;
+        lit.ambient[1] = p.m_renderWorld.ambient.g;
+        lit.ambient[2] = p.m_renderWorld.ambient.b;
+        lit.camPos[0] = p.m_renderWorld.camera.position.x;
+        lit.camPos[1] = p.m_renderWorld.camera.position.y;
+        lit.camPos[2] = p.m_renderWorld.camera.position.z;
+        D3D11_MAPPED_SUBRESOURCE lm{};
+        if (SUCCEEDED(ctx->Map(p.m_matLightCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &lm)))
+        {
+            std::memcpy(lm.pData, &lit, sizeof(lit));
+            ctx->Unmap(p.m_matLightCB.Get(), 0);
+        }
+    }
+#endif
 
     const UINT stride = 8 * sizeof(float);
     const UINT offset = 0;
@@ -3012,6 +3201,131 @@ void D3D11Renderer::DrawScene(int width, int height)
             const GpuMesh* mesh = p.resolveMesh(dc.meshAssetId, m_contentManager);
             const GpuMesh& m    = mesh ? *mesh : p.cube;
             if (!m.vbuf || !m.ibuf) return;
+
+#if defined(HE_HAVE_SHADERC)
+            // A4: node-graph material? Render through per-material VS/PS built from the
+            // MaterialShaderLibrary HLSL, bypassing the built-in Blinn-Phong path entirely, then
+            // RESTORE the scene state so subsequent built-in draws are unaffected. Falls through
+            // unchanged when the material has no graph shader OR resources are down. Blend + depth
+            // are NOT touched: the enclosing pass already binds the correct state for this DC's
+            // opacity class (opaque: none + depthState; transparent: alphaBlend + depthReadOnly),
+            // which is exactly what an opaque / transparent graph material wants.
+            if (p.m_matReady && m_contentManager)
+            {
+                uint64_t matHash = 0; std::string matFrag, matVertBody;
+                if (p.m_matShaderLib.resolveShaders(*m_contentManager, dc.materialAssetId,
+                                                    matHash, matFrag, matVertBody))
+                {
+                    const bool matTransp = dc.opacity < 0.999f;
+                    D3D11RendererImpl::MatShaders* sh =
+                        p.getOrBuildMaterialShaders(matHash, matFrag, matVertBody, matTransp);
+                    if (sh && sh->vs && sh->ps && sh->il)
+                    {
+                        // heTex0 = the material's base texture, matching the built-in selection +
+                        // hasTex flag: an override material's texture wins (A2), else the mesh's
+                        // baked texture (A1), else the white default. heTexP0..3 = white default
+                        // this increment (real graph project textures are an A4 follow-up).
+                        ID3D11ShaderResourceView* heTex0 = nullptr;
+                        bool matTextured = false;
+                        ID3D11ShaderResourceView* ovr = nullptr;
+                        if (p.resolveMaterialOverride(dc.materialAssetId, m_contentManager, ovr))
+                        {
+                            heTex0 = ovr;                 // override wins (null → flat)
+                            matTextured = (ovr != nullptr);
+                        }
+                        else if (m.texture)
+                        {
+                            heTex0 = m.texture.Get();     // baked mesh texture (A1)
+                            matTextured = true;
+                        }
+                        if (!heTex0) heTex0 = p.dummyTexture.Get(); // white default → not textured
+
+                        // Per-entity HeParams override wins over the material's shared params.
+                        const MaterialAsset* ma = m_contentManager->getMaterial(dc.materialAssetId);
+                        const std::vector<float>* params =
+                            !dc.paramOverride.empty() ? &dc.paramOverride
+                            : (ma && !ma->shaderParamData.empty() ? &ma->shaderParamData : nullptr);
+
+                        // ── Bind material pipeline state ──────────────────────────────────
+                        ctx->VSSetShader(sh->vs.Get(), nullptr, 0);
+                        ctx->PSSetShader(sh->ps.Get(), nullptr, 0);
+                        ctx->IASetInputLayout(sh->il.Get());
+                        ctx->IASetVertexBuffers(0, 1, m.vbuf.GetAddressOf(), &stride, &offset);
+                        ctx->IASetIndexBuffer(m.ibuf.Get(), DXGI_FORMAT_R32_UINT, 0);
+                        // HeLighting (b0 PS, b8 WPO VS) — same CB, filled once per frame.
+                        ctx->PSSetConstantBuffers(0, 1, p.m_matLightCB.GetAddressOf());
+                        ctx->VSSetConstantBuffers(8, 1, p.m_matLightCB.GetAddressOf());
+                        // heTex0 (t2 PS) + heTexP0..3 (t4..t7 PS, white default) + linear-wrap
+                        // samplers (s2 + s4..s7). t3 is intentionally unused by the mesh path.
+                        ctx->PSSetShaderResources(2, 1, &heTex0);
+                        ID3D11ShaderResourceView* whiteP[4] = {
+                            p.dummyTexture.Get(), p.dummyTexture.Get(),
+                            p.dummyTexture.Get(), p.dummyTexture.Get() };
+                        ctx->PSSetShaderResources(4, 4, whiteP);
+                        ID3D11SamplerState* matSamp = p.m_matSampler.Get();
+                        ctx->PSSetSamplers(2, 1, &matSamp);
+                        ID3D11SamplerState* matSamp4[4] = { matSamp, matSamp, matSamp, matSamp };
+                        ctx->PSSetSamplers(4, 4, matSamp4);
+
+                        auto drawMatInstance = [&](const glm::mat4& model) {
+                            // std140 U block (176 B) at b1 VS.
+                            struct MatU { glm::mat4 mvp; glm::mat4 model; glm::vec4 color; glm::vec4 flags; glm::vec4 pbr; };
+                            static_assert(sizeof(MatU) == 176, "material U block must be std140 176 B");
+                            MatU u;
+                            u.mvp   = viewProj * model;
+                            u.model = model;
+                            u.color = glm::vec4(dc.baseColor, 1.0f);
+                            u.flags = glm::vec4(matTextured ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+                            u.pbr   = glm::vec4(dc.metallic, dc.roughness, dc.opacity, 0.0f);
+                            D3D11_MAPPED_SUBRESOURCE mu{};
+                            if (SUCCEEDED(ctx->Map(p.m_matObjCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mu)))
+                            {
+                                std::memcpy(mu.pData, &u, sizeof(u));
+                                ctx->Unmap(p.m_matObjCB.Get(), 0);
+                            }
+                            // HeParams (16 vec4 = 64 floats = 256 B) at b3 PS / b9 WPO VS, zero-padded.
+                            float padded[64] = { 0.0f };
+                            if (params)
+                                std::memcpy(padded, params->data(),
+                                            std::min(params->size(), size_t(64)) * sizeof(float));
+                            D3D11_MAPPED_SUBRESOURCE mp{};
+                            if (SUCCEEDED(ctx->Map(p.m_matParamCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mp)))
+                            {
+                                std::memcpy(mp.pData, padded, sizeof(padded));
+                                ctx->Unmap(p.m_matParamCB.Get(), 0);
+                            }
+                            ctx->VSSetConstantBuffers(1, 1, p.m_matObjCB.GetAddressOf());   // b1 U (VS)
+                            ctx->PSSetConstantBuffers(3, 1, p.m_matParamCB.GetAddressOf()); // b3 HeParams (PS)
+                            ctx->VSSetConstantBuffers(9, 1, p.m_matParamCB.GetAddressOf()); // b9 HeParams (WPO VS)
+                            ctx->DrawIndexed(m.indexCount, 0, 0);
+                            ++p.counters.draws;
+                            p.counters.tris += m.indexCount / 3;
+                        };
+                        // Instanced graph materials draw each instance via the material path (this
+                        // increment does NOT combine graph materials with A3 GPU instancing).
+                        if (!dc.instanceTransforms.empty())
+                            for (const glm::mat4& t : dc.instanceTransforms) drawMatInstance(t);
+                        else
+                            drawMatInstance(dc.transform);
+
+                        // ── CRITICAL: restore scene state for subsequent built-in draws ───
+                        // The material path clobbered: VS/PS/IL, VS b1 (was perFrameCB, overwritten
+                        // by U), PS b0 (was perObjectCB, overwritten by HeLighting), and PS t2 (was
+                        // aoSRV, overwritten by heTex0). Slots the scene never reads (VS b8/b9, PS b3,
+                        // PS t4..t7, s2/s4..s7) are left as-is — harmless. VS b0 / PS b0 (perObject)
+                        // and t0 (albedo) are re-bound per draw by the built-in path, but PS b0 is
+                        // restored here too since HeLighting overwrote it.
+                        ctx->VSSetShader(p.vs.Get(), nullptr, 0);
+                        ctx->PSSetShader(p.ps.Get(), nullptr, 0);
+                        ctx->IASetInputLayout(p.inputLayout.Get());
+                        ctx->VSSetConstantBuffers(1, 1, p.perFrameCB.GetAddressOf());
+                        ctx->PSSetConstantBuffers(0, 1, p.perObjectCB.GetAddressOf());
+                        ctx->PSSetShaderResources(2, 1, &aoSRV); // t2 = AO (unoccluded white when off)
+                        return;
+                    }
+                }
+            }
+#endif
             // Base color: an explicit MaterialComponent override (dc.materialAssetId), once its
             // material is loaded, fully replaces the mesh's baked texture — even to flat.
             ID3D11ShaderResourceView* albedo = m.texture.Get(); // baked (may be null)
