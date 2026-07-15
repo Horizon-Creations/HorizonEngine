@@ -85,6 +85,11 @@ if(HE_VULKAN_ENABLED)
         ${Vulkan_INCLUDE_DIRS}
     )
     target_link_libraries(RendererVulkan PUBLIC Vulkan::Vulkan PRIVATE glm::glm HorizonCore)
+    # A4: shared material-graph shader layer (GLSL→SPIR-V via glslang/SPIRV-Cross) so the
+    # Vulkan backend can build per-material pipelines from node-graph materials.
+    if(TARGET he_materialshader)
+        target_link_libraries(RendererVulkan PRIVATE he_materialshader he_shadercompiler)
+    endif()
     target_compile_definitions(RendererVulkan PRIVATE GLM_FORCE_DEPTH_ZERO_TO_ONE HE_RENDERING_BUILD_DLL)
     message(STATUS "HorizonRendering: Vulkan backend enabled")
 

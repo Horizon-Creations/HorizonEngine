@@ -10,8 +10,10 @@
 #include <HorizonRendering/CommandBuffer.h>
 #include <Math/AABB.h>
 #include <Types/UUID.h>
+#include <material/MaterialShaderLibrary.h> // A4: shared cross-backend material shader layer
 #include <vulkan/vulkan.h>
 #include <vector>
+#include <string>
 #include <unordered_map>
 
 struct SDL_Window;
@@ -95,6 +97,13 @@ private:
 	void           destroyDepthResources();
 	void           createScenePipeline();
 	void           destroyScenePipeline();
+	// A4: node-graph material pipelines (built from MaterialShaderLibrary SPIR-V).
+	// createMaterialResources()/destroyMaterialResources() are no-ops when the shader
+	// cross-compiler (HE_HAVE_SHADERC) is absent; getOrBuildMaterialPipeline returns null.
+	void           createMaterialResources();
+	void           destroyMaterialResources();
+	VkPipeline     getOrBuildMaterialPipeline(uint64_t hash, const std::string& frag,
+	                                           const std::string& vertBody, bool hdr);
 	void           DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t height, bool hdr = false);
 	VkShaderModule loadShaderModule(const char* spvFileName);
 	uint32_t       findMemoryType(uint32_t typeBits, VkMemoryPropertyFlags props) const;
@@ -170,6 +179,28 @@ private:
 		VkDescriptorSet set    = VK_NULL_HANDLE;
 	};
 	FrameUBO m_frameUBO[2];
+
+	// ── A4: node-graph material pipelines ────────────────────────────────────
+	// Graph materials (Material-Node editor) render through per-material VkPipelines
+	// built at draw time from MaterialShaderLibrary SPIR-V. All of this is dead weight
+	// (never touched) when HE_HAVE_SHADERC is off: the member is default-constructed and
+	// the draw path never calls it, so behaviour is identical to the built-in PBR path.
+	// Canonical descriptor set 0 layout (matches the generated SPIR-V exactly):
+	//   b0 UBO(FS) HeLighting | b1 UBO(VS) U | b2 tex(FS) heTex0 | b3 UBO(FS) HeParams
+	//   b4..7 tex(FS) heTexP0..3 | b8/b9 UBO(VS) HeLighting/HeParams (WPO custom vertex).
+	HE::MaterialShaderLibrary m_matShaderLib;
+	std::unordered_map<uint64_t, VkPipeline> m_materialPipelines; // key = hash ^ hdr-bit
+	VkDescriptorSetLayout m_matSetLayout      = VK_NULL_HANDLE;
+	VkPipelineLayout      m_matPipelineLayout = VK_NULL_HANDLE;
+	VkDescriptorPool      m_matPool[2]        = {};  // per frame; reset whole each frame
+	struct MatFrameBuf { VkBuffer buf = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE; void* mapped = nullptr; };
+	MatFrameBuf m_matLightBuf[2];   // HeLighting (64 B, filled once per frame)
+	MatFrameBuf m_matObjBuf[2];     // U ring      (k_matMaxDraws × 256 B, one slot per draw)
+	MatFrameBuf m_matParBuf[2];     // HeParams ring (k_matMaxDraws × 256 B, one slot per draw)
+	uint32_t    m_matDrawCursor[2]  = {};    // per-frame ring/descriptor-set cursor
+	bool        m_matReady          = false; // true once createMaterialResources() succeeded
+	static constexpr uint32_t k_matMaxDraws   = 1024;
+	static constexpr uint32_t k_matSlotStride = 256; // 256-B stride/slot for U + HeParams
 
 	// Per-draw material data (32 bytes: baseColor(rgb)+metallic(a) + roughness + opacity
 	// + hasTexture). Updated per-draw via vkCmdUpdateBuffer; binding 2 in scene descriptor set.

@@ -1705,10 +1705,17 @@ void VulkanRenderer::createScenePipeline()
             vkDestroyShaderModule(m_device, svs, nullptr);
         }
     }
+
+    // A4: build the material-graph descriptor-set layout, pipeline layout, per-frame
+    // descriptor pools and UBO ring buffers once (the white default + albedo sampler this
+    // path binds already exist from the block above). No-op when HE_HAVE_SHADERC is off.
+    createMaterialResources();
 }
 
 void VulkanRenderer::destroyScenePipeline()
 {
+    destroyMaterialResources();
+
     for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
     {
         if (m_frameUBO[i].buf) vkDestroyBuffer(m_device, m_frameUBO[i].buf, nullptr);
@@ -1740,6 +1747,258 @@ void VulkanRenderer::destroyScenePipeline()
     if (m_scenePipeline)                 { vkDestroyPipeline(m_device, m_scenePipeline, nullptr);                 m_scenePipeline = VK_NULL_HANDLE; }
     if (m_scenePipelineLayout) { vkDestroyPipelineLayout(m_device, m_scenePipelineLayout, nullptr); m_scenePipelineLayout = VK_NULL_HANDLE; }
     if (m_sceneSetLayout)      { vkDestroyDescriptorSetLayout(m_device, m_sceneSetLayout, nullptr); m_sceneSetLayout = VK_NULL_HANDLE; }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// A4: node-graph material pipelines
+//
+// Graph materials render through per-material VkPipelines the engine builds at draw
+// time from MaterialShaderLibrary SPIR-V (VS + FS). They all share ONE descriptor-set
+// layout / pipeline layout and, per frame in flight, a descriptor pool (reset whole
+// each frame) plus host-visible UBO rings for the per-object `U` block and per-draw
+// `HeParams`, and a single `HeLighting` buffer filled once per frame. Mirrors the GL
+// reference (OpenGLRenderer::getOrBuildMaterialProgram + its draw integration).
+// ─────────────────────────────────────────────────────────────────────────────
+void VulkanRenderer::createMaterialResources()
+{
+#if defined(HE_HAVE_SHADERC)
+    // The material fragment samples the white default at heTex0/heTexP0..3 for this
+    // first increment; without it (or the shared albedo sampler) there is nothing valid
+    // to bind, so leave the path disabled rather than sample an unbound descriptor.
+    if (!m_whiteAlbedoView || !m_albedoSampler)
+    {
+        Logger::Log(Logger::LogLevel::Warning,
+            "VulkanRenderer: A4 material path disabled — white base-color default unavailable");
+        return;
+    }
+
+    // ── Descriptor set 0 layout: canonical bindings 0-7 (matches the generated SPIR-V)
+    //    + 8/9 for the WPO custom vertex, which reads HeLighting/HeParams in the VERTEX
+    //    stage at those slots (MaterialShaderLibrary.cpp kWpoUniforms). Extra bindings are
+    //    harmless for the standard (non-WPO) vertex, which references none of them. ──
+    VkDescriptorSetLayoutBinding b[10]{};
+    auto setB = [&](int i, uint32_t binding, VkDescriptorType type, VkShaderStageFlags stage) {
+        b[i].binding = binding; b[i].descriptorType = type; b[i].descriptorCount = 1; b[i].stageFlags = stage;
+    };
+    setB(0, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         VK_SHADER_STAGE_FRAGMENT_BIT); // HeLighting
+    setB(1, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         VK_SHADER_STAGE_VERTEX_BIT);   // U (per object)
+    setB(2, 2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heTex0
+    setB(3, 3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         VK_SHADER_STAGE_FRAGMENT_BIT); // HeParams
+    setB(4, 4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heTexP0
+    setB(5, 5, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heTexP1
+    setB(6, 6, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heTexP2
+    setB(7, 7, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heTexP3
+    setB(8, 8, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         VK_SHADER_STAGE_VERTEX_BIT);   // HeLighting (WPO VS)
+    setB(9, 9, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         VK_SHADER_STAGE_VERTEX_BIT);   // HeParams   (WPO VS)
+    VkDescriptorSetLayoutCreateInfo slci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+    slci.bindingCount = 10;
+    slci.pBindings    = b;
+    if (vkCreateDescriptorSetLayout(m_device, &slci, nullptr, &m_matSetLayout) != VK_SUCCESS)
+    {
+        Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: A4 material descriptor-set layout failed");
+        return;
+    }
+
+    // Pipeline layout: one set, no push constants (per-object data goes through the U UBO).
+    VkPipelineLayoutCreateInfo plci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    plci.setLayoutCount = 1;
+    plci.pSetLayouts    = &m_matSetLayout;
+    if (vkCreatePipelineLayout(m_device, &plci, nullptr, &m_matPipelineLayout) != VK_SUCCESS)
+    {
+        Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: A4 material pipeline layout failed");
+        return;
+    }
+
+    // Per-frame descriptor pool (reset whole each frame — no FREE bit) + UBO buffers.
+    // Each allocated set consumes 5 UBO descriptors (b0/b1/b3/b8/b9) and 5 samplers
+    // (b2/b4..7), so the pool must cover k_matMaxDraws sets worth of each.
+    auto makeBuf = [&](VkDeviceSize size, MatFrameBuf& mb) -> bool {
+        VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        bci.size  = size;
+        bci.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+        if (vkCreateBuffer(m_device, &bci, nullptr, &mb.buf) != VK_SUCCESS) return false;
+        VkMemoryRequirements req{}; vkGetBufferMemoryRequirements(m_device, mb.buf, &req);
+        VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        mai.allocationSize  = req.size;
+        mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if (vkAllocateMemory(m_device, &mai, nullptr, &mb.mem) != VK_SUCCESS) return false;
+        vkBindBufferMemory(m_device, mb.buf, mb.mem, 0);
+        return vkMapMemory(m_device, mb.mem, 0, size, 0, &mb.mapped) == VK_SUCCESS;
+    };
+
+    const VkDeviceSize ringSize = static_cast<VkDeviceSize>(k_matMaxDraws) * k_matSlotStride;
+    for (uint32_t f = 0; f < k_maxFramesInFlight; ++f)
+    {
+        VkDescriptorPoolSize ps[2] = {
+            { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         5u * k_matMaxDraws }, // b0,b1,b3,b8,b9
+            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 5u * k_matMaxDraws }, // b2,b4,b5,b6,b7
+        };
+        VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+        dpci.maxSets       = k_matMaxDraws;
+        dpci.poolSizeCount = 2;
+        dpci.pPoolSizes    = ps;
+        if (vkCreateDescriptorPool(m_device, &dpci, nullptr, &m_matPool[f]) != VK_SUCCESS)
+        {
+            Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: A4 material descriptor pool failed");
+            return;
+        }
+        if (!makeBuf(64, m_matLightBuf[f]) || !makeBuf(ringSize, m_matObjBuf[f]) || !makeBuf(ringSize, m_matParBuf[f]))
+        {
+            Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: A4 material UBO ring allocation failed");
+            return;
+        }
+    }
+
+    m_matReady = true;
+    Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: A4 material resources created");
+#endif
+}
+
+void VulkanRenderer::destroyMaterialResources()
+{
+#if defined(HE_HAVE_SHADERC)
+    m_matReady = false;
+    for (auto& kv : m_materialPipelines)
+        if (kv.second) vkDestroyPipeline(m_device, kv.second, nullptr);
+    m_materialPipelines.clear();
+    for (uint32_t f = 0; f < k_maxFramesInFlight; ++f)
+    {
+        for (MatFrameBuf* mb : { &m_matLightBuf[f], &m_matObjBuf[f], &m_matParBuf[f] })
+        {
+            if (mb->mem) vkUnmapMemory(m_device, mb->mem);
+            if (mb->buf) vkDestroyBuffer(m_device, mb->buf, nullptr);
+            if (mb->mem) vkFreeMemory   (m_device, mb->mem, nullptr);
+            *mb = {};
+        }
+        if (m_matPool[f]) { vkDestroyDescriptorPool(m_device, m_matPool[f], nullptr); m_matPool[f] = VK_NULL_HANDLE; }
+        m_matDrawCursor[f] = 0;
+    }
+    if (m_matPipelineLayout) { vkDestroyPipelineLayout(m_device, m_matPipelineLayout, nullptr); m_matPipelineLayout = VK_NULL_HANDLE; }
+    if (m_matSetLayout)      { vkDestroyDescriptorSetLayout(m_device, m_matSetLayout, nullptr); m_matSetLayout = VK_NULL_HANDLE; }
+#endif
+}
+
+VkPipeline VulkanRenderer::getOrBuildMaterialPipeline(uint64_t hash, const std::string& frag,
+                                                      const std::string& vertBody, bool hdr)
+{
+#if defined(HE_HAVE_SHADERC)
+    // Cache key mixes the shader hash with the render-target variant so LDR (swapchain)
+    // and HDR (RGBA16F offscreen) pipelines never collide — they use incompatible passes.
+    const uint64_t key = hash ^ (hdr ? 0x9E3779B97F4A7C15ULL : 0ULL);
+    if (auto it = m_materialPipelines.find(key); it != m_materialPipelines.end()) return it->second;
+
+    VkRenderPass rp = hdr ? m_postFxSceneRP : m_renderPass;
+    if (rp == VK_NULL_HANDLE)
+        return VK_NULL_HANDLE; // target pass not ready yet — retry next frame (not cached)
+
+    using Backend = HE::MaterialShaderLibrary::Backend;
+    // Standard vertex (no WPO) or the graph's custom vertex body, cross-compiled to SPIR-V.
+    const HE::MaterialShaderLibrary::Compiled& vc = vertBody.empty()
+        ? m_matShaderLib.standardVertex(Backend::SpirV)
+        : m_matShaderLib.customVertex(std::hash<std::string>{}(vertBody), vertBody, Backend::SpirV);
+    const HE::MaterialShaderLibrary::Compiled& fc = m_matShaderLib.fragment(hash, frag, Backend::SpirV);
+    if (!vc.ok || !fc.ok || vc.spirv.empty() || fc.spirv.empty())
+    {
+        Logger::Log(Logger::LogLevel::Warning, "VulkanRenderer: A4 material shader cross-compile failed");
+        m_materialPipelines.emplace(key, VK_NULL_HANDLE); // cache the miss — don't retry every draw
+        return VK_NULL_HANDLE;
+    }
+
+    auto makeModule = [&](const std::vector<uint32_t>& spv) -> VkShaderModule {
+        VkShaderModuleCreateInfo ci{ VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+        ci.codeSize = spv.size() * sizeof(uint32_t);
+        ci.pCode    = spv.data();
+        VkShaderModule mod = VK_NULL_HANDLE;
+        if (vkCreateShaderModule(m_device, &ci, nullptr, &mod) != VK_SUCCESS) return VK_NULL_HANDLE;
+        return mod;
+    };
+    VkShaderModule vs = makeModule(vc.spirv);
+    VkShaderModule fs = makeModule(fc.spirv);
+    if (!vs || !fs)
+    {
+        if (vs) vkDestroyShaderModule(m_device, vs, nullptr);
+        if (fs) vkDestroyShaderModule(m_device, fs, nullptr);
+        Logger::Log(Logger::LogLevel::Warning, "VulkanRenderer: A4 material shader module creation failed");
+        m_materialPipelines.emplace(key, VK_NULL_HANDLE);
+        return VK_NULL_HANDLE;
+    }
+
+    VkPipelineShaderStageCreateInfo stages[2]{};
+    stages[0].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage  = VK_SHADER_STAGE_VERTEX_BIT;   stages[0].module = vs; stages[0].pName = "main";
+    stages[1].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[1].stage  = VK_SHADER_STAGE_FRAGMENT_BIT; stages[1].module = fs; stages[1].pName = "main";
+
+    // Vertex input identical to the scene pipeline (binding 0 = interleaved pos/normal/uv,
+    // 32 B; the standard/custom vertex reads attribute locations 0/1/2).
+    VkVertexInputBindingDescription bind{ 0, 8u * sizeof(float), VK_VERTEX_INPUT_RATE_VERTEX };
+    VkVertexInputAttributeDescription attrs[3] = {
+        { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0 },
+        { 1, 0, VK_FORMAT_R32G32B32_SFLOAT, 12 },
+        { 2, 0, VK_FORMAT_R32G32_SFLOAT,    24 },
+    };
+    VkPipelineVertexInputStateCreateInfo vi{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+    vi.vertexBindingDescriptionCount   = 1;
+    vi.pVertexBindingDescriptions      = &bind;
+    vi.vertexAttributeDescriptionCount = 3;
+    vi.pVertexAttributeDescriptions    = attrs;
+
+    VkPipelineInputAssemblyStateCreateInfo ia{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkPipelineViewportStateCreateInfo vp{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+    vp.viewportCount = 1; vp.scissorCount = 1;
+    VkPipelineRasterizationStateCreateInfo rs{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+    rs.polygonMode = VK_POLYGON_MODE_FILL;
+    rs.cullMode    = VK_CULL_MODE_NONE;
+    rs.frontFace   = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rs.lineWidth   = 1.0f;
+    VkPipelineMultisampleStateCreateInfo ms{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    VkPipelineDepthStencilStateCreateInfo ds{ VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
+    ds.depthTestEnable  = VK_TRUE;
+    ds.depthWriteEnable = VK_TRUE;
+    ds.depthCompareOp   = VK_COMPARE_OP_LESS;
+    VkPipelineColorBlendAttachmentState cba{};
+    cba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT
+                       | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    VkPipelineColorBlendStateCreateInfo cb{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+    cb.attachmentCount = 1;
+    cb.pAttachments    = &cba;
+    VkDynamicState dynStates[2] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+    VkPipelineDynamicStateCreateInfo dyn{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+    dyn.dynamicStateCount = 2;
+    dyn.pDynamicStates    = dynStates;
+
+    VkGraphicsPipelineCreateInfo pci{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+    pci.stageCount          = 2;
+    pci.pStages             = stages;
+    pci.pVertexInputState   = &vi;
+    pci.pInputAssemblyState = &ia;
+    pci.pViewportState      = &vp;
+    pci.pRasterizationState = &rs;
+    pci.pMultisampleState   = &ms;
+    pci.pDepthStencilState  = &ds;
+    pci.pColorBlendState    = &cb;
+    pci.pDynamicState       = &dyn;
+    pci.layout              = m_matPipelineLayout;
+    pci.renderPass          = rp;
+    pci.subpass             = 0;
+
+    VkPipeline pipe = VK_NULL_HANDLE;
+    if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &pipe) != VK_SUCCESS)
+    {
+        Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: A4 material pipeline creation failed");
+        pipe = VK_NULL_HANDLE;
+    }
+    vkDestroyShaderModule(m_device, vs, nullptr);
+    vkDestroyShaderModule(m_device, fs, nullptr);
+    m_materialPipelines.emplace(key, pipe); // cache success OR failure (null → no per-draw retry)
+    return pipe;
+#else
+    (void)hash; (void)frag; (void)vertBody; (void)hdr;
+    return VK_NULL_HANDLE;
+#endif
 }
 
 void VulkanRenderer::createShadowResources()
@@ -3024,6 +3283,40 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
             std::memcpy(m_frameUBO[m_currentFrame].mapped, &f, sizeof(f));
     }
 
+#if defined(HE_HAVE_SHADERC)
+    // A4: recycle this frame slot's material descriptor sets (the frame fence waited on
+    // in Render() guarantees the GPU finished with them) + reset the per-frame ring cursor,
+    // then fill the shared HeLighting UBO once — identical for every graph-material draw.
+    // DrawScene runs at most once per frame (viewport OR swapchain, gated by useViewport),
+    // so this reset happens exactly once per frame. Matches OpenGLRenderer's HeLighting fill.
+    if (m_matReady)
+    {
+        vkResetDescriptorPool(m_device, m_matPool[m_currentFrame], 0);
+        m_matDrawCursor[m_currentFrame] = 0;
+
+        HE::MaterialShaderLibrary::Lighting lit{};
+        lit.sunDir[0] = m_renderWorld.sunDirection.x;
+        lit.sunDir[1] = m_renderWorld.sunDirection.y;
+        lit.sunDir[2] = m_renderWorld.sunDirection.z;
+        // Engine seconds for the node graph's Time input (HE_SKY_TIME pins it for
+        // deterministic headless captures, mirroring the sky clock and GL exactly).
+        static const char* s_timeOv = std::getenv("HE_SKY_TIME");
+        lit.sunDir[3] = (s_timeOv && *s_timeOv)
+            ? static_cast<float>(std::atof(s_timeOv))
+            : static_cast<float>(SDL_GetTicks()) / 1000.0f;
+        const glm::vec3 sc = m_environment.sunColor;
+        lit.sunColor[0] = sc.r; lit.sunColor[1] = sc.g; lit.sunColor[2] = sc.b;
+        lit.ambient[0] = m_renderWorld.ambient.r;
+        lit.ambient[1] = m_renderWorld.ambient.g;
+        lit.ambient[2] = m_renderWorld.ambient.b;
+        lit.camPos[0] = m_renderWorld.camera.position.x;
+        lit.camPos[1] = m_renderWorld.camera.position.y;
+        lit.camPos[2] = m_renderWorld.camera.position.z;
+        if (m_matLightBuf[m_currentFrame].mapped)
+            std::memcpy(m_matLightBuf[m_currentFrame].mapped, &lit, sizeof(lit));
+    }
+#endif
+
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
         hdr && m_scenePipelineHDR ? m_scenePipelineHDR : m_scenePipeline);
     VkViewport vp{ 0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height), 0.0f, 1.0f };
@@ -3062,10 +3355,132 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         // per-frame instance buffer across the frame's instanced batches.
         bool allowInstancing = true;
         uint32_t instCursor = 0;
+        // A4: the scene pipeline the CURRENT pass expects bound on entry to drawDCVk. A
+        // graph-material draw binds its own per-material pipeline, so it restores THIS after
+        // itself — otherwise the next built-in draw would inherit the material pipeline.
+        // The opaque loop leaves it at the opaque scene pipe; the transparent loop sets it
+        // to transPipe below.
+        VkPipeline activeMatScenePipe = hdr && m_scenePipelineHDR ? m_scenePipelineHDR : m_scenePipeline;
         auto drawDCVk = [&](const DrawCall& dc) {
             const GpuMesh* mesh = resolveMesh(dc.meshAssetId);
             const GpuMesh& m    = mesh ? *mesh : m_cube;
             if (!m.indexCount) return;
+
+#if defined(HE_HAVE_SHADERC)
+            // A4: node-graph material? Render through a per-material pipeline built from the
+            // MaterialShaderLibrary SPIR-V, bypassing the built-in PBR path entirely. Falls
+            // through unchanged when the material has no graph shader OR resources are down.
+            if (m_matReady && m_contentManager)
+            {
+                uint64_t matHash = 0; std::string matFrag, matVertBody;
+                if (m_matShaderLib.resolveShaders(*m_contentManager, dc.materialAssetId,
+                                                  matHash, matFrag, matVertBody))
+                {
+                    VkPipeline matPipe = getOrBuildMaterialPipeline(matHash, matFrag, matVertBody, hdr);
+                    uint32_t& cursor = m_matDrawCursor[m_currentFrame];
+                    if (matPipe != VK_NULL_HANDLE && cursor < k_matMaxDraws)
+                    {
+                        // Resolve the same PBR scalars / has-texture flag the built-in path uses.
+                        bool matTextured = (m.albedoSet != VK_NULL_HANDLE);
+                        const MaterialTexVk* matOvr = nullptr;
+                        if (resolveMaterialOverride(dc.materialAssetId, matOvr))
+                            matTextured = (matOvr->set != VK_NULL_HANDLE);
+
+                        // Per-entity HeParams override wins over the material's shared params.
+                        const MaterialAsset* ma = m_contentManager->getMaterial(dc.materialAssetId);
+                        const std::vector<float>* params =
+                            !dc.paramOverride.empty() ? &dc.paramOverride
+                            : (ma && !ma->shaderParamData.empty() ? &ma->shaderParamData : nullptr);
+
+                        VkDeviceSize voff = 0;
+                        vkCmdBindVertexBuffers(cmd, 0, 1, &m.vbuf, &voff);
+                        vkCmdBindIndexBuffer(cmd, m.ibuf, 0, VK_INDEX_TYPE_UINT32);
+
+                        auto drawMatInstance = [&](const glm::mat4& model) {
+                            if (cursor >= k_matMaxDraws) return;
+                            const uint32_t i = cursor++;
+
+                            // std140 U block (176 B) into ring slot i (256-B stride).
+                            struct UBlock { glm::mat4 mvp; glm::mat4 model; glm::vec4 color; glm::vec4 flags; glm::vec4 pbr; };
+                            static_assert(sizeof(UBlock) == 176, "U block must be std140 176 B");
+                            UBlock ub;
+                            ub.mvp   = viewProj * model;
+                            ub.model = model;
+                            ub.color = glm::vec4(dc.baseColor, 1.0f);
+                            ub.flags = glm::vec4(matTextured ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+                            ub.pbr   = glm::vec4(dc.metallic, dc.roughness, dc.opacity, 0.0f);
+                            std::memcpy(static_cast<uint8_t*>(m_matObjBuf[m_currentFrame].mapped)
+                                        + static_cast<size_t>(i) * k_matSlotStride, &ub, sizeof(ub));
+
+                            // HeParams (16 vec4 = 64 floats = 256 B) into ring slot i, zero-padded.
+                            float padded[64] = { 0.0f };
+                            if (params)
+                                std::memcpy(padded, params->data(),
+                                            std::min(params->size(), size_t(64)) * sizeof(float));
+                            std::memcpy(static_cast<uint8_t*>(m_matParBuf[m_currentFrame].mapped)
+                                        + static_cast<size_t>(i) * k_matSlotStride, padded, sizeof(padded));
+
+                            // One descriptor set per draw from this frame's pool (reset each frame).
+                            VkDescriptorSetAllocateInfo dsai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+                            dsai.descriptorPool     = m_matPool[m_currentFrame];
+                            dsai.descriptorSetCount = 1;
+                            dsai.pSetLayouts        = &m_matSetLayout;
+                            VkDescriptorSet set = VK_NULL_HANDLE;
+                            if (vkAllocateDescriptorSets(m_device, &dsai, &set) != VK_SUCCESS) return;
+
+                            const VkDeviceSize slot = static_cast<VkDeviceSize>(i) * k_matSlotStride;
+                            VkDescriptorBufferInfo lightBI{ m_matLightBuf[m_currentFrame].buf, 0, 64 };
+                            VkDescriptorBufferInfo objBI  { m_matObjBuf[m_currentFrame].buf, slot, 176 };
+                            VkDescriptorBufferInfo parBI  { m_matParBuf[m_currentFrame].buf, slot, 256 };
+                            // TODO A4-followup: bind heTex0 = material/mesh texture, heTexP0-3 =
+                            // graph project textures. This increment binds the 1x1 white default to
+                            // all five sampler slots so the shader samples something valid.
+                            VkDescriptorImageInfo whiteII{ m_albedoSampler, m_whiteAlbedoView,
+                                                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                            VkWriteDescriptorSet w[10]{};
+                            auto wr = [&](int idx, uint32_t binding, VkDescriptorType type,
+                                          const VkDescriptorBufferInfo* bi, const VkDescriptorImageInfo* ii) {
+                                w[idx].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                                w[idx].dstSet          = set;
+                                w[idx].dstBinding      = binding;
+                                w[idx].descriptorCount = 1;
+                                w[idx].descriptorType  = type;
+                                w[idx].pBufferInfo     = bi;
+                                w[idx].pImageInfo      = ii;
+                            };
+                            wr(0, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         &lightBI, nullptr);
+                            wr(1, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         &objBI,   nullptr);
+                            wr(2, 2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &whiteII);
+                            wr(3, 3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         &parBI,   nullptr);
+                            wr(4, 4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &whiteII);
+                            wr(5, 5, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &whiteII);
+                            wr(6, 6, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &whiteII);
+                            wr(7, 7, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &whiteII);
+                            wr(8, 8, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         &lightBI, nullptr); // WPO VS
+                            wr(9, 9, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         &parBI,   nullptr); // WPO VS
+                            vkUpdateDescriptorSets(m_device, 10, w, 0, nullptr);
+
+                            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, matPipe);
+                            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                                    m_matPipelineLayout, 0, 1, &set, 0, nullptr);
+                            vkCmdDrawIndexed(cmd, m.indexCount, 1, 0, 0, 0);
+                            ++m_statDraws;
+                            m_statTris += m.indexCount / 3;
+                        };
+                        // Instanced graph materials: draw each instance via the material path
+                        // (this increment does NOT combine graph materials with A3 instancing).
+                        if (!dc.instanceTransforms.empty())
+                            for (const glm::mat4& t : dc.instanceTransforms) drawMatInstance(t);
+                        else
+                            drawMatInstance(dc.transform);
+
+                        // Restore the pass's scene pipeline for subsequent built-in draws.
+                        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, activeMatScenePipe);
+                        return;
+                    }
+                }
+            }
+#endif
             // Base color: an explicit MaterialComponent override (dc.materialAssetId), once its
             // material is loaded, fully replaces the mesh's baked texture — even to flat.
             VkDescriptorSet albedoSet = m.albedoSet;             // baked (A1); null → flat
@@ -3166,6 +3581,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
             ? m_sceneTransparentPipelineHDR : m_sceneTransparentPipeline;
         if (!transparentDCs.empty() && transPipe) {
             allowInstancing = false; // transparent batches keep the per-instance loop (blend + depth sort)
+            activeMatScenePipe = transPipe; // A4: graph-material draws restore THIS in the transparent pass
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, transPipe);
             for (const DrawCall* dc : transparentDCs) drawDCVk(*dc);
         }
