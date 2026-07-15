@@ -3143,7 +3143,6 @@ static GIUniforms BuildGIUniforms(bool active, const glm::vec3& gridOrigin, floa
 // (envRole 1/2), so this pick still follows them — the fallback only fires in
 // scenes with no directional light at all, where the mask multiplies nothing.
 static bool giDominantDirectionalLight(const RenderWorld& rw,
-                                       const IRenderer::EnvironmentSettings& env,
                                        glm::vec3& towardOut, glm::vec3& colorIntensityOut)
 {
 	const LightData* best = nullptr;
@@ -3152,8 +3151,14 @@ static bool giDominantDirectionalLight(const RenderWorld& rw,
 			best = &l;
 	if (!best || glm::dot(best->direction, best->direction) < 1e-8f)
 	{
+		// No directional light shining right now (night without a moon, full
+		// overcast zeroing sun AND moon, or a light-less scene). The direction
+		// is only a harmless placeholder (the shadow mask multiplies nothing),
+		// but the colour MUST be zero: falling back to the environment's
+		// sunColor*sunIntensity here would feed the probe bounce full DAYTIME
+		// sunlight from below the horizon — meshes visibly sun-lit at night.
 		towardOut         = glm::normalize(rw.sunDirection);
-		colorIntensityOut = env.sunColor * env.sunIntensity;
+		colorIntensityOut = glm::vec3(0.0f);
 		return false;
 	}
 	towardOut         = -glm::normalize(best->direction); // LightData.direction = light travel direction
@@ -4405,7 +4410,7 @@ void MetalRenderer::EncodeGIShadowRays(void* cmdBufPtr, int width, int height)
 		// loop actually shades with — NOT the sky-dome sunDirection (see
 		// giDominantDirectionalLight's comment for the night-scene failure mode).
 		glm::vec3 towardLight, lightColorIntensity;
-		giDominantDirectionalLight(m_renderWorld, GetEnvironment(), towardLight, lightColorIntensity);
+		giDominantDirectionalLight(m_renderWorld, towardLight, lightColorIntensity);
 		sp.sunDirRadius = glm::vec4(towardLight, glm::radians(m_giLightRadius));
 		m_giShadowFrameSeed += 1.0f;
 		sp.frame = glm::vec4(m_giShadowFrameSeed, static_cast<float>(width), static_cast<float>(height), 0.0f);
@@ -4611,7 +4616,7 @@ void MetalRenderer::EncodeGIProbeUpdate(void* cmdBufPtr)
 		// estimate must bounce the light the scene is actually lit by, with THAT
 		// light's colour*intensity — not the sky-dome sun + environment settings.
 		glm::vec3 towardLight, lightColorIntensity;
-		giDominantDirectionalLight(m_renderWorld, GetEnvironment(), towardLight, lightColorIntensity);
+		giDominantDirectionalLight(m_renderWorld, towardLight, lightColorIntensity);
 		pp.sunColor     = glm::vec4(lightColorIntensity, 0.0f);
 		pp.skyAmbient   = glm::vec4(m_renderWorld.ambient, 0.0f);
 		// Local (point/spot) lights feed the one-bounce estimate — a scene keyed
