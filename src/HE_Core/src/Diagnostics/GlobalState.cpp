@@ -169,7 +169,14 @@ bool GlobalState::writeConfig()
 			Logger::Log(Logger::LogLevel::Error, "Failed to open config file for writing.");
 			return false;
 		}
-		out << j.dump(4);
+		// Serialize with the "replace" error handler: nlohmann's default dump()
+		// THROWS type_error.316 on any string holding invalid UTF-8, and this runs
+		// at shutdown with no catch above it -> terminate() -> SIGABRT (code 134).
+		// A single bad byte anywhere in the state (e.g. a per-project "openTabs:"
+		// value or a path picked up from the filesystem) would abort the whole app.
+		// The read side is already fully non-throwing; make the write side match by
+		// substituting U+FFFD for invalid bytes instead of crashing.
+		out << j.dump(4, ' ', false, json::error_handler_t::replace);
 		out.flush();
 		if (!out.good())
 		{
