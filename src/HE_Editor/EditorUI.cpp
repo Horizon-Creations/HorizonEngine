@@ -1639,13 +1639,38 @@ void EditorUI::RenderProjectHub(AppContext& ctx)
     ImGui::Spacing();
     ImGui::SetCursorPosX(padding);
     ImGui::Text("Scripting Language");
+
+    // A C++ project is useless without cmake + a working compiler, so drop it from the
+    // picker when the startup probe couldn't find them. A null probe = it hasn't
+    // finished yet → don't hide prematurely. Index 3 == Cpp (matches kLangNames /
+    // ProjectScriptLanguage). See DrawToolchainDialog / HcCodegen::probeToolchain.
+    const bool cppToolchainOk =
+        !ctx.toolchainProbe ||
+        (ctx.toolchainProbe->cmakeFound && ctx.toolchainProbe->compilerFound);
+    if (!cppToolchainOk && ctx.hubSelectedLang == 3)
+        ctx.hubSelectedLang = 0; // C++ no longer offered — fall back to HorizonCode
+
     ImGui::SetCursorPosX(padding);
     ImGui::PushItemWidth(panelW - padding * 2.0f);
-    ImGui::Combo("##HubLang", &ctx.hubSelectedLang,
-        kLangNames.data(), static_cast<int>(kLangNames.size()));
+    if (ImGui::BeginCombo("##HubLang", kLangNames[ctx.hubSelectedLang]))
+    {
+        for (int i = 0; i < static_cast<int>(kLangNames.size()); ++i)
+        {
+            if (i == 3 && !cppToolchainOk) continue; // hide C++ when no toolchain
+            const bool sel = (ctx.hubSelectedLang == i);
+            if (ImGui::Selectable(kLangNames[i], sel)) ctx.hubSelectedLang = i;
+            if (sel) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
     ImGui::PopItemWidth();
     ImGui::SetCursorPosX(padding);
     ImGui::TextDisabled("%s", kLangDesc[ctx.hubSelectedLang]);
+    if (!cppToolchainOk)
+    {
+        ImGui::SetCursorPosX(padding);
+        ImGui::TextDisabled("C++ needs cmake + a C++ compiler (not found on this machine).");
+    }
     ImGui::SetCursorPosX(padding);
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.75f, 0.45f, 1.0f));
     ImGui::PushTextWrapPos(padding + (panelW - padding * 2.0f));
@@ -2509,6 +2534,14 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                                   "directory instead of re-compressing them (via a .manifest sidecar).\n"
                                   "Falls back to a full pack automatically when settings changed.");
 
+            // "Compile HorizonCode" needs cmake + a working compiler; disable it (and
+            // force it off) when the startup probe couldn't find them, so the export
+            // can't try a codegen build that would just fail. Null probe = not finished
+            // yet → leave it enabled. Graphs still ship and run interpreted regardless.
+            const bool hcCompileOk =
+                !ctx.toolchainProbe ||
+                (ctx.toolchainProbe->cmakeFound && ctx.toolchainProbe->compilerFound);
+            if (!hcCompileOk) { s_exportCompileHC = false; ImGui::BeginDisabled(); }
             ImGui::Checkbox("Compile HorizonCode",   &s_exportCompileHC);
             ImGui::SameLine();
             ImGui::TextDisabled("(?)");
@@ -2519,6 +2552,9 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                                   "editor build. Graphs always ship too: anything that fails\n"
                                   "validation or compilation runs interpreted, per asset.\n"
                                   "Host platform only (cross-targets ship interpreted).");
+            if (!hcCompileOk) ImGui::EndDisabled();
+            if (!hcCompileOk)
+                ImGui::TextDisabled("Disabled — no cmake/C++ compiler found. HorizonCode will ship interpreted.");
 
             if (exportAppBundleApplicable(s_exportPlatform))
             {

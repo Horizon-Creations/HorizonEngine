@@ -1635,43 +1635,45 @@ ToolchainInstall installToolchain(bool needCmake, bool needCompiler,
 
 #if defined(__APPLE__)
     ensureToolPathAugmented(); // so an already-installed brew/cmake is actually visible
-    if (needCompiler)
+    const std::string brew = resolveBrew();
+
+    if (needCmake && brew.empty())
     {
+        // Homebrew is absent — bootstrap it AND install cmake in one automated pass.
+        // Homebrew's own installer also installs the Xcode Command Line Tools, so this
+        // covers the compiler too; there's no need to fire xcode-select separately.
+        // The bootstrap needs interactive administrator rights (a sudo password
+        // prompt) that a windowless popen pipe can't service, so hand the whole chain
+        // to Terminal.app: the user enters their password once there and Homebrew and
+        // cmake both install without a second trip back here — then Recheck goes green.
+        // The $(...) and the absolute brew paths stay single-quoted so THIS shell
+        // passes them through literally; Terminal's shell is what expands and runs them.
         r.attempted = true;
-        emit("Requesting the Xcode Command Line Tools installer…");
-        emit("Complete the macOS dialog that appears, then click Recheck.");
-        run("xcode-select --install"); // triggers the system GUI installer, returns fast
+        emit("Homebrew was not found — installing it (this also installs the Xcode");
+        emit("Command Line Tools compiler), then cmake, in a Terminal window.");
+        emit("Enter your password when Terminal asks; click Recheck once it finishes.");
+        run("osascript"
+            " -e 'tell application \"Terminal\" to activate'"
+            " -e 'tell application \"Terminal\" to do script \""
+            "/bin/bash -c \\\"$(curl -fsSL "
+            "https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\\\""
+            " && { /opt/homebrew/bin/brew install cmake || /usr/local/bin/brew install cmake; }"
+            "\"'");
     }
-    if (needCmake)
+    else
     {
-        const std::string brew = resolveBrew();
-        if (!brew.empty())
+        if (needCompiler)
+        {
+            r.attempted = true;
+            emit("Requesting the Xcode Command Line Tools installer…");
+            emit("Complete the macOS dialog that appears, then click Recheck.");
+            run("xcode-select --install"); // triggers the system GUI installer, returns fast
+        }
+        if (needCmake) // brew is present here → install cmake in-process (no sudo needed)
         {
             r.attempted = true;
             emit("Homebrew found (" + brew + ") — installing cmake…");
             if (const int rc = run(brew + " install cmake")) r.exitCode = rc;
-        }
-        else
-        {
-            // No Homebrew at all — install it first, then cmake needs a second pass.
-            // The official installer needs administrator rights and prompts
-            // interactively for the user's password, which a windowless popen pipe
-            // cannot service. Hand it off to Terminal.app (exactly like the
-            // xcode-select GUI installer above): the user completes it there, then
-            // clicks "Install Automatically" again — resolveBrew() now finds the
-            // fresh brew and installs cmake through it. The $(...) stays single-quoted
-            // here so this shell passes it through literally; Terminal's shell expands it.
-            r.attempted = true;
-            emit("Homebrew was not found. Opening Terminal to install it…");
-            emit("Complete the Homebrew install in the Terminal window (enter your");
-            emit("password when prompted). When it finishes, click \"Install");
-            emit("Automatically\" here again and the engine will install cmake via brew.");
-            run("osascript"
-                " -e 'tell application \"Terminal\" to activate'"
-                " -e 'tell application \"Terminal\" to do script \""
-                "/bin/bash -c \\\"$(curl -fsSL "
-                "https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\\\""
-                "\"'");
         }
     }
 #elif defined(_WIN32)
