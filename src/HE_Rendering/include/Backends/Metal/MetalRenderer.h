@@ -530,7 +530,9 @@ private:
 	// Lazily builds a BLAS for any not-yet-seen caster mesh, then rebuilds the TLAS
 	// from the current frame's caster set. No-op (early return) unless GI is
 	// enabled and supported. Shares cmdBuf with EncodeShadowMap/SimulateGpuParticles.
-	void  EncodeGIAccelBuild(void* cmdBuf);
+	// aspect MUST be the scene pass's aspect: this call's extract() seeds the
+	// m_renderWorld.camera that EncodeGIShadowRays rasterizes its G-buffer with.
+	void  EncodeGIAccelBuild(void* cmdBuf, float aspect);
 	// Unique BLAS instances the TLAS built this frame actually references (set by
 	// EncodeGIAccelBuild, consumed by EncodeGIShadowRays/EncodeGIProbeUpdate) — every
 	// compute encoder that traces against m_giTlas must useResource: each of these,

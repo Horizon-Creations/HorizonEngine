@@ -3997,7 +3997,7 @@ void* MetalRenderer::BuildBLAS(const GpuMesh& mesh)
 	return result;
 }
 
-void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr)
+void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr, float aspect)
 {
 	if (!m_giEnabled || !m_giSupported || !m_world)
 	{
@@ -4013,15 +4013,22 @@ void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr)
 
 	// Re-extract with the SAME day-night params EncodeShadowMap uses so the caster
 	// set matches — each pass independently re-extracts, the established
-	// convention in this file (see EncodeShadowMap/EncodeSSAO). Aspect only affects
-	// the camera frustum, which rays don't use, so 1.0 is fine here.
+	// convention in this file (see EncodeShadowMap/EncodeSSAO). The TLAS itself
+	// doesn't care about the camera, but EncodeGIShadowRays REUSES this extraction's
+	// m_renderWorld.camera to frustum-cull and rasterize its screen-space G-buffer,
+	// which fragmentMain then samples at the SCENE pass's UVs. Extracting with a
+	// wrong aspect (this used to pass 1.0) horizontally misaligns the whole shadow
+	// mask against the main view — lit faces pick up the hard 0.0 the ray kernel
+	// writes for light-back-facing pixels, and the error field sweeps across
+	// objects as the camera rotates (the exact "shadows swim with the camera"
+	// failure EncodeShadowMap's header comment warns about for CSM).
 	const IRenderer::EnvironmentSettings& env = GetEnvironment();
 	m_extractor.setDayNight(env.dayNightCycle, env.timeOfDay,
 	                        env.sunColor, env.sunIntensity,
 	                        env.moonColor, env.moonIntensity,
 	                        env.cloudCoverage);
 	m_extractor.setContentManager(m_contentManager);
-	m_extractor.extract(*m_world, m_renderWorld, 1.0f, &m_editorCamera);
+	m_extractor.extract(*m_world, m_renderWorld, aspect, &m_editorCamera);
 
 	RetireGIObject(m_giTlas);                m_giTlas                 = nullptr;
 	RetireGIObject(m_giInstanceBuffer);      m_giInstanceBuffer       = nullptr;
@@ -4272,6 +4279,12 @@ void MetalRenderer::EncodeGIShadowRays(void* cmdBufPtr, int width, int height)
 	if (m_sortedIndices.empty()) return;
 
 	const glm::mat4 viewProj = m_renderWorld.camera.projection * m_renderWorld.camera.view;
+	// Raster matrix needs the GL→Metal depth remap (like EncodeShadowMap's
+	// lightClip) or geometry closer than ~2× the near plane falls outside Metal's
+	// [0,w] clip range and drops out of the G-buffer. The temporal reprojection
+	// below keeps using the UNfixed viewProj: kMetalClipFix only rescales z, and
+	// giShadowTemporal's ndc math uses clip.xy/clip.w exclusively.
+	const glm::mat4 viewProjRaster = kMetalClipFix * viewProj;
 
 	@autoreleasepool
 	{
@@ -4298,7 +4311,7 @@ void MetalRenderer::EncodeGIShadowRays(void* cmdBufPtr, int width, int height)
 		{
 			const RenderObject& obj = m_renderWorld.objects[idx];
 			GIPosUniformsCPU u;
-			u.mvp   = viewProj * obj.transform;
+			u.mvp   = viewProjRaster * obj.transform;
 			u.model = obj.transform;
 			if (!valid || obj.meshAssetId != lastId)
 			{ cMesh = ResolveMesh(obj.meshAssetId); lastId = obj.meshAssetId; valid = true; }
@@ -7636,9 +7649,13 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 		// Ray-traced GI acceleration structures (BLAS/TLAS): lazy per-mesh BLAS +
 		// a full TLAS rebuild from this frame's caster set. No-op (early return)
 		// unless GI is enabled and the device/OS supports ray tracing — CSM/AO stay
-		// byte-identical to today in that case.
+		// byte-identical to today in that case. Same aspect as EncodeShadowMap/the
+		// scene pass — EncodeGIShadowRays rasterizes its G-buffer with THIS
+		// extraction's camera, and a mismatched aspect misaligns the shadow mask
+		// against the scene pass's screen-space sampling.
 		if (isPrimary)
-			EncodeGIAccelBuild((__bridge void*)cmdBuf);
+			EncodeGIAccelBuild((__bridge void*)cmdBuf,
+			                   shH > 0 ? static_cast<float>(shW) / static_cast<float>(shH) : 1.0f);
 		flushPass("GIShadow");   // detailed: commit the GIAccel command buffer (empty if GI off)
 
 		// Ray-traced shadows (replaces CSM's shadowFactor() sampling when GI is
