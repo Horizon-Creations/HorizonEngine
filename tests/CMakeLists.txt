@@ -12,6 +12,7 @@ add_executable(he_tests
     test_horizoncode_compiled.cpp
     test_game_instance.cpp
     test_culling.cpp
+    test_gi_bvh.cpp
     test_undo.cpp
     test_editorcamera.cpp
     test_rendergraph.cpp
@@ -62,6 +63,7 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/CommandBuffer.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/GPUMemoryAllocator.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderResourceManager.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/GiBvh.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorUndo.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorCamera.cpp
 )
