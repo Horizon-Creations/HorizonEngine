@@ -1293,10 +1293,16 @@ kernel void giShadowRay(uint2 gid [[thread_position_in_grid]],
 	float2 xi  = giHash2(gid, P.frame.x);
 	float3 dir = giConeSample(L, max(P.sunDirRadius.w, 1e-4), xi);
 
+	// Normal-offset bias + a matching min_distance floor — self-intersection
+	// ("shadow acne") on a lit-facing surface reads as false occlusion, i.e. a
+	// face pointed AT the light going dark while the away-facing side (unlit
+	// anyway, dot(N,L)<=0 above) looks comparatively bright. Both knobs guard the
+	// same failure independently: the offset moves the origin off the surface,
+	// min_distance additionally ignores anything found suspiciously close to it.
 	ray r;
-	r.origin       = pv.xyz + N * 0.02; // normal-offset bias, world units
+	r.origin       = pv.xyz + N * 0.05; // normal-offset bias, world units
 	r.direction    = dir;
-	r.min_distance = 0.001;
+	r.min_distance = 0.02;
 	r.max_distance = 10000.0;
 
 	intersection_params params;
@@ -1322,11 +1328,13 @@ vertex GIFsOut giFsVertex(uint vid [[vertex_id]])
 struct GITemporalParams { float4x4 prevViewProj; float4 blend; }; // blend.x = history weight (0 on first activation frame)
 
 // Reproject last frame's accumulated shadow value via this pixel's world
-// position and blend it with the new raw sample. Validity test is UV-bounds
-// only (no world-position match against the previous frame's G-buffer) — a v1
-// simplification: a bad reproject costs one frame of lag/ghosting on disocclusion,
-// never a crash or a stuck result. Matches the project's "faithful base
-// algorithm, not the fully hardened version" scope for this GI slice.
+// position and blend it with the new raw sample. The history texture carries
+// the WORLD POSITION the value was written for (rgb) alongside the shadow
+// scalar (a), so a disoccluded/parallax-revealed pixel — whose reprojected UV
+// lands on an unrelated surface, extremely common while orbiting the camera —
+// is rejected instead of blending in a wrong value at a heavy (~0.9) weight.
+// Earlier versions only checked UV-bounds, not "is this actually the same
+// surface", which visibly ghosted/swam on any camera rotation.
 fragment float4 giShadowTemporal(GIFsOut in [[stage_in]],
                                  texture2d<float> gPos    [[texture(0)]],
                                  texture2d<float> raw     [[texture(1)]],
@@ -1336,21 +1344,29 @@ fragment float4 giShadowTemporal(GIFsOut in [[stage_in]],
 {
 	float4 pv   = gPos.sample(smp, in.uv);
 	float  rawV = raw.sample(smp, in.uv).r;
-	if (pv.a < 0.5) return float4(rawV, 0.0, 0.0, 1.0); // background: no history to reproject
+	if (pv.a < 0.5) return float4(0.0, 0.0, 0.0, rawV); // background: no history to reproject
 
 	float4 clip = P.prevViewProj * float4(pv.xyz, 1.0);
-	if (clip.w <= 0.0) return float4(rawV, 0.0, 0.0, 1.0);
+	if (clip.w <= 0.0) return float4(pv.xyz, rawV);
 	float2 ndc    = clip.xy / clip.w;
 	float2 prevUV = float2(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
 	if (any(prevUV < 0.0) || any(prevUV > 1.0))
-		return float4(rawV, 0.0, 0.0, 1.0); // off-screen last frame → no history
+		return float4(pv.xyz, rawV); // off-screen last frame → no history
 
-	float histV  = history.sample(smp, prevUV).r;
-	float w      = clamp(P.blend.x, 0.0, 0.98);
-	float result = mix(rawV, histV, w);
-	return float4(result, 0.0, 0.0, 1.0);
+	float4 hist = history.sample(smp, prevUV);
+	// Reject history whose recorded world position is far from THIS pixel's —
+	// a disoccluded/wrong-surface reproject, not the same point one frame ago.
+	// Relative to distance-from-camera-ish scale (clip.w) rather than a fixed
+	// world-unit epsilon, so both close-up and distant geometry validate sanely.
+	const float posError = length(pv.xyz - hist.rgb);
+	const float tolerance = max(0.05 * clip.w, 0.02);
+	const float w = (posError < tolerance) ? clamp(P.blend.x, 0.0, 0.98) : 0.0;
+	float result = mix(rawV, hist.a, w);
+	return float4(pv.xyz, result);
 }
 
+// Reads the shadow scalar from the temporal history's alpha channel (rgb there
+// is the world position used for next frame's disocclusion check, not colour).
 fragment float4 giShadowBlur(GIFsOut in [[stage_in]],
                              texture2d<float> src [[texture(0)]],
                              sampler          smp [[sampler(0)]])
@@ -1359,7 +1375,7 @@ fragment float4 giShadowBlur(GIFsOut in [[stage_in]],
 	float sum = 0.0;
 	for (int x = -1; x <= 1; ++x)
 		for (int y = -1; y <= 1; ++y)
-			sum += src.sample(smp, in.uv + float2(float(x), float(y)) * texel).r;
+			sum += src.sample(smp, in.uv + float2(float(x), float(y)) * texel).a;
 	float v = sum / 9.0;
 	return float4(v, 0.0, 0.0, 1.0);
 }
@@ -4146,11 +4162,12 @@ void MetalRenderer::EnsureGIShadowPipelines()
 		if (rayPso) m_giShadowRayPipeline = (void*)CFBridgingRetain(rayPso);
 		else        Logger::Log(Logger::LogLevel::Error, "MetalRenderer: GI shadow-ray pipeline creation failed");
 
-		// Temporal accumulation (fullscreen triangle, single R-channel output).
+		// Temporal accumulation (fullscreen triangle). RGBA: rgb = world position
+		// (for next frame's disocclusion check), a = the shadow scalar itself.
 		MTLRenderPipelineDescriptor* tDesc = [[MTLRenderPipelineDescriptor alloc] init];
 		tDesc.vertexFunction   = [lib newFunctionWithName:@"giFsVertex"];
 		tDesc.fragmentFunction = [lib newFunctionWithName:@"giShadowTemporal"];
-		tDesc.colorAttachments[0].pixelFormat = MTLPixelFormatR16Float;
+		tDesc.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
 		id<MTLRenderPipelineState> tPso = [device newRenderPipelineStateWithDescriptor:tDesc error:&error];
 		if (tPso) m_giShadowTemporalPipeline = (void*)CFBridgingRetain(tPso);
 		else      Logger::Log(Logger::LogLevel::Error, "MetalRenderer: GI shadow-temporal pipeline creation failed");
@@ -4193,13 +4210,23 @@ void MetalRenderer::EnsureGIShadowTargets(int width, int height)
 	rawDesc.storageMode = MTLStorageModePrivate;
 	m_giShadowRawTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:rawDesc]);
 
+	// History carries rgb = world position (this value was written for) + a =
+	// shadow scalar, so giShadowTemporal can reject a reprojection that landed on
+	// an unrelated/disoccluded surface instead of blending in a wrong value.
 	MTLTextureDescriptor* histDesc = [MTLTextureDescriptor
-		texture2DDescriptorWithPixelFormat:MTLPixelFormatR16Float width:width height:height mipmapped:NO];
+		texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float width:width height:height mipmapped:NO];
 	histDesc.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
 	histDesc.storageMode = MTLStorageModePrivate;
 	m_giShadowHistory[0] = (void*)CFBridgingRetain([device newTextureWithDescriptor:histDesc]);
 	m_giShadowHistory[1] = (void*)CFBridgingRetain([device newTextureWithDescriptor:histDesc]);
-	m_giShadowResult     = (void*)CFBridgingRetain([device newTextureWithDescriptor:histDesc]);
+	// Final result is a plain scalar (fragmentMain only ever samples .r), written
+	// by a render pass (giShadowBlur) rather than a compute kernel — RenderTarget,
+	// not ShaderWrite, and back to the smaller R16Float format.
+	MTLTextureDescriptor* resultDesc = [MTLTextureDescriptor
+		texture2DDescriptorWithPixelFormat:MTLPixelFormatR16Float width:width height:height mipmapped:NO];
+	resultDesc.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+	resultDesc.storageMode = MTLStorageModePrivate;
+	m_giShadowResult = (void*)CFBridgingRetain([device newTextureWithDescriptor:resultDesc]);
 
 	m_giShadowHistoryIdx   = 0;
 	m_giShadowHistoryValid = false; // fresh (undefined-content) textures — first frame skips the history blend
