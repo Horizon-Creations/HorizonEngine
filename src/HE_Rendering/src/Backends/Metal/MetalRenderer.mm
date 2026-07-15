@@ -666,13 +666,18 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
 		? aoTex.sample(aoSmp, in.position.xy / scene.viewport.xy).r : 1.0;
 	// Flat ambient fill (never-black floor + overcast replacement) kept outside AO
 	// so grazing-angle SSAO over-darkening cannot zero it out.
-	// GI (Checkpoint C) replaces BOTH terms above with probe-sampled indirect
-	// diffuse when active — AO is bypassed entirely (EncodeSSAO isn't even
-	// dispatched; aoTex/ao above are dummy-bound and unused in this branch).
+	// GI (Checkpoint C) replaces the AO-gated IBL term with probe-sampled
+	// indirect diffuse when active — AO is bypassed entirely (EncodeSSAO isn't
+	// even dispatched; aoTex/ao above are dummy-bound and unused in this branch).
+	// The flat scene.ambient floor stays in BOTH branches: probes bounce only
+	// actual lights (sun/moon/point/spot), so full overcast or night would
+	// otherwise converge to 100% black — the floor is what keeps the never-black
+	// guarantee, exactly like the non-GI path.
 	// Specular IBL (ambSpec) is kept either way — this GI slice is diffuse-only.
 	float3 result = (gi.enabled != 0)
 		? sampleDDGIIrradiance(gi, giIrrTex, giIrrSmp, giVisTex, giVisSmp, in.worldPos, N)
 		      * diffuseColor * gi.params.x + ambSpec * (1.0 - 0.6 * wRough)
+		      + scene.ambient.xyz * diffuseColor
 		: ambient * ao + scene.ambient.xyz * diffuseColor;
 
 	int dbgCascade = 0;   // cascade chosen by the directional shadow (debug tint)
@@ -1407,9 +1412,15 @@ struct GIProbeParams {
 	float4 gridOrigin;   // xyz = world-space grid origin, w = spacing
 	float4 gridCounts;   // xyz = probe counts per axis (float, cast in-shader), w = probesPerRow
 	float4 rayParams;    // x = max ray distance, y = hysteresis (EMA blend), z = cursor start, w = probes this batch
-	float4 sunDirRadius; // xyz = direction TOWARD the sun, w unused
+	float4 sunDirRadius; // xyz = direction TOWARD the sun, w = local light count
 	float4 sunColor;     // rgb = sun colour * intensity, w unused
 	float4 skyAmbient;   // rgb = flat ambient/sky colour used on ray miss, w unused
+	// Local lights (point/spot) for the one-bounce estimate — without these,
+	// scenes keyed by point lights converge to pitch-black probes (only the
+	// directional light fed the bounce). Same attenuation model as fragmentMain.
+	float4 lightPosRange[8];  // xyz = world position, w = range
+	float4 lightColorType[8]; // rgb = colour * intensity, w = type (1 point, 2 spot)
+	float4 lightDirCos[8];    // xyz = spot travel direction, w = cos(half angle)
 };
 
 // Standard signed-octahedral mapping (Meyer et al. 2010, Clarberg-style). This
@@ -1478,13 +1489,34 @@ kernel void giProbeUpdate(uint2 texel   [[thread_position_in_threadgroup]],
 		// One-bounce direct-light estimate: the hit normal is approximated as
 		// facing back along the ray (no per-triangle normal fetch — that needs
 		// binding each mesh's vertex buffer to this kernel too, a follow-up), and
-		// the hit surface is treated as fully sun-lit (no secondary shadow ray).
+		// the hit surface is treated as fully lit (no secondary shadow ray).
 		// Good enough for a diffuse, low-frequency bounce estimate; not
 		// physically exact — see EncodeGIProbeUpdate's header comment.
 		const float3 hitNormal = -dir;
+		dist = q.get_committed_distance();
 		const float ndl = max(dot(hitNormal, P.sunDirRadius.xyz), 0.0);
 		radiance = albedo * P.sunColor.rgb * ndl;
-		dist     = q.get_committed_distance();
+		// Local (point/spot) lights bounce too — attenuation matches
+		// fragmentMain's direct model ((1 - d/range)^2 + spot cone smoothstep).
+		const float3 hitPos = probePos + dir * dist;
+		const int lightCount = int(P.sunDirRadius.w);
+		for (int i = 0; i < lightCount; ++i)
+		{
+			const float3 toL = P.lightPosRange[i].xyz - hitPos;
+			const float  d   = max(length(toL), 1e-4);
+			const float  range = max(P.lightPosRange[i].w, 1e-4);
+			if (d >= range) continue;
+			const float3 L = toL / d;
+			float atten = 1.0 - d / range;
+			atten *= atten;
+			if (P.lightColorType[i].w > 1.5) // spot cone
+			{
+				const float c       = dot(-L, normalize(P.lightDirCos[i].xyz));
+				const float cosCone = P.lightDirCos[i].w;
+				atten *= smoothstep(cosCone, mix(cosCone, 1.0, 0.2), c);
+			}
+			radiance += albedo * P.lightColorType[i].rgb * max(dot(hitNormal, L), 0.0) * atten;
+		}
 	}
 
 	const int probesPerRow = max(1, int(P.gridCounts.w));
@@ -3149,10 +3181,14 @@ struct GIProbeParamsCPU
 	glm::vec4 gridOrigin;   // xyz = world-space grid origin, w = spacing
 	glm::vec4 gridCounts;   // xyz = probe counts per axis, w = probesPerRow
 	glm::vec4 rayParams;    // x = max ray distance, y = hysteresis, z = cursor start, w = probes this batch
-	glm::vec4 sunDirRadius; // xyz = direction TOWARD the sun, w unused
+	glm::vec4 sunDirRadius; // xyz = direction TOWARD the sun, w = local light count
 	glm::vec4 sunColor;     // rgb = sun colour * intensity, w unused
 	glm::vec4 skyAmbient;   // rgb = flat ambient/sky colour used on ray miss, w unused
+	glm::vec4 lightPosRange[8];  // xyz = world position, w = range
+	glm::vec4 lightColorType[8]; // rgb = colour * intensity, w = type (1 point, 2 spot)
+	glm::vec4 lightDirCos[8];    // xyz = spot travel direction, w = cos(half angle)
 };
+static_assert(sizeof(GIProbeParamsCPU) == (6 + 24) * 16, "GIProbeParamsCPU must match the MSL GIProbeParams layout");
 
 // Matches the MSL SkyParams struct.
 struct SkyParams
@@ -4562,7 +4598,7 @@ void MetalRenderer::EncodeGIProbeUpdate(void* cmdBufPtr)
 		[enc setAccelerationStructure:(__bridge id<MTLAccelerationStructure>)m_giTlas atBufferIndex:0];
 		[enc setBuffer:(__bridge id<MTLBuffer>)m_giInstanceColorBuffer offset:0 atIndex:1];
 
-		GIProbeParamsCPU pp;
+		GIProbeParamsCPU pp{};
 		pp.gridOrigin = glm::vec4(m_giGridOrigin, kGIProbeSpacing);
 		pp.gridCounts = glm::vec4(static_cast<float>(m_giGridCounts.x), static_cast<float>(m_giGridCounts.y),
 		                         static_cast<float>(m_giGridCounts.z), static_cast<float>(m_giProbesPerRow));
@@ -4576,9 +4612,22 @@ void MetalRenderer::EncodeGIProbeUpdate(void* cmdBufPtr)
 		// light's colour*intensity — not the sky-dome sun + environment settings.
 		glm::vec3 towardLight, lightColorIntensity;
 		giDominantDirectionalLight(m_renderWorld, GetEnvironment(), towardLight, lightColorIntensity);
-		pp.sunDirRadius = glm::vec4(towardLight, 0.0f);
 		pp.sunColor     = glm::vec4(lightColorIntensity, 0.0f);
 		pp.skyAmbient   = glm::vec4(m_renderWorld.ambient, 0.0f);
+		// Local (point/spot) lights feed the one-bounce estimate — a scene keyed
+		// by point lights otherwise converges to pitch-black probes. Same 8-light
+		// window EncodeScene binds for direct shading.
+		int lightCount = 0;
+		for (const LightData& l : m_renderWorld.lights)
+		{
+			if (lightCount >= 8) break;
+			if ((l.type != 1 && l.type != 2) || l.intensity <= 0.0f) continue;
+			pp.lightPosRange[lightCount]  = glm::vec4(l.position, std::max(l.range, 1e-4f));
+			pp.lightColorType[lightCount] = glm::vec4(l.color * l.intensity, static_cast<float>(l.type));
+			pp.lightDirCos[lightCount]    = glm::vec4(l.direction, l.spotAngleCos);
+			++lightCount;
+		}
+		pp.sunDirRadius = glm::vec4(towardLight, static_cast<float>(lightCount));
 		[enc setBytes:&pp length:sizeof(pp) atIndex:2];
 
 		// Every BLAS the TLAS references must be explicitly declared used — Metal
