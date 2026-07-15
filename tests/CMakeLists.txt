@@ -51,6 +51,8 @@ add_executable(he_tests
     test_lod.cpp
     test_weather.cpp
     test_gamelogic_loader.cpp
+    test_net_bitstream.cpp
+    test_net_loopback.cpp
     # Culling/sorting/undo/camera/graph are compiled in directly — pulling in the
     # full HorizonRendering/Editor targets would drag GPU backends and ImGui in.
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderExtractor.cpp
@@ -165,6 +167,7 @@ endif()
 
 target_link_libraries(he_tests PRIVATE
     HorizonCore
+    HorizonNet
     HorizonScene
     HorizonImporters
     HorizonTools
@@ -189,6 +192,8 @@ if(WIN32)
     add_custom_command(TARGET he_tests POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             $<TARGET_FILE:HorizonCore>  $<TARGET_FILE_DIR:he_tests>
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:HorizonNet>   $<TARGET_FILE_DIR:he_tests>
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             $<TARGET_FILE:HorizonScene> $<TARGET_FILE_DIR:he_tests>
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
