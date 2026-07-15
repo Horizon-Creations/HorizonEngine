@@ -100,9 +100,15 @@ ToolchainProbe probeToolchain();
 // BLOCKING — run on a background thread. Only installs what's missing
 // (needCmake/needCompiler come from a prior probeToolchain()). Package managers:
 // macOS → Homebrew (cmake) + `xcode-select --install` (clang; hands off to the
-// system GUI installer, so its progress is limited); Windows → winget; Linux →
-// pkexec + the distro's apt/dnf/pacman/zypper. When no route is available it
-// returns attempted=false with an explanatory message instead of failing hard.
+// system GUI installer, so its progress is limited). When Homebrew itself is
+// absent, its official installer is launched in Terminal.app (it needs interactive
+// admin rights a windowless pipe can't service) — the user finishes there and
+// clicks Recheck, then cmake installs via the now-present brew. Windows → winget;
+// Linux → pkexec + the distro's apt/dnf/pacman/zypper. When no route is available
+// it returns attempted=false with an explanatory message instead of failing hard.
+// macOS note: a Finder-launched app inherits a minimal PATH without the Homebrew
+// prefixes, so this (and probeToolchain) first augment PATH to make an installed
+// brew/cmake visible in the first place.
 struct ToolchainInstall
 {
     bool        attempted = false; // did we actually launch any installer?

@@ -856,7 +856,8 @@ static void DrawToolchainDialog(AppContext& ctx)
 		ImGui::TextWrapped(
 			"The engine can install these for you using this system's package manager "
 #if defined(__APPLE__)
-			"(Homebrew for cmake, the Xcode Command Line Tools for the compiler). "
+			"(Homebrew for cmake — installed for you in Terminal if missing — and the "
+			"Xcode Command Line Tools for the compiler). "
 #elif defined(_WIN32)
 			"(winget: CMake + the Visual Studio C++ Build Tools). "
 #else

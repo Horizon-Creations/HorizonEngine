@@ -1393,6 +1393,43 @@ std::string shq(const std::filesystem::path& p)
     return out + "'";
 #endif
 }
+
+// macOS/Linux apps launched from Finder/Launchpad (a packaged .app, Spotlight, the
+// Dock) inherit a minimal PATH — typically "/usr/bin:/bin:/usr/sbin:/sbin" — that
+// omits the Homebrew prefixes: /opt/homebrew/bin on Apple Silicon, /usr/local/bin on
+// Intel. That's the whole reason a perfectly-installed `brew` (and any cmake or
+// compiler it provides) is invisible to every popen() below, so the toolchain probe
+// reports "cmake not found" and the auto-installer reports "Homebrew not found" even
+// though both are present. Prepend the standard tool locations to this process's PATH
+// exactly once so cmake/brew resolution and the installer all see a Homebrew install.
+// No-op on Windows, where GUI processes already inherit the full user PATH.
+void ensureToolPathAugmented()
+{
+#if !defined(_WIN32)
+    static const bool s_once = []
+    {
+        const char* cur = std::getenv("PATH");
+        const std::string path = cur ? cur : "";
+
+        std::unordered_set<std::string> have;
+        {
+            std::istringstream iss(path);
+            for (std::string tok; std::getline(iss, tok, ':'); )
+                if (!tok.empty()) have.insert(tok);
+        }
+        // Apple Silicon Homebrew, then Intel Homebrew / manual /usr/local installs.
+        std::string prefix;
+        for (const char* dir : { "/opt/homebrew/bin", "/opt/homebrew/sbin",
+                                 "/usr/local/bin",    "/usr/local/sbin" })
+            if (!have.count(dir)) prefix += std::string(dir) + ":";
+
+        if (!prefix.empty())
+            setenv("PATH", (prefix + path).c_str(), 1);
+        return true;
+    }();
+    (void)s_once;
+#endif
+}
 } // namespace
 
 namespace {
@@ -1418,6 +1455,7 @@ const std::string& resolveCmake()
     static bool s_done = false;
     if (s_done) return s_cmake;
     s_done = true;
+    ensureToolPathAugmented(); // make a Homebrew cmake on /opt/homebrew visible (see note above)
     namespace fs = std::filesystem;
     std::error_code ec;
     if (!g_bundledCmakeDir.empty())
@@ -1562,6 +1600,23 @@ bool commandExists(const std::string& exe)
     return runStreaming("command -v " + exe, nullptr, cap) == 0;
 #endif
 }
+
+#if defined(__APPLE__)
+// Resolve a usable Homebrew. ensureToolPathAugmented() already puts the standard
+// prefixes on PATH, but a Finder-launched app that ran before this fix, or an
+// install in a non-standard spot, can still hide `brew` from `command -v` — so also
+// probe the two canonical binary locations directly. Returns a shell-ready token
+// (a quoted absolute path, or the bare word "brew"), or empty when none is found.
+std::string resolveBrew()
+{
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    for (const char* p : { "/opt/homebrew/bin/brew", "/usr/local/bin/brew" })
+        if (fs::is_regular_file(p, ec)) return shq(fs::path(p));
+    if (commandExists("brew")) return "brew";
+    return {};
+}
+#endif
 } // namespace
 
 ToolchainInstall installToolchain(bool needCmake, bool needCompiler,
@@ -1579,6 +1634,7 @@ ToolchainInstall installToolchain(bool needCmake, bool needCompiler,
     };
 
 #if defined(__APPLE__)
+    ensureToolPathAugmented(); // so an already-installed brew/cmake is actually visible
     if (needCompiler)
     {
         r.attempted = true;
@@ -1588,16 +1644,34 @@ ToolchainInstall installToolchain(bool needCmake, bool needCompiler,
     }
     if (needCmake)
     {
-        if (commandExists("brew"))
+        const std::string brew = resolveBrew();
+        if (!brew.empty())
         {
             r.attempted = true;
-            if (const int rc = run("brew install cmake")) r.exitCode = rc;
+            emit("Homebrew found (" + brew + ") — installing cmake…");
+            if (const int rc = run(brew + " install cmake")) r.exitCode = rc;
         }
         else
         {
-            r.message = "Homebrew not found — install cmake from cmake.org/download, "
-                        "or install Homebrew (brew.sh) first and retry.";
-            emit(r.message);
+            // No Homebrew at all — install it first, then cmake needs a second pass.
+            // The official installer needs administrator rights and prompts
+            // interactively for the user's password, which a windowless popen pipe
+            // cannot service. Hand it off to Terminal.app (exactly like the
+            // xcode-select GUI installer above): the user completes it there, then
+            // clicks "Install Automatically" again — resolveBrew() now finds the
+            // fresh brew and installs cmake through it. The $(...) stays single-quoted
+            // here so this shell passes it through literally; Terminal's shell expands it.
+            r.attempted = true;
+            emit("Homebrew was not found. Opening Terminal to install it…");
+            emit("Complete the Homebrew install in the Terminal window (enter your");
+            emit("password when prompted). When it finishes, click \"Install");
+            emit("Automatically\" here again and the engine will install cmake via brew.");
+            run("osascript"
+                " -e 'tell application \"Terminal\" to activate'"
+                " -e 'tell application \"Terminal\" to do script \""
+                "/bin/bash -c \\\"$(curl -fsSL "
+                "https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\\\""
+                "\"'");
         }
     }
 #elif defined(_WIN32)
