@@ -106,6 +106,70 @@ bundle_macos() {
         for f in "$DIR"/*.dylib; do [ -f "$f" ] && codesign --force --sign - "$f" 2>/dev/null || true; done
         for f in "$DIR"/HorizonGame "$DIR"/HorizonEditor; do [ -f "$f" ] && codesign --force --sign - "$f" 2>/dev/null || true; done
     fi
+
+    # Relocate the Python C-extension modules' own non-system deps (only _ssl/_hashlib
+    # need this — their OpenSSL libssl/libcrypto). Keep them INSIDE lib-dynload/ with
+    # @loader_path so Python's OpenSSL stays a matched pair, isolated from the engine's
+    # own (Homebrew) libcrypto at the bundle root.
+    bundle_macos_dynload
+}
+
+# Make the .so in <DIR>/lib-dynload self-contained: pull each one's non-system deps
+# into lib-dynload/ next to it and rewrite links to @loader_path (the dir of the
+# loading .so). Only _ssl/_hashlib actually pull anything in (libssl + libcrypto); the
+# other ~70 modules are libSystem-only and are left untouched.
+bundle_macos_dynload() {
+    local dyndir="$DIR/lib-dynload"
+    [ -d "$dyndir" ] || return 0
+    local seen="|" items=() f dep name touched=()
+
+    for f in "$dyndir"/*.so "$dyndir"/*.dylib; do
+        [ -f "$f" ] || continue
+        items+=("$f"); seen="${seen}$(basename "$f")|"
+    done
+
+    # BFS: copy every transitive non-system dep into lib-dynload/.
+    local i=0
+    while [ "$i" -lt "${#items[@]}" ]; do
+        local cur="${items[$i]}"; i=$((i + 1))
+        while IFS= read -r dep; do
+            is_system_macho "$dep" && continue
+            name="$(basename "$dep")"
+            case "$seen" in *"|${name}|"*) continue ;; esac
+            seen="${seen}${name}|"
+            if [ -f "$dep" ]; then
+                cp -L "$dep" "$dyndir/$name"; chmod u+w "$dyndir/$name"
+                echo "    + lib-dynload/$name  (from $dep)"
+                items+=("$dyndir/$name"); touched+=("$dyndir/$name")
+            else
+                echo "    ! WARNING: lib-dynload dep not on disk: $dep"
+            fi
+        done < <(macho_deps "$cur")
+    done
+
+    # Rewrite ids (of copied dylibs) + every reference to a now-bundled sibling to
+    # @loader_path, recording which files we modified so we re-sign exactly those.
+    for f in "$dyndir"/*.so "$dyndir"/*.dylib; do
+        [ -f "$f" ] || continue
+        local changed=0
+        case "$f" in
+            *.dylib) install_name_tool -id "@loader_path/$(basename "$f")" "$f" 2>/dev/null && changed=1 || true ;;
+        esac
+        while IFS= read -r dep; do
+            is_system_macho "$dep" && continue
+            name="$(basename "$dep")"
+            if [ -f "$dyndir/$name" ]; then
+                install_name_tool -change "$dep" "@loader_path/$name" "$f" 2>/dev/null && changed=1 || true
+            fi
+        done < <(macho_deps "$f")
+        [ "$changed" -eq 1 ] && touched+=("$f")
+    done
+
+    # Re-sign only the files we touched (install_name_tool invalidated their signature);
+    # the untouched framework modules keep their valid signatures.
+    if command -v codesign >/dev/null 2>&1; then
+        for f in "${touched[@]}"; do [ -f "$f" ] && codesign --force --sign - "$f" 2>/dev/null || true; done
+    fi
 }
 
 bundle_linux() {

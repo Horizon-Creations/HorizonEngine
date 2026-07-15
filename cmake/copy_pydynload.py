@@ -6,19 +6,20 @@ he_bundle_python_stdlib (macOS/Linux).
 
     copy_pydynload.py <src_lib-dynload> <dest_dir>
 
-EXCLUDED modules — the only ones that pull in extra native libraries a game doesn't
-need — so the bundle stays self-contained without chasing those deps:
+EXCLUDED modules — those pull in native libraries a game never needs:
   _tkinter / _curses / _curses_panel  → Tcl/Tk, ncurses (GUI/terminal toolkits)
-  _ssl / _hashlib                     → OpenSSL (TLS + hashlib; documented limitation)
-  _zstd                               → libzstd (the stdlib zstd wrapper)
-Everything else here links only libSystem/glibc, so it copies verbatim and loads via
-the game's already-relocated runtime. Missing this dir is NOT fatal (returns 0).
+  _zstd                               → libzstd (niche stdlib zstd wrapper)
+Everything else here links only libSystem/glibc and copies verbatim EXCEPT _ssl and
+_hashlib, which link OpenSSL (libssl/libcrypto). Those are included so `ssl`/`hashlib`
+work; scripts/bundle_native_deps.sh then relocates their OpenSSL deps into lib-dynload/
+on macOS (on Linux they resolve against the system libssl/libcrypto). Missing this dir
+is NOT fatal (returns 0).
 """
 import os
 import shutil
 import sys
 
-EXCLUDE_STEMS = {"_tkinter", "_curses", "_curses_panel", "_ssl", "_hashlib", "_zstd"}
+EXCLUDE_STEMS = {"_tkinter", "_curses", "_curses_panel", "_zstd"}
 
 
 def main() -> int:
