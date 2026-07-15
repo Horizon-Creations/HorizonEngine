@@ -1356,10 +1356,15 @@ fragment float4 giShadowTemporal(GIFsOut in [[stage_in]],
 	float4 hist = history.sample(smp, prevUV);
 	// Reject history whose recorded world position is far from THIS pixel's —
 	// a disoccluded/wrong-surface reproject, not the same point one frame ago.
-	// Relative to distance-from-camera-ish scale (clip.w) rather than a fixed
-	// world-unit epsilon, so both close-up and distant geometry validate sanely.
+	// MUST be tight: two points can be spatially close in world units while
+	// being on completely different-facing surfaces (e.g. either side of a cube
+	// edge, right where a "lit face reprojects from/to the adjacent shadowed
+	// face" artifact would show up) — a loose, depth-scaled tolerance (the
+	// original version of this check used up to ~0.5 units at typical test
+	// distances, comparable to the whole object) accepted exactly that case as
+	// "close enough". Capped in the few-centimetre range regardless of depth.
 	const float posError = length(pv.xyz - hist.rgb);
-	const float tolerance = max(0.05 * clip.w, 0.02);
+	const float tolerance = clamp(0.02 * clip.w, 0.01, 0.06);
 	const float w = (posError < tolerance) ? clamp(P.blend.x, 0.0, 0.98) : 0.0;
 	float result = mix(rawV, hist.a, w);
 	return float4(pv.xyz, result);
