@@ -3099,6 +3099,36 @@ static GIUniforms BuildGIUniforms(bool active, const glm::vec3& gridOrigin, floa
 	return gi;
 }
 
+// The light GI shadows/bounces along: the BRIGHTEST directional light in the
+// extracted set — the same pick RenderExtractor's shadow fit uses, so GI
+// darkens exactly the light fragmentMain's directional loop shades with.
+// m_renderWorld.sunDirection is the SKY-DOME sun (day-night cycle), which sits
+// below the horizon at night and never tracks a user-placed key light: rays
+// traced toward it zero the actual directional light almost everywhere (scene
+// goes black) and pass only on surfaces facing the below-horizon sun
+// ("lighting on the wrong side" — e.g. a bright cube UNDERSIDE at night).
+// In day-night scenes the sun/moon are themselves lights in rw.lights
+// (envRole 1/2), so this pick still follows them — the fallback only fires in
+// scenes with no directional light at all, where the mask multiplies nothing.
+static bool giDominantDirectionalLight(const RenderWorld& rw,
+                                       const IRenderer::EnvironmentSettings& env,
+                                       glm::vec3& towardOut, glm::vec3& colorIntensityOut)
+{
+	const LightData* best = nullptr;
+	for (const LightData& l : rw.lights)
+		if (l.type == 0 && l.intensity > 0.0f && (!best || l.intensity > best->intensity))
+			best = &l;
+	if (!best || glm::dot(best->direction, best->direction) < 1e-8f)
+	{
+		towardOut         = glm::normalize(rw.sunDirection);
+		colorIntensityOut = env.sunColor * env.sunIntensity;
+		return false;
+	}
+	towardOut         = -glm::normalize(best->direction); // LightData.direction = light travel direction
+	colorIntensityOut = best->color * best->intensity;
+	return true;
+}
+
 // Matches the MSL GIPosUniforms / GIShadowParams / GITemporalParams structs
 // (kGIShadowMSL, used only by EncodeGIShadowRays).
 struct GIPosUniformsCPU { glm::mat4 mvp; glm::mat4 model; };
@@ -4335,11 +4365,12 @@ void MetalRenderer::EncodeGIShadowRays(void* cmdBufPtr, int width, int height)
 		[cenc setTexture:(__bridge id<MTLTexture>)m_giShadowRawTex atIndex:2];
 		[cenc setAccelerationStructure:(__bridge id<MTLAccelerationStructure>)m_giTlas atBufferIndex:0];
 		GIShadowParamsCPU sp;
-		// m_renderWorld.sunDirection is already "direction TOWARD the sun" (see the
-		// extractor's own comment above EncodeScene's sky pass) — unlike a light
-		// entry's dirSpot.xyz (light travel direction, negated in fragmentMain's
-		// L = normalize(-l.dirSpot.xyz)). No negation needed here.
-		sp.sunDirRadius = glm::vec4(glm::normalize(m_renderWorld.sunDirection), glm::radians(m_giLightRadius));
+		// Trace toward the brightest directional light — the light fragmentMain's
+		// loop actually shades with — NOT the sky-dome sunDirection (see
+		// giDominantDirectionalLight's comment for the night-scene failure mode).
+		glm::vec3 towardLight, lightColorIntensity;
+		giDominantDirectionalLight(m_renderWorld, GetEnvironment(), towardLight, lightColorIntensity);
+		sp.sunDirRadius = glm::vec4(towardLight, glm::radians(m_giLightRadius));
 		m_giShadowFrameSeed += 1.0f;
 		sp.frame = glm::vec4(m_giShadowFrameSeed, static_cast<float>(width), static_cast<float>(height), 0.0f);
 		[cenc setBytes:&sp length:sizeof(sp) atIndex:1];
@@ -4540,8 +4571,13 @@ void MetalRenderer::EncodeGIProbeUpdate(void* cmdBufPtr)
 		// pass's temporal-accumulation feel (converges over ~1-2s at 60fps).
 		const float maxDist = glm::length(glm::vec3(m_giGridCounts) * kGIProbeSpacing) + kGIProbeSpacing;
 		pp.rayParams    = glm::vec4(maxDist, 0.92f, static_cast<float>(m_giProbeUpdateCursor), static_cast<float>(budget));
-		pp.sunDirRadius = glm::vec4(glm::normalize(m_renderWorld.sunDirection), 0.0f);
-		pp.sunColor     = glm::vec4(GetEnvironment().sunColor * GetEnvironment().sunIntensity, 0.0f);
+		// Same dominant-directional pick as EncodeGIShadowRays: the one-bounce
+		// estimate must bounce the light the scene is actually lit by, with THAT
+		// light's colour*intensity — not the sky-dome sun + environment settings.
+		glm::vec3 towardLight, lightColorIntensity;
+		giDominantDirectionalLight(m_renderWorld, GetEnvironment(), towardLight, lightColorIntensity);
+		pp.sunDirRadius = glm::vec4(towardLight, 0.0f);
+		pp.sunColor     = glm::vec4(lightColorIntensity, 0.0f);
 		pp.skyAmbient   = glm::vec4(m_renderWorld.ambient, 0.0f);
 		[enc setBytes:&pp length:sizeof(pp) atIndex:2];
 
