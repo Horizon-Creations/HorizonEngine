@@ -3142,7 +3142,7 @@ static GIUniforms BuildGIUniforms(bool active, const glm::vec3& gridOrigin, floa
 // In day-night scenes the sun/moon are themselves lights in rw.lights
 // (envRole 1/2), so this pick still follows them — the fallback only fires in
 // scenes with no directional light at all, where the mask multiplies nothing.
-static bool giDominantDirectionalLight(const RenderWorld& rw,
+static bool dominantDirectionalLight(const RenderWorld& rw,
                                        glm::vec3& towardOut, glm::vec3& colorIntensityOut)
 {
 	const LightData* best = nullptr;
@@ -4408,9 +4408,9 @@ void MetalRenderer::EncodeGIShadowRays(void* cmdBufPtr, int width, int height)
 		GIShadowParamsCPU sp;
 		// Trace toward the brightest directional light — the light fragmentMain's
 		// loop actually shades with — NOT the sky-dome sunDirection (see
-		// giDominantDirectionalLight's comment for the night-scene failure mode).
+		// dominantDirectionalLight's comment for the night-scene failure mode).
 		glm::vec3 towardLight, lightColorIntensity;
-		giDominantDirectionalLight(m_renderWorld, towardLight, lightColorIntensity);
+		dominantDirectionalLight(m_renderWorld, towardLight, lightColorIntensity);
 		sp.sunDirRadius = glm::vec4(towardLight, glm::radians(m_giLightRadius));
 		m_giShadowFrameSeed += 1.0f;
 		sp.frame = glm::vec4(m_giShadowFrameSeed, static_cast<float>(width), static_cast<float>(height), 0.0f);
@@ -4616,7 +4616,7 @@ void MetalRenderer::EncodeGIProbeUpdate(void* cmdBufPtr)
 		// estimate must bounce the light the scene is actually lit by, with THAT
 		// light's colour*intensity — not the sky-dome sun + environment settings.
 		glm::vec3 towardLight, lightColorIntensity;
-		giDominantDirectionalLight(m_renderWorld, towardLight, lightColorIntensity);
+		dominantDirectionalLight(m_renderWorld, towardLight, lightColorIntensity);
 		pp.sunColor     = glm::vec4(lightColorIntensity, 0.0f);
 		pp.skyAmbient   = glm::vec4(m_renderWorld.ambient, 0.0f);
 		// Local (point/spot) lights feed the one-bounce estimate — a scene keyed
@@ -6739,10 +6739,12 @@ void MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height)
 	const simd::float2 vp = { (float)std::max(1, width), (float)std::max(1, height) };
 
 	// Lighting block for material quads (heLit sun/ambient + the Time input).
+	// Same dominant-directional fill as EncodeScene's matLight — the raw
+	// environment sunColor is never night/cloud-modulated (permanently sun-lit).
 	HE::MaterialShaderLibrary::Lighting matLight;
 	{
-		const glm::vec3 sd = m_renderWorld.sunDirection;
-		const glm::vec3 sc = GetEnvironment().sunColor;
+		glm::vec3 sd, sc;
+		dominantDirectionalLight(m_renderWorld, sd, sc);
 		const glm::vec3 am = m_renderWorld.ambient;
 		matLight.sunDir[0]   = sd.x; matLight.sunDir[1] = sd.y; matLight.sunDir[2] = sd.z;
 		matLight.sunDir[3]   = static_cast<float>(SDL_GetTicks()) / 1000.0f;
@@ -7234,16 +7236,23 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 	// Compact "material lighting ABI" for custom-shader materials (M2 std-lit). Bound at
 	// fragment buffer 1 so the shared MaterialShaderLibrary preamble's heLit() has sun +
 	// ambient. Harmless for the default PBR pipeline (which doesn't read buffer 1).
+	// Filled from the DOMINANT DIRECTIONAL LIGHT (colour × intensity — the same
+	// pick CSM/GI shadow along), NOT the raw environment sunColor + sky-dome
+	// sunDir: the raw values are never modulated by sunUp/night, cloud cover or
+	// intensity, so heLit() materials rendered permanently sun-lit at night.
+	// Zero when nothing shines → heLit() correctly degrades to its ambient term.
 	HE::MaterialShaderLibrary::Lighting matLight; // reused by WPO vertex-stage binds below
 	{
-		const glm::vec3 sc = GetEnvironment().sunColor, am = m_renderWorld.ambient;
-		matLight.sunDir[0]   = sunDir.x; matLight.sunDir[1]   = sunDir.y; matLight.sunDir[2]   = sunDir.z;
+		glm::vec3 matSunDir, matSunColor;
+		dominantDirectionalLight(m_renderWorld, matSunDir, matSunColor);
+		const glm::vec3 am = m_renderWorld.ambient;
+		matLight.sunDir[0]   = matSunDir.x; matLight.sunDir[1] = matSunDir.y; matLight.sunDir[2] = matSunDir.z;
 		matLight.sunDir[3]   = skyClock; // engine seconds — the node graph's Time input
 		matLight.camPos[0]   = m_renderWorld.camera.position.x;
 		matLight.camPos[1]   = m_renderWorld.camera.position.y;
 		matLight.camPos[2]   = m_renderWorld.camera.position.z;
-		matLight.sunColor[0] = sc.r;     matLight.sunColor[1] = sc.g;     matLight.sunColor[2] = sc.b;
-		matLight.ambient[0]  = am.r;     matLight.ambient[1]  = am.g;     matLight.ambient[2]  = am.b;
+		matLight.sunColor[0] = matSunColor.r; matLight.sunColor[1] = matSunColor.g; matLight.sunColor[2] = matSunColor.b;
+		matLight.ambient[0]  = am.r;          matLight.ambient[1]  = am.g;          matLight.ambient[2]  = am.b;
 		[encoder setFragmentBytes:&matLight length:sizeof(matLight)
 		                  atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
 	}
