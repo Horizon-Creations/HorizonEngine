@@ -543,6 +543,7 @@ configure_file(
 include_directories("${CMAKE_BINARY_DIR}/generated")
 
 add_subdirectory(src/HE_Core)
+add_subdirectory(src/HE_Net)
 add_subdirectory(src/HE_Scene)
 add_subdirectory(src/HE_Rendering)
 add_subdirectory(src/HE_Tools)
