@@ -650,6 +650,9 @@ void EditorApplication::OnInit()
 	m_editorConfig.SSAOIntensity               = globalstate.getCustomConfigFloat("SSAOIntensity",      m_editorConfig.SSAOIntensity);
 	m_editorConfig.SSAOMethod                  = globalstate.getCustomConfigInt("SSAOMethod",           m_editorConfig.SSAOMethod);
 	m_editorConfig.GpuParticles                = globalstate.getCustomConfigBool("GpuParticles",        m_editorConfig.GpuParticles);
+	m_editorConfig.GlobalIlluminationEnabled   = globalstate.getCustomConfigBool("GlobalIlluminationEnabled", m_editorConfig.GlobalIlluminationEnabled);
+	m_editorConfig.GIIndirectIntensity         = globalstate.getCustomConfigFloat("GIIndirectIntensity",      m_editorConfig.GIIndirectIntensity);
+	m_editorConfig.GILightRadius               = globalstate.getCustomConfigFloat("GILightRadius",            m_editorConfig.GILightRadius);
 	m_editorConfig.QuickSettingsFavorites      = globalstate.getCustomConfigString("QuickSettingsFavorites", m_editorConfig.QuickSettingsFavorites);
 	m_editorCamera.setFlySpeed(m_editorConfig.EditorCameraSpeed);
 	// Restore the last editor camera view (saved on exit). Skipped on first run (no
@@ -1173,6 +1176,10 @@ void EditorApplication::OnRender(float dt)
 			m_editorConfig.SSAORadius,
 			m_editorConfig.SSAOIntensity,
 			m_editorConfig.SSAOMethod});
+		renderer()->SetGISettings(IRenderer::GISettings{
+			m_editorConfig.GlobalIlluminationEnabled,
+			m_editorConfig.GIIndirectIntensity,
+			m_editorConfig.GILightRadius});
 		// Regenerate terrain meshes for any entity whose TerrainComponent is dirty
 		// (newly created, parameter-edited in the inspector, or just loaded/restored).
 		if (m_editorWorld)
@@ -1583,6 +1590,17 @@ void EditorApplication::dumpFrameHeadless()
 	r->SetSSAOSettings(IRenderer::SSAOSettings{
 		m_editorConfig.SSAOEnabled, m_editorConfig.SSAORadius, m_editorConfig.SSAOIntensity,
 		m_editorConfig.SSAOMethod});
+	{
+		// HE_DUMP_GI: override the persisted GI toggle for this capture only (does
+		// not touch config.json), so he_shot.py can compare GI-on vs GI-off without
+		// the editor's Preferences state leaking between captures.
+		const bool dumpGI = [&]{
+			const char* v = std::getenv("HE_DUMP_GI");
+			return v && *v ? std::atof(v) > 0.5 : m_editorConfig.GlobalIlluminationEnabled;
+		}();
+		r->SetGISettings(IRenderer::GISettings{
+			dumpGI, m_editorConfig.GIIndirectIntensity, m_editorConfig.GILightRadius});
+	}
 
 	// ── Sky-test capture (HE_DUMP_SKYTEST): aim the camera up at the sky and override
 	// the scene environment so a headless dump exercises the sky features (stars /
@@ -2777,6 +2795,9 @@ void EditorApplication::OnShutdown()
 	globalstate.setCustomConfigEntry("SSAOIntensity",              m_editorConfig.SSAOIntensity);
 	globalstate.setCustomConfigEntry("SSAOMethod",                 m_editorConfig.SSAOMethod);
 	globalstate.setCustomConfigEntry("GpuParticles",              m_editorConfig.GpuParticles);
+	globalstate.setCustomConfigEntry("GlobalIlluminationEnabled", m_editorConfig.GlobalIlluminationEnabled);
+	globalstate.setCustomConfigEntry("GIIndirectIntensity",       m_editorConfig.GIIndirectIntensity);
+	globalstate.setCustomConfigEntry("GILightRadius",             m_editorConfig.GILightRadius);
 	globalstate.setCustomConfigEntry("QuickSettingsFavorites",     m_editorConfig.QuickSettingsFavorites);
 	globalstate.writeConfig();
 }

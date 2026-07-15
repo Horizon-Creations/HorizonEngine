@@ -34,8 +34,8 @@ namespace {
 constexpr NSUInteger kMaxGpuSamples = 32;
 constexpr uint32_t   kInvalidSlot   = 0xFFFFFFFFu;   // ftPair/ftPoint when over capacity
 // Detailed capture submits the frame as this many command buffers, one per pass:
-// Shadow, SSAO, Scene, Bloom, Tonemap, Present (some may be empty → 0 ms).
-constexpr int        kDetailedPassCount = 6;
+// Shadow, GIAccel, SSAO, Scene, Bloom, Tonemap, Present (some may be empty → 0 ms).
+constexpr int        kDetailedPassCount = 7;
 // Cascaded shadow maps: layer count of the shadow depth-texture array. Must match
 // the extractor's kCascadeCount and the shader's cascade arrays (3).
 constexpr int        kCsmCascades = 3;
@@ -2705,6 +2705,7 @@ void MetalRenderer::Initialize(HE::Window* window)
 	if (!device)
 		throw std::runtime_error("MetalRenderer: MTLCreateSystemDefaultDevice failed");
 	m_device = (void*)CFBridgingRetain(device);
+	EnsureRaytracingSupport();
 
 	id<MTLCommandQueue> queue = [device newCommandQueue];
 	if (!queue)
@@ -2772,6 +2773,7 @@ void MetalRenderer::Shutdown()
 		if (mesh.vertexBuf) CFBridgingRelease(mesh.vertexBuf);
 		if (mesh.indexBuf)  CFBridgingRelease(mesh.indexBuf);
 		if (mesh.texture)   CFBridgingRelease(mesh.texture);
+		if (mesh.blas)      CFBridgingRelease(mesh.blas);
 	}
 	m_meshCache.clear();
 
@@ -2799,6 +2801,13 @@ void MetalRenderer::Shutdown()
 	DestroyLdrTarget();
 	DestroySSAOTargets();
 	DrainRetiredTextures();
+	DrainRetiredGIObjects();
+	if (m_giTlas)           { CFBridgingRelease(m_giTlas);           m_giTlas = nullptr; }
+	if (m_giInstanceBuffer) { CFBridgingRelease(m_giInstanceBuffer); m_giInstanceBuffer = nullptr; }
+	// Reset so a re-Initialize() re-probes ray-tracing support instead of keeping
+	// a stale (possibly wrong-device) cached result.
+	m_giRaytracingChecked = false;
+	m_giSupported         = false;
 	if (m_tonemapPipeline)      { CFBridgingRelease(m_tonemapPipeline);      m_tonemapPipeline = nullptr; }
 	if (m_shadercDemoPipeline)  { CFBridgingRelease(m_shadercDemoPipeline);  m_shadercDemoPipeline = nullptr; }
 	for (auto& [k, pso] : m_materialPipelineCache) if (pso) CFBridgingRelease(pso);
@@ -3429,6 +3438,192 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 			}
 			[enc endEncoding];
 		}
+	}
+}
+
+// ─── Global Illumination (ray-traced DDGI) — acceleration structures ──────────
+
+void MetalRenderer::EnsureRaytracingSupport()
+{
+	if (m_giRaytracingChecked) return;
+	m_giRaytracingChecked = true;
+
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	if (!device) return;
+
+	// The GI compute kernels use intersection_query (inline ray tracing), an MSL
+	// 2.4 / macOS 12 feature; acceleration-structure creation itself only needs
+	// device.supportsRaytracing (macOS 11+). Gate on both so GI reports
+	// unsupported — not a crash — on older macOS or GPUs without RT hardware.
+	if (@available(macOS 12.0, *))
+		m_giSupported = device.supportsRaytracing;
+
+	Logger::Log(Logger::LogLevel::Info,
+		(std::string("MetalRenderer: ray-traced GI ") + (m_giSupported ? "supported" : "not supported")
+		 + " on this device/OS").c_str());
+}
+
+void* MetalRenderer::BuildBLAS(const GpuMesh& mesh)
+{
+	if (!mesh.vertexBuf || !mesh.indexBuf || mesh.indexCount <= 0) return nullptr;
+
+	void* result = nullptr;
+	if (@available(macOS 12.0, *))
+	{
+		id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+
+		MTLAccelerationStructureTriangleGeometryDescriptor* geom =
+			[MTLAccelerationStructureTriangleGeometryDescriptor descriptor];
+		geom.vertexBuffer       = (__bridge id<MTLBuffer>)mesh.vertexBuf;
+		geom.vertexBufferOffset = 0;
+		geom.vertexStride       = sizeof(float) * 8; // interleaved pos3+normal3+uv2, position at offset 0
+		geom.vertexFormat       = MTLAttributeFormatFloat3;
+		geom.indexBuffer        = (__bridge id<MTLBuffer>)mesh.indexBuf;
+		geom.indexBufferOffset  = 0;
+		geom.indexType          = MTLIndexTypeUInt32;
+		geom.triangleCount      = (NSUInteger)(mesh.indexCount / 3);
+		geom.opaque              = YES; // casters are opaque occluders for shadow/GI rays (no alpha test yet)
+
+		MTLPrimitiveAccelerationStructureDescriptor* accelDesc =
+			[MTLPrimitiveAccelerationStructureDescriptor descriptor];
+		accelDesc.geometryDescriptors = @[ geom ];
+
+		MTLAccelerationStructureSizes sizes = [device accelerationStructureSizesWithDescriptor:accelDesc];
+		id<MTLAccelerationStructure> blas =
+			[device newAccelerationStructureWithSize:sizes.accelerationStructureSize];
+		if (blas)
+		{
+			id<MTLBuffer> scratch = [device newBufferWithLength:std::max((NSUInteger)1, sizes.buildScratchBufferSize)
+			                                              options:MTLResourceStorageModePrivate];
+			id<MTLCommandQueue>  queue  = (__bridge id<MTLCommandQueue>)m_commandQueue;
+			id<MTLCommandBuffer> cmdBuf = [queue commandBuffer];
+			id<MTLAccelerationStructureCommandEncoder> enc = [cmdBuf accelerationStructureCommandEncoder];
+			[enc buildAccelerationStructure:blas descriptor:accelDesc
+			                  scratchBuffer:scratch scratchBufferOffset:0];
+			[enc endEncoding];
+			[cmdBuf commit];
+			// One-shot, lazy (first-sight-only) build — a small hitch on the frame a
+			// new mesh first participates in GI is acceptable; waiting here keeps the
+			// BLAS fully built before any TLAS references it, no extra bookkeeping.
+			[cmdBuf waitUntilCompleted];
+			result = (void*)CFBridgingRetain(blas);
+		}
+	}
+	return result;
+}
+
+void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr)
+{
+	if (!m_giEnabled || !m_giSupported || !m_world)
+	{
+		// GI just turned off (or was never on this run): release any TLAS/instance
+		// buffer left over from the last GI-active frame instead of holding them
+		// until Shutdown(). No-op (RetireGIObject ignores null) once already clear.
+		RetireGIObject(m_giTlas);           m_giTlas           = nullptr;
+		RetireGIObject(m_giInstanceBuffer); m_giInstanceBuffer = nullptr;
+		return;
+	}
+
+	// Re-extract with the SAME day-night params EncodeShadowMap uses so the caster
+	// set matches — each pass independently re-extracts, the established
+	// convention in this file (see EncodeShadowMap/EncodeSSAO). Aspect only affects
+	// the camera frustum, which rays don't use, so 1.0 is fine here.
+	const IRenderer::EnvironmentSettings& env = GetEnvironment();
+	m_extractor.setDayNight(env.dayNightCycle, env.timeOfDay,
+	                        env.sunColor, env.sunIntensity,
+	                        env.moonColor, env.moonIntensity,
+	                        env.cloudCoverage);
+	m_extractor.setContentManager(m_contentManager);
+	m_extractor.extract(*m_world, m_renderWorld, 1.0f, &m_editorCamera);
+
+	RetireGIObject(m_giTlas);           m_giTlas           = nullptr;
+	RetireGIObject(m_giInstanceBuffer); m_giInstanceBuffer = nullptr;
+	if (m_renderWorld.objects.empty()) return;
+
+	if (@available(macOS 12.0, *))
+	{
+		id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+
+		// Same caster filter as EncodeShadowMap's cascade loop (castsShadow flag;
+		// skinned objects are never in m_renderWorld.objects, so they're already
+		// excluded — matching the existing "skinned meshes are shaded but never
+		// cast shadows" behaviour).
+		std::vector<id<MTLAccelerationStructure>> uniqueBlas;
+		std::vector<uint32_t> instanceBlasIndex;
+		std::vector<glm::mat4> instanceTransform;
+		instanceBlasIndex.reserve(m_renderWorld.objects.size());
+		instanceTransform.reserve(m_renderWorld.objects.size());
+
+		for (RenderObject& obj : m_renderWorld.objects)
+		{
+			if (!obj.castsShadow) continue;
+			const GpuMesh* resolved = ResolveMesh(obj.meshAssetId);
+			if (!resolved) continue;
+			GpuMesh& mesh = const_cast<GpuMesh&>(*resolved); // m_meshCache entry; safe, owned by this class
+			if (!mesh.blas) mesh.blas = BuildBLAS(mesh);
+			if (!mesh.blas) continue;
+
+			id<MTLAccelerationStructure> blas = (__bridge id<MTLAccelerationStructure>)mesh.blas;
+			int idx = -1;
+			for (size_t u = 0; u < uniqueBlas.size(); ++u)
+				if (uniqueBlas[u] == blas) { idx = (int)u; break; }
+			if (idx < 0) { idx = (int)uniqueBlas.size(); uniqueBlas.push_back(blas); }
+
+			instanceBlasIndex.push_back((uint32_t)idx);
+			instanceTransform.push_back(obj.transform);
+		}
+		if (uniqueBlas.empty()) return;
+
+		const NSUInteger count = (NSUInteger)instanceBlasIndex.size();
+		id<MTLBuffer> instanceBuf = [device
+			newBufferWithLength:sizeof(MTLAccelerationStructureInstanceDescriptor) * count
+			            options:MTLResourceStorageModeShared];
+		auto* instances = (MTLAccelerationStructureInstanceDescriptor*)instanceBuf.contents;
+		for (NSUInteger i = 0; i < count; ++i)
+		{
+			instances[i].accelerationStructureIndex        = instanceBlasIndex[i];
+			instances[i].options                            = MTLAccelerationStructureInstanceOptionOpaque;
+			instances[i].mask                               = 0xFF;
+			instances[i].intersectionFunctionTableOffset    = 0;
+			const glm::mat4& t = instanceTransform[i];
+			// MTLPackedFloat4x3: 3 rows x 4 columns (Metal's instance-transform
+			// convention), filled from our column-major glm::mat4.
+			for (int r = 0; r < 3; ++r)
+				for (int c = 0; c < 4; ++c)
+					instances[i].transformationMatrix.columns[c][r] = t[c][r];
+		}
+
+		NSMutableArray<id<MTLAccelerationStructure>>* accelArray =
+			[NSMutableArray arrayWithCapacity:uniqueBlas.size()];
+		for (id<MTLAccelerationStructure> b : uniqueBlas) [accelArray addObject:b];
+
+		MTLInstanceAccelerationStructureDescriptor* tlasDesc =
+			[MTLInstanceAccelerationStructureDescriptor descriptor];
+		tlasDesc.instancedAccelerationStructures = accelArray;
+		tlasDesc.instanceCount                   = count;
+		tlasDesc.instanceDescriptorBuffer        = instanceBuf;
+		tlasDesc.instanceDescriptorType          = MTLAccelerationStructureInstanceDescriptorTypeDefault;
+
+		MTLAccelerationStructureSizes sizes = [device accelerationStructureSizesWithDescriptor:tlasDesc];
+		id<MTLAccelerationStructure> tlas =
+			[device newAccelerationStructureWithSize:sizes.accelerationStructureSize];
+		if (!tlas) return;
+
+		id<MTLBuffer> scratch = [device newBufferWithLength:std::max((NSUInteger)1, sizes.buildScratchBufferSize)
+		                                              options:MTLResourceStorageModePrivate];
+		id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
+		id<MTLAccelerationStructureCommandEncoder> enc = [cmdBuf accelerationStructureCommandEncoder];
+		// The TLAS build reads every referenced BLAS; Metal does not auto-track
+		// residency through acceleration structures the way it does for directly
+		// bound buffers, so each one must be explicitly declared used.
+		for (id<MTLAccelerationStructure> b : uniqueBlas)
+			[enc useResource:b usage:MTLResourceUsageRead];
+		[enc buildAccelerationStructure:tlas descriptor:tlasDesc
+		                  scratchBuffer:scratch scratchBufferOffset:0];
+		[enc endEncoding];
+
+		m_giTlas           = (void*)CFBridgingRetain(tlas);
+		m_giInstanceBuffer = (void*)CFBridgingRetain(instanceBuf);
 	}
 }
 
@@ -4581,6 +4776,37 @@ void MetalRenderer::DrainRetiredTextures()
 	for (auto& r : m_retiredTextures)
 		CFBridgingRelease(r.texture);
 	m_retiredTextures.clear();
+}
+
+// Same deferred-release problem as RetireTexture above (GPU work may still
+// reference the object this frame's build just replaced), generalised to any
+// retained Objective-C object — used for the GI TLAS/instance buffer, which are
+// reallocated fresh every GI-active frame rather than mutated in place.
+void MetalRenderer::RetireGIObject(void* obj)
+{
+	if (!obj) return;
+	m_retiredGIObjects.push_back({ obj, 3 });
+}
+
+void MetalRenderer::AgeRetiredGIObjects()
+{
+	for (auto it = m_retiredGIObjects.begin(); it != m_retiredGIObjects.end(); )
+	{
+		if (--it->framesLeft <= 0)
+		{
+			CFBridgingRelease(it->object);
+			it = m_retiredGIObjects.erase(it);
+		}
+		else
+			++it;
+	}
+}
+
+void MetalRenderer::DrainRetiredGIObjects()
+{
+	for (auto& r : m_retiredGIObjects)
+		CFBridgingRelease(r.object);
+	m_retiredGIObjects.clear();
 }
 
 void MetalRenderer::EnsureViewportTarget()
@@ -6289,6 +6515,7 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			m_counters = FrameCounters{};
 
 			AgeRetiredTextures();
+			AgeRetiredGIObjects();
 
 			// Release cached GPU buffers for any mesh invalidated since last frame
 			// (e.g. sculpted terrain). In-flight GPU work may reference them, so
@@ -6298,6 +6525,7 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 				{
 					if (it->second.vertexBuf) CFBridgingRelease(it->second.vertexBuf);
 					if (it->second.indexBuf)  CFBridgingRelease(it->second.indexBuf);
+					if (it->second.blas)      CFBridgingRelease(it->second.blas);
 					m_meshCache.erase(it);
 				}
 			m_pendingMeshInvalidations.clear();
@@ -6436,7 +6664,16 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 		// the shared buffer within this command buffer. No-op when the path is disabled.
 		if (isPrimary)
 			SimulateGpuParticles((__bridge void*)cmdBuf);
-		flushPass("SSAO");   // detailed: commit the Shadow (+ particle sim) command buffer
+		flushPass("GIAccel");   // detailed: commit the Shadow (+ particle sim) command buffer
+
+		// Ray-traced GI acceleration structures (BLAS/TLAS): lazy per-mesh BLAS +
+		// a full TLAS rebuild from this frame's caster set. No-op (early return)
+		// unless GI is enabled and the device/OS supports ray tracing — CSM/AO stay
+		// byte-identical to today in that case. Nothing consumes the TLAS yet; the
+		// ray-traced shadow and DDGI probe passes that do land in later checkpoints.
+		if (isPrimary)
+			EncodeGIAccelBuild((__bridge void*)cmdBuf);
+		flushPass("SSAO");   // detailed: commit the GIAccel command buffer (empty if GI off)
 
 		const bool offscreen = isPrimary && m_viewportReqW > 0 && m_viewportReqH > 0;
 		if (isPrimary)
@@ -7101,12 +7338,29 @@ void MetalRenderer::DrawParticleGraphBatches(void* renderEncoder, const glm::mat
 
 IRenderer::Capabilities MetalRenderer::GetCapabilities() const
 {
-	return { true, true, true, true /* supportsGpuParticles */ };
+	Capabilities c;
+	c.supportsShadows            = true;
+	c.supportsPostProcessing     = true;
+	c.supportsHDR                = true;
+	c.supportsGpuParticles       = true;
+	// Cached at Initialize() by EnsureRaytracingSupport(): true only on devices +
+	// OS versions that actually support Metal ray tracing.
+	c.supportsGlobalIllumination = m_giSupported;
+	return c;
 }
 
 void MetalRenderer::SetGpuParticleParams(const GpuParticleParams& p)
 {
 	m_gpuParticleParams = p;
+}
+
+void MetalRenderer::SetGISettings(const GISettings& s)
+{
+	m_giEnabled             = s.enabled && m_giSupported;
+	m_giIndirectIntensity   = s.indirectIntensity;
+	m_giLightRadius         = s.lightRadius;
+	m_giRaysPerProbe        = s.raysPerProbe;
+	m_giProbeBudgetPerFrame = s.probeBudgetPerFrame;
 }
 
 void MetalRenderer::SetVSync(bool enabled)

@@ -95,6 +95,7 @@ public:
 	void  InvalidateMesh    (const HE::UUID& meshId)     override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
 	void  SetSSAOSettings(const SSAOSettings& settings) override;
+	void  SetGISettings(const GISettings& settings) override;
 	void  SetShadowDebug(bool on) override { m_debugShadowCascades = on; }
 	void  SetGpuParticleParams(const GpuParticleParams& p) override;
 	void  SetDebugLines(const std::vector<DebugLine>& lines) override;
@@ -128,6 +129,10 @@ private:
 		int   indexCount = 0;
 		void* texture    = nullptr; // id<MTLTexture>, base color (nullptr = none)
 		HE::AABB localBounds;       // object-space bounds for culling
+		// Bottom-level acceleration structure for ray-traced GI, built lazily the
+		// first time this mesh is seen while GI is active (BuildBLAS). Never
+		// rebuilt except via InvalidateMesh (sculpt/edit re-upload). id<MTLAccelerationStructure>.
+		void* blas = nullptr;
 	};
 
 	// GPU-side skeletal mesh: separate bone-ID and bone-weight buffers on top of
@@ -477,6 +482,48 @@ private:
 	// m_ssaoResult (or null). Runs its own extract/cull/sort (deterministic, so it
 	// matches EncodeScene's draw set) and its own render encoders on cmdBuf.
 	void  EncodeSSAO(void* cmdBuf, int width, int height);
+
+	// ── Global Illumination (ray-traced DDGI) ───────────────────────────────
+	// Metal-only, and only on devices + OS versions that support GPU ray tracing
+	// (checked once at Initialize(), see EnsureRaytracingSupport). When enabled on
+	// a supported device this COMPLETELY REPLACES CSM shadows and AO/ambient with
+	// one ray-traced pipeline: a bottom-level acceleration structure (BLAS) per
+	// unique mesh + a top-level acceleration structure (TLAS) rebuilt every frame
+	// from the same non-skinned, castsShadow-flagged object set EncodeShadowMap
+	// already uses (unculled by camera frustum — rays go in arbitrary directions).
+	// This checkpoint only builds the structures; the ray-traced shadow pass and
+	// DDGI probe pass that consume them land in later checkpoints.
+	bool  m_giRaytracingChecked = false; // EnsureRaytracingSupport() run-once guard
+	bool  m_giSupported         = false; // @available(macOS 12,*) && device.supportsRaytracing, cached
+	bool  m_giEnabled           = false; // latest SetGISettings().enabled
+	float m_giIndirectIntensity = 1.0f;
+	float m_giLightRadius       = 0.5f;  // degrees — sun angular radius (shadow penumbra softness)
+	int   m_giRaysPerProbe        = 128;
+	int   m_giProbeBudgetPerFrame = 256;
+	// TLAS + its instance-descriptor buffer are reallocated FRESH every GI-active
+	// frame (never mutated/resized in place): the previous frame's build may still
+	// be executing on the GPU when this frame starts encoding a new one, and
+	// MTLResourceStorageModeShared buffers have no automatic CPU/GPU sync, so
+	// overwriting one in place would race an in-flight build. Simpler and safer
+	// than tracking capacity/growth; instance buffers are tiny (tens of KB).
+	void* m_giTlas           = nullptr; // id<MTLAccelerationStructure> (retained), this frame's build
+	void* m_giInstanceBuffer = nullptr; // id<MTLBuffer> (retained), this frame's build
+	// Objects a build just replaced (old TLAS/instance/scratch buffers). GPU work
+	// from this frame's build (or a still in-flight prior frame) may still
+	// reference them, so they are released a few frames later — same lifetime
+	// problem and fix as m_retiredTextures/RetireTexture, generalised to any
+	// retained Objective-C object (not texture-specific despite that helper's name).
+	struct RetiredGIObject { void* object; int framesLeft; };
+	std::vector<RetiredGIObject> m_retiredGIObjects;
+	void  RetireGIObject(void* obj);      // hand a retained object over (nullptr-safe no-op)
+	void  AgeRetiredGIObjects();          // called once per frame
+	void  DrainRetiredGIObjects();        // immediate release (shutdown only)
+	void  EnsureRaytracingSupport();          // probes + caches m_giSupported, called once from Initialize()
+	void* BuildBLAS(const GpuMesh& mesh);     // one-shot; returns a retained id<MTLAccelerationStructure> or null
+	// Lazily builds a BLAS for any not-yet-seen caster mesh, then rebuilds the TLAS
+	// from the current frame's caster set. No-op (early return) unless GI is
+	// enabled and supported. Shares cmdBuf with EncodeShadowMap/SimulateGpuParticles.
+	void  EncodeGIAccelBuild(void* cmdBuf);
 
 	// Uploaded asset meshes, keyed by asset UUID
 	std::unordered_map<HE::UUID, GpuMesh>         m_meshCache;
