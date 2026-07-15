@@ -2845,13 +2845,27 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                 es.excludePatterns  = parseExcludeLines(s_exportExcludes.c_str());
                 es.incremental      = s_exportIncremental;
                 es.appBundle        = s_exportAppBundle && exportAppBundleApplicable(s_exportPlatform);
-                // ASTC textures for Apple Metal targets (Host/macOS on a Mac) —
-                // shares the .app-bundle predicate incidentally (both are "Apple
-                // target"), not by definition. Caveat: on an Intel-Mac *target*
-                // the GPU can't sample ASTC, so those meshes fall back to white
-                // (see MetalRenderer astcOk guard). Fine for Apple-Silicon; a
-                // dedicated toggle can split this if Intel distribution matters.
-                es.astcTextures     = exportAppBundleApplicable(s_exportPlatform);
+                // Texture-compression cook target, chosen automatically from the
+                // export target's GPU family (all encoding happens at pack time —
+                // the shipped game only uploads the resulting blocks). Values are
+                // HE::TextureFormat: 1 ASTC_4x4, 2 BC7, 3 BC3.
+                //   • Apple target (Host/macOS on a Mac) → ASTC for Metal, BUT BC3
+                //     when this editor runs the OpenGL backend, since macOS GL 4.1
+                //     samples S3TC and neither ASTC nor BC7. A single pak can't
+                //     serve both Metal (ASTC) and GL (BC3) on Apple Silicon; the
+                //     active backend decides which one ships.
+                //   • Windows/Linux desktop → BC7 (D3D11/D3D12/Vulkan and GL 4.6
+                //     all sample it; best RGBA quality).
+                // A format the target can't encode/sample degrades to RGBA8 in the
+                // cook, and the runtime skips a format its GPU can't sample.
+                uint8_t texComp;
+                if (exportAppBundleApplicable(s_exportPlatform))
+                    texComp = (ctx.backend == HE::RendererBackend::OpenGL)
+                                  ? static_cast<uint8_t>(3)  // BC3 — macOS GL
+                                  : static_cast<uint8_t>(1); // ASTC_4x4 — Metal
+                else
+                    texComp = static_cast<uint8_t>(2);       // BC7 — desktop D3D/Vulkan/GL
+                es.textureCompression = texComp;
                 es.gameRuntimeDir   = runtimeDir;
                 // Ship the bundled Python stdlib (pythonXY.zip + ._pth) only for
                 // Python-language projects — a non-Python game never inits Python, so

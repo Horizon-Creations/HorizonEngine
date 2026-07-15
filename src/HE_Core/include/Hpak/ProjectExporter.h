@@ -37,10 +37,13 @@ struct HE_API ExportSettings {
     // (codec/level/encrypt/key) changed. With encrypt, the previous export's
     // key is reused (read from its project.hcfg) so entries stay verbatim.
     bool incremental = true;
-    // Transcode RGBA8 textures to ASTC 4x4 at pack time (needs an ASTC encoder in
-    // the build). Only meaningful for targets whose GPU samples ASTC (Apple-
-    // Silicon Metal); the editor sets it accordingly.
-    bool astcTextures = false;
+    // Block-compress RGBA8 textures at pack time to this HE::TextureFormat value
+    // (0 RGBA8/none, 1 ASTC_4x4, 2 BC7, 3 BC3). All encoding happens here at export
+    // time so the shipped game only ever uploads pre-compressed blocks (+ pre-baked
+    // mips) — no runtime transcode or mip generation. The editor picks the value from
+    // the export target's GPU family (Apple-Metal→ASTC, Apple-GL→BC3, desktop→BC7);
+    // a format the target can't encode or sample degrades to RGBA8 (see cookTexture).
+    uint8_t textureCompression = 0;
     // macOS only: emit a <projectName>.app bundle instead of a flat folder —
     // executable + engine dylibs in Contents/MacOS, pak/hcfg/GameLogic in
     // Contents/Resources (where SDL_GetBasePath resolves inside a bundle), a
