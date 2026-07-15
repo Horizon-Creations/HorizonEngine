@@ -644,6 +644,56 @@ private:
 	GiBlasRange  BuildGiBlas(const HE::UUID& meshId); // CPU build from ContentManager data
 	void         UpdateGiAccel();                     // lazy BLAS append + per-frame instance upload
 	void         DestroyGiAccel();
+
+	// GL-B/GL-C: shadow-ray + probe passes. Pipelines are built lazily on the
+	// first GI-active frame (4.3 compute programs — never compiled on 4.1).
+	void         CreateGiPipelines();
+	void         EnsureGiShadowTargets(int width, int height);
+	void         DestroyGiShadowTargets();
+	void         EnsureGiProbeGrid();   // one-shot grid fit over the scene AABB
+	void         EnsureGiProbeAtlas();
+	void         DestroyGiProbeAtlas();
+	// Half-res G-buffer → compute shadow rays → temporal → blur. Returns the
+	// blurred mask texture (0 if unavailable). Uses THIS frame's extraction.
+	unsigned int RenderGiShadow(const CommandBuffer& cmds, int width, int height,
+	                            const glm::mat4& viewProj);
+	void         DispatchGiProbeUpdate();
+
+	static constexpr float kGiProbeSpacing     = 4.0f; // metres between probes
+	static constexpr int   kGiMaxProbesPerAxis = 10;   // grid clamp (matches Metal)
+	static constexpr int   kGiProbeOctSize     = 8;    // octahedral tile size
+
+	bool         m_giPipelinesBuilt   = false;
+	unsigned int m_giGBufProgram      = 0;
+	unsigned int m_giShadowCSProgram  = 0;
+	unsigned int m_giTemporalProgram  = 0;
+	unsigned int m_giBlurProgram      = 0;
+	unsigned int m_giProbeCSProgram   = 0;
+	// G-buffer + mask targets (all half-res).
+	unsigned int m_giGBufFBO   = 0, m_giGBufPosTex = 0, m_giGBufNormTex = 0, m_giGBufDepth = 0;
+	unsigned int m_giRawTex    = 0;                       // r16f, compute image store
+	unsigned int m_giHistFBO[2] = { 0, 0 }, m_giHistTex[2] = { 0, 0 }; // RGBA16F ping-pong
+	unsigned int m_giResultFBO = 0, m_giResultTex = 0;    // r16f, sampled by the scene
+	int          m_giShadowW = 0, m_giShadowH = 0;
+	int          m_giHistIdx = 0;
+	bool         m_giHistValid = false;
+	glm::mat4    m_giPrevViewProj{1.0f};
+	float        m_giFrameSeed = 0.0f;
+	// Probe grid + atlases.
+	glm::vec3    m_giGridOrigin{0.0f};
+	glm::ivec3   m_giGridCounts{0};
+	int          m_giProbeCount = 0, m_giProbesPerRow = 0, m_giProbeCursor = 0;
+	bool         m_giProbeGridBuilt = false;
+	unsigned int m_giIrrAtlas = 0, m_giVisAtlas = 0;
+	// Per-program GI uniform locations for the three programs sharing kUnlitFS.
+	struct GiSceneLocs
+	{
+		int enabled = -1, shadowTex = -1, irrTex = -1, visTex = -1;
+		int gridOrigin = -1, gridCounts = -1, intensity = -1;
+	};
+	GiSceneLocs  m_giLocsUnlit, m_giLocsSkinned, m_giLocsInstanced;
+	GiSceneLocs  FetchGiSceneLocs(unsigned int program) const;
+	void         PushGiSceneUniforms(const GiSceneLocs& locs, bool active);
 	std::unordered_map<HE::UUID, GiBlasRange> m_giBlasCache;
 	std::vector<HE::GiBvhNode>     m_giNodesCpu;      // concatenated BLAS nodes (all meshes)
 	std::vector<HE::GiBvhTriangle> m_giTrisCpu;       // concatenated BLAS triangles
