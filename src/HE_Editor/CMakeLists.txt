@@ -304,3 +304,17 @@ if(APPLE)
 	)
 	add_dependencies(dmg HorizonEditor)
 endif()
+
+# ── Linux: make the editor deploy self-contained ──────────────────────────────
+# Bundle the third-party libraries the editor links from system paths (lz4/zstd,
+# and libcrypto when not static mbedTLS) next to the binaries, so the tar.gz runs
+# without them installed. libpython + SDL3 are already deployed; the $ORIGIN rpath
+# finds all of them. Registered last so every editor .so is in place first. macOS is
+# NOT included here — its editor ships as a .app built by package_macos.sh, which
+# does its own dependency BFS + install-name rewrite (leave that path untouched).
+if(UNIX AND NOT APPLE)
+	add_custom_command(TARGET HorizonEditor POST_BUILD
+		COMMAND "${CMAKE_SOURCE_DIR}/scripts/bundle_native_deps.sh" "${DEPLOY_EDITOR}"
+		COMMENT "Bundling native deps into ${DEPLOY_EDITOR} (self-contained editor)"
+		VERBATIM)
+endif()

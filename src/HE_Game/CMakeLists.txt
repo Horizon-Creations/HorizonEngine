@@ -65,3 +65,19 @@ he_bundle_python(HorizonGame "${DEPLOY_GAME}")
 
 # Bundle the MSVC C++ runtime so the game runs on a clean PC without the VC++ redist.
 he_bundle_crt(HorizonGame "${DEPLOY_GAME}")
+
+# ── Post-build: make the game runtime SELF-CONTAINED on macOS + Linux ─────────
+# The engine dylibs/.so link third-party libraries from the dev's system/Homebrew
+# paths (lz4, zstd, openssl, the CPython framework/libpython). A game exported from
+# the editor copies DEPLOY_GAME wholesale, so without this it runs on the dev box but
+# is broken on any other machine ("Library not loaded: /opt/homebrew/..."). This
+# bundles those deps next to the binaries and (macOS) rewrites the links to @rpath +
+# ad-hoc re-signs; the game exe already carries an @executable_path/$ORIGIN rpath, so
+# they resolve next to it. No-op on Windows (bash-less — Python/CRT handled above).
+# MUST run last, after the deploy + he_bundle_python have populated DEPLOY_GAME.
+if(UNIX)
+    add_custom_command(TARGET HorizonGame POST_BUILD
+        COMMAND "${CMAKE_SOURCE_DIR}/scripts/bundle_native_deps.sh" "${DEPLOY_GAME}"
+        COMMENT "Bundling native deps into ${DEPLOY_GAME} (self-contained game runtime)"
+        VERBATIM)
+endif()
