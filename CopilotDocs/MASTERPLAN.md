@@ -2857,3 +2857,49 @@ Regression im Non-instanced-Pfad); 2 Low-Severity-Härtungen umgesetzt (Instance
 2×`sizeof(glm::mat4)`). Commits `a82ab82` (Kern) + `5038615` (Härtung). **Offen: echte Windows-GPU-Visual-/
 Perf-Prüfung (B3)** — blind Windows, auf dem Mac nicht messbar. **Nächster Plan-Schritt: A4 (Material-Node-
 Graph-Shader auf D3D/Vulkan — HLSL/SPIR-V-Codegen, echte funktionale Lücke, größter Brocken ~5–8 PT).**
+
+## Forts. 82 — Exportierte Spiele auf macOS + Linux self-contained: native Deps + volles Python (14.–15.07.2026)
+
+**Problem (User):** man konnte sein Spiel auf macOS/Linux faktisch nie ausliefern. Der Editor-Export kopiert
+die `Game/`-Runtime 1:1 in den Export — aber die Engine-Dylibs/.so linken Drittbibliotheken über die Dev-Pfade
+(`/opt/homebrew/opt/lz4|zstd|openssl@3/...`, `/Library/Frameworks/Python.framework/.../Python`). Also lief das
+exportierte Spiel auf der Dev-Box (Homebrew da), war aber auf jeder anderen Maschine kaputt
+(„Library not loaded: /opt/homebrew/..."). Weil der Exporter `Game/` verbatim kopiert, macht „`Game/`
+self-contained machen" den Export automatisch auf beiden Plattformen richtig.
+
+**Stage 1 — jedes Spiel STARTET auf einer sauberen Maschine (`0764957`, `scripts/bundle_native_deps.sh`).**
+Neue POST_BUILD-Stufe am `HorizonGame` (+ Linux-Editor-Deploy), `if(UNIX)`-gegated, No-op auf Windows:
+- **macOS:** BFS über jedes Mach-O in `Game/`, alle Nicht-System-Deps daneben kopieren, Install-Names auf
+  `@rpath` umschreiben, ad-hoc re-signen. Framework-Binaries (`Python`) landen als `libpython<ver>.dylib`
+  (damit `routeRuntime()` sie neben die exe legt). **Lokal via `DYLD_PRINT_LIBRARIES` verifiziert:** das Spiel
+  lädt lz4/zstd/crypto/python + Engine-Dylibs aus dem Bundle, nicht aus Homebrew/Library. Fat-Binary-Gotcha:
+  `otool -L` gibt pro Arch-Slice eine Header-Zeile aus → nur tab-eingerückte Zeilen parsen.
+- **Linux:** die lz4/zstd(/crypto-wenn-nicht-mbedTLS)-Sonames neben die Binaries kopieren; der `$ORIGIN`-rpath
+  (Forts. 80) findet sie. CI-grün, Tarball-Inhalt geprüft.
+
+**Stage 2 — Python-Spiele LAUFEN auf sauberer Maschine (`f314764`), gegated auf `scriptLanguage==Python`.**
+Auf User-Wunsch: „Python vom Editor packen, wenn Python die Projektsprache ist, und dann VOLL packen". Kein
+Runtime-Code-Change nötig — der Mechanismus (recherchiert+verifiziert, Details im Memory
+[[python-embed-zip-bundling]]):
+- **`pythonXY.zip` als `ZIP_STORED` (unkomprimiert!)** neben die exe. Ein Deflate-Zip scheitert am Bootstrap
+  (`zipimport … zlib not available` → „Failed to import encodings module"), weil `zlib` ein ungebundeltes
+  lib-dynload-Extension ist. Windows behält Deflate (zlib in die DLL gefroren).
+- **`lib-dynload/`** — die C-Extension-Module (struct/datetime/random/socket/select/json/pickle/… brauchen die,
+  gehen nicht in ein Zip). `cmake/copy_pydynload.py` kopiert die 71 libSystem-only-Module, schließt die 6 mit
+  Extra-Deps aus (tkinter/curses/ssl/hashlib/zstd).
+- **`<Exe>._pth`** (z. B. `HorizonGame._pth`) = `pythonXY.zip` / `.` / `lib-dynload`. Auf POSIX sucht getpath ein
+  `<Exe-Name>._pth` NEBEN der exe (NICHT `pythonXY._pth` — das ist das Windows-DLL-Landmark) und läuft dann
+  isoliert mit exakt diesen Pfaden. Plain `Py_Initialize()` bootet aus dem Bundle.
+- **Export:** `ExportSettings::bundlePythonStdlib` (Editor setzt es aus der Projektsprache). Der Exporter routet
+  `._pth` neben die exe, schickt Zip + `lib-dynload` NUR wenn gesetzt, und die libpython-Dylib/.so IMMER
+  (Load-Time-Dep von HorizonScene). `lib-dynload/` ist ein Unterordner → separat rekursiv kopiert (die flache
+  Datei-Schleife überspringt Ordner).
+- **Verifiziert (macOS, `env -i`, beliebiges cwd, echte Deploy-Artefakte):** struct/base64/datetime/random/json/
+  socket/select/array/pickle/binascii/math/re/zlib/bz2 importieren; `base64.b64encode(struct.pack(...))` läuft.
+  Full-Build + Tests grün.
+
+**Editor bleibt unangetastet:** kein `._pth` für den Editor auf macOS/Linux → er nutzt weiter das volle
+System-Python (der Editor braucht die volle stdlib für Scripting/Codegen). **Limitation (dokumentiert):**
+kein ssl/hashlib (OpenSSL) im Spiel-Bundle; Linux-Python-Runtime nur mechanisch verifiziert (identisch zu
+macOS), nicht auf echter Linux-Hardware ausgeführt. **Offen:** echtes Ausführen eines Python-Spiels auf
+Linux-HW; ssl/hashlib nachziehen falls gebraucht.
