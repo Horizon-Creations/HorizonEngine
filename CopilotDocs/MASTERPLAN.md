@@ -2903,3 +2903,18 @@ System-Python (der Editor braucht die volle stdlib für Scripting/Codegen). **Li
 kein ssl/hashlib (OpenSSL) im Spiel-Bundle; Linux-Python-Runtime nur mechanisch verifiziert (identisch zu
 macOS), nicht auf echter Linux-Hardware ausgeführt. **Offen:** echtes Ausführen eines Python-Spiels auf
 Linux-HW; ssl/hashlib nachziehen falls gebraucht.
+
+## Forts. 83 — macOS-Editor-`.app` bündelt jetzt die Game-Runtime (Export vom Download-Editor) (15.07.2026)
+
+**Lücke (User-Frage „wird die game runtime im editor package verpackt?"):** die macOS-`.app` lieferte NUR das
+Editor-Binary + Dylibs — kein `Game/`. Also konnte ein heruntergeladener macOS-Editor **keine Spiele exportieren**
+(`findRuntimeBundle` läuft von `SDL_GetBasePath()` = `Contents/Resources` hoch und suchte `<dir>/Game` → nichts).
+Windows/Linux-Pakete hatten die Runtime schon immer (Editor-POST_BUILD kopiert `DEPLOY_GAME`→`<editor>/Game`,
+das Archiv nimmt sie mit). `scripts/package_macos.sh` (`29ca9c4`) kopiert jetzt nach `Contents/Resources`:
+- **`Game/`** — die self-contained Runtime (Forts. 82: `@rpath`-relociert + voller Python-Bundle
+  zip+lib-dynload+`._pth`) → `findRuntimeBundle` findet `Resources/Game`, Export läuft, auch für Python-Spiele.
+- **`EngineContent/`** — die Read-only-Default-Assets, die der Editor relativ zum Base-Path lädt.
+- **`cmake/`** — die gebündelte cmake (falls `-DHE_BUNDLE_CMAKE=ON`) für C++-Codegen-Export vom Download-Editor.
+**Lokal verifiziert:** `.app` hat `Resources/Game/HorizonGame` (+ zip/lib-dynload/`._pth`) + EngineContent,
+`codesign --verify --deep --strict` grün (arm64-startfähig — verschachtelter Mach-O in Resources signiert sauber
+mit ad-hoc `--deep`), Editor lädt über dyld hinaus. Fixt auch die CI-DMG (baut via `dmg`-Target dasselbe Skript).
