@@ -9,6 +9,7 @@
 #include <HorizonRendering/RenderSorter.h>
 #include <HorizonRendering/RenderGraph.h>
 #include <HorizonRendering/CommandBuffer.h>
+#include <HorizonRendering/GiBvh.h>
 #include <Math/AABB.h>
 #include <Types/UUID.h>
 #include <material/MaterialShaderLibrary.h> // shared cross-backend material shader layer
@@ -494,7 +495,8 @@ private:
 	// This checkpoint only builds the structures; the ray-traced shadow pass and
 	// DDGI probe pass that consume them land in later checkpoints.
 	bool  m_giRaytracingChecked = false; // EnsureRaytracingSupport() run-once guard
-	bool  m_giSupported         = false; // @available(macOS 12,*) && device.supportsRaytracing, cached
+	bool  m_giSupported         = false; // GI available at all (always true once probed — SW path covers no-HW-RT)
+	bool  m_giHwRt              = false; // hardware inline ray tracing (macOS 12 + supportsRaytracing, minus HE_GI_FORCE_SW)
 	bool  m_giEnabled           = false; // latest SetGISettings().enabled
 	float m_giIndirectIntensity = 1.0f;
 	float m_giLightRadius       = 0.5f;  // degrees — sun angular radius (shadow penumbra softness)
@@ -515,6 +517,39 @@ private:
 	// probe-update kernel (Checkpoint C) look up which object it hit and tint the
 	// one-bounce estimate by that object's own colour instead of a flat grey.
 	void* m_giInstanceColorBuffer = nullptr; // id<MTLBuffer> (retained), this frame's build
+
+	// ── Software ray tracing (no-HW-RT fallback, or HE_GI_FORCE_SW) ──────────
+	// The CPU-built HE::GiBvh (same module + unit tests as the GL 4.3 port) in
+	// plain MTLBuffers, traversed by base compute kernels (kGISWMSL) that
+	// mirror GiBvh.cpp::giBvhIntersect 1:1. Node/tri buffers are concatenated
+	// BLASes (append-only, re-uploaded when a new mesh joins); the instance
+	// buffer (invTransform + baseColor + BLAS offsets) is rebuilt every frame
+	// like the HW TLAS. Everything downstream (G-buffer, temporal, blur,
+	// shading, probe atlases) is IDENTICAL to the HW path — only the ray
+	// dispatch kernel differs.
+	struct GiSwBlasRange
+	{
+		int32_t nodeOffset = 0, triOffset = 0;
+		bool    valid      = false;
+	};
+	struct GiSwInstanceCPU // must match kGISWMSL's GiInst (96 bytes)
+	{
+		glm::mat4 invTransform{1.0f};
+		glm::vec4 baseColor{1.0f};
+		int32_t   nodeOffset = 0, triOffset = 0, pad0 = 0, pad1 = 0;
+	};
+	std::unordered_map<HE::UUID, GiSwBlasRange> m_giSwBlasCache;
+	std::vector<HE::GiBvhNode>     m_giSwNodesCpu;
+	std::vector<HE::GiBvhTriangle> m_giSwTrisCpu;
+	bool  m_giSwBlasDirty     = false;
+	void* m_giSwNodeBuf       = nullptr; // id<MTLBuffer> (retained)
+	void* m_giSwTriBuf        = nullptr; // id<MTLBuffer> (retained)
+	void* m_giSwInstanceBuf   = nullptr; // id<MTLBuffer> (retained), rebuilt per frame
+	int   m_giSwInstanceCount = 0;
+	void* m_giShadowRaySwPipeline  = nullptr; // id<MTLComputePipelineState>
+	void* m_giProbeUpdateSwPipeline = nullptr; // id<MTLComputePipelineState>
+	GiSwBlasRange BuildGiSwBlas(const HE::UUID& meshId);
+	void          EncodeGISwAccelBuild(); // CPU BVH build + buffer upload (no cmd encoding needed)
 	// Objects a build just replaced (old TLAS/instance/scratch buffers). GPU work
 	// from this frame's build (or a still in-flight prior frame) may still
 	// reference them, so they are released a few frames later — same lifetime

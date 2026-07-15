@@ -1216,11 +1216,14 @@ fragment float4 ssaoBlurFragment(SSAOOut in [[stage_in]],
 // EncodeGIAccelBuild built this frame + temporal accumulation + spatial blur.
 // Requires MSL 2.4 (macOS 12+) for intersection_query — matches the capability
 // gate MetalRenderer::EnsureRaytracingSupport already enforces.
-static const char* kGIShadowMSL = R"MSL(
+// Raster stages of the GI shadow pass (G-buffer prepass, temporal
+// accumulation, spatial blur) — split from the ray kernel so they compile
+// on EVERY Metal device: the HW kernel needs MSL 2.4 (intersection_query)
+// and would take the whole library down on older OSes, but these stages are
+// shared by the hardware AND software ray-tracing paths.
+static const char* kGIShadowRasterMSL = R"MSL(
 #include <metal_stdlib>
-#include <metal_raytracing>
 using namespace metal;
-using namespace raytracing;
 
 struct GIVertexIn { packed_float3 position; packed_float3 normal; packed_float2 uv; };
 struct GIPosUniforms { float4x4 mvp; float4x4 model; };
@@ -1247,76 +1250,6 @@ fragment GIGBufOut giGBufFragment(GIPosOut in [[stage_in]])
 	o.posOut  = float4(in.worldPos, 1.0);            // a = 1 → valid geometry
 	o.normOut = float4(normalize(in.normal), 0.0);
 	return o;
-}
-
-struct GIShadowParams {
-	float4 sunDirRadius; // xyz = direction TOWARD the light (world space), w = angular radius (radians)
-	float4 frame;        // x = jitter seed, y = tex width, z = tex height, w unused
-};
-
-// Interleaved-gradient-noise-style hash → two independent [0,1) values per
-// pixel/frame, so successive frames sample different points in the light cone
-// (the temporal pass turns this into a soft penumbra without more rays/pixel).
-static float2 giHash2(uint2 gid, float seed)
-{
-	float2 p = float2(gid) + seed * 13.37;
-	return float2(fract(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453),
-	              fract(sin(dot(p, float2(39.3468, 11.1352))) * 24634.6345));
-}
-// Uniform disk sample mapped into a cone around L (small-angle approximation —
-// fine for the sun's ~0.25-3° angular radius this drives).
-static float3 giConeSample(float3 L, float angleRad, float2 xi)
-{
-	float3 up = (abs(L.y) < 0.99) ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
-	float3 T  = normalize(cross(up, L));
-	float3 B  = cross(L, T);
-	float  r   = sin(angleRad) * sqrt(xi.x);
-	float  phi = 6.28318530718 * xi.y;
-	return normalize(L + T * (r * cos(phi)) + B * (r * sin(phi)));
-}
-
-// One shadow ray per pixel toward the dominant directional light. Every BLAS in
-// the TLAS is opaque (BuildBLAS sets geom.opaque=YES) and accept_any_intersection
-// is set, so the first hit commits — a boolean occlusion test, no closest-hit
-// search needed.
-kernel void giShadowRay(uint2 gid [[thread_position_in_grid]],
-                        texture2d<float, access::read>  gPos      [[texture(0)]],
-                        texture2d<float, access::read>  gNorm     [[texture(1)]],
-                        texture2d<float, access::write> outShadow [[texture(2)]],
-                        instance_acceleration_structure accel     [[buffer(0)]],
-                        constant GIShadowParams&         P         [[buffer(1)]])
-{
-	if (float(gid.x) >= P.frame.y || float(gid.y) >= P.frame.z) return;
-	float4 pv = gPos.read(gid);
-	if (pv.a < 0.5) { outShadow.write(float4(1.0), gid); return; } // background → unoccluded
-	float3 N = normalize(gNorm.read(gid).xyz);
-	float3 L = P.sunDirRadius.xyz;
-	// Grazing/back-facing relative to the light: direct lighting's dot(N,L) term
-	// already zeroes this out, so skip the trace entirely.
-	if (dot(N, L) <= 0.0) { outShadow.write(float4(0.0), gid); return; }
-
-	float2 xi  = giHash2(gid, P.frame.x);
-	float3 dir = giConeSample(L, max(P.sunDirRadius.w, 1e-4), xi);
-
-	// Normal-offset bias + a matching min_distance floor — self-intersection
-	// ("shadow acne") on a lit-facing surface reads as false occlusion, i.e. a
-	// face pointed AT the light going dark while the away-facing side (unlit
-	// anyway, dot(N,L)<=0 above) looks comparatively bright. Both knobs guard the
-	// same failure independently: the offset moves the origin off the surface,
-	// min_distance additionally ignores anything found suspiciously close to it.
-	ray r;
-	r.origin       = pv.xyz + N * 0.05; // normal-offset bias, world units
-	r.direction    = dir;
-	r.min_distance = 0.02;
-	r.max_distance = 10000.0;
-
-	intersection_params params;
-	params.accept_any_intersection(true);
-	intersection_query<triangle_data, instancing> q;
-	q.reset(r, accel, params);
-	q.next();
-	const float shadow = (q.get_committed_intersection_type() == intersection_type::none) ? 1.0 : 0.0;
-	outShadow.write(float4(shadow), gid);
 }
 
 struct GIFsOut { float4 position [[position]]; float2 uv; };
@@ -1389,6 +1322,84 @@ fragment float4 giShadowBlur(GIFsOut in [[stage_in]],
 	float v = sum / 9.0;
 	return float4(v, 0.0, 0.0, 1.0);
 }
+)MSL";
+
+static const char* kGIShadowMSL = R"MSL(
+#include <metal_stdlib>
+#include <metal_raytracing>
+using namespace metal;
+using namespace raytracing;
+
+struct GIShadowParams {
+	float4 sunDirRadius; // xyz = direction TOWARD the light (world space), w = angular radius (radians)
+	float4 frame;        // x = jitter seed, y = tex width, z = tex height, w unused
+};
+
+// Interleaved-gradient-noise-style hash → two independent [0,1) values per
+// pixel/frame, so successive frames sample different points in the light cone
+// (the temporal pass turns this into a soft penumbra without more rays/pixel).
+static float2 giHash2(uint2 gid, float seed)
+{
+	float2 p = float2(gid) + seed * 13.37;
+	return float2(fract(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453),
+	              fract(sin(dot(p, float2(39.3468, 11.1352))) * 24634.6345));
+}
+// Uniform disk sample mapped into a cone around L (small-angle approximation —
+// fine for the sun's ~0.25-3° angular radius this drives).
+static float3 giConeSample(float3 L, float angleRad, float2 xi)
+{
+	float3 up = (abs(L.y) < 0.99) ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
+	float3 T  = normalize(cross(up, L));
+	float3 B  = cross(L, T);
+	float  r   = sin(angleRad) * sqrt(xi.x);
+	float  phi = 6.28318530718 * xi.y;
+	return normalize(L + T * (r * cos(phi)) + B * (r * sin(phi)));
+}
+
+// One shadow ray per pixel toward the dominant directional light. Every BLAS in
+// the TLAS is opaque (BuildBLAS sets geom.opaque=YES) and accept_any_intersection
+// is set, so the first hit commits — a boolean occlusion test, no closest-hit
+// search needed.
+kernel void giShadowRay(uint2 gid [[thread_position_in_grid]],
+                        texture2d<float, access::read>  gPos      [[texture(0)]],
+                        texture2d<float, access::read>  gNorm     [[texture(1)]],
+                        texture2d<float, access::write> outShadow [[texture(2)]],
+                        instance_acceleration_structure accel     [[buffer(0)]],
+                        constant GIShadowParams&         P         [[buffer(1)]])
+{
+	if (float(gid.x) >= P.frame.y || float(gid.y) >= P.frame.z) return;
+	float4 pv = gPos.read(gid);
+	if (pv.a < 0.5) { outShadow.write(float4(1.0), gid); return; } // background → unoccluded
+	float3 N = normalize(gNorm.read(gid).xyz);
+	float3 L = P.sunDirRadius.xyz;
+	// Grazing/back-facing relative to the light: direct lighting's dot(N,L) term
+	// already zeroes this out, so skip the trace entirely.
+	if (dot(N, L) <= 0.0) { outShadow.write(float4(0.0), gid); return; }
+
+	float2 xi  = giHash2(gid, P.frame.x);
+	float3 dir = giConeSample(L, max(P.sunDirRadius.w, 1e-4), xi);
+
+	// Normal-offset bias + a matching min_distance floor — self-intersection
+	// ("shadow acne") on a lit-facing surface reads as false occlusion, i.e. a
+	// face pointed AT the light going dark while the away-facing side (unlit
+	// anyway, dot(N,L)<=0 above) looks comparatively bright. Both knobs guard the
+	// same failure independently: the offset moves the origin off the surface,
+	// min_distance additionally ignores anything found suspiciously close to it.
+	ray r;
+	r.origin       = pv.xyz + N * 0.05; // normal-offset bias, world units
+	r.direction    = dir;
+	r.min_distance = 0.02;
+	r.max_distance = 10000.0;
+
+	intersection_params params;
+	params.accept_any_intersection(true);
+	intersection_query<triangle_data, instancing> q;
+	q.reset(r, accel, params);
+	q.next();
+	const float shadow = (q.get_committed_intersection_type() == intersection_type::none) ? 1.0 : 0.0;
+	outShadow.write(float4(shadow), gid);
+}
+
 )MSL";
 
 // ─── Global Illumination: DDGI probe update ──────────────────────────────────
@@ -1529,6 +1540,274 @@ kernel void giProbeUpdate(uint2 texel   [[thread_position_in_threadgroup]],
 	const float4 oldIrr = irradiance.read(outCoord);
 	irradiance.write(float4(mix(radiance, oldIrr.rgb, hysteresis), 1.0), outCoord);
 
+	const float4 oldVis = visibility.read(outCoord);
+	const float2 newVisSample = float2(dist, dist * dist);
+	visibility.write(float4(mix(newVisSample, oldVis.rg, hysteresis), 0.0, 0.0), outCoord);
+}
+)MSL";
+
+// ─── Global Illumination: SOFTWARE ray tracing (no-HW-RT fallback) ───────────
+// Base-Metal compute kernels for devices/OSes without intersection_query
+// support (pre-macOS-12 or !device.supportsRaytracing; HE_GI_FORCE_SW forces
+// this path on RT hardware for real-HW verification). Traverses the CPU-built
+// HE::GiBvh in plain buffers — the traversal mirrors GiBvh.cpp's
+// giBvhIntersect() 1:1 (same slab test, Möller-Trumbore, 64-entry stack), the
+// SAME algorithm the GL 4.3 port runs and tests/test_gi_bvh.cpp verifies.
+// Node/instance ints travel as float bit patterns (as_type) exactly like the
+// GLSL variant. Everything around these kernels (G-buffer, temporal, blur,
+// probe atlases, shading) is shared with the HW path.
+static const char* kGISWMSL = R"MSL(
+#include <metal_stdlib>
+using namespace metal;
+
+struct GiNode { float4 d0; float4 d1; }; // d0.xyz bmin, d0.w leftFirst (int bits), d1.xyz bmax, d1.w triCount (int bits)
+struct GiTri  { float4 v0; float4 v1; float4 v2; };
+struct GiInst { float4x4 invTransform; float4 baseColor; int4 offsets; }; // offsets.x nodeOffset, .y triOffset
+
+static bool giTriHit(GiTri tri, float3 o, float3 d, float tMin, float tMax, thread float& tOut)
+{
+	tOut = 0.0;
+	const float3 e1 = tri.v1.xyz - tri.v0.xyz;
+	const float3 e2 = tri.v2.xyz - tri.v0.xyz;
+	const float3 p  = cross(d, e2);
+	const float det = dot(e1, p);
+	if (abs(det) < 1e-9) return false;
+	const float invDet = 1.0 / det;
+	const float3 s = o - tri.v0.xyz;
+	const float u = dot(s, p) * invDet;
+	if (u < 0.0 || u > 1.0) return false;
+	const float3 q = cross(s, e1);
+	const float v = dot(d, q) * invDet;
+	if (v < 0.0 || u + v > 1.0) return false;
+	const float t = dot(e2, q) * invDet;
+	if (t <= tMin || t >= tMax) return false;
+	tOut = t;
+	return true;
+}
+
+static bool giBlasHit(const device GiNode* nodes, const device GiTri* tris,
+                      int nodeOfs, int triOfs, float3 o, float3 d,
+                      float tMin, float tMax, bool anyHit, thread float& tOut)
+{
+	tOut = tMax;
+	const float3 invD = 1.0 / d;
+	int stack[64];
+	int sp = 0;
+	stack[sp++] = nodeOfs;
+	bool hit = false;
+	float best = tMax;
+	while (sp > 0)
+	{
+		GiNode n = nodes[stack[--sp]];
+		const float3 t0 = (n.d0.xyz - o) * invD;
+		const float3 t1 = (n.d1.xyz - o) * invD;
+		const float3 lo = min(t0, t1);
+		const float3 hi = max(t0, t1);
+		const float tN = max(max(lo.x, lo.y), max(lo.z, tMin));
+		const float tF = min(min(hi.x, hi.y), min(hi.z, best));
+		if (tN > tF) continue;
+		const int leftFirst = as_type<int>(n.d0.w);
+		const int triCount  = as_type<int>(n.d1.w);
+		if (triCount > 0)
+		{
+			for (int i = 0; i < triCount; ++i)
+			{
+				float t;
+				if (giTriHit(tris[triOfs + leftFirst + i], o, d, tMin, best, t))
+				{
+					hit = true; best = t; tOut = t;
+					if (anyHit) return true;
+				}
+			}
+		}
+		else if (sp + 2 <= 64)
+		{
+			stack[sp++] = nodeOfs + leftFirst;
+			stack[sp++] = nodeOfs + leftFirst + 1;
+		}
+	}
+	return hit;
+}
+
+// Linear instance loop (TLAS analogue). Object-space ray with UNNORMALISED
+// direction keeps t world-comparable across instances.
+static bool giSceneAnyHit(const device GiNode* nodes, const device GiTri* tris,
+                          const device GiInst* insts, int instCount,
+                          float3 o, float3 d, float tMin, float tMax)
+{
+	for (int i = 0; i < instCount; ++i)
+	{
+		const float3 oL = (insts[i].invTransform * float4(o, 1.0)).xyz;
+		const float3 dL = (insts[i].invTransform * float4(d, 0.0)).xyz;
+		float t;
+		if (giBlasHit(nodes, tris, insts[i].offsets.x, insts[i].offsets.y, oL, dL, tMin, tMax, true, t))
+			return true;
+	}
+	return false;
+}
+
+static int giSceneClosestHit(const device GiNode* nodes, const device GiTri* tris,
+                             const device GiInst* insts, int instCount,
+                             float3 o, float3 d, float tMin, float tMax, thread float& tOut)
+{
+	int   bestInst = -1;
+	float best     = tMax;
+	for (int i = 0; i < instCount; ++i)
+	{
+		const float3 oL = (insts[i].invTransform * float4(o, 1.0)).xyz;
+		const float3 dL = (insts[i].invTransform * float4(d, 0.0)).xyz;
+		float t;
+		if (giBlasHit(nodes, tris, insts[i].offsets.x, insts[i].offsets.y, oL, dL, tMin, best, false, t))
+		{
+			best = t; bestInst = i;
+		}
+	}
+	tOut = best;
+	return bestInst;
+}
+
+// ── Shadow rays (same params/logic as the HW giShadowRay; frame.w carries the
+// instance count on this path) ────────────────────────────────────────────────
+struct GIShadowParams {
+	float4 sunDirRadius; // xyz = direction TOWARD the light, w = angular radius (radians)
+	float4 frame;        // x = jitter seed, y = tex width, z = tex height, w = instance count
+};
+static float2 giHash2(uint2 gid, float seed)
+{
+	float2 p = float2(gid) + seed * 13.37;
+	return float2(fract(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453),
+	              fract(sin(dot(p, float2(39.3468, 11.1352))) * 24634.6345));
+}
+static float3 giConeSample(float3 L, float angleRad, float2 xi)
+{
+	float3 up = (abs(L.y) < 0.99) ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
+	float3 T  = normalize(cross(up, L));
+	float3 B  = cross(L, T);
+	float  r   = sin(angleRad) * sqrt(xi.x);
+	float  phi = 6.28318530718 * xi.y;
+	return normalize(L + T * (r * cos(phi)) + B * (r * sin(phi)));
+}
+
+kernel void giShadowRaySw(uint2 gid [[thread_position_in_grid]],
+                          texture2d<float, access::read>  gPos      [[texture(0)]],
+                          texture2d<float, access::read>  gNorm     [[texture(1)]],
+                          texture2d<float, access::write> outShadow [[texture(2)]],
+                          const device GiNode* nodes [[buffer(0)]],
+                          const device GiTri*  tris  [[buffer(1)]],
+                          const device GiInst* insts [[buffer(2)]],
+                          constant GIShadowParams& P  [[buffer(3)]])
+{
+	if (float(gid.x) >= P.frame.y || float(gid.y) >= P.frame.z) return;
+	float4 pv = gPos.read(gid);
+	if (pv.a < 0.5) { outShadow.write(float4(1.0), gid); return; }
+	float3 N = normalize(gNorm.read(gid).xyz);
+	float3 L = P.sunDirRadius.xyz;
+	if (dot(N, L) <= 0.0) { outShadow.write(float4(0.0), gid); return; }
+
+	float2 xi  = giHash2(gid, P.frame.x);
+	float3 dir = giConeSample(L, max(P.sunDirRadius.w, 1e-4), xi);
+	float3 origin = pv.xyz + N * 0.05;
+	const int instCount = int(P.frame.w);
+	const float shadow = giSceneAnyHit(nodes, tris, insts, instCount, origin, dir, 0.02, 10000.0) ? 0.0 : 1.0;
+	outShadow.write(float4(shadow), gid);
+}
+
+// ── Probe update (same params/logic as the HW giProbeUpdate; sunColor.w
+// carries the instance count, albedo comes from the instance itself) ─────────
+struct GIProbeParams {
+	float4 gridOrigin;
+	float4 gridCounts;
+	float4 rayParams;
+	float4 sunDirRadius; // xyz = toward light, w = local light count
+	float4 sunColor;     // rgb = colour * intensity, w = instance count
+	float4 skyAmbient;
+	float4 lightPosRange[8];
+	float4 lightColorType[8];
+	float4 lightDirCos[8];
+};
+static float3 octDecode(float2 e)
+{
+	float3 n = float3(e.xy, 1.0 - abs(e.x) - abs(e.y));
+	if (n.z < 0.0)
+	{
+		float2 signN = float2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+		n.xy = (1.0 - abs(n.yx)) * signN;
+	}
+	return normalize(n);
+}
+constant int kGIProbeOctSize = 8; // must match MetalRenderer::kGIProbeOctSize
+
+kernel void giProbeUpdateSw(uint2 texel   [[thread_position_in_threadgroup]],
+                            uint2 batchIdx [[threadgroup_position_in_grid]],
+                            texture2d<float, access::read_write> irradiance [[texture(0)]],
+                            texture2d<float, access::read_write> visibility [[texture(1)]],
+                            const device GiNode* nodes [[buffer(0)]],
+                            const device GiTri*  tris  [[buffer(1)]],
+                            const device GiInst* insts [[buffer(2)]],
+                            constant GIProbeParams& P   [[buffer(3)]])
+{
+	const int gx = int(P.gridCounts.x), gy = int(P.gridCounts.y), gz = int(P.gridCounts.z);
+	const int probeCount = gx * gy * gz;
+	const int budget = int(P.rayParams.w);
+	if (probeCount <= 0 || int(batchIdx.x) >= budget) return;
+	const int cursorStart = int(P.rayParams.z);
+	const int probeIndex  = (cursorStart + int(batchIdx.x)) % probeCount;
+
+	const int pz = probeIndex / (gx * gy);
+	const int py = (probeIndex / gx) % gy;
+	const int px = probeIndex % gx;
+	const float3 probePos = P.gridOrigin.xyz + float3(float(px), float(py), float(pz)) * P.gridOrigin.w;
+
+	const float2 uv  = (float2(texel) + 0.5) / float(kGIProbeOctSize) * 2.0 - 1.0;
+	const float3 dir = octDecode(uv);
+
+	float dist;
+	const int instCount = int(P.sunColor.w);
+	const int hitInst = giSceneClosestHit(nodes, tris, insts, instCount,
+	                                      probePos, dir, 0.01, max(P.rayParams.x, 1.0), dist);
+
+	float3 radiance;
+	if (hitInst < 0)
+	{
+		radiance = P.skyAmbient.rgb;
+		dist     = P.rayParams.x;
+	}
+	else
+	{
+		const float3 albedo    = insts[hitInst].baseColor.rgb;
+		const float3 hitNormal = -dir;
+		const float ndl = max(dot(hitNormal, P.sunDirRadius.xyz), 0.0);
+		radiance = albedo * P.sunColor.rgb * ndl;
+		const float3 hitPos = probePos + dir * dist;
+		const int lightCount = int(P.sunDirRadius.w);
+		for (int i = 0; i < lightCount; ++i)
+		{
+			const float3 toL = P.lightPosRange[i].xyz - hitPos;
+			const float  d   = max(length(toL), 1e-4);
+			const float  range = max(P.lightPosRange[i].w, 1e-4);
+			if (d >= range) continue;
+			const float3 L = toL / d;
+			float atten = 1.0 - d / range;
+			atten *= atten;
+			if (P.lightColorType[i].w > 1.5)
+			{
+				const float c       = dot(-L, normalize(P.lightDirCos[i].xyz));
+				const float cosCone = P.lightDirCos[i].w;
+				atten *= smoothstep(cosCone, mix(cosCone, 1.0, 0.2), c);
+			}
+			radiance += albedo * P.lightColorType[i].rgb * max(dot(hitNormal, L), 0.0) * atten;
+		}
+	}
+
+	const int probesPerRow = max(1, int(P.gridCounts.w));
+	const int tileX = probeIndex % probesPerRow;
+	const int tileY = probeIndex / probesPerRow;
+	const uint2 outCoord = uint2(uint(tileX * kGIProbeOctSize) + texel.x,
+	                             uint(tileY * kGIProbeOctSize) + texel.y);
+
+	const float hysteresis = clamp(P.rayParams.y, 0.0, 0.98);
+	const float4 oldIrr = irradiance.read(outCoord);
+	irradiance.write(float4(mix(radiance, oldIrr.rgb, hysteresis), 1.0), outCoord);
 	const float4 oldVis = visibility.read(outCoord);
 	const float2 newVisSample = float2(dist, dist * dist);
 	visibility.write(float4(mix(newVisSample, oldVis.rg, hysteresis), 0.0, 0.0), outCoord);
@@ -3357,10 +3636,21 @@ void MetalRenderer::Shutdown()
 	if (m_giShadowTemporalPipeline) { CFBridgingRelease(m_giShadowTemporalPipeline); m_giShadowTemporalPipeline = nullptr; }
 	if (m_giShadowBlurPipeline)     { CFBridgingRelease(m_giShadowBlurPipeline);     m_giShadowBlurPipeline = nullptr; }
 	if (m_giProbeUpdatePipeline)    { CFBridgingRelease(m_giProbeUpdatePipeline);    m_giProbeUpdatePipeline = nullptr; }
+	if (m_giShadowRaySwPipeline)    { CFBridgingRelease(m_giShadowRaySwPipeline);    m_giShadowRaySwPipeline = nullptr; }
+	if (m_giProbeUpdateSwPipeline)  { CFBridgingRelease(m_giProbeUpdateSwPipeline);  m_giProbeUpdateSwPipeline = nullptr; }
+	if (m_giSwNodeBuf)     { CFBridgingRelease(m_giSwNodeBuf);     m_giSwNodeBuf = nullptr; }
+	if (m_giSwTriBuf)      { CFBridgingRelease(m_giSwTriBuf);      m_giSwTriBuf = nullptr; }
+	if (m_giSwInstanceBuf) { CFBridgingRelease(m_giSwInstanceBuf); m_giSwInstanceBuf = nullptr; }
+	m_giSwBlasCache.clear();
+	m_giSwNodesCpu.clear();
+	m_giSwTrisCpu.clear();
+	m_giSwInstanceCount = 0;
+	m_giSwBlasDirty     = false;
 	// Reset so a re-Initialize() rebuilds the grid/re-probes support instead of
 	// keeping a stale (possibly wrong-device, wrong-scene) cached result.
 	m_giRaytracingChecked = false;
 	m_giSupported         = false;
+	m_giHwRt              = false;
 	m_giProbeGridBuilt    = false;
 	m_giProbeCount        = 0;
 	m_giProbeUpdateCursor = 0;
@@ -4007,16 +4297,25 @@ void MetalRenderer::EnsureRaytracingSupport()
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
 	if (!device) return;
 
-	// The GI compute kernels use intersection_query (inline ray tracing), an MSL
-	// 2.4 / macOS 12 feature; acceleration-structure creation itself only needs
-	// device.supportsRaytracing (macOS 11+). Gate on both so GI reports
-	// unsupported — not a crash — on older macOS or GPUs without RT hardware.
+	// HARDWARE ray tracing (intersection_query, MSL 2.4 / macOS 12 +
+	// device.supportsRaytracing) is the preferred path. Devices/OSes without it
+	// fall back to SOFTWARE ray tracing: the CPU-built HE::GiBvh in plain
+	// MTLBuffers, traversed by base compute kernels (same approach as the GL
+	// 4.3 port) — so GI is supported on EVERY Metal device, only the kernels
+	// differ. HE_GI_FORCE_SW=1 forces the software path on RT hardware, which
+	// is how the SW kernels get real-hardware verification on this machine.
 	if (@available(macOS 12.0, *))
-		m_giSupported = device.supportsRaytracing;
+		m_giHwRt = device.supportsRaytracing;
+	if (const char* force = std::getenv("HE_GI_FORCE_SW"); force && *force && *force != '0')
+	{
+		m_giHwRt = false;
+		Logger::Log(Logger::LogLevel::Info, "MetalRenderer: HE_GI_FORCE_SW set — software GI path forced");
+	}
+	m_giSupported = true; // compute is base Metal; SW path covers the no-HW-RT case
 
 	Logger::Log(Logger::LogLevel::Info,
-		(std::string("MetalRenderer: ray-traced GI ") + (m_giSupported ? "supported" : "not supported")
-		 + " on this device/OS").c_str());
+		(std::string("MetalRenderer: ray-traced GI supported (")
+		 + (m_giHwRt ? "hardware" : "software") + " ray tracing)").c_str());
 }
 
 void* MetalRenderer::BuildBLAS(const GpuMesh& mesh)
@@ -4068,6 +4367,88 @@ void* MetalRenderer::BuildBLAS(const GpuMesh& mesh)
 	return result;
 }
 
+// ─── Software-RT acceleration build (no-HW-RT / HE_GI_FORCE_SW path) ─────────
+// CPU BVH per mesh (HE::buildGiBvh — the traversal the kGISWMSL kernels mirror
+// is unit-tested in tests/test_gi_bvh.cpp), concatenated into two shared
+// MTLBuffers; instances are a flat per-frame buffer. Mirrors the GL 4.3 port's
+// BuildGiBlas/UpdateGiAccel structure.
+
+MetalRenderer::GiSwBlasRange MetalRenderer::BuildGiSwBlas(const HE::UUID& meshId)
+{
+	GiSwBlasRange range;
+	if (!m_contentManager) return range;
+	const StaticMeshAsset* asset = m_contentManager->getStaticMesh(meshId);
+	if (!asset || asset->indices.empty()) return range;
+
+	// Same two layouts ResolveMesh uploads: cooked interleaved 8-float
+	// (position at offset 0) or loose tightly-packed 3-float positions.
+	HE::GiBvh bvh;
+	if (asset->cooked && !asset->interleaved.empty())
+		bvh = HE::buildGiBvh(asset->interleaved.data(), asset->vertexCount, 8,
+		                     asset->indices.data(), asset->indices.size());
+	else if (!asset->vertices.empty())
+		bvh = HE::buildGiBvh(asset->vertices.data(), asset->vertices.size() / 3, 3,
+		                     asset->indices.data(), asset->indices.size());
+	if (!bvh.valid()) return range;
+
+	range.nodeOffset = static_cast<int32_t>(m_giSwNodesCpu.size());
+	range.triOffset  = static_cast<int32_t>(m_giSwTrisCpu.size());
+	range.valid      = true;
+	m_giSwNodesCpu.insert(m_giSwNodesCpu.end(), bvh.nodes.begin(), bvh.nodes.end());
+	m_giSwTrisCpu.insert(m_giSwTrisCpu.end(), bvh.triangles.begin(), bvh.triangles.end());
+	m_giSwBlasDirty = true;
+	return range;
+}
+
+void MetalRenderer::EncodeGISwAccelBuild()
+{
+	// Same caster filter as the HW TLAS: castsShadow, unculled.
+	std::vector<GiSwInstanceCPU> instances;
+	instances.reserve(m_renderWorld.objects.size());
+	for (RenderObject& obj : m_renderWorld.objects)
+	{
+		if (!obj.castsShadow) continue;
+		auto it = m_giSwBlasCache.find(obj.meshAssetId);
+		if (it == m_giSwBlasCache.end())
+			it = m_giSwBlasCache.emplace(obj.meshAssetId, BuildGiSwBlas(obj.meshAssetId)).first;
+		if (!it->second.valid) continue;
+		GiSwInstanceCPU inst;
+		inst.invTransform = glm::inverse(obj.transform);
+		inst.baseColor    = glm::vec4(obj.baseColor, 1.0f);
+		inst.nodeOffset   = it->second.nodeOffset;
+		inst.triOffset    = it->second.triOffset;
+		instances.push_back(inst);
+	}
+	m_giSwInstanceCount = static_cast<int>(instances.size());
+	if (m_giSwInstanceCount == 0) return;
+
+	@autoreleasepool
+	{
+		id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+		if (m_giSwBlasDirty && !m_giSwNodesCpu.empty())
+		{
+			RetireGIObject(m_giSwNodeBuf); m_giSwNodeBuf = nullptr;
+			RetireGIObject(m_giSwTriBuf);  m_giSwTriBuf  = nullptr;
+			id<MTLBuffer> nb = [device newBufferWithBytes:m_giSwNodesCpu.data()
+			                                       length:m_giSwNodesCpu.size() * sizeof(HE::GiBvhNode)
+			                                      options:MTLResourceStorageModeShared];
+			id<MTLBuffer> tb = [device newBufferWithBytes:m_giSwTrisCpu.data()
+			                                       length:m_giSwTrisCpu.size() * sizeof(HE::GiBvhTriangle)
+			                                      options:MTLResourceStorageModeShared];
+			if (nb) m_giSwNodeBuf = (void*)CFBridgingRetain(nb);
+			if (tb) m_giSwTriBuf  = (void*)CFBridgingRetain(tb);
+			m_giSwBlasDirty = false;
+		}
+		// Instance buffer is rebuilt FRESH every frame (same in-flight-GPU-race
+		// reasoning as the HW TLAS instance buffer — see the member comment).
+		RetireGIObject(m_giSwInstanceBuf); m_giSwInstanceBuf = nullptr;
+		id<MTLBuffer> ib = [device newBufferWithBytes:instances.data()
+		                                       length:instances.size() * sizeof(GiSwInstanceCPU)
+		                                      options:MTLResourceStorageModeShared];
+		if (ib) m_giSwInstanceBuf = (void*)CFBridgingRetain(ib);
+	}
+}
+
 void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr, float aspect)
 {
 	if (!m_giEnabled || !m_giSupported || !m_world)
@@ -4079,6 +4460,11 @@ void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr, float aspect)
 		RetireGIObject(m_giInstanceBuffer);    m_giInstanceBuffer     = nullptr;
 		RetireGIObject(m_giInstanceColorBuffer); m_giInstanceColorBuffer = nullptr;
 		m_giUniqueBlas.clear();
+		RetireGIObject(m_giSwNodeBuf);     m_giSwNodeBuf     = nullptr;
+		RetireGIObject(m_giSwTriBuf);      m_giSwTriBuf      = nullptr;
+		RetireGIObject(m_giSwInstanceBuf); m_giSwInstanceBuf = nullptr;
+		m_giSwInstanceCount = 0;
+		m_giSwBlasDirty     = true; // node/tri buffers gone → re-upload on next GI-on
 		return;
 	}
 
@@ -4106,6 +4492,15 @@ void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr, float aspect)
 	RetireGIObject(m_giInstanceColorBuffer); m_giInstanceColorBuffer  = nullptr;
 	m_giUniqueBlas.clear();
 	if (m_renderWorld.objects.empty()) return;
+
+	// Software path (no HW inline ray tracing, or HE_GI_FORCE_SW): CPU BVH into
+	// plain buffers, no command encoding needed — everything downstream is
+	// shared with the HW path except the ray-dispatch kernels.
+	if (!m_giHwRt)
+	{
+		EncodeGISwAccelBuild();
+		return;
+	}
 
 	if (@available(macOS 12.0, *))
 	{
@@ -4218,8 +4613,10 @@ void MetalRenderer::EnsureGIShadowPipelines()
 	{
 		id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
 		NSError* error = nil;
+		// Raster stages compile on every device (no raytracing include) — shared
+		// by the hardware and software ray paths.
 		id<MTLLibrary> lib = [device newLibraryWithSource:
-			[NSString stringWithUTF8String:kGIShadowMSL] options:nil error:&error];
+			[NSString stringWithUTF8String:kGIShadowRasterMSL] options:nil error:&error];
 		if (!lib)
 		{
 			Logger::Log(Logger::LogLevel::Error,
@@ -4239,11 +4636,34 @@ void MetalRenderer::EnsureGIShadowPipelines()
 		if (gPso) m_giGBufPipeline = (void*)CFBridgingRetain(gPso);
 		else      Logger::Log(Logger::LogLevel::Error, "MetalRenderer: GI G-buffer pipeline creation failed");
 
-		// Ray-traced shadow compute kernel.
-		id<MTLFunction> rayFn = [lib newFunctionWithName:@"giShadowRay"];
-		id<MTLComputePipelineState> rayPso = [device newComputePipelineStateWithFunction:rayFn error:&error];
-		if (rayPso) m_giShadowRayPipeline = (void*)CFBridgingRetain(rayPso);
-		else        Logger::Log(Logger::LogLevel::Error, "MetalRenderer: GI shadow-ray pipeline creation failed");
+		// Ray dispatch kernel — HARDWARE (intersection_query, MSL 2.4 library) or
+		// SOFTWARE (base compute traversal of the CPU BVH, kGISWMSL).
+		if (m_giHwRt)
+		{
+			id<MTLLibrary> rayLib = [device newLibraryWithSource:
+				[NSString stringWithUTF8String:kGIShadowMSL] options:nil error:&error];
+			if (rayLib)
+			{
+				id<MTLFunction> rayFn = [rayLib newFunctionWithName:@"giShadowRay"];
+				id<MTLComputePipelineState> rayPso = [device newComputePipelineStateWithFunction:rayFn error:&error];
+				if (rayPso) m_giShadowRayPipeline = (void*)CFBridgingRetain(rayPso);
+			}
+			if (!m_giShadowRayPipeline)
+				Logger::Log(Logger::LogLevel::Error, "MetalRenderer: GI HW shadow-ray pipeline creation failed");
+		}
+		else
+		{
+			id<MTLLibrary> swLib = [device newLibraryWithSource:
+				[NSString stringWithUTF8String:kGISWMSL] options:nil error:&error];
+			if (swLib)
+			{
+				id<MTLFunction> rayFn = [swLib newFunctionWithName:@"giShadowRaySw"];
+				id<MTLComputePipelineState> rayPso = [device newComputePipelineStateWithFunction:rayFn error:&error];
+				if (rayPso) m_giShadowRaySwPipeline = (void*)CFBridgingRetain(rayPso);
+			}
+			if (!m_giShadowRaySwPipeline)
+				Logger::Log(Logger::LogLevel::Error, "MetalRenderer: GI SW shadow-ray pipeline creation failed");
+		}
 
 		// Temporal accumulation (fullscreen triangle). RGBA: rgb = world position
 		// (for next frame's disocclusion check), a = the shadow scalar itself.
@@ -4331,9 +4751,16 @@ void MetalRenderer::DestroyGIShadowTargets()
 
 void MetalRenderer::EncodeGIShadowRays(void* cmdBufPtr, int width, int height)
 {
-	if (!m_giEnabled || !m_giSupported || !m_giTlas || !m_world) return;
+	if (!m_giEnabled || !m_giSupported || !m_world) return;
+	// The active path's acceleration structure must exist (built this frame by
+	// EncodeGIAccelBuild): HW = TLAS, SW = CPU-BVH buffers + at least 1 instance.
+	if (m_giHwRt ? !m_giTlas
+	             : (!m_giSwNodeBuf || !m_giSwTriBuf || !m_giSwInstanceBuf || m_giSwInstanceCount == 0))
+		return;
 	EnsureGIShadowPipelines();
-	if (!m_giGBufPipeline || !m_giShadowRayPipeline || !m_giShadowTemporalPipeline || !m_giShadowBlurPipeline)
+	if (!m_giGBufPipeline || !m_giShadowTemporalPipeline || !m_giShadowBlurPipeline)
+		return;
+	if (m_giHwRt ? !m_giShadowRayPipeline : !m_giShadowRaySwPipeline)
 		return;
 	if (width <= 0 || height <= 0) return;
 
@@ -4398,13 +4825,10 @@ void MetalRenderer::EncodeGIShadowRays(void* cmdBufPtr, int width, int height)
 		}
 		[genc endEncoding];
 
-		// ── 2. Ray-traced occlusion (compute) ───────────────────────────────
+		// ── 2. Ray-traced occlusion (compute) — HW intersection_query against
+		// the TLAS, or SW BVH traversal against the CPU-built buffers. Same
+		// params block; frame.w carries the instance count on the SW path.
 		id<MTLComputeCommandEncoder> cenc = [cmdBuf computeCommandEncoder];
-		[cenc setComputePipelineState:(__bridge id<MTLComputePipelineState>)m_giShadowRayPipeline];
-		[cenc setTexture:(__bridge id<MTLTexture>)m_giGBufPosTex atIndex:0];
-		[cenc setTexture:(__bridge id<MTLTexture>)m_giGBufNormTex atIndex:1];
-		[cenc setTexture:(__bridge id<MTLTexture>)m_giShadowRawTex atIndex:2];
-		[cenc setAccelerationStructure:(__bridge id<MTLAccelerationStructure>)m_giTlas atBufferIndex:0];
 		GIShadowParamsCPU sp;
 		// Trace toward the brightest directional light — the light fragmentMain's
 		// loop actually shades with — NOT the sky-dome sunDirection (see
@@ -4413,13 +4837,30 @@ void MetalRenderer::EncodeGIShadowRays(void* cmdBufPtr, int width, int height)
 		dominantDirectionalLight(m_renderWorld, towardLight, lightColorIntensity);
 		sp.sunDirRadius = glm::vec4(towardLight, glm::radians(m_giLightRadius));
 		m_giShadowFrameSeed += 1.0f;
-		sp.frame = glm::vec4(m_giShadowFrameSeed, static_cast<float>(width), static_cast<float>(height), 0.0f);
-		[cenc setBytes:&sp length:sizeof(sp) atIndex:1];
-		// Every BLAS the TLAS references must be explicitly declared used — Metal
-		// does not auto-track residency through an acceleration structure.
-		[cenc useResource:(__bridge id<MTLAccelerationStructure>)m_giTlas usage:MTLResourceUsageRead];
-		for (void* b : m_giUniqueBlas)
-			[cenc useResource:(__bridge id<MTLAccelerationStructure>)b usage:MTLResourceUsageRead];
+		sp.frame = glm::vec4(m_giShadowFrameSeed, static_cast<float>(width), static_cast<float>(height),
+		                     static_cast<float>(m_giSwInstanceCount));
+		[cenc setTexture:(__bridge id<MTLTexture>)m_giGBufPosTex atIndex:0];
+		[cenc setTexture:(__bridge id<MTLTexture>)m_giGBufNormTex atIndex:1];
+		[cenc setTexture:(__bridge id<MTLTexture>)m_giShadowRawTex atIndex:2];
+		if (m_giHwRt)
+		{
+			[cenc setComputePipelineState:(__bridge id<MTLComputePipelineState>)m_giShadowRayPipeline];
+			[cenc setAccelerationStructure:(__bridge id<MTLAccelerationStructure>)m_giTlas atBufferIndex:0];
+			[cenc setBytes:&sp length:sizeof(sp) atIndex:1];
+			// Every BLAS the TLAS references must be explicitly declared used — Metal
+			// does not auto-track residency through an acceleration structure.
+			[cenc useResource:(__bridge id<MTLAccelerationStructure>)m_giTlas usage:MTLResourceUsageRead];
+			for (void* b : m_giUniqueBlas)
+				[cenc useResource:(__bridge id<MTLAccelerationStructure>)b usage:MTLResourceUsageRead];
+		}
+		else
+		{
+			[cenc setComputePipelineState:(__bridge id<MTLComputePipelineState>)m_giShadowRaySwPipeline];
+			[cenc setBuffer:(__bridge id<MTLBuffer>)m_giSwNodeBuf     offset:0 atIndex:0];
+			[cenc setBuffer:(__bridge id<MTLBuffer>)m_giSwTriBuf      offset:0 atIndex:1];
+			[cenc setBuffer:(__bridge id<MTLBuffer>)m_giSwInstanceBuf offset:0 atIndex:2];
+			[cenc setBytes:&sp length:sizeof(sp) atIndex:3];
+		}
 		const MTLSize tgSize  = MTLSizeMake(8, 8, 1);
 		const MTLSize tgCount = MTLSizeMake((NSUInteger)((width + 7) / 8), (NSUInteger)((height + 7) / 8), 1);
 		[cenc dispatchThreadgroups:tgCount threadsPerThreadgroup:tgSize];
@@ -4529,13 +4970,16 @@ void MetalRenderer::EnsureGIProbeGrid()
 
 void MetalRenderer::EnsureGIProbePipeline()
 {
-	if (m_giProbeUpdatePipeline) return; // already built
+	// HW and SW variants are mutually exclusive per session (m_giHwRt is fixed
+	// after EnsureRaytracingSupport), so one built pipeline means done.
+	if (m_giProbeUpdatePipeline || m_giProbeUpdateSwPipeline) return;
 	@autoreleasepool
 	{
 		id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
 		NSError* error = nil;
+		const char* src = m_giHwRt ? kGIProbeMSL : kGISWMSL;
 		id<MTLLibrary> lib = [device newLibraryWithSource:
-			[NSString stringWithUTF8String:kGIProbeMSL] options:nil error:&error];
+			[NSString stringWithUTF8String:src] options:nil error:&error];
 		if (!lib)
 		{
 			Logger::Log(Logger::LogLevel::Error,
@@ -4543,10 +4987,15 @@ void MetalRenderer::EnsureGIProbePipeline()
 				 + (error ? [[error localizedDescription] UTF8String] : "unknown")).c_str());
 			return;
 		}
-		id<MTLFunction> fn = [lib newFunctionWithName:@"giProbeUpdate"];
+		id<MTLFunction> fn = [lib newFunctionWithName:(m_giHwRt ? @"giProbeUpdate" : @"giProbeUpdateSw")];
 		id<MTLComputePipelineState> pso = [device newComputePipelineStateWithFunction:fn error:&error];
-		if (pso) m_giProbeUpdatePipeline = (void*)CFBridgingRetain(pso);
-		else     Logger::Log(Logger::LogLevel::Error, "MetalRenderer: GI probe-update pipeline creation failed");
+		if (!pso)
+		{
+			Logger::Log(Logger::LogLevel::Error, "MetalRenderer: GI probe-update pipeline creation failed");
+			return;
+		}
+		if (m_giHwRt) m_giProbeUpdatePipeline   = (void*)CFBridgingRetain(pso);
+		else          m_giProbeUpdateSwPipeline = (void*)CFBridgingRetain(pso);
 	}
 }
 
@@ -4585,11 +5034,15 @@ void MetalRenderer::DestroyGIProbeAtlas()
 
 void MetalRenderer::EncodeGIProbeUpdate(void* cmdBufPtr)
 {
-	if (!m_giEnabled || !m_giSupported || !m_giTlas || !m_world) return;
+	if (!m_giEnabled || !m_giSupported || !m_world) return;
+	if (m_giHwRt ? !m_giTlas
+	             : (!m_giSwNodeBuf || !m_giSwTriBuf || !m_giSwInstanceBuf || m_giSwInstanceCount == 0))
+		return;
 	EnsureGIProbeGrid();
 	if (!m_giProbeGridBuilt || m_giProbeCount <= 0) return;
 	EnsureGIProbePipeline();
-	if (!m_giProbeUpdatePipeline || !m_giIrradianceAtlas || !m_giVisibilityAtlas) return;
+	if (m_giHwRt ? !m_giProbeUpdatePipeline : !m_giProbeUpdateSwPipeline) return;
+	if (!m_giIrradianceAtlas || !m_giVisibilityAtlas) return;
 
 	const int budget = std::min(m_giProbeBudgetPerFrame > 0 ? m_giProbeBudgetPerFrame : 1, m_giProbeCount);
 
@@ -4597,11 +5050,23 @@ void MetalRenderer::EncodeGIProbeUpdate(void* cmdBufPtr)
 	{
 		id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
 		id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
-		[enc setComputePipelineState:(__bridge id<MTLComputePipelineState>)m_giProbeUpdatePipeline];
 		[enc setTexture:(__bridge id<MTLTexture>)m_giIrradianceAtlas atIndex:0];
 		[enc setTexture:(__bridge id<MTLTexture>)m_giVisibilityAtlas atIndex:1];
-		[enc setAccelerationStructure:(__bridge id<MTLAccelerationStructure>)m_giTlas atBufferIndex:0];
-		[enc setBuffer:(__bridge id<MTLBuffer>)m_giInstanceColorBuffer offset:0 atIndex:1];
+		if (m_giHwRt)
+		{
+			[enc setComputePipelineState:(__bridge id<MTLComputePipelineState>)m_giProbeUpdatePipeline];
+			[enc setAccelerationStructure:(__bridge id<MTLAccelerationStructure>)m_giTlas atBufferIndex:0];
+			[enc setBuffer:(__bridge id<MTLBuffer>)m_giInstanceColorBuffer offset:0 atIndex:1];
+		}
+		else
+		{
+			// SW path: BVH buffers instead of the TLAS; albedo comes from the
+			// instance itself (baseColor), no separate colour buffer needed.
+			[enc setComputePipelineState:(__bridge id<MTLComputePipelineState>)m_giProbeUpdateSwPipeline];
+			[enc setBuffer:(__bridge id<MTLBuffer>)m_giSwNodeBuf     offset:0 atIndex:0];
+			[enc setBuffer:(__bridge id<MTLBuffer>)m_giSwTriBuf      offset:0 atIndex:1];
+			[enc setBuffer:(__bridge id<MTLBuffer>)m_giSwInstanceBuf offset:0 atIndex:2];
+		}
 
 		GIProbeParamsCPU pp{};
 		pp.gridOrigin = glm::vec4(m_giGridOrigin, kGIProbeSpacing);
@@ -4633,13 +5098,21 @@ void MetalRenderer::EncodeGIProbeUpdate(void* cmdBufPtr)
 			++lightCount;
 		}
 		pp.sunDirRadius = glm::vec4(towardLight, static_cast<float>(lightCount));
-		[enc setBytes:&pp length:sizeof(pp) atIndex:2];
-
-		// Every BLAS the TLAS references must be explicitly declared used — Metal
-		// does not auto-track residency through an acceleration structure.
-		[enc useResource:(__bridge id<MTLAccelerationStructure>)m_giTlas usage:MTLResourceUsageRead];
-		for (void* b : m_giUniqueBlas)
-			[enc useResource:(__bridge id<MTLAccelerationStructure>)b usage:MTLResourceUsageRead];
+		if (m_giHwRt)
+		{
+			[enc setBytes:&pp length:sizeof(pp) atIndex:2];
+			// Every BLAS the TLAS references must be explicitly declared used — Metal
+			// does not auto-track residency through an acceleration structure.
+			[enc useResource:(__bridge id<MTLAccelerationStructure>)m_giTlas usage:MTLResourceUsageRead];
+			for (void* b : m_giUniqueBlas)
+				[enc useResource:(__bridge id<MTLAccelerationStructure>)b usage:MTLResourceUsageRead];
+		}
+		else
+		{
+			// SW kernel: params at buffer(3); sunColor.w carries the instance count.
+			pp.sunColor.w = static_cast<float>(m_giSwInstanceCount);
+			[enc setBytes:&pp length:sizeof(pp) atIndex:3];
+		}
 
 		// One threadgroup per probe in this frame's batch (kGIProbeOctSize^2
 		// threads/group = one thread per output texel — the "gather", see
@@ -7596,6 +8069,7 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			// (e.g. sculpted terrain). In-flight GPU work may reference them, so
 			// release via CFBridgingRelease (ARC autoreleasepool handles safety here).
 			for (const HE::UUID& id : m_pendingMeshInvalidations)
+			{
 				if (auto it = m_meshCache.find(id); it != m_meshCache.end())
 				{
 					if (it->second.vertexBuf) CFBridgingRelease(it->second.vertexBuf);
@@ -7603,6 +8077,18 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 					if (it->second.blas)      CFBridgingRelease(it->second.blas);
 					m_meshCache.erase(it);
 				}
+				// SW-RT BLAS ranges live in concatenated arrays — a single mesh
+				// can't be spliced out, so an edited mesh drops the whole SW cache;
+				// it rebuilds lazily on the next GI-active frame (same convention
+				// as the GL port).
+				if (m_giSwBlasCache.count(id))
+				{
+					m_giSwBlasCache.clear();
+					m_giSwNodesCpu.clear();
+					m_giSwTrisCpu.clear();
+					m_giSwBlasDirty = true;
+				}
+			}
 			m_pendingMeshInvalidations.clear();
 		}
 
