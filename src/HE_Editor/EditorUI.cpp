@@ -2853,6 +2853,13 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                 // dedicated toggle can split this if Intel distribution matters.
                 es.astcTextures     = exportAppBundleApplicable(s_exportPlatform);
                 es.gameRuntimeDir   = runtimeDir;
+                // Ship the bundled Python stdlib (pythonXY.zip + ._pth) only for
+                // Python-language projects — a non-Python game never inits Python, so
+                // the ~10 MB stdlib is wasted. The libpython dylib/.so still ships
+                // regardless (it's a load-time dependency of HorizonScene).
+                es.bundlePythonStdlib =
+                    ctx.projectManager &&
+                    ctx.projectManager->currentProject().scriptLanguage == ProjectScriptLanguage::Python;
                 // Precompile node-graph material shaders into the pak for the
                 // selected backends (0 → runtime cross-compiles as before).
                 es.shaderBackends        = s_exportShaderBackends;

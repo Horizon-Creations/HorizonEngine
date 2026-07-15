@@ -20,6 +20,12 @@ struct HE_API ExportSettings {
     // executable + dylibs/DLLs) are copied into outputDir so the export is
     // self-contained and runnable on the target machine.
     std::filesystem::path gameRuntimeDir;
+    // Ship the bundled Python stdlib (pythonXY.zip) + its ._pth path file from the
+    // runtime dir, so a game whose scripts use Python runs on a machine without a
+    // system Python. The editor sets this only for Python-language projects; for
+    // every other language the stdlib is skipped (the libpython DLL/dylib/.so still
+    // ships — it's a load-time dependency — but the ~10 MB stdlib does not).
+    bool bundlePythonStdlib = false;
     // Glob patterns (relative to contentDir, forward slashes) for assets to skip
     // when packing — e.g. "Debug/*", "*_test.hasset". See Hpak::PackSettings.
     std::vector<std::string> excludePatterns;
