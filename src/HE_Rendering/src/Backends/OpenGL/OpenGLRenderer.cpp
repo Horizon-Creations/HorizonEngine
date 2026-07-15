@@ -264,8 +264,93 @@ uniform int       uSSAOEnabled;      // 1 = darken the ambient by SSAO
 uniform float     uWetness;          // 0..1 wet-surface darken + gloss
 uniform float     uSnow;             // 0..1 snow cover on up-facing surfaces
 
+// ── Ray-traced GI (GL 4.3 compute port; samplers/uniforms are 4.1-safe, the
+// compute kernels that FILL them are gated on m_giSupported). When enabled,
+// the mask replaces the CSM lookup and the probe atlases replace the
+// AO-gated IBL ambient — mirrors the Metal fragmentMain branches.
+uniform int       uGIEnabled;
+uniform sampler2D uGIShadow;      // half-res screen-space shadow mask
+uniform sampler2D uGIIrr;         // DDGI irradiance atlas (RGBA16F)
+uniform sampler2D uGIVis;         // DDGI visibility atlas (RG16F)
+uniform vec4      uGIGridOrigin;  // xyz = grid origin, w = spacing
+uniform vec4      uGIGridCounts;  // xyz = probe counts, w = probesPerRow
+uniform float     uGIIntensity;
+
 // shared skyColor() is injected at the marker below (CreateUnlitPipeline)
 //#SKYFUNC#
+
+// Signed-octahedral mapping (direction → texel UV) — must match the probe
+// kernel's octDecode (kGiProbeCS) and the Metal octEncode byte-for-byte.
+vec2 giOctEncode(vec3 n)
+{
+	vec2 p = n.xy * (1.0 / (abs(n.x) + abs(n.y) + abs(n.z)));
+	vec2 signP = vec2(p.x >= 0.0 ? 1.0 : -1.0, p.y >= 0.0 ? 1.0 : -1.0);
+	return (n.z <= 0.0) ? ((1.0 - abs(p.yx)) * signP) : p;
+}
+
+const int GI_PROBE_OCT = 8; // must match OpenGLRenderer::kGiProbeOctSize
+
+// DDGI probe sampling — trilinear over the 8 surrounding probes × soft
+// backface × Chebyshev visibility. Direct port of Metal's
+// sampleDDGIIrradiance (same v1 notes: raw per-direction radiance, not
+// cosine-preintegrated).
+vec3 sampleDDGIIrradiance(vec3 P, vec3 N)
+{
+	int gx = int(uGIGridCounts.x), gy = int(uGIGridCounts.y), gz = int(uGIGridCounts.z);
+	if (gx <= 0 || gy <= 0 || gz <= 0) return vec3(0.0);
+	int probesPerRow = max(1, int(uGIGridCounts.w));
+	int probeRows    = int(ceil(float(gx * gy * gz) / float(probesPerRow)));
+	vec2 atlasSizeTexels = vec2(float(probesPerRow), float(probeRows)) * float(GI_PROBE_OCT);
+	float spacing = max(uGIGridOrigin.w, 1e-4);
+
+	vec3 gridSpace = (P - uGIGridOrigin.xyz) / spacing;
+	vec3 base      = floor(gridSpace);
+	vec3 fracP     = gridSpace - base;
+
+	vec3  sumColor  = vec3(0.0);
+	float sumWeight = 0.0;
+	for (int i = 0; i < 8; ++i)
+	{
+		vec3 offs = vec3(float(i & 1), float((i >> 1) & 1), float((i >> 2) & 1));
+		vec3 cell = base + offs;
+		if (any(lessThan(cell, vec3(0.0))) ||
+		    cell.x >= float(gx) || cell.y >= float(gy) || cell.z >= float(gz))
+			continue;
+		int probeIndex = int(cell.x) + int(cell.y) * gx + int(cell.z) * gx * gy;
+
+		vec3 trilinear = mix(1.0 - fracP, fracP, offs);
+		float weight = trilinear.x * trilinear.y * trilinear.z;
+		if (weight <= 1e-5) continue;
+
+		vec3 probePos   = uGIGridOrigin.xyz + cell * spacing;
+		vec3 toProbe    = probePos - P;
+		float dist      = max(length(toProbe), 1e-4);
+		vec3 dirToProbe = toProbe / dist;
+
+		weight *= max(0.05, dot(N, dirToProbe) * 0.5 + 0.5);
+
+		vec2 tileOrigin = vec2(float(probeIndex % probesPerRow),
+		                       float(probeIndex / probesPerRow)) * float(GI_PROBE_OCT);
+
+		vec2 visUV = (tileOrigin + (giOctEncode(-dirToProbe) * 0.5 + 0.5) * float(GI_PROBE_OCT)) / atlasSizeTexels;
+		vec2 visSample = texture(uGIVis, visUV).rg;
+		float mean = visSample.x, mean2 = visSample.y;
+		float variance = abs(mean2 - mean * mean);
+		float chebyshev = 1.0;
+		if (dist > mean)
+		{
+			float d = dist - mean;
+			chebyshev = variance / (variance + d * d);
+			chebyshev = chebyshev * chebyshev * chebyshev;
+		}
+		weight *= max(chebyshev, 0.05);
+
+		vec2 irrUV = (tileOrigin + (giOctEncode(N) * 0.5 + 0.5) * float(GI_PROBE_OCT)) / atlasSizeTexels;
+		sumColor  += texture(uGIIrr, irrUV).rgb * weight;
+		sumWeight += weight;
+	}
+	return sumColor / max(sumWeight, 1e-4);
+}
 
 // Atmospheric fog / aerial perspective: blend the lit colour toward the sky in
 // the fragment's view direction, so distant geometry melts into the horizon
@@ -400,7 +485,14 @@ void main()
 	// Flat ambient fill (never-black floor + overcast replacement) is intentionally
 	// kept outside the AO product so SSAO over-darkening at grazing angles cannot
 	// zero it out. It is the minimum guaranteed brightness on any surface.
-	vec3 result  = ambient * ao + uAmbient * diffuseColor;
+	// GI replaces the AO-gated IBL term with probe-sampled indirect diffuse; the
+	// flat floor stays in BOTH branches (never-black guarantee — probes bounce
+	// only actual lights and go dark under full overcast/night). Specular IBL
+	// (ambSpec) is kept either way — the GI slice is diffuse-only.
+	vec3 result = (uGIEnabled == 1)
+		? sampleDDGIIrradiance(vWorldPos, N) * diffuseColor * uGIIntensity
+		      + ambSpec * (1.0 - 0.6 * wRough) + uAmbient * diffuseColor
+		: ambient * ao + uAmbient * diffuseColor;
 
 	int dbgCascade = 0;   // cascade chosen by the directional shadow (debug tint)
 	for (int i = 0; i < uLightCount; ++i)
@@ -430,8 +522,14 @@ void main()
 		// Only the (first) directional light casts shadows. Explicit if (not a
 		// ternary) so the `out` cascade index is written only on the directional
 		// branch — strict GLSL compilers reject out-params inside a ?: selection.
+		// GI replaces CSM entirely when active: the ray-traced mask is sampled at
+		// the same screen-space UV convention the AO texture uses.
 		float sh = 1.0;
-		if (type == 0) sh = computeShadow(vWorldPos, N, L, dbgCascade);
+		if (type == 0)
+		{
+			if (uGIEnabled == 1) sh = texture(uGIShadow, gl_FragCoord.xy / uViewport).r;
+			else                 sh = computeShadow(vWorldPos, N, L, dbgCascade);
+		}
 
 		float diff = max(dot(N, L), 0.0);
 		vec3  H    = normalize(L + V);
@@ -2451,6 +2549,358 @@ static constexpr int kSSAOKernel = 32;
 // (xyz, with a = 1 marking valid geometry vs. the cleared background). Working in
 // view space sidesteps every depth-buffer / clip-space convention difference
 // between the backends — the SSAO maths is then identical on GL and Metal.
+// ─── Global Illumination (GL 4.3 compute port, Windows/Linux) ────────────────
+// Software ray tracing against the CPU-built HE::GiBvh (see GiBvh.h): the GLSL
+// traversal below mirrors giBvhIntersect() 1:1 — same slab test, same
+// Möller-Trumbore (two-sided), same 64-entry stack — so tests/test_gi_bvh.cpp
+// validates the exact algorithm these kernels run. Node/instance ints travel
+// as float bit patterns in vec4 rows (floatBitsToInt) so the std430 blocks are
+// layout-proof across drivers. The raster/temporal/blur stages stay #version
+// 410 (compilable everywhere incl. macOS); only the two compute kernels are
+// 430 and only ever compiled behind m_giSupported.
+
+// World-space G-buffer pre-pass (position + normal, MRT) — the GI counterpart
+// of kSSAOPosVS/FS. CRITICAL (Metal lesson, commit 5846efc): rendered with the
+// SAME extraction/camera as the scene pass, or the screen-space mask
+// misaligns and shadows swim with camera rotation.
+static const char* kGiGBufVS = R"GLSL(
+#version 410 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+uniform mat4 uMVP;
+uniform mat4 uModel;
+out vec3 vWorldPos;
+out vec3 vNormal;
+void main()
+{
+	vWorldPos   = (uModel * vec4(aPos, 1.0)).xyz;
+	vNormal     = mat3(uModel) * aNormal;
+	gl_Position = uMVP * vec4(aPos, 1.0);
+}
+)GLSL";
+
+static const char* kGiGBufFS = R"GLSL(
+#version 410 core
+in vec3 vWorldPos;
+in vec3 vNormal;
+layout(location = 0) out vec4 oPos;
+layout(location = 1) out vec4 oNorm;
+void main()
+{
+	oPos  = vec4(vWorldPos, 1.0);            // a = 1 → valid geometry
+	oNorm = vec4(normalize(vNormal), 0.0);
+}
+)GLSL";
+
+// Shared BVH declarations + traversal, string-prepended into both compute
+// kernels (GLSL has no #include). Instances are the TLAS analogue: the ray is
+// transformed into object space by invTransform with an UNNORMALISED
+// direction, so the parametric t stays world-comparable across instances.
+static const char* kGiTraversalGLSL = R"GLSL(
+struct GiNode { vec4 d0; vec4 d1; }; // d0.xyz bmin, d0.w leftFirst (int bits), d1.xyz bmax, d1.w triCount (int bits)
+struct GiTri  { vec4 v0; vec4 v1; vec4 v2; };
+struct GiInst { mat4 invTransform; vec4 baseColor; ivec4 offsets; }; // offsets.x = nodeOffset, .y = triOffset
+layout(std430, binding = 0) readonly buffer GiNodes { GiNode giNodes[]; };
+layout(std430, binding = 1) readonly buffer GiTris  { GiTri  giTris[];  };
+layout(std430, binding = 2) readonly buffer GiInsts { GiInst giInsts[]; };
+uniform int uGiInstanceCount;
+
+// Möller-Trumbore, both faces — mirrors GiBvh.cpp's triHit().
+bool giTriHit(GiTri tri, vec3 o, vec3 d, float tMin, float tMax, out float tOut)
+{
+	tOut = 0.0;
+	vec3 e1 = tri.v1.xyz - tri.v0.xyz;
+	vec3 e2 = tri.v2.xyz - tri.v0.xyz;
+	vec3 p  = cross(d, e2);
+	float det = dot(e1, p);
+	if (abs(det) < 1e-9) return false;
+	float invDet = 1.0 / det;
+	vec3 s = o - tri.v0.xyz;
+	float u = dot(s, p) * invDet;
+	if (u < 0.0 || u > 1.0) return false;
+	vec3 q = cross(s, e1);
+	float v = dot(d, q) * invDet;
+	if (v < 0.0 || u + v > 1.0) return false;
+	float t = dot(e2, q) * invDet;
+	if (t <= tMin || t >= tMax) return false;
+	tOut = t;
+	return true;
+}
+
+// BLAS traversal (one instance), object-space ray. anyHit: first accepted hit
+// wins. Mirrors GiBvh.cpp's giBvhIntersect() — same stack bound.
+bool giBlasHit(int nodeOfs, int triOfs, vec3 o, vec3 d, float tMin, float tMax,
+               bool anyHit, out float tOut)
+{
+	tOut = tMax;
+	vec3 invD = 1.0 / d;
+	int stack[64];
+	int sp = 0;
+	stack[sp++] = nodeOfs;
+	bool hit = false;
+	float best = tMax;
+	while (sp > 0)
+	{
+		GiNode n = giNodes[stack[--sp]];
+		vec3 t0 = (n.d0.xyz - o) * invD;
+		vec3 t1 = (n.d1.xyz - o) * invD;
+		vec3 lo = min(t0, t1);
+		vec3 hi = max(t0, t1);
+		float tN = max(max(lo.x, lo.y), max(lo.z, tMin));
+		float tF = min(min(hi.x, hi.y), min(hi.z, best));
+		if (tN > tF) continue;
+		int leftFirst = floatBitsToInt(n.d0.w);
+		int triCount  = floatBitsToInt(n.d1.w);
+		if (triCount > 0)
+		{
+			for (int i = 0; i < triCount; ++i)
+			{
+				float t;
+				if (giTriHit(giTris[triOfs + leftFirst + i], o, d, tMin, best, t))
+				{
+					hit = true; best = t; tOut = t;
+					if (anyHit) return true;
+				}
+			}
+		}
+		else if (sp + 2 <= 64)
+		{
+			stack[sp++] = nodeOfs + leftFirst;
+			stack[sp++] = nodeOfs + leftFirst + 1;
+		}
+	}
+	return hit;
+}
+
+// TLAS analogue: linear instance loop (v1 — instance counts here are small;
+// a top-level BVH is a documented perf follow-up). World-space ray in/out.
+bool giSceneAnyHit(vec3 o, vec3 d, float tMin, float tMax)
+{
+	for (int i = 0; i < uGiInstanceCount; ++i)
+	{
+		vec3 oL = (giInsts[i].invTransform * vec4(o, 1.0)).xyz;
+		vec3 dL = mat3(giInsts[i].invTransform) * d;
+		float t;
+		if (giBlasHit(giInsts[i].offsets.x, giInsts[i].offsets.y, oL, dL, tMin, tMax, true, t))
+			return true;
+	}
+	return false;
+}
+
+// Closest hit across all instances; returns instance index (-1 = miss).
+int giSceneClosestHit(vec3 o, vec3 d, float tMin, float tMax, out float tOut)
+{
+	int   bestInst = -1;
+	float best     = tMax;
+	for (int i = 0; i < uGiInstanceCount; ++i)
+	{
+		vec3 oL = (giInsts[i].invTransform * vec4(o, 1.0)).xyz;
+		vec3 dL = mat3(giInsts[i].invTransform) * d;
+		float t;
+		if (giBlasHit(giInsts[i].offsets.x, giInsts[i].offsets.y, oL, dL, tMin, best, false, t))
+		{
+			best = t; bestInst = i;
+		}
+	}
+	tOut = best;
+	return bestInst;
+}
+)GLSL";
+
+// Shadow-ray kernel: 1 cone-jittered ray/pixel toward the dominant directional
+// light (giDominantDirectionalLight pick — Metal lesson 5e45643: NEVER the
+// sky-dome sun). Same hash/cone/bias constants as Metal's giShadowRay.
+static const char* kGiShadowCS = R"GLSL(
+uniform sampler2D uGPos;
+uniform sampler2D uGNorm;
+layout(r16f, binding = 0) uniform writeonly image2D uOut;
+uniform vec4 uSunDirRadius; // xyz = direction TOWARD the light, w = angular radius (radians)
+uniform vec4 uFrame;        // x = jitter seed, y = tex width, z = tex height
+
+vec2 giHash2(uvec2 gid, float seed)
+{
+	vec2 p = vec2(gid) + seed * 13.37;
+	return vec2(fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453),
+	            fract(sin(dot(p, vec2(39.3468, 11.1352))) * 24634.6345));
+}
+vec3 giConeSample(vec3 L, float angleRad, vec2 xi)
+{
+	vec3 up = (abs(L.y) < 0.99) ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+	vec3 T  = normalize(cross(up, L));
+	vec3 B  = cross(L, T);
+	float r   = sin(angleRad) * sqrt(xi.x);
+	float phi = 6.28318530718 * xi.y;
+	return normalize(L + T * (r * cos(phi)) + B * (r * sin(phi)));
+}
+
+layout(local_size_x = 8, local_size_y = 8) in;
+void main()
+{
+	uvec2 gid = gl_GlobalInvocationID.xy;
+	if (float(gid.x) >= uFrame.y || float(gid.y) >= uFrame.z) return;
+	vec4 pv = texelFetch(uGPos, ivec2(gid), 0);
+	if (pv.a < 0.5) { imageStore(uOut, ivec2(gid), vec4(1.0)); return; } // background
+	vec3 N = normalize(texelFetch(uGNorm, ivec2(gid), 0).xyz);
+	vec3 L = uSunDirRadius.xyz;
+	if (dot(N, L) <= 0.0) { imageStore(uOut, ivec2(gid), vec4(0.0)); return; }
+
+	vec2 xi  = giHash2(gid, uFrame.x);
+	vec3 dir = giConeSample(L, max(uSunDirRadius.w, 1e-4), xi);
+	// Same self-intersection guards as Metal: normal-offset origin + min t.
+	vec3 origin = pv.xyz + N * 0.05;
+	float shadow = giSceneAnyHit(origin, dir, 0.02, 10000.0) ? 0.0 : 1.0;
+	imageStore(uOut, ivec2(gid), vec4(shadow));
+}
+)GLSL";
+
+// Temporal accumulation: reproject via last frame's viewProj, history carries
+// the world position (rgb) + shadow scalar (a). The tolerance is deliberately
+// TIGHT (Metal lesson 58ee312: a loose depth-scaled tolerance accepts
+// wrong-surface reprojects at cube edges). GL NDC → UV has NO y-flip.
+static const char* kGiTemporalFS = R"GLSL(
+#version 410 core
+in vec2 vUV;
+uniform sampler2D uGPos;
+uniform sampler2D uRaw;
+uniform sampler2D uHistory;
+uniform mat4  uPrevViewProj;
+uniform float uBlend; // history weight (0 on first GI frame)
+out vec4 FragColor;
+void main()
+{
+	vec4  pv   = texture(uGPos, vUV);
+	float rawV = texture(uRaw, vUV).r;
+	if (pv.a < 0.5) { FragColor = vec4(0.0, 0.0, 0.0, rawV); return; }
+
+	vec4 clip = uPrevViewProj * vec4(pv.xyz, 1.0);
+	if (clip.w <= 0.0) { FragColor = vec4(pv.xyz, rawV); return; }
+	vec2 ndc    = clip.xy / clip.w;
+	vec2 prevUV = ndc * 0.5 + 0.5;
+	if (any(lessThan(prevUV, vec2(0.0))) || any(greaterThan(prevUV, vec2(1.0))))
+	{ FragColor = vec4(pv.xyz, rawV); return; }
+
+	vec4  hist      = texture(uHistory, prevUV);
+	float posError  = length(pv.xyz - hist.rgb);
+	float tolerance = clamp(0.02 * clip.w, 0.01, 0.06);
+	float w = (posError < tolerance) ? clamp(uBlend, 0.0, 0.98) : 0.0;
+	FragColor = vec4(pv.xyz, mix(rawV, hist.a, w));
+}
+)GLSL";
+
+static const char* kGiBlurFS = R"GLSL(
+#version 410 core
+in vec2 vUV;
+uniform sampler2D uSrc; // temporal history: rgb = world pos, a = shadow
+out vec4 FragColor;
+void main()
+{
+	vec2 texel = 1.0 / vec2(textureSize(uSrc, 0));
+	float sum = 0.0;
+	for (int x = -1; x <= 1; ++x)
+		for (int y = -1; y <= 1; ++y)
+			sum += texture(uSrc, vUV + vec2(float(x), float(y)) * texel).a;
+	FragColor = vec4(sum / 9.0, 0.0, 0.0, 1.0);
+}
+)GLSL";
+
+// DDGI probe update — gather formulation like Metal's giProbeUpdate: one
+// thread per octahedral texel traces ITS OWN ray (no atomics; each thread owns
+// exactly one texel per dispatch). One workgroup per probe in the frame's
+// round-robin batch. Bounce estimate = dominant directional + up to 8 local
+// lights (Metal lessons 5e45643/0787c23 baked in from the start).
+static const char* kGiProbeCS = R"GLSL(
+layout(rgba16f, binding = 0) uniform image2D uIrr;
+layout(rg16f,   binding = 1) uniform image2D uVis;
+uniform vec4 uGridOrigin;   // xyz = grid origin, w = spacing
+uniform vec4 uGridCounts;   // xyz = probe counts, w = probesPerRow
+uniform vec4 uRayParams;    // x = max dist, y = hysteresis, z = cursor start, w = probes this batch
+uniform vec4 uSunDirRadius; // xyz = direction TOWARD the light, w = local light count
+uniform vec4 uSunColor;     // rgb = colour * intensity
+uniform vec4 uSkyAmbient;   // rgb = miss colour
+uniform vec4 uLightPosRange[8];  // xyz pos, w range
+uniform vec4 uLightColorType[8]; // rgb colour*intensity, w type (1 point, 2 spot)
+uniform vec4 uLightDirCos[8];    // xyz spot travel dir, w cos(half angle)
+
+const int kOctSize = 8; // must match OpenGLRenderer::kGiProbeOctSize
+
+vec3 octDecode(vec2 e)
+{
+	vec3 n = vec3(e.xy, 1.0 - abs(e.x) - abs(e.y));
+	if (n.z < 0.0)
+	{
+		vec2 signN = vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+		n.xy = (1.0 - abs(n.yx)) * signN;
+	}
+	return normalize(n);
+}
+
+layout(local_size_x = 8, local_size_y = 8) in;
+void main()
+{
+	ivec2 texel   = ivec2(gl_LocalInvocationID.xy);
+	int   batchIdx = int(gl_WorkGroupID.x);
+	int gx = int(uGridCounts.x), gy = int(uGridCounts.y), gz = int(uGridCounts.z);
+	int probeCount = gx * gy * gz;
+	if (probeCount <= 0 || batchIdx >= int(uRayParams.w)) return;
+	int probeIndex = (int(uRayParams.z) + batchIdx) % probeCount;
+
+	int pz = probeIndex / (gx * gy);
+	int py = (probeIndex / gx) % gy;
+	int px = probeIndex % gx;
+	vec3 probePos = uGridOrigin.xyz + vec3(float(px), float(py), float(pz)) * uGridOrigin.w;
+
+	vec2 uv  = (vec2(texel) + 0.5) / float(kOctSize) * 2.0 - 1.0;
+	vec3 dir = octDecode(uv);
+
+	float dist;
+	int hitInst = giSceneClosestHit(probePos, dir, 0.01, max(uRayParams.x, 1.0), dist);
+
+	vec3 radiance;
+	if (hitInst < 0)
+	{
+		radiance = uSkyAmbient.rgb;
+		dist     = uRayParams.x;
+	}
+	else
+	{
+		vec3 albedo    = giInsts[hitInst].baseColor.rgb;
+		vec3 hitNormal = -dir;
+		float ndl = max(dot(hitNormal, uSunDirRadius.xyz), 0.0);
+		radiance = albedo * uSunColor.rgb * ndl;
+		vec3 hitPos = probePos + dir * dist;
+		int lightCount = int(uSunDirRadius.w);
+		for (int i = 0; i < lightCount; ++i)
+		{
+			vec3 toL = uLightPosRange[i].xyz - hitPos;
+			float d  = max(length(toL), 1e-4);
+			float range = max(uLightPosRange[i].w, 1e-4);
+			if (d >= range) continue;
+			vec3 L = toL / d;
+			float atten = 1.0 - d / range;
+			atten *= atten;
+			if (uLightColorType[i].w > 1.5)
+			{
+				float c       = dot(-L, normalize(uLightDirCos[i].xyz));
+				float cosCone = uLightDirCos[i].w;
+				atten *= smoothstep(cosCone, mix(cosCone, 1.0, 0.2), c);
+			}
+			radiance += albedo * uLightColorType[i].rgb * max(dot(hitNormal, L), 0.0) * atten;
+		}
+	}
+
+	int probesPerRow = max(1, int(uGridCounts.w));
+	ivec2 outCoord = ivec2((probeIndex % probesPerRow) * kOctSize + texel.x,
+	                       (probeIndex / probesPerRow) * kOctSize + texel.y);
+
+	float hysteresis = clamp(uRayParams.y, 0.0, 0.98);
+	vec4 oldIrr = imageLoad(uIrr, outCoord);
+	imageStore(uIrr, outCoord, vec4(mix(radiance, oldIrr.rgb, hysteresis), 1.0));
+	vec4 oldVis = imageLoad(uVis, outCoord);
+	vec2 newVisSample = vec2(dist, dist * dist);
+	imageStore(uVis, outCoord, vec4(mix(newVisSample, oldVis.rg, hysteresis), 0.0, 0.0));
+}
+)GLSL";
+
 static const char* kSSAOPosVS = R"GLSL(
 #version 410 core
 layout(location = 0) in vec3 aPos;
@@ -2901,6 +3351,7 @@ void OpenGLRenderer::CreateUnlitPipeline()
 	m_uAO            = glGetUniformLocation(m_unlitProgram, "uAO");
 	m_uViewport      = glGetUniformLocation(m_unlitProgram, "uViewport");
 	m_uSSAOEnabled   = glGetUniformLocation(m_unlitProgram, "uSSAOEnabled");
+	m_giLocsUnlit    = FetchGiSceneLocs(m_unlitProgram);
 }
 
 #if defined(HE_HAVE_SHADERC)
@@ -3294,6 +3745,7 @@ void OpenGLRenderer::CreateSkinnedPipeline()
 	m_uSkinnedAO                 = loc("uAO");
 	m_uSkinnedViewport           = loc("uViewport");
 	m_uSkinnedSSAOEnabled        = loc("uSSAOEnabled");
+	m_giLocsSkinned              = FetchGiSceneLocs(m_skinnedProgram);
 }
 
 void OpenGLRenderer::CreateInstancedPipeline()
@@ -3348,6 +3800,7 @@ void OpenGLRenderer::CreateInstancedPipeline()
 	m_uInstAO               = loc("uAO");
 	m_uInstViewport         = loc("uViewport");
 	m_uInstSSAOEnabled      = loc("uSSAOEnabled");
+	m_giLocsInstanced       = FetchGiSceneLocs(m_instancedProgram);
 }
 
 void OpenGLRenderer::UpdateSkyEnvCube(const glm::vec3& sunDir)
@@ -3989,6 +4442,445 @@ void OpenGLRenderer::DestroyGiAccel()
 	m_giInstancesCpu.clear();
 	m_giInstanceCount = 0;
 	m_giBlasDirty     = false;
+}
+
+// GL copy of MetalRenderer's dominantDirectionalLight(): the brightest
+// directional light in the extracted set — the SAME light the CSM fit and
+// fragment loop use. NEVER the sky-dome sunDirection (below the horizon at
+// night) and NEVER the raw environment sunColor (unmodulated by night/clouds);
+// colour is hard zero when nothing shines. Keep both copies in sync.
+static bool glDominantDirectionalLight(const RenderWorld& rw,
+                                       glm::vec3& towardOut, glm::vec3& colorIntensityOut)
+{
+	const LightData* best = nullptr;
+	for (const LightData& l : rw.lights)
+		if (l.type == 0 && l.intensity > 0.0f && (!best || l.intensity > best->intensity))
+			best = &l;
+	if (!best || glm::dot(best->direction, best->direction) < 1e-8f)
+	{
+		towardOut         = glm::normalize(rw.sunDirection);
+		colorIntensityOut = glm::vec3(0.0f);
+		return false;
+	}
+	towardOut         = -glm::normalize(best->direction);
+	colorIntensityOut = best->color * best->intensity;
+	return true;
+}
+
+OpenGLRenderer::GiSceneLocs OpenGLRenderer::FetchGiSceneLocs(unsigned int program) const
+{
+	GiSceneLocs l;
+	l.enabled    = glGetUniformLocation(program, "uGIEnabled");
+	l.shadowTex  = glGetUniformLocation(program, "uGIShadow");
+	l.irrTex     = glGetUniformLocation(program, "uGIIrr");
+	l.visTex     = glGetUniformLocation(program, "uGIVis");
+	l.gridOrigin = glGetUniformLocation(program, "uGIGridOrigin");
+	l.gridCounts = glGetUniformLocation(program, "uGIGridCounts");
+	l.intensity  = glGetUniformLocation(program, "uGIIntensity");
+	return l;
+}
+
+// Pushes the GI scene uniforms onto the CURRENTLY BOUND program (texture
+// units are shared; only location integers differ between the three programs
+// sharing kUnlitFS). Inactive → just flips uGIEnabled off.
+void OpenGLRenderer::PushGiSceneUniforms(const GiSceneLocs& L, bool active)
+{
+	if (L.enabled >= 0) glUniform1i(L.enabled, active ? 1 : 0);
+	if (!active) return;
+	glUniform1i(L.shadowTex, 5);
+	glUniform1i(L.irrTex,    6);
+	glUniform1i(L.visTex,    7);
+	glUniform4f(L.gridOrigin, m_giGridOrigin.x, m_giGridOrigin.y, m_giGridOrigin.z, kGiProbeSpacing);
+	glUniform4f(L.gridCounts, static_cast<float>(m_giGridCounts.x), static_cast<float>(m_giGridCounts.y),
+	            static_cast<float>(m_giGridCounts.z), static_cast<float>(m_giProbesPerRow));
+	glUniform1f(L.intensity, m_giIndirectIntensity);
+}
+
+// Lazily builds the five GI programs on the first GI-active frame. The two
+// compute stages are GLSL 430 (traversal prefix + kernel, string-concatenated
+// — GLSL has no #include) and only ever reach the compiler behind
+// m_giSupported. A compile/link failure on an exotic driver logs + disables GI
+// for the session instead of throwing the app down (blind-port safety).
+void OpenGLRenderer::CreateGiPipelines()
+{
+	if (m_giPipelinesBuilt) return;
+	m_giPipelinesBuilt = true; // one attempt per session, success or not
+	try
+	{
+		auto link = [](GLuint vs, GLuint fs) -> GLuint
+		{
+			GLuint prog = glCreateProgram();
+			glAttachShader(prog, vs);
+			glAttachShader(prog, fs);
+			glLinkProgram(prog);
+			glDeleteShader(vs); glDeleteShader(fs);
+			GLint ok = 0; glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+			if (!ok)
+			{
+				GLchar log[512]; glGetProgramInfoLog(prog, sizeof(log), nullptr, log);
+				glDeleteProgram(prog);
+				throw std::runtime_error(std::string("GI program link failed: ") + log);
+			}
+			return prog;
+		};
+		auto linkCompute = [](const std::string& src) -> GLuint
+		{
+			GLuint cs   = CompileStage(GL_COMPUTE_SHADER, src.c_str());
+			GLuint prog = glCreateProgram();
+			glAttachShader(prog, cs);
+			glLinkProgram(prog);
+			glDeleteShader(cs);
+			GLint ok = 0; glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+			if (!ok)
+			{
+				GLchar log[512]; glGetProgramInfoLog(prog, sizeof(log), nullptr, log);
+				glDeleteProgram(prog);
+				throw std::runtime_error(std::string("GI compute link failed: ") + log);
+			}
+			return prog;
+		};
+
+		m_giGBufProgram = link(CompileStage(GL_VERTEX_SHADER,   kGiGBufVS),
+		                       CompileStage(GL_FRAGMENT_SHADER, kGiGBufFS));
+		m_giTemporalProgram = link(CompileStage(GL_VERTEX_SHADER,   kTonemapVS),
+		                           CompileStage(GL_FRAGMENT_SHADER, kGiTemporalFS));
+		m_giBlurProgram = link(CompileStage(GL_VERTEX_SHADER,   kTonemapVS),
+		                       CompileStage(GL_FRAGMENT_SHADER, kGiBlurFS));
+		const std::string header = "#version 430 core\n";
+		m_giShadowCSProgram = linkCompute(header + kGiTraversalGLSL + kGiShadowCS);
+		m_giProbeCSProgram  = linkCompute(header + kGiTraversalGLSL + kGiProbeCS);
+		Logger::Log(Logger::LogLevel::Info, "OpenGLRenderer: GI pipelines built (compute ray tracing active)");
+	}
+	catch (const std::exception& e)
+	{
+		Logger::Log(Logger::LogLevel::Error,
+		            (std::string("OpenGLRenderer: GI pipeline build failed — GI disabled: ") + e.what()).c_str());
+		if (m_giGBufProgram)     { glDeleteProgram(m_giGBufProgram);     m_giGBufProgram = 0; }
+		if (m_giTemporalProgram) { glDeleteProgram(m_giTemporalProgram); m_giTemporalProgram = 0; }
+		if (m_giBlurProgram)     { glDeleteProgram(m_giBlurProgram);     m_giBlurProgram = 0; }
+		if (m_giShadowCSProgram) { glDeleteProgram(m_giShadowCSProgram); m_giShadowCSProgram = 0; }
+		if (m_giProbeCSProgram)  { glDeleteProgram(m_giProbeCSProgram);  m_giProbeCSProgram = 0; }
+		m_giSupported = false;
+	}
+}
+
+void OpenGLRenderer::EnsureGiShadowTargets(int width, int height)
+{
+	width = std::max(1, width); height = std::max(1, height);
+	if (m_giGBufFBO && width == m_giShadowW && height == m_giShadowH) return;
+	DestroyGiShadowTargets();
+	m_giShadowW = width; m_giShadowH = height;
+
+	auto makeTex = [&](GLenum internal, GLenum filter) -> GLuint
+	{
+		GLuint t = 0;
+		glGenTextures(1, &t);
+		glBindTexture(GL_TEXTURE_2D, t);
+		// Immutable storage (4.2+, behind the 4.3 gate) — image load/store safe.
+		glTexStorage2D(GL_TEXTURE_2D, 1, internal, width, height);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, static_cast<GLint>(filter));
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, static_cast<GLint>(filter));
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		return t;
+	};
+
+	// World-space G-buffer: pos + normal MRT + depth.
+	m_giGBufPosTex  = makeTex(GL_RGBA16F, GL_NEAREST);
+	m_giGBufNormTex = makeTex(GL_RGBA16F, GL_NEAREST);
+	glGenTextures(1, &m_giGBufDepth);
+	glBindTexture(GL_TEXTURE_2D, m_giGBufDepth);
+	glTexStorage2D(GL_TEXTURE_2D, 1, GL_DEPTH_COMPONENT24, width, height);
+	glGenFramebuffers(1, &m_giGBufFBO);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_giGBufFBO);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_giGBufPosTex, 0);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, m_giGBufNormTex, 0);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,  GL_TEXTURE_2D, m_giGBufDepth, 0);
+	const GLenum bufs[2] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1 };
+	glDrawBuffers(2, bufs);
+
+	// Raw mask (compute image store) + ping-pong temporal history + blurred result.
+	m_giRawTex = makeTex(GL_R16F, GL_NEAREST);
+	for (int i = 0; i < 2; ++i)
+	{
+		m_giHistTex[i] = makeTex(GL_RGBA16F, GL_NEAREST);
+		glGenFramebuffers(1, &m_giHistFBO[i]);
+		glBindFramebuffer(GL_FRAMEBUFFER, m_giHistFBO[i]);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_giHistTex[i], 0);
+	}
+	// The scene shader samples the result full-res — LINEAR = free bilinear upsample.
+	m_giResultTex = makeTex(GL_R16F, GL_LINEAR);
+	glGenFramebuffers(1, &m_giResultFBO);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_giResultFBO);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_giResultTex, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	m_giHistValid = false; // fresh targets → no usable history
+}
+
+void OpenGLRenderer::DestroyGiShadowTargets()
+{
+	if (m_giGBufFBO)     { glDeleteFramebuffers(1, &m_giGBufFBO);   m_giGBufFBO = 0; }
+	if (m_giGBufPosTex)  { glDeleteTextures(1, &m_giGBufPosTex);    m_giGBufPosTex = 0; }
+	if (m_giGBufNormTex) { glDeleteTextures(1, &m_giGBufNormTex);   m_giGBufNormTex = 0; }
+	if (m_giGBufDepth)   { glDeleteTextures(1, &m_giGBufDepth);     m_giGBufDepth = 0; }
+	if (m_giRawTex)      { glDeleteTextures(1, &m_giRawTex);        m_giRawTex = 0; }
+	for (int i = 0; i < 2; ++i)
+	{
+		if (m_giHistFBO[i]) { glDeleteFramebuffers(1, &m_giHistFBO[i]); m_giHistFBO[i] = 0; }
+		if (m_giHistTex[i]) { glDeleteTextures(1, &m_giHistTex[i]);     m_giHistTex[i] = 0; }
+	}
+	if (m_giResultFBO) { glDeleteFramebuffers(1, &m_giResultFBO); m_giResultFBO = 0; }
+	if (m_giResultTex) { glDeleteTextures(1, &m_giResultTex);     m_giResultTex = 0; }
+	m_giShadowW = m_giShadowH = 0;
+	m_giHistValid = false;
+}
+
+// One-shot probe-grid fit over the scene AABB (Metal lesson: refresh
+// worldBounds from the real mesh bounds first — the extractor seeds only
+// fallback unit cubes).
+void OpenGLRenderer::EnsureGiProbeGrid()
+{
+	if (m_giProbeGridBuilt) return;
+	if (m_renderWorld.objects.empty()) return;
+
+	HE::AABB sceneBox;
+	for (RenderObject& obj : m_renderWorld.objects)
+	{
+		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId); mesh && mesh->localBounds.isValid())
+			obj.worldBounds = mesh->localBounds.transformed(obj.transform);
+		if (obj.worldBounds.isValid())
+			sceneBox.expand(obj.worldBounds);
+	}
+	if (!sceneBox.isValid()) return;
+
+	const glm::vec3 padded = sceneBox.extents() + glm::vec3(kGiProbeSpacing);
+	m_giGridCounts = glm::ivec3(
+		std::clamp(static_cast<int>(std::ceil(padded.x * 2.0f / kGiProbeSpacing)) + 1, 2, kGiMaxProbesPerAxis),
+		std::clamp(static_cast<int>(std::ceil(padded.y * 2.0f / kGiProbeSpacing)) + 1, 2, kGiMaxProbesPerAxis),
+		std::clamp(static_cast<int>(std::ceil(padded.z * 2.0f / kGiProbeSpacing)) + 1, 2, kGiMaxProbesPerAxis));
+	const glm::vec3 gridSpan = glm::vec3(m_giGridCounts - 1) * kGiProbeSpacing;
+	m_giGridOrigin   = sceneBox.center() - gridSpan * 0.5f;
+	m_giProbeCount   = m_giGridCounts.x * m_giGridCounts.y * m_giGridCounts.z;
+	m_giProbesPerRow = std::min(m_giProbeCount, 32);
+	m_giProbeCursor  = 0;
+	m_giProbeGridBuilt = true;
+	Logger::Log(Logger::LogLevel::Info,
+	            ("OpenGLRenderer: GI probe grid " + std::to_string(m_giGridCounts.x) + "x"
+	             + std::to_string(m_giGridCounts.y) + "x" + std::to_string(m_giGridCounts.z)
+	             + " (" + std::to_string(m_giProbeCount) + " probes)").c_str());
+}
+
+void OpenGLRenderer::EnsureGiProbeAtlas()
+{
+	if (m_giIrrAtlas || m_giProbeCount <= 0) return;
+	const int rows = (m_giProbeCount + m_giProbesPerRow - 1) / m_giProbesPerRow;
+	const int w = m_giProbesPerRow * kGiProbeOctSize;
+	const int h = rows * kGiProbeOctSize;
+
+	auto makeAtlas = [&](GLenum internal) -> GLuint
+	{
+		GLuint t = 0;
+		glGenTextures(1, &t);
+		glBindTexture(GL_TEXTURE_2D, t);
+		glTexStorage2D(GL_TEXTURE_2D, 1, internal, w, h);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		return t;
+	};
+	m_giIrrAtlas = makeAtlas(GL_RGBA16F);
+	m_giVisAtlas = makeAtlas(GL_RG16F);
+
+	// glTexStorage2D contents are undefined and the probe kernel EMA-reads its
+	// own previous value — clear both once via a throwaway FBO
+	// (glClearTexImage is 4.4, one step above the 4.3 gate).
+	GLuint fbo = 0;
+	glGenFramebuffers(1, &fbo);
+	glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+	glDisable(GL_SCISSOR_TEST);
+	glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_giIrrAtlas, 0);
+	glClear(GL_COLOR_BUFFER_BIT);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_giVisAtlas, 0);
+	glClear(GL_COLOR_BUFFER_BIT);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glDeleteFramebuffers(1, &fbo);
+	glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+void OpenGLRenderer::DestroyGiProbeAtlas()
+{
+	if (m_giIrrAtlas) { glDeleteTextures(1, &m_giIrrAtlas); m_giIrrAtlas = 0; }
+	if (m_giVisAtlas) { glDeleteTextures(1, &m_giVisAtlas); m_giVisAtlas = 0; }
+	m_giProbeGridBuilt = false;
+	m_giProbeCount = 0;
+	m_giProbeCursor = 0;
+}
+
+unsigned int OpenGLRenderer::RenderGiShadow(const CommandBuffer& cmds, int width, int height,
+                                            const glm::mat4& viewProj)
+{
+	CreateGiPipelines();
+	if (!m_giGBufProgram || !m_giShadowCSProgram || !m_giTemporalProgram || !m_giBlurProgram)
+		return 0;
+	EnsureGiShadowTargets(width, height);
+	if (!m_giGBufFBO) return 0;
+
+	// ── 1. World-space G-buffer (position + normal, half-res MRT). Same draw
+	// set as the scene pass — every shaded pixel needs a mask value.
+	glBindFramebuffer(GL_FRAMEBUFFER, m_giGBufFBO);
+	glViewport(0, 0, width, height);
+	glEnable(GL_DEPTH_TEST);
+	glDepthFunc(GL_LESS);
+	glDepthMask(GL_TRUE);
+	glClearColor(0.0f, 0.0f, 0.0f, 0.0f); // a = 0 → background
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+	glUseProgram(m_giGBufProgram);
+	const GLint uMVP   = glGetUniformLocation(m_giGBufProgram, "uMVP");
+	const GLint uModel = glGetUniformLocation(m_giGBufProgram, "uModel");
+	{
+		HE::UUID lastId{}; const GpuMesh* cMesh = nullptr; bool valid = false;
+		for (const DrawCall& dc : cmds.drawCalls())
+		{
+			if (!dc.contributesAO) continue; // precip/particles don't shade the mask
+			if (!valid || dc.meshAssetId != lastId)
+			{ cMesh = ResolveMesh(dc.meshAssetId); lastId = dc.meshAssetId; valid = true; }
+			const GpuMesh* mesh = cMesh ? cMesh : ResolveMesh(HE::kDefaultCubeMeshId);
+			if (!mesh) continue;
+			glBindVertexArray(mesh->vao);
+			auto drawOne = [&](const glm::mat4& t)
+			{
+				glUniformMatrix4fv(uMVP,   1, GL_FALSE, glm::value_ptr(viewProj * t));
+				glUniformMatrix4fv(uModel, 1, GL_FALSE, glm::value_ptr(t));
+				glDrawElements(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr);
+			};
+			if (!dc.instanceTransforms.empty())
+				for (const glm::mat4& t : dc.instanceTransforms) drawOne(t);
+			else
+				drawOne(dc.transform);
+		}
+	}
+
+	// ── 2. Shadow rays (compute, 1 ray/pixel against the BVH SSBOs) ──────────
+	glUseProgram(m_giShadowCSProgram);
+	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, m_giNodeSSBO);
+	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, m_giTriSSBO);
+	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, m_giInstanceSSBO);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, m_giGBufPosTex);
+	glUniform1i(glGetUniformLocation(m_giShadowCSProgram, "uGPos"), 0);
+	glActiveTexture(GL_TEXTURE1);
+	glBindTexture(GL_TEXTURE_2D, m_giGBufNormTex);
+	glUniform1i(glGetUniformLocation(m_giShadowCSProgram, "uGNorm"), 1);
+	glBindImageTexture(0, m_giRawTex, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R16F);
+	glm::vec3 towardLight, lightColorIntensity;
+	glDominantDirectionalLight(m_renderWorld, towardLight, lightColorIntensity);
+	m_giFrameSeed += 1.0f;
+	glUniform4f(glGetUniformLocation(m_giShadowCSProgram, "uSunDirRadius"),
+	            towardLight.x, towardLight.y, towardLight.z, glm::radians(m_giLightRadius));
+	glUniform4f(glGetUniformLocation(m_giShadowCSProgram, "uFrame"),
+	            m_giFrameSeed, static_cast<float>(width), static_cast<float>(height), 0.0f);
+	glUniform1i(glGetUniformLocation(m_giShadowCSProgram, "uGiInstanceCount"), m_giInstanceCount);
+	glDispatchCompute(static_cast<GLuint>((width + 7) / 8), static_cast<GLuint>((height + 7) / 8), 1);
+	// The temporal pass SAMPLES the image-stored raw mask next.
+	glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT);
+
+	// ── 3. Temporal accumulation (fullscreen, ping-pong history) ─────────────
+	const int curIdx = m_giHistIdx, prevIdx = 1 - curIdx;
+	glDisable(GL_DEPTH_TEST);
+	glBindVertexArray(m_fsVAO);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_giHistFBO[curIdx]);
+	glUseProgram(m_giTemporalProgram);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, m_giGBufPosTex);
+	glUniform1i(glGetUniformLocation(m_giTemporalProgram, "uGPos"), 0);
+	glActiveTexture(GL_TEXTURE1);
+	glBindTexture(GL_TEXTURE_2D, m_giRawTex);
+	glUniform1i(glGetUniformLocation(m_giTemporalProgram, "uRaw"), 1);
+	glActiveTexture(GL_TEXTURE2);
+	glBindTexture(GL_TEXTURE_2D, m_giHistTex[prevIdx]);
+	glUniform1i(glGetUniformLocation(m_giTemporalProgram, "uHistory"), 2);
+	glUniformMatrix4fv(glGetUniformLocation(m_giTemporalProgram, "uPrevViewProj"),
+	                   1, GL_FALSE, glm::value_ptr(m_giPrevViewProj));
+	glUniform1f(glGetUniformLocation(m_giTemporalProgram, "uBlend"), m_giHistValid ? 0.9f : 0.0f);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+	m_giHistValid   = true;
+	m_giHistIdx     = prevIdx;
+	m_giPrevViewProj = viewProj; // for NEXT frame's reprojection
+
+	// ── 4. Spatial blur → the mask the scene shader samples ─────────────────
+	glBindFramebuffer(GL_FRAMEBUFFER, m_giResultFBO);
+	glUseProgram(m_giBlurProgram);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, m_giHistTex[curIdx]);
+	glUniform1i(glGetUniformLocation(m_giBlurProgram, "uSrc"), 0);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+
+	glActiveTexture(GL_TEXTURE0);
+	glEnable(GL_DEPTH_TEST);
+	return m_giResultTex;
+}
+
+void OpenGLRenderer::DispatchGiProbeUpdate()
+{
+	if (!m_giProbeCSProgram || m_giInstanceCount == 0) return;
+	EnsureGiProbeGrid();
+	if (!m_giProbeGridBuilt) return;
+	EnsureGiProbeAtlas();
+	if (!m_giIrrAtlas || !m_giVisAtlas) return;
+
+	const int budget = std::min(m_giProbeBudgetPerFrame > 0 ? m_giProbeBudgetPerFrame : 1, m_giProbeCount);
+
+	glUseProgram(m_giProbeCSProgram);
+	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, m_giNodeSSBO);
+	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, m_giTriSSBO);
+	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, m_giInstanceSSBO);
+	glBindImageTexture(0, m_giIrrAtlas, 0, GL_FALSE, 0, GL_READ_WRITE, GL_RGBA16F);
+	glBindImageTexture(1, m_giVisAtlas, 0, GL_FALSE, 0, GL_READ_WRITE, GL_RG16F);
+
+	auto loc = [&](const char* n) { return glGetUniformLocation(m_giProbeCSProgram, n); };
+	glUniform4f(loc("uGridOrigin"), m_giGridOrigin.x, m_giGridOrigin.y, m_giGridOrigin.z, kGiProbeSpacing);
+	glUniform4f(loc("uGridCounts"), static_cast<float>(m_giGridCounts.x), static_cast<float>(m_giGridCounts.y),
+	            static_cast<float>(m_giGridCounts.z), static_cast<float>(m_giProbesPerRow));
+	const float maxDist = glm::length(glm::vec3(m_giGridCounts) * kGiProbeSpacing) + kGiProbeSpacing;
+	glUniform4f(loc("uRayParams"), maxDist, 0.92f,
+	            static_cast<float>(m_giProbeCursor), static_cast<float>(budget));
+
+	// Dominant directional + up to 8 local lights — the same bounce estimate
+	// (and the same night/local-light lessons) as Metal's EncodeGIProbeUpdate.
+	glm::vec3 towardLight, lightColorIntensity;
+	glDominantDirectionalLight(m_renderWorld, towardLight, lightColorIntensity);
+	glm::vec4 posRange[8], colorType[8], dirCos[8];
+	int lightCount = 0;
+	for (const LightData& l : m_renderWorld.lights)
+	{
+		if (lightCount >= 8) break;
+		if ((l.type != 1 && l.type != 2) || l.intensity <= 0.0f) continue;
+		posRange[lightCount]  = glm::vec4(l.position, std::max(l.range, 1e-4f));
+		colorType[lightCount] = glm::vec4(l.color * l.intensity, static_cast<float>(l.type));
+		dirCos[lightCount]    = glm::vec4(l.direction, l.spotAngleCos);
+		++lightCount;
+	}
+	glUniform4f(loc("uSunDirRadius"), towardLight.x, towardLight.y, towardLight.z,
+	            static_cast<float>(lightCount));
+	glUniform4f(loc("uSunColor"), lightColorIntensity.r, lightColorIntensity.g, lightColorIntensity.b, 0.0f);
+	glUniform4f(loc("uSkyAmbient"), m_renderWorld.ambient.r, m_renderWorld.ambient.g, m_renderWorld.ambient.b, 0.0f);
+	if (lightCount > 0)
+	{
+		glUniform4fv(loc("uLightPosRange"),  lightCount, glm::value_ptr(posRange[0]));
+		glUniform4fv(loc("uLightColorType"), lightCount, glm::value_ptr(colorType[0]));
+		glUniform4fv(loc("uLightDirCos"),    lightCount, glm::value_ptr(dirCos[0]));
+	}
+	glUniform1i(loc("uGiInstanceCount"), m_giInstanceCount);
+
+	glDispatchCompute(static_cast<GLuint>(budget), 1, 1);
+	// Next frame's dispatch EMA-reads these texels, and the scene pass samples
+	// them as textures right after — both need the barrier.
+	glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT);
+
+	m_giProbeCursor = (m_giProbeCursor + budget) % m_giProbeCount;
 }
 
 void OpenGLRenderer::EnsureSSAOTargets(int width, int height)
@@ -5353,6 +6245,13 @@ void OpenGLRenderer::Shutdown()
 	DestroyLdrTarget();
 	DestroyGpuTimer();
 	DestroySSAOTargets();
+	DestroyGiShadowTargets();
+	DestroyGiProbeAtlas();
+	if (m_giGBufProgram)     { glDeleteProgram(m_giGBufProgram);     m_giGBufProgram = 0; }
+	if (m_giTemporalProgram) { glDeleteProgram(m_giTemporalProgram); m_giTemporalProgram = 0; }
+	if (m_giBlurProgram)     { glDeleteProgram(m_giBlurProgram);     m_giBlurProgram = 0; }
+	if (m_giShadowCSProgram) { glDeleteProgram(m_giShadowCSProgram); m_giShadowCSProgram = 0; }
+	if (m_giProbeCSProgram)  { glDeleteProgram(m_giProbeCSProgram);  m_giProbeCSProgram = 0; }
 	for (auto& r : m_retiredTextures)
 		glDeleteTextures(1, &r.texture);
 	m_retiredTextures.clear();
@@ -5778,11 +6677,25 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			return;
 		}
 
+		// ── Ray-traced GI (compute): shadow mask + probe update ─────────────
+		// Replaces CSM sampling AND SSAO/IBL-ambient in the scene shader when
+		// active. Uses THIS extraction's camera/draw set (Metal aspect lesson:
+		// mask and scene pass must share one camera). Half-res like Metal.
+		unsigned int giShadowTex = 0u;
+		if (m_giEnabled && m_giSupported && m_giInstanceCount > 0)
+		{
+			GpuPassScope _giTimer(this, "GIShadow");
+			giShadowTex = RenderGiShadow(cmds, std::max(1, pw / 2), std::max(1, ph / 2), viewProj);
+			DispatchGiProbeUpdate();
+		}
+		const bool giShadingActive = giShadowTex != 0 && m_giIrrAtlas != 0 && m_giVisAtlas != 0;
+
 		// ── SSAO: view-space position pre-pass → occlusion → blur ───────────
 		// Computed before shading (using these same geometry draw calls) so the
-		// scene shader can darken its ambient term. Skipped (zero cost) when off.
+		// scene shader can darken its ambient term. Skipped (zero cost) when off
+		// — including when GI shades this frame (probe indirect replaces AO).
 		unsigned int aoTex = 0u;
-		if (m_ssaoEnabled)
+		if (m_ssaoEnabled && !giShadingActive)
 		{
 			GpuPassScope _ssaoTimer(this, "SSAO");
 			aoTex = RenderSSAO(cmds, pw, ph, viewProj, m_renderWorld.camera.view,
@@ -5835,6 +6748,16 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		glActiveTexture(GL_TEXTURE0);
 		glUniform2f(m_uViewport, static_cast<float>(pw), static_cast<float>(ph));
 		glUniform1i(m_uSSAOEnabled, aoActive ? 1 : 0);
+		// GI inputs on units 5/6/7 (white fallbacks keep the samplers valid for
+		// every program sharing kUnlitFS when GI is off this frame).
+		glActiveTexture(GL_TEXTURE5);
+		glBindTexture(GL_TEXTURE_2D, giShadingActive ? giShadowTex : m_whiteTex);
+		glActiveTexture(GL_TEXTURE6);
+		glBindTexture(GL_TEXTURE_2D, giShadingActive ? m_giIrrAtlas : m_whiteTex);
+		glActiveTexture(GL_TEXTURE7);
+		glBindTexture(GL_TEXTURE_2D, giShadingActive ? m_giVisAtlas : m_whiteTex);
+		glActiveTexture(GL_TEXTURE0);
+		PushGiSceneUniforms(m_giLocsUnlit, giShadingActive);
 
 		// Lights (clamped to the shader's MAX_LIGHTS)
 		{
@@ -5889,6 +6812,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glUniform1i(m_uInstAO, 4);
 			glUniform2f(m_uInstViewport, static_cast<float>(pw), static_cast<float>(ph));
 			glUniform1i(m_uInstSSAOEnabled, aoActive ? 1 : 0);
+			PushGiSceneUniforms(m_giLocsInstanced, giShadingActive);
 			{
 				constexpr int kMaxLights = 8;
 				const int count = std::min(static_cast<int>(m_renderWorld.lights.size()), kMaxLights);
@@ -6215,6 +7139,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glActiveTexture(GL_TEXTURE0);
 			glUniform2f(m_uSkinnedViewport, static_cast<float>(pw), static_cast<float>(ph));
 			glUniform1i(m_uSkinnedSSAOEnabled, aoActive ? 1 : 0);
+			PushGiSceneUniforms(m_giLocsSkinned, giShadingActive);
 			glUniform3fv(m_uSkinnedCameraPos, 1, glm::value_ptr(m_renderWorld.camera.position));
 			{
 				constexpr int kMaxLights = 8;
