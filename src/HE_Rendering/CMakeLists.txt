@@ -216,6 +216,41 @@ if(WIN32)
         target_link_libraries(RendererD3D12 PRIVATE he_materialshader he_shadercompiler)
     endif()
     target_compile_definitions(RendererD3D12 PRIVATE GLM_FORCE_DEPTH_ZERO_TO_ONE HE_RENDERING_BUILD_DLL)
+
+    # ── GI hardware ray-tracing kernels (DXR 1.1 inline RayQuery, SM 6.5) ────
+    # FXC (D3DCompile) cannot target SM 6, so the two RayQuery compute kernels
+    # are compiled OFFLINE by dxc into <build>/Shaders/*.cso — the same folder
+    # the Vulkan .spv land in; the editor deploy step copies it next to the exe
+    # and the D3D12 backend loads <exe dir>/Shaders/gi_*_hw.cso at runtime.
+    # dxc ships with recent Windows 10/11 SDKs (and the Vulkan SDK). If it is
+    # missing, only warn: the runtime checks file existence and silently keeps
+    # the embedded SM 5.0 software-ray-tracing kernels (no functional break).
+    set(HE_D3D12_GI_SHADERS FALSE CACHE INTERNAL "D3D12 DXR GI kernels compiled")
+    find_program(DXC_EXECUTABLE NAMES dxc dxc.exe
+                 HINTS "$ENV{WindowsSdkVerBinPath}x64" "$ENV{WindowsSdkVerBinPath}/x64"
+                       "$ENV{WindowsSdkVerBinPath}"
+                       "$ENV{WindowsSdkDir}bin/x64"    "$ENV{WindowsSdkDir}/bin/x64"
+                       "$ENV{VULKAN_SDK}/Bin"          "$ENV{VULKAN_SDK}/bin")
+    if(DXC_EXECUTABLE)
+        set(HE_D3D12_SHADER_OUT_DIR "${CMAKE_BINARY_DIR}/Shaders")
+        file(MAKE_DIRECTORY "${HE_D3D12_SHADER_OUT_DIR}")
+        set(HE_D3D12_GI_CSO "")
+        foreach(kernel gi_shadow_hw gi_probe_hw)
+            set(src "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${kernel}.hlsl")
+            set(dst "${HE_D3D12_SHADER_OUT_DIR}/${kernel}.cso")
+            add_custom_command(OUTPUT "${dst}"
+                COMMAND ${DXC_EXECUTABLE} -T cs_6_5 -E main -Fo "${dst}" "${src}"
+                DEPENDS "${src}" VERBATIM)
+            list(APPEND HE_D3D12_GI_CSO "${dst}")
+        endforeach()
+        add_custom_target(D3D12GiShaders DEPENDS ${HE_D3D12_GI_CSO})
+        add_dependencies(RendererD3D12 D3D12GiShaders)
+        set(HE_D3D12_GI_SHADERS TRUE CACHE INTERNAL "D3D12 DXR GI kernels compiled")
+        message(STATUS "HorizonRendering: D3D12 DXR GI kernels enabled (dxc: ${DXC_EXECUTABLE})")
+    else()
+        message(WARNING "HorizonRendering: dxc not found — D3D12 GI hardware ray-tracing "
+                        "kernels not compiled (runtime falls back to software GI)")
+    endif()
 endif()
 
 # ─── ViewportUI ────────────────────────────────────────────────────────────────

@@ -53,6 +53,21 @@ add_custom_command(TARGET HorizonGame POST_BUILD
 	VERBATIM
 )
 
+# Runtime-loaded shader binaries (Vulkan .spv + D3D12 DXR .cso) live in
+# ${CMAKE_BINARY_DIR}/Shaders and are loaded from <exe dir>/Shaders at runtime
+# — same pattern as the editor deploy (HE_Editor/CMakeLists.txt). Without this
+# a packaged game loses Vulkan entirely and D3D12 GI silently drops to the
+# software kernels.
+if(HE_VULKAN_ENABLED OR HE_D3D12_GI_SHADERS)
+	add_custom_command(TARGET HorizonGame POST_BUILD
+		COMMAND ${CMAKE_COMMAND} -E copy_directory
+			"${CMAKE_BINARY_DIR}/Shaders"
+			"${DEPLOY_GAME}/Shaders"
+		COMMENT "Deploying runtime shader binaries to the game"
+		VERBATIM
+	)
+endif()
+
 # ── Post-build: bundle the CPython runtime for shipping (Windows) ─────────────
 # HorizonScene links Python3::Python, so HorizonScene.dll has python3XY.dll in its
 # LOAD-TIME import table — a shipped game needs python3XY.dll next to the executable
