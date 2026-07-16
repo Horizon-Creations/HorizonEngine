@@ -12,6 +12,8 @@
 #include <HorizonRendering/CommandBuffer.h>
 #include <Math/AABB.h>
 #include <Types/UUID.h>
+#include <HorizonRendering/GiBvh.h>          // GI: CPU BLAS (shared with GL/Vulkan/Metal-SW)
+#include <ContentManager/DefaultAssets.h>    // GI: default-cube occluder fallback
 #include <material/MaterialShaderLibrary.h> // A4: shared cross-backend material shader layer (unguarded, like Vulkan/D3D12)
 #include <SDL3/SDL.h>
 #include <d3d11.h>
@@ -492,13 +494,90 @@ cbuffer PerFrame : register(b1)
     float4   uSunDir;           // xyz = sun direction toward sky, w unused
     float4   uFog;              // x = fogDensity, y = fogHeightFalloff
     float4   uViewport;        // x=width, y=height, z=ssaoEnabled (0/1)
+    float4   uGIParams;        // x = GI enabled (0/1), y = indirect intensity
+    float4   uGIGridOrigin;    // xyz = probe grid origin, w = spacing
+    float4   uGIGridCounts;    // xyz = probe counts, w = probesPerRow
 };
 
 Texture2D    uTexture   : register(t0);
 Texture2D    uShadowMap : register(t1);
 Texture2D    uAO        : register(t2);
+Texture2D    uGIShadow  : register(t4); // half-res ray-traced sun-shadow mask
+Texture2D    uGIIrr     : register(t5); // DDGI irradiance atlas (RGBA16F)
+Texture2D    uGIVis     : register(t6); // DDGI visibility atlas (RG16F)
 SamplerState uSampler   : register(s0);
 SamplerState uAOSampler : register(s1);
+SamplerState uGISampler : register(s2); // linear clamp (mask upsample + atlases)
+
+// Signed-octahedral mapping (direction → texel UV) — must match the probe
+// kernel's octDecode and the GL/Metal implementations byte-for-byte.
+float2 giOctEncode(float3 n)
+{
+    float2 p = n.xy * (1.0 / (abs(n.x) + abs(n.y) + abs(n.z)));
+    float2 signP = float2(p.x >= 0.0 ? 1.0 : -1.0, p.y >= 0.0 ? 1.0 : -1.0);
+    return (n.z <= 0.0) ? ((1.0 - abs(p.yx)) * signP) : p;
+}
+
+static const int GI_PROBE_OCT = 8; // must match the host's kGiProbeOctSize
+
+// DDGI probe sampling — trilinear over the 8 surrounding probes × soft
+// backface × Chebyshev visibility. Direct port of the GL/Metal version.
+float3 sampleDDGIIrradiance(float3 P, float3 N)
+{
+    int gx = int(uGIGridCounts.x), gy = int(uGIGridCounts.y), gz = int(uGIGridCounts.z);
+    if (gx <= 0 || gy <= 0 || gz <= 0) return float3(0, 0, 0);
+    int probesPerRow = max(1, int(uGIGridCounts.w));
+    int probeRows    = int(ceil(float(gx * gy * gz) / float(probesPerRow)));
+    float2 atlasSizeTexels = float2(probesPerRow, probeRows) * float(GI_PROBE_OCT);
+    float spacing = max(uGIGridOrigin.w, 1e-4);
+
+    float3 gridSpace = (P - uGIGridOrigin.xyz) / spacing;
+    float3 base      = floor(gridSpace);
+    float3 fracP     = gridSpace - base;
+
+    float3 sumColor  = float3(0, 0, 0);
+    float  sumWeight = 0.0;
+    for (int i = 0; i < 8; ++i)
+    {
+        float3 offs = float3(i & 1, (i >> 1) & 1, (i >> 2) & 1);
+        float3 cell = base + offs;
+        if (any(cell < 0.0) || cell.x >= float(gx) || cell.y >= float(gy) || cell.z >= float(gz))
+            continue;
+        int probeIndex = int(cell.x) + int(cell.y) * gx + int(cell.z) * gx * gy;
+
+        float3 trilinear = lerp(1.0 - fracP, fracP, offs);
+        float weight = trilinear.x * trilinear.y * trilinear.z;
+        if (weight <= 1e-5) continue;
+
+        float3 probePos   = uGIGridOrigin.xyz + cell * spacing;
+        float3 toProbe    = probePos - P;
+        float  dist       = max(length(toProbe), 1e-4);
+        float3 dirToProbe = toProbe / dist;
+
+        weight *= max(0.05, dot(N, dirToProbe) * 0.5 + 0.5);
+
+        float2 tileOrigin = float2(probeIndex % probesPerRow,
+                                   probeIndex / probesPerRow) * float(GI_PROBE_OCT);
+
+        float2 visUV = (tileOrigin + (giOctEncode(-dirToProbe) * 0.5 + 0.5) * float(GI_PROBE_OCT)) / atlasSizeTexels;
+        float2 visSample = uGIVis.SampleLevel(uGISampler, visUV, 0).rg;
+        float mean = visSample.x, mean2 = visSample.y;
+        float variance = abs(mean2 - mean * mean);
+        float chebyshev = 1.0;
+        if (dist > mean)
+        {
+            float dd = dist - mean;
+            chebyshev = variance / (variance + dd * dd);
+            chebyshev = chebyshev * chebyshev * chebyshev;
+        }
+        weight *= max(chebyshev, 0.05);
+
+        float2 irrUV = (tileOrigin + (giOctEncode(N) * 0.5 + 0.5) * float(GI_PROBE_OCT)) / atlasSizeTexels;
+        sumColor  += uGIIrr.SampleLevel(uGISampler, irrUV, 0).rgb * weight;
+        sumWeight += weight;
+    }
+    return sumColor / max(sumWeight, 1e-4);
+}
 
 struct VSIn  { float3 pos : POSITION; float3 normal : NORMAL; float2 uv : TEXCOORD0; };
 struct VSOut { float4 clip : SV_POSITION; float3 worldPos : TEXCOORD0; float3 normal : TEXCOORD1; float2 uv : TEXCOORD2; };
@@ -594,7 +673,14 @@ float4 PSMain(VSOut i) : SV_TARGET
     float3 ambDiff = skyColor(Nup,    uSunDir.xyz) * base * kd;
     float3 ambSpec = skyColor(Rrough, uSunDir.xyz) * F0;
     float ao = (uViewport.z > 0.5f) ? uAO.SampleLevel(uAOSampler, i.clip.xy / uViewport.xy, 0).r : 1.0f;
-    float3 result  = ao * (ambDiff * 0.35f + ambSpec * (1.0f - 0.6f * rough));
+    // GI replaces the AO-gated IBL diffuse with probe-grid indirect (spec IBL
+    // stays in both branches) — mirrors the GL/Metal gi.enabled branch.
+    float3 result;
+    if (uGIParams.x > 0.5f)
+        result = sampleDDGIIrradiance(i.worldPos, N) * base * kd * uGIParams.y
+               + ambSpec * (1.0f - 0.6f * rough);
+    else
+        result = ao * (ambDiff * 0.35f + ambSpec * (1.0f - 0.6f * rough));
 
     for (int li = 0; li < uLightCount.x; ++li)
     {
@@ -620,7 +706,13 @@ float4 PSMain(VSOut i) : SV_TARGET
                 atten *= smoothstep(cosCone, lerp(cosCone, 1.0, 0.2), c);
             }
         }
-        float  sh = (type == 0) ? shadowFactor(i.worldPos, N, L) : 1.0;
+        // Directional lights: ray-traced screen-space mask when GI is on
+        // (replaces the single shadow map entirely), else the classic lookup.
+        float sh = 1.0;
+        if (type == 0)
+            sh = (uGIParams.x > 0.5f)
+               ? uGIShadow.SampleLevel(uGISampler, i.clip.xy / uViewport.xy, 0).r
+               : shadowFactor(i.worldPos, N, L);
         result += BRDF(L, V, N, base, met, rough) * uLightColor[li].rgb * uLightColor[li].w * atten * sh;
     }
     // Atmospheric fog
@@ -1033,6 +1125,384 @@ float4 UIPSMain(UIOut i) : SV_TARGET
 }
 )HLSL";
 
+// ─── Ray-traced GI (software BVH) HLSL ──────────────────────────────────────
+// D3D11 port of the GL-4.3 compute GI (kGi* in OpenGLRenderer.cpp), which in
+// turn mirrors the Metal reference. SSBOs → StructuredBuffers, image store →
+// RWTexture2D, floatBitsToInt → asint(). All five stages compile as SM 5.0.
+
+// World-space G-buffer pre-pass (position + normal MRT). CRITICAL: rendered
+// with the SAME extraction/camera as the scene pass (Metal lesson 5846efc) or
+// the screen-space mask misaligns and shadows swim with camera rotation.
+// Reuses the PerObject cbuffer layout so the shared uploadObject helper feeds it.
+static const char* kGiGBufHLSL = R"HLSL(
+cbuffer PerObject : register(b0)
+{
+    float4x4 uMVP;
+    float4x4 uModel;
+    float4   uColor;
+    float4   uPBR;
+};
+struct VSIn  { float3 pos : POSITION; float3 normal : NORMAL; float2 uv : TEXCOORD0; };
+struct VSOut { float4 clip : SV_POSITION; float3 worldPos : TEXCOORD0; float3 normal : TEXCOORD1; };
+VSOut GiGBufVS(VSIn i)
+{
+    VSOut o;
+    o.worldPos = mul(uModel, float4(i.pos, 1.0)).xyz;
+    o.normal   = mul((float3x3)uModel, i.normal);
+    o.clip     = mul(uMVP, float4(i.pos, 1.0));
+    return o;
+}
+struct GiGBufOut { float4 pos : SV_Target0; float4 norm : SV_Target1; };
+GiGBufOut GiGBufPS(VSOut i)
+{
+    GiGBufOut o;
+    o.pos  = float4(i.worldPos, 1.0);          // a = 1 → valid geometry
+    o.norm = float4(normalize(i.normal), 0.0);
+    return o;
+}
+)HLSL";
+
+// Shared BVH declarations + traversal, string-prepended into both compute
+// kernels. Same data layout as the GL/Vulkan SSBOs: 32B nodes (int bits in
+// .w lanes, read via asint), 48B triangles, instances = inverse transform +
+// baseColor + BLAS offsets. glm writes column-major bytes and D3DCompile
+// defaults to column_major, so float4x4 in the structured buffer needs no
+// transpose (the A3 instancing buffer relies on the same fact).
+static const char* kGiTraversalHLSL = R"HLSL(
+struct GiNode { float4 d0; float4 d1; }; // d0.xyz bmin, d0.w leftFirst (int bits), d1.xyz bmax, d1.w triCount (int bits)
+struct GiTri  { float4 v0; float4 v1; float4 v2; };
+struct GiInst { float4x4 invTransform; float4 baseColor; int4 offsets; }; // offsets.x = nodeOffset, .y = triOffset
+StructuredBuffer<GiNode> giNodes : register(t2);
+StructuredBuffer<GiTri>  giTris  : register(t3);
+StructuredBuffer<GiInst> giInsts : register(t4);
+cbuffer GiCountCB : register(b1) { int4 uGiCount; }; // x = instance count
+
+// Möller-Trumbore, both faces — mirrors GiBvh.cpp's triHit().
+bool giTriHit(GiTri tri, float3 o, float3 d, float tMin, float tMax, out float tOut)
+{
+    tOut = 0.0;
+    float3 e1 = tri.v1.xyz - tri.v0.xyz;
+    float3 e2 = tri.v2.xyz - tri.v0.xyz;
+    float3 p  = cross(d, e2);
+    float det = dot(e1, p);
+    if (abs(det) < 1e-9) return false;
+    float invDet = 1.0 / det;
+    float3 s = o - tri.v0.xyz;
+    float u = dot(s, p) * invDet;
+    if (u < 0.0 || u > 1.0) return false;
+    float3 q = cross(s, e1);
+    float v = dot(d, q) * invDet;
+    if (v < 0.0 || u + v > 1.0) return false;
+    float t = dot(e2, q) * invDet;
+    if (t <= tMin || t >= tMax) return false;
+    tOut = t;
+    return true;
+}
+
+// BLAS traversal (one instance), object-space ray — mirrors giBvhIntersect().
+bool giBlasHit(int nodeOfs, int triOfs, float3 o, float3 d, float tMin, float tMax,
+               bool anyHit, out float tOut)
+{
+    tOut = tMax;
+    float3 invD = 1.0 / d;
+    int stack[64];
+    int sp = 0;
+    stack[sp++] = nodeOfs;
+    bool hit = false;
+    float best = tMax;
+    while (sp > 0)
+    {
+        GiNode n = giNodes[stack[--sp]];
+        float3 t0 = (n.d0.xyz - o) * invD;
+        float3 t1 = (n.d1.xyz - o) * invD;
+        float3 lo = min(t0, t1);
+        float3 hi = max(t0, t1);
+        float tN = max(max(lo.x, lo.y), max(lo.z, tMin));
+        float tF = min(min(hi.x, hi.y), min(hi.z, best));
+        if (tN > tF) continue;
+        int leftFirst = asint(n.d0.w);
+        int triCount  = asint(n.d1.w);
+        if (triCount > 0)
+        {
+            for (int i = 0; i < triCount; ++i)
+            {
+                float t;
+                if (giTriHit(giTris[triOfs + leftFirst + i], o, d, tMin, best, t))
+                {
+                    hit = true; best = t; tOut = t;
+                    if (anyHit) return true;
+                }
+            }
+        }
+        else if (sp + 2 <= 64)
+        {
+            stack[sp++] = nodeOfs + leftFirst;
+            stack[sp++] = nodeOfs + leftFirst + 1;
+        }
+    }
+    return hit;
+}
+
+// TLAS analogue: linear instance loop; unnormalised object-space direction
+// keeps the parametric t world-comparable across instances.
+bool giSceneAnyHit(float3 o, float3 d, float tMin, float tMax)
+{
+    for (int i = 0; i < uGiCount.x; ++i)
+    {
+        float3 oL = mul(giInsts[i].invTransform, float4(o, 1.0)).xyz;
+        float3 dL = mul((float3x3)giInsts[i].invTransform, d);
+        float t;
+        if (giBlasHit(giInsts[i].offsets.x, giInsts[i].offsets.y, oL, dL, tMin, tMax, true, t))
+            return true;
+    }
+    return false;
+}
+
+// Closest hit across all instances; returns instance index (-1 = miss).
+int giSceneClosestHit(float3 o, float3 d, float tMin, float tMax, out float tOut)
+{
+    int   bestInst = -1;
+    float best     = tMax;
+    for (int i = 0; i < uGiCount.x; ++i)
+    {
+        float3 oL = mul(giInsts[i].invTransform, float4(o, 1.0)).xyz;
+        float3 dL = mul((float3x3)giInsts[i].invTransform, d);
+        float t;
+        if (giBlasHit(giInsts[i].offsets.x, giInsts[i].offsets.y, oL, dL, tMin, best, false, t))
+        {
+            best = t; bestInst = i;
+        }
+    }
+    tOut = best;
+    return bestInst;
+}
+)HLSL";
+
+// Shadow-ray kernel: 1 cone-jittered ray/pixel toward the dominant directional
+// light (NEVER the sky-dome sun — Metal lesson 5e45643). Same hash/cone/bias
+// constants as the GL/Metal kernels.
+static const char* kGiShadowCSHLSL = R"HLSL(
+cbuffer GiShadowCB : register(b0)
+{
+    float4 uSunDirRadius; // xyz = direction TOWARD the light, w = angular radius (radians)
+    float4 uFrame;        // x = jitter seed, y = tex width, z = tex height
+};
+Texture2D<float4>   uGPos  : register(t0);
+Texture2D<float4>   uGNorm : register(t1);
+RWTexture2D<float>  uOut   : register(u0);
+
+float2 giHash2(uint2 gid, float seed)
+{
+    float2 p = float2(gid) + seed * 13.37;
+    return float2(frac(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453),
+                  frac(sin(dot(p, float2(39.3468, 11.1352))) * 24634.6345));
+}
+float3 giConeSample(float3 L, float angleRad, float2 xi)
+{
+    float3 up = (abs(L.y) < 0.99) ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
+    float3 T  = normalize(cross(up, L));
+    float3 B  = cross(L, T);
+    float r   = sin(angleRad) * sqrt(xi.x);
+    float phi = 6.28318530718 * xi.y;
+    return normalize(L + T * (r * cos(phi)) + B * (r * sin(phi)));
+}
+
+[numthreads(8, 8, 1)]
+void GiShadowCS(uint3 gid : SV_DispatchThreadID)
+{
+    if (float(gid.x) >= uFrame.y || float(gid.y) >= uFrame.z) return;
+    float4 pv = uGPos.Load(int3(gid.xy, 0));
+    if (pv.a < 0.5) { uOut[gid.xy] = 1.0; return; } // background
+    float3 N = normalize(uGNorm.Load(int3(gid.xy, 0)).xyz);
+    float3 L = uSunDirRadius.xyz;
+    if (dot(N, L) <= 0.0) { uOut[gid.xy] = 0.0; return; }
+
+    float2 xi  = giHash2(gid.xy, uFrame.x);
+    float3 dir = giConeSample(L, max(uSunDirRadius.w, 1e-4), xi);
+    // Same self-intersection guards as Metal: normal-offset origin + min t.
+    float3 origin = pv.xyz + N * 0.05;
+    uOut[gid.xy] = giSceneAnyHit(origin, dir, 0.02, 10000.0) ? 0.0 : 1.0;
+}
+)HLSL";
+
+// Temporal accumulation: reproject via last frame's viewProj; history carries
+// world position (rgb) + shadow scalar (a). Tolerance deliberately TIGHT
+// (Metal lesson 58ee312). D3D NDC → UV includes the y-flip (unlike GL).
+static const char* kGiTemporalHLSL = R"HLSL(
+Texture2D    uGPos    : register(t0);
+Texture2D    uRaw     : register(t1);
+Texture2D    uHistory : register(t2);
+SamplerState uPointSamp : register(s0);
+cbuffer GiTemporalCB : register(b0)
+{
+    float4x4 uPrevViewProj;
+    float4   uParams; // x = blend (0 on first GI frame), y = tex width, z = tex height
+};
+struct In { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
+float4 main(In i) : SV_Target
+{
+    float4 pv   = uGPos.Sample(uPointSamp, i.uv);
+    float  rawV = uRaw.Sample(uPointSamp, i.uv).r;
+    if (pv.a < 0.5) return float4(0.0, 0.0, 0.0, rawV);
+
+    float4 clip = mul(uPrevViewProj, float4(pv.xyz, 1.0));
+    if (clip.w <= 0.0) return float4(pv.xyz, rawV);
+    float2 ndc    = clip.xy / clip.w;
+    float2 prevUV = float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    if (any(prevUV < 0.0) || any(prevUV > 1.0)) return float4(pv.xyz, rawV);
+
+    float4 hist      = uHistory.Sample(uPointSamp, prevUV);
+    float  posError  = length(pv.xyz - hist.rgb);
+    float  tolerance = clamp(0.02 * clip.w, 0.01, 0.06);
+    float  w = (posError < tolerance) ? clamp(uParams.x, 0.0, 0.98) : 0.0;
+    // Neighbourhood clamp: guards OCCLUDER motion (the position check above
+    // only covers receiver/camera motion).
+    float2 texel = 1.0 / uParams.yz;
+    float nMin = rawV, nMax = rawV;
+    [unroll] for (int x = -1; x <= 1; ++x)
+        [unroll] for (int y = -1; y <= 1; ++y)
+        {
+            float r = uRaw.Sample(uPointSamp, i.uv + float2(x, y) * texel).r;
+            nMin = min(nMin, r);
+            nMax = max(nMax, r);
+        }
+    return float4(pv.xyz, lerp(rawV, clamp(hist.a, nMin, nMax), w));
+}
+)HLSL";
+
+// 3x3 spatial blur of the accumulated shadow scalar → the mask the scene
+// shader samples (R16F, linear = free bilinear upsample to full res).
+static const char* kGiBlurHLSL = R"HLSL(
+Texture2D    uSrc : register(t0); // temporal history: rgb = world pos, a = shadow
+SamplerState uPointSamp : register(s0);
+cbuffer GiBlurCB : register(b0) { float4 uTexel; }; // xy = 1/size
+struct In { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
+float4 main(In i) : SV_Target
+{
+    float sum = 0.0;
+    [unroll] for (int x = -1; x <= 1; ++x)
+        [unroll] for (int y = -1; y <= 1; ++y)
+            sum += uSrc.Sample(uPointSamp, i.uv + float2(x, y) * uTexel.xy).a;
+    return float4(sum / 9.0, 0.0, 0.0, 1.0);
+}
+)HLSL";
+
+// DDGI probe update — gather formulation (one thread per octahedral texel, no
+// atomics), one threadgroup per probe in the frame's round-robin batch.
+// D3D11 twist: typed UAV loads of RGBA16F/RG16F are an optional 11.3 cap, so
+// the previous atlas values arrive as SRV COPIES (t5/t6, refreshed by
+// CopyResource before the dispatch) instead of imageLoad on the UAV.
+static const char* kGiProbeCSHLSL = R"HLSL(
+cbuffer GiProbeCB : register(b0)
+{
+    float4 uGridOrigin;   // xyz = grid origin, w = spacing
+    float4 uGridCounts;   // xyz = probe counts, w = probesPerRow
+    float4 uRayParams;    // x = max dist, y = hysteresis, z = cursor start, w = probes this batch
+    float4 uSunDirRadius; // xyz = direction TOWARD the light, w = local light count
+    float4 uSunColor;     // rgb = colour * intensity
+    float4 uSkyAmbient;   // rgb = miss colour
+    float4 uLightPosRange[8];  // xyz pos, w range
+    float4 uLightColorType[8]; // rgb colour*intensity, w type (1 point, 2 spot)
+    float4 uLightDirCos[8];    // xyz spot travel dir, w cos(half angle)
+};
+Texture2D<float4>    uIrrPrev : register(t5);
+Texture2D<float2>    uVisPrev : register(t6);
+RWTexture2D<float4>  uIrr     : register(u0);
+RWTexture2D<float2>  uVis     : register(u1);
+
+static const int kOctSize = 8; // must match the host's kGiProbeOctSize
+
+float3 octDecode(float2 e)
+{
+    float3 n = float3(e.xy, 1.0 - abs(e.x) - abs(e.y));
+    if (n.z < 0.0)
+    {
+        float2 signN = float2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+        n.xy = (1.0 - abs(n.yx)) * signN;
+    }
+    return normalize(n);
+}
+
+[numthreads(8, 8, 1)]
+void GiProbeCS(uint3 gtid : SV_GroupThreadID, uint3 groupId : SV_GroupID)
+{
+    int2 texel    = int2(gtid.xy);
+    int  batchIdx = int(groupId.x);
+    int gx = int(uGridCounts.x), gy = int(uGridCounts.y), gz = int(uGridCounts.z);
+    int probeCount = gx * gy * gz;
+    if (probeCount <= 0 || batchIdx >= int(uRayParams.w)) return;
+    int probeIndex = (int(uRayParams.z) + batchIdx) % probeCount;
+
+    int pz = probeIndex / (gx * gy);
+    int py = (probeIndex / gx) % gy;
+    int px = probeIndex % gx;
+    float3 probePos = uGridOrigin.xyz + float3(px, py, pz) * uGridOrigin.w;
+
+    float2 uv  = (float2(texel) + 0.5) / float(kOctSize) * 2.0 - 1.0;
+    float3 dir = octDecode(uv);
+
+    float dist;
+    int hitInst = giSceneClosestHit(probePos, dir, 0.01, max(uRayParams.x, 1.0), dist);
+
+    float3 radiance;
+    if (hitInst < 0)
+    {
+        radiance = uSkyAmbient.rgb;
+        dist     = uRayParams.x;
+    }
+    else
+    {
+        float3 albedo    = giInsts[hitInst].baseColor.rgb;
+        float3 hitNormal = -dir;
+        float3 hitPos    = probePos + dir * dist;
+        float ndl = max(dot(hitNormal, uSunDirRadius.xyz), 0.0);
+        // Secondary shadow ray — hit surfaces are NOT assumed fully sun-lit
+        // (otherwise probes flood shadowed regions with bright sun bounce).
+        if (ndl > 0.0 && giSceneAnyHit(hitPos + hitNormal * 0.05, uSunDirRadius.xyz, 0.02, 10000.0))
+            ndl = 0.0;
+        radiance = albedo * uSunColor.rgb * ndl;
+        int lightCount = int(uSunDirRadius.w);
+        for (int i = 0; i < lightCount; ++i)
+        {
+            float3 toL = uLightPosRange[i].xyz - hitPos;
+            float d    = max(length(toL), 1e-4);
+            float range = max(uLightPosRange[i].w, 1e-4);
+            if (d >= range) continue;
+            float3 L = toL / d;
+            float ndl2 = max(dot(hitNormal, L), 0.0);
+            if (ndl2 <= 0.0) continue;
+            float atten = 1.0 - d / range;
+            atten *= atten;
+            if (uLightColorType[i].w > 1.5)
+            {
+                float c       = dot(-L, normalize(uLightDirCos[i].xyz));
+                float cosCone = uLightDirCos[i].w;
+                atten *= smoothstep(cosCone, lerp(cosCone, 1.0, 0.2), c);
+            }
+            if (atten <= 0.0) continue;
+            if (giSceneAnyHit(hitPos + hitNormal * 0.05, L, 0.02, max(d - 0.1, 0.02)))
+                continue;
+            radiance += albedo * uLightColorType[i].rgb * ndl2 * atten;
+        }
+    }
+
+    int probesPerRow = max(1, int(uGridCounts.w));
+    int2 outCoord = int2((probeIndex % probesPerRow) * kOctSize + texel.x,
+                         (probeIndex / probesPerRow) * kOctSize + texel.y);
+
+    // Adaptive hysteresis: deterministic gather rays → deltas are real scene
+    // changes; converge fast on change, stay smooth otherwise.
+    float baseH = clamp(uRayParams.y, 0.0, 0.98);
+    float4 oldIrr = uIrrPrev.Load(int3(outCoord, 0));
+    float hIrr = lerp(baseH, 0.3, saturate(length(radiance - oldIrr.rgb) * 4.0));
+    uIrr[outCoord] = float4(lerp(radiance, oldIrr.rgb, hIrr), 1.0);
+    float2 oldVis = uVisPrev.Load(int3(outCoord, 0));
+    float2 newVisSample = float2(dist, dist * dist);
+    float hVis = lerp(baseH, 0.3, saturate(abs(dist - oldVis.x) / max(uGridOrigin.w, 1.0)));
+    uVis[outCoord] = lerp(newVisSample, oldVis.xy, hVis);
+}
+)HLSL";
+
 namespace
 {
     // GPU mesh uploaded on first sight, mirroring the GL/Metal backends.
@@ -1078,7 +1548,31 @@ namespace
         glm::vec4  sunDir;   // xyz = sun direction
         glm::vec4  fog;      // x=fogDensity, y=fogHeightFalloff
         glm::vec4  viewport; // x=W, y=H, z=ssaoEnabled
+        glm::vec4  giParams;     // x = GI enabled (0/1), y = indirect intensity
+        glm::vec4  giGridOrigin; // xyz = probe grid origin, w = spacing
+        glm::vec4  giGridCounts; // xyz = probe counts, w = probesPerRow
     };
+
+    // GL copy of the dominant-directional-light pick (glDominantDirectionalLight)
+    // — the brightest directional light, NEVER the sky-dome sun (below the
+    // horizon at night). Keep all backend copies in sync.
+    static bool d3d11DominantDirectionalLight(const RenderWorld& rw,
+                                              glm::vec3& towardOut, glm::vec3& colorIntensityOut)
+    {
+        const LightData* best = nullptr;
+        for (const LightData& l : rw.lights)
+            if (l.type == 0 && l.intensity > 0.0f && (!best || l.intensity > best->intensity))
+                best = &l;
+        if (!best || glm::dot(best->direction, best->direction) < 1e-8f)
+        {
+            towardOut         = glm::normalize(rw.sunDirection);
+            colorIntensityOut = glm::vec3(0.0f);
+            return false;
+        }
+        towardOut         = -glm::normalize(best->direction);
+        colorIntensityOut = best->color * best->intensity;
+        return true;
+    }
 
     struct SkyCB {
         glm::mat4 invViewProj;
@@ -1173,7 +1667,7 @@ struct D3D11RendererImpl
         ComPtr<ID3D11InputLayout>  il;
     };
     std::unordered_map<uint64_t, MatShaders> m_materialShaders; // key = hash ^ transparentbit
-    ComPtr<ID3D11Buffer>       m_matLightCB;  // HeLighting (64 B) — b0 PS / b8 WPO VS, filled once/frame
+    ComPtr<ID3D11Buffer>       m_matLightCB;  // HeLighting (full Lighting struct) — b0 PS / b8 WPO VS, filled once/frame
     ComPtr<ID3D11Buffer>       m_matObjCB;    // U (176 B)         — b1 VS,          filled per draw
     ComPtr<ID3D11Buffer>       m_matParamCB;  // HeParams (256 B)  — b3 PS / b9 WPO VS, filled per draw
     ComPtr<ID3D11SamplerState> m_matSampler;  // linear-wrap, bound at s2 + s4..s7
@@ -1764,6 +2258,642 @@ struct D3D11RendererImpl
         return ssaoBlurSRV.Get();
     }
 
+    // ─── Ray-traced GI (software BVH) — D3D11 port of the GL-4.3 compute GI ──
+    // CPU-built per-mesh BLASes (HE::GiBvh, unit-tested in test_gi_bvh.cpp)
+    // concatenated into structured buffers + a flat per-frame instance array;
+    // compute shadow rays + DDGI probe gather, temporal + blur as fullscreen
+    // pixel passes. Mirrors OpenGLRenderer's kGi* stages 1:1.
+    struct GiBlasRange
+    {
+        int32_t nodeOffset = 0, nodeCount = 0;
+        int32_t triOffset  = 0, triCount  = 0;
+        bool    valid      = false;
+    };
+    struct GiInstanceGpu // must match the HLSL GiInst layout (raw structured buffer)
+    {
+        glm::mat4 invTransform;
+        glm::vec4 baseColor;
+        int32_t   nodeOffset = 0, triOffset = 0, pad0 = 0, pad1 = 0;
+    };
+    static constexpr float kGiProbeSpacing     = 4.0f;
+    static constexpr int   kGiMaxProbesPerAxis = 10;
+    static constexpr int   kGiProbeOctSize     = 8;
+
+    bool  giSupported          = true;  // FL 11.0 guarantees CS 5.0; compile failure clears it
+    bool  giEnabled            = false;
+    bool  giPipelinesBuilt     = false;
+    float giIndirectIntensity  = 1.0f;
+    float giLightRadius        = 0.5f;  // degrees, shadow-ray cone
+    int   giProbeBudgetPerFrame = 256;
+
+    ComPtr<ID3D11VertexShader>  giGBufVS;
+    ComPtr<ID3D11PixelShader>   giGBufPS;
+    ComPtr<ID3D11ComputeShader> giShadowCS;
+    ComPtr<ID3D11ComputeShader> giProbeCS;
+    ComPtr<ID3D11PixelShader>   giTemporalPS;
+    ComPtr<ID3D11PixelShader>   giBlurPS;
+    ComPtr<ID3D11Buffer>        giShadowCB, giCountCB, giTemporalCB, giBlurCB, giProbeCB;
+    ComPtr<ID3D11SamplerState>  giLinearClamp;
+
+    std::unordered_map<HE::UUID, GiBlasRange> giBlasCache;
+    std::vector<HE::GiBvhNode>     giNodesCpu;
+    std::vector<HE::GiBvhTriangle> giTrisCpu;
+    std::vector<GiInstanceGpu>     giInstancesCpu;
+    bool giBlasDirty     = false;
+    int  giInstanceCount = 0;
+    ComPtr<ID3D11Buffer>             giNodeSB, giTriSB, giInstanceSB;
+    ComPtr<ID3D11ShaderResourceView> giNodeSRV, giTriSRV, giInstanceSRV;
+
+    int giShadowW = 0, giShadowH = 0;
+    ComPtr<ID3D11Texture2D> giGBufPosTex, giGBufNormTex, giGBufDepth, giRawTex,
+                            giHistTex[2], giResultTex;
+    ComPtr<ID3D11RenderTargetView>    giGBufPosRTV, giGBufNormRTV, giHistRTV[2], giResultRTV;
+    ComPtr<ID3D11DepthStencilView>    giGBufDSV;
+    ComPtr<ID3D11ShaderResourceView>  giGBufPosSRV, giGBufNormSRV, giRawSRV,
+                                      giHistSRV[2], giResultSRV;
+    ComPtr<ID3D11UnorderedAccessView> giRawUAV;
+    int       giHistIdx     = 0;
+    bool      giHistValid   = false;
+    glm::mat4 giPrevViewProj{ 1.0f };
+    float     giFrameSeed   = 0.0f;
+
+    glm::vec3  giGridOrigin{ 0.0f };
+    glm::ivec3 giGridCounts{ 0 };
+    int  giProbeCount = 0, giProbesPerRow = 0, giProbeCursor = 0;
+    bool giProbeGridBuilt = false;
+    ComPtr<ID3D11Texture2D>           giIrrTex, giVisTex, giIrrPrevTex, giVisPrevTex;
+    ComPtr<ID3D11ShaderResourceView>  giIrrSRV, giVisSRV, giIrrPrevSRV, giVisPrevSRV;
+    ComPtr<ID3D11UnorderedAccessView> giIrrUAV, giVisUAV;
+
+    GiBlasRange buildGiBlas(ContentManager* cm, const HE::UUID& meshId)
+    {
+        GiBlasRange range;
+        if (!cm) return range;
+        const StaticMeshAsset* asset = cm->getStaticMesh(meshId);
+        if (!asset || asset->indices.empty()) return range;
+
+        // Same two layouts resolveMesh uploads: cooked = interleaved 8-float
+        // (position at offset 0), loose = tightly packed 3-float positions.
+        HE::GiBvh bvh;
+        if (asset->cooked && !asset->interleaved.empty())
+            bvh = HE::buildGiBvh(asset->interleaved.data(), asset->vertexCount, 8,
+                                 asset->indices.data(), asset->indices.size());
+        else if (!asset->vertices.empty())
+            bvh = HE::buildGiBvh(asset->vertices.data(), asset->vertices.size() / 3, 3,
+                                 asset->indices.data(), asset->indices.size());
+        if (!bvh.valid()) return range;
+
+        range.nodeOffset = static_cast<int32_t>(giNodesCpu.size());
+        range.nodeCount  = static_cast<int32_t>(bvh.nodes.size());
+        range.triOffset  = static_cast<int32_t>(giTrisCpu.size());
+        range.triCount   = static_cast<int32_t>(bvh.triangles.size());
+        range.valid      = true;
+        giNodesCpu.insert(giNodesCpu.end(), bvh.nodes.begin(), bvh.nodes.end());
+        giTrisCpu.insert(giTrisCpu.end(), bvh.triangles.begin(), bvh.triangles.end());
+        giBlasDirty = true;
+        return range;
+    }
+
+    void updateGiAccel(ContentManager* cm, const RenderWorld& rw)
+    {
+        giInstanceCount = 0;
+        if (!giEnabled || !giSupported) return;
+
+        // Same caster filter as the shadow pass: castsShadow only, UNCULLED —
+        // rays go in arbitrary directions, an off-screen caster still occludes.
+        giInstancesCpu.clear();
+        auto resolveRange = [&](const HE::UUID& id) -> GiBlasRange
+        {
+            auto it = giBlasCache.find(id);
+            if (it == giBlasCache.end())
+                it = giBlasCache.emplace(id, buildGiBlas(cm, id)).first;
+            return it->second;
+        };
+        for (const RenderObject& obj : rw.objects)
+        {
+            if (!obj.castsShadow) continue;
+            // Default-cube fallback — entities without a resolvable mesh RENDER
+            // as the default cube, so they must occlude as one too.
+            GiBlasRange range = resolveRange(obj.meshAssetId);
+            if (!range.valid) range = resolveRange(HE::kDefaultCubeMeshId);
+            if (!range.valid) continue;
+            GiInstanceGpu inst;
+            inst.invTransform = glm::inverse(obj.transform);
+            inst.baseColor    = glm::vec4(obj.baseColor, 1.0f);
+            inst.nodeOffset   = range.nodeOffset;
+            inst.triOffset    = range.triOffset;
+            giInstancesCpu.push_back(inst);
+        }
+        giInstanceCount = static_cast<int>(giInstancesCpu.size());
+        if (giInstanceCount == 0) return;
+
+        auto makeSB = [&](const void* data, UINT count, UINT strideBytes,
+                          ComPtr<ID3D11Buffer>& buf, ComPtr<ID3D11ShaderResourceView>& srv)
+        {
+            buf.Reset(); srv.Reset();
+            if (count == 0) return;
+            D3D11_BUFFER_DESC bd{};
+            bd.ByteWidth           = count * strideBytes;
+            bd.Usage               = D3D11_USAGE_IMMUTABLE;
+            bd.BindFlags           = D3D11_BIND_SHADER_RESOURCE;
+            bd.MiscFlags           = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+            bd.StructureByteStride = strideBytes;
+            D3D11_SUBRESOURCE_DATA init{}; init.pSysMem = data;
+            if (FAILED(device->CreateBuffer(&bd, &init, &buf))) return;
+            D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
+            sd.Format              = DXGI_FORMAT_UNKNOWN; // required for structured SRVs
+            sd.ViewDimension       = D3D11_SRV_DIMENSION_BUFFER;
+            sd.Buffer.FirstElement = 0;
+            sd.Buffer.NumElements  = count;
+            device->CreateShaderResourceView(buf.Get(), &sd, &srv);
+        };
+        // Nodes/tris only when a new BLAS was appended, instances every frame
+        // (transforms move; counts are small → IMMUTABLE re-create is fine).
+        if (giBlasDirty)
+        {
+            makeSB(giNodesCpu.data(), static_cast<UINT>(giNodesCpu.size()),
+                   sizeof(HE::GiBvhNode), giNodeSB, giNodeSRV);
+            makeSB(giTrisCpu.data(), static_cast<UINT>(giTrisCpu.size()),
+                   sizeof(HE::GiBvhTriangle), giTriSB, giTriSRV);
+            giBlasDirty = false;
+        }
+        makeSB(giInstancesCpu.data(), static_cast<UINT>(giInstancesCpu.size()),
+               sizeof(GiInstanceGpu), giInstanceSB, giInstanceSRV);
+        if (!giNodeSRV || !giTriSRV || !giInstanceSRV) giInstanceCount = 0;
+    }
+
+    void destroyGiAccel()
+    {
+        giNodeSB.Reset(); giTriSB.Reset(); giInstanceSB.Reset();
+        giNodeSRV.Reset(); giTriSRV.Reset(); giInstanceSRV.Reset();
+        giBlasCache.clear();
+        giNodesCpu.clear();
+        giTrisCpu.clear();
+        giInstancesCpu.clear();
+        giInstanceCount = 0;
+        giBlasDirty     = false;
+    }
+
+    // Lazily builds the GI pipelines on the first GI-active frame. A compile
+    // failure logs + disables GI for the session (blind-port safety), exactly
+    // like the GL port.
+    void createGiPipelines()
+    {
+        if (giPipelinesBuilt) return;
+        giPipelinesBuilt = true; // one attempt per session, success or not
+
+        UINT flags = 0;
+#if defined(_DEBUG)
+        flags |= D3DCOMPILE_DEBUG;
+#endif
+        auto compile = [&](const std::string& src, const char* entry, const char* profile,
+                           ComPtr<ID3DBlob>& blob) -> bool
+        {
+            ComPtr<ID3DBlob> err;
+            if (FAILED(D3DCompile(src.c_str(), src.size(), "gi", nullptr, nullptr,
+                                  entry, profile, flags, 0, &blob, &err)))
+            {
+                Logger::Log(Logger::LogLevel::Error,
+                    (std::string("D3D11Renderer: GI shader compile failed (") + entry + "): "
+                     + (err ? static_cast<const char*>(err->GetBufferPointer()) : "unknown")).c_str());
+                return false;
+            }
+            return true;
+        };
+        auto makeCB = [&](UINT bytes, ComPtr<ID3D11Buffer>& cb) -> bool
+        {
+            D3D11_BUFFER_DESC bd{};
+            bd.ByteWidth      = (bytes + 15u) & ~15u;
+            bd.Usage          = D3D11_USAGE_DYNAMIC;
+            bd.BindFlags      = D3D11_BIND_CONSTANT_BUFFER;
+            bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+            return SUCCEEDED(device->CreateBuffer(&bd, nullptr, &cb));
+        };
+
+        bool ok = true;
+        ComPtr<ID3DBlob> b;
+        if (ok && (ok = compile(kGiGBufHLSL, "GiGBufVS", "vs_5_0", b)))
+            ok = SUCCEEDED(device->CreateVertexShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &giGBufVS));
+        if (ok && (ok = compile(kGiGBufHLSL, "GiGBufPS", "ps_5_0", b)))
+            ok = SUCCEEDED(device->CreatePixelShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &giGBufPS));
+        if (ok && (ok = compile(std::string(kGiTraversalHLSL) + kGiShadowCSHLSL, "GiShadowCS", "cs_5_0", b)))
+            ok = SUCCEEDED(device->CreateComputeShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &giShadowCS));
+        if (ok && (ok = compile(std::string(kGiTraversalHLSL) + kGiProbeCSHLSL, "GiProbeCS", "cs_5_0", b)))
+            ok = SUCCEEDED(device->CreateComputeShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &giProbeCS));
+        if (ok && (ok = compile(kGiTemporalHLSL, "main", "ps_5_0", b)))
+            ok = SUCCEEDED(device->CreatePixelShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &giTemporalPS));
+        if (ok && (ok = compile(kGiBlurHLSL, "main", "ps_5_0", b)))
+            ok = SUCCEEDED(device->CreatePixelShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &giBlurPS));
+
+        ok = ok && makeCB(2 * 16, giShadowCB)
+                && makeCB(16, giCountCB)
+                && makeCB(sizeof(glm::mat4) + 16, giTemporalCB)
+                && makeCB(16, giBlurCB)
+                && makeCB(6 * 16 + 3 * 8 * 16, giProbeCB);
+        if (ok)
+        {
+            D3D11_SAMPLER_DESC sd{};
+            sd.Filter   = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+            sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+            sd.MaxLOD   = D3D11_FLOAT32_MAX;
+            ok = SUCCEEDED(device->CreateSamplerState(&sd, &giLinearClamp));
+        }
+
+        if (!ok)
+        {
+            Logger::Log(Logger::LogLevel::Error,
+                        "D3D11Renderer: GI pipeline build failed — GI disabled");
+            giGBufVS.Reset(); giGBufPS.Reset(); giShadowCS.Reset(); giProbeCS.Reset();
+            giTemporalPS.Reset(); giBlurPS.Reset();
+            giSupported = false;
+            return;
+        }
+        Logger::Log(Logger::LogLevel::Info,
+                    "D3D11Renderer: GI pipelines built (compute ray tracing active)");
+    }
+
+    void ensureGiShadowTargets(int w, int h)
+    {
+        w = std::max(1, w); h = std::max(1, h);
+        if (giGBufPosTex && w == giShadowW && h == giShadowH) return;
+        giShadowW = w; giShadowH = h;
+        giHistValid = false; // fresh targets → no usable history
+
+        auto makeTex = [&](DXGI_FORMAT fmt, UINT bind,
+                           ComPtr<ID3D11Texture2D>& t,
+                           ComPtr<ID3D11RenderTargetView>* rtv,
+                           ComPtr<ID3D11ShaderResourceView>* srv,
+                           ComPtr<ID3D11UnorderedAccessView>* uav) -> bool
+        {
+            t.Reset();
+            if (rtv) rtv->Reset();
+            if (srv) srv->Reset();
+            if (uav) uav->Reset();
+            D3D11_TEXTURE2D_DESC td{};
+            td.Width = (UINT)w; td.Height = (UINT)h;
+            td.MipLevels = td.ArraySize = 1;
+            td.Format = fmt; td.SampleDesc.Count = 1;
+            td.Usage = D3D11_USAGE_DEFAULT;
+            td.BindFlags = bind;
+            if (FAILED(device->CreateTexture2D(&td, nullptr, &t))) return false;
+            if (rtv && FAILED(device->CreateRenderTargetView(t.Get(), nullptr, rtv->GetAddressOf()))) return false;
+            if (srv && FAILED(device->CreateShaderResourceView(t.Get(), nullptr, srv->GetAddressOf()))) return false;
+            if (uav && FAILED(device->CreateUnorderedAccessView(t.Get(), nullptr, uav->GetAddressOf()))) return false;
+            return true;
+        };
+
+        bool ok = makeTex(DXGI_FORMAT_R16G16B16A16_FLOAT,
+                          D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE,
+                          giGBufPosTex, &giGBufPosRTV, &giGBufPosSRV, nullptr)
+               && makeTex(DXGI_FORMAT_R16G16B16A16_FLOAT,
+                          D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE,
+                          giGBufNormTex, &giGBufNormRTV, &giGBufNormSRV, nullptr)
+               && makeTex(DXGI_FORMAT_R16_FLOAT,
+                          D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE,
+                          giRawTex, nullptr, &giRawSRV, &giRawUAV)
+               && makeTex(DXGI_FORMAT_R16G16B16A16_FLOAT,
+                          D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE,
+                          giHistTex[0], &giHistRTV[0], &giHistSRV[0], nullptr)
+               && makeTex(DXGI_FORMAT_R16G16B16A16_FLOAT,
+                          D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE,
+                          giHistTex[1], &giHistRTV[1], &giHistSRV[1], nullptr)
+               && makeTex(DXGI_FORMAT_R16_FLOAT,
+                          D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE,
+                          giResultTex, &giResultRTV, &giResultSRV, nullptr);
+        // Depth buffer for the G-buffer prepass.
+        giGBufDSV.Reset(); giGBufDepth.Reset();
+        D3D11_TEXTURE2D_DESC dd{};
+        dd.Width = (UINT)w; dd.Height = (UINT)h;
+        dd.MipLevels = dd.ArraySize = 1;
+        dd.Format = DXGI_FORMAT_D16_UNORM; dd.SampleDesc.Count = 1;
+        dd.Usage = D3D11_USAGE_DEFAULT;
+        dd.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+        ok = ok && SUCCEEDED(device->CreateTexture2D(&dd, nullptr, &giGBufDepth))
+                && SUCCEEDED(device->CreateDepthStencilView(giGBufDepth.Get(), nullptr, &giGBufDSV));
+        if (!ok)
+        {
+            giGBufPosTex.Reset();
+            giShadowW = giShadowH = 0;
+        }
+    }
+
+    // One-shot probe-grid fit over the scene AABB (worldBounds are refreshed
+    // from the real mesh bounds in DrawScene before this runs).
+    void ensureGiProbeGrid(const RenderWorld& rw)
+    {
+        if (giProbeGridBuilt) return;
+        if (rw.objects.empty()) return;
+
+        HE::AABB sceneBox;
+        for (const RenderObject& obj : rw.objects)
+            if (obj.worldBounds.isValid())
+                sceneBox.expand(obj.worldBounds);
+        if (!sceneBox.isValid()) return;
+
+        const glm::vec3 padded = sceneBox.extents() + glm::vec3(kGiProbeSpacing);
+        giGridCounts = glm::ivec3(
+            std::clamp(static_cast<int>(std::ceil(padded.x * 2.0f / kGiProbeSpacing)) + 1, 2, kGiMaxProbesPerAxis),
+            std::clamp(static_cast<int>(std::ceil(padded.y * 2.0f / kGiProbeSpacing)) + 1, 2, kGiMaxProbesPerAxis),
+            std::clamp(static_cast<int>(std::ceil(padded.z * 2.0f / kGiProbeSpacing)) + 1, 2, kGiMaxProbesPerAxis));
+        const glm::vec3 gridSpan = glm::vec3(giGridCounts - 1) * kGiProbeSpacing;
+        giGridOrigin   = sceneBox.center() - gridSpan * 0.5f;
+        giProbeCount   = giGridCounts.x * giGridCounts.y * giGridCounts.z;
+        giProbesPerRow = std::min(giProbeCount, 32);
+        giProbeCursor  = 0;
+        giProbeGridBuilt = true;
+        Logger::Log(Logger::LogLevel::Info,
+                    ("D3D11Renderer: GI probe grid " + std::to_string(giGridCounts.x) + "x"
+                     + std::to_string(giGridCounts.y) + "x" + std::to_string(giGridCounts.z)
+                     + " (" + std::to_string(giProbeCount) + " probes)").c_str());
+    }
+
+    void ensureGiProbeAtlas()
+    {
+        if (giIrrTex || giProbeCount <= 0) return;
+        const int rows = (giProbeCount + giProbesPerRow - 1) / giProbesPerRow;
+        const int w = giProbesPerRow * kGiProbeOctSize;
+        const int h = rows * kGiProbeOctSize;
+
+        // Zero-initialised: the probe kernel EMA-blends against the previous
+        // value, so undefined contents would poison the first update round.
+        auto makeAtlas = [&](DXGI_FORMAT fmt, UINT texelBytes, UINT bind,
+                             ComPtr<ID3D11Texture2D>& t,
+                             ComPtr<ID3D11ShaderResourceView>& srv,
+                             ComPtr<ID3D11UnorderedAccessView>* uav) -> bool
+        {
+            std::vector<uint8_t> zeros(static_cast<size_t>(w) * h * texelBytes, 0);
+            D3D11_TEXTURE2D_DESC td{};
+            td.Width = (UINT)w; td.Height = (UINT)h;
+            td.MipLevels = td.ArraySize = 1;
+            td.Format = fmt; td.SampleDesc.Count = 1;
+            td.Usage = D3D11_USAGE_DEFAULT;
+            td.BindFlags = bind;
+            D3D11_SUBRESOURCE_DATA init{};
+            init.pSysMem = zeros.data();
+            init.SysMemPitch = (UINT)w * texelBytes;
+            if (FAILED(device->CreateTexture2D(&td, &init, &t))) return false;
+            if (FAILED(device->CreateShaderResourceView(t.Get(), nullptr, &srv))) return false;
+            if (uav && FAILED(device->CreateUnorderedAccessView(t.Get(), nullptr, uav->GetAddressOf()))) return false;
+            return true;
+        };
+        const bool ok =
+               makeAtlas(DXGI_FORMAT_R16G16B16A16_FLOAT, 8,
+                         D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE,
+                         giIrrTex, giIrrSRV, &giIrrUAV)
+            && makeAtlas(DXGI_FORMAT_R16G16_FLOAT, 4,
+                         D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE,
+                         giVisTex, giVisSRV, &giVisUAV)
+            // SRV-only copies of the previous frame (typed UAV loads of these
+            // formats are an optional 11.3 cap → the kernel reads SRVs instead).
+            && makeAtlas(DXGI_FORMAT_R16G16B16A16_FLOAT, 8, D3D11_BIND_SHADER_RESOURCE,
+                         giIrrPrevTex, giIrrPrevSRV, nullptr)
+            && makeAtlas(DXGI_FORMAT_R16G16_FLOAT, 4, D3D11_BIND_SHADER_RESOURCE,
+                         giVisPrevTex, giVisPrevSRV, nullptr);
+        if (!ok)
+        {
+            giIrrTex.Reset(); giVisTex.Reset(); giIrrPrevTex.Reset(); giVisPrevTex.Reset();
+            giIrrSRV.Reset(); giVisSRV.Reset(); giIrrPrevSRV.Reset(); giVisPrevSRV.Reset();
+            giIrrUAV.Reset(); giVisUAV.Reset();
+        }
+    }
+
+    void destroyGiTargets()
+    {
+        giGBufPosTex.Reset(); giGBufNormTex.Reset(); giGBufDepth.Reset(); giRawTex.Reset();
+        giGBufPosRTV.Reset(); giGBufNormRTV.Reset(); giGBufDSV.Reset();
+        giGBufPosSRV.Reset(); giGBufNormSRV.Reset(); giRawSRV.Reset(); giRawUAV.Reset();
+        for (int i = 0; i < 2; ++i)
+        { giHistTex[i].Reset(); giHistRTV[i].Reset(); giHistSRV[i].Reset(); }
+        giResultTex.Reset(); giResultRTV.Reset(); giResultSRV.Reset();
+        giShadowW = giShadowH = 0;
+        giHistValid = false;
+        giIrrTex.Reset(); giVisTex.Reset(); giIrrPrevTex.Reset(); giVisPrevTex.Reset();
+        giIrrSRV.Reset(); giVisSRV.Reset(); giIrrPrevSRV.Reset(); giVisPrevSRV.Reset();
+        giIrrUAV.Reset(); giVisUAV.Reset();
+        giProbeGridBuilt = false;
+        giProbeCount = 0;
+        giProbeCursor = 0;
+    }
+
+    // The 4-stage shadow-mask pipeline (G-buffer → compute rays → temporal →
+    // blur). Returns the SRV the scene shader binds at t4 (null on failure).
+    ID3D11ShaderResourceView* runGiShadow(ID3D11DeviceContext* ctx,
+                                          const std::vector<const DrawCall*>& opaqueDCs,
+                                          const glm::mat4& viewProj, int w, int h,
+                                          const RenderWorld& rw,
+                                          const std::function<const GpuMesh*(HE::UUID)>& resolveMeshFn,
+                                          const GpuMesh& fallbackMesh,
+                                          ID3D11InputLayout* il,
+                                          ID3D11DepthStencilState* depthSt,
+                                          ID3D11RasterizerState* rasterSt)
+    {
+        createGiPipelines();
+        if (!giGBufVS || !giShadowCS || !giTemporalPS || !giBlurPS) return nullptr;
+        ensureGiShadowTargets(w, h);
+        if (!giGBufPosTex) return nullptr;
+
+        const UINT stride = 8 * sizeof(float), off = 0;
+        D3D11_VIEWPORT vp{}; vp.Width = float(giShadowW); vp.Height = float(giShadowH); vp.MaxDepth = 1.0f;
+        ctx->RSSetViewports(1, &vp);
+
+        // ── 1. World-space G-buffer (position + normal MRT, half-res). Same
+        // draw set + camera as the scene pass (the aspect/misalign lesson).
+        {
+            ID3D11ShaderResourceView* nullSrvs[3] = {};
+            ctx->PSSetShaderResources(4, 3, nullSrvs); // t4-t6 may still hold last frame's GI
+            ID3D11RenderTargetView* rtvs[2] = { giGBufPosRTV.Get(), giGBufNormRTV.Get() };
+            ctx->OMSetRenderTargets(2, rtvs, giGBufDSV.Get());
+            const float clear[4] = { 0, 0, 0, 0 }; // a = 0 → background
+            ctx->ClearRenderTargetView(giGBufPosRTV.Get(), clear);
+            ctx->ClearRenderTargetView(giGBufNormRTV.Get(), clear);
+            ctx->ClearDepthStencilView(giGBufDSV.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
+            ctx->IASetInputLayout(il);
+            ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            ctx->VSSetShader(giGBufVS.Get(), nullptr, 0);
+            ctx->PSSetShader(giGBufPS.Get(), nullptr, 0);
+            ctx->OMSetDepthStencilState(depthSt, 0);
+            ctx->RSSetState(rasterSt);
+            ctx->VSSetConstantBuffers(0, 1, perObjectCB.GetAddressOf());
+
+            for (const DrawCall* dc : opaqueDCs)
+            {
+                if (!dc->contributesAO) continue; // precip/particles don't shade the mask
+                const GpuMesh* mesh = resolveMeshFn(dc->meshAssetId);
+                const GpuMesh& m = mesh ? *mesh : fallbackMesh;
+                if (!m.vbuf || !m.ibuf) continue;
+                ctx->IASetVertexBuffers(0, 1, m.vbuf.GetAddressOf(), &stride, &off);
+                ctx->IASetIndexBuffer(m.ibuf.Get(), DXGI_FORMAT_R32_UINT, 0);
+                auto drawOne = [&](const glm::mat4& t)
+                {
+                    PerObjectCB o{};
+                    o.mvp = viewProj * t; o.model = t;
+                    D3D11_MAPPED_SUBRESOURCE mapped{};
+                    if (SUCCEEDED(ctx->Map(perObjectCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+                    {
+                        std::memcpy(mapped.pData, &o, sizeof(o));
+                        ctx->Unmap(perObjectCB.Get(), 0);
+                    }
+                    ctx->DrawIndexed(m.indexCount, 0, 0);
+                };
+                if (!dc->instanceTransforms.empty())
+                    for (const glm::mat4& t : dc->instanceTransforms) drawOne(t);
+                else
+                    drawOne(dc->transform);
+            }
+            ID3D11RenderTargetView* nulls[2] = {};
+            ctx->OMSetRenderTargets(2, nulls, nullptr);
+        }
+
+        // ── 2. Shadow rays (compute, 1 cone-jittered ray/pixel vs the BVH) ──
+        {
+            glm::vec3 towardLight, lightColorIntensity;
+            d3d11DominantDirectionalLight(rw, towardLight, lightColorIntensity);
+            giFrameSeed += 1.0f;
+            struct { glm::vec4 sunDirRadius, frame; } scb{};
+            scb.sunDirRadius = glm::vec4(towardLight, glm::radians(giLightRadius));
+            scb.frame        = glm::vec4(giFrameSeed, float(giShadowW), float(giShadowH), 0.0f);
+            D3D11_MAPPED_SUBRESOURCE mapped{};
+            if (SUCCEEDED(ctx->Map(giShadowCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+            { std::memcpy(mapped.pData, &scb, sizeof(scb)); ctx->Unmap(giShadowCB.Get(), 0); }
+            glm::ivec4 cnt(giInstanceCount, 0, 0, 0);
+            if (SUCCEEDED(ctx->Map(giCountCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+            { std::memcpy(mapped.pData, &cnt, sizeof(cnt)); ctx->Unmap(giCountCB.Get(), 0); }
+
+            ctx->CSSetShader(giShadowCS.Get(), nullptr, 0);
+            ID3D11ShaderResourceView* srvs[5] = { giGBufPosSRV.Get(), giGBufNormSRV.Get(),
+                                                  giNodeSRV.Get(), giTriSRV.Get(), giInstanceSRV.Get() };
+            ctx->CSSetShaderResources(0, 5, srvs);
+            ID3D11Buffer* cbs[2] = { giShadowCB.Get(), giCountCB.Get() };
+            ctx->CSSetConstantBuffers(0, 2, cbs);
+            ID3D11UnorderedAccessView* uav = giRawUAV.Get();
+            ctx->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+            ctx->Dispatch((UINT)((giShadowW + 7) / 8), (UINT)((giShadowH + 7) / 8), 1);
+            ID3D11UnorderedAccessView* nullUav = nullptr;
+            ctx->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
+            ID3D11ShaderResourceView* nullSrvs[5] = {};
+            ctx->CSSetShaderResources(0, 5, nullSrvs);
+            ctx->CSSetShader(nullptr, nullptr, 0);
+        }
+
+        // ── 3. Temporal accumulation (fullscreen, ping-pong history) ────────
+        const int curIdx = giHistIdx, prevIdx = 1 - curIdx;
+        {
+            ctx->OMSetRenderTargets(1, giHistRTV[curIdx].GetAddressOf(), nullptr);
+            ctx->IASetInputLayout(nullptr);
+            ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            ctx->VSSetShader(fsVS.Get(), nullptr, 0);
+            ctx->PSSetShader(giTemporalPS.Get(), nullptr, 0);
+            ctx->OMSetDepthStencilState(noDepthDSS.Get(), 0);
+            ctx->RSSetState(fsRastState.Get());
+            ctx->PSSetSamplers(0, 1, pointSampler.GetAddressOf());
+            struct { glm::mat4 prevViewProj; glm::vec4 params; } tcb{};
+            tcb.prevViewProj = giPrevViewProj;
+            tcb.params = glm::vec4(giHistValid ? 0.9f : 0.0f,
+                                   float(giShadowW), float(giShadowH), 0.0f);
+            D3D11_MAPPED_SUBRESOURCE mapped{};
+            if (SUCCEEDED(ctx->Map(giTemporalCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+            { std::memcpy(mapped.pData, &tcb, sizeof(tcb)); ctx->Unmap(giTemporalCB.Get(), 0); }
+            ctx->PSSetConstantBuffers(0, 1, giTemporalCB.GetAddressOf());
+            ID3D11ShaderResourceView* srvs[3] = { giGBufPosSRV.Get(), giRawSRV.Get(),
+                                                  giHistSRV[prevIdx].Get() };
+            ctx->PSSetShaderResources(0, 3, srvs);
+            ctx->Draw(3, 0);
+            ID3D11RenderTargetView* n = nullptr;
+            ctx->OMSetRenderTargets(1, &n, nullptr);
+            ID3D11ShaderResourceView* nullSrvs[3] = {};
+            ctx->PSSetShaderResources(0, 3, nullSrvs);
+        }
+        giHistValid    = true;
+        giHistIdx      = prevIdx;
+        giPrevViewProj = viewProj; // for NEXT frame's reprojection
+
+        // ── 4. Spatial blur → the mask the scene shader samples ─────────────
+        {
+            ctx->OMSetRenderTargets(1, giResultRTV.GetAddressOf(), nullptr);
+            ctx->PSSetShader(giBlurPS.Get(), nullptr, 0);
+            glm::vec4 texel(1.0f / float(giShadowW), 1.0f / float(giShadowH), 0.0f, 0.0f);
+            D3D11_MAPPED_SUBRESOURCE mapped{};
+            if (SUCCEEDED(ctx->Map(giBlurCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+            { std::memcpy(mapped.pData, &texel, sizeof(texel)); ctx->Unmap(giBlurCB.Get(), 0); }
+            ctx->PSSetConstantBuffers(0, 1, giBlurCB.GetAddressOf());
+            ID3D11ShaderResourceView* srv = giHistSRV[curIdx].Get();
+            ctx->PSSetShaderResources(0, 1, &srv);
+            ctx->Draw(3, 0);
+            ID3D11RenderTargetView* n = nullptr;
+            ctx->OMSetRenderTargets(1, &n, nullptr);
+            ID3D11ShaderResourceView* nullSrv = nullptr;
+            ctx->PSSetShaderResources(0, 1, &nullSrv);
+        }
+        return giResultSRV.Get();
+    }
+
+    void dispatchGiProbeUpdate(ID3D11DeviceContext* ctx, const RenderWorld& rw)
+    {
+        if (!giProbeCS || giInstanceCount == 0) return;
+        ensureGiProbeGrid(rw);
+        if (!giProbeGridBuilt) return;
+        ensureGiProbeAtlas();
+        if (!giIrrUAV || !giVisUAV) return;
+
+        const int budget = std::min(giProbeBudgetPerFrame > 0 ? giProbeBudgetPerFrame : 1,
+                                    giProbeCount);
+
+        // Previous-frame values travel as SRV copies (no typed UAV loads on
+        // baseline 11.0); texels outside this batch keep their values in the
+        // canonical atlases since the kernel never writes them.
+        ctx->CopyResource(giIrrPrevTex.Get(), giIrrTex.Get());
+        ctx->CopyResource(giVisPrevTex.Get(), giVisTex.Get());
+
+        struct GiProbeCBData
+        {
+            glm::vec4 gridOrigin, gridCounts, rayParams, sunDirRadius, sunColor, skyAmbient;
+            glm::vec4 lightPosRange[8], lightColorType[8], lightDirCos[8];
+        } pcb{};
+        pcb.gridOrigin = glm::vec4(giGridOrigin, kGiProbeSpacing);
+        pcb.gridCounts = glm::vec4(glm::vec3(giGridCounts), float(giProbesPerRow));
+        const float maxDist = glm::length(glm::vec3(giGridCounts) * kGiProbeSpacing) + kGiProbeSpacing;
+        pcb.rayParams = glm::vec4(maxDist, 0.92f, float(giProbeCursor), float(budget));
+        glm::vec3 towardLight, lightColorIntensity;
+        d3d11DominantDirectionalLight(rw, towardLight, lightColorIntensity);
+        int lightCount = 0;
+        for (const LightData& l : rw.lights)
+        {
+            if (lightCount >= 8) break;
+            if ((l.type != 1 && l.type != 2) || l.intensity <= 0.0f) continue;
+            pcb.lightPosRange[lightCount]  = glm::vec4(l.position, std::max(l.range, 1e-4f));
+            pcb.lightColorType[lightCount] = glm::vec4(l.color * l.intensity, float(l.type));
+            pcb.lightDirCos[lightCount]    = glm::vec4(l.direction, l.spotAngleCos);
+            ++lightCount;
+        }
+        pcb.sunDirRadius = glm::vec4(towardLight, float(lightCount));
+        pcb.sunColor     = glm::vec4(lightColorIntensity, 0.0f);
+        pcb.skyAmbient   = glm::vec4(rw.ambient, 0.0f);
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        if (SUCCEEDED(ctx->Map(giProbeCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+        { std::memcpy(mapped.pData, &pcb, sizeof(pcb)); ctx->Unmap(giProbeCB.Get(), 0); }
+        glm::ivec4 cnt(giInstanceCount, 0, 0, 0);
+        if (SUCCEEDED(ctx->Map(giCountCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+        { std::memcpy(mapped.pData, &cnt, sizeof(cnt)); ctx->Unmap(giCountCB.Get(), 0); }
+
+        ctx->CSSetShader(giProbeCS.Get(), nullptr, 0);
+        ID3D11ShaderResourceView* srvs[7] = { nullptr, nullptr,
+                                              giNodeSRV.Get(), giTriSRV.Get(), giInstanceSRV.Get(),
+                                              giIrrPrevSRV.Get(), giVisPrevSRV.Get() };
+        ctx->CSSetShaderResources(0, 7, srvs);
+        ID3D11Buffer* cbs[2] = { giProbeCB.Get(), giCountCB.Get() };
+        ctx->CSSetConstantBuffers(0, 2, cbs);
+        ID3D11UnorderedAccessView* uavs[2] = { giIrrUAV.Get(), giVisUAV.Get() };
+        ctx->CSSetUnorderedAccessViews(0, 2, uavs, nullptr);
+        ctx->Dispatch((UINT)budget, 1, 1);
+        ID3D11UnorderedAccessView* nullUavs[2] = {};
+        ctx->CSSetUnorderedAccessViews(0, 2, nullUavs, nullptr);
+        ID3D11ShaderResourceView* nullSrvs[7] = {};
+        ctx->CSSetShaderResources(0, 7, nullSrvs);
+        ctx->CSSetShader(nullptr, nullptr, 0);
+
+        giProbeCursor = (giProbeCursor + budget) % giProbeCount;
+    }
+
     bool createPostFX()
     {
         UINT flags = 0;
@@ -2257,7 +3387,10 @@ struct D3D11RendererImpl
             return SUCCEEDED(device->CreateBuffer(&bd, nullptr, &out));
         };
         // Create all three unconditionally (no short-circuit), then AND the results.
-        const bool cbLight = makeCB(64,  m_matLightCB); // HeLighting
+        // Sized to the FULL Lighting struct — this was 64 (the v1 sun-only block)
+        // while the fill memcpy'd sizeof(Lighting), overflowing the mapped
+        // allocation ever since the v2 8-light window landed.
+        const bool cbLight = makeCB(sizeof(HE::MaterialShaderLibrary::Lighting), m_matLightCB);
         const bool cbObj   = makeCB(176, m_matObjCB);   // U
         const bool cbParam = makeCB(256, m_matParamCB); // HeParams
         D3D11_SAMPLER_DESC sd{};
@@ -2369,6 +3502,11 @@ struct D3D11RendererImpl
         {
             meshCache.erase(id);
             skeletalMeshCache.erase(id);
+            // GI BLAS ranges live in CONCATENATED buffers — no splice, so an
+            // edited mesh drops the whole cache and it rebuilds lazily (same
+            // policy as the GL port's InvalidateMesh).
+            if (giBlasCache.count(id))
+                destroyGiAccel();
         }
         pendingMeshInval.clear();
     }
@@ -2945,6 +4083,15 @@ void D3D11Renderer::Shutdown()
     m_impl->noiseSRV.Reset(); m_impl->noiseTex3D.Reset(); m_impl->skyNoiseSampler.Reset();
     m_impl->debugVS.Reset(); m_impl->debugPS.Reset(); m_impl->debugVB.Reset();
     m_impl->debugCB.Reset(); m_impl->debugIL.Reset();
+    // GI resources (accel buffers, targets, atlases, pipelines).
+    m_impl->destroyGiAccel();
+    m_impl->destroyGiTargets();
+    m_impl->giGBufVS.Reset(); m_impl->giGBufPS.Reset();
+    m_impl->giShadowCS.Reset(); m_impl->giProbeCS.Reset();
+    m_impl->giTemporalPS.Reset(); m_impl->giBlurPS.Reset();
+    m_impl->giShadowCB.Reset(); m_impl->giCountCB.Reset(); m_impl->giTemporalCB.Reset();
+    m_impl->giBlurCB.Reset(); m_impl->giProbeCB.Reset();
+    m_impl->giLinearClamp.Reset();
     m_impl->rtv.Reset();
     m_impl->dsv.Reset();
     m_impl->depthTex.Reset();
@@ -3001,6 +4148,11 @@ void D3D11Renderer::DrawScene(int width, int height)
         }
     }
 
+    // GI acceleration structures: refresh the BLAS cache + per-frame instance
+    // array right after extraction (UNCULLED — off-screen casters still occlude),
+    // mirroring GL's UpdateGiAccel placement. No-op when GI is off.
+    p.updateGiAccel(m_contentManager, p.m_renderWorld);
+
     p.m_culler.cull(p.m_renderWorld, p.m_visible);
     p.m_sorter.sort(p.m_renderWorld, p.m_visible, p.m_sortedIndices);
     p.counters.total   = static_cast<uint32_t>(p.m_renderWorld.objects.size());
@@ -3029,6 +4181,9 @@ void D3D11Renderer::DrawScene(int width, int height)
     ctx->PSSetSamplers(0, 1, p.sampler.GetAddressOf());
 
     // ── Per-frame constants (camera + up to 8 lights) ───────────────────────
+    // A lambda because the GI/SSAO decision is only known inside the backbuffer
+    // pass — the CB is refilled there with the final giActive/aoActive flags.
+    auto fillPerFrame = [&](bool giActive, bool aoActive)
     {
         PerFrameCB f{};
         f.cameraPos     = glm::vec4(p.m_renderWorld.camera.position, 1.0f);
@@ -3046,7 +4201,10 @@ void D3D11Renderer::DrawScene(int width, int height)
         f.shadowEnabled = glm::ivec4(shadows ? 1 : 0, 0, 0, 0);
         f.sunDir = glm::vec4(p.m_renderWorld.sunDirection, 0.0f);
         f.fog    = glm::vec4(m_environment.fogDensity, m_environment.fogHeightFalloff, 0, 0);
-        f.viewport = glm::vec4(float(width), float(height), (p.ssaoEnabled && p.ssaoReady) ? 1.0f : 0.0f, 0.0f);
+        f.viewport = glm::vec4(float(width), float(height), aoActive ? 1.0f : 0.0f, 0.0f);
+        f.giParams     = glm::vec4(giActive ? 1.0f : 0.0f, p.giIndirectIntensity, 0.0f, 0.0f);
+        f.giGridOrigin = glm::vec4(p.giGridOrigin, D3D11RendererImpl::kGiProbeSpacing);
+        f.giGridCounts = glm::vec4(glm::vec3(p.giGridCounts), float(p.giProbesPerRow));
         D3D11_MAPPED_SUBRESOURCE m{};
         if (SUCCEEDED(ctx->Map(p.perFrameCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m)))
         {
@@ -3055,39 +4213,68 @@ void D3D11Renderer::DrawScene(int width, int height)
         }
         ctx->VSSetConstantBuffers(1, 1, p.perFrameCB.GetAddressOf());
         ctx->PSSetConstantBuffers(1, 1, p.perFrameCB.GetAddressOf());
-    }
+    };
+    fillPerFrame(false, p.ssaoEnabled && p.ssaoReady);
 
 #if defined(HE_HAVE_SHADERC)
-    // A4: fill the shared HeLighting CB once — identical for every graph-material draw this
-    // frame (bound at b0 PS + b8 WPO VS in the material draw path). Mirrors the D3D12/Vulkan
-    // A4 HeLighting fill; DrawScene runs once per frame, so this fills exactly once.
-    if (p.m_matReady && p.m_matLightCB)
+    // A4: fill the shared HeLighting CB — identical for every graph-material draw this
+    // frame (bound at b0 PS + b8 WPO VS in the material draw path). A lambda because
+    // giParams.z is only known after the GI passes ran (refilled in the backbuffer
+    // branch). Now fills the FULL v2 light window from the dominant directional light
+    // (was sun-only sky values before — graph materials never saw point/spot lights
+    // on D3D11 and stayed sun-lit at night).
+    auto fillMatLight = [&](bool giActive)
     {
+        if (!(p.m_matReady && p.m_matLightCB)) return;
         HE::MaterialShaderLibrary::Lighting lit{};
-        lit.sunDir[0] = p.m_renderWorld.sunDirection.x;
-        lit.sunDir[1] = p.m_renderWorld.sunDirection.y;
-        lit.sunDir[2] = p.m_renderWorld.sunDirection.z;
+        glm::vec3 matSunDir, matSunColor;
+        d3d11DominantDirectionalLight(p.m_renderWorld, matSunDir, matSunColor);
+        lit.sunDir[0] = matSunDir.x;
+        lit.sunDir[1] = matSunDir.y;
+        lit.sunDir[2] = matSunDir.z;
         // Engine seconds for the node graph's Time input (HE_SKY_TIME pins it for deterministic
         // headless captures, mirroring the sky clock + GL/D3D12/Vulkan exactly).
         static const char* s_timeOv = std::getenv("HE_SKY_TIME");
         lit.sunDir[3] = (s_timeOv && *s_timeOv)
             ? static_cast<float>(std::atof(s_timeOv))
             : static_cast<float>(SDL_GetTicks()) / 1000.0f;
-        const glm::vec3 sc = m_environment.sunColor;
-        lit.sunColor[0] = sc.r; lit.sunColor[1] = sc.g; lit.sunColor[2] = sc.b;
+        lit.sunColor[0] = matSunColor.r; lit.sunColor[1] = matSunColor.g; lit.sunColor[2] = matSunColor.b;
         lit.ambient[0] = p.m_renderWorld.ambient.r;
         lit.ambient[1] = p.m_renderWorld.ambient.g;
         lit.ambient[2] = p.m_renderWorld.ambient.b;
         lit.camPos[0] = p.m_renderWorld.camera.position.x;
         lit.camPos[1] = p.m_renderWorld.camera.position.y;
         lit.camPos[2] = p.m_renderWorld.camera.position.z;
+        // Full light window for heLitP() — same first-8 order as the built-in
+        // shaders (keep the backend copies of this fill in sync).
+        {
+            const int lc = std::min(static_cast<int>(p.m_renderWorld.lights.size()), 8);
+            for (int li = 0; li < lc; ++li)
+            {
+                const LightData& ld = p.m_renderWorld.lights[li];
+                lit.lightPos[li][0] = ld.position.x;  lit.lightPos[li][1] = ld.position.y;
+                lit.lightPos[li][2] = ld.position.z;  lit.lightPos[li][3] = static_cast<float>(ld.type);
+                lit.lightDir[li][0] = ld.direction.x; lit.lightDir[li][1] = ld.direction.y;
+                lit.lightDir[li][2] = ld.direction.z; lit.lightDir[li][3] = ld.spotAngleCos;
+                lit.lightColor[li][0] = ld.color.r;   lit.lightColor[li][1] = ld.color.g;
+                lit.lightColor[li][2] = ld.color.b;   lit.lightColor[li][3] = ld.intensity;
+                lit.lightParams[li][0] = ld.range;
+            }
+            lit.counts[0] = static_cast<float>(lc);
+        }
+        lit.giParams[0] = static_cast<float>(width);
+        lit.giParams[1] = static_cast<float>(height);
+        lit.giParams[2] = giActive ? 1.0f : 0.0f;
+        // csmSplits stays 0 — D3D11 has a single shadow map, no cascade array,
+        // so the preamble's heCsmShadow() fallback is inert here.
         D3D11_MAPPED_SUBRESOURCE lm{};
         if (SUCCEEDED(ctx->Map(p.m_matLightCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &lm)))
         {
             std::memcpy(lm.pData, &lit, sizeof(lit));
             ctx->Unmap(p.m_matLightCB.Get(), 0);
         }
-    }
+    };
+    fillMatLight(false);
 #endif
 
     const UINT stride = 8 * sizeof(float);
@@ -3162,8 +4349,33 @@ void D3D11Renderer::DrawScene(int width, int height)
         for (const DrawCall& dc : cmds.drawCalls())
             (dc.opacity < 0.999f ? transparentDCs_ : opaqueDCs_).push_back(&dc);
 
+        // ── Ray-traced GI (software BVH): shadow mask + probe update, BEFORE
+        // SSAO — when GI shades, SSAO is skipped entirely (probe indirect
+        // replaces AO, the ray mask replaces the shadow-map lookup).
+        ID3D11ShaderResourceView* giShadowSRV = nullptr;
+        bool giShadingActive = false;
+        if (p.giEnabled && p.giSupported && p.giInstanceCount > 0)
+        {
+            ComPtr<ID3D11RenderTargetView> savedRTV;
+            ComPtr<ID3D11DepthStencilView> savedDSV;
+            ctx->OMGetRenderTargets(1, savedRTV.GetAddressOf(), savedDSV.GetAddressOf());
+
+            giShadowSRV = p.runGiShadow(ctx, opaqueDCs_, viewProj,
+                std::max(1, width / 2), std::max(1, height / 2), p.m_renderWorld,
+                [&](HE::UUID id) -> const GpuMesh* { return p.resolveMesh(id, m_contentManager); },
+                p.cube, p.inputLayout.Get(), p.depthState.Get(), p.rasterState.Get());
+            if (giShadowSRV)
+                p.dispatchGiProbeUpdate(ctx, p.m_renderWorld);
+            giShadingActive = giShadowSRV && p.giIrrSRV && p.giVisSRV && p.giProbeGridBuilt;
+
+            ID3D11RenderTargetView* restRTV = savedRTV.Get();
+            ctx->OMSetRenderTargets(1, &restRTV, savedDSV.Get());
+            D3D11_VIEWPORT vp{}; vp.Width = float(width); vp.Height = float(height); vp.MaxDepth = 1.0f;
+            ctx->RSSetViewports(1, &vp);
+        }
+
         ID3D11ShaderResourceView* aoSRV = p.whiteSRV.Get(); // default: unoccluded
-        if (p.ssaoEnabled && p.ssaoReady) {
+        if (!giShadingActive && p.ssaoEnabled && p.ssaoReady) {
             // Save and restore render target around SSAO passes
             ComPtr<ID3D11RenderTargetView> savedRTV;
             ComPtr<ID3D11DepthStencilView> savedDSV;
@@ -3198,6 +4410,35 @@ void D3D11Renderer::DrawScene(int width, int height)
         // AO SRV on t2, point sampler on s1
         ctx->PSSetSamplers(1, 1, p.pointSampler.GetAddressOf());
         ctx->PSSetShaderResources(2, 1, &aoSRV);
+        // GI mask + probe atlases on t4/t5/t6, linear-clamp sampler on s2
+        // (white fallbacks keep the SRVs valid when GI is off — the shader
+        // additionally gates on uGIParams.x). Refill both per-frame CBs with
+        // the final GI decision (they were filled before the passes ran).
+        {
+            ID3D11ShaderResourceView* giSrvs[3] = {
+                giShadingActive ? giShadowSRV       : p.whiteSRV.Get(),
+                giShadingActive ? p.giIrrSRV.Get()  : p.whiteSRV.Get(),
+                giShadingActive ? p.giVisSRV.Get()  : p.whiteSRV.Get() };
+            ctx->PSSetShaderResources(4, 3, giSrvs);
+            if (p.giLinearClamp)
+                ctx->PSSetSamplers(2, 1, p.giLinearClamp.GetAddressOf());
+            fillPerFrame(giShadingActive,
+                         !giShadingActive && p.ssaoEnabled && p.ssaoReady && aoSRV != p.whiteSRV.Get());
+#if defined(HE_HAVE_SHADERC)
+            fillMatLight(giShadingActive);
+            // heLitP GI masks for graph materials: sun mask on t10, per-light
+            // local mask on t11 (white until D3D grows one — giParams.z gates
+            // sampling anyway). Samplers s10/s11 = linear clamp.
+            ID3D11ShaderResourceView* matMasks[2] = {
+                giShadingActive ? giShadowSRV : p.whiteSRV.Get(), p.whiteSRV.Get() };
+            ctx->PSSetShaderResources(10, 2, matMasks);
+            if (p.giLinearClamp)
+            {
+                ID3D11SamplerState* matSamps[2] = { p.giLinearClamp.Get(), p.giLinearClamp.Get() };
+                ctx->PSSetSamplers(10, 2, matSamps);
+            }
+#endif
+        }
 
         const glm::vec3 camPos = p.m_renderWorld.camera.position;
 
@@ -3330,10 +4571,11 @@ void D3D11Renderer::DrawScene(int width, int height)
 
                         // ── CRITICAL: restore scene state for subsequent built-in draws ───
                         // The material path clobbered: VS/PS/IL, VS b1 (was perFrameCB, overwritten
-                        // by U), PS b0 (was perObjectCB, overwritten by HeLighting), and PS t2 (was
-                        // aoSRV, overwritten by heTex0). Slots the scene never reads (VS b8/b9, PS b3,
-                        // PS t4..t7, s2/s4..s7) are left as-is — harmless. VS b0 / PS b0 (perObject)
-                        // and t0 (albedo) are re-bound per draw by the built-in path, but PS b0 is
+                        // by U), PS b0 (was perObjectCB, overwritten by HeLighting), PS t2 (was
+                        // aoSRV, overwritten by heTex0), and — since the GI port — PS t4..t6 +
+                        // s2, which the built-in scene shader now reads (GI mask + probe
+                        // atlases + linear-clamp sampler). VS b0 / PS b0 (perObject) and t0
+                        // (albedo) are re-bound per draw by the built-in path, but PS b0 is
                         // restored here too since HeLighting overwrote it.
                         ctx->VSSetShader(p.vs.Get(), nullptr, 0);
                         ctx->PSSetShader(p.ps.Get(), nullptr, 0);
@@ -3341,6 +4583,15 @@ void D3D11Renderer::DrawScene(int width, int height)
                         ctx->VSSetConstantBuffers(1, 1, p.perFrameCB.GetAddressOf());
                         ctx->PSSetConstantBuffers(0, 1, p.perObjectCB.GetAddressOf());
                         ctx->PSSetShaderResources(2, 1, &aoSRV); // t2 = AO (unoccluded white when off)
+                        {
+                            ID3D11ShaderResourceView* giSrvs[3] = {
+                                giShadingActive ? giShadowSRV      : p.whiteSRV.Get(),
+                                giShadingActive ? p.giIrrSRV.Get() : p.whiteSRV.Get(),
+                                giShadingActive ? p.giVisSRV.Get() : p.whiteSRV.Get() };
+                            ctx->PSSetShaderResources(4, 3, giSrvs);
+                            if (p.giLinearClamp)
+                                ctx->PSSetSamplers(2, 1, p.giLinearClamp.GetAddressOf());
+                        }
                         return;
                     }
                 }
@@ -3610,7 +4861,26 @@ void D3D11Renderer::Render()
     p.swapchain->Present(p.vsync ? 1 : 0, 0);
 }
 
-IRenderer::Capabilities D3D11Renderer::GetCapabilities() const { return { true, m_impl->postFxReady, false }; }
+IRenderer::Capabilities D3D11Renderer::GetCapabilities() const
+{
+    Capabilities c{};
+    c.supportsShadows        = true;
+    c.supportsPostProcessing = m_impl->postFxReady;
+    c.supportsHDR            = false;
+    // Software ray-traced DDGI via CS 5.0 (FL 11.0 baseline) — same CPU-BVH
+    // path as GL 4.3/Vulkan; cleared if the GI shaders fail to compile.
+    c.supportsGlobalIllumination = m_impl->giSupported;
+    return c;
+}
+
+void D3D11Renderer::SetGISettings(const GISettings& s)
+{
+    auto& p = *m_impl;
+    p.giEnabled             = s.enabled && p.giSupported;
+    p.giIndirectIntensity   = std::max(0.0f, s.indirectIntensity);
+    p.giLightRadius         = std::clamp(s.lightRadius, 0.0f, 10.0f);
+    p.giProbeBudgetPerFrame = std::clamp(s.probeBudgetPerFrame, 1, 4096);
+}
 
 void D3D11Renderer::SetViewportSize(uint32_t width, uint32_t height)
 {

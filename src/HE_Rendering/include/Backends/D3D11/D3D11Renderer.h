@@ -34,6 +34,8 @@ public:
     void SetMoonTexture(const void* rgba8Pixels, int width, int height) override;
     void SetSSAOSettings(const SSAOSettings& settings) override;
     void SetBloomSettings(const BloomSettings& settings) override;
+    // Software ray-traced DDGI (CPU BVH + CS 5.0) — mirrors the GL 4.3/Vulkan port.
+    void SetGISettings(const GISettings& settings) override;
 
     // Editor material/mesh hot-reload: drop the cached override-material texture / mesh
     // GPU state so the next frame re-resolves it from the ContentManager (mirrors GL/Metal).
