@@ -387,9 +387,75 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 	// Material INSTANCES derive their effective shader/params from their parent —
 	// runs after the registry maps above so the recursive parent load is safe.
 	if (type == HE::AssetType::Material)
+	{
 		if (const MaterialAsset* m = getMaterial(id); m && !m->parentMaterialPath.empty())
 			syncMaterialInstance(id);
+		// BASE materials with a node graph: regenerate the baked GLSL from the graph
+		// (the source of truth) so assets saved under an older codegen automatically
+		// pick up shader-library upgrades (e.g. heLit → heLitP shadowing) without a
+		// manual re-save. Skipped when precompiled per-backend blobs are present
+		// (packed builds — the blobs were compiled from the baked GLSL and must
+		// stay consistent with it).
+		else if (m && !m->nodeGraphJson.empty() && m->precompiledShaders.empty())
+			regenerateMaterialFromGraph(id);
+	}
 	return id;
+}
+
+// Re-run the graph → GLSL codegen for a BASE material at load time. Mirrors
+// syncMaterialInstance's regeneration half: param VALUES are preserved by name
+// (users edit values without recompiling, so the baked shaderParamData can
+// legitimately differ from the graph's node defaults).
+void ContentManager::regenerateMaterialFromGraph(HE::UUID materialId)
+{
+	MaterialAsset* mat = getMaterialMutable(materialId);
+	if (!mat || mat->nodeGraphJson.empty()) return;
+
+	HE::MaterialGraph g;
+	if (!HE::materialGraphFromJson(mat->nodeGraphJson, g)) return;
+
+	std::map<std::string, std::array<float, 4>> oldValues;
+	for (size_t i = 0; i < mat->graphParamNames.size(); ++i)
+		if (i * 4 + 3 < mat->shaderParamData.size())
+			oldValues[mat->graphParamNames[i]] = { mat->shaderParamData[i*4+0],
+				mat->shaderParamData[i*4+1], mat->shaderParamData[i*4+2],
+				mat->shaderParamData[i*4+3] };
+
+	// Function graphs resolve through this manager; storage must outlive the call.
+	std::map<std::string, HE::MaterialGraph> fnStore;
+	HE::MatFunctionLoader loader = [&](const std::string& path) -> const HE::MaterialGraph*
+	{
+		if (auto it = fnStore.find(path); it != fnStore.end()) return &it->second;
+		const MaterialFunctionAsset* fn = getMaterialFunction(loadAsset(path));
+		if (!fn || fn->nodeGraphJson.empty()) return nullptr;
+		HE::MaterialGraph fg;
+		if (!HE::materialGraphFromJson(fn->nodeGraphJson, fg)) return nullptr;
+		return &(fnStore[path] = std::move(fg));
+	};
+	const HE::MatShaderGen gen = HE::generateFragment(g, loader, nullptr);
+	if (gen.glsl.empty()) return;
+
+	mat->customShaderFragGlsl = gen.glsl;
+	mat->customShaderVertGlsl = gen.vertexBody;
+	mat->blendMode            = gen.blendMode;
+	mat->graphTexturePaths    = gen.textures;
+	mat->graphParamNames.clear(); mat->graphParamTypes.clear();
+	mat->graphParamMinMax.clear(); mat->graphParamGroups.clear();
+	mat->graphParamTooltips.clear(); mat->shaderParamData.clear();
+	for (const auto& slot : gen.params)
+	{
+		mat->graphParamNames.push_back(slot.name);
+		mat->graphParamTypes.push_back(static_cast<uint8_t>(slot.kind));
+		mat->graphParamMinMax.insert(mat->graphParamMinMax.end(), { slot.minV, slot.maxV });
+		mat->graphParamGroups.push_back(slot.group);
+		mat->graphParamTooltips.push_back(slot.tooltip);
+		if (auto it = oldValues.find(slot.name); it != oldValues.end())
+			mat->shaderParamData.insert(mat->shaderParamData.end(),
+			                            it->second.begin(), it->second.end());
+		else
+			mat->shaderParamData.insert(mat->shaderParamData.end(),
+			                            slot.value, slot.value + 4);
+	}
 }
 
 // ─── Material instances ───────────────────────────────────────────────────────

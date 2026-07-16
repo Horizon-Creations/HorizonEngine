@@ -112,6 +112,10 @@ public:
 	// from the parent's graph with the override map (a distinct permutation). Called
 	// automatically when an instance loads; call again after editing the parent.
 	void syncMaterialInstance(HE::UUID instanceId);
+
+	// Regenerate a BASE material's baked GLSL from its node graph (load-time codegen
+	// refresh — old assets pick up shader-library upgrades; param values kept by name).
+	void regenerateMaterialFromGraph(HE::UUID materialId);
 	// Sync every LOADED instance whose parentMaterialPath == parentRelPath (live
 	// master→variants propagation while editing).
 	void syncMaterialInstancesOf(const std::string& parentRelPath);

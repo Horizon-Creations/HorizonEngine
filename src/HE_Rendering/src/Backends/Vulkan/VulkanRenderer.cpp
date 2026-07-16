@@ -1838,11 +1838,27 @@ void VulkanRenderer::createMaterialResources()
         return;
     }
 
+    // 1-layer 2D-ARRAY view over the white image for the heCsm default (binding 12).
+    // viewType 2D_ARRAY over a plain VK_IMAGE_TYPE_2D image with layerCount 1 is legal.
+    {
+        VkImageViewCreateInfo vci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+        vci.image            = m_whiteAlbedoImage;
+        vci.viewType         = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+        vci.format           = VK_FORMAT_R8G8B8A8_UNORM;
+        vci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        if (vkCreateImageView(m_device, &vci, nullptr, &m_whiteArrayView) != VK_SUCCESS)
+        {
+            Logger::Log(Logger::LogLevel::Warning,
+                "VulkanRenderer: A4 material path disabled — white array view failed");
+            return;
+        }
+    }
+
     // ── Descriptor set 0 layout: canonical bindings 0-7 (matches the generated SPIR-V)
     //    + 8/9 for the WPO custom vertex, which reads HeLighting/HeParams in the VERTEX
     //    stage at those slots (MaterialShaderLibrary.cpp kWpoUniforms). Extra bindings are
     //    harmless for the standard (non-WPO) vertex, which references none of them. ──
-    VkDescriptorSetLayoutBinding b[12]{};
+    VkDescriptorSetLayoutBinding b[13]{};
     auto setB = [&](int i, uint32_t binding, VkDescriptorType type, VkShaderStageFlags stage) {
         b[i].binding = binding; b[i].descriptorType = type; b[i].descriptorCount = 1; b[i].stageFlags = stage;
     };
@@ -1858,8 +1874,9 @@ void VulkanRenderer::createMaterialResources()
     setB(9, 9, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         VK_SHADER_STAGE_VERTEX_BIT);   // HeParams   (WPO VS)
     setB(10, 10, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heGIShadow (GI sun mask)
     setB(11, 11, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heGILocal (GI local mask)
+    setB(12, 12, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heCsm (CSM fallback, 2D array)
     VkDescriptorSetLayoutCreateInfo slci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-    slci.bindingCount = 12;
+    slci.bindingCount = 13;
     slci.pBindings    = b;
     if (vkCreateDescriptorSetLayout(m_device, &slci, nullptr, &m_matSetLayout) != VK_SUCCESS)
     {
@@ -1900,7 +1917,7 @@ void VulkanRenderer::createMaterialResources()
     {
         VkDescriptorPoolSize ps[2] = {
             { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         5u * k_matMaxDraws }, // b0,b1,b3,b8,b9
-            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 7u * k_matMaxDraws }, // b2,b4-b7,b10,b11
+            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 8u * k_matMaxDraws }, // b2,b4-b7,b10-b12
         };
         VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
         dpci.maxSets       = k_matMaxDraws;
@@ -1911,7 +1928,11 @@ void VulkanRenderer::createMaterialResources()
             Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: A4 material descriptor pool failed");
             return;
         }
-        if (!makeBuf(64, m_matLightBuf[f]) || !makeBuf(ringSize, m_matObjBuf[f]) || !makeBuf(ringSize, m_matParBuf[f]))
+        // NOTE: sized to the FULL Lighting struct — this was 64 (the v1 sun-only
+        // block) while the fill site memcpy'd sizeof(Lighting), overflowing the
+        // mapped allocation ever since the v2 8-light window landed.
+        if (!makeBuf(sizeof(HE::MaterialShaderLibrary::Lighting), m_matLightBuf[f])
+            || !makeBuf(ringSize, m_matObjBuf[f]) || !makeBuf(ringSize, m_matParBuf[f]))
         {
             Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: A4 material UBO ring allocation failed");
             return;
@@ -1944,6 +1965,7 @@ void VulkanRenderer::destroyMaterialResources()
     }
     if (m_matPipelineLayout) { vkDestroyPipelineLayout(m_device, m_matPipelineLayout, nullptr); m_matPipelineLayout = VK_NULL_HANDLE; }
     if (m_matSetLayout)      { vkDestroyDescriptorSetLayout(m_device, m_matSetLayout, nullptr); m_matSetLayout = VK_NULL_HANDLE; }
+    if (m_whiteArrayView)    { vkDestroyImageView(m_device, m_whiteArrayView, nullptr);         m_whiteArrayView = VK_NULL_HANDLE; }
 #endif
 }
 
@@ -3711,7 +3733,8 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             if (vkAllocateDescriptorSets(m_device, &dsai, &set) != VK_SUCCESS) return;
 
                             const VkDeviceSize slot = static_cast<VkDeviceSize>(i) * k_matSlotStride;
-                            VkDescriptorBufferInfo lightBI{ m_matLightBuf[m_currentFrame].buf, 0, 64 };
+                            VkDescriptorBufferInfo lightBI{ m_matLightBuf[m_currentFrame].buf, 0,
+                                                            sizeof(HE::MaterialShaderLibrary::Lighting) };
                             VkDescriptorBufferInfo objBI  { m_matObjBuf[m_currentFrame].buf, slot, 176 };
                             VkDescriptorBufferInfo parBI  { m_matParBuf[m_currentFrame].buf, slot, 256 };
                             // heTex0 = the material's base texture: an override material's texture
@@ -3726,7 +3749,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             // (needs a UUID→view cache); bound to the white default for now.
                             VkDescriptorImageInfo whiteII{ m_albedoSampler, m_whiteAlbedoView,
                                                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-                            VkWriteDescriptorSet w[12]{};
+                            VkWriteDescriptorSet w[13]{};
                             auto wr = [&](int idx, uint32_t binding, VkDescriptorType type,
                                           const VkDescriptorBufferInfo* bi, const VkDescriptorImageInfo* ii) {
                                 w[idx].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -3756,7 +3779,15 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                                                                       : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
                             wr(10, 10, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &giSunII);
                             wr(11, 11, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &whiteII);
-                            vkUpdateDescriptorSets(m_device, 12, w, 0, nullptr);
+                            // heCsm (binding 12, sampler2DArray): Vulkan's shadow map is a
+                            // single 2D map, so the CSM fallback stays off (csmSplits.w = 0)
+                            // and the 1-layer white ARRAY view keeps the descriptor valid —
+                            // a 2D view here would fail validation against the arrayed image
+                            // type in the SPIR-V.
+                            VkDescriptorImageInfo csmII{ m_albedoSampler, m_whiteArrayView,
+                                                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                            wr(12, 12, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &csmII);
+                            vkUpdateDescriptorSets(m_device, 13, w, 0, nullptr);
 
                             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, matPipe);
                             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,

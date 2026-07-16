@@ -3519,6 +3519,11 @@ unsigned int OpenGLRenderer::getOrBuildMaterialProgram(uint64_t key, const std::
 		// by the material/scene inputs).
 		if (GLint l = glGetUniformLocation(prog, "heGIShadow"); l >= 0) glUniform1i(l, 9);
 		if (GLint l = glGetUniformLocation(prog, "heGILocal");  l >= 0) glUniform1i(l, 10);
+		// heCsm (CSM fallback, sampler2DArray) — unit 11. GL keeps csmSplits.w = 0
+		// (single shadow map, never sampled), but the unit MUST be assigned: left
+		// at 0 it would alias heTex0's unit with a different sampler type, which
+		// is a draw-time validation error on strict drivers.
+		if (GLint l = glGetUniformLocation(prog, "heCsm");      l >= 0) glUniform1i(l, 11);
 		glUseProgram(0);
 	};
 
@@ -3691,6 +3696,8 @@ unsigned int OpenGLRenderer::getOrBuildUIMaterialProgram(const HE::UUID& materia
 			// giParams.z stays 0 on the UI path, but the units must be assigned).
 			if (GLint l = glGetUniformLocation(prog, "heGIShadow"); l >= 0) glUniform1i(l, 9);
 			if (GLint l = glGetUniformLocation(prog, "heGILocal");  l >= 0) glUniform1i(l, 10);
+			// heCsm — unit 11, same aliasing rationale as the mesh-material path.
+			if (GLint l = glGetUniformLocation(prog, "heCsm");      l >= 0) glUniform1i(l, 11);
 			glUseProgram(0);
 			program = prog;
 		}

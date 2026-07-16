@@ -108,6 +108,9 @@ layout(std140, set = 0, binding = 0) uniform HeLighting {
     vec4 lightParams[8]; // x = range
     vec4 counts;         // x = light count
     vec4 giParams;       // xy = viewport, z = GI masks valid (heLitP samples them)
+    mat4 csmVP[3];       // CSM fallback: per-cascade light view-proj (conventions pre-baked)
+    vec4 csmSplits;      // xyz = planar view-space far distances; w = cascade count (0 = off)
+    vec4 camFwd;         // xyz = camera forward (planar cascade selection)
 } heLight;
 // Screen-space ray-traced shadow masks (GI): sun visibility (.r) + local-light
 // visibility (one channel per the first 4 point/spot lights). Bindings 10/11 —
@@ -115,18 +118,59 @@ layout(std140, set = 0, binding = 0) uniform HeLighting {
 // white when GI is off; heLight.giParams.z additionally gates the samples.
 layout(set = 0, binding = 10) uniform sampler2D heGIShadow;
 layout(set = 0, binding = 11) uniform sampler2D heGILocal;
+// CSM depth array (binding 12): the SAME cascade shadow map the built-in PBR
+// shaders sample, so graph materials are shadowed identically when GI is off.
+// Backends without a cascade array bind a dummy and keep csmSplits.w = 0.
+layout(set = 0, binding = 12) uniform sampler2DArray heCsm;
+// Screen-space GI sun-visibility for the current fragment (1 = fully lit).
+// gl_FragCoord-based, so even the legacy worldPos-less heLit() can use it.
+float heGISun() {
+    if (heLight.giParams.z <= 0.5) return 1.0;
+    return texture(heGIShadow, gl_FragCoord.xy / max(heLight.giParams.xy, vec2(1.0))).r;
+}
+// CSM visibility — mirror of the built-in shaders' shadowFactor(): planar
+// view-distance cascade pick, normal-offset + slope-scaled bias, 3x3 PCF with
+// manual depth compare. The fill site pre-bakes clip conventions into csmVP.
+float heCsmShadow(vec3 worldPos, vec3 n, vec3 L) {
+    int count = int(heLight.csmSplits.w);
+    if (count < 1) return 1.0;
+    float viewDist = dot(worldPos - heLight.camPos.xyz, heLight.camFwd.xyz);
+    int c = count - 1;
+    if      (count > 0 && viewDist < heLight.csmSplits.x) c = 0;
+    else if (count > 1 && viewDist < heLight.csmSplits.y) c = 1;
+    else if (count > 2 && viewDist < heLight.csmSplits.z) c = 2;
+    c = clamp(c, 0, 2);
+    vec4 lp = heLight.csmVP[c] * vec4(worldPos + n * (0.06 * float(c + 1)), 1.0);
+    vec3 p  = lp.xyz / lp.w;
+    vec2 uv = p.xy * 0.5 + 0.5;
+    vec2 texel = 1.0 / vec2(textureSize(heCsm, 0).xy);
+    if (p.z > 1.0 || any(lessThan(uv, texel)) || any(greaterThan(uv, vec2(1.0) - texel)))
+        return 1.0;
+    float ndl  = clamp(dot(n, L), 0.0, 1.0);
+    float bias = clamp(0.0008 * tan(acos(ndl)), 0.0002, 0.02) * float(c + 1);
+    float vis = 0.0;
+    for (int y = -1; y <= 1; ++y)
+        for (int x = -1; x <= 1; ++x) {
+            float cd = texture(heCsm, vec3(uv + vec2(x, y) * texel, float(c))).r;
+            vis += (p.z - bias > cd) ? 0.0 : 1.0;
+        }
+    return vis / 9.0;
+}
 // Legacy sun-only shading — kept so precompiled material blobs and hand-written
-// escape-hatch fragments that call heLit() keep working unchanged.
+// escape-hatch fragments that call heLit() keep working unchanged. Has no
+// worldPos, so it can't project into the CSM — but the GI sun mask is pure
+// screen-space, so ray-traced occlusion applies here too.
 vec3 heLit(vec3 baseColor, vec3 N, float metallic, float roughness) {
     vec3  L    = normalize(heLight.sunDir.xyz);
     vec3  n    = normalize(N);
     float ndl  = max(dot(n, L), 0.0);
+    float sh   = heGISun();
     vec3  diff = baseColor * heLight.sunColor.rgb * ndl;
     vec3  amb  = baseColor * heLight.ambient.rgb;
     // cheap roughness-driven spec toward the sun (view ≈ +Z in this simple model)
     vec3  H    = normalize(L + vec3(0.0, 0.0, 1.0));
     float spec = pow(max(dot(n, H), 0.0), mix(4.0, 64.0, 1.0 - roughness)) * (1.0 - roughness);
-    return amb + diff + heLight.sunColor.rgb * spec * mix(0.04, 1.0, metallic);
+    return amb + (diff + heLight.sunColor.rgb * spec * mix(0.04, 1.0, metallic)) * sh;
 }
 // Full-scene-lights shading (M2 Standard Lit v2): ambient + all 8 window lights
 // with the SAME attenuation/cone model as the built-in PBR shaders. Needs the
@@ -160,7 +204,9 @@ vec3 heLitP(vec3 baseColor, vec3 N, float metallic, float roughness, vec3 worldP
         // Ray-traced screen-space shadows (GI): directional lights share the
         // temporally-accumulated sun mask, the first 4 local lights read their
         // channel of the hard-shadow mask — same convention as the built-in
-        // PBR shaders, so graph materials receive the same shadowing.
+        // PBR shaders, so graph materials receive the same shadowing. When the
+        // GI masks are absent, directional lights fall back to the cascaded
+        // shadow map (heCsmShadow) exactly like the built-in PBR pipeline.
         float sh = 1.0;
         if (heLight.giParams.z > 0.5)
         {
@@ -174,6 +220,10 @@ vec3 heLitP(vec3 baseColor, vec3 N, float metallic, float roughness, vec3 worldP
                 vec4 lm = texture(heGILocal, giUV);
                 sh = lm[localIdx];
             }
+        }
+        else if (type == 0)
+        {
+            sh = heCsmShadow(worldPos, n, L);
         }
         if (type != 0) localIdx++;
         float ndl  = max(dot(n, L), 0.0);
@@ -419,7 +469,10 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragment(
               // the standard pipeline's GI slots (5-8), so both pipelines can
               // share one encoder without rebinding.
               { Stage::Fragment, 0, 10, 9 },
-              { Stage::Fragment, 0, 11, 10 } }));
+              { Stage::Fragment, 0, 11, 10 },
+              // CSM depth array for the GI-off fallback (preamble binding 12)
+              // → MSL texture/sampler 11 (next free slot after the GI masks).
+              { Stage::Fragment, 0, 12, 11 } }));
     }
     else
     {

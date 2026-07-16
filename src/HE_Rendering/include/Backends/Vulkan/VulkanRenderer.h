@@ -226,6 +226,10 @@ private:
 	VkDeviceMemory  m_whiteAlbedoMem   = VK_NULL_HANDLE;
 	VkImageView     m_whiteAlbedoView  = VK_NULL_HANDLE;
 	VkDescriptorSet m_whiteAlbedoSet   = VK_NULL_HANDLE;
+	// 1-layer 2D-ARRAY view over the same white image — the material preamble's
+	// heCsm sampler is arrayed (sampler2DArray), so its default descriptor must
+	// be an array view (a plain 2D view fails validation against that SPIR-V).
+	VkImageView     m_whiteArrayView   = VK_NULL_HANDLE;
 
 	// ── MaterialComponent override + hot-reload (A2) ─────────────────────────
 	// Override-material textures cached by material UUID (parallel to the baked per-mesh
