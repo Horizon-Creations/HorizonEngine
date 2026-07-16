@@ -1304,7 +1304,23 @@ fragment float4 giShadowTemporal(GIFsOut in [[stage_in]],
 	const float posError = length(pv.xyz - hist.rgb);
 	const float tolerance = clamp(0.02 * clip.w, 0.01, 0.06);
 	const float w = (posError < tolerance) ? clamp(P.blend.x, 0.0, 0.98) : 0.0;
-	float result = mix(rawV, hist.a, w);
+	// Neighbourhood clamp: the position check above only guards RECEIVER
+	// motion — when the OCCLUDER moves, the receiving surface is unchanged and
+	// stale history blends in at 0.9, smearing the old shadow across the floor
+	// for ~30 frames. Clamping history to the current frame's 3x3 raw
+	// neighbourhood bounds it by present reality: a moved shadow edge updates
+	// within 1-2 frames, while static-noise smoothing is unaffected (the
+	// neighbourhood spans the jitter noise range anyway).
+	const float2 texel = 1.0 / float2(raw.get_width(), raw.get_height());
+	float nMin = rawV, nMax = rawV;
+	for (int x = -1; x <= 1; ++x)
+		for (int y = -1; y <= 1; ++y)
+		{
+			const float r = raw.sample(smp, in.uv + float2(float(x), float(y)) * texel).r;
+			nMin = min(nMin, r);
+			nMax = max(nMax, r);
+		}
+	float result = mix(rawV, clamp(hist.a, nMin, nMax), w);
 	return float4(pv.xyz, result);
 }
 
@@ -1505,7 +1521,26 @@ kernel void giProbeUpdate(uint2 texel   [[thread_position_in_threadgroup]],
 		// physically exact — see EncodeGIProbeUpdate's header comment.
 		const float3 hitNormal = -dir;
 		dist = q.get_committed_distance();
-		const float ndl = max(dot(hitNormal, P.sunDirRadius.xyz), 0.0);
+		float ndl = max(dot(hitNormal, P.sunDirRadius.xyz), 0.0);
+		// Secondary shadow ray: without it every hit surface counts as fully
+		// sun-lit, so probes flood shadowed regions (e.g. under a large
+		// occluder) with bright sun bounce — objects inside a shadow volume
+		// visibly glow. One occlusion ray per texel fixes the estimate.
+		if (ndl > 0.0)
+		{
+			ray sr;
+			sr.origin       = probePos + dir * dist + hitNormal * 0.05;
+			sr.direction    = P.sunDirRadius.xyz;
+			sr.min_distance = 0.02;
+			sr.max_distance = 10000.0;
+			intersection_params sparams;
+			sparams.accept_any_intersection(true);
+			intersection_query<triangle_data, instancing> sq;
+			sq.reset(sr, accel, sparams);
+			sq.next();
+			if (sq.get_committed_intersection_type() != intersection_type::none)
+				ndl = 0.0;
+		}
 		radiance = albedo * P.sunColor.rgb * ndl;
 		// Local (point/spot) lights bounce too — attenuation matches
 		// fragmentMain's direct model ((1 - d/range)^2 + spot cone smoothstep).
@@ -1776,9 +1811,14 @@ kernel void giProbeUpdateSw(uint2 texel   [[thread_position_in_threadgroup]],
 	{
 		const float3 albedo    = insts[hitInst].baseColor.rgb;
 		const float3 hitNormal = -dir;
-		const float ndl = max(dot(hitNormal, P.sunDirRadius.xyz), 0.0);
-		radiance = albedo * P.sunColor.rgb * ndl;
 		const float3 hitPos = probePos + dir * dist;
+		float ndl = max(dot(hitNormal, P.sunDirRadius.xyz), 0.0);
+		// Secondary shadow ray (see the HW kernel's comment): hit surfaces are
+		// no longer assumed fully sun-lit.
+		if (ndl > 0.0 && giSceneAnyHit(nodes, tris, insts, instCount,
+		                               hitPos + hitNormal * 0.05, P.sunDirRadius.xyz, 0.02, 10000.0))
+			ndl = 0.0;
+		radiance = albedo * P.sunColor.rgb * ndl;
 		const int lightCount = int(P.sunDirRadius.w);
 		for (int i = 0; i < lightCount; ++i)
 		{
