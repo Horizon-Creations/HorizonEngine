@@ -1842,7 +1842,7 @@ void VulkanRenderer::createMaterialResources()
     //    + 8/9 for the WPO custom vertex, which reads HeLighting/HeParams in the VERTEX
     //    stage at those slots (MaterialShaderLibrary.cpp kWpoUniforms). Extra bindings are
     //    harmless for the standard (non-WPO) vertex, which references none of them. ──
-    VkDescriptorSetLayoutBinding b[10]{};
+    VkDescriptorSetLayoutBinding b[12]{};
     auto setB = [&](int i, uint32_t binding, VkDescriptorType type, VkShaderStageFlags stage) {
         b[i].binding = binding; b[i].descriptorType = type; b[i].descriptorCount = 1; b[i].stageFlags = stage;
     };
@@ -1856,8 +1856,10 @@ void VulkanRenderer::createMaterialResources()
     setB(7, 7, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heTexP3
     setB(8, 8, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         VK_SHADER_STAGE_VERTEX_BIT);   // HeLighting (WPO VS)
     setB(9, 9, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         VK_SHADER_STAGE_VERTEX_BIT);   // HeParams   (WPO VS)
+    setB(10, 10, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heGIShadow (GI sun mask)
+    setB(11, 11, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heGILocal (GI local mask)
     VkDescriptorSetLayoutCreateInfo slci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-    slci.bindingCount = 10;
+    slci.bindingCount = 12;
     slci.pBindings    = b;
     if (vkCreateDescriptorSetLayout(m_device, &slci, nullptr, &m_matSetLayout) != VK_SUCCESS)
     {
@@ -1898,7 +1900,7 @@ void VulkanRenderer::createMaterialResources()
     {
         VkDescriptorPoolSize ps[2] = {
             { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         5u * k_matMaxDraws }, // b0,b1,b3,b8,b9
-            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 5u * k_matMaxDraws }, // b2,b4,b5,b6,b7
+            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 7u * k_matMaxDraws }, // b2,b4-b7,b10,b11
         };
         VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
         dpci.maxSets       = k_matMaxDraws;
@@ -3579,6 +3581,9 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
             }
             lit.counts[0] = static_cast<float>(lc);
         }
+        lit.giParams[0] = static_cast<float>(width);
+        lit.giParams[1] = static_cast<float>(height);
+        lit.giParams[2] = m_giRanThisFrame ? 1.0f : 0.0f;
         lit.ambient[0] = m_renderWorld.ambient.r;
         lit.ambient[1] = m_renderWorld.ambient.g;
         lit.ambient[2] = m_renderWorld.ambient.b;
@@ -3721,7 +3726,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             // (needs a UUID→view cache); bound to the white default for now.
                             VkDescriptorImageInfo whiteII{ m_albedoSampler, m_whiteAlbedoView,
                                                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-                            VkWriteDescriptorSet w[10]{};
+                            VkWriteDescriptorSet w[12]{};
                             auto wr = [&](int idx, uint32_t binding, VkDescriptorType type,
                                           const VkDescriptorBufferInfo* bi, const VkDescriptorImageInfo* ii) {
                                 w[idx].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -3742,7 +3747,16 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             wr(7, 7, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &whiteII);
                             wr(8, 8, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         &lightBI, nullptr); // WPO VS
                             wr(9, 9, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         &parBI,   nullptr); // WPO VS
-                            vkUpdateDescriptorSets(m_device, 10, w, 0, nullptr);
+                            // GI screen-space masks for heLitP(): sun mask when GI ran this
+                            // frame (Vulkan's per-pixel LOCAL mask is pending — white until
+                            // it lands; giParams.z gates sampling anyway).
+                            VkDescriptorImageInfo giSunII{ m_albedoSampler,
+                                (m_giRanThisFrame && m_giResult.view) ? m_giResult.view : m_whiteAlbedoView,
+                                (m_giRanThisFrame && m_giResult.view) ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                                                                      : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                            wr(10, 10, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &giSunII);
+                            wr(11, 11, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &whiteII);
+                            vkUpdateDescriptorSets(m_device, 12, w, 0, nullptr);
 
                             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, matPipe);
                             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,

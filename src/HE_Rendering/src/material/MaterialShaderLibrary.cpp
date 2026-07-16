@@ -107,7 +107,14 @@ layout(std140, set = 0, binding = 0) uniform HeLighting {
     vec4 lightColor[8];  // rgb = colour, w = intensity
     vec4 lightParams[8]; // x = range
     vec4 counts;         // x = light count
+    vec4 giParams;       // xy = viewport, z = GI masks valid (heLitP samples them)
 } heLight;
+// Screen-space ray-traced shadow masks (GI): sun visibility (.r) + local-light
+// visibility (one channel per the first 4 point/spot lights). Bindings 10/11 —
+// 8/9 belong to the WPO custom vertex's UBOs (kWpoUniforms). Bound to 1x1
+// white when GI is off; heLight.giParams.z additionally gates the samples.
+layout(set = 0, binding = 10) uniform sampler2D heGIShadow;
+layout(set = 0, binding = 11) uniform sampler2D heGILocal;
 // Legacy sun-only shading — kept so precompiled material blobs and hand-written
 // escape-hatch fragments that call heLit() keep working unchanged.
 vec3 heLit(vec3 baseColor, vec3 N, float metallic, float roughness) {
@@ -130,6 +137,7 @@ vec3 heLitP(vec3 baseColor, vec3 N, float metallic, float roughness, vec3 worldP
     vec3 V = normalize(heLight.camPos.xyz - worldPos);
     vec3 result = baseColor * heLight.ambient.rgb;
     int count = int(heLight.counts.x);
+    int localIdx = 0; // counter over non-directional lights → local-mask channel
     for (int i = 0; i < count; ++i) {
         int   type  = int(heLight.lightPos[i].w);
         vec3  L;
@@ -149,11 +157,30 @@ vec3 heLitP(vec3 baseColor, vec3 N, float metallic, float roughness, vec3 worldP
                 atten *= smoothstep(cosCone, mix(cosCone, 1.0, 0.2), c);
             }
         }
+        // Ray-traced screen-space shadows (GI): directional lights share the
+        // temporally-accumulated sun mask, the first 4 local lights read their
+        // channel of the hard-shadow mask — same convention as the built-in
+        // PBR shaders, so graph materials receive the same shadowing.
+        float sh = 1.0;
+        if (heLight.giParams.z > 0.5)
+        {
+            vec2 giUV = gl_FragCoord.xy / max(heLight.giParams.xy, vec2(1.0));
+            if (type == 0)
+            {
+                sh = texture(heGIShadow, giUV).r;
+            }
+            else if (localIdx < 4)
+            {
+                vec4 lm = texture(heGILocal, giUV);
+                sh = lm[localIdx];
+            }
+        }
+        if (type != 0) localIdx++;
         float ndl  = max(dot(n, L), 0.0);
         vec3  H    = normalize(L + V);
         float spec = pow(max(dot(n, H), 0.0), mix(4.0, 64.0, 1.0 - roughness)) * (1.0 - roughness);
         vec3  lc   = heLight.lightColor[i].rgb * heLight.lightColor[i].a;
-        result += (baseColor * ndl + vec3(spec) * mix(0.04, 1.0, metallic)) * lc * atten;
+        result += (baseColor * ndl + vec3(spec) * mix(0.04, 1.0, metallic)) * lc * atten * sh;
     }
     return result;
 }
@@ -386,7 +413,13 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragment(
               { Stage::Fragment, 0, 4, 1 },
               { Stage::Fragment, 0, 5, 2 },
               { Stage::Fragment, 0, 6, 3 },
-              { Stage::Fragment, 0, 7, 4 } }));
+              { Stage::Fragment, 0, 7, 4 },
+              // GI screen-space shadow masks (preamble bindings 10/11) → MSL
+              // texture/sampler 9/10 — clear of the material textures (0-4) AND
+              // the standard pipeline's GI slots (5-8), so both pipelines can
+              // share one encoder without rebinding.
+              { Stage::Fragment, 0, 10, 9 },
+              { Stage::Fragment, 0, 11, 10 } }));
     }
     else
     {

@@ -3515,6 +3515,10 @@ unsigned int OpenGLRenderer::getOrBuildMaterialProgram(uint64_t key, const std::
 			const std::string nm = "heTexP" + std::to_string(k);
 			if (GLint l = glGetUniformLocation(prog, nm.c_str()); l >= 0) glUniform1i(l, k + 1);
 		}
+		// GI screen-space shadow masks for heLitP() — units 9/10 (0-8 are taken
+		// by the material/scene inputs).
+		if (GLint l = glGetUniformLocation(prog, "heGIShadow"); l >= 0) glUniform1i(l, 9);
+		if (GLint l = glGetUniformLocation(prog, "heGILocal");  l >= 0) glUniform1i(l, 10);
 		glUseProgram(0);
 	};
 
@@ -3683,6 +3687,10 @@ unsigned int OpenGLRenderer::getOrBuildUIMaterialProgram(const HE::UUID& materia
 				const std::string nm = "heTexP" + std::to_string(k);
 				if (GLint l = glGetUniformLocation(prog, nm.c_str()); l >= 0) glUniform1i(l, k + 1);
 			}
+			// GI masks for heLitP() — units 9/10 (UI materials never sample them:
+			// giParams.z stays 0 on the UI path, but the units must be assigned).
+			if (GLint l = glGetUniformLocation(prog, "heGIShadow"); l >= 0) glUniform1i(l, 9);
+			if (GLint l = glGetUniformLocation(prog, "heGILocal");  l >= 0) glUniform1i(l, 10);
 			glUseProgram(0);
 			program = prog;
 		}
@@ -6815,6 +6823,12 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		glBindTexture(GL_TEXTURE_2D, giShadingActive ? m_giIrrAtlas : m_whiteTex);
 		glActiveTexture(GL_TEXTURE7);
 		glBindTexture(GL_TEXTURE_2D, giShadingActive ? m_giVisAtlas : m_whiteTex);
+		// heLitP() masks (custom materials), units 9/10. The GL per-pixel
+		// LOCAL mask doesn't exist yet — white = unoccluded until it lands.
+		glActiveTexture(GL_TEXTURE9);
+		glBindTexture(GL_TEXTURE_2D, giShadingActive ? giShadowTex : m_whiteTex);
+		glActiveTexture(GL_TEXTURE10);
+		glBindTexture(GL_TEXTURE_2D, m_whiteTex);
 		glActiveTexture(GL_TEXTURE0);
 		PushGiSceneUniforms(m_giLocsUnlit, giShadingActive);
 
@@ -7095,6 +7109,9 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					lit.camPos[2] = m_renderWorld.camera.position.z;
 					lit.sunColor[0]=sc.r; lit.sunColor[1]=sc.g; lit.sunColor[2]=sc.b;
 					lit.ambient[0]=m_renderWorld.ambient.r; lit.ambient[1]=m_renderWorld.ambient.g; lit.ambient[2]=m_renderWorld.ambient.b;
+					lit.giParams[0] = static_cast<float>(pw);
+					lit.giParams[1] = static_cast<float>(ph);
+					lit.giParams[2] = giShadingActive ? 1.0f : 0.0f;
 					// Full light window for heLitP() — same first-8 order as the built-in
 					// PBR shaders (keep the three backend copies of this fill in sync).
 					{{
