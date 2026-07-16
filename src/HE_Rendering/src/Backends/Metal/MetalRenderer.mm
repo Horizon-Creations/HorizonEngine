@@ -7651,6 +7651,10 @@ void MetalRenderer::EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& v
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:9];
 	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giLocalMaskTex : m_dummyTexture) atIndex:10];
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:10];
+	// CSM array for the material preamble's GI-off fallback, pinned at 11
+	// (sampling gated by heLight.csmSplits.w — same convention as slot 1).
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)m_shadowDepthTex atIndex:11];
+	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:11];
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
 
 	constexpr int kMaxBones = 128;
@@ -7890,6 +7894,10 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:9];
 	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giLocalMaskTex : m_dummyTexture) atIndex:10];
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:10];
+	// CSM array for the material preamble's GI-off fallback, pinned at 11
+	// (sampling gated by heLight.csmSplits.w — same convention as slot 1).
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)m_shadowDepthTex atIndex:11];
+	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:11];
 
 	// ── Lights (clamped to the shader's 8) ──────────────────────────────────
 	// Kept at function scope so the transparency pass below can re-bind it after
@@ -7976,6 +7984,31 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 			}}
 			matLight.counts[0] = static_cast<float>(lc);
 		}}
+		// CSM fallback for graph materials (v2.2): only meaningful when the GI
+		// masks are absent this frame — heLitP's directional lights then sample
+		// the SAME cascade array as the built-in shaders (texture 11). Metal's
+		// depth remap (kMetalClipFix) AND the shadow map's top-left UV origin
+		// are pre-baked into the matrices, so the shared preamble's
+		// heCsmShadow() stays convention-free (uv = p.xy*0.5+0.5, z in [0,1]).
+		if (!giActive && shadows && m_shadowDepthTex)
+		{
+			const ShadowData& sh = m_renderWorld.shadow;
+			const int nc = std::min(std::clamp(sh.cascadeCount, 0, kCsmCascades), 3);
+			glm::mat4 uvFlipY(1.0f);
+			uvFlipY[1][1] = -1.0f;
+			for (int c = 0; c < nc; ++c)
+			{
+				const glm::mat4 m = uvFlipY * kMetalClipFix * sh.cascadeViewProj[c];
+				std::memcpy(matLight.csmVP[c], &m[0][0], 16 * sizeof(float));
+			}
+			matLight.csmSplits[0] = nc > 0 ? sh.cascadeSplit[0] : 1e9f;
+			matLight.csmSplits[1] = nc > 1 ? sh.cascadeSplit[1] : 1e9f;
+			matLight.csmSplits[2] = nc > 2 ? sh.cascadeSplit[2] : 1e9f;
+			matLight.csmSplits[3] = static_cast<float>(nc);
+			matLight.camFwd[0] = scene.cameraFwd.x;
+			matLight.camFwd[1] = scene.cameraFwd.y;
+			matLight.camFwd[2] = scene.cameraFwd.z;
+		}
 		[encoder setFragmentBytes:&matLight length:sizeof(matLight)
 		                  atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
 	}
@@ -8256,6 +8289,9 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:9];
 		[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giLocalMaskTex : m_dummyTexture) atIndex:10];
 		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:10];
+		// CSM array for the material preamble's GI-off fallback, pinned at 11.
+		[encoder setFragmentTexture:(__bridge id<MTLTexture>)m_shadowDepthTex atIndex:11];
+		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:11];
 		void* tpBound = (__bridge void*)(__bridge id<MTLRenderPipelineState>)m_sceneBlendPipeline;
 		for (const TPDraw& t : transparent)
 		{

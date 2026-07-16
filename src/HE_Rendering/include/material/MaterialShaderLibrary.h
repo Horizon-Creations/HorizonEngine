@@ -46,6 +46,16 @@ public:
         // z = 1 when the GI masks are bound and valid this frame (0 → heLitP
         // skips the mask samples entirely; UI/preview passes leave this 0).
         float giParams[4]       = {};
+        // CSM fallback (v2.2, append-only): when the GI masks are NOT valid,
+        // heLitP shadows directional lights against the engine's cascaded shadow
+        // map instead (binding 12 in the preamble). The fill site pre-bakes its
+        // clip-space conventions into the matrices (Metal: depth remap + UV
+        // y-flip), so the shared GLSL uses plain uv = p.xy*0.5+0.5 and z in
+        // [0,1]. csmSplits.w = cascade count; 0 disables the path entirely
+        // (backends without a cascade array simply leave these zeroed).
+        float csmVP[3][16]      = {}; // per-cascade light view-proj, column-major
+        float csmSplits[4]      = {}; // xyz = planar view-space far distances; w = count
+        float camFwd[4]         = {}; // xyz = camera forward (planar cascade selection)
     };
     static constexpr int kMetalLightingBufferIndex = 1; // fragment [[buffer(1)]]
 

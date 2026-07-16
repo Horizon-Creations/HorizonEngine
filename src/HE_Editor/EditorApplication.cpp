@@ -1966,6 +1966,32 @@ void EditorApplication::dumpFrameHeadless()
 		reg.emplace<MaterialComponent>(e, mc);
 		Logger::Log(Logger::LogLevel::Info,
 			"EditorApplication: HE_DUMP_MATERIALTEST sphere with custom-shader material added");
+
+		// Shadow-reception witness (HE_DUMP_MATOCCLUDER=1): park a flat default-cube
+		// slab directly ABOVE the test sphere. With a high sun, the sphere — shaded
+		// by its GRAPH material (heLitP) — must visibly darken versus a run without
+		// this flag, proving graph materials receive occlusion (GI mask when GI is
+		// on, CSM fallback when it is off). Same A/B idea as the sky knobs.
+		if (const char* oc = std::getenv("HE_DUMP_MATOCCLUDER"); oc && *oc)
+		{
+			auto occ = m_editorWorld->createEntity("MatTestOccluder");
+			TransformComponent otc;
+			otc.position = tc.position + glm::vec3(3.0f, 6.0f, 0.0f);
+			otc.scale    = glm::vec3(12.0f, 0.25f, 12.0f);
+			reg.emplace<TransformComponent>(occ, otc);
+			reg.emplace<MeshComponent>(occ, MeshComponent{ HE::kDefaultCubeMeshId });
+			// Control receiver: an identical sphere WITHOUT the graph material —
+			// the built-in PBR path. If this one darkens under the slab and the
+			// graph sphere does not, the defect is in the material preamble; if
+			// neither darkens, the GI mask / CSM itself is wrong in this scene.
+			auto ctl = m_editorWorld->createEntity("MatTestBuiltinSphere");
+			TransformComponent btc = tc;
+			btc.position = tc.position + glm::vec3(6.0f, 0.0f, 0.0f);
+			reg.emplace<TransformComponent>(ctl, btc);
+			reg.emplace<MeshComponent>(ctl, MeshComponent{ meshId });
+			Logger::Log(Logger::LogLevel::Info,
+				"EditorApplication: HE_DUMP_MATOCCLUDER slab + built-in control sphere added");
+		}
 	}
 
 	pushEnvironment(0.0f); // scene environment from the World entity (no auto-advance)
