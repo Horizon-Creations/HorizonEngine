@@ -102,7 +102,14 @@ layout(std140, set = 0, binding = 0) uniform HeLighting {
     vec4 sunColor;  // rgb = sun radiance
     vec4 ambient;   // rgb = ambient / sky fill
     vec4 camPos;    // xyz = camera world position
+    vec4 lightPos[8];    // xyz = position, w = type (0 dir / 1 point / 2 spot)
+    vec4 lightDir[8];    // xyz = travel direction, w = cos(spot half angle)
+    vec4 lightColor[8];  // rgb = colour, w = intensity
+    vec4 lightParams[8]; // x = range
+    vec4 counts;         // x = light count
 } heLight;
+// Legacy sun-only shading — kept so precompiled material blobs and hand-written
+// escape-hatch fragments that call heLit() keep working unchanged.
 vec3 heLit(vec3 baseColor, vec3 N, float metallic, float roughness) {
     vec3  L    = normalize(heLight.sunDir.xyz);
     vec3  n    = normalize(N);
@@ -113,6 +120,42 @@ vec3 heLit(vec3 baseColor, vec3 N, float metallic, float roughness) {
     vec3  H    = normalize(L + vec3(0.0, 0.0, 1.0));
     float spec = pow(max(dot(n, H), 0.0), mix(4.0, 64.0, 1.0 - roughness)) * (1.0 - roughness);
     return amb + diff + heLight.sunColor.rgb * spec * mix(0.04, 1.0, metallic);
+}
+// Full-scene-lights shading (M2 Standard Lit v2): ambient + all 8 window lights
+// with the SAME attenuation/cone model as the built-in PBR shaders. Needs the
+// fragment's world position (attenuation + view vector) — the graph codegen
+// passes its vWorldPos varying.
+vec3 heLitP(vec3 baseColor, vec3 N, float metallic, float roughness, vec3 worldPos) {
+    vec3 n = normalize(N);
+    vec3 V = normalize(heLight.camPos.xyz - worldPos);
+    vec3 result = baseColor * heLight.ambient.rgb;
+    int count = int(heLight.counts.x);
+    for (int i = 0; i < count; ++i) {
+        int   type  = int(heLight.lightPos[i].w);
+        vec3  L;
+        float atten = 1.0;
+        if (type == 0) {
+            L = normalize(-heLight.lightDir[i].xyz);
+        } else {
+            vec3  d    = heLight.lightPos[i].xyz - worldPos;
+            float dist = max(length(d), 1e-4);
+            L = d / dist;
+            float range = max(heLight.lightParams[i].x, 1e-4);
+            atten = clamp(1.0 - dist / range, 0.0, 1.0);
+            atten *= atten;
+            if (type == 2) {
+                float c       = dot(-L, normalize(heLight.lightDir[i].xyz));
+                float cosCone = heLight.lightDir[i].w;
+                atten *= smoothstep(cosCone, mix(cosCone, 1.0, 0.2), c);
+            }
+        }
+        float ndl  = max(dot(n, L), 0.0);
+        vec3  H    = normalize(L + V);
+        float spec = pow(max(dot(n, H), 0.0), mix(4.0, 64.0, 1.0 - roughness)) * (1.0 - roughness);
+        vec3  lc   = heLight.lightColor[i].rgb * heLight.lightColor[i].a;
+        result += (baseColor * ndl + vec3(spec) * mix(0.04, 1.0, metallic)) * lc * atten;
+    }
+    return result;
 }
 )";
 

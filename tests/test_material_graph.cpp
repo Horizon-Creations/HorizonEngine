@@ -38,7 +38,7 @@ TEST_CASE("MaterialGraph codegen emits the expected constructs")
 	const std::string glsl = HE::generateFragmentGlsl(g);
 
 	CHECK(glsl.find("#version 450") == 0);
-	CHECK(glsl.find("heLit(") != std::string::npos);          // lit output
+	CHECK(glsl.find("heLitP(") != std::string::npos);         // lit output (full-scene-lights variant)
 	CHECK(glsl.find("mix(") != std::string::npos);            // Lerp
 	CHECK(glsl.find("sin(") != std::string::npos);            // Sine
 	CHECK(glsl.find("heLight.sunDir.w") != std::string::npos);// Time
@@ -612,7 +612,7 @@ TEST_CASE("Normal pin replaces vNormal in heLit; Normal Map emits the perturb he
 	const std::string glsl = HE::generateFragment(g).glsl;
 	CHECK(glsl.find("vec3 hePerturbNormal(") != std::string::npos);
 	CHECK(glsl.find("dFdx(") != std::string::npos);
-	CHECK(glsl.find("heLit(") != std::string::npos);
+	CHECK(glsl.find("heLitP(") != std::string::npos);
 	CHECK(glsl.find("heN") != std::string::npos);
 	CHECK(glsl.find("normalize(vNormal);") == std::string::npos); // replaced by the map
 }

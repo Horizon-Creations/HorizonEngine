@@ -33,6 +33,15 @@ public:
         float sunColor[4] = { 1.0f, 1.0f, 1.0f, 0.0f }; // rgb = sun radiance
         float ambient[4]  = { 0.1f, 0.1f, 0.1f, 0.0f }; // rgb = ambient/sky fill
         float camPos[4]   = { 0.0f, 0.0f, 0.0f, 0.0f }; // xyz = camera world pos (ViewDir/Fresnel)
+        // Full scene-light window (matches the built-in PBR shaders' 8-light
+        // layout) — consumed by heLitP(); appended AFTER the legacy fields so
+        // PRECOMPILED material blobs (old sun-only preamble) keep binding this
+        // buffer with unchanged offsets.
+        float lightPos[8][4]    = {}; // xyz = position,        w = type (0 dir / 1 point / 2 spot)
+        float lightDir[8][4]    = {}; // xyz = travel direction, w = cos(spot half angle)
+        float lightColor[8][4]  = {}; // rgb = colour,           w = intensity
+        float lightParams[8][4] = {}; // x = range
+        float counts[4]         = {}; // x = light count
     };
     static constexpr int kMetalLightingBufferIndex = 1; // fragment [[buffer(1)]]
 

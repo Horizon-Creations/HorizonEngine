@@ -984,7 +984,7 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
         src += "    if (" + mask + " < " + fmtF(cutoff) + ") discard;\n";
     src += "    vec3 heN = " + normalExpr + ";\n";
     if (lit)
-        src += "    oColor = vec4(heLit(" + base + ", heN, " + met + ", " + rough + ") + "
+        src += "    oColor = vec4(heLitP(" + base + ", heN, " + met + ", " + rough + ", vWorldPos) + "
              + emis + ", " + opacity + ");\n";
     else
         src += "    oColor = vec4(" + base + " + " + emis + ", " + opacity + ");\n";

@@ -5146,9 +5146,9 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 			// every UI quad this frame, so upload it once per pass.
 			if (!uiLightUploaded)
 			{
-				HE::MaterialShaderLibrary::Lighting lit;
-				const glm::vec3 sd = m_renderWorld.sunDirection;
-				const glm::vec3 sc = GetEnvironment().sunColor;
+				HE::MaterialShaderLibrary::Lighting lit{};
+				glm::vec3 sd, sc;
+				glDominantDirectionalLight(m_renderWorld, sd, sc);
 				const glm::vec3 am = m_renderWorld.ambient;
 				lit.sunDir[0]   = sd.x; lit.sunDir[1] = sd.y; lit.sunDir[2] = sd.z;
 				lit.sunDir[3]   = static_cast<float>(SDL_GetTicks()) / 1000.0f;
@@ -5157,6 +5157,23 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 				lit.camPos[0]   = m_renderWorld.camera.position.x;
 				lit.camPos[1]   = m_renderWorld.camera.position.y;
 				lit.camPos[2]   = m_renderWorld.camera.position.z;
+				// Full light window for heLitP() — same first-8 order as the built-in
+				// PBR shaders (keep the three backend copies of this fill in sync).
+				{{
+					const int lc = std::min(static_cast<int>(m_renderWorld.lights.size()), 8);
+					for (int li = 0; li < lc; ++li)
+					{{
+						const LightData& ld = m_renderWorld.lights[li];
+						lit.lightPos[li][0] = ld.position.x;  lit.lightPos[li][1] = ld.position.y;
+						lit.lightPos[li][2] = ld.position.z;  lit.lightPos[li][3] = static_cast<float>(ld.type);
+						lit.lightDir[li][0] = ld.direction.x; lit.lightDir[li][1] = ld.direction.y;
+						lit.lightDir[li][2] = ld.direction.z; lit.lightDir[li][3] = ld.spotAngleCos;
+						lit.lightColor[li][0] = ld.color.r;   lit.lightColor[li][1] = ld.color.g;
+						lit.lightColor[li][2] = ld.color.b;   lit.lightColor[li][3] = ld.intensity;
+						lit.lightParams[li][0] = ld.range;
+					}}
+					lit.counts[0] = static_cast<float>(lc);
+				}}
 				glBindBuffer(GL_UNIFORM_BUFFER, m_matLightUBO);
 				glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(lit), &lit);
 				uiLightUploaded = true;
@@ -5794,12 +5811,18 @@ void* OpenGLRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& 
 	glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(obj), &obj);
 	glBindBufferBase(GL_UNIFORM_BUFFER, 1, m_matObjUBO);
 
-	HE::MaterialShaderLibrary::Lighting lit;
+	HE::MaterialShaderLibrary::Lighting lit{};
 	const glm::vec3 sd = glm::normalize(glm::vec3(0.45f, 0.75f, 0.55f));
 	lit.sunDir[0] = sd.x; lit.sunDir[1] = sd.y; lit.sunDir[2] = sd.z; lit.sunDir[3] = 0.0f;
 	lit.sunColor[0] = lit.sunColor[1] = lit.sunColor[2] = 1.05f;
 	lit.ambient[0] = lit.ambient[1] = lit.ambient[2] = 0.28f;
 	lit.camPos[0] = camPos.x; lit.camPos[1] = camPos.y; lit.camPos[2] = camPos.z;
+	// Studio sun as the single array light so heLitP() previews shade correctly.
+	lit.lightPos[0][3]   = 0.0f; // directional
+	lit.lightDir[0][0]   = -sd.x; lit.lightDir[0][1] = -sd.y; lit.lightDir[0][2] = -sd.z;
+	lit.lightColor[0][0] = lit.lightColor[0][1] = lit.lightColor[0][2] = 1.05f;
+	lit.lightColor[0][3] = 1.0f;
+	lit.counts[0]        = 1.0f;
 	glBindBuffer(GL_UNIFORM_BUFFER, m_matLightUBO);
 	glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(lit), &lit);
 	glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_matLightUBO);
@@ -7054,9 +7077,13 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					obj.pbr   = glm::vec4(cMetallic, cRoughness, opacity, 0.0f);
 					glBindBuffer(GL_UNIFORM_BUFFER, m_matObjUBO);
 					glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(obj), &obj);
-					HE::MaterialShaderLibrary::Lighting lit;
-					const glm::vec3 sc = GetEnvironment().sunColor;
-					lit.sunDir[0]=sunDir.x; lit.sunDir[1]=sunDir.y; lit.sunDir[2]=sunDir.z;
+					HE::MaterialShaderLibrary::Lighting lit{};
+					// Dominant directional (NOT the raw env sun — night/cloud lesson,
+					// see glDominantDirectionalLight) + the full light window.
+					glm::vec3 matSunDir, matSunColor;
+					glDominantDirectionalLight(m_renderWorld, matSunDir, matSunColor);
+					const glm::vec3 sc = matSunColor;
+					lit.sunDir[0]=matSunDir.x; lit.sunDir[1]=matSunDir.y; lit.sunDir[2]=matSunDir.z;
 					// Engine seconds for the node graph's Time input (HE_SKY_TIME pins it
 					// for deterministic headless captures, mirroring the sky clock).
 					static const char* s_timeOv = std::getenv("HE_SKY_TIME");
@@ -7068,6 +7095,23 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					lit.camPos[2] = m_renderWorld.camera.position.z;
 					lit.sunColor[0]=sc.r; lit.sunColor[1]=sc.g; lit.sunColor[2]=sc.b;
 					lit.ambient[0]=m_renderWorld.ambient.r; lit.ambient[1]=m_renderWorld.ambient.g; lit.ambient[2]=m_renderWorld.ambient.b;
+					// Full light window for heLitP() — same first-8 order as the built-in
+					// PBR shaders (keep the three backend copies of this fill in sync).
+					{{
+						const int lc = std::min(static_cast<int>(m_renderWorld.lights.size()), 8);
+						for (int li = 0; li < lc; ++li)
+						{{
+							const LightData& ld = m_renderWorld.lights[li];
+							lit.lightPos[li][0] = ld.position.x;  lit.lightPos[li][1] = ld.position.y;
+							lit.lightPos[li][2] = ld.position.z;  lit.lightPos[li][3] = static_cast<float>(ld.type);
+							lit.lightDir[li][0] = ld.direction.x; lit.lightDir[li][1] = ld.direction.y;
+							lit.lightDir[li][2] = ld.direction.z; lit.lightDir[li][3] = ld.spotAngleCos;
+							lit.lightColor[li][0] = ld.color.r;   lit.lightColor[li][1] = ld.color.g;
+							lit.lightColor[li][2] = ld.color.b;   lit.lightColor[li][3] = ld.intensity;
+							lit.lightParams[li][0] = ld.range;
+						}}
+						lit.counts[0] = static_cast<float>(lc);
+					}}
 					// Lighting is identical for every material draw this frame → upload once.
 					if (!m_matLightUploadedThisFrame)
 					{
