@@ -1571,13 +1571,23 @@ kernel void giProbeUpdate(uint2 texel   [[thread_position_in_threadgroup]],
 	const uint2 outCoord = uint2(uint(tileX * kGIProbeOctSize) + texel.x,
 	                             uint(tileY * kGIProbeOctSize) + texel.y);
 
-	const float hysteresis = clamp(P.rayParams.y, 0.0, 0.98);
+	// Adaptive hysteresis: gather rays are DETERMINISTIC per texel (fixed
+	// octahedral direction, no jitter), so a frame-to-frame delta is a REAL
+	// scene change, never sampling noise. Small deltas (slow lighting drift)
+	// keep the smooth base blend — no flicker; large deltas (an occluder
+	// moved) drop the hysteresis so the probe converges in a few frames
+	// instead of ~2 s — still blended, so no hard pop either. Static scenes
+	// are byte-identical to before (delta 0 → base hysteresis).
+	const float baseH = clamp(P.rayParams.y, 0.0, 0.98);
 	const float4 oldIrr = irradiance.read(outCoord);
-	irradiance.write(float4(mix(radiance, oldIrr.rgb, hysteresis), 1.0), outCoord);
-
+	const float irrDelta = length(radiance - oldIrr.rgb);
+	const float hIrr = mix(baseH, 0.3, clamp(irrDelta * 4.0, 0.0, 1.0));
+	irradiance.write(float4(mix(radiance, oldIrr.rgb, hIrr), 1.0), outCoord);
 	const float4 oldVis = visibility.read(outCoord);
 	const float2 newVisSample = float2(dist, dist * dist);
-	visibility.write(float4(mix(newVisSample, oldVis.rg, hysteresis), 0.0, 0.0), outCoord);
+	const float visDelta = abs(dist - oldVis.x) / max(P.gridOrigin.w, 1.0);
+	const float hVis = mix(baseH, 0.3, clamp(visDelta, 0.0, 1.0));
+	visibility.write(float4(mix(newVisSample, oldVis.rg, hVis), 0.0, 0.0), outCoord);
 }
 )MSL";
 
@@ -1845,12 +1855,23 @@ kernel void giProbeUpdateSw(uint2 texel   [[thread_position_in_threadgroup]],
 	const uint2 outCoord = uint2(uint(tileX * kGIProbeOctSize) + texel.x,
 	                             uint(tileY * kGIProbeOctSize) + texel.y);
 
-	const float hysteresis = clamp(P.rayParams.y, 0.0, 0.98);
+	// Adaptive hysteresis: gather rays are DETERMINISTIC per texel (fixed
+	// octahedral direction, no jitter), so a frame-to-frame delta is a REAL
+	// scene change, never sampling noise. Small deltas (slow lighting drift)
+	// keep the smooth base blend — no flicker; large deltas (an occluder
+	// moved) drop the hysteresis so the probe converges in a few frames
+	// instead of ~2 s — still blended, so no hard pop either. Static scenes
+	// are byte-identical to before (delta 0 → base hysteresis).
+	const float baseH = clamp(P.rayParams.y, 0.0, 0.98);
 	const float4 oldIrr = irradiance.read(outCoord);
-	irradiance.write(float4(mix(radiance, oldIrr.rgb, hysteresis), 1.0), outCoord);
+	const float irrDelta = length(radiance - oldIrr.rgb);
+	const float hIrr = mix(baseH, 0.3, clamp(irrDelta * 4.0, 0.0, 1.0));
+	irradiance.write(float4(mix(radiance, oldIrr.rgb, hIrr), 1.0), outCoord);
 	const float4 oldVis = visibility.read(outCoord);
 	const float2 newVisSample = float2(dist, dist * dist);
-	visibility.write(float4(mix(newVisSample, oldVis.rg, hysteresis), 0.0, 0.0), outCoord);
+	const float visDelta = abs(dist - oldVis.x) / max(P.gridOrigin.w, 1.0);
+	const float hVis = mix(baseH, 0.3, clamp(visDelta, 0.0, 1.0));
+	visibility.write(float4(mix(newVisSample, oldVis.rg, hVis), 0.0, 0.0), outCoord);
 }
 )MSL";
 
