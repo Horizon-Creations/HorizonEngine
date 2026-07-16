@@ -617,7 +617,9 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
                              texture2d<float> giIrrTex    [[texture(6)]],
                              sampler          giIrrSmp    [[sampler(6)]],
                              texture2d<float> giVisTex    [[texture(7)]],
-                             sampler          giVisSmp    [[sampler(7)]])
+                             sampler          giVisSmp    [[sampler(7)]],
+                             texture2d<float> giLocalMask [[texture(8)]],
+                             sampler          giLocalSmp  [[sampler(8)]])
 {
 	float3 albedo = (in.hasTexture > 0.5)
 		? baseColor.sample(smp, float2(in.uv.x, 1.0 - in.uv.y)).rgb * in.color
@@ -681,6 +683,7 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
 		: ambient * ao + scene.ambient.xyz * diffuseColor;
 
 	int dbgCascade = 0;   // cascade chosen by the directional shadow (debug tint)
+	int giLocalIdx = 0;   // counter over non-directional lights → local-mask channel
 	for (int i = 0; i < scene.lightCount; ++i)
 	{
 		constant LightGPU& l = scene.lights[i];
@@ -706,18 +709,28 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
 			}
 		}
 
-		// Only the (first) directional light casts shadows.
+		// Directional lights: CSM (or the temporally-accumulated GI sun mask).
 		// Planar view-space depth (along camera forward) — matches the cascade splits,
 		// which are planar view-Z far distances (NOT euclidean radius). Using euclidean
 		// distance here pushes screen-edge pixels into a too-coarse cascade → dropouts.
 		float viewZ = dot(in.worldPos - scene.cameraPos.xyz, scene.cameraFwd.xyz);
-		// GI replaces CSM entirely when active: a ray-traced, temporally-accumulated
-		// shadow mask (EncodeGIShadowRays) sampled at the same screen-space UV
-		// convention aoTex already uses, instead of the cascade/PCF lookup.
-		float sh = (type != 0) ? 1.0
-			: (gi.enabled != 0
+		float sh = 1.0;
+		if (type == 0)
+		{
+			sh = (gi.enabled != 0
 				? giShadowTex.sample(giShadowSmp, in.position.xy / scene.viewport.xy).r
 				: shadowFactor(scene, in.worldPos, N, L, viewZ, shadowMap, shadowSmp, dbgCascade));
+		}
+		else
+		{
+			// Local (point/spot) lights: ray-traced hard shadows when GI is
+			// active — one visibility channel per light (first 4), written by
+			// the shadow kernel from unjittered secondary rays. CSM never
+			// shadowed local lights at all (they shone through geometry).
+			if (gi.enabled != 0 && giLocalIdx < 4)
+				sh = giLocalMask.sample(giLocalSmp, in.position.xy / scene.viewport.xy)[giLocalIdx];
+			giLocalIdx++;
+		}
 
 		float diff = max(dot(N, L), 0.0);
 		float3 H   = normalize(L + V);
@@ -1348,7 +1361,9 @@ using namespace raytracing;
 
 struct GIShadowParams {
 	float4 sunDirRadius; // xyz = direction TOWARD the light (world space), w = angular radius (radians)
-	float4 frame;        // x = jitter seed, y = tex width, z = tex height, w unused
+	float4 frame;        // x = jitter seed, y = tex width, z = tex height, w = SW instance count
+	float4 localPosRange[4]; // xyz = local (point/spot) light position, w = range
+	float4 extra;            // x = local light count
 };
 
 // Interleaved-gradient-noise-style hash → two independent [0,1) values per
@@ -1380,40 +1395,71 @@ kernel void giShadowRay(uint2 gid [[thread_position_in_grid]],
                         texture2d<float, access::read>  gPos      [[texture(0)]],
                         texture2d<float, access::read>  gNorm     [[texture(1)]],
                         texture2d<float, access::write> outShadow [[texture(2)]],
+                        texture2d<float, access::write> outLocal  [[texture(3)]],
                         instance_acceleration_structure accel     [[buffer(0)]],
                         constant GIShadowParams&         P         [[buffer(1)]])
 {
 	if (float(gid.x) >= P.frame.y || float(gid.y) >= P.frame.z) return;
 	float4 pv = gPos.read(gid);
-	if (pv.a < 0.5) { outShadow.write(float4(1.0), gid); return; } // background → unoccluded
+	if (pv.a < 0.5) // background → everything unoccluded
+	{ outShadow.write(float4(1.0), gid); outLocal.write(float4(1.0), gid); return; }
 	float3 N = normalize(gNorm.read(gid).xyz);
 	float3 L = P.sunDirRadius.xyz;
-	// Grazing/back-facing relative to the light: direct lighting's dot(N,L) term
-	// already zeroes this out, so skip the trace entirely.
-	if (dot(N, L) <= 0.0) { outShadow.write(float4(0.0), gid); return; }
 
-	float2 xi  = giHash2(gid, P.frame.x);
-	float3 dir = giConeSample(L, max(P.sunDirRadius.w, 1e-4), xi);
+	// ── Directional light (cone-jittered, temporally accumulated) ─────────
+	float sunVis = 0.0;
+	// Grazing/back-facing relative to the light: direct lighting's dot(N,L)
+	// term already zeroes this out, so skip the trace entirely.
+	if (dot(N, L) > 0.0)
+	{
+		float2 xi  = giHash2(gid, P.frame.x);
+		float3 dir = giConeSample(L, max(P.sunDirRadius.w, 1e-4), xi);
+		// Normal-offset bias + min_distance floor guard self-intersection
+		// ("shadow acne") independently.
+		ray r;
+		r.origin       = pv.xyz + N * 0.05;
+		r.direction    = dir;
+		r.min_distance = 0.02;
+		r.max_distance = 10000.0;
+		intersection_params params;
+		params.accept_any_intersection(true);
+		intersection_query<triangle_data, instancing> q;
+		q.reset(r, accel, params);
+		q.next();
+		sunVis = (q.get_committed_intersection_type() == intersection_type::none) ? 1.0 : 0.0;
+	}
+	outShadow.write(float4(sunVis), gid);
 
-	// Normal-offset bias + a matching min_distance floor — self-intersection
-	// ("shadow acne") on a lit-facing surface reads as false occlusion, i.e. a
-	// face pointed AT the light going dark while the away-facing side (unlit
-	// anyway, dot(N,L)<=0 above) looks comparatively bright. Both knobs guard the
-	// same failure independently: the offset moves the origin off the surface,
-	// min_distance additionally ignores anything found suspiciously close to it.
-	ray r;
-	r.origin       = pv.xyz + N * 0.05; // normal-offset bias, world units
-	r.direction    = dir;
-	r.min_distance = 0.02;
-	r.max_distance = 10000.0;
-
-	intersection_params params;
-	params.accept_any_intersection(true);
-	intersection_query<triangle_data, instancing> q;
-	q.reset(r, accel, params);
-	q.next();
-	const float shadow = (q.get_committed_intersection_type() == intersection_type::none) ? 1.0 : 0.0;
-	outShadow.write(float4(shadow), gid);
+	// ── Local (point/spot) lights: one HARD occlusion ray each toward the
+	// first 4 — point/spot lights previously had NO shadowing at all (CSM
+	// never covered them), so they shone straight through geometry. The rays
+	// are deliberately UNjittered: deterministic → no noise → no temporal
+	// pass needed, the mask reacts instantly and artefact-free. One visibility
+	// channel per light, fragmentMain indexes by its local-light counter.
+	float4 localVis = float4(1.0);
+	const int localCount = clamp(int(P.extra.x), 0, 4);
+	for (int i = 0; i < localCount; ++i)
+	{
+		const float3 toL   = P.localPosRange[i].xyz - pv.xyz;
+		const float  distL = length(toL);
+		if (distL <= 0.05) continue; // on top of the light → lit
+		if (distL >= P.localPosRange[i].w) continue; // outside the attenuation radius → contributes nothing, skip the ray
+		const float3 dirL = toL / distL;
+		if (dot(N, dirL) <= 0.0) { localVis[i] = 0.0; continue; }
+		ray lr;
+		lr.origin       = pv.xyz + N * 0.05;
+		lr.direction    = dirL;
+		lr.min_distance = 0.02;
+		lr.max_distance = max(distL - 0.1, 0.02); // stop short of the light itself
+		intersection_params lparams;
+		lparams.accept_any_intersection(true);
+		intersection_query<triangle_data, instancing> lq;
+		lq.reset(lr, accel, lparams);
+		lq.next();
+		if (lq.get_committed_intersection_type() != intersection_type::none)
+			localVis[i] = 0.0;
+	}
+	outLocal.write(localVis, gid);
 }
 
 )MSL";
@@ -1551,8 +1597,10 @@ kernel void giProbeUpdate(uint2 texel   [[thread_position_in_threadgroup]],
 			const float3 toL = P.lightPosRange[i].xyz - hitPos;
 			const float  d   = max(length(toL), 1e-4);
 			const float  range = max(P.lightPosRange[i].w, 1e-4);
-			if (d >= range) continue;
+			if (d >= range) continue; // outside the attenuation radius
 			const float3 L = toL / d;
+			const float ndl2 = max(dot(hitNormal, L), 0.0);
+			if (ndl2 <= 0.0) continue;
 			float atten = 1.0 - d / range;
 			atten *= atten;
 			if (P.lightColorType[i].w > 1.5) // spot cone
@@ -1561,7 +1609,22 @@ kernel void giProbeUpdate(uint2 texel   [[thread_position_in_threadgroup]],
 				const float cosCone = P.lightDirCos[i].w;
 				atten *= smoothstep(cosCone, mix(cosCone, 1.0, 0.2), c);
 			}
-			radiance += albedo * P.lightColorType[i].rgb * max(dot(hitNormal, L), 0.0) * atten;
+			if (atten <= 0.0) continue;
+			// Secondary occlusion ray to the light — bounce light no longer
+			// leaks through geometry from local lights either.
+			ray lr;
+			lr.origin       = hitPos + hitNormal * 0.05;
+			lr.direction    = L;
+			lr.min_distance = 0.02;
+			lr.max_distance = max(d - 0.1, 0.02);
+			intersection_params lparams;
+			lparams.accept_any_intersection(true);
+			intersection_query<triangle_data, instancing> lq;
+			lq.reset(lr, accel, lparams);
+			lq.next();
+			if (lq.get_committed_intersection_type() != intersection_type::none)
+				continue;
+			radiance += albedo * P.lightColorType[i].rgb * ndl2 * atten;
 		}
 	}
 
@@ -1716,6 +1779,8 @@ static int giSceneClosestHit(const device GiNode* nodes, const device GiTri* tri
 struct GIShadowParams {
 	float4 sunDirRadius; // xyz = direction TOWARD the light, w = angular radius (radians)
 	float4 frame;        // x = jitter seed, y = tex width, z = tex height, w = instance count
+	float4 localPosRange[4]; // xyz = local (point/spot) light position, w = range
+	float4 extra;            // x = local light count
 };
 static float2 giHash2(uint2 gid, float seed)
 {
@@ -1737,6 +1802,7 @@ kernel void giShadowRaySw(uint2 gid [[thread_position_in_grid]],
                           texture2d<float, access::read>  gPos      [[texture(0)]],
                           texture2d<float, access::read>  gNorm     [[texture(1)]],
                           texture2d<float, access::write> outShadow [[texture(2)]],
+                          texture2d<float, access::write> outLocal  [[texture(3)]],
                           const device GiNode* nodes [[buffer(0)]],
                           const device GiTri*  tris  [[buffer(1)]],
                           const device GiInst* insts [[buffer(2)]],
@@ -1744,17 +1810,39 @@ kernel void giShadowRaySw(uint2 gid [[thread_position_in_grid]],
 {
 	if (float(gid.x) >= P.frame.y || float(gid.y) >= P.frame.z) return;
 	float4 pv = gPos.read(gid);
-	if (pv.a < 0.5) { outShadow.write(float4(1.0), gid); return; }
+	if (pv.a < 0.5)
+	{ outShadow.write(float4(1.0), gid); outLocal.write(float4(1.0), gid); return; }
 	float3 N = normalize(gNorm.read(gid).xyz);
 	float3 L = P.sunDirRadius.xyz;
-	if (dot(N, L) <= 0.0) { outShadow.write(float4(0.0), gid); return; }
-
-	float2 xi  = giHash2(gid, P.frame.x);
-	float3 dir = giConeSample(L, max(P.sunDirRadius.w, 1e-4), xi);
-	float3 origin = pv.xyz + N * 0.05;
 	const int instCount = int(P.frame.w);
-	const float shadow = giSceneAnyHit(nodes, tris, insts, instCount, origin, dir, 0.02, 10000.0) ? 0.0 : 1.0;
-	outShadow.write(float4(shadow), gid);
+
+	float sunVis = 0.0;
+	if (dot(N, L) > 0.0)
+	{
+		float2 xi  = giHash2(gid, P.frame.x);
+		float3 dir = giConeSample(L, max(P.sunDirRadius.w, 1e-4), xi);
+		float3 origin = pv.xyz + N * 0.05;
+		sunVis = giSceneAnyHit(nodes, tris, insts, instCount, origin, dir, 0.02, 10000.0) ? 0.0 : 1.0;
+	}
+	outShadow.write(float4(sunVis), gid);
+
+	// Local (point/spot) lights: hard, UNjittered occlusion rays toward the
+	// first 4 (see the HW kernel's comment) — deterministic, no temporal.
+	float4 localVis = float4(1.0);
+	const int localCount = clamp(int(P.extra.x), 0, 4);
+	for (int i = 0; i < localCount; ++i)
+	{
+		const float3 toL   = P.localPosRange[i].xyz - pv.xyz;
+		const float  distL = length(toL);
+		if (distL <= 0.05) continue;
+		if (distL >= P.localPosRange[i].w) continue; // outside the attenuation radius → contributes nothing
+		const float3 dirL = toL / distL;
+		if (dot(N, dirL) <= 0.0) { localVis[i] = 0.0; continue; }
+		if (giSceneAnyHit(nodes, tris, insts, instCount,
+		                  pv.xyz + N * 0.05, dirL, 0.02, max(distL - 0.1, 0.02)))
+			localVis[i] = 0.0;
+	}
+	outLocal.write(localVis, gid);
 }
 
 // ── Probe update (same params/logic as the HW giProbeUpdate; sunColor.w
@@ -1835,8 +1923,10 @@ kernel void giProbeUpdateSw(uint2 texel   [[thread_position_in_threadgroup]],
 			const float3 toL = P.lightPosRange[i].xyz - hitPos;
 			const float  d   = max(length(toL), 1e-4);
 			const float  range = max(P.lightPosRange[i].w, 1e-4);
-			if (d >= range) continue;
+			if (d >= range) continue; // outside the attenuation radius
 			const float3 L = toL / d;
+			const float ndl2 = max(dot(hitNormal, L), 0.0);
+			if (ndl2 <= 0.0) continue;
 			float atten = 1.0 - d / range;
 			atten *= atten;
 			if (P.lightColorType[i].w > 1.5)
@@ -1845,7 +1935,12 @@ kernel void giProbeUpdateSw(uint2 texel   [[thread_position_in_threadgroup]],
 				const float cosCone = P.lightDirCos[i].w;
 				atten *= smoothstep(cosCone, mix(cosCone, 1.0, 0.2), c);
 			}
-			radiance += albedo * P.lightColorType[i].rgb * max(dot(hitNormal, L), 0.0) * atten;
+			if (atten <= 0.0) continue;
+			// Secondary occlusion ray to the light (see the HW kernel).
+			if (giSceneAnyHit(nodes, tris, insts, instCount,
+			                  hitPos + hitNormal * 0.05, L, 0.02, max(d - 0.1, 0.02)))
+				continue;
+			radiance += albedo * P.lightColorType[i].rgb * ndl2 * atten;
 		}
 	}
 
@@ -3512,8 +3607,11 @@ struct GIPosUniformsCPU { glm::mat4 mvp; glm::mat4 model; };
 struct GIShadowParamsCPU
 {
 	glm::vec4 sunDirRadius; // xyz = direction TOWARD the light, w = angular radius (radians)
-	glm::vec4 frame;        // x = jitter seed, y = tex width, z = tex height, w unused
+	glm::vec4 frame;        // x = jitter seed, y = tex width, z = tex height, w = SW instance count
+	glm::vec4 localPosRange[4]; // xyz = local light position, w = range
+	glm::vec4 extra;            // x = local light count
 };
+static_assert(sizeof(GIShadowParamsCPU) == 7 * 16, "must match the MSL GIShadowParams layout");
 struct GITemporalParamsCPU
 {
 	glm::mat4 prevViewProj;
@@ -4786,6 +4884,13 @@ void MetalRenderer::EnsureGIShadowTargets(int width, int height)
 	rawDesc.storageMode = MTLStorageModePrivate;
 	m_giShadowRawTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:rawDesc]);
 
+	// Local-light visibility mask (4 channels, one per local light).
+	MTLTextureDescriptor* localDesc = [MTLTextureDescriptor
+		texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float width:width height:height mipmapped:NO];
+	localDesc.usage       = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+	localDesc.storageMode = MTLStorageModePrivate;
+	m_giLocalMaskTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:localDesc]);
+
 	// History carries rgb = world position (this value was written for) + a =
 	// shadow scalar, so giShadowTemporal can reject a reprojection that landed on
 	// an unrelated/disoccluded surface instead of blending in a wrong value.
@@ -4815,6 +4920,7 @@ void MetalRenderer::DestroyGIShadowTargets()
 	if (m_giGBufNormTex)      { CFBridgingRelease(m_giGBufNormTex);      m_giGBufNormTex = nullptr; }
 	if (m_giGBufDepth)        { CFBridgingRelease(m_giGBufDepth);        m_giGBufDepth = nullptr; }
 	if (m_giShadowRawTex)     { CFBridgingRelease(m_giShadowRawTex);     m_giShadowRawTex = nullptr; }
+	if (m_giLocalMaskTex)     { CFBridgingRelease(m_giLocalMaskTex);     m_giLocalMaskTex = nullptr; }
 	if (m_giShadowHistory[0]) { CFBridgingRelease(m_giShadowHistory[0]); m_giShadowHistory[0] = nullptr; }
 	if (m_giShadowHistory[1]) { CFBridgingRelease(m_giShadowHistory[1]); m_giShadowHistory[1] = nullptr; }
 	if (m_giShadowResult)     { CFBridgingRelease(m_giShadowResult);     m_giShadowResult = nullptr; }
@@ -4902,7 +5008,7 @@ void MetalRenderer::EncodeGIShadowRays(void* cmdBufPtr, int width, int height)
 		// the TLAS, or SW BVH traversal against the CPU-built buffers. Same
 		// params block; frame.w carries the instance count on the SW path.
 		id<MTLComputeCommandEncoder> cenc = [cmdBuf computeCommandEncoder];
-		GIShadowParamsCPU sp;
+		GIShadowParamsCPU sp{};
 		// Trace toward the brightest directional light — the light fragmentMain's
 		// loop actually shades with — NOT the sky-dome sunDirection (see
 		// dominantDirectionalLight's comment for the night-scene failure mode).
@@ -4912,9 +5018,29 @@ void MetalRenderer::EncodeGIShadowRays(void* cmdBufPtr, int width, int height)
 		m_giShadowFrameSeed += 1.0f;
 		sp.frame = glm::vec4(m_giShadowFrameSeed, static_cast<float>(width), static_cast<float>(height),
 		                     static_cast<float>(m_giSwInstanceCount));
+		// First 4 local (point/spot) lights of the same 8-light window the scene
+		// shader iterates — fragmentMain counts non-directional lights in the
+		// SAME order to index the mask channels.
+		{
+			// Count EVERY non-directional light exactly like fragmentMain's loop
+			// does (its channel index is a plain counter over type != 0), fill
+			// the first 4 slots.
+			int localCount = 0;
+			const int windowCount = std::min(static_cast<int>(m_renderWorld.lights.size()), 8);
+			for (int li = 0; li < windowCount; ++li)
+			{
+				const LightData& l = m_renderWorld.lights[li];
+				if (l.type == 0) continue;
+				if (localCount < 4)
+					sp.localPosRange[localCount] = glm::vec4(l.position, std::max(l.range, 1e-4f));
+				++localCount;
+			}
+			sp.extra = glm::vec4(static_cast<float>(std::min(localCount, 4)), 0.0f, 0.0f, 0.0f);
+		}
 		[cenc setTexture:(__bridge id<MTLTexture>)m_giGBufPosTex atIndex:0];
 		[cenc setTexture:(__bridge id<MTLTexture>)m_giGBufNormTex atIndex:1];
 		[cenc setTexture:(__bridge id<MTLTexture>)m_giShadowRawTex atIndex:2];
+		[cenc setTexture:(__bridge id<MTLTexture>)m_giLocalMaskTex atIndex:3];
 		if (m_giHwRt)
 		{
 			[cenc setComputePipelineState:(__bridge id<MTLComputePipelineState>)m_giShadowRayPipeline];
@@ -7501,6 +7627,8 @@ void MetalRenderer::EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& v
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:6];
 	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giVisibilityAtlas : m_dummyTexture) atIndex:7];
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:7];
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giLocalMaskTex : m_dummyTexture) atIndex:8];
+	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:8];
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
 
 	constexpr int kMaxBones = 128;
@@ -7733,6 +7861,8 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:6];
 	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giVisibilityAtlas : m_dummyTexture) atIndex:7];
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:7];
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giLocalMaskTex : m_dummyTexture) atIndex:8];
+	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:8];
 
 	// ── Lights (clamped to the shader's 8) ──────────────────────────────────
 	// Kept at function scope so the transparency pass below can re-bind it after
@@ -8072,6 +8202,8 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:6];
 		[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giVisibilityAtlas : m_dummyTexture) atIndex:7];
 		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:7];
+		[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giLocalMaskTex : m_dummyTexture) atIndex:8];
+		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:8];
 		void* tpBound = (__bridge void*)(__bridge id<MTLRenderPipelineState>)m_sceneBlendPipeline;
 		for (const TPDraw& t : transparent)
 		{

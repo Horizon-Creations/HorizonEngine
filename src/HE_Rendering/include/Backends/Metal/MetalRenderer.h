@@ -590,6 +590,11 @@ private:
 	void* m_giGBufNormTex = nullptr; // id<MTLTexture> RGBA16F world normal
 	void* m_giGBufDepth   = nullptr; // id<MTLTexture> depth for the prepass only
 	void* m_giShadowRawTex = nullptr; // id<MTLTexture> R16F raw 1-ray/pixel result (compute-written)
+	// RGBA16F per-pixel visibility of the first 4 LOCAL (point/spot) lights —
+	// one hard, unjittered occlusion ray per light per pixel (deterministic →
+	// no temporal pass, instant response). Sampled by fragmentMain at
+	// texture(8); channel = the shader's non-directional light counter.
+	void* m_giLocalMaskTex = nullptr; // id<MTLTexture> (compute-written)
 	void* m_giShadowHistory[2] = { nullptr, nullptr }; // id<MTLTexture> R16F ping-pong temporal history
 	int   m_giShadowHistoryIdx   = 0;
 	bool  m_giShadowHistoryValid = false; // false right after (re)alloc — first frame skips history blend

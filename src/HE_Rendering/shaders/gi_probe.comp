@@ -176,8 +176,10 @@ void main()
             vec3 toL = uLightPosRange[i].xyz - hitPos;
             float d  = max(length(toL), 1e-4);
             float range = max(uLightPosRange[i].w, 1e-4);
-            if (d >= range) continue;
+            if (d >= range) continue; // outside the attenuation radius
             vec3 L = toL / d;
+            float ndl2 = max(dot(hitNormal, L), 0.0);
+            if (ndl2 <= 0.0) continue;
             float atten = 1.0 - d / range;
             atten *= atten;
             if (uLightColorType[i].w > 1.5)
@@ -186,7 +188,11 @@ void main()
                 float cosCone = uLightDirCos[i].w;
                 atten *= smoothstep(cosCone, mix(cosCone, 1.0, 0.2), c);
             }
-            radiance += albedo * uLightColorType[i].rgb * max(dot(hitNormal, L), 0.0) * atten;
+            if (atten <= 0.0) continue;
+            // Secondary occlusion ray to the light — no bounce leaking.
+            if (giSceneAnyHitP(hitPos + hitNormal * 0.05, L, 0.02, max(d - 0.1, 0.02)))
+                continue;
+            radiance += albedo * uLightColorType[i].rgb * ndl2 * atten;
         }
     }
 
