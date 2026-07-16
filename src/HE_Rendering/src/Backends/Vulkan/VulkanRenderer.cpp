@@ -100,6 +100,9 @@ namespace
         glm::vec4  sunDir;    // xyz = sun direction, w = 0
         glm::vec4  fog;       // x = fogDensity, y = fogHeightFalloff, zw = 0
         glm::vec4  viewport;  // x=W, y=H, z=ssaoEnabled(1.0), w=0
+        glm::vec4  giGridOrigin; // xyz = probe grid origin, w = spacing
+        glm::vec4  giGridCounts; // xyz = probe counts, w = probesPerRow
+        glm::vec4  giParams;     // x = indirectIntensity, y = giEnabled(1.0), zw = 0
     };
 
     // Sky pass UBO (set=0 binding=0 in sky.frag) — must match std140 exactly.
@@ -223,6 +226,35 @@ void VulkanRenderer::Shutdown()
     // but call explicitly in case viewport was never created).
     destroySSAOTargets();
     destroyGiAccel();
+    destroyGiTargets();
+    destroyGiProbeAtlas();
+    for (GiBuffer* b : { m_giShadowUBO, m_giProbeUBO, m_giTemporalUBO })
+        for (uint32_t i = 0; i < 3; ++i)
+        {
+            if (b[i].mapped) { vkUnmapMemory(m_device, b[i].mem); b[i].mapped = nullptr; }
+            if (b[i].buf)    { vkDestroyBuffer(m_device, b[i].buf, nullptr); b[i].buf = VK_NULL_HANDLE; }
+            if (b[i].mem)    { vkFreeMemory(m_device, b[i].mem, nullptr);    b[i].mem = VK_NULL_HANDLE; }
+            b[i].size = 0;
+        }
+    if (m_giGBufPipe)     { vkDestroyPipeline(m_device, m_giGBufPipe, nullptr);     m_giGBufPipe = VK_NULL_HANDLE; }
+    if (m_giTemporalPipe) { vkDestroyPipeline(m_device, m_giTemporalPipe, nullptr); m_giTemporalPipe = VK_NULL_HANDLE; }
+    if (m_giBlurPipe)     { vkDestroyPipeline(m_device, m_giBlurPipe, nullptr);     m_giBlurPipe = VK_NULL_HANDLE; }
+    if (m_giShadowPipe)   { vkDestroyPipeline(m_device, m_giShadowPipe, nullptr);   m_giShadowPipe = VK_NULL_HANDLE; }
+    if (m_giProbePipe)    { vkDestroyPipeline(m_device, m_giProbePipe, nullptr);    m_giProbePipe = VK_NULL_HANDLE; }
+    if (m_giGBufRP)       { vkDestroyRenderPass(m_device, m_giGBufRP, nullptr);     m_giGBufRP = VK_NULL_HANDLE; }
+    if (m_giTemporalRP)   { vkDestroyRenderPass(m_device, m_giTemporalRP, nullptr); m_giTemporalRP = VK_NULL_HANDLE; }
+    if (m_giBlurRP)       { vkDestroyRenderPass(m_device, m_giBlurRP, nullptr);     m_giBlurRP = VK_NULL_HANDLE; }
+    if (m_giShadowPL)     { vkDestroyPipelineLayout(m_device, m_giShadowPL, nullptr); m_giShadowPL = VK_NULL_HANDLE; }
+    if (m_giProbePL)      { vkDestroyPipelineLayout(m_device, m_giProbePL, nullptr);  m_giProbePL = VK_NULL_HANDLE; }
+    if (m_giFsPL)         { vkDestroyPipelineLayout(m_device, m_giFsPL, nullptr);     m_giFsPL = VK_NULL_HANDLE; }
+    if (m_giGBufPL)       { vkDestroyPipelineLayout(m_device, m_giGBufPL, nullptr);   m_giGBufPL = VK_NULL_HANDLE; }
+    if (m_giShadowDSL)    { vkDestroyDescriptorSetLayout(m_device, m_giShadowDSL, nullptr); m_giShadowDSL = VK_NULL_HANDLE; }
+    if (m_giProbeDSL)     { vkDestroyDescriptorSetLayout(m_device, m_giProbeDSL, nullptr);  m_giProbeDSL = VK_NULL_HANDLE; }
+    if (m_giFsDSL)        { vkDestroyDescriptorSetLayout(m_device, m_giFsDSL, nullptr);     m_giFsDSL = VK_NULL_HANDLE; }
+    if (m_giDescPool)     { vkDestroyDescriptorPool(m_device, m_giDescPool, nullptr);       m_giDescPool = VK_NULL_HANDLE; }
+    if (m_giPointSampler) { vkDestroySampler(m_device, m_giPointSampler, nullptr);          m_giPointSampler = VK_NULL_HANDLE; }
+    m_giPipelinesTried = false;
+    m_giReady          = false;
     // SSAO pipeline-level resources (static, not viewport-size-dependent).
     if (m_ssaoPosGfxPipeline)   { vkDestroyPipeline      (m_device, m_ssaoPosGfxPipeline,   nullptr); m_ssaoPosGfxPipeline   = VK_NULL_HANDLE; }
     if (m_ssaoGfxPipeline)      { vkDestroyPipeline      (m_device, m_ssaoGfxPipeline,       nullptr); m_ssaoGfxPipeline      = VK_NULL_HANDLE; }
@@ -336,6 +368,7 @@ void VulkanRenderer::Render()
 {
     m_wallTime = static_cast<float>(SDL_GetTicks()) * 0.001f;
     m_ssaoRanThisFrame = false;  // cleared each frame; set true only inside runSSAO()
+    m_giRanThisFrame   = false;  // cleared each frame; set true only inside runGi()
     m_statDraws = m_statTris = m_statVisible = m_statTotal = 0;  // rebuilt by DrawScene
 
     // Drop caches for materials/meshes edited since last frame, before any recording — the
@@ -410,10 +443,17 @@ void VulkanRenderer::Render()
         const bool useHDR = m_postFxReady && m_hdrFB && m_ldrFB && m_fxaaFB;
         if (useHDR)
         {
+            // ── Ray-traced GI (software compute): G-buffer + shadow rays +
+            // temporal + blur + probe update. Extracts the scene itself.
+            // Replaces the CSM lookup AND SSAO in scene.frag when it runs.
+            runGi(cmd, m_viewportW, m_viewportH);
+
             // ── SSAO position prepass + occlusion compute + blur ───────────
             // runSSAO() extracts the scene itself (like EncodeShadowMap) so it
-            // doesn't depend on DrawScene having run first.
-            runSSAO(cmd, m_viewportW, m_viewportH);
+            // doesn't depend on DrawScene having run first. Skipped when GI
+            // shades this frame (probe indirect replaces AO).
+            if (!m_giRanThisFrame)
+                runSSAO(cmd, m_viewportW, m_viewportH);
 
             // ── Scene → HDR RT (RGBA16F) ───────────────────────────────────
             VkRenderPassBeginInfo hdrpbi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
@@ -664,10 +704,10 @@ IRenderer::Capabilities VulkanRenderer::GetCapabilities() const
     c.supportsPostProcessing = m_postFxReady;
     c.supportsHDR            = false;
     c.supportsGpuParticles   = false;
-    // VK-A uploads the GI acceleration structures but nothing consumes them
-    // yet — the capability flips true with VK-B/C (shadow-ray + probe kernels
-    // + scene-shader integration), so the editor checkbox stays honest.
-    c.supportsGlobalIllumination = false;
+    // Software compute ray tracing (gi_*.comp) — compute is core Vulkan, so no
+    // extension gate. If pipeline creation fails at runtime, runGi() leaves
+    // m_giRanThisFrame false and rendering falls back to CSM+SSAO.
+    c.supportsGlobalIllumination = true;
     return c;
 }
 
@@ -1356,7 +1396,7 @@ void VulkanRenderer::createScenePipeline()
 {
     // Descriptor set: binding 0 = per-frame UBO, binding 1 = shadow map,
     //                 binding 2 = per-draw material UBO, binding 3 = SSAO AO texture.
-    VkDescriptorSetLayoutBinding binds[4]{};
+    VkDescriptorSetLayoutBinding binds[7]{};
     binds[0].binding         = 0;
     binds[0].descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     binds[0].descriptorCount = 1;
@@ -1373,8 +1413,17 @@ void VulkanRenderer::createScenePipeline()
     binds[3].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     binds[3].descriptorCount = 1;
     binds[3].stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
+    // Bindings 4-6: ray-traced GI mask + DDGI probe atlases (white fallbacks
+    // when GI is off — giParams.y == 0 gates all sampling in scene.frag).
+    for (uint32_t gb = 4; gb <= 6; ++gb)
+    {
+        binds[gb].binding         = gb;
+        binds[gb].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        binds[gb].descriptorCount = 1;
+        binds[gb].stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
+    }
     VkDescriptorSetLayoutCreateInfo slci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-    slci.bindingCount = 4;
+    slci.bindingCount = 7;
     slci.pBindings    = binds;
     vkCheck(vkCreateDescriptorSetLayout(m_device, &slci, nullptr, &m_sceneSetLayout), "descriptor set layout");
 
@@ -1427,7 +1476,7 @@ void VulkanRenderer::createScenePipeline()
     // Per-frame UBO buffers + descriptor sets (one per frame in flight).
     VkDescriptorPoolSize ps[2] = {
         { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         k_maxFramesInFlight * 2 },  // binding0 + binding2
-        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, k_maxFramesInFlight * 2 },  // binding1(shadow) + binding3(AO)
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, k_maxFramesInFlight * 5 },  // binding1(shadow) + binding3(AO) + bindings4-6(GI)
     };
     VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
     dpci.maxSets       = k_maxFramesInFlight;
@@ -3403,9 +3452,6 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                         static_cast<float>(width) / static_cast<float>(height),
                         &m_editorCamera);
 
-    // GI acceleration structures (Checkpoint VK-A): CPU BVH + SSBO upload from
-    // THIS extraction — inert until VK-B/C dispatch the compute kernels.
-    updateGiAccel();
 
     // Sky is independent of scene geometry — draw it before any early returns so it
     // always renders even when the scene is empty or fully culled (otherwise the
@@ -3477,6 +3523,12 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         // blurRT in non-HDR paths or when SSAO was skipped due to an empty scene.
         f.viewport      = glm::vec4(float(width), float(height),
                                     m_ssaoRanThisFrame ? 1.0f : 0.0f, 0.0f);
+        // giParams.y == 1 iff runGi() completed this frame (mask + atlases hold
+        // valid data and the scene set's bindings 4-6 point at them).
+        f.giGridOrigin  = glm::vec4(m_giGridOrigin, kGiProbeSpacing);
+        f.giGridCounts  = glm::vec4(float(m_giGridCounts.x), float(m_giGridCounts.y),
+                                    float(m_giGridCounts.z), float(m_giProbesPerRow));
+        f.giParams      = glm::vec4(m_giIndirectIntensity, m_giRanThisFrame ? 1.0f : 0.0f, 0.0f, 0.0f);
         if (m_frameUBO[m_currentFrame].mapped)
             std::memcpy(m_frameUBO[m_currentFrame].mapped, &f, sizeof(f));
     }
@@ -4919,7 +4971,8 @@ VulkanRenderer::GiBlasRange VulkanRenderer::buildGiBlas(const HE::UUID& meshId)
     return range;
 }
 
-bool VulkanRenderer::uploadGiBuffer(GiBuffer& b, const void* data, VkDeviceSize size)
+bool VulkanRenderer::uploadGiBuffer(GiBuffer& b, const void* data, VkDeviceSize size,
+                                    VkBufferUsageFlags usage)
 {
     if (size == 0) return false;
     if (b.size < size)
@@ -4931,7 +4984,7 @@ bool VulkanRenderer::uploadGiBuffer(GiBuffer& b, const void* data, VkDeviceSize 
 
         VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
         bci.size  = size;
-        bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+        bci.usage = usage;
         if (vkCreateBuffer(m_device, &bci, nullptr, &b.buf) != VK_SUCCESS) return false;
         VkMemoryRequirements req{};
         vkGetBufferMemoryRequirements(m_device, b.buf, &req);
@@ -5020,6 +5073,895 @@ void VulkanRenderer::destroyGiAccel()
     m_giInstanceCount = 0;
     m_giBlasDirty     = false;
 }
+
+// UBO mirrors of the gi_*.comp / gi_temporal.frag param blocks (std140: vec4
+// rows only, so the C++ structs match byte-for-byte).
+namespace
+{
+struct GiShadowUBOData   { glm::vec4 sunDirRadius; glm::vec4 frame; };
+struct GiTemporalUBOData { glm::mat4 prevViewProj; glm::vec4 blend; };
+struct GiProbeUBOData
+{
+    glm::vec4 gridOrigin, gridCounts, rayParams, sunDirRadius, sunColor, skyAmbient;
+    glm::vec4 lightPosRange[8], lightColorType[8], lightDirCos[8];
+};
+static_assert(sizeof(GiProbeUBOData) == (6 + 24) * 16, "must match gi_probe.comp's GiProbeUBO");
+
+// Vulkan copy of the dominant-directional pick (see MetalRenderer's
+// dominantDirectionalLight / OpenGL's glDominantDirectionalLight — keep all
+// three in sync): the brightest directional light, colour hard zero when
+// nothing shines (night without moon / full overcast) so the bounce never
+// invents daylight.
+bool vkDominantDirectionalLight(const RenderWorld& rw,
+                                glm::vec3& towardOut, glm::vec3& colorIntensityOut)
+{
+    const LightData* best = nullptr;
+    for (const LightData& l : rw.lights)
+        if (l.type == 0 && l.intensity > 0.0f && (!best || l.intensity > best->intensity))
+            best = &l;
+    if (!best || glm::dot(best->direction, best->direction) < 1e-8f)
+    {
+        towardOut         = glm::normalize(rw.sunDirection);
+        colorIntensityOut = glm::vec3(0.0f);
+        return false;
+    }
+    towardOut         = -glm::normalize(best->direction);
+    colorIntensityOut = best->color * best->intensity;
+    return true;
+}
+} // namespace
+
+// Builds the five GI pipelines + layouts + render passes once (first GI-active
+// frame). The FIRST compute pipelines in this backend. Failure logs + leaves
+// m_giReady false — GI silently off for the session, no crash (blind-port
+// safety, mirrors the GL port's behaviour).
+void VulkanRenderer::createGiPipelines()
+{
+    if (m_giPipelinesTried) return;
+    m_giPipelinesTried = true;
+
+    // NEAREST clamp sampler for G-buffer/raw/history reads (point semantics —
+    // the temporal pass must not blend across texels when reprojecting).
+    {
+        VkSamplerCreateInfo sci{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+        sci.magFilter    = VK_FILTER_NEAREST;
+        sci.minFilter    = VK_FILTER_NEAREST;
+        sci.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        if (vkCreateSampler(m_device, &sci, nullptr, &m_giPointSampler) != VK_SUCCESS)
+        { Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: GI point sampler failed"); return; }
+    }
+
+    // ── Descriptor set layouts ────────────────────────────────────────────────
+    auto makeDSL = [&](const std::vector<VkDescriptorSetLayoutBinding>& binds,
+                       VkDescriptorSetLayout& out) -> bool
+    {
+        VkDescriptorSetLayoutCreateInfo slci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+        slci.bindingCount = static_cast<uint32_t>(binds.size());
+        slci.pBindings    = binds.data();
+        return vkCreateDescriptorSetLayout(m_device, &slci, nullptr, &out) == VK_SUCCESS;
+    };
+    auto bindOf = [&](uint32_t b, VkDescriptorType t, VkShaderStageFlags st,
+                      const VkSampler* imm = nullptr)
+    {
+        VkDescriptorSetLayoutBinding r{};
+        r.binding = b; r.descriptorType = t; r.descriptorCount = 1;
+        r.stageFlags = st; r.pImmutableSamplers = imm;
+        return r;
+    };
+
+    // gi_shadow.comp: 0-2 SSBOs, 3-4 samplers (gPos/gNorm), 5 storage image, 6 UBO.
+    bool ok = makeDSL({
+        bindOf(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         VK_SHADER_STAGE_COMPUTE_BIT),
+        bindOf(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         VK_SHADER_STAGE_COMPUTE_BIT),
+        bindOf(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         VK_SHADER_STAGE_COMPUTE_BIT),
+        bindOf(3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT, &m_giPointSampler),
+        bindOf(4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT, &m_giPointSampler),
+        bindOf(5, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,          VK_SHADER_STAGE_COMPUTE_BIT),
+        bindOf(6, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         VK_SHADER_STAGE_COMPUTE_BIT),
+    }, m_giShadowDSL);
+    // gi_probe.comp: 0-2 SSBOs, 3-4 storage images, 5 UBO.
+    ok = ok && makeDSL({
+        bindOf(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT),
+        bindOf(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT),
+        bindOf(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT),
+        bindOf(3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,  VK_SHADER_STAGE_COMPUTE_BIT),
+        bindOf(4, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,  VK_SHADER_STAGE_COMPUTE_BIT),
+        bindOf(5, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT),
+    }, m_giProbeDSL);
+    // gi_temporal.frag (blur reuses the layout; unused bindings hold valid views):
+    // 0-2 samplers, 3 UBO.
+    ok = ok && makeDSL({
+        bindOf(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT, &m_giPointSampler),
+        bindOf(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT, &m_giPointSampler),
+        bindOf(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT, &m_giPointSampler),
+        bindOf(3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         VK_SHADER_STAGE_FRAGMENT_BIT),
+    }, m_giFsDSL);
+    if (!ok)
+    { Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: GI descriptor layouts failed"); return; }
+
+    // ── Pipeline layouts ──────────────────────────────────────────────────────
+    auto makePL = [&](VkDescriptorSetLayout dsl, uint32_t pcSize, VkShaderStageFlags pcStage,
+                      VkPipelineLayout& out) -> bool
+    {
+        VkPushConstantRange pcr{ pcStage, 0, pcSize };
+        VkPipelineLayoutCreateInfo plci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+        plci.setLayoutCount = dsl ? 1u : 0u;
+        plci.pSetLayouts    = dsl ? &dsl : nullptr;
+        plci.pushConstantRangeCount = pcSize ? 1u : 0u;
+        plci.pPushConstantRanges    = pcSize ? &pcr : nullptr;
+        return vkCreatePipelineLayout(m_device, &plci, nullptr, &out) == VK_SUCCESS;
+    };
+    ok = makePL(m_giShadowDSL, 0, 0, m_giShadowPL)
+      && makePL(m_giProbeDSL,  0, 0, m_giProbePL)
+      && makePL(m_giFsDSL,     0, 0, m_giFsPL)
+      && makePL(VK_NULL_HANDLE, sizeof(PushConstants), VK_SHADER_STAGE_VERTEX_BIT, m_giGBufPL);
+    if (!ok)
+    { Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: GI pipeline layouts failed"); return; }
+
+    // ── Render passes ─────────────────────────────────────────────────────────
+    // G-buffer: 2x RGBA16F (CLEAR → SHADER_READ_ONLY) + depth. The end
+    // dependency covers FRAGMENT **and** COMPUTE consumers — the shadow-ray
+    // KERNEL reads gPos/gNorm, unlike SSAO whose consumer is a fragment pass.
+    {
+        VkAttachmentDescription atts[3]{};
+        for (int i = 0; i < 2; ++i)
+        {
+            atts[i].format         = VK_FORMAT_R16G16B16A16_SFLOAT;
+            atts[i].samples        = VK_SAMPLE_COUNT_1_BIT;
+            atts[i].loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
+            atts[i].storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
+            atts[i].stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            atts[i].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            atts[i].initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
+            atts[i].finalLayout    = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        }
+        atts[2].format         = m_depthFormat;
+        atts[2].samples        = VK_SAMPLE_COUNT_1_BIT;
+        atts[2].loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        atts[2].storeOp        = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        atts[2].stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        atts[2].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        atts[2].initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
+        atts[2].finalLayout    = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        VkAttachmentReference colorRefs[2] = {
+            { 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL },
+            { 1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL },
+        };
+        VkAttachmentReference depthRef{ 2, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
+        VkSubpassDescription sub{};
+        sub.pipelineBindPoint       = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        sub.colorAttachmentCount    = 2;
+        sub.pColorAttachments       = colorRefs;
+        sub.pDepthStencilAttachment = &depthRef;
+        VkSubpassDependency deps[2]{};
+        deps[0].srcSubpass    = VK_SUBPASS_EXTERNAL;
+        deps[0].dstSubpass    = 0;
+        deps[0].srcStageMask  = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+        deps[0].dstStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                              | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+        deps[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        deps[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+                              | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        deps[1].srcSubpass    = 0;
+        deps[1].dstSubpass    = VK_SUBPASS_EXTERNAL;
+        deps[1].srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        deps[1].dstStageMask  = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+        deps[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        deps[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        VkRenderPassCreateInfo rpci{ VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
+        rpci.attachmentCount = 3; rpci.pAttachments  = atts;
+        rpci.subpassCount    = 1; rpci.pSubpasses    = &sub;
+        rpci.dependencyCount = 2; rpci.pDependencies = deps;
+        if (vkCreateRenderPass(m_device, &rpci, nullptr, &m_giGBufRP) != VK_SUCCESS)
+        { Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: GI gbuf render pass failed"); return; }
+    }
+    // Temporal (RGBA16F) + blur (R16F): single color, DONT_CARE → SHADER_READ_ONLY.
+    auto makeFsRP = [&](VkFormat fmt, VkRenderPass& rp) -> bool
+    {
+        VkAttachmentDescription att{};
+        att.format         = fmt;
+        att.samples        = VK_SAMPLE_COUNT_1_BIT;
+        att.loadOp         = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        att.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
+        att.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        att.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        att.initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
+        att.finalLayout    = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        VkAttachmentReference ref{ 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+        VkSubpassDescription sub{};
+        sub.pipelineBindPoint    = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        sub.colorAttachmentCount = 1;
+        sub.pColorAttachments    = &ref;
+        VkSubpassDependency deps[2]{};
+        deps[0].srcSubpass    = VK_SUBPASS_EXTERNAL;
+        deps[0].dstSubpass    = 0;
+        deps[0].srcStageMask  = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        deps[0].dstStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        deps[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        deps[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        deps[1].srcSubpass    = 0;
+        deps[1].dstSubpass    = VK_SUBPASS_EXTERNAL;
+        deps[1].srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        deps[1].dstStageMask  = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        deps[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        deps[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        VkRenderPassCreateInfo rpci{ VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
+        rpci.attachmentCount = 1; rpci.pAttachments  = &att;
+        rpci.subpassCount    = 1; rpci.pSubpasses    = &sub;
+        rpci.dependencyCount = 2; rpci.pDependencies = deps;
+        return vkCreateRenderPass(m_device, &rpci, nullptr, &rp) == VK_SUCCESS;
+    };
+    if (!makeFsRP(VK_FORMAT_R16G16B16A16_SFLOAT, m_giTemporalRP) ||
+        !makeFsRP(VK_FORMAT_R16_SFLOAT,          m_giBlurRP))
+    { Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: GI fs render passes failed"); return; }
+
+    // ── Shader modules ────────────────────────────────────────────────────────
+    VkShaderModule gbufVS   = loadShaderModule("gi_gbuf.vert.spv");
+    VkShaderModule gbufFS   = loadShaderModule("gi_gbuf.frag.spv");
+    VkShaderModule fsVS     = loadShaderModule("postfx.vert.spv");
+    VkShaderModule tempFS   = loadShaderModule("gi_temporal.frag.spv");
+    VkShaderModule blurFS   = loadShaderModule("gi_blur.frag.spv");
+    VkShaderModule shadowCS = loadShaderModule("gi_shadow.comp.spv");
+    VkShaderModule probeCS  = loadShaderModule("gi_probe.comp.spv");
+    auto destroyModules = [&]()
+    {
+        for (auto m : { gbufVS, gbufFS, fsVS, tempFS, blurFS, shadowCS, probeCS })
+            if (m) vkDestroyShaderModule(m_device, m, nullptr);
+    };
+    if (!gbufVS || !gbufFS || !fsVS || !tempFS || !blurFS || !shadowCS || !probeCS)
+    {
+        Logger::Log(Logger::LogLevel::Warning, "VulkanRenderer: GI shaders missing — GI disabled");
+        destroyModules();
+        return;
+    }
+
+    // ── Pipelines ─────────────────────────────────────────────────────────────
+    VkVertexInputBindingDescription vbind{ 0, 8u * sizeof(float), VK_VERTEX_INPUT_RATE_VERTEX };
+    VkVertexInputAttributeDescription vattrs[3] = {
+        { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0  },
+        { 1, 0, VK_FORMAT_R32G32B32_SFLOAT, 12 },
+        { 2, 0, VK_FORMAT_R32G32_SFLOAT,    24 },
+    };
+    VkPipelineVertexInputStateCreateInfo vi{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+    vi.vertexBindingDescriptionCount   = 1; vi.pVertexBindingDescriptions   = &vbind;
+    vi.vertexAttributeDescriptionCount = 3; vi.pVertexAttributeDescriptions = vattrs;
+    VkPipelineInputAssemblyStateCreateInfo ia{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkPipelineDepthStencilStateCreateInfo ds{ VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
+    ds.depthTestEnable = VK_TRUE; ds.depthWriteEnable = VK_TRUE; ds.depthCompareOp = VK_COMPARE_OP_LESS;
+    VkPipelineViewportStateCreateInfo vps{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+    vps.viewportCount = 1; vps.scissorCount = 1;
+    VkPipelineRasterizationStateCreateInfo rs{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+    rs.polygonMode = VK_POLYGON_MODE_FILL; rs.cullMode = VK_CULL_MODE_NONE;
+    rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE; rs.lineWidth = 1.0f;
+    VkPipelineMultisampleStateCreateInfo ms{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    VkPipelineColorBlendAttachmentState cba[2]{};
+    for (auto& a : cba)
+        a.colorWriteMask = VK_COLOR_COMPONENT_R_BIT|VK_COLOR_COMPONENT_G_BIT|
+                           VK_COLOR_COMPONENT_B_BIT|VK_COLOR_COMPONENT_A_BIT;
+    VkPipelineColorBlendStateCreateInfo cb2{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+    cb2.attachmentCount = 2; cb2.pAttachments = cba;
+    VkPipelineColorBlendStateCreateInfo cb1{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+    cb1.attachmentCount = 1; cb1.pAttachments = cba;
+    VkDynamicState dynStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+    VkPipelineDynamicStateCreateInfo dyn{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+    dyn.dynamicStateCount = 2; dyn.pDynamicStates = dynStates;
+
+    bool pipesOk = true;
+    // G-buffer prepass (MRT).
+    {
+        VkPipelineShaderStageCreateInfo stages[2]{};
+        stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;   stages[0].module = gbufVS; stages[0].pName = "main";
+        stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; stages[1].module = gbufFS; stages[1].pName = "main";
+        VkGraphicsPipelineCreateInfo pci{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+        pci.stageCount = 2; pci.pStages = stages;
+        pci.pVertexInputState = &vi;  pci.pInputAssemblyState = &ia;
+        pci.pViewportState = &vps;    pci.pRasterizationState = &rs;
+        pci.pMultisampleState = &ms;  pci.pDepthStencilState = &ds;
+        pci.pColorBlendState = &cb2;  pci.pDynamicState = &dyn;
+        pci.layout = m_giGBufPL;      pci.renderPass = m_giGBufRP;
+        pipesOk = pipesOk && vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr,
+                                                       &m_giGBufPipe) == VK_SUCCESS;
+    }
+    // Temporal + blur (attribute-less fullscreen, no depth).
+    VkPipelineVertexInputStateCreateInfo fsVI{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+    VkPipelineDepthStencilStateCreateInfo nods{ VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
+    auto makeFsPipe = [&](VkShaderModule fs, VkRenderPass rp, VkPipeline& out) -> bool
+    {
+        VkPipelineShaderStageCreateInfo stages[2]{};
+        stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;   stages[0].module = fsVS; stages[0].pName = "main";
+        stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; stages[1].module = fs;   stages[1].pName = "main";
+        VkGraphicsPipelineCreateInfo pci{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+        pci.stageCount = 2; pci.pStages = stages;
+        pci.pVertexInputState = &fsVI; pci.pInputAssemblyState = &ia;
+        pci.pViewportState = &vps;     pci.pRasterizationState = &rs;
+        pci.pMultisampleState = &ms;   pci.pDepthStencilState = &nods;
+        pci.pColorBlendState = &cb1;   pci.pDynamicState = &dyn;
+        pci.layout = m_giFsPL;         pci.renderPass = rp;
+        return vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &out) == VK_SUCCESS;
+    };
+    pipesOk = pipesOk && makeFsPipe(tempFS, m_giTemporalRP, m_giTemporalPipe);
+    pipesOk = pipesOk && makeFsPipe(blurFS, m_giBlurRP,     m_giBlurPipe);
+    // Compute kernels.
+    auto makeCompute = [&](VkShaderModule cs, VkPipelineLayout pl, VkPipeline& out) -> bool
+    {
+        VkComputePipelineCreateInfo cpi{ VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
+        cpi.stage.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        cpi.stage.stage  = VK_SHADER_STAGE_COMPUTE_BIT;
+        cpi.stage.module = cs;
+        cpi.stage.pName  = "main";
+        cpi.layout       = pl;
+        return vkCreateComputePipelines(m_device, VK_NULL_HANDLE, 1, &cpi, nullptr, &out) == VK_SUCCESS;
+    };
+    pipesOk = pipesOk && makeCompute(shadowCS, m_giShadowPL, m_giShadowPipe);
+    pipesOk = pipesOk && makeCompute(probeCS,  m_giProbePL,  m_giProbePipe);
+    destroyModules();
+    if (!pipesOk)
+    { Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: GI pipeline creation failed — GI disabled"); return; }
+
+    // ── Descriptor pool + per-in-flight-frame sets + params UBOs ─────────────
+    {
+        VkDescriptorPoolSize ps[4] = {
+            { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         k_maxFramesInFlight * 6 },
+            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, k_maxFramesInFlight * 8 },
+            { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,          k_maxFramesInFlight * 3 },
+            { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         k_maxFramesInFlight * 4 },
+        };
+        VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+        dpci.maxSets       = k_maxFramesInFlight * 4;
+        dpci.poolSizeCount = 4;
+        dpci.pPoolSizes    = ps;
+        if (vkCreateDescriptorPool(m_device, &dpci, nullptr, &m_giDescPool) != VK_SUCCESS)
+        { Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: GI descriptor pool failed"); return; }
+        for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
+        {
+            VkDescriptorSetLayout layouts[4] = { m_giShadowDSL, m_giProbeDSL, m_giFsDSL, m_giFsDSL };
+            VkDescriptorSet sets[4]{};
+            VkDescriptorSetAllocateInfo dsai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+            dsai.descriptorPool     = m_giDescPool;
+            dsai.descriptorSetCount = 4;
+            dsai.pSetLayouts        = layouts;
+            if (vkAllocateDescriptorSets(m_device, &dsai, sets) != VK_SUCCESS)
+            { Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: GI descriptor sets failed"); return; }
+            m_giShadowSet[i]   = sets[0];
+            m_giProbeSet[i]    = sets[1];
+            m_giTemporalSet[i] = sets[2];
+            m_giBlurSet[i]     = sets[3];
+        }
+    }
+    m_giReady = true;
+    Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: GI pipelines built (software compute ray tracing)");
+}
+
+void VulkanRenderer::createGiTargets(uint32_t w, uint32_t h)
+{
+    w = std::max(1u, w); h = std::max(1u, h);
+    if (m_giGBufFB && w == m_giW && h == m_giH) return;
+    destroyGiTargets();
+    m_giW = w; m_giH = h;
+
+    auto makeImg = [&](VkFormat fmt, VkImageUsageFlags usage, VkImageAspectFlags aspect,
+                       GiImage& out) -> bool
+    {
+        VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+        ici.imageType = VK_IMAGE_TYPE_2D; ici.format = fmt;
+        ici.extent = { w, h, 1 }; ici.mipLevels = 1; ici.arrayLayers = 1;
+        ici.samples = VK_SAMPLE_COUNT_1_BIT; ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+        ici.usage = usage; ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        if (vkCreateImage(m_device, &ici, nullptr, &out.img) != VK_SUCCESS) return false;
+        VkMemoryRequirements req{}; vkGetImageMemoryRequirements(m_device, out.img, &req);
+        VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        mai.allocationSize  = req.size;
+        mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (vkAllocateMemory(m_device, &mai, nullptr, &out.mem) != VK_SUCCESS) return false;
+        vkBindImageMemory(m_device, out.img, out.mem, 0);
+        VkImageViewCreateInfo vci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+        vci.image = out.img; vci.viewType = VK_IMAGE_VIEW_TYPE_2D; vci.format = fmt;
+        vci.subresourceRange = { aspect, 0, 1, 0, 1 };
+        return vkCreateImageView(m_device, &vci, nullptr, &out.view) == VK_SUCCESS;
+    };
+    const VkImageUsageFlags kRT = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    bool ok = makeImg(VK_FORMAT_R16G16B16A16_SFLOAT, kRT, VK_IMAGE_ASPECT_COLOR_BIT, m_giGBufPos)
+           && makeImg(VK_FORMAT_R16G16B16A16_SFLOAT, kRT, VK_IMAGE_ASPECT_COLOR_BIT, m_giGBufNorm)
+           && makeImg(m_depthFormat, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                      VK_IMAGE_ASPECT_DEPTH_BIT, m_giGBufDepth)
+           && makeImg(VK_FORMAT_R16_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                      VK_IMAGE_ASPECT_COLOR_BIT, m_giRaw)
+           && makeImg(VK_FORMAT_R16G16B16A16_SFLOAT, kRT, VK_IMAGE_ASPECT_COLOR_BIT, m_giHist[0])
+           && makeImg(VK_FORMAT_R16G16B16A16_SFLOAT, kRT, VK_IMAGE_ASPECT_COLOR_BIT, m_giHist[1])
+           && makeImg(VK_FORMAT_R16_SFLOAT, kRT, VK_IMAGE_ASPECT_COLOR_BIT, m_giResult);
+    if (!ok)
+    {
+        Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: GI target creation failed");
+        destroyGiTargets();
+        return;
+    }
+
+    // Framebuffers.
+    {
+        VkImageView gbufAtts[3] = { m_giGBufPos.view, m_giGBufNorm.view, m_giGBufDepth.view };
+        VkFramebufferCreateInfo fci{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
+        fci.renderPass = m_giGBufRP; fci.attachmentCount = 3; fci.pAttachments = gbufAtts;
+        fci.width = w; fci.height = h; fci.layers = 1;
+        ok = vkCreateFramebuffer(m_device, &fci, nullptr, &m_giGBufFB) == VK_SUCCESS;
+        for (int i = 0; i < 2 && ok; ++i)
+        {
+            VkFramebufferCreateInfo hci{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
+            hci.renderPass = m_giTemporalRP; hci.attachmentCount = 1; hci.pAttachments = &m_giHist[i].view;
+            hci.width = w; hci.height = h; hci.layers = 1;
+            ok = vkCreateFramebuffer(m_device, &hci, nullptr, &m_giHistFB[i]) == VK_SUCCESS;
+        }
+        if (ok)
+        {
+            VkFramebufferCreateInfo rci{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
+            rci.renderPass = m_giBlurRP; rci.attachmentCount = 1; rci.pAttachments = &m_giResult.view;
+            rci.width = w; rci.height = h; rci.layers = 1;
+            ok = vkCreateFramebuffer(m_device, &rci, nullptr, &m_giResultFB) == VK_SUCCESS;
+        }
+    }
+    if (!ok)
+    {
+        Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: GI framebuffer creation failed");
+        destroyGiTargets();
+        return;
+    }
+
+    // One-shot layout transitions: raw → GENERAL (storage image, stays there);
+    // hist[0/1] → SHADER_READ_ONLY so the FIRST temporal read of "prev" is a
+    // defined layout (contents are garbage, but uBlend == 0 on the first GI
+    // frame ignores history entirely).
+    {
+        VkCommandBufferAllocateInfo cbai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+        cbai.commandPool = m_cmdPool; cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; cbai.commandBufferCount = 1;
+        VkCommandBuffer tmp = VK_NULL_HANDLE;
+        vkAllocateCommandBuffers(m_device, &cbai, &tmp);
+        VkCommandBufferBeginInfo cbi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+        cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(tmp, &cbi);
+        auto barrier = [&](VkImage img, VkImageLayout to)
+        {
+            VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+            b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED; b.newLayout = to;
+            b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b.image = img; b.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+            b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+            vkCmdPipelineBarrier(tmp, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                0, 0, nullptr, 0, nullptr, 1, &b);
+        };
+        barrier(m_giRaw.img,     VK_IMAGE_LAYOUT_GENERAL);
+        barrier(m_giHist[0].img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        barrier(m_giHist[1].img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        vkEndCommandBuffer(tmp);
+        VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO }; si.commandBufferCount = 1; si.pCommandBuffers = &tmp;
+        vkQueueSubmit(m_graphicsQueue, 1, &si, VK_NULL_HANDLE);
+        vkQueueWaitIdle(m_graphicsQueue);
+        vkFreeCommandBuffers(m_device, m_cmdPool, 1, &tmp);
+    }
+    m_giHistValid = false; // fresh targets → no usable history
+}
+
+void VulkanRenderer::destroyGiTargets()
+{
+    auto destroy = [&](GiImage& g)
+    {
+        if (g.view) { vkDestroyImageView(m_device, g.view, nullptr); g.view = VK_NULL_HANDLE; }
+        if (g.img)  { vkDestroyImage(m_device, g.img, nullptr);      g.img  = VK_NULL_HANDLE; }
+        if (g.mem)  { vkFreeMemory(m_device, g.mem, nullptr);        g.mem  = VK_NULL_HANDLE; }
+    };
+    if (m_giGBufFB)   { vkDestroyFramebuffer(m_device, m_giGBufFB, nullptr);   m_giGBufFB = VK_NULL_HANDLE; }
+    for (int i = 0; i < 2; ++i)
+        if (m_giHistFB[i]) { vkDestroyFramebuffer(m_device, m_giHistFB[i], nullptr); m_giHistFB[i] = VK_NULL_HANDLE; }
+    if (m_giResultFB) { vkDestroyFramebuffer(m_device, m_giResultFB, nullptr); m_giResultFB = VK_NULL_HANDLE; }
+    destroy(m_giGBufPos); destroy(m_giGBufNorm); destroy(m_giGBufDepth);
+    destroy(m_giRaw); destroy(m_giHist[0]); destroy(m_giHist[1]); destroy(m_giResult);
+    m_giW = m_giH = 0;
+    m_giHistValid = false;
+}
+
+// One-shot probe-grid fit over the scene AABB. m_renderWorld was extracted by
+// runGi() with real mesh bounds refreshed (same lesson as GL/Metal: the
+// extractor seeds only fallback unit cubes).
+void VulkanRenderer::ensureGiProbeGrid()
+{
+    if (m_giProbeGridBuilt) return;
+    if (m_renderWorld.objects.empty()) return;
+
+    HE::AABB sceneBox;
+    for (const RenderObject& obj : m_renderWorld.objects)
+        if (obj.worldBounds.isValid())
+            sceneBox.expand(obj.worldBounds);
+    if (!sceneBox.isValid()) return;
+
+    const glm::vec3 padded = sceneBox.extents() + glm::vec3(kGiProbeSpacing);
+    m_giGridCounts = glm::ivec3(
+        std::clamp(static_cast<int>(std::ceil(padded.x * 2.0f / kGiProbeSpacing)) + 1, 2, kGiMaxProbesPerAxis),
+        std::clamp(static_cast<int>(std::ceil(padded.y * 2.0f / kGiProbeSpacing)) + 1, 2, kGiMaxProbesPerAxis),
+        std::clamp(static_cast<int>(std::ceil(padded.z * 2.0f / kGiProbeSpacing)) + 1, 2, kGiMaxProbesPerAxis));
+    const glm::vec3 gridSpan = glm::vec3(m_giGridCounts - 1) * kGiProbeSpacing;
+    m_giGridOrigin     = sceneBox.center() - gridSpan * 0.5f;
+    m_giProbeCount     = m_giGridCounts.x * m_giGridCounts.y * m_giGridCounts.z;
+    m_giProbesPerRow   = std::min(m_giProbeCount, 32);
+    m_giProbeCursor    = 0;
+    m_giProbeGridBuilt = true;
+}
+
+void VulkanRenderer::ensureGiProbeAtlas()
+{
+    if (m_giIrrAtlas.img || m_giProbeCount <= 0) return;
+    const int rows = (m_giProbeCount + m_giProbesPerRow - 1) / m_giProbesPerRow;
+    const uint32_t aw = static_cast<uint32_t>(m_giProbesPerRow * kGiProbeOctSize);
+    const uint32_t ah = static_cast<uint32_t>(rows * kGiProbeOctSize);
+
+    auto makeAtlas = [&](VkFormat fmt, GiImage& out) -> bool
+    {
+        VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+        ici.imageType = VK_IMAGE_TYPE_2D; ici.format = fmt;
+        ici.extent = { aw, ah, 1 }; ici.mipLevels = 1; ici.arrayLayers = 1;
+        ici.samples = VK_SAMPLE_COUNT_1_BIT; ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+        ici.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        if (vkCreateImage(m_device, &ici, nullptr, &out.img) != VK_SUCCESS) return false;
+        VkMemoryRequirements req{}; vkGetImageMemoryRequirements(m_device, out.img, &req);
+        VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        mai.allocationSize  = req.size;
+        mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (vkAllocateMemory(m_device, &mai, nullptr, &out.mem) != VK_SUCCESS) return false;
+        vkBindImageMemory(m_device, out.img, out.mem, 0);
+        VkImageViewCreateInfo vci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+        vci.image = out.img; vci.viewType = VK_IMAGE_VIEW_TYPE_2D; vci.format = fmt;
+        vci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        return vkCreateImageView(m_device, &vci, nullptr, &out.view) == VK_SUCCESS;
+    };
+    if (!makeAtlas(VK_FORMAT_R16G16B16A16_SFLOAT, m_giIrrAtlas) ||
+        !makeAtlas(VK_FORMAT_R16G16_SFLOAT,       m_giVisAtlas))
+    {
+        Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: GI probe atlas creation failed");
+        destroyGiProbeAtlas();
+        return;
+    }
+
+    // Transition both to GENERAL (imageLoad/Store + sampling live there) and
+    // zero-fill — the probe kernel EMA-reads its own previous texel.
+    VkCommandBufferAllocateInfo cbai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+    cbai.commandPool = m_cmdPool; cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; cbai.commandBufferCount = 1;
+    VkCommandBuffer tmp = VK_NULL_HANDLE;
+    vkAllocateCommandBuffers(m_device, &cbai, &tmp);
+    VkCommandBufferBeginInfo cbi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(tmp, &cbi);
+    for (GiImage* g : { &m_giIrrAtlas, &m_giVisAtlas })
+    {
+        VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+        b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED; b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = g->img; b.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(tmp, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &b);
+        VkClearColorValue zero{};
+        VkImageSubresourceRange range{ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        vkCmdClearColorImage(tmp, g->img, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &range);
+        VkMemoryBarrier mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+        mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(tmp, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            0, 1, &mb, 0, nullptr, 0, nullptr);
+    }
+    vkEndCommandBuffer(tmp);
+    VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO }; si.commandBufferCount = 1; si.pCommandBuffers = &tmp;
+    vkQueueSubmit(m_graphicsQueue, 1, &si, VK_NULL_HANDLE);
+    vkQueueWaitIdle(m_graphicsQueue);
+    vkFreeCommandBuffers(m_device, m_cmdPool, 1, &tmp);
+}
+
+void VulkanRenderer::destroyGiProbeAtlas()
+{
+    auto destroy = [&](GiImage& g)
+    {
+        if (g.view) { vkDestroyImageView(m_device, g.view, nullptr); g.view = VK_NULL_HANDLE; }
+        if (g.img)  { vkDestroyImage(m_device, g.img, nullptr);      g.img  = VK_NULL_HANDLE; }
+        if (g.mem)  { vkFreeMemory(m_device, g.mem, nullptr);        g.mem  = VK_NULL_HANDLE; }
+    };
+    destroy(m_giIrrAtlas);
+    destroy(m_giVisAtlas);
+    m_giProbeGridBuilt = false;
+    m_giProbeCount = 0;
+    m_giProbeCursor = 0;
+}
+
+// The full GI frame: extraction → accel upload → G-buffer prepass →
+// shadow-ray compute → temporal → blur → probe-update compute, all BEFORE the
+// main scene render pass (compute can't nest inside one). Mirrors the GL
+// port's RenderGiShadow/DispatchGiProbeUpdate structure; Metal lessons (same
+// camera as the scene pass, dominant light, tight temporal tolerance) baked in.
+void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
+{
+    if (!m_giEnabled || !m_world) return;
+    createGiPipelines();
+    if (!m_giReady) return;
+
+    // Extract with the scene pass's aspect (Metal lesson 5846efc: a mismatched
+    // camera misaligns the screen-space mask → swimming shadows).
+    const float aspect = w > 0 && h > 0 ? float(w) / float(h) : 1.0f;
+    m_extractor.setContentManager(m_contentManager);
+    m_extractor.extract(*m_world, m_renderWorld, aspect, &m_editorCamera);
+    if (m_renderWorld.objects.empty()) return;
+    for (RenderObject& obj : m_renderWorld.objects)
+        if (const GpuMesh* mesh = resolveMesh(obj.meshAssetId); mesh && mesh->localBounds.isValid())
+            obj.worldBounds = mesh->localBounds.transformed(obj.transform);
+
+    updateGiAccel();
+    if (m_giInstanceCount == 0) return;
+
+    const uint32_t gw = std::max(1u, w / 2), gh = std::max(1u, h / 2); // half-res like GL/Metal
+    createGiTargets(gw, gh);
+    if (!m_giGBufFB || !m_giResultFB) return;
+    ensureGiProbeGrid();
+    if (m_giProbeGridBuilt) ensureGiProbeAtlas();
+
+    m_culler.cull(m_renderWorld, m_visible);
+    m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
+    if (m_sortedIndices.empty()) return;
+
+    const glm::mat4 vp = kVulkanClipFix * m_renderWorld.camera.projection * m_renderWorld.camera.view;
+    const uint32_t  fi = m_currentFrame;
+    const int curIdx = m_giHistIdx, prevIdx = 1 - curIdx;
+
+    glm::vec3 towardLight, lightColorIntensity;
+    vkDominantDirectionalLight(m_renderWorld, towardLight, lightColorIntensity);
+
+    // ── Params UBOs (host-visible ring slot for this in-flight frame) ────────
+    m_giFrameSeed += 1.0f;
+    GiShadowUBOData shadowUbo{};
+    shadowUbo.sunDirRadius = glm::vec4(towardLight, glm::radians(m_giLightRadius));
+    shadowUbo.frame        = glm::vec4(m_giFrameSeed, float(gw), float(gh), float(m_giInstanceCount));
+    if (!uploadGiBuffer(m_giShadowUBO[fi], &shadowUbo, sizeof(shadowUbo),
+                        VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT)) return;
+
+    GiTemporalUBOData tempUbo{};
+    tempUbo.prevViewProj = m_giPrevViewProj;
+    tempUbo.blend        = glm::vec4(m_giHistValid ? 0.9f : 0.0f, 0.0f, 0.0f, 0.0f);
+    if (!uploadGiBuffer(m_giTemporalUBO[fi], &tempUbo, sizeof(tempUbo),
+                        VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT)) return;
+
+    const bool probesActive = m_giProbeGridBuilt && m_giIrrAtlas.img && m_giVisAtlas.img;
+    const int  probeBudget  = probesActive
+        ? std::min(m_giProbeBudgetPerFrame > 0 ? m_giProbeBudgetPerFrame : 1, m_giProbeCount) : 0;
+    if (probesActive)
+    {
+        GiProbeUBOData pu{};
+        pu.gridOrigin = glm::vec4(m_giGridOrigin, kGiProbeSpacing);
+        pu.gridCounts = glm::vec4(float(m_giGridCounts.x), float(m_giGridCounts.y),
+                                  float(m_giGridCounts.z), float(m_giProbesPerRow));
+        const float maxDist = glm::length(glm::vec3(m_giGridCounts) * kGiProbeSpacing) + kGiProbeSpacing;
+        pu.rayParams  = glm::vec4(maxDist, 0.92f, float(m_giProbeCursor), float(probeBudget));
+        pu.skyAmbient = glm::vec4(m_renderWorld.ambient, 0.0f);
+        int lightCount = 0;
+        for (const LightData& l : m_renderWorld.lights)
+        {
+            if (lightCount >= 8) break;
+            if ((l.type != 1 && l.type != 2) || l.intensity <= 0.0f) continue;
+            pu.lightPosRange[lightCount]  = glm::vec4(l.position, std::max(l.range, 1e-4f));
+            pu.lightColorType[lightCount] = glm::vec4(l.color * l.intensity, float(l.type));
+            pu.lightDirCos[lightCount]    = glm::vec4(l.direction, l.spotAngleCos);
+            ++lightCount;
+        }
+        pu.sunDirRadius = glm::vec4(towardLight, float(lightCount));
+        pu.sunColor     = glm::vec4(lightColorIntensity, float(m_giInstanceCount));
+        if (!uploadGiBuffer(m_giProbeUBO[fi], &pu, sizeof(pu),
+                            VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT)) return;
+    }
+
+    // ── Rewrite this frame slot's descriptor sets (fence already waited) ─────
+    {
+        VkDescriptorBufferInfo nodesBI{ m_giNodeBuf.buf, 0, VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo trisBI { m_giTriBuf.buf,  0, VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo instBI { m_giInstanceBuf[fi].buf, 0, VK_WHOLE_SIZE };
+        VkDescriptorImageInfo  posBI  { VK_NULL_HANDLE, m_giGBufPos.view,  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        VkDescriptorImageInfo  normBI { VK_NULL_HANDLE, m_giGBufNorm.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        VkDescriptorImageInfo  rawSI  { VK_NULL_HANDLE, m_giRaw.view,      VK_IMAGE_LAYOUT_GENERAL };
+        VkDescriptorBufferInfo shUboBI{ m_giShadowUBO[fi].buf, 0, sizeof(GiShadowUBOData) };
+        std::vector<VkWriteDescriptorSet> writes;
+        auto wBuf = [&](VkDescriptorSet set, uint32_t b, VkDescriptorType t, const VkDescriptorBufferInfo* bi)
+        {
+            VkWriteDescriptorSet ww{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+            ww.dstSet = set; ww.dstBinding = b; ww.descriptorCount = 1;
+            ww.descriptorType = t; ww.pBufferInfo = bi;
+            writes.push_back(ww);
+        };
+        auto wImg = [&](VkDescriptorSet set, uint32_t b, VkDescriptorType t, const VkDescriptorImageInfo* ii)
+        {
+            VkWriteDescriptorSet ww{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+            ww.dstSet = set; ww.dstBinding = b; ww.descriptorCount = 1;
+            ww.descriptorType = t; ww.pImageInfo = ii;
+            writes.push_back(ww);
+        };
+        // Shadow kernel set.
+        wBuf(m_giShadowSet[fi], 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &nodesBI);
+        wBuf(m_giShadowSet[fi], 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &trisBI);
+        wBuf(m_giShadowSet[fi], 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &instBI);
+        wImg(m_giShadowSet[fi], 3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &posBI);
+        wImg(m_giShadowSet[fi], 4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &normBI);
+        wImg(m_giShadowSet[fi], 5, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &rawSI);
+        wBuf(m_giShadowSet[fi], 6, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &shUboBI);
+        // Temporal set: gPos, raw (GENERAL), history[prev], UBO.
+        VkDescriptorImageInfo rawSamp{ VK_NULL_HANDLE, m_giRaw.view, VK_IMAGE_LAYOUT_GENERAL };
+        VkDescriptorImageInfo histBI { VK_NULL_HANDLE, m_giHist[prevIdx].view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        VkDescriptorBufferInfo tUboBI{ m_giTemporalUBO[fi].buf, 0, sizeof(GiTemporalUBOData) };
+        wImg(m_giTemporalSet[fi], 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &posBI);
+        wImg(m_giTemporalSet[fi], 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &rawSamp);
+        wImg(m_giTemporalSet[fi], 2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &histBI);
+        wBuf(m_giTemporalSet[fi], 3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &tUboBI);
+        // Blur set: reads history[cur]; bindings 1/2 get valid fillers, UBO reused.
+        VkDescriptorImageInfo histCurBI{ VK_NULL_HANDLE, m_giHist[curIdx].view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        wImg(m_giBlurSet[fi], 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &histCurBI);
+        wImg(m_giBlurSet[fi], 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &histCurBI);
+        wImg(m_giBlurSet[fi], 2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &histCurBI);
+        wBuf(m_giBlurSet[fi], 3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &tUboBI);
+        // Probe kernel set.
+        VkDescriptorBufferInfo pUboBI{ m_giProbeUBO[fi].buf, 0, sizeof(GiProbeUBOData) };
+        VkDescriptorImageInfo  irrSI { VK_NULL_HANDLE, m_giIrrAtlas.view, VK_IMAGE_LAYOUT_GENERAL };
+        VkDescriptorImageInfo  visSI { VK_NULL_HANDLE, m_giVisAtlas.view, VK_IMAGE_LAYOUT_GENERAL };
+        if (probesActive)
+        {
+            wBuf(m_giProbeSet[fi], 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &nodesBI);
+            wBuf(m_giProbeSet[fi], 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &trisBI);
+            wBuf(m_giProbeSet[fi], 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &instBI);
+            wImg(m_giProbeSet[fi], 3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &irrSI);
+            wImg(m_giProbeSet[fi], 4, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &visSI);
+            wBuf(m_giProbeSet[fi], 5, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &pUboBI);
+        }
+        vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+    }
+
+    // ── 1. World-space G-buffer prepass ──────────────────────────────────────
+    VkClearValue clears[3]{};
+    clears[0].color        = { { 0.0f, 0.0f, 0.0f, 0.0f } }; // a=0 = background
+    clears[1].color        = { { 0.0f, 0.0f, 0.0f, 0.0f } };
+    clears[2].depthStencil = { 1.0f, 0 };
+    VkRenderPassBeginInfo gRPBI{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+    gRPBI.renderPass        = m_giGBufRP;
+    gRPBI.framebuffer       = m_giGBufFB;
+    gRPBI.renderArea.extent = { gw, gh };
+    gRPBI.clearValueCount   = 3;
+    gRPBI.pClearValues      = clears;
+    vkCmdBeginRenderPass(cmd, &gRPBI, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_giGBufPipe);
+    VkViewport vvp{ 0, 0, float(gw), float(gh), 0, 1 };
+    VkRect2D   vsc{ { 0, 0 }, { gw, gh } };
+    vkCmdSetViewport(cmd, 0, 1, &vvp);
+    vkCmdSetScissor(cmd, 0, 1, &vsc);
+    for (uint32_t idx : m_sortedIndices)
+    {
+        const RenderObject& obj = m_renderWorld.objects[idx];
+        if (!obj.contributesAO) continue; // precip/particles don't shade the mask
+        const GpuMesh* mesh = resolveMesh(obj.meshAssetId);
+        const GpuMesh& gm   = mesh ? *mesh : m_cube;
+        if (!gm.indexCount) continue;
+        // gi_gbuf.vert: uMVP (clip-fixed) + uModel — same 128-byte shape.
+        PushConstants pc{ vp * obj.transform, obj.transform };
+        vkCmdPushConstants(cmd, m_giGBufPL, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
+        VkDeviceSize offset = 0;
+        vkCmdBindVertexBuffers(cmd, 0, 1, &gm.vbuf, &offset);
+        vkCmdBindIndexBuffer(cmd, gm.ibuf, 0, VK_INDEX_TYPE_UINT32);
+        vkCmdDrawIndexed(cmd, gm.indexCount, 1, 0, 0, 0);
+    }
+    vkCmdEndRenderPass(cmd); // colors → SHADER_READ_ONLY (dep covers COMPUTE too)
+
+    // ── 2. Shadow rays (compute) ─────────────────────────────────────────────
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_giShadowPipe);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_giShadowPL,
+                            0, 1, &m_giShadowSet[fi], 0, nullptr);
+    vkCmdDispatch(cmd, (gw + 7) / 8, (gh + 7) / 8, 1);
+    // Raw mask: compute write → fragment read (temporal), GENERAL stays.
+    {
+        VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+        b.oldLayout = VK_IMAGE_LAYOUT_GENERAL; b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = m_giRaw.img; b.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        b.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+    }
+
+    // ── 3. Temporal accumulation (fullscreen → hist[cur]) ────────────────────
+    {
+        VkRenderPassBeginInfo tRPBI{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+        tRPBI.renderPass        = m_giTemporalRP;
+        tRPBI.framebuffer       = m_giHistFB[curIdx];
+        tRPBI.renderArea.extent = { gw, gh };
+        vkCmdBeginRenderPass(cmd, &tRPBI, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_giTemporalPipe);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_giFsPL,
+                                0, 1, &m_giTemporalSet[fi], 0, nullptr);
+        vkCmdSetViewport(cmd, 0, 1, &vvp);
+        vkCmdSetScissor(cmd, 0, 1, &vsc);
+        vkCmdDraw(cmd, 3, 1, 0, 0);
+        vkCmdEndRenderPass(cmd);
+    }
+    m_giHistValid    = true;
+    m_giHistIdx      = prevIdx;
+    m_giPrevViewProj = vp; // clip-fixed, matching the G-buffer raster + temporal math
+
+    // ── 4. Spatial blur (fullscreen → result) ────────────────────────────────
+    {
+        VkRenderPassBeginInfo bRPBI{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+        bRPBI.renderPass        = m_giBlurRP;
+        bRPBI.framebuffer       = m_giResultFB;
+        bRPBI.renderArea.extent = { gw, gh };
+        vkCmdBeginRenderPass(cmd, &bRPBI, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_giBlurPipe);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_giFsPL,
+                                0, 1, &m_giBlurSet[fi], 0, nullptr);
+        vkCmdSetViewport(cmd, 0, 1, &vvp);
+        vkCmdSetScissor(cmd, 0, 1, &vsc);
+        vkCmdDraw(cmd, 3, 1, 0, 0);
+        vkCmdEndRenderPass(cmd);
+    }
+
+    // ── 5. Probe update (compute, frame-sliced round robin) ──────────────────
+    if (probesActive && probeBudget > 0)
+    {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_giProbePipe);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_giProbePL,
+                                0, 1, &m_giProbeSet[fi], 0, nullptr);
+        vkCmdDispatch(cmd, static_cast<uint32_t>(probeBudget), 1, 1);
+        // Atlases: compute write → fragment read (scene) AND next dispatch's EMA read.
+        VkImageMemoryBarrier bs[2]{};
+        for (int i = 0; i < 2; ++i)
+        {
+            bs[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            bs[i].oldLayout = VK_IMAGE_LAYOUT_GENERAL; bs[i].newLayout = VK_IMAGE_LAYOUT_GENERAL;
+            bs[i].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            bs[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            bs[i].image = (i == 0) ? m_giIrrAtlas.img : m_giVisAtlas.img;
+            bs[i].subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+            bs[i].srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            bs[i].dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        }
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0, 0, nullptr, 0, nullptr, 2, bs);
+        m_giProbeCursor = (m_giProbeCursor + probeBudget) % m_giProbeCount;
+    }
+
+    // ── 6. Point the scene set's GI bindings at this frame's outputs ─────────
+    // (this frame slot's fence was waited on, so the set is rewritable).
+    {
+        VkDescriptorImageInfo maskBI{ m_ssaoSampler, m_giResult.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        VkDescriptorImageInfo irrBI { m_ssaoSampler,
+            probesActive ? m_giIrrAtlas.view : m_ssaoWhiteView,
+            probesActive ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        VkDescriptorImageInfo visBI { m_ssaoSampler,
+            probesActive ? m_giVisAtlas.view : m_ssaoWhiteView,
+            probesActive ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        const VkDescriptorImageInfo* infos[3] = { &maskBI, &irrBI, &visBI };
+        VkWriteDescriptorSet ws[3]{};
+        for (uint32_t b = 0; b < 3; ++b)
+        {
+            ws[b].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            ws[b].dstSet          = m_frameUBO[fi].set;
+            ws[b].dstBinding      = 4 + b;
+            ws[b].descriptorCount = 1;
+            ws[b].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            ws[b].pImageInfo      = infos[b];
+        }
+        vkUpdateDescriptorSets(m_device, 3, ws, 0, nullptr);
+    }
+    m_giRanThisFrame = true;
+}
+
 
 void VulkanRenderer::SetBloomSettings(const BloomSettings& s)
 {
@@ -5211,13 +6153,19 @@ void VulkanRenderer::createSSAOPipeline()
         if (!m_frameUBO[i].set) continue;
         VkDescriptorImageInfo wdii{ m_ssaoSampler, m_ssaoWhiteView,
                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-        VkWriteDescriptorSet aw{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-        aw.dstSet          = m_frameUBO[i].set;
-        aw.dstBinding      = 3;
-        aw.descriptorCount = 1;
-        aw.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        aw.pImageInfo      = &wdii;
-        vkUpdateDescriptorSets(m_device, 1, &aw, 0, nullptr);
+        // Binding 3 (AO) + bindings 4-6 (GI mask/atlases): all start on the 1x1
+        // white fallback; runGi() rewrites 4-6 when it produces real targets.
+        VkWriteDescriptorSet aw[4]{};
+        for (uint32_t b = 0; b < 4; ++b)
+        {
+            aw[b].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            aw[b].dstSet          = m_frameUBO[i].set;
+            aw[b].dstBinding      = 3 + b;
+            aw[b].descriptorCount = 1;
+            aw[b].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            aw[b].pImageInfo      = &wdii;
+        }
+        vkUpdateDescriptorSets(m_device, 4, aw, 0, nullptr);
     }
 
     // ── 4x4 noise texture (RGBA32F, NEAREST+REPEAT) ──────────────────────────
