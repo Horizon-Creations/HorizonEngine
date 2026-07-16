@@ -4389,18 +4389,27 @@ void OpenGLRenderer::UpdateGiAccel()
 	// skinned meshes are never in m_renderWorld.objects. Unculled — rays go in
 	// arbitrary directions, an off-screen caster still occludes/bounces.
 	m_giInstancesCpu.clear();
+	auto resolveRange = [&](const HE::UUID& id) -> GiBlasRange
+	{
+		auto it = m_giBlasCache.find(id);
+		if (it == m_giBlasCache.end())
+			it = m_giBlasCache.emplace(id, BuildGiBlas(id)).first;
+		return it->second;
+	};
 	for (const RenderObject& obj : m_renderWorld.objects)
 	{
 		if (!obj.castsShadow) continue;
-		auto it = m_giBlasCache.find(obj.meshAssetId);
-		if (it == m_giBlasCache.end())
-			it = m_giBlasCache.emplace(obj.meshAssetId, BuildGiBlas(obj.meshAssetId)).first;
-		if (!it->second.valid) continue;
+		// Default-cube fallback — an entity without a resolvable mesh asset
+		// RENDERS as the default cube (draw-loop fallback), so it must occlude
+		// as one too, or plain cube entities cast no GI shadow at all.
+		GiBlasRange range = resolveRange(obj.meshAssetId);
+		if (!range.valid) range = resolveRange(HE::kDefaultCubeMeshId);
+		if (!range.valid) continue;
 		GiInstanceGpu inst;
 		inst.invTransform = glm::inverse(obj.transform);
 		inst.baseColor    = glm::vec4(obj.baseColor, 1.0f);
-		inst.nodeOffset   = it->second.nodeOffset;
-		inst.triOffset    = it->second.triOffset;
+		inst.nodeOffset   = range.nodeOffset;
+		inst.triOffset    = range.triOffset;
 		m_giInstancesCpu.push_back(inst);
 	}
 	m_giInstanceCount = static_cast<int>(m_giInstancesCpu.size());

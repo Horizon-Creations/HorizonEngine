@@ -4405,18 +4405,25 @@ void MetalRenderer::EncodeGISwAccelBuild()
 	// Same caster filter as the HW TLAS: castsShadow, unculled.
 	std::vector<GiSwInstanceCPU> instances;
 	instances.reserve(m_renderWorld.objects.size());
+	auto resolveSwRange = [&](const HE::UUID& id) -> GiSwBlasRange
+	{
+		auto it = m_giSwBlasCache.find(id);
+		if (it == m_giSwBlasCache.end())
+			it = m_giSwBlasCache.emplace(id, BuildGiSwBlas(id)).first;
+		return it->second;
+	};
 	for (RenderObject& obj : m_renderWorld.objects)
 	{
 		if (!obj.castsShadow) continue;
-		auto it = m_giSwBlasCache.find(obj.meshAssetId);
-		if (it == m_giSwBlasCache.end())
-			it = m_giSwBlasCache.emplace(obj.meshAssetId, BuildGiSwBlas(obj.meshAssetId)).first;
-		if (!it->second.valid) continue;
+		// Default-cube fallback — must match the draw loops (see the HW path).
+		GiSwBlasRange range = resolveSwRange(obj.meshAssetId);
+		if (!range.valid) range = resolveSwRange(HE::kDefaultCubeMeshId);
+		if (!range.valid) continue;
 		GiSwInstanceCPU inst;
 		inst.invTransform = glm::inverse(obj.transform);
 		inst.baseColor    = glm::vec4(obj.baseColor, 1.0f);
-		inst.nodeOffset   = it->second.nodeOffset;
-		inst.triOffset    = it->second.triOffset;
+		inst.nodeOffset   = range.nodeOffset;
+		inst.triOffset    = range.triOffset;
 		instances.push_back(inst);
 	}
 	m_giSwInstanceCount = static_cast<int>(instances.size());
@@ -4521,7 +4528,12 @@ void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr, float aspect)
 		for (RenderObject& obj : m_renderWorld.objects)
 		{
 			if (!obj.castsShadow) continue;
+			// Same fallback the shadow-caster/G-buffer DRAW loops use: an entity
+			// without a resolvable mesh asset renders as the default cube, so it
+			// must occlude as one too — skipping it here made such objects
+			// (plain cube entities) receive lighting but cast NOTHING.
 			const GpuMesh* resolved = ResolveMesh(obj.meshAssetId);
+			if (!resolved) resolved = ResolveMesh(HE::kDefaultCubeMeshId);
 			if (!resolved) continue;
 			GpuMesh& mesh = const_cast<GpuMesh&>(*resolved); // m_meshCache entry; safe, owned by this class
 			if (!mesh.blas) mesh.blas = BuildBLAS(mesh);
