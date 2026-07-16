@@ -113,11 +113,24 @@ if(HE_VULKAN_ENABLED)
                       ssao_pos.vert ssao_pos.frag ssao.frag ssao_blur.frag
                       gi_gbuf.vert gi_gbuf.frag gi_temporal.frag gi_blur.frag
                       gi_shadow.comp gi_probe.comp
+                      gi_shadow_hw.comp gi_probe_hw.comp
                       skinned.vert
                       ui.vert ui.frag)
             set(src "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${stage}")
             set(dst "${HE_SHADER_OUT_DIR}/${stage}.spv")
-            if(GLSLC_EXECUTABLE MATCHES "glslangValidator")
+            # The *_hw.comp kernels use GL_EXT_ray_query (SPIR-V 1.4+) and need an
+            # explicit Vulkan-1.2 target; the default target (SPIR-V 1.0) rejects them.
+            if(stage MATCHES "_hw\\.comp$")
+                if(GLSLC_EXECUTABLE MATCHES "glslangValidator")
+                    add_custom_command(OUTPUT "${dst}"
+                        COMMAND ${GLSLC_EXECUTABLE} -V --target-env vulkan1.2 "${src}" -o "${dst}"
+                        DEPENDS "${src}" VERBATIM)
+                else()
+                    add_custom_command(OUTPUT "${dst}"
+                        COMMAND ${GLSLC_EXECUTABLE} --target-env=vulkan1.2 "${src}" -o "${dst}"
+                        DEPENDS "${src}" VERBATIM)
+                endif()
+            elseif(GLSLC_EXECUTABLE MATCHES "glslangValidator")
                 add_custom_command(OUTPUT "${dst}"
                     COMMAND ${GLSLC_EXECUTABLE} -V "${src}" -o "${dst}"
                     DEPENDS "${src}" VERBATIM)
