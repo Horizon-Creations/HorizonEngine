@@ -20,6 +20,10 @@
 
 static constexpr uint32_t k_maxFramesInFlight = 2;
 
+// Defined in the GI block below; also used by the material-lighting fill.
+namespace { bool vkDominantDirectionalLight(const RenderWorld& rw,
+                                            glm::vec3& towardOut, glm::vec3& colorIntensityOut); }
+
 static void vkCheck(VkResult r, const char* msg)
 {
     if (r != VK_SUCCESS)
@@ -3545,17 +3549,36 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         m_matDrawCursor[m_currentFrame] = 0;
 
         HE::MaterialShaderLibrary::Lighting lit{};
-        lit.sunDir[0] = m_renderWorld.sunDirection.x;
-        lit.sunDir[1] = m_renderWorld.sunDirection.y;
-        lit.sunDir[2] = m_renderWorld.sunDirection.z;
+        // Dominant directional (NOT the sky-dome sun/raw env colour — the
+        // night/cloud lesson from the Metal/GL fill sites) + full light window.
+        glm::vec3 matSunDir, matSunColor;
+        vkDominantDirectionalLight(m_renderWorld, matSunDir, matSunColor);
+        lit.sunDir[0] = matSunDir.x;
+        lit.sunDir[1] = matSunDir.y;
+        lit.sunDir[2] = matSunDir.z;
         // Engine seconds for the node graph's Time input (HE_SKY_TIME pins it for
         // deterministic headless captures, mirroring the sky clock and GL exactly).
         static const char* s_timeOv = std::getenv("HE_SKY_TIME");
         lit.sunDir[3] = (s_timeOv && *s_timeOv)
             ? static_cast<float>(std::atof(s_timeOv))
             : static_cast<float>(SDL_GetTicks()) / 1000.0f;
-        const glm::vec3 sc = m_environment.sunColor;
+        const glm::vec3 sc = matSunColor;
         lit.sunColor[0] = sc.r; lit.sunColor[1] = sc.g; lit.sunColor[2] = sc.b;
+        {
+            const int lc = std::min(static_cast<int>(m_renderWorld.lights.size()), 8);
+            for (int li = 0; li < lc; ++li)
+            {
+                const LightData& ld = m_renderWorld.lights[li];
+                lit.lightPos[li][0] = ld.position.x;  lit.lightPos[li][1] = ld.position.y;
+                lit.lightPos[li][2] = ld.position.z;  lit.lightPos[li][3] = static_cast<float>(ld.type);
+                lit.lightDir[li][0] = ld.direction.x; lit.lightDir[li][1] = ld.direction.y;
+                lit.lightDir[li][2] = ld.direction.z; lit.lightDir[li][3] = ld.spotAngleCos;
+                lit.lightColor[li][0] = ld.color.r;   lit.lightColor[li][1] = ld.color.g;
+                lit.lightColor[li][2] = ld.color.b;   lit.lightColor[li][3] = ld.intensity;
+                lit.lightParams[li][0] = ld.range;
+            }
+            lit.counts[0] = static_cast<float>(lc);
+        }
         lit.ambient[0] = m_renderWorld.ambient.r;
         lit.ambient[1] = m_renderWorld.ambient.g;
         lit.ambient[2] = m_renderWorld.ambient.b;

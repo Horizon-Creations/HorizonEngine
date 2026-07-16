@@ -7425,6 +7425,23 @@ void MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height)
 		matLight.camPos[0]   = m_renderWorld.camera.position.x;
 		matLight.camPos[1]   = m_renderWorld.camera.position.y;
 		matLight.camPos[2]   = m_renderWorld.camera.position.z;
+		// Full light window for heLitP() — same first-8 order as the built-in
+		// PBR shaders (keep the three backend copies of this fill in sync).
+		{{
+			const int lc = std::min(static_cast<int>(m_renderWorld.lights.size()), 8);
+			for (int li = 0; li < lc; ++li)
+			{{
+				const LightData& ld = m_renderWorld.lights[li];
+				matLight.lightPos[li][0] = ld.position.x;  matLight.lightPos[li][1] = ld.position.y;
+				matLight.lightPos[li][2] = ld.position.z;  matLight.lightPos[li][3] = static_cast<float>(ld.type);
+				matLight.lightDir[li][0] = ld.direction.x; matLight.lightDir[li][1] = ld.direction.y;
+				matLight.lightDir[li][2] = ld.direction.z; matLight.lightDir[li][3] = ld.spotAngleCos;
+				matLight.lightColor[li][0] = ld.color.r;   matLight.lightColor[li][1] = ld.color.g;
+				matLight.lightColor[li][2] = ld.color.b;   matLight.lightColor[li][3] = ld.intensity;
+				matLight.lightParams[li][0] = ld.range;
+			}}
+			matLight.counts[0] = static_cast<float>(lc);
+		}}
 	}
 
 	// The uiVertex's repurposed U block (see MaterialShaderLibrary::uiVertex).
@@ -7929,6 +7946,23 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 		matLight.camPos[2]   = m_renderWorld.camera.position.z;
 		matLight.sunColor[0] = matSunColor.r; matLight.sunColor[1] = matSunColor.g; matLight.sunColor[2] = matSunColor.b;
 		matLight.ambient[0]  = am.r;          matLight.ambient[1]  = am.g;          matLight.ambient[2]  = am.b;
+		// Full light window for heLitP() — same first-8 order as the built-in
+		// PBR shaders (keep the three backend copies of this fill in sync).
+		{{
+			const int lc = std::min(static_cast<int>(m_renderWorld.lights.size()), 8);
+			for (int li = 0; li < lc; ++li)
+			{{
+				const LightData& ld = m_renderWorld.lights[li];
+				matLight.lightPos[li][0] = ld.position.x;  matLight.lightPos[li][1] = ld.position.y;
+				matLight.lightPos[li][2] = ld.position.z;  matLight.lightPos[li][3] = static_cast<float>(ld.type);
+				matLight.lightDir[li][0] = ld.direction.x; matLight.lightDir[li][1] = ld.direction.y;
+				matLight.lightDir[li][2] = ld.direction.z; matLight.lightDir[li][3] = ld.spotAngleCos;
+				matLight.lightColor[li][0] = ld.color.r;   matLight.lightColor[li][1] = ld.color.g;
+				matLight.lightColor[li][2] = ld.color.b;   matLight.lightColor[li][3] = ld.intensity;
+				matLight.lightParams[li][0] = ld.range;
+			}}
+			matLight.counts[0] = static_cast<float>(lc);
+		}}
 		[encoder setFragmentBytes:&matLight length:sizeof(matLight)
 		                  atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
 	}
