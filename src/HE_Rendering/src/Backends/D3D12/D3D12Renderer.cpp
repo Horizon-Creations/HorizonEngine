@@ -23,6 +23,7 @@
 #include <glm/gtc/type_ptr.hpp>
 #include <algorithm>
 #include <cmath>       // GI: std::ceil in the probe-grid fit
+#include <fstream>     // GI HW: offline-compiled DXR kernel blobs (.cso)
 #include <stdexcept>
 #include <unordered_map>
 #include <vector>
@@ -36,6 +37,21 @@
 #include <Diagnostics/Logger.h>
 
 using Microsoft::WRL::ComPtr;
+
+// GI hardware ray tracing (DXR 1.1 inline RayQuery) needs the DXR interfaces
+// (ID3D12Device5 / ID3D12GraphicsCommandList4, SDK 17763) AND the DXR 1.1
+// additions (D3D12_RAYTRACING_TIER_1_1 — an enum VALUE, not ifdef-able, so we
+// key on ID3D12GraphicsCommandList6, which shipped in the same SDK 19041).
+// Older SDK headers must still compile — everything DXR is fenced behind this
+// macro and the runtime falls back to the SM 5.0 software ray-tracing kernels.
+#if defined(__ID3D12Device5_INTERFACE_DEFINED__) && \
+    defined(__ID3D12GraphicsCommandList4_INTERFACE_DEFINED__) && \
+    defined(__ID3D12GraphicsCommandList6_INTERFACE_DEFINED__)
+    #define HE_D3D12_DXR 1
+#else
+    #define HE_D3D12_DXR 0
+#endif
+
 // Triple-buffered: with only 2 buffers + VSync OFF the CPU blocks waiting for a back
 // buffer to free, which shows up as uneven/juddery viewport motion. A 3rd buffer gives
 // the CPU enough slack to pace frames smoothly. Used for swapchain buffers AND frames
@@ -3027,6 +3043,16 @@ struct D3D12RendererImpl
             // policy as the GL/D3D11 ports' InvalidateMesh handling).
             if (giBlasCache.count(id))
                 destroyGiAccel();
+#if HE_D3D12_DXR
+            // The DXR BLAS cache is per-mesh — retire just this entry (frames
+            // in flight may still trace against it); it rebuilds lazily.
+            if (auto it = giHwBlasCache.find(id); it != giHwBlasCache.end())
+            {
+                if (it->second.as)
+                    m_retiredTextures.emplace_back(std::move(it->second.as), retireN);
+                giHwBlasCache.erase(it);
+            }
+#endif
         }
         m_pendingMeshInval.clear();
     }
@@ -4343,7 +4369,7 @@ struct D3D12RendererImpl
 
     // Pipelines + root signatures (built lazily on the first GI-active frame).
     ComPtr<ID3D12RootSignature> giGBufRS;      // b0 root CBV (per-object ring)
-    ComPtr<ID3D12RootSignature> giComputeRS;   // b0/b1 CBVs, t0-t1+t5-t6 table, t2/t3/t4 root SRVs, u0-u1 table
+    ComPtr<ID3D12RootSignature> giComputeRS;   // b0/b1 CBVs, t0-t1+t5-t6 table, t2/t3/t4 root SRVs, u0-u1 table, t7 root SRV (DXR TLAS)
     ComPtr<ID3D12RootSignature> giFsRS;        // b0 CBV + t0-t2 table + s0 static point-clamp
     ComPtr<ID3D12PipelineState> giGBufPSO;     // MRT pos+norm, D16
     ComPtr<ID3D12PipelineState> giShadowPSO;   // compute
@@ -4389,6 +4415,35 @@ struct D3D12RendererImpl
     bool      giHistValid   = false;
     glm::mat4 giPrevViewProj{ 1.0f };
     float     giFrameSeed   = 0.0f;
+
+    // ── GI hardware ray tracing (DXR 1.1 inline RayQuery) ───────────────────
+    // Mirrors the Vulkan VK_KHR_ray_query upgrade (0c62778): SM 6.5 kernel
+    // variants with an IDENTICAL binding interface plus the TLAS at t7, chosen
+    // per frame; any miss (tier, dxc-compiled .cso missing, BLAS/TLAS build
+    // failure, HE_GI_FORCE_SW) falls back to the embedded SW kernels.
+    bool giUseHwThisFrame = false; // decided by buildGiTlas() each GI frame
+#if HE_D3D12_DXR
+    bool giHwPipesReady = false;   // tier 1.1 + blobs loaded + HW PSOs built
+    ComPtr<ID3D12Device5>              giDevice5;
+    ComPtr<ID3D12GraphicsCommandList4> giCmdList4;    // the frame cmdList, DXR view
+    ComPtr<ID3D12PipelineState>        giShadowHwPSO, giProbeHwPSO;
+    // One-shot BLAS builds need their own allocator/list — the frame list is
+    // mid-recording when a new mesh first shows up (Vulkan uses a one-time
+    // command buffer + QueueWaitIdle for the same reason; builds are rare).
+    ComPtr<ID3D12CommandAllocator>      giBuildAllocator;
+    ComPtr<ID3D12GraphicsCommandList4>  giBuildCmdList;
+    struct GiHwBlas { ComPtr<ID3D12Resource> as; bool valid = false; };
+    std::unordered_map<HE::UUID, GiHwBlas> giHwBlasCache;
+    std::vector<D3D12_RAYTRACING_INSTANCE_DESC> giHwInstancesCpu;
+    bool giHwInstOk = false;       // this frame slot's TLAS instance upload succeeded
+    ComPtr<ID3D12Resource> giTlasInstSB[k_frameCount]; // upload ring: instance descs
+    uint8_t*               giTlasInstPtr[k_frameCount]{};
+    UINT                   giTlasInstCapacity[k_frameCount]{};
+    ComPtr<ID3D12Resource> giTlasBuf[k_frameCount];     // per-frame TLAS result
+    UINT64                 giTlasBufSize[k_frameCount]{};
+    ComPtr<ID3D12Resource> giTlasScratch[k_frameCount];
+    UINT64                 giTlasScratchSize[k_frameCount]{};
+#endif
 
     glm::vec3  giGridOrigin{ 0.0f };
     glm::ivec3 giGridCounts{ 0 };
@@ -4467,7 +4522,8 @@ struct D3D12RendererImpl
 
     void updateGiAccel(ContentManager* cm, const RenderWorld& rw, UINT fi)
     {
-        giInstanceCount = 0;
+        giInstanceCount   = 0;
+        giUseHwThisFrame  = false; // decided by buildGiTlas() during the GI passes
         if (!giEnabled || !giSupported) return;
 
         // Same caster filter as the shadow pass: castsShadow only, UNCULLED —
@@ -4480,13 +4536,30 @@ struct D3D12RendererImpl
                 it = giBlasCache.emplace(id, buildGiBlas(cm, id)).first;
             return it->second;
         };
+#if HE_D3D12_DXR
+        // HW path: build a D3D12_RAYTRACING_INSTANCE_DESC array in EXACTLY the
+        // giInsts order with InstanceID = index (the probe kernel indexes
+        // giInsts by CommittedInstanceID). Any mesh whose DXR BLAS can't be
+        // built breaks that 1:1 mapping → SW kernels this frame.
+        giHwInstOk = false;
+        giHwInstancesCpu.clear();
+        bool hwAll = giHwPipesReady;
+        auto resolveHwBlas = [&](const HE::UUID& id) -> const GiHwBlas&
+        {
+            auto it = giHwBlasCache.find(id);
+            if (it == giHwBlasCache.end())
+                it = giHwBlasCache.emplace(id, buildGiHwBlas(cm, id)).first;
+            return it->second;
+        };
+#endif
         for (const RenderObject& obj : rw.objects)
         {
             if (!obj.castsShadow) continue;
             // Default-cube fallback — entities without a resolvable mesh RENDER
             // as the default cube, so they must occlude as one too.
-            GiBlasRange range = resolveRange(obj.meshAssetId);
-            if (!range.valid) range = resolveRange(HE::kDefaultCubeMeshId);
+            HE::UUID    effectiveId = obj.meshAssetId;
+            GiBlasRange range       = resolveRange(effectiveId);
+            if (!range.valid) { effectiveId = HE::kDefaultCubeMeshId; range = resolveRange(effectiveId); }
             if (!range.valid) continue;
             GiInstanceGpu inst;
             inst.invTransform = glm::inverse(obj.transform);
@@ -4494,6 +4567,36 @@ struct D3D12RendererImpl
             inst.nodeOffset   = range.nodeOffset;
             inst.triOffset    = range.triOffset;
             giInstancesCpu.push_back(inst);
+
+#if HE_D3D12_DXR
+            if (hwAll)
+            {
+                const GiHwBlas& hb = resolveHwBlas(effectiveId);
+                if (!hb.valid)
+                {
+                    hwAll = false; // incomplete TLAS would misalign InstanceID ↔ giInsts
+                    giHwInstancesCpu.clear();
+                }
+                else
+                {
+                    D3D12_RAYTRACING_INSTANCE_DESC di{};
+                    // D3D12 instance transform is 3x4 ROW-major; glm is column-major.
+                    const glm::mat4& m = obj.transform;
+                    for (int r = 0; r < 3; ++r)
+                        for (int c = 0; c < 4; ++c)
+                            di.Transform[r][c] = m[c][r];
+                    di.InstanceID   = static_cast<UINT>(giInstancesCpu.size() - 1);
+                    di.InstanceMask = 0xFF;
+                    di.InstanceContributionToHitGroupIndex = 0;
+                    // Opaque (SW kernels have no any-hit shading) + no facing
+                    // cull (the SW Moeller-Trumbore is two-sided).
+                    di.Flags = D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_OPAQUE |
+                               D3D12_RAYTRACING_INSTANCE_FLAG_TRIANGLE_CULL_DISABLE;
+                    di.AccelerationStructure = hb.as->GetGPUVirtualAddress();
+                    giHwInstancesCpu.push_back(di);
+                }
+            }
+#endif
         }
         giInstanceCount = static_cast<int>(giInstancesCpu.size());
         if (giInstanceCount == 0) return;
@@ -4532,6 +4635,34 @@ struct D3D12RendererImpl
             std::memcpy(giInstancePtr[fi], giInstancesCpu.data(),
                         static_cast<size_t>(giInstanceCount) * sizeof(GiInstanceGpu));
         if (!giNodeSB || !giTriSB || !giInstanceSB[fi]) giInstanceCount = 0;
+
+#if HE_D3D12_DXR
+        // HW path: upload this frame slot's TLAS instance array (upload-heap
+        // ring slot, grown on demand — the slot's fence was waited in Render()).
+        // Failure just means SW kernels this frame; the SW buffers above are
+        // already in place.
+        if (hwAll && !giHwInstancesCpu.empty() && giInstanceCount > 0)
+        {
+            const UINT hwNeed = static_cast<UINT>(giHwInstancesCpu.size());
+            if (hwNeed > giTlasInstCapacity[fi] || !giTlasInstSB[fi])
+            {
+                if (giTlasInstSB[fi])
+                    m_retiredTextures.emplace_back(std::move(giTlasInstSB[fi]), retireN);
+                const UINT cap = std::max({ hwNeed, giTlasInstCapacity[fi] * 2u, 64u });
+                giTlasInstPtr[fi] = nullptr;
+                giTlasInstSB[fi]  = createUploadBuffer(
+                    static_cast<UINT64>(cap) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC),
+                    reinterpret_cast<void**>(&giTlasInstPtr[fi]));
+                giTlasInstCapacity[fi] = giTlasInstSB[fi] ? cap : 0;
+            }
+            if (giTlasInstSB[fi] && giTlasInstPtr[fi])
+            {
+                std::memcpy(giTlasInstPtr[fi], giHwInstancesCpu.data(),
+                            static_cast<size_t>(hwNeed) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC));
+                giHwInstOk = true;
+            }
+        }
+#endif
     }
 
     void destroyGiAccel()
@@ -4623,7 +4754,7 @@ struct D3D12RendererImpl
             uavRange.BaseShaderRegister                = 0;
             uavRange.OffsetInDescriptorsFromTableStart = 0;
 
-            D3D12_ROOT_PARAMETER params[7]{};
+            D3D12_ROOT_PARAMETER params[8]{};
             params[0].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
             params[0].Descriptor       = { 0, 0 };
             params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
@@ -4647,9 +4778,17 @@ struct D3D12RendererImpl
             params[6].DescriptorTable.NumDescriptorRanges = 1;
             params[6].DescriptorTable.pDescriptorRanges   = &uavRange;
             params[6].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_ALL;
+            // [7] root SRV t7 = the DXR TLAS for the HW RayQuery kernel
+            // variants (bound as a raw GPU VA via SetComputeRootShaderResource-
+            // View — acceleration structures need no descriptor). The SW
+            // kernels never reference t7, so leaving it unset is legal, and a
+            // superset root signature keeps ONE binding path for both variants.
+            params[7].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_SRV;
+            params[7].Descriptor       = { 7, 0 }; // t7
+            params[7].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
             D3D12_ROOT_SIGNATURE_DESC rsd{};
-            rsd.NumParameters = 7; rsd.pParameters = params;
+            rsd.NumParameters = 8; rsd.pParameters = params;
             ComPtr<ID3DBlob> sig, e;
             ok = SUCCEEDED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &e))
               && SUCCEEDED(device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
@@ -4838,6 +4977,11 @@ struct D3D12RendererImpl
         }
         Logger::Log(Logger::LogLevel::Info,
                     "D3D12Renderer: GI pipelines built (compute ray tracing active)");
+#if HE_D3D12_DXR
+        // Optional DXR 1.1 upgrade on top of the working SW pipelines — every
+        // miss inside only logs and leaves the SW kernels active.
+        createGiHwPipelines();
+#endif
     }
 
     void ensureGiShadowTargets(int w, int h)
@@ -5134,6 +5278,14 @@ struct D3D12RendererImpl
         ensureGiShadowTargets(w, h);
         if (!giGBufPosTex) return false;
 
+        // HW/SW selection for THIS frame: record the TLAS build up front (both
+        // GI dispatches ray-query the same TLAS). Any failure → SW kernels,
+        // which read the always-uploaded SW BVH buffers instead.
+        giUseHwThisFrame = false;
+#if HE_D3D12_DXR
+        giUseHwThisFrame = buildGiTlas(fi) && giShadowHwPSO && giProbeHwPSO;
+#endif
+
         D3D12_VIEWPORT vp{ 0, 0, float(giShadowW), float(giShadowH), 0.0f, 1.0f };
         D3D12_RECT     sc{ 0, 0, giShadowW, giShadowH };
 
@@ -5213,7 +5365,11 @@ struct D3D12RendererImpl
             ID3D12DescriptorHeap* heaps[] = { giSrvHeap.Get() };
             cl->SetDescriptorHeaps(1, heaps);
             cl->SetComputeRootSignature(giComputeRS.Get());
-            cl->SetPipelineState(giShadowPSO.Get());
+            ID3D12PipelineState* shadowPso = giShadowPSO.Get();
+#if HE_D3D12_DXR
+            if (giUseHwThisFrame) shadowPso = giShadowHwPSO.Get();
+#endif
+            cl->SetPipelineState(shadowPso);
             cl->SetComputeRootConstantBufferView(0, giShadowCB[fi]->GetGPUVirtualAddress());
             cl->SetComputeRootConstantBufferView(1, giCountCB[fi]->GetGPUVirtualAddress());
             cl->SetComputeRootDescriptorTable(2, giSrvGpu(0));
@@ -5221,6 +5377,10 @@ struct D3D12RendererImpl
             cl->SetComputeRootShaderResourceView(4, giTriSB->GetGPUVirtualAddress());
             cl->SetComputeRootShaderResourceView(5, giInstanceSB[fi]->GetGPUVirtualAddress());
             cl->SetComputeRootDescriptorTable(6, giSrvGpu(4)); // u0 = raw
+#if HE_D3D12_DXR
+            if (giUseHwThisFrame) // t7 = the TLAS, bound as a raw GPU VA
+                cl->SetComputeRootShaderResourceView(7, giTlasBuf[fi]->GetGPUVirtualAddress());
+#endif
             cl->Dispatch(static_cast<UINT>((giShadowW + 7) / 8),
                          static_cast<UINT>((giShadowH + 7) / 8), 1);
 
@@ -5346,7 +5506,14 @@ struct D3D12RendererImpl
         ID3D12DescriptorHeap* heaps[] = { giSrvHeap.Get() };
         cl->SetDescriptorHeaps(1, heaps);
         cl->SetComputeRootSignature(giComputeRS.Get());
-        cl->SetPipelineState(giProbePSO.Get());
+        ID3D12PipelineState* probePso = giProbePSO.Get();
+#if HE_D3D12_DXR
+        // Same-frame HW/SW choice as the shadow dispatch (giUseHwThisFrame was
+        // decided by buildGiTlas in runGiShadow — the TLAS is already built +
+        // barriered on this command list).
+        if (giUseHwThisFrame) probePso = giProbeHwPSO.Get();
+#endif
+        cl->SetPipelineState(probePso);
         cl->SetComputeRootConstantBufferView(0, giProbeCB[fi]->GetGPUVirtualAddress());
         cl->SetComputeRootConstantBufferView(1, giCountCB[fi]->GetGPUVirtualAddress());
         cl->SetComputeRootDescriptorTable(2, giSrvGpu(0));
@@ -5354,6 +5521,10 @@ struct D3D12RendererImpl
         cl->SetComputeRootShaderResourceView(4, giTriSB->GetGPUVirtualAddress());
         cl->SetComputeRootShaderResourceView(5, giInstanceSB[fi]->GetGPUVirtualAddress());
         cl->SetComputeRootDescriptorTable(6, giSrvGpu(6)); // u0 = irr, u1 = vis
+#if HE_D3D12_DXR
+        if (giUseHwThisFrame) // t7 = the TLAS, bound as a raw GPU VA
+            cl->SetComputeRootShaderResourceView(7, giTlasBuf[fi]->GetGPUVirtualAddress());
+#endif
         cl->Dispatch(static_cast<UINT>(budget), 1, 1);
 
         // UAV write → scene pixel-shader sampling (the transition doubles as the
@@ -5365,6 +5536,298 @@ struct D3D12RendererImpl
 
         giProbeCursor = (giProbeCursor + budget) % giProbeCount;
     }
+
+#if HE_D3D12_DXR
+    // ── GI hardware ray tracing (DXR 1.1) — acceleration-structure plumbing ──
+
+    // Loads an offline-compiled DXIL blob from <exe dir>/Shaders/<name> (dxc
+    // output deployed next to the executable, same convention as the Vulkan
+    // .spv files). Empty vector = not found → SW kernels.
+    std::vector<uint8_t> loadGiShaderBlob(const char* name)
+    {
+        const char* base = SDL_GetBasePath();
+        const std::string path = std::string(base ? base : "") + "Shaders/" + name;
+        std::ifstream f(path, std::ios::binary | std::ios::ate);
+        if (!f)
+        {
+            Logger::Log(Logger::LogLevel::Info,
+                        ("D3D12Renderer: DXR kernel not found (" + path +
+                         ") — software GI kernels stay active").c_str());
+            return {};
+        }
+        const size_t size = static_cast<size_t>(f.tellg());
+        std::vector<uint8_t> blob(size);
+        f.seekg(0);
+        f.read(reinterpret_cast<char*>(blob.data()), static_cast<std::streamsize>(size));
+        return blob;
+    }
+
+    // Default-heap buffer for AS results/scratch (UAV-capable, no CPU access).
+    ComPtr<ID3D12Resource> createGiHwBuffer(UINT64 bytes, D3D12_RESOURCE_STATES state)
+    {
+        D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+        D3D12_RESOURCE_DESC rd{};
+        rd.Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER;
+        rd.Width            = bytes;
+        rd.Height           = 1;
+        rd.DepthOrArraySize = 1;
+        rd.MipLevels        = 1;
+        rd.Format           = DXGI_FORMAT_UNKNOWN;
+        rd.SampleDesc.Count = 1;
+        rd.Layout           = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        rd.Flags            = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        ComPtr<ID3D12Resource> res;
+        if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+                   state, nullptr, IID_PPV_ARGS(&res))))
+            return nullptr;
+        return res;
+    }
+
+    // Detects DXR 1.1 + builds the two RayQuery compute PSOs from the offline
+    // dxc blobs. Called once from createGiPipelines after the SW pipelines
+    // succeeded; every miss only logs and leaves giHwPipesReady false — the SW
+    // kernels keep running unchanged.
+    void createGiHwPipelines()
+    {
+        if (const char* force = std::getenv("HE_GI_FORCE_SW"); force && *force && *force != '0')
+        {
+            Logger::Log(Logger::LogLevel::Info,
+                        "D3D12Renderer: HE_GI_FORCE_SW set — software GI path forced");
+            return;
+        }
+        if (FAILED(device.As(&giDevice5)) || !giDevice5)
+        {
+            Logger::Log(Logger::LogLevel::Info,
+                        "D3D12Renderer: GI uses software ray tracing (no ID3D12Device5)");
+            return;
+        }
+        D3D12_FEATURE_DATA_D3D12_OPTIONS5 opts5{};
+        if (FAILED(giDevice5->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5,
+                                                  &opts5, sizeof(opts5))) ||
+            opts5.RaytracingTier < D3D12_RAYTRACING_TIER_1_1)
+        {
+            Logger::Log(Logger::LogLevel::Info,
+                        "D3D12Renderer: GI uses software ray tracing (DXR tier < 1.1)");
+            giDevice5.Reset();
+            return;
+        }
+        const std::vector<uint8_t> shadowBlob = loadGiShaderBlob("gi_shadow_hw.cso");
+        const std::vector<uint8_t> probeBlob  = loadGiShaderBlob("gi_probe_hw.cso");
+        if (shadowBlob.empty() || probeBlob.empty())
+        {
+            giDevice5.Reset();
+            return; // loadGiShaderBlob already logged
+        }
+        // The frame command list as its DXR interface (same underlying object;
+        // Reset() between frames does not change identity).
+        if (FAILED(cmdList.As(&giCmdList4)) || !giCmdList4)
+        {
+            Logger::Log(Logger::LogLevel::Warning,
+                        "D3D12Renderer: DXR command-list interface unavailable — software GI");
+            giDevice5.Reset();
+            return;
+        }
+        bool ok = true;
+        {
+            D3D12_COMPUTE_PIPELINE_STATE_DESC cd{};
+            cd.pRootSignature = giComputeRS.Get();
+            cd.CS = { shadowBlob.data(), shadowBlob.size() };
+            ok = SUCCEEDED(device->CreateComputePipelineState(&cd, IID_PPV_ARGS(&giShadowHwPSO)));
+            if (ok)
+            {
+                cd.CS = { probeBlob.data(), probeBlob.size() };
+                ok = SUCCEEDED(device->CreateComputePipelineState(&cd, IID_PPV_ARGS(&giProbeHwPSO)));
+            }
+        }
+        // Dedicated allocator + list for one-shot BLAS builds (the frame list
+        // is mid-recording when a mesh first appears).
+        ok = ok && SUCCEEDED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                             IID_PPV_ARGS(&giBuildAllocator)))
+                && SUCCEEDED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                             giBuildAllocator.Get(), nullptr, IID_PPV_ARGS(&giBuildCmdList)));
+        if (ok) giBuildCmdList->Close(); // created open; keep closed between builds
+        if (!ok)
+        {
+            Logger::Log(Logger::LogLevel::Warning,
+                        "D3D12Renderer: DXR kernel PSO/allocator creation failed — software GI");
+            giShadowHwPSO.Reset(); giProbeHwPSO.Reset();
+            giBuildCmdList.Reset(); giBuildAllocator.Reset();
+            giCmdList4.Reset(); giDevice5.Reset();
+            return;
+        }
+        giHwPipesReady = true;
+        Logger::Log(Logger::LogLevel::Info,
+                    "D3D12Renderer: GI hardware ray tracing available (DXR 1.1 inline RayQuery)");
+    }
+
+    // One-shot BLAS build for a mesh, cached by asset id (parallel to the SW
+    // giBlasCache). Geometry source is the same data buildGiBlas consumes:
+    // cooked interleaved 8-float (position at offset 0 → 32-B stride feeds
+    // VertexBuffer.StrideInBytes directly, no repack) or loose tight 3-float
+    // positions. Builds on the dedicated one-shot list + full GPU sync — rare
+    // (once per distinct mesh), mirroring Vulkan's QueueWaitIdle approach.
+    GiHwBlas buildGiHwBlas(ContentManager* cm, const HE::UUID& meshId)
+    {
+        GiHwBlas out;
+        if (!giHwPipesReady || !cm) return out;
+        const StaticMeshAsset* asset = cm->getStaticMesh(meshId);
+        if (!asset || asset->indices.empty()) return out;
+
+        const float* vdata   = nullptr;
+        UINT         vcount  = 0;
+        UINT64       vstride = 0;
+        if (asset->cooked && !asset->interleaved.empty())
+        {
+            vdata   = asset->interleaved.data();
+            vcount  = static_cast<UINT>(asset->vertexCount);
+            vstride = 8 * sizeof(float);
+        }
+        else if (!asset->vertices.empty())
+        {
+            vdata   = asset->vertices.data();
+            vcount  = static_cast<UINT>(asset->vertices.size() / 3);
+            vstride = 3 * sizeof(float);
+        }
+        if (!vdata || vcount == 0) return out;
+        const UINT primCount = static_cast<UINT>(asset->indices.size() / 3);
+        if (primCount == 0) return out;
+
+        // Build-input buffer: vertices then (4-byte aligned) indices, upload heap
+        // (GENERIC_READ covers NON_PIXEL_SHADER_RESOURCE, valid AS build input).
+        const UINT64 vBytes = vstride * vcount;
+        const UINT64 iOfs   = (vBytes + 3ull) & ~3ull;
+        const UINT64 iBytes = asset->indices.size() * sizeof(uint32_t);
+        void* mapped = nullptr;
+        ComPtr<ID3D12Resource> geo = createUploadBuffer(iOfs + iBytes, &mapped);
+        if (!geo || !mapped)
+        {
+            Logger::Log(Logger::LogLevel::Warning, "D3D12Renderer: DXR BLAS input buffer failed");
+            return out;
+        }
+        std::memcpy(mapped, vdata, static_cast<size_t>(vBytes));
+        std::memcpy(static_cast<uint8_t*>(mapped) + iOfs, asset->indices.data(),
+                    static_cast<size_t>(iBytes));
+
+        D3D12_RAYTRACING_GEOMETRY_DESC gd{};
+        gd.Type  = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+        gd.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE; // SW kernels have no any-hit shading
+        gd.Triangles.VertexBuffer.StartAddress  = geo->GetGPUVirtualAddress();
+        gd.Triangles.VertexBuffer.StrideInBytes = vstride;
+        gd.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
+        gd.Triangles.VertexCount  = vcount;
+        gd.Triangles.IndexBuffer  = geo->GetGPUVirtualAddress() + iOfs;
+        gd.Triangles.IndexFormat  = DXGI_FORMAT_R32_UINT;
+        gd.Triangles.IndexCount   = static_cast<UINT>(asset->indices.size());
+
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs{};
+        inputs.Type           = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+        inputs.Flags          = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+        inputs.DescsLayout    = D3D12_ELEMENTS_LAYOUT_ARRAY;
+        inputs.NumDescs       = 1;
+        inputs.pGeometryDescs = &gd;
+        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO pre{};
+        giDevice5->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &pre);
+        if (pre.ResultDataMaxSizeInBytes == 0) return out;
+
+        out.as = createGiHwBuffer(pre.ResultDataMaxSizeInBytes,
+                                  D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
+        ComPtr<ID3D12Resource> scratch =
+            createGiHwBuffer(pre.ScratchDataSizeInBytes, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        if (!out.as || !scratch)
+        {
+            Logger::Log(Logger::LogLevel::Warning,
+                        "D3D12Renderer: DXR BLAS buffer creation failed — SW GI kernels for affected frames");
+            out.as.Reset();
+            return out;
+        }
+
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bd{};
+        bd.Inputs = inputs;
+        bd.DestAccelerationStructureData    = out.as->GetGPUVirtualAddress();
+        bd.ScratchAccelerationStructureData = scratch->GetGPUVirtualAddress();
+
+        // Record + submit on the dedicated one-shot list. Executing a second
+        // list while the frame list is still RECORDING is fine (it isn't
+        // submitted yet) — and this build lands on the queue BEFORE the frame,
+        // so the frame's TLAS build sees a completed BLAS.
+        waitForAllFrames(); // the build allocator must not be in flight
+        if (FAILED(giBuildAllocator->Reset()) ||
+            FAILED(giBuildCmdList->Reset(giBuildAllocator.Get(), nullptr)))
+        {
+            out.as.Reset();
+            return out;
+        }
+        giBuildCmdList->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
+        D3D12_RESOURCE_BARRIER uav{};
+        uav.Type          = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        uav.UAV.pResource = out.as.Get();
+        giBuildCmdList->ResourceBarrier(1, &uav);
+        giBuildCmdList->Close();
+        ID3D12CommandList* lists[] = { giBuildCmdList.Get() };
+        cmdQueue->ExecuteCommandLists(1, lists);
+        waitForAllFrames(); // scratch + geo (locals) may be released after this
+
+        out.valid = true;
+        return out;
+    }
+
+    // Records this frame's TLAS build on the frame command list (ring slot per
+    // frame in flight — the slot's fence was waited in Render(), so replacing
+    // a too-small slot is safe) plus the build → dispatch UAV barrier. Returns
+    // true iff the HW kernels can be dispatched against giTlasBuf[fi].
+    bool buildGiTlas(UINT fi)
+    {
+        if (!giHwPipesReady || !giHwInstOk || giHwInstancesCpu.empty() || !giCmdList4)
+            return false;
+        const UINT count = static_cast<UINT>(giHwInstancesCpu.size());
+
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs{};
+        inputs.Type          = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
+        inputs.Flags         = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+        inputs.DescsLayout   = D3D12_ELEMENTS_LAYOUT_ARRAY;
+        inputs.NumDescs      = count;
+        inputs.InstanceDescs = giTlasInstSB[fi]->GetGPUVirtualAddress();
+        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO pre{};
+        giDevice5->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &pre);
+        if (pre.ResultDataMaxSizeInBytes == 0) return false;
+
+        // (Re)create the slot's TLAS + scratch when the required sizes outgrow
+        // them. This slot's previous GPU work is fenced-complete, but retire
+        // anyway (uniform with every other replaced GPU resource).
+        if (!giTlasBuf[fi] || giTlasBufSize[fi] < pre.ResultDataMaxSizeInBytes ||
+            !giTlasScratch[fi] || giTlasScratchSize[fi] < pre.ScratchDataSizeInBytes)
+        {
+            const int retireN = static_cast<int>(k_frameCount) + 2;
+            if (giTlasBuf[fi])     m_retiredTextures.emplace_back(std::move(giTlasBuf[fi]), retireN);
+            if (giTlasScratch[fi]) m_retiredTextures.emplace_back(std::move(giTlasScratch[fi]), retireN);
+            giTlasBuf[fi] = createGiHwBuffer(pre.ResultDataMaxSizeInBytes,
+                                D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
+            giTlasScratch[fi] = createGiHwBuffer(pre.ScratchDataSizeInBytes,
+                                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            giTlasBufSize[fi]     = giTlasBuf[fi]     ? pre.ResultDataMaxSizeInBytes : 0;
+            giTlasScratchSize[fi] = giTlasScratch[fi] ? pre.ScratchDataSizeInBytes  : 0;
+            if (!giTlasBuf[fi] || !giTlasScratch[fi])
+            {
+                Logger::Log(Logger::LogLevel::Warning,
+                            "D3D12Renderer: GI TLAS buffer creation failed — SW kernels this frame");
+                return false;
+            }
+        }
+
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bd{};
+        bd.Inputs = inputs;
+        bd.DestAccelerationStructureData    = giTlasBuf[fi]->GetGPUVirtualAddress();
+        bd.ScratchAccelerationStructureData = giTlasScratch[fi]->GetGPUVirtualAddress();
+        giCmdList4->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
+
+        // TLAS build → ray-query reads in the two GI compute dispatches.
+        D3D12_RESOURCE_BARRIER uav{};
+        uav.Type          = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        uav.UAV.pResource = giTlasBuf[fi].Get();
+        giCmdList4->ResourceBarrier(1, &uav);
+        return true;
+    }
+#endif // HE_D3D12_DXR
 
     void uploadMesh(GpuMesh& mesh, const std::vector<float>& interleaved,
                     const std::vector<uint32_t>& indices)
@@ -6158,6 +6621,27 @@ void D3D12Renderer::Shutdown()
         m_impl->giGBufObjRing[i].Reset(); m_impl->giGBufObjPtr[i]   = nullptr;
     }
     m_impl->giPipelinesBuilt = false;
+    m_impl->giUseHwThisFrame = false;
+#if HE_D3D12_DXR
+    // DXR resources (per-mesh BLAS cache, per-frame TLAS ring, HW PSOs).
+    m_impl->giHwBlasCache.clear();
+    m_impl->giHwInstancesCpu.clear();
+    m_impl->giHwInstOk = false;
+    for (UINT i = 0; i < k_frameCount; ++i)
+    {
+        m_impl->giTlasInstSB[i].Reset(); m_impl->giTlasInstPtr[i] = nullptr;
+        m_impl->giTlasInstCapacity[i] = 0;
+        m_impl->giTlasBuf[i].Reset();     m_impl->giTlasBufSize[i]     = 0;
+        m_impl->giTlasScratch[i].Reset(); m_impl->giTlasScratchSize[i] = 0;
+    }
+    m_impl->giShadowHwPSO.Reset();
+    m_impl->giProbeHwPSO.Reset();
+    m_impl->giBuildCmdList.Reset();
+    m_impl->giBuildAllocator.Reset();
+    m_impl->giCmdList4.Reset();
+    m_impl->giDevice5.Reset();
+    m_impl->giHwPipesReady = false;
+#endif
     m_impl->pso.Reset();
     m_impl->transparentPSO.Reset();
     m_impl->depthPSO.Reset();
