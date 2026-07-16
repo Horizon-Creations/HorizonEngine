@@ -126,6 +126,7 @@ private:
 	uint32_t       m_shadowSize     = 2048;
 
 	VkInstance               m_instance       = VK_NULL_HANDLE;
+	uint32_t                 m_instanceApiVersion = 0; // actual requested VkApplicationInfo::apiVersion
 	VkDebugUtilsMessengerEXT m_debugMessenger = VK_NULL_HANDLE; // validation → Logger (debug only)
 	VkPhysicalDevice         m_physDevice     = VK_NULL_HANDLE;
 	VkDevice                 m_device         = VK_NULL_HANDLE;
@@ -670,6 +671,71 @@ private:
 	// bones UBO ring.
 	GiBuffer m_giInstanceBuf[3]; // k_maxFramesInFlight (static_assert at use site)
 	int      m_giInstanceCount = 0;
+
+	// ── Hardware ray tracing (VK_KHR_ray_query in compute) ──────────────────
+	// When the device offers VK_KHR_acceleration_structure + VK_KHR_ray_query
+	// (+ deferred_host_operations, buffer-device-address), the two GI kernels
+	// run as *_hw.comp variants that traverse a real VK acceleration structure
+	// instead of the CPU-built BVH SSBOs (same pattern as Metal's m_giHwRt:
+	// ray query in compute, NO ray-tracing pipeline). The SW path stays fully
+	// functional — every HW step degrades to SW on failure, and
+	// HE_GI_FORCE_SW=1 skips HW entirely. The SW SSBOs keep being uploaded
+	// either way: the HW kernels still bind them (interface parity; giInsts
+	// supplies baseColor, indexed by the ray query's InstanceId — the host
+	// keeps TLAS instance order identical to giInsts order).
+	bool m_giHwRt         = false; // device features enabled + entry points loaded
+	bool m_giHwPipesReady = false; // HW kernel pipelines + descriptor sets built
+	// KHR entry points (vkGetDeviceProcAddr; null until createDevice loads them).
+	PFN_vkCreateAccelerationStructureKHR           m_pfnCreateAS          = nullptr;
+	PFN_vkDestroyAccelerationStructureKHR          m_pfnDestroyAS         = nullptr;
+	PFN_vkGetAccelerationStructureBuildSizesKHR    m_pfnGetASBuildSizes   = nullptr;
+	PFN_vkCmdBuildAccelerationStructuresKHR        m_pfnCmdBuildAS        = nullptr;
+	PFN_vkGetAccelerationStructureDeviceAddressKHR m_pfnGetASAddress      = nullptr;
+	PFN_vkGetBufferDeviceAddressKHR                m_pfnGetBufferAddress  = nullptr;
+	VkDeviceSize m_giAsScratchAlign = 256; // minAccelerationStructureScratchOffsetAlignment
+
+	struct GiHwBuffer // device-address buffer (AS storage / scratch / build input)
+	{
+		VkBuffer        buf  = VK_NULL_HANDLE;
+		VkDeviceMemory  mem  = VK_NULL_HANDLE;
+		VkDeviceSize    size = 0;
+		VkDeviceAddress addr = 0;
+	};
+	struct GiHwBlas
+	{
+		VkAccelerationStructureKHR as = VK_NULL_HANDLE;
+		GiHwBuffer      buffer;      // AS backing storage
+		VkDeviceAddress address = 0; // for VkAccelerationStructureInstanceKHR
+		bool            valid   = false;
+	};
+	struct GiHwTlas // one per in-flight frame (slot's fence waited before reuse)
+	{
+		VkAccelerationStructureKHR as = VK_NULL_HANDLE;
+		GiHwBuffer buffer;  // AS backing storage
+		GiHwBuffer scratch; // build scratch (kept — rebuilt every frame)
+	};
+	bool     createGiHwBuffer(GiHwBuffer& b, VkDeviceSize size, VkBufferUsageFlags usage,
+	                          VkMemoryPropertyFlags props);
+	void     destroyGiHwBuffer(GiHwBuffer& b);
+	void     destroyGiHwBlas(GiHwBlas& b);
+	GiHwBlas buildGiHwBlas(const HE::UUID& meshId);   // one-shot cmdbuf BLAS build
+	void     createGiHwPipelines();                   // called by createGiPipelines
+	bool     buildGiTlas(VkCommandBuffer cmd);        // records this frame's TLAS build
+	std::unordered_map<HE::UUID, GiHwBlas> m_giHwBlasCache;
+	GiHwTlas m_giTlas[3];        // k_maxFramesInFlight ring
+	GiBuffer m_giTlasInstBuf[3]; // host-visible VkAccelerationStructureInstanceKHR array
+	std::vector<VkAccelerationStructureInstanceKHR> m_giHwInstancesCpu;
+	bool m_giHwInstOk = false;   // this frame's instance array complete + uploaded
+	VkDescriptorSetLayout m_giShadowHwDSL = VK_NULL_HANDLE; // SW bindings 0-6 + AS at 7
+	VkDescriptorSetLayout m_giProbeHwDSL  = VK_NULL_HANDLE; // SW bindings 0-5 + AS at 7
+	VkPipelineLayout m_giShadowHwPL   = VK_NULL_HANDLE;
+	VkPipelineLayout m_giProbeHwPL    = VK_NULL_HANDLE;
+	VkPipeline       m_giShadowHwPipe = VK_NULL_HANDLE;
+	VkPipeline       m_giProbeHwPipe  = VK_NULL_HANDLE;
+	VkDescriptorPool m_giHwDescPool   = VK_NULL_HANDLE;
+	VkDescriptorSet  m_giShadowHwSet[3] = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE };
+	VkDescriptorSet  m_giProbeHwSet[3]  = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE };
+
 	bool     m_giEnabled            = false;
 	float    m_giIndirectIntensity  = 1.0f;
 	float    m_giLightRadius        = 0.5f;

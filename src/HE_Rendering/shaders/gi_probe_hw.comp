@@ -1,0 +1,155 @@
+#version 460
+#extension GL_EXT_ray_query : require
+// DDGI probe update — HARDWARE ray tracing variant (VK_KHR_ray_query):
+// identical binding interface to gi_probe.comp (bindings 0-5 unchanged;
+// giNodes/giTris stay declared for descriptor-set parity but are never
+// traversed, giInsts still supplies the hit instance's baseColor), plus the
+// TLAS at binding 7. Ray semantics mirror the SW kernel 1:1: gather
+// formulation, one thread per octahedral texel, same bias/tMin/tMax
+// constants, secondary occlusion rays for sun + local-light bounce. The host
+// guarantees the TLAS instance order equals the giInsts order, so
+// rayQueryGetIntersectionInstanceIdEXT indexes giInsts directly.
+layout(local_size_x = 8, local_size_y = 8) in;
+
+struct GiNode { vec4 d0; vec4 d1; };
+struct GiTri  { vec4 v0; vec4 v1; vec4 v2; };
+struct GiInst { mat4 invTransform; vec4 baseColor; ivec4 offsets; };
+
+layout(std430, set = 0, binding = 0) readonly buffer GiNodes { GiNode giNodes[]; };
+layout(std430, set = 0, binding = 1) readonly buffer GiTris  { GiTri  giTris[];  };
+layout(std430, set = 0, binding = 2) readonly buffer GiInsts { GiInst giInsts[]; };
+layout(set = 0, binding = 3, rgba16f) uniform image2D uIrr;
+layout(set = 0, binding = 4, rg16f)   uniform image2D uVis;
+layout(set = 0, binding = 5) uniform GiProbeUBO {
+    vec4 uGridOrigin;   // xyz = grid origin, w = spacing
+    vec4 uGridCounts;   // xyz = probe counts, w = probesPerRow
+    vec4 uRayParams;    // x = max dist, y = hysteresis, z = cursor start, w = probes this batch
+    vec4 uSunDirRadius; // xyz = direction TOWARD the light, w = local light count
+    vec4 uSunColor;     // rgb = colour * intensity, w = instance count
+    vec4 uSkyAmbient;   // rgb = miss colour
+    vec4 uLightPosRange[8];  // xyz pos, w range
+    vec4 uLightColorType[8]; // rgb colour*intensity, w type (1 point, 2 spot)
+    vec4 uLightDirCos[8];    // xyz spot travel dir, w cos(half angle)
+};
+layout(set = 0, binding = 7) uniform accelerationStructureEXT uTlas;
+
+const int kOctSize = 8; // must match the renderer-side atlas tiling
+
+// Any-hit over the TLAS (occlusion only) — for the secondary shadow rays.
+bool giSceneAnyHitP(vec3 o, vec3 d, float tMin, float tMax)
+{
+    rayQueryEXT rq;
+    rayQueryInitializeEXT(rq, uTlas,
+                          gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT,
+                          0xFF, o, tMin, d, tMax);
+    while (rayQueryProceedEXT(rq)) { }
+    return rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionNoneEXT;
+}
+
+// Committed closest hit over the TLAS; the returned instance index equals the
+// giInsts index (host keeps the orders identical).
+int giSceneClosestHit(vec3 o, vec3 d, float tMin, float tMax, out float tOut)
+{
+    rayQueryEXT rq;
+    rayQueryInitializeEXT(rq, uTlas, gl_RayFlagsOpaqueEXT, 0xFF, o, tMin, d, tMax);
+    while (rayQueryProceedEXT(rq)) { }
+    tOut = tMax;
+    if (rayQueryGetIntersectionTypeEXT(rq, true) ==
+        gl_RayQueryCommittedIntersectionTriangleEXT)
+    {
+        tOut = rayQueryGetIntersectionTEXT(rq, true);
+        return rayQueryGetIntersectionInstanceIdEXT(rq, true);
+    }
+    return -1;
+}
+
+vec3 octDecode(vec2 e)
+{
+    vec3 n = vec3(e.xy, 1.0 - abs(e.x) - abs(e.y));
+    if (n.z < 0.0)
+    {
+        vec2 signN = vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+        n.xy = (1.0 - abs(n.yx)) * signN;
+    }
+    return normalize(n);
+}
+
+void main()
+{
+    ivec2 texel    = ivec2(gl_LocalInvocationID.xy);
+    int   batchIdx = int(gl_WorkGroupID.x);
+    int gx = int(uGridCounts.x), gy = int(uGridCounts.y), gz = int(uGridCounts.z);
+    int probeCount = gx * gy * gz;
+    if (probeCount <= 0 || batchIdx >= int(uRayParams.w)) return;
+    int probeIndex = (int(uRayParams.z) + batchIdx) % probeCount;
+
+    int pz = probeIndex / (gx * gy);
+    int py = (probeIndex / gx) % gy;
+    int px = probeIndex % gx;
+    vec3 probePos = uGridOrigin.xyz + vec3(float(px), float(py), float(pz)) * uGridOrigin.w;
+
+    vec2 uv  = (vec2(texel) + 0.5) / float(kOctSize) * 2.0 - 1.0;
+    vec3 dir = octDecode(uv);
+
+    float dist;
+    int hitInst = giSceneClosestHit(probePos, dir, 0.01, max(uRayParams.x, 1.0), dist);
+
+    vec3 radiance;
+    if (hitInst < 0)
+    {
+        radiance = uSkyAmbient.rgb;
+        dist     = uRayParams.x;
+    }
+    else
+    {
+        vec3 albedo    = giInsts[hitInst].baseColor.rgb;
+        vec3 hitNormal = -dir;
+        vec3 hitPos = probePos + dir * dist;
+        float ndl = max(dot(hitNormal, uSunDirRadius.xyz), 0.0);
+        // Secondary shadow ray: hit surfaces are no longer assumed fully
+        // sun-lit — without this, probes flood shadowed regions with bright
+        // sun bounce (objects under a large occluder visibly glow).
+        if (ndl > 0.0 && giSceneAnyHitP(hitPos + hitNormal * 0.05, uSunDirRadius.xyz, 0.02, 10000.0))
+            ndl = 0.0;
+        radiance = albedo * uSunColor.rgb * ndl;
+        int lightCount = int(uSunDirRadius.w);
+        for (int i = 0; i < lightCount; ++i)
+        {
+            vec3 toL = uLightPosRange[i].xyz - hitPos;
+            float d  = max(length(toL), 1e-4);
+            float range = max(uLightPosRange[i].w, 1e-4);
+            if (d >= range) continue; // outside the attenuation radius
+            vec3 L = toL / d;
+            float ndl2 = max(dot(hitNormal, L), 0.0);
+            if (ndl2 <= 0.0) continue;
+            float atten = 1.0 - d / range;
+            atten *= atten;
+            if (uLightColorType[i].w > 1.5)
+            {
+                float c       = dot(-L, normalize(uLightDirCos[i].xyz));
+                float cosCone = uLightDirCos[i].w;
+                atten *= smoothstep(cosCone, mix(cosCone, 1.0, 0.2), c);
+            }
+            if (atten <= 0.0) continue;
+            // Secondary occlusion ray to the light — no bounce leaking.
+            if (giSceneAnyHitP(hitPos + hitNormal * 0.05, L, 0.02, max(d - 0.1, 0.02)))
+                continue;
+            radiance += albedo * uLightColorType[i].rgb * ndl2 * atten;
+        }
+    }
+
+    int probesPerRow = max(1, int(uGridCounts.w));
+    ivec2 outCoord = ivec2((probeIndex % probesPerRow) * kOctSize + texel.x,
+                           (probeIndex / probesPerRow) * kOctSize + texel.y);
+
+    // Adaptive hysteresis (see the Metal kernels): deterministic gather rays →
+    // deltas are real scene changes; converge fast on change, stay smooth else.
+    float baseH = clamp(uRayParams.y, 0.0, 0.98);
+    vec4 oldIrr = imageLoad(uIrr, outCoord);
+    float hIrr = mix(baseH, 0.3, clamp(length(radiance - oldIrr.rgb) * 4.0, 0.0, 1.0));
+    imageStore(uIrr, outCoord, vec4(mix(radiance, oldIrr.rgb, hIrr), 1.0));
+    vec4 oldVis = imageLoad(uVis, outCoord);
+    vec2 newVisSample = vec2(dist, dist * dist);
+    float hVis = mix(baseH, 0.3, clamp(abs(dist - oldVis.x) / max(uGridOrigin.w, 1.0), 0.0, 1.0));
+    imageStore(uVis, outCoord, vec4(mix(newVisSample, oldVis.rg, hVis), 0.0, 0.0));
+}

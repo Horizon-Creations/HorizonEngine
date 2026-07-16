@@ -256,6 +256,16 @@ void VulkanRenderer::Shutdown()
     if (m_giProbeDSL)     { vkDestroyDescriptorSetLayout(m_device, m_giProbeDSL, nullptr);  m_giProbeDSL = VK_NULL_HANDLE; }
     if (m_giFsDSL)        { vkDestroyDescriptorSetLayout(m_device, m_giFsDSL, nullptr);     m_giFsDSL = VK_NULL_HANDLE; }
     if (m_giDescPool)     { vkDestroyDescriptorPool(m_device, m_giDescPool, nullptr);       m_giDescPool = VK_NULL_HANDLE; }
+    // HW ray-query kernel objects (the AS/BLAS/TLAS themselves are freed by
+    // destroyGiAccel above).
+    if (m_giShadowHwPipe) { vkDestroyPipeline(m_device, m_giShadowHwPipe, nullptr);         m_giShadowHwPipe = VK_NULL_HANDLE; }
+    if (m_giProbeHwPipe)  { vkDestroyPipeline(m_device, m_giProbeHwPipe, nullptr);          m_giProbeHwPipe  = VK_NULL_HANDLE; }
+    if (m_giShadowHwPL)   { vkDestroyPipelineLayout(m_device, m_giShadowHwPL, nullptr);     m_giShadowHwPL   = VK_NULL_HANDLE; }
+    if (m_giProbeHwPL)    { vkDestroyPipelineLayout(m_device, m_giProbeHwPL, nullptr);      m_giProbeHwPL    = VK_NULL_HANDLE; }
+    if (m_giHwDescPool)   { vkDestroyDescriptorPool(m_device, m_giHwDescPool, nullptr);     m_giHwDescPool   = VK_NULL_HANDLE; }
+    if (m_giShadowHwDSL)  { vkDestroyDescriptorSetLayout(m_device, m_giShadowHwDSL, nullptr); m_giShadowHwDSL = VK_NULL_HANDLE; }
+    if (m_giProbeHwDSL)   { vkDestroyDescriptorSetLayout(m_device, m_giProbeHwDSL, nullptr);  m_giProbeHwDSL  = VK_NULL_HANDLE; }
+    m_giHwPipesReady = false;
     if (m_giPointSampler) { vkDestroySampler(m_device, m_giPointSampler, nullptr);          m_giPointSampler = VK_NULL_HANDLE; }
     m_giPipelinesTried = false;
     m_giReady          = false;
@@ -800,10 +810,22 @@ void VulkanRenderer::createInstance()
                        : "VulkanRenderer: validation layer requested but NOT available");
     }
 
+    // Vulkan 1.2 is required for the HW ray-query GI path (SPIR-V 1.4+,
+    // buffer-device-address core). A 1.0 loader has no
+    // vkEnumerateInstanceVersion — fetch it dynamically; if the loader can't
+    // do 1.2 we fall back to 1.0 (everything else in this backend is 1.0-
+    // compatible) and the HW-RT gate in createDevice() stays off.
+    uint32_t loaderVersion = VK_API_VERSION_1_0;
+    if (auto enumVer = reinterpret_cast<PFN_vkEnumerateInstanceVersion>(
+            vkGetInstanceProcAddr(nullptr, "vkEnumerateInstanceVersion")))
+        enumVer(&loaderVersion);
+    m_instanceApiVersion = loaderVersion >= VK_API_VERSION_1_2 ? VK_API_VERSION_1_2
+                                                               : VK_API_VERSION_1_0;
+
     VkApplicationInfo appInfo{};
     appInfo.sType            = VK_STRUCTURE_TYPE_APPLICATION_INFO;
     appInfo.pApplicationName = "HorizonEngine";
-    appInfo.apiVersion       = VK_API_VERSION_1_2;
+    appInfo.apiVersion       = m_instanceApiVersion;
     VkInstanceCreateInfo ci{};
     ci.sType                   = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
     ci.pApplicationInfo        = &appInfo;
@@ -866,15 +888,122 @@ void VulkanRenderer::createDevice()
     qci.queueFamilyIndex = m_graphicsFamily;
     qci.queueCount       = 1;
     qci.pQueuePriorities = &prio;
-    const char* devExts[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+
+    // ── Hardware ray tracing probe (VK_KHR_ray_query in compute) ────────────
+    // Needs Vulkan 1.2 (instance AND device), the three KHR extensions and the
+    // accelerationStructure + rayQuery + bufferDeviceAddress features. Any
+    // miss → SW GI only (no behaviour change); HE_GI_FORCE_SW=1 skips the
+    // probe entirely, mirroring the Metal backend's override.
+    std::vector<const char*> devExts = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+    VkPhysicalDeviceAccelerationStructureFeaturesKHR asFeat{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR };
+    VkPhysicalDeviceRayQueryFeaturesKHR rqFeat{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR };
+    VkPhysicalDeviceBufferDeviceAddressFeatures bdaFeat{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES };
+    bool wantHwRt = false;
+    if (const char* force = std::getenv("HE_GI_FORCE_SW"); force && *force && *force != '0')
+    {
+        Logger::Log(Logger::LogLevel::Info,
+                    "VulkanRenderer: HE_GI_FORCE_SW set — software GI path forced");
+    }
+    else if (m_instanceApiVersion >= VK_API_VERSION_1_2)
+    {
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceProperties(m_physDevice, &props);
+        bool hasAccel = false, hasRayQuery = false, hasDefHostOps = false;
+        {
+            uint32_t n = 0;
+            vkEnumerateDeviceExtensionProperties(m_physDevice, nullptr, &n, nullptr);
+            std::vector<VkExtensionProperties> eprops(n);
+            if (n) vkEnumerateDeviceExtensionProperties(m_physDevice, nullptr, &n, eprops.data());
+            for (const auto& e : eprops)
+            {
+                if (std::strcmp(e.extensionName, VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME) == 0) hasAccel = true;
+                else if (std::strcmp(e.extensionName, VK_KHR_RAY_QUERY_EXTENSION_NAME) == 0) hasRayQuery = true;
+                else if (std::strcmp(e.extensionName, VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME) == 0) hasDefHostOps = true;
+            }
+        }
+        if (props.apiVersion >= VK_API_VERSION_1_2 && hasAccel && hasRayQuery && hasDefHostOps)
+        {
+            VkPhysicalDeviceFeatures2 feat2{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
+            feat2.pNext  = &asFeat;
+            asFeat.pNext = &rqFeat;
+            rqFeat.pNext = &bdaFeat;
+            vkGetPhysicalDeviceFeatures2(m_physDevice, &feat2);
+            if (asFeat.accelerationStructure && rqFeat.rayQuery && bdaFeat.bufferDeviceAddress)
+                wantHwRt = true;
+        }
+        if (wantHwRt)
+        {
+            // Scratch-offset alignment for AS builds (needed to place the
+            // scratch device address correctly).
+            VkPhysicalDeviceAccelerationStructurePropertiesKHR asProps{
+                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR };
+            VkPhysicalDeviceProperties2 props2{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2 };
+            props2.pNext = &asProps;
+            vkGetPhysicalDeviceProperties2(m_physDevice, &props2);
+            m_giAsScratchAlign = std::max<VkDeviceSize>(asProps.minAccelerationStructureScratchOffsetAlignment, 1);
+
+            devExts.push_back(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME);
+            devExts.push_back(VK_KHR_RAY_QUERY_EXTENSION_NAME);
+            devExts.push_back(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
+        }
+    }
+
+    // Fresh feature structs for device creation: enable ONLY what we use.
+    VkPhysicalDeviceAccelerationStructureFeaturesKHR asEnable{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR };
+    VkPhysicalDeviceRayQueryFeaturesKHR rqEnable{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR };
+    VkPhysicalDeviceBufferDeviceAddressFeatures bdaEnable{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES };
+    asEnable.accelerationStructure = VK_TRUE;
+    rqEnable.rayQuery              = VK_TRUE;
+    bdaEnable.bufferDeviceAddress  = VK_TRUE;
+    asEnable.pNext = &rqEnable;
+    rqEnable.pNext = &bdaEnable;
+
     VkDeviceCreateInfo dci{};
     dci.sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    dci.pNext                   = wantHwRt ? &asEnable : nullptr;
     dci.queueCreateInfoCount    = 1;
     dci.pQueueCreateInfos       = &qci;
-    dci.enabledExtensionCount   = 1;
-    dci.ppEnabledExtensionNames = devExts;
+    dci.enabledExtensionCount   = static_cast<uint32_t>(devExts.size());
+    dci.ppEnabledExtensionNames = devExts.data();
     vkCheck(vkCreateDevice(m_physDevice, &dci, nullptr, &m_device), "vkCreateDevice");
     vkGetDeviceQueue(m_device, m_graphicsFamily, 0, &m_graphicsQueue);
+
+    if (wantHwRt)
+    {
+        // KHR entry points — device-level, so vkGetDeviceProcAddr.
+        m_pfnCreateAS = reinterpret_cast<PFN_vkCreateAccelerationStructureKHR>(
+            vkGetDeviceProcAddr(m_device, "vkCreateAccelerationStructureKHR"));
+        m_pfnDestroyAS = reinterpret_cast<PFN_vkDestroyAccelerationStructureKHR>(
+            vkGetDeviceProcAddr(m_device, "vkDestroyAccelerationStructureKHR"));
+        m_pfnGetASBuildSizes = reinterpret_cast<PFN_vkGetAccelerationStructureBuildSizesKHR>(
+            vkGetDeviceProcAddr(m_device, "vkGetAccelerationStructureBuildSizesKHR"));
+        m_pfnCmdBuildAS = reinterpret_cast<PFN_vkCmdBuildAccelerationStructuresKHR>(
+            vkGetDeviceProcAddr(m_device, "vkCmdBuildAccelerationStructuresKHR"));
+        m_pfnGetASAddress = reinterpret_cast<PFN_vkGetAccelerationStructureDeviceAddressKHR>(
+            vkGetDeviceProcAddr(m_device, "vkGetAccelerationStructureDeviceAddressKHR"));
+        m_pfnGetBufferAddress = reinterpret_cast<PFN_vkGetBufferDeviceAddressKHR>(
+            vkGetDeviceProcAddr(m_device, "vkGetBufferDeviceAddressKHR"));
+        // Core-1.2 alias fallback (some drivers only export the core name).
+        if (!m_pfnGetBufferAddress)
+            m_pfnGetBufferAddress = reinterpret_cast<PFN_vkGetBufferDeviceAddressKHR>(
+                vkGetDeviceProcAddr(m_device, "vkGetBufferDeviceAddress"));
+        m_giHwRt = m_pfnCreateAS && m_pfnDestroyAS && m_pfnGetASBuildSizes &&
+                   m_pfnCmdBuildAS && m_pfnGetASAddress && m_pfnGetBufferAddress;
+        Logger::Log(Logger::LogLevel::Info,
+                    m_giHwRt ? "VulkanRenderer: GI hardware ray tracing available (VK_KHR_ray_query)"
+                             : "VulkanRenderer: HW-RT entry points missing — software GI path");
+    }
+    else
+    {
+        Logger::Log(Logger::LogLevel::Info,
+                    "VulkanRenderer: GI uses software ray tracing (no VK_KHR_ray_query)");
+    }
 }
 
 void VulkanRenderer::createSwapchain(uint32_t w, uint32_t h)
@@ -3377,6 +3506,13 @@ void VulkanRenderer::processPendingInvalidations()
             m_giTrisCpu.clear();
             m_giBlasDirty = true;
         }
+        // HW BLAS is per-mesh (no concatenated arrays) — drop just this one;
+        // it rebuilds lazily on the next updateGiAccel. Device is idle here.
+        if (auto it = m_giHwBlasCache.find(id); it != m_giHwBlasCache.end())
+        {
+            destroyGiHwBlas(it->second);
+            m_giHwBlasCache.erase(it);
+        }
         if (auto it = m_skeletalMeshCache.find(id); it != m_skeletalMeshCache.end())
         {
             GpuSkeletalMesh& m = it->second;
@@ -5057,6 +5193,15 @@ bool VulkanRenderer::uploadGiBuffer(GiBuffer& b, const void* data, VkDeviceSize 
         VkMemoryRequirements req{};
         vkGetBufferMemoryRequirements(m_device, b.buf, &req);
         VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        // Buffers the HW-RT path takes device addresses of (TLAS instance
+        // input) need the DEVICE_ADDRESS allocation flag or the address query
+        // is invalid.
+        VkMemoryAllocateFlagsInfo mafi{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO };
+        if (usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT)
+        {
+            mafi.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+            mai.pNext  = &mafi;
+        }
         mai.allocationSize  = req.size;
         mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits,
             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
@@ -5078,6 +5223,8 @@ bool VulkanRenderer::uploadGiBuffer(GiBuffer& b, const void* data, VkDeviceSize 
 void VulkanRenderer::updateGiAccel()
 {
     m_giInstanceCount = 0;
+    m_giHwInstOk      = false;
+    m_giHwInstancesCpu.clear();
     if (!m_giEnabled) return;
 
     // Same caster filter as the shadow pass / the other backends' TLAS builds:
@@ -5091,14 +5238,26 @@ void VulkanRenderer::updateGiAccel()
             it = m_giBlasCache.emplace(id, buildGiBlas(id)).first;
         return it->second;
     };
+    // HW path: build a VkAccelerationStructureInstanceKHR array in EXACTLY the
+    // giInsts order (the kernels index giInsts by InstanceId). Any mesh whose
+    // HW BLAS can't be built breaks that 1:1 mapping → SW kernels this frame.
+    bool hwAll = m_giHwRt && m_giHwPipesReady;
+    auto resolveHwBlas = [&](const HE::UUID& id) -> const GiHwBlas&
+    {
+        auto it = m_giHwBlasCache.find(id);
+        if (it == m_giHwBlasCache.end())
+            it = m_giHwBlasCache.emplace(id, buildGiHwBlas(id)).first;
+        return it->second;
+    };
     for (const RenderObject& obj : m_renderWorld.objects)
     {
         if (!obj.castsShadow) continue;
         // Default-cube fallback — an entity without a resolvable mesh asset
         // RENDERS as the default cube (draw-loop fallback), so it must occlude
         // as one too, or plain cube entities cast no GI shadow at all.
-        GiBlasRange range = resolveRange(obj.meshAssetId);
-        if (!range.valid) range = resolveRange(HE::kDefaultCubeMeshId);
+        HE::UUID    effectiveId = obj.meshAssetId;
+        GiBlasRange range       = resolveRange(effectiveId);
+        if (!range.valid) { effectiveId = HE::kDefaultCubeMeshId; range = resolveRange(effectiveId); }
         if (!range.valid) continue;
         GiInstanceGpu inst;
         inst.invTransform = glm::inverse(obj.transform);
@@ -5106,6 +5265,34 @@ void VulkanRenderer::updateGiAccel()
         inst.nodeOffset   = range.nodeOffset;
         inst.triOffset    = range.triOffset;
         instances.push_back(inst);
+
+        if (hwAll)
+        {
+            const GiHwBlas& hb = resolveHwBlas(effectiveId);
+            if (!hb.valid)
+            {
+                hwAll = false; // incomplete TLAS would misalign InstanceId ↔ giInsts
+                m_giHwInstancesCpu.clear();
+            }
+            else
+            {
+                VkAccelerationStructureInstanceKHR vi{};
+                // VkTransformMatrixKHR is 3x4 ROW-major; glm is column-major.
+                const glm::mat4& m = obj.transform;
+                for (int r = 0; r < 3; ++r)
+                    for (int c = 0; c < 4; ++c)
+                        vi.transform.matrix[r][c] = m[c][r];
+                vi.instanceCustomIndex = static_cast<uint32_t>(instances.size() - 1);
+                vi.mask                = 0xFF;
+                vi.instanceShaderBindingTableRecordOffset = 0;
+                // Opaque (SW kernels have no any-hit shading) + no facing cull
+                // (SW Möller-Trumbore is two-sided).
+                vi.flags = VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR |
+                           VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+                vi.accelerationStructureReference = hb.address;
+                m_giHwInstancesCpu.push_back(vi);
+            }
+        }
     }
     if (instances.empty()) return;
 
@@ -5130,6 +5317,20 @@ void VulkanRenderer::updateGiAccel()
                         instances.size() * sizeof(GiInstanceGpu)))
         return;
     m_giInstanceCount = static_cast<int>(instances.size());
+
+    // HW path: upload this frame's TLAS instance array (host-visible ring slot,
+    // device-address usage for the AS build input). Failure just means SW
+    // kernels this frame — the SW buffers above are already in place.
+    if (hwAll && !m_giHwInstancesCpu.empty())
+    {
+        static_assert(k_maxFramesInFlight <= sizeof(m_giTlasInstBuf) / sizeof(m_giTlasInstBuf[0]),
+                      "GI TLAS instance ring smaller than frames in flight");
+        m_giHwInstOk = uploadGiBuffer(
+            m_giTlasInstBuf[m_currentFrame], m_giHwInstancesCpu.data(),
+            m_giHwInstancesCpu.size() * sizeof(VkAccelerationStructureInstanceKHR),
+            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
+            VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+    }
 }
 
 void VulkanRenderer::destroyGiAccel()
@@ -5149,6 +5350,293 @@ void VulkanRenderer::destroyGiAccel()
     m_giTrisCpu.clear();
     m_giInstanceCount = 0;
     m_giBlasDirty     = false;
+
+    // HW-RT acceleration structures (BLAS cache + per-frame TLAS ring +
+    // instance upload ring). Callers guarantee the GPU is idle (Shutdown waits).
+    for (auto& [id, blas] : m_giHwBlasCache) destroyGiHwBlas(blas);
+    m_giHwBlasCache.clear();
+    for (GiHwTlas& t : m_giTlas)
+    {
+        if (t.as && m_pfnDestroyAS) { m_pfnDestroyAS(m_device, t.as, nullptr); t.as = VK_NULL_HANDLE; }
+        destroyGiHwBuffer(t.buffer);
+        destroyGiHwBuffer(t.scratch);
+    }
+    for (GiBuffer& b : m_giTlasInstBuf) destroy(b);
+    m_giHwInstancesCpu.clear();
+    m_giHwInstOk = false;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GI hardware ray tracing (VK_KHR_ray_query) — acceleration-structure plumbing
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool VulkanRenderer::createGiHwBuffer(GiHwBuffer& b, VkDeviceSize size,
+                                      VkBufferUsageFlags usage, VkMemoryPropertyFlags props)
+{
+    destroyGiHwBuffer(b);
+    VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+    bci.size  = size;
+    bci.usage = usage | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+    if (vkCreateBuffer(m_device, &bci, nullptr, &b.buf) != VK_SUCCESS) return false;
+    VkMemoryRequirements req{};
+    vkGetBufferMemoryRequirements(m_device, b.buf, &req);
+    VkMemoryAllocateFlagsInfo mafi{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO };
+    mafi.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+    VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    mai.pNext          = &mafi;
+    mai.allocationSize = req.size;
+    try { mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits, props); }
+    catch (...) { destroyGiHwBuffer(b); return false; } // findMemoryType throws on miss
+    if (vkAllocateMemory(m_device, &mai, nullptr, &b.mem) != VK_SUCCESS)
+    { destroyGiHwBuffer(b); return false; }
+    vkBindBufferMemory(m_device, b.buf, b.mem, 0);
+    VkBufferDeviceAddressInfo bdai{ VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO };
+    bdai.buffer = b.buf;
+    b.addr = m_pfnGetBufferAddress ? m_pfnGetBufferAddress(m_device, &bdai) : 0;
+    if (!b.addr) { destroyGiHwBuffer(b); return false; }
+    b.size = size;
+    return true;
+}
+
+void VulkanRenderer::destroyGiHwBuffer(GiHwBuffer& b)
+{
+    if (b.buf) { vkDestroyBuffer(m_device, b.buf, nullptr); b.buf = VK_NULL_HANDLE; }
+    if (b.mem) { vkFreeMemory(m_device, b.mem, nullptr);    b.mem = VK_NULL_HANDLE; }
+    b.size = 0;
+    b.addr = 0;
+}
+
+void VulkanRenderer::destroyGiHwBlas(GiHwBlas& b)
+{
+    if (b.as && m_pfnDestroyAS) { m_pfnDestroyAS(m_device, b.as, nullptr); b.as = VK_NULL_HANDLE; }
+    destroyGiHwBuffer(b.buffer);
+    b.address = 0;
+    b.valid   = false;
+}
+
+// One-shot BLAS build for a mesh: upload positions + indices into a device-
+// address input buffer, query build sizes, build on a one-time command buffer
+// (QueueWaitIdle — BLAS builds are rare: once per distinct mesh), then free
+// input + scratch (a built BLAS references neither). Geometry source is the
+// same data buildGiBlas consumes: cooked interleaved 8-float (position at
+// offset 0 → stride 32 B feeds vertexStride directly, no repack) or loose
+// tight 3-float positions.
+VulkanRenderer::GiHwBlas VulkanRenderer::buildGiHwBlas(const HE::UUID& meshId)
+{
+    GiHwBlas out;
+    if (!m_giHwRt || !m_contentManager) return out;
+    const StaticMeshAsset* asset = m_contentManager->getStaticMesh(meshId);
+    if (!asset || asset->indices.empty()) return out;
+
+    const float* vdata   = nullptr;
+    uint32_t     vcount  = 0;
+    VkDeviceSize vstride = 0;
+    if (asset->cooked && !asset->interleaved.empty())
+    {
+        vdata   = asset->interleaved.data();
+        vcount  = static_cast<uint32_t>(asset->vertexCount);
+        vstride = 8 * sizeof(float);
+    }
+    else if (!asset->vertices.empty())
+    {
+        vdata   = asset->vertices.data();
+        vcount  = static_cast<uint32_t>(asset->vertices.size() / 3);
+        vstride = 3 * sizeof(float);
+    }
+    if (!vdata || vcount == 0) return out;
+    const uint32_t primCount = static_cast<uint32_t>(asset->indices.size() / 3);
+    if (primCount == 0) return out;
+
+    // Build-input buffer: vertices then (4-byte aligned) indices, host-visible.
+    const VkDeviceSize vBytes = vstride * vcount;
+    const VkDeviceSize iOfs   = (vBytes + 3) & ~VkDeviceSize(3);
+    const VkDeviceSize iBytes = asset->indices.size() * sizeof(uint32_t);
+    GiHwBuffer geo;
+    if (!createGiHwBuffer(geo, iOfs + iBytes,
+            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))
+    {
+        Logger::Log(Logger::LogLevel::Warning, "VulkanRenderer: HW BLAS input buffer failed");
+        return out;
+    }
+    void* mapped = nullptr;
+    if (vkMapMemory(m_device, geo.mem, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS)
+    { destroyGiHwBuffer(geo); return out; }
+    std::memcpy(static_cast<uint8_t*>(mapped), vdata, static_cast<size_t>(vBytes));
+    std::memcpy(static_cast<uint8_t*>(mapped) + iOfs, asset->indices.data(),
+                static_cast<size_t>(iBytes));
+    vkUnmapMemory(m_device, geo.mem);
+
+    VkAccelerationStructureGeometryKHR geom{ VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR };
+    geom.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+    geom.flags        = VK_GEOMETRY_OPAQUE_BIT_KHR;
+    auto& tri = geom.geometry.triangles;
+    tri.sType                    = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+    tri.vertexFormat             = VK_FORMAT_R32G32B32_SFLOAT;
+    tri.vertexData.deviceAddress = geo.addr;
+    tri.vertexStride             = vstride;
+    tri.maxVertex                = vcount - 1;
+    tri.indexType                = VK_INDEX_TYPE_UINT32;
+    tri.indexData.deviceAddress  = geo.addr + iOfs;
+
+    VkAccelerationStructureBuildGeometryInfoKHR bgi{
+        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR };
+    bgi.type          = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    bgi.flags         = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    bgi.mode          = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    bgi.geometryCount = 1;
+    bgi.pGeometries   = &geom;
+    VkAccelerationStructureBuildSizesInfoKHR sizes{
+        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR };
+    m_pfnGetASBuildSizes(m_device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+                         &bgi, &primCount, &sizes);
+
+    GiHwBuffer scratch;
+    bool ok = createGiHwBuffer(out.buffer, sizes.accelerationStructureSize,
+                  VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR,
+                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+           && createGiHwBuffer(scratch, sizes.buildScratchSize + m_giAsScratchAlign,
+                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (ok)
+    {
+        VkAccelerationStructureCreateInfoKHR aci{
+            VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR };
+        aci.buffer = out.buffer.buf;
+        aci.offset = 0;
+        aci.size   = sizes.accelerationStructureSize;
+        aci.type   = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+        ok = m_pfnCreateAS(m_device, &aci, nullptr, &out.as) == VK_SUCCESS;
+    }
+    if (ok)
+    {
+        bgi.dstAccelerationStructure  = out.as;
+        bgi.scratchData.deviceAddress =
+            (scratch.addr + m_giAsScratchAlign - 1) & ~(VkDeviceAddress(m_giAsScratchAlign) - 1);
+        VkAccelerationStructureBuildRangeInfoKHR range{ primCount, 0, 0, 0 };
+        const VkAccelerationStructureBuildRangeInfoKHR* pRange = &range;
+
+        VkCommandBufferAllocateInfo cbai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+        cbai.commandPool = m_cmdPool; cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cbai.commandBufferCount = 1;
+        VkCommandBuffer tmp = VK_NULL_HANDLE;
+        ok = vkAllocateCommandBuffers(m_device, &cbai, &tmp) == VK_SUCCESS;
+        if (ok)
+        {
+            VkCommandBufferBeginInfo cbi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+            cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            vkBeginCommandBuffer(tmp, &cbi);
+            m_pfnCmdBuildAS(tmp, 1, &bgi, &pRange);
+            vkEndCommandBuffer(tmp);
+            VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+            si.commandBufferCount = 1; si.pCommandBuffers = &tmp;
+            ok = vkQueueSubmit(m_graphicsQueue, 1, &si, VK_NULL_HANDLE) == VK_SUCCESS;
+            vkQueueWaitIdle(m_graphicsQueue);
+            vkFreeCommandBuffers(m_device, m_cmdPool, 1, &tmp);
+        }
+    }
+    destroyGiHwBuffer(scratch);
+    destroyGiHwBuffer(geo);
+    if (!ok)
+    {
+        Logger::Log(Logger::LogLevel::Warning,
+                    "VulkanRenderer: HW BLAS build failed — SW GI kernels for affected frames");
+        destroyGiHwBlas(out);
+        return out;
+    }
+    VkAccelerationStructureDeviceAddressInfoKHR adai{
+        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR };
+    adai.accelerationStructure = out.as;
+    out.address = m_pfnGetASAddress(m_device, &adai);
+    out.valid   = out.address != 0;
+    if (!out.valid) destroyGiHwBlas(out);
+    return out;
+}
+
+// Records this frame's TLAS build (ring slot per in-flight frame — the slot's
+// fence was waited on, so destroy/rebuild of a too-small slot is safe) plus
+// the build → compute-read barrier. Returns true iff the HW kernels can be
+// dispatched against m_giTlas[m_currentFrame] this frame.
+bool VulkanRenderer::buildGiTlas(VkCommandBuffer cmd)
+{
+    if (!m_giHwRt || !m_giHwPipesReady || !m_giHwInstOk || m_giHwInstancesCpu.empty())
+        return false;
+    const uint32_t fi    = m_currentFrame;
+    const uint32_t count = static_cast<uint32_t>(m_giHwInstancesCpu.size());
+    GiHwTlas& t = m_giTlas[fi];
+
+    VkAccelerationStructureGeometryKHR geom{ VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR };
+    geom.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+    geom.geometry.instances.sType =
+        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
+    geom.geometry.instances.arrayOfPointers = VK_FALSE;
+    VkBufferDeviceAddressInfo bdai{ VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO };
+    bdai.buffer = m_giTlasInstBuf[fi].buf;
+    geom.geometry.instances.data.deviceAddress = m_pfnGetBufferAddress(m_device, &bdai);
+    if (!geom.geometry.instances.data.deviceAddress) return false;
+
+    VkAccelerationStructureBuildGeometryInfoKHR bgi{
+        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR };
+    bgi.type          = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+    bgi.flags         = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    bgi.mode          = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    bgi.geometryCount = 1;
+    bgi.pGeometries   = &geom;
+    VkAccelerationStructureBuildSizesInfoKHR sizes{
+        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR };
+    m_pfnGetASBuildSizes(m_device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+                         &bgi, &count, &sizes);
+
+    // (Re)create the slot's AS + scratch when the required sizes outgrow it.
+    if (!t.as || t.buffer.size < sizes.accelerationStructureSize ||
+        t.scratch.size < sizes.buildScratchSize + m_giAsScratchAlign)
+    {
+        if (t.as) { m_pfnDestroyAS(m_device, t.as, nullptr); t.as = VK_NULL_HANDLE; }
+        if (!createGiHwBuffer(t.buffer, sizes.accelerationStructureSize,
+                VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) ||
+            !createGiHwBuffer(t.scratch, sizes.buildScratchSize + m_giAsScratchAlign,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
+        {
+            Logger::Log(Logger::LogLevel::Warning,
+                        "VulkanRenderer: GI TLAS buffer creation failed — SW kernels this frame");
+            destroyGiHwBuffer(t.buffer);
+            destroyGiHwBuffer(t.scratch);
+            return false;
+        }
+        VkAccelerationStructureCreateInfoKHR aci{
+            VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR };
+        aci.buffer = t.buffer.buf;
+        aci.offset = 0;
+        aci.size   = sizes.accelerationStructureSize;
+        aci.type   = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+        if (m_pfnCreateAS(m_device, &aci, nullptr, &t.as) != VK_SUCCESS)
+        {
+            Logger::Log(Logger::LogLevel::Warning,
+                        "VulkanRenderer: GI TLAS creation failed — SW kernels this frame");
+            destroyGiHwBuffer(t.buffer);
+            destroyGiHwBuffer(t.scratch);
+            t.as = VK_NULL_HANDLE;
+            return false;
+        }
+    }
+
+    bgi.dstAccelerationStructure  = t.as;
+    bgi.scratchData.deviceAddress =
+        (t.scratch.addr + m_giAsScratchAlign - 1) & ~(VkDeviceAddress(m_giAsScratchAlign) - 1);
+    VkAccelerationStructureBuildRangeInfoKHR range{ count, 0, 0, 0 };
+    const VkAccelerationStructureBuildRangeInfoKHR* pRange = &range;
+    m_pfnCmdBuildAS(cmd, 1, &bgi, &pRange);
+
+    // TLAS build → ray-query reads in the two GI compute dispatches.
+    VkMemoryBarrier mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+    mb.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+    mb.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         0, 1, &mb, 0, nullptr, 0, nullptr);
+    return true;
 }
 
 // UBO mirrors of the gi_*.comp / gi_temporal.frag param blocks (std140: vec4
@@ -5515,6 +6003,139 @@ void VulkanRenderer::createGiPipelines()
     }
     m_giReady = true;
     Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: GI pipelines built (software compute ray tracing)");
+
+    // HW ray-query kernels on top (optional): failure logs + degrades to the
+    // SW kernels just built — never blocks GI as a whole.
+    if (m_giHwRt) createGiHwPipelines();
+}
+
+// Builds the two HW ray-query kernel pipelines (gi_shadow_hw/gi_probe_hw) +
+// their descriptor plumbing: SW bindings unchanged plus the TLAS at binding 7
+// (VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR). Only called when m_giHwRt;
+// any failure logs, cleans up and clears m_giHwRt — SW kernels take over.
+void VulkanRenderer::createGiHwPipelines()
+{
+    auto fail = [&](const char* what)
+    {
+        Logger::Log(Logger::LogLevel::Warning,
+            (std::string("VulkanRenderer: ") + what + " — HW ray tracing off, software GI kernels").c_str());
+        if (m_giShadowHwPipe) { vkDestroyPipeline(m_device, m_giShadowHwPipe, nullptr); m_giShadowHwPipe = VK_NULL_HANDLE; }
+        if (m_giProbeHwPipe)  { vkDestroyPipeline(m_device, m_giProbeHwPipe, nullptr);  m_giProbeHwPipe  = VK_NULL_HANDLE; }
+        if (m_giShadowHwPL)   { vkDestroyPipelineLayout(m_device, m_giShadowHwPL, nullptr); m_giShadowHwPL = VK_NULL_HANDLE; }
+        if (m_giProbeHwPL)    { vkDestroyPipelineLayout(m_device, m_giProbeHwPL, nullptr);  m_giProbeHwPL  = VK_NULL_HANDLE; }
+        if (m_giHwDescPool)   { vkDestroyDescriptorPool(m_device, m_giHwDescPool, nullptr); m_giHwDescPool = VK_NULL_HANDLE; }
+        if (m_giShadowHwDSL)  { vkDestroyDescriptorSetLayout(m_device, m_giShadowHwDSL, nullptr); m_giShadowHwDSL = VK_NULL_HANDLE; }
+        if (m_giProbeHwDSL)   { vkDestroyDescriptorSetLayout(m_device, m_giProbeHwDSL, nullptr);  m_giProbeHwDSL  = VK_NULL_HANDLE; }
+        for (auto& s : m_giShadowHwSet) s = VK_NULL_HANDLE;
+        for (auto& s : m_giProbeHwSet)  s = VK_NULL_HANDLE;
+        m_giHwPipesReady = false;
+        m_giHwRt         = false;
+    };
+
+    auto bindOf = [&](uint32_t b, VkDescriptorType t, const VkSampler* imm = nullptr)
+    {
+        VkDescriptorSetLayoutBinding r{};
+        r.binding = b; r.descriptorType = t; r.descriptorCount = 1;
+        r.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT; r.pImmutableSamplers = imm;
+        return r;
+    };
+    auto makeDSL = [&](const std::vector<VkDescriptorSetLayoutBinding>& binds,
+                       VkDescriptorSetLayout& out) -> bool
+    {
+        VkDescriptorSetLayoutCreateInfo slci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+        slci.bindingCount = static_cast<uint32_t>(binds.size());
+        slci.pBindings    = binds.data();
+        return vkCreateDescriptorSetLayout(m_device, &slci, nullptr, &out) == VK_SUCCESS;
+    };
+    // gi_shadow_hw.comp: SW bindings 0-6 + TLAS at 7.
+    bool ok = makeDSL({
+        bindOf(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER),
+        bindOf(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER),
+        bindOf(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER),
+        bindOf(3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &m_giPointSampler),
+        bindOf(4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &m_giPointSampler),
+        bindOf(5, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE),
+        bindOf(6, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER),
+        bindOf(7, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR),
+    }, m_giShadowHwDSL);
+    // gi_probe_hw.comp: SW bindings 0-5 + TLAS at 7 (6 intentionally unused).
+    ok = ok && makeDSL({
+        bindOf(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER),
+        bindOf(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER),
+        bindOf(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER),
+        bindOf(3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE),
+        bindOf(4, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE),
+        bindOf(5, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER),
+        bindOf(7, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR),
+    }, m_giProbeHwDSL);
+    if (!ok) { fail("GI HW descriptor layouts failed"); return; }
+
+    auto makePL = [&](VkDescriptorSetLayout dsl, VkPipelineLayout& out) -> bool
+    {
+        VkPipelineLayoutCreateInfo plci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+        plci.setLayoutCount = 1;
+        plci.pSetLayouts    = &dsl;
+        return vkCreatePipelineLayout(m_device, &plci, nullptr, &out) == VK_SUCCESS;
+    };
+    if (!makePL(m_giShadowHwDSL, m_giShadowHwPL) || !makePL(m_giProbeHwDSL, m_giProbeHwPL))
+    { fail("GI HW pipeline layouts failed"); return; }
+
+    VkShaderModule shadowCS = loadShaderModule("gi_shadow_hw.comp.spv");
+    VkShaderModule probeCS  = loadShaderModule("gi_probe_hw.comp.spv");
+    auto destroyModules = [&]()
+    {
+        if (shadowCS) vkDestroyShaderModule(m_device, shadowCS, nullptr);
+        if (probeCS)  vkDestroyShaderModule(m_device, probeCS, nullptr);
+    };
+    if (!shadowCS || !probeCS)
+    { destroyModules(); fail("GI HW shaders missing"); return; }
+    auto makeCompute = [&](VkShaderModule cs, VkPipelineLayout pl, VkPipeline& out) -> bool
+    {
+        VkComputePipelineCreateInfo cpi{ VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
+        cpi.stage.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        cpi.stage.stage  = VK_SHADER_STAGE_COMPUTE_BIT;
+        cpi.stage.module = cs;
+        cpi.stage.pName  = "main";
+        cpi.layout       = pl;
+        return vkCreateComputePipelines(m_device, VK_NULL_HANDLE, 1, &cpi, nullptr, &out) == VK_SUCCESS;
+    };
+    ok = makeCompute(shadowCS, m_giShadowHwPL, m_giShadowHwPipe)
+      && makeCompute(probeCS,  m_giProbeHwPL,  m_giProbeHwPipe);
+    destroyModules();
+    if (!ok) { fail("GI HW pipeline creation failed"); return; }
+
+    // Own pool: the SW pool has no ACCELERATION_STRUCTURE_KHR budget.
+    {
+        VkDescriptorPoolSize ps[5] = {
+            { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             k_maxFramesInFlight * 6 },
+            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     k_maxFramesInFlight * 2 },
+            { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              k_maxFramesInFlight * 3 },
+            { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,             k_maxFramesInFlight * 2 },
+            { VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, k_maxFramesInFlight * 2 },
+        };
+        VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+        dpci.maxSets       = k_maxFramesInFlight * 2;
+        dpci.poolSizeCount = 5;
+        dpci.pPoolSizes    = ps;
+        if (vkCreateDescriptorPool(m_device, &dpci, nullptr, &m_giHwDescPool) != VK_SUCCESS)
+        { fail("GI HW descriptor pool failed"); return; }
+        for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
+        {
+            VkDescriptorSetLayout layouts[2] = { m_giShadowHwDSL, m_giProbeHwDSL };
+            VkDescriptorSet sets[2]{};
+            VkDescriptorSetAllocateInfo dsai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+            dsai.descriptorPool     = m_giHwDescPool;
+            dsai.descriptorSetCount = 2;
+            dsai.pSetLayouts        = layouts;
+            if (vkAllocateDescriptorSets(m_device, &dsai, sets) != VK_SUCCESS)
+            { fail("GI HW descriptor sets failed"); return; }
+            m_giShadowHwSet[i] = sets[0];
+            m_giProbeHwSet[i]  = sets[1];
+        }
+    }
+    m_giHwPipesReady = true;
+    Logger::Log(Logger::LogLevel::Info,
+                "VulkanRenderer: GI HW ray-query kernels built (VK_KHR_ray_query)");
 }
 
 void VulkanRenderer::createGiTargets(uint32_t w, uint32_t h)
@@ -5780,6 +6401,10 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
     updateGiAccel();
     if (m_giInstanceCount == 0) return;
 
+    // HW ray tracing: record this frame's TLAS build (+ build→compute barrier)
+    // up front. false → software kernels this frame (BVH SSBOs are in place).
+    const bool useHw = buildGiTlas(cmd);
+
     const uint32_t gw = std::max(1u, w / 2), gh = std::max(1u, h / 2); // half-res like GL/Metal
     createGiTargets(gw, gh);
     if (!m_giGBufFB || !m_giResultFB) return;
@@ -5840,6 +6465,13 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
     }
 
     // ── Rewrite this frame slot's descriptor sets (fence already waited) ─────
+    // HW frames target the *_hw sets (same bindings + the TLAS at binding 7).
+    const VkDescriptorSet shadowSet = useHw ? m_giShadowHwSet[fi] : m_giShadowSet[fi];
+    const VkDescriptorSet probeSet  = useHw ? m_giProbeHwSet[fi]  : m_giProbeSet[fi];
+    VkWriteDescriptorSetAccelerationStructureKHR tlasWrite{
+        VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR };
+    tlasWrite.accelerationStructureCount = 1;
+    tlasWrite.pAccelerationStructures    = &m_giTlas[fi].as;
     {
         VkDescriptorBufferInfo nodesBI{ m_giNodeBuf.buf, 0, VK_WHOLE_SIZE };
         VkDescriptorBufferInfo trisBI { m_giTriBuf.buf,  0, VK_WHOLE_SIZE };
@@ -5863,14 +6495,23 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
             ww.descriptorType = t; ww.pImageInfo = ii;
             writes.push_back(ww);
         };
-        // Shadow kernel set.
-        wBuf(m_giShadowSet[fi], 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &nodesBI);
-        wBuf(m_giShadowSet[fi], 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &trisBI);
-        wBuf(m_giShadowSet[fi], 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &instBI);
-        wImg(m_giShadowSet[fi], 3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &posBI);
-        wImg(m_giShadowSet[fi], 4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &normBI);
-        wImg(m_giShadowSet[fi], 5, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &rawSI);
-        wBuf(m_giShadowSet[fi], 6, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &shUboBI);
+        auto wTlas = [&](VkDescriptorSet set, uint32_t b)
+        {
+            VkWriteDescriptorSet ww{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+            ww.pNext = &tlasWrite;
+            ww.dstSet = set; ww.dstBinding = b; ww.descriptorCount = 1;
+            ww.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+            writes.push_back(ww);
+        };
+        // Shadow kernel set (HW: + TLAS at binding 7).
+        wBuf(shadowSet, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &nodesBI);
+        wBuf(shadowSet, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &trisBI);
+        wBuf(shadowSet, 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &instBI);
+        wImg(shadowSet, 3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &posBI);
+        wImg(shadowSet, 4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &normBI);
+        wImg(shadowSet, 5, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &rawSI);
+        wBuf(shadowSet, 6, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &shUboBI);
+        if (useHw) wTlas(shadowSet, 7);
         // Temporal set: gPos, raw (GENERAL), history[prev], UBO.
         VkDescriptorImageInfo rawSamp{ VK_NULL_HANDLE, m_giRaw.view, VK_IMAGE_LAYOUT_GENERAL };
         VkDescriptorImageInfo histBI { VK_NULL_HANDLE, m_giHist[prevIdx].view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
@@ -5891,12 +6532,13 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
         VkDescriptorImageInfo  visSI { VK_NULL_HANDLE, m_giVisAtlas.view, VK_IMAGE_LAYOUT_GENERAL };
         if (probesActive)
         {
-            wBuf(m_giProbeSet[fi], 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &nodesBI);
-            wBuf(m_giProbeSet[fi], 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &trisBI);
-            wBuf(m_giProbeSet[fi], 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &instBI);
-            wImg(m_giProbeSet[fi], 3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &irrSI);
-            wImg(m_giProbeSet[fi], 4, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &visSI);
-            wBuf(m_giProbeSet[fi], 5, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &pUboBI);
+            wBuf(probeSet, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &nodesBI);
+            wBuf(probeSet, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &trisBI);
+            wBuf(probeSet, 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &instBI);
+            wImg(probeSet, 3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &irrSI);
+            wImg(probeSet, 4, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &visSI);
+            wBuf(probeSet, 5, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &pUboBI);
+            if (useHw) wTlas(probeSet, 7);
         }
         vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
     }
@@ -5935,10 +6577,12 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
     }
     vkCmdEndRenderPass(cmd); // colors → SHADER_READ_ONLY (dep covers COMPUTE too)
 
-    // ── 2. Shadow rays (compute) ─────────────────────────────────────────────
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_giShadowPipe);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_giShadowPL,
-                            0, 1, &m_giShadowSet[fi], 0, nullptr);
+    // ── 2. Shadow rays (compute; HW ray-query kernel when the TLAS is up) ───
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                      useHw ? m_giShadowHwPipe : m_giShadowPipe);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            useHw ? m_giShadowHwPL : m_giShadowPL,
+                            0, 1, &shadowSet, 0, nullptr);
     vkCmdDispatch(cmd, (gw + 7) / 8, (gh + 7) / 8, 1);
     // Raw mask: compute write → fragment read (temporal), GENERAL stays.
     {
@@ -5990,9 +6634,11 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
     // ── 5. Probe update (compute, frame-sliced round robin) ──────────────────
     if (probesActive && probeBudget > 0)
     {
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_giProbePipe);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_giProbePL,
-                                0, 1, &m_giProbeSet[fi], 0, nullptr);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                          useHw ? m_giProbeHwPipe : m_giProbePipe);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                useHw ? m_giProbeHwPL : m_giProbePL,
+                                0, 1, &probeSet, 0, nullptr);
         vkCmdDispatch(cmd, static_cast<uint32_t>(probeBudget), 1, 1);
         // Atlases: compute write → fragment read (scene) AND next dispatch's EMA read.
         VkImageMemoryBarrier bs[2]{};
