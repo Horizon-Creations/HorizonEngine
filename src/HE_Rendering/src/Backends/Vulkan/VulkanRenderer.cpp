@@ -222,6 +222,7 @@ void VulkanRenderer::Shutdown()
     // SSAO viewport-size targets (already freed by destroyViewportResources below,
     // but call explicitly in case viewport was never created).
     destroySSAOTargets();
+    destroyGiAccel();
     // SSAO pipeline-level resources (static, not viewport-size-dependent).
     if (m_ssaoPosGfxPipeline)   { vkDestroyPipeline      (m_device, m_ssaoPosGfxPipeline,   nullptr); m_ssaoPosGfxPipeline   = VK_NULL_HANDLE; }
     if (m_ssaoGfxPipeline)      { vkDestroyPipeline      (m_device, m_ssaoGfxPipeline,       nullptr); m_ssaoGfxPipeline      = VK_NULL_HANDLE; }
@@ -656,7 +657,19 @@ void VulkanRenderer::Render()
     m_currentFrame = (m_currentFrame + 1) % k_maxFramesInFlight;
 }
 
-IRenderer::Capabilities VulkanRenderer::GetCapabilities() const { return { true, m_postFxReady, false }; }
+IRenderer::Capabilities VulkanRenderer::GetCapabilities() const
+{
+    Capabilities c;
+    c.supportsShadows        = true;
+    c.supportsPostProcessing = m_postFxReady;
+    c.supportsHDR            = false;
+    c.supportsGpuParticles   = false;
+    // VK-A uploads the GI acceleration structures but nothing consumes them
+    // yet — the capability flips true with VK-B/C (shadow-ray + probe kernels
+    // + scene-shader integration), so the editor checkbox stays honest.
+    c.supportsGlobalIllumination = false;
+    return c;
+}
 
 void*    VulkanRenderer::GetInstance()       const { return static_cast<void*>(m_instance); }
 void*    VulkanRenderer::GetPhysicalDevice() const { return static_cast<void*>(m_physDevice); }
@@ -3277,6 +3290,16 @@ void VulkanRenderer::processPendingInvalidations()
             if (m.albedoMem)  vkFreeMemory(m_device, m.albedoMem, nullptr);
             m_meshCache.erase(it);
         }
+        // GI BLAS ranges live in concatenated arrays — no single-mesh splice, an
+        // edited mesh drops the whole cache (rebuilds lazily; same convention
+        // as the GL/Metal-SW ports).
+        if (m_giBlasCache.count(id))
+        {
+            m_giBlasCache.clear();
+            m_giNodesCpu.clear();
+            m_giTrisCpu.clear();
+            m_giBlasDirty = true;
+        }
         if (auto it = m_skeletalMeshCache.find(id); it != m_skeletalMeshCache.end())
         {
             GpuSkeletalMesh& m = it->second;
@@ -3379,6 +3402,10 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
     m_extractor.extract(*m_world, m_renderWorld,
                         static_cast<float>(width) / static_cast<float>(height),
                         &m_editorCamera);
+
+    // GI acceleration structures (Checkpoint VK-A): CPU BVH + SSBO upload from
+    // THIS extraction — inert until VK-B/C dispatch the compute kernels.
+    updateGiAccel();
 
     // Sky is independent of scene geometry — draw it before any early returns so it
     // always renders even when the scene is empty or fully culled (otherwise the
@@ -4844,6 +4871,154 @@ void VulkanRenderer::SetSSAOSettings(const SSAOSettings& s)
     m_ssaoRadius    = s.radius;
     m_ssaoIntensity = s.intensity;
     m_ssaoMethod    = s.method;
+}
+
+void VulkanRenderer::SetGISettings(const GISettings& s)
+{
+    m_giEnabled             = s.enabled;
+    m_giIndirectIntensity   = std::max(0.0f, s.indirectIntensity);
+    m_giLightRadius         = std::clamp(s.lightRadius, 0.0f, 10.0f);
+    m_giRaysPerProbe        = std::clamp(s.raysPerProbe, 8, 1024);
+    m_giProbeBudgetPerFrame = std::clamp(s.probeBudgetPerFrame, 1, 4096);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Global Illumination — software ray tracing, Checkpoint VK-A (accel only)
+// ─────────────────────────────────────────────────────────────────────────────
+// CPU-built HE::GiBvh (same module + unit tests as the GL 4.3 port and Metal's
+// SW fallback) uploaded into host-visible SSBOs; instances are a flat
+// per-in-flight-frame buffer (TLAS analogue: invTransform + baseColor + BLAS
+// offsets). The gi_shadow.comp/gi_probe.comp kernels consuming these land in
+// VK-B/C — until then this is inert (GI-off rendering byte-identical) and
+// GetCapabilities keeps supportsGlobalIllumination = false.
+
+VulkanRenderer::GiBlasRange VulkanRenderer::buildGiBlas(const HE::UUID& meshId)
+{
+    GiBlasRange range;
+    if (!m_contentManager) return range;
+    const StaticMeshAsset* asset = m_contentManager->getStaticMesh(meshId);
+    if (!asset || asset->indices.empty()) return range;
+
+    // Same two layouts the mesh upload path consumes: cooked interleaved
+    // 8-float (position at offset 0) or loose tightly-packed 3-float positions.
+    HE::GiBvh bvh;
+    if (asset->cooked && !asset->interleaved.empty())
+        bvh = HE::buildGiBvh(asset->interleaved.data(), asset->vertexCount, 8,
+                             asset->indices.data(), asset->indices.size());
+    else if (!asset->vertices.empty())
+        bvh = HE::buildGiBvh(asset->vertices.data(), asset->vertices.size() / 3, 3,
+                             asset->indices.data(), asset->indices.size());
+    if (!bvh.valid()) return range;
+
+    range.nodeOffset = static_cast<int32_t>(m_giNodesCpu.size());
+    range.triOffset  = static_cast<int32_t>(m_giTrisCpu.size());
+    range.valid      = true;
+    m_giNodesCpu.insert(m_giNodesCpu.end(), bvh.nodes.begin(), bvh.nodes.end());
+    m_giTrisCpu.insert(m_giTrisCpu.end(), bvh.triangles.begin(), bvh.triangles.end());
+    m_giBlasDirty = true;
+    return range;
+}
+
+bool VulkanRenderer::uploadGiBuffer(GiBuffer& b, const void* data, VkDeviceSize size)
+{
+    if (size == 0) return false;
+    if (b.size < size)
+    {
+        if (b.mapped) { vkUnmapMemory(m_device, b.mem); b.mapped = nullptr; }
+        if (b.buf)    { vkDestroyBuffer(m_device, b.buf, nullptr); b.buf = VK_NULL_HANDLE; }
+        if (b.mem)    { vkFreeMemory(m_device, b.mem, nullptr);    b.mem = VK_NULL_HANDLE; }
+        b.size = 0;
+
+        VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        bci.size  = size;
+        bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+        if (vkCreateBuffer(m_device, &bci, nullptr, &b.buf) != VK_SUCCESS) return false;
+        VkMemoryRequirements req{};
+        vkGetBufferMemoryRequirements(m_device, b.buf, &req);
+        VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        mai.allocationSize  = req.size;
+        mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if (vkAllocateMemory(m_device, &mai, nullptr, &b.mem) != VK_SUCCESS)
+        { vkDestroyBuffer(m_device, b.buf, nullptr); b.buf = VK_NULL_HANDLE; return false; }
+        vkBindBufferMemory(m_device, b.buf, b.mem, 0);
+        if (vkMapMemory(m_device, b.mem, 0, size, 0, &b.mapped) != VK_SUCCESS)
+        {
+            vkDestroyBuffer(m_device, b.buf, nullptr); b.buf = VK_NULL_HANDLE;
+            vkFreeMemory(m_device, b.mem, nullptr);    b.mem = VK_NULL_HANDLE;
+            return false;
+        }
+        b.size = size;
+    }
+    std::memcpy(b.mapped, data, static_cast<size_t>(size));
+    return true;
+}
+
+void VulkanRenderer::updateGiAccel()
+{
+    m_giInstanceCount = 0;
+    if (!m_giEnabled) return;
+
+    // Same caster filter as the shadow pass / the other backends' TLAS builds:
+    // castsShadow only, UNculled (rays go in arbitrary directions).
+    std::vector<GiInstanceGpu> instances;
+    instances.reserve(m_renderWorld.objects.size());
+    for (const RenderObject& obj : m_renderWorld.objects)
+    {
+        if (!obj.castsShadow) continue;
+        auto it = m_giBlasCache.find(obj.meshAssetId);
+        if (it == m_giBlasCache.end())
+            it = m_giBlasCache.emplace(obj.meshAssetId, buildGiBlas(obj.meshAssetId)).first;
+        if (!it->second.valid) continue;
+        GiInstanceGpu inst;
+        inst.invTransform = glm::inverse(obj.transform);
+        inst.baseColor    = glm::vec4(obj.baseColor, 1.0f);
+        inst.nodeOffset   = it->second.nodeOffset;
+        inst.triOffset    = it->second.triOffset;
+        instances.push_back(inst);
+    }
+    if (instances.empty()) return;
+
+    if (m_giBlasDirty && !m_giNodesCpu.empty())
+    {
+        // Node/tri concatenation only ever grows (new mesh joined). The buffers
+        // may still be read by an in-flight frame — but the appended layout
+        // keeps all existing offsets valid, and VK-A has no readers yet anyway;
+        // VK-B revisits this with a proper retire if growth-in-use shows up.
+        const bool nodesOk = uploadGiBuffer(m_giNodeBuf, m_giNodesCpu.data(),
+                                            m_giNodesCpu.size() * sizeof(HE::GiBvhNode));
+        const bool trisOk  = uploadGiBuffer(m_giTriBuf, m_giTrisCpu.data(),
+                                            m_giTrisCpu.size() * sizeof(HE::GiBvhTriangle));
+        if (!nodesOk || !trisOk) return;
+        m_giBlasDirty = false;
+    }
+    // Instances change every frame while earlier frames are in flight — ring
+    // slot per in-flight frame, same convention as the bones UBO ring.
+    static_assert(k_maxFramesInFlight <= sizeof(m_giInstanceBuf) / sizeof(m_giInstanceBuf[0]),
+                  "GI instance ring smaller than frames in flight");
+    if (!uploadGiBuffer(m_giInstanceBuf[m_currentFrame], instances.data(),
+                        instances.size() * sizeof(GiInstanceGpu)))
+        return;
+    m_giInstanceCount = static_cast<int>(instances.size());
+}
+
+void VulkanRenderer::destroyGiAccel()
+{
+    auto destroy = [&](GiBuffer& b)
+    {
+        if (b.mapped) { vkUnmapMemory(m_device, b.mem); b.mapped = nullptr; }
+        if (b.buf)    { vkDestroyBuffer(m_device, b.buf, nullptr); b.buf = VK_NULL_HANDLE; }
+        if (b.mem)    { vkFreeMemory(m_device, b.mem, nullptr);    b.mem = VK_NULL_HANDLE; }
+        b.size = 0;
+    };
+    destroy(m_giNodeBuf);
+    destroy(m_giTriBuf);
+    for (GiBuffer& b : m_giInstanceBuf) destroy(b);
+    m_giBlasCache.clear();
+    m_giNodesCpu.clear();
+    m_giTrisCpu.clear();
+    m_giInstanceCount = 0;
+    m_giBlasDirty     = false;
 }
 
 void VulkanRenderer::SetBloomSettings(const BloomSettings& s)
