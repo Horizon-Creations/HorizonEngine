@@ -1992,6 +1992,44 @@ void EditorApplication::dumpFrameHeadless()
 			Logger::Log(Logger::LogLevel::Info,
 				"EditorApplication: HE_DUMP_MATOCCLUDER slab + built-in control sphere added");
 		}
+
+		// Colour-bleed witness (HE_DUMP_GIBLEED=1|2): a tall cube RIGHT next to
+		// the test sphere — saturated red (1) vs neutral grey (2). With GI on,
+		// the multi-bounce probe feedback must tint the sphere's cube-facing
+		// side red in the "1" shot; the "2" shot is the geometry-identical
+		// control, so the A/B diff isolates pure bounce colour.
+		if (const char* bl = std::getenv("HE_DUMP_GIBLEED"); bl && *bl)
+		{
+			MaterialAsset wallMat;
+			wallMat.type = HE::AssetType::Material;
+			wallMat.name = "GIBleedWall";
+			const bool red = std::string(bl) != "2";
+			wallMat.baseColor[0] = red ? 1.0f : 0.5f;
+			wallMat.baseColor[1] = red ? 0.05f : 0.5f;
+			wallMat.baseColor[2] = red ? 0.05f : 0.5f;
+			const HE::UUID wallMatId = contentManager().registerMaterial(std::move(wallMat));
+			// A FLOOR slab, not a wall: at the noon sun of the standard capture a
+			// vertical wall's sphere-facing side has ndl≈0 — nothing to reflect.
+			// A fully sunlit red floor bounces onto the sphere's underside.
+			auto wall = m_editorWorld->createEntity("GIBleedWall");
+			TransformComponent wtc;
+			wtc.position = tc.position + glm::vec3(6.0f, -4.5f, 0.0f);
+			wtc.scale    = glm::vec3(12.0f, 0.5f, 12.0f);
+			reg.emplace<TransformComponent>(wall, wtc);
+			reg.emplace<MeshComponent>(wall, MeshComponent{ HE::kDefaultCubeMeshId });
+			reg.emplace<MaterialComponent>(wall, MaterialComponent{ wallMatId });
+			// Built-in receiver sphere BETWEEN graph sphere and wall — the graph
+			// sphere doesn't consume the probe field (heLitP has no DDGI), so the
+			// bleed must be read off a built-in-shaded surface.
+			auto rcv = m_editorWorld->createEntity("GIBleedReceiver");
+			TransformComponent rtc = tc;
+			rtc.position = tc.position + glm::vec3(6.0f, 0.0f, 0.0f);
+			reg.emplace<TransformComponent>(rcv, rtc);
+			reg.emplace<MeshComponent>(rcv, MeshComponent{ meshId });
+			Logger::Log(Logger::LogLevel::Info, red
+				? "EditorApplication: HE_DUMP_GIBLEED red wall added"
+				: "EditorApplication: HE_DUMP_GIBLEED grey control wall added");
+		}
 	}
 
 	pushEnvironment(0.0f); // scene environment from the World entity (no auto-advance)

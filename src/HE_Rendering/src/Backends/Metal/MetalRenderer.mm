@@ -1512,6 +1512,52 @@ static float3 octDecode(float2 e)
 
 constant int kGIProbeOctSize = 8; // must match MetalRenderer::kGIProbeOctSize
 
+// direction -> octahedral UV, inverse of octDecode (needed for the
+// multi-bounce field lookup below; matches kUnlitMSL's octEncode).
+static float2 octEncodeP(float3 n)
+{
+	float2 p = n.xy * (1.0 / (abs(n.x) + abs(n.y) + abs(n.z)));
+	float2 signP = float2(p.x >= 0.0 ? 1.0 : -1.0, p.y >= 0.0 ? 1.0 : -1.0);
+	return (n.z <= 0.0) ? ((1.0 - abs(p.yx)) * signP) : p;
+}
+
+// PREVIOUS-frame irradiance field at an arbitrary surface point: trilinear
+// over the 8 surrounding probes, point-read of each probe's octahedral tile
+// in the hit normal's direction. No Chebyshev here — this feeds the low-
+// frequency multi-bounce term, where leaking is dampened by albedo anyway.
+static float3 giSampleFieldIrradiance(texture2d<float, access::read_write> irradiance,
+                                      constant GIProbeParams& P, float3 pos, float3 n)
+{
+	const int gx = int(P.gridCounts.x), gy = int(P.gridCounts.y), gz = int(P.gridCounts.z);
+	if (gx <= 0 || gy <= 0 || gz <= 0) return float3(0.0);
+	const int probesPerRow = max(1, int(P.gridCounts.w));
+	const float spacing = max(P.gridOrigin.w, 1e-4);
+	const float3 gridSpace = (pos - P.gridOrigin.xyz) / spacing;
+	const float3 base  = floor(gridSpace);
+	const float3 fracP = gridSpace - base;
+	const float2 oct = octEncodeP(n) * 0.5 + 0.5;
+	const uint2 octTexel = uint2(clamp(oct * float(kGIProbeOctSize),
+	                                   0.0, float(kGIProbeOctSize) - 1.0));
+	float3 sum = float3(0.0);
+	float  sumW = 0.0;
+	for (int i = 0; i < 8; ++i)
+	{
+		const float3 offs = float3(float(i & 1), float((i >> 1) & 1), float((i >> 2) & 1));
+		const float3 cell = base + offs;
+		if (any(cell < 0.0) || cell.x >= float(gx) || cell.y >= float(gy) || cell.z >= float(gz))
+			continue;
+		const float3 tri = mix(1.0 - fracP, fracP, offs);
+		const float w = tri.x * tri.y * tri.z;
+		if (w <= 1e-5) continue;
+		const int probeIndex = int(cell.x) + int(cell.y) * gx + int(cell.z) * gx * gy;
+		const uint2 tile = uint2(uint((probeIndex % probesPerRow) * kGIProbeOctSize),
+		                         uint((probeIndex / probesPerRow) * kGIProbeOctSize));
+		sum  += irradiance.read(tile + octTexel).rgb * w;
+		sumW += w;
+	}
+	return sum / max(sumW, 1e-4);
+}
+
 kernel void giProbeUpdate(uint2 texel   [[thread_position_in_threadgroup]],
                           uint2 batchIdx [[threadgroup_position_in_grid]],
                           texture2d<float, access::read_write> irradiance [[texture(0)]],
@@ -1626,6 +1672,11 @@ kernel void giProbeUpdate(uint2 texel   [[thread_position_in_threadgroup]],
 				continue;
 			radiance += albedo * P.lightColorType[i].rgb * ndl2 * atten;
 		}
+		// Multi-bounce feedback (DDGI recursion): light already gathered in the
+		// probe field re-reflects off this surface — a red wall visibly bleeds
+		// red onto neighbouring geometry, and the series converges toward
+		// infinite bounces through the EMA. albedo < 1 keeps it stable.
+		radiance += albedo * giSampleFieldIrradiance(irradiance, P, hitPos, hitNormal);
 	}
 
 	const int probesPerRow = max(1, int(P.gridCounts.w));
@@ -1870,6 +1921,49 @@ static float3 octDecode(float2 e)
 }
 constant int kGIProbeOctSize = 8; // must match MetalRenderer::kGIProbeOctSize
 
+// direction -> octahedral UV + previous-frame field lookup for the
+// multi-bounce term — same helpers as the HW kernel (each embedded MSL
+// string compiles as its own library, no shared headers).
+static float2 octEncodeP(float3 n)
+{
+	float2 p = n.xy * (1.0 / (abs(n.x) + abs(n.y) + abs(n.z)));
+	float2 signP = float2(p.x >= 0.0 ? 1.0 : -1.0, p.y >= 0.0 ? 1.0 : -1.0);
+	return (n.z <= 0.0) ? ((1.0 - abs(p.yx)) * signP) : p;
+}
+
+static float3 giSampleFieldIrradiance(texture2d<float, access::read_write> irradiance,
+                                      constant GIProbeParams& P, float3 pos, float3 n)
+{
+	const int gx = int(P.gridCounts.x), gy = int(P.gridCounts.y), gz = int(P.gridCounts.z);
+	if (gx <= 0 || gy <= 0 || gz <= 0) return float3(0.0);
+	const int probesPerRow = max(1, int(P.gridCounts.w));
+	const float spacing = max(P.gridOrigin.w, 1e-4);
+	const float3 gridSpace = (pos - P.gridOrigin.xyz) / spacing;
+	const float3 base  = floor(gridSpace);
+	const float3 fracP = gridSpace - base;
+	const float2 oct = octEncodeP(n) * 0.5 + 0.5;
+	const uint2 octTexel = uint2(clamp(oct * float(kGIProbeOctSize),
+	                                   0.0, float(kGIProbeOctSize) - 1.0));
+	float3 sum = float3(0.0);
+	float  sumW = 0.0;
+	for (int i = 0; i < 8; ++i)
+	{
+		const float3 offs = float3(float(i & 1), float((i >> 1) & 1), float((i >> 2) & 1));
+		const float3 cell = base + offs;
+		if (any(cell < 0.0) || cell.x >= float(gx) || cell.y >= float(gy) || cell.z >= float(gz))
+			continue;
+		const float3 tri = mix(1.0 - fracP, fracP, offs);
+		const float w = tri.x * tri.y * tri.z;
+		if (w <= 1e-5) continue;
+		const int probeIndex = int(cell.x) + int(cell.y) * gx + int(cell.z) * gx * gy;
+		const uint2 tile = uint2(uint((probeIndex % probesPerRow) * kGIProbeOctSize),
+		                         uint((probeIndex / probesPerRow) * kGIProbeOctSize));
+		sum  += irradiance.read(tile + octTexel).rgb * w;
+		sumW += w;
+	}
+	return sum / max(sumW, 1e-4);
+}
+
 kernel void giProbeUpdateSw(uint2 texel   [[thread_position_in_threadgroup]],
                             uint2 batchIdx [[threadgroup_position_in_grid]],
                             texture2d<float, access::read_write> irradiance [[texture(0)]],
@@ -1942,6 +2036,8 @@ kernel void giProbeUpdateSw(uint2 texel   [[thread_position_in_threadgroup]],
 				continue;
 			radiance += albedo * P.lightColorType[i].rgb * ndl2 * atten;
 		}
+		// Multi-bounce feedback (DDGI recursion) — see the HW kernel.
+		radiance += albedo * giSampleFieldIrradiance(irradiance, P, hitPos, hitNormal);
 	}
 
 	const int probesPerRow = max(1, int(P.gridCounts.w));
