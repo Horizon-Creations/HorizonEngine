@@ -42,6 +42,10 @@ public:
         float lightColor[8][4]  = {}; // rgb = colour,           w = intensity
         float lightParams[8][4] = {}; // x = range
         float counts[4]         = {}; // x = light count
+        // Screen-space GI shadow inputs for heLitP(): xy = viewport size,
+        // z = 1 when the GI masks are bound and valid this frame (0 → heLitP
+        // skips the mask samples entirely; UI/preview passes leave this 0).
+        float giParams[4]       = {};
     };
     static constexpr int kMetalLightingBufferIndex = 1; // fragment [[buffer(1)]]
 
