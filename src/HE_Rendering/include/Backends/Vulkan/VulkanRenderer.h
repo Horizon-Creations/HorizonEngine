@@ -8,6 +8,7 @@
 #include <HorizonRendering/RenderSorter.h>
 #include <HorizonRendering/RenderGraph.h>
 #include <HorizonRendering/CommandBuffer.h>
+#include <HorizonRendering/GiBvh.h>
 #include <Math/AABB.h>
 #include <Types/UUID.h>
 #include <material/MaterialShaderLibrary.h> // A4: shared cross-backend material shader layer
@@ -48,6 +49,7 @@ public:
 	void SetMoonTexture(const void* rgba8Pixels, int width, int height) override;
 	void SetSSAOSettings(const SSAOSettings& s) override;
 	void SetBloomSettings(const BloomSettings& s) override;
+	void SetGISettings(const GISettings& s) override;
 
 	// Editor material/mesh hot-reload: drop the cached override-material texture / mesh GPU
 	// state so the next frame re-resolves it from the ContentManager (mirrors GL/Metal).
@@ -548,6 +550,55 @@ private:
 	float    m_ssaoIntensity= 1.5f;
 	int      m_ssaoMethod   = 0;
 	uint32_t m_ssaoW = 0, m_ssaoH = 0;
+
+	// ── Global Illumination (software ray tracing, Checkpoint VK-A) ──────────
+	// The CPU-built HE::GiBvh (same module + unit tests as the GL 4.3 port and
+	// Metal's SW fallback) in SSBOs + a flat per-frame instance buffer (TLAS
+	// analogue). The gi_shadow.comp/gi_probe.comp kernels that traverse these
+	// land in VK-B/C — VK-A uploads only (inert, GI-off rendering unchanged),
+	// which is why GetCapabilities still reports supportsGlobalIllumination
+	// = false: flipping it on is the LAST step, once the full pipeline exists.
+	// Compute is core Vulkan, so no extension/feature gate is needed.
+	struct GiBlasRange
+	{
+		int32_t nodeOffset = 0, triOffset = 0;
+		bool    valid      = false;
+	};
+	struct GiInstanceGpu // must match gi_shadow.comp/gi_probe.comp's GiInst (std430, 96 bytes)
+	{
+		glm::mat4 invTransform{1.0f};
+		glm::vec4 baseColor{1.0f};
+		int32_t   nodeOffset = 0, triOffset = 0, pad0 = 0, pad1 = 0;
+	};
+	struct GiBuffer // host-visible, persistently mapped
+	{
+		VkBuffer       buf    = VK_NULL_HANDLE;
+		VkDeviceMemory mem    = VK_NULL_HANDLE;
+		void*          mapped = nullptr;
+		VkDeviceSize   size   = 0;
+	};
+	GiBlasRange  buildGiBlas(const HE::UUID& meshId);
+	void         updateGiAccel();  // lazy BLAS append + per-frame instance upload
+	void         destroyGiAccel();
+	// (Re)creates a host-visible STORAGE_BUFFER of at least `size` bytes and
+	// memcpys `data` into it. Grows by recreation; never shrinks.
+	bool         uploadGiBuffer(GiBuffer& b, const void* data, VkDeviceSize size);
+	std::unordered_map<HE::UUID, GiBlasRange> m_giBlasCache;
+	std::vector<HE::GiBvhNode>     m_giNodesCpu;
+	std::vector<HE::GiBvhTriangle> m_giTrisCpu;
+	bool     m_giBlasDirty = false;
+	GiBuffer m_giNodeBuf;
+	GiBuffer m_giTriBuf;
+	// Instance data changes every frame while earlier frames may still be in
+	// flight — one buffer per in-flight frame, same ring convention as the
+	// bones UBO ring.
+	GiBuffer m_giInstanceBuf[3]; // k_maxFramesInFlight (static_assert at use site)
+	int      m_giInstanceCount = 0;
+	bool     m_giEnabled            = false;
+	float    m_giIndirectIntensity  = 1.0f;
+	float    m_giLightRadius        = 0.5f;
+	int      m_giRaysPerProbe        = 128;
+	int      m_giProbeBudgetPerFrame = 256;
 
 	// ── GPU skeletal-mesh skinning ───────────────────────────────────────────
 	// Each skeletal mesh uploaded to the GPU gets three vertex buffers:
