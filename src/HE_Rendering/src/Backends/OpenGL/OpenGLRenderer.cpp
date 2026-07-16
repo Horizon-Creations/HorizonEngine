@@ -2909,12 +2909,16 @@ void main()
 	ivec2 outCoord = ivec2((probeIndex % probesPerRow) * kOctSize + texel.x,
 	                       (probeIndex / probesPerRow) * kOctSize + texel.y);
 
-	float hysteresis = clamp(uRayParams.y, 0.0, 0.98);
+	// Adaptive hysteresis (see the Metal kernels): deterministic gather rays →
+	// deltas are real scene changes; converge fast on change, stay smooth else.
+	float baseH = clamp(uRayParams.y, 0.0, 0.98);
 	vec4 oldIrr = imageLoad(uIrr, outCoord);
-	imageStore(uIrr, outCoord, vec4(mix(radiance, oldIrr.rgb, hysteresis), 1.0));
+	float hIrr = mix(baseH, 0.3, clamp(length(radiance - oldIrr.rgb) * 4.0, 0.0, 1.0));
+	imageStore(uIrr, outCoord, vec4(mix(radiance, oldIrr.rgb, hIrr), 1.0));
 	vec4 oldVis = imageLoad(uVis, outCoord);
 	vec2 newVisSample = vec2(dist, dist * dist);
-	imageStore(uVis, outCoord, vec4(mix(newVisSample, oldVis.rg, hysteresis), 0.0, 0.0));
+	float hVis = mix(baseH, 0.3, clamp(abs(dist - oldVis.x) / max(uGridOrigin.w, 1.0), 0.0, 1.0));
+	imageStore(uVis, outCoord, vec4(mix(newVisSample, oldVis.rg, hVis), 0.0, 0.0));
 }
 )GLSL";
 
