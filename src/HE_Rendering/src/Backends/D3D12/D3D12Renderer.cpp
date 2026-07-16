@@ -10,6 +10,8 @@
 #include <HorizonRendering/CommandBuffer.h>
 #include <Math/AABB.h>
 #include <Types/UUID.h>
+#include <HorizonRendering/GiBvh.h>          // GI: CPU BLAS (shared with GL/D3D11/Vulkan/Metal-SW)
+#include <ContentManager/DefaultAssets.h>    // GI: default-cube occluder fallback
 #include <material/MaterialShaderLibrary.h> // A4: shared cross-backend material shader layer (unguarded, like Vulkan/GL)
 #include <SDL3/SDL.h>
 #include <d3d12.h>
@@ -20,6 +22,7 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <algorithm>
+#include <cmath>       // GI: std::ceil in the probe-grid fit
 #include <stdexcept>
 #include <unordered_map>
 #include <vector>
@@ -493,13 +496,90 @@ cbuffer PerFrame : register(b1)
     float4   uSunDir;    // xyz = sun direction
     float4   uFog;       // x=fogDensity, y=fogHeightFalloff
     float4   uViewport;  // x=W, y=H, z=ssaoEnabled
+    float4   uGIParams;     // x = GI enabled (0/1), y = indirect intensity
+    float4   uGIGridOrigin; // xyz = probe grid origin, w = spacing
+    float4   uGIGridCounts; // xyz = probe counts, w = probesPerRow
 };
 Texture2D    uShadowMap : register(t0);
 Texture2D    uAlbedo    : register(t1); // base-color texture (bound per draw; null when untextured)
 Texture2D    uAO        : register(t2);
+Texture2D    uGIShadow  : register(t4); // half-res ray-traced sun-shadow mask
+Texture2D    uGIIrr     : register(t5); // DDGI irradiance atlas (RGBA16F)
+Texture2D    uGIVis     : register(t6); // DDGI visibility atlas (RG16F)
 SamplerState uShadowSamp : register(s0);
 SamplerState uAOSampler  : register(s1);
 SamplerState uAlbedoSamp : register(s2); // linear + wrap, for tiling base-color textures
+SamplerState uGISampler  : register(s3); // linear + clamp (mask upsample + probe atlases)
+
+// Signed-octahedral mapping (direction -> texel UV) — must match the probe
+// kernel's octDecode and the GL/Metal/D3D11 implementations byte-for-byte.
+float2 giOctEncode(float3 n)
+{
+    float2 p = n.xy * (1.0 / (abs(n.x) + abs(n.y) + abs(n.z)));
+    float2 signP = float2(p.x >= 0.0 ? 1.0 : -1.0, p.y >= 0.0 ? 1.0 : -1.0);
+    return (n.z <= 0.0) ? ((1.0 - abs(p.yx)) * signP) : p;
+}
+
+static const int GI_PROBE_OCT = 8; // must match the host's kGiProbeOctSize
+
+// DDGI probe sampling — trilinear over the 8 surrounding probes x soft
+// backface x Chebyshev visibility. Direct port of the GL/D3D11 version.
+float3 sampleDDGIIrradiance(float3 P, float3 N)
+{
+    int gx = int(uGIGridCounts.x), gy = int(uGIGridCounts.y), gz = int(uGIGridCounts.z);
+    if (gx <= 0 || gy <= 0 || gz <= 0) return float3(0, 0, 0);
+    int probesPerRow = max(1, int(uGIGridCounts.w));
+    int probeRows    = int(ceil(float(gx * gy * gz) / float(probesPerRow)));
+    float2 atlasSizeTexels = float2(probesPerRow, probeRows) * float(GI_PROBE_OCT);
+    float spacing = max(uGIGridOrigin.w, 1e-4);
+
+    float3 gridSpace = (P - uGIGridOrigin.xyz) / spacing;
+    float3 base      = floor(gridSpace);
+    float3 fracP     = gridSpace - base;
+
+    float3 sumColor  = float3(0, 0, 0);
+    float  sumWeight = 0.0;
+    for (int i = 0; i < 8; ++i)
+    {
+        float3 offs = float3(i & 1, (i >> 1) & 1, (i >> 2) & 1);
+        float3 cell = base + offs;
+        if (any(cell < 0.0) || cell.x >= float(gx) || cell.y >= float(gy) || cell.z >= float(gz))
+            continue;
+        int probeIndex = int(cell.x) + int(cell.y) * gx + int(cell.z) * gx * gy;
+
+        float3 trilinear = lerp(1.0 - fracP, fracP, offs);
+        float weight = trilinear.x * trilinear.y * trilinear.z;
+        if (weight <= 1e-5) continue;
+
+        float3 probePos   = uGIGridOrigin.xyz + cell * spacing;
+        float3 toProbe    = probePos - P;
+        float  dist       = max(length(toProbe), 1e-4);
+        float3 dirToProbe = toProbe / dist;
+
+        weight *= max(0.05, dot(N, dirToProbe) * 0.5 + 0.5);
+
+        float2 tileOrigin = float2(probeIndex % probesPerRow,
+                                   probeIndex / probesPerRow) * float(GI_PROBE_OCT);
+
+        float2 visUV = (tileOrigin + (giOctEncode(-dirToProbe) * 0.5 + 0.5) * float(GI_PROBE_OCT)) / atlasSizeTexels;
+        float2 visSample = uGIVis.SampleLevel(uGISampler, visUV, 0).rg;
+        float mean = visSample.x, mean2 = visSample.y;
+        float variance = abs(mean2 - mean * mean);
+        float chebyshev = 1.0;
+        if (dist > mean)
+        {
+            float dd = dist - mean;
+            chebyshev = variance / (variance + dd * dd);
+            chebyshev = chebyshev * chebyshev * chebyshev;
+        }
+        weight *= max(chebyshev, 0.05);
+
+        float2 irrUV = (tileOrigin + (giOctEncode(N) * 0.5 + 0.5) * float(GI_PROBE_OCT)) / atlasSizeTexels;
+        sumColor  += uGIIrr.SampleLevel(uGISampler, irrUV, 0).rgb * weight;
+        sumWeight += weight;
+    }
+    return sumColor / max(sumWeight, 1e-4);
+}
 
 struct VSIn  { float3 pos : POSITION; float3 normal : NORMAL; float2 uv : TEXCOORD0; };
 struct VSOut { float4 clip : SV_POSITION; float3 worldPos : TEXCOORD0; float3 normal : TEXCOORD1; float2 uv : TEXCOORD2; };
@@ -585,7 +665,14 @@ float4 PSMain(VSOut i) : SV_TARGET
     float3 ambDiff = skyColor(Nup,    uSunDir.xyz) * base * kd;
     float3 ambSpec = skyColor(Rrough, uSunDir.xyz) * F0;
     float  ao      = (uViewport.z > 0.5f) ? uAO.SampleLevel(uAOSampler, i.clip.xy / uViewport.xy, 0).r : 1.0f;
-    float3 result  = ao * (ambDiff * 0.35f + ambSpec * (1.0f - 0.6f * rough));
+    // GI replaces the AO-gated IBL diffuse with probe-grid indirect (spec IBL
+    // stays in both branches) — mirrors the GL/Metal/D3D11 gi.enabled branch.
+    float3 result;
+    if (uGIParams.x > 0.5f)
+        result = sampleDDGIIrradiance(i.worldPos, N) * base * kd * uGIParams.y
+               + ambSpec * (1.0f - 0.6f * rough);
+    else
+        result = ao * (ambDiff * 0.35f + ambSpec * (1.0f - 0.6f * rough));
     for (int li = 0; li < uLightCount.x; ++li)
     {
         int type = (int)uLightPos[li].w;
@@ -605,7 +692,13 @@ float4 PSMain(VSOut i) : SV_TARGET
                 atten *= smoothstep(cosCone, lerp(cosCone, 1.0, 0.2), c);
             }
         }
-        float sh = (type == 0) ? shadowFactor(i.worldPos, N, L) : 1.0;
+        // Directional lights: ray-traced screen-space mask when GI is on
+        // (replaces the single shadow map entirely), else the classic lookup.
+        float sh = 1.0;
+        if (type == 0)
+            sh = (uGIParams.x > 0.5f)
+               ? uGIShadow.SampleLevel(uGISampler, i.clip.xy / uViewport.xy, 0).r
+               : shadowFactor(i.worldPos, N, L);
         result += BRDF12(L, V, N, base, met, rough) * uLightColor[li].rgb * uLightColor[li].w * atten * sh;
     }
     if (uFog.x > 0.0f) {
@@ -896,6 +989,386 @@ float4 SSAOBlurMain(FsIn i) : SV_TARGET
 }
 )HLSL";
 
+// ─── Ray-traced GI (software BVH) HLSL ──────────────────────────────────────
+// D3D12 port of the D3D11 compute GI (kGi* in D3D11Renderer.cpp, CI-green on
+// 3a91a80), which mirrors the GL-4.3 and Metal references. Shader strings are
+// byte-identical to the D3D11 port (SM 5.0 HLSL); only the host binding model
+// differs: giNodes/giTris/giInsts arrive as ROOT SRVs (t2/t3/t4), the textures
+// and UAVs live in a dedicated shader-visible GI descriptor heap.
+
+// World-space G-buffer pre-pass (position + normal MRT). CRITICAL: rendered
+// with the SAME extraction/camera as the scene pass (Metal lesson 5846efc) or
+// the screen-space mask misaligns and shadows swim with camera rotation.
+// Reuses the PerObject cbuffer layout so the shared per-object ring feeds it.
+static const char* kGiGBufHLSL12 = R"HLSL(
+cbuffer PerObject : register(b0)
+{
+    float4x4 uMVP;
+    float4x4 uModel;
+    float4   uColor;
+    float4   uPBR;
+};
+struct VSIn  { float3 pos : POSITION; float3 normal : NORMAL; float2 uv : TEXCOORD0; };
+struct VSOut { float4 clip : SV_POSITION; float3 worldPos : TEXCOORD0; float3 normal : TEXCOORD1; };
+VSOut GiGBufVS(VSIn i)
+{
+    VSOut o;
+    o.worldPos = mul(uModel, float4(i.pos, 1.0)).xyz;
+    o.normal   = mul((float3x3)uModel, i.normal);
+    o.clip     = mul(uMVP, float4(i.pos, 1.0));
+    return o;
+}
+struct GiGBufOut { float4 pos : SV_Target0; float4 norm : SV_Target1; };
+GiGBufOut GiGBufPS(VSOut i)
+{
+    GiGBufOut o;
+    o.pos  = float4(i.worldPos, 1.0);          // a = 1 -> valid geometry
+    o.norm = float4(normalize(i.normal), 0.0);
+    return o;
+}
+)HLSL";
+
+// Shared BVH declarations + traversal, string-prepended into both compute
+// kernels. Same data layout as the GL/Vulkan SSBOs: 32B nodes (int bits in
+// .w lanes, read via asint), 48B triangles, instances = inverse transform +
+// baseColor + BLAS offsets. glm writes column-major bytes and D3DCompile
+// defaults to column_major, so float4x4 in the structured buffer needs no
+// transpose (the A3 instancing buffer relies on the same fact).
+static const char* kGiTraversalHLSL12 = R"HLSL(
+struct GiNode { float4 d0; float4 d1; }; // d0.xyz bmin, d0.w leftFirst (int bits), d1.xyz bmax, d1.w triCount (int bits)
+struct GiTri  { float4 v0; float4 v1; float4 v2; };
+struct GiInst { float4x4 invTransform; float4 baseColor; int4 offsets; }; // offsets.x = nodeOffset, .y = triOffset
+StructuredBuffer<GiNode> giNodes : register(t2);
+StructuredBuffer<GiTri>  giTris  : register(t3);
+StructuredBuffer<GiInst> giInsts : register(t4);
+cbuffer GiCountCB : register(b1) { int4 uGiCount; }; // x = instance count
+
+// Moeller-Trumbore, both faces — mirrors GiBvh.cpp's triHit().
+bool giTriHit(GiTri tri, float3 o, float3 d, float tMin, float tMax, out float tOut)
+{
+    tOut = 0.0;
+    float3 e1 = tri.v1.xyz - tri.v0.xyz;
+    float3 e2 = tri.v2.xyz - tri.v0.xyz;
+    float3 p  = cross(d, e2);
+    float det = dot(e1, p);
+    if (abs(det) < 1e-9) return false;
+    float invDet = 1.0 / det;
+    float3 s = o - tri.v0.xyz;
+    float u = dot(s, p) * invDet;
+    if (u < 0.0 || u > 1.0) return false;
+    float3 q = cross(s, e1);
+    float v = dot(d, q) * invDet;
+    if (v < 0.0 || u + v > 1.0) return false;
+    float t = dot(e2, q) * invDet;
+    if (t <= tMin || t >= tMax) return false;
+    tOut = t;
+    return true;
+}
+
+// BLAS traversal (one instance), object-space ray — mirrors giBvhIntersect().
+bool giBlasHit(int nodeOfs, int triOfs, float3 o, float3 d, float tMin, float tMax,
+               bool anyHit, out float tOut)
+{
+    tOut = tMax;
+    float3 invD = 1.0 / d;
+    int stack[64];
+    int sp = 0;
+    stack[sp++] = nodeOfs;
+    bool hit = false;
+    float best = tMax;
+    while (sp > 0)
+    {
+        GiNode n = giNodes[stack[--sp]];
+        float3 t0 = (n.d0.xyz - o) * invD;
+        float3 t1 = (n.d1.xyz - o) * invD;
+        float3 lo = min(t0, t1);
+        float3 hi = max(t0, t1);
+        float tN = max(max(lo.x, lo.y), max(lo.z, tMin));
+        float tF = min(min(hi.x, hi.y), min(hi.z, best));
+        if (tN > tF) continue;
+        int leftFirst = asint(n.d0.w);
+        int triCount  = asint(n.d1.w);
+        if (triCount > 0)
+        {
+            for (int i = 0; i < triCount; ++i)
+            {
+                float t;
+                if (giTriHit(giTris[triOfs + leftFirst + i], o, d, tMin, best, t))
+                {
+                    hit = true; best = t; tOut = t;
+                    if (anyHit) return true;
+                }
+            }
+        }
+        else if (sp + 2 <= 64)
+        {
+            stack[sp++] = nodeOfs + leftFirst;
+            stack[sp++] = nodeOfs + leftFirst + 1;
+        }
+    }
+    return hit;
+}
+
+// TLAS analogue: linear instance loop; unnormalised object-space direction
+// keeps the parametric t world-comparable across instances.
+bool giSceneAnyHit(float3 o, float3 d, float tMin, float tMax)
+{
+    for (int i = 0; i < uGiCount.x; ++i)
+    {
+        float3 oL = mul(giInsts[i].invTransform, float4(o, 1.0)).xyz;
+        float3 dL = mul((float3x3)giInsts[i].invTransform, d);
+        float t;
+        if (giBlasHit(giInsts[i].offsets.x, giInsts[i].offsets.y, oL, dL, tMin, tMax, true, t))
+            return true;
+    }
+    return false;
+}
+
+// Closest hit across all instances; returns instance index (-1 = miss).
+int giSceneClosestHit(float3 o, float3 d, float tMin, float tMax, out float tOut)
+{
+    int   bestInst = -1;
+    float best     = tMax;
+    for (int i = 0; i < uGiCount.x; ++i)
+    {
+        float3 oL = mul(giInsts[i].invTransform, float4(o, 1.0)).xyz;
+        float3 dL = mul((float3x3)giInsts[i].invTransform, d);
+        float t;
+        if (giBlasHit(giInsts[i].offsets.x, giInsts[i].offsets.y, oL, dL, tMin, best, false, t))
+        {
+            best = t; bestInst = i;
+        }
+    }
+    tOut = best;
+    return bestInst;
+}
+)HLSL";
+
+// Shadow-ray kernel: 1 cone-jittered ray/pixel toward the dominant directional
+// light (NEVER the sky-dome sun — Metal lesson 5e45643). Same hash/cone/bias
+// constants as the GL/Metal/D3D11 kernels.
+static const char* kGiShadowCSHLSL12 = R"HLSL(
+cbuffer GiShadowCB : register(b0)
+{
+    float4 uSunDirRadius; // xyz = direction TOWARD the light, w = angular radius (radians)
+    float4 uFrame;        // x = jitter seed, y = tex width, z = tex height
+};
+Texture2D<float4>   uGPos  : register(t0);
+Texture2D<float4>   uGNorm : register(t1);
+RWTexture2D<float>  uOut   : register(u0);
+
+float2 giHash2(uint2 gid, float seed)
+{
+    float2 p = float2(gid) + seed * 13.37;
+    return float2(frac(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453),
+                  frac(sin(dot(p, float2(39.3468, 11.1352))) * 24634.6345));
+}
+float3 giConeSample(float3 L, float angleRad, float2 xi)
+{
+    float3 up = (abs(L.y) < 0.99) ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
+    float3 T  = normalize(cross(up, L));
+    float3 B  = cross(L, T);
+    float r   = sin(angleRad) * sqrt(xi.x);
+    float phi = 6.28318530718 * xi.y;
+    return normalize(L + T * (r * cos(phi)) + B * (r * sin(phi)));
+}
+
+[numthreads(8, 8, 1)]
+void GiShadowCS(uint3 gid : SV_DispatchThreadID)
+{
+    if (float(gid.x) >= uFrame.y || float(gid.y) >= uFrame.z) return;
+    float4 pv = uGPos.Load(int3(gid.xy, 0));
+    if (pv.a < 0.5) { uOut[gid.xy] = 1.0; return; } // background
+    float3 N = normalize(uGNorm.Load(int3(gid.xy, 0)).xyz);
+    float3 L = uSunDirRadius.xyz;
+    if (dot(N, L) <= 0.0) { uOut[gid.xy] = 0.0; return; }
+
+    float2 xi  = giHash2(gid.xy, uFrame.x);
+    float3 dir = giConeSample(L, max(uSunDirRadius.w, 1e-4), xi);
+    // Same self-intersection guards as Metal: normal-offset origin + min t.
+    float3 origin = pv.xyz + N * 0.05;
+    uOut[gid.xy] = giSceneAnyHit(origin, dir, 0.02, 10000.0) ? 0.0 : 1.0;
+}
+)HLSL";
+
+// Temporal accumulation: reproject via last frame's viewProj; history carries
+// world position (rgb) + shadow scalar (a). Tolerance deliberately TIGHT
+// (Metal lesson 58ee312). D3D NDC -> UV includes the y-flip (unlike GL).
+static const char* kGiTemporalHLSL12 = R"HLSL(
+Texture2D    uGPos    : register(t0);
+Texture2D    uRaw     : register(t1);
+Texture2D    uHistory : register(t2);
+SamplerState uPointSamp : register(s0);
+cbuffer GiTemporalCB : register(b0)
+{
+    float4x4 uPrevViewProj;
+    float4   uParams; // x = blend (0 on first GI frame), y = tex width, z = tex height
+};
+struct In { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
+float4 main(In i) : SV_Target
+{
+    float4 pv   = uGPos.Sample(uPointSamp, i.uv);
+    float  rawV = uRaw.Sample(uPointSamp, i.uv).r;
+    if (pv.a < 0.5) return float4(0.0, 0.0, 0.0, rawV);
+
+    float4 clip = mul(uPrevViewProj, float4(pv.xyz, 1.0));
+    if (clip.w <= 0.0) return float4(pv.xyz, rawV);
+    float2 ndc    = clip.xy / clip.w;
+    float2 prevUV = float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    if (any(prevUV < 0.0) || any(prevUV > 1.0)) return float4(pv.xyz, rawV);
+
+    float4 hist      = uHistory.Sample(uPointSamp, prevUV);
+    float  posError  = length(pv.xyz - hist.rgb);
+    float  tolerance = clamp(0.02 * clip.w, 0.01, 0.06);
+    float  w = (posError < tolerance) ? clamp(uParams.x, 0.0, 0.98) : 0.0;
+    // Neighbourhood clamp: guards OCCLUDER motion (the position check above
+    // only covers receiver/camera motion).
+    float2 texel = 1.0 / uParams.yz;
+    float nMin = rawV, nMax = rawV;
+    [unroll] for (int x = -1; x <= 1; ++x)
+        [unroll] for (int y = -1; y <= 1; ++y)
+        {
+            float r = uRaw.Sample(uPointSamp, i.uv + float2(x, y) * texel).r;
+            nMin = min(nMin, r);
+            nMax = max(nMax, r);
+        }
+    return float4(pv.xyz, lerp(rawV, clamp(hist.a, nMin, nMax), w));
+}
+)HLSL";
+
+// 3x3 spatial blur of the accumulated shadow scalar -> the mask the scene
+// shader samples (R16F, linear = free bilinear upsample to full res).
+static const char* kGiBlurHLSL12 = R"HLSL(
+Texture2D    uSrc : register(t0); // temporal history: rgb = world pos, a = shadow
+SamplerState uPointSamp : register(s0);
+cbuffer GiBlurCB : register(b0) { float4 uTexel; }; // xy = 1/size
+struct In { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
+float4 main(In i) : SV_Target
+{
+    float sum = 0.0;
+    [unroll] for (int x = -1; x <= 1; ++x)
+        [unroll] for (int y = -1; y <= 1; ++y)
+            sum += uSrc.Sample(uPointSamp, i.uv + float2(x, y) * uTexel.xy).a;
+    return float4(sum / 9.0, 0.0, 0.0, 1.0);
+}
+)HLSL";
+
+// DDGI probe update — gather formulation (one thread per octahedral texel, no
+// atomics), one threadgroup per probe in the frame's round-robin batch.
+// Like D3D11: typed UAV loads of RGBA16F/RG16F are optional on D3D12 too, so
+// the previous atlas values arrive as SRV COPIES (t5/t6, refreshed by
+// CopyResource before the dispatch) instead of typed loads on the UAV.
+static const char* kGiProbeCSHLSL12 = R"HLSL(
+cbuffer GiProbeCB : register(b0)
+{
+    float4 uGridOrigin;   // xyz = grid origin, w = spacing
+    float4 uGridCounts;   // xyz = probe counts, w = probesPerRow
+    float4 uRayParams;    // x = max dist, y = hysteresis, z = cursor start, w = probes this batch
+    float4 uSunDirRadius; // xyz = direction TOWARD the light, w = local light count
+    float4 uSunColor;     // rgb = colour * intensity
+    float4 uSkyAmbient;   // rgb = miss colour
+    float4 uLightPosRange[8];  // xyz pos, w range
+    float4 uLightColorType[8]; // rgb colour*intensity, w type (1 point, 2 spot)
+    float4 uLightDirCos[8];    // xyz spot travel dir, w cos(half angle)
+};
+Texture2D<float4>    uIrrPrev : register(t5);
+Texture2D<float2>    uVisPrev : register(t6);
+RWTexture2D<float4>  uIrr     : register(u0);
+RWTexture2D<float2>  uVis     : register(u1);
+
+static const int kOctSize = 8; // must match the host's kGiProbeOctSize
+
+float3 octDecode(float2 e)
+{
+    float3 n = float3(e.xy, 1.0 - abs(e.x) - abs(e.y));
+    if (n.z < 0.0)
+    {
+        float2 signN = float2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+        n.xy = (1.0 - abs(n.yx)) * signN;
+    }
+    return normalize(n);
+}
+
+[numthreads(8, 8, 1)]
+void GiProbeCS(uint3 gtid : SV_GroupThreadID, uint3 groupId : SV_GroupID)
+{
+    int2 texel    = int2(gtid.xy);
+    int  batchIdx = int(groupId.x);
+    int gx = int(uGridCounts.x), gy = int(uGridCounts.y), gz = int(uGridCounts.z);
+    int probeCount = gx * gy * gz;
+    if (probeCount <= 0 || batchIdx >= int(uRayParams.w)) return;
+    int probeIndex = (int(uRayParams.z) + batchIdx) % probeCount;
+
+    int pz = probeIndex / (gx * gy);
+    int py = (probeIndex / gx) % gy;
+    int px = probeIndex % gx;
+    float3 probePos = uGridOrigin.xyz + float3(px, py, pz) * uGridOrigin.w;
+
+    float2 uv  = (float2(texel) + 0.5) / float(kOctSize) * 2.0 - 1.0;
+    float3 dir = octDecode(uv);
+
+    float dist;
+    int hitInst = giSceneClosestHit(probePos, dir, 0.01, max(uRayParams.x, 1.0), dist);
+
+    float3 radiance;
+    if (hitInst < 0)
+    {
+        radiance = uSkyAmbient.rgb;
+        dist     = uRayParams.x;
+    }
+    else
+    {
+        float3 albedo    = giInsts[hitInst].baseColor.rgb;
+        float3 hitNormal = -dir;
+        float3 hitPos    = probePos + dir * dist;
+        float ndl = max(dot(hitNormal, uSunDirRadius.xyz), 0.0);
+        // Secondary shadow ray — hit surfaces are NOT assumed fully sun-lit
+        // (otherwise probes flood shadowed regions with bright sun bounce).
+        if (ndl > 0.0 && giSceneAnyHit(hitPos + hitNormal * 0.05, uSunDirRadius.xyz, 0.02, 10000.0))
+            ndl = 0.0;
+        radiance = albedo * uSunColor.rgb * ndl;
+        int lightCount = int(uSunDirRadius.w);
+        for (int i = 0; i < lightCount; ++i)
+        {
+            float3 toL = uLightPosRange[i].xyz - hitPos;
+            float d    = max(length(toL), 1e-4);
+            float range = max(uLightPosRange[i].w, 1e-4);
+            if (d >= range) continue;
+            float3 L = toL / d;
+            float ndl2 = max(dot(hitNormal, L), 0.0);
+            if (ndl2 <= 0.0) continue;
+            float atten = 1.0 - d / range;
+            atten *= atten;
+            if (uLightColorType[i].w > 1.5)
+            {
+                float c       = dot(-L, normalize(uLightDirCos[i].xyz));
+                float cosCone = uLightDirCos[i].w;
+                atten *= smoothstep(cosCone, lerp(cosCone, 1.0, 0.2), c);
+            }
+            if (atten <= 0.0) continue;
+            if (giSceneAnyHit(hitPos + hitNormal * 0.05, L, 0.02, max(d - 0.1, 0.02)))
+                continue;
+            radiance += albedo * uLightColorType[i].rgb * ndl2 * atten;
+        }
+    }
+
+    int probesPerRow = max(1, int(uGridCounts.w));
+    int2 outCoord = int2((probeIndex % probesPerRow) * kOctSize + texel.x,
+                         (probeIndex / probesPerRow) * kOctSize + texel.y);
+
+    // Adaptive hysteresis: deterministic gather rays -> deltas are real scene
+    // changes; converge fast on change, stay smooth otherwise.
+    float baseH = clamp(uRayParams.y, 0.0, 0.98);
+    float4 oldIrr = uIrrPrev.Load(int3(outCoord, 0));
+    float hIrr = lerp(baseH, 0.3, saturate(length(radiance - oldIrr.rgb) * 4.0));
+    uIrr[outCoord] = float4(lerp(radiance, oldIrr.rgb, hIrr), 1.0);
+    float2 oldVis = uVisPrev.Load(int3(outCoord, 0));
+    float2 newVisSample = float2(dist, dist * dist);
+    float hVis = lerp(baseH, 0.3, saturate(abs(dist - oldVis.x) / max(uGridOrigin.w, 1.0)));
+    uVis[outCoord] = lerp(newVisSample, oldVis.xy, hVis);
+}
+)HLSL";
+
 // ─── PostProcess HLSL (same logic as D3D11 — identical HLSL, same binding layout)
 static const char* kFSTriangleVS12 = R"HLSL(
 struct Out { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
@@ -993,7 +1466,31 @@ namespace
         glm::vec4  sunDir;     // xyz = sun direction
         glm::vec4  fog;        // x=fogDensity, y=fogHeightFalloff
         glm::vec4  viewport;   // x=W, y=H, z=ssaoEnabled
+        glm::vec4  giParams;     // x = GI enabled (0/1), y = indirect intensity
+        glm::vec4  giGridOrigin; // xyz = probe grid origin, w = spacing
+        glm::vec4  giGridCounts; // xyz = probe counts, w = probesPerRow
     };
+
+    // GL copy of the dominant-directional-light pick (glDominantDirectionalLight)
+    // — the brightest directional light, NEVER the sky-dome sun (below the
+    // horizon at night). Keep all backend copies in sync.
+    static bool d3d12DominantDirectionalLight(const RenderWorld& rw,
+                                              glm::vec3& towardOut, glm::vec3& colorIntensityOut)
+    {
+        const LightData* best = nullptr;
+        for (const LightData& l : rw.lights)
+            if (l.type == 0 && l.intensity > 0.0f && (!best || l.intensity > best->intensity))
+                best = &l;
+        if (!best || glm::dot(best->direction, best->direction) < 1e-8f)
+        {
+            towardOut         = glm::normalize(rw.sunDirection);
+            colorIntensityOut = glm::vec3(0.0f);
+            return false;
+        }
+        towardOut         = -glm::normalize(best->direction);
+        colorIntensityOut = best->color * best->intensity;
+        return true;
+    }
 
     struct SkyCB {
         glm::mat4 invViewProj;
@@ -2092,7 +2589,7 @@ struct D3D12RendererImpl
     std::unordered_map<uint64_t, ComPtr<ID3D12PipelineState>> m_materialPSOs; // key = hash^hdr^transparent
     ComPtr<ID3D12RootSignature>  m_matRootSig;
     ComPtr<ID3D12DescriptorHeap> m_matSrvHeap;   // 5 slots, all null RGBA8 (heTex0 + heTexP0..3)
-    ComPtr<ID3D12Resource>       m_matLightCB[k_frameCount];   uint8_t* m_matLightPtr[k_frameCount]{}; // HeLighting (64 B/frame)
+    ComPtr<ID3D12Resource>       m_matLightCB[k_frameCount];   uint8_t* m_matLightPtr[k_frameCount]{}; // HeLighting (sizeof(Lighting), 256-aligned)
     ComPtr<ID3D12Resource>       m_matObjRing[k_frameCount];   uint8_t* m_matObjPtr[k_frameCount]{};   // U ring (176 B/slot)
     ComPtr<ID3D12Resource>       m_matParamRing[k_frameCount]; uint8_t* m_matParamPtr[k_frameCount]{}; // HeParams ring (256 B/slot)
     UINT                         m_matDrawCursor[k_frameCount] = {}; // per-frame ring/slot cursor
@@ -2266,9 +2763,12 @@ struct D3D12RendererImpl
 
     // ── Combined scene SRV heap ──────────────────────────────────────────────
     // Static region: [0]=shadow(t0), [1]=AO-blur(t2), [2]=white-fallback(t2),
-    // [3]=null albedo fallback(t1).  Mesh-texture region: [k_sceneStaticSrvs ..]
-    // hold one base-color SRV per uploaded mesh, bound per draw as the t1 table.
-    static constexpr UINT k_sceneStaticSrvs = 4;   // slots [0..3] above
+    // [3]=null albedo fallback(t1), [4]=GI shadow mask(t4), [5]=DDGI irradiance
+    // atlas(t5), [6]=DDGI visibility atlas(t6).  Mesh-texture region:
+    // [k_sceneStaticSrvs ..] hold one base-color SRV per uploaded mesh, bound
+    // per draw as the t1 table (base slot follows the static region — nothing
+    // outside this constant hardcodes the region size).
+    static constexpr UINT k_sceneStaticSrvs = 7;   // slots [0..6] above
     static constexpr UINT k_albedoNullSlot  = 3;   // t1 fallback for untextured draws
     static constexpr UINT k_maxMeshTextures = 1024;
     ComPtr<ID3D12DescriptorHeap> sceneSrvHeap;    // CBV_SRV_UAV shader-visible
@@ -2522,6 +3022,11 @@ struct D3D12RendererImpl
                 retire(std::move(m.ibuf));
                 m_skeletalMeshCache.erase(it);
             }
+            // GI BLAS ranges live in CONCATENATED buffers — no splice, so an
+            // edited mesh drops the whole cache and it rebuilds lazily (same
+            // policy as the GL/D3D11 ports' InvalidateMesh handling).
+            if (giBlasCache.count(id))
+                destroyGiAccel();
         }
         m_pendingMeshInval.clear();
     }
@@ -2890,7 +3395,7 @@ struct D3D12RendererImpl
         // Both ranges point into the same descriptor table (sceneSrvHeap).
         // Layout of sceneSrvHeap: [0]=shadow(t0), [1]=AO-blur(t2), [2]=white(t2 fallback).
         // Since t2 is at heap slot 1, we set OffsetInDescriptorsFromTableStart=1 for range1.
-        D3D12_DESCRIPTOR_RANGE srvRanges[2]{};
+        D3D12_DESCRIPTOR_RANGE srvRanges[3]{};
         srvRanges[0].RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
         srvRanges[0].NumDescriptors                    = 1;
         srvRanges[0].BaseShaderRegister                = 0; // t0
@@ -2901,6 +3406,14 @@ struct D3D12RendererImpl
         srvRanges[1].BaseShaderRegister                = 2; // t2
         srvRanges[1].RegisterSpace                     = 0;
         srvRanges[1].OffsetInDescriptorsFromTableStart = 1; // heap slot 1
+        // GI mask + DDGI probe atlases (t4/t5/t6) — static heap slots [4..6],
+        // written once at GI-target/atlas creation (null views until then; the
+        // shader gates every sample on uGIParams.x).
+        srvRanges[2].RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        srvRanges[2].NumDescriptors                    = 3;
+        srvRanges[2].BaseShaderRegister                = 4; // t4..t6
+        srvRanges[2].RegisterSpace                     = 0;
+        srvRanges[2].OffsetInDescriptorsFromTableStart = 4; // heap slots 4..6
 
         // Per-draw base-color table (t1): its own single-descriptor table so the base can be
         // pointed at each mesh's slot (or the null fallback) independently of the shadow/AO table.
@@ -2919,7 +3432,7 @@ struct D3D12RendererImpl
         params[1].Descriptor       = { 1, 0 }; // b1
         params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
         params[2].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        params[2].DescriptorTable.NumDescriptorRanges = 2; // t0 + t2
+        params[2].DescriptorTable.NumDescriptorRanges = 3; // t0 + t2 + t4..t6 (GI)
         params[2].DescriptorTable.pDescriptorRanges   = srvRanges;
         params[2].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
         params[3].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
@@ -2933,8 +3446,9 @@ struct D3D12RendererImpl
         params[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
 
         // s0 = shadow sampler (linear-clamp), s1 = AO sampler (point-clamp),
-        // s2 = base-color sampler (linear-wrap, for tiling textures)
-        D3D12_STATIC_SAMPLER_DESC samplers[3]{};
+        // s2 = base-color sampler (linear-wrap, for tiling textures),
+        // s3 = GI sampler (linear-clamp: mask upsample + probe atlases)
+        D3D12_STATIC_SAMPLER_DESC samplers[4]{};
         samplers[0].Filter         = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
         samplers[0].AddressU = samplers[0].AddressV = samplers[0].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
         samplers[0].ShaderRegister = 0; // s0
@@ -2947,11 +3461,15 @@ struct D3D12RendererImpl
         samplers[2].AddressU = samplers[2].AddressV = samplers[2].AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
         samplers[2].ShaderRegister = 2; // s2
         samplers[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        samplers[3].Filter         = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+        samplers[3].AddressU = samplers[3].AddressV = samplers[3].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        samplers[3].ShaderRegister = 3; // s3
+        samplers[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
         D3D12_ROOT_SIGNATURE_DESC rsd{};
         rsd.NumParameters     = 5;
         rsd.pParameters       = params;
-        rsd.NumStaticSamplers = 3;
+        rsd.NumStaticSamplers = 4;
         rsd.pStaticSamplers   = samplers;
         rsd.Flags             = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
@@ -3004,6 +3522,22 @@ struct D3D12RendererImpl
             nullSrvRGBA.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
             nullSrvRGBA.Texture2D.MipLevels = 1;
             device->CreateShaderResourceView(nullptr, &nullSrvRGBA, sceneSrvCpu(k_albedoNullSlot));
+            // Slots 4..6: GI mask + probe atlases (t4/t5/t6). Null views until
+            // the GI targets/atlases exist — the scene shader gates every GI
+            // sample on uGIParams.x, so the nulls are never actually read, but
+            // the descriptor-table range covers them and they must be valid.
+            auto giNull = [&](UINT slot, DXGI_FORMAT fmt)
+            {
+                D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+                sv.Format                  = fmt;
+                sv.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
+                sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                sv.Texture2D.MipLevels     = 1;
+                device->CreateShaderResourceView(nullptr, &sv, sceneSrvCpu(slot));
+            };
+            giNull(4, DXGI_FORMAT_R16_FLOAT);          // GI shadow mask
+            giNull(5, DXGI_FORMAT_R16G16B16A16_FLOAT); // DDGI irradiance
+            giNull(6, DXGI_FORMAT_R16G16_FLOAT);       // DDGI visibility
         }
 
         UINT flags = 0;
@@ -3775,6 +4309,1063 @@ struct D3D12RendererImpl
         ssaoBlurRTState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
     }
 
+    // ─── Ray-traced GI (software BVH) — D3D12 port of the D3D11 compute GI ──
+    // CPU-built per-mesh BLASes (HE::GiBvh, unit-tested in test_gi_bvh.cpp)
+    // concatenated into structured buffers + a flat per-frame instance array;
+    // compute shadow rays + DDGI probe gather (dispatched on the direct
+    // command list), temporal + blur as fullscreen pixel passes. Mirrors the
+    // D3D11 kGi* stages 1:1; the binding model is D3D12-native: BVH buffers as
+    // ROOT SRVs, textures/UAVs in a dedicated shader-visible descriptor heap
+    // (giSrvHeap) that is bound during the GI passes and swapped back to
+    // sceneSrvHeap afterwards.
+    struct GiBlasRange
+    {
+        int32_t nodeOffset = 0, nodeCount = 0;
+        int32_t triOffset  = 0, triCount  = 0;
+        bool    valid      = false;
+    };
+    struct GiInstanceGpu // must match the HLSL GiInst layout (raw structured buffer)
+    {
+        glm::mat4 invTransform;
+        glm::vec4 baseColor;
+        int32_t   nodeOffset = 0, triOffset = 0, pad0 = 0, pad1 = 0;
+    };
+    static constexpr float kGiProbeSpacing     = 4.0f;
+    static constexpr int   kGiMaxProbesPerAxis = 10;
+    static constexpr int   kGiProbeOctSize     = 8;
+
+    bool  giSupported          = true;  // FL 11.0 guarantees CS 5.0; pipeline failure clears it
+    bool  giEnabled            = false;
+    bool  giPipelinesBuilt     = false;
+    float giIndirectIntensity  = 1.0f;
+    float giLightRadius        = 0.5f;  // degrees, shadow-ray cone
+    int   giProbeBudgetPerFrame = 256;
+
+    // Pipelines + root signatures (built lazily on the first GI-active frame).
+    ComPtr<ID3D12RootSignature> giGBufRS;      // b0 root CBV (per-object ring)
+    ComPtr<ID3D12RootSignature> giComputeRS;   // b0/b1 CBVs, t0-t1+t5-t6 table, t2/t3/t4 root SRVs, u0-u1 table
+    ComPtr<ID3D12RootSignature> giFsRS;        // b0 CBV + t0-t2 table + s0 static point-clamp
+    ComPtr<ID3D12PipelineState> giGBufPSO;     // MRT pos+norm, D16
+    ComPtr<ID3D12PipelineState> giShadowPSO;   // compute
+    ComPtr<ID3D12PipelineState> giProbePSO;    // compute
+    ComPtr<ID3D12PipelineState> giTemporalPSO; // fullscreen RGBA16F
+    ComPtr<ID3D12PipelineState> giBlurPSO;     // fullscreen R16F
+
+    // Per-frame CBs (persistently mapped upload buffers, one slot per frame in flight).
+    ComPtr<ID3D12Resource> giShadowCB[k_frameCount];   uint8_t* giShadowCBPtr[k_frameCount]{};
+    ComPtr<ID3D12Resource> giCountCB[k_frameCount];    uint8_t* giCountCBPtr[k_frameCount]{};
+    ComPtr<ID3D12Resource> giTemporalCB[k_frameCount]; uint8_t* giTemporalCBPtr[k_frameCount]{};
+    ComPtr<ID3D12Resource> giBlurCB[k_frameCount];     uint8_t* giBlurCBPtr[k_frameCount]{};
+    ComPtr<ID3D12Resource> giProbeCB[k_frameCount];    uint8_t* giProbeCBPtr[k_frameCount]{};
+    // Per-object ring for the G-buffer prepass (dedicated — the SSAO pos ring
+    // may be reused by SSAO in the same frame when GI fails mid-frame).
+    ComPtr<ID3D12Resource> giGBufObjRing[k_frameCount]; uint8_t* giGBufObjPtr[k_frameCount]{};
+
+    // Acceleration structures: shared node/tri upload buffers (rebuilt when a
+    // new BLAS is appended), per-frame instance upload buffers (rewritten every
+    // frame — transforms move).
+    std::unordered_map<HE::UUID, GiBlasRange> giBlasCache;
+    std::vector<HE::GiBvhNode>     giNodesCpu;
+    std::vector<HE::GiBvhTriangle> giTrisCpu;
+    std::vector<GiInstanceGpu>     giInstancesCpu;
+    bool giBlasDirty     = false;
+    int  giInstanceCount = 0;
+    ComPtr<ID3D12Resource> giNodeSB, giTriSB;
+    ComPtr<ID3D12Resource> giInstanceSB[k_frameCount];
+    uint8_t*               giInstancePtr[k_frameCount]{};
+    UINT                   giInstanceCapacity[k_frameCount]{};
+
+    // Screen-space targets (half-res) + probe atlases, with tracked states.
+    int giShadowW = 0, giShadowH = 0;
+    ComPtr<ID3D12Resource> giGBufPosTex, giGBufNormTex, giGBufDepth, giRawTex,
+                           giHistTex[2], giResultTex;
+    D3D12_RESOURCE_STATES  giGBufPosState  = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    D3D12_RESOURCE_STATES  giGBufNormState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    D3D12_RESOURCE_STATES  giRawState      = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    D3D12_RESOURCE_STATES  giHistState[2]  = { D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                                               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE };
+    D3D12_RESOURCE_STATES  giResultState   = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    int       giHistIdx     = 0;
+    bool      giHistValid   = false;
+    glm::mat4 giPrevViewProj{ 1.0f };
+    float     giFrameSeed   = 0.0f;
+
+    glm::vec3  giGridOrigin{ 0.0f };
+    glm::ivec3 giGridCounts{ 0 };
+    int  giProbeCount = 0, giProbesPerRow = 0, giProbeCursor = 0;
+    bool giProbeGridBuilt = false;
+    ComPtr<ID3D12Resource> giIrrTex, giVisTex, giIrrPrevTex, giVisPrevTex;
+    D3D12_RESOURCE_STATES  giIrrState     = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    D3D12_RESOURCE_STATES  giVisState     = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    D3D12_RESOURCE_STATES  giIrrPrevState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    D3D12_RESOURCE_STATES  giVisPrevState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+
+    // ── GI descriptor heaps ──────────────────────────────────────────────────
+    // giSrvHeap (shader-visible CBV_SRV_UAV, fixed slots — every slot in a
+    // bound table range holds a VALID descriptor at all times, tier-1 safe):
+    //  [0] gbufPos SRV (compute t0)     [1] gbufNorm SRV (compute t1)
+    //  [2] irrPrev SRV (compute t5)     [3] visPrev SRV (compute t6)
+    //  [4] raw UAV (shadow u0)          [5] raw UAV filler (shadow u1, unused)
+    //  [6] irr UAV (probe u0)           [7] vis UAV (probe u1)
+    //  [8..10]  temporal cur=0: gbufPos, raw, hist1
+    //  [11..13] temporal cur=1: gbufPos, raw, hist0
+    //  [14..16] blur cur=0: hist0 x3 (padding — the FS table range is 3 wide)
+    //  [17..19] blur cur=1: hist1 x3
+    static constexpr UINT k_giSrvSlots = 20;
+    ComPtr<ID3D12DescriptorHeap> giSrvHeap;   // shader-visible
+    ComPtr<ID3D12DescriptorHeap> giRtvHeap;   // 5: [0]=pos [1]=norm [2]=hist0 [3]=hist1 [4]=result
+    ComPtr<ID3D12DescriptorHeap> giDsvHeap;   // 1: G-buffer depth
+    UINT giSrvDescSize = 0, giRtvDescSize = 0;
+
+    D3D12_CPU_DESCRIPTOR_HANDLE giSrvCpu(UINT slot) const
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE h = giSrvHeap->GetCPUDescriptorHandleForHeapStart();
+        h.ptr += static_cast<SIZE_T>(slot) * giSrvDescSize;
+        return h;
+    }
+    D3D12_GPU_DESCRIPTOR_HANDLE giSrvGpu(UINT slot) const
+    {
+        D3D12_GPU_DESCRIPTOR_HANDLE h = giSrvHeap->GetGPUDescriptorHandleForHeapStart();
+        h.ptr += static_cast<UINT64>(slot) * giSrvDescSize;
+        return h;
+    }
+    D3D12_CPU_DESCRIPTOR_HANDLE giRtvCpu(UINT slot) const
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE h = giRtvHeap->GetCPUDescriptorHandleForHeapStart();
+        h.ptr += static_cast<SIZE_T>(slot) * giRtvDescSize;
+        return h;
+    }
+
+    GiBlasRange buildGiBlas(ContentManager* cm, const HE::UUID& meshId)
+    {
+        GiBlasRange range;
+        if (!cm) return range;
+        const StaticMeshAsset* asset = cm->getStaticMesh(meshId);
+        if (!asset || asset->indices.empty()) return range;
+
+        // Same two layouts resolveMesh uploads: cooked = interleaved 8-float
+        // (position at offset 0), loose = tightly packed 3-float positions.
+        HE::GiBvh bvh;
+        if (asset->cooked && !asset->interleaved.empty())
+            bvh = HE::buildGiBvh(asset->interleaved.data(), asset->vertexCount, 8,
+                                 asset->indices.data(), asset->indices.size());
+        else if (!asset->vertices.empty())
+            bvh = HE::buildGiBvh(asset->vertices.data(), asset->vertices.size() / 3, 3,
+                                 asset->indices.data(), asset->indices.size());
+        if (!bvh.valid()) return range;
+
+        range.nodeOffset = static_cast<int32_t>(giNodesCpu.size());
+        range.nodeCount  = static_cast<int32_t>(bvh.nodes.size());
+        range.triOffset  = static_cast<int32_t>(giTrisCpu.size());
+        range.triCount   = static_cast<int32_t>(bvh.triangles.size());
+        range.valid      = true;
+        giNodesCpu.insert(giNodesCpu.end(), bvh.nodes.begin(), bvh.nodes.end());
+        giTrisCpu.insert(giTrisCpu.end(), bvh.triangles.begin(), bvh.triangles.end());
+        giBlasDirty = true;
+        return range;
+    }
+
+    void updateGiAccel(ContentManager* cm, const RenderWorld& rw, UINT fi)
+    {
+        giInstanceCount = 0;
+        if (!giEnabled || !giSupported) return;
+
+        // Same caster filter as the shadow pass: castsShadow only, UNCULLED —
+        // rays go in arbitrary directions, an off-screen caster still occludes.
+        giInstancesCpu.clear();
+        auto resolveRange = [&](const HE::UUID& id) -> GiBlasRange
+        {
+            auto it = giBlasCache.find(id);
+            if (it == giBlasCache.end())
+                it = giBlasCache.emplace(id, buildGiBlas(cm, id)).first;
+            return it->second;
+        };
+        for (const RenderObject& obj : rw.objects)
+        {
+            if (!obj.castsShadow) continue;
+            // Default-cube fallback — entities without a resolvable mesh RENDER
+            // as the default cube, so they must occlude as one too.
+            GiBlasRange range = resolveRange(obj.meshAssetId);
+            if (!range.valid) range = resolveRange(HE::kDefaultCubeMeshId);
+            if (!range.valid) continue;
+            GiInstanceGpu inst;
+            inst.invTransform = glm::inverse(obj.transform);
+            inst.baseColor    = glm::vec4(obj.baseColor, 1.0f);
+            inst.nodeOffset   = range.nodeOffset;
+            inst.triOffset    = range.triOffset;
+            giInstancesCpu.push_back(inst);
+        }
+        giInstanceCount = static_cast<int>(giInstancesCpu.size());
+        if (giInstanceCount == 0) return;
+
+        // Nodes/tris only when a new BLAS was appended. The GPU may still be
+        // reading the old buffers (frames in flight) — retire, don't reset.
+        const int retireN = static_cast<int>(k_frameCount) + 2;
+        if (giBlasDirty)
+        {
+            if (giNodeSB) m_retiredTextures.emplace_back(std::move(giNodeSB), retireN);
+            if (giTriSB)  m_retiredTextures.emplace_back(std::move(giTriSB),  retireN);
+            giNodeSB = giNodesCpu.empty() ? nullptr
+                : createUploadBuffer(giNodesCpu.size() * sizeof(HE::GiBvhNode),
+                                     nullptr, giNodesCpu.data());
+            giTriSB = giTrisCpu.empty() ? nullptr
+                : createUploadBuffer(giTrisCpu.size() * sizeof(HE::GiBvhTriangle),
+                                     nullptr, giTrisCpu.data());
+            giBlasDirty = false;
+        }
+        // Instances change every frame → per-frame upload buffer, grown on
+        // demand. This slot's fence was waited in Render(), so replacing the
+        // buffer is safe; retire anyway for uniformity.
+        const UINT need = static_cast<UINT>(giInstanceCount);
+        if (need > giInstanceCapacity[fi] || !giInstanceSB[fi])
+        {
+            if (giInstanceSB[fi])
+                m_retiredTextures.emplace_back(std::move(giInstanceSB[fi]), retireN);
+            const UINT cap = std::max({ need, giInstanceCapacity[fi] * 2u, 64u });
+            giInstancePtr[fi] = nullptr;
+            giInstanceSB[fi]  = createUploadBuffer(
+                static_cast<UINT64>(cap) * sizeof(GiInstanceGpu),
+                reinterpret_cast<void**>(&giInstancePtr[fi]));
+            giInstanceCapacity[fi] = giInstanceSB[fi] ? cap : 0;
+        }
+        if (giInstancePtr[fi])
+            std::memcpy(giInstancePtr[fi], giInstancesCpu.data(),
+                        static_cast<size_t>(giInstanceCount) * sizeof(GiInstanceGpu));
+        if (!giNodeSB || !giTriSB || !giInstanceSB[fi]) giInstanceCount = 0;
+    }
+
+    void destroyGiAccel()
+    {
+        // Buffers may be referenced by frames in flight (edit-time invalidation)
+        // — retire them like hot-reloaded textures instead of dropping directly.
+        const int retireN = static_cast<int>(k_frameCount) + 2;
+        if (giNodeSB) m_retiredTextures.emplace_back(std::move(giNodeSB), retireN);
+        if (giTriSB)  m_retiredTextures.emplace_back(std::move(giTriSB),  retireN);
+        for (UINT f = 0; f < k_frameCount; ++f)
+        {
+            if (giInstanceSB[f])
+                m_retiredTextures.emplace_back(std::move(giInstanceSB[f]), retireN);
+            giInstancePtr[f]      = nullptr;
+            giInstanceCapacity[f] = 0;
+        }
+        giBlasCache.clear();
+        giNodesCpu.clear();
+        giTrisCpu.clear();
+        giInstancesCpu.clear();
+        giInstanceCount = 0;
+        giBlasDirty     = false;
+    }
+
+    // Lazily builds the GI pipelines on the first GI-active frame. Any failure
+    // logs + disables GI for the session (blind-port safety), exactly like the
+    // GL/D3D11 ports.
+    void createGiPipelines()
+    {
+        if (giPipelinesBuilt) return;
+        giPipelinesBuilt = true; // one attempt per session, success or not
+
+        UINT flags = 0;
+#ifdef _DEBUG
+        flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+        auto compile = [&](const std::string& src, const char* entry, const char* profile,
+                           ComPtr<ID3DBlob>& blob) -> bool
+        {
+            ComPtr<ID3DBlob> err;
+            if (FAILED(D3DCompile(src.c_str(), src.size(), "gi", nullptr, nullptr,
+                                  entry, profile, flags, 0, &blob, &err)))
+            {
+                Logger::Log(Logger::LogLevel::Error,
+                    (std::string("D3D12Renderer: GI shader compile failed (") + entry + "): "
+                     + (err ? static_cast<const char*>(err->GetBufferPointer()) : "unknown")).c_str());
+                return false;
+            }
+            return true;
+        };
+
+        bool ok = true;
+
+        // ── G-buffer root signature: b0 root CBV only ───────────────────────
+        if (ok)
+        {
+            D3D12_ROOT_PARAMETER p0{};
+            p0.ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
+            p0.Descriptor       = { 0, 0 };
+            p0.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+            D3D12_ROOT_SIGNATURE_DESC rsd{};
+            rsd.NumParameters = 1; rsd.pParameters = &p0;
+            rsd.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+            ComPtr<ID3DBlob> sig, e;
+            ok = SUCCEEDED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &e))
+              && SUCCEEDED(device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
+                           IID_PPV_ARGS(&giGBufRS)));
+        }
+
+        // ── Compute root signature (shared by shadow + probe kernels) ───────
+        //   [0] CBV b0 (pass CB)   [1] CBV b1 (instance count)
+        //   [2] SRV table: t0-t1 (G-buffer) + t5-t6 (prev atlases) — heap [0..3]
+        //   [3]/[4]/[5] root SRVs t2/t3/t4 (BVH nodes / tris / instances)
+        //   [6] UAV table u0-u1 — heap base chosen per dispatch ([4] shadow, [6] probe)
+        if (ok)
+        {
+            D3D12_DESCRIPTOR_RANGE srvRanges[2]{};
+            srvRanges[0].RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+            srvRanges[0].NumDescriptors                    = 2; // t0, t1
+            srvRanges[0].BaseShaderRegister                = 0;
+            srvRanges[0].OffsetInDescriptorsFromTableStart = 0;
+            srvRanges[1].RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+            srvRanges[1].NumDescriptors                    = 2; // t5, t6
+            srvRanges[1].BaseShaderRegister                = 5;
+            srvRanges[1].OffsetInDescriptorsFromTableStart = 2;
+            D3D12_DESCRIPTOR_RANGE uavRange{};
+            uavRange.RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+            uavRange.NumDescriptors                    = 2; // u0, u1
+            uavRange.BaseShaderRegister                = 0;
+            uavRange.OffsetInDescriptorsFromTableStart = 0;
+
+            D3D12_ROOT_PARAMETER params[7]{};
+            params[0].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
+            params[0].Descriptor       = { 0, 0 };
+            params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+            params[1].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
+            params[1].Descriptor       = { 1, 0 };
+            params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+            params[2].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            params[2].DescriptorTable.NumDescriptorRanges = 2;
+            params[2].DescriptorTable.pDescriptorRanges   = srvRanges;
+            params[2].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_ALL;
+            params[3].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_SRV;
+            params[3].Descriptor       = { 2, 0 }; // t2 nodes
+            params[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+            params[4].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_SRV;
+            params[4].Descriptor       = { 3, 0 }; // t3 tris
+            params[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+            params[5].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_SRV;
+            params[5].Descriptor       = { 4, 0 }; // t4 instances
+            params[5].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+            params[6].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            params[6].DescriptorTable.NumDescriptorRanges = 1;
+            params[6].DescriptorTable.pDescriptorRanges   = &uavRange;
+            params[6].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_ALL;
+
+            D3D12_ROOT_SIGNATURE_DESC rsd{};
+            rsd.NumParameters = 7; rsd.pParameters = params;
+            ComPtr<ID3DBlob> sig, e;
+            ok = SUCCEEDED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &e))
+              && SUCCEEDED(device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
+                           IID_PPV_ARGS(&giComputeRS)));
+        }
+
+        // ── Fullscreen root signature (temporal + blur): b0 + t0-t2 + s0 ────
+        if (ok)
+        {
+            D3D12_DESCRIPTOR_RANGE srvR{};
+            srvR.RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+            srvR.NumDescriptors                    = 3; // t0..t2 (blur uses t0 only)
+            srvR.BaseShaderRegister                = 0;
+            srvR.OffsetInDescriptorsFromTableStart = 0;
+            D3D12_ROOT_PARAMETER params[2]{};
+            params[0].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
+            params[0].Descriptor       = { 0, 0 };
+            params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            params[1].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            params[1].DescriptorTable  = { 1, &srvR };
+            params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            D3D12_STATIC_SAMPLER_DESC samp{};
+            samp.Filter           = D3D12_FILTER_MIN_MAG_MIP_POINT;
+            samp.AddressU = samp.AddressV = samp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+            samp.ShaderRegister   = 0;
+            samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            samp.MaxLOD           = D3D12_FLOAT32_MAX;
+            D3D12_ROOT_SIGNATURE_DESC rsd{};
+            rsd.NumParameters = 2;     rsd.pParameters     = params;
+            rsd.NumStaticSamplers = 1; rsd.pStaticSamplers = &samp;
+            ComPtr<ID3DBlob> sig, e;
+            ok = SUCCEEDED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &e))
+              && SUCCEEDED(device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
+                           IID_PPV_ARGS(&giFsRS)));
+        }
+
+        // ── Shaders + PSOs ──────────────────────────────────────────────────
+        ComPtr<ID3DBlob> gbufVS, gbufPS, shadowCS, probeCS, fsVS, temporalPS, blurPS;
+        ok = ok && compile(kGiGBufHLSL12, "GiGBufVS", "vs_5_0", gbufVS)
+                && compile(kGiGBufHLSL12, "GiGBufPS", "ps_5_0", gbufPS)
+                && compile(std::string(kGiTraversalHLSL12) + kGiShadowCSHLSL12, "GiShadowCS", "cs_5_0", shadowCS)
+                && compile(std::string(kGiTraversalHLSL12) + kGiProbeCSHLSL12, "GiProbeCS", "cs_5_0", probeCS)
+                && compile(kFSTriangleVS12, "main", "vs_5_0", fsVS)
+                && compile(kGiTemporalHLSL12, "main", "ps_5_0", temporalPS)
+                && compile(kGiBlurHLSL12, "main", "ps_5_0", blurPS);
+
+        if (ok) // G-buffer PSO: MRT RGBA16F pos+norm, D16 depth, scene input layout
+        {
+            const D3D12_INPUT_ELEMENT_DESC layout[] = {
+                { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+                { "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+                { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+            };
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+            pd.pRootSignature        = giGBufRS.Get();
+            pd.VS                    = { gbufVS->GetBufferPointer(), gbufVS->GetBufferSize() };
+            pd.PS                    = { gbufPS->GetBufferPointer(), gbufPS->GetBufferSize() };
+            pd.InputLayout           = { layout, 3 };
+            pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+            pd.NumRenderTargets      = 2;
+            pd.RTVFormats[0]         = DXGI_FORMAT_R16G16B16A16_FLOAT;
+            pd.RTVFormats[1]         = DXGI_FORMAT_R16G16B16A16_FLOAT;
+            pd.DSVFormat             = DXGI_FORMAT_D16_UNORM;
+            pd.SampleDesc.Count      = 1;
+            pd.SampleMask            = UINT_MAX;
+            pd.RasterizerState.FillMode        = D3D12_FILL_MODE_SOLID;
+            pd.RasterizerState.CullMode        = D3D12_CULL_MODE_NONE;
+            pd.RasterizerState.DepthClipEnable = TRUE;
+            pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+            pd.BlendState.RenderTarget[1].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+            pd.DepthStencilState.DepthEnable    = TRUE;
+            pd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+            pd.DepthStencilState.DepthFunc      = D3D12_COMPARISON_FUNC_LESS;
+            ok = SUCCEEDED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&giGBufPSO)));
+        }
+        if (ok) // compute PSOs
+        {
+            D3D12_COMPUTE_PIPELINE_STATE_DESC cd{};
+            cd.pRootSignature = giComputeRS.Get();
+            cd.CS = { shadowCS->GetBufferPointer(), shadowCS->GetBufferSize() };
+            ok = SUCCEEDED(device->CreateComputePipelineState(&cd, IID_PPV_ARGS(&giShadowPSO)));
+            if (ok)
+            {
+                cd.CS = { probeCS->GetBufferPointer(), probeCS->GetBufferSize() };
+                ok = SUCCEEDED(device->CreateComputePipelineState(&cd, IID_PPV_ARGS(&giProbePSO)));
+            }
+        }
+        if (ok) // fullscreen PSOs: temporal RGBA16F, blur R16F, no depth
+        {
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+            pd.pRootSignature        = giFsRS.Get();
+            pd.VS                    = { fsVS->GetBufferPointer(), fsVS->GetBufferSize() };
+            pd.PS                    = { temporalPS->GetBufferPointer(), temporalPS->GetBufferSize() };
+            pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+            pd.NumRenderTargets      = 1;
+            pd.RTVFormats[0]         = DXGI_FORMAT_R16G16B16A16_FLOAT;
+            pd.SampleDesc.Count      = 1;
+            pd.SampleMask            = UINT_MAX;
+            pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+            pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+            pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+            pd.DepthStencilState.DepthEnable = FALSE;
+            ok = SUCCEEDED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&giTemporalPSO)));
+            if (ok)
+            {
+                pd.PS            = { blurPS->GetBufferPointer(), blurPS->GetBufferSize() };
+                pd.RTVFormats[0] = DXGI_FORMAT_R16_FLOAT;
+                ok = SUCCEEDED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&giBlurPSO)));
+            }
+        }
+
+        // ── Per-frame CBs + the G-buffer per-object ring ─────────────────────
+        for (UINT f = 0; ok && f < k_frameCount; ++f)
+        {
+            giShadowCB[f]   = createUploadBuffer(k_cbSlot, reinterpret_cast<void**>(&giShadowCBPtr[f]));
+            giCountCB[f]    = createUploadBuffer(k_cbSlot, reinterpret_cast<void**>(&giCountCBPtr[f]));
+            giTemporalCB[f] = createUploadBuffer(k_cbSlot, reinterpret_cast<void**>(&giTemporalCBPtr[f]));
+            giBlurCB[f]     = createUploadBuffer(k_cbSlot, reinterpret_cast<void**>(&giBlurCBPtr[f]));
+            giProbeCB[f]    = createUploadBuffer(alignUp(6 * 16 + 3 * 8 * 16, k_cbSlot),
+                                                 reinterpret_cast<void**>(&giProbeCBPtr[f]));
+            giGBufObjRing[f] = createUploadBuffer(static_cast<UINT64>(k_maxDraws) * k_cbSlot,
+                                                  reinterpret_cast<void**>(&giGBufObjPtr[f]));
+            ok = giShadowCB[f] && giCountCB[f] && giTemporalCB[f] && giBlurCB[f]
+              && giProbeCB[f] && giGBufObjRing[f];
+        }
+
+        // ── Descriptor heaps (all slots pre-filled with valid null views) ────
+        if (ok)
+        {
+            giSrvDescSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+            giRtvDescSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+            D3D12_DESCRIPTOR_HEAP_DESC sd{};
+            sd.NumDescriptors = k_giSrvSlots;
+            sd.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+            sd.Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+            D3D12_DESCRIPTOR_HEAP_DESC rd{};
+            rd.NumDescriptors = 5;
+            rd.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+            D3D12_DESCRIPTOR_HEAP_DESC dd{};
+            dd.NumDescriptors = 1;
+            dd.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+            ok = SUCCEEDED(device->CreateDescriptorHeap(&sd, IID_PPV_ARGS(&giSrvHeap)))
+              && SUCCEEDED(device->CreateDescriptorHeap(&rd, IID_PPV_ARGS(&giRtvHeap)))
+              && SUCCEEDED(device->CreateDescriptorHeap(&dd, IID_PPV_ARGS(&giDsvHeap)));
+            if (ok)
+            {
+                auto nullSrv = [&](UINT slot, DXGI_FORMAT fmt)
+                {
+                    D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+                    sv.Format                  = fmt;
+                    sv.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
+                    sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                    sv.Texture2D.MipLevels     = 1;
+                    device->CreateShaderResourceView(nullptr, &sv, giSrvCpu(slot));
+                };
+                auto nullUav = [&](UINT slot, DXGI_FORMAT fmt)
+                {
+                    D3D12_UNORDERED_ACCESS_VIEW_DESC uv{};
+                    uv.Format        = fmt;
+                    uv.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+                    device->CreateUnorderedAccessView(nullptr, nullptr, &uv, giSrvCpu(slot));
+                };
+                nullSrv(0, DXGI_FORMAT_R16G16B16A16_FLOAT);
+                nullSrv(1, DXGI_FORMAT_R16G16B16A16_FLOAT);
+                nullSrv(2, DXGI_FORMAT_R16G16B16A16_FLOAT); // irrPrev
+                nullSrv(3, DXGI_FORMAT_R16G16_FLOAT);       // visPrev
+                nullUav(4, DXGI_FORMAT_R16_FLOAT);          // raw
+                nullUav(5, DXGI_FORMAT_R16_FLOAT);          // filler
+                nullUav(6, DXGI_FORMAT_R16G16B16A16_FLOAT); // irr
+                nullUav(7, DXGI_FORMAT_R16G16_FLOAT);       // vis
+                for (UINT s = 8; s < k_giSrvSlots; ++s)
+                    nullSrv(s, DXGI_FORMAT_R16G16B16A16_FLOAT);
+            }
+        }
+
+        if (!ok)
+        {
+            Logger::Log(Logger::LogLevel::Error,
+                        "D3D12Renderer: GI pipeline build failed — GI disabled");
+            giGBufRS.Reset(); giComputeRS.Reset(); giFsRS.Reset();
+            giGBufPSO.Reset(); giShadowPSO.Reset(); giProbePSO.Reset();
+            giTemporalPSO.Reset(); giBlurPSO.Reset();
+            giSrvHeap.Reset(); giRtvHeap.Reset(); giDsvHeap.Reset();
+            giSupported = false;
+            return;
+        }
+        Logger::Log(Logger::LogLevel::Info,
+                    "D3D12Renderer: GI pipelines built (compute ray tracing active)");
+    }
+
+    void ensureGiShadowTargets(int w, int h)
+    {
+        w = std::max(1, w); h = std::max(1, h);
+        if (giGBufPosTex && w == giShadowW && h == giShadowH) return;
+        // (Re)creating targets rewrites live descriptor-heap slots and drops
+        // resources previous frames may still read — flush the GPU first
+        // (once per resize, same policy as createSSAOTargets).
+        waitForAllFrames();
+        giShadowW = w; giShadowH = h;
+        giHistValid = false; // fresh targets → no usable history
+
+        giGBufPosTex.Reset(); giGBufNormTex.Reset(); giGBufDepth.Reset();
+        giRawTex.Reset(); giHistTex[0].Reset(); giHistTex[1].Reset(); giResultTex.Reset();
+
+        D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+        auto makeTex = [&](DXGI_FORMAT fmt, D3D12_RESOURCE_FLAGS rflags,
+                           D3D12_RESOURCE_STATES initState, bool clearColor,
+                           ComPtr<ID3D12Resource>& t) -> bool
+        {
+            D3D12_RESOURCE_DESC td{};
+            td.Dimension        = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            td.Width            = static_cast<UINT64>(w);
+            td.Height           = static_cast<UINT>(h);
+            td.DepthOrArraySize = 1;
+            td.MipLevels        = 1;
+            td.Format           = fmt;
+            td.SampleDesc.Count = 1;
+            td.Flags            = rflags;
+            D3D12_CLEAR_VALUE cv{}; cv.Format = fmt;
+            const bool wantClear = (rflags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET |
+                                              D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)) != 0;
+            if (rflags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) cv.DepthStencil.Depth = 1.0f;
+            (void)clearColor; // RT clear value stays 0 (background)
+            return SUCCEEDED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td,
+                             initState, wantClear ? &cv : nullptr, IID_PPV_ARGS(&t)));
+        };
+
+        const auto kPSR  = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        bool ok = makeTex(DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+                          kPSR, true, giGBufPosTex)
+               && makeTex(DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+                          kPSR, true, giGBufNormTex)
+               && makeTex(DXGI_FORMAT_R16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                          D3D12_RESOURCE_STATE_UNORDERED_ACCESS, false, giRawTex)
+               && makeTex(DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+                          kPSR, true, giHistTex[0])
+               && makeTex(DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+                          kPSR, true, giHistTex[1])
+               && makeTex(DXGI_FORMAT_R16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+                          kPSR, true, giResultTex)
+               && makeTex(DXGI_FORMAT_D16_UNORM, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL,
+                          D3D12_RESOURCE_STATE_DEPTH_WRITE, false, giGBufDepth);
+        if (!ok)
+        {
+            giGBufPosTex.Reset();
+            giShadowW = giShadowH = 0;
+            return;
+        }
+        giGBufPosState  = kPSR;
+        giGBufNormState = kPSR;
+        giRawState      = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        giHistState[0]  = kPSR;
+        giHistState[1]  = kPSR;
+        giResultState   = kPSR;
+
+        // RTVs + DSV.
+        device->CreateRenderTargetView(giGBufPosTex.Get(),  nullptr, giRtvCpu(0));
+        device->CreateRenderTargetView(giGBufNormTex.Get(), nullptr, giRtvCpu(1));
+        device->CreateRenderTargetView(giHistTex[0].Get(),  nullptr, giRtvCpu(2));
+        device->CreateRenderTargetView(giHistTex[1].Get(),  nullptr, giRtvCpu(3));
+        device->CreateRenderTargetView(giResultTex.Get(),   nullptr, giRtvCpu(4));
+        device->CreateDepthStencilView(giGBufDepth.Get(), nullptr,
+            giDsvHeap->GetCPUDescriptorHandleForHeapStart());
+
+        // SRVs/UAVs into the fixed giSrvHeap slots (see the layout comment).
+        auto srvInto = [&](ID3D12Resource* res, DXGI_FORMAT fmt, UINT slot)
+        {
+            D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+            sv.Format                  = fmt;
+            sv.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
+            sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            sv.Texture2D.MipLevels     = 1;
+            device->CreateShaderResourceView(res, &sv, giSrvCpu(slot));
+        };
+        srvInto(giGBufPosTex.Get(),  DXGI_FORMAT_R16G16B16A16_FLOAT, 0);
+        srvInto(giGBufNormTex.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, 1);
+        {
+            D3D12_UNORDERED_ACCESS_VIEW_DESC uv{};
+            uv.Format        = DXGI_FORMAT_R16_FLOAT;
+            uv.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+            device->CreateUnorderedAccessView(giRawTex.Get(), nullptr, &uv, giSrvCpu(4));
+            device->CreateUnorderedAccessView(giRawTex.Get(), nullptr, &uv, giSrvCpu(5)); // u1 filler
+        }
+        // Temporal tables: cur=0 reads hist[1]; cur=1 reads hist[0].
+        srvInto(giGBufPosTex.Get(),  DXGI_FORMAT_R16G16B16A16_FLOAT, 8);
+        srvInto(giRawTex.Get(),      DXGI_FORMAT_R16_FLOAT,          9);
+        srvInto(giHistTex[1].Get(),  DXGI_FORMAT_R16G16B16A16_FLOAT, 10);
+        srvInto(giGBufPosTex.Get(),  DXGI_FORMAT_R16G16B16A16_FLOAT, 11);
+        srvInto(giRawTex.Get(),      DXGI_FORMAT_R16_FLOAT,          12);
+        srvInto(giHistTex[0].Get(),  DXGI_FORMAT_R16G16B16A16_FLOAT, 13);
+        // Blur tables (range is 3 wide → pad with the same SRV).
+        for (UINT s = 14; s <= 16; ++s) srvInto(giHistTex[0].Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, s);
+        for (UINT s = 17; s <= 19; ++s) srvInto(giHistTex[1].Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, s);
+
+        // Publish the blurred mask to the shader-visible slots the scene pass
+        // (sceneSrvHeap[4], t4) and graph materials (m_matSrvHeap[5], t10)
+        // sample. giResultTex is stable between resizes, so these writes only
+        // happen here — behind the waitForAllFrames above.
+        if (sceneSrvHeap)
+            srvIntoHeapSlot(giResultTex.Get(), DXGI_FORMAT_R16_FLOAT, sceneSrvCpu(4));
+        if (m_matSrvHeap)
+        {
+            const UINT inc = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+            D3D12_CPU_DESCRIPTOR_HANDLE h = m_matSrvHeap->GetCPUDescriptorHandleForHeapStart();
+            h.ptr += static_cast<SIZE_T>(5) * inc; // slot 5 = t10 (heGIShadow)
+            srvIntoHeapSlot(giResultTex.Get(), DXGI_FORMAT_R16_FLOAT, h);
+            // Slot 6 = t11 (heGILocal): D3D has no local-light mask yet — bind
+            // opaque white so heLitP's channel reads are 1.0 (rrrr swizzle over
+            // the 1x1 R8 white; matches D3D11 binding whiteSRV at t11).
+            h.ptr += inc;
+            if (ssaoWhiteTex)
+            {
+                D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+                sv.Format                  = DXGI_FORMAT_R8_UNORM;
+                sv.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
+                sv.Shader4ComponentMapping = D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(0, 0, 0, 0); // rrrr = (1,1,1,1)
+                sv.Texture2D.MipLevels     = 1;
+                device->CreateShaderResourceView(ssaoWhiteTex.Get(), &sv, h);
+            }
+        }
+    }
+
+    void srvIntoHeapSlot(ID3D12Resource* res, DXGI_FORMAT fmt, D3D12_CPU_DESCRIPTOR_HANDLE h)
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+        sv.Format                  = fmt;
+        sv.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
+        sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sv.Texture2D.MipLevels     = 1;
+        device->CreateShaderResourceView(res, &sv, h);
+    }
+
+    // One-shot probe-grid fit over the scene AABB (worldBounds are refreshed
+    // from the real mesh bounds in DrawScene before this runs).
+    void ensureGiProbeGrid(const RenderWorld& rw)
+    {
+        if (giProbeGridBuilt) return;
+        if (rw.objects.empty()) return;
+
+        HE::AABB sceneBox;
+        for (const RenderObject& obj : rw.objects)
+            if (obj.worldBounds.isValid())
+                sceneBox.expand(obj.worldBounds);
+        if (!sceneBox.isValid()) return;
+
+        const glm::vec3 padded = sceneBox.extents() + glm::vec3(kGiProbeSpacing);
+        giGridCounts = glm::ivec3(
+            std::clamp(static_cast<int>(std::ceil(padded.x * 2.0f / kGiProbeSpacing)) + 1, 2, kGiMaxProbesPerAxis),
+            std::clamp(static_cast<int>(std::ceil(padded.y * 2.0f / kGiProbeSpacing)) + 1, 2, kGiMaxProbesPerAxis),
+            std::clamp(static_cast<int>(std::ceil(padded.z * 2.0f / kGiProbeSpacing)) + 1, 2, kGiMaxProbesPerAxis));
+        const glm::vec3 gridSpan = glm::vec3(giGridCounts - 1) * kGiProbeSpacing;
+        giGridOrigin   = sceneBox.center() - gridSpan * 0.5f;
+        giProbeCount   = giGridCounts.x * giGridCounts.y * giGridCounts.z;
+        giProbesPerRow = std::min(giProbeCount, 32);
+        giProbeCursor  = 0;
+        giProbeGridBuilt = true;
+        Logger::Log(Logger::LogLevel::Info,
+                    ("D3D12Renderer: GI probe grid " + std::to_string(giGridCounts.x) + "x"
+                     + std::to_string(giGridCounts.y) + "x" + std::to_string(giGridCounts.z)
+                     + " (" + std::to_string(giProbeCount) + " probes)").c_str());
+    }
+
+    // Creates the octahedral probe atlases (irradiance RGBA16F + visibility
+    // RG16F, UAV) plus their SRV-only previous-frame copies. D3D12 can't
+    // zero-init a DEFAULT-heap texture at creation, so the zeros travel through
+    // an upload buffer recorded on the CURRENT command list — the probe kernel
+    // EMA-blends against the previous value, so undefined contents would poison
+    // the first update round. Happens once per session.
+    void ensureGiProbeAtlas(ID3D12GraphicsCommandList* cl)
+    {
+        if (giIrrTex || giProbeCount <= 0 || !cl) return;
+        // The atlas SRV/UAV descriptors overwrite heap slots that in-flight
+        // frames' tables already reference as nulls — flush the GPU once.
+        waitForAllFrames();
+
+        const int rows = (giProbeCount + giProbesPerRow - 1) / giProbesPerRow;
+        const UINT aw = static_cast<UINT>(giProbesPerRow * kGiProbeOctSize);
+        const UINT ah = static_cast<UINT>(rows * kGiProbeOctSize);
+
+        D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+        auto makeAtlas = [&](DXGI_FORMAT fmt, UINT texelBytes, bool uav,
+                             ComPtr<ID3D12Resource>& t) -> bool
+        {
+            D3D12_RESOURCE_DESC td{};
+            td.Dimension        = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            td.Width            = aw;
+            td.Height           = ah;
+            td.DepthOrArraySize = 1;
+            td.MipLevels        = 1;
+            td.Format           = fmt;
+            td.SampleDesc.Count = 1;
+            td.Flags            = uav ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS
+                                      : D3D12_RESOURCE_FLAG_NONE;
+            if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td,
+                       D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&t))))
+                return false;
+            // Zero the contents via an upload-buffer copy on the current list.
+            const UINT rowPitch = alignUp(aw * texelBytes, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
+            void* mapped = nullptr;
+            ComPtr<ID3D12Resource> staging =
+                createUploadBuffer(static_cast<UINT64>(rowPitch) * ah, &mapped);
+            if (!staging || !mapped) return false;
+            std::memset(mapped, 0, static_cast<size_t>(rowPitch) * ah);
+            D3D12_TEXTURE_COPY_LOCATION src{};
+            src.pResource                      = staging.Get();
+            src.Type                           = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            src.PlacedFootprint.Footprint      = { fmt, aw, ah, 1, rowPitch };
+            D3D12_TEXTURE_COPY_LOCATION dst{};
+            dst.pResource        = t.Get();
+            dst.Type             = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            dst.SubresourceIndex = 0;
+            cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+            // The staging buffer is read at execute time — keep it alive past
+            // every frame in flight before releasing (swept in Render()).
+            m_retiredTextures.emplace_back(std::move(staging), static_cast<int>(k_frameCount) + 2);
+            return true;
+        };
+
+        bool ok = makeAtlas(DXGI_FORMAT_R16G16B16A16_FLOAT, 8, true,  giIrrTex)
+               && makeAtlas(DXGI_FORMAT_R16G16_FLOAT,       4, true,  giVisTex)
+               // SRV-only copies of the previous frame (typed UAV loads of
+               // these formats are optional → the kernel reads SRVs instead).
+               && makeAtlas(DXGI_FORMAT_R16G16B16A16_FLOAT, 8, false, giIrrPrevTex)
+               && makeAtlas(DXGI_FORMAT_R16G16_FLOAT,       4, false, giVisPrevTex);
+        if (!ok)
+        {
+            giIrrTex.Reset(); giVisTex.Reset(); giIrrPrevTex.Reset(); giVisPrevTex.Reset();
+            return;
+        }
+        // Transition out of COPY_DEST into the steady-state layout.
+        barrier12(cl, giIrrTex.Get(),     D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        barrier12(cl, giVisTex.Get(),     D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        barrier12(cl, giIrrPrevTex.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        barrier12(cl, giVisPrevTex.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        giIrrState     = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        giVisState     = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        giIrrPrevState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        giVisPrevState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+
+        // Descriptors: compute-kernel slots + probe UAV table + scene atlas SRVs.
+        srvIntoHeapSlot(giIrrPrevTex.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, giSrvCpu(2));
+        srvIntoHeapSlot(giVisPrevTex.Get(), DXGI_FORMAT_R16G16_FLOAT,       giSrvCpu(3));
+        {
+            D3D12_UNORDERED_ACCESS_VIEW_DESC uv{};
+            uv.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+            uv.Format        = DXGI_FORMAT_R16G16B16A16_FLOAT;
+            device->CreateUnorderedAccessView(giIrrTex.Get(), nullptr, &uv, giSrvCpu(6));
+            uv.Format        = DXGI_FORMAT_R16G16_FLOAT;
+            device->CreateUnorderedAccessView(giVisTex.Get(), nullptr, &uv, giSrvCpu(7));
+        }
+        if (sceneSrvHeap)
+        {
+            srvIntoHeapSlot(giIrrTex.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, sceneSrvCpu(5));
+            srvIntoHeapSlot(giVisTex.Get(), DXGI_FORMAT_R16G16_FLOAT,       sceneSrvCpu(6));
+        }
+    }
+
+    void destroyGiTargets()
+    {
+        giGBufPosTex.Reset(); giGBufNormTex.Reset(); giGBufDepth.Reset(); giRawTex.Reset();
+        giHistTex[0].Reset(); giHistTex[1].Reset(); giResultTex.Reset();
+        giShadowW = giShadowH = 0;
+        giHistValid = false;
+        giIrrTex.Reset(); giVisTex.Reset(); giIrrPrevTex.Reset(); giVisPrevTex.Reset();
+        giProbeGridBuilt = false;
+        giProbeCount = 0;
+        giProbeCursor = 0;
+    }
+
+    // The 4-stage shadow-mask pipeline (G-buffer → compute rays → temporal →
+    // blur). Returns true when the mask in giResultTex is valid this frame.
+    // Leaves giSrvHeap bound as the descriptor heap — the caller restores
+    // sceneSrvHeap + scene root signature + RTV/viewport afterwards.
+    bool runGiShadow(ID3D12GraphicsCommandList* cl, UINT fi,
+                     const std::vector<const DrawCall*>& opaqueDCs,
+                     const glm::mat4& viewProj, int w, int h,
+                     const RenderWorld& rw, ContentManager* cm)
+    {
+        createGiPipelines();
+        if (!giSupported || !giGBufPSO || !giShadowPSO || !giTemporalPSO || !giBlurPSO)
+            return false;
+        ensureGiShadowTargets(w, h);
+        if (!giGBufPosTex) return false;
+
+        D3D12_VIEWPORT vp{ 0, 0, float(giShadowW), float(giShadowH), 0.0f, 1.0f };
+        D3D12_RECT     sc{ 0, 0, giShadowW, giShadowH };
+
+        // ── 1. World-space G-buffer (position + normal MRT, half-res). Same
+        // draw set + camera as the scene pass (the aspect/misalign lesson).
+        {
+            barrier12(cl, giGBufPosTex.Get(),  giGBufPosState,  D3D12_RESOURCE_STATE_RENDER_TARGET);
+            barrier12(cl, giGBufNormTex.Get(), giGBufNormState, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            giGBufPosState = giGBufNormState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+
+            D3D12_CPU_DESCRIPTOR_HANDLE rtvs[2] = { giRtvCpu(0), giRtvCpu(1) };
+            D3D12_CPU_DESCRIPTOR_HANDLE dsv     = giDsvHeap->GetCPUDescriptorHandleForHeapStart();
+            cl->OMSetRenderTargets(2, rtvs, FALSE, &dsv);
+            const float clear[4] = { 0, 0, 0, 0 }; // a = 0 → background
+            cl->ClearRenderTargetView(rtvs[0], clear, 0, nullptr);
+            cl->ClearRenderTargetView(rtvs[1], clear, 0, nullptr);
+            cl->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+            cl->RSSetViewports(1, &vp);
+            cl->RSSetScissorRects(1, &sc);
+            cl->SetPipelineState(giGBufPSO.Get());
+            cl->SetGraphicsRootSignature(giGBufRS.Get());
+            cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+            const D3D12_GPU_VIRTUAL_ADDRESS ringBase = giGBufObjRing[fi]->GetGPUVirtualAddress();
+            UINT gbufIdx = 0;
+            for (const DrawCall* dc : opaqueDCs)
+            {
+                if (!dc->contributesAO) continue; // precip/particles don't shade the mask
+                const GpuMesh* mesh = resolveMesh(dc->meshAssetId, cm);
+                const GpuMesh& m    = mesh ? *mesh : cube;
+                if (!m.indexCount) continue;
+                cl->IASetVertexBuffers(0, 1, &m.vbv);
+                cl->IASetIndexBuffer(&m.ibv);
+                auto drawOne = [&](const glm::mat4& t)
+                {
+                    if (gbufIdx >= k_maxDraws) return;
+                    PerObjectCB o{};
+                    o.mvp = viewProj * t; o.model = t;
+                    if (giGBufObjPtr[fi])
+                        std::memcpy(giGBufObjPtr[fi] + static_cast<size_t>(gbufIdx) * k_cbSlot,
+                                    &o, sizeof(o));
+                    cl->SetGraphicsRootConstantBufferView(0,
+                        ringBase + static_cast<UINT64>(gbufIdx) * k_cbSlot);
+                    cl->DrawIndexedInstanced(m.indexCount, 1, 0, 0, 0);
+                    ++gbufIdx;
+                };
+                if (!dc->instanceTransforms.empty())
+                    for (const glm::mat4& t : dc->instanceTransforms) drawOne(t);
+                else
+                    drawOne(dc->transform);
+            }
+            const auto kBoth = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE
+                             | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+            barrier12(cl, giGBufPosTex.Get(),  giGBufPosState,  kBoth);
+            barrier12(cl, giGBufNormTex.Get(), giGBufNormState, kBoth);
+            giGBufPosState = giGBufNormState = kBoth;
+        }
+
+        // ── 2. Shadow rays (compute, 1 cone-jittered ray/pixel vs the BVH) ──
+        {
+            glm::vec3 towardLight, lightColorIntensity;
+            d3d12DominantDirectionalLight(rw, towardLight, lightColorIntensity);
+            giFrameSeed += 1.0f;
+            struct { glm::vec4 sunDirRadius, frame; } scb{};
+            scb.sunDirRadius = glm::vec4(towardLight, glm::radians(giLightRadius));
+            scb.frame        = glm::vec4(giFrameSeed, float(giShadowW), float(giShadowH), 0.0f);
+            if (giShadowCBPtr[fi]) std::memcpy(giShadowCBPtr[fi], &scb, sizeof(scb));
+            glm::ivec4 cnt(giInstanceCount, 0, 0, 0);
+            if (giCountCBPtr[fi]) std::memcpy(giCountCBPtr[fi], &cnt, sizeof(cnt));
+
+            if (giRawState != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+            {
+                barrier12(cl, giRawTex.Get(), giRawState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                giRawState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+            }
+
+            ID3D12DescriptorHeap* heaps[] = { giSrvHeap.Get() };
+            cl->SetDescriptorHeaps(1, heaps);
+            cl->SetComputeRootSignature(giComputeRS.Get());
+            cl->SetPipelineState(giShadowPSO.Get());
+            cl->SetComputeRootConstantBufferView(0, giShadowCB[fi]->GetGPUVirtualAddress());
+            cl->SetComputeRootConstantBufferView(1, giCountCB[fi]->GetGPUVirtualAddress());
+            cl->SetComputeRootDescriptorTable(2, giSrvGpu(0));
+            cl->SetComputeRootShaderResourceView(3, giNodeSB->GetGPUVirtualAddress());
+            cl->SetComputeRootShaderResourceView(4, giTriSB->GetGPUVirtualAddress());
+            cl->SetComputeRootShaderResourceView(5, giInstanceSB[fi]->GetGPUVirtualAddress());
+            cl->SetComputeRootDescriptorTable(6, giSrvGpu(4)); // u0 = raw
+            cl->Dispatch(static_cast<UINT>((giShadowW + 7) / 8),
+                         static_cast<UINT>((giShadowH + 7) / 8), 1);
+
+            barrier12(cl, giRawTex.Get(), giRawState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            giRawState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        }
+
+        // ── 3. Temporal accumulation (fullscreen, ping-pong history) ────────
+        const int curIdx = giHistIdx, prevIdx = 1 - curIdx;
+        {
+            barrier12(cl, giHistTex[curIdx].Get(), giHistState[curIdx],
+                      D3D12_RESOURCE_STATE_RENDER_TARGET);
+            giHistState[curIdx] = D3D12_RESOURCE_STATE_RENDER_TARGET;
+            if (giHistState[prevIdx] != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)
+            {
+                barrier12(cl, giHistTex[prevIdx].Get(), giHistState[prevIdx],
+                          D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                giHistState[prevIdx] = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+            }
+
+            struct { glm::mat4 prevViewProj; glm::vec4 params; } tcb{};
+            tcb.prevViewProj = giPrevViewProj;
+            tcb.params = glm::vec4(giHistValid ? 0.9f : 0.0f,
+                                   float(giShadowW), float(giShadowH), 0.0f);
+            if (giTemporalCBPtr[fi]) std::memcpy(giTemporalCBPtr[fi], &tcb, sizeof(tcb));
+
+            D3D12_CPU_DESCRIPTOR_HANDLE rtv = giRtvCpu(2 + static_cast<UINT>(curIdx));
+            cl->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+            cl->RSSetViewports(1, &vp);
+            cl->RSSetScissorRects(1, &sc);
+            cl->SetPipelineState(giTemporalPSO.Get());
+            cl->SetGraphicsRootSignature(giFsRS.Get());
+            cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            cl->SetGraphicsRootConstantBufferView(0, giTemporalCB[fi]->GetGPUVirtualAddress());
+            cl->SetGraphicsRootDescriptorTable(1, giSrvGpu(curIdx == 0 ? 8u : 11u));
+            cl->DrawInstanced(3, 1, 0, 0);
+        }
+        giHistValid    = true;
+        giHistIdx      = prevIdx;
+        giPrevViewProj = viewProj; // for NEXT frame's reprojection
+
+        // ── 4. Spatial blur → the mask the scene shader samples ─────────────
+        {
+            barrier12(cl, giHistTex[curIdx].Get(), giHistState[curIdx],
+                      D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            giHistState[curIdx] = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+            barrier12(cl, giResultTex.Get(), giResultState, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            giResultState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+
+            glm::vec4 texel(1.0f / float(giShadowW), 1.0f / float(giShadowH), 0.0f, 0.0f);
+            if (giBlurCBPtr[fi]) std::memcpy(giBlurCBPtr[fi], &texel, sizeof(texel));
+
+            D3D12_CPU_DESCRIPTOR_HANDLE rtv = giRtvCpu(4);
+            cl->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+            cl->SetPipelineState(giBlurPSO.Get());
+            cl->SetGraphicsRootConstantBufferView(0, giBlurCB[fi]->GetGPUVirtualAddress());
+            cl->SetGraphicsRootDescriptorTable(1, giSrvGpu(curIdx == 0 ? 14u : 17u));
+            cl->DrawInstanced(3, 1, 0, 0);
+
+            barrier12(cl, giResultTex.Get(), giResultState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            giResultState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        }
+        return true;
+    }
+
+    void dispatchGiProbeUpdate(ID3D12GraphicsCommandList* cl, UINT fi, const RenderWorld& rw)
+    {
+        if (!giProbePSO || giInstanceCount == 0) return;
+        ensureGiProbeGrid(rw);
+        if (!giProbeGridBuilt) return;
+        ensureGiProbeAtlas(cl);
+        if (!giIrrTex || !giVisTex) return;
+
+        const int budget = std::min(giProbeBudgetPerFrame > 0 ? giProbeBudgetPerFrame : 1,
+                                    giProbeCount);
+
+        // Previous-frame values travel as SRV copies (no typed UAV loads of
+        // RGBA16F/RG16F on baseline hardware); texels outside this batch keep
+        // their values in the canonical atlases since the kernel never writes them.
+        barrier12(cl, giIrrTex.Get(),     giIrrState,     D3D12_RESOURCE_STATE_COPY_SOURCE);
+        barrier12(cl, giVisTex.Get(),     giVisState,     D3D12_RESOURCE_STATE_COPY_SOURCE);
+        barrier12(cl, giIrrPrevTex.Get(), giIrrPrevState, D3D12_RESOURCE_STATE_COPY_DEST);
+        barrier12(cl, giVisPrevTex.Get(), giVisPrevState, D3D12_RESOURCE_STATE_COPY_DEST);
+        cl->CopyResource(giIrrPrevTex.Get(), giIrrTex.Get());
+        cl->CopyResource(giVisPrevTex.Get(), giVisTex.Get());
+        barrier12(cl, giIrrTex.Get(),     D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        barrier12(cl, giVisTex.Get(),     D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        barrier12(cl, giIrrPrevTex.Get(), D3D12_RESOURCE_STATE_COPY_DEST,   D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        barrier12(cl, giVisPrevTex.Get(), D3D12_RESOURCE_STATE_COPY_DEST,   D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        giIrrState     = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        giVisState     = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        giIrrPrevState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        giVisPrevState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+
+        struct GiProbeCBData
+        {
+            glm::vec4 gridOrigin, gridCounts, rayParams, sunDirRadius, sunColor, skyAmbient;
+            glm::vec4 lightPosRange[8], lightColorType[8], lightDirCos[8];
+        } pcb{};
+        pcb.gridOrigin = glm::vec4(giGridOrigin, kGiProbeSpacing);
+        pcb.gridCounts = glm::vec4(glm::vec3(giGridCounts), float(giProbesPerRow));
+        const float maxDist = glm::length(glm::vec3(giGridCounts) * kGiProbeSpacing) + kGiProbeSpacing;
+        pcb.rayParams = glm::vec4(maxDist, 0.92f, float(giProbeCursor), float(budget));
+        glm::vec3 towardLight, lightColorIntensity;
+        d3d12DominantDirectionalLight(rw, towardLight, lightColorIntensity);
+        int lightCount = 0;
+        for (const LightData& l : rw.lights)
+        {
+            if (lightCount >= 8) break;
+            if ((l.type != 1 && l.type != 2) || l.intensity <= 0.0f) continue;
+            pcb.lightPosRange[lightCount]  = glm::vec4(l.position, std::max(l.range, 1e-4f));
+            pcb.lightColorType[lightCount] = glm::vec4(l.color * l.intensity, float(l.type));
+            pcb.lightDirCos[lightCount]    = glm::vec4(l.direction, l.spotAngleCos);
+            ++lightCount;
+        }
+        pcb.sunDirRadius = glm::vec4(towardLight, float(lightCount));
+        pcb.sunColor     = glm::vec4(lightColorIntensity, 0.0f);
+        pcb.skyAmbient   = glm::vec4(rw.ambient, 0.0f);
+        if (giProbeCBPtr[fi]) std::memcpy(giProbeCBPtr[fi], &pcb, sizeof(pcb));
+        glm::ivec4 cnt(giInstanceCount, 0, 0, 0);
+        if (giCountCBPtr[fi]) std::memcpy(giCountCBPtr[fi], &cnt, sizeof(cnt));
+
+        ID3D12DescriptorHeap* heaps[] = { giSrvHeap.Get() };
+        cl->SetDescriptorHeaps(1, heaps);
+        cl->SetComputeRootSignature(giComputeRS.Get());
+        cl->SetPipelineState(giProbePSO.Get());
+        cl->SetComputeRootConstantBufferView(0, giProbeCB[fi]->GetGPUVirtualAddress());
+        cl->SetComputeRootConstantBufferView(1, giCountCB[fi]->GetGPUVirtualAddress());
+        cl->SetComputeRootDescriptorTable(2, giSrvGpu(0));
+        cl->SetComputeRootShaderResourceView(3, giNodeSB->GetGPUVirtualAddress());
+        cl->SetComputeRootShaderResourceView(4, giTriSB->GetGPUVirtualAddress());
+        cl->SetComputeRootShaderResourceView(5, giInstanceSB[fi]->GetGPUVirtualAddress());
+        cl->SetComputeRootDescriptorTable(6, giSrvGpu(6)); // u0 = irr, u1 = vis
+        cl->Dispatch(static_cast<UINT>(budget), 1, 1);
+
+        // UAV write → scene pixel-shader sampling (the transition doubles as the
+        // UAV barrier between the probe dispatch and the scene pass).
+        barrier12(cl, giIrrTex.Get(), giIrrState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        barrier12(cl, giVisTex.Get(), giVisState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        giIrrState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        giVisState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+
+        giProbeCursor = (giProbeCursor + budget) % giProbeCount;
+    }
+
     void uploadMesh(GpuMesh& mesh, const std::vector<float>& interleaved,
                     const std::vector<uint32_t>& indices)
     {
@@ -3859,7 +5450,7 @@ struct D3D12RendererImpl
         // Root signature = scene root sig + an extra root CBV at param[3] for b2 (bones).
         // Params [0..2] and [4] (the t1 base-color table) match the scene root sig so the
         // shared PS works; param[3] (bones) is the skinned-only addition.
-        D3D12_DESCRIPTOR_RANGE srvRanges[2]{};
+        D3D12_DESCRIPTOR_RANGE srvRanges[3]{};
         srvRanges[0].RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
         srvRanges[0].NumDescriptors                    = 1;
         srvRanges[0].BaseShaderRegister                = 0; // t0
@@ -3870,6 +5461,14 @@ struct D3D12RendererImpl
         srvRanges[1].BaseShaderRegister                = 2; // t2
         srvRanges[1].RegisterSpace                     = 0;
         srvRanges[1].OffsetInDescriptorsFromTableStart = 1;
+        // GI mask + probe atlases (t4..t6) — the shared scene PS statically
+        // references them, so this root sig must cover them exactly like the
+        // scene root sig (same heap slots [4..6]).
+        srvRanges[2].RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        srvRanges[2].NumDescriptors                    = 3;
+        srvRanges[2].BaseShaderRegister                = 4; // t4..t6
+        srvRanges[2].RegisterSpace                     = 0;
+        srvRanges[2].OffsetInDescriptorsFromTableStart = 4;
 
         // Per-draw base-color table (t1) — matches the scene root sig's param[3].
         D3D12_DESCRIPTOR_RANGE albedoRange{};
@@ -3887,7 +5486,7 @@ struct D3D12RendererImpl
         params[1].Descriptor       = { 1, 0 }; // b1 per-frame
         params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
         params[2].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        params[2].DescriptorTable.NumDescriptorRanges = 2;
+        params[2].DescriptorTable.NumDescriptorRanges = 3;
         params[2].DescriptorTable.pDescriptorRanges   = srvRanges;
         params[2].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
         params[3].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
@@ -3899,8 +5498,8 @@ struct D3D12RendererImpl
         params[4].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
 
         // Same static samplers as the scene root sig: s0 shadow linear-clamp, s1 AO point-clamp,
-        // s2 base-color linear-wrap. The shared PS references all three.
-        D3D12_STATIC_SAMPLER_DESC samplers[3]{};
+        // s2 base-color linear-wrap, s3 GI linear-clamp. The shared PS references all four.
+        D3D12_STATIC_SAMPLER_DESC samplers[4]{};
         samplers[0].Filter         = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
         samplers[0].AddressU = samplers[0].AddressV = samplers[0].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
         samplers[0].ShaderRegister = 0;
@@ -3913,11 +5512,15 @@ struct D3D12RendererImpl
         samplers[2].AddressU = samplers[2].AddressV = samplers[2].AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
         samplers[2].ShaderRegister = 2;
         samplers[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        samplers[3].Filter         = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+        samplers[3].AddressU = samplers[3].AddressV = samplers[3].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        samplers[3].ShaderRegister = 3;
+        samplers[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
         D3D12_ROOT_SIGNATURE_DESC rsd{};
         rsd.NumParameters     = 5;
         rsd.pParameters       = params;
-        rsd.NumStaticSamplers = 3;
+        rsd.NumStaticSamplers = 4;
         rsd.pStaticSamplers   = samplers;
         rsd.Flags             = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
@@ -4105,9 +5708,15 @@ void D3D12RendererImpl::createMaterialResources()
     cbv(3, 8); // b8 HeLighting (WPO VS)
     cbv(4, 9); // b9 HeParams   (WPO VS)
 
-    // Texture table: t2 (heTex0) then t4..t7 (heTexP0..3), two ranges → 5 consecutive heap
-    // slots. t3 is intentionally skipped (SPIRV-Cross leaves it unused for the mesh path).
-    D3D12_DESCRIPTOR_RANGE texRanges[2]{};
+    // Texture table: t2 (heTex0), t4..t7 (heTexP0..3), t10..t11 (heGIShadow +
+    // heGILocal, Material-ABI v2.1) and t12 (heCsm, Texture2DArray, v2.2) —
+    // four ranges → 8 consecutive heap slots. t3 is intentionally skipped
+    // (SPIRV-Cross leaves it unused for the mesh path); t8/t9 belong to the WPO
+    // custom-vertex UBOs. heCsmShadow() samples t12 behind csmSplits.w > 0 but
+    // is STATICALLY referenced, so the root signature must cover it — the heap
+    // slot holds a null Texture2DArray view (D3D12 keeps csmSplits.w = 0, so
+    // it is never actually sampled; mirrors "bind a dummy" in the preamble docs).
+    D3D12_DESCRIPTOR_RANGE texRanges[4]{};
     texRanges[0].RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
     texRanges[0].NumDescriptors                    = 1;
     texRanges[0].BaseShaderRegister                = 2; // t2
@@ -4118,17 +5727,30 @@ void D3D12RendererImpl::createMaterialResources()
     texRanges[1].BaseShaderRegister                = 4; // t4..t7
     texRanges[1].RegisterSpace                     = 0;
     texRanges[1].OffsetInDescriptorsFromTableStart = 1; // heap slots 1..4
+    texRanges[2].RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    texRanges[2].NumDescriptors                    = 2;
+    texRanges[2].BaseShaderRegister                = 10; // t10..t11 (GI masks)
+    texRanges[2].RegisterSpace                     = 0;
+    texRanges[2].OffsetInDescriptorsFromTableStart = 5; // heap slots 5..6
+    texRanges[3].RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    texRanges[3].NumDescriptors                    = 1;
+    texRanges[3].BaseShaderRegister                = 12; // t12 (heCsm array, dummy)
+    texRanges[3].RegisterSpace                     = 0;
+    texRanges[3].OffsetInDescriptorsFromTableStart = 7; // heap slot 7
     params[5].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    params[5].DescriptorTable.NumDescriptorRanges = 2;
+    params[5].DescriptorTable.NumDescriptorRanges = 4;
     params[5].DescriptorTable.pDescriptorRanges   = texRanges;
     params[5].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
 
-    D3D12_STATIC_SAMPLER_DESC samp[5]{};
-    const UINT sregs[5] = { 2, 4, 5, 6, 7 };
-    for (int i = 0; i < 5; ++i)
+    // s2 + s4..s7 linear-wrap (tiling material textures); s10..s12 linear-clamp
+    // (screen-space GI masks + CSM dummy must not wrap at the viewport edge).
+    D3D12_STATIC_SAMPLER_DESC samp[8]{};
+    const UINT sregs[8] = { 2, 4, 5, 6, 7, 10, 11, 12 };
+    for (int i = 0; i < 8; ++i)
     {
         samp[i].Filter         = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-        samp[i].AddressU = samp[i].AddressV = samp[i].AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+        samp[i].AddressU = samp[i].AddressV = samp[i].AddressW =
+            (i < 5) ? D3D12_TEXTURE_ADDRESS_MODE_WRAP : D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
         samp[i].ShaderRegister   = sregs[i];
         samp[i].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
         samp[i].MaxLOD           = D3D12_FLOAT32_MAX;
@@ -4137,7 +5759,7 @@ void D3D12RendererImpl::createMaterialResources()
     D3D12_ROOT_SIGNATURE_DESC rsd{};
     rsd.NumParameters     = 6;
     rsd.pParameters       = params;
-    rsd.NumStaticSamplers = 5;
+    rsd.NumStaticSamplers = 8;
     rsd.pStaticSamplers   = samp;
     rsd.Flags             = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
     ComPtr<ID3DBlob> sig, err;
@@ -4157,7 +5779,7 @@ void D3D12RendererImpl::createMaterialResources()
     // the bound descriptor heap to this one and restores sceneSrvHeap afterwards.
     {
         D3D12_DESCRIPTOR_HEAP_DESC hd{};
-        hd.NumDescriptors = 5;
+        hd.NumDescriptors = 8; // [0..4] heTex0 + heTexP0..3, [5..6] GI masks (t10/t11), [7] heCsm dummy (t12)
         hd.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
         hd.Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         if (FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_matSrvHeap))))
@@ -4174,12 +5796,39 @@ void D3D12RendererImpl::createMaterialResources()
         const UINT inc = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         D3D12_CPU_DESCRIPTOR_HANDLE h = m_matSrvHeap->GetCPUDescriptorHandleForHeapStart();
         for (int i = 0; i < 5; ++i) { device->CreateShaderResourceView(nullptr, &nullSrv, h); h.ptr += inc; }
+        // Slots 5..6: null GI-mask views (rewritten to the ray-traced mask + a
+        // white local mask when the GI targets are created; heLitP additionally
+        // gates its samples on giParams.z, which stays 0 until then).
+        {
+            D3D12_SHADER_RESOURCE_VIEW_DESC maskSrv = nullSrv;
+            maskSrv.Format = DXGI_FORMAT_R16_FLOAT;
+            device->CreateShaderResourceView(nullptr, &maskSrv, h); h.ptr += inc;
+            maskSrv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            device->CreateShaderResourceView(nullptr, &maskSrv, h); h.ptr += inc;
+        }
+        // Slot 7: null Texture2DArray for heCsm (t12) — the preamble declares a
+        // sampler2DArray, so the view DIMENSION must match even though D3D12
+        // never enables the CSM fallback (csmSplits.w stays 0).
+        {
+            D3D12_SHADER_RESOURCE_VIEW_DESC csmSrv{};
+            csmSrv.Format                        = DXGI_FORMAT_R32_FLOAT;
+            csmSrv.ViewDimension                 = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+            csmSrv.Shader4ComponentMapping       = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            csmSrv.Texture2DArray.MipLevels      = 1;
+            csmSrv.Texture2DArray.ArraySize      = 1;
+            device->CreateShaderResourceView(nullptr, &csmSrv, h);
+        }
     }
 
     // Per-frame rings: HeLighting (once/frame) + U ring + HeParams ring (per draw, 256-B slots).
     for (UINT f = 0; f < k_frameCount; ++f)
     {
-        m_matLightCB[f]   = createUploadBuffer(k_matSlot, reinterpret_cast<void**>(&m_matLightPtr[f]));
+        // HeLighting: sized to the FULL v2.2 struct (832 B), NOT k_matSlot — the
+        // fill memcpy's sizeof(Lighting); a 256-B buffer was the same overflow
+        // bug D3D11/Vulkan had with their 64-B v1 allocations.
+        m_matLightCB[f]   = createUploadBuffer(
+            alignUp(static_cast<UINT>(sizeof(HE::MaterialShaderLibrary::Lighting)), k_cbSlot),
+            reinterpret_cast<void**>(&m_matLightPtr[f]));
         m_matObjRing[f]   = createUploadBuffer(static_cast<UINT64>(k_matMaxDraws) * k_matSlot,
                                                reinterpret_cast<void**>(&m_matObjPtr[f]));
         m_matParamRing[f] = createUploadBuffer(static_cast<UINT64>(k_matMaxDraws) * k_matSlot,
@@ -4490,6 +6139,25 @@ void D3D12Renderer::Shutdown()
     m_impl->skinnedRootSig.Reset();
     for (UINT i = 0; i < k_frameCount; ++i)
         m_impl->m_bonesCB[i].Reset();
+    // GI resources (accel buffers, targets, atlases, pipelines, heaps, CBs).
+    // waitForAllFrames above already flushed the GPU.
+    m_impl->destroyGiAccel();
+    m_impl->destroyGiTargets();
+    m_impl->m_retiredTextures.clear(); // includes GI buffers just retired above
+    m_impl->giGBufRS.Reset(); m_impl->giComputeRS.Reset(); m_impl->giFsRS.Reset();
+    m_impl->giGBufPSO.Reset(); m_impl->giShadowPSO.Reset(); m_impl->giProbePSO.Reset();
+    m_impl->giTemporalPSO.Reset(); m_impl->giBlurPSO.Reset();
+    m_impl->giSrvHeap.Reset(); m_impl->giRtvHeap.Reset(); m_impl->giDsvHeap.Reset();
+    for (UINT i = 0; i < k_frameCount; ++i)
+    {
+        m_impl->giShadowCB[i].Reset();   m_impl->giShadowCBPtr[i]   = nullptr;
+        m_impl->giCountCB[i].Reset();    m_impl->giCountCBPtr[i]    = nullptr;
+        m_impl->giTemporalCB[i].Reset(); m_impl->giTemporalCBPtr[i] = nullptr;
+        m_impl->giBlurCB[i].Reset();     m_impl->giBlurCBPtr[i]     = nullptr;
+        m_impl->giProbeCB[i].Reset();    m_impl->giProbeCBPtr[i]    = nullptr;
+        m_impl->giGBufObjRing[i].Reset(); m_impl->giGBufObjPtr[i]   = nullptr;
+    }
+    m_impl->giPipelinesBuilt = false;
     m_impl->pso.Reset();
     m_impl->transparentPSO.Reset();
     m_impl->depthPSO.Reset();
@@ -4585,6 +6253,12 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         }
     }
 
+    // GI acceleration structures: refresh the BLAS cache + this frame slot's
+    // instance array right after extraction + bounds refresh (UNCULLED —
+    // off-screen casters still occlude), mirroring the GL/D3D11 placement.
+    // No-op when GI is off.
+    p.updateGiAccel(m_contentManager, p.m_renderWorld, p.frameIndex);
+
     p.m_culler.cull(p.m_renderWorld, p.m_visible);
     p.m_sorter.sort(p.m_renderWorld, p.m_visible, p.m_sortedIndices);
     p.statTotal   = static_cast<uint32_t>(p.m_renderWorld.objects.size());
@@ -4601,7 +6275,12 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     const bool      shadows   = p.m_renderWorld.shadow.enabled && p.shadowDepth && p.depthPSO;
     const glm::mat4 lightClip = kD3DClipFix * p.m_renderWorld.shadow.viewProj;
 
-    // Per-frame constants for this frame slot.
+    // Per-frame constants for this frame slot. A lambda because the GI/SSAO
+    // decision is only known inside the backbuffer pass — the mapped CB is
+    // REWRITTEN there with the final giActive/aoActive flags. The GPU reads it
+    // at execute time, so the last CPU write before submission wins for every
+    // draw of the frame (single buffer per slot, unlike the per-draw rings).
+    auto fillPerFrame = [&](bool giActive, bool aoActive)
     {
         PerFrameCB f{};
         f.cameraPos     = glm::vec4(p.m_renderWorld.camera.position, 1.0f);
@@ -4619,40 +6298,73 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         f.shadowEnabled = glm::ivec4(shadows ? 1 : 0, 0, 0, 0);
         f.sunDir = glm::vec4(p.m_renderWorld.sunDirection, 0.0f);
         f.fog    = glm::vec4(m_environment.fogDensity, m_environment.fogHeightFalloff, 0, 0);
-        f.viewport = glm::vec4(float(width), float(height),
-                               (p.ssaoEnabled && p.ssaoReady) ? 1.0f : 0.0f, 0.0f);
+        f.viewport = glm::vec4(float(width), float(height), aoActive ? 1.0f : 0.0f, 0.0f);
+        f.giParams     = glm::vec4(giActive ? 1.0f : 0.0f, p.giIndirectIntensity, 0.0f, 0.0f);
+        f.giGridOrigin = glm::vec4(p.giGridOrigin, D3D12RendererImpl::kGiProbeSpacing);
+        f.giGridCounts = glm::vec4(glm::vec3(p.giGridCounts), float(p.giProbesPerRow));
         if (p.perFramePtr[p.frameIndex])
             std::memcpy(p.perFramePtr[p.frameIndex], &f, sizeof(f));
-    }
+    };
+    fillPerFrame(false, p.ssaoEnabled && p.ssaoReady);
 
 #if defined(HE_HAVE_SHADERC)
-    // A4: reset this frame slot's material ring/descriptor cursor + fill the shared
-    // HeLighting CB once (identical for every graph-material draw this frame). DrawScene
-    // runs once per frame, so this resets exactly once. Mirrors the Vulkan A4 HeLighting fill.
+    // A4: reset this frame slot's material ring/descriptor cursor once per frame.
     if (p.m_matReady)
-    {
         p.m_matDrawCursor[p.frameIndex] = 0;
+    // Fill the shared HeLighting CB (identical for every graph-material draw
+    // this frame). A lambda because giParams.z is only known after the GI
+    // passes ran (rewritten in the backbuffer branch — the GPU reads the mapped
+    // buffer at execute time, so the last write wins). Now fills the FULL v2
+    // light window from the dominant directional light (was sun-only sky values
+    // before — graph materials never saw point/spot lights on D3D12 and stayed
+    // sun-lit at night). Mirrors the D3D11 fillMatLight.
+    auto fillMatLight = [&](bool giActive)
+    {
+        if (!(p.m_matReady && p.m_matLightPtr[p.frameIndex])) return;
         HE::MaterialShaderLibrary::Lighting lit{};
-        lit.sunDir[0] = p.m_renderWorld.sunDirection.x;
-        lit.sunDir[1] = p.m_renderWorld.sunDirection.y;
-        lit.sunDir[2] = p.m_renderWorld.sunDirection.z;
+        glm::vec3 matSunDir, matSunColor;
+        d3d12DominantDirectionalLight(p.m_renderWorld, matSunDir, matSunColor);
+        lit.sunDir[0] = matSunDir.x;
+        lit.sunDir[1] = matSunDir.y;
+        lit.sunDir[2] = matSunDir.z;
         // Engine seconds for the node graph's Time input (HE_SKY_TIME pins it for
         // deterministic headless captures, mirroring the sky clock + GL/Vulkan exactly).
         static const char* s_timeOv = std::getenv("HE_SKY_TIME");
         lit.sunDir[3] = (s_timeOv && *s_timeOv)
             ? static_cast<float>(std::atof(s_timeOv))
             : static_cast<float>(SDL_GetTicks()) / 1000.0f;
-        const glm::vec3 sc = m_environment.sunColor;
-        lit.sunColor[0] = sc.r; lit.sunColor[1] = sc.g; lit.sunColor[2] = sc.b;
+        lit.sunColor[0] = matSunColor.r; lit.sunColor[1] = matSunColor.g; lit.sunColor[2] = matSunColor.b;
         lit.ambient[0] = p.m_renderWorld.ambient.r;
         lit.ambient[1] = p.m_renderWorld.ambient.g;
         lit.ambient[2] = p.m_renderWorld.ambient.b;
         lit.camPos[0] = p.m_renderWorld.camera.position.x;
         lit.camPos[1] = p.m_renderWorld.camera.position.y;
         lit.camPos[2] = p.m_renderWorld.camera.position.z;
-        if (p.m_matLightPtr[p.frameIndex])
-            std::memcpy(p.m_matLightPtr[p.frameIndex], &lit, sizeof(lit));
-    }
+        // Full light window for heLitP() — same first-8 order as the built-in
+        // shaders (keep the backend copies of this fill in sync).
+        {
+            const int lc = std::min(static_cast<int>(p.m_renderWorld.lights.size()), 8);
+            for (int li = 0; li < lc; ++li)
+            {
+                const LightData& ld = p.m_renderWorld.lights[li];
+                lit.lightPos[li][0] = ld.position.x;  lit.lightPos[li][1] = ld.position.y;
+                lit.lightPos[li][2] = ld.position.z;  lit.lightPos[li][3] = static_cast<float>(ld.type);
+                lit.lightDir[li][0] = ld.direction.x; lit.lightDir[li][1] = ld.direction.y;
+                lit.lightDir[li][2] = ld.direction.z; lit.lightDir[li][3] = ld.spotAngleCos;
+                lit.lightColor[li][0] = ld.color.r;   lit.lightColor[li][1] = ld.color.g;
+                lit.lightColor[li][2] = ld.color.b;   lit.lightColor[li][3] = ld.intensity;
+                lit.lightParams[li][0] = ld.range;
+            }
+            lit.counts[0] = static_cast<float>(lc);
+        }
+        lit.giParams[0] = static_cast<float>(width);
+        lit.giParams[1] = static_cast<float>(height);
+        lit.giParams[2] = giActive ? 1.0f : 0.0f;
+        // csmSplits stays 0 — D3D12 has a single shadow map, no cascade array,
+        // so the preamble's heCsmShadow() fallback is inert here (t12 = dummy).
+        std::memcpy(p.m_matLightPtr[p.frameIndex], &lit, sizeof(lit));
+    };
+    fillMatLight(false);
 #endif
 
     cl->SetGraphicsRootSignature(p.rootSig.Get());
@@ -4749,8 +6461,49 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             Logger::Log(Logger::LogLevel::Info, c);
         }
 
+        // ── Ray-traced GI (software BVH): shadow mask + probe update, BEFORE
+        // SSAO — when GI shades, SSAO is skipped entirely (probe indirect
+        // replaces AO, the ray mask replaces the shadow-map lookup). Half-res
+        // mask with the SAME viewProj as the scene pass.
+        bool giShadingActive = false;
+        if (p.giEnabled && p.giSupported && p.giInstanceCount > 0)
+        {
+            const bool maskOk = p.runGiShadow(cl, p.frameIndex, opaqueDCs, viewProj,
+                                              std::max(1, width / 2), std::max(1, height / 2),
+                                              p.m_renderWorld, m_contentManager);
+            if (maskOk)
+                p.dispatchGiProbeUpdate(cl, p.frameIndex, p.m_renderWorld);
+            giShadingActive = maskOk && p.giIrrTex && p.giVisTex && p.giProbeGridBuilt;
+
+            // Restore the scene RTV + depth + viewport after the GI passes
+            // changed them (same target resolution logic as the SSAO restore).
+            if (p.usingHDR && p.hdrRtvHeap)
+            {
+                auto hrtv = p.hdrRtvHeap->GetCPUDescriptorHandleForHeapStart();
+                auto vdsv = p.viewportDsvHeap->GetCPUDescriptorHandleForHeapStart();
+                cl->OMSetRenderTargets(1, &hrtv, FALSE, &vdsv);
+            }
+            else if (p.viewportRtvHeap)
+            {
+                auto vrtv = p.viewportRtvHeap->GetCPUDescriptorHandleForHeapStart();
+                auto vdsv = p.viewportDsvHeap->GetCPUDescriptorHandleForHeapStart();
+                cl->OMSetRenderTargets(1, &vrtv, FALSE, &vdsv);
+            }
+            else
+            {
+                auto rtv  = p.rtvHandle(p.frameIndex);
+                auto dsv0 = p.dsvHandle(0);
+                cl->OMSetRenderTargets(1, &rtv, FALSE, &dsv0);
+            }
+            D3D12_VIEWPORT gvp{ 0, 0, (float)width, (float)height, 0.0f, 1.0f };
+            D3D12_RECT     gsc{ 0, 0, width, height };
+            cl->RSSetViewports(1, &gvp);
+            cl->RSSetScissorRects(1, &gsc);
+        }
+
         // ── SSAO: run 3-pass (pos prepass → ssao → blur) before sky/geometry ─
-        if (p.ssaoEnabled && p.ssaoReady)
+        // Skipped entirely when GI shades this frame (probe indirect replaces AO).
+        if (!giShadingActive && p.ssaoEnabled && p.ssaoReady)
         {
             if (p.ssaoW != width || p.ssaoH != height)
                 p.createSSAOTargets(width, height);
@@ -4796,18 +6549,30 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             cl->RSSetScissorRects(1, &vsc);
         }
 
-        // Restore scene root signature + per-frame CBV after SSAO changed them.
+        // Restore scene root signature + per-frame CBV after GI/SSAO changed them.
         cl->SetGraphicsRootSignature(p.rootSig.Get());
         cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         cl->SetGraphicsRootConstantBufferView(1, p.perFrameCB[p.frameIndex]->GetGPUVirtualAddress());
 
-        // ── Geometry pass: bind combined sceneSrvHeap (shadow t0 + AO t2) ───
+        // Rewrite the per-frame + HeLighting CBs with the FINAL GI/AO decision
+        // (they were pre-filled with GI off before the render graph ran; the
+        // GPU only reads the mapped memory at execute time, so this write
+        // applies to every draw of the frame). SSAO counts as active only when
+        // GI is not shading — GI replaces AO entirely.
+        fillPerFrame(giShadingActive, !giShadingActive && p.ssaoEnabled && p.ssaoReady);
+#if defined(HE_HAVE_SHADERC)
+        fillMatLight(giShadingActive);
+#endif
+
+        // ── Geometry pass: bind combined sceneSrvHeap (shadow t0 + AO t2 +
+        // GI mask/atlases t4..t6 — slots [4..6] were written at GI-target/atlas
+        // creation and hold null views until then; uGIParams.x gates sampling).
         if (p.sceneSrvHeap)
         {
             ID3D12DescriptorHeap* heaps[] = { p.sceneSrvHeap.Get() };
             cl->SetDescriptorHeaps(1, heaps);
-            // sceneSrvHeap[0]=shadow(t0), [1]=AO-blur(t2); the descriptor table has 2 ranges
-            // starting at heap slot 0, so one SetGraphicsRootDescriptorTable covers both.
+            // The descriptor table's ranges all offset from heap slot 0, so one
+            // SetGraphicsRootDescriptorTable covers shadow + AO + GI.
             cl->SetGraphicsRootDescriptorTable(2, p.sceneSrvHeap->GetGPUDescriptorHandleForHeapStart());
         }
         std::sort(transparentDCs.begin(), transparentDCs.end(),
@@ -5378,7 +7143,26 @@ void D3D12Renderer::Render()
     p.frameIndex = p.swapchain->GetCurrentBackBufferIndex();
 }
 
-IRenderer::Capabilities D3D12Renderer::GetCapabilities() const { return { true, m_impl->postFxReady, false }; }
+IRenderer::Capabilities D3D12Renderer::GetCapabilities() const
+{
+    Capabilities c{};
+    c.supportsShadows        = true;
+    c.supportsPostProcessing = m_impl->postFxReady;
+    c.supportsHDR            = false;
+    // Software ray-traced DDGI via CS 5.0/5.1 (FL 11.0 baseline) — same
+    // CPU-BVH path as GL 4.3/D3D11; cleared if the GI pipelines fail to build.
+    c.supportsGlobalIllumination = m_impl->giSupported;
+    return c;
+}
+
+void D3D12Renderer::SetGISettings(const GISettings& s)
+{
+    auto& p = *m_impl;
+    p.giEnabled             = s.enabled && p.giSupported;
+    p.giIndirectIntensity   = std::max(0.0f, s.indirectIntensity);
+    p.giLightRadius         = std::clamp(s.lightRadius, 0.0f, 10.0f);
+    p.giProbeBudgetPerFrame = std::clamp(s.probeBudgetPerFrame, 1, 4096);
+}
 
 void* D3D12Renderer::GetDevice()       const { return m_impl->device.Get(); }
 void* D3D12Renderer::GetCommandQueue() const { return m_impl->cmdQueue.Get(); }
