@@ -580,9 +580,81 @@ private:
 	GiBlasRange  buildGiBlas(const HE::UUID& meshId);
 	void         updateGiAccel();  // lazy BLAS append + per-frame instance upload
 	void         destroyGiAccel();
+
+	// VK-B/C: the full GI pass chain — G-buffer prepass → shadow-ray compute →
+	// temporal → blur, plus the DDGI probe-update compute. Runs BEFORE the main
+	// scene render pass (compute/render passes can't nest), does its own
+	// extraction like runSSAO. First compute pipelines in this backend.
+	void createGiPipelines();                 // lazy, one attempt; failure → GI off for the session
+	void createGiTargets(uint32_t w, uint32_t h);
+	void destroyGiTargets();
+	void ensureGiProbeGrid();
+	void ensureGiProbeAtlas();
+	void destroyGiProbeAtlas();
+	void runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h);
+
+	static constexpr float kGiProbeSpacing     = 4.0f;
+	static constexpr int   kGiMaxProbesPerAxis = 10;
+	static constexpr int   kGiProbeOctSize     = 8;
+
+	bool m_giPipelinesTried = false;
+	bool m_giReady          = false; // pipelines built OK
+	bool m_giRanThisFrame   = false; // set by runGi(); cleared at top of Render()
+	// Pipelines + layouts.
+	VkDescriptorSetLayout m_giShadowDSL = VK_NULL_HANDLE; // 3 SSBOs + 2 samplers + storage image + UBO
+	VkDescriptorSetLayout m_giProbeDSL  = VK_NULL_HANDLE; // 3 SSBOs + 2 storage images + UBO
+	VkDescriptorSetLayout m_giFsDSL     = VK_NULL_HANDLE; // 3 samplers + UBO (temporal; blur uses binding 0 + UBO ignored)
+	VkPipelineLayout m_giShadowPL   = VK_NULL_HANDLE;
+	VkPipelineLayout m_giProbePL    = VK_NULL_HANDLE;
+	VkPipelineLayout m_giFsPL       = VK_NULL_HANDLE;
+	VkPipelineLayout m_giGBufPL     = VK_NULL_HANDLE;
+	VkPipeline m_giShadowPipe   = VK_NULL_HANDLE; // compute
+	VkPipeline m_giProbePipe    = VK_NULL_HANDLE; // compute
+	VkPipeline m_giGBufPipe     = VK_NULL_HANDLE;
+	VkPipeline m_giTemporalPipe = VK_NULL_HANDLE;
+	VkPipeline m_giBlurPipe     = VK_NULL_HANDLE;
+	VkRenderPass m_giGBufRP     = VK_NULL_HANDLE; // 2x RGBA16F + depth → SHADER_READ_ONLY
+	VkRenderPass m_giTemporalRP = VK_NULL_HANDLE; // RGBA16F → SHADER_READ_ONLY
+	VkRenderPass m_giBlurRP     = VK_NULL_HANDLE; // R16F → SHADER_READ_ONLY
+	// Half-res targets.
+	struct GiImage
+	{
+		VkImage        img  = VK_NULL_HANDLE;
+		VkDeviceMemory mem  = VK_NULL_HANDLE;
+		VkImageView    view = VK_NULL_HANDLE;
+	};
+	GiImage m_giGBufPos, m_giGBufNorm, m_giGBufDepth;
+	GiImage m_giRaw;                 // R16F storage image, lives in GENERAL
+	GiImage m_giHist[2];             // RGBA16F ping-pong temporal history
+	GiImage m_giResult;              // R16F blurred mask (sampled by scene.frag)
+	VkFramebuffer m_giGBufFB = VK_NULL_HANDLE, m_giHistFB[2] = { VK_NULL_HANDLE, VK_NULL_HANDLE },
+	              m_giResultFB = VK_NULL_HANDLE;
+	uint32_t  m_giW = 0, m_giH = 0;
+	int       m_giHistIdx   = 0;
+	bool      m_giHistValid = false;
+	glm::mat4 m_giPrevViewProj{1.0f};
+	float     m_giFrameSeed = 0.0f;
+	// Probe grid + atlases (GENERAL layout: imageLoad/Store + sampled).
+	glm::vec3  m_giGridOrigin{0.0f};
+	glm::ivec3 m_giGridCounts{0};
+	int  m_giProbeCount = 0, m_giProbesPerRow = 0, m_giProbeCursor = 0;
+	bool m_giProbeGridBuilt = false;
+	GiImage m_giIrrAtlas, m_giVisAtlas;
+	// Per-in-flight-frame descriptor sets + params UBOs (sets are rewritten each
+	// frame BEFORE recording — safe because that slot's fence was waited on).
+	VkDescriptorPool m_giDescPool = VK_NULL_HANDLE;
+	VkDescriptorSet  m_giShadowSet[3]   = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE };
+	VkDescriptorSet  m_giProbeSet[3]    = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE };
+	VkDescriptorSet  m_giTemporalSet[3] = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE };
+	VkDescriptorSet  m_giBlurSet[3]     = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE };
+	GiBuffer m_giShadowUBO[3];
+	GiBuffer m_giProbeUBO[3];
+	GiBuffer m_giTemporalUBO[3];
+	VkSampler m_giPointSampler = VK_NULL_HANDLE; // NEAREST clamp (G-buffer/raw/history reads)
 	// (Re)creates a host-visible STORAGE_BUFFER of at least `size` bytes and
 	// memcpys `data` into it. Grows by recreation; never shrinks.
-	bool         uploadGiBuffer(GiBuffer& b, const void* data, VkDeviceSize size);
+	bool         uploadGiBuffer(GiBuffer& b, const void* data, VkDeviceSize size,
+	                            VkBufferUsageFlags usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 	std::unordered_map<HE::UUID, GiBlasRange> m_giBlasCache;
 	std::vector<HE::GiBvhNode>     m_giNodesCpu;
 	std::vector<HE::GiBvhTriangle> m_giTrisCpu;
