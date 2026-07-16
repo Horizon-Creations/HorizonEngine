@@ -2783,7 +2783,19 @@ void main()
 	float posError  = length(pv.xyz - hist.rgb);
 	float tolerance = clamp(0.02 * clip.w, 0.01, 0.06);
 	float w = (posError < tolerance) ? clamp(uBlend, 0.0, 0.98) : 0.0;
-	FragColor = vec4(pv.xyz, mix(rawV, hist.a, w));
+	// Neighbourhood clamp: guards OCCLUDER motion (the position check above
+	// only covers receiver/camera motion) — moved shadows update in 1-2 frames
+	// instead of smearing for ~30.
+	vec2 texel = 1.0 / vec2(textureSize(uRaw, 0));
+	float nMin = rawV, nMax = rawV;
+	for (int x = -1; x <= 1; ++x)
+		for (int y = -1; y <= 1; ++y)
+		{
+			float r = texture(uRaw, vUV + vec2(float(x), float(y)) * texel).r;
+			nMin = min(nMin, r);
+			nMax = max(nMax, r);
+		}
+	FragColor = vec4(pv.xyz, mix(rawV, clamp(hist.a, nMin, nMax), w));
 }
 )GLSL";
 
@@ -2865,9 +2877,14 @@ void main()
 	{
 		vec3 albedo    = giInsts[hitInst].baseColor.rgb;
 		vec3 hitNormal = -dir;
-		float ndl = max(dot(hitNormal, uSunDirRadius.xyz), 0.0);
-		radiance = albedo * uSunColor.rgb * ndl;
 		vec3 hitPos = probePos + dir * dist;
+		float ndl = max(dot(hitNormal, uSunDirRadius.xyz), 0.0);
+		// Secondary shadow ray: hit surfaces are no longer assumed fully
+		// sun-lit — without this, probes flood shadowed regions with bright
+		// sun bounce (objects under a large occluder visibly glow).
+		if (ndl > 0.0 && giSceneAnyHit(hitPos + hitNormal * 0.05, uSunDirRadius.xyz, 0.02, 10000.0))
+			ndl = 0.0;
+		radiance = albedo * uSunColor.rgb * ndl;
 		int lightCount = int(uSunDirRadius.w);
 		for (int i = 0; i < lightCount; ++i)
 		{

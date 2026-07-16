@@ -33,5 +33,17 @@ void main()
     float posError  = length(pv.xyz - hist.rgb);
     float tolerance = clamp(0.02 * clip.w, 0.01, 0.06);
     float w = (posError < tolerance) ? clamp(uBlend.x, 0.0, 0.98) : 0.0;
-    FragColor = vec4(pv.xyz, mix(rawV, hist.a, w));
+    // Neighbourhood clamp: guards OCCLUDER motion (the position check above
+    // only covers receiver/camera motion) — moved shadows update in 1-2 frames
+    // instead of smearing for ~30.
+    vec2 texel = 1.0 / vec2(textureSize(uRaw, 0));
+    float nMin = rawV, nMax = rawV;
+    for (int x = -1; x <= 1; ++x)
+        for (int y = -1; y <= 1; ++y)
+        {
+            float r = texture(uRaw, vUV + vec2(float(x), float(y)) * texel).r;
+            nMin = min(nMin, r);
+            nMax = max(nMax, r);
+        }
+    FragColor = vec4(pv.xyz, mix(rawV, clamp(hist.a, nMin, nMax), w));
 }

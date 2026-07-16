@@ -89,6 +89,21 @@ bool giBlasClosest(int nodeOfs, int triOfs, vec3 o, vec3 d, float tMin, float tM
     return hit;
 }
 
+// Any-hit over all instances (occlusion only) — for the secondary shadow ray.
+bool giSceneAnyHitP(vec3 o, vec3 d, float tMin, float tMax)
+{
+    int instCount = int(uSunColor.w);
+    for (int i = 0; i < instCount; ++i)
+    {
+        vec3 oL = (giInsts[i].invTransform * vec4(o, 1.0)).xyz;
+        vec3 dL = mat3(giInsts[i].invTransform) * d;
+        float t;
+        if (giBlasClosest(giInsts[i].offsets.x, giInsts[i].offsets.y, oL, dL, tMin, tMax, t))
+            return true;
+    }
+    return false;
+}
+
 int giSceneClosestHit(vec3 o, vec3 d, float tMin, float tMax, out float tOut)
 {
     int   bestInst = -1;
@@ -147,9 +162,14 @@ void main()
     {
         vec3 albedo    = giInsts[hitInst].baseColor.rgb;
         vec3 hitNormal = -dir;
-        float ndl = max(dot(hitNormal, uSunDirRadius.xyz), 0.0);
-        radiance = albedo * uSunColor.rgb * ndl;
         vec3 hitPos = probePos + dir * dist;
+        float ndl = max(dot(hitNormal, uSunDirRadius.xyz), 0.0);
+        // Secondary shadow ray: hit surfaces are no longer assumed fully
+        // sun-lit — without this, probes flood shadowed regions with bright
+        // sun bounce (objects under a large occluder visibly glow).
+        if (ndl > 0.0 && giSceneAnyHitP(hitPos + hitNormal * 0.05, uSunDirRadius.xyz, 0.02, 10000.0))
+            ndl = 0.0;
+        radiance = albedo * uSunColor.rgb * ndl;
         int lightCount = int(uSunDirRadius.w);
         for (int i = 0; i < lightCount; ++i)
         {
