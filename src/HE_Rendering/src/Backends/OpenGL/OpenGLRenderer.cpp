@@ -4766,7 +4766,11 @@ void OpenGLRenderer::EnsureGiShadowTargets(int width, int height)
 	};
 
 	// World-space G-buffer: pos + normal MRT + depth.
-	m_giGBufPosTex  = makeTex(GL_RGBA16F, GL_NEAREST);
+	// Position must be fp32: it seeds the shadow-ray origins, and fp16 carries only a
+	// 10-bit mantissa (~0.25 world units at terrain-scale coordinates) — far coarser
+	// than the 0.05 normal offset, so origins quantise below the surface and the rays
+	// self-intersect in banded blotches. Normals stay fp16 (unit length).
+	m_giGBufPosTex  = makeTex(GL_RGBA32F, GL_NEAREST);
 	m_giGBufNormTex = makeTex(GL_RGBA16F, GL_NEAREST);
 	glGenTextures(1, &m_giGBufDepth);
 	glBindTexture(GL_TEXTURE_2D, m_giGBufDepth);

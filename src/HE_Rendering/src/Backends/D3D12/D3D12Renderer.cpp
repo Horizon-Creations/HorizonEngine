@@ -4987,8 +4987,8 @@ struct D3D12RendererImpl
             pd.InputLayout           = { layout, 3 };
             pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
             pd.NumRenderTargets      = 2;
-            pd.RTVFormats[0]         = DXGI_FORMAT_R16G16B16A16_FLOAT;
-            pd.RTVFormats[1]         = DXGI_FORMAT_R16G16B16A16_FLOAT;
+            pd.RTVFormats[0]         = DXGI_FORMAT_R32G32B32A32_FLOAT; // world pos — must
+            pd.RTVFormats[1]         = DXGI_FORMAT_R16G16B16A16_FLOAT; // match giGBuf*Tex
             pd.DSVFormat             = DXGI_FORMAT_D16_UNORM;
             pd.SampleDesc.Count      = 1;
             pd.SampleMask            = UINT_MAX;
@@ -5161,7 +5161,11 @@ struct D3D12RendererImpl
         };
 
         const auto kPSR  = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-        bool ok = makeTex(DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+        // Position must be fp32: it seeds the shadow-ray origins, and fp16 carries only
+        // a 10-bit mantissa (~0.25 world units at terrain-scale coordinates) — far
+        // coarser than the 0.05 normal offset, so origins quantise below the surface and
+        // the rays self-intersect in banded blotches. Normals stay fp16 (unit length).
+        bool ok = makeTex(DXGI_FORMAT_R32G32B32A32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
                           kPSR, true, giGBufPosTex)
                && makeTex(DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
                           kPSR, true, giGBufNormTex)
@@ -5213,7 +5217,7 @@ struct D3D12RendererImpl
             sv.Texture2D.MipLevels     = 1;
             device->CreateShaderResourceView(res, &sv, giSrvCpu(slot));
         };
-        srvInto(giGBufPosTex.Get(),  DXGI_FORMAT_R16G16B16A16_FLOAT, 0);
+        srvInto(giGBufPosTex.Get(),  DXGI_FORMAT_R32G32B32A32_FLOAT, 0);
         srvInto(giGBufNormTex.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, 1);
         {
             D3D12_UNORDERED_ACCESS_VIEW_DESC uv{};
@@ -5226,10 +5230,10 @@ struct D3D12RendererImpl
             device->CreateUnorderedAccessView(giLocalMaskTex.Get(), nullptr, &uv, giSrvCpu(5));
         }
         // Temporal tables: cur=0 reads hist[1]; cur=1 reads hist[0].
-        srvInto(giGBufPosTex.Get(),  DXGI_FORMAT_R16G16B16A16_FLOAT, 8);
+        srvInto(giGBufPosTex.Get(),  DXGI_FORMAT_R32G32B32A32_FLOAT, 8);
         srvInto(giRawTex.Get(),      DXGI_FORMAT_R16_FLOAT,          9);
         srvInto(giHistTex[1].Get(),  DXGI_FORMAT_R16G16B16A16_FLOAT, 10);
-        srvInto(giGBufPosTex.Get(),  DXGI_FORMAT_R16G16B16A16_FLOAT, 11);
+        srvInto(giGBufPosTex.Get(),  DXGI_FORMAT_R32G32B32A32_FLOAT, 11);
         srvInto(giRawTex.Get(),      DXGI_FORMAT_R16_FLOAT,          12);
         srvInto(giHistTex[0].Get(),  DXGI_FORMAT_R16G16B16A16_FLOAT, 13);
         // Blur tables (range is 3 wide → pad with the same SRV).

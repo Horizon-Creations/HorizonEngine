@@ -5780,14 +5780,19 @@ void VulkanRenderer::createGiPipelines()
     { Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: GI pipeline layouts failed"); return; }
 
     // ── Render passes ─────────────────────────────────────────────────────────
-    // G-buffer: 2x RGBA16F (CLEAR → SHADER_READ_ONLY) + depth. The end
-    // dependency covers FRAGMENT **and** COMPUTE consumers — the shadow-ray
-    // KERNEL reads gPos/gNorm, unlike SSAO whose consumer is a fragment pass.
+    // G-buffer: RGBA32F world position + RGBA16F normal (CLEAR → SHADER_READ_ONLY)
+    // + depth. The end dependency covers FRAGMENT **and** COMPUTE consumers — the
+    // shadow-ray KERNEL reads gPos/gNorm, unlike SSAO whose consumer is a fragment
+    // pass. Position must be fp32: it seeds the ray origins, and fp16 carries only a
+    // 10-bit mantissa (~0.25 world units at terrain-scale coordinates) — far coarser
+    // than the 0.05 normal offset, so origins quantise below the surface and the rays
+    // self-intersect in banded blotches. Normals stay fp16 (unit length).
     {
         VkAttachmentDescription atts[3]{};
         for (int i = 0; i < 2; ++i)
         {
-            atts[i].format         = VK_FORMAT_R16G16B16A16_SFLOAT;
+            atts[i].format         = (i == 0) ? VK_FORMAT_R32G32B32A32_SFLOAT
+                                              : VK_FORMAT_R16G16B16A16_SFLOAT;
             atts[i].samples        = VK_SAMPLE_COUNT_1_BIT;
             atts[i].loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
             atts[i].storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
@@ -6181,7 +6186,8 @@ void VulkanRenderer::createGiTargets(uint32_t w, uint32_t h)
         return vkCreateImageView(m_device, &vci, nullptr, &out.view) == VK_SUCCESS;
     };
     const VkImageUsageFlags kRT = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-    bool ok = makeImg(VK_FORMAT_R16G16B16A16_SFLOAT, kRT, VK_IMAGE_ASPECT_COLOR_BIT, m_giGBufPos)
+    // Position fp32 (ray-origin precision — see the GI gbuf render pass), normal fp16.
+    bool ok = makeImg(VK_FORMAT_R32G32B32A32_SFLOAT, kRT, VK_IMAGE_ASPECT_COLOR_BIT, m_giGBufPos)
            && makeImg(VK_FORMAT_R16G16B16A16_SFLOAT, kRT, VK_IMAGE_ASPECT_COLOR_BIT, m_giGBufNorm)
            && makeImg(m_depthFormat, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
                       VK_IMAGE_ASPECT_DEPTH_BIT, m_giGBufDepth)

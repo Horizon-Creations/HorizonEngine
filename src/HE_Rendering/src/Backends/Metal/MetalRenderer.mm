@@ -4923,8 +4923,8 @@ void MetalRenderer::EnsureGIShadowPipelines()
 		MTLRenderPipelineDescriptor* gDesc = [[MTLRenderPipelineDescriptor alloc] init];
 		gDesc.vertexFunction   = [lib newFunctionWithName:@"giGBufVertex"];
 		gDesc.fragmentFunction = [lib newFunctionWithName:@"giGBufFragment"];
-		gDesc.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
-		gDesc.colorAttachments[1].pixelFormat = MTLPixelFormatRGBA16Float;
+		gDesc.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA32Float; // world pos — must
+		gDesc.colorAttachments[1].pixelFormat = MTLPixelFormatRGBA16Float; // match m_giGBuf*Tex
 		gDesc.depthAttachmentPixelFormat      = kDepthFormat;
 		id<MTLRenderPipelineState> gPso = [device newRenderPipelineStateWithDescriptor:gDesc error:&error];
 		if (gPso) m_giGBufPipeline = (void*)CFBridgingRetain(gPso);
@@ -4988,12 +4988,22 @@ void MetalRenderer::EnsureGIShadowTargets(int width, int height)
 	DestroyGIShadowTargets();
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
 
+	// Position must be fp32: it seeds the shadow-ray origins, and fp16 carries only a
+	// 10-bit mantissa (~0.25 world units at terrain-scale coordinates) — far coarser
+	// than the 0.05 normal offset, so origins quantise below the surface and the rays
+	// self-intersect in banded blotches. Normals keep fp16 (unit length), so the two
+	// no longer share a descriptor.
 	MTLTextureDescriptor* posDesc = [MTLTextureDescriptor
-		texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float width:width height:height mipmapped:NO];
+		texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float width:width height:height mipmapped:NO];
 	posDesc.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
 	posDesc.storageMode = MTLStorageModePrivate;
 	m_giGBufPosTex  = (void*)CFBridgingRetain([device newTextureWithDescriptor:posDesc]);
-	m_giGBufNormTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:posDesc]);
+
+	MTLTextureDescriptor* normDesc = [MTLTextureDescriptor
+		texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float width:width height:height mipmapped:NO];
+	normDesc.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+	normDesc.storageMode = MTLStorageModePrivate;
+	m_giGBufNormTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:normDesc]);
 
 	MTLTextureDescriptor* dDesc = [MTLTextureDescriptor
 		texture2DDescriptorWithPixelFormat:kDepthFormat width:width height:height mipmapped:NO];

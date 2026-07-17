@@ -2680,7 +2680,11 @@ struct D3D11RendererImpl
             return true;
         };
 
-        bool ok = makeTex(DXGI_FORMAT_R16G16B16A16_FLOAT,
+        // Position must be fp32: it seeds the shadow-ray origins, and fp16 carries only
+        // a 10-bit mantissa (~0.25 world units at terrain-scale coordinates) — far
+        // coarser than the 0.05 normal offset, so origins quantise below the surface and
+        // the rays self-intersect in banded blotches. Normals stay fp16 (unit length).
+        bool ok = makeTex(DXGI_FORMAT_R32G32B32A32_FLOAT,
                           D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE,
                           giGBufPosTex, &giGBufPosRTV, &giGBufPosSRV, nullptr)
                && makeTex(DXGI_FORMAT_R16G16B16A16_FLOAT,
