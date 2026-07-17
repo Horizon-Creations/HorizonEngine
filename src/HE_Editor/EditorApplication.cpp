@@ -7,6 +7,7 @@
 #include <HorizonScene/Components/EnvironmentComponent.h>
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
+#include <HorizonScene/Components/LightComponent.h>
 #include <HorizonScene/Components/MeshComponent.h>
 #include <HorizonScene/Components/MaterialComponent.h>
 #include <ContentManager/DefaultAssets.h>
@@ -2030,6 +2031,60 @@ void EditorApplication::dumpFrameHeadless()
 				? "EditorApplication: HE_DUMP_GIBLEED red wall added"
 				: "EditorApplication: HE_DUMP_GIBLEED grey control wall added");
 		}
+	}
+
+	// ── Local-light shadow witness (HE_DUMP_LOCALSHADOW=point|spot): a floor
+	// slab + caster cube + ONE shadow-casting local light. Shot at midnight
+	// (TOD=0) the local light dominates: the cube must throw a visible shadow
+	// onto the floor away from the light. Before the local shadow maps this
+	// floor stayed uniformly lit (local lights shone through geometry).
+	if (const char* ls = std::getenv("HE_DUMP_LOCALSHADOW"); ls && *ls && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		// Isolate the witness: pre-existing scene lights lose their shadow flag so
+		// the atlas holds ONLY the witness light's layers (deterministic layer 0).
+		for (auto [e, plc] : reg.view<LightComponent>().each())
+			plc.castsShadow = false;
+		auto floorE = m_editorWorld->createEntity("LocalShadowFloor");
+		TransformComponent ftc;
+		ftc.position = glm::vec3(0.0f, 199.0f, -8.0f); // high above any loaded scene content
+		ftc.scale    = glm::vec3(24.0f, 0.25f, 24.0f);
+		reg.emplace<TransformComponent>(floorE, ftc);
+		reg.emplace<MeshComponent>(floorE, MeshComponent{ HE::kDefaultCubeMeshId });
+
+		auto caster = m_editorWorld->createEntity("LocalShadowCaster");
+		TransformComponent ctc;
+		ctc.position = glm::vec3(0.0f, 200.25f, -8.0f);
+		reg.emplace<TransformComponent>(caster, ctc);
+		reg.emplace<MeshComponent>(caster, MeshComponent{ HE::kDefaultCubeMeshId });
+
+		auto lightE = m_editorWorld->createEntity("LocalShadowLight");
+		TransformComponent ltc;
+		LightComponent lc;
+		// "...off" control variant (pointoff/spotoff): identical scene WITHOUT the
+		// shadow flag — the A/B image diff isolates exactly the shadowed pixels.
+		std::string lsMode(ls);
+		lc.castsShadow = lsMode.find("off") == std::string::npos;
+		lc.intensity   = 8.0f;
+		lc.range       = 40.0f;
+		if (lsMode.rfind("spot", 0) == 0)
+		{
+			lc.type      = HE::LightType::Spot;
+			lc.spotAngle = 70.0f;
+			// Off to the side so the cast shadow lands NEXT to the cube in screen
+			// space (on-axis it hides exactly behind the caster from this camera).
+			ltc.position = glm::vec3(-3.0f, 206.0f, -3.0f);
+			ltc.rotation = glm::vec3(-55.0f, 0.0f, 0.0f); // aim down-forward
+		}
+		else
+		{
+			lc.type      = HE::LightType::Point;
+			ltc.position = glm::vec3(2.5f, 202.0f, -5.0f);
+		}
+		reg.emplace<TransformComponent>(lightE, ltc);
+		reg.emplace<LightComponent>(lightE, lc);
+		Logger::Log(Logger::LogLevel::Info,
+			"EditorApplication: HE_DUMP_LOCALSHADOW witness scene added");
 	}
 
 	pushEnvironment(0.0f); // scene environment from the World entity (no auto-advance)

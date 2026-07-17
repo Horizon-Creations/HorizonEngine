@@ -283,6 +283,10 @@ private:
 	void* m_shadowDepthTex = nullptr;  // id<MTLTexture>, Depth32Float 2D ARRAY (one layer/cascade)
 	void* m_shadowPipeline = nullptr;  // id<MTLRenderPipelineState>, depth-only
 	int   m_shadowSize     = 2048;
+	// Local (point/spot) shadow atlas: 2D depth ARRAY, one layer per spot view /
+	// point cube face (16 layers total, see ShadowData::kMaxLocalShadowLayers).
+	void* m_localShadowTex  = nullptr; // id<MTLTexture>, Depth32Float 2D ARRAY
+	int   m_localShadowSize = 1024;
 	bool  m_debugShadowCascades = false; // tint fragments by cascade index (debug)
 	void  EnsureShadowResources();
 	void  EncodeShadowMap(void* cmdBuf, float aspect); // CSM depth maps; aspect MUST match the scene extract

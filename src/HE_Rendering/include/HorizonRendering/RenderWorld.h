@@ -21,6 +21,10 @@ struct LightData {
     float     spotAngleCos = 0.0f;    // cos(half angle), spot only
     uint8_t   type         = 0;       // HE::LightType
     uint8_t   envRole      = 0;       // 0 none, 1 = environment sun, 2 = environment moon
+    bool      castsShadow  = false;   // authored LightComponent::castsShadow
+    int16_t   shadowLayer  = -1;      // point/spot shadow map: first layer in the local
+                                      // shadow atlas (spot: 1 layer, point: 6 cube-face
+                                      // layers), assigned by the extractor; -1 = none
 };
 
 // Directional-light shadow info, computed by the extractor.
@@ -40,6 +44,21 @@ struct ShadowData {
     glm::mat4 cascadeViewProj[kMaxCascades] = { glm::mat4(1.0f), glm::mat4(1.0f),
                                                 glm::mat4(1.0f), glm::mat4(1.0f) };
     float     cascadeSplit[kMaxCascades]    = { 0.0f, 0.0f, 0.0f, 0.0f };
+
+    // ── Local-light (point/spot) shadow maps ────────────────────────────────
+    // Independent of the directional CSM above. The extractor picks the
+    // camera-nearest shadow-casting point/spot lights (LightComponent::
+    // castsShadow) and packs their depth views into ONE 2D depth-array
+    // "local shadow atlas": a spot light uses 1 layer (perspective map along
+    // its cone), a point light uses 6 layers (cube faces stored as array
+    // layers, +X −X +Y −Y +Z −Z — face picked in the shader by major axis, so
+    // the same code works on every backend without cube-depth samplers).
+    // LightData::shadowLayer is the light's first layer; localViewProj[layer]
+    // is that view's light clip transform (GL clip, z∈[-1,1] — backends apply
+    // their own clip fix, exactly like cascadeViewProj).
+    static constexpr int kMaxLocalShadowLayers = 16;
+    int       localLayerCount = 0;
+    glm::mat4 localViewProj[kMaxLocalShadowLayers] = {};
 };
 
 // One live particle's raw GPU-instanced draw data — position/size (still CPU-lerped,
