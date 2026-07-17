@@ -435,6 +435,51 @@ float computeShadow(vec3 worldPos, vec3 N, vec3 L, out int outCascade)
 	return vis;
 }
 
+// Local-light (point/spot) shadow atlas: one sampler2DArray shared by all
+// shadow-casting point/spot lights. A spot light owns 1 perspective layer, a
+// point light 6 cube-face layers (+X −X +Y −Y +Z −Z — face picked here by the
+// fragment→light vector's major axis). The light's first layer index rides in
+// uLightParams[i].y (-1 = casts no shadow). Mirrors Metal's localShadowFactor.
+const int LOCAL_SHADOW_LAYERS = 16;
+uniform sampler2DArray uLocalShadowMap;
+uniform mat4 uLocalShadowVP[LOCAL_SHADOW_LAYERS]; // per-layer light view-proj (GL clip)
+
+float localShadowFactor(int i, vec3 worldPos, vec3 N)
+{
+	int base = int(uLightParams[i].y);
+	if (base < 0) return 1.0;
+	int layer = base;
+	if (int(uLightPos[i].w) == 1) // point: major-axis cube-face pick
+	{
+		vec3 d = worldPos - uLightPos[i].xyz;
+		vec3 a = abs(d);
+		int face;
+		if      (a.x >= a.y && a.x >= a.z) face = (d.x > 0.0) ? 0 : 1;
+		else if (a.y >= a.z)               face = (d.y > 0.0) ? 2 : 3;
+		else                               face = (d.z > 0.0) ? 4 : 5;
+		layer = base + face;
+	}
+	vec3  toL = normalize(uLightPos[i].xyz - worldPos);
+	float ndl = clamp(dot(N, toL), 0.0, 1.0);
+	vec4 lp = uLocalShadowVP[layer] * vec4(worldPos + N * 0.02, 1.0);
+	if (lp.w <= 0.0) return 1.0;             // behind the light's near plane
+	vec3 p = lp.xyz / lp.w;
+	p = p * 0.5 + 0.5;                       // GL NDC [-1,1] → [0,1]
+	vec2 texel = 1.0 / vec2(textureSize(uLocalShadowMap, 0).xy);
+	if (p.z > 1.0 || p.z < 0.0
+	    || any(lessThan(p.xy, texel)) || any(greaterThan(p.xy, 1.0 - texel)))
+		return 1.0;
+	float bias = clamp(0.0015 * tan(acos(ndl)), 0.0006, 0.01);
+	float vis = 0.0;
+	for (int y = -1; y <= 1; ++y)
+		for (int x = -1; x <= 1; ++x)
+		{
+			float cd = texture(uLocalShadowMap, vec3(p.xy + vec2(x, y) * texel, float(layer))).r;
+			vis += (p.z - bias > cd) ? 0.0 : 1.0;
+		}
+	return vis / 9.0;
+}
+
 void main()
 {
 	vec3 albedo = uHasTexture ? texture(uTexture, vUV).rgb * uColor : uColor;
@@ -534,12 +579,14 @@ void main()
 		}
 		else
 		{
-			// Local (point/spot) lights: ray-traced hard shadows when GI is
-			// active — one visibility channel per light (first 4), written by
-			// the shadow kernel from unjittered secondary rays. CSM never
-			// shadowed local lights at all (they shone through geometry).
+			// Local (point/spot) lights: shadow-mapped when the light casts
+			// shadows (uLightParams[i].y = atlas base layer, set by the
+			// extractor). When GI is active the ray-traced hard mask (first 4
+			// local lights) is combined in via min() — the map covers lights
+			// the mask can't.
+			sh = localShadowFactor(i, vWorldPos, N);
 			if (uGIEnabled == 1 && giLocalIdx < 4)
-				sh = texture(uGILocal, gl_FragCoord.xy / uViewport)[giLocalIdx];
+				sh = min(sh, texture(uGILocal, gl_FragCoord.xy / uViewport)[giLocalIdx]);
 			giLocalIdx++;
 		}
 
@@ -3475,6 +3522,8 @@ void OpenGLRenderer::CreateUnlitPipeline()
 	m_uShadowMap     = glGetUniformLocation(m_unlitProgram, "uShadowMap");
 	m_uShadowEnabled = glGetUniformLocation(m_unlitProgram, "uShadowEnabled");
 	m_uShadowDebug   = glGetUniformLocation(m_unlitProgram, "uShadowDebug");
+	m_uLocalShadowVP  = glGetUniformLocation(m_unlitProgram, "uLocalShadowVP[0]");
+	m_uLocalShadowMap = glGetUniformLocation(m_unlitProgram, "uLocalShadowMap");
 	m_uAO            = glGetUniformLocation(m_unlitProgram, "uAO");
 	m_uViewport      = glGetUniformLocation(m_unlitProgram, "uViewport");
 	m_uSSAOEnabled   = glGetUniformLocation(m_unlitProgram, "uSSAOEnabled");
@@ -3884,6 +3933,8 @@ void OpenGLRenderer::CreateSkinnedPipeline()
 	m_uSkinnedCameraFwd          = loc("uCameraFwd");
 	m_uSkinnedShadowDebug        = loc("uShadowDebug");
 	m_uSkinnedShadowMap          = loc("uShadowMap");
+	m_uSkinnedLocalShadowVP      = loc("uLocalShadowVP[0]");
+	m_uSkinnedLocalShadowMap     = loc("uLocalShadowMap");
 	m_uSkinnedAO                 = loc("uAO");
 	m_uSkinnedViewport           = loc("uViewport");
 	m_uSkinnedSSAOEnabled        = loc("uSSAOEnabled");
@@ -3939,6 +3990,8 @@ void OpenGLRenderer::CreateInstancedPipeline()
 	m_uInstShadowDebug      = loc("uShadowDebug");
 	m_uInstShadowMap        = loc("uShadowMap");
 	m_uInstShadowEnabled    = loc("uShadowEnabled");
+	m_uInstLocalShadowVP    = loc("uLocalShadowVP[0]");
+	m_uInstLocalShadowMap   = loc("uLocalShadowMap");
 	m_uInstAO               = loc("uAO");
 	m_uInstViewport         = loc("uViewport");
 	m_uInstSSAOEnabled      = loc("uSSAOEnabled");
@@ -3992,6 +4045,19 @@ void OpenGLRenderer::CreateShadowResources()
 	glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
 	glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
 	const float border[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+	glTexParameterfv(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_BORDER_COLOR, border);
+
+	// Local (point/spot) shadow atlas: same depth-array pattern, 16 layers
+	// (spot = 1 layer, point = 6 cube-face layers), lower per-view resolution.
+	glGenTextures(1, &m_localShadowDepthTex);
+	glBindTexture(GL_TEXTURE_2D_ARRAY, m_localShadowDepthTex);
+	glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_DEPTH_COMPONENT24,
+	             m_localShadowSize, m_localShadowSize, ShadowData::kMaxLocalShadowLayers,
+	             0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+	glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+	glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
 	glTexParameterfv(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_BORDER_COLOR, border);
 
 	// FBO is completed per cascade in the pass; attach layer 0 here so the initial
@@ -6496,6 +6562,7 @@ void OpenGLRenderer::Shutdown()
 	if (m_fsVAO)          { glDeleteVertexArrays(1, &m_fsVAO);  m_fsVAO = 0; }
 	if (m_shadowFBO)      { glDeleteFramebuffers(1, &m_shadowFBO);   m_shadowFBO = 0; }
 	if (m_shadowDepthTex) { glDeleteTextures(1, &m_shadowDepthTex);  m_shadowDepthTex = 0; }
+	if (m_localShadowDepthTex) { glDeleteTextures(1, &m_localShadowDepthTex); m_localShadowDepthTex = 0; }
 	if (m_moonTex)        { glDeleteTextures(1, &m_moonTex);         m_moonTex = 0; }
 	if (m_noiseTex)       { glDeleteTextures(1, &m_noiseTex);        m_noiseTex = 0; }
 	if (m_skyEnvCube)     { glDeleteTextures(1, &m_skyEnvCube);      m_skyEnvCube = 0; }
@@ -6717,6 +6784,12 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
 
 	const bool shadows = m_renderWorld.shadow.enabled && m_shadowFBO != 0;
+	// Local (point/spot) shadow atlas — independent of the directional CSM, so
+	// night scenes with only shadow-casting point lights still get their maps.
+	const int  nLocalLayers = std::clamp(m_renderWorld.shadow.localLayerCount, 0,
+	                                     ShadowData::kMaxLocalShadowLayers);
+	const bool localShadows = nLocalLayers > 0 && m_shadowFBO != 0 && m_localShadowDepthTex != 0;
+	const float* localVPData = glm::value_ptr(m_renderWorld.shadow.localViewProj[0]);
 
 	// ── Cascaded shadow map uniforms (shared across unlit/skinned/instanced) ──
 	// World forward (−Z of the camera-to-world matrix) for planar view-Z cascade
@@ -6757,7 +6830,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		// inside the cascade coverage. Mirrors the Metal backend's EncodeShadowMap.
 		if (io.output.id == kShadowMapTarget)
 		{
-			if (!shadows) return;
+			if (!shadows && !localShadows) return;
 			GpuPassScope _shadowTimer(this, "Shadow"); // ends (glEndQuery) at this branch's return
 			glBindFramebuffer(GL_FRAMEBUFFER, m_shadowFBO);
 			glViewport(0, 0, m_shadowSize, m_shadowSize);
@@ -6767,20 +6840,17 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glEnable(GL_POLYGON_OFFSET_FILL);
 			glPolygonOffset(2.0f, 4.0f);
 
-			const int cascades = std::clamp(m_renderWorld.shadow.cascadeCount, 1, kGLCsmCascades);
-			for (int c = 0; c < cascades; ++c)
+			// Depth-only render of every shadow caster into one layer of `target` —
+			// shared by the CSM cascades and the local (point/spot) shadow views.
+			// Cull + sort against the view's light frustum into scratch buffers
+			// (NOT m_visible/m_sortedIndices — those hold the camera cull the
+			// geometry pass consumes). Sorting keeps draws grouped by mesh id so
+			// the per-mesh resolve memoisation stays valid.
+			auto renderDepthLayer = [&](unsigned int target, int layer, const glm::mat4& vp)
 			{
-				// Render this cascade into its own depth-array layer.
-				glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
-				                          m_shadowDepthTex, 0, c);
+				glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, target, 0, layer);
 				glClear(GL_DEPTH_BUFFER_BIT);
-
-				// Cull + sort against this cascade's light frustum into scratch
-				// buffers (NOT m_visible/m_sortedIndices — those hold the camera cull
-				// the geometry pass consumes). Sorting keeps draws grouped by mesh id
-				// so the per-mesh resolve memoisation below stays valid.
-				const glm::mat4& cvp = m_renderWorld.shadow.cascadeViewProj[c];
-				m_culler.cull(m_renderWorld, cvp, m_shadowVisible);
+				m_culler.cull(m_renderWorld, vp, m_shadowVisible);
 				m_sorter.sort(m_renderWorld, m_shadowVisible, m_shadowSorted);
 
 				HE::UUID shMeshId{}; const GpuMesh* shMesh = nullptr; bool shMeshValid = false;
@@ -6789,7 +6859,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					const RenderObject& obj = m_renderWorld.objects[idx];
 					if (!obj.castsShadow) continue; // billboards (precip/particles) cast none
 					glUniformMatrix4fv(m_uDepthMVP, 1, GL_FALSE,
-					                   glm::value_ptr(cvp * obj.transform));
+					                   glm::value_ptr(vp * obj.transform));
 					if (!shMeshValid || obj.meshAssetId != shMeshId)
 					{
 						shMesh      = ResolveMesh(obj.meshAssetId);
@@ -6800,6 +6870,19 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					glBindVertexArray(mesh->vao);
 					glDrawElements(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr);
 				}
+			};
+
+			if (shadows)
+			{
+				const int cascades = std::clamp(m_renderWorld.shadow.cascadeCount, 1, kGLCsmCascades);
+				for (int c = 0; c < cascades; ++c)
+					renderDepthLayer(m_shadowDepthTex, c, m_renderWorld.shadow.cascadeViewProj[c]);
+			}
+			if (localShadows)
+			{
+				glViewport(0, 0, m_localShadowSize, m_localShadowSize);
+				for (int v = 0; v < nLocalLayers; ++v)
+					renderDepthLayer(m_localShadowDepthTex, v, m_renderWorld.shadow.localViewProj[v]);
 			}
 			glDisable(GL_POLYGON_OFFSET_FILL);
 			glBindFramebuffer(GL_FRAMEBUFFER, prevFBO);
@@ -6983,7 +7066,11 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				pos[i]    = glm::vec4(l.position,  static_cast<float>(l.type));
 				dir[i]    = glm::vec4(l.direction, l.spotAngleCos);
 				color[i]  = glm::vec4(l.color,     l.intensity);
-				params[i] = glm::vec4(l.range, 0.0f, 0.0f, 0.0f);
+				// y = local shadow atlas base layer (-1 = no shadow); forced off
+				// when the atlas texture is unavailable this frame.
+				params[i] = glm::vec4(l.range,
+				                      localShadows ? static_cast<float>(l.shadowLayer) : -1.0f,
+				                      0.0f, 0.0f);
 			}
 			glUniform1i(m_uLightCount, count);
 			if (count > 0)
@@ -7007,6 +7094,13 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		glUniform1i(m_uShadowMap, 1);
 		glActiveTexture(GL_TEXTURE1);
 		glBindTexture(GL_TEXTURE_2D_ARRAY, m_shadowDepthTex);
+		// Local (point/spot) shadow atlas on unit 11 — always bound (sampling is
+		// gated per light by uLightParams[i].y), matrices only when there are any.
+		glUniform1i(m_uLocalShadowMap, 11);
+		glActiveTexture(GL_TEXTURE11);
+		glBindTexture(GL_TEXTURE_2D_ARRAY, m_localShadowDepthTex ? m_localShadowDepthTex : m_shadowDepthTex);
+		if (localShadows)
+			glUniformMatrix4fv(m_uLocalShadowVP, nLocalLayers, GL_FALSE, localVPData);
 		glActiveTexture(GL_TEXTURE0); // base color binds here in the loop
 
 		// Mirror per-frame uniforms onto the instanced program (texture units are
@@ -7036,7 +7130,11 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					pos[i]    = glm::vec4(l.position,  static_cast<float>(l.type));
 					dir[i]    = glm::vec4(l.direction, l.spotAngleCos);
 					color[i]  = glm::vec4(l.color,     l.intensity);
-					params[i] = glm::vec4(l.range, 0.0f, 0.0f, 0.0f);
+					// y = local shadow atlas base layer (-1 = no shadow); forced off
+				// when the atlas texture is unavailable this frame.
+				params[i] = glm::vec4(l.range,
+				                      localShadows ? static_cast<float>(l.shadowLayer) : -1.0f,
+				                      0.0f, 0.0f);
 				}
 				glUniform1i(m_uInstLightCount, count);
 				if (count > 0)
@@ -7054,6 +7152,9 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glUniform4fv(m_uInstCascadeSplits, 1, glm::value_ptr(cascadeSplits));
 			glUniform3fv(m_uInstCameraFwd, 1, glm::value_ptr(camFwd));
 			glUniform1i(m_uInstShadowMap, 1);
+			glUniform1i(m_uInstLocalShadowMap, 11);
+			if (localShadows)
+				glUniformMatrix4fv(m_uInstLocalShadowVP, nLocalLayers, GL_FALSE, localVPData);
 			glUseProgram(m_unlitProgram); // restore for the per-object loop
 		}
 
@@ -7367,6 +7468,12 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			// sampler2DArray reads the shadow array, not a stale 2D texture.
 			glActiveTexture(GL_TEXTURE1);
 			glBindTexture(GL_TEXTURE_2D_ARRAY, m_shadowDepthTex);
+			// Local (point/spot) shadow atlas on unit 11 (same re-assert rationale).
+			glUniform1i(m_uSkinnedLocalShadowMap, 11);
+			glActiveTexture(GL_TEXTURE11);
+			glBindTexture(GL_TEXTURE_2D_ARRAY, m_localShadowDepthTex ? m_localShadowDepthTex : m_shadowDepthTex);
+			if (localShadows)
+				glUniformMatrix4fv(m_uSkinnedLocalShadowVP, nLocalLayers, GL_FALSE, localVPData);
 			glActiveTexture(GL_TEXTURE3);
 			glBindTexture(GL_TEXTURE_CUBE_MAP, m_skyEnvCube);
 			glUniform1i(m_uSkinnedSkyEnv, 3);
@@ -7388,7 +7495,11 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					pos[i]    = glm::vec4(l.position,  static_cast<float>(l.type));
 					dir[i]    = glm::vec4(l.direction, l.spotAngleCos);
 					color[i]  = glm::vec4(l.color,     l.intensity);
-					params[i] = glm::vec4(l.range, 0.0f, 0.0f, 0.0f);
+					// y = local shadow atlas base layer (-1 = no shadow); forced off
+				// when the atlas texture is unavailable this frame.
+				params[i] = glm::vec4(l.range,
+				                      localShadows ? static_cast<float>(l.shadowLayer) : -1.0f,
+				                      0.0f, 0.0f);
 				}
 				glUniform1i(m_uSkinnedLightCount, count);
 				if (count > 0)

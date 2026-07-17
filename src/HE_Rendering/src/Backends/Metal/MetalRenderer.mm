@@ -346,7 +346,7 @@ struct LightGPU {
 	float4 posType;        // xyz = position,  w = type (0 dir / 1 point / 2 spot)
 	float4 dirSpot;        // xyz = direction, w = cos(spot half angle)
 	float4 colorIntensity; // rgb = color,     w = intensity
-	float4 params;         // x = range
+	float4 params;         // x = range, y = local shadow base layer (-1 = none)
 };
 
 struct SceneUniforms {
@@ -365,6 +365,10 @@ struct SceneUniforms {
 	float4   fog;            // x = density (0 = off), y = height falloff
 	float4   viewport;       // xy = output size (screen-space AO lookup), z = ssaoEnabled
 	float4   weather;        // x = wetness, y = snow cover (ground response)
+	// Local-light (point/spot) shadow atlas: per-layer light view-proj (already
+	// Metal clip). Spot = 1 layer, point = 6 cube-face layers (+X −X +Y −Y +Z −Z);
+	// a light's first layer is in its LightGPU.params.y.
+	float4x4 localShadowVP[16];
 };
 
 // GI (Checkpoint B/C): fragmentMain buffer(3). Deliberately separate from
@@ -493,6 +497,47 @@ float shadowFactor(constant SceneUniforms& scene, float3 worldPos, float3 N, flo
 	return vis / 9.0;
 }
 
+// Point/spot shadow lookup in the local shadow atlas. Spot lights project into
+// their single perspective layer; point lights first pick the cube face from the
+// fragment→light vector's major axis (faces stored as 6 consecutive array layers,
+// +X −X +Y −Y +Z −Z), then project into that face's layer. Same 3×3 PCF and
+// normal-offset bias family as the directional CSM above.
+float localShadowFactor(constant SceneUniforms& scene, constant LightGPU& l,
+                        float3 worldPos, float3 N,
+                        texture2d_array<float> localMap, sampler shadowSmp)
+{
+	int base = int(l.params.y);
+	if (base < 0) return 1.0;
+	int layer = base;
+	if (int(l.posType.w) == 1) // point: major-axis cube-face pick
+	{
+		float3 d = worldPos - l.posType.xyz;
+		float3 a = abs(d);
+		int face;
+		if      (a.x >= a.y && a.x >= a.z) face = (d.x > 0.0) ? 0 : 1;
+		else if (a.y >= a.z)               face = (d.y > 0.0) ? 2 : 3;
+		else                               face = (d.z > 0.0) ? 4 : 5;
+		layer = base + face;
+	}
+	float3 toL  = normalize(l.posType.xyz - worldPos);
+	float  ndl  = clamp(dot(N, toL), 0.0, 1.0);
+	float4 lp = scene.localShadowVP[layer] * float4(worldPos + N * 0.02, 1.0);
+	if (lp.w <= 0.0) return 1.0;                  // behind the light's near plane
+	float3 p  = lp.xyz / lp.w;                    // z in [0,1] (Metal clip)
+	float2 uv = float2(p.x * 0.5 + 0.5, 1.0 - (p.y * 0.5 + 0.5));
+	float2 texel = 1.0 / float2(localMap.get_width(), localMap.get_height());
+	if (p.z > 1.0 || p.z < 0.0 || any(uv < texel) || any(uv > 1.0 - texel)) return 1.0;
+	float bias = clamp(0.0015 * tan(acos(ndl)), 0.0006, 0.01);
+	float vis = 0.0;
+	for (int y = -1; y <= 1; ++y)
+		for (int x = -1; x <= 1; ++x)
+		{
+			float cd = localMap.sample(shadowSmp, uv + float2(x, y) * texel, uint(layer)).r;
+			vis += (p.z - bias > cd) ? 0.0 : 1.0;
+		}
+	return vis / 9.0;
+}
+
 // Standard signed-octahedral mapping (Meyer et al. 2010) — direction -> texel
 // UV. Duplicated from kGIProbeMSL's octDecode (direction<-texel): each embedded
 // MSL string is compiled as its own library, no shared headers between them.
@@ -611,6 +656,10 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
                              sampler          skyEnvSmp [[sampler(2)]],
                              texture2d<float> aoTex     [[texture(3)]],
                              sampler          aoSmp     [[sampler(3)]],
+                             // Local (point/spot) shadow atlas — pinned at 12, above the
+                             // custom-material graph-texture window (1-4) and the GI pins
+                             // (5-11), so material draws can never clobber it.
+                             texture2d_array<float> localShadowMap [[texture(12)]],
                              constant GIUniforms& gi     [[buffer(3)]],
                              texture2d<float> giShadowTex [[texture(5)]],
                              sampler          giShadowSmp [[sampler(5)]],
@@ -723,12 +772,13 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
 		}
 		else
 		{
-			// Local (point/spot) lights: ray-traced hard shadows when GI is
-			// active — one visibility channel per light (first 4), written by
-			// the shadow kernel from unjittered secondary rays. CSM never
-			// shadowed local lights at all (they shone through geometry).
+			// Local (point/spot) lights: shadow-mapped when the light casts
+			// shadows (params.y = atlas base layer, set by the extractor).
+			// When GI is active the ray-traced hard mask (first 4 local lights)
+			// is combined in via min() — the map covers lights the mask can't.
+			sh = localShadowFactor(scene, l, in.worldPos, N, localShadowMap, shadowSmp);
 			if (gi.enabled != 0 && giLocalIdx < 4)
-				sh = giLocalMask.sample(giLocalSmp, in.position.xy / scene.viewport.xy)[giLocalIdx];
+				sh = min(sh, giLocalMask.sample(giLocalSmp, in.position.xy / scene.viewport.xy)[giLocalIdx]);
 			giLocalIdx++;
 		}
 
@@ -3617,6 +3667,9 @@ struct SceneUniforms
 	glm::vec4 fog = glm::vec4(0.0f); // x = density (0 = off), y = height falloff
 	glm::vec4 viewport = glm::vec4(0.0f); // xy = output size, z = ssaoEnabled
 	glm::vec4 weather = glm::vec4(0.0f); // x = wetness, y = snow cover
+	// Local (point/spot) shadow atlas view-projs (already Metal clip); a light's
+	// first layer index rides in its LightGPU params.y (-1 = casts no shadow).
+	glm::mat4 localShadowVP[16] = {};
 };
 
 // Matches the MSL SSAOPosUniforms / SSAOParams structs.
@@ -3950,6 +4003,7 @@ void MetalRenderer::Shutdown()
 	if (m_sceneDepthState) { CFBridgingRelease(m_sceneDepthState); m_sceneDepthState = nullptr; }
 	if (m_shadowPipeline)  { CFBridgingRelease(m_shadowPipeline);  m_shadowPipeline = nullptr; }
 	if (m_shadowDepthTex)  { CFBridgingRelease(m_shadowDepthTex);  m_shadowDepthTex = nullptr; }
+	if (m_localShadowTex)  { CFBridgingRelease(m_localShadowTex);  m_localShadowTex = nullptr; }
 	if (m_noDepthState)    { CFBridgingRelease(m_noDepthState);    m_noDepthState = nullptr; }
 	if (m_skyDepthState)   { CFBridgingRelease(m_skyDepthState);   m_skyDepthState = nullptr; }
 	if (m_ssaoPosPipeline)  { CFBridgingRelease(m_ssaoPosPipeline);  m_ssaoPosPipeline = nullptr; }
@@ -4445,6 +4499,18 @@ void MetalRenderer::EnsureShadowResources()
 		td.storageMode = MTLStorageModePrivate;
 		m_shadowDepthTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:td]);
 
+		// Local (point/spot) shadow atlas: same depth-array pattern, 16 layers
+		// (spot = 1 layer, point = 6 cube-face layers), lower per-view resolution.
+		MTLTextureDescriptor* ltd = [[MTLTextureDescriptor alloc] init];
+		ltd.textureType = MTLTextureType2DArray;
+		ltd.pixelFormat = kDepthFormat;
+		ltd.width       = (NSUInteger)m_localShadowSize;
+		ltd.height      = (NSUInteger)m_localShadowSize;
+		ltd.arrayLength = (NSUInteger)ShadowData::kMaxLocalShadowLayers;
+		ltd.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+		ltd.storageMode = MTLStorageModePrivate;
+		m_localShadowTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:ltd]);
+
 		// Depth-only pipeline (no color attachment, depth attachment only).
 		NSError* error = nil;
 		id<MTLLibrary> lib = [device newLibraryWithSource:
@@ -4476,40 +4542,49 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 	                        env.cloudCoverage);
 	m_extractor.setContentManager(m_contentManager);
 	m_extractor.extract(*m_world, m_renderWorld, aspect, &m_editorCamera);
-	if (!m_renderWorld.shadow.enabled || m_renderWorld.objects.empty()) return;
+	// CSM needs a directional light; the local (point/spot) atlas is independent
+	// of it — night scenes with only shadow-casting point lights still render.
+	const bool wantCsm   = m_renderWorld.shadow.enabled;
+	const bool wantLocal = m_renderWorld.shadow.localLayerCount > 0 && m_localShadowTex;
+	if ((!wantCsm && !wantLocal) || m_renderWorld.objects.empty()) return;
 	for (RenderObject& obj : m_renderWorld.objects)
 		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId); mesh && mesh->localBounds.isValid())
 			obj.worldBounds = mesh->localBounds.transformed(obj.transform);
-	const int cascades = std::clamp(m_renderWorld.shadow.cascadeCount, 1, kCsmCascades);
+	const int cascades    = wantCsm ? std::clamp(m_renderWorld.shadow.cascadeCount, 1, kCsmCascades) : 0;
+	const int localLayers = wantLocal
+		? std::clamp(m_renderWorld.shadow.localLayerCount, 0, ShadowData::kMaxLocalShadowLayers) : 0;
+	const int totalViews  = cascades + localLayers;
 
 	@autoreleasepool
 	{
 		id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
-		// One profiler bucket for the whole shadow pass (all cascade layers): start
-		// timer on the first cascade encoder, end on the last.
+		// One profiler bucket for the whole shadow pass (cascades + local layers):
+		// start timer on the first encoder, end on the last.
 		const uint32_t shBase = ftBeginMulti("Shadow");
+		int viewIdx = 0;
 
-		for (int c = 0; c < cascades; ++c)
+		// Depth-only render of every shadow caster into one layer of `target`,
+		// shared by the CSM cascades and the local (point/spot) shadow views.
+		auto encodeDepthLayer = [&](void* target, int layer, int size, const glm::mat4& viewProj)
 		{
-			// Cull casters against THIS cascade's light frustum — an off-screen object
-			// still casts into the visible scene while inside the cascade's coverage.
-			m_culler.cull(m_renderWorld, m_renderWorld.shadow.cascadeViewProj[c], m_visible);
+			m_culler.cull(m_renderWorld, viewProj, m_visible);
 			m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
-			const glm::mat4 lightClip = kMetalClipFix * m_renderWorld.shadow.cascadeViewProj[c];
+			const glm::mat4 lightClip = kMetalClipFix * viewProj;
 
 			MTLRenderPassDescriptor* sp = [MTLRenderPassDescriptor renderPassDescriptor];
-			sp.depthAttachment.texture       = (__bridge id<MTLTexture>)m_shadowDepthTex;
-			sp.depthAttachment.slice         = (NSUInteger)c;   // render into cascade layer c
+			sp.depthAttachment.texture       = (__bridge id<MTLTexture>)target;
+			sp.depthAttachment.slice         = (NSUInteger)layer;
 			sp.depthAttachment.loadAction    = MTLLoadActionClear;
 			sp.depthAttachment.storeAction   = MTLStoreActionStore;
 			sp.depthAttachment.clearDepth    = 1.0;
-			if (c == 0)            ftAttachStart((__bridge void*)sp, shBase);
-			if (c == cascades - 1) ftAttachEnd  ((__bridge void*)sp, shBase);
+			if (viewIdx == 0)              ftAttachStart((__bridge void*)sp, shBase);
+			if (viewIdx == totalViews - 1) ftAttachEnd  ((__bridge void*)sp, shBase);
+			++viewIdx;
 
 			id<MTLRenderCommandEncoder> enc = [cmdBuf renderCommandEncoderWithDescriptor:sp];
 			[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_shadowPipeline];
 			[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
-			[enc setViewport:(MTLViewport){ 0.0, 0.0, (double)m_shadowSize, (double)m_shadowSize, 0.0, 1.0 }];
+			[enc setViewport:(MTLViewport){ 0.0, 0.0, (double)size, (double)size, 0.0, 1.0 }];
 
 			HE::UUID shMeshId{}; const GpuMesh* shMesh = nullptr; bool shMeshValid = false;
 			for (uint32_t idx : m_sortedIndices)
@@ -4538,10 +4613,16 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 				         indexBufferOffset:0];
 			}
 			[enc endEncoding];
-		}
+		};
+
+		for (int c = 0; c < cascades; ++c)
+			encodeDepthLayer(m_shadowDepthTex, c, m_shadowSize,
+			                 m_renderWorld.shadow.cascadeViewProj[c]);
+		for (int v = 0; v < localLayers; ++v)
+			encodeDepthLayer(m_localShadowTex, v, m_localShadowSize,
+			                 m_renderWorld.shadow.localViewProj[v]);
 	}
 }
-
 // ─── Global Illumination (ray-traced DDGI) — acceleration structures ──────────
 
 void MetalRenderer::EnsureRaytracingSupport()
@@ -7751,6 +7832,9 @@ void MetalRenderer::EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& v
 	// (sampling gated by heLight.csmSplits.w — same convention as slot 1).
 	[encoder setFragmentTexture:(__bridge id<MTLTexture>)m_shadowDepthTex atIndex:11];
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:11];
+	// Local (point/spot) shadow atlas, pinned at 12 (sampling gated per light by params.y).
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(m_localShadowTex ? m_localShadowTex : m_shadowDepthTex) atIndex:12];
+	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:12];
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
 
 	constexpr int kMaxBones = 128;
@@ -7994,6 +8078,9 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 	// (sampling gated by heLight.csmSplits.w — same convention as slot 1).
 	[encoder setFragmentTexture:(__bridge id<MTLTexture>)m_shadowDepthTex atIndex:11];
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:11];
+	// Local (point/spot) shadow atlas, pinned at 12 (sampling gated per light by params.y).
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(m_localShadowTex ? m_localShadowTex : m_shadowDepthTex) atIndex:12];
+	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:12];
 
 	// ── Lights (clamped to the shader's 8) ──────────────────────────────────
 	// Kept at function scope so the transparency pass below can re-bind it after
@@ -8011,10 +8098,17 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 		scene.lights[i].posType        = glm::vec4(l.position,  static_cast<float>(l.type));
 		scene.lights[i].dirSpot        = glm::vec4(l.direction, l.spotAngleCos);
 		scene.lights[i].colorIntensity = glm::vec4(l.color,     l.intensity);
-		scene.lights[i].params         = glm::vec4(l.range, 0.0f, 0.0f, 0.0f);
+		// params.y = local shadow atlas base layer; force -1 (no shadow) when the
+		// atlas texture doesn't exist so the shader never samples an unbound layer.
+		scene.lights[i].params         = glm::vec4(l.range,
+		                                           m_localShadowTex ? static_cast<float>(l.shadowLayer) : -1.0f,
+		                                           0.0f, 0.0f);
 	}
 	{
 		const ShadowData& sh = m_renderWorld.shadow;
+		const int nl = std::clamp(sh.localLayerCount, 0, ShadowData::kMaxLocalShadowLayers);
+		for (int c = 0; c < nl; ++c)
+			scene.localShadowVP[c] = kMetalClipFix * sh.localViewProj[c];
 		const int nc = std::clamp(sh.cascadeCount, 0, kCsmCascades);
 		for (int c = 0; c < kCsmCascades; ++c)
 			scene.cascadeVP[c] = (c < nc) ? (kMetalClipFix * sh.cascadeViewProj[c])
@@ -8388,6 +8482,9 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 		// CSM array for the material preamble's GI-off fallback, pinned at 11.
 		[encoder setFragmentTexture:(__bridge id<MTLTexture>)m_shadowDepthTex atIndex:11];
 		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:11];
+		// Local (point/spot) shadow atlas, pinned at 12.
+		[encoder setFragmentTexture:(__bridge id<MTLTexture>)(m_localShadowTex ? m_localShadowTex : m_shadowDepthTex) atIndex:12];
+		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:12];
 		void* tpBound = (__bridge void*)(__bridge id<MTLRenderPipelineState>)m_sceneBlendPipeline;
 		for (const TPDraw& t : transparent)
 		{

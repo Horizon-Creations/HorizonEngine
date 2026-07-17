@@ -388,6 +388,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 		l.range        = light.range;
 		l.spotAngleCos = std::cos(glm::radians(light.spotAngle * 0.5f));
 		l.type         = static_cast<uint8_t>(light.type);
+		l.castsShadow  = light.castsShadow;
 		if (const auto* env = reg.try_get<EnvironmentLightComponent>(e))
 			l.envRole = (env->role == EnvironmentLightComponent::Role::Sun) ? 1 : 2;
 		out.lights.push_back(l);
@@ -613,6 +614,80 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 			out.shadow.cascadeSplit[c]    = fC;   // view-space far distance
 		}
 	}
+
+	// ── Local-light (point/spot) shadow views ────────────────────────────────
+	// Independent of the directional CSM (runs even at night / without a sun).
+	// Shadow-casting point/spot lights are packed camera-nearest-first into the
+	// 16-layer local shadow atlas: spot = 1 perspective layer, point = 6 cube-face
+	// layers. Only the first 8 lights ever reach the shaders (LightGPU cap), so
+	// lights beyond that never get layers.
+	out.shadow.localLayerCount = 0;
+	for (LightData& l : out.lights) l.shadowLayer = -1;
+	{
+		constexpr int kMaxShaderLights = 8;
+		const int lightWindow = std::min<int>(static_cast<int>(out.lights.size()), kMaxShaderLights);
+		std::vector<int> shadowed;
+		for (int i = 0; i < lightWindow; ++i)
+		{
+			const LightData& l = out.lights[i];
+			if (l.castsShadow && l.type != 0 && l.intensity > 0.0f && l.range > 0.0f)
+				shadowed.push_back(i);
+		}
+		auto dist2 = [&](int i) {
+			const glm::vec3 d = out.lights[i].position - out.camera.position;
+			return glm::dot(d, d);
+		};
+		std::sort(shadowed.begin(), shadowed.end(),
+		          [&](int a, int b) { return dist2(a) < dist2(b); });
+
+		int layer = 0;
+		for (int idx : shadowed)
+		{
+			LightData& l = out.lights[idx];
+			// Range-scaled near plane: a tiny fixed near (0.05) with far = range
+			// crushes all useful depth into z≈1 (perspective depth is hyperbolic
+			// in the near value) — caster and receiver then differ by less than
+			// the PCF bias and the shadow vanishes. 1% of range keeps millimetre
+			// separation at typical light ranges.
+			const float farP  = std::max(l.range, 0.2f);
+			const float nearP = std::max(0.1f, farP * 0.01f);
+			if (l.type == 2) // spot: one perspective map down the cone
+			{
+				if (layer + 1 > ShadowData::kMaxLocalShadowLayers) continue;
+				// Full cone angle, slightly widened so the PCF kernel + smoothstep
+				// cone falloff never sample outside the rendered frustum.
+				const float halfAngle = std::acos(glm::clamp(l.spotAngleCos, -1.0f, 0.999f));
+				const float fovy = glm::clamp(2.0f * halfAngle * 1.15f,
+				                              glm::radians(5.0f), glm::radians(170.0f));
+				const glm::vec3 dir = glm::normalize(l.direction);
+				const glm::vec3 up  = std::abs(dir.y) > 0.99f ? glm::vec3(0, 0, 1) : glm::vec3(0, 1, 0);
+				const glm::mat4 view = glm::lookAt(l.position, l.position + dir, up);
+				const glm::mat4 proj = glm::perspective(fovy, 1.0f, nearP, farP);
+				out.shadow.localViewProj[layer] = proj * view;
+				l.shadowLayer = static_cast<int16_t>(layer);
+				layer += 1;
+			}
+			else if (l.type == 1) // point: 6 cube faces as consecutive array layers
+			{
+				if (layer + 6 > ShadowData::kMaxLocalShadowLayers) continue;
+				static const glm::vec3 kFaceDir[6] = {
+					{ 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 } };
+				static const glm::vec3 kFaceUp[6] = {
+					{ 0, 1, 0 }, { 0, 1, 0 }, { 0, 0, 1 }, { 0, 0, -1 }, { 0, 1, 0 }, { 0, 1, 0 } };
+				// > 90° fov so adjacent faces overlap slightly — hides the face seam
+				// that the shader's hard major-axis pick would otherwise show under PCF.
+				const glm::mat4 proj = glm::perspective(glm::radians(92.0f), 1.0f, nearP, farP);
+				for (int f = 0; f < 6; ++f)
+				{
+					const glm::mat4 view = glm::lookAt(l.position, l.position + kFaceDir[f], kFaceUp[f]);
+					out.shadow.localViewProj[layer + f] = proj * view;
+				}
+				l.shadowLayer = static_cast<int16_t>(layer);
+				layer += 6;
+			}
+		}
+		out.shadow.localLayerCount = layer;
+}
 }
 
 void RenderExtractor::extractUI(HorizonWorld& world, float vpWidth, float vpHeight,

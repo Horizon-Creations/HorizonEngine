@@ -288,6 +288,8 @@ private:
 	int          m_uShadowMap     = -1;   // CSM shadow-map array sampler unit
 	int          m_uShadowEnabled = -1;
 	int          m_uShadowDebug   = -1;   // 1 = tint fragments by cascade index
+	int          m_uLocalShadowVP  = -1;  // mat4[16] local (point/spot) shadow view-projs
+	int          m_uLocalShadowMap = -1;  // local shadow atlas sampler unit
 	int          m_uAO            = -1;   // SSAO occlusion sampler unit
 	int          m_uViewport      = -1;   // viewport size (screen-space AO lookup)
 	int          m_uSSAOEnabled   = -1;   // 1 = modulate ambient by SSAO
@@ -325,6 +327,8 @@ private:
 	int          m_uSkinnedCameraFwd       = -1;
 	int          m_uSkinnedShadowDebug     = -1;
 	int          m_uSkinnedShadowMap       = -1;
+	int          m_uSkinnedLocalShadowVP   = -1;
+	int          m_uSkinnedLocalShadowMap  = -1;
 	int          m_uSkinnedAO              = -1;
 	int          m_uSkinnedViewport        = -1;
 	int          m_uSkinnedSSAOEnabled     = -1;
@@ -357,6 +361,8 @@ private:
 	int          m_uInstCameraFwd           = -1;
 	int          m_uInstShadowDebug         = -1;
 	int          m_uInstShadowMap           = -1;
+	int          m_uInstLocalShadowVP       = -1;
+	int          m_uInstLocalShadowMap      = -1;
 	int          m_uInstShadowEnabled       = -1;
 	int          m_uInstAO                  = -1;
 	int          m_uInstViewport            = -1;
@@ -414,6 +420,10 @@ private:
 	unsigned int m_shadowFBO      = 0;
 	unsigned int m_shadowDepthTex = 0;   // GL_TEXTURE_2D_ARRAY, Depth24, one layer/cascade
 	int          m_shadowSize     = 2048;
+	// Local (point/spot) shadow atlas: 2D depth ARRAY, one layer per spot view /
+	// point cube face (16 layers, see ShadowData::kMaxLocalShadowLayers).
+	unsigned int m_localShadowDepthTex = 0; // GL_TEXTURE_2D_ARRAY, Depth24
+	int          m_localShadowSize     = 1024;
 	unsigned int m_depthProgram   = 0;   // depth-only pass (cascadeVP * model * pos)
 	int          m_uDepthMVP      = -1;
 	bool         m_debugShadowCascades = false; // tint fragments by cascade index (debug)
