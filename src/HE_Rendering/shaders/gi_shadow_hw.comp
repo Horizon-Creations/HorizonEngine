@@ -22,8 +22,13 @@ layout(set = 0, binding = 5, r16f) uniform writeonly image2D uOut;
 layout(set = 0, binding = 6) uniform GiShadowUBO {
     vec4 uSunDirRadius; // xyz = direction TOWARD the light, w = angular radius (radians)
     vec4 uFrame;        // x = jitter seed, y = tex width, z = tex height, w = instance count
+    vec4 uLocalPosRange[4]; // xyz = local (point/spot) light position, w = range
+    vec4 uLocalExtra;       // x = local light count
 };
 layout(set = 0, binding = 7) uniform accelerationStructureEXT uTlas;
+// Per-pixel local-light visibility (1 channel per light, first 4) — binding 8
+// keeps the SW/HW binding interfaces parallel (TLAS owns 7).
+layout(set = 0, binding = 8, rgba16f) uniform writeonly image2D uOutLocal;
 
 // HW analogue of the SW BVH traversal: opaque first-hit query over the TLAS.
 bool giSceneAnyHit(vec3 o, vec3 d, float tMin, float tMax)
@@ -57,15 +62,45 @@ void main()
     uvec2 gid = gl_GlobalInvocationID.xy;
     if (float(gid.x) >= uFrame.y || float(gid.y) >= uFrame.z) return;
     vec4 pv = texelFetch(uGPos, ivec2(gid), 0);
-    if (pv.a < 0.5) { imageStore(uOut, ivec2(gid), vec4(1.0)); return; } // background
+    if (pv.a < 0.5) // background -> everything unoccluded
+    {
+        imageStore(uOut,      ivec2(gid), vec4(1.0));
+        imageStore(uOutLocal, ivec2(gid), vec4(1.0));
+        return;
+    }
     vec3 N = normalize(texelFetch(uGNorm, ivec2(gid), 0).xyz);
     vec3 L = uSunDirRadius.xyz;
-    if (dot(N, L) <= 0.0) { imageStore(uOut, ivec2(gid), vec4(0.0)); return; }
 
-    vec2 xi  = giHash2(gid, uFrame.x);
-    vec3 dir = giConeSample(L, max(uSunDirRadius.w, 1e-4), xi);
-    // Same self-intersection guards as the SW kernel: normal-offset origin + min t.
-    vec3 origin = pv.xyz + N * 0.05;
-    float shadow = giSceneAnyHit(origin, dir, 0.02, 10000.0) ? 0.0 : 1.0;
-    imageStore(uOut, ivec2(gid), vec4(shadow));
+    // -- Directional light (cone-jittered, temporally accumulated) --
+    float sunVis = 0.0;
+    // Grazing/back-facing relative to the light: direct lighting's dot(N,L)
+    // term already zeroes this out, so skip the trace entirely.
+    if (dot(N, L) > 0.0)
+    {
+        vec2 xi  = giHash2(gid, uFrame.x);
+        vec3 dir = giConeSample(L, max(uSunDirRadius.w, 1e-4), xi);
+        // Same self-intersection guards as the SW kernel: normal-offset origin + min t.
+        vec3 origin = pv.xyz + N * 0.05;
+        sunVis = giSceneAnyHit(origin, dir, 0.02, 10000.0) ? 0.0 : 1.0;
+    }
+    imageStore(uOut, ivec2(gid), vec4(sunVis));
+
+    // -- Local (point/spot) lights: one HARD occlusion ray each toward the
+    // first 4 (see the Metal kernels) -- deliberately UNjittered: deterministic,
+    // no temporal pass, one visibility channel per light; the scene shader
+    // indexes by its local-light counter.
+    vec4 localVis = vec4(1.0);
+    int localCount = clamp(int(uLocalExtra.x), 0, 4);
+    for (int i = 0; i < localCount; ++i)
+    {
+        vec3  toL   = uLocalPosRange[i].xyz - pv.xyz;
+        float distL = length(toL);
+        if (distL <= 0.05) continue; // on top of the light -> lit
+        if (distL >= uLocalPosRange[i].w) continue; // outside the attenuation radius -> contributes nothing, skip the ray
+        vec3 dirL = toL / distL;
+        if (dot(N, dirL) <= 0.0) { localVis[i] = 0.0; continue; }
+        if (giSceneAnyHit(pv.xyz + N * 0.05, dirL, 0.02, max(distL - 0.1, 0.02)))
+            localVis[i] = 0.0;
+    }
+    imageStore(uOutLocal, ivec2(gid), localVis);
 }

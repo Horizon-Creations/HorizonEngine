@@ -272,6 +272,7 @@ uniform int       uGIEnabled;
 uniform sampler2D uGIShadow;      // half-res screen-space shadow mask
 uniform sampler2D uGIIrr;         // DDGI irradiance atlas (RGBA16F)
 uniform sampler2D uGIVis;         // DDGI visibility atlas (RG16F)
+uniform sampler2D uGILocal;       // half-res local-light visibility mask (1 channel per light, first 4)
 uniform vec4      uGIGridOrigin;  // xyz = grid origin, w = spacing
 uniform vec4      uGIGridCounts;  // xyz = probe counts, w = probesPerRow
 uniform float     uGIIntensity;
@@ -495,6 +496,7 @@ void main()
 		: ambient * ao + uAmbient * diffuseColor;
 
 	int dbgCascade = 0;   // cascade chosen by the directional shadow (debug tint)
+	int giLocalIdx = 0;   // counter over non-directional lights → local-mask channel
 	for (int i = 0; i < uLightCount; ++i)
 	{
 		int   type  = int(uLightPos[i].w);
@@ -529,6 +531,16 @@ void main()
 		{
 			if (uGIEnabled == 1) sh = texture(uGIShadow, gl_FragCoord.xy / uViewport).r;
 			else                 sh = computeShadow(vWorldPos, N, L, dbgCascade);
+		}
+		else
+		{
+			// Local (point/spot) lights: ray-traced hard shadows when GI is
+			// active — one visibility channel per light (first 4), written by
+			// the shadow kernel from unjittered secondary rays. CSM never
+			// shadowed local lights at all (they shone through geometry).
+			if (uGIEnabled == 1 && giLocalIdx < 4)
+				sh = texture(uGILocal, gl_FragCoord.xy / uViewport)[giLocalIdx];
+			giLocalIdx++;
 		}
 
 		float diff = max(dot(N, L), 0.0);
@@ -2713,9 +2725,12 @@ int giSceneClosestHit(vec3 o, vec3 d, float tMin, float tMax, out float tOut)
 static const char* kGiShadowCS = R"GLSL(
 uniform sampler2D uGPos;
 uniform sampler2D uGNorm;
-layout(r16f, binding = 0) uniform writeonly image2D uOut;
+layout(r16f,    binding = 0) uniform writeonly image2D uOut;
+layout(rgba16f, binding = 1) uniform writeonly image2D uOutLocal;
 uniform vec4 uSunDirRadius; // xyz = direction TOWARD the light, w = angular radius (radians)
 uniform vec4 uFrame;        // x = jitter seed, y = tex width, z = tex height
+uniform vec4 uLocalPosRange[4]; // xyz = local (point/spot) light position, w = range
+uniform vec4 uLocalExtra;       // x = local light count
 
 vec2 giHash2(uvec2 gid, float seed)
 {
@@ -2739,17 +2754,49 @@ void main()
 	uvec2 gid = gl_GlobalInvocationID.xy;
 	if (float(gid.x) >= uFrame.y || float(gid.y) >= uFrame.z) return;
 	vec4 pv = texelFetch(uGPos, ivec2(gid), 0);
-	if (pv.a < 0.5) { imageStore(uOut, ivec2(gid), vec4(1.0)); return; } // background
+	if (pv.a < 0.5) // background → everything unoccluded
+	{
+		imageStore(uOut,      ivec2(gid), vec4(1.0));
+		imageStore(uOutLocal, ivec2(gid), vec4(1.0));
+		return;
+	}
 	vec3 N = normalize(texelFetch(uGNorm, ivec2(gid), 0).xyz);
 	vec3 L = uSunDirRadius.xyz;
-	if (dot(N, L) <= 0.0) { imageStore(uOut, ivec2(gid), vec4(0.0)); return; }
 
-	vec2 xi  = giHash2(gid, uFrame.x);
-	vec3 dir = giConeSample(L, max(uSunDirRadius.w, 1e-4), xi);
-	// Same self-intersection guards as Metal: normal-offset origin + min t.
-	vec3 origin = pv.xyz + N * 0.05;
-	float shadow = giSceneAnyHit(origin, dir, 0.02, 10000.0) ? 0.0 : 1.0;
-	imageStore(uOut, ivec2(gid), vec4(shadow));
+	// ── Directional light (cone-jittered, temporally accumulated) ─────────
+	float sunVis = 0.0;
+	// Grazing/back-facing relative to the light: direct lighting's dot(N,L)
+	// term already zeroes this out, so skip the trace entirely.
+	if (dot(N, L) > 0.0)
+	{
+		vec2 xi  = giHash2(gid, uFrame.x);
+		vec3 dir = giConeSample(L, max(uSunDirRadius.w, 1e-4), xi);
+		// Same self-intersection guards as Metal: normal-offset origin + min t.
+		vec3 origin = pv.xyz + N * 0.05;
+		sunVis = giSceneAnyHit(origin, dir, 0.02, 10000.0) ? 0.0 : 1.0;
+	}
+	imageStore(uOut, ivec2(gid), vec4(sunVis));
+
+	// ── Local (point/spot) lights: one HARD occlusion ray each toward the
+	// first 4 — point/spot lights previously had NO shadowing at all (CSM
+	// never covered them), so they shone straight through geometry. The rays
+	// are deliberately UNjittered: deterministic → no noise → no temporal
+	// pass needed, the mask reacts instantly and artefact-free. One visibility
+	// channel per light, the scene shader indexes by its local-light counter.
+	vec4 localVis = vec4(1.0);
+	int localCount = clamp(int(uLocalExtra.x), 0, 4);
+	for (int i = 0; i < localCount; ++i)
+	{
+		vec3  toL   = uLocalPosRange[i].xyz - pv.xyz;
+		float distL = length(toL);
+		if (distL <= 0.05) continue; // on top of the light → lit
+		if (distL >= uLocalPosRange[i].w) continue; // outside the attenuation radius → contributes nothing, skip the ray
+		vec3 dirL = toL / distL;
+		if (dot(N, dirL) <= 0.0) { localVis[i] = 0.0; continue; }
+		if (giSceneAnyHit(pv.xyz + N * 0.05, dirL, 0.02, max(distL - 0.1, 0.02)))
+			localVis[i] = 0.0;
+	}
+	imageStore(uOutLocal, ivec2(gid), localVis);
 }
 )GLSL";
 
@@ -2846,6 +2893,54 @@ vec3 octDecode(vec2 e)
 	return normalize(n);
 }
 
+// direction -> octahedral UV, inverse of octDecode (needed for the
+// multi-bounce field lookup below; matches the scene shader's giOctEncode
+// byte-for-byte).
+vec2 octEncodeP(vec3 n)
+{
+	vec2 p = n.xy * (1.0 / (abs(n.x) + abs(n.y) + abs(n.z)));
+	vec2 signP = vec2(p.x >= 0.0 ? 1.0 : -1.0, p.y >= 0.0 ? 1.0 : -1.0);
+	return (n.z <= 0.0) ? ((1.0 - abs(p.yx)) * signP) : p;
+}
+
+// PREVIOUS-frame irradiance field at an arbitrary surface point: trilinear
+// over the 8 surrounding probes, point-read of each probe's octahedral tile
+// in the hit normal's direction. No Chebyshev here — this feeds the low-
+// frequency multi-bounce term, where leaking is dampened by albedo anyway.
+// uIrr is the READ_WRITE image this kernel EMA-updates — imageLoad gives the
+// previous frame's values (only this thread's own texel is written later).
+vec3 giSampleFieldIrradiance(vec3 pos, vec3 n)
+{
+	int gx = int(uGridCounts.x), gy = int(uGridCounts.y), gz = int(uGridCounts.z);
+	if (gx <= 0 || gy <= 0 || gz <= 0) return vec3(0.0);
+	int probesPerRow = max(1, int(uGridCounts.w));
+	float spacing = max(uGridOrigin.w, 1e-4);
+	vec3 gridSpace = (pos - uGridOrigin.xyz) / spacing;
+	vec3 base  = floor(gridSpace);
+	vec3 fracP = gridSpace - base;
+	vec2 oct = octEncodeP(n) * 0.5 + 0.5;
+	ivec2 octTexel = ivec2(clamp(oct * float(kOctSize), 0.0, float(kOctSize) - 1.0));
+	vec3  sum  = vec3(0.0);
+	float sumW = 0.0;
+	for (int i = 0; i < 8; ++i)
+	{
+		vec3 offs = vec3(float(i & 1), float((i >> 1) & 1), float((i >> 2) & 1));
+		vec3 cell = base + offs;
+		if (any(lessThan(cell, vec3(0.0))) ||
+		    cell.x >= float(gx) || cell.y >= float(gy) || cell.z >= float(gz))
+			continue;
+		vec3 tri = mix(1.0 - fracP, fracP, offs);
+		float w = tri.x * tri.y * tri.z;
+		if (w <= 1e-5) continue;
+		int probeIndex = int(cell.x) + int(cell.y) * gx + int(cell.z) * gx * gy;
+		ivec2 tile = ivec2((probeIndex % probesPerRow) * kOctSize,
+		                   (probeIndex / probesPerRow) * kOctSize);
+		sum  += imageLoad(uIrr, tile + octTexel).rgb * w;
+		sumW += w;
+	}
+	return sum / max(sumW, 1e-4);
+}
+
 layout(local_size_x = 8, local_size_y = 8) in;
 void main()
 {
@@ -2909,6 +3004,11 @@ void main()
 				continue;
 			radiance += albedo * uLightColorType[i].rgb * ndl2 * atten;
 		}
+		// Multi-bounce feedback (DDGI recursion): light already gathered in the
+		// probe field re-reflects off this surface — a red wall visibly bleeds
+		// red onto neighbouring geometry, and the series converges toward
+		// infinite bounces through the EMA. albedo < 1 keeps it stable.
+		radiance += albedo * giSampleFieldIrradiance(hitPos, hitNormal);
 	}
 
 	int probesPerRow = max(1, int(uGridCounts.w));
@@ -4525,6 +4625,7 @@ OpenGLRenderer::GiSceneLocs OpenGLRenderer::FetchGiSceneLocs(unsigned int progra
 	l.shadowTex  = glGetUniformLocation(program, "uGIShadow");
 	l.irrTex     = glGetUniformLocation(program, "uGIIrr");
 	l.visTex     = glGetUniformLocation(program, "uGIVis");
+	l.localTex   = glGetUniformLocation(program, "uGILocal");
 	l.gridOrigin = glGetUniformLocation(program, "uGIGridOrigin");
 	l.gridCounts = glGetUniformLocation(program, "uGIGridCounts");
 	l.intensity  = glGetUniformLocation(program, "uGIIntensity");
@@ -4541,6 +4642,7 @@ void OpenGLRenderer::PushGiSceneUniforms(const GiSceneLocs& L, bool active)
 	glUniform1i(L.shadowTex, 5);
 	glUniform1i(L.irrTex,    6);
 	glUniform1i(L.visTex,    7);
+	glUniform1i(L.localTex,  8);
 	glUniform4f(L.gridOrigin, m_giGridOrigin.x, m_giGridOrigin.y, m_giGridOrigin.z, kGiProbeSpacing);
 	glUniform4f(L.gridCounts, static_cast<float>(m_giGridCounts.x), static_cast<float>(m_giGridCounts.y),
 	            static_cast<float>(m_giGridCounts.z), static_cast<float>(m_giProbesPerRow));
@@ -4652,6 +4754,11 @@ void OpenGLRenderer::EnsureGiShadowTargets(int width, int height)
 
 	// Raw mask (compute image store) + ping-pong temporal history + blurred result.
 	m_giRawTex = makeTex(GL_R16F, GL_NEAREST);
+	// Per-pixel local (point/spot) light visibility — 1 channel per light,
+	// first 4. Deterministic hard rays → no temporal/blur chain; the scene
+	// shader samples it directly (LINEAR = free bilinear upsample, like the
+	// blurred sun mask).
+	m_giLocalMaskTex = makeTex(GL_RGBA16F, GL_LINEAR);
 	for (int i = 0; i < 2; ++i)
 	{
 		m_giHistTex[i] = makeTex(GL_RGBA16F, GL_NEAREST);
@@ -4676,6 +4783,7 @@ void OpenGLRenderer::DestroyGiShadowTargets()
 	if (m_giGBufNormTex) { glDeleteTextures(1, &m_giGBufNormTex);   m_giGBufNormTex = 0; }
 	if (m_giGBufDepth)   { glDeleteTextures(1, &m_giGBufDepth);     m_giGBufDepth = 0; }
 	if (m_giRawTex)      { glDeleteTextures(1, &m_giRawTex);        m_giRawTex = 0; }
+	if (m_giLocalMaskTex) { glDeleteTextures(1, &m_giLocalMaskTex); m_giLocalMaskTex = 0; }
 	for (int i = 0; i < 2; ++i)
 	{
 		if (m_giHistFBO[i]) { glDeleteFramebuffers(1, &m_giHistFBO[i]); m_giHistFBO[i] = 0; }
@@ -4825,7 +4933,8 @@ unsigned int OpenGLRenderer::RenderGiShadow(const CommandBuffer& cmds, int width
 	glActiveTexture(GL_TEXTURE1);
 	glBindTexture(GL_TEXTURE_2D, m_giGBufNormTex);
 	glUniform1i(glGetUniformLocation(m_giShadowCSProgram, "uGNorm"), 1);
-	glBindImageTexture(0, m_giRawTex, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R16F);
+	glBindImageTexture(0, m_giRawTex,       0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R16F);
+	glBindImageTexture(1, m_giLocalMaskTex, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA16F);
 	glm::vec3 towardLight, lightColorIntensity;
 	glDominantDirectionalLight(m_renderWorld, towardLight, lightColorIntensity);
 	m_giFrameSeed += 1.0f;
@@ -4833,6 +4942,27 @@ unsigned int OpenGLRenderer::RenderGiShadow(const CommandBuffer& cmds, int width
 	            towardLight.x, towardLight.y, towardLight.z, glm::radians(m_giLightRadius));
 	glUniform4f(glGetUniformLocation(m_giShadowCSProgram, "uFrame"),
 	            m_giFrameSeed, static_cast<float>(width), static_cast<float>(height), 0.0f);
+	// First 4 local (point/spot) lights of the same 8-light window the scene
+	// shader iterates — its channel index is a plain counter over type != 0
+	// in the SAME order, so count every non-directional light exactly like
+	// the fragment loop does and fill the first 4 slots.
+	{
+		glm::vec4 localPosRange[4] = {};
+		int localCount = 0;
+		const int windowCount = std::min(static_cast<int>(m_renderWorld.lights.size()), 8);
+		for (int li = 0; li < windowCount; ++li)
+		{
+			const LightData& l = m_renderWorld.lights[li];
+			if (l.type == 0) continue;
+			if (localCount < 4)
+				localPosRange[localCount] = glm::vec4(l.position, std::max(l.range, 1e-4f));
+			++localCount;
+		}
+		glUniform4fv(glGetUniformLocation(m_giShadowCSProgram, "uLocalPosRange"),
+		             4, glm::value_ptr(localPosRange[0]));
+		glUniform4f(glGetUniformLocation(m_giShadowCSProgram, "uLocalExtra"),
+		            static_cast<float>(std::min(localCount, 4)), 0.0f, 0.0f, 0.0f);
+	}
 	glUniform1i(glGetUniformLocation(m_giShadowCSProgram, "uGiInstanceCount"), m_giInstanceCount);
 	glDispatchCompute(static_cast<GLuint>((width + 7) / 8), static_cast<GLuint>((height + 7) / 8), 1);
 	// The temporal pass SAMPLES the image-stored raw mask next.
@@ -6830,12 +6960,15 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		glBindTexture(GL_TEXTURE_2D, giShadingActive ? m_giIrrAtlas : m_whiteTex);
 		glActiveTexture(GL_TEXTURE7);
 		glBindTexture(GL_TEXTURE_2D, giShadingActive ? m_giVisAtlas : m_whiteTex);
-		// heLitP() masks (custom materials), units 9/10. The GL per-pixel
-		// LOCAL mask doesn't exist yet — white = unoccluded until it lands.
+		// Per-pixel local (point/spot) light visibility mask on unit 8 — written
+		// by the shadow kernel alongside the sun mask (white = unoccluded when off).
+		glActiveTexture(GL_TEXTURE8);
+		glBindTexture(GL_TEXTURE_2D, (giShadingActive && m_giLocalMaskTex) ? m_giLocalMaskTex : m_whiteTex);
+		// heLitP() masks (custom materials), units 9/10: sun mask + local mask.
 		glActiveTexture(GL_TEXTURE9);
 		glBindTexture(GL_TEXTURE_2D, giShadingActive ? giShadowTex : m_whiteTex);
 		glActiveTexture(GL_TEXTURE10);
-		glBindTexture(GL_TEXTURE_2D, m_whiteTex);
+		glBindTexture(GL_TEXTURE_2D, (giShadingActive && m_giLocalMaskTex) ? m_giLocalMaskTex : m_whiteTex);
 		glActiveTexture(GL_TEXTURE0);
 		PushGiSceneUniforms(m_giLocsUnlit, giShadingActive);
 

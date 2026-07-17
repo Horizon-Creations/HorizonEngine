@@ -505,6 +505,7 @@ Texture2D    uAO        : register(t2);
 Texture2D    uGIShadow  : register(t4); // half-res ray-traced sun-shadow mask
 Texture2D    uGIIrr     : register(t5); // DDGI irradiance atlas (RGBA16F)
 Texture2D    uGIVis     : register(t6); // DDGI visibility atlas (RG16F)
+Texture2D    uGILocal   : register(t7); // half-res local-light visibility mask (1 channel per light, first 4)
 SamplerState uSampler   : register(s0);
 SamplerState uAOSampler : register(s1);
 SamplerState uGISampler : register(s2); // linear clamp (mask upsample + atlases)
@@ -682,6 +683,7 @@ float4 PSMain(VSOut i) : SV_TARGET
     else
         result = ao * (ambDiff * 0.35f + ambSpec * (1.0f - 0.6f * rough));
 
+    int giLocalIdx = 0; // counter over non-directional lights → local-mask channel
     for (int li = 0; li < uLightCount.x; ++li)
     {
         int   type  = (int)uLightPos[li].w;
@@ -710,9 +712,21 @@ float4 PSMain(VSOut i) : SV_TARGET
         // (replaces the single shadow map entirely), else the classic lookup.
         float sh = 1.0;
         if (type == 0)
+        {
             sh = (uGIParams.x > 0.5f)
                ? uGIShadow.SampleLevel(uGISampler, i.clip.xy / uViewport.xy, 0).r
                : shadowFactor(i.worldPos, N, L);
+        }
+        else
+        {
+            // Local (point/spot) lights: ray-traced hard shadows when GI is
+            // active — one visibility channel per light (first 4), written by
+            // the shadow kernel from unjittered secondary rays (previously
+            // local lights had no shadowing at all).
+            if (uGIParams.x > 0.5f && giLocalIdx < 4)
+                sh = uGILocal.SampleLevel(uGISampler, i.clip.xy / uViewport.xy, 0)[giLocalIdx];
+            giLocalIdx++;
+        }
         result += BRDF(L, V, N, base, met, rough) * uLightColor[li].rgb * uLightColor[li].w * atten * sh;
     }
     // Atmospheric fog
@@ -1286,10 +1300,13 @@ cbuffer GiShadowCB : register(b0)
 {
     float4 uSunDirRadius; // xyz = direction TOWARD the light, w = angular radius (radians)
     float4 uFrame;        // x = jitter seed, y = tex width, z = tex height
+    float4 uLocalPosRange[4]; // xyz = local (point/spot) light position, w = range
+    float4 uLocalExtra;       // x = local light count
 };
-Texture2D<float4>   uGPos  : register(t0);
-Texture2D<float4>   uGNorm : register(t1);
-RWTexture2D<float>  uOut   : register(u0);
+Texture2D<float4>   uGPos     : register(t0);
+Texture2D<float4>   uGNorm    : register(t1);
+RWTexture2D<float>  uOut      : register(u0);
+RWTexture2D<float4> uOutLocal : register(u1); // per-pixel local-light visibility (1 channel per light, first 4)
 
 float2 giHash2(uint2 gid, float seed)
 {
@@ -1312,16 +1329,50 @@ void GiShadowCS(uint3 gid : SV_DispatchThreadID)
 {
     if (float(gid.x) >= uFrame.y || float(gid.y) >= uFrame.z) return;
     float4 pv = uGPos.Load(int3(gid.xy, 0));
-    if (pv.a < 0.5) { uOut[gid.xy] = 1.0; return; } // background
+    if (pv.a < 0.5) // background → everything unoccluded
+    {
+        uOut[gid.xy]      = 1.0;
+        uOutLocal[gid.xy] = float4(1.0, 1.0, 1.0, 1.0);
+        return;
+    }
     float3 N = normalize(uGNorm.Load(int3(gid.xy, 0)).xyz);
     float3 L = uSunDirRadius.xyz;
-    if (dot(N, L) <= 0.0) { uOut[gid.xy] = 0.0; return; }
 
-    float2 xi  = giHash2(gid.xy, uFrame.x);
-    float3 dir = giConeSample(L, max(uSunDirRadius.w, 1e-4), xi);
-    // Same self-intersection guards as Metal: normal-offset origin + min t.
-    float3 origin = pv.xyz + N * 0.05;
-    uOut[gid.xy] = giSceneAnyHit(origin, dir, 0.02, 10000.0) ? 0.0 : 1.0;
+    // ── Directional light (cone-jittered, temporally accumulated) ─────────
+    float sunVis = 0.0;
+    // Grazing/back-facing relative to the light: direct lighting's dot(N,L)
+    // term already zeroes this out, so skip the trace entirely.
+    if (dot(N, L) > 0.0)
+    {
+        float2 xi  = giHash2(gid.xy, uFrame.x);
+        float3 dir = giConeSample(L, max(uSunDirRadius.w, 1e-4), xi);
+        // Same self-intersection guards as Metal: normal-offset origin + min t.
+        float3 origin = pv.xyz + N * 0.05;
+        sunVis = giSceneAnyHit(origin, dir, 0.02, 10000.0) ? 0.0 : 1.0;
+    }
+    uOut[gid.xy] = sunVis;
+
+    // ── Local (point/spot) lights: one HARD occlusion ray each toward the
+    // first 4 (see the Metal kernels) — deliberately UNjittered: deterministic,
+    // no temporal pass, one visibility channel per light; the scene shader
+    // indexes by its local-light counter.
+    float4 localVis = float4(1.0, 1.0, 1.0, 1.0);
+    int localCount = clamp(int(uLocalExtra.x), 0, 4);
+    // Fixed-trip unrolled loop (i is a literal per iteration) so the dynamic
+    // vector-component write localVis[i] stays FXC/SM5.0-safe.
+    [unroll] for (int i = 0; i < 4; ++i)
+    {
+        if (i >= localCount) break;
+        float3 toL   = uLocalPosRange[i].xyz - pv.xyz;
+        float  distL = length(toL);
+        if (distL <= 0.05) continue; // on top of the light → lit
+        if (distL >= uLocalPosRange[i].w) continue; // outside the attenuation radius → contributes nothing, skip the ray
+        float3 dirL = toL / distL;
+        if (dot(N, dirL) <= 0.0) { localVis[i] = 0.0; continue; }
+        if (giSceneAnyHit(pv.xyz + N * 0.05, dirL, 0.02, max(distL - 0.1, 0.02)))
+            localVis[i] = 0.0;
+    }
+    uOutLocal[gid.xy] = localVis;
 }
 )HLSL";
 
@@ -1423,6 +1474,53 @@ float3 octDecode(float2 e)
     return normalize(n);
 }
 
+// direction -> octahedral UV, inverse of octDecode (needed for the
+// multi-bounce field lookup below; matches the scene shader's giOctEncode
+// byte-for-byte).
+float2 octEncodeP(float3 n)
+{
+    float2 p = n.xy * (1.0 / (abs(n.x) + abs(n.y) + abs(n.z)));
+    float2 signP = float2(p.x >= 0.0 ? 1.0 : -1.0, p.y >= 0.0 ? 1.0 : -1.0);
+    return (n.z <= 0.0) ? ((1.0 - abs(p.yx)) * signP) : p;
+}
+
+// PREVIOUS-frame irradiance field at an arbitrary surface point: trilinear
+// over the 8 surrounding probes, point-read of each probe's octahedral tile
+// in the hit normal's direction. No Chebyshev here — this feeds the low-
+// frequency multi-bounce term, where leaking is dampened by albedo anyway.
+// Reads uIrrPrev (the SRV copy of last frame's atlas — typed UAV loads are
+// an optional D3D11.3 cap, so the UAV is never read).
+float3 giSampleFieldIrradiance(float3 pos, float3 n)
+{
+    int gx = int(uGridCounts.x), gy = int(uGridCounts.y), gz = int(uGridCounts.z);
+    if (gx <= 0 || gy <= 0 || gz <= 0) return float3(0.0, 0.0, 0.0);
+    int probesPerRow = max(1, int(uGridCounts.w));
+    float spacing = max(uGridOrigin.w, 1e-4);
+    float3 gridSpace = (pos - uGridOrigin.xyz) / spacing;
+    float3 base  = floor(gridSpace);
+    float3 fracP = gridSpace - base;
+    float2 oct = octEncodeP(n) * 0.5 + 0.5;
+    int2 octTexel = int2(clamp(oct * float(kOctSize), 0.0, float(kOctSize) - 1.0));
+    float3 sum  = float3(0.0, 0.0, 0.0);
+    float  sumW = 0.0;
+    for (int i = 0; i < 8; ++i)
+    {
+        float3 offs = float3(float(i & 1), float((i >> 1) & 1), float((i >> 2) & 1));
+        float3 cell = base + offs;
+        if (any(cell < 0.0) || cell.x >= float(gx) || cell.y >= float(gy) || cell.z >= float(gz))
+            continue;
+        float3 tri = lerp(1.0 - fracP, fracP, offs);
+        float w = tri.x * tri.y * tri.z;
+        if (w <= 1e-5) continue;
+        int probeIndex = int(cell.x) + int(cell.y) * gx + int(cell.z) * gx * gy;
+        int2 tile = int2((probeIndex % probesPerRow) * kOctSize,
+                         (probeIndex / probesPerRow) * kOctSize);
+        sum  += uIrrPrev.Load(int3(tile + octTexel, 0)).rgb * w;
+        sumW += w;
+    }
+    return sum / max(sumW, 1e-4);
+}
+
 [numthreads(8, 8, 1)]
 void GiProbeCS(uint3 gtid : SV_GroupThreadID, uint3 groupId : SV_GroupID)
 {
@@ -1484,6 +1582,11 @@ void GiProbeCS(uint3 gtid : SV_GroupThreadID, uint3 groupId : SV_GroupID)
                 continue;
             radiance += albedo * uLightColorType[i].rgb * ndl2 * atten;
         }
+        // Multi-bounce feedback (DDGI recursion): light already gathered in the
+        // probe field re-reflects off this surface — a red wall visibly bleeds
+        // red onto neighbouring geometry, and the series converges toward
+        // infinite bounces through the EMA. albedo < 1 keeps it stable.
+        radiance += albedo * giSampleFieldIrradiance(hitPos, hitNormal);
     }
 
     int probesPerRow = max(1, int(uGridCounts.w));
@@ -2312,6 +2415,9 @@ struct D3D11RendererImpl
     ComPtr<ID3D11ShaderResourceView>  giGBufPosSRV, giGBufNormSRV, giRawSRV,
                                       giHistSRV[2], giResultSRV;
     ComPtr<ID3D11UnorderedAccessView> giRawUAV;
+    ComPtr<ID3D11Texture2D>           giLocalMaskTex; // RGBA16F per-pixel local-light visibility
+    ComPtr<ID3D11ShaderResourceView>  giLocalMaskSRV;
+    ComPtr<ID3D11UnorderedAccessView> giLocalMaskUAV;
     int       giHistIdx     = 0;
     bool      giHistValid   = false;
     glm::mat4 giPrevViewProj{ 1.0f };
@@ -2485,7 +2591,7 @@ struct D3D11RendererImpl
         if (ok && (ok = compile(kGiBlurHLSL, "main", "ps_5_0", b)))
             ok = SUCCEEDED(device->CreatePixelShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &giBlurPS));
 
-        ok = ok && makeCB(2 * 16, giShadowCB)
+        ok = ok && makeCB(7 * 16, giShadowCB) // sunDirRadius + frame + localPosRange[4] + localExtra
                 && makeCB(16, giCountCB)
                 && makeCB(sizeof(glm::mat4) + 16, giTemporalCB)
                 && makeCB(16, giBlurCB)
@@ -2551,6 +2657,12 @@ struct D3D11RendererImpl
                && makeTex(DXGI_FORMAT_R16_FLOAT,
                           D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE,
                           giRawTex, nullptr, &giRawSRV, &giRawUAV)
+               // Per-pixel local (point/spot) light visibility (1 channel per
+               // light, first 4). Deterministic hard rays → no temporal/blur;
+               // the scene shader samples it directly at t7.
+               && makeTex(DXGI_FORMAT_R16G16B16A16_FLOAT,
+                          D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE,
+                          giLocalMaskTex, nullptr, &giLocalMaskSRV, &giLocalMaskUAV)
                && makeTex(DXGI_FORMAT_R16G16B16A16_FLOAT,
                           D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE,
                           giHistTex[0], &giHistRTV[0], &giHistSRV[0], nullptr)
@@ -2662,6 +2774,7 @@ struct D3D11RendererImpl
         giGBufPosTex.Reset(); giGBufNormTex.Reset(); giGBufDepth.Reset(); giRawTex.Reset();
         giGBufPosRTV.Reset(); giGBufNormRTV.Reset(); giGBufDSV.Reset();
         giGBufPosSRV.Reset(); giGBufNormSRV.Reset(); giRawSRV.Reset(); giRawUAV.Reset();
+        giLocalMaskTex.Reset(); giLocalMaskSRV.Reset(); giLocalMaskUAV.Reset();
         for (int i = 0; i < 2; ++i)
         { giHistTex[i].Reset(); giHistRTV[i].Reset(); giHistSRV[i].Reset(); }
         giResultTex.Reset(); giResultRTV.Reset(); giResultSRV.Reset();
@@ -2699,8 +2812,8 @@ struct D3D11RendererImpl
         // ── 1. World-space G-buffer (position + normal MRT, half-res). Same
         // draw set + camera as the scene pass (the aspect/misalign lesson).
         {
-            ID3D11ShaderResourceView* nullSrvs[3] = {};
-            ctx->PSSetShaderResources(4, 3, nullSrvs); // t4-t6 may still hold last frame's GI
+            ID3D11ShaderResourceView* nullSrvs[4] = {};
+            ctx->PSSetShaderResources(4, 4, nullSrvs); // t4-t7 may still hold last frame's GI (t7 = local mask, next bound as UAV)
             ID3D11RenderTargetView* rtvs[2] = { giGBufPosRTV.Get(), giGBufNormRTV.Get() };
             ctx->OMSetRenderTargets(2, rtvs, giGBufDSV.Get());
             const float clear[4] = { 0, 0, 0, 0 }; // a = 0 → background
@@ -2749,9 +2862,26 @@ struct D3D11RendererImpl
             glm::vec3 towardLight, lightColorIntensity;
             d3d11DominantDirectionalLight(rw, towardLight, lightColorIntensity);
             giFrameSeed += 1.0f;
-            struct { glm::vec4 sunDirRadius, frame; } scb{};
+            struct { glm::vec4 sunDirRadius, frame, localPosRange[4], localExtra; } scb{};
             scb.sunDirRadius = glm::vec4(towardLight, glm::radians(giLightRadius));
             scb.frame        = glm::vec4(giFrameSeed, float(giShadowW), float(giShadowH), 0.0f);
+            // First 4 local (point/spot) lights of the same 8-light window the
+            // scene shader iterates — PSMain counts non-directional lights in
+            // the SAME order to index the mask channels, so count every
+            // type != 0 light exactly like its loop does, fill the first 4.
+            {
+                int localCount = 0;
+                const int windowCount = std::min(static_cast<int>(rw.lights.size()), 8);
+                for (int li = 0; li < windowCount; ++li)
+                {
+                    const LightData& l = rw.lights[li];
+                    if (l.type == 0) continue;
+                    if (localCount < 4)
+                        scb.localPosRange[localCount] = glm::vec4(l.position, std::max(l.range, 1e-4f));
+                    ++localCount;
+                }
+                scb.localExtra = glm::vec4(float(std::min(localCount, 4)), 0.0f, 0.0f, 0.0f);
+            }
             D3D11_MAPPED_SUBRESOURCE mapped{};
             if (SUCCEEDED(ctx->Map(giShadowCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
             { std::memcpy(mapped.pData, &scb, sizeof(scb)); ctx->Unmap(giShadowCB.Get(), 0); }
@@ -2765,11 +2895,11 @@ struct D3D11RendererImpl
             ctx->CSSetShaderResources(0, 5, srvs);
             ID3D11Buffer* cbs[2] = { giShadowCB.Get(), giCountCB.Get() };
             ctx->CSSetConstantBuffers(0, 2, cbs);
-            ID3D11UnorderedAccessView* uav = giRawUAV.Get();
-            ctx->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+            ID3D11UnorderedAccessView* uavs[2] = { giRawUAV.Get(), giLocalMaskUAV.Get() };
+            ctx->CSSetUnorderedAccessViews(0, 2, uavs, nullptr);
             ctx->Dispatch((UINT)((giShadowW + 7) / 8), (UINT)((giShadowH + 7) / 8), 1);
-            ID3D11UnorderedAccessView* nullUav = nullptr;
-            ctx->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
+            ID3D11UnorderedAccessView* nullUavs[2] = {};
+            ctx->CSSetUnorderedAccessViews(0, 2, nullUavs, nullptr);
             ID3D11ShaderResourceView* nullSrvs[5] = {};
             ctx->CSSetShaderResources(0, 5, nullSrvs);
             ctx->CSSetShader(nullptr, nullptr, 0);
@@ -4415,11 +4545,14 @@ void D3D11Renderer::DrawScene(int width, int height)
         // additionally gates on uGIParams.x). Refill both per-frame CBs with
         // the final GI decision (they were filled before the passes ran).
         {
-            ID3D11ShaderResourceView* giSrvs[3] = {
+            ID3D11ShaderResourceView* giLocalSrv =
+                (giShadingActive && p.giLocalMaskSRV) ? p.giLocalMaskSRV.Get() : p.whiteSRV.Get();
+            ID3D11ShaderResourceView* giSrvs[4] = {
                 giShadingActive ? giShadowSRV       : p.whiteSRV.Get(),
                 giShadingActive ? p.giIrrSRV.Get()  : p.whiteSRV.Get(),
-                giShadingActive ? p.giVisSRV.Get()  : p.whiteSRV.Get() };
-            ctx->PSSetShaderResources(4, 3, giSrvs);
+                giShadingActive ? p.giVisSRV.Get()  : p.whiteSRV.Get(),
+                giLocalSrv };
+            ctx->PSSetShaderResources(4, 4, giSrvs);
             if (p.giLinearClamp)
                 ctx->PSSetSamplers(2, 1, p.giLinearClamp.GetAddressOf());
             fillPerFrame(giShadingActive,
@@ -4427,10 +4560,10 @@ void D3D11Renderer::DrawScene(int width, int height)
 #if defined(HE_HAVE_SHADERC)
             fillMatLight(giShadingActive);
             // heLitP GI masks for graph materials: sun mask on t10, per-light
-            // local mask on t11 (white until D3D grows one — giParams.z gates
-            // sampling anyway). Samplers s10/s11 = linear clamp.
+            // local mask on t11 (the REAL mask when GI ran this frame).
+            // Samplers s10/s11 = linear clamp.
             ID3D11ShaderResourceView* matMasks[2] = {
-                giShadingActive ? giShadowSRV : p.whiteSRV.Get(), p.whiteSRV.Get() };
+                giShadingActive ? giShadowSRV : p.whiteSRV.Get(), giLocalSrv };
             ctx->PSSetShaderResources(10, 2, matMasks);
             if (p.giLinearClamp)
             {
@@ -4584,11 +4717,13 @@ void D3D11Renderer::DrawScene(int width, int height)
                         ctx->PSSetConstantBuffers(0, 1, p.perObjectCB.GetAddressOf());
                         ctx->PSSetShaderResources(2, 1, &aoSRV); // t2 = AO (unoccluded white when off)
                         {
-                            ID3D11ShaderResourceView* giSrvs[3] = {
+                            ID3D11ShaderResourceView* giSrvs[4] = {
                                 giShadingActive ? giShadowSRV      : p.whiteSRV.Get(),
                                 giShadingActive ? p.giIrrSRV.Get() : p.whiteSRV.Get(),
-                                giShadingActive ? p.giVisSRV.Get() : p.whiteSRV.Get() };
-                            ctx->PSSetShaderResources(4, 3, giSrvs);
+                                giShadingActive ? p.giVisSRV.Get() : p.whiteSRV.Get(),
+                                (giShadingActive && p.giLocalMaskSRV) ? p.giLocalMaskSRV.Get()
+                                                                      : p.whiteSRV.Get() };
+                            ctx->PSSetShaderResources(4, 4, giSrvs);
                             if (p.giLinearClamp)
                                 ctx->PSSetSamplers(2, 1, p.giLinearClamp.GetAddressOf());
                         }

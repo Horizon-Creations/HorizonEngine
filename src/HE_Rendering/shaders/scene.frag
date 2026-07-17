@@ -48,6 +48,9 @@ layout(set = 0, binding = 3) uniform sampler2D uAO;
 layout(set = 0, binding = 4) uniform sampler2D uGIShadow;
 layout(set = 0, binding = 5) uniform sampler2D uGIIrr;
 layout(set = 0, binding = 6) uniform sampler2D uGIVis;
+// Per-pixel local (point/spot) light visibility mask — 1 channel per light
+// (first 4, counter over non-directional lights), written by the shadow kernel.
+layout(set = 0, binding = 7) uniform sampler2D uGILocal;
 
 // Signed-octahedral mapping (direction → texel UV) — must match gi_probe.comp's
 // octDecode and the GL/Metal octEncode byte-for-byte.
@@ -238,6 +241,7 @@ void main()
               + ambSpec * (1.0 - 0.6 * rough)
         : ao * (ambDiff * 0.35 + ambSpec * (1.0 - 0.6 * rough));
 
+    int giLocalIdx = 0; // counter over non-directional lights → local-mask channel
     for (int i = 0; i < uf.lightCount.x; ++i)
     {
         int   type  = int(uf.lightPos[i].w);
@@ -269,6 +273,16 @@ void main()
             // sampled at the same screen-space UV convention as uAO.
             if (uf.giParams.y > 0.5) sh = texture(uGIShadow, gl_FragCoord.xy / uf.viewport.xy).r;
             else                     sh = shadowFactor(vWorldPos, N, L);
+        }
+        else
+        {
+            // Local (point/spot) lights: ray-traced hard shadows when GI is
+            // active — one visibility channel per light (first 4), written by
+            // the shadow kernel from unjittered secondary rays (they had no
+            // shadowing at all before — shone straight through geometry).
+            if (uf.giParams.y > 0.5 && giLocalIdx < 4)
+                sh = texture(uGILocal, gl_FragCoord.xy / uf.viewport.xy)[giLocalIdx];
+            giLocalIdx++;
         }
         result += BRDF(L, V, N, base, met, rough) * uf.lightColor[i].rgb * uf.lightColor[i].w * atten * sh;
     }
