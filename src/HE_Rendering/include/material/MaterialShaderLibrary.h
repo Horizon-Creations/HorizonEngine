@@ -56,6 +56,13 @@ public:
         float csmVP[3][16]      = {}; // per-cascade light view-proj, column-major
         float csmSplits[4]      = {}; // xyz = planar view-space far distances; w = count
         float camFwd[4]         = {}; // xyz = camera forward (planar cascade selection)
+        // Local (point/spot) shadow atlas (append-only, v2.3): per-layer light
+        // view-proj with the backend's clip conventions PRE-BAKED (like csmVP).
+        // A light's first layer index rides in lightParams[i].y as layer+1 —
+        // 0 = casts no shadow, so zero-initialised fills (previews, UI, D3D/
+        // Vulkan) never sample the atlas. Spot = 1 layer, point = 6 cube-face
+        // layers (+X −X +Y −Y +Z −Z, major-axis pick in the preamble).
+        float localShadowVP[16][16] = {};
     };
     static constexpr int kMetalLightingBufferIndex = 1; // fragment [[buffer(1)]]
 

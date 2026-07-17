@@ -3673,6 +3673,9 @@ unsigned int OpenGLRenderer::getOrBuildMaterialProgram(uint64_t key, const std::
 		// at 0 it would alias heTex0's unit with a different sampler type, which
 		// is a draw-time validation error on strict drivers.
 		if (GLint l = glGetUniformLocation(prog, "heCsm");      l >= 0) glUniform1i(l, 11);
+		// heLocalShadow (local point/spot shadow atlas, sampler2DArray) — unit 12,
+		// where DrawScene binds the atlas alongside the built-in shaders' unit 11.
+		if (GLint l = glGetUniformLocation(prog, "heLocalShadow"); l >= 0) glUniform1i(l, 12);
 		glUseProgram(0);
 	};
 
@@ -3847,6 +3850,7 @@ unsigned int OpenGLRenderer::getOrBuildUIMaterialProgram(const HE::UUID& materia
 			if (GLint l = glGetUniformLocation(prog, "heGILocal");  l >= 0) glUniform1i(l, 10);
 			// heCsm — unit 11, same aliasing rationale as the mesh-material path.
 			if (GLint l = glGetUniformLocation(prog, "heCsm");      l >= 0) glUniform1i(l, 11);
+			if (GLint l = glGetUniformLocation(prog, "heLocalShadow"); l >= 0) glUniform1i(l, 12);
 			glUseProgram(0);
 			program = prog;
 		}
@@ -7099,6 +7103,10 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		glUniform1i(m_uLocalShadowMap, 11);
 		glActiveTexture(GL_TEXTURE11);
 		glBindTexture(GL_TEXTURE_2D_ARRAY, m_localShadowDepthTex ? m_localShadowDepthTex : m_shadowDepthTex);
+		// Same atlas on unit 12 for CUSTOM-material programs (their heCsm alias
+		// occupies unit 11 in the preamble's sampler assignment).
+		glActiveTexture(GL_TEXTURE12);
+		glBindTexture(GL_TEXTURE_2D_ARRAY, m_localShadowDepthTex ? m_localShadowDepthTex : m_shadowDepthTex);
 		if (localShadows)
 			glUniformMatrix4fv(m_uLocalShadowVP, nLocalLayers, GL_FALSE, localVPData);
 		glActiveTexture(GL_TEXTURE0); // base color binds here in the loop
@@ -7367,9 +7375,26 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 							lit.lightColor[li][0] = ld.color.r;   lit.lightColor[li][1] = ld.color.g;
 							lit.lightColor[li][2] = ld.color.b;   lit.lightColor[li][3] = ld.intensity;
 							lit.lightParams[li][0] = ld.range;
+							// y = local shadow atlas base layer + 1 (0 = none) —
+							// the +1 keeps zero-initialised Lighting fills safe.
+							lit.lightParams[li][1] = (localShadows && ld.shadowLayer >= 0)
+								? static_cast<float>(ld.shadowLayer + 1) : 0.0f;
 						}}
 						lit.counts[0] = static_cast<float>(lc);
 					}}
+					// Local (point/spot) shadow atlas for heLitP — same matrices the
+					// built-in shaders use, with the GL depth remap (z: [-1,1]→[0,1])
+					// PRE-BAKED so the shared preamble stays convention-free.
+					if (localShadows)
+					{
+						glm::mat4 zRemap(1.0f);
+						zRemap[2][2] = 0.5f; zRemap[3][2] = 0.5f;
+						for (int c = 0; c < nLocalLayers; ++c)
+						{
+							const glm::mat4 m = zRemap * m_renderWorld.shadow.localViewProj[c];
+							std::memcpy(lit.localShadowVP[c], &m[0][0], 16 * sizeof(float));
+						}
+					}
 					// Lighting is identical for every material draw this frame → upload once.
 					if (!m_matLightUploadedThisFrame)
 					{

@@ -8171,9 +8171,30 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 				matLight.lightColor[li][0] = ld.color.r;   matLight.lightColor[li][1] = ld.color.g;
 				matLight.lightColor[li][2] = ld.color.b;   matLight.lightColor[li][3] = ld.intensity;
 				matLight.lightParams[li][0] = ld.range;
+				// y = local shadow atlas base layer + 1 (0 = none) — the +1
+				// keeps zero-initialised Lighting fills (previews, UI) safe.
+				matLight.lightParams[li][1] = (m_localShadowTex && ld.shadowLayer >= 0)
+					? static_cast<float>(ld.shadowLayer + 1) : 0.0f;
 			}}
 			matLight.counts[0] = static_cast<float>(lc);
 		}}
+		// Local (point/spot) shadow atlas for heLitP — the same matrices the
+		// built-in shaders sample with, Metal depth remap AND top-left UV origin
+		// pre-baked (uvFlipY * kMetalClipFix, exactly like csmVP below) so the
+		// shared preamble's heLocalShadowFactor stays convention-free. The layer
+		// gate rides in lightParams[li].y (layer+1, 0 = none) set in the loop above.
+		if (m_localShadowTex)
+		{
+			const ShadowData& lsh = m_renderWorld.shadow;
+			const int nlLoc = std::clamp(lsh.localLayerCount, 0, ShadowData::kMaxLocalShadowLayers);
+			glm::mat4 lsFlipY(1.0f);
+			lsFlipY[1][1] = -1.0f;
+			for (int c = 0; c < nlLoc; ++c)
+			{
+				const glm::mat4 m = lsFlipY * kMetalClipFix * lsh.localViewProj[c];
+				std::memcpy(matLight.localShadowVP[c], &m[0][0], 16 * sizeof(float));
+			}
+		}
 		// CSM fallback for graph materials (v2.2): only meaningful when the GI
 		// masks are absent this frame — heLitP's directional lights then sample
 		// the SAME cascade array as the built-in shaders (texture 11). Metal's

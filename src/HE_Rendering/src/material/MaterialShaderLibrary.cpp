@@ -111,6 +111,7 @@ layout(std140, set = 0, binding = 0) uniform HeLighting {
     mat4 csmVP[3];       // CSM fallback: per-cascade light view-proj (conventions pre-baked)
     vec4 csmSplits;      // xyz = planar view-space far distances; w = cascade count (0 = off)
     vec4 camFwd;         // xyz = camera forward (planar cascade selection)
+    mat4 localShadowVP[16]; // local (point/spot) shadow atlas view-projs (conventions pre-baked)
 } heLight;
 // Screen-space ray-traced shadow masks (GI): sun visibility (.r) + local-light
 // visibility (one channel per the first 4 point/spot lights). Bindings 10/11 —
@@ -122,6 +123,10 @@ layout(set = 0, binding = 11) uniform sampler2D heGILocal;
 // shaders sample, so graph materials are shadowed identically when GI is off.
 // Backends without a cascade array bind a dummy and keep csmSplits.w = 0.
 layout(set = 0, binding = 12) uniform sampler2DArray heCsm;
+// Local (point/spot) shadow atlas (binding 13): the SAME 16-layer depth array
+// the built-in PBR shaders sample. A light's base layer is lightParams[i].y-1
+// (0 = no shadow), so unfilled Lighting blocks never sample this.
+layout(set = 0, binding = 13) uniform sampler2DArray heLocalShadow;
 // Screen-space GI sun-visibility for the current fragment (1 = fully lit).
 // gl_FragCoord-based, so even the legacy worldPos-less heLit() can use it.
 float heGISun() {
@@ -152,6 +157,43 @@ float heCsmShadow(vec3 worldPos, vec3 n, vec3 L) {
     for (int y = -1; y <= 1; ++y)
         for (int x = -1; x <= 1; ++x) {
             float cd = texture(heCsm, vec3(uv + vec2(x, y) * texel, float(c))).r;
+            vis += (p.z - bias > cd) ? 0.0 : 1.0;
+        }
+    return vis / 9.0;
+}
+// Local (point/spot) shadow lookup in the atlas — mirror of the built-in
+// shaders' localShadowFactor(). Spot lights project into their single layer;
+// point lights pick the cube face from the fragment→light major axis first.
+// Clip conventions are pre-baked into localShadowVP by the fill site (like
+// csmVP), so this shared GLSL uses uv = p.xy*0.5+0.5 and z in [0,1].
+float heLocalShadowFactor(int i, vec3 worldPos, vec3 n) {
+    int base = int(heLight.lightParams[i].y) - 1; // stored as layer+1; 0 = none
+    if (base < 0) return 1.0;
+    int layer = base;
+    if (int(heLight.lightPos[i].w) == 1) { // point: major-axis cube-face pick
+        vec3 d = worldPos - heLight.lightPos[i].xyz;
+        vec3 a = abs(d);
+        int face;
+        if      (a.x >= a.y && a.x >= a.z) face = (d.x > 0.0) ? 0 : 1;
+        else if (a.y >= a.z)               face = (d.y > 0.0) ? 2 : 3;
+        else                               face = (d.z > 0.0) ? 4 : 5;
+        layer = base + face;
+    }
+    vec3  toL = normalize(heLight.lightPos[i].xyz - worldPos);
+    float ndl = clamp(dot(n, toL), 0.0, 1.0);
+    vec4 lp = heLight.localShadowVP[layer] * vec4(worldPos + n * 0.02, 1.0);
+    if (lp.w <= 0.0) return 1.0;             // behind the light's near plane
+    vec3 p  = lp.xyz / lp.w;
+    vec2 uv = p.xy * 0.5 + 0.5;
+    vec2 texel = 1.0 / vec2(textureSize(heLocalShadow, 0).xy);
+    if (p.z > 1.0 || p.z < 0.0
+        || any(lessThan(uv, texel)) || any(greaterThan(uv, vec2(1.0) - texel)))
+        return 1.0;
+    float bias = clamp(0.0015 * tan(acos(ndl)), 0.0006, 0.01);
+    float vis = 0.0;
+    for (int y = -1; y <= 1; ++y)
+        for (int x = -1; x <= 1; ++x) {
+            float cd = texture(heLocalShadow, vec3(uv + vec2(x, y) * texel, float(layer))).r;
             vis += (p.z - bias > cd) ? 0.0 : 1.0;
         }
     return vis / 9.0;
@@ -225,7 +267,15 @@ vec3 heLitP(vec3 baseColor, vec3 N, float metallic, float roughness, vec3 worldP
         {
             sh = heCsmShadow(worldPos, n, L);
         }
-        if (type != 0) localIdx++;
+        // Local (point/spot) lights: shadow-map the atlas layer the extractor
+        // assigned (lightParams[i].y). min() with the GI mask above — the map
+        // covers lights beyond the mask's first-4 window, the mask adds
+        // ray-traced contact hardness when GI is on. Mirrors the built-in PBR.
+        if (type != 0)
+        {
+            sh = min(sh, heLocalShadowFactor(i, worldPos, n));
+            localIdx++;
+        }
         float ndl  = max(dot(n, L), 0.0);
         vec3  H    = normalize(L + V);
         float spec = pow(max(dot(n, H), 0.0), mix(4.0, 64.0, 1.0 - roughness)) * (1.0 - roughness);
@@ -472,7 +522,11 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragment(
               { Stage::Fragment, 0, 11, 10 },
               // CSM depth array for the GI-off fallback (preamble binding 12)
               // → MSL texture/sampler 11 (next free slot after the GI masks).
-              { Stage::Fragment, 0, 12, 11 } }));
+              { Stage::Fragment, 0, 12, 11 },
+              // Local (point/spot) shadow atlas (preamble binding 13) → MSL
+              // texture/sampler 12 — the SAME pin the scene passes bind the
+              // atlas at for the built-in shaders, so no per-draw rebinding.
+              { Stage::Fragment, 0, 13, 12 } }));
     }
     else
     {

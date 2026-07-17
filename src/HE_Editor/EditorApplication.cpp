@@ -2051,6 +2051,27 @@ void EditorApplication::dumpFrameHeadless()
 		ftc.scale    = glm::vec3(24.0f, 0.25f, 24.0f);
 		reg.emplace<TransformComponent>(floorE, ftc);
 		reg.emplace<MeshComponent>(floorE, MeshComponent{ HE::kDefaultCubeMeshId });
+		// "...mat" variants (pointmat/spotmat/+off): the floor gets a NODE-GRAPH
+		// material (custom shader → heLitP path), witnessing that CUSTOM materials
+		// receive local-light shadows too — not just the built-in PBR pipeline.
+		if (std::string(ls).find("mat") != std::string::npos)
+		{
+			MaterialAsset fm;
+			fm.type = HE::AssetType::Material;
+			fm.name = "LocalShadowFloorMat";
+			HE::MaterialGraph g;
+			const int out = g.addNode(HE::MatNodeType::Output);
+			const int col = g.addNode(HE::MatNodeType::ConstColor);
+			g.findNode(col)->p[0] = 0.8f; g.findNode(col)->p[1] = 0.8f; g.findNode(col)->p[2] = 0.8f;
+			g.connect(col, 0, out, 0); // BaseColor → lit output (heLitP)
+			fm.nodeGraphJson = HE::materialGraphToJson(g);
+			const HE::MatShaderGen gen = HE::generateFragment(g);
+			fm.customShaderFragGlsl = gen.glsl;
+			fm.customShaderVertGlsl = gen.vertexBody;
+			fm.blendMode            = gen.blendMode;
+			reg.emplace<MaterialComponent>(floorE,
+				MaterialComponent{ contentManager().registerMaterial(std::move(fm)) });
+		}
 
 		auto caster = m_editorWorld->createEntity("LocalShadowCaster");
 		TransformComponent ctc;
