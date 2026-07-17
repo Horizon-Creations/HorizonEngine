@@ -442,7 +442,10 @@ void EditorApplication::OnInit()
 			ImGui_ImplDX12_InitInfo dx12Info{};
 			dx12Info.Device            = device;
 			dx12Info.CommandQueue      = cmdQueue;
-			dx12Info.NumFramesInFlight = 2;
+			// Must match D3D12Renderer's k_frameCount: the backend cycles its
+			// vertex/index buffers modulo this value, so a smaller number lets it
+			// overwrite buffers the GPU is still reading from an in-flight frame.
+			dx12Info.NumFramesInFlight = 3;
 			dx12Info.RTVFormat         = DXGI_FORMAT_R8G8B8A8_UNORM;
 			dx12Info.DSVFormat         = DXGI_FORMAT_UNKNOWN;
 			dx12Info.SrvDescriptorHeap = srvHeap;
