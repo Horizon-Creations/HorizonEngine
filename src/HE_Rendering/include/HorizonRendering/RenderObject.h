@@ -44,6 +44,12 @@ struct RenderObject {
     // they are NOT instanced) — and so rain/snow don't wrongly cast shadows or darken AO.
     bool         castsShadow    = true;
     bool         contributesAO  = true;
+    // Terrain (entity carries a TerrainComponent). Terrain is a ground plane the
+    // size of the whole level, so it must not drive the directional shadow map's
+    // XY extent — one map stretched over the terrain collapses to a few texels per
+    // prop. It still contributes to the light-space DEPTH range so its slope stays
+    // inside the bias envelope. See the shadow fit in RenderExtractor.
+    bool         isTerrain      = false;
     // Per-entity node-graph param override: empty = use the material's own
     // shaderParamData; otherwise the FULL merged HeParams block (16 vec4 = 64
     // floats) the backend uploads instead. Filled by the extractor from

@@ -14,6 +14,7 @@
 #include <HorizonScene/Components/ParticleSystemComponent.h>
 #include <HorizonScene/Components/WeatherComponent.h>
 #include <HorizonScene/Components/FoliageComponent.h>
+#include <HorizonScene/Components/TerrainComponent.h>
 #include <HorizonScene/UISystem.h>
 #include <ContentManager/DefaultAssets.h>
 #include <ContentManager/ContentManager.h>
@@ -127,6 +128,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 		uint32_t  entId;
 		int       lod;
 		bool      castsShadow;
+		bool      isTerrain;
 		HE::AABB  localBounds; // real mesh AABB, or invalid → unit-cube fallback
 		std::vector<float> paramOverride; // merged HeParams block, or empty
 	};
@@ -139,6 +141,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 		EntityData d;
 		d.world  = t.worldMatrix;
 		d.meshId = mesh.meshAssetId;
+		d.isTerrain = reg.try_get<TerrainComponent>(e) != nullptr;
 		d.matId  = {};
 		if (const auto* matComp = reg.try_get<MaterialComponent>(e))
 		{
@@ -198,6 +201,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 		obj.entityId        = d.entId;
 		obj.lod             = d.lod;
 		obj.castsShadow     = d.castsShadow;
+		obj.isTerrain       = d.isTerrain;
 		obj.paramOverride   = d.paramOverride; // per-entity HeParams block (empty = none)
 	});
 
@@ -497,12 +501,33 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 	}
 	if (shadowLight && shadowLight->intensity > 0.1f)
 	{
-		HE::AABB sceneBox;
+		// TWO boxes, deliberately:
+		//   fitBox   — everything EXCEPT terrain. Drives the ortho's XY extent and
+		//              centre, so the map's texels are spent on the props that
+		//              actually cast visible shadows. Terrain is level-sized; letting
+		//              it into the XY fit stretches one 2048² map over the whole level
+		//              (~0.3 world units per texel), which rounds every caster into a
+		//              blob — the shape is gone long before the resolution is.
+		//   sceneBox — EVERYTHING, terrain included. Drives only the light-space DEPTH
+		//              range below, so terrain still rasterizes into the map and its
+		//              slope stays inside the depth-bias envelope (the acne fix).
+		HE::AABB sceneBox, fitBox;
 		for (const RenderObject& o : out.objects)
+		{
 			sceneBox.expand(o.worldBounds);
-		glm::vec3 center = sceneBox.isValid() ? sceneBox.center() : glm::vec3(0.0f);
-		float radius = sceneBox.isValid() ? glm::length(sceneBox.extents()) : 10.0f;
+			if (!o.isTerrain) fitBox.expand(o.worldBounds);
+		}
+		// Terrain-only scenes have no props to frame: fall back to the full box so the
+		// terrain still self-shadows rather than collapsing to a 1-unit ortho.
+		if (!fitBox.isValid()) fitBox = sceneBox;
+
+		glm::vec3 center = fitBox.isValid() ? fitBox.center() : glm::vec3(0.0f);
+		float radius = fitBox.isValid() ? glm::length(fitBox.extents()) : 10.0f;
 		radius = std::max(radius, 1.0f);
+		// Depth-only radius: how far back the light eye must sit to keep every caster
+		// (terrain included) in front of the near plane.
+		float sceneRadius = sceneBox.isValid() ? glm::length(sceneBox.extents()) : radius;
+		sceneRadius = std::max(sceneRadius, radius);
 
 		const glm::vec3 dir = glm::normalize(shadowLight->direction);
 		const glm::vec3 up  = std::abs(dir.y) > 0.99f ? glm::vec3(0, 0, 1) : glm::vec3(0, 1, 0);
@@ -521,9 +546,16 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 		const float sz = glm::dot(center, dir);
 		center = right * sx + upL * sy + dir * sz;
 
-		const glm::vec3 eye = center - dir * (radius * 2.0f);
+		// Pull the eye back beyond the WHOLE scene (not just the fitted props) so
+		// terrain and off-screen casters sit in front of the near plane and still
+		// rasterize into the map — and so the depth range spans the terrain's slope,
+		// which is what keeps the NDC depth bias mapping to a large enough world-space
+		// bias to clear it. Same shape as the cascade path's `backZ = crad + radius`.
+		// XY (radius) stays the props-only fit, so texel density is unaffected.
+		const float     backZ = radius + sceneRadius;
+		const glm::vec3 eye = center - dir * backZ;
 		const glm::mat4 view = glm::lookAt(eye, center, up);
-		const glm::mat4 proj = glm::ortho(-radius, radius, -radius, radius, 0.05f, radius * 4.0f);
+		const glm::mat4 proj = glm::ortho(-radius, radius, -radius, radius, 0.05f, backZ + sceneRadius);
 		out.shadow.viewProj  = proj * view;   // legacy single map (GL / D3D / Vulkan)
 		out.shadow.direction = dir;
 		out.shadow.enabled   = true;
@@ -594,7 +626,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 			// moment the caster leaves the camera frustum (the reported "shadows
 			// disappear at certain angles"). The Z range is generous; D32 depth keeps
 			// sub-mm precision over these distances, and the XY snap (crad) is unaffected.
-			const float     backZ = crad + radius;   // radius = whole-scene bounding radius
+			const float     backZ = crad + sceneRadius; // whole-scene radius (terrain included)
 			const glm::vec3 cEye  = ccenter - dir * backZ;
 			const glm::mat4 cView = glm::lookAt(cEye, ccenter, up);
 			glm::mat4       cProj = glm::ortho(-crad, crad, -crad, crad, 0.05f, backZ + crad);
