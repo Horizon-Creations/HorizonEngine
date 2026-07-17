@@ -79,6 +79,52 @@ float3 octDecode(float2 e)
     return normalize(n);
 }
 
+// direction -> octahedral UV, inverse of octDecode (needed for the
+// multi-bounce field lookup below; matches the scene shader's giOctEncode
+// byte-for-byte).
+float2 octEncodeP(float3 n)
+{
+    float2 p = n.xy * (1.0 / (abs(n.x) + abs(n.y) + abs(n.z)));
+    float2 signP = float2(p.x >= 0.0 ? 1.0 : -1.0, p.y >= 0.0 ? 1.0 : -1.0);
+    return (n.z <= 0.0) ? ((1.0 - abs(p.yx)) * signP) : p;
+}
+
+// PREVIOUS-frame irradiance field at an arbitrary surface point: trilinear
+// over the 8 surrounding probes, point-read of each probe's octahedral tile
+// in the hit normal's direction. No Chebyshev here — this feeds the low-
+// frequency multi-bounce term, where leaking is dampened by albedo anyway.
+// Reads uIrrPrev (the SRV copy of last frame's atlas), same as the SW kernel.
+float3 giSampleFieldIrradiance(float3 pos, float3 n)
+{
+    int gx = int(uGridCounts.x), gy = int(uGridCounts.y), gz = int(uGridCounts.z);
+    if (gx <= 0 || gy <= 0 || gz <= 0) return float3(0.0, 0.0, 0.0);
+    int probesPerRow = max(1, int(uGridCounts.w));
+    float spacing = max(uGridOrigin.w, 1e-4);
+    float3 gridSpace = (pos - uGridOrigin.xyz) / spacing;
+    float3 base  = floor(gridSpace);
+    float3 fracP = gridSpace - base;
+    float2 oct = octEncodeP(n) * 0.5 + 0.5;
+    int2 octTexel = int2(clamp(oct * float(kOctSize), 0.0, float(kOctSize) - 1.0));
+    float3 sum  = float3(0.0, 0.0, 0.0);
+    float  sumW = 0.0;
+    for (int i = 0; i < 8; ++i)
+    {
+        float3 offs = float3(float(i & 1), float((i >> 1) & 1), float((i >> 2) & 1));
+        float3 cell = base + offs;
+        if (any(cell < 0.0) || cell.x >= float(gx) || cell.y >= float(gy) || cell.z >= float(gz))
+            continue;
+        float3 tri = lerp(1.0 - fracP, fracP, offs);
+        float w = tri.x * tri.y * tri.z;
+        if (w <= 1e-5) continue;
+        int probeIndex = int(cell.x) + int(cell.y) * gx + int(cell.z) * gx * gy;
+        int2 tile = int2((probeIndex % probesPerRow) * kOctSize,
+                         (probeIndex / probesPerRow) * kOctSize);
+        sum  += uIrrPrev.Load(int3(tile + octTexel, 0)).rgb * w;
+        sumW += w;
+    }
+    return sum / max(sumW, 1e-4);
+}
+
 [numthreads(8, 8, 1)]
 void main(uint3 gtid : SV_GroupThreadID, uint3 groupId : SV_GroupID)
 {
@@ -140,6 +186,11 @@ void main(uint3 gtid : SV_GroupThreadID, uint3 groupId : SV_GroupID)
                 continue;
             radiance += albedo * uLightColorType[i].rgb * ndl2 * atten;
         }
+        // Multi-bounce feedback (DDGI recursion): light already gathered in the
+        // probe field re-reflects off this surface — a red wall visibly bleeds
+        // red onto neighbouring geometry, and the series converges toward
+        // infinite bounces through the EMA. albedo < 1 keeps it stable.
+        radiance += albedo * giSampleFieldIrradiance(hitPos, hitNormal);
     }
 
     int probesPerRow = max(1, int(uGridCounts.w));

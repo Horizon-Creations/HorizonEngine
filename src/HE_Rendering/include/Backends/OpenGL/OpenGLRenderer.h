@@ -672,6 +672,7 @@ private:
 	// G-buffer + mask targets (all half-res).
 	unsigned int m_giGBufFBO   = 0, m_giGBufPosTex = 0, m_giGBufNormTex = 0, m_giGBufDepth = 0;
 	unsigned int m_giRawTex    = 0;                       // r16f, compute image store
+	unsigned int m_giLocalMaskTex = 0;                    // rgba16f, per-pixel local-light visibility (1 channel per light, first 4)
 	unsigned int m_giHistFBO[2] = { 0, 0 }, m_giHistTex[2] = { 0, 0 }; // RGBA16F ping-pong
 	unsigned int m_giResultFBO = 0, m_giResultTex = 0;    // r16f, sampled by the scene
 	int          m_giShadowW = 0, m_giShadowH = 0;
@@ -688,7 +689,7 @@ private:
 	// Per-program GI uniform locations for the three programs sharing kUnlitFS.
 	struct GiSceneLocs
 	{
-		int enabled = -1, shadowTex = -1, irrTex = -1, visTex = -1;
+		int enabled = -1, shadowTex = -1, irrTex = -1, visTex = -1, localTex = -1;
 		int gridOrigin = -1, gridCounts = -1, intensity = -1;
 	};
 	GiSceneLocs  m_giLocsUnlit, m_giLocsSkinned, m_giLocsInstanced;

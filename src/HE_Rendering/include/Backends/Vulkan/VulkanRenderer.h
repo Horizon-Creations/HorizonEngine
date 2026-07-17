@@ -630,6 +630,7 @@ private:
 	};
 	GiImage m_giGBufPos, m_giGBufNorm, m_giGBufDepth;
 	GiImage m_giRaw;                 // R16F storage image, lives in GENERAL
+	GiImage m_giLocalMask;           // RGBA16F per-pixel local-light visibility (1 channel per light, first 4), GENERAL
 	GiImage m_giHist[2];             // RGBA16F ping-pong temporal history
 	GiImage m_giResult;              // R16F blurred mask (sampled by scene.frag)
 	VkFramebuffer m_giGBufFB = VK_NULL_HANDLE, m_giHistFB[2] = { VK_NULL_HANDLE, VK_NULL_HANDLE },

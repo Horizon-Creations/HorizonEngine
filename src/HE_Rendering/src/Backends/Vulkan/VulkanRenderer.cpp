@@ -1529,7 +1529,7 @@ void VulkanRenderer::createScenePipeline()
 {
     // Descriptor set: binding 0 = per-frame UBO, binding 1 = shadow map,
     //                 binding 2 = per-draw material UBO, binding 3 = SSAO AO texture.
-    VkDescriptorSetLayoutBinding binds[7]{};
+    VkDescriptorSetLayoutBinding binds[8]{};
     binds[0].binding         = 0;
     binds[0].descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     binds[0].descriptorCount = 1;
@@ -1546,9 +1546,10 @@ void VulkanRenderer::createScenePipeline()
     binds[3].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     binds[3].descriptorCount = 1;
     binds[3].stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
-    // Bindings 4-6: ray-traced GI mask + DDGI probe atlases (white fallbacks
-    // when GI is off — giParams.y == 0 gates all sampling in scene.frag).
-    for (uint32_t gb = 4; gb <= 6; ++gb)
+    // Bindings 4-7: ray-traced GI mask + DDGI probe atlases + per-pixel
+    // local-light mask (white fallbacks when GI is off — giParams.y == 0
+    // gates all sampling in scene.frag).
+    for (uint32_t gb = 4; gb <= 7; ++gb)
     {
         binds[gb].binding         = gb;
         binds[gb].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -1556,7 +1557,7 @@ void VulkanRenderer::createScenePipeline()
         binds[gb].stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
     }
     VkDescriptorSetLayoutCreateInfo slci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-    slci.bindingCount = 7;
+    slci.bindingCount = 8;
     slci.pBindings    = binds;
     vkCheck(vkCreateDescriptorSetLayout(m_device, &slci, nullptr, &m_sceneSetLayout), "descriptor set layout");
 
@@ -1609,7 +1610,7 @@ void VulkanRenderer::createScenePipeline()
     // Per-frame UBO buffers + descriptor sets (one per frame in flight).
     VkDescriptorPoolSize ps[2] = {
         { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         k_maxFramesInFlight * 2 },  // binding0 + binding2
-        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, k_maxFramesInFlight * 5 },  // binding1(shadow) + binding3(AO) + bindings4-6(GI)
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, k_maxFramesInFlight * 6 },  // binding1(shadow) + binding3(AO) + bindings4-7(GI)
     };
     VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
     dpci.maxSets       = k_maxFramesInFlight;
@@ -3906,15 +3907,19 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             wr(7, 7, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &whiteII);
                             wr(8, 8, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         &lightBI, nullptr); // WPO VS
                             wr(9, 9, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         &parBI,   nullptr); // WPO VS
-                            // GI screen-space masks for heLitP(): sun mask when GI ran this
-                            // frame (Vulkan's per-pixel LOCAL mask is pending — white until
-                            // it lands; giParams.z gates sampling anyway).
+                            // GI screen-space masks for heLitP(): sun mask + per-pixel
+                            // local-light mask when GI ran this frame (white fallbacks
+                            // otherwise; giParams.z gates sampling anyway). The local
+                            // mask is a storage image and lives in GENERAL.
                             VkDescriptorImageInfo giSunII{ m_albedoSampler,
                                 (m_giRanThisFrame && m_giResult.view) ? m_giResult.view : m_whiteAlbedoView,
-                                (m_giRanThisFrame && m_giResult.view) ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-                                                                      : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
                             wr(10, 10, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &giSunII);
-                            wr(11, 11, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &whiteII);
+                            VkDescriptorImageInfo giLocalII{ m_albedoSampler,
+                                (m_giRanThisFrame && m_giLocalMask.view) ? m_giLocalMask.view : m_whiteAlbedoView,
+                                (m_giRanThisFrame && m_giLocalMask.view) ? VK_IMAGE_LAYOUT_GENERAL
+                                                                         : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                            wr(11, 11, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &giLocalII);
                             // heCsm (binding 12, sampler2DArray): Vulkan's shadow map is a
                             // single 2D map, so the CSM fallback stays off (csmSplits.w = 0)
                             // and the 1-layer white ARRAY view keeps the descriptor valid —
@@ -5643,7 +5648,14 @@ bool VulkanRenderer::buildGiTlas(VkCommandBuffer cmd)
 // rows only, so the C++ structs match byte-for-byte).
 namespace
 {
-struct GiShadowUBOData   { glm::vec4 sunDirRadius; glm::vec4 frame; };
+struct GiShadowUBOData
+{
+    glm::vec4 sunDirRadius;     // xyz = toward light, w = angular radius (radians)
+    glm::vec4 frame;            // x = jitter seed, y/z = tex size, w = instance count
+    glm::vec4 localPosRange[4]; // xyz = local (point/spot) light position, w = range
+    glm::vec4 localExtra;       // x = local light count
+};
+static_assert(sizeof(GiShadowUBOData) == 7 * 16, "must match gi_shadow.comp's GiShadowUBO");
 struct GiTemporalUBOData { glm::mat4 prevViewProj; glm::vec4 blend; };
 struct GiProbeUBOData
 {
@@ -5716,7 +5728,8 @@ void VulkanRenderer::createGiPipelines()
         return r;
     };
 
-    // gi_shadow.comp: 0-2 SSBOs, 3-4 samplers (gPos/gNorm), 5 storage image, 6 UBO.
+    // gi_shadow.comp: 0-2 SSBOs, 3-4 samplers (gPos/gNorm), 5 storage image,
+    // 6 UBO, 8 local-mask storage image (7 reserved for the HW variant's TLAS).
     bool ok = makeDSL({
         bindOf(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         VK_SHADER_STAGE_COMPUTE_BIT),
         bindOf(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         VK_SHADER_STAGE_COMPUTE_BIT),
@@ -5725,6 +5738,7 @@ void VulkanRenderer::createGiPipelines()
         bindOf(4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT, &m_giPointSampler),
         bindOf(5, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,          VK_SHADER_STAGE_COMPUTE_BIT),
         bindOf(6, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         VK_SHADER_STAGE_COMPUTE_BIT),
+        bindOf(8, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,          VK_SHADER_STAGE_COMPUTE_BIT),
     }, m_giShadowDSL);
     // gi_probe.comp: 0-2 SSBOs, 3-4 storage images, 5 UBO.
     ok = ok && makeDSL({
@@ -5976,7 +5990,7 @@ void VulkanRenderer::createGiPipelines()
         VkDescriptorPoolSize ps[4] = {
             { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         k_maxFramesInFlight * 6 },
             { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, k_maxFramesInFlight * 8 },
-            { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,          k_maxFramesInFlight * 3 },
+            { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,          k_maxFramesInFlight * 4 }, // shadow raw+local, probe irr+vis
             { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         k_maxFramesInFlight * 4 },
         };
         VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
@@ -6047,7 +6061,7 @@ void VulkanRenderer::createGiHwPipelines()
         slci.pBindings    = binds.data();
         return vkCreateDescriptorSetLayout(m_device, &slci, nullptr, &out) == VK_SUCCESS;
     };
-    // gi_shadow_hw.comp: SW bindings 0-6 + TLAS at 7.
+    // gi_shadow_hw.comp: SW bindings 0-6 + TLAS at 7 + local mask at 8.
     bool ok = makeDSL({
         bindOf(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER),
         bindOf(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER),
@@ -6057,6 +6071,7 @@ void VulkanRenderer::createGiHwPipelines()
         bindOf(5, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE),
         bindOf(6, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER),
         bindOf(7, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR),
+        bindOf(8, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE),
     }, m_giShadowHwDSL);
     // gi_probe_hw.comp: SW bindings 0-5 + TLAS at 7 (6 intentionally unused).
     ok = ok && makeDSL({
@@ -6109,7 +6124,7 @@ void VulkanRenderer::createGiHwPipelines()
         VkDescriptorPoolSize ps[5] = {
             { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             k_maxFramesInFlight * 6 },
             { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     k_maxFramesInFlight * 2 },
-            { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              k_maxFramesInFlight * 3 },
+            { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              k_maxFramesInFlight * 4 }, // shadow raw+local, probe irr+vis
             { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,             k_maxFramesInFlight * 2 },
             { VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, k_maxFramesInFlight * 2 },
         };
@@ -6172,6 +6187,8 @@ void VulkanRenderer::createGiTargets(uint32_t w, uint32_t h)
                       VK_IMAGE_ASPECT_DEPTH_BIT, m_giGBufDepth)
            && makeImg(VK_FORMAT_R16_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                       VK_IMAGE_ASPECT_COLOR_BIT, m_giRaw)
+           && makeImg(VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                      VK_IMAGE_ASPECT_COLOR_BIT, m_giLocalMask)
            && makeImg(VK_FORMAT_R16G16B16A16_SFLOAT, kRT, VK_IMAGE_ASPECT_COLOR_BIT, m_giHist[0])
            && makeImg(VK_FORMAT_R16G16B16A16_SFLOAT, kRT, VK_IMAGE_ASPECT_COLOR_BIT, m_giHist[1])
            && makeImg(VK_FORMAT_R16_SFLOAT, kRT, VK_IMAGE_ASPECT_COLOR_BIT, m_giResult);
@@ -6235,7 +6252,8 @@ void VulkanRenderer::createGiTargets(uint32_t w, uint32_t h)
                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                 0, 0, nullptr, 0, nullptr, 1, &b);
         };
-        barrier(m_giRaw.img,     VK_IMAGE_LAYOUT_GENERAL);
+        barrier(m_giRaw.img,       VK_IMAGE_LAYOUT_GENERAL);
+        barrier(m_giLocalMask.img, VK_IMAGE_LAYOUT_GENERAL); // storage image, stays GENERAL
         barrier(m_giHist[0].img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         barrier(m_giHist[1].img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         vkEndCommandBuffer(tmp);
@@ -6260,7 +6278,7 @@ void VulkanRenderer::destroyGiTargets()
         if (m_giHistFB[i]) { vkDestroyFramebuffer(m_device, m_giHistFB[i], nullptr); m_giHistFB[i] = VK_NULL_HANDLE; }
     if (m_giResultFB) { vkDestroyFramebuffer(m_device, m_giResultFB, nullptr); m_giResultFB = VK_NULL_HANDLE; }
     destroy(m_giGBufPos); destroy(m_giGBufNorm); destroy(m_giGBufDepth);
-    destroy(m_giRaw); destroy(m_giHist[0]); destroy(m_giHist[1]); destroy(m_giResult);
+    destroy(m_giRaw); destroy(m_giLocalMask); destroy(m_giHist[0]); destroy(m_giHist[1]); destroy(m_giResult);
     m_giW = m_giH = 0;
     m_giHistValid = false;
 }
@@ -6427,6 +6445,23 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
     GiShadowUBOData shadowUbo{};
     shadowUbo.sunDirRadius = glm::vec4(towardLight, glm::radians(m_giLightRadius));
     shadowUbo.frame        = glm::vec4(m_giFrameSeed, float(gw), float(gh), float(m_giInstanceCount));
+    // First 4 local (point/spot) lights of the same 8-light window the scene
+    // shader iterates — scene.frag counts non-directional lights in the SAME
+    // order to index the mask channels, so count every type != 0 light exactly
+    // like its loop does and fill the first 4 slots.
+    {
+        int localCount = 0;
+        const int windowCount = std::min(static_cast<int>(m_renderWorld.lights.size()), 8);
+        for (int li = 0; li < windowCount; ++li)
+        {
+            const LightData& l = m_renderWorld.lights[li];
+            if (l.type == 0) continue;
+            if (localCount < 4)
+                shadowUbo.localPosRange[localCount] = glm::vec4(l.position, std::max(l.range, 1e-4f));
+            ++localCount;
+        }
+        shadowUbo.localExtra = glm::vec4(float(std::min(localCount, 4)), 0.0f, 0.0f, 0.0f);
+    }
     if (!uploadGiBuffer(m_giShadowUBO[fi], &shadowUbo, sizeof(shadowUbo),
                         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT)) return;
 
@@ -6512,6 +6547,8 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
         wImg(shadowSet, 5, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &rawSI);
         wBuf(shadowSet, 6, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &shUboBI);
         if (useHw) wTlas(shadowSet, 7);
+        VkDescriptorImageInfo localSI{ VK_NULL_HANDLE, m_giLocalMask.view, VK_IMAGE_LAYOUT_GENERAL };
+        wImg(shadowSet, 8, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &localSI);
         // Temporal set: gPos, raw (GENERAL), history[prev], UBO.
         VkDescriptorImageInfo rawSamp{ VK_NULL_HANDLE, m_giRaw.view, VK_IMAGE_LAYOUT_GENERAL };
         VkDescriptorImageInfo histBI { VK_NULL_HANDLE, m_giHist[prevIdx].view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
@@ -6584,16 +6621,24 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
                             useHw ? m_giShadowHwPL : m_giShadowPL,
                             0, 1, &shadowSet, 0, nullptr);
     vkCmdDispatch(cmd, (gw + 7) / 8, (gh + 7) / 8, 1);
-    // Raw mask: compute write → fragment read (temporal), GENERAL stays.
+    // Raw mask: compute write → fragment read (temporal). Local mask: compute
+    // write → fragment read (scene pass samples it directly — no temporal/blur
+    // chain, the rays are deterministic). Both stay GENERAL.
     {
-        VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
-        b.oldLayout = VK_IMAGE_LAYOUT_GENERAL; b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-        b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        b.image = m_giRaw.img; b.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-        b.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        VkImageMemoryBarrier bs[2]{};
+        for (int i = 0; i < 2; ++i)
+        {
+            bs[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            bs[i].oldLayout = VK_IMAGE_LAYOUT_GENERAL; bs[i].newLayout = VK_IMAGE_LAYOUT_GENERAL;
+            bs[i].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            bs[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            bs[i].image = (i == 0) ? m_giRaw.img : m_giLocalMask.img;
+            bs[i].subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+            bs[i].srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            bs[i].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        }
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 2, bs);
     }
 
     // ── 3. Temporal accumulation (fullscreen → hist[cur]) ────────────────────
@@ -6669,9 +6714,11 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
         VkDescriptorImageInfo visBI { m_ssaoSampler,
             probesActive ? m_giVisAtlas.view : m_ssaoWhiteView,
             probesActive ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-        const VkDescriptorImageInfo* infos[3] = { &maskBI, &irrBI, &visBI };
-        VkWriteDescriptorSet ws[3]{};
-        for (uint32_t b = 0; b < 3; ++b)
+        // Local mask lives in GENERAL (storage image) — legal for sampling.
+        VkDescriptorImageInfo localBI{ m_ssaoSampler, m_giLocalMask.view, VK_IMAGE_LAYOUT_GENERAL };
+        const VkDescriptorImageInfo* infos[4] = { &maskBI, &irrBI, &visBI, &localBI };
+        VkWriteDescriptorSet ws[4]{};
+        for (uint32_t b = 0; b < 4; ++b)
         {
             ws[b].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             ws[b].dstSet          = m_frameUBO[fi].set;
@@ -6680,7 +6727,7 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
             ws[b].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             ws[b].pImageInfo      = infos[b];
         }
-        vkUpdateDescriptorSets(m_device, 3, ws, 0, nullptr);
+        vkUpdateDescriptorSets(m_device, 4, ws, 0, nullptr);
     }
     m_giRanThisFrame = true;
 }
@@ -6876,10 +6923,11 @@ void VulkanRenderer::createSSAOPipeline()
         if (!m_frameUBO[i].set) continue;
         VkDescriptorImageInfo wdii{ m_ssaoSampler, m_ssaoWhiteView,
                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-        // Binding 3 (AO) + bindings 4-6 (GI mask/atlases): all start on the 1x1
-        // white fallback; runGi() rewrites 4-6 when it produces real targets.
-        VkWriteDescriptorSet aw[4]{};
-        for (uint32_t b = 0; b < 4; ++b)
+        // Binding 3 (AO) + bindings 4-7 (GI mask/atlases/local mask): all start
+        // on the 1x1 white fallback; runGi() rewrites 4-7 when it produces real
+        // targets.
+        VkWriteDescriptorSet aw[5]{};
+        for (uint32_t b = 0; b < 5; ++b)
         {
             aw[b].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             aw[b].dstSet          = m_frameUBO[i].set;
@@ -6888,7 +6936,7 @@ void VulkanRenderer::createSSAOPipeline()
             aw[b].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             aw[b].pImageInfo      = &wdii;
         }
-        vkUpdateDescriptorSets(m_device, 4, aw, 0, nullptr);
+        vkUpdateDescriptorSets(m_device, 5, aw, 0, nullptr);
     }
 
     // ── 4x4 noise texture (RGBA32F, NEAREST+REPEAT) ──────────────────────────
