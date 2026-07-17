@@ -107,6 +107,7 @@ namespace
         glm::vec4  giGridOrigin; // xyz = probe grid origin, w = spacing
         glm::vec4  giGridCounts; // xyz = probe counts, w = probesPerRow
         glm::vec4  giParams;     // x = indirectIntensity, y = giEnabled(1.0), zw = 0
+        glm::vec4  ambient;      // rgb = RenderWorld::ambient flat fill, w = 0
     };
 
     // Sky pass UBO (set=0 binding=0 in sky.frag) — must match std140 exactly.
@@ -3694,6 +3695,10 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         f.giGridCounts  = glm::vec4(float(m_giGridCounts.x), float(m_giGridCounts.y),
                                     float(m_giGridCounts.z), float(m_giProbesPerRow));
         f.giParams      = glm::vec4(m_giIndirectIntensity, m_giRanThisFrame ? 1.0f : 0.0f, 0.0f, 0.0f);
+        // Flat never-black fill, added in both the GI and sky-ambient branches — GL and
+        // Metal have always applied this; Vulkan/D3D dropped it, which is why an unlit
+        // side or a dark probe here fell all the way to black.
+        f.ambient       = glm::vec4(m_renderWorld.ambient, 0.0f);
         if (m_frameUBO[m_currentFrame].mapped)
             std::memcpy(m_frameUBO[m_currentFrame].mapped, &f, sizeof(f));
     }

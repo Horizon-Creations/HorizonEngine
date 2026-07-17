@@ -497,6 +497,7 @@ cbuffer PerFrame : register(b1)
     float4   uGIParams;        // x = GI enabled (0/1), y = indirect intensity
     float4   uGIGridOrigin;    // xyz = probe grid origin, w = spacing
     float4   uGIGridCounts;    // xyz = probe counts, w = probesPerRow
+    float4   uAmbient;         // rgb = flat never-black fill, w unused
 };
 
 Texture2D    uTexture   : register(t0);
@@ -705,7 +706,11 @@ float4 PSMain(VSOut i) : SV_TARGET
         indirect = lerp(skyDiff, giDiff, coverage);
         indSpec  = ambSpec * (1.0f - 0.6f * rough); // GI branch leaves specular un-AO'd, as before
     }
-    float3 result = indirect + indSpec;
+    // Flat ambient fill, in BOTH branches and outside the AO product (matching GL/Metal):
+    // probes bounce only real lights, so at night or under overcast they converge to zero
+    // and the sky IBL goes with them — this is the floor that keeps a surface off pure
+    // black. Inside the probe volume `coverage` is 1, so nothing above can supply it.
+    float3 result = indirect + indSpec + uAmbient.rgb * base;
 
     int giLocalIdx = 0; // counter over non-directional lights → local-mask channel
     for (int li = 0; li < uLightCount.x; ++li)
@@ -1686,6 +1691,7 @@ namespace
         glm::vec4  giParams;     // x = GI enabled (0/1), y = indirect intensity
         glm::vec4  giGridOrigin; // xyz = probe grid origin, w = spacing
         glm::vec4  giGridCounts; // xyz = probe counts, w = probesPerRow
+        glm::vec4  ambient;      // rgb = RenderWorld::ambient flat fill, w = 0
     };
 
     // GL copy of the dominant-directional-light pick (glDominantDirectionalLight)
@@ -4371,6 +4377,10 @@ void D3D11Renderer::DrawScene(int width, int height)
         f.giParams     = glm::vec4(giActive ? 1.0f : 0.0f, p.giIndirectIntensity, 0.0f, 0.0f);
         f.giGridOrigin = glm::vec4(p.giGridOrigin, D3D11RendererImpl::kGiProbeSpacing);
         f.giGridCounts = glm::vec4(glm::vec3(p.giGridCounts), float(p.giProbesPerRow));
+        // Flat never-black fill, added in both the GI and sky-ambient branches — GL and
+        // Metal have always applied this; Vulkan/D3D dropped it, which is why an unlit
+        // side or a dark probe here fell all the way to black.
+        f.ambient      = glm::vec4(p.m_renderWorld.ambient, 0.0f);
         D3D11_MAPPED_SUBRESOURCE m{};
         if (SUCCEEDED(ctx->Map(p.perFrameCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m)))
         {

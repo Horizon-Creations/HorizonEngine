@@ -20,6 +20,7 @@ layout(set = 0, binding = 0) uniform Frame {
     vec4  giGridOrigin; // xyz = probe grid origin, w = spacing
     vec4  giGridCounts; // xyz = probe counts, w = probesPerRow
     vec4  giParams;     // x = indirectIntensity, y = giEnabled(1.0), zw = 0
+    vec4  ambient;      // rgb = flat never-black fill, w = 0
 } uf;
 
 layout(set = 0, binding = 1) uniform sampler2D uShadowMap;
@@ -269,7 +270,11 @@ void main()
         indirect = mix(skyDiff, giDiff, coverage);
         indSpec  = ambSpec * (1.0 - 0.6 * rough); // GI branch leaves specular un-AO'd, as before
     }
-    vec3 result = indirect + indSpec;
+    // Flat ambient fill, in BOTH branches and outside the AO product (matching GL/Metal):
+    // probes bounce only real lights, so at night or under overcast they converge to zero
+    // and the sky IBL goes with them — this is the floor that keeps a surface off pure
+    // black. Inside the probe volume `coverage` is 1, so nothing above can supply it.
+    vec3 result = indirect + indSpec + uf.ambient.rgb * base;
 
     int giLocalIdx = 0; // counter over non-directional lights → local-mask channel
     for (int i = 0; i < uf.lightCount.x; ++i)
