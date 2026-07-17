@@ -521,10 +521,25 @@ float2 giOctEncode(float3 n)
 
 static const int GI_PROBE_OCT = 8; // must match the host's kGiProbeOctSize
 
+// The ray-traced masks are binary 0/1 (one shadow ray, hit or miss), so a fully
+// occluded surface loses its direct term outright. Let a sliver through to stand in for
+// the light the single ray can't carry — bounced and area-light spill. Much lower than
+// shadowFactor()'s 0.35: that floor propped up the sky-ambient path, whereas here probe
+// indirect already lights the shadow, and a high floor would flatten the ray-traced
+// shadows this pass exists to produce.
+static const float GI_SHADOW_FLOOR = 0.1f;
+
 // DDGI probe sampling — trilinear over the 8 surrounding probes × soft
 // backface × Chebyshev visibility. Direct port of the GL/Metal version.
-float3 sampleDDGIIrradiance(float3 P, float3 N)
+// `coverage` reports how much of the trilinear footprint landed on real probes: 1 well
+// inside the grid, falling to 0 as P leaves it (and 0 outright before the grid is built).
+// The probe volume only spans kGiMaxProbesPerAxis × spacing, so a terrain reaches far
+// past it; the caller cross-fades back to sky ambient on that signal. Deliberately NOT
+// sumWeight — that folds in backface + Chebyshev, so a probe-lit surface legitimately in
+// shadow would read as "uncovered" and get sky ambient painted over its indirect shadow.
+float3 sampleDDGIIrradiance(float3 P, float3 N, out float coverage)
 {
+    coverage = 0.0;
     int gx = int(uGIGridCounts.x), gy = int(uGIGridCounts.y), gz = int(uGIGridCounts.z);
     if (gx <= 0 || gy <= 0 || gz <= 0) return float3(0, 0, 0);
     int probesPerRow = max(1, int(uGIGridCounts.w));
@@ -548,6 +563,7 @@ float3 sampleDDGIIrradiance(float3 P, float3 N)
 
         float3 trilinear = lerp(1.0 - fracP, fracP, offs);
         float weight = trilinear.x * trilinear.y * trilinear.z;
+        coverage += weight; // in-bounds share of the footprint, before any shadowing terms
         if (weight <= 1e-5) continue;
 
         float3 probePos   = uGIGridOrigin.xyz + cell * spacing;
@@ -577,6 +593,7 @@ float3 sampleDDGIIrradiance(float3 P, float3 N)
         sumColor  += uGIIrr.SampleLevel(uGISampler, irrUV, 0).rgb * weight;
         sumWeight += weight;
     }
+    coverage = saturate(coverage);
     return sumColor / max(sumWeight, 1e-4);
 }
 
@@ -676,12 +693,19 @@ float4 PSMain(VSOut i) : SV_TARGET
     float ao = (uViewport.z > 0.5f) ? uAO.SampleLevel(uAOSampler, i.clip.xy / uViewport.xy, 0).r : 1.0f;
     // GI replaces the AO-gated IBL diffuse with probe-grid indirect (spec IBL
     // stays in both branches) — mirrors the GL/Metal gi.enabled branch.
-    float3 result;
+    // Where the probe volume doesn't reach, `coverage` fades the sky diffuse back in
+    // rather than leaving the surface with no diffuse ambient at all.
+    float3 skyDiff  = ao * ambDiff * 0.35f;
+    float3 indirect = skyDiff;
+    float3 indSpec  = ao * ambSpec * (1.0f - 0.6f * rough);
     if (uGIParams.x > 0.5f)
-        result = sampleDDGIIrradiance(i.worldPos, N) * base * kd * uGIParams.y
-               + ambSpec * (1.0f - 0.6f * rough);
-    else
-        result = ao * (ambDiff * 0.35f + ambSpec * (1.0f - 0.6f * rough));
+    {
+        float  coverage;
+        float3 giDiff = sampleDDGIIrradiance(i.worldPos, N, coverage) * base * kd * uGIParams.y;
+        indirect = lerp(skyDiff, giDiff, coverage);
+        indSpec  = ambSpec * (1.0f - 0.6f * rough); // GI branch leaves specular un-AO'd, as before
+    }
+    float3 result = indirect + indSpec;
 
     int giLocalIdx = 0; // counter over non-directional lights → local-mask channel
     for (int li = 0; li < uLightCount.x; ++li)
@@ -714,7 +738,8 @@ float4 PSMain(VSOut i) : SV_TARGET
         if (type == 0)
         {
             sh = (uGIParams.x > 0.5f)
-               ? uGIShadow.SampleLevel(uGISampler, i.clip.xy / uViewport.xy, 0).r
+               ? lerp(GI_SHADOW_FLOOR, 1.0f,
+                      uGIShadow.SampleLevel(uGISampler, i.clip.xy / uViewport.xy, 0).r)
                : shadowFactor(i.worldPos, N, L);
         }
         else
@@ -724,7 +749,8 @@ float4 PSMain(VSOut i) : SV_TARGET
             // the shadow kernel from unjittered secondary rays (previously
             // local lights had no shadowing at all).
             if (uGIParams.x > 0.5f && giLocalIdx < 4)
-                sh = uGILocal.SampleLevel(uGISampler, i.clip.xy / uViewport.xy, 0)[giLocalIdx];
+                sh = lerp(GI_SHADOW_FLOOR, 1.0f,
+                          uGILocal.SampleLevel(uGISampler, i.clip.xy / uViewport.xy, 0)[giLocalIdx]);
             giLocalIdx++;
         }
         result += BRDF(L, V, N, base, met, rough) * uLightColor[li].rgb * uLightColor[li].w * atten * sh;
@@ -1324,6 +1350,22 @@ float3 giConeSample(float3 L, float angleRad, float2 xi)
     return normalize(L + T * (r * cos(phi)) + B * (r * sin(phi)));
 }
 
+// One HARD occlusion ray toward local light i. Returns visibility (1 = lit).
+// Kept scalar + called with literal indices below: FXC/SM5.0 cannot use a
+// dynamically indexed vector component as an l-value, and the runtime trip
+// count (uLocalExtra.x) blocks the unroll that would make the index literal.
+float giLocalVis(int i, float3 P, float3 N, int localCount)
+{
+    if (i >= localCount) return 1.0;
+    float3 toL   = uLocalPosRange[i].xyz - P;
+    float  distL = length(toL);
+    if (distL <= 0.05) return 1.0;              // on top of the light → lit
+    if (distL >= uLocalPosRange[i].w) return 1.0; // outside the attenuation radius → no contribution
+    float3 dirL = toL / distL;
+    if (dot(N, dirL) <= 0.0) return 0.0;
+    return giSceneAnyHit(P + N * 0.05, dirL, 0.02, max(distL - 0.1, 0.02)) ? 0.0 : 1.0;
+}
+
 [numthreads(8, 8, 1)]
 void GiShadowCS(uint3 gid : SV_DispatchThreadID)
 {
@@ -1356,22 +1398,12 @@ void GiShadowCS(uint3 gid : SV_DispatchThreadID)
     // first 4 (see the Metal kernels) — deliberately UNjittered: deterministic,
     // no temporal pass, one visibility channel per light; the scene shader
     // indexes by its local-light counter.
-    float4 localVis = float4(1.0, 1.0, 1.0, 1.0);
     int localCount = clamp(int(uLocalExtra.x), 0, 4);
-    // Fixed-trip unrolled loop (i is a literal per iteration) so the dynamic
-    // vector-component write localVis[i] stays FXC/SM5.0-safe.
-    [unroll] for (int i = 0; i < 4; ++i)
-    {
-        if (i >= localCount) break;
-        float3 toL   = uLocalPosRange[i].xyz - pv.xyz;
-        float  distL = length(toL);
-        if (distL <= 0.05) continue; // on top of the light → lit
-        if (distL >= uLocalPosRange[i].w) continue; // outside the attenuation radius → contributes nothing, skip the ray
-        float3 dirL = toL / distL;
-        if (dot(N, dirL) <= 0.0) { localVis[i] = 0.0; continue; }
-        if (giSceneAnyHit(pv.xyz + N * 0.05, dirL, 0.02, max(distL - 0.1, 0.02)))
-            localVis[i] = 0.0;
-    }
+    float4 localVis;
+    localVis.x = giLocalVis(0, pv.xyz, N, localCount);
+    localVis.y = giLocalVis(1, pv.xyz, N, localCount);
+    localVis.z = giLocalVis(2, pv.xyz, N, localCount);
+    localVis.w = giLocalVis(3, pv.xyz, N, localCount);
     uOutLocal[gid.xy] = localVis;
 }
 )HLSL";

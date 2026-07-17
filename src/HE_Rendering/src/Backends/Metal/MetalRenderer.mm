@@ -505,6 +505,13 @@ static float2 octEncode(float3 n)
 
 constant int kGIProbeOctSizeShade = 8; // must match MetalRenderer::kGIProbeOctSize
 
+// The ray-traced masks are binary 0/1 (one shadow ray, hit or miss), so a fully
+// occluded surface loses its direct term outright. Let a sliver through to stand in for
+// the light the single ray can't carry — bounced and area-light spill. Kept low: probe
+// indirect already lights the shadow, and a high floor would flatten the ray-traced
+// shadows this pass exists to produce.
+constant float kGIShadowFloor = 0.1;
+
 // DDGI probe sampling (Majercik et al. 2019, minus adaptive probe relocation/
 // classification and bicubic filtering — v1 simplifications). Trilinearly
 // blends the 8 probes surrounding P, weighted by a soft backface term and a
@@ -515,11 +522,19 @@ constant int kGIProbeOctSizeShade = 8; // must match MetalRenderer::kGIProbeOctS
 // small per-probe environment map than true pre-integrated irradiance — still
 // directionally correct and energy-plausible (brighter/tinted near lit/coloured
 // surfaces), just not radiometrically exact. A documented follow-up, not a bug.
+//
+// `coverage` reports how much of the trilinear footprint landed on real probes: 1 well
+// inside the grid, falling to 0 as P leaves it (and 0 outright before the grid is built).
+// The probe volume only spans kGiMaxProbesPerAxis × spacing, so a terrain reaches far
+// past it; the caller cross-fades back to sky ambient on that signal. Deliberately NOT
+// sumWeight — that folds in backface + Chebyshev, so a probe-lit surface legitimately in
+// shadow would read as "uncovered" and get sky ambient painted over its indirect shadow.
 static float3 sampleDDGIIrradiance(constant GIUniforms& gi,
                                    texture2d<float> irrAtlas, sampler irrSmp,
                                    texture2d<float> visAtlas, sampler visSmp,
-                                   float3 P, float3 N)
+                                   float3 P, float3 N, thread float& coverage)
 {
+	coverage = 0.0;
 	const int gx = int(gi.gridCounts.x), gy = int(gi.gridCounts.y), gz = int(gi.gridCounts.z);
 	if (gx <= 0 || gy <= 0 || gz <= 0) return float3(0.0);
 	const int probesPerRow = max(1, int(gi.gridCounts.w));
@@ -543,6 +558,7 @@ static float3 sampleDDGIIrradiance(constant GIUniforms& gi,
 
 		const float3 trilinear = mix(1.0 - frac, frac, offs);
 		float weight = trilinear.x * trilinear.y * trilinear.z;
+		coverage += weight; // in-bounds share of the footprint, before any shadowing terms
 		if (weight <= 1e-5) continue;
 
 		const float3 probePos  = gi.gridOrigin.xyz + cell * spacing;
@@ -578,6 +594,7 @@ static float3 sampleDDGIIrradiance(constant GIUniforms& gi,
 		sumColor  += irrAtlas.sample(irrSmp, irrUV).rgb * weight;
 		sumWeight += weight;
 	}
+	coverage = saturate(coverage);
 	return sumColor / max(sumWeight, 1e-4);
 }
 
@@ -661,7 +678,6 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
 	float3 Nup     = normalize(float3(N.x, max(N.y, 0.1), N.z));
 	float3 ambDiff = skyEnv.sample(skyEnvSmp, Nup).rgb    * diffuseColor;
 	float3 ambSpec = skyEnv.sample(skyEnvSmp, Rrough).rgb * specColor;
-	float3 ambient = ambDiff * 0.35 + ambSpec * (1.0 - 0.6 * wRough);
 	// Screen-space ambient occlusion darkens only the IBL indirect term in
 	// crevices; the direct lighting added below is left untouched. 1.0 = fully lit.
 	float ao = (scene.viewport.z > 0.5)
@@ -676,11 +692,20 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
 	// otherwise converge to 100% black — the floor is what keeps the never-black
 	// guarantee, exactly like the non-GI path.
 	// Specular IBL (ambSpec) is kept either way — this GI slice is diffuse-only.
-	float3 result = (gi.enabled != 0)
-		? sampleDDGIIrradiance(gi, giIrrTex, giIrrSmp, giVisTex, giVisSmp, in.worldPos, N)
-		      * diffuseColor * gi.params.x + ambSpec * (1.0 - 0.6 * wRough)
-		      + scene.ambient.xyz * diffuseColor
-		: ambient * ao + scene.ambient.xyz * diffuseColor;
+	// The probe volume covers only a fixed box around the scene centre, so outside it
+	// `coverage` fades the sky diffuse back in instead of dropping to the flat floor.
+	float3 skyDiff  = ambDiff * 0.35 * ao;
+	float3 indirect = skyDiff;
+	float3 indSpec  = ambSpec * (1.0 - 0.6 * wRough) * ao;
+	if (gi.enabled != 0)
+	{
+		float  coverage;
+		float3 giDiff = sampleDDGIIrradiance(gi, giIrrTex, giIrrSmp, giVisTex, giVisSmp,
+		                                     in.worldPos, N, coverage) * diffuseColor * gi.params.x;
+		indirect = mix(skyDiff, giDiff, coverage);
+		indSpec  = ambSpec * (1.0 - 0.6 * wRough); // GI branch leaves specular un-AO'd, as before
+	}
+	float3 result = indirect + indSpec + scene.ambient.xyz * diffuseColor;
 
 	int dbgCascade = 0;   // cascade chosen by the directional shadow (debug tint)
 	int giLocalIdx = 0;   // counter over non-directional lights → local-mask channel
@@ -718,7 +743,8 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
 		if (type == 0)
 		{
 			sh = (gi.enabled != 0
-				? giShadowTex.sample(giShadowSmp, in.position.xy / scene.viewport.xy).r
+				? mix(kGIShadowFloor, 1.0,
+				      giShadowTex.sample(giShadowSmp, in.position.xy / scene.viewport.xy).r)
 				: shadowFactor(scene, in.worldPos, N, L, viewZ, shadowMap, shadowSmp, dbgCascade));
 		}
 		else
@@ -728,7 +754,8 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
 			// the shadow kernel from unjittered secondary rays. CSM never
 			// shadowed local lights at all (they shone through geometry).
 			if (gi.enabled != 0 && giLocalIdx < 4)
-				sh = giLocalMask.sample(giLocalSmp, in.position.xy / scene.viewport.xy)[giLocalIdx];
+				sh = mix(kGIShadowFloor, 1.0,
+				         giLocalMask.sample(giLocalSmp, in.position.xy / scene.viewport.xy)[giLocalIdx]);
 			giLocalIdx++;
 		}
 

@@ -291,12 +291,26 @@ vec2 giOctEncode(vec3 n)
 
 const int GI_PROBE_OCT = 8; // must match OpenGLRenderer::kGiProbeOctSize
 
+// The ray-traced masks are binary 0/1 (one shadow ray, hit or miss), so a fully
+// occluded surface loses its direct term outright. Let a sliver through to stand in for
+// the light the single ray can't carry — bounced and area-light spill. Kept low: probe
+// indirect already lights the shadow, and a high floor would flatten the ray-traced
+// shadows this pass exists to produce.
+const float GI_SHADOW_FLOOR = 0.1;
+
 // DDGI probe sampling — trilinear over the 8 surrounding probes × soft
 // backface × Chebyshev visibility. Direct port of Metal's
 // sampleDDGIIrradiance (same v1 notes: raw per-direction radiance, not
 // cosine-preintegrated).
-vec3 sampleDDGIIrradiance(vec3 P, vec3 N)
+// `coverage` reports how much of the trilinear footprint landed on real probes: 1 well
+// inside the grid, falling to 0 as P leaves it (and 0 outright before the grid is built).
+// The probe volume only spans kGiMaxProbesPerAxis × spacing, so a terrain reaches far
+// past it; the caller cross-fades back to sky ambient on that signal. Deliberately NOT
+// sumWeight — that folds in backface + Chebyshev, so a probe-lit surface legitimately in
+// shadow would read as "uncovered" and get sky ambient painted over its indirect shadow.
+vec3 sampleDDGIIrradiance(vec3 P, vec3 N, out float coverage)
 {
+	coverage = 0.0;
 	int gx = int(uGIGridCounts.x), gy = int(uGIGridCounts.y), gz = int(uGIGridCounts.z);
 	if (gx <= 0 || gy <= 0 || gz <= 0) return vec3(0.0);
 	int probesPerRow = max(1, int(uGIGridCounts.w));
@@ -321,6 +335,7 @@ vec3 sampleDDGIIrradiance(vec3 P, vec3 N)
 
 		vec3 trilinear = mix(1.0 - fracP, fracP, offs);
 		float weight = trilinear.x * trilinear.y * trilinear.z;
+		coverage += weight; // in-bounds share of the footprint, before any shadowing terms
 		if (weight <= 1e-5) continue;
 
 		vec3 probePos   = uGIGridOrigin.xyz + cell * spacing;
@@ -350,6 +365,7 @@ vec3 sampleDDGIIrradiance(vec3 P, vec3 N)
 		sumColor  += texture(uGIIrr, irrUV).rgb * weight;
 		sumWeight += weight;
 	}
+	coverage = clamp(coverage, 0.0, 1.0);
 	return sumColor / max(sumWeight, 1e-4);
 }
 
@@ -479,7 +495,6 @@ void main()
 	vec3 Nup     = normalize(vec3(N.x, max(N.y, 0.1), N.z));
 	vec3 ambDiff = texture(uSkyEnv, Nup).rgb    * diffuseColor;
 	vec3 ambSpec = texture(uSkyEnv, Rrough).rgb * specColor;
-	vec3 ambient = ambDiff * 0.35 + ambSpec * (1.0 - 0.6 * wRough);
 	// Screen-space ambient occlusion darkens only the IBL indirect term in
 	// crevices; the direct lighting added below is left untouched. 1.0 = fully lit.
 	float ao = (uSSAOEnabled == 1) ? texture(uAO, gl_FragCoord.xy / uViewport).r : 1.0;
@@ -490,10 +505,19 @@ void main()
 	// flat floor stays in BOTH branches (never-black guarantee — probes bounce
 	// only actual lights and go dark under full overcast/night). Specular IBL
 	// (ambSpec) is kept either way — the GI slice is diffuse-only.
-	vec3 result = (uGIEnabled == 1)
-		? sampleDDGIIrradiance(vWorldPos, N) * diffuseColor * uGIIntensity
-		      + ambSpec * (1.0 - 0.6 * wRough) + uAmbient * diffuseColor
-		: ambient * ao + uAmbient * diffuseColor;
+	// The probe volume covers only a fixed box around the scene centre, so outside it
+	// `coverage` fades the sky diffuse back in instead of dropping to the flat floor.
+	vec3 skyDiff  = ambDiff * 0.35 * ao;
+	vec3 indirect = skyDiff;
+	vec3 indSpec  = ambSpec * (1.0 - 0.6 * wRough) * ao;
+	if (uGIEnabled == 1)
+	{
+		float coverage;
+		vec3  giDiff = sampleDDGIIrradiance(vWorldPos, N, coverage) * diffuseColor * uGIIntensity;
+		indirect = mix(skyDiff, giDiff, coverage);
+		indSpec  = ambSpec * (1.0 - 0.6 * wRough); // GI branch leaves specular un-AO'd, as before
+	}
+	vec3 result = indirect + indSpec + uAmbient * diffuseColor;
 
 	int dbgCascade = 0;   // cascade chosen by the directional shadow (debug tint)
 	int giLocalIdx = 0;   // counter over non-directional lights → local-mask channel
@@ -529,8 +553,10 @@ void main()
 		float sh = 1.0;
 		if (type == 0)
 		{
-			if (uGIEnabled == 1) sh = texture(uGIShadow, gl_FragCoord.xy / uViewport).r;
-			else                 sh = computeShadow(vWorldPos, N, L, dbgCascade);
+			if (uGIEnabled == 1)
+				sh = mix(GI_SHADOW_FLOOR, 1.0, texture(uGIShadow, gl_FragCoord.xy / uViewport).r);
+			else
+				sh = computeShadow(vWorldPos, N, L, dbgCascade);
 		}
 		else
 		{
@@ -539,7 +565,8 @@ void main()
 			// the shadow kernel from unjittered secondary rays. CSM never
 			// shadowed local lights at all (they shone through geometry).
 			if (uGIEnabled == 1 && giLocalIdx < 4)
-				sh = texture(uGILocal, gl_FragCoord.xy / uViewport)[giLocalIdx];
+				sh = mix(GI_SHADOW_FLOOR, 1.0,
+				         texture(uGILocal, gl_FragCoord.xy / uViewport)[giLocalIdx]);
 			giLocalIdx++;
 		}
 
