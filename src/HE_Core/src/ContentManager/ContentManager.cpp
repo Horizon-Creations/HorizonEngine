@@ -51,6 +51,30 @@ static void ensureMeshUVs(StaticMeshAsset& m)
     }
 }
 
+// Object-space AABB for meshes built at runtime (terrain chunks, editor primitives).
+// Only the .hasset load path computes bounds, so a registered mesh otherwise keeps the
+// {0,0,0}/{0,0,0} default. RenderExtractor rejects that degenerate box, which drops the
+// mesh from the directional-shadow ortho fit — a terrain fitted out of the frustum leaves
+// the ortho depth range sized to the remaining props, and the NDC-space depth bias then
+// maps to a world-space bias far too small to clear the terrain's slope (shadow acne).
+// No-op when the bounds are already a real box.
+static void ensureMeshBounds(StaticMeshAsset& m)
+{
+    const bool haveBounds = m.boundsMin[0] != m.boundsMax[0]
+                         || m.boundsMin[1] != m.boundsMax[1]
+                         || m.boundsMin[2] != m.boundsMax[2];
+    if (haveBounds || m.vertices.size() < 3) return;
+
+    m.boundsMin[0] = m.boundsMin[1] = m.boundsMin[2] =  1e30f;
+    m.boundsMax[0] = m.boundsMax[1] = m.boundsMax[2] = -1e30f;
+    for (size_t v = 0; v + 2 < m.vertices.size(); v += 3)
+        for (int k = 0; k < 3; ++k)
+        {
+            m.boundsMin[k] = std::min(m.boundsMin[k], m.vertices[v + k]);
+            m.boundsMax[k] = std::max(m.boundsMax[k], m.vertices[v + k]);
+        }
+}
+
 static std::vector<uint8_t> buildMetaChunk(const RuntimeAsset& a)
 {
     std::vector<uint8_t> buf;
@@ -1398,7 +1422,7 @@ bool ContentManager::replaceRuntimeAsset(SlotMap<T>& map, HE::UUID id, T asset)
 	return true;
 }
 
-HE::UUID ContentManager::registerStaticMesh(StaticMeshAsset asset)       { ensureMeshUVs(asset); return registerRuntimeAsset(m_staticMeshAssets,  std::move(asset), HE::AssetType::StaticMesh);    }
+HE::UUID ContentManager::registerStaticMesh(StaticMeshAsset asset)       { ensureMeshUVs(asset); ensureMeshBounds(asset); return registerRuntimeAsset(m_staticMeshAssets,  std::move(asset), HE::AssetType::StaticMesh);    }
 HE::UUID ContentManager::registerSkeletalMesh(SkeletalMeshAsset asset)   { return registerRuntimeAsset(m_skeletalMeshAssets, std::move(asset), HE::AssetType::SkeletalMesh); }
 HE::UUID ContentManager::registerTexture(TextureAsset asset)             { return registerRuntimeAsset(m_textureAssets,     std::move(asset), HE::AssetType::Texture);       }
 HE::UUID ContentManager::registerMaterial(MaterialAsset asset)           { return registerRuntimeAsset(m_materialAssets,    std::move(asset), HE::AssetType::Material);      }
@@ -1415,7 +1439,7 @@ HE::UUID ContentManager::registerAnimatorStateMachine(AnimatorStateMachineAsset 
 HE::UUID ContentManager::registerAnimationClip(AnimationClipAsset asset)       { return registerRuntimeAsset(m_animClipAssets,     std::move(asset), HE::AssetType::AnimationClip);     }
 HE::UUID ContentManager::registerPropertyAnimClip(PropertyAnimClipAsset asset) { return registerRuntimeAsset(m_propAnimClipAssets, std::move(asset), HE::AssetType::PropertyAnimClip); }
 
-bool ContentManager::replaceStaticMesh(HE::UUID id, StaticMeshAsset asset) { return replaceRuntimeAsset(m_staticMeshAssets, id, std::move(asset)); }
+bool ContentManager::replaceStaticMesh(HE::UUID id, StaticMeshAsset asset) { ensureMeshUVs(asset); ensureMeshBounds(asset); return replaceRuntimeAsset(m_staticMeshAssets, id, std::move(asset)); }
 bool ContentManager::replaceTexture(HE::UUID id, TextureAsset asset)       { return replaceRuntimeAsset(m_textureAssets,    id, std::move(asset)); }
 bool ContentManager::replaceMaterial(HE::UUID id, MaterialAsset asset)     { return replaceRuntimeAsset(m_materialAssets,   id, std::move(asset)); }
 

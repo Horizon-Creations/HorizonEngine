@@ -341,6 +341,66 @@ TEST_CASE("ContentManager registers a runtime mesh without a disk file")
 	CHECK(cm.getMaterial(id) == nullptr);
 }
 
+// Runtime meshes (terrain chunks, editor primitives) never pass through the .hasset
+// load path that scans for an AABB, so registration has to compute one. Without it the
+// asset keeps the {0,0,0}/{0,0,0} default, RenderExtractor rejects the degenerate box
+// (it requires max != min), and the mesh drops out of the directional-shadow ortho fit.
+TEST_CASE("ContentManager computes object-space bounds for runtime meshes")
+{
+	TempContentDir dir;
+	ContentManager cm(dir.path.string());
+
+	SUBCASE("registerStaticMesh scans vertices when bounds are absent")
+	{
+		StaticMeshAsset mesh;
+		mesh.vertices = { -4,0,-4,  6,3,-4,  6,0,9 };
+		mesh.indices  = { 0, 1, 2 };
+
+		const StaticMeshAsset* got = cm.getStaticMesh(cm.registerStaticMesh(std::move(mesh)));
+		REQUIRE(got != nullptr);
+		CHECK(got->boundsMin[0] == doctest::Approx(-4.0f));
+		CHECK(got->boundsMin[1] == doctest::Approx( 0.0f));
+		CHECK(got->boundsMin[2] == doctest::Approx(-4.0f));
+		CHECK(got->boundsMax[0] == doctest::Approx( 6.0f));
+		CHECK(got->boundsMax[1] == doctest::Approx( 3.0f));
+		CHECK(got->boundsMax[2] == doctest::Approx( 9.0f));
+		// The box must be non-degenerate — RenderExtractor discards max == min.
+		CHECK(got->boundsMax[1] != got->boundsMin[1]);
+	}
+
+	SUBCASE("replaceStaticMesh recomputes bounds after a sculpt")
+	{
+		StaticMeshAsset a;
+		a.vertices = { 0,0,0,  1,0,0,  0,1,0 };
+		a.indices  = { 0, 1, 2 };
+		const HE::UUID id = cm.registerStaticMesh(std::move(a));
+
+		StaticMeshAsset b;                       // terrain regenerated taller/wider
+		b.vertices = { 0,0,0,  20,0,0,  0,17,0 };
+		b.indices  = { 0, 1, 2 };
+		REQUIRE(cm.replaceStaticMesh(id, std::move(b)));
+
+		const StaticMeshAsset* got = cm.getStaticMesh(id);
+		REQUIRE(got != nullptr);
+		CHECK(got->boundsMax[0] == doctest::Approx(20.0f));
+		CHECK(got->boundsMax[1] == doctest::Approx(17.0f));
+	}
+
+	SUBCASE("an explicit AABB is preserved, not overwritten")
+	{
+		StaticMeshAsset mesh;
+		mesh.vertices     = { 0,0,0,  1,0,0,  0,1,0 };
+		mesh.indices      = { 0, 1, 2 };
+		mesh.boundsMin[0] = -100.0f;             // e.g. a skinned/animated envelope
+		mesh.boundsMax[0] =  100.0f;
+
+		const StaticMeshAsset* got = cm.getStaticMesh(cm.registerStaticMesh(std::move(mesh)));
+		REQUIRE(got != nullptr);
+		CHECK(got->boundsMin[0] == doctest::Approx(-100.0f));
+		CHECK(got->boundsMax[0] == doctest::Approx( 100.0f));
+	}
+}
+
 TEST_CASE("ContentManager replaceStaticMesh keeps the UUID, swaps the payload")
 {
 	TempContentDir dir;
