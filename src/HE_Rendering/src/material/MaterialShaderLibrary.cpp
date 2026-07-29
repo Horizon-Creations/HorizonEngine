@@ -207,12 +207,17 @@ vec3 heLit(vec3 baseColor, vec3 N, float metallic, float roughness) {
     vec3  n    = normalize(N);
     float ndl  = max(dot(n, L), 0.0);
     float sh   = heGISun();
-    vec3  diff = baseColor * heLight.sunColor.rgb * ndl;
-    vec3  amb  = baseColor * heLight.ambient.rgb;
+    // Same metallic/roughness split as heLitP + the built-in PBR shaders.
+    float rough = clamp(roughness, 0.0, 1.0);
+    float metal = clamp(metallic, 0.0, 1.0);
+    vec3  diffuseColor = baseColor * (1.0 - metal);
+    vec3  specColor    = mix(vec3(0.04), baseColor, metal);
+    vec3  diff = diffuseColor * heLight.sunColor.rgb * ndl;
+    vec3  amb  = diffuseColor * heLight.ambient.rgb;
     // cheap roughness-driven spec toward the sun (view ≈ +Z in this simple model)
     vec3  H    = normalize(L + vec3(0.0, 0.0, 1.0));
-    float spec = pow(max(dot(n, H), 0.0), mix(4.0, 64.0, 1.0 - roughness)) * (1.0 - roughness);
-    return amb + (diff + heLight.sunColor.rgb * spec * mix(0.04, 1.0, metallic)) * sh;
+    float spec = pow(max(dot(n, H), 0.0), mix(128.0, 8.0, rough)) * mix(0.5, 0.03, rough);
+    return amb + (diff + heLight.sunColor.rgb * specColor * spec) * sh;
 }
 // Full-scene-lights shading (M2 Standard Lit v2): ambient + all 8 window lights
 // with the SAME attenuation/cone model as the built-in PBR shaders. Needs the
@@ -221,7 +226,22 @@ vec3 heLit(vec3 baseColor, vec3 N, float metallic, float roughness) {
 vec3 heLitP(vec3 baseColor, vec3 N, float metallic, float roughness, vec3 worldPos) {
     vec3 n = normalize(N);
     vec3 V = normalize(heLight.camPos.xyz - worldPos);
-    vec3 result = baseColor * heLight.ambient.rgb;
+    // Metallic/roughness split — IDENTICAL to the built-in PBR shaders (see the
+    // OpenGL/Metal scene fragment): a metal has no diffuse lobe and tints its
+    // specular with the base colour, a dielectric keeps a neutral 0.04 F0.
+    // Graph materials used to ignore `metallic` completely (diffuse was always
+    // the full baseColor, specular always white) and ran the roughness curve
+    // BACKWARDS — mix(4,64,1-roughness) sharpens the highlight as roughness
+    // rises — so a graph material never matched a built-in one beside it.
+    float rough = clamp(roughness, 0.0, 1.0);
+    float metal = clamp(metallic, 0.0, 1.0);
+    vec3  diffuseColor = baseColor * (1.0 - metal);
+    vec3  specColor    = mix(vec3(0.04), baseColor, metal);
+    float shininess    = mix(128.0, 8.0, rough);
+    float specScale    = mix(0.5, 0.03, rough);
+    // Ambient hits the DIFFUSE albedo, like the built-in's flat ambient floor —
+    // a metal must not pick up a full-strength ambient wash.
+    vec3 result = diffuseColor * heLight.ambient.rgb;
     int count = int(heLight.counts.x);
     int localIdx = 0; // counter over non-directional lights → local-mask channel
     for (int i = 0; i < count; ++i) {
@@ -278,9 +298,9 @@ vec3 heLitP(vec3 baseColor, vec3 N, float metallic, float roughness, vec3 worldP
         }
         float ndl  = max(dot(n, L), 0.0);
         vec3  H    = normalize(L + V);
-        float spec = pow(max(dot(n, H), 0.0), mix(4.0, 64.0, 1.0 - roughness)) * (1.0 - roughness);
+        float spec = pow(max(dot(n, H), 0.0), shininess) * specScale;
         vec3  lc   = heLight.lightColor[i].rgb * heLight.lightColor[i].a;
-        result += (baseColor * ndl + vec3(spec) * mix(0.04, 1.0, metallic)) * lc * atten * sh;
+        result += (diffuseColor * ndl + specColor * spec) * lc * atten * sh;
     }
     return result;
 }

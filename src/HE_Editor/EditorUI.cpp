@@ -6806,12 +6806,51 @@ void EditorUI::RenderInspector(AppContext& ctx)
 	{
 		if (componentHeader("Mesh", true, removed))
 		{
-			if (m->meshAssetId == HE::UUID{})
-				ImGui::TextDisabled("Asset: (none — renders fallback cube)");
-			else if (ctx.contentManager)
+			// ── Mesh asset slot — drop a StaticMesh .hasset here ──────────────
+			// This was a read-only label, so a Mesh component added from "Add
+			// Component" could never be pointed at an asset: it kept a null UUID
+			// and silently rendered the fallback cube — which reads as "my engine
+			// cube didn't come back" after a save/reload. Same drop-target shape
+			// as the Material slot further down.
 			{
-				const StaticMeshAsset* asset = ctx.contentManager->getStaticMesh(m->meshAssetId);
-				ImGui::Text("Asset: %s", asset ? asset->name.c_str() : "(not loaded)");
+				const StaticMeshAsset* meshAsset =
+					(m->meshAssetId == HE::UUID{} || !ctx.contentManager)
+						? nullptr : ctx.contentManager->getStaticMesh(m->meshAssetId);
+				const std::string meshSlot = (m->meshAssetId == HE::UUID{})
+					? std::string("(none — drop a mesh here; renders fallback cube)")
+					: (meshAsset ? meshAsset->name : std::string("(not loaded)"));
+				ImGui::TextUnformatted("Asset");
+				ImGui::SameLine();
+				ImGui::Button((meshSlot + "##meshslot").c_str());
+				if (ImGui::BeginDragDropTarget())
+				{
+					if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_ASSET_PATH");
+					    p && ctx.contentManager)
+					{
+						const std::string rel = ctx.contentManager->toContentRelativePath(
+							static_cast<const char*>(p->Data));
+						const HE::UUID id = rel.empty() ? HE::UUID{}
+						                                : ctx.contentManager->loadAsset(rel);
+						if (id != HE::UUID{} && ctx.contentManager->getStaticMesh(id))
+						{
+							if (ctx.undoSys) ctx.undoSys->snapshotNow();
+							m->meshAssetId = id;
+						}
+						else
+							Logger::Log(Logger::LogLevel::Warning,
+								"Editor: dropped asset is not a static mesh");
+					}
+					ImGui::EndDragDropTarget();
+				}
+				if (m->meshAssetId != HE::UUID{})
+				{
+					ImGui::SameLine();
+					if (ImGui::SmallButton("Clear##meshslot"))
+					{
+						if (ctx.undoSys) ctx.undoSys->snapshotNow();
+						m->meshAssetId = HE::UUID{};
+					}
+				}
 			}
 			int lod = m->lodBias;
 			if (ImGui::InputInt("LOD Bias", &lod))

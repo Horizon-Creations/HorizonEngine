@@ -1236,3 +1236,64 @@ TEST_CASE("ContentManager scanContentDirectory indexes engine assets so UUID ref
 	CHECK(loaded->name == "Sphere");
 	CHECK(loaded->indices.size() == 3);
 }
+
+TEST_CASE("Engine default mesh survives a scene save/reload round-trip")
+{
+	// End-to-end mirror of the editor flow that "loses" an engine primitive:
+	//   session A: drag Engine/Meshes/Sphere.hasset in (loadAsset by the
+	//              "Engine/"-prefixed content path) → MeshComponent UUID → save
+	//   session B: fresh ContentManager (built-in defaults re-seeded) →
+	//              scanContentDirectory() → the UUID must resolve back to the
+	//              SAME engine mesh, not fall through to the default cube.
+	TempContentDir dir;
+	TempContentDir engineDir("he_test_engine_roundtrip");
+	fs::create_directories(engineDir.path / "Meshes");
+
+	// The shipped engine primitives are authored by mesh_gen with fixed UUIDs
+	// (hi = 0x100 + index, lo = 1) — reproduce that shape, not a random UUID.
+	const HE::UUID kSphereId{ 0x0000000000000101ULL, 0x0000000000000001ULL };
+	{
+		ContentManager gen(engineDir.path.string());
+		StaticMeshAsset mesh;
+		mesh.type     = HE::AssetType::StaticMesh;
+		mesh.id       = kSphereId;
+		mesh.name     = "Sphere";
+		mesh.path     = "Meshes/Sphere.hasset";
+		mesh.vertices = { 0,0,0, 1,0,0, 0,1,0, 1,1,0 };
+		mesh.indices  = { 0, 1, 2, 1, 3, 2 };
+		mesh.normals  = { 0,0,1, 0,0,1, 0,0,1, 0,0,1 };
+		REQUIRE(gen.saveAsset(mesh));
+	}
+
+	// ── Session A: reference it the way the content browser does ──────────────
+	HE::UUID authored;
+	{
+		ContentManager cm(dir.path.string());
+		cm.setEngineContentRoot(engineDir.path.string());
+		cm.scanContentDirectory();
+		// toContentRelativePath() of a file under the engine root yields this.
+		authored = cm.loadAsset("Engine/Meshes/Sphere.hasset");
+		REQUIRE_FALSE(authored == HE::UUID{});
+		// The identity written into the scene must be the mesh's OWN UUID.
+		CHECK(authored == kSphereId);
+		CHECK_FALSE(authored == HE::kDefaultCubeMeshId);
+		const StaticMeshAsset* a = cm.getStaticMesh(authored);
+		REQUIRE(a != nullptr);
+		CHECK(a->name == "Sphere");
+	}
+
+	// ── Session B: restart — only the UUID from the scene file survives ───────
+	{
+		ContentManager cm(dir.path.string());   // re-seeds the built-in defaults
+		cm.setEngineContentRoot(engineDir.path.string());
+		CHECK(cm.scanContentDirectory() >= 1);
+		// Nothing is loaded yet — this is the state a scene load starts from.
+		CHECK(cm.getStaticMesh(authored) == nullptr);
+		// SceneSystems::preloadAssetRefs does exactly this per referenced UUID.
+		REQUIRE(cm.ensureResident(authored));
+		const StaticMeshAsset* b = cm.getStaticMesh(authored);
+		REQUIRE(b != nullptr);
+		CHECK(b->name == "Sphere");
+		CHECK(b->indices.size() == 6);          // the real mesh, not the 36-index cube
+	}
+}
