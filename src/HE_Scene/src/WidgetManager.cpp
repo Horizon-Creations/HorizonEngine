@@ -462,6 +462,11 @@ void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderO
 		const float sx = vpWidth  / w.tree.canvasWidth;
 		const float sy = vpHeight / w.tree.canvasHeight;
 
+		// Auto-sizing elements fit themselves BEFORE the rects are resolved, so a
+		// text/font change made this frame (script, HorizonCode Set Property) is
+		// already reflected in the layout below.
+		HE::uiApplyAutoSize(w.tree);
+
 		// Draw elements of this widget, painter-ordered by (layer, depth).
 		struct Item { const HE::UIElement* e; int key; HE::UIWidgetRect r; };
 		std::vector<Item> items;

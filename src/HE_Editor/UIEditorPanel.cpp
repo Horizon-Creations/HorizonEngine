@@ -2,6 +2,7 @@
 #include <cstdint>
 #include "EditorApplication.h"                 // AppContext
 #include "GraphEditor.h"                        // shared node-graph canvas
+#include "HcGraphClipboard.h"                   // shared HorizonCode node clipboard
 #include "HcClassList.h"                        // Create Object class picker
 #include <HorizonScene/EngineApi.h>             // HE::api registry (Engine Call nodes)
 #include <HorizonScene/HcCodegen.h>             // in-editor compile check (Compile button)
@@ -454,8 +455,14 @@ void drawPropertyWidget(UIElement& e, const UIPropDesc& pd, bool& edit, bool& co
 	case UIPropType::String:
 	{
 		std::string v = e.getProp(pd.name).s;
-		if (ImGui::InputText((pd.name + id).c_str(), &v))
-			{ e.setProp(pd.name, UIPropValue::ofString(v)); edit = true; }
+		// Multi-line properties (Text) get a real text box so a newline can be
+		// typed — a single-line InputText swallows Enter and the value could
+		// never contain one.
+		const bool changed = pd.multiline
+			? ImGui::InputTextMultiline((pd.name + id).c_str(), &v,
+			                            ImVec2(-1.0f, ImGui::GetTextLineHeight() * 4.0f))
+			: ImGui::InputText((pd.name + id).c_str(), &v);
+		if (changed) { e.setProp(pd.name, UIPropValue::ofString(v)); edit = true; }
 		committed |= ImGui::IsItemDeactivatedAfterEdit();
 		break;
 	}
@@ -875,6 +882,10 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	}
 	dl->AddRect(cTL, ImVec2(cTL.x + canvasPx.x, cTL.y + canvasPx.y),
 	            IM_COL32(90, 90, 100, 255));
+
+	// Auto-sizing elements fit themselves before the rects resolve, so the
+	// designer shows the same box the runtime will (see uiApplyAutoSize).
+	HE::uiApplyAutoSize(st.tree);
 
 	// Paint order: (layer, depth) ascending — same rule as the runtime.
 	struct DrawItem { const UIElement* n; int layer; int depth; Rect r; };
@@ -2377,9 +2388,76 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 			{ st.gDropVar = static_cast<const char*>(data); st.gOpenVarDrop = true; }
 	};
 
+	const ImVec2 canvasOrigin = ImGui::GetCursorScreenPos();
 	const bool changed = GraphEditor::draw("##hc_graphcanvas", m, st.geState, avail);
 	st.selectedGraphNode = st.geState.selected;
 	if (changed) commitEdit(st, ctx);
+
+	// ── Keyboard: node clipboard + duplicate (Cmd on macOS, Ctrl elsewhere) ──
+	// Shares HcClipboard with the Level Script / Game Instance / HC Class graphs,
+	// so nodes copy across HorizonCode editors. Undo/redo + save live in the
+	// panel-wide shortcut block above.
+	{
+		const ImGuiIO& kio = ImGui::GetIO();
+		const bool mod  = kio.KeyCtrl || kio.KeySuper;
+		const bool kbOk = ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows)
+		                  && !kio.WantTextInput && !ImGui::IsAnyItemActive();
+		std::vector<int>& sel = st.geState.selection;
+		auto effectiveSel = [&]() -> std::vector<int> {
+			if (!sel.empty()) return sel;
+			return st.selectedGraphNode != 0 ? std::vector<int>{ st.selectedGraphNode }
+			                                 : std::vector<int>{};
+		};
+
+		if (kbOk && mod && ImGui::IsKeyPressed(ImGuiKey_C))
+			HcClipboard::copy(st.graph, effectiveSel());
+
+		if (kbOk && mod && ImGui::IsKeyPressed(ImGuiKey_X))
+		{
+			const std::vector<int> doomed = effectiveSel();
+			if (HcClipboard::copy(st.graph, doomed)) // cut = copy + delete
+			{
+				for (int id : doomed)
+					if (const HC::Node* n = st.graph.findNode(id);
+					    n && n->type != HC::NodeType::Event &&
+					    n->type != HC::NodeType::FunctionEntry)
+						st.graph.removeNode(id);
+				sel.clear(); st.geState.selected = 0; st.selectedGraphNode = 0;
+				commitEdit(st, ctx);
+			}
+		}
+
+		if (kbOk && mod && ImGui::IsKeyPressed(ImGuiKey_V) && !HcClipboard::empty())
+		{
+			// Paste at the mouse when it is over the canvas, else into its centre.
+			const bool over = kio.MousePos.x >= canvasOrigin.x && kio.MousePos.x <= canvasOrigin.x + avail.x &&
+			                  kio.MousePos.y >= canvasOrigin.y && kio.MousePos.y <= canvasOrigin.y + avail.y;
+			const float Z  = st.geState.zoom;
+			const float gx = ((over ? kio.MousePos.x : canvasOrigin.x + avail.x * 0.5f)
+			                  - canvasOrigin.x - st.geState.pan.x) / Z;
+			const float gy = ((over ? kio.MousePos.y : canvasOrigin.y + avail.y * 0.5f)
+			                  - canvasOrigin.y - st.geState.pan.y) / Z;
+			const std::vector<int> fresh = HcClipboard::paste(st.graph, gx, gy, st.currentGraph);
+			if (!fresh.empty())
+			{
+				HC::syncFunctionSignatures(st.graph);
+				sel = fresh;
+				st.geState.selected = st.selectedGraphNode = fresh.front();
+				commitEdit(st, ctx);
+			}
+		}
+
+		if (kbOk && mod && ImGui::IsKeyPressed(ImGuiKey_D))
+		{
+			const std::vector<int> fresh = HC::duplicateNodes(st.graph, effectiveSel());
+			if (!fresh.empty())
+			{
+				sel = fresh;
+				st.geState.selected = st.selectedGraphNode = fresh.front();
+				commitEdit(st, ctx);
+			}
+		}
+	}
 
 	// Variables-panel drop → Get/Set popup for the dropped element's properties.
 	if (st.gOpenDropPopup) { ImGui::OpenPopup("##graph_elem_drop"); st.gOpenDropPopup = false; }
@@ -2505,7 +2583,9 @@ void render(AppContext& ctx, const std::string& assetPath,
 	ImGui::Separator();
 
 	// ── Keyboard shortcuts (skip while typing in a field) ────────────────────
-	const bool typing = ImGui::IsAnyItemActive();
+	// WantTextInput as well as IsAnyItemActive: an InputText that has keyboard
+	// focus without being "active" this frame still owns the keystrokes.
+	const bool typing = ImGui::IsAnyItemActive() || ImGui::GetIO().WantTextInput;
 	if (!typing && ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows))
 	{
 		const bool ctrl = ImGui::GetIO().KeyCtrl || ImGui::GetIO().KeySuper;
@@ -2516,8 +2596,9 @@ void render(AppContext& ctx, const std::string& assetPath,
 		    (ctrl && ImGui::IsKeyPressed(ImGuiKey_Y)))
 			{ restoreSnapshot(st, st.undoPos + 1); applyToAsset(st, ctx); }
 
-		const bool del = ImGui::IsKeyPressed(ImGuiKey_Delete) ||
-		                 ImGui::IsKeyPressed(ImGuiKey_Backspace);
+		// Delete only — Backspace is the text-editing key and a near-miss on it
+		// used to destroy the selected element/node (same rule as GraphEditor).
+		const bool del = ImGui::IsKeyPressed(ImGuiKey_Delete);
 		if (st.viewMode == 0)
 		{
 			if (del && st.selected != 0)

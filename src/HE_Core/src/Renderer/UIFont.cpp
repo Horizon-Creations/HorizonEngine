@@ -89,49 +89,168 @@ namespace UIFontCache
     }
 }
 
+namespace
+{
+    // Advance width of one line at `sizePx` (glyphs outside ASCII 32..127 have no
+    // metrics and contribute nothing, exactly as the emit loop skips them).
+    float lineWidth(const BakedUIFont& font, const std::string& s, float scale)
+    {
+        float w = 0.0f;
+        for (unsigned char ch : s)
+            if (ch >= 32 && ch < 128) w += font.glyphs[ch - 32].xadvance * scale;
+        return w;
+    }
+} // namespace
+
+std::vector<std::string> layoutUITextLines(const BakedUIFont& font, const std::string& text,
+                                           float sizePx, float wrapWidth, bool wrap)
+{
+    std::vector<std::string> lines;
+    if (!font.ok || sizePx <= 0.0f) { lines.push_back(text); return lines; }
+    const float scale = sizePx / font.bakePx;
+
+    // Hard breaks first — '\r' is swallowed so CRLF text doesn't render a box.
+    std::string cur;
+    for (char c : text)
+    {
+        if (c == '\n') { lines.push_back(cur); cur.clear(); }
+        else if (c != '\r') cur.push_back(c);
+    }
+    lines.push_back(cur);
+
+    if (!wrap || wrapWidth <= 0.0f) return lines;
+
+    // Greedy word wrap on each hard line. A single word wider than the line is
+    // hard-broken so it can never overflow the rect.
+    // Trailing spaces would offset a centred line and inflate the fit test.
+    auto trimmed = [](std::string s) {
+        while (!s.empty() && s.back() == ' ') s.pop_back();
+        return s;
+    };
+    std::vector<std::string> wrapped;
+    for (const std::string& line : lines)
+    {
+        if (lineWidth(font, line, scale) <= wrapWidth) { wrapped.push_back(line); continue; }
+        std::string acc;
+        size_t i = 0;
+        while (i < line.size())
+        {
+            // Next word plus the run of spaces that follows it.
+            size_t e = line.find(' ', i);
+            if (e == std::string::npos) e = line.size();
+            while (e < line.size() && line[e] == ' ') ++e;
+            std::string word = line.substr(i, e - i);
+            i = e;
+
+            // Doesn't fit after what's already on this line → flush the line.
+            if (!acc.empty() && lineWidth(font, trimmed(acc + word), scale) > wrapWidth)
+            {
+                wrapped.push_back(trimmed(acc));
+                acc.clear();
+            }
+            // Even alone the word overflows → hard-break it, longest prefix first.
+            // The prefix always takes at least one character, so this terminates.
+            while (acc.empty() && word.size() > 1 &&
+                   lineWidth(font, trimmed(word), scale) > wrapWidth)
+            {
+                std::string head;
+                for (char c : word)
+                {
+                    if (!head.empty() && lineWidth(font, head + c, scale) > wrapWidth) break;
+                    head.push_back(c);
+                }
+                wrapped.push_back(head);
+                word.erase(0, head.size());
+            }
+            acc += word;
+        }
+        wrapped.push_back(trimmed(acc));
+    }
+    return wrapped;
+}
+
+glm::vec2 measureUIText(const BakedUIFont& font, const std::string& text, float sizePx,
+                        float wrapWidth, const UITextLayout& opts)
+{
+    if (!font.ok || sizePx <= 0.0f) return { 0.0f, 0.0f };
+    const float scale = sizePx / font.bakePx;
+    const std::vector<std::string> lines =
+        layoutUITextLines(font, text, sizePx, wrapWidth, opts.wrap);
+    float w = 0.0f;
+    for (const std::string& l : lines) w = std::max(w, lineWidth(font, l, scale));
+    const float step = sizePx * opts.lineSpacing;
+    const float h    = static_cast<float>(lines.size() - 1) * step + sizePx;
+    return { w, h };
+}
+
+glm::vec2 measureUIText(const std::string& text, float sizePx,
+                        float wrapWidth, const UITextLayout& opts)
+{
+    return measureUIText(sharedUIFont(), text, sizePx, wrapWidth, opts);
+}
+
+void emitUITextGlyphs(const BakedUIFont& font, std::uint32_t atlasKey,
+                      const std::string& text, const glm::vec2& rectPos,
+                      const glm::vec2& rectSize, float sizePx,
+                      const glm::vec4& color, int layer, const UITextLayout& opts,
+                      std::vector<UIRenderObject>& out)
+{
+    if (!font.ok || text.empty() || sizePx <= 0.0f) return;
+
+    const float scale = sizePx / font.bakePx;
+    const std::vector<std::string> lines =
+        layoutUITextLines(font, text, sizePx, rectSize.x, opts.wrap);
+
+    // The block is centred vertically in the rect; line i sits `step` below i-1.
+    // For a single line this collapses to the original formula exactly (the
+    // block centre IS the rect centre), so existing widgets don't shift.
+    const float step       = sizePx * opts.lineSpacing;
+    const float blockCentre = rectPos.y + rectSize.y * 0.5f;
+    const float firstCentre = blockCentre - static_cast<float>(lines.size() - 1) * step * 0.5f;
+
+    const float invW = 1.0f / (float)font.atlasW;
+    const float invH = 1.0f / (float)font.atlasH;
+
+    for (size_t li = 0; li < lines.size(); ++li)
+    {
+        const std::string& line = lines[li];
+        if (line.empty()) continue;                    // blank line still advances
+
+        const float runW = lineWidth(font, line, scale);
+        const float x = rectPos.x
+            + (opts.centerH ? std::max(0.0f, (rectSize.x - runW) * 0.5f) : 0.0f);
+        // Baseline: line centre shifted down by half the ascent (as before).
+        const float baseline = firstCentre + static_cast<float>(li) * step
+                             + (font.ascent * scale) * 0.5f - sizePx * 0.08f;
+
+        float penX = 0.0f;
+        for (unsigned char ch : line)
+        {
+            if (ch < 32 || ch >= 128) continue;
+            const BakedGlyph& g = font.glyphs[ch - 32];
+            UIRenderObject ro;
+            ro.position = { x + penX + g.xoff * scale, baseline + g.yoff * scale };
+            ro.size     = { (g.x1 - g.x0) * scale, (g.y1 - g.y0) * scale };
+            ro.uvMin    = { g.x0 * invW, g.y0 * invH };
+            ro.uvMax    = { g.x1 * invW, g.y1 * invH };
+            ro.color    = color;
+            ro.type     = 2;
+            ro.layer    = layer;
+            ro.fontAtlasKey = atlasKey;
+            out.push_back(std::move(ro));
+            penX += g.xadvance * scale;
+        }
+    }
+}
+
 void emitUITextGlyphs(const BakedUIFont& font, std::uint32_t atlasKey,
                       const std::string& text, const glm::vec2& rectPos,
                       const glm::vec2& rectSize, float sizePx,
                       const glm::vec4& color, int layer, bool centerH,
                       std::vector<UIRenderObject>& out)
 {
-    if (!font.ok || text.empty() || sizePx <= 0.0f) return;
-
-    const float scale = sizePx / font.bakePx;
-
-    // Measure the run (advance sum) for centering.
-    float runW = 0.0f;
-    for (unsigned char ch : text)
-        if (ch >= 32 && ch < 128)
-            runW += font.glyphs[ch - 32].xadvance * scale;
-
-    const float x = rectPos.x
-        + (centerH ? std::max(0.0f, (rectSize.x - runW) * 0.5f) : 0.0f);
-    // Baseline: vertical center of the rect, shifted down by half the ascent.
-    const float baseline = rectPos.y + rectSize.y * 0.5f
-                         + (font.ascent * scale) * 0.5f - sizePx * 0.08f;
-
-    float penX = 0.0f;
-    const float invW = 1.0f / (float)font.atlasW;
-    const float invH = 1.0f / (float)font.atlasH;
-    for (unsigned char ch : text)
-    {
-        if (ch < 32 || ch >= 128) continue;
-        const BakedGlyph& g = font.glyphs[ch - 32];
-        const float x0 = x + penX + g.xoff * scale;
-        const float y0 = baseline + g.yoff * scale;
-        UIRenderObject ro;
-        ro.position = { x0, y0 };
-        ro.size     = { (g.x1 - g.x0) * scale, (g.y1 - g.y0) * scale };
-        ro.uvMin    = { g.x0 * invW, g.y0 * invH };
-        ro.uvMax    = { g.x1 * invW, g.y1 * invH };
-        ro.color    = color;
-        ro.type     = 2;
-        ro.layer    = layer;
-        ro.fontAtlasKey = atlasKey;
-        out.push_back(std::move(ro));
-        penX += g.xadvance * scale;
-    }
+    UITextLayout opts; opts.centerH = centerH;   // no wrapping unless asked for
+    emitUITextGlyphs(font, atlasKey, text, rectPos, rectSize, sizePx, color, layer, opts, out);
 }
 
 void emitUITextGlyphs(const std::string& text, const glm::vec2& rectPos,

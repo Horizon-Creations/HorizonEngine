@@ -73,6 +73,17 @@ public:
     std::string text = "Text";
     float       fontSize = 22.0f;
     glm::vec4   color{ 1.0f, 1.0f, 1.0f, 1.0f };
+    // Multi-line: '\n' in Text always breaks a line. WordWrap additionally wraps
+    // at the element's width — off keeps long lines running past the box, which
+    // is what you want for a single-line label.
+    bool        wordWrap = false;
+    // Grow the element to fit its own text. Height always follows the line count
+    // and font size; width follows the widest line UNLESS WordWrap is on (then
+    // the authored width is the wrap column and only the height adapts). This is
+    // why bumping FontSize used to clip the text — the box stayed 200×30.
+    bool        autoSize = true;
+    // Horizontal alignment inside the element rect: 0 left, 1 centre.
+    int         align = 0;
 
     UIText() { sizeX = 200.0f; sizeY = 30.0f; }
     UIWidgetType type() const override { return UIWidgetType::Text; }
@@ -81,14 +92,20 @@ public:
     { return std::make_unique<UIText>(*this); }
 
     std::vector<UIPropDesc> properties() const override
-    { return { { "Text", UIPropType::String },
+    { return { { "Text", UIPropType::String, 0.0f, 0.0f, /*multiline=*/true },
                { "FontSize", UIPropType::Float, 4.0f, 200.0f },
-               { "Color", UIPropType::Color } }; }
+               { "Color", UIPropType::Color },
+               { "WordWrap", UIPropType::Bool },
+               { "AutoSize", UIPropType::Bool },
+               { "Center", UIPropType::Bool } }; }
     UIPropValue getProp(const std::string& n) const override
     {
         if (n == "Text")     return UIPropValue::ofString(text);
         if (n == "FontSize") return UIPropValue::ofFloat(fontSize);
         if (n == "Color")    return propColor(color);
+        if (n == "WordWrap") return UIPropValue::ofBool(wordWrap);
+        if (n == "AutoSize") return UIPropValue::ofBool(autoSize);
+        if (n == "Center")   return UIPropValue::ofBool(align == 1);
         return {};
     }
     void setProp(const std::string& n, const UIPropValue& v) override
@@ -96,7 +113,14 @@ public:
         if (n == "Text")     text = v.s;
         else if (n == "FontSize") fontSize = v.f;
         else if (n == "Color")    color = asColor(v);
+        else if (n == "WordWrap") wordWrap = v.b;
+        else if (n == "AutoSize") autoSize = v.b;
+        else if (n == "Center")   align = v.b ? 1 : 0;
     }
+
+    // Element size implied by the current text/font (see autoSize). Callers apply
+    // it before layout so the rect the glyphs lay out in already fits them.
+    void applyAutoSize() override;
 
     void render(const UIWidgetRect&, const UIElementRenderState&, const HE::UUID&,
                 float, std::vector<UIRenderObject>&) const override;

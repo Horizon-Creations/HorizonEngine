@@ -4,6 +4,11 @@
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/Components/MeshComponent.h>
+#include <HorizonScene/TerrainSystem.h>
+#include <HorizonScene/Components/TerrainChunkComponent.h>
+#include <HorizonScene/Components/MaterialComponent.h>
+#include <HorizonScene/Components/TransformComponent.h>
+#include <ContentManager/ContentManager.h>
 
 // ── Geometry correctness ───────────────────────────────────────────────────────
 
@@ -319,4 +324,49 @@ TEST_CASE("TerrainComponent sculptHeights survive save/load (base64 round-trip)"
     REQUIRE(loaded->sculptHeights.size() == tc.sculptHeights.size());
     for (size_t i = 0; i < tc.sculptHeights.size(); ++i)
         CHECK(loaded->sculptHeights[i] == doctest::Approx(tc.sculptHeights[i]));
+}
+
+// ── Chunk material follows the Landscape entity ────────────────────────────────
+// The Landscape entity itself has no mesh — its generated chunk children are what
+// render. Chunks used to be pinned to the built-in terrain material at creation,
+// so assigning (or recolouring) a material on the Landscape never reached screen.
+TEST_CASE("TerrainSystem propagates the Landscape's material to its chunks")
+{
+    HorizonWorld world;
+    ContentManager cm(".");
+    auto& reg = world.registry();
+
+    Entity te = world.createEntity("Landscape");
+    reg.emplace<TransformComponent>(te);
+    TerrainComponent tc;
+    tc.resolution = 9;      // small: 2ⁿ+1 already, no resample
+    tc.sizeX = tc.sizeZ = 16.0f;
+    tc.dirty = true;
+    reg.emplace<TerrainComponent>(te, tc);
+
+    // First tick builds the chunk entities.
+    TerrainSystem::updateTerrains(world, cm);
+    size_t chunks = 0;
+    for (auto ce : reg.view<TerrainChunkComponent>()) { (void)ce; ++chunks; }
+    REQUIRE(chunks > 0);
+
+    // Assign a different material to the Landscape (no heightfield change → the
+    // terrain is NOT dirty, so the sync must not be gated on the rebuild path).
+    const HE::UUID custom{ 0xABCDEF01ull, 0x1234ull };
+    reg.get<MaterialComponent>(te).materialAssetId = custom;
+    TerrainSystem::updateTerrains(world, cm);
+
+    for (auto [ce, tcc, mc] : reg.view<TerrainChunkComponent, MaterialComponent>().each())
+        CHECK(mc.materialAssetId == custom);
+
+    // Per-entity param overrides ride along too.
+    MaterialParamOverride ov; ov.name = "Tint"; ov.value[0] = 0.25f;
+    reg.get<MaterialComponent>(te).paramOverrides = { ov };
+    TerrainSystem::updateTerrains(world, cm);
+    for (auto [ce, tcc, mc] : reg.view<TerrainChunkComponent, MaterialComponent>().each())
+    {
+        REQUIRE(mc.paramOverrides.size() == 1);
+        CHECK(mc.paramOverrides[0].name == "Tint");
+        CHECK(mc.paramOverrides[0].value[0] == doctest::Approx(0.25f));
+    }
 }

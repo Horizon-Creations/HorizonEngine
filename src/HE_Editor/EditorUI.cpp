@@ -6485,11 +6485,15 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			if (ImGui::Checkbox("Auto-Advance", &env->autoAdvance) && env->autoAdvance)
 				env->dayNightCycle = true;
 			trackEdit();
-			ImGui::BeginDisabled(!env->autoAdvance);
+			// Day length is a property of the WORLD (how long a day lasts once time
+			// runs), not of the switch that starts it — so it stays editable with
+			// Auto-Advance off. Greying it out forced the user to enable the cycle
+			// just to dial the length in, then switch it back off.
 			ImGui::SetNextItemWidth(-1.0f);
 			ImGui::SliderFloat("##cyclelen", &env->cycleSeconds, 5.0f, 600.0f,
 			                   "Full day: %.0f s", ImGuiSliderFlags_Logarithmic); trackEdit();
-			ImGui::EndDisabled();
+			if (!env->autoAdvance)
+				ImGui::TextDisabled("Takes effect once Auto-Advance is on.");
 
 			if (ImGui::TreeNodeEx("Sun & Moon", ImGuiTreeNodeFlags_DefaultOpen)) {
 			ImGui::ColorEdit3("Sun Color",  &env->sunColor.x, ImGuiColorEditFlags_NoInputs); trackEdit();
@@ -6633,6 +6637,7 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			ImGui::SetNextItemWidth(-1.0f);
 			ImGui::SliderFloat("##shootingstars", &env->shootingStars, 0.0f, 1.0f, "Shooting Stars: %.2f"); trackEdit();
 			ImGui::TextDisabled("Occasional meteors streak across the night sky; higher = more frequent. Night only.");
+			ImGui::TextDisabled("Stars, Milky Way & nebula turn with the day-night cycle.");
 
 			ImGui::TreePop(); } // end Stars & Milky Way
 
@@ -6670,7 +6675,8 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			ImGui::SetNextItemWidth(-1.0f);
 			ImGui::SliderFloat("##aurorafrag", &env->auroraFragmentation, 0.0f, 1.0f, "Fragmentation: %.2f"); trackEdit();
 			ImGui::EndDisabled();
-			ImGui::TextDisabled("Stars, Milky Way & nebula turn with the day; aurora drifts.");
+			ImGui::TextDisabled("Night only — fades out as the sun rises. Height sets the band's");
+			ImGui::TextDisabled("altitude, Fragmentation how much the curtain breaks up.");
 			ImGui::TreePop(); } // end Aurora
 		}
 		ImGui::Separator();
@@ -7339,16 +7345,61 @@ void EditorUI::RenderInspector(AppContext& ctx)
 				if (applyShader) mat->customShaderFragGlsl = s_shaderEdit;
 
 				ImGui::Spacing();
-				if (ImGui::Button("Save Material"))
+				// Built-in defaults (DefaultMaterial / DefaultTerrainMaterial) are
+				// virtual "mem://" assets with no file behind them AND a fixed UUID
+				// that initDefaultAssets() re-seeds from hardcoded values on every
+				// start. Saving one in place therefore cannot survive a restart —
+				// that is why a recoloured Landscape came back grey. So for those,
+				// Save writes a NEW project material (fresh UUID + real path under
+				// Content/Materials) and re-points this entity at it; from then on
+				// it round-trips like any other asset.
+				const bool isBuiltIn = mat->path.rfind("mem://", 0) == 0;
+				if (ImGui::Button(isBuiltIn ? "Save as Project Material" : "Save Material"))
 				{
-					const bool ok = ctx.contentManager->saveAsset(*mat);
-					if (ok && ctx.renderer) ctx.renderer->InvalidateMaterial(m->materialAssetId);
-					Logger::Log(ok ? Logger::LogLevel::Info : Logger::LogLevel::Error,
-						("Editor: " + std::string(ok ? "saved" : "failed to save")
-						 + " material '" + mat->name + "'").c_str());
+					if (isBuiltIn)
+					{
+						MaterialAsset copy = *mat;
+						copy.id = HE::UUID{};                  // saveAsset mints a fresh one
+						// Unique "<Name>.hasset" under Content/Materials.
+						std::string base = mat->name.empty() ? std::string("Material") : mat->name;
+						if (base.rfind("Default", 0) == 0) base = base.substr(7); // DefaultTerrainMaterial → TerrainMaterial
+						const std::string dir = ctx.contentManager->contentRoot() + "/Materials";
+						std::error_code mkec; std::filesystem::create_directories(dir, mkec);
+						std::string name = base;
+						for (int n = 1; std::filesystem::exists(dir + "/" + name + ".hasset"); ++n)
+							name = base + std::to_string(n);
+						copy.name = name;
+						copy.path = "Materials/" + name + ".hasset";
+
+						const HE::UUID newId = ctx.contentManager->registerMaterial(std::move(copy));
+						MaterialAsset* saved = ctx.contentManager->getMaterialMutable(newId);
+						const bool ok = saved && ctx.contentManager->saveAsset(*saved);
+						if (ok)
+						{
+							if (ctx.undoSys) ctx.undoSys->snapshotNow();
+							m->materialAssetId = newId;   // this entity now owns a real asset
+							m->dirty = true;
+							ctx.contentRefreshPending = true;
+							if (ctx.renderer) ctx.renderer->InvalidateMaterial(newId);
+						}
+						Logger::Log(ok ? Logger::LogLevel::Info : Logger::LogLevel::Error,
+							("Editor: " + std::string(ok ? "saved built-in material as project asset "
+							                             : "failed to save built-in material as ")
+							 + (saved ? saved->path : std::string())).c_str());
+					}
+					else
+					{
+						const bool ok = ctx.contentManager->saveAsset(*mat);
+						if (ok && ctx.renderer) ctx.renderer->InvalidateMaterial(m->materialAssetId);
+						Logger::Log(ok ? Logger::LogLevel::Info : Logger::LogLevel::Error,
+							("Editor: " + std::string(ok ? "saved" : "failed to save")
+							 + " material '" + mat->name + "'").c_str());
+					}
 				}
 				ImGui::SameLine();
-				ImGui::TextDisabled("(edits apply live; Save writes to disk)");
+				ImGui::TextDisabled(isBuiltIn
+					? "(engine default — Save makes a project copy)"
+					: "(edits apply live; Save writes to disk)");
 			}
 		}
 		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<MaterialComponent>(entity); }

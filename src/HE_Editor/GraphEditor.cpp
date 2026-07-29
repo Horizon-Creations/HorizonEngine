@@ -655,8 +655,18 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
     if (model.drawFront) model.drawFront(dl, origin, st.pan, st.zoom);
 
     // ── Delete selection ─────────────────────────────────────────────────────
-    if (interact && model.removeNode &&
-        (ImGui::IsKeyPressed(ImGuiKey_Delete) || ImGui::IsKeyPressed(ImGuiKey_Backspace)))
+    // `interact` alone is NOT enough to own the keyboard: it only means the
+    // cursor is over the canvas. With a text field active anywhere (a node's
+    // rename box, a variable name, the search field of a popup) the cursor is
+    // usually still over the canvas — so an ordinary edit keystroke destroyed
+    // the selected nodes. Require that nothing is consuming text input, the
+    // same guard the material editor's shortcuts already use.
+    //
+    // Backspace is deliberately NOT a delete key here: it is THE text-editing
+    // key, so binding it to node destruction makes every near-miss fatal. The
+    // node context menu's "Delete Node/Selection" is the always-available path.
+    const bool kbOwned = !ImGui::GetIO().WantTextInput && !ImGui::IsAnyItemActive();
+    if (interact && kbOwned && model.removeNode && ImGui::IsKeyPressed(ImGuiKey_Delete))
     {
         std::vector<int> doomed = st.selection;
         if (doomed.empty() && st.selected != 0) doomed.push_back(st.selected);

@@ -70,6 +70,9 @@ struct UIPropDesc
     std::string name;
     UIPropType  type;
     float       minV = 0.0f, maxV = 0.0f; // Float slider range when minV < maxV
+    // String properties only: author over several lines (the editor shows a
+    // multi-line box, so a literal newline can be typed into the value).
+    bool        multiline = false;
 };
 
 // One event a widget type can fire. `argType` is the type of the value the
@@ -159,6 +162,12 @@ public:
     // checkboxes, combos, sliders, text fields). Panels/images/text/progress
     // are inert unless a script event binds them.
     virtual bool interactive() const { return false; }
+
+    // Resize this element to fit its own content, when the type supports it and
+    // the user asked for it. Run once per frame over the tree (uiApplyAutoSize)
+    // BEFORE layout, so a text/font change taken at runtime — from a HorizonCode
+    // Set Property, say — is reflected in the same frame. No-op by default.
+    virtual void applyAutoSize() {}
 
     // Type-specific JSON (base fields are handled by the tree serializer).
     virtual void writeJson(nlohmann::json&) const {}
