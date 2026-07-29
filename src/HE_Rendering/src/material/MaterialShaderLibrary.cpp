@@ -223,7 +223,8 @@ vec3 heLit(vec3 baseColor, vec3 N, float metallic, float roughness) {
 // with the SAME attenuation/cone model as the built-in PBR shaders. Needs the
 // fragment's world position (attenuation + view vector) — the graph codegen
 // passes its vWorldPos varying.
-vec3 heLitP(vec3 baseColor, vec3 N, float metallic, float roughness, vec3 worldPos) {
+vec3 heLitP(vec3 baseColor, vec3 N, float metallic, float roughness, vec3 worldPos,
+            float specular, float ambientOcclusion) {
     vec3 n = normalize(N);
     vec3 V = normalize(heLight.camPos.xyz - worldPos);
     // Metallic/roughness split — IDENTICAL to the built-in PBR shaders (see the
@@ -235,13 +236,19 @@ vec3 heLitP(vec3 baseColor, vec3 N, float metallic, float roughness, vec3 worldP
     // rises — so a graph material never matched a built-in one beside it.
     float rough = clamp(roughness, 0.0, 1.0);
     float metal = clamp(metallic, 0.0, 1.0);
+    // Specular drives the DIELECTRIC F0 (Unreal's convention: F0 = 0.08 * spec,
+    // so the 0.5 default reproduces the built-in shaders' fixed 0.04). Metals
+    // ignore it — their F0 is the base colour.
+    float f0    = 0.08 * clamp(specular, 0.0, 1.0);
     vec3  diffuseColor = baseColor * (1.0 - metal);
-    vec3  specColor    = mix(vec3(0.04), baseColor, metal);
+    vec3  specColor    = mix(vec3(f0), baseColor, metal);
     float shininess    = mix(128.0, 8.0, rough);
     float specScale    = mix(0.5, 0.03, rough);
     // Ambient hits the DIFFUSE albedo, like the built-in's flat ambient floor —
-    // a metal must not pick up a full-strength ambient wash.
-    vec3 result = diffuseColor * heLight.ambient.rgb;
+    // a metal must not pick up a full-strength ambient wash. Ambient Occlusion
+    // darkens ONLY this indirect term; direct lighting below stays untouched
+    // (same split as the built-in shaders' SSAO handling).
+    vec3 result = diffuseColor * heLight.ambient.rgb * clamp(ambientOcclusion, 0.0, 1.0);
     int count = int(heLight.counts.x);
     int localIdx = 0; // counter over non-directional lights → local-mask channel
     for (int i = 0; i < count; ++i) {
@@ -303,6 +310,12 @@ vec3 heLitP(vec3 baseColor, vec3 N, float metallic, float roughness, vec3 worldP
         result += (diffuseColor * ndl + specColor * spec) * lc * atten * sh;
     }
     return result;
+}
+// Legacy 5-argument form: material blobs baked before the Specular / Ambient
+// Occlusion output pins existed still call this, as do hand-written custom
+// fragments. Defaults reproduce the old behaviour exactly (0.5 → F0 0.04).
+vec3 heLitP(vec3 baseColor, vec3 N, float metallic, float roughness, vec3 worldPos) {
+    return heLitP(baseColor, N, metallic, roughness, worldPos, 0.5, 1.0);
 }
 )";
 

@@ -1,4 +1,5 @@
 #include "doctest.h"
+#include <algorithm>
 
 #include <MaterialGraph/MaterialGraph.h>
 
@@ -280,8 +281,8 @@ TEST_CASE("MaterialGraph v4: extra inputs + project-texture slots")
 	g.findNode(v4)->p[3] = 0.5f;
 	CHECK(g.connect(cp, 0, out, 0)); // BaseColor = camera pos
 	CHECK(g.connect(cd, 0, out, 1)); // Metallic = distance
-	CHECK(g.connect(sp, 0, out, 3)); // Emissive from screen pos (coerced)
-	CHECK(g.connect(v4, 0, out, 4)); // Opacity from vec4.x
+	CHECK(g.connect(sp, 0, out, HE::kMatOutputEmissivePin)); // Emissive from screen pos (coerced)
+	CHECK(g.connect(v4, 0, out, HE::kMatOutputOpacityPin)); // Opacity from vec4.x
 	const std::string glsl = HE::generateFragmentGlsl(g);
 	CHECK(glsl.find("length(heLight.camPos.xyz - vWorldPos)") != std::string::npos);
 	CHECK(glsl.find("gl_FragCoord.xy") != std::string::npos);
@@ -302,8 +303,8 @@ TEST_CASE("MaterialGraph v4: extra inputs + project-texture slots")
 	CHECK(t.connect(def, 0, comb, 0));
 	CHECK(t.connect(a,   0, comb, 1));
 	CHECK(t.connect(comb,0, tout, 0));
-	CHECK(t.connect(b,   0, tout, 3));
-	CHECK(t.connect(b2,  0, tout, 3)); // replaces link but references rock again
+	CHECK(t.connect(b,   0, tout, HE::kMatOutputEmissivePin));
+	CHECK(t.connect(b2,  0, tout, HE::kMatOutputEmissivePin)); // replaces link but references rock again
 	const HE::MatShaderGen gen = HE::generateFragment(t);
 	REQUIRE(gen.textures.size() == 2);          // grass, rock (dedup)
 	CHECK(gen.textures[0] == "Tex/grass.hasset");
@@ -366,7 +367,7 @@ TEST_CASE("MaterialGraph v5: logic nodes, If, and new parameter types")
 	p.findNode(pb)->s = "Toggle"; p.findNode(pb)->p[0] = 1.0f;
 	CHECK(p.connect(pv4, 0, pout, 0));  // BaseColor from vec4 (coerced)
 	CHECK(p.connect(pb,  0, pout, 1));  // Metallic from bool
-	CHECK(p.connect(pv2, 0, pout, 3));  // Emissive from vec2 (coerced)
+	CHECK(p.connect(pv2, 0, pout, HE::kMatOutputEmissivePin));  // Emissive from vec2 (coerced)
 	const HE::MatShaderGen gen = HE::generateFragment(p);
 	REQUIRE(gen.params.size() == 3);
 	// Slots in first-emit order; check names + component values survive.
@@ -551,7 +552,7 @@ TEST_CASE("Param metadata (range/group/tooltip) flows into slots and survives JS
 	n->s = "Roughness"; n->p[0] = 0.4f;
 	n->p[1] = 0.0f; n->p[2] = 1.0f;         // slider range
 	n->group = "Surface"; n->tooltip = "0 = mirror, 1 = chalk";
-	CHECK(g.connect(pf, 0, out, 2));
+	CHECK(g.connect(pf, 0, out, HE::kMatOutputRoughnessPin));
 
 	const HE::MatShaderGen gen = HE::generateFragment(g);
 	REQUIRE(gen.params.size() == 1);
@@ -578,7 +579,7 @@ TEST_CASE("Blend modes: opaque forces alpha 1, masked discards, translucent feed
 		g.findNode(out)->p[2] = 0.33f; // mask cutoff
 		const int a = g.addNode(MatNodeType::ConstFloat);
 		g.findNode(a)->p[0] = 0.42f;
-		g.connect(a, 0, out, 4); // pin 4 = Opacity/OpacityMask
+		g.connect(a, 0, out, HE::kMatOutputOpacityPin);
 		return g;
 	};
 	const std::string opq = HE::generateFragment(makeG(0.0f)).glsl;
@@ -608,7 +609,7 @@ TEST_CASE("Normal pin replaces vNormal in heLit; Normal Map emits the perturb he
 	MaterialGraph g;
 	const int out = g.addNode(MatNodeType::Output);
 	const int nm  = g.addNode(MatNodeType::NormalMapSample);
-	CHECK(g.connect(nm, 0, out, 5)); // Normal pin
+	CHECK(g.connect(nm, 0, out, HE::kMatOutputNormalPin)); // Normal pin
 	const std::string glsl = HE::generateFragment(g).glsl;
 	CHECK(glsl.find("vec3 hePerturbNormal(") != std::string::npos);
 	CHECK(glsl.find("dFdx(") != std::string::npos);
@@ -633,7 +634,7 @@ TEST_CASE("WPO pin generates a vertex body; its statements leave the fragment")
 	CHECK(g.connect(sn,  0, mul, 0));
 	CHECK(g.connect(amp, 0, mul, 1));
 	CHECK(g.connect(mul, 0, cmb, 0)); // offset in X
-	CHECK(g.connect(cmb, 0, out, 6)); // WPO pin
+	CHECK(g.connect(cmb, 0, out, HE::kMatOutputWPOPin)); // WPO pin
 
 	const HE::MatShaderGen gen = HE::generateFragment(g);
 	REQUIRE(!gen.vertexBody.empty());
@@ -722,7 +723,7 @@ TEST_CASE("v5 graph (logic + If + new params) cross-compiles for Metal and GL")
 	g.connect(pv4, 0, iff, 1);         // True (vec4 → vec3)
 	g.connect(blue,0, iff, 2);         // False
 	g.connect(iff, 0, out, 0);         // BaseColor
-	g.connect(eq,  0, out, 4);         // Opacity from Equal (unconnected inputs → defaults)
+	g.connect(eq,  0, out, HE::kMatOutputOpacityPin); // Opacity from Equal (unconnected inputs → defaults)
 	const std::string glsl = HE::generateFragment(g).glsl;
 	const uint64_t hash = std::hash<std::string>{}(glsl);
 	HE::MaterialShaderLibrary lib;
@@ -950,4 +951,128 @@ TEST_CASE("legacy UV nodes load as the identity, not as zero tiling")
     CHECK(g.nodes[0].p[1] == doctest::Approx(1.0f));
     CHECK(g.nodes[0].p[2] == doctest::Approx(0.0f));
     CHECK(g.nodes[0].p[3] == doctest::Approx(0.0f));
+}
+
+// ── Output-pin layout v1 → v2 ─────────────────────────────────────────────────
+// v2 inserted Specular at pin 2 and Ambient Occlusion at pin 7. Links are stored
+// by pin INDEX, so a v1 graph read as-is would rewire Roughness→Specular,
+// Emissive→Roughness, Opacity→Emissive … — every saved material would change.
+TEST_CASE("v1 material graphs remap their Output links to the v2 pin layout")
+{
+	// v1 Output pins: 0 BaseColor, 1 Metallic, 2 Roughness, 3 Emissive,
+	//                 4 Opacity, 5 Normal, 6 WPO.
+	// R"JSON(...)JSON": the payload contains "Normal (WS)" — a plain R"(...)"
+	// would end at that closing paren.
+	const std::string v1 = R"JSON({
+      "version": 1, "nextId": 9,
+      "nodes": [
+        { "id": 1, "type": "Output", "p": [1,2,0.5,0], "x": 0, "y": 0 },
+        { "id": 2, "type": "Float",  "p": [0.25,0,0,0], "x": -200, "y": 0 },
+        { "id": 3, "type": "Float",  "p": [0.75,0,0,0], "x": -200, "y": 60 },
+        { "id": 4, "type": "Color",  "p": [1,0,0,0],    "x": -200, "y": 120 },
+        { "id": 5, "type": "Float",  "p": [0.4,0,0,0],  "x": -200, "y": 180 },
+        { "id": 6, "type": "Normal (WS)", "p": [0,0,0,0], "x": -200, "y": 240 },
+        { "id": 7, "type": "World Position", "p": [0,0,0,0], "x": -200, "y": 300 }
+      ],
+      "links": [
+        { "sn": 2, "sp": 0, "dn": 1, "dp": 2 },
+        { "sn": 3, "sp": 0, "dn": 1, "dp": 1 },
+        { "sn": 4, "sp": 0, "dn": 1, "dp": 3 },
+        { "sn": 5, "sp": 0, "dn": 1, "dp": 4 },
+        { "sn": 6, "sp": 0, "dn": 1, "dp": 5 },
+        { "sn": 7, "sp": 0, "dn": 1, "dp": 6 }
+      ]})JSON";
+
+	HE::MaterialGraph g;
+	REQUIRE(HE::materialGraphFromJson(v1, g));
+	auto dstPinOf = [&](int srcNode) {
+		for (const auto& l : g.links) if (l.srcNode == srcNode) return l.dstPin;
+		return -1;
+	};
+	CHECK(dstPinOf(2) == HE::kMatOutputRoughnessPin); // was 2
+	CHECK(dstPinOf(3) == HE::kMatOutputMetallicPin);  // was 1 (unchanged)
+	CHECK(dstPinOf(4) == HE::kMatOutputEmissivePin);  // was 3
+	CHECK(dstPinOf(5) == HE::kMatOutputOpacityPin);   // was 4
+	CHECK(dstPinOf(6) == HE::kMatOutputNormalPin);    // was 5
+	CHECK(dstPinOf(7) == HE::kMatOutputWPOPin);       // was 6
+	// Nothing landed on the two NEW pins.
+	for (const auto& l : g.links)
+	{
+		CHECK(l.dstPin != HE::kMatOutputSpecularPin);
+		CHECK(l.dstPin != HE::kMatOutputAOPin);
+	}
+
+	// Re-saving stamps v2, and a v2 round-trip must be a no-op.
+	const std::string v2 = HE::materialGraphToJson(g);
+	CHECK(v2.find("\"version\":2") != std::string::npos);
+	HE::MaterialGraph g2;
+	REQUIRE(HE::materialGraphFromJson(v2, g2));
+	REQUIRE(g2.links.size() == g.links.size());
+	for (size_t i = 0; i < g.links.size(); ++i)
+	{
+		CHECK(g2.links[i].dstPin  == g.links[i].dstPin);
+		CHECK(g2.links[i].srcNode == g.links[i].srcNode);
+	}
+}
+
+
+// Argument list of the first `heLitP(` call, with nested parentheses respected
+// (BaseColor is often a `vec3(...)` expression, so "up to the next )" is wrong).
+static std::string heLitPArgs(const std::string& glsl)
+{
+	const size_t call = glsl.find("heLitP(");
+	if (call == std::string::npos) return {};
+	size_t i = call + 7;
+	int depth = 1;
+	for (; i < glsl.size() && depth > 0; ++i)
+	{
+		if (glsl[i] == '(') ++depth;
+		else if (glsl[i] == ')') --depth;
+	}
+	return glsl.substr(call + 7, (i - 1) - (call + 7));
+}
+
+// Commas at the TOP level of an argument list (nested calls have their own).
+static int topLevelCommas(const std::string& args)
+{
+	int depth = 0, n = 0;
+	for (char c : args)
+	{
+		if (c == '(') ++depth;
+		else if (c == ')') --depth;
+		else if (c == ',' && depth == 0) ++n;
+	}
+	return n;
+}
+
+TEST_CASE("Specular and Ambient Occlusion reach the lit shading call")
+{
+	HE::MaterialGraph g;
+	const int out = g.addNode(HE::MatNodeType::Output);
+	const int spec = g.addNode(HE::MatNodeType::ConstFloat);
+	g.findNode(spec)->p[0] = 0.9f;
+	const int ao = g.addNode(HE::MatNodeType::ConstFloat);
+	g.findNode(ao)->p[0] = 0.3f;
+	CHECK(g.connect(spec, 0, out, HE::kMatOutputSpecularPin));
+	CHECK(g.connect(ao,   0, out, HE::kMatOutputAOPin));
+
+	const std::string glsl = HE::generateFragmentGlsl(g);
+	// Constants become locals, so assert on the CALL SHAPE: heLitP now takes 7
+	// arguments and the last two carry the Specular / AO expressions.
+	const std::string args = heLitPArgs(glsl);
+	REQUIRE_FALSE(args.empty());
+	CHECK(topLevelCommas(args) == 6); // 7 arguments
+	// Both constants were emitted, and the values reached the shader.
+	CHECK(glsl.find("= 0.900000;") != std::string::npos);
+	CHECK(glsl.find("= 0.300000;") != std::string::npos);
+
+	// Unconnected → the defaults that reproduce the previous behaviour exactly.
+	HE::MaterialGraph plain;
+	plain.addNode(HE::MatNodeType::Output);
+	const std::string base = HE::generateFragmentGlsl(plain);
+	const std::string a2 = heLitPArgs(base);
+	REQUIRE_FALSE(a2.empty());
+	CHECK(topLevelCommas(a2) == 6);
+	CHECK(a2.find("0.500000") != std::string::npos); // Specular default
+	CHECK(a2.find("1.000000") != std::string::npos); // AO default
 }

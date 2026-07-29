@@ -95,6 +95,7 @@ ImU32 categoryColor(const char* cat)
 	const std::string c = cat;
 	if (c == "Material") return IM_COL32(140,  60,  60, 255);
 	if (c == "Input")    return IM_COL32( 60, 100, 140, 255);
+	if (c == "Constant") return IM_COL32( 60, 120, 130, 255);
 	if (c == "Math")     return IM_COL32( 60, 120,  80, 255);
 	if (c == "Texture")    return IM_COL32(120,  90, 150, 255);
 	if (c == "Parameter")  return IM_COL32(160, 110,  50, 255);
@@ -1079,26 +1080,52 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 			}
 			ImGui::Spacing();
 		}
+		// Grouped by category in a fixed, readable order. The registry lists node
+		// types roughly by the version that added them, so a category's entries
+		// are NOT adjacent in it — walking it straight printed the same header
+		// several times ("Input" three times over). Anything with an unlisted
+		// category falls through to the tail pass below, so a new category can
+		// never silently vanish from the menu.
+		static const char* kCatOrder[] = {
+			"Constant", "Parameter", "Input", "Texture", "Procedural",
+			"Math", "Logic", "Channels", "Function",
+		};
+		// True when this node type belongs in the menu at all.
+		auto listed = [&](const HE::MatNodeDesc& d) {
+			// Exactly one material Output; FunctionCall comes from the list below.
+			if (d.type == MatNodeType::Output || d.type == MatNodeType::FunctionCall) return false;
+			const bool fnInterface = d.type == MatNodeType::FnInput || d.type == MatNodeType::FnOutput;
+			if (fnInterface && !st.isFunction) return false;
+			return matches(d.name, d.category);
+		};
 		const char* lastCat = "";
+		auto emitCategory = [&](const char* cat) {
+			for (const auto& d : HE::matNodeRegistry())
+			{
+				if (std::string(d.category) != cat || !listed(d)) continue;
+				if (std::string(lastCat) != cat)
+				{
+					if (*lastCat) ImGui::Spacing();
+					ImGui::TextDisabled("%s", cat);
+					lastCat = cat;
+				}
+				if (ImGui::Selectable(d.name))
+				{
+					created = st.graph.addNode(d.type, gx, gy);
+					ImGui::CloseCurrentPopup();
+				}
+			}
+		};
+		for (const char* cat : kCatOrder) emitCategory(cat);
+		// Tail pass: a category not in kCatOrder (newly added) still shows up.
 		for (const auto& d : HE::matNodeRegistry())
 		{
-			// Exactly one material Output; FunctionCall inserted from the functions list.
-			if (d.type == MatNodeType::Output || d.type == MatNodeType::FunctionCall) continue;
-			const bool fnInterface = d.type == MatNodeType::FnInput || d.type == MatNodeType::FnOutput;
-			if (fnInterface && !st.isFunction) continue;
-			if (!matches(d.name, d.category)) continue;
-			if (std::string(lastCat) != d.category)
-			{
-				if (*lastCat) ImGui::Spacing();
-				ImGui::TextDisabled("%s", d.category);
-				lastCat = d.category;
-			}
-			if (ImGui::Selectable(d.name))
-			{
-				created = st.graph.addNode(d.type, gx, gy);
-				ImGui::CloseCurrentPopup();
-			}
+			bool known = false;
+			for (const char* cat : kCatOrder)
+				if (std::string(d.category) == cat) { known = true; break; }
+			if (!known && listed(d)) emitCategory(d.category);
 		}
+
 		// Project-wide material functions (insert as FunctionCall).
 		if (ctx.contentManager)
 		{
