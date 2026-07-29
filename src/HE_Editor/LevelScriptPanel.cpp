@@ -7,6 +7,7 @@
 #include "EditorUndo.h"          // scene-undo snapshots (dirty tracking + undo/redo)
 #include <Diagnostics/Logger.h>
 #include "GraphEditor.h"         // shared node-graph canvas
+#include "HcGraphClipboard.h"    // shared HorizonCode node clipboard (copy/cut/paste)
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/EngineApi.h>
 #include <HorizonScene/HcCodegen.h>   // in-editor compile check (Compile button)
@@ -1204,8 +1205,73 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 		return created;
 	};
 
+	const ImVec2 canvasOrigin = ImGui::GetCursorScreenPos();
 	if (GraphEditor::draw("##ls_canvas", m, g.ge, avail)) edited = true;
 	g.selectedNode = g.ge.selected;
+
+	// ── Keyboard: node clipboard + duplicate (Cmd on macOS, Ctrl elsewhere) ──
+	// Same shortcut set and the same guard the material graph has had since v3 —
+	// these graphs only ever had Delete, so every node had to be rebuilt by hand.
+	{
+		const ImGuiIO& kio = ImGui::GetIO();
+		const bool mod  = kio.KeyCtrl || kio.KeySuper;
+		const bool kbOk = ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows)
+		                  && !kio.WantTextInput && !ImGui::IsAnyItemActive();
+		std::vector<int>& sel = g.ge.selection;
+		// Fall back to the single selected node when no box-selection is active.
+		auto effectiveSel = [&]() -> std::vector<int> {
+			if (!sel.empty()) return sel;
+			return g.selectedNode != 0 ? std::vector<int>{ g.selectedNode } : std::vector<int>{};
+		};
+
+		if (kbOk && mod && ImGui::IsKeyPressed(ImGuiKey_C))
+			HcClipboard::copy(graph, effectiveSel());
+
+		if (kbOk && mod && ImGui::IsKeyPressed(ImGuiKey_X))
+		{
+			const std::vector<int> doomed = effectiveSel();
+			if (HcClipboard::copy(graph, doomed)) // cut = copy + delete
+			{
+				for (int id : doomed)
+					if (const HC::Node* n = graph.findNode(id);
+					    n && n->type != NT::Event && n->type != NT::FunctionEntry)
+						graph.removeNode(id);
+				sel.clear(); g.ge.selected = 0; g.selectedNode = 0;
+				edited = true;
+			}
+		}
+
+		if (kbOk && mod && ImGui::IsKeyPressed(ImGuiKey_V) && !HcClipboard::empty())
+		{
+			// Paste at the mouse when it is over the canvas, else into its centre.
+			const bool over = kio.MousePos.x >= canvasOrigin.x && kio.MousePos.x <= canvasOrigin.x + avail.x &&
+			                  kio.MousePos.y >= canvasOrigin.y && kio.MousePos.y <= canvasOrigin.y + avail.y;
+			const float Z  = g.ge.zoom;
+			const float gx = ((over ? kio.MousePos.x : canvasOrigin.x + avail.x * 0.5f)
+			                  - canvasOrigin.x - g.ge.pan.x) / Z;
+			const float gy = ((over ? kio.MousePos.y : canvasOrigin.y + avail.y * 0.5f)
+			                  - canvasOrigin.y - g.ge.pan.y) / Z;
+			const std::vector<int> fresh = HcClipboard::paste(graph, gx, gy, g.currentGraph);
+			if (!fresh.empty())
+			{
+				HC::syncFunctionSignatures(graph); // pasted FunctionCalls re-mirror their entry
+				sel = fresh;
+				g.ge.selected = g.selectedNode = fresh.front();
+				edited = true;
+			}
+		}
+
+		if (kbOk && mod && ImGui::IsKeyPressed(ImGuiKey_D))
+		{
+			const std::vector<int> fresh = HC::duplicateNodes(graph, effectiveSel());
+			if (!fresh.empty())
+			{
+				sel = fresh;
+				g.ge.selected = g.selectedNode = fresh.front();
+				edited = true;
+			}
+		}
+	}
 }
 
 // Shared window body: left sidebar (variables + functions + details) + canvas,

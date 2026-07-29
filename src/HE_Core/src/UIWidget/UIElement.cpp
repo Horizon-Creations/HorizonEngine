@@ -161,17 +161,25 @@ namespace
 
 // Text emit that honors the element's Font asset (fontAtlasKey) when set, else
 // the shared default font.
-static void emitText(const UIElement& e, const std::string& text, const glm::vec2& pos,
-                     const glm::vec2& size, float sizePx, const glm::vec4& color,
-                     bool centerH, std::vector<UIRenderObject>& out)
+static void emitTextL(const UIElement& e, const std::string& text, const glm::vec2& pos,
+                      const glm::vec2& size, float sizePx, const glm::vec4& color,
+                      const HE::UITextLayout& opts, std::vector<UIRenderObject>& out)
 {
     if (e.fontAtlasKey != 0)
         if (const HE::BakedUIFont* f = HE::UIFontCache::find(e.fontAtlasKey))
         {
-            HE::emitUITextGlyphs(*f, e.fontAtlasKey, text, pos, size, sizePx, color, 0, centerH, out);
+            HE::emitUITextGlyphs(*f, e.fontAtlasKey, text, pos, size, sizePx, color, 0, opts, out);
             return;
         }
-    HE::emitUITextGlyphs(text, pos, size, sizePx, color, 0, centerH, out);
+    HE::emitUITextGlyphs(HE::sharedUIFont(), 0, text, pos, size, sizePx, color, 0, opts, out);
+}
+
+static void emitText(const UIElement& e, const std::string& text, const glm::vec2& pos,
+                     const glm::vec2& size, float sizePx, const glm::vec4& color,
+                     bool centerH, std::vector<UIRenderObject>& out)
+{
+    HE::UITextLayout opts; opts.centerH = centerH;
+    emitTextL(e, text, pos, size, sizePx, color, opts, out);
 }
 
 // ── Panel / Image ────────────────────────────────────────────────────────────
@@ -190,11 +198,32 @@ void UIImage::render(const UIWidgetRect& px, const UIElementRenderState&,
 
 // ── Text ─────────────────────────────────────────────────────────────────────
 
+// Resize the element to its own content. Height always tracks the line count ×
+// font size; the width tracks the widest line unless WordWrap owns it (then the
+// authored width IS the wrap column). A small padding keeps descenders and the
+// last glyph's side bearing off the edge.
+void UIText::applyAutoSize()
+{
+    if (!autoSize) return;
+    HE::UITextLayout opts;
+    opts.centerH = align == 1;
+    opts.wrap    = wordWrap;
+    const float wrapW = wordWrap ? std::max(1.0f, sizeX) : 0.0f;
+    const HE::BakedUIFont* f = HE::UIFontCache::find(fontAtlasKey);
+    const glm::vec2 m = f ? HE::measureUIText(*f, text, fontSize, wrapW, opts)
+                          : HE::measureUIText(text, fontSize, wrapW, opts);
+    if (!wordWrap) sizeX = m.x + fontSize * 0.25f;
+    sizeY = m.y + fontSize * 0.35f;
+}
+
 void UIText::render(const UIWidgetRect& px, const UIElementRenderState&,
                     const HE::UUID&, float pxScaleY, std::vector<UIRenderObject>& out) const
 {
-    emitText(*this, text, { px.x, px.y }, { px.w, px.h }, fontSize * pxScaleY,
-             color, /*centerH=*/false, out);
+    HE::UITextLayout opts;
+    opts.centerH = align == 1;
+    opts.wrap    = wordWrap;
+    emitTextL(*this, text, { px.x, px.y }, { px.w, px.h }, fontSize * pxScaleY,
+              color, opts, out);
 }
 
 // ── Button ───────────────────────────────────────────────────────────────────
@@ -325,10 +354,16 @@ void UIImage::writeJson(nlohmann::json& j) const { j["tint"] = colJson(tint); }
 void UIImage::readJson(const nlohmann::json& j)  { tint = colFrom(j.value("tint", nlohmann::json()), tint); }
 
 void UIText::writeJson(nlohmann::json& j) const
-{ j["text"] = text; j["fontSize"] = fontSize; j["color"] = colJson(color); }
+{ j["text"] = text; j["fontSize"] = fontSize; j["color"] = colJson(color);
+  j["wordWrap"] = wordWrap; j["autoSize"] = autoSize; j["align"] = align; }
 void UIText::readJson(const nlohmann::json& j)
 { text = j.value("text", text); fontSize = j.value("fontSize", fontSize);
-  color = colFrom(j.value("color", nlohmann::json()), color); }
+  color = colFrom(j.value("color", nlohmann::json()), color);
+  wordWrap = j.value("wordWrap", wordWrap);
+  // Widgets authored before auto-size keep their hand-set box: defaulting them
+  // to true would resize every existing label on load.
+  autoSize = j.value("autoSize", false);
+  align    = j.value("align", align); }
 
 void UIButton::writeJson(nlohmann::json& j) const
 {

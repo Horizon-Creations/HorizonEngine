@@ -125,6 +125,54 @@ namespace TerrainSystem
         std::vector<entt::entity> terrains;
         for (auto e : reg.view<TerrainComponent>()) terrains.push_back(e);
 
+        // ── Chunk material follows the Landscape entity's material ───────────
+        // The chunks are what actually render; the Landscape entity itself has no
+        // mesh. Their MaterialComponent used to be pinned to the built-in terrain
+        // material at CREATION time, so assigning a material to the Landscape — or
+        // recolouring the one it has — never reached the screen. Re-synced every
+        // tick (NOT gated on tc.dirty: a material swap doesn't dirty the heightfield)
+        // so the parent's material and its per-entity param overrides propagate
+        // without rebuilding the terrain.
+        for (entt::entity te : terrains)
+        {
+            if (auto* have = reg.try_get<MaterialComponent>(te);
+                !have || have->materialAssetId == HE::UUID{} ||
+                have->materialAssetId == HE::kDefaultMaterialId)
+            {
+                MaterialComponent mat; mat.materialAssetId = HE::kDefaultTerrainMaterialId;
+                reg.emplace_or_replace<MaterialComponent>(te, mat);
+            }
+            // Copied out by value: emplacing below can reallocate the pool, which
+            // would dangle a pointer into the parent's component.
+            const MaterialComponent src = reg.get<MaterialComponent>(te);
+            auto same = [&src](const MaterialComponent& d)
+            {
+                if (d.materialAssetId != src.materialAssetId) return false;
+                if (d.paramOverrides.size() != src.paramOverrides.size()) return false;
+                for (size_t i = 0; i < d.paramOverrides.size(); ++i)
+                {
+                    const auto& x = d.paramOverrides[i]; const auto& y = src.paramOverrides[i];
+                    if (x.name != y.name) return false;
+                    for (int k = 0; k < 4; ++k) if (x.value[k] != y.value[k]) return false;
+                }
+                return true;
+            };
+            std::vector<entt::entity> needMat; // chunks with no MaterialComponent yet
+            for (auto [ce, cc] : reg.view<TerrainChunkComponent>().each())
+            {
+                if (cc.terrain != te) continue;
+                auto* dst = reg.try_get<MaterialComponent>(ce);
+                if (!dst) { needMat.push_back(ce); continue; }
+                if (same(*dst)) continue;
+                dst->materialAssetId = src.materialAssetId;
+                dst->paramOverrides  = src.paramOverrides;
+                dst->dirty           = true;
+            }
+            // Deferred: emplace adds storage, which must not happen mid-view.
+            for (entt::entity ce : needMat)
+                reg.emplace_or_replace<MaterialComponent>(ce, src);
+        }
+
         for (entt::entity te : terrains)
         {
             auto& tc = reg.get<TerrainComponent>(te);
@@ -210,8 +258,15 @@ namespace TerrainSystem
                         tf.position = glm::vec3(minX + chunkX * 0.5f, 0.0f, minZ + chunkZ * 0.5f);
                         tf.dirty    = true;
                         reg.emplace_or_replace<TransformComponent>(chunkEnt, tf);
-                        MaterialComponent mat; mat.materialAssetId = HE::kDefaultTerrainMaterialId;
-                        reg.emplace_or_replace<MaterialComponent>(chunkEnt, mat);
+                        // Seed from the Landscape's own material (the sync pass at
+                        // the top of the tick keeps it aligned from here on).
+                        if (const auto* parentMat = reg.try_get<MaterialComponent>(te))
+                            reg.emplace_or_replace<MaterialComponent>(chunkEnt, *parentMat);
+                        else
+                        {
+                            MaterialComponent mat; mat.materialAssetId = HE::kDefaultTerrainMaterialId;
+                            reg.emplace_or_replace<MaterialComponent>(chunkEnt, mat);
+                        }
                     }
 
                     buildChunk(reg, cm, renderer, chunkEnt, field, res, tc, g, cx, cz);
