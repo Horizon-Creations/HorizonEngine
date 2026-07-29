@@ -904,3 +904,50 @@ TEST_CASE("UI quad vertex cross-compiles for Metal and GL")
 	CHECK_MESSAGE(frag.ok, "companion fragment failed: ", frag.log);
 }
 #endif
+
+// ── UV tiling / offset ────────────────────────────────────────────────────────
+// The UV node was a bare `vUV` passthrough: a texture could only ever stretch
+// once across a mesh, never tile.
+TEST_CASE("UV node emits tiling and offset")
+{
+    HE::MaterialGraph g;
+    const int out = g.addNode(HE::MatNodeType::Output);
+    const int uv  = g.addNode(HE::MatNodeType::UV);
+
+    // A fresh UV node is the identity, and emits the bare varying (so existing
+    // generated shaders stay byte-identical).
+    CHECK(g.findNode(uv)->p[0] == doctest::Approx(1.0f));
+    CHECK(g.findNode(uv)->p[1] == doctest::Approx(1.0f));
+    const int tex = g.addNode(HE::MatNodeType::TextureSample);
+    g.connect(uv, 0, tex, 0);
+    g.connect(tex, 0, out, 0);
+    {
+        const std::string src = HE::generateFragmentGlsl(g);
+        CHECK(src.find("= vUV;") != std::string::npos);
+        CHECK(src.find("vUV * vec2(") == std::string::npos);
+    }
+
+    // Tiling/offset are baked into the generated expression.
+    g.findNode(uv)->p[0] = 4.0f; g.findNode(uv)->p[1] = 8.0f;
+    g.findNode(uv)->p[2] = 0.5f; g.findNode(uv)->p[3] = 0.25f;
+    {
+        const std::string src = HE::generateFragmentGlsl(g);
+        CHECK(src.find("vUV * vec2(4.000000, 8.000000)") != std::string::npos);
+        CHECK(src.find("vec2(0.500000, 0.250000)") != std::string::npos);
+    }
+}
+
+TEST_CASE("legacy UV nodes load as the identity, not as zero tiling")
+{
+    // Graphs authored before the UV node had params stored p = {0,0,0,0}.
+    // Reading that literally would multiply every UV by zero.
+    const std::string legacy =
+        R"({"nextId":3,"nodes":[{"id":1,"type":"UV","p":[0,0,0,0],"x":0,"y":0}],"links":[]})";
+    HE::MaterialGraph g;
+    REQUIRE(HE::materialGraphFromJson(legacy, g));
+    REQUIRE(g.nodes.size() == 1);
+    CHECK(g.nodes[0].p[0] == doctest::Approx(1.0f));
+    CHECK(g.nodes[0].p[1] == doctest::Approx(1.0f));
+    CHECK(g.nodes[0].p[2] == doctest::Approx(0.0f));
+    CHECK(g.nodes[0].p[3] == doctest::Approx(0.0f));
+}

@@ -4282,14 +4282,24 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 					if (s_gizmoOp == ImGuizmo::ROTATE && !s_rotateScreen)
 						effectiveOp = ImGuizmo::ROTATE_X | ImGuizmo::ROTATE_Y | ImGuizmo::ROTATE_Z;
 
-					glm::mat4 world = t->worldMatrix;
+					// While a drag is in progress the gizmo works on the matrix IT
+					// produced last frame, NOT on the scene graph's freshly
+					// recomposed worldMatrix. The round-trip
+					//   TRS -> worldMatrix -> decompose -> TRS -> worldMatrix
+					// is not an identity: DecomposeMatrixToComponents extracts an
+					// Euler triple that is only *equivalent* to the authored one, so
+					// each frame handed the gizmo a slightly different matrix and the
+					// values visibly jittered mid-drag.
+					static bool      s_gizmoWasUsing = false;
+					static glm::mat4 s_gizmoWorld(1.0f);
+					glm::mat4 world = s_gizmoWasUsing ? s_gizmoWorld : t->worldMatrix;
 					ImGuizmo::Manipulate(
 						&s_sceneSnapshot.camera.view[0][0],
 						&s_sceneSnapshot.camera.projection[0][0],
 						effectiveOp, s_gizmoMode, &world[0][0]);
+					s_gizmoWorld = world;
 
 					// Undo session: one entry per drag
-					static bool s_gizmoWasUsing = false;
 					if (ctx.undoSys)
 					{
 						if (ImGuizmo::IsUsing() && !s_gizmoWasUsing) ctx.undoSys->stashPre();
@@ -4311,10 +4321,20 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 
 						float pos[3], rot[3], scale[3];
 						ImGuizmo::DecomposeMatrixToComponents(&local[0][0], pos, rot, scale);
-						t->position = { pos[0],   pos[1],   pos[2]   };
-						t->rotation = { rot[0],   rot[1],   rot[2]   };
-						t->scale    = { scale[0], scale[1], scale[2] };
-						t->dirty    = true;
+						// Write back ONLY the channels this operation manipulates. A
+						// scale drag used to overwrite rotation with the re-extracted
+						// (equivalent but different) Euler triple and vice versa —
+						// visible as a value that jumps the moment you touch an
+						// unrelated handle.
+						const unsigned opBits = static_cast<unsigned>(effectiveOp);
+						if (opBits & static_cast<unsigned>(ImGuizmo::TRANSLATE))
+							t->position = { pos[0], pos[1], pos[2] };
+						if (opBits & static_cast<unsigned>(ImGuizmo::ROTATE))
+							t->rotation = { rot[0], rot[1], rot[2] };
+						if (opBits & (static_cast<unsigned>(ImGuizmo::SCALE) |
+						              static_cast<unsigned>(ImGuizmo::SCALEU)))
+							t->scale = { scale[0], scale[1], scale[2] };
+						t->dirty = true;
 					}
 				}
 
@@ -7646,6 +7666,21 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			if (ImGui::SliderInt("Resolution##tc", &res, 2, 512)) { t->resolution = static_cast<uint32_t>(res); changed = true; }
 			trackEdit();
 			changed |= ImGui::DragFloat("Height Scale##tc", &t->heightScale, 0.5f,  0.0f, 1000.0f,  "%.1f m"); trackEdit();
+
+			// The generated UVs run 0..uvTiling over the WHOLE landscape, so at 1
+			// a texture is stretched across every metre of it. This is the knob
+			// that makes a terrain texture tile instead of smear.
+			changed |= ImGui::DragFloat("Texture Tiling##tc", &t->uvTiling, 0.25f, 0.01f, 4096.0f, "%.2f x"); trackEdit();
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("How often the material's texture repeats across the whole terrain.\n"
+				                  "For a texture that should cover N metres, use Width / N.");
+			ImGui::SameLine();
+			if (ImGui::SmallButton("4 m##tcuv"))
+				{ t->uvTiling = std::max(0.01f, t->sizeX / 4.0f); changed = true; trackEdit(); }
+			// Authored LOD aggressiveness — now persisted with the scene.
+			changed |= ImGui::DragFloat("LOD Distance##tc", &t->lodDistanceScale, 0.05f, 0.1f, 20.0f, "%.2f x"); trackEdit();
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("Higher = keep full detail farther from the camera.");
 
 			// Noise is a one-time creation input: it is baked into editable
 			// heights when the landscape is created, so these are read-only here

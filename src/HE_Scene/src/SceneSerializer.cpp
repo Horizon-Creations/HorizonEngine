@@ -345,6 +345,10 @@ namespace
 				{ "frequency",  t->frequency },
 				{ "lacunarity", t->lacunarity },
 				{ "gain",       t->gain },
+				{ "uvTiling",   t->uvTiling },
+				// Authored LOD aggressiveness — was editable but never persisted,
+				// so it silently reverted to 1 on every reload.
+				{ "lodDistanceScale", t->lodDistanceScale },
 			};
 			if (!t->sculptHeights.empty())
 			{
@@ -815,6 +819,8 @@ namespace
 			t.frequency   = c.value("frequency",    t.frequency);
 			t.lacunarity  = c.value("lacunarity",   t.lacunarity);
 			t.gain        = c.value("gain",         t.gain);
+			t.uvTiling    = c.value("uvTiling",     t.uvTiling);
+			t.lodDistanceScale = c.value("lodDistanceScale", t.lodDistanceScale);
 			if (c.contains("sculptHeightsB64") && c["sculptHeightsB64"].is_string())
 			{
 				const std::vector<uint8_t> bytes =

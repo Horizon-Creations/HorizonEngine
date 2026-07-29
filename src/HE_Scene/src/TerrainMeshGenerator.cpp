@@ -120,8 +120,12 @@ StaticMeshAsset generateTerrainMesh(const TerrainComponent& tc)
             mesh.vertices.push_back(wy);
             mesh.vertices.push_back(wz);
 
-            mesh.uvs.push_back(static_cast<float>(xi) / static_cast<float>(res - 1));
-            mesh.uvs.push_back(static_cast<float>(zi) / static_cast<float>(res - 1));
+            // UVs span 0..uvTiling over the whole terrain — at 1 a texture is
+            // stretched across the entire landscape, which is why terrain
+            // textures looked smeared; raise it to tile.
+            const float uvT = tc.uvTiling > 0.0f ? tc.uvTiling : 1.0f;
+            mesh.uvs.push_back(static_cast<float>(xi) / static_cast<float>(res - 1) * uvT);
+            mesh.uvs.push_back(static_cast<float>(zi) / static_cast<float>(res - 1) * uvT);
 
             // Central differences — one-sided at grid borders
             const float yL = (xi > 0)       ? heights[zi * res + (xi - 1)] : wy;
@@ -256,7 +260,7 @@ StaticMeshAsset generateTerrainChunkMesh(
     const std::vector<float>& heights, uint32_t srcRes,
     float sizeX, float sizeZ,
     float u0, float v0, float u1, float v1,
-    uint32_t vertsPerSide)
+    uint32_t vertsPerSide, float uvTiling)
 {
     const uint32_t N = std::max(2u, vertsPerSide);
     const float halfX = sizeX * 0.5f;
@@ -276,6 +280,7 @@ StaticMeshAsset generateTerrainChunkMesh(
     mesh.normals .reserve((grid + static_cast<size_t>(N) * 4) * 3);
     mesh.uvs     .reserve((grid + static_cast<size_t>(N) * 4) * 2);
 
+    const float uvT = uvTiling > 0.0f ? uvTiling : 1.0f;
     float hmin =  1e30f, hmax = -1e30f;
     for (uint32_t j = 0; j < N; ++j)
         for (uint32_t i = 0; i < N; ++i)
@@ -290,8 +295,10 @@ StaticMeshAsset generateTerrainChunkMesh(
             mesh.vertices.push_back(wx - cxLocal);
             mesh.vertices.push_back(hy);
             mesh.vertices.push_back(wz - czLocal);
-            mesh.uvs.push_back(u);
-            mesh.uvs.push_back(v);
+            // Global (not per-chunk) UVs scaled by the terrain's tiling, so the
+            // texture is continuous across the chunk seams.
+            mesh.uvs.push_back(u * uvT);
+            mesh.uvs.push_back(v * uvT);
             float nx, ny, nz; sampleFieldNormal(heights, srcRes, sizeX, sizeZ, u, v, nx, ny, nz);
             mesh.normals.push_back(nx); mesh.normals.push_back(ny); mesh.normals.push_back(nz);
         }

@@ -33,8 +33,10 @@ const std::vector<MatNodeDesc>& registry()
           {}, { { "RGB", F::Vec3, 0 } }, 0 },
         { MatNodeType::NormalWS, "Normal (WS)", "Input",
           {}, { { "N", F::Vec3, 0 } }, 0 },
+        // p[0..1] = tiling (how often the texture repeats over the 0..1 range),
+        // p[2..3] = offset. Defaults 1/0 → the raw mesh UV, as before.
         { MatNodeType::UV, "UV", "Input",
-          {}, { { "UV", F::Vec2, 0 } }, 0 },
+          {}, { { "UV", F::Vec2, 0 } }, 4 },
         { MatNodeType::Time, "Time", "Input",
           {}, { { "Seconds", F::Float, 0 } }, 0 },
         { MatNodeType::TextureSample, "Texture Sample", "Texture",
@@ -297,6 +299,7 @@ int MaterialGraph::addNode(MatNodeType type, float x, float y)
     n.id = nextId++;
     n.type = type;
     n.x = x; n.y = y;
+    if (type == MatNodeType::UV)         { n.p[0] = n.p[1] = 1.0f; }          // tiling 1, offset 0
     if (type == MatNodeType::Output)     n.p[0] = 1.0f;                       // lit
     if (type == MatNodeType::ConstColor) { n.p[0] = n.p[1] = n.p[2] = 0.8f; }
     if (type == MatNodeType::ConstFloat) n.p[0] = 1.0f;
@@ -484,7 +487,15 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
         case MatNodeType::NormalWS:
             decl = "vec3 " + v + " = normalize(vNormal);"; break;
         case MatNodeType::UV:
-            decl = "vec2 " + v + " = vUV;"; break;
+            // Tiling/offset baked in as literals — the whole point is that a
+            // texture can repeat over a surface instead of stretching once.
+            // Identity params emit the bare varying so old graphs stay byte-equal.
+            if (n.p[0] == 1.0f && n.p[1] == 1.0f && n.p[2] == 0.0f && n.p[3] == 0.0f)
+                decl = "vec2 " + v + " = vUV;";
+            else
+                decl = "vec2 " + v + " = vUV * vec2(" + fmtF(n.p[0]) + ", " + fmtF(n.p[1])
+                     + ") + vec2(" + fmtF(n.p[2]) + ", " + fmtF(n.p[3]) + ");";
+            break;
         case MatNodeType::Time:
             decl = "float " + v + " = heLight.sunDir.w;"; break;
         case MatNodeType::TextureSample:
@@ -1054,6 +1065,11 @@ bool materialGraphFromJson(const std::string& json, MaterialGraph& out)
         n.tooltip = jn.value("tt", std::string());
         n.x = jn.value("x", 0.0f);
         n.y = jn.value("y", 0.0f);
+        // Migration: UV gained tiling params (p[0..1]) after these graphs were
+        // authored, where p was all-zero. Zero tiling would collapse every UV to
+        // the offset — read a legacy node as the identity it used to be.
+        if (n.type == MatNodeType::UV && n.p[0] == 0.0f && n.p[1] == 0.0f)
+        { n.p[0] = 1.0f; n.p[1] = 1.0f; }
         g.nodes.push_back(n);
         g.nextId = std::max(g.nextId, n.id + 1);
     }

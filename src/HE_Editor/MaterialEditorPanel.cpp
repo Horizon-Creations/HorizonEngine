@@ -447,6 +447,16 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true)
 			ImGui::DragFloat2("##v2", n.p, 0.01f);
 			committed = ImGui::IsItemDeactivatedAfterEdit();
 			break;
+		case MatNodeType::UV:
+			// Tiling = how often the texture repeats across the mesh's 0..1 UV
+			// range; Offset shifts it. 1/0 is the raw mesh UV.
+			ImGui::SetNextItemWidth((kNodeW - 62.0f) * scale);
+			ImGui::DragFloat2("Tile", &n.p[0], 0.05f, 0.0f, 1024.0f);
+			committed  = ImGui::IsItemDeactivatedAfterEdit();
+			ImGui::SetNextItemWidth((kNodeW - 62.0f) * scale);
+			ImGui::DragFloat2("Off", &n.p[2], 0.01f);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			break;
 		case MatNodeType::ConstVec4:
 			ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
 			ImGui::DragFloat4("##v4", n.p, 0.01f);
@@ -595,6 +605,7 @@ float nodeValueHeight(const MatGraphNode& n)
 	if (type == MatNodeType::TextureSample ||
 	    type == MatNodeType::NormalMapSample) return 44.0f;       // filename + hint rows
 	if (type == MatNodeType::ConstVec4 || type == MatNodeType::ParamVec4) return 30.0f; // vec4 drag row
+	if (type == MatNodeType::UV) return 52.0f;                    // tiling + offset rows
 	return 26.0f;                                                 // one value/combo row
 }
 

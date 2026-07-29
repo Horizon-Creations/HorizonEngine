@@ -36,6 +36,7 @@ add_executable(he_tests
     test_raycast.cpp
     test_character.cpp
     test_skeletalmeshimporter.cpp
+    test_meshimporter.cpp
     test_skeletalmeshcomponent.cpp
     test_animationsystem.cpp
     test_navigation.cpp

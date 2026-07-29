@@ -79,7 +79,7 @@ namespace TerrainSystem
         {
             const uint32_t verts = (g.lod0Cells >> k) + 1u;   // 65, 33, 17, 9, …
             StaticMeshAsset m = generateTerrainChunkMesh(field, res, tc.sizeX, tc.sizeZ,
-                                                         u0, v0, u1, v1, verts);
+                                                         u0, v0, u1, v1, verts, tc.uvTiling);
             HE::UUID id;
             if (haveLevels && cm.getStaticMesh(lod->levels[k].meshId) != nullptr)
             {
