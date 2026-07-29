@@ -142,7 +142,9 @@ std::unique_ptr<SkeletalMeshAsset> SkeletalMeshImporter::import(
                 if (uvAcc && v < uvAcc->count) {
                     float uv[2] = {};
                     cgltf_accessor_read_float(uvAcc, v, uv, 2);
-                    mesh->uvs.insert(mesh->uvs.end(), { uv[0], uv[1] });
+                    // glTF UV origin is TOP-left, the engine is GL-style
+                    // BOTTOM-left — same flip as the static MeshImporter.
+                    mesh->uvs.insert(mesh->uvs.end(), { uv[0], 1.0f - uv[1] });
                 } else {
                     mesh->uvs.insert(mesh->uvs.end(), { 0.f, 0.f });
                 }

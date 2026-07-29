@@ -370,3 +370,64 @@ TEST_CASE("TerrainSystem propagates the Landscape's material to its chunks")
         CHECK(mc.paramOverrides[0].value[0] == doctest::Approx(0.25f));
     }
 }
+
+// ── Texture tiling ────────────────────────────────────────────────────────────
+// Terrain UVs run 0..1 across the WHOLE landscape, so a texture was stretched
+// over the entire terrain instead of tiling.
+TEST_CASE("Terrain UVs scale with uvTiling and stay continuous across chunks")
+{
+    TerrainComponent tc;
+    tc.resolution = 9;
+    tc.sizeX = tc.sizeZ = 64.0f;
+
+    // Default is the historical 0..1 range (no behaviour change on old scenes).
+    CHECK(tc.uvTiling == doctest::Approx(1.0f));
+    {
+        const StaticMeshAsset m = generateTerrainMesh(tc);
+        float mx = 0.0f;
+        for (size_t i = 0; i < m.uvs.size(); ++i) mx = std::max(mx, m.uvs[i]);
+        CHECK(mx == doctest::Approx(1.0f));
+    }
+    tc.uvTiling = 16.0f;
+    {
+        const StaticMeshAsset m = generateTerrainMesh(tc);
+        float mx = 0.0f;
+        for (size_t i = 0; i < m.uvs.size(); ++i) mx = std::max(mx, m.uvs[i]);
+        CHECK(mx == doctest::Approx(16.0f));
+    }
+
+    // Chunk meshes use GLOBAL uvs, so neighbouring chunks continue the pattern:
+    // chunk (0,0) of a 2x2 grid ends exactly where chunk (1,0) begins.
+    const std::vector<float> field = computeTerrainHeightField(tc);
+    const StaticMeshAsset a = generateTerrainChunkMesh(field, tc.resolution, tc.sizeX, tc.sizeZ,
+                                                       0.0f, 0.0f, 0.5f, 1.0f, 5, tc.uvTiling);
+    const StaticMeshAsset b = generateTerrainChunkMesh(field, tc.resolution, tc.sizeX, tc.sizeZ,
+                                                       0.5f, 0.0f, 1.0f, 1.0f, 5, tc.uvTiling);
+    float aMaxU = 0.0f, bMinU = 1e30f;
+    for (size_t i = 0; i < a.uvs.size(); i += 2) aMaxU = std::max(aMaxU, a.uvs[i]);
+    for (size_t i = 0; i < b.uvs.size(); i += 2) bMinU = std::min(bMinU, b.uvs[i]);
+    CHECK(aMaxU == doctest::Approx(8.0f));   // 0.5 * 16
+    CHECK(bMinU == doctest::Approx(8.0f));   // seam matches → no visible repeat break
+}
+
+TEST_CASE("TerrainComponent uvTiling and lodDistanceScale round-trip")
+{
+    HorizonWorld world;
+    Entity e = world.createEntity("t");
+    TerrainComponent tc;
+    tc.uvTiling = 12.5f;
+    tc.lodDistanceScale = 3.25f;   // was editable but never persisted
+    world.registry().emplace<TerrainComponent>(e, tc);
+
+    SceneSerializer ser;
+    std::vector<uint8_t> bytes;
+    REQUIRE(ser.saveToMemory(world, bytes));
+    HorizonWorld w2;
+    REQUIRE(ser.loadFromMemory(w2, bytes));
+    const TerrainComponent* l = nullptr;
+    for (auto ent : w2.registry().view<TerrainComponent>())
+        l = &w2.registry().get<TerrainComponent>(ent);
+    REQUIRE(l != nullptr);
+    CHECK(l->uvTiling == doctest::Approx(12.5f));
+    CHECK(l->lodDistanceScale == doctest::Approx(3.25f));
+}

@@ -17,6 +17,11 @@ struct TerrainComponent {
     float    frequency   = 1.0f;
     float    lacunarity  = 2.0f;
     float    gain        = 0.5f;
+    // Texture repeats across the WHOLE terrain. The generated UVs run 0..1 over
+    // the full landscape, so at 1 a texture is stretched across every metre of
+    // it — set this to the number of tiles you want (e.g. sizeX/4 for a 4 m
+    // texture). 1 = the historical behaviour.
+    float    uvTiling    = 1.0f;
     HE::UUID heightmapTexture{};  // Phase 2: greyscale heightmap source
     bool     dirty = true;        // set to regenerate ALL chunks; not serialised
     // Per-vertex sculpted heights (size == res*res overrides fBm); serialised.
