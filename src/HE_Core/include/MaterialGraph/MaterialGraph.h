@@ -113,6 +113,25 @@ enum class MatNodeType : uint8_t
 //   Translucent — pin 4 is Opacity: drawn in the sorted alpha-blend pass.
 enum class MatBlendMode : uint8_t { Opaque = 0, Masked = 1, Translucent = 2 };
 
+// Output-node input pin indices (see the Output entry in the node registry).
+// Links are stored by pin INDEX, so these are part of the on-disk format: any
+// reorder needs a kMatGraphVersion bump plus a remap in materialGraphFromJson.
+enum : int {
+    kMatOutputBaseColorPin = 0,
+    kMatOutputMetallicPin  = 1,
+    kMatOutputSpecularPin  = 2,
+    kMatOutputRoughnessPin = 3,
+    kMatOutputEmissivePin  = 4,
+    kMatOutputOpacityPin   = 5,   // Opacity / OpacityMask, per blend mode
+    kMatOutputNormalPin    = 6,
+    kMatOutputAOPin        = 7,
+    kMatOutputWPOPin       = 8,
+};
+
+// Serialized graph format version. v2 inserted Specular at pin 2 and Ambient
+// Occlusion at pin 7 of the Output node, shifting everything after them.
+constexpr int kMatGraphVersion = 2;
+
 struct MatGraphNode
 {
     int         id   = 0;
