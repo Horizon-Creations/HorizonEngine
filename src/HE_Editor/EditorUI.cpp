@@ -11,6 +11,7 @@
 #include "HorizonCodeClassPanel.h"
 #include "InputAssetPanel.h"
 #include "SkeletalMeshEditorPanel.h"
+#include "StaticMeshEditorPanel.h"
 #include "ParticleGraphEditorPanel.h"
 #include "AnimatorStateMachineEditorPanel.h"
 #include "HorizonVersion.h"
@@ -3733,6 +3734,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                 UIEditorPanel::forget(t.assetPath);
                 HorizonCodeClassPanel::forget(t.assetPath);
                 InputAssetPanel::forget(t.assetPath);
+                StaticMeshEditorPanel::forget(t.assetPath); // view-only, never dirty
             };
 
             for (int i = 0; i < static_cast<int>(s_tabs.size()); )
@@ -3830,6 +3832,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
             InputAssetPanel::render(ctx, tabPath, tabPos, tabSize);
         else if (SkeletalMeshEditorPanel::isSkeletalMeshAsset(tabPath))
             SkeletalMeshEditorPanel::render(ctx, tabPath, tabPos, tabSize);
+        else if (StaticMeshEditorPanel::isStaticMeshAsset(tabPath))
+            StaticMeshEditorPanel::render(ctx, tabPath, tabPos, tabSize);
         else if (ParticleGraphEditorPanel::isParticleAsset(tabPath))
             ParticleGraphEditorPanel::render(ctx, tabPath, tabPos, tabSize);
         else if (AnimatorStateMachineEditorPanel::isAnimatorStateMachineAsset(tabPath))
@@ -5904,6 +5908,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				         HorizonCodeClassPanel::isClassAsset(file->fullPath) ||
 				         InputAssetPanel::isInputAsset(file->fullPath) ||
 				         SkeletalMeshEditorPanel::isSkeletalMeshAsset(file->fullPath) ||
+				         StaticMeshEditorPanel::isStaticMeshAsset(file->fullPath) ||
 				         ParticleGraphEditorPanel::isParticleAsset(file->fullPath) ||
 				         AnimatorStateMachineEditorPanel::isAnimatorStateMachineAsset(file->fullPath))
 				{
