@@ -7700,7 +7700,8 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 		// built-in shaders sample with, Metal depth remap AND top-left UV origin
 		// pre-baked (uvFlipY * kMetalClipFix, exactly like csmVP below) so the
 		// shared preamble's heLocalShadowFactor stays convention-free. The layer
-		// gate rides in lightParams[li].y (layer+1, 0 = none) set in the loop above.
+		// gate rides in lightParams[li].y (layer+1, 0 = none), written by the
+		// HE::FillMaterialLightWindow call above via its localShadowsActive flag.
 		if (m_localShadowTex)
 		{
 			const ShadowData& lsh = m_renderWorld.shadow;

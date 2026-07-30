@@ -10,11 +10,14 @@
 // layout mirrors the MSL SkyParams struct (mat4 + 17 float4) because that is the
 // richest of the five; backends whose sky shader takes a smaller constant buffer
 // read the named fields they need out of this instead of memcpy'ing the whole
-// thing (D3D11 and D3D12 do exactly that — their SkyCB is a subset).
+// thing (Vulkan, D3D11 and D3D12 all do that — their UBO/CB is a subset).
 //
-// STATE OF THE MIGRATION — 4 of 5 backends translate through this:
-//   Metal   memcpy of the whole struct (the layout is the MSL SkyParams).
-//   Vulkan  memcpy of the whole struct.
+// STATE OF THE MIGRATION — 4 of 5 backends translate through this. ONLY Metal
+// copies the struct wholesale; do not assume the others do:
+//   Metal   memcpy of the whole struct (the layout IS the MSL SkyParams).
+//   Vulkan  reads 15 named fields into its own 160-byte SkyUBOData and memcpies
+//           THAT. A blanket copy of this 336-byte struct would misalign every
+//           offset past invViewProj (VulkanRenderer.cpp, the sky UBO fill).
 //   D3D11   reads the 12 named fields its smaller SkyCB has (D3D11Renderer.cpp,
 //           D3D11RendererImpl::drawSky).
 //   D3D12   the same 12 plus the nebula pair its shader has and D3D11's lacks

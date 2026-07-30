@@ -171,8 +171,11 @@ unified on `kGIProbeSpacing`
 `.../OpenGL/OpenGLRenderer.h:696`, `.../Vulkan/VulkanRenderer.h:602`).
 
 **Deferred, deliberately (1) — the Vulkan backend's private methods.** `VulkanRenderer.h`
-still spells 15 private helpers `Gi`, not `GI`: `createGiPipelines`, `destroyGiAccel`,
-`buildGiHwBlas`, `buildGiTlas`, `ensureGiProbeAtlas`, `updateGiAccel`, … These
+still spells 16 private helpers `Gi`, not `GI`: `buildGiHwBlas`, `buildGiTlas`,
+`createGiHwBuffer`, `createGiHwPipelines`, `createGiPipelines`, `createGiTargets`,
+`destroyGiAccel`, `destroyGiHwBlas`, `destroyGiHwBuffer`, `destroyGiProbeAtlas`,
+`destroyGiTargets`, `ensureGiProbeAtlas`, `ensureGiProbeGrid`, `runGi`,
+`updateGiAccel`, `uploadGiBuffer`. These
 are class-scoped, so nothing collides. They are left alone for the same reason the
 private-helper *casing* is left alone in §4 — the Vulkan backend does not compile on the
 machine this tree is developed on, so a mechanical rename there is unverifiable outside
@@ -184,6 +187,24 @@ still `Gi`-spelled. Renaming the type wants the *file* renamed too, which drags 
 `src/HE_Rendering/CMakeLists.txt:282`, `tests/CMakeLists.txt:70`, `tests/test_gi_bvh.cpp`
 and eleven backend sources. Correct call, and the reason it is worth writing down: a
 cosmetic rename whose blast radius reaches the build files is not cosmetic.
+
+**Not deferred — simply not yet done, and the bulk of what is left.** The two entries
+above are the *named* exceptions, but they are not the only violations, and this rule
+should not be read as "everything else is clean". Roughly 25 further identifiers still
+lowercase an acronym, including in files this rework itself created:
+
+- `Ssao`: `SsaoKernel.{h,cpp}`, `kSsaoKernelSize`, `kSsaoNoiseTileSize`,
+  `kSsaoNoiseCount`, and `m_uSsao*` across all five backends (~8 files).
+- `Uuid`: `sceneUuidForPath`, `jsonToUuid`, `pathToUuid`, `startupSceneUuid`,
+  `projectUuidBytes`, `levelScriptKeyForUuid` (~12 files in HE_Core / HE_Scene /
+  HE_Game, several of them in public headers — so these are an API break, not a
+  cosmetic edit).
+- `Hdr` / `Lod`: `skyHdrPso`, `debugHdrPso`, `m_skinnedHdrPSO`, `newLod`.
+
+These are listed rather than fixed because a sweep touching public headers belongs in
+its own change with its own review, not tacked onto a naming pass. The rule above
+governs anything **new**; when you touch one of these files for another reason,
+renaming the identifiers you are already editing is welcome.
 
 Watch the shader boundary either way — `kOctSize` at
 `src/HE_Rendering/src/Backends/D3D_Shared/HlslSources.h:732` carries a "must match the

@@ -106,6 +106,12 @@ Parameter-Aufbereitung + eingebettete Shader-Quellen:
   „Gi" vs. „GI"; gleiche Konzepte verschieden benannt (`EnsureCloudFBO` vs.
   `EnsureCloudTarget`, `DispatchGiProbeUpdate` vs. `EncodeGIProbeUpdate`). Konvention
   festlegen (PascalCase, „GI").
+  *Status:* Konvention festgelegt und dokumentiert (`docs/coding-conventions.md` §4/§5);
+  „Gi"→„GI" und `EnsureCloudFBO`/`EnsureCloudTarget` erledigt. Das Methoden-Casing
+  selbst ist **bewusst offen** — es sind 84 camelCase- vs. 138 PascalCase-Deklarationen,
+  davon 77 allein in `VulkanRenderer.h`, in drei Backends, die auf der Entwicklungs-
+  maschine nicht baubar sind; ein mechanischer Rename wäre dort außerhalb der CI nicht
+  verifizierbar. Begründung und Restliste in `docs/coding-conventions.md` §4/§5.
 - **Stale Kommentar**: `RenderWorld.h:30–35` behauptet, GL sei noch Single-Shadow-Map —
   GL hat längst CSM; nur D3D11/D3D12/Vulkan sind Single-Map.
 
