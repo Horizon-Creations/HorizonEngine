@@ -58,6 +58,10 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderWorld.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/FrustumCuller.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderSorter.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/SsaoKernel.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/SkyNoise3D.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/SkyFrameParams.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/LightPacking.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderGraph.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderPass.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/CommandBuffer.cpp

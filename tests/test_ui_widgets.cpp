@@ -916,3 +916,103 @@ TEST_CASE("UIText multi-line properties round-trip through JSON")
     old.readJson(legacy);
     CHECK(!old.autoSize);
 }
+
+// ═══ Tree container semantics ════════════════════════════════════════════════
+
+TEST_CASE("UIWidgetTree never reuses an element id after removeSubtree")
+{
+    // Same rule as the node graphs (GraphCommon/GraphModel.h): nextId only moves
+    // forward, so a stale id can never re-bind to a different element.
+    HE::UIWidgetTree t;
+    const int a = t.add(HE::UIWidgetType::Panel);
+    const int b = t.add(HE::UIWidgetType::Text);
+    t.removeSubtree(a);
+    t.removeSubtree(b);
+    const int c = t.add(HE::UIWidgetType::Image);
+    CHECK(c != a);
+    CHECK(c != b);
+    CHECK(c > b);
+}
+
+TEST_CASE("uiWidgetTreeFromJson loads a hand-written OLD-format document")
+{
+    // The shape uiWidgetTreeToJson writes: pretty dump, element type by NAME,
+    // pos/size/pivot as 2-arrays, optional material/font/hitTestable/hoverCursor
+    // keys omitted at their defaults. Kept as a literal so refactoring the writer
+    // can never quietly redefine what still loads.
+    const std::string old =
+        R"J({"canvasWidth":1280.0,"canvasHeight":720.0,"nextId":3,)J"
+        R"J("elements":[{"id":1,"parent":0,"type":"Panel","name":"Root","pos":[0.0,0.0],)J"
+        R"J("size":[400.0,300.0],"pivot":[0.0,0.0],"anchor":0,"layer":0,"visible":true},)J"
+        R"J({"id":2,"parent":1,"type":"Text","name":"Label","pos":[10.0,10.0],)J"
+        R"J("size":[100.0,24.0],"pivot":[0.0,0.0],"anchor":4,"layer":1,"visible":false,)J"
+        R"J("text":"hi"}]})J";
+
+    HE::UIWidgetTree t;
+    REQUIRE(HE::uiWidgetTreeFromJson(old, t));
+    CHECK(t.canvasWidth == doctest::Approx(1280.0f));
+    REQUIRE(t.elements.size() == 2);
+    CHECK(t.find(1) != nullptr);
+    CHECK(t.find(2)->parentId == 1);
+    CHECK(t.find(2)->anchor == 4);
+    CHECK(t.find(2)->layer == 1);
+    CHECK_FALSE(t.find(2)->visible);
+    CHECK(t.find(1)->hitTestable);                             // absent key → default
+    CHECK(t.find(1)->hoverCursor == HE::UICursor::Default);    // absent key → default
+    CHECK(t.nextId == 3);
+    const std::vector<int> kids = t.childrenOf(1);
+    REQUIRE(kids.size() == 1);
+    CHECK(kids[0] == 2);
+}
+
+TEST_CASE("uiWidgetTreeFromJson repairs nextId when a saved id is >= it")
+{
+    const std::string json =
+        R"J({"canvasWidth":1920.0,"canvasHeight":1080.0,"nextId":1,)J"
+        R"J("elements":[{"id":9,"parent":0,"type":"Panel","name":"A"}]})J";
+    HE::UIWidgetTree t;
+    REQUIRE(HE::uiWidgetTreeFromJson(json, t));
+    CHECK(t.nextId == 10);
+    CHECK(t.add(HE::UIWidgetType::Panel) == 10);
+}
+
+// ═══ HorizonCode ⇄ UI property coercion ══════════════════════════════════════
+
+TEST_CASE("uiHcValueToProp follows HorizonCode's coercion rule")
+{
+    using HCV = HorizonCode::Value;
+    // Only Float↔Int↔Bool convert.
+    CHECK(HE::uiHcValueToProp(HCV::ofInt(3),      HE::UIPropType::Float).f == doctest::Approx(3.0f));
+    CHECK(HE::uiHcValueToProp(HCV::ofBool(true),  HE::UIPropType::Float).f == doctest::Approx(1.0f));
+    CHECK(HE::uiHcValueToProp(HCV::ofFloat(2.7f), HE::UIPropType::Int).i == 2);
+    CHECK(HE::uiHcValueToProp(HCV::ofFloat(0.0f), HE::UIPropType::Bool).b == false);
+    CHECK(HE::uiHcValueToProp(HCV::ofFloat(0.5f), HE::UIPropType::Bool).b == true);
+    // Any other mismatch yields the target's zero.
+    CHECK(HE::uiHcValueToProp(HCV::ofString("x"), HE::UIPropType::Float).f == doctest::Approx(0.0f));
+}
+
+TEST_CASE("uiHcValueToProp passes ARRAYS through uncoerced")
+{
+    // REGRESSION: arrays are never scalar-coerced (HorizonCode.cpp `coerce`, and
+    // hc::coerce* in HorizonCodeGenSupport.h) — the wanted type's RAW field is
+    // read. `type` on an array names the ELEMENT type, so cross-converting off it
+    // produced garbage: an Int-element array landing on a Float property used to
+    // be read as (float)v.i instead of v.f.
+    HorizonCode::Value arr;
+    arr.isArray = true;
+    arr.type    = HorizonCode::PinType::Int;   // element type
+    arr.i       = 42;                          // would leak in via the old Int→Float rule
+    arr.f       = 1.5f;                        // the raw field a passthrough must read
+    arr.items   = { HorizonCode::Value::ofInt(1), HorizonCode::Value::ofInt(2) };
+
+    CHECK(HE::uiHcValueToProp(arr, HE::UIPropType::Float).f == doctest::Approx(1.5f));
+
+    HorizonCode::Value arrF;
+    arrF.isArray = true;
+    arrF.type    = HorizonCode::PinType::Float;
+    arrF.f       = 3.9f;
+    arrF.i       = 7;
+    arrF.b       = true;
+    CHECK(HE::uiHcValueToProp(arrF, HE::UIPropType::Int).i == 7);
+    CHECK(HE::uiHcValueToProp(arrF, HE::UIPropType::Bool).b == true);
+}

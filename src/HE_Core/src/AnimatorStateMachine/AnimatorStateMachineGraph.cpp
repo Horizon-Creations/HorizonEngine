@@ -1,10 +1,30 @@
 #include "AnimatorStateMachine/AnimatorStateMachineGraph.h"
 #include <cstdint>
 
+#include <GraphCommon/GraphJson.h>
 #include <nlohmann/json.hpp>
 
 namespace HE
 {
+
+namespace
+{
+// A saved `op` is a raw int. A file from a newer editor (or a hand-edit) can name
+// an operator this build does not have; casting it blind produced a TransitionOp
+// with no valid enumerator, which AnimationStateMachineSystem then switch()es on
+// — an out-of-range comparison silently deciding a transition. Unknown ops fall
+// back to the field's own default (Greater), matching what an absent key does.
+TransitionOp transitionOpFromInt(int v)
+{
+    switch (v)
+    {
+        case (int)TransitionOp::Greater: return TransitionOp::Greater;
+        case (int)TransitionOp::Less:    return TransitionOp::Less;
+        case (int)TransitionOp::Equal:   return TransitionOp::Equal;
+        default:                         return TransitionOp::Greater;
+    }
+}
+} // namespace
 
 std::string animatorStateMachineToJson(const AnimatorStateMachineGraph& g)
 {
@@ -14,7 +34,7 @@ std::string animatorStateMachineToJson(const AnimatorStateMachineGraph& g)
 
     for (const auto& s : g.states)
         j["states"].push_back({ { "id", s.id }, { "name", s.name },
-                                 { "clipId", { { "hi", s.clipId.hi }, { "lo", s.clipId.lo } } },
+                                 { "clipId", HE::graph::uuidToJson(s.clipId) },
                                  { "looping", s.looping }, { "x", s.x }, { "y", s.y } });
     if (g.states.empty()) j["states"] = nlohmann::json::array();
 
@@ -33,8 +53,8 @@ std::string animatorStateMachineToJson(const AnimatorStateMachineGraph& g)
 
 bool animatorStateMachineFromJson(const std::string& json, AnimatorStateMachineGraph& out)
 {
-    nlohmann::json j = nlohmann::json::parse(json, nullptr, /*allow_exceptions=*/false);
-    if (j.is_discarded() || !j.is_object()) return false;
+    nlohmann::json j;
+    if (!HE::graph::parseGraphObject(json, j)) return false;
 
     AnimatorStateMachineGraph g;
     g.startState = j.value("startState", std::string());
@@ -44,8 +64,7 @@ bool animatorStateMachineFromJson(const std::string& json, AnimatorStateMachineG
         AnimationState s;
         s.id = sj.value("id", 0);
         s.name = sj.value("name", std::string());
-        if (auto c = sj.find("clipId"); c != sj.end())
-        { s.clipId.hi = c->value("hi", uint64_t(0)); s.clipId.lo = c->value("lo", uint64_t(0)); }
+        if (auto c = sj.find("clipId"); c != sj.end()) s.clipId = HE::graph::uuidFromJson(*c);
         s.looping = sj.value("looping", true);
         s.x = sj.value("x", 0.0f);
         s.y = sj.value("y", 0.0f);
@@ -58,7 +77,7 @@ bool animatorStateMachineFromJson(const std::string& json, AnimatorStateMachineG
         t.fromState = tj.value("fromState", std::string());
         t.toState   = tj.value("toState",   std::string());
         t.paramName = tj.value("paramName", std::string());
-        t.op        = static_cast<TransitionOp>(tj.value("op", 0));
+        t.op        = transitionOpFromInt(tj.value("op", 0));
         t.threshold = tj.value("threshold", 0.5f);
         t.duration  = tj.value("duration",  0.2f);
         g.transitions.push_back(std::move(t));

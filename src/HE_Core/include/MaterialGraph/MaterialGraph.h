@@ -289,6 +289,15 @@ struct MatShaderGen
 // binding pins stay static).
 inline constexpr int kMatMaxGraphTextures = 4;
 
+// Exposed parameters a single material graph may declare — the length of the
+// HeParams UBO array (`uniform HeParams { vec4 v[kMatMaxParams]; }`, emitted by
+// generateFragment and mirrored in MaterialShaderLibrary's WPO preamble).
+// A graph with MORE distinct parameter names bakes the surplus ones as literal
+// constants instead of indexing the UBO: the layout used to be clamped only
+// AFTER emission, so the generated shader kept reading heParams.v[16] and up —
+// out of bounds in the declared array.
+inline constexpr int kMatMaxParams = 16;
+
 // Generate shader + parameter layout. Always succeeds (unconnected inputs fall back to
 // pin defaults; a missing Output node yields a magenta error shader; recursive function
 // calls emit magenta instead of hanging). `switchOverrides` (name → on) replaces Static

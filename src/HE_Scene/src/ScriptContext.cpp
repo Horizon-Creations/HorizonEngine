@@ -4,6 +4,9 @@
 #include "HorizonScene/PhysicsWorld.h"
 #include "HorizonScene/ScriptApi.h"
 #include "HorizonScene/EngineApi.h"   // HE::api registry (registry-driven groups)
+#include "HorizonScene/Components/ScriptComponent.h"
+#include <ContentManager/ContentManager.h>
+#include <ContentManager/Assets.h>
 
 #include <string>
 #include <vector>
@@ -621,6 +624,55 @@ ScriptEngine::InstanceId ScriptContext::createInstance(const std::string& script
 void ScriptContext::destroyInstance(ScriptEngine::InstanceId id)
 {
     backendForId(id)->destroyInstance(rawId(id));
+}
+
+// ─── Bulk start of a scene's ECS scripts ──────────────────────────────────────
+
+ScriptEngine::InstanceId ScriptContext::startEntityScript(entt::entity entity, ContentManager& cm)
+{
+    if (!m_world) return ScriptEngine::kInvalidInstance;
+    auto& reg = m_world->registry();
+    if (!reg.valid(entity)) return ScriptEngine::kInvalidInstance;
+    auto* sc = reg.try_get<ScriptComponent>(entity);
+    if (!sc || !sc->enabled) return ScriptEngine::kInvalidInstance;
+    const ScriptAsset* asset = cm.getScript(sc->scriptAssetId);
+    if (!asset || asset->sourceCode.empty()) return ScriptEngine::kInvalidInstance;
+    if (!isScriptLoaded(sc->moduleName, asset->language))
+        loadScript(sc->moduleName, asset->sourceCode, asset->language);
+    const auto instId = createInstance(sc->moduleName, entity, asset->language);
+    if (instId == ScriptEngine::kInvalidInstance) return ScriptEngine::kInvalidInstance;
+    injectProperties(instId, sc->properties);
+    callOnStart(instId);
+    return instId;
+}
+
+int ScriptContext::startWorldScripts(ContentManager& cm, InstanceMap& out)
+{
+    if (!m_world) return 0;
+    int started = 0;
+    for (auto [entity, sc] : m_world->registry().view<ScriptComponent>().each())
+    {
+        const auto instId = startEntityScript(entity, cm);
+        if (instId == ScriptEngine::kInvalidInstance) continue;
+        out[static_cast<uint32_t>(entity)] = instId;
+        ++started;
+    }
+    return started;
+}
+
+int ScriptContext::startScriptsFor(const std::vector<entt::entity>& entities,
+                                   ContentManager& cm, InstanceMap& out)
+{
+    if (!m_world) return 0;
+    int started = 0;
+    for (entt::entity entity : entities)
+    {
+        const auto instId = startEntityScript(entity, cm);
+        if (instId == ScriptEngine::kInvalidInstance) continue;
+        out[static_cast<uint32_t>(entity)] = instId;
+        ++started;
+    }
+    return started;
 }
 
 bool ScriptContext::callOnStart(ScriptEngine::InstanceId id)

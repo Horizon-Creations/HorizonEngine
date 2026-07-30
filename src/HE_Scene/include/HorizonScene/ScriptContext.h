@@ -7,6 +7,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 class HorizonWorld;
 class PhysicsWorld;
@@ -57,6 +58,28 @@ public:
                                             ScriptLanguage     lang);
 
     void destroyInstance(ScriptEngine::InstanceId id);
+
+    // ── Bulk start of a scene's ECS scripts ───────────────────────────────
+    // entity → live instance, as the hosting app keeps it (game runtime and
+    // play-in-editor both map by the raw entt handle).
+    using InstanceMap = std::unordered_map<uint32_t, ScriptEngine::InstanceId>;
+
+    // Start ONE entity's enabled ScriptComponent: load its module (once per
+    // name+language), create the instance, inject the authored property overrides
+    // and fire onStart. Returns kInvalidInstance when the entity is stale, has no
+    // enabled ScriptComponent, its script asset is missing/empty, or the backend
+    // refused to create the instance — the caller simply skips it.
+    ScriptEngine::InstanceId startEntityScript(entt::entity entity, ContentManager& cm);
+
+    // Start every enabled ScriptComponent in the bound world, recording
+    // entity → instance in `out`. Returns how many actually started. This is the
+    // packaged game's startup path AND the editor's enter-play-mode path — they
+    // must stay the same code so a shipped game behaves like PIE.
+    int startWorldScripts(ContentManager& cm, InstanceMap& out);
+
+    // Same, restricted to `entities` (an additively loaded zone's fresh entities).
+    int startScriptsFor(const std::vector<entt::entity>& entities,
+                        ContentManager& cm, InstanceMap& out);
 
     // Call onStart(self) on the instance.
     bool callOnStart(ScriptEngine::InstanceId id);

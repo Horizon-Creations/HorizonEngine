@@ -18,6 +18,8 @@ add_library(HorizonScene SHARED
     src/LODSystem.cpp
     src/WeatherSystem.cpp
     src/SceneSystems.cpp
+    src/EnvironmentPush.cpp
+    src/FlyCameraController.cpp
     src/FoliageSystem.cpp
     src/UISystem.cpp
     src/UIInputSystem.cpp

@@ -54,7 +54,13 @@ void pushGpuParticleParams(HorizonWorld& world, IRenderer* renderer,
         const float fall   = isSnow ? 2.0f : 18.0f;
         const float boxTop = 24.0f;
         // Pool cap comes from the WeatherComponent budget if present, else a default.
-        int cap = isSnow ? 20000 : 20000;
+        // The default is the same for rain and snow: this used to read
+        // `isSnow ? 20000 : 20000`, i.e. a per-precipitation-type default was planned
+        // but never implemented — 20000 is simply the editor's Max Rain/Max Snow slider
+        // ceiling. Don't guess a smaller snow number here; it would silently change how
+        // a scene *without* a WeatherComponent renders snow.
+        constexpr int kDefaultPrecipCap = 20000;
+        int cap = kDefaultPrecipCap;
         for (auto [e, wc] : reg.view<WeatherComponent>().each())
         { cap = isSnow ? wc.maxSnowParticles : wc.maxRainParticles; break; }
         gp.enabled     = true;

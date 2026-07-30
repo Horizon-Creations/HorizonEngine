@@ -1,4 +1,5 @@
 #pragma once
+#include "../HE_RENDERING_API.h"
 #include "RenderObject.h"
 #include <Renderer/UIRenderObject.h>
 #include <ParticleGraph/ParticleGraph.h>
@@ -29,11 +30,12 @@ struct LightData {
 
 // Directional-light shadow info, computed by the extractor.
 //   viewProj   — single whole-scene light clip transform. Used by the backends that
-//                are still on a single shadow map (OpenGL / D3D / Vulkan).
+//                are still on a single shadow map (D3D11 / D3D12 / Vulkan).
 //   cascade*   — Cascaded Shadow Maps: `cascadeCount` tight light frusta fit to
 //                successive camera-distance slices (sharp near, coarse far), used by
-//                the Metal backend. cascadeSplit[i] = the cascade's far distance in
-//                view space (camera-forward metres) for per-fragment cascade pick.
+//                the Metal and OpenGL backends. cascadeSplit[i] = the cascade's far
+//                distance in view space (camera-forward metres) for per-fragment
+//                cascade pick.
 struct ShadowData {
     glm::mat4 viewProj   = glm::mat4(1.0f);
     glm::vec3 direction  = glm::vec3(0.0f, -1.0f, 0.0f);
@@ -95,6 +97,36 @@ struct ParticleBatch {
 class RenderWorld {
 public:
     void clear();
+
+    // The dominant directional light: the BRIGHTEST directional light in the
+    // extracted set — the same light the shadow fit and the fragment loop use.
+    //
+    // NEVER `sunDirection` (that is the SKY-DOME sun, which sits below the horizon
+    // at night and never tracks a user-placed key light: rays traced toward it zero
+    // the actual directional light almost everywhere — the scene goes black and only
+    // surfaces facing the below-horizon sun light up, e.g. a bright cube UNDERSIDE
+    // at night). And NEVER the raw environment sunColor, which is unmodulated by
+    // night/clouds.
+    //
+    // In day-night scenes the sun/moon are themselves lights in `lights` (envRole
+    // 1/2), so this pick follows them; the fallback below only fires in scenes with
+    // no directional light at all.
+    //
+    // Returns false when nothing shines (night without a moon, full overcast zeroing
+    // sun AND moon, or a light-less scene). Then `towardOut` is a harmless
+    // placeholder (the shadow mask multiplies nothing) but `colorIntensityOut` is
+    // hard ZERO: falling back to the environment's sunColor*sunIntensity here would
+    // feed the probe bounce full DAYTIME sunlight from below the horizon — meshes
+    // visibly sun-lit at night.
+    //
+    //   towardOut         — normalized direction TOWARD the light
+    //                       (LightData::direction is the light's TRAVEL direction)
+    //   colorIntensityOut — color * intensity
+    // Exported per-member (not per-class): the backend static libraries include this
+    // header but do not link HorizonRendering, so only the symbols they actually
+    // call may carry the import/export attribute.
+    HE_RENDERING_API bool dominantDirectionalLight(glm::vec3& towardOut,
+                                                   glm::vec3& colorIntensityOut) const;
 
     std::vector<RenderObject>        objects;
     std::vector<SkinnedRenderObject> skinnedObjects;

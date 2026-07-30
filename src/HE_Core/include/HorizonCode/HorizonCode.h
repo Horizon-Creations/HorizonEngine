@@ -214,6 +214,20 @@ struct PinDesc { const char* name; PinType type; bool isArray = false; };
 struct NodeSig { std::vector<PinDesc> execIns, execOuts, dataIns, dataOuts; };
 HE_API NodeSig signatureOf(const Node& n);
 
+// signatureOf() materialises four heap vectors per call. The pin-range and
+// pin-type queries in the hot paths need only the counts or a single pin —
+// Graph::connect asks 6× per attempted link, the interpreter once per executed
+// node — so they go through these ALLOCATION-FREE accessors instead. Same switch,
+// same answers; they just fill a reusable scratch signature and copy out the
+// scalar bits. (HcCodegen and the editor panels still build full NodeSigs; they
+// can adopt these too.)
+struct NodeSigCounts { int execIns = 0, execOuts = 0, dataIns = 0, dataOuts = 0; };
+HE_API NodeSigCounts signatureCountsOf(const Node& n);
+// One data pin's descriptor; false (leaving `out` untouched) when `index` is out
+// of range. `out.name` points into `n` or at a string literal, exactly like
+// signatureOf's, so it outlives the call.
+HE_API bool dataPinDescOf(const Node& n, bool input, int index, PinDesc& out);
+
 // Static metadata for the editor add-menu (category + display name).
 HE_API const char* nodeDisplayName(NodeType t);
 HE_API const char* nodeCategory(NodeType t);

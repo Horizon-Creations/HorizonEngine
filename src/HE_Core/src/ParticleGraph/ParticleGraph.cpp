@@ -1,6 +1,8 @@
 #include "ParticleGraph/ParticleGraph.h"
 #include <cstdint>
 
+#include <GraphCommon/GraphJson.h>
+#include <GraphCommon/GraphModel.h>
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -60,6 +62,10 @@ const std::vector<ParticleNodeDesc>& registry()
 
 const std::vector<ParticleNodeDesc>& particleNodeRegistry() { return registry(); }
 
+// The kParticle*Pin constants index straight into this entry — keep them in sync.
+static_assert(kParticleKillOnCollisionPin + 1 == kParticleEmitterPinCount,
+              "kParticle*Pin constants must cover exactly the Emitter Output inputs");
+
 const ParticleNodeDesc& particleNodeDesc(ParticleNodeType type)
 {
     for (const auto& d : registry())
@@ -77,7 +83,6 @@ const ParticleNodeDesc* particleNodeDescByName(const std::string& name)
 int ParticleGraph::addNode(ParticleNodeType type, float x, float y)
 {
     ParticleGraphNode n;
-    n.id = nextId++;
     n.type = type;
     n.x = x; n.y = y;
     switch (type)
@@ -88,21 +93,14 @@ int ParticleGraph::addNode(ParticleNodeType type, float x, float y)
         case ParticleNodeType::RandomRange: n.p[0] = 0.0f; n.p[1] = 1.0f; break;
         default: break;
     }
-    nodes.push_back(n);
-    return n.id;
+    return HE::graph::appendNode(nodes, nextId, std::move(n));
 }
 
 const ParticleGraphNode* ParticleGraph::findNode(int id) const
-{
-    for (const auto& n : nodes) if (n.id == id) return &n;
-    return nullptr;
-}
+{ return HE::graph::findNodeById(nodes, id); }
 
 ParticleGraphNode* ParticleGraph::findNode(int id)
-{
-    for (auto& n : nodes) if (n.id == id) return &n;
-    return nullptr;
-}
+{ return HE::graph::findNodeById(nodes, id); }
 
 bool ParticleGraph::connect(int srcNode, int srcPin, int dstNode, int dstPin)
 {
@@ -110,32 +108,25 @@ bool ParticleGraph::connect(int srcNode, int srcPin, int dstNode, int dstPin)
     const ParticleGraphNode* s = findNode(srcNode);
     const ParticleGraphNode* d = findNode(dstNode);
     if (!s || !d) return false;
+    // Strict static-registry pin check on both ends — unlike MaterialGraph, no
+    // particle node has dynamic pin counts.
     const ParticleNodeDesc& sd = particleNodeDesc(s->type);
     const ParticleNodeDesc& dd = particleNodeDesc(d->type);
     if (srcPin < 0 || srcPin >= (int)sd.outputs.size()) return false;
     if (dstPin < 0 || dstPin >= (int)dd.inputs.size())  return false;
-    disconnectInput(dstNode, dstPin);
+    disconnectInput(dstNode, dstPin); // an input pin holds at most one link
     links.push_back({ srcNode, srcPin, dstNode, dstPin });
     return true;
 }
 
 void ParticleGraph::disconnectInput(int dstNode, int dstPin)
-{
-    links.erase(std::remove_if(links.begin(), links.end(),
-        [&](const ParticleGraphLink& l) { return l.dstNode == dstNode && l.dstPin == dstPin; }),
-        links.end());
-}
+{ HE::graph::disconnectInput(links, dstNode, dstPin); }
 
 void ParticleGraph::removeNode(int id)
 {
     const ParticleGraphNode* n = findNode(id);
-    if (!n || n->type == ParticleNodeType::EmitterOutput) return;
-    links.erase(std::remove_if(links.begin(), links.end(),
-        [&](const ParticleGraphLink& l) { return l.srcNode == id || l.dstNode == id; }),
-        links.end());
-    nodes.erase(std::remove_if(nodes.begin(), nodes.end(),
-        [&](const ParticleGraphNode& nn) { return nn.id == id; }),
-        nodes.end());
+    if (!n || n->type == ParticleNodeType::EmitterOutput) return; // fixed sink
+    HE::graph::removeNodeAndLinks(nodes, links, id);
 }
 
 ParticleGraph ParticleGraph::makeDefault()
@@ -160,21 +151,20 @@ std::string particleGraphToJson(const ParticleGraph& graph)
                               { "p", { n.p[0], n.p[1], n.p[2], n.p[3] } },
                               { "x", n.x }, { "y", n.y } };
         if (n.meshAssetId != HE::UUID{})
-            jn["meshId"] = { { "hi", n.meshAssetId.hi }, { "lo", n.meshAssetId.lo } };
+            jn["meshId"] = HE::graph::uuidToJson(n.meshAssetId);
         if (n.materialAssetId != HE::UUID{})
-            jn["matId"] = { { "hi", n.materialAssetId.hi }, { "lo", n.materialAssetId.lo } };
+            jn["matId"] = HE::graph::uuidToJson(n.materialAssetId);
         j["nodes"].push_back(std::move(jn));
     }
-    for (const auto& l : graph.links)
-        j["links"].push_back({ { "sn", l.srcNode }, { "sp", l.srcPin },
-                               { "dn", l.dstNode }, { "dp", l.dstPin } });
+    for (const auto& l : graph.links) // OBJECT link form — see GraphJson.h
+        j["links"].push_back(HE::graph::linkToObject(l.srcNode, l.srcPin, l.dstNode, l.dstPin));
     return j.dump();
 }
 
 bool particleGraphFromJson(const std::string& json, ParticleGraph& out)
 {
-    nlohmann::json j = nlohmann::json::parse(json, nullptr, /*allow_exceptions=*/false);
-    if (j.is_discarded() || !j.is_object()) return false;
+    nlohmann::json j;
+    if (!HE::graph::parseGraphObject(json, j)) return false;
 
     ParticleGraph g;
     g.nextId = j.value("nextId", 1);
@@ -187,18 +177,19 @@ bool particleGraphFromJson(const std::string& json, ParticleGraph& out)
         n.type = d->type;
         if (auto p = jn.find("p"); p != jn.end() && p->is_array())
             for (size_t i = 0; i < 4 && i < p->size(); ++i) n.p[i] = (*p)[i].get<float>();
-        if (auto m = jn.find("meshId"); m != jn.end())
-        { n.meshAssetId.hi = m->value("hi", uint64_t(0)); n.meshAssetId.lo = m->value("lo", uint64_t(0)); }
-        if (auto m = jn.find("matId"); m != jn.end())
-        { n.materialAssetId.hi = m->value("hi", uint64_t(0)); n.materialAssetId.lo = m->value("lo", uint64_t(0)); }
+        if (auto m = jn.find("meshId"); m != jn.end()) n.meshAssetId     = HE::graph::uuidFromJson(*m);
+        if (auto m = jn.find("matId");  m != jn.end()) n.materialAssetId = HE::graph::uuidFromJson(*m);
         n.x = jn.value("x", 0.0f);
         n.y = jn.value("y", 0.0f);
         g.nodes.push_back(n);
-        g.nextId = std::max(g.nextId, n.id + 1);
+        HE::graph::bumpNextId(g.nextId, n.id);
     }
     for (const auto& jl : j.value("links", nlohmann::json::array()))
-        g.links.push_back({ jl.value("sn", 0), jl.value("sp", 0),
-                            jl.value("dn", 0), jl.value("dp", 0) });
+    {
+        ParticleGraphLink l;
+        HE::graph::linkFromObject(jl, l.srcNode, l.srcPin, l.dstNode, l.dstPin);
+        g.links.push_back(l);
+    }
 
     out = std::move(g);
     return true;
@@ -208,11 +199,7 @@ bool particleGraphFromJson(const std::string& json, ParticleGraph& out)
 namespace
 {
 const ParticleGraphLink* findFeedingLink(const ParticleGraph& g, int dstNode, int dstPin)
-{
-    for (const auto& l : g.links)
-        if (l.dstNode == dstNode && l.dstPin == dstPin) return &l;
-    return nullptr;
-}
+{ return HE::graph::linkToInput(g.links, dstNode, dstPin); }
 
 void evalNodeVec3(const ParticleGraph& g, int nodeId, std::mt19937& rng, float out[3], int depth);
 
@@ -302,35 +289,37 @@ ParticleEmitterConfig evaluateParticleGraph(const ParticleGraph& graph, std::mt1
         if (n.type == ParticleNodeType::EmitterOutput) { out = &n; break; }
     if (!out) return cfg; // no output node → old-component-compatible defaults
 
-    cfg.emitRate    = evalInputFloat(graph, out->id, 0, rng, 0);
-    cfg.lifetimeMin = evalInputFloat(graph, out->id, 1, rng, 0);
-    cfg.lifetimeMax = evalInputFloat(graph, out->id, 2, rng, 0);
-    cfg.startSize   = evalInputFloat(graph, out->id, 3, rng, 0);
-    cfg.endSize     = evalInputFloat(graph, out->id, 4, rng, 0);
+    // Pin order matters and is fixed on disk — see the kParticle*Pin constants.
+    cfg.emitRate    = evalInputFloat(graph, out->id, kParticleEmitRatePin,    rng, 0);
+    cfg.lifetimeMin = evalInputFloat(graph, out->id, kParticleLifetimeMinPin, rng, 0);
+    cfg.lifetimeMax = evalInputFloat(graph, out->id, kParticleLifetimeMaxPin, rng, 0);
+    cfg.startSize   = evalInputFloat(graph, out->id, kParticleStartSizePin,   rng, 0);
+    cfg.endSize     = evalInputFloat(graph, out->id, kParticleEndSizePin,     rng, 0);
 
     float v[3];
-    evalInputVec3(graph, out->id, 5, rng, v, 0);
+    evalInputVec3(graph, out->id, kParticleStartColorPin, rng, v, 0);
     cfg.startColor[0] = v[0]; cfg.startColor[1] = v[1]; cfg.startColor[2] = v[2];
-    evalInputVec3(graph, out->id, 6, rng, v, 0);
+    evalInputVec3(graph, out->id, kParticleEndColorPin, rng, v, 0);
     cfg.endColor[0] = v[0]; cfg.endColor[1] = v[1]; cfg.endColor[2] = v[2];
 
-    cfg.startAlpha = evalInputFloat(graph, out->id, 7, rng, 0);
-    cfg.endAlpha   = evalInputFloat(graph, out->id, 8, rng, 0);
+    cfg.startAlpha = evalInputFloat(graph, out->id, kParticleStartAlphaPin, rng, 0);
+    cfg.endAlpha   = evalInputFloat(graph, out->id, kParticleEndAlphaPin,   rng, 0);
 
-    evalInputVec3(graph, out->id, 9, rng, v, 0);
+    evalInputVec3(graph, out->id, kParticleInitialVelocityPin, rng, v, 0);
     cfg.initialVelocity[0] = v[0]; cfg.initialVelocity[1] = v[1]; cfg.initialVelocity[2] = v[2];
 
-    cfg.velocitySpread = evalInputFloat(graph, out->id, 10, rng, 0);
+    cfg.velocitySpread = evalInputFloat(graph, out->id, kParticleVelocitySpreadPin, rng, 0);
 
-    evalInputVec3(graph, out->id, 11, rng, v, 0);
+    evalInputVec3(graph, out->id, kParticleGravityPin, rng, v, 0);
     cfg.gravity[0] = v[0]; cfg.gravity[1] = v[1]; cfg.gravity[2] = v[2];
 
-    cfg.maxParticles = std::max(0, static_cast<int>(std::lround(evalInputFloat(graph, out->id, 12, rng, 0))));
-    cfg.looping      = evalInputFloat(graph, out->id, 13, rng, 0) > 0.5f;
+    cfg.maxParticles = std::max(0, static_cast<int>(std::lround(
+        evalInputFloat(graph, out->id, kParticleMaxParticlesPin, rng, 0))));
+    cfg.looping      = evalInputFloat(graph, out->id, kParticleLoopingPin, rng, 0) > 0.5f;
 
-    cfg.collisionEnabled = evalInputFloat(graph, out->id, 14, rng, 0) > 0.5f;
-    cfg.restitution      = evalInputFloat(graph, out->id, 15, rng, 0);
-    cfg.killOnCollision  = evalInputFloat(graph, out->id, 16, rng, 0) > 0.5f;
+    cfg.collisionEnabled = evalInputFloat(graph, out->id, kParticleCollisionEnabledPin, rng, 0) > 0.5f;
+    cfg.restitution      = evalInputFloat(graph, out->id, kParticleRestitutionPin,      rng, 0);
+    cfg.killOnCollision  = evalInputFloat(graph, out->id, kParticleKillOnCollisionPin,  rng, 0) > 0.5f;
 
     cfg.meshAssetId     = out->meshAssetId;
     cfg.materialAssetId = out->materialAssetId;
