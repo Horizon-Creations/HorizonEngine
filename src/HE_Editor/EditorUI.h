@@ -13,6 +13,5 @@ public:
 	static void joinPendingExport();
 
 private:
-	static void RenderEditor(AppContext& ctx, float dt);
-
-	};
+	static void renderEditor(AppContext& ctx, float dt);
+};

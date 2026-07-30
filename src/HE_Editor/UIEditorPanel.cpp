@@ -96,7 +96,7 @@ struct State
 	std::string name;                // filename for the header
 	std::string relPath;             // content-root-relative path of this asset
 };
-AssetPanelState<State> g_states;
+AssetPanelState<State> s_states;
 
 // ── Layout math (via UIWidgetTree's shared layout, mirrors the runtime) ───────
 ImVec2 anchorPoint(uint8_t a)
@@ -1940,14 +1940,14 @@ bool isWidgetAsset(const std::string& path)
 	return EditorAssetTypeCache::is(path, HE::AssetType::Widget);
 }
 
-bool isDirty(const std::string& assetPath) { return g_states.dirty(assetPath); }
+bool isDirty(const std::string& assetPath) { return s_states.dirty(assetPath); }
 
-void forget(const std::string& assetPath) { g_states.forget(assetPath); }
+void forget(const std::string& assetPath) { s_states.forget(assetPath); }
 
 void render(AppContext& ctx, const std::string& assetPath,
             const ImVec2& pos, const ImVec2& size)
 {
-	State& st = g_states[assetPath];
+	State& st = s_states[assetPath];
 	if (!st.loaded) loadState(st, ctx, assetPath);
 
 	ImGui::SetNextWindowPos(pos);

@@ -43,7 +43,7 @@ void render(AppContext& ctx)
 
 #ifdef __APPLE__
     // The macOS App-menu (Quit/About/New/Open) is installed AND pumped here too:
-    // RenderEditor — which normally does this — only runs once a project is
+    // renderEditor — which normally does this — only runs once a project is
     // loaded, so on the Hub the menu queue was never drained and Cmd+Q (and the
     // other items) did nothing after a project had been opened and closed.
     MacMenuBar::install();                       // idempotent

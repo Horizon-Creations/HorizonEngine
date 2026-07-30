@@ -896,7 +896,7 @@ struct ClassState
 	std::vector<std::string> events;    // event catalog (lifecycle + player input events)
 	double      eventsScanTime = -1.0;  // last catalog (re)build, ImGui time
 };
-AssetPanelState<ClassState> g_classStates;
+AssetPanelState<ClassState> s_classStates;
 
 // Input.<Action>.* event names for every InputAction asset in the project —
 // the input-event catalog player classes offer. Walks the content dir (cheap
@@ -930,14 +930,14 @@ bool HorizonCodeClassPanel::isClassAsset(const std::string& path)
 	return EditorAssetTypeCache::is(path, HE::AssetType::HorizonCodeClass);
 }
 
-void HorizonCodeClassPanel::forget(const std::string& path) { g_classStates.forget(path); }
+void HorizonCodeClassPanel::forget(const std::string& path) { s_classStates.forget(path); }
 
-bool HorizonCodeClassPanel::isDirty(const std::string& path) { return g_classStates.dirty(path); }
+bool HorizonCodeClassPanel::isDirty(const std::string& path) { return s_classStates.dirty(path); }
 
 void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath,
                                    const ImVec2& pos, const ImVec2& size)
 {
-	ClassState& st = g_classStates[assetPath];
+	ClassState& st = s_classStates[assetPath];
 	if (!st.loaded && ctx.contentManager)
 	{
 		const std::string rel = ctx.contentManager->toContentRelativePath(assetPath);

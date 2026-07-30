@@ -701,9 +701,9 @@ function M.onStart(self)
     vis    = horizon.isWidgetVisible(w)
 end
 return M
-)lua", ScriptLanguage::Lua));
+)lua", HE::ScriptLanguage::Lua));
     auto e = world.createEntity("driver");
-    const auto inst = ctx.createInstance("hud", e, ScriptLanguage::Lua);
+    const auto inst = ctx.createInstance("hud", e, HE::ScriptLanguage::Lua);
     REQUIRE(inst != ScriptEngine::kInvalidInstance);
     REQUIRE(ctx.callOnStart(inst));
 
@@ -738,9 +738,9 @@ local M = {}
 function M.onStart(self) horizon.showCursor() end
 function M.onUpdate(self, dt) horizon.hideCursor() end
 return M
-)lua", ScriptLanguage::Lua));
+)lua", HE::ScriptLanguage::Lua));
     auto e = world.createEntity("driver");
-    const auto inst = ctx.createInstance("cur", e, ScriptLanguage::Lua);
+    const auto inst = ctx.createInstance("cur", e, HE::ScriptLanguage::Lua);
     REQUIRE(ctx.callOnStart(inst));
     CHECK(visible); CHECK(calls == 1);
     REQUIRE(ctx.callOnUpdate(inst, 0.016f));

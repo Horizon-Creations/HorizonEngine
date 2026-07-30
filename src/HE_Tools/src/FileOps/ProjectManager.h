@@ -28,10 +28,20 @@ enum class ProjectScriptLanguage
 	Cpp,
 };
 
-// Manifest spelling of the language ("HorizonCode"/"Lua"/"Python"/"Cpp") and
-// its tolerant inverse (unknown/missing → HorizonCode).
-HE_TOOLS_API const char*           toString(ProjectScriptLanguage lang);
-HE_TOOLS_API ProjectScriptLanguage projectScriptLanguageFromString(const std::string& s);
+// `toString` and `cppIdentifier` are namespaced and the surrounding types are
+// not, on purpose: an exported function called `toString` sitting in the global
+// namespace is a hazard out of all proportion to its size — it is a candidate
+// for every unqualified `toString(x)` in every translation unit that reaches
+// this header. `ProjectManager`/`ProjectData`/`ExportProfile` are specific
+// enough to stay put for now. See docs/coding-conventions.md §1.
+namespace HE::tools
+{
+	// Manifest spelling of the language ("HorizonCode"/"Lua"/"Python"/"Cpp") and
+	// its tolerant inverse (unknown/missing → HorizonCode). The returned strings
+	// are the persisted .heproj "scriptLanguage" values — do not restyle them.
+	HE_TOOLS_API const char*           toString(ProjectScriptLanguage lang);
+	HE_TOOLS_API ProjectScriptLanguage projectScriptLanguageFromString(const std::string& s);
+}
 
 // ─── Native C++ gameplay scaffolding ─────────────────────────────────────────
 // A Cpp project authors gameplay as a native GameLogic shared library instead of
@@ -43,9 +53,12 @@ HE_TOOLS_API ProjectScriptLanguage projectScriptLanguageFromString(const std::st
 // hand-editing of the existing files. projectRoot is the project folder (the
 // parent of the .heproj), not the Content folder.
 
-// Turn an arbitrary asset/scene name into a valid C++ identifier (leading digit
-// prefixed with '_', non-alnum → '_'); empty → "Unnamed".
-HE_TOOLS_API std::string cppIdentifier(const std::string& name);
+namespace HE::tools
+{
+	// Turn an arbitrary asset/scene name into a valid C++ identifier (leading
+	// digit prefixed with '_', non-alnum → '_'); empty → "Unnamed".
+	HE_TOOLS_API std::string cppIdentifier(const std::string& name);
+}
 
 // Create the whole Source/ tree for a freshly created Cpp project: the runtime
 // header/impl, a GameInstance class, a LevelScript for the startup scene, the

@@ -413,7 +413,7 @@ float2 giOctEncode(float3 n)
     return (n.z <= 0.0) ? ((1.0 - abs(p.yx)) * signP) : p;
 }
 
-static const int GI_PROBE_OCT = 8; // must match the host's kGiProbeOctSize
+static const int GI_PROBE_OCT = 8; // must match the host's kGIProbeOctSize
 
 // DDGI probe sampling — trilinear over the 8 surrounding probes × soft
 // backface × Chebyshev visibility. Direct port of the GL/Metal version.
@@ -863,7 +863,7 @@ struct D3D11RendererImpl
     ComPtr<ID3D11SamplerState> m_matSampler;  // linear-wrap, bound at s2 + s4..s7
     bool m_matReady      = false; // true once createMaterialResources() succeeded
     bool m_matHlslLogged = false; // one-time dump of generated HLSL for HW verify
-    // createMaterialResources() + getOrBuildMaterialShaders() are defined inline below.
+    // createMaterialResources() + GetOrBuildMaterialShaders() are defined inline below.
 
     // ── Shadow map ──────────────────────────────────────────────────────────
     ComPtr<ID3D11VertexShader>       depthVS;    // depth-only pass
@@ -1454,21 +1454,21 @@ struct D3D11RendererImpl
     // concatenated into structured buffers + a flat per-frame instance array;
     // compute shadow rays + DDGI probe gather, temporal + blur as fullscreen
     // pixel passes. Mirrors OpenGLRenderer's kGi* stages 1:1.
-    struct GiBlasRange
+    struct GIBlasRange
     {
         int32_t nodeOffset = 0, nodeCount = 0;
         int32_t triOffset  = 0, triCount  = 0;
         bool    valid      = false;
     };
-    struct GiInstanceGpu // must match the HLSL GiInst layout (raw structured buffer)
+    struct GIInstanceGpu // must match the HLSL GiInst layout (raw structured buffer)
     {
         glm::mat4 invTransform;
         glm::vec4 baseColor;
         int32_t   nodeOffset = 0, triOffset = 0, pad0 = 0, pad1 = 0;
     };
-    static constexpr float kGiProbeSpacing     = 4.0f;
-    static constexpr int   kGiMaxProbesPerAxis = 10;
-    static constexpr int   kGiProbeOctSize     = 8;
+    static constexpr float kGIProbeSpacing     = 4.0f;
+    static constexpr int   kGIMaxProbesPerAxis = 10;
+    static constexpr int   kGIProbeOctSize     = 8;
 
     bool  giSupported          = true;  // FL 11.0 guarantees CS 5.0; compile failure clears it
     bool  giEnabled            = false;
@@ -1486,10 +1486,10 @@ struct D3D11RendererImpl
     ComPtr<ID3D11Buffer>        giShadowCB, giCountCB, giTemporalCB, giBlurCB, giProbeCB;
     ComPtr<ID3D11SamplerState>  giLinearClamp;
 
-    std::unordered_map<HE::UUID, GiBlasRange> giBlasCache;
+    std::unordered_map<HE::UUID, GIBlasRange> giBlasCache;
     std::vector<HE::GiBvhNode>     giNodesCpu;
     std::vector<HE::GiBvhTriangle> giTrisCpu;
-    std::vector<GiInstanceGpu>     giInstancesCpu;
+    std::vector<GIInstanceGpu>     giInstancesCpu;
     bool giBlasDirty     = false;
     int  giInstanceCount = 0;
     ComPtr<ID3D11Buffer>             giNodeSB, giTriSB, giInstanceSB;
@@ -1519,9 +1519,9 @@ struct D3D11RendererImpl
     ComPtr<ID3D11ShaderResourceView>  giIrrSRV, giVisSRV, giIrrPrevSRV, giVisPrevSRV;
     ComPtr<ID3D11UnorderedAccessView> giIrrUAV, giVisUAV;
 
-    GiBlasRange buildGiBlas(ContentManager* cm, const HE::UUID& meshId)
+    GIBlasRange BuildGIBlas(ContentManager* cm, const HE::UUID& meshId)
     {
-        GiBlasRange range;
+        GIBlasRange range;
         if (!cm) return range;
         const StaticMeshAsset* asset = cm->getStaticMesh(meshId);
         if (!asset || asset->indices.empty()) return range;
@@ -1556,11 +1556,11 @@ struct D3D11RendererImpl
         // Same caster filter as the shadow pass: castsShadow only, UNCULLED —
         // rays go in arbitrary directions, an off-screen caster still occludes.
         giInstancesCpu.clear();
-        auto resolveRange = [&](const HE::UUID& id) -> GiBlasRange
+        auto resolveRange = [&](const HE::UUID& id) -> GIBlasRange
         {
             auto it = giBlasCache.find(id);
             if (it == giBlasCache.end())
-                it = giBlasCache.emplace(id, buildGiBlas(cm, id)).first;
+                it = giBlasCache.emplace(id, BuildGIBlas(cm, id)).first;
             return it->second;
         };
         for (const RenderObject& obj : rw.objects)
@@ -1568,10 +1568,10 @@ struct D3D11RendererImpl
             if (!obj.castsShadow) continue;
             // Default-cube fallback — entities without a resolvable mesh RENDER
             // as the default cube, so they must occlude as one too.
-            GiBlasRange range = resolveRange(obj.meshAssetId);
+            GIBlasRange range = resolveRange(obj.meshAssetId);
             if (!range.valid) range = resolveRange(HE::kDefaultCubeMeshId);
             if (!range.valid) continue;
-            GiInstanceGpu inst;
+            GIInstanceGpu inst;
             inst.invTransform = glm::inverse(obj.transform);
             inst.baseColor    = glm::vec4(obj.baseColor, 1.0f);
             inst.nodeOffset   = range.nodeOffset;
@@ -1612,7 +1612,7 @@ struct D3D11RendererImpl
             giBlasDirty = false;
         }
         makeSB(giInstancesCpu.data(), static_cast<UINT>(giInstancesCpu.size()),
-               sizeof(GiInstanceGpu), giInstanceSB, giInstanceSRV);
+               sizeof(GIInstanceGpu), giInstanceSB, giInstanceSRV);
         if (!giNodeSRV || !giTriSRV || !giInstanceSRV) giInstanceCount = 0;
     }
 
@@ -1790,12 +1790,12 @@ struct D3D11RendererImpl
                 sceneBox.expand(obj.worldBounds);
         if (!sceneBox.isValid()) return;
 
-        const glm::vec3 padded = sceneBox.extents() + glm::vec3(kGiProbeSpacing);
+        const glm::vec3 padded = sceneBox.extents() + glm::vec3(kGIProbeSpacing);
         giGridCounts = glm::ivec3(
-            std::clamp(static_cast<int>(std::ceil(padded.x * 2.0f / kGiProbeSpacing)) + 1, 2, kGiMaxProbesPerAxis),
-            std::clamp(static_cast<int>(std::ceil(padded.y * 2.0f / kGiProbeSpacing)) + 1, 2, kGiMaxProbesPerAxis),
-            std::clamp(static_cast<int>(std::ceil(padded.z * 2.0f / kGiProbeSpacing)) + 1, 2, kGiMaxProbesPerAxis));
-        const glm::vec3 gridSpan = glm::vec3(giGridCounts - 1) * kGiProbeSpacing;
+            std::clamp(static_cast<int>(std::ceil(padded.x * 2.0f / kGIProbeSpacing)) + 1, 2, kGIMaxProbesPerAxis),
+            std::clamp(static_cast<int>(std::ceil(padded.y * 2.0f / kGIProbeSpacing)) + 1, 2, kGIMaxProbesPerAxis),
+            std::clamp(static_cast<int>(std::ceil(padded.z * 2.0f / kGIProbeSpacing)) + 1, 2, kGIMaxProbesPerAxis));
+        const glm::vec3 gridSpan = glm::vec3(giGridCounts - 1) * kGIProbeSpacing;
         giGridOrigin   = sceneBox.center() - gridSpan * 0.5f;
         giProbeCount   = giGridCounts.x * giGridCounts.y * giGridCounts.z;
         giProbesPerRow = std::min(giProbeCount, 32);
@@ -1811,8 +1811,8 @@ struct D3D11RendererImpl
     {
         if (giIrrTex || giProbeCount <= 0) return;
         const int rows = (giProbeCount + giProbesPerRow - 1) / giProbesPerRow;
-        const int w = giProbesPerRow * kGiProbeOctSize;
-        const int h = rows * kGiProbeOctSize;
+        const int w = giProbesPerRow * kGIProbeOctSize;
+        const int h = rows * kGIProbeOctSize;
 
         // Zero-initialised: the probe kernel EMA-blends against the previous
         // value, so undefined contents would poison the first update round.
@@ -2061,9 +2061,9 @@ struct D3D11RendererImpl
             glm::vec4 gridOrigin, gridCounts, rayParams, sunDirRadius, sunColor, skyAmbient;
             glm::vec4 lightPosRange[8], lightColorType[8], lightDirCos[8];
         } pcb{};
-        pcb.gridOrigin = glm::vec4(giGridOrigin, kGiProbeSpacing);
+        pcb.gridOrigin = glm::vec4(giGridOrigin, kGIProbeSpacing);
         pcb.gridCounts = glm::vec4(glm::vec3(giGridCounts), float(giProbesPerRow));
-        const float maxDist = glm::length(glm::vec3(giGridCounts) * kGiProbeSpacing) + kGiProbeSpacing;
+        const float maxDist = glm::length(glm::vec3(giGridCounts) * kGIProbeSpacing) + kGIProbeSpacing;
         pcb.rayParams = glm::vec4(maxDist, 0.92f, float(giProbeCursor), float(budget));
         glm::vec3 towardLight, lightColorIntensity;
         rw.dominantDirectionalLight(towardLight, lightColorIntensity);
@@ -2617,10 +2617,10 @@ struct D3D11RendererImpl
 
     // Build (or fetch from cache) the per-material VS + PS + input layout from the
     // MaterialShaderLibrary HLSL. Cached by hash^transparentbit for signature parity with
-    // the D3D12/Vulkan getOrBuild* (the transparent bit is redundant on D3D11 — the shader
+    // the D3D12/Vulkan GetOrBuild* (the transparent bit is redundant on D3D11 — the shader
     // objects don't bake blend/depth — but kept so the cache key matches the other backends).
     // Returns nullptr (and caches the miss so it never retries per-draw) on any failure.
-    MatShaders* getOrBuildMaterialShaders(uint64_t hash, const std::string& frag,
+    MatShaders* GetOrBuildMaterialShaders(uint64_t hash, const std::string& frag,
                                           const std::string& vertBody, bool transparent)
     {
 #if defined(HE_HAVE_SHADERC)
@@ -3411,7 +3411,7 @@ void D3D11Renderer::DrawScene(int width, int height)
         f.fog    = glm::vec4(m_environment.fogDensity, m_environment.fogHeightFalloff, 0, 0);
         f.viewport = glm::vec4(float(width), float(height), aoActive ? 1.0f : 0.0f, 0.0f);
         f.giParams     = glm::vec4(giActive ? 1.0f : 0.0f, p.giIndirectIntensity, 0.0f, 0.0f);
-        f.giGridOrigin = glm::vec4(p.giGridOrigin, D3D11RendererImpl::kGiProbeSpacing);
+        f.giGridOrigin = glm::vec4(p.giGridOrigin, D3D11RendererImpl::kGIProbeSpacing);
         f.giGridCounts = glm::vec4(glm::vec3(p.giGridCounts), float(p.giProbesPerRow));
         D3D11_MAPPED_SUBRESOURCE m{};
         if (SUCCEEDED(ctx->Map(p.perFrameCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m)))
@@ -3687,7 +3687,7 @@ void D3D11Renderer::DrawScene(int width, int height)
                 {
                     const bool matTransp = dc.opacity < 0.999f;
                     D3D11RendererImpl::MatShaders* sh =
-                        p.getOrBuildMaterialShaders(matHash, matFrag, matVertBody, matTransp);
+                        p.GetOrBuildMaterialShaders(matHash, matFrag, matVertBody, matTransp);
                     if (sh && sh->vs && sh->ps && sh->il)
                     {
                         // heTex0 = the material's base texture, matching the built-in selection +

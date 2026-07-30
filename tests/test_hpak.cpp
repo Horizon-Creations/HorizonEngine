@@ -545,7 +545,7 @@ static TypeIds authorAllTypes(const std::filesystem::path& dir)
 
     ScriptAsset script; script.type = HE::AssetType::Script; script.name = "script"; script.path = "script.hasset";
     script.sourceCode = "function on_update(dt) end";
-    script.language   = ScriptLanguage::Python; // exercise CHUNK_SLNG through pack/mount
+    script.language   = HE::ScriptLanguage::Python; // exercise CHUNK_SLNG through pack/mount
     REQUIRE(cm.saveAsset(script)); ids.script = script.id;
 
     ShaderAsset shader; shader.type = HE::AssetType::Shader; shader.name = "shader"; shader.path = "shader.hasset";
@@ -620,7 +620,7 @@ static void verifyAllTypes(Hpak::Codec codec)
     const ScriptAsset* scr = cm.getScript(ids.script);
     REQUIRE(scr != nullptr);
     CHECK(scr->sourceCode == "function on_update(dt) end");
-    CHECK(scr->language == ScriptLanguage::Python); // CHUNK_SLNG survived pack + mount
+    CHECK(scr->language == HE::ScriptLanguage::Python); // CHUNK_SLNG survived pack + mount
 
     const ShaderAsset* sh = cm.getShader(ids.shader);
     REQUIRE(sh != nullptr);
@@ -963,7 +963,7 @@ TEST_CASE("Cook: static mesh ships pre-interleaved + baked AABB; uncooked stays 
 
 // Builds a Script .hasset blob in memory; omit the language to test back-compat.
 static std::vector<uint8_t> makeScriptBlob(HE::UUID id, const char* src,
-                                           bool withLang, ScriptLanguage lang)
+                                           bool withLang, HE::ScriptLanguage lang)
 {
     std::vector<uint8_t> meta;
     HAsset::Writer::appendPOD(meta, static_cast<uint16_t>(HE::AssetType::Script));
@@ -986,18 +986,18 @@ TEST_CASE("Script language: CHUNK_SLNG round-trips, absent chunk defaults to Lua
     SUBCASE("explicit Python survives load")
     {
         const HE::UUID id{0x11, 0x22};
-        auto uuid = cm.loadAssetFromMemory(makeScriptBlob(id, "x", true, ScriptLanguage::Python));
+        auto uuid = cm.loadAssetFromMemory(makeScriptBlob(id, "x", true, HE::ScriptLanguage::Python));
         const ScriptAsset* s = cm.getScript(uuid);
         REQUIRE(s != nullptr);
-        CHECK(s->language == ScriptLanguage::Python);
+        CHECK(s->language == HE::ScriptLanguage::Python);
     }
     SUBCASE("missing SLNG chunk loads as Lua (back-compat with old .hasset files)")
     {
         const HE::UUID id{0x33, 0x44};
-        auto uuid = cm.loadAssetFromMemory(makeScriptBlob(id, "y", false, ScriptLanguage::Lua));
+        auto uuid = cm.loadAssetFromMemory(makeScriptBlob(id, "y", false, HE::ScriptLanguage::Lua));
         const ScriptAsset* s = cm.getScript(uuid);
         REQUIRE(s != nullptr);
-        CHECK(s->language == ScriptLanguage::Lua);
+        CHECK(s->language == HE::ScriptLanguage::Lua);
     }
 }
 

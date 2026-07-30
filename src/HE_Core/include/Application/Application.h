@@ -23,7 +23,7 @@ namespace HE
 	// All fields have sensible defaults so you only need to set what differs.
 	struct ApplicationConfig
 	{
-		HE::GraphicsAPI backend = HE::GraphicsAPI::OpenGL;
+		HE::RendererBackend backend = HE::RendererBackend::OpenGL;
 
 		HE::WindowProps windowprops;
 

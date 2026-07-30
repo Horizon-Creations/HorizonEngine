@@ -6,18 +6,29 @@
 
 enum class ScriptPropType { Float, Int, Bool, String };
 
-// Gameplay scripting language of a ScriptAsset. Lua is 0 so that language-tagged
-// instance ids (language in the high byte) stay bit-identical to the pre-tagging
-// Lua-only ids.
-enum class ScriptLanguage : uint8_t { Lua = 0, Python = 1 };
-
-// Derive the language from an asset/file path by extension (".py" → Python,
-// everything else → Lua, the engine's default scripting language).
-inline ScriptLanguage scriptLanguageFromPath(const std::string& path)
+namespace HE
 {
-	if (path.size() >= 3 && path.compare(path.size() - 3, 3, ".py") == 0)
-		return ScriptLanguage::Python;
-	return ScriptLanguage::Lua;
+	// Gameplay scripting language of a ScriptAsset. Lua is 0 so that language-
+	// tagged instance ids (language in the high byte) stay bit-identical to the
+	// pre-tagging Lua-only ids.
+	//
+	// The VALUES are persisted — as the 1-byte CHUNK_SLNG in .hasset/.hpak and as
+	// the high byte of a script InstanceId. Never renumber. The NAME is not
+	// persisted anywhere, which is why moving it into HE was safe: it changes no
+	// byte on disk. It used to sit at global scope, with a note warning that
+	// adding an HE::ScriptLanguage alongside it would silently shadow it for code
+	// inside namespace HE — that hazard only existed while both spellings did, and
+	// moving it rather than duplicating it is what removed it for good.
+	enum class ScriptLanguage : uint8_t { Lua = 0, Python = 1 };
+
+	// Derive the language from an asset/file path by extension (".py" → Python,
+	// everything else → Lua, the engine's default scripting language).
+	inline ScriptLanguage scriptLanguageFromPath(const std::string& path)
+	{
+		if (path.size() >= 3 && path.compare(path.size() - 3, 3, ".py") == 0)
+			return ScriptLanguage::Python;
+		return ScriptLanguage::Lua;
+	}
 }
 
 // UI pointer events dispatched to a UI element's behavior script. Handler

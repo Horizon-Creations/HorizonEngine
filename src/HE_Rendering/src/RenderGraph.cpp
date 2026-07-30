@@ -4,7 +4,7 @@
 void RenderGraph::addPass(std::unique_ptr<RenderPass> pass)
 {
 	if (pass)
-		passes_.push_back(std::move(pass));
+		m_passes.push_back(std::move(pass));
 }
 
 void RenderGraph::execute(const RenderWorld&           world,
@@ -13,11 +13,11 @@ void RenderGraph::execute(const RenderWorld&           world,
 {
 	// Each pass records into the scratch buffer on its own, then the backend
 	// binds the pass's declared target and replays it. Passes run in order.
-	for (const auto& pass : passes_)
+	for (const auto& pass : m_passes)
 	{
-		scratch_.reset();
-		pass->execute(world, sortedIndices, scratch_);
-		if (sink) sink(*pass, pass->describe(), scratch_);
+		m_scratch.reset();
+		pass->execute(world, sortedIndices, m_scratch);
+		if (sink) sink(*pass, pass->describe(), m_scratch);
 	}
 }
 
@@ -28,11 +28,11 @@ void RenderGraph::execute(const RenderWorld&           world,
 	// Passes run in insertion order, each appending to the shared command
 	// buffer. Reset once up front so the buffer holds exactly this frame.
 	outCmds.reset();
-	for (const auto& pass : passes_)
+	for (const auto& pass : m_passes)
 		pass->execute(world, sortedIndices, outCmds);
 }
 
 void RenderGraph::clear()
 {
-	passes_.clear();
+	m_passes.clear();
 }

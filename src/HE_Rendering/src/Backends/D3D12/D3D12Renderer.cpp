@@ -440,7 +440,7 @@ float2 giOctEncode(float3 n)
     return (n.z <= 0.0) ? ((1.0 - abs(p.yx)) * signP) : p;
 }
 
-static const int GI_PROBE_OCT = 8; // must match the host's kGiProbeOctSize
+static const int GI_PROBE_OCT = 8; // must match the host's kGIProbeOctSize
 
 // DDGI probe sampling — trilinear over the 8 surrounding probes x soft
 // backface x Chebyshev visibility. Direct port of the GL/D3D11 version.
@@ -1840,7 +1840,7 @@ struct D3D12RendererImpl
     static constexpr UINT        k_matSlot       = 256;              // 256-B stride/slot (U=176, HeParams=256)
 
     void createMaterialResources();
-    ID3D12PipelineState* getOrBuildMaterialPSO(uint64_t hash, const std::string& frag,
+    ID3D12PipelineState* GetOrBuildMaterialPSO(uint64_t hash, const std::string& frag,
                                                const std::string& vertBody, bool hdr, bool transparent);
 
     GpuMesh cube;
@@ -3570,21 +3570,21 @@ struct D3D12RendererImpl
     // ROOT SRVs, textures/UAVs in a dedicated shader-visible descriptor heap
     // (giSrvHeap) that is bound during the GI passes and swapped back to
     // sceneSrvHeap afterwards.
-    struct GiBlasRange
+    struct GIBlasRange
     {
         int32_t nodeOffset = 0, nodeCount = 0;
         int32_t triOffset  = 0, triCount  = 0;
         bool    valid      = false;
     };
-    struct GiInstanceGpu // must match the HLSL GiInst layout (raw structured buffer)
+    struct GIInstanceGpu // must match the HLSL GiInst layout (raw structured buffer)
     {
         glm::mat4 invTransform;
         glm::vec4 baseColor;
         int32_t   nodeOffset = 0, triOffset = 0, pad0 = 0, pad1 = 0;
     };
-    static constexpr float kGiProbeSpacing     = 4.0f;
-    static constexpr int   kGiMaxProbesPerAxis = 10;
-    static constexpr int   kGiProbeOctSize     = 8;
+    static constexpr float kGIProbeSpacing     = 4.0f;
+    static constexpr int   kGIMaxProbesPerAxis = 10;
+    static constexpr int   kGIProbeOctSize     = 8;
 
     bool  giSupported          = true;  // FL 11.0 guarantees CS 5.0; pipeline failure clears it
     bool  giEnabled            = false;
@@ -3616,10 +3616,10 @@ struct D3D12RendererImpl
     // Acceleration structures: shared node/tri upload buffers (rebuilt when a
     // new BLAS is appended), per-frame instance upload buffers (rewritten every
     // frame — transforms move).
-    std::unordered_map<HE::UUID, GiBlasRange> giBlasCache;
+    std::unordered_map<HE::UUID, GIBlasRange> giBlasCache;
     std::vector<HE::GiBvhNode>     giNodesCpu;
     std::vector<HE::GiBvhTriangle> giTrisCpu;
-    std::vector<GiInstanceGpu>     giInstancesCpu;
+    std::vector<GIInstanceGpu>     giInstancesCpu;
     bool giBlasDirty     = false;
     int  giInstanceCount = 0;
     ComPtr<ID3D12Resource> giNodeSB, giTriSB;
@@ -3718,9 +3718,9 @@ struct D3D12RendererImpl
         return h;
     }
 
-    GiBlasRange buildGiBlas(ContentManager* cm, const HE::UUID& meshId)
+    GIBlasRange BuildGIBlas(ContentManager* cm, const HE::UUID& meshId)
     {
-        GiBlasRange range;
+        GIBlasRange range;
         if (!cm) return range;
         const StaticMeshAsset* asset = cm->getStaticMesh(meshId);
         if (!asset || asset->indices.empty()) return range;
@@ -3756,11 +3756,11 @@ struct D3D12RendererImpl
         // Same caster filter as the shadow pass: castsShadow only, UNCULLED —
         // rays go in arbitrary directions, an off-screen caster still occludes.
         giInstancesCpu.clear();
-        auto resolveRange = [&](const HE::UUID& id) -> GiBlasRange
+        auto resolveRange = [&](const HE::UUID& id) -> GIBlasRange
         {
             auto it = giBlasCache.find(id);
             if (it == giBlasCache.end())
-                it = giBlasCache.emplace(id, buildGiBlas(cm, id)).first;
+                it = giBlasCache.emplace(id, BuildGIBlas(cm, id)).first;
             return it->second;
         };
 #if HE_D3D12_DXR
@@ -3785,10 +3785,10 @@ struct D3D12RendererImpl
             // Default-cube fallback — entities without a resolvable mesh RENDER
             // as the default cube, so they must occlude as one too.
             HE::UUID    effectiveId = obj.meshAssetId;
-            GiBlasRange range       = resolveRange(effectiveId);
+            GIBlasRange range       = resolveRange(effectiveId);
             if (!range.valid) { effectiveId = HE::kDefaultCubeMeshId; range = resolveRange(effectiveId); }
             if (!range.valid) continue;
-            GiInstanceGpu inst;
+            GIInstanceGpu inst;
             inst.invTransform = glm::inverse(obj.transform);
             inst.baseColor    = glm::vec4(obj.baseColor, 1.0f);
             inst.nodeOffset   = range.nodeOffset;
@@ -3854,13 +3854,13 @@ struct D3D12RendererImpl
             const UINT cap = std::max({ need, giInstanceCapacity[fi] * 2u, 64u });
             giInstancePtr[fi] = nullptr;
             giInstanceSB[fi]  = createUploadBuffer(
-                static_cast<UINT64>(cap) * sizeof(GiInstanceGpu),
+                static_cast<UINT64>(cap) * sizeof(GIInstanceGpu),
                 reinterpret_cast<void**>(&giInstancePtr[fi]));
             giInstanceCapacity[fi] = giInstanceSB[fi] ? cap : 0;
         }
         if (giInstancePtr[fi])
             std::memcpy(giInstancePtr[fi], giInstancesCpu.data(),
-                        static_cast<size_t>(giInstanceCount) * sizeof(GiInstanceGpu));
+                        static_cast<size_t>(giInstanceCount) * sizeof(GIInstanceGpu));
         if (!giNodeSB || !giTriSB || !giInstanceSB[fi]) giInstanceCount = 0;
 
 #if HE_D3D12_DXR
@@ -4371,12 +4371,12 @@ struct D3D12RendererImpl
                 sceneBox.expand(obj.worldBounds);
         if (!sceneBox.isValid()) return;
 
-        const glm::vec3 padded = sceneBox.extents() + glm::vec3(kGiProbeSpacing);
+        const glm::vec3 padded = sceneBox.extents() + glm::vec3(kGIProbeSpacing);
         giGridCounts = glm::ivec3(
-            std::clamp(static_cast<int>(std::ceil(padded.x * 2.0f / kGiProbeSpacing)) + 1, 2, kGiMaxProbesPerAxis),
-            std::clamp(static_cast<int>(std::ceil(padded.y * 2.0f / kGiProbeSpacing)) + 1, 2, kGiMaxProbesPerAxis),
-            std::clamp(static_cast<int>(std::ceil(padded.z * 2.0f / kGiProbeSpacing)) + 1, 2, kGiMaxProbesPerAxis));
-        const glm::vec3 gridSpan = glm::vec3(giGridCounts - 1) * kGiProbeSpacing;
+            std::clamp(static_cast<int>(std::ceil(padded.x * 2.0f / kGIProbeSpacing)) + 1, 2, kGIMaxProbesPerAxis),
+            std::clamp(static_cast<int>(std::ceil(padded.y * 2.0f / kGIProbeSpacing)) + 1, 2, kGIMaxProbesPerAxis),
+            std::clamp(static_cast<int>(std::ceil(padded.z * 2.0f / kGIProbeSpacing)) + 1, 2, kGIMaxProbesPerAxis));
+        const glm::vec3 gridSpan = glm::vec3(giGridCounts - 1) * kGIProbeSpacing;
         giGridOrigin   = sceneBox.center() - gridSpan * 0.5f;
         giProbeCount   = giGridCounts.x * giGridCounts.y * giGridCounts.z;
         giProbesPerRow = std::min(giProbeCount, 32);
@@ -4402,8 +4402,8 @@ struct D3D12RendererImpl
         waitForAllFrames();
 
         const int rows = (giProbeCount + giProbesPerRow - 1) / giProbesPerRow;
-        const UINT aw = static_cast<UINT>(giProbesPerRow * kGiProbeOctSize);
-        const UINT ah = static_cast<UINT>(rows * kGiProbeOctSize);
+        const UINT aw = static_cast<UINT>(giProbesPerRow * kGIProbeOctSize);
+        const UINT ah = static_cast<UINT>(rows * kGIProbeOctSize);
 
         D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
         auto makeAtlas = [&](DXGI_FORMAT fmt, UINT texelBytes, bool uav,
@@ -4732,9 +4732,9 @@ struct D3D12RendererImpl
             glm::vec4 gridOrigin, gridCounts, rayParams, sunDirRadius, sunColor, skyAmbient;
             glm::vec4 lightPosRange[8], lightColorType[8], lightDirCos[8];
         } pcb{};
-        pcb.gridOrigin = glm::vec4(giGridOrigin, kGiProbeSpacing);
+        pcb.gridOrigin = glm::vec4(giGridOrigin, kGIProbeSpacing);
         pcb.gridCounts = glm::vec4(glm::vec3(giGridCounts), float(giProbesPerRow));
-        const float maxDist = glm::length(glm::vec3(giGridCounts) * kGiProbeSpacing) + kGiProbeSpacing;
+        const float maxDist = glm::length(glm::vec3(giGridCounts) * kGIProbeSpacing) + kGIProbeSpacing;
         pcb.rayParams = glm::vec4(maxDist, 0.92f, float(giProbeCursor), float(budget));
         glm::vec3 towardLight, lightColorIntensity;
         rw.dominantDirectionalLight(towardLight, lightColorIntensity);
@@ -4911,7 +4911,7 @@ struct D3D12RendererImpl
     }
 
     // One-shot BLAS build for a mesh, cached by asset id (parallel to the SW
-    // giBlasCache). Geometry source is the same data buildGiBlas consumes:
+    // giBlasCache). Geometry source is the same data BuildGIBlas consumes:
     // cooked interleaved 8-float (position at offset 0 → 32-B stride feeds
     // VertexBuffer.StrideInBytes directly, no repack) or loose tight 3-float
     // positions. Builds on the dedicated one-shot list + full GPU sync — rare
@@ -5400,7 +5400,7 @@ struct D3D12RendererImpl
 // MaterialShaderLibrary HLSL (VS + PS). They share ONE root signature + a dedicated
 // 5-slot white SRV heap, and per frame in flight: a HeLighting CB (filled once/frame)
 // plus U and HeParams rings (one 256-B slot per draw). Mirrors the Vulkan A4 path
-// (VulkanRenderer::createMaterialResources + getOrBuildMaterialPipeline). No-op when
+// (VulkanRenderer::createMaterialResources + GetOrBuildMaterialPipeline). No-op when
 // HE_HAVE_SHADERC is off (m_matReady stays false, so the draw path skips it).
 // ─────────────────────────────────────────────────────────────────────────────
 void D3D12RendererImpl::createMaterialResources()
@@ -5558,7 +5558,7 @@ void D3D12RendererImpl::createMaterialResources()
 #endif
 }
 
-ID3D12PipelineState* D3D12RendererImpl::getOrBuildMaterialPSO(uint64_t hash, const std::string& frag,
+ID3D12PipelineState* D3D12RendererImpl::GetOrBuildMaterialPSO(uint64_t hash, const std::string& frag,
                                                               const std::string& vertBody, bool hdr,
                                                               bool transparent)
 {
@@ -6034,7 +6034,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         f.fog    = glm::vec4(m_environment.fogDensity, m_environment.fogHeightFalloff, 0, 0);
         f.viewport = glm::vec4(float(width), float(height), aoActive ? 1.0f : 0.0f, 0.0f);
         f.giParams     = glm::vec4(giActive ? 1.0f : 0.0f, p.giIndirectIntensity, 0.0f, 0.0f);
-        f.giGridOrigin = glm::vec4(p.giGridOrigin, D3D12RendererImpl::kGiProbeSpacing);
+        f.giGridOrigin = glm::vec4(p.giGridOrigin, D3D12RendererImpl::kGIProbeSpacing);
         f.giGridCounts = glm::vec4(glm::vec3(p.giGridCounts), float(p.giProbesPerRow));
         if (p.perFramePtr[p.frameIndex])
             std::memcpy(p.perFramePtr[p.frameIndex], &f, sizeof(f));
@@ -6340,7 +6340,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                                                     matHash, matFrag, matVertBody))
                 {
                     const bool matTransp = dc.opacity < 0.999f;
-                    ID3D12PipelineState* matPso = p.getOrBuildMaterialPSO(matHash, matFrag,
+                    ID3D12PipelineState* matPso = p.GetOrBuildMaterialPSO(matHash, matFrag,
                                                                           matVertBody, p.usingHDR, matTransp);
                     if (matPso && p.m_matDrawCursor[p.frameIndex] < D3D12RendererImpl::k_matMaxDraws)
                     {

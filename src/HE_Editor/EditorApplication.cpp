@@ -159,11 +159,11 @@ HE::ApplicationConfig EditorApplication::GetConfig() const
 	if (const char* rhi = std::getenv("HE_DUMP_RHI"); rhi && *rhi)
 	{
 		const std::string s = rhi;
-		if      (s == "Metal")               cfg.backend = HE::GraphicsAPI::Metal;
-		else if (s == "OpenGL" || s == "GL") cfg.backend = HE::GraphicsAPI::OpenGL;
-		else if (s == "Vulkan")              cfg.backend = HE::GraphicsAPI::Vulkan;
-		else if (s == "D3D11")               cfg.backend = HE::GraphicsAPI::D3D11;
-		else if (s == "D3D12")               cfg.backend = HE::GraphicsAPI::D3D12;
+		if      (s == "Metal")               cfg.backend = HE::RendererBackend::Metal;
+		else if (s == "OpenGL" || s == "GL") cfg.backend = HE::RendererBackend::OpenGL;
+		else if (s == "Vulkan")              cfg.backend = HE::RendererBackend::Vulkan;
+		else if (s == "D3D11")               cfg.backend = HE::RendererBackend::D3D11;
+		else if (s == "D3D12")               cfg.backend = HE::RendererBackend::D3D12;
 	}
 	return cfg;
 }
@@ -367,7 +367,7 @@ void EditorApplication::OnInit()
 	switch (m_backend)
 	{
 	// ── OpenGL ────────────────────────────────────────────────────────────────
-	case RendererFactory::Backend::OpenGL:
+	case HE::RendererBackend::OpenGL:
 		ImGui_ImplSDL3_InitForOpenGL(
 			window()->GetNativeWindow(),
 			window()->GetGLContext());
@@ -383,7 +383,7 @@ void EditorApplication::OnInit()
 
 #ifdef HE_IMGUI_METAL_ENABLED
 	// ── Metal ─────────────────────────────────────────────────────────────────
-	case RendererFactory::Backend::Metal:
+	case HE::RendererBackend::Metal:
 	{
 		auto* mtl = static_cast<MetalRenderer*>(renderer());
 		if (mtl && mtl->GetDevice())
@@ -401,7 +401,7 @@ void EditorApplication::OnInit()
 
 #ifdef _WIN32
 	// ── D3D11 ─────────────────────────────────────────────────────────────────
-	case RendererFactory::Backend::D3D11:
+	case HE::RendererBackend::D3D11:
 	{
 		HWND hwnd = static_cast<HWND>(SDL_GetPointerProperty(
 			SDL_GetWindowProperties(window()->GetNativeWindow()),
@@ -420,7 +420,7 @@ void EditorApplication::OnInit()
 	}
 
 	// ── D3D12 ─────────────────────────────────────────────────────────────────
-	case RendererFactory::Backend::D3D12:
+	case HE::RendererBackend::D3D12:
 	{
 		HWND hwnd = static_cast<HWND>(SDL_GetPointerProperty(
 			SDL_GetWindowProperties(window()->GetNativeWindow()),
@@ -479,7 +479,7 @@ void EditorApplication::OnInit()
 
 #ifdef HE_IMGUI_VULKAN_ENABLED
 	// ── Vulkan ────────────────────────────────────────────────────────────────
-	case RendererFactory::Backend::Vulkan:
+	case HE::RendererBackend::Vulkan:
 	{
 		auto* vk = static_cast<VulkanRenderer*>(renderer());
 		if (vk)
@@ -534,16 +534,16 @@ void EditorApplication::OnInit()
 
 			switch (m_backend)
 			{
-			case RendererFactory::Backend::OpenGL:
+			case HE::RendererBackend::OpenGL:
 				if (drawData->TotalVtxCount > 0)
 					ImGui_ImplOpenGL3_RenderDrawData(drawData);
 				break;
 #ifdef _WIN32
-			case RendererFactory::Backend::D3D11:
+			case HE::RendererBackend::D3D11:
 				if (drawData->TotalVtxCount > 0)
 					ImGui_ImplDX11_RenderDrawData(drawData);
 				break;
-			case RendererFactory::Backend::D3D12:
+			case HE::RendererBackend::D3D12:
 			{
 				if (!nativeContext) break;
 				auto* cmdList = static_cast<ID3D12GraphicsCommandList*>(nativeContext);
@@ -571,14 +571,14 @@ void EditorApplication::OnInit()
 			}
 #endif
 #ifdef HE_IMGUI_VULKAN_ENABLED
-			case RendererFactory::Backend::Vulkan:
+			case HE::RendererBackend::Vulkan:
 				if (nativeContext && drawData->TotalVtxCount > 0)
 					ImGui_ImplVulkan_RenderDrawData(drawData,
 						static_cast<VkCommandBuffer>(nativeContext));
 				break;
 #endif
 #ifdef HE_IMGUI_METAL_ENABLED
-			case RendererFactory::Backend::Metal:
+			case HE::RendererBackend::Metal:
 			{
 				if (!nativeContext || drawData->TotalVtxCount <= 0) break;
 				auto* mtlCtx = static_cast<MetalOverlayContext*>(nativeContext);
@@ -599,7 +599,7 @@ void EditorApplication::OnInit()
 		// below) so the renderer's CreateImGuiTexture can call back into ImGui's
 		// descriptor heap.
 #ifdef _WIN32
-		if (m_backend == RendererFactory::Backend::D3D12)
+		if (m_backend == HE::RendererBackend::D3D12)
 		{
 			renderer()->SetImGuiTextureRegistrar(
 				[this](void* res, void* /*unused*/) -> void*
@@ -628,7 +628,7 @@ void EditorApplication::OnInit()
 		}
 #endif
 #ifdef HE_IMGUI_VULKAN_ENABLED
-		if (m_backend == RendererFactory::Backend::Vulkan)
+		if (m_backend == HE::RendererBackend::Vulkan)
 		{
 			renderer()->SetImGuiTextureRegistrar(
 				[](void* view, void* sampler) -> void*
@@ -1443,7 +1443,7 @@ void EditorApplication::OnRender(float dt)
 	// then hand the opaque handle back to the renderer so GetViewportTexture()
 	// returns it for use in ImGui::Image().
 #ifdef _WIN32
-	if (m_backend == RendererFactory::Backend::D3D12)
+	if (m_backend == HE::RendererBackend::D3D12)
 	{
 		auto* dx12 = static_cast<D3D12Renderer*>(renderer());
 		if (dx12 && dx12->HasViewportResourceChanged())
@@ -1486,7 +1486,7 @@ void EditorApplication::OnRender(float dt)
 	}
 #endif
 #ifdef HE_IMGUI_VULKAN_ENABLED
-	if (m_backend == RendererFactory::Backend::Vulkan)
+	if (m_backend == HE::RendererBackend::Vulkan)
 	{
 		auto* vk = static_cast<VulkanRenderer*>(renderer());
 		if (vk && vk->HasViewportResourceChanged())
@@ -2854,7 +2854,7 @@ void EditorApplication::OnShutdown()
 
 	switch (m_backend)
 	{
-	case RendererFactory::Backend::OpenGL:
+	case HE::RendererBackend::OpenGL:
 		// ImGui_ImplOpenGL3_Shutdown() re-inits the GL3W loader inside
 		// DestroyDeviceObjects(); its parse_version() then reads glGetString/
 		// glGetIntegerv. If no GL context is current on this thread, those return
@@ -2869,11 +2869,11 @@ void EditorApplication::OnShutdown()
 		ImGui_ImplSDL3_Shutdown();
 		break;
 #ifdef _WIN32
-	case RendererFactory::Backend::D3D11:
+	case HE::RendererBackend::D3D11:
 		ImGui_ImplDX11_Shutdown();
 		ImGui_ImplSDL3_Shutdown();
 		break;
-	case RendererFactory::Backend::D3D12:
+	case HE::RendererBackend::D3D12:
 		ImGui_ImplDX12_Shutdown();
 		ImGui_ImplSDL3_Shutdown();
 		if (m_d3d12SrvAllocator)
@@ -2891,13 +2891,13 @@ void EditorApplication::OnShutdown()
 		break;
 #endif
 #ifdef HE_IMGUI_VULKAN_ENABLED
-	case RendererFactory::Backend::Vulkan:
+	case HE::RendererBackend::Vulkan:
 		ImGui_ImplVulkan_Shutdown();
 		ImGui_ImplSDL3_Shutdown();
 		break;
 #endif
 #ifdef HE_IMGUI_METAL_ENABLED
-	case RendererFactory::Backend::Metal:
+	case HE::RendererBackend::Metal:
 		ImGuiMetalBridge::Shutdown();
 		ImGui_ImplSDL3_Shutdown();
 		break;
@@ -2965,15 +2965,15 @@ bool EditorApplication::OnEvent(const SDL_Event& event)
 
 	switch (m_backend)
 	{
-	case RendererFactory::Backend::OpenGL:
-	case RendererFactory::Backend::Vulkan:
-	case RendererFactory::Backend::Metal:
+	case HE::RendererBackend::OpenGL:
+	case HE::RendererBackend::Vulkan:
+	case HE::RendererBackend::Metal:
 		// SDL3 platform backend handles keyboard, mouse, window, touch.
 		consumed = ImGui_ImplSDL3_ProcessEvent(&event);
 		break;
 #ifdef _WIN32
-	case RendererFactory::Backend::D3D11:
-	case RendererFactory::Backend::D3D12:
+	case HE::RendererBackend::D3D11:
+	case HE::RendererBackend::D3D12:
 		// Win32 platform backend only handles Win32 messages via WndProc.
 		// We still forward SDL events for mouse/keyboard via SDL3 backend,
 		// but for D3D+Win32 the ImGui_ImplWin32 path already intercepts

@@ -63,11 +63,11 @@ public:
 
     const std::vector<DrawCall>&        drawCalls()        const;
     const std::vector<SkinnedDrawCall>& skinnedDrawCalls() const;
-    bool hasPostProcess() const { return postProcess_; }
-    bool empty() const { return drawCalls_.empty() && skinnedDrawCalls_.empty(); }
+    bool hasPostProcess() const { return m_postProcess; }
+    bool empty() const { return m_drawCalls.empty() && m_skinnedDrawCalls.empty(); }
 
 private:
-    std::vector<DrawCall>        drawCalls_;
-    std::vector<SkinnedDrawCall> skinnedDrawCalls_;
-    bool                         postProcess_ = false;
+    std::vector<DrawCall>        m_drawCalls;
+    std::vector<SkinnedDrawCall> m_skinnedDrawCalls;
+    bool                         m_postProcess = false;
 };

@@ -10,7 +10,7 @@ namespace HC = HorizonCode;
 namespace
 {
 // Process-wide, so a copy in the Level Script tab pastes into a Widget graph.
-std::string g_payload;
+std::string s_payload;
 
 bool copyable(const HC::Node& n)
 {
@@ -40,7 +40,7 @@ bool copy(const HC::Graph& g, const std::vector<int>& ids)
 	// paste into a graph without that variable leaves an unbound node the user
 	// can rebind — pasting a variable DECLARATION would collide with the
 	// destination's own names.
-	g_payload = HC::toJson(tmp);
+	s_payload = HC::toJson(tmp);
 	return true;
 }
 
@@ -48,7 +48,7 @@ std::vector<int> paste(HC::Graph& g, float atX, float atY, int subgraph)
 {
 	std::vector<int> fresh;
 	HC::Graph tmp;
-	if (g_payload.empty() || !HC::fromJson(g_payload, tmp) || tmp.nodes.empty())
+	if (s_payload.empty() || !HC::fromJson(s_payload, tmp) || tmp.nodes.empty())
 		return fresh;
 
 	float mnx = tmp.nodes.front().x, mny = tmp.nodes.front().y;
@@ -75,6 +75,6 @@ std::vector<int> paste(HC::Graph& g, float atX, float atY, int subgraph)
 	return fresh;
 }
 
-bool empty() { return g_payload.empty(); }
+bool empty() { return s_payload.empty(); }
 
 } // namespace HcClipboard

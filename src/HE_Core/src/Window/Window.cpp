@@ -24,7 +24,7 @@ namespace HE
         SDL_WindowFlags flags = SDL_WINDOW_RESIZABLE;
         switch (props.api)
         {
-        case GraphicsAPI::OpenGL:
+        case RendererBackend::OpenGL:
 #ifdef __APPLE__
             // macOS caps OpenGL at 4.1 Core and requires a forward-compatible context
             SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
@@ -43,14 +43,14 @@ namespace HE
             // D3D uses the logical size (GetWidth/Height) so it is left unchanged.
             flags |= SDL_WINDOW_OPENGL | SDL_WINDOW_HIGH_PIXEL_DENSITY;
             break;
-        case GraphicsAPI::Vulkan:
+        case RendererBackend::Vulkan:
             flags |= SDL_WINDOW_VULKAN | SDL_WINDOW_HIGH_PIXEL_DENSITY;
             break;
-        case GraphicsAPI::Metal:
+        case RendererBackend::Metal:
             flags |= SDL_WINDOW_METAL | SDL_WINDOW_HIGH_PIXEL_DENSITY;
             break;
-        case GraphicsAPI::D3D11:
-        case GraphicsAPI::D3D12:
+        case RendererBackend::D3D11:
+        case RendererBackend::D3D12:
             // Plain window — D3D creates its own swap chain via HWND
             break;
         }
@@ -73,7 +73,7 @@ namespace HE
             m_pixelHeight = ph > 0 ? static_cast<uint32_t>(ph) : m_height;
         }
 
-        if (props.api == GraphicsAPI::OpenGL)
+        if (props.api == RendererBackend::OpenGL)
         {
             m_glContext = SDL_GL_CreateContext(m_window);
             if (!m_glContext)
@@ -126,7 +126,7 @@ namespace HE
 
     void Window::SwapBuffers()
     {
-        if (m_api == GraphicsAPI::OpenGL)
+        if (m_api == RendererBackend::OpenGL)
             SDL_GL_SwapWindow(m_window);
         // D3D/Vulkan present is called by the backend inside Render()
     }
@@ -159,7 +159,7 @@ namespace HE
 
     void Window::SetVSync(bool enabled)
     {
-        if (m_api == GraphicsAPI::OpenGL && m_window && m_glContext)
+        if (m_api == RendererBackend::OpenGL && m_window && m_glContext)
         {
             SDL_GL_MakeCurrent(m_window, static_cast<SDL_GLContext>(m_glContext));
             SDL_GL_SetSwapInterval(enabled ? 1 : 0);

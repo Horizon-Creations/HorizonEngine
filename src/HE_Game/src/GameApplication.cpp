@@ -57,9 +57,9 @@ HE::ApplicationConfig GameApplication::GetConfig() const
 	cfg.windowprops.vsync  = true;
 	cfg.windowprops.mode   = HE::WindowMode::Fullscreen;
 #ifdef __APPLE__
-	cfg.backend = RendererFactory::Backend::Metal;
+	cfg.backend = HE::RendererBackend::Metal;
 #else
-	cfg.backend = RendererFactory::Backend::OpenGL;
+	cfg.backend = HE::RendererBackend::OpenGL;
 #endif
 	return cfg;
 }

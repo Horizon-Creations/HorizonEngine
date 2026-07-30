@@ -21,7 +21,7 @@ namespace
 		bool        python         = false;
 		std::string name;                 // filename, shown in the header
 	};
-	AssetPanelState<State> g_states;
+	AssetPanelState<State> s_states;
 
 	bool isDirtyState(const State& st) { return st.editor.GetUndoIndex() != st.savedUndoIndex; }
 
@@ -51,7 +51,7 @@ namespace
 
 	State& stateFor(const std::string& path)
 	{
-		State& st = g_states[path];
+		State& st = s_states[path];
 		if (!st.loaded) loadFromDisk(st, path);
 		return st;
 	}
@@ -82,7 +82,7 @@ namespace ScriptEditorPanel
 {
 	bool isDirty(const std::string& path)
 	{
-		const State* st = g_states.find(path);
+		const State* st = s_states.find(path);
 		return st && st->loaded && isDirtyState(*st);
 	}
 
@@ -91,7 +91,7 @@ namespace ScriptEditorPanel
 		return EditorAssetTypeCache::is(path, HE::AssetType::Script);
 	}
 
-	void forget(const std::string& path) { g_states.forget(path); }
+	void forget(const std::string& path) { s_states.forget(path); }
 
 	void render(AppContext& ctx, const std::string& path, const ImVec2& pos, const ImVec2& size)
 	{

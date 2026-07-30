@@ -32,10 +32,10 @@ public:
 	std::string getDumpsDir() const;
 
 	// config
-	const HE::GraphicsAPI&            getSelectedRHI()       const { return m_engineStatus.selectedRHI; }
+	const HE::RendererBackend&        getSelectedRHI()        const { return m_engineStatus.selectedRHI; }
 	const std::string&                getLastProjectPath()    const { return m_engineStatus.lastProjectPath; }
 	const std::vector<std::string>&   getKnownProjects()      const { return m_engineStatus.knownProjects; }
-	void setSelectedRHI(HE::GraphicsAPI rhi)                        { m_engineStatus.selectedRHI = rhi; }
+	void setSelectedRHI(HE::RendererBackend rhi)                    { m_engineStatus.selectedRHI = rhi; }
 	void setLastProjectPath(const std::string& path)                { m_engineStatus.lastProjectPath = path; }
 	// Adds path to front of known-projects list (deduplicates, max 10)
 	void addKnownProject(const std::string& path);
@@ -63,7 +63,7 @@ public:
 
 	// Thread-safe read accessor: hält den shared_lock für die Lebensdauer des zurückgegebenen lock-Objekts.
 	// Verwendung: auto [folder, lock] = globalState->lockContentFolder();
-	std::pair<const Folder&, std::shared_lock<std::shared_mutex>> lockContentFolder() const
+	std::pair<const HE::Folder&, std::shared_lock<std::shared_mutex>> lockContentFolder() const
 	{
 		return { m_contentFolder, std::shared_lock<std::shared_mutex>(m_contentFolderMutex) };
 	}
@@ -83,7 +83,7 @@ public:
 
 	std::atomic<uint64_t> engineFolderVersion{0};
 
-	std::pair<const Folder&, std::shared_lock<std::shared_mutex>> lockEngineFolder() const
+	std::pair<const HE::Folder&, std::shared_lock<std::shared_mutex>> lockEngineFolder() const
 	{
 		return { m_engineFolder, std::shared_lock<std::shared_mutex>(m_engineFolderMutex) };
 	}
@@ -97,7 +97,7 @@ public:
 
 	std::atomic<uint64_t> sourceFolderVersion{0};
 
-	std::pair<const Folder&, std::shared_lock<std::shared_mutex>> lockSourceFolder() const
+	std::pair<const HE::Folder&, std::shared_lock<std::shared_mutex>> lockSourceFolder() const
 	{
 		return { m_sourceFolder, std::shared_lock<std::shared_mutex>(m_sourceFolderMutex) };
 	}
@@ -107,13 +107,13 @@ private:
 
 	//Structs
 	EngineStatus m_engineStatus;
-	Folder m_contentFolder;
+	HE::Folder m_contentFolder;
 	mutable std::shared_mutex m_contentFolderMutex;
 
-	Folder m_engineFolder;
+	HE::Folder m_engineFolder;
 	mutable std::shared_mutex m_engineFolderMutex;
 
-	Folder m_sourceFolder;
+	HE::Folder m_sourceFolder;
 	mutable std::shared_mutex m_sourceFolderMutex;
 
 	//Custom config entries

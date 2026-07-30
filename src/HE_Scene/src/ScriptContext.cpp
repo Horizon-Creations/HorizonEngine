@@ -567,7 +567,7 @@ void ScriptContext::setContentManager(ContentManager* cm)
 
 IScriptBackend* ScriptContext::backendForId(InstanceId id)
 {
-    if (langOf(id) == ScriptLanguage::Python && m_py) return m_py.get();
+    if (langOf(id) == HE::ScriptLanguage::Python && m_py) return m_py.get();
     return &m_engine;
 }
 
@@ -578,9 +578,9 @@ IScriptBackend* ScriptContext::backendForName(const std::string& name)
 }
 
 bool ScriptContext::loadScript(const std::string& name, const std::string& source,
-                               ScriptLanguage lang)
+                               HE::ScriptLanguage lang)
 {
-    if (lang == ScriptLanguage::Python)
+    if (lang == HE::ScriptLanguage::Python)
     {
         if (!m_py) { m_lastBackend = &m_engine; return false; } // built without Python
         m_lastBackend = m_py.get();
@@ -594,16 +594,16 @@ ScriptEngine::InstanceId ScriptContext::createInstance(const std::string& script
                                                         entt::entity       entity)
 {
     IScriptBackend* backend = backendForName(scriptName);
-    const ScriptLanguage lang = (backend == m_py.get()) ? ScriptLanguage::Python
-                                                        : ScriptLanguage::Lua;
+    const HE::ScriptLanguage lang = (backend == m_py.get()) ? HE::ScriptLanguage::Python
+                                                        : HE::ScriptLanguage::Lua;
     return createInstance(scriptName, entity, lang);
 }
 
 ScriptEngine::InstanceId ScriptContext::createInstance(const std::string& scriptName,
                                                         entt::entity       entity,
-                                                        ScriptLanguage     lang)
+                                                        HE::ScriptLanguage     lang)
 {
-    IScriptBackend* backend = (lang == ScriptLanguage::Python)
+    IScriptBackend* backend = (lang == HE::ScriptLanguage::Python)
                                   ? static_cast<IScriptBackend*>(m_py.get())
                                   : &m_engine;
     if (!backend) return IScriptBackend::kInvalidInstance; // Python requested, unavailable
@@ -705,9 +705,9 @@ bool ScriptContext::hotReloadScript(const std::string& name, const std::string& 
 }
 
 bool ScriptContext::hotReloadScript(const std::string& name, const std::string& source,
-                                    ScriptLanguage lang)
+                                    HE::ScriptLanguage lang)
 {
-    IScriptBackend* b = (lang == ScriptLanguage::Python)
+    IScriptBackend* b = (lang == HE::ScriptLanguage::Python)
                             ? static_cast<IScriptBackend*>(m_py.get())
                             : &m_engine;
     if (!b) { m_lastBackend = &m_engine; return false; } // Python requested, unavailable
@@ -721,9 +721,9 @@ bool ScriptContext::isScriptLoaded(const std::string& name) const
     return m_py && m_py->isScriptLoaded(name);
 }
 
-bool ScriptContext::isScriptLoaded(const std::string& name, ScriptLanguage lang) const
+bool ScriptContext::isScriptLoaded(const std::string& name, HE::ScriptLanguage lang) const
 {
-    if (lang == ScriptLanguage::Python) return m_py && m_py->isScriptLoaded(name);
+    if (lang == HE::ScriptLanguage::Python) return m_py && m_py->isScriptLoaded(name);
     return m_engine.isScriptLoaded(name);
 }
 

@@ -1851,7 +1851,7 @@ void VulkanRenderer::destroyScenePipeline()
 // layout / pipeline layout and, per frame in flight, a descriptor pool (reset whole
 // each frame) plus host-visible UBO rings for the per-object `U` block and per-draw
 // `HeParams`, and a single `HeLighting` buffer filled once per frame. Mirrors the GL
-// reference (OpenGLRenderer::getOrBuildMaterialProgram + its draw integration).
+// reference (OpenGLRenderer::GetOrBuildMaterialProgram + its draw integration).
 // ─────────────────────────────────────────────────────────────────────────────
 void VulkanRenderer::createMaterialResources()
 {
@@ -1997,7 +1997,7 @@ void VulkanRenderer::destroyMaterialResources()
 #endif
 }
 
-VkPipeline VulkanRenderer::getOrBuildMaterialPipeline(uint64_t hash, const std::string& frag,
+VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::string& frag,
                                                       const std::string& vertBody, bool hdr,
                                                       bool transparent)
 {
@@ -3588,7 +3588,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                                     m_ssaoRanThisFrame ? 1.0f : 0.0f, 0.0f);
         // giParams.y == 1 iff runGi() completed this frame (mask + atlases hold
         // valid data and the scene set's bindings 4-6 point at them).
-        f.giGridOrigin  = glm::vec4(m_giGridOrigin, kGiProbeSpacing);
+        f.giGridOrigin  = glm::vec4(m_giGridOrigin, kGIProbeSpacing);
         f.giGridCounts  = glm::vec4(float(m_giGridCounts.x), float(m_giGridCounts.y),
                                     float(m_giGridCounts.z), float(m_giProbesPerRow));
         f.giParams      = glm::vec4(m_giIndirectIntensity, m_giRanThisFrame ? 1.0f : 0.0f, 0.0f, 0.0f);
@@ -3715,7 +3715,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                     // depth-writing pipeline (hence RenderSorter::isTransparent, tint
                     // alpha included, not a bare dc.opacity test).
                     const bool matTransp = RenderSorter::isTransparent(dc);
-                    VkPipeline matPipe = getOrBuildMaterialPipeline(matHash, matFrag, matVertBody,
+                    VkPipeline matPipe = GetOrBuildMaterialPipeline(matHash, matFrag, matVertBody,
                                                                     hdr, matTransp);
                     uint32_t& cursor = m_matDrawCursor[m_currentFrame];
                     if (matPipe != VK_NULL_HANDLE && cursor < k_matMaxDraws)
@@ -5063,9 +5063,9 @@ void VulkanRenderer::SetGISettings(const GISettings& s)
 // VK-B/C — until then this is inert (GI-off rendering byte-identical) and
 // GetCapabilities keeps supportsGlobalIllumination = false.
 
-VulkanRenderer::GiBlasRange VulkanRenderer::buildGiBlas(const HE::UUID& meshId)
+VulkanRenderer::GIBlasRange VulkanRenderer::BuildGIBlas(const HE::UUID& meshId)
 {
-    GiBlasRange range;
+    GIBlasRange range;
     if (!m_contentManager) return range;
     const StaticMeshAsset* asset = m_contentManager->getStaticMesh(meshId);
     if (!asset || asset->indices.empty()) return range;
@@ -5144,13 +5144,13 @@ void VulkanRenderer::updateGiAccel()
 
     // Same caster filter as the shadow pass / the other backends' TLAS builds:
     // castsShadow only, UNculled (rays go in arbitrary directions).
-    std::vector<GiInstanceGpu> instances;
+    std::vector<GIInstanceGpu> instances;
     instances.reserve(m_renderWorld.objects.size());
-    auto resolveRange = [&](const HE::UUID& id) -> GiBlasRange
+    auto resolveRange = [&](const HE::UUID& id) -> GIBlasRange
     {
         auto it = m_giBlasCache.find(id);
         if (it == m_giBlasCache.end())
-            it = m_giBlasCache.emplace(id, buildGiBlas(id)).first;
+            it = m_giBlasCache.emplace(id, BuildGIBlas(id)).first;
         return it->second;
     };
     // HW path: build a VkAccelerationStructureInstanceKHR array in EXACTLY the
@@ -5171,10 +5171,10 @@ void VulkanRenderer::updateGiAccel()
         // RENDERS as the default cube (draw-loop fallback), so it must occlude
         // as one too, or plain cube entities cast no GI shadow at all.
         HE::UUID    effectiveId = obj.meshAssetId;
-        GiBlasRange range       = resolveRange(effectiveId);
+        GIBlasRange range       = resolveRange(effectiveId);
         if (!range.valid) { effectiveId = HE::kDefaultCubeMeshId; range = resolveRange(effectiveId); }
         if (!range.valid) continue;
-        GiInstanceGpu inst;
+        GIInstanceGpu inst;
         inst.invTransform = glm::inverse(obj.transform);
         inst.baseColor    = glm::vec4(obj.baseColor, 1.0f);
         inst.nodeOffset   = range.nodeOffset;
@@ -5229,7 +5229,7 @@ void VulkanRenderer::updateGiAccel()
     static_assert(k_maxFramesInFlight <= sizeof(m_giInstanceBuf) / sizeof(m_giInstanceBuf[0]),
                   "GI instance ring smaller than frames in flight");
     if (!uploadGiBuffer(m_giInstanceBuf[m_currentFrame], instances.data(),
-                        instances.size() * sizeof(GiInstanceGpu)))
+                        instances.size() * sizeof(GIInstanceGpu)))
         return;
     m_giInstanceCount = static_cast<int>(instances.size());
 
@@ -5333,7 +5333,7 @@ void VulkanRenderer::destroyGiHwBlas(GiHwBlas& b)
 // address input buffer, query build sizes, build on a one-time command buffer
 // (QueueWaitIdle — BLAS builds are rare: once per distinct mesh), then free
 // input + scratch (a built BLAS references neither). Geometry source is the
-// same data buildGiBlas consumes: cooked interleaved 8-float (position at
+// same data BuildGIBlas consumes: cooked interleaved 8-float (position at
 // offset 0 → stride 32 B feeds vertexStride directly, no repack) or loose
 // tight 3-float positions.
 VulkanRenderer::GiHwBlas VulkanRenderer::buildGiHwBlas(const HE::UUID& meshId)
@@ -6184,12 +6184,12 @@ void VulkanRenderer::ensureGiProbeGrid()
             sceneBox.expand(obj.worldBounds);
     if (!sceneBox.isValid()) return;
 
-    const glm::vec3 padded = sceneBox.extents() + glm::vec3(kGiProbeSpacing);
+    const glm::vec3 padded = sceneBox.extents() + glm::vec3(kGIProbeSpacing);
     m_giGridCounts = glm::ivec3(
-        std::clamp(static_cast<int>(std::ceil(padded.x * 2.0f / kGiProbeSpacing)) + 1, 2, kGiMaxProbesPerAxis),
-        std::clamp(static_cast<int>(std::ceil(padded.y * 2.0f / kGiProbeSpacing)) + 1, 2, kGiMaxProbesPerAxis),
-        std::clamp(static_cast<int>(std::ceil(padded.z * 2.0f / kGiProbeSpacing)) + 1, 2, kGiMaxProbesPerAxis));
-    const glm::vec3 gridSpan = glm::vec3(m_giGridCounts - 1) * kGiProbeSpacing;
+        std::clamp(static_cast<int>(std::ceil(padded.x * 2.0f / kGIProbeSpacing)) + 1, 2, kGIMaxProbesPerAxis),
+        std::clamp(static_cast<int>(std::ceil(padded.y * 2.0f / kGIProbeSpacing)) + 1, 2, kGIMaxProbesPerAxis),
+        std::clamp(static_cast<int>(std::ceil(padded.z * 2.0f / kGIProbeSpacing)) + 1, 2, kGIMaxProbesPerAxis));
+    const glm::vec3 gridSpan = glm::vec3(m_giGridCounts - 1) * kGIProbeSpacing;
     m_giGridOrigin     = sceneBox.center() - gridSpan * 0.5f;
     m_giProbeCount     = m_giGridCounts.x * m_giGridCounts.y * m_giGridCounts.z;
     m_giProbesPerRow   = std::min(m_giProbeCount, 32);
@@ -6201,8 +6201,8 @@ void VulkanRenderer::ensureGiProbeAtlas()
 {
     if (m_giIrrAtlas.img || m_giProbeCount <= 0) return;
     const int rows = (m_giProbeCount + m_giProbesPerRow - 1) / m_giProbesPerRow;
-    const uint32_t aw = static_cast<uint32_t>(m_giProbesPerRow * kGiProbeOctSize);
-    const uint32_t ah = static_cast<uint32_t>(rows * kGiProbeOctSize);
+    const uint32_t aw = static_cast<uint32_t>(m_giProbesPerRow * kGIProbeOctSize);
+    const uint32_t ah = static_cast<uint32_t>(rows * kGIProbeOctSize);
 
     auto makeAtlas = [&](VkFormat fmt, GiImage& out) -> bool
     {
@@ -6358,10 +6358,10 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
     if (probesActive)
     {
         GiProbeUBOData pu{};
-        pu.gridOrigin = glm::vec4(m_giGridOrigin, kGiProbeSpacing);
+        pu.gridOrigin = glm::vec4(m_giGridOrigin, kGIProbeSpacing);
         pu.gridCounts = glm::vec4(float(m_giGridCounts.x), float(m_giGridCounts.y),
                                   float(m_giGridCounts.z), float(m_giProbesPerRow));
-        const float maxDist = glm::length(glm::vec3(m_giGridCounts) * kGiProbeSpacing) + kGiProbeSpacing;
+        const float maxDist = glm::length(glm::vec3(m_giGridCounts) * kGIProbeSpacing) + kGIProbeSpacing;
         pu.rayParams  = glm::vec4(maxDist, 0.92f, float(m_giProbeCursor), float(probeBudget));
         pu.skyAmbient = glm::vec4(m_renderWorld.ambient, 0.0f);
         const HE::PackedLightArray pl = HE::BuildPackedLightArray(m_renderWorld);

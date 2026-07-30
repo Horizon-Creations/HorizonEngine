@@ -72,7 +72,7 @@ namespace
 		bool        resolved = false;    // sibling paths worked out yet?
 		std::string className;           // stem, shown in the header bar
 	};
-	AssetPanelState<State> g_states;
+	AssetPanelState<State> s_states;
 
 	void loadBuf(FileBuf& fb)
 	{
@@ -88,7 +88,7 @@ namespace
 	// load whichever exist. `canonical` is one of the two files (the grid item).
 	State& stateFor(const std::string& canonical)
 	{
-		State& st = g_states[canonical];
+		State& st = s_states[canonical];
 		if (st.resolved) return st;
 
 		fs::path p(canonical);
@@ -138,11 +138,11 @@ namespace CppClassEditorPanel
 
 	bool isDirty(const std::string& path)
 	{
-		const State* st = g_states.find(path);
+		const State* st = s_states.find(path);
 		return st && (bufDirty(st->header) || bufDirty(st->source));
 	}
 
-	void forget(const std::string& path) { g_states.forget(path); }
+	void forget(const std::string& path) { s_states.forget(path); }
 
 	void render(AppContext& ctx, const std::string& path, const ImVec2& pos, const ImVec2& size)
 	{

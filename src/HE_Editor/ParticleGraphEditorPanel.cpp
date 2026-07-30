@@ -47,11 +47,11 @@ struct State
 	float previewYaw = 0.6f, previewPitch = 0.2f, previewDist = 1.6f;
 };
 
-static AssetPanelState<State> g_states;
+static AssetPanelState<State> s_states;
 
 static State& stateFor(const std::string& path, AppContext& ctx)
 {
-	State& st = g_states[path];
+	State& st = s_states[path];
 	if (st.loaded || !ctx.contentManager) return st;
 
 	st.assetId = openPanelAsset(ctx, path, st.name, st.relPath);
@@ -73,9 +73,9 @@ bool isParticleAsset(const std::string& path)
 	return EditorAssetTypeCache::is(path, HE::AssetType::ParticleSystem);
 }
 
-bool isDirty(const std::string& assetPath) { return g_states.dirty(assetPath); }
+bool isDirty(const std::string& assetPath) { return s_states.dirty(assetPath); }
 
-void forget(const std::string& assetPath) { g_states.forget(assetPath); }
+void forget(const std::string& assetPath) { s_states.forget(assetPath); }
 
 namespace
 {
