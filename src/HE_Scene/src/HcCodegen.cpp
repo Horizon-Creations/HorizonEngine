@@ -754,15 +754,15 @@ private:
             b.line("hc::setProperty(m_ctx, " + std::to_string(n.elem) + ", " + strLit(n.s) +
                    ", hc::toValue(" + input(n, 0, fnCtx) + "));");
             break;
-        case NT::ShowWidget: b.line("hc::showSelf(m_ctx);"); break;
-        case NT::HideWidget: b.line("hc::hideSelf(m_ctx);"); break;
+        case NT::ShowSelf: b.line("hc::showSelf(m_ctx);"); break;
+        case NT::HideSelf: b.line("hc::hideSelf(m_ctx);"); break;
         case NT::CreateWidget:
             b.line(slotRef(n, 0) + " = hc::createWidget(m_ctx, " + strLit(n.s) + ");");
             break;
-        case NT::ShowWidgetId:
+        case NT::ShowWidget:
             b.line("hc::showWidget(m_ctx, (int)(" + input(n, 0, fnCtx) + "));");
             break;
-        case NT::HideWidgetId:
+        case NT::HideWidget:
             b.line("hc::hideWidget(m_ctx, (int)(" + input(n, 0, fnCtx) + "));");
             break;
         case NT::DestroyWidget:

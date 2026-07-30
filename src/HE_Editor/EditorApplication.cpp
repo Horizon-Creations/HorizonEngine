@@ -648,7 +648,17 @@ void EditorApplication::OnInit()
 	GlobalState& globalstate = GlobalState::getInstance();
 	m_editorConfig.ContentBrowserRefreshRate   = globalstate.getCustomConfigInt("ContentBrowserRefreshRate",   m_editorConfig.ContentBrowserRefreshRate);
 	m_editorConfig.KeepCPUAssets               = globalstate.getCustomConfigBool("KeepCPUAssets",               m_editorConfig.KeepCPUAssets);
-	m_editorConfig.KeepCPUAssetsInfoAcknoleged = globalstate.getCustomConfigBool("KeepCPUAssetsInfoAcknoleged", m_editorConfig.KeepCPUAssetsInfoAcknoleged);
+	// The persisted key was misspelled "KeepCPUAssetsInfoAcknoleged" until the
+	// 2026-07 rework. Read the old spelling FIRST and hand it in as the default for
+	// the corrected key, so a user who already dismissed the info box keeps that
+	// state instead of silently getting it back. The save side only ever writes the
+	// corrected key, so the stale entry stops mattering after one clean shutdown.
+	// Do not delete this fallback — every config.json written before that rework
+	// still carries only the old spelling.
+	const bool legacyKeepCPUAssetsAck =
+		globalstate.getCustomConfigBool("KeepCPUAssetsInfoAcknoleged", m_editorConfig.KeepCPUAssetsInfoAcknowledged);
+	m_editorConfig.KeepCPUAssetsInfoAcknowledged =
+		globalstate.getCustomConfigBool("KeepCPUAssetsInfoAcknowledged", legacyKeepCPUAssetsAck);
 	m_editorConfig.CbTreeWidth                 = globalstate.getCustomConfigFloat("CbTreeWidth", m_editorConfig.CbTreeWidth);
 	m_editorConfig.UiFontScale                 = globalstate.getCustomConfigFloat("UiFontScale",       m_editorConfig.UiFontScale);
 	m_editorConfig.EditorCameraSpeed           = globalstate.getCustomConfigFloat("EditorCameraSpeed", m_editorConfig.EditorCameraSpeed);
@@ -2911,7 +2921,7 @@ void EditorApplication::OnShutdown()
 
 	GlobalState& globalstate = GlobalState::getInstance();
 	globalstate.setCustomConfigEntry("KeepCPUAssets",               m_editorConfig.KeepCPUAssets);
-	globalstate.setCustomConfigEntry("KeepCPUAssetsInfoAcknoleged", m_editorConfig.KeepCPUAssetsInfoAcknoleged);
+	globalstate.setCustomConfigEntry("KeepCPUAssetsInfoAcknowledged", m_editorConfig.KeepCPUAssetsInfoAcknowledged);
 	globalstate.setCustomConfigEntry("ContentBrowserRefreshRate",   m_editorConfig.ContentBrowserRefreshRate);
 	globalstate.setCustomConfigEntry("CbTreeWidth",                 m_editorConfig.CbTreeWidth);
 	globalstate.setCustomConfigEntry("UiFontScale",                m_editorConfig.UiFontScale);

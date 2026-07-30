@@ -13,75 +13,75 @@ class SlotMap {
 public:
     SlotHandle insert(T value) {
         uint32_t slotIndex;
-        if (!freeList_.empty()) {
-            slotIndex = freeList_.back();
-            freeList_.pop_back();
+        if (!m_freeList.empty()) {
+            slotIndex = m_freeList.back();
+            m_freeList.pop_back();
         } else {
-            slotIndex = static_cast<uint32_t>(slots_.size());
-            slots_.push_back({});
+            slotIndex = static_cast<uint32_t>(m_slots.size());
+            m_slots.push_back({});
         }
 
-        uint32_t dataIndex = static_cast<uint32_t>(data_.size());
-        data_.push_back(std::move(value));
-        erase_.push_back(slotIndex);
+        uint32_t dataIndex = static_cast<uint32_t>(m_data.size());
+        m_data.push_back(std::move(value));
+        m_erase.push_back(slotIndex);
 
-        slots_[slotIndex].dataIndex  = dataIndex;
-        slots_[slotIndex].generation++;
+        m_slots[slotIndex].dataIndex  = dataIndex;
+        m_slots[slotIndex].generation++;
 
-        return { slotIndex, slots_[slotIndex].generation };
+        return { slotIndex, m_slots[slotIndex].generation };
     }
 
     T* get(SlotHandle handle) {
-        if (handle.index >= slots_.size()) return nullptr;
-        Slot& slot = slots_[handle.index];
+        if (handle.index >= m_slots.size()) return nullptr;
+        Slot& slot = m_slots[handle.index];
         if (slot.generation != handle.generation) return nullptr;
-        return &data_[slot.dataIndex];
+        return &m_data[slot.dataIndex];
     }
 
     const T* get(SlotHandle handle) const {
-        if (handle.index >= slots_.size()) return nullptr;
-        const Slot& slot = slots_[handle.index];
+        if (handle.index >= m_slots.size()) return nullptr;
+        const Slot& slot = m_slots[handle.index];
         if (slot.generation != handle.generation) return nullptr;
-        return &data_[slot.dataIndex];
+        return &m_data[slot.dataIndex];
     }
 
     bool isValid(SlotHandle handle) const {
-        return handle.index < slots_.size() &&
-               slots_[handle.index].generation == handle.generation;
+        return handle.index < m_slots.size() &&
+               m_slots[handle.index].generation == handle.generation;
     }
 
     void remove(SlotHandle handle) {
         if (!isValid(handle)) return;
 
-        uint32_t dataIndex = slots_[handle.index].dataIndex;
-        uint32_t lastData  = static_cast<uint32_t>(data_.size()) - 1;
+        uint32_t dataIndex = m_slots[handle.index].dataIndex;
+        uint32_t lastData  = static_cast<uint32_t>(m_data.size()) - 1;
 
         if (dataIndex != lastData) {
-            data_[dataIndex]  = std::move(data_[lastData]);
-            erase_[dataIndex] = erase_[lastData];
-            slots_[erase_[dataIndex]].dataIndex = dataIndex;
+            m_data[dataIndex]  = std::move(m_data[lastData]);
+            m_erase[dataIndex] = m_erase[lastData];
+            m_slots[m_erase[dataIndex]].dataIndex = dataIndex;
         }
 
-        data_.pop_back();
-        erase_.pop_back();
+        m_data.pop_back();
+        m_erase.pop_back();
 
-        slots_[handle.index].generation++;
-        freeList_.push_back(handle.index);
+        m_slots[handle.index].generation++;
+        m_freeList.push_back(handle.index);
     }
 
-    T*       begin()       { return data_.data(); }
-    T*       end()         { return data_.data() + data_.size(); }
-    const T* begin() const { return data_.data(); }
-    const T* end()   const { return data_.data() + data_.size(); }
+    T*       begin()       { return m_data.data(); }
+    T*       end()         { return m_data.data() + m_data.size(); }
+    const T* begin() const { return m_data.data(); }
+    const T* end()   const { return m_data.data() + m_data.size(); }
 
-    uint32_t size()  const { return static_cast<uint32_t>(data_.size()); }
-    bool     empty() const { return data_.empty(); }
+    uint32_t size()  const { return static_cast<uint32_t>(m_data.size()); }
+    bool     empty() const { return m_data.empty(); }
 
     void clear() {
-        data_.clear();
-        erase_.clear();
-        freeList_.clear();
-        for (auto& s : slots_) s.generation++;
+        m_data.clear();
+        m_erase.clear();
+        m_freeList.clear();
+        for (auto& s : m_slots) s.generation++;
     }
 
 private:
@@ -90,8 +90,8 @@ private:
         uint32_t generation = 1;
     };
 
-    std::vector<Slot>     slots_;
-    std::vector<T>        data_;
-    std::vector<uint32_t> erase_;
-    std::vector<uint32_t> freeList_;
+    std::vector<Slot>     m_slots;
+    std::vector<T>        m_data;
+    std::vector<uint32_t> m_erase;
+    std::vector<uint32_t> m_freeList;
 };

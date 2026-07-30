@@ -90,7 +90,7 @@ private:
         // This widget's script instance in the runtime (owns the graph + the
         // private variable store); 0 = no logic graph.
         HorizonCode::InstanceId scriptId = 0;
-        bool visible = true;       // ShowWidget/HideWidget nodes flip this
+        bool visible = true;       // ShowSelf/HideSelf nodes flip this
         // Transient interaction state (element ids; 0 = none).
         int hoveredElem   = 0;
         int pressedElem   = 0;

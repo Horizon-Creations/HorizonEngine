@@ -41,17 +41,17 @@ static HE::GraphicsAPI defaultRHI()
 
 void GlobalState::setLogFile(const std::string& exePath)
 {
-	engineStatus.startupPath = exePath;
+	m_engineStatus.startupPath = exePath;
 	// Derive log file next to the exe: <exeDir>/HorizonEngine.log
 	fs::path logPath =
 		fs::path(exePath).parent_path() / "HorizonEngine.log";
 	// Truncate on each launch so every run starts with a fresh log (one run = one file).
-	logFileStream.open(logPath.string(), std::ios::out | std::ios::trunc);
+	m_logFileStream.open(logPath.string(), std::ios::out | std::ios::trunc);
 }
 
 std::ofstream& GlobalState::getLogFileStream()
 {
-	return logFileStream;
+	return m_logFileStream;
 }
 
 std::string GlobalState::getDumpsDir() const
@@ -59,7 +59,7 @@ std::string GlobalState::getDumpsDir() const
 	// Mirror setLogFile's exe-adjacent derivation: <exeDir>/dumps. startupPath is
 	// argv[0] (the executable), so parent_path() is the deploy directory — the same
 	// folder that holds HorizonEngine.log.
-	fs::path dumps = fs::path(engineStatus.startupPath).parent_path() / "dumps";
+	fs::path dumps = fs::path(m_engineStatus.startupPath).parent_path() / "dumps";
 	std::error_code ec;
 	fs::create_directories(dumps, ec);
 	return dumps.string();
@@ -70,9 +70,9 @@ void GlobalState::readConfig()
 	if (!fs::exists("config.json"))
 	{
 		Logger::Log(Logger::LogLevel::Warning, "No config file found — using defaults");
-		engineStatus.selectedRHI = defaultRHI();
-		engineStatus.lastProjectPath = "";
-		engineStatus.knownProjects.clear();
+		m_engineStatus.selectedRHI = defaultRHI();
+		m_engineStatus.lastProjectPath = "";
+		m_engineStatus.knownProjects.clear();
 		writeConfig();
 		return;
 	}
@@ -94,10 +94,10 @@ void GlobalState::readConfig()
 	{
 		Logger::Log(Logger::LogLevel::Warning,
 			"config.json is corrupt or unreadable — resetting to defaults");
-		engineStatus.selectedRHI     = defaultRHI();
-		engineStatus.lastProjectPath = "";
-		engineStatus.knownProjects.clear();
-		customConfig.clear();
+		m_engineStatus.selectedRHI     = defaultRHI();
+		m_engineStatus.lastProjectPath = "";
+		m_engineStatus.knownProjects.clear();
+		m_customConfig.clear();
 		writeConfig();
 		return;
 	}
@@ -113,14 +113,14 @@ void GlobalState::readConfig()
 		auto it = j.find(key);
 		return (it != j.end() && it->is_string()) ? it->get<std::string>() : std::string{};
 	};
-	engineStatus.selectedRHI      = sanitizeRHI(static_cast<HE::GraphicsAPI>(
+	m_engineStatus.selectedRHI      = sanitizeRHI(static_cast<HE::GraphicsAPI>(
 		intField("RHI", static_cast<int>(defaultRHI()))));
 	// A config written by an older editor still carries an "OS" key. It was never
 	// read by anything (it was hard-coded to Windows on every platform), so it is
 	// deliberately not looked up here: unknown keys are simply ignored, which keeps
 	// an old config.json loadable instead of turning it into a startup failure.
-	engineStatus.lastProjectPath  = strField("LastProjectPath");
-	engineStatus.knownProjects.clear();
+	m_engineStatus.lastProjectPath  = strField("LastProjectPath");
+	m_engineStatus.knownProjects.clear();
 	if (j.contains("KnownProjects") && j["KnownProjects"].is_array())
 	{
 		for (const auto& entry : j["KnownProjects"])
@@ -129,7 +129,7 @@ void GlobalState::readConfig()
 			std::string p = entry.get<std::string>();
 			// Guard against corrupted entries (e.g. a settings string stored here by mistake)
 			if (p.size() >= 7 && p.substr(p.size() - 7) == ".heproj")
-				engineStatus.knownProjects.push_back(std::move(p));
+				m_engineStatus.knownProjects.push_back(std::move(p));
 		}
 	}
 	if (j.contains("CustomConfig") && j["CustomConfig"].is_array())
@@ -139,7 +139,7 @@ void GlobalState::readConfig()
 			if (entry.contains("Key") && entry["Key"].is_string() &&
 				entry.contains("Value"))
 			{
-				customConfig[entry["Key"].get<std::string>()] = entry["Value"];
+				m_customConfig[entry["Key"].get<std::string>()] = entry["Value"];
 			}
 		}
 	}
@@ -148,11 +148,11 @@ void GlobalState::readConfig()
 bool GlobalState::writeConfig()
 {
 	json j;
-	j["RHI"] = engineStatus.selectedRHI;
-	j["LastProjectPath"] = engineStatus.lastProjectPath;
-	j["KnownProjects"] = engineStatus.knownProjects;
+	j["RHI"] = m_engineStatus.selectedRHI;
+	j["LastProjectPath"] = m_engineStatus.lastProjectPath;
+	j["KnownProjects"] = m_engineStatus.knownProjects;
 	json::array_t customEntries;
-	for (const auto& [key, value] : customConfig.items())
+	for (const auto& [key, value] : m_customConfig.items())
 	{
 		customEntries.push_back({ {"Key", key}, {"Value", value} });
 	}
@@ -207,18 +207,18 @@ void GlobalState::addKnownProject(const std::string& path)
 	// or other values being accidentally passed here).
 	if (path.size() < 7 || path.substr(path.size() - 7) != ".heproj")
 		return;
-	auto& kp = engineStatus.knownProjects;
+	auto& kp = m_engineStatus.knownProjects;
 	// Remove existing occurrence to avoid duplicates
 	kp.erase(std::remove(kp.begin(), kp.end(), path), kp.end());
 	kp.insert(kp.begin(), path);
 	if (kp.size() > 10)
 		kp.resize(10);
-	engineStatus.lastProjectPath = path;
+	m_engineStatus.lastProjectPath = path;
 }
 
 void GlobalState::removeKnownProject(const std::string& path)
 {
-	auto& kp = engineStatus.knownProjects;
+	auto& kp = m_engineStatus.knownProjects;
 	kp.erase(std::remove(kp.begin(), kp.end(), path), kp.end());
 }
 
@@ -311,7 +311,7 @@ static void populateFolder(Folder* folder, const fs::path& path)
 
 bool GlobalState::refreshContentFolder()
 {
-	if (engineStatus.lastProjectPath.empty())
+	if (m_engineStatus.lastProjectPath.empty())
 	{
 		Logger::Log(Logger::LogLevel::Warning, "No project loaded — cannot refresh content folder.");
 		return false;
@@ -321,7 +321,7 @@ bool GlobalState::refreshContentFolder()
 	// may live on an unmounted/unreachable share — the throwing overloads would take
 	// the editor down instead of reporting "not found".
 	std::error_code ec;
-	fs::path projectPath = engineStatus.lastProjectPath;
+	fs::path projectPath = m_engineStatus.lastProjectPath;
 	if (fs::is_regular_file(projectPath, ec))
 		projectPath = projectPath.parent_path();
 
@@ -341,29 +341,29 @@ bool GlobalState::refreshContentFolder()
 
 	{
 		std::unique_lock lock(m_contentFolderMutex);
-		clearFolder(&contentFolder);
+		clearFolder(&m_contentFolder);
 		// swap, not move-assign: clearFolder just emptied the member's child
 		// vectors, so after the swap `fresh` provably holds no live nodes and its
 		// guard above becomes a no-op. A move-assign would leave the source in an
 		// unspecified state that the guard might then double-free.
-		std::swap(contentFolder, fresh);
+		std::swap(m_contentFolder, fresh);
 	}
 	// Old Folder/File nodes are gone — tell pointer-holders to re-resolve by path.
 	contentFolderVersion.fetch_add(1, std::memory_order_release);
 
 	Logger::Log(Logger::LogLevel::Info, "Content folder refreshed.");
-	Logger::Log(Logger::LogLevel::Info, ("Number of folders: " + std::to_string(contentFolder.subfolders.size())).c_str());
-	Logger::Log(Logger::LogLevel::Info, ("Number of files: " + std::to_string(contentFolder.files.size())).c_str());
+	Logger::Log(Logger::LogLevel::Info, ("Number of folders: " + std::to_string(m_contentFolder.subfolders.size())).c_str());
+	Logger::Log(Logger::LogLevel::Info, ("Number of files: " + std::to_string(m_contentFolder.files.size())).c_str());
 	return true;
 }
 
 bool GlobalState::refreshSourceFolder()
 {
-	if (engineStatus.lastProjectPath.empty())
+	if (m_engineStatus.lastProjectPath.empty())
 		return false;
 
 	std::error_code ec;
-	fs::path projectPath = engineStatus.lastProjectPath;
+	fs::path projectPath = m_engineStatus.lastProjectPath;
 	if (fs::is_regular_file(projectPath, ec))
 		projectPath = projectPath.parent_path();
 
@@ -381,8 +381,8 @@ bool GlobalState::refreshSourceFolder()
 
 	{
 		std::unique_lock lock(m_sourceFolderMutex);
-		clearFolder(&sourceFolder);
-		std::swap(sourceFolder, fresh); // see refreshContentFolder() for why swap
+		clearFolder(&m_sourceFolder);
+		std::swap(m_sourceFolder, fresh); // see refreshContentFolder() for why swap
 	}
 	sourceFolderVersion.fetch_add(1, std::memory_order_release);
 	return true;
@@ -486,8 +486,8 @@ bool GlobalState::refreshEngineFolder(const std::string& engineContentAbsPath,
 
 	{
 		std::unique_lock lock(m_engineFolderMutex);
-		clearFolder(&engineFolder);
-		std::swap(engineFolder, fresh); // see refreshContentFolder() for why swap
+		clearFolder(&m_engineFolder);
+		std::swap(m_engineFolder, fresh); // see refreshContentFolder() for why swap
 	}
 	engineFolderVersion.fetch_add(1, std::memory_order_release);
 
@@ -497,33 +497,33 @@ bool GlobalState::refreshEngineFolder(const std::string& engineContentAbsPath,
 
 void GlobalState::setCustomConfigEntry(const std::string& key, const json& value)
 {
-	customConfig[key] = value;
+	m_customConfig[key] = value;
 }
 
 int GlobalState::getCustomConfigInt(const std::string& key, int defaultValue) const
 {
-	if (customConfig.contains(key) && customConfig[key].is_number())
-		return customConfig[key].get<int>();
+	if (m_customConfig.contains(key) && m_customConfig[key].is_number())
+		return m_customConfig[key].get<int>();
 	return defaultValue;
 }
 
 float GlobalState::getCustomConfigFloat(const std::string& key, float defaultValue) const
 {
-	if (customConfig.contains(key) && customConfig[key].is_number())
-		return customConfig[key].get<float>();
+	if (m_customConfig.contains(key) && m_customConfig[key].is_number())
+		return m_customConfig[key].get<float>();
 	return defaultValue;
 }
 
 bool GlobalState::getCustomConfigBool(const std::string& key, bool defaultValue) const
 {
-	if (customConfig.contains(key) && customConfig[key].is_boolean())
-		return customConfig[key].get<bool>();
+	if (m_customConfig.contains(key) && m_customConfig[key].is_boolean())
+		return m_customConfig[key].get<bool>();
 	return defaultValue;
 }
 
 std::string GlobalState::getCustomConfigString(const std::string& key, const std::string& defaultValue) const
 {
-	if (customConfig.contains(key) && customConfig[key].is_string())
-		return customConfig[key].get<std::string>();
+	if (m_customConfig.contains(key) && m_customConfig[key].is_string())
+		return m_customConfig[key].get<std::string>();
 	return defaultValue;
 }

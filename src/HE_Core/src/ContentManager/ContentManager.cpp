@@ -78,8 +78,8 @@ static bool readMetaChunk(const HAsset::Reader::Chunk& c, uint16_t fileVersion,
     return true;
 }
 
-// ─── getAssetType ─────────────────────────────────────────────────────────────
-HE::AssetType ContentManager::getAssetType(const std::string path) const
+// ─── sniffAssetTypeFromFile ───────────────────────────────────────────────────
+HE::AssetType ContentManager::sniffAssetTypeFromFile(const std::string& path) const
 {
 	std::ifstream f(path, std::ios::binary);
 	if (!f.is_open()) return HE::AssetType::Unknown;
@@ -1510,7 +1510,7 @@ std::vector<HE::UUID> ContentManager::pollHotReload()
 
 		// Skip files that aren't valid .hasset yet (mid-write / partial save).
 		// Avoids evicting the live asset before the new version is readable.
-		if (getAssetType(fullPath) == HE::AssetType::Unknown) continue;
+		if (sniffAssetTypeFromFile(fullPath) == HE::AssetType::Unknown) continue;
 
 		// File changed — unload old entry (removes from m_pathMtime) then reload.
 		auto pathIt = m_pathToUUID.find(relPath);

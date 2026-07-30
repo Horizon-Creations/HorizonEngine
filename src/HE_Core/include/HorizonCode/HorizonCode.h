@@ -65,10 +65,10 @@ enum class NodeType : uint8_t
     // Target property access (elem + s = property name + propType = value type).
     GetProperty, SetProperty,
     // Host actions on the running widget itself ("self").
-    ShowWidget, HideWidget,
+    ShowSelf, HideSelf,
     // Create + manage widgets by id (from any graph — level, GameInstance, …).
     CreateWidget,    // s = widget asset path; dataOut Widget (Int id)
-    ShowWidgetId, HideWidgetId, DestroyWidget, // dataIn Widget (Int id)
+    ShowWidget, HideWidget, DestroyWidget, // dataIn Widget (Int id)
     // Instantiate a HorizonCode class asset as a live runtime object.
     CreateObject,    // s = HorizonCode class asset path; dataOut Object (Ref)
     DestroyObject,   // dataIn Object (Ref)

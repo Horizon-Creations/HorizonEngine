@@ -73,8 +73,8 @@ void signatureInto(const Node& n, NodeSig& s)
         s.dataIns  = { { "Value", n.propType, n.isArray } };
         s.dataOuts = { { "Value", n.propType, n.isArray } }; // pass the set value through
         break;
-    case T::ShowWidget:
-    case T::HideWidget:
+    case T::ShowSelf:
+    case T::HideSelf:
         s.execIns  = { { "", P::Exec } };
         s.execOuts = { { "", P::Exec } };
         break;
@@ -83,8 +83,8 @@ void signatureInto(const Node& n, NodeSig& s)
         s.execOuts = { { "", P::Exec } };
         s.dataOuts = { { "Widget", P::Ref } };
         break;
-    case T::ShowWidgetId:
-    case T::HideWidgetId:
+    case T::ShowWidget:
+    case T::HideWidget:
     case T::DestroyWidget:
         s.execIns  = { { "", P::Exec } };
         s.execOuts = { { "", P::Exec } };
@@ -305,11 +305,11 @@ const char* nodeDisplayName(NodeType t)
         case T::SetProperty:  return "Set Property";
         case T::GetVariable:  return "Get Variable";
         case T::SetVariable:  return "Set Variable";
-        case T::ShowWidget:   return "Show Self";
-        case T::HideWidget:   return "Hide Self";
+        case T::ShowSelf:   return "Show Self";
+        case T::HideSelf:   return "Hide Self";
         case T::CreateWidget: return "Create Widget";
-        case T::ShowWidgetId: return "Show Widget";
-        case T::HideWidgetId: return "Hide Widget";
+        case T::ShowWidget: return "Show Widget";
+        case T::HideWidget: return "Hide Widget";
         case T::DestroyWidget:return "Destroy Widget";
         case T::CreateObject: return "Create Object";
         case T::DestroyObject:return "Destroy Object";
@@ -400,16 +400,16 @@ const char* nodeTooltip(NodeType t)
                    "Pure — evaluated whenever the output is used.";
         case T::SetVariable:
             return "Writes the wired value to a graph variable when executed.";
-        case T::ShowWidget:
+        case T::ShowSelf:
             return "Makes THIS widget visible (only meaningful inside a widget graph).";
-        case T::HideWidget:
+        case T::HideSelf:
             return "Hides THIS widget (only meaningful inside a widget graph).";
         case T::CreateWidget:
             return "Instantiates the chosen widget asset and outputs its Widget id —\n"
                    "feed that into Show/Hide/Destroy Widget.";
-        case T::ShowWidgetId:
+        case T::ShowWidget:
             return "Shows the widget identified by the Widget input (from Create Widget).";
-        case T::HideWidgetId:
+        case T::HideWidget:
             return "Hides the widget identified by the Widget input (from Create Widget).";
         case T::DestroyWidget:
             return "Destroys the widget identified by the Widget input; its id becomes invalid.";
@@ -513,11 +513,11 @@ const char* nodeCategory(NodeType t)
         case T::SetProperty:   return "Property";
         case T::GetVariable:
         case T::SetVariable:   return "Variables";
-        case T::ShowWidget:
-        case T::HideWidget:    return "Widget";
+        case T::ShowSelf:
+        case T::HideSelf:    return "Widget";
         case T::CreateWidget:
-        case T::ShowWidgetId:
-        case T::HideWidgetId:
+        case T::ShowWidget:
+        case T::HideWidget:
         case T::DestroyWidget: return "UI";
         case T::ConstFloat: case T::ConstBool: case T::ConstInt:
         case T::ConstString: case T::ConstVec2: case T::ConstColor:
@@ -1260,8 +1260,8 @@ void Runner::execNode(const Node& n, int depth)
         else if (m_ctx.setVariable)
             m_ctx.setVariable(n.s, coerce(evalInput(n, 0, depth + 1), n.propType));
         break;
-    case T::ShowWidget: if (m_ctx.showSelf) m_ctx.showSelf(); break;
-    case T::HideWidget: if (m_ctx.hideSelf) m_ctx.hideSelf(); break;
+    case T::ShowSelf: if (m_ctx.showSelf) m_ctx.showSelf(); break;
+    case T::HideSelf: if (m_ctx.hideSelf) m_ctx.hideSelf(); break;
     case T::CreateWidget:
     {
         // The widget id doubles as its runtime reference (widget id == scriptId),
@@ -1270,8 +1270,8 @@ void Runner::execNode(const Node& n, int depth)
         m_execOutputs[n.id] = { Value::ofRef((uint32_t)id) }; // cached for the data output
         break;
     }
-    case T::ShowWidgetId:  if (m_ctx.showWidget)    m_ctx.showWidget((int)evalInput(n, 0, depth + 1).ref);    break;
-    case T::HideWidgetId:  if (m_ctx.hideWidget)    m_ctx.hideWidget((int)evalInput(n, 0, depth + 1).ref);    break;
+    case T::ShowWidget:  if (m_ctx.showWidget)    m_ctx.showWidget((int)evalInput(n, 0, depth + 1).ref);    break;
+    case T::HideWidget:  if (m_ctx.hideWidget)    m_ctx.hideWidget((int)evalInput(n, 0, depth + 1).ref);    break;
     case T::DestroyWidget: if (m_ctx.destroyWidget) m_ctx.destroyWidget((int)evalInput(n, 0, depth + 1).ref); break;
     case T::CreateObject:
     {

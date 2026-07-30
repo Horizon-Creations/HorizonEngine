@@ -48,8 +48,8 @@ enum class EditorMode
 
 struct EditorConfig
 {
-	bool KeepCPUAssets = false;   
-	bool KeepCPUAssetsInfoAcknoleged = false;
+	bool KeepCPUAssets = false;
+	bool KeepCPUAssetsInfoAcknowledged = false;
 	int  ContentBrowserRefreshRate = 60;
 
 	// Content browser tree-panel width (-1 = auto on first frame)
