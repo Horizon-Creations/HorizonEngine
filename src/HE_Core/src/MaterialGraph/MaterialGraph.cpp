@@ -1072,9 +1072,14 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
         src += "    if (" + mask + " < " + fmtF(cutoff) + ") discard;\n";
     src += "    vec3 heN = " + normalExpr + ";\n";
     if (lit)
-        src += "    oColor = vec4(heLitP(" + base + ", heN, " + met + ", " + rough
+        // Aerial perspective wraps the WHOLE lit colour (emissive included), the
+        // same place the built-in scene shaders apply it — without it a distant
+        // graph material stayed saturated while everything around it faded into
+        // the horizon. UNLIT output is deliberately left alone: there "unlit"
+        // means "my colour, verbatim".
+        src += "    oColor = vec4(heApplyFog(heLitP(" + base + ", heN, " + met + ", " + rough
              + ", vWorldPos, " + spec + ", " + ao + ") + "
-             + emis + ", " + opacity + ");\n";
+             + emis + ", vWorldPos), " + opacity + ");\n";
     else
         src += "    oColor = vec4(" + base + " + " + emis + ", " + opacity + ");\n";
     src += "}\n";

@@ -63,6 +63,15 @@ public:
         // Vulkan) never sample the atlas. Spot = 1 layer, point = 6 cube-face
         // layers (+X −X +Y −Y +Z −Z, major-axis pick in the preamble).
         float localShadowVP[16][16] = {};
+        // Aerial perspective + the two "is this bound" gates for the shared
+        // ambient inputs (append-only, v2.4):
+        //   x = fog density, y = fog height falloff (EnvironmentSettings)
+        //   z = 1 when heSkyEnv (the procedural sky cubemap) is bound and valid —
+        //       heLitP's image-based ambient AND the fog colour both read it;
+        //       0 makes both fall back (flat ambient, no fog), which is what the
+        //       preview/UI passes want.
+        //   w = 1 when heAO (the screen-space AO result) is bound and valid.
+        float fog[4] = {};
     };
     static constexpr int kMetalLightingBufferIndex = 1; // fragment [[buffer(1)]]
 

@@ -112,6 +112,7 @@ layout(std140, set = 0, binding = 0) uniform HeLighting {
     vec4 csmSplits;      // xyz = planar view-space far distances; w = cascade count (0 = off)
     vec4 camFwd;         // xyz = camera forward (planar cascade selection)
     mat4 localShadowVP[16]; // local (point/spot) shadow atlas view-projs (conventions pre-baked)
+    vec4 fog;            // x = density, y = height falloff, z = heSkyEnv valid, w = heAO valid
 } heLight;
 // Screen-space ray-traced shadow masks (GI): sun visibility (.r) + local-light
 // visibility (one channel per the first 4 point/spot lights). Bindings 10/11 —
@@ -127,6 +128,33 @@ layout(set = 0, binding = 12) uniform sampler2DArray heCsm;
 // the built-in PBR shaders sample. A light's base layer is lightParams[i].y-1
 // (0 = no shadow), so unfilled Lighting blocks never sample this.
 layout(set = 0, binding = 13) uniform sampler2DArray heLocalShadow;
+// Procedural sky environment cubemap (binding 15 — 14 is the landscape
+// weightmap): the SAME prefiltered sky the built-in PBR shaders use for
+// image-based ambient. Graph materials had only a flat ambient constant, so
+// they never picked up sky colour or reflections and read visibly "deader"
+// than a built-in material beside them. heLight.fog.z gates the samples.
+layout(set = 0, binding = 15) uniform samplerCube heSkyEnv;
+// Screen-space ambient occlusion result (binding 16), the same SSAO/HBAO/GTAO
+// buffer the built-in shaders read. Gated by heLight.fog.w.
+layout(set = 0, binding = 16) uniform sampler2D heAO;
+// Aerial perspective — mirror of the built-in applyFog(): an analytic
+// exponential height-fog integral along the view ray, blended toward the sky in
+// that direction. The built-ins evaluate the procedural sky function for the fog
+// colour; the env cubemap is generated FROM that same sky, so sampling it along
+// the ray reproduces the colour without pulling the sky library into every
+// material. Without this, distant custom-material geometry stayed fully
+// saturated while everything around it melted into the horizon.
+vec3 heApplyFog(vec3 color, vec3 worldPos) {
+    if (heLight.fog.x <= 0.0 || heLight.fog.z <= 0.5) return color;
+    vec3  ray  = worldPos - heLight.camPos.xyz;
+    float dist = length(ray);
+    float k    = heLight.fog.y * ray.y;
+    float t    = (abs(k) > 1e-4) ? (1.0 - exp(-k)) / k : 1.0; // mean height attenuation
+    float optical = heLight.fog.x * dist * exp(-heLight.fog.y * heLight.camPos.y) * t;
+    float f = 1.0 - exp(-optical);
+    vec3 fogCol = texture(heSkyEnv, ray / max(dist, 1e-4)).rgb;
+    return mix(color, fogCol, clamp(f, 0.0, 1.0));
+}
 // Screen-space GI sun-visibility for the current fragment (1 = fully lit).
 // gl_FragCoord-based, so even the legacy worldPos-less heLit() can use it.
 float heGISun() {
@@ -244,11 +272,31 @@ vec3 heLitP(vec3 baseColor, vec3 N, float metallic, float roughness, vec3 worldP
     vec3  specColor    = mix(vec3(f0), baseColor, metal);
     float shininess    = mix(128.0, 8.0, rough);
     float specScale    = mix(0.5, 0.03, rough);
-    // Ambient hits the DIFFUSE albedo, like the built-in's flat ambient floor —
-    // a metal must not pick up a full-strength ambient wash. Ambient Occlusion
-    // darkens ONLY this indirect term; direct lighting below stays untouched
-    // (same split as the built-in shaders' SSAO handling).
-    vec3 result = diffuseColor * heLight.ambient.rgb * clamp(ambientOcclusion, 0.0, 1.0);
+    // Image-based ambient from the procedural sky — the SAME construction as the
+    // built-in PBR shaders: diffuse from the normal (clamped above the horizon so
+    // a flat surface doesn't pick up the warm sunset band at noon), specular from
+    // the reflection bent toward N by roughness as a crude prefilter.
+    vec3 amb;
+    if (heLight.fog.z > 0.5)
+    {
+        vec3 Rrough = normalize(mix(reflect(-V, n), n, rough));
+        vec3 Nup    = normalize(vec3(n.x, max(n.y, 0.1), n.z));
+        vec3 ambDiff = texture(heSkyEnv, Nup).rgb    * diffuseColor;
+        vec3 ambSpec = texture(heSkyEnv, Rrough).rgb * specColor;
+        amb = ambDiff * 0.35 + ambSpec * (1.0 - 0.6 * rough);
+    }
+    else
+        amb = diffuseColor * heLight.ambient.rgb;  // no cubemap (preview/UI passes)
+
+    // Occlusion darkens ONLY the indirect term; the direct lighting below stays
+    // untouched, same split as the built-in shaders' SSAO handling. The material's
+    // own Ambient Occlusion pin multiplies on top of the screen-space result.
+    float ssao = (heLight.fog.w > 0.5)
+        ? texture(heAO, gl_FragCoord.xy / max(heLight.giParams.xy, vec2(1.0))).r : 1.0;
+    float ao = clamp(ambientOcclusion, 0.0, 1.0) * ssao;
+    // The flat ambient floor stays OUTSIDE the occlusion (never-black guarantee),
+    // exactly like the built-in.
+    vec3 result = amb * ao + heLight.ambient.rgb * diffuseColor;
     int count = int(heLight.counts.x);
     int localIdx = 0; // counter over non-directional lights → local-mask channel
     for (int i = 0; i < count; ++i) {
@@ -564,7 +612,12 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragment(
               // texture/sampler 13. Bound PER DRAW from the terrain chunk's
               // parent landscape (not per material), so two landscapes can share
               // one material and still carry their own paint.
-              { Stage::Fragment, 0, 14, 13 } }));
+              { Stage::Fragment, 0, 14, 13 },
+              // Sky environment cubemap (preamble binding 15) → MSL 14, and the
+              // screen-space AO result (binding 16) → MSL 15. Both are per-FRAME
+              // state pinned once on the encoder, like the GI/CSM slots above.
+              { Stage::Fragment, 0, 15, 14 },
+              { Stage::Fragment, 0, 16, 15 } }));
     }
     else
     {

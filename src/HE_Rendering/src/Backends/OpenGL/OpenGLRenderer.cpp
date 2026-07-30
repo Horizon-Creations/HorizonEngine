@@ -3680,6 +3680,11 @@ unsigned int OpenGLRenderer::getOrBuildMaterialProgram(uint64_t key, const std::
 		// from the terrain chunk's parent landscape, so two landscapes can share a
 		// material and still carry their own paint.
 		if (GLint l = glGetUniformLocation(prog, "heLandscapeWeights"); l >= 0) glUniform1i(l, 13);
+		// heSkyEnv (samplerCube, image-based ambient + fog colour) = unit 14,
+		// heAO (screen-space SSAO/HBAO/GTAO result) = unit 15. Per-FRAME state,
+		// bound alongside the other shared material inputs in DrawScene.
+		if (GLint l = glGetUniformLocation(prog, "heSkyEnv"); l >= 0) glUniform1i(l, 14);
+		if (GLint l = glGetUniformLocation(prog, "heAO");     l >= 0) glUniform1i(l, 15);
 		glUseProgram(0);
 	};
 
@@ -7385,6 +7390,12 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					lit.giParams[0] = static_cast<float>(pw);
 					lit.giParams[1] = static_cast<float>(ph);
 					lit.giParams[2] = giShadingActive ? 1.0f : 0.0f;
+					// Aerial perspective + the "is it bound" gates for the shared
+					// ambient inputs (units 14/15, bound just below).
+					lit.fog[0] = GetEnvironment().fogDensity;
+					lit.fog[1] = GetEnvironment().fogHeightFalloff;
+					lit.fog[2] = m_skyEnvCube ? 1.0f : 0.0f;
+					lit.fog[3] = aoActive     ? 1.0f : 0.0f;
 					// Full light window for heLitP() — same first-8 order as the built-in
 					// PBR shaders (keep the three backend copies of this fill in sync).
 					{{
@@ -7475,6 +7486,15 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						}
 						glActiveTexture(GL_TEXTURE0);
 					}
+					// Shared material inputs: sky env cubemap (14) for image-based
+					// ambient + the fog colour, screen-space AO (15). Per-FRAME state,
+					// re-asserted here because the units are only ever used by these
+					// material programs. Gated by heLight.fog.z/.w.
+					glActiveTexture(GL_TEXTURE14);
+					glBindTexture(GL_TEXTURE_CUBE_MAP, m_skyEnvCube);
+					glActiveTexture(GL_TEXTURE15);
+					glBindTexture(GL_TEXTURE_2D, aoActive ? aoTex : m_whiteTex);
+					glActiveTexture(GL_TEXTURE0);
 					// Landscape layer weightmap on unit 13 — PER DRAW (it belongs to
 					// the terrain the chunk is part of, not to the material). Objects
 					// that aren't landscape chunks get the 1x1 (1,0,0,0) default, so a
