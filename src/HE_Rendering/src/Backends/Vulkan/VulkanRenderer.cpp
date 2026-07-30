@@ -3623,21 +3623,11 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
             : static_cast<float>(SDL_GetTicks()) / 1000.0f;
         const glm::vec3 sc = matSunColor;
         lit.sunColor[0] = sc.r; lit.sunColor[1] = sc.g; lit.sunColor[2] = sc.b;
-        {
-            const int lc = std::min(static_cast<int>(m_renderWorld.lights.size()), 8);
-            for (int li = 0; li < lc; ++li)
-            {
-                const LightData& ld = m_renderWorld.lights[li];
-                lit.lightPos[li][0] = ld.position.x;  lit.lightPos[li][1] = ld.position.y;
-                lit.lightPos[li][2] = ld.position.z;  lit.lightPos[li][3] = static_cast<float>(ld.type);
-                lit.lightDir[li][0] = ld.direction.x; lit.lightDir[li][1] = ld.direction.y;
-                lit.lightDir[li][2] = ld.direction.z; lit.lightDir[li][3] = ld.spotAngleCos;
-                lit.lightColor[li][0] = ld.color.r;   lit.lightColor[li][1] = ld.color.g;
-                lit.lightColor[li][2] = ld.color.b;   lit.lightColor[li][3] = ld.intensity;
-                lit.lightParams[li][0] = ld.range;
-            }
-            lit.counts[0] = static_cast<float>(lc);
-        }
+        // Full light window for heLitP() — same first-8 order as the built-in
+        // shaders. Shared fill (HE::FillMaterialLightWindow); Vulkan has no local
+        // (point/spot) shadow atlas yet, so it passes false and lightParams[i].y
+        // stays 0 = "casts no local shadow".
+        HE::FillMaterialLightWindow(m_renderWorld, lit, /*localShadowsActive=*/false);
         lit.giParams[0] = static_cast<float>(width);
         lit.giParams[1] = static_cast<float>(height);
         lit.giParams[2] = m_giRanThisFrame ? 1.0f : 0.0f;

@@ -10,6 +10,7 @@
 #include <HorizonRendering/CommandBuffer.h>
 #include <HorizonRendering/SsaoKernel.h>
 #include <HorizonRendering/SkyNoise3D.h>
+#include <HorizonRendering/SkyEnvBake.h>
 #include <HorizonRendering/SkyFrameParams.h>
 #include <HorizonRendering/LightPacking.h>
 #include <HorizonScene/HorizonWorld.h>
@@ -378,6 +379,66 @@ TEST_CASE("SkyNoise3D: generated volume is byte-pinned")
 
 	// Deterministic across calls (no static state, no RNG carry-over).
 	CHECK(HE::BuildSkyNoise3D(8) == v8);
+}
+
+TEST_CASE("SkyEnvBake: the IBL ambient cube face is pinned and backend-independent")
+{
+	// This bake IS the ambient light every lit surface receives, and OpenGL and
+	// Metal must produce the same bytes from it (it used to be 88 duplicated lines
+	// in each). A failure here means the ambient lighting changed on both backends
+	// at once — re-pin only if that is what you intended.
+	const glm::vec3 sun = glm::normalize(glm::vec3(0.3f, 0.6f, 0.2f));
+
+	// The face-direction convention is the cubemap contract (slice order
+	// +X,-X,+Y,-Y,+Z,-Z, shared by GL and Metal — no per-backend axis flip).
+	CHECK(HE::SkyEnvFaceDirection(0, 0.0f, 0.0f) == glm::vec3( 1.0f, 0.0f, 0.0f));
+	CHECK(HE::SkyEnvFaceDirection(1, 0.0f, 0.0f) == glm::vec3(-1.0f, 0.0f, 0.0f));
+	CHECK(HE::SkyEnvFaceDirection(2, 0.0f, 0.0f) == glm::vec3( 0.0f, 1.0f, 0.0f));
+	CHECK(HE::SkyEnvFaceDirection(3, 0.0f, 0.0f) == glm::vec3( 0.0f,-1.0f, 0.0f));
+	CHECK(HE::SkyEnvFaceDirection(4, 0.0f, 0.0f) == glm::vec3( 0.0f, 0.0f, 1.0f));
+	CHECK(HE::SkyEnvFaceDirection(5, 0.0f, 0.0f) == glm::vec3( 0.0f, 0.0f,-1.0f));
+
+	// Digest over all six faces at 4². Quantised to 12 bits first, deliberately:
+	// the bake is float and a raw-bits pin would be hostage to the compiler's
+	// contraction choices, whereas the visible result is an 8-bit-ish colour.
+	// Verified stable at -O0/-O2/-g and bit-identical to the pre-unification code.
+	std::vector<uint16_t> q;
+	for (int f = 0; f < 6; ++f)
+	{
+		const std::vector<float> face = HE::BuildSkyEnvFace(4, f, sun);
+		REQUIRE(face.size() == 4u * 4u * 4u);          // RGBA32F, faceN² texels
+		for (size_t i = 0; i < face.size(); ++i)
+		{
+			if (i % 4 == 3) CHECK(face[i] == 1.0f);    // alpha is always opaque
+			const float c = glm::clamp(face[i], 0.0f, 1.0f);
+			q.push_back(static_cast<uint16_t>(c * 4095.0f + 0.5f));
+		}
+	}
+	CHECK(heFnv1a(q.data(), q.size() * sizeof(uint16_t)) == 0x5a9df978ef064f65ull);
+
+	// Row granularity must reproduce the whole-face path EXACTLY: OpenGL fans the
+	// six faces out row-per-task over the thread pool while Metal loops the rows
+	// serially, and the two have to bake identical cubes.
+	for (int f = 0; f < 6; ++f)
+	{
+		const std::vector<float> whole = HE::BuildSkyEnvFace(8, f, sun);
+		std::vector<float>       rows(8u * 8u * 4u);
+		for (int t = 0; t < 8; ++t)
+			HE::BuildSkyEnvFaceRow(8, f, t, sun, &rows[static_cast<size_t>(t) * 8 * 4]);
+		CHECK(whole == rows);
+	}
+
+	// Sanity on the model itself: straight down is the flat ground colour, and the
+	// bake keeps a sun disk (that is what carries the sun's energy into the
+	// ambient — the shader's own skyColor drops it).
+	const glm::vec3 down = HE::SkyColorCPU(glm::vec3(0.0f, -1.0f, 0.0f), sun);
+	CHECK(down.r == doctest::Approx(0.24f));
+	CHECK(down.g == doctest::Approx(0.23f));
+	CHECK(down.b == doctest::Approx(0.21f));
+	const glm::vec3 atSun = HE::SkyColorCPU(sun, sun);
+	CHECK(atSun.r > 10.0f);
+	// Deterministic across calls (pure functions, no cached state).
+	CHECK(HE::BuildSkyEnvFace(4, 0, sun) == HE::BuildSkyEnvFace(4, 0, sun));
 }
 
 TEST_CASE("CloudWindVector: 0 degrees drifts toward -Z (north), clockwise from there")

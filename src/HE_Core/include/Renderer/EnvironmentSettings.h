@@ -13,10 +13,17 @@
 // the image-based ambient and the shadows together. Off = the scene's own
 // directional light is used.
 //
-// KEEP IN SYNC: HE::makeEnvironmentSettings (HE_Scene/EnvironmentPush.cpp) is
-// the single EnvironmentComponent → this-struct translation, and
-// HE::BuildSkyFrameParams (HE_Rendering/SkyFrameParams.cpp) is the single
-// this-struct → backend sky-constants translation. A new field needs both.
+// KEEP IN SYNC — a new field needs BOTH of these, and on OpenGL a third:
+//   1. HE::makeEnvironmentSettings (HE_Scene/EnvironmentPush.cpp) — the single
+//      EnvironmentComponent → this-struct translation.
+//   2. HE::BuildSkyFrameParams (HE_Rendering/SkyFrameParams.cpp) — the
+//      this-struct → sky-constants translation for Metal, Vulkan, D3D11 and
+//      D3D12. It is NOT the only one:
+//   3. OpenGL has no sky UBO to memcpy into (its sky program uses loose
+//      uniforms), so it still maps every field by hand with its own glUniform*
+//      call in the sky block of OpenGLRenderer::DrawScene. Add the field there
+//      as well or it silently does nothing on OpenGL. SkyFrameParams.h's header
+//      comment tracks which backend is on which path.
 struct EnvironmentSettings
 {
     // Master sky switch. False when the scene has no Sky entity (removed via the

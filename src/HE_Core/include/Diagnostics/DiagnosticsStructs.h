@@ -7,7 +7,10 @@
 struct EngineStatus
 {
 	HE::RendererBackend      selectedRHI;
-	HE::OS                   currentOS;
+	// No `currentOS` here: it went with getCurrentOS(), which had no callers and
+	// defaulted every platform to Windows before persisting it. The rest of the
+	// engine branches on platform with `#ifdef _WIN32`/`__APPLE__` at the use site,
+	// so a never-assigned runtime field only invited that bug back.
 	std::string              startupPath;
 	std::string              lastProjectPath;
 	std::vector<std::string> knownProjects;   // most-recent first, max 10

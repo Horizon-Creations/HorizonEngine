@@ -321,7 +321,11 @@ void EditorUI::render(AppContext& ctx, float dt)
 // View-only panels (Static/Skeletal Mesh) have nothing to lose and stay out.
 // The virtual tabs (Level Script / Game Instance) edit the world, so their dirty
 // state is the scene's (ctx.sceneDirty) and is guarded separately.
-static bool tabHasUnsavedEdits(const std::string& assetPath)
+// Public (declared in EditorUI.h) because the OS-level quit veto in
+// EditorApplication::OnEvent has to ask the same question: an asset panel's edits
+// do NOT bump the world undo revision, so a clean scene is no proof that there is
+// nothing to lose.
+bool EditorUI::tabHasUnsavedEdits(const std::string& assetPath)
 {
 	if (assetPath.empty()) return false;
 	return ScriptEditorPanel::isDirty(assetPath)        ||

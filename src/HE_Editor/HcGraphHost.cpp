@@ -7,6 +7,7 @@
 #include <misc/cpp/imgui_stdlib.h>
 #include <algorithm>
 #include <cctype>
+#include <filesystem>
 
 namespace HcGraphHost
 {
@@ -118,6 +119,15 @@ std::string lower(std::string v)
 	std::transform(v.begin(), v.end(), v.begin(),
 		[](unsigned char c){ return (char)std::tolower(c); });
 	return v;
+}
+
+std::string variableTypeLabel(const HC::Variable& v)
+{
+	// An Object variable shows the class it holds, not a bare "Object" — otherwise
+	// every reference variable in the list looks the same.
+	return ((v.type == PT::Ref && !v.className.empty())
+		? std::filesystem::path(v.className).stem().string()
+		: std::string(pinTypeName(v.type))) + (v.isArray ? "[]" : "");
 }
 
 bool loadClassGraph(ContentManager* content, const std::string& path, HC::Graph& out)
@@ -559,6 +569,178 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 
 	ImGui::EndChild();
 	return created;
+}
+
+// ── Node details: the rows every HorizonCode frontend spells the same ────────
+// See the header for exactly which node types this covers and which ones each
+// frontend still draws itself.
+
+bool drawCommonNodeDetails(const Host& h, HC::Node& n)
+{
+	if (!h.graph) return false;
+	HC::Graph& g = *h.graph;
+	// The hosts differ only in HOW an edit is recorded, which is what onEdit is
+	// for: committed = the edit is finished (undo/save point), false = a value is
+	// still being dragged.
+	const auto edit = [&h](bool committed){ if (h.onEdit) h.onEdit(committed); };
+
+	switch (n.type)
+	{
+	case NT::ArrayMake:
+	case NT::ArrayLength:
+	case NT::ArrayGet:
+	case NT::ArrayAdd:
+	case NT::ArraySet:
+	case NT::ArrayInsert:
+	case NT::ArrayRemove:
+	case NT::ArrayContains:
+	case NT::ArrayIndexOf:
+	case NT::ForEach:
+	{
+		// Element type — object classes allowed too (the class path rides in s,
+		// which array-op nodes don't use otherwise).
+		const PT before = n.propType;
+		if (HcEditorUtil::drawTypePicker("Element", h.content, n.propType, &n.s) && n.propType != before)
+		{
+			// Retyping the element invalidates every link on the node, in and out.
+			g.links.erase(std::remove_if(g.links.begin(), g.links.end(),
+				[&](const HC::Link& l){ return l.srcNode == n.id || l.dstNode == n.id; }), g.links.end());
+			edit(true);
+		}
+		ImGui::TextDisabled("Element type of the array.");
+		return true;
+	}
+
+	// ── Literal values ───────────────────────────────────────────────────────
+	// Dragged widgets report the drag frames as uncommitted and the release as
+	// committed, so a host that snapshots for undo gets ONE entry per drag.
+	case NT::ConstFloat:
+		if (ImGui::DragFloat("Value", &n.f[0], 0.1f)) edit(false);
+		if (ImGui::IsItemDeactivatedAfterEdit())      edit(true);
+		return true;
+	case NT::ConstInt:
+	{
+		int v = (int)n.f[0];
+		if (ImGui::DragInt("Value", &v, 1)) { n.f[0] = (float)v; edit(false); }
+		if (ImGui::IsItemDeactivatedAfterEdit()) edit(true);
+		return true;
+	}
+	case NT::ConstBool:
+	{
+		bool b = n.f[0] != 0.0f;
+		if (ImGui::Checkbox("Value", &b)) { n.f[0] = b ? 1.0f : 0.0f; edit(true); }
+		return true;
+	}
+	case NT::ConstString:
+		ImGui::InputText("Value", &n.s);
+		if (ImGui::IsItemDeactivatedAfterEdit()) edit(true);
+		return true;
+	case NT::ConstVec2:
+		if (ImGui::DragFloat2("Value", n.f, 0.1f)) edit(false);
+		if (ImGui::IsItemDeactivatedAfterEdit())   edit(true);
+		return true;
+	case NT::ConstColor:
+		if (ImGui::ColorEdit4("Value", n.f)) edit(false);
+		if (ImGui::IsItemDeactivatedAfterEdit()) edit(true);
+		return true;
+
+	case NT::GetVariable:
+	case NT::SetVariable:
+	{
+		if (ImGui::BeginCombo("Variable", n.s.empty() ? "(none)" : n.s.c_str()))
+		{
+			for (const auto& v : g.variables)
+			{
+				// A function-local is only usable inside its owning sub-graph.
+				if (v.scope != 0 && v.scope != n.subgraph) continue;
+				if (ImGui::Selectable(v.name.c_str(), n.s == v.name))
+				{
+					const PT before = n.propType; const bool wasArr = n.isArray;
+					n.s        = v.name;
+					n.propType = v.type;      // node takes the variable's type…
+					n.isArray  = v.isArray;   // …and its array-ness
+					if (n.propType != before || n.isArray != wasArr)
+					{
+						const PinRanges r = pinRanges(n);
+						const int valuePin = n.type == NT::GetVariable ? r.dataOut0 : r.dataIn0;
+						removePinLinks(g, n.id, valuePin);
+					}
+					edit(true);
+				}
+			}
+			ImGui::EndCombo();
+		}
+		return true;
+	}
+
+	case NT::FunctionReturn:
+		if (HcEditorUtil::drawReturnFunctionPicker(g, n)) edit(true);
+		return true;
+
+	case NT::CallExternal:
+		ImGui::InputText("Function", &n.s);
+		if (ImGui::IsItemDeactivatedAfterEdit()) edit(true);
+		ImGui::TextDisabled("Calls a public function on the\nTarget instance (a reference).");
+		return true;
+
+	case NT::CreateWidget:
+	{
+		if (ImGui::BeginCombo("Widget", n.s.empty() ? "(none)" : n.s.c_str()))
+		{
+			for (const auto& a : HcEditorUtil::listAssets(h.content, HE::AssetType::Widget))
+				if (ImGui::Selectable((a.label + "##" + a.path).c_str(), n.s == a.path))
+					{ n.s = a.path; edit(true); }
+			ImGui::EndCombo();
+		}
+		ImGui::TextDisabled("Which UI Widget asset to instantiate.\nOutputs the new widget's id.");
+		return true;
+	}
+	case NT::CreateObject:
+	{
+		if (ImGui::BeginCombo("Class", n.s.empty() ? "(none)" : n.s.c_str()))
+		{
+			for (const auto& c : HcEditorUtil::listHorizonCodeClasses(h.content))
+				if (ImGui::Selectable((c.label + "##" + c.path).c_str(), n.s == c.path))
+					{ n.s = c.path; edit(true); }
+			ImGui::EndCombo();
+		}
+		ImGui::TextDisabled("Instantiates a HorizonCode class as a\nlive object. Outputs a reference to it.");
+		return true;
+	}
+
+	case NT::GetExternal:
+	case NT::SetExternal:
+	{
+		ImGui::InputText("Variable", &n.s);
+		if (ImGui::IsItemDeactivatedAfterEdit()) edit(true);
+		int t = (int)n.propType;
+		if (ImGui::Combo("Type", &t, "Exec\0Float\0Bool\0Int\0String\0Vec2\0Color\0Object\0"))
+		{
+			const PT nt = (PT)t;
+			if (nt != PT::Exec && nt != n.propType)
+			{
+				n.propType = nt;
+				const PinRanges r = pinRanges(n);
+				// Set External's value is its SECOND data input (Target is the first).
+				const int valuePin = n.type == NT::GetExternal ? r.dataOut0 : (r.dataIn0 + 1);
+				removePinLinks(g, n.id, valuePin);
+				edit(true);
+			}
+		}
+		ImGui::TextDisabled("Reads/writes a public variable on the\nTarget object.");
+		return true;
+	}
+
+	case NT::EngineCall:
+		// scene.load / scene.loadAdditive: choose the scene from a dropdown
+		// instead of typing the path (a typo silently fails to load).
+		if (HcEditorUtil::drawSceneParamPicker(n, h.content)) edit(true);
+		else ImGui::TextDisabled("Engine call — inputs are set on the node's pins.");
+		return true;
+
+	default:
+		return false;   // host-specific (or nothing to edit) — the frontend decides
+	}
 }
 
 // ── Keyboard: node clipboard + duplicate (Cmd on macOS, Ctrl elsewhere) ──────

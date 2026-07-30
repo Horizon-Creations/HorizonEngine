@@ -6,10 +6,26 @@
 // ─── Backend-agnostic sky constant block ──────────────────────────────────────
 // Every backend used to re-translate the same ~40 EnvironmentSettings fields into
 // its own sky constant buffer by hand — five hand-maintained mappings that could
-// (and did) drift. This is the ONE translation. The layout mirrors the MSL
-// SkyParams struct (mat4 + 17 float4) because that is the richest of the five;
-// backends whose sky shader takes a smaller constant buffer read the named fields
-// they need out of this instead of memcpy'ing the whole thing.
+// (and did) drift; D3D11/D3D12 both had the cloud wind's Z sign inverted. The
+// layout mirrors the MSL SkyParams struct (mat4 + 17 float4) because that is the
+// richest of the five; backends whose sky shader takes a smaller constant buffer
+// read the named fields they need out of this instead of memcpy'ing the whole
+// thing (D3D11 and D3D12 do exactly that — their SkyCB is a subset).
+//
+// STATE OF THE MIGRATION — 4 of 5 backends translate through this:
+//   Metal   memcpy of the whole struct (the layout is the MSL SkyParams).
+//   Vulkan  memcpy of the whole struct.
+//   D3D11   reads the 12 named fields its smaller SkyCB has (D3D11Renderer.cpp,
+//           D3D11RendererImpl::drawSky).
+//   D3D12   the same 12 plus the nebula pair its shader has and D3D11's lacks
+//           (D3D12Renderer.cpp, D3D12RendererImpl::drawSky).
+//   OpenGL  DOES NOT. Its sky program uses loose uniforms, not a UBO, so there is
+//           no POD to memcpy into — each field must be pushed with its own
+//           glUniform* call against a cached location. It therefore still maps
+//           its ~54 sky uniforms by hand, in the
+//           `if (m_skyProgram && GetEnvironment().skyEnabled)` block of
+//           OpenGLRenderer::DrawScene. A NEW FIELD MUST BE ADDED THERE TOO or it
+//           silently has no effect on OpenGL.
 namespace HE
 {
 
@@ -72,7 +88,8 @@ struct SkyFrameParams
 // silent drift.
 static_assert(sizeof(SkyFrameParams) == 64 + 17 * 16, "SkyFrameParams must match the MSL SkyParams layout (336 bytes)");
 
-// The one EnvironmentSettings → sky-constants translation.
+// EnvironmentSettings → sky-constants translation for the four backends listed at
+// the top of this header. OpenGL is NOT one of them — see that note.
 HE_RENDERING_API SkyFrameParams BuildSkyFrameParams(const IRenderer::EnvironmentSettings& env,
                                                     const SkyFrameInputs&                 in);
 

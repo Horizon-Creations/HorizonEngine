@@ -59,13 +59,6 @@ namespace HE
         Critical,
     };
 
-    enum class OS : uint8_t
-    {
-        Windows,
-        Linux,
-        macOS,
-    };
-
     // ── Assets ────────────────────────────────────────────────────────────────
 
     enum class AssetType : uint32_t

@@ -1,13 +1,16 @@
 #pragma once
 #include "../HE_RENDERING_API.h"
 #include "RenderWorld.h"
+#include <material/MaterialShaderLibrary.h> // MaterialShaderLibrary::Lighting (the graph-material light ABI)
 #include <Math/Math.h>
 
 // ─── Shared GPU light packing ─────────────────────────────────────────────────
-// Both packings below were duplicated verbatim in all five backends. Their OUTPUT
-// IS OBSERVABLE: the shaders index the arrays positionally, so the order in which
-// lights are written, the clamp, and the attenuation encoding are part of the
-// contract with the GLSL/MSL/HLSL — not implementation detail.
+// All three packings below were duplicated verbatim in the backends — the first
+// two once per backend, FillMaterialLightWindow seven times (OpenGL and Metal
+// each had a scene copy and a UI copy). Their OUTPUT IS OBSERVABLE: the shaders
+// index the arrays positionally, so the order in which lights are written, the
+// clamp, and the attenuation encoding are part of the contract with the
+// GLSL/MSL/HLSL — not implementation detail.
 namespace HE
 {
 
@@ -52,5 +55,27 @@ struct PackedLocalShadowLights
 };
 
 HE_RENDERING_API PackedLocalShadowLights BuildMaskedLocalLights(const RenderWorld& rw);
+
+// ── Graph-material (heLitP) light window ──────────────────────────────────────
+// Fills the light half of MaterialShaderLibrary::Lighting — the block every
+// backend binds for node-graph materials. This is a THIRD, deliberately
+// different scan from the two above: it walks the first kMaxLightWindow lights
+// of RenderWorld::lights and writes ALL of them, directional included and
+// without an intensity filter, because heLitP()'s loop is a plain
+// `for (i < counts.x)` over that same window and its light-type branch expects
+// slot i to be light i. Do not "fix" it to match BuildPackedLightArray.
+//
+// localShadowsActive = the local (point/spot) shadow atlas is bound and valid
+// this frame. Only then is lightParams[i].y written as shadowLayer + 1 (0 = the
+// light casts no local shadow); every pass that has no atlas — UI quads,
+// previews, and the backends with no local-shadow support at all — passes false
+// and leaves the field zeroed, which is what the preamble reads as "none".
+//
+// Fields OTHER than the light window (sun, ambient, camPos, GI, fog, CSM,
+// localShadowVP, weather) stay at the call sites: they differ per backend and
+// per pass, and several are clip-space-convention-baked.
+HE_RENDERING_API void FillMaterialLightWindow(const RenderWorld&               rw,
+                                              MaterialShaderLibrary::Lighting& out,
+                                              bool                             localShadowsActive);
 
 } // namespace HE

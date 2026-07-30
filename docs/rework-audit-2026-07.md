@@ -47,7 +47,8 @@ zwischen Game-/EditorApplication und zwischen den 5 Graph-Systemen — und (c) e
    Guards, die POD-/Disk-Varianten nicht).
 9. **`getCurrentOS()`-Default falsch** — `readConfig` setzt auf allen Plattformen
    `OS::Windows` und persistiert das (GlobalState.cpp:72/97/118); Funktion hat zudem
-   null Aufrufer.
+   null Aufrufer. *Status:* erledigt — `getCurrentOS()` ist raus, ebenso die letzten
+   Reste `EngineStatus::currentOS` und `enum class HE::OS` (repo-weit kein Leser).
 10. **Editor-Typ-Cache nie invalidiert** — die `s_typeCache`-Statics der Panels
     (z.B. ParticleGraphEditorPanel.cpp:76, MaterialEditorPanel.cpp:1312) werden nie
     geleert; Asset löschen + Pfad mit anderem Typ neu belegen → Doppelklick öffnet den
@@ -183,6 +184,9 @@ ASM-Panels sind dagegen wirklich dünn — die GraphEditor-Abstraktion funktioni
   ↔ apply Z. 617–1170); für Environment (~50 Felder × 2) existiert bereits die
   X-Macro-Liste `HE_ENV_FIELDS_*` in EngineApi.h:150–206 — wiederverwenden. Außerdem
   Hierarchie-Rebuild 3× copy-paste (Z. 1218/1290/1413) → `rebuildHierarchy(...)`-Helper.
+  *Status:* umgesetzt für 2 von 30 Blöcken (`environment`, `navmesh.config`); die
+  übrigen 28 bleiben handgetippt, dafür pinnt jetzt ein Voll-Round-Trip-Test alle
+  Feld-Sätze — Begründung in `docs/rework-2026-07-deferrals.md` §2.
 
 ---
 
@@ -267,7 +271,10 @@ Löschkandidaten:
 - **Methoden-Casing**: PascalCase (`Window::SetTitle`, `Application::Run`, GL/Metal-
   Backends) vs. camelCase (`InputMapping::mapAction`, Vulkan/D3D12, EngineProfiler) —
   teils in derselben Klasse (`Application`, `EditorUI.h`: `render()` neben
-  `RenderEditor`).
+  `RenderEditor`). *Status:* `Application` bleibt bewusst wie es ist (`HE_API`-
+  exportiert, `Run`/`On*` werden von repo-fremdem Spielcode aufgerufen bzw.
+  überschrieben) — als benannte Ausnahme in `docs/coding-conventions.md` §4
+  festgehalten, siehe `docs/rework-2026-07-deferrals.md` §3.
 - **Member-Präfix**: `m_` vs. Suffix-`_` vs. nichts — teils in derselben Klasse
   (`HorizonWorld`: `registry_` neben `m_hierarchyDirty`; `RenderResourceManager`:
   `allocator_` neben `m_nextIndex`). → auf `m_` vereinheitlichen.
@@ -311,7 +318,9 @@ Löschkandidaten:
   `unordered_map`-Index.
 - kGroups-Whitelist doppelt (ScriptContext.cpp:453 ↔ PyScriptBackend.cpp:395).
 - Geplante Inversion ScriptApi→HE::api umsetzen → macht ~500 Zeilen Hand-Shims in
-  ScriptContext/PyScriptBackend obsolet.
+  ScriptContext/PyScriptBackend obsolet. *Status:* NICHT umgesetzt — ändert die
+  skript-sichtbare Arität der Gameplay-Funktionen (Migration, kein Refactor);
+  Entscheidung + Vorgehen in `docs/rework-2026-07-deferrals.md` §1.
 - `play`/`playSpatial` ~55 Zeilen Copy-Paste; Sort-Key-Formel `layer*256+depth` 3×;
   `createWidget` dupliziert `refreshElementAssets`; Animation-Systeme teilen
   Zeitfortschalt-Muster; `int cap = isSnow ? 20000 : 20000;` (SceneSystems.cpp:57).

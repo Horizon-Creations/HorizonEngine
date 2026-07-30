@@ -7,24 +7,9 @@
 namespace HE
 {
 
-namespace
-{
-// A saved `op` is a raw int. A file from a newer editor (or a hand-edit) can name
-// an operator this build does not have; casting it blind produced a TransitionOp
-// with no valid enumerator, which AnimationStateMachineSystem then switch()es on
-// — an out-of-range comparison silently deciding a transition. Unknown ops fall
-// back to the field's own default (Greater), matching what an absent key does.
-TransitionOp transitionOpFromInt(int v)
-{
-    switch (v)
-    {
-        case (int)TransitionOp::Greater: return TransitionOp::Greater;
-        case (int)TransitionOp::Less:    return TransitionOp::Less;
-        case (int)TransitionOp::Equal:   return TransitionOp::Equal;
-        default:                         return TransitionOp::Greater;
-    }
-}
-} // namespace
+// transitionOpFromInt (the out-of-range `op` guard used below) now lives in
+// AnimatorStateMachineGraph.h next to the enum — SceneSerializer's legacy
+// migration path reads the same field and needs the same guard.
 
 std::string animatorStateMachineToJson(const AnimatorStateMachineGraph& g)
 {

@@ -2,6 +2,7 @@
 #include "EditorApplication.h"                 // AppContext
 #include "EditorAssetTypeCache.h"               // shared, invalidatable path → AssetType sniff
 #include "EditorPanelState.h"                   // shared per-tab state map + lazy asset open
+#include "EditorWidgets.h"                      // shared Content-Browser drop resolution
 #include "GraphEditor.h"                        // shared node-graph canvas frontend
 #include "HcEditorUtil.h"                       // asset dropdowns (texture picker)
 #include <MaterialGraph/MaterialGraph.h>
@@ -875,19 +876,17 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 			ImGui::SetNextItemAllowOverlap();
 			ImGui::InvisibleButton("##texdrop", ImVec2(std::max((bodyMax.x - bodyMin.x), 1.0f),
 			                                           std::max((bodyMax.y - bodyMin.y), 1.0f)));
-			if (ImGui::BeginDragDropTarget())
+			// Path-valued slot: the node stores a content-relative texture path, not a
+			// UUID, so only the drop RESOLUTION is shared — assetDropSlot draws a UUID
+			// slot and does not fit. One deliberate behaviour change: a file outside the
+			// content/engine roots is now rejected (with the shared "not a texture"
+			// warning) instead of being stored as an ABSOLUTE path, which the generated
+			// shader could never resolve on another machine anyway.
+			if (const EditorWidgets::AssetDrop drop =
+					EditorWidgets::acceptAssetDrop(ctx, HE::AssetType::Texture, "texture"))
 			{
-				if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("HE_ASSET_PATH"))
-				{
-					const std::string abs(static_cast<const char*>(pl->Data));
-					if (MaterialEditorPanel::isTextureAsset(abs) && ctx.contentManager)
-					{
-						const std::string rel = ctx.contentManager->toContentRelativePath(abs);
-						n->s = rel.empty() ? abs : rel;
-						structuralEdit = true; // texture list changed → regenerate
-					}
-				}
-				ImGui::EndDragDropTarget();
+				n->s = drop.relPath;
+				structuralEdit = true; // texture list changed → regenerate
 			}
 		}
 		// Align the name field with the value widgets below it: both sit at the
@@ -1294,11 +1293,6 @@ bool isMaterialAsset(const std::string& path)
 	// delete/rename/refresh. A per-panel cache could never be invalidated and kept
 	// answering with the type of an asset that had since been deleted at that path.
 	return EditorAssetTypeCache::is(path, HE::AssetType::Material);
-}
-
-bool isTextureAsset(const std::string& path)
-{
-	return EditorAssetTypeCache::is(path, HE::AssetType::Texture);
 }
 
 bool isMaterialFunctionAsset(const std::string& path)

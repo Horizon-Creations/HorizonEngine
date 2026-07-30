@@ -113,12 +113,49 @@ First-party `src/HE_Editor` is now at **zero** `g_` identifiers.
   `InputMapping::mapAction`).
 - **The renderer backend surface is `PascalCase`** — the `IRenderer` virtuals and every
   backend override of them: `virtual void Initialize(...)`
-  (`src/HE_Core/include/Renderer/IRenderer.h:81`), `SetGISettings` (`:195`). Backend
-  *private helpers* stay `camelCase`; `VulkanRenderer.h` shows the split cleanly —
-  `public:` at `:26` is all PascalCase overrides, `private:` at `:82` onward is
-  camelCase helpers.
+  (`src/HE_Core/include/Renderer/IRenderer.h:81`), `SetGISettings` (`:195`). That part
+  holds everywhere.
+  **Backend *private helpers* are NOT settled, and the code does not follow one rule.**
+  Counting the private member functions declared in each backend header:
+
+  | Header | PascalCase | camelCase |
+  |---|---:|---:|
+  | `OpenGL/OpenGLRenderer.h` | 63 | 1 |
+  | `Metal/MetalRenderer.h` | 69 | 6 |
+  | `Vulkan/VulkanRenderer.h` | 4 | 77 |
+  | `D3D11/D3D11Renderer.h`, `D3D12/D3D12Renderer.h` | 1 each | 0 |
+
+  So Vulkan is camelCase and everything else is PascalCase, and even Vulkan is mixed
+  (`DrawScene`, `EncodeShadowMap`, `BuildGIBlas`, `GetOrBuildMaterialPipeline` sit in its
+  `private:` block). This file previously asserted "backend *private helpers* stay
+  `camelCase`, `VulkanRenderer.h` shows the split cleanly" — that was true of one header
+  out of five and is corrected here rather than acted on. Unifying means renaming 84
+  methods (→ PascalCase) or 138 (→ camelCase) plus every call site, and three of the five
+  backends **cannot be compiled on the machine this tree is developed on** (D3D11/D3D12
+  are Windows-only, Vulkan needs an SDK) — and Vulkan alone holds 77 of the 84 camelCase
+  declarations. A mechanical rename there is unverifiable short of CI. Per §8.6
+  that is a reason not to start, not a reason to half-start. **Convention for NEW backend
+  private helpers: match the file you are editing.**
+- **The `Application` subclass surface is `PascalCase`** — the same reasoning that keeps
+  the `IRenderer` virtuals PascalCase, applied to a second class. `Run`/`Quit` and the
+  subclass hooks
+  `GetConfig`/`OnInit`/`OnEvent`/`OnRender`/`OnShutdown`/`CreateRenderer`
+  (`src/HE_Core/include/Application/Application.h:51–75`) sit right next to camelCase
+  accessors — `window()`, `gameLoop()`, `setWorld()`, `isRunning()`, `setMaxFps()`
+  (`:78–104`). That looks like drift, and it was flagged as such, but renaming it is a
+  **source break for users**: `Application` is `HE_API`-exported, `Run` is what a game's
+  `main()` calls (`src/HE_Game/src/main.cpp:7`), and the `On*` hooks are `override`n by
+  out-of-repo game code that this repo cannot grep (§8.4). The accessors stay camelCase
+  because they are *called* by subclasses, not overridden. (This bullet used to cite
+  `VulkanRenderer.h` as the model of that split; see the table above for why that citation
+  was withdrawn — the *overridden-vs-called* distinction is what carries the rule, not any
+  backend header.)
 - **Compile-time constants**: `k` + `PascalCase` (~204 in the tree), e.g.
   `kMatMaxGraphTextures` at `src/HE_Core/include/MaterialGraph/MaterialGraph.h:290`.
+
+Deliberate non-conversions from the 2026-07 rework that are *not* naming decisions — the
+`ScriptApi` → `HE::api` inversion, and the component (de)serialisation symmetry — are
+recorded in `docs/rework-2026-07-deferrals.md`, which links back to this entry.
 
 ---
 
@@ -133,9 +170,17 @@ unified on `kGIProbeSpacing`
 (`src/HE_Rendering/include/Backends/Metal/MetalRenderer.h:619`,
 `.../OpenGL/OpenGLRenderer.h:696`, `.../Vulkan/VulkanRenderer.h:602`).
 
-**Deferred, deliberately:** the CPU BVH family — `HE::GiBvh`, `GiBvhNode`,
+**Deferred, deliberately (1) — the Vulkan backend's private methods.** `VulkanRenderer.h`
+still spells 15 private helpers `Gi`, not `GI`: `createGiPipelines`, `destroyGiAccel`,
+`buildGiHwBlas`, `buildGiTlas`, `ensureGiProbeAtlas`, `updateGiAccel`, … These
+are class-scoped, so nothing collides. They are left alone for the same reason the
+private-helper *casing* is left alone in §4 — the Vulkan backend does not compile on the
+machine this tree is developed on, so a mechanical rename there is unverifiable outside
+CI. The rule above still governs anything **new**.
+
+**Deferred, deliberately (2) — the CPU BVH family:** `HE::GiBvh`, `GiBvhNode`,
 `GiBvhTriangle` (`src/HE_Rendering/include/HorizonRendering/GiBvh.h:40`, `:24`, `:34`) —
-is still `Gi`-spelled. Renaming the type wants the *file* renamed too, which drags in
+still `Gi`-spelled. Renaming the type wants the *file* renamed too, which drags in
 `src/HE_Rendering/CMakeLists.txt:282`, `tests/CMakeLists.txt:70`, `tests/test_gi_bvh.cpp`
 and eleven backend sources. Correct call, and the reason it is worth writing down: a
 cosmetic rename whose blast radius reaches the build files is not cosmetic.

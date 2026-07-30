@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string>
+
 struct AppContext;
 
 class EditorUI
@@ -11,6 +13,13 @@ public:
 	// Must be called on editor shutdown — destroying a joinable std::thread
 	// terminates the process.
 	static void joinPendingExport();
+
+	// True if the editor tab for `assetPath` holds edits that were never written
+	// to disk (see the definition in EditorUI.cpp for the panel list). Exposed so
+	// EditorApplication's OS-close veto (window X / Cmd+Q / app quit) can veto for
+	// dirty asset tabs too — those never touch the world undo revision, so the
+	// scene-dirty test alone lets them be lost without a prompt.
+	static bool tabHasUnsavedEdits(const std::string& assetPath);
 
 private:
 	static void renderEditor(AppContext& ctx, float dt);

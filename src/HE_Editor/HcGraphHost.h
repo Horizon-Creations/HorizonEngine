@@ -16,11 +16,17 @@ class ContentManager;
 // same for every HorizonCode editor: the Level Script / Game Instance /
 // HorizonCode Class tabs and the UI Widget graph.
 //
-// The frontends genuinely differ in only three things, so those are all the
-// hooks there are: how a node is titled (the widget editor appends the bound
-// element), how an edit is recorded (a scene-undo snapshot vs the widget's own
-// undo stack) and which node types the menus offer (a level script has no
-// self-widget and no element properties). Everything else lives here.
+// On the CANVAS the frontends genuinely differ in only three things, so those
+// are all the hooks there are: how a node is titled (the widget editor appends
+// the bound element), how an edit is recorded (a scene-undo snapshot vs the
+// widget's own undo stack) and which node types the menus offer (a level script
+// has no self-widget and no element properties).
+//
+// The SIDE PANELS are only partly shared: drawCommonNodeDetails (below) draws the
+// node-detail rows that every frontend spells identically, but each frontend
+// still owns its remaining detail rows and its whole variables/functions list —
+// those differ in layout, and the widget editor's list also enumerates the UI
+// elements. See the comment on drawCommonNodeDetails for the exact split.
 namespace HcGraphHost
 {
 namespace HC = HorizonCode;
@@ -42,6 +48,10 @@ void removePinLinks(HC::Graph& g, int nodeId, int pin);
 
 std::string uniqueFunctionName(const HC::Graph& g);
 std::string uniqueVarName(const HC::Graph& g);
+
+// How a variable's type reads in a list ("Float", "PlayerState", "Int[]") — an
+// Object variable shows its class, not a bare "Object".
+std::string variableTypeLabel(const HC::Variable& v);
 
 // Add a node at `pos`, owned by the visible sub-graph.
 int addNode(HC::Graph& g, HC::NodeType type, const ImVec2& pos, int subgraph);
@@ -110,6 +120,28 @@ std::string beginAddMenu();
 // Returns the id of a node created this frame, else 0.
 int  drawAddMenuTail(const Host& h, const std::string& lowerQuery);
 void endAddMenu();
+
+// ── Node details ─────────────────────────────────────────────────────────────
+// The detail rows that are word-for-word the same in every HorizonCode frontend,
+// drawn from `h.graph` / `h.content` and reported through `h.onEdit`. Returns
+// true when `n` was drawn here; false means the frontend has to draw it itself.
+//
+// Covered: the array element-type picker (ArrayMake…ForEach), every Const*
+// literal, Get/Set Variable, Function Return, Call External, Create Widget,
+// Create Object, Get/Set External and Engine Call.
+//
+// NOT covered, because the frontends genuinely say different things and each
+// still has its own case for them:
+//   Event          — a level script / class picks from an event catalog (or names
+//                    its own); a widget binds an ELEMENT and that element's events.
+//   FunctionEntry  — different access labels and different "who can call this"
+//                    hint (Lua/Python vs horizon.callWidgetFunction).
+//   FunctionCall   — the level script hides unnamed functions, the widget does not.
+//   BindEvent /
+//   EmitEvent      — same widgets, but the hint says "script" vs "widget".
+//   Get/SetProperty— widget-only (there are no UI elements in a level script).
+// Adding a case here is only correct while every frontend wants it identically.
+bool drawCommonNodeDetails(const Host& h, HC::Node& n);
 
 // A link dragged off a pin and released on empty canvas: a menu filtered to
 // everything that can take that pin, auto-wired on pick. Returns the new node
