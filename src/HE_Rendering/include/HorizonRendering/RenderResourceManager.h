@@ -27,6 +27,11 @@ struct MaterialDesc {
 // budget tracking + LRU eviction to the GPUMemoryAllocator.
 // Backends call uploadMesh/uploadTexture/createMaterial when they perform the
 // actual GPU upload, and release() when they tear it down.
+//
+// STAGED API — no production consumer yet: every backend still owns its own
+// UUID→GPU-mesh cache, so nothing outside the unit tests calls this today. It is
+// kept (and kept green) because it is the agreed shape for the roadmap's GPU
+// upload-budgeting item; do not delete it as dead code without retiring that item.
 class RenderResourceManager {
 public:
     explicit RenderResourceManager(GPUMemoryAllocator& allocator);

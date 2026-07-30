@@ -96,7 +96,11 @@ This one table is consumed by **all four** paths:
   generic *Engine Call* node reads `params`/`results` for its pins.
 - **Interpreter** — the `Context` binds each `id` to a `std::function` thunk
   that calls the real `HE::api` function (coercing pin values ↔ C++ args).
-- **Codegen** — emits `cppCall(ctx, args…)` directly, reading results back.
+- **Codegen** — emits the generic invoke path keyed by `id`
+  (`hc::callApi(m_ctx, "<id>", args)`), which the host resolves back through
+  `HE::api::find(id)->invoke`, and reads the results back. `cppCall` is *not*
+  emitted; it is staged input for the planned per-row migration to direct typed
+  calls (implementation plan §7.1 v2).
 - **Lua/Python** — generate their binding thunks from the same table.
 
 Adding subsystem coverage = adding rows to this table + one thunk each. New
@@ -136,8 +140,10 @@ made explicit (§4.4). Reuse `signatureOf`/`pinRanges` for pin semantics.
 
 ### 4.3 Back end — emit C++
 Each class → a `class X : hc::CompiledInstance` (see §5). Statements from the
-exec list; expressions from the data trees; engine calls from the registry’s
-`cppCall`. Name-mangle members/locals; manage includes (the `HE::api` headers +
+exec list; expressions from the data trees; engine calls through the registry’s
+generic invoke path (`hc::callApi(m_ctx, "<id>", args)`, keyed by `ApiFn::id` —
+emitting `cppCall` directly is a later, per-row migration, §7.1 v2 of the
+implementation plan). Name-mangle members/locals; manage includes (the `HE::api` headers +
 `glm`). Emit one `hc_registry.cpp` registering every class factory by asset UUID.
 
 ### 4.4 The pull-model + exec-cache lowering (the one subtle part)

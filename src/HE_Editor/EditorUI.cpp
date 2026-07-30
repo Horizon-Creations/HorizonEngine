@@ -43,10 +43,13 @@
 #include <Math/AABB.h>
 #include <glm/gtc/type_ptr.hpp>
 #include "MeshImporter.h"
+#include "SkeletalMeshImporter.h"
+#include "AnimationClipImporter.h"
 #include "TextureImporter.h"
 #include "MaterialImporter.h"
 #include "AudioImporter.h"
 #include "FontImporter.h"
+#include "ImporterCommon.h"   // Importer::gltfHasSkin — static vs. skeletal routing
 
 #ifdef _WIN32
 #include <windows.h>  // must come before any header that pulls in rpcdce.h
@@ -203,7 +206,7 @@ static bool   s_exportModSupport  = false;
 static std::string s_exportExcludes;               // one glob pattern per line
 static bool   s_exportIncremental = true;
 static bool   s_exportAppBundle   = false;         // macOS .app bundle
-static bool   s_exportCompileHC   = false;         // compile HorizonCode → C++ (not implemented yet)
+static bool   s_exportCompileHC   = false;         // compile HorizonCode → C++ (Host targets, needs cmake + compiler)
 static std::string s_exportPlatform = "Host";      // exportPlatformName() value
 static uint32_t s_exportShaderBackends = (1u << 4) | (1u << 0); // Metal|OpenGL bitmask of 1u<<RendererBackend
 
@@ -3402,7 +3405,17 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 
                 const std::filesystem::path root(ctx.contentManager->contentRoot());
                 bool ok = false;
-                if      (isMeshSrc)    ok = MeshImporter::import(srcPath, root)     != nullptr;
+                if (isMeshSrc && Importer::gltfHasSkin(srcPath))
+                {
+                    // Rigged source: MeshImporter would drop the skeleton and the
+                    // per-vertex joints/weights and register bind-pose geometry as a
+                    // StaticMesh, so the mesh could never be picked as a SkeletalMesh.
+                    ok = SkeletalMeshImporter::import(srcPath, root) != nullptr;
+                    // Animations usually live in the same glTF and become their own
+                    // assets (referenced by the AnimatorStateMachine).
+                    if (ok) AnimationClipImporter::importAndWrite(srcPath, root);
+                }
+                else if (isMeshSrc)    ok = MeshImporter::import(srcPath, root)     != nullptr;
                 else if (isTextureSrc) ok = TextureImporter::import(srcPath, root)  != nullptr;
                 else if (isAudioSrc)   ok = AudioImporter::import(srcPath, root)    != nullptr;
                 else if (isMatSrc)     ok = MaterialImporter::import(srcPath, root) != nullptr;
@@ -6321,7 +6334,15 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 					if (ec || relDir == ".") relDir.clear();
 
 					bool ok = false;
-					if      (isMeshSrc)    ok = MeshImporter::import(srcPath, root, relDir)     != nullptr;
+					if (isMeshSrc && Importer::gltfHasSkin(srcPath))
+					{
+						// Same routing as File ▸ Import Asset: a skinned glTF must not
+						// go through MeshImporter, which discards the skeleton and the
+						// JOINTS_0/WEIGHTS_0 attributes.
+						ok = SkeletalMeshImporter::import(srcPath, root, relDir) != nullptr;
+						if (ok) AnimationClipImporter::importAndWrite(srcPath, root, relDir);
+					}
+					else if (isMeshSrc)    ok = MeshImporter::import(srcPath, root, relDir)     != nullptr;
 					else if (isTextureSrc) ok = TextureImporter::import(srcPath, root, relDir)  != nullptr;
 					else if (isAudioSrc)   ok = AudioImporter::import(srcPath, root, relDir)    != nullptr;
 					else if (isMatSrc)     ok = MaterialImporter::import(srcPath, root, relDir) != nullptr;

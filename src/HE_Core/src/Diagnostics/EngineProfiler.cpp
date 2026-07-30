@@ -115,8 +115,8 @@ void EngineProfiler::beginFrame(double deltaMs)
 	}
 
 	m_frameStartNs = nowNs();   // always — cheap; drives lastCpuFrameMs() for the live HUD
-	m_lastDeltaMs  = deltaMs;
-	if (!m_recording) return;
+	if (!m_recording) return;   // deltaMs is only stored per recorded frame (m_current.deltaMs);
+	                            // the live HUD gets its delta straight from Application's own dt
 
 	m_current           = ProfFrameRecord{};
 	m_current.index     = m_frameCounter;

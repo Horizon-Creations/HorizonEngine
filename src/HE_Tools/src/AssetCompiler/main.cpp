@@ -5,9 +5,13 @@
 // the source directory layout. A file is skipped when its primary .hasset
 // output is newer than the source (pass --force to re-import everything).
 
+#include "../AssetImporter/AnimationClipImporter.h"
 #include "../AssetImporter/AudioImporter.h"
+#include "../AssetImporter/FontImporter.h"
+#include "../AssetImporter/ImporterCommon.h"
 #include "../AssetImporter/MaterialImporter.h"
 #include "../AssetImporter/MeshImporter.h"
+#include "../AssetImporter/SkeletalMeshImporter.h"
 #include "../AssetImporter/TextureImporter.h"
 
 #include <algorithm>
@@ -20,7 +24,7 @@ namespace fs = std::filesystem;
 
 namespace
 {
-	enum class SourceKind { None, Texture, Mesh, Material, Audio };
+	enum class SourceKind { None, Texture, Mesh, SkeletalMesh, Material, Audio, Font };
 
 	SourceKind classify(const fs::path& file)
 	{
@@ -31,13 +35,28 @@ namespace
 		if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".tga" ||
 		    ext == ".bmp" || ext == ".psd" || ext == ".hdr")
 			return SourceKind::Texture;
+		// A glTF carrying a skin has to go to SkeletalMeshImporter: MeshImporter
+		// ignores JOINTS_0/WEIGHTS_0 and the skeleton, so a rigged character would
+		// import as bind-pose geometry registered as a StaticMesh — with a success
+		// message and no way to ever pick it as a SkeletalMesh.
 		if (ext == ".gltf" || ext == ".glb")
-			return SourceKind::Mesh;
+			return Importer::gltfHasSkin(file) ? SourceKind::SkeletalMesh : SourceKind::Mesh;
 		if (ext == ".hmat")
 			return SourceKind::Material;
 		if (ext == ".wav")
 			return SourceKind::Audio;
+		if (ext == ".ttf" || ext == ".otf")
+			return SourceKind::Font;
 		return SourceKind::None;
+	}
+
+	// The .hasset an importer writes first — the timestamp probe below compares
+	// against it. Only SkeletalMeshImporter deviates from "<stem>.hasset".
+	fs::path primaryOutput(SourceKind kind, const fs::path& source)
+	{
+		const std::string stem = source.stem().string();
+		return (kind == SourceKind::SkeletalMesh) ? stem + "_skeletal.hasset"
+		                                          : stem + ".hasset";
 	}
 
 	bool isUpToDate(const fs::path& source, const fs::path& output)
@@ -90,7 +109,7 @@ int main(int argc, char** argv)
 
 		const fs::path relDir  = fs::relative(entry.path().parent_path(), sourceDir);
 		const fs::path relOut  = (relDir == ".") ? fs::path{} : relDir;
-		const fs::path primary = outputDir / relOut / (entry.path().stem().string() + ".hasset");
+		const fs::path primary = outputDir / relOut / primaryOutput(kind, entry.path());
 
 		if (!force && isUpToDate(entry.path(), primary))
 		{
@@ -105,6 +124,20 @@ int main(int argc, char** argv)
 		case SourceKind::Mesh:     ok = MeshImporter::import(entry.path(), outputDir, relOut)    != nullptr; break;
 		case SourceKind::Material: ok = MaterialImporter::import(entry.path(), outputDir, relOut)!= nullptr; break;
 		case SourceKind::Audio:    ok = AudioImporter::import(entry.path(), outputDir, relOut)   != nullptr; break;
+		case SourceKind::Font:     ok = FontImporter::import(entry.path(), outputDir, relOut)    != nullptr; break;
+		case SourceKind::SkeletalMesh:
+		{
+			ok = SkeletalMeshImporter::import(entry.path(), outputDir, relOut) != nullptr;
+			// A rigged glTF normally ships its animations in the same file; the
+			// clips are separate assets the AnimatorStateMachine references.
+			if (ok)
+			{
+				const auto clips = AnimationClipImporter::importAndWrite(entry.path(), outputDir, relOut);
+				imported += clips.written;
+				failed   += clips.failed;
+			}
+			break;
+		}
 		case SourceKind::None:     break;
 		}
 

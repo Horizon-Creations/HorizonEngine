@@ -6,8 +6,11 @@
 // ─── GeometryPass ───────────────────────────────────────────────────────────
 // Turns the culled + sorted visible objects into draw calls. It produces no
 // GPU work itself — the backend replays the resulting command buffer with its
-// own pipeline + per-frame state (camera, lights). This is the only pass wired
-// into the default graph today.
+// own pipeline + per-frame state (camera, lights). It is the one pass every
+// backend wires into its graph; which of the others join it is the backend's
+// choice (GL: Shadow → Geometry → PostProcess; D3D11/D3D12: Shadow → Geometry;
+// Metal/Vulkan: Geometry alone, their shadow and tonemap work is encoded
+// outside the graph).
 void GeometryPass::execute(const RenderWorld&           world,
                            const std::vector<uint32_t>& sortedIndices,
                            CommandBuffer&               outCmds)

@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -1232,10 +1233,10 @@ std::string classNameFor(const std::string& key, std::unordered_set<std::string>
 
 } // namespace
 
-Result generate(const std::vector<ClassSource>& sources, const Options& opt)
+// The whole emission, writing into `res`; generate() below wraps it so that
+// nothing thrown in here reaches a caller.
+static void generateInto(const std::vector<ClassSource>& sources, const Options& opt, Result& res)
 {
-    Result res;
-    res.ok = true;
     std::unordered_set<std::string> usedNames;
 
     struct Entry { std::string key, className; };
@@ -1260,6 +1261,22 @@ Result generate(const std::vector<ClassSource>& sources, const Options& opt)
         {
             usedNames.erase(className);   // name freed — the class ships interpreted
             res.fallbacks.push_back({ src.key, e.reason, e.node });
+        }
+        catch (const std::exception& e)
+        {
+            // NOT a "this graph can't be compiled" verdict (that is FallbackError
+            // above) but a slip in the emitter itself — a lookup we thought total
+            // (.at()) or an allocation failure. Keep translating the remaining
+            // classes so one bad graph doesn't cost the whole build, but fail the
+            // run: this class drops out of the manifest and ships interpreted.
+            // It gets a fallback entry as well as the warning because the editor's
+            // per-class compile check reads only `fallbacks` — without one it would
+            // report the graph as compiling cleanly.
+            usedNames.erase(className);
+            res.ok = false;
+            res.warnings.push_back("internal codegen error in '" +
+                                   (src.label.empty() ? src.key : src.label) + "': " + e.what());
+            res.fallbacks.push_back({ src.key, "internal codegen error — shipped interpreted", 0 });
         }
     }
 
@@ -1310,7 +1327,35 @@ Result generate(const std::vector<ClassSource>& sources, const Options& opt)
     rc += "    return " + ns + "::classes(count);\n}\n";
     rc += "#endif\n";
     res.files.push_back({ "hc_registry.cpp", std::move(rc) });
+}
 
+Result generate(const std::vector<ClassSource>& sources, const Options& opt)
+{
+    Result res;
+    res.ok = true;
+    // Exception firewall. Two of the four callers press this from an ImGui
+    // button mid-frame (LevelScriptPanel, UIEditorPanel), where an escaping
+    // exception unwinds through the unfinished frame — a torn frame at best.
+    // So an internal slip (a .at() we thought total, an allocation failure while
+    // building the sources) has to come back as ok=false + a warning instead.
+    // Per-class errors are already handled one level down; this catches whatever
+    // happens outside a class (the manifest emission) and anything the inner
+    // handler itself throws. Files produced so far are kept for diagnosis — the
+    // set is incomplete, which is exactly what ok=false says.
+    try
+    {
+        generateInto(sources, opt, res);
+    }
+    catch (const std::exception& e)
+    {
+        res.ok = false;
+        res.warnings.push_back(std::string("internal codegen error: ") + e.what());
+    }
+    catch (...)
+    {
+        res.ok = false;
+        res.warnings.push_back("internal codegen error: unknown exception");
+    }
     return res;
 }
 

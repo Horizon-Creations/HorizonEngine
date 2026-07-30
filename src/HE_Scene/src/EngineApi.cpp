@@ -41,6 +41,21 @@ namespace HE::api {
 // ── Debug ────────────────────────────────────────────────────────────────────
 void log(Ctx&, const std::string& message) { ScriptApi::log(message.c_str()); }
 
+namespace {
+// Flip every renderable component the entity carries. One definition for both
+// callers — the per-entity toggle (entity::setVisible) and zone hiding
+// (scene::setZoneVisible) mean exactly the same thing by "visible", so a
+// component type added here must show up in both. Caller validates the entity.
+void setEntityVisible(entt::registry& reg, entt::entity e, bool visible)
+{
+    if (auto* m  = reg.try_get<MeshComponent>(e))           m->visible  = visible;
+    if (auto* sm = reg.try_get<SkeletalMeshComponent>(e))   sm->visible = visible;
+    if (auto* l  = reg.try_get<LightComponent>(e))          l->visible  = visible;
+    if (auto* ps = reg.try_get<ParticleSystemComponent>(e)) ps->visible = visible;
+    if (auto* f  = reg.try_get<FoliageComponent>(e))        f->visible  = visible;
+}
+} // namespace
+
 // ── Entities ─────────────────────────────────────────────────────────────────
 namespace entity {
 std::string getName(Ctx& c, Entity e)                          { return c.world ? ScriptApi::getName(*c.world, e) : std::string(); }
@@ -66,13 +81,7 @@ bool exists(Ctx& c, Entity e)
 void setVisible(Ctx& c, Entity e, bool visible)
 {
     if (!c.world || !c.world->registry().valid((entt::entity)e)) return;
-    auto& reg = c.world->registry();
-    const auto en = (entt::entity)e;
-    if (auto* m  = reg.try_get<MeshComponent>(en))           m->visible  = visible;
-    if (auto* sm = reg.try_get<SkeletalMeshComponent>(en))   sm->visible = visible;
-    if (auto* l  = reg.try_get<LightComponent>(en))          l->visible  = visible;
-    if (auto* ps = reg.try_get<ParticleSystemComponent>(en)) ps->visible = visible;
-    if (auto* f  = reg.try_get<FoliageComponent>(en))        f->visible  = visible;
+    setEntityVisible(c.world->registry(), (entt::entity)e, visible);
 }
 bool getVisible(Ctx& c, Entity e)
 {
@@ -450,6 +459,8 @@ void activate()
 { Request r; r.kind = 3; requests().push_back(std::move(r)); }
 void requestZoneVisible(int zone, bool visible)
 { Request r; r.kind = 4; r.zone = zone; r.flag = visible; requests().push_back(std::move(r)); }
+void showZone(int zone) { requestZoneVisible(zone, true); }
+void hideZone(int zone) { requestZoneVisible(zone, false); }
 void requestZonePosition(int zone, const glm::vec3& p)
 { Request r; r.kind = 5; r.zone = zone; r.pos = p; requests().push_back(std::move(r)); }
 std::vector<Request> takeRequests()
@@ -503,18 +514,6 @@ void setZonePosition(Ctx& c, int zone, const glm::vec3& p)
     // zone's sub-root moves the whole zone.
     c.world->registry().get_or_emplace<TransformComponent>(e).position = p;
 }
-namespace {
-// Flip every renderable component the entity carries (zone hiding and the
-// per-entity visibility toggle share this).
-void setEntityVisible(entt::registry& reg, entt::entity e, bool visible)
-{
-    if (auto* m  = reg.try_get<MeshComponent>(e))           m->visible  = visible;
-    if (auto* sm = reg.try_get<SkeletalMeshComponent>(e))   sm->visible = visible;
-    if (auto* l  = reg.try_get<LightComponent>(e))          l->visible  = visible;
-    if (auto* ps = reg.try_get<ParticleSystemComponent>(e)) ps->visible = visible;
-    if (auto* f  = reg.try_get<FoliageComponent>(e))        f->visible  = visible;
-}
-} // namespace
 void setZoneVisible(Ctx& c, int zone, bool visible)
 {
     const ZoneInfo* z = zoneInfo(zone);
@@ -1004,10 +1003,10 @@ const std::vector<ApiFn>& registry()
             [](Ctx&, const VV&){ return VV{ Value::ofBool(scene::hasPendingLevel()) }; } });
         // Show/Hide/Move queue as requests so they order correctly with a Load
         // Additive in the SAME exec chain (the load itself is deferred).
-        t.push_back({ "scene.showZone", "Scene", true, {{"zone", P::Int}}, {}, "HE::api::scene::requestZoneVisible",
-            [](Ctx&, const VV& a){ scene::requestZoneVisible(aI(a, 0), true); return VV{}; } });
-        t.push_back({ "scene.hideZone", "Scene", true, {{"zone", P::Int}}, {}, "HE::api::scene::requestZoneVisible",
-            [](Ctx&, const VV& a){ scene::requestZoneVisible(aI(a, 0), false); return VV{}; } });
+        t.push_back({ "scene.showZone", "Scene", true, {{"zone", P::Int}}, {}, "HE::api::scene::showZone",
+            [](Ctx&, const VV& a){ scene::showZone(aI(a, 0)); return VV{}; } });
+        t.push_back({ "scene.hideZone", "Scene", true, {{"zone", P::Int}}, {}, "HE::api::scene::hideZone",
+            [](Ctx&, const VV& a){ scene::hideZone(aI(a, 0)); return VV{}; } });
         t.push_back({ "scene.zonePosition", "Scene", false, {{"zone", P::Int}}, {{"position", P::Color}}, "HE::api::scene::zonePosition",
             [](Ctx& c, const VV& a){ return VV{ v3(scene::zonePosition(c, aI(a, 0))) }; } });
         t.push_back({ "scene.setZonePosition", "Scene", true, {{"zone", P::Int}, {"position", P::Color}}, {}, "HE::api::scene::requestZonePosition",

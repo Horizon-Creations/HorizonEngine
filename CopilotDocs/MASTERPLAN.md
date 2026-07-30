@@ -33,7 +33,7 @@ Unity/Godot-Featureset, nicht Unreal-AAA).
 | Asset-Pipeline: Importer (Textur/Mesh/Material/Audio), `asset_compiler`, hpak v2 (LZ4HC/zstd, AES-256-GCM, On-Demand-Streaming, Overlays), Export-Pipeline (Profile, Async, Inkrementell, Plattform-Ziele, lauffähige Exporte inkl. macOS-.app-Bundle) | ✅ |
 | SceneSerializer (alle Komponenten inkl. Animator/AnimatorBlend/SkeletalMesh/PropertyAnimator/NavMesh/NavAgent, JSON+CBOR) | ✅ |
 | RenderGraph, RenderResourceManager, GPUMemoryAllocator | ✅ |
-| Memory (`Ref<T>`, Job-System) | ✅ |
+| Memory (`AssetRef<T>`-Pinning im ContentManager, Job-System) | ✅ |
 | Engine-Systeme: Physik (Jolt), Scripting (Lua + Python + natives C++ `GameLogicLoader` + HorizonCode-Interpreter + HorizonCode-C++-Codegen; **Projekt-Sprache jetzt harte, einsprachige Restriktion** — C++-Projekte mit kompilierbarem `Source/`-Scaffold), Audio (miniaudio), Animation (Skinning/Blending/State-Machine/Property-Anim), Navigation (Recast/Detour), Partikel, In-Game-UI/Widget-System v3, Input-Mapping + Input-Assets + PlayerHost | ✅ |
 | Textur-Kompression | 🟡 ASTC 4×4 (Metal/Apple-Silicon-Export) ✅ — BCn (D3D/Vulkan/GL) 🔴 |
 | Linux-Window/Input-Pfad | 🔴 kein Engine-Code |
@@ -132,7 +132,7 @@ Keine Abhängigkeiten; jede Woche ein bisschen davon.
 |---|---|---|---|
 | 0.1 | **Test-Gerüst** (doctest oder Catch2) | — | ✅ doctest, 14 Cases (SlotMap, HAsset, ContentManager, Serializer), GitHub-CI-Matrix |
 | 0.2 | **CI** GitHub-Actions-Matrix (macOS + Windows, später Linux) | 0.1 | ✅ `.github/workflows/ci.yml`, macOS + Windows Matrix |
-| 0.3 | **`Ref<T>`** (intrusiver Refcount) + Einsatz im ContentManager | — | ✅ Forts. 25 — `AssetRef<T>` + `pinAsset`/`unpinAsset` + `unloadAsset`-Gate |
+| 0.3 | **Ref-Counting** + Einsatz im ContentManager | — | ✅ Forts. 25 — erfüllt durch `AssetRef<T>` + `pinAsset`/`unpinAsset` + `unloadAsset`-Gate (der ursprünglich geplante intrusive `Ref<T>` wurde davon überflüssig gemacht und entfällt) |
 | 0.4 | **Job-System** (Thread-Pool, parallel_for, Abhängigkeits-Handles) | — | ✅ Forts. 26 — parallele FrustumCuller + parallele RenderExtractor-Extraktion |
 | 0.5 | **Profiling-Hooks**: Tracy vendoren, Frame-/Zone-Marker | — | ✅ Forts. 27 — Tracy FetchContent + HE_PROFILE_FRAME/SCOPE/SCOPE_N + 4 Zone-Marker |
 | 0.6 | **Aufräumen**: doppelte glm-Kopie (vendored + FetchContent) auf eine Quelle | — | ✅ Forts. 28 — 33 MB vendored glm aus HE_Rendering entfernt (war CMake-toter Code) |

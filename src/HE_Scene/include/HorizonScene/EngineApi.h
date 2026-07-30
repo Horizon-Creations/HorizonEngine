@@ -299,6 +299,12 @@ namespace scene {
     // requested the SAME frame (the direct setters below only see zones that
     // already finished loading).
     void requestZoneVisible(int zone, bool visible);
+    // Show Zone / Hide Zone as two callees rather than one with a bool: the
+    // registry rows below expose them as separate functions, and ApiFn::cppCall
+    // has to name a function whose signature matches that row's params exactly
+    // (a shared requestZoneVisible would drop the bool that tells them apart).
+    void showZone(int zone);
+    void hideZone(int zone);
     void requestZonePosition(int zone, const glm::vec3& p);
 
     // ── Zone queries / control (direct; operate on the app-maintained table) ──
@@ -419,7 +425,8 @@ namespace input {
 // ── Machine-readable registry ─────────────────────────────────────────────────
 // One ApiFn per function. The interpreter looks a function up by `id` and calls
 // `invoke`; the editor builds its add-menu from `category`/`params`/`results`;
-// codegen emits `cppCall(args…)`. This is the single source of truth.
+// codegen emits the generic `hc::callApi(ctx, "<id>", …)` thunk, which lands on
+// the same `invoke`. This is the single source of truth.
 
 struct ApiParam { const char* name; PinType type; bool isArray = false; };
 
@@ -430,7 +437,12 @@ struct ApiFn
     bool        isExec;      // true = side-effecting (exec node); false = pure data node
     std::vector<ApiParam> params;    // typed inputs (in call order)
     std::vector<ApiParam> results;   // typed outputs (in return order)
-    const char* cppCall;     // fully-qualified C++ callee, for the codegen back-end
+    // Fully-qualified C++ callee this row stands for. Staged input for a planned
+    // codegen migration (emit the direct call instead of routing through
+    // hc::callApi) — nothing emits it today, so it is only as correct as the
+    // invariant test in test_engine_api.cpp keeps it: one distinct callee per row,
+    // its signature matching `params` in order.
+    const char* cppCall;
     // Marshalling thunk: HorizonCode Values in → typed C++ call → Values out.
     // Missing/extra args are tolerated (defaults fill in), mirroring the API's
     // null-Ctx forgiveness.

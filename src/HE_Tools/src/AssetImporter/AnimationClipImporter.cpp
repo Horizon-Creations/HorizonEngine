@@ -1,10 +1,13 @@
 #include "AnimationClipImporter.h"
 #include <cstdint>
+#include "ImporterCommon.h"
 #include "Diagnostics/Logger.h"
 #include "cgltf.h"
 
 #include <unordered_map>
+#include <unordered_set>
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 
 namespace
@@ -40,6 +43,19 @@ static std::vector<float> readFloats(const cgltf_accessor* acc)
         cgltf_accessor_read_float(acc, i, out.data() + i * components,
                                   static_cast<cgltf_size>(components));
     return out;
+}
+
+// glTF animation names are free-form text and end up as a file name — keep only
+// characters that are safe on every target file system, so an artist-named clip
+// ("Run / Fast") cannot produce an unwritable path or escape the output folder.
+static std::string sanitizeFileStem(const std::string& name)
+{
+    std::string out;
+    out.reserve(name.size());
+    for (unsigned char c : name)
+        out.push_back((std::isalnum(c) || c == '_' || c == '-') ? static_cast<char>(c) : '_');
+    while (!out.empty() && out.back() == '_') out.pop_back();
+    return out.empty() ? std::string("clip") : out;
 }
 
 } // namespace
@@ -119,4 +135,49 @@ AnimationClipImporter::import(const std::filesystem::path& sourcePath)
 
     cgltf_free(data);
     return clips;
+}
+
+AnimationClipImporter::WriteResult AnimationClipImporter::importAndWrite(
+    const std::filesystem::path& sourcePath,
+    const std::filesystem::path& contentRoot,
+    const std::filesystem::path& relativeOutputDir)
+{
+    WriteResult result;
+
+    const std::string  gltfStem = sanitizeFileStem(sourcePath.stem().string());
+    const std::string  prefix   = gltfStem + "_";
+    std::unordered_set<std::string> usedStems;
+
+    for (auto& clip : import(sourcePath))
+    {
+        if (!clip) continue;
+
+        // import() already prefixes unnamed clips with the source stem; only add
+        // the prefix when the glTF supplied its own name, so two characters that
+        // both export a "Run" animation do not fight over one file.
+        std::string stem = sanitizeFileStem(clip->name);
+        if (stem.rfind(prefix, 0) != 0)
+            stem = prefix + stem;
+
+        // Two animations may legitimately carry the same name inside one glTF.
+        std::string unique = stem;
+        for (int n = 2; !usedStems.insert(unique).second; ++n)
+            unique = stem + "_" + std::to_string(n);
+
+        clip->path = Importer::toAssetPath(relativeOutputDir / (unique + ".hasset"));
+        if (Importer::writeAsset(*clip, contentRoot))
+        {
+            ++result.written;
+            Logger::Log(Logger::LogLevel::Info,
+                ("AnimationClipImporter: " + sourcePath.filename().string() + " -> "
+                 + clip->path + " (" + std::to_string(clip->channels.size())
+                 + " channels, " + std::to_string(clip->duration) + "s)").c_str());
+        }
+        else
+        {
+            ++result.failed;
+            logError("failed to write " + clip->path);
+        }
+    }
+    return result;
 }

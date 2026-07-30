@@ -121,5 +121,4 @@ private:
 
 	//logging
 	std::ofstream logFileStream;
-	std::string logfile;
 };

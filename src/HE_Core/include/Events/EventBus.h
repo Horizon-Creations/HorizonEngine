@@ -8,6 +8,12 @@
 #include <memory>
 #include <algorithm>
 
+// Public gameplay API: a typed pub/sub bus for game code to decouple systems.
+// Nothing in this repo subscribes to it yet (only the tests do) — it is exported
+// from HorizonCore (see src/Events/EventBus.cpp) for shipped games and the
+// roadmap's editor/gameplay event plumbing, so absence of an in-repo consumer is
+// not a sign that it is dead.
+
 // Forward declaration
 class EventBus;
 

@@ -107,6 +107,9 @@ public:
 	// next beginFrame so a frame is always recorded whole or not at all.
 	void requestStart(const ProfSessionInfo& info, size_t maxFrames = 0);
 	void requestStop();                 // stop + dump at next beginFrame
+	// Start-if-idle / stop-if-recording in one call. Application does NOT use this
+	// for its F9 handler: that path has to save the current vsync before starting
+	// and restore it on stop, so it open-codes the branch around setVSync().
 	void requestToggle(const ProfSessionInfo& info, size_t maxFrames = 0);
 
 	bool isRecording()        const { return m_recording.load(std::memory_order_acquire); }
@@ -135,7 +138,6 @@ public:
 	void pushLive(const ProfLiveFrame& f);
 	std::vector<ProfLiveFrame> liveSnapshot() const { return m_live; }
 	double lastCpuFrameMs() const { return m_lastCpuFrameMs; }
-	double lastDeltaMs()    const { return m_lastDeltaMs; }
 
 	// ── Single-frame capture ────────────────────────────────────────────────
 	// Capture exactly ONE frame in full detail (CPU scopes + detailed per-pass GPU,
@@ -196,7 +198,6 @@ private:
 	std::vector<ProfLiveFrame> m_live;
 	size_t                     m_liveCap       = 240;
 	double                     m_lastCpuFrameMs = 0.0;
-	double                     m_lastDeltaMs    = 0.0;
 
 	// Single-frame capture.
 	bool            m_pendingSingle   = false;

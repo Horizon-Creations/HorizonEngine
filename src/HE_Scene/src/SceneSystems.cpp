@@ -96,7 +96,7 @@ void SceneSystems::tick(HorizonWorld& world, ContentManager& cm, IRenderer* rend
         for (auto [e, wc] : world.registry().view<WeatherComponent>().each()) { clock = wc.weatherTime; break; }
         pushGpuParticleParams(world, renderer, cameraPos, dt, gpuParticles, clock);
     }
-    { HE_PROFILE_SCOPE_N("ParticleSystem"); ParticleSystem::update(world, cm, dt, cameraPos, physics); } // camera-following precipitation volume (Phase 2)
+    { HE_PROFILE_SCOPE_N("ParticleSystem"); ParticleSystem::update(world, cm, dt, physics); } // entity-bound emitters only — precipitation is WeatherSystem's own pool
     { HE_PROFILE_SCOPE_N("Foliage");        FoliageSystem::update(world); }
     { HE_PROFILE_SCOPE_N("LOD");            LODSystem::update(world, cameraPos); }
 }

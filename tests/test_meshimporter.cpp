@@ -1,6 +1,7 @@
 #include "doctest.h"
 #include "TestFsUtil.h"
 #include "MeshImporter.h"
+#include "ImporterCommon.h"
 #include <ContentManager/Assets.h>
 #include <cstdint>
 #include <cstring>
@@ -66,6 +67,42 @@ bool writeUvGltf(const fs::path& dir)
 	f << json;
 	return true;
 }
+
+// Same triangle, but the primitive is skinned: two joint nodes, a skin, and
+// JOINTS_0/WEIGHTS_0 attributes. Only the JSON matters here — Importer::gltfHasSkin
+// parses the document without loading buffers — so no .bin is written.
+bool writeSkinnedGltf(const fs::path& dir)
+{
+	std::error_code ec;
+	fs::create_directories(dir, ec);
+	const char* json = R"({
+  "asset": { "version": "2.0" },
+  "scene": 0,
+  "scenes": [ { "nodes": [0, 2] } ],
+  "nodes":  [ { "name": "root", "children": [1] }, { "name": "hip" },
+              { "mesh": 0, "skin": 0 } ],
+  "skins":  [ { "joints": [0, 1], "name": "Armature" } ],
+  "meshes": [ { "primitives": [ {
+      "attributes": { "POSITION": 0, "JOINTS_0": 1, "WEIGHTS_0": 2 },
+      "mode": 4 } ] } ],
+  "buffers":    [ { "uri": "skin.bin", "byteLength": 96 } ],
+  "bufferViews": [
+    { "buffer": 0, "byteOffset": 0,  "byteLength": 36 },
+    { "buffer": 0, "byteOffset": 36, "byteLength": 12 },
+    { "buffer": 0, "byteOffset": 48, "byteLength": 48 }
+  ],
+  "accessors": [
+    { "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3",
+      "min": [0,0,0], "max": [1,1,0] },
+    { "bufferView": 1, "componentType": 5121, "count": 3, "type": "VEC4" },
+    { "bufferView": 2, "componentType": 5126, "count": 3, "type": "VEC4" }
+  ]
+})";
+	std::ofstream f(dir / "skinned.gltf");
+	if (!f) return false;
+	f << json;
+	return true;
+}
 } // namespace
 
 // glTF stores UVs with the origin at the TOP-left; the engine is GL-style
@@ -93,6 +130,27 @@ TEST_CASE("MeshImporter flips glTF V into the engine's bottom-left UV origin")
 	CHECK(mesh->uvs[3] == doctest::Approx(1.0f)); // v1.v
 	CHECK(mesh->uvs[4] == doctest::Approx(0.0f)); // v2.u
 	CHECK(mesh->uvs[5] == doctest::Approx(0.0f)); // v2.v  (was 1 in the file)
+
+	he_test::removeAllQuiet(dir);
+}
+
+// Every import entry point (asset_compiler, File ▸ Import Asset, Content Browser
+// ▸ Import) used to send every .gltf to MeshImporter, which ignores skins — so a
+// rigged character imported as bind-pose geometry registered as a StaticMesh,
+// reported as a success, and never showed up in the SkeletalMesh picker. They now
+// all ask this one helper which importer a glTF belongs to.
+TEST_CASE("gltfHasSkin routes a skinned glTF away from the static MeshImporter")
+{
+	const fs::path dir = fs::temp_directory_path() / "he_test_skin_probe_gltf";
+	he_test::removeAllQuiet(dir);
+	REQUIRE(writeUvGltf(dir));
+	REQUIRE(writeSkinnedGltf(dir));
+
+	CHECK(Importer::gltfHasSkin(dir / "skinned.gltf") == true);
+	CHECK(Importer::gltfHasSkin(dir / "uv.gltf")      == false);
+	// Unreadable / non-glTF input must not claim a skin — the caller falls back to
+	// the static path and reports that importer's error.
+	CHECK(Importer::gltfHasSkin(dir / "does_not_exist.gltf") == false);
 
 	he_test::removeAllQuiet(dir);
 }

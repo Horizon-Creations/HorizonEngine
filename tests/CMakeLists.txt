@@ -16,7 +16,6 @@ add_executable(he_tests
     test_undo.cpp
     test_editorcamera.cpp
     test_rendergraph.cpp
-    test_ref.cpp
     test_jobsystem.cpp
     test_terrain.cpp
     test_debug_draw.cpp

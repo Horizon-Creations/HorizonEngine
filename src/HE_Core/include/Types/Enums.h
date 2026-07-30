@@ -43,13 +43,6 @@ namespace HE
         Borderless,
     };
 
-    enum class WindowState : uint8_t
-    {
-        Minimized,
-        Maximized,
-        Floating,
-    };
-
     // ── Diagnostics ───────────────────────────────────────────────────────────
 
     enum class LogLevel : uint8_t
@@ -132,11 +125,9 @@ namespace HE
         Binary,  // packaged game — compact, fast to load
     };
 
-	enum class ScriptLanguage : uint8_t
-	{
-		Lua,
-		Python,
-		CSharp,
-	};
+    // NOTE: the gameplay scripting language enum deliberately does NOT live here.
+    // It is ::ScriptLanguage in Scripting/ScriptTypes.h, at global scope, because
+    // its values are baked into instance ids and the CHUNK_SLNG byte. Re-adding an
+    // HE::ScriptLanguage would silently shadow it for any code inside namespace HE.
 
 } // namespace HE

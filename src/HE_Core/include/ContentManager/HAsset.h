@@ -31,7 +31,8 @@ struct FileHeader
 	uint16_t version;        // k_version
 	uint16_t asset_type;     // HE::AssetType cast to uint16
 	uint32_t chunk_count;
-	uint32_t flags;          // reserved / future use (compression, encryption)
+	uint32_t flags;          // reserved: always written as 0, never read. Compression
+	                         // and encryption happen in the .hpak container, not here.
 	uint8_t  reserved[16];   // pad to 32 bytes
 };
 static_assert(sizeof(FileHeader) == 32, "HAsset::FileHeader must be 32 bytes");

@@ -44,6 +44,10 @@ void main() {
 // core context. The GL backend feeds pos/normal/uv via a VAO (locations 0/1/2, the same
 // interleaved 32-byte layout). Same varyings + Uniforms UBO as the SSBO variant, so the
 // shared fragments are identical across backends — only the vertex data path differs.
+// Every material fragment is spliced onto one of the two variants, so all materials see
+// the same geometry-pass per-draw bindings and the same fragment-stage interface:
+//   in  0 vNormal (vec3)  1 vColor (vec3)  2 vUV (vec2)  3 vWorldPos (vec3)
+//   out 0 oColor  (vec4)
 constexpr const char* kStandardVertexAttrib = R"(#version 450
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
@@ -483,8 +487,6 @@ std::string injectPreamble(const std::string& src)
     return src.substr(0, eol + 1) + kLightingPreamble + src.substr(eol + 1);
 }
 } // namespace
-
-const char* MaterialShaderLibrary::standardVertexGlsl() { return kStandardVertexAttrib; }
 
 namespace
 {
