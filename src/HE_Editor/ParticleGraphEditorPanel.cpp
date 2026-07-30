@@ -1,10 +1,10 @@
 #include "ParticleGraphEditorPanel.h"
 #include <cstdint>
-#include "EditorApplication.h" // AppContext
-#include "GraphEditor.h"       // shared node-graph canvas frontend
+#include "EditorApplication.h"      // AppContext
+#include "EditorAssetTypeCache.h"   // shared, invalidatable path → AssetType sniff
+#include "GraphEditor.h"            // shared node-graph canvas frontend
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
-#include <ContentManager/HAsset.h>
 #include <ParticleGraph/ParticleGraph.h>
 #include <HorizonScene/ParticleSystem.h>
 #include <HorizonScene/Components/ParticleSystemComponent.h>
@@ -73,13 +73,13 @@ static State& stateFor(const std::string& path, AppContext& ctx)
 
 bool isParticleAsset(const std::string& path)
 {
-	static std::map<std::string, bool> s_typeCache;
-	if (auto it = s_typeCache.find(path); it != s_typeCache.end()) return it->second;
-	HAsset::Reader r;
-	const bool isPt = r.open(path) &&
-		r.assetType() == static_cast<uint16_t>(HE::AssetType::ParticleSystem);
-	s_typeCache[path] = isPt;
-	return isPt;
+	return EditorAssetTypeCache::is(path, HE::AssetType::ParticleSystem);
+}
+
+bool isDirty(const std::string& assetPath)
+{
+	auto it = g_states.find(assetPath);
+	return it != g_states.end() && it->second.dirty;
 }
 
 void forget(const std::string& assetPath) { g_states.erase(assetPath); }

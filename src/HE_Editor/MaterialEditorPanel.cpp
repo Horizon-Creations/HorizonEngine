@@ -1,12 +1,12 @@
 #include "MaterialEditorPanel.h"
 #include "EditorApplication.h"                 // AppContext
+#include "EditorAssetTypeCache.h"               // shared, invalidatable path → AssetType sniff
 #include "GraphEditor.h"                        // shared node-graph canvas frontend
 #include "HcClassList.h"                        // asset dropdowns (texture picker)
 #include <MaterialGraph/MaterialGraph.h>
 #include <material/MaterialShaderLibrary.h> // inline compile check (canvas error banner)
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
-#include <ContentManager/HAsset.h>
 #include <Types/Enums.h>
 #include <Diagnostics/Logger.h>
 #include <imgui.h>
@@ -1307,37 +1307,21 @@ namespace MaterialEditorPanel
 {
 bool isMaterialAsset(const std::string& path)
 {
-	// Called every frame for the active tab (dispatch) — cache the header sniff so we
-	// don't re-open the file per frame. An asset's type never changes in place.
-	static std::map<std::string, bool> s_typeCache;
-	if (auto it = s_typeCache.find(path); it != s_typeCache.end()) return it->second;
-	HAsset::Reader r;
-	const bool isMat = r.open(path) &&
-		r.assetType() == static_cast<uint16_t>(HE::AssetType::Material);
-	s_typeCache[path] = isMat;
-	return isMat;
+	// Called every frame for the active tab (dispatch), so the header sniff is cached —
+	// but in the SHARED EditorAssetTypeCache, which the Content Browser invalidates on
+	// delete/rename/refresh. A per-panel cache could never be invalidated and kept
+	// answering with the type of an asset that had since been deleted at that path.
+	return EditorAssetTypeCache::is(path, HE::AssetType::Material);
 }
 
 bool isTextureAsset(const std::string& path)
 {
-	static std::map<std::string, bool> s_texCache;
-	if (auto it = s_texCache.find(path); it != s_texCache.end()) return it->second;
-	HAsset::Reader r;
-	const bool isTex = r.open(path) &&
-		r.assetType() == static_cast<uint16_t>(HE::AssetType::Texture);
-	s_texCache[path] = isTex;
-	return isTex;
+	return EditorAssetTypeCache::is(path, HE::AssetType::Texture);
 }
 
 bool isMaterialFunctionAsset(const std::string& path)
 {
-	static std::map<std::string, bool> s_typeCache;
-	if (auto it = s_typeCache.find(path); it != s_typeCache.end()) return it->second;
-	HAsset::Reader r;
-	const bool isFn = r.open(path) &&
-		r.assetType() == static_cast<uint16_t>(HE::AssetType::MaterialFunction);
-	s_typeCache[path] = isFn;
-	return isFn;
+	return EditorAssetTypeCache::is(path, HE::AssetType::MaterialFunction);
 }
 
 bool isDirty(const std::string& assetPath)

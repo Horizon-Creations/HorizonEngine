@@ -105,6 +105,66 @@ bool writeTestGltf(const fs::path& dir)
     return true;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+//  Node-transform fixture — regression guard against a transposed node matrix
+//
+//  Reuses the binary buffer written by writeTestGltf() and adds a SECOND,
+//  UN-skinned mesh node whose world transform is deliberately non-symmetric:
+//
+//    node "prop_parent" : translation (10,0,0)
+//      └─ node "prop"   : matrix = rotZ(+90°) with translation (2,3,4)
+//
+//  world = T(10,0,0) * M  →  columns (0,1,0,0) (-1,0,0,0) (0,0,1,0) (12,3,4,1)
+//
+//  A symmetric matrix cannot detect a transpose, this one can: transposing it
+//  moves the translation out of the 4th column into the bottom row, so the
+//  local origin would stay at (0,0,0) instead of landing at (12,3,4).
+// ─────────────────────────────────────────────────────────────────────────────
+bool writeUnskinnedNodeGltf(const fs::path& dir)
+{
+    if (!writeTestGltf(dir)) return false; // writes sm_skin_test.bin, reused here
+
+    const std::string gltf = R"({
+"asset":{"version":"2.0"},
+"scene":0,
+"scenes":[{"nodes":[0,2,3]}],
+"nodes":[
+  {"name":"root","children":[1]},
+  {"name":"hip"},
+  {"name":"skinned","mesh":0,"skin":0},
+  {"name":"prop_parent","translation":[10,0,0],"children":[4]},
+  {"name":"prop","mesh":1,"matrix":[0,1,0,0, -1,0,0,0, 0,0,1,0, 2,3,4,1]}
+],
+"skins":[{"inverseBindMatrices":4,"joints":[0,1],"name":"Armature"}],
+"meshes":[
+  {"name":"SkinnedMesh","primitives":[{
+    "attributes":{"POSITION":0,"JOINTS_0":2,"WEIGHTS_0":3},"indices":1,"mode":4}]},
+  {"name":"PropMesh","primitives":[{
+    "attributes":{"POSITION":0},"indices":1,"mode":4}]}
+],
+"accessors":[
+  {"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]},
+  {"bufferView":1,"componentType":5123,"count":3,"type":"SCALAR"},
+  {"bufferView":2,"componentType":5121,"count":3,"type":"VEC4"},
+  {"bufferView":3,"componentType":5126,"count":3,"type":"VEC4"},
+  {"bufferView":4,"componentType":5126,"count":2,"type":"MAT4"}
+],
+"bufferViews":[
+  {"buffer":0,"byteOffset":0,  "byteLength":36},
+  {"buffer":0,"byteOffset":36, "byteLength":6},
+  {"buffer":0,"byteOffset":44, "byteLength":12},
+  {"buffer":0,"byteOffset":56, "byteLength":48},
+  {"buffer":0,"byteOffset":104,"byteLength":128}
+],
+"buffers":[{"uri":"sm_skin_test.bin","byteLength":232}]
+})";
+
+    std::ofstream f(dir / "sm_prop_test.gltf");
+    if (!f) return false;
+    f << gltf;
+    return true;
+}
+
 } // namespace
 
 TEST_CASE("SkeletalMeshImporter invalid path returns null")
@@ -208,6 +268,52 @@ TEST_CASE("SkeletalMeshImporter geometry (vertices and indices)")
     CHECK(mesh->indices[0] == 0u);
     CHECK(mesh->indices[1] == 1u);
     CHECK(mesh->indices[2] == 2u);
+
+    he_test::removeAllQuiet(dir);
+}
+
+TEST_CASE("SkeletalMeshImporter bakes un-skinned node transforms column-major")
+{
+    const fs::path dir     = fs::temp_directory_path() / "he_test_skelnodexform";
+    const fs::path content = dir / "content";
+    fs::create_directories(dir);
+    fs::create_directories(content);
+    REQUIRE(writeUnskinnedNodeGltf(dir));
+
+    auto mesh = SkeletalMeshImporter::import(dir / "sm_prop_test.gltf", content);
+    REQUIRE(mesh != nullptr);
+
+    // Node order in the file: skinned mesh node first (3 verts), prop node second.
+    REQUIRE(mesh->vertices.size() == 18); // 6 verts x xyz
+
+    // The skinned node must stay untransformed — the skin/IBM math places it.
+    CHECK(mesh->vertices[0] == doctest::Approx(0.0f));
+    CHECK(mesh->vertices[3] == doctest::Approx(1.0f));
+    CHECK(mesh->vertices[7] == doctest::Approx(1.0f));
+
+    // The un-skinned prop node must be baked with its world matrix read
+    // column-major. cgltf hands out a column-major float[16] and glm::make_mat4
+    // consumes exactly that, so no transpose may be applied.
+    //   local (0,0,0) -> (12,3,4)   (transposed it would wrongly stay at origin)
+    //   local (1,0,0) -> (12,4,4)   (transposed: (0,-1,0))
+    //   local (0,1,0) -> (11,3,4)   (transposed: (1, 0,0))
+    CHECK(mesh->vertices[9]  == doctest::Approx(12.0f));
+    CHECK(mesh->vertices[10] == doctest::Approx(3.0f));
+    CHECK(mesh->vertices[11] == doctest::Approx(4.0f));
+
+    CHECK(mesh->vertices[12] == doctest::Approx(12.0f));
+    CHECK(mesh->vertices[13] == doctest::Approx(4.0f));
+    CHECK(mesh->vertices[14] == doctest::Approx(4.0f));
+
+    CHECK(mesh->vertices[15] == doctest::Approx(11.0f));
+    CHECK(mesh->vertices[16] == doctest::Approx(3.0f));
+    CHECK(mesh->vertices[17] == doctest::Approx(4.0f));
+
+    // Second primitive's indices are rebased onto its own vertex block
+    REQUIRE(mesh->indices.size() == 6);
+    CHECK(mesh->indices[3] == 3u);
+    CHECK(mesh->indices[4] == 4u);
+    CHECK(mesh->indices[5] == 5u);
 
     he_test::removeAllQuiet(dir);
 }

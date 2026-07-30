@@ -59,6 +59,10 @@ public:
     void stopAll();
     bool isPlaying(uint64_t handle) const;
 
+    // Sample rate the playing sound is actually being fed to the mixer with, in Hz.
+    // Should equal the rate passed to play()/playSpatial(); 0 = unknown handle.
+    int  getSoundSampleRate(uint64_t handle) const;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> m_impl;

@@ -33,7 +33,6 @@ public:
 
 	// config
 	const HE::GraphicsAPI&            getSelectedRHI()       const { return engineStatus.selectedRHI; }
-	const HE::OS&                     getCurrentOS()          const { return engineStatus.currentOS; }
 	const std::string&                getLastProjectPath()    const { return engineStatus.lastProjectPath; }
 	const std::vector<std::string>&   getKnownProjects()      const { return engineStatus.knownProjects; }
 	void setSelectedRHI(HE::GraphicsAPI rhi)                        { engineStatus.selectedRHI = rhi; }

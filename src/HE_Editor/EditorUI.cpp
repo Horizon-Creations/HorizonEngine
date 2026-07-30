@@ -14,6 +14,7 @@
 #include "StaticMeshEditorPanel.h"
 #include "ParticleGraphEditorPanel.h"
 #include "AnimatorStateMachineEditorPanel.h"
+#include "EditorAssetTypeCache.h"        // shared path → AssetType sniff (invalidated below)
 #include "HorizonVersion.h"
 #ifdef __APPLE__
 #include "MacMenuBar.h"   // native system menu bar (replaces the ImGui menu row)
@@ -1149,6 +1150,29 @@ void EditorUI::render(AppContext& ctx, float dt)
         s_quietContentRefresh = false;
     }
 
+    // ── Drop the path → asset-type cache whenever the content tree changed ────
+    // The version counters are bumped by EVERY refresh — the two above, the modal
+    // one, and EditorApplication's periodic async poll — which is exactly when the
+    // asset at a path may have been replaced (deleted + recreated as another type,
+    // or overwritten outside the editor). Without this the panels' cached header
+    // sniff outlived the file and double-clicking opened the wrong editor. Runs
+    // before the routing below, so this frame's tab dispatch already sees the truth.
+    if (ctx.globalState)
+    {
+        static uint64_t s_typeCacheContentVersion = ~0ull;
+        static uint64_t s_typeCacheEngineVersion  = ~0ull;
+        const uint64_t contentV =
+            ctx.globalState->contentFolderVersion.load(std::memory_order_acquire);
+        const uint64_t engineV =
+            ctx.globalState->engineFolderVersion.load(std::memory_order_acquire);
+        if (contentV != s_typeCacheContentVersion || engineV != s_typeCacheEngineVersion)
+        {
+            s_typeCacheContentVersion = contentV;
+            s_typeCacheEngineVersion  = engineV;
+            EditorAssetTypeCache::invalidateAll();
+        }
+    }
+
     // ── Startup toolchain check — overlays either screen below ───────────────
     DrawToolchainDialog(ctx);
 
@@ -2062,6 +2086,27 @@ static const char* scriptStarterTemplate(int lang)
 	return (lang == 1) ? kPy : kLua;
 }
 
+// True if the editor tab for `assetPath` holds edits that were never written to disk.
+// EVERY panel that can modify its asset has to be listed here — this one predicate
+// gates the tab's dirty mark, forgetTabState (a panel missing from the list has its
+// unsaved graph dropped when the tab closes) and the Quit/Close-Project guard. That
+// is exactly how the Particle and Animator-State-Machine graphs used to be lost.
+// View-only panels (Static/Skeletal Mesh) have nothing to lose and stay out.
+// The virtual tabs (Level Script / Game Instance) edit the world, so their dirty
+// state is the scene's (ctx.sceneDirty) and is guarded separately.
+static bool tabHasUnsavedEdits(const std::string& assetPath)
+{
+	if (assetPath.empty()) return false;
+	return ScriptEditorPanel::isDirty(assetPath)        ||
+	       CppClassEditorPanel::isDirty(assetPath)      ||
+	       MaterialEditorPanel::isDirty(assetPath)      ||
+	       UIEditorPanel::isDirty(assetPath)            ||
+	       HorizonCodeClassPanel::isDirty(assetPath)    ||
+	       InputAssetPanel::isDirty(assetPath)          ||
+	       ParticleGraphEditorPanel::isDirty(assetPath) ||
+	       AnimatorStateMachineEditorPanel::isDirty(assetPath);
+}
+
 // ─── Full Editor UI ───────────────────────────────────────────────────────────
 void EditorUI::RenderEditor(AppContext& ctx, float dt)
 {
@@ -2187,9 +2232,29 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 		case GuardedAction::None:                                                  break;
 		}
 	};
+	// Unsaved edits in an ASSET TAB (material / UI widget / particle / state-machine
+	// graph …) live only in the panel's per-path state, which dies with the process.
+	// An action that ends the session therefore has to ask about them just like a
+	// dirty scene does — without this, quitting with a freshly edited particle graph
+	// dropped it silently. Scene actions (New/Open Scene) keep the tabs AND their
+	// panel state alive, so they deliberately stay unguarded.
+	auto endsSession = [](GuardedAction a)
+	{
+		return a == GuardedAction::Quit || a == GuardedAction::CloseProject ||
+		       a == GuardedAction::OpenProjectDialog;
+	};
+	auto unsavedTabLabels = [&]() -> std::vector<std::string>
+	{
+		std::vector<std::string> out;
+		for (const auto& t : ctx.tabs)
+			if (tabHasUnsavedEdits(t.assetPath))
+				out.push_back(t.label.empty() ? t.assetPath : t.label);
+		return out;
+	};
 	auto requestGuarded = [&](GuardedAction a, const std::string& arg = std::string{})
 	{
-		if (!ctx.sceneDirty) { runGuardedAction(a, arg); return; }
+		const bool tabsDirty = endsSession(a) && !unsavedTabLabels().empty();
+		if (!ctx.sceneDirty && !tabsDirty) { runGuardedAction(a, arg); return; }
 		s_guardAction      = a;
 		s_guardArg         = arg;
 		s_guardSaveThenAct = false;
@@ -3204,9 +3269,11 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
     }
 
     // ── Unsaved-changes modal ───────────────────────────────────────────────
-    // Raised by requestGuarded() when a scene-discarding action is attempted with
-    // a dirty scene. Save → write (Save-As if untitled) then run the action;
-    // Don't Save → run it straight away; Cancel → abandon it.
+    // Raised by requestGuarded() when a scene-discarding action is attempted with a
+    // dirty scene, or when a session-ending one (Quit / Close Project / Open Project)
+    // would take unsaved editor tabs with it. Save → write the scene (Save-As if
+    // untitled) then run the action; Don't Save → run it straight away; Cancel →
+    // abandon it.
     if (s_openUnsavedModal)
     {
         ImGui::OpenPopup("Unsaved Changes##scene");
@@ -3218,37 +3285,58 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
         if (ImGui::BeginPopupModal("Unsaved Changes##scene", nullptr,
             ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings))
         {
-            const std::string sceneName = ctx.currentScenePath.empty()
-                ? std::string("Untitled")
-                : std::filesystem::path(ctx.currentScenePath).stem().string();
-            ImGui::Text("Save changes to \"%s\" before continuing?", sceneName.c_str());
-            ImGui::Spacing();
-            ImGui::TextDisabled("Your unsaved changes will be lost otherwise.");
-            ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
-
             // Snapshot the stashed action — the buttons may clear it.
             const GuardedAction action = s_guardAction;
             const std::string   arg    = s_guardArg;
 
-            if (ImGui::Button("Save", ImVec2(110, 0)))
+            // Editor tabs are only at risk when the action ends the session; a scene
+            // switch keeps them and their unsaved edits (see requestGuarded).
+            const std::vector<std::string> dirtyTabs =
+                endsSession(action) ? unsavedTabLabels() : std::vector<std::string>{};
+
+            const std::string sceneName = ctx.currentScenePath.empty()
+                ? std::string("Untitled")
+                : std::filesystem::path(ctx.currentScenePath).stem().string();
+            if (ctx.sceneDirty)
+                ImGui::Text("Save changes to \"%s\" before continuing?", sceneName.c_str());
+            else
+                ImGui::Text("%d editor tab(s) have unsaved changes.",
+                            static_cast<int>(dirtyTabs.size()));
+            if (!dirtyTabs.empty())
             {
-                const bool hadPath = !ctx.currentScenePath.empty();
-                doSaveScene(); // synchronous if a path exists, else async Save-As
-                if (hadPath)
-                {
-                    runGuardedAction(action, arg);
-                    s_guardAction = GuardedAction::None;
-                }
-                else
-                {
-                    // Save-As dialog is in flight; the file-result handler runs
-                    // the action once a path has been chosen and written.
-                    s_guardSaveThenAct = true;
-                }
-                ImGui::CloseCurrentPopup();
+                ImGui::Spacing();
+                for (const std::string& n : dirtyTabs) ImGui::BulletText("%s", n.c_str());
+                // Only the panel itself can write its asset (each editor tab has its own
+                // Save button), so this prompt can warn about them but not save them.
+                ImGui::TextDisabled("Editor tabs are saved from their own Save button.");
             }
-            ImGui::SameLine();
-            if (ImGui::Button("Don't Save", ImVec2(110, 0)))
+            ImGui::Spacing();
+            ImGui::TextDisabled("Your unsaved changes will be lost otherwise.");
+            ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+
+            // "Save" writes the SCENE — offered only when the scene is what's dirty.
+            if (ctx.sceneDirty)
+            {
+                if (ImGui::Button("Save", ImVec2(110, 0)))
+                {
+                    const bool hadPath = !ctx.currentScenePath.empty();
+                    doSaveScene(); // synchronous if a path exists, else async Save-As
+                    if (hadPath)
+                    {
+                        runGuardedAction(action, arg);
+                        s_guardAction = GuardedAction::None;
+                    }
+                    else
+                    {
+                        // Save-As dialog is in flight; the file-result handler runs
+                        // the action once a path has been chosen and written.
+                        s_guardSaveThenAct = true;
+                    }
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::SameLine();
+            }
+            if (ImGui::Button(ctx.sceneDirty ? "Don't Save" : "Discard", ImVec2(110, 0)))
             {
                 runGuardedAction(action, arg);
                 s_guardAction = GuardedAction::None;
@@ -3722,19 +3810,17 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
             // the unsaved edits instead of silently discarding them.
             auto forgetTabState = [](const AppContext::EditorTab& t){
                 if (t.assetPath.empty()) return;
-                if (ScriptEditorPanel::isDirty(t.assetPath)   ||
-                    CppClassEditorPanel::isDirty(t.assetPath) ||
-                    MaterialEditorPanel::isDirty(t.assetPath) ||
-                    UIEditorPanel::isDirty(t.assetPath)       ||
-                    HorizonCodeClassPanel::isDirty(t.assetPath) ||
-                    InputAssetPanel::isDirty(t.assetPath)) return;
+                if (tabHasUnsavedEdits(t.assetPath)) return;
                 ScriptEditorPanel::forget(t.assetPath);
                 CppClassEditorPanel::forget(t.assetPath);
                 MaterialEditorPanel::forget(t.assetPath);
                 UIEditorPanel::forget(t.assetPath);
                 HorizonCodeClassPanel::forget(t.assetPath);
                 InputAssetPanel::forget(t.assetPath);
-                StaticMeshEditorPanel::forget(t.assetPath); // view-only, never dirty
+                ParticleGraphEditorPanel::forget(t.assetPath);
+                AnimatorStateMachineEditorPanel::forget(t.assetPath);
+                StaticMeshEditorPanel::forget(t.assetPath);      // view-only, never dirty
+                SkeletalMeshEditorPanel::forget(t.assetPath);    // view-only, never dirty
             };
 
             for (int i = 0; i < static_cast<int>(s_tabs.size()); )
@@ -3752,13 +3838,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                 bool pOpen = tab.closable ? tab.open : true;
                 // Stable ID (### + assetPath) so appending a dirty marker to the visible
                 // label never changes the tab's identity — which would reset its state.
-                const bool tabDirty = !tab.assetPath.empty() &&
-                    (ScriptEditorPanel::isDirty(tab.assetPath) ||
-                     CppClassEditorPanel::isDirty(tab.assetPath) ||
-                     MaterialEditorPanel::isDirty(tab.assetPath) ||
-                     UIEditorPanel::isDirty(tab.assetPath) ||
-                     HorizonCodeClassPanel::isDirty(tab.assetPath) ||
-                     InputAssetPanel::isDirty(tab.assetPath));
+                const bool tabDirty = tabHasUnsavedEdits(tab.assetPath);
                 const std::string shown = tab.label + (tabDirty ? " *" : "")
                     + "###tab_" + (tab.assetPath.empty() ? std::string("scene") : tab.assetPath);
                 if (ImGui::BeginTabItem(shown.c_str(), tab.closable ? &pOpen : nullptr, flags))
@@ -5991,6 +6071,10 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				std::filesystem::rename(src, dst, ec);
 				if (!ec)
 				{
+					// Same reasoning as the rename popup: the asset left one path and
+					// landed on another, so both cached type sniffs are now lies.
+					EditorAssetTypeCache::invalidate(s_pendingMoveSrc);
+					EditorAssetTypeCache::invalidate(dst.string());
 					if (s_selectedItem == s_pendingMoveSrc)
 						s_selectedItem = dst.string();
 					for (auto& t : ctx.tabs)
@@ -6081,6 +6165,10 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 					}
 					w.write(path, static_cast<uint16_t>(type));
 				}
+				// A path that was probed while it was still free (or held a deleted
+				// asset) has a stale entry in the shared type cache — this asset is
+				// the one that decides its type now.
+				EditorAssetTypeCache::invalidate(path);
 
 				// Show it now (don't wait for the next auto-refresh) and let the
 				// user name it straight away via the rename/name dialog.
@@ -6193,6 +6281,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 					std::filesystem::remove(s_ctxMenuItem, ec);
 					if (!ec)
 					{
+						// Nothing lives at that path any more — drop the cached type sniff.
+						EditorAssetTypeCache::invalidate(s_ctxMenuItem);
 						if (id != HE::UUID{}) ctx.contentManager->unloadAsset(id);
 						if (s_selectedItem == s_ctxMenuItem) s_selectedItem.clear();
 						s_ctxMenuItem.clear();
@@ -6325,6 +6415,10 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 			{
 				std::error_code ec;
 				std::filesystem::remove(s_ctxMenuItem, ec);
+				// The path is free again: a NEW asset of a different type may be created
+				// there next, and the panels' cached header sniff would still name the
+				// deleted asset's type (→ double-click opens the wrong editor).
+				EditorAssetTypeCache::invalidate(s_ctxMenuItem);
 				// In the Source root, delete BOTH halves of the class's .h/.cpp pair.
 				if (s_selectedRootKind == 2)
 				{
@@ -6334,7 +6428,12 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 					for (const char* e : { ".h", ".hpp", ".hh", ".hxx", ".cpp", ".cc", ".cxx", ".c" })
 					{
 						std::filesystem::path sib = dir / (stem + e);
-						if (sib != p) { std::error_code e2; std::filesystem::remove(sib, e2); }
+						if (sib != p)
+						{
+							std::error_code e2;
+							std::filesystem::remove(sib, e2);
+							EditorAssetTypeCache::invalidate(sib.string());
+						}
 					}
 				}
 				if (s_selectedItem == s_ctxMenuItem)
@@ -6408,6 +6507,17 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 					std::filesystem::rename(oldPath, newPath, ec);
 					if (!ec)
 					{
+						// Both paths now hold something else than the type cache believes:
+						// the old one nothing, the new one possibly a stale negative entry
+						// from before it existed. A FOLDER rename moves every asset below
+						// it, so there the whole map has to go.
+						if (s_renameIsFolder)
+							EditorAssetTypeCache::invalidateAll();
+						else
+						{
+							EditorAssetTypeCache::invalidate(s_renameTarget);
+							EditorAssetTypeCache::invalidate(newPath.string());
+						}
 						if (s_selectedItem == s_renameTarget)
 							s_selectedItem = newPath.string();
 						if (!s_renameIsFolder)

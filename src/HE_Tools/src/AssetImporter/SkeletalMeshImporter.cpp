@@ -86,11 +86,19 @@ std::unique_ptr<SkeletalMeshAsset> SkeletalMeshImporter::import(
 
         // Skinned nodes: the skin matrices handle world placement; baking the node
         // transform into vertices would corrupt the IBM-based skinning math.
+        //
+        // NEVER transpose here: cgltf_node_transform_world writes a COLUMN-major
+        // float[16] (translation lands in mat[12..14], exactly as the glTF spec
+        // stores node.matrix), and glm::make_mat4 is a raw memcpy into glm's
+        // column-major mat4 — so it consumes that layout directly. An earlier
+        // glm::transpose() here silently dropped the translation (the transposed
+        // 4th column became (0,0,0,1)) and inverted the rotation of every
+        // non-skinned node inside a skeleton file. MeshImporter.cpp gets this right.
         float mat[16];
         cgltf_node_transform_world(&node, mat);
         glm::mat4 world = (node.skin != nullptr)
             ? glm::mat4(1.0f)
-            : glm::transpose(glm::make_mat4(mat));
+            : glm::make_mat4(mat);
 
         const glm::mat3 normalMat = glm::transpose(glm::inverse(glm::mat3(world)));
 

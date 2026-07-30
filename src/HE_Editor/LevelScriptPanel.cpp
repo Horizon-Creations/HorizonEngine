@@ -3,8 +3,9 @@
 #include "GameInstancePanel.h"
 #include "HorizonCodeClassPanel.h"
 #include "HcClassList.h"
-#include "EditorApplication.h"   // AppContext
-#include "EditorUndo.h"          // scene-undo snapshots (dirty tracking + undo/redo)
+#include "EditorApplication.h"    // AppContext
+#include "EditorAssetTypeCache.h" // shared, invalidatable path → AssetType sniff
+#include "EditorUndo.h"           // scene-undo snapshots (dirty tracking + undo/redo)
 #include <Diagnostics/Logger.h>
 #include "GraphEditor.h"         // shared node-graph canvas
 #include "HcGraphClipboard.h"    // shared HorizonCode node clipboard (copy/cut/paste)
@@ -1474,13 +1475,7 @@ std::vector<std::string> scanInputEvents(ContentManager* cm)
 
 bool HorizonCodeClassPanel::isClassAsset(const std::string& path)
 {
-	static std::map<std::string, bool> cache;
-	if (auto it = cache.find(path); it != cache.end()) return it->second;
-	HAsset::Reader r;
-	const bool ok = r.open(path) &&
-		r.assetType() == static_cast<uint16_t>(HE::AssetType::HorizonCodeClass);
-	cache[path] = ok;
-	return ok;
+	return EditorAssetTypeCache::is(path, HE::AssetType::HorizonCodeClass);
 }
 
 void HorizonCodeClassPanel::forget(const std::string& path) { g_classStates.erase(path); }

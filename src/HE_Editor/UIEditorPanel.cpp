@@ -1,6 +1,7 @@
 #include "UIEditorPanel.h"
 #include <cstdint>
 #include "EditorApplication.h"                 // AppContext
+#include "EditorAssetTypeCache.h"               // shared, invalidatable path → AssetType sniff
 #include "GraphEditor.h"                        // shared node-graph canvas
 #include "HcGraphClipboard.h"                   // shared HorizonCode node clipboard
 #include "HcClassList.h"                        // Create Object class picker
@@ -13,7 +14,6 @@
 #include <HorizonCode/HorizonCode.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
-#include <ContentManager/HAsset.h>
 #include <Types/Enums.h>
 #include <Diagnostics/Logger.h>
 #include <imgui.h>
@@ -2527,13 +2527,7 @@ namespace UIEditorPanel
 
 bool isWidgetAsset(const std::string& path)
 {
-	static std::map<std::string, bool> s_typeCache;
-	if (auto it = s_typeCache.find(path); it != s_typeCache.end()) return it->second;
-	HAsset::Reader r;
-	const bool isW = r.open(path) &&
-		r.assetType() == static_cast<uint16_t>(HE::AssetType::Widget);
-	s_typeCache[path] = isW;
-	return isW;
+	return EditorAssetTypeCache::is(path, HE::AssetType::Widget);
 }
 
 bool isDirty(const std::string& assetPath)

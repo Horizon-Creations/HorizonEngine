@@ -2,6 +2,7 @@
 #include <ContentManager/HAsset.h>
 #include <Types/UUID.h>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <filesystem>
 
@@ -223,4 +224,141 @@ TEST_CASE("material chunk truncated before its tail fields parses cleanly")
     std::vector<std::string> layerNames;
     CHECK_FALSE(HAsset::Reader::readVec(mtrl, o, layerNames));
     CHECK(layerNames.empty());
+}
+
+// ── Integer-overflow guards ───────────────────────────────────────────────────
+// Every length in a .hasset comes from the file, so the bounds checks must not
+// be computable into a pass: `count * sizeof(T)` and `offset + size` both wrap
+// in unsigned 64-bit arithmetic. The checks therefore divide/subtract instead.
+TEST_CASE("readVec(POD) rejects a count whose byte size would wrap around")
+{
+    // count * sizeof(float) == 2^64 == 0 (mod 2^64): the old `offset + count *
+    // sizeof(T) > buf.size()` check saw a size of ZERO and let this through,
+    // then resize()d to 4.6 quintillion floats → bad_alloc out of the parse.
+    std::vector<uint8_t> buf;
+    const uint64_t wrapping = 0x4000000000000000ULL;
+    HAsset::Writer::appendPOD(buf, wrapping);
+    for (int i = 0; i < 4; ++i) buf.push_back(0xAB);   // one float of payload
+
+    size_t off = 0;
+    std::vector<float> out;
+    CHECK_FALSE(HAsset::Reader::readVec(buf, off, out));
+    CHECK(out.empty());                                 // nothing was allocated
+
+    // Same trick against an 8-byte element type (2^61 * 8 == 2^64).
+    std::vector<uint8_t> buf64;
+    HAsset::Writer::appendPOD(buf64, static_cast<uint64_t>(0x2000000000000000ULL));
+    for (int i = 0; i < 8; ++i) buf64.push_back(0x11);
+    size_t off64 = 0;
+    std::vector<uint64_t> out64;
+    CHECK_FALSE(HAsset::Reader::readVec(buf64, off64, out64));
+    CHECK(out64.empty());
+
+    // A merely absurd (non-wrapping) count is rejected as before …
+    std::vector<uint8_t> huge;
+    HAsset::Writer::appendPOD(huge, static_cast<uint64_t>(0xFFFFFFFFULL));
+    for (int i = 0; i < 4; ++i) huge.push_back(0x00);
+    size_t offH = 0;
+    std::vector<float> outH;
+    CHECK_FALSE(HAsset::Reader::readVec(huge, offH, outH));
+
+    // … and the honest case still round-trips exactly.
+    std::vector<uint8_t> good;
+    const std::vector<float> src = { 1.0f, 2.0f, 3.0f };
+    HAsset::Writer::appendVec(good, src);
+    size_t offG = 0;
+    std::vector<float> outG;
+    REQUIRE(HAsset::Reader::readVec(good, offG, outG));
+    REQUIRE(outG.size() == 3);
+    CHECK(outG[0] == 1.0f);
+    CHECK(outG[2] == 3.0f);
+    CHECK(offG == good.size());
+}
+
+// Helper: write a hand-crafted .hasset whose single chunk header lies about its
+// payload size. Returns the path.
+static std::string writeLyingChunkFile(const char* name, uint64_t declaredSize,
+                                       size_t actualPayloadBytes)
+{
+    const std::string file = (std::filesystem::temp_directory_path() / name).string();
+    HAsset::FileHeader hdr{};
+    std::memcpy(hdr.magic, HAsset::k_magic, 4);
+    hdr.version     = HAsset::k_version;
+    hdr.asset_type  = 1;
+    hdr.chunk_count = 1;
+    HAsset::ChunkHeader ch{};
+    ch.id   = HAsset::CHUNK_SRC;
+    ch.size = declaredSize;
+
+    std::ofstream f(file, std::ios::binary | std::ios::trunc);
+    f.write(reinterpret_cast<const char*>(&hdr), sizeof(hdr));
+    f.write(reinterpret_cast<const char*>(&ch),  sizeof(ch));
+    const std::vector<char> payload(actualPayloadBytes, 'x');
+    if (!payload.empty()) f.write(payload.data(), static_cast<std::streamsize>(payload.size()));
+    return file;
+}
+
+TEST_CASE("HAsset open() rejects a chunk size larger than the file")
+{
+    // 281 TB declared, 4 bytes present: open() used to resize() to the declared
+    // size (bad_alloc) and, for merely-truncated files, zero-fill the tail and
+    // report success. openData() has always bounded the size; open() had not.
+    const std::string absurd = writeLyingChunkFile("he_test_chunk_absurd.hasset",
+                                                   0x0000FFFFFFFFFFFFULL, 4);
+    HAsset::Reader r1;
+    CHECK_FALSE(r1.open(absurd));
+    CHECK(r1.chunks().empty());
+    std::remove(absurd.c_str());
+
+    // The plausible-but-truncated case fails cleanly too instead of silently
+    // handing out a chunk padded with zeroes.
+    const std::string trunc = writeLyingChunkFile("he_test_chunk_trunc.hasset", 4096, 8);
+    HAsset::Reader r2;
+    CHECK_FALSE(r2.open(trunc));
+    std::remove(trunc.c_str());
+
+    // An honest file of the same shape still loads.
+    const std::string okFile = writeLyingChunkFile("he_test_chunk_ok.hasset", 8, 8);
+    HAsset::Reader r3;
+    REQUIRE(r3.open(okFile));
+    REQUIRE(r3.chunks().size() == 1);
+    CHECK(r3.findChunk(HAsset::CHUNK_SRC)->data.size() == 8);
+    std::remove(okFile.c_str());
+
+    // A file shorter than the fixed header is not a .hasset at all.
+    const std::string stub = (std::filesystem::temp_directory_path() /
+                              "he_test_header_stub.hasset").string();
+    { std::ofstream f(stub, std::ios::binary | std::ios::trunc); f << "HAST"; }
+    HAsset::Reader r4;
+    CHECK_FALSE(r4.open(stub));
+    std::remove(stub.c_str());
+}
+
+TEST_CASE("HAsset chunk_count is capped by what the file can hold")
+{
+    // 4 billion chunks declared, zero bytes of chunk data: reserving the raw
+    // count asks the allocator for ~130 GB of Chunk structs before the read loop
+    // can notice the file is empty. The cap keeps the reserve at what the file
+    // could physically contain (here: none).
+    std::vector<uint8_t> blob(sizeof(HAsset::FileHeader), 0);
+    HAsset::FileHeader hdr{};
+    std::memcpy(hdr.magic, HAsset::k_magic, 4);
+    hdr.version     = HAsset::k_version;
+    hdr.asset_type  = 1;
+    hdr.chunk_count = 0xFFFFFFFFu;
+    std::memcpy(blob.data(), &hdr, sizeof(hdr));
+
+    HAsset::Reader r;
+    CHECK_NOTHROW(r.openData(blob));
+    CHECK(r.chunks().empty());
+
+    const std::string file = (std::filesystem::temp_directory_path() /
+                              "he_test_chunkcount.hasset").string();
+    { std::ofstream f(file, std::ios::binary | std::ios::trunc);
+      f.write(reinterpret_cast<const char*>(blob.data()),
+              static_cast<std::streamsize>(blob.size())); }
+    HAsset::Reader r2;
+    CHECK_NOTHROW(r2.open(file));
+    CHECK(r2.chunks().empty());
+    std::remove(file.c_str());
 }

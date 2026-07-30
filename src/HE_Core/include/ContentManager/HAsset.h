@@ -251,22 +251,47 @@ public:
 
 	bool open(const std::string& filePath)
 	{
-		std::ifstream f(filePath, std::ios::binary);
+		// Open at the end so the real file size is known up front: every declared
+		// size in the file is untrusted and has to be bounded against it before a
+		// single byte is allocated (the in-memory openData() path bounds against
+		// data.size() the same way).
+		std::ifstream f(filePath, std::ios::binary | std::ios::ate);
 		if (!f.is_open())
 			return false;
+
+		const std::streamoff fileEnd = f.tellg();
+		if (fileEnd < static_cast<std::streamoff>(sizeof(FileHeader)))
+			return false;
+		const uint64_t fileSize = static_cast<uint64_t>(fileEnd);
+		f.seekg(0, std::ios::beg);
 
 		f.read(reinterpret_cast<char*>(&m_header), sizeof(m_header));
 		if (!f || std::memcmp(m_header.magic, k_magic, 4) != 0)
 			return false;
 
 		m_chunks.clear();
-		m_chunks.reserve(m_header.chunk_count);
+		// chunk_count is attacker-controlled uint32: reserving it verbatim would
+		// allocate gigabytes for a corrupt header (and throw bad_alloc) before a
+		// single chunk is read. Every chunk costs at least its 12-byte header, so
+		// the file size is a hard upper bound on how many can possibly follow.
+		const uint64_t maxChunks = (fileSize - sizeof(FileHeader)) / sizeof(ChunkHeader);
+		m_chunks.reserve(static_cast<size_t>(
+			m_header.chunk_count < maxChunks ? m_header.chunk_count : maxChunks));
 
+		uint64_t offset = sizeof(FileHeader);
 		for (uint32_t i = 0; i < m_header.chunk_count; ++i)
 		{
 			ChunkHeader ch{};
 			f.read(reinterpret_cast<char*>(&ch), sizeof(ch));
 			if (!f) break;
+			offset += sizeof(ChunkHeader);   // the read succeeded → still <= fileSize
+
+			// Validate the declared size BEFORE allocating, exactly like openData():
+			// a corrupt/hostile size would otherwise resize() to gigabytes (throwing
+			// bad_alloc out of the parse) and the short read afterwards would leave
+			// the tail silently zero-filled. Compare against the remaining bytes —
+			// `offset + ch.size` could wrap, since size is an untrusted uint64.
+			if (ch.size > fileSize - offset) return false;
 
 			Chunk c;
 			c.id = ch.id;
@@ -274,6 +299,7 @@ public:
 			if (ch.size > 0)
 				f.read(reinterpret_cast<char*>(c.data.data()),
 					   static_cast<std::streamsize>(ch.size));
+			offset += ch.size;
 			m_chunks.push_back(std::move(c));
 		}
 		return true;
@@ -287,7 +313,11 @@ public:
 		if (std::memcmp(m_header.magic, k_magic, 4) != 0) return false;
 
 		m_chunks.clear();
-		m_chunks.reserve(m_header.chunk_count);
+		// Same cap as open(): chunk_count is untrusted, and a blind reserve of a
+		// garbage uint32 throws bad_alloc before the loop can reject anything.
+		const size_t maxChunks = (data.size() - sizeof(FileHeader)) / sizeof(ChunkHeader);
+		m_chunks.reserve(m_header.chunk_count < maxChunks
+						 ? static_cast<size_t>(m_header.chunk_count) : maxChunks);
 
 		size_t offset = sizeof(FileHeader);
 		for (uint32_t i = 0; i < m_header.chunk_count; ++i)
@@ -300,8 +330,10 @@ public:
 			// Validate the declared size BEFORE allocating: a corrupt/hostile size
 			// would otherwise throw bad_alloc/length_error out of the resize.
 			// Compare against the remaining bytes — `offset + ch.size` could wrap
-			// (size is attacker-controlled uint64) and slip past the check.
-			if (static_cast<size_t>(ch.size) > data.size() - offset) return false;
+			// (size is attacker-controlled uint64) and slip past the check. Compare
+			// as uint64 too: casting size down to size_t first would let a value
+			// like 0x1'0000'0004 truncate to 4 and pass on a 32-bit build.
+			if (ch.size > static_cast<uint64_t>(data.size() - offset)) return false;
 			Chunk c;
 			c.id = ch.id;
 			c.data.resize(static_cast<size_t>(ch.size));
@@ -340,7 +372,9 @@ public:
 		uint32_t len = 0;
 		std::memcpy(&len, buf.data() + offset, sizeof(len));
 		offset += sizeof(len);
-		if (offset + len > buf.size()) return false;
+		// Subtract instead of adding: len is a file value up to 4 GiB, so on a
+		// 32-bit build `offset + len` wraps and a truncated string would pass.
+		if (len > buf.size() - offset) return false;
 		out.assign(reinterpret_cast<const char*>(buf.data() + offset), len);
 		offset += len;
 		return true;
@@ -360,7 +394,13 @@ public:
 	{
 		uint64_t count = 0;
 		if (!readPOD(buf, offset, count)) return false;
-		if (offset + count * sizeof(T) > buf.size()) return false;
+		// Check the count by DIVISION, never by forming count * sizeof(T): count
+		// comes straight from the file, so the product wraps around for a hostile
+		// or corrupt value and lets an absurd count sail past the bounds test —
+		// after which resize() allocates count * sizeof(T) (bad_alloc → the parse
+		// aborts the process) and the memcpy below runs off the end of the buffer.
+		// readPOD only advances offset when it fits, so buf.size() - offset is safe.
+		if (count > (buf.size() - offset) / sizeof(T)) return false;
 		out.resize(static_cast<size_t>(count));
 		if (count > 0)
 		{
