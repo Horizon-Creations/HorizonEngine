@@ -33,10 +33,22 @@ const std::vector<UIWidgetType>& uiWidgetTypeRegistry()
     return kAll;
 }
 
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║  THESE STRINGS ARE AN ON-DISK FORMAT — uiWidgetTypeFromName reads them   ║
+// ║  back, so a saved widget names its element types with them. They must    ║
+// ║  stay in step with each subclass's typeName(); the "makeUIElement        ║
+// ║  produces the right subclass for every type" test pins the two together. ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
 const char* uiWidgetTypeName(UIWidgetType t)
 {
-    if (auto e = makeUIElement(t)) return e->typeName();
-    return "Panel";
+    static constexpr const char* kNames[] = {
+        "Panel", "Image", "Text", "Button", "CheckBox",
+        "Slider", "ProgressBar", "TextInput", "ComboBox" };
+    static_assert(sizeof(kNames) / sizeof(*kNames) == (size_t)UIWidgetType::COUNT,
+                  "uiWidgetTypeName table out of step with UIWidgetType");
+    const size_t i = (size_t)t;
+    // Out-of-range falls back to Panel, matching makeUIElement's default.
+    return i < sizeof(kNames) / sizeof(*kNames) ? kNames[i] : "Panel";
 }
 
 UIWidgetType uiWidgetTypeFromName(const std::string& s)
@@ -62,6 +74,151 @@ const char* uiCursorName(UICursor c)
         case UICursor::Wait:      return "Wait";
         default:                  return "Default";
     }
+}
+
+// ── Property tables (one per widget type) ────────────────────────────────────
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║  THESE NAMES ARE AN ON-DISK FORMAT.                                      ║
+// ║                                                                          ║
+// ║  A UI Widget asset is serialized with them and HorizonCode graphs         ║
+// ║  reference properties by name (Get/Set Property nodes store the string).  ║
+// ║  Renaming a row therefore breaks every saved widget and every graph that  ║
+// ║  touches that property — silently, since a lookup miss just reads as the  ║
+// ║  default value. test_ui_widgets.cpp pins the full name+type list per      ║
+// ║  type; if that test fails you changed the format.                         ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+// Declaration order is the order the editor's detail panel shows them in.
+
+const UIPropTable& UIPanel::propTable() const
+{
+    static const UIPropTable t = {
+        uiprop::slot<&UIPanel::color>({ "Color", UIPropType::Color }),
+    };
+    return t;
+}
+
+const UIPropTable& UIImage::propTable() const
+{
+    static const UIPropTable t = {
+        uiprop::slot<&UIImage::tint>({ "Tint", UIPropType::Color }),
+    };
+    return t;
+}
+
+const UIPropTable& UIText::propTable() const
+{
+    static const UIPropTable t = {
+        uiprop::slot<&UIText::text>    ({ "Text", UIPropType::String, 0.0f, 0.0f, /*multiline=*/true }),
+        uiprop::slot<&UIText::fontSize>({ "FontSize", UIPropType::Float, 4.0f, 200.0f }),
+        uiprop::slot<&UIText::color>   ({ "Color", UIPropType::Color }),
+        uiprop::slot<&UIText::wordWrap>({ "WordWrap", UIPropType::Bool }),
+        uiprop::slot<&UIText::autoSize>({ "AutoSize", UIPropType::Bool }),
+        // Not a plain field: the bool the user sees is the 0/1 `align` index.
+        uiprop::custom({ "Center", UIPropType::Bool },
+            [](const UIElement& e) { return UIPropValue::ofBool(static_cast<const UIText&>(e).align == 1); },
+            [](UIElement& e, const UIPropValue& v) { static_cast<UIText&>(e).align = v.b ? 1 : 0; }),
+    };
+    return t;
+}
+
+const UIPropTable& UIButton::propTable() const
+{
+    static const UIPropTable t = {
+        uiprop::slot<&UIButton::text>        ({ "Text", UIPropType::String }),
+        uiprop::slot<&UIButton::fontSize>    ({ "FontSize", UIPropType::Float, 4.0f, 200.0f }),
+        uiprop::slot<&UIButton::color>       ({ "Normal Color", UIPropType::Color }),
+        uiprop::slot<&UIButton::hoveredColor>({ "Hovered Color", UIPropType::Color }),
+        uiprop::slot<&UIButton::pressedColor>({ "Pressed Color", UIPropType::Color }),
+        uiprop::slot<&UIButton::textColor>   ({ "Text Color", UIPropType::Color }),
+    };
+    return t;
+}
+
+const UIPropTable& UICheckBox::propTable() const
+{
+    static const UIPropTable t = {
+        uiprop::slot<&UICheckBox::checked>   ({ "Checked", UIPropType::Bool }),
+        uiprop::slot<&UICheckBox::label>     ({ "Label", UIPropType::String }),
+        uiprop::slot<&UICheckBox::fontSize>  ({ "FontSize", UIPropType::Float, 4.0f, 200.0f }),
+        uiprop::slot<&UICheckBox::boxColor>  ({ "Box Color", UIPropType::Color }),
+        uiprop::slot<&UICheckBox::checkColor>({ "Check Color", UIPropType::Color }),
+        uiprop::slot<&UICheckBox::textColor> ({ "Text Color", UIPropType::Color }),
+    };
+    return t;
+}
+
+const UIPropTable& UISlider::propTable() const
+{
+    static const UIPropTable t = {
+        uiprop::slot<&UISlider::value>      ({ "Value", UIPropType::Float }),
+        uiprop::slot<&UISlider::minValue>   ({ "Min", UIPropType::Float }),
+        uiprop::slot<&UISlider::maxValue>   ({ "Max", UIPropType::Float }),
+        uiprop::slot<&UISlider::trackColor> ({ "Track Color", UIPropType::Color }),
+        uiprop::slot<&UISlider::fillColor>  ({ "Fill Color", UIPropType::Color }),
+        uiprop::slot<&UISlider::handleColor>({ "Handle Color", UIPropType::Color }),
+    };
+    return t;
+}
+
+const UIPropTable& UIProgressBar::propTable() const
+{
+    static const UIPropTable t = {
+        uiprop::slot<&UIProgressBar::value>    ({ "Value", UIPropType::Float, 0.0f, 1.0f }),
+        uiprop::slot<&UIProgressBar::backColor>({ "Back Color", UIPropType::Color }),
+        uiprop::slot<&UIProgressBar::fillColor>({ "Fill Color", UIPropType::Color }),
+    };
+    return t;
+}
+
+const UIPropTable& UITextInput::propTable() const
+{
+    static const UIPropTable t = {
+        uiprop::slot<&UITextInput::text>       ({ "Text", UIPropType::String }),
+        uiprop::slot<&UITextInput::placeholder>({ "Placeholder", UIPropType::String }),
+        uiprop::slot<&UITextInput::fontSize>   ({ "FontSize", UIPropType::Float, 4.0f, 200.0f }),
+        uiprop::slot<&UITextInput::backColor>  ({ "Back Color", UIPropType::Color }),
+        uiprop::slot<&UITextInput::textColor>  ({ "Text Color", UIPropType::Color }),
+    };
+    return t;
+}
+
+const UIPropTable& UIComboBox::propTable() const
+{
+    static const UIPropTable t = {
+        uiprop::slot<&UIComboBox::options>       ({ "Options", UIPropType::StringList }),
+        uiprop::slot<&UIComboBox::selectedIndex> ({ "Selected Index", UIPropType::Int }),
+        uiprop::slot<&UIComboBox::fontSize>      ({ "FontSize", UIPropType::Float, 4.0f, 200.0f }),
+        uiprop::slot<&UIComboBox::backColor>     ({ "Back Color", UIPropType::Color }),
+        uiprop::slot<&UIComboBox::textColor>     ({ "Text Color", UIPropType::Color }),
+        uiprop::slot<&UIComboBox::highlightColor>({ "Highlight Color", UIPropType::Color }),
+    };
+    return t;
+}
+
+// The three entry points every table serves. A name that is not in the table
+// reads as a default-constructed value and writes nowhere — the same silent
+// behaviour the per-class if-chains had.
+
+std::vector<UIPropDesc> UIElement::properties() const
+{
+    const UIPropTable& t = propTable();
+    std::vector<UIPropDesc> out;
+    out.reserve(t.size());
+    for (const UIPropSlot& s : t) out.push_back(s.desc);
+    return out;
+}
+
+UIPropValue UIElement::getProp(const std::string& name) const
+{
+    for (const UIPropSlot& s : propTable())
+        if (s.desc.name == name) return s.get(*this);
+    return {};
+}
+
+void UIElement::setProp(const std::string& name, const UIPropValue& v)
+{
+    for (const UIPropSlot& s : propTable())
+        if (s.desc.name == name) { s.set(*this, v); return; }
 }
 
 // ── Shared base properties ────────────────────────────────────────────────────
@@ -116,8 +273,8 @@ std::vector<UIPropDesc> UIElement::allProperties() const
     // the details panel uses).
     if (hasMaterialSlot())
         out.push_back({ "Material", UIPropType::String });
-    for (const UIPropDesc& pd : properties())
-        if (pd.name == "FontSize")
+    for (const UIPropSlot& s : propTable())
+        if (s.desc.name == "FontSize")
         {
             out.push_back({ "Font", UIPropType::String });
             break;

@@ -11,63 +11,128 @@ namespace HE
 {
 namespace
 {
-// The shared standard drop-in vertex (moved out of MetalRenderer). Vertex-pulls the
-// interleaved 32-byte VertexIn (pos3, normal3, uv2 = 8 floats) as a flat std430 float
-// array indexed by gl_VertexIndex, and reads the Uniforms UBO (std140, matching the
-// engine's per-object Uniforms). This is the M2 surface-template's vertex stage in embryo.
-// Metal/Vulkan/D3D vertex: pulls the interleaved VertexIn as a flat std430 SSBO indexed
-// by gl_VertexIndex (mirrors the engine's `const device VertexIn*` binding). SSBOs are
-// GL 4.3+, so this variant is NOT used for the macOS-GL (4.1) path — see kStandardVertexAttrib.
-constexpr const char* kStandardVertexSSBO = R"(#version 450
-layout(std430, set = 0, binding = 0) readonly buffer Verts { float d[]; };
-layout(std140, set = 0, binding = 1) uniform U {
-    mat4 mvp; mat4 model; vec4 color; vec4 flags; vec4 pbr;
-} u;
-layout(location = 0) out vec3 vNormal;
-layout(location = 1) out vec3 vColor;
-layout(location = 2) out vec2 vUV;
-layout(location = 3) out vec3 vWorldPos;
-void main() {
-    int b = gl_VertexIndex * 8;
-    vec3 pos = vec3(d[b + 0], d[b + 1], d[b + 2]);
-    vec3 nrm = vec3(d[b + 3], d[b + 4], d[b + 5]);
-    vec4 wp  = u.model * vec4(pos, 1.0);
-    gl_Position = u.mvp * vec4(pos, 1.0);
-    vNormal   = mat3(u.model) * nrm;
-    vColor    = u.color.rgb;
-    vUV       = vec2(d[b + 6], d[b + 7]);
-    vWorldPos = wp.xyz;
-}
-)";
-
-// GL-4.1-portable vertex: real vertex attributes (no SSBO), so it compiles on a GLSL 410
-// core context. The GL backend feeds pos/normal/uv via a VAO (locations 0/1/2, the same
-// interleaved 32-byte layout). Same varyings + Uniforms UBO as the SSBO variant, so the
-// shared fragments are identical across backends — only the vertex data path differs.
-// Every material fragment is spliced onto one of the two variants, so all materials see
-// the same geometry-pass per-draw bindings and the same fragment-stage interface:
+// ─── The one geometry-pass vertex assembler ──────────────────────────────────
+// The shared standard drop-in vertex (moved out of MetalRenderer), plus the
+// world-position-offset variant a node graph's vertex body is spliced into.
+// These used to be three hand-written near-copies (two string literals + the
+// body of buildCustomVertex), which meant the per-draw binding block and the
+// fragment-stage interface had to be edited in three places to stay compatible.
+// assembleVertex() emits all of them from one description:
+//
+//   VertexInput::Ssbo       Metal/Vulkan/D3D: vertex-pulls the interleaved
+//                           32-byte VertexIn (pos3, normal3, uv2 = 8 floats) as a
+//                           flat std430 float array indexed by gl_VertexIndex
+//                           (mirrors the engine's `const device VertexIn*`
+//                           binding). SSBOs are GL 4.3+, so this variant is NOT
+//                           used for the macOS-GL (4.1) path.
+//   VertexInput::Attributes GL-4.1-portable: real vertex attributes, so it
+//                           compiles on a GLSL 410 core context. The GL backend
+//                           feeds pos/normal/uv via a VAO (locations 0/1/2, the
+//                           same interleaved 32-byte layout).
+//
+// Both read the same Uniforms UBO (std140, matching the engine's per-object
+// Uniforms) and emit the same varyings, so a material fragment spliced onto
+// either sees the same geometry-pass per-draw bindings and the same
+// fragment-stage interface:
 //   in  0 vNormal (vec3)  1 vColor (vec3)  2 vUV (vec2)  3 vWorldPos (vec3)
 //   out 0 oColor  (vec4)
-constexpr const char* kStandardVertexAttrib = R"(#version 450
-layout(location = 0) in vec3 aPos;
-layout(location = 1) in vec3 aNormal;
-layout(location = 2) in vec2 aUV;
-layout(std140, set = 0, binding = 1) uniform U {
-    mat4 mvp; mat4 model; vec4 color; vec4 flags; vec4 pbr;
-} u;
-layout(location = 0) out vec3 vNormal;
-layout(location = 1) out vec3 vColor;
-layout(location = 2) out vec2 vUV;
-layout(location = 3) out vec3 vWorldPos;
-void main() {
-    vec4 wp = u.model * vec4(aPos, 1.0);
-    gl_Position = u.mvp * vec4(aPos, 1.0);
-    vNormal   = mat3(u.model) * aNormal;
-    vColor    = u.color.rgb;
-    vUV       = aUV;
-    vWorldPos = wp.xyz;
+//
+// NOTE ON WHITESPACE: the emitted text is byte-for-byte what the three
+// hand-written variants produced, down to their differing `vec4 wp` alignment.
+// This is shader SOURCE — a single stray character is a runtime shader-compile
+// failure, which no unit test in this repo would catch — so the variants' small
+// cosmetic quirks are reproduced rather than tidied up.
+enum class VertexInput { Ssbo, Attributes };
+
+// The world-position-offset splice: `declarations` goes between the U block and
+// the varyings, `statements` is the graph body (it reads the varyings written
+// above it and must leave a `vec3 heWpo`). Null = one of the standard variants.
+struct WpoBody
+{
+    const char*        declarations;
+    const std::string& statements;
+};
+
+std::string assembleVertex(VertexInput input, const WpoBody* wpo)
+{
+    const bool ssbo = (input == VertexInput::Ssbo);
+    // The WPO variants rebind the attributes to pos/nrm/uv so the graph body and
+    // the shared tail below read the same names on either data path.
+    const char* pos = (ssbo || wpo) ? "pos" : "aPos";
+    const char* nrm = (ssbo || wpo) ? "nrm" : "aNormal";
+    const char* uv  = wpo ? "uv" : (ssbo ? "vec2(d[b + 6], d[b + 7])" : "aUV");
+    // Alignment run after `vec4 wp` — cosmetic, kept per-variant (see the note above).
+    const char* wpPad = wpo ? "   " : (ssbo ? "  " : " ");
+
+    std::string src = "#version 450\n";
+    if (ssbo)
+        src += "layout(std430, set = 0, binding = 0) readonly buffer Verts { float d[]; };\n";
+    else
+        src += "layout(location = 0) in vec3 aPos;\n"
+               "layout(location = 1) in vec3 aNormal;\n"
+               "layout(location = 2) in vec2 aUV;\n";
+    src += "layout(std140, set = 0, binding = 1) uniform U {\n"
+           "    mat4 mvp; mat4 model; vec4 color; vec4 flags; vec4 pbr;\n"
+           "} u;\n";
+    if (wpo) src += wpo->declarations;
+    src += "layout(location = 0) out vec3 vNormal;\n"
+           "layout(location = 1) out vec3 vColor;\n"
+           "layout(location = 2) out vec2 vUV;\n"
+           "layout(location = 3) out vec3 vWorldPos;\n"
+           "void main() {\n";
+    // Vertex fetch. The standard variants inline the UV into the vUV assignment;
+    // the WPO variants want a named `uv` their body can read.
+    if (ssbo)
+    {
+        src += "    int b = gl_VertexIndex * 8;\n"
+               "    vec3 pos = vec3(d[b + 0], d[b + 1], d[b + 2]);\n"
+               "    vec3 nrm = vec3(d[b + 3], d[b + 4], d[b + 5]);\n";
+        if (wpo) src += "    vec2 uv  = vec2(d[b + 6], d[b + 7]);\n";
+    }
+    else if (wpo)
+        src += "    vec3 pos = aPos;\n    vec3 nrm = aNormal;\n    vec2 uv = aUV;\n";
+    src += "    vec4 wp";
+    src += wpPad;
+    src += "= u.model * vec4(";
+    src += pos;
+    src += ", 1.0);\n";
+    if (!wpo) // the WPO tail writes gl_Position last, from the offset position
+    {
+        src += "    gl_Position = u.mvp * vec4(";
+        src += pos;
+        src += ", 1.0);\n";
+    }
+    src += "    vNormal   = mat3(u.model) * ";
+    src += nrm;
+    src += ";\n";
+    src += "    vColor    = u.color.rgb;\n";
+    src += "    vUV       = ";
+    src += uv;
+    src += ";\n";
+    src += "    vWorldPos = wp.xyz;\n";
+    if (wpo)
+    {
+        // The varyings are WRITTEN first so the body may read them by their usual
+        // names; the world-space offset is mapped back to object space with the
+        // transpose trick (exact for rigid transforms with uniform scale —
+        // model^-1 ≈ model^T / |col0|²), so u.mvp keeps working.
+        src += wpo->statements; // graph statements → `vec3 heWpo`
+        src += "    vWorldPos += heWpo;\n"
+               "    vec3 heObjWpo = (transpose(mat3(u.model)) * heWpo)\n"
+               "                  / max(dot(u.model[0].xyz, u.model[0].xyz), 1e-8);\n"
+               "    gl_Position = u.mvp * vec4(pos + heObjWpo, 1.0);\n";
+    }
+    src += "}\n";
+    return src;
 }
-)";
+
+// The two standard variants: assembled once, then handed to the compiler as-is.
+const std::string& standardVertexSource(VertexInput input)
+{
+    static const std::string kSsbo   = assembleVertex(VertexInput::Ssbo,       nullptr);
+    static const std::string kAttrib = assembleVertex(VertexInput::Attributes, nullptr);
+    return (input == VertexInput::Ssbo) ? kSsbo : kAttrib;
+}
 
 he::shaderc::Target toTarget(MaterialShaderLibrary::Backend b)
 {
@@ -508,48 +573,22 @@ float heValueNoise3(vec3 p) { vec3 i = floor(p); vec3 f = fract(p); vec3 u3 = f 
 float heFbm3(vec3 p) { float v = 0.0; float a = 0.5; for (int i = 0; i < 4; i++) { v += a * heValueNoise3(p); p *= 2.0; a *= 0.5; } return v; }
 )";
 
-// Assemble the full canonical custom vertex around the graph body. The varyings are
-// WRITTEN first so the body may read them by their usual names; the world-space offset
-// is mapped back to object space with the transpose trick (exact for rigid transforms
-// with uniform scale — model^-1 ≈ model^T / |col0|²), so u.mvp keeps working.
+// The WPO variant's extra declarations: the blocks the body may reference, plus
+// the noise helpers. Assembled into one string once, since assembleVertex splices
+// `declarations` as a single blob.
+const char* wpoDeclarations()
+{
+    static const std::string kDecls = std::string(kWpoUniforms) + kWpoNoise;
+    return kDecls.c_str();
+}
+
+// Assemble the full canonical custom vertex around the graph body — see
+// assembleVertex at the top of this file, which emits this and the two standard
+// variants from one description.
 std::string buildCustomVertex(const std::string& body, bool ssbo)
 {
-    std::string src = "#version 450\n";
-    if (ssbo)
-        src += "layout(std430, set = 0, binding = 0) readonly buffer Verts { float d[]; };\n";
-    else
-        src += "layout(location = 0) in vec3 aPos;\n"
-               "layout(location = 1) in vec3 aNormal;\n"
-               "layout(location = 2) in vec2 aUV;\n";
-    src += "layout(std140, set = 0, binding = 1) uniform U {\n"
-           "    mat4 mvp; mat4 model; vec4 color; vec4 flags; vec4 pbr;\n"
-           "} u;\n";
-    src += kWpoUniforms;
-    src += kWpoNoise;
-    src += "layout(location = 0) out vec3 vNormal;\n"
-           "layout(location = 1) out vec3 vColor;\n"
-           "layout(location = 2) out vec2 vUV;\n"
-           "layout(location = 3) out vec3 vWorldPos;\n"
-           "void main() {\n";
-    if (ssbo)
-        src += "    int b = gl_VertexIndex * 8;\n"
-               "    vec3 pos = vec3(d[b + 0], d[b + 1], d[b + 2]);\n"
-               "    vec3 nrm = vec3(d[b + 3], d[b + 4], d[b + 5]);\n"
-               "    vec2 uv  = vec2(d[b + 6], d[b + 7]);\n";
-    else
-        src += "    vec3 pos = aPos;\n    vec3 nrm = aNormal;\n    vec2 uv = aUV;\n";
-    src += "    vec4 wp   = u.model * vec4(pos, 1.0);\n"
-           "    vNormal   = mat3(u.model) * nrm;\n"
-           "    vColor    = u.color.rgb;\n"
-           "    vUV       = uv;\n"
-           "    vWorldPos = wp.xyz;\n";
-    src += body; // graph statements (read the varyings above) → `vec3 heWpo`
-    src += "    vWorldPos += heWpo;\n"
-           "    vec3 heObjWpo = (transpose(mat3(u.model)) * heWpo)\n"
-           "                  / max(dot(u.model[0].xyz, u.model[0].xyz), 1e-8);\n"
-           "    gl_Position = u.mvp * vec4(pos + heObjWpo, 1.0);\n"
-           "}\n";
-    return src;
+    const WpoBody wpo{ wpoDeclarations(), body };
+    return assembleVertex(ssbo ? VertexInput::Ssbo : VertexInput::Attributes, &wpo);
 }
 } // namespace
 
@@ -612,13 +651,14 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::standardVertex(Bac
     {
         // SSBO vertex-pull, pinned so the vertex buffer lands at [[buffer(0)]] and Uniforms
         // at [[buffer(1)]] — the exact bind points the Metal geometry loop issues per draw.
-        out = toCompiled(compileMslPinned(kStandardVertexSSBO, Stage::Vertex,
+        out = toCompiled(compileMslPinned(standardVertexSource(VertexInput::Ssbo), Stage::Vertex,
             { { Stage::Vertex, 0, 0, 0 }, { Stage::Vertex, 0, 1, 1 } }));
     }
     else
     {
         // GL/D3D/Vulkan: attribute-based vertex so macOS-GL (4.1, no SSBO) can compile it.
-        out = toCompiled(compile(kStandardVertexAttrib, Stage::Vertex, toTarget(backend)));
+        out = toCompiled(compile(standardVertexSource(VertexInput::Attributes), Stage::Vertex,
+                                 toTarget(backend)));
     }
     return m_vertCache.emplace(key, std::move(out)).first->second;
 }

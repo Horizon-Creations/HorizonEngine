@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 class HorizonWorld;
@@ -478,5 +479,14 @@ struct ApiFn
 const std::vector<ApiFn>& registry();
 // Look up a single entry by id; nullptr if unknown.
 const ApiFn* find(const std::string& id);
+
+// True for a registry id's namespace ("math" of "math.clamp") that the text
+// scripting frontends expose as horizon.<group>.<fn>. Lua (ScriptContext) and
+// Python (PyScriptBackend) MUST agree on this, or the same script works in one
+// language and not the other — hence one list, not one per backend. The flat
+// gameplay functions keep their ergonomic hand-written bindings until ScriptApi
+// is inverted onto HE::api. NB: a packed vec3 (Color) param spreads as 4 numbers
+// (x, y, z, _) on this path. Widening the surface = adding a name to the list.
+bool isScriptGroup(std::string_view group);
 
 } // namespace HE::api

@@ -12,6 +12,7 @@
 #include <HorizonScene/Components/EnvironmentComponent.h>
 #include <HorizonScene/Components/EnvironmentLightComponent.h>
 #include <HorizonScene/EnvironmentPush.h>   // HE::makeEnvironmentSettings
+#include <HorizonScene/EngineApi.h>         // HE_ENV_FIELDS_* — the Environment field list
 #include <HorizonScene/Components/AnimatorStateMachineComponent.h>
 #include <HorizonScene/Components/AnimatorComponent.h>
 #include <HorizonScene/Components/AnimatorBlendComponent.h>
@@ -23,6 +24,9 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <string>
+#include <string_view>
+#include <vector>
 
 namespace fs = std::filesystem;
 
@@ -781,6 +785,137 @@ TEST_CASE("Lightning flash is deliberately runtime-only and is not persisted")
 	CHECK(lenv.flash == doctest::Approx(0.0f));
 	// …so a reloaded scene starts un-flashed rather than frozen mid-strike.
 	CHECK(HE::makeEnvironmentSettings(lenv, 0.0f).flash == doctest::Approx(0.0f));
+
+	he_test::removeQuiet(file);
+}
+
+namespace
+{
+	// Fill EVERY field in the HE_ENV_FIELDS_* lists with a distinct non-default
+	// value. Driven by the same X-lists the serializer is, so a field added to the
+	// component is covered here the moment it is added there — no hand-kept copy of
+	// the field list to forget (which is exactly the drift this test guards).
+	// `n` walks upward so no two floats share a value: a swapped pair of keys in the
+	// serializer would otherwise round-trip cleanly.
+	void fillEveryEnvironmentField(EnvironmentComponent& e)
+	{
+		int n = 0;
+#define HE_TEST_ENV_FLOAT(m, Name, disp) e.m = 1.0f + 0.125f * static_cast<float>(++n);
+#define HE_TEST_ENV_BOOL(m, Name, disp)  e.m = !e.m;
+		// Every int knob accepts 0/1 (cloudMode has only those two), so flipping
+		// inside that range gives a non-default value that is still legal.
+#define HE_TEST_ENV_INT(m, Name, disp)   e.m = (e.m > 0) ? 0 : 1;
+#define HE_TEST_ENV_COLOR(m, Name, disp) ++n; e.m = glm::vec3(0.01f * static_cast<float>(n), \
+                                                              0.02f * static_cast<float>(n), \
+                                                              0.03f * static_cast<float>(n));
+		HE_ENV_FIELDS_FLOAT(HE_TEST_ENV_FLOAT)
+		HE_ENV_FIELDS_BOOL (HE_TEST_ENV_BOOL)
+		HE_ENV_FIELDS_INT  (HE_TEST_ENV_INT)
+		HE_ENV_FIELDS_COLOR(HE_TEST_ENV_COLOR)
+#undef HE_TEST_ENV_FLOAT
+#undef HE_TEST_ENV_BOOL
+#undef HE_TEST_ENV_INT
+#undef HE_TEST_ENV_COLOR
+	}
+
+	// Compare every field EXCEPT flash (runtime-only, asserted separately above).
+	void checkSameEnvironmentComponent(const EnvironmentComponent& a,
+	                                   const EnvironmentComponent& b)
+	{
+#define HE_TEST_ENV_CMP_FLOAT(m, Name, disp) if (std::string_view(#m) != "flash") \
+		CHECK(a.m == doctest::Approx(b.m));
+#define HE_TEST_ENV_CMP_EQ(m, Name, disp)    CHECK(a.m == b.m);
+#define HE_TEST_ENV_CMP_COLOR(m, Name, disp) CHECK(a.m.x == doctest::Approx(b.m.x)); \
+		CHECK(a.m.y == doctest::Approx(b.m.y)); CHECK(a.m.z == doctest::Approx(b.m.z));
+		HE_ENV_FIELDS_FLOAT(HE_TEST_ENV_CMP_FLOAT)
+		HE_ENV_FIELDS_BOOL (HE_TEST_ENV_CMP_EQ)
+		HE_ENV_FIELDS_INT  (HE_TEST_ENV_CMP_EQ)
+		HE_ENV_FIELDS_COLOR(HE_TEST_ENV_CMP_COLOR)
+#undef HE_TEST_ENV_CMP_FLOAT
+#undef HE_TEST_ENV_CMP_EQ
+#undef HE_TEST_ENV_CMP_COLOR
+	}
+}
+
+TEST_CASE("A fully-populated Environment component round-trips field for field (JSON + binary)")
+{
+	HorizonWorld world;
+	world.createEntity("Decoy");
+	const Entity sky = world.addSky();
+	auto& env = world.registry().get<EnvironmentComponent>(sky);
+	fillEveryEnvironmentField(env);
+	const EnvironmentComponent authored = env;
+
+	SceneSerializer ser;
+
+	SUBCASE("JSON")
+	{
+		const fs::path file = fs::temp_directory_path() / "he_test_env_full.hescene";
+		REQUIRE(ser.save(world, file, SerializeFormat::JSON));
+
+		HorizonWorld loaded;
+		REQUIRE(ser.load(loaded, file, SerializeFormat::JSON));
+		const Entity lsky = loaded.environmentEntity();
+		REQUIRE((lsky != entt::null));
+		checkSameEnvironmentComponent(loaded.registry().get<EnvironmentComponent>(lsky), authored);
+
+		he_test::removeQuiet(file);
+	}
+
+	SUBCASE("binary / CBOR")
+	{
+		std::vector<uint8_t> blob;
+		REQUIRE(ser.saveToMemory(world, blob));
+
+		HorizonWorld loaded;
+		REQUIRE(ser.loadFromMemory(loaded, blob));
+		const Entity lsky = loaded.environmentEntity();
+		REQUIRE((lsky != entt::null));
+		checkSameEnvironmentComponent(loaded.registry().get<EnvironmentComponent>(lsky), authored);
+	}
+}
+
+TEST_CASE("The Environment component's on-disk keys are exactly the persisted field list")
+{
+	// Scene files are user data: the key set is the format. Pinning it here means a
+	// change to how the serializer is written (e.g. generating the two halves from
+	// the HE_ENV_FIELDS_* X-lists instead of typing them twice) cannot silently add,
+	// drop or rename a key on disk.
+	const fs::path file = fs::temp_directory_path() / "he_test_env_keys.hescene";
+
+	HorizonWorld world;
+	const Entity sky = world.addSky();
+	fillEveryEnvironmentField(world.registry().get<EnvironmentComponent>(sky));
+
+	SceneSerializer ser;
+	REQUIRE(ser.save(world, file, SerializeFormat::JSON));
+
+	std::ifstream in(file);
+	REQUIRE(in.is_open());
+	nlohmann::json scene = nlohmann::json::parse(in, nullptr, false);
+	REQUIRE(!scene.is_discarded());
+
+	const nlohmann::json* envJson = nullptr;
+	for (const auto& e : scene["entities"])
+		if (e.contains("components") && e["components"].contains("environment"))
+			envJson = &e["components"]["environment"];
+	REQUIRE(envJson != nullptr);
+
+	std::vector<std::string> expected;
+#define HE_TEST_ENV_KEY(m, Name, disp) if (std::string_view(#m) != "flash") expected.push_back(#m);
+	HE_ENV_FIELDS_FLOAT(HE_TEST_ENV_KEY)
+	HE_ENV_FIELDS_BOOL (HE_TEST_ENV_KEY)
+	HE_ENV_FIELDS_INT  (HE_TEST_ENV_KEY)
+	HE_ENV_FIELDS_COLOR(HE_TEST_ENV_KEY)
+#undef HE_TEST_ENV_KEY
+	std::sort(expected.begin(), expected.end());
+
+	std::vector<std::string> actual;
+	for (auto it = envJson->begin(); it != envJson->end(); ++it) actual.push_back(it.key());
+	std::sort(actual.begin(), actual.end());
+
+	CHECK(actual == expected);
+	CHECK(envJson->count("flash") == 0);   // runtime-only, must never reach the file
 
 	he_test::removeQuiet(file);
 }

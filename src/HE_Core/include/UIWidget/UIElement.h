@@ -75,6 +75,73 @@ struct UIPropDesc
     bool        multiline = false;
 };
 
+class UIElement;
+
+// ── Per-type property table ──────────────────────────────────────────────────
+// One row = one editable property: its descriptor plus the accessors that read
+// and write the backing field. A widget type declares its properties ONCE as a
+// table of these, and properties()/getProp()/setProp() are all served from it —
+// before, every subclass kept three parallel hand-written lists (a describe
+// list plus an if-chain each way) that could silently drift apart.
+//
+// *** THE NAMES IN THESE TABLES ARE AN ON-DISK FORMAT. *** UI Widget assets are
+// serialized with them and HorizonCode graphs reference properties by name, so
+// renaming a row breaks every saved widget and every graph that touches it.
+// test_ui_widgets.cpp pins the full per-type name+type list.
+struct UIPropSlot
+{
+    UIPropDesc  desc;
+    UIPropValue (*get)(const UIElement&);
+    void        (*set)(UIElement&, const UIPropValue&);
+};
+using UIPropTable = std::vector<UIPropSlot>;
+
+// ── Declaring a table row ────────────────────────────────────────────────────
+// A row is normally `uiprop::slot<&Class::field>({ "Name", UIPropType::X })`:
+// the field's C++ type picks which UIPropValue slot carries the value, so the
+// row is the ONE place the property exists. uiprop::custom() covers the rare
+// property that is not a plain field (e.g. a bool exposed over an int field).
+namespace uiprop {
+
+template <class T> struct MemberOf;
+template <class C, class F> struct MemberOf<F C::*> { using Class = C; };
+
+// UIPropValue ⇄ field, one overload per field type a widget can expose.
+inline UIPropValue read(float v)              { return UIPropValue::ofFloat(v); }
+inline UIPropValue read(int v)                { return UIPropValue::ofInt(v); }
+inline UIPropValue read(bool v)               { return UIPropValue::ofBool(v); }
+inline UIPropValue read(const std::string& v) { return UIPropValue::ofString(v); }
+inline UIPropValue read(const glm::vec2& v)   { return UIPropValue::ofVec2(v); }
+inline UIPropValue read(const glm::vec4& v)   { return UIPropValue::ofColor(v); }
+inline UIPropValue read(const std::vector<std::string>& v)
+{ UIPropValue r; r.type = UIPropType::StringList; r.list = v; return r; }
+
+inline void write(float& d, const UIPropValue& v)       { d = v.f; }
+inline void write(int& d, const UIPropValue& v)         { d = v.i; }
+inline void write(bool& d, const UIPropValue& v)        { d = v.b; }
+inline void write(std::string& d, const UIPropValue& v) { d = v.s; }
+inline void write(glm::vec2& d, const UIPropValue& v)   { d = v.v2; }
+inline void write(glm::vec4& d, const UIPropValue& v)   { d = v.col; }
+inline void write(std::vector<std::string>& d, const UIPropValue& v) { d = v.list; }
+
+// A slot only ever runs on its own class (the table is reached through that
+// class's propTable()), so the downcast is safe by construction.
+template <auto M>
+UIPropSlot slot(UIPropDesc d)
+{
+    using C = typename MemberOf<decltype(M)>::Class;
+    return { std::move(d),
+             [](const UIElement& e) { return read(static_cast<const C&>(e).*M); },
+             [](UIElement& e, const UIPropValue& v) { write(static_cast<C&>(e).*M, v); } };
+}
+
+inline UIPropSlot custom(UIPropDesc d,
+                         UIPropValue (*get)(const UIElement&),
+                         void (*set)(UIElement&, const UIPropValue&))
+{ return { std::move(d), get, set }; }
+
+} // namespace uiprop
+
 // One event a widget type can fire. `argType` is the type of the value the
 // event carries (e.g. Slider OnValueChanged → Float); `hasArg` false = pure exec.
 struct UIEventDesc
@@ -132,10 +199,14 @@ public:
     virtual const char*  typeName() const = 0;
     virtual std::unique_ptr<UIElement> clone() const = 0;
 
-    // Type-specific editable properties + generic access by name.
-    virtual std::vector<UIPropDesc> properties() const = 0;
-    virtual UIPropValue getProp(const std::string& name) const = 0;
-    virtual void        setProp(const std::string& name, const UIPropValue& v) = 0;
+    // Type-specific editable properties + generic access by name. A subclass
+    // declares ONE table (see UIPropSlot) and gets all three accessors from it;
+    // an unknown name reads as a default-constructed value and writes nowhere,
+    // exactly as the old per-class if-chains did.
+    virtual const UIPropTable& propTable() const = 0;
+    std::vector<UIPropDesc> properties() const;
+    UIPropValue getProp(const std::string& name) const;
+    void        setProp(const std::string& name, const UIPropValue& v);
 
     // ── Shared base properties (every element) ────────────────────────────
     // The base fields (Visible, Hit Testable, Position, Size, Layer, Hover
