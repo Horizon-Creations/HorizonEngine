@@ -559,7 +559,12 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragment(
               // Local (point/spot) shadow atlas (preamble binding 13) → MSL
               // texture/sampler 12 — the SAME pin the scene passes bind the
               // atlas at for the built-in shaders, so no per-draw rebinding.
-              { Stage::Fragment, 0, 13, 12 } }));
+              { Stage::Fragment, 0, 13, 12 },
+              // Landscape layer weightmap (preamble binding 14) → MSL
+              // texture/sampler 13. Bound PER DRAW from the terrain chunk's
+              // parent landscape (not per material), so two landscapes can share
+              // one material and still carry their own paint.
+              { Stage::Fragment, 0, 14, 13 } }));
     }
     else
     {

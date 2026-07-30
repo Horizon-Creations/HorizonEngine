@@ -5814,6 +5814,13 @@ void MetalRenderer::InvalidateMesh(const HE::UUID& meshId)
 		m_pendingMeshInvalidations.push_back(meshId);
 }
 
+void MetalRenderer::InvalidateTexture(const HE::UUID& textureId)
+{
+	// Same deferral as meshes — the graph-texture cache is keyed by UUID string.
+	if (textureId != HE::UUID{})
+		m_pendingTexInvalidations.push_back(textureId);
+}
+
 void MetalRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 {
 	// Build each custom-shader material's pipeline state NOW so the first draw
@@ -8427,6 +8434,23 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 							[encoder setFragmentTexture:(__bridge id<MTLTexture>)cGraphTex[i] atIndex:(i + 1)];
 							[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:(i + 1)];
 						}
+				// Landscape layer weightmap → MSL texture 13 (preamble binding 14).
+				// PER DRAW, not per material: it belongs to the terrain the chunk is
+				// part of, so two landscapes can share a material and paint apart.
+				// Objects that aren't landscape chunks get the 1x1 (1,0,0,0) default,
+				// which makes a layer-blend node resolve to layer 0 instead of black.
+				if (cMaterialPipeline)
+				{
+					void* wm = dc.weightmapTextureId != HE::UUID{}
+						? ResolveGraphTexture(dc.weightmapTextureId, {})
+						: nullptr;
+					if (!wm) wm = ResolveGraphTexture(HE::kDefaultLayer0WeightTextureId, {});
+					if (wm)
+					{
+						[encoder setFragmentTexture:(__bridge id<MTLTexture>)wm atIndex:13];
+						[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:13];
+					}
+				}
 				[encoder setVertexBuffer:vertexBuf offset:0 atIndex:0];
 				[encoder setVertexBytes:&ui length:sizeof(ui) atIndex:1];
 				// WPO materials read HeLighting (time) + HeParams in the VERTEX stage too
@@ -8597,6 +8621,19 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 				}
 			}
 			m_pendingMeshInvalidations.clear();
+
+			// Same for textures rewritten in place (landscape weightmap paints).
+			// m_graphTexCache is keyed by "hi:lo" for UUID-resolved entries.
+			for (const HE::UUID& id : m_pendingTexInvalidations)
+			{
+				const std::string key = std::to_string(id.hi) + ":" + std::to_string(id.lo);
+				if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end())
+				{
+					if (it->second) RetireTexture(it->second);
+					m_graphTexCache.erase(it);
+				}
+			}
+			m_pendingTexInvalidations.clear();
 		}
 
 		CAMetalLayer* layer = (__bridge CAMetalLayer*)target.metalLayer;

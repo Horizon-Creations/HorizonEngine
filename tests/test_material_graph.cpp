@@ -1076,3 +1076,51 @@ TEST_CASE("Specular and Ambient Occlusion reach the lit shading call")
 	CHECK(a2.find("0.500000") != std::string::npos); // Specular default
 	CHECK(a2.find("1.000000") != std::string::npos); // AO default
 }
+
+// ── Landscape layer blend ─────────────────────────────────────────────────────
+TEST_CASE("matLandscapeLayerNames splits, trims and caps the layer list")
+{
+	CHECK(HE::matLandscapeLayerNames("Grass\nRock") == std::vector<std::string>{ "Grass", "Rock" });
+	CHECK(HE::matLandscapeLayerNames("  Grass \n\n\t Rock  ")
+	      == std::vector<std::string>{ "Grass", "Rock" });
+	// Never empty — a node with no names still has one pin.
+	CHECK(HE::matLandscapeLayerNames("").size() == 1);
+	// One RGBA weightmap = four channels, so the list is capped.
+	CHECK(HE::matLandscapeLayerNames("a\nb\nc\nd\ne\nf").size()
+	      == static_cast<size_t>(HE::kMatMaxLandscapeLayers));
+}
+
+TEST_CASE("Landscape Layer Blend emits a normalised weightmap blend")
+{
+	HE::MaterialGraph g;
+	const int out = g.addNode(HE::MatNodeType::Output);
+	const int lb  = g.addNode(HE::MatNodeType::LandscapeLayerBlend);
+	g.findNode(lb)->s = "Grass\nRock\nSand";
+	const int c0 = g.addNode(HE::MatNodeType::ConstColor);
+	g.findNode(c0)->p[0] = 0.1f; g.findNode(c0)->p[1] = 0.6f; g.findNode(c0)->p[2] = 0.2f;
+	CHECK(g.connect(c0, 0, lb, 0));
+	CHECK(g.connect(lb, 0, out, HE::kMatOutputBaseColorPin));
+	// A pin beyond the declared layers must be rejected (dynamic pin count).
+	CHECK_FALSE(g.connect(c0, 0, lb, 3));
+
+	const HE::MatShaderGen gen = HE::generateFragment(g);
+	// The sampler is declared at the reserved binding and sampled at the RAW UV
+	// (the weightmap spans the whole terrain; detail tiling is per layer).
+	CHECK(gen.glsl.find("binding = 14) uniform sampler2D heLandscapeWeights") != std::string::npos);
+	CHECK(gen.glsl.find("texture(heLandscapeWeights, vUV)") != std::string::npos);
+	// Normalised by the weight sum, so a partly painted texel doesn't darken.
+	CHECK(gen.glsl.find("max(") != std::string::npos);
+	CHECK(gen.glsl.find("1e-4") != std::string::npos);
+	// Exactly the three declared layers are advertised to the landscape tool.
+	REQUIRE(gen.layerNames.size() == 3);
+	CHECK(gen.layerNames[0] == "Grass");
+	CHECK(gen.layerNames[1] == "Rock");
+	CHECK(gen.layerNames[2] == "Sand");
+
+	// An ordinary material declares no layers and no weightmap sampler.
+	HE::MaterialGraph plain;
+	plain.addNode(HE::MatNodeType::Output);
+	const HE::MatShaderGen pg = HE::generateFragment(plain);
+	CHECK(pg.layerNames.empty());
+	CHECK(pg.glsl.find("heLandscapeWeights") == std::string::npos);
+}

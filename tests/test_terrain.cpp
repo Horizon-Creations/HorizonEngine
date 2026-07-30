@@ -5,6 +5,7 @@
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/Components/MeshComponent.h>
 #include <HorizonScene/TerrainSystem.h>
+#include <HorizonScene/TerrainPaint.h>
 #include <HorizonScene/Components/TerrainChunkComponent.h>
 #include <HorizonScene/Components/MaterialComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
@@ -430,4 +431,121 @@ TEST_CASE("TerrainComponent uvTiling and lodDistanceScale round-trip")
     REQUIRE(l != nullptr);
     CHECK(l->uvTiling == doctest::Approx(12.5f));
     CHECK(l->lodDistanceScale == doctest::Approx(3.25f));
+}
+
+// ── Layer painting ────────────────────────────────────────────────────────────
+TEST_CASE("TerrainPaint allocates a weightmap that is fully layer 0")
+{
+    TerrainComponent tc;
+    tc.weightRes = 8;
+    TerrainPaint::ensureWeightmap(tc);
+    REQUIRE(tc.layerWeights.size() == 8u * 8u * 4u);
+    for (size_t i = 0; i < tc.layerWeights.size(); i += 4)
+    {
+        CHECK(tc.layerWeights[i + 0] == 255); // layer 0 …
+        CHECK(tc.layerWeights[i + 1] == 0);   // … and nothing else, which is what
+        CHECK(tc.layerWeights[i + 2] == 0);   // an unpainted landscape already
+        CHECK(tc.layerWeights[i + 3] == 0);   // renders as (1x1 default = 1,0,0,0)
+    }
+    CHECK(tc.weightsDirty);
+    // Idempotent: a correctly sized map is left alone.
+    tc.layerWeights[0] = 42;
+    TerrainPaint::ensureWeightmap(tc);
+    CHECK(tc.layerWeights[0] == 42);
+}
+
+TEST_CASE("TerrainPaint moves weight toward the painted layer and keeps the sum at 255")
+{
+    TerrainComponent tc;
+    tc.sizeX = tc.sizeZ = 64.0f;
+    tc.weightRes = 32;
+    TerrainPaint::ensureWeightmap(tc);
+
+    // Paint layer 1 at the centre with a hard-edged brush.
+    REQUIRE(TerrainPaint::paint(tc, 0.0f, 0.0f, /*layer=*/1,
+                                /*radius=*/8.0f, /*falloff=*/0.0f, /*strength=*/0.5f));
+
+    const uint32_t wr = tc.weightRes;
+    auto texel = [&](int x, int z) { return &tc.layerWeights[(static_cast<size_t>(z) * wr + x) * 4]; };
+    const int c = static_cast<int>(wr) / 2;
+
+    // Centre moved halfway to layer 1 …
+    const uint8_t* mid = texel(c, c);
+    CHECK(mid[1] > 100);
+    CHECK(mid[1] < 160);
+    CHECK(mid[0] > 100);
+    // … and every touched texel still sums to exactly 255 (no drift over strokes).
+    for (size_t i = 0; i < tc.layerWeights.size(); i += 4)
+    {
+        const int sum = tc.layerWeights[i] + tc.layerWeights[i+1]
+                      + tc.layerWeights[i+2] + tc.layerWeights[i+3];
+        CHECK(sum == 255);
+    }
+    // A corner far outside the brush is untouched.
+    const uint8_t* corner = texel(0, 0);
+    CHECK(corner[0] == 255);
+    CHECK(corner[1] == 0);
+
+    // Repeated strokes converge on the layer instead of overshooting.
+    for (int i = 0; i < 12; ++i)
+        TerrainPaint::paint(tc, 0.0f, 0.0f, 1, 8.0f, 0.0f, 0.5f);
+    CHECK(texel(c, c)[1] == 255);
+    CHECK(texel(c, c)[0] == 0);
+
+    // Painting a different layer over it takes the weight back — reversible.
+    for (int i = 0; i < 12; ++i)
+        TerrainPaint::paint(tc, 0.0f, 0.0f, 0, 8.0f, 0.0f, 0.5f);
+    CHECK(texel(c, c)[0] == 255);
+    CHECK(texel(c, c)[1] == 0);
+}
+
+TEST_CASE("TerrainPaint falloff fades with distance and rejects bad layers")
+{
+    TerrainComponent tc;
+    tc.sizeX = tc.sizeZ = 64.0f;
+    tc.weightRes = 64;
+    TerrainPaint::ensureWeightmap(tc);
+    REQUIRE(TerrainPaint::paint(tc, 0.0f, 0.0f, 2, /*radius=*/4.0f,
+                                /*falloff=*/12.0f, /*strength=*/1.0f));
+    const uint32_t wr = tc.weightRes;
+    auto at = [&](int x, int z) { return tc.layerWeights[(static_cast<size_t>(z) * wr + x) * 4 + 2]; };
+    const int c = static_cast<int>(wr) / 2;
+    // Inside the full-strength radius → saturated; further out → progressively less.
+    CHECK(at(c, c) == 255);
+    // 1 texel = 1 m here (64 m / 64 texels); the brush reaches radius+falloff = 16 m.
+    const uint8_t near = at(c + 6,  c);  // ~6.5 m: inside the falloff band
+    const uint8_t far  = at(c + 20, c);  // ~20.5 m: past radius+falloff
+    CHECK(near > 0);
+    CHECK(near < 255);
+    CHECK(far == 0);
+
+    CHECK_FALSE(TerrainPaint::paint(tc, 0.0f, 0.0f, 4, 4.0f, 0.0f, 1.0f)); // only 4 layers
+    CHECK_FALSE(TerrainPaint::paint(tc, 0.0f, 0.0f, -1, 4.0f, 0.0f, 1.0f));
+}
+
+TEST_CASE("Painted layer weights round-trip through the scene file")
+{
+    HorizonWorld world;
+    Entity e = world.createEntity("Landscape");
+    TerrainComponent tc;
+    tc.sizeX = tc.sizeZ = 32.0f;
+    tc.weightRes = 16;
+    TerrainPaint::ensureWeightmap(tc);
+    TerrainPaint::paint(tc, 4.0f, -3.0f, 3, 6.0f, 2.0f, 0.7f);
+    const std::vector<uint8_t> expected = tc.layerWeights;
+    world.registry().emplace<TerrainComponent>(e, tc);
+
+    SceneSerializer ser;
+    std::vector<uint8_t> bytes;
+    REQUIRE(ser.saveToMemory(world, bytes));
+    HorizonWorld w2;
+    REQUIRE(ser.loadFromMemory(w2, bytes));
+    const TerrainComponent* l = nullptr;
+    for (auto ent : w2.registry().view<TerrainComponent>())
+        l = &w2.registry().get<TerrainComponent>(ent);
+    REQUIRE(l != nullptr);
+    CHECK(l->weightRes == 16);
+    REQUIRE(l->layerWeights.size() == expected.size());
+    CHECK(l->layerWeights == expected);
+    CHECK(l->weightsDirty);   // needs an upload on the first tick after load
 }

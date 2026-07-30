@@ -242,6 +242,7 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 			HAsset::Reader::readVec(c->data,o,a.instanceSwitchValues);
 			HAsset::Reader::readPOD(c->data,o,a.blendMode);              // 0 opaque/1 masked/2 translucent
 			HAsset::Reader::readString(c->data,o,a.customShaderVertGlsl);// WPO vertex body
+			HAsset::Reader::readVec(c->data,o,a.graphLayerNames);        // landscape paint layers
 		}
 		// Baked graph-texture UUIDs live in MTLU alongside shaderId/textureIds.
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_MTLU))
@@ -439,6 +440,7 @@ void ContentManager::regenerateMaterialFromGraph(HE::UUID materialId)
 	mat->customShaderVertGlsl = gen.vertexBody;
 	mat->blendMode            = gen.blendMode;
 	mat->graphTexturePaths    = gen.textures;
+	mat->graphLayerNames      = gen.layerNames;   // landscape paint layers
 	mat->graphParamNames.clear(); mat->graphParamTypes.clear();
 	mat->graphParamMinMax.clear(); mat->graphParamGroups.clear();
 	mat->graphParamTooltips.clear(); mat->shaderParamData.clear();
@@ -1052,6 +1054,7 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 		HAsset::Writer::appendVec(b,a.instanceSwitchValues);              // …(name + 0/1)
 		HAsset::Writer::appendPOD(b,a.blendMode);                         // blend mode
 		HAsset::Writer::appendString(b,a.customShaderVertGlsl);           // WPO vertex body
+		HAsset::Writer::appendVec(b,a.graphLayerNames);                   // landscape paint layers
 		w.addChunk(HAsset::CHUNK_MTRL,b.data(),b.size());
 		break;
 	}
@@ -1891,6 +1894,19 @@ void ContentManager::initDefaultAssets()
 	white.height   = 1;
 	white.channels = 4;
 	registerTexture(std::move(white));
+
+	// ── Default landscape weightmap (kDefaultLayer0WeightTextureId) ──────────
+	// Bound for terrain chunks whose landscape has no painted weights yet, so a
+	// layer-blend material shows layer 0 instead of an average or a black hole.
+	TextureAsset w0;
+	w0.id       = HE::kDefaultLayer0WeightTextureId;
+	w0.name     = "DefaultLayer0Weight";
+	w0.path     = "mem://default_layer0_weight";
+	w0.data     = { 255, 0, 0, 0 };
+	w0.width    = 1;
+	w0.height   = 1;
+	w0.channels = 4;
+	registerTexture(std::move(w0));
 
 	// ── Default material (kDefaultMaterialId) ─────────────────────────────────
 	// PBR defaults: white base colour, non-metallic, mid roughness, fully opaque.

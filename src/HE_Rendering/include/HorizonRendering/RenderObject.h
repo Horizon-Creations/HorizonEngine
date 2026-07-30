@@ -49,6 +49,13 @@ struct RenderObject {
     // floats) the backend uploads instead. Filled by the extractor from
     // MaterialComponent::paramOverrides; only set when the entity has overrides.
     std::vector<float> paramOverride;
+    // Landscape layer weightmap for THIS object (terrain chunks only): the
+    // painted per-texel layer weights of the chunk's parent landscape, bound so
+    // a Landscape Layer Blend node can sample them. Null = not a landscape
+    // chunk; the backend then binds the 1x1 layer-0 default so the node still
+    // resolves. Per-OBJECT, not per-material: two landscapes can share one
+    // material and still paint independently.
+    HE::UUID     weightmapTextureId;
 };
 
 // Skinned renderable: same as RenderObject but carries bone matrices for GPU skinning.

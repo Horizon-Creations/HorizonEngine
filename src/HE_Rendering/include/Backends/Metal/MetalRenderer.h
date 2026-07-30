@@ -94,6 +94,7 @@ public:
 	                            const std::vector<ParticlePreviewInstance>& particles,
 	                            uint32_t size, float yaw, float pitch, float dist) override;
 	void  InvalidateMesh    (const HE::UUID& meshId)     override;
+	void  InvalidateTexture (const HE::UUID& textureId)  override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
 	void  SetSSAOSettings(const SSAOSettings& settings) override;
 	void  SetGISettings(const GISettings& settings) override;
@@ -658,6 +659,7 @@ private:
 	std::unordered_map<HE::UUID, GpuMesh>         m_meshCache;
 	std::unordered_map<HE::UUID, GpuSkeletalMesh> m_skeletalMeshCache;
 	std::vector<HE::UUID>                 m_pendingMeshInvalidations;
+	std::vector<HE::UUID>                 m_pendingTexInvalidations;
 
 	// Base-color textures for MaterialComponent overrides, keyed by material
 	// UUID (id<MTLTexture>, retained; nullptr = resolved, no texture).

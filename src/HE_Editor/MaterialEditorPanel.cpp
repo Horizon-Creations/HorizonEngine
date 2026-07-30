@@ -96,6 +96,7 @@ ImU32 categoryColor(const char* cat)
 	if (c == "Material") return IM_COL32(140,  60,  60, 255);
 	if (c == "Input")    return IM_COL32( 60, 100, 140, 255);
 	if (c == "Constant") return IM_COL32( 60, 120, 130, 255);
+	if (c == "Landscape") return IM_COL32( 70, 130,  70, 255);
 	if (c == "Math")     return IM_COL32( 60, 120,  80, 255);
 	if (c == "Texture")    return IM_COL32(120,  90, 150, 255);
 	if (c == "Parameter")  return IM_COL32(160, 110,  50, 255);
@@ -188,6 +189,7 @@ void applyToMaterial(State& st, AppContext& ctx)
 	// Project textures the graph samples, in slot order (heTexP0..) — the renderer
 	// binds these on loose materials; packing bakes them to graphTextureIds (MTLU).
 	mat->graphTexturePaths = gen.textures;
+	mat->graphLayerNames   = gen.layerNames;   // landscape paint layers
 	mat->blendMode            = gen.blendMode;
 	mat->customShaderVertGlsl = gen.vertexBody; // WPO vertex body ("" = standard vertex)
 	st.dirty = true;
@@ -423,7 +425,11 @@ void popWidgetScale()
 // `scale` = canvas zoom, so the fixed widget widths track the scaled node box.
 // `drawName` = draw the name/label field (true in the side panel); the canvas passes
 // false because the name is edited in the node's colored header instead.
-bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true)
+// `g` is the owning graph — needed only by nodes whose PIN COUNT is editable here
+// (Landscape Layer Blend), so removing a layer can drop the links on pins that
+// stop existing. Null is fine for every other node type.
+bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
+                      HE::MaterialGraph* g = nullptr)
 {
 	bool committed = false;
 	switch (n.type)
@@ -448,6 +454,48 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true)
 			ImGui::DragFloat2("##v2", n.p, 0.01f);
 			committed = ImGui::IsItemDeactivatedAfterEdit();
 			break;
+		case MatNodeType::LandscapeLayerBlend:
+		{
+			// The layer LIST is the material's declaration of its paint layers —
+			// the Landscape tool paints exactly these, in this order (= weightmap
+			// channel order). One name per row; adding/removing changes the pins.
+			std::vector<std::string> names = HE::matLandscapeLayerNames(n.s);
+			int removeAt = -1;
+			for (size_t i = 0; i < names.size(); ++i)
+			{
+				ImGui::PushID(static_cast<int>(i));
+				ImGui::SetNextItemWidth((kNodeW - 46.0f) * scale);
+				if (ImGui::InputText("##ln", &names[i])) committed = false;
+				if (ImGui::IsItemDeactivatedAfterEdit()) committed = true;
+				ImGui::SameLine();
+				if (ImGui::SmallButton("x")) { removeAt = static_cast<int>(i); committed = true; }
+				ImGui::PopID();
+			}
+			if (removeAt >= 0 && names.size() > 1)
+				names.erase(names.begin() + removeAt);
+			if (static_cast<int>(names.size()) < HE::kMatMaxLandscapeLayers &&
+			    ImGui::SmallButton("+ Layer"))
+			{
+				names.push_back("Layer " + std::to_string(names.size() + 1));
+				committed = true;
+			}
+			if (static_cast<int>(names.size()) >= HE::kMatMaxLandscapeLayers)
+				ImGui::TextDisabled("4 layers max (one RGBA weightmap)");
+			// Rebuild `s`; dropping a layer also drops the links on the pins that
+			// no longer exist, otherwise they would silently re-target.
+			std::string joined;
+			for (size_t i = 0; i < names.size(); ++i)
+				joined += (i ? "\n" : "") + names[i];
+			if (joined != n.s)
+			{
+				n.s = joined;
+				const int keep = static_cast<int>(names.size());
+				if (g)
+					for (int pin = keep; pin < HE::kMatMaxLandscapeLayers; ++pin)
+						g->disconnectInput(n.id, pin);
+			}
+			break;
+		}
 		case MatNodeType::UV:
 			// Tiling = how often the texture repeats across the mesh's 0..1 UV
 			// range; Offset shifts it. 1/0 is the raw mesh UV.
@@ -607,6 +655,8 @@ float nodeValueHeight(const MatGraphNode& n)
 	    type == MatNodeType::NormalMapSample) return 44.0f;       // filename + hint rows
 	if (type == MatNodeType::ConstVec4 || type == MatNodeType::ParamVec4) return 30.0f; // vec4 drag row
 	if (type == MatNodeType::UV) return 52.0f;                    // tiling + offset rows
+	if (type == MatNodeType::LandscapeLayerBlend)                 // one row per layer + "+ Layer"
+		return 26.0f * static_cast<float>(HE::matLandscapeLayerNames(n.s).size()) + 26.0f;
 	return 26.0f;                                                 // one value/combo row
 }
 
@@ -676,7 +726,7 @@ bool drawParamConstPanel(MaterialGraph& graph)
 			{
 				if (groupOf(n) != grp) continue;
 				ImGui::PushID(n->id);
-				committed |= nodeParamWidgets(*n);
+				committed |= nodeParamWidgets(*n, 1.0f, true, &graph);
 				// Tooltip marker + metadata editor ("⋯" popup: slider range/group/tooltip).
 				ImGui::SameLine();
 				if (ImGui::SmallButton("..")) ImGui::OpenPopup("##pmeta");
@@ -723,7 +773,7 @@ bool drawParamConstPanel(MaterialGraph& graph)
 			ImGui::PushID(n->id);
 			ImGui::TextUnformatted(HE::matNodeDesc(n->type).name);
 			ImGui::SameLine(90.0f);
-			committed |= nodeParamWidgets(*n);
+			committed |= nodeParamWidgets(*n, 1.0f, true, &graph);
 			ImGui::PopID();
 		}
 	}
@@ -754,6 +804,16 @@ std::vector<GraphEditor::Pin> matNodePins(AppContext& ctx, const MatGraphNode& n
 			HE::matFunctionPins(*fn, dynIn, dynOut);
 			nodeIns = &dynIn; nodeOuts = &dynOut;
 		}
+	// Landscape Layer Blend: one input pin per layer name, in weightmap-channel
+	// order — the node's own list is the material's layer declaration.
+	std::vector<std::string> layerNames;
+	if (n.type == MatNodeType::LandscapeLayerBlend)
+	{
+		layerNames = HE::matLandscapeLayerNames(n.s);
+		for (const std::string& nm : layerNames)
+			dynIn.push_back({ nm.c_str(), MatPinType::Vec3, 0.0f });
+		nodeIns = &dynIn;
+	}
 
 	std::vector<GraphEditor::Pin> pins;
 	pins.reserve(nodeIns->size() + nodeOuts->size());
@@ -864,7 +924,7 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 		}
 		// Inline VALUE widgets (name drawn above, so drawName=false).
 		if (HE::matNodeDesc(n->type).paramCount > 0 || n->type == MatNodeType::TextureSample)
-			if (nodeParamWidgets(*n, zoom, /*drawName=*/false)) paramEdit = true;
+			if (nodeParamWidgets(*n, zoom, /*drawName=*/false, &st.graph)) paramEdit = true;
 		popWidgetScale();
 	};
 
@@ -1088,7 +1148,7 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 		// never silently vanish from the menu.
 		static const char* kCatOrder[] = {
 			"Constant", "Parameter", "Input", "Texture", "Procedural",
-			"Math", "Logic", "Channels", "Function",
+			"Math", "Logic", "Channels", "Landscape", "Function",
 		};
 		// True when this node type belongs in the menu at all.
 		auto listed = [&](const HE::MatNodeDesc& d) {
@@ -1605,6 +1665,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 							mat->shaderParamData.insert(mat->shaderParamData.end(),
 							                            slot.value, slot.value + 4);
 						mat->graphTexturePaths = pgen.textures;
+						mat->graphLayerNames   = pgen.layerNames;
 						swapped = true;
 					}
 				}
@@ -1655,6 +1716,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 							sm->shaderParamData.insert(sm->shaderParamData.end(),
 							                           slot.value, slot.value + 4);
 						sm->graphTexturePaths = gen.textures;
+						sm->graphLayerNames   = gen.layerNames;
 						st.previewTex = ctx.renderer->RenderMaterialPreview(*ctx.contentManager,
 							st.fnPreviewMatId, (uint32_t)px, st.previewYaw, st.previewPitch,
 							st.previewDist, st.previewShape);

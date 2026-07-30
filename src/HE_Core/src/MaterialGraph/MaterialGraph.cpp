@@ -183,6 +183,10 @@ const std::vector<MatNodeDesc>& registry()
         // ── v9: surface features ──
         { MatNodeType::NormalMapSample, "Normal Map", "Texture",
           { { "UV", F::Vec2, 0 } }, { { "N", F::Vec3, 0 } }, 1 }, // p[0] = strength, s = texture
+        // Layer inputs are DYNAMIC (one per name in `s`) — see matLandscapeLayerPins;
+        // the registry entry only carries the single output + param count.
+        { MatNodeType::LandscapeLayerBlend, "Landscape Layer Blend", "Landscape",
+          {}, { { "Blended", F::Vec3, 0 } }, 0 },
     };
     return kReg;
 }
@@ -282,6 +286,25 @@ void matOutputPins(int blendMode, std::vector<MatPinDesc>& pins, std::vector<int
     }
 }
 
+std::vector<std::string> matLandscapeLayerNames(const std::string& s)
+{
+    std::vector<std::string> out;
+    std::string cur;
+    auto flush = [&] {
+        // Trim — a name is a UI label AND the paint-tool key, so stray spaces
+        // would make two layers that look identical compare unequal.
+        size_t b = cur.find_first_not_of(" \t\r");
+        size_t e = cur.find_last_not_of(" \t\r");
+        if (b != std::string::npos && (int)out.size() < kMatMaxLandscapeLayers)
+            out.push_back(cur.substr(b, e - b + 1));
+        cur.clear();
+    };
+    for (char ch : s) { if (ch == '\n') flush(); else cur.push_back(ch); }
+    flush();
+    if (out.empty()) out.push_back("Layer 1");
+    return out;
+}
+
 void matFunctionPins(const MaterialGraph& fnGraph,
                      std::vector<MatPinDesc>& inputs, std::vector<MatPinDesc>& outputs)
 {
@@ -327,6 +350,8 @@ int MaterialGraph::addNode(MatNodeType type, float x, float y)
     if (type == MatNodeType::StaticSwitch) { n.p[0] = 1.0f; n.s = "MySwitch"; }
     // v9: normal map strength; Output mask cutoff (p[1] blend mode stays 0 = Opaque)
     if (type == MatNodeType::NormalMapSample) n.p[0] = 1.0f;
+    // v10: a fresh layer-blend node starts with two named layers.
+    if (type == MatNodeType::LandscapeLayerBlend) n.s = "Layer 1\nLayer 2";
     if (type == MatNodeType::Output) n.p[2] = 0.5f;
     nodes.push_back(n);
     return n.id;
@@ -357,7 +382,12 @@ bool MaterialGraph::connect(int srcNode, int srcPin, int dstNode, int dstPin)
         const MatNodeDesc& sd = matNodeDesc(s->type);
         if (srcPin < 0 || srcPin >= (int)sd.outputs.size()) return false;
     }
-    if (d->type != MatNodeType::FunctionCall)
+    if (d->type == MatNodeType::LandscapeLayerBlend)
+    {
+        // Dynamic inputs: one per name in `s`, so validate against that count.
+        if (dstPin < 0 || dstPin >= (int)matLandscapeLayerNames(d->s).size()) return false;
+    }
+    else if (d->type != MatNodeType::FunctionCall)
     {
         const MatNodeDesc& dd = matNodeDesc(d->type);
         if (dstPin < 0 || dstPin >= (int)dd.inputs.size()) return false;
@@ -420,6 +450,10 @@ struct EmitCtx
     bool usesNoise   = false;                            // 2D value-noise/fbm helpers (UV-space)
     bool usesNoise3  = false;                            // 3D value-noise/fbm helpers (world-space)
     bool usesNormalPerturb = false;                      // hePerturbNormal (screen-space TBN)
+    // Landscape layer blending: the fragment declares heLandscapeWeights and the
+    // material advertises its layer names (order = weightmap channel order).
+    bool usesLandscapeWeights = false;
+    std::vector<std::string> layerNames;
     int  varCounter  = 0;
     std::vector<MatParamSlot> params;                    // exposed parameters, slot order
     std::vector<std::string>  textures;                  // project textures, slot order (max 4)
@@ -553,6 +587,34 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
                  + " " + v + "_t.xy *= " + fmtF(strength) + ";"
                  + " vec3 " + v + " = hePerturbNormal(normalize(vNormal), normalize(" + v
                  + "_t), vWorldPos, " + v + "_uv);";
+            break;
+        }
+        case MatNodeType::LandscapeLayerBlend:
+        {
+            // One input per named layer, weighted by the landscape's painted
+            // weightmap: channel k = layer k. Sampled at the RAW vUV, which spans
+            // the whole terrain — per-layer detail tiling belongs on each layer's
+            // own UV node, not here, or the weights would tile with the detail.
+            //
+            // The weights are normalised, so a half-painted texel does not darken.
+            // An UNPAINTED terrain binds the 1x1 (1,0,0,0) default weightmap, which
+            // resolves to layer 0 at full strength rather than to black or to the
+            // average of every layer.
+            const std::vector<std::string> names = matLandscapeLayerNames(n.s);
+            c.usesLandscapeWeights = true;
+            if (c.layerNames.empty()) c.layerNames = names;
+
+            static const char* kChan[kMatMaxLandscapeLayers] = { "x", "y", "z", "w" };
+            std::string sum, wsum;
+            for (size_t i = 0; i < names.size(); ++i)
+            {
+                const std::string w = v + "_w." + kChan[i];
+                sum  += (i ? " + " : "") + inputExpr(c, sc, n, (int)i, F::Vec3) + " * " + w;
+                wsum += (i ? " + " : "") + w;
+            }
+            decl = "vec4 " + v + "_w = texture(heLandscapeWeights, vUV);"
+                 + " float " + v + "_s = max(" + wsum + ", 1e-4);"
+                 + " vec3 " + v + " = (" + sum + ") / " + v + "_s;";
             break;
         }
         case MatNodeType::Add:
@@ -956,6 +1018,11 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
     std::string src = header;
     if (c.usesTexture)
         src += "layout(set = 0, binding = 2) uniform sampler2D heTex0;\n"; // legacy/mesh texture
+    if (c.usesLandscapeWeights)
+        // Binding 14 — the first free slot after the shared preamble's shadow/GI
+        // pins (see MaterialShaderLibrary's MSL binding map). Bound per DRAW from
+        // the terrain chunk's parent landscape, not per material.
+        src += "layout(set = 0, binding = 14) uniform sampler2D heLandscapeWeights;\n";
     for (size_t i = 0; i < c.textures.size(); ++i) // project textures (binding 4 + slot)
         src += "layout(set = 0, binding = " + std::to_string(4 + i)
              + ") uniform sampler2D heTexP" + std::to_string(i) + ";\n";
@@ -1020,6 +1087,7 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
     gen.textures = std::move(c.textures);
     gen.switches  = std::move(c.switches);
     gen.blendMode = static_cast<uint8_t>(blendMode);
+    gen.layerNames = std::move(c.layerNames);
     return gen;
 }
 
