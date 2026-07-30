@@ -64,7 +64,11 @@ void appendPrimitive(StaticMeshAsset& mesh, const cgltf_primitive& prim,
 		{
 			float uv[2] = {};
 			cgltf_accessor_read_float(uvAcc, v, uv, 2);
-			mesh.uvs.insert(mesh.uvs.end(), { uv[0], uv[1] });
+			// glTF puts the UV origin at the TOP-left; the engine is GL-style
+			// BOTTOM-left (TextureImporter flips images on import, the Metal
+			// backend flips V at sample time to match). Taking glTF's V verbatim
+			// rendered every imported mesh's texture vertically mirrored.
+			mesh.uvs.insert(mesh.uvs.end(), { uv[0], 1.0f - uv[1] });
 		}
 		else
 			mesh.uvs.insert(mesh.uvs.end(), { 0.0f, 0.0f });

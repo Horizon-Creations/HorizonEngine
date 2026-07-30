@@ -582,10 +582,12 @@ TEST_CASE("ContentManager default asset UUIDs are fixed and distinct")
 
 TEST_CASE("ContentManager enumerateIds returns all registered assets")
 {
-	ContentManager cm; // 7 default assets (cube, quad, snowflake, white tex, material, grid tex, terrain material)
+	// 8 built-in defaults: cube, quad, snowflake, white tex, grid tex, layer-0
+	// weightmap, default material, terrain material.
+	ContentManager cm;
 
 	const size_t defaultCount = cm.assetCount();
-	REQUIRE(defaultCount == 7);
+	REQUIRE(defaultCount == 8);
 
 	StaticMeshAsset m; m.name = "extra";
 	HE::UUID extraId = cm.registerStaticMesh(std::move(m));
@@ -600,7 +602,9 @@ TEST_CASE("ContentManager enumerateIds returns all registered assets")
 
 TEST_CASE("ContentManager enumerateIds(type) filters by asset type")
 {
-	ContentManager cm; // 3 meshes (cube + quad + snowflake), 2 textures (white + grid), 2 materials (default + terrain)
+	// 3 meshes (cube + quad + snowflake), 3 textures (white + grid + layer-0
+	// weightmap), 2 materials (default + terrain).
+	ContentManager cm;
 
 	auto meshes   = cm.enumerateIds(HE::AssetType::StaticMesh);
 	auto textures = cm.enumerateIds(HE::AssetType::Texture);
@@ -608,7 +612,7 @@ TEST_CASE("ContentManager enumerateIds(type) filters by asset type")
 	auto scripts  = cm.enumerateIds(HE::AssetType::Script);
 
 	CHECK(meshes.size()    == 3);
-	CHECK(textures.size()  == 2);
+	CHECK(textures.size()  == 3);
 	CHECK(materials.size() == 2);
 	CHECK(scripts.size()   == 0);
 
@@ -620,6 +624,7 @@ TEST_CASE("ContentManager enumerateIds(type) filters by asset type")
 	CHECK(contains(meshes,     HE::kDefaultQuadMeshId));
 	CHECK(contains(textures,   HE::kDefaultWhiteTextureId));
 	CHECK(contains(textures,   HE::kDefaultGridTextureId));
+	CHECK(contains(textures,   HE::kDefaultLayer0WeightTextureId));
 	CHECK(contains(materials,  HE::kDefaultMaterialId));
 	CHECK(contains(materials,  HE::kDefaultTerrainMaterialId));
 
@@ -627,7 +632,7 @@ TEST_CASE("ContentManager enumerateIds(type) filters by asset type")
 	StaticMeshAsset m2; m2.name = "m2";
 	cm.registerStaticMesh(std::move(m2));
 	CHECK(cm.enumerateIds(HE::AssetType::StaticMesh).size() == 4);
-	CHECK(cm.enumerateIds(HE::AssetType::Texture).size()    == 2);
+	CHECK(cm.enumerateIds(HE::AssetType::Texture).size()    == 3);
 }
 
 TEST_CASE("ContentManager enumerateIds unload removes entry")
@@ -639,12 +644,12 @@ TEST_CASE("ContentManager enumerateIds unload removes entry")
 	HE::UUID id = cm.registerStaticMesh(std::move(m));
 
 	auto before = cm.enumerateIds();
-	REQUIRE(before.size() == 8); // 7 defaults + 1
+	REQUIRE(before.size() == 9); // 8 defaults + 1
 
 	REQUIRE(cm.unloadAsset(id));
 
 	auto after = cm.enumerateIds();
-	CHECK(after.size() == 7);
+	CHECK(after.size() == 8);
 	for (auto uid : after) CHECK_FALSE(uid == id);
 
 	// Type-filtered enumeration also must not contain it
@@ -1235,4 +1240,65 @@ TEST_CASE("ContentManager scanContentDirectory indexes engine assets so UUID ref
 	REQUIRE(loaded != nullptr);
 	CHECK(loaded->name == "Sphere");
 	CHECK(loaded->indices.size() == 3);
+}
+
+TEST_CASE("Engine default mesh survives a scene save/reload round-trip")
+{
+	// End-to-end mirror of the editor flow that "loses" an engine primitive:
+	//   session A: drag Engine/Meshes/Sphere.hasset in (loadAsset by the
+	//              "Engine/"-prefixed content path) → MeshComponent UUID → save
+	//   session B: fresh ContentManager (built-in defaults re-seeded) →
+	//              scanContentDirectory() → the UUID must resolve back to the
+	//              SAME engine mesh, not fall through to the default cube.
+	TempContentDir dir;
+	TempContentDir engineDir("he_test_engine_roundtrip");
+	fs::create_directories(engineDir.path / "Meshes");
+
+	// The shipped engine primitives are authored by mesh_gen with fixed UUIDs
+	// (hi = 0x100 + index, lo = 1) — reproduce that shape, not a random UUID.
+	const HE::UUID kSphereId{ 0x0000000000000101ULL, 0x0000000000000001ULL };
+	{
+		ContentManager gen(engineDir.path.string());
+		StaticMeshAsset mesh;
+		mesh.type     = HE::AssetType::StaticMesh;
+		mesh.id       = kSphereId;
+		mesh.name     = "Sphere";
+		mesh.path     = "Meshes/Sphere.hasset";
+		mesh.vertices = { 0,0,0, 1,0,0, 0,1,0, 1,1,0 };
+		mesh.indices  = { 0, 1, 2, 1, 3, 2 };
+		mesh.normals  = { 0,0,1, 0,0,1, 0,0,1, 0,0,1 };
+		REQUIRE(gen.saveAsset(mesh));
+	}
+
+	// ── Session A: reference it the way the content browser does ──────────────
+	HE::UUID authored;
+	{
+		ContentManager cm(dir.path.string());
+		cm.setEngineContentRoot(engineDir.path.string());
+		cm.scanContentDirectory();
+		// toContentRelativePath() of a file under the engine root yields this.
+		authored = cm.loadAsset("Engine/Meshes/Sphere.hasset");
+		REQUIRE_FALSE(authored == HE::UUID{});
+		// The identity written into the scene must be the mesh's OWN UUID.
+		CHECK(authored == kSphereId);
+		CHECK_FALSE(authored == HE::kDefaultCubeMeshId);
+		const StaticMeshAsset* a = cm.getStaticMesh(authored);
+		REQUIRE(a != nullptr);
+		CHECK(a->name == "Sphere");
+	}
+
+	// ── Session B: restart — only the UUID from the scene file survives ───────
+	{
+		ContentManager cm(dir.path.string());   // re-seeds the built-in defaults
+		cm.setEngineContentRoot(engineDir.path.string());
+		CHECK(cm.scanContentDirectory() >= 1);
+		// Nothing is loaded yet — this is the state a scene load starts from.
+		CHECK(cm.getStaticMesh(authored) == nullptr);
+		// SceneSystems::preloadAssetRefs does exactly this per referenced UUID.
+		REQUIRE(cm.ensureResident(authored));
+		const StaticMeshAsset* b = cm.getStaticMesh(authored);
+		REQUIRE(b != nullptr);
+		CHECK(b->name == "Sphere");
+		CHECK(b->indices.size() == 6);          // the real mesh, not the 36-index cube
+	}
 }

@@ -18,23 +18,33 @@ using F = MatPinType;
 const std::vector<MatNodeDesc>& registry()
 {
     static const std::vector<MatNodeDesc> kReg = {
+        // Surface-output pins, ordered like Unreal's material output so the
+        // muscle memory carries over. ANY change to this order needs a bump of
+        // kMatGraphVersion + a remap in materialGraphFromJson: links are stored
+        // by pin INDEX, so a reorder silently rewires every saved material.
         { MatNodeType::Output, "Output", "Material",
-          { { "BaseColor", F::Vec3, 0.8f }, { "Metallic", F::Float, 0.0f },
-            { "Roughness", F::Float, 0.5f }, { "Emissive", F::Vec3, 0.0f },
-            { "Opacity", F::Float, 1.0f },   // pin 4 — meaning depends on the blend mode
-            { "Normal", F::Vec3, 0.0f },     // pin 5 — WORLD-space; unconnected = vNormal
-            { "WPO", F::Vec3, 0.0f } },      // pin 6 — world-space vertex offset (custom VS)
+          { { "Base Color", F::Vec3, 0.8f },   // 0
+            { "Metallic", F::Float, 0.0f },    // 1
+            { "Specular", F::Float, 0.5f },    // 2 — dielectric F0 = 0.08 * this (0.5 → 0.04)
+            { "Roughness", F::Float, 0.5f },   // 3
+            { "Emissive", F::Vec3, 0.0f },     // 4
+            { "Opacity", F::Float, 1.0f },     // 5 — meaning depends on the blend mode
+            { "Normal", F::Vec3, 0.0f },       // 6 — WORLD-space; unconnected = vNormal
+            { "Ambient Occlusion", F::Float, 1.0f }, // 7 — scales the ambient term only
+            { "World Position Offset", F::Vec3, 0.0f } }, // 8 — vertex stage
           {}, 3 }, // p[0] = lit, p[1] = blend mode, p[2] = mask cutoff
-        { MatNodeType::ConstFloat, "Float", "Input",
+        { MatNodeType::ConstFloat, "Float", "Constant",
           {}, { { "Value", F::Float, 0 } }, 1 },
-        { MatNodeType::ConstColor, "Color", "Input",
+        { MatNodeType::ConstColor, "Color", "Constant",
           {}, { { "RGB", F::Vec3, 0 } }, 3 },
         { MatNodeType::VertexColor, "Vertex Color", "Input",
           {}, { { "RGB", F::Vec3, 0 } }, 0 },
         { MatNodeType::NormalWS, "Normal (WS)", "Input",
           {}, { { "N", F::Vec3, 0 } }, 0 },
+        // p[0..1] = tiling (how often the texture repeats over the 0..1 range),
+        // p[2..3] = offset. Defaults 1/0 → the raw mesh UV, as before.
         { MatNodeType::UV, "UV", "Input",
-          {}, { { "UV", F::Vec2, 0 } }, 0 },
+          {}, { { "UV", F::Vec2, 0 } }, 4 },
         { MatNodeType::Time, "Time", "Input",
           {}, { { "Seconds", F::Float, 0 } }, 0 },
         { MatNodeType::TextureSample, "Texture Sample", "Texture",
@@ -110,9 +120,9 @@ const std::vector<MatNodeDesc>& registry()
           {}, {}, 0 }, // pins resolved from the referenced graph (matFunctionPins)
 
         // ── v4 inputs ──
-        { MatNodeType::ConstVec2, "Vector2", "Input",
+        { MatNodeType::ConstVec2, "Vector2", "Constant",
           {}, { { "XY", F::Vec2, 0 } }, 2 },
-        { MatNodeType::ConstVec4, "Vector4", "Input",
+        { MatNodeType::ConstVec4, "Vector4", "Constant",
           {}, { { "XYZW", F::Vec4, 0 } }, 4 },
         { MatNodeType::CameraPos, "Camera Position", "Input",
           {}, { { "XYZ", F::Vec3, 0 } }, 0 },
@@ -122,7 +132,7 @@ const std::vector<MatNodeDesc>& registry()
           {}, { { "XY", F::Vec2, 0 } }, 0 },
 
         // ── v5: baked constants, parameter types, logic ──
-        { MatNodeType::ConstBool, "Bool", "Input",
+        { MatNodeType::ConstBool, "Bool", "Constant",
           {}, { { "Out", F::Float, 0 } }, 1 }, // p[0] = 0/1
         { MatNodeType::ParamVec2, "Param (Vector2)", "Parameter",
           {}, { { "XY", F::Vec2, 0 } }, 2 },
@@ -173,6 +183,10 @@ const std::vector<MatNodeDesc>& registry()
         // ── v9: surface features ──
         { MatNodeType::NormalMapSample, "Normal Map", "Texture",
           { { "UV", F::Vec2, 0 } }, { { "N", F::Vec3, 0 } }, 1 }, // p[0] = strength, s = texture
+        // Layer inputs are DYNAMIC (one per name in `s`) — see matLandscapeLayerPins;
+        // the registry entry only carries the single output + param count.
+        { MatNodeType::LandscapeLayerBlend, "Landscape Layer Blend", "Landscape",
+          {}, { { "Blended", F::Vec3, 0 } }, 0 },
     };
     return kReg;
 }
@@ -257,7 +271,7 @@ void matOutputPins(int blendMode, std::vector<MatPinDesc>& pins, std::vector<int
     pins.clear(); regIndex.clear();
     for (int i = 0; i < (int)reg.size(); ++i)
     {
-        if (i == 4) // the opacity slot is blend-mode dependent
+        if (i == kMatOutputOpacityPin) // the opacity slot is blend-mode dependent
         {
             if (blendMode == (int)MatBlendMode::Masked)
                 pins.push_back({ "OpacityMask", F::Float, 1.0f });
@@ -270,6 +284,25 @@ void matOutputPins(int blendMode, std::vector<MatPinDesc>& pins, std::vector<int
             pins.push_back(reg[i]);
         regIndex.push_back(i);
     }
+}
+
+std::vector<std::string> matLandscapeLayerNames(const std::string& s)
+{
+    std::vector<std::string> out;
+    std::string cur;
+    auto flush = [&] {
+        // Trim — a name is a UI label AND the paint-tool key, so stray spaces
+        // would make two layers that look identical compare unequal.
+        size_t b = cur.find_first_not_of(" \t\r");
+        size_t e = cur.find_last_not_of(" \t\r");
+        if (b != std::string::npos && (int)out.size() < kMatMaxLandscapeLayers)
+            out.push_back(cur.substr(b, e - b + 1));
+        cur.clear();
+    };
+    for (char ch : s) { if (ch == '\n') flush(); else cur.push_back(ch); }
+    flush();
+    if (out.empty()) out.push_back("Layer 1");
+    return out;
 }
 
 void matFunctionPins(const MaterialGraph& fnGraph,
@@ -297,6 +330,7 @@ int MaterialGraph::addNode(MatNodeType type, float x, float y)
     n.id = nextId++;
     n.type = type;
     n.x = x; n.y = y;
+    if (type == MatNodeType::UV)         { n.p[0] = n.p[1] = 1.0f; }          // tiling 1, offset 0
     if (type == MatNodeType::Output)     n.p[0] = 1.0f;                       // lit
     if (type == MatNodeType::ConstColor) { n.p[0] = n.p[1] = n.p[2] = 0.8f; }
     if (type == MatNodeType::ConstFloat) n.p[0] = 1.0f;
@@ -316,6 +350,8 @@ int MaterialGraph::addNode(MatNodeType type, float x, float y)
     if (type == MatNodeType::StaticSwitch) { n.p[0] = 1.0f; n.s = "MySwitch"; }
     // v9: normal map strength; Output mask cutoff (p[1] blend mode stays 0 = Opaque)
     if (type == MatNodeType::NormalMapSample) n.p[0] = 1.0f;
+    // v10: a fresh layer-blend node starts with two named layers.
+    if (type == MatNodeType::LandscapeLayerBlend) n.s = "Layer 1\nLayer 2";
     if (type == MatNodeType::Output) n.p[2] = 0.5f;
     nodes.push_back(n);
     return n.id;
@@ -346,7 +382,12 @@ bool MaterialGraph::connect(int srcNode, int srcPin, int dstNode, int dstPin)
         const MatNodeDesc& sd = matNodeDesc(s->type);
         if (srcPin < 0 || srcPin >= (int)sd.outputs.size()) return false;
     }
-    if (d->type != MatNodeType::FunctionCall)
+    if (d->type == MatNodeType::LandscapeLayerBlend)
+    {
+        // Dynamic inputs: one per name in `s`, so validate against that count.
+        if (dstPin < 0 || dstPin >= (int)matLandscapeLayerNames(d->s).size()) return false;
+    }
+    else if (d->type != MatNodeType::FunctionCall)
     {
         const MatNodeDesc& dd = matNodeDesc(d->type);
         if (dstPin < 0 || dstPin >= (int)dd.inputs.size()) return false;
@@ -409,6 +450,10 @@ struct EmitCtx
     bool usesNoise   = false;                            // 2D value-noise/fbm helpers (UV-space)
     bool usesNoise3  = false;                            // 3D value-noise/fbm helpers (world-space)
     bool usesNormalPerturb = false;                      // hePerturbNormal (screen-space TBN)
+    // Landscape layer blending: the fragment declares heLandscapeWeights and the
+    // material advertises its layer names (order = weightmap channel order).
+    bool usesLandscapeWeights = false;
+    std::vector<std::string> layerNames;
     int  varCounter  = 0;
     std::vector<MatParamSlot> params;                    // exposed parameters, slot order
     std::vector<std::string>  textures;                  // project textures, slot order (max 4)
@@ -484,7 +529,15 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
         case MatNodeType::NormalWS:
             decl = "vec3 " + v + " = normalize(vNormal);"; break;
         case MatNodeType::UV:
-            decl = "vec2 " + v + " = vUV;"; break;
+            // Tiling/offset baked in as literals — the whole point is that a
+            // texture can repeat over a surface instead of stretching once.
+            // Identity params emit the bare varying so old graphs stay byte-equal.
+            if (n.p[0] == 1.0f && n.p[1] == 1.0f && n.p[2] == 0.0f && n.p[3] == 0.0f)
+                decl = "vec2 " + v + " = vUV;";
+            else
+                decl = "vec2 " + v + " = vUV * vec2(" + fmtF(n.p[0]) + ", " + fmtF(n.p[1])
+                     + ") + vec2(" + fmtF(n.p[2]) + ", " + fmtF(n.p[3]) + ");";
+            break;
         case MatNodeType::Time:
             decl = "float " + v + " = heLight.sunDir.w;"; break;
         case MatNodeType::TextureSample:
@@ -534,6 +587,34 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
                  + " " + v + "_t.xy *= " + fmtF(strength) + ";"
                  + " vec3 " + v + " = hePerturbNormal(normalize(vNormal), normalize(" + v
                  + "_t), vWorldPos, " + v + "_uv);";
+            break;
+        }
+        case MatNodeType::LandscapeLayerBlend:
+        {
+            // One input per named layer, weighted by the landscape's painted
+            // weightmap: channel k = layer k. Sampled at the RAW vUV, which spans
+            // the whole terrain — per-layer detail tiling belongs on each layer's
+            // own UV node, not here, or the weights would tile with the detail.
+            //
+            // The weights are normalised, so a half-painted texel does not darken.
+            // An UNPAINTED terrain binds the 1x1 (1,0,0,0) default weightmap, which
+            // resolves to layer 0 at full strength rather than to black or to the
+            // average of every layer.
+            const std::vector<std::string> names = matLandscapeLayerNames(n.s);
+            c.usesLandscapeWeights = true;
+            if (c.layerNames.empty()) c.layerNames = names;
+
+            static const char* kChan[kMatMaxLandscapeLayers] = { "x", "y", "z", "w" };
+            std::string sum, wsum;
+            for (size_t i = 0; i < names.size(); ++i)
+            {
+                const std::string w = v + "_w." + kChan[i];
+                sum  += (i ? " + " : "") + inputExpr(c, sc, n, (int)i, F::Vec3) + " * " + w;
+                wsum += (i ? " + " : "") + w;
+            }
+            decl = "vec4 " + v + "_w = texture(heLandscapeWeights, vUV);"
+                 + " float " + v + "_s = max(" + wsum + ", 1e-4);"
+                 + " vec3 " + v + " = (" + sum + ") / " + v + "_s;";
             break;
         }
         case MatNodeType::Add:
@@ -896,10 +977,12 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
     Scope root;
     root.g = &graph;
 
-    const std::string base    = inputExpr(c, root, *out, 0, F::Vec3);
-    const std::string met     = inputExpr(c, root, *out, 1, F::Float);
-    const std::string rough   = inputExpr(c, root, *out, 2, F::Float);
-    const std::string emis    = inputExpr(c, root, *out, 3, F::Vec3);
+    const std::string base    = inputExpr(c, root, *out, kMatOutputBaseColorPin, F::Vec3);
+    const std::string met     = inputExpr(c, root, *out, kMatOutputMetallicPin,  F::Float);
+    const std::string spec    = inputExpr(c, root, *out, kMatOutputSpecularPin,  F::Float);
+    const std::string rough   = inputExpr(c, root, *out, kMatOutputRoughnessPin, F::Float);
+    const std::string emis    = inputExpr(c, root, *out, kMatOutputEmissivePin,  F::Vec3);
+    const std::string ao      = inputExpr(c, root, *out, kMatOutputAOPin,        F::Float);
     const bool lit = out->p[0] > 0.5f;
 
     // ── Blend mode (Output p[1]) decides what pin 4 means and where alpha comes from. ──
@@ -908,25 +991,25 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
     std::string opacity   = "1.0";                                // Opaque/Masked → solid
     std::string mask;
     if (blendMode == (int)MatBlendMode::Masked)
-        mask = inputExpr(c, root, *out, 4, F::Float);
+        mask = inputExpr(c, root, *out, kMatOutputOpacityPin, F::Float);
     else if (blendMode == (int)MatBlendMode::Translucent)
-        opacity = inputExpr(c, root, *out, 4, F::Float);
+        opacity = inputExpr(c, root, *out, kMatOutputOpacityPin, F::Float);
 
     // ── Surface normal (pin 5): unconnected → the interpolated vertex normal. ──
-    const std::string normalExpr = hasInput(root, *out, 5)
-        ? "normalize(" + inputExpr(c, root, *out, 5, F::Vec3) + ")"
+    const std::string normalExpr = hasInput(root, *out, kMatOutputNormalPin)
+        ? "normalize(" + inputExpr(c, root, *out, kMatOutputNormalPin, F::Vec3) + ")"
         : "normalize(vNormal)";
 
     // ── World Position Offset (pin 6) → a VERTEX-stage body, emitted into a separate
     // scope ("vs") so its statements never share variables with the fragment body. The
     // same varying NAMES are readable in the vertex template, so the text is reusable. ──
-    if (hasInput(root, *out, 6))
+    if (hasInput(root, *out, kMatOutputWPOPin))
     {
         Scope vs;
         vs.g   = &graph;
         vs.key = "vs";
         const size_t mark = c.body.size();
-        const std::string wpoExpr = inputExpr(c, vs, *out, 6, F::Vec3);
+        const std::string wpoExpr = inputExpr(c, vs, *out, kMatOutputWPOPin, F::Vec3);
         gen.vertexBody = c.body.substr(mark)
                        + "    vec3 heWpo = " + wpoExpr + ";\n";
         c.body.resize(mark); // the WPO statements belong to the vertex stage only
@@ -935,6 +1018,11 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
     std::string src = header;
     if (c.usesTexture)
         src += "layout(set = 0, binding = 2) uniform sampler2D heTex0;\n"; // legacy/mesh texture
+    if (c.usesLandscapeWeights)
+        // Binding 14 — the first free slot after the shared preamble's shadow/GI
+        // pins (see MaterialShaderLibrary's MSL binding map). Bound per DRAW from
+        // the terrain chunk's parent landscape, not per material.
+        src += "layout(set = 0, binding = 14) uniform sampler2D heLandscapeWeights;\n";
     for (size_t i = 0; i < c.textures.size(); ++i) // project textures (binding 4 + slot)
         src += "layout(set = 0, binding = " + std::to_string(4 + i)
              + ") uniform sampler2D heTexP" + std::to_string(i) + ";\n";
@@ -984,8 +1072,14 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
         src += "    if (" + mask + " < " + fmtF(cutoff) + ") discard;\n";
     src += "    vec3 heN = " + normalExpr + ";\n";
     if (lit)
-        src += "    oColor = vec4(heLitP(" + base + ", heN, " + met + ", " + rough + ", vWorldPos) + "
-             + emis + ", " + opacity + ");\n";
+        // Aerial perspective wraps the WHOLE lit colour (emissive included), the
+        // same place the built-in scene shaders apply it — without it a distant
+        // graph material stayed saturated while everything around it faded into
+        // the horizon. UNLIT output is deliberately left alone: there "unlit"
+        // means "my colour, verbatim".
+        src += "    oColor = vec4(heApplyFog(heLitP(" + base + ", heN, " + met + ", " + rough
+             + ", vWorldPos, " + spec + ", " + ao + ") + "
+             + emis + ", vWorldPos), " + opacity + ");\n";
     else
         src += "    oColor = vec4(" + base + " + " + emis + ", " + opacity + ");\n";
     src += "}\n";
@@ -998,6 +1092,7 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
     gen.textures = std::move(c.textures);
     gen.switches  = std::move(c.switches);
     gen.blendMode = static_cast<uint8_t>(blendMode);
+    gen.layerNames = std::move(c.layerNames);
     return gen;
 }
 
@@ -1010,7 +1105,7 @@ std::string generateFragmentGlsl(const MaterialGraph& graph)
 std::string materialGraphToJson(const MaterialGraph& graph)
 {
     nlohmann::json j;
-    j["version"] = 1;
+    j["version"] = kMatGraphVersion;
     j["nextId"]  = graph.nextId;
     for (const auto& n : graph.nodes)
     {
@@ -1054,12 +1149,42 @@ bool materialGraphFromJson(const std::string& json, MaterialGraph& out)
         n.tooltip = jn.value("tt", std::string());
         n.x = jn.value("x", 0.0f);
         n.y = jn.value("y", 0.0f);
+        // Migration: UV gained tiling params (p[0..1]) after these graphs were
+        // authored, where p was all-zero. Zero tiling would collapse every UV to
+        // the offset — read a legacy node as the identity it used to be.
+        if (n.type == MatNodeType::UV && n.p[0] == 0.0f && n.p[1] == 0.0f)
+        { n.p[0] = 1.0f; n.p[1] = 1.0f; }
         g.nodes.push_back(n);
         g.nextId = std::max(g.nextId, n.id + 1);
     }
+    // v1 → v2: Specular was inserted at Output pin 2 and Ambient Occlusion at
+    // pin 7, shifting everything after them. Links are stored by pin INDEX, so
+    // a v1 graph read as-is would rewire Roughness→Specular, Emissive→Roughness,
+    // and so on. Remap the Output node's INPUT pins on the way in.
+    const int fileVersion = j.value("version", 1);
+    const bool remapOutput = fileVersion < 2;
+    std::vector<int> outputNodeIds;
+    if (remapOutput)
+        for (const auto& n : g.nodes)
+            if (n.type == MatNodeType::Output) outputNodeIds.push_back(n.id);
+    auto isOutputNode = [&](int id) {
+        return std::find(outputNodeIds.begin(), outputNodeIds.end(), id) != outputNodeIds.end();
+    };
+    // old index → new index (old: base, metal, rough, emis, opacity, normal, wpo)
+    static const int kV1ToV2[7] = {
+        kMatOutputBaseColorPin, kMatOutputMetallicPin, kMatOutputRoughnessPin,
+        kMatOutputEmissivePin,  kMatOutputOpacityPin,  kMatOutputNormalPin,
+        kMatOutputWPOPin };
+
     for (const auto& jl : j.value("links", nlohmann::json::array()))
-        g.links.push_back({ jl.value("sn", 0), jl.value("sp", 0),
-                            jl.value("dn", 0), jl.value("dp", 0) });
+    {
+        MatGraphLink l{ jl.value("sn", 0), jl.value("sp", 0),
+                        jl.value("dn", 0), jl.value("dp", 0) };
+        if (remapOutput && isOutputNode(l.dstNode) &&
+            l.dstPin >= 0 && l.dstPin < 7)
+            l.dstPin = kV1ToV2[l.dstPin];
+        g.links.push_back(l);
+    }
     for (const auto& jc : j.value("comments", nlohmann::json::array()))
     {
         MatGraphComment cm;

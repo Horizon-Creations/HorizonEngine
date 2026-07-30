@@ -5814,6 +5814,13 @@ void MetalRenderer::InvalidateMesh(const HE::UUID& meshId)
 		m_pendingMeshInvalidations.push_back(meshId);
 }
 
+void MetalRenderer::InvalidateTexture(const HE::UUID& textureId)
+{
+	// Same deferral as meshes — the graph-texture cache is keyed by UUID string.
+	if (textureId != HE::UUID{})
+		m_pendingTexInvalidations.push_back(textureId);
+}
+
 void MetalRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 {
 	// Build each custom-shader material's pipeline state NOW so the first draw
@@ -7835,6 +7842,20 @@ void MetalRenderer::EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& v
 	// Local (point/spot) shadow atlas, pinned at 12 (sampling gated per light by params.y).
 	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(m_localShadowTex ? m_localShadowTex : m_shadowDepthTex) atIndex:12];
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:12];
+	// Sky env cubemap (14) + screen-space AO (15) for the material preamble's
+	// image-based ambient and fog — the SAME textures the built-in shaders read
+	// at 2/3, re-pinned clear of the material-texture window. Gated by
+	// heLight.fog.z/.w gate the samples, so an absent cubemap (nil — legal in
+	// Metal, reads zero) or a dummy AO bind here is inert. The cube slot must NOT
+	// get the 2D dummy: Metal validates the texture TYPE.
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)m_skyEnvCube atIndex:14];
+	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:14];
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(ssaoActive ? m_ssaoResult : m_dummyTexture) atIndex:15];
+	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:15];
+	// The material preamble's DDGI atlases map onto slots 6/7 — the pins the
+	// scene pass already set above for the built-in shaders (Metal caps the
+	// fragment stage at 16 samplers, so they cannot get their own). Nothing to
+	// bind here.
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
 
 	constexpr int kMaxBones = 128;
@@ -8081,6 +8102,20 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 	// Local (point/spot) shadow atlas, pinned at 12 (sampling gated per light by params.y).
 	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(m_localShadowTex ? m_localShadowTex : m_shadowDepthTex) atIndex:12];
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:12];
+	// Sky env cubemap (14) + screen-space AO (15) for the material preamble's
+	// image-based ambient and fog — the SAME textures the built-in shaders read
+	// at 2/3, re-pinned clear of the material-texture window. Gated by
+	// heLight.fog.z/.w gate the samples, so an absent cubemap (nil — legal in
+	// Metal, reads zero) or a dummy AO bind here is inert. The cube slot must NOT
+	// get the 2D dummy: Metal validates the texture TYPE.
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)m_skyEnvCube atIndex:14];
+	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:14];
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(ssaoActive ? m_ssaoResult : m_dummyTexture) atIndex:15];
+	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:15];
+	// The material preamble's DDGI atlases map onto slots 6/7 — the pins the
+	// scene pass already set above for the built-in shaders (Metal caps the
+	// fragment stage at 16 samplers, so they cannot get their own). Nothing to
+	// bind here.
 
 	// ── Lights (clamped to the shader's 8) ──────────────────────────────────
 	// Kept at function scope so the transparency pass below can re-bind it after
@@ -8219,6 +8254,34 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 			matLight.camFwd[0] = scene.cameraFwd.x;
 			matLight.camFwd[1] = scene.cameraFwd.y;
 			matLight.camFwd[2] = scene.cameraFwd.z;
+		}
+		// Aerial perspective + the "is it bound" gates for the shared ambient
+		// inputs. The sky cubemap and the AO buffer are pinned on the encoder
+		// below (MSL 14/15); heLitP falls back to the flat ambient and skips fog
+		// when they are absent (preview/UI passes).
+		matLight.fog[0] = GetEnvironment().fogDensity;
+		matLight.fog[1] = GetEnvironment().fogHeightFalloff;
+		matLight.fog[2] = m_skyEnvCube ? 1.0f : 0.0f;
+		matLight.fog[3] = ssaoActive   ? 1.0f : 0.0f;
+		// Weather surface response — the same EnvironmentComponent values the
+		// built-in shaders read (SceneUniforms::weather).
+		matLight.weather[0] = GetEnvironment().wetness;
+		matLight.weather[1] = GetEnvironment().snowAmount;
+		// DDGI probe grid — the SAME values BuildGIUniforms hands the built-in
+		// shaders, so heLitP's indirect diffuse matches theirs instead of
+		// falling back to flat ambient while GI is on.
+		{
+			const GIUniforms gu = BuildGIUniforms(giActive, m_giGridOrigin, kGIProbeSpacing,
+			                                      m_giGridCounts, m_giProbesPerRow,
+			                                      m_giIndirectIntensity);
+			for (int k = 0; k < 4; ++k)
+			{
+				matLight.giGridOrigin[k] = gu.gridOrigin[k];
+				matLight.giGridCounts[k] = gu.gridCounts[k];
+			}
+			matLight.giProbe[0] = gu.params.x;
+			matLight.giProbe[1] = (giActive && m_giIrradianceAtlas && m_giVisibilityAtlas)
+				? 1.0f : 0.0f;
 		}
 		[encoder setFragmentBytes:&matLight length:sizeof(matLight)
 		                  atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
@@ -8427,6 +8490,23 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 							[encoder setFragmentTexture:(__bridge id<MTLTexture>)cGraphTex[i] atIndex:(i + 1)];
 							[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:(i + 1)];
 						}
+				// Landscape layer weightmap → MSL texture 13 (preamble binding 14).
+				// PER DRAW, not per material: it belongs to the terrain the chunk is
+				// part of, so two landscapes can share a material and paint apart.
+				// Objects that aren't landscape chunks get the 1x1 (1,0,0,0) default,
+				// which makes a layer-blend node resolve to layer 0 instead of black.
+				if (cMaterialPipeline)
+				{
+					void* wm = dc.weightmapTextureId != HE::UUID{}
+						? ResolveGraphTexture(dc.weightmapTextureId, {})
+						: nullptr;
+					if (!wm) wm = ResolveGraphTexture(HE::kDefaultLayer0WeightTextureId, {});
+					if (wm)
+					{
+						[encoder setFragmentTexture:(__bridge id<MTLTexture>)wm atIndex:13];
+						[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:13];
+					}
+				}
 				[encoder setVertexBuffer:vertexBuf offset:0 atIndex:0];
 				[encoder setVertexBytes:&ui length:sizeof(ui) atIndex:1];
 				// WPO materials read HeLighting (time) + HeParams in the VERTEX stage too
@@ -8597,6 +8677,19 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 				}
 			}
 			m_pendingMeshInvalidations.clear();
+
+			// Same for textures rewritten in place (landscape weightmap paints).
+			// m_graphTexCache is keyed by "hi:lo" for UUID-resolved entries.
+			for (const HE::UUID& id : m_pendingTexInvalidations)
+			{
+				const std::string key = std::to_string(id.hi) + ":" + std::to_string(id.lo);
+				if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end())
+				{
+					if (it->second) RetireTexture(it->second);
+					m_graphTexCache.erase(it);
+				}
+			}
+			m_pendingTexInvalidations.clear();
 		}
 
 		CAMetalLayer* layer = (__bridge CAMetalLayer*)target.metalLayer;

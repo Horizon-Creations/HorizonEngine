@@ -3676,6 +3676,18 @@ unsigned int OpenGLRenderer::getOrBuildMaterialProgram(uint64_t key, const std::
 		// heLocalShadow (local point/spot shadow atlas, sampler2DArray) — unit 12,
 		// where DrawScene binds the atlas alongside the built-in shaders' unit 11.
 		if (GLint l = glGetUniformLocation(prog, "heLocalShadow"); l >= 0) glUniform1i(l, 12);
+		// heLandscapeWeights (landscape layer weightmap) — unit 13. Bound PER DRAW
+		// from the terrain chunk's parent landscape, so two landscapes can share a
+		// material and still carry their own paint.
+		if (GLint l = glGetUniformLocation(prog, "heLandscapeWeights"); l >= 0) glUniform1i(l, 13);
+		// heSkyEnv (samplerCube, image-based ambient + fog colour) = unit 14,
+		// heAO (screen-space SSAO/HBAO/GTAO result) = unit 15. Per-FRAME state,
+		// bound alongside the other shared material inputs in DrawScene.
+		if (GLint l = glGetUniformLocation(prog, "heSkyEnv"); l >= 0) glUniform1i(l, 14);
+		if (GLint l = glGetUniformLocation(prog, "heAO");     l >= 0) glUniform1i(l, 15);
+		// DDGI probe atlases = units 16/17 (irradiance / visibility).
+		if (GLint l = glGetUniformLocation(prog, "heGIIrradiance"); l >= 0) glUniform1i(l, 16);
+		if (GLint l = glGetUniformLocation(prog, "heGIVisibility"); l >= 0) glUniform1i(l, 17);
 		glUseProgram(0);
 	};
 
@@ -5912,6 +5924,13 @@ void OpenGLRenderer::InvalidateMesh(const HE::UUID& meshId)
 		m_pendingMeshInvalidations.push_back(meshId);
 }
 
+void OpenGLRenderer::InvalidateTexture(const HE::UUID& textureId)
+{
+	// Same deferral — the graph-texture cache is keyed by "hi:lo" for UUIDs.
+	if (textureId != HE::UUID{})
+		m_pendingTexInvalidations.push_back(textureId);
+}
+
 void OpenGLRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 {
 	// Build each custom-shader material's GL program NOW so the first draw doesn't
@@ -6736,6 +6755,19 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	}
 	m_pendingMeshInvalidations.clear();
 
+	// Textures rewritten in place (landscape weightmap paints) drop their cached
+	// GL texture so the next ResolveGraphTexture re-uploads the new pixels.
+	for (const HE::UUID& id : m_pendingTexInvalidations)
+	{
+		const std::string key = std::to_string(id.hi) + ":" + std::to_string(id.lo);
+		if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end())
+		{
+			if (it->second) glDeleteTextures(1, &it->second);
+			m_graphTexCache.erase(it);
+		}
+	}
+	m_pendingTexInvalidations.clear();
+
 	const IRenderer::EnvironmentSettings& env = GetEnvironment();
 	m_extractor.setDayNight(env.dayNightCycle, env.timeOfDay,
 	                        env.sunColor, env.sunIntensity,
@@ -7361,6 +7393,27 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					lit.giParams[0] = static_cast<float>(pw);
 					lit.giParams[1] = static_cast<float>(ph);
 					lit.giParams[2] = giShadingActive ? 1.0f : 0.0f;
+					// Aerial perspective + the "is it bound" gates for the shared
+					// ambient inputs (units 14/15, bound just below).
+					lit.fog[0] = GetEnvironment().fogDensity;
+					lit.fog[1] = GetEnvironment().fogHeightFalloff;
+					lit.fog[2] = m_skyEnvCube ? 1.0f : 0.0f;
+					lit.fog[3] = aoActive     ? 1.0f : 0.0f;
+					// Weather surface response (same values as the built-in programs).
+					lit.weather[0] = GetEnvironment().wetness;
+					lit.weather[1] = GetEnvironment().snowAmount;
+					// DDGI probe grid — the same values PushGiSceneUniforms hands
+					// the built-in programs, so heLitP's indirect diffuse matches.
+					lit.giGridOrigin[0] = m_giGridOrigin.x;
+					lit.giGridOrigin[1] = m_giGridOrigin.y;
+					lit.giGridOrigin[2] = m_giGridOrigin.z;
+					lit.giGridOrigin[3] = kGiProbeSpacing;
+					lit.giGridCounts[0] = static_cast<float>(m_giGridCounts.x);
+					lit.giGridCounts[1] = static_cast<float>(m_giGridCounts.y);
+					lit.giGridCounts[2] = static_cast<float>(m_giGridCounts.z);
+					lit.giGridCounts[3] = static_cast<float>(m_giProbesPerRow);
+					lit.giProbe[0] = m_giIndirectIntensity;
+					lit.giProbe[1] = (giShadingActive && m_giIrrAtlas && m_giVisAtlas) ? 1.0f : 0.0f;
 					// Full light window for heLitP() — same first-8 order as the built-in
 					// PBR shaders (keep the three backend copies of this fill in sync).
 					{{
@@ -7449,6 +7502,32 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 							glActiveTexture(GL_TEXTURE1 + (GLenum)i);
 							glBindTexture(GL_TEXTURE_2D, ResolveGraphTexture(gid, gp));
 						}
+						glActiveTexture(GL_TEXTURE0);
+					}
+					// Shared material inputs: sky env cubemap (14) for image-based
+					// ambient + the fog colour, screen-space AO (15). Per-FRAME state,
+					// re-asserted here because the units are only ever used by these
+					// material programs. Gated by heLight.fog.z/.w.
+					glActiveTexture(GL_TEXTURE14);
+					glBindTexture(GL_TEXTURE_CUBE_MAP, m_skyEnvCube);
+					glActiveTexture(GL_TEXTURE15);
+					glBindTexture(GL_TEXTURE_2D, aoActive ? aoTex : m_whiteTex);
+					// DDGI probe atlases on 16/17 (white fallbacks keep the samplers
+					// valid when GI is off; heLight.giProbe.y gates the reads).
+					glActiveTexture(GL_TEXTURE16);
+					glBindTexture(GL_TEXTURE_2D, giShadingActive ? m_giIrrAtlas : m_whiteTex);
+					glActiveTexture(GL_TEXTURE17);
+					glBindTexture(GL_TEXTURE_2D, giShadingActive ? m_giVisAtlas : m_whiteTex);
+					glActiveTexture(GL_TEXTURE0);
+					// Landscape layer weightmap on unit 13 — PER DRAW (it belongs to
+					// the terrain the chunk is part of, not to the material). Objects
+					// that aren't landscape chunks get the 1x1 (1,0,0,0) default, so a
+					// layer-blend node resolves to layer 0 instead of black.
+					{
+						const HE::UUID wid = dc.weightmapTextureId != HE::UUID{}
+							? dc.weightmapTextureId : HE::kDefaultLayer0WeightTextureId;
+						glActiveTexture(GL_TEXTURE13);
+						glBindTexture(GL_TEXTURE_2D, ResolveGraphTexture(wid, {}));
 						glActiveTexture(GL_TEXTURE0);
 					}
 					glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, nullptr);

@@ -53,6 +53,7 @@ public:
 	                            const std::vector<ParticlePreviewInstance>& particles,
 	                            uint32_t size, float yaw, float pitch, float dist) override;
 	void  InvalidateMesh    (const HE::UUID& meshId)     override;
+	void  InvalidateTexture (const HE::UUID& textureId)  override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
 	void  SetSSAOSettings(const SSAOSettings& settings) override;
 	void  SetGISettings(const GISettings& settings) override;
@@ -411,6 +412,7 @@ private:
 	std::unordered_map<std::string, unsigned int> m_graphTexCache;
 	std::vector<HE::UUID>                       m_pendingMaterialInvalidations;
 	std::vector<HE::UUID>                       m_pendingMeshInvalidations;
+	std::vector<HE::UUID>                       m_pendingTexInvalidations;
 
 	// ── Shadow map (cascaded; directional light) ────────────────────────────
 	// m_shadowDepthTex is a GL_TEXTURE_2D_ARRAY (one Depth24 layer per cascade);

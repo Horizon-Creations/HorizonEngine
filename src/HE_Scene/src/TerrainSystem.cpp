@@ -79,7 +79,7 @@ namespace TerrainSystem
         {
             const uint32_t verts = (g.lod0Cells >> k) + 1u;   // 65, 33, 17, 9, …
             StaticMeshAsset m = generateTerrainChunkMesh(field, res, tc.sizeX, tc.sizeZ,
-                                                         u0, v0, u1, v1, verts);
+                                                         u0, v0, u1, v1, verts, tc.uvTiling);
             HE::UUID id;
             if (haveLevels && cm.getStaticMesh(lod->levels[k].meshId) != nullptr)
             {
@@ -124,6 +124,98 @@ namespace TerrainSystem
         // must not happen while iterating the view.
         std::vector<entt::entity> terrains;
         for (auto e : reg.view<TerrainComponent>()) terrains.push_back(e);
+
+        // ── Layer weightmap → GPU texture ────────────────────────────────────
+        // The painted per-texel layer weights (RGBA8, one channel per layer) become
+        // a texture the chunks' draw calls carry, so a material's Landscape Layer
+        // Blend node can sample them. Registered once and REPLACED in place on
+        // later paints, so the UUID stays stable for anything already holding it.
+        for (entt::entity te : terrains)
+        {
+            auto& tc = reg.get<TerrainComponent>(te);
+            if (tc.layerWeights.empty())
+            {
+                tc.weightmapTextureId = HE::UUID{};   // unpainted → shader uses layer 0
+                tc.weightsDirty = false;
+                continue;
+            }
+            const uint32_t wr = std::max(1u, tc.weightRes);
+            if (tc.layerWeights.size() != static_cast<size_t>(wr) * wr * 4)
+            {
+                tc.layerWeights.clear();              // defensive: never upload a short blob
+                tc.weightmapTextureId = HE::UUID{};
+                tc.weightsDirty = false;
+                continue;
+            }
+            const bool have = tc.weightmapTextureId != HE::UUID{}
+                           && cm.getTexture(tc.weightmapTextureId) != nullptr;
+            if (have && !tc.weightsDirty) continue;
+
+            TextureAsset tex;
+            tex.type     = HE::AssetType::Texture;
+            tex.name     = "terrain_weightmap";
+            tex.path     = "mem://terrain_weightmap";
+            tex.width    = static_cast<int>(wr);
+            tex.height   = static_cast<int>(wr);
+            tex.channels = 4;
+            tex.data     = tc.layerWeights;
+            if (have)
+            {
+                cm.replaceTexture(tc.weightmapTextureId, std::move(tex));
+                if (renderer) renderer->InvalidateTexture(tc.weightmapTextureId);
+            }
+            else
+                tc.weightmapTextureId = cm.registerTexture(std::move(tex));
+            tc.weightsDirty = false;
+        }
+
+        // ── Chunk material follows the Landscape entity's material ───────────
+        // The chunks are what actually render; the Landscape entity itself has no
+        // mesh. Their MaterialComponent used to be pinned to the built-in terrain
+        // material at CREATION time, so assigning a material to the Landscape — or
+        // recolouring the one it has — never reached the screen. Re-synced every
+        // tick (NOT gated on tc.dirty: a material swap doesn't dirty the heightfield)
+        // so the parent's material and its per-entity param overrides propagate
+        // without rebuilding the terrain.
+        for (entt::entity te : terrains)
+        {
+            if (auto* have = reg.try_get<MaterialComponent>(te);
+                !have || have->materialAssetId == HE::UUID{} ||
+                have->materialAssetId == HE::kDefaultMaterialId)
+            {
+                MaterialComponent mat; mat.materialAssetId = HE::kDefaultTerrainMaterialId;
+                reg.emplace_or_replace<MaterialComponent>(te, mat);
+            }
+            // Copied out by value: emplacing below can reallocate the pool, which
+            // would dangle a pointer into the parent's component.
+            const MaterialComponent src = reg.get<MaterialComponent>(te);
+            auto same = [&src](const MaterialComponent& d)
+            {
+                if (d.materialAssetId != src.materialAssetId) return false;
+                if (d.paramOverrides.size() != src.paramOverrides.size()) return false;
+                for (size_t i = 0; i < d.paramOverrides.size(); ++i)
+                {
+                    const auto& x = d.paramOverrides[i]; const auto& y = src.paramOverrides[i];
+                    if (x.name != y.name) return false;
+                    for (int k = 0; k < 4; ++k) if (x.value[k] != y.value[k]) return false;
+                }
+                return true;
+            };
+            std::vector<entt::entity> needMat; // chunks with no MaterialComponent yet
+            for (auto [ce, cc] : reg.view<TerrainChunkComponent>().each())
+            {
+                if (cc.terrain != te) continue;
+                auto* dst = reg.try_get<MaterialComponent>(ce);
+                if (!dst) { needMat.push_back(ce); continue; }
+                if (same(*dst)) continue;
+                dst->materialAssetId = src.materialAssetId;
+                dst->paramOverrides  = src.paramOverrides;
+                dst->dirty           = true;
+            }
+            // Deferred: emplace adds storage, which must not happen mid-view.
+            for (entt::entity ce : needMat)
+                reg.emplace_or_replace<MaterialComponent>(ce, src);
+        }
 
         for (entt::entity te : terrains)
         {
@@ -210,8 +302,15 @@ namespace TerrainSystem
                         tf.position = glm::vec3(minX + chunkX * 0.5f, 0.0f, minZ + chunkZ * 0.5f);
                         tf.dirty    = true;
                         reg.emplace_or_replace<TransformComponent>(chunkEnt, tf);
-                        MaterialComponent mat; mat.materialAssetId = HE::kDefaultTerrainMaterialId;
-                        reg.emplace_or_replace<MaterialComponent>(chunkEnt, mat);
+                        // Seed from the Landscape's own material (the sync pass at
+                        // the top of the tick keeps it aligned from here on).
+                        if (const auto* parentMat = reg.try_get<MaterialComponent>(te))
+                            reg.emplace_or_replace<MaterialComponent>(chunkEnt, *parentMat);
+                        else
+                        {
+                            MaterialComponent mat; mat.materialAssetId = HE::kDefaultTerrainMaterialId;
+                            reg.emplace_or_replace<MaterialComponent>(chunkEnt, mat);
+                        }
                     }
 
                     buildChunk(reg, cm, renderer, chunkEnt, field, res, tc, g, cx, cz);

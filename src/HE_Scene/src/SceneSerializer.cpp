@@ -345,7 +345,19 @@ namespace
 				{ "frequency",  t->frequency },
 				{ "lacunarity", t->lacunarity },
 				{ "gain",       t->gain },
+				{ "uvTiling",   t->uvTiling },
+				// Authored LOD aggressiveness — was editable but never persisted,
+				// so it silently reverted to 1 on every reload.
+				{ "lodDistanceScale", t->lodDistanceScale },
 			};
+			// Painted layer weights (RGBA8). Same base64 treatment as the
+			// heights: a JSON array of N bytes dominates the undo snapshot.
+			if (!t->layerWeights.empty())
+			{
+				tc["weightRes"]     = t->weightRes;
+				tc["layerWeightsB64"] = base64Encode(t->layerWeights.data(),
+				                                     t->layerWeights.size());
+			}
 			if (!t->sculptHeights.empty())
 			{
 				// As a base64 blob, NOT a JSON array of N floats — the array form
@@ -815,6 +827,18 @@ namespace
 			t.frequency   = c.value("frequency",    t.frequency);
 			t.lacunarity  = c.value("lacunarity",   t.lacunarity);
 			t.gain        = c.value("gain",         t.gain);
+			t.uvTiling    = c.value("uvTiling",     t.uvTiling);
+			t.lodDistanceScale = c.value("lodDistanceScale", t.lodDistanceScale);
+			t.weightRes   = c.value("weightRes",    t.weightRes);
+			if (c.contains("layerWeightsB64") && c["layerWeightsB64"].is_string())
+			{
+				t.layerWeights = base64Decode(c["layerWeightsB64"].get<std::string>());
+				// A truncated/mismatched blob would index out of bounds when painted
+				// or uploaded — drop it rather than carry a half-sized weightmap.
+				if (t.layerWeights.size() != static_cast<size_t>(t.weightRes) * t.weightRes * 4)
+					t.layerWeights.clear();
+				t.weightsDirty = !t.layerWeights.empty();
+			}
 			if (c.contains("sculptHeightsB64") && c["sculptHeightsB64"].is_string())
 			{
 				const std::vector<uint8_t> bytes =

@@ -377,6 +377,17 @@ public:
 	{
 		uint64_t count = 0;
 		if (!readPOD(buf, offset, count)) return false;
+		// Sanity-check the count BEFORE resizing. Every element costs at least its
+		// 4-byte length prefix, so a count larger than the bytes left can only come
+		// from a truncated or corrupt chunk — and resizing to it allocates
+		// count * sizeof(std::string), which for a garbage 64-bit value throws
+		// bad_alloc and aborts the process instead of failing the parse.
+		//
+		// This is reachable from any append-only chunk tail: a preceding truncated
+		// readString leaves `offset` advanced past its length prefix before it
+		// returns false, so the next field reads its count from a misaligned
+		// position. The POD overload has always had this guard; this one had not.
+		if (count > (buf.size() - offset) / sizeof(uint32_t)) return false;
 		out.resize(static_cast<size_t>(count));
 		for (auto& s : out)
 			if (!readString(buf, offset, s)) return false;

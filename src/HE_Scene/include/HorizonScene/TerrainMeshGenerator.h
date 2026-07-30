@@ -33,6 +33,9 @@ std::vector<float> resampleHeightField(const std::vector<float>& src,
 //   sizeX/sizeZ    : full terrain world size.
 //   u0,v0,u1,v1    : the chunk's normalized sub-rectangle of the terrain ([0,1]).
 //   vertsPerSide   : this LOD's vertex count per side (>= 2; lower = coarser).
+//   uvTiling       : texture repeats across the WHOLE terrain (see
+//                    TerrainComponent::uvTiling). Chunk UVs stay in the global
+//                    0..uvTiling range so the pattern is continuous across chunks.
 // Vertices are chunk-LOCAL (centred on the chunk middle) so the caller positions the
 // chunk entity at that centre and per-chunk frustum culling + distance-LOD work.
 // Normals are sampled from the global field at source-cell spacing (identical across
@@ -42,4 +45,4 @@ StaticMeshAsset generateTerrainChunkMesh(
     const std::vector<float>& heights, uint32_t srcRes,
     float sizeX, float sizeZ,
     float u0, float v0, float u1, float v1,
-    uint32_t vertsPerSide);
+    uint32_t vertsPerSide, float uvTiling = 1.0f);
