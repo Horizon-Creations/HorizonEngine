@@ -1,7 +1,6 @@
 #pragma once
 
 #include "HorizonWorld.h"
-#include "SceneGraph.h"
 #include "SceneSerializer.h"
 
 #include "Components/NameComponent.h"

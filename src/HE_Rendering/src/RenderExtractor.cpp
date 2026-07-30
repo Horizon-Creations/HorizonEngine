@@ -36,10 +36,11 @@ namespace
 		     * glm::scale(glm::mat4(1.0f), t.scale);
 	}
 
-	// Recompute world matrices top-down from the world root. Note this does
-	// NOT use SceneGraph::propagateTransforms — that only visits entities
-	// with parent == entt::null, but HorizonWorld parents everything to a
-	// root *entity*, so it never fires. Recomputing every frame is cheap at
+	// Recompute world matrices top-down from the world root. This is the only
+	// place world matrices are propagated — there is no separate scene-graph
+	// pass. Walking from world.rootEntity() is what makes it work: HorizonWorld
+	// parents everything to a root *entity*, so anything keyed on
+	// parent == entt::null would never fire. Recomputing every frame is cheap at
 	// current scene sizes; dirty-flag pruning can come back with profiling.
 	void propagateFrom(entt::registry& reg, entt::entity e, const glm::mat4& parentWorld)
 	{

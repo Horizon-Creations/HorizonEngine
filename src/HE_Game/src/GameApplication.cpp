@@ -760,8 +760,9 @@ void GameApplication::updateCameraController(float dt)
 	t.rotation.x -= dy * kSensitivity;    // pitch
 	t.rotation.x = std::clamp(t.rotation.x, -89.0f, 89.0f);
 
-	// Movement along the camera's own axes (rotation matches SceneGraph: the
-	// worldMatrix is built from glm::quat(radians(rotation))).
+	// Movement along the camera's own axes (rotation matches the transform
+	// propagation in RenderExtractor: worldMatrix is built from
+	// glm::quat(radians(rotation))).
 	const glm::quat q = glm::quat(glm::radians(t.rotation));
 	const glm::vec3 forward = q * glm::vec3(0.0f, 0.0f, -1.0f);
 	const glm::vec3 right   = q * glm::vec3(1.0f, 0.0f, 0.0f);
