@@ -7842,6 +7842,16 @@ void MetalRenderer::EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& v
 	// Local (point/spot) shadow atlas, pinned at 12 (sampling gated per light by params.y).
 	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(m_localShadowTex ? m_localShadowTex : m_shadowDepthTex) atIndex:12];
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:12];
+	// Sky env cubemap (14) + screen-space AO (15) for the material preamble's
+	// image-based ambient and fog — the SAME textures the built-in shaders read
+	// at 2/3, re-pinned clear of the material-texture window. Gated by
+	// heLight.fog.z/.w gate the samples, so an absent cubemap (nil — legal in
+	// Metal, reads zero) or a dummy AO bind here is inert. The cube slot must NOT
+	// get the 2D dummy: Metal validates the texture TYPE.
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)m_skyEnvCube atIndex:14];
+	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:14];
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(ssaoActive ? m_ssaoResult : m_dummyTexture) atIndex:15];
+	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:15];
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
 
 	constexpr int kMaxBones = 128;
@@ -8088,6 +8098,16 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 	// Local (point/spot) shadow atlas, pinned at 12 (sampling gated per light by params.y).
 	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(m_localShadowTex ? m_localShadowTex : m_shadowDepthTex) atIndex:12];
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:12];
+	// Sky env cubemap (14) + screen-space AO (15) for the material preamble's
+	// image-based ambient and fog — the SAME textures the built-in shaders read
+	// at 2/3, re-pinned clear of the material-texture window. Gated by
+	// heLight.fog.z/.w gate the samples, so an absent cubemap (nil — legal in
+	// Metal, reads zero) or a dummy AO bind here is inert. The cube slot must NOT
+	// get the 2D dummy: Metal validates the texture TYPE.
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)m_skyEnvCube atIndex:14];
+	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:14];
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(ssaoActive ? m_ssaoResult : m_dummyTexture) atIndex:15];
+	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:15];
 
 	// ── Lights (clamped to the shader's 8) ──────────────────────────────────
 	// Kept at function scope so the transparency pass below can re-bind it after
@@ -8227,6 +8247,14 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 			matLight.camFwd[1] = scene.cameraFwd.y;
 			matLight.camFwd[2] = scene.cameraFwd.z;
 		}
+		// Aerial perspective + the "is it bound" gates for the shared ambient
+		// inputs. The sky cubemap and the AO buffer are pinned on the encoder
+		// below (MSL 14/15); heLitP falls back to the flat ambient and skips fog
+		// when they are absent (preview/UI passes).
+		matLight.fog[0] = GetEnvironment().fogDensity;
+		matLight.fog[1] = GetEnvironment().fogHeightFalloff;
+		matLight.fog[2] = m_skyEnvCube ? 1.0f : 0.0f;
+		matLight.fog[3] = ssaoActive   ? 1.0f : 0.0f;
 		[encoder setFragmentBytes:&matLight length:sizeof(matLight)
 		                  atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
 	}
