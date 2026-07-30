@@ -97,6 +97,12 @@ UIWidgetRect uiElementRect(const UIWidgetTree& tree, const UIElement& e)
     return r;
 }
 
+void uiApplyAutoSize(UIWidgetTree& tree)
+{
+    for (auto& e : tree.elements)
+        if (e) e->applyAutoSize();
+}
+
 bool uiElementEffectiveVisible(const UIWidgetTree& tree, const UIElement& e)
 {
     if (!e.visible) return false;

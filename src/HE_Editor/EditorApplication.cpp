@@ -15,6 +15,8 @@
 #include <material/MaterialShaderLibrary.h> // HE_DUMP_MATPRECOMPILE witness
 #include <glm/gtc/quaternion.hpp>
 #include <HorizonScene/TerrainSystem.h>
+#include <HorizonScene/TerrainPaint.h>
+#include <HorizonScene/Components/TerrainComponent.h>
 #include <HorizonScene/AnimationSystem.h>
 #include <HorizonScene/AnimationBlendSystem.h>
 #include <HorizonScene/AnimationStateMachineSystem.h>
@@ -2004,7 +2006,15 @@ void EditorApplication::dumpFrameHeadless()
 			MaterialAsset wallMat;
 			wallMat.type = HE::AssetType::Material;
 			wallMat.name = "GIBleedWall";
-			const bool red = std::string(bl) != "2";
+			// "1"/"2": red/grey floor under the BUILT-IN receiver sphere.
+			// "3"/"4": the same pair, but the floor sits under the GRAPH-material
+			// sphere — the only way to measure whether heLitP itself consumes the
+			// probe field (it does since the DDGI port; before that the graph
+			// sphere was deliberately excluded from this witness).
+			const std::string blMode(bl);
+			const bool red      = (blMode != "2" && blMode != "4");
+			const bool underMat = (blMode == "3" || blMode == "4");
+			const float bleedX  = underMat ? 0.0f : 6.0f;
 			wallMat.baseColor[0] = red ? 1.0f : 0.5f;
 			wallMat.baseColor[1] = red ? 0.05f : 0.5f;
 			wallMat.baseColor[2] = red ? 0.05f : 0.5f;
@@ -2014,19 +2024,23 @@ void EditorApplication::dumpFrameHeadless()
 			// A fully sunlit red floor bounces onto the sphere's underside.
 			auto wall = m_editorWorld->createEntity("GIBleedWall");
 			TransformComponent wtc;
-			wtc.position = tc.position + glm::vec3(6.0f, -4.5f, 0.0f);
+			wtc.position = tc.position + glm::vec3(bleedX, -4.5f, 0.0f);
 			wtc.scale    = glm::vec3(12.0f, 0.5f, 12.0f);
 			reg.emplace<TransformComponent>(wall, wtc);
 			reg.emplace<MeshComponent>(wall, MeshComponent{ HE::kDefaultCubeMeshId });
 			reg.emplace<MaterialComponent>(wall, MaterialComponent{ wallMatId });
-			// Built-in receiver sphere BETWEEN graph sphere and wall — the graph
-			// sphere doesn't consume the probe field (heLitP has no DDGI), so the
-			// bleed must be read off a built-in-shaded surface.
-			auto rcv = m_editorWorld->createEntity("GIBleedReceiver");
-			TransformComponent rtc = tc;
-			rtc.position = tc.position + glm::vec3(6.0f, 0.0f, 0.0f);
-			reg.emplace<TransformComponent>(rcv, rtc);
-			reg.emplace<MeshComponent>(rcv, MeshComponent{ meshId });
+			// Built-in receiver sphere next to the wall — kept as the reference
+			// surface for the "1"/"2" pair. In the "3"/"4" pair the floor is under
+			// the GRAPH sphere instead and the receiver is omitted, so nothing
+			// else can contribute bounce to the measured region.
+			if (!underMat)
+			{
+				auto rcv = m_editorWorld->createEntity("GIBleedReceiver");
+				TransformComponent rtc = tc;
+				rtc.position = tc.position + glm::vec3(6.0f, 0.0f, 0.0f);
+				reg.emplace<TransformComponent>(rcv, rtc);
+				reg.emplace<MeshComponent>(rcv, MeshComponent{ meshId });
+			}
 			Logger::Log(Logger::LogLevel::Info, red
 				? "EditorApplication: HE_DUMP_GIBLEED red wall added"
 				: "EditorApplication: HE_DUMP_GIBLEED grey control wall added");
@@ -2106,6 +2120,67 @@ void EditorApplication::dumpFrameHeadless()
 		reg.emplace<LightComponent>(lightE, lc);
 		Logger::Log(Logger::LogLevel::Info,
 			"EditorApplication: HE_DUMP_LOCALSHADOW witness scene added");
+	}
+
+	// ── Landscape layer-blend witness (HE_DUMP_LANDSCAPELAYERS=1) ────────────
+	// A flat landscape with a THREE-LAYER material (red / green / blue) and a
+	// painted weightmap: a green disc in the middle of a red field, with a blue
+	// stripe. Proves the whole chain — layer-blend codegen → per-draw weightmap
+	// binding → painted weights — lands on pixels, and the three colours make a
+	// wrong channel obvious at a glance.
+	if (const char* ll = std::getenv("HE_DUMP_LANDSCAPELAYERS"); ll && *ll && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+
+		MaterialAsset lm;
+		lm.type = HE::AssetType::Material;
+		lm.name = "LayerBlendWitness";
+		HE::MaterialGraph g;
+		const int out = g.addNode(HE::MatNodeType::Output);
+		const int lb  = g.addNode(HE::MatNodeType::LandscapeLayerBlend);
+		g.findNode(lb)->s = "Red\nGreen\nBlue";
+		const float rgb[3][3] = { { 0.90f, 0.10f, 0.10f },
+		                          { 0.10f, 0.85f, 0.15f },
+		                          { 0.15f, 0.25f, 0.95f } };
+		for (int i = 0; i < 3; ++i)
+		{
+			const int c = g.addNode(HE::MatNodeType::ConstColor);
+			g.findNode(c)->p[0] = rgb[i][0];
+			g.findNode(c)->p[1] = rgb[i][1];
+			g.findNode(c)->p[2] = rgb[i][2];
+			g.connect(c, 0, lb, i);
+		}
+		g.connect(lb, 0, out, HE::kMatOutputBaseColorPin);
+		lm.nodeGraphJson = HE::materialGraphToJson(g);
+		const HE::MatShaderGen gen = HE::generateFragment(g);
+		lm.customShaderFragGlsl = gen.glsl;
+		lm.customShaderVertGlsl = gen.vertexBody;
+		lm.blendMode            = gen.blendMode;
+		lm.graphLayerNames      = gen.layerNames;
+		const HE::UUID lmId = contentManager().registerMaterial(std::move(lm));
+
+		auto land = m_editorWorld->createEntity("LayerLandscape");
+		TransformComponent ltf;
+		ltf.position = glm::vec3(0.0f, 300.0f, 0.0f); // clear of any loaded scene
+		reg.emplace<TransformComponent>(land, ltf);
+		TerrainComponent ltc;
+		ltc.sizeX = ltc.sizeZ = 100.0f;
+		ltc.resolution = 33;      // already 2ⁿ+1 → no resample
+		ltc.heightScale = 0.0f;   // flat: the colours are the whole point
+		ltc.seed = 0;
+		ltc.weightRes = 128;
+		ltc.dirty = true;
+		TerrainPaint::ensureWeightmap(ltc);
+		TerrainPaint::paint(ltc,   0.0f,  0.0f, /*Green*/1, 22.0f, 6.0f, 1.0f);
+		TerrainPaint::paint(ltc, -34.0f, 20.0f, /*Blue*/ 2, 12.0f, 4.0f, 1.0f);
+		reg.emplace<TerrainComponent>(land, ltc);
+		reg.emplace<MaterialComponent>(land, MaterialComponent{ lmId });
+		// The headless dump renders from OnInit, BEFORE the main loop's
+		// SceneSystems::tick — without this the terrain has no chunk entities yet
+		// and there is simply nothing to draw.
+		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+		Logger::Log(Logger::LogLevel::Info,
+			"EditorApplication: HE_DUMP_LANDSCAPELAYERS witness landscape added");
 	}
 
 	pushEnvironment(0.0f); // scene environment from the World entity (no auto-advance)

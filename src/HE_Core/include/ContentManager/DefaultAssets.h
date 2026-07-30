@@ -40,4 +40,10 @@ constexpr UUID kDefaultQuadMeshId = { 0x0000000000000006ULL, 0x0000000000000001U
 // weather system as a snowflake so flakes read as a shape, not a white square.
 constexpr UUID kDefaultSnowflakeMeshId = { 0x0000000000000007ULL, 0x0000000000000001ULL };
 
+// A 1x1 RGBA8 (255, 0, 0, 0) texture: the "nothing painted yet" landscape weightmap.
+// A Landscape Layer Blend node normalises by the weight sum, so an all-white default
+// would average every layer and a black one would divide by ~0 — full weight on
+// channel 0 makes an unpainted terrain show layer 0, which is what you want.
+constexpr UUID kDefaultLayer0WeightTextureId = { 0x0000000000000008ULL, 0x0000000000000001ULL };
+
 } // namespace HE

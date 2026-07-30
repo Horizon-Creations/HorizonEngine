@@ -63,6 +63,29 @@ public:
         // Vulkan) never sample the atlas. Spot = 1 layer, point = 6 cube-face
         // layers (+X −X +Y −Y +Z −Z, major-axis pick in the preamble).
         float localShadowVP[16][16] = {};
+        // Aerial perspective + the two "is this bound" gates for the shared
+        // ambient inputs (append-only, v2.4):
+        //   x = fog density, y = fog height falloff (EnvironmentSettings)
+        //   z = 1 when heSkyEnv (the procedural sky cubemap) is bound and valid —
+        //       heLitP's image-based ambient AND the fog colour both read it;
+        //       0 makes both fall back (flat ambient, no fog), which is what the
+        //       preview/UI passes want.
+        //   w = 1 when heAO (the screen-space AO result) is bound and valid.
+        float fog[4] = {};
+        // DDGI probe grid (append-only, v2.5) — the SAME values the built-in
+        // shaders' GIUniforms carries, so heLitP's indirect diffuse matches them:
+        //   giGridOrigin : xyz = probe-grid origin, w = probe spacing
+        //   giGridCounts : xyz = probes per axis,   w = probes per atlas row
+        //   giProbe      : x = indirect intensity,  y = 1 when the probe atlases
+        //                  (heGIIrradiance/heGIVisibility) are bound and valid
+        float giGridOrigin[4] = {};
+        float giGridCounts[4] = {};
+        float giProbe[4]      = {};
+        // Weather surface response (append-only, v2.6): x = wetness,
+        // y = snow amount — the same EnvironmentComponent values the built-in
+        // shaders read, so a graph material greys/glosses with the weather like
+        // everything around it.
+        float weather[4]      = {};
     };
     static constexpr int kMetalLightingBufferIndex = 1; // fragment [[buffer(1)]]
 

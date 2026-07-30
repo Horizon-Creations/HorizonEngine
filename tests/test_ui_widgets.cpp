@@ -1,4 +1,5 @@
 #include "doctest.h"
+#include <nlohmann/json.hpp>
 #include <UIWidget/UIElements.h>
 #include <UIWidget/UIWidgetTree.h>
 #include <UIWidget/UIWidgetBinding.h>
@@ -782,4 +783,136 @@ TEST_CASE("Material/Font base properties round-trip as strings")
     };
     CHECK(hasFont(*e));
     CHECK(!hasFont(*makeUIElement(UIWidgetType::Panel)));
+}
+
+// ── Multi-line text ───────────────────────────────────────────────────────────
+// emitUITextGlyphs used to lay out strictly one line and DROP every byte < 32,
+// so '\n' silently vanished and the whole string ran together.
+
+TEST_CASE("layoutUITextLines splits on newlines")
+{
+    const HE::BakedUIFont& f = HE::sharedUIFont();
+    REQUIRE(f.ok);
+    const auto lines = HE::layoutUITextLines(f, "one\ntwo\nthree", 20.0f, 0.0f, false);
+    REQUIRE(lines.size() == 3);
+    CHECK(lines[0] == "one");
+    CHECK(lines[1] == "two");
+    CHECK(lines[2] == "three");
+    // CRLF must not leave a stray carriage return in the run.
+    const auto crlf = HE::layoutUITextLines(f, "a\r\nb", 20.0f, 0.0f, false);
+    REQUIRE(crlf.size() == 2);
+    CHECK(crlf[0] == "a");
+    CHECK(crlf[1] == "b");
+}
+
+TEST_CASE("layoutUITextLines word-wraps within the width and never overflows")
+{
+    const HE::BakedUIFont& f = HE::sharedUIFont();
+    REQUIRE(f.ok);
+    const float sizePx = 20.0f, wrapW = 90.0f;
+    const auto lines = HE::layoutUITextLines(
+        f, "alpha beta gamma delta epsilon", sizePx, wrapW, true);
+    CHECK(lines.size() > 1);
+    const float scale = sizePx / f.bakePx;
+    for (const std::string& l : lines)
+    {
+        float w = 0.0f;
+        for (unsigned char ch : l) if (ch >= 32 && ch < 128) w += f.glyphs[ch - 32].xadvance * scale;
+        CHECK(w <= wrapW + 0.01f);
+    }
+    // Wrapping off leaves the run on one line.
+    CHECK(HE::layoutUITextLines(f, "alpha beta gamma delta epsilon",
+                                sizePx, wrapW, false).size() == 1);
+}
+
+TEST_CASE("layoutUITextLines hard-breaks a word wider than the line")
+{
+    const HE::BakedUIFont& f = HE::sharedUIFont();
+    REQUIRE(f.ok);
+    const auto lines = HE::layoutUITextLines(f, "supercalifragilistic", 24.0f, 40.0f, true);
+    CHECK(lines.size() > 1);
+    // Every character survives the break (no glyphs dropped).
+    std::string joined;
+    for (const std::string& l : lines) joined += l;
+    CHECK(joined == "supercalifragilistic");
+}
+
+TEST_CASE("emitUITextGlyphs emits both lines of a two-line run")
+{
+    std::vector<UIRenderObject> one, two;
+    HE::emitUITextGlyphs("ab", { 0.0f, 0.0f }, { 200.0f, 60.0f }, 16.0f,
+                         { 1, 1, 1, 1 }, 0, false, one);
+    HE::emitUITextGlyphs("ab\ncd", { 0.0f, 0.0f }, { 200.0f, 60.0f }, 16.0f,
+                         { 1, 1, 1, 1 }, 0, false, two);
+    CHECK(one.size() == 2);
+    CHECK(two.size() == 4);              // the newline is no longer swallowed
+    // The second line sits BELOW the first.
+    CHECK(two[2].position.y > two[0].position.y);
+    // A single line still lays out exactly where it always did.
+    CHECK(two[0].position.y < one[0].position.y);   // block centred → line 1 moves up
+}
+
+// ── Auto-size ─────────────────────────────────────────────────────────────────
+TEST_CASE("UIText auto-size grows the element with the font size")
+{
+    HE::UIText t;
+    t.text = "Hello";
+    t.autoSize = true;
+    t.fontSize = 20.0f;
+    t.applyAutoSize();
+    const float w20 = t.sizeX, h20 = t.sizeY;
+    CHECK(w20 > 0.0f);
+    CHECK(h20 > 0.0f);
+
+    t.fontSize = 60.0f;
+    t.applyAutoSize();
+    CHECK(t.sizeX > w20);
+    CHECK(t.sizeY > h20);
+
+    // More lines → taller, same width class.
+    t.text = "Hello\nWorld";
+    t.applyAutoSize();
+    CHECK(t.sizeY > 60.0f);
+
+    // Off = the authored box is left alone.
+    HE::UIText fixed;
+    fixed.autoSize = false;
+    fixed.fontSize = 80.0f;
+    const float sx = fixed.sizeX, sy = fixed.sizeY;
+    fixed.applyAutoSize();
+    CHECK(fixed.sizeX == doctest::Approx(sx));
+    CHECK(fixed.sizeY == doctest::Approx(sy));
+}
+
+TEST_CASE("UIText auto-size with WordWrap keeps the authored width")
+{
+    HE::UIText t;
+    t.text     = "a long sentence that certainly wraps at this width";
+    t.autoSize = true;
+    t.wordWrap = true;
+    t.sizeX    = 120.0f;
+    t.fontSize = 18.0f;
+    t.applyAutoSize();
+    CHECK(t.sizeX == doctest::Approx(120.0f)); // width is the wrap column
+    CHECK(t.sizeY > 18.0f);                    // height grew to hold the lines
+}
+
+TEST_CASE("UIText multi-line properties round-trip through JSON")
+{
+    HE::UIText t;
+    t.text = "a\nb"; t.wordWrap = true; t.autoSize = true; t.align = 1;
+    nlohmann::json j;
+    t.writeJson(j);
+    HE::UIText r;
+    r.readJson(j);
+    CHECK(r.text == "a\nb");
+    CHECK(r.wordWrap);
+    CHECK(r.autoSize);
+    CHECK(r.align == 1);
+
+    // Pre-auto-size widgets keep their hand-set box (autoSize defaults off).
+    nlohmann::json legacy = { { "text", "x" }, { "fontSize", 22.0f } };
+    HE::UIText old;
+    old.readJson(legacy);
+    CHECK(!old.autoSize);
 }

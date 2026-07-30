@@ -11,6 +11,7 @@
 #include "HorizonCodeClassPanel.h"
 #include "InputAssetPanel.h"
 #include "SkeletalMeshEditorPanel.h"
+#include "StaticMeshEditorPanel.h"
 #include "ParticleGraphEditorPanel.h"
 #include "AnimatorStateMachineEditorPanel.h"
 #include "HorizonVersion.h"
@@ -24,6 +25,7 @@
 #include <HorizonScene/LODSystem.h>
 #include <HorizonScene/NavigationSystem.h>
 #include <HorizonScene/ParticleSystem.h>
+#include <HorizonScene/TerrainPaint.h>   // landscape layer brush
 #include <HorizonScene/AnimationStateMachineSystem.h>
 #include <Scripting/ScriptEngine.h>
 #include <ContentManager/HAsset.h>
@@ -479,6 +481,11 @@ static bool s_quietContentRefresh = false;
 // Landscape sculpt tool state (shared between the panel and viewport)
 enum class TerrainTool { Raise, Lower, Smooth, Flatten, Ramp, Roughen };
 static TerrainTool s_terrainTool     = TerrainTool::Raise;
+// Landscape PAINT mode: the same brush writes layer weights instead of heights.
+// The paintable layers come from the assigned material's Landscape Layer Blend
+// node (MaterialAsset::graphLayerNames) — the material defines what a layer is.
+static bool        s_landscapePaint  = false;
+static int         s_paintLayer      = 0;
 static float       s_brushRadius     = 10.0f;  // inner full-strength radius (m)
 static float       s_falloffRadius   = 5.0f;   // transition width — strength falls linearly to 0
 static float       s_brushStrength   = 5.0f;
@@ -3727,6 +3734,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                 UIEditorPanel::forget(t.assetPath);
                 HorizonCodeClassPanel::forget(t.assetPath);
                 InputAssetPanel::forget(t.assetPath);
+                StaticMeshEditorPanel::forget(t.assetPath); // view-only, never dirty
             };
 
             for (int i = 0; i < static_cast<int>(s_tabs.size()); )
@@ -3824,6 +3832,8 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
             InputAssetPanel::render(ctx, tabPath, tabPos, tabSize);
         else if (SkeletalMeshEditorPanel::isSkeletalMeshAsset(tabPath))
             SkeletalMeshEditorPanel::render(ctx, tabPath, tabPos, tabSize);
+        else if (StaticMeshEditorPanel::isStaticMeshAsset(tabPath))
+            StaticMeshEditorPanel::render(ctx, tabPath, tabPos, tabSize);
         else if (ParticleGraphEditorPanel::isParticleAsset(tabPath))
             ParticleGraphEditorPanel::render(ctx, tabPath, tabPos, tabSize);
         else if (AnimatorStateMachineEditorPanel::isAnimatorStateMachineAsset(tabPath))
@@ -4282,14 +4292,24 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 					if (s_gizmoOp == ImGuizmo::ROTATE && !s_rotateScreen)
 						effectiveOp = ImGuizmo::ROTATE_X | ImGuizmo::ROTATE_Y | ImGuizmo::ROTATE_Z;
 
-					glm::mat4 world = t->worldMatrix;
+					// While a drag is in progress the gizmo works on the matrix IT
+					// produced last frame, NOT on the scene graph's freshly
+					// recomposed worldMatrix. The round-trip
+					//   TRS -> worldMatrix -> decompose -> TRS -> worldMatrix
+					// is not an identity: DecomposeMatrixToComponents extracts an
+					// Euler triple that is only *equivalent* to the authored one, so
+					// each frame handed the gizmo a slightly different matrix and the
+					// values visibly jittered mid-drag.
+					static bool      s_gizmoWasUsing = false;
+					static glm::mat4 s_gizmoWorld(1.0f);
+					glm::mat4 world = s_gizmoWasUsing ? s_gizmoWorld : t->worldMatrix;
 					ImGuizmo::Manipulate(
 						&s_sceneSnapshot.camera.view[0][0],
 						&s_sceneSnapshot.camera.projection[0][0],
 						effectiveOp, s_gizmoMode, &world[0][0]);
+					s_gizmoWorld = world;
 
 					// Undo session: one entry per drag
-					static bool s_gizmoWasUsing = false;
 					if (ctx.undoSys)
 					{
 						if (ImGuizmo::IsUsing() && !s_gizmoWasUsing) ctx.undoSys->stashPre();
@@ -4311,10 +4331,20 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 
 						float pos[3], rot[3], scale[3];
 						ImGuizmo::DecomposeMatrixToComponents(&local[0][0], pos, rot, scale);
-						t->position = { pos[0],   pos[1],   pos[2]   };
-						t->rotation = { rot[0],   rot[1],   rot[2]   };
-						t->scale    = { scale[0], scale[1], scale[2] };
-						t->dirty    = true;
+						// Write back ONLY the channels this operation manipulates. A
+						// scale drag used to overwrite rotation with the re-extracted
+						// (equivalent but different) Euler triple and vice versa —
+						// visible as a value that jumps the moment you touch an
+						// unrelated handle.
+						const unsigned opBits = static_cast<unsigned>(effectiveOp);
+						if (opBits & static_cast<unsigned>(ImGuizmo::TRANSLATE))
+							t->position = { pos[0], pos[1], pos[2] };
+						if (opBits & static_cast<unsigned>(ImGuizmo::ROTATE))
+							t->rotation = { rot[0], rot[1], rot[2] };
+						if (opBits & (static_cast<unsigned>(ImGuizmo::SCALE) |
+						              static_cast<unsigned>(ImGuizmo::SCALEU)))
+							t->scale = { scale[0], scale[1], scale[2] };
+						t->dirty = true;
 					}
 				}
 
@@ -4574,7 +4604,33 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 							ImGui::IsMouseDown(ImGuiMouseButton_Left) && !io.KeyAlt
 							&& (viewportHovered || s_brushWasDown);
 
-						if (lmbDown && !s_brushWasDown)
+						// ── Paint mode: layer weights, not heights ────────────
+						// Shares the brush shape/radius/falloff and the terrain hit
+						// with sculpting; only the target data differs. The sculpt
+						// blocks below all hang off `sculptDown`, which paint mode
+						// forces false — so a paint stroke can never move geometry.
+						if (s_landscapePaint)
+						{
+							if (lmbDown && !s_brushWasDown && ctx.undoSys)
+								ctx.undoSys->snapshotNow();   // one undo entry per stroke
+							if (lmbDown && hasHit)
+							{
+								// World → terrain-local (the brush works in world XZ).
+								const float lx = hitWS.x - terrainWorldPos.x;
+								const float lz = hitWS.z - terrainWorldPos.z;
+								// Per-second like the sculpt tools, but as a 0..1 blend
+								// factor: the shared 0.1..50 strength slider maps onto a
+								// usable paint rate here.
+								const float amount = std::clamp(
+									s_brushStrength * static_cast<float>(dt) * 0.16f, 0.0f, 1.0f);
+								TerrainPaint::paint(tc, lx, lz, s_paintLayer,
+								                    s_brushRadius, s_falloffRadius, amount);
+							}
+						}
+						// Sculpting is suppressed while painting.
+						const bool sculptDown = lmbDown && !s_landscapePaint;
+
+						if (sculptDown && !s_brushWasDown)
 						{
 							if (ctx.undoSys) ctx.undoSys->snapshotNow();
 							// Lazy-init sculptHeights from current terrain geometry
@@ -4600,7 +4656,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 						}
 						s_brushWasDown = lmbDown;
 
-						if (lmbDown && hasHit && !tc.sculptHeights.empty())
+						if (sculptDown && hasHit && !tc.sculptHeights.empty())
 						{
 							const float totalR  = s_brushRadius + s_falloffRadius;
 							const float totalR2 = totalR * totalR;
@@ -4857,7 +4913,128 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
         }
         else
         {
-            // ── Terrain exists — show sculpt tools ───────────────────────────
+            // ── Landscape material ───────────────────────────────────────────
+            // Right here, not only on the Terrain entity in the Outliner: the
+            // material IS a landscape authoring tool (it defines the paint
+            // layers), so it belongs in the Landscape panel. The Landscape's
+            // MaterialComponent is what TerrainSystem propagates to the chunk
+            // entities that actually render.
+            {
+                const Entity terrainEnt = terrainView.front();
+                auto* tmat = reg.try_get<MaterialComponent>(terrainEnt);
+                if (!tmat)
+                {
+                    MaterialComponent mc; mc.materialAssetId = HE::kDefaultTerrainMaterialId;
+                    tmat = &reg.emplace_or_replace<MaterialComponent>(terrainEnt, mc);
+                }
+                const MaterialAsset* lmat =
+                    (tmat->materialAssetId == HE::UUID{} || !ctx.contentManager)
+                        ? nullptr : ctx.contentManager->getMaterial(tmat->materialAssetId);
+                const bool builtIn = lmat && lmat->path.rfind("mem://", 0) == 0;
+                const std::string label = !lmat ? std::string("(none — drop a material here)")
+                                                : (builtIn ? lmat->name + " (engine default)" : lmat->name);
+                ImGui::SeparatorText("Material");
+                ImGui::Button((label + "##lsmat").c_str(), ImVec2(-1.0f, 0.0f));
+                if (ImGui::BeginDragDropTarget())
+                {
+                    if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_ASSET_PATH");
+                        p && ctx.contentManager)
+                    {
+                        const std::string rel = ctx.contentManager->toContentRelativePath(
+                            static_cast<const char*>(p->Data));
+                        const HE::UUID id = rel.empty() ? HE::UUID{}
+                                                        : ctx.contentManager->loadAsset(rel);
+                        if (id != HE::UUID{} && ctx.contentManager->getMaterial(id))
+                        {
+                            if (ctx.undoSys) ctx.undoSys->snapshotNow();
+                            tmat->materialAssetId = id;
+                            tmat->dirty = true;   // TerrainSystem pushes it to the chunks
+                            if (ctx.renderer) ctx.renderer->InvalidateMaterial(id);
+                        }
+                        else
+                            Logger::Log(Logger::LogLevel::Warning,
+                                "Editor: dropped asset is not a material");
+                    }
+                    ImGui::EndDragDropTarget();
+                }
+                if (!builtIn && lmat)
+                {
+                    if (ImGui::SmallButton("Reset to Engine Default##lsmat"))
+                    {
+                        if (ctx.undoSys) ctx.undoSys->snapshotNow();
+                        tmat->materialAssetId = HE::kDefaultTerrainMaterialId;
+                        tmat->dirty = true;
+                    }
+                }
+                else
+                    ImGui::TextDisabled("Drag a material from the Content Browser.");
+            }
+
+            // ── Sculpt / Paint mode ──────────────────────────────────────────
+            // Painting is only meaningful when the assigned material DECLARES
+            // layers (a Landscape Layer Blend node): those names are the paintable
+            // layers, in weightmap-channel order. The material is the source of
+            // truth for what a layer means; the terrain only stores the weights.
+            {
+                const Entity terrainEnt2 = terrainView.front();
+                const auto* tmat2 = reg.try_get<MaterialComponent>(terrainEnt2);
+                const MaterialAsset* lmat2 = (!tmat2 || !ctx.contentManager) ? nullptr
+                    : ctx.contentManager->getMaterial(tmat2->materialAssetId);
+                const std::vector<std::string> layers =
+                    lmat2 ? lmat2->graphLayerNames : std::vector<std::string>{};
+                if (layers.empty()) s_landscapePaint = false;
+
+                ImGui::SeparatorText("Mode");
+                if (ImGui::RadioButton("Sculpt", !s_landscapePaint)) s_landscapePaint = false;
+                ImGui::SameLine();
+                ImGui::BeginDisabled(layers.empty());
+                if (ImGui::RadioButton("Paint", s_landscapePaint)) s_landscapePaint = true;
+                ImGui::EndDisabled();
+                if (layers.empty())
+                    ImGui::TextDisabled("Paint needs a material with a\nLandscape Layer Blend node.");
+
+                if (s_landscapePaint)
+                {
+                    auto& ptc = reg.get<TerrainComponent>(terrainEnt2);
+                    ImGui::SeparatorText("Layer");
+                    s_paintLayer = std::clamp(s_paintLayer, 0, static_cast<int>(layers.size()) - 1);
+                    for (int i = 0; i < static_cast<int>(layers.size()); ++i)
+                    {
+                        if (i % 2 != 0) ImGui::SameLine();
+                        if (ImGui::RadioButton(layers[i].c_str(), s_paintLayer == i))
+                            s_paintLayer = i;
+                    }
+                    ImGui::Spacing();
+                    ImGui::DragFloat("Radius##paint",   &s_brushRadius,   0.5f, 0.5f, 500.0f, "%.1f m");
+                    ImGui::DragFloat("Falloff##paint",  &s_falloffRadius, 0.5f, 0.0f, 500.0f, "%.1f m");
+                    ImGui::DragFloat("Strength##paint", &s_brushStrength, 0.1f, 0.1f,  50.0f, "%.2f");
+                    s_brushRadius   = std::max(0.5f, s_brushRadius);
+                    s_falloffRadius = std::max(0.0f, s_falloffRadius);
+
+                    // Changing the resolution would throw the paint away, so it is
+                    // locked once anything has been painted.
+                    int wres = static_cast<int>(ptc.weightRes);
+                    ImGui::Spacing();
+                    ImGui::BeginDisabled(!ptc.layerWeights.empty());
+                    if (ImGui::SliderInt("Weightmap##paint", &wres, 32, 2048))
+                        ptc.weightRes = static_cast<uint32_t>(std::clamp(wres, 32, 2048));
+                    ImGui::EndDisabled();
+                    if (!ptc.layerWeights.empty())
+                        ImGui::TextDisabled("Resolution is fixed once painted.");
+                    ImGui::TextDisabled("LMB drag in viewport to paint");
+                    ImGui::Spacing();
+                    if (ImGui::Button("Clear Paint") && !ptc.layerWeights.empty())
+                    {
+                        if (ctx.undoSys) ctx.undoSys->snapshotNow();
+                        ptc.layerWeights.clear();   // back to "everything is layer 0"
+                        ptc.weightsDirty = true;
+                    }
+                }
+            }
+
+            // ── Sculpt tools (hidden while painting) ─────────────────────────
+            if (!s_landscapePaint)
+            {
             ImGui::SeparatorText("Sculpt Tool");
 
             const char* toolLabels[] = { "Raise", "Lower", "Smooth",
@@ -4908,6 +5085,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                 tc.sculptHeights.clear();
                 tc.dirty = true;
             }
+            } // end !s_landscapePaint (sculpt tools)
         }
     }
     else
@@ -5730,6 +5908,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 				         HorizonCodeClassPanel::isClassAsset(file->fullPath) ||
 				         InputAssetPanel::isInputAsset(file->fullPath) ||
 				         SkeletalMeshEditorPanel::isSkeletalMeshAsset(file->fullPath) ||
+				         StaticMeshEditorPanel::isStaticMeshAsset(file->fullPath) ||
 				         ParticleGraphEditorPanel::isParticleAsset(file->fullPath) ||
 				         AnimatorStateMachineEditorPanel::isAnimatorStateMachineAsset(file->fullPath))
 				{
@@ -6485,11 +6664,15 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			if (ImGui::Checkbox("Auto-Advance", &env->autoAdvance) && env->autoAdvance)
 				env->dayNightCycle = true;
 			trackEdit();
-			ImGui::BeginDisabled(!env->autoAdvance);
+			// Day length is a property of the WORLD (how long a day lasts once time
+			// runs), not of the switch that starts it — so it stays editable with
+			// Auto-Advance off. Greying it out forced the user to enable the cycle
+			// just to dial the length in, then switch it back off.
 			ImGui::SetNextItemWidth(-1.0f);
 			ImGui::SliderFloat("##cyclelen", &env->cycleSeconds, 5.0f, 600.0f,
 			                   "Full day: %.0f s", ImGuiSliderFlags_Logarithmic); trackEdit();
-			ImGui::EndDisabled();
+			if (!env->autoAdvance)
+				ImGui::TextDisabled("Takes effect once Auto-Advance is on.");
 
 			if (ImGui::TreeNodeEx("Sun & Moon", ImGuiTreeNodeFlags_DefaultOpen)) {
 			ImGui::ColorEdit3("Sun Color",  &env->sunColor.x, ImGuiColorEditFlags_NoInputs); trackEdit();
@@ -6633,6 +6816,7 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			ImGui::SetNextItemWidth(-1.0f);
 			ImGui::SliderFloat("##shootingstars", &env->shootingStars, 0.0f, 1.0f, "Shooting Stars: %.2f"); trackEdit();
 			ImGui::TextDisabled("Occasional meteors streak across the night sky; higher = more frequent. Night only.");
+			ImGui::TextDisabled("Stars, Milky Way & nebula turn with the day-night cycle.");
 
 			ImGui::TreePop(); } // end Stars & Milky Way
 
@@ -6670,7 +6854,8 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			ImGui::SetNextItemWidth(-1.0f);
 			ImGui::SliderFloat("##aurorafrag", &env->auroraFragmentation, 0.0f, 1.0f, "Fragmentation: %.2f"); trackEdit();
 			ImGui::EndDisabled();
-			ImGui::TextDisabled("Stars, Milky Way & nebula turn with the day; aurora drifts.");
+			ImGui::TextDisabled("Night only — fades out as the sun rises. Height sets the band's");
+			ImGui::TextDisabled("altitude, Fragmentation how much the curtain breaks up.");
 			ImGui::TreePop(); } // end Aurora
 		}
 		ImGui::Separator();
@@ -6800,12 +6985,51 @@ void EditorUI::RenderInspector(AppContext& ctx)
 	{
 		if (componentHeader("Mesh", true, removed))
 		{
-			if (m->meshAssetId == HE::UUID{})
-				ImGui::TextDisabled("Asset: (none — renders fallback cube)");
-			else if (ctx.contentManager)
+			// ── Mesh asset slot — drop a StaticMesh .hasset here ──────────────
+			// This was a read-only label, so a Mesh component added from "Add
+			// Component" could never be pointed at an asset: it kept a null UUID
+			// and silently rendered the fallback cube — which reads as "my engine
+			// cube didn't come back" after a save/reload. Same drop-target shape
+			// as the Material slot further down.
 			{
-				const StaticMeshAsset* asset = ctx.contentManager->getStaticMesh(m->meshAssetId);
-				ImGui::Text("Asset: %s", asset ? asset->name.c_str() : "(not loaded)");
+				const StaticMeshAsset* meshAsset =
+					(m->meshAssetId == HE::UUID{} || !ctx.contentManager)
+						? nullptr : ctx.contentManager->getStaticMesh(m->meshAssetId);
+				const std::string meshSlot = (m->meshAssetId == HE::UUID{})
+					? std::string("(none — drop a mesh here; renders fallback cube)")
+					: (meshAsset ? meshAsset->name : std::string("(not loaded)"));
+				ImGui::TextUnformatted("Asset");
+				ImGui::SameLine();
+				ImGui::Button((meshSlot + "##meshslot").c_str());
+				if (ImGui::BeginDragDropTarget())
+				{
+					if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_ASSET_PATH");
+					    p && ctx.contentManager)
+					{
+						const std::string rel = ctx.contentManager->toContentRelativePath(
+							static_cast<const char*>(p->Data));
+						const HE::UUID id = rel.empty() ? HE::UUID{}
+						                                : ctx.contentManager->loadAsset(rel);
+						if (id != HE::UUID{} && ctx.contentManager->getStaticMesh(id))
+						{
+							if (ctx.undoSys) ctx.undoSys->snapshotNow();
+							m->meshAssetId = id;
+						}
+						else
+							Logger::Log(Logger::LogLevel::Warning,
+								"Editor: dropped asset is not a static mesh");
+					}
+					ImGui::EndDragDropTarget();
+				}
+				if (m->meshAssetId != HE::UUID{})
+				{
+					ImGui::SameLine();
+					if (ImGui::SmallButton("Clear##meshslot"))
+					{
+						if (ctx.undoSys) ctx.undoSys->snapshotNow();
+						m->meshAssetId = HE::UUID{};
+					}
+				}
 			}
 			int lod = m->lodBias;
 			if (ImGui::InputInt("LOD Bias", &lod))
@@ -7339,16 +7563,61 @@ void EditorUI::RenderInspector(AppContext& ctx)
 				if (applyShader) mat->customShaderFragGlsl = s_shaderEdit;
 
 				ImGui::Spacing();
-				if (ImGui::Button("Save Material"))
+				// Built-in defaults (DefaultMaterial / DefaultTerrainMaterial) are
+				// virtual "mem://" assets with no file behind them AND a fixed UUID
+				// that initDefaultAssets() re-seeds from hardcoded values on every
+				// start. Saving one in place therefore cannot survive a restart —
+				// that is why a recoloured Landscape came back grey. So for those,
+				// Save writes a NEW project material (fresh UUID + real path under
+				// Content/Materials) and re-points this entity at it; from then on
+				// it round-trips like any other asset.
+				const bool isBuiltIn = mat->path.rfind("mem://", 0) == 0;
+				if (ImGui::Button(isBuiltIn ? "Save as Project Material" : "Save Material"))
 				{
-					const bool ok = ctx.contentManager->saveAsset(*mat);
-					if (ok && ctx.renderer) ctx.renderer->InvalidateMaterial(m->materialAssetId);
-					Logger::Log(ok ? Logger::LogLevel::Info : Logger::LogLevel::Error,
-						("Editor: " + std::string(ok ? "saved" : "failed to save")
-						 + " material '" + mat->name + "'").c_str());
+					if (isBuiltIn)
+					{
+						MaterialAsset copy = *mat;
+						copy.id = HE::UUID{};                  // saveAsset mints a fresh one
+						// Unique "<Name>.hasset" under Content/Materials.
+						std::string base = mat->name.empty() ? std::string("Material") : mat->name;
+						if (base.rfind("Default", 0) == 0) base = base.substr(7); // DefaultTerrainMaterial → TerrainMaterial
+						const std::string dir = ctx.contentManager->contentRoot() + "/Materials";
+						std::error_code mkec; std::filesystem::create_directories(dir, mkec);
+						std::string name = base;
+						for (int n = 1; std::filesystem::exists(dir + "/" + name + ".hasset"); ++n)
+							name = base + std::to_string(n);
+						copy.name = name;
+						copy.path = "Materials/" + name + ".hasset";
+
+						const HE::UUID newId = ctx.contentManager->registerMaterial(std::move(copy));
+						MaterialAsset* saved = ctx.contentManager->getMaterialMutable(newId);
+						const bool ok = saved && ctx.contentManager->saveAsset(*saved);
+						if (ok)
+						{
+							if (ctx.undoSys) ctx.undoSys->snapshotNow();
+							m->materialAssetId = newId;   // this entity now owns a real asset
+							m->dirty = true;
+							ctx.contentRefreshPending = true;
+							if (ctx.renderer) ctx.renderer->InvalidateMaterial(newId);
+						}
+						Logger::Log(ok ? Logger::LogLevel::Info : Logger::LogLevel::Error,
+							("Editor: " + std::string(ok ? "saved built-in material as project asset "
+							                             : "failed to save built-in material as ")
+							 + (saved ? saved->path : std::string())).c_str());
+					}
+					else
+					{
+						const bool ok = ctx.contentManager->saveAsset(*mat);
+						if (ok && ctx.renderer) ctx.renderer->InvalidateMaterial(m->materialAssetId);
+						Logger::Log(ok ? Logger::LogLevel::Info : Logger::LogLevel::Error,
+							("Editor: " + std::string(ok ? "saved" : "failed to save")
+							 + " material '" + mat->name + "'").c_str());
+					}
 				}
 				ImGui::SameLine();
-				ImGui::TextDisabled("(edits apply live; Save writes to disk)");
+				ImGui::TextDisabled(isBuiltIn
+					? "(engine default — Save makes a project copy)"
+					: "(edits apply live; Save writes to disk)");
 			}
 		}
 		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<MaterialComponent>(entity); }
@@ -7556,6 +7825,21 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			if (ImGui::SliderInt("Resolution##tc", &res, 2, 512)) { t->resolution = static_cast<uint32_t>(res); changed = true; }
 			trackEdit();
 			changed |= ImGui::DragFloat("Height Scale##tc", &t->heightScale, 0.5f,  0.0f, 1000.0f,  "%.1f m"); trackEdit();
+
+			// The generated UVs run 0..uvTiling over the WHOLE landscape, so at 1
+			// a texture is stretched across every metre of it. This is the knob
+			// that makes a terrain texture tile instead of smear.
+			changed |= ImGui::DragFloat("Texture Tiling##tc", &t->uvTiling, 0.25f, 0.01f, 4096.0f, "%.2f x"); trackEdit();
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("How often the material's texture repeats across the whole terrain.\n"
+				                  "For a texture that should cover N metres, use Width / N.");
+			ImGui::SameLine();
+			if (ImGui::SmallButton("4 m##tcuv"))
+				{ t->uvTiling = std::max(0.01f, t->sizeX / 4.0f); changed = true; trackEdit(); }
+			// Authored LOD aggressiveness — now persisted with the scene.
+			changed |= ImGui::DragFloat("LOD Distance##tc", &t->lodDistanceScale, 0.05f, 0.1f, 20.0f, "%.2f x"); trackEdit();
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("Higher = keep full detail farther from the camera.");
 
 			// Noise is a one-time creation input: it is baked into editable
 			// heights when the landscape is created, so these are read-only here
