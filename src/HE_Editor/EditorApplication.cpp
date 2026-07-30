@@ -2006,7 +2006,15 @@ void EditorApplication::dumpFrameHeadless()
 			MaterialAsset wallMat;
 			wallMat.type = HE::AssetType::Material;
 			wallMat.name = "GIBleedWall";
-			const bool red = std::string(bl) != "2";
+			// "1"/"2": red/grey floor under the BUILT-IN receiver sphere.
+			// "3"/"4": the same pair, but the floor sits under the GRAPH-material
+			// sphere — the only way to measure whether heLitP itself consumes the
+			// probe field (it does since the DDGI port; before that the graph
+			// sphere was deliberately excluded from this witness).
+			const std::string blMode(bl);
+			const bool red      = (blMode != "2" && blMode != "4");
+			const bool underMat = (blMode == "3" || blMode == "4");
+			const float bleedX  = underMat ? 0.0f : 6.0f;
 			wallMat.baseColor[0] = red ? 1.0f : 0.5f;
 			wallMat.baseColor[1] = red ? 0.05f : 0.5f;
 			wallMat.baseColor[2] = red ? 0.05f : 0.5f;
@@ -2016,19 +2024,23 @@ void EditorApplication::dumpFrameHeadless()
 			// A fully sunlit red floor bounces onto the sphere's underside.
 			auto wall = m_editorWorld->createEntity("GIBleedWall");
 			TransformComponent wtc;
-			wtc.position = tc.position + glm::vec3(6.0f, -4.5f, 0.0f);
+			wtc.position = tc.position + glm::vec3(bleedX, -4.5f, 0.0f);
 			wtc.scale    = glm::vec3(12.0f, 0.5f, 12.0f);
 			reg.emplace<TransformComponent>(wall, wtc);
 			reg.emplace<MeshComponent>(wall, MeshComponent{ HE::kDefaultCubeMeshId });
 			reg.emplace<MaterialComponent>(wall, MaterialComponent{ wallMatId });
-			// Built-in receiver sphere BETWEEN graph sphere and wall — the graph
-			// sphere doesn't consume the probe field (heLitP has no DDGI), so the
-			// bleed must be read off a built-in-shaded surface.
-			auto rcv = m_editorWorld->createEntity("GIBleedReceiver");
-			TransformComponent rtc = tc;
-			rtc.position = tc.position + glm::vec3(6.0f, 0.0f, 0.0f);
-			reg.emplace<TransformComponent>(rcv, rtc);
-			reg.emplace<MeshComponent>(rcv, MeshComponent{ meshId });
+			// Built-in receiver sphere next to the wall — kept as the reference
+			// surface for the "1"/"2" pair. In the "3"/"4" pair the floor is under
+			// the GRAPH sphere instead and the receiver is omitted, so nothing
+			// else can contribute bounce to the measured region.
+			if (!underMat)
+			{
+				auto rcv = m_editorWorld->createEntity("GIBleedReceiver");
+				TransformComponent rtc = tc;
+				rtc.position = tc.position + glm::vec3(6.0f, 0.0f, 0.0f);
+				reg.emplace<TransformComponent>(rcv, rtc);
+				reg.emplace<MeshComponent>(rcv, MeshComponent{ meshId });
+			}
 			Logger::Log(Logger::LogLevel::Info, red
 				? "EditorApplication: HE_DUMP_GIBLEED red wall added"
 				: "EditorApplication: HE_DUMP_GIBLEED grey control wall added");

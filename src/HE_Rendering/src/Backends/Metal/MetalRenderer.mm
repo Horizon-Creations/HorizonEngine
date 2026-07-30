@@ -7852,6 +7852,10 @@ void MetalRenderer::EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& v
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:14];
 	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(ssaoActive ? m_ssaoResult : m_dummyTexture) atIndex:15];
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:15];
+	// The material preamble's DDGI atlases map onto slots 6/7 — the pins the
+	// scene pass already set above for the built-in shaders (Metal caps the
+	// fragment stage at 16 samplers, so they cannot get their own). Nothing to
+	// bind here.
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
 
 	constexpr int kMaxBones = 128;
@@ -8108,6 +8112,10 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:14];
 	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(ssaoActive ? m_ssaoResult : m_dummyTexture) atIndex:15];
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:15];
+	// The material preamble's DDGI atlases map onto slots 6/7 — the pins the
+	// scene pass already set above for the built-in shaders (Metal caps the
+	// fragment stage at 16 samplers, so they cannot get their own). Nothing to
+	// bind here.
 
 	// ── Lights (clamped to the shader's 8) ──────────────────────────────────
 	// Kept at function scope so the transparency pass below can re-bind it after
@@ -8255,6 +8263,26 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 		matLight.fog[1] = GetEnvironment().fogHeightFalloff;
 		matLight.fog[2] = m_skyEnvCube ? 1.0f : 0.0f;
 		matLight.fog[3] = ssaoActive   ? 1.0f : 0.0f;
+		// Weather surface response — the same EnvironmentComponent values the
+		// built-in shaders read (SceneUniforms::weather).
+		matLight.weather[0] = GetEnvironment().wetness;
+		matLight.weather[1] = GetEnvironment().snowAmount;
+		// DDGI probe grid — the SAME values BuildGIUniforms hands the built-in
+		// shaders, so heLitP's indirect diffuse matches theirs instead of
+		// falling back to flat ambient while GI is on.
+		{
+			const GIUniforms gu = BuildGIUniforms(giActive, m_giGridOrigin, kGIProbeSpacing,
+			                                      m_giGridCounts, m_giProbesPerRow,
+			                                      m_giIndirectIntensity);
+			for (int k = 0; k < 4; ++k)
+			{
+				matLight.giGridOrigin[k] = gu.gridOrigin[k];
+				matLight.giGridCounts[k] = gu.gridCounts[k];
+			}
+			matLight.giProbe[0] = gu.params.x;
+			matLight.giProbe[1] = (giActive && m_giIrradianceAtlas && m_giVisibilityAtlas)
+				? 1.0f : 0.0f;
+		}
 		[encoder setFragmentBytes:&matLight length:sizeof(matLight)
 		                  atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
 	}
