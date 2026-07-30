@@ -215,6 +215,79 @@ TEST_CASE("ContentManager texture round-trip")
 	CHECK(loaded->data == tex.data);
 }
 
+// Regression: width/height/channels used to be written as size_t, so the TXMI
+// chunk layout differed between 32- and 64-bit builds. They are uint32 now, but
+// every .hasset a 64-bit build wrote before that change still carries the 8-byte
+// fields and MUST keep loading — HAsset::readTextureHeader tells the two layouts
+// apart by chunk size (legacy ≥ 24 bytes, current 18).
+TEST_CASE("ContentManager loads the legacy (size_t) TXMI texture layout")
+{
+	auto legacyBlob = [](const HE::UUID& id, const char* name, bool withCookTail)
+	{
+		std::vector<uint8_t> meta;
+		HAsset::Writer::appendPOD(meta, static_cast<uint16_t>(HE::AssetType::Texture));
+		HAsset::Writer::appendPOD(meta, id.hi);
+		HAsset::Writer::appendPOD(meta, id.lo);
+		HAsset::Writer::appendString(meta, name);
+		HAsset::Writer::appendString(meta, std::string("mem://") + name);
+
+		std::vector<uint8_t> txmi;
+		HAsset::Writer::appendPOD(txmi, static_cast<uint64_t>(2)); // width  (size_t on 64-bit)
+		HAsset::Writer::appendPOD(txmi, static_cast<uint64_t>(2)); // height
+		HAsset::Writer::appendPOD(txmi, static_cast<uint64_t>(4)); // channels
+		if (withCookTail)
+		{
+			HAsset::Writer::appendPOD(txmi, static_cast<uint32_t>(1)); // mipLevels
+			HAsset::Writer::appendPOD(txmi, static_cast<uint8_t>(0));  // format RGBA8
+			HAsset::Writer::appendPOD(txmi, static_cast<uint8_t>(1));  // srgb
+		}
+		CHECK(txmi.size() == (withCookTail ? 30u : 24u));
+
+		const std::vector<uint8_t> pixels(16, 0xAB);
+		HAsset::Writer w;
+		w.addChunk(HAsset::CHUNK_META, meta.data(), meta.size());
+		w.addChunk(HAsset::CHUNK_TXMI, txmi.data(), txmi.size());
+		w.addChunk(HAsset::CHUNK_PIXL, pixels.data(), pixels.size());
+		return w.toBytes(static_cast<uint16_t>(HE::AssetType::Texture));
+	};
+
+	const HE::UUID cooked{0x7E, 0x11}, preCook{0x7E, 0x12};
+
+	ContentManager cm;
+	REQUIRE(cm.loadAssetFromMemory(legacyBlob(cooked, "legacy_cooked", true)) == cooked);
+	const TextureAsset* t = cm.getTexture(cooked);
+	REQUIRE(t != nullptr);
+	CHECK(t->width    == 2);
+	CHECK(t->height   == 2);
+	CHECK(t->channels == 4);
+	CHECK(t->srgb);                    // cook tail still parsed at the right offset
+	CHECK(t->data.size() == 16);
+
+	// Pre-cook legacy files (24 bytes, no tail) keep their defaults.
+	REQUIRE(cm.loadAssetFromMemory(legacyBlob(preCook, "legacy_precook", false)) == preCook);
+	const TextureAsset* p = cm.getTexture(preCook);
+	REQUIRE(p != nullptr);
+	CHECK(p->width    == 2);
+	CHECK(p->height   == 2);
+	CHECK(p->channels == 4);
+	CHECK(p->mipLevels == 1);
+	CHECK_FALSE(p->srgb);
+
+	// A re-save writes the CURRENT layout — 12 bytes of header + the 6-byte cook
+	// tail. That 18 < 24 is what keeps the legacy discriminator working.
+	TempContentDir dir;
+	ContentManager saver(dir.path.string());
+	TextureAsset out;
+	out.type = HE::AssetType::Texture; out.name = "migrated"; out.path = "migrated.hasset";
+	out.width = 2; out.height = 2; out.channels = 4; out.data = std::vector<uint8_t>(16, 0x01);
+	REQUIRE(saver.saveAsset(out));
+	HAsset::Reader r;
+	REQUIRE(r.open((dir.path / "migrated.hasset").string()));
+	const HAsset::Reader::Chunk* c = r.findChunk(HAsset::CHUNK_TXMI);
+	REQUIRE(c != nullptr);
+	CHECK(c->data.size() == 18);
+}
+
 TEST_CASE("ContentManager unload removes asset")
 {
 	TempContentDir dir;

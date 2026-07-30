@@ -30,6 +30,12 @@
 #include <unordered_map>
 #include <unordered_set>
 
+// File-local alias. It used to arrive transitively from the public
+// HorizonRendering/ShaderManager.h, which declared it at global scope and so
+// leaked `fs` into every consumer of that header.
+namespace fs = std::filesystem;
+
+
 // The engine surface (transform/physics/material/ui/widget/cursor/entity) is a
 // thin promotion of the language-neutral ScriptApi — same behavior, now bundled
 // behind an explicit Ctx and grouped by subsystem, so one call reads the same in

@@ -15,13 +15,14 @@
 #include "ParticleGraphEditorPanel.h"
 #include "AnimatorStateMachineEditorPanel.h"
 #include "EditorAssetTypeCache.h"        // shared path → AssetType sniff (invalidated below)
+#include "EditorWidgets.h"               // shared Content-Browser asset drop slot
 #include "HorizonVersion.h"
 #ifdef __APPLE__
 #include "MacMenuBar.h"   // native system menu bar (replaces the ImGui menu row)
 #endif
 #include <Hpak/ProjectExporter.h>
 #include <HorizonScene/HcCodegen.h>      // HorizonCode → C++ codegen (compile-on-export)
-#include "HcClassList.h"                 // asset enumeration for the codegen source set
+#include "HcEditorUtil.h"                // asset enumeration for the codegen source set
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonScene/LODSystem.h>
 #include <HorizonScene/NavigationSystem.h>
@@ -166,6 +167,12 @@ namespace
 #include <Backends/Metal/MetalRenderer.h>
 #endif
 #include <ImGuizmo.h>
+
+// File-local alias. It used to arrive transitively from the public
+// HorizonRendering/ShaderManager.h, which declared it at global scope and so
+// leaked `fs` into every consumer of that header.
+namespace fs = std::filesystem;
+
 
 // Builds the editor's default dock layout into the given dockspace node. Only
 // called when the imgui.ini did not already provide a layout (DockBuilderGetNode
@@ -4924,14 +4931,21 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 	}
 
 
-    // ── Quick Settings / Landscape panel ────────────────────────────────────
-    // When Landscape mode is active the panel becomes the Landscape tool panel;
-    // otherwise it shows the user-pinned Quick Settings as normal.
+    // ── Landscape / Quick Settings panel ────────────────────────────────────
+    // In Landscape mode this panel IS the Landscape tool panel (the whole
+    // sculpt/paint toolset lives below); otherwise it shows the user-pinned
+    // Quick Settings. The title says which, but everything after "###" is what
+    // ImGui hashes into the window id — keeping it pinned to "Quick Settings"
+    // means the docking layout in imgui.ini and BuildDefaultDockLayout's
+    // DockBuilderDockWindow("Quick Settings") still find this window, across
+    // both the mode switch and this rename.
+    const bool landscapePanel = ctx.editorConfig.mode == EditorMode::Landscape && ctx.world;
     if (ctx.fontHeading) ImGui::PushFont(ctx.fontHeading);
-    ImGui::Begin("Quick Settings");
+    ImGui::Begin(landscapePanel ? "Landscape###Quick Settings"
+                                : "Quick Settings###Quick Settings");
     if (ctx.fontHeading) ImGui::PopFont();
 
-    if (ctx.editorConfig.mode == EditorMode::Landscape && ctx.world)
+    if (landscapePanel)
     {
         // ── Check for an existing terrain entity ─────────────────────────────
         auto& reg = ctx.world->registry();
@@ -5027,28 +5041,16 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                 const std::string label = !lmat ? std::string("(none — drop a material here)")
                                                 : (builtIn ? lmat->name + " (engine default)" : lmat->name);
                 ImGui::SeparatorText("Material");
+                // Full-width button + a "Reset to Engine Default" instead of a Clear,
+                // so only the drop half is the shared widget.
                 ImGui::Button((label + "##lsmat").c_str(), ImVec2(-1.0f, 0.0f));
-                if (ImGui::BeginDragDropTarget())
+                if (const EditorWidgets::AssetDrop drop =
+                        EditorWidgets::acceptAssetDrop(ctx, HE::AssetType::Material, "material"))
                 {
-                    if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_ASSET_PATH");
-                        p && ctx.contentManager)
-                    {
-                        const std::string rel = ctx.contentManager->toContentRelativePath(
-                            static_cast<const char*>(p->Data));
-                        const HE::UUID id = rel.empty() ? HE::UUID{}
-                                                        : ctx.contentManager->loadAsset(rel);
-                        if (id != HE::UUID{} && ctx.contentManager->getMaterial(id))
-                        {
-                            if (ctx.undoSys) ctx.undoSys->snapshotNow();
-                            tmat->materialAssetId = id;
-                            tmat->dirty = true;   // TerrainSystem pushes it to the chunks
-                            if (ctx.renderer) ctx.renderer->InvalidateMaterial(id);
-                        }
-                        else
-                            Logger::Log(Logger::LogLevel::Warning,
-                                "Editor: dropped asset is not a material");
-                    }
-                    ImGui::EndDragDropTarget();
+                    if (ctx.undoSys) ctx.undoSys->snapshotNow();
+                    tmat->materialAssetId = drop.id;
+                    tmat->dirty = true;   // TerrainSystem pushes it to the chunks
+                    if (ctx.renderer) ctx.renderer->InvalidateMaterial(drop.id);
                 }
                 if (!builtIn && lmat)
                 {
@@ -7034,33 +7036,9 @@ void EditorUI::RenderInspector(AppContext& ctx)
 				ImGui::TextDisabled("Drops collide via physics in Play; else die at Ground Y.");
 
 				// Thunder sound — drop an audio .hasset here (played on each strike).
-				{
-					const char* tlabel = (w->thunderSound == HE::UUID{})
-						? "Thunder: (none — drop audio)" : "Thunder: (set)";
-					ImGui::Button(tlabel);
-					if (ImGui::BeginDragDropTarget())
-					{
-						const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_ASSET_PATH");
-						if (p && ctx.contentManager)
-						{
-							const std::string rel = ctx.contentManager->toContentRelativePath(
-								static_cast<const char*>(p->Data));
-							const HE::UUID id = rel.empty()
-								? HE::UUID{} : ctx.contentManager->loadAsset(rel);
-							if (id != HE::UUID{} && ctx.contentManager->getAudio(id))
-							{
-								if (ctx.undoSys) ctx.undoSys->snapshotNow();
-								w->thunderSound = id;
-							}
-						}
-						ImGui::EndDragDropTarget();
-					}
-					if (w->thunderSound != HE::UUID{})
-					{
-						ImGui::SameLine();
-						if (ImGui::SmallButton("Clear##thunder")) w->thunderSound = HE::UUID{};
-					}
-				}
+				EditorWidgets::assetDropSlot(ctx, "Thunder", w->thunderSound,
+					HE::AssetType::Audio, "thunder", "(none — drop audio)",
+					/*rejectNoun=*/nullptr, /*showClear=*/true);
 
 			}
 			ImGui::Separator();
@@ -7122,46 +7100,10 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			// and silently rendered the fallback cube — which reads as "my engine
 			// cube didn't come back" after a save/reload. Same drop-target shape
 			// as the Material slot further down.
-			{
-				const StaticMeshAsset* meshAsset =
-					(m->meshAssetId == HE::UUID{} || !ctx.contentManager)
-						? nullptr : ctx.contentManager->getStaticMesh(m->meshAssetId);
-				const std::string meshSlot = (m->meshAssetId == HE::UUID{})
-					? std::string("(none — drop a mesh here; renders fallback cube)")
-					: (meshAsset ? meshAsset->name : std::string("(not loaded)"));
-				ImGui::TextUnformatted("Asset");
-				ImGui::SameLine();
-				ImGui::Button((meshSlot + "##meshslot").c_str());
-				if (ImGui::BeginDragDropTarget())
-				{
-					if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_ASSET_PATH");
-					    p && ctx.contentManager)
-					{
-						const std::string rel = ctx.contentManager->toContentRelativePath(
-							static_cast<const char*>(p->Data));
-						const HE::UUID id = rel.empty() ? HE::UUID{}
-						                                : ctx.contentManager->loadAsset(rel);
-						if (id != HE::UUID{} && ctx.contentManager->getStaticMesh(id))
-						{
-							if (ctx.undoSys) ctx.undoSys->snapshotNow();
-							m->meshAssetId = id;
-						}
-						else
-							Logger::Log(Logger::LogLevel::Warning,
-								"Editor: dropped asset is not a static mesh");
-					}
-					ImGui::EndDragDropTarget();
-				}
-				if (m->meshAssetId != HE::UUID{})
-				{
-					ImGui::SameLine();
-					if (ImGui::SmallButton("Clear##meshslot"))
-					{
-						if (ctx.undoSys) ctx.undoSys->snapshotNow();
-						m->meshAssetId = HE::UUID{};
-					}
-				}
-			}
+			EditorWidgets::assetDropSlot(ctx, "Asset", m->meshAssetId,
+				HE::AssetType::StaticMesh, "meshslot",
+				"(none — drop a mesh here; renders fallback cube)", "static mesh",
+				/*showClear=*/true);
 			int lod = m->lodBias;
 			if (ImGui::InputInt("LOD Bias", &lod))
 				m->lodBias = static_cast<uint8_t>(std::clamp(lod, 0, 255));
@@ -7192,32 +7134,10 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			ImGui::Checkbox("Receives Shadow", &sm->receivesShadow); trackEdit();
 
 			// Drag-drop asset slot
-			ImGui::TextUnformatted("Asset");
-			ImGui::SameLine();
-			const SkeletalMeshAsset* cur = (sm->meshAssetId != HE::UUID{} && ctx.contentManager)
-			    ? ctx.contentManager->getSkeletalMesh(sm->meshAssetId) : nullptr;
-			const std::string label = cur ? cur->name : (sm->meshAssetId == HE::UUID{} ? "(none)" : "(not loaded)");
-			ImGui::Button((label + "##smslot").c_str());
-			if (ImGui::BeginDragDropTarget())
-			{
-				if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_ASSET_PATH"))
-				{
-					std::string rel = ctx.contentManager
-					    ? ctx.contentManager->toContentRelativePath(static_cast<const char*>(p->Data))
-					    : std::string();
-					if (!rel.empty())
-					{
-						const HE::UUID id = ctx.contentManager->loadAsset(rel);
-						if (id != HE::UUID{} && ctx.contentManager->getSkeletalMesh(id))
-						{
-							if (ctx.undoSys) ctx.undoSys->snapshotNow();
-							sm->meshAssetId = id;
-							sm->dirty = true;
-						}
-					}
-				}
-				ImGui::EndDragDropTarget();
-			}
+			if (EditorWidgets::assetDropSlot(ctx, "Asset", sm->meshAssetId,
+					HE::AssetType::SkeletalMesh, "smslot")
+				== EditorWidgets::SlotAction::Assigned)
+				sm->dirty = true;
 		}
 		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<SkeletalMeshComponent>(entity); }
 	}
@@ -7228,32 +7148,10 @@ void EditorUI::RenderInspector(AppContext& ctx)
 		if (componentHeader("Animator", true, removed))
 		{
 			// Clip asset slot
-			ImGui::TextUnformatted("Clip");
-			ImGui::SameLine();
+			EditorWidgets::assetDropSlot(ctx, "Clip", an->clipAssetId,
+				HE::AssetType::AnimationClip, "animslot");
 			const AnimationClipAsset* cur = (an->clipAssetId != HE::UUID{} && ctx.contentManager)
 				? ctx.contentManager->getAnimationClip(an->clipAssetId) : nullptr;
-			const std::string clipLabel = cur ? cur->name
-				: (an->clipAssetId == HE::UUID{} ? "(none)" : "(not loaded)");
-			ImGui::Button((clipLabel + "##animslot").c_str());
-			if (ImGui::BeginDragDropTarget())
-			{
-				if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_ASSET_PATH"))
-				{
-					std::string rel = ctx.contentManager
-						? ctx.contentManager->toContentRelativePath(static_cast<const char*>(p->Data))
-						: std::string();
-					if (!rel.empty())
-					{
-						const HE::UUID id = ctx.contentManager->loadAsset(rel);
-						if (id != HE::UUID{} && ctx.contentManager->getAnimationClip(id))
-						{
-							if (ctx.undoSys) ctx.undoSys->snapshotNow();
-							an->clipAssetId = id;
-						}
-					}
-				}
-				ImGui::EndDragDropTarget();
-			}
 
 			// Playback controls
 			ImGui::DragFloat("Speed##an",    &an->playbackSpeed, 0.01f, -4.0f, 4.0f, "%.2f"); trackEdit();
@@ -7276,32 +7174,8 @@ void EditorUI::RenderInspector(AppContext& ctx)
 		{
 			auto clipSlot = [&](const char* label, HE::UUID& slotId)
 			{
-				ImGui::TextUnformatted(label);
-				ImGui::SameLine();
-				const AnimationClipAsset* cur = (slotId != HE::UUID{} && ctx.contentManager)
-					? ctx.contentManager->getAnimationClip(slotId) : nullptr;
-				const std::string clipLabel = cur ? cur->name
-					: (slotId == HE::UUID{} ? "(none)" : "(not loaded)");
-				ImGui::Button((clipLabel + "##" + label).c_str());
-				if (ImGui::BeginDragDropTarget())
-				{
-					if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_ASSET_PATH"))
-					{
-						std::string rel = ctx.contentManager
-							? ctx.contentManager->toContentRelativePath(static_cast<const char*>(p->Data))
-							: std::string();
-						if (!rel.empty())
-						{
-							const HE::UUID id = ctx.contentManager->loadAsset(rel);
-							if (id != HE::UUID{} && ctx.contentManager->getAnimationClip(id))
-							{
-								if (ctx.undoSys) ctx.undoSys->snapshotNow();
-								slotId = id;
-							}
-						}
-					}
-					ImGui::EndDragDropTarget();
-				}
+				EditorWidgets::assetDropSlot(ctx, label, slotId,
+					HE::AssetType::AnimationClip, /*idSuffix=*/label);
 			};
 
 			clipSlot("Clip A", ab->clipAId);
@@ -7326,48 +7200,15 @@ void EditorUI::RenderInspector(AppContext& ctx)
 	{
 		if (componentHeader("Animator State Machine", true, removed))
 		{
-			const AnimatorStateMachineAsset* asset = (asm_->stateMachineAssetId == HE::UUID{} || !ctx.contentManager)
-				? nullptr : ctx.contentManager->getAnimatorStateMachine(asm_->stateMachineAssetId);
-			const std::string slotLabel = (asm_->stateMachineAssetId == HE::UUID{})
-				? std::string("(none — drop a state machine here)")
-				: (asset ? asset->name : std::string("(not loaded)"));
-
-			ImGui::TextUnformatted("Asset");
-			ImGui::SameLine();
-			ImGui::Button((slotLabel + "##smslot").c_str());
-			if (ImGui::BeginDragDropTarget())
-			{
-				if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_ASSET_PATH"))
-				{
-					const std::string rel = ctx.contentManager
-						? ctx.contentManager->toContentRelativePath(static_cast<const char*>(p->Data))
-						: std::string();
-					if (!rel.empty())
-					{
-						const HE::UUID id = ctx.contentManager->loadAsset(rel);
-						if (id != HE::UUID{} && ctx.contentManager->getAnimatorStateMachine(id))
-						{
-							if (ctx.undoSys) ctx.undoSys->snapshotNow();
-							asm_->stateMachineAssetId = id;
-							AnimationStateMachineSystem::markConfigDirty(*asm_);
-						}
-						else
-							Logger::Log(Logger::LogLevel::Warning,
-								"Editor: dropped asset is not an animator state machine");
-					}
-				}
-				ImGui::EndDragDropTarget();
-			}
-			if (asm_->stateMachineAssetId != HE::UUID{})
-			{
-				ImGui::SameLine();
-				if (ImGui::SmallButton("Clear##sm"))
-				{
-					if (ctx.undoSys) ctx.undoSys->snapshotNow();
-					asm_->stateMachineAssetId = HE::UUID{};
-					AnimationStateMachineSystem::markConfigDirty(*asm_);
-				}
-			}
+			// Both assigning and clearing re-resolve the state machine's config.
+			// Slot id "asmslot", not "smslot": the Skeletal Mesh section above uses
+			// that one, and an entity with both components would put two items with
+			// the same ImGui id in this window as soon as their labels matched.
+			if (EditorWidgets::assetDropSlot(ctx, "Asset", asm_->stateMachineAssetId,
+					HE::AssetType::AnimatorStateMachine, "asmslot",
+					"(none — drop a state machine here)", "animator state machine",
+					/*showClear=*/true) != EditorWidgets::SlotAction::None)
+				AnimationStateMachineSystem::markConfigDirty(*asm_);
 
 			ImGui::LabelText("Current##sm", "%s",
 				asm_->currentStateName.empty() ? "(none)" : asm_->currentStateName.c_str());
@@ -7389,31 +7230,10 @@ void EditorUI::RenderInspector(AppContext& ctx)
 		if (componentHeader("Property Animator", true, removed))
 		{
 			// Clip drag-drop slot
-			ImGui::TextUnformatted("Clip");
-			ImGui::SameLine();
+			EditorWidgets::assetDropSlot(ctx, "Clip", pa->clipId,
+				HE::AssetType::PropertyAnimClip, "pac");
 			const PropertyAnimClipAsset* cur = (pa->clipId != HE::UUID{} && ctx.contentManager)
 				? ctx.contentManager->getPropertyAnimClip(pa->clipId) : nullptr;
-			const std::string clipLabel = cur ? cur->name : (pa->clipId == HE::UUID{} ? "(none)" : "(not loaded)");
-			ImGui::Button((clipLabel + "##pac").c_str());
-			if (ImGui::BeginDragDropTarget())
-			{
-				if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_ASSET_PATH"))
-				{
-					std::string rel = ctx.contentManager
-						? ctx.contentManager->toContentRelativePath(static_cast<const char*>(p->Data))
-						: std::string();
-					if (!rel.empty())
-					{
-						const HE::UUID id = ctx.contentManager->loadAsset(rel);
-						if (id != HE::UUID{} && ctx.contentManager->getPropertyAnimClip(id))
-						{
-							if (ctx.undoSys) ctx.undoSys->snapshotNow();
-							pa->clipId = id;
-						}
-					}
-				}
-				ImGui::EndDragDropTarget();
-			}
 
 			ImGui::DragFloat("Speed##pa",  &pa->playbackSpeed, 0.01f, -4.0f, 4.0f, "%.2f"); trackEdit();
 			ImGui::DragFloat("Time##pa",   &pa->playbackTime,  0.01f,  0.0f, 999.0f, "%.3f s"); trackEdit();
@@ -7493,44 +7313,16 @@ void EditorUI::RenderInspector(AppContext& ctx)
 			};
 
 			// ── Material asset slot — drop a material .hasset here ────────────
-			const MaterialAsset* asset = (m->materialAssetId == HE::UUID{} || !ctx.contentManager)
-				? nullptr : ctx.contentManager->getMaterial(m->materialAssetId);
-			const std::string slotLabel = (m->materialAssetId == HE::UUID{})
-				? std::string("(none — drop a material here)")
-				: (asset ? asset->name : std::string("(not loaded)"));
-
-			ImGui::TextUnformatted("Asset");
-			ImGui::SameLine();
-			ImGui::Button((slotLabel + "##matslot").c_str());
-			if (ImGui::BeginDragDropTarget())
+			// Assigning also drops the renderer's cached pipeline for the NEW
+			// material; clearing only needs the component re-resolved.
+			if (const EditorWidgets::SlotAction act = EditorWidgets::assetDropSlot(
+					ctx, "Asset", m->materialAssetId, HE::AssetType::Material, "matslot",
+					"(none — drop a material here)", "material", /*showClear=*/true);
+				act != EditorWidgets::SlotAction::None)
 			{
-				if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_ASSET_PATH"))
-				{
-					const std::string rel = toRelative(static_cast<const char*>(p->Data));
-					const HE::UUID id = rel.empty() ? HE::UUID{}
-					                                : ctx.contentManager->loadAsset(rel);
-					if (id != HE::UUID{} && ctx.contentManager->getMaterial(id))
-					{
-						if (ctx.undoSys) ctx.undoSys->snapshotNow();
-						m->materialAssetId = id;
-						m->dirty = true;
-						if (ctx.renderer) ctx.renderer->InvalidateMaterial(id);
-					}
-					else
-						Logger::Log(Logger::LogLevel::Warning,
-							"Editor: dropped asset is not a material");
-				}
-				ImGui::EndDragDropTarget();
-			}
-			if (m->materialAssetId != HE::UUID{})
-			{
-				ImGui::SameLine();
-				if (ImGui::SmallButton("Clear"))
-				{
-					if (ctx.undoSys) ctx.undoSys->snapshotNow();
-					m->materialAssetId = HE::UUID{};
-					m->dirty = true;
-				}
+				m->dirty = true;
+				if (act == EditorWidgets::SlotAction::Assigned && ctx.renderer)
+					ctx.renderer->InvalidateMaterial(m->materialAssetId);
 			}
 
 			// ── Editable slots of the assigned material ──────────────────────
@@ -8036,48 +7828,12 @@ void EditorUI::RenderInspector(AppContext& ctx)
 	{
 		if (componentHeader("Particle System", true, removed))
 		{
-			const ParticleGraphAsset* asset = (ps->particleAssetId == HE::UUID{} || !ctx.contentManager)
-				? nullptr : ctx.contentManager->getParticleGraph(ps->particleAssetId);
-			const std::string slotLabel = (ps->particleAssetId == HE::UUID{})
-				? std::string("(none — drop a particle system here)")
-				: (asset ? asset->name : std::string("(not loaded)"));
-
-			ImGui::TextUnformatted("Asset");
-			ImGui::SameLine();
-			ImGui::Button((slotLabel + "##psslot").c_str());
-			if (ImGui::BeginDragDropTarget())
-			{
-				if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_ASSET_PATH"))
-				{
-					const std::string rel = ctx.contentManager
-						? ctx.contentManager->toContentRelativePath(static_cast<const char*>(p->Data))
-						: std::string();
-					if (!rel.empty())
-					{
-						const HE::UUID id = ctx.contentManager->loadAsset(rel);
-						if (id != HE::UUID{} && ctx.contentManager->getParticleGraph(id))
-						{
-							if (ctx.undoSys) ctx.undoSys->snapshotNow();
-							ps->particleAssetId = id;
-							ParticleSystem::markConfigDirty(*ps);
-						}
-						else
-							Logger::Log(Logger::LogLevel::Warning,
-								"Editor: dropped asset is not a particle system");
-					}
-				}
-				ImGui::EndDragDropTarget();
-			}
-			if (ps->particleAssetId != HE::UUID{})
-			{
-				ImGui::SameLine();
-				if (ImGui::SmallButton("Clear##ps"))
-				{
-					if (ctx.undoSys) ctx.undoSys->snapshotNow();
-					ps->particleAssetId = HE::UUID{};
-					ParticleSystem::markConfigDirty(*ps);
-				}
-			}
+			// Both assigning and clearing re-resolve the emitter config.
+			if (EditorWidgets::assetDropSlot(ctx, "Asset", ps->particleAssetId,
+					HE::AssetType::ParticleSystem, "psslot",
+					"(none — drop a particle system here)", "particle system",
+					/*showClear=*/true) != EditorWidgets::SlotAction::None)
+				ParticleSystem::markConfigDirty(*ps);
 
 			ImGui::Checkbox("Playing##ps", &ps->playing); trackEdit();
 			ImGui::Text("Live: %zu", ps->particles.size());

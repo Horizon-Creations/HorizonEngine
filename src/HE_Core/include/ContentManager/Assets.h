@@ -328,9 +328,13 @@ struct TextureAsset : public RuntimeAsset
 	// 0 as the leading width*height*channels bytes, so appended mips are
 	// backward-compatible (ignored by consumers that don't sample them).
 	std::vector<uint8_t> data;     // raw pixel bytes (RGBA8 unless channels says otherwise)
-	size_t               width    = 0;
-	size_t               height   = 0;
-	size_t               channels = 0;
+	// Fixed-width on purpose: these go into the TXMI chunk verbatim, and as size_t
+	// the on-disk layout differed between 32- and 64-bit builds (a pak written by
+	// one was unreadable by the other). See HAsset::readTextureHeader, which still
+	// reads the old 64-bit layout.
+	uint32_t             width    = 0;
+	uint32_t             height   = 0;
+	uint32_t             channels = 0;
 
 	// Pack-time cook metadata (CHUNK_TXMI tail; absent → the defaults below, so
 	// old assets keep loading unchanged).

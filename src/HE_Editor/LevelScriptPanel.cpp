@@ -2,9 +2,10 @@
 #include <cstdint>
 #include "GameInstancePanel.h"
 #include "HorizonCodeClassPanel.h"
-#include "HcClassList.h"
+#include "HcEditorUtil.h"
 #include "EditorApplication.h"    // AppContext
 #include "EditorAssetTypeCache.h" // shared, invalidatable path → AssetType sniff
+#include "EditorPanelState.h"     // shared per-tab state map
 #include "EditorUndo.h"           // scene-undo snapshots (dirty tracking + undo/redo)
 #include <Diagnostics/Logger.h>
 #include "GraphEditor.h"         // shared node-graph canvas
@@ -895,7 +896,7 @@ struct ClassState
 	std::vector<std::string> events;    // event catalog (lifecycle + player input events)
 	double      eventsScanTime = -1.0;  // last catalog (re)build, ImGui time
 };
-std::map<std::string, ClassState> g_classStates;
+AssetPanelState<ClassState> g_classStates;
 
 // Input.<Action>.* event names for every InputAction asset in the project —
 // the input-event catalog player classes offer. Walks the content dir (cheap
@@ -929,13 +930,9 @@ bool HorizonCodeClassPanel::isClassAsset(const std::string& path)
 	return EditorAssetTypeCache::is(path, HE::AssetType::HorizonCodeClass);
 }
 
-void HorizonCodeClassPanel::forget(const std::string& path) { g_classStates.erase(path); }
+void HorizonCodeClassPanel::forget(const std::string& path) { g_classStates.forget(path); }
 
-bool HorizonCodeClassPanel::isDirty(const std::string& path)
-{
-	auto it = g_classStates.find(path);
-	return it != g_classStates.end() && it->second.dirty;
-}
+bool HorizonCodeClassPanel::isDirty(const std::string& path) { return g_classStates.dirty(path); }
 
 void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath,
                                    const ImVec2& pos, const ImVec2& size)

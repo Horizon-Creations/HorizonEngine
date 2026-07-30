@@ -1,5 +1,46 @@
 #version 450
 
+// ─── DRIFT WARNING: reduced second copy of the GL scene shader ───────────────
+// This file is NOT the reference implementation. The engine's lit scene shader
+// lives twice:
+//
+//   reference : src/HE_Rendering/src/Backends/OpenGL/OpenGLRenderer.cpp
+//               `kUnlitFS`      — the lit (misnamed) scene fragment shader
+//               `kSkyFuncGLSL`  — the shared analytic sky, spliced in at the
+//                                 `//#SKYFUNC#` marker (Metal mirrors both in MSL)
+//   this file : a hand-maintained, feature-reduced port for the Vulkan backend
+//
+// They are edited independently, so the GL/Metal scene shader has moved ahead.
+// Verified against the GL source (audit 1a); everything below is present in
+// `kUnlitFS` / `kSkyFuncGLSL` and MISSING here:
+//
+//   * atmoScatter / atmoRaySphere — the single-scattering atmosphere. The
+//     `skyColor()` below is the OLD hand-tuned gradient (the same reduced copy
+//     as in sky.frag), and it feeds BOTH the ambient IBL and the fog colour, so
+//     ambient light and fog tint differ from GL/Metal, not just the background.
+//   * Cascaded shadow maps — GL has uCascadeVP / uCascadeSplits / uCameraFwd and
+//     `computeShadow()` with planar view-Z cascade selection, plus the
+//     uShadowDebug cascade tint. This file has a single `lightVP` +
+//     `shadowFactor()` (the known D3D11/D3D12/Vulkan single-map limitation).
+//   * Point/spot shadow maps — GL's uLocalShadowMap atlas + uLocalShadowVP +
+//     `localShadowFactor()`. Local lights are unshadowed here unless ray-traced
+//     GI is active and writes the uGILocal mask.
+//   * uSkyEnv — the baked skyColor cubemap GL samples for ambient diffuse and
+//     specular. This file evaluates skyColor() analytically per fragment.
+//   * uAmbient — the flat ambient fill (never-black floor / overcast term).
+//     RenderWorld::ambient never reaches this shader.
+//   * uWetness / uSnow — the weather surface response (wet darken + gloss, snow
+//     cover on up-facing surfaces).
+//
+// Deliberately NOT drift: the GI block (giOctEncode / sampleDDGIIrradiance /
+// uGIShadow / uGILocal) is a byte-for-byte port and must stay in sync with
+// gi_probe.comp and the GL/Metal originals.
+//
+// Audit 1a decision: DOCUMENT the drift, do not port. Until it is generated from
+// one source, a change to the GL scene shader is NOT automatically visible on
+// Vulkan.
+// ─────────────────────────────────────────────────────────────────────────────
+
 layout(location = 0) in vec3 vWorldPos;
 layout(location = 1) in vec3 vNormal;
 layout(location = 2) in vec2 vUV;

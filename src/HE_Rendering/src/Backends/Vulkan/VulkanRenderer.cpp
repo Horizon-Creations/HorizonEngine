@@ -17,71 +17,19 @@
 #include <memory>
 #include <functional>
 #include <Diagnostics/Logger.h>
+#include <HorizonRendering/ClipSpace.h>
+#include <HorizonRendering/LightPacking.h>
+#include <HorizonRendering/RenderConstants.h>
+#include <HorizonRendering/SkyFrameParams.h>
+#include <HorizonRendering/SkyNoise3D.h>
+#include <HorizonRendering/SsaoKernel.h>
 
 static constexpr uint32_t k_maxFramesInFlight = 2;
-
-// Defined in the GI block below; also used by the material-lighting fill.
-namespace { bool vkDominantDirectionalLight(const RenderWorld& rw,
-                                            glm::vec3& towardOut, glm::vec3& colorIntensityOut); }
 
 static void vkCheck(VkResult r, const char* msg)
 {
     if (r != VK_SUCCESS)
         throw std::runtime_error(std::string("Vulkan: ") + msg);
-}
-
-// ─── Sky 3D noise volume bake ───────────────────────────────────────────────
-// CPU-baked RG16 volume the sky's starFbm3 (.r value noise) and worleyFbm
-// (.g cellular) sample for the volumetric clouds. Mirrors OpenGLRenderer's
-// BuildSkyNoise3D exactly — identical math — but serial nested loops instead of
-// std::execution::par_unseq (one-time init; avoids <execution>/<numeric>).
-// Tightly packed: index ((z*n+y)*n+x)*2 into the uint16_t buffer.
-static std::vector<uint16_t> BuildSkyNoise3D(int n)
-{
-    auto hash = [](glm::vec3 p) {
-        p = glm::fract(p * 0.1031f);
-        p += glm::dot(p, glm::vec3(p.z, p.y, p.x) + 31.32f);
-        return glm::fract((p.x + p.y) * p.z);
-    };
-    // Decorrelated per-cell jitter for the Worley feature points (sin-free so it is
-    // bit-deterministic across compilers — both backends bake CPU-side).
-    auto hash3 = [](glm::vec3 c) {
-        glm::vec3 p = glm::fract(c * glm::vec3(0.1031f, 0.1030f, 0.0973f));
-        p += glm::dot(p, glm::vec3(p.y, p.z, p.x) + 33.33f);
-        return glm::fract(glm::vec3((p.x + p.y) * p.z, (p.x + p.z) * p.y, (p.y + p.z) * p.x));
-    };
-    const int kWorleyGrid = 48;   // feature cells per axis across the tile
-    auto worley = [&](glm::vec3 uv) {
-        glm::vec3 pc = uv * static_cast<float>(kWorleyGrid);
-        glm::vec3 id = glm::floor(pc);
-        glm::vec3 fp = pc - id;
-        float f1 = 1e9f;
-        for (int k = -1; k <= 1; ++k)
-            for (int j = -1; j <= 1; ++j)
-                for (int i = -1; i <= 1; ++i)
-                {
-                    glm::vec3 off(static_cast<float>(i), static_cast<float>(j), static_cast<float>(k));
-                    glm::vec3 wrapped = glm::mod(id + off, static_cast<float>(kWorleyGrid)); // seamless tile
-                    glm::vec3 d = (off + hash3(wrapped)) - fp;
-                    f1 = std::min(f1, glm::dot(d, d));   // nearest feature (squared)
-                }
-        return glm::clamp(1.0f - std::sqrt(f1), 0.0f, 1.0f);
-    };
-    std::vector<uint16_t> d(static_cast<size_t>(n) * n * n * 2);
-    const float inv = 1.0f / static_cast<float>(n);
-
-    // Serial nested loops (one-time init): each voxel is fully independent.
-    for (int z = 0; z < n; ++z)
-        for (int y = 0; y < n; ++y)
-            for (int x = 0; x < n; ++x)
-            {
-                const size_t idx = ((static_cast<size_t>(z) * n + y) * n + x) * 2;
-                glm::vec3 uv((x + 0.5f) * inv, (y + 0.5f) * inv, (z + 0.5f) * inv);
-                d[idx + 0] = static_cast<uint16_t>(
-                    glm::clamp(hash(glm::vec3(x, y, z)), 0.0f, 1.0f) * 65535.0f + 0.5f);
-                d[idx + 1] = static_cast<uint16_t>(worley(uv) * 65535.0f + 0.5f);
-            }
-    return d;
 }
 
 namespace
@@ -126,56 +74,6 @@ namespace
     {
         glm::mat4 uVP;
     };
-
-    // The camera projection is built by the shared RenderExtractor with GL
-    // conventions (Y up, depth -1..1). This remaps clip space for Vulkan
-    // (Y down, depth 0..1) so it doesn't depend on how glm was compiled there.
-    const glm::mat4 kVulkanClipFix = glm::mat4(
-        1.0f, 0.0f, 0.0f, 0.0f,
-        0.0f,-1.0f, 0.0f, 0.0f,
-        0.0f, 0.0f, 0.5f, 0.0f,
-        0.0f, 0.0f, 0.5f, 1.0f);
-
-    // ── SSAO kernel + noise helpers ──────────────────────────────────────────
-    // Identical to OpenGL/Metal backends — same seeds produce the same samples.
-    struct SsaoRng {
-        uint32_t s;
-        float next() {
-            s = s * 1664525u + 1013904223u;
-            return float(s >> 8) * (1.0f / 16777216.0f);
-        }
-    };
-
-    static std::vector<glm::vec3> BuildSSAOKernel(int n)
-    {
-        SsaoRng rng{ 0x9E3779B9u };
-        std::vector<glm::vec3> k(n);
-        for (int i = 0; i < n; ++i)
-        {
-            glm::vec3 s(rng.next() * 2.0f - 1.0f,
-                        rng.next() * 2.0f - 1.0f,
-                        rng.next());
-            s = glm::normalize(s) * rng.next();
-            float t = float(i) / float(n);
-            s *= 0.1f + 0.9f * t * t;
-            k[i] = s;
-        }
-        return k;
-    }
-
-    static std::vector<glm::vec4> BuildSSAONoise(int n)
-    {
-        SsaoRng rng{ 0x2545F491u };
-        std::vector<glm::vec4> v(n);
-        for (int i = 0; i < n; ++i)
-            v[i] = glm::vec4(rng.next() * 2.0f - 1.0f,
-                             rng.next() * 2.0f - 1.0f,
-                             0.0f, 0.0f);
-        return v;
-    }
-
-    static constexpr int kSSAOKernelSize = 32;
-    static constexpr int kSSAONoiseSize  = 4; // 4x4 tile
 }
 
 VulkanRenderer::VulkanRenderer()  = default;
@@ -3062,7 +2960,7 @@ void VulkanRenderer::EncodeShadowMap(VkCommandBuffer cmd)
     m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
     if (m_sortedIndices.empty()) return;
 
-    const glm::mat4 lightClip = kVulkanClipFix * m_renderWorld.shadow.viewProj;
+    const glm::mat4 lightClip = HE::kVulkanClipFix * m_renderWorld.shadow.viewProj;
 
     VkClearValue clear{};
     clear.depthStencil = { 1.0f, 0 };
@@ -3663,7 +3561,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
 
     // GL-convention projection from the extractor → Vulkan clip space.
     const glm::mat4 viewProj =
-        kVulkanClipFix * m_renderWorld.camera.projection * m_renderWorld.camera.view;
+        HE::kVulkanClipFix * m_renderWorld.camera.projection * m_renderWorld.camera.view;
 
     // Per-frame UBO for this in-flight slot.
     {
@@ -3679,7 +3577,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
             f.lightColor[i]  = glm::vec4(l.color,     l.intensity);
             f.lightParams[i] = glm::vec4(l.range, 0.0f, 0.0f, 0.0f);
         }
-        f.lightVP       = kVulkanClipFix * m_renderWorld.shadow.viewProj;
+        f.lightVP       = HE::kVulkanClipFix * m_renderWorld.shadow.viewProj;
         f.shadowEnabled = glm::ivec4(m_renderWorld.shadow.enabled ? 1 : 0, 0, 0, 0);
         f.sunDir        = glm::vec4(m_renderWorld.sunDirection, 0.0f);
         f.fog           = glm::vec4(m_environment.fogDensity, m_environment.fogHeightFalloff, 0.0f, 0.0f);
@@ -3713,7 +3611,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         // Dominant directional (NOT the sky-dome sun/raw env colour — the
         // night/cloud lesson from the Metal/GL fill sites) + full light window.
         glm::vec3 matSunDir, matSunColor;
-        vkDominantDirectionalLight(m_renderWorld, matSunDir, matSunColor);
+        m_renderWorld.dominantDirectionalLight(matSunDir, matSunColor);
         lit.sunDir[0] = matSunDir.x;
         lit.sunDir[1] = matSunDir.y;
         lit.sunDir[2] = matSunDir.z;
@@ -3778,14 +3676,12 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                                 0, 1, &m_frameUBO[m_currentFrame].set, 0, nullptr);
 
         const glm::vec3 camPos = m_renderWorld.camera.position;
+        // Shared opaque/blended split + back-to-front order. The split now weighs
+        // the per-instance tint alpha too (this backend used to test dc.opacity
+        // alone, so a particle fading out via its tint was drawn opaque).
         std::vector<const DrawCall*> opaqueDCs, transparentDCs;
-        for (const DrawCall& dc : cmds.drawCalls())
-            (dc.opacity < 0.999f ? transparentDCs : opaqueDCs).push_back(&dc);
-        std::sort(transparentDCs.begin(), transparentDCs.end(),
-            [&](const DrawCall* a, const DrawCall* b) {
-                return glm::length(glm::vec3(a->transform[3]) - camPos) >
-                       glm::length(glm::vec3(b->transform[3]) - camPos);
-            });
+        RenderSorter::partitionByOpacity(cmds.drawCalls(), opaqueDCs, transparentDCs);
+        RenderSorter::sortBackToFront(transparentDCs, camPos);
 
         // A3: real instancing applies to the opaque pass only (transparent keeps the
         // per-instance loop for blend + depth sort). instCursor sub-allocates the
@@ -3813,9 +3709,12 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                 if (m_matShaderLib.resolveShaders(*m_contentManager, dc.materialAssetId,
                                                   matHash, matFrag, matVertBody))
                 {
-                    // Transparent graph materials (opacity < 1, matching the DC classification)
-                    // get a blend-on / depth-write-off pipeline variant.
-                    const bool matTransp = dc.opacity < 0.999f;
+                    // Transparent graph materials get a blend-on / depth-write-off
+                    // pipeline variant. MUST use the same predicate the opaque/blended
+                    // partition above used, or a draw lands in the blended pass with a
+                    // depth-writing pipeline (hence RenderSorter::isTransparent, tint
+                    // alpha included, not a bare dc.opacity test).
+                    const bool matTransp = RenderSorter::isTransparent(dc);
                     VkPipeline matPipe = getOrBuildMaterialPipeline(matHash, matFrag, matVertBody,
                                                                     hdr, matTransp);
                     uint32_t& cursor = m_matDrawCursor[m_currentFrame];
@@ -4224,15 +4123,16 @@ void VulkanRenderer::createSkyPipeline()
     vkCheck(vkCreateDescriptorPool(m_device, &dpci, nullptr, &m_skyDSPool), "sky descriptor pool");
 
     // ── 3D noise volume (RG16: R=value hash, G=Worley) for volumetric clouds ─
-    // Baked CPU-side (mirrors OpenGL/D3D11 BuildSkyNoise3D). Created + uploaded
-    // BEFORE the per-frame descriptor loop so binding 2 references a live view.
+    // Baked CPU-side by the shared HE::BuildSkyNoise3D (the bytes are a
+    // cross-backend contract). Created + uploaded BEFORE the per-frame
+    // descriptor loop so binding 2 references a live view.
     {
 #ifdef NDEBUG
         const int kNoiseN = 256;
 #else
         const int kNoiseN = 64;
 #endif
-        std::vector<uint16_t> noise = BuildSkyNoise3D(kNoiseN);
+        std::vector<uint16_t> noise = HE::BuildSkyNoise3D(kNoiseN);
         const VkDeviceSize dataSize =
             static_cast<VkDeviceSize>(kNoiseN) * kNoiseN * kNoiseN * 4; // RG16 = 4 bytes/texel
 
@@ -4541,28 +4441,38 @@ void VulkanRenderer::drawSky(VkCommandBuffer cmd, uint32_t /*width*/, uint32_t /
     if (!pipe || !m_skyPipelineLayout) return;
     if (!m_environment.skyEnabled) return; // no Sky entity → leave the cleared background
 
-    const glm::mat4 vp = kVulkanClipFix * m_renderWorld.camera.projection * m_renderWorld.camera.view;
+    const glm::mat4 vp = HE::kVulkanClipFix * m_renderWorld.camera.projection * m_renderWorld.camera.view;
+
+    // The one shared EnvironmentSettings → sky-constants translation. sky.frag's
+    // UBO is a REDUCED copy of HE::SkyFrameParams (see the header block in
+    // shaders/sky.frag), so the fields are read out by name instead of memcpy'd —
+    // a blanket copy would misalign every offset past invViewProj.
+    HE::SkyFrameInputs in;
+    in.invViewProj    = glm::inverse(vp);
+    in.sunDir         = glm::normalize(m_renderWorld.sunDirection);
+    in.cameraPos      = m_renderWorld.camera.position;
+    in.time           = m_wallTime;
+    in.hasMoonTexture = (m_moonImage != VK_NULL_HANDLE);
+    const HE::SkyFrameParams p = HE::BuildSkyFrameParams(m_environment, in);
 
     SkyUBOData sky{};
-    sky.invViewProj   = glm::inverse(vp);
-    sky.sunDir        = glm::normalize(m_renderWorld.sunDirection);
-    sky.timeOfDay     = m_environment.timeOfDay;
-    sky.sunColor      = m_environment.sunColor;
-    sky.cloudCoverage = m_environment.cloudCoverage;
-    {
-        // Cloud drift: world-units/sec. The 0.025 factor matches the OpenGL reference
-        // (windSpeed * 0.025) — without it the clouds scroll ~40× too fast.
-        const float rad = m_environment.windDirection * (3.14159265f / 180.0f);
-        sky.wind        = glm::vec3(std::sin(rad), 0.0f, std::cos(rad)) * (m_environment.windSpeed * 0.025f);
-    }
-    sky.time          = m_wallTime;
-    sky.auroraColor   = m_environment.auroraColor;
-    sky.aurora        = m_environment.auroraIntensity;
-    sky.milkyWay      = m_environment.milkyWayIntensity;
-    sky.flash         = m_environment.flash;
-    sky.hasMoonTex    = (m_moonImage != VK_NULL_HANDLE) ? 1 : 0;
-    sky.nebula        = m_environment.nebulaIntensity;
-    sky.nebulaColor   = m_environment.nebulaColor;
+    sky.invViewProj   = p.invViewProj;
+    sky.sunDir        = glm::vec3(p.sunDir);
+    sky.timeOfDay     = p.params.x;
+    sky.sunColor      = glm::vec3(p.sunColor);
+    sky.cloudCoverage = p.params.y;
+    // Cloud drift: world-units/sec, now HE::CloudWindVector. This backend used to
+    // drop the negation on Z (vec3(sin, 0, cos)), drifting the clouds 180° away
+    // from GL/Metal; the shared vector is the GL/Metal form.
+    sky.wind          = glm::vec3(p.wind);
+    sky.time          = p.params.z;
+    sky.auroraColor   = glm::vec3(p.auroraColor);
+    sky.aurora        = p.params.w;
+    sky.milkyWay      = p.auroraColor.w;
+    sky.flash         = p.wind.w;
+    sky.hasMoonTex    = (p.sunDir.w != 0.0f) ? 1 : 0;
+    sky.nebula        = p.nebulaColor.w;
+    sky.nebulaColor   = glm::vec3(p.nebulaColor);
     // sky._pad2 is left zeroed by the SkyUBOData{} value-initialisation above.
 
     if (m_skyUBO[m_currentFrame].mapped)
@@ -5663,29 +5573,6 @@ struct GiProbeUBOData
     glm::vec4 lightPosRange[8], lightColorType[8], lightDirCos[8];
 };
 static_assert(sizeof(GiProbeUBOData) == (6 + 24) * 16, "must match gi_probe.comp's GiProbeUBO");
-
-// Vulkan copy of the dominant-directional pick (see MetalRenderer's
-// dominantDirectionalLight / OpenGL's glDominantDirectionalLight — keep all
-// three in sync): the brightest directional light, colour hard zero when
-// nothing shines (night without moon / full overcast) so the bounce never
-// invents daylight.
-bool vkDominantDirectionalLight(const RenderWorld& rw,
-                                glm::vec3& towardOut, glm::vec3& colorIntensityOut)
-{
-    const LightData* best = nullptr;
-    for (const LightData& l : rw.lights)
-        if (l.type == 0 && l.intensity > 0.0f && (!best || l.intensity > best->intensity))
-            best = &l;
-    if (!best || glm::dot(best->direction, best->direction) < 1e-8f)
-    {
-        towardOut         = glm::normalize(rw.sunDirection);
-        colorIntensityOut = glm::vec3(0.0f);
-        return false;
-    }
-    towardOut         = -glm::normalize(best->direction);
-    colorIntensityOut = best->color * best->intensity;
-    return true;
-}
 } // namespace
 
 // Builds the five GI pipelines + layouts + render passes once (first GI-active
@@ -6433,12 +6320,12 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
     m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
     if (m_sortedIndices.empty()) return;
 
-    const glm::mat4 vp = kVulkanClipFix * m_renderWorld.camera.projection * m_renderWorld.camera.view;
+    const glm::mat4 vp = HE::kVulkanClipFix * m_renderWorld.camera.projection * m_renderWorld.camera.view;
     const uint32_t  fi = m_currentFrame;
     const int curIdx = m_giHistIdx, prevIdx = 1 - curIdx;
 
     glm::vec3 towardLight, lightColorIntensity;
-    vkDominantDirectionalLight(m_renderWorld, towardLight, lightColorIntensity);
+    m_renderWorld.dominantDirectionalLight(towardLight, lightColorIntensity);
 
     // ── Params UBOs (host-visible ring slot for this in-flight frame) ────────
     m_giFrameSeed += 1.0f;
@@ -6447,20 +6334,14 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
     shadowUbo.frame        = glm::vec4(m_giFrameSeed, float(gw), float(gh), float(m_giInstanceCount));
     // First 4 local (point/spot) lights of the same 8-light window the scene
     // shader iterates — scene.frag counts non-directional lights in the SAME
-    // order to index the mask channels, so count every type != 0 light exactly
-    // like its loop does and fill the first 4 slots.
+    // order to index the mask channels, which is exactly what the shared packing
+    // reproduces.
     {
-        int localCount = 0;
-        const int windowCount = std::min(static_cast<int>(m_renderWorld.lights.size()), 8);
-        for (int li = 0; li < windowCount; ++li)
-        {
-            const LightData& l = m_renderWorld.lights[li];
-            if (l.type == 0) continue;
-            if (localCount < 4)
-                shadowUbo.localPosRange[localCount] = glm::vec4(l.position, std::max(l.range, 1e-4f));
-            ++localCount;
-        }
-        shadowUbo.localExtra = glm::vec4(float(std::min(localCount, 4)), 0.0f, 0.0f, 0.0f);
+        const HE::PackedLocalShadowLights ml = HE::BuildMaskedLocalLights(m_renderWorld);
+        static_assert(sizeof(shadowUbo.localPosRange) == sizeof(ml.posRange),
+                      "gi_shadow.comp's local light slots must match HE::kMaxMaskedLocalLights");
+        std::memcpy(shadowUbo.localPosRange, ml.posRange, sizeof(shadowUbo.localPosRange));
+        shadowUbo.localExtra = glm::vec4(float(ml.count), 0.0f, 0.0f, 0.0f);
     }
     if (!uploadGiBuffer(m_giShadowUBO[fi], &shadowUbo, sizeof(shadowUbo),
                         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT)) return;
@@ -6483,17 +6364,15 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
         const float maxDist = glm::length(glm::vec3(m_giGridCounts) * kGiProbeSpacing) + kGiProbeSpacing;
         pu.rayParams  = glm::vec4(maxDist, 0.92f, float(m_giProbeCursor), float(probeBudget));
         pu.skyAmbient = glm::vec4(m_renderWorld.ambient, 0.0f);
-        int lightCount = 0;
-        for (const LightData& l : m_renderWorld.lights)
-        {
-            if (lightCount >= 8) break;
-            if ((l.type != 1 && l.type != 2) || l.intensity <= 0.0f) continue;
-            pu.lightPosRange[lightCount]  = glm::vec4(l.position, std::max(l.range, 1e-4f));
-            pu.lightColorType[lightCount] = glm::vec4(l.color * l.intensity, float(l.type));
-            pu.lightDirCos[lightCount]    = glm::vec4(l.direction, l.spotAngleCos);
-            ++lightCount;
-        }
-        pu.sunDirRadius = glm::vec4(towardLight, float(lightCount));
+        const HE::PackedLightArray pl = HE::BuildPackedLightArray(m_renderWorld);
+        static_assert(sizeof(pu.lightPosRange) == sizeof(pl.posRange),
+                      "gi_probe.comp's light window must match HE::kMaxLightWindow");
+        std::memcpy(pu.lightPosRange,  pl.posRange,  sizeof(pu.lightPosRange));
+        std::memcpy(pu.lightColorType, pl.colorType, sizeof(pu.lightColorType));
+        std::memcpy(pu.lightDirCos,    pl.dirCos,    sizeof(pu.lightDirCos));
+        pu.sunDirRadius = glm::vec4(towardLight, float(pl.count));
+        // .w stays Vulkan-specific plumbing (BLAS instance count for the RT path),
+        // not part of the shared packing.
         pu.sunColor     = glm::vec4(lightColorIntensity, float(m_giInstanceCount));
         if (!uploadGiBuffer(m_giProbeUBO[fi], &pu, sizeof(pu),
                             VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT)) return;
@@ -6941,13 +6820,13 @@ void VulkanRenderer::createSSAOPipeline()
 
     // ── 4x4 noise texture (RGBA32F, NEAREST+REPEAT) ──────────────────────────
     {
-        const auto noise = BuildSSAONoise(kSSAONoiseSize * kSSAONoiseSize);
+        const auto noise = HE::BuildSSAONoiseRGBA(HE::kSsaoNoiseCount);
         const VkDeviceSize noiseBytes = noise.size() * sizeof(glm::vec4);
 
         VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
         ici.imageType   = VK_IMAGE_TYPE_2D;
         ici.format      = VK_FORMAT_R32G32B32A32_SFLOAT;
-        ici.extent      = { (uint32_t)kSSAONoiseSize, (uint32_t)kSSAONoiseSize, 1 };
+        ici.extent      = { (uint32_t)HE::kSsaoNoiseTileSize, (uint32_t)HE::kSsaoNoiseTileSize, 1 };
         ici.mipLevels   = 1;
         ici.arrayLayers = 1;
         ici.samples     = VK_SAMPLE_COUNT_1_BIT;
@@ -7004,7 +6883,7 @@ void VulkanRenderer::createSSAOPipeline()
         VkBufferImageCopy region{};
         region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         region.imageSubresource.layerCount = 1;
-        region.imageExtent = { (uint32_t)kSSAONoiseSize, (uint32_t)kSSAONoiseSize, 1 };
+        region.imageExtent = { (uint32_t)HE::kSsaoNoiseTileSize, (uint32_t)HE::kSsaoNoiseTileSize, 1 };
         vkCmdCopyBufferToImage(tmp, stagingBuf, m_ssaoNoiseTex,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
         ssaoTransition(tmp, m_ssaoNoiseTex,
@@ -7038,15 +6917,15 @@ void VulkanRenderer::createSSAOPipeline()
         vkBindBufferMemory(m_device, m_ssaoUBO, m_ssaoUBOMem, 0);
         vkMapMemory(m_device, m_ssaoUBOMem, 0, kSSAOUBOSize, 0, &m_ssaoUBOPtr);
         // Pre-fill the kernel (static, never changes).
-        const auto kernel = BuildSSAOKernel(kSSAOKernelSize);
+        const auto kernel = HE::BuildSSAOKernel(HE::kSsaoKernelSize);
         // Layout: [mat4 proj(64)] [vec4 noiseScale(16)] [vec4 params(16)] [vec4 kernel[32](512)]
         // We set params/noiseScale at runtime; fill kernel now.
         uint8_t* base = static_cast<uint8_t*>(m_ssaoUBOPtr);
-        std::memcpy(base + 64 + 16 + 16, kernel.data(), kSSAOKernelSize * sizeof(glm::vec3));
+        std::memcpy(base + 64 + 16 + 16, kernel.data(), HE::kSsaoKernelSize * sizeof(glm::vec3));
         // Note: kernel elements are vec3 but the shader expects vec4 (w unused).
         // Expand them to vec4 with w=0.
         // Re-copy as vec4 array.
-        for (int k = kSSAOKernelSize - 1; k >= 0; --k)
+        for (int k = HE::kSsaoKernelSize - 1; k >= 0; --k)
         {
             glm::vec4 kv4(kernel[k], 0.0f);
             std::memcpy(base + 64 + 16 + 16 + k * 16, &kv4, 16);
@@ -7493,18 +7372,18 @@ void VulkanRenderer::runSSAO(VkCommandBuffer cmd, uint32_t w, uint32_t h)
 
     const glm::mat4 view     = m_renderWorld.camera.view;
     const glm::mat4 proj     = m_renderWorld.camera.projection;
-    const glm::mat4 clipProj = kVulkanClipFix * proj; // clip-space proj (no view)
-    const glm::mat4 vp       = kVulkanClipFix * proj * view;
+    const glm::mat4 clipProj = HE::kVulkanClipFix * proj; // clip-space proj (no view)
+    const glm::mat4 vp       = HE::kVulkanClipFix * proj * view;
 
     // ── Update SSAO UBO (proj, noiseScale, params) ───────────────────────────
     if (m_ssaoUBOPtr)
     {
         uint8_t* base = static_cast<uint8_t*>(m_ssaoUBOPtr);
-        // [0..63]:  uSSAOProj = kVulkanClipFix * camera.projection
+        // [0..63]:  uSSAOProj = HE::kVulkanClipFix * camera.projection
         std::memcpy(base, &clipProj, 64);
         // [64..79]: uSSAONoiseScale.xy = viewport / noiseSize
-        glm::vec4 noiseScale(float(w) / float(kSSAONoiseSize),
-                             float(h) / float(kSSAONoiseSize), 0.0f, 0.0f);
+        glm::vec4 noiseScale(float(w) / float(HE::kSsaoNoiseTileSize),
+                             float(h) / float(HE::kSsaoNoiseTileSize), 0.0f, 0.0f);
         std::memcpy(base + 64, &noiseScale, 16);
         // [80..95]: uSSAOParams = (radius, bias, intensity, 0)
         glm::vec4 params(m_ssaoRadius, m_ssaoBias, m_ssaoIntensity, float(m_ssaoMethod));

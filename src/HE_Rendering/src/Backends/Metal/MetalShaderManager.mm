@@ -1,7 +1,16 @@
 #include "Backends/Metal/MetalShaderManager.h"
+// Pulled in directly rather than transitively through ShaderManager.h: a global
+// `namespace fs` alias in a PUBLIC header leaks into every consumer, so the alias
+// lives here, file-local.
+#include <Diagnostics/Logger.h>
+#include <filesystem>
+#include <fstream>
 #include <sstream>
+#include <string>
 
 #import <Metal/Metal.h>
+
+namespace fs = std::filesystem;
 
 MetalShaderManager::~MetalShaderManager()
 {

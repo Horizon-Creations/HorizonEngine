@@ -2,21 +2,24 @@
 #include <Window/Window.h>
 #include <ContentManager/ContentManager.h>
 #include <HorizonRendering/ParticleShaderTemplates.h>
+#include <HorizonRendering/ClipSpace.h>       // HE::kMetalClipFix
+#include <HorizonRendering/LightPacking.h>    // HE::BuildPackedLightArray / BuildMaskedLocalLights
+#include <HorizonRendering/SkyFrameParams.h>  // HE::SkyFrameParams / BuildSkyFrameParams (folds in CloudWindVector)
+#include <HorizonRendering/SkyNoise3D.h>      // HE::BuildSkyNoise3D
+#include <HorizonRendering/SsaoKernel.h>      // HE::BuildSSAOKernel / BuildSSAONoise
 #include <MaterialGraph/MaterialGraph.h> // kMatMaxGraphTextures
 #include <Renderer/UIFont.h>             // shared baked UI font atlas
 #include <material/PreviewMesh.h> // shared preview primitives (sphere/cube/plane)
 #include <Diagnostics/Logger.h>
-#if defined(HE_HAVE_SHADERC)
-#include "ShaderCompiler.h" // he::shaderc — canonical GLSL → MSL (material-system M1)
-#include <cstdlib>
-#endif
+#include <cstdlib> // std::getenv / atoi / atof (HE_* debug + capture knobs)
 #include <Diagnostics/EngineProfiler.h>
 #include <SDL3/SDL.h>
 #include <stdexcept>
 #include <vector>
 #include <algorithm>
+#include <fstream> // HE_DUMP_* headless capture writes PNG/PPM dumps straight to disk
 #include <glm/glm.hpp>
-#include <glm/gtc/matrix_transform.hpp> // glm::translate (shaderc test mesh)
+#include <glm/gtc/matrix_transform.hpp> // glm::lookAt / glm::perspective (preview cameras)
 #include <glm/gtc/type_ptr.hpp>         // glm::make_mat4 (skeletal-preview bone overlay)
 #include <simd/simd.h>
 
@@ -144,57 +147,6 @@ void MetalRenderer::SamplePoint(void* encoderPtr, const char* name)
 			              atSampleIndex:slot
 			                withBarrier:NO];
 	}
-}
-
-// Builds a tiling NxNxN value-noise volume whose lattice values are exactly the
-// sky shader's starHash(i,j,k); the shader pre-smoothsteps the sample coordinate
-// so hardware trilinear filtering reproduces the old smoothstep value noise. The G
-// channel is a tiling inverted-Worley field whose fBm is the billowy cumulus cloud
-// shape. Identical to the OpenGL backend's BuildSkyNoise3D (interleaved RG16).
-static std::vector<uint16_t> BuildSkyNoise3D(int n)
-{
-	auto hash = [](glm::vec3 p) {
-		p = glm::fract(p * 0.1031f);
-		p += glm::dot(p, glm::vec3(p.z, p.y, p.x) + 31.32f);
-		return glm::fract((p.x + p.y) * p.z);
-	};
-	// Decorrelated per-cell jitter for the Worley feature points (sin-free so it is
-	// bit-deterministic across compilers — both backends bake CPU-side).
-	auto hash3 = [](glm::vec3 c) {
-		glm::vec3 p = glm::fract(c * glm::vec3(0.1031f, 0.1030f, 0.0973f));
-		p += glm::dot(p, glm::vec3(p.y, p.z, p.x) + 33.33f);
-		return glm::fract(glm::vec3((p.x + p.y) * p.z, (p.x + p.z) * p.y, (p.y + p.z) * p.x));
-	};
-	const int kWorleyGrid = 48;   // feature cells per axis across the tile
-	auto worley = [&](glm::vec3 uv) {
-		glm::vec3 pc = uv * static_cast<float>(kWorleyGrid);
-		glm::vec3 id = glm::floor(pc);
-		glm::vec3 fp = pc - id;
-		float f1 = 1e9f;
-		for (int k = -1; k <= 1; ++k)
-			for (int j = -1; j <= 1; ++j)
-				for (int i = -1; i <= 1; ++i)
-				{
-					glm::vec3 off(static_cast<float>(i), static_cast<float>(j), static_cast<float>(k));
-					glm::vec3 wrapped = glm::mod(id + off, static_cast<float>(kWorleyGrid)); // seamless tile
-					glm::vec3 d = (off + hash3(wrapped)) - fp;
-					f1 = std::min(f1, glm::dot(d, d));   // nearest feature (squared)
-				}
-		return glm::clamp(1.0f - std::sqrt(f1), 0.0f, 1.0f);
-	};
-	std::vector<uint16_t> d(static_cast<size_t>(n) * n * n * 2);
-	const float inv = 1.0f / static_cast<float>(n);
-	for (int z = 0; z < n; ++z)
-		for (int y = 0; y < n; ++y)
-			for (int x = 0; x < n; ++x)
-			{
-				size_t idx = ((static_cast<size_t>(z) * n + y) * n + x) * 2;
-				glm::vec3 uv((x + 0.5f) * inv, (y + 0.5f) * inv, (z + 0.5f) * inv);
-				d[idx + 0] = static_cast<uint16_t>(
-					glm::clamp(hash(glm::vec3(x, y, z)), 0.0f, 1.0f) * 65535.0f + 0.5f);
-				d[idx + 1] = static_cast<uint16_t>(worley(uv) * 65535.0f + 0.5f);
-			}
-	return d;
 }
 
 // CPU port of the shader skyColor(dir,sunDir) — bakes the image-based-ambient
@@ -3715,41 +3667,6 @@ static GIUniforms BuildGIUniforms(bool active, const glm::vec3& gridOrigin, floa
 	return gi;
 }
 
-// The light GI shadows/bounces along: the BRIGHTEST directional light in the
-// extracted set — the same pick RenderExtractor's shadow fit uses, so GI
-// darkens exactly the light fragmentMain's directional loop shades with.
-// m_renderWorld.sunDirection is the SKY-DOME sun (day-night cycle), which sits
-// below the horizon at night and never tracks a user-placed key light: rays
-// traced toward it zero the actual directional light almost everywhere (scene
-// goes black) and pass only on surfaces facing the below-horizon sun
-// ("lighting on the wrong side" — e.g. a bright cube UNDERSIDE at night).
-// In day-night scenes the sun/moon are themselves lights in rw.lights
-// (envRole 1/2), so this pick still follows them — the fallback only fires in
-// scenes with no directional light at all, where the mask multiplies nothing.
-static bool dominantDirectionalLight(const RenderWorld& rw,
-                                       glm::vec3& towardOut, glm::vec3& colorIntensityOut)
-{
-	const LightData* best = nullptr;
-	for (const LightData& l : rw.lights)
-		if (l.type == 0 && l.intensity > 0.0f && (!best || l.intensity > best->intensity))
-			best = &l;
-	if (!best || glm::dot(best->direction, best->direction) < 1e-8f)
-	{
-		// No directional light shining right now (night without a moon, full
-		// overcast zeroing sun AND moon, or a light-less scene). The direction
-		// is only a harmless placeholder (the shadow mask multiplies nothing),
-		// but the colour MUST be zero: falling back to the environment's
-		// sunColor*sunIntensity here would feed the probe bounce full DAYTIME
-		// sunlight from below the horizon — meshes visibly sun-lit at night.
-		towardOut         = glm::normalize(rw.sunDirection);
-		colorIntensityOut = glm::vec3(0.0f);
-		return false;
-	}
-	towardOut         = -glm::normalize(best->direction); // LightData.direction = light travel direction
-	colorIntensityOut = best->color * best->intensity;
-	return true;
-}
-
 // Matches the MSL GIPosUniforms / GIShadowParams / GITemporalParams structs
 // (kGIShadowMSL, used only by EncodeGIShadowRays).
 struct GIPosUniformsCPU { glm::mat4 mvp; glm::mat4 model; };
@@ -3782,41 +3699,12 @@ struct GIProbeParamsCPU
 };
 static_assert(sizeof(GIProbeParamsCPU) == (6 + 24) * 16, "GIProbeParamsCPU must match the MSL GIProbeParams layout");
 
-// Matches the MSL SkyParams struct.
-struct SkyParams
-{
-	glm::mat4 invViewProj = glm::mat4(1.0f);
-	glm::vec4 sunDir      = glm::vec4(0.0f, 1.0f, 0.0f, 0.0f);
-	glm::vec4 sunColor    = glm::vec4(1.0f);
-	glm::vec4 params      = glm::vec4(0.0f); // x = timeOfDay (cloud scroll), y = coverage, z = wall-clock time, w = aurora
-	glm::vec4 nebulaColor = glm::vec4(0.36f, 0.60f, 1.00f, 0.5f); // xyz = colour, w = nebula intensity
-	glm::vec4 auroraColor = glm::vec4(0.25f, 0.95f, 0.50f, 0.6f); // xyz = colour, w = milky-way intensity
-	glm::vec4 wind        = glm::vec4(0.0f); // xyz = horizontal cloud drift (world units / s); w = lightning flash
-	// ── Night-sky / cloud overhaul (mirrors the GL sky uniforms) ──────────────────
-	glm::vec4 cameraPos      = glm::vec4(0.0f);                      // xyz = camera world pos, w = cloudMode (0 dome / 1 3D)
-	glm::vec4 cloud          = glm::vec4(200.0f, 1.0f, 0.6f, 0.0f);  // height, density, fluffiness, contrailAmount
-	glm::vec4 cloudTint      = glm::vec4(1.0f, 1.0f, 1.0f, 0.0f);    // xyz = tint, w = cirrusAmount
-	glm::vec4 cirrus         = glm::vec4(0.0f, 0.18f, 0.4f, 0.0f);   // cirrusSeed, auroraHeight, auroraFragmentation, nebulaSeed
-	glm::vec4 nebulaColor2   = glm::vec4(1.00f, 0.60f, 0.28f, 1.0f); // xyz = colour 2, w = nebula quality 0/1/2
-	glm::vec4 nebulaColor3   = glm::vec4(0.90f, 0.30f, 0.16f, 0.0f); // xyz = colour 3
-	glm::vec4 auroraColorTop = glm::vec4(0.62f, 0.26f, 0.95f, 0.0f); // xyz = aurora top colour
-	glm::vec4 starColor      = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f);    // xyz = tint, w = brightness
-	glm::vec4 star           = glm::vec4(1.0f, 0.5f, 0.5f, 1.0f);    // size, sizeVariation, density, glow
-	glm::vec4 star2          = glm::vec4(0.6f, 0.0f, 0.0f, 0.0f);    // twinkle, cloudQuality, lowResClouds, rain
-	glm::vec4 neb2           = glm::vec4(0.5f, 0.0f, 0.0f, 0.0f);    // x = nebulaCoverage
-};
-// Byte layout must stay identical to the MSL SkyParams (mat4 + 17×float4): the whole
-// struct is uploaded via setFragmentBytes(&p, sizeof(p)). Guard against silent drift.
-static_assert(sizeof(SkyParams) == 64 + 17 * 16, "SkyParams must match the MSL layout (336 bytes)");
-
-// Remaps the extractor's GL-convention light projection (depth -1..1) to Metal
-// clip space (depth 0..1). Metal NDC y is up like GL, so no y flip here — the
-// flip happens when sampling (texture origin is top-left).
-static const glm::mat4 kMetalClipFix = glm::mat4(
-	1.0f, 0.0f, 0.0f, 0.0f,
-	0.0f, 1.0f, 0.0f, 0.0f,
-	0.0f, 0.0f, 0.5f, 0.0f,
-	0.0f, 0.0f, 0.5f, 1.0f);
+// The MSL SkyParams twin (mat4 + 17×float4, with the byte-layout static_assert) is
+// HE::SkyFrameParams in <HorizonRendering/SkyFrameParams.h>, and the one
+// EnvironmentSettings → sky-constants translation is HE::BuildSkyFrameParams.
+// The GL-clip → Metal-clip depth remap (0..1) is HE::kMetalClipFix in
+// <HorizonRendering/ClipSpace.h>. Metal NDC y is up like GL, so it holds no y flip
+// — that flip happens when SAMPLING (texture origin is top-left).
 
 MetalRenderer::MetalRenderer()  = default;
 MetalRenderer::~MetalRenderer() = default;
@@ -3963,7 +3851,6 @@ void MetalRenderer::Shutdown()
 	m_giProbeCount        = 0;
 	m_giProbeUpdateCursor = 0;
 	if (m_tonemapPipeline)      { CFBridgingRelease(m_tonemapPipeline);      m_tonemapPipeline = nullptr; }
-	if (m_shadercDemoPipeline)  { CFBridgingRelease(m_shadercDemoPipeline);  m_shadercDemoPipeline = nullptr; }
 	for (auto& [k, pso] : m_materialPipelineCache) if (pso) CFBridgingRelease(pso);
 	m_materialPipelineCache.clear();
 	for (auto& [k, pso] : m_particlePipelineCache) if (pso) CFBridgingRelease(pso);
@@ -3975,8 +3862,6 @@ void MetalRenderer::Shutdown()
 	if (m_previewVB)       { CFBridgingRelease(m_previewVB);       m_previewVB = nullptr; }
 	if (m_previewIB)       { CFBridgingRelease(m_previewIB);       m_previewIB = nullptr; }
 	m_previewSize = 0;
-	if (m_shadercTestVB)        { CFBridgingRelease(m_shadercTestVB);        m_shadercTestVB = nullptr; }
-	if (m_shadercTestIB)        { CFBridgingRelease(m_shadercTestIB);        m_shadercTestIB = nullptr; }
 	if (m_fxaaPipeline)         { CFBridgingRelease(m_fxaaPipeline);         m_fxaaPipeline = nullptr; }
 	if (m_uiPipeline)           { CFBridgingRelease(m_uiPipeline);           m_uiPipeline = nullptr; }
 	if (m_uiFontTexture)        { CFBridgingRelease(m_uiFontTexture);        m_uiFontTexture = nullptr; }
@@ -4022,35 +3907,9 @@ void MetalRenderer::Shutdown()
 
 // ─── Pipeline / mesh setup ────────────────────────────────────────────────────
 
-// Deterministic [0,1) RNG so this backend builds the *identical* SSAO kernel and
-// rotation noise as the GL backend — a prerequisite for GL == Metal parity.
-struct SsaoRng { uint32_t s; float next() { s = s * 1664525u + 1013904223u; return float(s >> 8) * (1.0f / 16777216.0f); } };
-
-// Cosine-ish hemisphere kernel oriented to +Z, packed toward the origin so close
-// occluders dominate. Identical to the OpenGL backend's BuildSSAOKernel.
-static std::vector<glm::vec3> BuildSSAOKernel(int n)
-{
-	SsaoRng rng{ 0x9E3779B9u };
-	std::vector<glm::vec3> k(n);
-	for (int i = 0; i < n; ++i)
-	{
-		glm::vec3 s(rng.next() * 2.0f - 1.0f, rng.next() * 2.0f - 1.0f, rng.next());
-		s = glm::normalize(s) * rng.next();
-		float t = static_cast<float>(i) / static_cast<float>(n);
-		s *= 0.1f + 0.9f * t * t;
-		k[i] = s;
-	}
-	return k;
-}
-// 4×4 tile of random tangent-plane rotation vectors (z = 0). Identical to GL.
-static std::vector<glm::vec3> BuildSSAONoise(int n)
-{
-	SsaoRng rng{ 0x2545F491u };
-	std::vector<glm::vec3> v(n);
-	for (int i = 0; i < n; ++i)
-		v[i] = glm::vec3(rng.next() * 2.0f - 1.0f, rng.next() * 2.0f - 1.0f, 0.0f);
-	return v;
-}
+// The SSAO kernel + 4×4 rotation-noise tile are HE::BuildSSAOKernel /
+// HE::BuildSSAONoise in <HorizonRendering/SsaoKernel.h> — one deterministic
+// generator for every backend, which is what makes GL == Metal == D3D == Vulkan.
 
 void MetalRenderer::SetDebugLines(const std::vector<DebugLine>& lines)
 {
@@ -4134,7 +3993,7 @@ void MetalRenderer::EncodeDebugLines(void* renderEncoderPtr, const glm::mat4& vi
 		}
 
 		// Apply Metal's NDC fix (same as scene pass)
-		glm::mat4 vp = kMetalClipFix * viewProj;
+		glm::mat4 vp = HE::kMetalClipFix * viewProj;
 
 		[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_debugLinePipeline];
 		[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
@@ -4357,7 +4216,7 @@ void MetalRenderer::CreateScenePipeline()
 		// once on the CPU. RG16Unorm (R=value noise, G=Worley billows) + linear +
 		// repeat so it tiles seamlessly.
 		constexpr int kNoiseN = 256;
-		const std::vector<uint16_t> noise = BuildSkyNoise3D(kNoiseN);
+		const std::vector<uint16_t> noise = HE::BuildSkyNoise3D(kNoiseN);
 		MTLTextureDescriptor* noiseDesc = [[MTLTextureDescriptor alloc] init];
 		noiseDesc.textureType = MTLTextureType3D;
 		noiseDesc.pixelFormat = MTLPixelFormatRG16Unorm;
@@ -4466,7 +4325,7 @@ void MetalRenderer::CreateScenePipeline()
 		m_ssaoNoiseSampler = (void*)CFBridgingRetain([device newSamplerStateWithDescriptor:nsDesc]);
 
 		// 4×4 rotation-noise texture (RGBA32F so the values match GL's bit-for-bit).
-		const std::vector<glm::vec3> ssaoNoise = BuildSSAONoise(16);
+		const std::vector<glm::vec3> ssaoNoise = HE::BuildSSAONoise(16);
 		float ssaoNoisePx[16 * 4];
 		for (int i = 0; i < 16; ++i)
 		{ ssaoNoisePx[i*4+0] = ssaoNoise[i].x; ssaoNoisePx[i*4+1] = ssaoNoise[i].y; ssaoNoisePx[i*4+2] = 0.0f; ssaoNoisePx[i*4+3] = 0.0f; }
@@ -4569,7 +4428,7 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 		{
 			m_culler.cull(m_renderWorld, viewProj, m_visible);
 			m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
-			const glm::mat4 lightClip = kMetalClipFix * viewProj;
+			const glm::mat4 lightClip = HE::kMetalClipFix * viewProj;
 
 			MTLRenderPassDescriptor* sp = [MTLRenderPassDescriptor renderPassDescriptor];
 			sp.depthAttachment.texture       = (__bridge id<MTLTexture>)target;
@@ -4709,9 +4568,9 @@ void* MetalRenderer::BuildBLAS(const GpuMesh& mesh)
 // MTLBuffers; instances are a flat per-frame buffer. Mirrors the GL 4.3 port's
 // BuildGiBlas/UpdateGiAccel structure.
 
-MetalRenderer::GiSwBlasRange MetalRenderer::BuildGiSwBlas(const HE::UUID& meshId)
+MetalRenderer::GISwBlasRange MetalRenderer::BuildGISwBlas(const HE::UUID& meshId)
 {
-	GiSwBlasRange range;
+	GISwBlasRange range;
 	if (!m_contentManager) return range;
 	const StaticMeshAsset* asset = m_contentManager->getStaticMesh(meshId);
 	if (!asset || asset->indices.empty()) return range;
@@ -4739,23 +4598,23 @@ MetalRenderer::GiSwBlasRange MetalRenderer::BuildGiSwBlas(const HE::UUID& meshId
 void MetalRenderer::EncodeGISwAccelBuild()
 {
 	// Same caster filter as the HW TLAS: castsShadow, unculled.
-	std::vector<GiSwInstanceCPU> instances;
+	std::vector<GISwInstanceCPU> instances;
 	instances.reserve(m_renderWorld.objects.size());
-	auto resolveSwRange = [&](const HE::UUID& id) -> GiSwBlasRange
+	auto resolveSwRange = [&](const HE::UUID& id) -> GISwBlasRange
 	{
 		auto it = m_giSwBlasCache.find(id);
 		if (it == m_giSwBlasCache.end())
-			it = m_giSwBlasCache.emplace(id, BuildGiSwBlas(id)).first;
+			it = m_giSwBlasCache.emplace(id, BuildGISwBlas(id)).first;
 		return it->second;
 	};
 	for (RenderObject& obj : m_renderWorld.objects)
 	{
 		if (!obj.castsShadow) continue;
 		// Default-cube fallback — must match the draw loops (see the HW path).
-		GiSwBlasRange range = resolveSwRange(obj.meshAssetId);
+		GISwBlasRange range = resolveSwRange(obj.meshAssetId);
 		if (!range.valid) range = resolveSwRange(HE::kDefaultCubeMeshId);
 		if (!range.valid) continue;
-		GiSwInstanceCPU inst;
+		GISwInstanceCPU inst;
 		inst.invTransform = glm::inverse(obj.transform);
 		inst.baseColor    = glm::vec4(obj.baseColor, 1.0f);
 		inst.nodeOffset   = range.nodeOffset;
@@ -4786,7 +4645,7 @@ void MetalRenderer::EncodeGISwAccelBuild()
 		// reasoning as the HW TLAS instance buffer — see the member comment).
 		RetireGIObject(m_giSwInstanceBuf); m_giSwInstanceBuf = nullptr;
 		id<MTLBuffer> ib = [device newBufferWithBytes:instances.data()
-		                                       length:instances.size() * sizeof(GiSwInstanceCPU)
+		                                       length:instances.size() * sizeof(GISwInstanceCPU)
 		                                      options:MTLResourceStorageModeShared];
 		if (ib) m_giSwInstanceBuf = (void*)CFBridgingRetain(ib);
 	}
@@ -5138,7 +4997,7 @@ void MetalRenderer::EncodeGIShadowRays(void* cmdBufPtr, int width, int height)
 	// [0,w] clip range and drops out of the G-buffer. The temporal reprojection
 	// below keeps using the UNfixed viewProj: kMetalClipFix only rescales z, and
 	// giShadowTemporal's ndc math uses clip.xy/clip.w exclusively.
-	const glm::mat4 viewProjRaster = kMetalClipFix * viewProj;
+	const glm::mat4 viewProjRaster = HE::kMetalClipFix * viewProj;
 
 	@autoreleasepool
 	{
@@ -5188,31 +5047,22 @@ void MetalRenderer::EncodeGIShadowRays(void* cmdBufPtr, int width, int height)
 		GIShadowParamsCPU sp{};
 		// Trace toward the brightest directional light — the light fragmentMain's
 		// loop actually shades with — NOT the sky-dome sunDirection (see
-		// dominantDirectionalLight's comment for the night-scene failure mode).
+		// RenderWorld::dominantDirectionalLight's comment for the night-scene failure mode).
 		glm::vec3 towardLight, lightColorIntensity;
-		dominantDirectionalLight(m_renderWorld, towardLight, lightColorIntensity);
+		m_renderWorld.dominantDirectionalLight(towardLight, lightColorIntensity);
 		sp.sunDirRadius = glm::vec4(towardLight, glm::radians(m_giLightRadius));
 		m_giShadowFrameSeed += 1.0f;
 		sp.frame = glm::vec4(m_giShadowFrameSeed, static_cast<float>(width), static_cast<float>(height),
 		                     static_cast<float>(m_giSwInstanceCount));
 		// First 4 local (point/spot) lights of the same 8-light window the scene
 		// shader iterates — fragmentMain counts non-directional lights in the
-		// SAME order to index the mask channels.
+		// SAME order to index the mask channels (shared with every backend).
 		{
-			// Count EVERY non-directional light exactly like fragmentMain's loop
-			// does (its channel index is a plain counter over type != 0), fill
-			// the first 4 slots.
-			int localCount = 0;
-			const int windowCount = std::min(static_cast<int>(m_renderWorld.lights.size()), 8);
-			for (int li = 0; li < windowCount; ++li)
-			{
-				const LightData& l = m_renderWorld.lights[li];
-				if (l.type == 0) continue;
-				if (localCount < 4)
-					sp.localPosRange[localCount] = glm::vec4(l.position, std::max(l.range, 1e-4f));
-				++localCount;
-			}
-			sp.extra = glm::vec4(static_cast<float>(std::min(localCount, 4)), 0.0f, 0.0f, 0.0f);
+			const HE::PackedLocalShadowLights lm = HE::BuildMaskedLocalLights(m_renderWorld);
+			static_assert(HE::kMaxMaskedLocalLights == 4, "GIShadowParams has 4 mask channels");
+			for (int i = 0; i < HE::kMaxMaskedLocalLights; ++i)
+				sp.localPosRange[i] = lm.posRange[i];
+			sp.extra = glm::vec4(static_cast<float>(lm.count), 0.0f, 0.0f, 0.0f);
 		}
 		[cenc setTexture:(__bridge id<MTLTexture>)m_giGBufPosTex atIndex:0];
 		[cenc setTexture:(__bridge id<MTLTexture>)m_giGBufNormTex atIndex:1];
@@ -5458,23 +5308,21 @@ void MetalRenderer::EncodeGIProbeUpdate(void* cmdBufPtr)
 		// estimate must bounce the light the scene is actually lit by, with THAT
 		// light's colour*intensity — not the sky-dome sun + environment settings.
 		glm::vec3 towardLight, lightColorIntensity;
-		dominantDirectionalLight(m_renderWorld, towardLight, lightColorIntensity);
+		m_renderWorld.dominantDirectionalLight(towardLight, lightColorIntensity);
 		pp.sunColor     = glm::vec4(lightColorIntensity, 0.0f);
 		pp.skyAmbient   = glm::vec4(m_renderWorld.ambient, 0.0f);
 		// Local (point/spot) lights feed the one-bounce estimate — a scene keyed
 		// by point lights otherwise converges to pitch-black probes. Same 8-light
-		// window EncodeScene binds for direct shading.
-		int lightCount = 0;
-		for (const LightData& l : m_renderWorld.lights)
+		// window EncodeScene binds for direct shading (shared with every backend).
+		const HE::PackedLightArray lp = HE::BuildPackedLightArray(m_renderWorld);
+		static_assert(HE::kMaxLightWindow == 8, "GIProbeParams has 8 light slots");
+		for (int i = 0; i < HE::kMaxLightWindow; ++i)
 		{
-			if (lightCount >= 8) break;
-			if ((l.type != 1 && l.type != 2) || l.intensity <= 0.0f) continue;
-			pp.lightPosRange[lightCount]  = glm::vec4(l.position, std::max(l.range, 1e-4f));
-			pp.lightColorType[lightCount] = glm::vec4(l.color * l.intensity, static_cast<float>(l.type));
-			pp.lightDirCos[lightCount]    = glm::vec4(l.direction, l.spotAngleCos);
-			++lightCount;
+			pp.lightPosRange[i]  = lp.posRange[i];
+			pp.lightColorType[i] = lp.colorType[i];
+			pp.lightDirCos[i]    = lp.dirCos[i];
 		}
-		pp.sunDirRadius = glm::vec4(towardLight, static_cast<float>(lightCount));
+		pp.sunDirRadius = glm::vec4(towardLight, static_cast<float>(lp.count));
 		if (m_giHwRt)
 		{
 			[enc setBytes:&pp length:sizeof(pp) atIndex:2];
@@ -6406,7 +6254,7 @@ fragment float4 particlePreviewFragment(VOut in [[stage_in]],
 	const glm::vec3 camPos = center + glm::vec3(std::sin(yaw) * cp, sp, std::cos(yaw) * cp) * camDist;
 	const glm::mat4 view = glm::lookAt(camPos, center, glm::vec3(0.0f, 1.0f, 0.0f));
 	const glm::mat4 proj = glm::perspective(glm::radians(35.0f), 1.0f, 0.01f, camDist * 20.0f + 10.0f);
-	const glm::mat4 viewProj = kMetalClipFix * proj * view;
+	const glm::mat4 viewProj = HE::kMetalClipFix * proj * view;
 	const glm::vec3 camRight(view[0][0], view[1][0], view[2][0]);
 	const glm::vec3 camUp   (view[0][1], view[1][1], view[2][1]);
 
@@ -6813,11 +6661,10 @@ void MetalRenderer::DestroyCloudTarget()
 
 // Quarter-res clouds-only pass → m_cloudColor (rgb = scattered L, a = transmittance T).
 // The sky pass upsamples + composites it (bg*T + L) when EnvironmentSettings.lowResClouds
-// is on. SkyParams build MUST stay identical to EncodeSky() so the clouds match the sky.
+// is on. The constants MUST stay identical to EncodeSky() so the clouds match the sky —
+// which is now structural: both go through the one HE::BuildSkyFrameParams translation.
 void MetalRenderer::EncodeCloudPrepass(void* cmdBufPtr, const glm::mat4& invViewProj,
-	const glm::vec3& sunDir, const glm::vec3& sunColor, float timeOfDay, float cloudCoverage,
-	float time, float auroraIntensity, const glm::vec3& nebulaColor, float nebulaIntensity,
-	const glm::vec3& auroraColor, float milkyWayIntensity, const glm::vec3& wind, int width, int height)
+	const glm::vec3& sunDir, float time, int width, int height)
 {
 	if (!m_cloudPipeline || width <= 0 || height <= 0) return;
 	EnsureCloudTarget(width, height);
@@ -6832,26 +6679,16 @@ void MetalRenderer::EncodeCloudPrepass(void* cmdBufPtr, const glm::mat4& invView
 	[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_cloudPipeline];
 	[enc setFragmentTexture:(__bridge id<MTLTexture>)m_noiseTexture atIndex:1];
 	[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_noiseSampler atIndex:1];
-	const IRenderer::EnvironmentSettings& env = GetEnvironment();
-	SkyParams p;
-	p.invViewProj    = invViewProj;
-	p.sunDir         = glm::vec4(sunDir, m_moonTexture ? 1.0f : 0.0f);
-	p.sunColor       = glm::vec4(sunColor, env.moonPhase);
-	p.params         = glm::vec4(timeOfDay, cloudCoverage, time, auroraIntensity);
-	p.nebulaColor    = glm::vec4(nebulaColor, nebulaIntensity);
-	p.auroraColor    = glm::vec4(auroraColor, milkyWayIntensity);
-	p.wind           = glm::vec4(wind, env.flash);
-	p.cameraPos      = glm::vec4(m_renderWorld.camera.position, (float)env.cloudMode);
-	p.cloud          = glm::vec4(env.cloudHeight, env.cloudDensity, env.cloudFluffiness, env.contrailAmount);
-	p.cloudTint      = glm::vec4(env.cloudTint, env.cirrusAmount);
-	p.cirrus         = glm::vec4(env.cirrusSeed, env.auroraHeight, env.auroraFragmentation, env.nebulaSeed);
-	p.nebulaColor2   = glm::vec4(env.nebulaColor2, (float)env.nebulaQuality);
-	p.nebulaColor3   = glm::vec4(env.nebulaColor3, env.godRays); // w = god-ray strength
-	p.auroraColorTop = glm::vec4(env.auroraColorTop, env.shootingStars); // w = meteor frequency
-	p.starColor      = glm::vec4(env.starColor, env.starBrightness);
-	p.star           = glm::vec4(env.starSize, env.starSizeVariation, env.starDensity, env.starGlow);
-	p.star2          = glm::vec4(env.starTwinkle, (float)env.cloudQuality, 1.0f, 0.0f);
-	p.neb2           = glm::vec4(env.nebulaCoverage, 0.0f, 0.0f, 0.0f);
+	HE::SkyFrameInputs in;
+	in.invViewProj    = invViewProj;
+	in.sunDir         = sunDir;
+	in.cameraPos      = m_renderWorld.camera.position;
+	in.time           = time;
+	in.hasMoonTexture = m_moonTexture != nullptr;
+	// The pre-pass IS the low-res cloud buffer, so it always raymarches (star2.z is
+	// read only by skyFragment, which decides whether to composite what lands here).
+	in.lowResClouds   = true;
+	const HE::SkyFrameParams p = HE::BuildSkyFrameParams(GetEnvironment(), in);
 	[enc setFragmentBytes:&p length:sizeof(p) atIndex:0];
 	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
 	[enc endEncoding];
@@ -7048,7 +6885,7 @@ void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
 		params.cfg  = glm::vec4(static_cast<float>(width) / 4.0f, static_cast<float>(height) / 4.0f,
 		                        m_ssaoRadius, 0.025f);
 		params.cfg2 = glm::vec4(m_ssaoIntensity, static_cast<float>(m_ssaoMethod), 0.0f, 0.0f);
-		const std::vector<glm::vec3> kernel = BuildSSAOKernel(32);
+		const std::vector<glm::vec3> kernel = HE::BuildSSAOKernel(32);
 		for (int i = 0; i < 32; ++i) params.samples[i] = glm::vec4(kernel[i], 0.0f);
 		{
 			MTLRenderPassDescriptor* sp = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -7085,93 +6922,7 @@ void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
 }
 
 #if defined(HE_HAVE_SHADERC)
-// Material-system M1 visual proof. Builds a fullscreen overlay pipeline whose MSL is
-// generated at runtime from ONE canonical GLSL source (glslang→SPIR-V→SPIRV-Cross via
-// he::shaderc) — the exact path a cross-backend material would take. Enabled only with
-// HE_SHADERC_DEMO=1; built once. Draws a shaded SDF sphere, alpha-blended over the scene,
-// so a screenshot proves the cross-compiled shader runs inside the real Metal frame.
-void MetalRenderer::EnsureShadercDemoPipeline()
-{
-	if (m_shadercDemoTried) return;
-	m_shadercDemoTried = true;
-	if (!std::getenv("HE_SHADERC_DEMO")) return;
-
-	// Canonical GLSL (Vulkan semantics) — authored ONCE, cross-compiled to MSL.
-	static const char* kVert = R"(#version 450
-void main() {
-    // Fullscreen triangle from gl_VertexIndex (no vertex buffer).
-    vec2 p = vec2(float((gl_VertexIndex << 1) & 2), float(gl_VertexIndex & 2));
-    gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
-}
-)";
-	static const char* kFrag = R"(#version 450
-layout(location = 0) out vec4 oColor;
-void main() {
-    vec2 res = vec2(1280.0, 720.0);              // dump is fixed 1280x720
-    vec2 uv = (gl_FragCoord.xy - 0.5 * res) / res.y;
-    uv.y = -uv.y;
-    float r = length(uv);
-    const float radius = 0.42;
-    float inside = smoothstep(radius, radius - 0.006, r);
-    vec3 n = normalize(vec3(uv, sqrt(max(radius*radius - r*r, 1e-4))));
-    vec3 L = normalize(vec3(0.5, 0.65, 0.8));
-    float d = max(dot(n, L), 0.0);
-    vec3 base = vec3(0.95, 0.42, 0.18);
-    vec3 col = base * (0.15 + 0.85 * d);
-    vec3 h = normalize(L + vec3(0.0, 0.0, 1.0));
-    col += vec3(1.0) * pow(max(dot(n, h), 0.0), 40.0) * 0.6;   // spec highlight
-    oColor = vec4(col, inside);
-}
-)";
-
-	using namespace he::shaderc;
-	const Result v = compile(kVert, Stage::Vertex,   Target::Msl);
-	const Result f = compile(kFrag, Stage::Fragment, Target::Msl);
-	if (!v.ok || !f.ok)
-	{
-		Logger::Log(Logger::LogLevel::Error,
-			(std::string("MetalRenderer: HE_SHADERC_DEMO compile failed\n") + v.log + f.log).c_str());
-		return;
-	}
-
-	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
-	NSError* err = nil;
-	id<MTLLibrary> vLib = [device newLibraryWithSource:[NSString stringWithUTF8String:v.source.c_str()]
-	                                           options:nil error:&err];
-	id<MTLLibrary> fLib = err ? nil
-		: [device newLibraryWithSource:[NSString stringWithUTF8String:f.source.c_str()]
-		                       options:nil error:&err];
-	if (!vLib || !fLib)
-	{
-		Logger::Log(Logger::LogLevel::Error,
-			(std::string("MetalRenderer: HE_SHADERC_DEMO MSL did not compile: ")
-			 + (err ? err.localizedDescription.UTF8String : "?")).c_str());
-		return;
-	}
-	// SPIRV-Cross names the entry point "main0" for every stage.
-	MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
-	desc.vertexFunction   = [vLib newFunctionWithName:@"main0"];
-	desc.fragmentFunction = [fLib newFunctionWithName:@"main0"];
-	desc.colorAttachments[0].pixelFormat = kSwapchainFormat;
-	desc.colorAttachments[0].blendingEnabled             = YES;
-	desc.colorAttachments[0].sourceRGBBlendFactor        = MTLBlendFactorSourceAlpha;
-	desc.colorAttachments[0].destinationRGBBlendFactor   = MTLBlendFactorOneMinusSourceAlpha;
-	desc.colorAttachments[0].sourceAlphaBlendFactor      = MTLBlendFactorOne;
-	desc.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
-	id<MTLRenderPipelineState> pso = [device newRenderPipelineStateWithDescriptor:desc error:&err];
-	if (!pso)
-	{
-		Logger::Log(Logger::LogLevel::Error,
-			(std::string("MetalRenderer: HE_SHADERC_DEMO pipeline failed: ")
-			 + (err ? err.localizedDescription.UTF8String : "?")).c_str());
-		return;
-	}
-	m_shadercDemoPipeline = (void*)CFBridgingRetain(pso);
-	Logger::Log(Logger::LogLevel::Info,
-		"MetalRenderer: HE_SHADERC_DEMO overlay built from canonical GLSL via he::shaderc");
-}
-
-void* MetalRenderer::ensureMaterialArchive()
+void* MetalRenderer::EnsureMaterialArchive()
 {
 	if (m_matArchiveTried) return m_matBinaryArchive;
 	m_matArchiveTried = true;
@@ -7300,7 +7051,7 @@ void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string&
 			id<MTLBinaryArchive> arch = nil;
 			if (@available(macOS 11.0, *))
 			{
-				arch = (__bridge id<MTLBinaryArchive>)ensureMaterialArchive();
+				arch = (__bridge id<MTLBinaryArchive>)EnsureMaterialArchive();
 				if (arch) desc.binaryArchives = @[arch];
 			}
 			id<MTLRenderPipelineState> pso = [device newRenderPipelineStateWithDescriptor:desc error:&err];
@@ -7340,48 +7091,6 @@ bool MetalRenderer::ResolveMaterialShader(const HE::UUID& materialId, uint64_t& 
 	return m_matShaderLib.resolveShaders(*m_contentManager, materialId, key, frag, vertBody);
 }
 
-void MetalRenderer::EnsureShadercTestMesh()
-{
-	if (m_shadercTestTried) return;
-	m_shadercTestTried = true;
-	if (!std::getenv("HE_SHADERC_MATERIAL")) return;
-	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
-
-	// Procedural UV sphere (interleaved pos3/normal3/uv2 = 8 floats, matching VertexIn)
-	// so the cross-compiled pipeline is visible on real 3D geometry even when the dump
-	// scene has no mesh objects.
-	{
-		const int   segU = 48, segV = 24;
-		const float radius = 18.0f;
-		std::vector<float>    verts;    verts.reserve((segU + 1) * (segV + 1) * 8);
-		std::vector<uint32_t> indices;
-		for (int y = 0; y <= segV; ++y)
-		{
-			const float v  = (float)y / segV, phi = v * (float)M_PI;
-			for (int x = 0; x <= segU; ++x)
-			{
-				const float u2 = (float)x / segU, theta = u2 * 2.0f * (float)M_PI;
-				const glm::vec3 n(std::sin(phi) * std::cos(theta), std::cos(phi),
-				                  std::sin(phi) * std::sin(theta));
-				const glm::vec3 p = n * radius;
-				verts.insert(verts.end(), { p.x, p.y, p.z, n.x, n.y, n.z, u2, v });
-			}
-		}
-		for (int y = 0; y < segV; ++y)
-			for (int x = 0; x < segU; ++x)
-			{
-				const uint32_t a = y * (segU + 1) + x, b = a + segU + 1;
-				indices.insert(indices.end(), { a, b, a + 1, a + 1, b, b + 1 });
-			}
-		m_shadercTestIdx = (int)indices.size();
-		id<MTLBuffer> vb = [device newBufferWithBytes:verts.data()
-			length:verts.size() * sizeof(float) options:MTLResourceStorageModeShared];
-		id<MTLBuffer> ib = [device newBufferWithBytes:indices.data()
-			length:indices.size() * sizeof(uint32_t) options:MTLResourceStorageModeShared];
-		m_shadercTestVB = (void*)CFBridgingRetain(vb);
-		m_shadercTestIB = (void*)CFBridgingRetain(ib);
-	}
-}
 #endif // HE_HAVE_SHADERC
 
 // Build (or fetch) a Metal pipeline for GPU-instanced ParticleGraph particle
@@ -7464,17 +7173,6 @@ void MetalRenderer::EncodeTonemap(void* renderEncoderPtr)
 	[enc setFragmentBytes:&params length:sizeof(params) atIndex:0];
 	[enc setFragmentBytes:m_lensFlareParams length:sizeof(m_lensFlareParams) atIndex:1];
 	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
-
-#if defined(HE_HAVE_SHADERC)
-	// Material-system M1 proof: overlay a cross-compiled-from-GLSL shader (HE_SHADERC_DEMO=1).
-	EnsureShadercDemoPipeline();
-	if (m_shadercDemoPipeline)
-	{
-		[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_shadercDemoPipeline];
-		[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_noDepthState];
-		[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
-	}
-#endif
 }
 
 // LDR intermediate the tonemap writes to and FXAA reads from. kSwapchainFormat so
@@ -7570,7 +7268,7 @@ void* MetalRenderer::GetOrBuildUIMaterialPipeline(const HE::UUID& materialId)
 	return result;
 }
 
-void* MetalRenderer::uiFontAtlasTexture(uint32_t key)
+void* MetalRenderer::UIFontAtlasTexture(uint32_t key)
 {
 	if (key == 0) return m_uiFontTexture;
 	if (auto it = m_uiFontAtlases.find(key); it != m_uiFontAtlases.end()) return it->second;
@@ -7601,7 +7299,7 @@ void MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height)
 	HE::MaterialShaderLibrary::Lighting matLight;
 	{
 		glm::vec3 sd, sc;
-		dominantDirectionalLight(m_renderWorld, sd, sc);
+		m_renderWorld.dominantDirectionalLight(sd, sc);
 		const glm::vec3 am = m_renderWorld.ambient;
 		matLight.sunDir[0]   = sd.x; matLight.sunDir[1] = sd.y; matLight.sunDir[2] = sd.z;
 		matLight.sunDir[3]   = static_cast<float>(SDL_GetTicks()) / 1000.0f;
@@ -7690,7 +7388,7 @@ void MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height)
 			[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_uiPipeline];
 			[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_noDepthState];
 			[enc setVertexBytes:&vp length:sizeof(vp) atIndex:1];
-			void* a0 = uiFontAtlasTexture(0);
+			void* a0 = UIFontAtlasTexture(0);
 			id<MTLTexture> atlas = a0 ? (__bridge id<MTLTexture>)a0
 			                          : (__bridge id<MTLTexture>)m_dummyTexture;
 			[enc setFragmentTexture:atlas atIndex:0];
@@ -7700,7 +7398,7 @@ void MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height)
 		// A glyph quad may use an imported font's atlas — bind it at texture(0).
 		if (obj.type == 2 && obj.fontAtlasKey != boundAtlasKey)
 		{
-			void* a = uiFontAtlasTexture(obj.fontAtlasKey);
+			void* a = UIFontAtlasTexture(obj.fontAtlasKey);
 			id<MTLTexture> atlas = a ? (__bridge id<MTLTexture>)a
 			                         : (__bridge id<MTLTexture>)m_dummyTexture;
 			[enc setFragmentTexture:atlas atIndex:0];
@@ -7722,11 +7420,7 @@ void MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height)
 // ─── Frame encoding ───────────────────────────────────────────────────────────
 
 void MetalRenderer::EncodeSky(void* renderEncoder, const glm::mat4& invViewProj,
-                             const glm::vec3& sunDir, const glm::vec3& sunColor,
-                             float timeOfDay, float cloudCoverage, float time,
-                             float auroraIntensity, const glm::vec3& nebulaColor,
-                             float nebulaIntensity, const glm::vec3& auroraColor,
-                             float milkyWayIntensity, const glm::vec3& wind)
+                             const glm::vec3& sunDir, float time)
 {
 	if (!m_skyPipeline) return;
 	if (!GetEnvironment().skyEnabled) return; // no Sky entity → leave the cleared background
@@ -7742,30 +7436,16 @@ void MetalRenderer::EncodeSky(void* renderEncoder, const glm::mat4& invViewProj,
 	[enc setFragmentTexture:(__bridge id<MTLTexture>)m_noiseTexture atIndex:1];
 	[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_noiseSampler atIndex:1];
 	const IRenderer::EnvironmentSettings& env = GetEnvironment();
-	SkyParams p;
-	p.invViewProj = invViewProj;
-	p.sunDir      = glm::vec4(sunDir, m_moonTexture ? 1.0f : 0.0f); // w = has-moon flag
-	p.sunColor    = glm::vec4(sunColor, env.moonPhase);            // w = lunar phase
-	p.params      = glm::vec4(timeOfDay, cloudCoverage, time, auroraIntensity);
-	p.nebulaColor = glm::vec4(nebulaColor, nebulaIntensity);
-	p.auroraColor = glm::vec4(auroraColor, milkyWayIntensity);
-	p.wind        = glm::vec4(wind, env.flash); // w = lightning flash
-	// Night-sky / cloud overhaul: self-populate from the environment + camera world pos.
-	p.cameraPos      = glm::vec4(m_renderWorld.camera.position, (float)env.cloudMode);
-	p.cloud          = glm::vec4(env.cloudHeight, env.cloudDensity, env.cloudFluffiness, env.contrailAmount);
-	p.cloudTint      = glm::vec4(env.cloudTint, env.cirrusAmount);
-	p.cirrus         = glm::vec4(env.cirrusSeed, env.auroraHeight, env.auroraFragmentation, env.nebulaSeed);
-	p.nebulaColor2   = glm::vec4(env.nebulaColor2, (float)env.nebulaQuality); // w = nebula quality 0/1/2
-	p.nebulaColor3   = glm::vec4(env.nebulaColor3, env.godRays); // w = god-ray strength
-	p.auroraColorTop = glm::vec4(env.auroraColorTop, env.shootingStars); // w = meteor frequency
-	p.starColor      = glm::vec4(env.starColor, env.starBrightness);
-	p.star           = glm::vec4(env.starSize, env.starSizeVariation, env.starDensity, env.starGlow);
-	// z = low-res clouds, but only when the pre-pass actually produced a buffer (else
-	// fall back to the inline raymarch so nothing breaks if the target is missing).
-	p.star2          = glm::vec4(env.starTwinkle, (float)env.cloudQuality,
-	                             (env.lowResClouds && m_cloudColor) ? 1.0f : 0.0f,
-	                             env.rainAmount); // w = rain amount (rainbow)
-	p.neb2           = glm::vec4(env.nebulaCoverage, 0.0f, 0.0f, 0.0f);
+	HE::SkyFrameInputs in;
+	in.invViewProj    = invViewProj;
+	in.sunDir         = sunDir;
+	in.cameraPos      = m_renderWorld.camera.position;
+	in.time           = time;
+	in.hasMoonTexture = m_moonTexture != nullptr;
+	// Composite the low-res clouds only when the pre-pass actually produced a buffer
+	// (else fall back to the inline raymarch so nothing breaks if the target is missing).
+	in.lowResClouds   = (env.lowResClouds && m_cloudColor);
+	const HE::SkyFrameParams p = HE::BuildSkyFrameParams(env, in);
 	// Quarter-res cloud buffer (rgb=L, a=T) on slot 2; dummy when unused (must be bound).
 	[enc setFragmentTexture:(__bridge id<MTLTexture>)(m_cloudColor ? m_cloudColor : m_dummyTexture) atIndex:2];
 	[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:2];
@@ -7943,21 +7623,13 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 	// Skybox is drawn LAST (after the geometry) with a depth-test == far, so the
 	// heavy sky shader only runs on the background pixels the scene didn't cover.
 	// This lambda is invoked at every exit so the background is always filled.
-	const float windRad = glm::radians(GetEnvironment().windDirection);
-	const glm::vec3 windVec = glm::vec3(std::sin(windRad), 0.0f, -std::cos(windRad))
-	                        * (GetEnvironment().windSpeed * 0.025f);
 	// HE_SKY_TIME overrides the animation clock (deterministic headless capture of
 	// time-animated sky elements — clouds/aurora — so an A/B differs only by the knob
 	// under test). Normal runs use the wall clock. Mirrors the OpenGL backend.
 	float skyClock = static_cast<float>(SDL_GetTicks()) / 1000.0f;
 	if (const char* ov = std::getenv("HE_SKY_TIME"); ov && *ov) skyClock = static_cast<float>(std::atof(ov));
 	auto drawSky = [&]() {
-		EncodeSky(renderEncoder, glm::inverse(viewProj), sunDir, GetEnvironment().sunColor,
-		          GetEnvironment().timeOfDay, GetEnvironment().cloudCoverage,
-		          skyClock,
-		          GetEnvironment().auroraIntensity, GetEnvironment().nebulaColor,
-		          GetEnvironment().nebulaIntensity, GetEnvironment().auroraColor,
-		          GetEnvironment().milkyWayIntensity, windVec);
+		EncodeSky(renderEncoder, glm::inverse(viewProj), sunDir, skyClock);
 	};
 
 	// Intra-Scene element timing (draw-boundary): anchor before the first element,
@@ -7965,57 +7637,6 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 	// No-op unless a capture with draw-boundary timing is active. The "Scene"
 	// total still comes from the exact stage-boundary pair on the encoder.
 	m_counters.total = static_cast<uint32_t>(m_renderWorld.objects.size());
-
-#if defined(HE_HAVE_SHADERC)
-	// M1 demo (HE_SHADERC_MATERIAL=1): draw TWO spheres, each with a DIFFERENT material
-	// fragment fetched from the per-material pipeline cache — so a screenshot shows the
-	// renderer selecting a distinct cross-compiled pipeline per material (the same cache
-	// + selection the real scene loop uses, exercised in the empty headless dump scene).
-	EnsureShadercTestMesh();
-	if (m_shadercTestVB)
-	{
-		// Two "materials" = two fragment shaders. In a real scene these come from each
-		// MaterialAsset::customShaderFragGlsl; here they are inline so the demo is self-
-		// contained. Distinct hashes → two cache entries → two pipelines.
-		static const std::string kMatA = R"(#version 450
-layout(location=0) in vec3 vNormal; layout(location=1) in vec3 vColor;
-layout(location=0) out vec4 oColor;
-void main(){ vec3 n=normalize(vNormal); float d=max(dot(n,normalize(vec3(0.4,0.9,0.3))),0.0);
-    float hemi=0.5+0.5*n.y; oColor=vec4(vColor*(0.25*hemi+0.9*d),1.0); })";       // matte hemispheric
-		static const std::string kMatB = R"(#version 450
-layout(location=0) in vec3 vNormal; layout(location=1) in vec3 vColor;
-layout(location=0) out vec4 oColor;
-void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
-    float fres=pow(1.0-max(dot(n,v),0.0),3.0);                    // fresnel rim
-    vec3 base=vec3(0.10,0.35,0.85); oColor=vec4(base+fres*vec3(0.9),1.0); })";     // blue + bright rim
-		void* psoA = GetOrBuildMaterialPipeline(std::hash<std::string>{}(kMatA), kMatA);
-		void* psoB = GetOrBuildMaterialPipeline(std::hash<std::string>{}(kMatB), kMatB);
-
-		const glm::vec3 c   = m_renderWorld.camera.position;
-		const glm::mat3 camB(glm::inverse(m_renderWorld.camera.view));
-		const glm::vec3 fwd   = -glm::normalize(camB[2]);
-		const glm::vec3 right =  glm::normalize(camB[0]);
-		[encoder setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
-		auto drawSphere = [&](void* pso, const glm::vec3& worldPos, const glm::vec4& tint)
-		{
-			if (!pso) return;
-			[encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)pso];
-			UnlitUniforms u{};
-			u.model = glm::translate(glm::mat4(1.0f), worldPos);
-			u.mvp   = viewProj * u.model;
-			u.color = tint;
-			[encoder setVertexBuffer:(__bridge id<MTLBuffer>)m_shadercTestVB offset:0 atIndex:0];
-			[encoder setVertexBytes:&u length:sizeof(u) atIndex:1];
-			[encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
-			                    indexCount:(NSUInteger)m_shadercTestIdx
-			                     indexType:MTLIndexTypeUInt32
-			                   indexBuffer:(__bridge id<MTLBuffer>)m_shadercTestIB
-			             indexBufferOffset:0];
-		};
-		drawSphere(psoA, c + fwd * 70.0f - right * 24.0f, glm::vec4(0.95f, 0.42f, 0.18f, 1.0f));
-		drawSphere(psoB, c + fwd * 70.0f + right * 24.0f, glm::vec4(0.10f, 0.35f, 0.85f, 1.0f));
-	}
-#endif
 
 	if (m_renderWorld.objects.empty())
 	{
@@ -8144,10 +7765,10 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 		const ShadowData& sh = m_renderWorld.shadow;
 		const int nl = std::clamp(sh.localLayerCount, 0, ShadowData::kMaxLocalShadowLayers);
 		for (int c = 0; c < nl; ++c)
-			scene.localShadowVP[c] = kMetalClipFix * sh.localViewProj[c];
+			scene.localShadowVP[c] = HE::kMetalClipFix * sh.localViewProj[c];
 		const int nc = std::clamp(sh.cascadeCount, 0, kCsmCascades);
 		for (int c = 0; c < kCsmCascades; ++c)
-			scene.cascadeVP[c] = (c < nc) ? (kMetalClipFix * sh.cascadeViewProj[c])
+			scene.cascadeVP[c] = (c < nc) ? (HE::kMetalClipFix * sh.cascadeViewProj[c])
 			                              : glm::mat4(1.0f);
 		scene.cascadeSplits = glm::vec4(nc > 0 ? sh.cascadeSplit[0] : 1e9f,
 		                                nc > 1 ? sh.cascadeSplit[1] : 1e9f,
@@ -8181,7 +7802,7 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 	HE::MaterialShaderLibrary::Lighting matLight; // reused by WPO vertex-stage binds below
 	{
 		glm::vec3 matSunDir, matSunColor;
-		dominantDirectionalLight(m_renderWorld, matSunDir, matSunColor);
+		m_renderWorld.dominantDirectionalLight(matSunDir, matSunColor);
 		const glm::vec3 am = m_renderWorld.ambient;
 		matLight.sunDir[0]   = matSunDir.x; matLight.sunDir[1] = matSunDir.y; matLight.sunDir[2] = matSunDir.z;
 		matLight.sunDir[3]   = skyClock; // engine seconds — the node graph's Time input
@@ -8227,7 +7848,7 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 			lsFlipY[1][1] = -1.0f;
 			for (int c = 0; c < nlLoc; ++c)
 			{
-				const glm::mat4 m = lsFlipY * kMetalClipFix * lsh.localViewProj[c];
+				const glm::mat4 m = lsFlipY * HE::kMetalClipFix * lsh.localViewProj[c];
 				std::memcpy(matLight.localShadowVP[c], &m[0][0], 16 * sizeof(float));
 			}
 		}
@@ -8245,7 +7866,7 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 			uvFlipY[1][1] = -1.0f;
 			for (int c = 0; c < nc; ++c)
 			{
-				const glm::mat4 m = uvFlipY * kMetalClipFix * sh.cascadeViewProj[c];
+				const glm::mat4 m = uvFlipY * HE::kMetalClipFix * sh.cascadeViewProj[c];
 				std::memcpy(matLight.csmVP[c], &m[0][0], 16 * sizeof(float));
 			}
 			matLight.csmSplits[0] = nc > 0 ? sh.cascadeSplit[0] : 1e9f;
@@ -8441,11 +8062,14 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 				UnlitUniforms ui = u;
 				ui.mvp   = viewProj * xform;
 				ui.model = xform;
-				if (ui.pbr.z < 0.999f) // tinted opacity (u.pbr.z), not the raw material cOpacity
+				// Tinted opacity (u.pbr.z), not the raw material cOpacity — Metal
+				// resolves the material×instance-tint product itself above, so the
+				// shared threshold is applied to that instead of RenderSorter::
+				// isTransparent (which re-derives it from a DrawCall).
+				if (ui.pbr.z < RenderSorter::kOpaqueOpacityThreshold)
 				{
-					const glm::vec3 d = glm::vec3(xform[3]) - camPos;
 					TPDraw t{ ui, (__bridge void*)vertexBuf, (__bridge void*)indexBuf,
-					          indexCount, texPtr, glm::dot(d, d) };
+					          indexCount, texPtr, RenderSorter::backToFrontKey(xform, camPos) };
 					// Translucent graph materials keep their own (blended) pipeline + state.
 					if (cMaterialPipelineBlend)
 					{
@@ -8555,6 +8179,8 @@ void main(){ vec3 n=normalize(vNormal); vec3 v=vec3(0.0,0.0,1.0);
 	// fragment bindings, so re-bind the scene's shadow/ambient/AO state + uniforms.
 	if (!transparent.empty())
 	{
+		// Farthest first (distSq = RenderSorter::backToFrontKey). Not stable — draws
+		// at exactly equal distance may come out in either order, as in every backend.
 		std::sort(transparent.begin(), transparent.end(),
 		          [](const TPDraw& a, const TPDraw& b) { return a.distSq > b.distSq; });
 		[encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_sceneBlendPipeline];
@@ -8917,9 +8543,6 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 				const IRenderer::EnvironmentSettings& cenv = GetEnvironment();
 				if (cenv.lowResClouds && cenv.cloudCoverage > 0.0f && m_cloudPipeline)
 				{
-					const float cwr = glm::radians(cenv.windDirection);
-					const glm::vec3 cwind = glm::vec3(std::sin(cwr), 0.0f, -std::cos(cwr))
-					                      * (cenv.windSpeed * 0.025f);
 					// Render the pre-pass with THIS frame's camera — like the GL backend. The
 					// shadow/SSAO extracts above are skippable, so extract explicitly here to make
 					// m_renderWorld.camera current; the quarter-res clouds then line up 1:1 with the
@@ -8938,10 +8561,8 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 					m_prepassViewProj = m_renderWorld.camera.projection * m_renderWorld.camera.view;
 					EncodeCloudPrepass((__bridge void*)cmdBuf, glm::inverse(m_prepassViewProj),
 						m_renderWorld.sunDirection,
-						cenv.sunColor, cenv.timeOfDay, cenv.cloudCoverage,
-						static_cast<float>(SDL_GetTicks()) / 1000.0f, cenv.auroraIntensity,
-						cenv.nebulaColor, cenv.nebulaIntensity, cenv.auroraColor, cenv.milkyWayIntensity,
-						cwind, std::max(1, sceneW / 2), std::max(1, sceneH / 2));
+						static_cast<float>(SDL_GetTicks()) / 1000.0f,
+						std::max(1, sceneW / 2), std::max(1, sceneH / 2));
 				}
 				else if (m_cloudColor) DestroyCloudTarget(); // freed when toggled off
 			}

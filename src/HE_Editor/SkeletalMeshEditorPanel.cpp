@@ -2,6 +2,8 @@
 #include <cstdint>
 #include "EditorApplication.h"      // AppContext
 #include "EditorAssetTypeCache.h"   // shared, invalidatable path → AssetType sniff
+#include "EditorPanelState.h"       // shared per-tab state map + lazy asset open
+#include "EditorWidgets.h"          // shared Content-Browser asset drop slot
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <HorizonScene/AnimationPreview.h>
@@ -9,8 +11,6 @@
 #include <imgui.h>
 #include <algorithm>
 #include <cmath>
-#include <filesystem>
-#include <map>
 #include <string>
 #include <vector>
 
@@ -34,18 +34,15 @@ struct State
 	float previewYaw = 0.6f, previewPitch = 0.35f, previewDist = 2.2f;
 };
 
-static std::map<std::string, State> g_states;
+static AssetPanelState<State> g_states;
 
 static State& stateFor(const std::string& path, AppContext& ctx)
 {
 	State& st = g_states[path];
 	if (st.loaded || !ctx.contentManager) return st;
 
-	st.name = std::filesystem::path(path).filename().string();
-	const std::string rel = ctx.contentManager->toContentRelativePath(path);
-	st.relPath = rel.empty() ? path : rel;
-	st.meshId  = ctx.contentManager->loadAsset(st.relPath);
-	st.loaded  = true;
+	st.meshId = openPanelAsset(ctx, path, st.name, st.relPath);
+	st.loaded = true;
 	return st;
 }
 
@@ -75,10 +72,7 @@ bool isSkeletalMeshAsset(const std::string& path)
 	return EditorAssetTypeCache::is(path, HE::AssetType::SkeletalMesh);
 }
 
-void forget(const std::string& assetPath)
-{
-	g_states.erase(assetPath);
-}
+void forget(const std::string& assetPath) { g_states.forget(assetPath); }
 
 void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, const ImVec2& size)
 {
@@ -122,33 +116,15 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 	ImGui::SameLine();
 	ImGui::BeginChild("##skelPreviewPane", ImVec2(0.0f, 0.0f), true);
 
+	// undo = false: the scrub clip is preview state on this tab, not a scene edit,
+	// so it must not push an undo snapshot of the world.
+	if (EditorWidgets::assetDropSlot(ctx, "Clip:", st.clipId, HE::AssetType::AnimationClip,
+			"skelClipSlot", "(bind pose — drop a clip)", /*rejectNoun=*/nullptr,
+			/*showClear=*/false, /*undo=*/false) == EditorWidgets::SlotAction::Assigned)
+		st.clipTime = 0.0f;
+
 	const AnimationClipAsset* clip = (st.clipId != HE::UUID{} && ctx.contentManager)
 		? ctx.contentManager->getAnimationClip(st.clipId) : nullptr;
-	const std::string clipLabel = clip ? clip->name
-		: (st.clipId == HE::UUID{} ? "(bind pose — drop a clip)" : "(not loaded)");
-
-	ImGui::TextUnformatted("Clip:");
-	ImGui::SameLine();
-	ImGui::Button((clipLabel + "##skelClipSlot").c_str());
-	if (ImGui::BeginDragDropTarget())
-	{
-		if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_ASSET_PATH"))
-		{
-			const std::string rel = ctx.contentManager
-				? ctx.contentManager->toContentRelativePath(static_cast<const char*>(p->Data))
-				: std::string();
-			if (!rel.empty())
-			{
-				const HE::UUID id = ctx.contentManager->loadAsset(rel);
-				if (id != HE::UUID{} && ctx.contentManager->getAnimationClip(id))
-				{
-					st.clipId   = id;
-					st.clipTime = 0.0f;
-				}
-			}
-		}
-		ImGui::EndDragDropTarget();
-	}
 	if (clip)
 	{
 		ImGui::SameLine();

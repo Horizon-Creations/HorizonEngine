@@ -2,9 +2,11 @@
 #include <cstdint>
 #include "EditorApplication.h"                 // AppContext
 #include "EditorAssetTypeCache.h"               // shared, invalidatable path → AssetType sniff
+#include "EditorPanelState.h"                   // shared per-tab state map
+#include "EditorWidgets.h"                      // shared Content-Browser asset drop target
 #include "GraphEditor.h"                        // shared node-graph canvas
 #include "HcGraphHost.h"                        // shared HorizonCode canvas host (pins, menus, clipboard)
-#include "HcClassList.h"                        // Create Object class picker
+#include "HcEditorUtil.h"                       // Create Object class picker
 #include <HorizonScene/EngineApi.h>             // HE::api registry (Engine Call nodes)
 #include <HorizonScene/HcCodegen.h>             // in-editor compile check (Compile button)
 #include <UIWidget/UIWidgetTree.h>
@@ -94,7 +96,7 @@ struct State
 	std::string name;                // filename for the header
 	std::string relPath;             // content-root-relative path of this asset
 };
-std::map<std::string, State> g_states;
+AssetPanelState<State> g_states;
 
 // ── Layout math (via UIWidgetTree's shared layout, mirrors the runtime) ───────
 ImVec2 anchorPoint(uint8_t a)
@@ -319,24 +321,12 @@ bool assetSlot(AppContext& ctx, const char* label, std::string& path,
 		ImGui::EndCombo();
 	}
 	if (ImGui::IsItemHovered() && !path.empty()) ImGui::SetTooltip("%s", path.c_str());
-	if (ImGui::BeginDragDropTarget())
+	// Path-valued slot: the widget's own undo (committed by the caller) covers it,
+	// so only the drop resolution is shared.
+	if (const EditorWidgets::AssetDrop drop = EditorWidgets::acceptAssetDrop(ctx, wantType))
 	{
-		if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_ASSET_PATH"))
-		{
-			std::string rel = ctx.contentManager
-				? ctx.contentManager->toContentRelativePath(static_cast<const char*>(p->Data))
-				: std::string();
-			if (!rel.empty() && ctx.contentManager)
-			{
-				const HE::UUID id = ctx.contentManager->loadAsset(rel);
-				if (id != HE::UUID{} && ctx.contentManager->assetType(id) == wantType)
-				{
-					path = rel;
-					changed = true;
-				}
-			}
-		}
-		ImGui::EndDragDropTarget();
+		path    = drop.relPath;
+		changed = true;
 	}
 	return changed;
 }
@@ -1950,13 +1940,9 @@ bool isWidgetAsset(const std::string& path)
 	return EditorAssetTypeCache::is(path, HE::AssetType::Widget);
 }
 
-bool isDirty(const std::string& assetPath)
-{
-	auto it = g_states.find(assetPath);
-	return it != g_states.end() && it->second.dirty;
-}
+bool isDirty(const std::string& assetPath) { return g_states.dirty(assetPath); }
 
-void forget(const std::string& assetPath) { g_states.erase(assetPath); }
+void forget(const std::string& assetPath) { g_states.forget(assetPath); }
 
 void render(AppContext& ctx, const std::string& assetPath,
             const ImVec2& pos, const ImVec2& size)

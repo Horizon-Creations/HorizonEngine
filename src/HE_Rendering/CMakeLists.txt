@@ -187,6 +187,9 @@ if(WIN32)
     target_include_directories(RendererD3D11 PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${HE_CORE_INCLUDE}
+        # src/ so both D3D backends can reach src/Backends/D3D_Shared/HlslSources.h,
+        # the HLSL they share verbatim. PRIVATE: nothing outside the backend needs it.
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
     target_link_libraries(RendererD3D11 PRIVATE d3d11 dxgi d3dcompiler glm::glm HorizonCore)
     # A4: shared material-graph shader layer (GLSL→HLSL via glslang/SPIRV-Cross) so the
@@ -207,6 +210,9 @@ if(WIN32)
     target_include_directories(RendererD3D12 PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${HE_CORE_INCLUDE}
+        # src/ so both D3D backends can reach src/Backends/D3D_Shared/HlslSources.h,
+        # the HLSL they share verbatim. PRIVATE: nothing outside the backend needs it.
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
     target_link_libraries(RendererD3D12 PRIVATE d3d12 dxgi d3dcompiler glm::glm HorizonCore)
     # A4: shared material-graph shader layer (GLSL→HLSL via glslang/SPIRV-Cross) so the

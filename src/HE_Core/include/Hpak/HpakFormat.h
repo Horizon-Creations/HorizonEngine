@@ -59,10 +59,12 @@ inline constexpr uint32_t kArchiveEncrypted = 0x4; // at least one entry carries
 // kFlagEncrypted is AES-256-GCM (AEAD): the stored blob is ciphertext || 16-byte
 // tag with the nonce in EntryDesc::nonce. Threat model in Aes256Gcm.h — this
 // obfuscates against casual ripping, it is NOT a security boundary (the key ships
-// with the game). kFlagUsesDict is not implemented on either side: HpakWriter
-// never sets it and HpakReader decodes zstd without a dictionary, so an entry
-// carrying it would fail to decompress. (The writer reads it only to refuse
-// verbatim incremental reuse of such an entry.)
+// with the game). kFlagUsesDict and kFlagBlockFramed are RESERVED and implemented
+// on neither side: HpakWriter never sets them, and HpakReader::readEntry REJECTS
+// an entry carrying either — a flag that says "these bytes must be read
+// differently" cannot be ignored, or the decode yields plausible garbage instead
+// of an error. (readStoredEntry still returns them: that is the verbatim re-pack
+// path, where the writer itself refuses to carry a dict entry over.)
 inline constexpr uint8_t  kFlagEncrypted   = 0x1; // payload is AES-256-GCM encrypted
 inline constexpr uint8_t  kFlagUsesDict    = 0x2; // RESERVED: zstd shared-dictionary entry
 inline constexpr uint8_t  kFlagBlockFramed = 0x4; // RESERVED: per-block framing (not yet implemented)

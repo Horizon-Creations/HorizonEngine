@@ -523,20 +523,15 @@ ExportResult ProjectExporter::exportProject(
     // builds (pak entries are UUID-keyed — paths aren't recoverable from them).
     if (!extraScenes.empty())
     {
-        std::string index = "[";
-        for (size_t i = 0; i < extraScenes.size(); ++i)
-        {
-            if (i) index += ",";
-            index += "\"";
-            for (char ch : extraScenes[i].first)   // minimal JSON string escape
-            {
-                if (ch == '"' || ch == '\\') index += '\\';
-                index += ch;
-            }
-            index += "\"";
-        }
-        index += "]";
-        packer.addEntry(sceneUuidForPath("__scene_index__"),
+        nlohmann::json arr = nlohmann::json::array();
+        for (const auto& scene : extraScenes)
+            arr.push_back(scene.first);   // project-relative path
+        // "replace" error handler: a scene path is a filesystem string and may hold
+        // bytes that are not valid UTF-8, on which the default dump() THROWS
+        // (type_error.316) — the same crash ProjectManager::saveProject hit with a
+        // project name. Substitute U+FFFD instead of failing the whole export.
+        const std::string index = arr.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+        packer.addEntry(sceneUuidForPath(kSceneIndexEntry),
                         std::vector<uint8_t>(index.begin(), index.end()), packSettings);
     }
 

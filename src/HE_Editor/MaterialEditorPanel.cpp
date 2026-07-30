@@ -1,8 +1,9 @@
 #include "MaterialEditorPanel.h"
 #include "EditorApplication.h"                 // AppContext
 #include "EditorAssetTypeCache.h"               // shared, invalidatable path → AssetType sniff
+#include "EditorPanelState.h"                   // shared per-tab state map + lazy asset open
 #include "GraphEditor.h"                        // shared node-graph canvas frontend
-#include "HcClassList.h"                        // asset dropdowns (texture picker)
+#include "HcEditorUtil.h"                       // asset dropdowns (texture picker)
 #include <MaterialGraph/MaterialGraph.h>
 #include <material/MaterialShaderLibrary.h> // inline compile check (canvas error banner)
 #include <ContentManager/ContentManager.h>
@@ -66,7 +67,7 @@ struct State
 	bool        isFunction = false;  // editing a MaterialFunction asset (FnInput/FnOutput mode)
 	std::string relPath;             // content-root-relative path of this asset
 };
-std::map<std::string, State> g_states;
+AssetPanelState<State> g_states;
 
 // Cache of loaded material-FUNCTION graphs, keyed by content-relative path. Backs both
 // the codegen loader and the dynamic pins of FunctionCall nodes. Invalidated when a
@@ -241,7 +242,7 @@ bool restoreSnapshot(State& st, int pos)
 std::string g_matClipboard;
 
 // One-shot open-asset request (double-clicked Material Function node → its editor tab).
-std::string s_openAssetRequest;
+std::string g_openAssetRequest;
 
 // Selected nodes + the links fully inside the selection, as graph JSON. Interface
 // nodes are excluded: Output/FnOutput are singletons, FnInput defines a function's
@@ -349,12 +350,7 @@ State& stateFor(const std::string& path, AppContext& ctx)
 	State& st = g_states[path];
 	if (st.loaded || !ctx.contentManager) return st;
 
-	st.name = std::filesystem::path(path).filename().string();
-	// The ContentManager addresses assets by content-root-relative path (or the
-	// reserved "Engine/"-prefixed path for engine-content-root assets).
-	const std::string rel = ctx.contentManager->toContentRelativePath(path);
-	st.relPath    = rel.empty() ? path : rel;
-	st.materialId = ctx.contentManager->loadAsset(st.relPath);
+	st.materialId = openPanelAsset(ctx, path, st.name, st.relPath);
 	st.isFunction = ctx.contentManager->assetType(st.materialId) == HE::AssetType::MaterialFunction;
 
 	if (st.isFunction)
@@ -402,23 +398,9 @@ State& stateFor(const std::string& path, AppContext& ctx)
 // Scale embedded ImGui widgets to the canvas zoom. Font scale alone is not enough —
 // FramePadding/spacing/grab are in pixels and would keep full size, making widgets
 // overflow the shrunken node box; scale those too so a node's widgets track its box.
-void pushWidgetScale(float z)
-{
-	const ImGuiStyle& s = ImGui::GetStyle();
-	const ImVec2 fp = s.FramePadding, is = s.ItemSpacing, iis = s.ItemInnerSpacing;
-	const float  fr = s.FrameRounding, gm = s.GrabMinSize;
-	ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,     ImVec2(fp.x * z, fp.y * z));
-	ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,      ImVec2(is.x * z, is.y * z));
-	ImGui::PushStyleVar(ImGuiStyleVar_ItemInnerSpacing, ImVec2(iis.x * z, iis.y * z));
-	ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding,    fr * z);
-	ImGui::PushStyleVar(ImGuiStyleVar_GrabMinSize,      gm * z);
-	ImGui::SetWindowFontScale(z);
-}
-void popWidgetScale()
-{
-	ImGui::SetWindowFontScale(1.0f);
-	ImGui::PopStyleVar(5);
-}
+// The one copy lives with the canvas that defines the zoom.
+using GraphEditor::pushWidgetScale;
+using GraphEditor::popWidgetScale;
 
 // Inline parameter widgets for a node; returns true when an edit was COMMITTED
 // (deactivated-after-edit), so constant drags don't rebuild the pipeline every frame.
@@ -1082,7 +1064,7 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 			}
 		if (n->type == MatNodeType::FunctionCall && !n->s.empty() && ctx.contentManager)
 			if (ImGui::MenuItem("Open Function"))
-				s_openAssetRequest = ctx.contentManager->resolveAbsolutePath(n->s);
+				g_openAssetRequest = ctx.contentManager->resolveAbsolutePath(n->s);
 		// Route THIS node's first output (unlit) onto the preview mesh.
 		std::vector<HE::MatPinDesc> dIn, dOut;
 		const std::vector<HE::MatPinDesc>* outs = &HE::matNodeDesc(n->type).outputs;
@@ -1102,7 +1084,7 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 	{
 		const MatGraphNode* n = st.graph.findNode(nodeId);
 		if (n && n->type == MatNodeType::FunctionCall && !n->s.empty() && ctx.contentManager)
-			s_openAssetRequest = ctx.contentManager->resolveAbsolutePath(n->s);
+			g_openAssetRequest = ctx.contentManager->resolveAbsolutePath(n->s);
 	};
 
 	// ── Add-node palette (searchable; ports the original popup body). ──
@@ -1324,18 +1306,14 @@ bool isMaterialFunctionAsset(const std::string& path)
 	return EditorAssetTypeCache::is(path, HE::AssetType::MaterialFunction);
 }
 
-bool isDirty(const std::string& assetPath)
-{
-	auto it = g_states.find(assetPath);
-	return it != g_states.end() && it->second.dirty;
-}
+bool isDirty(const std::string& assetPath) { return g_states.dirty(assetPath); }
 
-void forget(const std::string& assetPath) { g_states.erase(assetPath); }
+void forget(const std::string& assetPath) { g_states.forget(assetPath); }
 
 std::string takeOpenRequest()
 {
-	std::string r = std::move(s_openAssetRequest);
-	s_openAssetRequest.clear();
+	std::string r = std::move(g_openAssetRequest);
+	g_openAssetRequest.clear();
 	return r;
 }
 
@@ -1560,7 +1538,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 	{
 		ImGui::SameLine(ImGui::GetContentRegionAvail().x - 250.0f);
 		if (ImGui::Button("Open Parent") && ctx.contentManager)
-			s_openAssetRequest = ctx.contentManager->resolveAbsolutePath(mat->parentMaterialPath);
+			g_openAssetRequest = ctx.contentManager->resolveAbsolutePath(mat->parentMaterialPath);
 	}
 	ImGui::SameLine(ImGui::GetContentRegionAvail().x - 140.0f);
 	if (ImGui::Button(st.isFunction ? "Save Function" : "Save Material") && assetOk)

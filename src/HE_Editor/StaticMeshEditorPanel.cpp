@@ -1,16 +1,15 @@
 #include "StaticMeshEditorPanel.h"
 #include <cstdint>
 #include "EditorApplication.h" // AppContext
+#include "EditorAssetTypeCache.h" // shared, invalidatable path → AssetType sniff
+#include "EditorPanelState.h" // shared per-tab state map + lazy asset open
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
-#include <ContentManager/HAsset.h>
 #include <Types/Enums.h>
 #include <imgui.h>
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
-#include <filesystem>
-#include <map>
 #include <string>
 #include <vector>
 
@@ -46,7 +45,7 @@ struct State
 	bool    statsDone = false;
 };
 
-std::map<std::string, State> g_states;
+AssetPanelState<State> g_states;
 
 // Interleaved (cooked) assets keep uv in floats 6/7 of each 8-float vertex; loose
 // assets keep a separate uvs array. Returns false when the mesh has no UVs.
@@ -189,27 +188,18 @@ void drawUvView(const StaticMeshAsset& mesh, State& st, const ImVec2& size)
 
 bool isStaticMeshAsset(const std::string& path)
 {
-	static std::map<std::string, bool> s_typeCache;
-	if (auto it = s_typeCache.find(path); it != s_typeCache.end()) return it->second;
-	HAsset::Reader r;
-	const bool isMesh = r.open(path) &&
-		r.assetType() == static_cast<uint16_t>(HE::AssetType::StaticMesh);
-	s_typeCache[path] = isMesh;
-	return isMesh;
+	return EditorAssetTypeCache::is(path, HE::AssetType::StaticMesh);
 }
 
-void forget(const std::string& assetPath) { g_states.erase(assetPath); }
+void forget(const std::string& assetPath) { g_states.forget(assetPath); }
 
 void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, const ImVec2& size)
 {
 	State& st = g_states[assetPath];
 	if (!st.loaded && ctx.contentManager)
 	{
-		st.name = std::filesystem::path(assetPath).filename().string();
-		const std::string rel = ctx.contentManager->toContentRelativePath(assetPath);
-		st.relPath = rel.empty() ? assetPath : rel;
-		st.meshId  = ctx.contentManager->loadAsset(st.relPath);
-		st.loaded  = true;
+		st.meshId = openPanelAsset(ctx, assetPath, st.name, st.relPath);
+		st.loaded = true;
 	}
 
 	ImGui::SetCursorScreenPos(pos);

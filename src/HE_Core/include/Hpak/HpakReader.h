@@ -44,7 +44,8 @@ public:
     // Read and return the raw (decrypted, decompressed) .hasset bytes for one
     // entry. Pass key=nullptr for unencrypted entries. Returns an empty vector
     // when the entry is not found, the file is unreadable, the stored bytes fail
-    // their content hash, or decode/decrypt fails.
+    // their content hash, the entry carries a reserved flag this build cannot
+    // honour (Hpak::kFlagUsesDict / kFlagBlockFramed), or decode/decrypt fails.
     std::vector<uint8_t> readEntry(const HE::UUID& id,
                                    const uint8_t   key[32] = nullptr) const;
 
@@ -62,6 +63,12 @@ private:
 
     // Binary search over the sorted TOC. Returns nullptr when absent.
     const EntryMeta* find(const HE::UUID& id) const;
+
+    // Locate an entry and read its STORED bytes (compressed+encrypted, exactly as
+    // written) into `out`, content-hash verified. Returns the entry's metadata, or
+    // nullptr when absent/unreadable/corrupt. Shared prologue of readStoredEntry
+    // (verbatim re-pack) and readEntry (decode).
+    const EntryMeta* readStoredBytes(const HE::UUID& id, std::vector<uint8_t>& out) const;
 
     std::string            m_path;
     mutable std::ifstream  m_file;   // held open for the reader's lifetime

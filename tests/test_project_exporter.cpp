@@ -7,6 +7,7 @@
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <Types/UUID.h>
+#include <nlohmann/json.hpp>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -521,6 +522,59 @@ TEST_CASE("ProjectExporter packs a binary startup scene into the pak")
     // Streaming skips the scene entry (only the material asset streams).
     std::unordered_set<HE::UUID> exclude{sceneUuid};
     CHECK(cm.streamMountedAssets(exclude) == 1);
+
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(outputDir);
+}
+
+TEST_CASE("ProjectExporter's scene index is valid JSON for awkward scene paths")
+{
+    // The index used to be assembled by a hand-rolled escaper that only escaped
+    // " and \ — a control character in a path (legal on POSIX) went in RAW and
+    // made the whole array unparseable, so the shipped game enumerated NO scenes.
+    // It goes through nlohmann now; this pins that every path survives verbatim.
+    auto contentDir = std::filesystem::temp_directory_path() / "he_scene_index_content";
+    auto outputDir  = std::filesystem::temp_directory_path() / "he_scene_index_out";
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(outputDir);
+    std::filesystem::create_directories(contentDir);
+
+    const HE::UUID matId{0x1DE, 0x1};
+    { const auto blob = makeMinimalMaterialBlob(matId, "idx_mat");
+      std::ofstream f(contentDir / "idx_mat.hasset", std::ios::binary);
+      f.write(reinterpret_cast<const char*>(blob.data()), blob.size()); }
+
+    const std::vector<std::string> paths = {
+        "Scenes/Main.hescene",
+        "Scenes/quote\"and\\backslash.hescene",
+        "Scenes/tab\tand\nnewline.hescene",
+    };
+    std::vector<std::pair<std::string, std::vector<uint8_t>>> extraScenes;
+    for (const auto& p : paths) extraScenes.push_back({ p, std::vector<uint8_t>{1,2,3,4} });
+
+    const auto result = ProjectExporter::exportProject(
+        contentDir, "IndexGame", "", outputDir, {}, {}, extraScenes);
+    REQUIRE(result.success);
+
+    ProjectConfig cfg;
+    REQUIRE(ProjectConfigLoader::load(outputDir, cfg));
+    ContentManager cm;
+    REQUIRE(cm.mountPak((outputDir / cfg.hpakFilename).string(),
+                        cfg.encrypted ? cfg.encKey : nullptr));
+
+    const std::vector<uint8_t> idx = cm.readMountedEntry(sceneUuidForPath(kSceneIndexEntry));
+    REQUIRE(!idx.empty());
+    const nlohmann::json j = nlohmann::json::parse(
+        std::string(idx.begin(), idx.end()), nullptr, false);
+    REQUIRE(!j.is_discarded());          // raw control chars would have failed here
+    REQUIRE(j.is_array());
+    REQUIRE(j.size() == paths.size());
+    for (size_t i = 0; i < paths.size(); ++i)
+        CHECK(j[i].get<std::string>() == paths[i]);
+
+    // …and each of those scenes is really addressable under its path-derived UUID.
+    for (const auto& p : paths)
+        CHECK(cm.readMountedEntry(sceneUuidForPath(p)) == std::vector<uint8_t>{1,2,3,4});
 
     he_test::removeAllQuiet(contentDir);
     he_test::removeAllQuiet(outputDir);

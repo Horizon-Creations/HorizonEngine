@@ -195,6 +195,12 @@ static std::vector<uint8_t> rewriteRefsForPack(
         }
         if (isMat && c.id == HAsset::CHUNK_MTRL)
         {
+            // ⚠ FIELD-SYNCHRONISED WITH ContentManager::saveAsset's Material case
+            // (the MTRL writer) — the skim below walks that exact field order to find
+            // byte offsets. Insert/remove/reorder a field there without mirroring it
+            // here and the packer copies the wrong byte ranges: the shipped material
+            // silently gets garbage params / a missing WPO vertex body, with no error
+            // anywhere (every read is bounds-checked and just stops early).
             // Read the two leading path fields, then copy the remaining scalar
             // tail (baseColor/metallic/roughness/opacity + any future additions)
             // byte-verbatim — no fragile re-serialization of the PBR values.
@@ -451,10 +457,11 @@ static std::vector<uint8_t> cookTexture(HAsset::Reader& r, uint8_t targetFormat)
     }
     if (!tm || !px) return {};
 
-    size_t o = 0, width = 0, height = 0, channels = 0;
-    HAsset::Reader::readPOD(tm->data, o, width);
-    HAsset::Reader::readPOD(tm->data, o, height);
-    HAsset::Reader::readPOD(tm->data, o, channels);
+    size_t o = 0;
+    uint32_t width = 0, height = 0, channels = 0;
+    // Shared codec: also accepts the legacy size_t layout of loose .hasset files
+    // written by an older build (see HAsset::readTextureHeader).
+    if (!HAsset::readTextureHeader(tm->data, o, width, height, channels)) return {};
     uint32_t existingMips = 1;
     if (o + sizeof(uint32_t) <= tm->data.size()) HAsset::Reader::readPOD(tm->data, o, existingMips);
 
@@ -523,9 +530,7 @@ static std::vector<uint8_t> cookTexture(HAsset::Reader& r, uint8_t targetFormat)
         if (c.id == HAsset::CHUNK_TXMI)
         {
             std::vector<uint8_t> b;
-            HAsset::Writer::appendPOD(b, width);
-            HAsset::Writer::appendPOD(b, height);
-            HAsset::Writer::appendPOD(b, channels);
+            HAsset::appendTextureHeader(b, width, height, channels);
             HAsset::Writer::appendPOD(b, count);
             HAsset::Writer::appendPOD(b, format);
             HAsset::Writer::appendPOD(b, static_cast<uint8_t>(0)); // srgb false
