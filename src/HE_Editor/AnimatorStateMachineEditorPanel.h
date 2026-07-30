@@ -16,6 +16,10 @@ namespace AnimatorStateMachineEditorPanel
 	void render(AppContext& ctx, const std::string& assetPath,
 	            const ImVec2& pos, const ImVec2& size);
 
+	// True if the graph has edits not yet saved to disk (drives the tab's dirty mark
+	// and keeps the close-tab/exit unsaved-changes check from dropping the state).
+	bool isDirty(const std::string& assetPath);
+
 	// Whether the .hasset at `path` is an Animator State Machine asset (reads
 	// the HAsset header type; cached per path — same convention as
 	// MaterialEditorPanel::isMaterialAsset).

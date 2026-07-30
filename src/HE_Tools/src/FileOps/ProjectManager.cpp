@@ -586,12 +586,15 @@ bool ProjectManager::createNewProject(const std::string& projectDir,
 		fs::create_directories(root / "Content" / "Textures");
 		fs::create_directories(root / "Content" / "Materials");
 		fs::create_directories(root / "Content" / "Prefabs");
+		fs::create_directories(root / "Content" / "UI");
 		break;
 	case ProjectPreset::Simulation:
 		fs::create_directories(root / "Content" / "Data");
+		fs::create_directories(root / "Content" / "Materials");
 		break;
 	case ProjectPreset::Tool:
 		fs::create_directories(root / "Content" / "Source");
+		fs::create_directories(root / "Content" / "UI");
 		break;
 	case ProjectPreset::Empty:
 	default:
@@ -770,7 +773,9 @@ bool ProjectManager::saveProject(const std::string& projectPath)
 	{
 		std::ofstream out(tmpPath, std::ios::trunc);
 		if (!out.is_open()) return false;
-		out << j.dump(4);
+		// "replace" error handler: default dump() throws type_error.316 on invalid
+		// UTF-8 (e.g. a project name), which would abort the app instead of saving.
+		out << j.dump(4, ' ', false, json::error_handler_t::replace);
 		out.flush();
 		if (!out.good())
 		{

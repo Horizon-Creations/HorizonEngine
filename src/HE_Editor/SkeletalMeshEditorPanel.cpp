@@ -1,9 +1,9 @@
 #include "SkeletalMeshEditorPanel.h"
 #include <cstdint>
-#include "EditorApplication.h" // AppContext
+#include "EditorApplication.h"      // AppContext
+#include "EditorAssetTypeCache.h"   // shared, invalidatable path → AssetType sniff
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
-#include <ContentManager/HAsset.h>
 #include <HorizonScene/AnimationPreview.h>
 #include <Types/Enums.h>
 #include <imgui.h>
@@ -72,13 +72,7 @@ static void drawBoneNode(const SkeletalMeshAsset& mesh, const std::vector<std::v
 
 bool isSkeletalMeshAsset(const std::string& path)
 {
-	static std::map<std::string, bool> s_typeCache;
-	if (auto it = s_typeCache.find(path); it != s_typeCache.end()) return it->second;
-	HAsset::Reader r;
-	const bool isSkel = r.open(path) &&
-		r.assetType() == static_cast<uint16_t>(HE::AssetType::SkeletalMesh);
-	s_typeCache[path] = isSkel;
-	return isSkel;
+	return EditorAssetTypeCache::is(path, HE::AssetType::SkeletalMesh);
 }
 
 void forget(const std::string& assetPath)

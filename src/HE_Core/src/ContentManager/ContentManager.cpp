@@ -1462,6 +1462,11 @@ bool ContentManager::unloadAsset(HE::UUID id)
 		return true;
 	};
 
+	// This chain MUST list every SlotMap member of the class. A type missing here
+	// makes unloadAsset() return false for it, which silently disables hot reload
+	// (pollHotReload unloads-then-reloads) and leaks the slot on manual delete —
+	// exactly what happened to InputAction/InputMappingContext/ParticleGraph/
+	// AnimatorStateMachine after those maps were added.
 	const bool removed =
 		tryRemove(m_staticMeshAssets)   || tryRemove(m_skeletalMeshAssets) ||
 		tryRemove(m_textureAssets)      || tryRemove(m_materialAssets)     ||
@@ -1470,7 +1475,9 @@ bool ContentManager::unloadAsset(HE::UUID id)
 		tryRemove(m_shaderAssets)       || tryRemove(m_animClipAssets) ||
 		tryRemove(m_propAnimClipAssets) || tryRemove(m_materialFunctionAssets) ||
 		tryRemove(m_widgetAssets)       || tryRemove(m_hcClassAssets)     ||
-		tryRemove(m_prefabAssets);
+		tryRemove(m_prefabAssets)       || tryRemove(m_inputActionAssets) ||
+		tryRemove(m_inputMappingAssets) || tryRemove(m_particleGraphAssets) ||
+		tryRemove(m_animatorStateMachineAssets);
 	if (!removed)
 		return false;
 

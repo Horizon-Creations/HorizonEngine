@@ -1,10 +1,10 @@
 #include "AnimatorStateMachineEditorPanel.h"
 #include <cstdint>
-#include "EditorApplication.h" // AppContext
-#include "GraphEditor.h"       // shared node-graph canvas frontend
+#include "EditorApplication.h"      // AppContext
+#include "EditorAssetTypeCache.h"   // shared, invalidatable path → AssetType sniff
+#include "GraphEditor.h"            // shared node-graph canvas frontend
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
-#include <ContentManager/HAsset.h>
 #include <AnimatorStateMachine/AnimatorStateMachineGraph.h>
 #include <HorizonScene/AnimationStateMachineSystem.h>
 #include <HorizonScene/Components/AnimatorStateMachineComponent.h>
@@ -58,13 +58,13 @@ static State& stateFor(const std::string& path, AppContext& ctx)
 
 bool isAnimatorStateMachineAsset(const std::string& path)
 {
-	static std::map<std::string, bool> s_typeCache;
-	if (auto it = s_typeCache.find(path); it != s_typeCache.end()) return it->second;
-	HAsset::Reader r;
-	const bool isAsm = r.open(path) &&
-		r.assetType() == static_cast<uint16_t>(HE::AssetType::AnimatorStateMachine);
-	s_typeCache[path] = isAsm;
-	return isAsm;
+	return EditorAssetTypeCache::is(path, HE::AssetType::AnimatorStateMachine);
+}
+
+bool isDirty(const std::string& assetPath)
+{
+	auto it = g_states.find(assetPath);
+	return it != g_states.end() && it->second.dirty;
 }
 
 void forget(const std::string& assetPath) { g_states.erase(assetPath); }

@@ -35,6 +35,22 @@ namespace
         }
         return {0.0f, 0.0f};
     }
+
+    // The canvas an element hangs under: the nearest HierarchyComponent ancestor
+    // carrying a UICanvasComponent, or entt::null when the element lives outside
+    // every canvas subtree. The depth guard mirrors the other hierarchy walks in
+    // this file (reparentEntity rejects cycles, so it never actually trips).
+    entt::entity owningCanvas(entt::registry& reg, entt::entity e)
+    {
+        for (int guard = 0; guard < 256; ++guard)
+        {
+            const auto* h = reg.try_get<HierarchyComponent>(e);
+            if (!h || h->parent == entt::null) break;
+            e = h->parent;
+            if (reg.all_of<UICanvasComponent>(e)) return e;
+        }
+        return entt::null;
+    }
 }
 
 namespace UISystem {
@@ -93,6 +109,21 @@ void extract(HorizonWorld& world, float vpWidth, float vpHeight,
 {
     auto& reg = world.registry();
 
+    // Elements that hang outside every canvas subtree (scenes authored before
+    // canvases were parented, and the editor's "add a UIElementComponent to any
+    // entity" flow) belong to the FIRST active canvas — the same convention
+    // UIInputSystem uses for its scale. Resolved up front so the loop below can
+    // claim them for exactly one canvas: iterating every element for every
+    // canvas emitted each element once PER active canvas, i.e. doubled geometry
+    // with the wrong canvas' scale on one copy as soon as a scene had two.
+    entt::entity fallbackCanvas = entt::null;
+    for (auto [canvasEnt, canvas] : reg.view<UICanvasComponent>().each())
+    {
+        if (!canvas.active) continue;
+        fallbackCanvas = canvasEnt;
+        break;
+    }
+
     for (auto [canvasEnt, canvas] : reg.view<UICanvasComponent>().each())
     {
         if (!canvas.active) continue;
@@ -100,12 +131,16 @@ void extract(HorizonWorld& world, float vpWidth, float vpHeight,
         const float scaleX = vpWidth  / canvas.width;
         const float scaleY = vpHeight / canvas.height;
 
-        // Walk entities that are direct children of this canvas entity by
-        // checking every UIElementComponent in the registry.  We match via
-        // the HierarchyComponent parent field when present; fallback: include
-        // all UI elements (editor scenes typically have one canvas).
         for (auto [elemEnt, elem] : reg.view<UIElementComponent>().each())
         {
+            // Membership: the element's own canvas, or the fallback canvas when
+            // it has none. An element under an INACTIVE canvas draws nowhere —
+            // it must not fall back onto an active one.
+            const entt::entity owner = owningCanvas(reg, elemEnt);
+            if (owner != canvasEnt &&
+                !(owner == entt::null && canvasEnt == fallbackCanvas))
+                continue;
+
             glm::vec2 screenPos, screenSize;
             if (!computeScreenRect(reg, elemEnt, vpWidth, vpHeight,
                                    scaleX, scaleY, screenPos, screenSize))

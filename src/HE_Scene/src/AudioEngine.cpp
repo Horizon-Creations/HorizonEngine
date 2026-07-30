@@ -130,6 +130,11 @@ uint64_t AudioEngine::play(const std::vector<uint8_t>& pcmData,
         frameCount,
         snd->pcmCopy.data(),
         nullptr);
+    // ma_audio_buffer_config_init() hardcodes sampleRate = 0 (a documented
+    // miniaudio TODO for 0.12), and a zero rate makes ma_sound_init_from_data_source()
+    // fall back to the engine's rate and skip the resampler entirely — a 44.1 kHz
+    // clip would then play back ~9% too fast on the 48 kHz engine. Set it explicitly.
+    bcfg.sampleRate = static_cast<ma_uint32>(sampleRate);
 
     if (ma_audio_buffer_init(&bcfg, &snd->buffer) != MA_SUCCESS)
         return 0;
@@ -212,6 +217,9 @@ uint64_t AudioEngine::playSpatial(const std::vector<uint8_t>& pcmData,
         frameCount,
         snd->pcmCopy.data(),
         nullptr);
+    // Same as play(): the config initializer zeroes sampleRate, which silently
+    // disables resampling and plays the clip at the engine rate instead.
+    bcfg.sampleRate = static_cast<ma_uint32>(sampleRate);
 
     if (ma_audio_buffer_init(&bcfg, &snd->buffer) != MA_SUCCESS)
         return 0;
@@ -279,4 +287,18 @@ bool AudioEngine::isPlaying(uint64_t handle) const
     auto it = m_impl->sounds.find(handle);
     if (it == m_impl->sounds.end()) return false;
     return ma_sound_is_playing(&it->second->sound) == MA_TRUE;
+}
+
+int AudioEngine::getSoundSampleRate(uint64_t handle) const
+{
+    auto it = m_impl->sounds.find(handle);
+    if (it == m_impl->sounds.end() || !it->second->bufferOk) return 0;
+
+    // Query through the data-source interface — the exact same call miniaudio makes
+    // internally in ma_sound_init_from_data_source() to pick the resampler ratio.
+    ma_uint32 rate = 0;
+    if (ma_data_source_get_data_format(&it->second->buffer, nullptr, nullptr,
+                                        &rate, nullptr, 0) != MA_SUCCESS)
+        return 0;
+    return static_cast<int>(rate);
 }

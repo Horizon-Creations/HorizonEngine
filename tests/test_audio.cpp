@@ -550,6 +550,95 @@ TEST_CASE("AudioSourceComponent: busName field defaults to empty")
     CHECK(a.busName.empty());
 }
 
+// ─── Sample-rate handling ────────────────────────────────────────────────────
+// Regression: play()/playSpatial() validated the sampleRate argument but never
+// wrote it into the ma_audio_buffer_config, which leaves miniaudio's default of 0.
+// A zero rate makes the sound inherit the engine rate (48 kHz here) and skip the
+// resampler, so 44.1 kHz assets — what the WAV importer produces verbatim, it does
+// not resample — played back ~9% too fast and a pitch too high.
+
+TEST_CASE("AudioEngine: play keeps the clip's sample rate instead of the engine's")
+{
+    AudioEngine engine;
+    REQUIRE(engine.init(true)); // noDevice mode runs the engine at 48000 Hz
+
+    auto pcm = makeSilence(4410, 1);
+    uint64_t h = engine.play(pcm, 44100, 1);
+    REQUIRE(h != 0);
+    CHECK(engine.getSoundSampleRate(h) == 44100); // was 0 (-> silently 48000) before the fix
+
+    engine.stop(h);
+    engine.shutdown();
+}
+
+TEST_CASE("AudioEngine: playSpatial keeps the clip's sample rate")
+{
+    AudioEngine engine;
+    REQUIRE(engine.init(true));
+
+    auto pcm = makeSilence(2205, 2);
+    uint64_t h = engine.playSpatial(pcm, 22050, 2,
+                                     1.0f, 1.0f, false,
+                                     0.0f, 0.0f, 0.0f,
+                                     1.0f, 20.0f);
+    REQUIRE(h != 0);
+    CHECK(engine.getSoundSampleRate(h) == 22050);
+
+    engine.stop(h);
+    engine.shutdown();
+}
+
+TEST_CASE("AudioEngine: sample rate matching the engine still reports correctly")
+{
+    AudioEngine engine;
+    REQUIRE(engine.init(true));
+
+    auto pcm = makeSilence(4800, 2);
+    uint64_t h = engine.play(pcm, 48000, 2);
+    REQUIRE(h != 0);
+    CHECK(engine.getSoundSampleRate(h) == 48000);
+
+    engine.stop(h);
+    engine.shutdown();
+}
+
+TEST_CASE("AudioEngine: getSoundSampleRate returns 0 for unknown handle")
+{
+    AudioEngine engine;
+    REQUIRE(engine.init(true));
+    CHECK(engine.getSoundSampleRate(0)     == 0);
+    CHECK(engine.getSoundSampleRate(99999) == 0);
+    engine.shutdown();
+}
+
+TEST_CASE("AudioSystem: playOnStart forwards the asset's sample rate to the engine")
+{
+    HorizonWorld    world;
+    ContentManager  content;
+    AudioEngine     engine;
+    REQUIRE(engine.init(true));
+
+    AudioAsset asset;
+    asset.name       = "cd_quality";
+    asset.sampleRate = 44100; // what AudioImporter writes for a stock 44.1 kHz WAV
+    asset.channels   = 1;
+    asset.audioData  = makeSilence(4410, 1);
+    HE::UUID assetId = content.registerAudio(std::move(asset));
+
+    auto e = world.createEntity("SpeakerEntity");
+    AudioSourceComponent src;
+    src.assetId     = assetId;
+    src.playOnStart = true;
+    world.registry().emplace<AudioSourceComponent>(e, src);
+
+    AudioSystem::playOnStart(world, engine, &content);
+
+    const auto& stored = world.registry().get<AudioSourceComponent>(e);
+    REQUIRE(stored.handle != 0);
+    CHECK(engine.getSoundSampleRate(stored.handle) == 44100);
+    engine.shutdown();
+}
+
 TEST_CASE("AudioSourceComponent: busName serializes and deserializes")
 {
     HorizonWorld src_world;

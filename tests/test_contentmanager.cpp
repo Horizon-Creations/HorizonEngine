@@ -241,6 +241,74 @@ TEST_CASE("ContentManager unload removes asset")
 	CHECK(cm.getMaterial(id) == nullptr);
 }
 
+// Regression: unloadAsset() only searched a subset of the SlotMaps. For
+// InputAction / InputMappingContext / ParticleSystem / AnimatorStateMachine it
+// found nothing, returned false and left the asset resident — which also killed
+// hot reload for those types, because pollHotReload() unloads before reloading.
+TEST_CASE("ContentManager unload works for every asset type it can load")
+{
+	TempContentDir dir;
+	ContentManager cm(dir.path.string());
+
+	InputActionAsset ia;
+	ia.type = HE::AssetType::InputAction;
+	ia.name = "IA_Fire";
+	ia.path = "IA_Fire.hasset";
+	ia.json = R"({"valueType":"Bool"})";
+	REQUIRE(cm.saveAsset(ia));
+
+	InputMappingContextAsset imc;
+	imc.type = HE::AssetType::InputMappingContext;
+	imc.name = "IMC_Unload";
+	imc.path = "IMC_Unload.hasset";
+	imc.json = R"({"entries":[]})";
+	REQUIRE(cm.saveAsset(imc));
+
+	ParticleGraphAsset pg;
+	pg.type          = HE::AssetType::ParticleSystem;
+	pg.name          = "PG_Sparks";
+	pg.path          = "PG_Sparks.hasset";
+	pg.nodeGraphJson = R"({"nextId":1,"nodes":[],"links":[]})";
+	REQUIRE(cm.saveAsset(pg));
+
+	AnimatorStateMachineAsset asm_;
+	asm_.type      = HE::AssetType::AnimatorStateMachine;
+	asm_.name      = "ASM_Locomotion";
+	asm_.path      = "ASM_Locomotion.hasset";
+	asm_.graphJson = R"({"states":[],"transitions":[]})";
+	REQUIRE(cm.saveAsset(asm_));
+
+	const HE::UUID actionId  = cm.loadAsset("IA_Fire.hasset");
+	const HE::UUID mappingId = cm.loadAsset("IMC_Unload.hasset");
+	const HE::UUID particleId = cm.loadAsset("PG_Sparks.hasset");
+	const HE::UUID stateId   = cm.loadAsset("ASM_Locomotion.hasset");
+	REQUIRE(cm.getInputAction(actionId)           != nullptr);
+	REQUIRE(cm.getInputMappingContext(mappingId)  != nullptr);
+	REQUIRE(cm.getParticleGraph(particleId)       != nullptr);
+	REQUIRE(cm.getAnimatorStateMachine(stateId)   != nullptr);
+
+	CHECK(cm.unloadAsset(actionId));
+	CHECK_FALSE(cm.isLoaded(actionId));
+	CHECK(cm.getInputAction(actionId) == nullptr);
+	CHECK(cm.assetType(actionId) == HE::AssetType::Unknown);
+	CHECK_FALSE(cm.isLoaded("IA_Fire.hasset")); // path→UUID entry gone too
+
+	CHECK(cm.unloadAsset(mappingId));
+	CHECK_FALSE(cm.isLoaded(mappingId));
+	CHECK(cm.getInputMappingContext(mappingId) == nullptr);
+
+	CHECK(cm.unloadAsset(particleId));
+	CHECK_FALSE(cm.isLoaded(particleId));
+	CHECK(cm.getParticleGraph(particleId) == nullptr);
+
+	CHECK(cm.unloadAsset(stateId));
+	CHECK_FALSE(cm.isLoaded(stateId));
+	CHECK(cm.getAnimatorStateMachine(stateId) == nullptr);
+
+	// A second unload of an already-evicted asset stays false.
+	CHECK_FALSE(cm.unloadAsset(actionId));
+}
+
 TEST_CASE("ContentManager round-trips a material's custom shader (and defaults empty)")
 {
 	TempContentDir dir;
@@ -744,6 +812,47 @@ TEST_CASE("ContentManager pollHotReload detects a changed file and reloads it")
 
 	// Second poll with no further changes is quiet.
 	CHECK(cm.pollHotReload().empty());
+}
+
+// Regression: pollHotReload() unloads before reloading, so an asset type that
+// unloadAsset() did not know stayed pinned at its old contents forever. Proven
+// end-to-end here on the particle graph (same hole as InputAction /
+// InputMappingContext / AnimatorStateMachine).
+TEST_CASE("ContentManager pollHotReload reloads a changed particle graph")
+{
+	TempContentDir dir;
+	ContentManager cm(dir.path.string());
+
+	ParticleGraphAsset pg1;
+	pg1.type          = HE::AssetType::ParticleSystem;
+	pg1.name          = "hotgraph";
+	pg1.path          = "hotgraph.hasset";
+	pg1.nodeGraphJson = R"({"v":1})";
+	REQUIRE(cm.saveAsset(pg1));
+	const HE::UUID savedId = pg1.id;
+
+	const HE::UUID loaded = cm.loadAsset("hotgraph.hasset");
+	REQUIRE(loaded == savedId);
+	REQUIRE(cm.getParticleGraph(loaded) != nullptr);
+	CHECK(cm.getParticleGraph(loaded)->nodeGraphJson == R"({"v":1})");
+
+	// Overwrite V2 — same path, same UUID, different graph.
+	ParticleGraphAsset pg2 = *cm.getParticleGraph(loaded); // copies identity
+	pg2.nodeGraphJson = R"({"v":2})";
+	REQUIRE(cm.saveAsset(pg2));
+
+	// Advance the stored mtime by 2 s so the poller detects same-second saves.
+	const fs::path diskPath = dir.path / "hotgraph.hasset";
+	auto cur = fs::last_write_time(diskPath);
+	fs::last_write_time(diskPath, cur + std::chrono::seconds(2));
+
+	auto changed = cm.pollHotReload();
+	REQUIRE(changed.size() == 1);
+	CHECK(changed[0] == savedId);
+
+	const ParticleGraphAsset* reloaded = cm.getParticleGraph(savedId);
+	REQUIRE(reloaded != nullptr);
+	CHECK(reloaded->nodeGraphJson == R"({"v":2})");
 }
 
 // ── AssetRef (pin-based lifetime) ─────────────────────────────────────────────

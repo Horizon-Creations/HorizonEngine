@@ -3,8 +3,10 @@
 #include <algorithm>
 #include <fstream>
 #include <filesystem>
+#include <memory>
 #include <mutex>
 #include <shared_mutex>
+#include <utility>
 #include <nlohmann/json.hpp>
 
 using json = nlohmann::json;
@@ -69,7 +71,6 @@ void GlobalState::readConfig()
 	{
 		Logger::Log(Logger::LogLevel::Warning, "No config file found — using defaults");
 		engineStatus.selectedRHI = defaultRHI();
-		engineStatus.currentOS = HE::OS::Windows;
 		engineStatus.lastProjectPath = "";
 		engineStatus.knownProjects.clear();
 		writeConfig();
@@ -94,7 +95,6 @@ void GlobalState::readConfig()
 		Logger::Log(Logger::LogLevel::Warning,
 			"config.json is corrupt or unreadable — resetting to defaults");
 		engineStatus.selectedRHI     = defaultRHI();
-		engineStatus.currentOS       = HE::OS::Windows;
 		engineStatus.lastProjectPath = "";
 		engineStatus.knownProjects.clear();
 		customConfig.clear();
@@ -115,7 +115,10 @@ void GlobalState::readConfig()
 	};
 	engineStatus.selectedRHI      = sanitizeRHI(static_cast<HE::GraphicsAPI>(
 		intField("RHI", static_cast<int>(defaultRHI()))));
-	engineStatus.currentOS        = static_cast<HE::OS>(intField("OS", static_cast<int>(HE::OS::Windows)));
+	// A config written by an older editor still carries an "OS" key. It was never
+	// read by anything (it was hard-coded to Windows on every platform), so it is
+	// deliberately not looked up here: unknown keys are simply ignored, which keeps
+	// an old config.json loadable instead of turning it into a startup failure.
 	engineStatus.lastProjectPath  = strField("LastProjectPath");
 	engineStatus.knownProjects.clear();
 	if (j.contains("KnownProjects") && j["KnownProjects"].is_array())
@@ -146,7 +149,6 @@ bool GlobalState::writeConfig()
 {
 	json j;
 	j["RHI"] = engineStatus.selectedRHI;
-	j["OS"] = engineStatus.currentOS;
 	j["LastProjectPath"] = engineStatus.lastProjectPath;
 	j["KnownProjects"] = engineStatus.knownProjects;
 	json::array_t customEntries;
@@ -233,10 +235,48 @@ static void clearFolder(Folder* folder)
 	folder->files.clear();
 }
 
+// RAII owner for a Folder tree that is still being built on the stack.
+// Folder/File children are raw `new`ed pointers and Folder has no destructor of
+// its own (the content browser passes Folder*/File* around and must never own
+// them), so anything that unwinds out of the build — an early return, or a
+// bad_alloc from the string/vector work — would silently leak the whole
+// half-built subtree. Handover is done by swapping the built tree into the
+// member and leaving the (already emptied) member root behind here, so this
+// guard can stay armed for the entire function and still be a no-op on success.
+namespace
+{
+	struct ScopedFolderNodes
+	{
+		Folder* folder;
+		explicit ScopedFolderNodes(Folder* f) : folder(f) {}
+		~ScopedFolderNodes() { clearFolder(folder); }
+		ScopedFolderNodes(const ScopedFolderNodes&)            = delete;
+		ScopedFolderNodes& operator=(const ScopedFolderNodes&) = delete;
+	};
+}
+
 static void populateFolder(Folder* folder, const fs::path& path)
 {
-	for (const auto& entry : fs::directory_iterator(path))
+	// error_code overloads throughout: the throwing directory_iterator raises
+	// filesystem_error on the very first unreadable entry (a permission-denied
+	// directory, a directory deleted by another process mid-walk, a dead symlink
+	// into an unmounted share). That exception escaped all the way out of
+	// refreshContentFolder() — which has no handler above it — and additionally
+	// abandoned the walk with a half-built tree. Now an unreadable directory just
+	// contributes nothing and the rest of the tree still populates.
+	std::error_code ec;
+	fs::directory_iterator it(path, fs::directory_options::skip_permission_denied, ec);
+	if (ec)
+		return;
+
+	const fs::directory_iterator end;
+	for (; it != end; it.increment(ec))
 	{
+		if (ec)
+			return; // iteration broke down (unreadable dir) — keep what we have
+
+		const fs::directory_entry& entry = *it;
+
 		// Hide dotfiles/dotfolders (.gitkeep, .DS_Store, .git, …) — they are
 		// VCS/OS bookkeeping, never browsable content. (A ".gitkeep" is how the
 		// engine's empty category folders survive in git; it must not surface as
@@ -244,21 +284,27 @@ static void populateFolder(Folder* folder, const fs::path& path)
 		if (entry.path().filename().string().rfind('.', 0) == 0)
 			continue;
 
-		if (entry.is_directory())
+		std::error_code typeEc;
+		if (entry.is_directory(typeEc))
 		{
-			Folder* sub   = new Folder();
+			// Hold the fresh node in a unique_ptr until it is linked into the
+			// tree: the node only gets an owner once push_back succeeded, and
+			// from then on the root's ScopedFolderNodes covers it. Anything that
+			// throws in between (bad_alloc) therefore frees exactly once.
+			std::unique_ptr<Folder> sub(new Folder());
 			sub->name     = entry.path().filename().string();
 			sub->fullPath = entry.path().string();
-			populateFolder(sub, entry.path());
-			folder->subfolders.push_back(sub);
+			folder->subfolders.push_back(sub.get());
+			populateFolder(sub.release(), entry.path());
 		}
-		else if (entry.is_regular_file())
+		else if (entry.is_regular_file(typeEc))
 		{
-			File* file      = new File();
+			std::unique_ptr<File> file(new File());
 			file->name      = entry.path().filename().string();
 			file->fullPath  = entry.path().string();
 			file->extension = entry.path().extension().string();
-			folder->files.push_back(file);
+			folder->files.push_back(file.get());
+			file.release();
 		}
 	}
 }
@@ -271,12 +317,16 @@ bool GlobalState::refreshContentFolder()
 		return false;
 	}
 
+	// error_code overloads: these probes run on a user-supplied project path, which
+	// may live on an unmounted/unreachable share — the throwing overloads would take
+	// the editor down instead of reporting "not found".
+	std::error_code ec;
 	fs::path projectPath = engineStatus.lastProjectPath;
-	if (fs::is_regular_file(projectPath))
+	if (fs::is_regular_file(projectPath, ec))
 		projectPath = projectPath.parent_path();
 
 	fs::path contentFolderpath = projectPath / "Content";
-	if (!fs::exists(contentFolderpath) || !fs::is_directory(contentFolderpath))
+	if (!fs::is_directory(contentFolderpath, ec))
 	{
 		Logger::Log(Logger::LogLevel::Error, ("Content folder not found at " + contentFolderpath.string()).c_str());
 		return false;
@@ -284,6 +334,7 @@ bool GlobalState::refreshContentFolder()
 
 	// Daten ausserhalb des Locks zusammenstellen, dann atomar eintauschen
 	Folder fresh;
+	ScopedFolderNodes freshOwner(&fresh);
 	fresh.name     = contentFolderpath.filename().string();
 	fresh.fullPath = contentFolderpath.string();
 	populateFolder(&fresh, contentFolderpath);
@@ -291,7 +342,11 @@ bool GlobalState::refreshContentFolder()
 	{
 		std::unique_lock lock(m_contentFolderMutex);
 		clearFolder(&contentFolder);
-		contentFolder = std::move(fresh);
+		// swap, not move-assign: clearFolder just emptied the member's child
+		// vectors, so after the swap `fresh` provably holds no live nodes and its
+		// guard above becomes a no-op. A move-assign would leave the source in an
+		// unspecified state that the guard might then double-free.
+		std::swap(contentFolder, fresh);
 	}
 	// Old Folder/File nodes are gone — tell pointer-holders to re-resolve by path.
 	contentFolderVersion.fetch_add(1, std::memory_order_release);
@@ -307,8 +362,9 @@ bool GlobalState::refreshSourceFolder()
 	if (engineStatus.lastProjectPath.empty())
 		return false;
 
+	std::error_code ec;
 	fs::path projectPath = engineStatus.lastProjectPath;
-	if (fs::is_regular_file(projectPath))
+	if (fs::is_regular_file(projectPath, ec))
 		projectPath = projectPath.parent_path();
 
 	fs::path sourcePath = projectPath / "Source";
@@ -317,15 +373,16 @@ bool GlobalState::refreshSourceFolder()
 	// is not an error — leave the tree empty; the root's fullPath is still set so
 	// the browser's drop/create targets resolve.
 	Folder fresh;
+	ScopedFolderNodes freshOwner(&fresh);
 	fresh.name     = "Source";
 	fresh.fullPath = sourcePath.string();
-	if (fs::exists(sourcePath) && fs::is_directory(sourcePath))
+	if (fs::is_directory(sourcePath, ec))
 		populateFolder(&fresh, sourcePath);
 
 	{
 		std::unique_lock lock(m_sourceFolderMutex);
 		clearFolder(&sourceFolder);
-		sourceFolder = std::move(fresh);
+		std::swap(sourceFolder, fresh); // see refreshContentFolder() for why swap
 	}
 	sourceFolderVersion.fetch_add(1, std::memory_order_release);
 	return true;
@@ -342,26 +399,45 @@ bool GlobalState::refreshSourceFolder()
 // "overridden" here, never the folder's own identity.
 static void mergeOverrideInto(Folder* base, const fs::path& overrideDir)
 {
-	for (const auto& entry : fs::directory_iterator(overrideDir))
+	// Same non-throwing iteration contract as populateFolder — an unreadable
+	// override directory must degrade to "no overrides", never to an exception
+	// escaping refreshEngineFolder().
+	std::error_code ec;
+	fs::directory_iterator it(overrideDir, fs::directory_options::skip_permission_denied, ec);
+	if (ec)
+		return;
+
+	const fs::directory_iterator end;
+	for (; it != end; it.increment(ec))
 	{
+		if (ec)
+			return;
+
+		const fs::directory_entry& entry = *it;
+
 		if (entry.path().filename().string().rfind('.', 0) == 0)
 			continue; // same dotfile filter as populateFolder
 
-		if (entry.is_directory())
+		std::error_code typeEc;
+		if (entry.is_directory(typeEc))
 		{
 			Folder* sub = nullptr;
 			for (Folder* s : base->subfolders)
 				if (s->name == entry.path().filename().string()) { sub = s; break; }
 			if (!sub)
 			{
-				sub = new Folder();
-				sub->name     = entry.path().filename().string();
-				sub->fullPath = entry.path().string();
-				base->subfolders.push_back(sub);
+				// Owned by the unique_ptr until push_back linked it into the tree
+				// (see populateFolder) — the root's ScopedFolderNodes takes over
+				// from there.
+				std::unique_ptr<Folder> owned(new Folder());
+				owned->name     = entry.path().filename().string();
+				owned->fullPath = entry.path().string();
+				base->subfolders.push_back(owned.get());
+				sub = owned.release();
 			}
 			mergeOverrideInto(sub, entry.path());
 		}
-		else if (entry.is_regular_file())
+		else if (entry.is_regular_file(typeEc))
 		{
 			File* match = nullptr;
 			for (File* f : base->files)
@@ -370,11 +446,12 @@ static void mergeOverrideInto(Folder* base, const fs::path& overrideDir)
 				match->fullPath = entry.path().string(); // override shadows the default
 			else
 			{
-				File* file      = new File();
+				std::unique_ptr<File> file(new File());
 				file->name      = entry.path().filename().string();
 				file->fullPath  = entry.path().string();
 				file->extension = entry.path().extension().string();
-				base->files.push_back(file);
+				base->files.push_back(file.get());
+				file.release();
 			}
 		}
 	}
@@ -383,14 +460,16 @@ static void mergeOverrideInto(Folder* base, const fs::path& overrideDir)
 bool GlobalState::refreshEngineFolder(const std::string& engineContentAbsPath,
                                        const std::string& projectContentRoot)
 {
+	std::error_code ec;
 	fs::path enginePath = engineContentAbsPath;
-	if (!fs::exists(enginePath) || !fs::is_directory(enginePath))
+	if (!fs::is_directory(enginePath, ec))
 	{
 		Logger::Log(Logger::LogLevel::Warning, ("Engine content folder not found at " + enginePath.string()).c_str());
 		return false;
 	}
 
 	Folder fresh;
+	ScopedFolderNodes freshOwner(&fresh);
 	fresh.name     = "Engine";
 	fresh.fullPath = enginePath.string();
 	populateFolder(&fresh, enginePath);
@@ -401,7 +480,6 @@ bool GlobalState::refreshEngineFolder(const std::string& engineContentAbsPath,
 	if (!projectContentRoot.empty())
 	{
 		const fs::path overrideRoot = fs::path(projectContentRoot) / "Engine";
-		std::error_code ec;
 		if (fs::is_directory(overrideRoot, ec))
 			mergeOverrideInto(&fresh, overrideRoot);
 	}
@@ -409,7 +487,7 @@ bool GlobalState::refreshEngineFolder(const std::string& engineContentAbsPath,
 	{
 		std::unique_lock lock(m_engineFolderMutex);
 		clearFolder(&engineFolder);
-		engineFolder = std::move(fresh);
+		std::swap(engineFolder, fresh); // see refreshContentFolder() for why swap
 	}
 	engineFolderVersion.fetch_add(1, std::memory_order_release);
 
