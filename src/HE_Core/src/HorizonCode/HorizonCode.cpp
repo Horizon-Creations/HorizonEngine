@@ -1009,14 +1009,6 @@ namespace
 // FunctionEntry). Used to partition a flat graph into per-function sub-graphs.
 std::unordered_set<int> traceBody(const Graph& g, int start)
 {
-    auto pinRangesOf = [](const Node& n, int& execOut0, int& execOutEnd, int& dataIn0, int& dataInEnd)
-    {
-        const NodeSigCounts s = signatureCountsOf(n);
-        execOut0  = s.execIns;
-        execOutEnd = execOut0 + s.execOuts;
-        dataIn0   = execOutEnd;
-        dataInEnd = dataIn0 + s.dataIns;
-    };
     std::unordered_set<int> body; std::vector<int> stack;
     body.insert(start); stack.push_back(start);
     // Exec-forward.
@@ -1024,9 +1016,9 @@ std::unordered_set<int> traceBody(const Graph& g, int start)
     {
         const int id = stack.back(); stack.pop_back();
         const Node* n = g.findNode(id); if (!n) continue;
-        int eo0, eoE, di0, diE; pinRangesOf(*n, eo0, eoE, di0, diE);
+        const PinRanges r = pinRanges(*n);
         for (const auto& l : g.links)
-            if (l.srcNode == id && l.srcPin >= eo0 && l.srcPin < eoE)
+            if (l.srcNode == id && l.srcPin >= r.execOut0 && l.srcPin < r.dataIn0)
                 if (body.insert(l.dstNode).second) stack.push_back(l.dstNode);
     }
     // Data producers feeding any node already in the body.
@@ -1035,9 +1027,9 @@ std::unordered_set<int> traceBody(const Graph& g, int start)
     {
         const int id = stack.back(); stack.pop_back();
         const Node* n = g.findNode(id); if (!n) continue;
-        int eo0, eoE, di0, diE; pinRangesOf(*n, eo0, eoE, di0, diE);
+        const PinRanges r = pinRanges(*n);
         for (const auto& l : g.links)
-            if (l.dstNode == id && l.dstPin >= di0 && l.dstPin < diE)
+            if (l.dstNode == id && l.dstPin >= r.dataIn0 && l.dstPin < r.dataOut0)
                 if (body.insert(l.srcNode).second) stack.push_back(l.srcNode);
     }
     return body;

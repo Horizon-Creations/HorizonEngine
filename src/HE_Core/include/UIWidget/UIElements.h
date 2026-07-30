@@ -2,14 +2,11 @@
 #include <UIWidget/UIElement.h>
 
 // Concrete widget element types. Each declares its own data + properties +
-// events; render() and JSON live in UIElement.cpp. Field defaults are the
-// "sensible defaults" a freshly-added element starts with.
+// events; the property tables (propTable), render() and JSON live in
+// UIElement.cpp. Field defaults are the "sensible defaults" a freshly-added
+// element starts with.
 
 namespace HE {
-
-// Small helpers so the getProp/setProp bodies stay compact.
-inline UIPropValue propColor(const glm::vec4& c) { return UIPropValue::ofColor(c); }
-inline glm::vec4   asColor(const UIPropValue& v) { return v.col; }
 
 // ── Panel ─────────────────────────────────────────────────────────────────────
 class HE_API UIPanel final : public UIElement
@@ -23,12 +20,7 @@ public:
     std::unique_ptr<UIElement> clone() const override
     { auto p = std::make_unique<UIPanel>(*this); return p; }
 
-    std::vector<UIPropDesc> properties() const override
-    { return { { "Color", UIPropType::Color } }; }
-    UIPropValue getProp(const std::string& n) const override
-    { if (n == "Color") return propColor(color); return {}; }
-    void setProp(const std::string& n, const UIPropValue& v) override
-    { if (n == "Color") color = asColor(v); }
+    const UIPropTable& propTable() const override;
     std::vector<UIEventDesc> events() const override
     { return { { "OnMouseEnter" }, { "OnMouseLeave" }, { "OnClicked" } }; }
 
@@ -51,12 +43,7 @@ public:
     std::unique_ptr<UIElement> clone() const override
     { return std::make_unique<UIImage>(*this); }
 
-    std::vector<UIPropDesc> properties() const override
-    { return { { "Tint", UIPropType::Color } }; }
-    UIPropValue getProp(const std::string& n) const override
-    { if (n == "Tint") return propColor(tint); return {}; }
-    void setProp(const std::string& n, const UIPropValue& v) override
-    { if (n == "Tint") tint = asColor(v); }
+    const UIPropTable& propTable() const override;
     std::vector<UIEventDesc> events() const override
     { return { { "OnMouseEnter" }, { "OnMouseLeave" }, { "OnClicked" } }; }
 
@@ -91,32 +78,7 @@ public:
     std::unique_ptr<UIElement> clone() const override
     { return std::make_unique<UIText>(*this); }
 
-    std::vector<UIPropDesc> properties() const override
-    { return { { "Text", UIPropType::String, 0.0f, 0.0f, /*multiline=*/true },
-               { "FontSize", UIPropType::Float, 4.0f, 200.0f },
-               { "Color", UIPropType::Color },
-               { "WordWrap", UIPropType::Bool },
-               { "AutoSize", UIPropType::Bool },
-               { "Center", UIPropType::Bool } }; }
-    UIPropValue getProp(const std::string& n) const override
-    {
-        if (n == "Text")     return UIPropValue::ofString(text);
-        if (n == "FontSize") return UIPropValue::ofFloat(fontSize);
-        if (n == "Color")    return propColor(color);
-        if (n == "WordWrap") return UIPropValue::ofBool(wordWrap);
-        if (n == "AutoSize") return UIPropValue::ofBool(autoSize);
-        if (n == "Center")   return UIPropValue::ofBool(align == 1);
-        return {};
-    }
-    void setProp(const std::string& n, const UIPropValue& v) override
-    {
-        if (n == "Text")     text = v.s;
-        else if (n == "FontSize") fontSize = v.f;
-        else if (n == "Color")    color = asColor(v);
-        else if (n == "WordWrap") wordWrap = v.b;
-        else if (n == "AutoSize") autoSize = v.b;
-        else if (n == "Center")   align = v.b ? 1 : 0;
-    }
+    const UIPropTable& propTable() const override;
 
     // Element size implied by the current text/font (see autoSize). Callers apply
     // it before layout so the rect the glyphs lay out in already fits them.
@@ -147,32 +109,7 @@ public:
     std::unique_ptr<UIElement> clone() const override
     { return std::make_unique<UIButton>(*this); }
 
-    std::vector<UIPropDesc> properties() const override
-    { return { { "Text", UIPropType::String },
-               { "FontSize", UIPropType::Float, 4.0f, 200.0f },
-               { "Normal Color", UIPropType::Color },
-               { "Hovered Color", UIPropType::Color },
-               { "Pressed Color", UIPropType::Color },
-               { "Text Color", UIPropType::Color } }; }
-    UIPropValue getProp(const std::string& n) const override
-    {
-        if (n == "Text")          return UIPropValue::ofString(text);
-        if (n == "FontSize")      return UIPropValue::ofFloat(fontSize);
-        if (n == "Normal Color")  return propColor(color);
-        if (n == "Hovered Color") return propColor(hoveredColor);
-        if (n == "Pressed Color") return propColor(pressedColor);
-        if (n == "Text Color")    return propColor(textColor);
-        return {};
-    }
-    void setProp(const std::string& n, const UIPropValue& v) override
-    {
-        if (n == "Text")               text = v.s;
-        else if (n == "FontSize")      fontSize = v.f;
-        else if (n == "Normal Color")  color = asColor(v);
-        else if (n == "Hovered Color") hoveredColor = asColor(v);
-        else if (n == "Pressed Color") pressedColor = asColor(v);
-        else if (n == "Text Color")    textColor = asColor(v);
-    }
+    const UIPropTable& propTable() const override;
     std::vector<UIEventDesc> events() const override
     { return { { "OnClicked" }, { "OnPressed" }, { "OnReleased" },
                { "OnHovered" }, { "OnUnhovered" } }; }
@@ -201,32 +138,7 @@ public:
     std::unique_ptr<UIElement> clone() const override
     { return std::make_unique<UICheckBox>(*this); }
 
-    std::vector<UIPropDesc> properties() const override
-    { return { { "Checked", UIPropType::Bool },
-               { "Label", UIPropType::String },
-               { "FontSize", UIPropType::Float, 4.0f, 200.0f },
-               { "Box Color", UIPropType::Color },
-               { "Check Color", UIPropType::Color },
-               { "Text Color", UIPropType::Color } }; }
-    UIPropValue getProp(const std::string& n) const override
-    {
-        if (n == "Checked")     return UIPropValue::ofBool(checked);
-        if (n == "Label")       return UIPropValue::ofString(label);
-        if (n == "FontSize")    return UIPropValue::ofFloat(fontSize);
-        if (n == "Box Color")   return propColor(boxColor);
-        if (n == "Check Color") return propColor(checkColor);
-        if (n == "Text Color")  return propColor(textColor);
-        return {};
-    }
-    void setProp(const std::string& n, const UIPropValue& v) override
-    {
-        if (n == "Checked")          checked = v.b;
-        else if (n == "Label")       label = v.s;
-        else if (n == "FontSize")    fontSize = v.f;
-        else if (n == "Box Color")   boxColor = asColor(v);
-        else if (n == "Check Color") checkColor = asColor(v);
-        else if (n == "Text Color")  textColor = asColor(v);
-    }
+    const UIPropTable& propTable() const override;
     std::vector<UIEventDesc> events() const override
     { return { { "OnCheckChanged", UIPropType::Bool, true },
                { "OnHovered" }, { "OnUnhovered" } }; }
@@ -253,32 +165,7 @@ public:
     std::unique_ptr<UIElement> clone() const override
     { return std::make_unique<UISlider>(*this); }
 
-    std::vector<UIPropDesc> properties() const override
-    { return { { "Value", UIPropType::Float },
-               { "Min", UIPropType::Float },
-               { "Max", UIPropType::Float },
-               { "Track Color", UIPropType::Color },
-               { "Fill Color", UIPropType::Color },
-               { "Handle Color", UIPropType::Color } }; }
-    UIPropValue getProp(const std::string& n) const override
-    {
-        if (n == "Value")        return UIPropValue::ofFloat(value);
-        if (n == "Min")          return UIPropValue::ofFloat(minValue);
-        if (n == "Max")          return UIPropValue::ofFloat(maxValue);
-        if (n == "Track Color")  return propColor(trackColor);
-        if (n == "Fill Color")   return propColor(fillColor);
-        if (n == "Handle Color") return propColor(handleColor);
-        return {};
-    }
-    void setProp(const std::string& n, const UIPropValue& v) override
-    {
-        if (n == "Value")             value = v.f;
-        else if (n == "Min")          minValue = v.f;
-        else if (n == "Max")          maxValue = v.f;
-        else if (n == "Track Color")  trackColor = asColor(v);
-        else if (n == "Fill Color")   fillColor = asColor(v);
-        else if (n == "Handle Color") handleColor = asColor(v);
-    }
+    const UIPropTable& propTable() const override;
     std::vector<UIEventDesc> events() const override
     { return { { "OnValueChanged", UIPropType::Float, true } }; }
 
@@ -311,23 +198,7 @@ public:
     std::unique_ptr<UIElement> clone() const override
     { return std::make_unique<UIProgressBar>(*this); }
 
-    std::vector<UIPropDesc> properties() const override
-    { return { { "Value", UIPropType::Float, 0.0f, 1.0f },
-               { "Back Color", UIPropType::Color },
-               { "Fill Color", UIPropType::Color } }; }
-    UIPropValue getProp(const std::string& n) const override
-    {
-        if (n == "Value")      return UIPropValue::ofFloat(value);
-        if (n == "Back Color") return propColor(backColor);
-        if (n == "Fill Color") return propColor(fillColor);
-        return {};
-    }
-    void setProp(const std::string& n, const UIPropValue& v) override
-    {
-        if (n == "Value")           value = v.f;
-        else if (n == "Back Color") backColor = asColor(v);
-        else if (n == "Fill Color") fillColor = asColor(v);
-    }
+    const UIPropTable& propTable() const override;
 
     void render(const UIWidgetRect&, const UIElementRenderState&, const HE::UUID&,
                 float, std::vector<UIRenderObject>&) const override;
@@ -352,29 +223,7 @@ public:
     std::unique_ptr<UIElement> clone() const override
     { return std::make_unique<UITextInput>(*this); }
 
-    std::vector<UIPropDesc> properties() const override
-    { return { { "Text", UIPropType::String },
-               { "Placeholder", UIPropType::String },
-               { "FontSize", UIPropType::Float, 4.0f, 200.0f },
-               { "Back Color", UIPropType::Color },
-               { "Text Color", UIPropType::Color } }; }
-    UIPropValue getProp(const std::string& n) const override
-    {
-        if (n == "Text")        return UIPropValue::ofString(text);
-        if (n == "Placeholder") return UIPropValue::ofString(placeholder);
-        if (n == "FontSize")    return UIPropValue::ofFloat(fontSize);
-        if (n == "Back Color")  return propColor(backColor);
-        if (n == "Text Color")  return propColor(textColor);
-        return {};
-    }
-    void setProp(const std::string& n, const UIPropValue& v) override
-    {
-        if (n == "Text")             text = v.s;
-        else if (n == "Placeholder") placeholder = v.s;
-        else if (n == "FontSize")    fontSize = v.f;
-        else if (n == "Back Color")  backColor = asColor(v);
-        else if (n == "Text Color")  textColor = asColor(v);
-    }
+    const UIPropTable& propTable() const override;
     std::vector<UIEventDesc> events() const override
     { return { { "OnTextChanged", UIPropType::String, true },
                { "OnTextCommitted", UIPropType::String, true },
@@ -404,32 +253,7 @@ public:
     std::unique_ptr<UIElement> clone() const override
     { return std::make_unique<UIComboBox>(*this); }
 
-    std::vector<UIPropDesc> properties() const override
-    { return { { "Options", UIPropType::StringList },
-               { "Selected Index", UIPropType::Int },
-               { "FontSize", UIPropType::Float, 4.0f, 200.0f },
-               { "Back Color", UIPropType::Color },
-               { "Text Color", UIPropType::Color },
-               { "Highlight Color", UIPropType::Color } }; }
-    UIPropValue getProp(const std::string& n) const override
-    {
-        if (n == "Options")         { UIPropValue v; v.type = UIPropType::StringList; v.list = options; return v; }
-        if (n == "Selected Index")  return UIPropValue::ofInt(selectedIndex);
-        if (n == "FontSize")        return UIPropValue::ofFloat(fontSize);
-        if (n == "Back Color")      return propColor(backColor);
-        if (n == "Text Color")      return propColor(textColor);
-        if (n == "Highlight Color") return propColor(highlightColor);
-        return {};
-    }
-    void setProp(const std::string& n, const UIPropValue& v) override
-    {
-        if (n == "Options")              options = v.list;
-        else if (n == "Selected Index")  selectedIndex = v.i;
-        else if (n == "FontSize")        fontSize = v.f;
-        else if (n == "Back Color")      backColor = asColor(v);
-        else if (n == "Text Color")      textColor = asColor(v);
-        else if (n == "Highlight Color") highlightColor = asColor(v);
-    }
+    const UIPropTable& propTable() const override;
     std::vector<UIEventDesc> events() const override
     { return { { "OnSelectionChanged", UIPropType::Int, true } }; }
 

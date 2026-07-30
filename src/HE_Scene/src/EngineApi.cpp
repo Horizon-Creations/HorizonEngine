@@ -26,6 +26,7 @@
 #include <filesystem>
 #include <fstream>
 #include <random>
+#include <string_view>
 #include <utility>
 #include <unordered_map>
 #include <unordered_set>
@@ -1171,11 +1172,36 @@ const std::vector<ApiFn>& registry()
     return table;
 }
 
+bool isScriptGroup(std::string_view group)
+{
+    static constexpr std::string_view kGroups[] = { "math", "random", "time", "input",
+                                                    "string", "camera", "env", "entity", "audio",
+                                                    "debug", "fs", "save", "scene" };
+    for (std::string_view g : kGroups) if (group == g) return true;
+    return false;
+}
+
 const ApiFn* find(const std::string& id)
 {
-    for (const auto& fn : registry())
-        if (id == fn.id) return &fn;
-    return nullptr;
+    // Every script call (Lua, Python, the HorizonCode interpreter) and every
+    // codegen validation pass lands here, so this must not be a linear walk over
+    // ~140 rows. The index is built once from registry(), whose vector lives for
+    // the process and never reallocates after construction — so the ApiFn* stay
+    // valid, and string_view keys can borrow the rows' string-literal ids instead
+    // of copying them. Function-local static ⇒ the build is thread-safe, which it
+    // needs to be: codegen runs on a worker thread while scripts run on the main one.
+    // Duplicate ids (should not exist) resolve to the first row, as the scan did.
+    static const std::unordered_map<std::string_view, const ApiFn*> index = []
+    {
+        const std::vector<ApiFn>& table = registry();
+        std::unordered_map<std::string_view, const ApiFn*> m;
+        m.reserve(table.size());
+        for (const ApiFn& fn : table) m.emplace(fn.id, &fn);
+        return m;
+    }();
+
+    const auto it = index.find(std::string_view(id));
+    return it == index.end() ? nullptr : it->second;
 }
 
 } // namespace HE::api

@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <optional>
 #include <cstdlib>
 #include <cstring>
 
@@ -387,40 +388,76 @@ std::string levelScriptKeyForUuid(const HE::UUID& sceneUuid)
     return buf;
 }
 
-ExportResult ProjectExporter::exportProject(
-    const std::filesystem::path& contentDir,
-    const std::string&           projectName,
-    const std::string&           startupSceneName,
-    const std::filesystem::path& outputDir,
-    const ExportSettings&        settings,
-    const std::vector<uint8_t>&  startupSceneBinary,
-    const std::vector<std::pair<std::string, std::vector<uint8_t>>>& extraScenes,
-    const std::string&           gameInstanceJson)
+// ─── exportProject phases ─────────────────────────────────────────────────────
+// exportProject is one linear pipeline; every phase below is one step of it and
+// returns std::nullopt on success, or the FAILED ExportResult that the caller
+// hands straight back. Every one of those failures is deliberately HARD: this
+// writes shipping builds, where a silently missing executable, a missing key or
+// an unsigned bundle costs far more than a failed export.
+
+namespace
 {
-    std::error_code ec;
-
-    std::filesystem::create_directories(outputDir, ec);
-    if (ec) return {false, "Cannot create output dir: " + ec.message(), 0};
-
+// The state the phases hand to each other: the resolved output layout, the pack
+// settings derived from the export settings, and the counters the ExportResult
+// reports.
+struct ExportContext
+{
     // Layout: a macOS .app splits the export in two — the executable + engine
     // dylibs live in Contents/MacOS (found via @executable_path rpath) while the
     // pak, project.hcfg, loose scene and GameLogic live in Contents/Resources
     // (where SDL_GetBasePath resolves inside a bundle). A flat export collapses
     // both to outputDir. Everything below routes through binDir / dataDir so the
     // two layouts share one code path.
-    const bool app = settings.appBundle;
-    const std::filesystem::path appPath =
-        app ? outputDir / (projectName + ".app") : std::filesystem::path{};
-    const std::filesystem::path binDir  = app ? appPath / "Contents" / "MacOS"     : outputDir;
-    const std::filesystem::path dataDir = app ? appPath / "Contents" / "Resources" : outputDir;
-    if (app)
-    {
-        std::filesystem::create_directories(binDir, ec);
-        std::filesystem::create_directories(dataDir, ec);
-        if (ec) return {false, "Cannot create .app bundle: " + ec.message(), 0};
-    }
+    bool                  app = false;
+    std::filesystem::path appPath;      // <outputDir>/<name>.app, empty unless `app`
+    std::filesystem::path binDir;       // game executable + engine dylibs
+    std::filesystem::path dataDir;      // pak, project.hcfg, loose scene, GameLogic
 
-    Hpak::PackSettings packSettings;
+    Hpak::PackSettings    packSettings;
+    std::string           hpakFilename;
+    std::string           sceneFile;    // loose startup-scene copy (empty when packed)
+    HE::UUID              sceneUuid{};  // pak entry of the packed startup scene
+
+    int  assetsPacked = 0;
+    int  assetsReused = 0;
+    int  binaryCopied = 0;              // game exe + dylibs (+ the HorizonCode lib)
+    bool keyEmbedded  = false;
+    bool hcGenShipped = false;
+};
+} // namespace
+
+// Phase 1: resolve the output layout (flat folder vs. .app bundle) and create it.
+static std::optional<ExportResult> prepareOutputLayout(
+    const std::filesystem::path& outputDir,
+    const std::string&           projectName,
+    const ExportSettings&        settings,
+    ExportContext&               ctx)
+{
+    std::error_code ec;
+
+    std::filesystem::create_directories(outputDir, ec);
+    if (ec) return ExportResult{false, "Cannot create output dir: " + ec.message(), 0};
+
+    ctx.app     = settings.appBundle;
+    ctx.appPath = ctx.app ? outputDir / (projectName + ".app") : std::filesystem::path{};
+    ctx.binDir  = ctx.app ? ctx.appPath / "Contents" / "MacOS"     : outputDir;
+    ctx.dataDir = ctx.app ? ctx.appPath / "Contents" / "Resources" : outputDir;
+    if (ctx.app)
+    {
+        std::filesystem::create_directories(ctx.binDir, ec);
+        std::filesystem::create_directories(ctx.dataDir, ec);
+        if (ec) return ExportResult{false, "Cannot create .app bundle: " + ec.message(), 0};
+    }
+    return std::nullopt;
+}
+
+// Phase 2: derive the pak's PackSettings — codec, encryption key (reusing the
+// previous export's key for incremental packs) and the cook/precompile knobs.
+static std::optional<ExportResult> resolvePackSettings(const ExportSettings& settings,
+                                                       ExportContext&        ctx)
+{
+    Hpak::PackSettings& packSettings = ctx.packSettings;
+
     // Map the export "compress" toggle to the best codec available at build time
     // (zstd preferred for ship builds, LZ4 otherwise). Store when off.
     if (settings.compress)
@@ -448,7 +485,7 @@ ExportResult ProjectExporter::exportProject(
             // deliberately zero it); then the key patched into the previous
             // export's game executable.
             ProjectConfig prevCfg;
-            if (ProjectConfigLoader::load(dataDir, prevCfg) && prevCfg.encrypted)
+            if (ProjectConfigLoader::load(ctx.dataDir, prevCfg) && prevCfg.encrypted)
             {
                 bool nonZero = false;
                 for (int i = 0; i < 32; ++i) nonZero |= (prevCfg.encKey[i] != 0);
@@ -461,12 +498,12 @@ ExportResult ProjectExporter::exportProject(
             if (!haveKey)
             {
                 for (const char* exe : { "HorizonGame", "HorizonGame.exe" })
-                    if (readEmbeddedPakKey(binDir / exe, packSettings.key))
+                    if (readEmbeddedPakKey(ctx.binDir / exe, packSettings.key))
                     { haveKey = true; break; }
             }
         }
         if (!haveKey && !Hpak::randomBytes(packSettings.key, 32))
-            return {false, "Crypto backend unavailable — cannot encrypt", 0};
+            return ExportResult{false, "Crypto backend unavailable — cannot encrypt", 0};
     }
 
     packSettings.excludePatterns = settings.excludePatterns;
@@ -475,41 +512,27 @@ ExportResult ProjectExporter::exportProject(
     packSettings.shaderBackends        = settings.shaderBackends;        // precompile material shaders
     packSettings.compileShaderVariants = settings.compileShaderVariants;
     packSettings.compileParticleShaderVariants = settings.compileParticleShaderVariants;
+    return std::nullopt;
+}
 
-    const std::string hpakFilename = projectName + ".hpak";
-    const auto pakPath      = dataDir / hpakFilename;
-    const auto manifestPath = dataDir / (hpakFilename + ".manifest");
-    const uint64_t settingsFp = settingsFingerprint(packSettings);
-
-    // Incremental cache: previous pak + its manifest, gated on the manifest
-    // describing exactly that pak (tocHash) built with these settings.
-    auto prevPak = std::make_unique<HpakReader>();
-    Hpak::IncrementalCache cache;
-    bool haveCache = false;
-    if (settings.incremental && std::filesystem::exists(pakPath, ec)
-        && prevPak->open(pakPath.string()))
-    {
-        if (loadPakManifest(manifestPath, prevPak->tocHash(), settingsFp, cache.srcHashes))
-        {
-            cache.previousPak = prevPak.get();
-            haveCache = true;
-        }
-    }
-
-    HpakWriter packer;
-    const int added = packer.addDirectory(contentDir, packSettings, settings.progress,
-                                          haveCache ? &cache : nullptr);
-    const int reused = packer.reusedCount();
-    prevPak.reset(); // release the read handle BEFORE write() replaces the file
+// Phase 3a: the scene entries that ride along in the pak — the startup scene, every
+// other project scene, the scene index and the app-wide GameInstance graph.
+static void addSceneEntries(
+    HpakWriter&                  packer,
+    const std::vector<uint8_t>&  startupSceneBinary,
+    const std::vector<std::pair<std::string, std::vector<uint8_t>>>& extraScenes,
+    const std::string&           gameInstanceJson,
+    ExportContext&               ctx)
+{
+    const Hpak::PackSettings& packSettings = ctx.packSettings;
 
     // Pack the startup scene as a binary entry INTO the pak (if the caller
     // serialized one), under a fresh UUID recorded in the hcfg. Same codec +
     // encryption as the assets. Must happen before write().
-    HE::UUID sceneUuid{};
     if (!startupSceneBinary.empty())
     {
-        sceneUuid = HE::UUID::generate();
-        packer.addEntry(sceneUuid, startupSceneBinary, packSettings);
+        ctx.sceneUuid = HE::UUID::generate();
+        packer.addEntry(ctx.sceneUuid, startupSceneBinary, packSettings);
     }
 
     // Every other project scene rides along under a path-derived UUID so the
@@ -545,7 +568,11 @@ ExportResult ProjectExporter::exportProject(
         packer.addEntry(sceneUuidForPath(kGameInstanceEntry),
                         std::vector<uint8_t>(gameInstanceJson.begin(), gameInstanceJson.end()),
                         packSettings);
+}
 
+// Phase 3b: the pak's asset path index.
+static void addAssetPathIndex(HpakWriter& packer, const ExportContext& ctx)
+{
     // Asset path index: content-relative path → "hi:lo" UUID for every packed
     // asset, so the game can resolve loadAsset("<path>") to a mounted-pak entry.
     // Without it, an asset the scene's UUID reference closure never reaches — the
@@ -559,11 +586,55 @@ ExportResult ProjectExporter::exportProject(
             idx[relPath] = std::to_string(id.hi) + ":" + std::to_string(id.lo);
         const std::string s = idx.dump();
         packer.addEntry(sceneUuidForPath(kAssetPathIndexEntry),
-                        std::vector<uint8_t>(s.begin(), s.end()), packSettings);
+                        std::vector<uint8_t>(s.begin(), s.end()), ctx.packSettings);
+    }
+}
+
+// Phase 3: pack the content directory (reusing unchanged entries from the previous
+// export when possible), add the scene/index entries, write the .hpak and persist
+// the manifest the NEXT incremental export reads.
+static std::optional<ExportResult> packContent(
+    const std::filesystem::path& contentDir,
+    const std::string&           projectName,
+    const ExportSettings&        settings,
+    const std::vector<uint8_t>&  startupSceneBinary,
+    const std::vector<std::pair<std::string, std::vector<uint8_t>>>& extraScenes,
+    const std::string&           gameInstanceJson,
+    ExportContext&               ctx)
+{
+    std::error_code ec;
+
+    ctx.hpakFilename        = projectName + ".hpak";
+    const auto pakPath      = ctx.dataDir / ctx.hpakFilename;
+    const auto manifestPath = ctx.dataDir / (ctx.hpakFilename + ".manifest");
+    const uint64_t settingsFp = settingsFingerprint(ctx.packSettings);
+
+    // Incremental cache: previous pak + its manifest, gated on the manifest
+    // describing exactly that pak (tocHash) built with these settings.
+    auto prevPak = std::make_unique<HpakReader>();
+    Hpak::IncrementalCache cache;
+    bool haveCache = false;
+    if (settings.incremental && std::filesystem::exists(pakPath, ec)
+        && prevPak->open(pakPath.string()))
+    {
+        if (loadPakManifest(manifestPath, prevPak->tocHash(), settingsFp, cache.srcHashes))
+        {
+            cache.previousPak = prevPak.get();
+            haveCache = true;
+        }
     }
 
+    HpakWriter packer;
+    ctx.assetsPacked = packer.addDirectory(contentDir, ctx.packSettings, settings.progress,
+                                           haveCache ? &cache : nullptr);
+    ctx.assetsReused = packer.reusedCount();
+    prevPak.reset(); // release the read handle BEFORE write() replaces the file
+
+    addSceneEntries(packer, startupSceneBinary, extraScenes, gameInstanceJson, ctx);
+    addAssetPathIndex(packer, ctx);
+
     if (!packer.write(pakPath.string()))
-        return {false, "Failed to write " + hpakFilename, 0};
+        return ExportResult{false, "Failed to write " + ctx.hpakFilename, 0};
 
     // Persist the manifest for the NEXT incremental export. Best-effort cache:
     // if the reopen or write fails, the next export simply packs everything.
@@ -573,34 +644,45 @@ ExportResult ProjectExporter::exportProject(
             savePakManifest(manifestPath, newPak.tocHash(), settingsFp,
                             packer.sourceHashes());
     }
+    return std::nullopt;
+}
 
-    // Loose startup-scene fallback: only when no binary scene was packed.
-    std::string sceneFile;
+// Phase 4: loose startup-scene fallback — only when no binary scene was packed.
+static void copyLooseStartupScene(const std::filesystem::path& contentDir,
+                                  const std::string&           startupSceneName,
+                                  const std::vector<uint8_t>&  startupSceneBinary,
+                                  ExportContext&               ctx)
+{
+    std::error_code ec;
+
     if (startupSceneBinary.empty() && !startupSceneName.empty())
     {
         const auto sceneSrc = contentDir / startupSceneName;
-        sceneFile = std::filesystem::path(startupSceneName).filename().string();
+        ctx.sceneFile = std::filesystem::path(startupSceneName).filename().string();
         if (std::filesystem::exists(sceneSrc, ec))
-            std::filesystem::copy_file(sceneSrc, dataDir / sceneFile,
+            std::filesystem::copy_file(sceneSrc, ctx.dataDir / ctx.sceneFile,
                 std::filesystem::copy_options::overwrite_existing, ec);
     }
+}
 
-    // Copy game runtime binaries (executable + dylibs) so the export is runnable.
-    // This happens BEFORE project.hcfg is written: with encryption the key is
-    // patched into the copied game executable, and only if that succeeds is the
-    // key omitted from the hcfg. Non-throwing iteration: this runs on the
-    // editor's export worker thread, where an escaped filesystem_error would be
-    // std::terminate.
-    int  binaryCopied = 0;
-    bool keyEmbedded  = false;
+// Phase 5: copy game runtime binaries (executable + dylibs) so the export is
+// runnable. This happens BEFORE project.hcfg is written: with encryption the key
+// is patched into the copied game executable, and only if that succeeds is the
+// key omitted from the hcfg. Non-throwing iteration: this runs on the editor's
+// export worker thread, where an escaped filesystem_error would be std::terminate.
+static std::optional<ExportResult> copyRuntimeBinaries(const ExportSettings& settings,
+                                                       ExportContext&        ctx)
+{
+    std::error_code ec;
+
     if (!settings.gameRuntimeDir.empty())
     {
         // A named-but-missing runtime dir must FAIL, not silently ship a
         // data-only export (an existence gate here previously skipped the
         // whole block, including all its error checks).
         if (!std::filesystem::is_directory(settings.gameRuntimeDir, ec))
-            return {false, "Game runtime dir not found: "
-                           + settings.gameRuntimeDir.string(), added};
+            return ExportResult{false, "Game runtime dir not found: "
+                                       + settings.gameRuntimeDir.string(), ctx.assetsPacked};
 
         // Route each runtime file to the right place for the .app layout: the
         // executable and engine dylibs go next to the exe (binDir); GameLogic and
@@ -622,7 +704,7 @@ ExportResult ProjectExporter::exportProject(
                     || n.size() > 4 && (n.compare(n.size() - 4, 4, ".dll") == 0)
                     || n.size() > 3 && (n.compare(n.size() - 3, 3, ".so") == 0)
                     || n.size() > 6 && (n.compare(n.size() - 6, 6, ".dylib") == 0));
-            return (engineBin ? binDir : dataDir) / n;
+            return (engineBin ? ctx.binDir : ctx.dataDir) / n;
         };
 
         // Clear STALE code before copying fresh binaries. Re-signing over a
@@ -634,11 +716,11 @@ ExportResult ProjectExporter::exportProject(
         // incremental cache already read above — recreate it empty. (Flat
         // exports share one dir with the just-written pak, so they only remove
         // each destination individually, below.)
-        if (app)
+        if (ctx.app)
         {
-            std::filesystem::remove_all(appPath / "Contents" / "_CodeSignature", ec); ec.clear();
-            std::filesystem::remove_all(binDir, ec); ec.clear();
-            std::filesystem::create_directories(binDir, ec); ec.clear();
+            std::filesystem::remove_all(ctx.appPath / "Contents" / "_CodeSignature", ec); ec.clear();
+            std::filesystem::remove_all(ctx.binDir, ec); ec.clear();
+            std::filesystem::create_directories(ctx.binDir, ec); ec.clear();
         }
 
         // Every file in the bundle is required (executable AND its libraries):
@@ -673,10 +755,10 @@ ExportResult ProjectExporter::exportProject(
                 std::filesystem::copy_file(dit->path(), dst,
                     std::filesystem::copy_options::overwrite_existing, ec);
                 if (ec)
-                    return {false, "Failed to copy runtime binary "
-                                   + dit->path().filename().string() + ": "
-                                   + ec.message(), added};
-                ++binaryCopied;
+                    return ExportResult{false, "Failed to copy runtime binary "
+                                               + dit->path().filename().string() + ": "
+                                               + ec.message(), ctx.assetsPacked};
+                ++ctx.binaryCopied;
                 copied.push_back(dst);
             }
             dit.increment(ec);
@@ -685,9 +767,9 @@ ExportResult ProjectExporter::exportProject(
 
         // A runtime dir that yields nothing is a broken export (data without an
         // executable) — the exact failure mode this parameter exists to prevent.
-        if (binaryCopied == 0)
-            return {false, "Game runtime dir contained no files: "
-                           + settings.gameRuntimeDir.string(), added};
+        if (ctx.binaryCopied == 0)
+            return ExportResult{false, "Game runtime dir contained no files: "
+                                       + settings.gameRuntimeDir.string(), ctx.assetsPacked};
 
         // Patch the pak key into the game executable's embedded key block.
         // Only the game exe carries the block; other copied files are skipped
@@ -701,14 +783,15 @@ ExportResult ProjectExporter::exportProject(
             {
                 const auto name = dst.filename().string();
                 if (name != "HorizonGame" && name != "HorizonGame.exe") continue;
-                const int patched = patchEmbeddedPakKey(dst, packSettings.key);
+                const int patched = patchEmbeddedPakKey(dst, ctx.packSettings.key);
                 if (patched == -1)
-                    return {false, "Failed to embed the pak key into " + name
-                                   + " (write error)", added};
+                    return ExportResult{false, "Failed to embed the pak key into " + name
+                                               + " (write error)", ctx.assetsPacked};
                 if (patched == -2)
-                    return {false, "Failed to re-sign " + name
-                                   + " after embedding the pak key (codesign)", added};
-                if (patched > 0) keyEmbedded = true;
+                    return ExportResult{false, "Failed to re-sign " + name
+                                               + " after embedding the pak key (codesign)",
+                                        ctx.assetsPacked};
+                if (patched > 0) ctx.keyEmbedded = true;
             }
         }
 
@@ -723,71 +806,118 @@ ExportResult ProjectExporter::exportProject(
             const auto srcDyn = settings.gameRuntimeDir / "lib-dynload";
             if (std::filesystem::is_directory(srcDyn, ec))
             {
-                const auto dstDyn = binDir / "lib-dynload";
+                const auto dstDyn = ctx.binDir / "lib-dynload";
                 std::filesystem::remove_all(dstDyn, ec); ec.clear();
                 std::filesystem::copy(srcDyn, dstDyn,
                     std::filesystem::copy_options::recursive
                     | std::filesystem::copy_options::overwrite_existing, ec);
                 if (ec)
-                    return {false, "Failed to copy Python lib-dynload: " + ec.message(), added};
+                    return ExportResult{false, "Failed to copy Python lib-dynload: "
+                                               + ec.message(), ctx.assetsPacked};
             }
             ec.clear();
         }
     }
+    return std::nullopt;
+}
 
-    // Compiled HorizonCode classes: ship the generated library with the data
-    // (base path — same load location as GameLogic), under the canonical name
-    // the runtime loader probes. A copy failure is a hard error: hcfg would
-    // otherwise claim "compiled" for a library that never shipped.
-    bool hcGenShipped = false;
+// Phase 6: compiled HorizonCode classes — ship the generated library with the data
+// (base path — same load location as GameLogic), under the canonical name the
+// runtime loader probes. A copy failure is a hard error: hcfg would otherwise
+// claim "compiled" for a library that never shipped.
+static std::optional<ExportResult> copyHorizonCodeLib(const ExportSettings& settings,
+                                                      ExportContext&        ctx)
+{
+    std::error_code ec;
+
     if (!settings.horizonCodeGenLib.empty())
     {
-        const auto dst = dataDir / HorizonCode::compiledLibraryName();
+        const auto dst = ctx.dataDir / HorizonCode::compiledLibraryName();
         std::filesystem::remove(dst, ec); ec.clear();
         std::filesystem::copy_file(settings.horizonCodeGenLib, dst,
             std::filesystem::copy_options::overwrite_existing, ec);
         if (ec)
-            return {false, "Failed to copy the compiled HorizonCode library: "
-                           + ec.message(), added};
-        ++binaryCopied;
-        hcGenShipped = true;
+            return ExportResult{false, "Failed to copy the compiled HorizonCode library: "
+                                       + ec.message(), ctx.assetsPacked};
+        ++ctx.binaryCopied;
+        ctx.hcGenShipped = true;
     }
+    return std::nullopt;
+}
 
+// Phase 7: project.hcfg — the manifest the shipped game boots from.
+static std::optional<ExportResult> writeProjectConfig(const std::string&          projectName,
+                                                      const ExportSettings&       settings,
+                                                      const std::vector<uint8_t>& startupSceneBinary,
+                                                      const ExportContext&        ctx)
+{
     ProjectConfig cfg;
     cfg.projectName   = projectName;
-    cfg.hpakFilename  = hpakFilename;
-    cfg.mainSceneName = sceneFile;
+    cfg.hpakFilename  = ctx.hpakFilename;
+    cfg.mainSceneName = ctx.sceneFile;
     std::memset(cfg.projectUuidBytes, 0, 16);
     cfg.enableModSupport = settings.enableModSupport;
     cfg.encrypted = settings.encrypt;
-    cfg.horizonCodeCompiled = hcGenShipped;
+    cfg.horizonCodeCompiled = ctx.hcGenShipped;
     // Key placement: inside the game executable when the patch succeeded (the
     // hcfg then carries only the encrypted flag), in the hcfg otherwise.
-    if (settings.encrypt && !keyEmbedded)
-        std::memcpy(cfg.encKey, packSettings.key, 32);
+    if (settings.encrypt && !ctx.keyEmbedded)
+        std::memcpy(cfg.encKey, ctx.packSettings.key, 32);
     if (!startupSceneBinary.empty())
     {
         cfg.hasPackedScene = true;
-        std::memcpy(cfg.startupSceneUuid,      &sceneUuid.hi, 8);
-        std::memcpy(cfg.startupSceneUuid + 8,  &sceneUuid.lo, 8);
+        std::memcpy(cfg.startupSceneUuid,      &ctx.sceneUuid.hi, 8);
+        std::memcpy(cfg.startupSceneUuid + 8,  &ctx.sceneUuid.lo, 8);
     }
 
-    if (!ProjectConfigLoader::save(dataDir, cfg))
-        return {false, "Failed to write project.hcfg", 0};
+    if (!ProjectConfigLoader::save(ctx.dataDir, cfg))
+        return ExportResult{false, "Failed to write project.hcfg", 0};
+    return std::nullopt;
+}
 
-    // Finalize the .app: Info.plist makes Contents/ a real bundle (so
-    // SDL_GetBasePath resolves Resources), then an ad-hoc codesign of the whole
-    // thing — the key patch already re-signed the bare executable, but adding
-    // Info.plist and dylibs invalidates that; the bundle must be sealed last.
-    if (app)
+// Phase 8: finalize the .app — Info.plist makes Contents/ a real bundle (so
+// SDL_GetBasePath resolves Resources), then an ad-hoc codesign of the whole
+// thing — the key patch already re-signed the bare executable, but adding
+// Info.plist and dylibs invalidates that; the bundle must be sealed last.
+static std::optional<ExportResult> finalizeAppBundle(const std::string&   projectName,
+                                                     const ExportContext& ctx)
+{
+    if (ctx.app)
     {
-        if (!writeInfoPlist(appPath / "Contents", projectName))
-            return {false, "Failed to write Info.plist", added};
+        if (!writeInfoPlist(ctx.appPath / "Contents", projectName))
+            return ExportResult{false, "Failed to write Info.plist", ctx.assetsPacked};
 #ifdef __APPLE__
-        if (!signAppBundle(appPath))
-            return {false, "Failed to codesign the .app bundle", added};
+        if (!signAppBundle(ctx.appPath))
+            return ExportResult{false, "Failed to codesign the .app bundle", ctx.assetsPacked};
 #endif
     }
+    return std::nullopt;
+}
 
-    return {true, "", added, binaryCopied, reused, keyEmbedded};
+ExportResult ProjectExporter::exportProject(
+    const std::filesystem::path& contentDir,
+    const std::string&           projectName,
+    const std::string&           startupSceneName,
+    const std::filesystem::path& outputDir,
+    const ExportSettings&        settings,
+    const std::vector<uint8_t>&  startupSceneBinary,
+    const std::vector<std::pair<std::string, std::vector<uint8_t>>>& extraScenes,
+    const std::string&           gameInstanceJson)
+{
+    ExportContext ctx;
+
+    if (auto fail = prepareOutputLayout(outputDir, projectName, settings, ctx)) return *fail;
+    if (auto fail = resolvePackSettings(settings, ctx))                         return *fail;
+    if (auto fail = packContent(contentDir, projectName, settings, startupSceneBinary,
+                                extraScenes, gameInstanceJson, ctx))            return *fail;
+
+    copyLooseStartupScene(contentDir, startupSceneName, startupSceneBinary, ctx);
+
+    if (auto fail = copyRuntimeBinaries(settings, ctx))                         return *fail;
+    if (auto fail = copyHorizonCodeLib(settings, ctx))                          return *fail;
+    if (auto fail = writeProjectConfig(projectName, settings, startupSceneBinary, ctx))
+        return *fail;
+    if (auto fail = finalizeAppBundle(projectName, ctx))                        return *fail;
+
+    return {true, "", ctx.assetsPacked, ctx.binaryCopied, ctx.assetsReused, ctx.keyEmbedded};
 }

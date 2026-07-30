@@ -1,5 +1,6 @@
 #include "doctest.h"
 #include "TestFsUtil.h"
+#include "CppScaffoldTemplates.h"
 #include "ProjectManager.h"
 
 #include <filesystem>
@@ -85,6 +86,54 @@ TEST_CASE("writeCppLevelScript: registers under the real scene name, class is an
 	CHECK(writeCppLevelScript(root.string(), "Arena 2"));
 
 	he_test::removeAllQuiet(root);
+}
+
+// The scaffolding writers only choose a file name and drop a CppScaffold template
+// on disk — the generated file must be that template VERBATIM. This pins the seam
+// the template strings moved across (out of ProjectManager.cpp into
+// CppScaffoldTemplates.cpp): they are the source a generated project compiles
+// from, so a stray character produces a project that does not build.
+TEST_CASE("scaffolded files are the CppScaffold templates verbatim")
+{
+	const auto root = fs::temp_directory_path() / "he_cpp_scaffold_seam";
+	he_test::removeAllQuiet(root);
+	fs::create_directories(root);
+
+	REQUIRE(scaffoldCppProject(root.string(), "My Game", "StartupScene"));
+	const auto src = root / "Source";
+
+	CHECK(readFile(src / "GameLogicRuntime.h")   == CppScaffold::runtimeHeader());
+	CHECK(readFile(src / "GameLogicRuntime.cpp") == CppScaffold::runtimeSource());
+	CHECK(readFile(src / "GameInstance.h")       == CppScaffold::gameInstanceHeader());
+	CHECK(readFile(src / "GameInstance.cpp")     == CppScaffold::gameInstanceSource());
+	CHECK(readFile(src / "GameLogic.cpp")        == CppScaffold::gameLogicSource("StartupScene"));
+	// The CMakeLists gets the identifier form of the project name, the README the
+	// display name.
+	CHECK(readFile(src / "CMakeLists.txt")       == CppScaffold::cmakeLists("My_Game"));
+	CHECK(readFile(src / "README.md")            == CppScaffold::readme("My Game"));
+	CHECK(readFile(src / "StartupSceneLevelScript.h")
+	      == CppScaffold::levelScriptHeader("StartupSceneLevelScript", "StartupScene"));
+	CHECK(readFile(src / "StartupSceneLevelScript.cpp")
+	      == CppScaffold::levelScriptSource("StartupSceneLevelScript", "StartupScene"));
+
+	he_test::removeAllQuiet(root);
+}
+
+// The pieces every generated tree needs to compile and to be found at runtime.
+TEST_CASE("CppScaffold templates carry the load-bearing declarations")
+{
+	// The registry macro + the two functions it drives — without them a level
+	// script never registers and the engine finds no script for its scene.
+	const std::string rt = CppScaffold::runtimeHeader();
+	CHECK(rt.find("#define REGISTER_LEVEL_SCRIPT") != std::string::npos);
+	CHECK(rt.find("void registerLevelScript(")     != std::string::npos);
+	CHECK(rt.find("std::unique_ptr<LevelScript> createLevelScript(") != std::string::npos);
+	CHECK(CppScaffold::runtimeSource().find("std::unique_ptr<LevelScript> createLevelScript(")
+	      != std::string::npos);
+
+	// A gameplay class stub is a matching header/source pair.
+	CHECK(CppScaffold::gameplayClassHeader("Enemy").find("class Enemy")        != std::string::npos);
+	CHECK(CppScaffold::gameplayClassSource("Enemy").find("#include \"Enemy.h\"") != std::string::npos);
 }
 
 TEST_CASE("writeCppClass: auto-uniquifies when a class of that name exists")

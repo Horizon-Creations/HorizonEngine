@@ -12,6 +12,7 @@
 #include <HorizonScene/ScriptApi.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/WidgetManager.h>
+#include <algorithm>
 #include <filesystem>
 
 namespace
@@ -87,6 +88,160 @@ TEST_CASE("getProp/setProp round-trip per type")
     HE::UITextInput ti;
     ti.setProp("Text", HE::UIPropValue::ofString("hello"));
     CHECK(ti.text == "hello");
+}
+
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║  The property NAMES and TYPES below are an ON-DISK FORMAT.               ║
+// ║                                                                          ║
+// ║  UI Widget assets are serialized with them and HorizonCode graphs store   ║
+// ║  them verbatim in Get/Set Property nodes, so renaming or retyping a row   ║
+// ║  silently breaks every saved widget and graph that touches it (a lookup   ║
+// ║  miss just reads as the default value — no error anywhere).               ║
+// ║                                                                          ║
+// ║  If this test fails you changed the format. The fix is to put the name    ║
+// ║  back, NOT to update the table below.                                     ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+TEST_CASE("element property tables are the pinned on-disk name/type list")
+{
+    using namespace HE;
+    struct Row    { const char* name; UIPropType type; };
+    struct Expect { UIWidgetType type; std::vector<Row> props; };
+
+    const std::vector<Expect> kExpected = {
+        { UIWidgetType::Panel, {
+            { "Color", UIPropType::Color } } },
+        { UIWidgetType::Image, {
+            { "Tint", UIPropType::Color } } },
+        { UIWidgetType::Text, {
+            { "Text", UIPropType::String },
+            { "FontSize", UIPropType::Float },
+            { "Color", UIPropType::Color },
+            { "WordWrap", UIPropType::Bool },
+            { "AutoSize", UIPropType::Bool },
+            { "Center", UIPropType::Bool } } },
+        { UIWidgetType::Button, {
+            { "Text", UIPropType::String },
+            { "FontSize", UIPropType::Float },
+            { "Normal Color", UIPropType::Color },
+            { "Hovered Color", UIPropType::Color },
+            { "Pressed Color", UIPropType::Color },
+            { "Text Color", UIPropType::Color } } },
+        { UIWidgetType::CheckBox, {
+            { "Checked", UIPropType::Bool },
+            { "Label", UIPropType::String },
+            { "FontSize", UIPropType::Float },
+            { "Box Color", UIPropType::Color },
+            { "Check Color", UIPropType::Color },
+            { "Text Color", UIPropType::Color } } },
+        { UIWidgetType::Slider, {
+            { "Value", UIPropType::Float },
+            { "Min", UIPropType::Float },
+            { "Max", UIPropType::Float },
+            { "Track Color", UIPropType::Color },
+            { "Fill Color", UIPropType::Color },
+            { "Handle Color", UIPropType::Color } } },
+        { UIWidgetType::ProgressBar, {
+            { "Value", UIPropType::Float },
+            { "Back Color", UIPropType::Color },
+            { "Fill Color", UIPropType::Color } } },
+        { UIWidgetType::TextInput, {
+            { "Text", UIPropType::String },
+            { "Placeholder", UIPropType::String },
+            { "FontSize", UIPropType::Float },
+            { "Back Color", UIPropType::Color },
+            { "Text Color", UIPropType::Color } } },
+        { UIWidgetType::ComboBox, {
+            { "Options", UIPropType::StringList },
+            { "Selected Index", UIPropType::Int },
+            { "FontSize", UIPropType::Float },
+            { "Back Color", UIPropType::Color },
+            { "Text Color", UIPropType::Color },
+            { "Highlight Color", UIPropType::Color } } },
+    };
+
+    // Every registered type is covered, in registry order — a new widget type
+    // must land here too, or its property names are unprotected.
+    const std::vector<UIWidgetType>& reg = uiWidgetTypeRegistry();
+    REQUIRE(kExpected.size() == reg.size());
+    for (size_t i = 0; i < reg.size(); ++i) CHECK(kExpected[i].type == reg[i]);
+
+    // Type-specific names must never shadow a base name (getPropAny checks the
+    // base list FIRST, so a collision would make the subclass property
+    // unreachable through the generic accessors).
+    const std::vector<std::string> kBaseNames = {
+        "Visible", "Hit Testable", "Position", "Size", "Layer",
+        "Hover Cursor", "Material", "Font" };
+
+    // A value that differs from `cur`, so "did the write land?" is unambiguous.
+    auto probe = [](const UIPropValue& cur) {
+        UIPropValue v = cur;
+        switch (cur.type)
+        {
+            case UIPropType::Float:      v.f   = cur.f + 3.25f; break;
+            case UIPropType::Int:        v.i   = cur.i + 5; break;
+            case UIPropType::Bool:       v.b   = !cur.b; break;
+            case UIPropType::String:     v.s   = cur.s + "_probe"; break;
+            case UIPropType::Color:      v.col = cur.col + glm::vec4(0.125f); break;
+            case UIPropType::Vec2:       v.v2  = cur.v2 + glm::vec2(1.5f); break;
+            case UIPropType::StringList: v.list = { "probe" }; break;
+        }
+        return v;
+    };
+    auto same = [](const UIPropValue& a, const UIPropValue& b) {
+        if (a.type != b.type) return false;
+        switch (a.type)
+        {
+            case UIPropType::Float:      return a.f == doctest::Approx(b.f);
+            case UIPropType::Int:        return a.i == b.i;
+            case UIPropType::Bool:       return a.b == b.b;
+            case UIPropType::String:     return a.s == b.s;
+            case UIPropType::Color:      return a.col == b.col;
+            case UIPropType::Vec2:       return a.v2 == b.v2;
+            case UIPropType::StringList: return a.list == b.list;
+        }
+        return false;
+    };
+
+    for (const Expect& ex : kExpected)
+    {
+        auto e = makeUIElement(ex.type);
+        REQUIRE(e != nullptr);
+        CAPTURE(e->typeName());
+
+        const std::vector<UIPropDesc> props = e->properties();
+        REQUIRE(props.size() == ex.props.size());
+
+        std::vector<std::string> seen;
+        for (size_t i = 0; i < props.size(); ++i)
+        {
+            CAPTURE(ex.props[i].name);
+            CHECK(props[i].name == ex.props[i].name);   // name AND order are the format
+            CHECK(props[i].type == ex.props[i].type);
+
+            // No duplicate names within a type (a duplicate makes the second row
+            // dead — first match wins in every accessor).
+            CHECK(std::find(seen.begin(), seen.end(), props[i].name) == seen.end());
+            seen.push_back(props[i].name);
+            CHECK(std::find(kBaseNames.begin(), kBaseNames.end(), props[i].name) == kBaseNames.end());
+
+            // READABLE with the declared type…
+            const UIPropValue cur = e->getProp(props[i].name);
+            CHECK(cur.type == props[i].type);
+            // …and WRITABLE. A property that is one but not the other is a bug:
+            // the editor would show a value a graph cannot set, or vice versa.
+            const UIPropValue want = probe(cur);
+            e->setProp(props[i].name, want);
+            CHECK(same(e->getProp(props[i].name), want));
+
+            // The generic accessors reach the same row.
+            CHECK(same(e->getPropAny(props[i].name), want));
+        }
+
+        // An unknown name reads as a default value and writes nowhere.
+        CHECK(e->getProp("NoSuchProperty").type == UIPropType::Float);
+        e->setProp("NoSuchProperty", UIPropValue::ofFloat(1.0f));
+        CHECK(e->getProp("NoSuchProperty").f == doctest::Approx(0.0f));
+    }
 }
 
 TEST_CASE("interactive types declare events; Button fires OnClicked")
