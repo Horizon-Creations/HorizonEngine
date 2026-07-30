@@ -11,6 +11,7 @@
 #include <HorizonRendering/SsaoKernel.h>
 #include <HorizonRendering/SkyNoise3D.h>
 #include <HorizonRendering/SkyEnvBake.h>
+#include <HorizonRendering/WeatherParticleSeed.h>
 #include <HorizonRendering/SkyFrameParams.h>
 #include <HorizonRendering/LightPacking.h>
 #include <HorizonScene/HorizonWorld.h>
@@ -435,10 +436,90 @@ TEST_CASE("SkyEnvBake: the IBL ambient cube face is pinned and backend-independe
 	CHECK(down.r == doctest::Approx(0.24f));
 	CHECK(down.g == doctest::Approx(0.23f));
 	CHECK(down.b == doctest::Approx(0.21f));
+	// The sun disk is pinned by VALUE, not by a ">" threshold. The 4x4 face digest
+	// above cannot see it at all — the disk is pow(dot,1800)*14, far too tight to
+	// land on any texel of a 4x4 face — so halving the amplitude or the exponent
+	// slipped through a bare `atSun.r > 10.0f`. These two samples close that:
+	//   - straight at the sun pins the AMPLITUDE (the 14.0 term),
+	//   - 1.6 degrees off pins the EXPONENT: pow(cos(1.6deg), 1800) is near half,
+	//     so the disk's falloff width is what this number measures.
+	// Tolerance is 1%, not a tight epsilon: these are ~30-iteration float sums, so
+	// FP contraction moves them ~0.2% between -O0 and -O2 and between compilers.
+	// 1% still catches what matters — halving the amplitude shifts atSun by ~12%,
+	// and 1800->1200 shifts the off-axis sample by ~18%.
 	const glm::vec3 atSun = HE::SkyColorCPU(sun, sun);
-	CHECK(atSun.r > 10.0f);
+	CHECK(atSun.r == doctest::Approx(17.118f).epsilon(0.01));
+	CHECK(atSun.g == doctest::Approx(16.583f).epsilon(0.01));
+	CHECK(atSun.b == doctest::Approx(15.523f).epsilon(0.01));
+
+	const glm::vec3 sunAxis = glm::normalize(glm::cross(sun, glm::vec3(0.0f, 1.0f, 0.0f)));
+	const float     theta   = 1.6f * 3.14159265f / 180.0f;
+	const glm::vec3 offSun  = glm::normalize(sun * std::cos(theta) + sunAxis * std::sin(theta));
+	const glm::vec3 atOff   = HE::SkyColorCPU(offSun, sun);
+	CHECK(atOff.r == doctest::Approx(9.899f).epsilon(0.01));
 	// Deterministic across calls (pure functions, no cached state).
 	CHECK(HE::BuildSkyEnvFace(4, 0, sun) == HE::BuildSkyEnvFace(4, 0, sun));
+}
+
+TEST_CASE("SeedWeatherParticles: both backend lane layouts carry identical particles")
+{
+	// The two backends' simulation shaders read the 8-float record differently, so
+	// the seeder takes the lane order as a parameter. What must NOT differ is the
+	// particles themselves: same positions, same seeds, same velocities — only
+	// their slots move. Before this was shared, GL and Metal each had their own
+	// copy of the RNG and the lane maths, so a change to one silently desynced the
+	// look of a downpour between backends.
+	IRenderer::GpuParticleParams p{};
+	p.cameraPos   = { 10.0f, 5.0f, -3.0f };
+	p.boxTop      = 20.0f;
+	p.boxHalf     = 15.0f;
+	p.groundLevel = 0.0f;
+	p.fallSpeed   = 9.0f;
+	p.windVec     = { 2.0f, 0.0f, -1.0f };
+	p.isSnow      = false;
+
+	constexpr int kN = 4;
+	std::vector<float> gl(kN * HE::kWeatherParticleFloats, 0.0f);
+	HE::SeedWeatherParticles(p, kN, HE::WeatherParticleLayout::PosVelLifeSeed, gl.data());
+	std::vector<float> mt(kN * HE::kWeatherParticleFloats, 0.0f);
+	HE::SeedWeatherParticles(p, kN, HE::WeatherParticleLayout::PosLifeVelSeed, mt.data());
+
+	for (int i = 0; i < kN; ++i)
+	{
+		const float* g = &gl[static_cast<size_t>(i) * HE::kWeatherParticleFloats];
+		const float* m = &mt[static_cast<size_t>(i) * HE::kWeatherParticleFloats];
+		// Lanes 0..2 (position) and lane 7 (seed) are layout-invariant.
+		for (int k = 0; k < 3; ++k) CHECK(g[k] == m[k]);
+		CHECK(g[7] == m[7]);
+		// The permutation itself: GL [vx,vy,vz,life], Metal [life,vx,vy,vz].
+		CHECK(g[3] == m[4]);  // vx
+		CHECK(g[4] == m[5]);  // vy
+		CHECK(g[5] == m[6]);  // vz
+		CHECK(g[6] == m[3]);  // life
+		// Life expires exactly as the drop reaches the ground plane.
+		CHECK(g[6] == doctest::Approx((g[1] - p.groundLevel) / p.fallSpeed));
+		// The pool is spread evenly so `step(seed, coverage)` keeps a coverage
+		// fraction alive — an uneven spread would make coverage non-linear.
+		CHECK(g[7] == doctest::Approx((i + 0.5f) / static_cast<float>(kN)));
+	}
+
+	// Pin the RNG itself: these are the first record's values. The generator is a
+	// fixed golden-ratio start value plus an LCG precisely so a downpour looks the
+	// same on every backend and every run — reseeding it is a visual change.
+	CHECK(gl[0] == doctest::Approx(22.322083f).epsilon(0.0001));
+	CHECK(gl[1] == doctest::Approx(6.524979f).epsilon(0.0001));
+	CHECK(gl[2] == doctest::Approx(-10.547133f).epsilon(0.0001));
+
+	// Snow is blown around far less than rain by the same wind (0.3 vs 1.2), and
+	// that is the only thing isSnow changes here — positions must be untouched.
+	std::vector<float> snow(kN * HE::kWeatherParticleFloats, 0.0f);
+	p.isSnow = true;
+	HE::SeedWeatherParticles(p, kN, HE::WeatherParticleLayout::PosVelLifeSeed, snow.data());
+	CHECK(snow[0] == doctest::Approx(gl[0]));
+	CHECK(snow[1] == doctest::Approx(gl[1]));
+	CHECK(snow[3] == doctest::Approx(p.windVec.x * 0.3f));
+	CHECK(gl[3]   == doctest::Approx(p.windVec.x * 1.2f));
+	CHECK(snow[4] == doctest::Approx(-p.fallSpeed)); // gravity is unchanged
 }
 
 TEST_CASE("CloudWindVector: 0 degrees drifts toward -Z (north), clockwise from there")
