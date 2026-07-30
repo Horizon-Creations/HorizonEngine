@@ -1,11 +1,12 @@
 #include "ScriptEditorPanel.h"
 #include "EditorApplication.h"                 // AppContext
+#include "EditorAssetTypeCache.h"              // shared, invalidatable path → AssetType sniff
+#include "EditorPanelState.h"                  // shared per-tab state map
 #include "TextEditor.h"                        // ImGuiColorTextEdit (vendored, MIT)
 #include <imgui_internal.h>                    // ImGuiContext::PlatformImeData (text-input activation)
 #include <ContentManager/HAsset.h>
 #include <Types/Enums.h>                       // HE::AssetType
 #include <filesystem>
-#include <map>
 #include <cstdint>
 
 namespace
@@ -20,7 +21,7 @@ namespace
 		bool        python         = false;
 		std::string name;                 // filename, shown in the header
 	};
-	std::map<std::string, State> g_states;
+	AssetPanelState<State> g_states;
 
 	bool isDirtyState(const State& st) { return st.editor.GetUndoIndex() != st.savedUndoIndex; }
 
@@ -81,18 +82,16 @@ namespace ScriptEditorPanel
 {
 	bool isDirty(const std::string& path)
 	{
-		auto it = g_states.find(path);
-		return it != g_states.end() && it->second.loaded && isDirtyState(it->second);
+		const State* st = g_states.find(path);
+		return st && st->loaded && isDirtyState(*st);
 	}
 
 	bool isScriptAsset(const std::string& path)
 	{
-		HAsset::Reader r;
-		if (!r.open(path)) return false;
-		return r.assetType() == static_cast<uint16_t>(HE::AssetType::Script);
+		return EditorAssetTypeCache::is(path, HE::AssetType::Script);
 	}
 
-	void forget(const std::string& path) { g_states.erase(path); }
+	void forget(const std::string& path) { g_states.forget(path); }
 
 	void render(AppContext& ctx, const std::string& path, const ImVec2& pos, const ImVec2& size)
 	{

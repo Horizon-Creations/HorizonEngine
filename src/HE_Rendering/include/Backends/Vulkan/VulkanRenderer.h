@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <Renderer/IRenderer.h>
 #include "VulkanShaderManager.h"
+#include <HorizonRendering/RenderConstants.h>
 #include <HorizonRendering/RenderWorld.h>
 #include <HorizonRendering/RenderExtractor.h>
 #include <HorizonRendering/FrustumCuller.h>
@@ -123,7 +124,7 @@ private:
 	VkRenderPass   m_shadowPass     = VK_NULL_HANDLE;
 	VkFramebuffer  m_shadowFB       = VK_NULL_HANDLE;
 	VkPipeline     m_shadowPipeline = VK_NULL_HANDLE;
-	uint32_t       m_shadowSize     = 2048;
+	uint32_t       m_shadowSize     = HE::kShadowMapResolution;
 
 	VkInstance               m_instance       = VK_NULL_HANDLE;
 	uint32_t                 m_instanceApiVersion = 0; // actual requested VkApplicationInfo::apiVersion
@@ -836,7 +837,7 @@ private:
 	void gpuTimerInit();                       // after device creation
 	void gpuTimerBegin(VkCommandBuffer cmd);   // reap oldest slot + start stamp
 	void gpuTimerEnd(VkCommandBuffer cmd);     // end stamp + advance the ring
-	static constexpr uint32_t kGpuTimerRing = 4;
+	static constexpr uint32_t kGpuTimerRing = HE::kGpuTimerRing;
 	VkQueryPool m_tsQueryPool = VK_NULL_HANDLE;
 	bool        m_tsSupported = false;
 	float       m_tsPeriodNs  = 0.0f;               // ns per timestamp tick

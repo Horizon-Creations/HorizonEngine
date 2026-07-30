@@ -112,13 +112,15 @@ add_executable(HorizonEditor WIN32
 	StaticMeshEditorPanel.cpp
 	ParticleGraphEditorPanel.cpp
 	AnimatorStateMachineEditorPanel.cpp
-	HcClassList.cpp
+	HcEditorUtil.cpp
 	HcGraphClipboard.cpp
 	HcGraphHost.cpp
 	GraphEditor.cpp
 	EditorAssetTypeCache.cpp
+	EditorPanelState.cpp
+	EditorWidgets.cpp
 	stb_image_impl.cpp
- "EditorUI.h" "EditorUI.cpp" "ScriptEditorPanel.h" "MaterialEditorPanel.h" "LevelScriptPanel.h" "GameInstancePanel.h" "HorizonCodeClassPanel.h" "HcClassList.h" "HcGraphClipboard.h" "HcGraphHost.h" "SkeletalMeshEditorPanel.h" "StaticMeshEditorPanel.h" "ParticleGraphEditorPanel.h" "AnimatorStateMachineEditorPanel.h" "EditorAssetTypeCache.h")
+ "EditorUI.h" "EditorUI.cpp" "ScriptEditorPanel.h" "MaterialEditorPanel.h" "LevelScriptPanel.h" "GameInstancePanel.h" "HorizonCodeClassPanel.h" "HcEditorUtil.h" "HcGraphClipboard.h" "HcGraphHost.h" "SkeletalMeshEditorPanel.h" "StaticMeshEditorPanel.h" "ParticleGraphEditorPanel.h" "AnimatorStateMachineEditorPanel.h" "EditorAssetTypeCache.h" "EditorPanelState.h" "EditorWidgets.h")
 
 if(APPLE)
 	target_sources(HorizonEditor PRIVATE ImGuiMetalBridge.mm ImGuiMetalBridge.h

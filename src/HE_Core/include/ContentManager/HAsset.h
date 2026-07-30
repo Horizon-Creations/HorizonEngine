@@ -440,4 +440,50 @@ private:
 	std::vector<Chunk> m_chunks;
 };
 
+// ── TXMI header codec (width / height / channels) ─────────────────────────────
+// These three fields USED to be written as size_t, which made the on-disk chunk
+// layout depend on the writing build's pointer width (24 bytes on 64-bit vs 12 on
+// 32-bit for the same texture). They are uint32 now; the legacy 64-bit layout is
+// still read, told apart by the chunk size alone:
+//   legacy 64-bit : 24 B (width/height/channels only) or 30 B (+ mip/format/srgb tail)
+//   current       : 12 B + the 6-byte tail = 18 B
+// so "chunk >= 24 bytes" can only be the legacy layout, and a legacy 32-bit chunk
+// is byte-identical to the current one and needs no special case. Every reader of
+// TXMI must go through readTextureHeader (ContentManager's loader and the packer's
+// cookTexture both do) or old .hasset files decode to garbage dimensions.
+// CAUTION: the discriminator holds only while the current layout stays under 24
+// bytes, i.e. the optional tail after channels stays ≤ 11 bytes (6 today). A
+// bigger tail needs a real version marker instead.
+inline constexpr size_t kTextureHeaderLegacyMinSize = 24;
+
+// Reads width/height/channels at `offset` (advanced past them). False = truncated.
+// `buf` must be the WHOLE TXMI chunk starting at offset 0 — the layout is chosen
+// from its total size.
+inline bool readTextureHeader(const std::vector<uint8_t>& buf, size_t& offset,
+                              uint32_t& width, uint32_t& height, uint32_t& channels)
+{
+	if (buf.size() >= kTextureHeaderLegacyMinSize)
+	{
+		uint64_t w = 0, h = 0, c = 0;
+		if (!Reader::readPOD(buf, offset, w) || !Reader::readPOD(buf, offset, h)
+		    || !Reader::readPOD(buf, offset, c)) return false;
+		width    = static_cast<uint32_t>(w);
+		height   = static_cast<uint32_t>(h);
+		channels = static_cast<uint32_t>(c);
+		return true;
+	}
+	return Reader::readPOD(buf, offset, width) && Reader::readPOD(buf, offset, height)
+	    && Reader::readPOD(buf, offset, channels);
+}
+
+// Writes the current (uint32) layout — never the legacy one, so a re-save of an
+// old asset also migrates its TXMI chunk.
+inline void appendTextureHeader(std::vector<uint8_t>& buf,
+                                uint32_t width, uint32_t height, uint32_t channels)
+{
+	Writer::appendPOD(buf, width);
+	Writer::appendPOD(buf, height);
+	Writer::appendPOD(buf, channels);
+}
+
 } // namespace HAsset

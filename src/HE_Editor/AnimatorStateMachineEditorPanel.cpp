@@ -2,6 +2,8 @@
 #include <cstdint>
 #include "EditorApplication.h"      // AppContext
 #include "EditorAssetTypeCache.h"   // shared, invalidatable path → AssetType sniff
+#include "EditorPanelState.h"       // shared per-tab state map + lazy asset open
+#include "EditorWidgets.h"          // shared Content-Browser asset drop target
 #include "GraphEditor.h"            // shared node-graph canvas frontend
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
@@ -14,8 +16,6 @@
 #include <algorithm>
 #include <array>
 #include <cstdio>
-#include <filesystem>
-#include <map>
 #include <string>
 #include <vector>
 
@@ -33,17 +33,14 @@ struct State
 	GraphEditor::State geState;
 };
 
-static std::map<std::string, State> g_states;
+static AssetPanelState<State> g_states;
 
 static State& stateFor(const std::string& path, AppContext& ctx)
 {
 	State& st = g_states[path];
 	if (st.loaded || !ctx.contentManager) return st;
 
-	st.name = std::filesystem::path(path).filename().string();
-	const std::string rel = ctx.contentManager->toContentRelativePath(path);
-	st.relPath = rel.empty() ? path : rel;
-	st.assetId = ctx.contentManager->loadAsset(st.relPath);
+	st.assetId = openPanelAsset(ctx, path, st.name, st.relPath);
 
 	if (const AnimatorStateMachineAsset* asset = ctx.contentManager->getAnimatorStateMachine(st.assetId);
 	    asset && !asset->graphJson.empty())
@@ -61,13 +58,9 @@ bool isAnimatorStateMachineAsset(const std::string& path)
 	return EditorAssetTypeCache::is(path, HE::AssetType::AnimatorStateMachine);
 }
 
-bool isDirty(const std::string& assetPath)
-{
-	auto it = g_states.find(assetPath);
-	return it != g_states.end() && it->second.dirty;
-}
+bool isDirty(const std::string& assetPath) { return g_states.dirty(assetPath); }
 
-void forget(const std::string& assetPath) { g_states.erase(assetPath); }
+void forget(const std::string& assetPath) { g_states.forget(assetPath); }
 
 namespace
 {
@@ -83,20 +76,9 @@ HE::AnimationState* findStateByName(HE::AnimatorStateMachineGraph& g, const std:
 }
 
 // Scale embedded ImGui widgets to the canvas zoom (same technique Material/
-// HorizonCode/ParticleGraph node bodies use).
-void pushWidgetScale(float z)
-{
-	const ImGuiStyle& s = ImGui::GetStyle();
-	const ImVec2 fp = s.FramePadding, is = s.ItemSpacing, iis = s.ItemInnerSpacing;
-	const float  fr = s.FrameRounding, gm = s.GrabMinSize;
-	ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,     ImVec2(fp.x * z, fp.y * z));
-	ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,      ImVec2(is.x * z, is.y * z));
-	ImGui::PushStyleVar(ImGuiStyleVar_ItemInnerSpacing, ImVec2(iis.x * z, iis.y * z));
-	ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding,    fr * z);
-	ImGui::PushStyleVar(ImGuiStyleVar_GrabMinSize,      gm * z);
-	ImGui::SetWindowFontScale(z);
-}
-void popWidgetScale() { ImGui::SetWindowFontScale(1.0f); ImGui::PopStyleVar(5); }
+// HorizonCode/ParticleGraph node bodies use) — the one copy lives with the canvas.
+using GraphEditor::pushWidgetScale;
+using GraphEditor::popWidgetScale;
 } // namespace
 
 void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, const ImVec2& size)
@@ -259,24 +241,13 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 			ImGui::SetCursorScreenPos(ImVec2(bodyMin.x, bodyMin.y + 24.0f * zoom));
 			ImGui::SetNextItemAllowOverlap();
 			ImGui::InvisibleButton("##clipslot", ImVec2(std::max(bodyMax.x - bodyMin.x, 1.0f), 22.0f * zoom));
-			if (ImGui::BeginDragDropTarget())
+			// The graph's own dirty flag covers this (structuralEdit), so no world
+			// snapshot — hence the drop half only, not the whole slot widget.
+			if (const EditorWidgets::AssetDrop drop =
+					EditorWidgets::acceptAssetDrop(ctx, HE::AssetType::AnimationClip))
 			{
-				if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("HE_ASSET_PATH"))
-				{
-					const std::string rel = ctx.contentManager
-						? ctx.contentManager->toContentRelativePath(static_cast<const char*>(pl->Data))
-						: std::string();
-					if (!rel.empty() && ctx.contentManager)
-					{
-						const HE::UUID dropped = ctx.contentManager->loadAsset(rel);
-						if (dropped != HE::UUID{} && ctx.contentManager->assetType(dropped) == HE::AssetType::AnimationClip)
-						{
-							s->clipId = dropped;
-							structuralEdit = true;
-						}
-					}
-				}
-				ImGui::EndDragDropTarget();
+				s->clipId = drop.id;
+				structuralEdit = true;
 			}
 			popWidgetScale();
 		};

@@ -1,5 +1,5 @@
 #include "HcGraphHost.h"
-#include "HcClassList.h"         // HcEditorUtil: colors, tooltips, engine-API menu
+#include "HcEditorUtil.h"        // HcEditorUtil: colors, tooltips, engine-API menu
 #include "HcGraphClipboard.h"    // shared HorizonCode node clipboard (copy/cut/paste)
 #include <HorizonScene/EngineApi.h>
 #include <ContentManager/ContentManager.h>

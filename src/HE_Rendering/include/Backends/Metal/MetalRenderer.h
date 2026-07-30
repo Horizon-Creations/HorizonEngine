@@ -9,6 +9,7 @@
 #include <HorizonRendering/RenderSorter.h>
 #include <HorizonRendering/RenderGraph.h>
 #include <HorizonRendering/CommandBuffer.h>
+#include <HorizonRendering/RenderConstants.h> // HE::kShadowMapResolution
 #include <HorizonRendering/GiBvh.h>
 #include <Math/AABB.h>
 #include <Types/UUID.h>
@@ -161,10 +162,10 @@ private:
 	// Procedural skybox: fills the HDR target's background before the scene.
 	void* m_skyPipeline = nullptr; // id<MTLRenderPipelineState>
 	void* m_moonTexture = nullptr; // id<MTLTexture>, night-sky moon (or null)
+	// Everything else the sky shader needs comes from GetEnvironment() via the shared
+	// HE::BuildSkyFrameParams; only the per-frame camera/clock values are passed in.
 	void  EncodeSky(void* renderEncoder, const glm::mat4& invViewProj, const glm::vec3& sunDir,
-	                const glm::vec3& sunColor, float timeOfDay, float cloudCoverage, float time,
-	                float auroraIntensity, const glm::vec3& nebulaColor, float nebulaIntensity,
-	                const glm::vec3& auroraColor, float milkyWayIntensity, const glm::vec3& wind);
+	                float time);
 	// (Re)creates the offscreen viewport textures at the requested size.
 	void EnsureViewportTarget();
 	void DestroyViewportTarget();
@@ -283,7 +284,7 @@ private:
 	// ── Shadow map (cascaded; directional light) ────────────────────────────
 	void* m_shadowDepthTex = nullptr;  // id<MTLTexture>, Depth32Float 2D ARRAY (one layer/cascade)
 	void* m_shadowPipeline = nullptr;  // id<MTLRenderPipelineState>, depth-only
-	int   m_shadowSize     = 2048;
+	int   m_shadowSize     = HE::kShadowMapResolution;
 	// Local (point/spot) shadow atlas: 2D depth ARRAY, one layer per spot view /
 	// point cube face (16 layers total, see ShadowData::kMaxLocalShadowLayers).
 	void* m_localShadowTex  = nullptr; // id<MTLTexture>, Depth32Float 2D ARRAY
@@ -297,12 +298,6 @@ private:
 	// it down to the LDR output (viewport texture or drawable). Sized to the
 	// current scene output, recreated on resize.
 	void* m_tonemapPipeline = nullptr; // id<MTLRenderPipelineState>
-
-	// Material-system M1 visual proof (HE_SHADERC_DEMO=1): a fullscreen overlay whose
-	// MSL is generated at runtime from ONE canonical GLSL source via he::shaderc
-	// (glslang→SPIR-V→SPIRV-Cross). Off unless the env var is set; built lazily.
-	void* m_shadercDemoPipeline = nullptr; // id<MTLRenderPipelineState>
-	bool  m_shadercDemoTried    = false;
 
 	// Per-material pipeline cache (M1): a MaterialAsset with a customShaderFragGlsl gets
 	// its fragment cross-compiled (he::shaderc) and spliced onto the standard drop-in
@@ -319,7 +314,7 @@ private:
 	bool        m_matArchiveTried  = false;    // ensured once
 	std::string m_matArchivePath;              // serialize target on disk
 	// Returns the material binary archive (loading/creating it on first use), or nil.
-	void* ensureMaterialArchive();
+	void* EnsureMaterialArchive();
 	// Material-preview target (RenderMaterialPreview): a small RGBA16F color texture
 	// (matches the material PSO's HDR format) + depth, plus a lazily-built unit sphere,
 	// independent of the main viewport.
@@ -367,14 +362,6 @@ private:
 	                                 const ParticleShaderVariant* precompiled = nullptr);
 	void  DrawParticleGraphBatches(void* renderEncoder, const glm::mat4& viewProj, const glm::mat4& view);
 
-	// A procedural sphere (interleaved pos3/normal3/uv2, matching VertexIn) so per-material
-	// pipelines are visible on real 3D geometry even in the empty headless dump scene.
-	// Built + drawn (two spheres, two materials) when HE_SHADERC_MATERIAL=1.
-	void* m_shadercTestVB   = nullptr; // id<MTLBuffer>
-	void* m_shadercTestIB   = nullptr; // id<MTLBuffer>
-	int   m_shadercTestIdx  = 0;       // index count
-	bool  m_shadercTestTried = false;
-
 	void* m_hdrColor        = nullptr; // id<MTLTexture>, RGBA16Float (retained)
 	void* m_hdrDepth        = nullptr; // id<MTLTexture>, Depth32Float (retained)
 	int   m_hdrW            = 0;
@@ -383,8 +370,6 @@ private:
 	void  DestroyHDRTarget();
 	void  EncodeTonemap(void* renderEncoder); // fullscreen tonemap of m_hdrColor → LDR
 #if defined(HE_HAVE_SHADERC)
-	void  EnsureShadercDemoPipeline();        // HE_SHADERC_DEMO overlay (material-system M1)
-	void  EnsureShadercTestMesh();            // procedural sphere for the HE_SHADERC_MATERIAL demo
 	// Build (or fetch cached) a pipeline for a material's custom fragment GLSL, spliced
 	// onto the standard drop-in vertex. Returns null on compile/link failure (also cached).
 	// precompiled != null → build directly from baked MSL (no runtime cross-compile).
@@ -415,7 +400,7 @@ private:
 	void* m_uiFontTexture = nullptr; // id<MTLTexture>, R8 UI font atlas (UISystem::sharedFont)
 	// Imported Font asset atlases, uploaded lazily on first sight (key → id<MTLTexture>).
 	std::unordered_map<uint32_t, void*> m_uiFontAtlases;
-	void* uiFontAtlasTexture(uint32_t key); // key 0 → the shared atlas
+	void* UIFontAtlasTexture(uint32_t key); // key 0 → the shared atlas
 	// Material-on-UI-quad pipelines: same material fragments as the mesh path,
 	// paired with the screen-space uiVertex and the LDR/blend target of the UI
 	// pass — so they need their own cache (key = material shader hash).
@@ -455,10 +440,7 @@ private:
 	void  EnsureCloudTarget(int width, int height);
 	void  DestroyCloudTarget();
 	void  EncodeCloudPrepass(void* cmdBuf, const glm::mat4& invViewProj, const glm::vec3& sunDir,
-	                         const glm::vec3& sunColor, float timeOfDay, float cloudCoverage,
-	                         float time, float auroraIntensity, const glm::vec3& nebulaColor,
-	                         float nebulaIntensity, const glm::vec3& auroraColor,
-	                         float milkyWayIntensity, const glm::vec3& wind, int width, int height);
+	                         float time, int width, int height);
 
 	// ── SSAO (screen-space ambient occlusion) ───────────────────────────────
 	// Mirrors the GL backend: a view-space position pre-pass feeds a hemisphere-
@@ -532,18 +514,18 @@ private:
 	// like the HW TLAS. Everything downstream (G-buffer, temporal, blur,
 	// shading, probe atlases) is IDENTICAL to the HW path — only the ray
 	// dispatch kernel differs.
-	struct GiSwBlasRange
+	struct GISwBlasRange
 	{
 		int32_t nodeOffset = 0, triOffset = 0;
 		bool    valid      = false;
 	};
-	struct GiSwInstanceCPU // must match kGISWMSL's GiInst (96 bytes)
+	struct GISwInstanceCPU // must match kGISWMSL's GiInst (96 bytes)
 	{
 		glm::mat4 invTransform{1.0f};
 		glm::vec4 baseColor{1.0f};
 		int32_t   nodeOffset = 0, triOffset = 0, pad0 = 0, pad1 = 0;
 	};
-	std::unordered_map<HE::UUID, GiSwBlasRange> m_giSwBlasCache;
+	std::unordered_map<HE::UUID, GISwBlasRange> m_giSwBlasCache;
 	std::vector<HE::GiBvhNode>     m_giSwNodesCpu;
 	std::vector<HE::GiBvhTriangle> m_giSwTrisCpu;
 	bool  m_giSwBlasDirty     = false;
@@ -553,7 +535,7 @@ private:
 	int   m_giSwInstanceCount = 0;
 	void* m_giShadowRaySwPipeline  = nullptr; // id<MTLComputePipelineState>
 	void* m_giProbeUpdateSwPipeline = nullptr; // id<MTLComputePipelineState>
-	GiSwBlasRange BuildGiSwBlas(const HE::UUID& meshId);
+	GISwBlasRange BuildGISwBlas(const HE::UUID& meshId);
 	void          EncodeGISwAccelBuild(); // CPU BVH build + buffer upload (no cmd encoding needed)
 	// Objects a build just replaced (old TLAS/instance/scratch buffers). GPU work
 	// from this frame's build (or a still in-flight prior frame) may still

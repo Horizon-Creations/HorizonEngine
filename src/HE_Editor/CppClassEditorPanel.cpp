@@ -1,12 +1,12 @@
 #include "CppClassEditorPanel.h"
 #include "EditorApplication.h"                 // AppContext
+#include "EditorPanelState.h"                  // shared per-tab state map
 #include "TextEditor.h"                        // ImGuiColorTextEdit (vendored, MIT)
 #include <imgui_internal.h>                    // ImGuiContext::PlatformImeData (text-input activation)
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
 #include <fstream>
-#include <map>
 
 namespace fs = std::filesystem;
 
@@ -72,7 +72,7 @@ namespace
 		bool        resolved = false;    // sibling paths worked out yet?
 		std::string className;           // stem, shown in the header bar
 	};
-	std::map<std::string, State> g_states;
+	AssetPanelState<State> g_states;
 
 	void loadBuf(FileBuf& fb)
 	{
@@ -138,12 +138,11 @@ namespace CppClassEditorPanel
 
 	bool isDirty(const std::string& path)
 	{
-		auto it = g_states.find(path);
-		if (it == g_states.end()) return false;
-		return bufDirty(it->second.header) || bufDirty(it->second.source);
+		const State* st = g_states.find(path);
+		return st && (bufDirty(st->header) || bufDirty(st->source));
 	}
 
-	void forget(const std::string& path) { g_states.erase(path); }
+	void forget(const std::string& path) { g_states.forget(path); }
 
 	void render(AppContext& ctx, const std::string& path, const ImVec2& pos, const ImVec2& size)
 	{

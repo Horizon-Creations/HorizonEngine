@@ -38,6 +38,12 @@
 #include <glm/gtc/quaternion.hpp>
 #include <filesystem>
 
+// File-local alias. It used to arrive transitively from the public
+// HorizonRendering/ShaderManager.h, which declared it at global scope and so
+// leaked `fs` into every consumer of that header.
+namespace fs = std::filesystem;
+
+
 GameApplication::GameApplication(std::string startupPath)
 	: HE::Application(std::move(startupPath)) {}
 GameApplication::~GameApplication() = default;

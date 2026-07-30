@@ -191,9 +191,8 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_TXMI))
 		{
 			size_t o=0;
-			HAsset::Reader::readPOD(c->data,o,a.width);
-			HAsset::Reader::readPOD(c->data,o,a.height);
-			HAsset::Reader::readPOD(c->data,o,a.channels);
+			// Handles both the current uint32 layout and the legacy size_t one.
+			HAsset::readTextureHeader(c->data,o,a.width,a.height,a.channels);
 			// Cook tail (mipLevels, format, srgb) — guarded so pre-cook TXMI
 			// chunks (width/height/channels only) keep their defaults.
 			if (o + sizeof(uint32_t) <= c->data.size()) HAsset::Reader::readPOD(c->data,o,a.mipLevels);
@@ -403,6 +402,61 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 	return id;
 }
 
+// ─── Graph → material codegen helpers (shared by base + instance regeneration) ─
+// Function-graph resolution for HE::generateFragment. `fnStore` OWNS the parsed
+// graphs and must outlive the call: generateFragment keeps the raw pointers the
+// loader hands back. `cm` supplies loadAsset/getMaterialFunction.
+static HE::MatFunctionLoader makeMatFunctionLoader(
+	ContentManager& cm, std::map<std::string, HE::MaterialGraph>& fnStore)
+{
+	return [&cm, &fnStore](const std::string& path) -> const HE::MaterialGraph*
+	{
+		if (auto it = fnStore.find(path); it != fnStore.end()) return &it->second;
+		const MaterialFunctionAsset* fn = cm.getMaterialFunction(cm.loadAsset(path));
+		if (!fn || fn->nodeGraphJson.empty()) return nullptr;
+		HE::MaterialGraph fg;
+		if (!HE::materialGraphFromJson(fn->nodeGraphJson, fg)) return nullptr;
+		return &(fnStore[path] = std::move(fg));
+	};
+}
+
+// Replace a material's exposed-parameter arrays with a fresh codegen result (slot
+// order = gen.params order). `preserved` (optional) supplies values to keep BY NAME:
+// regenerateMaterialFromGraph passes the material's current values (a user edits
+// values without recompiling), syncMaterialInstance passes nullptr because it
+// re-applies only its explicitly overridden slots afterwards.
+static void applyGraphParams(MaterialAsset& m, const HE::MatShaderGen& gen,
+                             const std::map<std::string, std::array<float, 4>>* preserved)
+{
+	m.graphParamNames.clear(); m.graphParamTypes.clear();
+	m.graphParamMinMax.clear(); m.graphParamGroups.clear();
+	m.graphParamTooltips.clear(); m.shaderParamData.clear();
+	for (const auto& slot : gen.params)
+	{
+		m.graphParamNames.push_back(slot.name);
+		m.graphParamTypes.push_back(static_cast<uint8_t>(slot.kind));
+		m.graphParamMinMax.insert(m.graphParamMinMax.end(), { slot.minV, slot.maxV });
+		m.graphParamGroups.push_back(slot.group);
+		m.graphParamTooltips.push_back(slot.tooltip);
+		const std::array<float, 4>* keep = nullptr;
+		if (preserved)
+			if (auto it = preserved->find(slot.name); it != preserved->end()) keep = &it->second;
+		if (keep) m.shaderParamData.insert(m.shaderParamData.end(), keep->begin(), keep->end());
+		else      m.shaderParamData.insert(m.shaderParamData.end(), slot.value, slot.value + 4);
+	}
+}
+
+// Snapshot a material's current param values by name (slot i ↔ floats [i*4, i*4+4)).
+static std::map<std::string, std::array<float, 4>> snapshotGraphParams(const MaterialAsset& m)
+{
+	std::map<std::string, std::array<float, 4>> values;
+	for (size_t i = 0; i < m.graphParamNames.size(); ++i)
+		if (i * 4 + 3 < m.shaderParamData.size())
+			values[m.graphParamNames[i]] = { m.shaderParamData[i*4+0], m.shaderParamData[i*4+1],
+			                                 m.shaderParamData[i*4+2], m.shaderParamData[i*4+3] };
+	return values;
+}
+
 // Re-run the graph → GLSL codegen for a BASE material at load time. Mirrors
 // syncMaterialInstance's regeneration half: param VALUES are preserved by name
 // (users edit values without recompiling, so the baked shaderParamData can
@@ -415,24 +469,11 @@ void ContentManager::regenerateMaterialFromGraph(HE::UUID materialId)
 	HE::MaterialGraph g;
 	if (!HE::materialGraphFromJson(mat->nodeGraphJson, g)) return;
 
-	std::map<std::string, std::array<float, 4>> oldValues;
-	for (size_t i = 0; i < mat->graphParamNames.size(); ++i)
-		if (i * 4 + 3 < mat->shaderParamData.size())
-			oldValues[mat->graphParamNames[i]] = { mat->shaderParamData[i*4+0],
-				mat->shaderParamData[i*4+1], mat->shaderParamData[i*4+2],
-				mat->shaderParamData[i*4+3] };
+	const std::map<std::string, std::array<float, 4>> oldValues = snapshotGraphParams(*mat);
 
 	// Function graphs resolve through this manager; storage must outlive the call.
 	std::map<std::string, HE::MaterialGraph> fnStore;
-	HE::MatFunctionLoader loader = [&](const std::string& path) -> const HE::MaterialGraph*
-	{
-		if (auto it = fnStore.find(path); it != fnStore.end()) return &it->second;
-		const MaterialFunctionAsset* fn = getMaterialFunction(loadAsset(path));
-		if (!fn || fn->nodeGraphJson.empty()) return nullptr;
-		HE::MaterialGraph fg;
-		if (!HE::materialGraphFromJson(fn->nodeGraphJson, fg)) return nullptr;
-		return &(fnStore[path] = std::move(fg));
-	};
+	HE::MatFunctionLoader loader = makeMatFunctionLoader(*this, fnStore);
 	const HE::MatShaderGen gen = HE::generateFragment(g, loader, nullptr);
 	if (gen.glsl.empty()) return;
 
@@ -441,23 +482,7 @@ void ContentManager::regenerateMaterialFromGraph(HE::UUID materialId)
 	mat->blendMode            = gen.blendMode;
 	mat->graphTexturePaths    = gen.textures;
 	mat->graphLayerNames      = gen.layerNames;   // landscape paint layers
-	mat->graphParamNames.clear(); mat->graphParamTypes.clear();
-	mat->graphParamMinMax.clear(); mat->graphParamGroups.clear();
-	mat->graphParamTooltips.clear(); mat->shaderParamData.clear();
-	for (const auto& slot : gen.params)
-	{
-		mat->graphParamNames.push_back(slot.name);
-		mat->graphParamTypes.push_back(static_cast<uint8_t>(slot.kind));
-		mat->graphParamMinMax.insert(mat->graphParamMinMax.end(), { slot.minV, slot.maxV });
-		mat->graphParamGroups.push_back(slot.group);
-		mat->graphParamTooltips.push_back(slot.tooltip);
-		if (auto it = oldValues.find(slot.name); it != oldValues.end())
-			mat->shaderParamData.insert(mat->shaderParamData.end(),
-			                            it->second.begin(), it->second.end());
-		else
-			mat->shaderParamData.insert(mat->shaderParamData.end(),
-			                            slot.value, slot.value + 4);
-	}
+	applyGraphParams(*mat, gen, &oldValues);      // keep every user-edited value
 }
 
 // ─── Material instances ───────────────────────────────────────────────────────
@@ -484,12 +509,7 @@ void ContentManager::syncMaterialInstance(HE::UUID instanceId)
 		                 inst->instanceOverriddenParams.end(), nm)
 		       != inst->instanceOverriddenParams.end();
 	};
-	std::map<std::string, std::array<float, 4>> oldValues;
-	for (size_t i = 0; i < inst->graphParamNames.size(); ++i)
-		if (i * 4 + 3 < inst->shaderParamData.size())
-			oldValues[inst->graphParamNames[i]] = { inst->shaderParamData[i*4+0],
-				inst->shaderParamData[i*4+1], inst->shaderParamData[i*4+2],
-				inst->shaderParamData[i*4+3] };
+	const std::map<std::string, std::array<float, 4>> oldValues = snapshotGraphParams(*inst);
 
 	if (!inst->instanceSwitchNames.empty() && !parent->nodeGraphJson.empty())
 	{
@@ -505,29 +525,12 @@ void ContentManager::syncMaterialInstance(HE::UUID instanceId)
 				ov[inst->instanceSwitchNames[i]] = inst->instanceSwitchValues[i] != 0;
 			// Function graphs resolve through this manager; storage must outlive the call.
 			std::map<std::string, HE::MaterialGraph> fnStore;
-			HE::MatFunctionLoader loader = [&](const std::string& path) -> const HE::MaterialGraph*
-			{
-				if (auto it = fnStore.find(path); it != fnStore.end()) return &it->second;
-				const MaterialFunctionAsset* fn = getMaterialFunction(loadAsset(path));
-				if (!fn || fn->nodeGraphJson.empty()) return nullptr;
-				HE::MaterialGraph fg;
-				if (!HE::materialGraphFromJson(fn->nodeGraphJson, fg)) return nullptr;
-				return &(fnStore[path] = std::move(fg));
-			};
+			HE::MatFunctionLoader loader = makeMatFunctionLoader(*this, fnStore);
 			const HE::MatShaderGen gen = HE::generateFragment(g, loader, &ov);
 			inst->customShaderFragGlsl = gen.glsl;
-			inst->graphParamNames.clear(); inst->graphParamTypes.clear();
-			inst->graphParamMinMax.clear(); inst->graphParamGroups.clear();
-			inst->graphParamTooltips.clear(); inst->shaderParamData.clear();
-			for (const auto& slot : gen.params)
-			{
-				inst->graphParamNames.push_back(slot.name);
-				inst->graphParamTypes.push_back(static_cast<uint8_t>(slot.kind));
-				inst->graphParamMinMax.insert(inst->graphParamMinMax.end(), { slot.minV, slot.maxV });
-				inst->graphParamGroups.push_back(slot.group);
-				inst->graphParamTooltips.push_back(slot.tooltip);
-				for (int k = 0; k < 4; ++k) inst->shaderParamData.push_back(slot.value[k]);
-			}
+			// nullptr: start from the permutation's defaults — the overridden slots are
+			// re-applied from oldValues below, the rest must follow the parent.
+			applyGraphParams(*inst, gen, nullptr);
 			inst->graphTexturePaths = gen.textures;
 			inst->blendMode            = gen.blendMode;
 			inst->customShaderVertGlsl = gen.vertexBody;
@@ -871,10 +874,10 @@ size_t ContentManager::streamMountedAssets(const std::unordered_set<HE::UUID>& e
 	// Reserved pak entries are NOT streamable assets: the asset path index and the
 	// scene index are JSON metadata blobs read directly by their known UUID (via
 	// readMountedEntry), never parsed as .hasset. Streaming them would burn an
-	// async job on a guaranteed parse failure. (kAssetPathIndexEntry lives here in
-	// ProjectExporter.h; "__scene_index__" mirrors HE::api::scene::kSceneIndexEntry.)
+	// async job on a guaranteed parse failure. (Both names live in ProjectExporter.h;
+	// kSceneIndexEntry mirrors HE::api::scene::kSceneIndexEntry.)
 	const HE::UUID assetIdx = sceneUuidForPath(kAssetPathIndexEntry);
-	const HE::UUID sceneIdx = sceneUuidForPath("__scene_index__");
+	const HE::UUID sceneIdx = sceneUuidForPath(kSceneIndexEntry);
 	const HE::UUID giIdx    = sceneUuidForPath(kGameInstanceEntry);
 	size_t submitted = 0;
 	for (const auto& [id, mountIdx] : m_pakResidency)
@@ -1023,7 +1026,7 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 	case HE::AssetType::Texture:
 	{
 		auto& a = static_cast<TextureAsset&>(asset);
-		{ std::vector<uint8_t> b; HAsset::Writer::appendPOD(b,a.width); HAsset::Writer::appendPOD(b,a.height); HAsset::Writer::appendPOD(b,a.channels);
+		{ std::vector<uint8_t> b; HAsset::appendTextureHeader(b,a.width,a.height,a.channels);
 		  HAsset::Writer::appendPOD(b, a.mipLevels);
 		  HAsset::Writer::appendPOD(b, static_cast<uint8_t>(a.format));
 		  HAsset::Writer::appendPOD(b, static_cast<uint8_t>(a.srgb ? 1 : 0));
@@ -1033,6 +1036,12 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 	}
 	case HE::AssetType::Material:
 	{
+		// ⚠ FIELD-SYNCHRONISED WITH rewriteRefsForPack's MTRL branch (HpakWriter.cpp):
+		// the packer re-serializes this chunk by walking the field order below to find
+		// byte offsets (it copies the scalar tail verbatim rather than parsing it).
+		// Adding/removing/reordering a field here without mirroring it there makes the
+		// packer cut at the wrong offsets — packed materials then lose params or their
+		// WPO vertex body, silently (all reads are bounds-checked and just stop early).
 		auto& a = static_cast<MaterialAsset&>(asset);
 		std::vector<uint8_t> b; HAsset::Writer::appendString(b,a.shaderPath); HAsset::Writer::appendVec(b,a.texturePaths);
 		HAsset::Writer::appendPOD(b,a.baseColor[0]); HAsset::Writer::appendPOD(b,a.baseColor[1]); HAsset::Writer::appendPOD(b,a.baseColor[2]);
@@ -1173,29 +1182,16 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 	return w.write(fullPath, typeId);
 }
 
-// ─── Typed getters ───────────────────────────────────────────────────────────
-template<typename T>
-static const T* lookupAsset(const std::unordered_map<HE::UUID, SlotHandle>& index,
-                            const SlotMap<T>& map, HE::UUID id)
+// ─── Shader-variant chunk codecs (PSHD / PPSD) ───────────────────────────────
+// The single source of truth for the precompiled-shader byte layout, shared by
+// the exporter (encode) and the runtime loader above (decode). Material (PSHD)
+// and particle (PPSD) variants have identical wire shapes and differ only in the
+// C++ type they carry (see MaterialShaderVariant / ParticleShaderVariant in
+// Assets.h), so one template serves both — a layout change stays in one place.
+namespace
 {
-	auto it = index.find(id);
-	if (it == index.end()) return nullptr;
-	// SlotHandles are per-SlotMap, so the same {index,generation} can be valid in
-	// several maps. Confirm the stored asset really carries this UUID, otherwise a
-	// wrong-type lookup (e.g. getStaticMesh on a material id) would alias.
-	const T* a = map.get(it->second);
-	return (a && a->id == id) ? a : nullptr;
-}
-
-const StaticMeshAsset*    ContentManager::getStaticMesh(HE::UUID id) const    { return lookupAsset(m_handleToUUID, m_staticMeshAssets, id); }
-const SkeletalMeshAsset*  ContentManager::getSkeletalMesh(HE::UUID id) const  { return lookupAsset(m_handleToUUID, m_skeletalMeshAssets, id); }
-const TextureAsset*       ContentManager::getTexture(HE::UUID id) const       { return lookupAsset(m_handleToUUID, m_textureAssets, id); }
-const MaterialAsset*      ContentManager::getMaterial(HE::UUID id) const      { return lookupAsset(m_handleToUUID, m_materialAssets, id); }
-const AudioAsset*         ContentManager::getAudio(HE::UUID id) const         { return lookupAsset(m_handleToUUID, m_audioAssets, id); }
-const FontAsset*          ContentManager::getFont(HE::UUID id) const          { return lookupAsset(m_handleToUUID, m_fontAssets, id); }
-namespace HE
-{
-std::vector<uint8_t> encodeMaterialShaderVariants(const std::vector<MaterialShaderVariant>& vars)
+template<typename Variant>
+std::vector<uint8_t> encodeShaderVariants(const std::vector<Variant>& vars)
 {
 	// No variants → no blob, so the exporter's `if (!pshd.empty())` guard skips the
 	// chunk entirely (rather than baking a count-0 PSHD that decodes to nothing).
@@ -1210,47 +1206,17 @@ std::vector<uint8_t> encodeMaterialShaderVariants(const std::vector<MaterialShad
 	}
 	return b;
 }
-std::vector<MaterialShaderVariant> decodeMaterialShaderVariants(const std::vector<uint8_t>& bytes)
-{
-	std::vector<MaterialShaderVariant> out;
-	size_t o = 0; uint8_t count = 0;
-	if (!HAsset::Reader::readPOD(bytes, o, count)) return out;
-	out.reserve(count);
-	for (uint8_t i = 0; i < count; ++i)
-	{
-		MaterialShaderVariant v;
-		if (!HAsset::Reader::readPOD(bytes, o, v.backend))     break;
-		if (!HAsset::Reader::readString(bytes, o, v.vertex))   break;
-		if (!HAsset::Reader::readString(bytes, o, v.fragment)) break;
-		out.push_back(std::move(v));
-	}
-	return out;
-}
 
-// PPSD — identical wire shape to encode/decodeMaterialShaderVariants above, distinct
-// type only (see ParticleShaderVariant in Assets.h).
-std::vector<uint8_t> encodeParticleShaderVariants(const std::vector<ParticleShaderVariant>& vars)
+template<typename Variant>
+std::vector<Variant> decodeShaderVariants(const std::vector<uint8_t>& bytes)
 {
-	if (vars.empty()) return {};
-	std::vector<uint8_t> b;
-	HAsset::Writer::appendPOD(b, static_cast<uint8_t>(std::min<size_t>(vars.size(), 255)));
-	for (const auto& v : vars)
-	{
-		HAsset::Writer::appendPOD(b, v.backend);
-		HAsset::Writer::appendString(b, v.vertex);
-		HAsset::Writer::appendString(b, v.fragment);
-	}
-	return b;
-}
-std::vector<ParticleShaderVariant> decodeParticleShaderVariants(const std::vector<uint8_t>& bytes)
-{
-	std::vector<ParticleShaderVariant> out;
+	std::vector<Variant> out;
 	size_t o = 0; uint8_t count = 0;
 	if (!HAsset::Reader::readPOD(bytes, o, count)) return out;
 	out.reserve(count);
 	for (uint8_t i = 0; i < count; ++i)
 	{
-		ParticleShaderVariant v;
+		Variant v;
 		if (!HAsset::Reader::readPOD(bytes, o, v.backend))     break;
 		if (!HAsset::Reader::readString(bytes, o, v.vertex))   break;
 		if (!HAsset::Reader::readString(bytes, o, v.fragment)) break;
@@ -1258,77 +1224,71 @@ std::vector<ParticleShaderVariant> decodeParticleShaderVariants(const std::vecto
 	}
 	return out;
 }
+} // namespace
+
+namespace HE
+{
+std::vector<uint8_t> encodeMaterialShaderVariants(const std::vector<MaterialShaderVariant>& vars)
+{ return encodeShaderVariants(vars); }
+std::vector<MaterialShaderVariant> decodeMaterialShaderVariants(const std::vector<uint8_t>& bytes)
+{ return decodeShaderVariants<MaterialShaderVariant>(bytes); }
+std::vector<uint8_t> encodeParticleShaderVariants(const std::vector<ParticleShaderVariant>& vars)
+{ return encodeShaderVariants(vars); }
+std::vector<ParticleShaderVariant> decodeParticleShaderVariants(const std::vector<uint8_t>& bytes)
+{ return decodeShaderVariants<ParticleShaderVariant>(bytes); }
 } // namespace HE
 
+// ─── Typed getters ───────────────────────────────────────────────────────────
+template<typename T>
+static const T* lookupAsset(const std::unordered_map<HE::UUID, SlotHandle>& index,
+                            const SlotMap<T>& map, HE::UUID id)
+{
+	auto it = index.find(id);
+	if (it == index.end()) return nullptr;
+	// SlotHandles are per-SlotMap, so the same {index,generation} can be valid in
+	// several maps. Confirm the stored asset really carries this UUID, otherwise a
+	// wrong-type lookup (e.g. getStaticMesh on a material id) would alias.
+	const T* a = map.get(it->second);
+	return (a && a->id == id) ? a : nullptr;
+}
+
+// Mutable twin of lookupAsset — same UUID re-check against SlotHandle aliasing.
+template<typename T>
+static T* lookupAssetMutable(const std::unordered_map<HE::UUID, SlotHandle>& index,
+                             SlotMap<T>& map, HE::UUID id)
+{
+	auto it = index.find(id);
+	if (it == index.end()) return nullptr;
+	T* a = map.get(it->second);
+	return (a && a->id == id) ? a : nullptr; // reject wrong-type aliasing
+}
+
+const StaticMeshAsset*    ContentManager::getStaticMesh(HE::UUID id) const    { return lookupAsset(m_handleToUUID, m_staticMeshAssets, id); }
+const SkeletalMeshAsset*  ContentManager::getSkeletalMesh(HE::UUID id) const  { return lookupAsset(m_handleToUUID, m_skeletalMeshAssets, id); }
+const TextureAsset*       ContentManager::getTexture(HE::UUID id) const       { return lookupAsset(m_handleToUUID, m_textureAssets, id); }
+const MaterialAsset*      ContentManager::getMaterial(HE::UUID id) const      { return lookupAsset(m_handleToUUID, m_materialAssets, id); }
+const AudioAsset*         ContentManager::getAudio(HE::UUID id) const         { return lookupAsset(m_handleToUUID, m_audioAssets, id); }
+const FontAsset*          ContentManager::getFont(HE::UUID id) const          { return lookupAsset(m_handleToUUID, m_fontAssets, id); }
 const ScriptAsset*        ContentManager::getScript(HE::UUID id) const        { return lookupAsset(m_handleToUUID, m_scriptAssets, id); }
 const MaterialFunctionAsset* ContentManager::getMaterialFunction(HE::UUID id) const { return lookupAsset(m_handleToUUID, m_materialFunctionAssets, id); }
-MaterialFunctionAsset* ContentManager::getMaterialFunctionMutable(HE::UUID id)
-{
-	auto it = m_handleToUUID.find(id);
-	if (it == m_handleToUUID.end()) return nullptr;
-	MaterialFunctionAsset* a = m_materialFunctionAssets.get(it->second);
-	return (a && a->id == id) ? a : nullptr; // reject wrong-type aliasing
-}
+MaterialFunctionAsset*    ContentManager::getMaterialFunctionMutable(HE::UUID id) { return lookupAssetMutable(m_handleToUUID, m_materialFunctionAssets, id); }
 const UIWidgetAsset*      ContentManager::getWidget(HE::UUID id) const        { return lookupAsset(m_handleToUUID, m_widgetAssets, id); }
-UIWidgetAsset* ContentManager::getWidgetMutable(HE::UUID id)
-{
-	auto it = m_handleToUUID.find(id);
-	if (it == m_handleToUUID.end()) return nullptr;
-	UIWidgetAsset* a = m_widgetAssets.get(it->second);
-	return (a && a->id == id) ? a : nullptr; // reject wrong-type aliasing
-}
+UIWidgetAsset*            ContentManager::getWidgetMutable(HE::UUID id)       { return lookupAssetMutable(m_handleToUUID, m_widgetAssets, id); }
 const HorizonCodeClassAsset* ContentManager::getHorizonCodeClass(HE::UUID id) const { return lookupAsset(m_handleToUUID, m_hcClassAssets, id); }
-HorizonCodeClassAsset* ContentManager::getHorizonCodeClassMutable(HE::UUID id)
-{
-	auto it = m_handleToUUID.find(id);
-	if (it == m_handleToUUID.end()) return nullptr;
-	HorizonCodeClassAsset* a = m_hcClassAssets.get(it->second);
-	return (a && a->id == id) ? a : nullptr; // reject wrong-type aliasing
-}
-const InputActionAsset* ContentManager::getInputAction(HE::UUID id) const { return lookupAsset(m_handleToUUID, m_inputActionAssets, id); }
-InputActionAsset* ContentManager::getInputActionMutable(HE::UUID id)
-{
-	auto it = m_handleToUUID.find(id);
-	if (it == m_handleToUUID.end()) return nullptr;
-	InputActionAsset* a = m_inputActionAssets.get(it->second);
-	return (a && a->id == id) ? a : nullptr; // reject wrong-type aliasing
-}
+HorizonCodeClassAsset*    ContentManager::getHorizonCodeClassMutable(HE::UUID id) { return lookupAssetMutable(m_handleToUUID, m_hcClassAssets, id); }
+const InputActionAsset*   ContentManager::getInputAction(HE::UUID id) const   { return lookupAsset(m_handleToUUID, m_inputActionAssets, id); }
+InputActionAsset*         ContentManager::getInputActionMutable(HE::UUID id)  { return lookupAssetMutable(m_handleToUUID, m_inputActionAssets, id); }
 const InputMappingContextAsset* ContentManager::getInputMappingContext(HE::UUID id) const { return lookupAsset(m_handleToUUID, m_inputMappingAssets, id); }
-InputMappingContextAsset* ContentManager::getInputMappingContextMutable(HE::UUID id)
-{
-	auto it = m_handleToUUID.find(id);
-	if (it == m_handleToUUID.end()) return nullptr;
-	InputMappingContextAsset* a = m_inputMappingAssets.get(it->second);
-	return (a && a->id == id) ? a : nullptr; // reject wrong-type aliasing
-}
+InputMappingContextAsset* ContentManager::getInputMappingContextMutable(HE::UUID id) { return lookupAssetMutable(m_handleToUUID, m_inputMappingAssets, id); }
 const ParticleGraphAsset* ContentManager::getParticleGraph(HE::UUID id) const { return lookupAsset(m_handleToUUID, m_particleGraphAssets, id); }
-ParticleGraphAsset* ContentManager::getParticleGraphMutable(HE::UUID id)
-{
-	auto it = m_handleToUUID.find(id);
-	if (it == m_handleToUUID.end()) return nullptr;
-	ParticleGraphAsset* a = m_particleGraphAssets.get(it->second);
-	return (a && a->id == id) ? a : nullptr; // reject wrong-type aliasing
-}
+ParticleGraphAsset*       ContentManager::getParticleGraphMutable(HE::UUID id) { return lookupAssetMutable(m_handleToUUID, m_particleGraphAssets, id); }
 const AnimatorStateMachineAsset* ContentManager::getAnimatorStateMachine(HE::UUID id) const { return lookupAsset(m_handleToUUID, m_animatorStateMachineAssets, id); }
-AnimatorStateMachineAsset* ContentManager::getAnimatorStateMachineMutable(HE::UUID id)
-{
-	auto it = m_handleToUUID.find(id);
-	if (it == m_handleToUUID.end()) return nullptr;
-	AnimatorStateMachineAsset* a = m_animatorStateMachineAssets.get(it->second);
-	return (a && a->id == id) ? a : nullptr; // reject wrong-type aliasing
-}
+AnimatorStateMachineAsset* ContentManager::getAnimatorStateMachineMutable(HE::UUID id) { return lookupAssetMutable(m_handleToUUID, m_animatorStateMachineAssets, id); }
 const ShaderAsset*        ContentManager::getShader(HE::UUID id) const        { return lookupAsset(m_handleToUUID, m_shaderAssets, id); }
 const PrefabAsset*        ContentManager::getPrefab(HE::UUID id) const        { return lookupAsset(m_handleToUUID, m_prefabAssets, id); }
 const AnimationClipAsset*      ContentManager::getAnimationClip(HE::UUID id) const      { return lookupAsset(m_handleToUUID, m_animClipAssets,     id); }
 const PropertyAnimClipAsset*   ContentManager::getPropertyAnimClip(HE::UUID id) const   { return lookupAsset(m_handleToUUID, m_propAnimClipAssets, id); }
-
-MaterialAsset* ContentManager::getMaterialMutable(HE::UUID id)
-{
-	auto it = m_handleToUUID.find(id);
-	if (it == m_handleToUUID.end()) return nullptr;
-	MaterialAsset* a = m_materialAssets.get(it->second);
-	return (a && a->id == id) ? a : nullptr; // reject wrong-type aliasing
-}
+MaterialAsset*            ContentManager::getMaterialMutable(HE::UUID id)     { return lookupAssetMutable(m_handleToUUID, m_materialAssets, id); }
 
 bool ContentManager::setMaterialParam(HE::UUID id, const std::string& name,
                                       const float* values, int count)

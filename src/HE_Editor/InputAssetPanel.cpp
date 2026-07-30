@@ -1,11 +1,12 @@
 #include "InputAssetPanel.h"
 #include <algorithm>
 #include <cstdint>
-#include "EditorApplication.h"   // AppContext
-#include "HcClassList.h"         // HcEditorUtil::listAssets (action picker)
+#include "EditorApplication.h"    // AppContext
+#include "EditorAssetTypeCache.h" // shared, invalidatable path → AssetType sniff
+#include "EditorPanelState.h"     // shared per-tab state map
+#include "HcEditorUtil.h"         // HcEditorUtil::listAssets (action picker)
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
-#include <ContentManager/HAsset.h>
 #include <Application/InputAssets.h>
 #include <Types/Enums.h>
 #include <nlohmann/json.hpp>
@@ -14,7 +15,6 @@
 #include <SDL3/SDL.h>
 #include <cstring>
 #include <filesystem>
-#include <map>
 #include <string>
 #include <vector>
 
@@ -44,7 +44,7 @@ struct PanelState
 	// Mapping payload
 	std::vector<MapEntry> entries;
 };
-std::map<std::string, PanelState> g_states;
+AssetPanelState<PanelState> g_states;
 
 // ── "Press a key to bind" capture ───────────────────────────────────────────
 // At most one key field across all open tabs can be "listening" at a time.
@@ -74,15 +74,7 @@ void beginCapture(const std::string& assetPath, int entryIndex, int subIndex, Ca
 
 bool sniffType(const std::string& path, HE::AssetType type)
 {
-	static std::map<std::string, uint16_t> cache;
-	auto it = cache.find(path);
-	if (it == cache.end())
-	{
-		HAsset::Reader r;
-		cache[path] = r.open(path) ? r.assetType() : 0;
-		it = cache.find(path);
-	}
-	return it->second == static_cast<uint16_t>(type);
+	return EditorAssetTypeCache::is(path, type);
 }
 
 void decodeMapping(const std::string& json, std::vector<MapEntry>& out)
@@ -201,15 +193,13 @@ bool InputAssetPanel::isInputMappingAsset(const std::string& path)
 bool InputAssetPanel::isInputAsset(const std::string& path)
 { return isInputActionAsset(path) || isInputMappingAsset(path); }
 
-bool InputAssetPanel::isDirty(const std::string& path)
-{
-	auto it = g_states.find(path);
-	return it != g_states.end() && it->second.dirty;
-}
+bool InputAssetPanel::isDirty(const std::string& path) { return g_states.dirty(path); }
 
 void InputAssetPanel::forget(const std::string& path)
 {
-	g_states.erase(path);
+	g_states.forget(path);
+	// A key-capture aimed at the closing tab would otherwise stay armed and bind
+	// the next keypress into a state that no longer exists.
 	if (g_capture.assetPath == path) g_capture.kind = CaptureKind::None;
 }
 

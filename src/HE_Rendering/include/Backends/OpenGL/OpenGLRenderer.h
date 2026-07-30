@@ -8,6 +8,7 @@
 #include <HorizonRendering/RenderSorter.h>
 #include <HorizonRendering/RenderGraph.h>
 #include <HorizonRendering/CommandBuffer.h>
+#include <HorizonRendering/RenderConstants.h>
 #include <HorizonRendering/GiBvh.h>
 #include <Math/AABB.h>
 #include <Types/UUID.h>
@@ -94,8 +95,7 @@ private:
 		uint64_t frameIdx   = 0;
 		bool     pending    = false;                     // has un-reaped results
 	};
-	static constexpr int kGpuTimerRing = 4;
-	GpuTimerSlot  m_gpuSlots[kGpuTimerRing];
+	GpuTimerSlot  m_gpuSlots[HE::kGpuTimerRing];
 	bool          m_gpuTimerSupported   = false;  // false on Apple GL (unreliable)
 	bool          m_gpuTimerInit        = false;  // timestamp queries allocated
 	uint64_t      m_gpuFrameIdx         = 0;
@@ -154,6 +154,30 @@ private:
 	void CreateInstancedPipeline();
 	void UpdateSkyEnvCube(const glm::vec3& sunDir); // rebuild the IBL cubemap on sun move
 	void DrawScene(int width, int height);
+
+	// ── Per-frame scene lighting + CSM uniforms (one block, three programs) ──
+	// The unlit, instanced and skinned programs are all linked from the shared
+	// kUnlitFS text, so they declare byte-identical light/shadow uniforms and
+	// only the location integers differ. One location set per program + one
+	// writer, instead of three copies of the fill loop inside DrawScene.
+	struct SceneLightingLocs
+	{
+		int lightCount, lightPos, lightDir, lightColor, lightParams, cameraPos;
+		int shadowEnabled, shadowDebug, cascadeVP, cascadeSplits, cameraFwd, shadowMap;
+		int localShadowMap, localShadowVP;
+	};
+	// The per-frame shadow inputs the block needs (all DrawScene locals).
+	struct SceneShadowFrame
+	{
+		const float* cascadeVPData;  // kGLCsmCascades contiguous mat4 (GL clip space)
+		glm::vec4    cascadeSplits;  // xyz = far distance per cascade, w = count
+		glm::vec3    cameraFwd;      // world forward, for planar cascade selection
+		const float* localVPData;    // nLocalLayers contiguous mat4
+		int          nLocalLayers;
+		bool         shadows;
+		bool         localShadows;
+	};
+	void BindSceneLighting(const SceneLightingLocs& locs, const SceneShadowFrame& frame) const;
 	// (Re)creates the offscreen viewport FBO at the requested size.
 	void EnsureViewportTarget();
 	void DestroyViewportTarget();
@@ -421,7 +445,7 @@ private:
 	// backend's CSM (D3D/Vulkan still use the legacy single map).
 	unsigned int m_shadowFBO      = 0;
 	unsigned int m_shadowDepthTex = 0;   // GL_TEXTURE_2D_ARRAY, Depth24, one layer/cascade
-	int          m_shadowSize     = 2048;
+	int          m_shadowSize     = HE::kShadowMapResolution;
 	// Local (point/spot) shadow atlas: 2D depth ARRAY, one layer per spot view /
 	// point cube face (16 layers, see ShadowData::kMaxLocalShadowLayers).
 	unsigned int m_localShadowDepthTex = 0; // GL_TEXTURE_2D_ARRAY, Depth24
@@ -561,8 +585,8 @@ private:
 	int          m_bloomH        = 0;
 	// ── Low-res clouds (quarter-res cloud pre-pass; EnvironmentSettings.lowResClouds) ──
 	// Reuses m_skyProgram with uCloudPrepass=1 to raymarch clouds into m_cloudTex (rgb=L,
-	// a=T) at quarter res; the sky pass upsamples + composites it. Uses the previous
-	// frame's view/sun (1-frame lag, imperceptible) so the pre-pass needs no re-extract.
+	// a=T) at quarter res; the sky pass upsamples + composites it. Runs with the CURRENT
+	// camera (this backend draws the sky after extraction), so there is no 1-frame lag.
 	unsigned int m_cloudFBO = 0;
 	unsigned int m_cloudTex = 0;               // RGBA16F, quarter-res (L, T)
 	int          m_cloudW   = 0;
@@ -573,8 +597,6 @@ private:
 	int          m_uSkyRainAmount   = -1;
 	int          m_uSkyGodRays      = -1;
 	int          m_uSkyShootingStars = -1;
-	glm::mat4    m_lastInvViewProj = glm::mat4(1.0f); // (legacy; the cloud pre-pass now uses the current camera)
-	glm::vec3    m_lastSunDir      = glm::vec3(0.0f, 1.0f, 0.0f);
 	void         EnsureCloudFBO(int width, int height);
 	void         DestroyCloudFBO();
 	bool         m_bloomEnabled   = true;
@@ -653,23 +675,23 @@ private:
 		glm::vec4 baseColor{1.0f};      // probe one-bounce tint (GL-C)
 		int32_t   nodeOffset = 0, triOffset = 0, pad0 = 0, pad1 = 0;
 	};
-	GiBlasRange  BuildGiBlas(const HE::UUID& meshId); // CPU build from ContentManager data
-	void         UpdateGiAccel();                     // lazy BLAS append + per-frame instance upload
-	void         DestroyGiAccel();
+	GiBlasRange  BuildGIBlas(const HE::UUID& meshId); // CPU build from ContentManager data
+	void         UpdateGIAccel();                     // lazy BLAS append + per-frame instance upload
+	void         DestroyGIAccel();
 
 	// GL-B/GL-C: shadow-ray + probe passes. Pipelines are built lazily on the
 	// first GI-active frame (4.3 compute programs — never compiled on 4.1).
-	void         CreateGiPipelines();
-	void         EnsureGiShadowTargets(int width, int height);
-	void         DestroyGiShadowTargets();
-	void         EnsureGiProbeGrid();   // one-shot grid fit over the scene AABB
-	void         EnsureGiProbeAtlas();
-	void         DestroyGiProbeAtlas();
+	void         CreateGIPipelines();
+	void         EnsureGIShadowTargets(int width, int height);
+	void         DestroyGIShadowTargets();
+	void         EnsureGIProbeGrid();   // one-shot grid fit over the scene AABB
+	void         EnsureGIProbeAtlas();
+	void         DestroyGIProbeAtlas();
 	// Half-res G-buffer → compute shadow rays → temporal → blur. Returns the
 	// blurred mask texture (0 if unavailable). Uses THIS frame's extraction.
-	unsigned int RenderGiShadow(const CommandBuffer& cmds, int width, int height,
+	unsigned int RenderGIShadow(const CommandBuffer& cmds, int width, int height,
 	                            const glm::mat4& viewProj);
-	void         DispatchGiProbeUpdate();
+	void         DispatchGIProbeUpdate();
 
 	static constexpr float kGiProbeSpacing     = 4.0f; // metres between probes
 	static constexpr int   kGiMaxProbesPerAxis = 10;   // grid clamp (matches Metal)
@@ -699,14 +721,14 @@ private:
 	bool         m_giProbeGridBuilt = false;
 	unsigned int m_giIrrAtlas = 0, m_giVisAtlas = 0;
 	// Per-program GI uniform locations for the three programs sharing kUnlitFS.
-	struct GiSceneLocs
+	struct GISceneLocs
 	{
 		int enabled = -1, shadowTex = -1, irrTex = -1, visTex = -1, localTex = -1;
 		int gridOrigin = -1, gridCounts = -1, intensity = -1;
 	};
-	GiSceneLocs  m_giLocsUnlit, m_giLocsSkinned, m_giLocsInstanced;
-	GiSceneLocs  FetchGiSceneLocs(unsigned int program) const;
-	void         PushGiSceneUniforms(const GiSceneLocs& locs, bool active);
+	GISceneLocs  m_giLocsUnlit, m_giLocsSkinned, m_giLocsInstanced;
+	GISceneLocs  FetchGISceneLocs(unsigned int program) const;
+	void         PushGISceneUniforms(const GISceneLocs& locs, bool active);
 	std::unordered_map<HE::UUID, GiBlasRange> m_giBlasCache;
 	std::vector<HE::GiBvhNode>     m_giNodesCpu;      // concatenated BLAS nodes (all meshes)
 	std::vector<HE::GiBvhTriangle> m_giTrisCpu;       // concatenated BLAS triangles
