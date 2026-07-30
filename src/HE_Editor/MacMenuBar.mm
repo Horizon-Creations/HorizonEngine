@@ -115,7 +115,10 @@ void install()
 		// on click, never on the key-equivalent, which is why ⌘Q did nothing. The
 		// editor's unsaved-changes guard keys off SDL_EVENT_QUIT (see
 		// EditorApplication::OnEvent), so the save prompt still appears; this does
-		// not bypass it.
+		// not bypass it. That guard covers a dirty scene AND dirty asset tabs —
+		// this menu item is the only quit path on macOS (the guarded in-window
+		// File ▸ Exit is not drawn while the native menu is up), so anything the
+		// guard does not test is silently unrecoverable here.
 		NSMenuItem* quit = [[NSMenuItem alloc]
 			initWithTitle:@"Quit HorizonEditor"
 			       action:@selector(terminate:) keyEquivalent:@"q"];

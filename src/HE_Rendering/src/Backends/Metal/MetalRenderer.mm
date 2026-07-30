@@ -4,6 +4,8 @@
 #include <HorizonRendering/ParticleShaderTemplates.h>
 #include <HorizonRendering/ClipSpace.h>       // HE::kMetalClipFix
 #include <HorizonRendering/LightPacking.h>    // HE::BuildPackedLightArray / BuildMaskedLocalLights
+#include <HorizonRendering/WeatherParticleSeed.h> // shared rain/snow pool seeding
+#include <HorizonRendering/SkyEnvBake.h>      // shared CPU sky bake for the IBL ambient cubemap
 #include <HorizonRendering/SkyFrameParams.h>  // HE::SkyFrameParams / BuildSkyFrameParams (folds in CloudWindVector)
 #include <HorizonRendering/SkyNoise3D.h>      // HE::BuildSkyNoise3D
 #include <HorizonRendering/SsaoKernel.h>      // HE::BuildSSAOKernel / BuildSSAONoise
@@ -149,124 +151,11 @@ void MetalRenderer::SamplePoint(void* encoderPtr, const char* name)
 	}
 }
 
-// CPU port of the shader skyColor(dir,sunDir) — bakes the image-based-ambient
-// cubemap so fragmentMain samples it once instead of evaluating skyColor twice
-// per lit pixel. Mirrors kSkyFuncMSL / the GL SkyColorCPU exactly.
-static glm::vec2 AtmoRaySphereCPU(glm::vec3 ro, glm::vec3 rd, float R)
-{
-	float b = glm::dot(ro, rd);
-	float c = glm::dot(ro, ro) - R * R;
-	float d = b * b - c;
-	if (d < 0.0f) return glm::vec2(1.0e9f, -1.0e9f);
-	d = std::sqrt(d);
-	return glm::vec2(-b - d, -b + d);
-}
-// Mirror of the shader atmoScatter() — see kSkyFuncMSL for the model notes.
-static glm::vec3 AtmoScatterCPU(glm::vec3 dir, glm::vec3 sunDir)
-{
-	const float Rg = 6360.0e3f, Ra = 6440.0e3f;
-	const glm::vec3 bR(5.802e-6f, 13.558e-6f, 33.1e-6f);
-	const float bM = 3.996e-6f;
-	const glm::vec3 bO(0.650e-6f, 1.881e-6f, 0.085e-6f);
-	const float HR = 8500.0f, HM = 1200.0f;
-	glm::vec3 ro(0.0f, Rg + 200.0f, 0.0f);
-	glm::vec2 tA = AtmoRaySphereCPU(ro, dir, Ra);
-	if (tA.y <= 0.0f) return glm::vec3(0.0f);
-	float t0 = std::max(tA.x, 0.0f), t1 = tA.y;
-	glm::vec2 tG = AtmoRaySphereCPU(ro, dir, Rg);
-	if (tG.x > 0.0f) t1 = std::min(t1, tG.x);
-	float ds = (t1 - t0) / 12.0f;
-	float mu = glm::dot(dir, sunDir);
-	float phR = 0.05968310f * (1.0f + mu * mu);
-	const float g = 0.76f, g2 = g * g;
-	float phM = 0.11936620f * ((1.0f - g2) * (1.0f + mu * mu)) /
-	            ((2.0f + g2) * std::pow(1.0f + g2 - 2.0f * g * mu, 1.5f));
-	glm::vec3 sumR(0.0f), sumM(0.0f);
-	float odR = 0.0f, odM = 0.0f, odO = 0.0f;
-	for (int i = 0; i < 12; ++i)
-	{
-		glm::vec3 p = ro + dir * (t0 + (float(i) + 0.5f) * ds);
-		float hgt = glm::length(p) - Rg;
-		float dR  = std::exp(-hgt / HR) * ds;
-		float dM  = std::exp(-hgt / HM) * ds;
-		float dO  = std::max(0.0f, 1.0f - std::abs(hgt - 25.0e3f) / 15.0e3f) * ds;
-		odR += dR; odM += dM; odO += dO;
-		if (AtmoRaySphereCPU(p, sunDir, Rg).x > 0.0f) continue;
-		float sl = AtmoRaySphereCPU(p, sunDir, Ra).y * 0.2f;
-		float sR = 0.0f, sM = 0.0f, sO = 0.0f;
-		for (int j = 0; j < 5; ++j)
-		{
-			glm::vec3 q = p + sunDir * ((float(j) + 0.5f) * sl);
-			float hq = glm::length(q) - Rg;
-			sR += std::exp(-hq / HR) * sl;
-			sM += std::exp(-hq / HM) * sl;
-			sO += std::max(0.0f, 1.0f - std::abs(hq - 25.0e3f) / 15.0e3f) * sl;
-		}
-		glm::vec3 tau = bR * (odR + sR) + (bM * 1.11f) * (odM + sM) + bO * (odO + sO);
-		glm::vec3 tr  = glm::exp(-tau);
-		sumR += tr * dR;
-		sumM += tr * dM;
-	}
-	glm::vec3 L = (sumR * bR * phR + sumM * bM * phM) * 20.0f;
-	// Fake multiple-scatter in-fill — mirrors the shader atmoScatter().
-	glm::vec3 Tcam = glm::exp(-(bR * odR + (bM * 1.11f) * odM + bO * odO));
-	L += (glm::vec3(1.0f) - Tcam) * glm::vec3(0.30f, 0.42f, 0.60f) * (0.35f * glm::smoothstep(0.0f, 0.35f, sunDir.y));
-	return L;
-}
-static glm::vec3 SkyColorCPU(glm::vec3 dir, glm::vec3 sunDir)
-{
-	dir = glm::normalize(dir); sunDir = glm::normalize(sunDir);
-	float sunY = glm::clamp(sunDir.y, -0.3f, 1.0f);
-	float day  = glm::smoothstep(-0.10f, 0.10f, sunY);
-	float dusk = glm::smoothstep(-0.14f, 0.04f, sunY) * (1.0f - glm::smoothstep(0.04f, 0.26f, sunY));
-	float toNight = 1.0f - glm::smoothstep(-0.24f, -0.06f, sunY);
-	// Physically-based base sky (mirrors the shader), plus the deep-night floor.
-	glm::vec3 sky = AtmoScatterCPU(glm::normalize(glm::vec3(dir.x, std::max(dir.y, 0.004f), dir.z)), sunDir); // horizon clamp (see shader)
-	float h = glm::clamp(dir.y, 0.0f, 1.0f);
-	sky += glm::mix(glm::vec3(0.006f,0.009f,0.024f), glm::vec3(0.003f,0.005f,0.015f), h) * toNight;
-	glm::vec3 ground = glm::mix(glm::vec3(0.02f,0.02f,0.03f), glm::vec3(0.24f,0.23f,0.21f), day);
-	sky = glm::mix(sky, ground, glm::smoothstep(0.0f, -0.12f, dir.y));
-	// CPU mirror deliberately keeps a sun DISK (IBL ambient carries sun energy).
-	glm::vec3 sunTint = glm::mix(glm::vec3(1.0f,0.42f,0.20f), glm::vec3(1.0f,0.96f,0.88f), glm::smoothstep(0.0f,0.25f,sunY));
-	float s = std::max(glm::dot(dir, sunDir), 0.0f);
-	float sunVis = std::max(day, dusk);
-	sky += sunTint * (std::pow(s,1800.0f) * 14.0f * day);
-	sky += sunTint * (std::pow(s,180.0f)  * 2.2f * sunVis);
-	sky += sunTint * (std::pow(s,22.0f)   * 0.7f * sunVis);
-	float night = 1.0f - day;
-	glm::vec3 moonDir = glm::normalize(glm::vec3(-sunDir.x, -sunDir.y, sunDir.z));
-	float mdot = std::max(glm::dot(dir, moonDir), 0.0f);
-	sky += glm::vec3(0.80f,0.86f,1.00f) * (std::pow(mdot,60.0f) * 0.05f * night);
-	sky += glm::vec3(0.015f,0.018f,0.030f) * night;
-	return sky;
-}
-
-// One cube face (slice order +X,-X,+Y,-Y,+Z,-Z) of the IBL env map as tightly
-// packed RGBA32F. Metal cube maps use the same face/texel convention as GL, so
-// no axis flip — verified lossless (max 1/255 vs per-pixel skyColor).
-static std::vector<float> BuildSkyEnvFace(int faceN, int f, const glm::vec3& sunDir)
-{
-	std::vector<float> px(static_cast<size_t>(faceN) * faceN * 4);
-	for (int t = 0; t < faceN; ++t)
-		for (int s = 0; s < faceN; ++s)
-		{
-			float u = (s + 0.5f) / faceN * 2.0f - 1.0f;
-			float v = (t + 0.5f) / faceN * 2.0f - 1.0f;
-			glm::vec3 d;
-			switch (f) {
-				case 0: d = glm::vec3( 1.0f, -v, -u); break; // +X
-				case 1: d = glm::vec3(-1.0f, -v,  u); break; // -X
-				case 2: d = glm::vec3( u,  1.0f,  v); break; // +Y
-				case 3: d = glm::vec3( u, -1.0f, -v); break; // -Y
-				case 4: d = glm::vec3( u, -v,  1.0f); break; // +Z
-				default:d = glm::vec3(-u, -v, -1.0f); break; // -Z
-			}
-			glm::vec3 c = SkyColorCPU(glm::normalize(d), sunDir);
-			size_t i = (static_cast<size_t>(t) * faceN + s) * 4;
-			px[i+0] = c.r; px[i+1] = c.g; px[i+2] = c.b; px[i+3] = 1.0f;
-		}
-	return px;
-}
+// The CPU port of the shader skyColor(dir,sunDir) that bakes the image-based-
+// ambient cubemap — 88 lines that used to be duplicated verbatim in the GL
+// backend — now lives in HorizonRendering/SkyEnvBake.h. Both backends call
+// HE::BuildSkyEnvFace / HE::SkyColorCPU from there; the one caller in this file
+// is MetalRenderer::UpdateSkyEnvCube.
 
 // Swapchain / depth formats shared by every window target, the scene
 // pipeline and the ImGui pass descriptor — they must all match.
@@ -4263,7 +4152,7 @@ void MetalRenderer::CreateScenePipeline()
 		}
 
 		// Empty image-based-ambient cubemap (RGBA32F); filled per frame from the
-		// analytic skyColor (SkyColorCPU) when the sun direction changes. The
+		// analytic skyColor (HE::SkyColorCPU) when the sun direction changes. The
 		// existing clamp+linear sampler (m_linearSampler) samples it.
 		MTLTextureDescriptor* envDesc = [MTLTextureDescriptor
 			textureCubeDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float size:128 mipmapped:NO];
@@ -7309,22 +7198,9 @@ void MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height)
 		matLight.camPos[1]   = m_renderWorld.camera.position.y;
 		matLight.camPos[2]   = m_renderWorld.camera.position.z;
 		// Full light window for heLitP() — same first-8 order as the built-in
-		// PBR shaders (keep the three backend copies of this fill in sync).
-		{{
-			const int lc = std::min(static_cast<int>(m_renderWorld.lights.size()), 8);
-			for (int li = 0; li < lc; ++li)
-			{{
-				const LightData& ld = m_renderWorld.lights[li];
-				matLight.lightPos[li][0] = ld.position.x;  matLight.lightPos[li][1] = ld.position.y;
-				matLight.lightPos[li][2] = ld.position.z;  matLight.lightPos[li][3] = static_cast<float>(ld.type);
-				matLight.lightDir[li][0] = ld.direction.x; matLight.lightDir[li][1] = ld.direction.y;
-				matLight.lightDir[li][2] = ld.direction.z; matLight.lightDir[li][3] = ld.spotAngleCos;
-				matLight.lightColor[li][0] = ld.color.r;   matLight.lightColor[li][1] = ld.color.g;
-				matLight.lightColor[li][2] = ld.color.b;   matLight.lightColor[li][3] = ld.intensity;
-				matLight.lightParams[li][0] = ld.range;
-			}}
-			matLight.counts[0] = static_cast<float>(lc);
-		}}
+		// PBR shaders. Shared fill (HE::FillMaterialLightWindow); the UI pass has
+		// no local shadow atlas, so it passes false.
+		HE::FillMaterialLightWindow(m_renderWorld, matLight, /*localShadowsActive=*/false);
 	}
 
 	// The uiVertex's repurposed U block (see MaterialShaderLibrary::uiVertex).
@@ -7465,7 +7341,7 @@ void MetalRenderer::UpdateSkyEnvCube(const glm::vec3& sunDir)
 	constexpr int N = 128;
 	for (int f = 0; f < 6; ++f)
 	{
-		const std::vector<float> face = BuildSkyEnvFace(N, f, sunDir);
+		const std::vector<float> face = HE::BuildSkyEnvFace(N, f, sunDir);
 		[cube replaceRegion:MTLRegionMake2D(0, 0, N, N) mipmapLevel:0 slice:f
 		          withBytes:face.data() bytesPerRow:N * 4 * sizeof(float) bytesPerImage:0];
 	}
@@ -7815,26 +7691,11 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height)
 		matLight.giParams[1] = static_cast<float>(height);
 		matLight.giParams[2] = giActive ? 1.0f : 0.0f;
 		// Full light window for heLitP() — same first-8 order as the built-in
-		// PBR shaders (keep the three backend copies of this fill in sync).
-		{{
-			const int lc = std::min(static_cast<int>(m_renderWorld.lights.size()), 8);
-			for (int li = 0; li < lc; ++li)
-			{{
-				const LightData& ld = m_renderWorld.lights[li];
-				matLight.lightPos[li][0] = ld.position.x;  matLight.lightPos[li][1] = ld.position.y;
-				matLight.lightPos[li][2] = ld.position.z;  matLight.lightPos[li][3] = static_cast<float>(ld.type);
-				matLight.lightDir[li][0] = ld.direction.x; matLight.lightDir[li][1] = ld.direction.y;
-				matLight.lightDir[li][2] = ld.direction.z; matLight.lightDir[li][3] = ld.spotAngleCos;
-				matLight.lightColor[li][0] = ld.color.r;   matLight.lightColor[li][1] = ld.color.g;
-				matLight.lightColor[li][2] = ld.color.b;   matLight.lightColor[li][3] = ld.intensity;
-				matLight.lightParams[li][0] = ld.range;
-				// y = local shadow atlas base layer + 1 (0 = none) — the +1
-				// keeps zero-initialised Lighting fills (previews, UI) safe.
-				matLight.lightParams[li][1] = (m_localShadowTex && ld.shadowLayer >= 0)
-					? static_cast<float>(ld.shadowLayer + 1) : 0.0f;
-			}}
-			matLight.counts[0] = static_cast<float>(lc);
-		}}
+		// PBR shaders. Shared fill (HE::FillMaterialLightWindow); it also writes
+		// the per-light atlas layer into lightParams[i].y when the local shadow
+		// texture is bound this frame.
+		HE::FillMaterialLightWindow(m_renderWorld, matLight,
+		                            /*localShadowsActive=*/m_localShadowTex != nullptr);
 		// Local (point/spot) shadow atlas for heLitP — the same matrices the
 		// built-in shaders sample with, Metal depth remap AND top-left UV origin
 		// pre-baked (uvFlipY * kMetalClipFix, exactly like csmVP below) so the
@@ -9011,7 +8872,8 @@ void MetalRenderer::EnsureParticleBuffer(int count)
 	{
 		id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
 		if (m_particleBuffer) { CFBridgingRelease(m_particleBuffer); m_particleBuffer = nullptr; }
-		id<MTLBuffer> buf = [device newBufferWithLength:(NSUInteger)count * 8 * sizeof(float)
+		// Record width comes from the shared seeder so the two cannot drift apart.
+		id<MTLBuffer> buf = [device newBufferWithLength:(NSUInteger)count * HE::kWeatherParticleFloats * sizeof(float)
 		                                       options:MTLResourceStorageModeShared];
 		m_particleBuffer = (void*)CFBridgingRetain(buf);
 	}
@@ -9021,27 +8883,13 @@ void MetalRenderer::EnsureParticleBuffer(int count)
 
 void MetalRenderer::SeedParticleBuffer(int count)
 {
-	// Pre-distribute the pool down the fall column (same scheme as the GL backend):
-	// seed = (i+0.5)/count so step(seed,coverage) keeps exactly a `coverage` fraction.
-	const GpuParticleParams& p = m_gpuParticleParams;
+	// Shared with OpenGL (HE::SeedWeatherParticles) — the RNG, the (i+0.5)/count
+	// spread and the wind/life maths are a cross-backend contract, only the lane
+	// order differs. This backend's compute kernel reads two float4s:
+	// p0 = pos.xyz + life, p1 = vel.xyz + seed.
 	float* d = (float*)[(__bridge id<MTLBuffer>)m_particleBuffer contents];
-	const float top = p.cameraPos.y + p.boxTop;
-	uint32_t rng = 0x9E3779B9u;
-	auto frand = [&]() { rng = rng * 1664525u + 1013904223u; return (rng >> 8) * (1.0f / 16777216.0f); };
-	for (int i = 0; i < count; ++i)
-	{
-		const float seed = (i + 0.5f) / static_cast<float>(count);
-		const float y    = p.groundLevel + frand() * std::max(top - p.groundLevel, 1.0f);
-		float* e = &d[static_cast<size_t>(i) * 8];
-		e[0] = p.cameraPos.x + (frand() * 2.0f - 1.0f) * p.boxHalf;  // p0 = pos.xyz, life
-		e[1] = y;
-		e[2] = p.cameraPos.z + (frand() * 2.0f - 1.0f) * p.boxHalf;
-		e[3] = (y - p.groundLevel) / std::max(p.fallSpeed, 0.01f);
-		e[4] = p.windVec.x * (p.isSnow ? 0.3f : 1.2f);              // p1 = vel.xyz, seed
-		e[5] = -p.fallSpeed;
-		e[6] = p.windVec.z * (p.isSnow ? 0.3f : 1.2f);
-		e[7] = seed;
-	}
+	HE::SeedWeatherParticles(m_gpuParticleParams, count,
+	                         HE::WeatherParticleLayout::PosLifeVelSeed, d);
 	m_particleSeeded = true;
 }
 

@@ -265,9 +265,15 @@ PyObject* py_hideCursor(PyObject*, PyObject*)
 // C shim. Args after the id are read per the entry's param types (a vec2 = 2
 // numbers, a Color = 4 — the same spread as the hand-written bindings); results
 // spread the same way (1 → scalar, more → tuple). A Python bootstrap (built from
-// the registry) wraps each entry as horizon.<group>.<fn>. First group: the pure
-// Math library. Gameplay groups keep their ergonomic shims until ScriptApi is
-// inverted onto HE::api.
+// the registry) wraps each entry as horizon.<group>.<fn>. WHICH namespaces arrive
+// here is decided by HE::api::isScriptGroup, not by this file — it started as math
+// only and has grown since; read that list, not this comment, for the current
+// surface (Lua and Python MUST expose the identical set).
+// The FLAT gameplay functions above keep their ergonomic hand-written shims.
+// Routing them through here instead would change their script-visible arity (a
+// packed vec3 spreads as 4 numbers on this path), i.e. it breaks existing user
+// scripts — a migration, not a cleanup, deliberately deferred:
+// docs/rework-2026-07-deferrals.md §1.
 HorizonCode::Value pyReadValue(PyObject* args, Py_ssize_t& idx, HorizonCode::PinType t)
 {
 	using P = HorizonCode::PinType; using V = HorizonCode::Value;

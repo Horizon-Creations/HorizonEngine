@@ -615,14 +615,6 @@ void render(AppContext& ctx)
 	{
 		if (componentHeader("Material", true, removed))
 		{
-			// Resolve a Content-Browser drag (absolute path) to a content- or
-			// engine-root-relative path, empty if it lives outside both roots.
-			auto toRelative = [&](const char* absPath) -> std::string
-			{
-				if (!ctx.contentManager) return {};
-				return ctx.contentManager->toContentRelativePath(absPath);
-			};
-
 			// ── Material asset slot — drop a material .hasset here ────────────
 			// Assigning also drops the renderer's cached pipeline for the NEW
 			// material; clearing only needs the component re-resolved.
@@ -675,18 +667,16 @@ void render(AppContext& ctx)
 						mat->texturePaths[i] = tbuf;
 					if (ImGui::IsItemDeactivatedAfterEdit() && ctx.renderer)
 						ctx.renderer->InvalidateMaterial(m->materialAssetId);
-					if (ImGui::BeginDragDropTarget())
+					// Path-valued slot (the target is a string, not a UUID), so only the
+					// drop RESOLUTION is shared — assetDropSlot draws a UUID slot and does
+					// not fit here. Going through acceptAssetDrop also adds the asset-type
+					// check this copy never had: it used to write ANY dropped asset path
+					// (a mesh, an audio clip, a scene) into a texture slot, silently.
+					if (const EditorWidgets::AssetDrop drop =
+							EditorWidgets::acceptAssetDrop(ctx, HE::AssetType::Texture, "texture"))
 					{
-						if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_ASSET_PATH"))
-						{
-							const std::string rel = toRelative(static_cast<const char*>(p->Data));
-							if (!rel.empty())
-							{
-								mat->texturePaths[i] = rel;
-								if (ctx.renderer) ctx.renderer->InvalidateMaterial(m->materialAssetId);
-							}
-						}
-						ImGui::EndDragDropTarget();
+						mat->texturePaths[i] = drop.relPath;
+						if (ctx.renderer) ctx.renderer->InvalidateMaterial(m->materialAssetId);
 					}
 					ImGui::SameLine();
 					if (ImGui::SmallButton("X")) removeSlot = static_cast<int>(i);

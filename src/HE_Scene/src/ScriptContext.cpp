@@ -383,9 +383,15 @@ static int lua_horizon_hideCursor(lua_State* L)
 // group of engine functions is exposed by iterating the registry — no per-function
 // C shim. The Value ABI carries a vec2 as 2 numbers and a Color as 4 (the same
 // spread the hand-written bindings use), so scalars/vectors read and return the
-// familiar way. First registry-driven group: the pure Math library (horizon.math.*,
-// which no frontend could reach before). Gameplay groups keep their ergonomic
-// hand-written bindings until ScriptApi is inverted onto HE::api.
+// familiar way. WHICH namespaces arrive here is decided by HE::api::isScriptGroup,
+// not by this file — it started as math only and has grown since; read that list,
+// not this comment, for the current surface.
+// The FLAT gameplay functions above (horizon.setPosition, horizon.setUIText, the
+// widget calls, …) keep their ergonomic hand-written shims. Routing them through
+// here instead would change their script-visible arity (a packed vec3 spreads as 4
+// numbers on this path), i.e. it breaks existing user scripts — so it is a
+// migration, not a cleanup, and is deliberately deferred:
+// docs/rework-2026-07-deferrals.md §1.
 
 static HorizonCode::Value luaReadValue(lua_State* L, int& idx, HorizonCode::PinType t)
 {

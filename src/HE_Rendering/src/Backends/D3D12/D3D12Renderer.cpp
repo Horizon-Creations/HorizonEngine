@@ -19,7 +19,7 @@
 // so the shared versions are what keeps GL == Metal == Vulkan == D3D.
 #include <HorizonRendering/SkyNoise3D.h>      // CPU sky/cloud noise volume bake
 #include <HorizonRendering/SsaoKernel.h>      // SSAO sample kernel + rotation noise
-#include <HorizonRendering/SkyFrameParams.h>  // cloud wind vector
+#include <HorizonRendering/SkyFrameParams.h>  // HE::BuildSkyFrameParams (folds in the cloud wind vector)
 #include <HorizonRendering/LightPacking.h>    // GPU light window + shadow-mask lights
 #include <HorizonRendering/ClipSpace.h>       // GL depth (-1..1) → D3D depth (0..1)
 #include <HorizonRendering/RenderConstants.h> // shadow-map size
@@ -1737,22 +1737,28 @@ struct D3D12RendererImpl
         if (!env.skyEnabled) return; // no Sky entity → leave the cleared background
         auto* pso12 = usingHDR ? skyHdrPso.Get() : (skyLdrPso ? skyLdrPso.Get() : nullptr);
         if (!pso12) return;
+        // Translate the environment through the SHARED sky-constants builder
+        // instead of hand-assigning fields (which is how D3D12 previously ended up
+        // with +cos where GL/Metal have -cos, drifting the clouds 180° the wrong
+        // way). SkyCB is a small subset of SkyFrameParams, so read the named
+        // fields out — NOT a memcpy: the layouts differ.
+        HE::SkyFrameInputs skyIn;
+        skyIn.invViewProj    = invVP;
+        skyIn.sunDir         = sunDir;
+        skyIn.time           = m_wallTime;
+        skyIn.hasMoonTexture = moonTex12 ? true : false; // ComPtr → contextual bool
+        const HE::SkyFrameParams sp = HE::BuildSkyFrameParams(env, skyIn);
         SkyCB cb{};
-        cb.invViewProj = invVP;
-        cb.sunDir    = sunDir;       cb.timeOfDay     = env.timeOfDay;
-        cb.sunColor  = env.sunColor; cb.cloudCoverage = env.cloudCoverage;
-        // Cloud drift, world-units/sec (shared with every backend). BEHAVIOUR
-        // CHANGE: the local copy this replaced had +cos in Z where GL/Metal have
-        // -cos, so D3D12's clouds drifted 180° the wrong way (south instead of
-        // north at windDirection = 0).
-        cb.wind      = HE::CloudWindVector(env);
-        cb.time      = m_wallTime;
-        cb.auroraColor  = env.auroraColor; cb.aurora    = env.auroraIntensity;
-        cb.milkyWay     = env.milkyWayIntensity;
-        cb.flash        = env.flash;
-        cb.hasMoonTex   = moonTex12 ? 1 : 0;
-        cb.nebula       = env.nebulaIntensity;
-        cb.nebulaColor  = env.nebulaColor;
+        cb.invViewProj  = sp.invViewProj;
+        cb.sunDir       = glm::vec3(sp.sunDir);      cb.timeOfDay     = sp.params.x;
+        cb.sunColor     = glm::vec3(sp.sunColor);    cb.cloudCoverage = sp.params.y;
+        cb.wind         = glm::vec3(sp.wind);        cb.time          = sp.params.z;
+        cb.auroraColor  = glm::vec3(sp.auroraColor); cb.aurora        = sp.params.w;
+        cb.milkyWay     = sp.auroraColor.w;
+        cb.flash        = sp.wind.w;
+        cb.hasMoonTex   = sp.sunDir.w > 0.5f ? 1 : 0;  // sunDir.w is the 0/1 has-moon flag
+        cb.nebulaColor  = glm::vec3(sp.nebulaColor);
+        cb.nebula       = sp.nebulaColor.w;
         if (skyCBufPtr[fi])
             std::memcpy(skyCBufPtr[fi], &cb, sizeof(cb));
 
@@ -6075,22 +6081,10 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         lit.camPos[1] = p.m_renderWorld.camera.position.y;
         lit.camPos[2] = p.m_renderWorld.camera.position.z;
         // Full light window for heLitP() — same first-8 order as the built-in
-        // shaders (keep the backend copies of this fill in sync).
-        {
-            const int lc = std::min(static_cast<int>(p.m_renderWorld.lights.size()), 8);
-            for (int li = 0; li < lc; ++li)
-            {
-                const LightData& ld = p.m_renderWorld.lights[li];
-                lit.lightPos[li][0] = ld.position.x;  lit.lightPos[li][1] = ld.position.y;
-                lit.lightPos[li][2] = ld.position.z;  lit.lightPos[li][3] = static_cast<float>(ld.type);
-                lit.lightDir[li][0] = ld.direction.x; lit.lightDir[li][1] = ld.direction.y;
-                lit.lightDir[li][2] = ld.direction.z; lit.lightDir[li][3] = ld.spotAngleCos;
-                lit.lightColor[li][0] = ld.color.r;   lit.lightColor[li][1] = ld.color.g;
-                lit.lightColor[li][2] = ld.color.b;   lit.lightColor[li][3] = ld.intensity;
-                lit.lightParams[li][0] = ld.range;
-            }
-            lit.counts[0] = static_cast<float>(lc);
-        }
+        // shaders. Shared fill (HE::FillMaterialLightWindow); D3D12 has no local
+        // (point/spot) shadow atlas yet, so it passes false and lightParams[i].y
+        // stays 0 = "casts no local shadow".
+        HE::FillMaterialLightWindow(p.m_renderWorld, lit, /*localShadowsActive=*/false);
         lit.giParams[0] = static_cast<float>(width);
         lit.giParams[1] = static_cast<float>(height);
         lit.giParams[2] = giActive ? 1.0f : 0.0f;
@@ -6339,7 +6333,12 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 if (p.m_matShaderLib.resolveShaders(*m_contentManager, dc.materialAssetId,
                                                     matHash, matFrag, matVertBody))
                 {
-                    const bool matTransp = dc.opacity < 0.999f;
+                    // Transparent graph materials get a blend-on / depth-write-off PSO
+                    // variant. MUST use the same predicate the opaque/blended partition
+                    // above used, or a draw lands in the blended pass with a
+                    // depth-writing PSO (hence RenderSorter::isTransparent, tint alpha
+                    // included, not a bare dc.opacity test).
+                    const bool matTransp = RenderSorter::isTransparent(dc);
                     ID3D12PipelineState* matPso = p.GetOrBuildMaterialPSO(matHash, matFrag,
                                                                           matVertBody, p.usingHDR, matTransp);
                     if (matPso && p.m_matDrawCursor[p.frameIndex] < D3D12RendererImpl::k_matMaxDraws)

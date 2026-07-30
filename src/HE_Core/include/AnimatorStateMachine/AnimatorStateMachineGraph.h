@@ -24,6 +24,28 @@ namespace HE
 
 enum class TransitionOp : uint8_t { Greater = 0, Less = 1, Equal = 2 };
 
+// A saved `op` is a raw int, and two JSON readers parse it: animatorStateMachineFromJson
+// (the asset's own JSON) and SceneSerializer's legacy inline-component migration path
+// (user .hescene JSON, pre-asset format). A file
+// from a newer editor — or a hand-edit — can name an operator this build does not
+// have; casting it blind produces a TransitionOp with no valid enumerator, which
+// AnimationStateMachineSystem then switch()es on — an out-of-range comparison
+// silently deciding a transition. Unknown ops fall back to the field's own default
+// (Greater), matching what an absent key does.
+// It lives HERE, next to the enum, and not file-local in the .cpp, because that is
+// exactly how the second reader ended up without it: the guard was written for
+// hand-edited files but only one of the two paths could see it.
+constexpr TransitionOp transitionOpFromInt(int v)
+{
+    switch (v)
+    {
+        case (int)TransitionOp::Greater: return TransitionOp::Greater;
+        case (int)TransitionOp::Less:    return TransitionOp::Less;
+        case (int)TransitionOp::Equal:   return TransitionOp::Equal;
+        default:                         return TransitionOp::Greater;
+    }
+}
+
 struct AnimationState
 {
     int         id = 0; // stable id for the GraphEditor canvas (0 = unassigned)

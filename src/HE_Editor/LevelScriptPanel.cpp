@@ -19,7 +19,6 @@
 #include <ContentManager/HAsset.h>
 #include <Application/InputAssets.h>  // shared Input.<Action>.* event naming
 #include <Types/Enums.h>
-#include <filesystem>
 #include <map>
 #include <imgui.h>
 #include <misc/cpp/imgui_stdlib.h>
@@ -171,6 +170,12 @@ const HGH::MenuOpts kMenus = {
 };
 
 // ── Left sidebar: variables + functions + details ─────────────────────────────
+// Deliberately NOT shared with the widget editor's drawGraphVariables: only the
+// type label is (HcGraphHost::variableTypeLabel). The two lists agree on what a
+// variable IS but not on how it is presented — this one puts the type in the row
+// label and drags a "HE_LSGRAPH_VAR" payload, the widget one puts the type in a
+// trailing TextDisabled + tooltip, drags "HE_UIWGRAPH_VAR", and leads with a UI
+// element browser that has no counterpart here.
 
 void drawVariables(HC::Graph& graph, bool& edited)
 {
@@ -179,11 +184,7 @@ void drawVariables(HC::Graph& graph, bool& edited)
 	auto varRow = [&](const HC::Variable& v)
 	{
 		ImGui::PushID(v.name.c_str());
-		// Object variables show their class name as the type, not a bare "Object".
-		const std::string typeStr = ((v.type == PT::Ref && !v.className.empty())
-			? std::filesystem::path(v.className).stem().string()
-			: std::string(HGH::pinTypeName(v.type))) + (v.isArray ? "[]" : "");
-		const std::string label = v.name + "  (" + typeStr + ")";
+		const std::string label = v.name + "  (" + HGH::variableTypeLabel(v) + ")";
 		if (ImGui::Selectable(label.c_str(), g.selectedVar == v.name))
 		{
 			g.selectedVar = v.name;
@@ -277,6 +278,15 @@ void drawFunctions(HC::Graph& graph, bool& edited)
 }
 
 // Detail editor for the selected variable.
+//
+// STILL DUPLICATED, knowingly: the widget editor has a near-identical copy in
+// UIEditorPanel::drawGraphNodeDetails (its "no node selected but a variable is"
+// branch). Unlike the node-detail rows, this one cannot go through
+// HcGraphHost::Host as it stands — it needs three pieces of per-host scratch
+// state the Host does not model (the name-edit buffer, which variable that
+// buffer belongs to, and the host's selected-variable name), and inventing
+// out-params for them would trade one duplication for a worse interface.
+// Fixing it properly means giving Host a small "selection" block first.
 void drawVariableDetails(HC::Graph& graph, ContentManager* content, bool& edited)
 {
 	HC::Variable* v = graph.findVariable(g.selectedVar);
@@ -400,6 +410,15 @@ void drawVariableDetails(HC::Graph& graph, ContentManager* content, bool& edited
 }
 
 // Detail editor for the selected node.
+//
+// The rows that read the same in every HorizonCode frontend (the Const* literals,
+// the array element-type picker, Get/Set Variable, Function Return, Call/Get/Set
+// External, Create Widget/Object, Engine Call) come from HcGraphHost. What is
+// still spelled out below is what this frontend says DIFFERENTLY from the widget
+// editor: Event (an event catalog / free-named custom event, no UI element to
+// bind), the Lua/Python wording on FunctionEntry, the unnamed-function filter on
+// FunctionCall, and the "script" wording on Bind/Emit Event.
+// HcGraphHost::drawCommonNodeDetails lists the same split from the other side.
 void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events,
                      bool allowCustomEvents, ContentManager* content, bool& edited)
 {
@@ -408,6 +427,16 @@ void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events,
 
 	ImGui::TextDisabled("%s", HC::nodeDisplayName(n->type));
 	ImGui::Separator();
+
+	// This panel's `edited` means "the graph changed": the caller reacts once per
+	// frame (undo snapshot / re-save / dirty flag) and always did so from the first
+	// dragged frame — so a still-dragging edit deliberately counts like a finished
+	// one here. (The CANVAS host in drawCanvas takes committed edits only.)
+	HGH::Host common;
+	common.graph   = &graph;
+	common.content = content;
+	common.onEdit  = [&edited](bool){ edited = true; };
+	if (HGH::drawCommonNodeDetails(common, *n)) return;
 
 	switch (n->type)
 	{
@@ -477,6 +506,8 @@ void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events,
 		HcEditorUtil::drawFunctionInterface(graph, *n, edited);
 		break;
 	}
+	// Kept here: this one skips unnamed functions (an empty Selectable label is
+	// unclickable), the widget editor's copy lists them. Same widget otherwise.
 	case NT::FunctionCall:
 	{
 		if (ImGui::BeginCombo("Function", n->s.empty() ? "(none)" : n->s.c_str()))
@@ -489,77 +520,8 @@ void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events,
 		}
 		break;
 	}
-	case NT::FunctionReturn:
-		if (HcEditorUtil::drawReturnFunctionPicker(graph, *n)) edited = true;
-		break;
-	case NT::GetVariable:
-	case NT::SetVariable:
-	{
-		if (ImGui::BeginCombo("Variable", n->s.empty() ? "(none)" : n->s.c_str()))
-		{
-			for (const auto& v : graph.variables)
-			{
-				// A function-local is only usable inside its owning sub-graph.
-				if (v.scope != 0 && v.scope != n->subgraph) continue;
-				if (ImGui::Selectable(v.name.c_str(), n->s == v.name))
-				{
-					const PT before = n->propType; const bool wasArr = n->isArray;
-					n->s = v.name; n->propType = v.type; n->isArray = v.isArray;
-					if (n->propType != before || n->isArray != wasArr)
-					{
-						const PinRanges r = HGH::pinRanges(*n);
-						const int valuePin = n->type == NT::GetVariable ? r.dataOut0 : r.dataIn0;
-						HGH::removePinLinks(graph, n->id, valuePin);
-					}
-					edited = true;
-				}
-			}
-			ImGui::EndCombo();
-		}
-		break;
-	}
-	case NT::ArrayMake:
-	case NT::ArrayLength:
-	case NT::ArrayGet:
-	case NT::ArrayAdd:
-	case NT::ArraySet:
-	case NT::ArrayInsert:
-	case NT::ArrayRemove:
-	case NT::ArrayContains:
-	case NT::ArrayIndexOf:
-	case NT::ForEach:
-	{
-		// Element type — object classes allowed too (the class path rides in s,
-		// which array-op nodes don't use otherwise).
-		const PT before = n->propType;
-		if (HcEditorUtil::drawTypePicker("Element", content, n->propType, &n->s) && n->propType != before)
-		{
-			graph.links.erase(std::remove_if(graph.links.begin(), graph.links.end(),
-				[&](const HC::Link& l){ return l.srcNode == n->id || l.dstNode == n->id; }), graph.links.end());
-			edited = true;
-		}
-		ImGui::TextDisabled("Element type of the array.");
-		break;
-	}
-	case NT::ConstFloat:
-		if (ImGui::DragFloat("Value", &n->f[0], 0.1f)) edited = true; break;
-	case NT::ConstInt:
-	{
-		int v = (int)n->f[0];
-		if (ImGui::DragInt("Value", &v, 1)) { n->f[0] = (float)v; edited = true; } break;
-	}
-	case NT::ConstBool:
-	{
-		bool b = n->f[0] != 0.0f;
-		if (ImGui::Checkbox("Value", &b)) { n->f[0] = b ? 1.0f : 0.0f; edited = true; } break;
-	}
-	case NT::ConstString:
-		ImGui::InputText("Value", &n->s);
-		if (ImGui::IsItemDeactivatedAfterEdit()) edited = true; break;
-	case NT::ConstVec2:
-		if (ImGui::DragFloat2("Value", n->f, 0.1f)) edited = true; break;
-	case NT::ConstColor:
-		if (ImGui::ColorEdit4("Value", n->f)) edited = true; break;
+	// Kept here (not in HcGraphHost) because the widget editor words the hint
+	// "widget's Event" where this one says "script's Event".
 	case NT::BindEvent:
 	case NT::EmitEvent:
 		ImGui::InputText("Event", &n->s);
@@ -567,62 +529,6 @@ void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events,
 		ImGui::TextDisabled(n->type == NT::BindEvent
 			? "When Target fires this event, this\nscript's Event of the same name runs."
 			: "Broadcast to everyone bound to this\nscript's event of this name.");
-		break;
-	case NT::CallExternal:
-		ImGui::InputText("Function", &n->s);
-		if (ImGui::IsItemDeactivatedAfterEdit()) edited = true;
-		ImGui::TextDisabled("Calls a public function on the\nTarget instance (a reference).");
-		break;
-	case NT::CreateWidget:
-	{
-		if (ImGui::BeginCombo("Widget", n->s.empty() ? "(none)" : n->s.c_str()))
-		{
-			for (const auto& a : HcEditorUtil::listAssets(content, HE::AssetType::Widget))
-				if (ImGui::Selectable((a.label + "##" + a.path).c_str(), n->s == a.path))
-					{ n->s = a.path; edited = true; }
-			ImGui::EndCombo();
-		}
-		ImGui::TextDisabled("Which UI Widget asset to instantiate.\nOutputs the new widget's id.");
-		break;
-	}
-	case NT::CreateObject:
-	{
-		if (ImGui::BeginCombo("Class", n->s.empty() ? "(none)" : n->s.c_str()))
-		{
-			for (const auto& c : HcEditorUtil::listHorizonCodeClasses(content))
-				if (ImGui::Selectable((c.label + "##" + c.path).c_str(), n->s == c.path))
-					{ n->s = c.path; edited = true; }
-			ImGui::EndCombo();
-		}
-		ImGui::TextDisabled("Instantiates a HorizonCode class as a\nlive object. Outputs a reference to it.");
-		break;
-	}
-	case NT::GetExternal:
-	case NT::SetExternal:
-	{
-		ImGui::InputText("Variable", &n->s);
-		if (ImGui::IsItemDeactivatedAfterEdit()) edited = true;
-		int t = (int)n->propType;
-		if (ImGui::Combo("Type", &t, "Exec\0Float\0Bool\0Int\0String\0Vec2\0Color\0Object\0"))
-		{
-			const PT nt = (PT)t;
-			if (nt != PT::Exec && nt != n->propType)
-			{
-				n->propType = nt;
-				const PinRanges r = HGH::pinRanges(*n);
-				const int valuePin = n->type == NT::GetExternal ? r.dataOut0 : (r.dataIn0 + 1);
-				HGH::removePinLinks(graph, n->id, valuePin);
-				edited = true;
-			}
-		}
-		ImGui::TextDisabled("Reads/writes a public variable on the\nTarget object.");
-		break;
-	}
-	case NT::EngineCall:
-		// scene.load / scene.loadAdditive: choose the scene from a dropdown
-		// instead of typing the path (a typo silently fails to load).
-		if (HcEditorUtil::drawSceneParamPicker(*n, content)) edited = true;
-		else ImGui::TextDisabled("Engine call — inputs are set on the node's pins.");
 		break;
 	default:
 		ImGui::TextDisabled("No parameters.");

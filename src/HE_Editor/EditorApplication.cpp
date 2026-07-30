@@ -3032,21 +3032,34 @@ bool EditorApplication::OnEvent(const SDL_Event& event)
 
 	// ── Unsaved-changes guard for OS-level close (window X / Cmd+Q / app quit) ──
 	// Window::PollEvents() has already flagged the window to close this frame; if
-	// the active scene has unsaved edits, veto that here and ask the UI to raise
-	// the save-prompt instead. The prompt's "quit" path then exits cleanly through
-	// Application::Quit(). Skipped in headless-dump mode, when no project is loaded,
-	// or when the scene is clean (let it close normally). For window-close events
-	// we only react to the *main* window — ImGui's secondary viewport windows
-	// manage their own close.
-	if ((event.type == SDL_EVENT_QUIT ||
-	     (event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED && window() &&
-	      event.window.windowID == SDL_GetWindowID(window()->GetNativeWindow()))) &&
-	    m_dumpPath.empty() && m_projectLoaded &&
-	    m_undo.revision() != m_savedRevision)
+	// there is anything unsaved, veto that here and ask the UI to raise the
+	// save-prompt instead (EditorUI turns m_exitRequested into a guarded Quit). The
+	// prompt's "quit" path then exits cleanly through Application::Quit(). Skipped
+	// in headless-dump mode, when no project is loaded, or when nothing is dirty
+	// (let it close normally). For window-close events we only react to the *main*
+	// window — ImGui's secondary viewport windows manage their own close.
+	//
+	// "Anything unsaved" is deliberately BOTH tests: an asset tab (material / UI
+	// widget / particle / animator state machine …) keeps its edits in per-panel
+	// state and does not bump the world undo revision, so the scene-revision test
+	// alone let a clean-scene + dirty-graph session quit without any prompt — on
+	// macOS ⌘Q is the only quit path, so those edits were simply gone.
+	const bool osCloseRequest =
+		event.type == SDL_EVENT_QUIT ||
+		(event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED && window() &&
+		 event.window.windowID == SDL_GetWindowID(window()->GetNativeWindow()));
+	if (osCloseRequest && m_dumpPath.empty() && m_projectLoaded)
 	{
-		if (window()) window()->CancelClose();
-		m_exitRequested = true;
-		return true; // consume — defer the quit until the user resolves the prompt
+		const bool sceneDirty = m_undo.revision() != m_savedRevision;
+		const bool tabsDirty  = std::any_of(m_tabs.begin(), m_tabs.end(),
+			[](const AppContext::EditorTab& t)
+			{ return EditorUI::tabHasUnsavedEdits(t.assetPath); });
+		if (sceneDirty || tabsDirty)
+		{
+			if (window()) window()->CancelClose();
+			m_exitRequested = true;
+			return true; // consume — defer the quit until the user resolves the prompt
+		}
 	}
 
 	// Only truly consume the event if ImGui wants *exclusive* input —

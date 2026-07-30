@@ -1006,7 +1006,11 @@ namespace
 						t.fromState = tj.value("fromState", std::string());
 						t.toState   = tj.value("toState",   std::string());
 						t.paramName = tj.value("paramName", std::string());
-						t.op        = static_cast<HE::TransitionOp>(tj.value("op", 0));
+						// Same guard the asset reader uses (see the comment on
+						// HE::transitionOpFromInt): this is user JSON, so an op
+						// this build has no enumerator for must not reach the
+						// system's switch().
+						t.op        = HE::transitionOpFromInt(tj.value("op", 0));
 						t.threshold = tj.value("threshold", 0.5f);
 						t.duration  = tj.value("duration",  0.2f);
 						lg.transitions.push_back(std::move(t));
