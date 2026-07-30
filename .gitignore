@@ -31,6 +31,12 @@ CMakeUserPresets.json
 # macOS
 .DS_Store
 
+# Compiled shader blobs. The build always compiles SPIR-V itself into
+# ${CMAKE_BINARY_DIR}/Shaders and the runtime only ever loads <exe dir>/Shaders,
+# so a .spv next to its .vert/.frag source is never read — checking one in only
+# risks it going stale against the source it was built from.
+*.spv
+
 # Runtime artifacts
 *.log
 config.json

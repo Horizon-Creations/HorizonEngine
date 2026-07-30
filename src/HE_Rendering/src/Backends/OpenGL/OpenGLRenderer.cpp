@@ -4878,8 +4878,8 @@ void OpenGLRenderer::DestroyGiShadowTargets()
 }
 
 // One-shot probe-grid fit over the scene AABB (Metal lesson: refresh
-// worldBounds from the real mesh bounds first — the extractor seeds only
-// fallback unit cubes).
+// worldBounds from the real mesh bounds first — the extractor leaves them
+// invalid or proxy-sized, so unioning them raw undersizes the grid).
 void OpenGLRenderer::EnsureGiProbeGrid()
 {
 	if (m_giProbeGridBuilt) return;

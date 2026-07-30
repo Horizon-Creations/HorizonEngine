@@ -1,11 +1,16 @@
 #pragma once
 #include <Math/Math.h>
 
-// Scene-wide environment / sky settings, authored on the World root entity and
-// persisted with the scene (the SceneSerializer writes/reads it like any other
-// component). The editor edits it in the World node's Details panel and pushes it
-// to the renderer each frame via IRenderer::SetEnvironmentSettings. Defaults match
-// the previous global editor defaults so existing scenes look unchanged.
+// Scene-wide environment / sky settings, authored on the "Sky" entity — an
+// ordinary, deletable scene entity in the Outliner, added/removed via the editor's
+// Environment window (View menu); a scene without one has no sky at all. Consumers
+// find it with HorizonWorld::environmentEntity() instead of looking at the root.
+// Persisted with the scene (the SceneSerializer writes/reads it like any other
+// component); scenes from before the split carried it on the World root and are
+// moved onto a Sky entity on load by HorizonWorld::migrateLegacyRootEnvironment().
+// The editor edits it in the Sky node's Details panel and pushes it to the renderer
+// each frame via IRenderer::SetEnvironmentSettings. Defaults match the previous
+// global editor defaults so existing scenes look unchanged.
 struct EnvironmentComponent
 {
     // Day-night cycle: timeOfDay 0..1 (0.25 sunrise, 0.5 noon, 0.75 sunset, 0/1

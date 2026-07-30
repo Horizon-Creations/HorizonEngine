@@ -25,10 +25,12 @@ public:
     // Called after extract() when viewport pixel dimensions are known.
     void extractUI(HorizonWorld& world, float vpWidth, float vpHeight, RenderWorld& outWorld);
 
-    // Optional: when set, mesh renderables are culled against each mesh's real
-    // object-space AABB (looked up by asset UUID) instead of a unit-cube proxy —
-    // less overdraw / popping and a tighter shadow-frustum fit. Falls back to the
-    // unit cube when a mesh isn't resident yet or carries no bounds.
+    // Optional: when set, mesh renderables get each mesh's real object-space AABB
+    // (looked up by asset UUID) as their cull bounds — less overdraw / popping and
+    // a tighter shadow-frustum fit. When a mesh isn't resident yet or carries no
+    // usable bounds the world bounds are left INVALID (= never culled) rather than
+    // proxied by a unit cube, so a large mesh can't disappear while in view; the
+    // backend fills in the real bounds once it resolves the asset.
     void setContentManager(ContentManager* cm) { m_contentManager = cm; }
 
     // Day-night cycle: when enabled, the extractor drives the sun from the time

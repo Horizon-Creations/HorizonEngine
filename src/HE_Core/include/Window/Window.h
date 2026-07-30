@@ -17,7 +17,6 @@ namespace HE
         uint32_t    height = 720;
         bool        vsync  = true;
         WindowMode  mode   = WindowMode::Windowed;
-        WindowState state  = WindowState::Floating;
         // Set by Application::Run based on the chosen backend.
         // Window::Init uses this to set the correct SDL window flags
         // and to skip GL context creation for D3D / Vulkan.

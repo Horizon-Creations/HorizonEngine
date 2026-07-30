@@ -54,7 +54,7 @@ Spiegelt `setLogFile`: `fs::path(startupPath).parent_path() / "dumps"`, `create_
 - `beginFrame(dt*1000)` am Schleifenanfang (wendet pending Start/Stop an); `endFrame()` vor `}`.
 - Scopes: `PollEvents`, `OnRender`, `Render` (um `m_renderer->Render()`), `GameLogicTick` (um `m_loop.tick`), `SwapBuffers`.
 - Nach `Render()`: GPU-Stats vom Renderer ziehen (`m_renderer->GetFrameGpuStats()` → `gpuFrameMs` + `passes[]`) → `setRenderStats` + `setGpuFrame`. GPU-Zeiten sind 1–N Frames versetzt → Zuordnung per Frame-Index, nicht Wall-Clock.
-- **Hotkey** (cross-build): F9 = `requestToggle()` (Stop → Dump + Log-Zeile mit Pfad). Im Event-Callback der Base-`Application`.
+- **Hotkey** (cross-build): F9 = `Application::toggleProfilerCapture()` (Stop → Dump + Log-Zeile mit Pfad). Im Event-Callback der Base-`Application`. Der Toggle ist dort **ausgeschrieben** (`isRecordingOrPending()` → `requestStop()`, sonst `requestStart()`) statt `requestToggle()` zu rufen, weil derselbe Pfad zusätzlich den VSync-Zustand sichern und beim Stop wiederherstellen muss (nächster Punkt).
 - **Benchmark-Capture / VSync (Advisor):** VSync blockiert `SwapBuffers` auf die Bildwiederholrate → CPU-Frametime/FPS sind bei VSync an **bedeutungslos** (immer 8,3/16,6 ms, egal wie teuer der Himmel). Beim Start einer Aufnahme optional **VSync aus** (`captureVsyncOff`, Default an für den Benchmark), alten Zustand merken, beim Stop wiederherstellen. Der tatsächliche VSync-Zustand wandert in die Dump-Metadaten, damit ein gecappter Lauf nicht als „langsam" fehlgelesen wird. (GPU-Timestamps sind VSync-immun — zweiter Grund, warum Punkt 6 die verlässlichen Zahlen liefert.)
 
 ### 5. Szene-Systeme — `SceneSystems::tick` (`SceneSystems.cpp:59–82`)
@@ -162,7 +162,7 @@ Das „Performance Profiler"-Fenster (View-Menü) hat jetzt drei Tabs:
 - **Capture** — „Start Benchmark Capture (F9)" (vsync-off-Multi-Frame → JSON-Dump), **„Capture Single Frame"** (genau ein Frame, detailed-GPU erzwungen → exklusive Per-Pass-Zeiten same-frame dank `waitUntilCompleted`, kein Dump), detailed-Checkbox, Dump/Open-Folder.
 - **Frame Detail** — volle Aufschlüsselung **eines** Frames (Single-Frame-Capture, sonst letzter Benchmark-Frame): GPU-Pässe (mode-aware: „exclusive, serialized" im detailed-Modus, sonst Overlap-Warnung), CPU-Scope-Baum (eingerückt nach Tiefe, ms + Balken), Zähler, `gpuMode`.
 
-Backend: `EngineProfiler` bekam `ProfLiveFrame`-Ring (`pushLive`/`liveSnapshot`/`setLiveEnabled`/`liveEnabled`, cap 240), `requestSingleFrameCapture()`/`singleFrame()` (1-Frame-Aufnahme in `m_singleFrame`, `m_forceDetailed` → `detailedGpuCapture()` true für den Frame, kein Dump), und `lastCpuFrameMs()`/`lastDeltaMs()`. `beginFrame/endFrame` messen `cpuFrameMs` jetzt **immer** (2 Timestamps, vernachlässigbar) für den Live-HUD. Application pusht Live-Frames, wenn `liveEnabled() || isRecording()`. **Editor-UI im Sandbox nicht lauffähig → Sichtprüfung durch User offen.**
+Backend: `EngineProfiler` bekam `ProfLiveFrame`-Ring (`pushLive`/`liveSnapshot`/`setLiveEnabled`/`liveEnabled`, cap 240), `requestSingleFrameCapture()`/`singleFrame()` (1-Frame-Aufnahme in `m_singleFrame`, `m_forceDetailed` → `detailedGpuCapture()` true für den Frame, kein Dump), und `lastCpuFrameMs()`. `beginFrame/endFrame` messen `cpuFrameMs` jetzt **immer** (2 Timestamps, vernachlässigbar) für den Live-HUD. Application pusht Live-Frames, wenn `liveEnabled() || isRecording()`. **Editor-UI im Sandbox nicht lauffähig → Sichtprüfung durch User offen.**
 
 ## Nutzung (so misst man)
 **Starten/Stoppen — zwei Wege, beide identisch:**

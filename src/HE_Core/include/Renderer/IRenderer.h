@@ -54,9 +54,10 @@ public:
         bool supportsShadows        = false;
         bool supportsPostProcessing = false;
         bool supportsHDR            = false;
-        // GPU-simulated weather particles (transform feedback). True only on
-        // backends + drivers that can run the GPU precipitation path; the editor
-        // greys out the toggle when false. GL reports true (TF is core in 4.1).
+        // GPU-simulated weather particles. True only on backends that implement
+        // the GPU precipitation path; the editor greys out the toggle when false.
+        // OpenGL (transform feedback, core in 4.1) and Metal (compute kernel)
+        // report true; D3D11/D3D12/Vulkan report false and stay on the CPU pool.
         bool supportsGpuParticles   = false;
         // Ray-traced DDGI (dynamic diffuse global illumination). Metal-only, and
         // only when the device + OS actually support GPU ray tracing (checked once

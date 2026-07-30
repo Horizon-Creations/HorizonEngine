@@ -130,7 +130,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 		uint32_t  entId;
 		int       lod;
 		bool      castsShadow;
-		HE::AABB  localBounds; // real mesh AABB, or invalid → unit-cube fallback
+		HE::AABB  localBounds; // real mesh AABB; invalid → world bounds stay invalid (never culled)
 		std::vector<float> paramOverride; // merged HeParams block, or empty
 		HE::UUID  weightmapId;            // landscape layer weights (chunks only)
 	};

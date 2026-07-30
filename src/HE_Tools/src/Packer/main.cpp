@@ -1,9 +1,11 @@
 // hpak_packer — pack a project's .hasset files into a single .hpak archive
 // Usage: hpak_packer <project_root> <output.hpak> [--secret <passphrase>]
 //
-// If --secret is provided the entries are XOR-encrypted with a key derived
-// from the passphrase + a zero salt. The same passphrase must be passed to
-// ContentManager::loadPak() at runtime.
+// If --secret is provided the entries are AES-256-GCM encrypted with a key
+// derived from the passphrase + a zero salt (KeyDerivation::derive). Reading the
+// archive back needs that same 32-byte key: the runtime hands it to
+// ContentManager::mountPak() (GameApplication does the mounting for a packaged
+// game); loadPak() is the eager tools/tests variant.
 
 #include "HpakWriter.h"
 #include <cstdint>

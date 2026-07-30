@@ -4,6 +4,10 @@
 #include "ContentManager/HAsset.h"
 #include "Diagnostics/Logger.h"
 
+// Declarations only — CGLTF_IMPLEMENTATION is defined exactly once, in
+// MeshImporter.cpp, for the whole HorizonImporters link unit.
+#include "cgltf.h"
+
 namespace Importer
 {
 
@@ -14,6 +18,19 @@ std::string toAssetPath(const std::filesystem::path& relativePath)
 	if (s.rfind("./", 0) == 0)
 		s.erase(0, 2);
 	return s;
+}
+
+bool gltfHasSkin(const std::filesystem::path& sourcePath)
+{
+	cgltf_options options{};
+	cgltf_data*   data = nullptr;
+	// cgltf_parse_file reads the JSON only — skins_count is filled in without
+	// touching the (potentially large) .bin buffers or embedded images.
+	if (cgltf_parse_file(&options, sourcePath.string().c_str(), &data) != cgltf_result_success)
+		return false;
+	const bool skinned = data->skins_count > 0;
+	cgltf_free(data);
+	return skinned;
 }
 
 static HE::UUID existingUUID(const std::filesystem::path& file)

@@ -49,7 +49,7 @@ namespace HE
 		const ApplicationConfig cfg = GetConfig();
 		Logger::Log(Logger::LogLevel::Info, "Configuration loaded");
 
-		m_loop = GameLoop({ cfg.fixedTimestep, cfg.maxFixedSteps, cfg.windowprops.vsync });
+		m_loop = GameLoop({ cfg.fixedTimestep, cfg.maxFixedSteps });
 
 		// RendererBackend and GraphicsAPI share the same underlying values.
 		WindowProps wp = cfg.windowprops;

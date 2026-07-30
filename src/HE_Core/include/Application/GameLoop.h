@@ -10,7 +10,6 @@ namespace HE {
 struct GameLoopConfig {
     float    fixedTimestep = 1.0f / 60.0f;
     uint32_t maxFixedSteps = 5;
-    bool     vsync         = true;
 };
 
 // Frame pacing & fixed-timestep tick.
@@ -22,8 +21,9 @@ public:
     // One frame. Returns false if the loop should exit.
     bool tick(HorizonWorld& world, IGameLogic* logic, float deltaTime);
 
+    // Latches the loop off; tick() returns false from then on. Called by
+    // Application::Quit so an in-flight frame still finishes cleanly.
     void requestStop();
-    bool running() const { return running_; }
 
     const GameLoopConfig& config() const { return config_; }
 

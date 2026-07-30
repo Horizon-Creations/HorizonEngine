@@ -6,7 +6,6 @@
 
 struct EngineStatus
 {
-	bool                     isRunning;
 	HE::GraphicsAPI          selectedRHI;
 	HE::OS                   currentOS;
 	std::string              startupPath;

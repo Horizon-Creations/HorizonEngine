@@ -253,15 +253,6 @@ if(WIN32)
     endif()
 endif()
 
-# ─── ViewportUI ────────────────────────────────────────────────────────────────
-add_library(ViewportUI STATIC
-    src/ViewportUI/UIManager.cpp)
-target_include_directories(ViewportUI PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${HE_CORE_INCLUDE}
-)
-target_link_libraries(ViewportUI PRIVATE glm::glm HorizonCore)
-
 # ─── HorizonRendering DLL ──────────────────────────────────────────────────────
 add_library(HorizonRendering SHARED
     src/RenderExtractor.cpp
@@ -273,7 +264,6 @@ add_library(HorizonRendering SHARED
     src/RenderGraph.cpp
     src/RenderPass.cpp
     src/CommandBuffer.cpp
-    src/IRenderer.cpp
     src/GiBvh.cpp
     src/RendererFactory.cpp)
 
@@ -283,7 +273,7 @@ target_include_directories(HorizonRendering
             ${CMAKE_CURRENT_SOURCE_DIR}/glad/include
 )
 
-set(HR_BACKENDS RendererOpenGL ViewportUI)
+set(HR_BACKENDS RendererOpenGL)
 if(HE_VULKAN_ENABLED)
     list(APPEND HR_BACKENDS RendererVulkan)
 endif()

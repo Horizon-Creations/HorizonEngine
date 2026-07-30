@@ -124,9 +124,9 @@ HE_API std::vector<std::string> matLandscapeLayerNames(const std::string& s);
 // Material blend modes (Output node p[1]; → MaterialAsset::blendMode). They change which
 // Output pins are meaningful — see matOutputPins:
 //   Opaque      — no Opacity pin; alpha forced to 1.
-//   Masked      — pin 4 becomes OpacityMask: fragments below the cutoff (p[2]) discard.
-//                 Stays in the OPAQUE pass (no sorting), holes are hard-edged.
-//   Translucent — pin 4 is Opacity: drawn in the sorted alpha-blend pass.
+//   Masked      — kMatOutputOpacityPin becomes OpacityMask: fragments below the cutoff
+//                 (p[2]) discard. Stays in the OPAQUE pass (no sorting), hard-edged holes.
+//   Translucent — kMatOutputOpacityPin is Opacity: drawn in the sorted alpha-blend pass.
 enum class MatBlendMode : uint8_t { Opaque = 0, Masked = 1, Translucent = 2 };
 
 // Output-node input pin indices (see the Output entry in the node registry).
@@ -219,9 +219,10 @@ HE_API const MatNodeDesc&              matNodeDesc(MatNodeType type);
 HE_API const MatNodeDesc*              matNodeDescByName(const std::string& name);
 
 // The Output node's DISPLAYED input pins for a blend mode, plus the registry pin index
-// each row maps to (indices stay stable across modes so serialized links never break:
-// 0 BaseColor, 1 Metallic, 2 Roughness, 3 Emissive, 4 Opacity/OpacityMask, 5 Normal,
-// 6 WPO). Opaque hides pin 4; Masked renames it to OpacityMask.
+// each row maps to — those indices are exactly the kMatOutput*Pin constants above (named
+// rather than spelled out here, so this comment cannot rot when a pin is inserted). They
+// stay stable across modes so serialized links never break: Opaque hides
+// kMatOutputOpacityPin, Masked renames it to OpacityMask.
 HE_API void matOutputPins(int blendMode, std::vector<MatPinDesc>& pins, std::vector<int>& regIndex);
 
 // Interface pins of a FUNCTION graph: its FnInput nodes (sorted by id) become the call

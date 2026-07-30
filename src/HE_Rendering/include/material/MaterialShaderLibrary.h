@@ -22,9 +22,12 @@ class MaterialShaderLibrary
 public:
     enum class Backend { Metal, HLSL, GLSL410, GLSLES300, SpirV };
 
-    // Compact, stable shading input for material pipelines — the "material lighting ABI".
-    // The engine fills this each frame; the standard-lit preamble's heLit() reads it.
-    // std140: four vec4 = 64 bytes. Each backend binds it at its lighting slot (Metal:
+    // Stable shading input for material pipelines — the "material lighting ABI".
+    // The engine fills this each frame; the standard-lit preamble's heLit() reads the
+    // first four vec4s, heLitP() the rest. std140, and append-only: it started as those
+    // four vec4s and has grown by kilobytes since (localShadowVP alone is 16×mat4 = 1 KiB),
+    // so the struct below is the only authority on its size — don't quote a byte count
+    // here, it rots on the next append. Each backend binds it at its lighting slot (Metal:
     // fragment [[buffer(kMetalLightingBufferIndex)]]). A UBO (GL 3.1+), so unlike the SSBO
     // vertex it is fully GL-4.1 portable.
     struct Lighting
@@ -96,13 +99,6 @@ public:
         std::vector<uint32_t> spirv;  // populated for the SpirV backend
         std::string           log;    // diagnostics on failure
     };
-
-    // The shared "drop-in" vertex: vertex-pulls the interleaved pos3/normal3/uv2 vertex and
-    // reads the per-object Uniforms UBO. Every material fragment is spliced onto this, so
-    // all materials share the geometry pass's per-draw bindings. Fragment interface:
-    //   layout(location = 0) in vec3 vNormal;  layout(location = 1) in vec3 vColor;
-    //   layout(location = 0) out vec4 oColor;
-    static const char* standardVertexGlsl();
 
     // True + (hash, glsl) if the material carries a custom shader; false → built-in PBR.
     bool resolveFragment(const ContentManager& cm, const UUID& materialId,

@@ -12,13 +12,15 @@
 //  Layout:
 //    [ FileHeader (64 bytes)            ]
 //    [ EntryDesc × entryCount           ]  TOC, ASCENDING by (uuidHi,uuidLo)
-//    [ optional shared zstd dictionary  ]  at FileHeader::dictOffset, dictSize bytes
+//    [ shared zstd dictionary  RESERVED ]  slot at FileHeader::dictOffset/dictSize —
+//                                          HpakWriter always writes 0/0, HpakReader
+//                                          never looks at it (see kArchiveHasDict)
 //    [ raw data blocks at each offset   ]  .hasset blobs
 //
 //  All values are little-endian.
 //
-//  Per entry: an optional codec (store/lz4/zstd) and optional XOR obfuscation,
-//  selected via EntryDesc::codec and EntryDesc::entryFlags.
+//  Per entry: an optional codec (store/lz4/zstd) and optional AES-256-GCM
+//  encryption, selected via EntryDesc::codec and EntryDesc::entryFlags.
 //    Operation order on write: compress → encrypt.
 //    Operation order on read:  decrypt  → decompress.
 //    origSize always holds the uncompressed .hasset size.
@@ -30,7 +32,8 @@
 //                               verified per read → catches localized corruption.
 //  These use a fast non-cryptographic hash: they detect ACCIDENTAL corruption,
 //  they are NOT tamper-proof (an attacker just recomputes them). Tamper-evidence
-//  requires a secret — see the AEAD auth tag once encryption lands (kFlagEncrypted).
+//  requires a secret: encrypted entries (kFlagEncrypted) get it from the AES-GCM
+//  auth tag — a modified payload fails to decrypt. Plain entries have none.
 // ─────────────────────────────────────────────────────────────────────────────
 
 namespace Hpak
@@ -44,19 +47,24 @@ enum class Codec : uint8_t
 {
     Store = 0, // uncompressed
     LZ4   = 1, // LZ4 block (LZ4HC at pack time; decoded by LZ4_decompress_safe)
-    Zstd  = 2, // zstd frame (optionally with the archive's shared dictionary)
+    Zstd  = 2, // zstd frame (always dictionary-less — see kFlagUsesDict)
 };
 
 // ── Archive-wide flags (FileHeader::flags) ────────────────────────────────────
 inline constexpr uint32_t kArchiveSortedTOC = 0x1; // TOC ascending by UUID (binary search valid)
-inline constexpr uint32_t kArchiveHasDict   = 0x2; // dictOffset/dictSize point at a shared zstd dictionary
+inline constexpr uint32_t kArchiveHasDict   = 0x2; // RESERVED: shared zstd dictionary (never set)
 inline constexpr uint32_t kArchiveEncrypted = 0x4; // at least one entry carries kFlagEncrypted
 
 // ── Per-entry flags (EntryDesc::entryFlags) ───────────────────────────────────
-// NOTE: kFlagEncrypted is currently XOR (obfuscation, NOT a security guarantee —
-// the key ships with the game). It is scheduled to become AES-256-GCM (AEAD).
-inline constexpr uint8_t  kFlagEncrypted   = 0x1; // payload is obfuscated/encrypted
-inline constexpr uint8_t  kFlagUsesDict    = 0x2; // zstd entry compressed with the archive dictionary
+// kFlagEncrypted is AES-256-GCM (AEAD): the stored blob is ciphertext || 16-byte
+// tag with the nonce in EntryDesc::nonce. Threat model in Aes256Gcm.h — this
+// obfuscates against casual ripping, it is NOT a security boundary (the key ships
+// with the game). kFlagUsesDict is not implemented on either side: HpakWriter
+// never sets it and HpakReader decodes zstd without a dictionary, so an entry
+// carrying it would fail to decompress. (The writer reads it only to refuse
+// verbatim incremental reuse of such an entry.)
+inline constexpr uint8_t  kFlagEncrypted   = 0x1; // payload is AES-256-GCM encrypted
+inline constexpr uint8_t  kFlagUsesDict    = 0x2; // RESERVED: zstd shared-dictionary entry
 inline constexpr uint8_t  kFlagBlockFramed = 0x4; // RESERVED: per-block framing (not yet implemented)
 
 #pragma pack(push, 1)
@@ -70,8 +78,8 @@ struct FileHeader
     uint64_t buildId;        // hash/semver of the build → patch validation
     uint64_t baseArchiveId;  // 0 = base archive; else buildId of the base this patch overlays
     uint64_t tocHash;        // hash64 over the EntryDesc region
-    uint64_t dictOffset;     // byte offset of the shared zstd dictionary blob (0 = none)
-    uint32_t dictSize;       // dictionary blob length
+    uint64_t dictOffset;     // RESERVED: shared zstd dictionary blob offset (always 0 today)
+    uint32_t dictSize;       // RESERVED: dictionary blob length (always 0 today)
     uint32_t reserved0;
     uint64_t reserved1;
 };
@@ -83,9 +91,9 @@ struct EntryDesc
     uint64_t uuidLo;         // sorted key (low)
     uint64_t dataOffset;     // byte offset from start of file
     uint32_t origSize;       // uncompressed .hasset size
-    uint32_t dataSize;       // stored size (compressed+encrypted; incl. AEAD tag once encrypted)
+    uint32_t dataSize;       // stored size (compressed+encrypted; incl. the 16-byte AEAD tag)
     uint64_t contentHash;    // hash64 of the stored bytes
-    uint8_t  nonce[12];      // AEAD nonce (96-bit); zero when unencrypted / XOR
+    uint8_t  nonce[12];      // AES-GCM nonce (96-bit); zero when the entry is unencrypted
     uint8_t  codec;          // Hpak::Codec
     uint8_t  entryFlags;     // kFlag* bits
     uint16_t pad;
@@ -113,8 +121,14 @@ inline uint64_t hash64(const uint8_t* data, size_t len) noexcept
 struct PackSettings {
     Codec   codec   = Codec::Store; // compression codec (Store = none)
     int     level   = 0;            // codec level; 0 = codec default (LZ4HC 9 / zstd 19)
-    bool    encrypt = false;        // XOR obfuscation with `key` (see kFlagEncrypted note)
-    uint8_t key[32] = {};           // 32-byte key (from KeyDerivation::derive)
+    // AES-256-GCM the stored bytes with `key` (see the kFlagEncrypted note). Silently
+    // falls back to storing plaintext when the build has no crypto backend
+    // (Hpak::cryptoAvailable) or the encryption call fails — check the written
+    // entry flags, not this field, to know whether a pak really is encrypted.
+    bool    encrypt = false;
+    // 32-byte key: the editor export draws a random one (Hpak::randomBytes) and ships
+    // it with the game; hpak_packer --secret derives one via KeyDerivation::derive.
+    uint8_t key[32] = {};
     // Glob patterns matched against each file's path RELATIVE to the packed
     // directory (forward slashes, e.g. "Debug/*", "*_test.hasset"). Matching
     // files are skipped by HpakWriter::addDirectory. `*` matches any sequence

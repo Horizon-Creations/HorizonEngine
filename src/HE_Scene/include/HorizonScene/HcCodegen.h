@@ -38,7 +38,10 @@ struct GeneratedFile { std::string name; std::string contents; };
 
 struct Result
 {
-    bool ok = false;                        // false only on internal errors
+    // false only on internal errors (emitter slip / out of memory), never because
+    // a graph couldn't be compiled — that is a Fallback. generate() never lets an
+    // exception escape; the reason lands in `warnings`.
+    bool ok = false;
     std::vector<GeneratedFile> files;       // hcgen_<Class>.h/.cpp per class + hc_registry.h/.cpp
     // node = the graph node the reason anchors to (0 = whole graph) — lets the
     // editor highlight the offending node ("compile error in the graph").

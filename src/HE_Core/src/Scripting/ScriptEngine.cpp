@@ -96,13 +96,13 @@ ScriptEngine::InstanceId ScriptEngine::createInstance(const std::string& scriptN
     while (lua_next(m_L, -3) != 0)
     {
         // stack: script_table, instance_table, key, value
-        lua_pushvalue(m_L, -2); // duplicate key
-        lua_insert(m_L, -2);    // stack: ..., key(dup), key, value → ..., key(dup), value
-        // Actually we want: instance[key] = value
-        // stack: script_table, instance_table, key, value
-        // We need to rawset(instance_table, key, value)
-        // rawset pops key and value
-        lua_rawset(m_L, -4); // instance_table[key] = value; pops key+value
+        // The key has to be duplicated before the store: lua_rawset consumes a
+        // key/value pair, but lua_next needs the original key still on top to
+        // find the next entry. Push a copy and slide it under the value so
+        // rawset eats the copy and leaves the original behind.
+        lua_pushvalue(m_L, -2); // key copy on top
+        lua_insert(m_L, -2);    // stack: script, instance, key, key(copy), value
+        lua_rawset(m_L, -4);    // instance_table[key] = value; pops copy+value
     }
     // stack: script_table, instance_table
     lua_remove(m_L, -2); // drop script_table, leave instance_table on top

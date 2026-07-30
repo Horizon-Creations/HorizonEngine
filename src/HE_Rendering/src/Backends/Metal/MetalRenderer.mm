@@ -5290,12 +5290,13 @@ void MetalRenderer::EnsureGIProbeGrid()
 	if (m_renderWorld.objects.empty()) return; // wait for real geometry before committing to a grid
 
 	// m_renderWorld was re-extracted by EncodeGIAccelBuild's m_extractor.extract()
-	// call earlier this frame, which creates BRAND NEW RenderObjects seeded with
-	// only the extractor's small fallback-cube worldBounds (see RenderObject.h) —
-	// NOT the real per-mesh bounds EncodeShadowMap/EncodeSSAO refresh in their own
-	// passes. Those refreshes don't survive the re-extraction, so refresh here too
-	// before unioning, or the grid ends up sized to a handful of unit cubes
-	// instead of the actual scene.
+	// call earlier this frame, which creates BRAND NEW RenderObjects whose
+	// worldBounds are whatever the extractor could produce — invalid for meshes it
+	// could not resolve, a unit-cube proxy for particles/skinned (see
+	// RenderObject.h) — NOT the real per-mesh bounds EncodeShadowMap/EncodeSSAO
+	// refresh in their own passes. Those refreshes don't survive the re-extraction,
+	// so refresh here too before unioning, or the grid ends up sized to a handful
+	// of proxy boxes instead of the actual scene.
 	for (RenderObject& obj : m_renderWorld.objects)
 		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId); mesh && mesh->localBounds.isValid())
 			obj.worldBounds = mesh->localBounds.transformed(obj.transform);
