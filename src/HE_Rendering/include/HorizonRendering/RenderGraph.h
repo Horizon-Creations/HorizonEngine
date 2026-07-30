@@ -36,9 +36,9 @@ public:
 
     void clear();
 
-    bool empty() const { return passes_.empty(); }
+    bool empty() const { return m_passes.empty(); }
 
 private:
-    std::vector<std::unique_ptr<RenderPass>> passes_;
-    CommandBuffer                            scratch_; // reused per pass in the sink form
+    std::vector<std::unique_ptr<RenderPass>> m_passes;
+    CommandBuffer                            m_scratch; // reused per pass in the sink form
 };

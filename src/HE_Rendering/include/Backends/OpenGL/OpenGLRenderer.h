@@ -276,10 +276,10 @@ private:
 	// frame, so one scratch buffer suffices). Drawn in the transparent pass.
 	std::unordered_map<uint64_t, unsigned int> m_particlePrograms; // hash → program (0 = failed)
 	unsigned int m_particleInstVBO = 0, m_particleVAO = 0;
-	unsigned int getOrBuildParticleProgram(uint64_t key, const HE::ParticleEmitterConfig& config,
+	unsigned int GetOrBuildParticleProgram(uint64_t key, const HE::ParticleEmitterConfig& config,
 	                                       const ParticleShaderVariant* precompiled);
 
-	unsigned int getOrBuildMaterialProgram(uint64_t key, const std::string& fragGlsl,
+	unsigned int GetOrBuildMaterialProgram(uint64_t key, const std::string& fragGlsl,
 	                                       const std::string& vertBody = {},
 	                                       const MaterialShaderVariant* precompiled = nullptr);
 	bool         resolveMaterialShader(const HE::UUID& materialId, uint64_t& key, std::string& frag,
@@ -287,7 +287,7 @@ private:
 	// UI-quad material programs: same fragment hash, but linked against the
 	// screen-space uiVertex instead of the mesh vertex → own cache.
 	std::unordered_map<uint64_t, unsigned int> m_uiMaterialPrograms; // hash → program (0 = failed)
-	unsigned int getOrBuildUIMaterialProgram(const HE::UUID& materialId);
+	unsigned int GetOrBuildUIMaterialProgram(const HE::UUID& materialId);
 
 	int          m_uMVP           = -1;
 	int          m_uModel         = -1;
@@ -426,7 +426,7 @@ private:
 	void SimulateGpuParticles();
 	void DrawGpuParticles(const glm::mat4& viewProj, const glm::vec3& camPos);
 	// Draws RenderWorld::particleBatches (ParticleGraph particles), one GPU-
-	// instanced glDrawArraysInstanced per batch — see getOrBuildParticleProgram.
+	// instanced glDrawArraysInstanced per batch — see GetOrBuildParticleProgram.
 	void DrawParticleGraphBatches(const glm::mat4& viewProj, const glm::mat4& view);
 
 	// Base-color textures for MaterialComponent overrides, keyed by material
@@ -564,7 +564,7 @@ private:
 	unsigned int m_uiFontTexture = 0;   // R8 UI font atlas (HE::sharedUIFont), lazy
 	// Imported Font asset atlases, uploaded lazily on first sight (key → R8 tex).
 	std::unordered_map<uint32_t, unsigned int> m_uiFontAtlases;
-	unsigned int uiFontAtlasTexture(uint32_t key); // key 0 → the shared atlas
+	unsigned int UIFontAtlasTexture(uint32_t key); // key 0 → the shared atlas
 	void         RenderUIPass(int pw, int ph);
 
 	// ── Bloom (bright-pass + separable Gaussian blur on the HDR target) ──────
@@ -597,8 +597,8 @@ private:
 	int          m_uSkyRainAmount   = -1;
 	int          m_uSkyGodRays      = -1;
 	int          m_uSkyShootingStars = -1;
-	void         EnsureCloudFBO(int width, int height);
-	void         DestroyCloudFBO();
+	void         EnsureCloudTarget(int width, int height);
+	void         DestroyCloudTarget();
 	bool         m_bloomEnabled   = true;
 	float        m_bloomThreshold = 1.0f;
 	float        m_bloomKnee      = 0.5f;
@@ -661,7 +661,7 @@ private:
 	// GL 4.3 context (GLAD_GL_VERSION_4_3) — macOS GL is 4.1 and never enters.
 	// Checkpoint GL-A: capability + settings + accel upload only, nothing
 	// samples these buffers yet (GI-off rendering stays byte-identical).
-	struct GiBlasRange
+	struct GIBlasRange
 	{
 		int32_t nodeOffset = 0, nodeCount = 0;
 		int32_t triOffset  = 0, triCount  = 0;
@@ -669,13 +669,13 @@ private:
 	};
 	// Matches the std430 GiInstance block the GL-B kernels will declare: two
 	// mat4 rows + colour + BLAS offsets (16-byte aligned).
-	struct GiInstanceGpu
+	struct GIInstanceGpu
 	{
 		glm::mat4 invTransform{1.0f};   // world → object (rays enter BLAS space)
 		glm::vec4 baseColor{1.0f};      // probe one-bounce tint (GL-C)
 		int32_t   nodeOffset = 0, triOffset = 0, pad0 = 0, pad1 = 0;
 	};
-	GiBlasRange  BuildGIBlas(const HE::UUID& meshId); // CPU build from ContentManager data
+	GIBlasRange  BuildGIBlas(const HE::UUID& meshId); // CPU build from ContentManager data
 	void         UpdateGIAccel();                     // lazy BLAS append + per-frame instance upload
 	void         DestroyGIAccel();
 
@@ -693,9 +693,9 @@ private:
 	                            const glm::mat4& viewProj);
 	void         DispatchGIProbeUpdate();
 
-	static constexpr float kGiProbeSpacing     = 4.0f; // metres between probes
-	static constexpr int   kGiMaxProbesPerAxis = 10;   // grid clamp (matches Metal)
-	static constexpr int   kGiProbeOctSize     = 8;    // octahedral tile size
+	static constexpr float kGIProbeSpacing     = 4.0f; // metres between probes
+	static constexpr int   kGIMaxProbesPerAxis = 10;   // grid clamp (matches Metal)
+	static constexpr int   kGIProbeOctSize     = 8;    // octahedral tile size
 
 	bool         m_giPipelinesBuilt   = false;
 	unsigned int m_giGBufProgram      = 0;
@@ -729,10 +729,10 @@ private:
 	GISceneLocs  m_giLocsUnlit, m_giLocsSkinned, m_giLocsInstanced;
 	GISceneLocs  FetchGISceneLocs(unsigned int program) const;
 	void         PushGISceneUniforms(const GISceneLocs& locs, bool active);
-	std::unordered_map<HE::UUID, GiBlasRange> m_giBlasCache;
+	std::unordered_map<HE::UUID, GIBlasRange> m_giBlasCache;
 	std::vector<HE::GiBvhNode>     m_giNodesCpu;      // concatenated BLAS nodes (all meshes)
 	std::vector<HE::GiBvhTriangle> m_giTrisCpu;       // concatenated BLAS triangles
-	std::vector<GiInstanceGpu>     m_giInstancesCpu;  // rebuilt per frame
+	std::vector<GIInstanceGpu>     m_giInstancesCpu;  // rebuilt per frame
 	bool         m_giBlasDirty       = false;         // node/tri SSBOs need re-upload
 	unsigned int m_giNodeSSBO        = 0;
 	unsigned int m_giTriSSBO         = 0;

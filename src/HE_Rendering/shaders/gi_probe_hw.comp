@@ -35,7 +35,7 @@
 // (OpenGL), MetalRenderer.mm's `kGIProbeOctSizeShade`, the D3D11/D3D12
 // `GI_PROBE_OCT` blocks, and `kLightingPreamble`'s `kOct` in
 // src/HE_Rendering/src/material/MaterialShaderLibrary.cpp — plus the host-side
-// `kGiProbeOctSize` each backend allocates the atlas with. Changing it here
+// `kGIProbeOctSize` each backend allocates the atlas with. Changing it here
 // alone silently reads the wrong texels.
 //
 // WHAT BREAKS ON DRIFT: every copy still compiles and still runs. The probes

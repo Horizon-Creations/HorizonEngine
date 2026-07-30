@@ -67,24 +67,24 @@ struct State
 	bool        isFunction = false;  // editing a MaterialFunction asset (FnInput/FnOutput mode)
 	std::string relPath;             // content-root-relative path of this asset
 };
-AssetPanelState<State> g_states;
+AssetPanelState<State> s_states;
 
 // Cache of loaded material-FUNCTION graphs, keyed by content-relative path. Backs both
 // the codegen loader and the dynamic pins of FunctionCall nodes. Invalidated when a
 // function is saved in this editor.
-std::map<std::string, HE::MaterialGraph> g_fnGraphCache;
+std::map<std::string, HE::MaterialGraph> s_fnGraphCache;
 
 const HE::MaterialGraph* loadFunctionGraph(AppContext& ctx, const std::string& relPath)
 {
 	if (relPath.empty() || !ctx.contentManager) return nullptr;
-	if (auto it = g_fnGraphCache.find(relPath); it != g_fnGraphCache.end()) return &it->second;
+	if (auto it = s_fnGraphCache.find(relPath); it != s_fnGraphCache.end()) return &it->second;
 	const HE::UUID id = ctx.contentManager->loadAsset(relPath);
 	const MaterialFunctionAsset* fn = ctx.contentManager->getMaterialFunction(id);
 	if (!fn) return nullptr;
 	HE::MaterialGraph g;
 	if (!fn->nodeGraphJson.empty() && !HE::materialGraphFromJson(fn->nodeGraphJson, g))
 		return nullptr;
-	return &(g_fnGraphCache[relPath] = std::move(g));
+	return &(s_fnGraphCache[relPath] = std::move(g));
 }
 
 // Node width used to size the inline value widgets (kept in sync with the shared
@@ -158,7 +158,7 @@ void applyToMaterial(State& st, AppContext& ctx)
 		if (MaterialFunctionAsset* fn = ctx.contentManager->getMaterialFunctionMutable(st.materialId))
 		{
 			fn->nodeGraphJson = HE::materialGraphToJson(st.graph);
-			g_fnGraphCache.erase(st.relPath);
+			s_fnGraphCache.erase(st.relPath);
 			st.dirty = true;
 		}
 		return;
@@ -239,10 +239,10 @@ bool restoreSnapshot(State& st, int pos)
 }
 
 // ── Node clipboard (process-wide → copy/paste works ACROSS material tabs) ──────────
-std::string g_matClipboard;
+std::string s_matClipboard;
 
 // One-shot open-asset request (double-clicked Material Function node → its editor tab).
-std::string g_openAssetRequest;
+std::string s_openAssetRequest;
 
 // Selected nodes + the links fully inside the selection, as graph JSON. Interface
 // nodes are excluded: Output/FnOutput are singletons, FnInput defines a function's
@@ -347,7 +347,7 @@ bool drawFunctionInterfacePanel(MaterialGraph& g)
 
 State& stateFor(const std::string& path, AppContext& ctx)
 {
-	State& st = g_states[path];
+	State& st = s_states[path];
 	if (st.loaded || !ctx.contentManager) return st;
 
 	st.materialId = openPanelAsset(ctx, path, st.name, st.relPath);
@@ -1064,7 +1064,7 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 			}
 		if (n->type == MatNodeType::FunctionCall && !n->s.empty() && ctx.contentManager)
 			if (ImGui::MenuItem("Open Function"))
-				g_openAssetRequest = ctx.contentManager->resolveAbsolutePath(n->s);
+				s_openAssetRequest = ctx.contentManager->resolveAbsolutePath(n->s);
 		// Route THIS node's first output (unlit) onto the preview mesh.
 		std::vector<HE::MatPinDesc> dIn, dOut;
 		const std::vector<HE::MatPinDesc>* outs = &HE::matNodeDesc(n->type).outputs;
@@ -1084,7 +1084,7 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 	{
 		const MatGraphNode* n = st.graph.findNode(nodeId);
 		if (n && n->type == MatNodeType::FunctionCall && !n->s.empty() && ctx.contentManager)
-			g_openAssetRequest = ctx.contentManager->resolveAbsolutePath(n->s);
+			s_openAssetRequest = ctx.contentManager->resolveAbsolutePath(n->s);
 	};
 
 	// ── Add-node palette (searchable; ports the original popup body). ──
@@ -1239,7 +1239,7 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 		if (kbOk && mod && ImGui::IsKeyPressed(ImGuiKey_C) && !sel.empty())
 		{
 			const std::string payload = serializeSelection(st);
-			if (!payload.empty()) g_matClipboard = payload;
+			if (!payload.empty()) s_matClipboard = payload;
 		}
 		if (kbOk && mod && ImGui::IsKeyPressed(ImGuiKey_X) && !sel.empty())
 		{
@@ -1247,7 +1247,7 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 			const std::string payload = serializeSelection(st);
 			if (!payload.empty())
 			{
-				g_matClipboard = payload;
+				s_matClipboard = payload;
 				for (int sid : sel)
 					if (const MatGraphNode* sn = st.graph.findNode(sid);
 					    sn && sn->type != MatNodeType::Output &&
@@ -1258,7 +1258,7 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 				structuralEdit = true;
 			}
 		}
-		if (kbOk && mod && ImGui::IsKeyPressed(ImGuiKey_V) && !g_matClipboard.empty())
+		if (kbOk && mod && ImGui::IsKeyPressed(ImGuiKey_V) && !s_matClipboard.empty())
 		{
 			// Paste at the mouse when it's over the canvas, else into the visible center.
 			const ImVec2 org = canvasOrigin;
@@ -1268,7 +1268,7 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 			const float Z = st.geState.zoom;
 			const float gx = ((overCanvas ? mp.x : org.x + avail.x * 0.5f) - org.x - st.geState.pan.x) / Z;
 			const float gy = ((overCanvas ? mp.y : org.y + avail.y * 0.5f) - org.y - st.geState.pan.y) / Z;
-			if (pasteInto(st, g_matClipboard, gx, gy)) structuralEdit = true;
+			if (pasteInto(st, s_matClipboard, gx, gy)) structuralEdit = true;
 		}
 		if (kbOk && mod && ImGui::IsKeyPressed(ImGuiKey_D) && !sel.empty())
 		{
@@ -1306,14 +1306,14 @@ bool isMaterialFunctionAsset(const std::string& path)
 	return EditorAssetTypeCache::is(path, HE::AssetType::MaterialFunction);
 }
 
-bool isDirty(const std::string& assetPath) { return g_states.dirty(assetPath); }
+bool isDirty(const std::string& assetPath) { return s_states.dirty(assetPath); }
 
-void forget(const std::string& assetPath) { g_states.forget(assetPath); }
+void forget(const std::string& assetPath) { s_states.forget(assetPath); }
 
 std::string takeOpenRequest()
 {
-	std::string r = std::move(g_openAssetRequest);
-	g_openAssetRequest.clear();
+	std::string r = std::move(s_openAssetRequest);
+	s_openAssetRequest.clear();
 	return r;
 }
 
@@ -1538,7 +1538,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 	{
 		ImGui::SameLine(ImGui::GetContentRegionAvail().x - 250.0f);
 		if (ImGui::Button("Open Parent") && ctx.contentManager)
-			g_openAssetRequest = ctx.contentManager->resolveAbsolutePath(mat->parentMaterialPath);
+			s_openAssetRequest = ctx.contentManager->resolveAbsolutePath(mat->parentMaterialPath);
 	}
 	ImGui::SameLine(ImGui::GetContentRegionAvail().x - 140.0f);
 	if (ImGui::Button(st.isFunction ? "Save Function" : "Save Material") && assetOk)

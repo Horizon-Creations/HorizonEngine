@@ -16,7 +16,7 @@ namespace ContentBrowserPanel
 	// tab" slot: double-clicking an asset opens its editor tab and has to force
 	// the tab bar to focus it next frame. `openSceneGuarded` runs a scene open
 	// through the shell's unsaved-changes guard (double-clicking a .hescene).
-	// Both are owned by RenderEditor — hence passed in rather than duplicated.
+	// Both are owned by renderEditor — hence passed in rather than duplicated.
 	void render(AppContext& ctx, int& tabSelectRequest,
 	            const std::function<void(const std::string&)>& openSceneGuarded);
 

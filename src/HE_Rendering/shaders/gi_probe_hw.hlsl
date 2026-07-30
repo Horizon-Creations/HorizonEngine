@@ -35,7 +35,7 @@
 // (OpenGL), MetalRenderer.mm's `kGIProbeOctSizeShade`, the D3D11/D3D12
 // `GI_PROBE_OCT` blocks, and `kLightingPreamble`'s `kOct` in
 // src/HE_Rendering/src/material/MaterialShaderLibrary.cpp — plus the host-side
-// `kGiProbeOctSize` each backend allocates the atlas with. Changing it here
+// `kGIProbeOctSize` each backend allocates the atlas with. Changing it here
 // alone silently reads the wrong texels.
 //
 // WHAT BREAKS ON DRIFT: every copy still compiles and still runs. The probes
@@ -69,7 +69,7 @@ RWTexture2D<float4>  uIrr     : register(u0);
 RWTexture2D<float2>  uVis     : register(u1);
 RaytracingAccelerationStructure uTlas : register(t7);
 
-static const int kOctSize = 8; // must match the host's kGiProbeOctSize
+static const int kOctSize = 8; // must match the host's kGIProbeOctSize
 
 // Any-hit over the TLAS (occlusion only) — for the secondary shadow rays.
 bool giSceneAnyHit(float3 o, float3 d, float tMin, float tMax)

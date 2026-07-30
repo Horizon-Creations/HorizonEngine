@@ -42,7 +42,7 @@ public:
     // Load a named script in the given language (Lua by default). Python routes
     // to the CPython backend when the engine was built with it; otherwise fails.
     bool loadScript(const std::string& name, const std::string& source,
-                    ScriptLanguage lang = ScriptLanguage::Lua);
+                    HE::ScriptLanguage lang = HE::ScriptLanguage::Lua);
 
     // Create an instance of a named script bound to an entity.
     // self.entityId is set to the raw entt::entity value.
@@ -55,7 +55,7 @@ public:
                                             entt::entity       entity);
     ScriptEngine::InstanceId createInstance(const std::string& scriptName,
                                             entt::entity       entity,
-                                            ScriptLanguage     lang);
+                                            HE::ScriptLanguage     lang);
 
     void destroyInstance(ScriptEngine::InstanceId id);
 
@@ -102,7 +102,7 @@ public:
     // 2-arg form routes by which backend owns the name (ambiguous across
     // languages); prefer the 3-arg form with the script's known language.
     bool hotReloadScript(const std::string& name, const std::string& source);
-    bool hotReloadScript(const std::string& name, const std::string& source, ScriptLanguage lang);
+    bool hotReloadScript(const std::string& name, const std::string& source, HE::ScriptLanguage lang);
 
     // Inject stored property overrides into a live instance before onStart.
     void injectProperties(ScriptEngine::InstanceId id,
@@ -111,7 +111,7 @@ public:
     // True if the name is loaded in either backend; the 2-arg form checks the
     // specific language (so a Lua-loaded name reads as not-loaded for Python).
     bool   isScriptLoaded(const std::string& name) const;
-    bool   isScriptLoaded(const std::string& name, ScriptLanguage lang) const;
+    bool   isScriptLoaded(const std::string& name, HE::ScriptLanguage lang) const;
     size_t loadedScriptCount() const;
     size_t instanceCount() const;
     const std::string& lastError() const;
@@ -134,12 +134,12 @@ private:
     // Language lives in the high byte of the public InstanceId. Lua == 0 keeps
     // existing ids untouched; backends store instances under their own raw ids.
     static constexpr int kLangShift = 56;
-    static InstanceId tagId(InstanceId raw, ScriptLanguage lang)
+    static InstanceId tagId(InstanceId raw, HE::ScriptLanguage lang)
     { return raw | (static_cast<InstanceId>(static_cast<uint8_t>(lang)) << kLangShift); }
     static InstanceId rawId(InstanceId id)
     { return id & ((static_cast<InstanceId>(1) << kLangShift) - 1); }
-    static ScriptLanguage langOf(InstanceId id)
-    { return static_cast<ScriptLanguage>(static_cast<uint8_t>(id >> kLangShift)); }
+    static HE::ScriptLanguage langOf(InstanceId id)
+    { return static_cast<HE::ScriptLanguage>(static_cast<uint8_t>(id >> kLangShift)); }
 
     // Backend selection: by id (per-instance calls) or by name (name-keyed calls).
     IScriptBackend* backendForId(InstanceId id);

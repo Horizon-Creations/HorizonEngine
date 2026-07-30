@@ -1334,9 +1334,9 @@ TEST_CASE("GlobalState::refreshEngineFolder merges project overrides into the di
 	REQUIRE(gs.refreshEngineFolder(engineDir.path.string(), dir.path.string()));
 
 	auto [engineFolder, lock] = gs.lockEngineFolder();
-	const Folder* matFns = nullptr;
-	const Folder* meshes = nullptr;
-	for (const Folder* f : engineFolder.subfolders)
+	const HE::Folder* matFns = nullptr;
+	const HE::Folder* meshes = nullptr;
+	for (const HE::Folder* f : engineFolder.subfolders)
 	{
 		if (f->name == "MaterialFunctions") matFns = f;
 		if (f->name == "Meshes")            meshes = f;
@@ -1345,9 +1345,9 @@ TEST_CASE("GlobalState::refreshEngineFolder merges project overrides into the di
 	REQUIRE(meshes != nullptr);
 
 	// Fresnel.hasset's node now points at the OVERRIDE file, not the default.
-	const File* fresnel = nullptr;
-	const File* onlyInProject = nullptr;
-	for (const File* f : matFns->files)
+	const HE::File* fresnel = nullptr;
+	const HE::File* onlyInProject = nullptr;
+	for (const HE::File* f : matFns->files)
 	{
 		if (f->name == "Fresnel.hasset")       fresnel = f;
 		if (f->name == "OnlyInProject.hasset") onlyInProject = f;

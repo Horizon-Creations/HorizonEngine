@@ -103,10 +103,10 @@ private:
 	void           destroyScenePipeline();
 	// A4: node-graph material pipelines (built from MaterialShaderLibrary SPIR-V).
 	// createMaterialResources()/destroyMaterialResources() are no-ops when the shader
-	// cross-compiler (HE_HAVE_SHADERC) is absent; getOrBuildMaterialPipeline returns null.
+	// cross-compiler (HE_HAVE_SHADERC) is absent; GetOrBuildMaterialPipeline returns null.
 	void           createMaterialResources();
 	void           destroyMaterialResources();
-	VkPipeline     getOrBuildMaterialPipeline(uint64_t hash, const std::string& frag,
+	VkPipeline     GetOrBuildMaterialPipeline(uint64_t hash, const std::string& frag,
 	                                           const std::string& vertBody, bool hdr,
 	                                           bool transparent);
 	void           DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t height, bool hdr = false);
@@ -565,12 +565,12 @@ private:
 	// which is why GetCapabilities still reports supportsGlobalIllumination
 	// = false: flipping it on is the LAST step, once the full pipeline exists.
 	// Compute is core Vulkan, so no extension/feature gate is needed.
-	struct GiBlasRange
+	struct GIBlasRange
 	{
 		int32_t nodeOffset = 0, triOffset = 0;
 		bool    valid      = false;
 	};
-	struct GiInstanceGpu // must match gi_shadow.comp/gi_probe.comp's GiInst (std430, 96 bytes)
+	struct GIInstanceGpu // must match gi_shadow.comp/gi_probe.comp's GiInst (std430, 96 bytes)
 	{
 		glm::mat4 invTransform{1.0f};
 		glm::vec4 baseColor{1.0f};
@@ -583,7 +583,7 @@ private:
 		void*          mapped = nullptr;
 		VkDeviceSize   size   = 0;
 	};
-	GiBlasRange  buildGiBlas(const HE::UUID& meshId);
+	GIBlasRange  BuildGIBlas(const HE::UUID& meshId);
 	void         updateGiAccel();  // lazy BLAS append + per-frame instance upload
 	void         destroyGiAccel();
 
@@ -599,9 +599,9 @@ private:
 	void destroyGiProbeAtlas();
 	void runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h);
 
-	static constexpr float kGiProbeSpacing     = 4.0f;
-	static constexpr int   kGiMaxProbesPerAxis = 10;
-	static constexpr int   kGiProbeOctSize     = 8;
+	static constexpr float kGIProbeSpacing     = 4.0f;
+	static constexpr int   kGIMaxProbesPerAxis = 10;
+	static constexpr int   kGIProbeOctSize     = 8;
 
 	bool m_giPipelinesTried = false;
 	bool m_giReady          = false; // pipelines built OK
@@ -662,7 +662,7 @@ private:
 	// memcpys `data` into it. Grows by recreation; never shrinks.
 	bool         uploadGiBuffer(GiBuffer& b, const void* data, VkDeviceSize size,
 	                            VkBufferUsageFlags usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-	std::unordered_map<HE::UUID, GiBlasRange> m_giBlasCache;
+	std::unordered_map<HE::UUID, GIBlasRange> m_giBlasCache;
 	std::vector<HE::GiBvhNode>     m_giNodesCpu;
 	std::vector<HE::GiBvhTriangle> m_giTrisCpu;
 	bool     m_giBlasDirty = false;

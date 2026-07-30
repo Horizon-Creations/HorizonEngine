@@ -269,7 +269,7 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_SRC))
 			a.sourceCode.assign(reinterpret_cast<const char*>(c->data.data()), c->data.size());
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_SLNG); c && !c->data.empty())
-			a.language = static_cast<ScriptLanguage>(c->data[0]); // absent → default Lua
+			a.language = static_cast<HE::ScriptLanguage>(c->data[0]); // absent → default Lua
 		handle = m_scriptAssets.insert(std::move(a)); break;
 	}
 	case HE::AssetType::MaterialFunction:

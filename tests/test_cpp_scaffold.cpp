@@ -20,12 +20,12 @@ std::string readFile(const fs::path& p)
 
 TEST_CASE("cppIdentifier: sanitises names into valid C++ identifiers")
 {
-	CHECK(cppIdentifier("StartupScene") == "StartupScene");
-	CHECK(cppIdentifier("My Level")     == "My_Level");   // space → underscore
-	CHECK(cppIdentifier("level-2.a")    == "level_2_a");  // punctuation → underscore
-	CHECK(cppIdentifier("3rd")          == "_3rd");        // leading digit gets a prefix
-	CHECK(cppIdentifier("")             == "Unnamed");     // empty → placeholder
-	CHECK(cppIdentifier("_ok_")         == "_ok_");        // underscores preserved
+	CHECK(HE::tools::cppIdentifier("StartupScene") == "StartupScene");
+	CHECK(HE::tools::cppIdentifier("My Level")     == "My_Level");   // space → underscore
+	CHECK(HE::tools::cppIdentifier("level-2.a")    == "level_2_a");  // punctuation → underscore
+	CHECK(HE::tools::cppIdentifier("3rd")          == "_3rd");        // leading digit gets a prefix
+	CHECK(HE::tools::cppIdentifier("")             == "Unnamed");     // empty → placeholder
+	CHECK(HE::tools::cppIdentifier("_ok_")         == "_ok_");        // underscores preserved
 }
 
 TEST_CASE("scaffoldCppProject: lays down a compilable Source/ tree")

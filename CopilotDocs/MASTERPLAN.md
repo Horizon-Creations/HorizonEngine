@@ -85,6 +85,8 @@ untereinander unabhängig und parallelisierbar.
 
 ## Bauprinzip — bottom-up (low-level zuerst)
 
+> **Code-Konventionen** (Namespace `HE`, `m_`/`s_`-Präfixe, Casing, Kommentar-Stil, On-Disk-Formate, Rename-Checkliste): [`docs/coding-conventions.md`](../docs/coding-conventions.md) — festgelegt im 2026-07-Rework, vor neuem Code lesen.
+
 **Regel:** Erst die zugrunde liegenden Systeme *fertig* bauen, dann die Features, die darauf aufsetzen.
 Kein High-Level-Feature auf einem unfertigen Fundament. Der Abhängigkeitsgraph oben **ist** diese
 Reihenfolge — er wird **von unten nach oben** abgearbeitet (Core / Memory / Asset-Pipeline → Rendering /

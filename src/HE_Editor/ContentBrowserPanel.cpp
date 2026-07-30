@@ -106,14 +106,14 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		ImGui::Separator();
 
 		// ── Tree: single-click = expand/collapse, double-click = navigate ──
-		static const Folder* s_selectedTreeFolder = nullptr;
+		static const HE::Folder* s_selectedTreeFolder = nullptr;
 		// Which root s_selectedTreeFolder/s_gridFolder belongs to: 0=Content,
 		// 1=Engine, 2=Source. Needed because nullptr used to unambiguously mean
 		// "the Content root" — three roots now exist, so nullptr is ambiguous and
 		// every place that treats it as a root sentinel must also check this tag.
 		static int s_selectedRootKind = 0;
 		// The Folder backing each root kind (structured-binding refs captured above).
-		auto cbRootFolder = [&](int kind) -> const Folder&
+		auto cbRootFolder = [&](int kind) -> const HE::Folder&
 		{ return kind == 1 ? engineFolder : kind == 2 ? sourceFolder : contentFolder; };
 		// If the Source root is hidden (non-C++ project) but was last selected,
 		// fall back to Content so the grid never shows a stale/empty Source view.
@@ -137,7 +137,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			ImGui::EndDragDropTarget();
 		};
 
-		std::function<void(const Folder*, int, int)> renderTree = [&](const Folder* folder, int depth, int rootKind)
+		std::function<void(const HE::Folder*, int, int)> renderTree = [&](const HE::Folder* folder, int depth, int rootKind)
 		{
 			ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow
 									 | ImGuiTreeNodeFlags_SpanAvailWidth;
@@ -252,7 +252,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 
 		// ── Determine which folder's content to show ──────────────────────
 		// s_selectedTreeFolder nullptr → root; otherwise the selected sub-folder
-		static const Folder* s_gridFolder = nullptr;
+		static const HE::Folder* s_gridFolder = nullptr;
 
 		// refreshContentFolder()/refreshEngineFolder() (asset create/rename/delete,
 		// project load, periodic external-change poll) delete and rebuild every
@@ -280,18 +280,18 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			s_treeVersionSeen   = treeVersion;
 			s_engineVersionSeen = engineVersion;
 			s_sourceVersionSeen = sourceVersion;
-			const Folder* fresh = nullptr;
+			const HE::Folder* fresh = nullptr;
 			if (!s_gridFolderPath.empty())
 			{
-				std::function<const Folder*(const Folder*)> findByPath =
-					[&](const Folder* cur) -> const Folder*
+				std::function<const HE::Folder*(const HE::Folder*)> findByPath =
+					[&](const HE::Folder* cur) -> const HE::Folder*
 				{
 					if (cur->fullPath == s_gridFolderPath) return cur;
-					for (const Folder* sub : cur->subfolders)
-						if (const Folder* hit = findByPath(sub)) return hit;
+					for (const HE::Folder* sub : cur->subfolders)
+						if (const HE::Folder* hit = findByPath(sub)) return hit;
 					return nullptr;
 				};
-				const Folder& searchRoot = cbRootFolder(s_selectedRootKind);
+				const HE::Folder& searchRoot = cbRootFolder(s_selectedRootKind);
 				fresh = findByPath(&searchRoot);
 				if (fresh == &searchRoot) fresh = nullptr; // root is the null state
 			}
@@ -303,7 +303,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		if (s_selectedTreeFolder != s_gridFolder)
 			s_gridFolder = s_selectedTreeFolder;
 
-		const Folder* displayFolder = s_gridFolder ? s_gridFolder : &cbRootFolder(s_selectedRootKind);
+		const HE::Folder* displayFolder = s_gridFolder ? s_gridFolder : &cbRootFolder(s_selectedRootKind);
 		s_gridFolderPath = s_gridFolder ? s_gridFolder->fullPath : std::string{};
 
 		// ── Breadcrumb ────────────────────────────────────────────────────
@@ -319,10 +319,10 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(2, 1));
 
 			// Build ancestor chain via DFS
-			std::vector<const Folder*> crumbs;
+			std::vector<const HE::Folder*> crumbs;
 			if (s_gridFolder)
 			{
-				std::function<bool(const Folder*)> findPath = [&](const Folder* cur) -> bool
+				std::function<bool(const HE::Folder*)> findPath = [&](const HE::Folder* cur) -> bool
 				{
 					if (cur == s_gridFolder) return true;
 					for (auto* sub : cur->subfolders)
@@ -350,7 +350,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				ImGui::SameLine(0, 2);
 				ImGui::TextDisabled(">");
 				ImGui::SameLine(0, 2);
-				const Folder* crumb = crumbs[ci];
+				const HE::Folder* crumb = crumbs[ci];
 				bool isLast = (ci == static_cast<int>(crumbs.size()) - 1);
 				if (isLast)
 				{
@@ -526,7 +526,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		auto cbLowerExt = [](const std::string& e){ std::string s=e; for(auto&c:s) c=(char)::tolower((unsigned char)c); return s; };
 		auto cbIsHeaderExt = [&](const std::string& e){ std::string s=cbLowerExt(e); return s==".h"||s==".hpp"||s==".hh"||s==".hxx"; };
 		auto cbIsSourceExt = [&](const std::string& e){ std::string s=cbLowerExt(e); return s==".cpp"||s==".cc"||s==".cxx"||s==".c"; };
-		std::vector<const File*> gridFiles;
+		std::vector<const HE::File*> gridFiles;
 		gridFiles.reserve(displayFolder->files.size());
 		for (auto* f : displayFolder->files)
 		{
@@ -739,7 +739,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		auto drawCreateAssetItems = [&](const std::string& targetFolder)
 		{
 			auto tryCreate = [&](const char* defaultName, const char* ext, HE::AssetType type,
-			                     ScriptLanguage scriptLang = ScriptLanguage::Lua,
+			                     HE::ScriptLanguage scriptLang = HE::ScriptLanguage::Lua,
 			                     const char* hcBaseClass = nullptr)
 			{
 				// Build a path that does not yet exist
@@ -858,17 +858,17 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				if (ImGui::BeginMenu("HorizonCode Player"))
 				{
 					if (ImGui::MenuItem("Player Controller"))
-						tryCreate("NewPlayerController", ".hasset", HE::AssetType::HorizonCodeClass, ScriptLanguage::Lua, "PlayerController");
+						tryCreate("NewPlayerController", ".hasset", HE::AssetType::HorizonCodeClass, HE::ScriptLanguage::Lua, "PlayerController");
 					if (ImGui::MenuItem("Player Character"))
-						tryCreate("NewPlayerCharacter", ".hasset", HE::AssetType::HorizonCodeClass, ScriptLanguage::Lua, "PlayerCharacter");
+						tryCreate("NewPlayerCharacter", ".hasset", HE::AssetType::HorizonCodeClass, HE::ScriptLanguage::Lua, "PlayerCharacter");
 					ImGui::EndMenu();
 				}
 				break;
 			case ProjectScriptLanguage::Lua:
-				if (ImGui::MenuItem("Script")) tryCreate("NewScript", ".hasset", HE::AssetType::Script, ScriptLanguage::Lua);
+				if (ImGui::MenuItem("Script")) tryCreate("NewScript", ".hasset", HE::AssetType::Script, HE::ScriptLanguage::Lua);
 				break;
 			case ProjectScriptLanguage::Python:
-				if (ImGui::MenuItem("Script")) tryCreate("NewScript", ".hasset", HE::AssetType::Script, ScriptLanguage::Python);
+				if (ImGui::MenuItem("Script")) tryCreate("NewScript", ".hasset", HE::AssetType::Script, HE::ScriptLanguage::Python);
 				break;
 			case ProjectScriptLanguage::Cpp:
 				if (ImGui::MenuItem("C++ Class"))

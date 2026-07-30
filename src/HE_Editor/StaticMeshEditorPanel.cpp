@@ -45,7 +45,7 @@ struct State
 	bool    statsDone = false;
 };
 
-AssetPanelState<State> g_states;
+AssetPanelState<State> s_states;
 
 // Interleaved (cooked) assets keep uv in floats 6/7 of each 8-float vertex; loose
 // assets keep a separate uvs array. Returns false when the mesh has no UVs.
@@ -191,11 +191,11 @@ bool isStaticMeshAsset(const std::string& path)
 	return EditorAssetTypeCache::is(path, HE::AssetType::StaticMesh);
 }
 
-void forget(const std::string& assetPath) { g_states.forget(assetPath); }
+void forget(const std::string& assetPath) { s_states.forget(assetPath); }
 
 void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, const ImVec2& size)
 {
-	State& st = g_states[assetPath];
+	State& st = s_states[assetPath];
 	if (!st.loaded && ctx.contentManager)
 	{
 		st.meshId = openPanelAsset(ctx, assetPath, st.name, st.relPath);

@@ -286,7 +286,7 @@ struct ScriptAsset : public RuntimeAsset
 	// Scripting language of sourceCode. Lua by default so pre-existing .hasset
 	// files (which carry no language chunk) keep loading as Lua. Persisted as a
 	// 1-byte CHUNK_SLNG; the asset is the single source of truth for language.
-	ScriptLanguage language = ScriptLanguage::Lua;
+	HE::ScriptLanguage language = HE::ScriptLanguage::Lua;
 };
 
 struct AudioAsset : public RuntimeAsset

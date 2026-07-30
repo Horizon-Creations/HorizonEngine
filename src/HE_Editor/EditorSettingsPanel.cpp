@@ -99,19 +99,19 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode)
 		ImGui::SetNextItemWidth(-1.0f);
 		if (ImGui::BeginCombo("##backend", ctx.backendName.c_str()))
 		{
-			auto pick = [&](const char* label, HE::GraphicsAPI api){
+			auto pick = [&](const char* label, HE::RendererBackend api){
 				if (ImGui::Selectable(label)) { ctx.globalState->setSelectedRHI(api); ctx.backendName = getRHIName(api); }
 			};
-			pick("OpenGL", HE::GraphicsAPI::OpenGL);
+			pick("OpenGL", HE::RendererBackend::OpenGL);
 #ifdef HE_VULKAN_ENABLED
-			pick("Vulkan", HE::GraphicsAPI::Vulkan);
+			pick("Vulkan", HE::RendererBackend::Vulkan);
 #endif
 #ifdef _WIN32
-			pick("DirectX11", HE::GraphicsAPI::D3D11);
-			pick("DirectX12", HE::GraphicsAPI::D3D12);
+			pick("DirectX11", HE::RendererBackend::D3D11);
+			pick("DirectX12", HE::RendererBackend::D3D12);
 #endif
 #ifdef __APPLE__
-			pick("Metal", HE::GraphicsAPI::Metal);
+			pick("Metal", HE::RendererBackend::Metal);
 #endif
 			ImGui::EndCombo();
 		}

@@ -105,6 +105,9 @@ static void readProfiles(const json& j, ProjectData& data)
 	if (!known) data.activeExportProfile = data.exportProfiles.front().name;
 }
 
+namespace HE::tools
+{
+
 const char* toString(ProjectScriptLanguage lang)
 {
 	switch (lang)
@@ -125,9 +128,11 @@ ProjectScriptLanguage projectScriptLanguageFromString(const std::string& s)
 	return ProjectScriptLanguage::HorizonCode; // unknown/missing → default
 }
 
+} // namespace HE::tools
+
 // ─── Native C++ gameplay scaffolding ─────────────────────────────────────────
 
-std::string cppIdentifier(const std::string& name)
+std::string HE::tools::cppIdentifier(const std::string& name)
 {
 	std::string id;
 	id.reserve(name.size());
@@ -166,7 +171,7 @@ bool writeTextFileIfAbsent(const fs::path& path, const std::string& content)
 bool writeCppLevelScript(const std::string& projectRoot, const std::string& sceneName)
 {
 	const fs::path source = fs::path(projectRoot) / "Source";
-	const std::string className = cppIdentifier(sceneName) + "LevelScript";
+	const std::string className = HE::tools::cppIdentifier(sceneName) + "LevelScript";
 	const fs::path header = source / (className + ".h");
 	const fs::path body   = source / (className + ".cpp");
 	// Idempotent: an existing level script for this scene is left untouched.
@@ -180,7 +185,7 @@ bool writeCppClass(const std::string& projectRoot, const std::string& className,
                    std::string* outCreatedHeaderPath)
 {
 	const fs::path source = fs::path(projectRoot) / "Source";
-	const std::string base = cppIdentifier(className);
+	const std::string base = HE::tools::cppIdentifier(className);
 	std::string name = base;
 	int counter = 1;
 	while (fs::exists(source / (name + ".h")) || fs::exists(source / (name + ".cpp")))
@@ -207,7 +212,7 @@ bool scaffoldCppProject(const std::string& projectRoot,
 	ok &= writeTextFileIfAbsent(source / "GameInstance.h",      CppScaffold::gameInstanceHeader());
 	ok &= writeTextFileIfAbsent(source / "GameInstance.cpp",    CppScaffold::gameInstanceSource());
 	ok &= writeTextFileIfAbsent(source / "GameLogic.cpp",       CppScaffold::gameLogicSource(startupSceneName));
-	ok &= writeTextFileIfAbsent(source / "CMakeLists.txt",      CppScaffold::cmakeLists(cppIdentifier(projectName)));
+	ok &= writeTextFileIfAbsent(source / "CMakeLists.txt",      CppScaffold::cmakeLists(HE::tools::cppIdentifier(projectName)));
 	ok &= writeTextFileIfAbsent(source / "README.md",          CppScaffold::readme(projectName));
 	ok &= writeCppLevelScript(projectRoot, startupSceneName);
 	return ok;
@@ -323,7 +328,7 @@ bool ProjectManager::createNewProject(const std::string& projectDir,
 	j["version"]        = "1.0";
 	j["preset"]         = static_cast<int>(preset);
 	j["startupScene"]   = "Content/StartupScene.hescene";
-	j["scriptLanguage"] = toString(scriptLanguage);
+	j["scriptLanguage"] = HE::tools::toString(scriptLanguage);
 
 	// Seed the default packaging profiles so Build > Export works out of the box.
 	const auto profiles = defaultExportProfiles();
@@ -388,7 +393,7 @@ bool ProjectManager::loadProject(const std::string& projectPath)
 
 	readProfiles(j, m_currentProject);
 	m_currentProject.scriptLanguage =
-		projectScriptLanguageFromString(jsonString(j, "scriptLanguage"));
+		HE::tools::projectScriptLanguageFromString(jsonString(j, "scriptLanguage"));
 
 	if (m_onProjectLoaded)
 		m_onProjectLoaded(m_currentProject.startupScene);
@@ -419,7 +424,7 @@ bool ProjectManager::saveProject(const std::string& projectPath)
 		jp.push_back(profileToJson(p));
 	j["exportProfiles"]      = std::move(jp);
 	j["activeExportProfile"] = m_currentProject.activeExportProfile;
-	j["scriptLanguage"]      = toString(m_currentProject.scriptLanguage);
+	j["scriptLanguage"]      = HE::tools::toString(m_currentProject.scriptLanguage);
 
 	// Write temp + rename: an in-place ofstream truncates the only copy before
 	// the new content is durable, so disk-full/kill mid-write would leave an

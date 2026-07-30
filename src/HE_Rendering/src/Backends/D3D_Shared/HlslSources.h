@@ -729,7 +729,7 @@ Texture2D<float2>    uVisPrev : register(t6);
 RWTexture2D<float4>  uIrr     : register(u0);
 RWTexture2D<float2>  uVis     : register(u1);
 
-static const int kOctSize = 8; // must match the host's kGiProbeOctSize
+static const int kOctSize = 8; // must match the host's kGIProbeOctSize
 
 float3 octDecode(float2 e)
 {

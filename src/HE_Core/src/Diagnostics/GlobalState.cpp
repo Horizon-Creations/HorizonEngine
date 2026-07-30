@@ -14,28 +14,28 @@ namespace fs = std::filesystem;
 
 // Clamp a (possibly stale, possibly from another OS) RHI choice to one that
 // can actually be created on this platform.
-static HE::GraphicsAPI sanitizeRHI(HE::GraphicsAPI rhi)
+static HE::RendererBackend sanitizeRHI(HE::RendererBackend rhi)
 {
 #ifdef __APPLE__
-	if (rhi == HE::GraphicsAPI::D3D11 || rhi == HE::GraphicsAPI::D3D12)
-		return HE::GraphicsAPI::Metal;
+	if (rhi == HE::RendererBackend::D3D11 || rhi == HE::RendererBackend::D3D12)
+		return HE::RendererBackend::Metal;
 #else
-	if (rhi == HE::GraphicsAPI::Metal)
-		return HE::GraphicsAPI::OpenGL;
+	if (rhi == HE::RendererBackend::Metal)
+		return HE::RendererBackend::OpenGL;
 #ifndef _WIN32
-	if (rhi == HE::GraphicsAPI::D3D11 || rhi == HE::GraphicsAPI::D3D12)
-		return HE::GraphicsAPI::OpenGL;
+	if (rhi == HE::RendererBackend::D3D11 || rhi == HE::RendererBackend::D3D12)
+		return HE::RendererBackend::OpenGL;
 #endif
 #endif
 	return rhi;
 }
 
-static HE::GraphicsAPI defaultRHI()
+static HE::RendererBackend defaultRHI()
 {
 #ifdef __APPLE__
-	return HE::GraphicsAPI::Metal;
+	return HE::RendererBackend::Metal;
 #else
-	return HE::GraphicsAPI::OpenGL;
+	return HE::RendererBackend::OpenGL;
 #endif
 }
 
@@ -113,7 +113,7 @@ void GlobalState::readConfig()
 		auto it = j.find(key);
 		return (it != j.end() && it->is_string()) ? it->get<std::string>() : std::string{};
 	};
-	m_engineStatus.selectedRHI      = sanitizeRHI(static_cast<HE::GraphicsAPI>(
+	m_engineStatus.selectedRHI      = sanitizeRHI(static_cast<HE::RendererBackend>(
 		intField("RHI", static_cast<int>(defaultRHI()))));
 	// A config written by an older editor still carries an "OS" key. It was never
 	// read by anything (it was hard-coded to Windows on every platform), so it is
@@ -222,15 +222,15 @@ void GlobalState::removeKnownProject(const std::string& path)
 	kp.erase(std::remove(kp.begin(), kp.end(), path), kp.end());
 }
 
-static void clearFolder(Folder* folder)
+static void clearFolder(HE::Folder* folder)
 {
-	for (Folder* sub : folder->subfolders)
+	for (HE::Folder* sub : folder->subfolders)
 	{
 		clearFolder(sub);
 		delete sub;
 	}
 	folder->subfolders.clear();
-	for (File* file : folder->files)
+	for (HE::File* file : folder->files)
 		delete file;
 	folder->files.clear();
 }
@@ -247,15 +247,15 @@ namespace
 {
 	struct ScopedFolderNodes
 	{
-		Folder* folder;
-		explicit ScopedFolderNodes(Folder* f) : folder(f) {}
+		HE::Folder* folder;
+		explicit ScopedFolderNodes(HE::Folder* f) : folder(f) {}
 		~ScopedFolderNodes() { clearFolder(folder); }
 		ScopedFolderNodes(const ScopedFolderNodes&)            = delete;
 		ScopedFolderNodes& operator=(const ScopedFolderNodes&) = delete;
 	};
 }
 
-static void populateFolder(Folder* folder, const fs::path& path)
+static void populateFolder(HE::Folder* folder, const fs::path& path)
 {
 	// error_code overloads throughout: the throwing directory_iterator raises
 	// filesystem_error on the very first unreadable entry (a permission-denied
@@ -291,7 +291,7 @@ static void populateFolder(Folder* folder, const fs::path& path)
 			// tree: the node only gets an owner once push_back succeeded, and
 			// from then on the root's ScopedFolderNodes covers it. Anything that
 			// throws in between (bad_alloc) therefore frees exactly once.
-			std::unique_ptr<Folder> sub(new Folder());
+			std::unique_ptr<HE::Folder> sub(new HE::Folder());
 			sub->name     = entry.path().filename().string();
 			sub->fullPath = entry.path().string();
 			folder->subfolders.push_back(sub.get());
@@ -299,7 +299,7 @@ static void populateFolder(Folder* folder, const fs::path& path)
 		}
 		else if (entry.is_regular_file(typeEc))
 		{
-			std::unique_ptr<File> file(new File());
+			std::unique_ptr<HE::File> file(new HE::File());
 			file->name      = entry.path().filename().string();
 			file->fullPath  = entry.path().string();
 			file->extension = entry.path().extension().string();
@@ -333,7 +333,7 @@ bool GlobalState::refreshContentFolder()
 	}
 
 	// Daten ausserhalb des Locks zusammenstellen, dann atomar eintauschen
-	Folder fresh;
+	HE::Folder fresh;
 	ScopedFolderNodes freshOwner(&fresh);
 	fresh.name     = contentFolderpath.filename().string();
 	fresh.fullPath = contentFolderpath.string();
@@ -372,7 +372,7 @@ bool GlobalState::refreshSourceFolder()
 	// Build off-lock. An absent Source/ (non-C++ project, or not scaffolded yet)
 	// is not an error — leave the tree empty; the root's fullPath is still set so
 	// the browser's drop/create targets resolve.
-	Folder fresh;
+	HE::Folder fresh;
 	ScopedFolderNodes freshOwner(&fresh);
 	fresh.name     = "Source";
 	fresh.fullPath = sourcePath.string();
@@ -397,7 +397,7 @@ bool GlobalState::refreshSourceFolder()
 // with no matching default is simply added. Folder nodes that already exist
 // keep pointing at the default directory — only LEAF files are ever
 // "overridden" here, never the folder's own identity.
-static void mergeOverrideInto(Folder* base, const fs::path& overrideDir)
+static void mergeOverrideInto(HE::Folder* base, const fs::path& overrideDir)
 {
 	// Same non-throwing iteration contract as populateFolder — an unreadable
 	// override directory must degrade to "no overrides", never to an exception
@@ -421,15 +421,15 @@ static void mergeOverrideInto(Folder* base, const fs::path& overrideDir)
 		std::error_code typeEc;
 		if (entry.is_directory(typeEc))
 		{
-			Folder* sub = nullptr;
-			for (Folder* s : base->subfolders)
+			HE::Folder* sub = nullptr;
+			for (HE::Folder* s : base->subfolders)
 				if (s->name == entry.path().filename().string()) { sub = s; break; }
 			if (!sub)
 			{
 				// Owned by the unique_ptr until push_back linked it into the tree
 				// (see populateFolder) — the root's ScopedFolderNodes takes over
 				// from there.
-				std::unique_ptr<Folder> owned(new Folder());
+				std::unique_ptr<HE::Folder> owned(new HE::Folder());
 				owned->name     = entry.path().filename().string();
 				owned->fullPath = entry.path().string();
 				base->subfolders.push_back(owned.get());
@@ -439,14 +439,14 @@ static void mergeOverrideInto(Folder* base, const fs::path& overrideDir)
 		}
 		else if (entry.is_regular_file(typeEc))
 		{
-			File* match = nullptr;
-			for (File* f : base->files)
+			HE::File* match = nullptr;
+			for (HE::File* f : base->files)
 				if (f->name == entry.path().filename().string()) { match = f; break; }
 			if (match)
 				match->fullPath = entry.path().string(); // override shadows the default
 			else
 			{
-				std::unique_ptr<File> file(new File());
+				std::unique_ptr<HE::File> file(new HE::File());
 				file->name      = entry.path().filename().string();
 				file->fullPath  = entry.path().string();
 				file->extension = entry.path().extension().string();
@@ -468,7 +468,7 @@ bool GlobalState::refreshEngineFolder(const std::string& engineContentAbsPath,
 		return false;
 	}
 
-	Folder fresh;
+	HE::Folder fresh;
 	ScopedFolderNodes freshOwner(&fresh);
 	fresh.name     = "Engine";
 	fresh.fullPath = enginePath.string();

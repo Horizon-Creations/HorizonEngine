@@ -232,7 +232,7 @@ vec2 giOctEncode(vec3 n)
 	return (n.z <= 0.0) ? ((1.0 - abs(p.yx)) * signP) : p;
 }
 
-const int GI_PROBE_OCT = 8; // must match OpenGLRenderer::kGiProbeOctSize
+const int GI_PROBE_OCT = 8; // must match OpenGLRenderer::kGIProbeOctSize
 
 // DDGI probe sampling — trilinear over the 8 surrounding probes × soft
 // backface × Chebyshev visibility. Direct port of Metal's
@@ -2870,7 +2870,7 @@ uniform vec4 uLightPosRange[8];  // xyz pos, w range
 uniform vec4 uLightColorType[8]; // rgb colour*intensity, w type (1 point, 2 spot)
 uniform vec4 uLightDirCos[8];    // xyz spot travel dir, w cos(half angle)
 
-const int kOctSize = 8; // must match OpenGLRenderer::kGiProbeOctSize
+const int kOctSize = 8; // must match OpenGLRenderer::kGIProbeOctSize
 
 vec3 octDecode(vec2 e)
 {
@@ -3564,7 +3564,7 @@ void glSaveCachedProgram(const std::filesystem::path& path, GLuint prog)
 }
 } // namespace
 
-unsigned int OpenGLRenderer::getOrBuildMaterialProgram(uint64_t key, const std::string& fragGlsl,
+unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::string& fragGlsl,
                                                        const std::string& vertBody,
                                                        const MaterialShaderVariant* precompiled)
 {
@@ -3709,7 +3709,7 @@ unsigned int OpenGLRenderer::getOrBuildMaterialProgram(uint64_t key, const std::
 // splicing + relies on the driver compiler only; null → generate the templates from
 // `config` right now via HE::generateParticleShaderSource (see that function's
 // comment on why it takes the resolved config, not the graph).
-unsigned int OpenGLRenderer::getOrBuildParticleProgram(uint64_t key, const HE::ParticleEmitterConfig& config,
+unsigned int OpenGLRenderer::GetOrBuildParticleProgram(uint64_t key, const HE::ParticleEmitterConfig& config,
                                                        const ParticleShaderVariant* precompiled)
 {
 	if (auto it = m_particlePrograms.find(key); it != m_particlePrograms.end()) return it->second;
@@ -3760,7 +3760,7 @@ unsigned int OpenGLRenderer::getOrBuildParticleProgram(uint64_t key, const HE::P
 // repurposed — model[0]=rect px, model[1]=uvRect, model[2].xy=viewport px, color=
 // tint; see MaterialShaderLibrary::uiVertex). Same fragment hash as the mesh path,
 // but a different vertex → own cache. Cached by hash; 0 cached on failure.
-unsigned int OpenGLRenderer::getOrBuildUIMaterialProgram(const HE::UUID& materialId)
+unsigned int OpenGLRenderer::GetOrBuildUIMaterialProgram(const HE::UUID& materialId)
 {
 	uint64_t key = 0; std::string fragGlsl, vertBody;
 	if (!resolveMaterialShader(materialId, key, fragGlsl, vertBody))
@@ -4307,12 +4307,12 @@ void OpenGLRenderer::DestroyBloomTargets()
 	m_bloomW = m_bloomH = 0;
 }
 
-void OpenGLRenderer::EnsureCloudFBO(int width, int height)
+void OpenGLRenderer::EnsureCloudTarget(int width, int height)
 {
 	width  = std::max(1, width);
 	height = std::max(1, height);
 	if (m_cloudFBO && width == m_cloudW && height == m_cloudH) return;
-	DestroyCloudFBO();
+	DestroyCloudTarget();
 	glGenFramebuffers(1, &m_cloudFBO);
 	glGenTextures(1, &m_cloudTex);
 	glBindFramebuffer(GL_FRAMEBUFFER, m_cloudFBO);
@@ -4331,7 +4331,7 @@ void OpenGLRenderer::EnsureCloudFBO(int width, int height)
 	m_cloudH = height;
 }
 
-void OpenGLRenderer::DestroyCloudFBO()
+void OpenGLRenderer::DestroyCloudTarget()
 {
 	if (m_cloudFBO) glDeleteFramebuffers(1, &m_cloudFBO);
 	if (m_cloudTex) glDeleteTextures(1, &m_cloudTex);
@@ -4490,9 +4490,9 @@ void OpenGLRenderer::SetGISettings(const GISettings& s)
 // SSBOs; instances are a flat per-frame array referencing BLAS ranges. In
 // GL-A nothing samples these yet — upload only, zero visual change.
 
-OpenGLRenderer::GiBlasRange OpenGLRenderer::BuildGIBlas(const HE::UUID& meshId)
+OpenGLRenderer::GIBlasRange OpenGLRenderer::BuildGIBlas(const HE::UUID& meshId)
 {
-	GiBlasRange range;
+	GIBlasRange range;
 	if (!m_contentManager) return range;
 	const StaticMeshAsset* asset = m_contentManager->getStaticMesh(meshId);
 	if (!asset || asset->indices.empty()) return range;
@@ -4529,7 +4529,7 @@ void OpenGLRenderer::UpdateGIAccel()
 	// skinned meshes are never in m_renderWorld.objects. Unculled — rays go in
 	// arbitrary directions, an off-screen caster still occludes/bounces.
 	m_giInstancesCpu.clear();
-	auto resolveRange = [&](const HE::UUID& id) -> GiBlasRange
+	auto resolveRange = [&](const HE::UUID& id) -> GIBlasRange
 	{
 		auto it = m_giBlasCache.find(id);
 		if (it == m_giBlasCache.end())
@@ -4542,10 +4542,10 @@ void OpenGLRenderer::UpdateGIAccel()
 		// Default-cube fallback — an entity without a resolvable mesh asset
 		// RENDERS as the default cube (draw-loop fallback), so it must occlude
 		// as one too, or plain cube entities cast no GI shadow at all.
-		GiBlasRange range = resolveRange(obj.meshAssetId);
+		GIBlasRange range = resolveRange(obj.meshAssetId);
 		if (!range.valid) range = resolveRange(HE::kDefaultCubeMeshId);
 		if (!range.valid) continue;
-		GiInstanceGpu inst;
+		GIInstanceGpu inst;
 		inst.invTransform = glm::inverse(obj.transform);
 		inst.baseColor    = glm::vec4(obj.baseColor, 1.0f);
 		inst.nodeOffset   = range.nodeOffset;
@@ -4575,7 +4575,7 @@ void OpenGLRenderer::UpdateGIAccel()
 	}
 	glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_giInstanceSSBO);
 	glBufferData(GL_SHADER_STORAGE_BUFFER,
-	             static_cast<GLsizeiptr>(m_giInstancesCpu.size() * sizeof(GiInstanceGpu)),
+	             static_cast<GLsizeiptr>(m_giInstancesCpu.size() * sizeof(GIInstanceGpu)),
 	             m_giInstancesCpu.data(), GL_DYNAMIC_DRAW);
 	glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 }
@@ -4618,7 +4618,7 @@ void OpenGLRenderer::PushGISceneUniforms(const GISceneLocs& L, bool active)
 	glUniform1i(L.irrTex,    6);
 	glUniform1i(L.visTex,    7);
 	glUniform1i(L.localTex,  8);
-	glUniform4f(L.gridOrigin, m_giGridOrigin.x, m_giGridOrigin.y, m_giGridOrigin.z, kGiProbeSpacing);
+	glUniform4f(L.gridOrigin, m_giGridOrigin.x, m_giGridOrigin.y, m_giGridOrigin.z, kGIProbeSpacing);
 	glUniform4f(L.gridCounts, static_cast<float>(m_giGridCounts.x), static_cast<float>(m_giGridCounts.y),
 	            static_cast<float>(m_giGridCounts.z), static_cast<float>(m_giProbesPerRow));
 	glUniform1f(L.intensity, m_giIndirectIntensity);
@@ -4788,12 +4788,12 @@ void OpenGLRenderer::EnsureGIProbeGrid()
 	}
 	if (!sceneBox.isValid()) return;
 
-	const glm::vec3 padded = sceneBox.extents() + glm::vec3(kGiProbeSpacing);
+	const glm::vec3 padded = sceneBox.extents() + glm::vec3(kGIProbeSpacing);
 	m_giGridCounts = glm::ivec3(
-		std::clamp(static_cast<int>(std::ceil(padded.x * 2.0f / kGiProbeSpacing)) + 1, 2, kGiMaxProbesPerAxis),
-		std::clamp(static_cast<int>(std::ceil(padded.y * 2.0f / kGiProbeSpacing)) + 1, 2, kGiMaxProbesPerAxis),
-		std::clamp(static_cast<int>(std::ceil(padded.z * 2.0f / kGiProbeSpacing)) + 1, 2, kGiMaxProbesPerAxis));
-	const glm::vec3 gridSpan = glm::vec3(m_giGridCounts - 1) * kGiProbeSpacing;
+		std::clamp(static_cast<int>(std::ceil(padded.x * 2.0f / kGIProbeSpacing)) + 1, 2, kGIMaxProbesPerAxis),
+		std::clamp(static_cast<int>(std::ceil(padded.y * 2.0f / kGIProbeSpacing)) + 1, 2, kGIMaxProbesPerAxis),
+		std::clamp(static_cast<int>(std::ceil(padded.z * 2.0f / kGIProbeSpacing)) + 1, 2, kGIMaxProbesPerAxis));
+	const glm::vec3 gridSpan = glm::vec3(m_giGridCounts - 1) * kGIProbeSpacing;
 	m_giGridOrigin   = sceneBox.center() - gridSpan * 0.5f;
 	m_giProbeCount   = m_giGridCounts.x * m_giGridCounts.y * m_giGridCounts.z;
 	m_giProbesPerRow = std::min(m_giProbeCount, 32);
@@ -4809,8 +4809,8 @@ void OpenGLRenderer::EnsureGIProbeAtlas()
 {
 	if (m_giIrrAtlas || m_giProbeCount <= 0) return;
 	const int rows = (m_giProbeCount + m_giProbesPerRow - 1) / m_giProbesPerRow;
-	const int w = m_giProbesPerRow * kGiProbeOctSize;
-	const int h = rows * kGiProbeOctSize;
+	const int w = m_giProbesPerRow * kGIProbeOctSize;
+	const int h = rows * kGIProbeOctSize;
 
 	auto makeAtlas = [&](GLenum internal) -> GLuint
 	{
@@ -4986,10 +4986,10 @@ void OpenGLRenderer::DispatchGIProbeUpdate()
 	glBindImageTexture(1, m_giVisAtlas, 0, GL_FALSE, 0, GL_READ_WRITE, GL_RG16F);
 
 	auto loc = [&](const char* n) { return glGetUniformLocation(m_giProbeCSProgram, n); };
-	glUniform4f(loc("uGridOrigin"), m_giGridOrigin.x, m_giGridOrigin.y, m_giGridOrigin.z, kGiProbeSpacing);
+	glUniform4f(loc("uGridOrigin"), m_giGridOrigin.x, m_giGridOrigin.y, m_giGridOrigin.z, kGIProbeSpacing);
 	glUniform4f(loc("uGridCounts"), static_cast<float>(m_giGridCounts.x), static_cast<float>(m_giGridCounts.y),
 	            static_cast<float>(m_giGridCounts.z), static_cast<float>(m_giProbesPerRow));
-	const float maxDist = glm::length(glm::vec3(m_giGridCounts) * kGiProbeSpacing) + kGiProbeSpacing;
+	const float maxDist = glm::length(glm::vec3(m_giGridCounts) * kGIProbeSpacing) + kGIProbeSpacing;
 	glUniform4f(loc("uRayParams"), maxDist, 0.92f,
 	            static_cast<float>(m_giProbeCursor), static_cast<float>(budget));
 
@@ -5163,7 +5163,7 @@ unsigned int OpenGLRenderer::RenderSSAO(const CommandBuffer& cmds, int pw, int p
 
 // The R8 atlas texture for a font key (0 = the shared default), uploaded lazily
 // from UIFontCache the first time a glyph quad references it.
-unsigned int OpenGLRenderer::uiFontAtlasTexture(uint32_t key)
+unsigned int OpenGLRenderer::UIFontAtlasTexture(uint32_t key)
 {
 	if (key == 0) return m_uiFontTexture ? m_uiFontTexture : m_whiteTex;
 	if (auto it = m_uiFontAtlases.find(key); it != m_uiFontAtlases.end()) return it->second;
@@ -5225,7 +5225,7 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 		// Custom material on an image quad → material program (the solid path below
 		// stays the fallback when the material has no custom shader / failed).
 		const unsigned int matProg = obj.type == 0 && obj.materialAssetId != HE::UUID{}
-			? getOrBuildUIMaterialProgram(obj.materialAssetId) : 0;
+			? GetOrBuildUIMaterialProgram(obj.materialAssetId) : 0;
 		if (matProg)
 		{
 			if (boundMaterial != matProg)
@@ -5317,7 +5317,7 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 			glUniform2f(m_uUIViewport, static_cast<float>(pw), static_cast<float>(ph));
 			// Font atlas on unit 0 (uFontAtlas); glyphs sample it, solid quads ignore it.
 			glActiveTexture(GL_TEXTURE0);
-			glBindTexture(GL_TEXTURE_2D, uiFontAtlasTexture(0));
+			glBindTexture(GL_TEXTURE_2D, UIFontAtlasTexture(0));
 			boundAtlasKey = 0;
 			basicBound = true; boundMaterial = 0;
 		}
@@ -5325,7 +5325,7 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 		if (obj.type == 2 && obj.fontAtlasKey != boundAtlasKey)
 		{
 			glActiveTexture(GL_TEXTURE0);
-			glBindTexture(GL_TEXTURE_2D, uiFontAtlasTexture(obj.fontAtlasKey));
+			glBindTexture(GL_TEXTURE_2D, UIFontAtlasTexture(obj.fontAtlasKey));
 			boundAtlasKey = obj.fontAtlasKey;
 		}
 		glUniform4f(m_uUIRect,  obj.position.x, obj.position.y, obj.size.x, obj.size.y);
@@ -5820,7 +5820,7 @@ void OpenGLRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 		if (const MaterialAsset* ma = m_contentManager ? m_contentManager->getMaterial(id) : nullptr)
 			for (const auto& var : ma->precompiledShaders)
 				if (var.backend == static_cast<uint8_t>(HE::RendererBackend::OpenGL)) { pre = &var; break; }
-		if (getOrBuildMaterialProgram(shKey, shFrag, shVert, pre)) ++built;
+		if (GetOrBuildMaterialProgram(shKey, shFrag, shVert, pre)) ++built;
 	}
 	if (built > 0)
 		Logger::Log(Logger::LogLevel::Info,
@@ -5843,7 +5843,7 @@ void* OpenGLRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& 
 	if (ma)
 		for (const auto& var : ma->precompiledShaders)
 			if (var.backend == static_cast<uint8_t>(HE::RendererBackend::OpenGL)) { pre = &var; break; }
-	const unsigned int prog = getOrBuildMaterialProgram(shKey, shFrag, shVert, pre);
+	const unsigned int prog = GetOrBuildMaterialProgram(shKey, shFrag, shVert, pre);
 	if (!prog) return nullptr;
 
 	// ── Lazy preview primitive (interleaved pos3/normal3/uv2 — the material vertex
@@ -6406,7 +6406,7 @@ void OpenGLRenderer::Shutdown()
 	DestroyViewportTarget();
 	DestroyHDRTarget();
 	DestroyBloomTargets();
-	DestroyCloudFBO();
+	DestroyCloudTarget();
 	DestroyLdrTarget();
 	DestroyGpuTimer();
 	DestroySSAOTargets();
@@ -7150,7 +7150,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						if (ma)
 							for (const auto& var : ma->precompiledShaders)
 								if (var.backend == static_cast<uint8_t>(HE::RendererBackend::OpenGL)) { pre = &var; break; }
-						tpProg = getOrBuildMaterialProgram(shKey, shFrag, shVert, pre);
+						tpProg = GetOrBuildMaterialProgram(shKey, shFrag, shVert, pre);
 						if (tpProg && ma)
 						{
 							tpParams = !dc.paramOverride.empty() ? dc.paramOverride
@@ -7227,7 +7227,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						? m_contentManager->getMaterial(dc.materialAssetId) : nullptr)
 						for (const auto& var : ma->precompiledShaders)
 							if (var.backend == static_cast<uint8_t>(HE::RendererBackend::OpenGL)) { pre = &var; break; }
-					matProg = getOrBuildMaterialProgram(shKey, shFrag, shVert, pre);
+					matProg = GetOrBuildMaterialProgram(shKey, shFrag, shVert, pre);
 				}
 				if (matProg)
 				{
@@ -7275,7 +7275,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					lit.giGridOrigin[0] = m_giGridOrigin.x;
 					lit.giGridOrigin[1] = m_giGridOrigin.y;
 					lit.giGridOrigin[2] = m_giGridOrigin.z;
-					lit.giGridOrigin[3] = kGiProbeSpacing;
+					lit.giGridOrigin[3] = kGIProbeSpacing;
 					lit.giGridCounts[0] = static_cast<float>(m_giGridCounts.x);
 					lit.giGridCounts[1] = static_cast<float>(m_giGridCounts.y);
 					lit.giGridCounts[2] = static_cast<float>(m_giGridCounts.z);
@@ -7579,7 +7579,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			if (lowRes)
 			{
 				GLint prevFBO = 0; glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevFBO);
-				EnsureCloudFBO(std::max(1, pw / 2), std::max(1, ph / 2));
+				EnsureCloudTarget(std::max(1, pw / 2), std::max(1, ph / 2));
 				// Render the pre-pass with the CURRENT camera (this backend draws the sky after
 				// extraction, so the current view is available inline). Compositing at the current
 				// screen UV then lines the clouds up 1:1 with the sky — no lag/swim when panning.
@@ -8093,7 +8093,7 @@ void OpenGLRenderer::DrawParticleGraphBatches(const glm::mat4& viewProj, const g
 		if (batch.instances.empty()) continue;
 
 		// A precompiled OpenGL variant (export-baked, CHUNK_PPSD) wins over an
-		// on-demand-compiled + hash-cached one — see getOrBuildParticleProgram.
+		// on-demand-compiled + hash-cached one — see GetOrBuildParticleProgram.
 		const ParticleShaderVariant* precompiled = nullptr;
 		if (const ParticleGraphAsset* asset = m_contentManager ? m_contentManager->getParticleGraph(batch.particleAssetId) : nullptr)
 			for (const auto& var : asset->precompiledShaders)
@@ -8102,7 +8102,7 @@ void OpenGLRenderer::DrawParticleGraphBatches(const glm::mat4& viewProj, const g
 		const uint64_t key = precompiled
 			? (0x50505344ull /*"PPSD"*/ ^ (static_cast<uint64_t>(batch.particleAssetId.hi) * 0x9E3779B97F4A7C15ULL) ^ batch.particleAssetId.lo)
 			: HE::hashParticleShaderConfig(batch.config);
-		const unsigned int program = getOrBuildParticleProgram(key, batch.config, precompiled);
+		const unsigned int program = GetOrBuildParticleProgram(key, batch.config, precompiled);
 		if (!program) continue;
 
 		unsigned int tex = 0;

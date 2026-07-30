@@ -12,15 +12,15 @@ namespace HE
 {
     struct WindowProps
     {
-        std::string title  = "HorizonEngine";
-        uint32_t    width  = 1280;
-        uint32_t    height = 720;
-        bool        vsync  = true;
-        WindowMode  mode   = WindowMode::Windowed;
+        std::string     title  = "HorizonEngine";
+        uint32_t        width  = 1280;
+        uint32_t        height = 720;
+        bool            vsync  = true;
+        WindowMode      mode   = WindowMode::Windowed;
         // Set by Application::Run based on the chosen backend.
         // Window::Init uses this to set the correct SDL window flags
         // and to skip GL context creation for D3D / Vulkan.
-        GraphicsAPI api    = GraphicsAPI::OpenGL;
+        RendererBackend api    = RendererBackend::OpenGL;
     };
 
     class HE_API Window
@@ -71,15 +71,15 @@ namespace HE
         void Init(const WindowProps& props);
         void Shutdown();
 
-        SDL_Window*   m_window        = nullptr;
-        void*         m_glContext     = nullptr;
-        bool          m_shouldClose   = false;
-        bool          m_isPrimary     = true;
-        uint32_t      m_width         = 0;   // points
-        uint32_t      m_height        = 0;   // points
-        uint32_t      m_pixelWidth    = 0;   // pixels (HiDPI-scaled points)
-        uint32_t      m_pixelHeight   = 0;   // pixels (HiDPI-scaled points)
-        GraphicsAPI   m_api           = GraphicsAPI::OpenGL;
-        EventCallback m_eventCallback;
+        SDL_Window*     m_window        = nullptr;
+        void*           m_glContext     = nullptr;
+        bool            m_shouldClose   = false;
+        bool            m_isPrimary     = true;
+        uint32_t        m_width         = 0;   // points
+        uint32_t        m_height        = 0;   // points
+        uint32_t        m_pixelWidth    = 0;   // pixels (HiDPI-scaled points)
+        uint32_t        m_pixelHeight   = 0;   // pixels (HiDPI-scaled points)
+        RendererBackend m_api           = RendererBackend::OpenGL;
+        EventCallback   m_eventCallback;
     };
 }

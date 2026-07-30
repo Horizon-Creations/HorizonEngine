@@ -109,7 +109,7 @@ namespace fs = std::filesystem;
 // fall into this default instead of floating loose. Mirrors the panel layout in
 // the reference screenshots: thin toolbar floats on top; Quick Settings left,
 // World Outliner + Details stacked right, Content Browser bottom, Scene centre.
-// Set by View > Reset Layout; consumed by the dockspace block in RenderEditor()
+// Set by View > Reset Layout; consumed by the dockspace block in renderEditor()
 // to force a rebuild of the default layout even when a layout is already loaded.
 static bool s_resetLayoutRequested = false;
 
@@ -172,16 +172,16 @@ void EditorUI::render(AppContext& ctx, float dt)
     // Begin new ImGui frame — platform backend is backend-specific
     switch (ctx.backend)
     {
-    case RendererFactory::Backend::OpenGL:
+    case HE::RendererBackend::OpenGL:
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplSDL3_NewFrame();
         break;
 #ifdef _WIN32
-    case RendererFactory::Backend::D3D11:
+    case HE::RendererBackend::D3D11:
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplSDL3_NewFrame();
         break;
-    case RendererFactory::Backend::D3D12:
+    case HE::RendererBackend::D3D12:
         ImGui_ImplDX12_NewFrame();
         ImGui_ImplSDL3_NewFrame();
         {
@@ -192,13 +192,13 @@ void EditorUI::render(AppContext& ctx, float dt)
         break;
 #endif
 #ifdef HE_IMGUI_VULKAN_ENABLED
-    case RendererFactory::Backend::Vulkan:
+    case HE::RendererBackend::Vulkan:
         ImGui_ImplVulkan_NewFrame();
         ImGui_ImplSDL3_NewFrame();
         break;
 #endif
 #ifdef HE_IMGUI_METAL_ENABLED
-    case RendererFactory::Backend::Metal:
+    case HE::RendererBackend::Metal:
         if (auto* mtl = static_cast<MetalRenderer*>(ctx.renderer))
             ImGuiMetalBridge::NewFrame(mtl->GetFramePassDescriptor());
         ImGui_ImplSDL3_NewFrame();
@@ -252,7 +252,7 @@ void EditorUI::render(AppContext& ctx, float dt)
     }
 
     // ── Silent content refresh (create/rename) ───────────────────────────────
-    // Runs here, before RenderEditor acquires the content-folder shared lock, so
+    // Runs here, before renderEditor acquires the content-folder shared lock, so
     // refreshContentFolder()'s unique_lock can't deadlock against it.
     if (ContentBrowserPanel::quietRefreshRequested() && ctx.globalState)
     {
@@ -292,7 +292,7 @@ void EditorUI::render(AppContext& ctx, float dt)
 
     // ── Route to either the Project Hub or the full Editor UI ─────────────────
     if (ctx.projectLoaded)
-        RenderEditor(ctx, dt);
+        renderEditor(ctx, dt);
     else
         ProjectHubPanel::render(ctx);
 
@@ -335,7 +335,7 @@ static bool tabHasUnsavedEdits(const std::string& assetPath)
 }
 
 // ─── Full Editor UI ───────────────────────────────────────────────────────────
-void EditorUI::RenderEditor(AppContext& ctx, float dt)
+void EditorUI::renderEditor(AppContext& ctx, float dt)
 {
 #ifdef HE_IMGUI_ENABLED
 	// Runs every frame regardless of which tab/panel is active (before any early-out):

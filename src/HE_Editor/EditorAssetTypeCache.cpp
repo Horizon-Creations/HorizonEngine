@@ -9,7 +9,7 @@ namespace EditorAssetTypeCache
 {
 namespace
 {
-	std::unordered_map<std::string, HE::AssetType> g_cache;
+	std::unordered_map<std::string, HE::AssetType> s_cache;
 
 	// Reads ONLY the 32-byte HAsset file header. HAsset::Reader::open() would pull
 	// every chunk of the file into memory — megabytes for a mesh — to answer a
@@ -30,12 +30,12 @@ namespace
 HE::AssetType assetTypeOf(const std::string& path)
 {
 	if (path.empty()) return HE::AssetType::Unknown;
-	if (auto it = g_cache.find(path); it != g_cache.end()) return it->second;
+	if (auto it = s_cache.find(path); it != s_cache.end()) return it->second;
 
 	// Files that are not HAssets (C++ sources, the virtual "::LevelScript::" tab
 	// path) are cached as Unknown too, so they cost one open instead of one per frame.
 	const HE::AssetType type = sniffHeader(path);
-	g_cache.emplace(path, type);
+	s_cache.emplace(path, type);
 	return type;
 }
 
@@ -46,12 +46,12 @@ bool is(const std::string& path, HE::AssetType type)
 
 void invalidate(const std::string& path)
 {
-	g_cache.erase(path);
+	s_cache.erase(path);
 }
 
 void invalidateAll()
 {
-	g_cache.clear();
+	s_cache.clear();
 }
 
 } // namespace EditorAssetTypeCache

@@ -14,18 +14,22 @@ namespace HE
 {
     // ── Rendering ─────────────────────────────────────────────────────────────
 
+    // The one and only name for "which RHI". Window uses it to pick SDL flags /
+    // swap-chain creation, RendererFactory to pick a backend implementation, and
+    // the asset pipeline to tag precompiled shader variants (1u << value).
+    //
+    // The numeric values are PERSISTED — as int in config.json ("RHI"), as the
+    // uint8 `backend` field of MaterialShaderVariant/ParticleShaderVariant inside
+    // .hpak/.hasset chunks, and as a bitmask (1u << value) in export profiles'
+    // shaderBackends. Never reorder; only append.
     enum class RendererBackend : uint8_t
     {
-        OpenGL,
-        Vulkan,
-        D3D11,
-        D3D12,
-        Metal,   // appended last — value is persisted as int in config.json
+        OpenGL,  // 0
+        Vulkan,  // 1
+        D3D11,   // 2
+        D3D12,   // 3
+        Metal,   // 4 — appended last
     };
-
-    // Subset used by Window to select SDL flags / swap-chain creation.
-    // Identical to RendererBackend — kept as an alias to avoid redundant casts.
-    using GraphicsAPI = RendererBackend;
 
     enum class ShaderType : uint8_t
     {
@@ -125,9 +129,12 @@ namespace HE
         Binary,  // packaged game — compact, fast to load
     };
 
-    // NOTE: the gameplay scripting language enum deliberately does NOT live here.
-    // It is ::ScriptLanguage in Scripting/ScriptTypes.h, at global scope, because
-    // its values are baked into instance ids and the CHUNK_SLNG byte. Re-adding an
-    // HE::ScriptLanguage would silently shadow it for any code inside namespace HE.
+    // NOTE: the gameplay scripting language enum is HE::ScriptLanguage, and it
+    // lives in Scripting/ScriptTypes.h rather than here — it is the scripting
+    // subsystem's vocabulary, not a general engine enum. Do NOT add a second
+    // spelling of it here: two visible ScriptLanguages would let unqualified uses
+    // inside namespace HE silently bind to the wrong one. Its values are baked
+    // into script instance ids and the CHUNK_SLNG byte, so they must never be
+    // renumbered either.
 
 } // namespace HE
