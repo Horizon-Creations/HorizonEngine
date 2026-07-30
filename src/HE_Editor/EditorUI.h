@@ -13,8 +13,6 @@ public:
 	static void joinPendingExport();
 
 private:
-	static void RenderProjectHub(AppContext& ctx);
 	static void RenderEditor(AppContext& ctx, float dt);
-	static void RenderInspector(AppContext& ctx);
 
 	};

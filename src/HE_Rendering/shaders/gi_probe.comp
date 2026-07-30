@@ -4,6 +4,14 @@
 // probe in the frame's round-robin batch. Bounce estimate = dominant
 // directional + up to 8 local lights (the night/local-light lessons from the
 // Metal path baked in). Traversal identical to gi_shadow.comp / GiBvh.cpp.
+//
+// SYNC: this is one of SEVEN hand-kept copies of the DDGI probe-update kernel
+// and the one the others were ported from; kOctSize additionally has to match
+// every SAMPLER of the probe atlas. See the full list, the constants that must
+// not drift and what breaks when they do at the top of
+// src/HE_Rendering/shaders/gi_probe_hw.comp. Edit here → edit all seven, then
+// run tests/test_culling.cpp's "GI kernels: the constants the hand-kept copies
+// must share".
 layout(local_size_x = 8, local_size_y = 8) in;
 
 struct GiNode { vec4 d0; vec4 d1; };

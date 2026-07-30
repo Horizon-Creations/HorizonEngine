@@ -7,6 +7,10 @@
 // Parses the first skin found: joint hierarchy, inverse bind matrices,
 // JOINTS_0 and WEIGHTS_0 per-vertex attributes (4 influences per vertex).
 // Falls back to static import if no skin is present.
+//
+// If the glTF references a base-color texture, it is imported alongside the mesh
+// and a MaterialAsset referencing it is generated; the mesh's MREF then points at
+// that material — same as MeshImporter.
 class SkeletalMeshImporter {
 public:
     struct ImportSettings {

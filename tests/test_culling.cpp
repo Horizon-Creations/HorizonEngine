@@ -18,6 +18,17 @@
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <glm/gtc/matrix_transform.hpp>
+#include <algorithm>
+#include <cctype>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <regex>
+#include <sstream>
+#include <string>
+#include <vector>
 
 TEST_CASE("RenderExtractor: real mesh bounds when a ContentManager is set, invalid (kept visible) otherwise")
 {
@@ -662,4 +673,351 @@ TEST_CASE("SkyFrameParams: one EnvironmentSettings translation for every backend
 	CHECK(q.star2.z == doctest::Approx(0.0f));
 	CHECK(q.star2.w == doctest::Approx(p.star2.w));
 	CHECK(q.wind    == p.wind);
+}
+
+// ─── Cascaded-shadow-map fit ─────────────────────────────────────────────────
+// RenderExtractor::fitDirectionalShadow is built from three free functions in
+// HorizonRendering/RenderExtractor.h. They are free precisely so the maths can
+// be pinned here: reaching the same numbers through extract() would mean
+// building a whole ECS world and then reverse-engineering a cascade matrix.
+
+TEST_CASE("fitCascadeSphere: sphere through the slice's near and far corner rings")
+{
+	// A slice of a narrow frustum (tan(halfFov) = 0.2 on both axes), [1, 2].
+	// This is the ordinary case: the centre lands INSIDE the slice and the sphere
+	// touches both corner rings, which is what "fit" means here.
+	const HE::CascadeSphere s = HE::fitCascadeSphere(1.0f, 2.0f, 0.2f, 0.2f);
+	CHECK(s.centerDistance == doctest::Approx(1.62f));
+
+	// Corner-ring distances from that centre — equal, and both inside the radius.
+	const float dNear = std::sqrt(0.08f + (1.0f - 1.62f) * (1.0f - 1.62f)); // |(0.2,0.2)|² = 0.08
+	const float dFar  = std::sqrt(0.32f + (2.0f - 1.62f) * (2.0f - 1.62f)); // |(0.4,0.4)|² = 0.32
+	CHECK(dNear == doctest::Approx(dFar));
+	CHECK(s.radius == doctest::Approx(0.6875f));  // ceil(0.681469 * 16) / 16
+	CHECK(s.radius >= dNear);
+
+	// 90° fov, square aspect, slice [1, 3]: the unquantised centre would sit at
+	// z = 6, BEHIND the far plane, so the fit clamps it to the far plane and the
+	// sphere degenerates to the far ring's circumsphere, r = |(3, 3)| = sqrt(18).
+	const HE::CascadeSphere wide = HE::fitCascadeSphere(1.0f, 3.0f, 1.0f, 1.0f);
+	CHECK(wide.centerDistance == doctest::Approx(3.0f));
+	CHECK(wide.radius == doctest::Approx(4.25f));  // ceil(sqrt(18) * 16) / 16
+}
+
+TEST_CASE("fitCascadeSphere: the radius is quantised, so small fov drift cannot swim the shadows")
+{
+	// The radius IS the cascade's texel size. If it wobbled with a hair of aspect
+	// drift (a resized viewport, a fov slider), the texel grid would wobble with
+	// it and the shadow edges would crawl. Quantising to 1/16 absorbs that.
+	const float base = HE::fitCascadeSphere(0.1f, 40.0f, 1.3333f, 1.0f).radius;
+	CHECK(base * 16.0f == doctest::Approx(std::round(base * 16.0f)));
+	CHECK(HE::fitCascadeSphere(0.1f, 40.0f, 1.3333f + 1e-5f, 1.0f).radius == base);
+	CHECK(HE::fitCascadeSphere(0.1f, 40.0f, 1.3333f + 3e-4f, 1.0f).radius == base);
+
+	// A degenerate (near-zero-extent) slice still yields a usable radius — a
+	// zero-width ortho box would make the cascade projection singular.
+	CHECK(HE::fitCascadeSphere(5.0f, 5.001f, 0.0f, 0.0f).radius >= 0.01f);
+}
+
+TEST_CASE("computeCascadeSplits: blends the logarithmic and the uniform split series")
+{
+	float u[4] = {}, l[4] = {}, s[4] = {};
+
+	// lambda = 0 → the uniform series verbatim.
+	HE::computeCascadeSplits(0.1f, 250.0f, 3, 0.0f, u);
+	CHECK(u[0] == doctest::Approx(0.1f));
+	CHECK(u[1] == doctest::Approx(83.4f));
+	CHECK(u[2] == doctest::Approx(166.7f));
+	CHECK(u[3] == doctest::Approx(250.0f));
+
+	// lambda = 1 → the logarithmic series, near * (far/near)^(i/n).
+	HE::computeCascadeSplits(0.1f, 250.0f, 3, 1.0f, l);
+	CHECK(l[0] == doctest::Approx(0.1f));
+	CHECK(l[1] == doctest::Approx(0.1f * std::pow(250.0f / 0.1f, 1.0f / 3.0f)));
+	CHECK(l[2] == doctest::Approx(0.1f * std::pow(250.0f / 0.1f, 2.0f / 3.0f)));
+	CHECK(l[3] == doctest::Approx(250.0f));
+
+	// The extractor's lambda = 0.5 is exactly the mean of the two, strictly
+	// increasing, and pinned at both ends (the last split IS the shadow distance).
+	HE::computeCascadeSplits(0.1f, 250.0f, 3, 0.5f, s);
+	for (int i = 0; i <= 3; ++i) CHECK(s[i] == doctest::Approx(0.5f * (u[i] + l[i])));
+	CHECK(s[0] < s[1]);
+	CHECK(s[1] < s[2]);
+	CHECK(s[2] < s[3]);
+	CHECK(s[0] == doctest::Approx(0.1f));
+	CHECK(s[3] == doctest::Approx(250.0f));
+}
+
+TEST_CASE("cascadeTexelSnapOffset: anchors the shadow texel grid to the world")
+{
+	constexpr float kRes    = 2048.0f;
+	const float     halfRes = kRes * 0.5f;
+	const float     crad    = 12.5f;
+	// A cascade centre deliberately off the texel grid.
+	const glm::vec3 center(3.7f, 1.3f, -8.9f);
+	const glm::vec3 dir  = glm::normalize(glm::vec3(-0.4f, -0.8f, -0.3f)); // light travel dir
+	const glm::mat4 view = glm::lookAt(center - dir * 40.0f, center, glm::vec3(0, 1, 0));
+	glm::mat4       proj = glm::ortho(-crad, crad, -crad, crad, 0.05f, 80.0f);
+
+	const glm::vec4 before = (proj * view) * glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
+	CHECK(std::abs(before.x * halfRes - std::round(before.x * halfRes)) > 1e-3f); // really unaligned
+	CHECK(std::abs(before.y * halfRes - std::round(before.y * halfRes)) > 1e-3f);
+
+	// The shift is sub-texel — it may never move the cascade by a whole texel.
+	const glm::vec2 off = HE::cascadeTexelSnapOffset(proj * view, kRes);
+	CHECK(std::abs(off.x) <= 1.0f / halfRes);
+	CHECK(std::abs(off.y) <= 1.0f / halfRes);
+
+	// Applied the way the extractor applies it, the (fixed) world origin lands on
+	// a whole shadow texel — that is what locks the grid to the world instead of
+	// to the camera-following cascade centre.
+	proj[3][0] += off.x;
+	proj[3][1] += off.y;
+	const glm::vec4 after = (proj * view) * glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
+	CHECK(std::abs(after.x * halfRes - std::round(after.x * halfRes)) < 1e-3f);
+	CHECK(std::abs(after.y * halfRes - std::round(after.y * halfRes)) < 1e-3f);
+
+	// Idempotent: an already-snapped projection asks for no further shift.
+	const glm::vec2 off2 = HE::cascadeTexelSnapOffset(proj * view, kRes);
+	CHECK(std::abs(off2.x) < 1e-5f);
+	CHECK(std::abs(off2.y) < 1e-5f);
+}
+
+// ─── GI shader-kernel drift guard ────────────────────────────────────────────
+// The ray-traced-GI shading maths exists as a family of hand-kept ports: one
+// per API dialect (GLSL / HLSL / MSL) and, for the ray kernels, one per
+// traversal path (software BVH vs. hardware ray query). They are held in sync
+// by discipline alone — nothing forces it, and a divergence shows up only as a
+// rendering difference on one backend, which is exactly the kind of bug nobody
+// notices for months. This compares the constants and the small shared function
+// bodies across the copies that live in their own source FILES; the copies
+// embedded as C++ string literals in the backend translation units are named in
+// each file's sync-comment block instead (they are being migrated and would
+// make this test fight the backend rework).
+namespace shaderdrift
+{
+namespace fs = std::filesystem;
+
+// Locate the checkout (the directory holding src/HE_Rendering/shaders). This
+// test reads SOURCE files, so the build tree alone is not enough: seed the walk
+// with the directory this TU was compiled from and with the process CWD (the
+// build dir lives inside the checkout), then walk up from both.
+inline fs::path findRepoRoot()
+{
+	std::error_code ec;
+	std::vector<fs::path> seeds;
+	fs::path self(__FILE__);
+	if (!self.is_absolute()) self = fs::current_path(ec) / self;
+	seeds.push_back(self.parent_path());
+	seeds.push_back(fs::current_path(ec));
+	for (fs::path seed : seeds)
+		for (int up = 0; up < 8 && !seed.empty(); ++up, seed = seed.parent_path())
+			if (fs::exists(seed / "src" / "HE_Rendering" / "shaders" / "gi_probe_hw.comp", ec))
+				return seed;
+	return {};
+}
+
+inline std::string readFile(const fs::path& p)
+{
+	std::ifstream f(p, std::ios::binary);
+	std::ostringstream ss;
+	ss << f.rdbuf();
+	return ss.str();
+}
+
+// Comments differ freely between the copies (each explains its own dialect), and
+// several of them quote the very constants below — strip them before matching.
+inline std::string stripLineComments(const std::string& src)
+{
+	std::string out;
+	out.reserve(src.size());
+	for (size_t i = 0; i < src.size();)
+	{
+		if (src[i] == '/' && i + 1 < src.size() && src[i + 1] == '/')
+		{
+			while (i < src.size() && src[i] != '\n') ++i;
+			continue;
+		}
+		out += src[i++];
+	}
+	return out;
+}
+
+// Reduce a captured snippet to a dialect-neutral, formatting-neutral form:
+// collapse whitespace, rewrite the HLSL type/intrinsic spellings to their GLSL
+// equivalents, and canonicalise every numeric literal (so 8 == 8.0 and
+// 1e-4 == 0.0001). What survives is the part that must actually agree.
+inline std::string canonicalise(const std::string& s)
+{
+	std::string ws;
+	bool inSpace = false;
+	for (char c : s)
+	{
+		if (std::isspace(static_cast<unsigned char>(c))) { inSpace = true; continue; }
+		if (inSpace && !ws.empty()) ws += ' ';
+		inSpace = false;
+		ws += c;
+	}
+	// Order matters: uint2 before int2, float4x4 before float4.
+	static const char* kDialect[][2] = {
+		{ "float4x4", "mat4" }, { "float3x3", "mat3" },
+		{ "uint2", "uvec2" },   { "uint3", "uvec3" },
+		{ "float2", "vec2" },   { "float3", "vec3" },  { "float4", "vec4" },
+		{ "int2", "ivec2" },    { "int3", "ivec3" },   { "int4", "ivec4" },
+		{ "frac(", "fract(" },  { "lerp(", "mix(" },
+	};
+	for (const auto& r : kDialect)
+	{
+		const size_t n = std::string(r[0]).size();
+		for (size_t p = ws.find(r[0]); p != std::string::npos; p = ws.find(r[0], p + 1))
+			ws.replace(p, n, r[1]);
+	}
+	static const std::regex kNum(R"([0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?)");
+	std::string out;
+	size_t last = 0;
+	for (auto it = std::sregex_iterator(ws.begin(), ws.end(), kNum);
+	     it != std::sregex_iterator(); ++it)
+	{
+		out.append(ws, last, static_cast<size_t>(it->position()) - last);
+		char buf[64];
+		std::snprintf(buf, sizeof buf, "%.9g", std::atof(it->str().c_str()));
+		out += buf;
+		last = static_cast<size_t>(it->position() + it->length());
+	}
+	out.append(ws, last, std::string::npos);
+	return out;
+}
+
+// Every capture of every match, joined — so a constant that appears N times is
+// compared N times, and a copy that lost one occurrence is caught too.
+inline std::string extract(const std::string& text, const char* pattern)
+{
+	const std::regex re(pattern);
+	std::string joined;
+	for (auto it = std::sregex_iterator(text.begin(), text.end(), re);
+	     it != std::sregex_iterator(); ++it)
+		for (size_t g = 1; g < it->size(); ++g)
+		{
+			if (!joined.empty()) joined += " | ";
+			joined += (*it)[g].str();
+		}
+	return canonicalise(joined);
+}
+
+struct SharedConstant
+{
+	const char* name;
+	// One pattern shared by every copy, or one per copy where the dialects spell
+	// the surrounding code differently (workgroup size, tile-size declaration).
+	std::vector<const char*> patterns;
+};
+
+inline void checkGroup(const std::vector<const char*>& names,
+                       const std::vector<std::string>& sources,
+                       const std::vector<SharedConstant>& constants)
+{
+	for (const SharedConstant& c : constants)
+	{
+		std::vector<std::string> vals;
+		for (size_t i = 0; i < sources.size(); ++i)
+			vals.push_back(extract(sources[i], c.patterns.size() == 1 ? c.patterns[0]
+			                                                         : c.patterns[i]));
+		// Empty means the pattern stopped matching everywhere — the code moved, and
+		// the guard would silently pass. That is a failure too.
+		CHECK_MESSAGE(!vals[0].empty(), "no match for '", c.name, "' in ", names[0],
+		              " - the drift guard's pattern is stale");
+		for (size_t i = 1; i < vals.size(); ++i)
+			CHECK_MESSAGE(vals[i] == vals[0], c.name, " drifted: ", names[0], " has '",
+			              vals[0], "', ", names[i], " has '", vals[i], "'");
+	}
+}
+
+} // namespace shaderdrift
+
+TEST_CASE("GI kernels: the constants the hand-kept copies must share")
+{
+	using namespace shaderdrift;
+	const fs::path root = findRepoRoot();
+	if (root.empty())
+	{
+		// Not run from a checkout: there is nothing to compare, and failing here
+		// would report a build layout, not shader drift.
+		MESSAGE("GI shader sources not found - drift comparison skipped");
+		return;
+	}
+	const fs::path sh = root / "src" / "HE_Rendering" / "shaders";
+
+	SUBCASE("shadow-ray kernels")
+	{
+		const std::vector<const char*> names = { "gi_shadow.comp", "gi_shadow_hw.comp",
+		                                         "gi_shadow_hw.hlsl" };
+		std::vector<std::string> src;
+		for (const char* n : names) src.push_back(stripLineComments(readFile(sh / n)));
+		checkGroup(names, src, {
+			{ "surface origin bias",  { R"(\+ N \* ([0-9.]+))" } },
+			{ "sun ray tMin/tMax",    { R"(giSceneAnyHit\(origin, dir, ([0-9.]+), ([0-9.]+)\))" } },
+			{ "local-light skip",     { R"(distL <= ([0-9.]+)\))" } },
+			{ "local ray tMin/slack", { R"(dirL, ([0-9.]+), max\(distL - ([0-9.]+), ([0-9.]+)\)\))" } },
+			{ "cone jitter hash",     { R"(sin\(dot\(p, \w*2\(([0-9.]+), ([0-9.]+)\)\)\) \* ([0-9.]+)\))" } },
+			{ "workgroup size",       { R"(local_size_x = (\d+), local_size_y = (\d+))",
+			                            R"(local_size_x = (\d+), local_size_y = (\d+))",
+			                            R"(numthreads\((\d+), (\d+), 1\))" } },
+		});
+	}
+
+	SUBCASE("DDGI probe-update kernels")
+	{
+		const std::vector<const char*> names = { "gi_probe.comp", "gi_probe_hw.comp",
+		                                         "gi_probe_hw.hlsl" };
+		std::vector<std::string> src;
+		for (const char* n : names) src.push_back(stripLineComments(readFile(sh / n)));
+		checkGroup(names, src, {
+			{ "octahedral tile size", { R"(const int kOctSize = (\d+);)" } },
+			{ "texel -> direction",   { R"(\w*2\(texel\) \+ ([0-9.]+)\) / float\(kOctSize\) \* ([0-9.]+) - ([0-9.]+))" } },
+			{ "sun bounce ray",       { R"(hitNormal \* ([0-9.]+), uSunDirRadius\.xyz, ([0-9.]+), ([0-9.]+)\))" } },
+			{ "local bounce ray",     { R"(hitNormal \* ([0-9.]+), L, ([0-9.]+), max\(d - ([0-9.]+), ([0-9.]+)\)\))" } },
+			{ "grid spacing floors",  { R"(max\(uGridOrigin\.w, ([0-9.e+-]+)\))" } },
+			{ "hysteresis clamp",     { R"(clamp\(uRayParams\.y, ([0-9.]+), ([0-9.]+)\))" } },
+			{ "hysteresis converge",  { R"((?:mix|lerp)\(baseH, ([0-9.]+),)" } },
+			{ "irradiance delta gain",{ R"(oldIrr\.rgb\) \* ([0-9.]+))" } },
+			{ "octDecode body",       { R"(octDecode\((?:vec2|float2) e\)\s*\{([^}]*\}[^}]*)\})" } },
+			{ "workgroup size",       { R"(local_size_x = (\d+), local_size_y = (\d+))",
+			                            R"(local_size_x = (\d+), local_size_y = (\d+))",
+			                            R"(numthreads\((\d+), (\d+), 1\))" } },
+		});
+	}
+
+	SUBCASE("DDGI probe sampling on the shading side")
+	{
+		// kLightingPreamble (graph materials, every backend) vs. the Vulkan
+		// built-in PBR shader. They must agree or a graph material and a built-in
+		// material standing side by side disagree about indirect light.
+		const std::string lib = readFile(root / "src" / "HE_Rendering" / "src" / "material" /
+		                                 "MaterialShaderLibrary.cpp");
+		// Anchored on the declaration itself, so the sync-comment block above it
+		// (which names this test) cannot be mistaken for the literal's start.
+		const size_t decl  = lib.find("kLightingPreamble = R\"(");
+		const size_t open  = (decl == std::string::npos) ? std::string::npos
+		                                                 : lib.find("R\"(", decl);
+		const size_t close = (open == std::string::npos) ? std::string::npos
+		                                                 : lib.find(")\";", open + 3);
+		REQUIRE(close != std::string::npos); // the preamble literal moved or was renamed
+
+		const std::vector<const char*> names = { "kLightingPreamble", "scene.frag" };
+		const std::vector<std::string> src = {
+			stripLineComments(lib.substr(open + 3, close - open - 3)),
+			stripLineComments(readFile(sh / "scene.frag")),
+		};
+		checkGroup(names, src, {
+			{ "octEncode body",         { R"(OctEncode\(vec3 n\)\s*\{([^}]*)\})" } },
+			{ "octahedral tile size",   { R"(const float kOct = ([0-9.]+);)",
+			                              R"(const int GI_PROBE_OCT = (\d+);)" } },
+			{ "probe distance floor",   { R"(max\(length\(toProbe\), ([0-9.e+-]+)\))" } },
+			{ "trilinear weight cutoff",{ R"(weight <= ([0-9.e+-]+)\) continue)" } },
+			{ "backface weight floor",  { R"(weight \*= max\(([0-9.]+), dot\(N, dirToProbe\))" } },
+			{ "chebyshev sharpen",      { R"(chebyshev = (chebyshev \* chebyshev \* chebyshev);)" } },
+			{ "chebyshev floor",        { R"(weight \*= max\(chebyshev, ([0-9.]+)\))" } },
+			{ "irradiance normaliser",  { R"(sumColor / max\(sumWeight, ([0-9.e+-]+)\))" } },
+		});
+	}
 }

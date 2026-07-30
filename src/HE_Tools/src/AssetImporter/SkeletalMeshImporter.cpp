@@ -1,7 +1,6 @@
 #include "SkeletalMeshImporter.h"
 #include <algorithm>
 #include <cstdint>
-#include "TextureImporter.h"
 #include "ImporterCommon.h"
 #include "Diagnostics/Logger.h"
 
@@ -12,7 +11,6 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <unordered_map>
-#include <cstring>
 
 namespace
 {
@@ -100,91 +98,18 @@ std::unique_ptr<SkeletalMeshAsset> SkeletalMeshImporter::import(
             ? glm::mat4(1.0f)
             : glm::make_mat4(mat);
 
-        const glm::mat3 normalMat = glm::transpose(glm::inverse(glm::mat3(world)));
+        Importer::MeshVertexStreams streams{ mesh->vertices, mesh->normals, mesh->uvs };
 
         for (cgltf_size pi = 0; pi < node.mesh->primitives_count; ++pi)
         {
-            const cgltf_primitive& prim = node.mesh->primitives[pi];
-            if (prim.type != cgltf_primitive_type_triangles) continue;
+            // Positions/normals/UVs (including the glTF→engine V flip) are the
+            // static importer's code path; only the skin streams are extra here.
+            const auto attrs = Importer::appendPrimitive(
+                node.mesh->primitives[pi], world, settings.uniformScale,
+                streams, mesh->indices);
+            if (!attrs.position) continue;
 
-            const cgltf_accessor* posAcc    = nullptr;
-            const cgltf_accessor* normAcc   = nullptr;
-            const cgltf_accessor* uvAcc     = nullptr;
-            const cgltf_accessor* jointsAcc = nullptr;
-            const cgltf_accessor* weightsAcc= nullptr;
-
-            for (cgltf_size a = 0; a < prim.attributes_count; ++a)
-            {
-                const cgltf_attribute& attr = prim.attributes[a];
-                switch (attr.type)
-                {
-                case cgltf_attribute_type_position: posAcc     = attr.data; break;
-                case cgltf_attribute_type_normal:   normAcc    = attr.data; break;
-                case cgltf_attribute_type_texcoord: if (attr.index == 0) uvAcc = attr.data; break;
-                case cgltf_attribute_type_joints:   if (attr.index == 0) jointsAcc  = attr.data; break;
-                case cgltf_attribute_type_weights:  if (attr.index == 0) weightsAcc = attr.data; break;
-                default: break;
-                }
-            }
-            if (!posAcc) continue;
-
-            const uint32_t baseVertex = static_cast<uint32_t>(mesh->vertices.size() / 3);
-
-            for (cgltf_size v = 0; v < posAcc->count; ++v)
-            {
-                float p[3] = {};
-                cgltf_accessor_read_float(posAcc, v, p, 3);
-                glm::vec3 wp = glm::vec3(world * glm::vec4(p[0], p[1], p[2], 1.0f))
-                               * settings.uniformScale;
-                mesh->vertices.insert(mesh->vertices.end(), { wp.x, wp.y, wp.z });
-
-                if (normAcc && v < normAcc->count) {
-                    float n[3] = {};
-                    cgltf_accessor_read_float(normAcc, v, n, 3);
-                    glm::vec3 wn = glm::normalize(normalMat * glm::vec3(n[0], n[1], n[2]));
-                    mesh->normals.insert(mesh->normals.end(), { wn.x, wn.y, wn.z });
-                } else {
-                    mesh->normals.insert(mesh->normals.end(), { 0.f, 0.f, 0.f });
-                }
-
-                if (uvAcc && v < uvAcc->count) {
-                    float uv[2] = {};
-                    cgltf_accessor_read_float(uvAcc, v, uv, 2);
-                    // glTF UV origin is TOP-left, the engine is GL-style
-                    // BOTTOM-left — same flip as the static MeshImporter.
-                    mesh->uvs.insert(mesh->uvs.end(), { uv[0], 1.0f - uv[1] });
-                } else {
-                    mesh->uvs.insert(mesh->uvs.end(), { 0.f, 0.f });
-                }
-
-                // Skinning: 4 joints + 4 weights per vertex
-                uint32_t jids[4] = {};
-                float    wts[4]  = { 1.0f, 0.0f, 0.0f, 0.0f };
-                if (jointsAcc && v < jointsAcc->count)
-                {
-                    float jf[4] = {};
-                    cgltf_accessor_read_float(jointsAcc, v, jf, 4);
-                    for (int k = 0; k < 4; ++k)
-                        jids[k] = static_cast<uint32_t>(jf[k]);
-                }
-                if (weightsAcc && v < weightsAcc->count)
-                    cgltf_accessor_read_float(weightsAcc, v, wts, 4);
-
-                mesh->boneIDs.insert(mesh->boneIDs.end(), { jids[0], jids[1], jids[2], jids[3] });
-                mesh->boneWeights.insert(mesh->boneWeights.end(), { wts[0], wts[1], wts[2], wts[3] });
-            }
-
-            if (prim.indices)
-            {
-                for (cgltf_size ii = 0; ii < prim.indices->count; ++ii)
-                    mesh->indices.push_back(baseVertex +
-                        static_cast<uint32_t>(cgltf_accessor_read_index(prim.indices, ii)));
-            }
-            else
-            {
-                for (cgltf_size ii = 0; ii < posAcc->count; ++ii)
-                    mesh->indices.push_back(baseVertex + static_cast<uint32_t>(ii));
-            }
+            Importer::appendSkinning(attrs, mesh->boneIDs, mesh->boneWeights);
         }
     }
 
@@ -225,45 +150,14 @@ std::unique_ptr<SkeletalMeshAsset> SkeletalMeshImporter::import(
     }
 
     // ── Material ────────────────────────────────────────────────────────────────
-    if (settings.importMaterials && data->materials_count > 0)
-    {
-        const cgltf_material& mat = data->materials[0];
-        if (mat.has_pbr_metallic_roughness && mat.pbr_metallic_roughness.base_color_texture.texture)
-        {
-            const cgltf_texture* tex = mat.pbr_metallic_roughness.base_color_texture.texture;
-            if (tex && tex->image)
-            {
-                const cgltf_image* img = tex->image;
-                const std::string texName = stem + "_basecolor";
-                std::string texPath;
-
-                if (img->uri && std::strncmp(img->uri, "data:", 5) != 0)
-                {
-                    char decoded[1024];
-                    std::strncpy(decoded, img->uri, sizeof(decoded) - 1);
-                    decoded[sizeof(decoded) - 1] = '\0';
-                    cgltf_decode_uri(decoded);
-                    auto t = TextureImporter::import(sourcePath.parent_path() / decoded,
-                                                     contentRoot, relativeOutputDir);
-                    texPath = t ? t->path : std::string{};
-                }
-                else if (img->buffer_view && img->buffer_view->buffer && img->buffer_view->buffer->data)
-                {
-                    const auto* bytes = static_cast<const uint8_t*>(img->buffer_view->buffer->data)
-                                      + img->buffer_view->offset;
-                    auto t = TextureImporter::decodeFromMemory(bytes, img->buffer_view->size);
-                    if (t) {
-                        t->type = HE::AssetType::Texture; t->name = texName;
-                        t->path = Importer::toAssetPath(relativeOutputDir / (texName + ".hasset"));
-                        if (Importer::writeAsset(*t, contentRoot)) texPath = t->path;
-                    }
-                }
-
-                if (!texPath.empty())
-                    mesh->materialPath = texPath;
-            }
-        }
-    }
+    // `materialPath` lands in chunk MREF, which every renderer resolves as a
+    // MATERIAL reference (ContentManager::resolveMaterialRef). This used to store
+    // the base-color TEXTURE path directly, so the lookup always came back empty
+    // and skinned meshes rendered untextured; import the same texture+material
+    // pair the static MeshImporter writes instead.
+    if (settings.importMaterials)
+        mesh->materialPath = Importer::importBaseColorMaterial(
+            data, sourcePath, contentRoot, relativeOutputDir, stem);
 
     cgltf_free(data);
 
