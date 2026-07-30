@@ -113,6 +113,10 @@ layout(std140, set = 0, binding = 0) uniform HeLighting {
     vec4 camFwd;         // xyz = camera forward (planar cascade selection)
     mat4 localShadowVP[16]; // local (point/spot) shadow atlas view-projs (conventions pre-baked)
     vec4 fog;            // x = density, y = height falloff, z = heSkyEnv valid, w = heAO valid
+    vec4 giGridOrigin;   // xyz = DDGI probe-grid origin, w = probe spacing
+    vec4 giGridCounts;   // xyz = probes per axis, w = probes per atlas row
+    vec4 giProbe;        // x = indirect intensity, y = probe atlases bound
+    vec4 weather;        // x = wetness, y = snow amount
 } heLight;
 // Screen-space ray-traced shadow masks (GI): sun visibility (.r) + local-light
 // visibility (one channel per the first 4 point/spot lights). Bindings 10/11 —
@@ -137,6 +141,87 @@ layout(set = 0, binding = 15) uniform samplerCube heSkyEnv;
 // Screen-space ambient occlusion result (binding 16), the same SSAO/HBAO/GTAO
 // buffer the built-in shaders read. Gated by heLight.fog.w.
 layout(set = 0, binding = 16) uniform sampler2D heAO;
+// ── DDGI probe irradiance ─────────────────────────────────────────────────────
+// Octahedral probe atlases (bindings 17/18): the SAME two textures the built-in
+// PBR shaders sample. Graph materials previously had no probe lookup at all — the
+// ray-traced GI SHADOW reached them, but the indirect BOUNCE (colour bleeding off
+// nearby lit surfaces) did not, so a custom material sat in flat ambient while a
+// built-in one beside it picked up the room.
+layout(set = 0, binding = 17) uniform sampler2D heGIIrradiance;
+layout(set = 0, binding = 18) uniform sampler2D heGIVisibility;
+// Signed-octahedral mapping (Meyer et al. 2010), direction -> texel UV. Mirror of
+// the backends' octEncode; kept a copy here for the same reason they keep theirs:
+// each shader string is its own compilation unit.
+vec2 heOctEncode(vec3 n) {
+    vec2 p = n.xy * (1.0 / (abs(n.x) + abs(n.y) + abs(n.z)));
+    vec2 signP = vec2(p.x >= 0.0 ? 1.0 : -1.0, p.y >= 0.0 ? 1.0 : -1.0);
+    return (n.z <= 0.0) ? ((1.0 - abs(p.yx)) * signP) : p;
+}
+// Trilinear blend of the 8 probes around P, weighted by a soft backface term and
+// a Chebyshev visibility test (suppresses leaking through thin occluders).
+// Line-for-line the backends' sampleDDGIIrradiance — any drift here shows up as
+// graph materials disagreeing with built-ins about indirect light.
+vec3 heGIIrradianceAt(vec3 P, vec3 N) {
+    int gx = int(heLight.giGridCounts.x);
+    int gy = int(heLight.giGridCounts.y);
+    int gz = int(heLight.giGridCounts.z);
+    if (gx <= 0 || gy <= 0 || gz <= 0) return vec3(0.0);
+    const float kOct = 8.0;                 // must match kGIProbeOctSize
+    int probesPerRow = max(1, int(heLight.giGridCounts.w));
+    int probeRows    = int(ceil(float(gx * gy * gz) / float(probesPerRow)));
+    vec2 atlasSizeTexels = vec2(float(probesPerRow), float(probeRows)) * kOct;
+    float spacing = max(heLight.giGridOrigin.w, 1e-4);
+
+    vec3 gridSpace = (P - heLight.giGridOrigin.xyz) / spacing;
+    vec3 base = floor(gridSpace);
+    vec3 frac = gridSpace - base;
+
+    vec3  sumColor  = vec3(0.0);
+    float sumWeight = 0.0;
+    for (int i = 0; i < 8; ++i)
+    {
+        vec3 offs = vec3(float(i & 1), float((i >> 1) & 1), float((i >> 2) & 1));
+        vec3 cell = base + offs;
+        if (any(lessThan(cell, vec3(0.0))) ||
+            cell.x >= float(gx) || cell.y >= float(gy) || cell.z >= float(gz)) continue;
+        int probeIndex = int(cell.x) + int(cell.y) * gx + int(cell.z) * gx * gy;
+
+        vec3 trilinear = mix(1.0 - frac, frac, offs);
+        float weight = trilinear.x * trilinear.y * trilinear.z;
+        if (weight <= 1e-5) continue;
+
+        vec3  probePos   = heLight.giGridOrigin.xyz + cell * spacing;
+        vec3  toProbe    = probePos - P;
+        float dist       = max(length(toProbe), 1e-4);
+        vec3  dirToProbe = toProbe / dist;
+
+        // Soft backface term (never fully zero) — avoids the hard-cutoff seam at
+        // the normal's tangent plane.
+        weight *= max(0.05, dot(N, dirToProbe) * 0.5 + 0.5);
+
+        int  tileX = probeIndex % probesPerRow;
+        int  tileY = probeIndex / probesPerRow;
+        vec2 tileOrigin = vec2(float(tileX), float(tileY)) * kOct;
+
+        vec2 visUV = (tileOrigin + (heOctEncode(-dirToProbe) * 0.5 + 0.5) * kOct) / atlasSizeTexels;
+        vec2 visSample = texture(heGIVisibility, visUV).rg;
+        float mean = visSample.x, mean2 = visSample.y;
+        float variance = abs(mean2 - mean * mean);
+        float chebyshev = 1.0;
+        if (dist > mean)
+        {
+            float d = dist - mean;
+            chebyshev = variance / (variance + d * d);
+            chebyshev = chebyshev * chebyshev * chebyshev; // sharpen, per the DDGI paper
+        }
+        weight *= max(chebyshev, 0.05);
+
+        vec2 irrUV = (tileOrigin + (heOctEncode(N) * 0.5 + 0.5) * kOct) / atlasSizeTexels;
+        sumColor  += texture(heGIIrradiance, irrUV).rgb * weight;
+        sumWeight += weight;
+    }
+    return sumColor / max(sumWeight, 1e-4);
+}
 // Aerial perspective — mirror of the built-in applyFog(): an analytic
 // exponential height-fog integral along the view ray, blended toward the sky in
 // that direction. The built-ins evaluate the procedural sky function for the fog
@@ -262,7 +347,19 @@ vec3 heLitP(vec3 baseColor, vec3 N, float metallic, float roughness, vec3 worldP
     // the full baseColor, specular always white) and ran the roughness curve
     // BACKWARDS — mix(4,64,1-roughness) sharpens the highlight as roughness
     // rises — so a graph material never matched a built-in one beside it.
+    // Weather ground response, identical to the built-in shaders: snow settles on
+    // up-facing surfaces, wetness darkens and glosses the rest. Without it a
+    // graph-material surface stayed bone dry in the middle of a rainstorm while
+    // every built-in surface around it went wet.
+    float snowMask = smoothstep(0.25, 0.75, clamp(n.y, 0.0, 1.0))
+                   * clamp(heLight.weather.y, 0.0, 1.0);
+    float wet      = clamp(heLight.weather.x, 0.0, 1.0) * (1.0 - snowMask);
+    baseColor = mix(baseColor, vec3(0.90, 0.93, 0.97), snowMask);
+    baseColor *= (1.0 - 0.30 * wet);
+
     float rough = clamp(roughness, 0.0, 1.0);
+    rough = mix(rough, 0.08, wet);
+    rough = mix(rough, 0.85, snowMask);
     float metal = clamp(metallic, 0.0, 1.0);
     // Specular drives the DIELECTRIC F0 (Unreal's convention: F0 = 0.08 * spec,
     // so the 0.5 default reproduces the built-in shaders' fixed 0.04). Metals
@@ -270,33 +367,40 @@ vec3 heLitP(vec3 baseColor, vec3 N, float metallic, float roughness, vec3 worldP
     float f0    = 0.08 * clamp(specular, 0.0, 1.0);
     vec3  diffuseColor = baseColor * (1.0 - metal);
     vec3  specColor    = mix(vec3(f0), baseColor, metal);
+    specColor          = mix(specColor, vec3(0.08), wet);   // water-like F0
     float shininess    = mix(128.0, 8.0, rough);
-    float specScale    = mix(0.5, 0.03, rough);
+    float specScale    = mix(0.5, 0.03, rough) + 0.25 * wet; // wet sheen
     // Image-based ambient from the procedural sky — the SAME construction as the
     // built-in PBR shaders: diffuse from the normal (clamped above the horizon so
     // a flat surface doesn't pick up the warm sunset band at noon), specular from
     // the reflection bent toward N by roughness as a crude prefilter.
-    vec3 amb;
+    vec3 ambDiff = diffuseColor * heLight.ambient.rgb;   // fallback (no cubemap)
+    vec3 ambSpec = vec3(0.0);
     if (heLight.fog.z > 0.5)
     {
         vec3 Rrough = normalize(mix(reflect(-V, n), n, rough));
         vec3 Nup    = normalize(vec3(n.x, max(n.y, 0.1), n.z));
-        vec3 ambDiff = texture(heSkyEnv, Nup).rgb    * diffuseColor;
-        vec3 ambSpec = texture(heSkyEnv, Rrough).rgb * specColor;
-        amb = ambDiff * 0.35 + ambSpec * (1.0 - 0.6 * rough);
+        ambDiff = texture(heSkyEnv, Nup).rgb    * diffuseColor;
+        ambSpec = texture(heSkyEnv, Rrough).rgb * specColor * (1.0 - 0.6 * rough);
     }
-    else
-        amb = diffuseColor * heLight.ambient.rgb;  // no cubemap (preview/UI passes)
-
-    // Occlusion darkens ONLY the indirect term; the direct lighting below stays
-    // untouched, same split as the built-in shaders' SSAO handling. The material's
-    // own Ambient Occlusion pin multiplies on top of the screen-space result.
+    // Occlusion darkens ONLY the indirect term; direct lighting stays untouched,
+    // same split as the built-in shaders' SSAO handling. The material's own
+    // Ambient Occlusion pin multiplies on top of the screen-space result.
     float ssao = (heLight.fog.w > 0.5)
         ? texture(heAO, gl_FragCoord.xy / max(heLight.giParams.xy, vec2(1.0))).r : 1.0;
     float ao = clamp(ambientOcclusion, 0.0, 1.0) * ssao;
-    // The flat ambient floor stays OUTSIDE the occlusion (never-black guarantee),
-    // exactly like the built-in.
-    vec3 result = amb * ao + heLight.ambient.rgb * diffuseColor;
+
+    // With GI active the probe field REPLACES the sky's diffuse ambient (and AO is
+    // bypassed entirely — the probes already carry occlusion); the specular IBL
+    // term is kept either way, this GI slice being diffuse-only. Exactly the
+    // branch the built-in shaders take. The flat ambient floor stays outside the
+    // occlusion in BOTH branches (never-black guarantee).
+    vec3 result;
+    if (heLight.giProbe.y > 0.5)
+        result = heGIIrradianceAt(worldPos, n) * diffuseColor * heLight.giProbe.x
+               + ambSpec + heLight.ambient.rgb * diffuseColor;
+    else
+        result = (ambDiff * 0.35 + ambSpec) * ao + heLight.ambient.rgb * diffuseColor;
     int count = int(heLight.counts.x);
     int localIdx = 0; // counter over non-directional lights → local-mask channel
     for (int i = 0; i < count; ++i) {
@@ -581,6 +685,21 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragment(
     Compiled out;
     if (backend == Backend::Metal)
     {
+        // ── Fragment sampler budget ──────────────────────────────────────────
+        // Metal caps a fragment stage at 16 SAMPLERS, i.e. indices 0..15, and the
+        // material pipeline is currently AT that limit:
+        //   0      heTex0 (legacy/mesh texture)
+        //   1-4    heTexP0..3 (node-graph project textures)
+        //   6,7    DDGI irradiance / visibility  (shared with the scene pass)
+        //   9,10   GI sun + local shadow masks
+        //   11     CSM array          12  local point/spot shadow atlas
+        //   13     landscape weightmap
+        //   14     sky env cubemap    15  screen-space AO
+        // A new sampler MUST reuse one of these (or a scene-pass slot the shared
+        // encoder already binds, as 6/7 do) — pinning a 17th makes the whole
+        // pipeline fail to build, and the renderer then falls back to built-in
+        // PBR for EVERY graph material without anything looking obviously broken.
+        //
         // Pin the lighting UBO to the fragment slot the engine binds it at (buffer 1;
         // SceneUniforms occupies fragment buffer 0 in the scene pass), and the material
         // texture (set 0, binding 2 in canonical GLSL) to texture/sampler 0 — the slot the
@@ -617,7 +736,17 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragment(
               // screen-space AO result (binding 16) → MSL 15. Both are per-FRAME
               // state pinned once on the encoder, like the GI/CSM slots above.
               { Stage::Fragment, 0, 15, 14 },
-              { Stage::Fragment, 0, 16, 15 } }));
+              { Stage::Fragment, 0, 16, 15 },
+              // DDGI probe atlases (bindings 17/18) → MSL 6/7, NOT 16/17: Metal
+              // caps a fragment stage at 16 SAMPLERS (0..15), and slots 0-4 +
+              // 9-15 are already spoken for — pinning these any higher makes the
+              // whole material pipeline fail to build, silently dropping every
+              // graph material back to the built-in PBR shader.
+              // 6/7 are where the SCENE pass already binds these exact two
+              // atlases for the built-in shaders, and both pipelines share one
+              // encoder, so the material pipeline just reads them in place.
+              { Stage::Fragment, 0, 17, 6 },
+              { Stage::Fragment, 0, 18, 7 } }));
     }
     else
     {
