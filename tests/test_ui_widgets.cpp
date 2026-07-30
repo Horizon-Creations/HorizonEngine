@@ -455,7 +455,7 @@ TEST_CASE("HorizonCode functions honor the access modifier")
     const int pubId = g.addNode(pub);
     HorizonCode::Node priv; priv.type = NodeType::FunctionEntry; priv.s = "Secret"; priv.access = 1;
     g.addNode(priv);
-    HorizonCode::Node show; show.type = NodeType::ShowWidget;
+    HorizonCode::Node show; show.type = NodeType::ShowSelf;
     const int showId = g.addNode(show);
     REQUIRE(g.connect(pubId, 0, showId, 0));
 

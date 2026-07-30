@@ -409,8 +409,8 @@ std::uint32_t nodeHeaderColor(const HorizonCode::Node& n)
 		// Reference/object producers carry the Ref (purple) tint.
 		case T::GetSelf: case T::GetGameInstance:
 		case T::CreateObject: case T::DestroyObject:
-		case T::CreateWidget: case T::ShowWidgetId: case T::HideWidgetId: case T::DestroyWidget:
-		case T::ShowWidget: case T::HideWidget:
+		case T::CreateWidget: case T::ShowWidget: case T::HideWidget: case T::DestroyWidget:
+		case T::ShowSelf: case T::HideSelf:
 			return darken(pinTypeColor(HorizonCode::PinType::Ref), 0.78f);
 		// Everything data-ish is colored by its value type (Bool getter always red…).
 		default:

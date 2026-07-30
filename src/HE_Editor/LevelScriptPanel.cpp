@@ -162,12 +162,12 @@ const HGH::MenuOpts kMenus = {
 	/*addExcluded*/   { NT::Event, NT::FunctionEntry, NT::FunctionCall,
 	                    NT::GetVariable, NT::SetVariable,
 	                    NT::GetProperty, NT::SetProperty,
-	                    NT::ShowWidget, NT::HideWidget },
+	                    NT::ShowSelf, NT::HideSelf },
 	/*dragExcluded*/  { NT::Event, NT::FunctionEntry, NT::FunctionCall,
 	                    NT::FunctionReturn, NT::GetVariable, NT::SetVariable,
 	                    NT::GetProperty, NT::SetProperty, NT::EngineCall,
 	                    NT::CallExternal, NT::GetExternal, NT::SetExternal,
-	                    NT::BindEvent, NT::ShowWidget, NT::HideWidget },
+	                    NT::BindEvent, NT::ShowSelf, NT::HideSelf },
 };
 
 // ── Left sidebar: variables + functions + details ─────────────────────────────

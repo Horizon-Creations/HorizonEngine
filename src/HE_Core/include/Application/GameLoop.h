@@ -25,12 +25,12 @@ public:
     // Application::Quit so an in-flight frame still finishes cleanly.
     void requestStop();
 
-    const GameLoopConfig& config() const { return config_; }
+    const GameLoopConfig& config() const { return m_config; }
 
 private:
-    GameLoopConfig config_;
-    bool           running_      = true;
-    float          accumulator_  = 0.0f;
+    GameLoopConfig m_config;
+    bool           m_running     = true;
+    float          m_accumulator = 0.0f;
 };
 
 } // namespace HE

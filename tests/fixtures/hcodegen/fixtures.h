@@ -539,9 +539,9 @@ inline HE::hccg::ClassSource fxWidgetProps()
     const int sCopy = f.setVar("copied", PT::String);
     f.data(setTx, 0, sCopy, 0);   // pass-through re-evaluates the pin default
     f.exec(setTx, sCopy);
-    const int show = f.op(NT::ShowWidget);
+    const int show = f.op(NT::ShowSelf);
     f.exec(sCopy, show);
-    const int hide = f.op(NT::HideWidget);
+    const int hide = f.op(NT::HideSelf);
     f.exec(show, hide);
     return f.done("widget_props");
 }

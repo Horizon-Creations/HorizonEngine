@@ -1049,7 +1049,7 @@ TEST_CASE("ContentManager pollHotReload skips mid-write (invalid) files")
 	const HE::UUID id = mat.id;
 	REQUIRE(cm.loadAsset("guarded.hasset") == id);
 
-	// Overwrite with garbage so getAssetType returns Unknown (simulates mid-write).
+	// Overwrite with garbage so sniffAssetTypeFromFile returns Unknown (mid-write).
 	const fs::path diskPath = dir.path / "guarded.hasset";
 	{ std::ofstream f(diskPath, std::ios::binary); f << "GARBAGE_NOT_A_VALID_ASSET"; }
 	auto t = fs::last_write_time(diskPath);

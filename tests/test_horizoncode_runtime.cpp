@@ -465,16 +465,16 @@ TEST_CASE("Widget nodes call the runtime services and cache CreateWidget's id")
 	svc.showWidget   = [&](int id){ shownId = id; };
 	rt.setServices(svc);
 
-	// Event Go → CreateWidget("hud.ui") → ShowWidget(<created id>).
+	// Event Go → CreateWidget("hud.ui") → ShowSelf(<created id>).
 	// CreateWidget: execIn 0 / execOut 1 / Widget dataOut 2.
-	// ShowWidget:   execIn 0 / execOut 1 / Widget dataIn 2.
+	// ShowSelf:   execIn 0 / execOut 1 / Widget dataIn 2.
 	Graph g;
 	Node ev; ev.type = NodeType::Event; ev.s = "Go"; const int e = g.addNode(ev);
 	Node cw; cw.type = NodeType::CreateWidget; cw.s = "hud.ui"; const int c = g.addNode(cw);
-	Node sw; sw.type = NodeType::ShowWidgetId; const int s = g.addNode(sw);
+	Node sw; sw.type = NodeType::ShowWidget; const int s = g.addNode(sw);
 	REQUIRE(g.connect(e, 0, c, 0)); // Event exec → CreateWidget exec-in
-	REQUIRE(g.connect(c, 1, s, 0)); // CreateWidget exec-out → ShowWidget exec-in
-	REQUIRE(g.connect(c, 2, s, 2)); // CreateWidget id → ShowWidget Widget
+	REQUIRE(g.connect(c, 1, s, 0)); // CreateWidget exec-out → ShowSelf exec-in
+	REQUIRE(g.connect(c, 2, s, 2)); // CreateWidget id → ShowSelf Widget
 
 	const InstanceId id = rt.add(std::move(g));
 	rt.fireEvent(id, "Go");

@@ -9,9 +9,9 @@
 
 HorizonWorld::HorizonWorld()
 {
-    rootEntity_ = registry_.create();
-    registry_.emplace<NameComponent>(rootEntity_, NameComponent{ "World" });
-    registry_.emplace<HierarchyComponent>(rootEntity_);
+    m_rootEntity = m_registry.create();
+    m_registry.emplace<NameComponent>(m_rootEntity, NameComponent{ "World" });
+    m_registry.emplace<HierarchyComponent>(m_rootEntity);
     // Sky (EnvironmentComponent) and Weather (WeatherComponent) are NOT created here:
     // a bare world starts empty. The Game/Simulation project templates seed a "Sky"
     // and "Weather" entity into their StartupScene; other projects (and a plain New
@@ -34,16 +34,16 @@ void HorizonWorld::reserveComponentStorage()
     // previously created implicitly by the constructor's default sky + sun/moon lights;
     // reserving them explicitly keeps a bare world safe now that it starts empty. Pure
     // reservation — adds no components, so the world stays empty.
-    (void)registry_.storage<TransformComponent>();
-    (void)registry_.storage<LightComponent>();
-    (void)registry_.storage<EnvironmentLightComponent>();
-    (void)registry_.storage<EnvironmentComponent>();
-    (void)registry_.storage<WeatherComponent>();
+    (void)m_registry.storage<TransformComponent>();
+    (void)m_registry.storage<LightComponent>();
+    (void)m_registry.storage<EnvironmentLightComponent>();
+    (void)m_registry.storage<EnvironmentComponent>();
+    (void)m_registry.storage<WeatherComponent>();
 }
 
 bool HorizonWorld::isBuiltin(Entity entity) const
 {
-    return entity == rootEntity_ || registry_.all_of<EnvironmentLightComponent>(entity);
+    return entity == m_rootEntity || m_registry.all_of<EnvironmentLightComponent>(entity);
 }
 
 void HorizonWorld::ensureEnvironmentLights()
@@ -54,10 +54,10 @@ void HorizonWorld::ensureEnvironmentLights()
     if (sky == entt::null)
     {
         std::vector<Entity> strays;
-        for (auto [e, elc] : registry_.view<EnvironmentLightComponent>().each())
+        for (auto [e, elc] : m_registry.view<EnvironmentLightComponent>().each())
             strays.push_back(e);
         for (Entity e : strays)
-            if (registry_.valid(e)) destroyRecursive(e); // built-in → bypass the guard
+            if (m_registry.valid(e)) destroyRecursive(e); // built-in → bypass the guard
         m_hierarchyDirty = true;
         return;
     }
@@ -68,13 +68,13 @@ void HorizonWorld::ensureEnvironmentLights()
         // under `parent` — the lights live UNDER the Sky entity so removeSky() takes
         // them down with it (scene load also rebuilds children from the serialised
         // list, which omits these never-serialised lights, so re-attach every time).
-        auto& h = registry_.get<HierarchyComponent>(e);
+        auto& h = m_registry.get<HierarchyComponent>(e);
         if (h.parent != entt::null && h.parent != parent)
-            if (auto* ph = registry_.try_get<HierarchyComponent>(h.parent))
+            if (auto* ph = m_registry.try_get<HierarchyComponent>(h.parent))
                 ph->children.erase(std::remove(ph->children.begin(), ph->children.end(), e),
                                    ph->children.end());
         h.parent = parent;
-        auto& sh = registry_.get<HierarchyComponent>(parent);
+        auto& sh = m_registry.get<HierarchyComponent>(parent);
         if (std::find(sh.children.begin(), sh.children.end(), e) == sh.children.end())
             sh.children.push_back(e);
     };
@@ -83,7 +83,7 @@ void HorizonWorld::ensureEnvironmentLights()
     {
         // Find an existing light with this role (e.g. recreated after scene load).
         Entity e = entt::null;
-        for (auto [ent, elc] : registry_.view<EnvironmentLightComponent>().each())
+        for (auto [ent, elc] : m_registry.view<EnvironmentLightComponent>().each())
             if (elc.role == role) { e = ent; break; }
 
         if (e == entt::null)
@@ -92,11 +92,11 @@ void HorizonWorld::ensureEnvironmentLights()
             // A (default) transform so the render extractor's
             // <TransformComponent, LightComponent> view picks the light up; the
             // direction itself is driven by the environment, not this transform.
-            registry_.emplace<TransformComponent>(e, TransformComponent{});
+            m_registry.emplace<TransformComponent>(e, TransformComponent{});
             LightComponent lc;
             lc.type = HE::LightType::Directional;
-            registry_.emplace<LightComponent>(e, lc);
-            registry_.emplace<EnvironmentLightComponent>(e, EnvironmentLightComponent{ role });
+            m_registry.emplace<LightComponent>(e, lc);
+            m_registry.emplace<EnvironmentLightComponent>(e, EnvironmentLightComponent{ role });
         }
         attach(e, sky);
     };
@@ -107,7 +107,7 @@ void HorizonWorld::ensureEnvironmentLights()
 
 Entity HorizonWorld::environmentEntity() const
 {
-    auto view = registry_.view<const EnvironmentComponent>();
+    auto view = m_registry.view<const EnvironmentComponent>();
     for (auto e : view)
         return e; // at most one; first wins
     return entt::null;
@@ -115,7 +115,7 @@ Entity HorizonWorld::environmentEntity() const
 
 Entity HorizonWorld::weatherEntity() const
 {
-    auto view = registry_.view<const WeatherComponent>();
+    auto view = m_registry.view<const WeatherComponent>();
     for (auto e : view)
         return e;
     return entt::null;
@@ -126,7 +126,7 @@ Entity HorizonWorld::addSky()
     if (Entity e = environmentEntity(); e != entt::null)
         return e; // already have a sky
     Entity sky = createEntity("Sky");
-    registry_.emplace<EnvironmentComponent>(sky);
+    m_registry.emplace<EnvironmentComponent>(sky);
     ensureEnvironmentLights(); // sun/moon become children of the Sky entity
     return sky;
 }
@@ -135,19 +135,19 @@ void HorizonWorld::removeSky()
 {
     Entity sky = environmentEntity();
     if (sky == entt::null) return;
-    if (sky == rootEntity_)
+    if (sky == m_rootEntity)
     {
         // Legacy/edge case: env sitting on the World root — strip the component and
         // any lights rather than deleting the (non-deletable) root.
-        registry_.remove<EnvironmentComponent>(sky);
+        m_registry.remove<EnvironmentComponent>(sky);
         ensureEnvironmentLights(); // sky now gone → tears down the stray lights
         m_hierarchyDirty = true;
         return;
     }
     // Detach from parent, then force-destroy the whole subtree (incl. the built-in
     // sun/moon child lights, which destroyEntity would otherwise skip).
-    if (auto* h = registry_.try_get<HierarchyComponent>(sky); h && h->parent != entt::null)
-        if (auto* ph = registry_.try_get<HierarchyComponent>(h->parent))
+    if (auto* h = m_registry.try_get<HierarchyComponent>(sky); h && h->parent != entt::null)
+        if (auto* ph = m_registry.try_get<HierarchyComponent>(h->parent))
             ph->children.erase(std::remove(ph->children.begin(), ph->children.end(), sky),
                                ph->children.end());
     destroyRecursive(sky);
@@ -159,7 +159,7 @@ Entity HorizonWorld::addWeather()
     if (Entity e = weatherEntity(); e != entt::null)
         return e;
     Entity weather = createEntity("Weather");
-    registry_.emplace<WeatherComponent>(weather);
+    m_registry.emplace<WeatherComponent>(weather);
     return weather;
 }
 
@@ -167,7 +167,7 @@ void HorizonWorld::removeWeather()
 {
     Entity weather = weatherEntity();
     if (weather == entt::null) return;
-    if (weather == rootEntity_) { registry_.remove<WeatherComponent>(weather); return; }
+    if (weather == m_rootEntity) { m_registry.remove<WeatherComponent>(weather); return; }
     destroyEntity(weather); // no hidden children — the normal path is fine
 }
 
@@ -175,57 +175,57 @@ void HorizonWorld::migrateLegacyRootEnvironment()
 {
     // Legacy scenes stored Environment/Weather on the World root. Move each onto its
     // own dedicated entity so the whole engine sees a single, uniform model.
-    if (registry_.all_of<EnvironmentComponent>(rootEntity_))
+    if (m_registry.all_of<EnvironmentComponent>(m_rootEntity))
     {
-        EnvironmentComponent e = registry_.get<EnvironmentComponent>(rootEntity_);
-        registry_.remove<EnvironmentComponent>(rootEntity_);
+        EnvironmentComponent e = m_registry.get<EnvironmentComponent>(m_rootEntity);
+        m_registry.remove<EnvironmentComponent>(m_rootEntity);
         Entity sky = createEntity("Sky");
-        registry_.emplace<EnvironmentComponent>(sky, e);
+        m_registry.emplace<EnvironmentComponent>(sky, e);
     }
-    if (registry_.all_of<WeatherComponent>(rootEntity_))
+    if (m_registry.all_of<WeatherComponent>(m_rootEntity))
     {
-        WeatherComponent w = registry_.get<WeatherComponent>(rootEntity_);
-        registry_.remove<WeatherComponent>(rootEntity_);
+        WeatherComponent w = m_registry.get<WeatherComponent>(m_rootEntity);
+        m_registry.remove<WeatherComponent>(m_rootEntity);
         Entity weather = createEntity("Weather");
-        registry_.emplace<WeatherComponent>(weather, w);
+        m_registry.emplace<WeatherComponent>(weather, w);
     }
 }
 
 Entity HorizonWorld::createEntity(const std::string& name)
 {
-    Entity e = registry_.create();
-    registry_.emplace<NameComponent>(e, NameComponent{ name });
-    registry_.emplace<HierarchyComponent>(e);
-    auto& rootHierarchy = registry_.get<HierarchyComponent>(rootEntity_);
+    Entity e = m_registry.create();
+    m_registry.emplace<NameComponent>(e, NameComponent{ name });
+    m_registry.emplace<HierarchyComponent>(e);
+    auto& rootHierarchy = m_registry.get<HierarchyComponent>(m_rootEntity);
     rootHierarchy.children.push_back(e);
-    registry_.get<HierarchyComponent>(e).parent = rootEntity_;
+    m_registry.get<HierarchyComponent>(e).parent = m_rootEntity;
     m_hierarchyDirty = true;
     return e;
 }
 
 void HorizonWorld::destroyRecursive(Entity entity)
 {
-    if (!registry_.valid(entity)) return;
+    if (!m_registry.valid(entity)) return;
     // Destroy the subtree bottom-up (children vector is copied — destroying
     // mutates the registry under us). No built-in guard here: the caller vetted the
     // top-level entity, and a Sky entity's built-in sun/moon lights must go with it.
-    if (auto* h = registry_.try_get<HierarchyComponent>(entity))
+    if (auto* h = m_registry.try_get<HierarchyComponent>(entity))
     {
         const std::vector<Entity> children = h->children;
         for (Entity child : children)
             destroyRecursive(child);
     }
-    registry_.destroy(entity);
+    m_registry.destroy(entity);
 }
 
 void HorizonWorld::destroyEntity(Entity entity)
 {
-    if (!registry_.valid(entity) || isBuiltin(entity))
+    if (!m_registry.valid(entity) || isBuiltin(entity))
         return; // root + the environment sun/moon lights are not deletable
 
     // Detach from parent first so nothing dangles, then force-destroy the subtree.
-    if (auto* h = registry_.try_get<HierarchyComponent>(entity); h && h->parent != entt::null)
-        if (auto* ph = registry_.try_get<HierarchyComponent>(h->parent))
+    if (auto* h = m_registry.try_get<HierarchyComponent>(entity); h && h->parent != entt::null)
+        if (auto* ph = m_registry.try_get<HierarchyComponent>(h->parent))
         {
             auto& ch = ph->children;
             ch.erase(std::remove(ch.begin(), ch.end(), entity), ch.end());
@@ -251,19 +251,19 @@ void HorizonWorld::clear()
     // then force-destroy any strays that were never parented into the hierarchy.
     // Everything but the root goes — a cleared world is bare (no sky/weather). New
     // Scene stays empty; a loaded scene recreates its own Sky/Weather from the file.
-    if (auto* rh = registry_.try_get<HierarchyComponent>(rootEntity_))
+    if (auto* rh = m_registry.try_get<HierarchyComponent>(m_rootEntity))
     {
         const std::vector<Entity> children = rh->children;
         for (Entity c : children)
             destroyEntity(c);
     }
     std::vector<Entity> strays;
-    for (auto e : registry_.view<entt::entity>())
-        if (e != rootEntity_)
+    for (auto e : m_registry.view<entt::entity>())
+        if (e != m_rootEntity)
             strays.push_back(e);
     for (Entity e : strays)
-        if (registry_.valid(e))
-            registry_.destroy(e); // direct destroy: bypasses the built-in guard for env lights
+        if (m_registry.valid(e))
+            m_registry.destroy(e); // direct destroy: bypasses the built-in guard for env lights
 
     // Drop the level script too (like the environment, a loaded scene restores
     // its own via setLevelScriptJson; a scene without one starts empty).
@@ -283,11 +283,11 @@ void HorizonWorld::clear()
 bool HorizonWorld::isAncestorOf(Entity ancestor, Entity entity) const
 {
     Entity cur = entity;
-    while (cur != entt::null && registry_.valid(cur))
+    while (cur != entt::null && m_registry.valid(cur))
     {
         if (cur == ancestor)
             return true;
-        const auto* h = registry_.try_get<HierarchyComponent>(cur);
+        const auto* h = m_registry.try_get<HierarchyComponent>(cur);
         cur = h ? h->parent : entt::null;
     }
     return false;
@@ -295,27 +295,27 @@ bool HorizonWorld::isAncestorOf(Entity ancestor, Entity entity) const
 
 bool HorizonWorld::reparentEntity(Entity entity, Entity newParent)
 {
-    if (entity == rootEntity_ || entity == newParent)
+    if (entity == m_rootEntity || entity == newParent)
         return false;
     // A built-in (the environment sun/moon) can't be reparented, and nothing may be
     // dropped UNDER a built-in — except the World root itself, which is the valid
     // target for un-parenting an entity back to the top level.
-    if (isBuiltin(entity) || (isBuiltin(newParent) && newParent != rootEntity_))
+    if (isBuiltin(entity) || (isBuiltin(newParent) && newParent != m_rootEntity))
         return false;
-    if (!registry_.valid(entity) || !registry_.valid(newParent))
+    if (!m_registry.valid(entity) || !m_registry.valid(newParent))
         return false;
     if (isAncestorOf(entity, newParent))
         return false; // would create a cycle
 
-    auto* h  = registry_.try_get<HierarchyComponent>(entity);
-    auto* nh = registry_.try_get<HierarchyComponent>(newParent);
+    auto* h  = m_registry.try_get<HierarchyComponent>(entity);
+    auto* nh = m_registry.try_get<HierarchyComponent>(newParent);
     if (!h || !nh)
         return false;
     if (h->parent == newParent)
         return true; // already there
 
     if (h->parent != entt::null)
-        if (auto* ph = registry_.try_get<HierarchyComponent>(h->parent))
+        if (auto* ph = m_registry.try_get<HierarchyComponent>(h->parent))
         {
             auto& ch = ph->children;
             ch.erase(std::remove(ch.begin(), ch.end(), entity), ch.end());
@@ -329,7 +329,7 @@ bool HorizonWorld::reparentEntity(Entity entity, Entity newParent)
 
 void HorizonWorld::renameEntity(Entity entity, const std::string& newName)
 {
-    if (auto* n = registry_.try_get<NameComponent>(entity))
+    if (auto* n = m_registry.try_get<NameComponent>(entity))
     {
         n->name = newName;
         m_hierarchyDirty = true;

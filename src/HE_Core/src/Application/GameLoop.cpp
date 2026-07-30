@@ -5,24 +5,24 @@
 namespace HE {
 
 GameLoop::GameLoop(const GameLoopConfig& config)
-    : config_(config)
+    : m_config(config)
 {
 }
 
 bool GameLoop::tick(HorizonWorld& world, IGameLogic* logic, float deltaTime)
 {
-    if (!running_) return false;
+    if (!m_running) return false;
 
-    accumulator_ += deltaTime;
+    m_accumulator += deltaTime;
     uint32_t steps = 0;
-    while (accumulator_ >= config_.fixedTimestep && steps < config_.maxFixedSteps) {
-        if (logic) logic->onUpdate(world, config_.fixedTimestep);
-        accumulator_ -= config_.fixedTimestep;
+    while (m_accumulator >= m_config.fixedTimestep && steps < m_config.maxFixedSteps) {
+        if (logic) logic->onUpdate(world, m_config.fixedTimestep);
+        m_accumulator -= m_config.fixedTimestep;
         ++steps;
     }
-    return running_;
+    return m_running;
 }
 
-void GameLoop::requestStop() { running_ = false; }
+void GameLoop::requestStop() { m_running = false; }
 
 } // namespace HE

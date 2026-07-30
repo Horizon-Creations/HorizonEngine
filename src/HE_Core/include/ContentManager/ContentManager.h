@@ -308,7 +308,10 @@ public:
 
 private:
 
-	HE::AssetType getAssetType(const std::string path) const;
+	// Opens the file at `path` and reads the HAsset header out of it — this hits
+	// the disk, it is not an accessor for already-loaded state (that is
+	// assetType(UUID) above). Unknown when the file is missing or not an HAsset.
+	HE::AssetType sniffAssetTypeFromFile(const std::string& path) const;
 	void          initDefaultAssets();
 
 	// scanContentDirectory() worker: index one root's .hasset META into
