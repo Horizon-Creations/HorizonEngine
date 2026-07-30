@@ -165,6 +165,35 @@ MaterialShaderLibrary::Compiled toCompiled(he::shaderc::Result&& r)
 // Unused by raw fragments (glslang drops the UBO when heLit isn't called), so it's inert
 // for the escape-hatch path. UBO (not SSBO) → GL-4.1 portable. Later: the node graph emits
 // calls to these std-library functions.
+//
+// ─── SYNC: this preamble is the 6th copy of the built-in shading maths ───────
+// Everything below (heGIIrradianceAt, heOctEncode, heCsmShadow, heApplyFog, the
+// heLit* attenuation/PBR terms) is a deliberate hand-port of what each backend's
+// built-in PBR shader already does. There is no generator: the copies are:
+//
+//   OpenGL   src/Backends/OpenGL/OpenGLRenderer.cpp — `kUnlitFS` (the lit scene
+//            fragment shader, misnamed) + `GI_PROBE_OCT` / sampleDDGIIrradiance
+//   Metal    src/Backends/Metal/MetalRenderer.mm — the scene MSL fragment +
+//            `kGIProbeOctSizeShade` / sampleDDGIIrradiance
+//   D3D11    src/Backends/D3D11/D3D11Renderer.cpp — `GI_PROBE_OCT` block
+//   D3D12    src/Backends/D3D12/D3D12Renderer.cpp — `GI_PROBE_OCT` block
+//   Vulkan   src/HE_Rendering/shaders/scene.frag — `GI_PROBE_OCT` /
+//            giOctEncode / sampleDDGIIrradiance (that file carries its own
+//            drift banner: it is a REDUCED port of the GL shader, but its GI
+//            block is byte-for-byte and must stay so)
+//
+// WHAT BREAKS ON DRIFT: nothing fails to compile and no test elsewhere notices.
+// A graph material and a built-in material standing side by side in the same
+// scene simply disagree about indirect light / shadow / fog — different probe
+// bleed, a shifted cascade edge, a different fog falloff — on the one backend
+// that was edited. Reported as "the custom material looks dead next to the
+// standard one", which is how the ambient/IBL/SSAO/fog gaps were found before.
+//
+// GUARD: tests/test_culling.cpp, "GI kernels: the constants the hand-kept copies
+// must share" string-compares the shared constants and the heOctEncode /
+// sampleDDGIIrradiance blocks of this preamble against scene.frag. It cannot see
+// the four copies embedded as C++ string literals above — change one, change all
+// six, and run that test.
 constexpr const char* kLightingPreamble = R"(
 layout(std140, set = 0, binding = 0) uniform HeLighting {
     vec4 sunDir;    // xyz = direction TO the sun (normalized); w = engine time (s)

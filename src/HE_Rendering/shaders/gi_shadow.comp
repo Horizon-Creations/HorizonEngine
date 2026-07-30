@@ -6,6 +6,13 @@
 // tests/test_gi_bvh.cpp. Ints travel as float bit patterns in vec4 rows
 // (floatBitsToInt) so the std430 layout is driver-proof. Same GLSL as the
 // GL 4.3 port's kGiShadowCS, in Vulkan dialect (explicit sets, params UBO).
+//
+// SYNC: this is one of SEVEN hand-kept copies of the GI shadow-ray kernel and
+// the one the others were ported from — see the full list, the constants that
+// must not drift and what breaks when they do at the top of
+// src/HE_Rendering/shaders/gi_shadow_hw.comp. Edit here → edit all seven, then
+// run tests/test_culling.cpp's "GI kernels: the constants the hand-kept copies
+// must share".
 layout(local_size_x = 8, local_size_y = 8) in;
 
 struct GiNode { vec4 d0; vec4 d1; }; // d0.xyz bmin, d0.w leftFirst (int bits), d1.xyz bmax, d1.w triCount (int bits)

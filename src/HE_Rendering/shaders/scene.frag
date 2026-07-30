@@ -34,7 +34,10 @@
 //
 // Deliberately NOT drift: the GI block (giOctEncode / sampleDDGIIrradiance /
 // uGIShadow / uGILocal) is a byte-for-byte port and must stay in sync with
-// gi_probe.comp and the GL/Metal originals.
+// gi_probe.comp and the GL/Metal originals — and with `kLightingPreamble` in
+// src/HE_Rendering/src/material/MaterialShaderLibrary.cpp, which is what graph
+// materials are shaded with. tests/test_culling.cpp's "GI kernels: the constants
+// the hand-kept copies must share" string-compares this block against that one.
 //
 // Audit 1a decision: DOCUMENT the drift, do not port. Until it is generated from
 // one source, a change to the GL scene shader is NOT automatically visible on

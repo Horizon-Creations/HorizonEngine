@@ -75,6 +75,20 @@ bool buildFontAtlas(int width, int height, float fontSizePixels,
     return result > 0;
 }
 
+int nestingDepth(entt::registry& reg, entt::entity e)
+{
+    int depth = 0;
+    for (auto cur = e; depth < 255; )
+    {
+        const auto* h = reg.try_get<HierarchyComponent>(cur);
+        if (!h || h->parent == entt::null ||
+            !reg.all_of<UIElementComponent>(h->parent)) break;
+        cur = h->parent;
+        ++depth;
+    }
+    return depth;
+}
+
 bool computeScreenRect(entt::registry& reg, entt::entity e,
                        float vpWidth, float vpHeight,
                        float scaleX, float scaleY,
@@ -146,20 +160,8 @@ void extract(HorizonWorld& world, float vpWidth, float vpHeight,
                                    scaleX, scaleY, screenPos, screenSize))
                 continue;
 
-            // Children draw over their parents at equal layer: the sort key is
-            // layer (major) + UI nesting depth (minor). The view iterates in
-            // arbitrary order, so without the depth key a child could vanish
-            // under its parent panel.
-            int depth = 0;
-            for (auto cur = elemEnt; depth < 255; )
-            {
-                const auto* h = reg.try_get<HierarchyComponent>(cur);
-                if (!h || h->parent == entt::null ||
-                    !reg.all_of<UIElementComponent>(h->parent)) break;
-                cur = h->parent;
-                ++depth;
-            }
-            const int sortLayer = elem.layer * 256 + depth;
+            // Children draw over their parents at equal layer (see sortKey).
+            const int sortLayer = sortKey(elem.layer, nestingDepth(reg, elemEnt));
 
             auto* img = reg.try_get<UIImageComponent>(elemEnt);
             auto* btn = reg.try_get<UIButtonComponent>(elemEnt);

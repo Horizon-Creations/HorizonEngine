@@ -9,6 +9,46 @@
 // constants, secondary occlusion rays for sun + local-light bounce. The host
 // guarantees the TLAS instance order equals the giInsts order, so
 // rayQueryGetIntersectionInstanceIdEXT indexes giInsts directly.
+//
+// ─── SYNC: seven hand-kept copies of this kernel ─────────────────────────────
+// The DDGI probe-update kernel exists once per API dialect and once per
+// traversal path. Nothing generates them from a common source:
+//
+//   GLSL SW  src/HE_Rendering/shaders/gi_probe.comp      (Vulkan, CPU BVH)
+//   GLSL HW  src/HE_Rendering/shaders/gi_probe_hw.comp   (this file)
+//   HLSL SW  src/HE_Rendering/src/Backends/D3D_Shared/HlslSources.h
+//            `kGiTraversalHLSL` + `kGiProbeCSHLSL`       (D3D11 and D3D12)
+//   HLSL HW  src/HE_Rendering/shaders/gi_probe_hw.hlsl   (D3D12, DXR 1.1)
+//   GLSL SW  src/HE_Rendering/src/Backends/OpenGL/OpenGLRenderer.cpp
+//            `kGiTraversalGLSL` + `kGiProbeCS`           (GL 4.3)
+//   MSL  SW  src/HE_Rendering/src/Backends/Metal/MetalRenderer.mm `kGISWMSL`
+//   MSL  HW  src/HE_Rendering/src/Backends/Metal/MetalRenderer.mm `kGIProbeMSL`
+//
+// WHAT MUST NOT DRIFT, inside this family: kOctSize and the octDecode mapping
+// (they define the atlas layout), the secondary-ray parameters (hitNormal * 0.05
+// bias, tMin/tMax 0.02 / 10000, the 0.1 slack on the local ray), the adaptive
+// hysteresis constants, and the 8x8 workgroup (one thread per octahedral texel —
+// the host dispatches on that assumption).
+//
+// AND ACROSS FAMILIES: kOctSize is also baked into every SAMPLER of the atlas —
+// scene.frag's `GI_PROBE_OCT` / giOctEncode, the same block in kUnlitFS
+// (OpenGL), MetalRenderer.mm's `kGIProbeOctSizeShade`, the D3D11/D3D12
+// `GI_PROBE_OCT` blocks, and `kLightingPreamble`'s `kOct` in
+// src/HE_Rendering/src/material/MaterialShaderLibrary.cpp — plus the host-side
+// `kGiProbeOctSize` each backend allocates the atlas with. Changing it here
+// alone silently reads the wrong texels.
+//
+// WHAT BREAKS ON DRIFT: every copy still compiles and still runs. The probes
+// simply converge to different irradiance on the affected backend/path —
+// too-fast hysteresis flickers, a wrong bias leaks light through walls, a wrong
+// tile size samples neighbouring probes. Nothing here is covered by an image
+// test.
+//
+// GUARD: tests/test_culling.cpp, "GI kernels: the constants the hand-kept copies
+// must share", string-compares those constants across the three copies that live
+// in files of their own (and kOctSize against the samplers it can reach). The
+// four embedded as C++ string literals are out of its reach — change one, change
+// all seven, and run that test.
 layout(local_size_x = 8, local_size_y = 8) in;
 
 struct GiNode { vec4 d0; vec4 d1; };

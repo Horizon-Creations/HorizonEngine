@@ -20,21 +20,8 @@ void AnimationSystem::update(HorizonWorld& world, ContentManager& cm, float dt)
         const AnimationClipAsset* clip = cm.getAnimationClip(animator.clipAssetId);
         if (!clip || clip->duration <= 0.0f) continue;
 
-        animator.playbackTime += dt * animator.playbackSpeed;
-        if (animator.looping)
-        {
-            animator.playbackTime = std::fmod(animator.playbackTime, clip->duration);
-            if (animator.playbackTime < 0.0f)
-                animator.playbackTime += clip->duration;
-        }
-        else
-        {
-            if (animator.playbackTime >= clip->duration)
-            {
-                animator.playbackTime = clip->duration;
-                animator.playing      = false;
-            }
-        }
+        advancePlayback(animator.playbackTime, animator.playing,
+                        animator.playbackSpeed, animator.looping, clip->duration, dt);
 
         const SkeletalMeshAsset* mesh = cm.getSkeletalMesh(smc.meshAssetId);
         if (!mesh || mesh->skeleton.empty()) continue;

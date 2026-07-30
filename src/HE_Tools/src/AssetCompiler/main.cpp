@@ -2,8 +2,10 @@
 //
 // Walks <source_dir> recursively, dispatches each source file by extension to
 // the matching importer and writes .hasset files into <output_dir>, mirroring
-// the source directory layout. A file is skipped when its primary .hasset
-// output is newer than the source (pass --force to re-import everything).
+// the source directory layout. A file is skipped when EVERY .hasset that import
+// produces — the primary one plus its sidecars (material, textures, animation
+// clips) — is present and newer than the source (pass --force to re-import
+// everything).
 
 #include "../AssetImporter/AnimationClipImporter.h"
 #include "../AssetImporter/AudioImporter.h"
@@ -19,6 +21,7 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include <vector>
 
 namespace fs = std::filesystem;
 
@@ -50,8 +53,8 @@ namespace
 		return SourceKind::None;
 	}
 
-	// The .hasset an importer writes first — the timestamp probe below compares
-	// against it. Only SkeletalMeshImporter deviates from "<stem>.hasset".
+	// The .hasset an importer writes first — the timestamp probe below starts
+	// from it. Only SkeletalMeshImporter deviates from "<stem>.hasset".
 	fs::path primaryOutput(SourceKind kind, const fs::path& source)
 	{
 		const std::string stem = source.stem().string();
@@ -59,14 +62,16 @@ namespace
 		                                          : stem + ".hasset";
 	}
 
-	bool isUpToDate(const fs::path& source, const fs::path& output)
+	// The outputs BESIDES the primary one, relative to the output root. The
+	// material and its textures are read off the primary itself
+	// (Importer::importOutputsUpToDate does that), so only the animation clips a
+	// rigged glTF produces have to be named here.
+	std::vector<std::string> extraOutputs(SourceKind kind, const fs::path& source,
+	                                      const fs::path& relOut)
 	{
-		std::error_code ec;
-		const auto outTime = fs::last_write_time(output, ec);
-		if (ec) return false;
-		const auto srcTime = fs::last_write_time(source, ec);
-		if (ec) return false;
-		return outTime >= srcTime;
+		if (kind != SourceKind::SkeletalMesh)
+			return {};
+		return AnimationClipImporter::outputPaths(source, relOut);
 	}
 }
 
@@ -111,7 +116,11 @@ int main(int argc, char** argv)
 		const fs::path relOut  = (relDir == ".") ? fs::path{} : relDir;
 		const fs::path primary = outputDir / relOut / primaryOutput(kind, entry.path());
 
-		if (!force && isUpToDate(entry.path(), primary))
+		// Every output of this import has to be present, not just the primary
+		// one: a deleted sidecar (the base-color texture, its material, one of
+		// the animation clips) used to be regenerated only with --force.
+		if (!force && Importer::importOutputsUpToDate(
+				entry.path(), outputDir, primary, extraOutputs(kind, entry.path(), relOut)))
 		{
 			++skipped;
 			continue;

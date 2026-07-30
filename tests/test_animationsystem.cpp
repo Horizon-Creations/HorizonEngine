@@ -181,6 +181,37 @@ TEST_CASE("AnimationSystem stops at end when looping=false")
     CHECK(updatedAn.playing == false);
 }
 
+TEST_CASE("AnimationSystem wraps a rewinding looping clip forward, never negative")
+{
+    // std::fmod returns a NEGATIVE remainder for a negative playbackSpeed, so the
+    // wrap adds one duration back. Without that, playbackTime would go negative and
+    // sampleClip would clamp to the first keyframe — the clip would look frozen
+    // instead of playing backwards. Shared by all three clip-driven animators
+    // (advancePlayback), so it is pinned here once.
+    ContentManager cm;
+    HorizonWorld   world;
+
+    const HE::UUID meshId = HE::UUID::generate();
+    cm.registerSkeletalMesh(makeOneBoneSkeletalMesh(meshId));
+
+    AnimationClipAsset clip = makeTranslationClip(1.0f);
+    const HE::UUID clipId   = cm.registerAnimationClip(std::move(clip));
+
+    entt::entity e = world.createEntity();
+    world.addComponent(e, TransformComponent{ .position = {}, .rotation = {}, .scale = glm::vec3(1.0f) });
+    SkeletalMeshComponent smc; smc.meshAssetId = meshId;
+    world.addComponent(e, smc);
+    AnimatorComponent an; an.clipAssetId = clipId; an.looping = true;
+    an.playbackTime = 0.1f; an.playbackSpeed = -1.0f;
+    world.addComponent(e, an);
+
+    // 0.1 - 0.25 = -0.15 → fmod = -0.15 → + 1.0 = 0.85
+    AnimationSystem::update(world, cm, 0.25f);
+    const auto& updatedAn = world.registry().get<AnimatorComponent>(e);
+    CHECK(updatedAn.playbackTime == doctest::Approx(0.85f).epsilon(1e-4));
+    CHECK(updatedAn.playing == true);
+}
+
 TEST_CASE("AnimationSystem skips update when playing=false")
 {
     ContentManager cm;

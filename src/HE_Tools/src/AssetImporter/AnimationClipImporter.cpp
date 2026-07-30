@@ -58,6 +58,35 @@ static std::string sanitizeFileStem(const std::string& name)
     return out.empty() ? std::string("clip") : out;
 }
 
+// The clip's asset name: the glTF's own animation name, or a deterministic
+// fallback for unnamed animations.
+static std::string clipName(const cgltf_animation& anim, cgltf_size index,
+                            const std::filesystem::path& sourcePath)
+{
+    return anim.name ? std::string(anim.name)
+                     : (sourcePath.stem().string() + "_anim" + std::to_string(index));
+}
+
+// The file stem one clip is written under: sanitised, prefixed with the glTF's
+// own stem, and made unique against the stems already handed out for this file.
+// importAndWrite() and outputPaths() must agree exactly, so both come here.
+static std::string clipFileStem(const std::string& name, const std::string& prefix,
+                                std::unordered_set<std::string>& usedStems)
+{
+    // import() already prefixes unnamed clips with the source stem; only add
+    // the prefix when the glTF supplied its own name, so two characters that
+    // both export a "Run" animation do not fight over one file.
+    std::string stem = sanitizeFileStem(name);
+    if (stem.rfind(prefix, 0) != 0)
+        stem = prefix + stem;
+
+    // Two animations may legitimately carry the same name inside one glTF.
+    std::string unique = stem;
+    for (int n = 2; !usedStems.insert(unique).second; ++n)
+        unique = stem + "_" + std::to_string(n);
+    return unique;
+}
+
 } // namespace
 
 std::vector<std::unique_ptr<AnimationClipAsset>>
@@ -90,8 +119,7 @@ AnimationClipImporter::import(const std::filesystem::path& sourcePath)
         const cgltf_animation& anim = data->animations[ai];
         auto clip = std::make_unique<AnimationClipAsset>();
         clip->type = HE::AssetType::AnimationClip;
-        clip->name = anim.name ? anim.name
-                               : (sourcePath.stem().string() + "_anim" + std::to_string(ai));
+        clip->name = clipName(anim, ai, sourcePath);
 
         float maxTime = 0.0f;
 
@@ -152,17 +180,7 @@ AnimationClipImporter::WriteResult AnimationClipImporter::importAndWrite(
     {
         if (!clip) continue;
 
-        // import() already prefixes unnamed clips with the source stem; only add
-        // the prefix when the glTF supplied its own name, so two characters that
-        // both export a "Run" animation do not fight over one file.
-        std::string stem = sanitizeFileStem(clip->name);
-        if (stem.rfind(prefix, 0) != 0)
-            stem = prefix + stem;
-
-        // Two animations may legitimately carry the same name inside one glTF.
-        std::string unique = stem;
-        for (int n = 2; !usedStems.insert(unique).second; ++n)
-            unique = stem + "_" + std::to_string(n);
+        const std::string unique = clipFileStem(clip->name, prefix, usedStems);
 
         clip->path = Importer::toAssetPath(relativeOutputDir / (unique + ".hasset"));
         if (Importer::writeAsset(*clip, contentRoot))
@@ -180,4 +198,34 @@ AnimationClipImporter::WriteResult AnimationClipImporter::importAndWrite(
         }
     }
     return result;
+}
+
+std::vector<std::string> AnimationClipImporter::outputPaths(
+    const std::filesystem::path& sourcePath,
+    const std::filesystem::path& relativeOutputDir)
+{
+    std::vector<std::string> paths;
+
+    cgltf_options options{};
+    cgltf_data*   data = nullptr;
+    // JSON only — animations_count and the animation names are filled in without
+    // touching the (potentially large) .bin buffers. A file that does not parse
+    // answers "no outputs"; the import itself then reports the real error.
+    if (cgltf_parse_file(&options, sourcePath.string().c_str(), &data) != cgltf_result_success)
+        return paths;
+
+    const std::string  gltfStem = sanitizeFileStem(sourcePath.stem().string());
+    const std::string  prefix   = gltfStem + "_";
+    std::unordered_set<std::string> usedStems;
+
+    paths.reserve(data->animations_count);
+    for (cgltf_size ai = 0; ai < data->animations_count; ++ai)
+    {
+        const std::string unique =
+            clipFileStem(clipName(data->animations[ai], ai, sourcePath), prefix, usedStems);
+        paths.push_back(Importer::toAssetPath(relativeOutputDir / (unique + ".hasset")));
+    }
+
+    cgltf_free(data);
+    return paths;
 }

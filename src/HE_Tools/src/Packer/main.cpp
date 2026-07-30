@@ -13,17 +13,29 @@
 #include <iostream>
 #include <string>
 #include <filesystem>
-#include <cstring>
+#include <vector>
+
+namespace
+{
+// Prints what was wrong with the command line (if anything) plus the usage, and
+// returns the process exit code. Argument errors are HARD here: a packer that
+// quietly ignores "--secrt <pass>" or "--codec zstdd" writes an archive the game
+// then cannot open, and the mistake only surfaces at runtime.
+int usage(const std::string& problem = {})
+{
+    if (!problem.empty())
+        std::cerr << "hpak_packer: " << problem << "\n";
+    std::cerr << "Usage: hpak_packer <project_root> <output.hpak> "
+                 "[--codec store|lz4|zstd] [--secret <passphrase>] "
+                 "[--exclude <glob>]...\n";
+    return 1;
+}
+} // namespace
 
 int main(int argc, char** argv)
 {
     if (argc < 3)
-    {
-        std::cerr << "Usage: hpak_packer <project_root> <output.hpak> "
-                     "[--codec store|lz4|zstd] [--secret <passphrase>] "
-                     "[--exclude <glob>]...\n";
-        return 1;
-    }
+        return usage();
 
     const std::string inputPath  = argv[1];
     const std::string outputFile = argv[2];
@@ -31,26 +43,45 @@ int main(int argc, char** argv)
     std::string   secret;
     Hpak::Codec   codec = Hpak::Codec::Zstd; // sensible ship default
     std::vector<std::string> excludes;
-    for (int i = 3; i < argc - 1; ++i)
+    for (int i = 3; i < argc; ++i)
     {
-        if (std::strcmp(argv[i], "--secret") == 0)
+        const std::string arg = argv[i];
+
+        // Every flag below takes exactly one value. The loop used to stop at
+        // argc - 1, which silently dropped a trailing flag along with its value.
+        const auto takeValue = [&](std::string& out)
         {
-            secret = argv[i + 1];
-            ++i;
+            if (i + 1 >= argc) return false;
+            out = argv[++i];
+            return true;
+        };
+
+        if (arg == "--secret")
+        {
+            if (!takeValue(secret))
+                return usage("--secret needs a passphrase");
         }
-        else if (std::strcmp(argv[i], "--codec") == 0)
+        else if (arg == "--codec")
         {
-            const std::string c = argv[i + 1];
+            std::string c;
+            if (!takeValue(c))
+                return usage("--codec needs one of store|lz4|zstd");
             if      (c == "store") codec = Hpak::Codec::Store;
             else if (c == "lz4")   codec = Hpak::Codec::LZ4;
             else if (c == "zstd")  codec = Hpak::Codec::Zstd;
-            ++i;
+            else return usage("unknown codec '" + c + "' (expected store|lz4|zstd)");
         }
-        else if (std::strcmp(argv[i], "--exclude") == 0)
+        else if (arg == "--exclude")
         {
             // Repeatable. Glob vs the project-root-relative path ('*' spans '/').
-            excludes.emplace_back(argv[i + 1]);
-            ++i;
+            std::string glob;
+            if (!takeValue(glob))
+                return usage("--exclude needs a glob");
+            excludes.emplace_back(std::move(glob));
+        }
+        else
+        {
+            return usage("unknown argument '" + arg + "'");
         }
     }
 

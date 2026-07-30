@@ -6,6 +6,36 @@
 // dominant directional light, same origin bias (N * 0.05) and tMin/tMax
 // (0.02 / 10000). The host guarantees the TLAS instance order equals the
 // giInsts order (irrelevant here — occlusion only — but kept as an invariant).
+//
+// ─── SYNC: seven hand-kept copies of this kernel ─────────────────────────────
+// The GI shadow-ray kernel exists once per API dialect and once per traversal
+// path. Nothing generates them from a common source:
+//
+//   GLSL SW  src/HE_Rendering/shaders/gi_shadow.comp     (Vulkan, CPU BVH)
+//   GLSL HW  src/HE_Rendering/shaders/gi_shadow_hw.comp  (Vulkan, ray query)
+//   HLSL SW  src/HE_Rendering/src/Backends/D3D_Shared/HlslSources.h
+//            `kGiTraversalHLSL` + `kGiShadowCSHLSL`      (D3D11 and D3D12)
+//   HLSL HW  src/HE_Rendering/shaders/gi_shadow_hw.hlsl  (this file)
+//   GLSL SW  src/HE_Rendering/src/Backends/OpenGL/OpenGLRenderer.cpp
+//            `kGiTraversalGLSL` + `kGiShadowCS`          (GL 4.3)
+//   MSL  SW  src/HE_Rendering/src/Backends/Metal/MetalRenderer.mm `kGISWMSL`
+//   MSL  HW  src/HE_Rendering/src/Backends/Metal/MetalRenderer.mm `kGIShadowMSL`
+//
+// WHAT MUST NOT DRIFT: the ray parameters — surface origin bias (N * 0.05),
+// tMin/tMax (0.02 / 10000), the local-light skip radius and the 0.1 slack on the
+// local ray's tMax — the cone-jitter hash constants, and the 8x8 thread group
+// (the host dispatches ceil(w/8) x ceil(h/8) and relies on it).
+//
+// WHAT BREAKS ON DRIFT: every copy still compiles and still runs. Only the
+// shadow mask differs, on the one backend/path that was edited — a changed bias
+// gives acne or peter-panning, a changed tMax makes distant shadows stop, a
+// changed hash gives a different noise the temporal filter then resolves
+// differently. Nothing here is covered by an image test.
+//
+// GUARD: tests/test_culling.cpp, "GI kernels: the constants the hand-kept copies
+// must share", string-compares those constants across the three copies that live
+// in files of their own. The four embedded as C++ string literals are out of its
+// reach — change one, change all seven, and run that test.
 cbuffer GiShadowCB : register(b0)
 {
     float4 uSunDirRadius; // xyz = direction TOWARD the light, w = angular radius (radians)

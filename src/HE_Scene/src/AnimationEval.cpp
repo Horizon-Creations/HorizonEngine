@@ -30,6 +30,26 @@ static float bracketAlpha(const std::vector<float>& times, size_t k, float t)
 
 } // namespace
 
+void advancePlayback(float& playbackTime, bool& playing,
+                     float playbackSpeed, bool looping, float duration, float dt)
+{
+    playbackTime += dt * playbackSpeed;
+    if (looping)
+    {
+        playbackTime = std::fmod(playbackTime, duration);
+        if (playbackTime < 0.0f)
+            playbackTime += duration;
+    }
+    else
+    {
+        if (playbackTime >= duration)
+        {
+            playbackTime = duration;
+            playing      = false;
+        }
+    }
+}
+
 void sampleClip(const AnimationClipAsset& clip, float t, std::vector<JointTRS>& localTRS)
 {
     for (const auto& channel : clip.channels)

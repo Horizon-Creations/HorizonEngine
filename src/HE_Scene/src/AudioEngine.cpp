@@ -110,10 +110,14 @@ bool AudioEngine::hasBus(const std::string& name) const
     return m_impl->buses.count(name) > 0;
 }
 
-uint64_t AudioEngine::play(const std::vector<uint8_t>& pcmData,
-                            int sampleRate, int channels,
-                            float volume, float pitch, bool loop,
-                            const std::string& busName)
+// Everything play() and playSpatial() have in common — the PCM copy, the audio
+// buffer, the bus routing and the start. Only the spatialization flag and the
+// positional setup below differ, so this is written once.
+uint64_t AudioEngine::startSound(const std::vector<uint8_t>& pcmData,
+                                  int sampleRate, int channels,
+                                  float volume, float pitch, bool loop,
+                                  const std::string& busName,
+                                  const SpatialParams* spatial)
 {
     if (!m_initialized || pcmData.empty()) return 0;
     if (sampleRate <= 0 || channels <= 0)  return 0;
@@ -148,7 +152,8 @@ uint64_t AudioEngine::play(const std::vector<uint8_t>& pcmData,
             busGroup = &it->second->group;
     }
 
-    ma_uint32 flags = MA_SOUND_FLAG_NO_SPATIALIZATION;
+    // Spatial sounds pass no flag — positioning enabled.
+    ma_uint32 flags = spatial ? 0u : MA_SOUND_FLAG_NO_SPATIALIZATION;
     if (ma_sound_init_from_data_source(&m_impl->engine,
                                         &snd->buffer,
                                         flags, busGroup,
@@ -162,6 +167,14 @@ uint64_t AudioEngine::play(const std::vector<uint8_t>& pcmData,
     ma_sound_set_volume(&snd->sound, volume);
     ma_sound_set_pitch(&snd->sound, pitch);
     ma_sound_set_looping(&snd->sound, loop ? MA_TRUE : MA_FALSE);
+    if (spatial)
+    {
+        ma_sound_set_position(&snd->sound, spatial->x, spatial->y, spatial->z);
+        ma_sound_set_attenuation_model(&snd->sound, ma_attenuation_model_linear);
+        ma_sound_set_min_distance(&snd->sound, spatial->minDist > 0.0f ? spatial->minDist : 0.01f);
+        ma_sound_set_max_distance(&snd->sound, spatial->maxDist > spatial->minDist
+                                                   ? spatial->maxDist : spatial->minDist + 1.0f);
+    }
 
     if (ma_sound_start(&snd->sound) != MA_SUCCESS)
     {
@@ -173,6 +186,14 @@ uint64_t AudioEngine::play(const std::vector<uint8_t>& pcmData,
     uint64_t handle = m_nextHandle++;
     m_impl->sounds.emplace(handle, std::move(snd));
     return handle;
+}
+
+uint64_t AudioEngine::play(const std::vector<uint8_t>& pcmData,
+                            int sampleRate, int channels,
+                            float volume, float pitch, bool loop,
+                            const std::string& busName)
+{
+    return startSound(pcmData, sampleRate, channels, volume, pitch, loop, busName, nullptr);
 }
 
 void AudioEngine::stop(uint64_t handle)
@@ -202,66 +223,8 @@ uint64_t AudioEngine::playSpatial(const std::vector<uint8_t>& pcmData,
                                    float minDist, float maxDist,
                                    const std::string& busName)
 {
-    if (!m_initialized || pcmData.empty()) return 0;
-    if (sampleRate <= 0 || channels <= 0)  return 0;
-
-    auto snd = std::make_unique<ActiveSound>();
-    snd->pcmCopy = pcmData;
-
-    const ma_uint64 frameCount =
-        snd->pcmCopy.size() / (sizeof(int16_t) * static_cast<size_t>(channels));
-
-    ma_audio_buffer_config bcfg = ma_audio_buffer_config_init(
-        ma_format_s16,
-        static_cast<ma_uint32>(channels),
-        frameCount,
-        snd->pcmCopy.data(),
-        nullptr);
-    // Same as play(): the config initializer zeroes sampleRate, which silently
-    // disables resampling and plays the clip at the engine rate instead.
-    bcfg.sampleRate = static_cast<ma_uint32>(sampleRate);
-
-    if (ma_audio_buffer_init(&bcfg, &snd->buffer) != MA_SUCCESS)
-        return 0;
-    snd->bufferOk = true;
-
-    // Route through bus if found
-    ma_sound_group* busGroup = nullptr;
-    if (!busName.empty()) {
-        auto it = m_impl->buses.find(busName);
-        if (it != m_impl->buses.end() && it->second->groupOk)
-            busGroup = &it->second->group;
-    }
-
-    // No NO_SPATIALIZATION flag — spatial positioning enabled
-    if (ma_sound_init_from_data_source(&m_impl->engine,
-                                        &snd->buffer,
-                                        0, busGroup,
-                                        &snd->sound) != MA_SUCCESS)
-    {
-        ma_audio_buffer_uninit(&snd->buffer);
-        return 0;
-    }
-    snd->soundOk = true;
-
-    ma_sound_set_volume(&snd->sound, volume);
-    ma_sound_set_pitch(&snd->sound, pitch);
-    ma_sound_set_looping(&snd->sound, loop ? MA_TRUE : MA_FALSE);
-    ma_sound_set_position(&snd->sound, x, y, z);
-    ma_sound_set_attenuation_model(&snd->sound, ma_attenuation_model_linear);
-    ma_sound_set_min_distance(&snd->sound, minDist > 0.0f ? minDist : 0.01f);
-    ma_sound_set_max_distance(&snd->sound, maxDist > minDist ? maxDist : minDist + 1.0f);
-
-    if (ma_sound_start(&snd->sound) != MA_SUCCESS)
-    {
-        ma_sound_uninit(&snd->sound);
-        ma_audio_buffer_uninit(&snd->buffer);
-        return 0;
-    }
-
-    uint64_t handle = m_nextHandle++;
-    m_impl->sounds.emplace(handle, std::move(snd));
-    return handle;
+    const SpatialParams sp{ x, y, z, minDist, maxDist };
+    return startSound(pcmData, sampleRate, channels, volume, pitch, loop, busName, &sp);
 }
 
 void AudioEngine::setSoundPosition(uint64_t handle, float x, float y, float z)

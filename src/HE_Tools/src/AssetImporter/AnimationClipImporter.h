@@ -27,4 +27,13 @@ public:
         const std::filesystem::path& sourcePath,
         const std::filesystem::path& contentRoot,
         const std::filesystem::path& relativeOutputDir = {});
+
+    // The asset paths (content-root relative) importAndWrite() would produce for
+    // `sourcePath`, without importing anything: only the glTF's JSON is parsed —
+    // no buffers, no channel data — and the names run through exactly the same
+    // naming steps as the write path. The asset compiler asks this to notice that
+    // one of a rigged glTF's clips was deleted and has to be regenerated.
+    static std::vector<std::string> outputPaths(
+        const std::filesystem::path& sourcePath,
+        const std::filesystem::path& relativeOutputDir = {});
 };
