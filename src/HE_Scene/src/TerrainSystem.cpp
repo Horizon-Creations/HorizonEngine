@@ -125,6 +125,50 @@ namespace TerrainSystem
         std::vector<entt::entity> terrains;
         for (auto e : reg.view<TerrainComponent>()) terrains.push_back(e);
 
+        // ── Layer weightmap → GPU texture ────────────────────────────────────
+        // The painted per-texel layer weights (RGBA8, one channel per layer) become
+        // a texture the chunks' draw calls carry, so a material's Landscape Layer
+        // Blend node can sample them. Registered once and REPLACED in place on
+        // later paints, so the UUID stays stable for anything already holding it.
+        for (entt::entity te : terrains)
+        {
+            auto& tc = reg.get<TerrainComponent>(te);
+            if (tc.layerWeights.empty())
+            {
+                tc.weightmapTextureId = HE::UUID{};   // unpainted → shader uses layer 0
+                tc.weightsDirty = false;
+                continue;
+            }
+            const uint32_t wr = std::max(1u, tc.weightRes);
+            if (tc.layerWeights.size() != static_cast<size_t>(wr) * wr * 4)
+            {
+                tc.layerWeights.clear();              // defensive: never upload a short blob
+                tc.weightmapTextureId = HE::UUID{};
+                tc.weightsDirty = false;
+                continue;
+            }
+            const bool have = tc.weightmapTextureId != HE::UUID{}
+                           && cm.getTexture(tc.weightmapTextureId) != nullptr;
+            if (have && !tc.weightsDirty) continue;
+
+            TextureAsset tex;
+            tex.type     = HE::AssetType::Texture;
+            tex.name     = "terrain_weightmap";
+            tex.path     = "mem://terrain_weightmap";
+            tex.width    = static_cast<int>(wr);
+            tex.height   = static_cast<int>(wr);
+            tex.channels = 4;
+            tex.data     = tc.layerWeights;
+            if (have)
+            {
+                cm.replaceTexture(tc.weightmapTextureId, std::move(tex));
+                if (renderer) renderer->InvalidateTexture(tc.weightmapTextureId);
+            }
+            else
+                tc.weightmapTextureId = cm.registerTexture(std::move(tex));
+            tc.weightsDirty = false;
+        }
+
         // ── Chunk material follows the Landscape entity's material ───────────
         // The chunks are what actually render; the Landscape entity itself has no
         // mesh. Their MaterialComponent used to be pinned to the built-in terrain

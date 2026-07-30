@@ -3676,6 +3676,10 @@ unsigned int OpenGLRenderer::getOrBuildMaterialProgram(uint64_t key, const std::
 		// heLocalShadow (local point/spot shadow atlas, sampler2DArray) — unit 12,
 		// where DrawScene binds the atlas alongside the built-in shaders' unit 11.
 		if (GLint l = glGetUniformLocation(prog, "heLocalShadow"); l >= 0) glUniform1i(l, 12);
+		// heLandscapeWeights (landscape layer weightmap) — unit 13. Bound PER DRAW
+		// from the terrain chunk's parent landscape, so two landscapes can share a
+		// material and still carry their own paint.
+		if (GLint l = glGetUniformLocation(prog, "heLandscapeWeights"); l >= 0) glUniform1i(l, 13);
 		glUseProgram(0);
 	};
 
@@ -5912,6 +5916,13 @@ void OpenGLRenderer::InvalidateMesh(const HE::UUID& meshId)
 		m_pendingMeshInvalidations.push_back(meshId);
 }
 
+void OpenGLRenderer::InvalidateTexture(const HE::UUID& textureId)
+{
+	// Same deferral — the graph-texture cache is keyed by "hi:lo" for UUIDs.
+	if (textureId != HE::UUID{})
+		m_pendingTexInvalidations.push_back(textureId);
+}
+
 void OpenGLRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 {
 	// Build each custom-shader material's GL program NOW so the first draw doesn't
@@ -6736,6 +6747,19 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	}
 	m_pendingMeshInvalidations.clear();
 
+	// Textures rewritten in place (landscape weightmap paints) drop their cached
+	// GL texture so the next ResolveGraphTexture re-uploads the new pixels.
+	for (const HE::UUID& id : m_pendingTexInvalidations)
+	{
+		const std::string key = std::to_string(id.hi) + ":" + std::to_string(id.lo);
+		if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end())
+		{
+			if (it->second) glDeleteTextures(1, &it->second);
+			m_graphTexCache.erase(it);
+		}
+	}
+	m_pendingTexInvalidations.clear();
+
 	const IRenderer::EnvironmentSettings& env = GetEnvironment();
 	m_extractor.setDayNight(env.dayNightCycle, env.timeOfDay,
 	                        env.sunColor, env.sunIntensity,
@@ -7449,6 +7473,17 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 							glActiveTexture(GL_TEXTURE1 + (GLenum)i);
 							glBindTexture(GL_TEXTURE_2D, ResolveGraphTexture(gid, gp));
 						}
+						glActiveTexture(GL_TEXTURE0);
+					}
+					// Landscape layer weightmap on unit 13 — PER DRAW (it belongs to
+					// the terrain the chunk is part of, not to the material). Objects
+					// that aren't landscape chunks get the 1x1 (1,0,0,0) default, so a
+					// layer-blend node resolves to layer 0 instead of black.
+					{
+						const HE::UUID wid = dc.weightmapTextureId != HE::UUID{}
+							? dc.weightmapTextureId : HE::kDefaultLayer0WeightTextureId;
+						glActiveTexture(GL_TEXTURE13);
+						glBindTexture(GL_TEXTURE_2D, ResolveGraphTexture(wid, {}));
 						glActiveTexture(GL_TEXTURE0);
 					}
 					glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, nullptr);

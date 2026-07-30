@@ -103,7 +103,23 @@ enum class MatNodeType : uint8_t
     NormalMapSample,// tangent-space normal map → WORLD-space normal, using a screen-space
                     // cotangent frame (dFdx/dFdy of vWorldPos+vUV, Mikkelsen) — no vertex
                     // tangents needed. s = texture path (like TextureSample), p[0] = strength.
+
+    // ── v10: landscape layers ──
+    LandscapeLayerBlend, // one input per named layer, blended by the landscape's painted
+                         // weightmap (RGBA8, channel k = layer k). s = '\n'-separated layer
+                         // names (these become MaterialAsset::graphLayerNames, which is what
+                         // the Landscape paint tool lists). Sampled at the RAW mesh UV — the
+                         // weightmap spans the whole terrain, so per-layer detail tiling is
+                         // authored with the UV node's Tiling instead of the terrain's.
 };
+
+// Layers a single Landscape Layer Blend node can hold — one RGBA8 weightmap
+// channel each. More would mean several weightmap textures + shader permutations.
+inline constexpr int kMatMaxLandscapeLayers = 4;
+
+// Split a LandscapeLayerBlend node's `s` into its layer names (newline separated,
+// blanks dropped, capped at kMatMaxLandscapeLayers). Empty → one "Layer 1".
+HE_API std::vector<std::string> matLandscapeLayerNames(const std::string& s);
 
 // Material blend modes (Output node p[1]; → MaterialAsset::blendMode). They change which
 // Output pins are meaningful — see matOutputPins:
@@ -260,6 +276,12 @@ struct MatShaderGen
     // Empty when the WPO pin is unconnected → the standard vertex is used. The renderers
     // wrap it into their per-backend vertex template (MaterialShaderLibrary::customVertex).
     std::string vertexBody;
+    // Landscape paint layers this material declares, in weightmap-channel order
+    // (→ MaterialAsset::graphLayerNames). Non-empty makes it a LANDSCAPE material:
+    // the Landscape tool lists exactly these as its paintable layers, so the
+    // material — not the terrain — is the single source of truth for what a layer
+    // means. Empty for every ordinary material.
+    std::vector<std::string> layerNames;
 };
 
 // Max project textures a single material graph may sample (fixed so the per-backend

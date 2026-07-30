@@ -24,6 +24,7 @@
 #include <HorizonScene/LODSystem.h>
 #include <HorizonScene/NavigationSystem.h>
 #include <HorizonScene/ParticleSystem.h>
+#include <HorizonScene/TerrainPaint.h>   // landscape layer brush
 #include <HorizonScene/AnimationStateMachineSystem.h>
 #include <Scripting/ScriptEngine.h>
 #include <ContentManager/HAsset.h>
@@ -479,6 +480,11 @@ static bool s_quietContentRefresh = false;
 // Landscape sculpt tool state (shared between the panel and viewport)
 enum class TerrainTool { Raise, Lower, Smooth, Flatten, Ramp, Roughen };
 static TerrainTool s_terrainTool     = TerrainTool::Raise;
+// Landscape PAINT mode: the same brush writes layer weights instead of heights.
+// The paintable layers come from the assigned material's Landscape Layer Blend
+// node (MaterialAsset::graphLayerNames) — the material defines what a layer is.
+static bool        s_landscapePaint  = false;
+static int         s_paintLayer      = 0;
 static float       s_brushRadius     = 10.0f;  // inner full-strength radius (m)
 static float       s_falloffRadius   = 5.0f;   // transition width — strength falls linearly to 0
 static float       s_brushStrength   = 5.0f;
@@ -4594,7 +4600,33 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 							ImGui::IsMouseDown(ImGuiMouseButton_Left) && !io.KeyAlt
 							&& (viewportHovered || s_brushWasDown);
 
-						if (lmbDown && !s_brushWasDown)
+						// ── Paint mode: layer weights, not heights ────────────
+						// Shares the brush shape/radius/falloff and the terrain hit
+						// with sculpting; only the target data differs. The sculpt
+						// blocks below all hang off `sculptDown`, which paint mode
+						// forces false — so a paint stroke can never move geometry.
+						if (s_landscapePaint)
+						{
+							if (lmbDown && !s_brushWasDown && ctx.undoSys)
+								ctx.undoSys->snapshotNow();   // one undo entry per stroke
+							if (lmbDown && hasHit)
+							{
+								// World → terrain-local (the brush works in world XZ).
+								const float lx = hitWS.x - terrainWorldPos.x;
+								const float lz = hitWS.z - terrainWorldPos.z;
+								// Per-second like the sculpt tools, but as a 0..1 blend
+								// factor: the shared 0.1..50 strength slider maps onto a
+								// usable paint rate here.
+								const float amount = std::clamp(
+									s_brushStrength * static_cast<float>(dt) * 0.16f, 0.0f, 1.0f);
+								TerrainPaint::paint(tc, lx, lz, s_paintLayer,
+								                    s_brushRadius, s_falloffRadius, amount);
+							}
+						}
+						// Sculpting is suppressed while painting.
+						const bool sculptDown = lmbDown && !s_landscapePaint;
+
+						if (sculptDown && !s_brushWasDown)
 						{
 							if (ctx.undoSys) ctx.undoSys->snapshotNow();
 							// Lazy-init sculptHeights from current terrain geometry
@@ -4620,7 +4652,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
 						}
 						s_brushWasDown = lmbDown;
 
-						if (lmbDown && hasHit && !tc.sculptHeights.empty())
+						if (sculptDown && hasHit && !tc.sculptHeights.empty())
 						{
 							const float totalR  = s_brushRadius + s_falloffRadius;
 							const float totalR2 = totalR * totalR;
@@ -4877,7 +4909,128 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
         }
         else
         {
-            // ── Terrain exists — show sculpt tools ───────────────────────────
+            // ── Landscape material ───────────────────────────────────────────
+            // Right here, not only on the Terrain entity in the Outliner: the
+            // material IS a landscape authoring tool (it defines the paint
+            // layers), so it belongs in the Landscape panel. The Landscape's
+            // MaterialComponent is what TerrainSystem propagates to the chunk
+            // entities that actually render.
+            {
+                const Entity terrainEnt = terrainView.front();
+                auto* tmat = reg.try_get<MaterialComponent>(terrainEnt);
+                if (!tmat)
+                {
+                    MaterialComponent mc; mc.materialAssetId = HE::kDefaultTerrainMaterialId;
+                    tmat = &reg.emplace_or_replace<MaterialComponent>(terrainEnt, mc);
+                }
+                const MaterialAsset* lmat =
+                    (tmat->materialAssetId == HE::UUID{} || !ctx.contentManager)
+                        ? nullptr : ctx.contentManager->getMaterial(tmat->materialAssetId);
+                const bool builtIn = lmat && lmat->path.rfind("mem://", 0) == 0;
+                const std::string label = !lmat ? std::string("(none — drop a material here)")
+                                                : (builtIn ? lmat->name + " (engine default)" : lmat->name);
+                ImGui::SeparatorText("Material");
+                ImGui::Button((label + "##lsmat").c_str(), ImVec2(-1.0f, 0.0f));
+                if (ImGui::BeginDragDropTarget())
+                {
+                    if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_ASSET_PATH");
+                        p && ctx.contentManager)
+                    {
+                        const std::string rel = ctx.contentManager->toContentRelativePath(
+                            static_cast<const char*>(p->Data));
+                        const HE::UUID id = rel.empty() ? HE::UUID{}
+                                                        : ctx.contentManager->loadAsset(rel);
+                        if (id != HE::UUID{} && ctx.contentManager->getMaterial(id))
+                        {
+                            if (ctx.undoSys) ctx.undoSys->snapshotNow();
+                            tmat->materialAssetId = id;
+                            tmat->dirty = true;   // TerrainSystem pushes it to the chunks
+                            if (ctx.renderer) ctx.renderer->InvalidateMaterial(id);
+                        }
+                        else
+                            Logger::Log(Logger::LogLevel::Warning,
+                                "Editor: dropped asset is not a material");
+                    }
+                    ImGui::EndDragDropTarget();
+                }
+                if (!builtIn && lmat)
+                {
+                    if (ImGui::SmallButton("Reset to Engine Default##lsmat"))
+                    {
+                        if (ctx.undoSys) ctx.undoSys->snapshotNow();
+                        tmat->materialAssetId = HE::kDefaultTerrainMaterialId;
+                        tmat->dirty = true;
+                    }
+                }
+                else
+                    ImGui::TextDisabled("Drag a material from the Content Browser.");
+            }
+
+            // ── Sculpt / Paint mode ──────────────────────────────────────────
+            // Painting is only meaningful when the assigned material DECLARES
+            // layers (a Landscape Layer Blend node): those names are the paintable
+            // layers, in weightmap-channel order. The material is the source of
+            // truth for what a layer means; the terrain only stores the weights.
+            {
+                const Entity terrainEnt2 = terrainView.front();
+                const auto* tmat2 = reg.try_get<MaterialComponent>(terrainEnt2);
+                const MaterialAsset* lmat2 = (!tmat2 || !ctx.contentManager) ? nullptr
+                    : ctx.contentManager->getMaterial(tmat2->materialAssetId);
+                const std::vector<std::string> layers =
+                    lmat2 ? lmat2->graphLayerNames : std::vector<std::string>{};
+                if (layers.empty()) s_landscapePaint = false;
+
+                ImGui::SeparatorText("Mode");
+                if (ImGui::RadioButton("Sculpt", !s_landscapePaint)) s_landscapePaint = false;
+                ImGui::SameLine();
+                ImGui::BeginDisabled(layers.empty());
+                if (ImGui::RadioButton("Paint", s_landscapePaint)) s_landscapePaint = true;
+                ImGui::EndDisabled();
+                if (layers.empty())
+                    ImGui::TextDisabled("Paint needs a material with a\nLandscape Layer Blend node.");
+
+                if (s_landscapePaint)
+                {
+                    auto& ptc = reg.get<TerrainComponent>(terrainEnt2);
+                    ImGui::SeparatorText("Layer");
+                    s_paintLayer = std::clamp(s_paintLayer, 0, static_cast<int>(layers.size()) - 1);
+                    for (int i = 0; i < static_cast<int>(layers.size()); ++i)
+                    {
+                        if (i % 2 != 0) ImGui::SameLine();
+                        if (ImGui::RadioButton(layers[i].c_str(), s_paintLayer == i))
+                            s_paintLayer = i;
+                    }
+                    ImGui::Spacing();
+                    ImGui::DragFloat("Radius##paint",   &s_brushRadius,   0.5f, 0.5f, 500.0f, "%.1f m");
+                    ImGui::DragFloat("Falloff##paint",  &s_falloffRadius, 0.5f, 0.0f, 500.0f, "%.1f m");
+                    ImGui::DragFloat("Strength##paint", &s_brushStrength, 0.1f, 0.1f,  50.0f, "%.2f");
+                    s_brushRadius   = std::max(0.5f, s_brushRadius);
+                    s_falloffRadius = std::max(0.0f, s_falloffRadius);
+
+                    // Changing the resolution would throw the paint away, so it is
+                    // locked once anything has been painted.
+                    int wres = static_cast<int>(ptc.weightRes);
+                    ImGui::Spacing();
+                    ImGui::BeginDisabled(!ptc.layerWeights.empty());
+                    if (ImGui::SliderInt("Weightmap##paint", &wres, 32, 2048))
+                        ptc.weightRes = static_cast<uint32_t>(std::clamp(wres, 32, 2048));
+                    ImGui::EndDisabled();
+                    if (!ptc.layerWeights.empty())
+                        ImGui::TextDisabled("Resolution is fixed once painted.");
+                    ImGui::TextDisabled("LMB drag in viewport to paint");
+                    ImGui::Spacing();
+                    if (ImGui::Button("Clear Paint") && !ptc.layerWeights.empty())
+                    {
+                        if (ctx.undoSys) ctx.undoSys->snapshotNow();
+                        ptc.layerWeights.clear();   // back to "everything is layer 0"
+                        ptc.weightsDirty = true;
+                    }
+                }
+            }
+
+            // ── Sculpt tools (hidden while painting) ─────────────────────────
+            if (!s_landscapePaint)
+            {
             ImGui::SeparatorText("Sculpt Tool");
 
             const char* toolLabels[] = { "Raise", "Lower", "Smooth",
@@ -4928,6 +5081,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
                 tc.sculptHeights.clear();
                 tc.dirty = true;
             }
+            } // end !s_landscapePaint (sculpt tools)
         }
     }
     else

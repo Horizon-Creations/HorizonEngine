@@ -14,6 +14,8 @@
 #include <HorizonScene/Components/ParticleSystemComponent.h>
 #include <HorizonScene/Components/WeatherComponent.h>
 #include <HorizonScene/Components/FoliageComponent.h>
+#include <HorizonScene/Components/TerrainComponent.h>       // landscape layer weightmap
+#include <HorizonScene/Components/TerrainChunkComponent.h>  // chunk → parent landscape
 #include <HorizonScene/UISystem.h>
 #include <ContentManager/DefaultAssets.h>
 #include <ContentManager/ContentManager.h>
@@ -129,6 +131,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 		bool      castsShadow;
 		HE::AABB  localBounds; // real mesh AABB, or invalid → unit-cube fallback
 		std::vector<float> paramOverride; // merged HeParams block, or empty
+		HE::UUID  weightmapId;            // landscape layer weights (chunks only)
 	};
 	auto meshView = reg.view<TransformComponent, MeshComponent>();
 	std::vector<EntityData> items;
@@ -161,6 +164,14 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 					d.paramOverride = std::move(block);
 				}
 		}
+		// Terrain chunk → its parent landscape's painted layer weightmap, so a
+		// Landscape Layer Blend material samples the right terrain's paint. Read
+		// from the PARENT: the weights belong to the landscape, the chunks are
+		// just the pieces it renders as.
+		if (const auto* chunk = reg.try_get<TerrainChunkComponent>(e))
+			if (reg.valid(chunk->terrain))
+				if (const auto* pt = reg.try_get<TerrainComponent>(chunk->terrain))
+					d.weightmapId = pt->weightmapTextureId;
 		d.entId  = static_cast<uint32_t>(e);
 		d.lod    = mesh.lodBias;
 		d.castsShadow = mesh.castsShadow;
@@ -199,6 +210,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 		obj.lod             = d.lod;
 		obj.castsShadow     = d.castsShadow;
 		obj.paramOverride   = d.paramOverride; // per-entity HeParams block (empty = none)
+		obj.weightmapTextureId = d.weightmapId; // landscape layer weights (chunks only)
 	});
 
 	// ── ParticleGraph particles ────────────────────────────────────────────────

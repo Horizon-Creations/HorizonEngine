@@ -406,6 +406,12 @@ public:
     // changes are not masked by the renderer's VBO cache.
     virtual void InvalidateMesh(const HE::UUID& /*meshId*/) {}
 
+    // Same for a texture: drop the cached GPU texture so it re-uploads from the
+    // ContentManager. Call after replaceTexture — e.g. the landscape weightmap,
+    // which is rewritten in place on every paint stroke and would otherwise stay
+    // frozen at whatever the first upload captured.
+    virtual void InvalidateTexture(const HE::UUID& /*textureId*/) {}
+
     // ── ImGui texture helpers ──────────────────────────────────────────────
     // Upload raw RGBA8 pixel data and return a backend-specific texture handle
     // that can be cast to ImTextureID at the call site.

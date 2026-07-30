@@ -40,6 +40,9 @@ void GeometryPass::execute(const RenderWorld&           world,
 			// tint. Identity tint (the default for everything else) always matches
 			// identity, so non-particle batching is unaffected.
 			if (next.instanceTint != first.instanceTint) break;
+			// Landscape chunks of DIFFERENT terrains share mesh+material but each
+			// samples its own painted weightmap, so they can't share a draw.
+			if (next.weightmapTextureId != first.weightmapTextureId) break;
 			++j;
 		}
 
@@ -59,6 +62,7 @@ void GeometryPass::execute(const RenderWorld&           world,
 		dc.opacity         = first.opacity;
 		dc.instanceTint    = first.instanceTint; // batching guarantees the whole run shares this
 		dc.paramOverride   = first.paramOverride; // per-entity HeParams block (empty = none)
+		dc.weightmapTextureId = first.weightmapTextureId; // landscape layer weights
 
 		if (runLen > 1)
 		{

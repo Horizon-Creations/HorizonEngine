@@ -193,6 +193,13 @@ struct MaterialAsset : public RuntimeAsset
 	std::vector<std::string> graphTexturePaths;
 	std::vector<HE::UUID>    graphTextureIds;
 
+	// Landscape paint layers this material declares, in weightmap-CHANNEL order
+	// (generated from its Landscape Layer Blend node). Non-empty = a landscape
+	// material: the Landscape tool lists exactly these as its paintable layers,
+	// so the material is the single source of truth for what a layer means and
+	// the terrain only stores the weights.
+	std::vector<std::string> graphLayerNames;
+
 	// Precompiled per-backend shaders baked into the .hpak at export time (CHUNK_PSHD).
 	// Empty for loose editor assets → the renderer cross-compiles customShaderFragGlsl at
 	// runtime; when present, the renderer uses the variant for the active backend directly
