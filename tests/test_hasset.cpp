@@ -154,3 +154,73 @@ TEST_CASE("HAsset write fails gracefully on an unwritable path")
 	HAsset::Writer w;
 	CHECK_FALSE(w.write(bad, 1));
 }
+
+// ── Truncated / corrupt chunk tails ───────────────────────────────────────────
+// Chunk formats grow by APPENDING fields, so an older asset simply runs out of
+// bytes partway through the read sequence. That has to fail cleanly — but the
+// string-vector reader used to resize() to an unvalidated 64-bit count first,
+// which for a garbage value throws bad_alloc and aborts the process.
+TEST_CASE("readVec(strings) rejects an out-of-range count instead of allocating")
+{
+    // A count that could never fit: each element needs at least a 4-byte prefix.
+    std::vector<uint8_t> buf;
+    const uint64_t bogus = 0xFFFFFFFFFFFFULL;
+    HAsset::Writer::appendPOD(buf, bogus);
+    buf.push_back(0); buf.push_back(0);   // a couple of trailing bytes, far too few
+
+    size_t off = 0;
+    std::vector<std::string> out;
+    CHECK_FALSE(HAsset::Reader::readVec(buf, off, out));
+    CHECK(out.empty());                    // and nothing was allocated
+
+    // A count that fits the buffer but whose strings do not still fails cleanly.
+    std::vector<uint8_t> buf2;
+    const uint64_t two = 2;
+    HAsset::Writer::appendPOD(buf2, two);
+    HAsset::Writer::appendString(buf2, "ok");
+    // second element missing entirely
+    size_t off2 = 0;
+    std::vector<std::string> out2;
+    CHECK_FALSE(HAsset::Reader::readVec(buf2, off2, out2));
+
+    // The valid case still round-trips.
+    std::vector<uint8_t> good;
+    const uint64_t n = 2;
+    HAsset::Writer::appendPOD(good, n);
+    HAsset::Writer::appendString(good, "Grass");
+    HAsset::Writer::appendString(good, "Rock");
+    size_t off3 = 0;
+    std::vector<std::string> out3;
+    REQUIRE(HAsset::Reader::readVec(good, off3, out3));
+    REQUIRE(out3.size() == 2);
+    CHECK(out3[0] == "Grass");
+    CHECK(out3[1] == "Rock");
+    CHECK(off3 == good.size());
+}
+
+// A material written BEFORE a tail field existed must still parse — the reader
+// walks past the end of its MTRL chunk and every field after the truncation
+// keeps its default. This is the exact shape the packaged-asset tests exercise.
+TEST_CASE("material chunk truncated before its tail fields parses cleanly")
+{
+    std::vector<uint8_t> mtrl;
+    HAsset::Writer::appendString(mtrl, "");          // shaderPath
+    const uint64_t texCount = 0;
+    HAsset::Writer::appendPOD(mtrl, texCount);       // texturePaths
+    for (float f : { 1.0f, 0.0f, 0.0f, 0.0f, 0.5f, 1.0f })
+        HAsset::Writer::appendPOD(mtrl, f);          // baseColor/metallic/roughness/opacity
+    // …and nothing else: no custom shader, no graph data, no layer names.
+
+    size_t o = 0;
+    std::string shaderPath; std::vector<std::string> texturePaths;
+    CHECK(HAsset::Reader::readString(mtrl, o, shaderPath));
+    CHECK(HAsset::Reader::readVec(mtrl, o, texturePaths));
+    float v = 0.0f;
+    for (int i = 0; i < 6; ++i) CHECK(HAsset::Reader::readPOD(mtrl, o, v));
+    // Every tail read past this point fails without touching the process.
+    std::string frag, vert;
+    CHECK_FALSE(HAsset::Reader::readString(mtrl, o, frag));
+    std::vector<std::string> layerNames;
+    CHECK_FALSE(HAsset::Reader::readVec(mtrl, o, layerNames));
+    CHECK(layerNames.empty());
+}
