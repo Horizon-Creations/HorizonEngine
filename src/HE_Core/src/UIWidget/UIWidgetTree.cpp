@@ -1,21 +1,20 @@
 #include <UIWidget/UIWidgetTree.h>
 #include <cstdint>
+#include <GraphCommon/GraphJson.h>
+#include <GraphCommon/GraphModel.h>
 #include <UIWidget/UIElements.h>
 #include <nlohmann/json.hpp>
 #include <algorithm>
 
 namespace HE {
 
+// A widget tree is a parent-id TREE, not a link graph: it shares find/add id
+// handling with the node graphs (GraphModel.h) but has no links, hence no
+// connect/disconnect and a removeSubtree instead of removeNode.
 UIElement* UIWidgetTree::find(int id)
-{
-    for (auto& e : elements) if (e->id == id) return e.get();
-    return nullptr;
-}
+{ return HE::graph::findNodeById(elements, id); }
 const UIElement* UIWidgetTree::find(int id) const
-{
-    for (const auto& e : elements) if (e->id == id) return e.get();
-    return nullptr;
-}
+{ return HE::graph::findNodeById(elements, id); }
 
 std::vector<int> UIWidgetTree::childrenOf(int parentId) const
 {
@@ -52,10 +51,7 @@ void UIWidgetTree::removeSubtree(int id)
 
 int UIWidgetTree::add(std::unique_ptr<UIElement> e)
 {
-    e->id = nextId++;
-    const int id = e->id;
-    elements.push_back(std::move(e));
-    return id;
+    return HE::graph::appendNode(elements, nextId, std::move(e));
 }
 
 int UIWidgetTree::add(UIWidgetType type)
@@ -149,8 +145,8 @@ std::string uiWidgetTreeToJson(const UIWidgetTree& tree)
 
 bool uiWidgetTreeFromJson(const std::string& json, UIWidgetTree& out)
 {
-    nlohmann::json j = nlohmann::json::parse(json, nullptr, /*allow_exceptions=*/false);
-    if (j.is_discarded() || !j.is_object()) return false;
+    nlohmann::json j;
+    if (!HE::graph::parseGraphObject(json, j)) return false;
 
     UIWidgetTree t;
     t.canvasWidth  = j.value("canvasWidth",  1920.0f);
@@ -180,7 +176,7 @@ bool uiWidgetTreeFromJson(const std::string& json, UIWidgetTree& out)
             o.value("hoverCursor", static_cast<int>(HE::UICursor::Default)));
         e->readJson(o); // type-specific fields
 
-        if (e->id >= t.nextId) t.nextId = e->id + 1;
+        HE::graph::bumpNextId(t.nextId, e->id);
         t.elements.push_back(std::move(e));
     }
 

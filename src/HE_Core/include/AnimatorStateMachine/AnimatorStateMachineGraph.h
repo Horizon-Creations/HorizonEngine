@@ -33,6 +33,13 @@ struct AnimationState
     float       x = 0.0f, y = 0.0f; // persisted canvas position
 };
 
+// KNOWN WART (deliberately not fixed here): a transition names its endpoints BY
+// STATE NAME, not by AnimationState::id. Renaming a state therefore has to
+// rewrite every transition that mentions it — a fix-up the EDITOR PANEL owns
+// (AnimatorStateMachineEditorPanel), so anything that forgets it silently breaks
+// the machine. Migrating to ids is the right fix, but it changes the on-disk
+// format (a loader accepting both forms, plus the panel switching to ids), and
+// the panel is where most of that work lands — too wide to do as a drive-by.
 struct AnimationTransition
 {
     std::string  fromState;

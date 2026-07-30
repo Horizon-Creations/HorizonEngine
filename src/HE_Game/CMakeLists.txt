@@ -22,6 +22,15 @@ if(APPLE)
     )
 endif()
 
+# ── Development-only hotkeys ─────────────────────────────────────────────────
+# Debug keys that must NOT be live in a shipped game (today: V = VSync toggle —
+# a player has no settings menu to undo it with, and a stray V would silently
+# change their present mode). Release/MinSizeRel are what the CI packages and
+# what the exporter ships as the game runtime, so they compile these out.
+target_compile_definitions(HorizonGame PRIVATE
+	$<$<CONFIG:Debug,RelWithDebInfo>:HE_GAME_DEV_HOTKEYS>
+)
+
 if(DEFINED HE_PROJECT_SECRET)
 	target_compile_definitions(HorizonGame
 		PRIVATE HE_PROJECT_SECRET="${HE_PROJECT_SECRET}"

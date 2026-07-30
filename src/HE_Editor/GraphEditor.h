@@ -166,4 +166,23 @@ constexpr float kPinR   = 5.0f;
 // editors share one palette. Hosts map their own categories/types onto these.
 ImU32 categoryColor(const char* category);
 
+// Scale embedded ImGui widgets to the canvas zoom. Font scale alone is not
+// enough — FramePadding/spacing/grab are in pixels and would keep full size,
+// making the widgets overflow the shrunken node box; scale those too so a
+// node's widgets track its box. Every node-graph host (material, HorizonCode,
+// particle, animator state machine) draws its on-node widgets inside this pair.
+inline void pushWidgetScale(float z)
+{
+    const ImGuiStyle& s = ImGui::GetStyle();
+    const ImVec2 fp = s.FramePadding, is = s.ItemSpacing, iis = s.ItemInnerSpacing;
+    const float  fr = s.FrameRounding, gm = s.GrabMinSize;
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,     ImVec2(fp.x * z, fp.y * z));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,      ImVec2(is.x * z, is.y * z));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemInnerSpacing, ImVec2(iis.x * z, iis.y * z));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding,    fr * z);
+    ImGui::PushStyleVar(ImGuiStyleVar_GrabMinSize,      gm * z);
+    ImGui::SetWindowFontScale(z);
+}
+inline void popWidgetScale() { ImGui::SetWindowFontScale(1.0f); ImGui::PopStyleVar(5); }
+
 } // namespace GraphEditor

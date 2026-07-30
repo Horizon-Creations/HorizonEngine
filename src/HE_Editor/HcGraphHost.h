@@ -1,0 +1,124 @@
+#pragma once
+#include "GraphEditor.h"
+#include <HorizonCode/HorizonCode.h>
+#include <imgui.h>
+#include <functional>
+#include <string>
+#include <vector>
+
+class ContentManager;
+
+// ── HcGraphHost ──────────────────────────────────────────────────────────────
+// The HorizonCode half of the shared node canvas. GraphEditor draws ANY graph
+// (it is shared with the material editor); this layer is the part that knows
+// HorizonCode — unified pin layout, the searchable add-node palette, the
+// filtered drag-off-a-pin menu and the node clipboard shortcuts — and it is the
+// same for every HorizonCode editor: the Level Script / Game Instance /
+// HorizonCode Class tabs and the UI Widget graph.
+//
+// The frontends genuinely differ in only three things, so those are all the
+// hooks there are: how a node is titled (the widget editor appends the bound
+// element), how an edit is recorded (a scene-undo snapshot vs the widget's own
+// undo stack) and which node types the menus offer (a level script has no
+// self-widget and no element properties). Everything else lives here.
+namespace HcGraphHost
+{
+namespace HC = HorizonCode;
+
+// ── Node plumbing (all derived from HC::signatureOf) ─────────────────────────
+
+// Unified pin index layout: [execIns][execOuts][dataIns][dataOuts].
+struct PinRanges { int execIn0, execOut0, dataIn0, dataOut0, end; };
+PinRanges pinRanges(const HC::Node& n);
+
+// Display name for a HorizonCode data pin type (used by the variables UI).
+const char* pinTypeName(HC::PinType t);
+
+// Pins for the GraphEditor, in unified index order (positions are laid out by
+// the canvas itself, so only id/label/type/side/exec-ness are provided).
+std::vector<GraphEditor::Pin> nodePins(const HC::Node& n);
+
+void removePinLinks(HC::Graph& g, int nodeId, int pin);
+
+std::string uniqueFunctionName(const HC::Graph& g);
+std::string uniqueVarName(const HC::Graph& g);
+
+// Add a node at `pos`, owned by the visible sub-graph.
+int addNode(HC::Graph& g, HC::NodeType type, const ImVec2& pos, int subgraph);
+
+// Search helper for the menus.
+std::string lower(std::string v);
+
+// Load a class/widget asset's graph (for enumerating its public members). A
+// widget is a first-class object too, so its logic graph counts as a "class".
+bool loadClassGraph(ContentManager* content, const std::string& path, HC::Graph& out);
+
+// The class graph the Ref output of `srcNode` points to (self / GameInstance /
+// a typed Object variable / Create Object), or null when the class is unknown.
+const HC::Graph* resolveClassGraph(const HC::Node& srcNode, const HC::Graph& selfGraph,
+                                   const HC::Graph* giGraph, ContentManager* content,
+                                   HC::Graph& scratch);
+
+// ── Host bindings ────────────────────────────────────────────────────────────
+
+// Which node types each frontend offers. Kept as plain data (not behaviour) so
+// the menus themselves stay shared.
+struct MenuOpts
+{
+	// Add-menu sections, in display order (HC::nodeCategory names).
+	std::vector<const char*> addCategories;
+	// Node types the add menu never offers generically (they are created
+	// through a dedicated path, or make no sense in this frontend).
+	std::vector<HC::NodeType> addExcluded;
+	// Same for the drag-off menu, which walks the whole registry rather than
+	// per category — so every exclusion here is live.
+	std::vector<HC::NodeType> dragExcluded;
+};
+
+// What the shared canvas needs from the editor embedding it.
+struct Host
+{
+	HC::Graph*          graph        = nullptr; // the graph being edited
+	GraphEditor::State* ge           = nullptr; // shared canvas state
+	int*                selectedNode = nullptr; // host-side primary selection
+	int                 currentGraph = 0;       // visible sub-graph (0 = event graph)
+	ContentManager*     content      = nullptr;
+	const HC::Graph*    giGraph      = nullptr; // for Get Game Instance member menus
+	// Node whose compile error gets a red halo (0 = none).
+	int                 errorNode    = 0;
+	// Header text for a node.
+	std::function<std::string(const HC::Node&)> title;
+	// An edit happened. committed = this is an undo/snapshot point (a finished
+	// edit); false = a value is still being dragged (mark dirty, don't snapshot).
+	std::function<void(bool committed)> onEdit;
+	const MenuOpts*     menus        = nullptr;
+};
+
+// The fully wired canvas model. The host only adds its own add-menu
+// (`drawAddMenu`) and drag-drop payloads afterwards; `h` must outlive the
+// GraphEditor::draw call that uses the returned model.
+GraphEditor::Model buildModel(const Host& h);
+
+// ── Add menu ─────────────────────────────────────────────────────────────────
+// Split in three so each host can slot its OWN Events section in the middle
+// (world events / lifecycle events differ per frontend) without duplicating the
+// search box or the rest of the palette.
+// Draws the search field and opens the scrolling list; returns the lowercased
+// query for `drawAddMenuTail` and the host's own matching.
+std::string beginAddMenu();
+// Generic node categories + Call/Return + the engine API + Get/Set Variable.
+// Returns the id of a node created this frame, else 0.
+int  drawAddMenuTail(const Host& h, const std::string& lowerQuery);
+void endAddMenu();
+
+// A link dragged off a pin and released on empty canvas: a menu filtered to
+// everything that can take that pin, auto-wired on pick. Returns the new node
+// id (auto-selected), or 0. Wired into Model::drawPinDragMenu by buildModel.
+int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const ImVec2& pos);
+
+// Node clipboard + duplicate shortcuts (Cmd on macOS, Ctrl elsewhere), handled
+// after GraphEditor::draw. `canvasOrigin`/`avail` are the canvas rect (paste
+// lands under the mouse when it is over the canvas, else in its centre).
+void handleClipboardKeys(const Host& h, const ImVec2& canvasOrigin, const ImVec2& avail);
+
+} // namespace HcGraphHost

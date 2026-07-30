@@ -29,6 +29,8 @@
 #include <HorizonScene/CollisionSystem.h>
 #include <HorizonScene/ScriptApi.h>
 #include <HorizonScene/EngineApi.h>
+#include <HorizonScene/EnvironmentPush.h>      // makeEnvironmentSettings (shared with the game runtime)
+#include <HorizonScene/FlyCameraController.h>  // free-fly PIE camera (shared with the game runtime)
 #include <HorizonScene/Components/ScriptComponent.h>
 #include <ContentManager/Assets.h>
 #include <Renderer/RendererFactory.h>
@@ -967,28 +969,6 @@ void EditorApplication::startToolchainInstall(bool needCmake, bool needCompiler)
 	});
 }
 
-// Push the current SDL keyboard/mouse state into HE::api::input so input.* nodes
-// and scripts can poll it during play. Mouse delta + scroll stay 0 here (the play
-// camera controller owns SDL's relative-motion accumulator); position + buttons +
-// keys (by SDL scancode name, e.g. "W"/"Space") are polled.
-static void pushEngineInputSnapshot()
-{
-	int n = 0;
-	const bool* ks = SDL_GetKeyboardState(&n);
-	std::vector<std::string> down;
-	if (ks)
-		for (int sc = 0; sc < n; ++sc)
-			if (ks[sc]) { const char* name = SDL_GetScancodeName((SDL_Scancode)sc); if (name && name[0]) down.emplace_back(name); }
-	float mx = 0.0f, my = 0.0f;
-	const SDL_MouseButtonFlags mb = SDL_GetMouseState(&mx, &my);
-	uint32_t buttons = 0;
-	if (mb & SDL_BUTTON_MASK(SDL_BUTTON_LEFT))   buttons |= 1u << 0;
-	if (mb & SDL_BUTTON_MASK(SDL_BUTTON_RIGHT))  buttons |= 1u << 1;
-	if (mb & SDL_BUTTON_MASK(SDL_BUTTON_MIDDLE)) buttons |= 1u << 2;
-	HE::api::input::setMouse({ mx, my }, { 0.0f, 0.0f }, buttons, 0.0f);
-	HE::api::input::setKeysDown(down);
-}
-
 // Logger sink: capture play-session warnings/errors for the post-PIE report.
 // May run on ANY thread (streaming/export workers log too) — appendPlayLog locks.
 static void hePlayLogSink(HE::LogLevel level, const char* message, void* user)
@@ -1021,16 +1001,17 @@ void EditorApplication::OnRender(float dt)
 	if (m_isPlaying)
 	{
 		HE::api::time::advance(dt);
-		pushEngineInputSnapshot();
+		HE::api::input::pushSdlSnapshot();
 		// Zone requests (additive load / unload / show / hide / move) run in PIE
 		// against the editor world — leaving play mode restores the pre-play
 		// snapshot, which drops zone entities again. Only the FULL level switch
 		// and activate stay game-runtime-only (the play snapshot belongs to THIS
 		// scene), consumed loudly so a graph author sees why nothing happened.
+		using Kind = HE::api::scene::RequestKind;
 		for (const auto& r : HE::api::scene::takeRequests())
 		{
 			HE::api::Ctx c{ m_editorWorld.get(), nullptr, &contentManager(), &m_audioEngine };
-			if (r.kind == 1 && m_editorWorld) // additive zone
+			if (r.kindOf() == Kind::Additive && m_editorWorld) // additive zone
 			{
 				const std::filesystem::path projRoot =
 					std::filesystem::path(m_projectManager.currentProject().path).parent_path();
@@ -1064,7 +1045,7 @@ void EditorApplication::OnRender(float dt)
 					 + std::to_string(created.size()) + " entities"
 					 + (r.hidden ? ", hidden" : "") + ")").c_str());
 			}
-			else if (r.kind == 2 && m_editorWorld) // unload zone
+			else if (r.kindOf() == Kind::UnloadZone && m_editorWorld) // unload zone
 			{
 				if (const auto* z = HE::api::scene::zoneInfo(r.zone))
 				{
@@ -1075,11 +1056,11 @@ void EditorApplication::OnRender(float dt)
 					HE::api::scene::noteZoneUnloaded(r.zone);
 				}
 			}
-			else if (r.kind == 4) HE::api::scene::setZoneVisible(c, r.zone, r.flag);
-			else if (r.kind == 5) HE::api::scene::setZonePosition(c, r.zone, r.pos);
+			else if (r.kindOf() == Kind::ZoneVisible)  HE::api::scene::setZoneVisible(c, r.zone, r.flag);
+			else if (r.kindOf() == Kind::ZonePosition) HE::api::scene::setZonePosition(c, r.zone, r.pos);
 			else
 				Logger::Log(Logger::LogLevel::Warning,
-					("scene." + std::string(r.kind == 0 ? "load" : "activate")
+					("scene." + std::string(r.kindOf() == Kind::Switch ? "load" : "activate")
 					 + (r.path.empty() ? "" : " ('" + r.path + "')")
 					 + " runs in the packaged game — play-in-editor keeps the current scene.").c_str());
 		}
@@ -2463,43 +2444,17 @@ void EditorApplication::setPlayMouseCaptured(bool captured)
 void EditorApplication::updatePlayCameraController(float dt)
 {
 	if (!m_isPlaying || !m_playMouseCaptured || !m_editorWorld || dt <= 0.0f) return;
-	auto& reg = m_editorWorld->registry();
 
-	entt::entity cam = entt::null;
-	for (auto [e, t, c] : reg.view<TransformComponent, CameraComponent>().each())
-	{
-		if (cam == entt::null) cam = e;
-		if (c.isMain) { cam = e; break; }
-	}
-
-	// Re-assert the capture every frame: SDL engages relative mode only while the
-	// *flagged* window holds keyboard focus, and with multi-viewport panels the focus
-	// can move between OS windows mid-play — the flag set on one window silently stops
-	// engaging when another gains focus. Also re-hide the cursor in case anything
-	// slipped past ImGuiConfigFlags_NoMouseCursorChange and re-showed it.
+	// The focused window is both the one whose relative mode must be re-asserted and
+	// the one the cursor is warped back into (see FlyCameraController) — with
+	// multi-viewport panels that may be a floating panel's OS window, not the main one.
 	SDL_Window* const focusWin = SDL_GetKeyboardFocus();
-	if (focusWin && !SDL_GetWindowRelativeMouseMode(focusWin))
-		SDL_SetWindowRelativeMouseMode(focusWin, true);
-	if (SDL_CursorVisible())
-		SDL_HideCursor();
 
-	// Relative mouse delta accumulated since the last frame. Read exactly once — a
-	// second SDL_GetRelativeMouseState() would return zero because reading drains it.
-	float dx = 0.0f, dy = 0.0f;
-	SDL_GetRelativeMouseState(&dx, &dy);
-
-	// Park the cursor back at the focused window's centre after each frame's relative
-	// motion. With relative mode engaged this is a pure internal position update (SDL
-	// generates no motion events for it); when it is NOT engaged (focus transition,
-	// platform quirk) the OS cursor physically drifts and would stall the look at the
-	// screen edge — the warp keeps it centred either way. SDL pre-sets last_x/last_y
-	// to the warp target, so the warp never pollutes the relative accumulator.
-	if (focusWin)
-	{
-		int fw = 0, fh = 0;
-		SDL_GetWindowSize(focusWin, &fw, &fh);
-		SDL_WarpMouseInWindow(focusWin, fw * 0.5f, fh * 0.5f);
-	}
+	HE::FlyCameraController::Config cfg;
+	cfg.reassertCapture  = true;   // focus can move between OS windows mid-play
+	cfg.runWithoutCamera = true;   // keep feeding the self-diagnostic below
+	const auto frame =
+		HE::FlyCameraController::update(m_editorWorld->registry(), input(), dt, focusWin, cfg);
 
 	// ── Self-diagnostic (throttled ~once/sec) ──────────────────────────────────────
 	// One PIE test should be conclusive: this reports whether a camera is being driven
@@ -2507,12 +2462,12 @@ void EditorApplication::updatePlayCameraController(float dt)
 	// tells us which cause (no camera / input not arriving / extractor) to chase.
 	static int   s_diagFrames = 0;
 	static float s_diagMotion = 0.0f;
-	s_diagMotion += std::abs(dx) + std::abs(dy);
+	s_diagMotion += std::abs(frame.dx) + std::abs(frame.dy);
 	if (++s_diagFrames >= 60)
 	{
 		Logger::Log(Logger::LogLevel::Info,
 			(std::string("PIE camera controller: ")
-			+ (cam == entt::null ? "NO camera to drive" : "driving a scene camera")
+			+ (frame.camera == entt::null ? "NO camera to drive" : "driving a scene camera")
 			+ ", mouse motion (60 frames) = " + std::to_string(s_diagMotion)
 			+ (input().IsKeyDown(SDL_SCANCODE_W) ? " [W held]" : "")
 			+ (focusWin && SDL_GetWindowRelativeMouseMode(focusWin) ? "" : " [rel-mode OFF]")
@@ -2520,35 +2475,6 @@ void EditorApplication::updatePlayCameraController(float dt)
 		s_diagFrames  = 0;
 		s_diagMotion  = 0.0f;
 	}
-
-	if (cam == entt::null) return;
-	auto& t = reg.get<TransformComponent>(cam);
-
-	constexpr float kSensitivity = 0.12f; // degrees per pixel
-	t.rotation.y -= dx * kSensitivity;    // yaw
-	t.rotation.x -= dy * kSensitivity;    // pitch
-	t.rotation.x = std::clamp(t.rotation.x, -89.0f, 89.0f);
-
-	const glm::quat q = glm::quat(glm::radians(t.rotation));
-	const glm::vec3 forward = q * glm::vec3(0.0f, 0.0f, -1.0f);
-	const glm::vec3 right   = q * glm::vec3(1.0f, 0.0f, 0.0f);
-	const glm::vec3 worldUp(0.0f, 1.0f, 0.0f);
-
-	Input& in = input();
-	glm::vec3 move(0.0f);
-	if (in.IsKeyDown(SDL_SCANCODE_W)) move += forward;
-	if (in.IsKeyDown(SDL_SCANCODE_S)) move -= forward;
-	if (in.IsKeyDown(SDL_SCANCODE_D)) move += right;
-	if (in.IsKeyDown(SDL_SCANCODE_A)) move -= right;
-	if (in.IsKeyDown(SDL_SCANCODE_E) || in.IsKeyDown(SDL_SCANCODE_SPACE)) move += worldUp;
-	if (in.IsKeyDown(SDL_SCANCODE_Q) || in.IsKeyDown(SDL_SCANCODE_LCTRL)) move -= worldUp;
-	if (glm::dot(move, move) > 0.0f)
-	{
-		float speed = 6.0f; // units/sec
-		if (in.IsKeyDown(SDL_SCANCODE_LSHIFT) || in.IsKeyDown(SDL_SCANCODE_RSHIFT)) speed *= 3.0f;
-		t.position += glm::normalize(move) * speed * dt;
-	}
-	t.dirty = true;
 }
 
 void EditorApplication::setPlayMode(bool play)
@@ -2623,22 +2549,9 @@ void EditorApplication::setPlayMode(bool play)
 		m_scriptContext = std::make_unique<ScriptContext>(*m_editorWorld);
 		m_scriptContext->setPhysicsWorld(m_physicsWorld.get());
 		m_scriptContext->setContentManager(&contentManager()); // horizon.setMaterialParam
-		{
-			auto& reg = m_editorWorld->registry();
-			for (auto [entity, sc] : reg.view<ScriptComponent>().each())
-			{
-				if (!sc.enabled) continue;
-				const ScriptAsset* asset = contentManager().getScript(sc.scriptAssetId);
-				if (!asset || asset->sourceCode.empty()) continue;
-				if (!m_scriptContext->isScriptLoaded(sc.moduleName, asset->language))
-					m_scriptContext->loadScript(sc.moduleName, asset->sourceCode, asset->language);
-				auto instId = m_scriptContext->createInstance(sc.moduleName, entity, asset->language);
-				if (instId == ScriptEngine::kInvalidInstance) continue;
-				m_scriptContext->injectProperties(instId, sc.properties);
-				m_scriptContext->callOnStart(instId);
-				m_scriptInstances[static_cast<uint32_t>(entity)] = instId;
-			}
-		}
+		// Same call the packaged game's startScripts() makes, so PIE and a shipped
+		// game bring scripts up identically.
+		m_scriptContext->startWorldScripts(contentManager(), m_scriptInstances);
 
 		// The level script's "OnLevelLoaded" fires once, after per-entity
 		// scripts have started. Leaving play mode routes through clear(), which
@@ -2831,49 +2744,11 @@ void EditorApplication::pushEnvironment(float dt)
 		return;
 	}
 
-	// Auto-advance the day-night cycle (time flows with real time).
-	if (env->dayNightCycle && env->autoAdvance && dt > 0.0f)
-	{
-		float dayFrac = dt / std::max(env->cycleSeconds, 1.0f);
-		env->timeOfDay += dayFrac;
-		env->timeOfDay -= std::floor(env->timeOfDay); // wrap to [0,1)
-		// Lunar cycle: the moon phase advances one full cycle per moonCycleDays day-night cycles.
-		if (env->moonPhaseAuto)
-		{
-			env->moonPhase += dayFrac / std::max(env->moonCycleDays, 0.1f);
-			env->moonPhase -= std::floor(env->moonPhase);
-		}
-	}
-
-	renderer()->SetEnvironmentSettings(IRenderer::EnvironmentSettings{
-		.dayNightCycle = env->dayNightCycle, .timeOfDay = env->timeOfDay,
-		.sunColor = env->sunColor, .sunIntensity = env->sunIntensity,
-		.moonColor = env->moonColor, .moonIntensity = env->moonIntensity,
-		.moonPhase = env->moonPhase,
-		.cloudCoverage = env->cloudCoverage,
-		.fogDensity = env->fogDensity, .fogHeightFalloff = env->fogHeightFalloff,
-		.auroraIntensity = env->auroraIntensity,
-		.milkyWayIntensity = env->milkyWayIntensity, .nebulaIntensity = env->nebulaIntensity,
-		.nebulaColor = env->nebulaColor, .nebulaColor2 = env->nebulaColor2,
-		.nebulaColor3 = env->nebulaColor3, .nebulaSeed = env->nebulaSeed,
-		.nebulaCoverage = env->nebulaCoverage,
-		.nebulaQuality = env->nebulaQuality,
-		.auroraColor = env->auroraColor,
-		.auroraColorTop = env->auroraColorTop,
-		.auroraHeight = env->auroraHeight, .auroraFragmentation = env->auroraFragmentation,
-		.windDirection = env->windDirection, .windSpeed = env->windSpeed, .flash = env->flash,
-		.wetness = env->wetness, .snowAmount = env->snowAmount, .rainAmount = env->rainAmount,
-		.cloudMode = env->cloudMode, .cloudHeight = env->cloudHeight,
-		.cloudQuality = env->cloudQuality, .lowResClouds = env->lowResClouds,
-		.cloudDensity = env->cloudDensity, .cloudFluffiness = env->cloudFluffiness,
-		.cloudTint = env->cloudTint,
-		.contrailAmount = env->contrailAmount,
-		.cirrusAmount = env->cirrusAmount, .cirrusSeed = env->cirrusSeed,
-		.godRays = env->godRays, .shootingStars = env->shootingStars, .lensFlare = env->lensFlare,
-		.starBrightness = env->starBrightness, .starColor = env->starColor,
-		.starSize = env->starSize, .starSizeVariation = env->starSizeVariation,
-		.starGlow = env->starGlow, .starTwinkle = env->starTwinkle,
-		.starDensity = env->starDensity});
+	// Shared with the packaged game runtime so the viewport and a shipped build push
+	// the SAME fields. It also AUTO-ADVANCES the day-night cycle by `dt` — which is
+	// why this function is called exactly once per frame (dt = 0 from the headless
+	// dump path, where nothing may advance).
+	renderer()->SetEnvironmentSettings(HE::makeEnvironmentSettings(*env, dt));
 }
 
 void EditorApplication::warmupWorldMaterials()

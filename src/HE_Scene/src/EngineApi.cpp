@@ -16,6 +16,7 @@
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <DebugDraw/DebugDraw.h>
+#include <SDL3/SDL.h>              // input::pushSdlSnapshot (live keyboard/mouse poll)
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <cctype>
@@ -445,24 +446,24 @@ std::unordered_map<int, ZoneInfo>& zones() { static std::unordered_map<int, Zone
 bool& pendingLevel() { static bool p = false; return p; }
 } // namespace
 void load(const std::string& scenePath, bool hidden)
-{ Request r; r.kind = 0; r.path = scenePath; r.hidden = hidden; requests().push_back(std::move(r)); }
+{ Request r; r.kind = (int)RequestKind::Switch; r.path = scenePath; r.hidden = hidden; requests().push_back(std::move(r)); }
 int loadAdditive(const std::string& scenePath, bool hidden, const glm::vec3& position)
 {
-    Request r; r.kind = 1; r.path = scenePath; r.zone = nextZone()++;
+    Request r; r.kind = (int)RequestKind::Additive; r.path = scenePath; r.zone = nextZone()++;
     r.hidden = hidden; r.pos = position;
     requests().push_back(r);
     return r.zone;
 }
 void unloadZone(int zone)
-{ Request r; r.kind = 2; r.zone = zone; requests().push_back(std::move(r)); }
+{ Request r; r.kind = (int)RequestKind::UnloadZone; r.zone = zone; requests().push_back(std::move(r)); }
 void activate()
-{ Request r; r.kind = 3; requests().push_back(std::move(r)); }
+{ Request r; r.kind = (int)RequestKind::Activate; requests().push_back(std::move(r)); }
 void requestZoneVisible(int zone, bool visible)
-{ Request r; r.kind = 4; r.zone = zone; r.flag = visible; requests().push_back(std::move(r)); }
+{ Request r; r.kind = (int)RequestKind::ZoneVisible; r.zone = zone; r.flag = visible; requests().push_back(std::move(r)); }
 void showZone(int zone) { requestZoneVisible(zone, true); }
 void hideZone(int zone) { requestZoneVisible(zone, false); }
 void requestZonePosition(int zone, const glm::vec3& p)
-{ Request r; r.kind = 5; r.zone = zone; r.pos = p; requests().push_back(std::move(r)); }
+{ Request r; r.kind = (int)RequestKind::ZonePosition; r.zone = zone; r.pos = p; requests().push_back(std::move(r)); }
 std::vector<Request> takeRequests()
 {
     std::vector<Request> out = std::move(requests());
@@ -674,6 +675,23 @@ bool      mouseButton(int i)            { return i >= 0 && i < 32 && (snap().but
 glm::vec2 mousePosition()               { return snap().pos; }
 glm::vec2 mouseDelta()                  { return snap().delta; }
 float     scrollDelta()                 { return snap().scroll; }
+void pushSdlSnapshot()
+{
+    int n = 0;
+    const bool* ks = SDL_GetKeyboardState(&n);
+    std::vector<std::string> down;
+    if (ks)
+        for (int sc = 0; sc < n; ++sc)
+            if (ks[sc]) { const char* name = SDL_GetScancodeName((SDL_Scancode)sc); if (name && name[0]) down.emplace_back(name); }
+    float mx = 0.0f, my = 0.0f;
+    const SDL_MouseButtonFlags mb = SDL_GetMouseState(&mx, &my);
+    uint32_t buttons = 0;
+    if (mb & SDL_BUTTON_MASK(SDL_BUTTON_LEFT))   buttons |= 1u << 0;
+    if (mb & SDL_BUTTON_MASK(SDL_BUTTON_RIGHT))  buttons |= 1u << 1;
+    if (mb & SDL_BUTTON_MASK(SDL_BUTTON_MIDDLE)) buttons |= 1u << 2;
+    setMouse({ mx, my }, { 0.0f, 0.0f }, buttons, 0.0f);
+    setKeysDown(down);
+}
 } // namespace input
 
 // ── Registry ─────────────────────────────────────────────────────────────────

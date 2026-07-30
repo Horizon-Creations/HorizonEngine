@@ -880,3 +880,183 @@ TEST_CASE("Variable scope survives the JSON round-trip and dies with its functio
 	CHECK(back.findVariable("l") == nullptr);
 	CHECK(back.findVariable("keep") != nullptr);
 }
+
+// ═══ Graph container semantics ═══════════════════════════════════════════════
+
+TEST_CASE("connect: a DATA input holds one link, an EXEC output holds one link")
+{
+	// The one place HorizonCode's link semantics differ from Material/
+	// ParticleGraph: it also has exec pins, and an exec OUTPUT is a single "what
+	// runs next" pointer, so the SOURCE side is what gets replaced there. Data
+	// pins follow the shared rule — replace on the INPUT, fan out on the output.
+	Graph g;
+	Node seq; seq.type = NodeType::Sequence;
+	const int s = g.addNode(seq);
+	Node p1; p1.type = NodeType::Print;
+	const int a = g.addNode(p1);
+	Node p2; p2.type = NodeType::Print;
+	const int b = g.addNode(p2);
+
+	// Sequence pins: execIn 0, Then 0 = 1, Then 1 = 2.
+	CHECK(g.connect(s, 1, a, 0));
+	REQUIRE(g.links.size() == 1);
+	CHECK(g.connect(s, 1, b, 0));      // same exec OUT → replaces
+	REQUIRE(g.links.size() == 1);
+	CHECK(g.links[0].dstNode == b);
+	CHECK(g.connect(s, 2, a, 0));      // a different exec out → additional link
+	CHECK(g.links.size() == 2);
+
+	// Data: two strings racing for the same Print input.
+	Node c1; c1.type = NodeType::ConstString; c1.s = "one";
+	const int k1 = g.addNode(c1);
+	Node c2; c2.type = NodeType::ConstString; c2.s = "two";
+	const int k2 = g.addNode(c2);
+	CHECK(g.connect(k1, 0, a, 2));     // Print dataIn 0 is unified pin 2
+	CHECK(g.connect(k2, 0, a, 2));     // replaces, never appends
+	int toPrintA = 0;
+	for (const Link& l : g.links) if (l.dstNode == a && l.dstPin == 2) ++toPrintA;
+	CHECK(toPrintA == 1);
+
+	// One data OUTPUT may feed many inputs.
+	CHECK(g.connect(k2, 0, b, 2));
+	int fromK2 = 0;
+	for (const Link& l : g.links) if (l.srcNode == k2) ++fromK2;
+	CHECK(fromK2 == 2);
+}
+
+TEST_CASE("removeNode drops every link touching the node, in either direction")
+{
+	Graph g;
+	Node ev; ev.type = NodeType::Event; ev.s = "Tick";
+	const int e = g.addNode(ev);
+	Node pr; pr.type = NodeType::Print;
+	const int p = g.addNode(pr);
+	Node cs; cs.type = NodeType::ConstString; cs.s = "x";
+	const int c = g.addNode(cs);
+	CHECK(g.connect(e, 0, p, 0));   // exec in
+	CHECK(g.connect(c, 0, p, 2));   // data in
+	REQUIRE(g.links.size() == 2);
+
+	g.removeNode(p);
+	CHECK(g.findNode(p) == nullptr);
+	CHECK(g.links.empty());         // both the incoming exec and the incoming data
+}
+
+TEST_CASE("Graph never reuses a node id after removeNode")
+{
+	Graph g;
+	Node n1; n1.type = NodeType::ConstFloat;
+	const int a = g.addNode(n1);
+	Node n2; n2.type = NodeType::ConstFloat;
+	const int b = g.addNode(n2);
+	g.removeNode(a);
+	g.removeNode(b);
+	Node n3; n3.type = NodeType::ConstFloat;
+	const int c = g.addNode(n3);
+	CHECK(c != a);
+	CHECK(c != b);
+	CHECK(c > b);
+}
+
+TEST_CASE("signatureCountsOf / dataPinDescOf agree with signatureOf for every node type")
+{
+	// The allocation-free accessors must answer exactly what building the full
+	// NodeSig would — they are the same switch, and the hot paths use them.
+	for (NodeType t : nodeRegistry())
+	{
+		Node n; n.type = t;
+		n.hasArg = true;                 // exercise the variable-pin branches
+		n.propType = PinType::Int;
+		n.params  = { { "a", PinType::Float, false }, { "b", PinType::String, true } };
+		n.results = { { "r", PinType::Bool, false } };
+
+		const NodeSig sig = signatureOf(n);
+		const NodeSigCounts cnt = signatureCountsOf(n);
+		CHECK(cnt.execIns  == (int)sig.execIns.size());
+		CHECK(cnt.execOuts == (int)sig.execOuts.size());
+		CHECK(cnt.dataIns  == (int)sig.dataIns.size());
+		CHECK(cnt.dataOuts == (int)sig.dataOuts.size());
+
+		for (int i = 0; i < (int)sig.dataIns.size(); ++i)
+		{
+			PinDesc d;
+			REQUIRE(dataPinDescOf(n, /*input=*/true, i, d));
+			CHECK(d.type == sig.dataIns[i].type);
+			CHECK(d.isArray == sig.dataIns[i].isArray);
+		}
+		for (int i = 0; i < (int)sig.dataOuts.size(); ++i)
+		{
+			PinDesc d;
+			REQUIRE(dataPinDescOf(n, /*input=*/false, i, d));
+			CHECK(d.type == sig.dataOuts[i].type);
+			CHECK(d.isArray == sig.dataOuts[i].isArray);
+		}
+		PinDesc oob;
+		CHECK_FALSE(dataPinDescOf(n, true,  (int)sig.dataIns.size(),  oob));
+		CHECK_FALSE(dataPinDescOf(n, false, (int)sig.dataOuts.size(), oob));
+		CHECK_FALSE(dataPinDescOf(n, true,  -1, oob));
+	}
+}
+
+// ═══ On-disk format ══════════════════════════════════════════════════════════
+
+TEST_CASE("fromJson loads a hand-written OLD-format document")
+{
+	// The shape toJson writes: pretty dump, node type by DISPLAY NAME, links as
+	// ARRAYS [srcNode, srcPin, dstNode, dstPin]. Kept as a literal so refactoring
+	// the writer can never quietly redefine what still loads.
+	const std::string old =
+		R"J({"nextId":4,)J"
+		R"J("nodes":[{"id":1,"type":"Event","pos":[10.0,20.0],"s":"OnClicked","hasArg":false},)J"
+		R"J({"id":2,"type":"Print","pos":[200.0,20.0]},)J"
+		R"J({"id":3,"type":"String","pos":[40.0,120.0],"s":"hello"}],)J"
+		R"J("links":[[1,0,2,0],[3,0,2,2]],)J"
+		R"J("variables":[{"name":"Count","type":3,"f":[7.0,0.0,0.0,0.0]}]})J";
+
+	Graph g;
+	REQUIRE(fromJson(old, g));
+	REQUIRE(g.nodes.size() == 3);
+	CHECK(g.nodes[0].type == NodeType::Event);
+	CHECK(g.nodes[0].s == "OnClicked");
+	CHECK(g.nodes[2].type == NodeType::ConstString);
+	CHECK(g.nodes[2].s == "hello");
+	REQUIRE(g.links.size() == 2);
+	CHECK(g.links[0].srcNode == 1);
+	CHECK(g.links[1].dstPin  == 2);
+	REQUIRE(g.variables.size() == 1);
+	CHECK(g.variables[0].name == "Count");
+	CHECK(g.nextId == 4);
+}
+
+TEST_CASE("fromJson still accepts the legacy \"Array Add\" node name")
+{
+	// Nodes serialize by DISPLAY NAME, so the "Array Add" → "Array Append" rename
+	// would have dropped the node (and its links) out of every saved graph. The
+	// alias table is what keeps those graphs loading — this is its regression test.
+	const std::string legacy =
+		R"J({"nextId":2,"nodes":[{"id":1,"type":"Array Add","pos":[0.0,0.0],"propType":2}],)J"
+		R"J("links":[],"variables":[]})J";
+	Graph g;
+	REQUIRE(fromJson(legacy, g));
+	REQUIRE(g.nodes.size() == 1);
+	CHECK(g.nodes[0].type == NodeType::ArrayAdd);
+
+	// The current name loads too, and round-trips.
+	Graph r;
+	REQUIRE(fromJson(toJson(g), r));
+	REQUIRE(r.nodes.size() == 1);
+	CHECK(r.nodes[0].type == NodeType::ArrayAdd);
+}
+
+TEST_CASE("fromJson drops links whose endpoints did not survive, and repairs nextId")
+{
+	const std::string json =
+		R"J({"nextId":1,"nodes":[{"id":9,"type":"Print","pos":[0.0,0.0]}],)J"
+		R"J("links":[[9,0,404,0],[404,0,9,0],[9]],"variables":[]})J";
+	Graph g;
+	REQUIRE(fromJson(json, g));
+	CHECK(g.links.empty());   // node 404 was never loaded; the 1-element link is skipped
+	CHECK(g.nextId == 10);    // a saved id >= nextId must push it past
+	Node n; n.type = NodeType::ConstFloat;
+	CHECK(g.addNode(n) == 10);
+}

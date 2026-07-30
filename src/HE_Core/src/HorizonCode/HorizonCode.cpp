@@ -1,6 +1,8 @@
 #include <HorizonCode/HorizonCode.h>
 #include <cstdint>
 #include <Diagnostics/Logger.h>
+#include <GraphCommon/GraphJson.h>
+#include <GraphCommon/GraphModel.h>
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <array>
@@ -16,9 +18,14 @@ using P = PinType;
 
 // ── Node signatures ──────────────────────────────────────────────────────────
 
-NodeSig signatureOf(const Node& n)
+namespace
 {
-    NodeSig s;
+// The one switch that knows every node's pins. Fills `s` IN PLACE — clearing its
+// vectors without shrinking them — so the allocation-free accessors below can
+// reuse a single scratch NodeSig instead of building four heap vectors per query.
+void signatureInto(const Node& n, NodeSig& s)
+{
+    s.execIns.clear(); s.execOuts.clear(); s.dataIns.clear(); s.dataOuts.clear();
     switch (n.type)
     {
     case T::Event:
@@ -227,9 +234,64 @@ NodeSig signatureOf(const Node& n)
         break;
     default: break;
     }
+}
+
+// Scratch signature for the counting / single-pin queries below. Its vectors keep
+// their capacity across calls, so after the first call signatureInto() only
+// assigns and pushes into storage it already owns — zero allocations in the hot
+// path (Graph::connect queries it 6× per attempted link, the Runner once per
+// executed node, traceBody once per visited node). thread_local because the
+// editor and the runtime can query concurrently; every accessor copies what it
+// needs out before returning, so callers never alias the scratch.
+NodeSig& sigScratch()
+{
+    static thread_local NodeSig s;
+    return s;
+}
+} // namespace
+
+NodeSig signatureOf(const Node& n)
+{
+    NodeSig s;
+    signatureInto(n, s);
     return s;
 }
 
+NodeSigCounts signatureCountsOf(const Node& n)
+{
+    NodeSig& s = sigScratch();
+    signatureInto(n, s);
+    return { (int)s.execIns.size(), (int)s.execOuts.size(),
+             (int)s.dataIns.size(), (int)s.dataOuts.size() };
+}
+
+bool dataPinDescOf(const Node& n, bool input, int index, PinDesc& out)
+{
+    if (index < 0) return false;
+    NodeSig& s = sigScratch();
+    signatureInto(n, s);
+    const std::vector<PinDesc>& pins = input ? s.dataIns : s.dataOuts;
+    if (index >= (int)pins.size()) return false;
+    // PinDesc::name points at a string literal or at a string owned by `n` — never
+    // at the scratch itself — so the copy stays valid after the next query.
+    out = pins[(size_t)index];
+    return true;
+}
+
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║  THESE STRINGS ARE AN ON-DISK FORMAT.                                    ║
+// ║                                                                          ║
+// ║  toJson() writes a node's type as its DISPLAY NAME and fromJson() looks  ║
+// ║  it back up by that same string. Renaming an entry below therefore makes ║
+// ║  every saved graph containing that node UNREADABLE — the node is silently ║
+// ║  dropped on load (fromJson `continue`s on an unknown name) and every link ║
+// ║  attached to it goes with it. "Array Add" → "Array Append" already cost   ║
+// ║  us exactly that; it survives only through kLegacyNodeNames below.        ║
+// ║                                                                          ║
+// ║  So: if you rename a node, ADD ITS OLD STRING TO kLegacyNodeNames in the  ║
+// ║  same commit. (The proper fix — a stable serialName per type, independent ║
+// ║  of the UI label — is a format migration; see nodeTypeFromStoredName.)    ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
 const char* nodeDisplayName(NodeType t)
 {
     switch (t)
@@ -498,55 +560,49 @@ const std::vector<NodeType>& nodeRegistry()
 namespace
 {
 struct PinRanges { int execIn0, execOut0, dataIn0, dataOut0, end; };
+// All three go through the allocation-free accessors (see HorizonCode.h): they
+// are the interpreter's and the editor's per-node hot path.
 PinRanges pinRanges(const Node& n)
 {
-    const NodeSig s = signatureOf(n);
+    const NodeSigCounts s = signatureCountsOf(n);
     PinRanges r;
     r.execIn0  = 0;
-    r.execOut0 = r.execIn0  + (int)s.execIns.size();
-    r.dataIn0  = r.execOut0 + (int)s.execOuts.size();
-    r.dataOut0 = r.dataIn0  + (int)s.dataIns.size();
-    r.end      = r.dataOut0 + (int)s.dataOuts.size();
+    r.execOut0 = r.execIn0  + s.execIns;
+    r.dataIn0  = r.execOut0 + s.execOuts;
+    r.dataOut0 = r.dataIn0  + s.dataIns;
+    r.end      = r.dataOut0 + s.dataOuts;
     return r;
 }
 PinType dataPinType(const Node& n, bool input, int index)
 {
-    const NodeSig s = signatureOf(n);
-    const auto& pins = input ? s.dataIns : s.dataOuts;
-    if (index < 0 || index >= (int)pins.size()) return P::Float;
-    return pins[index].type;
+    PinDesc d;
+    return dataPinDescOf(n, input, index, d) ? d.type : P::Float;
 }
 bool dataPinIsArray(const Node& n, bool input, int index)
 {
-    const NodeSig s = signatureOf(n);
-    const auto& pins = input ? s.dataIns : s.dataOuts;
-    if (index < 0 || index >= (int)pins.size()) return false;
-    return pins[index].isArray;
+    PinDesc d;
+    return dataPinDescOf(n, input, index, d) && d.isArray;
 }
 } // namespace
 
 // ── Graph container ──────────────────────────────────────────────────────────
 
-Node*       Graph::findNode(int id)       { for (auto& n : nodes) if (n.id == id) return &n; return nullptr; }
-const Node* Graph::findNode(int id) const { for (const auto& n : nodes) if (n.id == id) return &n; return nullptr; }
+Node*       Graph::findNode(int id)       { return HE::graph::findNodeById(nodes, id); }
+const Node* Graph::findNode(int id) const { return HE::graph::findNodeById(nodes, id); }
 
 int Graph::addNode(Node n)
 {
-    n.id = nextId++;
-    nodes.push_back(std::move(n));
-    return nodes.back().id;
+    return HE::graph::appendNode(nodes, nextId, std::move(n));
 }
 
 void Graph::removeNode(int id)
 {
-    // A deleted function takes its local variables with it.
+    // A deleted function takes its local variables with it. (HorizonCode has no
+    // fixed sink node, so unlike Material/ParticleGraph nothing is un-removable.)
     if (const Node* n = findNode(id); n && n->type == NodeType::FunctionEntry)
         variables.erase(std::remove_if(variables.begin(), variables.end(),
             [&](const Variable& v){ return v.scope == id; }), variables.end());
-    nodes.erase(std::remove_if(nodes.begin(), nodes.end(),
-        [&](const Node& n){ return n.id == id; }), nodes.end());
-    links.erase(std::remove_if(links.begin(), links.end(),
-        [&](const Link& l){ return l.srcNode == id || l.dstNode == id; }), links.end());
+    HE::graph::removeNodeAndLinks(nodes, links, id);
 }
 
 Variable*       Graph::findVariable(const std::string& name)
@@ -614,11 +670,12 @@ void adoptForEachElementType(Graph& g, int srcNode, int srcPin, int dstNode, int
     if (!dst || !src || dst->type != NodeType::ForEach) return;
     // ForEach unified pins: execIn 0, Body 1, Done 2, Array-in 3, Element-out 4.
     if (dstPin != 3) return;
-    const NodeSig ss = signatureOf(*src);
-    const int di = srcPin - (int)(ss.execIns.size() + ss.execOuts.size() + ss.dataIns.size());
-    if (di < 0 || di >= (int)ss.dataOuts.size() || !ss.dataOuts[di].isArray) return;
+    PinDesc sd;
+    if (!dataPinDescOf(*src, /*input=*/false, srcPin - pinRanges(*src).dataOut0, sd) ||
+        !sd.isArray)
+        return;
 
-    const PinType elem = ss.dataOuts[di].type;
+    const PinType elem = sd.type;
     if (elem != dst->propType)
     {
         dst->propType = elem;
@@ -657,8 +714,10 @@ bool Graph::connect(int srcNode, int srcPin, int dstNode, int dstPin)
 
     if (srcIsExecOut && dstIsExecIn)
     {
-        links.erase(std::remove_if(links.begin(), links.end(),
-            [&](const Link& l){ return l.srcNode == srcNode && l.srcPin == srcPin; }), links.end());
+        // An exec OUTPUT is a single "what runs next" pointer, so it is the SOURCE
+        // side that gets replaced here — the one place HorizonCode's link semantics
+        // differ from Material/ParticleGraph (which have no exec pins at all).
+        HE::graph::disconnectOutput(links, srcNode, srcPin);
         links.push_back({ srcNode, srcPin, dstNode, dstPin });
         return true;
     }
@@ -668,8 +727,7 @@ bool Graph::connect(int srcNode, int srcPin, int dstNode, int dstPin)
         if (dataPinType(*s, false, si) != dataPinType(*d, true, di) ||
             dataPinIsArray(*s, false, si) != dataPinIsArray(*d, true, di)) // array ≠ scalar
             return false;
-        links.erase(std::remove_if(links.begin(), links.end(),
-            [&](const Link& l){ return l.dstNode == dstNode && l.dstPin == dstPin; }), links.end());
+        HE::graph::disconnectInput(links, dstNode, dstPin); // an input holds one link
         links.push_back({ srcNode, srcPin, dstNode, dstPin });
         return true;
     }
@@ -725,6 +783,33 @@ Value scalarValueFromJson(const nlohmann::json& j, PinType t)
     }
     return v;
 }
+
+// ── Stored node type name → NodeType ─────────────────────────────────────────
+// Nodes serialize by DISPLAY NAME (see the banner at nodeDisplayName), so every
+// rename of a node label leaves saved graphs referring to the OLD string. This
+// table is where those old strings keep working — data-driven, one line per
+// rename, forever. Never delete an entry: the graph that still uses it may be in
+// a user's project, not in this repo.
+//
+// FOLLOW-UP (deliberately not done here): give every NodeType a stable
+// serialName decoupled from the UI label and write THAT, keeping this table as
+// the read-side alias map for everything written so far. That flips what
+// toJson() emits, so it needs a format version on the graph and a shipped-editor
+// compatibility story — too big to slip into a refactor. Until then the rule
+// above ("rename ⇒ add an alias in the same commit") is the whole contract.
+struct LegacyNodeName { const char* stored; NodeType type; };
+constexpr LegacyNodeName kLegacyNodeNames[] = {
+    { "Array Add", NodeType::ArrayAdd },   // renamed to "Array Append"
+};
+
+bool nodeTypeFromStoredName(const std::string& stored, NodeType& out)
+{
+    for (NodeType t : nodeRegistry())
+        if (stored == nodeDisplayName(t)) { out = t; return true; }
+    for (const LegacyNodeName& a : kLegacyNodeNames)
+        if (stored == a.stored) { out = a.type; return true; }
+    return false;
+}
 } // namespace
 
 std::string toJson(const Graph& g)
@@ -777,8 +862,8 @@ std::string toJson(const Graph& g)
     j["nodes"] = std::move(jn);
 
     nlohmann::json jl = nlohmann::json::array();
-    for (const auto& l : g.links)
-        jl.push_back({ l.srcNode, l.srcPin, l.dstNode, l.dstPin });
+    for (const auto& l : g.links) // ARRAY link form — see GraphJson.h
+        jl.push_back(HE::graph::linkToArray(l.srcNode, l.srcPin, l.dstNode, l.dstPin));
     j["links"] = std::move(jl);
 
     nlohmann::json jv = nlohmann::json::array();
@@ -808,8 +893,8 @@ std::string toJson(const Graph& g)
 
 bool fromJson(const std::string& json, Graph& out)
 {
-    nlohmann::json j = nlohmann::json::parse(json, nullptr, /*allow_exceptions=*/false);
-    if (j.is_discarded() || !j.is_object()) return false;
+    nlohmann::json j;
+    if (!HE::graph::parseGraphObject(json, j)) return false;
 
     Graph g;
     g.nextId = j.value("nextId", 1);
@@ -817,13 +902,7 @@ bool fromJson(const std::string& json, Graph& out)
     {
         Node n;
         n.id = e.value("id", 0);
-        const std::string typeName = e.value("type", std::string());
-        bool known = false;
-        for (NodeType t : nodeRegistry())
-            if (typeName == nodeDisplayName(t)) { n.type = t; known = true; break; }
-        // Legacy display names (nodes serialize by name → renames need aliases).
-        if (!known && typeName == "Array Add") { n.type = NodeType::ArrayAdd; known = true; }
-        if (!known) continue;
+        if (!nodeTypeFromStoredName(e.value("type", std::string()), n.type)) continue;
         if (const auto& p = e.value("pos", nlohmann::json::array()); p.size() >= 2)
         { n.x = p[0].get<float>(); n.y = p[1].get<float>(); }
         n.elem     = e.value("elem", 0);
@@ -863,13 +942,16 @@ bool fromJson(const std::string& json, Graph& out)
                 const PinType t = (PinType)entry.value("t", (int)P::Float);
                 n.pinDefaults[idx] = scalarValueFromJson(entry.value("v", nlohmann::json()), t);
             }
-        if (n.id >= g.nextId) g.nextId = n.id + 1;
+        HE::graph::bumpNextId(g.nextId, n.id);
         g.nodes.push_back(std::move(n));
     }
     for (const auto& e : j.value("links", nlohmann::json::array()))
     {
-        if (!e.is_array() || e.size() < 4) continue;
-        Link l{ e[0].get<int>(), e[1].get<int>(), e[2].get<int>(), e[3].get<int>() };
+        Link l;
+        if (!HE::graph::linkFromArray(e, l.srcNode, l.srcPin, l.dstNode, l.dstPin)) continue;
+        // Unlike Material/ParticleGraph, HorizonCode drops links whose endpoints
+        // didn't survive the node loop (an unknown/removed node type) — a dangling
+        // exec link would otherwise stall the interpreter's chain walk.
         if (g.findNode(l.srcNode) && g.findNode(l.dstNode))
             g.links.push_back(l);
     }
@@ -929,11 +1011,11 @@ std::unordered_set<int> traceBody(const Graph& g, int start)
 {
     auto pinRangesOf = [](const Node& n, int& execOut0, int& execOutEnd, int& dataIn0, int& dataInEnd)
     {
-        const NodeSig s = signatureOf(n);
-        execOut0  = (int)s.execIns.size();
-        execOutEnd = execOut0 + (int)s.execOuts.size();
+        const NodeSigCounts s = signatureCountsOf(n);
+        execOut0  = s.execIns;
+        execOutEnd = execOut0 + s.execOuts;
         dataIn0   = execOutEnd;
-        dataInEnd = dataIn0 + (int)s.dataIns.size();
+        dataInEnd = dataIn0 + s.dataIns;
     };
     std::unordered_set<int> body; std::vector<int> stack;
     body.insert(start); stack.push_back(start);
@@ -1012,6 +1094,15 @@ bool valueEquals(const Value& a, const Value& b, PinType t)
     }
 }
 
+// ── THE coercion rule. Two other places implement it and MUST match: ─────────
+//   • HorizonCodeGenSupport.h `hc::coerce*` — the generated-C++ backend. It is a
+//     DELIBERATE duplicate, not an oversight: generated code must produce the
+//     byte-identical result the interpreter would, without linking the
+//     interpreter. Change one → change the other, or a packaged build silently
+//     diverges from what the editor previewed.
+//   • UIWidgetBinding.cpp `uiHcValueToProp` — the widget-property bridge, which
+//     coerces into UIPropValue instead of Value but follows the same rule.
+// Only Float↔Int↔Bool convert; any other mismatch yields the target's zero.
 Value coerce(Value v, PinType want)
 {
     if (v.isArray) return v;   // arrays are never scalar-coerced (pass through whole)

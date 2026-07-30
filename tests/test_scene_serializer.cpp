@@ -11,6 +11,7 @@
 #include <HorizonScene/Components/ScriptComponent.h>
 #include <HorizonScene/Components/EnvironmentComponent.h>
 #include <HorizonScene/Components/EnvironmentLightComponent.h>
+#include <HorizonScene/EnvironmentPush.h>   // HE::makeEnvironmentSettings
 #include <HorizonScene/Components/AnimatorStateMachineComponent.h>
 #include <HorizonScene/Components/AnimatorComponent.h>
 #include <HorizonScene/Components/AnimatorBlendComponent.h>
@@ -647,6 +648,139 @@ TEST_CASE("EnvironmentComponent round-trips on a dedicated Sky entity")
 	CHECK(le.fogDensity     == doctest::Approx(0.05f));
 	CHECK(le.auroraIntensity == doctest::Approx(0.6f));
 	CHECK(le.nebulaColor.b  == doctest::Approx(0.3f));
+
+	he_test::removeQuiet(file);
+}
+
+namespace
+{
+	// Every field HE::makeEnvironmentSettings maps, compared one by one. Used to assert
+	// that what a saved scene pushes to the renderer is what the reloaded scene pushes:
+	// a sky knob added to the component + the push but forgotten in the SceneSerializer
+	// shows up here instead of as "the sky looks different after reopening the level".
+	void checkSameEnvironmentSettings(const IRenderer::EnvironmentSettings& a,
+	                                  const IRenderer::EnvironmentSettings& b)
+	{
+		CHECK(a.skyEnabled          == b.skyEnabled);
+		CHECK(a.dayNightCycle       == b.dayNightCycle);
+		CHECK(a.timeOfDay           == doctest::Approx(b.timeOfDay));
+		CHECK(a.sunColor            == b.sunColor);
+		CHECK(a.sunIntensity        == doctest::Approx(b.sunIntensity));
+		CHECK(a.moonColor           == b.moonColor);
+		CHECK(a.moonIntensity       == doctest::Approx(b.moonIntensity));
+		CHECK(a.moonPhase           == doctest::Approx(b.moonPhase));
+		CHECK(a.cloudCoverage       == doctest::Approx(b.cloudCoverage));
+		CHECK(a.fogDensity          == doctest::Approx(b.fogDensity));
+		CHECK(a.fogHeightFalloff    == doctest::Approx(b.fogHeightFalloff));
+		CHECK(a.auroraIntensity     == doctest::Approx(b.auroraIntensity));
+		CHECK(a.milkyWayIntensity   == doctest::Approx(b.milkyWayIntensity));
+		CHECK(a.nebulaIntensity     == doctest::Approx(b.nebulaIntensity));
+		CHECK(a.nebulaColor         == b.nebulaColor);
+		CHECK(a.nebulaColor2        == b.nebulaColor2);
+		CHECK(a.nebulaColor3        == b.nebulaColor3);
+		CHECK(a.nebulaSeed          == doctest::Approx(b.nebulaSeed));
+		CHECK(a.nebulaCoverage      == doctest::Approx(b.nebulaCoverage));
+		CHECK(a.nebulaQuality       == b.nebulaQuality);
+		CHECK(a.auroraColor         == b.auroraColor);
+		CHECK(a.auroraColorTop      == b.auroraColorTop);
+		CHECK(a.auroraHeight        == doctest::Approx(b.auroraHeight));
+		CHECK(a.auroraFragmentation == doctest::Approx(b.auroraFragmentation));
+		CHECK(a.windDirection       == doctest::Approx(b.windDirection));
+		CHECK(a.windSpeed           == doctest::Approx(b.windSpeed));
+		CHECK(a.wetness             == doctest::Approx(b.wetness));
+		CHECK(a.snowAmount          == doctest::Approx(b.snowAmount));
+		CHECK(a.rainAmount          == doctest::Approx(b.rainAmount));
+		CHECK(a.cloudMode           == b.cloudMode);
+		CHECK(a.cloudHeight         == doctest::Approx(b.cloudHeight));
+		CHECK(a.cloudQuality        == b.cloudQuality);
+		CHECK(a.lowResClouds        == b.lowResClouds);
+		CHECK(a.cloudDensity        == doctest::Approx(b.cloudDensity));
+		CHECK(a.cloudFluffiness     == doctest::Approx(b.cloudFluffiness));
+		CHECK(a.cloudTint           == b.cloudTint);
+		CHECK(a.contrailAmount      == doctest::Approx(b.contrailAmount));
+		CHECK(a.cirrusAmount        == doctest::Approx(b.cirrusAmount));
+		CHECK(a.cirrusSeed          == doctest::Approx(b.cirrusSeed));
+		CHECK(a.godRays             == doctest::Approx(b.godRays));
+		CHECK(a.shootingStars       == doctest::Approx(b.shootingStars));
+		CHECK(a.lensFlare           == doctest::Approx(b.lensFlare));
+		CHECK(a.starBrightness      == doctest::Approx(b.starBrightness));
+		CHECK(a.starColor           == b.starColor);
+		CHECK(a.starSize            == doctest::Approx(b.starSize));
+		CHECK(a.starSizeVariation   == doctest::Approx(b.starSizeVariation));
+		CHECK(a.starGlow            == doctest::Approx(b.starGlow));
+		CHECK(a.starTwinkle         == doctest::Approx(b.starTwinkle));
+		CHECK(a.starDensity         == doctest::Approx(b.starDensity));
+	}
+}
+
+TEST_CASE("A round-tripped Sky pushes identical EnvironmentSettings to the renderer")
+{
+	const fs::path file = fs::temp_directory_path() / "he_test_env_push.hescene";
+
+	HorizonWorld world;
+	const Entity sky = world.addSky();
+	auto& env = world.registry().get<EnvironmentComponent>(sky);
+	// Non-default in every persisted field, so a dropped one changes the pushed value.
+	env.dayNightCycle = true;  env.timeOfDay = 0.37f;
+	env.autoAdvance = false;   env.cycleSeconds = 55.0f;      // no auto-advance: pure mapping
+	env.sunColor = glm::vec3(0.11f, 0.12f, 0.13f);   env.sunIntensity  = 3.1f;
+	env.moonColor = glm::vec3(0.21f, 0.22f, 0.23f);  env.moonIntensity = 0.42f;
+	env.moonPhase = 0.23f;     env.moonPhaseAuto = false;     env.moonCycleDays = 12.5f;
+	env.cloudCoverage = 0.71f; env.windDirection = 210.0f;    env.windSpeed = 2.2f;
+	env.cloudMode = 1;         env.cloudHeight = 275.0f;      env.cloudQuality = 2;
+	env.lowResClouds = true;   env.cloudDensity = 1.6f;       env.cloudFluffiness = 0.34f;
+	env.cloudTint = glm::vec3(0.31f, 0.32f, 0.33f);
+	env.contrailAmount = 0.18f; env.cirrusAmount = 0.29f;     env.cirrusSeed = 7.0f;
+	env.godRays = 0.41f;       env.shootingStars = 0.52f;     env.lensFlare = 0.63f;
+	env.fogDensity = 0.045f;   env.fogHeightFalloff = 0.22f;
+	env.rainAmount = 0.64f;    env.snowAmount = 0.15f;        env.wetness = 0.72f;
+	env.auroraIntensity = 0.81f; env.milkyWayIntensity = 0.44f; env.nebulaIntensity = 0.55f;
+	env.nebulaColor  = glm::vec3(0.41f, 0.42f, 0.43f);
+	env.nebulaColor2 = glm::vec3(0.51f, 0.52f, 0.53f);
+	env.nebulaColor3 = glm::vec3(0.61f, 0.62f, 0.63f);
+	env.nebulaSeed = 13.0f;    env.nebulaCoverage = 0.66f;    env.nebulaQuality = 2;
+	env.auroraColor    = glm::vec3(0.71f, 0.72f, 0.73f);
+	env.auroraColorTop = glm::vec3(0.81f, 0.82f, 0.83f);
+	env.auroraHeight = 0.27f;  env.auroraFragmentation = 0.38f;
+	env.starBrightness = 1.25f; env.starColor = glm::vec3(0.91f, 0.92f, 0.93f);
+	env.starSize = 1.45f;      env.starSizeVariation = 0.26f;
+	env.starGlow = 1.65f;      env.starTwinkle = 0.47f;       env.starDensity = 0.58f;
+
+	const IRenderer::EnvironmentSettings before = HE::makeEnvironmentSettings(env, 0.0f);
+
+	SceneSerializer ser;
+	REQUIRE(ser.save(world, file, SerializeFormat::JSON));
+
+	HorizonWorld loaded;
+	REQUIRE(ser.load(loaded, file, SerializeFormat::JSON));
+	const Entity lsky = loaded.environmentEntity();
+	REQUIRE((lsky != entt::null));
+	auto& lenv = loaded.registry().get<EnvironmentComponent>(lsky);
+	const IRenderer::EnvironmentSettings after = HE::makeEnvironmentSettings(lenv, 0.0f);
+
+	checkSameEnvironmentSettings(before, after);
+
+	he_test::removeQuiet(file);
+}
+
+TEST_CASE("Lightning flash is deliberately runtime-only and is not persisted")
+{
+	const fs::path file = fs::temp_directory_path() / "he_test_env_flash.hescene";
+
+	HorizonWorld world;
+	const Entity sky = world.addSky();
+	auto& env = world.registry().get<EnvironmentComponent>(sky);
+	env.flash = 0.9f;   // set by the WeatherSystem during a strike, never serialized
+
+	SceneSerializer ser;
+	REQUIRE(ser.save(world, file, SerializeFormat::JSON));
+
+	HorizonWorld loaded;
+	REQUIRE(ser.load(loaded, file, SerializeFormat::JSON));
+	auto& lenv = loaded.registry().get<EnvironmentComponent>(loaded.environmentEntity());
+	CHECK(lenv.flash == doctest::Approx(0.0f));
+	// …so a reloaded scene starts un-flashed rather than frozen mid-strike.
+	CHECK(HE::makeEnvironmentSettings(lenv, 0.0f).flash == doctest::Approx(0.0f));
 
 	he_test::removeQuiet(file);
 }

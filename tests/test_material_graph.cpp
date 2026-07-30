@@ -1124,3 +1124,167 @@ TEST_CASE("Landscape Layer Blend emits a normalised weightmap blend")
 	CHECK(pg.layerNames.empty());
 	CHECK(pg.glsl.find("heLandscapeWeights") == std::string::npos);
 }
+
+// ═══ Container semantics shared with the other graph systems ═════════════════
+
+TEST_CASE("MaterialGraph::connect REPLACES an existing link on the same input pin")
+{
+	// An input pin holds at most one link — the rule every graph system in the
+	// engine follows (see GraphCommon/GraphModel.h). Wiring an occupied input
+	// must not leave two wires racing for the same pin.
+	MaterialGraph g;
+	const int out = g.addNode(MatNodeType::Output);
+	const int a   = g.addNode(MatNodeType::ConstColor);
+	const int b   = g.addNode(MatNodeType::ConstColor);
+
+	CHECK(g.connect(a, 0, out, HE::kMatOutputBaseColorPin));
+	CHECK(g.links.size() == 1);
+	CHECK(g.connect(b, 0, out, HE::kMatOutputBaseColorPin));
+	REQUIRE(g.links.size() == 1);
+	CHECK(g.links[0].srcNode == b);
+
+	// The OUTPUT side is free to fan out to many inputs.
+	CHECK(g.connect(b, 0, out, HE::kMatOutputEmissivePin));
+	CHECK(g.links.size() == 2);
+}
+
+TEST_CASE("MaterialGraph::removeNode drops every link touching the node")
+{
+	MaterialGraph g;
+	const int out  = g.addNode(MatNodeType::Output);
+	const int col  = g.addNode(MatNodeType::ConstColor);
+	const int lerp = g.addNode(MatNodeType::Lerp);
+	CHECK(g.connect(col,  0, lerp, 0));
+	CHECK(g.connect(lerp, 0, out,  HE::kMatOutputBaseColorPin));
+	REQUIRE(g.links.size() == 2);
+
+	g.removeNode(lerp);                 // links on BOTH sides go with it
+	CHECK(g.findNode(lerp) == nullptr);
+	CHECK(g.links.empty());
+}
+
+TEST_CASE("MaterialGraph never reuses a node id after removeNode")
+{
+	MaterialGraph g;
+	const int a = g.addNode(MatNodeType::ConstFloat);
+	const int b = g.addNode(MatNodeType::ConstFloat);
+	g.removeNode(a);
+	g.removeNode(b);
+	const int c = g.addNode(MatNodeType::ConstFloat);
+	CHECK(c != a);
+	CHECK(c != b);
+	CHECK(c > b);
+}
+
+// ═══ Parameter budget ════════════════════════════════════════════════════════
+
+TEST_CASE("More than kMatMaxParams parameters never index past the HeParams array")
+{
+	// REGRESSION: the layout used to be clamped only AFTER the shader text was
+	// built, so an over-budget graph emitted heParams.v[16] (and up) against a
+	// `vec4 v[16]` declaration — an out-of-bounds read in the generated shader.
+	// The budget is now enforced before emission: surplus params bake their
+	// authored default as a literal instead.
+	// 20 distinct named float params, chained through Adds so every one of them
+	// is actually reached (and therefore slotted) during emission.
+	MaterialGraph g;
+	const int out = g.addNode(MatNodeType::Output);
+	int acc = -1;
+	for (int i = 0; i < 20; ++i)
+	{
+		const int p = g.addNode(MatNodeType::ParamFloat);
+		g.findNode(p)->s    = "P" + std::to_string(i);
+		g.findNode(p)->p[0] = 0.25f + (float)i; // authored default, baked when over budget
+		if (acc < 0) { acc = p; continue; }
+		const int a = g.addNode(MatNodeType::Add);
+		CHECK(g.connect(acc, 0, a, 0));
+		CHECK(g.connect(p,   0, a, 1));
+		acc = a;
+	}
+	CHECK(g.connect(acc, 0, out, HE::kMatOutputBaseColorPin));
+
+	const HE::MatShaderGen gen = HE::generateFragment(g);
+	CHECK((int)gen.params.size() == HE::kMatMaxParams);
+
+	// No slot index at or beyond the array length appears in the emitted GLSL.
+	for (int i = HE::kMatMaxParams; i < 32; ++i)
+	{
+		const std::string oob = "heParams.v[" + std::to_string(i) + "]";
+		CHECK(gen.glsl.find(oob) == std::string::npos);
+	}
+	// The last in-budget slot IS used, so the test is actually exercising the cap.
+	CHECK(gen.glsl.find("heParams.v[" + std::to_string(HE::kMatMaxParams - 1) + "]")
+	      != std::string::npos);
+	// And the declared array is exactly kMatMaxParams long.
+	CHECK(gen.glsl.find("vec4 v[" + std::to_string(HE::kMatMaxParams) + "]")
+	      != std::string::npos);
+	// Surplus params are baked: their node comment survives without a UBO read.
+	CHECK(gen.glsl.find("// param: P19") != std::string::npos);
+}
+
+TEST_CASE("Exactly kMatMaxParams parameters still all get real UBO slots")
+{
+	MaterialGraph g;
+	const int out = g.addNode(MatNodeType::Output);
+	int acc = -1;
+	for (int i = 0; i < HE::kMatMaxParams; ++i)
+	{
+		const int p = g.addNode(MatNodeType::ParamFloat);
+		g.findNode(p)->s = "Q" + std::to_string(i);
+		if (acc < 0) { acc = p; continue; }
+		const int a = g.addNode(MatNodeType::Add);
+		CHECK(g.connect(acc, 0, a, 0));
+		CHECK(g.connect(p,   0, a, 1));
+		acc = a;
+	}
+	CHECK(g.connect(acc, 0, out, HE::kMatOutputBaseColorPin));
+
+	const HE::MatShaderGen gen = HE::generateFragment(g);
+	CHECK((int)gen.params.size() == HE::kMatMaxParams);
+	for (int i = 0; i < HE::kMatMaxParams; ++i)
+		CHECK(gen.glsl.find("heParams.v[" + std::to_string(i) + "]") != std::string::npos);
+}
+
+// ═══ On-disk format ══════════════════════════════════════════════════════════
+
+TEST_CASE("materialGraphFromJson loads a hand-written OLD-format document")
+{
+	// The shape the shipped editor writes: compact dump, node type by NAME, links
+	// as OBJECTS {sn,sp,dn,dp}, optional s/g/tt keys, no "comments" array at all.
+	// Kept as a literal so refactoring the writer can never quietly redefine what
+	// still loads.
+	const std::string old =
+		R"J({"version":2,"nextId":4,)J"
+		R"J("nodes":[{"id":1,"type":"Output","p":[1.0,0.0,0.5,0.0],"x":380.0,"y":120.0},)J"
+		R"J({"id":2,"type":"Color","p":[0.8,0.4,0.2,0.0],"x":80.0,"y":120.0},)J"
+		R"J({"id":3,"type":"Param (Float)","p":[0.5,0.0,1.0,0.0],"x":80.0,"y":260.0,)J"
+		R"J("s":"Gloss","g":"Surface","tt":"how shiny"}],)J"
+		R"J("links":[{"sn":2,"sp":0,"dn":1,"dp":0},{"sn":3,"sp":0,"dn":1,"dp":3}]})J";
+
+	MaterialGraph g;
+	REQUIRE(HE::materialGraphFromJson(old, g));
+	REQUIRE(g.nodes.size() == 3);
+	CHECK(g.nodes[0].type == MatNodeType::Output);
+	CHECK(g.nodes[2].s       == "Gloss");
+	CHECK(g.nodes[2].group   == "Surface");
+	CHECK(g.nodes[2].tooltip == "how shiny");
+	REQUIRE(g.links.size() == 2);
+	CHECK(g.links[0].dstPin == HE::kMatOutputBaseColorPin);
+	CHECK(g.links[1].dstPin == HE::kMatOutputRoughnessPin);
+	CHECK(g.comments.empty());
+	CHECK(g.nextId == 4);
+
+	const HE::MatShaderGen gen = HE::generateFragment(g);
+	REQUIRE(gen.params.size() == 1);
+	CHECK(gen.params[0].name == "Gloss");
+}
+
+TEST_CASE("materialGraphFromJson repairs nextId when a saved id is >= it")
+{
+	const std::string json =
+		R"({"version":2,"nextId":1,"nodes":[{"id":9,"type":"Output","p":[1.0,0.0,0.5,0.0]}],"links":[]})";
+	MaterialGraph g;
+	REQUIRE(HE::materialGraphFromJson(json, g));
+	CHECK(g.nextId == 10);
+	CHECK(g.addNode(MatNodeType::ConstFloat) == 10);
+}

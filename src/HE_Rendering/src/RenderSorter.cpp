@@ -38,3 +38,25 @@ void RenderSorter::sort(const RenderWorld&          world,
 	for (const SortKey& k : m_keys)
 		outSortedIndices.push_back(k.index);
 }
+
+void RenderSorter::partitionByOpacity(const std::vector<DrawCall>&  drawCalls,
+                                      std::vector<const DrawCall*>& outOpaque,
+                                      std::vector<const DrawCall*>& outTransparent)
+{
+	outOpaque.clear();
+	outTransparent.clear();
+	outOpaque.reserve(drawCalls.size());
+	for (const DrawCall& dc : drawCalls)
+		(isTransparent(dc) ? outTransparent : outOpaque).push_back(&dc);
+}
+
+void RenderSorter::sortBackToFront(std::vector<const DrawCall*>& transparent,
+                                   const glm::vec3&              camPos)
+{
+	std::sort(transparent.begin(), transparent.end(),
+		[&camPos](const DrawCall* a, const DrawCall* b)
+		{
+			return backToFrontKey(a->transform, camPos)
+			     > backToFrontKey(b->transform, camPos);
+		});
+}

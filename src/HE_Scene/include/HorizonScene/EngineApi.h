@@ -319,16 +319,29 @@ namespace scene {
     bool                     hasPendingLevel();              // a hidden load awaits activate()
 
     // ── App hooks ─────────────────────────────────────────────────────────────
+    // What a queued Request asks the app to do. The app dispatch (game runtime and
+    // editor PIE) switches on Request::kindOf() instead of repeating the raw numbers.
+    enum class RequestKind : int
+    {
+        Switch       = 0,  // full world switch — or, with hidden, a background PRELOAD
+        Additive     = 1,  // additive zone load
+        UnloadZone   = 2,  // unload an additive zone
+        Activate     = 3,  // present the level preloaded by Switch + hidden
+        ZoneVisible  = 4,  // show/hide a zone (queued so it orders after a load)
+        ZonePosition = 5,  // move a zone (queued so it orders after a load)
+    };
     struct Request
     {
+        // Stays `int` on the wire: the numbering is the queue's public contract
+        // (test_engine_api.cpp asserts it) and RequestKind is the typed view of it.
         int         kind = 0;
         std::string path;
         int         zone = 0;
-        bool        hidden = false;          // load: defer presentation
-        bool        flag = false;            // kind 4: target visibility
-        glm::vec3   pos{ 0.0f };             // kind 1: placement; kind 5: target position
+        bool        hidden = false;                 // load: defer presentation
+        bool        flag = false;                   // ZoneVisible: target visibility
+        glm::vec3   pos{ 0.0f };                    // Additive: placement; ZonePosition: target
+        RequestKind kindOf() const { return static_cast<RequestKind>(kind); }
     };
-    // kinds: 0 switch, 1 additive, 2 unloadZone, 3 activate, 4 zoneVisible, 5 zonePosition
     std::vector<Request> takeRequests();
     struct ZoneInfo { std::string path; uint32_t root = 0; std::vector<uint32_t> entities; };
     void            noteZoneLoaded(int zone, ZoneInfo info);
@@ -414,6 +427,14 @@ namespace input {
     void setMouse(const glm::vec2& pos, const glm::vec2& delta, uint32_t buttonMask, float scroll);
     void setKeysDown(const std::vector<std::string>& downKeyNames);
     void clear();
+    // Push the current SDL keyboard/mouse state into the snapshot above, so the
+    // input.* registry nodes and scripts poll fresh values this frame. Mouse delta +
+    // scroll are left at 0 here to avoid consuming SDL's relative-motion accumulator
+    // the free-fly camera controller uses; position + buttons + keys (by SDL scancode
+    // name, e.g. "W"/"Space") are polled. Called once per frame by whichever app owns
+    // the SDL window — the packaged game every frame, the editor only while playing
+    // (edit mode leaves the snapshot untouched).
+    void pushSdlSnapshot();
     // Script queries.
     bool      keyDown(const std::string& name);
     bool      mouseButton(int index);    // 0 = left, 1 = right, 2 = middle

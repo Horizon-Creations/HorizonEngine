@@ -65,6 +65,33 @@ struct ParticleGraphLink
     int dstNode = 0, dstPin = 0;
 };
 
+// Emitter Output input pin indices (see the EmitterOutput entry in the node
+// registry), modelled on MaterialGraph's kMatOutput*Pin. Links are stored by pin
+// INDEX, so these are part of the ON-DISK FORMAT: a pin may only ever be
+// APPENDED, never inserted or reordered — which is exactly why pins 14-16
+// (collision) sit at the end instead of next to the other physics-ish fields.
+enum : int {
+    kParticleEmitRatePin         = 0,
+    kParticleLifetimeMinPin      = 1,
+    kParticleLifetimeMaxPin      = 2,
+    kParticleStartSizePin        = 3,
+    kParticleEndSizePin          = 4,
+    kParticleStartColorPin       = 5,   // Vec3
+    kParticleEndColorPin         = 6,   // Vec3
+    kParticleStartAlphaPin       = 7,
+    kParticleEndAlphaPin         = 8,
+    kParticleInitialVelocityPin  = 9,   // Vec3
+    kParticleVelocitySpreadPin   = 10,
+    kParticleGravityPin          = 11,  // Vec3
+    kParticleMaxParticlesPin     = 12,
+    kParticleLoopingPin          = 13,  // > 0.5 → true
+    kParticleCollisionEnabledPin = 14,  // > 0.5 → true
+    kParticleRestitutionPin      = 15,
+    kParticleKillOnCollisionPin  = 16,  // > 0.5 → true
+};
+// One past the last Emitter Output pin — the registry entry must stay this long.
+inline constexpr int kParticleEmitterPinCount = 17;
+
 struct ParticlePinDesc { const char* name; ParticlePinType type; float def; };
 struct ParticleNodeDesc
 {

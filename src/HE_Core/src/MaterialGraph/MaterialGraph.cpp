@@ -1,6 +1,8 @@
 #include "MaterialGraph/MaterialGraph.h"
 #include <cstdint>
 
+#include <GraphCommon/GraphJson.h>
+#include <GraphCommon/GraphModel.h>
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -305,19 +307,30 @@ std::vector<std::string> matLandscapeLayerNames(const std::string& s)
     return out;
 }
 
+// A material function's interface pins, in PIN ORDER. The order is the FnInput /
+// FnOutput nodes sorted by node id — i.e. creation order — because there is no
+// other authored ordering on a canvas, and links are stored by pin INDEX, so the
+// order must be stable for a given saved graph. Every place that resolves a
+// function's interface (matFunctionPins for the editor/pin metadata, the FnInput
+// case that maps a pin back onto the caller's argument, and the FunctionCall case
+// that inlines the k-th FnOutput) MUST use this one ordering or a call would wire
+// its arguments to the wrong parameters.
+static std::vector<const MatGraphNode*> fnInterfaceNodes(const MaterialGraph& g, MatNodeType kind)
+{
+    std::vector<const MatGraphNode*> out;
+    for (const auto& n : g.nodes)
+        if (n.type == kind) out.push_back(&n);
+    std::sort(out.begin(), out.end(),
+              [](const MatGraphNode* a, const MatGraphNode* b){ return a->id < b->id; });
+    return out;
+}
+
 void matFunctionPins(const MaterialGraph& fnGraph,
                      std::vector<MatPinDesc>& inputs, std::vector<MatPinDesc>& outputs)
 {
     inputs.clear(); outputs.clear();
-    std::vector<const MatGraphNode*> ins, outs;
-    for (const auto& n : fnGraph.nodes)
-    {
-        if (n.type == MatNodeType::FnInput)  ins.push_back(&n);
-        if (n.type == MatNodeType::FnOutput) outs.push_back(&n);
-    }
-    auto byId = [](const MatGraphNode* a, const MatGraphNode* b){ return a->id < b->id; };
-    std::sort(ins.begin(), ins.end(), byId);
-    std::sort(outs.begin(), outs.end(), byId);
+    const std::vector<const MatGraphNode*> ins  = fnInterfaceNodes(fnGraph, MatNodeType::FnInput);
+    const std::vector<const MatGraphNode*> outs = fnInterfaceNodes(fnGraph, MatNodeType::FnOutput);
     for (const auto* n : ins)
         inputs.push_back({ n->s.c_str(), pinTypeFromParam(n->p[0]), 0.0f });
     for (const auto* n : outs)
@@ -327,7 +340,6 @@ void matFunctionPins(const MaterialGraph& fnGraph,
 int MaterialGraph::addNode(MatNodeType type, float x, float y)
 {
     MatGraphNode n;
-    n.id = nextId++;
     n.type = type;
     n.x = x; n.y = y;
     if (type == MatNodeType::UV)         { n.p[0] = n.p[1] = 1.0f; }          // tiling 1, offset 0
@@ -353,20 +365,13 @@ int MaterialGraph::addNode(MatNodeType type, float x, float y)
     // v10: a fresh layer-blend node starts with two named layers.
     if (type == MatNodeType::LandscapeLayerBlend) n.s = "Layer 1\nLayer 2";
     if (type == MatNodeType::Output) n.p[2] = 0.5f;
-    nodes.push_back(n);
-    return n.id;
+    return HE::graph::appendNode(nodes, nextId, std::move(n));
 }
 
 const MatGraphNode* MaterialGraph::findNode(int id) const
-{
-    for (const auto& n : nodes) if (n.id == id) return &n;
-    return nullptr;
-}
+{ return HE::graph::findNodeById(nodes, id); }
 MatGraphNode* MaterialGraph::findNode(int id)
-{
-    for (auto& n : nodes) if (n.id == id) return &n;
-    return nullptr;
-}
+{ return HE::graph::findNodeById(nodes, id); }
 
 bool MaterialGraph::connect(int srcNode, int srcPin, int dstNode, int dstPin)
 {
@@ -392,28 +397,19 @@ bool MaterialGraph::connect(int srcNode, int srcPin, int dstNode, int dstPin)
         const MatNodeDesc& dd = matNodeDesc(d->type);
         if (dstPin < 0 || dstPin >= (int)dd.inputs.size()) return false;
     }
-    disconnectInput(dstNode, dstPin);
+    disconnectInput(dstNode, dstPin); // an input pin holds at most one link
     links.push_back({ srcNode, srcPin, dstNode, dstPin });
     return true;
 }
 
 void MaterialGraph::disconnectInput(int dstNode, int dstPin)
-{
-    links.erase(std::remove_if(links.begin(), links.end(),
-        [&](const MatGraphLink& l){ return l.dstNode == dstNode && l.dstPin == dstPin; }),
-        links.end());
-}
+{ HE::graph::disconnectInput(links, dstNode, dstPin); }
 
 void MaterialGraph::removeNode(int id)
 {
     const MatGraphNode* n = findNode(id);
-    if (!n || n->type == MatNodeType::Output) return;
-    links.erase(std::remove_if(links.begin(), links.end(),
-        [&](const MatGraphLink& l){ return l.srcNode == id || l.dstNode == id; }),
-        links.end());
-    nodes.erase(std::remove_if(nodes.begin(), nodes.end(),
-        [&](const MatGraphNode& nn){ return nn.id == id; }),
-        nodes.end());
+    if (!n || n->type == MatNodeType::Output) return; // fixed sink
+    HE::graph::removeNodeAndLinks(nodes, links, id);
 }
 
 MaterialGraph MaterialGraph::makeDefault()
@@ -481,12 +477,19 @@ std::string uvInput(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pinI
 // of the vec4's components carry the default value (rest stay 0) AND the typed widget
 // shown outside the canvas. Same name reuses the slot so repeated Param nodes share
 // one uniform.
+//
+// Returns -1 when the graph is OVER the kMatMaxParams budget; the caller then bakes
+// the node's authored default as a literal instead. This check has to happen HERE,
+// before emission: the layout used to be clamped only after the shader text was
+// built, so an over-budget graph emitted heParams.v[16] (and up) against a
+// `vec4 v[16]` array — an out-of-bounds read in the generated shader.
 int paramSlot(EmitCtx& c, const MatGraphNode& n, MatParamKind kind)
 {
     const std::string name = n.s.empty() ? ("param_" + std::to_string(n.id)) : n.s;
     for (size_t i = 0; i < c.params.size(); ++i)
         if (c.params[i].name == name)
             return (int)i;
+    if ((int)c.params.size() >= kMatMaxParams) return -1;
     const int keep = matParamKindComponents(kind);
     MatParamSlot slot;
     slot.name = name;
@@ -500,6 +503,24 @@ int paramSlot(EmitCtx& c, const MatGraphNode& n, MatParamKind kind)
     if (kind == MatParamKind::Float) { slot.minV = n.p[1]; slot.maxV = n.p[2]; }
     c.params.push_back(std::move(slot));
     return (int)c.params.size() - 1;
+}
+
+// Resolve the sampler name a texture-reading node should use. A node with no
+// picked texture (empty s) samples the material's legacy/mesh texture (heTex0).
+// A picked project texture gets its own slot heTexP{k} (deduplicated by path,
+// capped at kMatMaxGraphTextures); extras fall back to heTex0.
+// Shared by Texture Sample and Normal Map Sample — they must allocate out of the
+// SAME slot table, or two nodes sampling the same file would claim two bindings.
+std::string textureSampler(EmitCtx& c, const MatGraphNode& n)
+{
+    if (n.s.empty()) { c.usesTexture = true; return "heTex0"; }
+    int slot = -1;
+    for (size_t i = 0; i < c.textures.size(); ++i)
+        if (c.textures[i] == n.s) { slot = (int)i; break; }
+    if (slot < 0 && (int)c.textures.size() < kMatMaxGraphTextures)
+    { slot = (int)c.textures.size(); c.textures.push_back(n.s); }
+    if (slot < 0) { c.usesTexture = true; return "heTex0"; } // over budget → default
+    return "heTexP" + std::to_string(slot);
 }
 
 // Emit one node (memoized per scope); returns the expression for output pin `pin`.
@@ -542,22 +563,7 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
             decl = "float " + v + " = heLight.sunDir.w;"; break;
         case MatNodeType::TextureSample:
         {
-            // A node with no picked texture (empty s) samples the material's legacy/mesh
-            // texture (heTex0). A picked project texture gets its own slot heTexP{k}
-            // (deduplicated, capped at kMatMaxGraphTextures); extras fall back to heTex0.
-            std::string sampler = "heTex0";
-            if (!n.s.empty())
-            {
-                int slot = -1;
-                for (size_t i = 0; i < c.textures.size(); ++i)
-                    if (c.textures[i] == n.s) { slot = (int)i; break; }
-                if (slot < 0 && (int)c.textures.size() < kMatMaxGraphTextures)
-                { slot = (int)c.textures.size(); c.textures.push_back(n.s); }
-                if (slot >= 0) sampler = "heTexP" + std::to_string(slot);
-                else           c.usesTexture = true; // over budget → default
-            }
-            else
-                c.usesTexture = true;
+            const std::string sampler = textureSampler(c, n);
             decl = "vec4 " + v + " = texture(" + sampler + ", " + inputExpr(c, sc, n, 0, F::Vec2) + ");";
             pinExpr = { v + ".xyz", v + ".w" };
             break;
@@ -567,19 +573,7 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
             // Tangent-space normal map → world space WITHOUT vertex tangents: build the
             // cotangent frame from screen-space derivatives of position+UV (Mikkelsen).
             // Same slot machinery as Texture Sample (empty s → the mesh texture).
-            std::string sampler = "heTex0";
-            if (!n.s.empty())
-            {
-                int slot = -1;
-                for (size_t i = 0; i < c.textures.size(); ++i)
-                    if (c.textures[i] == n.s) { slot = (int)i; break; }
-                if (slot < 0 && (int)c.textures.size() < kMatMaxGraphTextures)
-                { slot = (int)c.textures.size(); c.textures.push_back(n.s); }
-                if (slot >= 0) sampler = "heTexP" + std::to_string(slot);
-                else           c.usesTexture = true;
-            }
-            else
-                c.usesTexture = true;
+            const std::string sampler = textureSampler(c, n);
             c.usesNormalPerturb = true;
             const float strength = n.p[0] > 0.0f ? n.p[0] : 1.0f;
             decl = "vec2 " + v + "_uv = " + uvInput(c, sc, n, 0) + ";"
@@ -648,16 +642,20 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
             decl = "vec3 " + v + " = normalize(heLight.camPos.xyz - vWorldPos);"; break;
         case MatNodeType::ParamFloat:
         {
+            // Over budget (slot < 0) → bake the authored default; see paramSlot.
             const int slot = paramSlot(c, n, MatParamKind::Float);
-            decl = "float " + v + " = heParams.v[" + std::to_string(slot) + "].x; // param: "
-                 + (n.s.empty() ? "?" : n.s);
+            decl = "float " + v + " = "
+                 + (slot < 0 ? fmtF(n.p[0]) : "heParams.v[" + std::to_string(slot) + "].x")
+                 + "; // param: " + (n.s.empty() ? "?" : n.s);
             break;
         }
         case MatNodeType::ParamColor:
         {
             const int slot = paramSlot(c, n, MatParamKind::Color);
-            decl = "vec3 " + v + " = heParams.v[" + std::to_string(slot) + "].xyz; // param: "
-                 + (n.s.empty() ? "?" : n.s);
+            decl = "vec3 " + v + " = "
+                 + (slot < 0 ? "vec3(" + fmtF(n.p[0]) + ", " + fmtF(n.p[1]) + ", " + fmtF(n.p[2]) + ")"
+                             : "heParams.v[" + std::to_string(slot) + "].xyz")
+                 + "; // param: " + (n.s.empty() ? "?" : n.s);
             break;
         }
         case MatNodeType::Subtract:
@@ -746,11 +744,8 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
             const MatPinType t = pinTypeFromParam(n.p[0]);
             if (sc.parent && sc.callNode)
             {
-                std::vector<const MatGraphNode*> ins;
-                for (const auto& nn : sc.g->nodes)
-                    if (nn.type == MatNodeType::FnInput) ins.push_back(&nn);
-                std::sort(ins.begin(), ins.end(),
-                          [](const MatGraphNode* a, const MatGraphNode* b){ return a->id < b->id; });
+                const std::vector<const MatGraphNode*> ins =
+                    fnInterfaceNodes(*sc.g, MatNodeType::FnInput);
                 int idx = 0;
                 for (size_t i = 0; i < ins.size(); ++i) if (ins[i]->id == n.id) idx = (int)i;
                 const std::string src = inputExpr(c, *sc.parent, *sc.callNode, idx, t);
@@ -777,11 +772,8 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
                      + std::string(recursing ? "recursive" : "missing") + " function: " + n.s;
                 break;
             }
-            std::vector<const MatGraphNode*> outs;
-            for (const auto& nn : fn->nodes)
-                if (nn.type == MatNodeType::FnOutput) outs.push_back(&nn);
-            std::sort(outs.begin(), outs.end(),
-                      [](const MatGraphNode* a, const MatGraphNode* b){ return a->id < b->id; });
+            const std::vector<const MatGraphNode*> outs =
+                fnInterfaceNodes(*fn, MatNodeType::FnOutput);
             if (outs.empty())
             {
                 decl = "vec3 " + v + " = vec3(1.0, 0.0, 1.0); // function has no output: " + n.s;
@@ -820,23 +812,31 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
         case MatNodeType::ParamVec2:
         {
             const int slot = paramSlot(c, n, MatParamKind::Vec2);
-            decl = "vec2 " + v + " = heParams.v[" + std::to_string(slot) + "].xy; // param: "
-                 + (n.s.empty() ? "?" : n.s);
+            decl = "vec2 " + v + " = "
+                 + (slot < 0 ? "vec2(" + fmtF(n.p[0]) + ", " + fmtF(n.p[1]) + ")"
+                             : "heParams.v[" + std::to_string(slot) + "].xy")
+                 + "; // param: " + (n.s.empty() ? "?" : n.s);
             break;
         }
         case MatNodeType::ParamVec4:
         {
             const int slot = paramSlot(c, n, MatParamKind::Vec4);
-            decl = "vec4 " + v + " = heParams.v[" + std::to_string(slot) + "]; // param: "
-                 + (n.s.empty() ? "?" : n.s);
+            decl = "vec4 " + v + " = "
+                 + (slot < 0 ? "vec4(" + fmtF(n.p[0]) + ", " + fmtF(n.p[1]) + ", "
+                                       + fmtF(n.p[2]) + ", " + fmtF(n.p[3]) + ")"
+                             : "heParams.v[" + std::to_string(slot) + "]")
+                 + "; // param: " + (n.s.empty() ? "?" : n.s);
             break;
         }
         case MatNodeType::ParamBool:
         {
             const int slot = paramSlot(c, n, MatParamKind::Bool);
             // Threshold so a bool param reads cleanly as 0.0/1.0 even if set to e.g. 0.7.
-            decl = "float " + v + " = step(0.5, heParams.v[" + std::to_string(slot) + "].x); // param: "
-                 + (n.s.empty() ? "?" : n.s);
+            // Over budget the threshold is applied at bake time (same as ConstBool).
+            decl = "float " + v + " = "
+                 + (slot < 0 ? std::string(n.p[0] > 0.5f ? "1.0" : "0.0")
+                             : "step(0.5, heParams.v[" + std::to_string(slot) + "].x)")
+                 + "; // param: " + (n.s.empty() ? "?" : n.s);
             break;
         }
         case MatNodeType::If:
@@ -1027,7 +1027,8 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
         src += "layout(set = 0, binding = " + std::to_string(4 + i)
              + ") uniform sampler2D heTexP" + std::to_string(i) + ";\n";
     if (!c.params.empty())
-        src += "layout(std140, set = 0, binding = 3) uniform HeParams { vec4 v[16]; } heParams;\n";
+        src += "layout(std140, set = 0, binding = 3) uniform HeParams { vec4 v["
+             + std::to_string(kMatMaxParams) + "]; } heParams;\n";
     if (c.usesNoise)
         src +=
             "float heHash21(vec2 p) { p = fract(p * vec2(123.34, 456.21));"
@@ -1084,9 +1085,11 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
         src += "    oColor = vec4(" + base + " + " + emis + ", " + opacity + ");\n";
     src += "}\n";
 
-    // Cap at the UBO's 16 slots (over-budget params were still emitted with their slot
-    // index — clamp the layout so uploads stay in bounds; realistically never hit).
-    if (c.params.size() > 16) c.params.resize(16);
+    // No clamp here any more: the kMatMaxParams budget is enforced in paramSlot(),
+    // BEFORE emission, so an over-budget node bakes its default instead of indexing
+    // past the UBO array. Clamping afterwards (what this used to do) shrank the
+    // uploaded layout but left the already-emitted heParams.v[16+] reads in the
+    // shader — an out-of-bounds index. c.params can no longer exceed kMatMaxParams.
     gen.glsl     = std::move(src);
     gen.params   = std::move(c.params);
     gen.textures = std::move(c.textures);
@@ -1117,9 +1120,8 @@ std::string materialGraphToJson(const MaterialGraph& graph)
         if (!n.tooltip.empty()) jn["tt"] = n.tooltip;
         j["nodes"].push_back(std::move(jn));
     }
-    for (const auto& l : graph.links)
-        j["links"].push_back({ { "sn", l.srcNode }, { "sp", l.srcPin },
-                               { "dn", l.dstNode }, { "dp", l.dstPin } });
+    for (const auto& l : graph.links) // OBJECT link form — see GraphJson.h
+        j["links"].push_back(HE::graph::linkToObject(l.srcNode, l.srcPin, l.dstNode, l.dstPin));
     // Editor-only comment boxes. Older parsers ignore the extra key (forward-compatible);
     // absent key → no comments (backward-compatible).
     for (const auto& cm : graph.comments)
@@ -1131,8 +1133,8 @@ std::string materialGraphToJson(const MaterialGraph& graph)
 
 bool materialGraphFromJson(const std::string& json, MaterialGraph& out)
 {
-    nlohmann::json j = nlohmann::json::parse(json, nullptr, /*allow_exceptions=*/false);
-    if (j.is_discarded() || !j.is_object()) return false;
+    nlohmann::json j;
+    if (!HE::graph::parseGraphObject(json, j)) return false;
     MaterialGraph g;
     g.nextId = j.value("nextId", 1);
     for (const auto& jn : j.value("nodes", nlohmann::json::array()))
@@ -1155,7 +1157,7 @@ bool materialGraphFromJson(const std::string& json, MaterialGraph& out)
         if (n.type == MatNodeType::UV && n.p[0] == 0.0f && n.p[1] == 0.0f)
         { n.p[0] = 1.0f; n.p[1] = 1.0f; }
         g.nodes.push_back(n);
-        g.nextId = std::max(g.nextId, n.id + 1);
+        HE::graph::bumpNextId(g.nextId, n.id);
     }
     // v1 → v2: Specular was inserted at Output pin 2 and Ambient Occlusion at
     // pin 7, shifting everything after them. Links are stored by pin INDEX, so
@@ -1178,8 +1180,8 @@ bool materialGraphFromJson(const std::string& json, MaterialGraph& out)
 
     for (const auto& jl : j.value("links", nlohmann::json::array()))
     {
-        MatGraphLink l{ jl.value("sn", 0), jl.value("sp", 0),
-                        jl.value("dn", 0), jl.value("dp", 0) };
+        MatGraphLink l;
+        HE::graph::linkFromObject(jl, l.srcNode, l.srcPin, l.dstNode, l.dstPin);
         if (remapOutput && isOutputNode(l.dstNode) &&
             l.dstPin >= 0 && l.dstPin < 7)
             l.dstPin = kV1ToV2[l.dstPin];
@@ -1192,7 +1194,7 @@ bool materialGraphFromJson(const std::string& json, MaterialGraph& out)
         cm.text = jc.value("t", std::string());
         cm.x = jc.value("x", 0.0f); cm.y = jc.value("y", 0.0f);
         cm.w = jc.value("w", 260.0f); cm.h = jc.value("h", 180.0f);
-        g.nextId = std::max(g.nextId, cm.id + 1);
+        HE::graph::bumpNextId(g.nextId, cm.id);
         g.comments.push_back(std::move(cm));
     }
     out = std::move(g);

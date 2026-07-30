@@ -110,6 +110,15 @@ inline Value arg(const std::vector<Value>& args, size_t i)
 // Arrays pass through coerce untouched, then the reader reads the field raw —
 // so each helper reads the raw field for arrays too. Only Float↔Int↔Bool
 // convert; any other mismatch yields the target's zero value.
+//
+// *** DELIBERATE DUPLICATE — KEEP IN SYNC WITH HorizonCode.cpp's `coerce`. ***
+// This is the parity contract between the interpreter (what the editor previews)
+// and generated C++ (what a packaged build actually runs): the generated code
+// must reach the same value WITHOUT linking the interpreter, so the rule is
+// written out twice on purpose. Any edit here needs the matching edit there (and
+// vice versa), or a shipped build diverges from the editor with no error at all.
+// A third implementation of the same rule lives in UIWidgetBinding.cpp
+// (uiHcValueToProp), coercing into UIPropValue.
 inline float coerceFloat(const Value& v)
 {
     if (v.isArray || v.type == PinType::Float) return v.f;
