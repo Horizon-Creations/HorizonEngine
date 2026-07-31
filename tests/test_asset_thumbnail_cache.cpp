@@ -4,6 +4,9 @@
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <MaterialGraph/MaterialGraph.h>
+#include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/SceneSerializer.h>
+#include <HorizonScene/Components/MeshComponent.h>
 #include <Types/Enums.h>
 #include <filesystem>
 #include <fstream>
@@ -310,6 +313,67 @@ TEST_CASE("texture tile handles greyscale and RGB sources, rejects nonsense")
 	CHECK_FALSE(AssetThumbnailCache::textureThumbnail(
 		makeTexture(cm, 0, 0, 4, {}), out));
 	CHECK_FALSE(AssetThumbnailCache::textureThumbnail(HE::UUID{}, out));
+
+	AssetThumbnailCache::setContext(nullptr, nullptr, "");
+	he_test::removeAllQuiet(dir);
+}
+
+// ── Prefab tiles ─────────────────────────────────────────────────────────────
+
+TEST_CASE("prefab tile resolves to the mesh inside the blob")
+{
+	const fs::path dir = fs::temp_directory_path() / "he_thumb_prefab";
+	he_test::removeAllQuiet(dir);
+	fs::create_directories(dir);
+	ContentManager cm(dir.string());
+	AssetThumbnailCache::setContext(nullptr, &cm, dir.string());
+
+	const HE::UUID meshId{ 0x1234ULL, 0x5678ULL };
+
+	// Author a one-entity subtree carrying that mesh and capture it as a prefab —
+	// the same path the editor takes when you make a prefab from a selection.
+	HorizonWorld world;
+	SceneSerializer ser;
+	const Entity e = world.createEntity("Prop");
+	world.registry().emplace<MeshComponent>(e, MeshComponent{ meshId });
+	PrefabAsset pf;
+	pf.type = HE::AssetType::Prefab;
+	pf.name = "Prop";
+	pf.data = ser.serializeSubtree(world, e);
+	REQUIRE_FALSE(pf.data.empty());
+	const HE::UUID prefabId = cm.registerPrefab(std::move(pf));
+
+	HE::UUID found{}; bool skeletal = true;
+	REQUIRE(AssetThumbnailCache::prefabMesh(prefabId, found, skeletal));
+	CHECK(found == meshId);
+	CHECK_FALSE(skeletal);
+
+	AssetThumbnailCache::setContext(nullptr, nullptr, "");
+	he_test::removeAllQuiet(dir);
+}
+
+TEST_CASE("a prefab without any mesh reports no tile")
+{
+	const fs::path dir = fs::temp_directory_path() / "he_thumb_prefab_empty";
+	he_test::removeAllQuiet(dir);
+	fs::create_directories(dir);
+	ContentManager cm(dir.string());
+	AssetThumbnailCache::setContext(nullptr, &cm, dir.string());
+
+	HorizonWorld world;
+	SceneSerializer ser;
+	const Entity e = world.createEntity("LogicOnly");   // no MeshComponent
+	PrefabAsset pf;
+	pf.type = HE::AssetType::Prefab;
+	pf.name = "LogicOnly";
+	pf.data = ser.serializeSubtree(world, e);
+	const HE::UUID prefabId = cm.registerPrefab(std::move(pf));
+
+	HE::UUID found{}; bool skeletal = false;
+	// Nothing to draw — the caller must fall back to the glyph rather than render
+	// an empty sphere and cache it.
+	CHECK_FALSE(AssetThumbnailCache::prefabMesh(prefabId, found, skeletal));
+	CHECK_FALSE(AssetThumbnailCache::prefabMesh(HE::UUID{}, found, skeletal));
 
 	AssetThumbnailCache::setContext(nullptr, nullptr, "");
 	he_test::removeAllQuiet(dir);

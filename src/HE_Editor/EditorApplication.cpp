@@ -2312,6 +2312,45 @@ void EditorApplication::dumpFrameHeadless()
 				AssetThumbnailCache::setContext(nullptr, nullptr, "");
 			}
 		}
+		// A font tile is baked through UIFontCache, so it too skips the renderer.
+		{
+			const char* bp2 = SDL_GetBasePath();
+			const std::string ttf = std::string(bp2 ? bp2 : "") + "Fonts/Roboto_Condensed-Bold.ttf";
+			if (std::ifstream tf(ttf, std::ios::binary); tf)
+			{
+				FontAsset fo;
+				fo.type = HE::AssetType::Font;
+				fo.name = "__thumbWitnessFont";
+				fo.path = "__thumbWitnessFont.hasset";
+				fo.fontData.assign(std::istreambuf_iterator<char>(tf), std::istreambuf_iterator<char>());
+				HE::UUID fid{};
+				if (contentManager().saveAsset(fo)) fid = contentManager().loadAsset(fo.path);
+				AssetThumbnailCache::setContext(r, &contentManager(), dir.string());
+				std::vector<uint8_t> fp;
+				if (AssetThumbnailCache::fontThumbnail(fid, fp))
+				{
+					const int TS = (int)AssetThumbnailCache::thumbnailSize();
+					if (std::ofstream f((dir / "font.ppm").string(), std::ios::binary); f)
+					{
+						f << "P6\n" << TS << " " << TS << "\n255\n";
+						for (int i = 0; i < TS * TS; ++i)
+						{
+							// Composite the coverage over grey — the glyphs are white on
+							// transparent, which a plain RGB dump would render invisible.
+							const float a = fp[(size_t)i * 4 + 3] / 255.0f;
+							const uint8_t v = (uint8_t)(255 * a + 60 * (1.0f - a));
+							for (int c = 0; c < 3; ++c) f.write(reinterpret_cast<const char*>(&v), 1);
+						}
+					}
+					Logger::Log(Logger::LogLevel::Info,
+						"EditorApplication: thumbnail witness wrote font.ppm");
+				}
+				AssetThumbnailCache::setContext(nullptr, nullptr, "");
+				std::error_code frc;
+				std::filesystem::remove(
+					std::filesystem::path(contentManager().contentRoot()) / fo.path, frc);
+			}
+		}
 		// A material with NO node graph exercises the OTHER material branch — the
 		// built-in-PBR fallback, which the interactive preview never reaches (it
 		// returns "no preview" there) and which is therefore only visible here.

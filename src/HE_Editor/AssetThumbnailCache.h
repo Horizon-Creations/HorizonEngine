@@ -89,6 +89,21 @@ namespace AssetThumbnailCache
 	// Edge length of a generated tile, in pixels.
 	uint32_t thumbnailSize();
 
+	// A prefab is a CBOR entity subtree, not a shape — its tile is the first mesh
+	// found inside it, which is exactly right for the common case (a prop) and
+	// shows the primary part rather than nothing for an assembly. Resolves the
+	// blob by instantiating it into a throwaway world, so no second CBOR reader
+	// has to exist. False when the prefab holds no mesh at all (pure logic or
+	// audio), where the glyph is the honest answer. Public for tests.
+	bool prefabMesh(const HE::UUID& prefabId, HE::UUID& meshIdOut, bool& isSkeletalOut);
+
+	// A font's tile is a sample set IN THAT FONT — the one preview that answers
+	// what you actually want to know about a face, which no glyph could. Baked
+	// through the engine's own UIFontCache, so a font that renders in-game renders
+	// here identically. Fills `out` with kThumbSize² RGBA8 (white coverage on
+	// transparent). Public for tests.
+	bool fontThumbnail(const HE::UUID& fontId, std::vector<uint8_t>& out);
+
 	// ── Cache-file format (exposed for tests) ────────────────────────────────
 	// A .hthumb is a 32-byte header, the asset's content-relative path, then
 	// `size`×`size` top-down RGBA8 pixels. The path is stored so a hash collision
