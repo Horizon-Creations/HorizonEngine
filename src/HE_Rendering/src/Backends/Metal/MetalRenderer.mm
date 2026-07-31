@@ -3737,6 +3737,10 @@ void MetalRenderer::Initialize(HE::Window* window)
 		m_deferredTileMode = [device supportsFamily:MTLGPUFamilyApple1];
 	if (const char* tm = std::getenv("HE_DEFERRED_TILE"); tm && *tm)
 		m_deferredTileMode = std::atoi(tm) != 0;
+	// P7 clustered lighting in the deferred resolve — on by default;
+	// HE_DEFERRED_CLUSTER=0 forces the 8-light resolve (A/B guard).
+	if (const char* cl = std::getenv("HE_DEFERRED_CLUSTER"); cl && *cl)
+		m_deferredClustered = std::atoi(cl) != 0;
 
 	Logger::Log(Logger::LogLevel::Info,
 		(std::string("MetalRenderer: initialized on ") + [[device name] UTF8String]).c_str());
@@ -7219,8 +7223,10 @@ bool MetalRenderer::EnsureDeferredPipelines()
 		using Backend = HE::MaterialShaderLibrary::Backend;
 		const auto& v = m_matShaderLib.fullscreenVertex(Backend::Metal);
 		const auto& f = m_deferredTileMode
-			? m_matShaderLib.deferredResolveTile(Backend::Metal)
-			: m_matShaderLib.deferredResolve(Backend::Metal);
+			? (m_deferredClustered ? m_matShaderLib.deferredResolveTileClustered(Backend::Metal)
+			                       : m_matShaderLib.deferredResolveTile(Backend::Metal))
+			: (m_deferredClustered ? m_matShaderLib.deferredResolveClustered(Backend::Metal)
+			                       : m_matShaderLib.deferredResolve(Backend::Metal));
 		if (v.ok && f.ok)
 		{
 			NSError* verr = nil;
@@ -8554,9 +8560,27 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 		ru.depthParams[1] = 1.0f;
 		ru.depthParams[2] = 0.0f;
 		ru.depthParams[3] = static_cast<float>(m_gbufferDebugView); // HE_DUMP_GBUFFER
+#if defined(HE_HAVE_SHADERC)
+		// P7: point/spot lights come from the cluster lists; the resolve's
+		// heLight window shrinks to directional-only (a COPY — the full fill in
+		// `matLight` keeps serving the forward-routed and transparent draws).
+		if (m_deferredClustered)
+		{
+			HE::MaterialShaderLibrary::Lighting clusterLight = matLight;
+			EncodeClusterData(renderEncoder, clusterLight, ru);
+			[encoder setFragmentBytes:&clusterLight length:sizeof(clusterLight)
+			                  atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
+		}
+#endif
 		[encoder setFragmentBytes:&ru length:sizeof(ru) atIndex:3];
 		[encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
 		++m_counters.draws;
+#if defined(HE_HAVE_SHADERC)
+		// Restore the FULL light window for everything drawn after the resolve.
+		if (m_deferredClustered)
+			[encoder setFragmentBytes:&matLight length:sizeof(matLight)
+			                  atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
+#endif
 
 		// Restore what the resolve draw clobbered for the passes below: the
 		// scene-pass texture slots 1-3 and the GI uniforms on fragment buffer 3.
@@ -9072,6 +9096,156 @@ void MetalRenderer::FillMaterialLighting(HE::MaterialShaderLibrary::Lighting& ma
 	}
 }
 
+// ─── Clustered lighting build (plan P7) ──────────────────────────────────────
+// CPU scatter: every point/spot light's projected bounds mark the screen-tile ×
+// log-z-slice clusters it can touch; the resolve then shades only its cluster's
+// list. Cheap (few hundred lights × few touched clusters) and re-built fresh
+// per frame like the particle instance buffers — no CPU/GPU sync hazards.
+// Rewrites matLight's window to DIRECTIONAL lights only: point/spot shading now
+// belongs exclusively to the cluster list, or every windowed light would be
+// counted twice.
+void MetalRenderer::EncodeClusterData(void* renderEncoder,
+                                      HE::MaterialShaderLibrary::Lighting& matLight,
+                                      HE::MaterialShaderLibrary::ResolveUniforms& ru)
+{
+	id<MTLRenderCommandEncoder> encoder = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+
+	const glm::mat4 viewProj =
+		m_renderWorld.camera.projection * m_renderWorld.camera.view;
+	const glm::vec3 camPos = m_renderWorld.camera.position;
+	const glm::vec3 camFwd =
+		-glm::normalize(glm::vec3(glm::inverse(m_renderWorld.camera.view)[2]));
+	const float sliceScale =
+		static_cast<float>(kClusterGridZ) / std::log(kClusterFar / kClusterNear);
+
+	// Pack the local lights (4 vec4 each) + scatter them into the grid.
+	std::vector<glm::vec4> lightData;
+	const int gridTotal = kClusterGridX * kClusterGridY * kClusterGridZ;
+	std::vector<std::vector<uint32_t>> cells(gridTotal);
+	int lightCount = 0;
+	for (const LightData& l : m_renderWorld.lights)
+	{
+		if (l.type == 0) continue; // directional stays in the heLight window
+		if (lightCount >= kMaxClusteredLights) break;
+		const float range = std::max(l.range, 1e-4f);
+		// Depth slice range along the camera forward.
+		const float viewZ = glm::dot(l.position - camPos, camFwd);
+		const float zMin  = viewZ - range, zMax = viewZ + range;
+		if (zMax < kClusterNear || zMin > kClusterFar) continue; // outside the grid
+		auto slice = [&](float z) {
+			return std::clamp(static_cast<int>(std::log(std::max(z, kClusterNear) / kClusterNear)
+			                                   * sliceScale), 0, kClusterGridZ - 1);
+		};
+		const int z0 = slice(zMin), z1 = slice(zMax);
+		// Screen rect: project the 8 corners of the world-space bounding box.
+		// A corner at/behind the near plane makes the projection unusable →
+		// conservatively cover the full screen for that light.
+		float u0 = 1e9f, u1 = -1e9f, v0 = 1e9f, v1 = -1e9f;
+		bool fullRect = false;
+		for (int c = 0; c < 8 && !fullRect; ++c)
+		{
+			const glm::vec3 corner = l.position + range * glm::vec3(
+				(c & 1) ? 1.0f : -1.0f, (c & 2) ? 1.0f : -1.0f, (c & 4) ? 1.0f : -1.0f);
+			const glm::vec4 clip = viewProj * glm::vec4(corner, 1.0f);
+			if (clip.w <= kClusterNear) { fullRect = true; break; }
+			// Metal's gl_FragCoord/uv origin is TOP-LEFT — flip v so the CPU
+			// scatter and the shader's cluster pick agree.
+			const float u = clip.x / clip.w * 0.5f + 0.5f;
+			const float v = 1.0f - (clip.y / clip.w * 0.5f + 0.5f);
+			u0 = std::min(u0, u); u1 = std::max(u1, u);
+			v0 = std::min(v0, v); v1 = std::max(v1, v);
+		}
+		int x0 = 0, x1 = kClusterGridX - 1, y0 = 0, y1 = kClusterGridY - 1;
+		if (!fullRect)
+		{
+			if (u1 < 0.0f || u0 > 1.0f || v1 < 0.0f || v0 > 1.0f) continue; // off-screen
+			x0 = std::clamp(static_cast<int>(u0 * kClusterGridX), 0, kClusterGridX - 1);
+			x1 = std::clamp(static_cast<int>(u1 * kClusterGridX), 0, kClusterGridX - 1);
+			y0 = std::clamp(static_cast<int>(v0 * kClusterGridY), 0, kClusterGridY - 1);
+			y1 = std::clamp(static_cast<int>(v1 * kClusterGridY), 0, kClusterGridY - 1);
+		}
+		const uint32_t li = static_cast<uint32_t>(lightCount++);
+		lightData.push_back(glm::vec4(l.position, static_cast<float>(l.type)));
+		lightData.push_back(glm::vec4(l.direction, l.spotAngleCos));
+		lightData.push_back(glm::vec4(l.color, l.intensity));
+		lightData.push_back(glm::vec4(range,
+			(m_localShadowTex && l.shadowLayer >= 0) ? static_cast<float>(l.shadowLayer + 1) : 0.0f,
+			0.0f, 0.0f));
+		for (int z = z0; z <= z1; ++z)
+			for (int y = y0; y <= y1; ++y)
+				for (int x = x0; x <= x1; ++x)
+					cells[(z * kClusterGridY + y) * kClusterGridX + x].push_back(li);
+	}
+
+	// Flatten: per-cluster {offset, count} + one index list.
+	std::vector<uint32_t> grid(gridTotal * 2, 0u);
+	std::vector<uint32_t> indices;
+	for (int cIdx = 0; cIdx < gridTotal; ++cIdx)
+	{
+		grid[cIdx * 2 + 0] = static_cast<uint32_t>(indices.size());
+		grid[cIdx * 2 + 1] = static_cast<uint32_t>(cells[cIdx].size());
+		indices.insert(indices.end(), cells[cIdx].begin(), cells[cIdx].end());
+	}
+	if (lightData.empty()) lightData.push_back(glm::vec4(0.0f)); // never a 0-byte buffer
+	if (indices.empty())   indices.push_back(0u);
+
+	// Fresh per-frame buffers (newBufferWithBytes) — the encoder retains them.
+	id<MTLBuffer> lightBuf = [device newBufferWithBytes:lightData.data()
+	                                             length:lightData.size() * sizeof(glm::vec4)
+	                                            options:MTLResourceStorageModeShared];
+	id<MTLBuffer> gridBuf  = [device newBufferWithBytes:grid.data()
+	                                             length:grid.size() * sizeof(uint32_t)
+	                                            options:MTLResourceStorageModeShared];
+	id<MTLBuffer> idxBuf   = [device newBufferWithBytes:indices.data()
+	                                             length:indices.size() * sizeof(uint32_t)
+	                                            options:MTLResourceStorageModeShared];
+	[encoder setFragmentBuffer:lightBuf offset:0 atIndex:4];
+	[encoder setFragmentBuffer:gridBuf  offset:0 atIndex:5];
+	[encoder setFragmentBuffer:idxBuf   offset:0 atIndex:6];
+
+	ru.clusterParams[0]  = static_cast<float>(kClusterGridX);
+	ru.clusterParams[1]  = static_cast<float>(kClusterGridY);
+	ru.clusterParams[2]  = static_cast<float>(kClusterGridZ);
+	ru.clusterParams[3]  = sliceScale;
+	ru.clusterCamFwd[0]  = camFwd.x;
+	ru.clusterCamFwd[1]  = camFwd.y;
+	ru.clusterCamFwd[2]  = camFwd.z;
+	ru.clusterCamFwd[3]  = kClusterNear;
+
+	// heLight window → directional lights only (same field conventions as
+	// HE::FillMaterialLightWindow, which packed the mixed first-8 window).
+	int nDir = 0;
+	for (const LightData& l : m_renderWorld.lights)
+	{
+		if (l.type != 0 || nDir >= 8) continue;
+		matLight.lightPos[nDir][0] = l.position.x;
+		matLight.lightPos[nDir][1] = l.position.y;
+		matLight.lightPos[nDir][2] = l.position.z;
+		matLight.lightPos[nDir][3] = 0.0f; // directional
+		matLight.lightDir[nDir][0] = l.direction.x;
+		matLight.lightDir[nDir][1] = l.direction.y;
+		matLight.lightDir[nDir][2] = l.direction.z;
+		matLight.lightDir[nDir][3] = l.spotAngleCos;
+		matLight.lightColor[nDir][0] = l.color.r;
+		matLight.lightColor[nDir][1] = l.color.g;
+		matLight.lightColor[nDir][2] = l.color.b;
+		matLight.lightColor[nDir][3] = l.intensity;
+		matLight.lightParams[nDir][0] = l.range;
+		matLight.lightParams[nDir][1] = 0.0f;
+		matLight.lightParams[nDir][2] = 0.0f;
+		matLight.lightParams[nDir][3] = 0.0f;
+		++nDir;
+	}
+	for (int i = nDir; i < 8; ++i)
+		for (int k = 0; k < 4; ++k)
+		{
+			matLight.lightPos[i][k] = 0.0f; matLight.lightDir[i][k] = 0.0f;
+			matLight.lightColor[i][k] = 0.0f; matLight.lightParams[i][k] = 0.0f;
+		}
+	matLight.counts[0] = static_cast<float>(nDir);
+}
+
 // ─── Tile-memory deferred resolve (plan P6) ──────────────────────────────────
 // Encoded into the OPEN G-buffer pass encoder on Apple Silicon: the fragment
 // framebuffer-fetches the four memoryless G-buffer attachments and writes the
@@ -9096,12 +9270,6 @@ void MetalRenderer::EncodeDeferredResolveTile(void* renderEncoder, int width, in
 	[encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_deferredResolveTilePipeline];
 	[encoder setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_noDepthState];
 
-#if defined(HE_HAVE_SHADERC)
-	HE::MaterialShaderLibrary::Lighting matLight;
-	FillMaterialLighting(matLight, width, height, giActive, ssaoActive, shadows, skyClock);
-	[encoder setFragmentBytes:&matLight length:sizeof(matLight)
-	                  atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
-#endif
 	HE::MaterialShaderLibrary::ResolveUniforms ru;
 	const glm::mat4 viewProj =
 		m_renderWorld.camera.projection * m_renderWorld.camera.view;
@@ -9111,6 +9279,16 @@ void MetalRenderer::EncodeDeferredResolveTile(void* renderEncoder, int width, in
 	ru.depthParams[1] = 1.0f;
 	ru.depthParams[2] = 0.0f;
 	ru.depthParams[3] = static_cast<float>(m_gbufferDebugView);
+#if defined(HE_HAVE_SHADERC)
+	HE::MaterialShaderLibrary::Lighting matLight;
+	FillMaterialLighting(matLight, width, height, giActive, ssaoActive, shadows, skyClock);
+	// P7: point/spot lights move into the cluster lists; matLight's window is
+	// rewritten to directional-only so no light is counted twice.
+	if (m_deferredClustered)
+		EncodeClusterData(renderEncoder, matLight, ru);
+	[encoder setFragmentBytes:&matLight length:sizeof(matLight)
+	                  atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
+#endif
 	[encoder setFragmentBytes:&ru length:sizeof(ru) atIndex:3];
 
 	// The preamble's lighting textures on their scene-pass slots.

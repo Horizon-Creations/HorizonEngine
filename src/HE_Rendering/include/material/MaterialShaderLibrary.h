@@ -145,11 +145,26 @@ public:
     //       is top-left), y/z = NDC-z scale/bias from the sampled depth (GL 2/−1,
     //       Metal 1/0), w = debug view (0 off, 1 = BaseColor, 2 = Normal,
     //       3 = Rough/Spec/Metal, 4 = Emissive) — HE_DUMP_GBUFFER.
+    // clusterParams/clusterCamFwd drive the CLUSTERED variant only (plan P7,
+    // Metal): grid dims + log-slice scale, camera forward + near plane. Zero on
+    // backends without clustering (the non-clustered sources never read them).
     struct ResolveUniforms
     {
-        float invViewProj[16] = {}; // column-major inverse(proj * view)
-        float depthParams[4]  = {};
+        float invViewProj[16]   = {}; // column-major inverse(proj * view)
+        float depthParams[4]    = {};
+        float clusterParams[4]  = {}; // x/y/z = grid dims, w = gridZ / log(far/near)
+        float clusterCamFwd[4]  = {}; // xyz = camera forward (view-z), w = cluster near
     };
+
+    // Clustered-lighting variants of the two resolves (plan P7, Metal only):
+    // heLitP shades ambient/GI/directional from a DIRECTIONAL-ONLY light window,
+    // and all point/spot lights come from per-cluster light lists in SSBOs
+    // (bindings 24/25/26 → Metal fragment buffers 4/5/6) — the 8-light limit
+    // falls. Per-light math and the atlas-shadow lookup are kept line-for-line
+    // with heLitP's loop (the clustered-off A/B is the guard). The ray-traced
+    // GI local masks are not applied to cluster lights (v1 limitation).
+    const Compiled& deferredResolveClustered(Backend backend);
+    const Compiled& deferredResolveTileClustered(Backend backend);
 
     // Cross-compile, cached. The Metal backend pins the vertex to verts@0 / Uniforms@1 so
     // it drops into the fixed geometry-pass bind points; other backends use their natural
@@ -184,8 +199,8 @@ private:
     std::unordered_map<uint64_t, Compiled> m_fragCache;  // key = mix(sourceHash, backend)
     std::unordered_map<uint64_t, Compiled> m_cvertCache; // key = mix(bodyHash, backend)
     std::unordered_map<int, Compiled>      m_uiVertCache; // key = (int)backend
-    std::unordered_map<int, Compiled>      m_resolveCache; // key = (int)backend
-    std::unordered_map<int, Compiled>      m_resolveTileCache; // key = (int)backend
+    std::unordered_map<int, Compiled>      m_resolveCache; // key = (int)backend (+64 clustered)
+    std::unordered_map<int, Compiled>      m_resolveTileCache; // key = (int)backend (+64 clustered)
     std::unordered_map<int, Compiled>      m_fsVertCache;  // key = (int)backend
 };
 } // namespace HE

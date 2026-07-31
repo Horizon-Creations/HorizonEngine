@@ -776,15 +776,33 @@ namespace
 // Backend clip conventions (uv origin, NDC z range) are folded into
 // HeResolve.depthParams by the fill site, so this canonical GLSL stays
 // convention-free — same trick as csmVP/localShadowVP.
-constexpr const char* kDeferredResolveFS = R"(#version 450
-layout(location = 0) out vec4 oColor;
-layout(set = 0, binding = 19) uniform sampler2D heGB0;     // rgb BaseColor, a Metallic
-layout(set = 0, binding = 20) uniform sampler2D heGB1;     // rg oct normal, b Roughness, a Specular
-layout(set = 0, binding = 21) uniform sampler2D heGB2;     // rgb Emissive (HDR), a Material-AO
-layout(set = 0, binding = 22) uniform sampler2D heGBDepth; // scene depth (world-pos reconstruction)
-layout(std140, set = 0, binding = 23) uniform HeResolve {
+// Assembled by buildDeferredResolveSource below — one text for four variants
+// ({sampled, tile} × {8-light, clustered}), so the shared math can never drift
+// between them.
+std::string buildDeferredResolveSource(bool tile, bool clustered)
+{
+    std::string src = "#version 450\n";
+    // Output: attachment 0 (own pass) or attachment 4 (single pass, behind the
+    // four G-buffer attachments).
+    src += tile ? "layout(location = 4) out vec4 oColor;\n"
+                : "layout(location = 0) out vec4 oColor;\n";
+    if (tile)
+        src +=
+            "layout(input_attachment_index = 0, set = 0, binding = 19) uniform subpassInput heGB0;\n"
+            "layout(input_attachment_index = 1, set = 0, binding = 20) uniform subpassInput heGB1;\n"
+            "layout(input_attachment_index = 2, set = 0, binding = 21) uniform subpassInput heGB2;\n"
+            "layout(input_attachment_index = 3, set = 0, binding = 22) uniform subpassInput heGBDepth;\n";
+    else
+        src +=
+            "layout(set = 0, binding = 19) uniform sampler2D heGB0;     // rgb BaseColor, a Metallic\n"
+            "layout(set = 0, binding = 20) uniform sampler2D heGB1;     // rg oct normal, b Roughness, a Specular\n"
+            "layout(set = 0, binding = 21) uniform sampler2D heGB2;     // rgb Emissive (HDR), a Material-AO\n"
+            "layout(set = 0, binding = 22) uniform sampler2D heGBDepth; // scene depth (world-pos reconstruction)\n";
+    src += R"(layout(std140, set = 0, binding = 23) uniform HeResolve {
     mat4 invViewProj;
-    vec4 depthParams; // x = uv→NDC y sign, y/z = NDC-z scale/bias, w = debug view
+    vec4 depthParams;   // x = uv→NDC y sign, y/z = NDC-z scale/bias, w = debug view
+    vec4 clusterParams; // x/y/z = cluster grid dims, w = gridZ / log(far/near)
+    vec4 clusterCamFwd; // xyz = camera forward (view-z), w = cluster near plane
 } heResolve;
 // Inverse of the preamble's heOctEncode (signed octahedral, Meyer et al. 2010).
 // Lives here rather than in the preamble so the drift-guarded preamble blocks
@@ -796,60 +814,126 @@ vec3 heOctDecode(vec2 f) {
     n.y += (n.y >= 0.0) ? -t : t;
     return normalize(n);
 }
-void main() {
-    vec2 uv = gl_FragCoord.xy / max(heLight.giParams.xy, vec2(1.0));
-    float d = texture(heGBDepth, uv).r;
-    if (d >= 1.0) discard;                          // background → the sky pass fills it
-    vec4 g0 = texture(heGB0, uv);
-    vec4 g1 = texture(heGB1, uv);
-    vec4 g2 = texture(heGB2, uv);
-    vec4 clip = vec4(uv.x * 2.0 - 1.0,
-                     (uv.y * 2.0 - 1.0) * heResolve.depthParams.x,
-                     d * heResolve.depthParams.y + heResolve.depthParams.z, 1.0);
-    vec4 wp = heResolve.invViewProj * clip;
-    vec3 P  = wp.xyz / max(wp.w, 1e-8);
-    vec3 N  = heOctDecode(g1.rg * 2.0 - 1.0);
-    int dbg = int(heResolve.depthParams.w);
-    if (dbg == 1) { oColor = vec4(g0.rgb, 1.0); return; }               // BaseColor
-    if (dbg == 2) { oColor = vec4(N * 0.5 + 0.5, 1.0); return; }        // Normal
-    if (dbg == 3) { oColor = vec4(g1.b, g1.a, g0.a, 1.0); return; }     // Rough/Spec/Metal
-    if (dbg == 4) { oColor = vec4(g2.rgb, 1.0); return; }               // Emissive
-    oColor = vec4(heApplyFog(heLitP(g0.rgb, N, g0.a, g1.b, P, g1.a, g2.a) + g2.rgb, P), 1.0);
-}
 )";
+    if (clustered)
+        src += R"(// ── Clustered lighting (plan P7) ─────────────────────────────────────────────
+// All point/spot lights live in per-cluster lists; heLight's window carries
+// ONLY directional lights in this variant. 4 vec4 per light: posType, dirSpot,
+// colorIntensity (w = intensity), params (x = range, y = atlas layer + 1).
+layout(std430, set = 0, binding = 24) readonly buffer HeClusterLights { vec4 clLights[]; };
+layout(std430, set = 0, binding = 25) readonly buffer HeClusterGrid   { uvec2 clGrid[]; };
+layout(std430, set = 0, binding = 26) readonly buffer HeClusterIdx    { uint clIdx[]; };
+// Local (point/spot) atlas shadow with EXPLICIT light data — line-for-line the
+// preamble's heLocalShadowFactor, which indexes the 8-light window instead.
+float heClusterShadow(vec4 posType, vec4 params, vec3 worldPos, vec3 n) {
+    int base = int(params.y) - 1; // stored as layer+1; 0 = none
+    if (base < 0) return 1.0;
+    int layer = base;
+    if (int(posType.w) == 1) { // point: major-axis cube-face pick
+        vec3 d = worldPos - posType.xyz;
+        vec3 a = abs(d);
+        int face;
+        if      (a.x >= a.y && a.x >= a.z) face = (d.x > 0.0) ? 0 : 1;
+        else if (a.y >= a.z)               face = (d.y > 0.0) ? 2 : 3;
+        else                               face = (d.z > 0.0) ? 4 : 5;
+        layer = base + face;
+    }
+    vec3  toL = normalize(posType.xyz - worldPos);
+    float ndl = clamp(dot(n, toL), 0.0, 1.0);
+    vec4 lp = heLight.localShadowVP[layer] * vec4(worldPos + n * 0.02, 1.0);
+    if (lp.w <= 0.0) return 1.0;
+    vec3 p  = lp.xyz / lp.w;
+    vec2 suv = p.xy * 0.5 + 0.5;
+    vec2 texel = 1.0 / vec2(textureSize(heLocalShadow, 0).xy);
+    if (p.z > 1.0 || p.z < 0.0
+        || any(lessThan(suv, texel)) || any(greaterThan(suv, vec2(1.0) - texel)))
+        return 1.0;
+    float bias = clamp(0.0015 * tan(acos(ndl)), 0.0006, 0.01);
+    float vis = 0.0;
+    for (int y = -1; y <= 1; ++y)
+        for (int x = -1; x <= 1; ++x) {
+            float cd = texture(heLocalShadow, vec3(suv + vec2(x, y) * texel, float(layer))).r;
+            vis += (p.z - bias > cd) ? 0.0 : 1.0;
+        }
+    return vis / 9.0;
+}
+// Point/spot shading over this fragment's cluster list. The weather/material
+// split and the per-light model mirror heLitP's loop body exactly — the
+// clustered-off A/B is the guard. GI local ray masks are not applied to
+// cluster lights (v1 limitation; the atlas shadow still is).
+vec3 heClusterLighting(vec3 P, vec3 Nin, vec3 baseColor, float metallic,
+                       float roughness, float specular, vec2 uv) {
+    vec3 n = normalize(Nin);
+    vec3 V = normalize(heLight.camPos.xyz - P);
+    float snowMask = smoothstep(0.25, 0.75, clamp(n.y, 0.0, 1.0))
+                   * clamp(heLight.weather.y, 0.0, 1.0);
+    float wet      = clamp(heLight.weather.x, 0.0, 1.0) * (1.0 - snowMask);
+    vec3 bc = mix(baseColor, vec3(0.90, 0.93, 0.97), snowMask);
+    bc *= (1.0 - 0.30 * wet);
+    float rough = clamp(roughness, 0.0, 1.0);
+    rough = mix(rough, 0.08, wet);
+    rough = mix(rough, 0.85, snowMask);
+    float metal = clamp(metallic, 0.0, 1.0);
+    float f0    = 0.08 * clamp(specular, 0.0, 1.0);
+    vec3  diffuseColor = bc * (1.0 - metal);
+    vec3  specColor    = mix(vec3(f0), bc, metal);
+    specColor          = mix(specColor, vec3(0.08), wet);
+    float shininess    = mix(128.0, 8.0, rough);
+    float specScale    = mix(0.5, 0.03, rough) + 0.25 * wet;
 
-// Tile-memory variant (plan P6, Metal/Apple Silicon): identical shading, but the
-// G-buffer arrives as subpass inputs — SPIRV-Cross emits them as [[color(n)]]
-// framebuffer-fetch reads (n = input_attachment_index), so the G-buffer lives in
-// tile storage and never touches DRAM. The lit colour writes to LOCATION 4, the
-// single pass's HDR attachment behind the four G-buffer attachments. The NDC
-// depth comes from G-buffer attachment 3 (a colour target the G-buffer fragments
-// write gl_FragCoord.z into — the depth buffer itself cannot be fetched).
-constexpr const char* kDeferredResolveTileFS = R"(#version 450
-layout(location = 4) out vec4 oColor;
-layout(input_attachment_index = 0, set = 0, binding = 19) uniform subpassInput heGB0;
-layout(input_attachment_index = 1, set = 0, binding = 20) uniform subpassInput heGB1;
-layout(input_attachment_index = 2, set = 0, binding = 21) uniform subpassInput heGB2;
-layout(input_attachment_index = 3, set = 0, binding = 22) uniform subpassInput heGBDepth;
-layout(std140, set = 0, binding = 23) uniform HeResolve {
-    mat4 invViewProj;
-    vec4 depthParams; // x = uv→NDC y sign, y/z = NDC-z scale/bias, w = debug view
-} heResolve;
-vec3 heOctDecode(vec2 f) {
-    vec3 n = vec3(f.x, f.y, 1.0 - abs(f.x) - abs(f.y));
-    float t = max(-n.z, 0.0);
-    n.x += (n.x >= 0.0) ? -t : t;
-    n.y += (n.y >= 0.0) ? -t : t;
-    return normalize(n);
+    float nearZ = max(heResolve.clusterCamFwd.w, 1e-4);
+    float viewZ = max(dot(P - heLight.camPos.xyz, heResolve.clusterCamFwd.xyz), nearZ);
+    int gx = int(heResolve.clusterParams.x);
+    int gy = int(heResolve.clusterParams.y);
+    int gz = int(heResolve.clusterParams.z);
+    if (gx <= 0 || gy <= 0 || gz <= 0) return vec3(0.0);
+    int cz = clamp(int(log(viewZ / nearZ) * heResolve.clusterParams.w), 0, gz - 1);
+    int cx = clamp(int(uv.x * float(gx)), 0, gx - 1);
+    int cy = clamp(int(uv.y * float(gy)), 0, gy - 1);
+    uvec2 cell = clGrid[(cz * gy + cy) * gx + cx];
+    vec3 result = vec3(0.0);
+    for (uint k = 0u; k < cell.y; ++k) {
+        uint li = clIdx[cell.x + k] * 4u;
+        vec4 posType = clLights[li + 0u];
+        vec4 dirSpot = clLights[li + 1u];
+        vec4 colInt  = clLights[li + 2u];
+        vec4 params  = clLights[li + 3u];
+        vec3  d    = posType.xyz - P;
+        float dist = max(length(d), 1e-4);
+        vec3  L = d / dist;
+        float range = max(params.x, 1e-4);
+        float atten = clamp(1.0 - dist / range, 0.0, 1.0);
+        atten *= atten;
+        if (posType.w > 1.5) { // spot cone
+            float c       = dot(-L, normalize(dirSpot.xyz));
+            float cosCone = dirSpot.w;
+            atten *= smoothstep(cosCone, mix(cosCone, 1.0, 0.2), c);
+        }
+        if (atten <= 0.0) continue;
+        float sh   = heClusterShadow(posType, params, P, n);
+        float ndl  = max(dot(n, L), 0.0);
+        vec3  H    = normalize(L + V);
+        float spec = pow(max(dot(n, H), 0.0), shininess) * specScale;
+        result += (diffuseColor * ndl + specColor * spec) * colInt.rgb * colInt.a * atten * sh;
+    }
+    return result;
 }
-void main() {
-    float d = subpassLoad(heGBDepth).r;
-    if (d >= 1.0) discard;                          // background → the sky pass fills it
-    vec4 g0 = subpassLoad(heGB0);
-    vec4 g1 = subpassLoad(heGB1);
-    vec4 g2 = subpassLoad(heGB2);
-    vec2 uv = gl_FragCoord.xy / max(heLight.giParams.xy, vec2(1.0));
-    vec4 clip = vec4(uv.x * 2.0 - 1.0,
+)";
+    src += "void main() {\n"
+           "    vec2 uv = gl_FragCoord.xy / max(heLight.giParams.xy, vec2(1.0));\n";
+    if (tile)
+        src += "    float d = subpassLoad(heGBDepth).r;\n"
+               "    if (d >= 1.0) discard;                          // background → the sky pass fills it\n"
+               "    vec4 g0 = subpassLoad(heGB0);\n"
+               "    vec4 g1 = subpassLoad(heGB1);\n"
+               "    vec4 g2 = subpassLoad(heGB2);\n";
+    else
+        src += "    float d = texture(heGBDepth, uv).r;\n"
+               "    if (d >= 1.0) discard;                          // background → the sky pass fills it\n"
+               "    vec4 g0 = texture(heGB0, uv);\n"
+               "    vec4 g1 = texture(heGB1, uv);\n"
+               "    vec4 g2 = texture(heGB2, uv);\n";
+    src += R"(    vec4 clip = vec4(uv.x * 2.0 - 1.0,
                      (uv.y * 2.0 - 1.0) * heResolve.depthParams.x,
                      d * heResolve.depthParams.y + heResolve.depthParams.z, 1.0);
     vec4 wp = heResolve.invViewProj * clip;
@@ -860,9 +944,14 @@ void main() {
     if (dbg == 2) { oColor = vec4(N * 0.5 + 0.5, 1.0); return; }        // Normal
     if (dbg == 3) { oColor = vec4(g1.b, g1.a, g0.a, 1.0); return; }     // Rough/Spec/Metal
     if (dbg == 4) { oColor = vec4(g2.rgb, 1.0); return; }               // Emissive
-    oColor = vec4(heApplyFog(heLitP(g0.rgb, N, g0.a, g1.b, P, g1.a, g2.a) + g2.rgb, P), 1.0);
-}
+    vec3 lit = heLitP(g0.rgb, N, g0.a, g1.b, P, g1.a, g2.a);
 )";
+    if (clustered)
+        src += "    lit += heClusterLighting(P, N, g0.rgb, g0.a, g1.b, g1.a, uv);\n";
+    src += "    oColor = vec4(heApplyFog(lit + g2.rgb, P), 1.0);\n"
+           "}\n";
+    return src;
+}
 
 // Fullscreen triangle with NO varyings — the resolve fragment reads gl_FragCoord,
 // so nothing needs to cross the stage boundary.
@@ -875,41 +964,75 @@ void main() {
 )";
 } // namespace
 
+namespace
+{
+// Shared compile for the four resolve variants. Metal pins: everything the
+// preamble binds on its scene-pass slots, HeResolve on fragment buffer 3, the
+// G-buffer as texture slots 0..3 (sampled variant only — the tile variant
+// framebuffer-fetches [[color(0..3)]] and consumes no samplers), and the
+// clustered SSBOs on fragment buffers 4/5/6. Total samplers stay well inside
+// Metal's 16.
+MaterialShaderLibrary::Compiled compileResolveVariant(
+    const std::string& injected, MaterialShaderLibrary::Backend backend,
+    bool tile, bool clustered)
+{
+    using namespace he::shaderc;
+    using Backend = MaterialShaderLibrary::Backend;
+    if (backend != Backend::Metal)
+    {
+        // GL keeps the sampled non-clustered resolve (no SSBOs in GL 4.1, no
+        // framebuffer fetch); the tile/clustered variants are Metal-only.
+        if (tile || clustered) return {};
+        return toCompiled(compile(injected, Stage::Fragment, toTarget(backend)));
+    }
+    std::vector<MslPin> pins = {
+        { Stage::Fragment, 0, 0, static_cast<uint32_t>(MaterialShaderLibrary::kMetalLightingBufferIndex) },
+        { Stage::Fragment, 0, 23, 3 },    // HeResolve UBO → fragment buffer 3
+        { Stage::Fragment, 0, 10, 9 },    // GI sun mask (as in fragment())
+        { Stage::Fragment, 0, 11, 10 },   // GI local mask
+        { Stage::Fragment, 0, 12, 11 },   // CSM array
+        { Stage::Fragment, 0, 13, 12 },   // local shadow atlas
+        { Stage::Fragment, 0, 15, 14 },   // sky env cubemap
+        { Stage::Fragment, 0, 16, 15 },   // screen-space AO
+        { Stage::Fragment, 0, 17, 6 },    // DDGI irradiance atlas
+        { Stage::Fragment, 0, 18, 7 },    // DDGI visibility atlas
+    };
+    if (!tile)
+    {
+        pins.push_back({ Stage::Fragment, 0, 19, 0 }); // heGB0 → texture/sampler 0
+        pins.push_back({ Stage::Fragment, 0, 20, 1 }); // heGB1 → 1
+        pins.push_back({ Stage::Fragment, 0, 21, 2 }); // heGB2 → 2
+        pins.push_back({ Stage::Fragment, 0, 22, 3 }); // heGBDepth → 3
+    }
+    if (clustered)
+    {
+        pins.push_back({ Stage::Fragment, 0, 24, 4 }); // light array → buffer 4
+        pins.push_back({ Stage::Fragment, 0, 25, 5 }); // cluster grid → buffer 5
+        pins.push_back({ Stage::Fragment, 0, 26, 6 }); // light index list → buffer 6
+    }
+    MslOptions opts;
+    opts.framebufferFetchSubpasses = tile;
+    return toCompiled(compileMslPinned(injected, Stage::Fragment, pins, opts));
+}
+} // namespace
+
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::deferredResolve(Backend backend)
 {
     const int key = static_cast<int>(backend);
     if (auto it = m_resolveCache.find(key); it != m_resolveCache.end()) return it->second;
+    Compiled out = compileResolveVariant(
+        injectPreamble(buildDeferredResolveSource(/*tile=*/false, /*clustered=*/false)),
+        backend, false, false);
+    return m_resolveCache.emplace(key, std::move(out)).first->second;
+}
 
-    using namespace he::shaderc;
-    const std::string injected = injectPreamble(kDeferredResolveFS);
-    Compiled out;
-    if (backend == Backend::Metal)
-    {
-        // Same pin map as fragment() for everything the preamble binds (so the
-        // resolve encoder can reuse the scene pass's slot conventions), plus the
-        // G-buffer inputs on the otherwise-unused material-texture slots 0..3 and
-        // HeResolve on fragment buffer 3. Total samplers: 0-3 + 6/7 + 9-12 + 14/15
-        // = 12 of Metal's 16 — comfortably inside the budget, as planned.
-        out = toCompiled(compileMslPinned(injected, Stage::Fragment,
-            { { Stage::Fragment, 0, 0, static_cast<uint32_t>(kMetalLightingBufferIndex) },
-              { Stage::Fragment, 0, 23, 3 },    // HeResolve UBO → fragment buffer 3
-              { Stage::Fragment, 0, 19, 0 },    // heGB0 → texture/sampler 0
-              { Stage::Fragment, 0, 20, 1 },    // heGB1 → 1
-              { Stage::Fragment, 0, 21, 2 },    // heGB2 → 2
-              { Stage::Fragment, 0, 22, 3 },    // heGBDepth → 3
-              { Stage::Fragment, 0, 10, 9 },    // GI sun mask (as in fragment())
-              { Stage::Fragment, 0, 11, 10 },   // GI local mask
-              { Stage::Fragment, 0, 12, 11 },   // CSM array
-              { Stage::Fragment, 0, 13, 12 },   // local shadow atlas
-              { Stage::Fragment, 0, 15, 14 },   // sky env cubemap
-              { Stage::Fragment, 0, 16, 15 },   // screen-space AO
-              { Stage::Fragment, 0, 17, 6 },    // DDGI irradiance atlas
-              { Stage::Fragment, 0, 18, 7 } }));// DDGI visibility atlas
-    }
-    else
-    {
-        out = toCompiled(compile(injected, Stage::Fragment, toTarget(backend)));
-    }
+const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::deferredResolveClustered(Backend backend)
+{
+    const int key = static_cast<int>(backend) + 64;
+    if (auto it = m_resolveCache.find(key); it != m_resolveCache.end()) return it->second;
+    Compiled out = compileResolveVariant(
+        injectPreamble(buildDeferredResolveSource(/*tile=*/false, /*clustered=*/true)),
+        backend, false, true);
     return m_resolveCache.emplace(key, std::move(out)).first->second;
 }
 
@@ -917,30 +1040,19 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::deferredResolveTil
 {
     const int key = static_cast<int>(backend);
     if (auto it = m_resolveTileCache.find(key); it != m_resolveTileCache.end()) return it->second;
+    Compiled out = compileResolveVariant(
+        injectPreamble(buildDeferredResolveSource(/*tile=*/true, /*clustered=*/false)),
+        backend, true, false);
+    return m_resolveTileCache.emplace(key, std::move(out)).first->second;
+}
 
-    using namespace he::shaderc;
-    Compiled out;
-    if (backend == Backend::Metal)
-    {
-        const std::string injected = injectPreamble(kDeferredResolveTileFS);
-        MslOptions opts;
-        opts.framebufferFetchSubpasses = true;
-        // Same pin map as deferredResolve minus the G-buffer texture slots —
-        // the subpass inputs become [[color(0..3)]] and consume no samplers.
-        out = toCompiled(compileMslPinned(injected, Stage::Fragment,
-            { { Stage::Fragment, 0, 0, static_cast<uint32_t>(kMetalLightingBufferIndex) },
-              { Stage::Fragment, 0, 23, 3 },    // HeResolve UBO → fragment buffer 3
-              { Stage::Fragment, 0, 10, 9 },    // GI sun mask
-              { Stage::Fragment, 0, 11, 10 },   // GI local mask
-              { Stage::Fragment, 0, 12, 11 },   // CSM array
-              { Stage::Fragment, 0, 13, 12 },   // local shadow atlas
-              { Stage::Fragment, 0, 15, 14 },   // sky env cubemap
-              { Stage::Fragment, 0, 16, 15 },   // screen-space AO
-              { Stage::Fragment, 0, 17, 6 },    // DDGI irradiance atlas
-              { Stage::Fragment, 0, 18, 7 } },  // DDGI visibility atlas
-            opts));
-    }
-    // Non-Metal backends have no tile-memory path — leave `ok = false`.
+const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::deferredResolveTileClustered(Backend backend)
+{
+    const int key = static_cast<int>(backend) + 64;
+    if (auto it = m_resolveTileCache.find(key); it != m_resolveTileCache.end()) return it->second;
+    Compiled out = compileResolveVariant(
+        injectPreamble(buildDeferredResolveSource(/*tile=*/true, /*clustered=*/true)),
+        backend, true, true);
     return m_resolveTileCache.emplace(key, std::move(out)).first->second;
 }
 

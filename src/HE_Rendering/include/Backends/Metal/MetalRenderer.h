@@ -206,6 +206,27 @@ private:
 	// Fullscreen tile resolve, encoded into the OPEN G-buffer pass encoder.
 	void  EncodeDeferredResolveTile(void* renderEncoder, int width, int height);
 	bool  m_deferredPipelinesTried  = false;   // build attempted once; failure logs + falls back forward
+
+	// ── Clustered lighting (plan P7) ─────────────────────────────────────────
+	// In the deferred resolve ALL point/spot lights come from per-cluster light
+	// lists (CPU-built each frame, scattered by projected bounds) instead of the
+	// 8-light window — the light limit falls. The heLight window then carries
+	// directional lights only. Default on for deferred; HE_DEFERRED_CLUSTER=0
+	// forces the 8-light resolve (A/B guard). GL keeps the 8-light resolve
+	// (no SSBOs in GL 4.1).
+	static constexpr int   kClusterGridX = 16;
+	static constexpr int   kClusterGridY = 9;
+	static constexpr int   kClusterGridZ = 24;
+	static constexpr float kClusterNear  = 0.1f;
+	static constexpr float kClusterFar   = 1000.0f;
+	static constexpr int   kMaxClusteredLights = 256;
+	bool  m_deferredClustered = true;
+	// Build this frame's cluster data from m_renderWorld, bind the three SSBO
+	// buffers on the encoder (fragment buffers 4/5/6), fill ru's cluster fields
+	// and rewrite matLight's window to DIRECTIONAL lights only.
+	void  EncodeClusterData(void* renderEncoder,
+	                        HE::MaterialShaderLibrary::Lighting& matLight,
+	                        HE::MaterialShaderLibrary::ResolveUniforms& ru);
 	int   m_gbufferDebugView        = 0;       // HE_DUMP_GBUFFER (1..4), read once at Initialize
 	bool  m_deferredFrameActive     = false;   // this frame renders deferred (set before SSAO — P5 reads it)
 	void  EnsureGBufferTargets(int width, int height);
