@@ -42,6 +42,16 @@ struct ParticlePreviewInstance
     float     alpha = 1.0f;
 };
 
+// Which asset an IRenderer::RenderAssetThumbnail call is being asked to draw.
+// Deliberately a small closed set rather than "any AssetType": a thumbnail needs
+// a geometric/shaded representation, which only these three have.
+enum class ThumbnailKind
+{
+    Material     = 0, // the material on a unit sphere
+    StaticMesh   = 1, // the mesh itself, camera auto-framed on its bounds
+    SkeletalMesh = 2, // the mesh in bind pose (no clip evaluated)
+};
+
 // ─── IRenderer ────────────────────────────────────────────────────────────────
 // Pure interface — lives in HorizonCore so Application can hold a renderer
 // without creating a circular dependency with HorizonRendering.
@@ -314,6 +324,24 @@ public:
                                         const std::vector<ParticlePreviewInstance>& /*particles*/,
                                         uint32_t /*size*/, float /*yaw*/, float /*pitch*/, float /*dist*/)
     { return nullptr; }
+
+    // ── Asset thumbnails ───────────────────────────────────────────────────
+    // Render `assetId` into a PRIVATE offscreen target and read it back as
+    // tightly packed, top-down RGBA8 (`size`×`size`×4 bytes, transparent where
+    // nothing was drawn). Unlike the Render*Preview calls above this returns
+    // pixels rather than a GPU handle, so the caller can cache the result on
+    // disk and re-upload it as a plain texture — the Content Browser draws one
+    // thumbnail per asset and must not re-render them every frame. It also uses
+    // a target of its own: sharing the interactive preview's would overwrite
+    // whatever the Material Editor is currently showing.
+    //
+    // Synchronous (renders and waits), so the caller has to budget how many it
+    // asks for per frame. Returns false on backends without a thumbnail path,
+    // or when the asset cannot be resolved.
+    virtual bool RenderAssetThumbnail(class ContentManager& /*cm*/, ThumbnailKind /*kind*/,
+                                      const HE::UUID& /*assetId*/, uint32_t /*size*/,
+                                      std::vector<uint8_t>& /*outRgba8*/)
+    { return false; }
 
     // Drop cached GPU buffers for a mesh so ResolveMesh re-uploads from the
     // ContentManager next frame. Call after replaceStaticMesh so sculpt/edit

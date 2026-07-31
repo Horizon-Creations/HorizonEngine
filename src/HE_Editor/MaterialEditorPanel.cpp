@@ -1,6 +1,7 @@
 #include "MaterialEditorPanel.h"
 #include "EditorApplication.h"                 // AppContext
 #include "EditorAssetTypeCache.h"               // shared, invalidatable path → AssetType sniff
+#include "AssetThumbnailCache.h"                // Content-Browser tile, re-rendered on save
 #include "EditorPanelState.h"                   // shared per-tab state map + lazy asset open
 #include "EditorWidgets.h"                      // shared Content-Browser drop resolution
 #include "GraphEditor.h"                        // shared node-graph canvas frontend
@@ -1544,6 +1545,10 @@ void render(AppContext& ctx, const std::string& assetPath,
 		RuntimeAsset* toSave = st.isFunction ? static_cast<RuntimeAsset*>(fnAsset)
 		                                     : static_cast<RuntimeAsset*>(mat);
 		if (toSave && ctx.contentManager->saveAsset(*toSave)) st.dirty = false;
+		// The Content Browser tile is now a picture of the PREVIOUS graph. Its own
+		// staleness poll would catch this within a second or two; dropping it here
+		// makes the grid update the moment the save lands.
+		AssetThumbnailCache::invalidate(assetPath);
 		Logger::Log(Logger::LogLevel::Info,
 			("MaterialEditor: saved '" + st.name + "'").c_str());
 	}

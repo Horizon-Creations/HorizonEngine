@@ -15,6 +15,7 @@ add_executable(he_tests
     test_gi_bvh.cpp
     test_undo.cpp
     test_editorcamera.cpp
+    test_asset_thumbnail_cache.cpp
     test_rendergraph.cpp
     test_jobsystem.cpp
     test_terrain.cpp
@@ -70,6 +71,8 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/GiBvh.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorUndo.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorCamera.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorAssetTypeCache.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetThumbnailCache.cpp
 )
 
 target_include_directories(he_tests PRIVATE

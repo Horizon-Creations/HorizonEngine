@@ -94,6 +94,8 @@ public:
 	void* RenderParticlePreview(ContentManager& cm, const HE::UUID& meshId, const HE::UUID& materialId,
 	                            const std::vector<ParticlePreviewInstance>& particles,
 	                            uint32_t size, float yaw, float pitch, float dist) override;
+	bool  RenderAssetThumbnail(ContentManager& cm, ThumbnailKind kind, const HE::UUID& assetId,
+	                           uint32_t size, std::vector<uint8_t>& outRgba8) override;
 	void  InvalidateMesh    (const HE::UUID& meshId)     override;
 	void  InvalidateTexture (const HE::UUID& textureId)  override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
@@ -343,6 +345,30 @@ private:
 	void* m_particlePreviewDepthTex = nullptr; // id<MTLTexture> (retained)
 	int   m_particlePreviewSize     = 0;
 	void* m_particlePreviewPipeline = nullptr; // id<MTLRenderPipelineState> (retained)
+
+	// ── Content-Browser thumbnails (RenderAssetThumbnail) ────────────────────
+	// Own target, deliberately NOT any of the preview targets above: a thumbnail
+	// is rendered while the Material Editor may be showing its live preview, and
+	// sharing m_previewColorTex would replace that preview's contents with
+	// whatever asset the grid happened to ask for. Read back to RGBA8 and cached
+	// by the editor, so this holds one thumbnail at a time.
+	void* m_thumbColorTex = nullptr; // id<MTLTexture> (retained), RGBA16F like the previews
+	void* m_thumbDepthTex = nullptr; // id<MTLTexture> (retained)
+	int   m_thumbSize     = 0;
+	// Unskinned mesh pipeline shared by the mesh thumbnails and by materials that
+	// have no node graph (built-in PBR): the counterpart of m_skelPreviewPipeline
+	// with the bone buffers removed and a metallic/roughness-driven highlight.
+	void* m_meshPreviewPipeline = nullptr; // id<MTLRenderPipelineState> (retained)
+	// Encode one material-graph preview primitive into an OPEN encoder (the caller
+	// owns the render pass + its clear). False when the material has no node-graph
+	// pipeline — the thumbnail path then falls back to m_meshPreviewPipeline.
+	bool EncodeMaterialPreview(void* renderEncoder, const HE::UUID& materialId,
+	                           float yaw, float pitch, float dist, int shape);
+	// Same contract for the mesh pipeline; `center`/`extent` frame the orbit camera.
+	void EncodeMeshPreview(void* renderEncoder, void* vertexBuf, void* indexBuf, int indexCount,
+	                       void* texture, const glm::vec3& center, float extent,
+	                       const glm::vec3& baseColor, float metallic, float roughness,
+	                       float yaw, float pitch, float dist);
 
 	// GPU-instanced ParticleGraph particle rendering (the real scene draw path, see
 	// RenderWorld::particleBatches) — one compiled pipeline per unique color/alpha-
