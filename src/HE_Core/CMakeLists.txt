@@ -33,6 +33,7 @@ add_library(HorizonCore SHARED
 	src/HorizonCode/HorizonCodeGenSupport.cpp
 	src/HorizonCode/HcCompiledLoader.cpp
 	src/Renderer/UIFont.cpp
+	src/ContentManager/AssetRefRetarget.cpp
  "include/ContentManager/ContentManager.h" "src/ContentManager/ContentManager.cpp" "include/ContentManager/Assets.h")
 
 target_include_directories(HorizonCore

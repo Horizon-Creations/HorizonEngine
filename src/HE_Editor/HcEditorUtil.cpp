@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cfloat>
+#include <climits>
 #include <cstdio>
 #include <string>
 #include <imgui.h>
@@ -571,6 +572,159 @@ bool drawLiteralNodeBody(HorizonCode::Node& n, bool& committed)
 	return changed;
 }
 
+// ── Searchable menu: ranking + keyboard driving ──────────────────────────────
+// One session at a time (the add-node palette and the drag-off menu are both
+// popups and can never be open together), so the state is a single file-static.
+//
+// The ranking is settled at the END of a frame, once every entry has registered,
+// and the highlight it produces is drawn on the NEXT one. That one-frame delay is
+// what makes the whole thing work in immediate mode: an entry has to be drawn
+// before we know whether something better comes after it — at 60 Hz the highlight
+// simply appears to follow the typing.
+//
+// Enter normally picks within the same frame, EXCEPT when the query also changed
+// in it (ImGui delivers a whole burst of queued keys at once, so a fast typer's
+// last letter and their Enter can arrive together): the pick is then held over
+// one frame, or it would insert whatever the PREVIOUS query had highlighted.
+namespace
+{
+	struct SearchNav
+	{
+		std::string text;                 // raw search field contents
+		std::string query;                // lowercased `text`, as ranked against
+		std::string activeKey;            // the highlighted entry
+		std::string bestKey;              // best-ranked entry seen this frame
+		int         bestScore = INT_MAX;
+		std::vector<std::string> keys;    // entries registered this frame, in order
+		int  move        = 0;             // pending ↑/↓ steps from the search field
+		bool enterQueued = false;         // Enter pressed; the highlight takes it next frame
+		bool scrollTo    = false;         // bring the highlight into view
+		bool refocus     = false;         // Enter deactivates the field — take it back
+		bool queryDirty  = false;         // query edited this frame → re-pick the best match
+	};
+	SearchNav s_nav;
+
+	// ↑/↓ inside a single-line InputText are only delivered (and only taken away
+	// from ImGui's own nav, which would otherwise walk the focus out of the field)
+	// when the history flag is set — that is exactly what this callback is for.
+	int searchNavCallback(ImGuiInputTextCallbackData* d)
+	{
+		if (d->EventFlag == ImGuiInputTextFlags_CallbackHistory)
+			s_nav.move += (d->EventKey == ImGuiKey_UpArrow) ? -1 : 1;
+		return 0;
+	}
+
+	// How well `lowerLabel` answers `q` — lower is better, ties go to whichever
+	// entry the menu drew first. Entries that don't contain the query at all are
+	// still rankable (a menu may list a whole category because the CATEGORY
+	// matched), they just lose to every real match.
+	int rankMatch(const std::string& lowerLabel, const std::string& q)
+	{
+		if (q.empty()) return 0;                       // no query → the first entry leads
+		const size_t pos = lowerLabel.find(q);
+		if (pos == std::string::npos) return 9000;
+		if (lowerLabel.size() == q.size()) return 0;   // exact name
+		const int extra = static_cast<int>(lowerLabel.size() - q.size()); // prefer the tighter fit
+		if (pos == 0) return 100 + extra;                                 // "add" → "Add"
+		const bool wordStart = !std::isalnum(static_cast<unsigned char>(lowerLabel[pos - 1]));
+		if (wordStart) return 300 + static_cast<int>(pos) + extra;        // "vec" → "Make Vec2"
+		return 600 + static_cast<int>(pos) + extra;                       // anywhere inside a word
+	}
+} // namespace
+
+std::string searchMenuBegin(const char* id, const char* hint, float width)
+{
+	if (ImGui::IsWindowAppearing())
+	{
+		s_nav = SearchNav{};
+		s_nav.scrollTo = true;
+		ImGui::SetKeyboardFocusHere();
+	}
+	// EnterReturnsTrue deactivates the field, so an Enter that picks nothing (no
+	// match) would leave the user typing into a dead box — take the focus back.
+	if (s_nav.refocus) { ImGui::SetKeyboardFocusHere(); s_nav.refocus = false; }
+
+	ImGui::SetNextItemWidth(width);
+	if (ImGui::InputTextWithHint(id, hint, &s_nav.text,
+	        ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackHistory,
+	        searchNavCallback))
+	{ s_nav.enterQueued = true; s_nav.refocus = true; }
+
+	std::string q = s_nav.text;
+	std::transform(q.begin(), q.end(), q.begin(),
+		[](unsigned char c){ return (char)std::tolower(c); });
+	s_nav.queryDirty = (q != s_nav.query);
+	s_nav.query      = q;
+
+	s_nav.keys.clear();
+	s_nav.bestKey.clear();
+	s_nav.bestScore = INT_MAX;
+	return q;
+}
+
+bool searchMenuItem(const std::string& label, bool disabled)
+{
+	if (disabled) // never highlighted, never reachable by ↑/↓ or Enter
+	{
+		ImGui::Selectable(label.c_str(), false, ImGuiSelectableFlags_Disabled);
+		return false;
+	}
+
+	// Rank on the VISIBLE text: an "##id" suffix disambiguates the ImGui id, it is
+	// not part of what the user is searching for.
+	std::string shown = label.substr(0, label.find("##"));
+	std::transform(shown.begin(), shown.end(), shown.begin(),
+		[](unsigned char c){ return (char)std::tolower(c); });
+	const int score = rankMatch(shown, s_nav.query);
+	if (score < s_nav.bestScore) { s_nav.bestScore = score; s_nav.bestKey = label; }
+	s_nav.keys.push_back(label);
+
+	// The highlight still belongs to the previous query while the query is being
+	// edited this frame, so an Enter that arrived with the keystroke waits.
+	const bool highlighted = (label == s_nav.activeKey);
+	bool picked = false;
+	if (highlighted && s_nav.enterQueued && !s_nav.queryDirty)
+	{ s_nav.enterQueued = false; picked = true; }
+
+	if (highlighted) ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.90f, 0.55f, 0.10f, 0.55f));
+	const bool clicked = ImGui::Selectable(label.c_str(), highlighted);
+	if (highlighted) ImGui::PopStyleColor();
+	if (highlighted && s_nav.scrollTo) ImGui::SetScrollHereY(0.5f);
+
+	return clicked || picked;
+}
+
+void searchMenuEnd()
+{
+	// Settle the highlight for the next frame. Editing the query re-picks the
+	// best match (that IS the point); otherwise the highlight stays where it is
+	// — including where ↑/↓ put it — as long as that entry is still listed.
+	auto indexOf = [](const std::string& k) -> int {
+		for (size_t i = 0; i < s_nav.keys.size(); ++i)
+			if (s_nav.keys[i] == k) return static_cast<int>(i);
+		return -1; };
+
+	bool scroll = false;
+	int  idx    = indexOf(s_nav.activeKey);
+	if (idx < 0 || s_nav.queryDirty)
+	{
+		s_nav.activeKey = s_nav.bestKey;
+		idx             = indexOf(s_nav.activeKey);
+		scroll          = true;
+	}
+	if (s_nav.move != 0 && !s_nav.keys.empty())
+	{
+		idx = std::clamp(idx + s_nav.move, 0, static_cast<int>(s_nav.keys.size()) - 1);
+		s_nav.activeKey = s_nav.keys[idx];
+		scroll          = true;
+	}
+	s_nav.scrollTo = scroll;
+	s_nav.move     = 0;
+	// An Enter held over for the re-ranked highlight survives into the next frame;
+	// one that simply found nothing to pick (empty list) must not linger.
+	if (!s_nav.queryDirty) s_nav.enterQueued = false;
+}
+
 std::string drawEngineApiMenu(const std::string& lowerQuery)
 {
 	auto lower = [](std::string v){ std::transform(v.begin(), v.end(), v.begin(),
@@ -588,7 +742,7 @@ std::string drawEngineApiMenu(const std::string& lowerQuery)
 		if (!header || std::string(header) != fn.category)
 		{ ImGui::TextDisabled("Engine · %s", fn.category); header = fn.category; }
 		// Unique ImGui id via the stable api id (display names may repeat later).
-		if (ImGui::Selectable((std::string(shown) + "##" + fn.id).c_str())) picked = fn.id;
+		if (searchMenuItem(std::string(shown) + "##" + fn.id)) picked = fn.id;
 		if (ImGui::IsItemHovered())
 		{
 			// Same self-documentation as the canvas hover: build the EngineCall

@@ -5,6 +5,7 @@
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonRendering/RenderExtractor.h>
 #include <HorizonRendering/RenderWorld.h>
+#include <HorizonRendering/ScenePick.h>   // triangle-exact ray probe for drag-drop placement
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <Types/Enums.h>
@@ -62,6 +63,51 @@ static bool                s_rotateScreen = false;
 
 // Picking + sculpt AABB cache (keyed by mesh asset UUID)
 static std::unordered_map<HE::UUID, HE::AABB> s_aabbCache;
+
+// Local-space AABB of a mesh asset, cached. Cooked meshes (packed content) carry
+// their bounds precomputed and their SoA vertex array empty, so both forms have
+// to be read here — the loose editor path is the interleaved-less one.
+static const HE::AABB* meshBounds(ContentManager& cm, const HE::UUID& meshId)
+{
+	auto it = s_aabbCache.find(meshId);
+	if (it == s_aabbCache.end())
+	{
+		const StaticMeshAsset* mesh = cm.getStaticMesh(meshId);
+		if (!mesh) return nullptr;
+		HE::AABB box;
+		if (mesh->cooked)
+		{
+			for (uint32_t i = 0; i < mesh->vertexCount; ++i)
+				box.expand({ mesh->interleaved[i * 8 + 0],
+				             mesh->interleaved[i * 8 + 1],
+				             mesh->interleaved[i * 8 + 2] });
+		}
+		else
+			box = HE::AABB::fromPositions(mesh->vertices.data(), mesh->vertices.size() / 3);
+		it = s_aabbCache.emplace(meshId, box).first;
+	}
+	return it->second.isValid() ? &it->second : nullptr;
+}
+
+// Mesh geometry for HE::ScenePick, served straight out of the content manager
+// (plus the bounds cache above, so the cheap box reject costs nothing here).
+// Cooked assets keep their vertices interleaved with normals and UVs and leave
+// the SoA array empty, hence the stride.
+static HE::ScenePick::MeshLookup meshLookup(ContentManager& cm)
+{
+	return [&cm](const HE::UUID& id, HE::ScenePick::MeshGeometry& out)
+	{
+		const StaticMeshAsset* mesh = cm.getStaticMesh(id);
+		if (!mesh) return false;
+		out.positions   = mesh->cooked ? mesh->interleaved.data() : mesh->vertices.data();
+		out.stride      = mesh->cooked ? 8 : 3;
+		out.vertexCount = mesh->cooked ? mesh->vertexCount : mesh->vertices.size() / 3;
+		out.indices     = mesh->indices.data();
+		out.indexCount  = mesh->indices.size();
+		out.bounds      = meshBounds(cm, id);
+		return true;
+	};
+}
 
 void releaseViewportLookCapture(SDL_Window* win)
 {
@@ -392,9 +438,13 @@ void render(AppContext& ctx, float dt)
 					                    camOverride.active ? &camOverride : nullptr);
 
 				// ── Spawn a mesh dropped onto the viewport ──────────────────
-				// Placed where the drop ray meets the ground plane (Y=0); if the
-				// ray points away from it (looking up), fall back to a fixed
-				// distance in front of the camera. Non-mesh assets are ignored.
+				// A collision probe decides where: the drop ray is traced against
+				// the scene's actual geometry and the asset lands on the nearest
+				// surface under the cursor (terrain, floor, another mesh), resting
+				// on it rather than intersecting it. With nothing under the cursor
+				// the ground plane (Y=0) takes over, and if the ray points away
+				// from that too (looking up), a fixed distance in front of the
+				// camera. Non-mesh assets are ignored.
 				if (!s_viewportDropPath.empty())
 				{
 					if (ctx.world && ctx.contentManager)
@@ -417,12 +467,21 @@ void render(AppContext& ctx, float dt)
 								pNear /= pNear.w; pFar /= pFar.w;
 								const glm::vec3 ro(pNear);
 								const glm::vec3 rd = glm::normalize(glm::vec3(pFar) - glm::vec3(pNear));
-								if (std::abs(rd.y) > 1e-5f)
+								const HE::ScenePick::SurfaceHit surface = HE::ScenePick::raycast(
+									s_sceneSnapshot, meshLookup(*ctx.contentManager), ro, rd);
+								if (surface.hit) { spawnPos = surface.point; placed = true; }
+								else if (std::abs(rd.y) > 1e-5f)
 								{
 									const float t = -ro.y / rd.y;
 									if (t > 0.0f) { spawnPos = ro + t * rd; placed = true; }
 								}
 							}
+							// Rest the mesh ON the surface: its own bounds decide how
+							// far its origin sits above the contact point, so a model
+							// whose pivot is at its centre doesn't sink in halfway.
+							if (placed)
+								if (const HE::AABB* box = meshBounds(*ctx.contentManager, id))
+									spawnPos.y -= box->min.y;
 							if (!placed && ctx.editorCamera)
 							{
 								// EditorCamera::forward() is private — derive it from the
@@ -595,19 +654,8 @@ void render(AppContext& ctx, float dt)
 					{
 						HE::AABB box = s_cubeBox;
 						if (obj.meshAssetId != HE::UUID{} && ctx.contentManager)
-						{
-							auto it = s_aabbCache.find(obj.meshAssetId);
-							if (it == s_aabbCache.end())
-							{
-								if (const StaticMeshAsset* mesh =
-									ctx.contentManager->getStaticMesh(obj.meshAssetId))
-									it = s_aabbCache.emplace(obj.meshAssetId,
-										HE::AABB::fromPositions(mesh->vertices.data(),
-										                        mesh->vertices.size() / 3)).first;
-							}
-							if (it != s_aabbCache.end() && it->second.isValid())
-								box = it->second;
-						}
+							if (const HE::AABB* b = meshBounds(*ctx.contentManager, obj.meshAssetId))
+								box = *b;
 
 						// Ray → object space (exact test for rotated objects)
 						const glm::mat4 invModel = glm::inverse(obj.transform);
