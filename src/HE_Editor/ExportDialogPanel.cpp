@@ -46,6 +46,10 @@ namespace ExportDialogPanel
 // ExportProfile (persisted in the .heproj); the export itself runs on a worker
 // thread so packing/compression never freezes the UI.
 static bool   s_showExportModal   = false;
+// Whether the modal actually drew last frame. Recomputed inside render() rather
+// than derived from ImGui::IsPopupOpen, which hashes the id against whatever
+// window happens to be current at the call site. Read through isOpen().
+static bool   s_modalVisible      = false;
 static int    s_exportProfileIdx  = 0;             // index into exportProfiles
 static std::string s_exportOutputDir;
 static bool   s_exportCompress    = true;
@@ -130,6 +134,11 @@ static void buildStepsFinish(bool success)
 	if (success)
 		for (auto& s : s_buildSteps) if (s.state < 2) s.state = 2;
 	s_buildStepCurrent = -1;
+}
+
+bool isOpen()
+{
+	return s_modalVisible;
 }
 
 void joinPendingExport()
@@ -358,6 +367,7 @@ void open(AppContext& ctx)
 void render(AppContext& ctx)
 {
 #ifdef HE_IMGUI_ENABLED
+    s_modalVisible = false;   // set again below if BeginPopupModal draws this frame
     // ── Export Project modal ────────────────────────────────────────────────
     if (s_showExportModal)
     {
@@ -389,6 +399,7 @@ void render(AppContext& ctx)
         if (ImGui::BeginPopupModal("Export Project##build", nullptr,
             ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings))
         {
+            s_modalVisible = true;
             ProjectManager* pm = ctx.projectManager;
             const std::filesystem::path projectRoot = pm
                 ? std::filesystem::path(pm->currentProject().path).parent_path()

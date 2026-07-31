@@ -19,6 +19,11 @@ namespace ExportDialogPanel
 	// export has to be joined even if the user closed the popup.
 	void render(AppContext& ctx);
 
+	// True while the modal was on screen during the last render() call. Only a
+	// status read — the interactive tutorial watches it to notice that the user
+	// opened Build ▸ Export Project.
+	bool isOpen();
+
 	// Blocks until a project export running on the worker thread has finished.
 	// Must be called on editor shutdown — destroying a joinable std::thread
 	// terminates the process.

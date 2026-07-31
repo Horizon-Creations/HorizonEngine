@@ -17,6 +17,7 @@ namespace MacMenuBar
 		Quit, Preferences,
 		ResetLayout, ToggleProfiler, ToggleEnvironment, OpenLevelScript, OpenGameInstance,
 		ImportAsset, ExportProject,
+		OpenTutorial,
 	};
 
 	// Build + set NSApp.mainMenu (idempotent). Call after SDL created the app.

@@ -21,6 +21,7 @@
 #include "ViewportPanel.h"               // centre dock: Scene viewport, camera, gizmo, picking
 #include "OutlinerPanel.h"               // right dock: World Outliner hierarchy tree
 #include "ProjectHubPanel.h"             // start screen while no project is open
+#include "TutorialPanel.h"               // first-start welcome + Help ▸ Interactive Tutorial
 #include "ProfilerPanel.h"               // View > Performance Profiler window
 #include "EnvironmentPanel.h"            // View > Environment (add/remove Sky + Weather)
 #include "EditorSettingsPanel.h"         // engine-settings catalog + Preferences window
@@ -292,9 +293,16 @@ void EditorUI::render(AppContext& ctx, float dt)
 
     // ── Route to either the Project Hub or the full Editor UI ─────────────────
     if (ctx.projectLoaded)
+    {
         renderEditor(ctx, dt);
+    }
     else
+    {
         ProjectHubPanel::render(ctx);
+        // Drawn after the hub so the welcome card sits on top of it. Draws nothing
+        // once the user has answered it once (persisted in the editor config).
+        TutorialPanel::renderWelcome(ctx);
+    }
 
     ImGui::Render();
 
@@ -586,6 +594,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 				break;
 			case MC::ImportAsset:     triggerImportAsset();                                  break;
 			case MC::ExportProject:   if (ctx.projectLoaded) openExportDialog();             break;
+			case MC::OpenTutorial:    TutorialPanel::open();                                 break;
 			default: break;
 			}
 		}
@@ -657,6 +666,9 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	}
 	if (ImGui::BeginMenu("Help"))
 	{
+		if (ImGui::MenuItem("Interactive Tutorial", nullptr, TutorialPanel::isOpen()))
+			TutorialPanel::open();
+		ImGui::Separator();
 		if (ImGui::MenuItem("Documentation")) {}
 		if (ImGui::MenuItem("About")) {}
 		ImGui::EndMenu();
@@ -881,15 +893,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 
     // ── New Project Popup ─────────────────────────────────────────────────────
     {
-        static const std::array<const char*, 4> kPresetNames = {
-            "Empty Project", "Game", "Simulation", "Tool",
-        };
-        static const std::array<const char*, 4> kPresetDesc = {
-            "Only the basic folder skeleton, no extra content.",
-            "Assets, Scenes and Scripts folders + a sample scene file.",
-            "Assets, Scenes and Data folders.",
-            "Assets and Source folders.",
-        };
+        // Templates: ProjectHubPanel::kPresetNames/kPresetDescs — shared with the
+        // Hub's own create form so the two lists cannot drift apart.
         // Index order MUST match ProjectScriptLanguage (HorizonCode, Lua, Python, Cpp).
         static const std::array<const char*, 4> kLangNames = {
             "HorizonCode (Visual Scripting)", "Lua", "Python", "C++",
@@ -990,8 +995,10 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             ImGui::Text("Template");
             ImGui::SetNextItemWidth(-1);
             ImGui::ListBox("##npPresets", &ctx.hubSelectedPreset,
-                kPresetNames.data(), static_cast<int>(kPresetNames.size()), 4);
-            ImGui::TextDisabled("%s", kPresetDesc[ctx.hubSelectedPreset]);
+                ProjectHubPanel::kPresetNames, ProjectHubPanel::kPresetCount, 5);
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+            ImGui::TextWrapped("%s", ProjectHubPanel::kPresetDescs[ctx.hubSelectedPreset]);
+            ImGui::PopStyleColor();
 
             ImGui::Spacing();
             ImGui::Text("Scripting Language");
@@ -1439,5 +1446,17 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
     // slot and the unsaved-changes-guarded scene open, so both are handed in.
     ContentBrowserPanel::render(ctx, s_tabSelectRequest,
         [&](const std::string& scenePath) { requestGuarded(GuardedAction::OpenScenePath, scenePath); });
+
+    // ── Interactive tutorial ────────────────────────────────────────────────
+    // Last, so its floating card and the highlight it draws around the panel of
+    // the current step sit on top of everything above. The window toggles it
+    // watches for are file statics here, so they are handed over explicitly.
+    {
+        TutorialPanel::UiFlags tutFlags;
+        tutFlags.profilerOpen    = s_showProfiler;
+        tutFlags.environmentOpen = s_showEnvironment;
+        tutFlags.exportOpen      = ExportDialogPanel::isOpen();
+        TutorialPanel::render(ctx, dt, tutFlags);
+    }
 #endif // HE_IMGUI_ENABLED
 }

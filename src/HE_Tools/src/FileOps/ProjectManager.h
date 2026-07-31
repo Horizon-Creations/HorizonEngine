@@ -5,12 +5,14 @@
 #include <vector>
 #include <functional>
 
+// Persisted as an int in the .heproj manifest ("preset") — only ever append.
 enum class ProjectPreset
 {
 	Empty,       // only folder skeleton, no extra content
 	Game,        // Assets, Scenes, Scripts sub-folders + sample scene
 	Simulation,  // Assets, Scenes, Data sub-folders
 	Tool,        // Assets, Source sub-folders
+	Tutorial,    // Game skeleton + a furnished sandbox scene for the guided tour
 };
 
 // The gameplay scripting language a project is authored in, chosen at creation
@@ -67,6 +69,16 @@ namespace HE::tools
 HE_TOOLS_API bool scaffoldCppProject(const std::string& projectRoot,
                                      const std::string& projectName,
                                      const std::string& startupSceneName);
+
+// ─── Tutorial sandbox ────────────────────────────────────────────────────────
+// Lay down the extra files a ProjectPreset::Tutorial project gets on top of the
+// normal skeleton: a TUTORIAL.md that explains what the sandbox is for and how to
+// reopen the guided tour. The furnished starter scene itself is part of the
+// startup-scene JSON (see startupSceneJson in the .cpp), because every preset
+// writes that same file. Existing files are left untouched, so re-running this on
+// an existing project is safe. Returns false only on a write failure.
+HE_TOOLS_API bool scaffoldTutorialProject(const std::string& projectRoot,
+                                          const std::string& projectName);
 
 // Emit Source/<Scene>LevelScript.{h,cpp} with the level event stubs
 // (OnLevelLoaded / OnLevelUnloaded / OnUpdate) and a REGISTER_LEVEL_SCRIPT for

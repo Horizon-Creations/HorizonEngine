@@ -177,6 +177,15 @@ void install()
 		NSApp.windowsMenu = window;
 	}
 
+	// ── Help (last, as macOS expects) ──────────────────────────────────────
+	// Deliberately NOT project-scoped: the guided tour is exactly what someone
+	// with no project open is most likely to reach for.
+	{
+		NSMenu* help = heAddSubmenu(main, @"Help");
+		heAddItem(help, @"Interactive Tutorial", C::OpenTutorial, nil, 0, false);
+		NSApp.helpMenu = help;
+	}
+
 	NSApp.mainMenu = main;
 	setProjectLoaded(false);
 	s_installed = true;
