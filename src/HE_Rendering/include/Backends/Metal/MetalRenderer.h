@@ -183,11 +183,28 @@ private:
 	void* m_gbColor0 = nullptr; // id<MTLTexture> RGBA8Unorm_sRGB — BaseColor + Metallic
 	void* m_gbColor1 = nullptr; // id<MTLTexture> RGBA16Float — oct Normal + Roughness + Specular
 	void* m_gbColor2 = nullptr; // id<MTLTexture> RGBA16Float — Emissive (HDR) + Material-AO
-	void* m_gbDepth  = nullptr; // id<MTLTexture> Depth32Float — sampled by the resolve,
-	                            // blitted into m_hdrDepth for the lighting pass's attachment
+	void* m_gbDepth  = nullptr; // id<MTLTexture> Depth32Float — two-pass mode only: sampled by
+	                            // the resolve, blitted into m_hdrDepth for the lighting pass
+	// NDC depth as a COLOUR target (R32Float, attachment 3): written by every
+	// G-buffer fragment so the tile resolve can framebuffer-fetch it — Metal
+	// cannot fetch the depth buffer itself. In two-pass mode it is attached
+	// (pipeline/pass formats must match) but unused.
+	void* m_gbDepthLin = nullptr;
 	int   m_gbW = 0, m_gbH = 0;
 	void* m_gbufferPipeline        = nullptr; // id<MTLRenderPipelineState> — built-in PBR G-buffer
 	void* m_deferredResolvePipeline = nullptr; // id<MTLRenderPipelineState> — fullscreen heLitP resolve
+	// Tile-memory single pass (plan P6, Apple Silicon): the G-buffer attachments
+	// are MTLStorageModeMemoryless and the resolve runs INSIDE the G-buffer pass
+	// via framebuffer fetch, writing the HDR colour to attachment 4 — the
+	// G-buffer never leaves tile storage (bandwidth ≈ 0). Decided once at
+	// Initialize (Apple-GPU family; HE_DEFERRED_TILE=0/1 overrides). SSAO keeps
+	// its classic geometry pre-pass in this mode: the resolve consumes AO inside
+	// pass 1, so there is no stored depth to reconstruct it from (P5 stays for
+	// the two-pass fallback).
+	bool  m_deferredTileMode            = false;
+	void* m_deferredResolveTilePipeline = nullptr; // id<MTLRenderPipelineState>
+	// Fullscreen tile resolve, encoded into the OPEN G-buffer pass encoder.
+	void  EncodeDeferredResolveTile(void* renderEncoder, int width, int height);
 	bool  m_deferredPipelinesTried  = false;   // build attempted once; failure logs + falls back forward
 	int   m_gbufferDebugView        = 0;       // HE_DUMP_GBUFFER (1..4), read once at Initialize
 	bool  m_deferredFrameActive     = false;   // this frame renders deferred (set before SSAO — P5 reads it)
@@ -199,6 +216,12 @@ private:
 	// must run forward in the lighting pass (translucent + custom materials
 	// without a G-buffer variant).
 	void  EncodeGBuffer(void* renderEncoder, int width, int height, MetalDeferredFrame& out);
+	// The heLitP lighting-ABI fill for custom-material draws AND the deferred
+	// resolve — one implementation, so the two can never drift (extracted from
+	// EncodeScene when the tile resolve needed it outside that function).
+	void  FillMaterialLighting(HE::MaterialShaderLibrary::Lighting& matLight,
+	                           int width, int height, bool giActive, bool ssaoActive,
+	                           bool shadows, float skyClock);
 	// Procedural skybox: fills the HDR target's background before the scene.
 	void* m_skyPipeline = nullptr; // id<MTLRenderPipelineState>
 	void* m_moonTexture = nullptr; // id<MTLTexture>, night-sky moon (or null)

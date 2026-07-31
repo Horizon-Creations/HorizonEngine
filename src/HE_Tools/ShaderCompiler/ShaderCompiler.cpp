@@ -140,7 +140,8 @@ Result compile(const std::string& glsl, Stage stage, Target target)
 }
 
 Result compileMslPinned(const std::string& glsl, Stage stage,
-                        const std::vector<MslPin>& pins)
+                        const std::vector<MslPin>& pins,
+                        const MslOptions& opts)
 {
     Result r;
     std::lock_guard<std::mutex> lock(g_glslangMutex);
@@ -153,6 +154,9 @@ Result compileMslPinned(const std::string& glsl, Stage stage,
             spirv_cross::CompilerMSL::Options o;
             o.platform = spirv_cross::CompilerMSL::Options::macOS;
             o.set_msl_version(2, 3);
+            // subpassInput → [[color(n)]] framebuffer fetch (tile memory on
+            // Apple GPUs) instead of an input-attachment texture bind.
+            o.use_framebuffer_fetch_subpasses = opts.framebufferFetchSubpasses;
             c.set_msl_options(o);
             for (const MslPin& p : pins)
             {

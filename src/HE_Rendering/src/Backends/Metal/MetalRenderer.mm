@@ -657,6 +657,7 @@ struct GBufOut {
 	float4 gb0 [[color(0)]]; // rgb BaseColor, a Metallic
 	float4 gb1 [[color(1)]]; // rg oct Normal, b Roughness, a Specular
 	float4 gb2 [[color(2)]]; // rgb Emissive, a Material-AO
+	float4 gb3 [[color(3)]]; // r = NDC depth (tile-memory resolve, P6)
 };
 
 fragment GBufOut gbufferMain(VSOut in [[stage_in]],
@@ -671,6 +672,7 @@ fragment GBufOut gbufferMain(VSOut in [[stage_in]],
 	o.gb0 = float4(albedo, clamp(in.metallic, 0.0, 1.0));
 	o.gb1 = float4(octEncode(N) * 0.5 + 0.5, clamp(in.roughness, 0.0, 1.0), 0.5);
 	o.gb2 = float4(0.0, 0.0, 0.0, 1.0);
+	o.gb3 = float4(in.position.z, 0.0, 0.0, 0.0);
 	return o;
 }
 )MSL";
@@ -3547,6 +3549,7 @@ struct MetalDeferredFrame
 {
 	std::vector<TPDraw> transparent;    // translucent draws → sorted blend replay
 	std::vector<TPDraw> forwardOpaque;  // opaque forward-routed draws (no G-buffer variant)
+	bool resolveDone = false;           // tile mode: the resolve already ran inside pass 1
 };
 
 // Matches the MSL LightGPU/SceneUniforms structs above.
@@ -3727,6 +3730,13 @@ void MetalRenderer::Initialize(HE::Window* window)
 			? HE::RenderPath::Deferred : HE::RenderPath::Forward;
 	if (const char* dv = std::getenv("HE_DUMP_GBUFFER"); dv && *dv)
 		m_gbufferDebugView = std::clamp(std::atoi(dv), 0, 4);
+	// P6 tile mode: single-pass memoryless G-buffer via framebuffer fetch —
+	// Apple-GPU family only ([[color(n)]] fragment inputs). HE_DEFERRED_TILE=0/1
+	// overrides (0 forces the two-pass stored path for A/B and debugging).
+	if (@available(macOS 10.15, *))
+		m_deferredTileMode = [device supportsFamily:MTLGPUFamilyApple1];
+	if (const char* tm = std::getenv("HE_DEFERRED_TILE"); tm && *tm)
+		m_deferredTileMode = std::atoi(tm) != 0;
 
 	Logger::Log(Logger::LogLevel::Info,
 		(std::string("MetalRenderer: initialized on ") + [[device name] UTF8String]).c_str());
@@ -3783,8 +3793,9 @@ void MetalRenderer::Shutdown()
 	DestroyViewportTarget();
 	DestroyHDRTarget();
 	DestroyGBufferTargets();
-	if (m_gbufferPipeline)         { CFBridgingRelease(m_gbufferPipeline);         m_gbufferPipeline = nullptr; }
-	if (m_deferredResolvePipeline) { CFBridgingRelease(m_deferredResolvePipeline); m_deferredResolvePipeline = nullptr; }
+	if (m_gbufferPipeline)             { CFBridgingRelease(m_gbufferPipeline);             m_gbufferPipeline = nullptr; }
+	if (m_deferredResolvePipeline)     { CFBridgingRelease(m_deferredResolvePipeline);     m_deferredResolvePipeline = nullptr; }
+	if (m_deferredResolveTilePipeline) { CFBridgingRelease(m_deferredResolveTilePipeline); m_deferredResolveTilePipeline = nullptr; }
 	m_deferredPipelinesTried = false; // re-Initialize() rebuilds instead of staying forward
 	DestroyBloomTargets();
 	DestroyCloudTarget();
@@ -7108,24 +7119,36 @@ void MetalRenderer::EnsureGBufferTargets(int width, int height)
 	DestroyGBufferTargets();
 
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	// Tile mode (P6): the G-buffer never leaves tile storage — memoryless
+	// attachments, attachment-only usage. Two-pass fallback: private + sampled
+	// by the resolve.
 	auto makeColor = [&](MTLPixelFormat fmt) -> void*
 	{
 		MTLTextureDescriptor* d = [MTLTextureDescriptor
 			texture2DDescriptorWithPixelFormat:fmt width:width height:height mipmapped:NO];
-		d.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
-		d.storageMode = MTLStorageModePrivate;
+		d.usage       = m_deferredTileMode ? MTLTextureUsageRenderTarget
+		                                   : (MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead);
+		d.storageMode = m_deferredTileMode ? MTLStorageModeMemoryless : MTLStorageModePrivate;
 		return (void*)CFBridgingRetain([device newTextureWithDescriptor:d]);
 	};
-	m_gbColor0 = makeColor(kGBuf0Format);
-	m_gbColor1 = makeColor(kGBufAttrFormat);
-	m_gbColor2 = makeColor(kGBufAttrFormat);
-	// Depth is SAMPLED by the resolve (world-pos reconstruction) — unlike
-	// m_hdrDepth it needs ShaderRead on top of RenderTarget.
-	MTLTextureDescriptor* depthDesc = [MTLTextureDescriptor
-		texture2DDescriptorWithPixelFormat:kDepthFormat width:width height:height mipmapped:NO];
-	depthDesc.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
-	depthDesc.storageMode = MTLStorageModePrivate;
-	m_gbDepth = (void*)CFBridgingRetain([device newTextureWithDescriptor:depthDesc]);
+	m_gbColor0   = makeColor(kGBuf0Format);
+	m_gbColor1   = makeColor(kGBufAttrFormat);
+	m_gbColor2   = makeColor(kGBufAttrFormat);
+	// NDC depth as attachment 3 (R32F): the tile resolve framebuffer-fetches it;
+	// the two-pass fallback attaches it only for pipeline/pass format parity.
+	m_gbDepthLin = makeColor(MTLPixelFormatR32Float);
+	if (!m_deferredTileMode)
+	{
+		// Depth is SAMPLED by the two-pass resolve (world-pos reconstruction) —
+		// unlike m_hdrDepth it needs ShaderRead on top of RenderTarget. The tile
+		// mode has no separate G-buffer depth: its pass writes m_hdrDepth
+		// directly and the resolve reads m_gbDepthLin from tile storage.
+		MTLTextureDescriptor* depthDesc = [MTLTextureDescriptor
+			texture2DDescriptorWithPixelFormat:kDepthFormat width:width height:height mipmapped:NO];
+		depthDesc.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+		depthDesc.storageMode = MTLStorageModePrivate;
+		m_gbDepth = (void*)CFBridgingRetain([device newTextureWithDescriptor:depthDesc]);
+	}
 
 	m_gbW = width;
 	m_gbH = height;
@@ -7133,16 +7156,23 @@ void MetalRenderer::EnsureGBufferTargets(int width, int height)
 
 void MetalRenderer::DestroyGBufferTargets()
 {
-	if (m_gbColor0) { CFBridgingRelease(m_gbColor0); m_gbColor0 = nullptr; }
-	if (m_gbColor1) { CFBridgingRelease(m_gbColor1); m_gbColor1 = nullptr; }
-	if (m_gbColor2) { CFBridgingRelease(m_gbColor2); m_gbColor2 = nullptr; }
-	if (m_gbDepth)  { CFBridgingRelease(m_gbDepth);  m_gbDepth  = nullptr; }
+	if (m_gbColor0)   { CFBridgingRelease(m_gbColor0);   m_gbColor0 = nullptr; }
+	if (m_gbColor1)   { CFBridgingRelease(m_gbColor1);   m_gbColor1 = nullptr; }
+	if (m_gbColor2)   { CFBridgingRelease(m_gbColor2);   m_gbColor2 = nullptr; }
+	if (m_gbDepthLin) { CFBridgingRelease(m_gbDepthLin); m_gbDepthLin = nullptr; }
+	if (m_gbDepth)    { CFBridgingRelease(m_gbDepth);    m_gbDepth  = nullptr; }
 	m_gbW = m_gbH = 0;
 }
 
 bool MetalRenderer::EnsureDeferredPipelines()
 {
-	if (m_gbufferPipeline && m_deferredResolvePipeline) return true;
+	// Tile mode builds m_deferredResolveTilePipeline INSTEAD of the sampling
+	// resolve — check the one this mode actually uses, or the second frame
+	// falls back to forward forever.
+	if (m_gbufferPipeline &&
+	    (m_deferredTileMode ? m_deferredResolveTilePipeline != nullptr
+	                        : m_deferredResolvePipeline != nullptr))
+		return true;
 	if (m_deferredPipelinesTried) return false; // failed once — stay forward, don't retry per frame
 	m_deferredPipelinesTried = true;
 
@@ -7169,16 +7199,28 @@ bool MetalRenderer::EnsureDeferredPipelines()
 			desc.colorAttachments[0].pixelFormat = kGBuf0Format;
 			desc.colorAttachments[1].pixelFormat = kGBufAttrFormat;
 			desc.colorAttachments[2].pixelFormat = kGBufAttrFormat;
+			desc.colorAttachments[3].pixelFormat = MTLPixelFormatR32Float; // NDC depth (P6 fetch)
+			if (m_deferredTileMode)
+			{
+				// Single pass: the HDR target rides as attachment 4; the G-buffer
+				// stage never writes it.
+				desc.colorAttachments[4].pixelFormat = kSceneColorFormat;
+				desc.colorAttachments[4].writeMask   = MTLColorWriteMaskNone;
+			}
 			desc.depthAttachmentPixelFormat      = kDepthFormat;
 			id<MTLRenderPipelineState> pso = [device newRenderPipelineStateWithDescriptor:desc error:&err];
 			if (pso) m_gbufferPipeline = (void*)CFBridgingRetain(pso);
 		}
 
 		// Fullscreen lighting resolve: cross-compiled from the SAME lighting
-		// preamble as every material fragment (one shading source, §4.2).
+		// preamble as every material fragment (one shading source, §4.2). Tile
+		// mode uses the framebuffer-fetch variant inside the shared 5-attachment
+		// pass; the fallback samples the stored G-buffer in its own pass.
 		using Backend = HE::MaterialShaderLibrary::Backend;
 		const auto& v = m_matShaderLib.fullscreenVertex(Backend::Metal);
-		const auto& f = m_matShaderLib.deferredResolve(Backend::Metal);
+		const auto& f = m_deferredTileMode
+			? m_matShaderLib.deferredResolveTile(Backend::Metal)
+			: m_matShaderLib.deferredResolve(Backend::Metal);
 		if (v.ok && f.ok)
 		{
 			NSError* verr = nil;
@@ -7191,12 +7233,28 @@ bool MetalRenderer::EnsureDeferredPipelines()
 				MTLRenderPipelineDescriptor* rdesc = [[MTLRenderPipelineDescriptor alloc] init];
 				rdesc.vertexFunction   = [vLib newFunctionWithName:@"main0"];
 				rdesc.fragmentFunction = [fLib newFunctionWithName:@"main0"];
-				rdesc.colorAttachments[0].pixelFormat = kSceneColorFormat;
-				rdesc.depthAttachmentPixelFormat      = kDepthFormat; // pass carries the blitted depth
+				if (m_deferredTileMode)
+				{
+					// Shared single pass: reads attachments 0..3 (fetch), writes 4.
+					rdesc.colorAttachments[0].pixelFormat = kGBuf0Format;
+					rdesc.colorAttachments[1].pixelFormat = kGBufAttrFormat;
+					rdesc.colorAttachments[2].pixelFormat = kGBufAttrFormat;
+					rdesc.colorAttachments[3].pixelFormat = MTLPixelFormatR32Float;
+					for (int a = 0; a < 4; ++a)
+						rdesc.colorAttachments[a].writeMask = MTLColorWriteMaskNone;
+					rdesc.colorAttachments[4].pixelFormat = kSceneColorFormat;
+				}
+				else
+					rdesc.colorAttachments[0].pixelFormat = kSceneColorFormat;
+				rdesc.depthAttachmentPixelFormat      = kDepthFormat;
 				id<MTLRenderPipelineState> rpso = [device newRenderPipelineStateWithDescriptor:rdesc error:&verr];
-				if (rpso) m_deferredResolvePipeline = (void*)CFBridgingRetain(rpso);
+				if (rpso)
+				{
+					if (m_deferredTileMode) m_deferredResolveTilePipeline = (void*)CFBridgingRetain(rpso);
+					else                    m_deferredResolvePipeline     = (void*)CFBridgingRetain(rpso);
+				}
 			}
-			if (!m_deferredResolvePipeline)
+			if (!(m_deferredTileMode ? m_deferredResolveTilePipeline : m_deferredResolvePipeline))
 				Logger::Log(Logger::LogLevel::Error,
 					(std::string("MetalRenderer: deferred resolve pipeline build failed: ")
 					 + (verr ? verr.localizedDescription.UTF8String : "?")).c_str());
@@ -7211,10 +7269,16 @@ bool MetalRenderer::EnsureDeferredPipelines()
 				(std::string("MetalRenderer: G-buffer pipeline build failed: ")
 				 + (err ? err.localizedDescription.UTF8String : "?")).c_str());
 
-		const bool ok = m_gbufferPipeline && m_deferredResolvePipeline;
+		const bool ok = m_gbufferPipeline &&
+			(m_deferredTileMode ? m_deferredResolveTilePipeline != nullptr
+			                    : m_deferredResolvePipeline != nullptr);
 		if (!ok)
 			Logger::Log(Logger::LogLevel::Warning,
 				"MetalRenderer: deferred render path unavailable — staying on forward");
+		else
+			Logger::Log(Logger::LogLevel::Info, m_deferredTileMode
+				? "MetalRenderer: deferred path ready (single-pass tile-memory G-buffer)"
+				: "MetalRenderer: deferred path ready (two-pass stored G-buffer)");
 		return ok;
 	}
 #endif
@@ -7676,11 +7740,17 @@ void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string&
 			MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
 			desc.vertexFunction   = [vLib newFunctionWithName:@"main0"];
 			desc.fragmentFunction = [fLib newFunctionWithName:@"main0"];
-			if (gbuffer) // deferred variant: the three G-buffer targets, never blended
+			if (gbuffer) // deferred variant: the G-buffer targets, never blended
 			{
 				desc.colorAttachments[0].pixelFormat = kGBuf0Format;
 				desc.colorAttachments[1].pixelFormat = kGBufAttrFormat;
 				desc.colorAttachments[2].pixelFormat = kGBufAttrFormat;
+				desc.colorAttachments[3].pixelFormat = MTLPixelFormatR32Float; // NDC depth (P6)
+				if (m_deferredTileMode)
+				{
+					desc.colorAttachments[4].pixelFormat = kSceneColorFormat;
+					desc.colorAttachments[4].writeMask   = MTLColorWriteMaskNone;
+				}
 			}
 			else
 				desc.colorAttachments[0].pixelFormat = kSceneColorFormat; // same HDR target as m_scenePipeline
@@ -8443,100 +8513,9 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	// intensity, so heLit() materials rendered permanently sun-lit at night.
 	// Zero when nothing shines → heLit() correctly degrades to its ambient term.
 	HE::MaterialShaderLibrary::Lighting matLight; // reused by WPO vertex-stage binds below
-	{
-		glm::vec3 matSunDir, matSunColor;
-		m_renderWorld.dominantDirectionalLight(matSunDir, matSunColor);
-		const glm::vec3 am = m_renderWorld.ambient;
-		matLight.sunDir[0]   = matSunDir.x; matLight.sunDir[1] = matSunDir.y; matLight.sunDir[2] = matSunDir.z;
-		matLight.sunDir[3]   = skyClock; // engine seconds — the node graph's Time input
-		matLight.camPos[0]   = m_renderWorld.camera.position.x;
-		matLight.camPos[1]   = m_renderWorld.camera.position.y;
-		matLight.camPos[2]   = m_renderWorld.camera.position.z;
-		matLight.sunColor[0] = matSunColor.r; matLight.sunColor[1] = matSunColor.g; matLight.sunColor[2] = matSunColor.b;
-		matLight.ambient[0]  = am.r;          matLight.ambient[1]  = am.g;          matLight.ambient[2]  = am.b;
-		matLight.giParams[0] = static_cast<float>(width);
-		matLight.giParams[1] = static_cast<float>(height);
-		matLight.giParams[2] = giActive ? 1.0f : 0.0f;
-		// Full light window for heLitP() — same first-8 order as the built-in
-		// PBR shaders. Shared fill (HE::FillMaterialLightWindow); it also writes
-		// the per-light atlas layer into lightParams[i].y when the local shadow
-		// texture is bound this frame.
-		HE::FillMaterialLightWindow(m_renderWorld, matLight,
-		                            /*localShadowsActive=*/m_localShadowTex != nullptr);
-		// Local (point/spot) shadow atlas for heLitP — the same matrices the
-		// built-in shaders sample with, Metal depth remap AND top-left UV origin
-		// pre-baked (uvFlipY * kMetalClipFix, exactly like csmVP below) so the
-		// shared preamble's heLocalShadowFactor stays convention-free. The layer
-		// gate rides in lightParams[li].y (layer+1, 0 = none), written by the
-		// HE::FillMaterialLightWindow call above via its localShadowsActive flag.
-		if (m_localShadowTex)
-		{
-			const ShadowData& lsh = m_renderWorld.shadow;
-			const int nlLoc = std::clamp(lsh.localLayerCount, 0, ShadowData::kMaxLocalShadowLayers);
-			glm::mat4 lsFlipY(1.0f);
-			lsFlipY[1][1] = -1.0f;
-			for (int c = 0; c < nlLoc; ++c)
-			{
-				const glm::mat4 m = lsFlipY * HE::kMetalClipFix * lsh.localViewProj[c];
-				std::memcpy(matLight.localShadowVP[c], &m[0][0], 16 * sizeof(float));
-			}
-		}
-		// CSM fallback for graph materials (v2.2): only meaningful when the GI
-		// masks are absent this frame — heLitP's directional lights then sample
-		// the SAME cascade array as the built-in shaders (texture 11). Metal's
-		// depth remap (kMetalClipFix) AND the shadow map's top-left UV origin
-		// are pre-baked into the matrices, so the shared preamble's
-		// heCsmShadow() stays convention-free (uv = p.xy*0.5+0.5, z in [0,1]).
-		if (!giActive && shadows && m_shadowDepthTex)
-		{
-			const ShadowData& sh = m_renderWorld.shadow;
-			const int nc = std::min(std::clamp(sh.cascadeCount, 0, kCsmCascades), 3);
-			glm::mat4 uvFlipY(1.0f);
-			uvFlipY[1][1] = -1.0f;
-			for (int c = 0; c < nc; ++c)
-			{
-				const glm::mat4 m = uvFlipY * HE::kMetalClipFix * sh.cascadeViewProj[c];
-				std::memcpy(matLight.csmVP[c], &m[0][0], 16 * sizeof(float));
-			}
-			matLight.csmSplits[0] = nc > 0 ? sh.cascadeSplit[0] : 1e9f;
-			matLight.csmSplits[1] = nc > 1 ? sh.cascadeSplit[1] : 1e9f;
-			matLight.csmSplits[2] = nc > 2 ? sh.cascadeSplit[2] : 1e9f;
-			matLight.csmSplits[3] = static_cast<float>(nc);
-			matLight.camFwd[0] = scene.cameraFwd.x;
-			matLight.camFwd[1] = scene.cameraFwd.y;
-			matLight.camFwd[2] = scene.cameraFwd.z;
-		}
-		// Aerial perspective + the "is it bound" gates for the shared ambient
-		// inputs. The sky cubemap and the AO buffer are pinned on the encoder
-		// below (MSL 14/15); heLitP falls back to the flat ambient and skips fog
-		// when they are absent (preview/UI passes).
-		matLight.fog[0] = GetEnvironment().fogDensity;
-		matLight.fog[1] = GetEnvironment().fogHeightFalloff;
-		matLight.fog[2] = m_skyEnvCube ? 1.0f : 0.0f;
-		matLight.fog[3] = ssaoActive   ? 1.0f : 0.0f;
-		// Weather surface response — the same EnvironmentComponent values the
-		// built-in shaders read (SceneUniforms::weather).
-		matLight.weather[0] = GetEnvironment().wetness;
-		matLight.weather[1] = GetEnvironment().snowAmount;
-		// DDGI probe grid — the SAME values BuildGIUniforms hands the built-in
-		// shaders, so heLitP's indirect diffuse matches theirs instead of
-		// falling back to flat ambient while GI is on.
-		{
-			const GIUniforms gu = BuildGIUniforms(giActive, m_giGridOrigin, kGIProbeSpacing,
-			                                      m_giGridCounts, m_giProbesPerRow,
-			                                      m_giIndirectIntensity);
-			for (int k = 0; k < 4; ++k)
-			{
-				matLight.giGridOrigin[k] = gu.gridOrigin[k];
-				matLight.giGridCounts[k] = gu.gridCounts[k];
-			}
-			matLight.giProbe[0] = gu.params.x;
-			matLight.giProbe[1] = (giActive && m_giIrradianceAtlas && m_giVisibilityAtlas)
-				? 1.0f : 0.0f;
-		}
-		[encoder setFragmentBytes:&matLight length:sizeof(matLight)
-		                  atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
-	}
+	FillMaterialLighting(matLight, width, height, giActive, ssaoActive, shadows, skyClock);
+	[encoder setFragmentBytes:&matLight length:sizeof(matLight)
+	                  atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
 #endif
 
 	// Transparent (opacity < 1) draws collected during the opaque loop and replayed
@@ -8553,6 +8532,8 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	// unchanged — they are forward in both paths.
 	if (deferred)
 	{
+		if (!deferred->resolveDone)
+		{
 		[encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_deferredResolvePipeline];
 		[encoder setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_noDepthState];
 		// G-buffer inputs on the material-texture slots the resolve was pinned to.
@@ -8584,6 +8565,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 		[encoder setFragmentTexture:(__bridge id<MTLTexture>)m_skyEnvCube atIndex:2];
 		[encoder setFragmentTexture:(__bridge id<MTLTexture>)(ssaoActive ? m_ssaoResult : m_dummyTexture) atIndex:3];
 		[encoder setFragmentBytes:&giUniforms length:sizeof(giUniforms) atIndex:3];
+		} // !resolveDone — tile mode resolved inside the G-buffer pass already
 
 		// Forward-routed opaque draws (custom materials without a G-buffer
 		// variant): normal depth test + write against the blitted G-buffer depth.
@@ -8985,6 +8967,169 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	DrawGpuParticles(renderEncoder, viewProj, m_renderWorld.camera.position);
 	DrawParticleGraphBatches(renderEncoder, viewProj, m_renderWorld.camera.view);
 	SamplePoint(renderEncoder, "Particles");
+}
+
+// ─── heLitP lighting-ABI fill (custom materials + deferred resolve) ──────────
+// Extracted verbatim from EncodeScene so the tile-memory resolve (which runs
+// inside the G-buffer pass, before EncodeScene) fills the SAME block — one
+// implementation, no drift. Filled from the DOMINANT DIRECTIONAL LIGHT (colour ×
+// intensity — the same pick CSM/GI shadow along), NOT the raw environment
+// sunColor: the raw values are never modulated by sunUp/night or cloud cover.
+void MetalRenderer::FillMaterialLighting(HE::MaterialShaderLibrary::Lighting& matLight,
+                                         int width, int height, bool giActive,
+                                         bool ssaoActive, bool shadows, float skyClock)
+{
+	glm::vec3 matSunDir, matSunColor;
+	m_renderWorld.dominantDirectionalLight(matSunDir, matSunColor);
+	const glm::vec3 am = m_renderWorld.ambient;
+	matLight.sunDir[0]   = matSunDir.x; matLight.sunDir[1] = matSunDir.y; matLight.sunDir[2] = matSunDir.z;
+	matLight.sunDir[3]   = skyClock; // engine seconds — the node graph's Time input
+	matLight.camPos[0]   = m_renderWorld.camera.position.x;
+	matLight.camPos[1]   = m_renderWorld.camera.position.y;
+	matLight.camPos[2]   = m_renderWorld.camera.position.z;
+	matLight.sunColor[0] = matSunColor.r; matLight.sunColor[1] = matSunColor.g; matLight.sunColor[2] = matSunColor.b;
+	matLight.ambient[0]  = am.r;          matLight.ambient[1]  = am.g;          matLight.ambient[2]  = am.b;
+	matLight.giParams[0] = static_cast<float>(width);
+	matLight.giParams[1] = static_cast<float>(height);
+	matLight.giParams[2] = giActive ? 1.0f : 0.0f;
+	// Full light window for heLitP() — same first-8 order as the built-in
+	// PBR shaders. Shared fill (HE::FillMaterialLightWindow); it also writes
+	// the per-light atlas layer into lightParams[i].y when the local shadow
+	// texture is bound this frame.
+	HE::FillMaterialLightWindow(m_renderWorld, matLight,
+	                            /*localShadowsActive=*/m_localShadowTex != nullptr);
+	// Local (point/spot) shadow atlas for heLitP — the same matrices the
+	// built-in shaders sample with, Metal depth remap AND top-left UV origin
+	// pre-baked (uvFlipY * kMetalClipFix, exactly like csmVP below) so the
+	// shared preamble's heLocalShadowFactor stays convention-free. The layer
+	// gate rides in lightParams[li].y (layer+1, 0 = none), written by the
+	// HE::FillMaterialLightWindow call above via its localShadowsActive flag.
+	if (m_localShadowTex)
+	{
+		const ShadowData& lsh = m_renderWorld.shadow;
+		const int nlLoc = std::clamp(lsh.localLayerCount, 0, ShadowData::kMaxLocalShadowLayers);
+		glm::mat4 lsFlipY(1.0f);
+		lsFlipY[1][1] = -1.0f;
+		for (int c = 0; c < nlLoc; ++c)
+		{
+			const glm::mat4 m = lsFlipY * HE::kMetalClipFix * lsh.localViewProj[c];
+			std::memcpy(matLight.localShadowVP[c], &m[0][0], 16 * sizeof(float));
+		}
+	}
+	// CSM fallback for graph materials (v2.2): only meaningful when the GI
+	// masks are absent this frame — heLitP's directional lights then sample
+	// the SAME cascade array as the built-in shaders (texture 11). Metal's
+	// depth remap (kMetalClipFix) AND the shadow map's top-left UV origin
+	// are pre-baked into the matrices, so the shared preamble's
+	// heCsmShadow() stays convention-free (uv = p.xy*0.5+0.5, z in [0,1]).
+	if (!giActive && shadows && m_shadowDepthTex)
+	{
+		const ShadowData& sh = m_renderWorld.shadow;
+		const int nc = std::min(std::clamp(sh.cascadeCount, 0, kCsmCascades), 3);
+		glm::mat4 uvFlipY(1.0f);
+		uvFlipY[1][1] = -1.0f;
+		for (int c = 0; c < nc; ++c)
+		{
+			const glm::mat4 m = uvFlipY * HE::kMetalClipFix * sh.cascadeViewProj[c];
+			std::memcpy(matLight.csmVP[c], &m[0][0], 16 * sizeof(float));
+		}
+		matLight.csmSplits[0] = nc > 0 ? sh.cascadeSplit[0] : 1e9f;
+		matLight.csmSplits[1] = nc > 1 ? sh.cascadeSplit[1] : 1e9f;
+		matLight.csmSplits[2] = nc > 2 ? sh.cascadeSplit[2] : 1e9f;
+		matLight.csmSplits[3] = static_cast<float>(nc);
+		const glm::vec3 camFwd =
+			-glm::normalize(glm::vec3(glm::inverse(m_renderWorld.camera.view)[2]));
+		matLight.camFwd[0] = camFwd.x;
+		matLight.camFwd[1] = camFwd.y;
+		matLight.camFwd[2] = camFwd.z;
+	}
+	// Aerial perspective + the "is it bound" gates for the shared ambient
+	// inputs (MSL 14/15); heLitP falls back to the flat ambient and skips fog
+	// when they are absent (preview/UI passes).
+	matLight.fog[0] = GetEnvironment().fogDensity;
+	matLight.fog[1] = GetEnvironment().fogHeightFalloff;
+	matLight.fog[2] = m_skyEnvCube ? 1.0f : 0.0f;
+	matLight.fog[3] = ssaoActive   ? 1.0f : 0.0f;
+	// Weather surface response — the same EnvironmentComponent values the
+	// built-in shaders read (SceneUniforms::weather).
+	matLight.weather[0] = GetEnvironment().wetness;
+	matLight.weather[1] = GetEnvironment().snowAmount;
+	// DDGI probe grid — the SAME values BuildGIUniforms hands the built-in
+	// shaders, so heLitP's indirect diffuse matches theirs instead of
+	// falling back to flat ambient while GI is on.
+	{
+		const GIUniforms gu = BuildGIUniforms(giActive, m_giGridOrigin, kGIProbeSpacing,
+		                                      m_giGridCounts, m_giProbesPerRow,
+		                                      m_giIndirectIntensity);
+		for (int k = 0; k < 4; ++k)
+		{
+			matLight.giGridOrigin[k] = gu.gridOrigin[k];
+			matLight.giGridCounts[k] = gu.gridCounts[k];
+		}
+		matLight.giProbe[0] = gu.params.x;
+		matLight.giProbe[1] = (giActive && m_giIrradianceAtlas && m_giVisibilityAtlas)
+			? 1.0f : 0.0f;
+	}
+}
+
+// ─── Tile-memory deferred resolve (plan P6) ──────────────────────────────────
+// Encoded into the OPEN G-buffer pass encoder on Apple Silicon: the fragment
+// framebuffer-fetches the four memoryless G-buffer attachments and writes the
+// lit colour to attachment 4 (the HDR target). All lighting inputs (matLight,
+// CSM/local atlases, sky env, AO, GI) are bound here — the G-buffer pass itself
+// binds none of them.
+void MetalRenderer::EncodeDeferredResolveTile(void* renderEncoder, int width, int height)
+{
+	if (!m_deferredResolveTilePipeline) return;
+	id<MTLRenderCommandEncoder> encoder = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
+
+	// Same gates EncodeScene computes for its binds — m_renderWorld is current
+	// (EncodeGBuffer extracted right before this call, same camera).
+	const bool ssaoActive = m_ssaoEnabled && m_ssaoResult;
+	const bool giActive   = m_giEnabled && m_giSupported && m_giShadowResult
+	                     && m_giIrradianceAtlas && m_giVisibilityAtlas;
+	const bool shadows    = m_renderWorld.shadow.enabled && m_shadowDepthTex;
+	float skyClock = static_cast<float>(SDL_GetTicks()) / 1000.0f;
+	if (const char* ov = std::getenv("HE_SKY_TIME"); ov && *ov) skyClock = static_cast<float>(std::atof(ov));
+	UpdateSkyEnvCube(m_renderWorld.sunDirection); // resolve samples the IBL cube (14)
+
+	[encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_deferredResolveTilePipeline];
+	[encoder setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_noDepthState];
+
+#if defined(HE_HAVE_SHADERC)
+	HE::MaterialShaderLibrary::Lighting matLight;
+	FillMaterialLighting(matLight, width, height, giActive, ssaoActive, shadows, skyClock);
+	[encoder setFragmentBytes:&matLight length:sizeof(matLight)
+	                  atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
+#endif
+	HE::MaterialShaderLibrary::ResolveUniforms ru;
+	const glm::mat4 viewProj =
+		m_renderWorld.camera.projection * m_renderWorld.camera.view;
+	const glm::mat4 ivp = glm::inverse(viewProj);
+	std::memcpy(ru.invViewProj, &ivp[0][0], 16 * sizeof(float));
+	ru.depthParams[0] = -1.0f; // same conventions as the two-pass resolve
+	ru.depthParams[1] = 1.0f;
+	ru.depthParams[2] = 0.0f;
+	ru.depthParams[3] = static_cast<float>(m_gbufferDebugView);
+	[encoder setFragmentBytes:&ru length:sizeof(ru) atIndex:3];
+
+	// The preamble's lighting textures on their scene-pass slots.
+	auto bindTex = [&](void* tex, int slot)
+	{
+		[encoder setFragmentTexture:(__bridge id<MTLTexture>)tex atIndex:slot];
+		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:slot];
+	};
+	bindTex(giActive ? m_giIrradianceAtlas : m_dummyTexture, 6);
+	bindTex(giActive ? m_giVisibilityAtlas : m_dummyTexture, 7);
+	bindTex(giActive ? m_giShadowResult    : m_dummyTexture, 9);
+	bindTex(giActive ? m_giLocalMaskTex    : m_dummyTexture, 10);
+	bindTex(m_shadowDepthTex, 11);
+	bindTex(m_localShadowTex ? m_localShadowTex : m_shadowDepthTex, 12);
+	bindTex(m_skyEnvCube, 14);
+	bindTex(ssaoActive ? m_ssaoResult : m_dummyTexture, 15);
+
+	[encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+	++m_counters.draws;
 }
 
 // ─── Deferred G-buffer pass ──────────────────────────────────────────────────
@@ -9520,69 +9665,125 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			const bool deferredActive =
 				m_renderPath == HE::RenderPath::Deferred && EnsureDeferredPipelines();
 			m_deferredFrameActive = deferredActive;
-			if (deferredActive)
+			const bool deferredTile = deferredActive && m_deferredTileMode;
 			{
-				EnsureGBufferTargets(sceneW, sceneH);
-				MTLRenderPassDescriptor* gbPass = [MTLRenderPassDescriptor renderPassDescriptor];
-				id<MTLTexture> gbTex[3] = { (__bridge id<MTLTexture>)m_gbColor0,
-				                            (__bridge id<MTLTexture>)m_gbColor1,
-				                            (__bridge id<MTLTexture>)m_gbColor2 };
-				for (int a = 0; a < 3; ++a)
+				// One-shot diagnostic: which scene-pass mode actually runs. Logged
+				// on every CHANGE (not per frame) so a mid-session flip is visible.
+				static int s_lastMode = -1;
+				const int mode = deferredTile ? 2 : (deferredActive ? 1 : 0);
+				if (mode != s_lastMode)
 				{
-					gbPass.colorAttachments[a].texture     = gbTex[a];
-					gbPass.colorAttachments[a].loadAction  = MTLLoadActionClear;
-					gbPass.colorAttachments[a].storeAction = MTLStoreActionStore;
-					gbPass.colorAttachments[a].clearColor  = MTLClearColorMake(0.0, 0.0, 0.0, 0.0);
+					s_lastMode = mode;
+					Logger::Log(Logger::LogLevel::Info, mode == 2
+						? "MetalRenderer: scene pass mode → deferred (tile single-pass)"
+						: mode == 1 ? "MetalRenderer: scene pass mode → deferred (two-pass)"
+						            : "MetalRenderer: scene pass mode → forward");
 				}
-				// Clear GB1's normal channels to the encoded +Z so untouched pixels
-				// decode to a valid direction (they are discarded by depth anyway).
-				gbPass.colorAttachments[1].clearColor = MTLClearColorMake(0.5, 0.5, 1.0, 0.5);
-				gbPass.depthAttachment.texture     = (__bridge id<MTLTexture>)m_gbDepth;
-				gbPass.depthAttachment.loadAction  = MTLLoadActionClear;
-				gbPass.depthAttachment.storeAction = MTLStoreActionStore; // sampled by the resolve
-				gbPass.depthAttachment.clearDepth  = 1.0;
-				id<MTLRenderCommandEncoder> gbEncoder =
-					[cmdBuf renderCommandEncoderWithDescriptor:gbPass];
-				EncodeGBuffer((__bridge void*)gbEncoder, sceneW, sceneH, deferredFrame);
-				[gbEncoder endEncoding];
-
-				// Copy the G-buffer depth into the HDR pass's depth attachment so
-				// the forward tail (sky/skinned/transparency) tests against it
-				// while the resolve SAMPLES m_gbDepth (a texture cannot be both
-				// attachment and sampled input of one pass).
-				id<MTLBlitCommandEncoder> blit = [cmdBuf blitCommandEncoder];
-				[blit copyFromTexture:(__bridge id<MTLTexture>)m_gbDepth
-				          sourceSlice:0 sourceLevel:0
-				         sourceOrigin:MTLOriginMake(0, 0, 0)
-				           sourceSize:MTLSizeMake(m_gbW, m_gbH, 1)
-				            toTexture:(__bridge id<MTLTexture>)m_hdrDepth
-				     destinationSlice:0 destinationLevel:0
-				    destinationOrigin:MTLOriginMake(0, 0, 0)];
-				[blit endEncoding];
 			}
-			else if (m_gbColor0 && m_renderPath != HE::RenderPath::Deferred)
-				DestroyGBufferTargets(); // freed when the user switches back to forward
 
 			// SSAO occlusion (its own pre-pass + encoders) before the shading pass,
 			// so the scene shader can darken its ambient. Skipped (zero cost) off —
 			// including when GI is active, since GI's probe-sampled indirect diffuse
 			// replaces AO entirely (EncodeScene's giActive gate skips aoTex too).
-			// Rendered at HALF resolution: SSAO was by far the biggest GPU pass
-			// (~1.8 ms, spiking with visible terrain) because its geometry pre-pass +
-			// 32-sample occlusion ran full-res. AO is low-frequency and gets blurred,
-			// so half-res (¼ the pixels) is ~4× cheaper with no visible quality loss;
-			// the scene shader samples it with normalized coords (bilinear upsample).
-			// In deferred mode the pre-pass reads the G-buffer depth instead (P5).
+			// Rendered at HALF resolution (~4× cheaper, no visible quality loss —
+			// AO is low-frequency and blurred; sampled with normalized coords).
+			// Ordering: the two-pass deferred fallback encodes the G-buffer FIRST
+			// so the pre-pass can read its depth (P5); the tile mode must run
+			// SSAO BEFORE its single pass (the resolve inside that pass consumes
+			// the result) and keeps the classic geometry pre-pass — its
+			// memoryless G-buffer has no stored depth to reconstruct from.
 			const bool giReplacesAO = m_giEnabled && m_giSupported;
-			if (m_ssaoEnabled && !giReplacesAO) EncodeSSAO((__bridge void*)cmdBuf,
-			                              std::max(1, sceneW / 2), std::max(1, sceneH / 2));
-			else               m_ssaoResult = nullptr;
+			auto runSSAO = [&]{
+				if (m_ssaoEnabled && !giReplacesAO)
+					EncodeSSAO((__bridge void*)cmdBuf,
+					           std::max(1, sceneW / 2), std::max(1, sceneH / 2));
+				else m_ssaoResult = nullptr;
+			};
+			if (deferredTile) runSSAO();
+
+			if (deferredActive)
+			{
+				EnsureGBufferTargets(sceneW, sceneH);
+				MTLRenderPassDescriptor* gbPass = [MTLRenderPassDescriptor renderPassDescriptor];
+				id<MTLTexture> gbTex[4] = { (__bridge id<MTLTexture>)m_gbColor0,
+				                            (__bridge id<MTLTexture>)m_gbColor1,
+				                            (__bridge id<MTLTexture>)m_gbColor2,
+				                            (__bridge id<MTLTexture>)m_gbDepthLin };
+				for (int a = 0; a < 4; ++a)
+				{
+					gbPass.colorAttachments[a].texture     = gbTex[a];
+					gbPass.colorAttachments[a].loadAction  = MTLLoadActionClear;
+					// Memoryless attachments (tile mode) must not store; the
+					// two-pass fallback stores GB0..2 for its sampling resolve.
+					gbPass.colorAttachments[a].storeAction =
+						deferredTile ? MTLStoreActionDontCare : MTLStoreActionStore;
+					gbPass.colorAttachments[a].clearColor  = MTLClearColorMake(0.0, 0.0, 0.0, 0.0);
+				}
+				// Clear GB1's normal channels to the encoded +Z so untouched pixels
+				// decode to a valid direction, and the NDC-depth attachment to 1
+				// (background — the resolve discards there).
+				gbPass.colorAttachments[1].clearColor = MTLClearColorMake(0.5, 0.5, 1.0, 0.5);
+				gbPass.colorAttachments[3].clearColor = MTLClearColorMake(1.0, 0.0, 0.0, 0.0);
+				if (deferredTile)
+				{
+					// Single pass (P6): the HDR colour rides as attachment 4 and
+					// the pass writes m_hdrDepth directly — no blit, and the
+					// G-buffer never leaves tile storage.
+					gbPass.colorAttachments[4].texture     = (__bridge id<MTLTexture>)m_hdrColor;
+					gbPass.colorAttachments[4].loadAction  = MTLLoadActionClear;
+					gbPass.colorAttachments[4].storeAction = MTLStoreActionStore;
+					gbPass.colorAttachments[4].clearColor  = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+					gbPass.depthAttachment.texture     = (__bridge id<MTLTexture>)m_hdrDepth;
+					gbPass.depthAttachment.loadAction  = MTLLoadActionClear;
+					gbPass.depthAttachment.storeAction = MTLStoreActionStore; // pass 2 loads it
+					gbPass.depthAttachment.clearDepth  = 1.0;
+				}
+				else
+				{
+					gbPass.depthAttachment.texture     = (__bridge id<MTLTexture>)m_gbDepth;
+					gbPass.depthAttachment.loadAction  = MTLLoadActionClear;
+					gbPass.depthAttachment.storeAction = MTLStoreActionStore; // sampled by the resolve
+					gbPass.depthAttachment.clearDepth  = 1.0;
+				}
+				id<MTLRenderCommandEncoder> gbEncoder =
+					[cmdBuf renderCommandEncoderWithDescriptor:gbPass];
+				EncodeGBuffer((__bridge void*)gbEncoder, sceneW, sceneH, deferredFrame);
+				if (deferredTile)
+				{
+					// Lighting resolve INSIDE the pass, via framebuffer fetch.
+					EncodeDeferredResolveTile((__bridge void*)gbEncoder, sceneW, sceneH);
+					deferredFrame.resolveDone = true;
+				}
+				[gbEncoder endEncoding];
+
+				if (!deferredTile)
+				{
+					// Two-pass fallback: copy the G-buffer depth into the HDR
+					// pass's depth attachment so the forward tail tests against
+					// it while the resolve SAMPLES m_gbDepth (a texture cannot
+					// be both attachment and sampled input of one pass).
+					id<MTLBlitCommandEncoder> blit = [cmdBuf blitCommandEncoder];
+					[blit copyFromTexture:(__bridge id<MTLTexture>)m_gbDepth
+					          sourceSlice:0 sourceLevel:0
+					         sourceOrigin:MTLOriginMake(0, 0, 0)
+					           sourceSize:MTLSizeMake(m_gbW, m_gbH, 1)
+					            toTexture:(__bridge id<MTLTexture>)m_hdrDepth
+					     destinationSlice:0 destinationLevel:0
+					    destinationOrigin:MTLOriginMake(0, 0, 0)];
+					[blit endEncoding];
+				}
+			}
+			else if (m_gbColor0 && m_renderPath != HE::RenderPath::Deferred)
+				DestroyGBufferTargets(); // freed when the user switches back to forward
+
+			if (!deferredTile) runSSAO(); // forward, or two-pass deferred (P5 depth read)
 			flushPass("Scene");   // detailed: commit the SSAO command buffer (empty if SSAO off)
 
-			// Scene → RGBA16Float HDR target.
+			// Scene → RGBA16Float HDR target. Tile mode already CONTAINS the
+			// resolved lighting (pass 1 wrote it) → load instead of clear.
 			MTLRenderPassDescriptor* hdrPass = [MTLRenderPassDescriptor renderPassDescriptor];
 			hdrPass.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_hdrColor;
-			hdrPass.colorAttachments[0].loadAction  = MTLLoadActionClear;
+			hdrPass.colorAttachments[0].loadAction  = deferredTile ? MTLLoadActionLoad : MTLLoadActionClear;
 			hdrPass.colorAttachments[0].storeAction = MTLStoreActionStore;
 			hdrPass.colorAttachments[0].clearColor  = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
 			hdrPass.depthAttachment.texture     = (__bridge id<MTLTexture>)m_hdrDepth;
