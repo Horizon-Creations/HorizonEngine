@@ -3800,6 +3800,10 @@ void MetalRenderer::Shutdown()
 	if (m_gbufferPipeline)             { CFBridgingRelease(m_gbufferPipeline);             m_gbufferPipeline = nullptr; }
 	if (m_deferredResolvePipeline)     { CFBridgingRelease(m_deferredResolvePipeline);     m_deferredResolvePipeline = nullptr; }
 	if (m_deferredResolveTilePipeline) { CFBridgingRelease(m_deferredResolveTilePipeline); m_deferredResolveTilePipeline = nullptr; }
+	if (m_ssrTracePipeline)     { CFBridgingRelease(m_ssrTracePipeline);     m_ssrTracePipeline = nullptr; }
+	if (m_ssrCompositePipeline) { CFBridgingRelease(m_ssrCompositePipeline); m_ssrCompositePipeline = nullptr; }
+	m_ssrPipelinesTried = false;
+	DestroySSRTarget();
 	m_deferredPipelinesTried = false; // re-Initialize() rebuilds instead of staying forward
 	DestroyBloomTargets();
 	DestroyCloudTarget();
@@ -7118,21 +7122,23 @@ void MetalRenderer::DestroyHDRTarget()
 
 void MetalRenderer::EnsureGBufferTargets(int width, int height)
 {
-	if (m_gbColor0 && width == m_gbW && height == m_gbH)
+	// Tile mode keeps the G-buffer memoryless — EXCEPT when SSR runs this
+	// frame: its trace/composite passes sample the stored attachments after the
+	// pass, so they must exist in DRAM (inherent to screen-space reflections).
+	const bool stored = !m_deferredTileMode || m_ssrFrameActive;
+	if (m_gbColor0 && width == m_gbW && height == m_gbH && stored == m_gbStored)
 		return;
 	DestroyGBufferTargets();
+	m_gbStored = stored;
 
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
-	// Tile mode (P6): the G-buffer never leaves tile storage — memoryless
-	// attachments, attachment-only usage. Two-pass fallback: private + sampled
-	// by the resolve.
 	auto makeColor = [&](MTLPixelFormat fmt) -> void*
 	{
 		MTLTextureDescriptor* d = [MTLTextureDescriptor
 			texture2DDescriptorWithPixelFormat:fmt width:width height:height mipmapped:NO];
-		d.usage       = m_deferredTileMode ? MTLTextureUsageRenderTarget
-		                                   : (MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead);
-		d.storageMode = m_deferredTileMode ? MTLStorageModeMemoryless : MTLStorageModePrivate;
+		d.usage       = stored ? (MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead)
+		                       : MTLTextureUsageRenderTarget;
+		d.storageMode = stored ? MTLStorageModePrivate : MTLStorageModeMemoryless;
 		return (void*)CFBridgingRetain([device newTextureWithDescriptor:d]);
 	};
 	m_gbColor0   = makeColor(kGBuf0Format);
@@ -9298,6 +9304,14 @@ void MetalRenderer::EncodeDeferredResolveTile(void* renderEncoder, int width, in
 #if defined(HE_HAVE_SHADERC)
 	HE::MaterialShaderLibrary::Lighting matLight;
 	FillMaterialLighting(matLight, width, height, giActive, ssaoActive, shadows, skyClock);
+	// SSR (ssr-plan §4.5): the resolve SKIPS its specular-IBL term — the
+	// dedicated reflection pass after this one supplies it (mixed with SSR).
+	if (m_ssrFrameActive)
+	{
+		matLight.ssr[1] = m_ssrIntensity;
+		matLight.ssr[2] = m_ssrMaxRoughness;
+		matLight.ssr[3] = 1.0f;
+	}
 	// P7: point/spot lights move into the cluster lists; matLight's window is
 	// rewritten to directional-only so no light is counted twice.
 	if (m_deferredClustered)
@@ -9324,6 +9338,195 @@ void MetalRenderer::EncodeDeferredResolveTile(void* renderEncoder, int width, in
 
 	[encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
 	++m_counters.draws;
+}
+
+// ─── Screen-space reflections (docs/ssr-plan.md §4.5, deferred tile mode) ────
+bool MetalRenderer::EnsureSSRPipelines()
+{
+	if (m_ssrTracePipeline && m_ssrCompositePipeline) return true;
+	if (m_ssrPipelinesTried) return false;
+	m_ssrPipelinesTried = true;
+#if !defined(HE_HAVE_SHADERC)
+	return false;
+#else
+	@autoreleasepool
+	{
+		id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+		if (!device) return false;
+		using Backend = HE::MaterialShaderLibrary::Backend;
+		const auto& v  = m_matShaderLib.fullscreenVertex(Backend::Metal);
+		const auto& ft = m_matShaderLib.ssrTrace(Backend::Metal);
+		const auto& fc = m_matShaderLib.ssrComposite(Backend::Metal);
+		if (!(v.ok && ft.ok && fc.ok))
+		{
+			Logger::Log(Logger::LogLevel::Error,
+				(std::string("MetalRenderer: SSR shader compile failed\n")
+				 + v.log + ft.log + fc.log).c_str());
+			return false;
+		}
+		NSError* err = nil;
+		id<MTLLibrary> vLib = [device newLibraryWithSource:
+			[NSString stringWithUTF8String:v.source.c_str()] options:nil error:&err];
+		id<MTLLibrary> tLib = err ? nil : [device newLibraryWithSource:
+			[NSString stringWithUTF8String:ft.source.c_str()] options:nil error:&err];
+		id<MTLLibrary> cLib = err ? nil : [device newLibraryWithSource:
+			[NSString stringWithUTF8String:fc.source.c_str()] options:nil error:&err];
+		if (vLib && tLib && cLib)
+		{
+			MTLRenderPipelineDescriptor* td = [[MTLRenderPipelineDescriptor alloc] init];
+			td.vertexFunction   = [vLib newFunctionWithName:@"main0"];
+			td.fragmentFunction = [tLib newFunctionWithName:@"main0"];
+			td.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
+			id<MTLRenderPipelineState> tp = [device newRenderPipelineStateWithDescriptor:td error:&err];
+			if (tp) m_ssrTracePipeline = (void*)CFBridgingRetain(tp);
+
+			MTLRenderPipelineDescriptor* cd = [[MTLRenderPipelineDescriptor alloc] init];
+			cd.vertexFunction   = [vLib newFunctionWithName:@"main0"];
+			cd.fragmentFunction = [cLib newFunctionWithName:@"main0"];
+			cd.colorAttachments[0].pixelFormat = kSceneColorFormat;
+			cd.colorAttachments[0].blendingEnabled           = YES; // additive over the resolve
+			cd.colorAttachments[0].rgbBlendOperation         = MTLBlendOperationAdd;
+			cd.colorAttachments[0].alphaBlendOperation       = MTLBlendOperationAdd;
+			cd.colorAttachments[0].sourceRGBBlendFactor      = MTLBlendFactorOne;
+			cd.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOne;
+			cd.colorAttachments[0].sourceAlphaBlendFactor      = MTLBlendFactorZero;
+			cd.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOne;
+			id<MTLRenderPipelineState> cp = [device newRenderPipelineStateWithDescriptor:cd error:&err];
+			if (cp) m_ssrCompositePipeline = (void*)CFBridgingRetain(cp);
+		}
+		const bool ok = m_ssrTracePipeline && m_ssrCompositePipeline;
+		if (!ok)
+			Logger::Log(Logger::LogLevel::Error,
+				(std::string("MetalRenderer: SSR pipeline build failed: ")
+				 + (err ? err.localizedDescription.UTF8String : "?")).c_str());
+		return ok;
+	}
+#endif
+}
+
+void MetalRenderer::EnsureSSRTarget(int width, int height)
+{
+	if (m_ssrReflTex && width == m_ssrReflW && height == m_ssrReflH) return;
+	DestroySSRTarget();
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	MTLTextureDescriptor* d = [MTLTextureDescriptor
+		texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
+		width:width height:height mipmapped:NO];
+	d.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+	d.storageMode = MTLStorageModePrivate;
+	m_ssrReflTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:d]);
+	m_ssrReflW = width;
+	m_ssrReflH = height;
+}
+
+void MetalRenderer::DestroySSRTarget()
+{
+	if (m_ssrReflTex) { CFBridgingRelease(m_ssrReflTex); m_ssrReflTex = nullptr; }
+	m_ssrReflW = m_ssrReflH = 0;
+}
+
+// Trace (half-res) + additive composite, own passes after the tile G-buffer
+// pass. m_renderWorld.camera is current (EncodeGBuffer extracted this frame).
+void MetalRenderer::EncodeSSRPasses(void* cmdBufPtr, int width, int height)
+{
+	if (!m_ssrTracePipeline || !m_ssrCompositePipeline || !m_gbStored) return;
+	@autoreleasepool
+	{
+		id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
+		const int tw = std::max(1, width / 2), th = std::max(1, height / 2);
+		EnsureSSRTarget(tw, th);
+
+		const glm::mat4 viewProj =
+			m_renderWorld.camera.projection * m_renderWorld.camera.view;
+		const glm::vec3 camFwd =
+			-glm::normalize(glm::vec3(glm::inverse(m_renderWorld.camera.view)[2]));
+
+		// ── 1. Trace ───────────────────────────────────────────────────────
+		{
+			HE::MaterialShaderLibrary::SSRTraceUniforms tu;
+			const glm::mat4 ivp = glm::inverse(viewProj);
+			std::memcpy(tu.viewProj,    &viewProj[0][0], 16 * sizeof(float));
+			std::memcpy(tu.invViewProj, &ivp[0][0],      16 * sizeof(float));
+			tu.camPos[0] = m_renderWorld.camera.position.x;
+			tu.camPos[1] = m_renderWorld.camera.position.y;
+			tu.camPos[2] = m_renderWorld.camera.position.z;
+			tu.camFwd[0] = camFwd.x; tu.camFwd[1] = camFwd.y; tu.camFwd[2] = camFwd.z;
+			tu.cfg[0] = m_ssrMaxDistance;
+			tu.cfg[1] = m_ssrThickness;
+			tu.cfg[2] = m_ssrMaxRoughness;
+			tu.cfg[3] = static_cast<float>(m_ssrQuality <= 0 ? 16 : m_ssrQuality == 1 ? 32 : 64);
+			tu.conv[0] = -1.0f; // Metal uv origin top-left (same as the resolve)
+			tu.conv[1] = 1.0f;
+			tu.conv[2] = 0.0f;
+			tu.conv[3] = 0.1f;  // edge fade over the outer 10 % of the screen
+			tu.vp[0] = static_cast<float>(tw);
+			tu.vp[1] = static_cast<float>(th);
+
+			MTLRenderPassDescriptor* tp = [MTLRenderPassDescriptor renderPassDescriptor];
+			tp.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_ssrReflTex;
+			tp.colorAttachments[0].loadAction  = MTLLoadActionDontCare;
+			tp.colorAttachments[0].storeAction = MTLStoreActionStore;
+			id<MTLRenderCommandEncoder> enc = [cmdBuf renderCommandEncoderWithDescriptor:tp];
+			[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_ssrTracePipeline];
+			[enc setFragmentBytes:&tu length:sizeof(tu) atIndex:0];
+			[enc setFragmentTexture:(__bridge id<MTLTexture>)m_hdrColor atIndex:0];
+			[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
+			[enc setFragmentTexture:(__bridge id<MTLTexture>)m_gbColor1 atIndex:1];
+			[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:1];
+			[enc setFragmentTexture:(__bridge id<MTLTexture>)m_gbDepthLin atIndex:2];
+			[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)(m_ssaoPointSampler ? m_ssaoPointSampler : m_linearSampler) atIndex:2];
+			[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+			[enc endEncoding];
+		}
+
+		// ── 2. Additive composite onto the resolved HDR ────────────────────
+		{
+			const bool ssaoActive = m_ssaoEnabled && m_ssaoResult;
+			const bool giActive   = m_giEnabled && m_giSupported && m_giShadowResult
+			                     && m_giIrradianceAtlas && m_giVisibilityAtlas;
+			const bool shadows    = m_renderWorld.shadow.enabled && m_shadowDepthTex;
+			float skyClock = static_cast<float>(SDL_GetTicks()) / 1000.0f;
+			if (const char* ov = std::getenv("HE_SKY_TIME"); ov && *ov) skyClock = static_cast<float>(std::atof(ov));
+
+			MTLRenderPassDescriptor* cp = [MTLRenderPassDescriptor renderPassDescriptor];
+			cp.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_hdrColor;
+			cp.colorAttachments[0].loadAction  = MTLLoadActionLoad;
+			cp.colorAttachments[0].storeAction = MTLStoreActionStore;
+			id<MTLRenderCommandEncoder> enc = [cmdBuf renderCommandEncoderWithDescriptor:cp];
+			[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_ssrCompositePipeline];
+#if defined(HE_HAVE_SHADERC)
+			HE::MaterialShaderLibrary::Lighting matLight;
+			FillMaterialLighting(matLight, width, height, giActive, ssaoActive, shadows, skyClock);
+			matLight.ssr[1] = m_ssrIntensity;
+			matLight.ssr[2] = m_ssrMaxRoughness;
+			matLight.ssr[3] = 1.0f;
+			[enc setFragmentBytes:&matLight length:sizeof(matLight)
+			              atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
+#endif
+			HE::MaterialShaderLibrary::ResolveUniforms ru;
+			const glm::mat4 ivp = glm::inverse(viewProj);
+			std::memcpy(ru.invViewProj, &ivp[0][0], 16 * sizeof(float));
+			ru.depthParams[0] = -1.0f;
+			ru.depthParams[1] = 1.0f;
+			ru.depthParams[2] = 0.0f;
+			[enc setFragmentBytes:&ru length:sizeof(ru) atIndex:3];
+			auto bindTex = [&](void* tex, int slot, void* sampler)
+			{
+				[enc setFragmentTexture:(__bridge id<MTLTexture>)tex atIndex:slot];
+				[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)sampler atIndex:slot];
+			};
+			bindTex(m_gbColor0,   0, m_linearSampler);
+			bindTex(m_gbColor1,   1, m_linearSampler);
+			bindTex(m_gbColor2,   2, m_linearSampler);
+			bindTex(m_gbDepthLin, 3, m_ssaoPointSampler ? m_ssaoPointSampler : m_linearSampler);
+			bindTex(m_ssrReflTex, 4, m_linearSampler);
+			bindTex(m_skyEnvCube, 14, m_linearSampler);
+			bindTex(ssaoActive ? m_ssaoResult : m_dummyTexture, 15, m_linearSampler);
+			[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+			[enc endEncoding];
+			m_counters.draws += 2;
+		}
+	}
 }
 
 // ─── Deferred G-buffer pass ──────────────────────────────────────────────────
@@ -9860,6 +10063,9 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 				m_renderPath == HE::RenderPath::Deferred && EnsureDeferredPipelines();
 			m_deferredFrameActive = deferredActive;
 			const bool deferredTile = deferredActive && m_deferredTileMode;
+			// SSR (ssr-plan §4.5): v1 only in the deferred tile mode — the trace
+			// reads the stored G-buffer + the resolved HDR of THIS frame.
+			m_ssrFrameActive = deferredTile && m_ssrEnabled && EnsureSSRPipelines();
 			{
 				// One-shot diagnostic: which scene-pass mode actually runs. Logged
 				// on every CHANGE (not per frame) so a mid-session flip is visible.
@@ -9908,9 +10114,12 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 					gbPass.colorAttachments[a].texture     = gbTex[a];
 					gbPass.colorAttachments[a].loadAction  = MTLLoadActionClear;
 					// Memoryless attachments (tile mode) must not store; the
-					// two-pass fallback stores GB0..2 for its sampling resolve.
+					// two-pass fallback — and the tile mode with SSR, whose
+					// trace/composite sample the G-buffer after the pass —
+					// store them.
 					gbPass.colorAttachments[a].storeAction =
-						deferredTile ? MTLStoreActionDontCare : MTLStoreActionStore;
+						(deferredTile && !m_ssrFrameActive) ? MTLStoreActionDontCare
+						                                    : MTLStoreActionStore;
 					gbPass.colorAttachments[a].clearColor  = MTLClearColorMake(0.0, 0.0, 0.0, 0.0);
 				}
 				// Clear GB1's normal channels to the encoded +Z so untouched pixels
@@ -9949,6 +10158,12 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 					deferredFrame.resolveDone = true;
 				}
 				[gbEncoder endEncoding];
+
+				// SSR: trace against the stored G-buffer + the resolved HDR,
+				// then add the (skipped) specular-IBL term back — before the
+				// forward tail so transparency draws over the reflections.
+				if (deferredTile && m_ssrFrameActive)
+					EncodeSSRPasses((__bridge void*)cmdBuf, sceneW, sceneH);
 
 				if (!deferredTile)
 				{
@@ -10613,6 +10828,9 @@ IRenderer::Capabilities MetalRenderer::GetCapabilities() const
 	// The deferred resolve shader is generated from the shared lighting preamble
 	// at runtime — no cross-compiler, no deferred path.
 	c.supportsDeferredRendering  = true;
+	// SSR v1 rides on the deferred tile mode (Apple Silicon): the reflection
+	// pass reads the stored G-buffer + the resolved HDR of the same frame.
+	c.supportsScreenSpaceReflections = m_deferredTileMode;
 #endif
 	return c;
 }
@@ -10620,6 +10838,16 @@ IRenderer::Capabilities MetalRenderer::GetCapabilities() const
 void MetalRenderer::SetGpuParticleParams(const GpuParticleParams& p)
 {
 	m_gpuParticleParams = p;
+}
+
+void MetalRenderer::SetSSRSettings(const SSRSettings& s)
+{
+	m_ssrEnabled      = s.enabled;
+	m_ssrIntensity    = s.intensity;
+	m_ssrMaxRoughness = s.maxRoughness;
+	m_ssrMaxDistance  = s.maxDistance;
+	m_ssrThickness    = s.thickness;
+	m_ssrQuality      = s.quality;
 }
 
 void MetalRenderer::SetGISettings(const GISettings& s)

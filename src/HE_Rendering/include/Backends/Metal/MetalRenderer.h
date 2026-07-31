@@ -110,6 +110,7 @@ public:
 	void  SetBloomSettings(const BloomSettings& settings) override;
 	void  SetSSAOSettings(const SSAOSettings& settings) override;
 	void  SetGISettings(const GISettings& settings) override;
+	void  SetSSRSettings(const SSRSettings& settings) override;
 	void  SetShadowDebug(bool on) override { m_debugShadowCascades = on; }
 	void  SetGpuParticleParams(const GpuParticleParams& p) override;
 	void  SetDebugLines(const std::vector<DebugLine>& lines) override;
@@ -206,6 +207,34 @@ private:
 	// Fullscreen tile resolve, encoded into the OPEN G-buffer pass encoder.
 	void  EncodeDeferredResolveTile(void* renderEncoder, int width, int height);
 	bool  m_deferredPipelinesTried  = false;   // build attempted once; failure logs + falls back forward
+
+	// ── Screen-space reflections (docs/ssr-plan.md §4.5, deferred-tile v1) ───
+	// After the tile resolve (which SKIPS its specular-IBL term via
+	// heLight.ssr.w) two extra passes run: a half-res world-space trace against
+	// the stored G-buffer depth sampling the CURRENT frame's resolved HDR (no
+	// lag, no history), and an additive fullscreen composite that mixes the SSR
+	// hit against the sky cubemap with heLitP's exact weather/AO/fog factors.
+	// SSR forces the tile G-buffer to STORED (non-memoryless) attachments —
+	// screen-space reflections need the data after the pass; that trade is
+	// inherent to the technique.
+	bool  m_ssrEnabled      = false;
+	float m_ssrIntensity    = 1.0f;
+	float m_ssrMaxRoughness = 0.6f;
+	float m_ssrMaxDistance  = 30.0f;
+	float m_ssrThickness    = 0.5f;
+	int   m_ssrQuality      = 1;      // 0 = 16 steps, 1 = 32, 2 = 64
+	bool  m_ssrFrameActive  = false;  // this frame runs SSR (tile deferred + enabled + pipelines)
+	void* m_ssrTracePipeline     = nullptr; // id<MTLRenderPipelineState>
+	void* m_ssrCompositePipeline = nullptr; // id<MTLRenderPipelineState> (ONE/ONE additive)
+	bool  m_ssrPipelinesTried    = false;
+	void* m_ssrReflTex = nullptr; // id<MTLTexture> RGBA16F half-res: rgb radiance, a confidence
+	int   m_ssrReflW = 0, m_ssrReflH = 0;
+	bool  m_gbStored = false;     // current G-buffer allocation: stored vs memoryless
+	bool  EnsureSSRPipelines();
+	void  EnsureSSRTarget(int width, int height);
+	void  DestroySSRTarget();
+	// Trace + composite, own passes on cmdBuf (after the tile G-buffer pass).
+	void  EncodeSSRPasses(void* cmdBuf, int width, int height);
 
 	// ── Clustered lighting (plan P7) ─────────────────────────────────────────
 	// In the deferred resolve ALL point/spot lights come from per-cluster light

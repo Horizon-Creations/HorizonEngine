@@ -676,6 +676,9 @@ void EditorApplication::OnInit()
 	m_editorConfig.GIIndirectIntensity         = globalstate.getCustomConfigFloat("GIIndirectIntensity",      m_editorConfig.GIIndirectIntensity);
 	m_editorConfig.GILightRadius               = globalstate.getCustomConfigFloat("GILightRadius",            m_editorConfig.GILightRadius);
 	m_editorConfig.RenderPath                  = globalstate.getCustomConfigInt("RenderPath",           m_editorConfig.RenderPath);
+	m_editorConfig.SSREnabled                  = globalstate.getCustomConfigBool("SSREnabled",          m_editorConfig.SSREnabled);
+	m_editorConfig.SSRIntensity                = globalstate.getCustomConfigFloat("SSRIntensity",       m_editorConfig.SSRIntensity);
+	m_editorConfig.SSRMaxRoughness             = globalstate.getCustomConfigFloat("SSRMaxRoughness",    m_editorConfig.SSRMaxRoughness);
 	m_editorConfig.QuickSettingsFavorites      = globalstate.getCustomConfigString("QuickSettingsFavorites", m_editorConfig.QuickSettingsFavorites);
 	m_editorCamera.setFlySpeed(m_editorConfig.EditorCameraSpeed);
 	// Restore the last editor camera view (saved on exit). Skipped on first run (no
@@ -1196,6 +1199,10 @@ void EditorApplication::OnRender(float dt)
 			m_editorConfig.GlobalIlluminationEnabled,
 			m_editorConfig.GIIndirectIntensity,
 			m_editorConfig.GILightRadius});
+		renderer()->SetSSRSettings(IRenderer::SSRSettings{
+			m_editorConfig.SSREnabled,
+			m_editorConfig.SSRIntensity,
+			m_editorConfig.SSRMaxRoughness});
 		// Render path (Forward | Deferred) — gated on the backend capability so an
 		// unsupported backend simply stays forward. HE_DUMP_RENDERPATH must win
 		// HERE too (not only in the one-shot dump block): this push runs every
@@ -1630,6 +1637,15 @@ void EditorApplication::dumpFrameHeadless()
 		}();
 		r->SetGISettings(IRenderer::GISettings{
 			dumpGI, m_editorConfig.GIIndirectIntensity, m_editorConfig.GILightRadius});
+	}
+	{
+		// HE_DUMP_SSR: override the persisted SSR toggle for this capture only.
+		const bool dumpSSR = [&]{
+			const char* v = std::getenv("HE_DUMP_SSR");
+			return v && *v ? std::atof(v) > 0.5 : m_editorConfig.SSREnabled;
+		}();
+		r->SetSSRSettings(IRenderer::SSRSettings{
+			dumpSSR, m_editorConfig.SSRIntensity, m_editorConfig.SSRMaxRoughness});
 	}
 	{
 		// HE_DUMP_RENDERPATH: override the persisted render path for this capture
@@ -2082,6 +2098,45 @@ void EditorApplication::dumpFrameHeadless()
 				? "EditorApplication: HE_DUMP_GIBLEED red wall added"
 				: "EditorApplication: HE_DUMP_GIBLEED grey control wall added");
 		}
+	}
+
+	// ── SSR witness (HE_DUMP_SSRTEST=1): a mirror floor (metallic 1, roughness
+	// 0.05) with a red cube standing on it. With SSR on (deferred tile path)
+	// the floor must show the cube's reflection; the SSR=0 control shows only
+	// the sky cubemap — the A/B diff isolates exactly the reflected pixels.
+	if (const char* sw = std::getenv("HE_DUMP_SSRTEST"); sw && *sw && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		MaterialAsset mirror;
+		mirror.type = HE::AssetType::Material;
+		mirror.name = "SSRMirrorFloor";
+		mirror.baseColor[0] = 0.9f; mirror.baseColor[1] = 0.9f; mirror.baseColor[2] = 0.9f;
+		mirror.metallic  = 1.0f;
+		mirror.roughness = 0.05f;
+		auto floorE = m_editorWorld->createEntity("SSRFloor");
+		TransformComponent ftc;
+		ftc.position = glm::vec3(0.0f, -0.1f, -8.0f);
+		ftc.scale    = glm::vec3(30.0f, 0.2f, 30.0f);
+		reg.emplace<TransformComponent>(floorE, ftc);
+		reg.emplace<MeshComponent>(floorE, MeshComponent{ HE::kDefaultCubeMeshId });
+		reg.emplace<MaterialComponent>(floorE,
+			MaterialComponent{ contentManager().registerMaterial(std::move(mirror)) });
+
+		MaterialAsset red;
+		red.type = HE::AssetType::Material;
+		red.name = "SSRRedCube";
+		red.baseColor[0] = 1.0f; red.baseColor[1] = 0.1f; red.baseColor[2] = 0.1f;
+		red.roughness = 0.6f;
+		auto cubeE = m_editorWorld->createEntity("SSRCube");
+		TransformComponent ctc;
+		ctc.position = glm::vec3(0.0f, 1.5f, -8.0f);
+		ctc.scale    = glm::vec3(1.5f);
+		reg.emplace<TransformComponent>(cubeE, ctc);
+		reg.emplace<MeshComponent>(cubeE, MeshComponent{ HE::kDefaultCubeMeshId });
+		reg.emplace<MaterialComponent>(cubeE,
+			MaterialComponent{ contentManager().registerMaterial(std::move(red)) });
+		Logger::Log(Logger::LogLevel::Info,
+			"EditorApplication: HE_DUMP_SSRTEST witness scene added");
 	}
 
 	// ── Local-light shadow witness (HE_DUMP_LOCALSHADOW=point|spot): a floor
@@ -3261,6 +3316,9 @@ void EditorApplication::OnShutdown()
 	globalstate.setCustomConfigEntry("GIIndirectIntensity",       m_editorConfig.GIIndirectIntensity);
 	globalstate.setCustomConfigEntry("GILightRadius",             m_editorConfig.GILightRadius);
 	globalstate.setCustomConfigEntry("RenderPath",                m_editorConfig.RenderPath);
+	globalstate.setCustomConfigEntry("SSREnabled",                m_editorConfig.SSREnabled);
+	globalstate.setCustomConfigEntry("SSRIntensity",              m_editorConfig.SSRIntensity);
+	globalstate.setCustomConfigEntry("SSRMaxRoughness",           m_editorConfig.SSRMaxRoughness);
 	globalstate.setCustomConfigEntry("QuickSettingsFavorites",     m_editorConfig.QuickSettingsFavorites);
 	globalstate.writeConfig();
 }

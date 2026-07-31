@@ -89,6 +89,12 @@ public:
         // shaders read, so a graph material greys/glosses with the weather like
         // everything around it.
         float weather[4]      = {};
+        // SSR (append-only, v2.7, docs/ssr-plan.md §5): y = intensity (mix
+        // against the sky cubemap), z = maxRoughness, w = 1 → heLitP SKIPS its
+        // specular-IBL term (ambSpec) because a later reflection pass supplies
+        // it (deferred path only — forward never sets this). x reserved for the
+        // forward heSSR sampler gate (not wired in v1).
+        float ssr[4]          = {};
     };
     static constexpr int kMetalLightingBufferIndex = 1; // fragment [[buffer(1)]]
 
@@ -156,6 +162,28 @@ public:
         float clusterCamFwd[4]  = {}; // xyz = camera forward (view-z), w = cluster near
     };
 
+    // ── SSR (docs/ssr-plan.md §4.5 — deferred path, Metal v1) ────────────────
+    // ssrTrace: fullscreen world-space ray march against the G-buffer depth,
+    // sampling the CURRENT frame's resolved HDR colour (no lag, no history).
+    // Output RGBA16F: rgb = reflected radiance, a = confidence.
+    // ssrComposite: additive fullscreen pass that re-adds the specular-IBL term
+    // heLitP skipped (heLight.ssr.w) — sky cubemap mixed against the SSR hit,
+    // with heLitP's exact weather/AO/fog factors (SYNC-commented).
+    const Compiled& ssrTrace(Backend backend);
+    const Compiled& ssrComposite(Backend backend);
+
+    // std140 layout of the trace shader's HeSSRTrace UBO (binding 23).
+    struct SSRTraceUniforms
+    {
+        float viewProj[16]    = {};
+        float invViewProj[16] = {};
+        float camPos[4]       = {}; // xyz camera world position
+        float camFwd[4]       = {}; // xyz camera forward (view-z axis)
+        float cfg[4]          = {}; // x maxDistance, y thickness, z maxRoughness, w stepCount
+        float conv[4]         = {}; // x ndc-y sign, y depth scale, z depth bias, w edge-fade width
+        float vp[4]           = {}; // xy = trace-target size in pixels
+    };
+
     // Clustered-lighting variants of the two resolves (plan P7, Metal only):
     // heLitP shades ambient/GI/directional from a DIRECTIONAL-ONLY light window,
     // and all point/spot lights come from per-cluster light lists in SSBOs
@@ -192,7 +220,7 @@ public:
 
     void clear() { m_vertCache.clear(); m_fragCache.clear(); m_cvertCache.clear();
                    m_uiVertCache.clear(); m_resolveCache.clear(); m_resolveTileCache.clear();
-                   m_fsVertCache.clear(); }
+                   m_ssrCache.clear(); m_fsVertCache.clear(); }
 
 private:
     std::unordered_map<int, Compiled>      m_vertCache;  // key = (int)backend
@@ -201,6 +229,7 @@ private:
     std::unordered_map<int, Compiled>      m_uiVertCache; // key = (int)backend
     std::unordered_map<int, Compiled>      m_resolveCache; // key = (int)backend (+64 clustered)
     std::unordered_map<int, Compiled>      m_resolveTileCache; // key = (int)backend (+64 clustered)
+    std::unordered_map<int, Compiled>      m_ssrCache;     // key = (int)backend*2 + (0 trace / 1 composite)
     std::unordered_map<int, Compiled>      m_fsVertCache;  // key = (int)backend
 };
 } // namespace HE

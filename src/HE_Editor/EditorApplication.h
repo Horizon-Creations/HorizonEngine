@@ -81,6 +81,13 @@ struct EditorConfig
 	// Metal + OpenGL). The backend's supportsDeferredRendering gates it.
 	int   RenderPath = 0;
 
+	// Screen-space reflections (pushed each frame via SetSSRSettings). v1 only
+	// effective on Metal in the deferred render path; supportsScreenSpaceReflections
+	// gates the toggle. Off by default (like GI).
+	bool  SSREnabled      = false;
+	float SSRIntensity    = 1.0f;
+	float SSRMaxRoughness = 0.6f;
+
 	// Global Illumination: ray-traced DDGI (pushed to the renderer each frame via
 	// SetGISettings). Metal-only; the backend's supportsGlobalIllumination gates
 	// it (needs a ray-tracing-capable GPU + macOS 12+). Off by default — strictly

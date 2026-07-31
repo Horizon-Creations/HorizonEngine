@@ -177,6 +177,22 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode)
 		else if (supported)
 			ImGui::TextDisabled("Simulate rain/snow on the GPU (transform feedback).");
 	});
+	row("ssr", "Renderer", [&]{
+		const bool supported = ctx.renderer && ctx.renderer->GetCapabilities().supportsScreenSpaceReflections;
+		ImGui::BeginDisabled(!supported);
+		ImGui::Checkbox("Screen-Space Reflections", &cfg.SSREnabled);
+		ImGui::BeginDisabled(!cfg.SSREnabled);
+		ImGui::SetNextItemWidth(220.0f);
+		ImGui::SliderFloat("SSR Intensity", &cfg.SSRIntensity, 0.0f, 1.0f, "%.2f");
+		ImGui::SetNextItemWidth(220.0f);
+		ImGui::SliderFloat("SSR Max Roughness", &cfg.SSRMaxRoughness, 0.05f, 1.0f, "%.2f");
+		ImGui::EndDisabled();
+		ImGui::EndDisabled();
+		if (!supported && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+			ImGui::SetTooltip("Metal only, and only with Render Path = Deferred.");
+		else if (supported)
+			ImGui::TextDisabled("Metallic surfaces reflect the actual scene (deferred path).");
+	});
 	row("gi", "Renderer", [&]{
 		const bool supported = ctx.renderer && ctx.renderer->GetCapabilities().supportsGlobalIllumination;
 		ImGui::BeginDisabled(!supported);
