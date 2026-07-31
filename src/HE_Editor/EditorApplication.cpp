@@ -678,6 +678,7 @@ void EditorApplication::OnInit()
 	m_editorConfig.RenderPath                  = globalstate.getCustomConfigInt("RenderPath",           m_editorConfig.RenderPath);
 	m_editorConfig.SSREnabled                  = globalstate.getCustomConfigBool("SSREnabled",          m_editorConfig.SSREnabled);
 	m_editorConfig.SSRIntensity                = globalstate.getCustomConfigFloat("SSRIntensity",       m_editorConfig.SSRIntensity);
+	m_editorConfig.SSRQuality                  = globalstate.getCustomConfigInt("SSRQuality",           m_editorConfig.SSRQuality);
 	m_editorConfig.SSRMaxRoughness             = globalstate.getCustomConfigFloat("SSRMaxRoughness",    m_editorConfig.SSRMaxRoughness);
 	m_editorConfig.QuickSettingsFavorites      = globalstate.getCustomConfigString("QuickSettingsFavorites", m_editorConfig.QuickSettingsFavorites);
 	m_editorCamera.setFlySpeed(m_editorConfig.EditorCameraSpeed);
@@ -1199,10 +1200,14 @@ void EditorApplication::OnRender(float dt)
 			m_editorConfig.GlobalIlluminationEnabled,
 			m_editorConfig.GIIndirectIntensity,
 			m_editorConfig.GILightRadius});
-		renderer()->SetSSRSettings(IRenderer::SSRSettings{
-			m_editorConfig.SSREnabled,
-			m_editorConfig.SSRIntensity,
-			m_editorConfig.SSRMaxRoughness});
+		{
+			IRenderer::SSRSettings ssr;
+			ssr.enabled      = m_editorConfig.SSREnabled;
+			ssr.intensity    = m_editorConfig.SSRIntensity;
+			ssr.maxRoughness = m_editorConfig.SSRMaxRoughness;
+			ssr.quality      = m_editorConfig.SSRQuality;
+			renderer()->SetSSRSettings(ssr);
+		}
 		// Render path (Forward | Deferred) — gated on the backend capability so an
 		// unsupported backend simply stays forward. HE_DUMP_RENDERPATH must win
 		// HERE too (not only in the one-shot dump block): this push runs every
@@ -1648,6 +1653,7 @@ void EditorApplication::dumpFrameHeadless()
 		}();
 		IRenderer::SSRSettings ssr{
 			dumpSSR, m_editorConfig.SSRIntensity, m_editorConfig.SSRMaxRoughness};
+		ssr.quality = m_editorConfig.SSRQuality;
 		if (const char* q = std::getenv("HE_DUMP_SSRQUALITY"); q && *q)
 			ssr.quality = std::atoi(q);
 		r->SetSSRSettings(ssr);
@@ -3353,6 +3359,7 @@ void EditorApplication::OnShutdown()
 	globalstate.setCustomConfigEntry("RenderPath",                m_editorConfig.RenderPath);
 	globalstate.setCustomConfigEntry("SSREnabled",                m_editorConfig.SSREnabled);
 	globalstate.setCustomConfigEntry("SSRIntensity",              m_editorConfig.SSRIntensity);
+	globalstate.setCustomConfigEntry("SSRQuality",                m_editorConfig.SSRQuality);
 	globalstate.setCustomConfigEntry("SSRMaxRoughness",           m_editorConfig.SSRMaxRoughness);
 	globalstate.setCustomConfigEntry("QuickSettingsFavorites",     m_editorConfig.QuickSettingsFavorites);
 	globalstate.writeConfig();

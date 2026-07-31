@@ -87,6 +87,7 @@ struct EditorConfig
 	bool  SSREnabled      = false;
 	float SSRIntensity    = 1.0f;
 	float SSRMaxRoughness = 0.6f;
+	int   SSRQuality      = 1;   // 0 Low (16 steps, raw) / 1 Med (32+blur) / 2 High (64+glossy)
 
 	// Global Illumination: ray-traced DDGI (pushed to the renderer each frame via
 	// SetGISettings). Metal-only; the backend's supportsGlobalIllumination gates
