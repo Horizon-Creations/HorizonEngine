@@ -75,6 +75,20 @@ namespace AssetThumbnailCache
 	// render before asking for another.
 	HE::UUID materialFunctionScratch(const std::string& relPath);
 
+	// A texture shows ITSELF rather than a glyph, drawn on the CPU from the
+	// asset's own pixels — no GPU round-trip, works on every backend. Aspect is
+	// letterboxed (a 4:1 trim sheet squashed square is unrecognisable) and alpha
+	// is composited over a checkerboard (otherwise a transparent texture reads as
+	// half-missing on the dark tile). Fills `out` with kThumbSize² RGBA8.
+	//
+	// False for a cooked (BCn) texture: those bytes are block-compressed and only
+	// the backends can decode them, so they keep the texture glyph. Editor content
+	// is RGBA8 — cooking happens at pack time. Public for tests.
+	bool textureThumbnail(const HE::UUID& textureId, std::vector<uint8_t>& out);
+
+	// Edge length of a generated tile, in pixels.
+	uint32_t thumbnailSize();
+
 	// ── Cache-file format (exposed for tests) ────────────────────────────────
 	// A .hthumb is a 32-byte header, the asset's content-relative path, then
 	// `size`×`size` top-down RGBA8 pixels. The path is stored so a hash collision

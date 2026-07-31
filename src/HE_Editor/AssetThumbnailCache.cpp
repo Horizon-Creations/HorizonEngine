@@ -5,6 +5,7 @@
 #include <MaterialGraph/MaterialGraph.h> // material-FUNCTION tiles wrap the graph
 #include <Renderer/IRenderer.h>
 #include <Types/Enums.h>
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -82,6 +83,9 @@ namespace
 			case HE::AssetType::MaterialFunction: out = ThumbnailKind::Material;     return true;
 			case HE::AssetType::StaticMesh:       out = ThumbnailKind::StaticMesh;   return true;
 			case HE::AssetType::SkeletalMesh:     out = ThumbnailKind::SkeletalMesh; return true;
+			// Textures never reach the renderer — makeTextureThumbnail draws them on
+			// the CPU from the asset's own pixels. The kind is unused for them.
+			case HE::AssetType::Texture:          out = ThumbnailKind::Material;     return true;
 			default: return false;
 		}
 	}
@@ -160,6 +164,76 @@ namespace
 		return s_fnScratchMaterial;
 	}
 
+	// ── Textures ─────────────────────────────────────────────────────────────
+	// A texture is its own best thumbnail, and producing one needs no GPU at all:
+	// the asset already holds the pixels. Done on the CPU rather than through the
+	// renderer so it costs no synchronous round-trip and works on every backend.
+	//
+	// Cooked (BCn) textures are the one gap — their bytes are block-compressed and
+	// only the backends can decode them, so those keep the texture glyph. Editor
+	// content is RGBA8 (that is what the importer writes); cooking happens at pack
+	// time, so this covers everything the Content Browser normally shows.
+	bool makeTextureThumbnail(const HE::UUID& id, std::vector<uint8_t>& out)
+	{
+		const TextureAsset* tex = s_content->getTexture(id);
+		if (!tex || tex->format != TextureFormat::RGBA8) return false;
+		const uint32_t w = tex->width, h = tex->height, ch = tex->channels;
+		if (w == 0 || h == 0 || (ch != 1 && ch != 3 && ch != 4)) return false;
+		if (tex->data.size() < static_cast<size_t>(w) * h * ch) return false;
+
+		const int S = static_cast<int>(kThumbSize);
+		out.assign(static_cast<size_t>(S) * S * 4, 0);
+
+		// Letterbox rather than stretch — a 4:1 trim sheet squashed into a square
+		// tile is unrecognisable, and the tile has a transparent background to
+		// letterbox into anyway.
+		const float scale = std::min(static_cast<float>(S) / w, static_cast<float>(S) / h);
+		const int dw = std::max(1, static_cast<int>(w * scale));
+		const int dh = std::max(1, static_cast<int>(h * scale));
+		const int ox = (S - dw) / 2, oy = (S - dh) / 2;
+
+		// Box filter, but with a CAPPED sample count per destination pixel: a 4K
+		// source averaged in full would be 16M reads inside the UI frame. 4x4
+		// evenly spread samples bound the cost at ~260k regardless of source size
+		// and still look like a proper downscale.
+		constexpr int kMaxTaps = 4;
+		for (int y = 0; y < dh; ++y)
+		{
+			const uint32_t sy0 = static_cast<uint32_t>((static_cast<float>(y)     / dh) * h);
+			const uint32_t sy1 = std::max(sy0 + 1, static_cast<uint32_t>((static_cast<float>(y + 1) / dh) * h));
+			for (int x = 0; x < dw; ++x)
+			{
+				const uint32_t sx0 = static_cast<uint32_t>((static_cast<float>(x)     / dw) * w);
+				const uint32_t sx1 = std::max(sx0 + 1, static_cast<uint32_t>((static_cast<float>(x + 1) / dw) * w));
+				const uint32_t stepX = std::max(1u, (sx1 - sx0) / kMaxTaps);
+				const uint32_t stepY = std::max(1u, (sy1 - sy0) / kMaxTaps);
+
+				uint32_t acc[4] = { 0, 0, 0, 0 };
+				uint32_t taps = 0;
+				for (uint32_t sy = sy0; sy < sy1 && sy < h; sy += stepY)
+					for (uint32_t sx = sx0; sx < sx1 && sx < w; sx += stepX)
+					{
+						const uint8_t* p = &tex->data[(static_cast<size_t>(sy) * w + sx) * ch];
+						if (ch == 1)      { acc[0] += p[0]; acc[1] += p[0]; acc[2] += p[0]; acc[3] += 255; }
+						else if (ch == 3) { acc[0] += p[0]; acc[1] += p[1]; acc[2] += p[2]; acc[3] += 255; }
+						else              { acc[0] += p[0]; acc[1] += p[1]; acc[2] += p[2]; acc[3] += p[3]; }
+						++taps;
+					}
+				if (taps == 0) continue;
+
+				// Composite over a checkerboard: a texture with alpha drawn straight
+				// onto the dark tile background reads as "half the image is missing".
+				const float a = static_cast<float>(acc[3] / taps) / 255.0f;
+				const uint8_t bg = (((x + ox) / 16 + (y + oy) / 16) & 1) ? 90 : 130;
+				uint8_t* dst = &out[(static_cast<size_t>(y + oy) * S + (x + ox)) * 4];
+				for (int c = 0; c < 3; ++c)
+					dst[c] = static_cast<uint8_t>((acc[c] / taps) * a + bg * (1.0f - a));
+				dst[3] = 255;
+			}
+		}
+		return true;
+	}
+
 	// Content-relative path (or the absolute one when the asset lives under
 	// neither root) — the same key the ContentManager addresses assets by, and
 	// what the cache file records so a name-hash collision can be detected.
@@ -175,6 +249,13 @@ HE::UUID materialFunctionScratch(const std::string& relPath)
 {
 	return makeMaterialFunctionScratch(relPath);
 }
+
+bool textureThumbnail(const HE::UUID& textureId, std::vector<uint8_t>& out)
+{
+	return s_content && makeTextureThumbnail(textureId, out);
+}
+
+uint32_t thumbnailSize() { return kThumbSize; }
 
 void setContext(IRenderer* renderer, ContentManager* cm, const std::string& cacheDir)
 {
@@ -255,15 +336,28 @@ void* get(const std::string& absPath)
 
 	// A material FUNCTION is rendered through a scratch material standing in for
 	// it; everything else is drawn as itself.
-	const bool isFunction =
-		EditorAssetTypeCache::assetTypeOf(absPath) == HE::AssetType::MaterialFunction;
+	const HE::AssetType type = EditorAssetTypeCache::assetTypeOf(absPath);
+	const bool isFunction = type == HE::AssetType::MaterialFunction;
+	// Whether the asset was ALREADY in memory decides if we may drop it again
+	// below: generating a tile must not evict something the scene is using, but it
+	// also must not permanently resident every 4K texture in a browsed folder.
+	const bool wasLoaded = s_content->isLoaded(relPath);
 	const HE::UUID id = isFunction ? makeMaterialFunctionScratch(relPath)
 	                               : s_content->loadAsset(relPath);
 	if (id == HE::UUID{}) { e.state = State::Unsupported; return nullptr; }
 
 	std::vector<uint8_t> pixels;
 	--s_rendersLeft;
-	if (!s_renderer->RenderAssetThumbnail(*s_content, kind, id, kThumbSize, pixels))
+	const bool produced = (type == HE::AssetType::Texture)
+		? makeTextureThumbnail(id, pixels)
+		: s_renderer->RenderAssetThumbnail(*s_content, kind, id, kThumbSize, pixels);
+
+	// The asset was pulled into memory only to draw a 128px tile — let it go
+	// again. The renderer keeps its own GPU copy of a mesh it just uploaded, so
+	// this costs nothing but the CPU-side bytes.
+	if (!wasLoaded && !isFunction) s_content->unloadAsset(id);
+
+	if (!produced)
 	{
 		// No thumbnail path on this backend, or the asset would not resolve. Mark
 		// it Unsupported so it is not retried every frame; a later edit to the

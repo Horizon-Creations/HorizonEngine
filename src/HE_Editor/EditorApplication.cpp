@@ -2278,6 +2278,40 @@ void EditorApplication::dumpFrameHeadless()
 		};
 		dumpThumb("material", ThumbnailKind::Material,   s_matTestId);
 		dumpThumb("mesh",     ThumbnailKind::StaticMesh, HE::kDefaultCubeMeshId);
+		// A texture tile is produced on the CPU, so it bypasses dumpThumb's
+		// renderer call entirely. Uses the editor's own logo because it has real
+		// alpha AND a non-square aspect — the two things the tile has to handle
+		// (checkerboard behind transparency, letterbox instead of squash).
+		{
+			const char* bp = SDL_GetBasePath();
+			const std::string logo = std::string(bp ? bp : "") + "Images/HC_Logo.png";
+			int tw = 0, th = 0, tch = 0;
+			if (unsigned char* px = stbi_load(logo.c_str(), &tw, &th, &tch, 4))
+			{
+				TextureAsset ta;
+				ta.type = HE::AssetType::Texture;
+				ta.name = "__thumbWitnessTex";
+				ta.width = (uint32_t)tw; ta.height = (uint32_t)th; ta.channels = 4;
+				ta.data.assign(px, px + (size_t)tw * th * 4);
+				stbi_image_free(px);
+				const HE::UUID texId = contentManager().registerTexture(std::move(ta));
+				AssetThumbnailCache::setContext(r, &contentManager(), dir.string());
+				std::vector<uint8_t> tp;
+				if (AssetThumbnailCache::textureThumbnail(texId, tp))
+				{
+					const int TS = (int)AssetThumbnailCache::thumbnailSize();
+					if (std::ofstream f((dir / "texture.ppm").string(), std::ios::binary); f)
+					{
+						f << "P6\n" << TS << " " << TS << "\n255\n";
+						for (int i = 0; i < TS * TS; ++i)
+							f.write(reinterpret_cast<const char*>(&tp[(size_t)i * 4]), 3);
+					}
+					Logger::Log(Logger::LogLevel::Info,
+						"EditorApplication: thumbnail witness wrote texture.ppm");
+				}
+				AssetThumbnailCache::setContext(nullptr, nullptr, "");
+			}
+		}
 		// A material with NO node graph exercises the OTHER material branch — the
 		// built-in-PBR fallback, which the interactive preview never reaches (it
 		// returns "no preview" there) and which is therefore only visible here.

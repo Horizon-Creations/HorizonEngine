@@ -209,6 +209,112 @@ TEST_CASE("a function with no output pin yields no scratch material")
 	he_test::removeAllQuiet(dir);
 }
 
+// ── Texture tiles ────────────────────────────────────────────────────────────
+
+namespace
+{
+	// Register a texture directly (no disk round-trip needed — the tile is built
+	// from the in-memory asset).
+	HE::UUID makeTexture(ContentManager& cm, uint32_t w, uint32_t h, uint32_t ch,
+	                     std::vector<uint8_t> px)
+	{
+		TextureAsset t;
+		t.type = HE::AssetType::Texture;
+		t.name = "tex";
+		t.width = w; t.height = h; t.channels = ch;
+		t.data = std::move(px);
+		return cm.registerTexture(std::move(t));
+	}
+}
+
+TEST_CASE("texture tile letterboxes instead of stretching")
+{
+	const fs::path dir = fs::temp_directory_path() / "he_thumb_tex";
+	he_test::removeAllQuiet(dir);
+	fs::create_directories(dir);
+	ContentManager cm(dir.string());
+	AssetThumbnailCache::setContext(nullptr, &cm, dir.string());
+
+	const uint32_t S = AssetThumbnailCache::thumbnailSize();
+	// A 4:1 strip of solid opaque red.
+	const uint32_t w = 64, h = 16;
+	std::vector<uint8_t> px(static_cast<size_t>(w) * h * 4);
+	for (size_t i = 0; i < px.size(); i += 4) { px[i] = 255; px[i+1] = 0; px[i+2] = 0; px[i+3] = 255; }
+
+	std::vector<uint8_t> out;
+	REQUIRE(AssetThumbnailCache::textureThumbnail(makeTexture(cm, w, h, 4, px), out));
+	REQUIRE(out.size() == static_cast<size_t>(S) * S * 4);
+
+	auto at = [&](uint32_t x, uint32_t y) { return &out[(static_cast<size_t>(y) * S + x) * 4]; };
+	// Centre row is the image: red and opaque.
+	CHECK(at(S / 2, S / 2)[0] > 200);
+	CHECK(at(S / 2, S / 2)[3] == 255);
+	// Top and bottom are letterbox, NOT stretched image — a 4:1 source in a square
+	// tile must leave those transparent rather than filling them.
+	CHECK(at(S / 2, 2)[3] == 0);
+	CHECK(at(S / 2, S - 3)[3] == 0);
+
+	AssetThumbnailCache::setContext(nullptr, nullptr, "");
+	he_test::removeAllQuiet(dir);
+}
+
+TEST_CASE("texture tile composites alpha over a checkerboard")
+{
+	const fs::path dir = fs::temp_directory_path() / "he_thumb_tex_alpha";
+	he_test::removeAllQuiet(dir);
+	fs::create_directories(dir);
+	ContentManager cm(dir.string());
+	AssetThumbnailCache::setContext(nullptr, &cm, dir.string());
+
+	const uint32_t S = AssetThumbnailCache::thumbnailSize();
+	// Fully TRANSPARENT square. Drawn straight onto the dark tile this would be
+	// invisible; the checkerboard is what makes "this texture has alpha" legible.
+	const uint32_t w = 32, h = 32;
+	std::vector<uint8_t> px(static_cast<size_t>(w) * h * 4, 0);
+
+	std::vector<uint8_t> out;
+	REQUIRE(AssetThumbnailCache::textureThumbnail(makeTexture(cm, w, h, 4, px), out));
+
+	bool light = false, dark = false;
+	for (uint32_t y = 4; y < S - 4; ++y)
+		for (uint32_t x = 4; x < S - 4; ++x)
+		{
+			const uint8_t v = out[(static_cast<size_t>(y) * S + x) * 4];
+			if (v > 110) light = true;
+			if (v > 0 && v < 110) dark = true;
+		}
+	CHECK(light);   // both checker shades present → the pattern really is drawn
+	CHECK(dark);
+
+	AssetThumbnailCache::setContext(nullptr, nullptr, "");
+	he_test::removeAllQuiet(dir);
+}
+
+TEST_CASE("texture tile handles greyscale and RGB sources, rejects nonsense")
+{
+	const fs::path dir = fs::temp_directory_path() / "he_thumb_tex_ch";
+	he_test::removeAllQuiet(dir);
+	fs::create_directories(dir);
+	ContentManager cm(dir.string());
+	AssetThumbnailCache::setContext(nullptr, &cm, dir.string());
+
+	std::vector<uint8_t> out;
+	CHECK(AssetThumbnailCache::textureThumbnail(
+		makeTexture(cm, 8, 8, 1, std::vector<uint8_t>(64, 200)), out));   // grey
+	CHECK(AssetThumbnailCache::textureThumbnail(
+		makeTexture(cm, 8, 8, 3, std::vector<uint8_t>(8 * 8 * 3, 90)), out)); // RGB
+	// A header claiming more pixels than the asset carries must be refused, not
+	// read past the end of the buffer.
+	CHECK_FALSE(AssetThumbnailCache::textureThumbnail(
+		makeTexture(cm, 256, 256, 4, std::vector<uint8_t>(16, 0)), out));
+	CHECK_FALSE(AssetThumbnailCache::textureThumbnail(
+		makeTexture(cm, 0, 0, 4, {}), out));
+	CHECK_FALSE(AssetThumbnailCache::textureThumbnail(HE::UUID{}, out));
+
+	AssetThumbnailCache::setContext(nullptr, nullptr, "");
+	he_test::removeAllQuiet(dir);
+}
+
 TEST_CASE("source stamp tracks writes and reports missing files as zero")
 {
 	const fs::path dir  = scratchDir();
