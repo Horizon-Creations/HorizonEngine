@@ -1304,6 +1304,99 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::ssrComposite(Backe
     return m_ssrCache.emplace(key, std::move(out)).first->second;
 }
 
+namespace
+{
+// ─── Deferred decals (Metal tile mode) ───────────────────────────────────────
+// Unit-cube projector, rasterized inside the G-buffer pass. Front faces are
+// culled by the encoder (camera-inside-box safe) and there is no depth test —
+// the box-space clip against the reconstructed world position decides.
+constexpr const char* kDecalVS = R"(#version 450
+layout(std140, set = 0, binding = 23) uniform HeDecal {
+    mat4 viewProj;
+    mat4 model;
+    mat4 invModel;
+    mat4 invViewProj;
+    vec4 color;
+    vec4 params;
+    vec4 vp;
+} heDecal;
+void main() {
+    // 36-vertex unit cube [-0.5, 0.5]³ as a triangle list from gl_VertexIndex.
+    const int idx[36] = int[36](
+        0,1,2, 2,1,3,  4,6,5, 5,6,7,   // -Z, +Z
+        0,4,1, 1,4,5,  2,3,6, 6,3,7,   // -Y, +Y
+        0,2,4, 4,2,6,  1,5,3, 3,5,7);  // -X, +X
+    int c = idx[gl_VertexIndex];
+    vec3 corner = vec3(float(c & 1), float((c >> 1) & 1), float((c >> 2) & 1)) - 0.5;
+    gl_Position = heDecal.viewProj * heDecal.model * vec4(corner, 1.0);
+}
+)";
+
+constexpr const char* kDecalFS = R"(#version 450
+layout(location = 0) out vec4 oGB0; // alpha-blended, writeMask RGB (metallic in .a stays)
+layout(input_attachment_index = 3, set = 0, binding = 22) uniform subpassInput heGBDepth;
+layout(set = 0, binding = 19) uniform sampler2D heDecalTex;
+layout(std140, set = 0, binding = 23) uniform HeDecal {
+    mat4 viewProj;
+    mat4 model;
+    mat4 invModel;
+    mat4 invViewProj;
+    vec4 color;   // rgba tint
+    vec4 params;  // x hasTexture, y ndc-y sign, z depth scale, w depth bias
+    vec4 vp;      // xy viewport
+} heDecal;
+void main() {
+    float d = subpassLoad(heGBDepth).r;
+    if (d >= 1.0) discard;                       // background
+    vec2 uv = gl_FragCoord.xy / max(heDecal.vp.xy, vec2(1.0));
+    vec4 clip = vec4(uv.x * 2.0 - 1.0, (uv.y * 2.0 - 1.0) * heDecal.params.y,
+                     d * heDecal.params.z + heDecal.params.w, 1.0);
+    vec4 wp = heDecal.invViewProj * clip;
+    vec3 P  = wp.xyz / max(wp.w, 1e-8);
+    vec3 lp = (heDecal.invModel * vec4(P, 1.0)).xyz;
+    if (any(greaterThan(abs(lp), vec3(0.5)))) discard; // outside the projector box
+    vec4 c = heDecal.color;
+    if (heDecal.params.x > 0.5)
+        c *= texture(heDecalTex, lp.xz + 0.5);   // projected along the box's local Y
+    if (c.a <= 0.001) discard;
+    oGB0 = c;
+}
+)";
+} // namespace
+
+const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::decalVertex(Backend backend)
+{
+    const int key = static_cast<int>(backend) * 2;
+    if (auto it = m_decalCache.find(key); it != m_decalCache.end()) return it->second;
+    using namespace he::shaderc;
+    Compiled out;
+    if (backend == Backend::Metal)
+        out = toCompiled(compileMslPinned(kDecalVS, Stage::Vertex,
+            { { Stage::Vertex, 0, 23, 0 } })); // HeDecal UBO → vertex buffer 0
+    else
+        out = toCompiled(compile(kDecalVS, Stage::Vertex, toTarget(backend)));
+    return m_decalCache.emplace(key, std::move(out)).first->second;
+}
+
+const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::decalFragment(Backend backend)
+{
+    const int key = static_cast<int>(backend) * 2 + 1;
+    if (auto it = m_decalCache.find(key); it != m_decalCache.end()) return it->second;
+    using namespace he::shaderc;
+    Compiled out;
+    if (backend == Backend::Metal)
+    {
+        MslOptions opts;
+        opts.framebufferFetchSubpasses = true; // heGBDepth → [[color(3)]]
+        out = toCompiled(compileMslPinned(kDecalFS, Stage::Fragment,
+            { { Stage::Fragment, 0, 23, 0 },    // HeDecal UBO → fragment buffer 0
+              { Stage::Fragment, 0, 19, 0 } },  // decal texture → texture/sampler 0
+            opts));
+    }
+    // Non-Metal backends have no framebuffer-fetch decal path in v1.
+    return m_decalCache.emplace(key, std::move(out)).first->second;
+}
+
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fullscreenVertex(Backend backend)
 {
     const int key = static_cast<int>(backend);

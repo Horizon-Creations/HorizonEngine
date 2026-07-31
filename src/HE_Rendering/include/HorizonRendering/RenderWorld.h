@@ -94,6 +94,15 @@ struct ParticleBatch {
     std::vector<ParticleInstance> instances;
 };
 
+// One projected decal (DecalComponent), extracted per frame. The transform is
+// the entity's world matrix applied to a unit cube [-0.5, 0.5]³; the deferred
+// path blends color (× texture) into the G-buffer base colour inside the box.
+struct DecalData {
+    glm::mat4 transform = glm::mat4(1.0f);
+    glm::vec4 color     = glm::vec4(1.0f);
+    HE::UUID  textureId;
+};
+
 class RenderWorld {
 public:
     void clear();
@@ -131,6 +140,7 @@ public:
     std::vector<RenderObject>        objects;
     std::vector<SkinnedRenderObject> skinnedObjects;
     std::vector<LightData>           lights;
+    std::vector<DecalData>           decals;
     std::vector<UIRenderObject>      uiObjects;
     std::vector<ParticleBatch>       particleBatches;
     CameraData                camera;

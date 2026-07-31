@@ -8,6 +8,7 @@
 #include "HorizonScene/Components/MaterialComponent.h"
 #include "HorizonScene/Components/CameraComponent.h"
 #include "HorizonScene/Components/LightComponent.h"
+#include "HorizonScene/Components/DecalComponent.h"
 #include "HorizonScene/Components/RigidBodyComponent.h"
 #include "HorizonScene/Components/ColliderComponent.h"
 #include "HorizonScene/Components/CharacterControllerComponent.h"
@@ -238,6 +239,14 @@ namespace
 				{ "cullDistance", l->cullDistance },
 				{ "visible",      l->visible },
 				{ "castsShadow",  l->castsShadow },
+			};
+		}
+		if (auto* d = registry.try_get<DecalComponent>(entity))
+		{
+			comps["decal"] = {
+				{ "color",     { d->color.r, d->color.g, d->color.b, d->color.a } },
+				{ "roughness", d->roughness },
+				{ "texture",   uuidToJson(d->textureId) },
 			};
 		}
 		if (auto* r = registry.try_get<RigidBodyComponent>(entity))
@@ -655,6 +664,17 @@ namespace
 			l.visible      = c.value("visible",      l.visible);
 			l.castsShadow  = c.value("castsShadow",  l.castsShadow);
 			registry.emplace_or_replace<LightComponent>(entity, l);
+		}
+		if (comps.contains("decal"))
+		{
+			const json& c = comps["decal"];
+			DecalComponent d;
+			if (auto col = c.find("color"); col != c.end() && col->is_array() && col->size() >= 4)
+				d.color = glm::vec4((*col)[0].get<float>(), (*col)[1].get<float>(),
+				                    (*col)[2].get<float>(), (*col)[3].get<float>());
+			d.roughness = c.value("roughness", d.roughness);
+			d.textureId = jsonToUuid(c.value("texture", json()));
+			registry.emplace_or_replace<DecalComponent>(entity, d);
 		}
 		if (comps.contains("rigidbody"))
 		{

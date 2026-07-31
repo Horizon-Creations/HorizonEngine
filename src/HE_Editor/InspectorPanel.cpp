@@ -891,6 +891,20 @@ void render(AppContext& ctx)
 		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<LightComponent>(entity); }
 	}
 
+	// ── Decal ───────────────────────────────────────────────────────────────
+	if (auto* d = registry.try_get<DecalComponent>(entity))
+	{
+		if (componentHeader("Decal", true, removed))
+		{
+			ImGui::ColorEdit4("Color##decal", &d->color.x); trackEdit();
+			EditorWidgets::assetDropSlot(ctx, "Texture", d->textureId, HE::AssetType::Texture,
+			                             "decaltex", "(none — drop a texture here)", "texture", true);
+			ImGui::TextDisabled("Projects along the entity's local Y through its scaled box.\n"
+			                    "Renders in the Deferred path (Metal).");
+		}
+		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<DecalComponent>(entity); }
+	}
+
 	// ── Rigid Body ──────────────────────────────────────────────────────────
 	if (auto* r = registry.try_get<RigidBodyComponent>(entity))
 	{
@@ -1300,6 +1314,7 @@ void render(AppContext& ctx)
 			addItem("Material",     MaterialComponent{});
 			addItem("Camera",       CameraComponent{});
 			addItem("Light",        LightComponent{});
+			addItem("Decal",        DecalComponent{});
 			addItem("Rigid Body",          RigidBodyComponent{});
 			addItem("Collider",            ColliderComponent{});
 			// A ScriptComponent points at a Lua/Python Script asset, so it's only

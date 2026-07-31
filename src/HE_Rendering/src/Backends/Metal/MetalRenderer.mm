@@ -3800,6 +3800,8 @@ void MetalRenderer::Shutdown()
 	if (m_gbufferPipeline)             { CFBridgingRelease(m_gbufferPipeline);             m_gbufferPipeline = nullptr; }
 	if (m_deferredResolvePipeline)     { CFBridgingRelease(m_deferredResolvePipeline);     m_deferredResolvePipeline = nullptr; }
 	if (m_deferredResolveTilePipeline) { CFBridgingRelease(m_deferredResolveTilePipeline); m_deferredResolveTilePipeline = nullptr; }
+	if (m_decalPipeline) { CFBridgingRelease(m_decalPipeline); m_decalPipeline = nullptr; }
+	m_decalPipelineTried = false;
 	if (m_ssrTracePipeline)     { CFBridgingRelease(m_ssrTracePipeline);     m_ssrTracePipeline = nullptr; }
 	if (m_ssrCompositePipeline) { CFBridgingRelease(m_ssrCompositePipeline); m_ssrCompositePipeline = nullptr; }
 	m_ssrPipelinesTried = false;
@@ -9340,6 +9342,110 @@ void MetalRenderer::EncodeDeferredResolveTile(void* renderEncoder, int width, in
 	++m_counters.draws;
 }
 
+// ─── Deferred decals (P7 follow-up, tile mode) ───────────────────────────────
+bool MetalRenderer::EnsureDecalPipeline()
+{
+	if (m_decalPipeline) return true;
+	if (m_decalPipelineTried) return false;
+	m_decalPipelineTried = true;
+#if !defined(HE_HAVE_SHADERC)
+	return false;
+#else
+	@autoreleasepool
+	{
+		id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+		if (!device || !m_deferredTileMode) return false;
+		using Backend = HE::MaterialShaderLibrary::Backend;
+		const auto& v = m_matShaderLib.decalVertex(Backend::Metal);
+		const auto& f = m_matShaderLib.decalFragment(Backend::Metal);
+		if (!(v.ok && f.ok))
+		{
+			Logger::Log(Logger::LogLevel::Error,
+				(std::string("MetalRenderer: decal shader compile failed\n") + v.log + f.log).c_str());
+			return false;
+		}
+		NSError* err = nil;
+		id<MTLLibrary> vLib = [device newLibraryWithSource:
+			[NSString stringWithUTF8String:v.source.c_str()] options:nil error:&err];
+		id<MTLLibrary> fLib = err ? nil : [device newLibraryWithSource:
+			[NSString stringWithUTF8String:f.source.c_str()] options:nil error:&err];
+		if (vLib && fLib)
+		{
+			// Full 5-attachment single-pass layout; only GB0's rgb is written
+			// (alpha-blended — GB0.a keeps the metallic value).
+			MTLRenderPipelineDescriptor* d = [[MTLRenderPipelineDescriptor alloc] init];
+			d.vertexFunction   = [vLib newFunctionWithName:@"main0"];
+			d.fragmentFunction = [fLib newFunctionWithName:@"main0"];
+			d.colorAttachments[0].pixelFormat = kGBuf0Format;
+			d.colorAttachments[0].blendingEnabled             = YES;
+			d.colorAttachments[0].sourceRGBBlendFactor        = MTLBlendFactorSourceAlpha;
+			d.colorAttachments[0].destinationRGBBlendFactor   = MTLBlendFactorOneMinusSourceAlpha;
+			d.colorAttachments[0].writeMask = MTLColorWriteMaskRed | MTLColorWriteMaskGreen | MTLColorWriteMaskBlue;
+			d.colorAttachments[1].pixelFormat = kGBufAttrFormat;
+			d.colorAttachments[1].writeMask   = MTLColorWriteMaskNone;
+			d.colorAttachments[2].pixelFormat = kGBufAttrFormat;
+			d.colorAttachments[2].writeMask   = MTLColorWriteMaskNone;
+			d.colorAttachments[3].pixelFormat = MTLPixelFormatR32Float;
+			d.colorAttachments[3].writeMask   = MTLColorWriteMaskNone;
+			d.colorAttachments[4].pixelFormat = kSceneColorFormat;
+			d.colorAttachments[4].writeMask   = MTLColorWriteMaskNone;
+			d.depthAttachmentPixelFormat      = kDepthFormat;
+			id<MTLRenderPipelineState> pso = [device newRenderPipelineStateWithDescriptor:d error:&err];
+			if (pso) m_decalPipeline = (void*)CFBridgingRetain(pso);
+		}
+		if (!m_decalPipeline)
+			Logger::Log(Logger::LogLevel::Error,
+				(std::string("MetalRenderer: decal pipeline build failed: ")
+				 + (err ? err.localizedDescription.UTF8String : "?")).c_str());
+		return m_decalPipeline != nullptr;
+	}
+#endif
+}
+
+// Rasterize this frame's decal projectors into the OPEN G-buffer pass encoder,
+// after the geometry and before the resolve (which fetches the blended GB0).
+void MetalRenderer::EncodeDecals(void* renderEncoder, int width, int height)
+{
+	if (m_renderWorld.decals.empty() || !EnsureDecalPipeline()) return;
+	id<MTLRenderCommandEncoder> encoder = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
+
+	const glm::mat4 viewProj =
+		m_renderWorld.camera.projection * m_renderWorld.camera.view;
+	const glm::mat4 ivp = glm::inverse(viewProj);
+
+	[encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_decalPipeline];
+	[encoder setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_noDepthState];
+	// Cull FRONT faces so the projector still draws when the camera is inside
+	// its box; the box-space clip in the fragment decides coverage.
+	[encoder setCullMode:MTLCullModeFront];
+
+	for (const DecalData& dc : m_renderWorld.decals)
+	{
+		HE::MaterialShaderLibrary::DecalUniforms du;
+		const glm::mat4 invModel = glm::inverse(dc.transform);
+		std::memcpy(du.viewProj,    &viewProj[0][0],     16 * sizeof(float));
+		std::memcpy(du.model,       &dc.transform[0][0], 16 * sizeof(float));
+		std::memcpy(du.invModel,    &invModel[0][0],     16 * sizeof(float));
+		std::memcpy(du.invViewProj, &ivp[0][0],          16 * sizeof(float));
+		du.color[0] = dc.color.r; du.color[1] = dc.color.g;
+		du.color[2] = dc.color.b; du.color[3] = dc.color.a;
+		void* tex = dc.textureId != HE::UUID{} ? ResolveGraphTexture(dc.textureId, {}) : nullptr;
+		du.params[0] = tex ? 1.0f : 0.0f;
+		du.params[1] = -1.0f; // Metal uv origin top-left (same conv as the resolve)
+		du.params[2] = 1.0f;
+		du.params[3] = 0.0f;
+		du.vp[0] = static_cast<float>(width);
+		du.vp[1] = static_cast<float>(height);
+		[encoder setVertexBytes:&du length:sizeof(du) atIndex:0];
+		[encoder setFragmentBytes:&du length:sizeof(du) atIndex:0];
+		[encoder setFragmentTexture:(__bridge id<MTLTexture>)(tex ? tex : m_dummyTexture) atIndex:0];
+		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
+		[encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:36];
+		++m_counters.draws;
+	}
+	[encoder setCullMode:MTLCullModeNone]; // restore for the fullscreen resolve
+}
+
 // ─── Screen-space reflections (docs/ssr-plan.md §4.5, deferred tile mode) ────
 bool MetalRenderer::EnsureSSRPipelines()
 {
@@ -10153,6 +10259,9 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 				EncodeGBuffer((__bridge void*)gbEncoder, sceneW, sceneH, deferredFrame);
 				if (deferredTile)
 				{
+					// Decal projectors blend into GB0 (framebuffer-fetched depth)
+					// BEFORE the resolve reads the attributes.
+					EncodeDecals((__bridge void*)gbEncoder, sceneW, sceneH);
 					// Lighting resolve INSIDE the pass, via framebuffer fetch.
 					EncodeDeferredResolveTile((__bridge void*)gbEncoder, sceneW, sceneH);
 					deferredFrame.resolveDone = true;
