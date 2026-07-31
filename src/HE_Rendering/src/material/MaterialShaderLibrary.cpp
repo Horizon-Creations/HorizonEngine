@@ -1262,11 +1262,37 @@ void main() {
     oColor = vec4(ambSpec, 1.0);
 }
 )";
+
+// ─── SSR blur (docs/ssr-plan.md §4.3, P4) ────────────────────────────────────
+// Separable 5-tap Gaussian (1 4 6 4 1 / 16) over the half-res trace result,
+// run twice (horizontal, then vertical) before the composite. Taps are weighted
+// by their confidence so miss pixels (a = 0, black rgb) never darken hit edges;
+// the blurred confidence itself feathers the transition to the cubemap fallback.
+constexpr const char* kSSRBlurFS = R"(#version 450
+layout(location = 0) out vec4 oSSR;
+layout(set = 0, binding = 19) uniform sampler2D heSSRIn;
+layout(std140, set = 0, binding = 23) uniform HeSSRBlur {
+    vec4 dir; // xy = one-texel UV step along the blur axis, zw = 1 / target size
+} heBlur;
+void main() {
+    vec2 uv = gl_FragCoord.xy * heBlur.dir.zw;
+    float w[5] = float[5](0.0625, 0.25, 0.375, 0.25, 0.0625);
+    vec3  rgb  = vec3(0.0);
+    float conf = 0.0;
+    for (int i = 0; i < 5; ++i)
+    {
+        vec4 s = texture(heSSRIn, uv + heBlur.dir.xy * float(i - 2));
+        rgb  += s.rgb * s.a * w[i];
+        conf += s.a * w[i];
+    }
+    oSSR = vec4(conf > 1e-4 ? rgb / conf : vec3(0.0), conf);
+}
+)";
 } // namespace
 
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::ssrTrace(Backend backend)
 {
-    const int key = static_cast<int>(backend) * 2;
+    const int key = static_cast<int>(backend) * 4;
     if (auto it = m_ssrCache.find(key); it != m_ssrCache.end()) return it->second;
     using namespace he::shaderc;
     Compiled out;
@@ -1283,7 +1309,7 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::ssrTrace(Backend b
 
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::ssrComposite(Backend backend)
 {
-    const int key = static_cast<int>(backend) * 2 + 1;
+    const int key = static_cast<int>(backend) * 4 + 1;
     if (auto it = m_ssrCache.find(key); it != m_ssrCache.end()) return it->second;
     using namespace he::shaderc;
     const std::string injected = injectPreamble(kSSRCompositeFS);
@@ -1301,6 +1327,21 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::ssrComposite(Backe
               { Stage::Fragment, 0, 16, 15 } }));// screen-space AO (scene-pass slot)
     else
         out = toCompiled(compile(injected, Stage::Fragment, toTarget(backend)));
+    return m_ssrCache.emplace(key, std::move(out)).first->second;
+}
+
+const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::ssrBlur(Backend backend)
+{
+    const int key = static_cast<int>(backend) * 4 + 2;
+    if (auto it = m_ssrCache.find(key); it != m_ssrCache.end()) return it->second;
+    using namespace he::shaderc;
+    Compiled out;
+    if (backend == Backend::Metal)
+        out = toCompiled(compileMslPinned(kSSRBlurFS, Stage::Fragment,
+            { { Stage::Fragment, 0, 23, 0 },    // HeSSRBlur UBO → fragment buffer 0
+              { Stage::Fragment, 0, 19, 0 } }));// trace result → texture/sampler 0
+    else
+        out = toCompiled(compile(kSSRBlurFS, Stage::Fragment, toTarget(backend)));
     return m_ssrCache.emplace(key, std::move(out)).first->second;
 }
 

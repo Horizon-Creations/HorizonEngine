@@ -193,8 +193,11 @@ verrauscht (dieselbe `ssaoIgn`-Funktion), damit der Blur in 4.3 die Bänder aufl
 
 ### 4.3 Filter (`EncodeSSRResolve`)
 
-- **v1:** separierbarer 5-Tap-Gauss (die vorhandene `blurFragment`-Logik aus `kPostFXMSL`,
-  Zeile 864, ist direkt wiederverwendbar) → `m_ssrBlurTex`.
+- **v1:** separierbarer 5-Tap-Gauss → **UMGESETZT** als `kSSRBlurFS` (eigener kanonischer
+  GLSL-Shader statt `kPostFXMSL`-Klon, confidence-gewichtet: Miss-Pixel mit `a = 0` tragen
+  keine Farbe bei, schwärzen also keine Trefferränder; die geblurte Confidence feathert den
+  Übergang zur Cubemap). Zwei Passes H/V über `m_ssrPingTex` zurück nach `m_ssrReflTex`,
+  aktiv ab Quality Med; `HE_DUMP_SSRQUALITY=0` erzwingt den rohen Trace fürs A/B.
 - **v2 (Phase 4):** zwei Mip-Stufen; das Shading lerpt anhand von `roughness` zwischen scharf
   und unscharf → glaubwürdige „glossy" statt nur „mirror"-Reflexionen.
 - **v2 (Phase 4):** temporale Akkumulation mit Reprojektion, wie sie `EncodeGIShadowRays`

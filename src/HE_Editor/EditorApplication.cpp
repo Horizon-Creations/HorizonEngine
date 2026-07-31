@@ -1640,12 +1640,17 @@ void EditorApplication::dumpFrameHeadless()
 	}
 	{
 		// HE_DUMP_SSR: override the persisted SSR toggle for this capture only.
+		// HE_DUMP_SSRQUALITY: override the quality tier (0 = raw trace without
+		// the P4 blur, 1/2 = blurred) for headless A/B of the blur passes.
 		const bool dumpSSR = [&]{
 			const char* v = std::getenv("HE_DUMP_SSR");
 			return v && *v ? std::atof(v) > 0.5 : m_editorConfig.SSREnabled;
 		}();
-		r->SetSSRSettings(IRenderer::SSRSettings{
-			dumpSSR, m_editorConfig.SSRIntensity, m_editorConfig.SSRMaxRoughness});
+		IRenderer::SSRSettings ssr{
+			dumpSSR, m_editorConfig.SSRIntensity, m_editorConfig.SSRMaxRoughness};
+		if (const char* q = std::getenv("HE_DUMP_SSRQUALITY"); q && *q)
+			ssr.quality = std::atoi(q);
+		r->SetSSRSettings(ssr);
 	}
 	{
 		// HE_DUMP_RENDERPATH: override the persisted render path for this capture

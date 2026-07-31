@@ -169,8 +169,19 @@ public:
     // ssrComposite: additive fullscreen pass that re-adds the specular-IBL term
     // heLitP skipped (heLight.ssr.w) — sky cubemap mixed against the SSR hit,
     // with heLitP's exact weather/AO/fog factors (SYNC-commented).
+    // ssrBlur: separable 5-tap Gaussian over the half-res trace result (plan
+    // §4.3 / P4) — smooths the jittered march's dithering before the composite.
+    // Confidence-weighted: miss pixels (a = 0) contribute no colour, so hit
+    // edges do not darken; the blurred confidence itself feathers them.
     const Compiled& ssrTrace(Backend backend);
     const Compiled& ssrComposite(Backend backend);
+    const Compiled& ssrBlur(Backend backend);
+
+    // std140 layout of the blur shader's HeSSRBlur UBO (binding 23).
+    struct SSRBlurUniforms
+    {
+        float dir[4] = {}; // xy = one-texel UV step along the blur axis, zw = 1 / target size
+    };
 
     // std140 layout of the trace shader's HeSSRTrace UBO (binding 23).
     struct SSRTraceUniforms
@@ -250,7 +261,7 @@ private:
     std::unordered_map<int, Compiled>      m_uiVertCache; // key = (int)backend
     std::unordered_map<int, Compiled>      m_resolveCache; // key = (int)backend (+64 clustered)
     std::unordered_map<int, Compiled>      m_resolveTileCache; // key = (int)backend (+64 clustered)
-    std::unordered_map<int, Compiled>      m_ssrCache;     // key = (int)backend*2 + (0 trace / 1 composite)
+    std::unordered_map<int, Compiled>      m_ssrCache;     // key = (int)backend*4 + (0 trace / 1 composite / 2 blur)
     std::unordered_map<int, Compiled>      m_decalCache;   // key = (int)backend*2 + (0 vertex / 1 fragment)
     std::unordered_map<int, Compiled>      m_fsVertCache;  // key = (int)backend
 };
