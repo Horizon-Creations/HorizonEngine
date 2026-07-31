@@ -1,6 +1,7 @@
 #include "HcGraphHost.h"
 #include "HcEditorUtil.h"        // HcEditorUtil: colors, tooltips, engine-API menu
 #include "HcGraphClipboard.h"    // shared HorizonCode node clipboard (copy/cut/paste)
+#include "HcGraphShortcuts.h"    // the "hold a key, click" node bindings
 #include <HorizonScene/EngineApi.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
@@ -19,6 +20,76 @@ using NT = HC::NodeType;
 bool listed(const std::vector<NT>& v, NT t)
 {
 	return std::find(v.begin(), v.end(), t) != v.end();
+}
+
+// What kind of pin a wire is being dragged off: exec vs data, and for a data pin
+// its value type + array-ness. Both the drag-off menu and the quick-spawn keys
+// need it to find a compatible pin on the node they are about to create.
+struct DragPin { bool isExec = true; PT type = PT::Float; bool array = false; };
+
+DragPin classifyDragPin(const HC::Node& sn, int srcPin)
+{
+	const HC::NodeSig sig = HC::signatureOf(sn);
+	const PinRanges   rr  = pinRanges(sn);
+	DragPin d;
+	d.isExec = srcPin < rr.dataIn0;
+	if (d.isExec) return d;
+	if (srcPin >= rr.dataOut0 && srcPin - rr.dataOut0 < (int)sig.dataOuts.size())
+	{ const auto& pd = sig.dataOuts[srcPin - rr.dataOut0]; d.type = pd.type; d.array = pd.isArray; }
+	else if (srcPin - rr.dataIn0 < (int)sig.dataIns.size())
+	{ const auto& pd = sig.dataIns[srcPin - rr.dataIn0];  d.type = pd.type; d.array = pd.isArray; }
+	return d;
+}
+
+// 'B' → ImGuiKey_B. The letter keys are one contiguous run in ImGui's enum, so
+// the shortcut table can stay plain ASCII (and ImGui-free, and unit-testable).
+ImGuiKey letterKey(char c)
+{
+	static_assert(ImGuiKey_Z == ImGuiKey_A + 25, "ImGuiKey letters are not contiguous");
+	return (ImGuiKey)(ImGuiKey_A + (c - 'A'));
+}
+
+// ── Quick-pick popup (G / Shift+G / E) ──────────────────────────────────────
+// Those three keys do not stand for a fixed node: they open a small searchable
+// list right at the cursor (this graph's variables, or the engine API) because
+// the node they create is only useful once it is bound to something. The key
+// handler runs inside GraphEditor::draw, so it just records the request and
+// opens the popup; handleGraphKeys draws it afterwards in the same window.
+struct QuickPick
+{
+	enum Kind { None = 0, VarGet, VarSet, EngineApi };
+	Kind   kind = None;
+	ImVec2 pos;      // graph-space drop point
+};
+QuickPick s_pick;
+constexpr const char* kQuickPickPopup = "##hc_quickpick";
+
+// A palette row that also advertises its keyboard shortcut, right-aligned and
+// dimmed ("Branch          B") — the shortcuts are only worth having if people
+// meet them where they already look for the node. `hovered` reports the hover
+// state of the ROW (checking IsItemHovered at the call site would ask about the
+// hint text instead, which sits on the same line).
+bool menuItemWithHint(const std::string& label, const char* hint, bool* hovered = nullptr)
+{
+	const float x = ImGui::GetCursorPosX();
+	const float w = ImGui::GetContentRegionAvail().x;
+	const bool picked = HcEditorUtil::searchMenuItem(label);
+	if (hovered) *hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip);
+	if (hint && *hint)
+	{
+		ImGui::SameLine(x + w - ImGui::CalcTextSize(hint).x);
+		ImGui::TextDisabled("%s", hint);
+	}
+	return picked;
+}
+
+// Make `id` the selection on both sides — the canvas draws it selected, the
+// frontend's details panel follows.
+void selectNode(const Host& h, int id)
+{
+	h.ge->selected  = id;
+	h.ge->selection = { id };
+	if (h.selectedNode) *h.selectedNode = id;
 }
 } // namespace
 
@@ -170,6 +241,43 @@ const HC::Graph* resolveClassGraph(const HC::Node& srcNode, const HC::Graph& sel
 
 // ── Canvas model ─────────────────────────────────────────────────────────────
 
+namespace
+{
+// One quick-spawn: drop `type` at the cursor and, when the shortcut ended a link
+// drag, wire it to that pin — the same match-and-connect the drag-off menu does,
+// minus the menu. A pin with nothing compatible on the new node (an exec wire
+// into a pure data node, say) still leaves the node there, unwired: the key did
+// something visible, and one Cmd+Z takes it back.
+int quickSpawnNode(const Host& h, NT type, const GraphEditor::QuickSpawnCtx& c)
+{
+	HC::Graph& graph = *h.graph;
+	const int id = addNode(graph, type, c.pos, h.currentGraph);
+	HC::Node* nn = graph.findNode(id);
+	if (!nn || c.linkNode == 0) return id;
+
+	const HC::Node* sn = graph.findNode(c.linkNode);
+	if (!sn) return id;
+	const DragPin dp  = classifyDragPin(*sn, c.linkPin);
+	const int     pin = HcEditorUtil::dragMatchPin(type, dp.type, dp.array, c.linkInput, dp.isExec);
+	if (pin < 0) return id;
+
+	if (!dp.isExec) nn->propType = dp.type;   // keep the matched signature
+	// adoptForEachElementType first: a ForEach on either end takes the array's
+	// element type before the typed connect (as in drawPinDragMenu).
+	if (c.linkInput)
+	{
+		HC::adoptForEachElementType(graph, id, pin, c.linkNode, c.linkPin);
+		graph.connect(id, pin, c.linkNode, c.linkPin);
+	}
+	else
+	{
+		HC::adoptForEachElementType(graph, c.linkNode, c.linkPin, id, pin);
+		graph.connect(c.linkNode, c.linkPin, id, pin);
+	}
+	return id;
+}
+} // namespace
+
 GraphEditor::Model buildModel(const Host& h)
 {
 	HC::Graph& graph = *h.graph;
@@ -256,6 +364,39 @@ GraphEditor::Model buildModel(const Host& h)
 	// Drag a wire off ANY pin → a filtered menu of everything that can take it.
 	m.drawPinDragMenu = [&h](int srcNode, int srcPin, bool srcInput, ImVec2 pos){
 		return drawPinDragMenu(h, srcNode, srcPin, srcInput, pos); };
+
+	// ── Quick-spawn keys ────────────────────────────────────────────────────
+	// Hold the key and click empty canvas (or hit it mid link-drag, which wires
+	// the node up). A type this frontend hides from its palette gets no shortcut
+	// either — the keys must not be a back door into nodes the menu denies.
+	for (const HcGraphShortcuts::Binding& b : HcGraphShortcuts::bindings())
+	{
+		if (h.menus && listed(h.menus->addExcluded, b.type)) continue;
+		GraphEditor::QuickSpawn qs;
+		qs.key   = letterKey(b.key);
+		qs.spawn = [&h, t = b.type](const GraphEditor::QuickSpawnCtx& c){
+			return quickSpawnNode(h, t, c); };
+		m.quickSpawns.push_back(std::move(qs));
+	}
+	// G / Shift+G / E stand for a node that is useless until it is bound to
+	// something, so they open a picker at the cursor instead of dropping one.
+	// They cannot end a link drag (the drag context would not survive the menu).
+	auto pickerKey = [&m](char key, bool shift, QuickPick::Kind kind)
+	{
+		GraphEditor::QuickSpawn qs;
+		qs.key      = letterKey(key);
+		qs.shift    = shift;
+		qs.wireable = false;
+		qs.spawn    = [kind](const GraphEditor::QuickSpawnCtx& c) -> int {
+			s_pick.kind = kind; s_pick.pos = c.pos;
+			ImGui::OpenPopup(kQuickPickPopup);
+			return 0;   // the popup creates the node, not this callback
+		};
+		m.quickSpawns.push_back(std::move(qs));
+	};
+	pickerKey('G', false, QuickPick::VarGet);
+	pickerKey('G', true,  QuickPick::VarSet);
+	pickerKey('E', false, QuickPick::EngineApi);
 	return m;
 }
 
@@ -292,10 +433,10 @@ int drawAddMenuTail(const Host& h, const std::string& q)
 			if (std::string(HC::nodeCategory(t)) != cat) continue;
 			if (!matches(HC::nodeDisplayName(t), cat)) continue;
 			if (!header) { ImGui::TextDisabled("%s", cat); header = true; }
-			if (HcEditorUtil::searchMenuItem(HC::nodeDisplayName(t)))
+			bool hov = false;
+			if (menuItemWithHint(HC::nodeDisplayName(t), HcGraphShortcuts::hintFor(t), &hov))
 			{ created = addNode(graph, t, drop, h.currentGraph); ImGui::CloseCurrentPopup(); }
-			if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip))
-				ImGui::SetTooltip("%s", HcEditorUtil::nodeTooltipText(t).c_str());
+			if (hov) ImGui::SetTooltip("%s", HcEditorUtil::nodeTooltipText(t).c_str());
 		}
 		if (header) ImGui::Spacing();
 	}
@@ -360,7 +501,7 @@ int drawAddMenuTail(const Host& h, const std::string& q)
 			const std::string lbl = (k == 0 ? "Get " : "Set ") + v.name;
 			if (!matches(lbl, "Variables")) continue;
 			if (!vh) { ImGui::TextDisabled("Variables"); vh = true; }
-			if (HcEditorUtil::searchMenuItem(lbl))
+			if (menuItemWithHint(lbl, k == 0 ? "G" : "Shift+G"))
 			{
 				const int id = addNode(graph, k == 0 ? NT::GetVariable : NT::SetVariable,
 				                       drop, h.currentGraph);
@@ -385,17 +526,10 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 	int created = 0;
 
 	// Classify the dragged pin (exec vs data; data type + array-ness).
-	const HC::NodeSig sig = HC::signatureOf(*sn);
-	const PinRanges rr = pinRanges(*sn);
-	const bool isExecPin = srcPin < rr.dataIn0;
-	PT dragType = PT::Float; bool dragArray = false;
-	if (!isExecPin)
-	{
-		if (srcPin >= rr.dataOut0 && srcPin - rr.dataOut0 < (int)sig.dataOuts.size())
-		{ const auto& pd = sig.dataOuts[srcPin - rr.dataOut0]; dragType = pd.type; dragArray = pd.isArray; }
-		else if (srcPin - rr.dataIn0 < (int)sig.dataIns.size())
-		{ const auto& pd = sig.dataIns[srcPin - rr.dataIn0];  dragType = pd.type; dragArray = pd.isArray; }
-	}
+	const DragPin dp = classifyDragPin(*sn, srcPin);
+	const bool isExecPin = dp.isExec;
+	const PT   dragType  = dp.type;
+	const bool dragArray = dp.array;
 
 	const std::string q = HcEditorUtil::searchMenuBegin("##dragSearch", "Search…", 232.0f);
 	auto matches = [&](const std::string& name){ return q.empty() || lower(name).find(q) != std::string::npos; };
@@ -472,15 +606,17 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 			const int pin = HcEditorUtil::dragMatchPin(t, dragType, dragArray, srcInput, isExecPin);
 			if (pin < 0 || !matches(HC::nodeDisplayName(t))) continue;
 			if (!gh) { ImGui::TextDisabled("Nodes"); gh = true; }
-			if (HcEditorUtil::searchMenuItem(HC::nodeDisplayName(t)))
+			// The hint is live here too: the same key hit MID-DRAG skips this
+			// menu and drops the node already wired.
+			bool hov = false;
+			if (menuItemWithHint(HC::nodeDisplayName(t), HcGraphShortcuts::hintFor(t), &hov))
 			{
 				const int id = addNode(graph, t, pos, h.currentGraph);
 				HC::Node* nn = graph.findNode(id);
 				if (!isExecPin) nn->propType = dragType; // keep the matched signature
 				wireAt(id, pin); created = id; ImGui::CloseCurrentPopup();
 			}
-			if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip))
-				ImGui::SetTooltip("%s", HcEditorUtil::nodeTooltipText(t).c_str());
+			if (hov) ImGui::SetTooltip("%s", HcEditorUtil::nodeTooltipText(t).c_str());
 		}
 		if (gh) ImGui::Spacing();
 	}
@@ -737,16 +873,91 @@ bool drawCommonNodeDetails(const Host& h, HC::Node& n)
 	}
 }
 
+// ── Quick-pick popup (opened by the G / Shift+G / E shortcuts) ──────────────
+// A searchable list at the cursor, drawn in the canvas window right after
+// GraphEditor::draw so the popup id matches the OpenPopup the key handler
+// issued from inside it.
+
+namespace
+{
+void drawQuickPickPopup(const Host& h)
+{
+	if (s_pick.kind == QuickPick::None) return;
+	if (!ImGui::IsPopupOpen(kQuickPickPopup)) { s_pick.kind = QuickPick::None; return; }
+	if (!ImGui::BeginPopup(kQuickPickPopup)) return;
+
+	HC::Graph& graph = *h.graph;
+	const bool wantSet = s_pick.kind == QuickPick::VarSet;
+
+	if (s_pick.kind == QuickPick::EngineApi)
+	{
+		const std::string q = HcEditorUtil::searchMenuBegin("##qpEngine", "Engine call…", 232.0f);
+		ImGui::Separator();
+		ImGui::BeginChild("##qpEngineList", ImVec2(240.0f, 300.0f));
+		if (std::string picked = HcEditorUtil::drawEngineApiMenu(q); !picked.empty())
+		{
+			if (const HE::api::ApiFn* fn = HE::api::find(picked))
+			{
+				const int id = addNode(graph, NT::EngineCall, s_pick.pos, h.currentGraph);
+				HC::Node* nn = graph.findNode(id);
+				nn->s = fn->id;
+				nn->hasArg = fn->isExec;             // exec node vs pure data node
+				nn->params.clear(); nn->results.clear();
+				for (const auto& p : fn->params)  nn->params.push_back({ p.name, p.type, p.isArray });
+				for (const auto& r : fn->results) nn->results.push_back({ r.name, r.type, r.isArray });
+				selectNode(h, id);
+				h.onEdit(true);
+			}
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::EndChild();
+		HcEditorUtil::searchMenuEnd();
+	}
+	else
+	{
+		const std::string q = HcEditorUtil::searchMenuBegin(
+			"##qpVar", wantSet ? "Set variable…" : "Get variable…", 232.0f);
+		ImGui::Separator();
+		ImGui::BeginChild("##qpVarList", ImVec2(240.0f, 300.0f));
+		bool any = false;
+		for (const auto& v : graph.variables)
+		{
+			// Locals belong to their own function only.
+			if (v.scope != 0 && v.scope != h.currentGraph) continue;
+			if (!q.empty() && lower(v.name).find(q) == std::string::npos) continue;
+			any = true;
+			if (HcEditorUtil::searchMenuItem(v.name + "  (" + variableTypeLabel(v) + ")"))
+			{
+				const int id = addNode(graph, wantSet ? NT::SetVariable : NT::GetVariable,
+				                       s_pick.pos, h.currentGraph);
+				HC::Node* nn = graph.findNode(id);
+				nn->s = v.name; nn->propType = v.type; nn->isArray = v.isArray;
+				selectNode(h, id);
+				h.onEdit(true);
+				ImGui::CloseCurrentPopup();
+			}
+		}
+		if (!any) ImGui::TextDisabled(graph.variables.empty() ? "(no variables yet)" : "(no match)");
+		ImGui::EndChild();
+		HcEditorUtil::searchMenuEnd();
+	}
+
+	ImGui::EndPopup();
+}
+} // namespace
+
 // ── Keyboard: node clipboard + duplicate (Cmd on macOS, Ctrl elsewhere) ──────
 // Same shortcut set and the same guard the material graph has had since v3 —
 // these graphs only ever had Delete, so every node had to be rebuilt by hand.
 // HcClipboard is shared by the Level Script / Game Instance / HC Class graphs
 // and the widget graph, so nodes copy across HorizonCode editors.
 
-void handleClipboardKeys(const Host& h, const ImVec2& canvasOrigin, const ImVec2& avail)
+void handleGraphKeys(const Host& h, const ImVec2& canvasOrigin, const ImVec2& avail)
 {
 	HC::Graph& graph = *h.graph;
 	GraphEditor::State& ge = *h.ge;
+
+	drawQuickPickPopup(h);
 
 	const ImGuiIO& kio = ImGui::GetIO();
 	const bool mod  = kio.KeyCtrl || kio.KeySuper;

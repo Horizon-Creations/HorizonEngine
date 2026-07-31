@@ -12,6 +12,7 @@ add_executable(he_tests
     test_level_script.cpp
     test_horizoncode_runtime.cpp
     test_horizoncode_compiled.cpp
+    test_horizoncode_shortcuts.cpp
     test_game_instance.cpp
     test_culling.cpp
     test_gi_bvh.cpp
@@ -81,6 +82,10 @@ add_executable(he_tests
     # tables can be asserted here without a window.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TutorialSteps.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetThumbnailCache.cpp
+    # The graph quick-spawn key table is deliberately plain data and ImGui-free
+    # (HcGraphHost turns a letter into an ImGuiKey), so its invariants can be
+    # asserted here without a window.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcGraphShortcuts.cpp
 )
 
 target_include_directories(he_tests PRIVATE
