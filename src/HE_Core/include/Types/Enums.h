@@ -38,6 +38,18 @@ namespace HE
         Compute,
 	};
 
+    // Which lighting architecture the scene pass uses. Forward shades every
+    // fragment in the geometry pass (today's path, every backend); Deferred
+    // writes a G-buffer and shades once per visible pixel in a fullscreen
+    // resolve (Metal + OpenGL, Capabilities::supportsDeferredRendering).
+    // The numeric values are PERSISTED as int in config.json ("RenderPath") —
+    // never reorder; only append.
+    enum class RenderPath : uint8_t
+    {
+        Forward  = 0,
+        Deferred = 1,
+    };
+
     // ── Window ────────────────────────────────────────────────────────────────
 
     enum class WindowMode : uint8_t

@@ -110,6 +110,40 @@ public:
     bool resolveShaders(const ContentManager& cm, const UUID& materialId,
                         uint64_t& hashOut, std::string& fragOut, std::string& vertBodyOut) const;
 
+    // Deferred: same contract as resolveShaders, but returns the material's G-BUFFER
+    // fragment variant (MaterialAsset::customShaderGBufGlsl — MRT emit tail instead of
+    // heLitP). False when the material has no G-buffer variant (hand-written escape-hatch
+    // GLSL, packaged material without a graph) — the deferred path then draws it through
+    // the forward extra pass instead. The hash is of the G-buffer SOURCE (+ vertex fold),
+    // so it never collides with the forward pipeline's key space.
+    bool resolveGBufferShaders(const ContentManager& cm, const UUID& materialId,
+                               uint64_t& hashOut, std::string& fragOut,
+                               std::string& vertBodyOut) const;
+
+    // Deferred lighting-resolve fragment: built from the SAME kLightingPreamble as every
+    // material fragment and shades by calling heLitP on the G-buffer attributes — there
+    // is deliberately no second shading implementation (docs/deferred-renderer-plan.md
+    // §4.2). Canonical bindings (set 0): heGB0/1/2 = 19/20/21, heGBDepth = 22, HeResolve
+    // UBO (invViewProj + depth/debug params) = 23; Metal pins: GB textures → fragment
+    // texture/sampler 0..3, HeResolve → fragment buffer 3, everything else exactly like
+    // fragment() (HeLighting → buffer 1, CSM/GI/sky/AO on their scene-pass slots).
+    const Compiled& deferredResolve(Backend backend);
+
+    // Attribute-less fullscreen-triangle vertex with NO varyings (the resolve fragment
+    // reads gl_FragCoord); paired with deferredResolve for the fullscreen lighting draw.
+    const Compiled& fullscreenVertex(Backend backend);
+
+    // std140 layout of the resolve shader's HeResolve UBO. depthParams:
+    //   x = clip-space Y sign of the uv→NDC mapping (GL +1, Metal −1: its uv origin
+    //       is top-left), y/z = NDC-z scale/bias from the sampled depth (GL 2/−1,
+    //       Metal 1/0), w = debug view (0 off, 1 = BaseColor, 2 = Normal,
+    //       3 = Rough/Spec/Metal, 4 = Emissive) — HE_DUMP_GBUFFER.
+    struct ResolveUniforms
+    {
+        float invViewProj[16] = {}; // column-major inverse(proj * view)
+        float depthParams[4]  = {};
+    };
+
     // Cross-compile, cached. The Metal backend pins the vertex to verts@0 / Uniforms@1 so
     // it drops into the fixed geometry-pass bind points; other backends use their natural
     // binding model. `sourceHash` keys the fragment cache (identical shaders share a slot).
@@ -134,12 +168,15 @@ public:
     // vNormal = +Z, vWorldPos = (screen px, 0) — sane defaults for UI shading.
     const Compiled& uiVertex(Backend backend);
 
-    void clear() { m_vertCache.clear(); m_fragCache.clear(); m_cvertCache.clear(); m_uiVertCache.clear(); }
+    void clear() { m_vertCache.clear(); m_fragCache.clear(); m_cvertCache.clear();
+                   m_uiVertCache.clear(); m_resolveCache.clear(); m_fsVertCache.clear(); }
 
 private:
     std::unordered_map<int, Compiled>      m_vertCache;  // key = (int)backend
     std::unordered_map<uint64_t, Compiled> m_fragCache;  // key = mix(sourceHash, backend)
     std::unordered_map<uint64_t, Compiled> m_cvertCache; // key = mix(bodyHash, backend)
     std::unordered_map<int, Compiled>      m_uiVertCache; // key = (int)backend
+    std::unordered_map<int, Compiled>      m_resolveCache; // key = (int)backend
+    std::unordered_map<int, Compiled>      m_fsVertCache;  // key = (int)backend
 };
 } // namespace HE

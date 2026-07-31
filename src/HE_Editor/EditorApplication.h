@@ -76,6 +76,11 @@ struct EditorConfig
 	// (GL + Metal = yes, so it's the path used unless the user turns it off).
 	bool  GpuParticles  = true;
 
+	// Render path (pushed to the renderer each frame via SetRenderPath): 0 =
+	// Forward (default), 1 = Deferred (G-buffer + fullscreen lighting resolve,
+	// Metal + OpenGL). The backend's supportsDeferredRendering gates it.
+	int   RenderPath = 0;
+
 	// Global Illumination: ray-traced DDGI (pushed to the renderer each frame via
 	// SetGISettings). Metal-only; the backend's supportsGlobalIllumination gates
 	// it (needs a ray-tracing-capable GPU + macOS 12+). Off by default — strictly

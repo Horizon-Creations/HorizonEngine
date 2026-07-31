@@ -328,6 +328,12 @@ private:
 	                                       const MaterialShaderVariant* precompiled = nullptr);
 	bool         resolveMaterialShader(const HE::UUID& materialId, uint64_t& key, std::string& frag,
 	                                   std::string& vertBody);
+	// Deferred G-buffer variant (customShaderGBufGlsl): false → the material has
+	// none and its draws run forward in the lighting pass. The returned key is a
+	// hash of the G-buffer SOURCE, so its programs share m_materialPrograms
+	// without ever colliding with the forward key space.
+	bool         resolveMaterialShaderGB(const HE::UUID& materialId, uint64_t& key, std::string& frag,
+	                                     std::string& vertBody);
 	// UI-quad material programs: same fragment hash, but linked against the
 	// screen-space uiVertex instead of the mesh vertex → own cache.
 	std::unordered_map<uint64_t, unsigned int> m_uiMaterialPrograms; // hash → program (0 = failed)
@@ -582,6 +588,33 @@ private:
 	void CreateTonemapPipeline();
 	void EnsureHDRTarget(int width, int height);
 	void DestroyHDRTarget();
+
+	// ── Deferred render path (G-buffer + fullscreen lighting resolve) ────────
+	// docs/deferred-renderer-plan.md. MRT FBO: GB0 = SRGB8_ALPHA8 (BaseColor +
+	// Metallic, written with GL_FRAMEBUFFER_SRGB enabled), GB1/GB2 = RGBA16F
+	// (oct Normal/Roughness/Specular, HDR Emissive/Material-AO), depth as a
+	// TEXTURE (sampled by the resolve; blitted into m_hdrDepth for the forward
+	// tail). Pipelines are built lazily on the first deferred frame; a build
+	// failure logs once and the renderer stays forward.
+	unsigned int m_gbFBO      = 0;
+	unsigned int m_gbColor0   = 0, m_gbColor1 = 0, m_gbColor2 = 0;
+	unsigned int m_gbDepthTex = 0;
+	int          m_gbW = 0, m_gbH = 0;
+	unsigned int m_gbufferProgram          = 0; // built-in PBR → G-buffer (kUnlitVS + kGBufFS)
+	unsigned int m_gbufferInstancedProgram = 0; // instanced variant (kInstancedVS + kGBufFS)
+	unsigned int m_deferredResolveProgram  = 0; // fullscreen heLitP resolve (shared preamble)
+	unsigned int m_resolveUBO      = 0;         // HeResolve block (binding 3)
+	unsigned int m_resolveLightUBO = 0;         // resolve-only HeLighting fill (incl. CSM matrices)
+	bool         m_deferredPipelinesTried = false;
+	int          m_gbufferDebugView       = 0;  // HE_DUMP_GBUFFER (1..4)
+	// Built-in G-buffer program uniform locations (same names as the unlit set).
+	int m_uGBMVP = -1, m_uGBModel = -1, m_uGBColor = -1, m_uGBMetallic = -1,
+	    m_uGBRoughness = -1, m_uGBHasTexture = -1, m_uGBTexture = -1;
+	int m_uGBInstViewProj = -1, m_uGBInstColor = -1, m_uGBInstMetallic = -1,
+	    m_uGBInstRoughness = -1, m_uGBInstHasTexture = -1, m_uGBInstTexture = -1;
+	void EnsureGBufferTargets(int width, int height);
+	void DestroyGBufferTargets();
+	bool EnsureDeferredPipelines(); // true when the G-buffer + resolve programs exist
 
 	// ── FXAA (edge antialiasing) ─────────────────────────────────────────────
 	// The tonemap pass writes its LDR result into m_ldrColor instead of straight

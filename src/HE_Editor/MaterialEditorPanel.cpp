@@ -172,6 +172,7 @@ void applyToMaterial(State& st, AppContext& ctx)
 	HE::MatShaderGen gen = HE::generateFragment(st.graph, loader);
 	st.lastGlsl = gen.glsl;
 	mat->customShaderFragGlsl = st.lastGlsl;
+	mat->customShaderGBufGlsl = gen.glslGBuffer; // deferred MRT variant, same graph
 	mat->nodeGraphJson        = HE::materialGraphToJson(st.graph);
 	mat->shaderParamData.clear();
 	mat->graphParamNames.clear();
