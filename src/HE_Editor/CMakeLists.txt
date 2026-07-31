@@ -129,6 +129,7 @@ add_executable(HorizonEditor WIN32
 	HcEditorUtil.cpp
 	HcGraphClipboard.cpp
 	HcGraphHost.cpp
+	HcGraphShortcuts.cpp
 	GraphEditor.cpp
 	EditorAssetTypeCache.cpp
 	AssetThumbnailCache.cpp

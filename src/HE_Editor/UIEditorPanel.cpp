@@ -1764,7 +1764,7 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	st.selectedGraphNode = st.geState.selected;
 	if (changed) commitEdit(st, ctx);
 
-	HGH::handleClipboardKeys(host, canvasOrigin, avail);
+	HGH::handleGraphKeys(host, canvasOrigin, avail);
 
 	// Variables-panel drop → Get/Set popup for the dropped element's properties.
 	if (st.gOpenDropPopup) { ImGui::OpenPopup("##graph_elem_drop"); st.gOpenDropPopup = false; }
