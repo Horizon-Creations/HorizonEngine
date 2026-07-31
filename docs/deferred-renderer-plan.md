@@ -4,6 +4,26 @@
 > im Editor und im Spiel umschaltbar ist (`Renderer ▸ Render Path: Forward | Deferred`).
 > Metal zuerst (wie GI/SSR), Architektur so, dass die Shading-Mathematik **nicht** ein siebtes
 > Mal kopiert wird.
+
+> **UMSETZUNGSSTAND 2026-07-31: P0–P7 implementiert (Metal + OpenGL; P6/P7 Metal-only).**
+> - P0–P3: `RenderPath`-Enum, Editor-Combo + `config.json`-Persistenz + Game-Read;
+>   G-Buffer-Codegen (`MatShaderGen::glslGBuffer`, gemeinsamer Body + zweiter Emit-Tail),
+>   `MaterialShaderLibrary::deferredResolve*` aus der geteilten `kLightingPreamble` (heLitP),
+>   G-Buffer-Pass + Resolve + Forward-Zusatzpass in Metal **und** GL.
+> - P4: A/B via `HE_DUMP_RENDERPATH` (he_shot): mittl. Abweichung ~0.02–0.03/255 ✅.
+> - P5: SSAO rekonstruiert View-Positionen aus der G-Buffer-Tiefe (Fullscreen statt
+>   Re-Rasterisierung) — Metal-Two-Pass + GL. (Im Tile-Modus bleibt der klassische
+>   Prepass: der Resolve konsumiert AO innerhalb von Pass 1.)
+> - P6 (Metal/Apple Silicon): Single-Pass, G-Buffer **memoryless** im Tile-Speicher,
+>   Resolve per Framebuffer-Fetch (`[[color(n)]]`; 4. Attachment R32F trägt die NDC-Tiefe);
+>   Fallback = Two-Pass (Intel, `HE_DEFERRED_TILE=0`).
+> - P7 (Metal): **Clustered Lighting** — Punkt/Spot aus per-Cluster-Listen (16×9×24-Grid,
+>   CPU-Scatter, bis 256 Lichter), heLight-Fenster nur noch Directional; 8-Licht-Limit
+>   gefallen. `HE_DEFERRED_CLUSTER=0` = 8-Licht-A/B-Guard. GL bleibt 8-Licht (kein SSBO in 4.1).
+> - Export: `customShaderGBufGlsl` wird als MTRL-Tail-Feld serialisiert und vom Packer
+>   byte-verbatim mitgenommen — Packaged Builds rendern Deferred ohne Node-Graph.
+> - Offen: SSR-Integration (ssr-plan.md), Decals, GI-Local-Ray-Masken für Cluster-Lichter,
+>   Profiler-Messung P6 auf echter HW.
 >
 > **UMGESETZT (2026-07-31): P0–P4 für Metal UND OpenGL.** RenderPath-Enum + Editor-Combo +
 > config.json ("RenderPath") + GameApplication-Read; `MatShaderGen::glslGBuffer` (zweiter
