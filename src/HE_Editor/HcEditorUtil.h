@@ -86,11 +86,38 @@ namespace HcEditorUtil
 	// changed this frame; sets `committed` when the edit finished (undo snapshot).
 	bool  drawLiteralNodeBody(HorizonCode::Node& n, bool& committed);
 
+	// ── Searchable menu: ranking + keyboard driving ───────────────────────────
+	// The HorizonCode palettes (right-click add-node, drag-off-a-pin) rank every
+	// entry against the search query, highlight the best match and let ↑/↓ move it
+	// and Enter insert it — so the common case is "right-click, type three
+	// letters, Enter" without ever aiming at the list.
+	//
+	// Every entry a menu offers MUST be drawn with searchMenuItem(): a raw
+	// ImGui::Selectable is invisible to the ranking, so the keyboard skips over it
+	// and a worse entry behind it wins the highlight. Usage inside the popup:
+	//
+	//     const std::string q = HcEditorUtil::searchMenuBegin("##search", "Search…", 220.0f);
+	//     ImGui::BeginChild(…);                       // the scrolling list
+	//       if (HcEditorUtil::searchMenuItem("Branch")) { … create the node … }
+	//     ImGui::EndChild();
+	//     HcEditorUtil::searchMenuEnd();
+	//
+	// Draws the search field and starts a session; returns the lowercased query
+	// (the caller still does its own filtering — ranking only orders what is shown).
+	std::string searchMenuBegin(const char* id, const char* hint, float width);
+	// One entry. `label` is the ImGui label as usual (an "##id" suffix is ignored
+	// for ranking). Returns true when picked — clicked, or Enter on the highlight.
+	// A disabled entry is drawn greyed out and left out of the ranking entirely.
+	bool searchMenuItem(const std::string& label, bool disabled = false);
+	// Closes the session: settles which entry the highlight lands on next frame.
+	void searchMenuEnd();
+
 	// Draws the HE::api engine registry as an add-menu section: entries grouped by
 	// category, filtered by `lowerQuery` (already lowercased; empty = show all).
 	// Returns the picked registry id when a selectable is clicked this frame, else
 	// "". The caller resolves it via HE::api::find and builds an EngineCall node
 	// (copying the descriptor's isExec → hasArg and params/results onto the node).
+	// Entries go through searchMenuItem, so they join the keyboard ranking.
 	std::string drawEngineApiMenu(const std::string& lowerQuery);
 	// Readable title for an EngineCall node ("Sine" for math.sin) — the registry's
 	// displayName, falling back to the raw id.

@@ -72,6 +72,20 @@ static const char* scriptStarterTemplate(int lang)
 	return (lang == 1) ? kPy : kLua;
 }
 
+// An item just moved on disk: hand the old/new ABSOLUTE paths to the content
+// manager as the content-relative ones references are stored in, so everything
+// that points at the item follows it. Silently a no-op for anything outside the
+// content/engine roots (the C++ Source tree, which holds no asset references).
+static void retargetReferences(AppContext& ctx, const std::string& oldAbs,
+                               const std::string& newAbs, bool folder)
+{
+	if (!ctx.contentManager) return;
+	const std::string oldRel = ctx.contentManager->toContentRelativePath(oldAbs);
+	const std::string newRel = ctx.contentManager->toContentRelativePath(newAbs);
+	if (oldRel.empty() || newRel.empty()) return;
+	ctx.contentManager->retargetAssetReferences(oldRel, newRel, folder);
+}
+
 void render(AppContext& ctx, int& tabSelectRequest,
             const std::function<void(const std::string&)>& openSceneGuarded)
 {
@@ -782,6 +796,9 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				std::filesystem::rename(src, dst, ec);
 				if (!ec)
 				{
+					// Everything that pointed at the old path — other assets' stored
+					// references and the asset's own embedded path — follows it here.
+					retargetReferences(ctx, s_pendingMoveSrc, dst.string(), /*folder=*/false);
 					// Same reasoning as the rename popup: the asset left one path and
 					// landed on another, so both cached type sniffs are now lies.
 					EditorAssetTypeCache::invalidate(s_pendingMoveSrc);
@@ -1233,6 +1250,13 @@ void render(AppContext& ctx, int& tabSelectRequest,
 					std::filesystem::rename(oldPath, newPath, ec);
 					if (!ec)
 					{
+						// Carry every stored reference to the old path (or, for a
+						// folder, to anything under it) over to the new one — an
+						// asset renamed out from under its referrers is exactly how
+						// a project silently loses its materials/textures. Skipped
+						// on create: a brand-new asset has no referrers yet.
+						if (!s_renameIsCreate)
+							retargetReferences(ctx, s_renameTarget, newPath.string(), s_renameIsFolder);
 						// Both paths now hold something else than the type cache believes:
 						// the old one nothing, the new one possibly a stale negative entry
 						// from before it existed. A FOLDER rename moves every asset below

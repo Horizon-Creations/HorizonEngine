@@ -586,8 +586,7 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 			// Each event handler is unique — a catalog event already present is
 			// disabled so lifecycle events can't be added twice.
 			const bool used = eventNameUsed(graph, ev);
-			if (ImGui::Selectable(ev.c_str(), false,
-			        used ? ImGuiSelectableFlags_Disabled : 0) && !used)
+			if (HcEditorUtil::searchMenuItem(ev, used))
 			{
 				const int id = addNode(graph, NT::Event, g.ge.addMenuGraphPos);
 				HC::Node* nn = graph.findNode(id);
@@ -607,7 +606,7 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 		if (g.currentGraph == 0 && (events.empty() || allowCustomEvents) && matches("Custom Event", "Events"))
 		{
 			if (!eh) { ImGui::TextDisabled("Events"); eh = true; }
-			if (ImGui::Selectable("Custom Event"))
+			if (HcEditorUtil::searchMenuItem("Custom Event"))
 			{ created = addNode(graph, NT::Event, g.ge.addMenuGraphPos); ImGui::CloseCurrentPopup(); }
 		}
 		if (eh) ImGui::Spacing();

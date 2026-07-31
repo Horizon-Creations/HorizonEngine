@@ -265,6 +265,7 @@ add_library(HorizonRendering SHARED
     src/RenderWorld.cpp
     src/FrustumCuller.cpp
     src/RenderSorter.cpp
+    src/ScenePick.cpp
     # Cross-backend shared renderer helpers (audit 1a). The backend static libs
     # only reuse this target's PUBLIC include path — they do not link it — but
     # they are linked INTO HorizonRendering (and, for the editor, alongside it),
