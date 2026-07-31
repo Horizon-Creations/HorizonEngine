@@ -13,6 +13,7 @@ add_executable(he_tests
     test_horizoncode_runtime.cpp
     test_horizoncode_compiled.cpp
     test_horizoncode_shortcuts.cpp
+    test_graph_editor_keys.cpp
     test_game_instance.cpp
     test_culling.cpp
     test_gi_bvh.cpp
@@ -86,12 +87,23 @@ add_executable(he_tests
     # (HcGraphHost turns a letter into an ImGuiKey), so its invariants can be
     # asserted here without a window.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcGraphShortcuts.cpp
+    # The node canvas + ImGui's CORE only (no backend, no GPU): ImGui runs
+    # headless given a context and a display size, which is what lets
+    # test_graph_editor_keys.cpp actually press the graph shortcuts. The editor
+    # target stays out of this — it is the backends that drag the GPU in, not
+    # ImGui itself.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/GraphEditor.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui_draw.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui_tables.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui_widgets.cpp
 )
 
 target_include_directories(he_tests PRIVATE
     vendor
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/include
     ${CMAKE_SOURCE_DIR}/src/HE_Editor
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui
 )
 # The HorizonRendering sources above are compiled straight into the test exe
 # instead of linking the DLL. Define HE_RENDERING_BUILD_DLL so HE_RENDERING_API
