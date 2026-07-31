@@ -9531,16 +9531,18 @@ void MetalRenderer::EnsureSSRTarget(int width, int height)
 		width:width height:height mipmapped:NO];
 	d.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
 	d.storageMode = MTLStorageModePrivate;
-	m_ssrReflTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:d]);
-	m_ssrPingTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:d]);
+	m_ssrReflTex  = (void*)CFBridgingRetain([device newTextureWithDescriptor:d]);
+	m_ssrPingTex  = (void*)CFBridgingRetain([device newTextureWithDescriptor:d]);
+	m_ssrRoughTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:d]);
 	m_ssrReflW = width;
 	m_ssrReflH = height;
 }
 
 void MetalRenderer::DestroySSRTarget()
 {
-	if (m_ssrReflTex) { CFBridgingRelease(m_ssrReflTex); m_ssrReflTex = nullptr; }
-	if (m_ssrPingTex) { CFBridgingRelease(m_ssrPingTex); m_ssrPingTex = nullptr; }
+	if (m_ssrReflTex)  { CFBridgingRelease(m_ssrReflTex);  m_ssrReflTex = nullptr; }
+	if (m_ssrPingTex)  { CFBridgingRelease(m_ssrPingTex);  m_ssrPingTex = nullptr; }
+	if (m_ssrRoughTex) { CFBridgingRelease(m_ssrRoughTex); m_ssrRoughTex = nullptr; }
 	m_ssrReflW = m_ssrReflH = 0;
 }
 
@@ -9627,6 +9629,15 @@ void MetalRenderer::EncodeSSRPasses(void* cmdBufPtr, int width, int height)
 			blurPass(m_ssrReflTex, m_ssrPingTex, 1.0f / static_cast<float>(tw), 0.0f);
 			blurPass(m_ssrPingTex, m_ssrReflTex, 0.0f, 1.0f / static_cast<float>(th));
 			m_counters.draws += 2;
+			// High tier: a second, wide pass (3-texel spacing) into m_ssrRoughTex
+			// — the mip-chain substitute. The composite lerps between the two by
+			// G-buffer roughness (glossy instead of mirror-only, plan §4.3 v2).
+			if (m_ssrQuality >= 2)
+			{
+				blurPass(m_ssrReflTex, m_ssrPingTex,  3.0f / static_cast<float>(tw), 0.0f);
+				blurPass(m_ssrPingTex, m_ssrRoughTex, 0.0f, 3.0f / static_cast<float>(th));
+				m_counters.draws += 2;
+			}
 		}
 
 		// ── 2. Additive composite onto the resolved HDR ────────────────────
@@ -9670,6 +9681,7 @@ void MetalRenderer::EncodeSSRPasses(void* cmdBufPtr, int width, int height)
 			bindTex(m_gbColor2,   2, m_linearSampler);
 			bindTex(m_gbDepthLin, 3, m_ssaoPointSampler ? m_ssaoPointSampler : m_linearSampler);
 			bindTex(m_ssrReflTex, 4, m_linearSampler);
+			bindTex(m_ssrQuality >= 2 ? m_ssrRoughTex : m_ssrReflTex, 5, m_linearSampler);
 			bindTex(m_skyEnvCube, 14, m_linearSampler);
 			bindTex(ssaoActive ? m_ssaoResult : m_dummyTexture, 15, m_linearSampler);
 			[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];

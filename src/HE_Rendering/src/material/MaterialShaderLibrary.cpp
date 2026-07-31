@@ -1189,7 +1189,8 @@ layout(set = 0, binding = 19) uniform sampler2D heGB0;
 layout(set = 0, binding = 20) uniform sampler2D heGB1;
 layout(set = 0, binding = 21) uniform sampler2D heGB2;
 layout(set = 0, binding = 22) uniform sampler2D heGBDepth;
-layout(set = 0, binding = 27) uniform sampler2D heSSRTex;
+layout(set = 0, binding = 27) uniform sampler2D heSSRTex;      // near-sharp (one 5-tap pass)
+layout(set = 0, binding = 28) uniform sampler2D heSSRTexRough; // wide second blur (High tier); below High the renderer binds heSSRTex here → lerp is a no-op
 layout(std140, set = 0, binding = 23) uniform HeResolve {
     mat4 invViewProj;
     vec4 depthParams;
@@ -1237,7 +1238,12 @@ void main() {
     {
         vec3 Rrough  = normalize(mix(reflect(-V, n), n, rough));
         vec3 envSpec = texture(heSkyEnv, Rrough).rgb;
-        vec4 r = texture(heSSRTex, uv);
+        // Glossy lerp (ssr-plan §4.3 v2): mirror-like surfaces read the
+        // near-sharp result, rough ones the wide second blur — the mip-chain
+        // substitute. Below quality High both samplers hold the same texture.
+        vec4 r0 = texture(heSSRTex, uv);
+        vec4 r1 = texture(heSSRTexRough, uv);
+        vec4 r  = mix(r0, r1, smoothstep(0.0, max(heLight.ssr.z, 1e-3), rough));
         envSpec = mix(envSpec, r.rgb, r.a * heLight.ssr.y); // SSR hit over the cubemap
         ambSpec = envSpec * specColor * (1.0 - 0.6 * rough);
     }
@@ -1322,7 +1328,8 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::ssrComposite(Backe
               { Stage::Fragment, 0, 20, 1 },    // GB1 → 1
               { Stage::Fragment, 0, 21, 2 },    // GB2 → 2
               { Stage::Fragment, 0, 22, 3 },    // depth → 3
-              { Stage::Fragment, 0, 27, 4 },    // SSR result → 4
+              { Stage::Fragment, 0, 27, 4 },    // SSR result (near-sharp) → 4
+              { Stage::Fragment, 0, 28, 5 },    // SSR result (wide blur) → 5
               { Stage::Fragment, 0, 15, 14 },   // sky env cubemap (scene-pass slot)
               { Stage::Fragment, 0, 16, 15 } }));// screen-space AO (scene-pass slot)
     else
