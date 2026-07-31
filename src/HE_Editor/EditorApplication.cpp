@@ -2290,6 +2290,29 @@ void EditorApplication::dumpFrameHeadless()
 			dumpThumb("material_pbr", ThumbnailKind::Material,
 			          contentManager().registerMaterial(std::move(flat)));
 		}
+		// And a material FUNCTION, which is drawn through the scratch material the
+		// thumbnail cache wraps it in. Unit tests cover the wrapping; only a real
+		// render shows whether the generated shader actually produces a picture.
+		{
+			MaterialFunctionAsset fn;
+			fn.type = HE::AssetType::MaterialFunction;
+			fn.name = "__thumbWitnessFn";
+			fn.path = "__thumbWitnessFn.hasset";
+			fn.nodeGraphJson = HE::materialGraphToJson(HE::MaterialGraph::makeDefaultFunction());
+			if (contentManager().saveAsset(fn))
+			{
+				AssetThumbnailCache::setContext(r, &contentManager(), dir.string());
+				dumpThumb("material_function", ThumbnailKind::Material,
+				          AssetThumbnailCache::materialFunctionScratch(fn.path));
+				AssetThumbnailCache::setContext(nullptr, nullptr, "");
+				std::error_code rc;
+				std::filesystem::remove(
+					std::filesystem::path(contentManager().contentRoot()) / fn.path, rc);
+			}
+			else
+				Logger::Log(Logger::LogLevel::Warning,
+					"EditorApplication: thumbnail witness could not write the function asset");
+		}
 	}
 
 	// DIAGNOSTIC (HE_DUMP_GIROTATE): sweep the camera through an orbit before the

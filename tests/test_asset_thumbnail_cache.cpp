@@ -1,6 +1,10 @@
 #include "doctest.h"
 #include "AssetThumbnailCache.h"
 #include "TestFsUtil.h"
+#include <ContentManager/ContentManager.h>
+#include <ContentManager/Assets.h>
+#include <MaterialGraph/MaterialGraph.h>
+#include <Types/Enums.h>
 #include <filesystem>
 #include <fstream>
 #include <vector>
@@ -135,6 +139,74 @@ TEST_CASE("thumbnail file names are stable and per-path")
 	CHECK(a != c);
 	CHECK(a.size() == 16 + 7);  // 16 hex digits + ".hthumb"
 	CHECK(a.rfind(".hthumb") == 16);
+}
+
+// ── Material-function tiles ──────────────────────────────────────────────────
+// A function is a sub-graph with no surface, so its tile is rendered through a
+// scratch material that wraps it. The wrapping is the part that can silently go
+// wrong (a function whose graph yields no shader would render as a blank sphere
+// forever, cached to disk), and it needs no GPU to check.
+
+TEST_CASE("material function wraps into a renderable scratch material")
+{
+	const fs::path dir = fs::temp_directory_path() / "he_thumb_fn_content";
+	he_test::removeAllQuiet(dir);
+	fs::create_directories(dir);
+
+	ContentManager cm(dir.string());
+	{
+		MaterialFunctionAsset fn;
+		fn.type = HE::AssetType::MaterialFunction;
+		fn.name = "Tint";
+		fn.path = "Tint.hasset";
+		fn.nodeGraphJson = HE::materialGraphToJson(HE::MaterialGraph::makeDefaultFunction());
+		REQUIRE(cm.saveAsset(fn));
+	}
+
+	AssetThumbnailCache::setContext(nullptr, &cm, dir.string());
+	const HE::UUID scratch = AssetThumbnailCache::materialFunctionScratch("Tint.hasset");
+	REQUIRE_FALSE(scratch == HE::UUID{});
+
+	// The scratch must carry real generated GLSL — an empty shader is exactly the
+	// failure that would bake a blank tile into the on-disk cache.
+	const MaterialAsset* mat = cm.getMaterial(scratch);
+	REQUIRE(mat != nullptr);
+	CHECK_FALSE(mat->customShaderFragGlsl.empty());
+
+	// Asking again reuses the same scratch rather than leaking one material per
+	// function — tiles are rendered one at a time, so a second live one is waste.
+	CHECK(AssetThumbnailCache::materialFunctionScratch("Tint.hasset") == scratch);
+
+	AssetThumbnailCache::setContext(nullptr, nullptr, "");
+	he_test::removeAllQuiet(dir);
+}
+
+TEST_CASE("a function with no output pin yields no scratch material")
+{
+	const fs::path dir = fs::temp_directory_path() / "he_thumb_fn_empty";
+	he_test::removeAllQuiet(dir);
+	fs::create_directories(dir);
+
+	ContentManager cm(dir.string());
+	{
+		// A graph with nodes but no FnOutput: there is nothing to route into the
+		// wrapper's BaseColor, so the honest answer is "no tile", not a black ball.
+		HE::MaterialGraph g;
+		g.addNode(HE::MatNodeType::ConstFloat);
+		MaterialFunctionAsset fn;
+		fn.type = HE::AssetType::MaterialFunction;
+		fn.name = "NoOut";
+		fn.path = "NoOut.hasset";
+		fn.nodeGraphJson = HE::materialGraphToJson(g);
+		REQUIRE(cm.saveAsset(fn));
+	}
+
+	AssetThumbnailCache::setContext(nullptr, &cm, dir.string());
+	CHECK(AssetThumbnailCache::materialFunctionScratch("NoOut.hasset") == HE::UUID{});
+	CHECK(AssetThumbnailCache::materialFunctionScratch("DoesNotExist.hasset") == HE::UUID{});
+
+	AssetThumbnailCache::setContext(nullptr, nullptr, "");
+	he_test::removeAllQuiet(dir);
 }
 
 TEST_CASE("source stamp tracks writes and reports missing files as zero")

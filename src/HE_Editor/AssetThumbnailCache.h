@@ -1,4 +1,5 @@
 #pragma once
+#include <Types/UUID.h>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -60,6 +61,19 @@ namespace AssetThumbnailCache
 	// Release GPU textures while the renderer is still alive. Call from the
 	// editor's shutdown before the renderer is destroyed.
 	void shutdown();
+
+	// A material FUNCTION has no surface of its own — it is a reusable sub-graph.
+	// Its tile is rendered through a scratch material that wraps it (Output ←
+	// FunctionCall, lit), the same construction the Material Editor uses to
+	// preview a function in its own tab, so the grid and the tab agree. get()
+	// calls this internally; it is public because it is the interesting half of
+	// the material-function path and is worth testing without a GPU.
+	//
+	// `relPath` is content-relative. Returns a null UUID when the function has no
+	// output pin (nothing to show), when it cannot be loaded, or when no
+	// ContentManager is set. The returned material is REUSED by the next call —
+	// render before asking for another.
+	HE::UUID materialFunctionScratch(const std::string& relPath);
 
 	// ── Cache-file format (exposed for tests) ────────────────────────────────
 	// A .hthumb is a 32-byte header, the asset's content-relative path, then

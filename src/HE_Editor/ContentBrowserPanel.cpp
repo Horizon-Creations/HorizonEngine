@@ -639,6 +639,23 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				ImGui::Button("##icon", ImVec2(k_cellSize, k_cellSize));
 			}
 
+			// A material FUNCTION renders as the sphere its own editor tab shows —
+			// which is exactly a material's tile. The corner badge is what tells
+			// the two apart at a glance; drawn over the tile rather than baked into
+			// the image so the cached thumbnail stays a plain picture of the shader.
+			if (thumb && EditorAssetTypeCache::is(file->fullPath, HE::AssetType::MaterialFunction))
+			{
+				const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
+				ImDrawList* dl = ImGui::GetWindowDrawList();
+				const float r = 9.0f;
+				const ImVec2 c(mx.x - r - 3.0f, mn.y + r + 3.0f);
+				dl->AddCircleFilled(c, r, IM_COL32(24, 26, 24, 225));
+				dl->AddCircle(c, r, IM_COL32(150, 225, 190, 235), 0, 1.5f);
+				const ImVec2 ts = ImGui::CalcTextSize("f");
+				dl->AddText(ImVec2(c.x - ts.x * 0.5f, c.y - ts.y * 0.5f),
+				            IM_COL32(180, 240, 210, 255), "f");
+			}
+
 			ImGui::PopStyleVar();
 			ImGui::PopStyleColor(3);
 
