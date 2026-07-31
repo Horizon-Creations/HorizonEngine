@@ -5954,11 +5954,21 @@ bool MetalRenderer::RenderAssetThumbnail(ContentManager& cm, ThumbnailKind kind,
 	rp.depthAttachment.clearDepth  = 1.0;
 
 	// Fixed three-quarter view — a thumbnail has no orbit interaction, and one
-	// shared angle makes a grid of tiles comparable at a glance. `extent` is the
-	// bounds' half-DIAGONAL, so fitting it into the 35° FOV takes at least
-	// extent/tan(17.5°) ≈ 3.17·extent; 3.6 leaves a small margin, and without it
-	// a cube-shaped mesh renders cropped at the tile edges.
-	constexpr float kYaw = 0.7f, kPitch = 0.45f, kMeshFrameDist = 3.6f;
+	// shared angle makes a grid of tiles comparable at a glance.
+	//
+	// The three framing distances all target the same ~90%-of-half-frame fill, so
+	// mesh and material tiles sit equally in their cells. They differ because the
+	// paths differ in FOV and in what the distance is measured against:
+	//   • kMeshFrameDist scales the bounds' half-DIAGONAL, and fitting that into
+	//     the mesh path's 35° FOV takes ≥ extent/tan(17.5°) ≈ 3.17·extent.
+	//   • the two sphere distances are absolute (unit radius). A sphere's
+	//     silhouette fills tan(asin(r/D))/tan(fov/2) of the half-frame, NOT r/D —
+	//     the naive form is what left the material tiles cropped: the old 3.1 at
+	//     32° works out to 119%, i.e. a fifth of the sphere outside the tile.
+	constexpr float kYaw = 0.7f, kPitch = 0.45f;
+	constexpr float kMeshFrameDist    = 3.6f;  // × extent, 35° FOV
+	constexpr float kMatGraphDist     = 4.0f;  // unit sphere, 32° FOV → 90.0%
+	constexpr float kMatFallbackDist  = 3.66f; // unit sphere, 35° FOV → 90.1%
 
 	id<MTLCommandBuffer> cb = [queue commandBuffer];
 	id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
@@ -5967,7 +5977,7 @@ bool MetalRenderer::RenderAssetThumbnail(ContentManager& cm, ThumbnailKind kind,
 	{
 		// Graph material → the real shader; otherwise the built-in PBR scalars on
 		// the same sphere, so EVERY material asset produces a tile.
-		drew = EncodeMaterialPreview((__bridge void*)enc, assetId, kYaw, kPitch, 3.1f, 0 /*sphere*/);
+		drew = EncodeMaterialPreview((__bridge void*)enc, assetId, kYaw, kPitch, kMatGraphDist, 0 /*sphere*/);
 		if (!drew)
 		{
 			const MaterialAsset* ma = m_contentManager->getMaterial(assetId);
@@ -5993,13 +6003,13 @@ bool MetalRenderer::RenderAssetThumbnail(ContentManager& cm, ThumbnailKind kind,
 				const std::string tp  = ma->texturePaths.empty() ? std::string{} : ma->texturePaths[0];
 				if (tid != HE::UUID{} || !tp.empty()) baseTex = ResolveGraphTexture(tid, tp);
 			}
-			// dist 2.8 × the unit sphere's extent (1.0) reproduces the graph path's
-			// 3.1 at its narrower 32° FOV (3.1·tan16° ≈ 2.8·tan17.5°), so a material
-			// with a graph and one without frame the sphere identically.
+			// Wider FOV here than the graph path, hence the shorter distance — both
+			// land on the same apparent sphere size (see the constants above).
 			EncodeMeshPreview((__bridge void*)enc, m_previewVB, m_previewIB, m_previewIdxCount,
 				baseTex, glm::vec3(0.0f), 1.0f,
 				ma ? glm::vec3(ma->baseColor[0], ma->baseColor[1], ma->baseColor[2]) : glm::vec3(0.8f),
-				ma ? ma->metallic : 0.0f, ma ? ma->roughness : 0.5f, kYaw, kPitch, 2.8f);
+				ma ? ma->metallic : 0.0f, ma ? ma->roughness : 0.5f,
+				kYaw, kPitch, kMatFallbackDist);
 			drew = true;
 		}
 	}
