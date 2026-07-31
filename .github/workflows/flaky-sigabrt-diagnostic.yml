@@ -1,0 +1,166 @@
+# TEMPORARY diagnostic workflow — investigating the sporadic SIGABRT in
+# tests/test_python_scripting.cpp on the Linux runner. The failing run aborted with
+# glibc's "malloc(): unaligned tcache chunk detected", i.e. allocator-metadata
+# corruption, NOT a Python GC/finalizer-ordering problem. glibc reports that at the
+# next malloc after the damage, so the reported test case is where the corruption is
+# DETECTED, not necessarily where it is CAUSED.
+#
+# Three jobs, cheapest signal first:
+#   stress   — the real Release build, suite run many times (does it reproduce, how often)
+#   asan     — ASan+UBSan (pinpoints the write, in instrumented engine code)
+#   valgrind — memcheck (catches the same class of bug inside UNinstrumented libpython/SDL)
+#
+# DELETE THIS FILE once the root cause is fixed.
+name: Flaky SIGABRT Diagnostic
+
+on:
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ── 1. Does it reproduce, and how often? ────────────────────────────────────
+  # Faithful copy of the real Linux job's configure flags, then the suite in a loop.
+  # MALLOC_PERTURB_ fills freed memory with a poison byte, so a use-after-free that
+  # normally reads plausible stale data instead reads garbage — it turns a rare
+  # silent corruption into a much louder one. Half the iterations run clean so we can
+  # tell "reproduces on its own" apart from "only reproduces when amplified".
+  stress:
+    name: Stress (Release x40)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: seanmiddleditch/gha-setup-ninja@v5
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev \
+            libxfixes-dev libxss-dev libwayland-dev wayland-protocols libdecor-0-dev \
+            libxkbcommon-dev libegl1-mesa-dev libgl1-mesa-dev libglu1-mesa-dev \
+            libasound2-dev libpulse-dev libudev-dev libdbus-1-dev libibus-1.0-dev \
+            liblz4-dev libzstd-dev python3-dev
+      - name: Configure
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DHE_PREFER_MBEDTLS=ON
+      - name: Build tests
+        run: cmake --build build --target he_tests -j 4
+      - name: Run suite 40x
+        run: |
+          set +e
+          fails=0
+          for i in $(seq 1 40); do
+            if [ "$i" -le 20 ]; then unset MALLOC_PERTURB_; mode="plain";
+            else export MALLOC_PERTURB_=165; mode="perturb"; fi
+            out=$(./build/tests/he_tests 2>&1)
+            rc=$?
+            if [ $rc -ne 0 ]; then
+              fails=$((fails+1))
+              echo "::group::iteration $i ($mode) FAILED rc=$rc"
+              echo "$out" | tail -60
+              echo "::endgroup::"
+            else
+              echo "iteration $i ($mode): ok"
+            fi
+          done
+          echo "=== $fails / 40 iterations failed ==="
+          [ $fails -eq 0 ]
+
+  # ── 2. Where is the bad write? ──────────────────────────────────────────────
+  # detect_leaks=0: the embedded interpreter is deliberately never Py_Finalize'd, so
+  # LeakSanitizer would bury the real finding under thousands of intentional leaks.
+  # detect_odr_violation=0: the hcgen parity fixtures are compiled BOTH into he_tests
+  # and into libtest_hcgen.so by design, which ASan flags on sight.
+  # UBSan is non-halting so a benign UB report cannot mask an ASan memory finding.
+  asan:
+    name: ASan + UBSan
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: seanmiddleditch/gha-setup-ninja@v5
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev \
+            libxfixes-dev libxss-dev libwayland-dev wayland-protocols libdecor-0-dev \
+            libxkbcommon-dev libegl1-mesa-dev libgl1-mesa-dev libglu1-mesa-dev \
+            libasound2-dev libpulse-dev libudev-dev libdbus-1-dev libibus-1.0-dev \
+            liblz4-dev libzstd-dev python3-dev
+      - name: Configure (sanitized)
+        run: |
+          cmake -B build-asan -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DHE_PREFER_MBEDTLS=ON \
+            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g" \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined" \
+            -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=address,undefined"
+      - name: Build tests
+        run: cmake --build build-asan --target he_tests -j 4
+      - name: Run suite 3x under ASan
+        env:
+          ASAN_OPTIONS: detect_leaks=0:detect_odr_violation=0:abort_on_error=1:print_stacktrace=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=0
+          # Route CPython's allocations through raw malloc so ASan can see
+          # use-after-free / overflow on Python objects too (pymalloc's arenas are
+          # opaque to ASan and would hide exactly this class of bug).
+          PYTHONMALLOC: malloc
+        run: |
+          set +e
+          fails=0
+          for i in 1 2 3; do
+            out=$(./build-asan/tests/he_tests 2>&1); rc=$?
+            if [ $rc -ne 0 ]; then
+              fails=$((fails+1))
+              echo "::group::ASan iteration $i FAILED rc=$rc"; echo "$out" | tail -120; echo "::endgroup::"
+            else
+              echo "ASan iteration $i: ok"
+            fi
+          done
+          echo "=== $fails / 3 ASan iterations failed ==="
+          [ $fails -eq 0 ]
+
+  # ── 3. The blind spot ASan cannot cover ─────────────────────────────────────
+  # ASan only instruments code we compile. A bad write performed inside libpython,
+  # SDL or glibc's own pthread code is invisible to it (that is exactly how a
+  # confirmed use-after-free in ContentManager's async path slipped past ASan
+  # locally — the offending access happened inside pthread_mutex_lock).
+  # Valgrind checks every instruction regardless of who compiled it.
+  valgrind:
+    name: Valgrind memcheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: seanmiddleditch/gha-setup-ninja@v5
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y valgrind \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev \
+            libxfixes-dev libxss-dev libwayland-dev wayland-protocols libdecor-0-dev \
+            libxkbcommon-dev libegl1-mesa-dev libgl1-mesa-dev libglu1-mesa-dev \
+            libasound2-dev libpulse-dev libudev-dev libdbus-1-dev libibus-1.0-dev \
+            liblz4-dev libzstd-dev python3-dev
+      - name: Configure
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DHE_PREFER_MBEDTLS=ON
+      - name: Build tests
+        run: cmake --build build --target he_tests -j 4
+      - name: memcheck
+        env:
+          # Without this, pymalloc's deliberate reads of uninitialised arena bytes
+          # drown the log in false positives on a stock (non --with-valgrind) CPython.
+          PYTHONMALLOC: malloc
+        run: |
+          set +e
+          valgrind --tool=memcheck --error-limit=no --num-callers=30 \
+                   --keep-debuginfo=yes --track-origins=yes \
+                   --errors-for-leak-kinds=none --leak-check=no \
+                   ./build/tests/he_tests 2>&1 | tee vg.log | tail -40
+          echo "=== memcheck error summary ==="
+          grep -E "Invalid (write|read)|ERROR SUMMARY|Mismatched|blocks are|jump" vg.log | tail -60
