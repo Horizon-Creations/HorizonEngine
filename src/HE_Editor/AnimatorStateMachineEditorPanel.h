@@ -2,6 +2,7 @@
 #include "EditorUI.h"
 #include <imgui.h>
 #include <string>
+#include <vector>
 
 // The Animator State Machine graph editor — states as nodes, transitions as
 // links, on the same shared node-graph canvas (GraphEditor) as Material/
@@ -19,6 +20,10 @@ namespace AnimatorStateMachineEditorPanel
 	// True if the graph has edits not yet saved to disk (drives the tab's dirty mark
 	// and keeps the close-tab/exit unsaved-changes check from dropping the state).
 	bool isDirty(const std::string& assetPath);
+	// Paths of every unsaved tab this panel holds, open or already closed.
+	// See AssetPanelState::appendDirtyPaths — a closed dirty tab keeps its
+	// state but leaves the tab vector, so the quit guard must ask here.
+	void appendDirtyPaths(std::vector<std::string>& out);
 
 	// Whether the .hasset at `path` is an Animator State Machine asset (reads
 	// the HAsset header type; cached per path — same convention as

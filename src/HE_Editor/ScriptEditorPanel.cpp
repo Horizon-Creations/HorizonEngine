@@ -86,6 +86,11 @@ namespace ScriptEditorPanel
 		return st && st->loaded && isDirtyState(*st);
 	}
 
+	void appendDirtyPaths(std::vector<std::string>& out)
+	{
+		s_states.appendPathsIf([](const State& st) { return st.loaded && isDirtyState(st); }, out);
+	}
+
 	bool isScriptAsset(const std::string& path)
 	{
 		return EditorAssetTypeCache::is(path, HE::AssetType::Script);

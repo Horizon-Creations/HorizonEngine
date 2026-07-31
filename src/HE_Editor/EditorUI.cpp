@@ -338,6 +338,27 @@ bool EditorUI::tabHasUnsavedEdits(const std::string& assetPath)
 	       AnimatorStateMachineEditorPanel::isDirty(assetPath);
 }
 
+// Every unsaved asset, INCLUDING ones whose tab the user already closed.
+// Closing a dirty tab deliberately keeps the panel state (so reopening restores
+// the edits) but removes the tab from ctx.tabs — so a guard that walks ctx.tabs
+// sees nothing to lose and lets the editor quit. Asking the panels directly is
+// the only view that covers both.
+std::vector<std::string> EditorUI::unsavedAssetPaths()
+{
+	std::vector<std::string> out;
+	ScriptEditorPanel::appendDirtyPaths(out);
+	CppClassEditorPanel::appendDirtyPaths(out);
+	MaterialEditorPanel::appendDirtyPaths(out);
+	UIEditorPanel::appendDirtyPaths(out);
+	HorizonCodeClassPanel::appendDirtyPaths(out);
+	InputAssetPanel::appendDirtyPaths(out);
+	ParticleGraphEditorPanel::appendDirtyPaths(out);
+	AnimatorStateMachineEditorPanel::appendDirtyPaths(out);
+	std::sort(out.begin(), out.end());
+	out.erase(std::unique(out.begin(), out.end()), out.end());
+	return out;
+}
+
 // ─── Full Editor UI ───────────────────────────────────────────────────────────
 void EditorUI::renderEditor(AppContext& ctx, float dt)
 {
@@ -476,10 +497,18 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	};
 	auto unsavedTabLabels = [&]() -> std::vector<std::string>
 	{
+		// Driven by the PANELS, not by ctx.tabs: closing a dirty tab keeps its
+		// state but drops the tab, so walking ctx.tabs would silently omit exactly
+		// the edits the user is most likely to have forgotten about. Open tabs
+		// still get their friendly label; a closed one falls back to its path.
 		std::vector<std::string> out;
-		for (const auto& t : ctx.tabs)
-			if (tabHasUnsavedEdits(t.assetPath))
-				out.push_back(t.label.empty() ? t.assetPath : t.label);
+		for (const std::string& path : unsavedAssetPaths())
+		{
+			const auto it = std::find_if(ctx.tabs.begin(), ctx.tabs.end(),
+				[&](const AppContext::EditorTab& t) { return t.assetPath == path; });
+			const bool open = it != ctx.tabs.end() && !it->label.empty();
+			out.push_back(open ? it->label : path);
+		}
 		return out;
 	};
 	auto requestGuarded = [&](GuardedAction a, const std::string& arg = std::string{})

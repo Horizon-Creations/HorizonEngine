@@ -1,6 +1,7 @@
 #pragma once
 #include <imgui.h>
 #include <string>
+#include <vector>
 
 struct AppContext;
 
@@ -22,6 +23,10 @@ namespace InputAssetPanel
 
 	// True if the cached editor for `path` has unsaved edits (tab dirty mark).
 	bool isDirty(const std::string& path);
+	// Paths of every unsaved tab this panel holds, open or already closed.
+	// See AssetPanelState::appendDirtyPaths — a closed dirty tab keeps its
+	// state but leaves the tab vector, so the quit guard must ask here.
+	void appendDirtyPaths(std::vector<std::string>& out);
 	// Drop the cached editor state (tab closed without unsaved edits).
 	void forget(const std::string& path);
 }
