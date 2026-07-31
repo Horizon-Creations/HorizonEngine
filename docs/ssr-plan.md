@@ -1,8 +1,15 @@
 # Screen Space Reflections (SSR) — Umsetzungsplan (Metal zuerst)
 
-> Stand: 2026-07-31 · Ziel: Metallische und glatte Materialien spiegeln die tatsächliche Szene,
-> nicht nur die prozedurale Sky-Cubemap. Metal-only in v1 (wie GI), Architektur so gebaut, dass
-> GL/D3D/Vulkan später ohne Umbau der Shading-Mathematik nachziehen können.
+> Stand: 2026-07-31 (rev. 2 — auf `deferred-renderer-plan.md` abgestimmt) · Ziel: Metallische und
+> glatte Materialien spiegeln die tatsächliche Szene, nicht nur die prozedurale Sky-Cubemap.
+> Metal-only in v1 (wie GI), Architektur so gebaut, dass GL/D3D/Vulkan später ohne Umbau der
+> Shading-Mathematik nachziehen können.
+
+> **Abhängigkeit:** SSR hat **einen** Trace-Pass, aber **zwei** Composite-Wege — je nach
+> Render-Pfad (siehe `docs/deferred-renderer-plan.md`). Empfohlene Reihenfolge: erst dessen
+> **P0–P2** (G-Buffer + Resolve), dann SSR. Dann wird der Composite einmal geschrieben statt
+> zweimal, und die Deferred-Variante ist zugleich die qualitativ bessere (kein Frame-Lag).
+> Wer SSR früher will, baut Phase 1–3 unten im Forward-Pfad und ergänzt später 4.5.
 
 ---
 
@@ -59,12 +66,13 @@ Die Engine ist **Forward-Renderer**: Beleuchtung passiert im Geometrie-Fragment-
   mit `prevViewProj`, siehe Phase 4; die Engine hält für die Low-Res-Wolken bereits ein
   `m_prepassViewProj`).
 
-**Option B — Trace nach dem Scene-Pass, Composite als eigener Fullscreen-Pass**
-*Verworfen.* Bräuchte einen MRT-G-Buffer mit `specColor`/`roughness`/Normale, d. h. ein zweites
-Color-Attachment an **jeder** Scene-Pipeline und eine zweite Ausgabe in **jedem generierten**
-Material-Fragment (Codegen + alle 5 Backends). Zusätzlich müsste der bereits im Shading addierte
-`ambSpec` rückgängig gemacht werden → Doppelzählung oder ein weiterer G-Buffer-Kanal.
-Unverhältnismäßige Eingriffstiefe für v1.
+**Option B — Trace nach dem Lighting, Composite als eigener Fullscreen-Pass**
+*Gewählt für den **Deferred**-Pfad.* Braucht einen G-Buffer mit `specColor`/`roughness`/Normale —
+im Forward-Pfad wäre das ein zweites Color-Attachment an **jeder** Scene-Pipeline plus eine zweite
+Ausgabe in **jedem generierten** Material-Fragment, also unverhältnismäßig. Sobald der
+Deferred-Pfad existiert, **liegt dieser G-Buffer aber ohnehin da** — dann ist Option B strikt
+besser als A: aktuelle Frame-Farbe statt Vorframe, kein Lag, kein Sampler-Slot nötig. Details in
+4.5.
 
 **Option C — Reflexions-Probes statt SSR**
 *Später, orthogonal.* Löst das Off-Screen-Problem (SSR kann nur spiegeln, was auf dem Schirm
@@ -74,6 +82,11 @@ Fallback dienen, wo SSR keine Confidence hat (heute: Sky-Cubemap).
 ---
 
 ## 3. Der Blocker — und seine Lösung: Metal-Sampler-Budget
+
+> Gilt **nur für den Forward-Pfad**. Im Deferred-Pfad braucht das Material gar keinen
+> SSR-Sampler (es schreibt nur Attribute), und der Resolve-/Reflexions-Pass hat das
+> Sampler-Budget für sich allein. Der Umzug in P0 lohnt trotzdem: er spart in beiden Pfaden
+> 6 redundante Bind-Calls pro Frame und schafft Luft für Reflection-Probes.
 
 Metal erlaubt **16 Sampler pro Fragment-Stage** (Index 0–15). Laut Kommentar in
 `MaterialShaderLibrary.cpp:759-772` ist die Material-Pipeline **am Limit**, und ein 17. Pin lässt
@@ -187,7 +200,7 @@ verrauscht (dieselbe `ssaoIgn`-Funktion), damit der Blur in 4.3 die Bänder aufl
 - **v2 (Phase 4):** temporale Akkumulation mit Reprojektion, wie sie `EncodeGIShadowRays`
   bereits macht (History-Textur + Verwerfen bei Tiefen-/Normalen-Bruch).
 
-### 4.4 Composite (Shading-Pass)
+### 4.4 Composite — Forward-Pfad (Shading-Pass)
 
 Genau **eine** Zeile ändert sich in beiden Shadern — der Cubemap-Sample wird zum Fallback:
 
@@ -214,6 +227,28 @@ Zu ändernde Kopien (die bekannten 6 Klone der Shading-Mathematik):
 `shaders/scene.frag` trägt bereits ein Drift-Banner; der neue Absatz wird dort dokumentiert statt
 portiert. `tests/test_culling.cpp` („GI kernels …") vergleicht nur den GI-Block — der bleibt
 unberührt.
+
+### 4.5 Composite — Deferred-Pfad (eigener Reflexions-Pass, **kein** Lag)
+
+Im Deferred-Pfad wandert der **indirekte Spekularterm komplett aus dem Lighting-Resolve heraus**
+in einen eigenen Pass. Ablauf:
+
+```
+G-Buffer ▸ Lighting-Resolve (Direktlicht + indirekt DIFFUS, ohne ambSpec)
+         ▸ SSR-Trace  (gegen die JETZT fertige m_hdrColor + G-Buffer-Depth)
+         ▸ Reflexions-Pass (additiv): envSpec = mix(skyEnv(Rrough), ssr.rgb, ssr.a * intensity);
+                                      hdr += envSpec * specColor * (1 - 0.6*rough);
+```
+
+`specColor`, `roughness` und die Normale kommen exakt aus dem G-Buffer — kein Vorframe, keine
+Reprojektion, kein Ghosting, keine History-Textur, kein zusätzlicher Sampler in der
+Material-Pipeline. Dass `ambSpec` aus dem Resolve verschwindet, ist **kein** Sonderfall im
+Shading-Code: `heLitP` bekommt dafür ein Flag in `heLight.ssr.w` (`1` = „Spekular-IBL überspringen,
+ein späterer Pass liefert ihn nach"), das der Forward-Pfad nie setzt. Die Preamble bleibt also
+weiterhin die einzige Shading-Quelle für beide Pfade.
+
+Konsequenz für die Phasen: **P4 (Qualität) schrumpft im Deferred-Pfad** — temporale Akkumulation
+und Reprojektion sind dort nur noch Rauschglättung, keine Lag-Kompensation mehr.
 
 ---
 
@@ -252,6 +287,9 @@ bool supportsScreenSpaceReflections = false;   // v1: nur Metal
 ## 6. Phasenplan
 
 Jede Phase ist einzeln commit- und verifizierbar; nach jeder Phase läuft die Engine.
+P0–P2 sind **pfadunabhängig**; ab P3 gabelt sich der Composite (4.4 Forward / 4.5 Deferred).
+Existiert der Deferred-Pfad bereits, entfallen P3-Forward und der History-Blit aus P1 —
+dann startet SSR direkt mit 4.5.
 
 ### P0 — Vorbereitung (kein sichtbarer Effekt)
 1. `heGIShadow`/`heGILocal` von MSL 9/10 → 5/8 umpinnen (`MaterialShaderLibrary.cpp:788-795`),
@@ -277,12 +315,20 @@ Objekt als zusammenhängende Fläche zeigen, Confidence am Bildrand sauber ausbl
 **Verifikation:** Witness-Szene `HE_DUMP_SSR=point|mirror` (analog `HE_DUMP_LOCALSHADOW`): spiegelnder
 Boden (`metallic = 1`, `roughness = 0.05`) + farbige Objekte. A/B `SSR=0` vs `SSR=1`, Differenzbild.
 
-### P3 — Composite in `heLitP` (Graph-Materialien)
+### P3 — Composite in `heLitP` (Graph-Materialien, Forward-Pfad)
 Dieselbe Zeile in der Preamble + Metal-Pin. Damit sieht ein Graph-Material identisch aus wie ein
 Built-in daneben.
 
 **Verifikation:** `ShadowValidation` headless rendern — die metallische Kugel (`123Test.hasset`,
 Metallic 1.0) muss die weiße Ebene spiegeln. Genau der Ausgangsfall dieses Plans.
+
+### P3d — Composite im Deferred-Pfad (statt oder zusätzlich zu P3)
+`ambSpec` aus dem Lighting-Resolve herauslösen (`heLight.ssr.w`), Reflexions-Pass nach 4.5,
+SSR-Trace hinter den Resolve verschieben (History-Textur entfällt).
+
+**Verifikation:** dieselbe `ShadowValidation`-Szene in beiden Pfaden — Deferred muss bei
+statischer Kamera nahe an Forward liegen und bei **bewegter** Kamera sichtbar sauberer sein
+(kein Nachziehen der Spiegelung).
 
 ### P4 — Qualität
 Roughness-Mips + roughness-abhängiger Lerp, temporale Akkumulation mit Reprojektion und
@@ -339,6 +385,9 @@ HW verifiziert).
 
 ## 9. Offene Entscheidungen (brauchen deine Antwort)
 
+0. **Reihenfolge:** erst `deferred-renderer-plan.md` P0–P2, dann SSR (Empfehlung — spart den
+   Forward-Composite und liefert sofort die lag-freie Variante), oder SSR zuerst im Forward-Pfad,
+   weil es schneller sichtbar ist?
 1. **Default-Zustand:** SSR standardmäßig **aus** (wie GI) oder **an** für neue Projekte?
    Empfehlung: aus, bis P4 durch ist.
 2. **Fresnel jetzt oder später:** Der korrekte Grazing-Angle-Boost verändert auch das Aussehen
