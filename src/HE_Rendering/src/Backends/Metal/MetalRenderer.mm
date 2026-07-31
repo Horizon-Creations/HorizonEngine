@@ -554,7 +554,11 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
 	// even at noon. A floor of 0.1 keeps the sample safely in the cool sky dome.
 	float3 Nup     = normalize(float3(N.x, max(N.y, 0.1), N.z));
 	float3 ambDiff = skyEnv.sample(skyEnvSmp, Nup).rgb    * diffuseColor;
-	float3 ambSpec = skyEnv.sample(skyEnvSmp, Rrough).rgb * specColor;
+	// Fresnel (Schlick, roughness-aware — same term as heLitP, ssr-plan P4).
+	float  NdV = saturate(dot(N, V));
+	float3 fresnelSpec = specColor
+		+ (max(float3(1.0 - wRough), specColor) - specColor) * pow(1.0 - NdV, 5.0);
+	float3 ambSpec = skyEnv.sample(skyEnvSmp, Rrough).rgb * fresnelSpec;
 	float3 ambient = ambDiff * 0.35 + ambSpec * (1.0 - 0.6 * wRough);
 	// Screen-space ambient occlusion darkens only the IBL indirect term in
 	// crevices; the direct lighting added below is left untouched. 1.0 = fully lit.

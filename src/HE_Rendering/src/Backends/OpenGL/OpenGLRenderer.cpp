@@ -366,7 +366,11 @@ void main()
 	// even at noon. A floor of 0.1 keeps the sample safely in the cool sky dome.
 	vec3 Nup     = normalize(vec3(N.x, max(N.y, 0.1), N.z));
 	vec3 ambDiff = texture(uSkyEnv, Nup).rgb    * diffuseColor;
-	vec3 ambSpec = texture(uSkyEnv, Rrough).rgb * specColor;
+	// Fresnel (Schlick, roughness-aware — same term as heLitP, ssr-plan P4).
+	float NdV = clamp(dot(N, V), 0.0, 1.0);
+	vec3 fresnelSpec = specColor
+		+ (max(vec3(1.0 - wRough), specColor) - specColor) * pow(1.0 - NdV, 5.0);
+	vec3 ambSpec = texture(uSkyEnv, Rrough).rgb * fresnelSpec;
 	vec3 ambient = ambDiff * 0.35 + ambSpec * (1.0 - 0.6 * wRough);
 	// Screen-space ambient occlusion darkens only the IBL indirect term in
 	// crevices; the direct lighting added below is left untouched. 1.0 = fully lit.
