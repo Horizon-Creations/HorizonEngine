@@ -951,6 +951,25 @@ vertex SSAOOut ssaoVertex(uint vid [[vertex_id]])
 	return o;
 }
 
+// Deferred (plan P5): reconstruct the view-space position from the G-buffer
+// depth instead of re-rasterizing the scene — the whole extract/cull/sort +
+// geometry pre-pass disappears when the G-buffer exists this frame. Stored
+// depth is the GL-convention ndc z (the scene raster uses the unfixed
+// projection), so invProj is the plain inverse of the GL projection; uv origin
+// is top-left → ndc.y flips.
+struct SSAODepthPosParams { float4x4 invProj; };
+fragment float4 ssaoDepthPosFragment(SSAOOut in [[stage_in]],
+                                     texture2d<float> depthTex [[texture(0)]],
+                                     sampler          smp      [[sampler(0)]],
+                                     constant SSAODepthPosParams& P [[buffer(0)]])
+{
+	float d = depthTex.sample(smp, in.uv).r;
+	if (d >= 1.0) return float4(0.0);              // background → a = 0
+	float4 clip = float4(in.uv.x * 2.0 - 1.0, 1.0 - 2.0 * in.uv.y, d, 1.0);
+	float4 v = P.invProj * clip;
+	return float4(v.xyz / max(v.w, 1e-8), 1.0);    // a = 1 → valid geometry
+}
+
 struct SSAOParams {
 	float4x4 proj;        // camera projection (GL convention)
 	float4   cfg;         // x,y = noise scale (viewport/4), z = radius, w = bias
@@ -3852,6 +3871,7 @@ void MetalRenderer::Shutdown()
 	if (m_noDepthState)    { CFBridgingRelease(m_noDepthState);    m_noDepthState = nullptr; }
 	if (m_skyDepthState)   { CFBridgingRelease(m_skyDepthState);   m_skyDepthState = nullptr; }
 	if (m_ssaoPosPipeline)  { CFBridgingRelease(m_ssaoPosPipeline);  m_ssaoPosPipeline = nullptr; }
+	if (m_ssaoDepthPosPipeline) { CFBridgingRelease(m_ssaoDepthPosPipeline); m_ssaoDepthPosPipeline = nullptr; }
 	if (m_ssaoPipeline)     { CFBridgingRelease(m_ssaoPipeline);     m_ssaoPipeline = nullptr; }
 	if (m_ssaoBlurPipeline) { CFBridgingRelease(m_ssaoBlurPipeline); m_ssaoBlurPipeline = nullptr; }
 	if (m_ssaoNoiseTex)     { CFBridgingRelease(m_ssaoNoiseTex);     m_ssaoNoiseTex = nullptr; }
@@ -4249,6 +4269,18 @@ void MetalRenderer::CreateScenePipeline()
 			throw std::runtime_error(std::string("MetalRenderer: SSAO pos pipeline failed: ")
 				+ (ssError ? [[ssError localizedDescription] UTF8String] : "unknown"));
 		m_ssaoPosPipeline = (void*)CFBridgingRetain(posPso);
+
+		// Deferred P5 variant: view-pos reconstructed from the G-buffer depth by a
+		// fullscreen draw — no depth attachment, no geometry.
+		MTLRenderPipelineDescriptor* dpDesc = [[MTLRenderPipelineDescriptor alloc] init];
+		dpDesc.vertexFunction   = [ssLib newFunctionWithName:@"ssaoVertex"];
+		dpDesc.fragmentFunction = [ssLib newFunctionWithName:@"ssaoDepthPosFragment"];
+		dpDesc.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
+		id<MTLRenderPipelineState> dpPso = [device newRenderPipelineStateWithDescriptor:dpDesc error:&ssError];
+		if (!dpPso)
+			throw std::runtime_error(std::string("MetalRenderer: SSAO depth-pos pipeline failed: ")
+				+ (ssError ? [[ssError localizedDescription] UTF8String] : "unknown"));
+		m_ssaoDepthPosPipeline = (void*)CFBridgingRetain(dpPso);
 
 		MTLRenderPipelineDescriptor* occDesc = [[MTLRenderPipelineDescriptor alloc] init];
 		occDesc.vertexFunction   = [ssLib newFunctionWithName:@"ssaoVertex"];
@@ -7394,6 +7426,14 @@ void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
 	if (!m_ssaoPosPipeline || !m_ssaoPipeline || !m_ssaoBlurPipeline || !m_world) return;
 	if (width <= 0 || height <= 0) return;
 
+	// Deferred P5: the G-buffer was rasterized this frame — reconstruct the
+	// view-space positions from its depth in one fullscreen draw instead of
+	// re-extracting/culling/sorting and re-rasterizing the whole scene.
+	// m_renderWorld.camera is current (EncodeGBuffer extracted right before).
+	const bool fromGBuffer = m_deferredFrameActive && m_gbDepth && m_ssaoDepthPosPipeline;
+
+	if (!fromGBuffer)
+	{
 	const IRenderer::EnvironmentSettings& env = GetEnvironment();
 	m_extractor.setDayNight(env.dayNightCycle, env.timeOfDay,
 	                        env.sunColor, env.sunIntensity,
@@ -7409,6 +7449,7 @@ void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
 	m_culler.cull(m_renderWorld, m_visible);
 	m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
 	if (m_sortedIndices.empty()) return;
+	}
 
 	EnsureSSAOTargets(width, height);
 	const glm::mat4 viewProj = m_renderWorld.camera.projection * m_renderWorld.camera.view;
@@ -7422,6 +7463,26 @@ void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
 		id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
 
 		// ── 1. View-space position pre-pass ────────────────────────────────
+		if (fromGBuffer)
+		{
+			// Deferred P5: one fullscreen draw reading the G-buffer depth.
+			MTLRenderPassDescriptor* pp = [MTLRenderPassDescriptor renderPassDescriptor];
+			pp.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_ssaoPosTex;
+			pp.colorAttachments[0].loadAction  = MTLLoadActionDontCare;
+			pp.colorAttachments[0].storeAction = MTLStoreActionStore;
+			ftAttachStart((__bridge void*)pp, ssaoBase);
+			id<MTLRenderCommandEncoder> enc = [cmdBuf renderCommandEncoderWithDescriptor:pp];
+			[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_ssaoDepthPosPipeline];
+			struct { glm::mat4 invProj; } dp;
+			dp.invProj = glm::inverse(m_renderWorld.camera.projection);
+			[enc setFragmentBytes:&dp length:sizeof(dp) atIndex:0];
+			[enc setFragmentTexture:(__bridge id<MTLTexture>)m_gbDepth atIndex:0];
+			[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_ssaoPointSampler atIndex:0];
+			[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+			[enc endEncoding];
+		}
+		else
+		{
 		MTLRenderPassDescriptor* pp = [MTLRenderPassDescriptor renderPassDescriptor];
 		pp.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_ssaoPosTex;
 		pp.colorAttachments[0].loadAction  = MTLLoadActionClear;
@@ -7456,6 +7517,7 @@ void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
 			                 indexType:MTLIndexTypeUInt32 indexBuffer:ibuf indexBufferOffset:0];
 		}
 		[enc endEncoding];
+		}
 
 		// ── 2. Occlusion (fullscreen) ──────────────────────────────────────
 		SSAOParamsCPU params;
@@ -9445,30 +9507,19 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			const int sceneH = offscreen ? (int)m_viewportReqH : ph;
 			EnsureHDRTarget(sceneW, sceneH);
 
-			// SSAO occlusion (its own pre-pass + encoders) before the shading pass,
-			// so the scene shader can darken its ambient. Skipped (zero cost) off —
-			// including when GI is active, since GI's probe-sampled indirect diffuse
-			// replaces AO entirely (EncodeScene's giActive gate skips aoTex too).
-			// Rendered at HALF resolution: SSAO was by far the biggest GPU pass
-			// (~1.8 ms, spiking with visible terrain) because its geometry pre-pass +
-			// 32-sample occlusion ran full-res. AO is low-frequency and gets blurred,
-			// so half-res (¼ the pixels) is ~4× cheaper with no visible quality loss;
-			// the scene shader samples it with normalized coords (bilinear upsample).
-			const bool giReplacesAO = m_giEnabled && m_giSupported;
-			if (m_ssaoEnabled && !giReplacesAO) EncodeSSAO((__bridge void*)cmdBuf,
-			                              std::max(1, sceneW / 2), std::max(1, sceneH / 2));
-			else               m_ssaoResult = nullptr;
-			flushPass("Scene");   // detailed: commit the SSAO command buffer (empty if SSAO off)
-
 			// ── Deferred G-buffer pass (docs/deferred-renderer-plan.md) ─────────
 			// When the render path is Deferred (and the pipelines built), the
 			// opaque scene is rasterized into the G-buffer first; the HDR pass
 			// below then starts with a fullscreen lighting resolve instead of the
 			// opaque loop and LOADS the blitted G-buffer depth so sky/skinned/
-			// transparency depth-test against the deferred geometry.
+			// transparency depth-test against the deferred geometry. Encoded
+			// BEFORE SSAO (plan P5): the AO pre-pass then reconstructs its
+			// view-space positions from the G-buffer depth in a single fullscreen
+			// draw instead of re-rasterizing the whole scene.
 			MetalDeferredFrame deferredFrame;
 			const bool deferredActive =
 				m_renderPath == HE::RenderPath::Deferred && EnsureDeferredPipelines();
+			m_deferredFrameActive = deferredActive;
 			if (deferredActive)
 			{
 				EnsureGBufferTargets(sceneW, sceneH);
@@ -9511,6 +9562,22 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			}
 			else if (m_gbColor0 && m_renderPath != HE::RenderPath::Deferred)
 				DestroyGBufferTargets(); // freed when the user switches back to forward
+
+			// SSAO occlusion (its own pre-pass + encoders) before the shading pass,
+			// so the scene shader can darken its ambient. Skipped (zero cost) off —
+			// including when GI is active, since GI's probe-sampled indirect diffuse
+			// replaces AO entirely (EncodeScene's giActive gate skips aoTex too).
+			// Rendered at HALF resolution: SSAO was by far the biggest GPU pass
+			// (~1.8 ms, spiking with visible terrain) because its geometry pre-pass +
+			// 32-sample occlusion ran full-res. AO is low-frequency and gets blurred,
+			// so half-res (¼ the pixels) is ~4× cheaper with no visible quality loss;
+			// the scene shader samples it with normalized coords (bilinear upsample).
+			// In deferred mode the pre-pass reads the G-buffer depth instead (P5).
+			const bool giReplacesAO = m_giEnabled && m_giSupported;
+			if (m_ssaoEnabled && !giReplacesAO) EncodeSSAO((__bridge void*)cmdBuf,
+			                              std::max(1, sceneW / 2), std::max(1, sceneH / 2));
+			else               m_ssaoResult = nullptr;
+			flushPass("Scene");   // detailed: commit the SSAO command buffer (empty if SSAO off)
 
 			// Scene → RGBA16Float HDR target.
 			MTLRenderPassDescriptor* hdrPass = [MTLRenderPassDescriptor renderPassDescriptor];

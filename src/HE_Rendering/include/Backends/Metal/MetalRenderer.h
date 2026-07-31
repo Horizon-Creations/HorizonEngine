@@ -190,6 +190,7 @@ private:
 	void* m_deferredResolvePipeline = nullptr; // id<MTLRenderPipelineState> — fullscreen heLitP resolve
 	bool  m_deferredPipelinesTried  = false;   // build attempted once; failure logs + falls back forward
 	int   m_gbufferDebugView        = 0;       // HE_DUMP_GBUFFER (1..4), read once at Initialize
+	bool  m_deferredFrameActive     = false;   // this frame renders deferred (set before SSAO — P5 reads it)
 	void  EnsureGBufferTargets(int width, int height);
 	void  DestroyGBufferTargets();
 	bool  EnsureDeferredPipelines();  // true when both PSOs exist
@@ -538,6 +539,7 @@ private:
 	// darken the image-based ambient in crevices. Encoded before the HDR scene
 	// pass (it owns its own render encoders); skipped entirely when disabled.
 	void* m_ssaoPosPipeline  = nullptr; // id<MTLRenderPipelineState> (writes view pos)
+	void* m_ssaoDepthPosPipeline = nullptr; // deferred P5: view pos from G-buffer depth (fullscreen)
 	void* m_ssaoPipeline     = nullptr; // fullscreen occlusion estimate
 	void* m_ssaoBlurPipeline = nullptr; // fullscreen box blur
 	void* m_ssaoPosTex       = nullptr; // id<MTLTexture> RGBA16F view position

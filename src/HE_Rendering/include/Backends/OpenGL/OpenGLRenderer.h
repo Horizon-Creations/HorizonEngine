@@ -692,6 +692,10 @@ private:
 	// the image-based ambient in crevices. Runs before the geometry pass; skipped
 	// entirely (zero cost) when disabled. Always full-resolution.
 	unsigned int m_ssaoPosProgram = 0;   // pre-pass: writes view-space position
+	// Deferred P5: view-pos reconstruction from the G-buffer depth (fullscreen).
+	unsigned int m_ssaoDepthPosProgram = 0;
+	int          m_uDepthPosDepth   = -1;
+	int          m_uDepthPosInvProj = -1;
 	int          m_uPosMVP        = -1;   // clip = viewProj * model
 	int          m_uPosModelView  = -1;   // view * model (view-space position out)
 	unsigned int m_ssaoProgram    = 0;   // fullscreen occlusion estimate
@@ -726,9 +730,11 @@ private:
 	void DestroySSAOTargets();
 	// Pre-pass + occlusion + blur using the geometry draw calls; returns the
 	// blurred AO texture id (or 0 if unavailable). Restores GL_TEXTURE0 active.
+	// fromGBufferDepth (deferred, plan P5): reconstruct the view-space positions
+	// from m_gbDepthTex in one fullscreen draw instead of the geometry pre-pass.
 	unsigned int RenderSSAO(const CommandBuffer& cmds, int pw, int ph,
 	                        const glm::mat4& viewProj, const glm::mat4& view,
-	                        const glm::mat4& proj);
+	                        const glm::mat4& proj, bool fromGBufferDepth = false);
 
 	// ── Global Illumination (GL 4.3+ compute port, Windows/Linux — blind) ──────
 	// Software counterpart of the Metal ray-traced DDGI path: CPU-built BVH
