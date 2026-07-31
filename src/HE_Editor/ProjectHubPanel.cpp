@@ -1,5 +1,6 @@
 #include "ProjectHubPanel.h"
 #include "EditorApplication.h"           // AppContext, ProjectManager, EditorConfig
+#include "TutorialPanel.h"               // Help ▸ Interactive Tutorial → sandbox offer
 #include "HorizonVersion.h"
 #ifdef __APPLE__
 #include "MacMenuBar.h"   // native system menu bar (replaces the ImGui menu row)
@@ -64,6 +65,8 @@ void render(AppContext& ctx)
                 ctx.hubCreateError.clear();
                 break;
             case MC::OpenProject: s_hubOpenBrowseRequested = true;   break;
+            // No project to tour yet — the tutorial's answer here is its sandbox offer.
+            case MC::OpenTutorial: TutorialPanel::showWelcome();      break;
             default: break;   // project-scoped / editor-only items: no-op here
             }
         }
@@ -123,18 +126,8 @@ void render(AppContext& ctx)
     const float panelW  = vp->Size.x / 3.0f;
     const float padding = 16.0f;
 
-    static const std::array<const char*, 4> kPresetNames = {
-        "Empty Project",
-        "Game",
-        "Simulation",
-        "Tool",
-    };
-    static const std::array<const char*, 4> kPresetDesc = {
-        "Only the basic folder skeleton, no extra content.",
-        "Assets, Scenes and Scripts folders + a sample scene file.",
-        "Assets, Scenes and Data folders.",
-        "Assets and Source folders.",
-    };
+    // Templates: see kPresetNames/kPresetDescs in the header (shared with the
+    // in-editor File ▸ New Project popup).
     // Index order MUST match ProjectScriptLanguage (HorizonCode, Lua, Python, Cpp).
     static const std::array<const char*, 4> kLangNames = {
         "HorizonCode (Visual Scripting)",
@@ -173,11 +166,13 @@ void render(AppContext& ctx)
     ImGui::SetCursorPosX(padding);
     ImGui::PushItemWidth(panelW - padding * 2.0f);
     ImGui::ListBox("##Presets", &ctx.hubSelectedPreset,
-        kPresetNames.data(), static_cast<int>(kPresetNames.size()), 4);
+        kPresetNames, kPresetCount, 5);
     ImGui::PopItemWidth();
 
     ImGui::SetCursorPosX(padding);
-    ImGui::TextDisabled("%s", kPresetDesc[ctx.hubSelectedPreset]);
+    ImGui::PushTextWrapPos(padding + (panelW - padding * 2.0f));
+    ImGui::TextDisabled("%s", kPresetDescs[ctx.hubSelectedPreset]);
+    ImGui::PopTextWrapPos();
 
     ImGui::Spacing();
     ImGui::SetCursorPosX(padding);

@@ -1,5 +1,7 @@
 #include "ProjectManager.h"
 #include "CppScaffoldTemplates.h"
+#include <ContentManager/DefaultAssets.h> // well-known UUIDs seeded into the tutorial scene
+#include <Types/Enums.h>                  // HE::LightType
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
@@ -198,6 +200,36 @@ bool writeCppClass(const std::string& projectRoot, const std::string& className,
 	return true;
 }
 
+bool scaffoldTutorialProject(const std::string& projectRoot,
+                             const std::string& projectName)
+{
+	const std::string readme =
+		"# " + projectName + "\n"
+		"\n"
+		"A sandbox created by the Horizon Engine editor for the interactive tutorial.\n"
+		"Nothing in here is special — it is an ordinary project, and every change you\n"
+		"make while following the tour is a change to a real project you can keep.\n"
+		"\n"
+		"## What is already in it\n"
+		"\n"
+		"`Content/StartupScene.hescene` opens with:\n"
+		"\n"
+		"- **Sky** and **Weather** entities (atmosphere, clouds, wind — all scene data)\n"
+		"- **Ground**, a wide flattened cube to stand things on\n"
+		"- **Cube**, a single box above the ground to select, move and re-material\n"
+		"- **Point Light**, a local light next to it\n"
+		"\n"
+		"## Reopening the tour\n"
+		"\n"
+		"Help - Interactive Tutorial. Your place in it is remembered between sessions,\n"
+		"and the Tutorial template in the Project Hub recreates this sandbox at any\n"
+		"time if you want to start over without touching the project you built here.\n";
+
+	std::error_code ec;
+	fs::create_directories(fs::path(projectRoot), ec);
+	return writeTextFileIfAbsent(fs::path(projectRoot) / "TUTORIAL.md", readme);
+}
+
 bool scaffoldCppProject(const std::string& projectRoot,
                         const std::string& projectName,
                         const std::string& startupSceneName)
@@ -216,6 +248,114 @@ bool scaffoldCppProject(const std::string& projectRoot,
 	ok &= writeTextFileIfAbsent(source / "README.md",          CppScaffold::readme(projectName));
 	ok &= writeCppLevelScript(projectRoot, startupSceneName);
 	return ok;
+}
+
+// ─── Startup scene ────────────────────────────────────────────────────────────
+// The Content/StartupScene.hescene every new project gets. Root entity "World"
+// (id 0, no parent); Game/Simulation/Tutorial additionally get the dedicated
+// "Sky" (EnvironmentComponent) and "Weather" (WeatherComponent) entities, and
+// Tutorial gets a furnished sandbox on top of that — the guided tour's first
+// chapters are about selecting, moving and re-materialling something, which needs
+// there to *be* something.
+//
+// An empty component object lets the scene loader fill every field from the
+// struct defaults, so this stays decoupled from the components' exact field lists;
+// the tutorial entities only spell out the fields whose defaults are wrong for
+// them. Empty/Tool projects start with a bare world (add a Sky via the editor's
+// Environment window).
+static json startupSceneJson(ProjectPreset preset)
+{
+	constexpr uint32_t kNull = std::numeric_limits<uint32_t>::max();
+
+	const bool seedEnvironment = (preset == ProjectPreset::Game ||
+	                              preset == ProjectPreset::Simulation ||
+	                              preset == ProjectPreset::Tutorial);
+	const bool furnish = (preset == ProjectPreset::Tutorial);
+
+	auto vec3 = [](float x, float y, float z) { return json::array({ x, y, z }); };
+	// Matches SceneSerializer's uuidToJson: [hi, lo].
+	auto uuid = [](const HE::UUID& id) { return json::array({ id.hi, id.lo }); };
+	auto transform = [&](json position, json scale)
+	{
+		return json{ { "position", std::move(position) },
+		             { "rotation", vec3(0.0f, 0.0f, 0.0f) },
+		             { "scale",    std::move(scale) } };
+	};
+
+	json entities = json::array();
+	json rootChildren = json::array();
+
+	json rootEntity;
+	rootEntity["id"]     = 0;
+	rootEntity["name"]   = "World";
+	rootEntity["parent"] = kNull;
+	// Filled in below once the children are known — pushed last so the array is
+	// complete, but kept at index 0 of `entities` for readability of the file.
+	entities.push_back(rootEntity);
+
+	auto addChild = [&](uint32_t id, const char* name, json components)
+	{
+		rootChildren.push_back(id);
+		json e;
+		e["id"]         = id;
+		e["name"]       = name;
+		e["parent"]     = 0;
+		e["children"]   = json::array();
+		e["components"] = std::move(components);
+		entities.push_back(std::move(e));
+	};
+
+	if (seedEnvironment)
+	{
+		// The tutorial's Sky is the one seeded environment that is not left at the
+		// struct defaults. Those are a dome sky with the day-night cycle OFF, which
+		// means timeOfDay does nothing at all (the renderer then takes the sun from
+		// the scene's own directional light — see EnvironmentSettings.h) and the
+		// frame is flat and shadowless. Turning the cycle on is what makes the
+		// tour's "drag the time-of-day slider" step actually move the sun.
+		// Keys are EnvironmentComponent member names (HE_ENV_FIELDS_* /
+		// SceneSerializer); anything left out falls back to the struct default.
+		addChild(1, "Sky", json{ { "environment", furnish
+			? json{ { "dayNightCycle", true  },   // without this timeOfDay is inert
+			        { "timeOfDay",     0.32f },   // mid-morning: raking light, long shadows
+			        { "cloudMode",     1     },   // volumetric clouds rather than the dome
+			        { "cloudCoverage", 0.4f  } }
+			: json::object() } });
+		addChild(2, "Weather", json{ { "weather", json::object() } });
+	}
+
+	if (furnish)
+	{
+		// A wide, flattened cube rather than the Plane primitive: it has thickness,
+		// so a box collider added during the physics chapter behaves sensibly and
+		// the tutorial's falling cube lands on something instead of through it.
+		// The neutral-grey terrain material, not the white default one — on the
+		// default material the cube would be white geometry on a white floor.
+		addChild(3, "Ground", json{
+			{ "transform", transform(vec3(0.0f, -0.25f, 0.0f), vec3(24.0f, 0.5f, 24.0f)) },
+			{ "mesh",      json{ { "asset", uuid(HE::kDefaultCubeMeshId) } } },
+			{ "material",  json{ { "asset", uuid(HE::kDefaultTerrainMaterialId) } } },
+		});
+		addChild(4, "Cube", json{
+			{ "transform", transform(vec3(0.0f, 1.0f, 0.0f), vec3(1.0f, 1.0f, 1.0f)) },
+			{ "mesh",      json{ { "asset", uuid(HE::kDefaultCubeMeshId) } } },
+			{ "material",  json{ { "asset", uuid(HE::kDefaultMaterialId) } } },
+		});
+		addChild(5, "Point Light", json{
+			{ "transform", transform(vec3(2.5f, 3.0f, 2.5f), vec3(1.0f, 1.0f, 1.0f)) },
+			{ "light",     json{ { "type",      static_cast<uint8_t>(HE::LightType::Point) },
+			                     { "color",     vec3(1.0f, 0.85f, 0.7f) },
+			                     { "intensity", 4.0f },
+			                     { "range",     12.0f } } },
+		});
+	}
+
+	entities[0]["children"] = std::move(rootChildren);
+
+	json scene;
+	scene["version"]  = "1.1";
+	scene["entities"] = std::move(entities);
+	return scene;
 }
 
 bool ProjectManager::createNewProject(const std::string& projectDir,
@@ -238,6 +378,10 @@ bool ProjectManager::createNewProject(const std::string& projectDir,
 	// ── Preset-specific sub-folders ───────────────────────────────────────────
 	switch (preset)
 	{
+	// The tutorial sandbox is a Game project with a furnished scene — the tour
+	// walks through scripts, audio, models, materials, prefabs and UI, so every
+	// folder it mentions has to already be there to put things in.
+	case ProjectPreset::Tutorial:
 	case ProjectPreset::Game:
 		fs::create_directories(root / "Content" / "Scripts");
 		fs::create_directories(root / "Content" / "Audio");
@@ -271,56 +415,10 @@ bool ProjectManager::createNewProject(const std::string& projectDir,
 	// Default startup scene: Content/StartupScene.hescene
 	fs::path scenePath = root / "Content" / "StartupScene.hescene";
 
-	// Game/Simulation projects ship with a sky & weather out of the box; Empty/Tool
-	// projects start with a bare world (add a Sky via the editor's Environment window).
-	const bool seedEnvironment = (preset == ProjectPreset::Game ||
-	                              preset == ProjectPreset::Simulation);
-
-	// Write the startup scene JSON. Root entity "World" (id 0, no parent); when seeding,
-	// add dedicated "Sky" (EnvironmentComponent) and "Weather" (WeatherComponent) child
-	// entities. An empty component object lets the scene loader fill every field from the
-	// struct defaults, so this stays decoupled from the components' exact field lists.
 	{
 		std::ofstream sceneOut(scenePath);
 		if (sceneOut.is_open())
-		{
-			constexpr uint32_t kNull = std::numeric_limits<uint32_t>::max();
-			json entities = json::array();
-
-			json rootEntity;
-			rootEntity["id"]     = 0;
-			rootEntity["name"]   = "World";
-			rootEntity["parent"] = kNull;
-			json rootChildren = json::array();
-			if (seedEnvironment) { rootChildren.push_back(1); rootChildren.push_back(2); }
-			rootEntity["children"] = rootChildren;
-			entities.push_back(rootEntity);
-
-			if (seedEnvironment)
-			{
-				json sky;
-				sky["id"]         = 1;
-				sky["name"]       = "Sky";
-				sky["parent"]     = 0;
-				sky["children"]   = json::array();
-				sky["components"] = { { "environment", json::object() } };
-				entities.push_back(sky);
-
-				json weather;
-				weather["id"]         = 2;
-				weather["name"]       = "Weather";
-				weather["parent"]     = 0;
-				weather["children"]   = json::array();
-				weather["components"] = { { "weather", json::object() } };
-				entities.push_back(weather);
-			}
-
-			json scene;
-			scene["version"]  = "1.1";
-			scene["entities"] = entities;
-
-			sceneOut << scene.dump(4);
-		}
+			sceneOut << startupSceneJson(preset).dump(4);
 	}
 
 	json j;
@@ -350,6 +448,11 @@ bool ProjectManager::createNewProject(const std::string& projectDir,
 	// project is still usable; the user can regenerate the scaffold.
 	if (scriptLanguage == ProjectScriptLanguage::Cpp)
 		scaffoldCppProject(root.string(), projectName, scenePath.stem().string());
+
+	// Same deal for the tutorial sandbox's TUTORIAL.md: nice to have, never a
+	// reason to fail a project that is otherwise complete on disk.
+	if (preset == ProjectPreset::Tutorial)
+		scaffoldTutorialProject(root.string(), projectName);
 
 	m_currentProject.name                = projectName;
 	m_currentProject.path                = heprojPath.string();

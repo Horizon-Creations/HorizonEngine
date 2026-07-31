@@ -50,6 +50,7 @@ add_executable(he_tests
     test_project_exporter.cpp
     test_export_profiles.cpp
     test_cpp_scaffold.cpp
+    test_tutorial.cpp
     test_lod.cpp
     test_weather.cpp
     test_gamelogic_loader.cpp
@@ -72,6 +73,10 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorUndo.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorCamera.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorAssetTypeCache.cpp
+    # The tutorial curriculum + its completion predicates are deliberately
+    # ImGui-free (TutorialPanel.cpp holds everything that is not), so the step
+    # tables can be asserted here without a window.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/TutorialSteps.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetThumbnailCache.cpp
 )
 
