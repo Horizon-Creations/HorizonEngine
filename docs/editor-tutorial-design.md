@@ -145,8 +145,13 @@ werden kann.
   anders liest als gedacht, wäre genau der erste Eindruck, den dieses Feature nicht
   vertragen kann. Dazu die Gegenprobe, dass Game/Empty unverändert bleiben.
 
-Optisch verifiziert (Metal, `HE_DUMP_PATH`-Headless-Dump der erzeugten Sandbox):
-Sky mit volumetrischen Wolken, grauer Boden, Würfel mit Schlagschatten.
+Optisch verifiziert (Metal, `HE_DUMP_PATH`-Headless-Dump der **erzeugten** Sandbox — also
+mit ihrer eigenen Umgebung, nicht der `HE_DUMP_SKYTEST`-Ersatzszene): Sky rendert, Boden
+und Würfel stehen richtig, und mit `dayNightCycle: true` wirft der Würfel einen
+gerichteten Schlagschatten, den derselbe Dump mit den Struct-Defaults *nicht* hatte.
+`cloudMode: 1` ist dabei **nicht** einzeln nachgewiesen — die Kamera des Dumps kommt aus
+den `EditorCam*`-Config-Werten und blickt leicht nach unten, es ist also kaum Himmel im
+Bild.
 
 ## Offen
 
