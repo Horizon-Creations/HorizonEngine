@@ -1,12 +1,15 @@
 #include "AssetThumbnailCache.h"
 #include "EditorAssetTypeCache.h"      // path → AssetType (cached HAsset header sniff)
 #include <ContentManager/ContentManager.h>
+#include <ContentManager/Assets.h>
+#include <MaterialGraph/MaterialGraph.h> // material-FUNCTION tiles wrap the graph
 #include <Renderer/IRenderer.h>
 #include <Types/Enums.h>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <unordered_map>
 #include <vector>
 
@@ -68,17 +71,93 @@ namespace
 		s_pendingDestroy.clear();
 	}
 
-	// The three asset types a thumbnail can be rendered for. Anything else keeps
-	// its extension icon.
+	// The asset types a thumbnail can be rendered for. Anything else keeps its
+	// per-type icon. MaterialFunction maps onto the Material kind because that is
+	// how it is drawn — see makeMaterialFunctionScratch.
 	bool thumbnailKindOf(const std::string& absPath, ThumbnailKind& out)
 	{
 		switch (EditorAssetTypeCache::assetTypeOf(absPath))
 		{
-			case HE::AssetType::Material:     out = ThumbnailKind::Material;     return true;
-			case HE::AssetType::StaticMesh:   out = ThumbnailKind::StaticMesh;   return true;
-			case HE::AssetType::SkeletalMesh: out = ThumbnailKind::SkeletalMesh; return true;
+			case HE::AssetType::Material:         out = ThumbnailKind::Material;     return true;
+			case HE::AssetType::MaterialFunction: out = ThumbnailKind::Material;     return true;
+			case HE::AssetType::StaticMesh:       out = ThumbnailKind::StaticMesh;   return true;
+			case HE::AssetType::SkeletalMesh:     out = ThumbnailKind::SkeletalMesh; return true;
 			default: return false;
 		}
+	}
+
+	// ── Material functions ───────────────────────────────────────────────────
+	// A function is a reusable SUB-graph: it has no surface of its own, so there
+	// is nothing to hand the renderer directly. The Material Editor already
+	// solves this for its own preview by wrapping the function in a throwaway
+	// material — Output ← FunctionCall, lit — and rendering that; a tile does the
+	// same so the grid and the function's editor tab show the same picture.
+	//
+	// One scratch material is reused for every function. Tiles are rendered one
+	// at a time and then cached, so a second live one never exists, and the
+	// renderer keys its program on the SOURCE hash — a rewritten scratch
+	// naturally lands on a different program without any cache juggling.
+	HE::UUID s_fnScratchMaterial{};
+
+	// Non-caching function-graph loader for codegen to resolve nested
+	// FunctionCall nodes. Deliberately not the Material Editor's cached one:
+	// that cache belongs to the open tabs and is invalidated on save, whereas a
+	// tile is generated once and then lives on disk. The map only exists because
+	// MatFunctionLoader hands back a POINTER, which has to stay alive.
+	const HE::MaterialGraph* loadFunctionGraph(const std::string& relPath)
+	{
+		static std::map<std::string, HE::MaterialGraph> graphs;
+		if (relPath.empty() || !s_content) return nullptr;
+		if (auto it = graphs.find(relPath); it != graphs.end()) return &it->second;
+		const HE::UUID id = s_content->loadAsset(relPath);
+		const MaterialFunctionAsset* fn = s_content->getMaterialFunction(id);
+		if (!fn) return nullptr;
+		HE::MaterialGraph g;
+		if (!fn->nodeGraphJson.empty() && !HE::materialGraphFromJson(fn->nodeGraphJson, g))
+			return nullptr;
+		return &(graphs[relPath] = std::move(g));
+	}
+
+	// The scratch material that renders material function `relPath`, or a null
+	// UUID when the function has no output pin (nothing to show).
+	HE::UUID makeMaterialFunctionScratch(const std::string& relPath)
+	{
+		if (!s_content) return {};
+		const HE::MaterialGraph* fnGraph = loadFunctionGraph(relPath);
+		if (!fnGraph) return {};
+		bool hasOutput = false;
+		for (const auto& n : fnGraph->nodes)
+			if (n.type == HE::MatNodeType::FnOutput) { hasOutput = true; break; }
+		if (!hasOutput) return {};
+
+		if (s_fnScratchMaterial == HE::UUID{})
+		{
+			MaterialAsset scratch;
+			scratch.type = HE::AssetType::Material;
+			scratch.name = "__thumbnailFunctionPreview";
+			s_fnScratchMaterial = s_content->registerMaterial(std::move(scratch));
+		}
+		MaterialAsset* sm = s_content->getMaterialMutable(s_fnScratchMaterial);
+		if (!sm) return {};
+
+		HE::MaterialGraph pg;
+		const int out = pg.addNode(HE::MatNodeType::Output);
+		if (HE::MatGraphNode* n = pg.findNode(out)) n->p[0] = 1.0f;  // lit — read it as a surface
+		const int call = pg.addNode(HE::MatNodeType::FunctionCall);
+		if (HE::MatGraphNode* n = pg.findNode(call)) n->s = relPath;
+		pg.connect(call, 0, out, HE::kMatOutputBaseColorPin); // first FnOutput → BaseColor
+
+		const HE::MatShaderGen gen = HE::generateFragment(pg, loadFunctionGraph);
+		if (gen.glsl.empty()) return {};
+		sm->customShaderFragGlsl = gen.glsl;
+		sm->customShaderVertGlsl = gen.vertexBody;
+		sm->shaderParamData.clear();
+		for (const auto& slot : gen.params)
+			sm->shaderParamData.insert(sm->shaderParamData.end(), slot.value, slot.value + 4);
+		sm->graphTexturePaths = gen.textures;
+		sm->graphTextureIds.clear();   // loose editor assets resolve by path
+		if (s_renderer) s_renderer->InvalidateMaterial(s_fnScratchMaterial);
+		return s_fnScratchMaterial;
 	}
 
 	// Content-relative path (or the absolute one when the asset lives under
@@ -90,6 +169,11 @@ namespace
 		const std::string rel = s_content->toContentRelativePath(absPath);
 		return rel.empty() ? absPath : rel;
 	}
+}
+
+HE::UUID materialFunctionScratch(const std::string& relPath)
+{
+	return makeMaterialFunctionScratch(relPath);
 }
 
 void setContext(IRenderer* renderer, ContentManager* cm, const std::string& cacheDir)
@@ -169,7 +253,12 @@ void* get(const std::string& absPath)
 	// with the tile showing its icon fallback in the meantime.
 	if (s_rendersLeft <= 0) return nullptr;
 
-	const HE::UUID id = s_content->loadAsset(relPath);
+	// A material FUNCTION is rendered through a scratch material standing in for
+	// it; everything else is drawn as itself.
+	const bool isFunction =
+		EditorAssetTypeCache::assetTypeOf(absPath) == HE::AssetType::MaterialFunction;
+	const HE::UUID id = isFunction ? makeMaterialFunctionScratch(relPath)
+	                               : s_content->loadAsset(relPath);
 	if (id == HE::UUID{}) { e.state = State::Unsupported; return nullptr; }
 
 	std::vector<uint8_t> pixels;
