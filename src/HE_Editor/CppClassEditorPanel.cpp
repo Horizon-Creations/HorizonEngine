@@ -142,6 +142,12 @@ namespace CppClassEditorPanel
 		return st && (bufDirty(st->header) || bufDirty(st->source));
 	}
 
+	void appendDirtyPaths(std::vector<std::string>& out)
+	{
+		s_states.appendPathsIf(
+			[](const State& st) { return bufDirty(st.header) || bufDirty(st.source); }, out);
+	}
+
 	void forget(const std::string& path) { s_states.forget(path); }
 
 	void render(AppContext& ctx, const std::string& path, const ImVec2& pos, const ImVec2& size)

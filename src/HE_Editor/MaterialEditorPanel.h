@@ -2,6 +2,7 @@
 #include "EditorUI.h"
 #include <imgui.h>
 #include <string>
+#include <vector>
 
 // The material node-graph editor (M3) — a top-level editor tab opened by double-clicking
 // a material asset in the Content Browser. Edits the HE::MaterialGraph stored in the
@@ -20,6 +21,10 @@ namespace MaterialEditorPanel
 
 	// True if the graph has edits not yet saved to disk (drives the tab's dirty mark).
 	bool isDirty(const std::string& assetPath);
+	// Paths of every unsaved tab this panel holds, open or already closed.
+	// See AssetPanelState::appendDirtyPaths — a closed dirty tab keeps its
+	// state but leaves the tab vector, so the quit guard must ask here.
+	void appendDirtyPaths(std::vector<std::string>& out);
 
 	// Whether the .hasset at `path` is a material / material-function asset
 	// (reads the HAsset header type; cached per path).

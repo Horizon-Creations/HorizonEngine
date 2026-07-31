@@ -1,5 +1,6 @@
 #pragma once
 #include <string>
+#include <vector>
 #include <imgui.h>
 
 struct AppContext;
@@ -21,6 +22,10 @@ namespace CppClassEditorPanel
 
 	// True if either the header or the source buffer has unsaved edits.
 	bool isDirty(const std::string& assetPath);
+	// Paths of every unsaved tab this panel holds, open or already closed.
+	// See AssetPanelState::appendDirtyPaths — a closed dirty tab keeps its
+	// state but leaves the tab vector, so the quit guard must ask here.
+	void appendDirtyPaths(std::vector<std::string>& out);
 
 	// Whether `path` is a C++ source/header file by extension
 	// (.h/.hpp/.hh/.hxx/.cpp/.cc/.cxx/.c). Raw-file check — no HAsset header.

@@ -840,6 +840,7 @@ void HorizonCodeClassPanel::forget(const std::string& path) { s_classStates.forg
 
 bool HorizonCodeClassPanel::isDirty(const std::string& path) { return s_classStates.dirty(path); }
 
+void HorizonCodeClassPanel::appendDirtyPaths(std::vector<std::string>& out) { s_classStates.appendDirtyPaths(out); }
 void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath,
                                    const ImVec2& pos, const ImVec2& size)
 {

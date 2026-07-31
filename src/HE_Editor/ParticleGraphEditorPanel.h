@@ -2,6 +2,7 @@
 #include "EditorUI.h"
 #include <imgui.h>
 #include <string>
+#include <vector>
 
 // The particle emitter node graph editor (HE::ParticleGraph) — a top-level tab
 // opened by double-clicking a ParticleSystem .hasset in the Content Browser.
@@ -20,6 +21,10 @@ namespace ParticleGraphEditorPanel
 	// True if the graph has edits not yet saved to disk (drives the tab's dirty mark
 	// and keeps the close-tab/exit unsaved-changes check from dropping the state).
 	bool isDirty(const std::string& assetPath);
+	// Paths of every unsaved tab this panel holds, open or already closed.
+	// See AssetPanelState::appendDirtyPaths — a closed dirty tab keeps its
+	// state but leaves the tab vector, so the quit guard must ask here.
+	void appendDirtyPaths(std::vector<std::string>& out);
 
 	// Whether the .hasset at `path` is a particle-system asset (reads the HAsset
 	// header type; cached per path — same convention as MaterialEditorPanel).

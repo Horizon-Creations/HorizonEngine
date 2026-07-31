@@ -201,8 +201,9 @@ struct AppContext
 	// unsaved changes since the last save/load (tracked via the undo revision).
 	std::string& currentScenePath;
 	bool         sceneDirty = false;
-	// Raised by EditorApplication when an OS close request was vetoed (unsaved
-	// scene); the UI turns it into a guarded Quit and clears it.
+	// Raised by EditorApplication when an OS close request was vetoed — either the
+	// scene or an asset panel has unsaved edits (including a panel whose tab was
+	// already closed); the UI turns it into a guarded Quit and clears it.
 	bool&        exitRequested;
 	std::function<void(const std::string&)> saveSceneToPath; // write world → .hescene (JSON)
 	std::function<void(const std::string&)> openScene;          // load .hescene, replacing the world

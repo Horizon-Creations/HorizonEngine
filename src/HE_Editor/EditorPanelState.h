@@ -2,6 +2,7 @@
 #include <Types/UUID.h>
 #include <map>
 #include <string>
+#include <vector>
 
 struct AppContext;
 
@@ -46,6 +47,27 @@ public:
 	{
 		const T* st = find(assetPath);
 		return st && st->dirty;
+	}
+
+	// Every unsaved tab this panel is holding, whether or not it is still OPEN.
+	// Closing a dirty tab deliberately keeps its state (above) while removing it
+	// from EditorUI's tab vector — so anything that answers "is there something to
+	// lose?" by walking the tab vector misses exactly those. The quit guard asks
+	// here instead.
+	void appendDirtyPaths(std::vector<std::string>& out) const
+	{
+		appendPathsIf([](const T& st) { return st.dirty; }, out);
+	}
+
+	// Same, for the panels whose "unsaved" is not a bool on the State — the script
+	// editor compares undo indices, the C++ class editor tests two text buffers.
+	// They pass their own isDirty predicate so there is still exactly one place
+	// that knows how to walk the map.
+	template <class Pred>
+	void appendPathsIf(Pred pred, std::vector<std::string>& out) const
+	{
+		for (const auto& [path, st] : m_states)
+			if (pred(st)) out.push_back(path);
 	}
 
 	// Drop a closed tab's state (see the lifecycle note above).

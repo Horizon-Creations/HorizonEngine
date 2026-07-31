@@ -75,6 +75,7 @@ bool isParticleAsset(const std::string& path)
 
 bool isDirty(const std::string& assetPath) { return s_states.dirty(assetPath); }
 
+void appendDirtyPaths(std::vector<std::string>& out) { s_states.appendDirtyPaths(out); }
 void forget(const std::string& assetPath) { s_states.forget(assetPath); }
 
 namespace

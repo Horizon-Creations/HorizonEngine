@@ -3051,9 +3051,10 @@ bool EditorApplication::OnEvent(const SDL_Event& event)
 	if (osCloseRequest && m_dumpPath.empty() && m_projectLoaded)
 	{
 		const bool sceneDirty = m_undo.revision() != m_savedRevision;
-		const bool tabsDirty  = std::any_of(m_tabs.begin(), m_tabs.end(),
-			[](const AppContext::EditorTab& t)
-			{ return EditorUI::tabHasUnsavedEdits(t.assetPath); });
+		// Panel-driven, not m_tabs-driven: a dirty tab the user CLOSED keeps its
+		// panel state but is gone from m_tabs, so walking m_tabs would let those
+		// edits be thrown away silently.
+		const bool tabsDirty = !EditorUI::unsavedAssetPaths().empty();
 		if (sceneDirty || tabsDirty)
 		{
 			if (window()) window()->CancelClose();

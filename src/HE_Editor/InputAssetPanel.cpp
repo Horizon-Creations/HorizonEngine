@@ -195,6 +195,7 @@ bool InputAssetPanel::isInputAsset(const std::string& path)
 
 bool InputAssetPanel::isDirty(const std::string& path) { return s_states.dirty(path); }
 
+void InputAssetPanel::appendDirtyPaths(std::vector<std::string>& out) { s_states.appendDirtyPaths(out); }
 void InputAssetPanel::forget(const std::string& path)
 {
 	s_states.forget(path);

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 struct AppContext;
 
@@ -20,6 +21,10 @@ public:
 	// dirty asset tabs too — those never touch the world undo revision, so the
 	// scene-dirty test alone lets them be lost without a prompt.
 	static bool tabHasUnsavedEdits(const std::string& assetPath);
+	// Every unsaved asset, including ones whose tab was already closed — the
+	// quit guard needs that wider view (a closed dirty tab keeps its panel
+	// state but leaves ctx.tabs).
+	static std::vector<std::string> unsavedAssetPaths();
 
 private:
 	static void renderEditor(AppContext& ctx, float dt);
