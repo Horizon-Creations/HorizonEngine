@@ -26,7 +26,9 @@
 >   **SSR v1** nach ssr-plan §4.5 — lag-freier Trace + additiver Composite im Tile-Pfad,
 >   Resolve überspringt ambSpec via `heLight.ssr.w` (8341c4d); **Decals v1** — DecalComponent
 >   + Projektor-Pass im Tile-G-Buffer via Framebuffer-Fetch (9121baf).
-> - Offen: SSR-Blur/temporale Glättung (ssr-plan P4), SSR/Decals im Two-Pass-Fallback & GL,
+> - **SSR-Blur (ssr-plan P4, v1):** separierbarer 5-Tap-Gauss (confidence-gewichtet) auf dem
+>   Half-Res-Trace vor dem Composite, ab Quality Med; Quality Low = roher Trace.
+> - Offen: SSR temporale Glättung (ssr-plan P4 v2), SSR/Decals im Two-Pass-Fallback & GL,
 >   Profiler-Messung P6 auf echter HW, Reflection-Probes (Off-Screen-Fallback).
 >
 > **UMGESETZT (2026-07-31): P0–P4 für Metal UND OpenGL.** RenderPath-Enum + Editor-Combo +

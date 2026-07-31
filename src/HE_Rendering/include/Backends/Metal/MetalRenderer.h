@@ -226,8 +226,10 @@ private:
 	bool  m_ssrFrameActive  = false;  // this frame runs SSR (tile deferred + enabled + pipelines)
 	void* m_ssrTracePipeline     = nullptr; // id<MTLRenderPipelineState>
 	void* m_ssrCompositePipeline = nullptr; // id<MTLRenderPipelineState> (ONE/ONE additive)
+	void* m_ssrBlurPipeline      = nullptr; // id<MTLRenderPipelineState> separable 5-tap (plan P4)
 	bool  m_ssrPipelinesTried    = false;
 	void* m_ssrReflTex = nullptr; // id<MTLTexture> RGBA16F half-res: rgb radiance, a confidence
+	void* m_ssrPingTex = nullptr; // id<MTLTexture> same format, ping target of the separable blur
 	int   m_ssrReflW = 0, m_ssrReflH = 0;
 	bool  m_gbStored = false;     // current G-buffer allocation: stored vs memoryless
 	bool  EnsureSSRPipelines();

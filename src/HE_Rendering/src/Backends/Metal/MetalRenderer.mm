@@ -3804,6 +3804,7 @@ void MetalRenderer::Shutdown()
 	m_decalPipelineTried = false;
 	if (m_ssrTracePipeline)     { CFBridgingRelease(m_ssrTracePipeline);     m_ssrTracePipeline = nullptr; }
 	if (m_ssrCompositePipeline) { CFBridgingRelease(m_ssrCompositePipeline); m_ssrCompositePipeline = nullptr; }
+	if (m_ssrBlurPipeline)      { CFBridgingRelease(m_ssrBlurPipeline);      m_ssrBlurPipeline = nullptr; }
 	m_ssrPipelinesTried = false;
 	DestroySSRTarget();
 	m_deferredPipelinesTried = false; // re-Initialize() rebuilds instead of staying forward
@@ -9463,11 +9464,12 @@ bool MetalRenderer::EnsureSSRPipelines()
 		const auto& v  = m_matShaderLib.fullscreenVertex(Backend::Metal);
 		const auto& ft = m_matShaderLib.ssrTrace(Backend::Metal);
 		const auto& fc = m_matShaderLib.ssrComposite(Backend::Metal);
-		if (!(v.ok && ft.ok && fc.ok))
+		const auto& fb = m_matShaderLib.ssrBlur(Backend::Metal);
+		if (!(v.ok && ft.ok && fc.ok && fb.ok))
 		{
 			Logger::Log(Logger::LogLevel::Error,
 				(std::string("MetalRenderer: SSR shader compile failed\n")
-				 + v.log + ft.log + fc.log).c_str());
+				 + v.log + ft.log + fc.log + fb.log).c_str());
 			return false;
 		}
 		NSError* err = nil;
@@ -9477,7 +9479,9 @@ bool MetalRenderer::EnsureSSRPipelines()
 			[NSString stringWithUTF8String:ft.source.c_str()] options:nil error:&err];
 		id<MTLLibrary> cLib = err ? nil : [device newLibraryWithSource:
 			[NSString stringWithUTF8String:fc.source.c_str()] options:nil error:&err];
-		if (vLib && tLib && cLib)
+		id<MTLLibrary> bLib = err ? nil : [device newLibraryWithSource:
+			[NSString stringWithUTF8String:fb.source.c_str()] options:nil error:&err];
+		if (vLib && tLib && cLib && bLib)
 		{
 			MTLRenderPipelineDescriptor* td = [[MTLRenderPipelineDescriptor alloc] init];
 			td.vertexFunction   = [vLib newFunctionWithName:@"main0"];
@@ -9499,8 +9503,15 @@ bool MetalRenderer::EnsureSSRPipelines()
 			cd.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOne;
 			id<MTLRenderPipelineState> cp = [device newRenderPipelineStateWithDescriptor:cd error:&err];
 			if (cp) m_ssrCompositePipeline = (void*)CFBridgingRetain(cp);
+
+			MTLRenderPipelineDescriptor* bd = [[MTLRenderPipelineDescriptor alloc] init];
+			bd.vertexFunction   = [vLib newFunctionWithName:@"main0"];
+			bd.fragmentFunction = [bLib newFunctionWithName:@"main0"];
+			bd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
+			id<MTLRenderPipelineState> bp = [device newRenderPipelineStateWithDescriptor:bd error:&err];
+			if (bp) m_ssrBlurPipeline = (void*)CFBridgingRetain(bp);
 		}
-		const bool ok = m_ssrTracePipeline && m_ssrCompositePipeline;
+		const bool ok = m_ssrTracePipeline && m_ssrCompositePipeline && m_ssrBlurPipeline;
 		if (!ok)
 			Logger::Log(Logger::LogLevel::Error,
 				(std::string("MetalRenderer: SSR pipeline build failed: ")
@@ -9521,6 +9532,7 @@ void MetalRenderer::EnsureSSRTarget(int width, int height)
 	d.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
 	d.storageMode = MTLStorageModePrivate;
 	m_ssrReflTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:d]);
+	m_ssrPingTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:d]);
 	m_ssrReflW = width;
 	m_ssrReflH = height;
 }
@@ -9528,6 +9540,7 @@ void MetalRenderer::EnsureSSRTarget(int width, int height)
 void MetalRenderer::DestroySSRTarget()
 {
 	if (m_ssrReflTex) { CFBridgingRelease(m_ssrReflTex); m_ssrReflTex = nullptr; }
+	if (m_ssrPingTex) { CFBridgingRelease(m_ssrPingTex); m_ssrPingTex = nullptr; }
 	m_ssrReflW = m_ssrReflH = 0;
 }
 
@@ -9583,6 +9596,37 @@ void MetalRenderer::EncodeSSRPasses(void* cmdBufPtr, int width, int height)
 			[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)(m_ssaoPointSampler ? m_ssaoPointSampler : m_linearSampler) atIndex:2];
 			[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
 			[enc endEncoding];
+		}
+
+		// ── 1b. Separable 5-tap blur (ssr-plan §4.3 / P4) ──────────────────
+		// Smooths the jittered march's IGN dithering. Quality Low (16 steps)
+		// skips it, matching the plan's quality tiers; the composite then
+		// samples the raw trace. H pass refl→ping, V pass ping→refl, so the
+		// composite below reads m_ssrReflTex either way.
+		if (m_ssrQuality >= 1)
+		{
+			auto blurPass = [&](void* src, void* dst, float dx, float dy)
+			{
+				HE::MaterialShaderLibrary::SSRBlurUniforms bu;
+				bu.dir[0] = dx;
+				bu.dir[1] = dy;
+				bu.dir[2] = 1.0f / static_cast<float>(tw);
+				bu.dir[3] = 1.0f / static_cast<float>(th);
+				MTLRenderPassDescriptor* bp = [MTLRenderPassDescriptor renderPassDescriptor];
+				bp.colorAttachments[0].texture     = (__bridge id<MTLTexture>)dst;
+				bp.colorAttachments[0].loadAction  = MTLLoadActionDontCare;
+				bp.colorAttachments[0].storeAction = MTLStoreActionStore;
+				id<MTLRenderCommandEncoder> enc = [cmdBuf renderCommandEncoderWithDescriptor:bp];
+				[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_ssrBlurPipeline];
+				[enc setFragmentBytes:&bu length:sizeof(bu) atIndex:0];
+				[enc setFragmentTexture:(__bridge id<MTLTexture>)src atIndex:0];
+				[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
+				[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+				[enc endEncoding];
+			};
+			blurPass(m_ssrReflTex, m_ssrPingTex, 1.0f / static_cast<float>(tw), 0.0f);
+			blurPass(m_ssrPingTex, m_ssrReflTex, 0.0f, 1.0f / static_cast<float>(th));
+			m_counters.draws += 2;
 		}
 
 		// ── 2. Additive composite onto the resolved HDR ────────────────────
