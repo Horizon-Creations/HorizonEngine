@@ -1197,11 +1197,19 @@ void EditorApplication::OnRender(float dt)
 			m_editorConfig.GIIndirectIntensity,
 			m_editorConfig.GILightRadius});
 		// Render path (Forward | Deferred) — gated on the backend capability so an
-		// unsupported backend simply stays forward.
-		renderer()->SetRenderPath(
-			(m_editorConfig.RenderPath == 1
-			 && renderer()->GetCapabilities().supportsDeferredRendering)
-				? HE::RenderPath::Deferred : HE::RenderPath::Forward);
+		// unsupported backend simply stays forward. HE_DUMP_RENDERPATH must win
+		// HERE too (not only in the one-shot dump block): this push runs every
+		// frame and would otherwise flip a headless capture back to the persisted
+		// config value between the dump setup and the captured frame.
+		{
+			int rpath = m_editorConfig.RenderPath;
+			static const char* s_rpOv = std::getenv("HE_DUMP_RENDERPATH");
+			if (s_rpOv && *s_rpOv)
+				rpath = (std::string(s_rpOv) == "1" || std::string(s_rpOv) == "deferred") ? 1 : 0;
+			renderer()->SetRenderPath(
+				(rpath == 1 && renderer()->GetCapabilities().supportsDeferredRendering)
+					? HE::RenderPath::Deferred : HE::RenderPath::Forward);
+		}
 		// Regenerate terrain meshes for any entity whose TerrainComponent is dirty
 		// (newly created, parameter-edited in the inspector, or just loaded/restored).
 		if (m_editorWorld)

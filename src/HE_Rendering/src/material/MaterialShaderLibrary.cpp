@@ -818,6 +818,52 @@ void main() {
 }
 )";
 
+// Tile-memory variant (plan P6, Metal/Apple Silicon): identical shading, but the
+// G-buffer arrives as subpass inputs — SPIRV-Cross emits them as [[color(n)]]
+// framebuffer-fetch reads (n = input_attachment_index), so the G-buffer lives in
+// tile storage and never touches DRAM. The lit colour writes to LOCATION 4, the
+// single pass's HDR attachment behind the four G-buffer attachments. The NDC
+// depth comes from G-buffer attachment 3 (a colour target the G-buffer fragments
+// write gl_FragCoord.z into — the depth buffer itself cannot be fetched).
+constexpr const char* kDeferredResolveTileFS = R"(#version 450
+layout(location = 4) out vec4 oColor;
+layout(input_attachment_index = 0, set = 0, binding = 19) uniform subpassInput heGB0;
+layout(input_attachment_index = 1, set = 0, binding = 20) uniform subpassInput heGB1;
+layout(input_attachment_index = 2, set = 0, binding = 21) uniform subpassInput heGB2;
+layout(input_attachment_index = 3, set = 0, binding = 22) uniform subpassInput heGBDepth;
+layout(std140, set = 0, binding = 23) uniform HeResolve {
+    mat4 invViewProj;
+    vec4 depthParams; // x = uv→NDC y sign, y/z = NDC-z scale/bias, w = debug view
+} heResolve;
+vec3 heOctDecode(vec2 f) {
+    vec3 n = vec3(f.x, f.y, 1.0 - abs(f.x) - abs(f.y));
+    float t = max(-n.z, 0.0);
+    n.x += (n.x >= 0.0) ? -t : t;
+    n.y += (n.y >= 0.0) ? -t : t;
+    return normalize(n);
+}
+void main() {
+    float d = subpassLoad(heGBDepth).r;
+    if (d >= 1.0) discard;                          // background → the sky pass fills it
+    vec4 g0 = subpassLoad(heGB0);
+    vec4 g1 = subpassLoad(heGB1);
+    vec4 g2 = subpassLoad(heGB2);
+    vec2 uv = gl_FragCoord.xy / max(heLight.giParams.xy, vec2(1.0));
+    vec4 clip = vec4(uv.x * 2.0 - 1.0,
+                     (uv.y * 2.0 - 1.0) * heResolve.depthParams.x,
+                     d * heResolve.depthParams.y + heResolve.depthParams.z, 1.0);
+    vec4 wp = heResolve.invViewProj * clip;
+    vec3 P  = wp.xyz / max(wp.w, 1e-8);
+    vec3 N  = heOctDecode(g1.rg * 2.0 - 1.0);
+    int dbg = int(heResolve.depthParams.w);
+    if (dbg == 1) { oColor = vec4(g0.rgb, 1.0); return; }               // BaseColor
+    if (dbg == 2) { oColor = vec4(N * 0.5 + 0.5, 1.0); return; }        // Normal
+    if (dbg == 3) { oColor = vec4(g1.b, g1.a, g0.a, 1.0); return; }     // Rough/Spec/Metal
+    if (dbg == 4) { oColor = vec4(g2.rgb, 1.0); return; }               // Emissive
+    oColor = vec4(heApplyFog(heLitP(g0.rgb, N, g0.a, g1.b, P, g1.a, g2.a) + g2.rgb, P), 1.0);
+}
+)";
+
 // Fullscreen triangle with NO varyings — the resolve fragment reads gl_FragCoord,
 // so nothing needs to cross the stage boundary.
 constexpr const char* kFullscreenVS = R"(#version 450
@@ -865,6 +911,37 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::deferredResolve(Ba
         out = toCompiled(compile(injected, Stage::Fragment, toTarget(backend)));
     }
     return m_resolveCache.emplace(key, std::move(out)).first->second;
+}
+
+const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::deferredResolveTile(Backend backend)
+{
+    const int key = static_cast<int>(backend);
+    if (auto it = m_resolveTileCache.find(key); it != m_resolveTileCache.end()) return it->second;
+
+    using namespace he::shaderc;
+    Compiled out;
+    if (backend == Backend::Metal)
+    {
+        const std::string injected = injectPreamble(kDeferredResolveTileFS);
+        MslOptions opts;
+        opts.framebufferFetchSubpasses = true;
+        // Same pin map as deferredResolve minus the G-buffer texture slots —
+        // the subpass inputs become [[color(0..3)]] and consume no samplers.
+        out = toCompiled(compileMslPinned(injected, Stage::Fragment,
+            { { Stage::Fragment, 0, 0, static_cast<uint32_t>(kMetalLightingBufferIndex) },
+              { Stage::Fragment, 0, 23, 3 },    // HeResolve UBO → fragment buffer 3
+              { Stage::Fragment, 0, 10, 9 },    // GI sun mask
+              { Stage::Fragment, 0, 11, 10 },   // GI local mask
+              { Stage::Fragment, 0, 12, 11 },   // CSM array
+              { Stage::Fragment, 0, 13, 12 },   // local shadow atlas
+              { Stage::Fragment, 0, 15, 14 },   // sky env cubemap
+              { Stage::Fragment, 0, 16, 15 },   // screen-space AO
+              { Stage::Fragment, 0, 17, 6 },    // DDGI irradiance atlas
+              { Stage::Fragment, 0, 18, 7 } },  // DDGI visibility atlas
+            opts));
+    }
+    // Non-Metal backends have no tile-memory path — leave `ok = false`.
+    return m_resolveTileCache.emplace(key, std::move(out)).first->second;
 }
 
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fullscreenVertex(Backend backend)

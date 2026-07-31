@@ -968,7 +968,12 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
     const std::string headerGB = headerCommon +
         "layout(location = 0) out vec4 oGB0;\n"   // rgb = BaseColor, a = Metallic
         "layout(location = 1) out vec4 oGB1;\n"   // rg = oct normal, b = Roughness, a = Specular
-        "layout(location = 2) out vec4 oGB2;\n";  // rgb = Emissive (HDR), a = Material-AO
+        "layout(location = 2) out vec4 oGB2;\n"   // rgb = Emissive (HDR), a = Material-AO
+        // NDC depth for the tile-memory resolve (Metal single-pass P6, which can
+        // framebuffer-fetch colour attachments but not the depth buffer). GL
+        // binds only 3 draw buffers → the write is dropped there; the two-pass
+        // Metal fallback stores it unused (R32F, DontCare).
+        "layout(location = 3) out vec4 oGB3;\n";
 
     MatShaderGen gen;
     if (!out)
@@ -976,7 +981,8 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
         gen.glsl = header + "void main() { oColor = vec4(1.0, 0.0, 1.0, 1.0); } // no Output node\n";
         gen.glslGBuffer = headerGB +
             "void main() { oGB0 = vec4(1.0, 0.0, 1.0, 0.0);"
-            " oGB1 = vec4(0.5, 0.5, 1.0, 0.5); oGB2 = vec4(0.0); } // no Output node\n";
+            " oGB1 = vec4(0.5, 0.5, 1.0, 0.5); oGB2 = vec4(0.0);"
+            " oGB3 = vec4(gl_FragCoord.z, 0.0, 0.0, 0.0); } // no Output node\n";
         return gen;
     }
 
@@ -1115,6 +1121,7 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
         gb += "    oGB0 = vec4(0.0, 0.0, 0.0, 1.0);\n"
               "    oGB1 = vec4(heOctEncode(normalize(heN)) * 0.5 + 0.5, 1.0, 0.0);\n"
               "    oGB2 = vec4(" + base + " + " + emis + ", 1.0);\n";
+    gb += "    oGB3 = vec4(gl_FragCoord.z, 0.0, 0.0, 0.0);\n";
     gb += "}\n";
 
     // No clamp here any more: the kMatMaxParams budget is enforced in paramSlot(),

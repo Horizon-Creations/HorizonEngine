@@ -133,6 +133,13 @@ public:
     // reads gl_FragCoord); paired with deferredResolve for the fullscreen lighting draw.
     const Compiled& fullscreenVertex(Backend backend);
 
+    // Tile-memory variant of deferredResolve (plan P6, Metal/Apple-Silicon only):
+    // the G-buffer arrives as subpassInput 0..3 (GB0/GB1/GB2/NDC-depth), emitted
+    // as [[color(n)]] framebuffer-fetch reads, and the lit colour goes to output
+    // location 4 — the HDR attachment of the shared single pass. Same preamble,
+    // same heLitP call; the G-buffer never leaves tile storage.
+    const Compiled& deferredResolveTile(Backend backend);
+
     // std140 layout of the resolve shader's HeResolve UBO. depthParams:
     //   x = clip-space Y sign of the uv→NDC mapping (GL +1, Metal −1: its uv origin
     //       is top-left), y/z = NDC-z scale/bias from the sampled depth (GL 2/−1,
@@ -169,7 +176,8 @@ public:
     const Compiled& uiVertex(Backend backend);
 
     void clear() { m_vertCache.clear(); m_fragCache.clear(); m_cvertCache.clear();
-                   m_uiVertCache.clear(); m_resolveCache.clear(); m_fsVertCache.clear(); }
+                   m_uiVertCache.clear(); m_resolveCache.clear(); m_resolveTileCache.clear();
+                   m_fsVertCache.clear(); }
 
 private:
     std::unordered_map<int, Compiled>      m_vertCache;  // key = (int)backend
@@ -177,6 +185,7 @@ private:
     std::unordered_map<uint64_t, Compiled> m_cvertCache; // key = mix(bodyHash, backend)
     std::unordered_map<int, Compiled>      m_uiVertCache; // key = (int)backend
     std::unordered_map<int, Compiled>      m_resolveCache; // key = (int)backend
+    std::unordered_map<int, Compiled>      m_resolveTileCache; // key = (int)backend
     std::unordered_map<int, Compiled>      m_fsVertCache;  // key = (int)backend
 };
 } // namespace HE

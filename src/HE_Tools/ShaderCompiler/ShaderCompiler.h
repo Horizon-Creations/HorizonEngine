@@ -57,9 +57,20 @@ struct MslPin
     uint32_t mslBuffer;   // target MSL [[buffer(n)]]
 };
 
+// Extra MSL emission options. framebufferFetchSubpasses turns GLSL subpassInput
+// declarations into Metal [[color(input_attachment_index)]] framebuffer-fetch
+// reads (Apple-GPU tile memory; requires MSL 2.3 on macOS, which the compiler
+// already targets) — the deferred renderer's single-pass lighting resolve reads
+// the G-buffer from tile storage this way instead of sampling stored textures.
+struct MslOptions
+{
+    bool framebufferFetchSubpasses = false;
+};
+
 // Compile canonical GLSL to MSL with explicit buffer-slot assignments (Target::Msl).
 Result compileMslPinned(const std::string& glsl, Stage stage,
-                        const std::vector<MslPin>& pins);
+                        const std::vector<MslPin>& pins,
+                        const MslOptions& opts = {});
 
 // Convenience: compile once to SPIR-V, then emit several targets from it (cheaper
 // than re-parsing the GLSL per target). Returns SPIR-V + a source per requested target,
