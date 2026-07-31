@@ -5669,12 +5669,21 @@ void* MetalRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& m
 	[enc setVertexBuffer:(__bridge id<MTLBuffer>)m_previewVB offset:0 atIndex:0];
 	[enc setVertexBytes:&ui length:sizeof(ui) atIndex:1];
 
-	HE::MaterialShaderLibrary::Lighting lit;
+	HE::MaterialShaderLibrary::Lighting lit{};
 	const glm::vec3 sd = glm::normalize(glm::vec3(0.45f, 0.75f, 0.55f));
 	lit.sunDir[0] = sd.x; lit.sunDir[1] = sd.y; lit.sunDir[2] = sd.z; lit.sunDir[3] = 0.0f;
 	lit.sunColor[0] = lit.sunColor[1] = lit.sunColor[2] = 1.05f;
 	lit.ambient[0] = lit.ambient[1] = lit.ambient[2] = 0.28f;
 	lit.camPos[0] = camPos.x; lit.camPos[1] = camPos.y; lit.camPos[2] = camPos.z;
+	// Studio sun as the single array light so heLitP() previews shade correctly
+	// (same seed as the GL backend's RenderMaterialPreview). heLitP has NO separate
+	// sun term — sunDir/sunColor above only feed the legacy heLit() — so leaving
+	// counts at 0 rendered every graph material as a flat, unshaded ambient disc.
+	lit.lightPos[0][3]   = 0.0f; // directional
+	lit.lightDir[0][0]   = -sd.x; lit.lightDir[0][1] = -sd.y; lit.lightDir[0][2] = -sd.z;
+	lit.lightColor[0][0] = lit.lightColor[0][1] = lit.lightColor[0][2] = 1.05f;
+	lit.lightColor[0][3] = 1.0f;
+	lit.counts[0]        = 1.0f;
 	[enc setFragmentBytes:&lit length:sizeof(lit) atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
 	// WPO materials read HeLighting/HeParams in the VERTEX stage (buffers 2/3).
 	if (!shVert.empty())
