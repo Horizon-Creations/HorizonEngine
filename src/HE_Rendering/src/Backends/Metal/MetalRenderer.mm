@@ -3751,6 +3751,11 @@ void MetalRenderer::Shutdown()
 	if (m_previewVB)       { CFBridgingRelease(m_previewVB);       m_previewVB = nullptr; }
 	if (m_previewIB)       { CFBridgingRelease(m_previewIB);       m_previewIB = nullptr; }
 	m_previewSize = 0;
+	// Content-Browser thumbnail target + its mesh pipeline.
+	if (m_thumbColorTex)       { CFBridgingRelease(m_thumbColorTex);       m_thumbColorTex = nullptr; }
+	if (m_thumbDepthTex)       { CFBridgingRelease(m_thumbDepthTex);       m_thumbDepthTex = nullptr; }
+	if (m_meshPreviewPipeline) { CFBridgingRelease(m_meshPreviewPipeline); m_meshPreviewPipeline = nullptr; }
+	m_thumbSize = 0;
 	if (m_fxaaPipeline)         { CFBridgingRelease(m_fxaaPipeline);         m_fxaaPipeline = nullptr; }
 	if (m_uiPipeline)           { CFBridgingRelease(m_uiPipeline);           m_uiPipeline = nullptr; }
 	if (m_uiFontTexture)        { CFBridgingRelease(m_uiFontTexture);        m_uiFontTexture = nullptr; }
@@ -5583,26 +5588,29 @@ void MetalRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 			("MetalRenderer: warmed up " + std::to_string(built) + " material pipeline(s)").c_str());
 }
 
-void* MetalRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& materialId,
-                                           uint32_t size, float yaw, float pitch, float dist,
-                                           int shape)
+// Encode one material-graph preview primitive into an already-open encoder. Split
+// out of RenderMaterialPreview so the interactive preview and the Content-Browser
+// thumbnail share the exact same shading while rendering into DIFFERENT targets —
+// a thumbnail that reused m_previewColorTex would silently replace whatever the
+// Material Editor is showing. The caller owns the render pass, its clear and the
+// depth-stencil state; this only sets the pipeline, buffers and textures.
+bool MetalRenderer::EncodeMaterialPreview(void* renderEncoder, const HE::UUID& materialId,
+                                          float yaw, float pitch, float dist, int shape)
 {
-	const int S = std::clamp(static_cast<int>(size), 32, 1024);
-	if (!m_contentManager) m_contentManager = &cm;
+	id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
-	id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)m_commandQueue;
-	if (!device || !queue) return nullptr;
+	if (!enc || !device || !m_contentManager) return false;
 
 	// Resolve the node-graph material pipeline (built-in-PBR materials have none).
 	uint64_t shKey; std::string shFrag, shVert;
-	if (!ResolveMaterialShader(materialId, shKey, shFrag, shVert)) return nullptr;
+	if (!ResolveMaterialShader(materialId, shKey, shFrag, shVert)) return false;
 	const MaterialAsset* ma = m_contentManager->getMaterial(materialId);
 	const MaterialShaderVariant* pre = nullptr;
 	if (ma)
 		for (const auto& var : ma->precompiledShaders)
 			if (var.backend == static_cast<uint8_t>(HE::RendererBackend::Metal)) { pre = &var; break; }
 	id<MTLRenderPipelineState> pso = (__bridge id<MTLRenderPipelineState>)GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre);
-	if (!pso) return nullptr;
+	if (!pso) return false;
 
 	// ── Lazy preview primitive (interleaved pos3/normal3/uv2 + uint32 indices),
 	// rebuilt when the requested shape changes. Geometry is shared with the GL path
@@ -5621,37 +5629,6 @@ void* MetalRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& m
 			length:idx.size() * sizeof(uint32_t) options:MTLResourceStorageModeShared]);
 	}
 
-	// ── Lazy / resized target: RGBA16F color (matches the material PSO) + depth.
-	if (!m_previewColorTex || m_previewSize != S)
-	{
-		if (m_previewColorTex) { CFBridgingRelease(m_previewColorTex); m_previewColorTex = nullptr; }
-		if (m_previewDepthTex) { CFBridgingRelease(m_previewDepthTex); m_previewDepthTex = nullptr; }
-		MTLTextureDescriptor* cd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kSceneColorFormat
-			width:S height:S mipmapped:NO];
-		cd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
-		cd.storageMode = MTLStorageModePrivate;
-		m_previewColorTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:cd]);
-		MTLTextureDescriptor* dd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kDepthFormat
-			width:S height:S mipmapped:NO];
-		dd.usage = MTLTextureUsageRenderTarget; dd.storageMode = MTLStorageModePrivate;
-		m_previewDepthTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:dd]);
-		m_previewSize = S;
-	}
-	id<MTLTexture> colorTex = (__bridge id<MTLTexture>)m_previewColorTex;
-
-	// ── Encode one sphere draw into the preview target.
-	MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
-	rp.colorAttachments[0].texture     = colorTex;
-	rp.colorAttachments[0].loadAction  = MTLLoadActionClear;
-	rp.colorAttachments[0].storeAction = MTLStoreActionStore;
-	rp.colorAttachments[0].clearColor  = MTLClearColorMake(0.0, 0.0, 0.0, 0.0); // transparent
-	rp.depthAttachment.texture     = (__bridge id<MTLTexture>)m_previewDepthTex;
-	rp.depthAttachment.loadAction  = MTLLoadActionClear;
-	rp.depthAttachment.storeAction = MTLStoreActionDontCare;
-	rp.depthAttachment.clearDepth  = 1.0;
-
-	id<MTLCommandBuffer> cb = [queue commandBuffer];
-	id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
 	[enc setRenderPipelineState:pso];
 	[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
 
@@ -5676,7 +5653,7 @@ void* MetalRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& m
 	lit.ambient[0] = lit.ambient[1] = lit.ambient[2] = 0.28f;
 	lit.camPos[0] = camPos.x; lit.camPos[1] = camPos.y; lit.camPos[2] = camPos.z;
 	// Studio sun as the single array light so heLitP() previews shade correctly
-	// (same seed as the GL backend's RenderMaterialPreview). heLitP has NO separate
+	// (same seed as the GL backend's material preview). heLitP has NO separate
 	// sun term — sunDir/sunColor above only feed the legacy heLit() — so leaving
 	// counts at 0 rendered every graph material as a flat, unshaded ambient disc.
 	lit.lightPos[0][3]   = 0.0f; // directional
@@ -5722,7 +5699,169 @@ void* MetalRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& m
 	[enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:(NSUInteger)m_previewIdxCount
 	                 indexType:MTLIndexTypeUInt32 indexBuffer:(__bridge id<MTLBuffer>)m_previewIB
 	         indexBufferOffset:0];
+	return true;
+}
+
+// The non-graph counterpart: any interleaved pos3/normal3/uv2 buffer, shaded by a
+// small lambert + metallic/roughness-driven highlight. Used for mesh thumbnails and
+// for materials whose only description is their PBR scalars. Same caller contract.
+void MetalRenderer::EncodeMeshPreview(void* renderEncoder, void* vertexBuf, void* indexBuf,
+                                      int indexCount, void* texture, const glm::vec3& center,
+                                      float extent, const glm::vec3& baseColor, float metallic,
+                                      float roughness, float yaw, float pitch, float dist)
+{
+	id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	if (!enc || !device || !vertexBuf || !indexBuf || indexCount <= 0) return;
+
+	if (!m_meshPreviewPipeline)
+	{
+		@autoreleasepool
+		{
+			NSError* error = nil;
+			NSString* src = @R"(
+#include <metal_stdlib>
+using namespace metal;
+struct VertexIn { packed_float3 position; packed_float3 normal; packed_float2 uv; };
+struct Uniforms { float4x4 mvp; float4x4 model; float4 color; float4 flags; float4 pbr; };
+struct VOut { float4 position [[position]]; float3 normal; float2 uv; float3 worldPos; };
+
+vertex VOut meshPreviewVertex(uint vid [[vertex_id]],
+                              const device VertexIn* verts [[buffer(0)]],
+                              constant Uniforms&     u     [[buffer(1)]])
+{
+    float4 p = float4(float3(verts[vid].position), 1.0);
+    float3x3 m3 = float3x3(u.model[0].xyz, u.model[1].xyz, u.model[2].xyz);
+    VOut o;
+    o.position = u.mvp * p;
+    o.normal   = m3 * float3(verts[vid].normal);
+    o.uv       = float2(verts[vid].uv);
+    o.worldPos = (u.model * p).xyz;
+    return o;
+}
+
+fragment float4 meshPreviewFragment(VOut in [[stage_in]],
+                                    constant Uniforms& u [[buffer(1)]],
+                                    texture2d<float> tex [[texture(0)]],
+                                    sampler samp [[sampler(0)]])
+{
+    float3 N = normalize(in.normal);
+    float3 L = normalize(float3(0.45, 0.75, 0.55));
+    float3 V = normalize(u.flags.yzw - in.worldPos);
+    float3 H = normalize(L + V);
+    float diff  = max(dot(N, L), 0.0);
+    float rough = clamp(u.pbr.y, 0.05, 1.0);
+    float spec  = pow(max(dot(N, H), 0.0), mix(128.0, 8.0, rough))
+                * (1.0 - rough) * mix(0.25, 1.0, clamp(u.pbr.x, 0.0, 1.0));
+    float3 albedo = u.flags.x > 0.5 ? tex.sample(samp, in.uv).rgb * u.color.rgb : u.color.rgb;
+    return float4(albedo * (0.32 + 0.68 * diff) + float3(spec), 1.0);
+}
+)";
+			id<MTLLibrary> lib = [device newLibraryWithSource:src options:nil error:&error];
+			if (lib)
+			{
+				MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
+				desc.vertexFunction   = [lib newFunctionWithName:@"meshPreviewVertex"];
+				desc.fragmentFunction = [lib newFunctionWithName:@"meshPreviewFragment"];
+				desc.colorAttachments[0].pixelFormat = kSceneColorFormat;
+				desc.depthAttachmentPixelFormat      = kDepthFormat;
+				id<MTLRenderPipelineState> pso = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+				if (pso) m_meshPreviewPipeline = (void*)CFBridgingRetain(pso);
+				else
+					Logger::Log(Logger::LogLevel::Error,
+						(std::string("MetalRenderer: mesh-preview pipeline creation failed: ")
+							+ (error ? [[error localizedDescription] UTF8String] : "unknown")).c_str());
+			}
+			else
+				Logger::Log(Logger::LogLevel::Error, "MetalRenderer: mesh-preview shader compile failed");
+		}
+	}
+	if (!m_meshPreviewPipeline) return;
+
+	// Orbit camera auto-framed on the caller's bounds — meshes vary wildly in size
+	// and pivot, so `dist` scales the extent rather than being an absolute distance.
+	const float camDist = std::max(0.05f, dist) * std::max(extent, 0.05f);
+	const float cp = std::cos(pitch), sp = std::sin(pitch);
+	const glm::vec3 camPos = center + glm::vec3(std::sin(yaw) * cp, sp, std::cos(yaw) * cp) * camDist;
+	const glm::mat4 view = glm::lookAt(camPos, center, glm::vec3(0.0f, 1.0f, 0.0f));
+	const glm::mat4 proj = glm::perspective(glm::radians(35.0f), 1.0f, 0.01f, camDist * 20.0f + 10.0f);
+	const glm::mat4 model(1.0f);
+
+	// flags = (hasTexture, camPos) — the shared UnlitUniforms layout has no camera
+	// slot of its own and the preview shader is the only consumer of these fields.
+	UnlitUniforms u;
+	u.mvp   = proj * view * model;
+	u.model = model;
+	u.color = glm::vec4(baseColor, 1.0f);
+	u.flags = glm::vec4(texture ? 1.0f : 0.0f, camPos.x, camPos.y, camPos.z);
+	u.pbr   = glm::vec4(metallic, roughness, 0.0f, 0.0f);
+
+	[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_meshPreviewPipeline];
+	[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
+	[enc setVertexBuffer:(__bridge id<MTLBuffer>)vertexBuf offset:0 atIndex:0];
+	[enc setVertexBytes:&u length:sizeof(u) atIndex:1];
+	[enc setFragmentBytes:&u length:sizeof(u) atIndex:1];
+	[enc setFragmentTexture:(__bridge id<MTLTexture>)(texture ? texture : m_dummyTexture) atIndex:0];
+	[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
+	[enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+	                indexCount:(NSUInteger)indexCount
+	                 indexType:MTLIndexTypeUInt32
+	               indexBuffer:(__bridge id<MTLBuffer>)indexBuf
+	         indexBufferOffset:0];
+}
+
+void* MetalRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& materialId,
+                                           uint32_t size, float yaw, float pitch, float dist,
+                                           int shape)
+{
+	const int S = std::clamp(static_cast<int>(size), 32, 1024);
+	if (!m_contentManager) m_contentManager = &cm;
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)m_commandQueue;
+	if (!device || !queue) return nullptr;
+
+	// Nothing to preview for a built-in-PBR material (no node-graph pipeline) — bail
+	// out BEFORE allocating the target, so a material without a graph never costs a
+	// texture. The thumbnail path handles that case with its own fallback pipeline.
+	{
+		uint64_t probeKey; std::string probeFrag, probeVert;
+		if (!ResolveMaterialShader(materialId, probeKey, probeFrag, probeVert)) return nullptr;
+	}
+
+	// ── Lazy / resized target: RGBA16F color (matches the material PSO) + depth.
+	if (!m_previewColorTex || m_previewSize != S)
+	{
+		if (m_previewColorTex) { CFBridgingRelease(m_previewColorTex); m_previewColorTex = nullptr; }
+		if (m_previewDepthTex) { CFBridgingRelease(m_previewDepthTex); m_previewDepthTex = nullptr; }
+		MTLTextureDescriptor* cd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kSceneColorFormat
+			width:S height:S mipmapped:NO];
+		cd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+		cd.storageMode = MTLStorageModePrivate;
+		m_previewColorTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:cd]);
+		MTLTextureDescriptor* dd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kDepthFormat
+			width:S height:S mipmapped:NO];
+		dd.usage = MTLTextureUsageRenderTarget; dd.storageMode = MTLStorageModePrivate;
+		m_previewDepthTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:dd]);
+		m_previewSize = S;
+	}
+	id<MTLTexture> colorTex = (__bridge id<MTLTexture>)m_previewColorTex;
+
+	// ── Encode one sphere draw into the preview target.
+	MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+	rp.colorAttachments[0].texture     = colorTex;
+	rp.colorAttachments[0].loadAction  = MTLLoadActionClear;
+	rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+	rp.colorAttachments[0].clearColor  = MTLClearColorMake(0.0, 0.0, 0.0, 0.0); // transparent
+	rp.depthAttachment.texture     = (__bridge id<MTLTexture>)m_previewDepthTex;
+	rp.depthAttachment.loadAction  = MTLLoadActionClear;
+	rp.depthAttachment.storeAction = MTLStoreActionDontCare;
+	rp.depthAttachment.clearDepth  = 1.0;
+
+	id<MTLCommandBuffer> cb = [queue commandBuffer];
+	id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+	const bool encoded = EncodeMaterialPreview((__bridge void*)enc, materialId, yaw, pitch, dist, shape);
 	[enc endEncoding];
+	if (!encoded) { [cb commit]; return nullptr; }
 
 	// Headless witness (HE_PREVIEW_DUMP=path): blit to a managed staging texture, read
 	// back the RGBA16F, decode halves → PPM. No-op in normal editor use.
@@ -5773,6 +5912,162 @@ void* MetalRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& m
 		}
 	}
 	return m_previewColorTex; // id<MTLTexture> for ImGui::Image
+}
+
+bool MetalRenderer::RenderAssetThumbnail(ContentManager& cm, ThumbnailKind kind,
+                                         const HE::UUID& assetId, uint32_t size,
+                                         std::vector<uint8_t>& outRgba8)
+{
+	const int S = std::clamp(static_cast<int>(size), 16, 512);
+	if (!m_contentManager) m_contentManager = &cm;
+	if (assetId == HE::UUID{}) return false;
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)m_commandQueue;
+	if (!device || !queue) return false;
+
+	// ── Lazy / resized thumbnail target (its own, see the header note).
+	if (!m_thumbColorTex || m_thumbSize != S)
+	{
+		if (m_thumbColorTex) { CFBridgingRelease(m_thumbColorTex); m_thumbColorTex = nullptr; }
+		if (m_thumbDepthTex) { CFBridgingRelease(m_thumbDepthTex); m_thumbDepthTex = nullptr; }
+		MTLTextureDescriptor* cd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kSceneColorFormat
+			width:S height:S mipmapped:NO];
+		cd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+		cd.storageMode = MTLStorageModePrivate;
+		m_thumbColorTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:cd]);
+		MTLTextureDescriptor* dd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kDepthFormat
+			width:S height:S mipmapped:NO];
+		dd.usage = MTLTextureUsageRenderTarget; dd.storageMode = MTLStorageModePrivate;
+		m_thumbDepthTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:dd]);
+		m_thumbSize = S;
+	}
+	id<MTLTexture> colorTex = (__bridge id<MTLTexture>)m_thumbColorTex;
+
+	MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+	rp.colorAttachments[0].texture     = colorTex;
+	rp.colorAttachments[0].loadAction  = MTLLoadActionClear;
+	rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+	rp.colorAttachments[0].clearColor  = MTLClearColorMake(0.0, 0.0, 0.0, 0.0); // transparent
+	rp.depthAttachment.texture     = (__bridge id<MTLTexture>)m_thumbDepthTex;
+	rp.depthAttachment.loadAction  = MTLLoadActionClear;
+	rp.depthAttachment.storeAction = MTLStoreActionDontCare;
+	rp.depthAttachment.clearDepth  = 1.0;
+
+	// Fixed three-quarter view — a thumbnail has no orbit interaction, and one
+	// shared angle makes a grid of tiles comparable at a glance. `extent` is the
+	// bounds' half-DIAGONAL, so fitting it into the 35° FOV takes at least
+	// extent/tan(17.5°) ≈ 3.17·extent; 3.6 leaves a small margin, and without it
+	// a cube-shaped mesh renders cropped at the tile edges.
+	constexpr float kYaw = 0.7f, kPitch = 0.45f, kMeshFrameDist = 3.6f;
+
+	id<MTLCommandBuffer> cb = [queue commandBuffer];
+	id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+	bool drew = false;
+	if (kind == ThumbnailKind::Material)
+	{
+		// Graph material → the real shader; otherwise the built-in PBR scalars on
+		// the same sphere, so EVERY material asset produces a tile.
+		drew = EncodeMaterialPreview((__bridge void*)enc, assetId, kYaw, kPitch, 3.1f, 0 /*sphere*/);
+		if (!drew)
+		{
+			const MaterialAsset* ma = m_contentManager->getMaterial(assetId);
+			if (!m_previewVB || m_previewShape != 0)
+			{
+				// Reuse the material preview's sphere — building it here keeps the
+				// fallback independent of whether an interactive preview ever ran.
+				if (m_previewVB) { CFBridgingRelease(m_previewVB); m_previewVB = nullptr; }
+				if (m_previewIB) { CFBridgingRelease(m_previewIB); m_previewIB = nullptr; }
+				std::vector<float> verts; std::vector<uint32_t> idx;
+				HE::buildPreviewMesh(0, verts, idx);
+				m_previewIdxCount = (int)idx.size();
+				m_previewShape    = 0;
+				m_previewVB = (void*)CFBridgingRetain([device newBufferWithBytes:verts.data()
+					length:verts.size() * sizeof(float) options:MTLResourceStorageModeShared]);
+				m_previewIB = (void*)CFBridgingRetain([device newBufferWithBytes:idx.data()
+					length:idx.size() * sizeof(uint32_t) options:MTLResourceStorageModeShared]);
+			}
+			void* baseTex = nullptr;
+			if (ma)
+			{
+				const HE::UUID    tid = ma->textureIds.empty()   ? HE::UUID{}   : ma->textureIds[0];
+				const std::string tp  = ma->texturePaths.empty() ? std::string{} : ma->texturePaths[0];
+				if (tid != HE::UUID{} || !tp.empty()) baseTex = ResolveGraphTexture(tid, tp);
+			}
+			// dist 2.8 × the unit sphere's extent (1.0) reproduces the graph path's
+			// 3.1 at its narrower 32° FOV (3.1·tan16° ≈ 2.8·tan17.5°), so a material
+			// with a graph and one without frame the sphere identically.
+			EncodeMeshPreview((__bridge void*)enc, m_previewVB, m_previewIB, m_previewIdxCount,
+				baseTex, glm::vec3(0.0f), 1.0f,
+				ma ? glm::vec3(ma->baseColor[0], ma->baseColor[1], ma->baseColor[2]) : glm::vec3(0.8f),
+				ma ? ma->metallic : 0.0f, ma ? ma->roughness : 0.5f, kYaw, kPitch, 2.8f);
+			drew = true;
+		}
+	}
+	else if (kind == ThumbnailKind::StaticMesh)
+	{
+		if (const GpuMesh* mesh = ResolveMesh(assetId))
+		{
+			const HE::AABB& b = mesh->localBounds;
+			const glm::vec3 c = b.isValid() ? (b.min + b.max) * 0.5f : glm::vec3(0.0f);
+			const float e = b.isValid() ? glm::length(b.max - b.min) * 0.5f : 1.0f;
+			EncodeMeshPreview((__bridge void*)enc, mesh->vertexBuf, mesh->indexBuf, mesh->indexCount,
+				mesh->texture, c, e, glm::vec3(0.78f), 0.0f, 0.55f, kYaw, kPitch, kMeshFrameDist);
+			drew = true;
+		}
+	}
+	else if (kind == ThumbnailKind::SkeletalMesh)
+	{
+		// Bind pose: the stored vertex positions ARE the bind pose, so the plain mesh
+		// pipeline is enough — no bone matrices, no skinning shader. Its vertex buffer
+		// has the same pos3/normal3/uv2 layout the mesh pipeline expects.
+		if (const GpuSkeletalMesh* mesh = ResolveSkeletalMesh(assetId))
+		{
+			const HE::AABB& b = mesh->localBounds;
+			const glm::vec3 c = b.isValid() ? (b.min + b.max) * 0.5f : glm::vec3(0.0f);
+			const float e = b.isValid() ? glm::length(b.max - b.min) * 0.5f : 1.0f;
+			EncodeMeshPreview((__bridge void*)enc, mesh->vertexBuf, mesh->indexBuf, mesh->indexCount,
+				mesh->texture, c, e, glm::vec3(0.78f), 0.0f, 0.55f, kYaw, kPitch, kMeshFrameDist);
+			drew = true;
+		}
+	}
+	[enc endEncoding];
+
+	if (!drew) { [cb commit]; return false; }
+
+	// The target is RGBA16F (the format every material PSO is built against), so
+	// the readback goes through a managed staging copy and decodes halves to 8-bit.
+	MTLTextureDescriptor* sd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kSceneColorFormat
+		width:S height:S mipmapped:NO];
+	sd.storageMode = MTLStorageModeManaged; sd.usage = MTLTextureUsageShaderRead;
+	id<MTLTexture> staging = [device newTextureWithDescriptor:sd];
+	id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+	[blit copyFromTexture:colorTex sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0)
+	           sourceSize:MTLSizeMake(S,S,1) toTexture:staging destinationSlice:0 destinationLevel:0
+	    destinationOrigin:MTLOriginMake(0,0,0)];
+	[blit synchronizeResource:staging];
+	[blit endEncoding];
+	[cb commit];
+	[cb waitUntilCompleted];
+
+	std::vector<uint16_t> half((size_t)S * S * 4);
+	[staging getBytes:half.data() bytesPerRow:S * 4 * sizeof(uint16_t)
+	       fromRegion:MTLRegionMake2D(0, 0, S, S) mipmapLevel:0];
+	auto h2f = [](uint16_t h) -> float {
+		uint32_t s = (h >> 15) & 1, e = (h >> 10) & 0x1f, m = h & 0x3ff, f;
+		if (e == 0) { if (m == 0) f = s << 31; else { e = 127 - 15 + 1; while (!(m & 0x400)) { m <<= 1; e--; } m &= 0x3ff; f = (s << 31) | (e << 23) | (m << 13); } }
+		else if (e == 0x1f) f = (s << 31) | (0xffu << 23) | (m << 13);
+		else f = (s << 31) | ((e - 15 + 127) << 23) | (m << 13);
+		float o; std::memcpy(&o, &f, 4); return o;
+	};
+	// Metal texture rows are already top-down — no flip, unlike the GL path.
+	outRgba8.resize((size_t)S * S * 4);
+	for (size_t i = 0; i < (size_t)S * S * 4; ++i)
+	{
+		float v = h2f(half[i]);
+		v = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+		outRgba8[i] = (uint8_t)(v * 255.0f + 0.5f);
+	}
+	return true;
 }
 
 void* MetalRenderer::RenderSkeletalPreview(ContentManager& cm, const HE::UUID& meshId,

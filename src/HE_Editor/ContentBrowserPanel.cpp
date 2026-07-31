@@ -13,6 +13,7 @@
 #include "ParticleGraphEditorPanel.h"
 #include "AnimatorStateMachineEditorPanel.h"
 #include "EditorAssetTypeCache.h"        // shared path → AssetType sniff
+#include "AssetThumbnailCache.h"         // rendered mesh/material tiles for the grid
 #include <ContentManager/HAsset.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
@@ -403,6 +404,19 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				return 0;
 		};
 
+		// ── Rendered thumbnails for mesh/material assets ──────────────────
+		// Point the cache at the loaded project (a no-op after the first frame)
+		// and refill its per-frame budget, then let each tile ask for its image.
+		// A miss just falls back to the extension icon below.
+		if (ctx.projectManager)
+		{
+			const std::string& projFile = ctx.projectManager->currentProject().path;
+			const std::string cacheDir = projFile.empty() ? std::string{}
+				: (std::filesystem::path(projFile).parent_path() / "Saved" / "Thumbnails").string();
+			AssetThumbnailCache::setContext(ctx.renderer, ctx.contentManager, cacheDir);
+		}
+		AssetThumbnailCache::beginFrame(ImGui::GetTime());
+
 		// Column count from the HORIZONTAL stride only: an item is k_cellSize
 		// wide (icon button = icon + 2×frame padding) with k_padding ItemSpacing
 		// between columns; the label renders BELOW the icon and adds height, not
@@ -567,17 +581,23 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			}
 			ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(k_iconPad, k_iconPad));
 
-			ImTextureID assetIcon = pickAssetIcon(file->extension);
+			// A rendered thumbnail (mesh/material) wins over the generic icon; it is
+			// drawn untinted, since its colours ARE the information. Everything else
+			// keeps the extension icon with its per-type tint.
+			ImTextureID thumb    = reinterpret_cast<ImTextureID>(
+				AssetThumbnailCache::get(file->fullPath));
+			ImTextureID assetIcon = thumb ? thumb : pickAssetIcon(file->extension);
 			if (assetIcon)
 			{
 				ImVec4 tint{0.75f, 0.85f, 1.0f, 1.0f};
-				if (assetIcon == ctx.cbIcons.material) tint = {0.60f, 0.90f, 0.60f, 1.0f};
-				if (assetIcon == ctx.cbIcons.model3d)  tint = {0.70f, 0.80f, 1.00f, 1.0f};
-				if (assetIcon == ctx.cbIcons.model2d)  tint = {0.80f, 0.70f, 1.00f, 1.0f};
-				if (assetIcon == ctx.cbIcons.script)   tint = {0.90f, 0.90f, 0.50f, 1.0f};
-				if (assetIcon == ctx.cbIcons.sound)    tint = {0.60f, 0.90f, 0.90f, 1.0f};
-				if (assetIcon == ctx.cbIcons.texture)  tint = {0.90f, 0.75f, 0.60f, 1.0f};
-				if (assetIcon == ctx.cbIcons.scene)    tint = {0.75f, 0.65f, 1.00f, 1.0f};
+				if (thumb)                             tint = {1.00f, 1.00f, 1.00f, 1.0f};
+				else if (assetIcon == ctx.cbIcons.material) tint = {0.60f, 0.90f, 0.60f, 1.0f};
+				else if (assetIcon == ctx.cbIcons.model3d)  tint = {0.70f, 0.80f, 1.00f, 1.0f};
+				else if (assetIcon == ctx.cbIcons.model2d)  tint = {0.80f, 0.70f, 1.00f, 1.0f};
+				else if (assetIcon == ctx.cbIcons.script)   tint = {0.90f, 0.90f, 0.50f, 1.0f};
+				else if (assetIcon == ctx.cbIcons.sound)    tint = {0.60f, 0.90f, 0.90f, 1.0f};
+				else if (assetIcon == ctx.cbIcons.texture)  tint = {0.90f, 0.75f, 0.60f, 1.0f};
+				else if (assetIcon == ctx.cbIcons.scene)    tint = {0.75f, 0.65f, 1.00f, 1.0f};
 
 				ImGui::ImageButton("##icon", assetIcon,
 					ImVec2(k_iconSize, k_iconSize),
@@ -719,6 +739,10 @@ void render(AppContext& ctx, int& tabSelectRequest,
 					// landed on another, so both cached type sniffs are now lies.
 					EditorAssetTypeCache::invalidate(s_pendingMoveSrc);
 					EditorAssetTypeCache::invalidate(dst.string());
+					// The thumbnail is keyed by the asset's path, so the old key would
+					// keep a .hthumb nobody can reach again.
+					AssetThumbnailCache::invalidate(s_pendingMoveSrc);
+					AssetThumbnailCache::invalidate(dst.string());
 					if (s_selectedItem == s_pendingMoveSrc)
 						s_selectedItem = dst.string();
 					for (auto& t : ctx.tabs)
@@ -925,8 +949,10 @@ void render(AppContext& ctx, int& tabSelectRequest,
 					std::filesystem::remove(s_ctxMenuItem, ec);
 					if (!ec)
 					{
-						// Nothing lives at that path any more — drop the cached type sniff.
+						// Nothing lives at that path any more — drop the cached type sniff
+						// and the rendered tile of the override that just went away.
 						EditorAssetTypeCache::invalidate(s_ctxMenuItem);
+						AssetThumbnailCache::invalidate(s_ctxMenuItem);
 						if (id != HE::UUID{}) ctx.contentManager->unloadAsset(id);
 						if (s_selectedItem == s_ctxMenuItem) s_selectedItem.clear();
 						s_ctxMenuItem.clear();
@@ -1071,6 +1097,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				// there next, and the panels' cached header sniff would still name the
 				// deleted asset's type (→ double-click opens the wrong editor).
 				EditorAssetTypeCache::invalidate(s_ctxMenuItem);
+				AssetThumbnailCache::invalidate(s_ctxMenuItem); // + its cached tile
 				// In the Source root, delete BOTH halves of the class's .h/.cpp pair.
 				if (s_selectedRootKind == 2)
 				{
@@ -1164,11 +1191,21 @@ void render(AppContext& ctx, int& tabSelectRequest,
 						// from before it existed. A FOLDER rename moves every asset below
 						// it, so there the whole map has to go.
 						if (s_renameIsFolder)
+						{
 							EditorAssetTypeCache::invalidateAll();
+							// Same for the tiles: every asset under the folder is now
+							// addressed by a path that no longer exists. Their .hthumb
+							// files are left behind as orphans rather than walking the
+							// whole subtree to delete them — they are never looked up
+							// again, and the cache directory is disposable by design.
+							AssetThumbnailCache::clear();
+						}
 						else
 						{
 							EditorAssetTypeCache::invalidate(s_renameTarget);
 							EditorAssetTypeCache::invalidate(newPath.string());
+							AssetThumbnailCache::invalidate(s_renameTarget);
+							AssetThumbnailCache::invalidate(newPath.string());
 						}
 						if (s_selectedItem == s_renameTarget)
 							s_selectedItem = newPath.string();

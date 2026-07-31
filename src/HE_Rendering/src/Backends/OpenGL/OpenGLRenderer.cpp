@@ -532,6 +532,59 @@ void main()
 }
 )GLSL";
 
+// ─── Mesh-thumbnail shaders (RenderAssetThumbnail) ──────────────────────────
+// The unskinned counterpart of kSkelPreview*: static meshes, skeletal meshes in
+// bind pose, and the preview sphere for materials that have NO node graph (the
+// built-in PBR ones — resolveMaterialShader finds nothing to compile for them,
+// and a Content Browser tile still has to show something). Same sun direction
+// and ambient as the skeletal preview so every thumbnail is lit alike; the
+// highlight is driven by metallic/roughness so two flat materials that differ
+// only in their PBR scalars still produce different tiles.
+static const char* kMeshPreviewVS = R"GLSL(
+#version 410 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec2 aUV;
+uniform mat4 uMVP;
+uniform mat4 uModel;
+out vec3 vNormal;
+out vec2 vUV;
+out vec3 vWorldPos;
+void main()
+{
+    vNormal     = mat3(uModel) * aNormal;
+    vUV         = aUV;
+    vWorldPos   = (uModel * vec4(aPos, 1.0)).xyz;
+    gl_Position = uMVP * vec4(aPos, 1.0);
+}
+)GLSL";
+
+static const char* kMeshPreviewFS = R"GLSL(
+#version 410 core
+in vec3 vNormal;
+in vec2 vUV;
+in vec3 vWorldPos;
+out vec4 FragColor;
+uniform vec3  uColor;
+uniform bool  uHasTex;
+uniform sampler2D uTex;
+uniform vec3  uCamPos;
+uniform vec2  uPbr;   // x = metallic, y = roughness
+void main()
+{
+    vec3 N = normalize(vNormal);
+    vec3 L = normalize(vec3(0.45, 0.75, 0.55));
+    vec3 V = normalize(uCamPos - vWorldPos);
+    vec3 H = normalize(L + V);
+    float diff  = max(dot(N, L), 0.0);
+    float rough = clamp(uPbr.y, 0.05, 1.0);
+    float spec  = pow(max(dot(N, H), 0.0), mix(128.0, 8.0, rough))
+                * (1.0 - rough) * mix(0.25, 1.0, clamp(uPbr.x, 0.0, 1.0));
+    vec3 albedo = uHasTex ? texture(uTex, vUV).rgb * uColor : uColor;
+    FragColor = vec4(albedo * (0.32 + 0.68 * diff) + vec3(spec), 1.0);
+}
+)GLSL";
+
 // Immediate-mode line pass for the bone overlay (joint markers drawn as tiny
 // crosses + parent→child segments) — its own tiny program, since the shared
 // DebugDrawBuffer pipeline targets the backbuffer scene, not an arbitrary
@@ -5714,24 +5767,26 @@ void OpenGLRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 			("OpenGLRenderer: warmed up " + std::to_string(built) + " material program(s)").c_str());
 }
 
-void* OpenGLRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& materialId,
-                                           uint32_t size, float yaw, float pitch, float dist,
-                                           int shape)
+// Draw one material-graph preview primitive into whatever target is bound. Split
+// out of RenderMaterialPreview so the interactive preview and the Content-Browser
+// thumbnail can share the exact same shading while rendering into DIFFERENT
+// targets — a thumbnail that reused m_previewFBO would silently replace whatever
+// the Material Editor is showing. The caller owns FBO/viewport/clear and the
+// depth/blend/cull state; this only touches program, UBOs, textures and the VAO.
+bool OpenGLRenderer::DrawMaterialPreviewGeometry(const HE::UUID& materialId, float yaw, float pitch,
+                                                 float dist, int shape)
 {
-	const int S = std::clamp(static_cast<int>(size), 32, 1024);
-	if (!m_contentManager) m_contentManager = &cm;
-
 	// Resolve the material's node-graph program (built-in-PBR materials have none →
-	// nothing to preview). Reuses the same program cache + precompiled-variant path.
+	// nothing to draw). Reuses the same program cache + precompiled-variant path.
 	uint64_t shKey; std::string shFrag, shVert;
-	if (!resolveMaterialShader(materialId, shKey, shFrag, shVert)) return nullptr;
+	if (!resolveMaterialShader(materialId, shKey, shFrag, shVert)) return false;
 	const MaterialShaderVariant* pre = nullptr;
-	const MaterialAsset* ma = m_contentManager->getMaterial(materialId);
+	const MaterialAsset* ma = m_contentManager ? m_contentManager->getMaterial(materialId) : nullptr;
 	if (ma)
 		for (const auto& var : ma->precompiledShaders)
 			if (var.backend == static_cast<uint8_t>(HE::RendererBackend::OpenGL)) { pre = &var; break; }
 	const unsigned int prog = GetOrBuildMaterialProgram(shKey, shFrag, shVert, pre);
-	if (!prog) return nullptr;
+	if (!prog) return false;
 
 	// ── Lazy preview primitive (interleaved pos3/normal3/uv2 — the material vertex
 	// layout), rebuilt when the requested shape changes. Geometry is shared with the
@@ -5755,38 +5810,6 @@ void* OpenGLRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& 
 		glEnableVertexAttribArray(2); glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(6 * sizeof(float)));
 		glBindVertexArray(0);
 	}
-
-	// ── Lazy / resized offscreen target.
-	if (!m_previewFBO || m_previewSize != S)
-	{
-		if (m_previewColor) glDeleteTextures(1, &m_previewColor);
-		if (m_previewDepth) glDeleteRenderbuffers(1, &m_previewDepth);
-		if (!m_previewFBO) glGenFramebuffers(1, &m_previewFBO);
-		glBindFramebuffer(GL_FRAMEBUFFER, m_previewFBO);
-		glGenTextures(1, &m_previewColor);
-		glBindTexture(GL_TEXTURE_2D, m_previewColor);
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, S, S, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_previewColor, 0);
-		glGenRenderbuffers(1, &m_previewDepth);
-		glBindRenderbuffer(GL_RENDERBUFFER, m_previewDepth);
-		glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, S, S);
-		glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, m_previewDepth);
-		glBindFramebuffer(GL_FRAMEBUFFER, 0);
-		glBindTexture(GL_TEXTURE_2D, 0);
-		m_previewSize = S;
-	}
-
-	// ── Draw the sphere into the preview target. Save/restore the caller's FBO+viewport.
-	GLint prevFBO = 0; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
-	GLint prevVP[4]; glGetIntegerv(GL_VIEWPORT, prevVP);
-	glBindFramebuffer(GL_FRAMEBUFFER, m_previewFBO);
-	glViewport(0, 0, S, S);
-	glClearColor(0.0f, 0.0f, 0.0f, 0.0f); // transparent — editor composites over its own backdrop
-	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-	glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LESS);
-	glDisable(GL_BLEND); glDisable(GL_CULL_FACE);
 
 	glUseProgram(prog);
 	// Orbit camera around the sphere at the origin (yaw/pitch/dist from the editor).
@@ -5850,6 +5873,254 @@ void* OpenGLRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& 
 	glDrawElements(GL_TRIANGLES, m_previewIdxCount, GL_UNSIGNED_INT, nullptr);
 	glBindVertexArray(0);
 	glActiveTexture(GL_TEXTURE0);
+	return true;
+}
+
+// The non-graph counterpart: any pos/normal/uv VAO, shaded by the small
+// kMeshPreview* program. Used for mesh thumbnails and for materials whose only
+// description is their PBR scalars. Same caller contract as above.
+void OpenGLRenderer::DrawMeshPreviewGeometry(unsigned int vao, int indexCount, unsigned int texture,
+                                             const glm::vec3& center, float extent,
+                                             const glm::vec3& baseColor, float metallic,
+                                             float roughness, float yaw, float pitch, float dist)
+{
+	if (!vao || indexCount <= 0) return;
+	if (!m_meshPreviewProgram)
+	{
+		GLuint vs = CompileStage(GL_VERTEX_SHADER,   kMeshPreviewVS);
+		GLuint fs = CompileStage(GL_FRAGMENT_SHADER, kMeshPreviewFS);
+		m_meshPreviewProgram = glCreateProgram();
+		glAttachShader(m_meshPreviewProgram, vs);
+		glAttachShader(m_meshPreviewProgram, fs);
+		glLinkProgram(m_meshPreviewProgram);
+		glDeleteShader(vs); glDeleteShader(fs);
+		m_uMeshPvMVP    = glGetUniformLocation(m_meshPreviewProgram, "uMVP");
+		m_uMeshPvModel  = glGetUniformLocation(m_meshPreviewProgram, "uModel");
+		m_uMeshPvColor  = glGetUniformLocation(m_meshPreviewProgram, "uColor");
+		m_uMeshPvHasTex = glGetUniformLocation(m_meshPreviewProgram, "uHasTex");
+		m_uMeshPvCamPos = glGetUniformLocation(m_meshPreviewProgram, "uCamPos");
+		m_uMeshPvPbr    = glGetUniformLocation(m_meshPreviewProgram, "uPbr");
+	}
+	if (!m_meshPreviewProgram) return;
+
+	// Orbit camera auto-framed on the caller's bounds — meshes vary wildly in size
+	// and pivot, so `dist` scales the extent rather than being an absolute distance.
+	const float camDist = std::max(0.05f, dist) * std::max(extent, 0.05f);
+	const float cp = std::cos(pitch), sp = std::sin(pitch);
+	const glm::vec3 camPos = center + glm::vec3(std::sin(yaw) * cp, sp, std::cos(yaw) * cp) * camDist;
+	const glm::mat4 view = glm::lookAt(camPos, center, glm::vec3(0.0f, 1.0f, 0.0f));
+	const glm::mat4 proj = glm::perspective(glm::radians(35.0f), 1.0f, 0.01f, camDist * 20.0f + 10.0f);
+	const glm::mat4 model(1.0f);
+	const glm::mat4 mvp = proj * view * model;
+
+	glUseProgram(m_meshPreviewProgram);
+	glUniformMatrix4fv(m_uMeshPvMVP,   1, GL_FALSE, glm::value_ptr(mvp));
+	glUniformMatrix4fv(m_uMeshPvModel, 1, GL_FALSE, glm::value_ptr(model));
+	glUniform3fv(m_uMeshPvColor,  1, glm::value_ptr(baseColor));
+	glUniform3fv(m_uMeshPvCamPos, 1, glm::value_ptr(camPos));
+	glUniform2f(m_uMeshPvPbr, metallic, roughness);
+	glUniform1i(m_uMeshPvHasTex, texture != 0);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, texture);
+	glBindVertexArray(vao);
+	glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, nullptr);
+	glBindVertexArray(0);
+}
+
+bool OpenGLRenderer::RenderAssetThumbnail(ContentManager& cm, ThumbnailKind kind,
+                                          const HE::UUID& assetId, uint32_t size,
+                                          std::vector<uint8_t>& outRgba8)
+{
+	const int S = std::clamp(static_cast<int>(size), 16, 512);
+	if (!m_contentManager) m_contentManager = &cm;
+	if (assetId == HE::UUID{}) return false;
+
+	// ── Lazy / resized thumbnail target (its own, see the header note).
+	if (!m_thumbFBO || m_thumbSize != S)
+	{
+		if (m_thumbColor) glDeleteTextures(1, &m_thumbColor);
+		if (m_thumbDepth) glDeleteRenderbuffers(1, &m_thumbDepth);
+		if (!m_thumbFBO) glGenFramebuffers(1, &m_thumbFBO);
+		glBindFramebuffer(GL_FRAMEBUFFER, m_thumbFBO);
+		glGenTextures(1, &m_thumbColor);
+		glBindTexture(GL_TEXTURE_2D, m_thumbColor);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, S, S, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_thumbColor, 0);
+		glGenRenderbuffers(1, &m_thumbDepth);
+		glBindRenderbuffer(GL_RENDERBUFFER, m_thumbDepth);
+		glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, S, S);
+		glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, m_thumbDepth);
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		glBindTexture(GL_TEXTURE_2D, 0);
+		m_thumbSize = S;
+	}
+
+	GLint prevFBO = 0; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
+	GLint prevVP[4]; glGetIntegerv(GL_VIEWPORT, prevVP);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_thumbFBO);
+	glViewport(0, 0, S, S);
+	glClearColor(0.0f, 0.0f, 0.0f, 0.0f); // transparent — the grid composites over its own tile
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+	glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LESS);
+	glDisable(GL_BLEND); glDisable(GL_CULL_FACE);
+
+	// Fixed three-quarter view — a thumbnail has no orbit interaction, and one
+	// shared angle makes a grid of tiles comparable at a glance. `extent` is the
+	// bounds' half-DIAGONAL, so fitting it into the 35° FOV takes at least
+	// extent/tan(17.5°) ≈ 3.17·extent; 3.6 leaves a small margin, and without it
+	// a cube-shaped mesh renders cropped at the tile edges.
+	constexpr float kYaw = 0.7f, kPitch = 0.45f, kMeshFrameDist = 3.6f;
+	bool drew = false;
+	if (kind == ThumbnailKind::Material)
+	{
+		// Graph material → the real shader; otherwise the built-in PBR scalars on
+		// the same sphere, so EVERY material asset produces a tile.
+		drew = DrawMaterialPreviewGeometry(assetId, kYaw, kPitch, 3.1f, 0 /*sphere*/);
+		if (!drew)
+		{
+			const MaterialAsset* ma = m_contentManager->getMaterial(assetId);
+			if (!m_previewVAO || m_previewShape != 0)
+			{
+				// Reuse the material preview's sphere VAO — building it here keeps the
+				// fallback independent of whether an interactive preview ever ran.
+				std::vector<float> verts; std::vector<uint32_t> idx;
+				HE::buildPreviewMesh(0, verts, idx);
+				m_previewIdxCount = (int)idx.size();
+				m_previewShape    = 0;
+				if (!m_previewVAO) glGenVertexArrays(1, &m_previewVAO);
+				glBindVertexArray(m_previewVAO);
+				if (!m_previewVBO) glGenBuffers(1, &m_previewVBO);
+				glBindBuffer(GL_ARRAY_BUFFER, m_previewVBO);
+				glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(), GL_STATIC_DRAW);
+				if (!m_previewIBO) glGenBuffers(1, &m_previewIBO);
+				glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_previewIBO);
+				glBufferData(GL_ELEMENT_ARRAY_BUFFER, idx.size() * sizeof(uint32_t), idx.data(), GL_STATIC_DRAW);
+				glEnableVertexAttribArray(0); glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
+				glEnableVertexAttribArray(1); glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(3 * sizeof(float)));
+				glEnableVertexAttribArray(2); glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(6 * sizeof(float)));
+				glBindVertexArray(0);
+			}
+			unsigned int baseTex = 0;
+			if (ma)
+			{
+				const HE::UUID tid = ma->textureIds.empty()   ? HE::UUID{} : ma->textureIds[0];
+				const std::string tp = ma->texturePaths.empty() ? std::string{} : ma->texturePaths[0];
+				if (tid != HE::UUID{} || !tp.empty()) baseTex = ResolveGraphTexture(tid, tp);
+			}
+			// dist 2.8 × the unit sphere's extent (1.0) reproduces the graph path's
+			// 3.1 at its narrower 32° FOV (3.1·tan16° ≈ 2.8·tan17.5°), so a material
+			// with a graph and one without frame the sphere identically.
+			DrawMeshPreviewGeometry(m_previewVAO, m_previewIdxCount, baseTex,
+				glm::vec3(0.0f), 1.0f,
+				ma ? glm::vec3(ma->baseColor[0], ma->baseColor[1], ma->baseColor[2]) : glm::vec3(0.8f),
+				ma ? ma->metallic : 0.0f, ma ? ma->roughness : 0.5f, kYaw, kPitch, 2.8f);
+			drew = true;
+		}
+	}
+	else if (kind == ThumbnailKind::StaticMesh)
+	{
+		if (const GpuMesh* mesh = ResolveMesh(assetId))
+		{
+			const HE::AABB& b = mesh->localBounds;
+			const glm::vec3 c = b.isValid() ? (b.min + b.max) * 0.5f : glm::vec3(0.0f);
+			const float e = b.isValid() ? glm::length(b.max - b.min) * 0.5f : 1.0f;
+			DrawMeshPreviewGeometry(mesh->vao, mesh->indexCount, mesh->texture, c, e,
+				glm::vec3(0.78f), 0.0f, 0.55f, kYaw, kPitch, kMeshFrameDist);
+			drew = true;
+		}
+	}
+	else if (kind == ThumbnailKind::SkeletalMesh)
+	{
+		// Bind pose: the stored vertex positions ARE the bind pose, so the plain
+		// mesh program is enough — no bone matrices, no skinning shader. The extra
+		// bone attributes on this VAO are simply unused by that program.
+		if (const GpuSkeletalMesh* mesh = ResolveSkeletalMesh(assetId))
+		{
+			const HE::AABB& b = mesh->localBounds;
+			const glm::vec3 c = b.isValid() ? (b.min + b.max) * 0.5f : glm::vec3(0.0f);
+			const float e = b.isValid() ? glm::length(b.max - b.min) * 0.5f : 1.0f;
+			DrawMeshPreviewGeometry(mesh->vao, mesh->indexCount, mesh->texture, c, e,
+				glm::vec3(0.78f), 0.0f, 0.55f, kYaw, kPitch, kMeshFrameDist);
+			drew = true;
+		}
+	}
+
+	if (drew)
+	{
+		// GL reads bottom-up; the caller's contract (and every image format it will
+		// be written to) is top-down, so flip row by row on the way out.
+		outRgba8.assign(static_cast<size_t>(S) * S * 4, 0);
+		std::vector<uint8_t> raw(static_cast<size_t>(S) * S * 4);
+		glPixelStorei(GL_PACK_ALIGNMENT, 1);
+		glReadPixels(0, 0, S, S, GL_RGBA, GL_UNSIGNED_BYTE, raw.data());
+		const size_t rowBytes = static_cast<size_t>(S) * 4;
+		for (int y = 0; y < S; ++y)
+			std::memcpy(outRgba8.data() + static_cast<size_t>(y) * rowBytes,
+			            raw.data() + static_cast<size_t>(S - 1 - y) * rowBytes, rowBytes);
+	}
+
+	glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prevFBO);
+	glViewport(prevVP[0], prevVP[1], prevVP[2], prevVP[3]);
+	glUseProgram(0);
+	return drew;
+}
+
+void* OpenGLRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& materialId,
+                                           uint32_t size, float yaw, float pitch, float dist,
+                                           int shape)
+{
+	const int S = std::clamp(static_cast<int>(size), 32, 1024);
+	if (!m_contentManager) m_contentManager = &cm;
+
+	// Nothing to preview for a built-in-PBR material (no node-graph program) — bail
+	// out BEFORE allocating the target, so a material without a graph never costs an
+	// FBO. The thumbnail path handles that case with its own fallback program.
+	{
+		uint64_t probeKey; std::string probeFrag, probeVert;
+		if (!resolveMaterialShader(materialId, probeKey, probeFrag, probeVert)) return nullptr;
+	}
+
+	// ── Lazy / resized offscreen target.
+	if (!m_previewFBO || m_previewSize != S)
+	{
+		if (m_previewColor) glDeleteTextures(1, &m_previewColor);
+		if (m_previewDepth) glDeleteRenderbuffers(1, &m_previewDepth);
+		if (!m_previewFBO) glGenFramebuffers(1, &m_previewFBO);
+		glBindFramebuffer(GL_FRAMEBUFFER, m_previewFBO);
+		glGenTextures(1, &m_previewColor);
+		glBindTexture(GL_TEXTURE_2D, m_previewColor);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, S, S, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_previewColor, 0);
+		glGenRenderbuffers(1, &m_previewDepth);
+		glBindRenderbuffer(GL_RENDERBUFFER, m_previewDepth);
+		glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, S, S);
+		glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, m_previewDepth);
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		glBindTexture(GL_TEXTURE_2D, 0);
+		m_previewSize = S;
+	}
+
+	// ── Draw the sphere into the preview target. Save/restore the caller's FBO+viewport.
+	GLint prevFBO = 0; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
+	GLint prevVP[4]; glGetIntegerv(GL_VIEWPORT, prevVP);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_previewFBO);
+	glViewport(0, 0, S, S);
+	glClearColor(0.0f, 0.0f, 0.0f, 0.0f); // transparent — editor composites over its own backdrop
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+	glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LESS);
+	glDisable(GL_BLEND); glDisable(GL_CULL_FACE);
+
+	if (!DrawMaterialPreviewGeometry(materialId, yaw, pitch, dist, shape))
+	{
+		glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prevFBO);
+		glViewport(prevVP[0], prevVP[1], prevVP[2], prevVP[3]);
+		glUseProgram(0);
+		return nullptr;
+	}
 
 	// Headless witness: dump the preview target to a PPM (HE_PREVIEW_DUMP=path).
 	if (const char* dp = std::getenv("HE_PREVIEW_DUMP"); dp && *dp)
@@ -6326,6 +6597,12 @@ void OpenGLRenderer::Shutdown()
 	for (auto& [k, t] : m_graphTexCache) if (t) glDeleteTextures(1, &t);
 	m_graphTexCache.clear();
 #endif
+	// Content-Browser thumbnail target + its mesh program — outside the shaderc
+	// guard above, since the mesh path needs no cross-compiler.
+	if (m_thumbColor)         { glDeleteTextures(1, &m_thumbColor);       m_thumbColor = 0; }
+	if (m_thumbDepth)         { glDeleteRenderbuffers(1, &m_thumbDepth);  m_thumbDepth = 0; }
+	if (m_thumbFBO)           { glDeleteFramebuffers(1, &m_thumbFBO);     m_thumbFBO = 0; }
+	if (m_meshPreviewProgram) { glDeleteProgram(m_meshPreviewProgram);    m_meshPreviewProgram = 0; }
 	if (m_instancedProgram) { glDeleteProgram(m_instancedProgram); m_instancedProgram = 0; }
 	if (m_instanceVBO)      { glDeleteBuffers(1, &m_instanceVBO);  m_instanceVBO = 0; }
 	for (auto& [k, prog] : m_particlePrograms) if (prog) glDeleteProgram(prog);

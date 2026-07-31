@@ -1,5 +1,6 @@
 #include "EditorApplication.h"
 #include <cstring>
+#include "AssetThumbnailCache.h" // renderer-owned Content-Browser tiles (freed on shutdown)
 #include "EditorUI.h"
 #include "HorizonVersion.h"
 #include <Diagnostics/Profiler.h>
@@ -2220,6 +2221,63 @@ void EditorApplication::dumpFrameHeadless()
 			Logger::Log(Logger::LogLevel::Info, "EditorApplication: preview stress loop done");
 		}
 	}
+	// Witness the Content-Browser thumbnail path (HE_DUMP_THUMB=<dir>): render the
+	// material and static-mesh thumbnails through IRenderer::RenderAssetThumbnail —
+	// the same call the asset grid makes — and write each as a PPM. Written from the
+	// returned PIXELS, not from a GPU handle, so it proves the whole render →
+	// readback → "what the tile will contain" chain, alpha included: the transparent
+	// background is composited over a checkerboard, so an opaque-background
+	// regression is visible rather than invisible.
+	if (const char* tb = std::getenv("HE_DUMP_THUMB"); tb && *tb)
+	{
+		const std::filesystem::path dir(tb);
+		std::error_code tec;
+		std::filesystem::create_directories(dir, tec);
+		auto dumpThumb = [&](const char* name, ThumbnailKind kind, const HE::UUID& id)
+		{
+			if (id == HE::UUID{}) return;
+			std::vector<uint8_t> px;
+			if (!r->RenderAssetThumbnail(contentManager(), kind, id, 128, px))
+			{
+				Logger::Log(Logger::LogLevel::Warning,
+					(std::string("EditorApplication: thumbnail witness '") + name + "' produced nothing").c_str());
+				return;
+			}
+			const int S = 128;
+			std::ofstream f((dir / (std::string(name) + ".ppm")).string(), std::ios::binary);
+			if (!f) return;
+			f << "P6\n" << S << " " << S << "\n255\n";
+			for (int y = 0; y < S; ++y)
+				for (int x = 0; x < S; ++x)
+				{
+					const uint8_t* p = &px[(static_cast<size_t>(y) * S + x) * 4];
+					const float a = p[3] / 255.0f;
+					const uint8_t bg = ((x / 16 + y / 16) & 1) ? 90 : 150; // checkerboard
+					for (int c = 0; c < 3; ++c)
+					{
+						const uint8_t v = static_cast<uint8_t>(p[c] * a + bg * (1.0f - a));
+						f.write(reinterpret_cast<const char*>(&v), 1);
+					}
+				}
+			Logger::Log(Logger::LogLevel::Info,
+				(std::string("EditorApplication: thumbnail witness wrote ") + name + ".ppm").c_str());
+		};
+		dumpThumb("material", ThumbnailKind::Material,   s_matTestId);
+		dumpThumb("mesh",     ThumbnailKind::StaticMesh, HE::kDefaultCubeMeshId);
+		// A material with NO node graph exercises the OTHER material branch — the
+		// built-in-PBR fallback, which the interactive preview never reaches (it
+		// returns "no preview" there) and which is therefore only visible here.
+		{
+			MaterialAsset flat;
+			flat.type = HE::AssetType::Material;
+			flat.name = "__thumbWitnessFlat";
+			flat.baseColor[0] = 0.85f; flat.baseColor[1] = 0.35f; flat.baseColor[2] = 0.15f;
+			flat.metallic = 0.1f; flat.roughness = 0.35f;
+			dumpThumb("material_pbr", ThumbnailKind::Material,
+			          contentManager().registerMaterial(std::move(flat)));
+		}
+	}
+
 	// DIAGNOSTIC (HE_DUMP_GIROTATE): sweep the camera through an orbit before the
 	// final static settle below, to directly exercise GI's temporal reprojection
 	// under camera rotation (disocclusion). The plain 3x static-render capture
@@ -2916,6 +2974,9 @@ void EditorApplication::OnShutdown()
 		renderer()->DestroyImGuiTexture(reinterpret_cast<void*>(static_cast<uintptr_t>(m_logoTexture)));
 		m_logoTexture = 0;
 	}
+	// Same for the Content Browser's rendered asset tiles — they are renderer-owned
+	// textures, so they have to go while the renderer is still alive.
+	AssetThumbnailCache::shutdown();
 
 	m_audioEngine.shutdown();
 

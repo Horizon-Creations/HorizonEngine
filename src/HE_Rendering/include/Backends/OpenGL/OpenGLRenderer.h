@@ -53,6 +53,8 @@ public:
 	void* RenderParticlePreview(ContentManager& cm, const HE::UUID& meshId, const HE::UUID& materialId,
 	                            const std::vector<ParticlePreviewInstance>& particles,
 	                            uint32_t size, float yaw, float pitch, float dist) override;
+	bool  RenderAssetThumbnail(ContentManager& cm, ThumbnailKind kind, const HE::UUID& assetId,
+	                           uint32_t size, std::vector<uint8_t>& outRgba8) override;
 	void  InvalidateMesh    (const HE::UUID& meshId)     override;
 	void  InvalidateTexture (const HE::UUID& textureId)  override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
@@ -268,6 +270,32 @@ private:
 	int          m_particlePreviewSize = 0;
 	unsigned int m_particlePreviewProgram = 0, m_particlePreviewInstVBO = 0, m_particlePreviewVAO = 0;
 	int          m_uPPvViewProj = -1, m_uPPvCamRight = -1, m_uPPvCamUp = -1, m_uPPvHasTex = -1;
+
+	// ── Content-Browser thumbnails (RenderAssetThumbnail) ────────────────────
+	// Its own FBO, deliberately NOT any of the preview targets above: a thumbnail
+	// is rendered while the Material Editor may be showing its live preview, and
+	// sharing m_previewFBO would replace that preview's contents with whatever
+	// asset the grid happened to ask for. Read back to RGBA8 and cached by the
+	// editor, so this target only ever holds one thumbnail at a time.
+	unsigned int m_thumbFBO = 0, m_thumbColor = 0, m_thumbDepth = 0;
+	int          m_thumbSize = 0;
+	// Unlit-ish mesh program shared by the mesh thumbnails and by materials that
+	// have no node graph (built-in PBR): pos/normal/uv in, fixed sun + ambient
+	// plus a roughness/metallic-driven highlight, so a flat material still reads
+	// as a shaded sphere instead of a silhouette.
+	unsigned int m_meshPreviewProgram = 0;
+	int          m_uMeshPvMVP = -1, m_uMeshPvModel = -1, m_uMeshPvColor = -1;
+	int          m_uMeshPvHasTex = -1, m_uMeshPvCamPos = -1, m_uMeshPvPbr = -1;
+	// Draws one material-graph preview primitive into the CURRENTLY BOUND target
+	// (caller owns FBO/viewport/clear). False when the material has no node-graph
+	// program — the thumbnail path then falls back to m_meshPreviewProgram.
+	bool DrawMaterialPreviewGeometry(const HE::UUID& materialId, float yaw, float pitch,
+	                                 float dist, int shape);
+	// Same contract for the mesh program: `vao`/`indexCount`/`texture` describe the
+	// geometry, `center`/`extent` frame the orbit camera.
+	void DrawMeshPreviewGeometry(unsigned int vao, int indexCount, unsigned int texture,
+	                             const glm::vec3& center, float extent, const glm::vec3& baseColor,
+	                             float metallic, float roughness, float yaw, float pitch, float dist);
 
 	// GPU-instanced ParticleGraph particle rendering (the real scene draw path, see
 	// RenderWorld::particleBatches) — one compiled program per unique color/alpha-
