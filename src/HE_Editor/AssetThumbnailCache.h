@@ -104,6 +104,12 @@ namespace AssetThumbnailCache
 	// transparent). Public for tests.
 	bool fontThumbnail(const HE::UUID& fontId, std::vector<uint8_t>& out);
 
+	// A particle asset is an emitter GRAPH, so its tile is a snapshot of the
+	// effect actually running: the pool is stepped here (ParticleSystem::stepPool
+	// — the renderer never simulates) with a FIXED seed, because a cached tile
+	// must not change every time it is regenerated. Public for tests.
+	bool particleThumbnail(const HE::UUID& particleId, std::vector<uint8_t>& out);
+
 	// ── Cache-file format (exposed for tests) ────────────────────────────────
 	// A .hthumb is a 32-byte header, the asset's content-relative path, then
 	// `size`×`size` top-down RGBA8 pixels. The path is stored so a hash collision

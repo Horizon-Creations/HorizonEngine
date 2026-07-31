@@ -2312,6 +2312,47 @@ void EditorApplication::dumpFrameHeadless()
 				AssetThumbnailCache::setContext(nullptr, nullptr, "");
 			}
 		}
+		// A particle tile steps a real pool and renders it through the dedicated
+		// particle thumbnail path — worth witnessing because "did the simulation
+		// actually produce particles" cannot be seen from the code.
+		{
+			ParticleGraphAsset pg;
+			pg.type = HE::AssetType::ParticleSystem;
+			pg.name = "__thumbWitnessParticles";
+			pg.path = "__thumbWitnessParticles.hasset";
+			pg.nodeGraphJson = HE::particleGraphToJson(HE::ParticleGraph::makeDefault());
+			HE::UUID pid{};
+			if (contentManager().saveAsset(pg)) pid = contentManager().loadAsset(pg.path);
+			AssetThumbnailCache::setContext(r, &contentManager(), dir.string());
+			std::vector<uint8_t> pp;
+			if (pid != HE::UUID{} && AssetThumbnailCache::particleThumbnail(pid, pp))
+			{
+				const int TS = (int)AssetThumbnailCache::thumbnailSize();
+				if (std::ofstream f((dir / "particles.ppm").string(), std::ios::binary); f)
+				{
+					f << "P6\n" << TS << " " << TS << "\n255\n";
+					for (int i = 0; i < TS * TS; ++i)
+					{
+						const float a = pp[(size_t)i * 4 + 3] / 255.0f;
+						const uint8_t bg = (((i % TS) / 16 + (i / TS) / 16) & 1) ? 90 : 150;
+						for (int c = 0; c < 3; ++c)
+						{
+							const uint8_t v = (uint8_t)(pp[(size_t)i * 4 + c] * a + bg * (1.0f - a));
+							f.write(reinterpret_cast<const char*>(&v), 1);
+						}
+					}
+				}
+				Logger::Log(Logger::LogLevel::Info,
+					"EditorApplication: thumbnail witness wrote particles.ppm");
+			}
+			else
+				Logger::Log(Logger::LogLevel::Warning,
+					"EditorApplication: thumbnail witness produced no particle tile");
+			AssetThumbnailCache::setContext(nullptr, nullptr, "");
+			std::error_code prc;
+			std::filesystem::remove(
+				std::filesystem::path(contentManager().contentRoot()) / pg.path, prc);
+		}
 		// A font tile is baked through UIFontCache, so it too skips the renderer.
 		{
 			const char* bp2 = SDL_GetBasePath();

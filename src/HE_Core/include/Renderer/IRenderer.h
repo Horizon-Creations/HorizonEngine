@@ -343,6 +343,18 @@ public:
                                       std::vector<uint8_t>& /*outRgba8*/)
     { return false; }
 
+    // Same, for a particle system: it has no single asset to point at — a tile is
+    // a snapshot of a SIMULATED pool, which the caller steps (ParticleSystem::
+    // stepPool lives in HE_Scene; the renderer never simulates) and hands over
+    // already resolved, exactly as for RenderParticlePreview. Reads back to
+    // top-down RGBA8 like RenderAssetThumbnail; the target is private to the
+    // thumbnail path, not the interactive particle preview's.
+    virtual bool RenderParticleThumbnail(class ContentManager& /*cm*/,
+                                         const HE::UUID& /*materialId*/,
+                                         const std::vector<ParticlePreviewInstance>& /*particles*/,
+                                         uint32_t /*size*/, std::vector<uint8_t>& /*outRgba8*/)
+    { return false; }
+
     // Drop cached GPU buffers for a mesh so ResolveMesh re-uploads from the
     // ContentManager next frame. Call after replaceStaticMesh so sculpt/edit
     // changes are not masked by the renderer's VBO cache.
