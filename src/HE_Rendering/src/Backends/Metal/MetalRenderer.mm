@@ -9124,8 +9124,23 @@ void MetalRenderer::EncodeClusterData(void* renderEncoder,
 	const int gridTotal = kClusterGridX * kClusterGridY * kClusterGridZ;
 	std::vector<std::vector<uint32_t>> cells(gridTotal);
 	int lightCount = 0;
+	// GI local-mask channel bookkeeping: the ray-traced mask (heGILocal) covers
+	// the first 4 NON-directional lights of the first-8 window, counted exactly
+	// like heLitP's localIdx — reproduce that scan so cluster lights keep their
+	// mask channel when GI is on.
+	const bool giMasksValid = m_giEnabled && m_giSupported && m_giShadowResult
+	                       && m_giIrradianceAtlas && m_giVisibilityAtlas;
+	int extractorIndex = -1;
+	int windowLocalIdx = 0;
 	for (const LightData& l : m_renderWorld.lights)
 	{
+		++extractorIndex;
+		int maskChannel = -1; // -1 = no ray-traced mask for this light
+		if (l.type != 0 && extractorIndex < 8)
+		{
+			if (giMasksValid && windowLocalIdx < 4) maskChannel = windowLocalIdx;
+			++windowLocalIdx;
+		}
 		if (l.type == 0) continue; // directional stays in the heLight window
 		if (lightCount >= kMaxClusteredLights) break;
 		const float range = std::max(l.range, 1e-4f);
@@ -9171,7 +9186,8 @@ void MetalRenderer::EncodeClusterData(void* renderEncoder,
 		lightData.push_back(glm::vec4(l.color, l.intensity));
 		lightData.push_back(glm::vec4(range,
 			(m_localShadowTex && l.shadowLayer >= 0) ? static_cast<float>(l.shadowLayer + 1) : 0.0f,
-			0.0f, 0.0f));
+			static_cast<float>(maskChannel + 1), // GI mask channel + 1 (0 = none)
+			0.0f));
 		for (int z = z0; z <= z1; ++z)
 			for (int y = y0; y <= y1; ++y)
 				for (int x = x0; x <= x1; ++x)
