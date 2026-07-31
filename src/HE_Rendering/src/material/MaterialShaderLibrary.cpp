@@ -910,7 +910,17 @@ vec3 heClusterLighting(vec3 P, vec3 Nin, vec3 baseColor, float metallic,
             atten *= smoothstep(cosCone, mix(cosCone, 1.0, 0.2), c);
         }
         if (atten <= 0.0) continue;
-        float sh   = heClusterShadow(posType, params, P, n);
+        float sh = heClusterShadow(posType, params, P, n);
+        // Ray-traced GI local mask: params.z carries this light's channel + 1
+        // (assigned by the CPU scatter with heLitP's exact first-4-of-window
+        // scan), min()-combined with the atlas shadow like heLitP's loop.
+        if (heLight.giParams.z > 0.5) {
+            int ch = int(params.z) - 1;
+            if (ch >= 0) {
+                vec4 lm = texture(heGILocal, uv);
+                sh = min(sh, lm[ch]);
+            }
+        }
         float ndl  = max(dot(n, L), 0.0);
         vec3  H    = normalize(L + V);
         float spec = pow(max(dot(n, H), 0.0), shininess) * specScale;
