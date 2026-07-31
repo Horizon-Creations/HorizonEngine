@@ -15,6 +15,7 @@
 #include <HorizonRendering/SkyFrameParams.h>
 #include <HorizonRendering/LightPacking.h>
 #include <HorizonScene/HorizonWorld.h>
+#include "TestFsUtil.h"
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/MeshComponent.h>
 #include <ContentManager/ContentManager.h>
@@ -1087,6 +1088,28 @@ inline void checkGroup(const std::vector<const char*>& names,
 }
 
 } // namespace shaderdrift
+
+TEST_CASE("shaderdrift::readFile normalises CRLF, so multi-line needles match everywhere")
+{
+	// readFile's normalisation is load-bearing but invisible on the platforms most
+	// of us develop on: `* text=auto` only materialises CRLF on the Windows
+	// runner, so dropping it again would turn exactly one job red, and only for
+	// multi-line needles (single-line regexes swallow the \r via \\s*). 619e098
+	// shipped that state for two weeks. Pin the behaviour where every platform
+	// checks it, instead of relying on Windows CI to notice a second time.
+	namespace fs = std::filesystem;
+	const fs::path tmp = fs::temp_directory_path() / "he_test_crlf_readfile.txt";
+	{
+		std::ofstream f(tmp, std::ios::binary);
+		f << "float NdV = clamp(dot(n, V), 0.0, 1.0);\r\nvec3 fresnelSpec = specColor;\r\n";
+	}
+	const std::string text = shaderdrift::readFile(tmp);
+	he_test::removeQuiet(tmp);
+
+	CHECK(text.find('\r') == std::string::npos);
+	CHECK(text.find("float NdV = clamp(dot(n, V), 0.0, 1.0);\n"
+	                "vec3 fresnelSpec = specColor;") != std::string::npos);
+}
 
 TEST_CASE("GI kernels: the constants the hand-kept copies must share")
 {
