@@ -63,7 +63,19 @@ jobs:
           for round in $(seq 1 15); do
             declare -A pids
             for c in 1 2 3 4; do
-              stdbuf -oL -eL ./build/tests/he_tests --duration=true > "r${round}_${c}.log" 2>&1 &
+              # Own TMPDIR per copy: a lot of tests build fixtures at FIXED paths under
+              # std::filesystem::temp_directory_path() (export profiles, thumbnail cache,
+              # async streaming). Concurrent copies would clobber each other's files and
+              # drown the run in assertion failures that say nothing about the crash.
+              d="$PWD/tmp_s${c}"; rm -rf "$d"; mkdir -p "$d"
+              # -tce=GameLogicLoader*: the loader hot-copies the dylib to a NUMBERED
+              # SIBLING next to itself (GameLogic.hot-0001.so) using a process-local
+              # counter, so two copies out of one build dir fight over the same file.
+              # Process-local is correct in production (one editor loads game logic);
+              # it is only wrong under this artificial concurrency. The sequential ASan
+              # run in the other job still covers these tests.
+              TMPDIR="$d" stdbuf -oL -eL ./build/tests/he_tests --duration=true \
+                -tce="GameLogicLoader*" > "r${round}_${c}.log" 2>&1 &
               pids[$c]=$!
             done
             for c in 1 2 3 4; do
@@ -134,10 +146,23 @@ jobs:
         run: |
           set +e
           fails=0
+          # One sequential run over the COMPLETE suite first: the contended rounds below
+          # have to exclude the GameLogicLoader tests, so this is what keeps them covered.
+          d="$PWD/tmp_seq"; mkdir -p "$d"
+          TMPDIR="$d" stdbuf -oL -eL ./build-asan/tests/he_tests > seq.log 2>&1
+          if [ $? -ne 0 ]; then
+            fails=$((fails+1))
+            echo "::group::ASan sequential full run FAILED"; tail -150 seq.log; echo "::endgroup::"
+          else
+            echo "ASan sequential full run: ok"
+          fi
           for round in $(seq 1 8); do
             declare -A pids
             for c in 1 2; do
-              stdbuf -oL -eL ./build-asan/tests/he_tests > "a${round}_${c}.log" 2>&1 &
+              # See the TMPDIR note in stress-contended — same fixed-temp-path collision.
+              d="$PWD/tmp_a${c}"; rm -rf "$d"; mkdir -p "$d"
+              TMPDIR="$d" stdbuf -oL -eL ./build-asan/tests/he_tests \
+                -tce="GameLogicLoader*" > "a${round}_${c}.log" 2>&1 &
               pids[$c]=$!
             done
             for c in 1 2; do
@@ -152,7 +177,7 @@ jobs:
             rm -f a${round}_*.log
             echo "ASan round $round done (running total of failures: $fails)"
           done
-          echo "=== $fails / 16 ASan runs failed ==="
+          echo "=== $fails / 17 ASan runs failed (1 sequential + 16 contended) ==="
           [ $fails -eq 0 ]
 
   # ── 3. The blind spot ASan cannot cover ─────────────────────────────────────
