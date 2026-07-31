@@ -959,12 +959,24 @@ inline fs::path findRepoRoot()
 	return {};
 }
 
+// Read a source file with its line endings NORMALISED to '\n'.
+//
+// .gitattributes sets `* text=auto`, so a Windows checkout materialises these
+// files with CRLF while macOS/Linux get LF. Read verbatim (binary, so the reader
+// is not at the mercy of the platform's text-mode translation), then strip the
+// '\r' explicitly — the needles below are C++ string literals written with '\n',
+// and a multi-line one can never match CRLF content. That is not hypothetical:
+// the SSR/Fresnel needle added in 619e098 turned Windows CI red and left the
+// other two platforms green, because every OTHER check here matches within a
+// single line and so never noticed the difference.
 inline std::string readFile(const fs::path& p)
 {
 	std::ifstream f(p, std::ios::binary);
 	std::ostringstream ss;
 	ss << f.rdbuf();
-	return ss.str();
+	std::string s = ss.str();
+	s.erase(std::remove(s.begin(), s.end(), '\r'), s.end());
+	return s;
 }
 
 // Comments differ freely between the copies (each explains its own dialect), and
