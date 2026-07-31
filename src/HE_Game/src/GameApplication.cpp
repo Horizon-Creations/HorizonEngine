@@ -849,10 +849,12 @@ void GameApplication::OnRender(float deltaTime)
 			const bool ssrEnabled =
 				GlobalState::getInstance().getCustomConfigBool("SSREnabled", false) &&
 				r->GetCapabilities().supportsScreenSpaceReflections;
-			r->SetSSRSettings(IRenderer::SSRSettings{
-				ssrEnabled,
-				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("SSRIntensity", 1.0f)),
-				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("SSRMaxRoughness", 0.6f))});
+			IRenderer::SSRSettings ssr;
+			ssr.enabled      = ssrEnabled;
+			ssr.intensity    = static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("SSRIntensity", 1.0f));
+			ssr.maxRoughness = static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("SSRMaxRoughness", 0.6f));
+			ssr.quality      = GlobalState::getInstance().getCustomConfigInt("SSRQuality", 1);
+			r->SetSSRSettings(ssr);
 
 			// Render path — same config.json key the editor's Preferences combo
 			// writes ("RenderPath": 0 = Forward, 1 = Deferred), capability-gated.

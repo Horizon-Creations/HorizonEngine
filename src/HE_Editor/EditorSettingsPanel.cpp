@@ -186,6 +186,13 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode)
 		ImGui::SliderFloat("SSR Intensity", &cfg.SSRIntensity, 0.0f, 1.0f, "%.2f");
 		ImGui::SetNextItemWidth(220.0f);
 		ImGui::SliderFloat("SSR Max Roughness", &cfg.SSRMaxRoughness, 0.05f, 1.0f, "%.2f");
+		ImGui::SetNextItemWidth(220.0f);
+		// Low = 16 steps, raw trace; Med = 32 + blur; High = 64 + glossy
+		// roughness lerp (wide second blur) — matches ssr-plan §7's tiers.
+		const char* kSSRQuality[] = { "Low", "Medium", "High" };
+		int ssrQ = std::clamp(cfg.SSRQuality, 0, 2);
+		if (ImGui::Combo("SSR Quality", &ssrQ, kSSRQuality, 3))
+			cfg.SSRQuality = ssrQ;
 		ImGui::EndDisabled();
 		ImGui::EndDisabled();
 		if (!supported && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
