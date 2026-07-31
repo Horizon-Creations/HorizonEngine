@@ -3030,6 +3030,27 @@ out vec4 FragColor;
 void main() { FragColor = vec4(vViewPos, 1.0); } // a = 1 → valid geometry
 )GLSL";
 
+// Deferred (plan P5): reconstruct the view-space position from the G-buffer
+// depth instead of re-rasterizing the scene — the whole geometry pre-pass above
+// collapses into one fullscreen draw when the G-buffer exists this frame.
+// Shares the tonemap fullscreen-triangle VS (vUV, bottom-left origin, matching
+// the GL depth convention d*2-1 → ndc z).
+static const char* kSSAODepthPosFS = R"GLSL(
+#version 410 core
+in vec2 vUV;
+uniform sampler2D uDepth;    // G-buffer depth texture
+uniform mat4      uInvProj;  // inverse camera projection (GL convention)
+out vec4 FragColor;
+void main()
+{
+	float d = texture(uDepth, vUV).r;
+	if (d >= 1.0) { FragColor = vec4(0.0); return; } // background → a = 0
+	vec4 clip = vec4(vUV * 2.0 - 1.0, d * 2.0 - 1.0, 1.0);
+	vec4 v = uInvProj * clip;
+	FragColor = vec4(v.xyz / max(v.w, 1e-8), 1.0);   // a = 1 → valid geometry
+}
+)GLSL";
+
 // Occlusion estimate (fullscreen, shares the tonemap fullscreen-triangle VS).
 // Reconstructs the view-space normal from neighbouring positions, then runs the
 // AO method selected by uAOMethod (0 = SSAO tangent-plane kernel, 1 = HBAO
@@ -4406,6 +4427,18 @@ void OpenGLRenderer::CreateSSAOPipeline()
 		m_uPosMVP       = glGetUniformLocation(m_ssaoPosProgram, "uMVP");
 		m_uPosModelView = glGetUniformLocation(m_ssaoPosProgram, "uModelView");
 	}
+	// Deferred P5 pre-pass variant: view-pos from the G-buffer depth (fullscreen).
+	{
+		GLuint vs = CompileStage(GL_VERTEX_SHADER,   kTonemapVS);
+		GLuint fs = CompileStage(GL_FRAGMENT_SHADER, kSSAODepthPosFS);
+		m_ssaoDepthPosProgram = glCreateProgram();
+		glAttachShader(m_ssaoDepthPosProgram, vs);
+		glAttachShader(m_ssaoDepthPosProgram, fs);
+		glLinkProgram(m_ssaoDepthPosProgram);
+		glDeleteShader(vs); glDeleteShader(fs);
+		m_uDepthPosDepth   = glGetUniformLocation(m_ssaoDepthPosProgram, "uDepth");
+		m_uDepthPosInvProj = glGetUniformLocation(m_ssaoDepthPosProgram, "uInvProj");
+	}
 	// Occlusion program (reuses the tonemap fullscreen-triangle VS).
 	{
 		GLuint vs = CompileStage(GL_VERTEX_SHADER,   kTonemapVS);
@@ -5091,13 +5124,33 @@ void OpenGLRenderer::DestroySSAOTargets()
 // Pre-pass (view position) → occlusion → blur. Leaves GL_TEXTURE0 active and the
 // depth test disabled; the caller re-binds its own target + depth state.
 unsigned int OpenGLRenderer::RenderSSAO(const CommandBuffer& cmds, int pw, int ph,
-	const glm::mat4& viewProj, const glm::mat4& view, const glm::mat4& proj)
+	const glm::mat4& viewProj, const glm::mat4& view, const glm::mat4& proj,
+	bool fromGBufferDepth)
 {
 	if (!m_ssaoPosProgram || !m_ssaoProgram || !m_ssaoBlurProgram) return 0;
+	if (fromGBufferDepth && (!m_ssaoDepthPosProgram || !m_gbDepthTex)) fromGBufferDepth = false;
 	EnsureSSAOTargets(pw, ph);
 	if (!m_ssaoPosFBO) return 0;
 
 	// ── 1. View-space position pre-pass ────────────────────────────────────
+	if (fromGBufferDepth)
+	{
+		// Deferred P5: one fullscreen draw reading the G-buffer depth — no
+		// extract/cull/sort, no geometry re-rasterization.
+		glBindFramebuffer(GL_FRAMEBUFFER, m_ssaoPosFBO);
+		glViewport(0, 0, pw, ph);
+		glDisable(GL_DEPTH_TEST);
+		glUseProgram(m_ssaoDepthPosProgram);
+		glActiveTexture(GL_TEXTURE0);
+		glBindTexture(GL_TEXTURE_2D, m_gbDepthTex);
+		glUniform1i(m_uDepthPosDepth, 0);
+		glUniformMatrix4fv(m_uDepthPosInvProj, 1, GL_FALSE,
+		                   glm::value_ptr(glm::inverse(proj)));
+		glBindVertexArray(m_fsVAO);
+		glDrawArrays(GL_TRIANGLES, 0, 3);
+	}
+	else
+	{
 	glBindFramebuffer(GL_FRAMEBUFFER, m_ssaoPosFBO);
 	glViewport(0, 0, pw, ph);
 	glEnable(GL_DEPTH_TEST);
@@ -5136,6 +5189,7 @@ unsigned int OpenGLRenderer::RenderSSAO(const CommandBuffer& cmds, int pw, int p
 			glUniformMatrix4fv(m_uPosModelView, 1, GL_FALSE, glm::value_ptr(view * dc.transform));
 			glDrawElements(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr);
 		}
+	}
 	}
 
 	// ── 2. Occlusion (fullscreen) ──────────────────────────────────────────
@@ -6935,6 +6989,7 @@ void OpenGLRenderer::Shutdown()
 	DestroyViewportTarget();
 	DestroyHDRTarget();
 	DestroyGBufferTargets();
+	if (m_ssaoDepthPosProgram)     { glDeleteProgram(m_ssaoDepthPosProgram);     m_ssaoDepthPosProgram = 0; }
 	if (m_gbufferProgram)          { glDeleteProgram(m_gbufferProgram);          m_gbufferProgram = 0; }
 	if (m_gbufferInstancedProgram) { glDeleteProgram(m_gbufferInstancedProgram); m_gbufferInstancedProgram = 0; }
 	if (m_deferredResolveProgram)  { glDeleteProgram(m_deferredResolveProgram);  m_deferredResolveProgram = 0; }
@@ -7489,8 +7544,13 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		// Computed before shading (using these same geometry draw calls) so the
 		// scene shader can darken its ambient term. Skipped (zero cost) when off
 		// — including when GI shades this frame (probe indirect replaces AO).
+		// Deferred (docs/deferred-renderer-plan.md): decided here, before SSAO —
+		// in deferred mode the AO pre-pass reads the G-buffer depth (plan P5), so
+		// SSAO runs AFTER the G-buffer loop below instead of here.
+		const bool deferredActive =
+			m_renderPath == HE::RenderPath::Deferred && EnsureDeferredPipelines();
 		unsigned int aoTex = 0u;
-		if (m_ssaoEnabled && !giShadingActive)
+		if (m_ssaoEnabled && !giShadingActive && !deferredActive)
 		{
 			GpuPassScope _ssaoTimer(this, "SSAO");
 			aoTex = RenderSSAO(cmds, pw, ph, viewProj, m_renderWorld.camera.view,
@@ -7508,9 +7568,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		GpuTimerBeginPass("Opaque");
 		// ── Deferred render path: rasterize the opaque geometry into the G-buffer
 		// instead of shading it here; the lighting happens once, in the fullscreen
-		// resolve below (docs/deferred-renderer-plan.md).
-		const bool deferredActive =
-			m_renderPath == HE::RenderPath::Deferred && EnsureDeferredPipelines();
+		// resolve below (deferredActive was decided above, before the SSAO block).
 		if (deferredActive)
 		{
 			EnsureGBufferTargets(pw, ph);
@@ -7565,7 +7623,11 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		glUniform1f(m_uWetness,          GetEnvironment().wetness);
 		glUniform1f(m_uSnow,             GetEnvironment().snowAmount);
 		// SSAO occlusion on unit 4 (white fallback when off → ao = 1, no change).
-		const bool aoActive = m_ssaoEnabled && aoTex != 0;
+		// Mutable (not const): in deferred mode SSAO runs AFTER the G-buffer loop
+		// (P5, reads its depth) and updates aoTex/aoActive there — every consumer
+		// below the resolve (skinned/transparency binds, fillMatLight) reads the
+		// refreshed values.
+		bool aoActive = m_ssaoEnabled && aoTex != 0;
 		glActiveTexture(GL_TEXTURE4);
 		glBindTexture(GL_TEXTURE_2D, aoActive ? aoTex : m_whiteTex);
 		glUniform1i(m_uAO, 4);
@@ -8220,6 +8282,39 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		if (deferredActive)
 		{
 			glDisable(GL_FRAMEBUFFER_SRGB);
+
+			// P5: SSAO from the G-buffer depth (one fullscreen reconstruction
+			// instead of the geometry pre-pass). Runs here — after the G-buffer,
+			// before the resolve that samples the result on unit 15.
+			if (m_ssaoEnabled && !giShadingActive)
+			{
+				GpuPassScope _ssaoTimer(this, "SSAO");
+				aoTex = RenderSSAO(cmds, pw, ph, viewProj, m_renderWorld.camera.view,
+				                   m_renderWorld.camera.projection, /*fromGBufferDepth=*/true);
+				aoActive = m_ssaoEnabled && aoTex != 0;
+				// Refresh the AO binds the per-frame setup made while aoTex was
+				// still 0: built-in unit 4 (uAO) + its enable flag on the unlit
+				// program (transparency replay reads it), custom-material unit 15.
+				glActiveTexture(GL_TEXTURE4);
+				glBindTexture(GL_TEXTURE_2D, aoActive ? aoTex : m_whiteTex);
+				glActiveTexture(GL_TEXTURE0);
+				glUseProgram(m_unlitProgram);
+				glUniform1i(m_uSSAOEnabled, aoActive ? 1 : 0);
+#if defined(HE_HAVE_SHADERC)
+				// The pre-loop lighting upload (Time for G-buffer graphs) carried
+				// fog.w = 0 — re-upload with the fresh AO gate for the forward-
+				// routed and transparent custom-material draws.
+				if (m_matLightUBO)
+				{
+					HE::MaterialShaderLibrary::Lighting lit{};
+					fillMatLight(lit);
+					glBindBuffer(GL_UNIFORM_BUFFER, m_matLightUBO);
+					glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(lit), &lit);
+					glBindBuffer(GL_UNIFORM_BUFFER, 0);
+				}
+#endif
+			}
+
 			// Depth: G-buffer → HDR FBO, so the forward tail (skinned/sky/
 			// transparency) depth-tests against the deferred geometry while the
 			// resolve SAMPLES the depth texture (attachment + sampled input of
