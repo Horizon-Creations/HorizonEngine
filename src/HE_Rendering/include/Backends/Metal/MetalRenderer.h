@@ -236,6 +236,16 @@ private:
 	// Trace + composite, own passes on cmdBuf (after the tile G-buffer pass).
 	void  EncodeSSRPasses(void* cmdBuf, int width, int height);
 
+	// ── Deferred decals (P7 follow-up, tile mode v1) ─────────────────────────
+	// Unit-cube projectors (DecalComponent) rasterized INSIDE the G-buffer pass
+	// right after the geometry: the fragment framebuffer-fetches the NDC depth
+	// (attachment 3), clips against the box and alpha-blends into GB0.rgb.
+	// Apple-GPU only (fetch) — the two-pass fallback and GL ignore decals in v1.
+	void* m_decalPipeline      = nullptr; // id<MTLRenderPipelineState>
+	bool  m_decalPipelineTried = false;
+	bool  EnsureDecalPipeline();
+	void  EncodeDecals(void* renderEncoder, int width, int height);
+
 	// ── Clustered lighting (plan P7) ─────────────────────────────────────────
 	// In the deferred resolve ALL point/spot lights come from per-cluster light
 	// lists (CPU-built each frame, scattered by projected bounds) instead of the

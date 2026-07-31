@@ -184,6 +184,27 @@ public:
         float vp[4]           = {}; // xy = trace-target size in pixels
     };
 
+    // ── Deferred decals (P7 follow-up, Metal tile mode v1) ───────────────────
+    // A unit-cube projector rasterized INSIDE the G-buffer pass: the fragment
+    // framebuffer-fetches the NDC depth (attachment 3), reconstructs the world
+    // position, clips against the decal box and alpha-blends its colour into
+    // GB0's rgb (metallic in .a stays — writeMask RGB). No depth test: the box
+    // volume decides, so the camera may sit inside the projector.
+    const Compiled& decalVertex(Backend backend);
+    const Compiled& decalFragment(Backend backend);
+
+    // std140 layout of the decal shader's HeDecal UBO (binding 23, both stages).
+    struct DecalUniforms
+    {
+        float viewProj[16]    = {}; // scene view-proj (raster convention)
+        float model[16]       = {}; // unit cube [-0.5, 0.5]³ → world
+        float invModel[16]    = {};
+        float invViewProj[16] = {};
+        float color[4]        = {}; // rgba tint (a = opacity)
+        float params[4]       = {}; // x hasTexture, y ndc-y sign, z depth scale, w depth bias
+        float vp[4]           = {}; // xy viewport in pixels
+    };
+
     // Clustered-lighting variants of the two resolves (plan P7, Metal only):
     // heLitP shades ambient/GI/directional from a DIRECTIONAL-ONLY light window,
     // and all point/spot lights come from per-cluster light lists in SSBOs
@@ -220,7 +241,7 @@ public:
 
     void clear() { m_vertCache.clear(); m_fragCache.clear(); m_cvertCache.clear();
                    m_uiVertCache.clear(); m_resolveCache.clear(); m_resolveTileCache.clear();
-                   m_ssrCache.clear(); m_fsVertCache.clear(); }
+                   m_ssrCache.clear(); m_decalCache.clear(); m_fsVertCache.clear(); }
 
 private:
     std::unordered_map<int, Compiled>      m_vertCache;  // key = (int)backend
@@ -230,6 +251,7 @@ private:
     std::unordered_map<int, Compiled>      m_resolveCache; // key = (int)backend (+64 clustered)
     std::unordered_map<int, Compiled>      m_resolveTileCache; // key = (int)backend (+64 clustered)
     std::unordered_map<int, Compiled>      m_ssrCache;     // key = (int)backend*2 + (0 trace / 1 composite)
+    std::unordered_map<int, Compiled>      m_decalCache;   // key = (int)backend*2 + (0 vertex / 1 fragment)
     std::unordered_map<int, Compiled>      m_fsVertCache;  // key = (int)backend
 };
 } // namespace HE

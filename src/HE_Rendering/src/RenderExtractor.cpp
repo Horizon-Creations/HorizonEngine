@@ -11,6 +11,7 @@
 #include <HorizonScene/Components/MaterialComponent.h>
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/LightComponent.h>
+#include <HorizonScene/Components/DecalComponent.h>
 #include <HorizonScene/Components/EnvironmentLightComponent.h>
 #include <HorizonScene/Components/ParticleSystemComponent.h>
 #include <HorizonScene/Components/WeatherComponent.h>
@@ -416,6 +417,21 @@ namespace
 		}
 	}
 
+	// ── Decals ──────────────────────────────────────────────────────────────
+	// The entity's world matrix IS the projector box (unit cube scaled by the
+	// transform); the deferred path blends the colour into the G-buffer.
+	void extractDecals(entt::registry& reg, RenderWorld& out)
+	{
+		for (auto [e, t, d] : reg.view<TransformComponent, DecalComponent>().each())
+		{
+			DecalData dd;
+			dd.transform = t.worldMatrix;
+			dd.color     = d.color;
+			dd.textureId = d.textureId;
+			out.decals.push_back(dd);
+		}
+	}
+
 	// ── Lights ──────────────────────────────────────────────────────────────
 	void extractLights(entt::registry& reg, RenderWorld& out)
 	{
@@ -697,6 +713,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 	extractPrecipitation(reg, out);
 	extractFoliage(reg, out);
 	extractSkinnedMeshes(reg, out);
+	extractDecals(reg, out);
 	// Lights, then the day-night pass that overrides the sun/moon among them.
 	extractLights(reg, out);
 	applyDayNight(out);

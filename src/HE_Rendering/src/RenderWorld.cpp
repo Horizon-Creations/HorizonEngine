@@ -5,6 +5,7 @@ void RenderWorld::clear()
 	objects.clear();
 	skinnedObjects.clear();
 	lights.clear();
+	decals.clear();
 	uiObjects.clear();
 	particleBatches.clear();
 	camera = CameraData{};

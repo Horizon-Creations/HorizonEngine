@@ -2139,6 +2139,32 @@ void EditorApplication::dumpFrameHeadless()
 			"EditorApplication: HE_DUMP_SSRTEST witness scene added");
 	}
 
+	// ── Decal witness (HE_DUMP_DECALTEST=1): a grey floor slab with a red decal
+	// projector box over its centre. In the deferred (tile) path the floor must
+	// show a red patch exactly under the box; forward ignores decals (v1) — the
+	// A/B diff isolates the projected pixels.
+	if (const char* dt = std::getenv("HE_DUMP_DECALTEST"); dt && *dt && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		auto floorE = m_editorWorld->createEntity("DecalFloor");
+		TransformComponent ftc;
+		ftc.position = glm::vec3(0.0f, -0.1f, -8.0f);
+		ftc.scale    = glm::vec3(30.0f, 0.2f, 30.0f);
+		reg.emplace<TransformComponent>(floorE, ftc);
+		reg.emplace<MeshComponent>(floorE, MeshComponent{ HE::kDefaultCubeMeshId });
+
+		auto decalE = m_editorWorld->createEntity("DecalProjector");
+		TransformComponent dtc;
+		dtc.position = glm::vec3(0.0f, 0.0f, -8.0f);
+		dtc.scale    = glm::vec3(5.0f, 2.0f, 5.0f);
+		reg.emplace<TransformComponent>(decalE, dtc);
+		DecalComponent dc;
+		dc.color = glm::vec4(1.0f, 0.1f, 0.1f, 0.85f);
+		reg.emplace<DecalComponent>(decalE, dc);
+		Logger::Log(Logger::LogLevel::Info,
+			"EditorApplication: HE_DUMP_DECALTEST witness scene added");
+	}
+
 	// ── Local-light shadow witness (HE_DUMP_LOCALSHADOW=point|spot): a floor
 	// slab + caster cube + ONE shadow-casting local light. Shot at midnight
 	// (TOD=0) the local light dominates: the cube must throw a visible shadow
