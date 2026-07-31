@@ -82,6 +82,17 @@ TEST_CASE("tutorial: parameterised checks name something that exists")
 			}
 			if (s.check == tut::Check::TabOpen)
 				CHECK(std::string(s.arg).size() > 0);
+
+			// focusWindow is looked up with ImGui::FindWindowByName, which silently
+			// finds nothing on a typo — the step would just never highlight anything.
+			// These are the dockable panels EditorUI opens by these exact names
+			// (Quick Settings is "…###Quick Settings", and the id is the ### part).
+			if (s.focusWindow[0] != '\0')
+			{
+				const std::string w = s.focusWindow;
+				CHECK((w == "Scene" || w == "World Outliner" || w == "Details" ||
+				       w == "Content Browser" || w == "Quick Settings"));
+			}
 		}
 	}
 }
