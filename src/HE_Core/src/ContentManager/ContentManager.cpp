@@ -2,6 +2,7 @@
 #include <cstdint>
 #include "MaterialGraph/MaterialGraph.h" // instance sync: switch-permutation regenerate
 #include "ContentManager/HAsset.h"
+#include "ContentManager/AssetRefRetarget.h" // move/rename: carry path references over
 #include "Hpak/HpakReader.h"
 #include "Hpak/ProjectExporter.h"        // sceneUuidForPath + kAssetPathIndexEntry
 #include "JobSystem/JobSystem.h"
@@ -1534,6 +1535,99 @@ std::vector<HE::UUID> ContentManager::pollHotReload()
 			changed.push_back(newId);
 	}
 	return changed;
+}
+
+// ─── retargetAssetReferences ─────────────────────────────────────────────────
+size_t ContentManager::retargetAssetReferences(const std::string& oldRel,
+                                                const std::string& newRel,
+                                                bool folder)
+{
+	namespace fs = std::filesystem;
+	if (m_contentRoot.empty() || oldRel.empty() || newRel.empty() || oldRel == newRel)
+		return 0;
+
+	// Scene references are project-relative ("Content/Level.hescene"), so the
+	// rules need the content directory's own name as their second form.
+	const std::string contentDir = fs::path(m_contentRoot).filename().generic_string();
+	const std::vector<HE::AssetRefs::Rule> rules =
+		HE::AssetRefs::moveRules(oldRel, newRel, folder, contentDir);
+	if (rules.empty()) return 0;
+
+	// Engine DEFAULTS are read-only ground and never move; their project-local
+	// overrides live under the content root, so one walk covers everything.
+	size_t rewritten = HE::AssetRefs::retargetTree(m_contentRoot, rules);
+
+	// The project manifest names the startup scene by the same project-relative
+	// path a moved scene just invalidated.
+	{
+		std::error_code ec;
+		const fs::path projectRoot = fs::path(m_contentRoot).parent_path();
+		for (const auto& e : fs::directory_iterator(projectRoot, ec))
+		{
+			if (ec) break;
+			std::error_code fec;
+			if (!e.is_regular_file(fec) || fec || e.path().extension() != ".heproj") continue;
+			std::string text;
+			{
+				std::ifstream f(e.path(), std::ios::binary);
+				if (!f) continue;
+				text.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+			}
+			if (!HE::AssetRefs::retargetJsonText(text, rules)) continue;
+			std::ofstream o(e.path(), std::ios::binary | std::ios::trunc);
+			if (!o) continue;
+			o.write(text.data(), static_cast<std::streamsize>(text.size()));
+			if (o) ++rewritten;
+		}
+	}
+
+	// Re-key the in-memory indices: every one of them is keyed by (or holds) the
+	// path the file no longer has. Without this, loadAsset() of the new path would
+	// register a SECOND copy of the same UUID, saveAsset() of an already-open
+	// asset would write back to the vacated location, and ensureResident() would
+	// look the moved file up where it used to be.
+	auto rekeyMap = [&](auto& map)
+	{
+		using MapT = std::decay_t<decltype(map)>;
+		MapT moved;
+		for (auto it = map.begin(); it != map.end(); )
+		{
+			std::string key = it->first;
+			if (HE::AssetRefs::retargetValue(key, rules))
+			{
+				moved.emplace(std::move(key), std::move(it->second));
+				it = map.erase(it);
+			}
+			else ++it;
+		}
+		for (auto& [k, v] : moved) map[k] = std::move(v);
+	};
+	rekeyMap(m_pathToUUID);
+	rekeyMap(m_pathMtime);
+	for (auto& [id, path] : m_diskRegistry) HE::AssetRefs::retargetValue(path, rules);
+
+	// …and the `path` an already-loaded asset carries, which is where saveAsset()
+	// writes it back to.
+	auto rekeyAssetPaths = [&](auto& slotMap)
+	{
+		for (auto& asset : slotMap) HE::AssetRefs::retargetValue(asset.path, rules);
+	};
+	rekeyAssetPaths(m_staticMeshAssets);   rekeyAssetPaths(m_skeletalMeshAssets);
+	rekeyAssetPaths(m_textureAssets);      rekeyAssetPaths(m_materialAssets);
+	rekeyAssetPaths(m_sceneAssets);        rekeyAssetPaths(m_scriptAssets);
+	rekeyAssetPaths(m_materialFunctionAssets); rekeyAssetPaths(m_widgetAssets);
+	rekeyAssetPaths(m_hcClassAssets);      rekeyAssetPaths(m_inputActionAssets);
+	rekeyAssetPaths(m_inputMappingAssets); rekeyAssetPaths(m_particleGraphAssets);
+	rekeyAssetPaths(m_animatorStateMachineAssets);
+	rekeyAssetPaths(m_audioAssets);        rekeyAssetPaths(m_fontAssets);
+	rekeyAssetPaths(m_shaderAssets);       rekeyAssetPaths(m_prefabAssets);
+	rekeyAssetPaths(m_animClipAssets);     rekeyAssetPaths(m_propAnimClipAssets);
+
+	if (rewritten > 0)
+		Logger::Log(Logger::LogLevel::Info,
+			("ContentManager: retargeted " + std::to_string(rewritten) + " file(s) from '" +
+			 oldRel + "' to '" + newRel + "'").c_str());
+	return rewritten;
 }
 
 // ─── loadAssetFromMemory ─────────────────────────────────────────────────────
