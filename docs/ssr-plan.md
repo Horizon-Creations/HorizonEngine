@@ -338,6 +338,14 @@ Roughness-Mips + roughness-abhängiger Lerp, temporale Akkumulation mit Reprojek
 Verwerfen bei Tiefenbruch, Fresnel-Gewichtung (`F_Schlick(NdV, specColor)`) statt flachem
 `specColor`, Feedback-Clamp.
 
+**Status:** Blur (4.3 v1) ✅; Glossy-Lerp ✅ (zweite breite Blur-Stufe statt Mips, Quality
+High, Composite lerpt per G-Buffer-Roughness); Fresnel ✅ (roughness-aware Schlick
+`F0 + (max(1-rough, F0) - F0)·(1-NdV)^5` in heLitP + SSR-Composite + Metal/GL/D3D11/D3D12-
+Built-ins; `scene.frag` = dokumentierter Drift; Drift-Guard in `test_culling.cpp` prüft
+heLitP↔Composite byte-identisch). Temporale Akkumulation **bewusst zurückgestellt**: im
+Deferred-Pfad ist sie nur noch Rauschglättung (kein Lag zu kompensieren), und die
+Blur-Stufen erledigen das Dithering bereits; Feedback-Clamp entfällt (keine History).
+
 **Verifikation:** Kamerafahrt (`HE_DUMP_GIROTATE`-Muster) → kein sichtbares Ghosting/Schweifen;
 Profiler-Capture: SSR-Pass unter Budget (7.).
 
@@ -395,7 +403,8 @@ HW verifiziert).
    Empfehlung: aus, bis P4 durch ist.
 2. **Fresnel jetzt oder später:** Der korrekte Grazing-Angle-Boost verändert auch das Aussehen
    *ohne* SSR (alle bestehenden Szenen werden an flachen Winkeln spiegelnder). Empfehlung: P4,
-   als eigener Commit mit Vorher/Nachher-Shots.
+   als eigener Commit mit Vorher/Nachher-Shots. → **Umgesetzt** (eigener Commit, A/B headless
+   verifiziert; Vulkan/`scene.frag` bleibt flaches F0 = dokumentierter Drift).
 3. **Reflection-Probes** als Folgefeature einplanen (löst Off-Screen), oder erst mal SSR + Sky?
 4. **Material-Preview:** Soll die Vorschau eine feste Studio-Environment bekommen (siehe
    vorheriger Fix) — dann sähe Metall auch im Thumbnail richtig aus, unabhängig von SSR.

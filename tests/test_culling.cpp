@@ -1162,4 +1162,21 @@ TEST_CASE("GI kernels: the constants the hand-kept copies must share")
 			{ "irradiance normaliser",  { R"(sumColor / max\(sumWeight, ([0-9.e+-]+)\))" } },
 		});
 	}
+
+	SUBCASE("SSR composite mirrors heLitP's Fresnel ambSpec term")
+	{
+		// The deferred reflection pass (kSSRCompositeFS) re-adds exactly the
+		// specular-IBL term heLitP skips via heLight.ssr.w — if the two drift,
+		// SSR-off deferred no longer matches forward. The roughness-aware
+		// Schlick line must appear byte-identically in BOTH string literals.
+		const std::string lib = readFile(root / "src" / "HE_Rendering" / "src" /
+		                                 "material" / "MaterialShaderLibrary.cpp");
+		const std::string needle =
+			"        float NdV = clamp(dot(n, V), 0.0, 1.0);\n"
+			"        vec3 fresnelSpec = specColor\n"
+			"            + (max(vec3(1.0 - rough), specColor) - specColor) * pow(1.0 - NdV, 5.0);";
+		const size_t first = lib.find(needle);
+		REQUIRE(first != std::string::npos); // term moved/reworded — update BOTH copies + this needle
+		CHECK(lib.find(needle, first + 1) != std::string::npos);
+	}
 }

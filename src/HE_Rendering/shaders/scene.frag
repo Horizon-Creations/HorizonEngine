@@ -42,6 +42,11 @@
 // Audit 1a decision: DOCUMENT the drift, do not port. Until it is generated from
 // one source, a change to the GL scene shader is NOT automatically visible on
 // Vulkan.
+//
+// Known drift (ssr-plan P4, 2026-07-31): heLitP/GL/Metal/D3D11/D3D12 weight the
+// specular IBL with a roughness-aware Schlick Fresnel (fresnelSpec = F0 +
+// (max(1-rough, F0) - F0) * (1-NdV)^5) instead of the flat F0 below. Vulkan
+// still uses flat F0 until this shader is regenerated from one source.
 // ─────────────────────────────────────────────────────────────────────────────
 
 layout(location = 0) in vec3 vWorldPos;

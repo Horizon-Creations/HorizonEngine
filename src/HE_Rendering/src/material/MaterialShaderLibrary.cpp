@@ -480,7 +480,12 @@ vec3 heLitP(vec3 baseColor, vec3 N, float metallic, float roughness, vec3 worldP
         vec3 Rrough = normalize(mix(reflect(-V, n), n, rough));
         vec3 Nup    = normalize(vec3(n.x, max(n.y, 0.1), n.z));
         ambDiff = texture(heSkyEnv, Nup).rgb    * diffuseColor;
-        ambSpec = texture(heSkyEnv, Rrough).rgb * specColor * (1.0 - 0.6 * rough);
+        // Fresnel (Schlick, roughness-aware, ssr-plan P4): grazing views boost
+        // the specular IBL toward max(1-rough, F0) instead of the flat specColor.
+        float NdV = clamp(dot(n, V), 0.0, 1.0);
+        vec3 fresnelSpec = specColor
+            + (max(vec3(1.0 - rough), specColor) - specColor) * pow(1.0 - NdV, 5.0);
+        ambSpec = texture(heSkyEnv, Rrough).rgb * fresnelSpec * (1.0 - 0.6 * rough);
     }
     // Deferred SSR (docs/ssr-plan.md §4.5): the specular-IBL term moves into a
     // dedicated reflection pass AFTER the resolve — it mixes SSR hits against
@@ -1245,7 +1250,10 @@ void main() {
         vec4 r1 = texture(heSSRTexRough, uv);
         vec4 r  = mix(r0, r1, smoothstep(0.0, max(heLight.ssr.z, 1e-3), rough));
         envSpec = mix(envSpec, r.rgb, r.a * heLight.ssr.y); // SSR hit over the cubemap
-        ambSpec = envSpec * specColor * (1.0 - 0.6 * rough);
+        float NdV = clamp(dot(n, V), 0.0, 1.0);
+        vec3 fresnelSpec = specColor
+            + (max(vec3(1.0 - rough), specColor) - specColor) * pow(1.0 - NdV, 5.0);
+        ambSpec = envSpec * fresnelSpec * (1.0 - 0.6 * rough);
     }
     // AO exactly as heLitP applies it: the non-GI branch multiplies ambSpec by
     // material-AO × screen-space AO; the GI branch adds it unoccluded.

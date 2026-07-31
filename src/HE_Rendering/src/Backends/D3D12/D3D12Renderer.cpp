@@ -583,7 +583,11 @@ float4 PSMain(VSOut i) : SV_TARGET
     float3 F0     = lerp(float3(0.04f,0.04f,0.04f), base, met);
     float3 kd     = (1.0f - F0) * (1.0f - met);
     float3 ambDiff = skyColor(Nup,    uSunDir.xyz) * base * kd;
-    float3 ambSpec = skyColor(Rrough, uSunDir.xyz) * F0;
+    // Fresnel (Schlick, roughness-aware — same term as heLitP, ssr-plan P4).
+    float  NdV = saturate(dot(N, V));
+    float3 fresnelSpec = F0
+        + (max(float3(1.0f - rough, 1.0f - rough, 1.0f - rough), F0) - F0) * pow(1.0f - NdV, 5.0f);
+    float3 ambSpec = skyColor(Rrough, uSunDir.xyz) * fresnelSpec;
     float  ao      = (uViewport.z > 0.5f) ? uAO.SampleLevel(uAOSampler, i.clip.xy / uViewport.xy, 0).r : 1.0f;
     // GI replaces the AO-gated IBL diffuse with probe-grid indirect (spec IBL
     // stays in both branches) — mirrors the GL/Metal/D3D11 gi.enabled branch.
