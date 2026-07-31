@@ -7,6 +7,7 @@
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/Components/MeshComponent.h>
 #include <HorizonScene/Components/SkeletalMeshComponent.h>
+#include <HorizonScene/WidgetManager.h>   // WIDGET tiles instantiate + lay out the tree
 #include <HorizonScene/ParticleSystem.h>  // PARTICLE tiles step a real pool
 #include <HorizonScene/Components/ParticleSystemComponent.h> // struct Particle
 #include <ParticleGraph/ParticleGraph.h>
@@ -102,6 +103,8 @@ namespace
 			case HE::AssetType::Font:             out = ThumbnailKind::Material;     return true;
 			// Particles go through RenderParticleThumbnail, not RenderAssetThumbnail.
 			case HE::AssetType::ParticleSystem:   out = ThumbnailKind::Material;     return true;
+			// Widgets go through RenderWidgetThumbnail; kind unused.
+			case HE::AssetType::Widget:           out = ThumbnailKind::Material;     return true;
 			default: return false;
 		}
 	}
@@ -377,6 +380,29 @@ namespace
 		                                           instances, kThumbSize, out);
 	}
 
+	// ── UI widgets ───────────────────────────────────────────────────────────
+	// A widget asset is a layout tree, so its tile is the widget actually laid
+	// out and drawn. Instantiated through WidgetManager — the same path the game
+	// takes for horizon.createWidget — and its draw quads handed to the renderer,
+	// which knows how to draw UIRenderObjects but nothing about widget assets.
+	//
+	// Laid out for a SQUARE viewport of the tile's size. UI layout is
+	// resolution-dependent (anchors resolve against the viewport), so a widget
+	// designed for 16:9 will compose differently here than in game — but every
+	// alternative distorts something, and a square tile at least shows the real
+	// elements, colours and text rather than a glyph.
+	bool makeWidgetThumbnail(const std::string& relPath, std::vector<uint8_t>& out)
+	{
+		WidgetManager wm;
+		const int id = wm.createWidget(*s_content, relPath);
+		if (id == 0) return false;
+
+		std::vector<UIRenderObject> quads;
+		wm.extract(static_cast<float>(kThumbSize), static_cast<float>(kThumbSize), quads);
+		if (quads.empty()) return false;   // an empty widget has nothing to show
+		return s_renderer->RenderWidgetThumbnail(quads, kThumbSize, out);
+	}
+
 	// ── Prefabs ──────────────────────────────────────────────────────────────
 	// A prefab is a CBOR entity subtree, so there is no shape to hand the
 	// renderer — but there is one inside it. The blob is instantiated into a
@@ -451,6 +477,11 @@ bool fontThumbnail(const HE::UUID& fontId, std::vector<uint8_t>& out)
 bool particleThumbnail(const HE::UUID& particleId, std::vector<uint8_t>& out)
 {
 	return s_content && s_renderer && makeParticleThumbnail(particleId, out);
+}
+
+bool widgetThumbnail(const std::string& relPath, std::vector<uint8_t>& out)
+{
+	return s_content && s_renderer && makeWidgetThumbnail(relPath, out);
 }
 
 void setContext(IRenderer* renderer, ContentManager* cm, const std::string& cacheDir)
@@ -566,6 +597,7 @@ void* get(const std::string& absPath)
 		  type == HE::AssetType::Texture        ? makeTextureThumbnail(renderId, pixels)
 		: type == HE::AssetType::Font           ? makeFontThumbnail(renderId, pixels)
 		: type == HE::AssetType::ParticleSystem ? makeParticleThumbnail(renderId, pixels)
+		: type == HE::AssetType::Widget         ? makeWidgetThumbnail(relPath, pixels)
 		: s_renderer->RenderAssetThumbnail(*s_content, kind, renderId, kThumbSize, pixels);
 
 	// The asset was pulled into memory only to draw a 128px tile — let it go

@@ -58,6 +58,8 @@ public:
 	bool  RenderParticleThumbnail(ContentManager& cm, const HE::UUID& materialId,
 	                              const std::vector<ParticlePreviewInstance>& particles,
 	                              uint32_t size, std::vector<uint8_t>& outRgba8) override;
+	bool  RenderWidgetThumbnail(const std::vector<UIRenderObject>& uiObjects,
+	                            uint32_t size, std::vector<uint8_t>& outRgba8) override;
 	void  InvalidateMesh    (const HE::UUID& meshId)     override;
 	void  InvalidateTexture (const HE::UUID& textureId)  override;
 	void  SetBloomSettings(const BloomSettings& settings) override;

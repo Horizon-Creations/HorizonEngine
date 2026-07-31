@@ -99,6 +99,8 @@ public:
 	bool  RenderParticleThumbnail(ContentManager& cm, const HE::UUID& materialId,
 	                              const std::vector<ParticlePreviewInstance>& particles,
 	                              uint32_t size, std::vector<uint8_t>& outRgba8) override;
+	bool  RenderWidgetThumbnail(const std::vector<UIRenderObject>& uiObjects,
+	                            uint32_t size, std::vector<uint8_t>& outRgba8) override;
 	void  InvalidateMesh    (const HE::UUID& meshId)     override;
 	void  InvalidateTexture (const HE::UUID& textureId)  override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
@@ -358,6 +360,13 @@ private:
 	void* m_thumbColorTex = nullptr; // id<MTLTexture> (retained), RGBA16F like the previews
 	void* m_thumbDepthTex = nullptr; // id<MTLTexture> (retained)
 	int   m_thumbSize     = 0;
+	// A SECOND target for widget tiles, in the SWAPCHAIN format: every pipeline
+	// the UI pass uses is built against kSwapchainFormat and Metal requires the
+	// pipeline's colour format to match the pass's attachment, so UI drawn into
+	// the RGBA16F target above renders nothing at all.
+	void* m_thumbUIColorTex = nullptr; // id<MTLTexture> (retained), BGRA8
+	void* m_thumbUIDepthTex = nullptr; // id<MTLTexture> (retained)
+	int   m_thumbUISize     = 0;
 	// Unskinned mesh pipeline shared by the mesh thumbnails and by materials that
 	// have no node graph (built-in PBR): the counterpart of m_skelPreviewPipeline
 	// with the bone buffers removed and a metallic/roughness-driven highlight.

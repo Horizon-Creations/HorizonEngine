@@ -3,6 +3,7 @@
 #include "Types/UUID.h"
 #include "DebugDraw/DebugDraw.h"
 #include "Renderer/EnvironmentSettings.h" // IRenderer::EnvironmentSettings (aliased below)
+#include "Renderer/UIRenderObject.h"     // RenderWidgetThumbnail takes UI draw quads
 #include <glm/glm.hpp>
 #include <functional>
 #include <memory>
@@ -353,6 +354,15 @@ public:
                                          const HE::UUID& /*materialId*/,
                                          const std::vector<ParticlePreviewInstance>& /*particles*/,
                                          uint32_t /*size*/, std::vector<uint8_t>& /*outRgba8*/)
+    { return false; }
+
+    // Same, for a UI widget: the caller instantiates the widget and extracts its
+    // draw quads (WidgetManager, HE_Scene), then hands them over — the renderer
+    // knows how to draw UIRenderObjects but nothing about widget assets. `size`
+    // is the tile edge; the quads must already be laid out for a square viewport
+    // of that many pixels, since UI layout is resolution-dependent.
+    virtual bool RenderWidgetThumbnail(const std::vector<UIRenderObject>& /*uiObjects*/,
+                                       uint32_t /*size*/, std::vector<uint8_t>& /*outRgba8*/)
     { return false; }
 
     // Drop cached GPU buffers for a mesh so ResolveMesh re-uploads from the

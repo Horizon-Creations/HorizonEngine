@@ -110,6 +110,14 @@ namespace AssetThumbnailCache
 	// must not change every time it is regenerated. Public for tests.
 	bool particleThumbnail(const HE::UUID& particleId, std::vector<uint8_t>& out);
 
+	// A widget asset is a layout tree, so its tile is the widget really laid out
+	// and drawn — instantiated through WidgetManager, the same path
+	// horizon.createWidget takes. Laid out for a SQUARE viewport of the tile
+	// size, so a 16:9 design composes differently than in game; every
+	// alternative distorts something, and this at least shows the real elements,
+	// colours and text. `relPath` is content-relative. Public for tests.
+	bool widgetThumbnail(const std::string& relPath, std::vector<uint8_t>& out);
+
 	// ── Cache-file format (exposed for tests) ────────────────────────────────
 	// A .hthumb is a 32-byte header, the asset's content-relative path, then
 	// `size`×`size` top-down RGBA8 pixels. The path is stored so a hash collision

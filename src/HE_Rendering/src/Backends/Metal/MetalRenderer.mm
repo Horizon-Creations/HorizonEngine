@@ -3755,7 +3755,10 @@ void MetalRenderer::Shutdown()
 	if (m_thumbColorTex)       { CFBridgingRelease(m_thumbColorTex);       m_thumbColorTex = nullptr; }
 	if (m_thumbDepthTex)       { CFBridgingRelease(m_thumbDepthTex);       m_thumbDepthTex = nullptr; }
 	if (m_meshPreviewPipeline) { CFBridgingRelease(m_meshPreviewPipeline); m_meshPreviewPipeline = nullptr; }
+	if (m_thumbUIColorTex)     { CFBridgingRelease(m_thumbUIColorTex);     m_thumbUIColorTex = nullptr; }
+	if (m_thumbUIDepthTex)     { CFBridgingRelease(m_thumbUIDepthTex);     m_thumbUIDepthTex = nullptr; }
 	m_thumbSize = 0;
+	m_thumbUISize = 0;
 	if (m_fxaaPipeline)         { CFBridgingRelease(m_fxaaPipeline);         m_fxaaPipeline = nullptr; }
 	if (m_uiPipeline)           { CFBridgingRelease(m_uiPipeline);           m_uiPipeline = nullptr; }
 	if (m_uiFontTexture)        { CFBridgingRelease(m_uiFontTexture);        m_uiFontTexture = nullptr; }
@@ -6036,6 +6039,82 @@ bool MetalRenderer::RenderParticleThumbnail(ContentManager& cm, const HE::UUID& 
 	EncodeParticleBillboards((__bridge void*)enc, materialId, particles, viewProj, camRight, camUp);
 	[enc endEncoding];
 	return CommitAndReadThumbnail((__bridge void*)cb, S, outRgba8);
+}
+
+bool MetalRenderer::RenderWidgetThumbnail(const std::vector<UIRenderObject>& uiObjects,
+                                          uint32_t size, std::vector<uint8_t>& outRgba8)
+{
+	const int S = std::clamp(static_cast<int>(size), 16, 512);
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)m_commandQueue;
+	if (!device || !queue || uiObjects.empty()) return false;
+
+	// ── Its OWN target, in the SWAPCHAIN format ──────────────────────────────
+	// Every pipeline the UI pass uses (m_uiPipeline and the per-material UI
+	// pipelines) is built against kSwapchainFormat, and Metal requires the
+	// pipeline's colour format to match the render pass's attachment. Drawing UI
+	// into the shared RGBA16F thumbnail target silently produced an empty tile.
+	if (!m_thumbUIColorTex || m_thumbUISize != S)
+	{
+		if (m_thumbUIColorTex) { CFBridgingRelease(m_thumbUIColorTex); m_thumbUIColorTex = nullptr; }
+		if (m_thumbUIDepthTex) { CFBridgingRelease(m_thumbUIDepthTex); m_thumbUIDepthTex = nullptr; }
+		MTLTextureDescriptor* cd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kSwapchainFormat
+			width:S height:S mipmapped:NO];
+		cd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+		cd.storageMode = MTLStorageModePrivate;
+		m_thumbUIColorTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:cd]);
+		MTLTextureDescriptor* dd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kDepthFormat
+			width:S height:S mipmapped:NO];
+		dd.usage = MTLTextureUsageRenderTarget; dd.storageMode = MTLStorageModePrivate;
+		m_thumbUIDepthTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:dd]);
+		m_thumbUISize = S;
+	}
+	if (!m_thumbUIColorTex) return false;
+
+	MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+	rp.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_thumbUIColorTex;
+	rp.colorAttachments[0].loadAction  = MTLLoadActionClear;
+	rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+	rp.colorAttachments[0].clearColor  = MTLClearColorMake(0.0, 0.0, 0.0, 0.0);
+	rp.depthAttachment.texture     = (__bridge id<MTLTexture>)m_thumbUIDepthTex;
+	rp.depthAttachment.loadAction  = MTLLoadActionClear;
+	rp.depthAttachment.storeAction = MTLStoreActionDontCare;
+	rp.depthAttachment.clearDepth  = 1.0;
+
+	id<MTLCommandBuffer> cb = [queue commandBuffer];
+	id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+
+	// EncodeUIPass draws m_renderWorld.uiObjects into the given encoder, so the
+	// tile borrows that list for one pass and puts the frame's own back.
+	std::vector<UIRenderObject> saved;
+	saved.swap(m_renderWorld.uiObjects);
+	m_renderWorld.uiObjects = uiObjects;
+	EncodeUIPass((__bridge void*)enc, S, S);
+	m_renderWorld.uiObjects.swap(saved);
+	[enc endEncoding];
+
+	// BGRA8 readback — one byte swap rather than the half-float decode the
+	// RGBA16F targets need.
+	MTLTextureDescriptor* sd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kSwapchainFormat
+		width:S height:S mipmapped:NO];
+	sd.storageMode = MTLStorageModeManaged; sd.usage = MTLTextureUsageShaderRead;
+	id<MTLTexture> staging = [device newTextureWithDescriptor:sd];
+	id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+	[blit copyFromTexture:(__bridge id<MTLTexture>)m_thumbUIColorTex
+	          sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0)
+	           sourceSize:MTLSizeMake(S,S,1) toTexture:staging destinationSlice:0 destinationLevel:0
+	    destinationOrigin:MTLOriginMake(0,0,0)];
+	[blit synchronizeResource:staging];
+	[blit endEncoding];
+	[cb commit];
+	[cb waitUntilCompleted];
+
+	outRgba8.resize((size_t)S * S * 4);
+	[staging getBytes:outRgba8.data() bytesPerRow:S * 4
+	       fromRegion:MTLRegionMake2D(0, 0, S, S) mipmapLevel:0];
+	for (size_t i = 0; i < outRgba8.size(); i += 4)
+		std::swap(outRgba8[i], outRgba8[i + 2]);   // BGRA → RGBA
+	return true;
 }
 
 bool MetalRenderer::RenderAssetThumbnail(ContentManager& cm, ThumbnailKind kind,
