@@ -1725,7 +1725,7 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 				if (!matches(ev, "Events")) continue;
 				if (!eh) { ImGui::TextDisabled("Events"); eh = true; }
 				const bool u = used(ev);
-				if (ImGui::Selectable(ev, false, u ? ImGuiSelectableFlags_Disabled : 0) && !u)
+				if (HcEditorUtil::searchMenuItem(ev, u))
 				{
 					const int id = addGraphNode(st, NT::Event, st.geState.addMenuGraphPos);
 					HC::Node* nn = st.graph.findNode(id);
@@ -1739,7 +1739,7 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 			if (matches("Custom Event", "Events"))
 			{
 				if (!eh) { ImGui::TextDisabled("Events"); eh = true; }
-				if (ImGui::Selectable("Custom Event"))
+				if (HcEditorUtil::searchMenuItem("Custom Event"))
 				{ created = addGraphNode(st, NT::Event, st.geState.addMenuGraphPos); ImGui::CloseCurrentPopup(); }
 			}
 			if (eh) ImGui::Spacing();

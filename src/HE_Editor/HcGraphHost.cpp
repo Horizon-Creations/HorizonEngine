@@ -263,16 +263,13 @@ GraphEditor::Model buildModel(const Host& h)
 
 std::string beginAddMenu()
 {
-	static std::string s_search;
-	if (ImGui::IsWindowAppearing()) { s_search.clear(); ImGui::SetKeyboardFocusHere(); }
-	ImGui::SetNextItemWidth(220.0f);
-	ImGui::InputTextWithHint("##nodeSearch", "Search nodes...", &s_search);
+	const std::string q = HcEditorUtil::searchMenuBegin("##nodeSearch", "Search nodes...", 220.0f);
 	ImGui::Separator();
 	ImGui::BeginChild("##nodeList", ImVec2(232.0f, 300.0f));
-	return lower(s_search);
+	return q;
 }
 
-void endAddMenu() { ImGui::EndChild(); }
+void endAddMenu() { ImGui::EndChild(); HcEditorUtil::searchMenuEnd(); }
 
 int drawAddMenuTail(const Host& h, const std::string& q)
 {
@@ -295,7 +292,7 @@ int drawAddMenuTail(const Host& h, const std::string& q)
 			if (std::string(HC::nodeCategory(t)) != cat) continue;
 			if (!matches(HC::nodeDisplayName(t), cat)) continue;
 			if (!header) { ImGui::TextDisabled("%s", cat); header = true; }
-			if (ImGui::Selectable(HC::nodeDisplayName(t)))
+			if (HcEditorUtil::searchMenuItem(HC::nodeDisplayName(t)))
 			{ created = addNode(graph, t, drop, h.currentGraph); ImGui::CloseCurrentPopup(); }
 			if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip))
 				ImGui::SetTooltip("%s", HcEditorUtil::nodeTooltipText(t).c_str());
@@ -311,7 +308,7 @@ int drawAddMenuTail(const Host& h, const std::string& q)
 		const std::string lbl = "Call " + e.s;
 		if (!matches(lbl, "Functions")) continue;
 		if (!fh) { ImGui::TextDisabled("Functions"); fh = true; }
-		if (ImGui::Selectable(lbl.c_str()))
+		if (HcEditorUtil::searchMenuItem(lbl))
 		{
 			const int id = addNode(graph, NT::FunctionCall, drop, h.currentGraph);
 			graph.findNode(id)->s = e.s;
@@ -324,7 +321,7 @@ int drawAddMenuTail(const Host& h, const std::string& q)
 	if (h.currentGraph != 0 && matches("Return", "Functions"))
 	{
 		if (!fh) { ImGui::TextDisabled("Functions"); fh = true; }
-		if (ImGui::Selectable("Return"))
+		if (HcEditorUtil::searchMenuItem("Return"))
 		{
 			const int id = addNode(graph, NT::FunctionReturn, drop, h.currentGraph);
 			if (const HC::Node* owner = graph.findNode(h.currentGraph))
@@ -363,7 +360,7 @@ int drawAddMenuTail(const Host& h, const std::string& q)
 			const std::string lbl = (k == 0 ? "Get " : "Set ") + v.name;
 			if (!matches(lbl, "Variables")) continue;
 			if (!vh) { ImGui::TextDisabled("Variables"); vh = true; }
-			if (ImGui::Selectable(lbl.c_str()))
+			if (HcEditorUtil::searchMenuItem(lbl))
 			{
 				const int id = addNode(graph, k == 0 ? NT::GetVariable : NT::SetVariable,
 				                       drop, h.currentGraph);
@@ -400,11 +397,7 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 		{ const auto& pd = sig.dataIns[srcPin - rr.dataIn0];  dragType = pd.type; dragArray = pd.isArray; }
 	}
 
-	static std::string s_dragSearch;
-	if (ImGui::IsWindowAppearing()) { s_dragSearch.clear(); ImGui::SetKeyboardFocusHere(); }
-	ImGui::SetNextItemWidth(232.0f);
-	ImGui::InputTextWithHint("##dragSearch", "Search…", &s_dragSearch);
-	const std::string q = lower(s_dragSearch);
+	const std::string q = HcEditorUtil::searchMenuBegin("##dragSearch", "Search…", 232.0f);
 	auto matches = [&](const std::string& name){ return q.empty() || lower(name).find(q) != std::string::npos; };
 
 	ImGui::BeginChild("##pindrag", ImVec2(240.0f, 320.0f));
@@ -435,7 +428,7 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 				    matches("Call " + fn.s))
 				{
 					if (!fh) { ImGui::TextDisabled("Functions"); fh = true; }
-					if (ImGui::Selectable(("Call " + fn.s).c_str()))
+					if (HcEditorUtil::searchMenuItem("Call " + fn.s))
 					{
 						const int id = addNode(graph, NT::CallExternal, pos, h.currentGraph);
 						HC::Node* nn = graph.findNode(id);
@@ -449,9 +442,9 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 				{
 					if (!vh && (matches("Get " + var.name) || matches("Set " + var.name)))
 					{ ImGui::TextDisabled("Variables"); vh = true; }
-					if (matches("Get " + var.name) && ImGui::Selectable(("Get " + var.name).c_str()))
+					if (matches("Get " + var.name) && HcEditorUtil::searchMenuItem("Get " + var.name))
 					{ const int id = addNode(graph, NT::GetExternal, pos, h.currentGraph); HC::Node* nn = graph.findNode(id); nn->s = var.name; nn->propType = var.type; wire(id); created = id; ImGui::CloseCurrentPopup(); }
-					if (matches("Set " + var.name) && ImGui::Selectable(("Set " + var.name).c_str()))
+					if (matches("Set " + var.name) && HcEditorUtil::searchMenuItem("Set " + var.name))
 					{ const int id = addNode(graph, NT::SetExternal, pos, h.currentGraph); HC::Node* nn = graph.findNode(id); nn->s = var.name; nn->propType = var.type; wire(id); created = id; ImGui::CloseCurrentPopup(); }
 				}
 			if (fh || vh) ImGui::Separator();
@@ -460,7 +453,7 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 
 		ImGui::TextDisabled("Reference");
 		auto refItem = [&](const char* lbl, NT t){
-			if (matches(lbl) && ImGui::Selectable(lbl))
+			if (matches(lbl) && HcEditorUtil::searchMenuItem(lbl))
 			{ const int id = addNode(graph, t, pos, h.currentGraph); wire(id); created = id; ImGui::CloseCurrentPopup(); } };
 		refItem("Call Function (Ref)", NT::CallExternal);
 		refItem("Bind Event",          NT::BindEvent);
@@ -479,7 +472,7 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 			const int pin = HcEditorUtil::dragMatchPin(t, dragType, dragArray, srcInput, isExecPin);
 			if (pin < 0 || !matches(HC::nodeDisplayName(t))) continue;
 			if (!gh) { ImGui::TextDisabled("Nodes"); gh = true; }
-			if (ImGui::Selectable(HC::nodeDisplayName(t)))
+			if (HcEditorUtil::searchMenuItem(HC::nodeDisplayName(t)))
 			{
 				const int id = addNode(graph, t, pos, h.currentGraph);
 				HC::Node* nn = graph.findNode(id);
@@ -501,7 +494,7 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 			const char* shown = fn.displayName ? fn.displayName : fn.id;
 			if (pin < 0 || !matches(shown)) continue;
 			if (!eh) { ImGui::TextDisabled("Engine"); eh = true; }
-			if (ImGui::Selectable((std::string(shown) + "##" + fn.id).c_str()))
+			if (HcEditorUtil::searchMenuItem(std::string(shown) + "##" + fn.id))
 			{
 				const int id = addNode(graph, NT::EngineCall, pos, h.currentGraph);
 				HC::Node* nn = graph.findNode(id);
@@ -535,12 +528,12 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 			if (setOk && matches("Set " + v.name))
 			{
 				if (!vh) { ImGui::TextDisabled("Variables"); vh = true; }
-				if (ImGui::Selectable(("Set " + v.name).c_str())) add(false);
+				if (HcEditorUtil::searchMenuItem("Set " + v.name)) add(false);
 			}
 			if (getOk && matches("Get " + v.name))
 			{
 				if (!vh) { ImGui::TextDisabled("Variables"); vh = true; }
-				if (ImGui::Selectable(("Get " + v.name).c_str())) add(true);
+				if (HcEditorUtil::searchMenuItem("Get " + v.name)) add(true);
 			}
 		}
 		if (vh) ImGui::Spacing();
@@ -554,7 +547,7 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 		{
 			if (e.type != NT::FunctionEntry || e.s.empty() || !matches("Call " + e.s)) continue;
 			if (!fh) { ImGui::TextDisabled("Functions"); fh = true; }
-			if (ImGui::Selectable(("Call " + e.s).c_str()))
+			if (HcEditorUtil::searchMenuItem("Call " + e.s))
 			{
 				const int id = addNode(graph, NT::FunctionCall, pos, h.currentGraph);
 				graph.findNode(id)->s = e.s;
@@ -568,6 +561,7 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 	}
 
 	ImGui::EndChild();
+	HcEditorUtil::searchMenuEnd();
 	return created;
 }
 
