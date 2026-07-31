@@ -269,7 +269,11 @@ struct AppContext
 	int         logoW       = 0;
 	int         logoH       = 0;
 
-	// Content browser icon textures (white images, tinted at render time)
+	// Content browser icon textures (white images, tinted at render time).
+	// There is one per HE::AssetType the browser can show: the grid used to pick
+	// icons by file EXTENSION, which meant every engine asset — all of them
+	// ".hasset" — matched nothing and rendered as an empty button. The extension
+	// map now only serves loose source files (.png/.obj/.lua/…).
 	struct CbIcons
 	{
 		ImTextureID folder   = 0;
@@ -280,6 +284,18 @@ struct AppContext
 		ImTextureID sound    = 0;
 		ImTextureID texture  = 0;
 		ImTextureID scene    = 0;
+		ImTextureID materialFunction    = 0;
+		ImTextureID shader              = 0;
+		ImTextureID prefab              = 0;
+		ImTextureID animationClip       = 0;
+		ImTextureID propertyAnimClip    = 0;
+		ImTextureID widget              = 0;
+		ImTextureID horizonCodeClass    = 0;
+		ImTextureID inputAction         = 0;
+		ImTextureID inputMappingContext = 0;
+		ImTextureID particleSystem      = 0;
+		ImTextureID animatorStateMachine= 0;
+		ImTextureID font                = 0;
 	} cbIcons;
 
 	// Toolbar icon textures
@@ -516,6 +532,20 @@ private:
 	ImTextureID m_iconSound    = 0;
 	ImTextureID m_iconTexture  = 0;
 	ImTextureID m_iconScene    = 0;
+	// One per remaining HE::AssetType, so no engine asset falls back to a blank
+	// tile (see AppContext::CbIcons).
+	ImTextureID m_iconMaterialFunction    = 0;
+	ImTextureID m_iconShader              = 0;
+	ImTextureID m_iconPrefab              = 0;
+	ImTextureID m_iconAnimationClip       = 0;
+	ImTextureID m_iconPropertyAnimClip    = 0;
+	ImTextureID m_iconWidget              = 0;
+	ImTextureID m_iconHorizonCodeClass    = 0;
+	ImTextureID m_iconInputAction         = 0;
+	ImTextureID m_iconInputMappingContext = 0;
+	ImTextureID m_iconParticleSystem      = 0;
+	ImTextureID m_iconAnimatorStateMachine= 0;
+	ImTextureID m_iconFont                = 0;
 
 	// Toolbar icons
 	ImTextureID m_iconPlay     = 0;
