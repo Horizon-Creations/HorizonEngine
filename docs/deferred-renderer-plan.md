@@ -22,8 +22,12 @@
 >   gefallen. `HE_DEFERRED_CLUSTER=0` = 8-Licht-A/B-Guard. GL bleibt 8-Licht (kein SSBO in 4.1).
 > - Export: `customShaderGBufGlsl` wird als MTRL-Tail-Feld serialisiert und vom Packer
 >   byte-verbatim mitgenommen — Packaged Builds rendern Deferred ohne Node-Graph.
-> - Offen: SSR-Integration (ssr-plan.md), Decals, GI-Local-Ray-Masken für Cluster-Lichter,
->   Profiler-Messung P6 auf echter HW.
+> - **Nachträge (ebenfalls umgesetzt):** GI-Local-Ray-Masken für Cluster-Lichter (344dfb2);
+>   **SSR v1** nach ssr-plan §4.5 — lag-freier Trace + additiver Composite im Tile-Pfad,
+>   Resolve überspringt ambSpec via `heLight.ssr.w` (8341c4d); **Decals v1** — DecalComponent
+>   + Projektor-Pass im Tile-G-Buffer via Framebuffer-Fetch (9121baf).
+> - Offen: SSR-Blur/temporale Glättung (ssr-plan P4), SSR/Decals im Two-Pass-Fallback & GL,
+>   Profiler-Messung P6 auf echter HW, Reflection-Probes (Off-Screen-Fallback).
 >
 > **UMGESETZT (2026-07-31): P0–P4 für Metal UND OpenGL.** RenderPath-Enum + Editor-Combo +
 > config.json ("RenderPath") + GameApplication-Read; `MatShaderGen::glslGBuffer` (zweiter
