@@ -6481,6 +6481,35 @@ bool OpenGLRenderer::RenderParticleThumbnail(ContentManager& cm, const HE::UUID&
 	return true;
 }
 
+bool OpenGLRenderer::RenderWidgetThumbnail(const std::vector<UIRenderObject>& uiObjects,
+                                           uint32_t size, std::vector<uint8_t>& outRgba8)
+{
+	const int S = std::clamp(static_cast<int>(size), 16, 512);
+	if (uiObjects.empty() || !EnsureThumbnailTarget(S)) return false;
+
+	GLint prevFBO = 0; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
+	GLint prevVP[4]; glGetIntegerv(GL_VIEWPORT, prevVP);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_thumbFBO);
+	glViewport(0, 0, S, S);
+	glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+	// RenderUIPass draws m_renderWorld.uiObjects into whatever is bound, so the
+	// tile borrows that list for one pass and puts the frame's own back. Swapping
+	// (not copying) keeps the scene's objects intact even if this throws.
+	std::vector<UIRenderObject> saved;
+	saved.swap(m_renderWorld.uiObjects);
+	m_renderWorld.uiObjects = uiObjects;
+	RenderUIPass(S, S);
+	m_renderWorld.uiObjects.swap(saved);
+
+	ReadThumbnailTarget(S, outRgba8);
+	glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prevFBO);
+	glViewport(prevVP[0], prevVP[1], prevVP[2], prevVP[3]);
+	glUseProgram(0);
+	return true;
+}
+
 void* OpenGLRenderer::RenderParticlePreview(ContentManager& cm, const HE::UUID& /*meshId*/,
                                            const HE::UUID& materialId,
                                            const std::vector<ParticlePreviewInstance>& particles,

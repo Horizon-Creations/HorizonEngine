@@ -2312,6 +2312,65 @@ void EditorApplication::dumpFrameHeadless()
 				AssetThumbnailCache::setContext(nullptr, nullptr, "");
 			}
 		}
+		// A widget tile lays the tree out and draws it through the UI pass. A
+		// freshly created widget is an EMPTY tree, so the witness authors a small
+		// one — a panel with a caption — otherwise there would be nothing to see
+		// and "no quads" would look the same as "broken".
+		{
+			HE::UIWidgetTree tree;
+			tree.canvasWidth = tree.canvasHeight = 512.0f;
+			const int panelId = tree.add(HE::UIWidgetType::Panel);
+			if (HE::UIElement* pe = tree.find(panelId))
+			{
+				pe->posX = 256.0f; pe->posY = 256.0f;
+				pe->sizeX = 400.0f; pe->sizeY = 260.0f;
+				pe->anchor = 0;
+			}
+			const int textId = tree.add(HE::UIWidgetType::Text);
+			if (HE::UIElement* te = tree.find(textId))
+			{
+				te->parentId = panelId;
+				te->posX = 200.0f; te->posY = 130.0f;
+				te->sizeX = 340.0f; te->sizeY = 60.0f;
+			}
+			UIWidgetAsset wa;
+			wa.type = HE::AssetType::Widget;
+			wa.name = "__thumbWitnessWidget";
+			wa.path = "__thumbWitnessWidget.hasset";
+			wa.treeJson = HE::uiWidgetTreeToJson(tree);
+			if (contentManager().saveAsset(wa))
+			{
+				AssetThumbnailCache::setContext(r, &contentManager(), dir.string());
+				std::vector<uint8_t> wp;
+				if (AssetThumbnailCache::widgetThumbnail(wa.path, wp))
+				{
+					const int TS = (int)AssetThumbnailCache::thumbnailSize();
+					if (std::ofstream f((dir / "widget.ppm").string(), std::ios::binary); f)
+					{
+						f << "P6\n" << TS << " " << TS << "\n255\n";
+						for (int i = 0; i < TS * TS; ++i)
+						{
+							const float a = wp[(size_t)i * 4 + 3] / 255.0f;
+							const uint8_t bg = (((i % TS) / 16 + (i / TS) / 16) & 1) ? 90 : 150;
+							for (int c = 0; c < 3; ++c)
+							{
+								const uint8_t v = (uint8_t)(wp[(size_t)i * 4 + c] * a + bg * (1.0f - a));
+								f.write(reinterpret_cast<const char*>(&v), 1);
+							}
+						}
+					}
+					Logger::Log(Logger::LogLevel::Info,
+						"EditorApplication: thumbnail witness wrote widget.ppm");
+				}
+				else
+					Logger::Log(Logger::LogLevel::Warning,
+						"EditorApplication: thumbnail witness produced no widget tile");
+				AssetThumbnailCache::setContext(nullptr, nullptr, "");
+				std::error_code wrc;
+				std::filesystem::remove(
+					std::filesystem::path(contentManager().contentRoot()) / wa.path, wrc);
+			}
+		}
 		// A particle tile steps a real pool and renders it through the dedicated
 		// particle thumbnail path — worth witnessing because "did the simulation
 		// actually produce particles" cannot be seen from the code.
