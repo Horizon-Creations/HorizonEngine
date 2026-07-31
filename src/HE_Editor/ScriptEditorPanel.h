@@ -24,6 +24,12 @@ namespace ScriptEditorPanel
 	// state but leaves the tab vector, so the quit guard must ask here.
 	void appendDirtyPaths(std::vector<std::string>& out);
 
+	// Write the editor's buffer for `assetPath` to disk, exactly like the tab's own
+	// Save button — so the close/quit prompt can save this asset without the user
+	// having to walk back into the tab. Returns true when nothing is left unsaved
+	// for this path (including the "this panel never held it" case).
+	bool save(const std::string& assetPath);
+
 	// Whether the .hasset at `path` is a script asset (reads the HAsset header type).
 	bool isScriptAsset(const std::string& path);
 

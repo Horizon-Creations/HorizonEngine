@@ -148,6 +148,18 @@ namespace CppClassEditorPanel
 			[](const State& st) { return bufDirty(st.header) || bufDirty(st.source); }, out);
 	}
 
+	bool save(const std::string& path)
+	{
+		State* st = s_states.find(path);
+		// A class this panel never opened has nothing to write — the caller asks
+		// every panel about every path, so "not mine" must read as success.
+		if (!st) return true;
+		bool ok = true;
+		if (bufDirty(st->header)) ok = saveBuf(st->header) && ok;
+		if (bufDirty(st->source)) ok = saveBuf(st->source) && ok;
+		return ok;
+	}
+
 	void forget(const std::string& path) { s_states.forget(path); }
 
 	void render(AppContext& ctx, const std::string& path, const ImVec2& pos, const ImVec2& size)

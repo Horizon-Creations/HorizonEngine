@@ -2935,3 +2935,35 @@ einer sauberen Maschine nicht nutzen. Auf User-Wunsch nachgezogen (`41173fe`):
   `ssl.create_default_context()` läuft; `hashlib`/`hmac` gehen; die 4 relozierten Binaries `codesign --verify
   --strict` grün. Tests grün. **Linux:** `_ssl`/`_hashlib` lösen gegen das System-OpenSSL auf (auf ~allen Linux da);
   volle Linux-Self-Containment bräuchte `patchelf` (`$ORIGIN/..` im Subdir) — Follow-up falls nötig.
+
+## Forts. 85 — „Unsaved Changes"-Dialog speichert ungespeicherte Assets jetzt selbst (31.07.2026)
+
+**Lücke (User):** Der Schließen/Beenden-Guard listete ungespeicherte Asset-Tabs nur auf und schrieb dazu
+„Editor tabs are saved from their own Save button" — der User musste also abbrechen, jeden Tab suchen und dort
+Save drücken. Für einen bereits **geschlossenen** dirty Tab (dessen Panel-State absichtlich weiterlebt, s.
+`AssetPanelState`) hieß das sogar: Tab erst wieder öffnen, nur um an den Save-Button zu kommen. Jetzt speichert
+der Dialog sie selbst — genau wie die Szene.
+
+- **Panel-API:** jedes Asset-Panel hat neben `isDirty()/appendDirtyPaths()` jetzt ein `save(...)`
+  (Script, C++-Klasse, Material/Material-Function, UI-Widget, HorizonCode-Klasse, Input-Action/-Mapping,
+  Partikel-Graph, Animator-State-Machine). Konvention: **true = für diesen Pfad ist nichts mehr offen**, auch
+  wenn das Panel den Pfad gar nicht hält (der Dispatcher fragt alle Panels nach jedem Pfad). Die Schreiblogik
+  wurde dafür je Panel aus dem Header-Save-Button in einen gemeinsamen Helfer gezogen (`saveToDisk`/`saveState`/
+  `saveClassState`) — Button und Dialog können damit nicht auseinanderlaufen (Live-Reload-Nebeneffekte wie
+  `markConfigDirty` auf laufenden Entities oder `AssetThumbnailCache::invalidate` gelten für beide Wege).
+  Der C++-Klassen-Tab schreibt aus dem Dialog **beide** Hälften (.h und .cpp), nicht nur die gerade sichtbare.
+- **Dispatch:** `EditorUI::saveAsset(ctx, path)` als Schreib-Hälfte von `tabHasUnsavedEdits()` — dieselbe
+  Panel-Liste (ein fehlendes Panel würde still Edits behalten, nachdem der Dialog „gespeichert" gemeldet hat)
+  und am Ende noch einmal `tabHasUnsavedEdits()` als Gegenprobe.
+- **Dialog:** pro ungespeichertem Asset eine Zeile mit eigenem **Save**-Button (Pfad als Tooltip; ab 9 Einträgen
+  scrollende Child-Liste). Die Liste wird jeden Frame neu aus den Panels gebildet → ein gespeichertes Asset
+  verschwindet sofort. Der primäre Button heißt **„Save All"**, wenn Szene *und* Assets dirty sind, sonst „Save",
+  und schreibt alles (Assets zuerst, danach die Szene) bevor die gestashte Aktion läuft. Er wird jetzt auch bei
+  **sauberer Szene** angeboten (vorher gab es dort nur Discard/Cancel). Sind am Ende alle Einträge gespeichert,
+  steht im Dialog „Everything is saved." und der zweite Button heißt „Continue" statt „Discard".
+- **Fehlerpfad:** schlägt ein Write fehl (Asset verschwunden, Schreibrechte), läuft die Aktion **nicht** — das
+  Modal bleibt mit rotem Grund + „Nothing was closed or discarded." offen und den weiterhin dirty Einträgen.
+  Assets werden bewusst **vor** der Szene geschrieben: ihre Writes sind synchron, ein Fehler kann also noch
+  abbrechen, bevor der asynchrone Save-As-Dialog der Szene in der Luft ist.
+- Unverändert: welche Aktionen überhaupt gegated sind, das OS-Close-Veto und `s_guardSaveThenAct` (Save-As einer
+  Untitled-Szene führt die Aktion weiterhin erst nach erfolgreichem Schreiben aus).

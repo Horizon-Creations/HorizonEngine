@@ -78,6 +78,35 @@ bool isDirty(const std::string& assetPath) { return s_states.dirty(assetPath); }
 void appendDirtyPaths(std::vector<std::string>& out) { s_states.appendDirtyPaths(out); }
 void forget(const std::string& assetPath) { s_states.forget(assetPath); }
 
+// Persist a tab's graph. The header's Save button AND the close/quit prompt's
+// "Save All" both come through here, so the two can never drift apart.
+static bool saveToDisk(State& st, AppContext& ctx)
+{
+	if (!ctx.contentManager) return false;
+	ParticleGraphAsset* asset = ctx.contentManager->getParticleGraphMutable(st.assetId);
+	if (!asset) return false;
+	asset->nodeGraphJson = HE::particleGraphToJson(st.graph);
+	if (!ctx.contentManager->saveAsset(*asset)) return false;
+	st.dirty = false;
+	// Live entities already using this asset should reflect the edit now, not only
+	// the next time their own particleAssetId changes — same idea as
+	// InvalidateMaterial after a Material save.
+	if (ctx.world)
+		for (auto [e, ps] : ctx.world->registry().view<ParticleSystemComponent>().each())
+			if (ps.particleAssetId == st.assetId) ParticleSystem::markConfigDirty(ps);
+	Logger::Log(Logger::LogLevel::Info, ("ParticleGraphEditor: saved '" + st.name + "'").c_str());
+	return true;
+}
+
+bool save(AppContext& ctx, const std::string& assetPath)
+{
+	State* st = s_states.find(assetPath);
+	// A tab this panel never opened has nothing to write — the caller asks every
+	// panel about every path, so "not mine" must read as success.
+	if (!st || !st->dirty) return true;
+	return saveToDisk(*st, ctx);
+}
+
 namespace
 {
 ImU32 headerColorFor(HE::ParticleNodeType t)
@@ -134,18 +163,7 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 	ImGui::SameLine();
 	ImGui::TextDisabled("particle system%s", st.dirty ? "  (unsaved)" : "");
 	ImGui::SameLine(ImGui::GetContentRegionAvail().x - 100.0f);
-	if (ImGui::Button("Save##ptsave") && asset)
-	{
-		asset->nodeGraphJson = HE::particleGraphToJson(st.graph);
-		if (ctx.contentManager->saveAsset(*asset)) st.dirty = false;
-		// Live entities already using this asset should reflect the edit now,
-		// not only the next time their own particleAssetId changes — same idea
-		// as InvalidateMaterial after a Material save.
-		if (ctx.world)
-			for (auto [e, ps] : ctx.world->registry().view<ParticleSystemComponent>().each())
-				if (ps.particleAssetId == st.assetId) ParticleSystem::markConfigDirty(ps);
-		Logger::Log(Logger::LogLevel::Info, ("ParticleGraphEditor: saved '" + st.name + "'").c_str());
-	}
+	if (ImGui::Button("Save##ptsave") && asset) saveToDisk(st, ctx);
 	if (!asset)
 		ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "Asset could not be loaded.");
 	ImGui::Separator();
