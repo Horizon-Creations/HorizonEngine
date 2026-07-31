@@ -85,6 +85,11 @@ public:
         // combo when false and the backend stays forward regardless of
         // SetRenderPath.
         bool supportsDeferredRendering = false;
+        // Screen-space reflections (docs/ssr-plan.md). v1: Metal only, and only
+        // in the DEFERRED render path's tile mode (the reflection pass reads the
+        // stored G-buffer + the resolved HDR colour — lag-free, no history).
+        // The editor greys out the SSR toggle when false.
+        bool supportsScreenSpaceReflections = false;
     };
 
     // Overlay callback: called by the backend at the correct point inside the
@@ -212,6 +217,23 @@ public:
         int   probeBudgetPerFrame = 256;   // probes relit per frame (round-robin over the grid)
     };
     virtual void SetGISettings(const GISettings& /*settings*/) {}
+
+    // ── Screen-space reflections (docs/ssr-plan.md) ────────────────────────
+    // Pushed by the editor's preferences / the packaged game's GlobalState read.
+    // v1 effective only on Metal in the deferred path (Capabilities::
+    // supportsScreenSpaceReflections gates the UI); other backends ignore it and
+    // metallic surfaces keep reflecting the sky cubemap only. Disabled = the
+    // image is byte-identical to SSR never having existed.
+    struct SSRSettings
+    {
+        bool  enabled      = false;
+        float intensity    = 1.0f;   // 0…1 mix against the sky cubemap
+        float maxRoughness = 0.6f;   // above this no SSR (smooth fade toward it)
+        float maxDistance  = 30.0f;  // world-space ray length
+        float thickness    = 0.5f;   // depth-buffer thickness assumption
+        int   quality      = 1;      // 0 = 16 steps, 1 = 32, 2 = 64
+    };
+    virtual void SetSSRSettings(const SSRSettings& /*settings*/) {}
 
     // ── Render path (Forward | Deferred) ────────────────────────────────────
     // Pushed by the editor's preferences / the packaged game's GlobalState read,

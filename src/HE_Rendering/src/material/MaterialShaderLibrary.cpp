@@ -215,6 +215,7 @@ layout(std140, set = 0, binding = 0) uniform HeLighting {
     vec4 giGridCounts;   // xyz = probes per axis, w = probes per atlas row
     vec4 giProbe;        // x = indirect intensity, y = probe atlases bound
     vec4 weather;        // x = wetness, y = snow amount
+    vec4 ssr;            // y = SSR intensity, z = max roughness, w = 1 → skip ambSpec (deferred reflection pass)
 } heLight;
 // Screen-space ray-traced shadow masks (GI): sun visibility (.r) + local-light
 // visibility (one channel per the first 4 point/spot lights). Bindings 10/11 —
@@ -481,6 +482,12 @@ vec3 heLitP(vec3 baseColor, vec3 N, float metallic, float roughness, vec3 worldP
         ambDiff = texture(heSkyEnv, Nup).rgb    * diffuseColor;
         ambSpec = texture(heSkyEnv, Rrough).rgb * specColor * (1.0 - 0.6 * rough);
     }
+    // Deferred SSR (docs/ssr-plan.md §4.5): the specular-IBL term moves into a
+    // dedicated reflection pass AFTER the resolve — it mixes SSR hits against
+    // the same cubemap sample and re-applies the same AO/fog factors. Zeroed
+    // HERE (before the GI branch — both branches consume ambSpec) so nothing
+    // is counted twice. Forward never sets ssr.w.
+    if (heLight.ssr.w > 0.5) ambSpec = vec3(0.0);
     // Occlusion darkens ONLY the indirect term; direct lighting stays untouched,
     // same split as the built-in shaders' SSAO handling. The material's own
     // Ambient Occlusion pin multiplies on top of the screen-space result.
@@ -1064,6 +1071,237 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::deferredResolveTil
         injectPreamble(buildDeferredResolveSource(/*tile=*/true, /*clustered=*/true)),
         backend, true, true);
     return m_resolveTileCache.emplace(key, std::move(out)).first->second;
+}
+
+namespace
+{
+// ─── SSR trace (docs/ssr-plan.md §4.2, deferred variant of §4.5) ─────────────
+// World-space linear march + binary refine against the G-buffer depth; the hit
+// samples the CURRENT frame's resolved HDR colour — no history, no reprojection,
+// no ghosting. Confidence folds edge fade × facing × roughness fade × distance.
+// Standalone canonical GLSL (no lighting preamble — nothing here shades).
+constexpr const char* kSSRTraceFS = R"(#version 450
+layout(location = 0) out vec4 oSSR;
+layout(set = 0, binding = 19) uniform sampler2D heSceneColor; // resolved HDR (opaque, pre-sky)
+layout(set = 0, binding = 20) uniform sampler2D heGB1;        // rg oct normal, b roughness
+layout(set = 0, binding = 22) uniform sampler2D heGBDepth;    // NDC depth (R32F G-buffer target)
+layout(std140, set = 0, binding = 23) uniform HeSSRTrace {
+    mat4 viewProj;
+    mat4 invViewProj;
+    vec4 camPos;  // xyz camera world position
+    vec4 camFwd;  // xyz camera forward
+    vec4 cfg;     // x maxDistance, y thickness, z maxRoughness, w stepCount
+    vec4 conv;    // x ndc-y sign, y depth scale, z depth bias, w edge-fade width
+    vec4 vp;      // xy = trace-target size in pixels
+} heSSR;
+vec3 heOctDecode(vec2 f) {
+    vec3 n = vec3(f.x, f.y, 1.0 - abs(f.x) - abs(f.y));
+    float t = max(-n.z, 0.0);
+    n.x += (n.x >= 0.0) ? -t : t;
+    n.y += (n.y >= 0.0) ? -t : t;
+    return normalize(n);
+}
+float heIgn(vec2 p) { return fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y)); }
+vec3 heWorldAt(vec2 uv, float d) {
+    vec4 c = vec4(uv.x * 2.0 - 1.0, (uv.y * 2.0 - 1.0) * heSSR.conv.x,
+                  d * heSSR.conv.y + heSSR.conv.z, 1.0);
+    vec4 w = heSSR.invViewProj * c;
+    return w.xyz / max(w.w, 1e-8);
+}
+float heViewZ(vec3 p) { return dot(p - heSSR.camPos.xyz, heSSR.camFwd.xyz); }
+void main() {
+    vec2 uv = gl_FragCoord.xy / max(heSSR.vp.xy, vec2(1.0));
+    float d = texture(heGBDepth, uv).r;
+    if (d >= 1.0) { oSSR = vec4(0.0); return; }             // background
+    vec4 g1 = texture(heGB1, uv);
+    float rough = clamp(g1.b, 0.0, 1.0);
+    float roughFade = 1.0 - smoothstep(heSSR.cfg.z * 0.7, heSSR.cfg.z, rough);
+    if (roughFade <= 0.0) { oSSR = vec4(0.0); return; }
+    vec3 P = heWorldAt(uv, d);
+    vec3 N = heOctDecode(g1.rg * 2.0 - 1.0);
+    vec3 V = normalize(P - heSSR.camPos.xyz);
+    vec3 R = reflect(V, N);
+    // Rays back toward the camera cannot be resolved in screen space.
+    float facing = smoothstep(0.0, 0.2, dot(R, heSSR.camFwd.xyz));
+    if (facing <= 0.0) { oSSR = vec4(0.0); return; }
+    int   steps   = int(heSSR.cfg.w);
+    float maxDist = heSSR.cfg.x;
+    float dt      = maxDist / float(steps);
+    float t       = dt * (0.5 + heIgn(gl_FragCoord.xy));    // jittered start
+    float prevT   = 0.0;
+    vec2  hitUV   = vec2(-1.0);
+    bool  hit     = false;
+    for (int i = 0; i < steps; ++i)
+    {
+        vec3 q = P + R * t;
+        vec4 clip = heSSR.viewProj * vec4(q, 1.0);
+        if (clip.w <= 0.0) break;
+        vec3 ndc = clip.xyz / clip.w;
+        vec2 quv = vec2(ndc.x * 0.5 + 0.5, (ndc.y * heSSR.conv.x) * 0.5 + 0.5);
+        if (any(lessThan(quv, vec2(0.0))) || any(greaterThan(quv, vec2(1.0)))) break;
+        float sceneD = texture(heGBDepth, quv).r;
+        if (sceneD < 1.0)
+        {
+            float rayZ   = heViewZ(q);
+            float sceneZ = heViewZ(heWorldAt(quv, sceneD));
+            if (rayZ > sceneZ + 0.01)
+            {
+                // Fell behind geometry — thickness test, then binary refine.
+                if (rayZ - sceneZ < heSSR.cfg.y + dt)
+                {
+                    float t0 = prevT, t1 = t;
+                    for (int b = 0; b < 5; ++b)
+                    {
+                        float tm = 0.5 * (t0 + t1);
+                        vec3 qm = P + R * tm;
+                        vec4 cm = heSSR.viewProj * vec4(qm, 1.0);
+                        vec3 nm = cm.xyz / max(cm.w, 1e-6);
+                        vec2 um = vec2(nm.x * 0.5 + 0.5, (nm.y * heSSR.conv.x) * 0.5 + 0.5);
+                        float dm = texture(heGBDepth, um).r;
+                        if (heViewZ(qm) > heViewZ(heWorldAt(um, dm))) { t1 = tm; hitUV = um; }
+                        else t0 = tm;
+                    }
+                    if (hitUV.x < 0.0) hitUV = quv;
+                    hit = true;
+                }
+                break;
+            }
+        }
+        prevT = t;
+        t += dt;
+    }
+    if (!hit) { oSSR = vec4(0.0); return; }
+    vec2 ef = min(hitUV, vec2(1.0) - hitUV);
+    float edge     = smoothstep(0.0, max(heSSR.conv.w, 1e-3), min(ef.x, ef.y));
+    float distFade = 1.0 - 0.5 * clamp(t / maxDist, 0.0, 1.0);
+    oSSR = vec4(texture(heSceneColor, hitUV).rgb, edge * facing * roughFade * distFade);
+}
+)";
+
+// ─── SSR composite (docs/ssr-plan.md §4.5) ───────────────────────────────────
+// Additive fullscreen pass that supplies the specular-IBL term the resolve
+// skipped (heLight.ssr.w): sky cubemap mixed against the SSR hit, then heLitP's
+// exact AO gating and the fog transmittance the resolve already applied to
+// everything else. Compiled WITH the lighting preamble (heLight/heSkyEnv/heAO).
+constexpr const char* kSSRCompositeFS = R"(#version 450
+layout(location = 0) out vec4 oColor; // blended ONE/ONE onto the resolved HDR
+layout(set = 0, binding = 19) uniform sampler2D heGB0;
+layout(set = 0, binding = 20) uniform sampler2D heGB1;
+layout(set = 0, binding = 21) uniform sampler2D heGB2;
+layout(set = 0, binding = 22) uniform sampler2D heGBDepth;
+layout(set = 0, binding = 27) uniform sampler2D heSSRTex;
+layout(std140, set = 0, binding = 23) uniform HeResolve {
+    mat4 invViewProj;
+    vec4 depthParams;
+    vec4 clusterParams;
+    vec4 clusterCamFwd;
+} heResolve;
+vec3 heOctDecode(vec2 f) {
+    vec3 n = vec3(f.x, f.y, 1.0 - abs(f.x) - abs(f.y));
+    float t = max(-n.z, 0.0);
+    n.x += (n.x >= 0.0) ? -t : t;
+    n.y += (n.y >= 0.0) ? -t : t;
+    return normalize(n);
+}
+void main() {
+    vec2 uv = gl_FragCoord.xy / max(heLight.giParams.xy, vec2(1.0));
+    float d = texture(heGBDepth, uv).r;
+    if (d >= 1.0) discard;
+    vec4 g0 = texture(heGB0, uv);
+    vec4 g1 = texture(heGB1, uv);
+    vec4 g2 = texture(heGB2, uv);
+    vec4 clip = vec4(uv.x * 2.0 - 1.0,
+                     (uv.y * 2.0 - 1.0) * heResolve.depthParams.x,
+                     d * heResolve.depthParams.y + heResolve.depthParams.z, 1.0);
+    vec4 wp = heResolve.invViewProj * clip;
+    vec3 P  = wp.xyz / max(wp.w, 1e-8);
+    vec3 n  = heOctDecode(g1.rg * 2.0 - 1.0);
+    vec3 V  = normalize(heLight.camPos.xyz - P);
+    // ── SYNC: heLitP's weather/material split + ambSpec term, line-for-line —
+    // this IS the term heLitP skipped (ssr.w), so the two must stay identical
+    // (SSR-off deferred vs forward is the guard).
+    float snowMask = smoothstep(0.25, 0.75, clamp(n.y, 0.0, 1.0))
+                   * clamp(heLight.weather.y, 0.0, 1.0);
+    float wet      = clamp(heLight.weather.x, 0.0, 1.0) * (1.0 - snowMask);
+    vec3 baseColor = mix(g0.rgb, vec3(0.90, 0.93, 0.97), snowMask);
+    baseColor *= (1.0 - 0.30 * wet);
+    float rough = clamp(g1.b, 0.0, 1.0);
+    rough = mix(rough, 0.08, wet);
+    rough = mix(rough, 0.85, snowMask);
+    float metal = clamp(g0.a, 0.0, 1.0);
+    float f0    = 0.08 * clamp(g1.a, 0.0, 1.0);
+    vec3  specColor = mix(vec3(f0), baseColor, metal);
+    specColor       = mix(specColor, vec3(0.08), wet);
+    vec3 ambSpec = vec3(0.0);
+    if (heLight.fog.z > 0.5)
+    {
+        vec3 Rrough  = normalize(mix(reflect(-V, n), n, rough));
+        vec3 envSpec = texture(heSkyEnv, Rrough).rgb;
+        vec4 r = texture(heSSRTex, uv);
+        envSpec = mix(envSpec, r.rgb, r.a * heLight.ssr.y); // SSR hit over the cubemap
+        ambSpec = envSpec * specColor * (1.0 - 0.6 * rough);
+    }
+    // AO exactly as heLitP applies it: the non-GI branch multiplies ambSpec by
+    // material-AO × screen-space AO; the GI branch adds it unoccluded.
+    if (heLight.giProbe.y <= 0.5)
+    {
+        float ssao = (heLight.fog.w > 0.5) ? texture(heAO, uv).r : 1.0;
+        ambSpec *= clamp(g2.a, 0.0, 1.0) * ssao;
+    }
+    // Fog transmittance (mirror of heApplyFog's factor): the resolve fogged the
+    // rest of the lighting — an additive term must scale by (1 − f) = e^-optical.
+    if (heLight.fog.x > 0.0 && heLight.fog.z > 0.5)
+    {
+        vec3  ray  = P - heLight.camPos.xyz;
+        float dist = length(ray);
+        float k    = heLight.fog.y * ray.y;
+        float tt   = (abs(k) > 1e-4) ? (1.0 - exp(-k)) / k : 1.0;
+        float optical = heLight.fog.x * dist * exp(-heLight.fog.y * heLight.camPos.y) * tt;
+        ambSpec *= exp(-optical);
+    }
+    oColor = vec4(ambSpec, 1.0);
+}
+)";
+} // namespace
+
+const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::ssrTrace(Backend backend)
+{
+    const int key = static_cast<int>(backend) * 2;
+    if (auto it = m_ssrCache.find(key); it != m_ssrCache.end()) return it->second;
+    using namespace he::shaderc;
+    Compiled out;
+    if (backend == Backend::Metal)
+        out = toCompiled(compileMslPinned(kSSRTraceFS, Stage::Fragment,
+            { { Stage::Fragment, 0, 23, 0 },    // HeSSRTrace UBO → fragment buffer 0
+              { Stage::Fragment, 0, 19, 0 },    // scene colour → texture/sampler 0
+              { Stage::Fragment, 0, 20, 1 },    // GB1 → 1
+              { Stage::Fragment, 0, 22, 2 } }));// depth → 2
+    else
+        out = toCompiled(compile(kSSRTraceFS, Stage::Fragment, toTarget(backend)));
+    return m_ssrCache.emplace(key, std::move(out)).first->second;
+}
+
+const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::ssrComposite(Backend backend)
+{
+    const int key = static_cast<int>(backend) * 2 + 1;
+    if (auto it = m_ssrCache.find(key); it != m_ssrCache.end()) return it->second;
+    using namespace he::shaderc;
+    const std::string injected = injectPreamble(kSSRCompositeFS);
+    Compiled out;
+    if (backend == Backend::Metal)
+        out = toCompiled(compileMslPinned(injected, Stage::Fragment,
+            { { Stage::Fragment, 0, 0, static_cast<uint32_t>(kMetalLightingBufferIndex) },
+              { Stage::Fragment, 0, 23, 3 },    // HeResolve UBO → fragment buffer 3
+              { Stage::Fragment, 0, 19, 0 },    // GB0 → 0
+              { Stage::Fragment, 0, 20, 1 },    // GB1 → 1
+              { Stage::Fragment, 0, 21, 2 },    // GB2 → 2
+              { Stage::Fragment, 0, 22, 3 },    // depth → 3
+              { Stage::Fragment, 0, 27, 4 },    // SSR result → 4
+              { Stage::Fragment, 0, 15, 14 },   // sky env cubemap (scene-pass slot)
+              { Stage::Fragment, 0, 16, 15 } }));// screen-space AO (scene-pass slot)
+    else
+        out = toCompiled(compile(injected, Stage::Fragment, toTarget(backend)));
+    return m_ssrCache.emplace(key, std::move(out)).first->second;
 }
 
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fullscreenVertex(Backend backend)

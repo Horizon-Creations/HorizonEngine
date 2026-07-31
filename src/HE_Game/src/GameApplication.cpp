@@ -844,6 +844,16 @@ void GameApplication::OnRender(float deltaTime)
 				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("GIIndirectIntensity", 1.0f)),
 				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("GILightRadius", 0.5f))});
 
+			// SSR — same config.json keys the editor writes, capability-gated
+			// (Metal deferred tile mode only in v1).
+			const bool ssrEnabled =
+				GlobalState::getInstance().getCustomConfigBool("SSREnabled", false) &&
+				r->GetCapabilities().supportsScreenSpaceReflections;
+			r->SetSSRSettings(IRenderer::SSRSettings{
+				ssrEnabled,
+				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("SSRIntensity", 1.0f)),
+				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("SSRMaxRoughness", 0.6f))});
+
 			// Render path — same config.json key the editor's Preferences combo
 			// writes ("RenderPath": 0 = Forward, 1 = Deferred), capability-gated.
 			const bool deferredPath =
