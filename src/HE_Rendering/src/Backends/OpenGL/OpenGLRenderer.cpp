@@ -453,6 +453,45 @@ void main()
 }
 )GLSL";
 
+// ─── Deferred G-buffer fragment (built-in PBR materials) ─────────────────────
+// Writes surface ATTRIBUTES instead of shading them; the fullscreen resolve
+// (MaterialShaderLibrary::deferredResolve → heLitP) lights them once per
+// visible pixel. Weather/fog/IBL deliberately NOT applied here — they run in
+// the resolve on these attributes, so the result matches forward by
+// construction. Specular 0.5 = the dielectric F0 0.04 the built-in forward
+// shader uses; emissive 0, material AO 1. Links against kUnlitVS (single) and
+// kInstancedVS (instanced batches) — both emit the same varyings.
+static const char* kGBufFS = R"GLSL(
+#version 410 core
+in vec3 vNormal;
+in vec2 vUV;
+in vec3 vWorldPos;
+uniform vec3      uColor;
+uniform bool      uHasTexture;
+uniform sampler2D uTexture;
+uniform float     uMetallic;
+uniform float     uRoughness;
+layout(location = 0) out vec4 oGB0; // rgb BaseColor, a Metallic
+layout(location = 1) out vec4 oGB1; // rg oct Normal, b Roughness, a Specular
+layout(location = 2) out vec4 oGB2; // rgb Emissive, a Material-AO
+// Signed-octahedral mapping (Meyer et al. 2010) — same encode as the shared
+// lighting preamble's heOctEncode, so the resolve's decode round-trips.
+vec2 octEncode(vec3 n)
+{
+	vec2 p = n.xy * (1.0 / (abs(n.x) + abs(n.y) + abs(n.z)));
+	vec2 signP = vec2(p.x >= 0.0 ? 1.0 : -1.0, p.y >= 0.0 ? 1.0 : -1.0);
+	return (n.z <= 0.0) ? ((1.0 - abs(p.yx)) * signP) : p;
+}
+void main()
+{
+	vec3 albedo = uHasTexture ? texture(uTexture, vUV).rgb * uColor : uColor;
+	vec3 N = normalize(vNormal);
+	oGB0 = vec4(albedo, clamp(uMetallic, 0.0, 1.0));
+	oGB1 = vec4(octEncode(N) * 0.5 + 0.5, clamp(uRoughness, 0.0, 1.0), 0.5);
+	oGB2 = vec4(0.0, 0.0, 0.0, 1.0);
+}
+)GLSL";
+
 // ─── Skinned vertex shader ────────────────────────────────────────────────────
 // Identical shading to kUnlitVS/kUnlitFS but blends the vertex by up to 4 bone
 // matrices before applying the model+MVP.  The fragment shader is shared with
@@ -3314,6 +3353,15 @@ void OpenGLRenderer::Initialize(HE::Window* window)
 
 	m_shaderManager = OpenGLShaderManager();
 
+	// Deferred-path debug/headless knobs (mirrors the Metal backend):
+	// HE_RENDER_PATH=1/deferred forces the path without touching config,
+	// HE_DUMP_GBUFFER=1..4 makes the resolve output a raw G-buffer view.
+	if (const char* rp = std::getenv("HE_RENDER_PATH"); rp && *rp)
+		m_renderPath = (std::string(rp) == "1" || std::string(rp) == "deferred")
+			? HE::RenderPath::Deferred : HE::RenderPath::Forward;
+	if (const char* dv = std::getenv("HE_DUMP_GBUFFER"); dv && *dv)
+		m_gbufferDebugView = std::clamp(std::atoi(dv), 0, 4);
+
 	glEnable(GL_DEPTH_TEST);
 	CreateUnlitPipeline();
 	CreateSkinnedPipeline();
@@ -3433,6 +3481,13 @@ bool OpenGLRenderer::resolveMaterialShader(const HE::UUID& materialId, uint64_t&
 {
 	if (!m_contentManager) return false;
 	return m_matShaderLib.resolveShaders(*m_contentManager, materialId, key, frag, vertBody);
+}
+
+bool OpenGLRenderer::resolveMaterialShaderGB(const HE::UUID& materialId, uint64_t& key, std::string& frag,
+                                             std::string& vertBody)
+{
+	if (!m_contentManager) return false;
+	return m_matShaderLib.resolveGBufferShaders(*m_contentManager, materialId, key, frag, vertBody);
 }
 
 // Build (or fetch) a GL program for a material's custom fragment. The shared library
@@ -5322,6 +5377,211 @@ void OpenGLRenderer::DestroyHDRTarget()
 	m_hdrW = m_hdrH = 0;
 }
 
+void OpenGLRenderer::EnsureGBufferTargets(int width, int height)
+{
+	if (m_gbFBO && width == m_gbW && height == m_gbH)
+		return;
+	DestroyGBufferTargets();
+
+	glGenFramebuffers(1, &m_gbFBO);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_gbFBO);
+
+	auto makeColor = [&](unsigned int& tex, GLenum internalFmt, int attachment)
+	{
+		glGenTextures(1, &tex);
+		glBindTexture(GL_TEXTURE_2D, tex);
+		glTexImage2D(GL_TEXTURE_2D, 0, internalFmt, width, height, 0, GL_RGBA,
+		             internalFmt == GL_SRGB8_ALPHA8 ? GL_UNSIGNED_BYTE : GL_FLOAT, nullptr);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + attachment,
+		                       GL_TEXTURE_2D, tex, 0);
+	};
+	// GB0 sRGB (BaseColor is perceptual 8-bit — written with GL_FRAMEBUFFER_SRGB
+	// enabled during the G-buffer pass, decoded automatically on sampling), the
+	// attribute targets RGBA16F. Matches the Metal G-buffer formats.
+	makeColor(m_gbColor0, GL_SRGB8_ALPHA8, 0);
+	makeColor(m_gbColor1, GL_RGBA16F,      1);
+	makeColor(m_gbColor2, GL_RGBA16F,      2);
+	const GLenum bufs[3] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2 };
+	glDrawBuffers(3, bufs);
+
+	// Depth as a TEXTURE (the resolve samples it for world-pos reconstruction);
+	// same internal format as m_hdrDepth so the depth blit between them is legal.
+	glGenTextures(1, &m_gbDepthTex);
+	glBindTexture(GL_TEXTURE_2D, m_gbDepthTex);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, width, height, 0,
+	             GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, nullptr);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, m_gbDepthTex, 0);
+
+	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+		Logger::Log(Logger::LogLevel::Error, "OpenGLRenderer: G-buffer FBO incomplete");
+
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	m_gbW = width;
+	m_gbH = height;
+}
+
+void OpenGLRenderer::DestroyGBufferTargets()
+{
+	if (m_gbFBO)      { glDeleteFramebuffers(1, &m_gbFBO); m_gbFBO = 0; }
+	if (m_gbColor0)   { glDeleteTextures(1, &m_gbColor0);  m_gbColor0 = 0; }
+	if (m_gbColor1)   { glDeleteTextures(1, &m_gbColor1);  m_gbColor1 = 0; }
+	if (m_gbColor2)   { glDeleteTextures(1, &m_gbColor2);  m_gbColor2 = 0; }
+	if (m_gbDepthTex) { glDeleteTextures(1, &m_gbDepthTex);m_gbDepthTex = 0; }
+	m_gbW = m_gbH = 0;
+}
+
+bool OpenGLRenderer::EnsureDeferredPipelines()
+{
+	if (m_gbufferProgram && m_deferredResolveProgram) return true;
+	if (m_deferredPipelinesTried) return false; // failed once — stay forward
+	m_deferredPipelinesTried = true;
+
+#if !defined(HE_HAVE_SHADERC)
+	// The resolve shader is generated from the shared lighting preamble at
+	// runtime — without the cross-compiler there is no deferred path.
+	return false;
+#else
+	auto link = [](const char* what, GLuint vs, GLuint fs) -> GLuint
+	{
+		GLuint prog = glCreateProgram();
+		glAttachShader(prog, vs);
+		glAttachShader(prog, fs);
+		glLinkProgram(prog);
+		GLint ok = 0; glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+		if (!ok)
+		{
+			char log[2048]; glGetProgramInfoLog(prog, sizeof(log), nullptr, log);
+			Logger::Log(Logger::LogLevel::Error,
+				(std::string("OpenGLRenderer: ") + what + " link failed: " + log).c_str());
+			glDeleteProgram(prog);
+			return 0;
+		}
+		return prog;
+	};
+
+	try
+	{
+		// Built-in-PBR G-buffer programs: the unlit/instanced vertex stages with
+		// the MRT attribute fragment.
+		GLuint gbFS = CompileStage(GL_FRAGMENT_SHADER, kGBufFS);
+		{
+			GLuint vs = CompileStage(GL_VERTEX_SHADER, kUnlitVS);
+			m_gbufferProgram = link("G-buffer program", vs, gbFS);
+			glDeleteShader(vs);
+		}
+		{
+			GLuint vs = CompileStage(GL_VERTEX_SHADER, kInstancedVS);
+			m_gbufferInstancedProgram = link("instanced G-buffer program", vs, gbFS);
+			glDeleteShader(vs);
+		}
+		glDeleteShader(gbFS);
+		if (m_gbufferProgram)
+		{
+			glUseProgram(m_gbufferProgram);
+			m_uGBMVP        = glGetUniformLocation(m_gbufferProgram, "uMVP");
+			m_uGBModel      = glGetUniformLocation(m_gbufferProgram, "uModel");
+			m_uGBColor      = glGetUniformLocation(m_gbufferProgram, "uColor");
+			m_uGBMetallic   = glGetUniformLocation(m_gbufferProgram, "uMetallic");
+			m_uGBRoughness  = glGetUniformLocation(m_gbufferProgram, "uRoughness");
+			m_uGBHasTexture = glGetUniformLocation(m_gbufferProgram, "uHasTexture");
+			m_uGBTexture    = glGetUniformLocation(m_gbufferProgram, "uTexture");
+			glUniform1i(m_uGBTexture, 0);
+		}
+		if (m_gbufferInstancedProgram)
+		{
+			glUseProgram(m_gbufferInstancedProgram);
+			m_uGBInstViewProj   = glGetUniformLocation(m_gbufferInstancedProgram, "uViewProj");
+			m_uGBInstColor      = glGetUniformLocation(m_gbufferInstancedProgram, "uColor");
+			m_uGBInstMetallic   = glGetUniformLocation(m_gbufferInstancedProgram, "uMetallic");
+			m_uGBInstRoughness  = glGetUniformLocation(m_gbufferInstancedProgram, "uRoughness");
+			m_uGBInstHasTexture = glGetUniformLocation(m_gbufferInstancedProgram, "uHasTexture");
+			m_uGBInstTexture    = glGetUniformLocation(m_gbufferInstancedProgram, "uTexture");
+			glUniform1i(m_uGBInstTexture, 0);
+		}
+		glUseProgram(0);
+
+		// Fullscreen lighting resolve — cross-compiled from the SAME lighting
+		// preamble as every material fragment (one shading source, plan §4.2).
+		using Backend = HE::MaterialShaderLibrary::Backend;
+		const auto& v = m_matShaderLib.fullscreenVertex(Backend::GLSL410);
+		const auto& f = m_matShaderLib.deferredResolve(Backend::GLSL410);
+		if (v.ok && f.ok)
+		{
+			GLuint vs = CompileStage(GL_VERTEX_SHADER,   v.source.c_str());
+			GLuint fs = CompileStage(GL_FRAGMENT_SHADER, f.source.c_str());
+			m_deferredResolveProgram = link("deferred resolve program", vs, fs);
+			glDeleteShader(vs); glDeleteShader(fs);
+			if (m_deferredResolveProgram)
+			{
+				// UBO blocks: HeLighting → 0 (the resolve-only fill buffer is bound
+				// there during the resolve draw), HeResolve → 3. Samplers: the
+				// G-buffer inputs on units 0..3, everything the preamble declares
+				// on the SAME units as material programs (setupProgram convention),
+				// so the frame's shared binds cover them.
+				const GLuint lIdx = glGetUniformBlockIndex(m_deferredResolveProgram, "HeLighting");
+				if (lIdx != GL_INVALID_INDEX) glUniformBlockBinding(m_deferredResolveProgram, lIdx, 0);
+				const GLuint rIdx = glGetUniformBlockIndex(m_deferredResolveProgram, "HeResolve");
+				if (rIdx != GL_INVALID_INDEX) glUniformBlockBinding(m_deferredResolveProgram, rIdx, 3);
+				glUseProgram(m_deferredResolveProgram);
+				auto smp = [&](const char* nm, int unit) {
+					if (GLint l = glGetUniformLocation(m_deferredResolveProgram, nm); l >= 0)
+						glUniform1i(l, unit);
+				};
+				smp("heGB0", 0); smp("heGB1", 1); smp("heGB2", 2); smp("heGBDepth", 3);
+				smp("heGIShadow", 9);  smp("heGILocal", 10);
+				smp("heCsm", 11);      smp("heLocalShadow", 12);
+				smp("heSkyEnv", 14);   smp("heAO", 15);
+				smp("heGIIrradiance", 16); smp("heGIVisibility", 17);
+				glUseProgram(0);
+			}
+		}
+		else
+			Logger::Log(Logger::LogLevel::Error,
+				(std::string("OpenGLRenderer: deferred resolve shader compile failed\n")
+				 + v.log + f.log).c_str());
+	}
+	catch (const std::exception& e)
+	{
+		Logger::Log(Logger::LogLevel::Error,
+			(std::string("OpenGLRenderer: deferred pipeline build failed: ") + e.what()).c_str());
+	}
+
+	// UBOs for the resolve draw: HeResolve (mat4 + vec4) and the resolve-only
+	// HeLighting fill (the shared m_matLightUBO must keep the material fill —
+	// custom-material programs alias heCsm onto the local-atlas unit, so THEY
+	// must keep csmSplits.w = 0 while the resolve gets real CSM matrices).
+	if (m_deferredResolveProgram && !m_resolveUBO)
+	{
+		glGenBuffers(1, &m_resolveUBO);
+		glBindBuffer(GL_UNIFORM_BUFFER, m_resolveUBO);
+		glBufferData(GL_UNIFORM_BUFFER,
+			static_cast<GLsizeiptr>(sizeof(HE::MaterialShaderLibrary::ResolveUniforms)),
+			nullptr, GL_DYNAMIC_DRAW);
+		glGenBuffers(1, &m_resolveLightUBO);
+		glBindBuffer(GL_UNIFORM_BUFFER, m_resolveLightUBO);
+		glBufferData(GL_UNIFORM_BUFFER,
+			static_cast<GLsizeiptr>(sizeof(HE::MaterialShaderLibrary::Lighting)),
+			nullptr, GL_DYNAMIC_DRAW);
+		glBindBuffer(GL_UNIFORM_BUFFER, 0);
+	}
+
+	const bool ok = m_gbufferProgram && m_gbufferInstancedProgram && m_deferredResolveProgram;
+	if (!ok)
+		Logger::Log(Logger::LogLevel::Warning,
+			"OpenGLRenderer: deferred render path unavailable — staying on forward");
+	return ok;
+#endif
+}
+
 // ─── Block-compressed texture support ─────────────────────────────────────────
 // glad only exposes the BPTC enum; S3TC comes from an EXT so define it locally.
 #ifndef GL_COMPRESSED_RGBA_S3TC_DXT5_EXT
@@ -5761,6 +6021,16 @@ void OpenGLRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 			for (const auto& var : ma->precompiledShaders)
 				if (var.backend == static_cast<uint8_t>(HE::RendererBackend::OpenGL)) { pre = &var; break; }
 		if (GetOrBuildMaterialProgram(shKey, shFrag, shVert, pre)) ++built;
+		// Deferred path active → also warm the G-buffer variant so the first
+		// deferred frame doesn't hitch on its cross-compile.
+		if (m_renderPath == HE::RenderPath::Deferred)
+		{
+			uint64_t gbKey; std::string gbFrag, gbVert;
+			if (resolveMaterialShaderGB(id, gbKey, gbFrag, gbVert)
+			    && !m_materialPrograms.count(gbKey)
+			    && GetOrBuildMaterialProgram(gbKey, gbFrag, gbVert, nullptr))
+				++built;
+		}
 	}
 	if (built > 0)
 		Logger::Log(Logger::LogLevel::Info,
@@ -6664,6 +6934,13 @@ void OpenGLRenderer::Shutdown()
 	m_materialTexCache.clear();
 	DestroyViewportTarget();
 	DestroyHDRTarget();
+	DestroyGBufferTargets();
+	if (m_gbufferProgram)          { glDeleteProgram(m_gbufferProgram);          m_gbufferProgram = 0; }
+	if (m_gbufferInstancedProgram) { glDeleteProgram(m_gbufferInstancedProgram); m_gbufferInstancedProgram = 0; }
+	if (m_deferredResolveProgram)  { glDeleteProgram(m_deferredResolveProgram);  m_deferredResolveProgram = 0; }
+	if (m_resolveUBO)      { glDeleteBuffers(1, &m_resolveUBO);      m_resolveUBO = 0; }
+	if (m_resolveLightUBO) { glDeleteBuffers(1, &m_resolveLightUBO); m_resolveLightUBO = 0; }
+	m_deferredPipelinesTried = false; // re-Initialize() rebuilds instead of staying forward
 	DestroyBloomTargets();
 	DestroyCloudTarget();
 	DestroyLdrTarget();
@@ -7229,6 +7506,34 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		// "Opaque" / "Sky+Clouds" markers). The geometry branch has no early return, so
 		// these explicit begin/end pairs always balance.
 		GpuTimerBeginPass("Opaque");
+		// ── Deferred render path: rasterize the opaque geometry into the G-buffer
+		// instead of shading it here; the lighting happens once, in the fullscreen
+		// resolve below (docs/deferred-renderer-plan.md).
+		const bool deferredActive =
+			m_renderPath == HE::RenderPath::Deferred && EnsureDeferredPipelines();
+		if (deferredActive)
+		{
+			EnsureGBufferTargets(pw, ph);
+			glBindFramebuffer(GL_FRAMEBUFFER, m_gbFBO);
+			glViewport(0, 0, pw, ph);
+			glEnable(GL_DEPTH_TEST);
+			glDepthFunc(GL_LESS);
+			glDepthMask(GL_TRUE);
+			const float c0[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+			const float c1[4] = { 0.5f, 0.5f, 1.0f, 0.5f }; // encoded +Z normal, mid rough/spec
+			const float c2[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+			const float d1    = 1.0f;
+			glClearBufferfv(GL_COLOR, 0, c0);
+			glClearBufferfv(GL_COLOR, 1, c1);
+			glClearBufferfv(GL_COLOR, 2, c2);
+			glClearBufferfv(GL_DEPTH, 0, &d1);
+			// GB0 is SRGB8 — enable the encode-on-write so the linear shader
+			// output round-trips through the 8-bit target (disabled again after
+			// the G-buffer loop; GB1/GB2 are float targets, unaffected).
+			glEnable(GL_FRAMEBUFFER_SRGB);
+		}
+		else
+		{
 		glBindFramebuffer(GL_FRAMEBUFFER, m_hdrFBO);
 		glViewport(0, 0, pw, ph);
 		// Explicit depth state for the opaque geometry: test on, write on, LESS, so
@@ -7238,6 +7543,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		glDepthMask(GL_TRUE);
 		glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+		}
 
 		// (The procedural skybox is drawn AFTER the geometry below, with a
 		// depth-test == far, so the heavy sky shader only runs on the background
@@ -7353,12 +7659,310 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		                // Custom translucent material: its GL program + param block +
 		                // node-graph textures (0 → the built-in blend program).
 		                unsigned int matProg = 0; std::vector<float> params;
-		                unsigned int gtex[4] = { 0, 0, 0, 0 }; int gtexCount = 0; };
+		                unsigned int gtex[4] = { 0, 0, 0, 0 }; int gtexCount = 0;
+		                // Deferred forward-routed opaque draws only: the landscape
+		                // weightmap resolved at collect time (0 → layer-0 default).
+		                unsigned int wmTex = 0; };
 		std::vector<TPDraw> transparent;
+		// Deferred: opaque draws whose custom material has no G-buffer variant —
+		// replayed forward right after the lighting resolve.
+		std::vector<TPDraw> deferredForward;
 		const glm::vec3 camPos = m_renderWorld.camera.position;
+
+#if defined(HE_HAVE_SHADERC)
+		// The heLitP lighting ABI fill for custom-material programs — shared by
+		// the forward opaque loop, the deferred G-buffer loop (Time input) and
+		// the deferred replay passes, so the values can never drift between them.
+		auto fillMatLight = [&](HE::MaterialShaderLibrary::Lighting& lit)
+		{
+			// Dominant directional (NOT the raw env sun — night/cloud lesson,
+			// see RenderWorld::dominantDirectionalLight) + the full light window.
+			glm::vec3 matSunDir, matSunColor;
+			m_renderWorld.dominantDirectionalLight(matSunDir, matSunColor);
+			const glm::vec3 sc = matSunColor;
+			lit.sunDir[0]=matSunDir.x; lit.sunDir[1]=matSunDir.y; lit.sunDir[2]=matSunDir.z;
+			// Engine seconds for the node graph's Time input (HE_SKY_TIME pins it
+			// for deterministic headless captures, mirroring the sky clock).
+			static const char* s_timeOv = std::getenv("HE_SKY_TIME");
+			lit.sunDir[3] = s_timeOv && *s_timeOv
+				? static_cast<float>(std::atof(s_timeOv))
+				: static_cast<float>(SDL_GetTicks()) / 1000.0f;
+			lit.camPos[0] = m_renderWorld.camera.position.x;
+			lit.camPos[1] = m_renderWorld.camera.position.y;
+			lit.camPos[2] = m_renderWorld.camera.position.z;
+			lit.sunColor[0]=sc.r; lit.sunColor[1]=sc.g; lit.sunColor[2]=sc.b;
+			lit.ambient[0]=m_renderWorld.ambient.r; lit.ambient[1]=m_renderWorld.ambient.g; lit.ambient[2]=m_renderWorld.ambient.b;
+			lit.giParams[0] = static_cast<float>(pw);
+			lit.giParams[1] = static_cast<float>(ph);
+			lit.giParams[2] = giShadingActive ? 1.0f : 0.0f;
+			// Aerial perspective + the "is it bound" gates for the shared
+			// ambient inputs (units 14/15).
+			lit.fog[0] = GetEnvironment().fogDensity;
+			lit.fog[1] = GetEnvironment().fogHeightFalloff;
+			lit.fog[2] = m_skyEnvCube ? 1.0f : 0.0f;
+			lit.fog[3] = aoActive     ? 1.0f : 0.0f;
+			// Weather surface response (same values as the built-in programs).
+			lit.weather[0] = GetEnvironment().wetness;
+			lit.weather[1] = GetEnvironment().snowAmount;
+			// DDGI probe grid — the same values PushGISceneUniforms hands
+			// the built-in programs, so heLitP's indirect diffuse matches.
+			lit.giGridOrigin[0] = m_giGridOrigin.x;
+			lit.giGridOrigin[1] = m_giGridOrigin.y;
+			lit.giGridOrigin[2] = m_giGridOrigin.z;
+			lit.giGridOrigin[3] = kGIProbeSpacing;
+			lit.giGridCounts[0] = static_cast<float>(m_giGridCounts.x);
+			lit.giGridCounts[1] = static_cast<float>(m_giGridCounts.y);
+			lit.giGridCounts[2] = static_cast<float>(m_giGridCounts.z);
+			lit.giGridCounts[3] = static_cast<float>(m_giProbesPerRow);
+			lit.giProbe[0] = m_giIndirectIntensity;
+			lit.giProbe[1] = (giShadingActive && m_giIrrAtlas && m_giVisAtlas) ? 1.0f : 0.0f;
+			// Full light window for heLitP() — same first-8 order as the built-in
+			// PBR shaders. Shared fill (HE::FillMaterialLightWindow); it also
+			// writes the per-light atlas layer into lightParams[i].y when
+			// `localShadows` says the atlas is bound this frame.
+			HE::FillMaterialLightWindow(m_renderWorld, lit, localShadows);
+			// Local (point/spot) shadow atlas for heLitP — same matrices the
+			// built-in shaders use, with the GL depth remap (z: [-1,1]→[0,1])
+			// PRE-BAKED so the shared preamble stays convention-free.
+			if (localShadows)
+			{
+				glm::mat4 zRemap(1.0f);
+				zRemap[2][2] = 0.5f; zRemap[3][2] = 0.5f;
+				for (int c = 0; c < nLocalLayers; ++c)
+				{
+					const glm::mat4 m = zRemap * m_renderWorld.shadow.localViewProj[c];
+					std::memcpy(lit.localShadowVP[c], &m[0][0], 16 * sizeof(float));
+				}
+			}
+		};
+#endif
 
 		glUniform1f(m_uOpacity, 1.0f); // opaque pass writes alpha 1
 		m_matLightUploadedThisFrame = false; // lighting UBO re-uploaded at most once this frame
+
+		// ── Deferred G-buffer loop: the same routing as the forward loop below,
+		// only with G-buffer programs and without any lighting binds (plan §4.1).
+		// Translucent draws collect into `transparent` exactly like forward;
+		// custom materials WITHOUT a G-buffer variant collect into
+		// `deferredForward` and replay right after the lighting resolve.
+		if (deferredActive)
+		{
+#if defined(HE_HAVE_SHADERC)
+			// G-buffer graph fragments may read the Time input (heLight.sunDir.w)
+			// — upload the standard fill once, before any custom G-buffer draw.
+			{
+				HE::MaterialShaderLibrary::Lighting lit{};
+				fillMatLight(lit);
+				if (m_matLightUBO)
+				{
+					glBindBuffer(GL_UNIFORM_BUFFER, m_matLightUBO);
+					glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(lit), &lit);
+					glBindBuffer(GL_UNIFORM_BUFFER, 0);
+					m_matLightUploadedThisFrame = true;
+				}
+			}
+#endif
+			glUseProgram(m_gbufferProgram);
+			for (const DrawCall& dc : cmds.drawCalls())
+			{
+				if (!matValid || dc.materialAssetId != lastMatId)
+				{
+					cHasOverride = ResolveMaterialTexture(dc.materialAssetId, cOverrideTex);
+					cBaseColor   = glm::vec3(1.0f); cMetallic = 0.0f; cRoughness = 0.5f; cOpacity = 1.0f;
+					cHasMat      = ResolveMaterialParams(dc.materialAssetId, cBaseColor, cMetallic, cRoughness, cOpacity);
+					lastMatId    = dc.materialAssetId; matValid = true;
+				}
+				if (!meshValid || dc.meshAssetId != lastMeshId)
+				{
+					cMesh      = ResolveMesh(dc.meshAssetId);
+					lastMeshId = dc.meshAssetId; meshValid = true;
+				}
+				const GpuMesh*     mesh = cMesh;
+				const unsigned int tex  = cHasOverride ? cOverrideTex
+				                                       : (mesh ? mesh->texture : 0u);
+				glm::vec3 baseColor = cBaseColor;
+				if (!cHasMat)
+					baseColor = (tex != 0) ? glm::vec3(1.0f) : glm::vec3(0.55f, 0.55f, 0.55f);
+				baseColor *= glm::vec3(dc.instanceTint);
+				const float opacity = cOpacity * dc.instanceTint.a;
+				const GpuMesh* drawMesh = mesh ? mesh : ResolveMesh(HE::kDefaultCubeMeshId);
+				if (!drawMesh) continue;
+				const unsigned int vao        = drawMesh->vao;
+				const int          indexCount = drawMesh->indexCount;
+
+				// Custom-material programs: forward (transparency + forward-routing)
+				// and, when the material has a G-buffer variant, its MRT program.
+				unsigned int matProg = 0, gbProg = 0; bool hasCustom = false;
+				std::vector<float> mParams; unsigned int mGtex[4] = { 0, 0, 0, 0 }; int mGtexCount = 0;
+#if defined(HE_HAVE_SHADERC)
+				{
+					uint64_t shKey; std::string shFrag, shVert;
+					if (resolveMaterialShader(dc.materialAssetId, shKey, shFrag, shVert))
+					{
+						hasCustom = true;
+						const MaterialShaderVariant* pre = nullptr;
+						const MaterialAsset* ma = m_contentManager
+							? m_contentManager->getMaterial(dc.materialAssetId) : nullptr;
+						if (ma)
+							for (const auto& var : ma->precompiledShaders)
+								if (var.backend == static_cast<uint8_t>(HE::RendererBackend::OpenGL)) { pre = &var; break; }
+						matProg = GetOrBuildMaterialProgram(shKey, shFrag, shVert, pre);
+						// G-buffer variant — runtime cross-compiled only (baked packs
+						// carry no G-buffer GLSL yet).
+						uint64_t gbKey; std::string gbFrag, gbVert;
+						if (resolveMaterialShaderGB(dc.materialAssetId, gbKey, gbFrag, gbVert))
+							gbProg = GetOrBuildMaterialProgram(gbKey, gbFrag, gbVert, nullptr);
+						if (ma)
+						{
+							mParams = !dc.paramOverride.empty() ? dc.paramOverride
+							                                    : ma->shaderParamData;
+							const size_t nTex = std::min<size_t>(4,
+								std::max(ma->graphTexturePaths.size(), ma->graphTextureIds.size()));
+							for (size_t i = 0; i < nTex; ++i)
+							{
+								const HE::UUID    gid = i < ma->graphTextureIds.size()   ? ma->graphTextureIds[i]   : HE::UUID{};
+								const std::string gp  = i < ma->graphTexturePaths.size() ? ma->graphTexturePaths[i] : std::string{};
+								mGtex[mGtexCount++] = ResolveGraphTexture(gid, gp);
+							}
+						}
+					}
+				}
+#endif
+				if (opacity < RenderSorter::kOpaqueOpacityThreshold)
+				{
+					// Same collection as the forward loop's transparent branch.
+					auto pushTP = [&](const glm::mat4& t) {
+						TPDraw tp{ viewProj * t, t, baseColor,
+						           cMetallic, cRoughness, opacity, tex, vao, indexCount,
+						           RenderSorter::backToFrontKey(t, camPos) };
+						tp.matProg = matProg;
+						tp.params  = mParams;
+						for (int i = 0; i < mGtexCount; ++i) tp.gtex[i] = mGtex[i];
+						tp.gtexCount = mGtexCount;
+						transparent.push_back(std::move(tp));
+					};
+					if (!dc.instanceTransforms.empty())
+						for (const glm::mat4& t : dc.instanceTransforms) pushTP(t);
+					else
+						pushTP(dc.transform);
+					continue;
+				}
+				if (!dc.instanceTransforms.empty() && m_gbufferInstancedProgram && m_instanceVBO)
+				{
+					// Instanced batches always take the built-in instanced program —
+					// the same routing the forward loop uses.
+					glBindBuffer(GL_ARRAY_BUFFER, m_instanceVBO);
+					glBufferData(GL_ARRAY_BUFFER,
+					             static_cast<GLsizeiptr>(dc.instanceTransforms.size() * sizeof(glm::mat4)),
+					             dc.instanceTransforms.data(), GL_STREAM_DRAW);
+					glBindBuffer(GL_ARRAY_BUFFER, 0);
+					glUseProgram(m_gbufferInstancedProgram);
+					glUniformMatrix4fv(m_uGBInstViewProj, 1, GL_FALSE, glm::value_ptr(viewProj));
+					glUniform3fv(m_uGBInstColor,     1, glm::value_ptr(baseColor));
+					glUniform1f(m_uGBInstMetallic,   cMetallic);
+					glUniform1f(m_uGBInstRoughness,  cRoughness);
+					glBindVertexArray(vao);
+					glUniform1i(m_uGBInstHasTexture, tex != 0);
+					glActiveTexture(GL_TEXTURE0);
+					glBindTexture(GL_TEXTURE_2D, tex);
+					glDrawElementsInstanced(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, nullptr,
+					                        static_cast<GLsizei>(dc.instanceTransforms.size()));
+					++m_counters.draws;
+					m_counters.tris += static_cast<uint32_t>(indexCount / 3) *
+					                   static_cast<uint32_t>(dc.instanceTransforms.size());
+					glUseProgram(m_gbufferProgram);
+					continue;
+				}
+				if (hasCustom && !gbProg)
+				{
+					// No G-buffer variant → forward replay after the resolve.
+					TPDraw tp{ viewProj * dc.transform, dc.transform, baseColor,
+					           cMetallic, cRoughness, opacity, tex, vao, indexCount, 0.0f };
+					tp.matProg = matProg;
+					tp.params  = mParams;
+					for (int i = 0; i < mGtexCount; ++i) tp.gtex[i] = mGtex[i];
+					tp.gtexCount = mGtexCount;
+					{
+						const HE::UUID wid = dc.weightmapTextureId != HE::UUID{}
+							? dc.weightmapTextureId : HE::kDefaultLayer0WeightTextureId;
+						tp.wmTex = ResolveGraphTexture(wid, {});
+					}
+					deferredForward.push_back(std::move(tp));
+					continue;
+				}
+#if defined(HE_HAVE_SHADERC)
+				if (gbProg)
+				{
+					// Custom material → its G-buffer MRT program, same per-draw
+					// binds as the forward custom branch (minus the lighting-only
+					// inputs the resolve owns).
+					glUseProgram(gbProg);
+					struct { glm::mat4 mvp, model; glm::vec4 color, flags, pbr; } obj;
+					obj.mvp   = viewProj * dc.transform;
+					obj.model = dc.transform;
+					obj.color = glm::vec4(baseColor, 1.0f);
+					obj.flags = glm::vec4(tex != 0 ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+					obj.pbr   = glm::vec4(cMetallic, cRoughness, opacity, 0.0f);
+					glBindBuffer(GL_UNIFORM_BUFFER, m_matObjUBO);
+					glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(obj), &obj);
+					glBindBuffer(GL_UNIFORM_BUFFER, 0);
+					glBindBufferBase(GL_UNIFORM_BUFFER, 1, m_matObjUBO);   // block "U"
+					glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_matLightUBO); // block "HeLighting" (Time)
+					if (!mParams.empty())
+					{
+						float padded[64] = { 0 };
+						std::memcpy(padded, mParams.data(),
+						            std::min(mParams.size(), size_t(64)) * sizeof(float));
+						if (!m_haveMatParams || std::memcmp(padded, m_lastMatParams, sizeof(padded)) != 0)
+						{
+							std::memcpy(m_lastMatParams, padded, sizeof(padded));
+							m_haveMatParams = true;
+							glBindBuffer(GL_UNIFORM_BUFFER, m_matParamUBO);
+							glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(padded), padded);
+							glBindBuffer(GL_UNIFORM_BUFFER, 0);
+						}
+					}
+					glBindBufferBase(GL_UNIFORM_BUFFER, 2, m_matParamUBO); // block "HeParams"
+					glBindVertexArray(vao);
+					glActiveTexture(GL_TEXTURE0);
+					glBindTexture(GL_TEXTURE_2D, tex);
+					for (int i = 0; i < mGtexCount; ++i)
+					{
+						glActiveTexture(GL_TEXTURE1 + (GLenum)i);
+						glBindTexture(GL_TEXTURE_2D, mGtex[i]);
+					}
+					// Landscape layer weightmap on unit 13, per draw (as forward).
+					{
+						const HE::UUID wid = dc.weightmapTextureId != HE::UUID{}
+							? dc.weightmapTextureId : HE::kDefaultLayer0WeightTextureId;
+						glActiveTexture(GL_TEXTURE13);
+						glBindTexture(GL_TEXTURE_2D, ResolveGraphTexture(wid, {}));
+					}
+					glActiveTexture(GL_TEXTURE0);
+					glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, nullptr);
+					glUseProgram(m_gbufferProgram);
+					++m_counters.draws;
+					m_counters.tris += static_cast<uint32_t>(indexCount / 3);
+					continue;
+				}
+#endif
+				// Built-in PBR → the built-in G-buffer program.
+				glUniformMatrix4fv(m_uGBMVP,   1, GL_FALSE, glm::value_ptr(viewProj * dc.transform));
+				glUniformMatrix4fv(m_uGBModel, 1, GL_FALSE, glm::value_ptr(dc.transform));
+				glUniform3fv(m_uGBColor, 1, glm::value_ptr(baseColor));
+				glUniform1f(m_uGBMetallic,  cMetallic);
+				glUniform1f(m_uGBRoughness, cRoughness);
+				glBindVertexArray(vao);
+				glUniform1i(m_uGBHasTexture, tex != 0);
+				glActiveTexture(GL_TEXTURE0);
+				glBindTexture(GL_TEXTURE_2D, tex);
+				glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, nullptr);
+				++m_counters.draws;
+				m_counters.tris += static_cast<uint32_t>(indexCount / 3);
+			}
+			glUseProgram(m_unlitProgram);
+		}
+		else
 		for (const DrawCall& dc : cmds.drawCalls())
 		{
 			// An explicit MaterialComponent override wins over the mesh's own
@@ -7508,65 +8112,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					glBindBuffer(GL_UNIFORM_BUFFER, m_matObjUBO);
 					glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(obj), &obj);
 					HE::MaterialShaderLibrary::Lighting lit{};
-					// Dominant directional (NOT the raw env sun — night/cloud lesson,
-					// see RenderWorld::dominantDirectionalLight) + the full light window.
-					glm::vec3 matSunDir, matSunColor;
-					m_renderWorld.dominantDirectionalLight(matSunDir, matSunColor);
-					const glm::vec3 sc = matSunColor;
-					lit.sunDir[0]=matSunDir.x; lit.sunDir[1]=matSunDir.y; lit.sunDir[2]=matSunDir.z;
-					// Engine seconds for the node graph's Time input (HE_SKY_TIME pins it
-					// for deterministic headless captures, mirroring the sky clock).
-					static const char* s_timeOv = std::getenv("HE_SKY_TIME");
-					lit.sunDir[3] = s_timeOv && *s_timeOv
-						? static_cast<float>(std::atof(s_timeOv))
-						: static_cast<float>(SDL_GetTicks()) / 1000.0f;
-					lit.camPos[0] = m_renderWorld.camera.position.x;
-					lit.camPos[1] = m_renderWorld.camera.position.y;
-					lit.camPos[2] = m_renderWorld.camera.position.z;
-					lit.sunColor[0]=sc.r; lit.sunColor[1]=sc.g; lit.sunColor[2]=sc.b;
-					lit.ambient[0]=m_renderWorld.ambient.r; lit.ambient[1]=m_renderWorld.ambient.g; lit.ambient[2]=m_renderWorld.ambient.b;
-					lit.giParams[0] = static_cast<float>(pw);
-					lit.giParams[1] = static_cast<float>(ph);
-					lit.giParams[2] = giShadingActive ? 1.0f : 0.0f;
-					// Aerial perspective + the "is it bound" gates for the shared
-					// ambient inputs (units 14/15, bound just below).
-					lit.fog[0] = GetEnvironment().fogDensity;
-					lit.fog[1] = GetEnvironment().fogHeightFalloff;
-					lit.fog[2] = m_skyEnvCube ? 1.0f : 0.0f;
-					lit.fog[3] = aoActive     ? 1.0f : 0.0f;
-					// Weather surface response (same values as the built-in programs).
-					lit.weather[0] = GetEnvironment().wetness;
-					lit.weather[1] = GetEnvironment().snowAmount;
-					// DDGI probe grid — the same values PushGISceneUniforms hands
-					// the built-in programs, so heLitP's indirect diffuse matches.
-					lit.giGridOrigin[0] = m_giGridOrigin.x;
-					lit.giGridOrigin[1] = m_giGridOrigin.y;
-					lit.giGridOrigin[2] = m_giGridOrigin.z;
-					lit.giGridOrigin[3] = kGIProbeSpacing;
-					lit.giGridCounts[0] = static_cast<float>(m_giGridCounts.x);
-					lit.giGridCounts[1] = static_cast<float>(m_giGridCounts.y);
-					lit.giGridCounts[2] = static_cast<float>(m_giGridCounts.z);
-					lit.giGridCounts[3] = static_cast<float>(m_giProbesPerRow);
-					lit.giProbe[0] = m_giIndirectIntensity;
-					lit.giProbe[1] = (giShadingActive && m_giIrrAtlas && m_giVisAtlas) ? 1.0f : 0.0f;
-					// Full light window for heLitP() — same first-8 order as the built-in
-					// PBR shaders. Shared fill (HE::FillMaterialLightWindow); it also
-					// writes the per-light atlas layer into lightParams[i].y when
-					// `localShadows` says the atlas is bound this frame.
-					HE::FillMaterialLightWindow(m_renderWorld, lit, localShadows);
-					// Local (point/spot) shadow atlas for heLitP — same matrices the
-					// built-in shaders use, with the GL depth remap (z: [-1,1]→[0,1])
-					// PRE-BAKED so the shared preamble stays convention-free.
-					if (localShadows)
-					{
-						glm::mat4 zRemap(1.0f);
-						zRemap[2][2] = 0.5f; zRemap[3][2] = 0.5f;
-						for (int c = 0; c < nLocalLayers; ++c)
-						{
-							const glm::mat4 m = zRemap * m_renderWorld.shadow.localViewProj[c];
-							std::memcpy(lit.localShadowVP[c], &m[0][0], 16 * sizeof(float));
-						}
-					}
+					fillMatLight(lit); // shared heLitP ABI fill (see the lambda above)
 					// Lighting is identical for every material draw this frame → upload once.
 					if (!m_matLightUploadedThisFrame)
 					{
@@ -7668,6 +8214,167 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				++m_counters.draws;
 				m_counters.tris += static_cast<uint32_t>(indexCount / 3);
 			}
+		}
+
+		// ── Deferred: fullscreen lighting resolve + forward-routed replay ────
+		if (deferredActive)
+		{
+			glDisable(GL_FRAMEBUFFER_SRGB);
+			// Depth: G-buffer → HDR FBO, so the forward tail (skinned/sky/
+			// transparency) depth-tests against the deferred geometry while the
+			// resolve SAMPLES the depth texture (attachment + sampled input of
+			// one FBO would be a feedback loop).
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, m_gbFBO);
+			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_hdrFBO);
+			glBlitFramebuffer(0, 0, pw, ph, 0, 0, pw, ph, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+			glBindFramebuffer(GL_FRAMEBUFFER, m_hdrFBO);
+			glViewport(0, 0, pw, ph);
+			glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+			glClear(GL_COLOR_BUFFER_BIT); // depth was just blitted — keep it
+
+#if defined(HE_HAVE_SHADERC)
+			if (m_deferredResolveProgram && m_resolveLightUBO)
+			{
+				// Resolve-only lighting fill: the standard heLitP ABI PLUS the CSM
+				// cascade matrices (GL z remap pre-baked, like localShadowVP). A
+				// SEPARATE buffer from m_matLightUBO: custom-material programs
+				// alias heCsm onto the local-atlas unit, so THEIR fill must keep
+				// csmSplits.w = 0 — only the resolve binds the real CSM array.
+				HE::MaterialShaderLibrary::Lighting lit{};
+				fillMatLight(lit);
+				if (!giShadingActive && shadowFrame.shadows && m_shadowDepthTex)
+				{
+					glm::mat4 zRemap(1.0f);
+					zRemap[2][2] = 0.5f; zRemap[3][2] = 0.5f;
+					const int nc = std::min(nCascades, 3);
+					for (int c = 0; c < nc; ++c)
+					{
+						const glm::mat4 m = zRemap * m_renderWorld.shadow.cascadeViewProj[c];
+						std::memcpy(lit.csmVP[c], &m[0][0], 16 * sizeof(float));
+					}
+					lit.csmSplits[0] = cascadeSplits.x;
+					lit.csmSplits[1] = cascadeSplits.y;
+					lit.csmSplits[2] = cascadeSplits.z;
+					lit.csmSplits[3] = static_cast<float>(nc);
+					lit.camFwd[0] = camFwd.x; lit.camFwd[1] = camFwd.y; lit.camFwd[2] = camFwd.z;
+				}
+				glBindBuffer(GL_UNIFORM_BUFFER, m_resolveLightUBO);
+				glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(lit), &lit);
+
+				// HeResolve: world-pos reconstruction (GL: ndc.y sign +1, depth
+				// [0,1] → ndc z = d*2-1) + the HE_DUMP_GBUFFER debug view.
+				HE::MaterialShaderLibrary::ResolveUniforms ru;
+				std::memcpy(ru.invViewProj, glm::value_ptr(invViewProj), 16 * sizeof(float));
+				ru.depthParams[0] = 1.0f;
+				ru.depthParams[1] = 2.0f;
+				ru.depthParams[2] = -1.0f;
+				ru.depthParams[3] = static_cast<float>(m_gbufferDebugView);
+				glBindBuffer(GL_UNIFORM_BUFFER, m_resolveUBO);
+				glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(ru), &ru);
+				glBindBuffer(GL_UNIFORM_BUFFER, 0);
+
+				// G-buffer inputs on units 0..3; the real CSM array replaces the
+				// local atlas on unit 11 for the duration of the resolve draw.
+				glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, m_gbColor0);
+				glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, m_gbColor1);
+				glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, m_gbColor2);
+				glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, m_gbDepthTex);
+				glActiveTexture(GL_TEXTURE11);
+				glBindTexture(GL_TEXTURE_2D_ARRAY, m_shadowDepthTex);
+				// Shared material inputs the preamble samples (sky env / AO / DDGI
+				// atlases) — the same units the custom-material draws use.
+				glActiveTexture(GL_TEXTURE14);
+				glBindTexture(GL_TEXTURE_CUBE_MAP, m_skyEnvCube);
+				glActiveTexture(GL_TEXTURE15);
+				glBindTexture(GL_TEXTURE_2D, aoActive ? aoTex : m_whiteTex);
+				glActiveTexture(GL_TEXTURE16);
+				glBindTexture(GL_TEXTURE_2D, giShadingActive ? m_giIrrAtlas : m_whiteTex);
+				glActiveTexture(GL_TEXTURE17);
+				glBindTexture(GL_TEXTURE_2D, giShadingActive ? m_giVisAtlas : m_whiteTex);
+				glActiveTexture(GL_TEXTURE0);
+
+				glUseProgram(m_deferredResolveProgram);
+				glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_resolveLightUBO);
+				glBindBufferBase(GL_UNIFORM_BUFFER, 3, m_resolveUBO);
+				glDisable(GL_DEPTH_TEST);
+				glDepthMask(GL_FALSE);
+				glBindVertexArray(m_fsVAO);
+				glDrawArrays(GL_TRIANGLES, 0, 3);
+				++m_counters.draws;
+				glEnable(GL_DEPTH_TEST);
+				glDepthMask(GL_TRUE);
+				glDepthFunc(GL_LESS);
+				// Restore the material-programs' state: their lighting UBO on
+				// binding 0 and the local atlas back on unit 11.
+				glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_matLightUBO);
+				glActiveTexture(GL_TEXTURE11);
+				glBindTexture(GL_TEXTURE_2D_ARRAY,
+				              m_localShadowDepthTex ? m_localShadowDepthTex : m_shadowDepthTex);
+				glActiveTexture(GL_TEXTURE0);
+			}
+
+			// Forward-routed opaque draws (custom materials without a G-buffer
+			// variant): full depth test + write against the blitted depth, no
+			// blending — the same custom-material draw the forward loop performs.
+			for (const TPDraw& t : deferredForward)
+			{
+				if (t.matProg)
+				{
+					glUseProgram(t.matProg);
+					struct { glm::mat4 mvp, model; glm::vec4 color, flags, pbr; } obj;
+					obj.mvp   = t.mvp;
+					obj.model = t.model;
+					obj.color = glm::vec4(t.baseColor, 1.0f);
+					obj.flags = glm::vec4(t.tex != 0 ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+					obj.pbr   = glm::vec4(t.metallic, t.roughness, t.opacity, 0.0f);
+					glBindBuffer(GL_UNIFORM_BUFFER, m_matObjUBO);
+					glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(obj), &obj);
+					float padded[64] = { 0 };
+					std::memcpy(padded, t.params.data(),
+					            std::min(t.params.size(), size_t(64)) * sizeof(float));
+					glBindBuffer(GL_UNIFORM_BUFFER, m_matParamUBO);
+					glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(padded), padded);
+					glBindBuffer(GL_UNIFORM_BUFFER, 0);
+					m_haveMatParams = false;
+					glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_matLightUBO);
+					glBindBufferBase(GL_UNIFORM_BUFFER, 1, m_matObjUBO);
+					glBindBufferBase(GL_UNIFORM_BUFFER, 2, m_matParamUBO);
+					glBindVertexArray(t.vao);
+					glActiveTexture(GL_TEXTURE0);
+					glBindTexture(GL_TEXTURE_2D, t.tex);
+					for (int i = 0; i < t.gtexCount; ++i)
+					{
+						glActiveTexture(GL_TEXTURE1 + (GLenum)i);
+						glBindTexture(GL_TEXTURE_2D, t.gtex[i]);
+					}
+					if (t.wmTex)
+					{
+						glActiveTexture(GL_TEXTURE13);
+						glBindTexture(GL_TEXTURE_2D, t.wmTex);
+					}
+					glActiveTexture(GL_TEXTURE0);
+					glDrawElements(GL_TRIANGLES, t.indexCount, GL_UNSIGNED_INT, nullptr);
+					++m_counters.draws;
+					m_counters.tris += static_cast<uint32_t>(t.indexCount / 3);
+					continue;
+				}
+				// Custom shader failed to build entirely → built-in forward PBR.
+				glUseProgram(m_unlitProgram);
+				glUniformMatrix4fv(m_uMVP,   1, GL_FALSE, glm::value_ptr(t.mvp));
+				glUniformMatrix4fv(m_uModel, 1, GL_FALSE, glm::value_ptr(t.model));
+				glUniform3fv(m_uColor, 1, glm::value_ptr(t.baseColor));
+				glUniform1f(m_uMetallic,  t.metallic);
+				glUniform1f(m_uRoughness, t.roughness);
+				glUniform1f(m_uOpacity,   1.0f);
+				glUniform1i(m_uHasTexture, t.tex != 0);
+				glBindVertexArray(t.vao);
+				glBindTexture(GL_TEXTURE_2D, t.tex);
+				glDrawElements(GL_TRIANGLES, t.indexCount, GL_UNSIGNED_INT, nullptr);
+				++m_counters.draws;
+				m_counters.tris += static_cast<uint32_t>(t.indexCount / 3);
+			}
+#endif
+			glUseProgram(m_unlitProgram); // restore for the skinned/sky passes
 		}
 
 		// ── Skinned draws (after opaque statics, before sky) ────────────────────
@@ -8397,6 +9104,11 @@ IRenderer::Capabilities OpenGLRenderer::GetCapabilities() const
 	// Ray-traced GI via compute + CPU BVH: needs a GL 4.3 context (Windows/
 	// Linux). macOS GL is 4.1 → false there (Metal covers GI on Apple).
 	c.supportsGlobalIllumination = m_giSupported;
+#if defined(HE_HAVE_SHADERC)
+	// Deferred needs only MRT + a runtime-generated resolve shader — GL 4.1 is
+	// enough, but the shader cross-compiler must be built in.
+	c.supportsDeferredRendering  = true;
+#endif
 	return c;
 }
 

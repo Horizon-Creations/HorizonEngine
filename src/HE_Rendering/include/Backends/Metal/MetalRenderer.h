@@ -48,6 +48,10 @@ struct GpuTimedPoint { const char* name; uint32_t slot; };
 struct SDL_Window;
 struct MaterialShaderVariant; // ContentManager/Assets.h — baked per-backend material shader
 struct ParticleShaderVariant; // ContentManager/Assets.h — baked per-backend particle shader
+// Per-frame hand-off between the deferred G-buffer pass and the lighting pass
+// (defined in MetalRenderer.mm — it carries draw structs built on .mm-local
+// types). Lives on EncodeFrame's stack, never across frames.
+struct MetalDeferredFrame;
 
 // Passed as the overlay-callback context so ImGui (or any other overlay) can
 // encode into the active render pass. All pointers are Objective-C objects
@@ -164,8 +168,36 @@ private:
 	void CreateScenePipeline();
 	void EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool isPrimary);
 	// Encodes the scene draw calls into the given encoder (any render pass
-	// whose attachments match the scene pipeline formats).
-	void EncodeScene(void* renderEncoder, int width, int height);
+	// whose attachments match the scene pipeline formats). When `deferred` is
+	// non-null the opaque geometry was already rasterized into the G-buffer by
+	// EncodeGBuffer this frame: instead of the opaque loop, a fullscreen
+	// lighting resolve is drawn (plus the forward-routed opaque replay), and the
+	// transparency list is taken from the hand-off. Everything else (skinned,
+	// sky, transparency, particles) is the SAME code as forward.
+	void EncodeScene(void* renderEncoder, int width, int height,
+	                 MetalDeferredFrame* deferred = nullptr);
+
+	// ── Deferred render path (G-buffer + lighting resolve) ───────────────────
+	// docs/deferred-renderer-plan.md. Active when SetRenderPath(Deferred) and the
+	// pipelines could be built (needs HE_HAVE_SHADERC for the resolve shader).
+	void* m_gbColor0 = nullptr; // id<MTLTexture> RGBA8Unorm_sRGB — BaseColor + Metallic
+	void* m_gbColor1 = nullptr; // id<MTLTexture> RGBA16Float — oct Normal + Roughness + Specular
+	void* m_gbColor2 = nullptr; // id<MTLTexture> RGBA16Float — Emissive (HDR) + Material-AO
+	void* m_gbDepth  = nullptr; // id<MTLTexture> Depth32Float — sampled by the resolve,
+	                            // blitted into m_hdrDepth for the lighting pass's attachment
+	int   m_gbW = 0, m_gbH = 0;
+	void* m_gbufferPipeline        = nullptr; // id<MTLRenderPipelineState> — built-in PBR G-buffer
+	void* m_deferredResolvePipeline = nullptr; // id<MTLRenderPipelineState> — fullscreen heLitP resolve
+	bool  m_deferredPipelinesTried  = false;   // build attempted once; failure logs + falls back forward
+	int   m_gbufferDebugView        = 0;       // HE_DUMP_GBUFFER (1..4), read once at Initialize
+	void  EnsureGBufferTargets(int width, int height);
+	void  DestroyGBufferTargets();
+	bool  EnsureDeferredPipelines();  // true when both PSOs exist
+	// Rasterize the opaque scene into the G-buffer (extract/cull/sort of its own,
+	// deterministic — same set EncodeScene sees). Fills `out` with the draws that
+	// must run forward in the lighting pass (translucent + custom materials
+	// without a G-buffer variant).
+	void  EncodeGBuffer(void* renderEncoder, int width, int height, MetalDeferredFrame& out);
 	// Procedural skybox: fills the HDR target's background before the scene.
 	void* m_skyPipeline = nullptr; // id<MTLRenderPipelineState>
 	void* m_moonTexture = nullptr; // id<MTLTexture>, night-sky moon (or null)
@@ -426,13 +458,20 @@ private:
 	// precompiled != null → build directly from baked MSL (no runtime cross-compile).
 	// vertBody = WPO vertex body ("" → standard vertex); blend = alpha-blended variant
 	// for the transparency pass (cached separately — same key space, blend bit mixed in).
+	// gbuffer = MRT G-buffer variant for the deferred path: fragGlsl is then the
+	// material's customShaderGBufGlsl and the PSO targets the three G-buffer
+	// formats (never blended). Own key space via a salt, like blend.
 	void* GetOrBuildMaterialPipeline(uint64_t key, const std::string& fragGlsl,
 	                                 const std::string& vertBody = {},
 	                                 const MaterialShaderVariant* precompiled = nullptr,
-	                                 bool blend = false);
+	                                 bool blend = false, bool gbuffer = false);
 	// Resolve a material's custom shader: true + (key,frag) if it has customShaderFragGlsl.
 	bool  ResolveMaterialShader(const HE::UUID& materialId, uint64_t& key, std::string& frag,
 	                            std::string& vertBody);
+	// Same for the deferred G-buffer variant (customShaderGBufGlsl); false → the
+	// material has none and its draws are routed through the forward extra pass.
+	bool  ResolveMaterialShaderGB(const HE::UUID& materialId, uint64_t& key, std::string& frag,
+	                              std::string& vertBody);
 #endif
 
 	// ── FXAA (edge antialiasing) ─────────────────────────────────────────────

@@ -844,6 +844,13 @@ void GameApplication::OnRender(float deltaTime)
 				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("GIIndirectIntensity", 1.0f)),
 				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("GILightRadius", 0.5f))});
 
+			// Render path — same config.json key the editor's Preferences combo
+			// writes ("RenderPath": 0 = Forward, 1 = Deferred), capability-gated.
+			const bool deferredPath =
+				GlobalState::getInstance().getCustomConfigInt("RenderPath", 0) == 1 &&
+				r->GetCapabilities().supportsDeferredRendering;
+			r->SetRenderPath(deferredPath ? HE::RenderPath::Deferred : HE::RenderPath::Forward);
+
 			// Push the scene environment to the renderer. The base Application renders the
 			// world but never pushes EnvironmentSettings (that lived only in the editor), so
 			// without this the weather sky / clouds / fog / flash would not show in-game.

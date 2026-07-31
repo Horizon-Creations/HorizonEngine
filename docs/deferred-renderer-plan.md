@@ -4,6 +4,22 @@
 > im Editor und im Spiel umschaltbar ist (`Renderer ▸ Render Path: Forward | Deferred`).
 > Metal zuerst (wie GI/SSR), Architektur so, dass die Shading-Mathematik **nicht** ein siebtes
 > Mal kopiert wird.
+>
+> **UMGESETZT (2026-07-31): P0–P4 für Metal UND OpenGL.** RenderPath-Enum + Editor-Combo +
+> config.json ("RenderPath") + GameApplication-Read; `MatShaderGen::glslGBuffer` (zweiter
+> Emit-Tail, gleiche Ausdrucksvariablen, in-memory `MaterialAsset::customShaderGBufGlsl`, bei
+> Load/Edit regeneriert — NICHT serialisiert, gepackte Builds ohne Graph routen forward);
+> `MaterialShaderLibrary::deferredResolve()/fullscreenVertex()/resolveGBufferShaders()`;
+> Metal: `EncodeGBuffer` + Depth-Blit + Resolve im HDR-Pass (`MetalDeferredFrame`-Hand-off);
+> GL: MRT-FBO (SRGB8+2×RGBA16F+Depth-Textur, `GL_FRAMEBUFFER_SRGB` im G-Buffer-Pass), Resolve
+> mit eigenem `m_resolveLightUBO` (inkl. CSM-Matrizen — die Material-Programme aliasen heCsm
+> auf die Local-Atlas-Unit und behalten csmSplits.w=0). Skinned Meshes laufen v1 forward im
+> Lighting-Pass (nicht im G-Buffer). Debug: `HE_DUMP_RENDERPATH=1`, `HE_DUMP_GBUFFER=1..4`,
+> `HE_RENDER_PATH` (Renderer-Init). P4-Gate headless verifiziert (Metal, MATERIALTEST,
+> HE_SKY_TIME gepinnt): mittlere Abweichung **0.021/255**, Ausreißer ≤10/255 auf 0,001 % der
+> Pixel (Silhouetten). GL blind (Sandbox ohne Display), Windows/Linux-HW-Verify offen.
+> Offen: P5 (SSAO aus dem G-Buffer), P6 (memoryless/Tile-Subpass), P7 (Clustered Lighting),
+> G-Buffer-Varianten im Export-Baking (CHUNK_PSHD).
 
 ---
 

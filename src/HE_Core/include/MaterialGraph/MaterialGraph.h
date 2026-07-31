@@ -263,6 +263,13 @@ struct MatParamSlot
 struct MatShaderGen
 {
     std::string               glsl;     // canonical fragment (→ MaterialAsset::customShaderFragGlsl)
+    // Deferred G-buffer variant: SAME graph evaluation (byte-identical body and
+    // attribute expressions), but the tail writes base/metallic/normal/roughness/
+    // specular/emissive/AO into three MRT outputs (oGB0/oGB1/oGB2) instead of
+    // calling heLitP — the lighting happens once, in the fullscreen resolve
+    // (MaterialShaderLibrary::deferredResolve). Empty only when glsl is empty.
+    // → MaterialAsset::customShaderGBufGlsl (derived, regenerated at load).
+    std::string               glslGBuffer;
     std::vector<MatParamSlot> params;   // HeParams layout (→ MaterialAsset::shaderParamData)
     // Content-relative paths of the project textures referenced by Texture Sample nodes,
     // in slot order (heTexP0..heTexP3). → MaterialAsset::graphTexturePaths. Max 4.

@@ -478,6 +478,7 @@ void ContentManager::regenerateMaterialFromGraph(HE::UUID materialId)
 	if (gen.glsl.empty()) return;
 
 	mat->customShaderFragGlsl = gen.glsl;
+	mat->customShaderGBufGlsl = gen.glslGBuffer;
 	mat->customShaderVertGlsl = gen.vertexBody;
 	mat->blendMode            = gen.blendMode;
 	mat->graphTexturePaths    = gen.textures;
@@ -528,6 +529,7 @@ void ContentManager::syncMaterialInstance(HE::UUID instanceId)
 			HE::MatFunctionLoader loader = makeMatFunctionLoader(*this, fnStore);
 			const HE::MatShaderGen gen = HE::generateFragment(g, loader, &ov);
 			inst->customShaderFragGlsl = gen.glsl;
+			inst->customShaderGBufGlsl = gen.glslGBuffer;
 			// nullptr: start from the permutation's defaults — the overridden slots are
 			// re-applied from oldValues below, the rest must follow the parent.
 			applyGraphParams(*inst, gen, nullptr);
@@ -542,6 +544,7 @@ void ContentManager::syncMaterialInstance(HE::UUID instanceId)
 	{
 		// Pure param overrides: byte-identical shader → the SAME cached pipeline.
 		inst->customShaderFragGlsl = parent->customShaderFragGlsl;
+		inst->customShaderGBufGlsl = parent->customShaderGBufGlsl;
 		inst->graphParamNames      = parent->graphParamNames;
 		inst->graphParamTypes      = parent->graphParamTypes;
 		inst->graphParamMinMax     = parent->graphParamMinMax;

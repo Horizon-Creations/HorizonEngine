@@ -675,6 +675,7 @@ void EditorApplication::OnInit()
 	m_editorConfig.GlobalIlluminationEnabled   = globalstate.getCustomConfigBool("GlobalIlluminationEnabled", m_editorConfig.GlobalIlluminationEnabled);
 	m_editorConfig.GIIndirectIntensity         = globalstate.getCustomConfigFloat("GIIndirectIntensity",      m_editorConfig.GIIndirectIntensity);
 	m_editorConfig.GILightRadius               = globalstate.getCustomConfigFloat("GILightRadius",            m_editorConfig.GILightRadius);
+	m_editorConfig.RenderPath                  = globalstate.getCustomConfigInt("RenderPath",           m_editorConfig.RenderPath);
 	m_editorConfig.QuickSettingsFavorites      = globalstate.getCustomConfigString("QuickSettingsFavorites", m_editorConfig.QuickSettingsFavorites);
 	m_editorCamera.setFlySpeed(m_editorConfig.EditorCameraSpeed);
 	// Restore the last editor camera view (saved on exit). Skipped on first run (no
@@ -1195,6 +1196,12 @@ void EditorApplication::OnRender(float dt)
 			m_editorConfig.GlobalIlluminationEnabled,
 			m_editorConfig.GIIndirectIntensity,
 			m_editorConfig.GILightRadius});
+		// Render path (Forward | Deferred) — gated on the backend capability so an
+		// unsupported backend simply stays forward.
+		renderer()->SetRenderPath(
+			(m_editorConfig.RenderPath == 1
+			 && renderer()->GetCapabilities().supportsDeferredRendering)
+				? HE::RenderPath::Deferred : HE::RenderPath::Forward);
 		// Regenerate terrain meshes for any entity whose TerrainComponent is dirty
 		// (newly created, parameter-edited in the inspector, or just loaded/restored).
 		if (m_editorWorld)
@@ -1616,6 +1623,15 @@ void EditorApplication::dumpFrameHeadless()
 		r->SetGISettings(IRenderer::GISettings{
 			dumpGI, m_editorConfig.GIIndirectIntensity, m_editorConfig.GILightRadius});
 	}
+	{
+		// HE_DUMP_RENDERPATH: override the persisted render path for this capture
+		// only (he_shot Forward/Deferred A/B without touching config.json).
+		int path = m_editorConfig.RenderPath;
+		if (const char* v = std::getenv("HE_DUMP_RENDERPATH"); v && *v)
+			path = (std::string(v) == "1" || std::string(v) == "deferred") ? 1 : 0;
+		r->SetRenderPath((path == 1 && r->GetCapabilities().supportsDeferredRendering)
+			? HE::RenderPath::Deferred : HE::RenderPath::Forward);
+	}
 
 	// ── Sky-test capture (HE_DUMP_SKYTEST): aim the camera up at the sky and override
 	// the scene environment so a headless dump exercises the sky features (stars /
@@ -1828,6 +1844,7 @@ void EditorApplication::dumpFrameHeadless()
 			mat.nodeGraphJson = HE::materialGraphToJson(g);
 			const HE::MatShaderGen gen = HE::generateFragment(g);
 			mat.customShaderFragGlsl = gen.glsl;
+			mat.customShaderGBufGlsl = gen.glslGBuffer;
 			mat.customShaderVertGlsl = gen.vertexBody; // WPO vertex body (if the graph uses it)
 			mat.blendMode            = gen.blendMode;
 			for (const auto& slot : gen.params)
@@ -2093,6 +2110,7 @@ void EditorApplication::dumpFrameHeadless()
 			fm.nodeGraphJson = HE::materialGraphToJson(g);
 			const HE::MatShaderGen gen = HE::generateFragment(g);
 			fm.customShaderFragGlsl = gen.glsl;
+			fm.customShaderGBufGlsl = gen.glslGBuffer;
 			fm.customShaderVertGlsl = gen.vertexBody;
 			fm.blendMode            = gen.blendMode;
 			reg.emplace<MaterialComponent>(floorE,
@@ -2166,6 +2184,7 @@ void EditorApplication::dumpFrameHeadless()
 		lm.nodeGraphJson = HE::materialGraphToJson(g);
 		const HE::MatShaderGen gen = HE::generateFragment(g);
 		lm.customShaderFragGlsl = gen.glsl;
+		lm.customShaderGBufGlsl = gen.glslGBuffer;
 		lm.customShaderVertGlsl = gen.vertexBody;
 		lm.blendMode            = gen.blendMode;
 		lm.graphLayerNames      = gen.layerNames;
@@ -3233,6 +3252,7 @@ void EditorApplication::OnShutdown()
 	globalstate.setCustomConfigEntry("GlobalIlluminationEnabled", m_editorConfig.GlobalIlluminationEnabled);
 	globalstate.setCustomConfigEntry("GIIndirectIntensity",       m_editorConfig.GIIndirectIntensity);
 	globalstate.setCustomConfigEntry("GILightRadius",             m_editorConfig.GILightRadius);
+	globalstate.setCustomConfigEntry("RenderPath",                m_editorConfig.RenderPath);
 	globalstate.setCustomConfigEntry("QuickSettingsFavorites",     m_editorConfig.QuickSettingsFavorites);
 	globalstate.writeConfig();
 }

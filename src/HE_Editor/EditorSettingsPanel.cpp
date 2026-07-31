@@ -116,6 +116,19 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode)
 			ImGui::EndCombo();
 		}
 	});
+	row("renderpath", "Renderer", [&]{
+		const bool supported = ctx.renderer && ctx.renderer->GetCapabilities().supportsDeferredRendering;
+		ImGui::TextUnformatted("Render Path");
+		ImGui::SetNextItemWidth(-1.0f);
+		ImGui::BeginDisabled(!supported);
+		const char* kPaths[] = { "Forward", "Deferred" };
+		ImGui::Combo("##renderpath", &cfg.RenderPath, kPaths, IM_ARRAYSIZE(kPaths));
+		ImGui::EndDisabled();
+		if (!supported && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+			ImGui::SetTooltip("Deferred is available on Metal and OpenGL only.");
+		else if (supported)
+			ImGui::TextDisabled("Deferred: G-buffer + one lighting resolve per visible pixel.");
+	});
 	row("vsync", "Renderer", [&]{ if (ImGui::Checkbox("VSync", &ctx.vsync)) ApplyVSync(ctx); });
 	row("maxfps", "Renderer", [&]{
 		// VSync-off frame cap. 0 = unlimited (default — full FPS). A cap paces the loop so

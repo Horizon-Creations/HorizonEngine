@@ -658,6 +658,25 @@ bool MaterialShaderLibrary::resolveShaders(const ContentManager& cm, const UUID&
     return true;
 }
 
+bool MaterialShaderLibrary::resolveGBufferShaders(const ContentManager& cm, const UUID& materialId,
+                                                  uint64_t& hashOut, std::string& fragOut,
+                                                  std::string& vertBodyOut) const
+{
+    if (materialId == UUID{}) return false;
+    const MaterialAsset* mat = cm.getMaterial(materialId);
+    // Only materials that HAVE a forward custom shader get a G-buffer variant —
+    // a material without one renders built-in PBR, which the deferred path
+    // covers with its own built-in G-buffer pipeline.
+    if (!mat || mat->customShaderFragGlsl.empty() || mat->customShaderGBufGlsl.empty())
+        return false;
+    fragOut = mat->customShaderGBufGlsl;
+    hashOut = std::hash<std::string>{}(fragOut);
+    vertBodyOut = mat->customShaderVertGlsl;
+    if (!vertBodyOut.empty()) // fold the vertex into the pipeline key (like resolveShaders)
+        hashOut ^= std::hash<std::string>{}(vertBodyOut) * 0x9E3779B97F4A7C15ULL;
+    return true;
+}
+
 bool MaterialShaderLibrary::resolveFragment(const ContentManager& cm, const UUID& materialId,
                                             uint64_t& hashOut, std::string& glslOut) const
 {
@@ -741,6 +760,125 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::uiVertex(Backend b
         out = toCompiled(compile(kUIVertex, Stage::Vertex, toTarget(backend)));
     }
     return m_uiVertCache.emplace(key, std::move(out)).first->second;
+}
+
+namespace
+{
+// ─── Deferred lighting resolve ───────────────────────────────────────────────
+// Fullscreen fragment that reconstructs the surface from the G-buffer and calls
+// the SAME heLitP / heApplyFog the material fragments use — the preamble is
+// injected by injectPreamble like for every material, so there is exactly ONE
+// shading implementation per backend and the two paths cannot drift apart
+// (docs/deferred-renderer-plan.md §4.2/§8).
+//
+// uv comes from gl_FragCoord / heLight.giParams.xy (the viewport, already part
+// of the lighting ABI); world position from the sampled depth via HeResolve.
+// Backend clip conventions (uv origin, NDC z range) are folded into
+// HeResolve.depthParams by the fill site, so this canonical GLSL stays
+// convention-free — same trick as csmVP/localShadowVP.
+constexpr const char* kDeferredResolveFS = R"(#version 450
+layout(location = 0) out vec4 oColor;
+layout(set = 0, binding = 19) uniform sampler2D heGB0;     // rgb BaseColor, a Metallic
+layout(set = 0, binding = 20) uniform sampler2D heGB1;     // rg oct normal, b Roughness, a Specular
+layout(set = 0, binding = 21) uniform sampler2D heGB2;     // rgb Emissive (HDR), a Material-AO
+layout(set = 0, binding = 22) uniform sampler2D heGBDepth; // scene depth (world-pos reconstruction)
+layout(std140, set = 0, binding = 23) uniform HeResolve {
+    mat4 invViewProj;
+    vec4 depthParams; // x = uv→NDC y sign, y/z = NDC-z scale/bias, w = debug view
+} heResolve;
+// Inverse of the preamble's heOctEncode (signed octahedral, Meyer et al. 2010).
+// Lives here rather than in the preamble so the drift-guarded preamble blocks
+// stay byte-identical to the backends' copies.
+vec3 heOctDecode(vec2 f) {
+    vec3 n = vec3(f.x, f.y, 1.0 - abs(f.x) - abs(f.y));
+    float t = max(-n.z, 0.0);
+    n.x += (n.x >= 0.0) ? -t : t;
+    n.y += (n.y >= 0.0) ? -t : t;
+    return normalize(n);
+}
+void main() {
+    vec2 uv = gl_FragCoord.xy / max(heLight.giParams.xy, vec2(1.0));
+    float d = texture(heGBDepth, uv).r;
+    if (d >= 1.0) discard;                          // background → the sky pass fills it
+    vec4 g0 = texture(heGB0, uv);
+    vec4 g1 = texture(heGB1, uv);
+    vec4 g2 = texture(heGB2, uv);
+    vec4 clip = vec4(uv.x * 2.0 - 1.0,
+                     (uv.y * 2.0 - 1.0) * heResolve.depthParams.x,
+                     d * heResolve.depthParams.y + heResolve.depthParams.z, 1.0);
+    vec4 wp = heResolve.invViewProj * clip;
+    vec3 P  = wp.xyz / max(wp.w, 1e-8);
+    vec3 N  = heOctDecode(g1.rg * 2.0 - 1.0);
+    int dbg = int(heResolve.depthParams.w);
+    if (dbg == 1) { oColor = vec4(g0.rgb, 1.0); return; }               // BaseColor
+    if (dbg == 2) { oColor = vec4(N * 0.5 + 0.5, 1.0); return; }        // Normal
+    if (dbg == 3) { oColor = vec4(g1.b, g1.a, g0.a, 1.0); return; }     // Rough/Spec/Metal
+    if (dbg == 4) { oColor = vec4(g2.rgb, 1.0); return; }               // Emissive
+    oColor = vec4(heApplyFog(heLitP(g0.rgb, N, g0.a, g1.b, P, g1.a, g2.a) + g2.rgb, P), 1.0);
+}
+)";
+
+// Fullscreen triangle with NO varyings — the resolve fragment reads gl_FragCoord,
+// so nothing needs to cross the stage boundary.
+constexpr const char* kFullscreenVS = R"(#version 450
+void main() {
+    float x = float((gl_VertexIndex & 1) << 2) - 1.0;
+    float y = float((gl_VertexIndex & 2) << 1) - 1.0;
+    gl_Position = vec4(x, y, 0.0, 1.0);
+}
+)";
+} // namespace
+
+const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::deferredResolve(Backend backend)
+{
+    const int key = static_cast<int>(backend);
+    if (auto it = m_resolveCache.find(key); it != m_resolveCache.end()) return it->second;
+
+    using namespace he::shaderc;
+    const std::string injected = injectPreamble(kDeferredResolveFS);
+    Compiled out;
+    if (backend == Backend::Metal)
+    {
+        // Same pin map as fragment() for everything the preamble binds (so the
+        // resolve encoder can reuse the scene pass's slot conventions), plus the
+        // G-buffer inputs on the otherwise-unused material-texture slots 0..3 and
+        // HeResolve on fragment buffer 3. Total samplers: 0-3 + 6/7 + 9-12 + 14/15
+        // = 12 of Metal's 16 — comfortably inside the budget, as planned.
+        out = toCompiled(compileMslPinned(injected, Stage::Fragment,
+            { { Stage::Fragment, 0, 0, static_cast<uint32_t>(kMetalLightingBufferIndex) },
+              { Stage::Fragment, 0, 23, 3 },    // HeResolve UBO → fragment buffer 3
+              { Stage::Fragment, 0, 19, 0 },    // heGB0 → texture/sampler 0
+              { Stage::Fragment, 0, 20, 1 },    // heGB1 → 1
+              { Stage::Fragment, 0, 21, 2 },    // heGB2 → 2
+              { Stage::Fragment, 0, 22, 3 },    // heGBDepth → 3
+              { Stage::Fragment, 0, 10, 9 },    // GI sun mask (as in fragment())
+              { Stage::Fragment, 0, 11, 10 },   // GI local mask
+              { Stage::Fragment, 0, 12, 11 },   // CSM array
+              { Stage::Fragment, 0, 13, 12 },   // local shadow atlas
+              { Stage::Fragment, 0, 15, 14 },   // sky env cubemap
+              { Stage::Fragment, 0, 16, 15 },   // screen-space AO
+              { Stage::Fragment, 0, 17, 6 },    // DDGI irradiance atlas
+              { Stage::Fragment, 0, 18, 7 } }));// DDGI visibility atlas
+    }
+    else
+    {
+        out = toCompiled(compile(injected, Stage::Fragment, toTarget(backend)));
+    }
+    return m_resolveCache.emplace(key, std::move(out)).first->second;
+}
+
+const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fullscreenVertex(Backend backend)
+{
+    const int key = static_cast<int>(backend);
+    if (auto it = m_fsVertCache.find(key); it != m_fsVertCache.end()) return it->second;
+
+    using namespace he::shaderc;
+    Compiled out;
+    if (backend == Backend::Metal)
+        out = toCompiled(compileMslPinned(kFullscreenVS, Stage::Vertex, {}));
+    else
+        out = toCompiled(compile(kFullscreenVS, Stage::Vertex, toTarget(backend)));
+    return m_fsVertCache.emplace(key, std::move(out)).first->second;
 }
 
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragment(

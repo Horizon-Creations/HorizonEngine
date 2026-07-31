@@ -1,5 +1,6 @@
 #pragma once
 #include "Types/Defines.h"
+#include "Types/Enums.h" // HE::RenderPath
 #include "Types/UUID.h"
 #include "DebugDraw/DebugDraw.h"
 #include "Renderer/EnvironmentSettings.h" // IRenderer::EnvironmentSettings (aliased below)
@@ -77,6 +78,13 @@ public:
         // every other backend; the editor greys out the GI toggle when false and
         // the backend keeps rendering CSM shadows + AO/ambient as today.
         bool supportsGlobalIllumination = false;
+        // Deferred render path (G-buffer + fullscreen lighting resolve, see
+        // docs/deferred-renderer-plan.md). Metal + OpenGL when built with the
+        // shader cross-compiler (the resolve shader is generated from the shared
+        // lighting preamble at runtime); the editor greys out the Render Path
+        // combo when false and the backend stays forward regardless of
+        // SetRenderPath.
+        bool supportsDeferredRendering = false;
     };
 
     // Overlay callback: called by the backend at the correct point inside the
@@ -204,6 +212,14 @@ public:
         int   probeBudgetPerFrame = 256;   // probes relit per frame (round-robin over the grid)
     };
     virtual void SetGISettings(const GISettings& /*settings*/) {}
+
+    // ── Render path (Forward | Deferred) ────────────────────────────────────
+    // Pushed by the editor's preferences / the packaged game's GlobalState read,
+    // like SetGISettings. Backends without deferred support (Capabilities::
+    // supportsDeferredRendering == false) ignore it and stay forward. Takes
+    // effect at the start of the next frame — never mid-frame.
+    virtual void SetRenderPath(HE::RenderPath path) { m_renderPath = path; }
+    HE::RenderPath GetRenderPath() const { return m_renderPath; }
 
     // Debug: tint each lit fragment by its shadow cascade index (Metal CSM) so the
     // cascade split placement can be verified visually. No-op on other backends.
@@ -410,6 +426,7 @@ public:
 
 protected:
     OverlayCallback      m_overlayCallback;
+    HE::RenderPath       m_renderPath           = HE::RenderPath::Forward;
     HorizonWorld*        m_world                = nullptr;
     ContentManager*      m_contentManager       = nullptr;
     EditorCameraOverride m_editorCamera;
