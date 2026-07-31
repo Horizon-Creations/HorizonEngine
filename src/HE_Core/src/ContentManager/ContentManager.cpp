@@ -242,6 +242,11 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 			HAsset::Reader::readPOD(c->data,o,a.blendMode);              // 0 opaque/1 masked/2 translucent
 			HAsset::Reader::readString(c->data,o,a.customShaderVertGlsl);// WPO vertex body
 			HAsset::Reader::readVec(c->data,o,a.graphLayerNames);        // landscape paint layers
+			// Deferred G-buffer fragment variant (append-only tail; absent in older
+			// files → empty → forward-routed in deferred). For assets WITH a graph
+			// the load-time regeneration overwrites it anyway; the serialized copy
+			// is what lets PACKAGED materials (graph stripped) render deferred.
+			HAsset::Reader::readString(c->data,o,a.customShaderGBufGlsl);
 		}
 		// Baked graph-texture UUIDs live in MTLU alongside shaderId/textureIds.
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_MTLU))
@@ -1067,6 +1072,10 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 		HAsset::Writer::appendPOD(b,a.blendMode);                         // blend mode
 		HAsset::Writer::appendString(b,a.customShaderVertGlsl);           // WPO vertex body
 		HAsset::Writer::appendVec(b,a.graphLayerNames);                   // landscape paint layers
+		// Deferred G-buffer fragment variant — post-v9 tail, which the packer
+		// (HpakWriter's MTRL branch) copies byte-verbatim into shipped paks, so
+		// packaged games can build the G-buffer pipeline without the node graph.
+		HAsset::Writer::appendString(b,a.customShaderGBufGlsl);
 		w.addChunk(HAsset::CHUNK_MTRL,b.data(),b.size());
 		break;
 	}

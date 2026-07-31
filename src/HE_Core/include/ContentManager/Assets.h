@@ -153,11 +153,12 @@ struct MaterialAsset : public RuntimeAsset
 	std::string customShaderVertGlsl;
 
 	// Deferred G-buffer fragment variant (MatShaderGen::glslGBuffer): the same graph
-	// evaluation with an MRT emit tail instead of heLitP. DERIVED, NOT SERIALIZED —
-	// regenerated from the graph at load (regenerateMaterialFromGraph) and on every
-	// editor change, exactly like customShaderFragGlsl. Empty for hand-written
-	// escape-hatch shaders and for packaged materials without a graph: the deferred
-	// path then routes this material's draws through the forward extra pass.
+	// evaluation with an MRT emit tail instead of heLitP. Regenerated from the graph
+	// at load and on every editor change like customShaderFragGlsl, AND serialized as
+	// the last MTRL tail field — the packer ships it byte-verbatim, so packaged
+	// materials (graph stripped) still render deferred. Empty for hand-written
+	// escape-hatch shaders: the deferred path then routes those draws through the
+	// forward extra pass.
 	std::string customShaderGBufGlsl;
 
 	// Exposed graph parameters (Param nodes), 4 floats per HeParams UBO slot, in slot
