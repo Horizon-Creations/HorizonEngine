@@ -27,6 +27,12 @@ namespace CppClassEditorPanel
 	// state but leaves the tab vector, so the quit guard must ask here.
 	void appendDirtyPaths(std::vector<std::string>& out);
 
+	// Write BOTH halves of the class (header and source) to disk — the tab's own
+	// Save button only writes the half currently shown, but the close/quit prompt
+	// saves the whole class. Returns true when nothing is left unsaved for this
+	// path (including the "this panel never held it" case).
+	bool save(const std::string& assetPath);
+
 	// Whether `path` is a C++ source/header file by extension
 	// (.h/.hpp/.hh/.hxx/.cpp/.cc/.cxx/.c). Raw-file check — no HAsset header.
 	bool isCppSourceAsset(const std::string& path);
