@@ -25,6 +25,12 @@ public:
 	// quit guard needs that wider view (a closed dirty tab keeps its panel
 	// state but leaves ctx.tabs).
 	static std::vector<std::string> unsavedAssetPaths();
+	// Write the asset at `assetPath` through whichever panel is holding its edits
+	// (the counterpart of tabHasUnsavedEdits). Lets the close/quit prompt save an
+	// asset tab itself instead of sending the user back into the tab — which for a
+	// tab the user already CLOSED meant reopening it first. Returns true when
+	// nothing is left unsaved for that path.
+	static bool saveAsset(AppContext& ctx, const std::string& assetPath);
 
 private:
 	static void renderEditor(AppContext& ctx, float dt);

@@ -91,6 +91,15 @@ namespace ScriptEditorPanel
 		s_states.appendPathsIf([](const State& st) { return st.loaded && isDirtyState(st); }, out);
 	}
 
+	bool save(const std::string& path)
+	{
+		State* st = s_states.find(path);
+		// A tab this panel never opened has nothing to write — the caller asks
+		// every panel about every path, so "not mine" must read as success.
+		if (!st || !st->loaded || !isDirtyState(*st)) return true;
+		return saveToDisk(*st, path);
+	}
+
 	bool isScriptAsset(const std::string& path)
 	{
 		return EditorAssetTypeCache::is(path, HE::AssetType::Script);

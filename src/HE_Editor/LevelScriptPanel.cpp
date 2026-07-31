@@ -828,6 +828,19 @@ std::vector<std::string> scanInputEvents(ContentManager* cm)
 	}
 	return out;
 }
+
+// Persist a class tab's graph. The header's Save button AND the close/quit
+// prompt's "Save All" both come through here, so the two can never drift apart.
+bool saveClassState(ClassState& st, AppContext& ctx)
+{
+	if (!ctx.contentManager) return false;
+	HorizonCodeClassAsset* a = ctx.contentManager->getHorizonCodeClassMutable(st.assetId);
+	if (!a) return false;
+	a->graphJson = HorizonCode::toJson(st.graph);
+	if (!ctx.contentManager->saveAsset(*a)) return false;
+	st.dirty = false;
+	return true;
+}
 }
 
 bool HorizonCodeClassPanel::isClassAsset(const std::string& path)
@@ -840,6 +853,16 @@ void HorizonCodeClassPanel::forget(const std::string& path) { s_classStates.forg
 bool HorizonCodeClassPanel::isDirty(const std::string& path) { return s_classStates.dirty(path); }
 
 void HorizonCodeClassPanel::appendDirtyPaths(std::vector<std::string>& out) { s_classStates.appendDirtyPaths(out); }
+
+bool HorizonCodeClassPanel::save(AppContext& ctx, const std::string& path)
+{
+	ClassState* st = s_classStates.find(path);
+	// A tab this panel never opened has nothing to write — the caller asks every
+	// panel about every path, so "not mine" must read as success.
+	if (!st || !st->dirty) return true;
+	return saveClassState(*st, ctx);
+}
+
 void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath,
                                    const ImVec2& pos, const ImVec2& size)
 {
@@ -868,14 +891,7 @@ void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath
 	ImGui::SameLine();
 	ImGui::TextDisabled("%s%s", kindLabel, st.dirty ? "  (unsaved)" : "");
 	ImGui::SameLine(ImGui::GetContentRegionAvail().x - 60.0f);
-	if (ImGui::Button("Save", ImVec2(56.0f, 0.0f)) && ctx.contentManager)
-	{
-		if (HorizonCodeClassAsset* a = ctx.contentManager->getHorizonCodeClassMutable(st.assetId))
-		{
-			a->graphJson = HorizonCode::toJson(st.graph);
-			if (ctx.contentManager->saveAsset(*a)) st.dirty = false;
-		}
-	}
+	if (ImGui::Button("Save", ImVec2(56.0f, 0.0f))) saveClassState(st, ctx);
 	ImGui::Separator();
 
 	// Classes expose the lifecycle events (Construct on create, Destruct on

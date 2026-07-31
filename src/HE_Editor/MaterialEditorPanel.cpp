@@ -211,6 +211,28 @@ void applyToMaterial(State& st, AppContext& ctx)
 	st.compileLog = chk.ok ? std::string() : chk.log;
 }
 
+// Persist this tab's asset. The header's Save button AND the close/quit prompt's
+// "Save All" both come through here, so the two can never drift apart.
+bool saveToDisk(State& st, AppContext& ctx, const std::string& assetPath)
+{
+	if (!ctx.contentManager) return false;
+	// Instances have no graph — their state is already live on the asset; masters
+	// regenerate first so the saved file always matches the canvas.
+	if (!st.isInstance) applyToMaterial(st, ctx);
+	RuntimeAsset* toSave = st.isFunction
+		? static_cast<RuntimeAsset*>(ctx.contentManager->getMaterialFunctionMutable(st.materialId))
+		: static_cast<RuntimeAsset*>(ctx.contentManager->getMaterialMutable(st.materialId));
+	if (!toSave || !ctx.contentManager->saveAsset(*toSave)) return false;
+	st.dirty = false;
+	// The Content Browser tile is now a picture of the PREVIOUS graph. Its own
+	// staleness poll would catch this within a second or two; dropping it here
+	// makes the grid update the moment the save lands.
+	AssetThumbnailCache::invalidate(assetPath);
+	Logger::Log(Logger::LogLevel::Info,
+		("MaterialEditor: saved '" + st.name + "'").c_str());
+	return true;
+}
+
 // ── Undo/redo (JSON snapshots — cheap at graph scale, and reuses the asset codec) ──
 constexpr size_t kUndoCap = 64;
 
@@ -1307,6 +1329,15 @@ bool isDirty(const std::string& assetPath) { return s_states.dirty(assetPath); }
 void appendDirtyPaths(std::vector<std::string>& out) { s_states.appendDirtyPaths(out); }
 void forget(const std::string& assetPath) { s_states.forget(assetPath); }
 
+bool save(AppContext& ctx, const std::string& assetPath)
+{
+	State* st = s_states.find(assetPath);
+	// A tab this panel never opened has nothing to write — the caller asks every
+	// panel about every path, so "not mine" must read as success.
+	if (!st || !st->dirty) return true;
+	return saveToDisk(*st, ctx, assetPath);
+}
+
 std::string takeOpenRequest()
 {
 	std::string r = std::move(s_openAssetRequest);
@@ -1539,20 +1570,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 	}
 	ImGui::SameLine(ImGui::GetContentRegionAvail().x - 140.0f);
 	if (ImGui::Button(st.isFunction ? "Save Function" : "Save Material") && assetOk)
-	{
-		// Instances have no graph — their state is already live on the asset; masters
-		// regenerate first so the saved file always matches the canvas.
-		if (!st.isInstance) applyToMaterial(st, ctx);
-		RuntimeAsset* toSave = st.isFunction ? static_cast<RuntimeAsset*>(fnAsset)
-		                                     : static_cast<RuntimeAsset*>(mat);
-		if (toSave && ctx.contentManager->saveAsset(*toSave)) st.dirty = false;
-		// The Content Browser tile is now a picture of the PREVIOUS graph. Its own
-		// staleness poll would catch this within a second or two; dropping it here
-		// makes the grid update the moment the save lands.
-		AssetThumbnailCache::invalidate(assetPath);
-		Logger::Log(Logger::LogLevel::Info,
-			("MaterialEditor: saved '" + st.name + "'").c_str());
-	}
+		saveToDisk(st, ctx, assetPath);
 	if (!assetOk)
 		ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "Asset could not be loaded.");
 	ImGui::Separator();

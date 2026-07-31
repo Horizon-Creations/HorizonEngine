@@ -218,19 +218,23 @@ void loadState(State& st, AppContext& ctx, const std::string& assetPath)
 	st.dirty = false;
 }
 
-void saveState(State& st, AppContext& ctx)
+// Returns false when the write did not happen — the close/quit prompt reports a
+// failed save instead of quietly continuing and dropping the edits.
+bool saveState(State& st, AppContext& ctx)
 {
-	if (!ctx.contentManager) return;
+	if (!ctx.contentManager) return false;
 	UIWidgetAsset* a = ctx.contentManager->getWidgetMutable(st.assetId);
 	if (!a)
 	{
 		Logger::Log(Logger::LogLevel::Error,
 			"UIEditorPanel: widget asset vanished — cannot save");
-		return;
+		return false;
 	}
 	a->treeJson  = HE::uiWidgetTreeToJson(st.tree);
 	a->graphJson = HC::toJson(st.graph);
-	if (ctx.contentManager->saveAsset(*a)) st.dirty = false;
+	if (!ctx.contentManager->saveAsset(*a)) return false;
+	st.dirty = false;
+	return true;
 }
 
 // Keep the live asset in sync on every edit, so PIE picks up unsaved edits too
@@ -1841,6 +1845,15 @@ bool isDirty(const std::string& assetPath) { return s_states.dirty(assetPath); }
 
 void appendDirtyPaths(std::vector<std::string>& out) { s_states.appendDirtyPaths(out); }
 void forget(const std::string& assetPath) { s_states.forget(assetPath); }
+
+bool save(AppContext& ctx, const std::string& assetPath)
+{
+	State* st = s_states.find(assetPath);
+	// A tab this panel never opened has nothing to write — the caller asks every
+	// panel about every path, so "not mine" must read as success.
+	if (!st || !st->dirty) return true;
+	return saveState(*st, ctx);
+}
 
 void render(AppContext& ctx, const std::string& assetPath,
             const ImVec2& pos, const ImVec2& size)

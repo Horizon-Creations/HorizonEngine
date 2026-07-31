@@ -51,7 +51,9 @@
 #include <SDL3/SDL.h>
 #include <filesystem>
 #include <string>
+#include <utility>
 #include <vector>
+#include <cfloat>
 #include <cstdlib>
 #include <cstring>
 #include <array>
@@ -367,6 +369,28 @@ std::vector<std::string> EditorUI::unsavedAssetPaths()
 	return out;
 }
 
+// Save one asset through whichever panel owns its edits — the write half of
+// tabHasUnsavedEdits, and it must list exactly the same panels (a panel missing
+// here silently keeps its edits after the prompt claimed to have saved them).
+// Every panel's save() answers true for a path it isn't holding, so asking all of
+// them is the whole dispatch: there is no path→panel map to keep in sync.
+bool EditorUI::saveAsset(AppContext& ctx, const std::string& assetPath)
+{
+	if (assetPath.empty()) return false;
+	bool ok = true;
+	ok = ScriptEditorPanel::save(assetPath)                          && ok;
+	ok = CppClassEditorPanel::save(assetPath)                        && ok;
+	ok = MaterialEditorPanel::save(ctx, assetPath)                   && ok;
+	ok = UIEditorPanel::save(ctx, assetPath)                         && ok;
+	ok = HorizonCodeClassPanel::save(ctx, assetPath)                 && ok;
+	ok = InputAssetPanel::save(ctx, assetPath)                       && ok;
+	ok = ParticleGraphEditorPanel::save(ctx, assetPath)              && ok;
+	ok = AnimatorStateMachineEditorPanel::save(ctx, assetPath)       && ok;
+	// The panels are the authority on their own dirty flag; re-asking also catches
+	// a save that reported success but left the state dirty.
+	return ok && !tabHasUnsavedEdits(assetPath);
+}
+
 // ─── Full Editor UI ───────────────────────────────────────────────────────────
 void EditorUI::renderEditor(AppContext& ctx, float dt)
 {
@@ -388,6 +412,10 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	static std::string   s_guardArg;            // path payload for OpenScenePath
 	static bool          s_openUnsavedModal = false;
 	static bool          s_guardSaveThenAct = false;
+	// Why the prompt's last save attempt failed ("" = none). A failed write must
+	// never let the guarded action run — the modal stays open with the reason and
+	// the entries that are still dirty.
+	static std::string   s_guardSaveError;
 
 	// One-shot request to programmatically select a top-level tab (set by a
 	// Content-Browser double-click). -1 = none. The tab bar applies SetSelected for
@@ -503,29 +531,35 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		return a == GuardedAction::Quit || a == GuardedAction::CloseProject ||
 		       a == GuardedAction::OpenProjectDialog;
 	};
-	auto unsavedTabLabels = [&]() -> std::vector<std::string>
+	// (asset path, label to show) per unsaved asset. The path is what the prompt's
+	// per-asset Save button writes through EditorUI::saveAsset.
+	auto unsavedTabEntries = [&]() -> std::vector<std::pair<std::string, std::string>>
 	{
 		// Driven by the PANELS, not by ctx.tabs: closing a dirty tab keeps its
 		// state but drops the tab, so walking ctx.tabs would silently omit exactly
 		// the edits the user is most likely to have forgotten about. Open tabs
-		// still get their friendly label; a closed one falls back to its path.
-		std::vector<std::string> out;
+		// still get their friendly label; a closed one falls back to its path,
+		// content-relative so a deep absolute path can't stretch the prompt.
+		std::vector<std::pair<std::string, std::string>> out;
 		for (const std::string& path : unsavedAssetPaths())
 		{
 			const auto it = std::find_if(ctx.tabs.begin(), ctx.tabs.end(),
 				[&](const AppContext::EditorTab& t) { return t.assetPath == path; });
-			const bool open = it != ctx.tabs.end() && !it->label.empty();
-			out.push_back(open ? it->label : path);
+			if (it != ctx.tabs.end() && !it->label.empty()) { out.emplace_back(path, it->label); continue; }
+			const std::string rel = ctx.contentManager
+				? ctx.contentManager->toContentRelativePath(path) : std::string{};
+			out.emplace_back(path, rel.empty() ? path : rel);
 		}
 		return out;
 	};
 	auto requestGuarded = [&](GuardedAction a, const std::string& arg = std::string{})
 	{
-		const bool tabsDirty = endsSession(a) && !unsavedTabLabels().empty();
+		const bool tabsDirty = endsSession(a) && !unsavedTabEntries().empty();
 		if (!ctx.sceneDirty && !tabsDirty) { runGuardedAction(a, arg); return; }
 		s_guardAction      = a;
 		s_guardArg         = arg;
 		s_guardSaveThenAct = false;
+		s_guardSaveError.clear();
 		s_openUnsavedModal = true;
 	};
 
@@ -697,6 +731,9 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
     {
         ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(),
                                 ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+        // Auto-height, but a stable minimum width — the asset rows below would
+        // otherwise make the popup jump around as entries are saved away.
+        ImGui::SetNextWindowSizeConstraints(ImVec2(420.0f, 0.0f), ImVec2(FLT_MAX, FLT_MAX));
         if (ImGui::BeginPopupModal("Unsaved Changes##scene", nullptr,
             ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings))
         {
@@ -706,55 +743,120 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 
             // Editor tabs are only at risk when the action ends the session; a scene
             // switch keeps them and their unsaved edits (see requestGuarded).
-            const std::vector<std::string> dirtyTabs =
-                endsSession(action) ? unsavedTabLabels() : std::vector<std::string>{};
+            // Recomputed every frame, so anything saved from here drops off the list.
+            const std::vector<std::pair<std::string, std::string>> dirtyTabs =
+                endsSession(action) ? unsavedTabEntries()
+                                    : std::vector<std::pair<std::string, std::string>>{};
+
+            // The per-asset Save buttons below can empty the list while the prompt is
+            // open — then there is nothing left to warn about, only the action to run.
+            const bool anythingDirty = ctx.sceneDirty || !dirtyTabs.empty();
 
             const std::string sceneName = ctx.currentScenePath.empty()
                 ? std::string("Untitled")
                 : std::filesystem::path(ctx.currentScenePath).stem().string();
             if (ctx.sceneDirty)
                 ImGui::Text("Save changes to \"%s\" before continuing?", sceneName.c_str());
-            else
+            else if (!dirtyTabs.empty())
                 ImGui::Text("%d editor tab(s) have unsaved changes.",
                             static_cast<int>(dirtyTabs.size()));
+            else
+                ImGui::TextUnformatted("Everything is saved.");
             if (!dirtyTabs.empty())
             {
                 ImGui::Spacing();
-                for (const std::string& n : dirtyTabs) ImGui::BulletText("%s", n.c_str());
-                // Only the panel itself can write its asset (each editor tab has its own
-                // Save button), so this prompt can warn about them but not save them.
-                ImGui::TextDisabled("Editor tabs are saved from their own Save button.");
+                if (ctx.sceneDirty) ImGui::TextDisabled("These assets are unsaved too:");
+                // Each asset gets its own Save button right here: the prompt writes it
+                // through its panel (EditorUI::saveAsset), so the user never has to go
+                // back into the tab — which for a tab they already CLOSED would have
+                // meant reopening it first just to find the Save button.
+                const int   rows   = static_cast<int>(dirtyTabs.size());
+                const bool  scroll = rows > 8;
+                if (scroll)
+                    ImGui::BeginChild("##dirtyAssets",
+                        ImVec2(0.0f, ImGui::GetFrameHeightWithSpacing() * 8.0f),
+                        ImGuiChildFlags_Borders);
+                for (const auto& [path, label] : dirtyTabs)
+                {
+                    ImGui::PushID(path.c_str());
+                    if (ImGui::SmallButton("Save"))
+                    {
+                        if (EditorUI::saveAsset(ctx, path)) s_guardSaveError.clear();
+                        else s_guardSaveError = "Could not save \"" + label + "\".";
+                    }
+                    ImGui::SameLine();
+                    ImGui::TextUnformatted(label.c_str());
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", path.c_str());
+                    ImGui::PopID();
+                }
+                if (scroll) ImGui::EndChild();
             }
             ImGui::Spacing();
-            ImGui::TextDisabled("Your unsaved changes will be lost otherwise.");
+            if (anythingDirty)
+                ImGui::TextDisabled("Your unsaved changes will be lost otherwise.");
+            if (!s_guardSaveError.empty())
+            {
+                ImGui::Spacing();
+                ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "%s", s_guardSaveError.c_str());
+                ImGui::TextDisabled("Nothing was closed or discarded.");
+            }
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
 
-            // "Save" writes the SCENE — offered only when the scene is what's dirty.
-            if (ctx.sceneDirty)
+            // Primary button: write EVERYTHING that's dirty (scene + every asset tab)
+            // and then run the action. Offered whenever there is anything to save —
+            // an unsaved asset tab counts even with a clean scene.
+            if (anythingDirty)
             {
-                if (ImGui::Button("Save", ImVec2(110, 0)))
+                const bool both = ctx.sceneDirty && !dirtyTabs.empty();
+                if (ImGui::Button(both ? "Save All" : "Save", ImVec2(110, 0)))
                 {
-                    const bool hadPath = !ctx.currentScenePath.empty();
-                    doSaveScene(); // synchronous if a path exists, else async Save-As
-                    if (hadPath)
+                    // Assets first: those writes are synchronous, so a failure can
+                    // still abort the flow before the scene's async Save-As dialog is
+                    // in flight (and before anything gets discarded).
+                    int         failed = 0;
+                    std::string firstFailed;
+                    for (const auto& [path, label] : dirtyTabs)
+                        if (!EditorUI::saveAsset(ctx, path))
+                        {
+                            if (failed++ == 0) firstFailed = label;
+                        }
+                    if (failed > 0)
                     {
-                        runGuardedAction(action, arg);
-                        s_guardAction = GuardedAction::None;
+                        s_guardSaveError = failed == 1
+                            ? "Could not save \"" + firstFailed + "\"."
+                            : std::to_string(failed) + " assets could not be saved.";
                     }
                     else
                     {
-                        // Save-As dialog is in flight; the file-result handler runs
-                        // the action once a path has been chosen and written.
-                        s_guardSaveThenAct = true;
+                        s_guardSaveError.clear();
+                        const bool hadPath = !ctx.currentScenePath.empty();
+                        if (ctx.sceneDirty)
+                            doSaveScene(); // synchronous if a path exists, else async Save-As
+                        if (!ctx.sceneDirty || hadPath)
+                        {
+                            runGuardedAction(action, arg);
+                            s_guardAction = GuardedAction::None;
+                        }
+                        else
+                        {
+                            // Save-As dialog is in flight; the file-result handler runs
+                            // the action once a path has been chosen and written.
+                            s_guardSaveThenAct = true;
+                        }
+                        ImGui::CloseCurrentPopup();
                     }
-                    ImGui::CloseCurrentPopup();
                 }
                 ImGui::SameLine();
             }
-            if (ImGui::Button(ctx.sceneDirty ? "Don't Save" : "Discard", ImVec2(110, 0)))
+            // Same button either way: run the action. It only DISCARDS anything while
+            // something is still dirty, so the label follows that.
+            if (ImGui::Button(!anythingDirty ? "Continue"
+                                             : (ctx.sceneDirty ? "Don't Save" : "Discard"),
+                              ImVec2(110, 0)))
             {
                 runGuardedAction(action, arg);
                 s_guardAction = GuardedAction::None;
+                s_guardSaveError.clear();
                 ImGui::CloseCurrentPopup();
             }
             ImGui::SameLine();
@@ -763,6 +865,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             {
                 s_guardAction      = GuardedAction::None;
                 s_guardSaveThenAct = false;
+                s_guardSaveError.clear();
                 ImGui::CloseCurrentPopup();
             }
             ImGui::EndPopup();

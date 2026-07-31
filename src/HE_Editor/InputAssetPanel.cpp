@@ -184,6 +184,30 @@ void keyBindField(const char* label, std::string& value, bool& dirty,
 	ImGui::PopID();
 }
 
+// Persist a tab's decoded model back into its asset. The header's Save button AND
+// the close/quit prompt's "Save All" both come through here, so the two can never
+// drift apart.
+bool saveState(PanelState& st, AppContext& ctx)
+{
+	if (!ctx.contentManager) return false;
+	if (st.isMapping)
+	{
+		InputMappingContextAsset* m = ctx.contentManager->getInputMappingContextMutable(st.assetId);
+		if (!m) return false;
+		m->json = encodeMapping(st.entries);
+		if (!ctx.contentManager->saveAsset(*m)) return false;
+	}
+	else
+	{
+		InputActionAsset* a = ctx.contentManager->getInputActionMutable(st.assetId);
+		if (!a) return false;
+		a->json = st.isAxis ? "{\"valueType\":\"Axis\"}" : "{\"valueType\":\"Button\"}";
+		if (!ctx.contentManager->saveAsset(*a)) return false;
+	}
+	st.dirty = false;
+	return true;
+}
+
 } // namespace
 
 bool InputAssetPanel::isInputActionAsset(const std::string& path)
@@ -196,6 +220,16 @@ bool InputAssetPanel::isInputAsset(const std::string& path)
 bool InputAssetPanel::isDirty(const std::string& path) { return s_states.dirty(path); }
 
 void InputAssetPanel::appendDirtyPaths(std::vector<std::string>& out) { s_states.appendDirtyPaths(out); }
+
+bool InputAssetPanel::save(AppContext& ctx, const std::string& path)
+{
+	PanelState* st = s_states.find(path);
+	// A tab this panel never opened has nothing to write — the caller asks every
+	// panel about every path, so "not mine" must read as success.
+	if (!st || !st->dirty) return true;
+	return saveState(*st, ctx);
+}
+
 void InputAssetPanel::forget(const std::string& path)
 {
 	s_states.forget(path);
@@ -239,22 +273,7 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 	ImGui::TextDisabled("%s%s", st.isMapping ? "Input Mapping Context" : "Input Action",
 	                    st.dirty ? "  (unsaved)" : "");
 	ImGui::SameLine(ImGui::GetContentRegionAvail().x - 60.0f);
-	if (ImGui::Button("Save", ImVec2(56.0f, 0.0f)) && ctx.contentManager)
-	{
-		if (st.isMapping)
-		{
-			if (InputMappingContextAsset* m = ctx.contentManager->getInputMappingContextMutable(st.assetId))
-			{
-				m->json = encodeMapping(st.entries);
-				if (ctx.contentManager->saveAsset(*m)) st.dirty = false;
-			}
-		}
-		else if (InputActionAsset* a = ctx.contentManager->getInputActionMutable(st.assetId))
-		{
-			a->json = st.isAxis ? "{\"valueType\":\"Axis\"}" : "{\"valueType\":\"Button\"}";
-			if (ctx.contentManager->saveAsset(*a)) st.dirty = false;
-		}
-	}
+	if (ImGui::Button("Save", ImVec2(56.0f, 0.0f))) saveState(st, ctx);
 	ImGui::Separator();
 
 	if (!st.isMapping)

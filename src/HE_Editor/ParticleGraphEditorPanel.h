@@ -26,6 +26,12 @@ namespace ParticleGraphEditorPanel
 	// state but leaves the tab vector, so the quit guard must ask here.
 	void appendDirtyPaths(std::vector<std::string>& out);
 
+	// Write this tab's graph to disk, exactly like the header's Save button — so
+	// the close/quit prompt can save this asset without the user having to walk
+	// back into the tab. Returns true when nothing is left unsaved for this path
+	// (including the "this panel never held it" case).
+	bool save(AppContext& ctx, const std::string& assetPath);
+
 	// Whether the .hasset at `path` is a particle-system asset (reads the HAsset
 	// header type; cached per path — same convention as MaterialEditorPanel).
 	bool isParticleAsset(const std::string& path);
