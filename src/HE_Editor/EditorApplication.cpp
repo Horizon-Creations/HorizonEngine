@@ -2118,6 +2118,10 @@ void EditorApplication::dumpFrameHeadless()
 		mirror.baseColor[0] = 0.9f; mirror.baseColor[1] = 0.9f; mirror.baseColor[2] = 0.9f;
 		mirror.metallic  = 1.0f;
 		mirror.roughness = 0.05f;
+		// HE_DUMP_SSRTESTROUGH: override the floor roughness (0..1) so the High
+		// tier's glossy lerp (sharp vs wide-blur) is visible in a headless A/B.
+		if (const char* fr = std::getenv("HE_DUMP_SSRTESTROUGH"); fr && *fr)
+			mirror.roughness = std::clamp(static_cast<float>(std::atof(fr)), 0.0f, 1.0f);
 		auto floorE = m_editorWorld->createEntity("SSRFloor");
 		TransformComponent ftc;
 		ftc.position = glm::vec3(0.0f, -0.1f, -8.0f);

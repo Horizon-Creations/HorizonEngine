@@ -230,6 +230,7 @@ private:
 	bool  m_ssrPipelinesTried    = false;
 	void* m_ssrReflTex = nullptr; // id<MTLTexture> RGBA16F half-res: rgb radiance, a confidence
 	void* m_ssrPingTex = nullptr; // id<MTLTexture> same format, ping target of the separable blur
+	void* m_ssrRoughTex = nullptr; // id<MTLTexture> wide second blur (High tier glossy lerp)
 	int   m_ssrReflW = 0, m_ssrReflH = 0;
 	bool  m_gbStored = false;     // current G-buffer allocation: stored vs memoryless
 	bool  EnsureSSRPipelines();
