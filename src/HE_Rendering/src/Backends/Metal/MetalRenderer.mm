@@ -5914,18 +5914,13 @@ void* MetalRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& m
 	return m_previewColorTex; // id<MTLTexture> for ImGui::Image
 }
 
-bool MetalRenderer::RenderAssetThumbnail(ContentManager& cm, ThumbnailKind kind,
-                                         const HE::UUID& assetId, uint32_t size,
-                                         std::vector<uint8_t>& outRgba8)
+// Lazily (re)create the shared thumbnail target at S×S. Its own textures, see
+// the header note: a thumbnail rendered into one of the interactive preview
+// targets would replace whatever editor panel is showing that preview.
+bool MetalRenderer::EnsureThumbnailTarget(int S)
 {
-	const int S = std::clamp(static_cast<int>(size), 16, 512);
-	if (!m_contentManager) m_contentManager = &cm;
-	if (assetId == HE::UUID{}) return false;
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
-	id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)m_commandQueue;
-	if (!device || !queue) return false;
-
-	// ── Lazy / resized thumbnail target (its own, see the header note).
+	if (!device) return false;
 	if (!m_thumbColorTex || m_thumbSize != S)
 	{
 		if (m_thumbColorTex) { CFBridgingRelease(m_thumbColorTex); m_thumbColorTex = nullptr; }
@@ -5941,10 +5936,125 @@ bool MetalRenderer::RenderAssetThumbnail(ContentManager& cm, ThumbnailKind kind,
 		m_thumbDepthTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:dd]);
 		m_thumbSize = S;
 	}
-	id<MTLTexture> colorTex = (__bridge id<MTLTexture>)m_thumbColorTex;
+	return m_thumbColorTex != nullptr;
+}
 
+// Blit the thumbnail target into a staging texture on `commandBuffer`, commit,
+// wait, and decode the RGBA16F to top-down RGBA8. The target is RGBA16F because
+// that is the format every material PSO is built against, so a thumbnail always
+// pays this half-float decode.
+bool MetalRenderer::CommitAndReadThumbnail(void* commandBuffer, int S, std::vector<uint8_t>& out)
+{
+	id<MTLCommandBuffer> cb = (__bridge id<MTLCommandBuffer>)commandBuffer;
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	if (!cb || !device || !m_thumbColorTex) return false;
+
+	MTLTextureDescriptor* sd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kSceneColorFormat
+		width:S height:S mipmapped:NO];
+	sd.storageMode = MTLStorageModeManaged; sd.usage = MTLTextureUsageShaderRead;
+	id<MTLTexture> staging = [device newTextureWithDescriptor:sd];
+	id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+	[blit copyFromTexture:(__bridge id<MTLTexture>)m_thumbColorTex
+	          sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0)
+	           sourceSize:MTLSizeMake(S,S,1) toTexture:staging destinationSlice:0 destinationLevel:0
+	    destinationOrigin:MTLOriginMake(0,0,0)];
+	[blit synchronizeResource:staging];
+	[blit endEncoding];
+	[cb commit];
+	[cb waitUntilCompleted];
+
+	std::vector<uint16_t> half((size_t)S * S * 4);
+	[staging getBytes:half.data() bytesPerRow:S * 4 * sizeof(uint16_t)
+	       fromRegion:MTLRegionMake2D(0, 0, S, S) mipmapLevel:0];
+	auto h2f = [](uint16_t h) -> float {
+		uint32_t s = (h >> 15) & 1, e = (h >> 10) & 0x1f, m = h & 0x3ff, f;
+		if (e == 0) { if (m == 0) f = s << 31; else { e = 127 - 15 + 1; while (!(m & 0x400)) { m <<= 1; e--; } m &= 0x3ff; f = (s << 31) | (e << 23) | (m << 13); } }
+		else if (e == 0x1f) f = (s << 31) | (0xffu << 23) | (m << 13);
+		else f = (s << 31) | ((e - 15 + 127) << 23) | (m << 13);
+		float o; std::memcpy(&o, &f, 4); return o;
+	};
+	// Metal texture rows are already top-down — no flip, unlike the GL path.
+	out.resize((size_t)S * S * 4);
+	for (size_t i = 0; i < (size_t)S * S * 4; ++i)
+	{
+		float v = h2f(half[i]);
+		v = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+		out[i] = (uint8_t)(v * 255.0f + 0.5f);
+	}
+	return true;
+}
+
+bool MetalRenderer::RenderParticleThumbnail(ContentManager& cm, const HE::UUID& materialId,
+                                            const std::vector<ParticlePreviewInstance>& particles,
+                                            uint32_t size, std::vector<uint8_t>& outRgba8)
+{
+	const int S = std::clamp(static_cast<int>(size), 16, 512);
+	if (!m_contentManager) m_contentManager = &cm;
+	id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)m_commandQueue;
+	if (!queue || particles.empty()) return false;
+	if (!EnsureParticlePreviewPipeline() || !EnsureThumbnailTarget(S)) return false;
+
+	// Same fixed three-quarter framing as the mesh tiles, so a grid of assets
+	// reads as one set. 2.6 leaves the cloud a margin at the 35° FOV.
+	// Each particle is a BILLBOARD of radius `size`, so the bounds have to include
+	// that radius — framing on the centres alone crops every quad by half its
+	// width, which for a tight cloud of large sprites fills the whole frame.
+	glm::vec3 bmin(1e30f), bmax(-1e30f);
+	for (const auto& p : particles)
+	{
+		const glm::vec3 r(p.size * 0.5f);
+		bmin = glm::min(bmin, p.position - r);
+		bmax = glm::max(bmax, p.position + r);
+	}
+	const bool valid = bmin.x <= bmax.x;
+	const glm::vec3 center = valid ? (bmin + bmax) * 0.5f : glm::vec3(0.0f);
+	const float extent  = valid ? glm::max(glm::length(bmax - bmin) * 0.5f, 0.1f) : 1.0f;
+	const float camDist = 2.9f * std::max(extent, 0.1f);
+	const float cp = std::cos(0.45f), sp = std::sin(0.45f);
+	const glm::vec3 camPos = center + glm::vec3(std::sin(0.7f) * cp, sp, std::cos(0.7f) * cp) * camDist;
+	const glm::mat4 view = glm::lookAt(camPos, center, glm::vec3(0.0f, 1.0f, 0.0f));
+	const glm::mat4 proj = glm::perspective(glm::radians(35.0f), 1.0f, 0.01f, camDist * 20.0f + 10.0f);
+	const glm::mat4 viewProj = HE::kMetalClipFix * proj * view;
+	const glm::vec3 camRight(view[0][0], view[1][0], view[2][0]);
+	const glm::vec3 camUp   (view[0][1], view[1][1], view[2][1]);
+
+	// Built inline at both thumbnail call sites rather than in a helper: this file
+	// is ARC, so handing a descriptor back as a raw void* would leave the caller
+	// with a reference the helper's scope exit already released.
 	MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
-	rp.colorAttachments[0].texture     = colorTex;
+	rp.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_thumbColorTex;
+	rp.colorAttachments[0].loadAction  = MTLLoadActionClear;
+	rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+	rp.colorAttachments[0].clearColor  = MTLClearColorMake(0.0, 0.0, 0.0, 0.0); // transparent
+	rp.depthAttachment.texture     = (__bridge id<MTLTexture>)m_thumbDepthTex;
+	rp.depthAttachment.loadAction  = MTLLoadActionClear;
+	rp.depthAttachment.storeAction = MTLStoreActionDontCare;
+	rp.depthAttachment.clearDepth  = 1.0;
+
+	id<MTLCommandBuffer> cb = [queue commandBuffer];
+	id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+	EncodeParticleBillboards((__bridge void*)enc, materialId, particles, viewProj, camRight, camUp);
+	[enc endEncoding];
+	return CommitAndReadThumbnail((__bridge void*)cb, S, outRgba8);
+}
+
+bool MetalRenderer::RenderAssetThumbnail(ContentManager& cm, ThumbnailKind kind,
+                                         const HE::UUID& assetId, uint32_t size,
+                                         std::vector<uint8_t>& outRgba8)
+{
+	const int S = std::clamp(static_cast<int>(size), 16, 512);
+	if (!m_contentManager) m_contentManager = &cm;
+	if (assetId == HE::UUID{}) return false;
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)m_commandQueue;
+	if (!device || !queue) return false;
+	if (!EnsureThumbnailTarget(S)) return false;
+
+	// Built inline at both thumbnail call sites rather than in a helper: this file
+	// is ARC, so handing a descriptor back as a raw void* would leave the caller
+	// with a reference the helper's scope exit already released.
+	MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+	rp.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_thumbColorTex;
 	rp.colorAttachments[0].loadAction  = MTLLoadActionClear;
 	rp.colorAttachments[0].storeAction = MTLStoreActionStore;
 	rp.colorAttachments[0].clearColor  = MTLClearColorMake(0.0, 0.0, 0.0, 0.0); // transparent
@@ -6043,41 +6153,7 @@ bool MetalRenderer::RenderAssetThumbnail(ContentManager& cm, ThumbnailKind kind,
 	[enc endEncoding];
 
 	if (!drew) { [cb commit]; return false; }
-
-	// The target is RGBA16F (the format every material PSO is built against), so
-	// the readback goes through a managed staging copy and decodes halves to 8-bit.
-	MTLTextureDescriptor* sd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kSceneColorFormat
-		width:S height:S mipmapped:NO];
-	sd.storageMode = MTLStorageModeManaged; sd.usage = MTLTextureUsageShaderRead;
-	id<MTLTexture> staging = [device newTextureWithDescriptor:sd];
-	id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
-	[blit copyFromTexture:colorTex sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0)
-	           sourceSize:MTLSizeMake(S,S,1) toTexture:staging destinationSlice:0 destinationLevel:0
-	    destinationOrigin:MTLOriginMake(0,0,0)];
-	[blit synchronizeResource:staging];
-	[blit endEncoding];
-	[cb commit];
-	[cb waitUntilCompleted];
-
-	std::vector<uint16_t> half((size_t)S * S * 4);
-	[staging getBytes:half.data() bytesPerRow:S * 4 * sizeof(uint16_t)
-	       fromRegion:MTLRegionMake2D(0, 0, S, S) mipmapLevel:0];
-	auto h2f = [](uint16_t h) -> float {
-		uint32_t s = (h >> 15) & 1, e = (h >> 10) & 0x1f, m = h & 0x3ff, f;
-		if (e == 0) { if (m == 0) f = s << 31; else { e = 127 - 15 + 1; while (!(m & 0x400)) { m <<= 1; e--; } m &= 0x3ff; f = (s << 31) | (e << 23) | (m << 13); } }
-		else if (e == 0x1f) f = (s << 31) | (0xffu << 23) | (m << 13);
-		else f = (s << 31) | ((e - 15 + 127) << 23) | (m << 13);
-		float o; std::memcpy(&o, &f, 4); return o;
-	};
-	// Metal texture rows are already top-down — no flip, unlike the GL path.
-	outRgba8.resize((size_t)S * S * 4);
-	for (size_t i = 0; i < (size_t)S * S * 4; ++i)
-	{
-		float v = h2f(half[i]);
-		v = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
-		outRgba8[i] = (uint8_t)(v * 255.0f + 0.5f);
-	}
-	return true;
+	return CommitAndReadThumbnail((__bridge void*)cb, S, outRgba8);
 }
 
 void* MetalRenderer::RenderSkeletalPreview(ContentManager& cm, const HE::UUID& meshId,
@@ -6344,17 +6420,50 @@ fragment float4 skelPreviewFragment(VOut in [[stage_in]],
 	return m_skelPreviewColorTex; // id<MTLTexture> for ImGui::Image
 }
 
-void* MetalRenderer::RenderParticlePreview(ContentManager& cm, const HE::UUID& /*meshId*/,
-                                           const HE::UUID& materialId,
-                                           const std::vector<ParticlePreviewInstance>& particles,
-                                           uint32_t size, float yaw, float pitch, float dist)
+// Encode the particle cloud into an already-open encoder. Shared by the
+// interactive preview and the Content-Browser thumbnail so the two can never
+// drift; the thumbnail must NOT reuse the preview's own target or it would
+// overwrite what the Particle Graph Editor is showing.
+void MetalRenderer::EncodeParticleBillboards(void* renderEncoder, const HE::UUID& materialId,
+                                             const std::vector<ParticlePreviewInstance>& particles,
+                                             const glm::mat4& viewProj, const glm::vec3& camRight,
+                                             const glm::vec3& camUp)
 {
-	const int S = std::clamp(static_cast<int>(size), 32, 1024);
-	if (!m_contentManager) m_contentManager = &cm;
+	id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
-	id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)m_commandQueue;
-	if (!device || !queue) return nullptr;
+	if (!enc || !device || particles.empty() || !m_particlePreviewPipeline) return;
 
+	std::vector<float> inst;
+	inst.reserve(particles.size() * 8);
+	for (const auto& p : particles)
+		inst.insert(inst.end(), { p.position.x, p.position.y, p.position.z, p.size,
+		                          p.color.r, p.color.g, p.color.b, p.alpha });
+	id<MTLBuffer> instBuf = [device newBufferWithBytes:inst.data()
+	                                            length:inst.size() * sizeof(float)
+	                                           options:MTLResourceStorageModeShared];
+
+	void* matTex = nullptr;
+	const bool hasTex = ResolveMaterialTexture(materialId, matTex);
+
+	[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_particlePreviewPipeline];
+	[enc setVertexBuffer:instBuf offset:0 atIndex:0];
+	[enc setVertexBytes:&viewProj length:sizeof(viewProj) atIndex:1];
+	[enc setVertexBytes:&camRight length:sizeof(camRight) atIndex:2];
+	[enc setVertexBytes:&camUp    length:sizeof(camUp)    atIndex:3];
+	bool hasTexFlag = hasTex;
+	[enc setFragmentBytes:&hasTexFlag length:sizeof(hasTexFlag) atIndex:1];
+	[enc setFragmentTexture:(__bridge id<MTLTexture>)(hasTex ? matTex : m_dummyTexture) atIndex:0];
+	[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
+	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6
+	      instanceCount:static_cast<NSUInteger>(particles.size())];
+}
+
+// Build the billboard pipeline once. Split out so both the interactive preview
+// and the Content-Browser thumbnail can reach it.
+bool MetalRenderer::EnsureParticlePreviewPipeline()
+{
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	if (!device) return false;
 	// ── Lazy billboard pipeline — camera-facing quads via vertex_id (no vertex
 	// buffer for the corners), alpha-blended (unlike the opaque skeletal preview).
 	if (!m_particlePreviewPipeline)
@@ -6426,7 +6535,20 @@ fragment float4 particlePreviewFragment(VOut in [[stage_in]],
 				Logger::Log(Logger::LogLevel::Error, "MetalRenderer: particle-preview shader compile failed");
 		}
 	}
-	if (!m_particlePreviewPipeline) return nullptr;
+	return m_particlePreviewPipeline != nullptr;
+}
+
+void* MetalRenderer::RenderParticlePreview(ContentManager& cm, const HE::UUID& /*meshId*/,
+                                           const HE::UUID& materialId,
+                                           const std::vector<ParticlePreviewInstance>& particles,
+                                           uint32_t size, float yaw, float pitch, float dist)
+{
+	const int S = std::clamp(static_cast<int>(size), 32, 1024);
+	if (!m_contentManager) m_contentManager = &cm;
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)m_commandQueue;
+	if (!device || !queue) return nullptr;
+	if (!EnsureParticlePreviewPipeline()) return nullptr;
 
 	// ── Lazy / resized target.
 	if (!m_particlePreviewColorTex || m_particlePreviewSize != S)
@@ -6447,8 +6569,16 @@ fragment float4 particlePreviewFragment(VOut in [[stage_in]],
 	id<MTLTexture> colorTex = (__bridge id<MTLTexture>)m_particlePreviewColorTex;
 
 	// ── Orbit camera auto-framed around the LIVE particles' bounds.
+	// Each particle is a BILLBOARD of radius `size`, so the bounds have to include
+	// that radius — framing on the centres alone crops every quad by half its
+	// width, which for a tight cloud of large sprites fills the whole frame.
 	glm::vec3 bmin(1e30f), bmax(-1e30f);
-	for (const auto& p : particles) { bmin = glm::min(bmin, p.position); bmax = glm::max(bmax, p.position); }
+	for (const auto& p : particles)
+	{
+		const glm::vec3 r(p.size * 0.5f);
+		bmin = glm::min(bmin, p.position - r);
+		bmax = glm::max(bmax, p.position + r);
+	}
 	const bool valid = !particles.empty() && bmin.x <= bmax.x;
 	const glm::vec3 center = valid ? (bmin + bmax) * 0.5f : glm::vec3(0.0f);
 	const float extent = valid ? glm::max(glm::length(bmax - bmin) * 0.5f, 0.1f) : 1.0f;
@@ -6473,33 +6603,7 @@ fragment float4 particlePreviewFragment(VOut in [[stage_in]],
 
 	id<MTLCommandBuffer> cb = [queue commandBuffer];
 	id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
-
-	if (!particles.empty())
-	{
-		std::vector<float> inst;
-		inst.reserve(particles.size() * 8);
-		for (const auto& p : particles)
-			inst.insert(inst.end(), { p.position.x, p.position.y, p.position.z, p.size,
-			                          p.color.r, p.color.g, p.color.b, p.alpha });
-		id<MTLBuffer> instBuf = [device newBufferWithBytes:inst.data()
-		                                            length:inst.size() * sizeof(float)
-		                                           options:MTLResourceStorageModeShared];
-
-		void* matTex = nullptr;
-		const bool hasTex = ResolveMaterialTexture(materialId, matTex);
-
-		[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_particlePreviewPipeline];
-		[enc setVertexBuffer:instBuf offset:0 atIndex:0];
-		[enc setVertexBytes:&viewProj length:sizeof(viewProj) atIndex:1];
-		[enc setVertexBytes:&camRight length:sizeof(camRight) atIndex:2];
-		[enc setVertexBytes:&camUp    length:sizeof(camUp)    atIndex:3];
-		bool hasTexFlag = hasTex;
-		[enc setFragmentBytes:&hasTexFlag length:sizeof(hasTexFlag) atIndex:1];
-		[enc setFragmentTexture:(__bridge id<MTLTexture>)(hasTex ? matTex : m_dummyTexture) atIndex:0];
-		[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
-		[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6
-		      instanceCount:static_cast<NSUInteger>(particles.size())];
-	}
+	EncodeParticleBillboards((__bridge void*)enc, materialId, particles, viewProj, camRight, camUp);
 	[enc endEncoding];
 
 	const char* dp = std::getenv("HE_PARTICLE_PREVIEW_DUMP");

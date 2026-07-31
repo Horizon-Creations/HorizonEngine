@@ -5927,15 +5927,11 @@ void OpenGLRenderer::DrawMeshPreviewGeometry(unsigned int vao, int indexCount, u
 	glBindVertexArray(0);
 }
 
-bool OpenGLRenderer::RenderAssetThumbnail(ContentManager& cm, ThumbnailKind kind,
-                                          const HE::UUID& assetId, uint32_t size,
-                                          std::vector<uint8_t>& outRgba8)
+// Lazily (re)create the shared thumbnail target at `S`×`S`. Its own FBO, see the
+// header note: a thumbnail rendered into one of the interactive preview targets
+// would replace whatever editor panel is currently showing that preview.
+bool OpenGLRenderer::EnsureThumbnailTarget(int S)
 {
-	const int S = std::clamp(static_cast<int>(size), 16, 512);
-	if (!m_contentManager) m_contentManager = &cm;
-	if (assetId == HE::UUID{}) return false;
-
-	// ── Lazy / resized thumbnail target (its own, see the header note).
 	if (!m_thumbFBO || m_thumbSize != S)
 	{
 		if (m_thumbColor) glDeleteTextures(1, &m_thumbColor);
@@ -5956,6 +5952,32 @@ bool OpenGLRenderer::RenderAssetThumbnail(ContentManager& cm, ThumbnailKind kind
 		glBindTexture(GL_TEXTURE_2D, 0);
 		m_thumbSize = S;
 	}
+	return m_thumbFBO != 0;
+}
+
+// Read the thumbnail target back as tightly packed, TOP-DOWN RGBA8. GL reads
+// bottom-up; the caller's contract (and every image format it will be written
+// to) is top-down, so flip row by row on the way out.
+void OpenGLRenderer::ReadThumbnailTarget(int S, std::vector<uint8_t>& outRgba8)
+{
+	outRgba8.assign(static_cast<size_t>(S) * S * 4, 0);
+	std::vector<uint8_t> raw(static_cast<size_t>(S) * S * 4);
+	glPixelStorei(GL_PACK_ALIGNMENT, 1);
+	glReadPixels(0, 0, S, S, GL_RGBA, GL_UNSIGNED_BYTE, raw.data());
+	const size_t rowBytes = static_cast<size_t>(S) * 4;
+	for (int y = 0; y < S; ++y)
+		std::memcpy(outRgba8.data() + static_cast<size_t>(y) * rowBytes,
+		            raw.data() + static_cast<size_t>(S - 1 - y) * rowBytes, rowBytes);
+}
+
+bool OpenGLRenderer::RenderAssetThumbnail(ContentManager& cm, ThumbnailKind kind,
+                                          const HE::UUID& assetId, uint32_t size,
+                                          std::vector<uint8_t>& outRgba8)
+{
+	const int S = std::clamp(static_cast<int>(size), 16, 512);
+	if (!m_contentManager) m_contentManager = &cm;
+	if (assetId == HE::UUID{}) return false;
+	if (!EnsureThumbnailTarget(S)) return false;
 
 	GLint prevFBO = 0; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
 	GLint prevVP[4]; glGetIntegerv(GL_VIEWPORT, prevVP);
@@ -6057,19 +6079,7 @@ bool OpenGLRenderer::RenderAssetThumbnail(ContentManager& cm, ThumbnailKind kind
 		}
 	}
 
-	if (drew)
-	{
-		// GL reads bottom-up; the caller's contract (and every image format it will
-		// be written to) is top-down, so flip row by row on the way out.
-		outRgba8.assign(static_cast<size_t>(S) * S * 4, 0);
-		std::vector<uint8_t> raw(static_cast<size_t>(S) * S * 4);
-		glPixelStorei(GL_PACK_ALIGNMENT, 1);
-		glReadPixels(0, 0, S, S, GL_RGBA, GL_UNSIGNED_BYTE, raw.data());
-		const size_t rowBytes = static_cast<size_t>(S) * 4;
-		for (int y = 0; y < S; ++y)
-			std::memcpy(outRgba8.data() + static_cast<size_t>(y) * rowBytes,
-			            raw.data() + static_cast<size_t>(S - 1 - y) * rowBytes, rowBytes);
-	}
+	if (drew) ReadThumbnailTarget(S, outRgba8);
 
 	glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prevFBO);
 	glViewport(prevVP[0], prevVP[1], prevVP[2], prevVP[3]);
@@ -6335,15 +6345,10 @@ void* OpenGLRenderer::RenderSkeletalPreview(ContentManager& cm, const HE::UUID& 
 	return reinterpret_cast<void*>(static_cast<intptr_t>(m_skelPreviewColor));
 }
 
-void* OpenGLRenderer::RenderParticlePreview(ContentManager& cm, const HE::UUID& /*meshId*/,
-                                           const HE::UUID& materialId,
-                                           const std::vector<ParticlePreviewInstance>& particles,
-                                           uint32_t size, float yaw, float pitch, float dist)
+// Compile the billboard program + its instance VAO once. Split out so both the
+// interactive preview and the Content-Browser thumbnail can reach it.
+bool OpenGLRenderer::EnsureParticlePreviewProgram()
 {
-	const int S = std::clamp(static_cast<int>(size), 32, 1024);
-	if (!m_contentManager) m_contentManager = &cm;
-
-	// ── Lazy billboard program.
 	if (!m_particlePreviewProgram)
 	{
 		GLuint vs = CompileStage(GL_VERTEX_SHADER,   kParticlePreviewVS);
@@ -6377,45 +6382,34 @@ void* OpenGLRenderer::RenderParticlePreview(ContentManager& cm, const HE::UUID& 
 		glVertexAttribDivisor(3, 1);
 		glBindVertexArray(0);
 	}
-	if (!m_particlePreviewProgram) return nullptr;
+	return m_particlePreviewProgram != 0;
+}
 
-	// ── Lazy / resized offscreen target.
-	if (!m_particlePreviewFBO || m_particlePreviewSize != S)
-	{
-		if (m_particlePreviewColor) glDeleteTextures(1, &m_particlePreviewColor);
-		if (m_particlePreviewDepth) glDeleteRenderbuffers(1, &m_particlePreviewDepth);
-		if (!m_particlePreviewFBO) glGenFramebuffers(1, &m_particlePreviewFBO);
-		glBindFramebuffer(GL_FRAMEBUFFER, m_particlePreviewFBO);
-		glGenTextures(1, &m_particlePreviewColor);
-		glBindTexture(GL_TEXTURE_2D, m_particlePreviewColor);
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, S, S, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_particlePreviewColor, 0);
-		glGenRenderbuffers(1, &m_particlePreviewDepth);
-		glBindRenderbuffer(GL_RENDERBUFFER, m_particlePreviewDepth);
-		glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, S, S);
-		glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, m_particlePreviewDepth);
-		glBindFramebuffer(GL_FRAMEBUFFER, 0);
-		glBindTexture(GL_TEXTURE_2D, 0);
-		m_particlePreviewSize = S;
-	}
-
+// Draw the particle cloud into whatever target is bound (caller owns FBO,
+// viewport and clear). Shared by RenderParticlePreview and the thumbnail path so
+// the two can never drift; the thumbnail must NOT reuse the preview's own target
+// or it would overwrite what the Particle Graph Editor is showing.
+void OpenGLRenderer::DrawParticlePreviewGeometry(const HE::UUID& materialId,
+                                                const std::vector<ParticlePreviewInstance>& particles,
+                                                float yaw, float pitch, float dist)
+{
 	// ── Orbit camera auto-framed around the LIVE particles' bounds (an emitter's
 	// extent depends entirely on velocity/gravity/lifetime, unlike a fixed mesh).
+	// Each particle is a BILLBOARD of radius `size`, so the bounds have to include
+	// that radius — framing on the centres alone crops every quad by half its
+	// width, which for a tight cloud of large sprites fills the whole frame.
 	glm::vec3 bmin(1e30f), bmax(-1e30f);
-	for (const auto& p : particles) { bmin = glm::min(bmin, p.position); bmax = glm::max(bmax, p.position); }
+	for (const auto& p : particles)
+	{
+		const glm::vec3 r(p.size * 0.5f);
+		bmin = glm::min(bmin, p.position - r);
+		bmax = glm::max(bmax, p.position + r);
+	}
 	const bool valid = !particles.empty() && bmin.x <= bmax.x;
 	const glm::vec3 center = valid ? (bmin + bmax) * 0.5f : glm::vec3(0.0f);
 	const float extent = valid ? glm::max(glm::length(bmax - bmin) * 0.5f, 0.1f) : 1.0f;
 	const float camDist = std::max(0.05f, dist) * std::max(extent, 0.1f);
 
-	GLint prevFBO = 0; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
-	GLint prevVP[4]; glGetIntegerv(GL_VIEWPORT, prevVP);
-	glBindFramebuffer(GL_FRAMEBUFFER, m_particlePreviewFBO);
-	glViewport(0, 0, S, S);
-	glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
-	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 	glEnable(GL_DEPTH_TEST); glDepthMask(GL_FALSE); glDepthFunc(GL_LESS);
 	glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 	glDisable(GL_CULL_FACE);
@@ -6458,6 +6452,74 @@ void* OpenGLRenderer::RenderParticlePreview(ContentManager& cm, const HE::UUID& 
 
 	glDepthMask(GL_TRUE);
 	glDisable(GL_BLEND);
+}
+
+bool OpenGLRenderer::RenderParticleThumbnail(ContentManager& cm, const HE::UUID& materialId,
+                                             const std::vector<ParticlePreviewInstance>& particles,
+                                             uint32_t size, std::vector<uint8_t>& outRgba8)
+{
+	const int S = std::clamp(static_cast<int>(size), 16, 512);
+	if (!m_contentManager) m_contentManager = &cm;
+	if (particles.empty() || !EnsureParticlePreviewProgram()) return false;
+	if (!EnsureThumbnailTarget(S)) return false;
+
+	GLint prevFBO = 0; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
+	GLint prevVP[4]; glGetIntegerv(GL_VIEWPORT, prevVP);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_thumbFBO);
+	glViewport(0, 0, S, S);
+	glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+	// Same fixed three-quarter framing as the mesh tiles, so a grid of assets
+	// reads as one set. 2.6 leaves the cloud a margin at the 35° FOV.
+	DrawParticlePreviewGeometry(materialId, particles, 0.7f, 0.45f, 2.9f);
+	ReadThumbnailTarget(S, outRgba8);
+
+	glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prevFBO);
+	glViewport(prevVP[0], prevVP[1], prevVP[2], prevVP[3]);
+	glUseProgram(0);
+	return true;
+}
+
+void* OpenGLRenderer::RenderParticlePreview(ContentManager& cm, const HE::UUID& /*meshId*/,
+                                           const HE::UUID& materialId,
+                                           const std::vector<ParticlePreviewInstance>& particles,
+                                           uint32_t size, float yaw, float pitch, float dist)
+{
+	const int S = std::clamp(static_cast<int>(size), 32, 1024);
+	if (!m_contentManager) m_contentManager = &cm;
+	if (!EnsureParticlePreviewProgram()) return nullptr;
+
+	// ── Lazy / resized offscreen target.
+	if (!m_particlePreviewFBO || m_particlePreviewSize != S)
+	{
+		if (m_particlePreviewColor) glDeleteTextures(1, &m_particlePreviewColor);
+		if (m_particlePreviewDepth) glDeleteRenderbuffers(1, &m_particlePreviewDepth);
+		if (!m_particlePreviewFBO) glGenFramebuffers(1, &m_particlePreviewFBO);
+		glBindFramebuffer(GL_FRAMEBUFFER, m_particlePreviewFBO);
+		glGenTextures(1, &m_particlePreviewColor);
+		glBindTexture(GL_TEXTURE_2D, m_particlePreviewColor);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, S, S, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_particlePreviewColor, 0);
+		glGenRenderbuffers(1, &m_particlePreviewDepth);
+		glBindRenderbuffer(GL_RENDERBUFFER, m_particlePreviewDepth);
+		glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, S, S);
+		glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, m_particlePreviewDepth);
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		glBindTexture(GL_TEXTURE_2D, 0);
+		m_particlePreviewSize = S;
+	}
+
+	GLint prevFBO = 0; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
+	GLint prevVP[4]; glGetIntegerv(GL_VIEWPORT, prevVP);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_particlePreviewFBO);
+	glViewport(0, 0, S, S);
+	glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+	DrawParticlePreviewGeometry(materialId, particles, yaw, pitch, dist);
 
 	if (const char* dp = std::getenv("HE_PARTICLE_PREVIEW_DUMP"); dp && *dp)
 	{

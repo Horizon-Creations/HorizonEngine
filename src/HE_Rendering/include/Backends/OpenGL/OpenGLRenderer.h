@@ -55,6 +55,9 @@ public:
 	                            uint32_t size, float yaw, float pitch, float dist) override;
 	bool  RenderAssetThumbnail(ContentManager& cm, ThumbnailKind kind, const HE::UUID& assetId,
 	                           uint32_t size, std::vector<uint8_t>& outRgba8) override;
+	bool  RenderParticleThumbnail(ContentManager& cm, const HE::UUID& materialId,
+	                              const std::vector<ParticlePreviewInstance>& particles,
+	                              uint32_t size, std::vector<uint8_t>& outRgba8) override;
 	void  InvalidateMesh    (const HE::UUID& meshId)     override;
 	void  InvalidateTexture (const HE::UUID& textureId)  override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
@@ -286,11 +289,22 @@ private:
 	unsigned int m_meshPreviewProgram = 0;
 	int          m_uMeshPvMVP = -1, m_uMeshPvModel = -1, m_uMeshPvColor = -1;
 	int          m_uMeshPvHasTex = -1, m_uMeshPvCamPos = -1, m_uMeshPvPbr = -1;
+	// Lazily (re)create the thumbnail target at S×S; false if it could not be made.
+	bool EnsureThumbnailTarget(int S);
+	// Read the bound thumbnail target back as tightly packed, TOP-DOWN RGBA8.
+	void ReadThumbnailTarget(int S, std::vector<uint8_t>& outRgba8);
 	// Draws one material-graph preview primitive into the CURRENTLY BOUND target
 	// (caller owns FBO/viewport/clear). False when the material has no node-graph
 	// program — the thumbnail path then falls back to m_meshPreviewProgram.
 	bool DrawMaterialPreviewGeometry(const HE::UUID& materialId, float yaw, float pitch,
 	                                 float dist, int shape);
+	// Compile the billboard program + instance VAO once; false on failure.
+	bool EnsureParticlePreviewProgram();
+	// Draw the particle cloud into the CURRENTLY BOUND target — shared by the
+	// interactive preview and the thumbnail so the two can never drift.
+	void DrawParticlePreviewGeometry(const HE::UUID& materialId,
+	                                 const std::vector<ParticlePreviewInstance>& particles,
+	                                 float yaw, float pitch, float dist);
 	// Same contract for the mesh program: `vao`/`indexCount`/`texture` describe the
 	// geometry, `center`/`extent` frame the orbit camera.
 	void DrawMeshPreviewGeometry(unsigned int vao, int indexCount, unsigned int texture,

@@ -7,6 +7,10 @@
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/Components/MeshComponent.h>
 #include <HorizonScene/Components/SkeletalMeshComponent.h>
+#include <HorizonScene/ParticleSystem.h>  // PARTICLE tiles step a real pool
+#include <HorizonScene/Components/ParticleSystemComponent.h> // struct Particle
+#include <ParticleGraph/ParticleGraph.h>
+#include <random>
 #include <Renderer/IRenderer.h>
 #include <Renderer/UIFont.h>       // FONT tiles bake a sample through the engine's own cache
 #include <Types/Enums.h>
@@ -96,6 +100,8 @@ namespace
 			case HE::AssetType::Prefab:           out = ThumbnailKind::StaticMesh;   return true;
 			// Fonts are baked on the CPU too (makeFontThumbnail); kind unused.
 			case HE::AssetType::Font:             out = ThumbnailKind::Material;     return true;
+			// Particles go through RenderParticleThumbnail, not RenderAssetThumbnail.
+			case HE::AssetType::ParticleSystem:   out = ThumbnailKind::Material;     return true;
 			default: return false;
 		}
 	}
@@ -318,6 +324,59 @@ namespace
 		return true;
 	}
 
+	// ── Particle systems ─────────────────────────────────────────────────────
+	// A particle asset is an emitter GRAPH — there is no static shape to draw, so
+	// the tile is a snapshot of the effect actually running. The pool is stepped
+	// here (ParticleSystem::stepPool, HE_Scene — the renderer never simulates,
+	// same split as the Particle Graph Editor's live preview) and handed over as
+	// already-resolved instances.
+	bool makeParticleThumbnail(const HE::UUID& particleId, std::vector<uint8_t>& out)
+	{
+		const ParticleGraphAsset* pa = s_content->getParticleGraph(particleId);
+		if (!pa || pa->nodeGraphJson.empty()) return false;
+		HE::ParticleGraph graph;
+		if (!HE::particleGraphFromJson(pa->nodeGraphJson, graph)) return false;
+
+		// Fixed seed: a thumbnail is cached, so it must not change every time it is
+		// regenerated — two runs of the same asset have to produce the same picture.
+		std::mt19937 rng(0x9E3779B9u);
+		const HE::ParticleEmitterConfig config = HE::evaluateParticleGraph(graph, rng);
+
+		// Warm the pool to a representative moment: at t=0 nothing has been emitted
+		// yet, and a single step shows one particle at the origin. ~1.2 s of fixed
+		// 60 Hz steps lets a typical emitter develop its shape without letting a
+		// short-lived burst die out again.
+		std::vector<Particle> pool;
+		float emitAccumulator = 0.0f;
+		constexpr float kDt = 1.0f / 60.0f;
+		constexpr int   kWarmupSteps = 72;
+		for (int i = 0; i < kWarmupSteps; ++i)
+			ParticleSystem::stepPool(pool, emitAccumulator, rng, config, glm::vec3(0.0f), kDt);
+		if (pool.empty()) return false;
+
+		// Resolve size/colour/alpha over each particle's life, exactly as the
+		// Particle Graph Editor's preview does.
+		std::vector<ParticlePreviewInstance> instances;
+		instances.reserve(pool.size());
+		for (const auto& p : pool)
+		{
+			const float t01 = 1.0f - p.lifetime / p.maxLifetime; // 0 = born, 1 = dead
+			const float sz  = config.startSize + (config.endSize - config.startSize) * t01;
+			if (sz <= 0.0f) continue;
+			ParticlePreviewInstance inst;
+			inst.position = p.position;
+			inst.size     = sz;
+			for (int c = 0; c < 3; ++c)
+				inst.color[c] = config.startColor[c] + (config.endColor[c] - config.startColor[c]) * t01;
+			inst.alpha = config.startAlpha + (config.endAlpha - config.startAlpha) * t01;
+			instances.push_back(inst);
+		}
+		if (instances.empty()) return false;
+
+		return s_renderer->RenderParticleThumbnail(*s_content, config.materialAssetId,
+		                                           instances, kThumbSize, out);
+	}
+
 	// ── Prefabs ──────────────────────────────────────────────────────────────
 	// A prefab is a CBOR entity subtree, so there is no shape to hand the
 	// renderer — but there is one inside it. The blob is instantiated into a
@@ -387,6 +446,11 @@ bool prefabMesh(const HE::UUID& prefabId, HE::UUID& meshIdOut, bool& isSkeletalO
 bool fontThumbnail(const HE::UUID& fontId, std::vector<uint8_t>& out)
 {
 	return s_content && makeFontThumbnail(fontId, out);
+}
+
+bool particleThumbnail(const HE::UUID& particleId, std::vector<uint8_t>& out)
+{
+	return s_content && s_renderer && makeParticleThumbnail(particleId, out);
 }
 
 void setContext(IRenderer* renderer, ContentManager* cm, const std::string& cacheDir)
@@ -499,8 +563,9 @@ void* get(const std::string& absPath)
 	std::vector<uint8_t> pixels;
 	--s_rendersLeft;
 	const bool produced =
-		  type == HE::AssetType::Texture ? makeTextureThumbnail(renderId, pixels)
-		: type == HE::AssetType::Font    ? makeFontThumbnail(renderId, pixels)
+		  type == HE::AssetType::Texture        ? makeTextureThumbnail(renderId, pixels)
+		: type == HE::AssetType::Font           ? makeFontThumbnail(renderId, pixels)
+		: type == HE::AssetType::ParticleSystem ? makeParticleThumbnail(renderId, pixels)
 		: s_renderer->RenderAssetThumbnail(*s_content, kind, renderId, kThumbSize, pixels);
 
 	// The asset was pulled into memory only to draw a 128px tile — let it go

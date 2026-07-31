@@ -96,6 +96,9 @@ public:
 	                            uint32_t size, float yaw, float pitch, float dist) override;
 	bool  RenderAssetThumbnail(ContentManager& cm, ThumbnailKind kind, const HE::UUID& assetId,
 	                           uint32_t size, std::vector<uint8_t>& outRgba8) override;
+	bool  RenderParticleThumbnail(ContentManager& cm, const HE::UUID& materialId,
+	                              const std::vector<ParticlePreviewInstance>& particles,
+	                              uint32_t size, std::vector<uint8_t>& outRgba8) override;
 	void  InvalidateMesh    (const HE::UUID& meshId)     override;
 	void  InvalidateTexture (const HE::UUID& textureId)  override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
@@ -359,11 +362,24 @@ private:
 	// have no node graph (built-in PBR): the counterpart of m_skelPreviewPipeline
 	// with the bone buffers removed and a metallic/roughness-driven highlight.
 	void* m_meshPreviewPipeline = nullptr; // id<MTLRenderPipelineState> (retained)
+	// Lazily (re)create the thumbnail target at S×S; false if it could not be made.
+	bool EnsureThumbnailTarget(int S);
+	// Blit the thumbnail target to staging on `commandBuffer`, commit, wait and
+	// decode the RGBA16F into top-down RGBA8.
+	bool CommitAndReadThumbnail(void* commandBuffer, int S, std::vector<uint8_t>& out);
 	// Encode one material-graph preview primitive into an OPEN encoder (the caller
 	// owns the render pass + its clear). False when the material has no node-graph
 	// pipeline — the thumbnail path then falls back to m_meshPreviewPipeline.
 	bool EncodeMaterialPreview(void* renderEncoder, const HE::UUID& materialId,
 	                           float yaw, float pitch, float dist, int shape);
+	// Build the billboard pipeline once; false on failure.
+	bool EnsureParticlePreviewPipeline();
+	// Encode the particle cloud into an OPEN encoder — shared by the interactive
+	// preview and the thumbnail so the two can never drift.
+	void EncodeParticleBillboards(void* renderEncoder, const HE::UUID& materialId,
+	                              const std::vector<ParticlePreviewInstance>& particles,
+	                              const glm::mat4& viewProj, const glm::vec3& camRight,
+	                              const glm::vec3& camUp);
 	// Same contract for the mesh pipeline; `center`/`extent` frame the orbit camera.
 	void EncodeMeshPreview(void* renderEncoder, void* vertexBuf, void* indexBuf, int indexCount,
 	                       void* texture, const glm::vec3& center, float extent,
