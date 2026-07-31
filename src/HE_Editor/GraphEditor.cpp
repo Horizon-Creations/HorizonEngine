@@ -129,7 +129,14 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
     // usually still over the canvas — so an ordinary edit keystroke would
     // destroy the selection or drop a node. Every shortcut below is gated on
     // this, the same guard the material editor's shortcuts already use.
-    const bool kbOwned = !ImGui::GetIO().WantTextInput && !ImGui::IsAnyItemActive();
+    //
+    // The canvas button itself does NOT count as "something else is active" —
+    // exactly the trap the comment above warns about for `interact`. Pressing
+    // the mouse makes the InvisibleButton the active item, so a plain
+    // IsAnyItemActive() is false precisely on the frame a hold-a-key-and-click
+    // shortcut fires, which killed every one of them.
+    const bool kbOwned = !ImGui::GetIO().WantTextInput &&
+                         (!ImGui::IsAnyItemActive() || canvasHeld);
 
     // F is bound twice (see State::fSpawned): a fresh press starts out "not
     // spawned yet", and only a release still in that state frames the selection.
