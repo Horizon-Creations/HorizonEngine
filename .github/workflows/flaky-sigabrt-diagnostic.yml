@@ -6,9 +6,13 @@
 # DETECTED, not necessarily where it is CAUSED.
 #
 # Three jobs, cheapest signal first:
-#   stress   — the real Release build, suite run many times (does it reproduce, how often)
-#   asan     — ASan+UBSan (pinpoints the write, in instrumented engine code)
-#   valgrind — memcheck (catches the same class of bug inside UNinstrumented libpython/SDL)
+#   stress-contended — real Release build, 4 concurrent suites x 15 rounds
+#   asan             — ASan+UBSan, 2 concurrent x 8 rounds (pinpoints the write)
+#   valgrind         — memcheck (catches the same class inside UNinstrumented libpython/SDL)
+#
+# Round 1 results: sequential Release x40 (half with MALLOC_PERTURB_) = 0 failures, so
+# that job is dropped — the flake is rarer than 1-in-40 and needs contention, not more
+# idle repetitions.
 #
 # DELETE THIS FILE once the root cause is fixed.
 name: Flaky SIGABRT Diagnostic
@@ -22,16 +26,18 @@ permissions:
   contents: read
 
 jobs:
-  # ── 1. Does it reproduce, and how often? ────────────────────────────────────
-  # Faithful copy of the real Linux job's configure flags, then the suite in a loop.
-  # MALLOC_PERTURB_ fills freed memory with a poison byte, so a use-after-free that
-  # normally reads plausible stale data instead reads garbage — it turns a rare
-  # silent corruption into a much louder one. Half the iterations run clean so we can
-  # tell "reproduces on its own" apart from "only reproduces when amplified".
-  stress:
-    name: Stress (Release x40)
+  # ── 1b. Same, but under contention ──────────────────────────────────────────
+  # 40 sequential runs on an idle runner did NOT reproduce. The engine's JobSystem
+  # pool sizes itself to hardware_concurrency, so on an idle 4-core runner a
+  # background job starts almost immediately — which is exactly the timing that hides
+  # a late-worker/teardown race. Running 4 suites at once oversubscribes the box, so
+  # queued jobs actually wait, and it quadruples the samples per round.
+  # stdbuf -oL keeps doctest's stdout line-buffered: on SIGABRT the buffer is
+  # otherwise lost, and with it the name of the test that was running.
+  stress-contended:
+    name: Stress (4 concurrent x 15 rounds)
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - uses: seanmiddleditch/gha-setup-ninja@v5
@@ -48,25 +54,31 @@ jobs:
         run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DHE_PREFER_MBEDTLS=ON
       - name: Build tests
         run: cmake --build build --target he_tests -j 4
-      - name: Run suite 40x
+      - name: Run 4 concurrent suites x 15 rounds
+        env:
+          MALLOC_PERTURB_: "165"
         run: |
           set +e
           fails=0
-          for i in $(seq 1 40); do
-            if [ "$i" -le 20 ]; then unset MALLOC_PERTURB_; mode="plain";
-            else export MALLOC_PERTURB_=165; mode="perturb"; fi
-            out=$(./build/tests/he_tests 2>&1)
-            rc=$?
-            if [ $rc -ne 0 ]; then
-              fails=$((fails+1))
-              echo "::group::iteration $i ($mode) FAILED rc=$rc"
-              echo "$out" | tail -60
-              echo "::endgroup::"
-            else
-              echo "iteration $i ($mode): ok"
-            fi
+          for round in $(seq 1 15); do
+            declare -A pids
+            for c in 1 2 3 4; do
+              stdbuf -oL -eL ./build/tests/he_tests --duration=true > "r${round}_${c}.log" 2>&1 &
+              pids[$c]=$!
+            done
+            for c in 1 2 3 4; do
+              wait "${pids[$c]}"; rc=$?
+              if [ $rc -ne 0 ]; then
+                fails=$((fails+1))
+                echo "::group::round $round copy $c FAILED rc=$rc"
+                tail -40 "r${round}_${c}.log"
+                echo "::endgroup::"
+              fi
+            done
+            rm -f r${round}_*.log
+            echo "round $round done (running total of failures: $fails)"
           done
-          echo "=== $fails / 40 iterations failed ==="
+          echo "=== $fails / 60 concurrent runs failed ==="
           [ $fails -eq 0 ]
 
   # ── 2. Where is the bad write? ──────────────────────────────────────────────
@@ -91,18 +103,27 @@ jobs:
             libxkbcommon-dev libegl1-mesa-dev libgl1-mesa-dev libglu1-mesa-dev \
             libasound2-dev libpulse-dev libudev-dev libdbus-1-dev libibus-1.0-dev \
             liblz4-dev libzstd-dev python3-dev
+      # -fno-sanitize=vptr: UBSan's vptr check emits typeinfo references for every
+      # polymorphic type, but Jolt and Recast are compiled without RTTI — leaving
+      # "undefined reference to typeinfo for JPH::Shape" & co. at link time. The check
+      # is unrelated to the heap corruption we are chasing, so it goes.
       - name: Configure (sanitized)
         run: |
           cmake -B build-asan -G Ninja \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DHE_PREFER_MBEDTLS=ON \
-            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g" \
-            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g" \
-            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined" \
-            -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=address,undefined"
+            -DHE_ENABLE_ASTC=OFF \
+            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-sanitize=vptr -fno-omit-frame-pointer -g" \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-sanitize=vptr -fno-omit-frame-pointer -g" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined -fno-sanitize=vptr" \
+            -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=address,undefined -fno-sanitize=vptr"
       - name: Build tests
         run: cmake --build build-asan --target he_tests -j 4
-      - name: Run suite 3x under ASan
+      # 2 concurrent copies x 8 rounds rather than a few sequential runs: the flake did
+      # not show in 40 sequential Release runs, so single-shot ASan would almost
+      # certainly come back green and prove nothing. Oversubscribing the runner is what
+      # makes a queued background job actually sit in the queue.
+      - name: Run suite 16x under ASan (2 concurrent x 8 rounds)
         env:
           ASAN_OPTIONS: detect_leaks=0:detect_odr_violation=0:abort_on_error=1:print_stacktrace=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=0
@@ -113,16 +134,25 @@ jobs:
         run: |
           set +e
           fails=0
-          for i in 1 2 3; do
-            out=$(./build-asan/tests/he_tests 2>&1); rc=$?
-            if [ $rc -ne 0 ]; then
-              fails=$((fails+1))
-              echo "::group::ASan iteration $i FAILED rc=$rc"; echo "$out" | tail -120; echo "::endgroup::"
-            else
-              echo "ASan iteration $i: ok"
-            fi
+          for round in $(seq 1 8); do
+            declare -A pids
+            for c in 1 2; do
+              stdbuf -oL -eL ./build-asan/tests/he_tests > "a${round}_${c}.log" 2>&1 &
+              pids[$c]=$!
+            done
+            for c in 1 2; do
+              wait "${pids[$c]}"; rc=$?
+              if [ $rc -ne 0 ]; then
+                fails=$((fails+1))
+                echo "::group::ASan round $round copy $c FAILED rc=$rc"
+                tail -150 "a${round}_${c}.log"
+                echo "::endgroup::"
+              fi
+            done
+            rm -f a${round}_*.log
+            echo "ASan round $round done (running total of failures: $fails)"
           done
-          echo "=== $fails / 3 ASan iterations failed ==="
+          echo "=== $fails / 16 ASan runs failed ==="
           [ $fails -eq 0 ]
 
   # ── 3. The blind spot ASan cannot cover ─────────────────────────────────────
@@ -147,8 +177,14 @@ jobs:
             libxkbcommon-dev libegl1-mesa-dev libgl1-mesa-dev libglu1-mesa-dev \
             libasound2-dev libpulse-dev libudev-dev libdbus-1-dev libibus-1.0-dev \
             liblz4-dev libzstd-dev python3-dev
+      # HE_ENABLE_ASTC=OFF: astcenc is fetched with ASTCENC_ISA_NATIVE=ON, i.e. built
+      # with -march=native. On the runner that emits instructions Valgrind's VEX cannot
+      # emulate, and the first ASTC test dies with SIGILL inside astcenc_config_init —
+      # which aborted the run at test 423/960, long before the region of interest
+      # (Python tests are ~689). Dropping the encoder costs one unrelated test case and
+      # buys coverage of the whole suite.
       - name: Configure
-        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DHE_PREFER_MBEDTLS=ON
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DHE_PREFER_MBEDTLS=ON -DHE_ENABLE_ASTC=OFF
       - name: Build tests
         run: cmake --build build --target he_tests -j 4
       - name: memcheck
@@ -164,3 +200,10 @@ jobs:
                    ./build/tests/he_tests 2>&1 | tee vg.log | tail -40
           echo "=== memcheck error summary ==="
           grep -E "Invalid (write|read)|ERROR SUMMARY|Mismatched|blocks are|jump" vg.log | tail -60
+          # A run that dies early (SIGILL/SIGABRT) reports "0 errors" for the part it
+          # never reached — so assert we actually got to the end before trusting that.
+          echo "=== coverage check ==="
+          grep -E "\[doctest\] test cases:" vg.log || true
+          if grep -qE "test case CRASHED|skipped" vg.log && ! grep -qE "0 skipped" vg.log; then
+            echo "WARNING: memcheck did not cover the whole suite — result is inconclusive"
+          fi
