@@ -140,6 +140,25 @@ public:
 	bool replaceTexture(HE::UUID id, TextureAsset asset);
 	bool replaceMaterial(HE::UUID id, MaterialAsset asset);
 
+	// ── Move / rename (editor) ─────────────────────────────────────────────
+	// An asset — or, with `folder = true`, a whole directory — has just been moved
+	// on disk from `oldRelativePath` to `newRelativePath` (both content-relative,
+	// an "Engine/…" prefix included). Assets reference each other by PATH here
+	// (mesh→material, material→textures/parent, graphs→classes/widgets/scenes,
+	// input mappings→actions), so without this every one of those references would
+	// dangle after the move; the UUID references scene components store are
+	// unaffected either way.
+	//
+	// Rewrites every referencing .hasset under the content root — including the
+	// moved asset's OWN embedded META path, which is what the packer builds its
+	// path→UUID map from — plus the project manifest's startup scene, and re-keys
+	// the in-memory path indices. Loaded copies of the rewritten files refresh
+	// through the ordinary pollHotReload() tick. Returns the number of files
+	// rewritten (0 = nothing referenced it).
+	size_t retargetAssetReferences(const std::string& oldRelativePath,
+	                               const std::string& newRelativePath,
+	                               bool folder = false);
+
 	// Check all disk-backed assets for file changes and reload any that have
 	// been modified since the last load. Returns the UUIDs of reloaded assets
 	// (same UUIDs — existing references remain valid). Virtual mem:// paths are

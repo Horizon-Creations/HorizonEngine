@@ -3,6 +3,7 @@ add_executable(he_tests
     test_slotmap.cpp
     test_hasset.cpp
     test_contentmanager.cpp
+    test_asset_ref_retarget.cpp
     test_material_graph.cpp
     test_particle_graph.cpp
     test_animator_state_machine_graph.cpp
@@ -59,6 +60,7 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderWorld.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/FrustumCuller.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderSorter.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/ScenePick.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/SsaoKernel.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/SkyNoise3D.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/SkyFrameParams.cpp
