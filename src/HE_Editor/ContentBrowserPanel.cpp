@@ -383,25 +383,64 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		constexpr float k_iconSize    = k_cellSize - k_iconPad * 2.0f;
 		constexpr float k_padding     = 8.0f;
 
-		// Helper: pick an asset icon based on file extension
-		auto pickAssetIcon = [&](const std::string& ext) -> ImTextureID
+		// ── Icon + tint for one grid item ─────────────────────────────────
+		// Keyed on what the file IS rather than what it is called. Engine assets
+		// are all named ".hasset", so the old extension-only lookup matched none
+		// of them and every one rendered as a blank button — the cached HAsset
+		// header sniff is what actually identifies them. Loose source files
+		// (.png/.obj/.lua/…) are not HAssets and fall through to the extension
+		// map below, which now exists only for them.
+		//
+		// The tint travels WITH the icon instead of being recovered afterwards by
+		// comparing texture handles: related types share a hue (meshes blue,
+		// material-ish green, scripting yellow, animation pink, input steel) and
+		// that grouping is only legible if the colour sits next to the type.
+		struct AssetVisual { ImTextureID icon = 0; ImVec4 tint{ 0.75f, 0.85f, 1.0f, 1.0f }; };
+		auto pickAssetVisual = [&](const HE::File* file) -> AssetVisual
 		{
-			std::string e = ext;
+			const auto& I = ctx.cbIcons;
+			switch (EditorAssetTypeCache::assetTypeOf(file->fullPath))
+			{
+				case HE::AssetType::StaticMesh:          return { I.model3d,              {0.70f, 0.80f, 1.00f, 1.0f} };
+				case HE::AssetType::SkeletalMesh:        return { I.model3d,              {0.62f, 0.86f, 1.00f, 1.0f} };
+				case HE::AssetType::Prefab:              return { I.prefab,               {0.58f, 0.78f, 1.00f, 1.0f} };
+				case HE::AssetType::Material:            return { I.material,             {0.60f, 0.90f, 0.60f, 1.0f} };
+				case HE::AssetType::MaterialFunction:    return { I.materialFunction,     {0.55f, 0.88f, 0.75f, 1.0f} };
+				case HE::AssetType::Shader:              return { I.shader,               {0.50f, 0.88f, 0.82f, 1.0f} };
+				case HE::AssetType::Texture:             return { I.texture,              {0.90f, 0.75f, 0.60f, 1.0f} };
+				case HE::AssetType::ParticleSystem:      return { I.particleSystem,       {1.00f, 0.82f, 0.55f, 1.0f} };
+				case HE::AssetType::Scene:               return { I.scene,                {0.75f, 0.65f, 1.00f, 1.0f} };
+				case HE::AssetType::Widget:              return { I.widget,               {0.82f, 0.72f, 1.00f, 1.0f} };
+				case HE::AssetType::Script:              return { I.script,               {0.90f, 0.90f, 0.50f, 1.0f} };
+				case HE::AssetType::HorizonCodeClass:    return { I.horizonCodeClass,     {0.95f, 0.85f, 0.55f, 1.0f} };
+				case HE::AssetType::AnimationClip:       return { I.animationClip,        {1.00f, 0.70f, 0.85f, 1.0f} };
+				case HE::AssetType::PropertyAnimClip:    return { I.propertyAnimClip,     {0.96f, 0.76f, 0.94f, 1.0f} };
+				case HE::AssetType::AnimatorStateMachine:return { I.animatorStateMachine, {0.98f, 0.72f, 0.78f, 1.0f} };
+				case HE::AssetType::InputAction:         return { I.inputAction,          {0.70f, 0.88f, 0.96f, 1.0f} };
+				case HE::AssetType::InputMappingContext: return { I.inputMappingContext,  {0.60f, 0.82f, 0.96f, 1.0f} };
+				case HE::AssetType::Audio:               return { I.sound,                {0.60f, 0.90f, 0.90f, 1.0f} };
+				case HE::AssetType::Font:                return { I.font,                 {0.92f, 0.88f, 0.80f, 1.0f} };
+				case HE::AssetType::Unknown: break; // not an HAsset — try the extension
+			}
+
+			std::string e = file->extension;
 			for (auto& c : e) c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
-			if (e == ".mat")                                   return ctx.cbIcons.material;
+			if (e == ".mat")                                   return { I.material, {0.60f, 0.90f, 0.60f, 1.0f} };
 			if (e == ".obj" || e == ".fbx" || e == ".gltf"
-				|| e == ".glb" || e == ".dae")                 return ctx.cbIcons.model3d;
-			if (e == ".svg" || e == ".ai")                     return ctx.cbIcons.model2d;
+				|| e == ".glb" || e == ".dae")                 return { I.model3d,  {0.70f, 0.80f, 1.00f, 1.0f} };
+			if (e == ".svg" || e == ".ai")                     return { I.model2d,  {0.80f, 0.70f, 1.00f, 1.0f} };
 			if (e == ".cs"  || e == ".lua" || e == ".py"
-				|| e == ".js")                                  return ctx.cbIcons.script;
+				|| e == ".js")                                  return { I.script,   {0.90f, 0.90f, 0.50f, 1.0f} };
 			if (e == ".h"   || e == ".hpp" || e == ".hh" || e == ".hxx"
-				|| e == ".cpp" || e == ".cc" || e == ".cxx" || e == ".c") return ctx.cbIcons.script;
+				|| e == ".cpp" || e == ".cc" || e == ".cxx" || e == ".c")
+				                                                return { I.script,   {0.90f, 0.90f, 0.50f, 1.0f} };
 			if (e == ".wav" || e == ".mp3" || e == ".ogg"
-				|| e == ".flac")                                return ctx.cbIcons.sound;
+				|| e == ".flac")                                return { I.sound,    {0.60f, 0.90f, 0.90f, 1.0f} };
 			if (e == ".png" || e == ".jpg" || e == ".jpeg"
-					|| e == ".bmp" || e == ".tga" || e == ".hdr")  return ctx.cbIcons.texture;
-				if (e == ".hescene")                               return ctx.cbIcons.scene;
-				return 0;
+				|| e == ".bmp" || e == ".tga" || e == ".hdr")   return { I.texture,  {0.90f, 0.75f, 0.60f, 1.0f} };
+			if (e == ".hescene")                               return { I.scene,    {0.75f, 0.65f, 1.00f, 1.0f} };
+			if (e == ".ttf" || e == ".otf")                    return { I.font,     {0.92f, 0.88f, 0.80f, 1.0f} };
+			return {};
 		};
 
 		// ── Rendered thumbnails for mesh/material assets ──────────────────
@@ -581,28 +620,19 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			}
 			ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(k_iconPad, k_iconPad));
 
-			// A rendered thumbnail (mesh/material) wins over the generic icon; it is
-			// drawn untinted, since its colours ARE the information. Everything else
-			// keeps the extension icon with its per-type tint.
-			ImTextureID thumb    = reinterpret_cast<ImTextureID>(
+			// A rendered thumbnail wins over the generic icon and is drawn untinted,
+			// since its colours ARE the information. Types without one — and assets
+			// whose tile has not been rendered yet — keep the per-type glyph.
+			ImTextureID thumb = reinterpret_cast<ImTextureID>(
 				AssetThumbnailCache::get(file->fullPath));
-			ImTextureID assetIcon = thumb ? thumb : pickAssetIcon(file->extension);
-			if (assetIcon)
+			const AssetVisual vis = thumb ? AssetVisual{ thumb, ImVec4(1, 1, 1, 1) }
+			                              : pickAssetVisual(file);
+			if (vis.icon)
 			{
-				ImVec4 tint{0.75f, 0.85f, 1.0f, 1.0f};
-				if (thumb)                             tint = {1.00f, 1.00f, 1.00f, 1.0f};
-				else if (assetIcon == ctx.cbIcons.material) tint = {0.60f, 0.90f, 0.60f, 1.0f};
-				else if (assetIcon == ctx.cbIcons.model3d)  tint = {0.70f, 0.80f, 1.00f, 1.0f};
-				else if (assetIcon == ctx.cbIcons.model2d)  tint = {0.80f, 0.70f, 1.00f, 1.0f};
-				else if (assetIcon == ctx.cbIcons.script)   tint = {0.90f, 0.90f, 0.50f, 1.0f};
-				else if (assetIcon == ctx.cbIcons.sound)    tint = {0.60f, 0.90f, 0.90f, 1.0f};
-				else if (assetIcon == ctx.cbIcons.texture)  tint = {0.90f, 0.75f, 0.60f, 1.0f};
-				else if (assetIcon == ctx.cbIcons.scene)    tint = {0.75f, 0.65f, 1.00f, 1.0f};
-
-				ImGui::ImageButton("##icon", assetIcon,
+				ImGui::ImageButton("##icon", vis.icon,
 					ImVec2(k_iconSize, k_iconSize),
 					ImVec2(0,0), ImVec2(1,1),
-					ImVec4(0,0,0,0), tint);
+					ImVec4(0,0,0,0), vis.tint);
 			}
 			else
 			{

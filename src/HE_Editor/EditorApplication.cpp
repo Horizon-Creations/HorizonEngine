@@ -753,6 +753,20 @@ void EditorApplication::OnInit()
 			{ "Stop.tga",     &m_iconStop     },
 			{ "undo.png",     &m_iconUndo     },
 			{ "redo.png",     &m_iconRedo     },
+			// Per-asset-type glyphs (scripts/make_asset_icons.py). File names are
+			// the HE::AssetType spelling so the mapping stays obvious.
+			{ "MaterialFunction.png",     &m_iconMaterialFunction     },
+			{ "Shader.png",               &m_iconShader               },
+			{ "Prefab.png",               &m_iconPrefab               },
+			{ "AnimationClip.png",        &m_iconAnimationClip        },
+			{ "PropertyAnimClip.png",     &m_iconPropertyAnimClip     },
+			{ "Widget.png",               &m_iconWidget               },
+			{ "HorizonCodeClass.png",     &m_iconHorizonCodeClass     },
+			{ "InputAction.png",          &m_iconInputAction          },
+			{ "InputMappingContext.png",  &m_iconInputMappingContext  },
+			{ "ParticleSystem.png",       &m_iconParticleSystem       },
+			{ "AnimatorStateMachine.png", &m_iconAnimatorStateMachine },
+			{ "Font.png",                 &m_iconFont                 },
 		};
 		for (auto& entry : icons)
 		{
@@ -2425,6 +2439,18 @@ AppContext EditorApplication::makeContext()
 			m_iconSound,
 			m_iconTexture,
 			m_iconScene,
+			m_iconMaterialFunction,
+			m_iconShader,
+			m_iconPrefab,
+			m_iconAnimationClip,
+			m_iconPropertyAnimClip,
+			m_iconWidget,
+			m_iconHorizonCodeClass,
+			m_iconInputAction,
+			m_iconInputMappingContext,
+			m_iconParticleSystem,
+			m_iconAnimatorStateMachine,
+			m_iconFont,
 		},
 		.toolbarIcons        = {
 			m_iconPlay,
