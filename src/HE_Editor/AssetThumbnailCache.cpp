@@ -3,7 +3,12 @@
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <MaterialGraph/MaterialGraph.h> // material-FUNCTION tiles wrap the graph
+#include <HorizonScene/HorizonWorld.h>   // PREFAB tiles instantiate the blob
+#include <HorizonScene/SceneSerializer.h>
+#include <HorizonScene/Components/MeshComponent.h>
+#include <HorizonScene/Components/SkeletalMeshComponent.h>
 #include <Renderer/IRenderer.h>
+#include <Renderer/UIFont.h>       // FONT tiles bake a sample through the engine's own cache
 #include <Types/Enums.h>
 #include <algorithm>
 #include <cstdio>
@@ -86,6 +91,11 @@ namespace
 			// Textures never reach the renderer — makeTextureThumbnail draws them on
 			// the CPU from the asset's own pixels. The kind is unused for them.
 			case HE::AssetType::Texture:          out = ThumbnailKind::Material;     return true;
+			// A prefab resolves to a mesh inside it; the real kind is decided at
+			// render time by prefabPrimaryMesh (static vs skeletal).
+			case HE::AssetType::Prefab:           out = ThumbnailKind::StaticMesh;   return true;
+			// Fonts are baked on the CPU too (makeFontThumbnail); kind unused.
+			case HE::AssetType::Font:             out = ThumbnailKind::Material;     return true;
 			default: return false;
 		}
 	}
@@ -234,6 +244,118 @@ namespace
 		return true;
 	}
 
+	// ── Fonts ────────────────────────────────────────────────────────────────
+	// A font's tile is a sample set IN THAT FONT — the one preview that tells you
+	// what you actually want to know (is it a serif? a display face? does it have
+	// the weight I need?), which no glyph could. Baked through the engine's own
+	// UIFontCache rather than a private rasterizer, so a font that renders in-game
+	// renders here identically.
+	bool makeFontThumbnail(const HE::UUID& fontId, std::vector<uint8_t>& out)
+	{
+		const FontAsset* fa = s_content->getFont(fontId);
+		if (!fa || fa->fontData.empty()) return false;
+		const uint32_t key = HE::UIFontCache::keyFor(fontId.hi ^ fontId.lo, fa->fontData,
+		                                             HE::BakedUIFont::kBakePx);
+		const HE::BakedUIFont* font = HE::UIFontCache::find(key);
+		if (!font || !font->ok || font->pixels.empty()) return false;
+
+		// "Aa" — a capital and a lowercase show cap height, x-height and the
+		// stroke contrast between them, which is most of a face's character.
+		static const char kSample[] = "Aa";
+		struct Quad { float x0, y0, x1, y1; const HE::BakedGlyph* g; };
+		std::vector<Quad> quads;
+		float penX = 0.0f;
+		float minX = 1e9f, minY = 1e9f, maxX = -1e9f, maxY = -1e9f;
+		for (const char* c = kSample; *c; ++c)
+		{
+			const unsigned char ch = static_cast<unsigned char>(*c);
+			if (ch < 32 || ch >= 128) continue;
+			const HE::BakedGlyph& g = font->glyphs[ch - 32];
+			const Quad q{ penX + g.xoff, g.yoff,
+			              penX + g.xoff + (g.x1 - g.x0), g.yoff + (g.y1 - g.y0), &g };
+			if (q.x1 > q.x0 && q.y1 > q.y0)
+			{
+				quads.push_back(q);
+				minX = std::min(minX, q.x0); maxX = std::max(maxX, q.x1);
+				minY = std::min(minY, q.y0); maxY = std::max(maxY, q.y1);
+			}
+			penX += g.xadvance;
+		}
+		if (quads.empty() || maxX <= minX || maxY <= minY) return false;
+
+		const int S = static_cast<int>(kThumbSize);
+		out.assign(static_cast<size_t>(S) * S * 4, 0);
+		const float margin = S * 0.14f;
+		const float scale  = std::min((S - 2 * margin) / (maxX - minX),
+		                              (S - 2 * margin) / (maxY - minY));
+		const float offX = (S - (maxX - minX) * scale) * 0.5f - minX * scale;
+		const float offY = (S - (maxY - minY) * scale) * 0.5f - minY * scale;
+
+		// White coverage on transparent — the tile is drawn untinted over the dark
+		// button, so the glyphs read the same way the icons do.
+		for (const Quad& q : quads)
+		{
+			const int dx0 = std::max(0, static_cast<int>(q.x0 * scale + offX));
+			const int dy0 = std::max(0, static_cast<int>(q.y0 * scale + offY));
+			const int dx1 = std::min(S, static_cast<int>(q.x1 * scale + offX) + 1);
+			const int dy1 = std::min(S, static_cast<int>(q.y1 * scale + offY) + 1);
+			for (int y = dy0; y < dy1; ++y)
+				for (int x = dx0; x < dx1; ++x)
+				{
+					// Back-project the destination pixel centre into the atlas box.
+					const float u = ((x + 0.5f) - offX) / scale - q.x0;
+					const float v = ((y + 0.5f) - offY) / scale - q.y0;
+					const int sx = static_cast<int>(q.g->x0 + u);
+					const int sy = static_cast<int>(q.g->y0 + v);
+					if (sx < 0 || sy < 0 || sx >= font->atlasW || sy >= font->atlasH) continue;
+					const uint8_t cov = font->pixels[static_cast<size_t>(sy) * font->atlasW + sx];
+					if (cov == 0) continue;
+					uint8_t* dst = &out[(static_cast<size_t>(y) * S + x) * 4];
+					dst[0] = dst[1] = dst[2] = 255;
+					dst[3] = std::max(dst[3], cov);
+				}
+		}
+		return true;
+	}
+
+	// ── Prefabs ──────────────────────────────────────────────────────────────
+	// A prefab is a CBOR entity subtree, so there is no shape to hand the
+	// renderer — but there is one inside it. The blob is instantiated into a
+	// throwaway world (the same call the editor uses when you drop a prefab into
+	// a scene, so no second CBOR reader has to exist) and the first mesh found is
+	// drawn as the tile.
+	//
+	// FIRST mesh, not all of them: the thumbnail API renders one asset, and a
+	// multi-mesh prefab would need a whole scene render with per-entity
+	// transforms. For the common case — a prop, one mesh — the tile is exactly
+	// right; for an assembly it shows the primary part rather than nothing.
+	bool prefabPrimaryMesh(const HE::UUID& prefabId, HE::UUID& meshOut, bool& skeletalOut)
+	{
+		const PrefabAsset* pf = s_content->getPrefab(prefabId);
+		if (!pf || pf->data.empty()) return false;
+
+		// Its constructor reserves the core component pools for this module, so a
+		// scratch world here cannot hand pool ownership to a hot-loaded game dylib.
+		HorizonWorld scratch;
+		SceneSerializer ser;
+		if (ser.instantiatePrefab(scratch, pf->data) == entt::null) return false;
+
+		auto& reg = scratch.registry();
+		// Static meshes win over skeletal ones only by iteration order; either
+		// makes a fine tile, and the caller picks the matching thumbnail kind.
+		for (auto e : reg.view<MeshComponent>())
+		{
+			const auto& mc = reg.get<MeshComponent>(e);
+			if (mc.meshAssetId != HE::UUID{}) { meshOut = mc.meshAssetId; skeletalOut = false; return true; }
+		}
+		for (auto e : reg.view<SkeletalMeshComponent>())
+		{
+			const auto& sc = reg.get<SkeletalMeshComponent>(e);
+			if (sc.meshAssetId != HE::UUID{}) { meshOut = sc.meshAssetId; skeletalOut = true; return true; }
+		}
+		return false;
+	}
+
 	// Content-relative path (or the absolute one when the asset lives under
 	// neither root) — the same key the ContentManager addresses assets by, and
 	// what the cache file records so a name-hash collision can be detected.
@@ -256,6 +378,16 @@ bool textureThumbnail(const HE::UUID& textureId, std::vector<uint8_t>& out)
 }
 
 uint32_t thumbnailSize() { return kThumbSize; }
+
+bool prefabMesh(const HE::UUID& prefabId, HE::UUID& meshIdOut, bool& isSkeletalOut)
+{
+	return s_content && prefabPrimaryMesh(prefabId, meshIdOut, isSkeletalOut);
+}
+
+bool fontThumbnail(const HE::UUID& fontId, std::vector<uint8_t>& out)
+{
+	return s_content && makeFontThumbnail(fontId, out);
+}
 
 void setContext(IRenderer* renderer, ContentManager* cm, const std::string& cacheDir)
 {
@@ -346,11 +478,30 @@ void* get(const std::string& absPath)
 	                               : s_content->loadAsset(relPath);
 	if (id == HE::UUID{}) { e.state = State::Unsupported; return nullptr; }
 
+	// A prefab is drawn as the mesh it contains, so both the id and the kind are
+	// replaced before the render.
+	HE::UUID renderId = id;
+	if (type == HE::AssetType::Prefab)
+	{
+		HE::UUID meshId; bool skeletal = false;
+		if (!prefabPrimaryMesh(id, meshId, skeletal))
+		{
+			// A prefab with no mesh at all (pure logic/audio) has nothing to draw —
+			// its glyph is the honest answer.
+			if (!wasLoaded) s_content->unloadAsset(id);
+			e.state = State::Unsupported;
+			return nullptr;
+		}
+		renderId = meshId;
+		kind = skeletal ? ThumbnailKind::SkeletalMesh : ThumbnailKind::StaticMesh;
+	}
+
 	std::vector<uint8_t> pixels;
 	--s_rendersLeft;
-	const bool produced = (type == HE::AssetType::Texture)
-		? makeTextureThumbnail(id, pixels)
-		: s_renderer->RenderAssetThumbnail(*s_content, kind, id, kThumbSize, pixels);
+	const bool produced =
+		  type == HE::AssetType::Texture ? makeTextureThumbnail(renderId, pixels)
+		: type == HE::AssetType::Font    ? makeFontThumbnail(renderId, pixels)
+		: s_renderer->RenderAssetThumbnail(*s_content, kind, renderId, kThumbSize, pixels);
 
 	// The asset was pulled into memory only to draw a 128px tile — let it go
 	// again. The renderer keeps its own GPU copy of a mesh it just uploaded, so
