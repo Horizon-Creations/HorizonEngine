@@ -9,6 +9,7 @@
 #   stress-contended — real Release build, 4 concurrent suites x 15 rounds
 #   asan             — ASan+UBSan, 2 concurrent x 8 rounds (pinpoints the write)
 #   valgrind         — memcheck (catches the same class inside UNinstrumented libpython/SDL)
+#   tsan             — ThreadSanitizer, finds the race itself rather than its aftermath
 #
 # Round 1 results: sequential Release x40 (half with MALLOC_PERTURB_) = 0 failures, so
 # that job is dropped — the flake is rarer than 1-in-40 and needs contention, not more
@@ -131,6 +132,11 @@ jobs:
             -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=address,undefined -fno-sanitize=vptr"
       - name: Build tests
         run: cmake --build build-asan --target he_tests -j 4
+      # NOTE: no stdbuf here. stdbuf injects libstdbuf.so via LD_PRELOAD, which then
+      # precedes the sanitizer runtime and makes it refuse to start ("ASan runtime does
+      # not come first in initial library list") — every run aborts instantly with 134.
+      # Sanitizer reports go to stderr unbuffered, so line buffering buys nothing here;
+      # it is only needed in the plain stress job, where doctest's stdout is the signal.
       # 2 concurrent copies x 8 rounds rather than a few sequential runs: the flake did
       # not show in 40 sequential Release runs, so single-shot ASan would almost
       # certainly come back green and prove nothing. Oversubscribing the runner is what
@@ -149,7 +155,7 @@ jobs:
           # One sequential run over the COMPLETE suite first: the contended rounds below
           # have to exclude the GameLogicLoader tests, so this is what keeps them covered.
           d="$PWD/tmp_seq"; mkdir -p "$d"
-          TMPDIR="$d" stdbuf -oL -eL ./build-asan/tests/he_tests > seq.log 2>&1
+          TMPDIR="$d" ./build-asan/tests/he_tests > seq.log 2>&1
           if [ $? -ne 0 ]; then
             fails=$((fails+1))
             echo "::group::ASan sequential full run FAILED"; tail -150 seq.log; echo "::endgroup::"
@@ -161,7 +167,7 @@ jobs:
             for c in 1 2; do
               # See the TMPDIR note in stress-contended — same fixed-temp-path collision.
               d="$PWD/tmp_a${c}"; rm -rf "$d"; mkdir -p "$d"
-              TMPDIR="$d" stdbuf -oL -eL ./build-asan/tests/he_tests \
+              TMPDIR="$d" ./build-asan/tests/he_tests \
                 -tce="GameLogicLoader*" > "a${round}_${c}.log" 2>&1 &
               pids[$c]=$!
             done
@@ -179,6 +185,61 @@ jobs:
           done
           echo "=== $fails / 17 ASan runs failed (1 sequential + 16 contended) ==="
           [ $fails -eq 0 ]
+
+  # ── 4. Races, directly ──────────────────────────────────────────────────────
+  # Valgrind memcheck came back with 0 errors over the FULL suite, which largely rules
+  # out a deterministic overflow/use-after-free — but memcheck serializes threads, so
+  # it is structurally blind to timing-dependent bugs. That leaves a race as the
+  # leading explanation, and TSan finds races directly instead of waiting for one to
+  # corrupt the allocator. It should flag the async ContentManager path, where a pool
+  # worker touches this->m_resultsMutex / m_asyncResults with no ordering against
+  # ~ContentManager.
+  # ASan and TSan cannot be combined, hence a separate job.
+  tsan:
+    name: ThreadSanitizer
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: seanmiddleditch/gha-setup-ninja@v5
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev \
+            libxfixes-dev libxss-dev libwayland-dev wayland-protocols libdecor-0-dev \
+            libxkbcommon-dev libegl1-mesa-dev libgl1-mesa-dev libglu1-mesa-dev \
+            libasound2-dev libpulse-dev libudev-dev libdbus-1-dev libibus-1.0-dev \
+            liblz4-dev libzstd-dev python3-dev
+      - name: Configure (TSan)
+        run: |
+          cmake -B build-tsan -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DHE_PREFER_MBEDTLS=ON \
+            -DHE_ENABLE_ASTC=OFF \
+            -DCMAKE_C_FLAGS="-fsanitize=thread -fno-omit-frame-pointer -g" \
+            -DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer -g" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread" \
+            -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=thread"
+      - name: Build tests
+        run: cmake --build build-tsan --target he_tests -j 4
+      - name: Run suite under TSan
+        env:
+          # halt_on_error=0: collect EVERY race in one pass instead of dying on the
+          # first one; the report is the deliverable here, not the exit code.
+          TSAN_OPTIONS: halt_on_error=0:second_deadlock_stack=1:history_size=7
+          PYTHONMALLOC: malloc
+        run: |
+          set +e
+          for i in 1 2 3; do
+            d="$PWD/tmp_t$i"; mkdir -p "$d"
+            TMPDIR="$d" ./build-tsan/tests/he_tests > "t$i.log" 2>&1
+            echo "TSan run $i exit=$?"
+          done
+          echo "=== distinct race signatures ==="
+          grep -hA3 "WARNING: ThreadSanitizer" t*.log | head -300
+          echo "=== race count per run ==="
+          for i in 1 2 3; do echo "run $i: $(grep -c 'WARNING: ThreadSanitizer' t$i.log) warnings"; done
 
   # ── 3. The blind spot ASan cannot cover ─────────────────────────────────────
   # ASan only instruments code we compile. A bad write performed inside libpython,
