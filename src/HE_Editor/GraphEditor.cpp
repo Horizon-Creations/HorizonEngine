@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <unordered_set>
 #include <cmath>
+#include <limits>
 #include <unordered_map>
 
 namespace GraphEditor {
@@ -121,6 +122,35 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
     // box-select. Hovering a node-body child window already turns `hovered`
     // off, so editing a body widget doesn't trigger canvas interaction.
     const bool interact = hovered && !st.suppressInteraction && !behindConsumed;
+
+    // Owning the keyboard is NOT the same as `interact`: that only means the
+    // cursor is over the canvas. With a text field active anywhere (a node's
+    // rename box, a variable name, the search field of a popup) the cursor is
+    // usually still over the canvas — so an ordinary edit keystroke would
+    // destroy the selection or drop a node. Every shortcut below is gated on
+    // this, the same guard the material editor's shortcuts already use.
+    const bool kbOwned = !ImGui::GetIO().WantTextInput && !ImGui::IsAnyItemActive();
+
+    // F is bound twice (see State::fSpawned): a fresh press starts out "not
+    // spawned yet", and only a release still in that state frames the selection.
+    // Key REPEAT has to be off here — a held F keeps re-firing IsKeyPressed by
+    // default, which would wipe the "already spawned" mark while the key is
+    // still down and frame the view the moment it comes up.
+    if (kbOwned && ImGui::IsKeyPressed(ImGuiKey_F, /*repeat*/false)) st.fSpawned = false;
+
+    // The quick-spawn entry whose key is held right now (modifiers must match
+    // exactly, so Cmd+D stays Duplicate and never drops a Delay).
+    auto heldSpawn = [&](bool pressedOnly) -> const QuickSpawn*
+    {
+        const ImGuiIO& kio = ImGui::GetIO();
+        if (kio.KeyCtrl || kio.KeySuper || kio.KeyAlt) return nullptr;
+        for (const QuickSpawn& qs : model.quickSpawns)
+            if (qs.shift == kio.KeyShift &&
+                (pressedOnly ? ImGui::IsKeyPressed(qs.key, /*repeat*/false)
+                             : ImGui::IsKeyDown(qs.key)))
+                return &qs;
+        return nullptr;
+    };
 
     // Canvas drop targets (elements, variables, …) — bound to the InvisibleButton.
     if (!model.dropPayloads.empty() && model.onDrop && ImGui::BeginDragDropTarget())
@@ -505,6 +535,25 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
         }
     }
 
+    // ── Quick spawn: hold a bound key, click empty canvas ────────────────────
+    // Runs after the node loop (so `hoverNodeNow` is known) and before
+    // box-select, and consumes the click — otherwise the same press would also
+    // start a selection rectangle under the node it just dropped.
+    if (interact && kbOwned && !consumed && !model.quickSpawns.empty() &&
+        st.linkSrcNode == 0 && st.dragNode == 0 && hoverNodeNow == 0 &&
+        ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+    {
+        if (const QuickSpawn* qs = heldSpawn(/*pressedOnly*/false))
+        {
+            QuickSpawnCtx ctx;
+            ctx.pos = toGraph(mouse);
+            const int created = qs->spawn(ctx);
+            if (created != 0) { st.selected = created; st.selection = { created }; changed = true; }
+            if (qs->key == ImGuiKey_F) st.fSpawned = true;
+            consumed = true;
+        }
+    }
+
     // ── Hover tooltip (after the cursor rests on a node briefly) ─────────────
     if (model.nodeTooltip)
     {
@@ -572,7 +621,30 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
                 else                 drawLink(dl, *a, mouse, IM_COL32(255, 210, 120, 220), 2.0f);
             }
 
-        if (ImGui::IsMouseReleased(ImGuiMouseButton_Left))
+        // A bound key hit mid-drag drops that node ALREADY WIRED to the pin in
+        // hand — the drag-off menu's result without the menu. There is no click
+        // to gate on here, so this reacts to the key edge, not to it being held.
+        if (kbOwned && !model.quickSpawns.empty())
+        {
+            if (const QuickSpawn* qs = heldSpawn(/*pressedOnly*/true); qs && qs->wireable)
+            {
+                QuickSpawnCtx ctx;
+                ctx.pos       = toGraph(mouse);
+                ctx.linkNode  = st.linkSrcNode;
+                ctx.linkPin   = st.linkSrcPin;
+                ctx.linkInput = st.linkSrcInput;
+                const int created = qs->spawn(ctx);
+                if (created != 0) { st.selected = created; st.selection = { created }; changed = true; }
+                if (qs->key == ImGuiKey_F) st.fSpawned = true;
+                // The drag is over either way; the mouse button is still down,
+                // so clearing the source here also stops the release below from
+                // opening the drag-off menu on top of the node just created.
+                st.linkSrcNode = 0;
+                st.linkGrab = false;
+            }
+        }
+
+        if (st.linkSrcNode != 0 && ImGui::IsMouseReleased(ImGuiMouseButton_Left))
         {
             int tn = 0, tp = 0; bool ti = false;
             if (pinAt(mouse, tn, tp, ti))
@@ -655,23 +727,107 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
     if (model.drawFront) model.drawFront(dl, origin, st.pan, st.zoom);
 
     // ── Delete selection ─────────────────────────────────────────────────────
-    // `interact` alone is NOT enough to own the keyboard: it only means the
-    // cursor is over the canvas. With a text field active anywhere (a node's
-    // rename box, a variable name, the search field of a popup) the cursor is
-    // usually still over the canvas — so an ordinary edit keystroke destroyed
-    // the selected nodes. Require that nothing is consuming text input, the
-    // same guard the material editor's shortcuts already use.
+    // Gated on kbOwned (see its definition): with a text field active the cursor
+    // is usually still over the canvas, so an ordinary edit keystroke used to
+    // destroy the selected nodes.
     //
     // Backspace is deliberately NOT a delete key here: it is THE text-editing
     // key, so binding it to node destruction makes every near-miss fatal. The
     // node context menu's "Delete Node/Selection" is the always-available path.
-    const bool kbOwned = !ImGui::GetIO().WantTextInput && !ImGui::IsAnyItemActive();
     if (interact && kbOwned && model.removeNode && ImGui::IsKeyPressed(ImGuiKey_Delete))
     {
         std::vector<int> doomed = st.selection;
         if (doomed.empty() && st.selected != 0) doomed.push_back(st.selected);
         for (int nid : doomed) model.removeNode(nid);
         if (!doomed.empty()) { st.selection.clear(); st.selected = 0; changed = true; }
+    }
+
+    // ── Select all (in the visible sub-graph) ────────────────────────────────
+    {
+        const ImGuiIO& kio = ImGui::GetIO();
+        if (interact && kbOwned && model.multiSelect && (kio.KeyCtrl || kio.KeySuper) &&
+            ImGui::IsKeyPressed(ImGuiKey_A, /*repeat*/false))
+        {
+            st.selection = ids;   // `ids` is already only what this graph shows
+            st.selected  = st.selection.empty() ? 0 : st.selection.front();
+        }
+    }
+
+    // ── Framing: Home fits the whole graph, a plain F tap the selection ──────
+    // Fits `which` (empty = every node) into the canvas. Zoom is capped at 1:1 —
+    // framing a single small node should bring it into view, not magnify it.
+    auto frameNodes = [&](const std::vector<int>& which)
+    {
+        constexpr float kBig = std::numeric_limits<float>::max();
+        ImVec2 mn(kBig, kBig), mx(-kBig, -kBig);
+        for (const Drawn& n : nodes)
+        {
+            if (!which.empty() &&
+                std::find(which.begin(), which.end(), n.id) == which.end()) continue;
+            float gx = 0, gy = 0; model.getPos(n.id, gx, gy);
+            mn.x = std::min(mn.x, gx);                       mn.y = std::min(mn.y, gy);
+            mx.x = std::max(mx.x, gx + n.size.x / st.zoom);  mx.y = std::max(mx.y, gy + n.size.y / st.zoom);
+        }
+        if (mn.x > mx.x) return;   // nothing to frame
+        const float pad = 60.0f;
+        const float w = (mx.x - mn.x) + pad * 2.0f, h = (mx.y - mn.y) + pad * 2.0f;
+        st.zoom  = std::clamp(std::min(size.x / w, size.y / h), 0.3f, 1.0f);
+        st.pan.x = size.x * 0.5f - (mn.x + mx.x) * 0.5f * st.zoom;
+        st.pan.y = size.y * 0.5f - (mn.y + mx.y) * 0.5f * st.zoom;
+    };
+    if (interact && kbOwned && ImGui::IsKeyPressed(ImGuiKey_Home, /*repeat*/false)) frameNodes({});
+    if (interact && kbOwned && !st.fSpawned && ImGui::IsKeyReleased(ImGuiKey_F))
+    {
+        std::vector<int> sel = st.selection;
+        if (sel.empty() && st.selected != 0) sel.push_back(st.selected);
+        frameNodes(sel);   // nothing selected → frame everything
+    }
+
+    // ── Straighten connections (Q) ───────────────────────────────────────────
+    // Snaps the selection's wires horizontal: for every link INSIDE the
+    // selection the downstream node slides vertically until its input pin lines
+    // up with the source's output pin. With a single node selected it is the
+    // other end of each of its links that moves instead, so the node you aimed
+    // at stays where you put it.
+    if (interact && kbOwned && model.setPos && ImGui::IsKeyPressed(ImGuiKey_Q, /*repeat*/false))
+    {
+        std::vector<int> sel = st.selection;
+        if (sel.empty() && st.selected != 0) sel.push_back(st.selected);
+        const bool single = sel.size() == 1;
+        auto inSel = [&](int nid){ return std::find(sel.begin(), sel.end(), nid) != sel.end(); };
+        // A pin's offset from its node's top edge in graph units — unlike the
+        // laid-out pin positions this stays valid while the nodes move.
+        auto pinOffsetY = [&](int nid, int pinId, bool input) -> float {
+            const Drawn* n = findNode(nid); if (!n) return 0.0f;
+            const ImVec2* p = findPin(*n, pinId, input); if (!p) return 0.0f;
+            return (p->y - n->pos.y) / st.zoom;
+        };
+        auto align = [&](int anchor, int anchorPin, int mover, int moverPin, bool moverIsDst) {
+            float ax = 0, ay = 0, mx2 = 0, my = 0;
+            model.getPos(anchor, ax, ay);
+            model.getPos(mover,  mx2, my);
+            const float want = ay + pinOffsetY(anchor, anchorPin, !moverIsDst)
+                                  - pinOffsetY(mover,  moverPin,   moverIsDst);
+            if (std::fabs(want - my) > 0.01f) { model.setPos(mover, mx2, want); changed = true; }
+        };
+        // Left to right, so a chain settles in one sweep; a second pass catches
+        // the nodes whose anchor only moved during the first.
+        std::vector<std::array<int,4>> ordered;
+        for (const auto& l : links)
+            if (single ? (l[0] == sel.front() || l[2] == sel.front())
+                       : (inSel(l[0]) && inSel(l[2])))
+                ordered.push_back(l);
+        std::sort(ordered.begin(), ordered.end(), [&](const auto& a, const auto& b) {
+            float ax = 0, ay = 0, bx = 0, by = 0;
+            model.getPos(a[0], ax, ay); model.getPos(b[0], bx, by);
+            return ax < bx;
+        });
+        for (int pass = 0; pass < 2; ++pass)
+            for (const auto& l : ordered)
+            {
+                if (single && l[2] == sel.front()) align(l[2], l[3], l[0], l[1], false);
+                else                               align(l[0], l[1], l[2], l[3], true);
+            }
     }
 
     // ── Add-node popup (right-click on EMPTY canvas, no pan drag) ─────────────
@@ -684,6 +840,14 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
     if (model.drawAddMenu && interact && !overAnyNode &&
         ImGui::IsMouseReleased(ImGuiMouseButton_Right) &&
         ImGui::GetIO().MouseDragMaxDistanceSqr[ImGuiMouseButton_Right] < 36.0f)
+    {
+        st.addMenuGraphPos = toGraph(mouse);
+        ImGui::OpenPopup("##ge_add");
+    }
+    // Space is the keyboard route to the same palette: the popup opens at the
+    // cursor with its search field focused, so "space, three letters, Enter"
+    // never needs the mouse to aim at anything.
+    if (model.drawAddMenu && interact && kbOwned && ImGui::IsKeyPressed(ImGuiKey_Space, /*repeat*/false))
     {
         st.addMenuGraphPos = toGraph(mouse);
         ImGui::OpenPopup("##ge_add");

@@ -629,7 +629,7 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 	if (GraphEditor::draw("##ls_canvas", m, g.ge, avail)) edited = true;
 	g.selectedNode = g.ge.selected;
 
-	HGH::handleClipboardKeys(host, canvasOrigin, avail);
+	HGH::handleGraphKeys(host, canvasOrigin, avail);
 }
 
 // Shared window body: left sidebar (variables + functions + details) + canvas,

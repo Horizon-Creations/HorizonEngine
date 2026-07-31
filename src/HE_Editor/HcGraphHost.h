@@ -148,9 +148,15 @@ bool drawCommonNodeDetails(const Host& h, HC::Node& n);
 // id (auto-selected), or 0. Wired into Model::drawPinDragMenu by buildModel.
 int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const ImVec2& pos);
 
-// Node clipboard + duplicate shortcuts (Cmd on macOS, Ctrl elsewhere), handled
-// after GraphEditor::draw. `canvasOrigin`/`avail` are the canvas rect (paste
-// lands under the mouse when it is over the canvas, else in its centre).
-void handleClipboardKeys(const Host& h, const ImVec2& canvasOrigin, const ImVec2& avail);
+// Everything keyboard-driven that has to happen AFTER GraphEditor::draw, in the
+// canvas window: the node clipboard + duplicate shortcuts (Cmd on macOS, Ctrl
+// elsewhere) and the quick-pick popup the G / Shift+G / E shortcuts request from
+// inside the canvas. `canvasOrigin`/`avail` are the canvas rect (paste lands
+// under the mouse when it is over the canvas, else in its centre).
+//
+// The rest of the shortcuts live where they belong: the node keys (B/S/D/…) are
+// GraphEditor::Model::quickSpawns entries filled by buildModel, and the canvas
+// itself owns Delete, Space, Ctrl+A, Home, F and Q.
+void handleGraphKeys(const Host& h, const ImVec2& canvasOrigin, const ImVec2& avail);
 
 } // namespace HcGraphHost

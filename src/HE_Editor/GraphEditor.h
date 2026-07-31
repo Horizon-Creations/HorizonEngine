@@ -10,8 +10,15 @@
 // HorizonCode (visual scripting) editor, so the two look and behave identically.
 // The component owns the common frontend — pan/zoom, grid, node boxes, pins,
 // bezier links, drag-to-connect, node move, single/multi/box selection, delete,
-// and the right-click add-node popup — while the host adapts its own graph
-// (material shader nodes vs HorizonCode code nodes) through the Model callbacks.
+// the right-click add-node popup and the keyboard shortcuts — while the host
+// adapts its own graph (material shader nodes vs HorizonCode code nodes)
+// through the Model callbacks.
+//
+// Shortcuts the canvas itself owns (all gated on the cursor being over it and
+// nothing consuming text input): Delete removes the selection, Space opens the
+// add palette at the cursor, Ctrl/Cmd+A selects everything, Home fits the graph,
+// a plain F tap frames the selection and Q straightens the selection's wires.
+// Node shortcuts ("hold B, click" → Branch) are host data — see quickSpawns.
 // Host-specific chrome (comments, per-node parameter widgets, previews) is drawn
 // through the body/decoration hooks in the SAME canvas transform.
 
@@ -30,6 +37,34 @@ struct Pin
     bool        input;   // left column (true) or right column (false)
     bool        isExec;  // draw as a triangle (exec flow) vs a circle (data)
     bool        isArray = false; // draw as a 2×2 grid (array of the data type)
+};
+
+// ── Quick spawn ("hold a key, click") ────────────────────────────────────────
+// What the host is told when a bound key fires: where the node goes, plus the
+// pin the user was dragging a wire off at that moment (0 = none, an ordinary
+// click on empty canvas). When a pin IS supplied the host should wire the new
+// node to it — the same auto-wiring its drag-off menu already does, just
+// without the menu.
+struct QuickSpawnCtx
+{
+    ImVec2 pos;                // graph-space drop point
+    int    linkNode  = 0;      // node the in-flight link drag started from
+    int    linkPin   = 0;      // …and its pin
+    bool   linkInput = false;  // that pin is an INPUT (so the new node feeds it)
+};
+
+struct QuickSpawn
+{
+    ImGuiKey key;
+    // Create (and, given a pin, wire) the node. Returns the new node id — or 0
+    // when the host opened a popup of its own instead, in which case nothing is
+    // selected and no undo point is taken here.
+    std::function<int(const QuickSpawnCtx&)> spawn;
+    // Fires only while Shift is held; an entry without it only while it is not.
+    bool shift = false;
+    // May end an in-flight link drag. False for popup entries: the drag would
+    // have to survive until the user picks something, which it cannot.
+    bool wireable = true;
 };
 
 // Persistent per-graph canvas state. The host owns one and passes it each frame;
@@ -73,6 +108,10 @@ struct State
     // filtered drag-off menu next frame).
     int    dragOffNode = 0, dragOffPin = 0;
     bool   dragOffInput = false;
+    // F is bound twice on purpose (F+click drops a For Each, a plain F tap
+    // frames the selection): this remembers whether the current F press already
+    // spawned something, so the release only frames when it did not.
+    bool   fSpawned = false;
 };
 
 // The host bridges its graph to the canvas through these callbacks. Required
@@ -135,6 +174,12 @@ struct Model
     // it). Returns the new node id (auto-selected), or 0. When unset, an empty
     // drag just cancels.
     std::function<int(int srcNode, int srcPin, bool srcInput, ImVec2 graphPos)> drawPinDragMenu;
+
+    // "Hold a key and click empty canvas" node shortcuts (and the same keys
+    // during a link drag, which spawn pre-wired). Empty = no shortcuts. The
+    // component only decides WHEN one fires and with what context; which node a
+    // key stands for, and how it is wired, stays with the host.
+    std::vector<QuickSpawn> quickSpawns;
 
     // Accept ImGui drag-drop payloads dropped onto the canvas (e.g. an element or
     // a variable). The component makes the canvas a drop target for each listed
