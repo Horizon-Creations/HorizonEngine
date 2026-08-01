@@ -338,6 +338,16 @@ else()
     message(STATUS "HorizonEngine: Python3 embed libs not found — Python scripting disabled (Lua only)")
 endif()
 
+# ─── Redistributable-build portability ────────────────────────────────────────
+# Dependencies that pick CPU instructions at COMPILE time (today: astcenc) must be
+# built for a fixed baseline ISA whenever the binary leaves this machine — a package
+# built on a CI runner with AVX-512/AVX2 dies with SIGILL on an older user CPU the
+# moment that code path runs. Local dev builds keep -march=native (faster cook, and
+# the binary never leaves the machine); CI / release / DMG builds pass ON.
+option(HE_PORTABLE_BUILD "Build CPU-specialised dependencies for a fixed baseline ISA instead of this machine's CPU (required for redistributed binaries)" OFF)
+set(HE_ASTC_X86_ISA "sse4.1" CACHE STRING "x86-64 ASTC encoder baseline in a portable build: sse2 | sse4.1 | avx2")
+set_property(CACHE HE_ASTC_X86_ISA PROPERTY STRINGS sse2 sse4.1 avx2)
+
 # ─── astcenc (optional: ASTC texture compression cook) ─────────────────────────
 # The pack-time texture cook can transcode RGBA8 → ASTC for GPUs that sample it
 # (Apple-Silicon Metal). Without it, textures stay RGBA8 (+ baked mipmaps).
@@ -352,15 +362,69 @@ if(HE_ENABLE_ASTC)
     )
     set(ASTCENC_CLI             OFF CACHE BOOL "" FORCE)
     set(ASTCENC_UNITTEST        OFF CACHE BOOL "" FORCE)
-    set(ASTCENC_UNIVERSAL_BUILD OFF CACHE BOOL "" FORCE) # single-arch (native) lib
-    set(ASTCENC_ISA_NATIVE      ON  CACHE BOOL "" FORCE)
     set(ASTCENC_INVARIANCE      OFF CACHE BOOL "" FORCE)
-    FetchContent_MakeAvailable(astcenc)
-    if(TARGET astcenc-native-static)
-        set(HE_HAVE_ASTCENC TRUE)
-        message(STATUS "HorizonEngine: astcenc found — ASTC texture cooking enabled")
+
+    # astcenc has NO runtime ISA dispatch: each ISA is a separate static lib compiled
+    # with fixed -m flags, and all of them export the same astcenc_* symbols, so only
+    # one can ever be linked into a binary. ASTCENC_UNIVERSAL_BUILD is not a dispatch
+    # mode either — it is the macOS fat-binary path (x86_64 + x86_64h + arm64), it only
+    # lipos the CLI and the shared lib (there is no universal *static* lib), and it
+    # rejects ISA_NATIVE with a FATAL_ERROR. The ISA is therefore a configure-time
+    # choice, and HE_PORTABLE_BUILD is what decides it.
+    set(ASTCENC_UNIVERSAL_BUILD OFF CACHE BOOL "" FORCE)
+    foreach(_he_isa ASTCENC_ISA_NATIVE ASTCENC_ISA_NONE ASTCENC_ISA_NEON
+                    ASTCENC_ISA_AVX2 ASTCENC_ISA_SSE41 ASTCENC_ISA_SSE2)
+        set(${_he_isa} OFF CACHE BOOL "" FORCE) # deterministic: never inherit a stale ISA
+    endforeach()
+
+    if(NOT HE_PORTABLE_BUILD)
+        set(_he_astc_isa_opt ASTCENC_ISA_NATIVE)
+        set(HE_ASTCENC_TARGET astcenc-native-static)
     else()
-        message(STATUS "HorizonEngine: astcenc target not found — ASTC cooking disabled")
+        # Target architecture, not host: on Apple, CMAKE_OSX_ARCHITECTURES wins.
+        set(_he_astc_arch "${CMAKE_SYSTEM_PROCESSOR}")
+        if(APPLE AND CMAKE_OSX_ARCHITECTURES)
+            set(_he_astc_arch "${CMAKE_OSX_ARCHITECTURES}")
+            list(LENGTH _he_astc_arch _he_astc_arch_count)
+            if(_he_astc_arch_count GREATER 1)
+                message(FATAL_ERROR
+                    "HorizonEngine: astcenc builds one ISA (= one architecture) per configure and has no "
+                    "universal static lib, so it cannot serve a fat CMAKE_OSX_ARCHITECTURES=${CMAKE_OSX_ARCHITECTURES} "
+                    "build. Configure once per architecture and lipo the results, or pass -DHE_ENABLE_ASTC=OFF.")
+            endif()
+        endif()
+
+        if(_he_astc_arch MATCHES "^(arm64|aarch64|ARM64)")
+            # NEON is mandatory in the armv8-A baseline — always safe, no dispatch needed.
+            set(_he_astc_isa_opt ASTCENC_ISA_NEON)
+            set(HE_ASTCENC_TARGET astcenc-neon-static)
+        elseif(_he_astc_arch MATCHES "^(x86_64|x86_64h|AMD64|amd64|i[3-6]86|x86)$")
+            # Default baseline SSE4.1+POPCNT = Intel Nehalem (2008) / AMD Bulldozer (2011);
+            # avx2 needs Haswell (2013)/Excavator (2015) and excludes noticeably more users.
+            if(HE_ASTC_X86_ISA STREQUAL "sse4.1")
+                set(_he_astc_isa_opt ASTCENC_ISA_SSE41)
+            elseif(HE_ASTC_X86_ISA STREQUAL "avx2")
+                set(_he_astc_isa_opt ASTCENC_ISA_AVX2)
+            elseif(HE_ASTC_X86_ISA STREQUAL "sse2")
+                set(_he_astc_isa_opt ASTCENC_ISA_SSE2)
+            else()
+                message(FATAL_ERROR "HorizonEngine: HE_ASTC_X86_ISA='${HE_ASTC_X86_ISA}' is not one of sse2|sse4.1|avx2")
+            endif()
+            set(HE_ASTCENC_TARGET astcenc-${HE_ASTC_X86_ISA}-static)
+        else()
+            # Unknown architecture (RISC-V, ppc64le, …): scalar fallback still builds.
+            set(_he_astc_isa_opt ASTCENC_ISA_NONE)
+            set(HE_ASTCENC_TARGET astcenc-none-static)
+        endif()
+    endif()
+    set(${_he_astc_isa_opt} ON CACHE BOOL "" FORCE)
+
+    FetchContent_MakeAvailable(astcenc)
+    if(TARGET ${HE_ASTCENC_TARGET})
+        set(HE_HAVE_ASTCENC TRUE)
+        message(STATUS "HorizonEngine: astcenc found (${HE_ASTCENC_TARGET}) — ASTC texture cooking enabled")
+    else()
+        message(STATUS "HorizonEngine: astcenc target ${HE_ASTCENC_TARGET} not found — ASTC cooking disabled")
     endif()
 endif()
 

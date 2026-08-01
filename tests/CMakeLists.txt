@@ -114,7 +114,7 @@ if(HE_HAVE_OPENSSL OR HE_HAVE_MBEDTLS)
 endif()
 # astcenc for the ASTC cook round-trip test (encode → decode → compare).
 if(HE_HAVE_ASTCENC)
-    target_link_libraries(he_tests PRIVATE astcenc-native-static)
+    target_link_libraries(he_tests PRIVATE ${HE_ASTCENC_TARGET})
     target_include_directories(he_tests PRIVATE ${astcenc_SOURCE_DIR}/Source)
     target_compile_definitions(he_tests PRIVATE HE_HAVE_ASTCENC)
 endif()
