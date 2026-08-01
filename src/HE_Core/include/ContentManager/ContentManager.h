@@ -368,8 +368,23 @@ private:
 	mutable std::mutex              m_pendingMutex;
 	std::unordered_set<std::string> m_pendingPaths;  // in-flight relative paths
 
-	std::mutex                      m_resultsMutex;
-	std::queue<AsyncResult>         m_asyncResults;  // ready to register (main thread)
+	// Where finished jobs drop their results. Deliberately NOT a plain member: a job
+	// is submitted fire-and-forget, so it can still be queued (or mid-read) when this
+	// ContentManager is destroyed — play-mode stop, a closed project, or simply a test
+	// that submits and never drains. The worker used to lock this->m_resultsMutex and
+	// push into this->m_asyncResults after the owner was gone, i.e. write a string, a
+	// vector and a std::function straight into freed memory. On glibc that shreds the
+	// allocator's tcache metadata and aborts an unrelated malloc much later
+	// ("malloc(): unaligned tcache chunk detected"), which is close to undebuggable
+	// from the crash site.
+	// Sharing the sink by shared_ptr means a late worker writes into a live object; the
+	// sink dies with the last job instead of with the owner. The lambdas therefore
+	// capture the sink, never `this` — keep it that way.
+	struct AsyncSink {
+		std::mutex              mutex;
+		std::queue<AsyncResult> results;   // ready to register (drained on main thread)
+	};
+	std::shared_ptr<AsyncSink> m_asyncSink = std::make_shared<AsyncSink>();
 
 	std::string m_contentRoot;
 	std::string m_engineContentRoot;
