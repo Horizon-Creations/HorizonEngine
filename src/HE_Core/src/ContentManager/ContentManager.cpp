@@ -725,7 +725,8 @@ void ContentManager::loadAssetAsync(const std::string& relativePath,
 
 	const std::string fullPath = resolveAbsolutePath(relativePath);
 
-	globalPool().submit([this, relativePath, fullPath,
+	// Captures the sink, never `this` — the job may outlive this ContentManager.
+	globalPool().submit([relativePath, fullPath, sink = m_asyncSink,
 	                     cb = std::move(callback)]() mutable
 	{
 		AsyncResult result;
@@ -744,8 +745,8 @@ void ContentManager::loadAssetAsync(const std::string& relativePath,
 			result.failed = true;
 		}
 
-		std::unique_lock<std::mutex> lock(m_resultsMutex);
-		m_asyncResults.push(std::move(result));
+		std::unique_lock<std::mutex> lock(sink->mutex);
+		sink->results.push(std::move(result));
 	});
 }
 
@@ -754,13 +755,13 @@ std::vector<HE::UUID> ContentManager::pollAsyncResults(size_t maxRegistrations)
 {
 	std::vector<AsyncResult> ready;
 	{
-		std::unique_lock<std::mutex> lock(m_resultsMutex);
+		std::unique_lock<std::mutex> lock(m_asyncSink->mutex);
 		// Pull at most `maxRegistrations` completed jobs; leave the rest queued so
 		// a burst is spread over frames (registration/parse runs on this thread).
-		while (!m_asyncResults.empty() && ready.size() < maxRegistrations)
+		while (!m_asyncSink->results.empty() && ready.size() < maxRegistrations)
 		{
-			ready.push_back(std::move(m_asyncResults.front()));
-			m_asyncResults.pop();
+			ready.push_back(std::move(m_asyncSink->results.front()));
+			m_asyncSink->results.pop();
 		}
 	}
 
@@ -856,7 +857,8 @@ void ContentManager::loadAssetAsync(HE::UUID id, std::function<void(HE::UUID)> c
 	const bool              enc  = mount.encrypted;
 	std::array<uint8_t, 32> key  = mount.key;
 
-	globalPool().submit([this, id, path, enc, key, coalesceKey,
+	// Captures the sink, never `this` — the job may outlive this ContentManager.
+	globalPool().submit([id, path, enc, key, coalesceKey, sink = m_asyncSink,
 	                     cb = std::move(callback)]() mutable
 	{
 		AsyncResult result;
@@ -872,8 +874,8 @@ void ContentManager::loadAssetAsync(HE::UUID id, std::function<void(HE::UUID)> c
 		}
 		else result.failed = true;
 
-		std::unique_lock<std::mutex> lock(m_resultsMutex);
-		m_asyncResults.push(std::move(result));
+		std::unique_lock<std::mutex> lock(sink->mutex);
+		sink->results.push(std::move(result));
 	});
 }
 
