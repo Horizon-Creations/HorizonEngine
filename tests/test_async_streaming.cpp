@@ -6,6 +6,10 @@
 #include <fstream>
 #include <chrono>
 #include <thread>
+#include <atomic>
+#include <vector>
+#include <future>
+#include <JobSystem/JobSystem.h>
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -251,4 +255,48 @@ TEST_CASE("isAsyncPending tracks in-flight state correctly")
     CHECK(cm.isLoaded("async_pending.hasset"));
 
     he_test::removeQuiet(full);
+}
+
+// Regression: a job submitted fire-and-forget outlives its ContentManager whenever
+// the owner is destroyed before the worker runs — play-mode stop, a closed project,
+// or a test that submits and never drains (test_project_exporter.cpp:481 does exactly
+// that). The worker used to lock this->m_resultsMutex and push into
+// this->m_asyncResults after the owner was gone, writing a string, a vector and a
+// std::function into freed memory. On glibc that corrupts the allocator's tcache and
+// aborts an unrelated malloc much later, which is how it showed up: a sporadic
+// SIGABRT ("malloc(): unaligned tcache chunk detected") in a Python scripting test
+// ~20 test cases downstream.
+//
+// The pool is saturated first on purpose. Without that the worker almost always wins
+// the race on a fast idle machine (verified: an in-flight counter in ~ContentManager
+// stayed at 0 over 70 macOS runs, 30 of them under full CPU load) and the test would
+// pass whether or not the bug is present. Blocking every worker makes the job sit in
+// the queue, so the owner is guaranteed to die first.
+TEST_CASE("ContentManager destroyed with an async job still queued is safe")
+{
+    const HE::UUID id{0x1111111111111111ULL, 0x2222222222222222ULL};
+    const auto full = writeTempAsset("async_owner_outlived.hasset", id);
+
+    ThreadPool& pool = globalPool();
+    std::atomic<bool> release{false};
+    std::vector<std::future<void>> blockers;
+    for (size_t i = 0; i < pool.threadCount(); ++i)
+        blockers.push_back(pool.submit([&release]{
+            while (!release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }));
+
+    {
+        ContentManager cm(full.parent_path().string());
+        cm.loadAssetAsync("async_owner_outlived.hasset", [](HE::UUID) {});
+        CHECK(cm.isAsyncPending("async_owner_outlived.hasset"));
+    }   // owner destroyed with the job still queued
+
+    release.store(true);
+    for (auto& f : blockers) f.get();
+    // Give the freed job its chance to run against a dead owner. Clean under ASan/TSan;
+    // before the shared-sink fix this wrote into freed memory.
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    he_test::removeQuiet(full);
+    CHECK(true);
 }
