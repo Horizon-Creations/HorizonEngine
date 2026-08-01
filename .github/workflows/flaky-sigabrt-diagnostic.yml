@@ -236,10 +236,15 @@ jobs:
             TMPDIR="$d" ./build-tsan/tests/he_tests > "t$i.log" 2>&1
             echo "TSan run $i exit=$?"
           done
-          echo "=== distinct race signatures ==="
-          grep -hA3 "WARNING: ThreadSanitizer" t*.log | head -300
+          # FULL reports, not grep -A3: a TSan race is only actionable with BOTH stacks
+          # (the racing access AND the previous one). The 3-line version showed the
+          # main-thread side and cut off the worker side that names the submitting call.
+          echo "=== full race reports (run 1) ==="
+          sed -n '/WARNING: ThreadSanitizer/,/^SUMMARY: ThreadSanitizer/p' t1.log | head -400
           echo "=== race count per run ==="
           for i in 1 2 3; do echo "run $i: $(grep -c 'WARNING: ThreadSanitizer' t$i.log) warnings"; done
+          echo "=== unique SUMMARY lines across all runs ==="
+          grep -h "^SUMMARY: ThreadSanitizer" t*.log | sort | uniq -c | sort -rn
 
   # ── 3. The blind spot ASan cannot cover ─────────────────────────────────────
   # ASan only instruments code we compile. A bad write performed inside libpython,
