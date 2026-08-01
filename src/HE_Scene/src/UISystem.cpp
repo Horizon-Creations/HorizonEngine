@@ -58,6 +58,14 @@ namespace UISystem {
 bool buildFontAtlas(int width, int height, float fontSizePixels,
                     std::vector<uint8_t>& outPixels)
 {
+    // An empty atlas has no buffer to bake into: outPixels.data() would be
+    // nullptr and stb memsets it unconditionally (UB even for length 0).
+    if (width <= 0 || height <= 0)
+    {
+        outPixels.clear();
+        return false;
+    }
+
     outPixels.resize(static_cast<size_t>(width) * static_cast<size_t>(height), 0);
 
     // Bake ASCII 32-127 into the atlas.
