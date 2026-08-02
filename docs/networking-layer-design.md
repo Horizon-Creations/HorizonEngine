@@ -1,10 +1,15 @@
 # HorizonNet — Networking Layer Design
 
-Status: **Checkpoints N1 + N2 done, N2.5 partly done** — Layer 0–2 abstractions,
-loopback + real TCP transport, an authenticated/encrypted channel, and the
-discovery half of N2.5 (UDP, HTTP client, UPnP port mapping, session-directory
-endpoint). The directory *client* still needs a TLS-capable HTTP stack (N2.5b).
-Session protocol (N3), presence (N4), locking (N5) and live deltas (N6) follow.
+Status: **N1–N6 done, plus editor integration.** Transport, forward-secret
+authenticated encryption, discovery through a live session directory, the session
+protocol with chunked late-join snapshots, presence, an authoritative lock table,
+and live replication of transforms, authored assets and structural changes — all
+reachable from the editor (View ▸ Collaboration) with per-user undo/redo.
+
+Not done: replication of components other than `TransformComponent` (needs a
+per-component serializer), NAT-PMP as a second port-mapping path, and gameplay
+replication (N4a). Not verified: two real editor instances in one session, which
+needs two GUI processes.
 
 ## Why one layer serves two very different consumers
 
