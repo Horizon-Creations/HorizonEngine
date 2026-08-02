@@ -651,6 +651,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			case MC::ResetLayout:     s_resetLayoutRequested = true;                         break;
 			case MC::ToggleProfiler:  toggleFloatingWindow(s_showProfiler, "Performance Profiler"); break;
 			case MC::ToggleEnvironment: toggleFloatingWindow(s_showEnvironment, "Environment"); break;
+			case MC::ToggleCollab:      toggleFloatingWindow(s_showCollab, "Collaboration");    break;
 			case MC::OpenLevelScript:
 				if (ctx.projectLoaded) openVirtualTab("Level Script", LevelScriptPanel::kTabPath);
 				break;
