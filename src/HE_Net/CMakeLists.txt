@@ -9,9 +9,22 @@
 # Deliberately dependency-light for now: the loopback transport needs nothing but
 # the STL, so this builds and tests everywhere without pulling GameNetworkingSockets.
 add_library(HorizonNet SHARED
+	src/Socket.cpp
 	src/LoopbackTransport.cpp
+	src/TcpTransport.cpp
+	src/SecureTransport.cpp
 	src/NetSession.cpp
 )
+
+# HorizonCore supplies the crypto primitives the session handshake reuses rather
+# than reimplementing: Hpak::aesGcm* (AEAD, backed by OpenSSL/mbedTLS),
+# Hpak::randomBytes (CSPRNG) and KeyDerivation::hmac (HMAC-SHA256).
+target_link_libraries(HorizonNet PRIVATE HorizonCore)
+
+# Winsock (Windows only; POSIX sockets need no extra link library).
+if(WIN32)
+	target_link_libraries(HorizonNet PRIVATE ws2_32)
+endif()
 
 target_include_directories(HorizonNet
 	PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/include
