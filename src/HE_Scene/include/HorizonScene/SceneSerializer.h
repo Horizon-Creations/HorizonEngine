@@ -46,6 +46,19 @@ public:
     // the prefab is independent of the source world's handle space.
     std::vector<uint8_t> serializeSubtree(const HorizonWorld& world, Entity root);
 
+    // ── Single-entity component state (CBOR) ─────────────────────────────────
+    // Capture or restore just the components of ONE existing entity, without
+    // creating or destroying anything. This is what live collaboration
+    // replicates for non-transform edits: a prefab blob would mint a new entity,
+    // which is the wrong operation when the entity already exists on the peer
+    // and is merely being edited.
+    //
+    // applyEntityComponents overwrites the components present in `data` and
+    // leaves the rest alone, so it is an update rather than a replacement.
+    std::vector<uint8_t> serializeEntityComponents(const HorizonWorld& world, Entity entity);
+    bool applyEntityComponents(HorizonWorld& world, Entity entity,
+                               const std::vector<uint8_t>& data);
+
     // Instantiate a prefab blob into the world. Creates fresh entities for
     // every entry in the prefab and re-wires their hierarchy. The new subtree
     // root is reparented to `parent` (world root if entt::null). Returns the

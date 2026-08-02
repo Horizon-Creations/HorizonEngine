@@ -23,7 +23,8 @@
 #include "ProjectHubPanel.h"             // start screen while no project is open
 #include "TutorialPanel.h"               // first-start welcome + Help ▸ Interactive Tutorial
 #include "ProfilerPanel.h"               // View > Performance Profiler window
-#include "EnvironmentPanel.h"            // View > Environment (add/remove Sky + Weather)
+#include "EnvironmentPanel.h"
+#include "CollabPanel.h"            // View > Collaboration (host / join a live session)
 #include "EditorSettingsPanel.h"         // engine-settings catalog + Preferences window
 #include "ToolchainDialog.h"             // startup cmake/compiler check
 #include "PlayReportPanel.h"             // post-PIE warning/error report
@@ -140,6 +141,9 @@ static bool s_showProfiler = false;
 
 // Toggled by View > Environment; drives the Sky/Weather add-remove window.
 static bool s_showEnvironment = false;
+
+// Toggled by View > Collaboration; drives the live-session panel.
+static bool s_showCollab = false;
 
 // (Level Script + Game Instance open as editor tabs, not toggled windows.)
 
@@ -690,8 +694,32 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
     }
     if (ImGui::BeginMenu("Edit"))
     {
-        if (ImGui::MenuItem("Undo", "Ctrl+Z")) {}
-        if (ImGui::MenuItem("Redo", "Ctrl+Y")) {}
+        // In a session, undo/redo operate on YOUR OWN changes as inverse
+        // operations that get republished — the snapshot stack would restore a
+        // whole world and revert everyone else's work with it (CollabUndo.h).
+        const bool collabUndoActive = ctx.collab && ctx.collab->inSession() && ctx.collabUndo;
+        if (collabUndoActive)
+        {
+            const std::string uLabel = ctx.collabUndo->canUndo()
+                ? ctx.collabUndo->undoLabel() : std::string("Undo");
+            const std::string rLabel = ctx.collabUndo->canRedo()
+                ? ctx.collabUndo->redoLabel() : std::string("Redo");
+
+            if (ImGui::MenuItem(uLabel.c_str(), "Ctrl+Z", false,
+                                ctx.collabUndo->canUndo()))
+                ctx.collabUndo->undo();
+            if (ImGui::MenuItem(rLabel.c_str(), "Ctrl+Y", false,
+                                ctx.collabUndo->canRedo()))
+                ctx.collabUndo->redo();
+
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("While collaborating, undo applies only to your own changes.");
+        }
+        else
+        {
+            if (ImGui::MenuItem("Undo", "Ctrl+Z")) {}
+            if (ImGui::MenuItem("Redo", "Ctrl+Y")) {}
+        }
         ImGui::Separator();
         if (ImGui::MenuItem("Cut",   "Ctrl+X")) {}
         if (ImGui::MenuItem("Copy",  "Ctrl+C")) {}
@@ -708,6 +736,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             toggleFloatingWindow(s_showProfiler, "Performance Profiler");
         if (ImGui::MenuItem("Environment", nullptr, s_showEnvironment))
             toggleFloatingWindow(s_showEnvironment, "Environment");
+        if (ImGui::MenuItem("Collaboration", nullptr, s_showCollab))
+            toggleFloatingWindow(s_showCollab, "Collaboration");
         if (ImGui::MenuItem("Level Script", nullptr, false, ctx.projectLoaded))
             openVirtualTab("Level Script", LevelScriptPanel::kTabPath);
         if (ImGui::MenuItem("Game Instance", nullptr, false, ctx.projectLoaded))
@@ -1613,6 +1643,7 @@ void EditorUI::renderOverlays(AppContext& ctx, float dt)
     EditorSettingsPanel::DrawPreferencesWindow(ctx, s_showPreferences);
     ProfilerPanel::DrawProfilerWindow(ctx, s_showProfiler);
     EnvironmentPanel::DrawEnvironmentWindow(ctx, s_showEnvironment);
+    CollabPanel::DrawCollabWindow(ctx, s_showCollab);
 
     TutorialPanel::UiFlags tutFlags;
     tutFlags.profilerOpen      = s_showProfiler;

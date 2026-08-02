@@ -45,7 +45,8 @@ jobs:
             libxfixes-dev libxss-dev libwayland-dev wayland-protocols libdecor-0-dev \
             libxkbcommon-dev libegl1-mesa-dev libgl1-mesa-dev libglu1-mesa-dev \
             libasound2-dev libpulse-dev libudev-dev libdbus-1-dev libibus-1.0-dev \
-            liblz4-dev libzstd-dev python3-dev
+            liblz4-dev libzstd-dev python3-dev \
+            libcurl4-openssl-dev
 
       # FetchContent checkouts (SDL3, glm, nlohmann_json) are cached on the
       # configure hash so CI does not re-clone them on every run.

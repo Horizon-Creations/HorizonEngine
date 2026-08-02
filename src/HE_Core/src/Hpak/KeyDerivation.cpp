@@ -106,6 +106,13 @@ static void hmacSha256(const uint8_t* key, size_t keyLen,
     sha256(outerBuf, 96, out);
 }
 
+void KeyDerivation::hmac(const uint8_t* key, size_t keyLen,
+                         const uint8_t* msg, size_t msgLen,
+                         uint8_t        out[32])
+{
+    hmacSha256(key, keyLen, msg, msgLen, out);
+}
+
 // ─── PBKDF2-HMAC-SHA256 (1 iteration, 32-byte output) ───────────────────────
 
 void KeyDerivation::derive(const std::string& secret,

@@ -1609,6 +1609,30 @@ std::vector<uint8_t> SceneSerializer::serializeSubtree(const HorizonWorld& world
     return cbor;
 }
 
+std::vector<uint8_t> SceneSerializer::serializeEntityComponents(const HorizonWorld& world,
+                                                               Entity entity)
+{
+    auto& registry = const_cast<HorizonWorld&>(world).registry();
+    if (!registry.valid(entity)) return {};
+    return json::to_cbor(serializeComponents(registry, entity));
+}
+
+bool SceneSerializer::applyEntityComponents(HorizonWorld& world, Entity entity,
+                                            const std::vector<uint8_t>& data)
+{
+    auto& registry = world.registry();
+    if (!registry.valid(entity) || data.empty()) return false;
+
+    const json comps = json::from_cbor(data, /*strict=*/true, /*allow_exceptions=*/false);
+    if (comps.is_discarded() || !comps.is_object()) return false;
+
+    // Reuses the same restore path as scene loading, so every component type is
+    // covered by construction — a new component that loads from a scene file
+    // replicates without any extra work here.
+    applyComponents(registry, entity, comps);
+    return true;
+}
+
 Entity SceneSerializer::instantiatePrefab(HorizonWorld& world,
                                           const std::vector<uint8_t>& data,
                                           Entity parent)

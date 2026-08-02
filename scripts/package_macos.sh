@@ -197,7 +197,15 @@ cat > "$APP_PATH/Contents/Info.plist" <<PLIST
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSPrincipalClass</key>
-    <string>NSApplication</string>${ICON_PLIST}
+    <string>NSApplication</string>
+    <!-- Required from macOS Sequoia on: without this key (and the user's
+         approval) every send to a LAN or multicast address fails with
+         EHOSTUNREACH, while internet traffic keeps working. That silently
+         breaks UPnP router discovery for collaboration sessions and any
+         LAN peer discovery — a failure mode that looks like a routing bug
+         rather than a missing permission. -->
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>HorizonEngine uses the local network to discover your router for collaboration sessions and to find peers on your LAN.</string>${ICON_PLIST}
 </dict>
 </plist>
 PLIST
