@@ -126,6 +126,37 @@ public:
 	// users confirm out of band that they are in the same session.
 	std::string sessionFingerprint() const;
 
+	// ── Live scene deltas ──
+	// Publish the transform of the entity we currently hold, when it actually
+	// moved. Cheap to call every frame: unchanged values send nothing.
+	void publishTransform(std::uint64_t subject,
+	                      const float pos[3], const float rotEuler[3], const float scale[3],
+	                      std::uint64_t nowMs);
+
+	// Fires when a remote peer moved something; the editor writes it into the
+	// world. Applying is deliberately NOT done here — CollabController must not
+	// reach into the ECS.
+	void onRemoteTransform(
+		std::function<void(std::uint64_t, const float[3], const float[3], const float[3])> fn)
+	{
+		m_onRemoteTransform = std::move(fn);
+	}
+
+	// ── Locks ──
+	bool requestLock(std::uint64_t subject);
+	void releaseLock(std::uint64_t subject);
+	const HE::Net::LockInfo* lockFor(std::uint64_t subject) const;
+	bool ownsLock(std::uint64_t subject) const;
+
+	// Keep exactly one entity locked: the one currently selected. Called every
+	// frame with the selection; releases the previous subject and claims the new
+	// one only when it actually changed, so this stays free to call.
+	void followSelection(std::uint64_t subject);
+
+	// Set when a lock request was refused, for a transient UI notice.
+	const std::string& lockNotice() const { return m_lockNotice; }
+	void clearLockNotice() { m_lockNotice.clear(); }
+
 	// ── Presence ──
 	void setLocalPresence(const float cameraPos[3], const float cameraRot[4],
 	                      const std::vector<std::uint64_t>& selection);
@@ -189,6 +220,19 @@ private:
 
 	std::uint32_t m_snapshotGot   = 0;
 	std::uint32_t m_snapshotTotal = 0;
+
+	std::uint64_t m_heldSubject = 0;   // the one entity we currently hold
+	std::string   m_lockNotice;
+
+	// Last transform we published, so an unmoved object sends nothing. Same
+	// reasoning as presence: a gizmo drag changes this every frame.
+	std::uint64_t m_lastTransformSubject = 0;
+	float         m_lastTransform[9] {};   // pos3 + rotEuler3 + scale3
+	bool          m_hasLastTransform = false;
+	std::uint64_t m_lastTransformSendMs = 0;
+
+	std::function<void(std::uint64_t, const float[3], const float[3], const float[3])>
+		m_onRemoteTransform;
 
 	std::function<void()> m_onWorldReplaced;
 };

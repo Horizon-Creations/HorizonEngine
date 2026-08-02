@@ -171,6 +171,34 @@ public:
         m_onPresence = std::move(fn);
     }
 
+    // ── Live scene deltas ──
+    // A transform change on one entity, keyed by its handle. Handles match
+    // across peers because everyone started from the same snapshot, so no id
+    // remapping is needed — and a transform is by far the most common edit
+    // during collaboration, which is why it gets its own compact message rather
+    // than riding on a general component blob.
+    //
+    // The host only relays a change when the sender holds the lock on that
+    // subject, so two people cannot move the same object at once.
+    // Rotation is Euler degrees, matching TransformComponent exactly. A
+    // quaternion would have to be converted on both ends, and quantizing it to
+    // [-1,1] — as presence does — is only valid for a *unit* quaternion, not for
+    // angles that legitimately run past 180°.
+    struct TransformDelta {
+        std::uint64_t subject = 0;
+        float position[3] { 0.0f, 0.0f, 0.0f };
+        float rotation[3] { 0.0f, 0.0f, 0.0f };   // Euler degrees
+        float scale[3]    { 1.0f, 1.0f, 1.0f };
+    };
+
+    // Publish a local transform change. Ignored when we do not hold the lock.
+    bool sendTransform(const TransformDelta& delta);
+
+    // A remote participant moved something. The editor applies it to its world.
+    void onTransform(std::function<void(ParticipantId, const TransformDelta&)> fn) {
+        m_onTransform = std::move(fn);
+    }
+
     // ── Locks ──
     // Ask to own `subject`. On the host this is answered immediately; on a
     // client it is a request, and the answer arrives via onLockChanged /
@@ -249,6 +277,12 @@ private:
     void broadcastLock(std::uint64_t subject, bool acquired, ConnectionId except);
     void releaseLocksOf(ParticipantId owner);
 
+    // Transforms
+    void handleTransformUpdate(ConnectionId conn, BitReader& r);   // host
+    void handleTransformRelay(BitReader& r);                       // client
+    static void writeTransformBody(BitWriter& w, const TransformDelta& d);
+    static bool readTransformBody(BitReader& r, TransformDelta& out);
+
     Participant* findParticipant(ParticipantId id);
     ParticipantId participantForConnection(ConnectionId conn) const;
 
@@ -284,6 +318,7 @@ private:
     // The authoritative table on the host; a replica on clients.
     std::vector<LockInfo> m_locks;
 
+    std::function<void(ParticipantId, const TransformDelta&)> m_onTransform;
     std::function<void(const LockInfo&, bool)>         m_onLockChanged;
     std::function<void(std::uint64_t, LockDenyReason)> m_onLockDenied;
     std::function<void(ParticipantId, const PresenceState&)> m_onPresence;

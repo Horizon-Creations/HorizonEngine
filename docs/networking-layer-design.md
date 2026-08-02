@@ -147,7 +147,7 @@ any zero-pad in the payload's final byte.
 - **N3** ✅ — session protocol: join/leave, participant list, **chunked late-join snapshot** behind `ISessionStateProvider`.
 - **N4** ✅ — **presence**: camera pose + selection per participant, throttled and relayed by the host.
 - **N5** ✅ — **authoritative lock table** on the host, which removes the polling race window LFS locks have.
-- **N6** — **live deltas**: dirty-entity replication via `serializeSubtree`, a quantized transform fast path, per-tick coalescing, and UUID-only asset references with a "missing asset" hint.
+- **N6** ◐ — **live deltas**: transform replication with lock-derived authority and rate limiting is done. Structural changes (create/delete/reparent) and other components still need handle-stable instantiation — see the section below.
 - **N4a** *(later)* — gameplay replication: `NetworkComponent` on entt, authority model, snapshot + delta, client prediction / server reconciliation, interest management.
 
 ## Discovery (N2.5)
@@ -344,6 +344,82 @@ golden ratio so consecutive participant ids land far apart on the wheel: two
 people who joined one after another never get near-identical gizmos. It is
 derived from the id, so every peer picks the same colour for the same person
 without having to agree on one.
+
+## Live scene deltas (N6, v1)
+
+`CollabSession::TransformDelta` — one entity's transform, keyed by its **entity
+handle**. Handles match across peers because everyone started from the same
+snapshot, so no id remapping is needed.
+
+Rotation is Euler degrees, matching `TransformComponent` exactly. Quantizing it
+to [-1,1] the way presence does would be wrong: that is only valid for a *unit
+quaternion*, and Euler angles legitimately run past 180°. Position, rotation and
+scale therefore all go at full float precision — unlike a presence gizmo, this is
+the authoritative value.
+
+**Authority comes from the lock**, which is why N5 had to land first: only the
+holder may move a subject, so there is no conflict to resolve and no merge
+strategy to get wrong. The host **re-checks** ownership on arrival rather than
+trusting the sender — a test hand-builds a frame that bypasses the local guard
+and confirms it is dropped.
+
+Sending is rate-limited (~30 Hz) and skipped entirely when nothing moved, for the
+same reason as presence: a gizmo drag produces a change every frame.
+
+### What v1 does not do — stated plainly
+
+Only **transforms** replicate. Structural changes — creating, deleting or
+reparenting entities, and edits to any other component — do **not**. The obstacle
+is concrete: `SceneSerializer::instantiatePrefab` mints *fresh* entity handles,
+and there is no API to apply a serialized subtree onto an existing handle. Since
+handles are the delta key, structural replication needs either handle-stable
+instantiation or a per-component serializer. Until then, structural edits are
+only shared when someone re-joins and gets a fresh snapshot.
+
+## Undo in a shared session — the problem, and a proposal
+
+**Undo as it exists today cannot be made multi-user safe.** `EditorUndo` is
+snapshot-based: every entry is a full-world CBOR blob, and undo *restores the
+whole world*. In a session that would silently revert everyone else's concurrent
+work — not just your own. There is no way to fix that by adjusting when undo
+fires; the data model itself is wrong for the job.
+
+Today the editor sidesteps it: a received delta is applied **without** going
+through the undo system, so at least a remote edit never lands on your stack.
+That leaves the reverse hole open — your own undo still restores a whole-world
+snapshot taken before their edits existed.
+
+### Proposal: inverse-delta undo, scoped by lock
+
+The delta work already gives us the missing ingredient. An undo entry becomes an
+**inverse operation** instead of a snapshot:
+
+1. Before applying a local change to subject *S*, capture its previous value.
+2. Push `(S, before, after)` onto a per-user stack.
+3. Undo = send the *inverse* delta (`S` back to `before`) as an ordinary change.
+   Everyone applies it like any other edit; nothing is "restored".
+
+That makes undo an edit like any other, which is what makes it composable with
+other people's work. It is how Figma and collaborative editors solve this.
+
+**Locks make it sound.** You may only edit what you hold, so while an entry is on
+your stack nobody else can have touched that subject — inverting it cannot
+clobber anyone. The rule that follows: **an undo entry is only valid while you
+still hold the lock on its subject.** Release the lock (deselect), and entries
+for that subject are dropped from your stack, because someone else may have
+changed it since and your "before" value is no longer a truthful inverse.
+
+**Scope and cost.** This only covers what deltas cover — transforms today. Until
+structural replication exists, create/delete cannot be undone this way, so in a
+session those operations should be blocked or confirmed rather than silently
+half-undoable. Outside a session, snapshot undo stays exactly as it is: it is
+simple, it works, and there is no reason to pay for operation-based undo when
+you are alone.
+
+**Recommended sequencing:** do *not* start this until structural deltas exist.
+Building inverse-undo on transforms alone means a second rewrite when
+create/delete arrives, and a partially-undoable editor is more confusing than one
+that says plainly "undo is limited while collaborating".
 
 ## Do private hosts need a TLS certificate? No — and here is why
 

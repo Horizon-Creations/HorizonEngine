@@ -773,6 +773,128 @@ TEST_CASE("CollabSession: re-requesting a lock you already hold is not a denial"
     CHECK(p->client->ownsLock(kSubject));
 }
 
+// ─── Live transform deltas ───────────────────────────────────────────────────
+
+TEST_CASE("CollabSession: a transform change reaches the other side")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+    REQUIRE(p->client->isJoined());
+
+    constexpr std::uint64_t kEntity = 77;
+    REQUIRE(p->client->requestLock(kEntity));
+    p->pump(4);
+    REQUIRE(p->client->ownsLock(kEntity));
+
+    CollabSession::TransformDelta received;
+    bool got = false;
+    p->host->onTransform([&](ParticipantId, const CollabSession::TransformDelta& d) {
+        received = d;
+        got = true;
+    });
+
+    CollabSession::TransformDelta sent;
+    sent.subject = kEntity;
+    sent.position[0] = 12.5f; sent.position[1] = -3.25f; sent.position[2] = 100.0f;
+    sent.rotation[0] = 45.0f; sent.rotation[1] = 270.0f; sent.rotation[2] = -90.0f;
+    sent.scale[0] = 2.0f; sent.scale[1] = 0.5f; sent.scale[2] = 1.0f;
+    REQUIRE(p->client->sendTransform(sent));
+
+    p->pump(4);
+    REQUIRE(got);
+
+    CHECK(received.subject == kEntity);
+    CHECK(received.position[0] == doctest::Approx(12.5f));
+    CHECK(received.position[2] == doctest::Approx(100.0f));
+    // Euler angles run past 180°, which is exactly why they are sent at full
+    // precision instead of quantized to [-1,1] like a unit quaternion.
+    CHECK(received.rotation[1] == doctest::Approx(270.0f));
+    CHECK(received.rotation[2] == doctest::Approx(-90.0f));
+    CHECK(received.scale[1] == doctest::Approx(0.5f));
+}
+
+TEST_CASE("CollabSession: moving something you do not hold is refused")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+
+    constexpr std::uint64_t kEntity = 88;
+    // The host takes the lock, the client tries to move it anyway.
+    REQUIRE(p->host->requestLock(kEntity));
+    p->pump(4);
+
+    bool hostSawChange = false;
+    p->host->onTransform([&](ParticipantId, const CollabSession::TransformDelta&) {
+        hostSawChange = true;
+    });
+
+    CollabSession::TransformDelta sneaky;
+    sneaky.subject = kEntity;
+    sneaky.position[0] = 999.0f;
+    CHECK_FALSE(p->client->sendTransform(sneaky));   // refused locally...
+
+    p->pump(4);
+    CHECK_FALSE(hostSawChange);                      // ...and nothing arrived
+}
+
+TEST_CASE("CollabSession: a forged transform is rejected by the host, not merely by the sender")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+
+    constexpr std::uint64_t kEntity = 91;
+    REQUIRE(p->host->requestLock(kEntity));
+    p->pump(4);
+
+    bool hostSawChange = false;
+    p->host->onTransform([&](ParticipantId, const CollabSession::TransformDelta&) {
+        hostSawChange = true;
+    });
+
+    // Hand-build the frame, bypassing the local ownsLock() guard entirely — the
+    // host must re-check authority rather than trust what arrives.
+    BitWriter w;
+    w.writeUInt64(kEntity);
+    for (int i = 0; i < 3; ++i) w.writeFloat(999.0f);
+    for (int i = 0; i < 3; ++i) w.writeFloat(0.0f);
+    for (int i = 0; i < 3; ++i) w.writeFloat(1.0f);
+    p->clientNet->send(LoopbackTransport::kPeer, kFirstUserMessage + 15, w,
+                       SendMode::Unreliable);
+
+    p->pump(4);
+    CHECK_FALSE(hostSawChange);
+}
+
+TEST_CASE("CollabSession: the host's own move reaches clients")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+
+    constexpr std::uint64_t kEntity = 5;
+    REQUIRE(p->host->requestLock(kEntity));
+    p->pump(4);
+
+    bool got = false;
+    CollabSession::TransformDelta received;
+    p->client->onTransform([&](ParticipantId, const CollabSession::TransformDelta& d) {
+        received = d;
+        got = true;
+    });
+
+    CollabSession::TransformDelta d;
+    d.subject = kEntity;
+    d.position[1] = 42.0f;
+    REQUIRE(p->host->sendTransform(d));
+
+    p->pump(4);
+    REQUIRE(got);
+    CHECK(received.position[1] == doctest::Approx(42.0f));
+}
+
 // ─── State sequence ──────────────────────────────────────────────────────────
 
 TEST_CASE("CollabSession: the joiner adopts the host's state sequence")

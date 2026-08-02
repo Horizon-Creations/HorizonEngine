@@ -329,6 +329,32 @@ void CollabController::wireCallbacks()
 		m_snapshotGot   = got;
 		m_snapshotTotal = total;
 	});
+
+	m_collab->onTransform([this](HE::Net::ParticipantId,
+	                             const HE::Net::CollabSession::TransformDelta& d) {
+		if (m_onRemoteTransform) m_onRemoteTransform(d.subject, d.position, d.rotation, d.scale);
+	});
+
+	m_collab->onLockChanged([this](const LockInfo& l, bool acquired) {
+		// If we lost the lock we were holding (the holder left, or we released
+		// it), forget it so the next selection re-requests cleanly.
+		if (!acquired && l.subject == m_heldSubject && l.owner == m_collab->localId())
+			m_heldSubject = 0;
+	});
+
+	m_collab->onLockDenied([this](std::uint64_t subject, LockDenyReason reason) {
+		// Refused means someone else is already editing it. Say who, so the user
+		// knows to ask rather than wonder why nothing responds.
+		if (reason == LockDenyReason::HeldByOther)
+		{
+			const LockInfo* l = m_collab->lockFor(subject);
+			m_lockNotice = l && !l->ownerName.empty()
+				? (l->ownerName + " is editing this — it is read-only for you.")
+				: std::string("Someone else is editing this — it is read-only for you.");
+		}
+		// We do not hold it, so do not pretend we do.
+		if (subject == m_heldSubject) m_heldSubject = 0;
+	});
 }
 
 void CollabController::leave()
@@ -365,6 +391,8 @@ void CollabController::teardown()
 	m_port          = 0;
 	m_snapshotGot   = 0;
 	m_snapshotTotal = 0;
+	m_heldSubject   = 0;
+	m_lockNotice.clear();
 
 	// Drop any directory work still in flight. Destroying a std::async future
 	// blocks until its thread finishes, which is why the calls carry timeouts.
@@ -503,6 +531,89 @@ std::string CollabController::sessionFingerprint() const
 		if (!fp.empty()) return fp;
 	}
 	return {};
+}
+
+// ─── Live transform deltas ───────────────────────────────────────────────────
+
+void CollabController::publishTransform(std::uint64_t subject,
+                                        const float pos[3], const float rotEuler[3],
+                                        const float scale[3], std::uint64_t nowMs)
+{
+	if (!m_collab || !inSession() || subject == 0) return;
+	// Only the holder may move something; without the lock this is refused at
+	// the host anyway, so do not spend bandwidth on it.
+	if (!m_collab->ownsLock(subject)) return;
+
+	const float current[9] = { pos[0], pos[1], pos[2],
+	                           rotEuler[0], rotEuler[1], rotEuler[2],
+	                           scale[0], scale[1], scale[2] };
+
+	// Same argument as presence: a gizmo drag produces a change every frame, and
+	// most of them are indistinguishable. Send only real movement, and at most
+	// at a fixed rate.
+	bool moved = !m_hasLastTransform || subject != m_lastTransformSubject;
+	if (!moved)
+	{
+		for (int i = 0; i < 9; ++i)
+		{
+			if (std::fabs(current[i] - m_lastTransform[i]) > 0.0005f) { moved = true; break; }
+		}
+	}
+	if (!moved) return;
+	if (m_hasLastTransform && subject == m_lastTransformSubject &&
+	    nowMs - m_lastTransformSendMs < 33)   // ~30 Hz while dragging
+	{
+		return;
+	}
+
+	HE::Net::CollabSession::TransformDelta d;
+	d.subject = subject;
+	for (int i = 0; i < 3; ++i) d.position[i] = pos[i];
+	for (int i = 0; i < 3; ++i) d.rotation[i] = rotEuler[i];
+	for (int i = 0; i < 3; ++i) d.scale[i]    = scale[i];
+
+	if (m_collab->sendTransform(d))
+	{
+		m_lastTransformSubject = subject;
+		for (int i = 0; i < 9; ++i) m_lastTransform[i] = current[i];
+		m_hasLastTransform    = true;
+		m_lastTransformSendMs = nowMs;
+	}
+}
+
+// ─── Locks ───────────────────────────────────────────────────────────────────
+
+bool CollabController::requestLock(std::uint64_t subject)
+{
+	return m_collab ? m_collab->requestLock(subject) : false;
+}
+
+void CollabController::releaseLock(std::uint64_t subject)
+{
+	if (m_collab) m_collab->releaseLock(subject);
+}
+
+const HE::Net::LockInfo* CollabController::lockFor(std::uint64_t subject) const
+{
+	return m_collab ? m_collab->lockFor(subject) : nullptr;
+}
+
+bool CollabController::ownsLock(std::uint64_t subject) const
+{
+	return m_collab && m_collab->ownsLock(subject);
+}
+
+void CollabController::followSelection(std::uint64_t subject)
+{
+	if (!m_collab || !inSession()) return;
+	if (subject == m_heldSubject) return;   // nothing changed — stay quiet
+
+	// Give up the previous one first: holding two at once would block an entity
+	// nobody is even looking at any more.
+	if (m_heldSubject != 0) m_collab->releaseLock(m_heldSubject);
+
+	m_heldSubject = subject;
+	if (subject != 0) m_collab->requestLock(subject);
 }
 
 // ─── Presence ────────────────────────────────────────────────────────────────
