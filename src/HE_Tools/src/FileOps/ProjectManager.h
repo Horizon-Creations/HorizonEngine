@@ -5,12 +5,14 @@
 #include <vector>
 #include <functional>
 
+// Persisted as an int in the .heproj manifest ("preset") — only ever append.
 enum class ProjectPreset
 {
 	Empty,       // only folder skeleton, no extra content
 	Game,        // Assets, Scenes, Scripts sub-folders + sample scene
 	Simulation,  // Assets, Scenes, Data sub-folders
 	Tool,        // Assets, Source sub-folders
+	Tutorial,    // Game skeleton + a furnished sandbox scene for the guided tour
 };
 
 // The gameplay scripting language a project is authored in, chosen at creation
@@ -28,10 +30,20 @@ enum class ProjectScriptLanguage
 	Cpp,
 };
 
-// Manifest spelling of the language ("HorizonCode"/"Lua"/"Python"/"Cpp") and
-// its tolerant inverse (unknown/missing → HorizonCode).
-HE_TOOLS_API const char*           toString(ProjectScriptLanguage lang);
-HE_TOOLS_API ProjectScriptLanguage projectScriptLanguageFromString(const std::string& s);
+// `toString` and `cppIdentifier` are namespaced and the surrounding types are
+// not, on purpose: an exported function called `toString` sitting in the global
+// namespace is a hazard out of all proportion to its size — it is a candidate
+// for every unqualified `toString(x)` in every translation unit that reaches
+// this header. `ProjectManager`/`ProjectData`/`ExportProfile` are specific
+// enough to stay put for now. See docs/coding-conventions.md §1.
+namespace HE::tools
+{
+	// Manifest spelling of the language ("HorizonCode"/"Lua"/"Python"/"Cpp") and
+	// its tolerant inverse (unknown/missing → HorizonCode). The returned strings
+	// are the persisted .heproj "scriptLanguage" values — do not restyle them.
+	HE_TOOLS_API const char*           toString(ProjectScriptLanguage lang);
+	HE_TOOLS_API ProjectScriptLanguage projectScriptLanguageFromString(const std::string& s);
+}
 
 // ─── Native C++ gameplay scaffolding ─────────────────────────────────────────
 // A Cpp project authors gameplay as a native GameLogic shared library instead of
@@ -43,9 +55,12 @@ HE_TOOLS_API ProjectScriptLanguage projectScriptLanguageFromString(const std::st
 // hand-editing of the existing files. projectRoot is the project folder (the
 // parent of the .heproj), not the Content folder.
 
-// Turn an arbitrary asset/scene name into a valid C++ identifier (leading digit
-// prefixed with '_', non-alnum → '_'); empty → "Unnamed".
-HE_TOOLS_API std::string cppIdentifier(const std::string& name);
+namespace HE::tools
+{
+	// Turn an arbitrary asset/scene name into a valid C++ identifier (leading
+	// digit prefixed with '_', non-alnum → '_'); empty → "Unnamed".
+	HE_TOOLS_API std::string cppIdentifier(const std::string& name);
+}
 
 // Create the whole Source/ tree for a freshly created Cpp project: the runtime
 // header/impl, a GameInstance class, a LevelScript for the startup scene, the
@@ -54,6 +69,16 @@ HE_TOOLS_API std::string cppIdentifier(const std::string& name);
 HE_TOOLS_API bool scaffoldCppProject(const std::string& projectRoot,
                                      const std::string& projectName,
                                      const std::string& startupSceneName);
+
+// ─── Tutorial sandbox ────────────────────────────────────────────────────────
+// Lay down the extra files a ProjectPreset::Tutorial project gets on top of the
+// normal skeleton: a TUTORIAL.md that explains what the sandbox is for and how to
+// reopen the guided tour. The furnished starter scene itself is part of the
+// startup-scene JSON (see startupSceneJson in the .cpp), because every preset
+// writes that same file. Existing files are left untouched, so re-running this on
+// an existing project is safe. Returns false only on a write failure.
+HE_TOOLS_API bool scaffoldTutorialProject(const std::string& projectRoot,
+                                          const std::string& projectName);
 
 // Emit Source/<Scene>LevelScript.{h,cpp} with the level event stubs
 // (OnLevelLoaded / OnLevelUnloaded / OnUpdate) and a REGISTER_LEVEL_SCRIPT for

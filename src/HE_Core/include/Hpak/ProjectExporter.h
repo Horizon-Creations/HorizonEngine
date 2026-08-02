@@ -130,6 +130,14 @@ HE_API HE::UUID sceneUuidForPath(const std::string& projectRelPath);
 // the scene's UUID reference closure never reaches). "__asset_index__".
 inline constexpr const char* kAssetPathIndexEntry = "__asset_index__";
 
+// Well-known name (→ sceneUuidForPath UUID) of the pak's SCENE index: a JSON
+// array of every packed scene's project-relative path, so scene.available() can
+// enumerate scenes in a shipped build (pak entries are UUID-keyed — the paths
+// aren't recoverable from them). Mirrored by HE::api::scene::kSceneIndexEntry in
+// HE_Scene (which cannot depend on this header); the two literals MUST match or
+// the game looks up a UUID the exporter never wrote. "__scene_index__".
+inline constexpr const char* kSceneIndexEntry = "__scene_index__";
+
 // Well-known name (→ sceneUuidForPath UUID) of the packed app-wide GameInstance
 // graph (the project's GameInstance.hcode). It drives OnInit → app lifecycle and
 // commonly creates the game's UI, so it MUST ship — packed into the .hpak it

@@ -215,6 +215,79 @@ TEST_CASE("ContentManager texture round-trip")
 	CHECK(loaded->data == tex.data);
 }
 
+// Regression: width/height/channels used to be written as size_t, so the TXMI
+// chunk layout differed between 32- and 64-bit builds. They are uint32 now, but
+// every .hasset a 64-bit build wrote before that change still carries the 8-byte
+// fields and MUST keep loading — HAsset::readTextureHeader tells the two layouts
+// apart by chunk size (legacy ≥ 24 bytes, current 18).
+TEST_CASE("ContentManager loads the legacy (size_t) TXMI texture layout")
+{
+	auto legacyBlob = [](const HE::UUID& id, const char* name, bool withCookTail)
+	{
+		std::vector<uint8_t> meta;
+		HAsset::Writer::appendPOD(meta, static_cast<uint16_t>(HE::AssetType::Texture));
+		HAsset::Writer::appendPOD(meta, id.hi);
+		HAsset::Writer::appendPOD(meta, id.lo);
+		HAsset::Writer::appendString(meta, name);
+		HAsset::Writer::appendString(meta, std::string("mem://") + name);
+
+		std::vector<uint8_t> txmi;
+		HAsset::Writer::appendPOD(txmi, static_cast<uint64_t>(2)); // width  (size_t on 64-bit)
+		HAsset::Writer::appendPOD(txmi, static_cast<uint64_t>(2)); // height
+		HAsset::Writer::appendPOD(txmi, static_cast<uint64_t>(4)); // channels
+		if (withCookTail)
+		{
+			HAsset::Writer::appendPOD(txmi, static_cast<uint32_t>(1)); // mipLevels
+			HAsset::Writer::appendPOD(txmi, static_cast<uint8_t>(0));  // format RGBA8
+			HAsset::Writer::appendPOD(txmi, static_cast<uint8_t>(1));  // srgb
+		}
+		CHECK(txmi.size() == (withCookTail ? 30u : 24u));
+
+		const std::vector<uint8_t> pixels(16, 0xAB);
+		HAsset::Writer w;
+		w.addChunk(HAsset::CHUNK_META, meta.data(), meta.size());
+		w.addChunk(HAsset::CHUNK_TXMI, txmi.data(), txmi.size());
+		w.addChunk(HAsset::CHUNK_PIXL, pixels.data(), pixels.size());
+		return w.toBytes(static_cast<uint16_t>(HE::AssetType::Texture));
+	};
+
+	const HE::UUID cooked{0x7E, 0x11}, preCook{0x7E, 0x12};
+
+	ContentManager cm;
+	REQUIRE(cm.loadAssetFromMemory(legacyBlob(cooked, "legacy_cooked", true)) == cooked);
+	const TextureAsset* t = cm.getTexture(cooked);
+	REQUIRE(t != nullptr);
+	CHECK(t->width    == 2);
+	CHECK(t->height   == 2);
+	CHECK(t->channels == 4);
+	CHECK(t->srgb);                    // cook tail still parsed at the right offset
+	CHECK(t->data.size() == 16);
+
+	// Pre-cook legacy files (24 bytes, no tail) keep their defaults.
+	REQUIRE(cm.loadAssetFromMemory(legacyBlob(preCook, "legacy_precook", false)) == preCook);
+	const TextureAsset* p = cm.getTexture(preCook);
+	REQUIRE(p != nullptr);
+	CHECK(p->width    == 2);
+	CHECK(p->height   == 2);
+	CHECK(p->channels == 4);
+	CHECK(p->mipLevels == 1);
+	CHECK_FALSE(p->srgb);
+
+	// A re-save writes the CURRENT layout — 12 bytes of header + the 6-byte cook
+	// tail. That 18 < 24 is what keeps the legacy discriminator working.
+	TempContentDir dir;
+	ContentManager saver(dir.path.string());
+	TextureAsset out;
+	out.type = HE::AssetType::Texture; out.name = "migrated"; out.path = "migrated.hasset";
+	out.width = 2; out.height = 2; out.channels = 4; out.data = std::vector<uint8_t>(16, 0x01);
+	REQUIRE(saver.saveAsset(out));
+	HAsset::Reader r;
+	REQUIRE(r.open((dir.path / "migrated.hasset").string()));
+	const HAsset::Reader::Chunk* c = r.findChunk(HAsset::CHUNK_TXMI);
+	REQUIRE(c != nullptr);
+	CHECK(c->data.size() == 18);
+}
+
 TEST_CASE("ContentManager unload removes asset")
 {
 	TempContentDir dir;
@@ -239,6 +312,74 @@ TEST_CASE("ContentManager unload removes asset")
 	CHECK(cm.unloadAsset(id));
 	CHECK_FALSE(cm.isLoaded(id));
 	CHECK(cm.getMaterial(id) == nullptr);
+}
+
+// Regression: unloadAsset() only searched a subset of the SlotMaps. For
+// InputAction / InputMappingContext / ParticleSystem / AnimatorStateMachine it
+// found nothing, returned false and left the asset resident — which also killed
+// hot reload for those types, because pollHotReload() unloads before reloading.
+TEST_CASE("ContentManager unload works for every asset type it can load")
+{
+	TempContentDir dir;
+	ContentManager cm(dir.path.string());
+
+	InputActionAsset ia;
+	ia.type = HE::AssetType::InputAction;
+	ia.name = "IA_Fire";
+	ia.path = "IA_Fire.hasset";
+	ia.json = R"({"valueType":"Bool"})";
+	REQUIRE(cm.saveAsset(ia));
+
+	InputMappingContextAsset imc;
+	imc.type = HE::AssetType::InputMappingContext;
+	imc.name = "IMC_Unload";
+	imc.path = "IMC_Unload.hasset";
+	imc.json = R"({"entries":[]})";
+	REQUIRE(cm.saveAsset(imc));
+
+	ParticleGraphAsset pg;
+	pg.type          = HE::AssetType::ParticleSystem;
+	pg.name          = "PG_Sparks";
+	pg.path          = "PG_Sparks.hasset";
+	pg.nodeGraphJson = R"({"nextId":1,"nodes":[],"links":[]})";
+	REQUIRE(cm.saveAsset(pg));
+
+	AnimatorStateMachineAsset asm_;
+	asm_.type      = HE::AssetType::AnimatorStateMachine;
+	asm_.name      = "ASM_Locomotion";
+	asm_.path      = "ASM_Locomotion.hasset";
+	asm_.graphJson = R"({"states":[],"transitions":[]})";
+	REQUIRE(cm.saveAsset(asm_));
+
+	const HE::UUID actionId  = cm.loadAsset("IA_Fire.hasset");
+	const HE::UUID mappingId = cm.loadAsset("IMC_Unload.hasset");
+	const HE::UUID particleId = cm.loadAsset("PG_Sparks.hasset");
+	const HE::UUID stateId   = cm.loadAsset("ASM_Locomotion.hasset");
+	REQUIRE(cm.getInputAction(actionId)           != nullptr);
+	REQUIRE(cm.getInputMappingContext(mappingId)  != nullptr);
+	REQUIRE(cm.getParticleGraph(particleId)       != nullptr);
+	REQUIRE(cm.getAnimatorStateMachine(stateId)   != nullptr);
+
+	CHECK(cm.unloadAsset(actionId));
+	CHECK_FALSE(cm.isLoaded(actionId));
+	CHECK(cm.getInputAction(actionId) == nullptr);
+	CHECK(cm.assetType(actionId) == HE::AssetType::Unknown);
+	CHECK_FALSE(cm.isLoaded("IA_Fire.hasset")); // path→UUID entry gone too
+
+	CHECK(cm.unloadAsset(mappingId));
+	CHECK_FALSE(cm.isLoaded(mappingId));
+	CHECK(cm.getInputMappingContext(mappingId) == nullptr);
+
+	CHECK(cm.unloadAsset(particleId));
+	CHECK_FALSE(cm.isLoaded(particleId));
+	CHECK(cm.getParticleGraph(particleId) == nullptr);
+
+	CHECK(cm.unloadAsset(stateId));
+	CHECK_FALSE(cm.isLoaded(stateId));
+	CHECK(cm.getAnimatorStateMachine(stateId) == nullptr);
+
+	// A second unload of an already-evicted asset stays false.
+	CHECK_FALSE(cm.unloadAsset(actionId));
 }
 
 TEST_CASE("ContentManager round-trips a material's custom shader (and defaults empty)")
@@ -582,10 +723,12 @@ TEST_CASE("ContentManager default asset UUIDs are fixed and distinct")
 
 TEST_CASE("ContentManager enumerateIds returns all registered assets")
 {
-	ContentManager cm; // 7 default assets (cube, quad, snowflake, white tex, material, grid tex, terrain material)
+	// 8 built-in defaults: cube, quad, snowflake, white tex, grid tex, layer-0
+	// weightmap, default material, terrain material.
+	ContentManager cm;
 
 	const size_t defaultCount = cm.assetCount();
-	REQUIRE(defaultCount == 7);
+	REQUIRE(defaultCount == 8);
 
 	StaticMeshAsset m; m.name = "extra";
 	HE::UUID extraId = cm.registerStaticMesh(std::move(m));
@@ -600,7 +743,9 @@ TEST_CASE("ContentManager enumerateIds returns all registered assets")
 
 TEST_CASE("ContentManager enumerateIds(type) filters by asset type")
 {
-	ContentManager cm; // 3 meshes (cube + quad + snowflake), 2 textures (white + grid), 2 materials (default + terrain)
+	// 3 meshes (cube + quad + snowflake), 3 textures (white + grid + layer-0
+	// weightmap), 2 materials (default + terrain).
+	ContentManager cm;
 
 	auto meshes   = cm.enumerateIds(HE::AssetType::StaticMesh);
 	auto textures = cm.enumerateIds(HE::AssetType::Texture);
@@ -608,7 +753,7 @@ TEST_CASE("ContentManager enumerateIds(type) filters by asset type")
 	auto scripts  = cm.enumerateIds(HE::AssetType::Script);
 
 	CHECK(meshes.size()    == 3);
-	CHECK(textures.size()  == 2);
+	CHECK(textures.size()  == 3);
 	CHECK(materials.size() == 2);
 	CHECK(scripts.size()   == 0);
 
@@ -620,6 +765,7 @@ TEST_CASE("ContentManager enumerateIds(type) filters by asset type")
 	CHECK(contains(meshes,     HE::kDefaultQuadMeshId));
 	CHECK(contains(textures,   HE::kDefaultWhiteTextureId));
 	CHECK(contains(textures,   HE::kDefaultGridTextureId));
+	CHECK(contains(textures,   HE::kDefaultLayer0WeightTextureId));
 	CHECK(contains(materials,  HE::kDefaultMaterialId));
 	CHECK(contains(materials,  HE::kDefaultTerrainMaterialId));
 
@@ -627,7 +773,7 @@ TEST_CASE("ContentManager enumerateIds(type) filters by asset type")
 	StaticMeshAsset m2; m2.name = "m2";
 	cm.registerStaticMesh(std::move(m2));
 	CHECK(cm.enumerateIds(HE::AssetType::StaticMesh).size() == 4);
-	CHECK(cm.enumerateIds(HE::AssetType::Texture).size()    == 2);
+	CHECK(cm.enumerateIds(HE::AssetType::Texture).size()    == 3);
 }
 
 TEST_CASE("ContentManager enumerateIds unload removes entry")
@@ -639,12 +785,12 @@ TEST_CASE("ContentManager enumerateIds unload removes entry")
 	HE::UUID id = cm.registerStaticMesh(std::move(m));
 
 	auto before = cm.enumerateIds();
-	REQUIRE(before.size() == 8); // 7 defaults + 1
+	REQUIRE(before.size() == 9); // 8 defaults + 1
 
 	REQUIRE(cm.unloadAsset(id));
 
 	auto after = cm.enumerateIds();
-	CHECK(after.size() == 7);
+	CHECK(after.size() == 8);
 	for (auto uid : after) CHECK_FALSE(uid == id);
 
 	// Type-filtered enumeration also must not contain it
@@ -739,6 +885,47 @@ TEST_CASE("ContentManager pollHotReload detects a changed file and reloads it")
 
 	// Second poll with no further changes is quiet.
 	CHECK(cm.pollHotReload().empty());
+}
+
+// Regression: pollHotReload() unloads before reloading, so an asset type that
+// unloadAsset() did not know stayed pinned at its old contents forever. Proven
+// end-to-end here on the particle graph (same hole as InputAction /
+// InputMappingContext / AnimatorStateMachine).
+TEST_CASE("ContentManager pollHotReload reloads a changed particle graph")
+{
+	TempContentDir dir;
+	ContentManager cm(dir.path.string());
+
+	ParticleGraphAsset pg1;
+	pg1.type          = HE::AssetType::ParticleSystem;
+	pg1.name          = "hotgraph";
+	pg1.path          = "hotgraph.hasset";
+	pg1.nodeGraphJson = R"({"v":1})";
+	REQUIRE(cm.saveAsset(pg1));
+	const HE::UUID savedId = pg1.id;
+
+	const HE::UUID loaded = cm.loadAsset("hotgraph.hasset");
+	REQUIRE(loaded == savedId);
+	REQUIRE(cm.getParticleGraph(loaded) != nullptr);
+	CHECK(cm.getParticleGraph(loaded)->nodeGraphJson == R"({"v":1})");
+
+	// Overwrite V2 — same path, same UUID, different graph.
+	ParticleGraphAsset pg2 = *cm.getParticleGraph(loaded); // copies identity
+	pg2.nodeGraphJson = R"({"v":2})";
+	REQUIRE(cm.saveAsset(pg2));
+
+	// Advance the stored mtime by 2 s so the poller detects same-second saves.
+	const fs::path diskPath = dir.path / "hotgraph.hasset";
+	auto cur = fs::last_write_time(diskPath);
+	fs::last_write_time(diskPath, cur + std::chrono::seconds(2));
+
+	auto changed = cm.pollHotReload();
+	REQUIRE(changed.size() == 1);
+	CHECK(changed[0] == savedId);
+
+	const ParticleGraphAsset* reloaded = cm.getParticleGraph(savedId);
+	REQUIRE(reloaded != nullptr);
+	CHECK(reloaded->nodeGraphJson == R"({"v":2})");
 }
 
 // ── AssetRef (pin-based lifetime) ─────────────────────────────────────────────
@@ -862,7 +1049,7 @@ TEST_CASE("ContentManager pollHotReload skips mid-write (invalid) files")
 	const HE::UUID id = mat.id;
 	REQUIRE(cm.loadAsset("guarded.hasset") == id);
 
-	// Overwrite with garbage so getAssetType returns Unknown (simulates mid-write).
+	// Overwrite with garbage so sniffAssetTypeFromFile returns Unknown (mid-write).
 	const fs::path diskPath = dir.path / "guarded.hasset";
 	{ std::ofstream f(diskPath, std::ios::binary); f << "GARBAGE_NOT_A_VALID_ASSET"; }
 	auto t = fs::last_write_time(diskPath);
@@ -1147,9 +1334,9 @@ TEST_CASE("GlobalState::refreshEngineFolder merges project overrides into the di
 	REQUIRE(gs.refreshEngineFolder(engineDir.path.string(), dir.path.string()));
 
 	auto [engineFolder, lock] = gs.lockEngineFolder();
-	const Folder* matFns = nullptr;
-	const Folder* meshes = nullptr;
-	for (const Folder* f : engineFolder.subfolders)
+	const HE::Folder* matFns = nullptr;
+	const HE::Folder* meshes = nullptr;
+	for (const HE::Folder* f : engineFolder.subfolders)
 	{
 		if (f->name == "MaterialFunctions") matFns = f;
 		if (f->name == "Meshes")            meshes = f;
@@ -1158,9 +1345,9 @@ TEST_CASE("GlobalState::refreshEngineFolder merges project overrides into the di
 	REQUIRE(meshes != nullptr);
 
 	// Fresnel.hasset's node now points at the OVERRIDE file, not the default.
-	const File* fresnel = nullptr;
-	const File* onlyInProject = nullptr;
-	for (const File* f : matFns->files)
+	const HE::File* fresnel = nullptr;
+	const HE::File* onlyInProject = nullptr;
+	for (const HE::File* f : matFns->files)
 	{
 		if (f->name == "Fresnel.hasset")       fresnel = f;
 		if (f->name == "OnlyInProject.hasset") onlyInProject = f;
@@ -1235,4 +1422,65 @@ TEST_CASE("ContentManager scanContentDirectory indexes engine assets so UUID ref
 	REQUIRE(loaded != nullptr);
 	CHECK(loaded->name == "Sphere");
 	CHECK(loaded->indices.size() == 3);
+}
+
+TEST_CASE("Engine default mesh survives a scene save/reload round-trip")
+{
+	// End-to-end mirror of the editor flow that "loses" an engine primitive:
+	//   session A: drag Engine/Meshes/Sphere.hasset in (loadAsset by the
+	//              "Engine/"-prefixed content path) → MeshComponent UUID → save
+	//   session B: fresh ContentManager (built-in defaults re-seeded) →
+	//              scanContentDirectory() → the UUID must resolve back to the
+	//              SAME engine mesh, not fall through to the default cube.
+	TempContentDir dir;
+	TempContentDir engineDir("he_test_engine_roundtrip");
+	fs::create_directories(engineDir.path / "Meshes");
+
+	// The shipped engine primitives are authored by mesh_gen with fixed UUIDs
+	// (hi = 0x100 + index, lo = 1) — reproduce that shape, not a random UUID.
+	const HE::UUID kSphereId{ 0x0000000000000101ULL, 0x0000000000000001ULL };
+	{
+		ContentManager gen(engineDir.path.string());
+		StaticMeshAsset mesh;
+		mesh.type     = HE::AssetType::StaticMesh;
+		mesh.id       = kSphereId;
+		mesh.name     = "Sphere";
+		mesh.path     = "Meshes/Sphere.hasset";
+		mesh.vertices = { 0,0,0, 1,0,0, 0,1,0, 1,1,0 };
+		mesh.indices  = { 0, 1, 2, 1, 3, 2 };
+		mesh.normals  = { 0,0,1, 0,0,1, 0,0,1, 0,0,1 };
+		REQUIRE(gen.saveAsset(mesh));
+	}
+
+	// ── Session A: reference it the way the content browser does ──────────────
+	HE::UUID authored;
+	{
+		ContentManager cm(dir.path.string());
+		cm.setEngineContentRoot(engineDir.path.string());
+		cm.scanContentDirectory();
+		// toContentRelativePath() of a file under the engine root yields this.
+		authored = cm.loadAsset("Engine/Meshes/Sphere.hasset");
+		REQUIRE_FALSE(authored == HE::UUID{});
+		// The identity written into the scene must be the mesh's OWN UUID.
+		CHECK(authored == kSphereId);
+		CHECK_FALSE(authored == HE::kDefaultCubeMeshId);
+		const StaticMeshAsset* a = cm.getStaticMesh(authored);
+		REQUIRE(a != nullptr);
+		CHECK(a->name == "Sphere");
+	}
+
+	// ── Session B: restart — only the UUID from the scene file survives ───────
+	{
+		ContentManager cm(dir.path.string());   // re-seeds the built-in defaults
+		cm.setEngineContentRoot(engineDir.path.string());
+		CHECK(cm.scanContentDirectory() >= 1);
+		// Nothing is loaded yet — this is the state a scene load starts from.
+		CHECK(cm.getStaticMesh(authored) == nullptr);
+		// SceneSystems::preloadAssetRefs does exactly this per referenced UUID.
+		REQUIRE(cm.ensureResident(authored));
+		const StaticMeshAsset* b = cm.getStaticMesh(authored);
+		REQUIRE(b != nullptr);
+		CHECK(b->name == "Sphere");
+		CHECK(b->indices.size() == 6);          // the real mesh, not the 36-index cube
+	}
 }

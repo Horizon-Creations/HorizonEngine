@@ -1,4 +1,5 @@
 #include <HorizonScene/WidgetManager.h>
+#include <HorizonScene/UISystem.h>   // sortKey — one painter-order rule for both UI paths
 #include <HorizonCode/HcCompiledLoader.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
@@ -9,7 +10,9 @@
 namespace
 {
 	// Sort key inside one widget: layer (major) + nesting depth (minor), the
-	// same rule the entity UI path uses — children draw over their parents.
+	// same rule (and the same formula, UISystem::sortKey) the entity UI path
+	// uses — children draw over their parents. Only the depth walk differs:
+	// a widget tree nests by parentId, the entity path by HierarchyComponent.
 	int elementSortKey(const HE::UIWidgetTree& tree, const HE::UIElement& e)
 	{
 		int depth = 0;
@@ -19,7 +22,7 @@ namespace
 			if (!p) break;
 			c = p;
 		}
-		return e.layer * 256 + depth;
+		return UISystem::sortKey(e.layer, depth);
 	}
 }
 
@@ -75,7 +78,7 @@ HorizonCode::HostBindings WidgetManager::makeBindings()
 void WidgetManager::refreshElementAssets(Instance& w, HE::UIElement& e)
 {
 	if (!m_content) return;
-	// Material path → UUID (mirrors the createWidget loop for one element).
+	// Material path → UUID.
 	if (e.material.empty())
 		w.materials.erase(e.id);
 	else
@@ -121,27 +124,13 @@ int WidgetManager::createWidget(ContentManager& content, const std::string& asse
 	if (!asset->graphJson.empty())
 		HorizonCode::fromJson(asset->graphJson, graph); // absent/broken → no logic
 
-	// Resolve per-element material references once (paths → UUIDs).
+	// Resolve per-element material references once (paths → UUIDs) and bake each
+	// element's Font asset → a stable atlas key its text emits with (0 = the
+	// shared default font). Exactly the resolution refreshElementAssets does for
+	// one element when a script changes Material/Font at runtime, so it is done
+	// there and only there.
 	for (const auto& e : w.tree.elements)
-		if (!e->material.empty())
-		{
-			const HE::UUID mid = content.loadAsset(e->material);
-			if (mid != HE::UUID{}) w.materials[e->id] = mid;
-		}
-
-	// Resolve + bake each element's Font asset once → a stable atlas key the
-	// element's text emits with (0 = the shared default font).
-	for (const auto& e : w.tree.elements)
-	{
-		e->fontAtlasKey = 0;
-		if (e->font.empty()) continue;
-		const HE::UUID fid = content.loadAsset(e->font);
-		if (fid == HE::UUID{}) continue;
-		const FontAsset* fa = content.getFont(fid);
-		if (!fa || fa->fontData.empty()) continue;
-		const float bakePx = fa->size > 0 ? (float)fa->size : 48.0f;
-		e->fontAtlasKey = HE::UIFontCache::keyFor(fid.hi ^ fid.lo, fa->fontData, bakePx);
-	}
+		refreshElementAssets(w, *e);
 
 	// Register the widget's logic with the central runtime, which takes the graph
 	// and seeds the private variable store from its declared defaults. The
@@ -461,6 +450,11 @@ void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderO
 		Instance& w = *wp;
 		const float sx = vpWidth  / w.tree.canvasWidth;
 		const float sy = vpHeight / w.tree.canvasHeight;
+
+		// Auto-sizing elements fit themselves BEFORE the rects are resolved, so a
+		// text/font change made this frame (script, HorizonCode Set Property) is
+		// already reflected in the layout below.
+		HE::uiApplyAutoSize(w.tree);
 
 		// Draw elements of this widget, painter-ordered by (layer, depth).
 		struct Item { const HE::UIElement* e; int key; HE::UIWidgetRect r; };

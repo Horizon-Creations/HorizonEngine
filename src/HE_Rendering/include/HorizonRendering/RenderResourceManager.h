@@ -27,6 +27,11 @@ struct MaterialDesc {
 // budget tracking + LRU eviction to the GPUMemoryAllocator.
 // Backends call uploadMesh/uploadTexture/createMaterial when they perform the
 // actual GPU upload, and release() when they tear it down.
+//
+// STAGED API — no production consumer yet: every backend still owns its own
+// UUID→GPU-mesh cache, so nothing outside the unit tests calls this today. It is
+// kept (and kept green) because it is the agreed shape for the roadmap's GPU
+// upload-budgeting item; do not delete it as dead code without retiring that item.
 class RenderResourceManager {
 public:
     explicit RenderResourceManager(GPUMemoryAllocator& allocator);
@@ -43,19 +48,19 @@ public:
     bool         isLoaded  (const HE::UUID& assetId) const;
 
     // Forward to allocator so callers don't need to keep the allocator reference.
-    void onHandleUsed(RenderHandle handle) { allocator_.onHandleUsed(handle); }
+    void onHandleUsed(RenderHandle handle) { m_allocator.onHandleUsed(handle); }
 
-    uint64_t usedBytes()   const { return allocator_.usedBytes(); }
-    uint64_t totalBudget() const { return allocator_.totalBudget(); }
-    size_t   loadedCount() const { return assetIndex_.size(); }
+    uint64_t usedBytes()   const { return m_allocator.usedBytes(); }
+    uint64_t totalBudget() const { return m_allocator.totalBudget(); }
+    size_t   loadedCount() const { return m_assetIndex.size(); }
 
 private:
     RenderHandle nextHandle();
 
-    GPUMemoryAllocator& allocator_;
-    std::unordered_map<HE::UUID, RenderHandle> assetIndex_;
+    GPUMemoryAllocator& m_allocator;
+    std::unordered_map<HE::UUID, RenderHandle> m_assetIndex;
     // Reverse map: encoded handle → UUID (for release by handle)
-    std::unordered_map<uint64_t, HE::UUID>     handleToAsset_;
+    std::unordered_map<uint64_t, HE::UUID>     m_handleToAsset;
 
     uint32_t m_nextIndex      = 1; // 0 is reserved for invalid
     uint32_t m_generation     = 1; // bumped on every nextHandle() call

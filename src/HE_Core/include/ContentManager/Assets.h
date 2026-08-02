@@ -152,6 +152,15 @@ struct MaterialAsset : public RuntimeAsset
 	// pipeline on fragment+vertex together.
 	std::string customShaderVertGlsl;
 
+	// Deferred G-buffer fragment variant (MatShaderGen::glslGBuffer): the same graph
+	// evaluation with an MRT emit tail instead of heLitP. Regenerated from the graph
+	// at load and on every editor change like customShaderFragGlsl, AND serialized as
+	// the last MTRL tail field — the packer ships it byte-verbatim, so packaged
+	// materials (graph stripped) still render deferred. Empty for hand-written
+	// escape-hatch shaders: the deferred path then routes those draws through the
+	// forward extra pass.
+	std::string customShaderGBufGlsl;
+
 	// Exposed graph parameters (Param nodes), 4 floats per HeParams UBO slot, in slot
 	// order. Generated alongside customShaderFragGlsl; the renderer uploads this per
 	// material — editing a parameter VALUE never recompiles the shader.
@@ -192,6 +201,13 @@ struct MaterialAsset : public RuntimeAsset
 	// (heTexP0..). Loose assets keep paths; packing bakes them to graphTextureIds (MTLU).
 	std::vector<std::string> graphTexturePaths;
 	std::vector<HE::UUID>    graphTextureIds;
+
+	// Landscape paint layers this material declares, in weightmap-CHANNEL order
+	// (generated from its Landscape Layer Blend node). Non-empty = a landscape
+	// material: the Landscape tool lists exactly these as its paintable layers,
+	// so the material is the single source of truth for what a layer means and
+	// the terrain only stores the weights.
+	std::vector<std::string> graphLayerNames;
 
 	// Precompiled per-backend shaders baked into the .hpak at export time (CHUNK_PSHD).
 	// Empty for loose editor assets → the renderer cross-compiles customShaderFragGlsl at
@@ -279,7 +295,7 @@ struct ScriptAsset : public RuntimeAsset
 	// Scripting language of sourceCode. Lua by default so pre-existing .hasset
 	// files (which carry no language chunk) keep loading as Lua. Persisted as a
 	// 1-byte CHUNK_SLNG; the asset is the single source of truth for language.
-	ScriptLanguage language = ScriptLanguage::Lua;
+	HE::ScriptLanguage language = HE::ScriptLanguage::Lua;
 };
 
 struct AudioAsset : public RuntimeAsset
@@ -321,9 +337,13 @@ struct TextureAsset : public RuntimeAsset
 	// 0 as the leading width*height*channels bytes, so appended mips are
 	// backward-compatible (ignored by consumers that don't sample them).
 	std::vector<uint8_t> data;     // raw pixel bytes (RGBA8 unless channels says otherwise)
-	size_t               width    = 0;
-	size_t               height   = 0;
-	size_t               channels = 0;
+	// Fixed-width on purpose: these go into the TXMI chunk verbatim, and as size_t
+	// the on-disk layout differed between 32- and 64-bit builds (a pak written by
+	// one was unreadable by the other). See HAsset::readTextureHeader, which still
+	// reads the old 64-bit layout.
+	uint32_t             width    = 0;
+	uint32_t             height   = 0;
+	uint32_t             channels = 0;
 
 	// Pack-time cook metadata (CHUNK_TXMI tail; absent → the defaults below, so
 	// old assets keep loading unchanged).

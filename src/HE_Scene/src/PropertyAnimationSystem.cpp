@@ -5,6 +5,7 @@
 #include <HorizonScene/Components/MaterialComponent.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
+#include "AnimationEval.h"   // advancePlayback — shared playhead rule
 
 #include <algorithm>
 #include <cmath>
@@ -38,20 +39,8 @@ void PropertyAnimationSystem::update(HorizonWorld& world, ContentManager& cm, fl
         const PropertyAnimClipAsset* clip = cm.getPropertyAnimClip(pa.clipId);
         if (!clip || clip->duration <= 0.0f) continue;
 
-        pa.playbackTime += dt * pa.playbackSpeed;
-        if (pa.looping)
-        {
-            pa.playbackTime = std::fmod(pa.playbackTime, clip->duration);
-            if (pa.playbackTime < 0.0f) pa.playbackTime += clip->duration;
-        }
-        else
-        {
-            if (pa.playbackTime >= clip->duration)
-            {
-                pa.playbackTime = clip->duration;
-                pa.playing      = false;
-            }
-        }
+        advancePlayback(pa.playbackTime, pa.playing,
+                        pa.playbackSpeed, pa.looping, clip->duration, dt);
 
         const float t = pa.playbackTime;
 

@@ -2,32 +2,32 @@
 
 void CommandBuffer::reset()
 {
-	drawCalls_.clear();
-	skinnedDrawCalls_.clear();
-	postProcess_ = false;
+	m_drawCalls.clear();
+	m_skinnedDrawCalls.clear();
+	m_postProcess = false;
 }
 
 void CommandBuffer::recordPostProcess()
 {
-	postProcess_ = true;
+	m_postProcess = true;
 }
 
 void CommandBuffer::recordDraw(const DrawCall& call)
 {
-	drawCalls_.push_back(call);
+	m_drawCalls.push_back(call);
 }
 
 void CommandBuffer::recordSkinnedDraw(const SkinnedDrawCall& call)
 {
-	skinnedDrawCalls_.push_back(call);
+	m_skinnedDrawCalls.push_back(call);
 }
 
 const std::vector<DrawCall>& CommandBuffer::drawCalls() const
 {
-	return drawCalls_;
+	return m_drawCalls;
 }
 
 const std::vector<SkinnedDrawCall>& CommandBuffer::skinnedDrawCalls() const
 {
-	return skinnedDrawCalls_;
+	return m_skinnedDrawCalls;
 }

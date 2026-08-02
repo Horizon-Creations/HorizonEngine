@@ -81,27 +81,46 @@ std::vector<HE::UUID> HpakReader::enumerate() const
     return ids;
 }
 
-bool HpakReader::readStoredEntry(const HE::UUID& id, StoredEntry& out) const
+const HpakReader::EntryMeta* HpakReader::readStoredBytes(const HE::UUID& id,
+                                                         std::vector<uint8_t>& out) const
 {
     const EntryMeta* e = find(id);
-    if (!e || !m_file.is_open()) return false;
-    if (e->dataSize > 0x7FFFFFFFu || e->origSize > 0x7FFFFFFFu) return false;
+    // Use is_open() (independent of stream state), NOT operator bool(): a prior
+    // failed read leaves a sticky failbit on this persistent handle, and testing
+    // it here — before clear() — would make one bad entry poison every later read.
+    if (!e || !m_file.is_open()) return nullptr;
 
-    m_file.clear(); // drop sticky fail/eof bits from a previous read
+    // Reject implausibly large sizes up front: origSize/dataSize are uint32 (up to
+    // ~4 GB) but the LZ4 and OpenSSL update APIs take int, so a crafted entry with
+    // size > INT_MAX would overflow the cast. Also avoids a huge speculative alloc.
+    if (e->dataSize > 0x7FFFFFFFu || e->origSize > 0x7FFFFFFFu) return nullptr;
+
+    m_file.clear(); // drop any sticky fail/eof bits from a previous read
     m_file.seekg(static_cast<std::streamoff>(e->dataOffset));
-    if (!m_file) return false;
+    if (!m_file) return nullptr;
 
-    out.data.resize(e->dataSize);
+    out.resize(e->dataSize);
     if (e->dataSize > 0)
     {
-        m_file.read(reinterpret_cast<char*>(out.data.data()),
+        m_file.read(reinterpret_cast<char*>(out.data()),
                     static_cast<std::streamsize>(e->dataSize));
-        if (!m_file) return false;
+        if (!m_file) return nullptr;
     }
-    // Verify before handing the bytes on — a corrupt stored entry must be
-    // repacked from source, never carried verbatim into the next archive.
-    if (Hpak::hash64(out.data.data(), out.data.size()) != e->contentHash) return false;
 
+    // Content-hash check on the stored bytes (corruption detection). Verified here,
+    // before either caller uses them — a corrupt entry must be repacked from source,
+    // never carried verbatim into the next archive nor decoded into an asset.
+    if (Hpak::hash64(out.data(), out.size()) != e->contentHash) return nullptr;
+    return e;
+}
+
+bool HpakReader::readStoredEntry(const HE::UUID& id, StoredEntry& out) const
+{
+    const EntryMeta* e = readStoredBytes(id, out.data);
+    if (!e) return false;
+
+    // No flag filtering here (unlike readEntry): this is the verbatim re-pack path,
+    // and HpakWriter is the one that decides which flags it can carry over.
     out.origSize    = e->origSize;
     out.contentHash = e->contentHash;
     out.codec       = e->codec;
@@ -112,31 +131,19 @@ bool HpakReader::readStoredEntry(const HE::UUID& id, StoredEntry& out) const
 
 std::vector<uint8_t> HpakReader::readEntry(const HE::UUID& id, const uint8_t key[32]) const
 {
-    const EntryMeta* e = find(id);
-    // Use is_open() (independent of stream state), NOT operator bool(): a prior
-    // failed read leaves a sticky failbit on this persistent handle, and testing
-    // it here — before clear() — would make one bad entry poison every later read.
-    if (!e || !m_file.is_open()) return {};
+    std::vector<uint8_t> raw;
+    const EntryMeta* e = readStoredBytes(id, raw);
+    if (!e) return {};
 
-    // Reject implausibly large sizes up front: origSize/dataSize are uint32 (up to
-    // ~4 GB) but the LZ4 and OpenSSL update APIs take int, so a crafted entry with
-    // size > INT_MAX would overflow the cast. Also avoids a huge speculative alloc.
-    if (e->dataSize > 0x7FFFFFFFu || e->origSize > 0x7FFFFFFFu) return {};
-
-    m_file.clear(); // drop any sticky fail/eof bits from a previous read
-    m_file.seekg(static_cast<std::streamoff>(e->dataOffset));
-    if (!m_file) return {};
-
-    std::vector<uint8_t> raw(e->dataSize);
-    if (e->dataSize > 0)
-    {
-        m_file.read(reinterpret_cast<char*>(raw.data()),
-                    static_cast<std::streamsize>(e->dataSize));
-        if (!m_file) return {};
-    }
-
-    // Content-hash check on the stored bytes (corruption detection).
-    if (Hpak::hash64(raw.data(), raw.size()) != e->contentHash) return {};
+    // Reserved entry flags this build cannot honour. kFlagUsesDict says the payload
+    // was compressed against a shared zstd dictionary; this reader decodes without
+    // one, so the result would be a decode error at best and plausible-looking
+    // GARBAGE at worst. kFlagBlockFramed likewise announces a framing this decode
+    // path does not implement. Both are refused explicitly — silently ignoring a
+    // flag that changes how the bytes must be read is how corrupt assets reach the
+    // engine. (Supporting them means a real dictionary/framing section in the
+    // format, not clearing this check.)
+    if (e->flags & (Hpak::kFlagUsesDict | Hpak::kFlagBlockFramed)) return {};
 
     // Step 1: decrypt (AES-256-GCM; order matches write: compress → encrypt).
     // The auth tag makes a wrong key / tampered pak fail here rather than

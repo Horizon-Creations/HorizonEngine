@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -240,6 +241,17 @@ std::string sanitize(const std::string& s)
     return out;
 }
 
+// Claim `base` in `used`, suffixing _2, _3 … until it is free. Every generated
+// C++ identifier (member/local vars, functions, events, class names) goes through
+// this so name mangling stays deterministic and collision-free in one place.
+std::string uniqueName(const std::string& base, std::unordered_set<std::string>& used)
+{
+    std::string name = base;
+    for (int i = 2; used.count(name); ++i) name = base + "_" + std::to_string(i);
+    used.insert(name);
+    return name;
+}
+
 // ── the per-class emitter ─────────────────────────────────────────────────────
 class ClassEmitter
 {
@@ -381,13 +393,7 @@ private:
     void buildNames()
     {
         std::unordered_set<std::string> used;
-        auto unique = [&used](std::string base)
-        {
-            std::string name = base;
-            for (int i = 2; used.count(name); ++i) name = base + "_" + std::to_string(i);
-            used.insert(name);
-            return name;
-        };
+        auto unique = [&used](const std::string& base) { return uniqueName(base, used); };
         for (const auto& v : m_g.variables)
         {
             if (v.scope == 0) m_varMember[v.name] = unique("v_" + sanitize(v.name));
@@ -641,6 +647,33 @@ private:
         }
     }
 
+    // The exec emission shared by CallExternal and EngineCall: pack the data-in
+    // args into a std::vector<hc::Value>, make the call, then cache the returned
+    // values into this node's RunState slots. The two differ only in where the
+    // args start (CallExternal's data-in 0 is the Target) and in which hc:: entry
+    // point is called. `makeCall` is invoked AFTER the arg pushes are emitted,
+    // preserving §3.4's ordering (args evaluate before the Target read).
+    void emitValueCall(const Node& n, int fnCtx, Body& b, int firstArgPin,
+                       const std::function<std::string(const std::string&)>& makeCall)
+    {
+        const std::string av = "a" + std::to_string(n.id);
+        const std::string rv = "r" + std::to_string(n.id);
+        b.line("{");
+        ++b.indent;
+        b.line("std::vector<hc::Value> " + av + ";");
+        if (!n.params.empty()) b.line(av + ".reserve(" + std::to_string(n.params.size()) + ");");
+        for (size_t i = 0; i < n.params.size(); ++i)
+            b.line(av + ".push_back(hc::toValue(" + input(n, (int)i + firstArgPin, fnCtx) + "));");
+        b.line("const std::vector<hc::Value> " + rv + " = " + makeCall(av) + ";");
+        const auto it = m_slots.find(n.id);
+        if (it != m_slots.end())
+            for (size_t k = 0; k < it->second.size(); ++k)
+                b.line("rs." + it->second[k].field + " = " +
+                       fromValueCall(rv, k, it->second[k].tr) + ";");
+        --b.indent;
+        b.line("}");
+    }
+
     void stmt(const Node& n, int fnCtx, Body& b)
     {
         const PinRanges r = pinRanges(n);
@@ -721,15 +754,15 @@ private:
             b.line("hc::setProperty(m_ctx, " + std::to_string(n.elem) + ", " + strLit(n.s) +
                    ", hc::toValue(" + input(n, 0, fnCtx) + "));");
             break;
-        case NT::ShowWidget: b.line("hc::showSelf(m_ctx);"); break;
-        case NT::HideWidget: b.line("hc::hideSelf(m_ctx);"); break;
+        case NT::ShowSelf: b.line("hc::showSelf(m_ctx);"); break;
+        case NT::HideSelf: b.line("hc::hideSelf(m_ctx);"); break;
         case NT::CreateWidget:
             b.line(slotRef(n, 0) + " = hc::createWidget(m_ctx, " + strLit(n.s) + ");");
             break;
-        case NT::ShowWidgetId:
+        case NT::ShowWidget:
             b.line("hc::showWidget(m_ctx, (int)(" + input(n, 0, fnCtx) + "));");
             break;
-        case NT::HideWidgetId:
+        case NT::HideWidget:
             b.line("hc::hideWidget(m_ctx, (int)(" + input(n, 0, fnCtx) + "));");
             break;
         case NT::DestroyWidget:
@@ -756,27 +789,13 @@ private:
                 b.line("hc::emitEvent(m_ctx, " + strLit(n.s) + ", hc::Value{});");
             break;
         case NT::CallExternal:
-        {
-            const std::string av = "a" + std::to_string(n.id);
-            const std::string rv = "r" + std::to_string(n.id);
-            b.line("{");
-            ++b.indent;
-            b.line("std::vector<hc::Value> " + av + ";");
-            if (!n.params.empty()) b.line(av + ".reserve(" + std::to_string(n.params.size()) + ");");
-            // §3.4: args (data-ins 1..) evaluate before the Target read.
-            for (size_t i = 0; i < n.params.size(); ++i)
-                b.line(av + ".push_back(hc::toValue(" + input(n, (int)i + 1, fnCtx) + "));");
-            b.line("const std::vector<hc::Value> " + rv + " = hc::callExternal(m_ctx, " +
-                   input(n, 0, fnCtx) + ", " + strLit(n.s) + ", " + av + ");");
-            const auto it = m_slots.find(n.id);
-            if (it != m_slots.end())
-                for (size_t k = 0; k < it->second.size(); ++k)
-                    b.line("rs." + it->second[k].field + " = " +
-                           fromValueCall(rv, k, it->second[k].tr) + ";");
-            --b.indent;
-            b.line("}");
+            // §3.4: args (data-ins 1..) evaluate before the Target read (data-in 0).
+            emitValueCall(n, fnCtx, b, /*firstArgPin=*/1, [&](const std::string& av)
+            {
+                return "hc::callExternal(m_ctx, " + input(n, 0, fnCtx) + ", " +
+                       strLit(n.s) + ", " + av + ")";
+            });
             break;
-        }
         case NT::FunctionCall:
         {
             const Node* entry = fnEntryByName(n.s);
@@ -837,26 +856,11 @@ private:
             break;
         }
         case NT::EngineCall:
-        {
-            const std::string av = "a" + std::to_string(n.id);
-            const std::string rv = "r" + std::to_string(n.id);
-            b.line("{");
-            ++b.indent;
-            b.line("std::vector<hc::Value> " + av + ";");
-            if (!n.params.empty()) b.line(av + ".reserve(" + std::to_string(n.params.size()) + ");");
-            for (size_t i = 0; i < n.params.size(); ++i)
-                b.line(av + ".push_back(hc::toValue(" + input(n, (int)i, fnCtx) + "));");
-            b.line("const std::vector<hc::Value> " + rv + " = hc::callApi(m_ctx, " +
-                   strLit(n.s) + ", " + av + ");");
-            const auto it = m_slots.find(n.id);
-            if (it != m_slots.end())
-                for (size_t k = 0; k < it->second.size(); ++k)
-                    b.line("rs." + it->second[k].field + " = " +
-                           fromValueCall(rv, k, it->second[k].tr) + ";");
-            --b.indent;
-            b.line("}");
+            emitValueCall(n, fnCtx, b, /*firstArgPin=*/0, [&](const std::string& av)
+            {
+                return "hc::callApi(m_ctx, " + strLit(n.s) + ", " + av + ")";
+            });
             break;
-        }
         case NT::Print:
             b.line("hc::print(" + input(n, 0, fnCtx) + ");");
             break;
@@ -1223,19 +1227,15 @@ std::string classNameFor(const std::string& key, std::unordered_set<std::string>
             stem = stem.substr(0, dot);
         stem = prefix + stem;
     }
-    std::string base = "C_" + sanitize(stem);
-    std::string name = base;
-    for (int i = 2; used.count(name); ++i) name = base + "_" + std::to_string(i);
-    used.insert(name);
-    return name;
+    return uniqueName("C_" + sanitize(stem), used);
 }
 
 } // namespace
 
-Result generate(const std::vector<ClassSource>& sources, const Options& opt)
+// The whole emission, writing into `res`; generate() below wraps it so that
+// nothing thrown in here reaches a caller.
+static void generateInto(const std::vector<ClassSource>& sources, const Options& opt, Result& res)
 {
-    Result res;
-    res.ok = true;
     std::unordered_set<std::string> usedNames;
 
     struct Entry { std::string key, className; };
@@ -1260,6 +1260,22 @@ Result generate(const std::vector<ClassSource>& sources, const Options& opt)
         {
             usedNames.erase(className);   // name freed — the class ships interpreted
             res.fallbacks.push_back({ src.key, e.reason, e.node });
+        }
+        catch (const std::exception& e)
+        {
+            // NOT a "this graph can't be compiled" verdict (that is FallbackError
+            // above) but a slip in the emitter itself — a lookup we thought total
+            // (.at()) or an allocation failure. Keep translating the remaining
+            // classes so one bad graph doesn't cost the whole build, but fail the
+            // run: this class drops out of the manifest and ships interpreted.
+            // It gets a fallback entry as well as the warning because the editor's
+            // per-class compile check reads only `fallbacks` — without one it would
+            // report the graph as compiling cleanly.
+            usedNames.erase(className);
+            res.ok = false;
+            res.warnings.push_back("internal codegen error in '" +
+                                   (src.label.empty() ? src.key : src.label) + "': " + e.what());
+            res.fallbacks.push_back({ src.key, "internal codegen error — shipped interpreted", 0 });
         }
     }
 
@@ -1310,7 +1326,35 @@ Result generate(const std::vector<ClassSource>& sources, const Options& opt)
     rc += "    return " + ns + "::classes(count);\n}\n";
     rc += "#endif\n";
     res.files.push_back({ "hc_registry.cpp", std::move(rc) });
+}
 
+Result generate(const std::vector<ClassSource>& sources, const Options& opt)
+{
+    Result res;
+    res.ok = true;
+    // Exception firewall. Two of the four callers press this from an ImGui
+    // button mid-frame (LevelScriptPanel, UIEditorPanel), where an escaping
+    // exception unwinds through the unfinished frame — a torn frame at best.
+    // So an internal slip (a .at() we thought total, an allocation failure while
+    // building the sources) has to come back as ok=false + a warning instead.
+    // Per-class errors are already handled one level down; this catches whatever
+    // happens outside a class (the manifest emission) and anything the inner
+    // handler itself throws. Files produced so far are kept for diagnosis — the
+    // set is incomplete, which is exactly what ok=false says.
+    try
+    {
+        generateInto(sources, opt, res);
+    }
+    catch (const std::exception& e)
+    {
+        res.ok = false;
+        res.warnings.push_back(std::string("internal codegen error: ") + e.what());
+    }
+    catch (...)
+    {
+        res.ok = false;
+        res.warnings.push_back("internal codegen error: unknown exception");
+    }
     return res;
 }
 
@@ -1487,7 +1531,31 @@ namespace {
 // Run a shell command, streaming each output line (stdout+stderr merged) to
 // `onLine` and appending everything to `captured`. Returns the exit status.
 int runStreaming(const std::string& cmd, const std::function<void(const std::string&)>& onLine,
-                 std::string& captured);
+                 std::string& captured)
+{
+#if defined(_WIN32)
+    FILE* pipe = _popen((cmd + " 2>&1").c_str(), "r");
+#else
+    FILE* pipe = popen((cmd + " 2>&1").c_str(), "r");
+#endif
+    if (!pipe) return -1;
+    char buf[1024];
+    while (std::fgets(buf, sizeof buf, pipe))
+    {
+        captured += buf;
+        if (onLine)
+        {
+            std::string line(buf);
+            while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
+            onLine(line);
+        }
+    }
+#if defined(_WIN32)
+    return _pclose(pipe);
+#else
+    return pclose(pipe);
+#endif
+}
 } // namespace
 
 ToolchainProbe probeToolchain()
@@ -1561,35 +1629,6 @@ ToolchainProbe probeToolchain()
 }
 
 namespace {
-// Run a shell command, streaming each output line (stdout+stderr merged) to
-// `onLine` and appending everything to `captured`. Returns the exit status.
-int runStreaming(const std::string& cmd, const std::function<void(const std::string&)>& onLine,
-                 std::string& captured)
-{
-#if defined(_WIN32)
-    FILE* pipe = _popen((cmd + " 2>&1").c_str(), "r");
-#else
-    FILE* pipe = popen((cmd + " 2>&1").c_str(), "r");
-#endif
-    if (!pipe) return -1;
-    char buf[1024];
-    while (std::fgets(buf, sizeof buf, pipe))
-    {
-        captured += buf;
-        if (onLine)
-        {
-            std::string line(buf);
-            while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
-            onLine(line);
-        }
-    }
-#if defined(_WIN32)
-    return _pclose(pipe);
-#else
-    return pclose(pipe);
-#endif
-}
-
 // True if <exe> resolves on PATH — used to pick an available package manager.
 bool commandExists(const std::string& exe)
 {

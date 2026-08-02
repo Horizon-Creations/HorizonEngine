@@ -1,5 +1,6 @@
 #include "EditorApplication.h"
 #include <cstring>
+#include "AssetThumbnailCache.h" // renderer-owned Content-Browser tiles (freed on shutdown)
 #include "EditorUI.h"
 #include "HorizonVersion.h"
 #include <Diagnostics/Profiler.h>
@@ -7,6 +8,7 @@
 #include <HorizonScene/Components/EnvironmentComponent.h>
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
+#include <HorizonScene/Components/LightComponent.h>
 #include <HorizonScene/Components/MeshComponent.h>
 #include <HorizonScene/Components/MaterialComponent.h>
 #include <ContentManager/DefaultAssets.h>
@@ -14,6 +16,8 @@
 #include <material/MaterialShaderLibrary.h> // HE_DUMP_MATPRECOMPILE witness
 #include <glm/gtc/quaternion.hpp>
 #include <HorizonScene/TerrainSystem.h>
+#include <HorizonScene/TerrainPaint.h>
+#include <HorizonScene/Components/TerrainComponent.h>
 #include <HorizonScene/AnimationSystem.h>
 #include <HorizonScene/AnimationBlendSystem.h>
 #include <HorizonScene/AnimationStateMachineSystem.h>
@@ -26,6 +30,8 @@
 #include <HorizonScene/CollisionSystem.h>
 #include <HorizonScene/ScriptApi.h>
 #include <HorizonScene/EngineApi.h>
+#include <HorizonScene/EnvironmentPush.h>      // makeEnvironmentSettings (shared with the game runtime)
+#include <HorizonScene/FlyCameraController.h>  // free-fly PIE camera (shared with the game runtime)
 #include <HorizonScene/Components/ScriptComponent.h>
 #include <ContentManager/Assets.h>
 #include <Renderer/RendererFactory.h>
@@ -115,6 +121,12 @@ struct D3D12DescriptorHeapAllocator
 #ifdef HE_IMGUI_METAL_ENABLED
 #include "ImGuiMetalBridge.h"
 #include <Backends/Metal/MetalRenderer.h>
+
+// File-local alias. It used to arrive transitively from the public
+// HorizonRendering/ShaderManager.h, which declared it at global scope and so
+// leaked `fs` into every consumer of that header.
+namespace fs = std::filesystem;
+
 #endif
 #endif // HE_IMGUI_ENABLED
 
@@ -148,11 +160,11 @@ HE::ApplicationConfig EditorApplication::GetConfig() const
 	if (const char* rhi = std::getenv("HE_DUMP_RHI"); rhi && *rhi)
 	{
 		const std::string s = rhi;
-		if      (s == "Metal")               cfg.backend = HE::GraphicsAPI::Metal;
-		else if (s == "OpenGL" || s == "GL") cfg.backend = HE::GraphicsAPI::OpenGL;
-		else if (s == "Vulkan")              cfg.backend = HE::GraphicsAPI::Vulkan;
-		else if (s == "D3D11")               cfg.backend = HE::GraphicsAPI::D3D11;
-		else if (s == "D3D12")               cfg.backend = HE::GraphicsAPI::D3D12;
+		if      (s == "Metal")               cfg.backend = HE::RendererBackend::Metal;
+		else if (s == "OpenGL" || s == "GL") cfg.backend = HE::RendererBackend::OpenGL;
+		else if (s == "Vulkan")              cfg.backend = HE::RendererBackend::Vulkan;
+		else if (s == "D3D11")               cfg.backend = HE::RendererBackend::D3D11;
+		else if (s == "D3D12")               cfg.backend = HE::RendererBackend::D3D12;
 	}
 	return cfg;
 }
@@ -305,6 +317,15 @@ void EditorApplication::OnInit()
 	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 	io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
 	io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
+	// ImGui windows that end up in their own OS window (a dialog that does not fit
+	// inside the editor, a panel dragged out of it) are top-level and unparented
+	// by default, so the window manager orders them independently of the editor:
+	// alt-tabbing away and back, or clicking the editor, buries them behind the
+	// docked layout while they stay open — and an open modal keeps eating input.
+	// Declaring the main viewport as their parent makes the OS keep them in front
+	// of the editor window. EditorWidgets::raiseDetachedModals() covers macOS,
+	// where the SDL3 backend skips parenting (multi-monitor quirk upstream).
+	io.ConfigViewportsNoDefaultParent = false;
 
 	// ── Load editor fonts ─────────────────────────────────────────────────────
 	// Font file is deployed alongside the executable via the CMake post-build step.
@@ -369,7 +390,7 @@ void EditorApplication::OnInit()
 	switch (m_backend)
 	{
 	// ── OpenGL ────────────────────────────────────────────────────────────────
-	case RendererFactory::Backend::OpenGL:
+	case HE::RendererBackend::OpenGL:
 		ImGui_ImplSDL3_InitForOpenGL(
 			window()->GetNativeWindow(),
 			window()->GetGLContext());
@@ -385,7 +406,7 @@ void EditorApplication::OnInit()
 
 #ifdef HE_IMGUI_METAL_ENABLED
 	// ── Metal ─────────────────────────────────────────────────────────────────
-	case RendererFactory::Backend::Metal:
+	case HE::RendererBackend::Metal:
 	{
 		auto* mtl = static_cast<MetalRenderer*>(renderer());
 		if (mtl && mtl->GetDevice())
@@ -403,7 +424,7 @@ void EditorApplication::OnInit()
 
 #ifdef _WIN32
 	// ── D3D11 ─────────────────────────────────────────────────────────────────
-	case RendererFactory::Backend::D3D11:
+	case HE::RendererBackend::D3D11:
 	{
 		HWND hwnd = static_cast<HWND>(SDL_GetPointerProperty(
 			SDL_GetWindowProperties(window()->GetNativeWindow()),
@@ -422,7 +443,7 @@ void EditorApplication::OnInit()
 	}
 
 	// ── D3D12 ─────────────────────────────────────────────────────────────────
-	case RendererFactory::Backend::D3D12:
+	case HE::RendererBackend::D3D12:
 	{
 		HWND hwnd = static_cast<HWND>(SDL_GetPointerProperty(
 			SDL_GetWindowProperties(window()->GetNativeWindow()),
@@ -481,7 +502,7 @@ void EditorApplication::OnInit()
 
 #ifdef HE_IMGUI_VULKAN_ENABLED
 	// ── Vulkan ────────────────────────────────────────────────────────────────
-	case RendererFactory::Backend::Vulkan:
+	case HE::RendererBackend::Vulkan:
 	{
 		auto* vk = static_cast<VulkanRenderer*>(renderer());
 		if (vk)
@@ -536,16 +557,16 @@ void EditorApplication::OnInit()
 
 			switch (m_backend)
 			{
-			case RendererFactory::Backend::OpenGL:
+			case HE::RendererBackend::OpenGL:
 				if (drawData->TotalVtxCount > 0)
 					ImGui_ImplOpenGL3_RenderDrawData(drawData);
 				break;
 #ifdef _WIN32
-			case RendererFactory::Backend::D3D11:
+			case HE::RendererBackend::D3D11:
 				if (drawData->TotalVtxCount > 0)
 					ImGui_ImplDX11_RenderDrawData(drawData);
 				break;
-			case RendererFactory::Backend::D3D12:
+			case HE::RendererBackend::D3D12:
 			{
 				if (!nativeContext) break;
 				auto* cmdList = static_cast<ID3D12GraphicsCommandList*>(nativeContext);
@@ -573,14 +594,14 @@ void EditorApplication::OnInit()
 			}
 #endif
 #ifdef HE_IMGUI_VULKAN_ENABLED
-			case RendererFactory::Backend::Vulkan:
+			case HE::RendererBackend::Vulkan:
 				if (nativeContext && drawData->TotalVtxCount > 0)
 					ImGui_ImplVulkan_RenderDrawData(drawData,
 						static_cast<VkCommandBuffer>(nativeContext));
 				break;
 #endif
 #ifdef HE_IMGUI_METAL_ENABLED
-			case RendererFactory::Backend::Metal:
+			case HE::RendererBackend::Metal:
 			{
 				if (!nativeContext || drawData->TotalVtxCount <= 0) break;
 				auto* mtlCtx = static_cast<MetalOverlayContext*>(nativeContext);
@@ -601,7 +622,7 @@ void EditorApplication::OnInit()
 		// below) so the renderer's CreateImGuiTexture can call back into ImGui's
 		// descriptor heap.
 #ifdef _WIN32
-		if (m_backend == RendererFactory::Backend::D3D12)
+		if (m_backend == HE::RendererBackend::D3D12)
 		{
 			renderer()->SetImGuiTextureRegistrar(
 				[this](void* res, void* /*unused*/) -> void*
@@ -630,7 +651,7 @@ void EditorApplication::OnInit()
 		}
 #endif
 #ifdef HE_IMGUI_VULKAN_ENABLED
-		if (m_backend == RendererFactory::Backend::Vulkan)
+		if (m_backend == HE::RendererBackend::Vulkan)
 		{
 			renderer()->SetImGuiTextureRegistrar(
 				[](void* view, void* sampler) -> void*
@@ -650,7 +671,17 @@ void EditorApplication::OnInit()
 	GlobalState& globalstate = GlobalState::getInstance();
 	m_editorConfig.ContentBrowserRefreshRate   = globalstate.getCustomConfigInt("ContentBrowserRefreshRate",   m_editorConfig.ContentBrowserRefreshRate);
 	m_editorConfig.KeepCPUAssets               = globalstate.getCustomConfigBool("KeepCPUAssets",               m_editorConfig.KeepCPUAssets);
-	m_editorConfig.KeepCPUAssetsInfoAcknoleged = globalstate.getCustomConfigBool("KeepCPUAssetsInfoAcknoleged", m_editorConfig.KeepCPUAssetsInfoAcknoleged);
+	// The persisted key was misspelled "KeepCPUAssetsInfoAcknoleged" until the
+	// 2026-07 rework. Read the old spelling FIRST and hand it in as the default for
+	// the corrected key, so a user who already dismissed the info box keeps that
+	// state instead of silently getting it back. The save side only ever writes the
+	// corrected key, so the stale entry stops mattering after one clean shutdown.
+	// Do not delete this fallback — every config.json written before that rework
+	// still carries only the old spelling.
+	const bool legacyKeepCPUAssetsAck =
+		globalstate.getCustomConfigBool("KeepCPUAssetsInfoAcknoleged", m_editorConfig.KeepCPUAssetsInfoAcknowledged);
+	m_editorConfig.KeepCPUAssetsInfoAcknowledged =
+		globalstate.getCustomConfigBool("KeepCPUAssetsInfoAcknowledged", legacyKeepCPUAssetsAck);
 	m_editorConfig.CbTreeWidth                 = globalstate.getCustomConfigFloat("CbTreeWidth", m_editorConfig.CbTreeWidth);
 	m_editorConfig.UiFontScale                 = globalstate.getCustomConfigFloat("UiFontScale",       m_editorConfig.UiFontScale);
 	m_editorConfig.EditorCameraSpeed           = globalstate.getCustomConfigFloat("EditorCameraSpeed", m_editorConfig.EditorCameraSpeed);
@@ -666,6 +697,11 @@ void EditorApplication::OnInit()
 	m_editorConfig.GlobalIlluminationEnabled   = globalstate.getCustomConfigBool("GlobalIlluminationEnabled", m_editorConfig.GlobalIlluminationEnabled);
 	m_editorConfig.GIIndirectIntensity         = globalstate.getCustomConfigFloat("GIIndirectIntensity",      m_editorConfig.GIIndirectIntensity);
 	m_editorConfig.GILightRadius               = globalstate.getCustomConfigFloat("GILightRadius",            m_editorConfig.GILightRadius);
+	m_editorConfig.RenderPath                  = globalstate.getCustomConfigInt("RenderPath",           m_editorConfig.RenderPath);
+	m_editorConfig.SSREnabled                  = globalstate.getCustomConfigBool("SSREnabled",          m_editorConfig.SSREnabled);
+	m_editorConfig.SSRIntensity                = globalstate.getCustomConfigFloat("SSRIntensity",       m_editorConfig.SSRIntensity);
+	m_editorConfig.SSRQuality                  = globalstate.getCustomConfigInt("SSRQuality",           m_editorConfig.SSRQuality);
+	m_editorConfig.SSRMaxRoughness             = globalstate.getCustomConfigFloat("SSRMaxRoughness",    m_editorConfig.SSRMaxRoughness);
 	m_editorConfig.QuickSettingsFavorites      = globalstate.getCustomConfigString("QuickSettingsFavorites", m_editorConfig.QuickSettingsFavorites);
 	m_editorCamera.setFlySpeed(m_editorConfig.EditorCameraSpeed);
 	// Restore the last editor camera view (saved on exit). Skipped on first run (no
@@ -744,6 +780,20 @@ void EditorApplication::OnInit()
 			{ "Stop.tga",     &m_iconStop     },
 			{ "undo.png",     &m_iconUndo     },
 			{ "redo.png",     &m_iconRedo     },
+			// Per-asset-type glyphs (scripts/make_asset_icons.py). File names are
+			// the HE::AssetType spelling so the mapping stays obvious.
+			{ "MaterialFunction.png",     &m_iconMaterialFunction     },
+			{ "Shader.png",               &m_iconShader               },
+			{ "Prefab.png",               &m_iconPrefab               },
+			{ "AnimationClip.png",        &m_iconAnimationClip        },
+			{ "PropertyAnimClip.png",     &m_iconPropertyAnimClip     },
+			{ "Widget.png",               &m_iconWidget               },
+			{ "HorizonCodeClass.png",     &m_iconHorizonCodeClass     },
+			{ "InputAction.png",          &m_iconInputAction          },
+			{ "InputMappingContext.png",  &m_iconInputMappingContext  },
+			{ "ParticleSystem.png",       &m_iconParticleSystem       },
+			{ "AnimatorStateMachine.png", &m_iconAnimatorStateMachine },
+			{ "Font.png",                 &m_iconFont                 },
 		};
 		for (auto& entry : icons)
 		{
@@ -977,28 +1027,6 @@ void EditorApplication::startToolchainInstall(bool needCmake, bool needCompiler)
 	});
 }
 
-// Push the current SDL keyboard/mouse state into HE::api::input so input.* nodes
-// and scripts can poll it during play. Mouse delta + scroll stay 0 here (the play
-// camera controller owns SDL's relative-motion accumulator); position + buttons +
-// keys (by SDL scancode name, e.g. "W"/"Space") are polled.
-static void pushEngineInputSnapshot()
-{
-	int n = 0;
-	const bool* ks = SDL_GetKeyboardState(&n);
-	std::vector<std::string> down;
-	if (ks)
-		for (int sc = 0; sc < n; ++sc)
-			if (ks[sc]) { const char* name = SDL_GetScancodeName((SDL_Scancode)sc); if (name && name[0]) down.emplace_back(name); }
-	float mx = 0.0f, my = 0.0f;
-	const SDL_MouseButtonFlags mb = SDL_GetMouseState(&mx, &my);
-	uint32_t buttons = 0;
-	if (mb & SDL_BUTTON_MASK(SDL_BUTTON_LEFT))   buttons |= 1u << 0;
-	if (mb & SDL_BUTTON_MASK(SDL_BUTTON_RIGHT))  buttons |= 1u << 1;
-	if (mb & SDL_BUTTON_MASK(SDL_BUTTON_MIDDLE)) buttons |= 1u << 2;
-	HE::api::input::setMouse({ mx, my }, { 0.0f, 0.0f }, buttons, 0.0f);
-	HE::api::input::setKeysDown(down);
-}
-
 // Logger sink: capture play-session warnings/errors for the post-PIE report.
 // May run on ANY thread (streaming/export workers log too) — appendPlayLog locks.
 static void hePlayLogSink(HE::LogLevel level, const char* message, void* user)
@@ -1031,16 +1059,17 @@ void EditorApplication::OnRender(float dt)
 	if (m_isPlaying)
 	{
 		HE::api::time::advance(dt);
-		pushEngineInputSnapshot();
+		HE::api::input::pushSdlSnapshot();
 		// Zone requests (additive load / unload / show / hide / move) run in PIE
 		// against the editor world — leaving play mode restores the pre-play
 		// snapshot, which drops zone entities again. Only the FULL level switch
 		// and activate stay game-runtime-only (the play snapshot belongs to THIS
 		// scene), consumed loudly so a graph author sees why nothing happened.
+		using Kind = HE::api::scene::RequestKind;
 		for (const auto& r : HE::api::scene::takeRequests())
 		{
 			HE::api::Ctx c{ m_editorWorld.get(), nullptr, &contentManager(), &m_audioEngine };
-			if (r.kind == 1 && m_editorWorld) // additive zone
+			if (r.kindOf() == Kind::Additive && m_editorWorld) // additive zone
 			{
 				const std::filesystem::path projRoot =
 					std::filesystem::path(m_projectManager.currentProject().path).parent_path();
@@ -1074,7 +1103,7 @@ void EditorApplication::OnRender(float dt)
 					 + std::to_string(created.size()) + " entities"
 					 + (r.hidden ? ", hidden" : "") + ")").c_str());
 			}
-			else if (r.kind == 2 && m_editorWorld) // unload zone
+			else if (r.kindOf() == Kind::UnloadZone && m_editorWorld) // unload zone
 			{
 				if (const auto* z = HE::api::scene::zoneInfo(r.zone))
 				{
@@ -1085,11 +1114,11 @@ void EditorApplication::OnRender(float dt)
 					HE::api::scene::noteZoneUnloaded(r.zone);
 				}
 			}
-			else if (r.kind == 4) HE::api::scene::setZoneVisible(c, r.zone, r.flag);
-			else if (r.kind == 5) HE::api::scene::setZonePosition(c, r.zone, r.pos);
+			else if (r.kindOf() == Kind::ZoneVisible)  HE::api::scene::setZoneVisible(c, r.zone, r.flag);
+			else if (r.kindOf() == Kind::ZonePosition) HE::api::scene::setZonePosition(c, r.zone, r.pos);
 			else
 				Logger::Log(Logger::LogLevel::Warning,
-					("scene." + std::string(r.kind == 0 ? "load" : "activate")
+					("scene." + std::string(r.kindOf() == Kind::Switch ? "load" : "activate")
 					 + (r.path.empty() ? "" : " ('" + r.path + "')")
 					 + " runs in the packaged game — play-in-editor keeps the current scene.").c_str());
 		}
@@ -1193,6 +1222,28 @@ void EditorApplication::OnRender(float dt)
 			m_editorConfig.GlobalIlluminationEnabled,
 			m_editorConfig.GIIndirectIntensity,
 			m_editorConfig.GILightRadius});
+		{
+			IRenderer::SSRSettings ssr;
+			ssr.enabled      = m_editorConfig.SSREnabled;
+			ssr.intensity    = m_editorConfig.SSRIntensity;
+			ssr.maxRoughness = m_editorConfig.SSRMaxRoughness;
+			ssr.quality      = m_editorConfig.SSRQuality;
+			renderer()->SetSSRSettings(ssr);
+		}
+		// Render path (Forward | Deferred) — gated on the backend capability so an
+		// unsupported backend simply stays forward. HE_DUMP_RENDERPATH must win
+		// HERE too (not only in the one-shot dump block): this push runs every
+		// frame and would otherwise flip a headless capture back to the persisted
+		// config value between the dump setup and the captured frame.
+		{
+			int rpath = m_editorConfig.RenderPath;
+			static const char* s_rpOv = std::getenv("HE_DUMP_RENDERPATH");
+			if (s_rpOv && *s_rpOv)
+				rpath = (std::string(s_rpOv) == "1" || std::string(s_rpOv) == "deferred") ? 1 : 0;
+			renderer()->SetRenderPath(
+				(rpath == 1 && renderer()->GetCapabilities().supportsDeferredRendering)
+					? HE::RenderPath::Deferred : HE::RenderPath::Forward);
+		}
 		// Regenerate terrain meshes for any entity whose TerrainComponent is dirty
 		// (newly created, parameter-edited in the inspector, or just loaded/restored).
 		if (m_editorWorld)
@@ -1456,7 +1507,7 @@ void EditorApplication::OnRender(float dt)
 	// then hand the opaque handle back to the renderer so GetViewportTexture()
 	// returns it for use in ImGui::Image().
 #ifdef _WIN32
-	if (m_backend == RendererFactory::Backend::D3D12)
+	if (m_backend == HE::RendererBackend::D3D12)
 	{
 		auto* dx12 = static_cast<D3D12Renderer*>(renderer());
 		if (dx12 && dx12->HasViewportResourceChanged())
@@ -1499,7 +1550,7 @@ void EditorApplication::OnRender(float dt)
 	}
 #endif
 #ifdef HE_IMGUI_VULKAN_ENABLED
-	if (m_backend == RendererFactory::Backend::Vulkan)
+	if (m_backend == HE::RendererBackend::Vulkan)
 	{
 		auto* vk = static_cast<VulkanRenderer*>(renderer());
 		if (vk && vk->HasViewportResourceChanged())
@@ -1642,6 +1693,30 @@ void EditorApplication::dumpFrameHeadless()
 		}();
 		r->SetGISettings(IRenderer::GISettings{
 			dumpGI, m_editorConfig.GIIndirectIntensity, m_editorConfig.GILightRadius});
+	}
+	{
+		// HE_DUMP_SSR: override the persisted SSR toggle for this capture only.
+		// HE_DUMP_SSRQUALITY: override the quality tier (0 = raw trace without
+		// the P4 blur, 1/2 = blurred) for headless A/B of the blur passes.
+		const bool dumpSSR = [&]{
+			const char* v = std::getenv("HE_DUMP_SSR");
+			return v && *v ? std::atof(v) > 0.5 : m_editorConfig.SSREnabled;
+		}();
+		IRenderer::SSRSettings ssr{
+			dumpSSR, m_editorConfig.SSRIntensity, m_editorConfig.SSRMaxRoughness};
+		ssr.quality = m_editorConfig.SSRQuality;
+		if (const char* q = std::getenv("HE_DUMP_SSRQUALITY"); q && *q)
+			ssr.quality = std::atoi(q);
+		r->SetSSRSettings(ssr);
+	}
+	{
+		// HE_DUMP_RENDERPATH: override the persisted render path for this capture
+		// only (he_shot Forward/Deferred A/B without touching config.json).
+		int path = m_editorConfig.RenderPath;
+		if (const char* v = std::getenv("HE_DUMP_RENDERPATH"); v && *v)
+			path = (std::string(v) == "1" || std::string(v) == "deferred") ? 1 : 0;
+		r->SetRenderPath((path == 1 && r->GetCapabilities().supportsDeferredRendering)
+			? HE::RenderPath::Deferred : HE::RenderPath::Forward);
 	}
 
 	// ── Sky-test capture (HE_DUMP_SKYTEST): aim the camera up at the sky and override
@@ -1855,6 +1930,7 @@ void EditorApplication::dumpFrameHeadless()
 			mat.nodeGraphJson = HE::materialGraphToJson(g);
 			const HE::MatShaderGen gen = HE::generateFragment(g);
 			mat.customShaderFragGlsl = gen.glsl;
+			mat.customShaderGBufGlsl = gen.glslGBuffer;
 			mat.customShaderVertGlsl = gen.vertexBody; // WPO vertex body (if the graph uses it)
 			mat.blendMode            = gen.blendMode;
 			for (const auto& slot : gen.params)
@@ -2008,6 +2084,289 @@ void EditorApplication::dumpFrameHeadless()
 		reg.emplace<MaterialComponent>(e, mc);
 		Logger::Log(Logger::LogLevel::Info,
 			"EditorApplication: HE_DUMP_MATERIALTEST sphere with custom-shader material added");
+
+		// Shadow-reception witness (HE_DUMP_MATOCCLUDER=1): park a flat default-cube
+		// slab directly ABOVE the test sphere. With a high sun, the sphere — shaded
+		// by its GRAPH material (heLitP) — must visibly darken versus a run without
+		// this flag, proving graph materials receive occlusion (GI mask when GI is
+		// on, CSM fallback when it is off). Same A/B idea as the sky knobs.
+		if (const char* oc = std::getenv("HE_DUMP_MATOCCLUDER"); oc && *oc)
+		{
+			auto occ = m_editorWorld->createEntity("MatTestOccluder");
+			TransformComponent otc;
+			otc.position = tc.position + glm::vec3(3.0f, 6.0f, 0.0f);
+			otc.scale    = glm::vec3(12.0f, 0.25f, 12.0f);
+			reg.emplace<TransformComponent>(occ, otc);
+			reg.emplace<MeshComponent>(occ, MeshComponent{ HE::kDefaultCubeMeshId });
+			// Control receiver: an identical sphere WITHOUT the graph material —
+			// the built-in PBR path. If this one darkens under the slab and the
+			// graph sphere does not, the defect is in the material preamble; if
+			// neither darkens, the GI mask / CSM itself is wrong in this scene.
+			auto ctl = m_editorWorld->createEntity("MatTestBuiltinSphere");
+			TransformComponent btc = tc;
+			btc.position = tc.position + glm::vec3(6.0f, 0.0f, 0.0f);
+			reg.emplace<TransformComponent>(ctl, btc);
+			reg.emplace<MeshComponent>(ctl, MeshComponent{ meshId });
+			Logger::Log(Logger::LogLevel::Info,
+				"EditorApplication: HE_DUMP_MATOCCLUDER slab + built-in control sphere added");
+		}
+
+		// Colour-bleed witness (HE_DUMP_GIBLEED=1|2): a tall cube RIGHT next to
+		// the test sphere — saturated red (1) vs neutral grey (2). With GI on,
+		// the multi-bounce probe feedback must tint the sphere's cube-facing
+		// side red in the "1" shot; the "2" shot is the geometry-identical
+		// control, so the A/B diff isolates pure bounce colour.
+		if (const char* bl = std::getenv("HE_DUMP_GIBLEED"); bl && *bl)
+		{
+			MaterialAsset wallMat;
+			wallMat.type = HE::AssetType::Material;
+			wallMat.name = "GIBleedWall";
+			// "1"/"2": red/grey floor under the BUILT-IN receiver sphere.
+			// "3"/"4": the same pair, but the floor sits under the GRAPH-material
+			// sphere — the only way to measure whether heLitP itself consumes the
+			// probe field (it does since the DDGI port; before that the graph
+			// sphere was deliberately excluded from this witness).
+			const std::string blMode(bl);
+			const bool red      = (blMode != "2" && blMode != "4");
+			const bool underMat = (blMode == "3" || blMode == "4");
+			const float bleedX  = underMat ? 0.0f : 6.0f;
+			wallMat.baseColor[0] = red ? 1.0f : 0.5f;
+			wallMat.baseColor[1] = red ? 0.05f : 0.5f;
+			wallMat.baseColor[2] = red ? 0.05f : 0.5f;
+			const HE::UUID wallMatId = contentManager().registerMaterial(std::move(wallMat));
+			// A FLOOR slab, not a wall: at the noon sun of the standard capture a
+			// vertical wall's sphere-facing side has ndl≈0 — nothing to reflect.
+			// A fully sunlit red floor bounces onto the sphere's underside.
+			auto wall = m_editorWorld->createEntity("GIBleedWall");
+			TransformComponent wtc;
+			wtc.position = tc.position + glm::vec3(bleedX, -4.5f, 0.0f);
+			wtc.scale    = glm::vec3(12.0f, 0.5f, 12.0f);
+			reg.emplace<TransformComponent>(wall, wtc);
+			reg.emplace<MeshComponent>(wall, MeshComponent{ HE::kDefaultCubeMeshId });
+			reg.emplace<MaterialComponent>(wall, MaterialComponent{ wallMatId });
+			// Built-in receiver sphere next to the wall — kept as the reference
+			// surface for the "1"/"2" pair. In the "3"/"4" pair the floor is under
+			// the GRAPH sphere instead and the receiver is omitted, so nothing
+			// else can contribute bounce to the measured region.
+			if (!underMat)
+			{
+				auto rcv = m_editorWorld->createEntity("GIBleedReceiver");
+				TransformComponent rtc = tc;
+				rtc.position = tc.position + glm::vec3(6.0f, 0.0f, 0.0f);
+				reg.emplace<TransformComponent>(rcv, rtc);
+				reg.emplace<MeshComponent>(rcv, MeshComponent{ meshId });
+			}
+			Logger::Log(Logger::LogLevel::Info, red
+				? "EditorApplication: HE_DUMP_GIBLEED red wall added"
+				: "EditorApplication: HE_DUMP_GIBLEED grey control wall added");
+		}
+	}
+
+	// ── SSR witness (HE_DUMP_SSRTEST=1): a mirror floor (metallic 1, roughness
+	// 0.05) with a red cube standing on it. With SSR on (deferred tile path)
+	// the floor must show the cube's reflection; the SSR=0 control shows only
+	// the sky cubemap — the A/B diff isolates exactly the reflected pixels.
+	if (const char* sw = std::getenv("HE_DUMP_SSRTEST"); sw && *sw && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		MaterialAsset mirror;
+		mirror.type = HE::AssetType::Material;
+		mirror.name = "SSRMirrorFloor";
+		mirror.baseColor[0] = 0.9f; mirror.baseColor[1] = 0.9f; mirror.baseColor[2] = 0.9f;
+		mirror.metallic  = 1.0f;
+		mirror.roughness = 0.05f;
+		// HE_DUMP_SSRTESTROUGH: override the floor roughness (0..1) so the High
+		// tier's glossy lerp (sharp vs wide-blur) is visible in a headless A/B.
+		if (const char* fr = std::getenv("HE_DUMP_SSRTESTROUGH"); fr && *fr)
+			mirror.roughness = std::clamp(static_cast<float>(std::atof(fr)), 0.0f, 1.0f);
+		auto floorE = m_editorWorld->createEntity("SSRFloor");
+		TransformComponent ftc;
+		ftc.position = glm::vec3(0.0f, -0.1f, -8.0f);
+		ftc.scale    = glm::vec3(30.0f, 0.2f, 30.0f);
+		reg.emplace<TransformComponent>(floorE, ftc);
+		reg.emplace<MeshComponent>(floorE, MeshComponent{ HE::kDefaultCubeMeshId });
+		reg.emplace<MaterialComponent>(floorE,
+			MaterialComponent{ contentManager().registerMaterial(std::move(mirror)) });
+
+		MaterialAsset red;
+		red.type = HE::AssetType::Material;
+		red.name = "SSRRedCube";
+		red.baseColor[0] = 1.0f; red.baseColor[1] = 0.1f; red.baseColor[2] = 0.1f;
+		red.roughness = 0.6f;
+		auto cubeE = m_editorWorld->createEntity("SSRCube");
+		TransformComponent ctc;
+		ctc.position = glm::vec3(0.0f, 1.5f, -8.0f);
+		ctc.scale    = glm::vec3(1.5f);
+		reg.emplace<TransformComponent>(cubeE, ctc);
+		reg.emplace<MeshComponent>(cubeE, MeshComponent{ HE::kDefaultCubeMeshId });
+		reg.emplace<MaterialComponent>(cubeE,
+			MaterialComponent{ contentManager().registerMaterial(std::move(red)) });
+		Logger::Log(Logger::LogLevel::Info,
+			"EditorApplication: HE_DUMP_SSRTEST witness scene added");
+	}
+
+	// ── Decal witness (HE_DUMP_DECALTEST=1): a grey floor slab with a red decal
+	// projector box over its centre. In the deferred (tile) path the floor must
+	// show a red patch exactly under the box; forward ignores decals (v1) — the
+	// A/B diff isolates the projected pixels.
+	if (const char* dt = std::getenv("HE_DUMP_DECALTEST"); dt && *dt && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		auto floorE = m_editorWorld->createEntity("DecalFloor");
+		TransformComponent ftc;
+		ftc.position = glm::vec3(0.0f, -0.1f, -8.0f);
+		ftc.scale    = glm::vec3(30.0f, 0.2f, 30.0f);
+		reg.emplace<TransformComponent>(floorE, ftc);
+		reg.emplace<MeshComponent>(floorE, MeshComponent{ HE::kDefaultCubeMeshId });
+
+		auto decalE = m_editorWorld->createEntity("DecalProjector");
+		TransformComponent dtc;
+		dtc.position = glm::vec3(0.0f, 0.0f, -8.0f);
+		dtc.scale    = glm::vec3(5.0f, 2.0f, 5.0f);
+		reg.emplace<TransformComponent>(decalE, dtc);
+		DecalComponent dc;
+		dc.color = glm::vec4(1.0f, 0.1f, 0.1f, 0.85f);
+		reg.emplace<DecalComponent>(decalE, dc);
+		Logger::Log(Logger::LogLevel::Info,
+			"EditorApplication: HE_DUMP_DECALTEST witness scene added");
+	}
+
+	// ── Local-light shadow witness (HE_DUMP_LOCALSHADOW=point|spot): a floor
+	// slab + caster cube + ONE shadow-casting local light. Shot at midnight
+	// (TOD=0) the local light dominates: the cube must throw a visible shadow
+	// onto the floor away from the light. Before the local shadow maps this
+	// floor stayed uniformly lit (local lights shone through geometry).
+	if (const char* ls = std::getenv("HE_DUMP_LOCALSHADOW"); ls && *ls && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		// Isolate the witness: pre-existing scene lights lose their shadow flag so
+		// the atlas holds ONLY the witness light's layers (deterministic layer 0).
+		for (auto [e, plc] : reg.view<LightComponent>().each())
+			plc.castsShadow = false;
+		auto floorE = m_editorWorld->createEntity("LocalShadowFloor");
+		TransformComponent ftc;
+		ftc.position = glm::vec3(0.0f, 199.0f, -8.0f); // high above any loaded scene content
+		ftc.scale    = glm::vec3(24.0f, 0.25f, 24.0f);
+		reg.emplace<TransformComponent>(floorE, ftc);
+		reg.emplace<MeshComponent>(floorE, MeshComponent{ HE::kDefaultCubeMeshId });
+		// "...mat" variants (pointmat/spotmat/+off): the floor gets a NODE-GRAPH
+		// material (custom shader → heLitP path), witnessing that CUSTOM materials
+		// receive local-light shadows too — not just the built-in PBR pipeline.
+		if (std::string(ls).find("mat") != std::string::npos)
+		{
+			MaterialAsset fm;
+			fm.type = HE::AssetType::Material;
+			fm.name = "LocalShadowFloorMat";
+			HE::MaterialGraph g;
+			const int out = g.addNode(HE::MatNodeType::Output);
+			const int col = g.addNode(HE::MatNodeType::ConstColor);
+			g.findNode(col)->p[0] = 0.8f; g.findNode(col)->p[1] = 0.8f; g.findNode(col)->p[2] = 0.8f;
+			g.connect(col, 0, out, 0); // BaseColor → lit output (heLitP)
+			fm.nodeGraphJson = HE::materialGraphToJson(g);
+			const HE::MatShaderGen gen = HE::generateFragment(g);
+			fm.customShaderFragGlsl = gen.glsl;
+			fm.customShaderGBufGlsl = gen.glslGBuffer;
+			fm.customShaderVertGlsl = gen.vertexBody;
+			fm.blendMode            = gen.blendMode;
+			reg.emplace<MaterialComponent>(floorE,
+				MaterialComponent{ contentManager().registerMaterial(std::move(fm)) });
+		}
+
+		auto caster = m_editorWorld->createEntity("LocalShadowCaster");
+		TransformComponent ctc;
+		ctc.position = glm::vec3(0.0f, 200.25f, -8.0f);
+		reg.emplace<TransformComponent>(caster, ctc);
+		reg.emplace<MeshComponent>(caster, MeshComponent{ HE::kDefaultCubeMeshId });
+
+		auto lightE = m_editorWorld->createEntity("LocalShadowLight");
+		TransformComponent ltc;
+		LightComponent lc;
+		// "...off" control variant (pointoff/spotoff): identical scene WITHOUT the
+		// shadow flag — the A/B image diff isolates exactly the shadowed pixels.
+		std::string lsMode(ls);
+		lc.castsShadow = lsMode.find("off") == std::string::npos;
+		lc.intensity   = 8.0f;
+		lc.range       = 40.0f;
+		if (lsMode.rfind("spot", 0) == 0)
+		{
+			lc.type      = HE::LightType::Spot;
+			lc.spotAngle = 70.0f;
+			// Off to the side so the cast shadow lands NEXT to the cube in screen
+			// space (on-axis it hides exactly behind the caster from this camera).
+			ltc.position = glm::vec3(-3.0f, 206.0f, -3.0f);
+			ltc.rotation = glm::vec3(-55.0f, 0.0f, 0.0f); // aim down-forward
+		}
+		else
+		{
+			lc.type      = HE::LightType::Point;
+			ltc.position = glm::vec3(2.5f, 202.0f, -5.0f);
+		}
+		reg.emplace<TransformComponent>(lightE, ltc);
+		reg.emplace<LightComponent>(lightE, lc);
+		Logger::Log(Logger::LogLevel::Info,
+			"EditorApplication: HE_DUMP_LOCALSHADOW witness scene added");
+	}
+
+	// ── Landscape layer-blend witness (HE_DUMP_LANDSCAPELAYERS=1) ────────────
+	// A flat landscape with a THREE-LAYER material (red / green / blue) and a
+	// painted weightmap: a green disc in the middle of a red field, with a blue
+	// stripe. Proves the whole chain — layer-blend codegen → per-draw weightmap
+	// binding → painted weights — lands on pixels, and the three colours make a
+	// wrong channel obvious at a glance.
+	if (const char* ll = std::getenv("HE_DUMP_LANDSCAPELAYERS"); ll && *ll && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+
+		MaterialAsset lm;
+		lm.type = HE::AssetType::Material;
+		lm.name = "LayerBlendWitness";
+		HE::MaterialGraph g;
+		const int out = g.addNode(HE::MatNodeType::Output);
+		const int lb  = g.addNode(HE::MatNodeType::LandscapeLayerBlend);
+		g.findNode(lb)->s = "Red\nGreen\nBlue";
+		const float rgb[3][3] = { { 0.90f, 0.10f, 0.10f },
+		                          { 0.10f, 0.85f, 0.15f },
+		                          { 0.15f, 0.25f, 0.95f } };
+		for (int i = 0; i < 3; ++i)
+		{
+			const int c = g.addNode(HE::MatNodeType::ConstColor);
+			g.findNode(c)->p[0] = rgb[i][0];
+			g.findNode(c)->p[1] = rgb[i][1];
+			g.findNode(c)->p[2] = rgb[i][2];
+			g.connect(c, 0, lb, i);
+		}
+		g.connect(lb, 0, out, HE::kMatOutputBaseColorPin);
+		lm.nodeGraphJson = HE::materialGraphToJson(g);
+		const HE::MatShaderGen gen = HE::generateFragment(g);
+		lm.customShaderFragGlsl = gen.glsl;
+		lm.customShaderGBufGlsl = gen.glslGBuffer;
+		lm.customShaderVertGlsl = gen.vertexBody;
+		lm.blendMode            = gen.blendMode;
+		lm.graphLayerNames      = gen.layerNames;
+		const HE::UUID lmId = contentManager().registerMaterial(std::move(lm));
+
+		auto land = m_editorWorld->createEntity("LayerLandscape");
+		TransformComponent ltf;
+		ltf.position = glm::vec3(0.0f, 300.0f, 0.0f); // clear of any loaded scene
+		reg.emplace<TransformComponent>(land, ltf);
+		TerrainComponent ltc;
+		ltc.sizeX = ltc.sizeZ = 100.0f;
+		ltc.resolution = 33;      // already 2ⁿ+1 → no resample
+		ltc.heightScale = 0.0f;   // flat: the colours are the whole point
+		ltc.seed = 0;
+		ltc.weightRes = 128;
+		ltc.dirty = true;
+		TerrainPaint::ensureWeightmap(ltc);
+		TerrainPaint::paint(ltc,   0.0f,  0.0f, /*Green*/1, 22.0f, 6.0f, 1.0f);
+		TerrainPaint::paint(ltc, -34.0f, 20.0f, /*Blue*/ 2, 12.0f, 4.0f, 1.0f);
+		reg.emplace<TerrainComponent>(land, ltc);
+		reg.emplace<MaterialComponent>(land, MaterialComponent{ lmId });
+		// The headless dump renders from OnInit, BEFORE the main loop's
+		// SceneSystems::tick — without this the terrain has no chunk entities yet
+		// and there is simply nothing to draw.
+		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+		Logger::Log(Logger::LogLevel::Info,
+			"EditorApplication: HE_DUMP_LANDSCAPELAYERS witness landscape added");
 	}
 
 	pushEnvironment(0.0f); // scene environment from the World entity (no auto-advance)
@@ -2050,6 +2409,292 @@ void EditorApplication::dumpFrameHeadless()
 			Logger::Log(Logger::LogLevel::Info, "EditorApplication: preview stress loop done");
 		}
 	}
+	// Witness the Content-Browser thumbnail path (HE_DUMP_THUMB=<dir>): render the
+	// material and static-mesh thumbnails through IRenderer::RenderAssetThumbnail —
+	// the same call the asset grid makes — and write each as a PPM. Written from the
+	// returned PIXELS, not from a GPU handle, so it proves the whole render →
+	// readback → "what the tile will contain" chain, alpha included: the transparent
+	// background is composited over a checkerboard, so an opaque-background
+	// regression is visible rather than invisible.
+	if (const char* tb = std::getenv("HE_DUMP_THUMB"); tb && *tb)
+	{
+		const std::filesystem::path dir(tb);
+		std::error_code tec;
+		std::filesystem::create_directories(dir, tec);
+		auto dumpThumb = [&](const char* name, ThumbnailKind kind, const HE::UUID& id)
+		{
+			if (id == HE::UUID{}) return;
+			std::vector<uint8_t> px;
+			if (!r->RenderAssetThumbnail(contentManager(), kind, id, 128, px))
+			{
+				Logger::Log(Logger::LogLevel::Warning,
+					(std::string("EditorApplication: thumbnail witness '") + name + "' produced nothing").c_str());
+				return;
+			}
+			const int S = 128;
+			std::ofstream f((dir / (std::string(name) + ".ppm")).string(), std::ios::binary);
+			if (!f) return;
+			f << "P6\n" << S << " " << S << "\n255\n";
+			for (int y = 0; y < S; ++y)
+				for (int x = 0; x < S; ++x)
+				{
+					const uint8_t* p = &px[(static_cast<size_t>(y) * S + x) * 4];
+					const float a = p[3] / 255.0f;
+					const uint8_t bg = ((x / 16 + y / 16) & 1) ? 90 : 150; // checkerboard
+					for (int c = 0; c < 3; ++c)
+					{
+						const uint8_t v = static_cast<uint8_t>(p[c] * a + bg * (1.0f - a));
+						f.write(reinterpret_cast<const char*>(&v), 1);
+					}
+				}
+			Logger::Log(Logger::LogLevel::Info,
+				(std::string("EditorApplication: thumbnail witness wrote ") + name + ".ppm").c_str());
+		};
+		dumpThumb("material", ThumbnailKind::Material,   s_matTestId);
+		dumpThumb("mesh",     ThumbnailKind::StaticMesh, HE::kDefaultCubeMeshId);
+		// A texture tile is produced on the CPU, so it bypasses dumpThumb's
+		// renderer call entirely. Uses the editor's own logo because it has real
+		// alpha AND a non-square aspect — the two things the tile has to handle
+		// (checkerboard behind transparency, letterbox instead of squash).
+		{
+			const char* bp = SDL_GetBasePath();
+			const std::string logo = std::string(bp ? bp : "") + "Images/HC_Logo.png";
+			int tw = 0, th = 0, tch = 0;
+			if (unsigned char* px = stbi_load(logo.c_str(), &tw, &th, &tch, 4))
+			{
+				TextureAsset ta;
+				ta.type = HE::AssetType::Texture;
+				ta.name = "__thumbWitnessTex";
+				ta.width = (uint32_t)tw; ta.height = (uint32_t)th; ta.channels = 4;
+				ta.data.assign(px, px + (size_t)tw * th * 4);
+				stbi_image_free(px);
+				const HE::UUID texId = contentManager().registerTexture(std::move(ta));
+				AssetThumbnailCache::setContext(r, &contentManager(), dir.string());
+				std::vector<uint8_t> tp;
+				if (AssetThumbnailCache::textureThumbnail(texId, tp))
+				{
+					const int TS = (int)AssetThumbnailCache::thumbnailSize();
+					if (std::ofstream f((dir / "texture.ppm").string(), std::ios::binary); f)
+					{
+						f << "P6\n" << TS << " " << TS << "\n255\n";
+						for (int i = 0; i < TS * TS; ++i)
+							f.write(reinterpret_cast<const char*>(&tp[(size_t)i * 4]), 3);
+					}
+					Logger::Log(Logger::LogLevel::Info,
+						"EditorApplication: thumbnail witness wrote texture.ppm");
+				}
+				AssetThumbnailCache::setContext(nullptr, nullptr, "");
+			}
+		}
+		// A widget tile lays the tree out and draws it through the UI pass. A
+		// freshly created widget is an EMPTY tree, so the witness authors a small
+		// one — a panel with a caption — otherwise there would be nothing to see
+		// and "no quads" would look the same as "broken".
+		{
+			HE::UIWidgetTree tree;
+			tree.canvasWidth = tree.canvasHeight = 512.0f;
+			const int panelId = tree.add(HE::UIWidgetType::Panel);
+			if (HE::UIElement* pe = tree.find(panelId))
+			{
+				pe->posX = 256.0f; pe->posY = 256.0f;
+				pe->sizeX = 400.0f; pe->sizeY = 260.0f;
+				pe->anchor = 0;
+			}
+			const int textId = tree.add(HE::UIWidgetType::Text);
+			if (HE::UIElement* te = tree.find(textId))
+			{
+				te->parentId = panelId;
+				te->posX = 200.0f; te->posY = 130.0f;
+				te->sizeX = 340.0f; te->sizeY = 60.0f;
+			}
+			UIWidgetAsset wa;
+			wa.type = HE::AssetType::Widget;
+			wa.name = "__thumbWitnessWidget";
+			wa.path = "__thumbWitnessWidget.hasset";
+			wa.treeJson = HE::uiWidgetTreeToJson(tree);
+			if (contentManager().saveAsset(wa))
+			{
+				AssetThumbnailCache::setContext(r, &contentManager(), dir.string());
+				std::vector<uint8_t> wp;
+				if (AssetThumbnailCache::widgetThumbnail(wa.path, wp))
+				{
+					const int TS = (int)AssetThumbnailCache::thumbnailSize();
+					if (std::ofstream f((dir / "widget.ppm").string(), std::ios::binary); f)
+					{
+						f << "P6\n" << TS << " " << TS << "\n255\n";
+						for (int i = 0; i < TS * TS; ++i)
+						{
+							const float a = wp[(size_t)i * 4 + 3] / 255.0f;
+							const uint8_t bg = (((i % TS) / 16 + (i / TS) / 16) & 1) ? 90 : 150;
+							for (int c = 0; c < 3; ++c)
+							{
+								const uint8_t v = (uint8_t)(wp[(size_t)i * 4 + c] * a + bg * (1.0f - a));
+								f.write(reinterpret_cast<const char*>(&v), 1);
+							}
+						}
+					}
+					Logger::Log(Logger::LogLevel::Info,
+						"EditorApplication: thumbnail witness wrote widget.ppm");
+				}
+				else
+					Logger::Log(Logger::LogLevel::Warning,
+						"EditorApplication: thumbnail witness produced no widget tile");
+				AssetThumbnailCache::setContext(nullptr, nullptr, "");
+				std::error_code wrc;
+				std::filesystem::remove(
+					std::filesystem::path(contentManager().contentRoot()) / wa.path, wrc);
+			}
+		}
+		// A particle tile steps a real pool and renders it through the dedicated
+		// particle thumbnail path — worth witnessing because "did the simulation
+		// actually produce particles" cannot be seen from the code.
+		{
+			ParticleGraphAsset pg;
+			pg.type = HE::AssetType::ParticleSystem;
+			pg.name = "__thumbWitnessParticles";
+			pg.path = "__thumbWitnessParticles.hasset";
+			pg.nodeGraphJson = HE::particleGraphToJson(HE::ParticleGraph::makeDefault());
+			HE::UUID pid{};
+			if (contentManager().saveAsset(pg)) pid = contentManager().loadAsset(pg.path);
+			AssetThumbnailCache::setContext(r, &contentManager(), dir.string());
+			std::vector<uint8_t> pp;
+			if (pid != HE::UUID{} && AssetThumbnailCache::particleThumbnail(pid, pp))
+			{
+				const int TS = (int)AssetThumbnailCache::thumbnailSize();
+				if (std::ofstream f((dir / "particles.ppm").string(), std::ios::binary); f)
+				{
+					f << "P6\n" << TS << " " << TS << "\n255\n";
+					for (int i = 0; i < TS * TS; ++i)
+					{
+						const float a = pp[(size_t)i * 4 + 3] / 255.0f;
+						const uint8_t bg = (((i % TS) / 16 + (i / TS) / 16) & 1) ? 90 : 150;
+						for (int c = 0; c < 3; ++c)
+						{
+							const uint8_t v = (uint8_t)(pp[(size_t)i * 4 + c] * a + bg * (1.0f - a));
+							f.write(reinterpret_cast<const char*>(&v), 1);
+						}
+					}
+				}
+				Logger::Log(Logger::LogLevel::Info,
+					"EditorApplication: thumbnail witness wrote particles.ppm");
+			}
+			else
+				Logger::Log(Logger::LogLevel::Warning,
+					"EditorApplication: thumbnail witness produced no particle tile");
+			AssetThumbnailCache::setContext(nullptr, nullptr, "");
+			std::error_code prc;
+			std::filesystem::remove(
+				std::filesystem::path(contentManager().contentRoot()) / pg.path, prc);
+		}
+		// A font tile is baked through UIFontCache, so it too skips the renderer.
+		{
+			const char* bp2 = SDL_GetBasePath();
+			const std::string ttf = std::string(bp2 ? bp2 : "") + "Fonts/Roboto_Condensed-Bold.ttf";
+			if (std::ifstream tf(ttf, std::ios::binary); tf)
+			{
+				FontAsset fo;
+				fo.type = HE::AssetType::Font;
+				fo.name = "__thumbWitnessFont";
+				fo.path = "__thumbWitnessFont.hasset";
+				fo.fontData.assign(std::istreambuf_iterator<char>(tf), std::istreambuf_iterator<char>());
+				HE::UUID fid{};
+				if (contentManager().saveAsset(fo)) fid = contentManager().loadAsset(fo.path);
+				AssetThumbnailCache::setContext(r, &contentManager(), dir.string());
+				std::vector<uint8_t> fp;
+				if (AssetThumbnailCache::fontThumbnail(fid, fp))
+				{
+					const int TS = (int)AssetThumbnailCache::thumbnailSize();
+					if (std::ofstream f((dir / "font.ppm").string(), std::ios::binary); f)
+					{
+						f << "P6\n" << TS << " " << TS << "\n255\n";
+						for (int i = 0; i < TS * TS; ++i)
+						{
+							// Composite the coverage over grey — the glyphs are white on
+							// transparent, which a plain RGB dump would render invisible.
+							const float a = fp[(size_t)i * 4 + 3] / 255.0f;
+							const uint8_t v = (uint8_t)(255 * a + 60 * (1.0f - a));
+							for (int c = 0; c < 3; ++c) f.write(reinterpret_cast<const char*>(&v), 1);
+						}
+					}
+					Logger::Log(Logger::LogLevel::Info,
+						"EditorApplication: thumbnail witness wrote font.ppm");
+				}
+				AssetThumbnailCache::setContext(nullptr, nullptr, "");
+				std::error_code frc;
+				std::filesystem::remove(
+					std::filesystem::path(contentManager().contentRoot()) / fo.path, frc);
+			}
+		}
+		// A material with NO node graph exercises the OTHER material branch — the
+		// built-in-PBR fallback, which the interactive preview never reaches (it
+		// returns "no preview" there) and which is therefore only visible here.
+		{
+			MaterialAsset flat;
+			flat.type = HE::AssetType::Material;
+			flat.name = "__thumbWitnessFlat";
+			flat.baseColor[0] = 0.85f; flat.baseColor[1] = 0.35f; flat.baseColor[2] = 0.15f;
+			flat.metallic = 0.1f; flat.roughness = 0.35f;
+			dumpThumb("material_pbr", ThumbnailKind::Material,
+			          contentManager().registerMaterial(std::move(flat)));
+		}
+		// And a material FUNCTION, which is drawn through the scratch material the
+		// thumbnail cache wraps it in. Unit tests cover the wrapping; only a real
+		// render shows whether the generated shader actually produces a picture.
+		{
+			MaterialFunctionAsset fn;
+			fn.type = HE::AssetType::MaterialFunction;
+			fn.name = "__thumbWitnessFn";
+			fn.path = "__thumbWitnessFn.hasset";
+			fn.nodeGraphJson = HE::materialGraphToJson(HE::MaterialGraph::makeDefaultFunction());
+			if (contentManager().saveAsset(fn))
+			{
+				AssetThumbnailCache::setContext(r, &contentManager(), dir.string());
+				dumpThumb("material_function", ThumbnailKind::Material,
+				          AssetThumbnailCache::materialFunctionScratch(fn.path));
+				AssetThumbnailCache::setContext(nullptr, nullptr, "");
+				std::error_code rc;
+				std::filesystem::remove(
+					std::filesystem::path(contentManager().contentRoot()) / fn.path, rc);
+			}
+			else
+				Logger::Log(Logger::LogLevel::Warning,
+					"EditorApplication: thumbnail witness could not write the function asset");
+		}
+	}
+
+	// DIAGNOSTIC (HE_DUMP_GIROTATE): sweep the camera through an orbit before the
+	// final static settle below, to directly exercise GI's temporal reprojection
+	// under camera rotation (disocclusion). The plain 3x static-render capture
+	// this harness otherwise does can NEVER trigger this — every he_shot.py call
+	// is a fresh process (no accumulated history) and the camera never moves
+	// within a single dump. "<deg>" (one value) sweeps start==end, i.e. a STATIC
+	// control at that angle for every frame; "<start>,<end>" sweeps between them
+	// — comparing the two final captures isolates whether an in-flight rotation
+	// (not just the final angle) changes the result.
+	if (const char* rot = std::getenv("HE_DUMP_GIROTATE"); rot && *rot && m_editorWorld)
+	{
+		float startDeg = 0.0f, endDeg = 0.0f;
+		if (std::sscanf(rot, "%f,%f", &startDeg, &endDeg) != 2)
+		{ endDeg = static_cast<float>(std::atof(rot)); startDeg = endDeg; }
+		const int steps = 12;
+		const glm::vec3 pivot(0.0f, 1.0f, 0.0f);
+		const float dist = 14.0f;
+		const float pitchRad = glm::radians(-20.0f);
+		const float cp = std::cos(pitchRad), sp = std::sin(pitchRad);
+		for (int i = 0; i <= steps; ++i)
+		{
+			const float t      = static_cast<float>(i) / static_cast<float>(steps);
+			const float yawRad = glm::radians(startDeg + (endDeg - startDeg) * t);
+			const glm::vec3 camPos = pivot + glm::vec3(std::sin(yawRad) * cp, sp, std::cos(yawRad) * cp) * dist;
+			m_editorCamera.setOrientation(camPos, glm::normalize(pivot - camPos));
+			r->SetEditorCamera(m_editorCamera.makeOverride());
+			r->Render();
+		}
+		Logger::Log(Logger::LogLevel::Info,
+			("EditorApplication: GI rotate diagnostic swept yaw " + std::to_string(startDeg)
+			 + "° -> " + std::to_string(endDeg) + "°").c_str());
+	}
+
 	for (int i = 0; i < 3; ++i)
 		r->Render();
 
@@ -2164,6 +2809,18 @@ AppContext EditorApplication::makeContext()
 			m_iconSound,
 			m_iconTexture,
 			m_iconScene,
+			m_iconMaterialFunction,
+			m_iconShader,
+			m_iconPrefab,
+			m_iconAnimationClip,
+			m_iconPropertyAnimClip,
+			m_iconWidget,
+			m_iconHorizonCodeClass,
+			m_iconInputAction,
+			m_iconInputMappingContext,
+			m_iconParticleSystem,
+			m_iconAnimatorStateMachine,
+			m_iconFont,
 		},
 		.toolbarIcons        = {
 			m_iconPlay,
@@ -2258,43 +2915,17 @@ void EditorApplication::setPlayMouseCaptured(bool captured)
 void EditorApplication::updatePlayCameraController(float dt)
 {
 	if (!m_isPlaying || !m_playMouseCaptured || !m_editorWorld || dt <= 0.0f) return;
-	auto& reg = m_editorWorld->registry();
 
-	entt::entity cam = entt::null;
-	for (auto [e, t, c] : reg.view<TransformComponent, CameraComponent>().each())
-	{
-		if (cam == entt::null) cam = e;
-		if (c.isMain) { cam = e; break; }
-	}
-
-	// Re-assert the capture every frame: SDL engages relative mode only while the
-	// *flagged* window holds keyboard focus, and with multi-viewport panels the focus
-	// can move between OS windows mid-play — the flag set on one window silently stops
-	// engaging when another gains focus. Also re-hide the cursor in case anything
-	// slipped past ImGuiConfigFlags_NoMouseCursorChange and re-showed it.
+	// The focused window is both the one whose relative mode must be re-asserted and
+	// the one the cursor is warped back into (see FlyCameraController) — with
+	// multi-viewport panels that may be a floating panel's OS window, not the main one.
 	SDL_Window* const focusWin = SDL_GetKeyboardFocus();
-	if (focusWin && !SDL_GetWindowRelativeMouseMode(focusWin))
-		SDL_SetWindowRelativeMouseMode(focusWin, true);
-	if (SDL_CursorVisible())
-		SDL_HideCursor();
 
-	// Relative mouse delta accumulated since the last frame. Read exactly once — a
-	// second SDL_GetRelativeMouseState() would return zero because reading drains it.
-	float dx = 0.0f, dy = 0.0f;
-	SDL_GetRelativeMouseState(&dx, &dy);
-
-	// Park the cursor back at the focused window's centre after each frame's relative
-	// motion. With relative mode engaged this is a pure internal position update (SDL
-	// generates no motion events for it); when it is NOT engaged (focus transition,
-	// platform quirk) the OS cursor physically drifts and would stall the look at the
-	// screen edge — the warp keeps it centred either way. SDL pre-sets last_x/last_y
-	// to the warp target, so the warp never pollutes the relative accumulator.
-	if (focusWin)
-	{
-		int fw = 0, fh = 0;
-		SDL_GetWindowSize(focusWin, &fw, &fh);
-		SDL_WarpMouseInWindow(focusWin, fw * 0.5f, fh * 0.5f);
-	}
+	HE::FlyCameraController::Config cfg;
+	cfg.reassertCapture  = true;   // focus can move between OS windows mid-play
+	cfg.runWithoutCamera = true;   // keep feeding the self-diagnostic below
+	const auto frame =
+		HE::FlyCameraController::update(m_editorWorld->registry(), input(), dt, focusWin, cfg);
 
 	// ── Self-diagnostic (throttled ~once/sec) ──────────────────────────────────────
 	// One PIE test should be conclusive: this reports whether a camera is being driven
@@ -2302,12 +2933,12 @@ void EditorApplication::updatePlayCameraController(float dt)
 	// tells us which cause (no camera / input not arriving / extractor) to chase.
 	static int   s_diagFrames = 0;
 	static float s_diagMotion = 0.0f;
-	s_diagMotion += std::abs(dx) + std::abs(dy);
+	s_diagMotion += std::abs(frame.dx) + std::abs(frame.dy);
 	if (++s_diagFrames >= 60)
 	{
 		Logger::Log(Logger::LogLevel::Info,
 			(std::string("PIE camera controller: ")
-			+ (cam == entt::null ? "NO camera to drive" : "driving a scene camera")
+			+ (frame.camera == entt::null ? "NO camera to drive" : "driving a scene camera")
 			+ ", mouse motion (60 frames) = " + std::to_string(s_diagMotion)
 			+ (input().IsKeyDown(SDL_SCANCODE_W) ? " [W held]" : "")
 			+ (focusWin && SDL_GetWindowRelativeMouseMode(focusWin) ? "" : " [rel-mode OFF]")
@@ -2315,35 +2946,6 @@ void EditorApplication::updatePlayCameraController(float dt)
 		s_diagFrames  = 0;
 		s_diagMotion  = 0.0f;
 	}
-
-	if (cam == entt::null) return;
-	auto& t = reg.get<TransformComponent>(cam);
-
-	constexpr float kSensitivity = 0.12f; // degrees per pixel
-	t.rotation.y -= dx * kSensitivity;    // yaw
-	t.rotation.x -= dy * kSensitivity;    // pitch
-	t.rotation.x = std::clamp(t.rotation.x, -89.0f, 89.0f);
-
-	const glm::quat q = glm::quat(glm::radians(t.rotation));
-	const glm::vec3 forward = q * glm::vec3(0.0f, 0.0f, -1.0f);
-	const glm::vec3 right   = q * glm::vec3(1.0f, 0.0f, 0.0f);
-	const glm::vec3 worldUp(0.0f, 1.0f, 0.0f);
-
-	Input& in = input();
-	glm::vec3 move(0.0f);
-	if (in.IsKeyDown(SDL_SCANCODE_W)) move += forward;
-	if (in.IsKeyDown(SDL_SCANCODE_S)) move -= forward;
-	if (in.IsKeyDown(SDL_SCANCODE_D)) move += right;
-	if (in.IsKeyDown(SDL_SCANCODE_A)) move -= right;
-	if (in.IsKeyDown(SDL_SCANCODE_E) || in.IsKeyDown(SDL_SCANCODE_SPACE)) move += worldUp;
-	if (in.IsKeyDown(SDL_SCANCODE_Q) || in.IsKeyDown(SDL_SCANCODE_LCTRL)) move -= worldUp;
-	if (glm::dot(move, move) > 0.0f)
-	{
-		float speed = 6.0f; // units/sec
-		if (in.IsKeyDown(SDL_SCANCODE_LSHIFT) || in.IsKeyDown(SDL_SCANCODE_RSHIFT)) speed *= 3.0f;
-		t.position += glm::normalize(move) * speed * dt;
-	}
-	t.dirty = true;
 }
 
 void EditorApplication::setPlayMode(bool play)
@@ -2418,22 +3020,9 @@ void EditorApplication::setPlayMode(bool play)
 		m_scriptContext = std::make_unique<ScriptContext>(*m_editorWorld);
 		m_scriptContext->setPhysicsWorld(m_physicsWorld.get());
 		m_scriptContext->setContentManager(&contentManager()); // horizon.setMaterialParam
-		{
-			auto& reg = m_editorWorld->registry();
-			for (auto [entity, sc] : reg.view<ScriptComponent>().each())
-			{
-				if (!sc.enabled) continue;
-				const ScriptAsset* asset = contentManager().getScript(sc.scriptAssetId);
-				if (!asset || asset->sourceCode.empty()) continue;
-				if (!m_scriptContext->isScriptLoaded(sc.moduleName, asset->language))
-					m_scriptContext->loadScript(sc.moduleName, asset->sourceCode, asset->language);
-				auto instId = m_scriptContext->createInstance(sc.moduleName, entity, asset->language);
-				if (instId == ScriptEngine::kInvalidInstance) continue;
-				m_scriptContext->injectProperties(instId, sc.properties);
-				m_scriptContext->callOnStart(instId);
-				m_scriptInstances[static_cast<uint32_t>(entity)] = instId;
-			}
-		}
+		// Same call the packaged game's startScripts() makes, so PIE and a shipped
+		// game bring scripts up identically.
+		m_scriptContext->startWorldScripts(contentManager(), m_scriptInstances);
 
 		// The level script's "OnLevelLoaded" fires once, after per-entity
 		// scripts have started. Leaving play mode routes through clear(), which
@@ -2560,7 +3149,10 @@ void EditorApplication::saveOpenTabs()
 
 	if (m_globalState)
 	{
-		m_globalState->setCustomConfigEntry("openTabs:" + m_projectManager.currentProject().path, state.dump());
+		// "replace" handler: dump() throws on invalid UTF-8 in a tab label/path,
+		// which would abort the editor; substitute U+FFFD rather than crash.
+		m_globalState->setCustomConfigEntry("openTabs:" + m_projectManager.currentProject().path,
+			state.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
 		m_globalState->writeConfig();
 	}
 }
@@ -2623,49 +3215,11 @@ void EditorApplication::pushEnvironment(float dt)
 		return;
 	}
 
-	// Auto-advance the day-night cycle (time flows with real time).
-	if (env->dayNightCycle && env->autoAdvance && dt > 0.0f)
-	{
-		float dayFrac = dt / std::max(env->cycleSeconds, 1.0f);
-		env->timeOfDay += dayFrac;
-		env->timeOfDay -= std::floor(env->timeOfDay); // wrap to [0,1)
-		// Lunar cycle: the moon phase advances one full cycle per moonCycleDays day-night cycles.
-		if (env->moonPhaseAuto)
-		{
-			env->moonPhase += dayFrac / std::max(env->moonCycleDays, 0.1f);
-			env->moonPhase -= std::floor(env->moonPhase);
-		}
-	}
-
-	renderer()->SetEnvironmentSettings(IRenderer::EnvironmentSettings{
-		.dayNightCycle = env->dayNightCycle, .timeOfDay = env->timeOfDay,
-		.sunColor = env->sunColor, .sunIntensity = env->sunIntensity,
-		.moonColor = env->moonColor, .moonIntensity = env->moonIntensity,
-		.moonPhase = env->moonPhase,
-		.cloudCoverage = env->cloudCoverage,
-		.fogDensity = env->fogDensity, .fogHeightFalloff = env->fogHeightFalloff,
-		.auroraIntensity = env->auroraIntensity,
-		.milkyWayIntensity = env->milkyWayIntensity, .nebulaIntensity = env->nebulaIntensity,
-		.nebulaColor = env->nebulaColor, .nebulaColor2 = env->nebulaColor2,
-		.nebulaColor3 = env->nebulaColor3, .nebulaSeed = env->nebulaSeed,
-		.nebulaCoverage = env->nebulaCoverage,
-		.nebulaQuality = env->nebulaQuality,
-		.auroraColor = env->auroraColor,
-		.auroraColorTop = env->auroraColorTop,
-		.auroraHeight = env->auroraHeight, .auroraFragmentation = env->auroraFragmentation,
-		.windDirection = env->windDirection, .windSpeed = env->windSpeed, .flash = env->flash,
-		.wetness = env->wetness, .snowAmount = env->snowAmount, .rainAmount = env->rainAmount,
-		.cloudMode = env->cloudMode, .cloudHeight = env->cloudHeight,
-		.cloudQuality = env->cloudQuality, .lowResClouds = env->lowResClouds,
-		.cloudDensity = env->cloudDensity, .cloudFluffiness = env->cloudFluffiness,
-		.cloudTint = env->cloudTint,
-		.contrailAmount = env->contrailAmount,
-		.cirrusAmount = env->cirrusAmount, .cirrusSeed = env->cirrusSeed,
-		.godRays = env->godRays, .shootingStars = env->shootingStars, .lensFlare = env->lensFlare,
-		.starBrightness = env->starBrightness, .starColor = env->starColor,
-		.starSize = env->starSize, .starSizeVariation = env->starSizeVariation,
-		.starGlow = env->starGlow, .starTwinkle = env->starTwinkle,
-		.starDensity = env->starDensity});
+	// Shared with the packaged game runtime so the viewport and a shipped build push
+	// the SAME fields. It also AUTO-ADVANCES the day-night cycle by `dt` — which is
+	// why this function is called exactly once per frame (dt = 0 from the headless
+	// dump path, where nothing may advance).
+	renderer()->SetEnvironmentSettings(HE::makeEnvironmentSettings(*env, dt));
 }
 
 void EditorApplication::warmupWorldMaterials()
@@ -2755,16 +3309,26 @@ void EditorApplication::OnShutdown()
 
 	switch (m_backend)
 	{
-	case RendererFactory::Backend::OpenGL:
+	case HE::RendererBackend::OpenGL:
+		// ImGui_ImplOpenGL3_Shutdown() re-inits the GL3W loader inside
+		// DestroyDeviceObjects(); its parse_version() then reads glGetString/
+		// glGetIntegerv. If no GL context is current on this thread, those return
+		// null and parse_version dereferences it -> SIGSEGV during shutdown. The
+		// render loop leaves the context current on the happy path, but nothing
+		// guarantees it here (e.g. after an error or a secondary-window teardown),
+		// so re-assert it explicitly before tearing ImGui down.
+		if (window() && window()->GetNativeWindow() && window()->GetGLContext())
+			SDL_GL_MakeCurrent(window()->GetNativeWindow(),
+				static_cast<SDL_GLContext>(window()->GetGLContext()));
 		ImGui_ImplOpenGL3_Shutdown();
 		ImGui_ImplSDL3_Shutdown();
 		break;
 #ifdef _WIN32
-	case RendererFactory::Backend::D3D11:
+	case HE::RendererBackend::D3D11:
 		ImGui_ImplDX11_Shutdown();
 		ImGui_ImplSDL3_Shutdown();
 		break;
-	case RendererFactory::Backend::D3D12:
+	case HE::RendererBackend::D3D12:
 		ImGui_ImplDX12_Shutdown();
 		ImGui_ImplSDL3_Shutdown();
 		if (m_d3d12SrvAllocator)
@@ -2782,13 +3346,13 @@ void EditorApplication::OnShutdown()
 		break;
 #endif
 #ifdef HE_IMGUI_VULKAN_ENABLED
-	case RendererFactory::Backend::Vulkan:
+	case HE::RendererBackend::Vulkan:
 		ImGui_ImplVulkan_Shutdown();
 		ImGui_ImplSDL3_Shutdown();
 		break;
 #endif
 #ifdef HE_IMGUI_METAL_ENABLED
-	case RendererFactory::Backend::Metal:
+	case HE::RendererBackend::Metal:
 		ImGuiMetalBridge::Shutdown();
 		ImGui_ImplSDL3_Shutdown();
 		break;
@@ -2807,12 +3371,15 @@ void EditorApplication::OnShutdown()
 		renderer()->DestroyImGuiTexture(reinterpret_cast<void*>(static_cast<uintptr_t>(m_logoTexture)));
 		m_logoTexture = 0;
 	}
+	// Same for the Content Browser's rendered asset tiles — they are renderer-owned
+	// textures, so they have to go while the renderer is still alive.
+	AssetThumbnailCache::shutdown();
 
 	m_audioEngine.shutdown();
 
 	GlobalState& globalstate = GlobalState::getInstance();
 	globalstate.setCustomConfigEntry("KeepCPUAssets",               m_editorConfig.KeepCPUAssets);
-	globalstate.setCustomConfigEntry("KeepCPUAssetsInfoAcknoleged", m_editorConfig.KeepCPUAssetsInfoAcknoleged);
+	globalstate.setCustomConfigEntry("KeepCPUAssetsInfoAcknowledged", m_editorConfig.KeepCPUAssetsInfoAcknowledged);
 	globalstate.setCustomConfigEntry("ContentBrowserRefreshRate",   m_editorConfig.ContentBrowserRefreshRate);
 	globalstate.setCustomConfigEntry("CbTreeWidth",                 m_editorConfig.CbTreeWidth);
 	globalstate.setCustomConfigEntry("UiFontScale",                m_editorConfig.UiFontScale);
@@ -2841,6 +3408,11 @@ void EditorApplication::OnShutdown()
 	globalstate.setCustomConfigEntry("GlobalIlluminationEnabled", m_editorConfig.GlobalIlluminationEnabled);
 	globalstate.setCustomConfigEntry("GIIndirectIntensity",       m_editorConfig.GIIndirectIntensity);
 	globalstate.setCustomConfigEntry("GILightRadius",             m_editorConfig.GILightRadius);
+	globalstate.setCustomConfigEntry("RenderPath",                m_editorConfig.RenderPath);
+	globalstate.setCustomConfigEntry("SSREnabled",                m_editorConfig.SSREnabled);
+	globalstate.setCustomConfigEntry("SSRIntensity",              m_editorConfig.SSRIntensity);
+	globalstate.setCustomConfigEntry("SSRQuality",                m_editorConfig.SSRQuality);
+	globalstate.setCustomConfigEntry("SSRMaxRoughness",           m_editorConfig.SSRMaxRoughness);
 	globalstate.setCustomConfigEntry("QuickSettingsFavorites",     m_editorConfig.QuickSettingsFavorites);
 	globalstate.writeConfig();
 }
@@ -2856,15 +3428,15 @@ bool EditorApplication::OnEvent(const SDL_Event& event)
 
 	switch (m_backend)
 	{
-	case RendererFactory::Backend::OpenGL:
-	case RendererFactory::Backend::Vulkan:
-	case RendererFactory::Backend::Metal:
+	case HE::RendererBackend::OpenGL:
+	case HE::RendererBackend::Vulkan:
+	case HE::RendererBackend::Metal:
 		// SDL3 platform backend handles keyboard, mouse, window, touch.
 		consumed = ImGui_ImplSDL3_ProcessEvent(&event);
 		break;
 #ifdef _WIN32
-	case RendererFactory::Backend::D3D11:
-	case RendererFactory::Backend::D3D12:
+	case HE::RendererBackend::D3D11:
+	case HE::RendererBackend::D3D12:
 		// Win32 platform backend only handles Win32 messages via WndProc.
 		// We still forward SDL events for mouse/keyboard via SDL3 backend,
 		// but for D3D+Win32 the ImGui_ImplWin32 path already intercepts
@@ -2923,21 +3495,35 @@ bool EditorApplication::OnEvent(const SDL_Event& event)
 
 	// ── Unsaved-changes guard for OS-level close (window X / Cmd+Q / app quit) ──
 	// Window::PollEvents() has already flagged the window to close this frame; if
-	// the active scene has unsaved edits, veto that here and ask the UI to raise
-	// the save-prompt instead. The prompt's "quit" path then exits cleanly through
-	// Application::Quit(). Skipped in headless-dump mode, when no project is loaded,
-	// or when the scene is clean (let it close normally). For window-close events
-	// we only react to the *main* window — ImGui's secondary viewport windows
-	// manage their own close.
-	if ((event.type == SDL_EVENT_QUIT ||
-	     (event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED && window() &&
-	      event.window.windowID == SDL_GetWindowID(window()->GetNativeWindow()))) &&
-	    m_dumpPath.empty() && m_projectLoaded &&
-	    m_undo.revision() != m_savedRevision)
+	// there is anything unsaved, veto that here and ask the UI to raise the
+	// save-prompt instead (EditorUI turns m_exitRequested into a guarded Quit). The
+	// prompt's "quit" path then exits cleanly through Application::Quit(). Skipped
+	// in headless-dump mode, when no project is loaded, or when nothing is dirty
+	// (let it close normally). For window-close events we only react to the *main*
+	// window — ImGui's secondary viewport windows manage their own close.
+	//
+	// "Anything unsaved" is deliberately BOTH tests: an asset tab (material / UI
+	// widget / particle / animator state machine …) keeps its edits in per-panel
+	// state and does not bump the world undo revision, so the scene-revision test
+	// alone let a clean-scene + dirty-graph session quit without any prompt — on
+	// macOS ⌘Q is the only quit path, so those edits were simply gone.
+	const bool osCloseRequest =
+		event.type == SDL_EVENT_QUIT ||
+		(event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED && window() &&
+		 event.window.windowID == SDL_GetWindowID(window()->GetNativeWindow()));
+	if (osCloseRequest && m_dumpPath.empty() && m_projectLoaded)
 	{
-		if (window()) window()->CancelClose();
-		m_exitRequested = true;
-		return true; // consume — defer the quit until the user resolves the prompt
+		const bool sceneDirty = m_undo.revision() != m_savedRevision;
+		// Panel-driven, not m_tabs-driven: a dirty tab the user CLOSED keeps its
+		// panel state but is gone from m_tabs, so walking m_tabs would let those
+		// edits be thrown away silently.
+		const bool tabsDirty = !EditorUI::unsavedAssetPaths().empty();
+		if (sceneDirty || tabsDirty)
+		{
+			if (window()) window()->CancelClose();
+			m_exitRequested = true;
+			return true; // consume — defer the quit until the user resolves the prompt
+		}
 	}
 
 	// Only truly consume the event if ImGui wants *exclusive* input —

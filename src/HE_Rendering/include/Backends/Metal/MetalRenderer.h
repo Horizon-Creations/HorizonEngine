@@ -9,6 +9,8 @@
 #include <HorizonRendering/RenderSorter.h>
 #include <HorizonRendering/RenderGraph.h>
 #include <HorizonRendering/CommandBuffer.h>
+#include <HorizonRendering/RenderConstants.h> // HE::kShadowMapResolution
+#include <HorizonRendering/GiBvh.h>
 #include <Math/AABB.h>
 #include <Types/UUID.h>
 #include <material/MaterialShaderLibrary.h> // shared cross-backend material shader layer
@@ -46,6 +48,10 @@ struct GpuTimedPoint { const char* name; uint32_t slot; };
 struct SDL_Window;
 struct MaterialShaderVariant; // ContentManager/Assets.h — baked per-backend material shader
 struct ParticleShaderVariant; // ContentManager/Assets.h — baked per-backend particle shader
+// Per-frame hand-off between the deferred G-buffer pass and the lighting pass
+// (defined in MetalRenderer.mm — it carries draw structs built on .mm-local
+// types). Lives on EncodeFrame's stack, never across frames.
+struct MetalDeferredFrame;
 
 // Passed as the overlay-callback context so ImGui (or any other overlay) can
 // encode into the active render pass. All pointers are Objective-C objects
@@ -92,10 +98,19 @@ public:
 	void* RenderParticlePreview(ContentManager& cm, const HE::UUID& meshId, const HE::UUID& materialId,
 	                            const std::vector<ParticlePreviewInstance>& particles,
 	                            uint32_t size, float yaw, float pitch, float dist) override;
+	bool  RenderAssetThumbnail(ContentManager& cm, ThumbnailKind kind, const HE::UUID& assetId,
+	                           uint32_t size, std::vector<uint8_t>& outRgba8) override;
+	bool  RenderParticleThumbnail(ContentManager& cm, const HE::UUID& materialId,
+	                              const std::vector<ParticlePreviewInstance>& particles,
+	                              uint32_t size, std::vector<uint8_t>& outRgba8) override;
+	bool  RenderWidgetThumbnail(const std::vector<UIRenderObject>& uiObjects,
+	                            uint32_t size, std::vector<uint8_t>& outRgba8) override;
 	void  InvalidateMesh    (const HE::UUID& meshId)     override;
+	void  InvalidateTexture (const HE::UUID& textureId)  override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
 	void  SetSSAOSettings(const SSAOSettings& settings) override;
 	void  SetGISettings(const GISettings& settings) override;
+	void  SetSSRSettings(const SSRSettings& settings) override;
 	void  SetShadowDebug(bool on) override { m_debugShadowCascades = on; }
 	void  SetGpuParticleParams(const GpuParticleParams& p) override;
 	void  SetDebugLines(const std::vector<DebugLine>& lines) override;
@@ -154,15 +169,129 @@ private:
 	void CreateScenePipeline();
 	void EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool isPrimary);
 	// Encodes the scene draw calls into the given encoder (any render pass
-	// whose attachments match the scene pipeline formats).
-	void EncodeScene(void* renderEncoder, int width, int height);
+	// whose attachments match the scene pipeline formats). When `deferred` is
+	// non-null the opaque geometry was already rasterized into the G-buffer by
+	// EncodeGBuffer this frame: instead of the opaque loop, a fullscreen
+	// lighting resolve is drawn (plus the forward-routed opaque replay), and the
+	// transparency list is taken from the hand-off. Everything else (skinned,
+	// sky, transparency, particles) is the SAME code as forward.
+	void EncodeScene(void* renderEncoder, int width, int height,
+	                 MetalDeferredFrame* deferred = nullptr);
+
+	// ── Deferred render path (G-buffer + lighting resolve) ───────────────────
+	// docs/deferred-renderer-plan.md. Active when SetRenderPath(Deferred) and the
+	// pipelines could be built (needs HE_HAVE_SHADERC for the resolve shader).
+	void* m_gbColor0 = nullptr; // id<MTLTexture> RGBA8Unorm_sRGB — BaseColor + Metallic
+	void* m_gbColor1 = nullptr; // id<MTLTexture> RGBA16Float — oct Normal + Roughness + Specular
+	void* m_gbColor2 = nullptr; // id<MTLTexture> RGBA16Float — Emissive (HDR) + Material-AO
+	void* m_gbDepth  = nullptr; // id<MTLTexture> Depth32Float — two-pass mode only: sampled by
+	                            // the resolve, blitted into m_hdrDepth for the lighting pass
+	// NDC depth as a COLOUR target (R32Float, attachment 3): written by every
+	// G-buffer fragment so the tile resolve can framebuffer-fetch it — Metal
+	// cannot fetch the depth buffer itself. In two-pass mode it is attached
+	// (pipeline/pass formats must match) but unused.
+	void* m_gbDepthLin = nullptr;
+	int   m_gbW = 0, m_gbH = 0;
+	void* m_gbufferPipeline        = nullptr; // id<MTLRenderPipelineState> — built-in PBR G-buffer
+	void* m_deferredResolvePipeline = nullptr; // id<MTLRenderPipelineState> — fullscreen heLitP resolve
+	// Tile-memory single pass (plan P6, Apple Silicon): the G-buffer attachments
+	// are MTLStorageModeMemoryless and the resolve runs INSIDE the G-buffer pass
+	// via framebuffer fetch, writing the HDR colour to attachment 4 — the
+	// G-buffer never leaves tile storage (bandwidth ≈ 0). Decided once at
+	// Initialize (Apple-GPU family; HE_DEFERRED_TILE=0/1 overrides). SSAO keeps
+	// its classic geometry pre-pass in this mode: the resolve consumes AO inside
+	// pass 1, so there is no stored depth to reconstruct it from (P5 stays for
+	// the two-pass fallback).
+	bool  m_deferredTileMode            = false;
+	void* m_deferredResolveTilePipeline = nullptr; // id<MTLRenderPipelineState>
+	// Fullscreen tile resolve, encoded into the OPEN G-buffer pass encoder.
+	void  EncodeDeferredResolveTile(void* renderEncoder, int width, int height);
+	bool  m_deferredPipelinesTried  = false;   // build attempted once; failure logs + falls back forward
+
+	// ── Screen-space reflections (docs/ssr-plan.md §4.5, deferred-tile v1) ───
+	// After the tile resolve (which SKIPS its specular-IBL term via
+	// heLight.ssr.w) two extra passes run: a half-res world-space trace against
+	// the stored G-buffer depth sampling the CURRENT frame's resolved HDR (no
+	// lag, no history), and an additive fullscreen composite that mixes the SSR
+	// hit against the sky cubemap with heLitP's exact weather/AO/fog factors.
+	// SSR forces the tile G-buffer to STORED (non-memoryless) attachments —
+	// screen-space reflections need the data after the pass; that trade is
+	// inherent to the technique.
+	bool  m_ssrEnabled      = false;
+	float m_ssrIntensity    = 1.0f;
+	float m_ssrMaxRoughness = 0.6f;
+	float m_ssrMaxDistance  = 30.0f;
+	float m_ssrThickness    = 0.5f;
+	int   m_ssrQuality      = 1;      // 0 = 16 steps, 1 = 32, 2 = 64
+	bool  m_ssrFrameActive  = false;  // this frame runs SSR (tile deferred + enabled + pipelines)
+	void* m_ssrTracePipeline     = nullptr; // id<MTLRenderPipelineState>
+	void* m_ssrCompositePipeline = nullptr; // id<MTLRenderPipelineState> (ONE/ONE additive)
+	void* m_ssrBlurPipeline      = nullptr; // id<MTLRenderPipelineState> separable 5-tap (plan P4)
+	bool  m_ssrPipelinesTried    = false;
+	void* m_ssrReflTex = nullptr; // id<MTLTexture> RGBA16F half-res: rgb radiance, a confidence
+	void* m_ssrPingTex = nullptr; // id<MTLTexture> same format, ping target of the separable blur
+	void* m_ssrRoughTex = nullptr; // id<MTLTexture> wide second blur (High tier glossy lerp)
+	int   m_ssrReflW = 0, m_ssrReflH = 0;
+	bool  m_gbStored = false;     // current G-buffer allocation: stored vs memoryless
+	bool  EnsureSSRPipelines();
+	void  EnsureSSRTarget(int width, int height);
+	void  DestroySSRTarget();
+	// Trace + composite, own passes on cmdBuf (after the tile G-buffer pass).
+	void  EncodeSSRPasses(void* cmdBuf, int width, int height);
+
+	// ── Deferred decals (P7 follow-up, tile mode v1) ─────────────────────────
+	// Unit-cube projectors (DecalComponent) rasterized INSIDE the G-buffer pass
+	// right after the geometry: the fragment framebuffer-fetches the NDC depth
+	// (attachment 3), clips against the box and alpha-blends into GB0.rgb.
+	// Apple-GPU only (fetch) — the two-pass fallback and GL ignore decals in v1.
+	void* m_decalPipeline      = nullptr; // id<MTLRenderPipelineState>
+	bool  m_decalPipelineTried = false;
+	bool  EnsureDecalPipeline();
+	void  EncodeDecals(void* renderEncoder, int width, int height);
+
+	// ── Clustered lighting (plan P7) ─────────────────────────────────────────
+	// In the deferred resolve ALL point/spot lights come from per-cluster light
+	// lists (CPU-built each frame, scattered by projected bounds) instead of the
+	// 8-light window — the light limit falls. The heLight window then carries
+	// directional lights only. Default on for deferred; HE_DEFERRED_CLUSTER=0
+	// forces the 8-light resolve (A/B guard). GL keeps the 8-light resolve
+	// (no SSBOs in GL 4.1).
+	static constexpr int   kClusterGridX = 16;
+	static constexpr int   kClusterGridY = 9;
+	static constexpr int   kClusterGridZ = 24;
+	static constexpr float kClusterNear  = 0.1f;
+	static constexpr float kClusterFar   = 1000.0f;
+	static constexpr int   kMaxClusteredLights = 256;
+	bool  m_deferredClustered = true;
+	// Build this frame's cluster data from m_renderWorld, bind the three SSBO
+	// buffers on the encoder (fragment buffers 4/5/6), fill ru's cluster fields
+	// and rewrite matLight's window to DIRECTIONAL lights only.
+	void  EncodeClusterData(void* renderEncoder,
+	                        HE::MaterialShaderLibrary::Lighting& matLight,
+	                        HE::MaterialShaderLibrary::ResolveUniforms& ru);
+	int   m_gbufferDebugView        = 0;       // HE_DUMP_GBUFFER (1..4), read once at Initialize
+	bool  m_deferredFrameActive     = false;   // this frame renders deferred (set before SSAO — P5 reads it)
+	void  EnsureGBufferTargets(int width, int height);
+	void  DestroyGBufferTargets();
+	bool  EnsureDeferredPipelines();  // true when both PSOs exist
+	// Rasterize the opaque scene into the G-buffer (extract/cull/sort of its own,
+	// deterministic — same set EncodeScene sees). Fills `out` with the draws that
+	// must run forward in the lighting pass (translucent + custom materials
+	// without a G-buffer variant).
+	void  EncodeGBuffer(void* renderEncoder, int width, int height, MetalDeferredFrame& out);
+	// The heLitP lighting-ABI fill for custom-material draws AND the deferred
+	// resolve — one implementation, so the two can never drift (extracted from
+	// EncodeScene when the tile resolve needed it outside that function).
+	void  FillMaterialLighting(HE::MaterialShaderLibrary::Lighting& matLight,
+	                           int width, int height, bool giActive, bool ssaoActive,
+	                           bool shadows, float skyClock);
 	// Procedural skybox: fills the HDR target's background before the scene.
 	void* m_skyPipeline = nullptr; // id<MTLRenderPipelineState>
 	void* m_moonTexture = nullptr; // id<MTLTexture>, night-sky moon (or null)
+	// Everything else the sky shader needs comes from GetEnvironment() via the shared
+	// HE::BuildSkyFrameParams; only the per-frame camera/clock values are passed in.
 	void  EncodeSky(void* renderEncoder, const glm::mat4& invViewProj, const glm::vec3& sunDir,
-	                const glm::vec3& sunColor, float timeOfDay, float cloudCoverage, float time,
-	                float auroraIntensity, const glm::vec3& nebulaColor, float nebulaIntensity,
-	                const glm::vec3& auroraColor, float milkyWayIntensity, const glm::vec3& wind);
+	                float time);
 	// (Re)creates the offscreen viewport textures at the requested size.
 	void EnsureViewportTarget();
 	void DestroyViewportTarget();
@@ -281,7 +410,11 @@ private:
 	// ── Shadow map (cascaded; directional light) ────────────────────────────
 	void* m_shadowDepthTex = nullptr;  // id<MTLTexture>, Depth32Float 2D ARRAY (one layer/cascade)
 	void* m_shadowPipeline = nullptr;  // id<MTLRenderPipelineState>, depth-only
-	int   m_shadowSize     = 2048;
+	int   m_shadowSize     = HE::kShadowMapResolution;
+	// Local (point/spot) shadow atlas: 2D depth ARRAY, one layer per spot view /
+	// point cube face (16 layers total, see ShadowData::kMaxLocalShadowLayers).
+	void* m_localShadowTex  = nullptr; // id<MTLTexture>, Depth32Float 2D ARRAY
+	int   m_localShadowSize = 1024;
 	bool  m_debugShadowCascades = false; // tint fragments by cascade index (debug)
 	void  EnsureShadowResources();
 	void  EncodeShadowMap(void* cmdBuf, float aspect); // CSM depth maps; aspect MUST match the scene extract
@@ -291,12 +424,6 @@ private:
 	// it down to the LDR output (viewport texture or drawable). Sized to the
 	// current scene output, recreated on resize.
 	void* m_tonemapPipeline = nullptr; // id<MTLRenderPipelineState>
-
-	// Material-system M1 visual proof (HE_SHADERC_DEMO=1): a fullscreen overlay whose
-	// MSL is generated at runtime from ONE canonical GLSL source via he::shaderc
-	// (glslang→SPIR-V→SPIRV-Cross). Off unless the env var is set; built lazily.
-	void* m_shadercDemoPipeline = nullptr; // id<MTLRenderPipelineState>
-	bool  m_shadercDemoTried    = false;
 
 	// Per-material pipeline cache (M1): a MaterialAsset with a customShaderFragGlsl gets
 	// its fragment cross-compiled (he::shaderc) and spliced onto the standard drop-in
@@ -313,7 +440,7 @@ private:
 	bool        m_matArchiveTried  = false;    // ensured once
 	std::string m_matArchivePath;              // serialize target on disk
 	// Returns the material binary archive (loading/creating it on first use), or nil.
-	void* ensureMaterialArchive();
+	void* EnsureMaterialArchive();
 	// Material-preview target (RenderMaterialPreview): a small RGBA16F color texture
 	// (matches the material PSO's HDR format) + depth, plus a lazily-built unit sphere,
 	// independent of the main viewport.
@@ -343,6 +470,50 @@ private:
 	int   m_particlePreviewSize     = 0;
 	void* m_particlePreviewPipeline = nullptr; // id<MTLRenderPipelineState> (retained)
 
+	// ── Content-Browser thumbnails (RenderAssetThumbnail) ────────────────────
+	// Own target, deliberately NOT any of the preview targets above: a thumbnail
+	// is rendered while the Material Editor may be showing its live preview, and
+	// sharing m_previewColorTex would replace that preview's contents with
+	// whatever asset the grid happened to ask for. Read back to RGBA8 and cached
+	// by the editor, so this holds one thumbnail at a time.
+	void* m_thumbColorTex = nullptr; // id<MTLTexture> (retained), RGBA16F like the previews
+	void* m_thumbDepthTex = nullptr; // id<MTLTexture> (retained)
+	int   m_thumbSize     = 0;
+	// A SECOND target for widget tiles, in the SWAPCHAIN format: every pipeline
+	// the UI pass uses is built against kSwapchainFormat and Metal requires the
+	// pipeline's colour format to match the pass's attachment, so UI drawn into
+	// the RGBA16F target above renders nothing at all.
+	void* m_thumbUIColorTex = nullptr; // id<MTLTexture> (retained), BGRA8
+	void* m_thumbUIDepthTex = nullptr; // id<MTLTexture> (retained)
+	int   m_thumbUISize     = 0;
+	// Unskinned mesh pipeline shared by the mesh thumbnails and by materials that
+	// have no node graph (built-in PBR): the counterpart of m_skelPreviewPipeline
+	// with the bone buffers removed and a metallic/roughness-driven highlight.
+	void* m_meshPreviewPipeline = nullptr; // id<MTLRenderPipelineState> (retained)
+	// Lazily (re)create the thumbnail target at S×S; false if it could not be made.
+	bool EnsureThumbnailTarget(int S);
+	// Blit the thumbnail target to staging on `commandBuffer`, commit, wait and
+	// decode the RGBA16F into top-down RGBA8.
+	bool CommitAndReadThumbnail(void* commandBuffer, int S, std::vector<uint8_t>& out);
+	// Encode one material-graph preview primitive into an OPEN encoder (the caller
+	// owns the render pass + its clear). False when the material has no node-graph
+	// pipeline — the thumbnail path then falls back to m_meshPreviewPipeline.
+	bool EncodeMaterialPreview(void* renderEncoder, const HE::UUID& materialId,
+	                           float yaw, float pitch, float dist, int shape);
+	// Build the billboard pipeline once; false on failure.
+	bool EnsureParticlePreviewPipeline();
+	// Encode the particle cloud into an OPEN encoder — shared by the interactive
+	// preview and the thumbnail so the two can never drift.
+	void EncodeParticleBillboards(void* renderEncoder, const HE::UUID& materialId,
+	                              const std::vector<ParticlePreviewInstance>& particles,
+	                              const glm::mat4& viewProj, const glm::vec3& camRight,
+	                              const glm::vec3& camUp);
+	// Same contract for the mesh pipeline; `center`/`extent` frame the orbit camera.
+	void EncodeMeshPreview(void* renderEncoder, void* vertexBuf, void* indexBuf, int indexCount,
+	                       void* texture, const glm::vec3& center, float extent,
+	                       const glm::vec3& baseColor, float metallic, float roughness,
+	                       float yaw, float pitch, float dist);
+
 	// GPU-instanced ParticleGraph particle rendering (the real scene draw path, see
 	// RenderWorld::particleBatches) — one compiled pipeline per unique color/alpha-
 	// over-life config, hash-keyed cache mirroring m_materialPipelineCache. Each
@@ -361,14 +532,6 @@ private:
 	                                 const ParticleShaderVariant* precompiled = nullptr);
 	void  DrawParticleGraphBatches(void* renderEncoder, const glm::mat4& viewProj, const glm::mat4& view);
 
-	// A procedural sphere (interleaved pos3/normal3/uv2, matching VertexIn) so per-material
-	// pipelines are visible on real 3D geometry even in the empty headless dump scene.
-	// Built + drawn (two spheres, two materials) when HE_SHADERC_MATERIAL=1.
-	void* m_shadercTestVB   = nullptr; // id<MTLBuffer>
-	void* m_shadercTestIB   = nullptr; // id<MTLBuffer>
-	int   m_shadercTestIdx  = 0;       // index count
-	bool  m_shadercTestTried = false;
-
 	void* m_hdrColor        = nullptr; // id<MTLTexture>, RGBA16Float (retained)
 	void* m_hdrDepth        = nullptr; // id<MTLTexture>, Depth32Float (retained)
 	int   m_hdrW            = 0;
@@ -377,20 +540,25 @@ private:
 	void  DestroyHDRTarget();
 	void  EncodeTonemap(void* renderEncoder); // fullscreen tonemap of m_hdrColor → LDR
 #if defined(HE_HAVE_SHADERC)
-	void  EnsureShadercDemoPipeline();        // HE_SHADERC_DEMO overlay (material-system M1)
-	void  EnsureShadercTestMesh();            // procedural sphere for the HE_SHADERC_MATERIAL demo
 	// Build (or fetch cached) a pipeline for a material's custom fragment GLSL, spliced
 	// onto the standard drop-in vertex. Returns null on compile/link failure (also cached).
 	// precompiled != null → build directly from baked MSL (no runtime cross-compile).
 	// vertBody = WPO vertex body ("" → standard vertex); blend = alpha-blended variant
 	// for the transparency pass (cached separately — same key space, blend bit mixed in).
+	// gbuffer = MRT G-buffer variant for the deferred path: fragGlsl is then the
+	// material's customShaderGBufGlsl and the PSO targets the three G-buffer
+	// formats (never blended). Own key space via a salt, like blend.
 	void* GetOrBuildMaterialPipeline(uint64_t key, const std::string& fragGlsl,
 	                                 const std::string& vertBody = {},
 	                                 const MaterialShaderVariant* precompiled = nullptr,
-	                                 bool blend = false);
+	                                 bool blend = false, bool gbuffer = false);
 	// Resolve a material's custom shader: true + (key,frag) if it has customShaderFragGlsl.
 	bool  ResolveMaterialShader(const HE::UUID& materialId, uint64_t& key, std::string& frag,
 	                            std::string& vertBody);
+	// Same for the deferred G-buffer variant (customShaderGBufGlsl); false → the
+	// material has none and its draws are routed through the forward extra pass.
+	bool  ResolveMaterialShaderGB(const HE::UUID& materialId, uint64_t& key, std::string& frag,
+	                              std::string& vertBody);
 #endif
 
 	// ── FXAA (edge antialiasing) ─────────────────────────────────────────────
@@ -409,7 +577,7 @@ private:
 	void* m_uiFontTexture = nullptr; // id<MTLTexture>, R8 UI font atlas (UISystem::sharedFont)
 	// Imported Font asset atlases, uploaded lazily on first sight (key → id<MTLTexture>).
 	std::unordered_map<uint32_t, void*> m_uiFontAtlases;
-	void* uiFontAtlasTexture(uint32_t key); // key 0 → the shared atlas
+	void* UIFontAtlasTexture(uint32_t key); // key 0 → the shared atlas
 	// Material-on-UI-quad pipelines: same material fragments as the mesh path,
 	// paired with the screen-space uiVertex and the LDR/blend target of the UI
 	// pass — so they need their own cache (key = material shader hash).
@@ -449,10 +617,7 @@ private:
 	void  EnsureCloudTarget(int width, int height);
 	void  DestroyCloudTarget();
 	void  EncodeCloudPrepass(void* cmdBuf, const glm::mat4& invViewProj, const glm::vec3& sunDir,
-	                         const glm::vec3& sunColor, float timeOfDay, float cloudCoverage,
-	                         float time, float auroraIntensity, const glm::vec3& nebulaColor,
-	                         float nebulaIntensity, const glm::vec3& auroraColor,
-	                         float milkyWayIntensity, const glm::vec3& wind, int width, int height);
+	                         float time, int width, int height);
 
 	// ── SSAO (screen-space ambient occlusion) ───────────────────────────────
 	// Mirrors the GL backend: a view-space position pre-pass feeds a hemisphere-
@@ -460,6 +625,7 @@ private:
 	// darken the image-based ambient in crevices. Encoded before the HDR scene
 	// pass (it owns its own render encoders); skipped entirely when disabled.
 	void* m_ssaoPosPipeline  = nullptr; // id<MTLRenderPipelineState> (writes view pos)
+	void* m_ssaoDepthPosPipeline = nullptr; // deferred P5: view pos from G-buffer depth (fullscreen)
 	void* m_ssaoPipeline     = nullptr; // fullscreen occlusion estimate
 	void* m_ssaoBlurPipeline = nullptr; // fullscreen box blur
 	void* m_ssaoPosTex       = nullptr; // id<MTLTexture> RGBA16F view position
@@ -494,7 +660,8 @@ private:
 	// This checkpoint only builds the structures; the ray-traced shadow pass and
 	// DDGI probe pass that consume them land in later checkpoints.
 	bool  m_giRaytracingChecked = false; // EnsureRaytracingSupport() run-once guard
-	bool  m_giSupported         = false; // @available(macOS 12,*) && device.supportsRaytracing, cached
+	bool  m_giSupported         = false; // GI available at all (always true once probed — SW path covers no-HW-RT)
+	bool  m_giHwRt              = false; // hardware inline ray tracing (macOS 12 + supportsRaytracing, minus HE_GI_FORCE_SW)
 	bool  m_giEnabled           = false; // latest SetGISettings().enabled
 	float m_giIndirectIntensity = 1.0f;
 	float m_giLightRadius       = 0.5f;  // degrees — sun angular radius (shadow penumbra softness)
@@ -508,6 +675,46 @@ private:
 	// than tracking capacity/growth; instance buffers are tiny (tens of KB).
 	void* m_giTlas           = nullptr; // id<MTLAccelerationStructure> (retained), this frame's build
 	void* m_giInstanceBuffer = nullptr; // id<MTLBuffer> (retained), this frame's build
+	// Per-instance flat baseColor (float4), SAME index order as the TLAS instance
+	// array — get_committed_instance_id() in a ray hit returns that array index
+	// (confirmed: MTLAccelerationStructureInstanceDescriptorTypeDefault has no
+	// separate user-ID field, so the id IS the array position), letting the DDGI
+	// probe-update kernel (Checkpoint C) look up which object it hit and tint the
+	// one-bounce estimate by that object's own colour instead of a flat grey.
+	void* m_giInstanceColorBuffer = nullptr; // id<MTLBuffer> (retained), this frame's build
+
+	// ── Software ray tracing (no-HW-RT fallback, or HE_GI_FORCE_SW) ──────────
+	// The CPU-built HE::GiBvh (same module + unit tests as the GL 4.3 port) in
+	// plain MTLBuffers, traversed by base compute kernels (kGISWMSL) that
+	// mirror GiBvh.cpp::giBvhIntersect 1:1. Node/tri buffers are concatenated
+	// BLASes (append-only, re-uploaded when a new mesh joins); the instance
+	// buffer (invTransform + baseColor + BLAS offsets) is rebuilt every frame
+	// like the HW TLAS. Everything downstream (G-buffer, temporal, blur,
+	// shading, probe atlases) is IDENTICAL to the HW path — only the ray
+	// dispatch kernel differs.
+	struct GISwBlasRange
+	{
+		int32_t nodeOffset = 0, triOffset = 0;
+		bool    valid      = false;
+	};
+	struct GISwInstanceCPU // must match kGISWMSL's GiInst (96 bytes)
+	{
+		glm::mat4 invTransform{1.0f};
+		glm::vec4 baseColor{1.0f};
+		int32_t   nodeOffset = 0, triOffset = 0, pad0 = 0, pad1 = 0;
+	};
+	std::unordered_map<HE::UUID, GISwBlasRange> m_giSwBlasCache;
+	std::vector<HE::GiBvhNode>     m_giSwNodesCpu;
+	std::vector<HE::GiBvhTriangle> m_giSwTrisCpu;
+	bool  m_giSwBlasDirty     = false;
+	void* m_giSwNodeBuf       = nullptr; // id<MTLBuffer> (retained)
+	void* m_giSwTriBuf        = nullptr; // id<MTLBuffer> (retained)
+	void* m_giSwInstanceBuf   = nullptr; // id<MTLBuffer> (retained), rebuilt per frame
+	int   m_giSwInstanceCount = 0;
+	void* m_giShadowRaySwPipeline  = nullptr; // id<MTLComputePipelineState>
+	void* m_giProbeUpdateSwPipeline = nullptr; // id<MTLComputePipelineState>
+	GISwBlasRange BuildGISwBlas(const HE::UUID& meshId);
+	void          EncodeGISwAccelBuild(); // CPU BVH build + buffer upload (no cmd encoding needed)
 	// Objects a build just replaced (old TLAS/instance/scratch buffers). GPU work
 	// from this frame's build (or a still in-flight prior frame) may still
 	// reference them, so they are released a few frames later — same lifetime
@@ -523,12 +730,96 @@ private:
 	// Lazily builds a BLAS for any not-yet-seen caster mesh, then rebuilds the TLAS
 	// from the current frame's caster set. No-op (early return) unless GI is
 	// enabled and supported. Shares cmdBuf with EncodeShadowMap/SimulateGpuParticles.
-	void  EncodeGIAccelBuild(void* cmdBuf);
+	// aspect MUST be the scene pass's aspect: this call's extract() seeds the
+	// m_renderWorld.camera that EncodeGIShadowRays rasterizes its G-buffer with.
+	void  EncodeGIAccelBuild(void* cmdBuf, float aspect);
+	// Unique BLAS instances the TLAS built this frame actually references (set by
+	// EncodeGIAccelBuild, consumed by EncodeGIShadowRays/EncodeGIProbeUpdate) — every
+	// compute encoder that traces against m_giTlas must useResource: each of these,
+	// since Metal doesn't auto-track residency through an acceleration structure.
+	std::vector<void*> m_giUniqueBlas;
+
+	// ── Global Illumination: ray-traced shadow pass (Checkpoint B) ──────────────
+	// Replaces CSM's shadowFactor() sampling when GI is active: a half-res
+	// world-space G-buffer (position+normal) pre-pass, one ray-traced occlusion
+	// sample per pixel (jittered within a cone around the sun for a soft
+	// penumbra), temporally accumulated against a ping-pong history (reprojected
+	// via the true previous frame's view-proj — NOT the same-frame m_prepassViewProj
+	// pattern), then a small spatial blur. Result sampled by fragmentMain exactly
+	// like aoTex (screen-space UV, free bilinear upsample from half-res).
+	void* m_giGBufPipeline        = nullptr; // id<MTLRenderPipelineState> (MRT: world pos + normal)
+	void* m_giShadowRayPipeline   = nullptr; // id<MTLComputePipelineState>
+	void* m_giShadowTemporalPipeline = nullptr; // id<MTLRenderPipelineState>
+	void* m_giShadowBlurPipeline  = nullptr; // id<MTLRenderPipelineState>
+	void* m_giGBufPosTex  = nullptr; // id<MTLTexture> RGBA16F world pos, a=1 valid geometry
+	void* m_giGBufNormTex = nullptr; // id<MTLTexture> RGBA16F world normal
+	void* m_giGBufDepth   = nullptr; // id<MTLTexture> depth for the prepass only
+	void* m_giShadowRawTex = nullptr; // id<MTLTexture> R16F raw 1-ray/pixel result (compute-written)
+	// RGBA16F per-pixel visibility of the first 4 LOCAL (point/spot) lights —
+	// one hard, unjittered occlusion ray per light per pixel (deterministic →
+	// no temporal pass, instant response). Sampled by fragmentMain at
+	// texture(8); channel = the shader's non-directional light counter.
+	void* m_giLocalMaskTex = nullptr; // id<MTLTexture> (compute-written)
+	void* m_giShadowHistory[2] = { nullptr, nullptr }; // id<MTLTexture> R16F ping-pong temporal history
+	int   m_giShadowHistoryIdx   = 0;
+	bool  m_giShadowHistoryValid = false; // false right after (re)alloc — first frame skips history blend
+	void* m_giShadowResult = nullptr; // id<MTLTexture> R16F final blurred result, sampled by fragmentMain
+	int   m_giShadowW = 0, m_giShadowH = 0;
+	// TRUE previous-frame view-proj (unlike m_prepassViewProj, which is written and
+	// read within the SAME frame for the low-res cloud pre-pass) — written at the
+	// END of EncodeGIShadowRays from the value used THIS frame, so next frame's
+	// reprojection reads last frame's camera, not this frame's.
+	glm::mat4 m_giPrevViewProj    = glm::mat4(1.0f);
+	float     m_giShadowFrameSeed = 0.0f; // increments every GI-active frame, drives cone jitter
+	void  EnsureGIShadowPipelines();              // builds the 4 pipelines above once, only if m_giSupported
+	void  EnsureGIShadowTargets(int width, int height);
+	void  DestroyGIShadowTargets();
+	// No-op (early return) unless GI is enabled/supported/has a built TLAS. Shares
+	// m_renderWorld/m_sortedIndices with EncodeGIAccelBuild (called immediately
+	// before this in the frame, same extract).
+	void  EncodeGIShadowRays(void* cmdBuf, int width, int height);
+
+	// ── Global Illumination: DDGI probes (Checkpoint C) ──────────────────────────
+	// Replaces AO + flat/IBL ambient when GI is active: a fixed probe grid over the
+	// scene AABB (built once, not every frame — probes encode static indirect
+	// light), each probe an 8x8-texel octahedral map. v1 simplifications
+	// (documented, not the fully hardened DDGI paper): irradiance AND visibility
+	// share ONE octahedral resolution/ray set (not separately super-sampled) —
+	// each output texel traces its OWN ray in its own octahedral direction (a
+	// "gather", one thread per texel) rather than scattering N random rays into M
+	// texels, which needs no atomics/resolve pass since every thread in a probe's
+	// update owns exactly one texel; bounce colour is the hit object's flat
+	// baseColor (m_giInstanceColorBuffer), not a per-texel material/UV sample; no
+	// secondary shadow ray at the hit point (hit surfaces are treated as fully
+	// sun-lit); no border-texel wrap (accepts minor bilinear seams at probe tile
+	// edges). All are straightforward follow-ups once the base algorithm is
+	// visually verified, not correctness bugs.
+	static constexpr float kGIProbeSpacing      = 4.0f; // world units between probes
+	static constexpr int   kGIMaxProbesPerAxis  = 10;   // caps total probes/memory/cost
+	static constexpr int   kGIProbeOctSize      = 8;    // texels/side of each probe's octahedral tile (no border)
+	glm::vec3 m_giGridOrigin  = glm::vec3(0.0f); // world-space position of probe (0,0,0)
+	glm::ivec3 m_giGridCounts = glm::ivec3(0);   // probe counts per axis
+	int   m_giProbeCount   = 0;                  // gridCounts.x*y*z
+	int   m_giProbesPerRow = 0;                  // atlas tile layout (ceil(sqrt(probeCount)))
+	bool  m_giProbeGridBuilt = false;            // built lazily once; NOT rebuilt on scene change (v1 limitation)
+	int   m_giProbeUpdateCursor = 0;             // round-robin index into [0, probeCount) for frame-sliced updates
+	void* m_giProbeUpdatePipeline = nullptr;     // id<MTLComputePipelineState>
+	void* m_giIrradianceAtlas = nullptr;         // id<MTLTexture> RGBA16F, read_write (in-place EMA blend)
+	void* m_giVisibilityAtlas = nullptr;         // id<MTLTexture> RG16F (mean, mean^2 hit distance), read_write
+	void  EnsureGIProbeGrid();                   // computes the grid from the scene AABB, once
+	void  EnsureGIProbePipeline();                // builds m_giProbeUpdatePipeline once, only if m_giSupported
+	void  EnsureGIProbeAtlas();                   // (re)allocates the 2 atlas textures for the current grid
+	void  DestroyGIProbeAtlas();
+	// No-op (early return) unless GI is enabled/supported/has a built TLAS. Updates
+	// up to probeBudgetPerFrame probes this frame (round-robin), tracing
+	// raysPerProbe-ish rays each (== kGIProbeOctSize^2, the gather formulation).
+	void  EncodeGIProbeUpdate(void* cmdBuf);
 
 	// Uploaded asset meshes, keyed by asset UUID
 	std::unordered_map<HE::UUID, GpuMesh>         m_meshCache;
 	std::unordered_map<HE::UUID, GpuSkeletalMesh> m_skeletalMeshCache;
 	std::vector<HE::UUID>                 m_pendingMeshInvalidations;
+	std::vector<HE::UUID>                 m_pendingTexInvalidations;
 
 	// Base-color textures for MaterialComponent overrides, keyed by material
 	// UUID (id<MTLTexture>, retained; nullptr = resolved, no texture).

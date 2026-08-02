@@ -1,0 +1,136 @@
+#version 460
+#extension GL_EXT_ray_query : require
+// GI shadow rays — HARDWARE ray tracing variant (VK_KHR_ray_query): identical
+// binding interface to gi_shadow.comp (bindings 0-6 unchanged; giNodes/giTris
+// stay declared for descriptor-set parity but are never traversed), plus the
+// TLAS at binding 7. Ray semantics mirror the SW kernel 1:1: one cone-jittered
+// any-hit ray per pixel toward the dominant directional light, same origin
+// bias (N * 0.05) and tMin/tMax (0.02 / 10000). The host guarantees the TLAS
+// instance order equals the giInsts order.
+//
+// ─── SYNC: seven hand-kept copies of this kernel ─────────────────────────────
+// The GI shadow-ray kernel exists once per API dialect and once per traversal
+// path. Nothing generates them from a common source:
+//
+//   GLSL SW  src/HE_Rendering/shaders/gi_shadow.comp     (Vulkan, CPU BVH)
+//   GLSL HW  src/HE_Rendering/shaders/gi_shadow_hw.comp  (this file)
+//   HLSL SW  src/HE_Rendering/src/Backends/D3D_Shared/HlslSources.h
+//            `kGiTraversalHLSL` + `kGiShadowCSHLSL`      (D3D11 and D3D12)
+//   HLSL HW  src/HE_Rendering/shaders/gi_shadow_hw.hlsl  (D3D12, DXR 1.1)
+//   GLSL SW  src/HE_Rendering/src/Backends/OpenGL/OpenGLRenderer.cpp
+//            `kGiTraversalGLSL` + `kGiShadowCS`          (GL 4.3)
+//   MSL  SW  src/HE_Rendering/src/Backends/Metal/MetalRenderer.mm `kGISWMSL`
+//   MSL  HW  src/HE_Rendering/src/Backends/Metal/MetalRenderer.mm `kGIShadowMSL`
+//
+// WHAT MUST NOT DRIFT: the ray parameters — surface origin bias (N * 0.05),
+// tMin/tMax (0.02 / 10000), the local-light skip radius and the 0.1 slack on the
+// local ray's tMax — the cone-jitter hash constants, and the 8x8 workgroup (the
+// host dispatches ceil(w/8) x ceil(h/8) and relies on it).
+//
+// WHAT BREAKS ON DRIFT: every copy still compiles and still runs. Only the
+// shadow mask differs, on the one backend/path that was edited — a changed bias
+// gives acne or peter-panning, a changed tMax makes distant shadows stop, a
+// changed hash gives a different noise the temporal filter then resolves
+// differently. Nothing here is covered by an image test.
+//
+// GUARD: tests/test_culling.cpp, "GI kernels: the constants the hand-kept copies
+// must share", string-compares those constants across the three copies that live
+// in files of their own. The four embedded as C++ string literals are out of its
+// reach — change one, change all seven, and run that test.
+layout(local_size_x = 8, local_size_y = 8) in;
+
+struct GiNode { vec4 d0; vec4 d1; };
+struct GiTri  { vec4 v0; vec4 v1; vec4 v2; };
+struct GiInst { mat4 invTransform; vec4 baseColor; ivec4 offsets; };
+
+layout(std430, set = 0, binding = 0) readonly buffer GiNodes { GiNode giNodes[]; };
+layout(std430, set = 0, binding = 1) readonly buffer GiTris  { GiTri  giTris[];  };
+layout(std430, set = 0, binding = 2) readonly buffer GiInsts { GiInst giInsts[]; };
+layout(set = 0, binding = 3) uniform sampler2D uGPos;
+layout(set = 0, binding = 4) uniform sampler2D uGNorm;
+layout(set = 0, binding = 5, r16f) uniform writeonly image2D uOut;
+layout(set = 0, binding = 6) uniform GiShadowUBO {
+    vec4 uSunDirRadius; // xyz = direction TOWARD the light, w = angular radius (radians)
+    vec4 uFrame;        // x = jitter seed, y = tex width, z = tex height, w = instance count
+    vec4 uLocalPosRange[4]; // xyz = local (point/spot) light position, w = range
+    vec4 uLocalExtra;       // x = local light count
+};
+layout(set = 0, binding = 7) uniform accelerationStructureEXT uTlas;
+// Per-pixel local-light visibility (1 channel per light, first 4) — binding 8
+// keeps the SW/HW binding interfaces parallel (TLAS owns 7).
+layout(set = 0, binding = 8, rgba16f) uniform writeonly image2D uOutLocal;
+
+// HW analogue of the SW BVH traversal: opaque first-hit query over the TLAS.
+bool giSceneAnyHit(vec3 o, vec3 d, float tMin, float tMax)
+{
+    rayQueryEXT rq;
+    rayQueryInitializeEXT(rq, uTlas,
+                          gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT,
+                          0xFF, o, tMin, d, tMax);
+    while (rayQueryProceedEXT(rq)) { }
+    return rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionNoneEXT;
+}
+
+vec2 giHash2(uvec2 gid, float seed)
+{
+    vec2 p = vec2(gid) + seed * 13.37;
+    return vec2(fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453),
+                fract(sin(dot(p, vec2(39.3468, 11.1352))) * 24634.6345));
+}
+vec3 giConeSample(vec3 L, float angleRad, vec2 xi)
+{
+    vec3 up = (abs(L.y) < 0.99) ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    vec3 T  = normalize(cross(up, L));
+    vec3 B  = cross(L, T);
+    float r   = sin(angleRad) * sqrt(xi.x);
+    float phi = 6.28318530718 * xi.y;
+    return normalize(L + T * (r * cos(phi)) + B * (r * sin(phi)));
+}
+
+void main()
+{
+    uvec2 gid = gl_GlobalInvocationID.xy;
+    if (float(gid.x) >= uFrame.y || float(gid.y) >= uFrame.z) return;
+    vec4 pv = texelFetch(uGPos, ivec2(gid), 0);
+    if (pv.a < 0.5) // background -> everything unoccluded
+    {
+        imageStore(uOut,      ivec2(gid), vec4(1.0));
+        imageStore(uOutLocal, ivec2(gid), vec4(1.0));
+        return;
+    }
+    vec3 N = normalize(texelFetch(uGNorm, ivec2(gid), 0).xyz);
+    vec3 L = uSunDirRadius.xyz;
+
+    // -- Directional light (cone-jittered, temporally accumulated) --
+    float sunVis = 0.0;
+    // Grazing/back-facing relative to the light: direct lighting's dot(N,L)
+    // term already zeroes this out, so skip the trace entirely.
+    if (dot(N, L) > 0.0)
+    {
+        vec2 xi  = giHash2(gid, uFrame.x);
+        vec3 dir = giConeSample(L, max(uSunDirRadius.w, 1e-4), xi);
+        // Same self-intersection guards as the SW kernel: normal-offset origin + min t.
+        vec3 origin = pv.xyz + N * 0.05;
+        sunVis = giSceneAnyHit(origin, dir, 0.02, 10000.0) ? 0.0 : 1.0;
+    }
+    imageStore(uOut, ivec2(gid), vec4(sunVis));
+
+    // -- Local (point/spot) lights: one HARD occlusion ray each toward the
+    // first 4 (see the Metal kernels) -- deliberately UNjittered: deterministic,
+    // no temporal pass, one visibility channel per light; the scene shader
+    // indexes by its local-light counter.
+    vec4 localVis = vec4(1.0);
+    int localCount = clamp(int(uLocalExtra.x), 0, 4);
+    for (int i = 0; i < localCount; ++i)
+    {
+        vec3  toL   = uLocalPosRange[i].xyz - pv.xyz;
+        float distL = length(toL);
+        if (distL <= 0.05) continue; // on top of the light -> lit
+        if (distL >= uLocalPosRange[i].w) continue; // outside the attenuation radius -> contributes nothing, skip the ray
+        vec3 dirL = toL / distL;
+        if (dot(N, dirL) <= 0.0) { localVis[i] = 0.0; continue; }
+        if (giSceneAnyHit(pv.xyz + N * 0.05, dirL, 0.02, max(distL - 0.1, 0.02)))
+            localVis[i] = 0.0;
+    }
+    imageStore(uOutLocal, ivec2(gid), localVis);
+}

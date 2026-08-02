@@ -178,10 +178,9 @@ bool ParticleSystem::stepPool(std::vector<Particle>& particles, float& emitAccum
     return !config.looping && particles.empty() && emitAccumulator < interval;
 }
 
-void ParticleSystem::update(HorizonWorld& world, ContentManager& cm, float dt, const glm::vec3& cameraPos,
+void ParticleSystem::update(HorizonWorld& world, ContentManager& cm, float dt,
                             const PhysicsWorld* physics)
 {
-    (void)cameraPos; // used by camera-following volume emitters (Phase 2)
     auto& reg = world.registry();
 
     for (auto [e, tc, ps] : reg.view<TransformComponent, ParticleSystemComponent>().each())

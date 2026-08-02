@@ -26,11 +26,11 @@ public:
     // Resolve a symbol by name. Returns nullptr if not found / not loaded.
     void* getSymbol(const std::string& name) const;
 
-    bool  isLoaded() const { return handle_ != nullptr; }
-    void* nativeHandle() const { return handle_; }
+    bool  isLoaded() const { return m_handle != nullptr; }
+    void* nativeHandle() const { return m_handle; }
 
 private:
-    void* handle_ = nullptr;
+    void* m_handle = nullptr;
 };
 
 } // namespace HE

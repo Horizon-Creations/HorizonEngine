@@ -9,16 +9,16 @@
 #include <string>
 
 namespace {
-const char* rhiName(HE::GraphicsAPI api)
+const char* rhiName(HE::RendererBackend api)
 {
 	switch (api)
 	{
-		case HE::GraphicsAPI::OpenGL: return "OpenGL";
-		case HE::GraphicsAPI::Metal:  return "Metal";
-		case HE::GraphicsAPI::D3D11:  return "D3D11";
-		case HE::GraphicsAPI::D3D12:  return "D3D12";
-		case HE::GraphicsAPI::Vulkan: return "Vulkan";
-		default:                      return "unknown";
+		case HE::RendererBackend::OpenGL: return "OpenGL";
+		case HE::RendererBackend::Metal:  return "Metal";
+		case HE::RendererBackend::D3D11:  return "D3D11";
+		case HE::RendererBackend::D3D12:  return "D3D12";
+		case HE::RendererBackend::Vulkan: return "Vulkan";
+		default:                          return "unknown";
 	}
 }
 } // namespace
@@ -49,11 +49,10 @@ namespace HE
 		const ApplicationConfig cfg = GetConfig();
 		Logger::Log(Logger::LogLevel::Info, "Configuration loaded");
 
-		m_loop = GameLoop({ cfg.fixedTimestep, cfg.maxFixedSteps, cfg.windowprops.vsync });
+		m_loop = GameLoop({ cfg.fixedTimestep, cfg.maxFixedSteps });
 
-		// RendererBackend and GraphicsAPI share the same underlying values.
 		WindowProps wp = cfg.windowprops;
-		wp.api = static_cast<HE::GraphicsAPI>(cfg.backend);
+		wp.api = cfg.backend;
 		m_window = std::make_unique<Window>(wp);
 		m_window->SetEventCallback([this](const SDL_Event& e)
 		{

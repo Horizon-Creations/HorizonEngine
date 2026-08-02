@@ -3,8 +3,10 @@
 #include <algorithm>
 #include <fstream>
 #include <filesystem>
+#include <memory>
 #include <mutex>
 #include <shared_mutex>
+#include <utility>
 #include <nlohmann/json.hpp>
 
 using json = nlohmann::json;
@@ -12,44 +14,44 @@ namespace fs = std::filesystem;
 
 // Clamp a (possibly stale, possibly from another OS) RHI choice to one that
 // can actually be created on this platform.
-static HE::GraphicsAPI sanitizeRHI(HE::GraphicsAPI rhi)
+static HE::RendererBackend sanitizeRHI(HE::RendererBackend rhi)
 {
 #ifdef __APPLE__
-	if (rhi == HE::GraphicsAPI::D3D11 || rhi == HE::GraphicsAPI::D3D12)
-		return HE::GraphicsAPI::Metal;
+	if (rhi == HE::RendererBackend::D3D11 || rhi == HE::RendererBackend::D3D12)
+		return HE::RendererBackend::Metal;
 #else
-	if (rhi == HE::GraphicsAPI::Metal)
-		return HE::GraphicsAPI::OpenGL;
+	if (rhi == HE::RendererBackend::Metal)
+		return HE::RendererBackend::OpenGL;
 #ifndef _WIN32
-	if (rhi == HE::GraphicsAPI::D3D11 || rhi == HE::GraphicsAPI::D3D12)
-		return HE::GraphicsAPI::OpenGL;
+	if (rhi == HE::RendererBackend::D3D11 || rhi == HE::RendererBackend::D3D12)
+		return HE::RendererBackend::OpenGL;
 #endif
 #endif
 	return rhi;
 }
 
-static HE::GraphicsAPI defaultRHI()
+static HE::RendererBackend defaultRHI()
 {
 #ifdef __APPLE__
-	return HE::GraphicsAPI::Metal;
+	return HE::RendererBackend::Metal;
 #else
-	return HE::GraphicsAPI::OpenGL;
+	return HE::RendererBackend::OpenGL;
 #endif
 }
 
 void GlobalState::setLogFile(const std::string& exePath)
 {
-	engineStatus.startupPath = exePath;
+	m_engineStatus.startupPath = exePath;
 	// Derive log file next to the exe: <exeDir>/HorizonEngine.log
 	fs::path logPath =
 		fs::path(exePath).parent_path() / "HorizonEngine.log";
 	// Truncate on each launch so every run starts with a fresh log (one run = one file).
-	logFileStream.open(logPath.string(), std::ios::out | std::ios::trunc);
+	m_logFileStream.open(logPath.string(), std::ios::out | std::ios::trunc);
 }
 
 std::ofstream& GlobalState::getLogFileStream()
 {
-	return logFileStream;
+	return m_logFileStream;
 }
 
 std::string GlobalState::getDumpsDir() const
@@ -57,7 +59,7 @@ std::string GlobalState::getDumpsDir() const
 	// Mirror setLogFile's exe-adjacent derivation: <exeDir>/dumps. startupPath is
 	// argv[0] (the executable), so parent_path() is the deploy directory — the same
 	// folder that holds HorizonEngine.log.
-	fs::path dumps = fs::path(engineStatus.startupPath).parent_path() / "dumps";
+	fs::path dumps = fs::path(m_engineStatus.startupPath).parent_path() / "dumps";
 	std::error_code ec;
 	fs::create_directories(dumps, ec);
 	return dumps.string();
@@ -68,10 +70,9 @@ void GlobalState::readConfig()
 	if (!fs::exists("config.json"))
 	{
 		Logger::Log(Logger::LogLevel::Warning, "No config file found — using defaults");
-		engineStatus.selectedRHI = defaultRHI();
-		engineStatus.currentOS = HE::OS::Windows;
-		engineStatus.lastProjectPath = "";
-		engineStatus.knownProjects.clear();
+		m_engineStatus.selectedRHI = defaultRHI();
+		m_engineStatus.lastProjectPath = "";
+		m_engineStatus.knownProjects.clear();
 		writeConfig();
 		return;
 	}
@@ -93,11 +94,10 @@ void GlobalState::readConfig()
 	{
 		Logger::Log(Logger::LogLevel::Warning,
 			"config.json is corrupt or unreadable — resetting to defaults");
-		engineStatus.selectedRHI     = defaultRHI();
-		engineStatus.currentOS       = HE::OS::Windows;
-		engineStatus.lastProjectPath = "";
-		engineStatus.knownProjects.clear();
-		customConfig.clear();
+		m_engineStatus.selectedRHI     = defaultRHI();
+		m_engineStatus.lastProjectPath = "";
+		m_engineStatus.knownProjects.clear();
+		m_customConfig.clear();
 		writeConfig();
 		return;
 	}
@@ -113,11 +113,14 @@ void GlobalState::readConfig()
 		auto it = j.find(key);
 		return (it != j.end() && it->is_string()) ? it->get<std::string>() : std::string{};
 	};
-	engineStatus.selectedRHI      = sanitizeRHI(static_cast<HE::GraphicsAPI>(
+	m_engineStatus.selectedRHI      = sanitizeRHI(static_cast<HE::RendererBackend>(
 		intField("RHI", static_cast<int>(defaultRHI()))));
-	engineStatus.currentOS        = static_cast<HE::OS>(intField("OS", static_cast<int>(HE::OS::Windows)));
-	engineStatus.lastProjectPath  = strField("LastProjectPath");
-	engineStatus.knownProjects.clear();
+	// A config written by an older editor still carries an "OS" key. It was never
+	// read by anything (it was hard-coded to Windows on every platform), so it is
+	// deliberately not looked up here: unknown keys are simply ignored, which keeps
+	// an old config.json loadable instead of turning it into a startup failure.
+	m_engineStatus.lastProjectPath  = strField("LastProjectPath");
+	m_engineStatus.knownProjects.clear();
 	if (j.contains("KnownProjects") && j["KnownProjects"].is_array())
 	{
 		for (const auto& entry : j["KnownProjects"])
@@ -126,7 +129,7 @@ void GlobalState::readConfig()
 			std::string p = entry.get<std::string>();
 			// Guard against corrupted entries (e.g. a settings string stored here by mistake)
 			if (p.size() >= 7 && p.substr(p.size() - 7) == ".heproj")
-				engineStatus.knownProjects.push_back(std::move(p));
+				m_engineStatus.knownProjects.push_back(std::move(p));
 		}
 	}
 	if (j.contains("CustomConfig") && j["CustomConfig"].is_array())
@@ -136,7 +139,7 @@ void GlobalState::readConfig()
 			if (entry.contains("Key") && entry["Key"].is_string() &&
 				entry.contains("Value"))
 			{
-				customConfig[entry["Key"].get<std::string>()] = entry["Value"];
+				m_customConfig[entry["Key"].get<std::string>()] = entry["Value"];
 			}
 		}
 	}
@@ -145,12 +148,11 @@ void GlobalState::readConfig()
 bool GlobalState::writeConfig()
 {
 	json j;
-	j["RHI"] = engineStatus.selectedRHI;
-	j["OS"] = engineStatus.currentOS;
-	j["LastProjectPath"] = engineStatus.lastProjectPath;
-	j["KnownProjects"] = engineStatus.knownProjects;
+	j["RHI"] = m_engineStatus.selectedRHI;
+	j["LastProjectPath"] = m_engineStatus.lastProjectPath;
+	j["KnownProjects"] = m_engineStatus.knownProjects;
 	json::array_t customEntries;
-	for (const auto& [key, value] : customConfig.items())
+	for (const auto& [key, value] : m_customConfig.items())
 	{
 		customEntries.push_back({ {"Key", key}, {"Value", value} });
 	}
@@ -169,7 +171,14 @@ bool GlobalState::writeConfig()
 			Logger::Log(Logger::LogLevel::Error, "Failed to open config file for writing.");
 			return false;
 		}
-		out << j.dump(4);
+		// Serialize with the "replace" error handler: nlohmann's default dump()
+		// THROWS type_error.316 on any string holding invalid UTF-8, and this runs
+		// at shutdown with no catch above it -> terminate() -> SIGABRT (code 134).
+		// A single bad byte anywhere in the state (e.g. a per-project "openTabs:"
+		// value or a path picked up from the filesystem) would abort the whole app.
+		// The read side is already fully non-throwing; make the write side match by
+		// substituting U+FFFD for invalid bytes instead of crashing.
+		out << j.dump(4, ' ', false, json::error_handler_t::replace);
 		out.flush();
 		if (!out.good())
 		{
@@ -198,38 +207,76 @@ void GlobalState::addKnownProject(const std::string& path)
 	// or other values being accidentally passed here).
 	if (path.size() < 7 || path.substr(path.size() - 7) != ".heproj")
 		return;
-	auto& kp = engineStatus.knownProjects;
+	auto& kp = m_engineStatus.knownProjects;
 	// Remove existing occurrence to avoid duplicates
 	kp.erase(std::remove(kp.begin(), kp.end(), path), kp.end());
 	kp.insert(kp.begin(), path);
 	if (kp.size() > 10)
 		kp.resize(10);
-	engineStatus.lastProjectPath = path;
+	m_engineStatus.lastProjectPath = path;
 }
 
 void GlobalState::removeKnownProject(const std::string& path)
 {
-	auto& kp = engineStatus.knownProjects;
+	auto& kp = m_engineStatus.knownProjects;
 	kp.erase(std::remove(kp.begin(), kp.end(), path), kp.end());
 }
 
-static void clearFolder(Folder* folder)
+static void clearFolder(HE::Folder* folder)
 {
-	for (Folder* sub : folder->subfolders)
+	for (HE::Folder* sub : folder->subfolders)
 	{
 		clearFolder(sub);
 		delete sub;
 	}
 	folder->subfolders.clear();
-	for (File* file : folder->files)
+	for (HE::File* file : folder->files)
 		delete file;
 	folder->files.clear();
 }
 
-static void populateFolder(Folder* folder, const fs::path& path)
+// RAII owner for a Folder tree that is still being built on the stack.
+// Folder/File children are raw `new`ed pointers and Folder has no destructor of
+// its own (the content browser passes Folder*/File* around and must never own
+// them), so anything that unwinds out of the build — an early return, or a
+// bad_alloc from the string/vector work — would silently leak the whole
+// half-built subtree. Handover is done by swapping the built tree into the
+// member and leaving the (already emptied) member root behind here, so this
+// guard can stay armed for the entire function and still be a no-op on success.
+namespace
 {
-	for (const auto& entry : fs::directory_iterator(path))
+	struct ScopedFolderNodes
 	{
+		HE::Folder* folder;
+		explicit ScopedFolderNodes(HE::Folder* f) : folder(f) {}
+		~ScopedFolderNodes() { clearFolder(folder); }
+		ScopedFolderNodes(const ScopedFolderNodes&)            = delete;
+		ScopedFolderNodes& operator=(const ScopedFolderNodes&) = delete;
+	};
+}
+
+static void populateFolder(HE::Folder* folder, const fs::path& path)
+{
+	// error_code overloads throughout: the throwing directory_iterator raises
+	// filesystem_error on the very first unreadable entry (a permission-denied
+	// directory, a directory deleted by another process mid-walk, a dead symlink
+	// into an unmounted share). That exception escaped all the way out of
+	// refreshContentFolder() — which has no handler above it — and additionally
+	// abandoned the walk with a half-built tree. Now an unreadable directory just
+	// contributes nothing and the rest of the tree still populates.
+	std::error_code ec;
+	fs::directory_iterator it(path, fs::directory_options::skip_permission_denied, ec);
+	if (ec)
+		return;
+
+	const fs::directory_iterator end;
+	for (; it != end; it.increment(ec))
+	{
+		if (ec)
+			return; // iteration broke down (unreadable dir) — keep what we have
+
+		const fs::directory_entry& entry = *it;
+
 		// Hide dotfiles/dotfolders (.gitkeep, .DS_Store, .git, …) — they are
 		// VCS/OS bookkeeping, never browsable content. (A ".gitkeep" is how the
 		// engine's empty category folders survive in git; it must not surface as
@@ -237,71 +284,87 @@ static void populateFolder(Folder* folder, const fs::path& path)
 		if (entry.path().filename().string().rfind('.', 0) == 0)
 			continue;
 
-		if (entry.is_directory())
+		std::error_code typeEc;
+		if (entry.is_directory(typeEc))
 		{
-			Folder* sub   = new Folder();
+			// Hold the fresh node in a unique_ptr until it is linked into the
+			// tree: the node only gets an owner once push_back succeeded, and
+			// from then on the root's ScopedFolderNodes covers it. Anything that
+			// throws in between (bad_alloc) therefore frees exactly once.
+			std::unique_ptr<HE::Folder> sub(new HE::Folder());
 			sub->name     = entry.path().filename().string();
 			sub->fullPath = entry.path().string();
-			populateFolder(sub, entry.path());
-			folder->subfolders.push_back(sub);
+			folder->subfolders.push_back(sub.get());
+			populateFolder(sub.release(), entry.path());
 		}
-		else if (entry.is_regular_file())
+		else if (entry.is_regular_file(typeEc))
 		{
-			File* file      = new File();
+			std::unique_ptr<HE::File> file(new HE::File());
 			file->name      = entry.path().filename().string();
 			file->fullPath  = entry.path().string();
 			file->extension = entry.path().extension().string();
-			folder->files.push_back(file);
+			folder->files.push_back(file.get());
+			file.release();
 		}
 	}
 }
 
 bool GlobalState::refreshContentFolder()
 {
-	if (engineStatus.lastProjectPath.empty())
+	if (m_engineStatus.lastProjectPath.empty())
 	{
 		Logger::Log(Logger::LogLevel::Warning, "No project loaded — cannot refresh content folder.");
 		return false;
 	}
 
-	fs::path projectPath = engineStatus.lastProjectPath;
-	if (fs::is_regular_file(projectPath))
+	// error_code overloads: these probes run on a user-supplied project path, which
+	// may live on an unmounted/unreachable share — the throwing overloads would take
+	// the editor down instead of reporting "not found".
+	std::error_code ec;
+	fs::path projectPath = m_engineStatus.lastProjectPath;
+	if (fs::is_regular_file(projectPath, ec))
 		projectPath = projectPath.parent_path();
 
 	fs::path contentFolderpath = projectPath / "Content";
-	if (!fs::exists(contentFolderpath) || !fs::is_directory(contentFolderpath))
+	if (!fs::is_directory(contentFolderpath, ec))
 	{
 		Logger::Log(Logger::LogLevel::Error, ("Content folder not found at " + contentFolderpath.string()).c_str());
 		return false;
 	}
 
 	// Daten ausserhalb des Locks zusammenstellen, dann atomar eintauschen
-	Folder fresh;
+	HE::Folder fresh;
+	ScopedFolderNodes freshOwner(&fresh);
 	fresh.name     = contentFolderpath.filename().string();
 	fresh.fullPath = contentFolderpath.string();
 	populateFolder(&fresh, contentFolderpath);
 
 	{
 		std::unique_lock lock(m_contentFolderMutex);
-		clearFolder(&contentFolder);
-		contentFolder = std::move(fresh);
+		clearFolder(&m_contentFolder);
+		// swap, not move-assign: clearFolder just emptied the member's child
+		// vectors, so after the swap `fresh` provably holds no live nodes and its
+		// guard above becomes a no-op. A move-assign would leave the source in an
+		// unspecified state that the guard might then double-free.
+		std::swap(m_contentFolder, fresh);
 	}
 	// Old Folder/File nodes are gone — tell pointer-holders to re-resolve by path.
 	contentFolderVersion.fetch_add(1, std::memory_order_release);
 
 	Logger::Log(Logger::LogLevel::Info, "Content folder refreshed.");
-	Logger::Log(Logger::LogLevel::Info, ("Number of folders: " + std::to_string(contentFolder.subfolders.size())).c_str());
-	Logger::Log(Logger::LogLevel::Info, ("Number of files: " + std::to_string(contentFolder.files.size())).c_str());
+	Logger::Log(Logger::LogLevel::Info, ("Number of folders: " + std::to_string(m_contentFolder.subfolders.size())).c_str());
+	Logger::Log(Logger::LogLevel::Info, ("Number of files: " + std::to_string(m_contentFolder.files.size())).c_str());
 	return true;
 }
 
 bool GlobalState::refreshSourceFolder()
 {
-	if (engineStatus.lastProjectPath.empty())
+	if (m_engineStatus.lastProjectPath.empty())
 		return false;
 
-	fs::path projectPath = engineStatus.lastProjectPath;
-	if (fs::is_regular_file(projectPath))
+	std::error_code ec;
+	fs::path projectPath = m_engineStatus.lastProjectPath;
+	if (fs::is_regular_file(projectPath, ec))
 		projectPath = projectPath.parent_path();
 
 	fs::path sourcePath = projectPath / "Source";
@@ -309,16 +372,17 @@ bool GlobalState::refreshSourceFolder()
 	// Build off-lock. An absent Source/ (non-C++ project, or not scaffolded yet)
 	// is not an error — leave the tree empty; the root's fullPath is still set so
 	// the browser's drop/create targets resolve.
-	Folder fresh;
+	HE::Folder fresh;
+	ScopedFolderNodes freshOwner(&fresh);
 	fresh.name     = "Source";
 	fresh.fullPath = sourcePath.string();
-	if (fs::exists(sourcePath) && fs::is_directory(sourcePath))
+	if (fs::is_directory(sourcePath, ec))
 		populateFolder(&fresh, sourcePath);
 
 	{
 		std::unique_lock lock(m_sourceFolderMutex);
-		clearFolder(&sourceFolder);
-		sourceFolder = std::move(fresh);
+		clearFolder(&m_sourceFolder);
+		std::swap(m_sourceFolder, fresh); // see refreshContentFolder() for why swap
 	}
 	sourceFolderVersion.fetch_add(1, std::memory_order_release);
 	return true;
@@ -333,41 +397,61 @@ bool GlobalState::refreshSourceFolder()
 // with no matching default is simply added. Folder nodes that already exist
 // keep pointing at the default directory — only LEAF files are ever
 // "overridden" here, never the folder's own identity.
-static void mergeOverrideInto(Folder* base, const fs::path& overrideDir)
+static void mergeOverrideInto(HE::Folder* base, const fs::path& overrideDir)
 {
-	for (const auto& entry : fs::directory_iterator(overrideDir))
+	// Same non-throwing iteration contract as populateFolder — an unreadable
+	// override directory must degrade to "no overrides", never to an exception
+	// escaping refreshEngineFolder().
+	std::error_code ec;
+	fs::directory_iterator it(overrideDir, fs::directory_options::skip_permission_denied, ec);
+	if (ec)
+		return;
+
+	const fs::directory_iterator end;
+	for (; it != end; it.increment(ec))
 	{
+		if (ec)
+			return;
+
+		const fs::directory_entry& entry = *it;
+
 		if (entry.path().filename().string().rfind('.', 0) == 0)
 			continue; // same dotfile filter as populateFolder
 
-		if (entry.is_directory())
+		std::error_code typeEc;
+		if (entry.is_directory(typeEc))
 		{
-			Folder* sub = nullptr;
-			for (Folder* s : base->subfolders)
+			HE::Folder* sub = nullptr;
+			for (HE::Folder* s : base->subfolders)
 				if (s->name == entry.path().filename().string()) { sub = s; break; }
 			if (!sub)
 			{
-				sub = new Folder();
-				sub->name     = entry.path().filename().string();
-				sub->fullPath = entry.path().string();
-				base->subfolders.push_back(sub);
+				// Owned by the unique_ptr until push_back linked it into the tree
+				// (see populateFolder) — the root's ScopedFolderNodes takes over
+				// from there.
+				std::unique_ptr<HE::Folder> owned(new HE::Folder());
+				owned->name     = entry.path().filename().string();
+				owned->fullPath = entry.path().string();
+				base->subfolders.push_back(owned.get());
+				sub = owned.release();
 			}
 			mergeOverrideInto(sub, entry.path());
 		}
-		else if (entry.is_regular_file())
+		else if (entry.is_regular_file(typeEc))
 		{
-			File* match = nullptr;
-			for (File* f : base->files)
+			HE::File* match = nullptr;
+			for (HE::File* f : base->files)
 				if (f->name == entry.path().filename().string()) { match = f; break; }
 			if (match)
 				match->fullPath = entry.path().string(); // override shadows the default
 			else
 			{
-				File* file      = new File();
+				std::unique_ptr<HE::File> file(new HE::File());
 				file->name      = entry.path().filename().string();
 				file->fullPath  = entry.path().string();
 				file->extension = entry.path().extension().string();
-				base->files.push_back(file);
+				base->files.push_back(file.get());
+				file.release();
 			}
 		}
 	}
@@ -376,14 +460,16 @@ static void mergeOverrideInto(Folder* base, const fs::path& overrideDir)
 bool GlobalState::refreshEngineFolder(const std::string& engineContentAbsPath,
                                        const std::string& projectContentRoot)
 {
+	std::error_code ec;
 	fs::path enginePath = engineContentAbsPath;
-	if (!fs::exists(enginePath) || !fs::is_directory(enginePath))
+	if (!fs::is_directory(enginePath, ec))
 	{
 		Logger::Log(Logger::LogLevel::Warning, ("Engine content folder not found at " + enginePath.string()).c_str());
 		return false;
 	}
 
-	Folder fresh;
+	HE::Folder fresh;
+	ScopedFolderNodes freshOwner(&fresh);
 	fresh.name     = "Engine";
 	fresh.fullPath = enginePath.string();
 	populateFolder(&fresh, enginePath);
@@ -394,15 +480,14 @@ bool GlobalState::refreshEngineFolder(const std::string& engineContentAbsPath,
 	if (!projectContentRoot.empty())
 	{
 		const fs::path overrideRoot = fs::path(projectContentRoot) / "Engine";
-		std::error_code ec;
 		if (fs::is_directory(overrideRoot, ec))
 			mergeOverrideInto(&fresh, overrideRoot);
 	}
 
 	{
 		std::unique_lock lock(m_engineFolderMutex);
-		clearFolder(&engineFolder);
-		engineFolder = std::move(fresh);
+		clearFolder(&m_engineFolder);
+		std::swap(m_engineFolder, fresh); // see refreshContentFolder() for why swap
 	}
 	engineFolderVersion.fetch_add(1, std::memory_order_release);
 
@@ -412,33 +497,33 @@ bool GlobalState::refreshEngineFolder(const std::string& engineContentAbsPath,
 
 void GlobalState::setCustomConfigEntry(const std::string& key, const json& value)
 {
-	customConfig[key] = value;
+	m_customConfig[key] = value;
 }
 
 int GlobalState::getCustomConfigInt(const std::string& key, int defaultValue) const
 {
-	if (customConfig.contains(key) && customConfig[key].is_number())
-		return customConfig[key].get<int>();
+	if (m_customConfig.contains(key) && m_customConfig[key].is_number())
+		return m_customConfig[key].get<int>();
 	return defaultValue;
 }
 
 float GlobalState::getCustomConfigFloat(const std::string& key, float defaultValue) const
 {
-	if (customConfig.contains(key) && customConfig[key].is_number())
-		return customConfig[key].get<float>();
+	if (m_customConfig.contains(key) && m_customConfig[key].is_number())
+		return m_customConfig[key].get<float>();
 	return defaultValue;
 }
 
 bool GlobalState::getCustomConfigBool(const std::string& key, bool defaultValue) const
 {
-	if (customConfig.contains(key) && customConfig[key].is_boolean())
-		return customConfig[key].get<bool>();
+	if (m_customConfig.contains(key) && m_customConfig[key].is_boolean())
+		return m_customConfig[key].get<bool>();
 	return defaultValue;
 }
 
 std::string GlobalState::getCustomConfigString(const std::string& key, const std::string& defaultValue) const
 {
-	if (customConfig.contains(key) && customConfig[key].is_string())
-		return customConfig[key].get<std::string>();
+	if (m_customConfig.contains(key) && m_customConfig[key].is_string())
+		return m_customConfig[key].get<std::string>();
 	return defaultValue;
 }

@@ -112,6 +112,10 @@ public:
 	// from the parent's graph with the override map (a distinct permutation). Called
 	// automatically when an instance loads; call again after editing the parent.
 	void syncMaterialInstance(HE::UUID instanceId);
+
+	// Regenerate a BASE material's baked GLSL from its node graph (load-time codegen
+	// refresh — old assets pick up shader-library upgrades; param values kept by name).
+	void regenerateMaterialFromGraph(HE::UUID materialId);
 	// Sync every LOADED instance whose parentMaterialPath == parentRelPath (live
 	// master→variants propagation while editing).
 	void syncMaterialInstancesOf(const std::string& parentRelPath);
@@ -136,17 +140,39 @@ public:
 	bool replaceTexture(HE::UUID id, TextureAsset asset);
 	bool replaceMaterial(HE::UUID id, MaterialAsset asset);
 
+	// ── Move / rename (editor) ─────────────────────────────────────────────
+	// An asset — or, with `folder = true`, a whole directory — has just been moved
+	// on disk from `oldRelativePath` to `newRelativePath` (both content-relative,
+	// an "Engine/…" prefix included). Assets reference each other by PATH here
+	// (mesh→material, material→textures/parent, graphs→classes/widgets/scenes,
+	// input mappings→actions), so without this every one of those references would
+	// dangle after the move; the UUID references scene components store are
+	// unaffected either way.
+	//
+	// Rewrites every referencing .hasset under the content root — including the
+	// moved asset's OWN embedded META path, which is what the packer builds its
+	// path→UUID map from — plus the project manifest's startup scene, and re-keys
+	// the in-memory path indices. Loaded copies of the rewritten files refresh
+	// through the ordinary pollHotReload() tick. Returns the number of files
+	// rewritten (0 = nothing referenced it).
+	size_t retargetAssetReferences(const std::string& oldRelativePath,
+	                               const std::string& newRelativePath,
+	                               bool folder = false);
+
 	// Check all disk-backed assets for file changes and reload any that have
 	// been modified since the last load. Returns the UUIDs of reloaded assets
 	// (same UUIDs — existing references remain valid). Virtual mem:// paths are
 	// silently skipped. Safe to call every frame from the editor tick.
 	std::vector<HE::UUID> pollHotReload();
 
-	// Load all assets packed in a .hpak archive. Each entry's raw .hasset blob
-	// is parsed and registered exactly like loadAsset() would. Already-loaded
-	// UUIDs are skipped. Pass a 32-byte key if the pak was encrypted; nullptr
-	// for unencrypted. Returns true when the file was opened; individual entry
-	// parse failures are silently skipped.
+	// LEGACY EAGER LOADER, kept for tools and tests — the shipped runtime does not
+	// call it (GameApplication mounts the pak, see mountPak() below). Enumerates the
+	// whole archive up front and parses + registers every entry's raw .hasset blob
+	// exactly like loadAsset() would. Already-loaded UUIDs are skipped. Pass a
+	// 32-byte key if the pak was encrypted; nullptr for unencrypted. Returns true
+	// when the file was opened; individual entry parse failures are silently skipped.
+	// NOT interchangeable with mountPak(): that one parses nothing until first
+	// access, so anything that needs assets resident immediately wants this.
 	bool loadPak(const std::string& path, const uint8_t key[32] = nullptr);
 
 	// ── On-demand pak mounting (streaming) ─────────────────────────────────────
@@ -301,7 +327,10 @@ public:
 
 private:
 
-	HE::AssetType getAssetType(const std::string path) const;
+	// Opens the file at `path` and reads the HAsset header out of it — this hits
+	// the disk, it is not an accessor for already-loaded state (that is
+	// assetType(UUID) above). Unknown when the file is missing or not an HAsset.
+	HE::AssetType sniffAssetTypeFromFile(const std::string& path) const;
 	void          initDefaultAssets();
 
 	// scanContentDirectory() worker: index one root's .hasset META into
@@ -339,8 +368,23 @@ private:
 	mutable std::mutex              m_pendingMutex;
 	std::unordered_set<std::string> m_pendingPaths;  // in-flight relative paths
 
-	std::mutex                      m_resultsMutex;
-	std::queue<AsyncResult>         m_asyncResults;  // ready to register (main thread)
+	// Where finished jobs drop their results. Deliberately NOT a plain member: a job
+	// is submitted fire-and-forget, so it can still be queued (or mid-read) when this
+	// ContentManager is destroyed — play-mode stop, a closed project, or simply a test
+	// that submits and never drains. The worker used to lock this->m_resultsMutex and
+	// push into this->m_asyncResults after the owner was gone, i.e. write a string, a
+	// vector and a std::function straight into freed memory. On glibc that shreds the
+	// allocator's tcache metadata and aborts an unrelated malloc much later
+	// ("malloc(): unaligned tcache chunk detected"), which is close to undebuggable
+	// from the crash site.
+	// Sharing the sink by shared_ptr means a late worker writes into a live object; the
+	// sink dies with the last job instead of with the owner. The lambdas therefore
+	// capture the sink, never `this` — keep it that way.
+	struct AsyncSink {
+		std::mutex              mutex;
+		std::queue<AsyncResult> results;   // ready to register (drained on main thread)
+	};
+	std::shared_ptr<AsyncSink> m_asyncSink = std::make_shared<AsyncSink>();
 
 	std::string m_contentRoot;
 	std::string m_engineContentRoot;

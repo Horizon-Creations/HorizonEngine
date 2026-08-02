@@ -265,9 +265,15 @@ PyObject* py_hideCursor(PyObject*, PyObject*)
 // C shim. Args after the id are read per the entry's param types (a vec2 = 2
 // numbers, a Color = 4 — the same spread as the hand-written bindings); results
 // spread the same way (1 → scalar, more → tuple). A Python bootstrap (built from
-// the registry) wraps each entry as horizon.<group>.<fn>. First group: the pure
-// Math library. Gameplay groups keep their ergonomic shims until ScriptApi is
-// inverted onto HE::api.
+// the registry) wraps each entry as horizon.<group>.<fn>. WHICH namespaces arrive
+// here is decided by HE::api::isScriptGroup, not by this file — it started as math
+// only and has grown since; read that list, not this comment, for the current
+// surface (Lua and Python MUST expose the identical set).
+// The FLAT gameplay functions above keep their ergonomic hand-written shims.
+// Routing them through here instead would change their script-visible arity (a
+// packed vec3 spreads as 4 numbers on this path), i.e. it breaks existing user
+// scripts — a migration, not a cleanup, deliberately deferred:
+// docs/rework-2026-07-deferrals.md §1.
 HorizonCode::Value pyReadValue(PyObject* args, Py_ssize_t& idx, HorizonCode::PinType t)
 {
 	using P = HorizonCode::PinType; using V = HorizonCode::Value;
@@ -388,16 +394,9 @@ void bootstrapEngineApiGroups()
 		const auto dot = id.find('.');
 		if (dot == std::string::npos) continue;       // only namespaced ("math.clamp")
 		const std::string group = id.substr(0, dot), name = id.substr(dot + 1);
-		// Registry-driven groups exposed as horizon.<group>.<fn>. The flat
-		// gameplay functions keep their ergonomic hand-written bindings until
-		// ScriptApi is inverted onto HE::api. NB: a packed vec3 (Color) param
-		// spreads as 4 numbers (x, y, z, _) on this path. Widening = add a name.
-		static const char* kGroups[] = { "math", "random", "time", "input",
-		                                 "string", "camera", "env", "entity", "audio",
-	                                 "debug", "fs", "save", "scene" };
-		bool exposed = false;
-		for (const char* gname : kGroups) if (group == gname) { exposed = true; break; }
-		if (!exposed) continue;
+		// Registry-driven groups exposed as horizon.<group>.<fn> — one shared list
+		// (HE::api::isScriptGroup) so Python and Lua expose the same surface.
+		if (!HE::api::isScriptGroup(group)) continue;
 		if (group != lastGroup)
 		{
 			src += "if not isinstance(getattr(horizon, '" + group + "', None), types.SimpleNamespace):\n"

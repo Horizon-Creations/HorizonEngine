@@ -39,6 +39,9 @@ struct DrawCall {
     // floats) the backend uploads instead. Objects carrying an override are never
     // batched (each is its own DrawCall), so this is per-draw unambiguous.
     std::vector<float> paramOverride;
+    // Landscape layer weightmap (see RenderObject::weightmapTextureId). Objects
+    // carrying one are never batched with objects carrying a different one.
+    HE::UUID     weightmapTextureId;
 };
 
 // A draw call that also carries per-joint bone matrices for GPU skinning.
@@ -60,11 +63,11 @@ public:
 
     const std::vector<DrawCall>&        drawCalls()        const;
     const std::vector<SkinnedDrawCall>& skinnedDrawCalls() const;
-    bool hasPostProcess() const { return postProcess_; }
-    bool empty() const { return drawCalls_.empty() && skinnedDrawCalls_.empty(); }
+    bool hasPostProcess() const { return m_postProcess; }
+    bool empty() const { return m_drawCalls.empty() && m_skinnedDrawCalls.empty(); }
 
 private:
-    std::vector<DrawCall>        drawCalls_;
-    std::vector<SkinnedDrawCall> skinnedDrawCalls_;
-    bool                         postProcess_ = false;
+    std::vector<DrawCall>        m_drawCalls;
+    std::vector<SkinnedDrawCall> m_skinnedDrawCalls;
+    bool                         m_postProcess = false;
 };

@@ -49,8 +49,8 @@ enum class EditorMode
 
 struct EditorConfig
 {
-	bool KeepCPUAssets = false;   
-	bool KeepCPUAssetsInfoAcknoleged = false;
+	bool KeepCPUAssets = false;
+	bool KeepCPUAssetsInfoAcknowledged = false;
 	int  ContentBrowserRefreshRate = 60;
 
 	// Content browser tree-panel width (-1 = auto on first frame)
@@ -76,6 +76,19 @@ struct EditorConfig
 	// instead of the CPU pool. Default on; the backend's supportsGpuParticles gates it
 	// (GL + Metal = yes, so it's the path used unless the user turns it off).
 	bool  GpuParticles  = true;
+
+	// Render path (pushed to the renderer each frame via SetRenderPath): 0 =
+	// Forward (default), 1 = Deferred (G-buffer + fullscreen lighting resolve,
+	// Metal + OpenGL). The backend's supportsDeferredRendering gates it.
+	int   RenderPath = 0;
+
+	// Screen-space reflections (pushed each frame via SetSSRSettings). v1 only
+	// effective on Metal in the deferred render path; supportsScreenSpaceReflections
+	// gates the toggle. Off by default (like GI).
+	bool  SSREnabled      = false;
+	float SSRIntensity    = 1.0f;
+	float SSRMaxRoughness = 0.6f;
+	int   SSRQuality      = 1;   // 0 Low (16 steps, raw) / 1 Med (32+blur) / 2 High (64+glossy)
 
 	// Global Illumination: ray-traced DDGI (pushed to the renderer each frame via
 	// SetGISettings). Metal-only; the backend's supportsGlobalIllumination gates
@@ -202,8 +215,9 @@ struct AppContext
 	// unsaved changes since the last save/load (tracked via the undo revision).
 	std::string& currentScenePath;
 	bool         sceneDirty = false;
-	// Raised by EditorApplication when an OS close request was vetoed (unsaved
-	// scene); the UI turns it into a guarded Quit and clears it.
+	// Raised by EditorApplication when an OS close request was vetoed — either the
+	// scene or an asset panel has unsaved edits (including a panel whose tab was
+	// already closed); the UI turns it into a guarded Quit and clears it.
 	bool&        exitRequested;
 	std::function<void(const std::string&)> saveSceneToPath; // write world → .hescene (JSON)
 	std::function<void(const std::string&)> openScene;          // load .hescene, replacing the world
@@ -269,7 +283,11 @@ struct AppContext
 	int         logoW       = 0;
 	int         logoH       = 0;
 
-	// Content browser icon textures (white images, tinted at render time)
+	// Content browser icon textures (white images, tinted at render time).
+	// There is one per HE::AssetType the browser can show: the grid used to pick
+	// icons by file EXTENSION, which meant every engine asset — all of them
+	// ".hasset" — matched nothing and rendered as an empty button. The extension
+	// map now only serves loose source files (.png/.obj/.lua/…).
 	struct CbIcons
 	{
 		ImTextureID folder   = 0;
@@ -280,6 +298,18 @@ struct AppContext
 		ImTextureID sound    = 0;
 		ImTextureID texture  = 0;
 		ImTextureID scene    = 0;
+		ImTextureID materialFunction    = 0;
+		ImTextureID shader              = 0;
+		ImTextureID prefab              = 0;
+		ImTextureID animationClip       = 0;
+		ImTextureID propertyAnimClip    = 0;
+		ImTextureID widget              = 0;
+		ImTextureID horizonCodeClass    = 0;
+		ImTextureID inputAction         = 0;
+		ImTextureID inputMappingContext = 0;
+		ImTextureID particleSystem      = 0;
+		ImTextureID animatorStateMachine= 0;
+		ImTextureID font                = 0;
 	} cbIcons;
 
 	// Toolbar icon textures
@@ -523,6 +553,20 @@ private:
 	ImTextureID m_iconSound    = 0;
 	ImTextureID m_iconTexture  = 0;
 	ImTextureID m_iconScene    = 0;
+	// One per remaining HE::AssetType, so no engine asset falls back to a blank
+	// tile (see AppContext::CbIcons).
+	ImTextureID m_iconMaterialFunction    = 0;
+	ImTextureID m_iconShader              = 0;
+	ImTextureID m_iconPrefab              = 0;
+	ImTextureID m_iconAnimationClip       = 0;
+	ImTextureID m_iconPropertyAnimClip    = 0;
+	ImTextureID m_iconWidget              = 0;
+	ImTextureID m_iconHorizonCodeClass    = 0;
+	ImTextureID m_iconInputAction         = 0;
+	ImTextureID m_iconInputMappingContext = 0;
+	ImTextureID m_iconParticleSystem      = 0;
+	ImTextureID m_iconAnimatorStateMachine= 0;
+	ImTextureID m_iconFont                = 0;
 
 	// Toolbar icons
 	ImTextureID m_iconPlay     = 0;

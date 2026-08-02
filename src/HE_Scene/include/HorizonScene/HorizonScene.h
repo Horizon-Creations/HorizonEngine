@@ -1,7 +1,6 @@
 #pragma once
 
 #include "HorizonWorld.h"
-#include "SceneGraph.h"
 #include "SceneSerializer.h"
 
 #include "Components/NameComponent.h"
@@ -19,6 +18,7 @@
 #include "Components/MaterialComponent.h"
 #include "Components/CameraComponent.h"
 #include "Components/LightComponent.h"
+#include "Components/DecalComponent.h"
 #include "Components/RigidBodyComponent.h"
 #include "Components/ColliderComponent.h"
 #include "Components/CharacterControllerComponent.h"

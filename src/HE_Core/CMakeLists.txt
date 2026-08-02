@@ -7,15 +7,9 @@ add_library(HorizonCore SHARED
 	src/Application/InputAssets.cpp
 	src/Diagnostics/GlobalState.cpp
 	src/Diagnostics/Logger.cpp
-	src/Diagnostics/Profiler.cpp
 	src/Diagnostics/EngineProfiler.cpp
 	src/Diagnostics/CrashHandler.cpp
-	src/Memory/PoolAllocator.cpp
-	src/Memory/Ref.cpp
 	src/JobSystem/JobSystem.cpp
-	src/Types/UUID.cpp
-	src/Types/StringID.cpp
-	src/Platform/FileSystem.cpp
 	src/Platform/DynLib.cpp
 	src/Window/Window.cpp
 	src/Renderer/IRenderer.cpp
@@ -40,6 +34,7 @@ add_library(HorizonCore SHARED
 	src/HorizonCode/HorizonCodeGenSupport.cpp
 	src/HorizonCode/HcCompiledLoader.cpp
 	src/Renderer/UIFont.cpp
+	src/ContentManager/AssetRefRetarget.cpp
  "include/ContentManager/ContentManager.h" "src/ContentManager/ContentManager.cpp" "include/ContentManager/Assets.h")
 
 target_include_directories(HorizonCore

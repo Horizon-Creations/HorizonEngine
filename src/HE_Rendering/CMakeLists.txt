@@ -111,11 +111,26 @@ if(HE_VULKAN_ENABLED)
                       sky.vert sky.frag
                       debug_line.vert debug_line.frag
                       ssao_pos.vert ssao_pos.frag ssao.frag ssao_blur.frag
+                      gi_gbuf.vert gi_gbuf.frag gi_temporal.frag gi_blur.frag
+                      gi_shadow.comp gi_probe.comp
+                      gi_shadow_hw.comp gi_probe_hw.comp
                       skinned.vert
                       ui.vert ui.frag)
             set(src "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${stage}")
             set(dst "${HE_SHADER_OUT_DIR}/${stage}.spv")
-            if(GLSLC_EXECUTABLE MATCHES "glslangValidator")
+            # The *_hw.comp kernels use GL_EXT_ray_query (SPIR-V 1.4+) and need an
+            # explicit Vulkan-1.2 target; the default target (SPIR-V 1.0) rejects them.
+            if(stage MATCHES "_hw\\.comp$")
+                if(GLSLC_EXECUTABLE MATCHES "glslangValidator")
+                    add_custom_command(OUTPUT "${dst}"
+                        COMMAND ${GLSLC_EXECUTABLE} -V --target-env vulkan1.2 "${src}" -o "${dst}"
+                        DEPENDS "${src}" VERBATIM)
+                else()
+                    add_custom_command(OUTPUT "${dst}"
+                        COMMAND ${GLSLC_EXECUTABLE} --target-env=vulkan1.2 "${src}" -o "${dst}"
+                        DEPENDS "${src}" VERBATIM)
+                endif()
+            elseif(GLSLC_EXECUTABLE MATCHES "glslangValidator")
                 add_custom_command(OUTPUT "${dst}"
                     COMMAND ${GLSLC_EXECUTABLE} -V "${src}" -o "${dst}"
                     DEPENDS "${src}" VERBATIM)
@@ -172,6 +187,9 @@ if(WIN32)
     target_include_directories(RendererD3D11 PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${HE_CORE_INCLUDE}
+        # src/ so both D3D backends can reach src/Backends/D3D_Shared/HlslSources.h,
+        # the HLSL they share verbatim. PRIVATE: nothing outside the backend needs it.
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
     target_link_libraries(RendererD3D11 PRIVATE d3d11 dxgi d3dcompiler glm::glm HorizonCore)
     # A4: shared material-graph shader layer (GLSL→HLSL via glslang/SPIRV-Cross) so the
@@ -192,6 +210,9 @@ if(WIN32)
     target_include_directories(RendererD3D12 PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${HE_CORE_INCLUDE}
+        # src/ so both D3D backends can reach src/Backends/D3D_Shared/HlslSources.h,
+        # the HLSL they share verbatim. PRIVATE: nothing outside the backend needs it.
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
     target_link_libraries(RendererD3D12 PRIVATE d3d12 dxgi d3dcompiler glm::glm HorizonCore)
     # A4: shared material-graph shader layer (GLSL→HLSL via glslang/SPIRV-Cross) so the
@@ -201,16 +222,42 @@ if(WIN32)
         target_link_libraries(RendererD3D12 PRIVATE he_materialshader he_shadercompiler)
     endif()
     target_compile_definitions(RendererD3D12 PRIVATE GLM_FORCE_DEPTH_ZERO_TO_ONE HE_RENDERING_BUILD_DLL)
-endif()
 
-# ─── ViewportUI ────────────────────────────────────────────────────────────────
-add_library(ViewportUI STATIC
-    src/ViewportUI/UIManager.cpp)
-target_include_directories(ViewportUI PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${HE_CORE_INCLUDE}
-)
-target_link_libraries(ViewportUI PRIVATE glm::glm HorizonCore)
+    # ── GI hardware ray-tracing kernels (DXR 1.1 inline RayQuery, SM 6.5) ────
+    # FXC (D3DCompile) cannot target SM 6, so the two RayQuery compute kernels
+    # are compiled OFFLINE by dxc into <build>/Shaders/*.cso — the same folder
+    # the Vulkan .spv land in; the editor deploy step copies it next to the exe
+    # and the D3D12 backend loads <exe dir>/Shaders/gi_*_hw.cso at runtime.
+    # dxc ships with recent Windows 10/11 SDKs (and the Vulkan SDK). If it is
+    # missing, only warn: the runtime checks file existence and silently keeps
+    # the embedded SM 5.0 software-ray-tracing kernels (no functional break).
+    set(HE_D3D12_GI_SHADERS FALSE CACHE INTERNAL "D3D12 DXR GI kernels compiled")
+    find_program(DXC_EXECUTABLE NAMES dxc dxc.exe
+                 HINTS "$ENV{WindowsSdkVerBinPath}x64" "$ENV{WindowsSdkVerBinPath}/x64"
+                       "$ENV{WindowsSdkVerBinPath}"
+                       "$ENV{WindowsSdkDir}bin/x64"    "$ENV{WindowsSdkDir}/bin/x64"
+                       "$ENV{VULKAN_SDK}/Bin"          "$ENV{VULKAN_SDK}/bin")
+    if(DXC_EXECUTABLE)
+        set(HE_D3D12_SHADER_OUT_DIR "${CMAKE_BINARY_DIR}/Shaders")
+        file(MAKE_DIRECTORY "${HE_D3D12_SHADER_OUT_DIR}")
+        set(HE_D3D12_GI_CSO "")
+        foreach(kernel gi_shadow_hw gi_probe_hw)
+            set(src "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${kernel}.hlsl")
+            set(dst "${HE_D3D12_SHADER_OUT_DIR}/${kernel}.cso")
+            add_custom_command(OUTPUT "${dst}"
+                COMMAND ${DXC_EXECUTABLE} -T cs_6_5 -E main -Fo "${dst}" "${src}"
+                DEPENDS "${src}" VERBATIM)
+            list(APPEND HE_D3D12_GI_CSO "${dst}")
+        endforeach()
+        add_custom_target(D3D12GiShaders DEPENDS ${HE_D3D12_GI_CSO})
+        add_dependencies(RendererD3D12 D3D12GiShaders)
+        set(HE_D3D12_GI_SHADERS TRUE CACHE INTERNAL "D3D12 DXR GI kernels compiled")
+        message(STATUS "HorizonRendering: D3D12 DXR GI kernels enabled (dxc: ${DXC_EXECUTABLE})")
+    else()
+        message(WARNING "HorizonRendering: dxc not found — D3D12 GI hardware ray-tracing "
+                        "kernels not compiled (runtime falls back to software GI)")
+    endif()
+endif()
 
 # ─── HorizonRendering DLL ──────────────────────────────────────────────────────
 add_library(HorizonRendering SHARED
@@ -218,12 +265,22 @@ add_library(HorizonRendering SHARED
     src/RenderWorld.cpp
     src/FrustumCuller.cpp
     src/RenderSorter.cpp
+    src/ScenePick.cpp
+    # Cross-backend shared renderer helpers (audit 1a). The backend static libs
+    # only reuse this target's PUBLIC include path — they do not link it — but
+    # they are linked INTO HorizonRendering (and, for the editor, alongside it),
+    # so these definitions resolve at the final link exactly like RenderGraph /
+    # CommandBuffer already do.
+    src/SsaoKernel.cpp
+    src/SkyNoise3D.cpp
+    src/SkyFrameParams.cpp
+    src/LightPacking.cpp
     src/RenderResourceManager.cpp
     src/GPUMemoryAllocator.cpp
     src/RenderGraph.cpp
     src/RenderPass.cpp
     src/CommandBuffer.cpp
-    src/IRenderer.cpp
+    src/GiBvh.cpp
     src/RendererFactory.cpp)
 
 target_include_directories(HorizonRendering
@@ -232,7 +289,7 @@ target_include_directories(HorizonRendering
             ${CMAKE_CURRENT_SOURCE_DIR}/glad/include
 )
 
-set(HR_BACKENDS RendererOpenGL ViewportUI)
+set(HR_BACKENDS RendererOpenGL)
 if(HE_VULKAN_ENABLED)
     list(APPEND HR_BACKENDS RendererVulkan)
 endif()

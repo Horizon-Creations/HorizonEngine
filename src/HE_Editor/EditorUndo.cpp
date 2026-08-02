@@ -62,6 +62,7 @@ bool EditorUndo::undo()
 	restore(m_undoStack.back());
 	m_undoStack.pop_back();
 	++m_revision;
+	++m_undoCount;
 	return true;
 }
 

@@ -342,3 +342,110 @@ TEST_CASE("PPSD encode/decode roundtrip preserves particle shader variants")
     CHECK(HE::encodeParticleShaderVariants({}).empty());
     CHECK(HE::decodeParticleShaderVariants({}).empty());
 }
+
+// ═══ Container semantics shared with the other graph systems ═════════════════
+
+TEST_CASE("ParticleGraph never reuses a node id after removeNode")
+{
+    // nextId only moves forward, so a stale id (undo buffer, saved link, editor
+    // selection) can never silently re-bind to a different node.
+    ParticleGraph g;
+    const int a = g.addNode(ParticleNodeType::ConstFloat);
+    const int b = g.addNode(ParticleNodeType::ConstFloat);
+    g.removeNode(a);
+    g.removeNode(b);
+    const int c = g.addNode(ParticleNodeType::ConstFloat);
+    CHECK(c != a);
+    CHECK(c != b);
+    CHECK(c > b);
+}
+
+TEST_CASE("ParticleGraph: a data output may fan out to several inputs")
+{
+    // Only the INPUT side is single-link; one source feeding many sinks is normal.
+    ParticleGraph g;
+    const int out = g.addNode(ParticleNodeType::EmitterOutput);
+    const int cf  = g.addNode(ParticleNodeType::ConstFloat);
+    CHECK(g.connect(cf, 0, out, kParticleEmitRatePin));
+    CHECK(g.connect(cf, 0, out, kParticleStartSizePin));
+    CHECK(g.links.size() == 2);
+}
+
+TEST_CASE("kParticle*Pin constants match the Emitter Output registry entry")
+{
+    const ParticleNodeDesc& d = particleNodeDesc(ParticleNodeType::EmitterOutput);
+    REQUIRE(d.inputs.size() == (size_t)kParticleEmitterPinCount);
+    // The names are the editor's labels; the INDEX is what saved links store, so
+    // this pairing is the on-disk contract.
+    CHECK(std::string(d.inputs[kParticleEmitRatePin].name)         == "Emit Rate");
+    CHECK(std::string(d.inputs[kParticleLifetimeMinPin].name)      == "Lifetime Min");
+    CHECK(std::string(d.inputs[kParticleLifetimeMaxPin].name)      == "Lifetime Max");
+    CHECK(std::string(d.inputs[kParticleStartSizePin].name)        == "Start Size");
+    CHECK(std::string(d.inputs[kParticleEndSizePin].name)          == "End Size");
+    CHECK(std::string(d.inputs[kParticleStartColorPin].name)       == "Start Color");
+    CHECK(std::string(d.inputs[kParticleEndColorPin].name)         == "End Color");
+    CHECK(std::string(d.inputs[kParticleStartAlphaPin].name)       == "Start Alpha");
+    CHECK(std::string(d.inputs[kParticleEndAlphaPin].name)         == "End Alpha");
+    CHECK(std::string(d.inputs[kParticleInitialVelocityPin].name)  == "Initial Velocity");
+    CHECK(std::string(d.inputs[kParticleVelocitySpreadPin].name)   == "Velocity Spread");
+    CHECK(std::string(d.inputs[kParticleGravityPin].name)          == "Gravity");
+    CHECK(std::string(d.inputs[kParticleMaxParticlesPin].name)     == "Max Particles");
+    CHECK(std::string(d.inputs[kParticleLoopingPin].name)          == "Looping");
+    CHECK(std::string(d.inputs[kParticleCollisionEnabledPin].name) == "Collision Enabled");
+    CHECK(std::string(d.inputs[kParticleRestitutionPin].name)      == "Restitution");
+    CHECK(std::string(d.inputs[kParticleKillOnCollisionPin].name)  == "Kill On Collision");
+}
+
+// ═══ On-disk format ══════════════════════════════════════════════════════════
+
+TEST_CASE("particleGraphFromJson loads a hand-written OLD-format document")
+{
+    // The shape the shipped editor writes: compact dump, node type by NAME,
+    // links as OBJECTS {sn,sp,dn,dp}, asset refs as {hi,lo}. Kept as a literal so
+    // refactoring the writer can never quietly redefine what still loads.
+    const std::string old =
+        R"({"version":1,"nextId":3,)"
+        R"("nodes":[{"id":1,"type":"Emitter Output","p":[0.0,0.0,0.0,0.0],"x":300.0,"y":120.0,)"
+        R"("meshId":{"hi":5,"lo":6},"matId":{"hi":7,"lo":8}},)"
+        R"({"id":2,"type":"Const Float","p":[42.0,0.0,0.0,0.0],"x":80.0,"y":120.0}],)"
+        R"("links":[{"sn":2,"sp":0,"dn":1,"dp":0}]})";
+
+    ParticleGraph g;
+    REQUIRE(particleGraphFromJson(old, g));
+    REQUIRE(g.nodes.size() == 2);
+    CHECK(g.nodes[0].type == ParticleNodeType::EmitterOutput);
+    CHECK(g.nodes[0].meshAssetId.hi == 5);
+    CHECK(g.nodes[0].materialAssetId.lo == 8);
+    CHECK(g.nodes[1].type == ParticleNodeType::ConstFloat);
+    CHECK(g.nodes[1].p[0] == doctest::Approx(42.0f));
+    REQUIRE(g.links.size() == 1);
+    CHECK(g.links[0].srcNode == 2);
+    CHECK(g.links[0].dstNode == 1);
+    CHECK(g.links[0].dstPin  == kParticleEmitRatePin);
+    CHECK(g.nextId == 3);
+
+    std::mt19937 rng(1);
+    CHECK(evaluateParticleGraph(g, rng).emitRate == doctest::Approx(42.0f));
+}
+
+TEST_CASE("particleGraphFromJson repairs nextId when a saved id is >= it")
+{
+    // A hand-merged file can carry ids at or above nextId; without repair the next
+    // addNode would hand out an id that already exists and alias two nodes.
+    const std::string json =
+        R"({"nextId":1,"nodes":[{"id":9,"type":"Const Float","p":[1.0,0.0,0.0,0.0]}],"links":[]})";
+    ParticleGraph g;
+    REQUIRE(particleGraphFromJson(json, g));
+    CHECK(g.nextId == 10);
+    CHECK(g.addNode(ParticleNodeType::ConstFloat) == 10);
+}
+
+TEST_CASE("particleGraphFromJson tolerates a malformed link entry")
+{
+    const std::string json =
+        R"({"nextId":2,"nodes":[{"id":1,"type":"Const Float"}],"links":["nonsense",7]})";
+    ParticleGraph g;
+    REQUIRE(particleGraphFromJson(json, g)); // no throw out of the loader
+    CHECK(g.links.size() == 2);              // inert: node id 0 is never allocated
+    CHECK(g.links[0].srcNode == 0);
+}

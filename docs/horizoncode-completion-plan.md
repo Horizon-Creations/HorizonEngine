@@ -45,7 +45,9 @@ struct ApiFn {
 ```
 
 One row per function feeds **four** consumers: the editor add-menu + pins, the
-interpreter (a `Context` thunk per `id`), the C++ codegen (`cppCall`), and the
+interpreter (a `Context` thunk per `id`), the C++ codegen (which emits the generic
+`hc::callApi(ctx, "<id>", args)` path keyed by `id`, *not* `cppCall` — that field is
+staged input for a planned migration to direct typed calls), and the
 Lua/Python bindings. **Completing HorizonCode = filling this table + writing one
 thunk each.** No enum growth, no codegen changes per function.
 

@@ -1,4 +1,5 @@
 #pragma once
+#include "../HE_RENDERING_API.h"
 #include "RenderObject.h"
 #include <Renderer/UIRenderObject.h>
 #include <ParticleGraph/ParticleGraph.h>
@@ -21,15 +22,20 @@ struct LightData {
     float     spotAngleCos = 0.0f;    // cos(half angle), spot only
     uint8_t   type         = 0;       // HE::LightType
     uint8_t   envRole      = 0;       // 0 none, 1 = environment sun, 2 = environment moon
+    bool      castsShadow  = false;   // authored LightComponent::castsShadow
+    int16_t   shadowLayer  = -1;      // point/spot shadow map: first layer in the local
+                                      // shadow atlas (spot: 1 layer, point: 6 cube-face
+                                      // layers), assigned by the extractor; -1 = none
 };
 
 // Directional-light shadow info, computed by the extractor.
 //   viewProj   — single whole-scene light clip transform. Used by the backends that
-//                are still on a single shadow map (OpenGL / D3D / Vulkan).
+//                are still on a single shadow map (D3D11 / D3D12 / Vulkan).
 //   cascade*   — Cascaded Shadow Maps: `cascadeCount` tight light frusta fit to
 //                successive camera-distance slices (sharp near, coarse far), used by
-//                the Metal backend. cascadeSplit[i] = the cascade's far distance in
-//                view space (camera-forward metres) for per-fragment cascade pick.
+//                the Metal and OpenGL backends. cascadeSplit[i] = the cascade's far
+//                distance in view space (camera-forward metres) for per-fragment
+//                cascade pick.
 struct ShadowData {
     glm::mat4 viewProj   = glm::mat4(1.0f);
     glm::vec3 direction  = glm::vec3(0.0f, -1.0f, 0.0f);
@@ -40,6 +46,21 @@ struct ShadowData {
     glm::mat4 cascadeViewProj[kMaxCascades] = { glm::mat4(1.0f), glm::mat4(1.0f),
                                                 glm::mat4(1.0f), glm::mat4(1.0f) };
     float     cascadeSplit[kMaxCascades]    = { 0.0f, 0.0f, 0.0f, 0.0f };
+
+    // ── Local-light (point/spot) shadow maps ────────────────────────────────
+    // Independent of the directional CSM above. The extractor picks the
+    // camera-nearest shadow-casting point/spot lights (LightComponent::
+    // castsShadow) and packs their depth views into ONE 2D depth-array
+    // "local shadow atlas": a spot light uses 1 layer (perspective map along
+    // its cone), a point light uses 6 layers (cube faces stored as array
+    // layers, +X −X +Y −Y +Z −Z — face picked in the shader by major axis, so
+    // the same code works on every backend without cube-depth samplers).
+    // LightData::shadowLayer is the light's first layer; localViewProj[layer]
+    // is that view's light clip transform (GL clip, z∈[-1,1] — backends apply
+    // their own clip fix, exactly like cascadeViewProj).
+    static constexpr int kMaxLocalShadowLayers = 16;
+    int       localLayerCount = 0;
+    glm::mat4 localViewProj[kMaxLocalShadowLayers] = {};
 };
 
 // One live particle's raw GPU-instanced draw data — position/size (still CPU-lerped,
@@ -73,13 +94,53 @@ struct ParticleBatch {
     std::vector<ParticleInstance> instances;
 };
 
+// One projected decal (DecalComponent), extracted per frame. The transform is
+// the entity's world matrix applied to a unit cube [-0.5, 0.5]³; the deferred
+// path blends color (× texture) into the G-buffer base colour inside the box.
+struct DecalData {
+    glm::mat4 transform = glm::mat4(1.0f);
+    glm::vec4 color     = glm::vec4(1.0f);
+    HE::UUID  textureId;
+};
+
 class RenderWorld {
 public:
     void clear();
 
+    // The dominant directional light: the BRIGHTEST directional light in the
+    // extracted set — the same light the shadow fit and the fragment loop use.
+    //
+    // NEVER `sunDirection` (that is the SKY-DOME sun, which sits below the horizon
+    // at night and never tracks a user-placed key light: rays traced toward it zero
+    // the actual directional light almost everywhere — the scene goes black and only
+    // surfaces facing the below-horizon sun light up, e.g. a bright cube UNDERSIDE
+    // at night). And NEVER the raw environment sunColor, which is unmodulated by
+    // night/clouds.
+    //
+    // In day-night scenes the sun/moon are themselves lights in `lights` (envRole
+    // 1/2), so this pick follows them; the fallback below only fires in scenes with
+    // no directional light at all.
+    //
+    // Returns false when nothing shines (night without a moon, full overcast zeroing
+    // sun AND moon, or a light-less scene). Then `towardOut` is a harmless
+    // placeholder (the shadow mask multiplies nothing) but `colorIntensityOut` is
+    // hard ZERO: falling back to the environment's sunColor*sunIntensity here would
+    // feed the probe bounce full DAYTIME sunlight from below the horizon — meshes
+    // visibly sun-lit at night.
+    //
+    //   towardOut         — normalized direction TOWARD the light
+    //                       (LightData::direction is the light's TRAVEL direction)
+    //   colorIntensityOut — color * intensity
+    // Exported per-member (not per-class): the backend static libraries include this
+    // header but do not link HorizonRendering, so only the symbols they actually
+    // call may carry the import/export attribute.
+    HE_RENDERING_API bool dominantDirectionalLight(glm::vec3& towardOut,
+                                                   glm::vec3& colorIntensityOut) const;
+
     std::vector<RenderObject>        objects;
     std::vector<SkinnedRenderObject> skinnedObjects;
     std::vector<LightData>           lights;
+    std::vector<DecalData>           decals;
     std::vector<UIRenderObject>      uiObjects;
     std::vector<ParticleBatch>       particleBatches;
     CameraData                camera;

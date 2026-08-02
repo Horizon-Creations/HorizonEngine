@@ -8,6 +8,7 @@
 #include "HorizonScene/Components/MaterialComponent.h"
 #include "HorizonScene/Components/CameraComponent.h"
 #include "HorizonScene/Components/LightComponent.h"
+#include "HorizonScene/Components/DecalComponent.h"
 #include "HorizonScene/Components/RigidBodyComponent.h"
 #include "HorizonScene/Components/ColliderComponent.h"
 #include "HorizonScene/Components/CharacterControllerComponent.h"
@@ -35,11 +36,13 @@
 #include "HorizonScene/Components/NavMeshComponent.h"
 #include "HorizonScene/Components/NavAgentComponent.h"
 #include "HorizonScene/NavigationSystem.h"
+#include "HorizonScene/EngineApi.h"   // HE_ENV_FIELDS_* — the EnvironmentComponent field list
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <cstring>
 #include <cstdint>
 #include <string>
+#include <string_view>
 
 using json = nlohmann::json;
 
@@ -147,6 +150,25 @@ namespace
 		return v;
 	}
 
+	// ── Field lists shared by both sides of the round-trip ───────────────────
+	// A component whose two halves are mechanical (write field → read field back)
+	// is described ONCE and both halves are generated from that list, so a new
+	// field can no longer be added to the writer and forgotten in the reader.
+	//
+	// EnvironmentComponent reuses HE_ENV_FIELDS_* from EngineApi.h — the same list
+	// that generates its scripting API — with exactly one exception: `flash` is the
+	// WeatherSystem's lightning strobe, rewritten every frame during a storm. It
+	// has never been in the scene file and must stay out, or a reloaded scene would
+	// start frozen mid-strike (test: "Lightning flash is deliberately runtime-only
+	// and is not persisted").
+	constexpr bool envFieldPersisted(std::string_view field) { return field != "flash"; }
+
+	// NavMeshComponent::config — a flat block of bake parameters, 1:1 on both sides.
+#define HE_NAVCFG_FIELDS(X) \
+	X(cellSize) X(cellHeight) X(walkableHeight) X(walkableClimb) \
+	X(walkableRadius) X(maxSlope) X(maxEdgeLen) X(maxSimplification) \
+	X(minRegionArea) X(mergeRegionArea) X(detailSampleDist) X(detailMaxError)
+
 	// ── Per-entity component → JSON ──────────────────────────────────────────
 	json serializeComponents(entt::registry& registry, Entity entity)
 	{
@@ -209,13 +231,22 @@ namespace
 		if (auto* l = registry.try_get<LightComponent>(entity))
 		{
 			comps["light"] = {
-				{ "type",        static_cast<uint8_t>(l->type) },
-				{ "color",       vec3ToJson(l->color) },
-				{ "intensity",   l->intensity },
-				{ "range",       l->range },
-				{ "spotAngle",   l->spotAngle },
-				{ "visible",     l->visible },
-				{ "castsShadow", l->castsShadow },
+				{ "type",         static_cast<uint8_t>(l->type) },
+				{ "color",        vec3ToJson(l->color) },
+				{ "intensity",    l->intensity },
+				{ "range",        l->range },
+				{ "spotAngle",    l->spotAngle },
+				{ "cullDistance", l->cullDistance },
+				{ "visible",      l->visible },
+				{ "castsShadow",  l->castsShadow },
+			};
+		}
+		if (auto* d = registry.try_get<DecalComponent>(entity))
+		{
+			comps["decal"] = {
+				{ "color",     { d->color.r, d->color.g, d->color.b, d->color.a } },
+				{ "roughness", d->roughness },
+				{ "texture",   uuidToJson(d->textureId) },
 			};
 		}
 		if (auto* r = registry.try_get<RigidBodyComponent>(entity))
@@ -262,60 +293,19 @@ namespace
 		}
 		if (auto* e = registry.try_get<EnvironmentComponent>(entity))
 		{
-			comps["environment"] = {
-				{ "dayNightCycle",     e->dayNightCycle },
-				{ "timeOfDay",         e->timeOfDay },
-				{ "autoAdvance",       e->autoAdvance },
-				{ "cycleSeconds",      e->cycleSeconds },
-				{ "sunColor",          vec3ToJson(e->sunColor) },
-				{ "sunIntensity",      e->sunIntensity },
-				{ "moonColor",         vec3ToJson(e->moonColor) },
-				{ "moonIntensity",     e->moonIntensity },
-				{ "moonPhase",         e->moonPhase },
-				{ "moonPhaseAuto",     e->moonPhaseAuto },
-				{ "moonCycleDays",     e->moonCycleDays },
-				{ "cloudCoverage",     e->cloudCoverage },
-				{ "cloudMode",         e->cloudMode },
-				{ "cloudQuality",      e->cloudQuality },
-				{ "lowResClouds",      e->lowResClouds },
-				{ "cloudHeight",       e->cloudHeight },
-				{ "cloudDensity",      e->cloudDensity },
-				{ "cloudFluffiness",   e->cloudFluffiness },
-				{ "cloudTint",         vec3ToJson(e->cloudTint) },
-				{ "contrailAmount",    e->contrailAmount },
-				{ "cirrusAmount",      e->cirrusAmount },
-				{ "cirrusSeed",        e->cirrusSeed },
-				{ "godRays",           e->godRays },
-				{ "shootingStars",     e->shootingStars },
-				{ "lensFlare",         e->lensFlare },
-				{ "windDirection",     e->windDirection },
-				{ "windSpeed",         e->windSpeed },
-				{ "fogDensity",        e->fogDensity },
-				{ "fogHeightFalloff",  e->fogHeightFalloff },
-				{ "rainAmount",        e->rainAmount },
-				{ "snowAmount",        e->snowAmount },
-				{ "wetness",           e->wetness },
-				{ "auroraIntensity",   e->auroraIntensity },
-				{ "milkyWayIntensity", e->milkyWayIntensity },
-				{ "nebulaIntensity",   e->nebulaIntensity },
-				{ "nebulaColor",       vec3ToJson(e->nebulaColor) },
-				{ "nebulaColor2",      vec3ToJson(e->nebulaColor2) },
-				{ "nebulaColor3",      vec3ToJson(e->nebulaColor3) },
-				{ "nebulaSeed",        e->nebulaSeed },
-				{ "nebulaCoverage",    e->nebulaCoverage },
-				{ "nebulaQuality",     e->nebulaQuality },
-				{ "auroraColor",       vec3ToJson(e->auroraColor) },
-				{ "auroraColorTop",    vec3ToJson(e->auroraColorTop) },
-				{ "auroraHeight",        e->auroraHeight },
-				{ "auroraFragmentation", e->auroraFragmentation },
-				{ "starBrightness",    e->starBrightness },
-				{ "starColor",         vec3ToJson(e->starColor) },
-				{ "starSize",          e->starSize },
-				{ "starSizeVariation", e->starSizeVariation },
-				{ "starGlow",          e->starGlow },
-				{ "starTwinkle",       e->starTwinkle },
-				{ "starDensity",       e->starDensity },
-			};
+			// One key per HE_ENV_FIELDS_* row (see envFieldPersisted above). Key
+			// names are the member names, exactly as the hand-written block wrote
+			// them — the on-disk format is unchanged.
+			json env = json::object();
+#define HE_ENV_SER_PLAIN(m, Name, disp) if (envFieldPersisted(#m)) env[#m] = e->m;
+#define HE_ENV_SER_COLOR(m, Name, disp) if (envFieldPersisted(#m)) env[#m] = vec3ToJson(e->m);
+			HE_ENV_FIELDS_FLOAT(HE_ENV_SER_PLAIN)
+			HE_ENV_FIELDS_BOOL (HE_ENV_SER_PLAIN)
+			HE_ENV_FIELDS_INT  (HE_ENV_SER_PLAIN)
+			HE_ENV_FIELDS_COLOR(HE_ENV_SER_COLOR)
+#undef HE_ENV_SER_PLAIN
+#undef HE_ENV_SER_COLOR
+			comps["environment"] = std::move(env);
 		}
 		if (auto* w = registry.try_get<WeatherComponent>(entity))
 		{
@@ -344,7 +334,19 @@ namespace
 				{ "frequency",  t->frequency },
 				{ "lacunarity", t->lacunarity },
 				{ "gain",       t->gain },
+				{ "uvTiling",   t->uvTiling },
+				// Authored LOD aggressiveness — was editable but never persisted,
+				// so it silently reverted to 1 on every reload.
+				{ "lodDistanceScale", t->lodDistanceScale },
 			};
+			// Painted layer weights (RGBA8). Same base64 treatment as the
+			// heights: a JSON array of N bytes dominates the undo snapshot.
+			if (!t->layerWeights.empty())
+			{
+				tc["weightRes"]     = t->weightRes;
+				tc["layerWeightsB64"] = base64Encode(t->layerWeights.data(),
+				                                     t->layerWeights.size());
+			}
 			if (!t->sculptHeights.empty())
 			{
 				// As a base64 blob, NOT a JSON array of N floats — the array form
@@ -427,22 +429,12 @@ namespace
 		}
 		if (auto* nm = registry.try_get<NavMeshComponent>(entity))
 		{
-			json nmJson = {
-				{ "config", {
-					{ "cellSize",          nm->config.cellSize },
-					{ "cellHeight",        nm->config.cellHeight },
-					{ "walkableHeight",    nm->config.walkableHeight },
-					{ "walkableClimb",     nm->config.walkableClimb },
-					{ "walkableRadius",    nm->config.walkableRadius },
-					{ "maxSlope",          nm->config.maxSlope },
-					{ "maxEdgeLen",        nm->config.maxEdgeLen },
-					{ "maxSimplification", nm->config.maxSimplification },
-					{ "minRegionArea",     nm->config.minRegionArea },
-					{ "mergeRegionArea",   nm->config.mergeRegionArea },
-					{ "detailSampleDist",  nm->config.detailSampleDist },
-					{ "detailMaxError",    nm->config.detailMaxError },
-				} },
-			};
+			json cfg = json::object();
+#define HE_NAVCFG_SER(m) cfg[#m] = nm->config.m;
+			HE_NAVCFG_FIELDS(HE_NAVCFG_SER)
+#undef HE_NAVCFG_SER
+			json nmJson;
+			nmJson["config"] = std::move(cfg);
 			// Baked navMesh/navQuery are runtime-only (re-baked on load, see
 			// applyComponents) — only the source geometry needs to survive the
 			// round-trip, as base64 blobs like terrain's sculptHeights (a JSON
@@ -663,14 +655,26 @@ namespace
 		{
 			const json& c = comps["light"];
 			LightComponent l;
-			l.type        = static_cast<LightType>(c.value("type", static_cast<uint8_t>(l.type)));
-			l.color       = jsonToVec3(c.value("color", json()), l.color);
-			l.intensity   = c.value("intensity",   l.intensity);
-			l.range       = c.value("range",       l.range);
-			l.spotAngle   = c.value("spotAngle",   l.spotAngle);
-			l.visible     = c.value("visible",     l.visible);
-			l.castsShadow = c.value("castsShadow", l.castsShadow);
+			l.type         = static_cast<LightType>(c.value("type", static_cast<uint8_t>(l.type)));
+			l.color        = jsonToVec3(c.value("color", json()), l.color);
+			l.intensity    = c.value("intensity",    l.intensity);
+			l.range        = c.value("range",        l.range);
+			l.spotAngle    = c.value("spotAngle",    l.spotAngle);
+			l.cullDistance = c.value("cullDistance", l.cullDistance);
+			l.visible      = c.value("visible",      l.visible);
+			l.castsShadow  = c.value("castsShadow",  l.castsShadow);
 			registry.emplace_or_replace<LightComponent>(entity, l);
+		}
+		if (comps.contains("decal"))
+		{
+			const json& c = comps["decal"];
+			DecalComponent d;
+			if (auto col = c.find("color"); col != c.end() && col->is_array() && col->size() >= 4)
+				d.color = glm::vec4((*col)[0].get<float>(), (*col)[1].get<float>(),
+				                    (*col)[2].get<float>(), (*col)[3].get<float>());
+			d.roughness = c.value("roughness", d.roughness);
+			d.textureId = jsonToUuid(c.value("texture", json()));
+			registry.emplace_or_replace<DecalComponent>(entity, d);
 		}
 		if (comps.contains("rigidbody"))
 		{
@@ -724,63 +728,20 @@ namespace
 		{
 			const json& c = comps["environment"];
 			EnvironmentComponent e;
-			e.dayNightCycle     = c.value("dayNightCycle",     e.dayNightCycle);
-			e.timeOfDay         = c.value("timeOfDay",         e.timeOfDay);
-			e.autoAdvance       = c.value("autoAdvance",       e.autoAdvance);
-			e.cycleSeconds      = c.value("cycleSeconds",      e.cycleSeconds);
-			e.sunColor          = jsonToVec3(c.value("sunColor",  json()), e.sunColor);
-			e.sunIntensity      = c.value("sunIntensity",      e.sunIntensity);
-			e.moonColor         = jsonToVec3(c.value("moonColor", json()), e.moonColor);
-			e.moonIntensity     = c.value("moonIntensity",     e.moonIntensity);
-			e.moonPhase         = c.value("moonPhase",         e.moonPhase);
-			e.moonPhaseAuto     = c.value("moonPhaseAuto",     e.moonPhaseAuto);
-			e.moonCycleDays     = c.value("moonCycleDays",     e.moonCycleDays);
-			e.cloudCoverage     = c.value("cloudCoverage",     e.cloudCoverage);
-			e.cloudMode         = c.value("cloudMode",         e.cloudMode);
-			e.cloudQuality      = c.value("cloudQuality",      e.cloudQuality);
-			e.lowResClouds      = c.value("lowResClouds",      e.lowResClouds);
-			e.cloudHeight       = c.value("cloudHeight",       e.cloudHeight);
-			e.cloudDensity      = c.value("cloudDensity",      e.cloudDensity);
-			e.cloudFluffiness   = c.value("cloudFluffiness",   e.cloudFluffiness);
-			e.cloudTint         = jsonToVec3(c.value("cloudTint", json()), e.cloudTint);
-			e.contrailAmount    = c.value("contrailAmount",    e.contrailAmount);
-			e.cirrusAmount      = c.value("cirrusAmount",      e.cirrusAmount);
-			e.cirrusSeed        = c.value("cirrusSeed",        e.cirrusSeed);
-			e.godRays           = c.value("godRays",           e.godRays);
-			e.shootingStars     = c.value("shootingStars",     e.shootingStars);
-			e.lensFlare         = c.value("lensFlare",         e.lensFlare);
-			e.windDirection     = c.value("windDirection",     e.windDirection);
-			e.windSpeed         = c.value("windSpeed",         e.windSpeed);
-			e.fogDensity        = c.value("fogDensity",        e.fogDensity);
-			e.fogHeightFalloff  = c.value("fogHeightFalloff",  e.fogHeightFalloff);
-			e.rainAmount        = c.value("rainAmount",        e.rainAmount);
-			e.snowAmount        = c.value("snowAmount",        e.snowAmount);
-			e.wetness           = c.value("wetness",           e.wetness);
-			e.auroraIntensity   = c.value("auroraIntensity",   e.auroraIntensity);
-			e.milkyWayIntensity = c.value("milkyWayIntensity", e.milkyWayIntensity);
-			e.nebulaIntensity   = c.value("nebulaIntensity",   e.nebulaIntensity);
-			e.nebulaColor       = jsonToVec3(c.value("nebulaColor", json()), e.nebulaColor);
-			e.nebulaColor2      = jsonToVec3(c.value("nebulaColor2", json()), e.nebulaColor2);
-			e.nebulaColor3      = jsonToVec3(c.value("nebulaColor3", json()), e.nebulaColor3);
-			e.nebulaSeed        = c.value("nebulaSeed",        e.nebulaSeed);
-			e.nebulaCoverage    = c.value("nebulaCoverage",    e.nebulaCoverage);
+			// Same field list as the writer (see envFieldPersisted): a missing key
+			// keeps the component default, exactly as the hand-written block did.
+#define HE_ENV_APPLY_PLAIN(m, Name, disp) if (envFieldPersisted(#m)) e.m = c.value(#m, e.m);
+#define HE_ENV_APPLY_COLOR(m, Name, disp) if (envFieldPersisted(#m)) e.m = jsonToVec3(c.value(#m, json()), e.m);
+			HE_ENV_FIELDS_FLOAT(HE_ENV_APPLY_PLAIN)
+			HE_ENV_FIELDS_BOOL (HE_ENV_APPLY_PLAIN)
+			HE_ENV_FIELDS_INT  (HE_ENV_APPLY_PLAIN)
+			HE_ENV_FIELDS_COLOR(HE_ENV_APPLY_COLOR)
+#undef HE_ENV_APPLY_PLAIN
+#undef HE_ENV_APPLY_COLOR
 			// nebulaQuality (0/1/2) replaced the old nebulaHighFidelity bool — fall back to it
 			// for scenes saved before the change (true → High=1, false → Performance=0).
-			if (c.contains("nebulaQuality"))
-				e.nebulaQuality = c.value("nebulaQuality", e.nebulaQuality);
-			else if (c.contains("nebulaHighFidelity"))
+			if (!c.contains("nebulaQuality") && c.contains("nebulaHighFidelity"))
 				e.nebulaQuality = c.value("nebulaHighFidelity", true) ? 1 : 0;
-			e.auroraColor       = jsonToVec3(c.value("auroraColor", json()), e.auroraColor);
-			e.auroraColorTop     = jsonToVec3(c.value("auroraColorTop", json()), e.auroraColorTop);
-			e.auroraHeight        = c.value("auroraHeight",        e.auroraHeight);
-			e.auroraFragmentation = c.value("auroraFragmentation", e.auroraFragmentation);
-			e.starBrightness    = c.value("starBrightness",    e.starBrightness);
-			e.starColor         = jsonToVec3(c.value("starColor", json()), e.starColor);
-			e.starSize          = c.value("starSize",          e.starSize);
-			e.starSizeVariation = c.value("starSizeVariation", e.starSizeVariation);
-			e.starGlow          = c.value("starGlow",          e.starGlow);
-			e.starTwinkle       = c.value("starTwinkle",       e.starTwinkle);
-			e.starDensity       = c.value("starDensity",       e.starDensity);
 			registry.emplace_or_replace<EnvironmentComponent>(entity, e);
 		}
 		if (comps.contains("weather"))
@@ -813,6 +774,18 @@ namespace
 			t.frequency   = c.value("frequency",    t.frequency);
 			t.lacunarity  = c.value("lacunarity",   t.lacunarity);
 			t.gain        = c.value("gain",         t.gain);
+			t.uvTiling    = c.value("uvTiling",     t.uvTiling);
+			t.lodDistanceScale = c.value("lodDistanceScale", t.lodDistanceScale);
+			t.weightRes   = c.value("weightRes",    t.weightRes);
+			if (c.contains("layerWeightsB64") && c["layerWeightsB64"].is_string())
+			{
+				t.layerWeights = base64Decode(c["layerWeightsB64"].get<std::string>());
+				// A truncated/mismatched blob would index out of bounds when painted
+				// or uploaded — drop it rather than carry a half-sized weightmap.
+				if (t.layerWeights.size() != static_cast<size_t>(t.weightRes) * t.weightRes * 4)
+					t.layerWeights.clear();
+				t.weightsDirty = !t.layerWeights.empty();
+			}
 			if (c.contains("sculptHeightsB64") && c["sculptHeightsB64"].is_string())
 			{
 				const std::vector<uint8_t> bytes =
@@ -939,18 +912,9 @@ namespace
 			if (c.contains("config"))
 			{
 				const json& cc = c["config"];
-				nm.config.cellSize          = cc.value("cellSize",          nm.config.cellSize);
-				nm.config.cellHeight        = cc.value("cellHeight",        nm.config.cellHeight);
-				nm.config.walkableHeight    = cc.value("walkableHeight",    nm.config.walkableHeight);
-				nm.config.walkableClimb     = cc.value("walkableClimb",     nm.config.walkableClimb);
-				nm.config.walkableRadius    = cc.value("walkableRadius",    nm.config.walkableRadius);
-				nm.config.maxSlope          = cc.value("maxSlope",          nm.config.maxSlope);
-				nm.config.maxEdgeLen        = cc.value("maxEdgeLen",        nm.config.maxEdgeLen);
-				nm.config.maxSimplification = cc.value("maxSimplification", nm.config.maxSimplification);
-				nm.config.minRegionArea     = cc.value("minRegionArea",     nm.config.minRegionArea);
-				nm.config.mergeRegionArea   = cc.value("mergeRegionArea",   nm.config.mergeRegionArea);
-				nm.config.detailSampleDist  = cc.value("detailSampleDist",  nm.config.detailSampleDist);
-				nm.config.detailMaxError    = cc.value("detailMaxError",    nm.config.detailMaxError);
+#define HE_NAVCFG_APPLY(m) nm.config.m = cc.value(#m, nm.config.m);
+				HE_NAVCFG_FIELDS(HE_NAVCFG_APPLY)
+#undef HE_NAVCFG_APPLY
 			}
 			if (c.contains("geometry"))
 			{
@@ -1062,7 +1026,11 @@ namespace
 						t.fromState = tj.value("fromState", std::string());
 						t.toState   = tj.value("toState",   std::string());
 						t.paramName = tj.value("paramName", std::string());
-						t.op        = static_cast<HE::TransitionOp>(tj.value("op", 0));
+						// Same guard the asset reader uses (see the comment on
+						// HE::transitionOpFromInt): this is user JSON, so an op
+						// this build has no enumerator for must not reach the
+						// system's switch().
+						t.op        = HE::transitionOpFromInt(tj.value("op", 0));
 						t.threshold = tj.value("threshold", 0.5f);
 						t.duration  = tj.value("duration",  0.2f);
 						lg.transitions.push_back(std::move(t));
@@ -1142,6 +1110,43 @@ namespace
 			registry.emplace_or_replace<UIButtonComponent>(entity, std::move(btn));
 		}
 	}
+#undef HE_NAVCFG_FIELDS
+
+	// ── Pass 2 of every load path: rebuild parent/child links ────────────────
+	// Shared verbatim by the full-scene, additive and prefab loads — they differ
+	// only in how pass 1 created the entities, not in how the links are restored.
+	// Entities missing from idMap (or from the registry's hierarchy) are skipped,
+	// so a partial/hand-edited scene still loads.
+	void rebuildHierarchy(entt::registry& registry, const json& scene,
+	                      const std::unordered_map<uint32_t, Entity>& idMap)
+	{
+		for (const auto& eJson : scene["entities"])
+		{
+			if (!eJson.contains("children")) continue;
+
+			uint32_t serialId = eJson.value("id", 0u);
+			auto it = idMap.find(serialId);
+			if (it == idMap.end()) continue;
+
+			Entity parent = it->second;
+			auto*  pHier  = registry.try_get<HierarchyComponent>(parent);
+			if (!pHier) continue;
+
+			// Clear the children list rebuilt during createEntity — restore exact order
+			pHier->children.clear();
+
+			for (const auto& childId : eJson["children"])
+			{
+				uint32_t cid = childId.get<uint32_t>();
+				auto cit = idMap.find(cid);
+				if (cit == idMap.end()) continue;
+				Entity child = cit->second;
+				pHier->children.push_back(child);
+				if (auto* cHier = registry.try_get<HierarchyComponent>(child))
+					cHier->parent = parent;
+			}
+		}
+	}
 
 	// ── JSON → Scene ─────────────────────────────────────────────────────────
 	bool applySceneJson(HorizonWorld& world, const json& scene)
@@ -1189,32 +1194,7 @@ namespace
 		}
 
 		// ── Pass 2: rebuild parent/child links ────────────────────────────────
-		for (auto& eJson : scene["entities"])
-		{
-			if (!eJson.contains("children")) continue;
-
-			uint32_t serialId = eJson.value("id", 0u);
-			auto it = idMap.find(serialId);
-			if (it == idMap.end()) continue;
-
-			Entity parent = it->second;
-			auto*  pHier  = registry.try_get<HierarchyComponent>(parent);
-			if (!pHier) continue;
-
-			// Clear the children list rebuilt during createEntity — restore exact order
-			pHier->children.clear();
-
-			for (auto& childId : eJson["children"])
-			{
-				uint32_t cid = childId.get<uint32_t>();
-				auto cit = idMap.find(cid);
-				if (cit == idMap.end()) continue;
-				Entity child = cit->second;
-				pHier->children.push_back(child);
-				if (auto* cHier = registry.try_get<HierarchyComponent>(child))
-					cHier->parent = parent;
-			}
-		}
+		rebuildHierarchy(registry, scene, idMap);
 
 		// Legacy scenes stored Environment/Weather on the World root; move them onto
 		// dedicated Sky/Weather entities so the whole engine sees one uniform model.
@@ -1261,31 +1241,7 @@ namespace
 		}
 
 		// Pass 2: rebuild hierarchy (only within the newly loaded entities)
-		for (auto& eJson : scene["entities"])
-		{
-			if (!eJson.contains("children")) continue;
-
-			uint32_t serialId = eJson.value("id", 0u);
-			auto it = idMap.find(serialId);
-			if (it == idMap.end()) continue;
-
-			Entity parent = it->second;
-			auto*  pHier  = registry.try_get<HierarchyComponent>(parent);
-			if (!pHier) continue;
-
-			pHier->children.clear();
-
-			for (auto& childId : eJson["children"])
-			{
-				uint32_t cid = childId.get<uint32_t>();
-				auto cit = idMap.find(cid);
-				if (cit == idMap.end()) continue;
-				Entity child = cit->second;
-				pHier->children.push_back(child);
-				if (auto* cHier = registry.try_get<HierarchyComponent>(child))
-					cHier->parent = parent;
-			}
-		}
+		rebuildHierarchy(registry, scene, idMap);
 
 		world.ensureEnvironmentLights();
 		world.markHierarchyDirty();
@@ -1384,30 +1340,7 @@ namespace
 
 		if (prefabRoot == entt::null) return entt::null;
 
-		for (auto& eJson : scene["entities"])
-		{
-			if (!eJson.contains("children")) continue;
-
-			uint32_t seqId = eJson.value("id", 0u);
-			auto it = idMap.find(seqId);
-			if (it == idMap.end()) continue;
-
-			Entity parent = it->second;
-			auto* pHier = registry.try_get<HierarchyComponent>(parent);
-			if (!pHier) continue;
-
-			pHier->children.clear();
-			for (auto& childId : eJson["children"])
-			{
-				uint32_t cid = childId.get<uint32_t>();
-				auto cit = idMap.find(cid);
-				if (cit == idMap.end()) continue;
-				Entity child = cit->second;
-				pHier->children.push_back(child);
-				if (auto* cHier = registry.try_get<HierarchyComponent>(child))
-					cHier->parent = parent;
-			}
-		}
+		rebuildHierarchy(registry, scene, idMap);
 
 		Entity targetParent = (prefabParent != entt::null) ? prefabParent : world.rootEntity();
 		world.reparentEntity(prefabRoot, targetParent);

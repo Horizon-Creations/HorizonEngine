@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_library(HorizonTools SHARED
             src/FileOps/ProjectManager.cpp
+            src/FileOps/CppScaffoldTemplates.cpp
 )
 
 target_compile_definitions(HorizonTools PRIVATE HE_TOOLS_BUILD_DLL)
@@ -26,6 +27,7 @@ add_library(HorizonImporters STATIC
     src/AssetImporter/TextureImporter.cpp
     src/AssetImporter/MeshImporter.cpp
     src/AssetImporter/SkeletalMeshImporter.cpp
+    src/AssetImporter/AnimationClipImporter.cpp
     src/AssetImporter/MaterialImporter.cpp
     src/AssetImporter/AudioImporter.cpp
     src/AssetImporter/FontImporter.cpp
@@ -53,8 +55,6 @@ target_include_directories(asset_compiler PRIVATE src/AssetCompiler)
 # ─── hpak_packer.exe ───────────────────────────────────────────────────────────
 add_executable(hpak_packer
     src/Packer/main.cpp
-    src/Packer/HpakWriter.cpp
-    src/Packer/KeyDerivation.cpp
 )
 target_link_libraries(hpak_packer
     PRIVATE HorizonCore
@@ -105,12 +105,10 @@ if(WIN32)
     )
 endif()
 
-# ─── shader_compiler.exe ───────────────────────────────────────────────────────
-add_executable(shader_compiler
-    src/ShaderCompiler/main.cpp
-)
-# Note: shader_compiler requires glslc (from Vulkan SDK) in PATH
-target_include_directories(shader_compiler PRIVATE src/ShaderCompiler)
+# (No shader_compiler CLI: shaders are compiled in-process by he_shadercompiler
+# — HE_Tools/ShaderCompiler, glslang + SPIRV-Cross — which MaterialShaderLibrary
+# and the Metal backend call directly. The old CLI shelled out to an external
+# glslc and had no callers.)
 
 # ─── mesh_gen.exe (generates the built-in default primitive meshes) ───────────
 # One-shot generator: mesh_gen <out-dir> writes Cube/Sphere/Cylinder/… .hasset

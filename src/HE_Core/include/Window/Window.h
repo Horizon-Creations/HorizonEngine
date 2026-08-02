@@ -12,16 +12,15 @@ namespace HE
 {
     struct WindowProps
     {
-        std::string title  = "HorizonEngine";
-        uint32_t    width  = 1280;
-        uint32_t    height = 720;
-        bool        vsync  = true;
-        WindowMode  mode   = WindowMode::Windowed;
-        WindowState state  = WindowState::Floating;
+        std::string     title  = "HorizonEngine";
+        uint32_t        width  = 1280;
+        uint32_t        height = 720;
+        bool            vsync  = true;
+        WindowMode      mode   = WindowMode::Windowed;
         // Set by Application::Run based on the chosen backend.
         // Window::Init uses this to set the correct SDL window flags
         // and to skip GL context creation for D3D / Vulkan.
-        GraphicsAPI api    = GraphicsAPI::OpenGL;
+        RendererBackend api    = RendererBackend::OpenGL;
     };
 
     class HE_API Window
@@ -51,8 +50,16 @@ namespace HE
         void        CancelClose()       { m_shouldClose = false; }
         bool        IsPrimary()   const { return m_isPrimary; }
         uint32_t    GetWindowId() const;
+        // Logical size in points — what SDL_CreateWindow / SetSize were given.
+        // Kept current by PollEvents (SDL_EVENT_WINDOW_RESIZED).
         uint32_t    GetWidth()    const;
         uint32_t    GetHeight()   const;
+        // Drawable size in pixels. Equals the points size unless the window was created
+        // with SDL_WINDOW_HIGH_PIXEL_DENSITY (GL/Metal/Vulkan) and runs on a HiDPI display,
+        // where it is the points size times the display scale.
+        // Kept current by PollEvents (SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED).
+        uint32_t    GetPixelWidth()  const;
+        uint32_t    GetPixelHeight() const;
         SDL_Window* GetNativeWindow() const;
         void*       GetGLContext()    const;
 
@@ -64,13 +71,15 @@ namespace HE
         void Init(const WindowProps& props);
         void Shutdown();
 
-        SDL_Window*   m_window        = nullptr;
-        void*         m_glContext     = nullptr;
-        bool          m_shouldClose   = false;
-        bool          m_isPrimary     = true;
-        uint32_t      m_width         = 0;
-        uint32_t      m_height        = 0;
-        GraphicsAPI   m_api           = GraphicsAPI::OpenGL;
-        EventCallback m_eventCallback;
+        SDL_Window*     m_window        = nullptr;
+        void*           m_glContext     = nullptr;
+        bool            m_shouldClose   = false;
+        bool            m_isPrimary     = true;
+        uint32_t        m_width         = 0;   // points
+        uint32_t        m_height        = 0;   // points
+        uint32_t        m_pixelWidth    = 0;   // pixels (HiDPI-scaled points)
+        uint32_t        m_pixelHeight   = 0;   // pixels (HiDPI-scaled points)
+        RendererBackend m_api           = RendererBackend::OpenGL;
+        EventCallback   m_eventCallback;
     };
 }

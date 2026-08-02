@@ -41,6 +41,11 @@ public:
 	// value at the last save/load to know whether the scene is dirty.
 	uint64_t revision() const { return m_revision; }
 
+	// How many undos have been performed. Separate from revision() because redo
+	// and push bump that too — the guided tour asks the user to *undo* something
+	// and has to see exactly that, not any mutation.
+	uint64_t undoCount() const { return m_undoCount; }
+
 	void clearHistory();
 
 private:
@@ -56,6 +61,7 @@ private:
 	Snapshot      m_pending;
 	bool          m_hasPending = false;
 	uint64_t      m_revision   = 0;
+	uint64_t      m_undoCount  = 0;
 	std::vector<Snapshot> m_undoStack;
 	std::vector<Snapshot> m_redoStack;
 };

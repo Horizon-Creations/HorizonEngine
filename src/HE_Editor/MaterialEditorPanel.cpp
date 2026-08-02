@@ -1,12 +1,15 @@
 #include "MaterialEditorPanel.h"
 #include "EditorApplication.h"                 // AppContext
+#include "EditorAssetTypeCache.h"               // shared, invalidatable path → AssetType sniff
+#include "AssetThumbnailCache.h"                // Content-Browser tile, re-rendered on save
+#include "EditorPanelState.h"                   // shared per-tab state map + lazy asset open
+#include "EditorWidgets.h"                      // shared Content-Browser drop resolution
 #include "GraphEditor.h"                        // shared node-graph canvas frontend
-#include "HcClassList.h"                        // asset dropdowns (texture picker)
+#include "HcEditorUtil.h"                       // asset dropdowns (texture picker)
 #include <MaterialGraph/MaterialGraph.h>
 #include <material/MaterialShaderLibrary.h> // inline compile check (canvas error banner)
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
-#include <ContentManager/HAsset.h>
 #include <Types/Enums.h>
 #include <Diagnostics/Logger.h>
 #include <imgui.h>
@@ -66,24 +69,24 @@ struct State
 	bool        isFunction = false;  // editing a MaterialFunction asset (FnInput/FnOutput mode)
 	std::string relPath;             // content-root-relative path of this asset
 };
-std::map<std::string, State> g_states;
+AssetPanelState<State> s_states;
 
 // Cache of loaded material-FUNCTION graphs, keyed by content-relative path. Backs both
 // the codegen loader and the dynamic pins of FunctionCall nodes. Invalidated when a
 // function is saved in this editor.
-std::map<std::string, HE::MaterialGraph> g_fnGraphCache;
+std::map<std::string, HE::MaterialGraph> s_fnGraphCache;
 
 const HE::MaterialGraph* loadFunctionGraph(AppContext& ctx, const std::string& relPath)
 {
 	if (relPath.empty() || !ctx.contentManager) return nullptr;
-	if (auto it = g_fnGraphCache.find(relPath); it != g_fnGraphCache.end()) return &it->second;
+	if (auto it = s_fnGraphCache.find(relPath); it != s_fnGraphCache.end()) return &it->second;
 	const HE::UUID id = ctx.contentManager->loadAsset(relPath);
 	const MaterialFunctionAsset* fn = ctx.contentManager->getMaterialFunction(id);
 	if (!fn) return nullptr;
 	HE::MaterialGraph g;
 	if (!fn->nodeGraphJson.empty() && !HE::materialGraphFromJson(fn->nodeGraphJson, g))
 		return nullptr;
-	return &(g_fnGraphCache[relPath] = std::move(g));
+	return &(s_fnGraphCache[relPath] = std::move(g));
 }
 
 // Node width used to size the inline value widgets (kept in sync with the shared
@@ -95,6 +98,8 @@ ImU32 categoryColor(const char* cat)
 	const std::string c = cat;
 	if (c == "Material") return IM_COL32(140,  60,  60, 255);
 	if (c == "Input")    return IM_COL32( 60, 100, 140, 255);
+	if (c == "Constant") return IM_COL32( 60, 120, 130, 255);
+	if (c == "Landscape") return IM_COL32( 70, 130,  70, 255);
 	if (c == "Math")     return IM_COL32( 60, 120,  80, 255);
 	if (c == "Texture")    return IM_COL32(120,  90, 150, 255);
 	if (c == "Parameter")  return IM_COL32(160, 110,  50, 255);
@@ -155,7 +160,7 @@ void applyToMaterial(State& st, AppContext& ctx)
 		if (MaterialFunctionAsset* fn = ctx.contentManager->getMaterialFunctionMutable(st.materialId))
 		{
 			fn->nodeGraphJson = HE::materialGraphToJson(st.graph);
-			g_fnGraphCache.erase(st.relPath);
+			s_fnGraphCache.erase(st.relPath);
 			st.dirty = true;
 		}
 		return;
@@ -167,6 +172,7 @@ void applyToMaterial(State& st, AppContext& ctx)
 	HE::MatShaderGen gen = HE::generateFragment(st.graph, loader);
 	st.lastGlsl = gen.glsl;
 	mat->customShaderFragGlsl = st.lastGlsl;
+	mat->customShaderGBufGlsl = gen.glslGBuffer; // deferred MRT variant, same graph
 	mat->nodeGraphJson        = HE::materialGraphToJson(st.graph);
 	mat->shaderParamData.clear();
 	mat->graphParamNames.clear();
@@ -187,6 +193,7 @@ void applyToMaterial(State& st, AppContext& ctx)
 	// Project textures the graph samples, in slot order (heTexP0..) — the renderer
 	// binds these on loose materials; packing bakes them to graphTextureIds (MTLU).
 	mat->graphTexturePaths = gen.textures;
+	mat->graphLayerNames   = gen.layerNames;   // landscape paint layers
 	mat->blendMode            = gen.blendMode;
 	mat->customShaderVertGlsl = gen.vertexBody; // WPO vertex body ("" = standard vertex)
 	st.dirty = true;
@@ -202,6 +209,28 @@ void applyToMaterial(State& st, AppContext& ctx)
 	const auto& chk = s_checkLib.fragment(std::hash<std::string>{}(st.lastGlsl),
 	                                      st.lastGlsl, HE::MaterialShaderLibrary::Backend::Metal);
 	st.compileLog = chk.ok ? std::string() : chk.log;
+}
+
+// Persist this tab's asset. The header's Save button AND the close/quit prompt's
+// "Save All" both come through here, so the two can never drift apart.
+bool saveToDisk(State& st, AppContext& ctx, const std::string& assetPath)
+{
+	if (!ctx.contentManager) return false;
+	// Instances have no graph — their state is already live on the asset; masters
+	// regenerate first so the saved file always matches the canvas.
+	if (!st.isInstance) applyToMaterial(st, ctx);
+	RuntimeAsset* toSave = st.isFunction
+		? static_cast<RuntimeAsset*>(ctx.contentManager->getMaterialFunctionMutable(st.materialId))
+		: static_cast<RuntimeAsset*>(ctx.contentManager->getMaterialMutable(st.materialId));
+	if (!toSave || !ctx.contentManager->saveAsset(*toSave)) return false;
+	st.dirty = false;
+	// The Content Browser tile is now a picture of the PREVIOUS graph. Its own
+	// staleness poll would catch this within a second or two; dropping it here
+	// makes the grid update the moment the save lands.
+	AssetThumbnailCache::invalidate(assetPath);
+	Logger::Log(Logger::LogLevel::Info,
+		("MaterialEditor: saved '" + st.name + "'").c_str());
+	return true;
 }
 
 // ── Undo/redo (JSON snapshots — cheap at graph scale, and reuses the asset codec) ──
@@ -235,7 +264,7 @@ bool restoreSnapshot(State& st, int pos)
 }
 
 // ── Node clipboard (process-wide → copy/paste works ACROSS material tabs) ──────────
-std::string g_matClipboard;
+std::string s_matClipboard;
 
 // One-shot open-asset request (double-clicked Material Function node → its editor tab).
 std::string s_openAssetRequest;
@@ -343,15 +372,10 @@ bool drawFunctionInterfacePanel(MaterialGraph& g)
 
 State& stateFor(const std::string& path, AppContext& ctx)
 {
-	State& st = g_states[path];
+	State& st = s_states[path];
 	if (st.loaded || !ctx.contentManager) return st;
 
-	st.name = std::filesystem::path(path).filename().string();
-	// The ContentManager addresses assets by content-root-relative path (or the
-	// reserved "Engine/"-prefixed path for engine-content-root assets).
-	const std::string rel = ctx.contentManager->toContentRelativePath(path);
-	st.relPath    = rel.empty() ? path : rel;
-	st.materialId = ctx.contentManager->loadAsset(st.relPath);
+	st.materialId = openPanelAsset(ctx, path, st.name, st.relPath);
 	st.isFunction = ctx.contentManager->assetType(st.materialId) == HE::AssetType::MaterialFunction;
 
 	if (st.isFunction)
@@ -399,30 +423,20 @@ State& stateFor(const std::string& path, AppContext& ctx)
 // Scale embedded ImGui widgets to the canvas zoom. Font scale alone is not enough —
 // FramePadding/spacing/grab are in pixels and would keep full size, making widgets
 // overflow the shrunken node box; scale those too so a node's widgets track its box.
-void pushWidgetScale(float z)
-{
-	const ImGuiStyle& s = ImGui::GetStyle();
-	const ImVec2 fp = s.FramePadding, is = s.ItemSpacing, iis = s.ItemInnerSpacing;
-	const float  fr = s.FrameRounding, gm = s.GrabMinSize;
-	ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,     ImVec2(fp.x * z, fp.y * z));
-	ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,      ImVec2(is.x * z, is.y * z));
-	ImGui::PushStyleVar(ImGuiStyleVar_ItemInnerSpacing, ImVec2(iis.x * z, iis.y * z));
-	ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding,    fr * z);
-	ImGui::PushStyleVar(ImGuiStyleVar_GrabMinSize,      gm * z);
-	ImGui::SetWindowFontScale(z);
-}
-void popWidgetScale()
-{
-	ImGui::SetWindowFontScale(1.0f);
-	ImGui::PopStyleVar(5);
-}
+// The one copy lives with the canvas that defines the zoom.
+using GraphEditor::pushWidgetScale;
+using GraphEditor::popWidgetScale;
 
 // Inline parameter widgets for a node; returns true when an edit was COMMITTED
 // (deactivated-after-edit), so constant drags don't rebuild the pipeline every frame.
 // `scale` = canvas zoom, so the fixed widget widths track the scaled node box.
 // `drawName` = draw the name/label field (true in the side panel); the canvas passes
 // false because the name is edited in the node's colored header instead.
-bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true)
+// `g` is the owning graph — needed only by nodes whose PIN COUNT is editable here
+// (Landscape Layer Blend), so removing a layer can drop the links on pins that
+// stop existing. Null is fine for every other node type.
+bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
+                      HE::MaterialGraph* g = nullptr)
 {
 	bool committed = false;
 	switch (n.type)
@@ -446,6 +460,58 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true)
 			ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
 			ImGui::DragFloat2("##v2", n.p, 0.01f);
 			committed = ImGui::IsItemDeactivatedAfterEdit();
+			break;
+		case MatNodeType::LandscapeLayerBlend:
+		{
+			// The layer LIST is the material's declaration of its paint layers —
+			// the Landscape tool paints exactly these, in this order (= weightmap
+			// channel order). One name per row; adding/removing changes the pins.
+			std::vector<std::string> names = HE::matLandscapeLayerNames(n.s);
+			int removeAt = -1;
+			for (size_t i = 0; i < names.size(); ++i)
+			{
+				ImGui::PushID(static_cast<int>(i));
+				ImGui::SetNextItemWidth((kNodeW - 46.0f) * scale);
+				if (ImGui::InputText("##ln", &names[i])) committed = false;
+				if (ImGui::IsItemDeactivatedAfterEdit()) committed = true;
+				ImGui::SameLine();
+				if (ImGui::SmallButton("x")) { removeAt = static_cast<int>(i); committed = true; }
+				ImGui::PopID();
+			}
+			if (removeAt >= 0 && names.size() > 1)
+				names.erase(names.begin() + removeAt);
+			if (static_cast<int>(names.size()) < HE::kMatMaxLandscapeLayers &&
+			    ImGui::SmallButton("+ Layer"))
+			{
+				names.push_back("Layer " + std::to_string(names.size() + 1));
+				committed = true;
+			}
+			if (static_cast<int>(names.size()) >= HE::kMatMaxLandscapeLayers)
+				ImGui::TextDisabled("4 layers max (one RGBA weightmap)");
+			// Rebuild `s`; dropping a layer also drops the links on the pins that
+			// no longer exist, otherwise they would silently re-target.
+			std::string joined;
+			for (size_t i = 0; i < names.size(); ++i)
+				joined += (i ? "\n" : "") + names[i];
+			if (joined != n.s)
+			{
+				n.s = joined;
+				const int keep = static_cast<int>(names.size());
+				if (g)
+					for (int pin = keep; pin < HE::kMatMaxLandscapeLayers; ++pin)
+						g->disconnectInput(n.id, pin);
+			}
+			break;
+		}
+		case MatNodeType::UV:
+			// Tiling = how often the texture repeats across the mesh's 0..1 UV
+			// range; Offset shifts it. 1/0 is the raw mesh UV.
+			ImGui::SetNextItemWidth((kNodeW - 62.0f) * scale);
+			ImGui::DragFloat2("Tile", &n.p[0], 0.05f, 0.0f, 1024.0f);
+			committed  = ImGui::IsItemDeactivatedAfterEdit();
+			ImGui::SetNextItemWidth((kNodeW - 62.0f) * scale);
+			ImGui::DragFloat2("Off", &n.p[2], 0.01f);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
 			break;
 		case MatNodeType::ConstVec4:
 			ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
@@ -595,6 +661,9 @@ float nodeValueHeight(const MatGraphNode& n)
 	if (type == MatNodeType::TextureSample ||
 	    type == MatNodeType::NormalMapSample) return 44.0f;       // filename + hint rows
 	if (type == MatNodeType::ConstVec4 || type == MatNodeType::ParamVec4) return 30.0f; // vec4 drag row
+	if (type == MatNodeType::UV) return 52.0f;                    // tiling + offset rows
+	if (type == MatNodeType::LandscapeLayerBlend)                 // one row per layer + "+ Layer"
+		return 26.0f * static_cast<float>(HE::matLandscapeLayerNames(n.s).size()) + 26.0f;
 	return 26.0f;                                                 // one value/combo row
 }
 
@@ -664,7 +733,7 @@ bool drawParamConstPanel(MaterialGraph& graph)
 			{
 				if (groupOf(n) != grp) continue;
 				ImGui::PushID(n->id);
-				committed |= nodeParamWidgets(*n);
+				committed |= nodeParamWidgets(*n, 1.0f, true, &graph);
 				// Tooltip marker + metadata editor ("⋯" popup: slider range/group/tooltip).
 				ImGui::SameLine();
 				if (ImGui::SmallButton("..")) ImGui::OpenPopup("##pmeta");
@@ -711,7 +780,7 @@ bool drawParamConstPanel(MaterialGraph& graph)
 			ImGui::PushID(n->id);
 			ImGui::TextUnformatted(HE::matNodeDesc(n->type).name);
 			ImGui::SameLine(90.0f);
-			committed |= nodeParamWidgets(*n);
+			committed |= nodeParamWidgets(*n, 1.0f, true, &graph);
 			ImGui::PopID();
 		}
 	}
@@ -742,6 +811,16 @@ std::vector<GraphEditor::Pin> matNodePins(AppContext& ctx, const MatGraphNode& n
 			HE::matFunctionPins(*fn, dynIn, dynOut);
 			nodeIns = &dynIn; nodeOuts = &dynOut;
 		}
+	// Landscape Layer Blend: one input pin per layer name, in weightmap-channel
+	// order — the node's own list is the material's layer declaration.
+	std::vector<std::string> layerNames;
+	if (n.type == MatNodeType::LandscapeLayerBlend)
+	{
+		layerNames = HE::matLandscapeLayerNames(n.s);
+		for (const std::string& nm : layerNames)
+			dynIn.push_back({ nm.c_str(), MatPinType::Vec3, 0.0f });
+		nodeIns = &dynIn;
+	}
 
 	std::vector<GraphEditor::Pin> pins;
 	pins.reserve(nodeIns->size() + nodeOuts->size());
@@ -821,19 +900,17 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 			ImGui::SetNextItemAllowOverlap();
 			ImGui::InvisibleButton("##texdrop", ImVec2(std::max((bodyMax.x - bodyMin.x), 1.0f),
 			                                           std::max((bodyMax.y - bodyMin.y), 1.0f)));
-			if (ImGui::BeginDragDropTarget())
+			// Path-valued slot: the node stores a content-relative texture path, not a
+			// UUID, so only the drop RESOLUTION is shared — assetDropSlot draws a UUID
+			// slot and does not fit. One deliberate behaviour change: a file outside the
+			// content/engine roots is now rejected (with the shared "not a texture"
+			// warning) instead of being stored as an ABSOLUTE path, which the generated
+			// shader could never resolve on another machine anyway.
+			if (const EditorWidgets::AssetDrop drop =
+					EditorWidgets::acceptAssetDrop(ctx, HE::AssetType::Texture, "texture"))
 			{
-				if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("HE_ASSET_PATH"))
-				{
-					const std::string abs(static_cast<const char*>(pl->Data));
-					if (MaterialEditorPanel::isTextureAsset(abs) && ctx.contentManager)
-					{
-						const std::string rel = ctx.contentManager->toContentRelativePath(abs);
-						n->s = rel.empty() ? abs : rel;
-						structuralEdit = true; // texture list changed → regenerate
-					}
-				}
-				ImGui::EndDragDropTarget();
+				n->s = drop.relPath;
+				structuralEdit = true; // texture list changed → regenerate
 			}
 		}
 		// Align the name field with the value widgets below it: both sit at the
@@ -852,7 +929,7 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 		}
 		// Inline VALUE widgets (name drawn above, so drawName=false).
 		if (HE::matNodeDesc(n->type).paramCount > 0 || n->type == MatNodeType::TextureSample)
-			if (nodeParamWidgets(*n, zoom, /*drawName=*/false)) paramEdit = true;
+			if (nodeParamWidgets(*n, zoom, /*drawName=*/false, &st.graph)) paramEdit = true;
 		popWidgetScale();
 	};
 
@@ -1068,26 +1145,52 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 			}
 			ImGui::Spacing();
 		}
+		// Grouped by category in a fixed, readable order. The registry lists node
+		// types roughly by the version that added them, so a category's entries
+		// are NOT adjacent in it — walking it straight printed the same header
+		// several times ("Input" three times over). Anything with an unlisted
+		// category falls through to the tail pass below, so a new category can
+		// never silently vanish from the menu.
+		static const char* kCatOrder[] = {
+			"Constant", "Parameter", "Input", "Texture", "Procedural",
+			"Math", "Logic", "Channels", "Landscape", "Function",
+		};
+		// True when this node type belongs in the menu at all.
+		auto listed = [&](const HE::MatNodeDesc& d) {
+			// Exactly one material Output; FunctionCall comes from the list below.
+			if (d.type == MatNodeType::Output || d.type == MatNodeType::FunctionCall) return false;
+			const bool fnInterface = d.type == MatNodeType::FnInput || d.type == MatNodeType::FnOutput;
+			if (fnInterface && !st.isFunction) return false;
+			return matches(d.name, d.category);
+		};
 		const char* lastCat = "";
+		auto emitCategory = [&](const char* cat) {
+			for (const auto& d : HE::matNodeRegistry())
+			{
+				if (std::string(d.category) != cat || !listed(d)) continue;
+				if (std::string(lastCat) != cat)
+				{
+					if (*lastCat) ImGui::Spacing();
+					ImGui::TextDisabled("%s", cat);
+					lastCat = cat;
+				}
+				if (ImGui::Selectable(d.name))
+				{
+					created = st.graph.addNode(d.type, gx, gy);
+					ImGui::CloseCurrentPopup();
+				}
+			}
+		};
+		for (const char* cat : kCatOrder) emitCategory(cat);
+		// Tail pass: a category not in kCatOrder (newly added) still shows up.
 		for (const auto& d : HE::matNodeRegistry())
 		{
-			// Exactly one material Output; FunctionCall inserted from the functions list.
-			if (d.type == MatNodeType::Output || d.type == MatNodeType::FunctionCall) continue;
-			const bool fnInterface = d.type == MatNodeType::FnInput || d.type == MatNodeType::FnOutput;
-			if (fnInterface && !st.isFunction) continue;
-			if (!matches(d.name, d.category)) continue;
-			if (std::string(lastCat) != d.category)
-			{
-				if (*lastCat) ImGui::Spacing();
-				ImGui::TextDisabled("%s", d.category);
-				lastCat = d.category;
-			}
-			if (ImGui::Selectable(d.name))
-			{
-				created = st.graph.addNode(d.type, gx, gy);
-				ImGui::CloseCurrentPopup();
-			}
+			bool known = false;
+			for (const char* cat : kCatOrder)
+				if (std::string(d.category) == cat) { known = true; break; }
+			if (!known && listed(d)) emitCategory(d.category);
 		}
+
 		// Project-wide material functions (insert as FunctionCall).
 		if (ctx.contentManager)
 		{
@@ -1159,7 +1262,7 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 		if (kbOk && mod && ImGui::IsKeyPressed(ImGuiKey_C) && !sel.empty())
 		{
 			const std::string payload = serializeSelection(st);
-			if (!payload.empty()) g_matClipboard = payload;
+			if (!payload.empty()) s_matClipboard = payload;
 		}
 		if (kbOk && mod && ImGui::IsKeyPressed(ImGuiKey_X) && !sel.empty())
 		{
@@ -1167,7 +1270,7 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 			const std::string payload = serializeSelection(st);
 			if (!payload.empty())
 			{
-				g_matClipboard = payload;
+				s_matClipboard = payload;
 				for (int sid : sel)
 					if (const MatGraphNode* sn = st.graph.findNode(sid);
 					    sn && sn->type != MatNodeType::Output &&
@@ -1178,7 +1281,7 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 				structuralEdit = true;
 			}
 		}
-		if (kbOk && mod && ImGui::IsKeyPressed(ImGuiKey_V) && !g_matClipboard.empty())
+		if (kbOk && mod && ImGui::IsKeyPressed(ImGuiKey_V) && !s_matClipboard.empty())
 		{
 			// Paste at the mouse when it's over the canvas, else into the visible center.
 			const ImVec2 org = canvasOrigin;
@@ -1188,7 +1291,7 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 			const float Z = st.geState.zoom;
 			const float gx = ((overCanvas ? mp.x : org.x + avail.x * 0.5f) - org.x - st.geState.pan.x) / Z;
 			const float gy = ((overCanvas ? mp.y : org.y + avail.y * 0.5f) - org.y - st.geState.pan.y) / Z;
-			if (pasteInto(st, g_matClipboard, gx, gy)) structuralEdit = true;
+			if (pasteInto(st, s_matClipboard, gx, gy)) structuralEdit = true;
 		}
 		if (kbOk && mod && ImGui::IsKeyPressed(ImGuiKey_D) && !sel.empty())
 		{
@@ -1209,46 +1312,31 @@ namespace MaterialEditorPanel
 {
 bool isMaterialAsset(const std::string& path)
 {
-	// Called every frame for the active tab (dispatch) — cache the header sniff so we
-	// don't re-open the file per frame. An asset's type never changes in place.
-	static std::map<std::string, bool> s_typeCache;
-	if (auto it = s_typeCache.find(path); it != s_typeCache.end()) return it->second;
-	HAsset::Reader r;
-	const bool isMat = r.open(path) &&
-		r.assetType() == static_cast<uint16_t>(HE::AssetType::Material);
-	s_typeCache[path] = isMat;
-	return isMat;
-}
-
-bool isTextureAsset(const std::string& path)
-{
-	static std::map<std::string, bool> s_texCache;
-	if (auto it = s_texCache.find(path); it != s_texCache.end()) return it->second;
-	HAsset::Reader r;
-	const bool isTex = r.open(path) &&
-		r.assetType() == static_cast<uint16_t>(HE::AssetType::Texture);
-	s_texCache[path] = isTex;
-	return isTex;
+	// Called every frame for the active tab (dispatch), so the header sniff is cached —
+	// but in the SHARED EditorAssetTypeCache, which the Content Browser invalidates on
+	// delete/rename/refresh. A per-panel cache could never be invalidated and kept
+	// answering with the type of an asset that had since been deleted at that path.
+	return EditorAssetTypeCache::is(path, HE::AssetType::Material);
 }
 
 bool isMaterialFunctionAsset(const std::string& path)
 {
-	static std::map<std::string, bool> s_typeCache;
-	if (auto it = s_typeCache.find(path); it != s_typeCache.end()) return it->second;
-	HAsset::Reader r;
-	const bool isFn = r.open(path) &&
-		r.assetType() == static_cast<uint16_t>(HE::AssetType::MaterialFunction);
-	s_typeCache[path] = isFn;
-	return isFn;
+	return EditorAssetTypeCache::is(path, HE::AssetType::MaterialFunction);
 }
 
-bool isDirty(const std::string& assetPath)
+bool isDirty(const std::string& assetPath) { return s_states.dirty(assetPath); }
+
+void appendDirtyPaths(std::vector<std::string>& out) { s_states.appendDirtyPaths(out); }
+void forget(const std::string& assetPath) { s_states.forget(assetPath); }
+
+bool save(AppContext& ctx, const std::string& assetPath)
 {
-	auto it = g_states.find(assetPath);
-	return it != g_states.end() && it->second.dirty;
+	State* st = s_states.find(assetPath);
+	// A tab this panel never opened has nothing to write — the caller asks every
+	// panel about every path, so "not mine" must read as success.
+	if (!st || !st->dirty) return true;
+	return saveToDisk(*st, ctx, assetPath);
 }
-
-void forget(const std::string& assetPath) { g_states.erase(assetPath); }
 
 std::string takeOpenRequest()
 {
@@ -1482,16 +1570,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 	}
 	ImGui::SameLine(ImGui::GetContentRegionAvail().x - 140.0f);
 	if (ImGui::Button(st.isFunction ? "Save Function" : "Save Material") && assetOk)
-	{
-		// Instances have no graph — their state is already live on the asset; masters
-		// regenerate first so the saved file always matches the canvas.
-		if (!st.isInstance) applyToMaterial(st, ctx);
-		RuntimeAsset* toSave = st.isFunction ? static_cast<RuntimeAsset*>(fnAsset)
-		                                     : static_cast<RuntimeAsset*>(mat);
-		if (toSave && ctx.contentManager->saveAsset(*toSave)) st.dirty = false;
-		Logger::Log(Logger::LogLevel::Info,
-			("MaterialEditor: saved '" + st.name + "'").c_str());
-	}
+		saveToDisk(st, ctx, assetPath);
 	if (!assetOk)
 		ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "Asset could not be loaded.");
 	ImGui::Separator();
@@ -1567,6 +1646,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 							mat->shaderParamData.insert(mat->shaderParamData.end(),
 							                            slot.value, slot.value + 4);
 						mat->graphTexturePaths = pgen.textures;
+						mat->graphLayerNames   = pgen.layerNames;
 						swapped = true;
 					}
 				}
@@ -1617,6 +1697,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 							sm->shaderParamData.insert(sm->shaderParamData.end(),
 							                           slot.value, slot.value + 4);
 						sm->graphTexturePaths = gen.textures;
+						sm->graphLayerNames   = gen.layerNames;
 						st.previewTex = ctx.renderer->RenderMaterialPreview(*ctx.contentManager,
 							st.fnPreviewMatId, (uint32_t)px, st.previewYaw, st.previewPitch,
 							st.previewDist, st.previewShape);

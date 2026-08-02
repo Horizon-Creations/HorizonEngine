@@ -5,14 +5,20 @@
 #include <random>
 #include "ParticleSystemComponent.h" // for Particle (precipitation reuses the pool type)
 
-// Weather controller, authored on the World root entity alongside EnvironmentComponent.
+// Weather controller, authored on the "Weather" entity — like the "Sky" entity that
+// carries the EnvironmentComponent, an ordinary deletable scene entity added/removed
+// via the editor's Environment window (View menu), found with
+// HorizonWorld::weatherEntity() rather than on the World root (legacy scenes are
+// migrated on load by HorizonWorld::migrateLegacyRootEnvironment()).
 // WeatherSystem blends the active weather toward `targetKind` over `transitionDuration`
 // and writes the resulting sky parameters (cloud coverage, fog density, wind speed) into
 // the EnvironmentComponent — exactly how AnimatorComponent/AnimationSystem drives
 // SkeletalMeshComponent::boneMatrices. Those EnvironmentComponent fields therefore become
 // weather-driven (the inspector shows them read-only while a WeatherComponent is present).
-// It also produces a precipitation intensity/type (rain/snow) and storm state (lightning)
-// consumed by the precipitation emitter (Phase 2) and the renderer flash (Phase 3).
+// It also produces a precipitation intensity/type (rain/snow) and storm state (lightning);
+// WeatherSystem itself simulates the camera-following precipitation volume into `precip`
+// (or hands rain/snow to the renderer's GPU pool) and pushes the lightning flash into
+// EnvironmentComponent::flash for the renderer.
 
 enum class WeatherKind : uint8_t
 {

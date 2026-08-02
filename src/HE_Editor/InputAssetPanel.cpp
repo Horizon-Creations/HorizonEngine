@@ -1,11 +1,12 @@
 #include "InputAssetPanel.h"
 #include <algorithm>
 #include <cstdint>
-#include "EditorApplication.h"   // AppContext
-#include "HcClassList.h"         // HcEditorUtil::listAssets (action picker)
+#include "EditorApplication.h"    // AppContext
+#include "EditorAssetTypeCache.h" // shared, invalidatable path → AssetType sniff
+#include "EditorPanelState.h"     // shared per-tab state map
+#include "HcEditorUtil.h"         // HcEditorUtil::listAssets (action picker)
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
-#include <ContentManager/HAsset.h>
 #include <Application/InputAssets.h>
 #include <Types/Enums.h>
 #include <nlohmann/json.hpp>
@@ -14,7 +15,6 @@
 #include <SDL3/SDL.h>
 #include <cstring>
 #include <filesystem>
-#include <map>
 #include <string>
 #include <vector>
 
@@ -44,7 +44,7 @@ struct PanelState
 	// Mapping payload
 	std::vector<MapEntry> entries;
 };
-std::map<std::string, PanelState> g_states;
+AssetPanelState<PanelState> s_states;
 
 // ── "Press a key to bind" capture ───────────────────────────────────────────
 // At most one key field across all open tabs can be "listening" at a time.
@@ -61,28 +61,20 @@ struct CaptureState
 	bool         primed     = false;                    // snapshot-only first frame
 	bool         prevKeys[SDL_SCANCODE_COUNT] = {};      // last frame's held-key snapshot
 };
-CaptureState g_capture;
+CaptureState s_capture;
 
 void beginCapture(const std::string& assetPath, int entryIndex, int subIndex, CaptureKind kind)
 {
-	g_capture.assetPath  = assetPath;
-	g_capture.entryIndex = entryIndex;
-	g_capture.subIndex   = subIndex;
-	g_capture.kind       = kind;
-	g_capture.primed     = false;
+	s_capture.assetPath  = assetPath;
+	s_capture.entryIndex = entryIndex;
+	s_capture.subIndex   = subIndex;
+	s_capture.kind       = kind;
+	s_capture.primed     = false;
 }
 
 bool sniffType(const std::string& path, HE::AssetType type)
 {
-	static std::map<std::string, uint16_t> cache;
-	auto it = cache.find(path);
-	if (it == cache.end())
-	{
-		HAsset::Reader r;
-		cache[path] = r.open(path) ? r.assetType() : 0;
-		it = cache.find(path);
-	}
-	return it->second == static_cast<uint16_t>(type);
+	return EditorAssetTypeCache::is(path, type);
 }
 
 void decodeMapping(const std::string& json, std::vector<MapEntry>& out)
@@ -147,7 +139,7 @@ void helpMarker(const char* desc)
 //
 // `capturedName`/`captureCancelled` are this frame's poll result (computed
 // once per render() call, see the call site) — applied here only if this
-// field is the one g_capture is currently pointed at.
+// field is the one s_capture is currently pointed at.
 void keyBindField(const char* label, std::string& value, bool& dirty,
                    const std::string& assetPath, int entryIndex, int subIndex, CaptureKind kind,
                    const std::string& capturedName, bool captureCancelled)
@@ -157,12 +149,12 @@ void keyBindField(const char* label, std::string& value, bool& dirty,
 	// otherwise collide (both just say "Bind").
 	ImGui::PushID(label);
 
-	const bool mine = g_capture.kind == kind && g_capture.assetPath == assetPath &&
-	                   g_capture.entryIndex == entryIndex && g_capture.subIndex == subIndex;
+	const bool mine = s_capture.kind == kind && s_capture.assetPath == assetPath &&
+	                   s_capture.entryIndex == entryIndex && s_capture.subIndex == subIndex;
 	if (mine)
 	{
-		if (!capturedName.empty()) { value = capturedName; dirty = true; g_capture.kind = CaptureKind::None; }
-		else if (captureCancelled)  { g_capture.kind = CaptureKind::None; }
+		if (!capturedName.empty()) { value = capturedName; dirty = true; s_capture.kind = CaptureKind::None; }
+		else if (captureCancelled)  { s_capture.kind = CaptureKind::None; }
 	}
 
 	ImGui::SetNextItemWidth(100.0f);
@@ -181,7 +173,7 @@ void keyBindField(const char* label, std::string& value, bool& dirty,
 	{
 		ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(214, 122, 30, 255));
 		ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(230, 140, 40, 255));
-		if (ImGui::SmallButton("Press a key\xE2\x80\xA6 (click to cancel)")) g_capture.kind = CaptureKind::None;
+		if (ImGui::SmallButton("Press a key\xE2\x80\xA6 (click to cancel)")) s_capture.kind = CaptureKind::None;
 		ImGui::PopStyleColor(2);
 	}
 	else if (ImGui::SmallButton("Bind"))
@@ -190,6 +182,30 @@ void keyBindField(const char* label, std::string& value, bool& dirty,
 	}
 
 	ImGui::PopID();
+}
+
+// Persist a tab's decoded model back into its asset. The header's Save button AND
+// the close/quit prompt's "Save All" both come through here, so the two can never
+// drift apart.
+bool saveState(PanelState& st, AppContext& ctx)
+{
+	if (!ctx.contentManager) return false;
+	if (st.isMapping)
+	{
+		InputMappingContextAsset* m = ctx.contentManager->getInputMappingContextMutable(st.assetId);
+		if (!m) return false;
+		m->json = encodeMapping(st.entries);
+		if (!ctx.contentManager->saveAsset(*m)) return false;
+	}
+	else
+	{
+		InputActionAsset* a = ctx.contentManager->getInputActionMutable(st.assetId);
+		if (!a) return false;
+		a->json = st.isAxis ? "{\"valueType\":\"Axis\"}" : "{\"valueType\":\"Button\"}";
+		if (!ctx.contentManager->saveAsset(*a)) return false;
+	}
+	st.dirty = false;
+	return true;
 }
 
 } // namespace
@@ -201,22 +217,31 @@ bool InputAssetPanel::isInputMappingAsset(const std::string& path)
 bool InputAssetPanel::isInputAsset(const std::string& path)
 { return isInputActionAsset(path) || isInputMappingAsset(path); }
 
-bool InputAssetPanel::isDirty(const std::string& path)
+bool InputAssetPanel::isDirty(const std::string& path) { return s_states.dirty(path); }
+
+void InputAssetPanel::appendDirtyPaths(std::vector<std::string>& out) { s_states.appendDirtyPaths(out); }
+
+bool InputAssetPanel::save(AppContext& ctx, const std::string& path)
 {
-	auto it = g_states.find(path);
-	return it != g_states.end() && it->second.dirty;
+	PanelState* st = s_states.find(path);
+	// A tab this panel never opened has nothing to write — the caller asks every
+	// panel about every path, so "not mine" must read as success.
+	if (!st || !st->dirty) return true;
+	return saveState(*st, ctx);
 }
 
 void InputAssetPanel::forget(const std::string& path)
 {
-	g_states.erase(path);
-	if (g_capture.assetPath == path) g_capture.kind = CaptureKind::None;
+	s_states.forget(path);
+	// A key-capture aimed at the closing tab would otherwise stay armed and bind
+	// the next keypress into a state that no longer exists.
+	if (s_capture.assetPath == path) s_capture.kind = CaptureKind::None;
 }
 
 void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
                              const ImVec2& pos, const ImVec2& size)
 {
-	PanelState& st = g_states[assetPath];
+	PanelState& st = s_states[assetPath];
 	if (!st.loaded && ctx.contentManager)
 	{
 		const std::string rel = ctx.contentManager->toContentRelativePath(assetPath);
@@ -248,22 +273,7 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 	ImGui::TextDisabled("%s%s", st.isMapping ? "Input Mapping Context" : "Input Action",
 	                    st.dirty ? "  (unsaved)" : "");
 	ImGui::SameLine(ImGui::GetContentRegionAvail().x - 60.0f);
-	if (ImGui::Button("Save", ImVec2(56.0f, 0.0f)) && ctx.contentManager)
-	{
-		if (st.isMapping)
-		{
-			if (InputMappingContextAsset* m = ctx.contentManager->getInputMappingContextMutable(st.assetId))
-			{
-				m->json = encodeMapping(st.entries);
-				if (ctx.contentManager->saveAsset(*m)) st.dirty = false;
-			}
-		}
-		else if (InputActionAsset* a = ctx.contentManager->getInputActionMutable(st.assetId))
-		{
-			a->json = st.isAxis ? "{\"valueType\":\"Axis\"}" : "{\"valueType\":\"Button\"}";
-			if (ctx.contentManager->saveAsset(*a)) st.dirty = false;
-		}
-	}
+	if (ImGui::Button("Save", ImVec2(56.0f, 0.0f))) saveState(st, ctx);
 	ImGui::Separator();
 
 	if (!st.isMapping)
@@ -297,27 +307,27 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 	ImGui::Spacing();
 
 	// Poll SDL's live keyboard state once per frame while a field on THIS tab
-	// is listening for the next key press. g_capture is global across all open
+	// is listening for the next key press. s_capture is global across all open
 	// tabs; only the tab it targets does anything with the poll result below.
 	std::string capturedKeyName;
 	bool captureWasCancelled = false;
-	if (g_capture.kind != CaptureKind::None && g_capture.assetPath == assetPath)
+	if (s_capture.kind != CaptureKind::None && s_capture.assetPath == assetPath)
 	{
 		int numKeys = 0;
 		const bool* keyState = SDL_GetKeyboardState(&numKeys);
 		numKeys = std::min(numKeys, static_cast<int>(SDL_SCANCODE_COUNT));
-		if (!g_capture.primed)
+		if (!s_capture.primed)
 		{
 			// First active frame is snapshot-only, so a key still held down from
 			// the click that opened the capture isn't mistaken for a fresh press.
-			std::memcpy(g_capture.prevKeys, keyState, sizeof(bool) * numKeys);
-			g_capture.primed = true;
+			std::memcpy(s_capture.prevKeys, keyState, sizeof(bool) * numKeys);
+			s_capture.primed = true;
 		}
 		else
 		{
 			for (int sc = 0; sc < numKeys; ++sc)
 			{
-				if (keyState[sc] && !g_capture.prevKeys[sc])
+				if (keyState[sc] && !s_capture.prevKeys[sc])
 				{
 					if (sc == SDL_SCANCODE_ESCAPE) captureWasCancelled = true;
 					else if (const char* n = SDL_GetScancodeName(static_cast<SDL_Scancode>(sc)); n && n[0])
@@ -325,13 +335,13 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 					break;
 				}
 			}
-			std::memcpy(g_capture.prevKeys, keyState, sizeof(bool) * numKeys);
+			std::memcpy(s_capture.prevKeys, keyState, sizeof(bool) * numKeys);
 		}
 	}
 	// Any structural edit below (add/remove key, axis or entry) can shift the
-	// indices g_capture is pointed at — just drop an in-flight capture rather
+	// indices s_capture is pointed at — just drop an in-flight capture rather
 	// than risk it landing on the wrong field.
-	auto cancelCaptureForThisAsset = [&]() { if (g_capture.assetPath == assetPath) g_capture.kind = CaptureKind::None; };
+	auto cancelCaptureForThisAsset = [&]() { if (s_capture.assetPath == assetPath) s_capture.kind = CaptureKind::None; };
 
 	const auto actions = HcEditorUtil::listAssets(ctx.contentManager, HE::AssetType::InputAction);
 	int removeEntry = -1;

@@ -2,11 +2,11 @@ add_library(HorizonScene SHARED
     src/HorizonWorld.cpp
     src/GameInstanceHost.cpp
     src/PlayerHost.cpp
-    src/SceneGraph.cpp
     src/SceneSerializer.cpp
     src/Components/TransformComponent.cpp
     src/TerrainMeshGenerator.cpp
     src/TerrainSystem.cpp
+    src/TerrainPaint.cpp
     src/AnimationEval.cpp
     src/AnimationSystem.cpp
     src/AnimationBlendSystem.cpp
@@ -18,6 +18,8 @@ add_library(HorizonScene SHARED
     src/LODSystem.cpp
     src/WeatherSystem.cpp
     src/SceneSystems.cpp
+    src/EnvironmentPush.cpp
+    src/FlyCameraController.cpp
     src/FoliageSystem.cpp
     src/UISystem.cpp
     src/UIInputSystem.cpp

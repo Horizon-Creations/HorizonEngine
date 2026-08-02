@@ -19,9 +19,12 @@ struct RenderObject {
     RenderHandle meshHandle     = RenderHandle::invalid();
     RenderHandle materialHandle = RenderHandle::invalid();
     glm::mat4    transform      = glm::mat4(1.0f);
-    // World-space bounds for culling. Seeded by the extractor with the
-    // fallback cube's box; backends refine it with the real mesh AABB once
-    // the asset is resolved. Invalid box = never culled.
+    // World-space bounds for culling. Invalid box = never culled, and that is
+    // deliberately what the extractor leaves here for a mesh whose real AABB it
+    // could not read yet (not resident): culling a large mesh against a small
+    // proxy box makes it vanish while plainly in view. Backends fill in the real
+    // bounds once the asset resolves. Proxy unit cubes are used only where the
+    // size is known to be about right anyway (particles, skinned meshes).
     HE::AABB     worldBounds;
     uint32_t     entityId       = 0;
     uint8_t      lod            = 0;
@@ -49,6 +52,13 @@ struct RenderObject {
     // floats) the backend uploads instead. Filled by the extractor from
     // MaterialComponent::paramOverrides; only set when the entity has overrides.
     std::vector<float> paramOverride;
+    // Landscape layer weightmap for THIS object (terrain chunks only): the
+    // painted per-texel layer weights of the chunk's parent landscape, bound so
+    // a Landscape Layer Blend node can sample them. Null = not a landscape
+    // chunk; the backend then binds the 1x1 layer-0 default so the node still
+    // resolves. Per-OBJECT, not per-material: two landscapes can share one
+    // material and still paint independently.
+    HE::UUID     weightmapTextureId;
 };
 
 // Skinned renderable: same as RenderObject but carries bone matrices for GPU skinning.

@@ -32,21 +32,8 @@ void AnimationBlendSystem::update(HorizonWorld& world, ContentManager& cm, float
         if (clipB) refDuration = std::max(refDuration, clipB->duration);
         if (refDuration <= 0.0f) continue;
 
-        blend.playbackTime += dt * blend.playbackSpeed;
-        if (blend.looping)
-        {
-            blend.playbackTime = std::fmod(blend.playbackTime, refDuration);
-            if (blend.playbackTime < 0.0f)
-                blend.playbackTime += refDuration;
-        }
-        else
-        {
-            if (blend.playbackTime >= refDuration)
-            {
-                blend.playbackTime = refDuration;
-                blend.playing      = false;
-            }
-        }
+        advancePlayback(blend.playbackTime, blend.playing,
+                        blend.playbackSpeed, blend.looping, refDuration, dt);
 
         const float t = blend.playbackTime;
 
