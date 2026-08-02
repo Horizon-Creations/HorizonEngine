@@ -13,6 +13,8 @@ add_library(HorizonNet SHARED
 	src/LoopbackTransport.cpp
 	src/TcpTransport.cpp
 	src/SecureTransport.cpp
+	src/HttpClient.cpp
+	src/PortMapper.cpp
 	src/NetSession.cpp
 )
 

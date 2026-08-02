@@ -340,6 +340,27 @@ SocketResult socketSend(SocketHandle h, const std::uint8_t* data,
     return SocketResult::Error;
 }
 
+bool socketWaitReadable(SocketHandle h, int timeoutMs) {
+    if (h == kInvalidSocket) return false;
+
+    fd_set readSet;
+    FD_ZERO(&readSet);
+#ifdef _WIN32
+    const SOCKET s = static_cast<SOCKET>(h);
+    FD_SET(s, &readSet);
+    const int nfds = 0;   // ignored by Winsock
+#else
+    const int s = static_cast<int>(h);
+    FD_SET(s, &readSet);
+    const int nfds = s + 1;
+#endif
+    timeval tv{};
+    tv.tv_sec  = timeoutMs / 1000;
+    tv.tv_usec = (timeoutMs % 1000) * 1000;
+
+    return ::select(nfds, &readSet, nullptr, nullptr, &tv) > 0;
+}
+
 SocketResult socketRecv(SocketHandle h, std::uint8_t* buf, std::size_t len,
                         std::size_t& outReceived) {
     outReceived = 0;
@@ -362,6 +383,164 @@ SocketResult socketRecv(SocketHandle h, std::uint8_t* buf, std::size_t len,
     const int e = lastError();
     if (errIsWouldBlock(e) || errIsInterrupted(e)) return SocketResult::WouldBlock;
     return SocketResult::Error;
+}
+
+// ─── UDP ─────────────────────────────────────────────────────────────────────
+
+SocketHandle socketCreateUdp() {
+    if (!socketSystemInit()) return kInvalidSocket;
+
+#ifdef _WIN32
+    SOCKET s = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (s == INVALID_SOCKET) return kInvalidSocket;
+#else
+    int s = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (s < 0) return kInvalidSocket;
+#endif
+    const auto h = static_cast<SocketHandle>(s);
+    if (!socketSetNonBlocking(h, true)) {
+        socketClose(h);
+        return kInvalidSocket;
+    }
+    return h;
+}
+
+bool socketBindUdp(SocketHandle h, std::uint16_t port) {
+    if (h == kInvalidSocket) return false;
+    socketSetReuseAddr(h, true);
+
+    sockaddr_in addr{};
+    addr.sin_family      = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port        = htons(port);
+
+#ifdef _WIN32
+    return ::bind(static_cast<SOCKET>(h),
+                  reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0;
+#else
+    return ::bind(static_cast<int>(h),
+                  reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0;
+#endif
+}
+
+bool socketSetMulticastTtl(SocketHandle h, int ttl) {
+    if (h == kInvalidSocket) return false;
+#ifdef _WIN32
+    const DWORD v = static_cast<DWORD>(ttl);
+    return ::setsockopt(static_cast<SOCKET>(h), IPPROTO_IP, IP_MULTICAST_TTL,
+                        reinterpret_cast<const char*>(&v), sizeof(v)) == 0;
+#else
+    // BSD/Linux expect an unsigned char here, not an int — passing sizeof(int)
+    // makes the call fail on macOS.
+    const unsigned char v = static_cast<unsigned char>(ttl);
+    return ::setsockopt(static_cast<int>(h), IPPROTO_IP, IP_MULTICAST_TTL,
+                        &v, sizeof(v)) == 0;
+#endif
+}
+
+SocketResult socketSendTo(SocketHandle h, const std::uint8_t* data, std::size_t len,
+                          const std::string& host, std::uint16_t port,
+                          std::size_t& outSent) {
+    outSent = 0;
+    if (h == kInvalidSocket) return SocketResult::Error;
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons(port);
+    if (::inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
+        return SocketResult::Error;
+    }
+
+#ifdef _WIN32
+    const int n = ::sendto(static_cast<SOCKET>(h),
+                           reinterpret_cast<const char*>(data),
+                           static_cast<int>(len), 0,
+                           reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+#else
+    const ssize_t n = ::sendto(static_cast<int>(h), data, len, 0,
+                               reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+#endif
+    if (n > 0) {
+        outSent = static_cast<std::size_t>(n);
+        return SocketResult::Ok;
+    }
+    const int e = lastError();
+    if (errIsWouldBlock(e) || errIsInterrupted(e)) return SocketResult::WouldBlock;
+    return SocketResult::Error;
+}
+
+SocketResult socketRecvFrom(SocketHandle h, std::uint8_t* buf, std::size_t len,
+                            std::size_t& outReceived, std::string& outFromHost,
+                            std::uint16_t& outFromPort) {
+    outReceived = 0;
+    outFromHost.clear();
+    outFromPort = 0;
+    if (h == kInvalidSocket) return SocketResult::Error;
+
+    sockaddr_in from{};
+#ifdef _WIN32
+    int fromLen = static_cast<int>(sizeof(from));
+    const int n = ::recvfrom(static_cast<SOCKET>(h), reinterpret_cast<char*>(buf),
+                             static_cast<int>(len), 0,
+                             reinterpret_cast<sockaddr*>(&from), &fromLen);
+#else
+    socklen_t fromLen = sizeof(from);
+    const ssize_t n = ::recvfrom(static_cast<int>(h), buf, len, 0,
+                                 reinterpret_cast<sockaddr*>(&from), &fromLen);
+#endif
+    if (n > 0) {
+        outReceived = static_cast<std::size_t>(n);
+        char ip[INET_ADDRSTRLEN] = {};
+        if (::inet_ntop(AF_INET, &from.sin_addr, ip, sizeof(ip))) outFromHost = ip;
+        outFromPort = ntohs(from.sin_port);
+        return SocketResult::Ok;
+    }
+    const int e = lastError();
+    if (errIsWouldBlock(e) || errIsInterrupted(e)) return SocketResult::WouldBlock;
+    return SocketResult::Error;
+}
+
+// ─── Local address ───────────────────────────────────────────────────────────
+
+std::string socketLocalAddress() {
+    if (!socketSystemInit()) return {};
+
+    SocketHandle h = socketCreateUdp();
+    if (h == kInvalidSocket) return {};
+
+    // Connecting a UDP socket sends nothing — it only asks the kernel to pick a
+    // route, which then reveals the outbound interface via getsockname().
+    sockaddr_in probe{};
+    probe.sin_family = AF_INET;
+    probe.sin_port   = htons(53);
+    ::inet_pton(AF_INET, "8.8.8.8", &probe.sin_addr);
+
+#ifdef _WIN32
+    const int rc = ::connect(static_cast<SOCKET>(h),
+                             reinterpret_cast<sockaddr*>(&probe), sizeof(probe));
+#else
+    const int rc = ::connect(static_cast<int>(h),
+                             reinterpret_cast<sockaddr*>(&probe), sizeof(probe));
+#endif
+    if (rc != 0) { socketClose(h); return {}; }
+
+    sockaddr_in local{};
+#ifdef _WIN32
+    int len = static_cast<int>(sizeof(local));
+    const bool ok = ::getsockname(static_cast<SOCKET>(h),
+                                  reinterpret_cast<sockaddr*>(&local), &len) == 0;
+#else
+    socklen_t len = sizeof(local);
+    const bool ok = ::getsockname(static_cast<int>(h),
+                                  reinterpret_cast<sockaddr*>(&local), &len) == 0;
+#endif
+    std::string out;
+    if (ok) {
+        char ip[INET_ADDRSTRLEN] = {};
+        if (::inet_ntop(AF_INET, &local.sin_addr, ip, sizeof(ip))) out = ip;
+    }
+    socketClose(h);
+    return out;
 }
 
 } // namespace HE::Net
