@@ -186,7 +186,11 @@ bool socketBindListen(SocketHandle h, std::uint16_t port, int backlog) {
 
 std::uint16_t socketBoundPort(SocketHandle h) {
     if (h == kInvalidSocket) return 0;
-    sockaddr_in addr{};
+
+    // sockaddr_storage, not sockaddr_in: a dual-stack listener is AF_INET6, and
+    // reading it into the smaller v4 struct would truncate and report a wrong
+    // port entirely.
+    sockaddr_storage addr{};
 #ifdef _WIN32
     int len = static_cast<int>(sizeof(addr));
     if (::getsockname(static_cast<SOCKET>(h),
@@ -196,7 +200,10 @@ std::uint16_t socketBoundPort(SocketHandle h) {
     if (::getsockname(static_cast<int>(h),
                       reinterpret_cast<sockaddr*>(&addr), &len) != 0) return 0;
 #endif
-    return ntohs(addr.sin_port);
+    if (addr.ss_family == AF_INET6) {
+        return ntohs(reinterpret_cast<sockaddr_in6*>(&addr)->sin6_port);
+    }
+    return ntohs(reinterpret_cast<sockaddr_in*>(&addr)->sin_port);
 }
 
 SocketResult socketAccept(SocketHandle listener, SocketHandle& outAccepted) {
@@ -260,6 +267,120 @@ SocketResult socketConnect(SocketHandle h, const std::string& host,
     const int e = lastError();
     if (errIsInProgress(e) || errIsWouldBlock(e)) return SocketResult::WouldBlock;
     return SocketResult::Error;
+}
+
+SocketResult socketCreateTcpConnecting(const std::string& host, std::uint16_t port,
+                                       SocketHandle& outSocket) {
+    outSocket = kInvalidSocket;
+    if (!socketSystemInit()) return SocketResult::Error;
+
+    // AF_UNSPEC: let the resolver decide. A session directory records whichever
+    // address it saw the host arrive from, which today is often IPv6 — an
+    // AF_INET-only path could not reach those peers at all.
+    addrinfo hints{};
+    hints.ai_family   = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+
+    const std::string portStr = std::to_string(port);
+    addrinfo* res = nullptr;
+    if (::getaddrinfo(host.c_str(), portStr.c_str(), &hints, &res) != 0 || !res) {
+        return SocketResult::Error;
+    }
+
+    SocketResult result = SocketResult::Error;
+    for (addrinfo* ai = res; ai != nullptr; ai = ai->ai_next) {
+#ifdef _WIN32
+        SOCKET s = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (s == INVALID_SOCKET) continue;
+#else
+        int s = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (s < 0) continue;
+#endif
+        const auto h = static_cast<SocketHandle>(s);
+        if (!socketSetNonBlocking(h, true)) { socketClose(h); continue; }
+        socketSetNoDelay(h, true);
+
+#ifdef _WIN32
+        const int rc = ::connect(static_cast<SOCKET>(h), ai->ai_addr,
+                                 static_cast<int>(ai->ai_addrlen));
+#else
+        const int rc = ::connect(static_cast<int>(h), ai->ai_addr,
+                                 static_cast<socklen_t>(ai->ai_addrlen));
+#endif
+        if (rc == 0) { outSocket = h; result = SocketResult::Ok; break; }
+
+        const int e = lastError();
+        if (errIsInProgress(e) || errIsWouldBlock(e)) {
+            outSocket = h;
+            result = SocketResult::WouldBlock;
+            break;
+        }
+        // This candidate failed outright — try the next family/address.
+        socketClose(h);
+    }
+
+    ::freeaddrinfo(res);
+    return result;
+}
+
+// ─── Dual-stack listener ─────────────────────────────────────────────────────
+
+SocketHandle socketCreateListenerDualStack(std::uint16_t port, int backlog) {
+    if (!socketSystemInit()) return kInvalidSocket;
+
+#ifdef _WIN32
+    SOCKET s6 = ::socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
+    const bool have6 = (s6 != INVALID_SOCKET);
+#else
+    int s6 = ::socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
+    const bool have6 = (s6 >= 0);
+#endif
+
+    if (have6) {
+        const auto h = static_cast<SocketHandle>(s6);
+
+        // Clearing IPV6_V6ONLY makes one socket serve both families: IPv4 peers
+        // show up as v4-mapped addresses. Windows and some BSDs default it to
+        // ON, so it must be cleared explicitly.
+        const int off = 0;
+#ifdef _WIN32
+        ::setsockopt(static_cast<SOCKET>(h), IPPROTO_IPV6, IPV6_V6ONLY,
+                     reinterpret_cast<const char*>(&off), sizeof(off));
+#else
+        ::setsockopt(static_cast<int>(h), IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof(off));
+#endif
+        socketSetNonBlocking(h, true);
+        socketSetNoDelay(h, true);
+        socketSetReuseAddr(h, true);
+
+        sockaddr_in6 addr{};
+        addr.sin6_family = AF_INET6;
+        addr.sin6_addr   = in6addr_any;
+        addr.sin6_port   = htons(port);
+
+#ifdef _WIN32
+        const bool bound = ::bind(static_cast<SOCKET>(h),
+                                  reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0
+                        && ::listen(static_cast<SOCKET>(h), backlog) == 0;
+#else
+        const bool bound = ::bind(static_cast<int>(h),
+                                  reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0
+                        && ::listen(static_cast<int>(h), backlog) == 0;
+#endif
+        if (bound) return h;
+        socketClose(h);
+    }
+
+    // No usable IPv6 stack (or the bind failed) — fall back to IPv4 rather than
+    // failing outright, so a host on a v4-only network still works.
+    SocketHandle h4 = socketCreateTcp();
+    if (h4 == kInvalidSocket) return kInvalidSocket;
+    if (!socketBindListen(h4, port, backlog)) {
+        socketClose(h4);
+        return kInvalidSocket;
+    }
+    return h4;
 }
 
 SocketResult socketConnectPoll(SocketHandle h) {

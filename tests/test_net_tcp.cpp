@@ -73,6 +73,54 @@ TEST_CASE("TcpTransport: client connects and both sides report Connected")
     CHECK(clientEvents[0].type == NetEventType::Connected);
 }
 
+TEST_CASE("TcpTransport: an IPv6 client reaches the dual-stack listener")
+{
+    // The session directory records whichever address it observed the host
+    // arrive from, and that is frequently IPv6 — a v4-only listener would be
+    // unreachable for those peers, which is exactly the bug this covers.
+    auto server = TcpTransport::listen(0);
+    REQUIRE(server != nullptr);
+
+    auto client = TcpTransport::connect("::1", server->boundPort());
+    if (!client) return;   // host without an IPv6 stack — legitimately skipped
+
+    const bool up = pumpUntil(*server, *client, [&] {
+        return server->connectionCount() == 1 && client->connectionCount() == 1;
+    });
+    if (!up) return;       // IPv6 loopback unavailable in this environment
+
+    ConnectionId conn = kInvalidConnection;
+    for (const auto& ev : drain(*server)) {
+        if (ev.type == NetEventType::Connected) conn = ev.conn;
+    }
+    REQUIRE(conn != kInvalidConnection);
+    drain(*client);
+
+    const std::vector<std::uint8_t> payload{ 6, 6, 6 };
+    server->send(conn, payload, SendMode::ReliableOrdered);
+
+    std::vector<NetEvent> got;
+    REQUIRE(pumpUntil(*server, *client, [&] {
+        for (auto& ev : drain(*client)) got.push_back(std::move(ev));
+        return !got.empty();
+    }));
+    CHECK(got[0].data == payload);
+}
+
+TEST_CASE("TcpTransport: IPv4 still reaches the same dual-stack listener")
+{
+    // Clearing IPV6_V6ONLY is what makes one socket serve both families; if that
+    // regressed, IPv4 peers would stop connecting.
+    auto server = TcpTransport::listen(0);
+    REQUIRE(server != nullptr);
+    auto client = TcpTransport::connect("127.0.0.1", server->boundPort());
+    REQUIRE(client != nullptr);
+
+    CHECK(pumpUntil(*server, *client, [&] {
+        return server->connectionCount() == 1 && client->connectionCount() == 1;
+    }));
+}
+
 TEST_CASE("TcpTransport: connecting to a closed port surfaces a drop, not a hang")
 {
     // Bind then immediately release, so the port is almost certainly unused.

@@ -140,19 +140,15 @@ HttpResponse httpRequest(const std::string& url, const std::string& method,
         return resp;
     }
 
-    SocketHandle sock = socketCreateTcp();
-    if (sock == kInvalidSocket) {
-        resp.error = "socket creation failed";
-        return resp;
-    }
-
     const auto deadline = std::chrono::steady_clock::now()
                         + std::chrono::milliseconds(timeoutMs);
 
-    // Connect (non-blocking socket, so poll until resolved or the deadline hits).
-    SocketResult rc = socketConnect(sock, parsed.host, parsed.port);
-    if (rc == SocketResult::Error) {
-        socketClose(sock);
+    // Resolve first, then create a socket of the matching family: routers on a
+    // v6-capable LAN may well answer on an IPv6 address.
+    SocketHandle sock = kInvalidSocket;
+    SocketResult rc = socketCreateTcpConnecting(parsed.host, parsed.port, sock);
+    if (rc == SocketResult::Error || sock == kInvalidSocket) {
+        if (sock != kInvalidSocket) socketClose(sock);
         resp.error = "connect failed";
         return resp;
     }
