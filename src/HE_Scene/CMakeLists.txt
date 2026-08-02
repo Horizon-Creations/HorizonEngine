@@ -1,4 +1,5 @@
 add_library(HorizonScene SHARED
+	src/GameReplication.cpp
     src/HorizonWorld.cpp
     src/GameInstanceHost.cpp
     src/PlayerHost.cpp
@@ -49,6 +50,9 @@ target_compile_features(HorizonScene PUBLIC cxx_std_20)
 
 target_link_libraries(HorizonScene
     PUBLIC  HorizonCore
+    # Gameplay replication (GameReplication) sits on the shared transport.
+    # HorizonNet is BELOW the scene layer, so this dependency points downward.
+    PUBLIC  HorizonNet
     PRIVATE nlohmann_json::nlohmann_json
             Jolt
             RecastNavigation::Recast

@@ -6,9 +6,13 @@ protocol with chunked late-join snapshots, presence, an authoritative lock table
 and live replication of transforms, authored assets and structural changes — all
 reachable from the editor (View ▸ Collaboration) with per-user undo/redo.
 
-Not done: NAT-PMP as a second port-mapping path, and gameplay replication (N4a).
-Not verified: two real editor instances in one session, which needs two GUI
-processes.
+Gameplay replication (N4a) has its foundation: `NetworkComponent`,
+server-authoritative snapshots, interest management, interpolation. Client-side
+prediction and reconciliation are not implemented, so a locally controlled
+character lags by the round trip.
+
+Not done: NAT-PMP as a second port-mapping path. Not verified: two real editor
+instances in one session, which needs two GUI processes.
 
 ## Why one layer serves two very different consumers
 
@@ -152,7 +156,7 @@ any zero-pad in the payload's final byte.
 - **N4** ✅ — **presence**: camera pose + selection per participant, throttled and relayed by the host.
 - **N5** ✅ — **authoritative lock table** on the host, which removes the polling race window LFS locks have.
 - **N6** ✅ — **live deltas**: transforms, all other components, authored assets, and structural changes (create/destroy/reparent) replicate, with lock-derived authority.
-- **N4a** *(later)* — gameplay replication: `NetworkComponent` on entt, authority model, snapshot + delta, client prediction / server reconciliation, interest management.
+- **N4a** ◐ — gameplay replication: `NetworkComponent`, server-authoritative snapshots at a fixed tick, quantized transforms, interest management and client-side interpolation. Prediction/reconciliation still missing — see below.
 
 ## Discovery (N2.5)
 
@@ -617,3 +621,40 @@ including the platform differences in non-blocking mode, error codes, and
 layers verify identically on all three OSes. As with the D3D/Vulkan work,
 Windows/Linux behaviour is CI + real-HW verified rather than blind-merged —
 macOS is the only platform the sockets have actually been exercised on so far.
+
+
+## Gameplay replication (N4a)
+
+`HorizonScene/GameReplication` + `NetworkComponent`. Deliberately a *separate*
+consumer from editor collaboration despite sharing the transport, because the two
+want opposite things: collab replicates authored edits — rare, reliable, must
+never be lost — while gameplay replicates simulation state at ~30 Hz and tolerates
+loss, since a dropped snapshot is corrected by the next one milliseconds later.
+Forcing gameplay through the collab path would make every position update a
+reliable message; forcing collab through this one would silently drop an edit.
+
+- **Registration is opt-in.** An entity without a `netId` is not replicated,
+  which is how purely local effects (muzzle flashes, debris) stay off the wire.
+- **Clients never mint ids.** `adoptEntity` takes the id the server assigned —
+  otherwise the two peers would disagree about which entity a snapshot names.
+  (This API was added because a test exposed its absence.)
+- **Interest management** is the single largest bandwidth lever, far more than
+  per-field compression: entities beyond a client's relevance radius are never
+  sent to it at all.
+- **Quantization**: 24 bits per position axis over ±4096 (sub-millimetre), 16
+  bits per Euler angle (~0.005°) — about 19 bytes per entity per snapshot.
+- **Unreliable by intent.** Waiting for a retransmit would deliver state that is
+  already wrong.
+- **A stalled server sends one snapshot, not a backlog** — catching up would
+  burst updates that are all stale on arrival.
+- **Interpolation** between the last two snapshots keeps other entities from
+  visibly stepping at the tick rate on a higher-refresh display.
+
+### What is missing, and why it matters
+
+**Client-side prediction and server reconciliation.** Without them a player's own
+character responds only after a full round trip, which feels wrong at any ping
+above ~50 ms. This is the honest foundation, not finished netcode.
+
+**Euler interpolation is wrong across the ±180° seam** — a quaternion path fixes
+it, and belongs with the prediction work rather than before it.
