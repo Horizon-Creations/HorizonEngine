@@ -100,12 +100,15 @@ this **is** a real boundary: a collab session is internet-reachable and carries
 the project's scene data.
 
 ```
-host → client   Challenge  [0x01][version][32-byte hostNonce]
-client → host   Response   [0x02][32-byte clientNonce][32-byte mac]
-host → client   Accept     [0x03]                    (or Reject [0x04])
+host → client   Challenge  [0x01][version][32 hostNonce][32 hostPub]
+client → host   Response   [0x02][32 clientNonce][32 clientPub][32 mac]
+host → client   Accept     [0x03]                        (or Reject [0x04])
 
-mac        = HMAC(secret, "HN-auth-v1" || hostNonce || clientNonce)
-sessionKey = HMAC(secret, "HN-key-v1"  || hostNonce || clientNonce)
+transcript = hostNonce || clientNonce || hostPub || clientPub
+mac        = HMAC(joinSecret, "HN-auth-v2" || transcript)
+shared     = X25519(ourEphemeralPriv, peerPub)
+prk        = HMAC(key = shared, "HN-key-v2" || transcript)
+sessionKey = HMAC(key = prk,    joinSecret)
 ```
 
 Properties, each covered by a test:
@@ -266,32 +269,42 @@ to pin a fingerprint exchanged out of band, which is precisely what the join cod
 already does, with less machinery. Worse, it trains users to click through
 certificate warnings.
 
-### The one real gap: no forward secrecy
+### Forward secrecy — closed in handshake v2
 
-The session key is derived deterministically:
+The original v1 handshake derived the session key deterministically from the join
+secret and two public nonces. Anyone who recorded the ciphertext and obtained the
+join code *later* could decrypt that recording retroactively.
 
-```
-sessionKey = HMAC(joinSecret, "HN-key-v1" || hostNonce || clientNonce)
-```
+v2 roots the key in a per-connection **X25519** exchange instead. Both ephemeral
+private scalars are wiped as soon as the shared secret is computed, so they exist
+nowhere afterwards — a leaked or reused join code no longer unlocks past traffic.
 
-The nonces are public, so anyone who records the ciphertext today and obtains the
-join code *later* can decrypt that recording retroactively. TLS with ECDHE does
-not have this property, because its ephemeral keys are destroyed after use.
+Two properties are deliberately combined:
 
-Today's mitigation is weak but real: join secrets are machine-generated (~128
-bits), per-session and short-lived. The exposure is a leaked or reused code —
-a screenshot in a stream, a chat log — retroactively unlocking recorded sessions.
+- The join secret is folded into the **final** key, so breaking the curve alone
+  does not yield it either. Neither input is sufficient on its own.
+- The mac covers the transcript **including both public keys**, so a man in the
+  middle cannot substitute a key it controls — it cannot produce a valid mac
+  without the secret. This is verified by a test that flips a byte inside the
+  ephemeral key in flight and confirms no session is established.
 
-**Fix (recommended, not yet implemented):** add an ephemeral X25519 exchange to
-the handshake. Each side generates a throwaway keypair per connection, the public
-keys ride along in the existing Challenge/Response messages, and the session key
-comes from the ECDH output instead of the secret alone. The join secret keeps its
-job — authenticating the transcript, including both public keys, so an attacker
-without it still cannot MITM. Since the ephemeral private keys are discarded,
-a later leak of the join code no longer decrypts past traffic.
+`HE::Crypto::x25519*` (HE_Core) wraps OpenSSL's `EVP_PKEY_X25519` and mbedTLS's
+PSA `psa_raw_key_agreement`; neither implements the curve here, so clamping and
+constant-time arithmetic come from the library. Both backends are pinned to the
+**RFC 7748 §6.1 known-answer vectors**, so they are measured against the spec
+rather than merely against each other — a consistently wrong implementation would
+pass a self-consistency check.
 
-X25519 exists in both OpenSSL and mbedcrypto, so this needs no new dependency —
-only a backend-specific implementation alongside the existing `Aes256Gcm.cpp`.
+`sessionFingerprint()` exposes a one-way 64-bit digest of the negotiated key
+(never the key). Both peers compute the same value, so it can be shown in the UI
+to confirm out of band that two users are really in the same session.
+
+**What the tests can and cannot show.** They prove the mechanism is present and
+per-session: the transcript carries 32-byte ephemeral public keys, both sides
+contribute one, and they differ across sessions. Forward secrecy itself follows
+from those private scalars being discarded — the absence of a derivation is a
+design property, not something a unit test can demonstrate. Note that "each
+session gets a different key" alone proves nothing here: v1 satisfied that too.
 
 ## Connectivity over the internet
 
