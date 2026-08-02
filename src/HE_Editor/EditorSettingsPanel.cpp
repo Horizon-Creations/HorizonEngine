@@ -1,6 +1,7 @@
 #include "EditorSettingsPanel.h"
 #include "EditorApplication.h"           // AppContext, EditorConfig, EditorCamera
 #include "ToolchainDialog.h"             // Preferences > Recheck forces the dialog open
+#include "EditorWidgets.h"               // pinDialogToEditorWindow
 #include <HorizonScene/HcCodegen.h>      // HE::hccg::ToolchainProbe (toolchain readout)
 #include <Types/Enums.h>
 #include <cstring>
@@ -254,8 +255,10 @@ void DrawPreferencesWindow(AppContext& ctx, bool& open)
 	}
 
 	ImGui::SetNextWindowSize(ImVec2(440.0f, 0.0f), ImGuiCond_Appearing);
-	ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(),
-	                        ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+	// Pinned to the editor window: the settings catalog is long enough to grow
+	// taller than the editor, and a protruding popup becomes its own OS window
+	// that the window manager can bury behind us on the next focus change.
+	EditorWidgets::pinDialogToEditorWindow();
 	if (ImGui::BeginPopupModal("Preferences", nullptr, ImGuiWindowFlags_NoCollapse))
 	{
 		EditorConfig& cfg = ctx.editorConfig;

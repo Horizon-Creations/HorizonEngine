@@ -1,5 +1,6 @@
 #include "ToolchainDialog.h"
 #include "EditorApplication.h"           // AppContext
+#include "EditorWidgets.h"               // pinDialogToEditorWindow
 #include <HorizonScene/HcCodegen.h>      // HE::hccg::ToolchainProbe
 #include <SDL3/SDL.h>
 #include <string>
@@ -62,7 +63,7 @@ void DrawToolchainDialog(AppContext& ctx)
 	if (!s_haveLast) return;
 
 	ImGui::SetNextWindowSize(ImVec2(520.0f, 0.0f), ImGuiCond_Appearing);
-	ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+	EditorWidgets::pinDialogToEditorWindow();
 	if (ImGui::BeginPopupModal("##ToolchainMissing", nullptr,
 		ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize))
 	{

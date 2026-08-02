@@ -1,6 +1,7 @@
 #include "TutorialPanel.h"
 #include "TutorialSteps.h"
 #include "EditorApplication.h"   // AppContext, EditorConfig, ProjectManager
+#include "EditorWidgets.h"       // dialog placement (stay inside the editor window)
 #include "HorizonVersion.h"
 
 #include <HorizonScene/HorizonWorld.h>
@@ -24,6 +25,7 @@
 #include <Diagnostics/Logger.h>
 #include <SDL3/SDL.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -253,9 +255,10 @@ void renderWelcome(AppContext& ctx)
 	static std::string s_error;
 	if (s_dir.empty()) s_dir = defaultProjectDir();
 
-	const ImGuiViewport* vp = ImGui::GetMainViewport();
-	ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
 	ImGui::SetNextWindowSize(ImVec2(560.0f, 0.0f), ImGuiCond_Always);
+	// Pinned to the editor window so the card can never protrude, get its own OS
+	// window and end up buried behind the editor on the next focus change.
+	EditorWidgets::pinDialogToEditorWindow();
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(20.0f, 18.0f));
 	const bool visible = ImGui::BeginPopupModal("##TutorialWelcome", nullptr,
 		ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar);
@@ -305,7 +308,9 @@ void renderWelcome(AppContext& ctx)
 	ImGui::Separator();
 	ImGui::Spacing();
 
-	const float btnW = (560.0f - 20.0f * 2.0f - 8.0f) * 0.5f;
+	// From the actual content width, not the nominal 560: the card is capped to
+	// the editor window, so on a small editor it is narrower than it asked for.
+	const float btnW = (ImGui::GetContentRegionAvail().x - 8.0f) * 0.5f;
 	if (ImGui::Button("Start the tutorial", ImVec2(btnW, 34.0f)))
 	{
 		s_error.clear();
@@ -391,7 +396,13 @@ void render(AppContext& ctx, float dt, const UiFlags& flags)
 		ImVec2(vp->WorkPos.x + vp->WorkSize.x - 450.0f,
 		       vp->WorkPos.y + vp->WorkSize.y - 380.0f),
 		ImGuiCond_FirstUseEver);
-	ImGui::SetNextWindowSizeConstraints(ImVec2(340.0f, 220.0f), ImVec2(900.0f, 1200.0f));
+	// Capped to the editor window: a floating window that protrudes gets its own
+	// OS window, which the window manager is free to bury behind the editor on the
+	// next focus change — the tour would then be "open" but invisible.
+	ImGui::SetNextWindowSizeConstraints(
+		ImVec2(340.0f, 220.0f),
+		ImVec2(std::max(340.0f, std::min(900.0f,  vp->WorkSize.x - 16.0f)),
+		       std::max(220.0f, std::min(1200.0f, vp->WorkSize.y - 16.0f))));
 
 	bool open = true;
 	// NoDocking on purpose: the tour points at the docked panels, so it has to
@@ -403,6 +414,8 @@ void render(AppContext& ctx, float dt, const UiFlags& flags)
 		if (!open) s_open = false;
 		return;
 	}
+	// Draggable, but not off the editor window (same reason as the size cap).
+	EditorWidgets::clampCurrentWindowToEditorWindow();
 
 	if (!step || !chap)
 	{
