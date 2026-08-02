@@ -232,6 +232,67 @@ therefore declares `NSLocalNetworkUsageDescription`
 - **Not verified**: the Windows (WinHTTP) and Linux (libcurl) TLS backends have
   never been compiled or run; only the Apple one has. They need CI.
 
+## Do private hosts need a TLS certificate? No — and here is why
+
+There are two separate encrypted surfaces, and conflating them causes needless
+worry:
+
+| Surface | Who proves identity | Certificate needed by the host? |
+|---|---|---|
+| Engine ↔ session directory (website) | the *website's* certificate | **No** — the host is only a client |
+| Engine ↔ engine (host ↔ peers) | the shared join secret | **No** — this path uses no TLS at all |
+
+The peer link is `SecureTransport`: a pre-shared join secret, an HMAC
+challenge-response, and AES-256-GCM. No CA, no domain name, no certificate —
+it works on a bare, dynamic IP address.
+
+**This is the right construction, not a shortcut.** PKI answers a question we do
+not have: *"I am contacting a stranger claiming to be example.com — prove it."*
+That needs a domain and a third party to vouch for it. Here, both sides already
+share a join code passed out of band (chat, voice, screen share). When a secret
+is already shared, a pre-shared key is simpler *and* stronger: no certificate
+authority has to be trusted at all. WireGuard and Syncthing are built on the same
+reasoning.
+
+A certificate would also be impractical for a private host: certificate
+authorities issue for domain names you control, home users have none, addresses
+are dynamic, hosts usually sit behind NAT, and public CAs do not issue for
+private IPs. Running ACME renewals for a session that lasts an afternoon is
+absurd.
+
+**Self-signed certificates would be strictly worse.** They look like TLS while
+having no trust anchor, so there is nothing to validate against — you would have
+to pin a fingerprint exchanged out of band, which is precisely what the join code
+already does, with less machinery. Worse, it trains users to click through
+certificate warnings.
+
+### The one real gap: no forward secrecy
+
+The session key is derived deterministically:
+
+```
+sessionKey = HMAC(joinSecret, "HN-key-v1" || hostNonce || clientNonce)
+```
+
+The nonces are public, so anyone who records the ciphertext today and obtains the
+join code *later* can decrypt that recording retroactively. TLS with ECDHE does
+not have this property, because its ephemeral keys are destroyed after use.
+
+Today's mitigation is weak but real: join secrets are machine-generated (~128
+bits), per-session and short-lived. The exposure is a leaked or reused code —
+a screenshot in a stream, a chat log — retroactively unlocking recorded sessions.
+
+**Fix (recommended, not yet implemented):** add an ephemeral X25519 exchange to
+the handshake. Each side generates a throwaway keypair per connection, the public
+keys ride along in the existing Challenge/Response messages, and the session key
+comes from the ECDH output instead of the secret alone. The join secret keeps its
+job — authenticating the transcript, including both public keys, so an attacker
+without it still cannot MITM. Since the ephemeral private keys are discarded,
+a later leak of the join code no longer decrypts past traffic.
+
+X25519 exists in both OpenSSL and mbedcrypto, so this needs no new dependency —
+only a backend-specific implementation alongside the existing `Aes256Gcm.cpp`.
+
 ## Connectivity over the internet
 
 Two editors behind NAT cannot find each other unaided. The fallback ladder,
