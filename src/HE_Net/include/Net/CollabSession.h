@@ -58,6 +58,21 @@ struct Participant {
     bool          isHost = false;
 };
 
+// ─── Presence ────────────────────────────────────────────────────────────────
+// Volatile per-participant state: where someone is looking and what they have
+// selected. Unlike the scene itself this is disposable — a lost update is
+// corrected by the next one, so it is rate-limited rather than reliable-ordered
+// in spirit.
+//
+// Entity ids are carried as opaque 64-bit values. HorizonNet has no idea what
+// they refer to, which is what keeps this layer independent of the scene.
+struct PresenceState {
+    float cameraPos[3] { 0.0f, 0.0f, 0.0f };
+    float cameraRot[4] { 0.0f, 0.0f, 0.0f, 1.0f };   // quaternion (x, y, z, w)
+    std::vector<std::uint64_t> selection;
+    bool  valid = false;   // false until the participant has sent anything
+};
+
 // Supplies and applies the session's shared state. Implemented by the editor on
 // top of SceneSerializer; implemented trivially by tests.
 class HE_NET_API ISessionStateProvider {
@@ -82,6 +97,16 @@ public:
         // host announcing a size that would exhaust memory.
         std::uint32_t maxSnapshotBytes = 64u * 1024u * 1024u;
         std::uint32_t chunkBytes       = 256u * 1024u;
+
+        // Presence is sent at most this often. A gizmo drag produces one change
+        // per frame; forwarding all of them would swamp the link for state that
+        // is obsolete a frame later.
+        std::uint64_t presenceIntervalMs = 100;   // 10 Hz
+        // Ignore sub-threshold camera jitter so a stationary editor emits nothing.
+        float         presencePositionEpsilon = 0.001f;
+        float         presenceRotationEpsilon = 0.001f;
+        // Bounds the frame a peer can cause us to build.
+        std::uint16_t maxSelectionIds = 1024;
     };
 
     CollabSession(NetSession* net, NetRole role, Config cfg);
@@ -106,8 +131,29 @@ public:
         m_onProgress = std::move(fn);
     }
 
+    // Report where this user is looking and what they have selected. Cheap to
+    // call every frame: the value is stored, and update() decides whether it is
+    // worth sending.
+    void setLocalPresence(const float cameraPos[3], const float cameraRot[4],
+                          const std::vector<std::uint64_t>& selection);
+
+    // Last known presence of a participant (including ourselves). `valid` is
+    // false until they have reported any.
+    const PresenceState* presenceOf(ParticipantId id) const;
+
+    // Fires whenever a remote participant's presence changes — the editor
+    // redraws their camera gizmo and selection highlight from this.
+    void onPresenceChanged(std::function<void(ParticipantId, const PresenceState&)> fn) {
+        m_onPresence = std::move(fn);
+    }
+
     // Drive the session. Pump the transport first, then this.
     void update();
+
+    // Explicit-time overload. Presence throttling depends on the clock, and a
+    // wall-clock read would make it untestable and unreproducible; passing the
+    // time in also suits a fixed-step host loop.
+    void update(std::uint64_t nowMs);
 
     const std::vector<Participant>& participants() const { return m_participants; }
     ParticipantId localId() const { return m_localId; }
@@ -135,7 +181,17 @@ private:
     void handleSnapshotChunk(BitReader& r);
     void handleSnapshotEnd();
 
+    // Presence
+    void handlePresenceUpdate(ConnectionId conn, BitReader& r);   // host: from a client
+    void handlePresenceRelay(BitReader& r);                       // client: from the host
+    bool readPresenceBody(BitReader& r, PresenceState& out) const;
+    void writePresenceBody(BitWriter& w, const PresenceState& p) const;
+    void sendLocalPresence();
+    bool presenceDiffersFromSent() const;
+    void applyPresence(ParticipantId id, PresenceState state);
+
     Participant* findParticipant(ParticipantId id);
+    ParticipantId participantForConnection(ConnectionId conn) const;
 
     NetSession*           m_net   = nullptr;
     NetRole               m_role  = NetRole::None;
@@ -158,6 +214,15 @@ private:
     std::uint32_t             m_snapshotReceived = 0;
     bool                      m_snapshotActive   = false;
 
+    // Presence, keyed by participant. Cleared when they leave.
+    std::vector<std::pair<ParticipantId, PresenceState>> m_presence;
+    PresenceState m_localPresence;
+    PresenceState m_lastSentPresence;
+    bool          m_localPresenceSet  = false;
+    bool          m_everSentPresence  = false;
+    std::uint64_t m_lastPresenceSendMs = 0;
+
+    std::function<void(ParticipantId, const PresenceState&)> m_onPresence;
     std::function<void(ParticipantId)>                m_onJoined;
     std::function<void(JoinRejectReason)>             m_onRejected;
     std::function<void(const Participant&)>           m_onJoin;

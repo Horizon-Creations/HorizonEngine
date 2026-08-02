@@ -42,14 +42,19 @@ struct Pair {
     std::unique_ptr<CollabSession>     host, client;
     FakeState hostState, clientState;
 
-    void pump(int rounds = 12) {
+    // Simulated clock, so presence throttling is deterministic rather than
+    // dependent on how fast the test machine happens to run.
+    std::uint64_t nowMs = 0;
+
+    void pump(int rounds = 12, std::uint64_t stepMs = 1000) {
         for (int i = 0; i < rounds; ++i) {
             hostT->update();
             clientT->update();
             hostNet->pump();
             clientNet->pump();
-            host->update();
-            client->update();
+            host->update(nowMs);
+            client->update(nowMs);
+            nowMs += stepMs;
         }
     }
 };
@@ -358,6 +363,230 @@ TEST_CASE("CollabSession: a client that loses the host is no longer joined")
 
     CHECK_FALSE(p->client->isJoined());
     CHECK(p->client->participants().empty());
+}
+
+// ─── Presence ────────────────────────────────────────────────────────────────
+
+namespace {
+const float kPos[3] = { 1.5f, -2.25f, 30.0f };
+const float kRot[4] = { 0.0f, 0.7071068f, 0.0f, 0.7071068f };   // 90° about Y
+} // namespace
+
+TEST_CASE("CollabSession: a client's camera and selection reach the host")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+    REQUIRE(p->client->isJoined());
+
+    ParticipantId changedFor = kInvalidParticipant;
+    p->host->onPresenceChanged([&](ParticipantId id, const PresenceState&) {
+        changedFor = id;
+    });
+
+    p->client->setLocalPresence(kPos, kRot, { 111, 222, 333 });
+    p->pump(4);
+
+    const ParticipantId clientId = p->client->localId();
+    CHECK(changedFor == clientId);
+
+    const PresenceState* seen = p->host->presenceOf(clientId);
+    REQUIRE(seen != nullptr);
+    CHECK(seen->valid);
+
+    // Position keeps full float precision — a scene can span kilometres.
+    CHECK(seen->cameraPos[0] == doctest::Approx(kPos[0]));
+    CHECK(seen->cameraPos[1] == doctest::Approx(kPos[1]));
+    CHECK(seen->cameraPos[2] == doctest::Approx(kPos[2]));
+
+    // Rotation is quantized to 16 bits per component; the error must stay far
+    // below anything a camera gizmo could show.
+    for (int i = 0; i < 4; ++i) {
+        CHECK(seen->cameraRot[i] == doctest::Approx(kRot[i]).epsilon(0.001));
+    }
+
+    CHECK(seen->selection == std::vector<std::uint64_t>{ 111, 222, 333 });
+}
+
+TEST_CASE("CollabSession: the host's own presence reaches clients")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+    REQUIRE(p->client->isJoined());
+
+    p->host->setLocalPresence(kPos, kRot, { 42 });
+    p->pump(4);
+
+    const PresenceState* seen = p->client->presenceOf(p->host->localId());
+    REQUIRE(seen != nullptr);
+    CHECK(seen->cameraPos[2] == doctest::Approx(kPos[2]));
+    CHECK(seen->selection == std::vector<std::uint64_t>{ 42 });
+}
+
+TEST_CASE("CollabSession: presence is throttled rather than sent every frame")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+    REQUIRE(p->client->isJoined());
+
+    int updates = 0;
+    p->host->onPresenceChanged([&](ParticipantId, const PresenceState&) { ++updates; });
+
+    // 60 "frames" of continuous camera movement inside one 100 ms window.
+    for (int i = 0; i < 60; ++i) {
+        const float pos[3] = { static_cast<float>(i), 0.0f, 0.0f };
+        p->client->setLocalPresence(pos, kRot, {});
+        p->clientT->update(); p->hostT->update();
+        p->clientNet->pump(); p->hostNet->pump();
+        p->client->update(p->nowMs);
+        p->host->update(p->nowMs);
+        p->nowMs += 1;   // 1 ms per frame
+    }
+
+    // A gizmo drag must not put 60 messages on the wire for state that is stale
+    // a frame later.
+    CHECK(updates <= 2);
+    CHECK(updates >= 1);
+}
+
+TEST_CASE("CollabSession: an idle editor stops sending presence")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+
+    p->client->setLocalPresence(kPos, kRot, {});
+    p->pump(4);
+
+    int updates = 0;
+    p->host->onPresenceChanged([&](ParticipantId, const PresenceState&) { ++updates; });
+
+    // Plenty of time passes, but nothing moves.
+    p->pump(20, 500);
+
+    CHECK(updates == 0);
+}
+
+TEST_CASE("CollabSession: a moved camera resumes sending after the idle period")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+
+    p->client->setLocalPresence(kPos, kRot, {});
+    p->pump(4);
+
+    int updates = 0;
+    p->host->onPresenceChanged([&](ParticipantId, const PresenceState&) { ++updates; });
+
+    const float moved[3] = { 99.0f, 5.0f, -1.0f };
+    p->client->setLocalPresence(moved, kRot, {});
+    p->pump(4);
+
+    CHECK(updates >= 1);
+    const PresenceState* seen = p->host->presenceOf(p->client->localId());
+    REQUIRE(seen != nullptr);
+    CHECK(seen->cameraPos[0] == doctest::Approx(99.0f));
+}
+
+TEST_CASE("CollabSession: a selection change alone is enough to send")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+
+    p->client->setLocalPresence(kPos, kRot, { 1 });
+    p->pump(4);
+
+    int updates = 0;
+    p->host->onPresenceChanged([&](ParticipantId, const PresenceState&) { ++updates; });
+
+    // Camera unchanged, but the user clicked something else — selection is
+    // discrete, so any difference must propagate.
+    p->client->setLocalPresence(kPos, kRot, { 7, 8 });
+    p->pump(4);
+
+    CHECK(updates >= 1);
+    const PresenceState* seen = p->host->presenceOf(p->client->localId());
+    REQUIRE(seen != nullptr);
+    CHECK(seen->selection == std::vector<std::uint64_t>{ 7, 8 });
+}
+
+TEST_CASE("CollabSession: a client cannot publish presence as another participant")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+    REQUIRE(p->client->isJoined());
+
+    const ParticipantId hostId   = p->host->localId();
+    const ParticipantId clientId = p->client->localId();
+
+    // Forge a presence update. The client→host message carries no id at all, so
+    // even a hand-built frame cannot claim to be the host — the host stamps the
+    // identity from the connection.
+    BitWriter forged;
+    forged.writeFloat(1000.0f); forged.writeFloat(1000.0f); forged.writeFloat(1000.0f);
+    for (int i = 0; i < 4; ++i) forged.writeFloatQuantized(0.0f, -1.0f, 1.0f, 16);
+    forged.writeUInt16(0);
+    p->clientNet->send(LoopbackTransport::kPeer, kFirstUserMessage + 8, forged,
+                       SendMode::Unreliable);
+
+    p->pump(4);
+
+    // It landed on the client's own record, not the host's.
+    const PresenceState* asClient = p->host->presenceOf(clientId);
+    REQUIRE(asClient != nullptr);
+    CHECK(asClient->cameraPos[0] == doctest::Approx(1000.0f));
+
+    const PresenceState* asHost = p->host->presenceOf(hostId);
+    if (asHost) CHECK(asHost->cameraPos[0] != doctest::Approx(1000.0f));
+}
+
+TEST_CASE("CollabSession: presence disappears when a participant leaves")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+
+    p->client->setLocalPresence(kPos, kRot, { 5 });
+    p->pump(4);
+
+    const ParticipantId clientId = p->client->localId();
+    REQUIRE(p->host->presenceOf(clientId) != nullptr);
+
+    p->clientT.reset();
+    for (int i = 0; i < 6; ++i) {
+        p->hostT->update();
+        p->hostNet->pump();
+        p->host->update(p->nowMs);
+        p->nowMs += 100;
+    }
+
+    // Otherwise their camera gizmo would hang in everyone's viewport forever.
+    CHECK(p->host->presenceOf(clientId) == nullptr);
+}
+
+TEST_CASE("CollabSession: an oversized selection is clamped, not trusted")
+{
+    CollabSession::Config small;
+    small.maxSelectionIds = 4;
+    auto p = makePair("Anna", "Bob", small);
+    p->hostState.data = makeBlob(64);
+    p->pump();
+    REQUIRE(p->client->isJoined());
+
+    std::vector<std::uint64_t> huge(100);
+    for (std::size_t i = 0; i < huge.size(); ++i) huge[i] = i;
+    p->client->setLocalPresence(kPos, kRot, huge);
+    p->pump(4);
+
+    // Clamped locally before it ever reaches the wire.
+    const PresenceState* local = p->client->presenceOf(p->client->localId());
+    REQUIRE(local != nullptr);
+    CHECK(local->selection.size() == 4);
 }
 
 // ─── State sequence ──────────────────────────────────────────────────────────

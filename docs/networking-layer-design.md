@@ -145,7 +145,7 @@ any zero-pad in the payload's final byte.
 - **N2.5a** ✅ — discovery: UDP sockets, plaintext HTTP client, UPnP IGD port mapping, `session-api.php` (register/lookup/heartbeat/unregister with server-side reachability probe).
 - **N2.5b** ✅ — session-directory *client* over HTTPS, with TLS delegated to the platform (`HttpsClient_Apple.mm` / `_Win.cpp` / `_Curl.cpp`) and `SessionDirectory` on top. Still pending: NAT-PMP/PCP as a second mapping path (needs a default-gateway lookup, unlike SSDP which self-discovers).
 - **N3** ✅ — session protocol: join/leave, participant list, **chunked late-join snapshot** behind `ISessionStateProvider`.
-- **N4** — **presence**: remote cameras as frustum gizmos, remote selection highlighting. First visible collab payoff, no correctness risk.
+- **N4** ✅ — **presence**: camera pose + selection per participant, throttled and relayed by the host.
 - **N5** — **authoritative lock table** on the host (`RealtimeLockProvider`), which removes the polling race window LFS locks have.
 - **N6** — **live deltas**: dirty-entity replication via `serializeSubtree`, a quantized transform fast path, per-tick coalescing, and UUID-only asset references with a "missing asset" hint.
 - **N4a** *(later)* — gameplay replication: `NetworkComponent` on entt, authority model, snapshot + delta, client prediction / server reconciliation, interest management.
@@ -275,6 +275,40 @@ incomplete transfer — a partially deserialized scene is worse than none.
 **`stateSequence()`** is carried through the snapshot even though nothing
 increments it yet: live deltas (N6) continue from it, so defining it now avoids a
 protocol break later.
+
+## Presence (N4)
+
+Per-participant volatile state — where someone is looking and what they have
+selected — relayed by the host. Unlike the scene itself it is disposable: a lost
+update is corrected by the next one.
+
+**Identity is stamped by the host, never claimed by the sender.** The
+client→host message deliberately carries *no* participant id; the host derives it
+from the connection the frame arrived on and only then relays it with an id
+attached. Two message ids exist for exactly this reason — a single shared layout
+would let a client publish presence on someone else's behalf, moving another
+user's camera gizmo or faking their selection.
+
+**Throttling is the other half of the design.** A gizmo drag produces a change
+every frame, for state that is stale a frame later. Presence is therefore sent at
+most every 100 ms (10 Hz) *and* only when something moved beyond an epsilon, so
+an idle editor emits nothing at all. Both are covered by tests: 60 frames of
+continuous movement inside one interval produce at most two messages, and a
+stationary camera produces none.
+
+`update(nowMs)` takes the time explicitly. Reading a wall clock inside would make
+throttling untestable and irreproducible, and the explicit form also suits a
+fixed-step host loop.
+
+**Encoding.** Position stays full float precision — a scene can span kilometres,
+so a fixed quantization range would either clip or lose centimetres. Rotation is
+a unit quaternion, so every component is bounded by [-1, 1] and quantizes cleanly
+to 16 bits (~3e-5 of angular resolution, far finer than a gizmo can show) at a
+quarter the size. Selection ids are opaque 64-bit values: HorizonNet has no idea
+what they refer to, which is what keeps this layer independent of the scene.
+
+Presence is dropped when a participant leaves, or their camera gizmo would linger
+in everyone's viewport forever.
 
 ## Do private hosts need a TLS certificate? No — and here is why
 
