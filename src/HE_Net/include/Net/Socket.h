@@ -43,7 +43,11 @@ HE_NET_API bool socketSystemInit();
 
 // ─── Lifetime ────────────────────────────────────────────────────────────────
 
-// Create a non-blocking TCP socket. Returns kInvalidSocket on failure.
+// Create a non-blocking IPv4 TCP socket. Returns kInvalidSocket on failure.
+//
+// Prefer socketCreateTcpConnecting() for outbound links: the address family has
+// to match the destination, and a session directory reports whatever address the
+// host actually reached it from — which is frequently IPv6.
 HE_NET_API SocketHandle socketCreateTcp();
 HE_NET_API void         socketClose(SocketHandle h);
 
@@ -62,6 +66,15 @@ HE_NET_API bool socketSetReuseAddr(SocketHandle h, bool reuse);
 // Bind + listen. Pass port 0 to let the OS pick a free one, then query it with
 // socketBoundPort().
 HE_NET_API bool socketBindListen(SocketHandle h, std::uint16_t port, int backlog = 16);
+
+// Create a listening socket that accepts BOTH IPv4 and IPv6 peers: an AF_INET6
+// socket with IPV6_V6ONLY cleared, so IPv4 clients arrive as v4-mapped
+// addresses. Falls back to IPv4-only where IPv6 is unavailable.
+//
+// This matters because a host published in the session directory is reached at
+// whichever address the directory observed — and an IPv4-only listener would
+// simply be unreachable for half of them.
+HE_NET_API SocketHandle socketCreateListenerDualStack(std::uint16_t port, int backlog = 16);
 // Actual bound port (useful after binding to 0). Returns 0 on failure.
 HE_NET_API std::uint16_t socketBoundPort(SocketHandle h);
 // Accept one pending connection. WouldBlock when none is queued. The accepted
@@ -70,8 +83,19 @@ HE_NET_API SocketResult socketAccept(SocketHandle listener, SocketHandle& outAcc
 
 // ─── Client ──────────────────────────────────────────────────────────────────
 
-// Start a non-blocking connect. Ok means it completed immediately (typical on
-// loopback); WouldBlock means it is in progress — poll socketConnectPoll().
+// Resolve `host` (IPv4 literal, IPv6 literal, or DNS name), create a socket of
+// the matching family, and start a non-blocking connect. This is the correct
+// entry point for outbound links — socketCreateTcp() + socketConnect() can only
+// ever reach IPv4 peers.
+//
+// Returns Ok (connected immediately, typical on loopback), WouldBlock (in
+// progress — poll socketConnectPoll()), or Error. `outSocket` is kInvalidSocket
+// unless the call returns Ok or WouldBlock.
+HE_NET_API SocketResult socketCreateTcpConnecting(const std::string& host,
+                                                  std::uint16_t port,
+                                                  SocketHandle& outSocket);
+
+// Start a non-blocking connect on an existing IPv4 socket.
 HE_NET_API SocketResult socketConnect(SocketHandle h, const std::string& host,
                                       std::uint16_t port);
 // Resolve a pending connect: Ok when established, WouldBlock while still

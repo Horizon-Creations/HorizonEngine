@@ -28,13 +28,11 @@ std::uint32_t readLengthPrefix(const std::uint8_t* p) {
 // ─── Construction ────────────────────────────────────────────────────────────
 
 std::unique_ptr<TcpTransport> TcpTransport::listen(std::uint16_t port) {
-    SocketHandle s = socketCreateTcp();
+    // Dual-stack: a host published in the session directory is reached at
+    // whichever address the directory observed, which is frequently IPv6.
+    // An IPv4-only listener would be unreachable for those peers.
+    SocketHandle s = socketCreateListenerDualStack(port);
     if (s == kInvalidSocket) return nullptr;
-
-    if (!socketBindListen(s, port)) {
-        socketClose(s);
-        return nullptr;
-    }
 
     std::unique_ptr<TcpTransport> t(new TcpTransport());
     t->m_listener  = s;
@@ -44,12 +42,12 @@ std::unique_ptr<TcpTransport> TcpTransport::listen(std::uint16_t port) {
 
 std::unique_ptr<TcpTransport> TcpTransport::connect(const std::string& host,
                                                     std::uint16_t port) {
-    SocketHandle s = socketCreateTcp();
-    if (s == kInvalidSocket) return nullptr;
-
-    const SocketResult rc = socketConnect(s, host, port);
-    if (rc == SocketResult::Error) {
-        socketClose(s);
+    // Resolves the destination first and then creates a socket of the matching
+    // family, so IPv6 peers are reachable too.
+    SocketHandle s = kInvalidSocket;
+    const SocketResult rc = socketCreateTcpConnecting(host, port, s);
+    if (rc == SocketResult::Error || s == kInvalidSocket) {
+        if (s != kInvalidSocket) socketClose(s);
         return nullptr;
     }
 
