@@ -273,6 +273,19 @@ std::unique_ptr<IRenderer> EditorApplication::CreateRenderer()
 
 void EditorApplication::OnInit()
 {
+	// A received collaboration snapshot replaces the whole world. Selection and
+	// undo history still hold entity handles from the world that just went away,
+	// so acting on them afterwards would touch freed storage.
+	m_collab.onWorldReplaced([this] {
+		m_selectedEntity = entt::null;
+		// Every snapshot in the undo stack belongs to the replaced world, so
+		// undoing into one would restore a scene the session no longer shares.
+		m_undo.clearHistory();
+		// The received scene has never been saved locally: leave the dirty flag
+		// set by making the saved revision unreachable.
+		m_savedRevision = static_cast<std::uint64_t>(-1);
+	});
+
 	// ── Headless frame-dump hook (validation / CI screenshots) ──────────────
 	if (const char* p = std::getenv("HE_DUMP_PATH"); p && *p)
 	{
@@ -1511,6 +1524,35 @@ void EditorApplication::OnRender(float dt)
 	}
 #endif
 
+	// ── Collaboration ─────────────────────────────────────────────────────
+	// CollabSession is entirely poll-driven, so without this call nothing at all
+	// happens — no joins, no snapshots, no presence.
+	{
+		m_collab.setWorld(m_editorWorld.get());
+		const auto nowMs = static_cast<std::uint64_t>(
+			std::chrono::duration_cast<std::chrono::milliseconds>(
+				std::chrono::steady_clock::now().time_since_epoch()).count());
+		m_collab.update(nowMs);
+
+		// Feed the local camera + selection so remote peers can draw them.
+		if (m_collab.active())
+		{
+			const glm::vec3 pos = m_editorCamera.position();
+			// The view matrix maps world → camera; a remote peer draws the
+			// frustum in world space, so send the inverse rotation.
+			const glm::quat rot =
+				glm::quat_cast(glm::transpose(glm::mat3(m_editorCamera.viewMatrix())));
+			const float p[3] = { pos.x, pos.y, pos.z };
+			const float r[4] = { rot.x, rot.y, rot.z, rot.w };
+
+			std::vector<std::uint64_t> selection;
+			if (m_selectedEntity != entt::null)
+				selection.push_back(static_cast<std::uint64_t>(entt::to_integral(m_selectedEntity)));
+
+			m_collab.setLocalPresence(p, r, selection);
+		}
+	}
+
 	AppContext ctx = makeContext();
 	EditorUI::render(ctx, dt);
 	saveOpenTabs(); // persists only when the tab set/active index actually changed
@@ -2146,6 +2188,7 @@ AppContext EditorApplication::makeContext()
 		.pendingFileReady    = m_pendingFileReady,
 		.dialogBridge        = &m_sdlDialogBridge,
 #endif
+		.collab              = &m_collab,
 	};
 }
 
