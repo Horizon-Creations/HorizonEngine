@@ -80,6 +80,11 @@ public:
 	// HE_COLLAB_DIRECTORY environment variable when testing against another.
 	static std::string directoryEndpoint();
 
+	// A stable, well-separated colour for a participant, used for their camera
+	// gizmo and selection highlight. Derived from the id so both peers pick the
+	// same colour for the same person without having to agree on one.
+	static void participantColor(HE::Net::ParticipantId id, float outRgb[3]);
+
 	// Pump transport → session → collaboration. Call once per frame.
 	void update(std::uint64_t nowMs);
 
@@ -89,6 +94,11 @@ public:
 	                                            m_status == Status::Connecting ||
 	                                            m_status == Status::Joined; }
 	bool               isHost() const { return m_isHost; }
+	// Fully in a session and able to see other participants. A host qualifies as
+	// soon as it is listening; a client only once its snapshot has been applied,
+	// since before that it does not share the scene the others are looking at.
+	bool               inSession() const { return m_status == Status::Hosting ||
+	                                              m_status == Status::Joined; }
 	const std::string& joinCode() const { return m_joinCode; }
 	const std::string& sessionId() const { return m_sessionId; }
 	const std::string& localAddress() const { return m_localAddress; }

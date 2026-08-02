@@ -23,6 +23,11 @@ constexpr MessageId kMsgSnapshotEnd       = kFirstUserMessage + 7;
 // stamps the id from the connection it arrived on.
 constexpr MessageId kMsgPresenceUpdate    = kFirstUserMessage + 8;   // client → host
 constexpr MessageId kMsgPresenceRelay     = kFirstUserMessage + 9;   // host → clients
+constexpr MessageId kMsgLockRequest       = kFirstUserMessage + 10;  // client → host
+constexpr MessageId kMsgLockRelease       = kFirstUserMessage + 11;  // client → host
+constexpr MessageId kMsgLockUpdate        = kFirstUserMessage + 12;  // host → clients
+constexpr MessageId kMsgLockDenied        = kFirstUserMessage + 13;  // host → one client
+constexpr MessageId kMsgLockTable         = kFirstUserMessage + 14;  // host → joiner
 
 // Quaternion components are always in [-1, 1], so 16 bits each is ~3e-5 of
 // angular resolution — far finer than a camera gizmo can show, at a quarter the
@@ -56,6 +61,12 @@ void CollabSession::installHandlers() {
         m_net->on(kMsgPresenceUpdate, [this](ConnectionId conn, BitReader& r) {
             handlePresenceUpdate(conn, r);
         });
+        m_net->on(kMsgLockRequest, [this](ConnectionId conn, BitReader& r) {
+            handleLockRequest(conn, r);
+        });
+        m_net->on(kMsgLockRelease, [this](ConnectionId conn, BitReader& r) {
+            handleLockRelease(conn, r);
+        });
     } else {
         m_net->on(kMsgJoinAccepted, [this](ConnectionId, BitReader& r) { handleJoinAccepted(r); });
         m_net->on(kMsgJoinRejected, [this](ConnectionId, BitReader& r) { handleJoinRejected(r); });
@@ -63,6 +74,9 @@ void CollabSession::installHandlers() {
         m_net->on(kMsgSnapshotChunk, [this](ConnectionId, BitReader& r) { handleSnapshotChunk(r); });
         m_net->on(kMsgSnapshotEnd,   [this](ConnectionId, BitReader&)   { handleSnapshotEnd(); });
         m_net->on(kMsgPresenceRelay, [this](ConnectionId, BitReader& r) { handlePresenceRelay(r); });
+        m_net->on(kMsgLockUpdate, [this](ConnectionId, BitReader& r) { handleLockUpdate(r); });
+        m_net->on(kMsgLockDenied, [this](ConnectionId, BitReader& r) { handleLockDenied(r); });
+        m_net->on(kMsgLockTable,  [this](ConnectionId, BitReader& r) { handleLockTable(r); });
 
         // Roster updates for peers other than ourselves.
         m_net->on(kMsgParticipantJoined, [this](ConnectionId, BitReader& r) {
@@ -219,6 +233,14 @@ void CollabSession::handleJoinRequest(ConnectionId conn, BitReader& r) {
     m_participants.push_back(joiner);
     m_connToParticipant.emplace_back(conn, id);
 
+    // Hand over the current lock table, or a late arrival would believe every
+    // asset is free and immediately collide with whoever is already editing.
+    {
+        BitWriter table;
+        writeLockTable(table);
+        m_net->send(conn, kMsgLockTable, table);
+    }
+
     BitWriter announce;
     announce.writeUInt32(id);
     announce.writeString(name);
@@ -236,6 +258,7 @@ void CollabSession::onPeerDisconnected(ConnectionId conn) {
         m_joinSent = false;
         m_participants.clear();
         m_presence.clear();
+        m_locks.clear();
         m_everSentPresence = false;
         return;
     }
@@ -246,6 +269,11 @@ void CollabSession::onPeerDisconnected(ConnectionId conn) {
 
     const ParticipantId id = it->second;
     m_connToParticipant.erase(it);
+
+    // Free their locks BEFORE removing them from the roster, so the broadcast
+    // still reaches everyone and nothing they held stays blocked forever.
+    releaseLocksOf(id);
+
     m_participants.erase(
         std::remove_if(m_participants.begin(), m_participants.end(),
                        [id](const Participant& p) { return p.id == id; }),
@@ -514,6 +542,212 @@ void CollabSession::handlePresenceRelay(BitReader& r) {
 
     applyPresence(id, state);
     if (m_onPresence) m_onPresence(id, *presenceOf(id));
+}
+
+// ─── Locks ───────────────────────────────────────────────────────────────────
+
+const LockInfo* CollabSession::lockFor(std::uint64_t subject) const {
+    for (const auto& l : m_locks) {
+        if (l.subject == subject) return &l;
+    }
+    return nullptr;
+}
+
+bool CollabSession::ownsLock(std::uint64_t subject) const {
+    const LockInfo* l = lockFor(subject);
+    return l && l->owner == m_localId;
+}
+
+void CollabSession::grantLock(std::uint64_t subject, ParticipantId owner,
+                              const std::string& name) {
+    for (auto& l : m_locks) {
+        if (l.subject == subject) { l.owner = owner; l.ownerName = name; return; }
+    }
+    m_locks.push_back(LockInfo{ subject, owner, name });
+}
+
+void CollabSession::dropLock(std::uint64_t subject) {
+    m_locks.erase(std::remove_if(m_locks.begin(), m_locks.end(),
+                                 [subject](const LockInfo& l) { return l.subject == subject; }),
+                  m_locks.end());
+}
+
+void CollabSession::broadcastLock(std::uint64_t subject, bool acquired,
+                                  ConnectionId /*except*/) {
+    const LockInfo* l = lockFor(subject);
+
+    BitWriter w;
+    w.writeUInt64(subject);
+    w.writeBool(acquired);
+    w.writeUInt32(acquired && l ? l->owner : kInvalidParticipant);
+    w.writeString(acquired && l ? l->ownerName : std::string{});
+
+    // Sent to everyone, including the requester: the grant IS its confirmation,
+    // so there is no separate "you got it" message to keep in sync with this one.
+    m_net->broadcast(kMsgLockUpdate, w);
+}
+
+bool CollabSession::requestLock(std::uint64_t subject) {
+    if (!m_net || !m_joined) return false;
+
+    if (m_role == NetRole::Host) {
+        // The host is the authority, so it answers itself — no round trip, and
+        // no window in which two peers both believe they hold it.
+        const LockInfo* existing = lockFor(subject);
+        if (existing && existing->owner != m_localId) {
+            if (m_onLockDenied) m_onLockDenied(subject, LockDenyReason::HeldByOther);
+            return false;
+        }
+        grantLock(subject, m_localId, m_cfg.displayName);
+        broadcastLock(subject, true, kInvalidConnection);
+        if (m_onLockChanged) m_onLockChanged(*lockFor(subject), true);
+        return true;
+    }
+
+    if (m_net->connections().empty()) return false;
+    BitWriter w;
+    w.writeUInt64(subject);
+    m_net->send(m_net->connections().front(), kMsgLockRequest, w);
+    return true;
+}
+
+void CollabSession::releaseLock(std::uint64_t subject) {
+    if (!m_net || !m_joined) return;
+
+    if (m_role == NetRole::Host) {
+        const LockInfo* existing = lockFor(subject);
+        if (!existing || existing->owner != m_localId) return;   // not ours to give up
+        const LockInfo copy = *existing;
+        dropLock(subject);
+        broadcastLock(subject, false, kInvalidConnection);
+        if (m_onLockChanged) m_onLockChanged(copy, false);
+        return;
+    }
+
+    if (m_net->connections().empty()) return;
+    BitWriter w;
+    w.writeUInt64(subject);
+    m_net->send(m_net->connections().front(), kMsgLockRelease, w);
+}
+
+// ── Host side ──
+
+void CollabSession::handleLockRequest(ConnectionId conn, BitReader& r) {
+    std::uint64_t subject = 0;
+    if (!r.readUInt64(subject)) return;
+
+    const ParticipantId requester = participantForConnection(conn);
+    if (requester == kInvalidParticipant) {
+        BitWriter w;
+        w.writeUInt64(subject);
+        w.writeByte(static_cast<std::uint8_t>(LockDenyReason::NotInSession));
+        m_net->send(conn, kMsgLockDenied, w);
+        return;
+    }
+
+    const LockInfo* existing = lockFor(subject);
+    if (existing && existing->owner != requester) {
+        // Someone already has it. Refusing is the entire point — this is the
+        // moment a second person would otherwise start editing the same thing.
+        BitWriter w;
+        w.writeUInt64(subject);
+        w.writeByte(static_cast<std::uint8_t>(LockDenyReason::HeldByOther));
+        m_net->send(conn, kMsgLockDenied, w);
+        return;
+    }
+
+    const Participant* p = findParticipant(requester);
+    grantLock(subject, requester, p ? p->name : std::string{});
+    broadcastLock(subject, true, kInvalidConnection);
+    if (m_onLockChanged) m_onLockChanged(*lockFor(subject), true);
+}
+
+void CollabSession::handleLockRelease(ConnectionId conn, BitReader& r) {
+    std::uint64_t subject = 0;
+    if (!r.readUInt64(subject)) return;
+
+    const ParticipantId requester = participantForConnection(conn);
+    const LockInfo* existing = lockFor(subject);
+    // Only the holder may release: otherwise anyone could free someone else's
+    // lock and edit underneath them.
+    if (!existing || existing->owner != requester) return;
+
+    const LockInfo copy = *existing;
+    dropLock(subject);
+    broadcastLock(subject, false, kInvalidConnection);
+    if (m_onLockChanged) m_onLockChanged(copy, false);
+}
+
+void CollabSession::releaseLocksOf(ParticipantId owner) {
+    // Everything a departing participant held becomes free again, or their locks
+    // would block the rest of the session forever.
+    std::vector<std::uint64_t> freed;
+    for (const auto& l : m_locks) {
+        if (l.owner == owner) freed.push_back(l.subject);
+    }
+    for (const std::uint64_t subject : freed) {
+        const LockInfo copy = *lockFor(subject);
+        dropLock(subject);
+        broadcastLock(subject, false, kInvalidConnection);
+        if (m_onLockChanged) m_onLockChanged(copy, false);
+    }
+}
+
+void CollabSession::writeLockTable(BitWriter& w) const {
+    w.writeUInt16(static_cast<std::uint16_t>(m_locks.size()));
+    for (const auto& l : m_locks) {
+        w.writeUInt64(l.subject);
+        w.writeUInt32(l.owner);
+        w.writeString(l.ownerName);
+    }
+}
+
+// ── Client side ──
+
+void CollabSession::handleLockUpdate(BitReader& r) {
+    std::uint64_t subject = 0;
+    bool acquired = false;
+    std::uint32_t owner = 0;
+    std::string name;
+    if (!r.readUInt64(subject) || !r.readBool(acquired) ||
+        !r.readUInt32(owner) || !r.readString(name)) {
+        return;
+    }
+
+    if (acquired) {
+        grantLock(subject, owner, name);
+        if (m_onLockChanged) m_onLockChanged(*lockFor(subject), true);
+    } else {
+        const LockInfo* existing = lockFor(subject);
+        const LockInfo copy = existing ? *existing : LockInfo{ subject, owner, name };
+        dropLock(subject);
+        if (m_onLockChanged) m_onLockChanged(copy, false);
+    }
+}
+
+void CollabSession::handleLockDenied(BitReader& r) {
+    std::uint64_t subject = 0;
+    std::uint8_t reason = 0;
+    if (!r.readUInt64(subject) || !r.readByte(reason)) return;
+    if (m_onLockDenied) m_onLockDenied(subject, static_cast<LockDenyReason>(reason));
+}
+
+void CollabSession::handleLockTable(BitReader& r) {
+    // Sent once on join, so a late arrival does not start out believing
+    // everything is free.
+    std::uint16_t count = 0;
+    if (!r.readUInt16(count)) return;
+
+    m_locks.clear();
+    for (std::uint16_t i = 0; i < count; ++i) {
+        LockInfo l;
+        std::uint32_t owner = 0;
+        if (!r.readUInt64(l.subject) || !r.readUInt32(owner) || !r.readString(l.ownerName)) {
+            return;
+        }
+        l.owner = owner;
+        m_locks.push_back(l);
+    }
 }
 
 } // namespace HE::Net

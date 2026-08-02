@@ -88,6 +88,30 @@ public:
     virtual bool applySnapshot(const std::vector<std::uint8_t>& data) = 0;
 };
 
+// ─── Locks ───────────────────────────────────────────────────────────────────
+// Who currently owns the right to edit a given thing. The host holds the only
+// copy of this table and arbitrates every request, which is the whole point:
+// unlike Git-LFS locks — which each client discovers by polling a server, so two
+// people can believe they hold the same lock for a few seconds — a request here
+// is answered by the one authority, in order, with no window at all.
+//
+// The subject is an opaque 64-bit id, exactly like presence selection: it may be
+// an entity, an asset UUID hash, or anything else the editor decides. HorizonNet
+// never interprets it.
+struct LockInfo {
+    std::uint64_t subject = 0;
+    ParticipantId owner   = kInvalidParticipant;
+    std::string   ownerName;   // carried so the UI can name a holder that is not
+                               // in the roster yet (or already left)
+};
+
+enum class LockDenyReason : std::uint8_t {
+    None       = 0,
+    HeldByOther = 1,
+    NotOwner    = 2,   // tried to release something someone else holds
+    NotInSession = 3,
+};
+
 class HE_NET_API CollabSession {
 public:
     struct Config {
@@ -147,6 +171,29 @@ public:
         m_onPresence = std::move(fn);
     }
 
+    // ── Locks ──
+    // Ask to own `subject`. On the host this is answered immediately; on a
+    // client it is a request, and the answer arrives via onLockChanged /
+    // onLockDenied. Returns false only when there is no session to ask.
+    bool requestLock(std::uint64_t subject);
+    // Give up a lock. Silently ignored if we do not hold it.
+    void releaseLock(std::uint64_t subject);
+
+    // Current holder of `subject`, or nullptr when it is free.
+    const LockInfo* lockFor(std::uint64_t subject) const;
+    bool            ownsLock(std::uint64_t subject) const;
+    const std::vector<LockInfo>& locks() const { return m_locks; }
+
+    // A lock was taken or released — the editor repaints the affected item and,
+    // if it lost one, stops allowing edits.
+    void onLockChanged(std::function<void(const LockInfo&, bool acquired)> fn) {
+        m_onLockChanged = std::move(fn);
+    }
+    // Our own request was refused.
+    void onLockDenied(std::function<void(std::uint64_t, LockDenyReason)> fn) {
+        m_onLockDenied = std::move(fn);
+    }
+
     // Drive the session. Pump the transport first, then this.
     void update();
 
@@ -190,6 +237,18 @@ private:
     bool presenceDiffersFromSent() const;
     void applyPresence(ParticipantId id, PresenceState state);
 
+    // Locks
+    void handleLockRequest(ConnectionId conn, BitReader& r);   // host
+    void handleLockRelease(ConnectionId conn, BitReader& r);   // host
+    void handleLockUpdate(BitReader& r);                       // client
+    void handleLockDenied(BitReader& r);                       // client
+    void handleLockTable(BitReader& r);                        // client, on join
+    void writeLockTable(BitWriter& w) const;
+    void grantLock(std::uint64_t subject, ParticipantId owner, const std::string& name);
+    void dropLock(std::uint64_t subject);
+    void broadcastLock(std::uint64_t subject, bool acquired, ConnectionId except);
+    void releaseLocksOf(ParticipantId owner);
+
     Participant* findParticipant(ParticipantId id);
     ParticipantId participantForConnection(ConnectionId conn) const;
 
@@ -222,6 +281,11 @@ private:
     bool          m_everSentPresence  = false;
     std::uint64_t m_lastPresenceSendMs = 0;
 
+    // The authoritative table on the host; a replica on clients.
+    std::vector<LockInfo> m_locks;
+
+    std::function<void(const LockInfo&, bool)>         m_onLockChanged;
+    std::function<void(std::uint64_t, LockDenyReason)> m_onLockDenied;
     std::function<void(ParticipantId, const PresenceState&)> m_onPresence;
     std::function<void(ParticipantId)>                m_onJoined;
     std::function<void(JoinRejectReason)>             m_onRejected;

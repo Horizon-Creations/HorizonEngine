@@ -8,6 +8,7 @@
 #include <Net/TcpTransport.h>
 
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <thread>
 
@@ -150,6 +151,28 @@ bool CollabController::startHosting(std::uint16_t port, const std::string& displ
 	});
 
 	return true;
+}
+
+void CollabController::participantColor(HE::Net::ParticipantId id, float outRgb[3])
+{
+	// Golden-ratio hue stepping: consecutive ids land far apart on the colour
+	// wheel, so two people who joined one after another never get near-identical
+	// gizmos. Full saturation, high value — these are overlay lines, not surfaces.
+	const float hue = std::fmod(static_cast<float>(id) * 0.618033988f, 1.0f);
+	const float h6  = hue * 6.0f;
+	const int   sector = static_cast<int>(h6) % 6;
+	const float f   = h6 - std::floor(h6);
+	const float q   = 1.0f - f;
+
+	switch (sector)
+	{
+	case 0: outRgb[0] = 1.0f; outRgb[1] = f;    outRgb[2] = 0.0f; break;
+	case 1: outRgb[0] = q;    outRgb[1] = 1.0f; outRgb[2] = 0.0f; break;
+	case 2: outRgb[0] = 0.0f; outRgb[1] = 1.0f; outRgb[2] = f;    break;
+	case 3: outRgb[0] = 0.0f; outRgb[1] = q;    outRgb[2] = 1.0f; break;
+	case 4: outRgb[0] = f;    outRgb[1] = 0.0f; outRgb[2] = 1.0f; break;
+	default:outRgb[0] = 1.0f; outRgb[1] = 0.0f; outRgb[2] = q;    break;
+	}
 }
 
 std::string CollabController::directoryEndpoint()
