@@ -34,4 +34,9 @@ public:
 
 private:
 	static void renderEditor(AppContext& ctx, float dt);
+	// Floating tool windows (Preferences, Profiler, Environment) and the guided
+	// tour. Deliberately NOT part of renderEditor: that returns early when an asset
+	// tab is active, and all of these must stay usable — and the tour must keep
+	// sampling — while the user is inside a material graph or a HorizonCode tab.
+	static void renderOverlays(AppContext& ctx, float dt);
 };

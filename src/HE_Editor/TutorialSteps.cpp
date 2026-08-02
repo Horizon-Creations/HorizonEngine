@@ -18,8 +18,10 @@ namespace
 
 	// Index-parallel to Asset.
 	constexpr std::array<const char*, static_cast<size_t>(Asset::Count)> kAssetNames = {
-		"material", "particlesystem", "widget", "animatorstatemachine", "inputaction",
-		"scene", "texture", "staticmesh", "skeletalmesh", "script",
+		"material", "materialfunction", "particlesystem", "widget",
+		"animatorstatemachine", "inputaction", "inputmappingcontext",
+		"horizoncodeclass", "scene", "texture", "staticmesh", "skeletalmesh",
+		"script", "audio", "font", "prefab", "animationclip",
 	};
 }
 
@@ -284,7 +286,74 @@ constexpr Step kContent[] = {
 	  "Content Browser", Check::AssetAdded, "" },
 };
 
-// ── 6. Materials ──
+// ── 6. The asset family ──
+// Every kind of .hasset gets named here, and the ones the Create Asset menu can
+// make are actually made — reading a list of asset types teaches nothing about
+// where they live or what opens them.
+constexpr Step kAssetTypes[] = {
+	{ "asset-anatomy",
+	  "What an asset is",
+	  "Almost everything in a project is a .hasset: one container format with a "
+	  "type tag and a UUID, which is why the browser groups by icon rather than by "
+	  "extension. Scenes (.hescene) are the one exception, and only because it "
+	  "helps to spot them in a file manager.\n"
+	  "The UUID is the identity. Renaming or moving an asset does not break the "
+	  "things pointing at it; the reference is to the id, and the path is only how "
+	  "you find it.\n"
+	  "Two ways in: Create Asset makes an empty one of a kind the editor can "
+	  "author, Import Asset converts a file from outside. The next steps make one "
+	  "of each authorable kind.",
+	  "", "Content Browser", Check::ReadAck, "" },
+
+	{ "asset-scene",
+	  "Scenes",
+	  "A scene is an asset like any other: a tree of entities with their "
+	  "components, saved as .hescene. A project has as many as you like — a menu "
+	  "level, a test box, the real thing.\n"
+	  "One is marked as the startup scene in each export profile; that is the one a "
+	  "packaged build opens. Scenes can also be loaded additively on top of another, "
+	  "which is how a streamed world or a persistent HUD level is built.",
+	  "Create a Scene asset in the Content Browser.",
+	  "Content Browser", Check::AssetOfTypeAdded, "scene" },
+
+	{ "asset-texture",
+	  "Textures",
+	  "Texture assets hold the pixels plus how they are meant to be read: colour "
+	  "textures are sRGB, normal and roughness maps are linear, and getting that "
+	  "wrong is the usual cause of a material that looks washed out.\n"
+	  "Import brings in PNG/JPG/TGA/HDR; Create makes an empty one you point a "
+	  "material's Texture node at. HDR images are what an image-based sky lighting "
+	  "setup wants.",
+	  "Create a Texture asset.",
+	  "Content Browser", Check::AssetOfTypeAdded, "texture" },
+
+	{ "asset-mesh",
+	  "Static and skeletal meshes",
+	  "A Static Mesh is geometry with no skeleton: props, terrain rocks, "
+	  "architecture. Its editor tab previews it and shows the LOD chain the "
+	  "renderer picks from by screen size, and identical meshes are drawn as GPU "
+	  "instances rather than one draw call each.\n"
+	  "A Skeletal Mesh is the same thing plus a rig, and carries its Animation "
+	  "Clips. Both usually arrive through Import from a glTF/GLB — whether the file "
+	  "has a skin decides which one you get.",
+	  "Create a Static Mesh asset and double-click it to open its editor.",
+	  "Content Browser", Check::TabOfTypeOpened, "staticmesh" },
+
+	{ "asset-imported",
+	  "The import-only kinds",
+	  "Four families exist that the editor does not author, only convert:\n"
+	  "Audio — WAV, played through an Audio Source component.\n"
+	  "Font — TTF, used by UI widget text and the in-game UI.\n"
+	  "Animation Clip — comes along with a rigged glTF; states in an Animator "
+	  "State Machine reference these.\n"
+	  "Prefab — an entity subtree saved for reuse, made by saving a selection out "
+	  "of the World Outliner rather than from the Create menu.\n"
+	  "Shader assets sit next to those for hand-written shader code, for the cases "
+	  "the material graph cannot express.",
+	  "", "Content Browser", Check::ReadAck, "" },
+};
+
+// ── 7. Materials ──
 constexpr Step kMaterials[] = {
 	{ "material-graph",
 	  "Materials are node graphs",
@@ -305,6 +374,16 @@ constexpr Step kMaterials[] = {
 	  "the scene, so what you see there is what you get.",
 	  "Drag your material onto a Material component's asset slot in Details.",
 	  "Details", Check::MaterialAssigned, "" },
+
+	{ "material-function",
+	  "Material functions",
+	  "A Material Function is a reusable sub-graph — a bit of shading maths you "
+	  "want in five materials without copying it five times. It opens in the same "
+	  "node canvas and appears as a single node inside the materials that use it.\n"
+	  "Nothing is interpreted at runtime: on export a function is inlined into "
+	  "every material that calls it, so the shipped shader has no indirection.",
+	  "Create a Material Function and double-click it to open it.",
+	  "Content Browser", Check::TabOfTypeOpened, "materialfunction" },
 };
 
 // ── 7. Environment ──
@@ -481,7 +560,80 @@ constexpr Step kUI[] = {
 	  "", "", Check::ReadAck, "" },
 };
 
-// ── 14. Scripting ──
+// ── HorizonCode ──
+// Built entirely on the Level Script and the Game Instance, on purpose: those two
+// graphs exist in EVERY project whatever its scripting language, while a
+// HorizonCode Class asset only exists in a HorizonCode project. A chapter that
+// asked a Lua project to create one would be a step nobody there could finish.
+constexpr Step kHorizonCode[] = {
+	{ "hc-intro",
+	  "HorizonCode",
+	  "HorizonCode is the visual scripting language: a graph of nodes instead of "
+	  "text. White exec pins are the order things happen in, coloured data pins are "
+	  "the values flowing between them.\n"
+	  "The editor interprets the graph so you can play immediately, but a packaged "
+	  "build does not: on export every graph is translated into real C++ and "
+	  "compiled, the same way the material graphs become shader code. What you "
+	  "build here is not a slower way to write gameplay.\n"
+	  "It is the same node canvas as materials, particle systems and animator state "
+	  "machines — one set of gestures for all of them.",
+	  "", "", Check::ReadAck, "" },
+
+	{ "hc-level-script",
+	  "The Level Script",
+	  "View - Level Script opens the graph belonging to the scene you have open. It "
+	  "has the events the level itself cares about: Level Loaded, Level Unloaded "
+	  "and a per-frame update.\n"
+	  "It is stored inside the scene, so it travels with the level and is saved by "
+	  "the same Ctrl/Cmd+S.",
+	  "Open View - Level Script.",
+	  "", Check::TabOpen, "::LevelScript::" },
+
+	{ "hc-node",
+	  "Adding nodes",
+	  "Right-click the empty canvas for the searchable add menu, or drag off a pin "
+	  "and let go — the menu then lists only what can legally connect there.\n"
+	  "Drag from an out pin to an in pin to wire two nodes; drag a link away from "
+	  "its input to cut it. The canvas pans with the middle mouse button and zooms "
+	  "with the wheel, like the viewport.",
+	  "Add any node to the Level Script graph.",
+	  "", Check::HcNodeAdded, "" },
+
+	{ "hc-variables",
+	  "Graph variables",
+	  "The Variables list on the left of the canvas holds typed, persistent state "
+	  "for this graph — a score, a door's open flag, a reference to the player. Add "
+	  "one and it gives you Get and Set nodes for it; dragging the variable onto the "
+	  "canvas offers both.\n"
+	  "Functions live under it, each with its own sub-graph and an access modifier. "
+	  "Public ones can be called by name from another graph or from a script, which "
+	  "is how a HUD widget and the gameplay that feeds it stay decoupled.",
+	  "Add a variable to the Level Script graph.",
+	  "", Check::HcVariableAdded, "" },
+
+	{ "hc-game-instance",
+	  "The Game Instance",
+	  "View - Game Instance opens the one graph that outlives every scene: it is "
+	  "created before anything loads and runs until the game quits. Save data, "
+	  "settings, the current player, a scene-change request — anything that must "
+	  "survive a level change belongs here rather than in a level script.\n"
+	  "It is a project asset, not a scene one, so it is the same graph whichever "
+	  "level is open.",
+	  "Open View - Game Instance.",
+	  "", Check::TabOpen, "::GameInstance::" },
+
+	{ "hc-compile",
+	  "Compiling and the rest of the language",
+	  "The Compile button on the canvas runs exactly the translation the export "
+	  "would run and reports the first node that would not compile, highlighted in "
+	  "place — so a broken graph is found here rather than at packaging time.\n"
+	  "HorizonCode classes (their own asset, in a HorizonCode project) attach to an "
+	  "entity the way a script does, and widget graphs drive UI. All three are the "
+	  "same language with different events wired in.",
+	  "", "", Check::ReadAck, "" },
+};
+
+// ── Scripting ──
 constexpr Step kScripting[] = {
 	{ "language",
 	  "Your project's language",
@@ -489,18 +641,9 @@ constexpr Step kScripting[] = {
 	  "graphs), Lua, Python or C++ — chosen when it was created. The editor only "
 	  "offers the matching assets everywhere, so there is no way to end up with half "
 	  "a project in each.\n"
-	  "UI widgets and the two graphs in the next step are shared by every language.",
+	  "UI widgets and the two graphs from the HorizonCode chapter — the Level Script "
+	  "and the Game Instance — are shared by every language.",
 	  "", "", Check::ReadAck, "" },
-
-	{ "level-script",
-	  "Level Script and Game Instance",
-	  "View - Level Script opens the logic belonging to the current scene: level "
-	  "loaded, level unloaded, per-frame update.\n"
-	  "View - Game Instance opens the one graph that lives for the whole run of the "
-	  "game, across scene changes — the natural home for save data, settings and "
-	  "the current player.",
-	  "Open View - Level Script.",
-	  "", Check::TabOpen, "::LevelScript::" },
 
 	{ "entity-logic",
 	  "Logic on an entity",
@@ -521,6 +664,16 @@ constexpr Step kScripting[] = {
 	  "Gameplay listens to the action, so rebinding never touches your logic.",
 	  "Create an Input Action asset in the Content Browser.",
 	  "Content Browser", Check::AssetOfTypeAdded, "inputaction" },
+
+	{ "input-mapping",
+	  "Mapping contexts",
+	  "A Mapping Context is the other half: it binds concrete keys, buttons and "
+	  "axes to those actions, and several can be active at once with a priority. "
+	  "Walking, driving and being in a menu are three contexts you push and pop "
+	  "rather than three sets of if-statements.\n"
+	  "A Player Host on an entity is what activates them for a player.",
+	  "Create an Input Mapping Context asset.",
+	  "Content Browser", Check::AssetOfTypeAdded, "inputmappingcontext" },
 };
 
 // ── 15. Play ──
@@ -617,6 +770,8 @@ constexpr Chapter kChapters[] = {
 	  kComponents,  static_cast<int>(std::size(kComponents)) },
 	{ "content",     "Assets",             "The Content Browser, importing and creating",
 	  kContent,     static_cast<int>(std::size(kContent)) },
+	{ "assettypes",  "Asset types",        "Every kind of .hasset and where it comes from",
+	  kAssetTypes,  static_cast<int>(std::size(kAssetTypes)) },
 	{ "materials",   "Materials",          "Node-graph surfaces that compile everywhere",
 	  kMaterials,   static_cast<int>(std::size(kMaterials)) },
 	{ "environment", "Sky, weather, light","Atmosphere as scene data, plus local lights",
@@ -633,7 +788,9 @@ constexpr Chapter kChapters[] = {
 	  kNavigation,  static_cast<int>(std::size(kNavigation)) },
 	{ "ui",          "User interface",     "Widget designer and widget logic",
 	  kUI,          static_cast<int>(std::size(kUI)) },
-	{ "scripting",   "Gameplay logic",     "Level script, game instance, entity logic, input",
+	{ "horizoncode", "HorizonCode",        "Visual scripting: graphs, variables, compile-to-C++",
+	  kHorizonCode, static_cast<int>(std::size(kHorizonCode)) },
+	{ "scripting",   "Gameplay logic",     "Project language, entity logic and input assets",
 	  kScripting,   static_cast<int>(std::size(kScripting)) },
 	{ "play",        "Playing",            "Play in editor and the post-play report",
 	  kPlay,        static_cast<int>(std::size(kPlay)) },
@@ -672,6 +829,8 @@ bool satisfied(const Step& step, const Signals& base, const Signals& now)
 	case Check::ImportOpened:     return now.importOpens > base.importOpens;
 	case Check::PlayCycled:       return now.playSessions > base.playSessions;
 	case Check::MaterialAssigned: return now.materialsAssigned > base.materialsAssigned;
+	case Check::HcNodeAdded:      return now.hcNodes     > base.hcNodes;
+	case Check::HcVariableAdded:  return now.hcVariables > base.hcVariables;
 
 	// "Switched to" rather than "is on": a step that opens while the target is
 	// already showing must still ask the user to do it, not tick instantly.

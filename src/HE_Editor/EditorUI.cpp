@@ -312,6 +312,9 @@ void EditorUI::render(AppContext& ctx, float dt)
     if (ctx.projectLoaded)
     {
         renderEditor(ctx, dt);
+        // After renderEditor, not inside it: it has an early return for asset tabs,
+        // and these have to stay on screen (and keep watching) across a tab switch.
+        renderOverlays(ctx, dt);
     }
     else
     {
@@ -1577,9 +1580,6 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 
     InspectorPanel::render(ctx);
 
-    EditorSettingsPanel::DrawPreferencesWindow(ctx, s_showPreferences);
-    ProfilerPanel::DrawProfilerWindow(ctx, s_showProfiler);
-    EnvironmentPanel::DrawEnvironmentWindow(ctx, s_showEnvironment);
     // Level Script + Game Instance now render as editor tabs (see the tab dispatch).
 
     // ── Content Browser ─────────────────────────────────────────────────────
@@ -1590,22 +1590,37 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
     ContentBrowserPanel::render(ctx, s_tabSelectRequest,
         [&](const std::string& scenePath) { requestGuarded(GuardedAction::OpenScenePath, scenePath); });
 
-    // ── Interactive tutorial ────────────────────────────────────────────────
-    // Last, so its floating card and the highlight it draws around the panel of
-    // the current step sit on top of everything above. The window toggles it
-    // watches for are file statics here, so they are handed over explicitly.
-    {
-        TutorialPanel::UiFlags tutFlags;
-        tutFlags.profilerOpen    = s_showProfiler;
-        tutFlags.environmentOpen = s_showEnvironment;
-        tutFlags.exportOpen      = ExportDialogPanel::isOpen();
-        // The Preferences modal owns its own lifetime once opened (see
-        // DrawPreferencesWindow), so ask ImGui whether it is up rather than
-        // reading the one-shot request flag.
-        tutFlags.preferencesOpen = ImGui::IsPopupOpen("Preferences");
-        tutFlags.importDialogOpens = s_importDialogOpens;
-        tutFlags.contentRootKind   = ContentBrowserPanel::browsedRootKind();
-        TutorialPanel::render(ctx, dt, tutFlags);
-    }
 #endif // HE_IMGUI_ENABLED
 }
+
+#ifdef HE_IMGUI_ENABLED
+// Everything that must be on screen no matter which tab is active: the floating
+// tool windows the View/Edit menus toggle, and the guided tour.
+//
+// These all used to sit at the bottom of renderEditor(), which returns early when
+// an asset tab is active (a material graph, a particle graph, a widget, the Level
+// Script). So: opening Preferences, the Profiler or the Environment window from
+// inside an asset tab silently did nothing, and the tour vanished the moment the
+// user opened one — and, worse, stopped SAMPLING there, so every step whose
+// action is "open this asset's editor" could never see itself happen. Those were
+// exactly the steps that looked like they were not being noticed.
+//
+// Drawn after renderEditor returns, so they are on top of both layouts. The menu
+// toggles they read are file statics in this translation unit, hence the
+// explicit hand-over into UiFlags.
+void EditorUI::renderOverlays(AppContext& ctx, float dt)
+{
+    EditorSettingsPanel::DrawPreferencesWindow(ctx, s_showPreferences);
+    ProfilerPanel::DrawProfilerWindow(ctx, s_showProfiler);
+    EnvironmentPanel::DrawEnvironmentWindow(ctx, s_showEnvironment);
+
+    TutorialPanel::UiFlags tutFlags;
+    tutFlags.profilerOpen      = s_showProfiler;
+    tutFlags.environmentOpen   = s_showEnvironment;
+    tutFlags.exportOpen        = ExportDialogPanel::isOpen();
+    tutFlags.preferencesOpen   = EditorSettingsPanel::preferencesOpen();
+    tutFlags.importDialogOpens = s_importDialogOpens;
+    tutFlags.contentRootKind   = ContentBrowserPanel::browsedRootKind();
+    TutorialPanel::render(ctx, dt, tutFlags);
+}
+#endif // HE_IMGUI_ENABLED
