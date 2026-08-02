@@ -416,10 +416,51 @@ half-undoable. Outside a session, snapshot undo stays exactly as it is: it is
 simple, it works, and there is no reason to pay for operation-based undo when
 you are alone.
 
-**Recommended sequencing:** do *not* start this until structural deltas exist.
-Building inverse-undo on transforms alone means a second rewrite when
-create/delete arrives, and a partially-undoable editor is more confusing than one
-that says plainly "undo is limited while collaborating".
+### Implemented — `CollabUndo`
+
+The stack now exists and is wired into the Edit menu, so **everyone undoes and
+redoes their own changes**. It covers both kinds of change that replicate:
+transforms and authored assets.
+
+- Undo re-applies `before` and **publishes it as an ordinary edit**; redo does
+  the same with `after`. Nothing is restored, so it composes with other people's
+  work.
+- Recording clears the redo branch, as any undo stack does.
+- **Entries die with the lock.** `dropUnowned()` runs before every undo/redo, so
+  once you release a subject its entries vanish — someone else may have changed
+  it since, and the recorded `before` would overwrite their work rather than
+  undo yours.
+- A transform entry spans a whole edit, not one per frame: the editor keeps a
+  baseline for the held subject and records the delta against it.
+- An asset with no previous state (freshly created) cannot be undone — that
+  would mean deleting the file, a different operation than this stack models.
+- Menu labels name the change ("Undo change to MainMenu.huiw") rather than a bare
+  "Undo", which tells the user nothing when several kinds of edit are in flight.
+
+Still limited to what replicates: structural changes (create/delete/reparent)
+are neither synced nor undoable this way.
+
+## Authored-asset sync
+
+Every authored asset — HorizonCode graphs, materials, material functions, UI
+widgets, particle and animator graphs, input assets, scripts and scenes — travels
+over the session as a **chunked byte blob**, keyed by a hash of its project
+path. One mechanism covers all of them, without a line of per-type code, because
+they all funnel through `ContentManager::saveAsset`.
+
+That is also the hook: `setOnAssetSaved` is a pure notification, so HE_Core stays
+unaware that collaboration exists. Receivers write the bytes verbatim and reload,
+rather than deserializing per type — which is what makes it uniform.
+
+**Binary media is deliberately excluded.** Meshes, textures and audio do not
+travel this way: they are large, almost never edited during a session, and belong
+to source control. Pushing them through the session would quietly turn it into a
+poor file-sync system — the same boundary drawn at the very start of this design.
+
+Authority is the lock table again: publishing an asset requires holding its
+subject, the host re-checks on arrival, and a save is refused outright when
+someone else holds it. Applying a received asset sets a guard flag, so writing it
+to disk does not bounce straight back out through the save notification.
 
 ## Do private hosts need a TLS certificate? No — and here is why
 

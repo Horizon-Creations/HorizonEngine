@@ -7,9 +7,12 @@
 #include <Net/Socket.h>
 #include <Net/TcpTransport.h>
 
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <fstream>
+#include <iterator>
 #include <thread>
 
 #include <HorizonScene/HorizonWorld.h>
@@ -330,6 +333,16 @@ void CollabController::wireCallbacks()
 		m_snapshotTotal = total;
 	});
 
+	m_collab->onAssetUpdated([this](HE::Net::ParticipantId,
+	                                const HE::Net::CollabSession::AssetUpdate& a) {
+		if (!m_onRemoteAsset) return;
+		// Guard the write: applying it hits ContentManager::saveAsset, whose
+		// notification would otherwise publish the same bytes straight back.
+		m_applyingRemoteAsset = true;
+		m_onRemoteAsset(a.path, a.bytes);
+		m_applyingRemoteAsset = false;
+	});
+
 	m_collab->onTransform([this](HE::Net::ParticipantId,
 	                             const HE::Net::CollabSession::TransformDelta& d) {
 		if (m_onRemoteTransform) m_onRemoteTransform(d.subject, d.position, d.rotation, d.scale);
@@ -579,6 +592,81 @@ void CollabController::publishTransform(std::uint64_t subject,
 		m_hasLastTransform    = true;
 		m_lastTransformSendMs = nowMs;
 	}
+}
+
+// ─── Authored-asset sync ─────────────────────────────────────────────────────
+
+std::uint64_t CollabController::assetSubject(const std::string& relativePath)
+{
+	// FNV-1a over the normalised path. Entity subjects are small integers
+	// (handles), so setting the top bit keeps the two spaces from ever colliding
+	// in the shared lock table.
+	std::uint64_t hash = 1469598103934665603ull;
+	for (char c : relativePath)
+	{
+		if (c == '\\') c = '/';   // same asset, either separator
+		hash ^= static_cast<std::uint64_t>(static_cast<unsigned char>(c));
+		hash *= 1099511628211ull;
+	}
+	return hash | (1ull << 63);
+}
+
+bool CollabController::isSyncableAsset(const std::string& relativePath)
+{
+	const std::size_t dot = relativePath.find_last_of('.');
+	if (dot == std::string::npos) return false;
+
+	std::string ext = relativePath.substr(dot);
+	for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+	// Authored data only. Meshes, textures and audio are deliberately excluded:
+	// they are large, almost never edited during a session, and belong to source
+	// control — pushing them through the session would turn it into a poor file
+	// sync (see the scope boundary in docs/networking-layer-design.md).
+	static const char* kAuthored[] = {
+		".hscene",    // scenes
+		".hcode",     // HorizonCode graphs
+		".hmat",      // materials
+		".hmatfn",    // material functions
+		".huiw",      // UI widgets
+		".hpart",     // particle graphs
+		".hasm",      // animator state machines
+		".hinput",    // input assets
+		".lua", ".py",// scripts
+	};
+	for (const char* a : kAuthored)
+	{
+		if (ext == a) return true;
+	}
+	return false;
+}
+
+void CollabController::publishAsset(const std::string& relativePath,
+                                    const std::string& fullPath)
+{
+	if (!m_collab || !inSession()) return;
+	if (m_applyingRemoteAsset) return;      // this save WAS the remote change
+	if (!isSyncableAsset(relativePath)) return;
+
+	std::ifstream f(fullPath, std::ios::binary);
+	if (!f) return;
+	std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(f)),
+	                                 std::istreambuf_iterator<char>());
+	if (bytes.empty()) return;
+
+	const std::uint64_t subject = assetSubject(relativePath);
+
+	// Take the lock if it is free. Without this a save would be silently dropped
+	// just because the user edited the asset in a panel rather than selecting it
+	// in a way that happened to take a lock.
+	if (!m_collab->ownsLock(subject))
+	{
+		if (m_collab->lockFor(subject)) return;   // someone else owns it — refuse
+		m_collab->requestLock(subject);
+		if (!m_collab->ownsLock(subject)) return; // a client must await the grant
+	}
+
+	m_collab->sendAsset(subject, relativePath, bytes);
 }
 
 // ─── Locks ───────────────────────────────────────────────────────────────────

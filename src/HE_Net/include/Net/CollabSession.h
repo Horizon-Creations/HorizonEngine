@@ -199,6 +199,32 @@ public:
         m_onTransform = std::move(fn);
     }
 
+    // ── Authored-asset sync ──
+    // Every authored asset — HorizonCode graphs, materials, UI widgets, particle
+    // and animator graphs, scenes — is an HAsset file, so one blob transfer
+    // covers all of them without a single line of per-type code.
+    //
+    // Binary media (meshes, textures, audio) deliberately does NOT travel this
+    // way: those are large, rarely edited in-session, and are source control's
+    // job. See the scope boundary in the design document.
+    //
+    // The subject is the same opaque 64-bit id used for locks, so an asset and
+    // an entity are arbitrated by exactly the same table.
+    struct AssetUpdate {
+        std::uint64_t             subject = 0;
+        std::string               path;      // project-relative
+        std::vector<std::uint8_t> bytes;
+    };
+
+    // Publish a saved asset. Ignored unless we hold the lock on `subject`.
+    bool sendAsset(std::uint64_t subject, const std::string& path,
+                   const std::vector<std::uint8_t>& bytes);
+
+    // A remote peer saved an asset — the editor writes it and reloads.
+    void onAssetUpdated(std::function<void(ParticipantId, const AssetUpdate&)> fn) {
+        m_onAsset = std::move(fn);
+    }
+
     // ── Locks ──
     // Ask to own `subject`. On the host this is answered immediately; on a
     // client it is a request, and the answer arrives via onLockChanged /
@@ -280,6 +306,14 @@ private:
     // Transforms
     void handleTransformUpdate(ConnectionId conn, BitReader& r);   // host
     void handleTransformRelay(BitReader& r);                       // client
+
+    // Assets
+    void handleAssetUpdate(ConnectionId conn, BitReader& r);       // host
+    void handleAssetRelay(BitReader& r);                           // client
+    void sendAssetChunks(ConnectionId conn, ParticipantId from, const AssetUpdate& a);
+    void installAssetChunkHandlers();
+    bool readAssetHeader(BitReader& r, AssetUpdate& out, std::uint32_t& outTotal,
+                         std::uint32_t& outChunks) const;
     static void writeTransformBody(BitWriter& w, const TransformDelta& d);
     static bool readTransformBody(BitReader& r, TransformDelta& out);
 
@@ -318,6 +352,19 @@ private:
     // The authoritative table on the host; a replica on clients.
     std::vector<LockInfo> m_locks;
 
+    // Inbound asset transfers in progress, keyed by the sender's connection so
+    // two peers saving at once cannot interleave into one buffer.
+    struct AssetAssembly {
+        ConnectionId              from = kInvalidConnection;
+        ParticipantId             sender = kInvalidParticipant;
+        std::uint64_t             subject = 0;
+        std::string               path;
+        std::vector<std::uint8_t> bytes;
+        std::uint32_t             expected = 0;
+    };
+    std::vector<AssetAssembly> m_assetAssembly;
+
+    std::function<void(ParticipantId, const AssetUpdate&)>     m_onAsset;
     std::function<void(ParticipantId, const TransformDelta&)> m_onTransform;
     std::function<void(const LockInfo&, bool)>         m_onLockChanged;
     std::function<void(std::uint64_t, LockDenyReason)> m_onLockDenied;

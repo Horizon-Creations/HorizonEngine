@@ -1194,7 +1194,13 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 		std::filesystem::create_directories(std::filesystem::path(fullPath).parent_path(), ec);
 	}
 
-	return w.write(fullPath, typeId);
+	if (!w.write(fullPath, typeId)) return false;
+
+	// Tell whoever is listening that this asset's bytes changed. Used by the
+	// editor to publish the change to a collaboration session; ContentManager
+	// itself stays unaware of any of that.
+	if (m_onAssetSaved) m_onAssetSaved(asset.path, fullPath);
+	return true;
 }
 
 // ─── Shader-variant chunk codecs (PSHD / PPSD) ───────────────────────────────

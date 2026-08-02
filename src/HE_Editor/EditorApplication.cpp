@@ -288,6 +288,51 @@ void EditorApplication::OnInit()
 	// A received collaboration snapshot replaces the whole world. Selection and
 	// undo history still hold entity handles from the world that just went away,
 	// so acting on them afterwards would touch freed storage.
+	// ── Per-user undo/redo for the session ───────────────────────────────────
+	// Undo becomes an ordinary edit that is republished, not a snapshot
+	// restore — see CollabUndo.h.
+	m_collabUndo.setHandlers(
+		[this](std::uint64_t subject, const float v[9]) {
+			if (!m_editorWorld) return;
+			auto& reg = m_editorWorld->registry();
+			const auto e = static_cast<entt::entity>(static_cast<entt::id_type>(subject));
+			if (!reg.valid(e)) return;
+			if (auto* tc = reg.try_get<TransformComponent>(e))
+			{
+				tc->position = glm::vec3(v[0], v[1], v[2]);
+				tc->rotation = glm::vec3(v[3], v[4], v[5]);
+				tc->scale    = glm::vec3(v[6], v[7], v[8]);
+				tc->dirty    = true;
+				// Publishing it is what makes the undo visible to everyone —
+				// it travels as a normal change, not as a rewind.
+				const float p[3] = { v[0], v[1], v[2] };
+				const float r[3] = { v[3], v[4], v[5] };
+				const float s[3] = { v[6], v[7], v[8] };
+				m_collab.publishTransform(subject, p, r, s, 0);
+			}
+		},
+		[this](const std::string& path, const std::vector<std::uint8_t>& bytes) {
+			applyAssetBytes(path, bytes);
+			m_collab.publishAsset(path, contentManager().resolveSavePath(path));
+		},
+		[this](std::uint64_t subject) { return m_collab.ownsLock(subject); });
+
+	// ── Authored-asset sync ──────────────────────────────────────────────────
+	// Every asset type funnels through ContentManager::saveAsset, so one hook
+	// covers HorizonCode graphs, materials, UI widgets, particle and animator
+	// graphs and scenes alike.
+	contentManager().setOnAssetSaved(
+		[this](const std::string& relPath, const std::string& fullPath) {
+			m_collab.publishAsset(relPath, fullPath);
+		});
+
+	m_collab.onRemoteAsset([this](const std::string& relPath,
+	                              const std::vector<std::uint8_t>& bytes) {
+		applyAssetBytes(relPath, bytes);
+		Logger::Log(Logger::LogLevel::Info,
+		            ("Collab: applied remote change to " + relPath).c_str());
+	});
+
 	// A remote peer moved something. Applying it here (rather than inside
 	// CollabController) keeps the network layer out of the ECS.
 	m_collab.onRemoteTransform([this](std::uint64_t subject, const float pos[3],
@@ -1694,6 +1739,32 @@ void EditorApplication::OnRender(float dt)
 					const float p[3] = { tc->position.x, tc->position.y, tc->position.z };
 					const float r[3] = { tc->rotation.x, tc->rotation.y, tc->rotation.z };
 					const float s[3] = { tc->scale.x, tc->scale.y, tc->scale.z };
+
+					// Record the change for OUR undo stack before publishing it.
+					// The "before" is whatever we last saw for this subject; the
+					// first observation only establishes a baseline.
+					const float now9[9] = { p[0], p[1], p[2], r[0], r[1], r[2],
+					                        s[0], s[1], s[2] };
+					if (m_undoBaselineSubject == subject)
+					{
+						bool changed = false;
+						for (int i = 0; i < 9; ++i)
+						{
+							if (std::fabs(now9[i] - m_undoBaseline[i]) > 0.0005f)
+							{ changed = true; break; }
+						}
+						if (changed)
+						{
+							m_collabUndo.recordTransform(subject, m_undoBaseline, now9);
+							std::memcpy(m_undoBaseline, now9, sizeof(now9));
+						}
+					}
+					else
+					{
+						m_undoBaselineSubject = subject;
+						std::memcpy(m_undoBaseline, now9, sizeof(now9));
+					}
+
 					m_collab.publishTransform(subject, p, r, s, nowMs);
 				}
 			}
@@ -2832,6 +2903,26 @@ void EditorApplication::dumpFrameHeadless()
 	}
 }
 
+void EditorApplication::applyAssetBytes(const std::string& relativePath,
+                                        const std::vector<std::uint8_t>& bytes)
+{
+	// Write the bytes exactly as they arrived, then reload so open panels pick
+	// the new content up. Writing the file rather than deserializing per asset
+	// type is what keeps this uniform across HorizonCode, materials, UI widgets,
+	// particle and animator graphs and scenes alike.
+	const std::string full = contentManager().resolveSavePath(relativePath);
+	{
+		std::error_code ec;
+		std::filesystem::create_directories(std::filesystem::path(full).parent_path(), ec);
+		std::ofstream out(full, std::ios::binary | std::ios::trunc);
+		if (!out) return;
+		out.write(reinterpret_cast<const char*>(bytes.data()),
+		          static_cast<std::streamsize>(bytes.size()));
+		if (!out) return;
+	}
+	contentManager().loadAsset(relativePath);
+}
+
 AppContext EditorApplication::makeContext()
 {
 	m_sdlDialogBridge.pendingDirResult  = &m_pendingDirResult;
@@ -2960,6 +3051,7 @@ AppContext EditorApplication::makeContext()
 		.dialogBridge        = &m_sdlDialogBridge,
 #endif
 		.collab              = &m_collab,
+		.collabUndo          = &m_collabUndo,
 	};
 }
 

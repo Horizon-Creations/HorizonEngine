@@ -7,6 +7,7 @@
 #include "EditorUndo.h"
 #include "EditorCamera.h"
 #include "CollabController.h"
+#include "CollabUndo.h"
 #include <HorizonScene/HorizonScene.h>
 #include <Scripting/ScriptEngine.h>
 #include <HorizonScene/PhysicsWorld.h>
@@ -345,6 +346,10 @@ struct AppContext
 	// Live collaboration session (see CollabController). Null until the editor
 	// has constructed it; the panel treats that as "not available".
 	CollabController* collab = nullptr;
+
+	// Per-user undo/redo used INSTEAD of the snapshot stack while a session is
+	// running — see CollabUndo.h for why snapshots cannot work there.
+	CollabUndo* collabUndo = nullptr;
 };
 
 class EditorApplication : public HE::Application
@@ -393,6 +398,11 @@ private:
 	// Per-project open-tab persistence (stored in the global config keyed by
 	// project path). restoreOpenTabs runs on project load; saveOpenTabs runs when
 	// the tab set changes (via the signature check each frame) + on shutdown.
+	// Write an asset file verbatim and reload it. Shared by remote asset updates
+	// and by collaborative undo — writing bytes rather than deserializing by type
+	// is what makes both uniform across every asset kind.
+	void        applyAssetBytes(const std::string& relativePath,
+	                            const std::vector<std::uint8_t>& bytes);
 	void        saveOpenTabs();
 	void        restoreOpenTabs();
 	std::string m_lastTabSig; // change detection for the auto-save
@@ -425,6 +435,11 @@ private:
 
 	// Live collaboration. Poll-driven: pumped once per frame from OnRender.
 	CollabController m_collab;
+	CollabUndo       m_collabUndo;
+	// Last transform we recorded for the held subject, so an undo entry spans a
+	// whole edit rather than one entry per frame of a drag.
+	std::uint64_t    m_undoBaselineSubject = 0;
+	float            m_undoBaseline[9] {};
 
 	// In-game UI pointer input during PIE. The viewport panel reports the
 	// mouse in render-target pixels each frame (reportPlayUIPointer); the

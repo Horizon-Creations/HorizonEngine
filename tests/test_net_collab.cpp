@@ -895,6 +895,108 @@ TEST_CASE("CollabSession: the host's own move reaches clients")
     CHECK(received.position[1] == doctest::Approx(42.0f));
 }
 
+// ─── Authored-asset sync ─────────────────────────────────────────────────────
+
+TEST_CASE("CollabSession: a saved asset reaches the other side intact")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+    REQUIRE(p->client->isJoined());
+
+    constexpr std::uint64_t kAsset = 0x8000'0000'0000'1234ull;
+    REQUIRE(p->client->requestLock(kAsset));
+    p->pump(4);
+
+    CollabSession::AssetUpdate got;
+    bool arrived = false;
+    p->host->onAssetUpdated([&](ParticipantId, const CollabSession::AssetUpdate& a) {
+        got = a;
+        arrived = true;
+    });
+
+    const auto payload = makeBlob(3000);
+    REQUIRE(p->client->sendAsset(kAsset, "Content/Materials/Steel.hmat", payload));
+    p->pump(6);
+
+    REQUIRE(arrived);
+    CHECK(got.subject == kAsset);
+    CHECK(got.path == "Content/Materials/Steel.hmat");
+    CHECK(got.bytes == payload);   // byte-for-byte, or the asset would be corrupt
+}
+
+TEST_CASE("CollabSession: a large asset survives chunking")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+
+    constexpr std::uint64_t kAsset = 0x8000'0000'0000'5555ull;
+    REQUIRE(p->client->requestLock(kAsset));
+    p->pump(4);
+
+    CollabSession::AssetUpdate got;
+    bool arrived = false;
+    p->host->onAssetUpdated([&](ParticipantId, const CollabSession::AssetUpdate& a) {
+        got = a; arrived = true;
+    });
+
+    // Several chunks' worth — a graph-heavy scene or widget can reach this.
+    const auto payload = makeBlob(800 * 1024);
+    REQUIRE(p->client->sendAsset(kAsset, "Content/UI/Menu.huiw", payload));
+    p->pump(30);
+
+    REQUIRE(arrived);
+    CHECK(got.bytes.size() == payload.size());
+    CHECK(got.bytes == payload);
+}
+
+TEST_CASE("CollabSession: saving an asset someone else holds is refused")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+
+    constexpr std::uint64_t kAsset = 0x8000'0000'0000'7777ull;
+    REQUIRE(p->host->requestLock(kAsset));
+    p->pump(4);
+
+    bool arrived = false;
+    p->host->onAssetUpdated([&](ParticipantId, const CollabSession::AssetUpdate&) {
+        arrived = true;
+    });
+
+    CHECK_FALSE(p->client->sendAsset(kAsset, "Content/Materials/Steel.hmat",
+                                     makeBlob(128)));
+    p->pump(6);
+    CHECK_FALSE(arrived);
+}
+
+TEST_CASE("CollabSession: the host's asset save reaches clients")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+
+    constexpr std::uint64_t kAsset = 0x8000'0000'0000'0001ull;
+    REQUIRE(p->host->requestLock(kAsset));
+    p->pump(4);
+
+    CollabSession::AssetUpdate got;
+    bool arrived = false;
+    p->client->onAssetUpdated([&](ParticipantId, const CollabSession::AssetUpdate& a) {
+        got = a; arrived = true;
+    });
+
+    const auto payload = makeBlob(2048);
+    REQUIRE(p->host->sendAsset(kAsset, "Content/Scripts/Player.hcode", payload));
+    p->pump(8);
+
+    REQUIRE(arrived);
+    CHECK(got.path == "Content/Scripts/Player.hcode");
+    CHECK(got.bytes == payload);
+}
+
 // ─── State sequence ──────────────────────────────────────────────────────────
 
 TEST_CASE("CollabSession: the joiner adopts the host's state sequence")

@@ -142,6 +142,29 @@ public:
 		m_onRemoteTransform = std::move(fn);
 	}
 
+	// ── Authored-asset sync ──
+	// A stable subject id for an asset path, so an asset and an entity are
+	// arbitrated by the same lock table.
+	static std::uint64_t assetSubject(const std::string& relativePath);
+
+	// True when this asset kind should travel over the session at all. Authored
+	// data (graphs, materials, UI, scenes) yes; binary media (meshes, textures,
+	// audio) no — those are large, rarely edited live, and source control's job.
+	static bool isSyncableAsset(const std::string& relativePath);
+
+	// Publish a saved asset. Claims the lock first when nobody holds it, so
+	// saving does not silently do nothing just because the user never selected
+	// the asset in a way that took a lock.
+	void publishAsset(const std::string& relativePath, const std::string& fullPath);
+
+	// Fires when a peer saved an asset: (relativePath, bytes). The editor writes
+	// the file and reloads — CollabController does not touch the ContentManager.
+	void onRemoteAsset(
+		std::function<void(const std::string&, const std::vector<std::uint8_t>&)> fn)
+	{
+		m_onRemoteAsset = std::move(fn);
+	}
+
 	// ── Locks ──
 	bool requestLock(std::uint64_t subject);
 	void releaseLock(std::uint64_t subject);
@@ -233,6 +256,11 @@ private:
 
 	std::function<void(std::uint64_t, const float[3], const float[3], const float[3])>
 		m_onRemoteTransform;
+	std::function<void(const std::string&, const std::vector<std::uint8_t>&)>
+		m_onRemoteAsset;
+	// Set while applying a received asset, so writing it to disk does not bounce
+	// straight back out as our own change.
+	bool m_applyingRemoteAsset = false;
 
 	std::function<void()> m_onWorldReplaced;
 };
