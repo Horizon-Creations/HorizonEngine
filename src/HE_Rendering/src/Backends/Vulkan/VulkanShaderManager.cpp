@@ -14,7 +14,7 @@ ShaderHandle VulkanShaderManager::load(const char* path, HE::ShaderType type)
 {
     if (!fs::exists(path))
     {
-        Logger::Log(Logger::LogLevel::Error, (std::string("VulkanShaderManager: shader file not found: ") + path).c_str());
+        HE_LOG_ERROR(RHI, "%s", (std::string("VulkanShaderManager: shader file not found: ") + path).c_str());
         return { 0, false };
     }
 
@@ -22,7 +22,7 @@ ShaderHandle VulkanShaderManager::load(const char* path, HE::ShaderType type)
     std::ifstream file(path, std::ios::binary | std::ios::ate);
     if (!file.is_open())
     {
-        Logger::Log(Logger::LogLevel::Error, (std::string("VulkanShaderManager: failed to open shader file: ") + path).c_str());
+        HE_LOG_ERROR(RHI, "%s", (std::string("VulkanShaderManager: failed to open shader file: ") + path).c_str());
         return { 0, false };
     }
 
@@ -49,14 +49,14 @@ ShaderHandle VulkanShaderManager::load(const char* path, HE::ShaderType type)
     {
         if (vkCreateShaderModule(m_device, &createInfo, nullptr, &shaderModule) != VK_SUCCESS)
         {
-            Logger::Log(Logger::LogLevel::Error, "VulkanShaderManager: failed to create shader module");
+            HE_LOG_ERROR(RHI, "%s", "VulkanShaderManager: failed to create shader module");
             return { 0, false };
         }
         m_shaderModules[handle.id] = shaderModule;
     }
     else
     {
-        Logger::Log(Logger::LogLevel::Warning, "VulkanShaderManager: device not set, shader module not created");
+        HE_LOG_WARN(RHI, "%s", "VulkanShaderManager: device not set, shader module not created");
     }
 
     m_loadedShaders.push_back(handle);
@@ -83,7 +83,7 @@ bool VulkanShaderManager::compile(ShaderHandle& handle)
         handle.ready = true;
         return true;
     }
-    Logger::Log(Logger::LogLevel::Error, "VulkanShaderManager: shader module not found for compile");
+    HE_LOG_ERROR(RHI, "%s", "VulkanShaderManager: shader module not found for compile");
     return false;
 }
 

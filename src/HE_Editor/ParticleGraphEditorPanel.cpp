@@ -94,7 +94,7 @@ static bool saveToDisk(State& st, AppContext& ctx)
 	if (ctx.world)
 		for (auto [e, ps] : ctx.world->registry().view<ParticleSystemComponent>().each())
 			if (ps.particleAssetId == st.assetId) ParticleSystem::markConfigDirty(ps);
-	Logger::Log(Logger::LogLevel::Info, ("ParticleGraphEditor: saved '" + st.name + "'").c_str());
+	HE_LOG_INFO(Editor, "%s", ("ParticleGraphEditor: saved '" + st.name + "'").c_str());
 	return true;
 }
 

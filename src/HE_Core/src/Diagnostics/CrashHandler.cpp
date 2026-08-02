@@ -1,4 +1,5 @@
 #include "Diagnostics/CrashHandler.h"
+#include "Diagnostics/Log.h"
 
 #ifndef _WIN32
 #include <csignal>
@@ -75,6 +76,14 @@ static void crashHandler(int sig, siginfo_t*, void*)
         for (int i = 0; i < depth; ++i)
             std::fprintf(f, "  #%d  %p\n", i, frames[i]);
     }
+
+    // Recent log history. The stack trace says WHERE it died; these lines say
+    // what the engine was doing on the way there — which asset was streaming in,
+    // which shader had just compiled, which script had just run.
+    std::fprintf(f, "\n--- Last %d log lines ---\n", HE::Log::kRingCapacity);
+    HE::Log::forEachRecent([](const char* line, void* user) {
+        std::fprintf(static_cast<FILE*>(user), "  %s\n", line);
+    }, f);
 
     std::fprintf(f, "===================================\n");
     if (f != stderr) std::fclose(f);

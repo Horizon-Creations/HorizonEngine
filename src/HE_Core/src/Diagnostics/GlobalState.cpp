@@ -1,6 +1,8 @@
 #include "Diagnostics/GlobalState.h"
+#include "Diagnostics/Log.h"
 #include "Diagnostics/Logger.h"
 #include <algorithm>
+#include <cstdlib>
 #include <fstream>
 #include <filesystem>
 #include <memory>
@@ -45,13 +47,20 @@ void GlobalState::setLogFile(const std::string& exePath)
 	// Derive log file next to the exe: <exeDir>/HorizonEngine.log
 	fs::path logPath =
 		fs::path(exePath).parent_path() / "HorizonEngine.log";
-	// Truncate on each launch so every run starts with a fresh log (one run = one file).
-	m_logFileStream.open(logPath.string(), std::ios::out | std::ios::trunc);
-}
+	// One run = one file, but the three previous runs are rotated to
+	// HorizonEngine.1/2/3.log rather than dropped: after a crash the interesting
+	// log is the one from BEFORE the restart, and truncating on launch used to
+	// destroy it before anyone could look.
+	HE::Log::openLogFile(logPath.string(), /*keepBackups=*/3);
 
-std::ofstream& GlobalState::getLogFileStream()
-{
-	return m_logFileStream;
+	// Verbosity comes from (lowest to highest priority) the built-in default,
+	// the "logVerbosity" config entry, and the HE_LOG environment variable, so a
+	// user can crank up one subsystem for a single run without editing anything:
+	//     HE_LOG=Physics=Trace,RHI=Debug ./HorizonEngine
+	if (const char* env = std::getenv("HE_LOG"))
+		HE::Log::configureFromString(env);
+	if (std::getenv("HE_LOG_NO_CONSOLE"))
+		HE::Log::setConsoleEnabled(false);
 }
 
 std::string GlobalState::getDumpsDir() const
@@ -69,7 +78,7 @@ void GlobalState::readConfig()
 {
 	if (!fs::exists("config.json"))
 	{
-		Logger::Log(Logger::LogLevel::Warning, "No config file found — using defaults");
+		HE_LOG_WARN(Config, "%s", "No config file found — using defaults");
 		m_engineStatus.selectedRHI = defaultRHI();
 		m_engineStatus.lastProjectPath = "";
 		m_engineStatus.knownProjects.clear();
@@ -79,7 +88,7 @@ void GlobalState::readConfig()
 	std::ifstream configFile("config.json");
 	if (!configFile.is_open())
 	{
-		Logger::Log(Logger::LogLevel::Error, "Failed to open config file.");
+		HE_LOG_ERROR(Config, "%s", "Failed to open config file.");
 		return;
 	}
 	// config.json is written on many events (project open, RHI change, …); a crash
@@ -92,7 +101,7 @@ void GlobalState::readConfig()
 	json j = json::parse(configFile, nullptr, /*allow_exceptions=*/false);
 	if (j.is_discarded() || !j.is_object())
 	{
-		Logger::Log(Logger::LogLevel::Warning,
+		HE_LOG_WARN(Config, "%s",
 			"config.json is corrupt or unreadable — resetting to defaults");
 		m_engineStatus.selectedRHI     = defaultRHI();
 		m_engineStatus.lastProjectPath = "";
@@ -143,6 +152,19 @@ void GlobalState::readConfig()
 			}
 		}
 	}
+
+	// Persisted log verbosity ("Render=Debug,Physics=Trace"), then HE_LOG again so
+	// the environment always wins over whatever the config happens to hold.
+	if (const std::string spec = getCustomConfigString("logVerbosity"); !spec.empty())
+		HE::Log::configureFromString(spec.c_str());
+	if (const char* env = std::getenv("HE_LOG"))
+		HE::Log::configureFromString(env);
+
+	HE_LOG_INFO(Config, "Config loaded: RHI=%d, lastProject='%s', %zu known project(s), %zu custom entrie(s)",
+	            static_cast<int>(m_engineStatus.selectedRHI),
+	            m_engineStatus.lastProjectPath.c_str(),
+	            m_engineStatus.knownProjects.size(),
+	            m_customConfig.size());
 }
 
 bool GlobalState::writeConfig()
@@ -168,7 +190,7 @@ bool GlobalState::writeConfig()
 		std::ofstream out(tmp, std::ios::trunc);
 		if (!out.is_open())
 		{
-			Logger::Log(Logger::LogLevel::Error, "Failed to open config file for writing.");
+			HE_LOG_ERROR(Config, "%s", "Failed to open config file for writing.");
 			return false;
 		}
 		// Serialize with the "replace" error handler: nlohmann's default dump()
@@ -185,7 +207,7 @@ bool GlobalState::writeConfig()
 			out.close();
 			std::error_code ec;
 			fs::remove(tmp, ec);
-			Logger::Log(Logger::LogLevel::Error, "Failed to write config file.");
+			HE_LOG_ERROR(Config, "%s", "Failed to write config file.");
 			return false;
 		}
 	}
@@ -195,7 +217,7 @@ bool GlobalState::writeConfig()
 	{
 		std::error_code ec2;
 		fs::remove(tmp, ec2);
-		Logger::Log(Logger::LogLevel::Error, "Failed to commit config file.");
+		HE_LOG_ERROR(Config, "%s", "Failed to commit config file.");
 		return false;
 	}
 	return true;
@@ -313,7 +335,7 @@ bool GlobalState::refreshContentFolder()
 {
 	if (m_engineStatus.lastProjectPath.empty())
 	{
-		Logger::Log(Logger::LogLevel::Warning, "No project loaded — cannot refresh content folder.");
+		HE_LOG_WARN(Config, "%s", "No project loaded — cannot refresh content folder.");
 		return false;
 	}
 
@@ -328,7 +350,7 @@ bool GlobalState::refreshContentFolder()
 	fs::path contentFolderpath = projectPath / "Content";
 	if (!fs::is_directory(contentFolderpath, ec))
 	{
-		Logger::Log(Logger::LogLevel::Error, ("Content folder not found at " + contentFolderpath.string()).c_str());
+		HE_LOG_ERROR(Config, "%s", ("Content folder not found at " + contentFolderpath.string()).c_str());
 		return false;
 	}
 
@@ -351,9 +373,9 @@ bool GlobalState::refreshContentFolder()
 	// Old Folder/File nodes are gone — tell pointer-holders to re-resolve by path.
 	contentFolderVersion.fetch_add(1, std::memory_order_release);
 
-	Logger::Log(Logger::LogLevel::Info, "Content folder refreshed.");
-	Logger::Log(Logger::LogLevel::Info, ("Number of folders: " + std::to_string(m_contentFolder.subfolders.size())).c_str());
-	Logger::Log(Logger::LogLevel::Info, ("Number of files: " + std::to_string(m_contentFolder.files.size())).c_str());
+	HE_LOG_INFO(Config, "%s", "Content folder refreshed.");
+	HE_LOG_INFO(Config, "%s", ("Number of folders: " + std::to_string(m_contentFolder.subfolders.size())).c_str());
+	HE_LOG_INFO(Config, "%s", ("Number of files: " + std::to_string(m_contentFolder.files.size())).c_str());
 	return true;
 }
 
@@ -464,7 +486,7 @@ bool GlobalState::refreshEngineFolder(const std::string& engineContentAbsPath,
 	fs::path enginePath = engineContentAbsPath;
 	if (!fs::is_directory(enginePath, ec))
 	{
-		Logger::Log(Logger::LogLevel::Warning, ("Engine content folder not found at " + enginePath.string()).c_str());
+		HE_LOG_WARN(Config, "%s", ("Engine content folder not found at " + enginePath.string()).c_str());
 		return false;
 	}
 
@@ -491,7 +513,7 @@ bool GlobalState::refreshEngineFolder(const std::string& engineContentAbsPath,
 	}
 	engineFolderVersion.fetch_add(1, std::memory_order_release);
 
-	Logger::Log(Logger::LogLevel::Info, "Engine content folder refreshed.");
+	HE_LOG_INFO(Config, "%s", "Engine content folder refreshed.");
 	return true;
 }
 

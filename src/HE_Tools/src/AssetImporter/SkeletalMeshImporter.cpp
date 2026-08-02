@@ -17,7 +17,7 @@ namespace
 
 void logError(const std::string& msg)
 {
-    Logger::Log(Logger::LogLevel::Error, ("SkeletalMeshImporter: " + msg).c_str());
+    HE_LOG_ERROR(Tool, "%s", ("SkeletalMeshImporter: " + msg).c_str());
 }
 
 // Build the joint-index lookup: cgltf_node* → index in skin.joints[]

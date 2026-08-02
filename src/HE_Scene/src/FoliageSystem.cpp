@@ -4,6 +4,7 @@
 #include "HorizonScene/Components/TerrainComponent.h"
 #include "HorizonScene/Components/TransformComponent.h"
 #include "HorizonScene/TerrainMeshGenerator.h"
+#include <Diagnostics/Log.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <cmath>
 #include <cstdint>
@@ -39,7 +40,12 @@ void FoliageSystem::update(HorizonWorld& world)
         foliage.dirty = false;
         foliage.cachedInstances.clear();
 
-        if (foliage.meshAssetId == HE::UUID{}) continue;
+        if (foliage.meshAssetId == HE::UUID{})
+        {
+            HE_LOG_WARN(Foliage, "Entity %u: foliage layer has no mesh assigned — "
+                                 "nothing will be scattered", static_cast<uint32_t>(entity));
+            continue;
+        }
 
         // Terrain world-space origin from TransformComponent if present
         glm::vec3 origin(0.f);
@@ -50,7 +56,20 @@ void FoliageSystem::update(HorizonWorld& world)
         const float sizeZ  = terrain.sizeZ;
         const float area   = sizeX * sizeZ;
         const int   count  = static_cast<int>(area * foliage.density);
-        if (count <= 0) continue;
+        if (count <= 0)
+        {
+            HE_LOG_WARN(Foliage, "Entity %u: foliage density %.4f over a %.0fx%.0f terrain "
+                                 "yields 0 instances", static_cast<uint32_t>(entity),
+                        foliage.density, sizeX, sizeZ);
+            continue;
+        }
+        // Scattering is O(count) and rebuilt whenever the layer is dirtied; a
+        // density typo (0.5/m² over a 1 km terrain) is otherwise felt only as a
+        // mysterious multi-second editor freeze.
+        if (count > 200000)
+            HE_LOG_WARN(Foliage, "Entity %u: scattering %d foliage instances "
+                                 "(density %.4f over %.0fx%.0f) — this is very expensive",
+                        static_cast<uint32_t>(entity), count, foliage.density, sizeX, sizeZ);
 
         foliage.cachedInstances.reserve(static_cast<size_t>(count));
 
@@ -73,5 +92,8 @@ void FoliageSystem::update(HorizonWorld& world)
             m = glm::scale(m, glm::vec3(scale));
             foliage.cachedInstances.push_back(m);
         }
+
+        HE_LOG_DEBUG(Foliage, "Entity %u: scattered %d foliage instance(s) over %.0fx%.0f",
+                     static_cast<uint32_t>(entity), count, sizeX, sizeZ);
     }
 }

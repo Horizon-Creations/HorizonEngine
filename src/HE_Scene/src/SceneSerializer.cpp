@@ -37,12 +37,15 @@
 #include "HorizonScene/Components/NavAgentComponent.h"
 #include "HorizonScene/NavigationSystem.h"
 #include "HorizonScene/EngineApi.h"   // HE_ENV_FIELDS_* — the EnvironmentComponent field list
+#include <Diagnostics/Log.h>
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <cstring>
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 
 using json = nlohmann::json;
 
@@ -593,8 +596,43 @@ namespace
 	}
 
 	// ── JSON → components of one entity ──────────────────────────────────────
+	// Every component key applyComponents below knows how to restore. A scene
+	// carrying anything else is silently losing data — usually a component that
+	// was added to the save path but not the load path, or a scene written by a
+	// newer build. Reported once per unknown key rather than per entity.
+	bool isKnownComponentKey(const std::string& key)
+	{
+		static const std::unordered_set<std::string> kKnown = {
+			"animator", "animatorblend", "animstatemachine", "audiolistener",
+			"audiosource", "camera", "characterController", "collider", "decal",
+			"environment", "foliage", "light", "lod", "material", "mesh",
+			"navagent", "navmesh", "particlesystem", "propertyanimator",
+			"rigidbody", "script", "skeletalmesh", "terrain", "transform",
+			"transform2d", "uibutton", "uicanvas", "uielement", "uiimage",
+			"uitext", "weather",
+		};
+		return kKnown.count(key) > 0;
+	}
+
+	void warnUnknownComponents(const json& comps)
+	{
+		if (!comps.is_object()) return;
+		static std::mutex                   s_mutex;
+		static std::unordered_set<std::string> s_reported;
+		for (auto it = comps.begin(); it != comps.end(); ++it)
+		{
+			if (isKnownComponentKey(it.key())) continue;
+			std::lock_guard<std::mutex> lk(s_mutex);
+			if (!s_reported.insert(it.key()).second) continue;
+			HE_LOG_WARN(Serialize, "Scene contains unknown component '%s' — it is being "
+			                       "dropped on load (scene written by a newer build, or a "
+			                       "save/load mismatch)", it.key().c_str());
+		}
+	}
+
 	void applyComponents(entt::registry& registry, Entity entity, const json& comps)
 	{
+		warnUnknownComponents(comps);
 		if (comps.contains("transform"))
 		{
 			const json& c = comps["transform"];
@@ -1349,11 +1387,26 @@ namespace
 	}
 } // namespace
 
+// Serialisation failures used to be a bare `return false` — the caller (editor
+// save, PIE snapshot, packaged startup) then reported a generic "failed" with no
+// idea whether the file was missing, unreadable, or simply malformed. Every exit
+// path below says which one it was and for which file.
+namespace
+{
+    size_t sceneEntityCount(const json& scene)
+    {
+        auto it = scene.find("entities");
+        return (it != scene.end() && it->is_array()) ? it->size() : 0u;
+    }
+}
+
 bool SceneSerializer::save(const HorizonWorld& world,
                             const std::filesystem::path& path,
                             SerializeFormat format) {
     if (format == SerializeFormat::JSON)   return saveJSON(world, path);
     if (format == SerializeFormat::Binary) return saveBinary(world, path);
+    HE_LOG_ERROR(Serialize, "Scene save to '%s': unknown format %d",
+                 path.string().c_str(), static_cast<int>(format));
     return false;
 }
 
@@ -1362,6 +1415,8 @@ bool SceneSerializer::load(HorizonWorld& world,
                             SerializeFormat format) {
     if (format == SerializeFormat::JSON)   return loadJSON(world, path);
     if (format == SerializeFormat::Binary) return loadBinary(world, path);
+    HE_LOG_ERROR(Serialize, "Scene load from '%s': unknown format %d",
+                 path.string().c_str(), static_cast<int>(format));
     return false;
 }
 
@@ -1370,21 +1425,43 @@ bool SceneSerializer::loadAdditive(HorizonWorld& world,
                                     SerializeFormat format,
                                     std::vector<Entity>* outCreated)
 {
+    HE_LOG_SLOW_SCOPE(Serialize, 100.0, "SceneSerializer::loadAdditive");
     if (format == SerializeFormat::Binary)
     {
         std::ifstream in(path, std::ios::binary);
-        if (!in.is_open()) return false;
+        if (!in.is_open())
+        {
+            HE_LOG_ERROR(Serialize, "Additive scene load: cannot open '%s'", path.string().c_str());
+            return false;
+        }
         const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(in)),
                                           std::istreambuf_iterator<char>());
         json scene = json::from_cbor(bytes, true, false);
-        if (scene.is_discarded()) return false;
+        if (scene.is_discarded())
+        {
+            HE_LOG_ERROR(Serialize, "Additive scene load: '%s' is not valid CBOR (%zu bytes)",
+                         path.string().c_str(), bytes.size());
+            return false;
+        }
+        HE_LOG_INFO(Serialize, "Additive scene load (binary): '%s', %zu entity/-ies",
+                    path.string().c_str(), sceneEntityCount(scene));
         return applyAdditiveJson(world, scene, outCreated);
     }
     // Default: JSON
     std::ifstream in(path);
-    if (!in.is_open()) return false;
+    if (!in.is_open())
+    {
+        HE_LOG_ERROR(Serialize, "Additive scene load: cannot open '%s'", path.string().c_str());
+        return false;
+    }
     json scene = json::parse(in, nullptr, false);
-    if (scene.is_discarded()) return false;
+    if (scene.is_discarded())
+    {
+        HE_LOG_ERROR(Serialize, "Additive scene load: '%s' is not valid JSON", path.string().c_str());
+        return false;
+    }
+    HE_LOG_INFO(Serialize, "Additive scene load (JSON): '%s', %zu entity/-ies",
+                path.string().c_str(), sceneEntityCount(scene));
     return applyAdditiveJson(world, scene, outCreated);
 }
 
@@ -1393,30 +1470,59 @@ bool SceneSerializer::loadAdditiveFromMemory(HorizonWorld& world,
                                              std::vector<Entity>* outCreated)
 {
     json scene = json::from_cbor(data, true, false);
-    if (scene.is_discarded()) return false;
+    if (scene.is_discarded())
+    {
+        HE_LOG_ERROR(Serialize, "Additive scene load from memory: not valid CBOR (%zu bytes)",
+                     data.size());
+        return false;
+    }
     return applyAdditiveJson(world, scene, outCreated);
 }
 
 // ── JSON ──────────────────────────────────────────────────────────────────────
 bool SceneSerializer::saveJSON(const HorizonWorld& world, const std::filesystem::path& path)
 {
+    HE_LOG_SLOW_SCOPE(Serialize, 100.0, "SceneSerializer::saveJSON");
     // Mutable access needed for registry views — safe during serialisation
     json scene = buildSceneJson(const_cast<HorizonWorld&>(world));
 
     std::ofstream out(path);
-    if (!out.is_open()) return false;
+    if (!out.is_open())
+    {
+        HE_LOG_ERROR(Serialize, "Scene save: cannot open '%s' for writing", path.string().c_str());
+        return false;
+    }
     out << scene.dump(4);
-    return out.good();
+    if (!out.good())
+    {
+        HE_LOG_ERROR(Serialize, "Scene save: write to '%s' failed (disk full or read-only?)",
+                     path.string().c_str());
+        return false;
+    }
+    HE_LOG_INFO(Serialize, "Scene saved (JSON): '%s', %zu entity/-ies",
+                path.string().c_str(), sceneEntityCount(scene));
+    return true;
 }
 
 bool SceneSerializer::loadJSON(HorizonWorld& world, const std::filesystem::path& path)
 {
+    HE_LOG_SLOW_SCOPE(Serialize, 100.0, "SceneSerializer::loadJSON");
     std::ifstream in(path);
-    if (!in.is_open()) return false;
+    if (!in.is_open())
+    {
+        HE_LOG_ERROR(Serialize, "Scene load: cannot open '%s'", path.string().c_str());
+        return false;
+    }
 
     json scene = json::parse(in, nullptr, false);
-    if (scene.is_discarded()) return false;
+    if (scene.is_discarded())
+    {
+        HE_LOG_ERROR(Serialize, "Scene load: '%s' is not valid JSON", path.string().c_str());
+        return false;
+    }
 
+    HE_LOG_INFO(Serialize, "Scene loaded (JSON): '%s', %zu entity/-ies",
+                path.string().c_str(), sceneEntityCount(scene));
     return applySceneJson(world, scene);
 }
 
@@ -1425,39 +1531,71 @@ bool SceneSerializer::saveToMemory(const HorizonWorld& world, std::vector<uint8_
 {
     json scene = buildSceneJson(const_cast<HorizonWorld&>(world));
     out = json::to_cbor(scene);
+    HE_LOG_DEBUG(Serialize, "Scene snapshot to memory: %zu entity/-ies, %zu byte(s)",
+                 sceneEntityCount(scene), out.size());
     return true;
 }
 
 bool SceneSerializer::loadFromMemory(HorizonWorld& world, const std::vector<uint8_t>& data)
 {
     json scene = json::from_cbor(data, true, false);
-    if (scene.is_discarded()) return false;
+    if (scene.is_discarded())
+    {
+        HE_LOG_ERROR(Serialize, "Scene restore from memory: not valid CBOR (%zu bytes)", data.size());
+        return false;
+    }
+    HE_LOG_DEBUG(Serialize, "Scene restored from memory: %zu entity/-ies", sceneEntityCount(scene));
     return applySceneJson(world, scene);
 }
 
 // ── Binary (CBOR encoding of the identical JSON structure) ───────────────────
 bool SceneSerializer::saveBinary(const HorizonWorld& world, const std::filesystem::path& path)
 {
+    HE_LOG_SLOW_SCOPE(Serialize, 100.0, "SceneSerializer::saveBinary");
     json scene = buildSceneJson(const_cast<HorizonWorld&>(world));
     const std::vector<uint8_t> cbor = json::to_cbor(scene);
 
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
-    if (!out.is_open()) return false;
+    if (!out.is_open())
+    {
+        HE_LOG_ERROR(Serialize, "Scene save: cannot open '%s' for writing", path.string().c_str());
+        return false;
+    }
     out.write(reinterpret_cast<const char*>(cbor.data()),
               static_cast<std::streamsize>(cbor.size()));
-    return out.good();
+    if (!out.good())
+    {
+        HE_LOG_ERROR(Serialize, "Scene save: write to '%s' failed after %zu byte(s)",
+                     path.string().c_str(), cbor.size());
+        return false;
+    }
+    HE_LOG_INFO(Serialize, "Scene saved (binary): '%s', %zu entity/-ies, %zu byte(s)",
+                path.string().c_str(), sceneEntityCount(scene), cbor.size());
+    return true;
 }
 
 bool SceneSerializer::loadBinary(HorizonWorld& world, const std::filesystem::path& path)
 {
+    HE_LOG_SLOW_SCOPE(Serialize, 100.0, "SceneSerializer::loadBinary");
     std::ifstream in(path, std::ios::binary);
-    if (!in.is_open()) return false;
+    if (!in.is_open())
+    {
+        HE_LOG_ERROR(Serialize, "Scene load: cannot open '%s'", path.string().c_str());
+        return false;
+    }
 
     const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(in)),
                                       std::istreambuf_iterator<char>());
     json scene = json::from_cbor(bytes, true, false);
-    if (scene.is_discarded()) return false;
+    if (scene.is_discarded())
+    {
+        HE_LOG_ERROR(Serialize, "Scene load: '%s' is not valid CBOR (%zu bytes)",
+                     path.string().c_str(), bytes.size());
+        return false;
+    }
 
+    HE_LOG_INFO(Serialize, "Scene loaded (binary): '%s', %zu entity/-ies",
+                path.string().c_str(), sceneEntityCount(scene));
     return applySceneJson(world, scene);
 }
 
@@ -1465,7 +1603,10 @@ bool SceneSerializer::loadBinary(HorizonWorld& world, const std::filesystem::pat
 std::vector<uint8_t> SceneSerializer::serializeSubtree(const HorizonWorld& world, Entity root)
 {
     json scene = buildSubtreeJson(const_cast<HorizonWorld&>(world), root);
-    return json::to_cbor(scene);
+    std::vector<uint8_t> cbor = json::to_cbor(scene);
+    HE_LOG_DEBUG(Serialize, "Serialised prefab subtree: %zu entity/-ies, %zu byte(s)",
+                 sceneEntityCount(scene), cbor.size());
+    return cbor;
 }
 
 Entity SceneSerializer::instantiatePrefab(HorizonWorld& world,
@@ -1473,6 +1614,11 @@ Entity SceneSerializer::instantiatePrefab(HorizonWorld& world,
                                           Entity parent)
 {
     json scene = json::from_cbor(data, true, false);
-    if (scene.is_discarded()) return entt::null;
+    if (scene.is_discarded())
+    {
+        HE_LOG_ERROR(Serialize, "Prefab instantiation failed: payload is not valid CBOR "
+                                "(%zu bytes)", data.size());
+        return entt::null;
+    }
     return applyPrefabJson(world, scene, parent);
 }

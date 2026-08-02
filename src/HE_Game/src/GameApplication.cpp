@@ -67,13 +67,13 @@ HE::ApplicationConfig GameApplication::GetConfig() const
 std::unique_ptr<IRenderer> GameApplication::CreateRenderer()
 {
 	const auto backend = GetConfig().backend;
-	Logger::Log(Logger::LogLevel::Info, "GameApplication: creating renderer");
+	HE_LOG_INFO(Core, "%s", "GameApplication: creating renderer");
 	return RendererFactory::Create(backend);
 }
 
 void GameApplication::OnInit()
 {
-	Logger::Log(Logger::LogLevel::Info, "GameApplication::OnInit");
+	HE_LOG_INFO(Core, "%s", "GameApplication::OnInit");
 
 	// Grab the mouse on startup (FPS-style look). Done first so it holds even on
 	// the early-return paths below (no hcfg / no pak); Esc toggles it back so the
@@ -89,14 +89,14 @@ void GameApplication::OnInit()
 	const char* baseRaw = SDL_GetBasePath();
 	if (!baseRaw)
 	{
-		Logger::Log(Logger::LogLevel::Warning, "GameApplication: SDL_GetBasePath returned null");
+		HE_LOG_WARN(Core, "%s", "GameApplication: SDL_GetBasePath returned null");
 		return;
 	}
 	const std::filesystem::path exeDir(baseRaw);
 
 	if (!ProjectConfigLoader::load(exeDir, m_config))
 	{
-		Logger::Log(Logger::LogLevel::Info, "GameApplication: no project.hcfg — running without pak");
+		HE_LOG_INFO(Core, "%s", "GameApplication: no project.hcfg — running without pak");
 		return;
 	}
 
@@ -131,7 +131,7 @@ void GameApplication::OnInit()
 
 	if (contentManager().mountPak(pakPath, pakKey))
 	{
-		Logger::Log(Logger::LogLevel::Info,
+		HE_LOG_INFO(Core, "%s",
 			("GameApplication: mounted " + m_config.hpakFilename).c_str());
 
 		// Mod overlays: every .hpak in Mods/ next to the executable, mounted on
@@ -142,12 +142,12 @@ void GameApplication::OnInit()
 		{
 			const size_t mods = contentManager().mountPakOverlays(exeDir / "Mods");
 			if (mods > 0)
-				Logger::Log(Logger::LogLevel::Info,
+				HE_LOG_INFO(Core, "%s",
 					("GameApplication: mounted " + std::to_string(mods) + " mod pak(s)").c_str());
 		}
 	}
 	else
-		Logger::Log(Logger::LogLevel::Warning, ("GameApplication: pak not found: " + pakPath).c_str());
+		HE_LOG_WARN(Core, "%s", ("GameApplication: pak not found: " + pakPath).c_str());
 
 	// Compiled HorizonCode classes: the export may have translated the project's
 	// graphs to native C++ (HorizonCodeGen library beside the executable). Loaded
@@ -159,7 +159,7 @@ void GameApplication::OnInit()
 		HorizonCode::compiledClasses().load(exeDir / HorizonCode::compiledLibraryName(),
 		                                    HE_VERSION_STRING);
 		if (m_config.horizonCodeCompiled && !HorizonCode::compiledClasses().loaded())
-			Logger::Log(Logger::LogLevel::Warning,
+			HE_LOG_WARN(Core, "%s",
 				"GameApplication: project.hcfg says HorizonCode is compiled, but the "
 				"HorizonCodeGen library is missing or was rejected — running interpreted");
 	}
@@ -174,22 +174,22 @@ void GameApplication::OnInit()
 		if (!giBytes.empty())
 		{
 			giJson.assign(giBytes.begin(), giBytes.end());
-			Logger::Log(Logger::LogLevel::Info, "GameApplication: loaded packed GameInstance graph");
+			HE_LOG_INFO(Core, "%s", "GameApplication: loaded packed GameInstance graph");
 		}
 		else if (std::ifstream gif(exeDir / "GameInstance.hcode"); gif)
 		{
 			giJson.assign(std::istreambuf_iterator<char>(gif), std::istreambuf_iterator<char>());
-			Logger::Log(Logger::LogLevel::Info, "GameApplication: loaded loose GameInstance.hcode");
+			HE_LOG_INFO(Core, "%s", "GameApplication: loaded loose GameInstance.hcode");
 		}
 		else
-			Logger::Log(Logger::LogLevel::Warning,
+			HE_LOG_WARN(Core, "%s",
 				"GameApplication: no GameInstance graph found — app lifecycle/UI scripts will not run");
 		// Compiled GameInstance takes precedence; the graph still ships in the
 		// pak, so a fallback (or an older runtime) interprets it unchanged.
 		if (auto compiled = HorizonCode::compiledClasses().create(kGameInstanceEntry))
 		{
 			m_gameInstance.runtime().setGameInstanceCompiled(std::move(compiled));
-			Logger::Log(Logger::LogLevel::Info, "GameApplication: GameInstance running compiled");
+			HE_LOG_INFO(Core, "%s", "GameApplication: GameInstance running compiled");
 		}
 		else
 			m_gameInstance.setGraph(giJson);
@@ -273,24 +273,24 @@ void GameApplication::OnInit()
 			// Key the level script by the packed scene's UUID so a compiled one
 			// (if the export shipped it) is picked up at fireLevelLoaded.
 			m_world->setLevelScriptKey(levelScriptKeyForUuid(sceneUuid));
-			Logger::Log(Logger::LogLevel::Info, "GameApplication: loaded packed startup scene");
+			HE_LOG_INFO(Core, "%s", "GameApplication: loaded packed startup scene");
 		}
 		else
-			Logger::Log(Logger::LogLevel::Warning, "GameApplication: failed to load packed startup scene");
+			HE_LOG_WARN(Core, "%s", "GameApplication: failed to load packed startup scene");
 	}
 	if (!sceneLoaded && !m_config.mainSceneName.empty())
 	{
 		// Fallback: loose .hescene (JSON) next to the executable.
 		const std::filesystem::path scenePath = exeDir / m_config.mainSceneName;
 		if (serializer.load(*m_world, scenePath, SerializeFormat::JSON))
-			Logger::Log(Logger::LogLevel::Info, ("GameApplication: loaded scene " + m_config.mainSceneName).c_str());
+			HE_LOG_INFO(Core, "%s", ("GameApplication: loaded scene " + m_config.mainSceneName).c_str());
 		else
-			Logger::Log(Logger::LogLevel::Warning, ("GameApplication: failed to load scene " + scenePath.string()).c_str());
+			HE_LOG_WARN(Core, "%s", ("GameApplication: failed to load scene " + scenePath.string()).c_str());
 	}
 	setWorld(m_world.get());
 
 	if (ensureDefaultCamera(*m_world))
-		Logger::Log(Logger::LogLevel::Info,
+		HE_LOG_INFO(Core, "%s",
 			"GameApplication: added a default free-fly camera (scene had none)");
 
 	// Player controller/character classes + input events: discover the project's
@@ -304,7 +304,7 @@ void GameApplication::OnInit()
 	if (m_audioEngine.init())
 		AudioSystem::playOnStart(*m_world, m_audioEngine, &contentManager());
 	else
-		Logger::Log(Logger::LogLevel::Warning,
+		HE_LOG_WARN(Core, "%s",
 			"GameApplication: audio device init failed — running silent");
 
 	// fs/save sandbox: the per-user pref dir (never the install dir, which may be
@@ -319,7 +319,7 @@ void GameApplication::OnInit()
 		}
 	}
 
-	Logger::Log(Logger::LogLevel::Info,
+	HE_LOG_INFO(Core, "%s",
 		("GameApplication: streaming " + std::to_string(streamSceneAssets(*m_world)) +
 		 " scene-referenced asset roots").c_str());
 
@@ -337,7 +337,7 @@ void GameApplication::OnInit()
 	if (std::filesystem::exists(logicPath) && logicLoader().load(logicPath))
 	{
 		logicLoader().logic()->onStart(*m_world);
-		Logger::Log(Logger::LogLevel::Info, "GameApplication: native game logic started");
+		HE_LOG_INFO(Core, "%s", "GameApplication: native game logic started");
 	}
 
 	// horizon.showCursor()/hideCursor(): scripts release/re-grab the mouse.
@@ -415,7 +415,7 @@ bool GameApplication::performSceneSwitch(const std::string& scenePath)
 	auto newWorld = std::make_unique<HorizonWorld>();
 	if (!loadSceneInto(*newWorld, scenePath, /*additive=*/false, nullptr))
 	{
-		Logger::Log(Logger::LogLevel::Warning,
+		HE_LOG_WARN(Core, "%s",
 			("GameApplication: scene.load failed — '" + scenePath + "' not found "
 			 "(packed entry, project file, exe dir)").c_str());
 		return false;
@@ -454,7 +454,7 @@ void GameApplication::swapToWorld(std::unique_ptr<HorizonWorld> newWorld, const 
 
 	startScripts();
 	m_world->fireLevelLoaded();
-	Logger::Log(Logger::LogLevel::Info,
+	HE_LOG_INFO(Core, "%s",
 		("GameApplication: switched to scene '" + label + "' ("
 		 + std::to_string(refCount) + " asset roots streaming)").c_str());
 }
@@ -473,7 +473,7 @@ void GameApplication::executeSceneRequests()
 			auto pending = std::make_unique<HorizonWorld>();
 			if (!loadSceneInto(*pending, r.path, /*additive=*/false, nullptr))
 			{
-				Logger::Log(Logger::LogLevel::Warning,
+				HE_LOG_WARN(Core, "%s",
 					("GameApplication: scene.load (hidden) failed — '" + r.path + "' not found").c_str());
 				break;
 			}
@@ -481,12 +481,12 @@ void GameApplication::executeSceneRequests()
 			// presents without a streaming pop.
 			const size_t refCount = streamSceneAssets(*pending);
 			if (m_pendingWorld)
-				Logger::Log(Logger::LogLevel::Warning,
+				HE_LOG_WARN(Core, "%s",
 					("GameApplication: replacing pending scene '" + m_pendingScenePath + "'").c_str());
 			m_pendingWorld     = std::move(pending);
 			m_pendingScenePath = r.path;
 			HE::api::scene::notePendingLevel(true);
-			Logger::Log(Logger::LogLevel::Info,
+			HE_LOG_INFO(Core, "%s",
 				("GameApplication: preloaded scene '" + r.path + "' ("
 				 + std::to_string(refCount) + " asset roots streaming) — awaiting activate").c_str());
 			break;
@@ -495,7 +495,7 @@ void GameApplication::executeSceneRequests()
 		{
 			if (!m_pendingWorld)
 			{
-				Logger::Log(Logger::LogLevel::Warning,
+				HE_LOG_WARN(Core, "%s",
 					"GameApplication: scene.activate with no pending scene (load hidden first)");
 				break;
 			}
@@ -510,7 +510,7 @@ void GameApplication::executeSceneRequests()
 			std::vector<entt::entity> created;
 			if (!loadSceneInto(*m_world, r.path, /*additive=*/true, &created))
 			{
-				Logger::Log(Logger::LogLevel::Warning,
+				HE_LOG_WARN(Core, "%s",
 					("GameApplication: scene.loadAdditive failed — '" + r.path + "' not found").c_str());
 				break;
 			}
@@ -543,7 +543,7 @@ void GameApplication::executeSceneRequests()
 			// sources); zone audio starts from its scripts/graphs.
 			streamSceneAssets(*m_world);
 			const int started = startScriptsFor(created);
-			Logger::Log(Logger::LogLevel::Info,
+			HE_LOG_INFO(Core, "%s",
 				("GameApplication: zone " + std::to_string(r.zone) + " loaded ('" + r.path +
 				 "', " + std::to_string(created.size()) + " entities, " +
 				 std::to_string(started) + " scripts" + (r.hidden ? ", hidden" : "") + ")").c_str());
@@ -579,7 +579,7 @@ void GameApplication::executeSceneRequests()
 				++gone;
 			}
 			HE::api::scene::noteZoneUnloaded(r.zone);
-			Logger::Log(Logger::LogLevel::Info,
+			HE_LOG_INFO(Core, "%s",
 				("GameApplication: zone " + std::to_string(r.zone) + " unloaded ("
 				 + std::to_string(gone) + " entities)").c_str());
 			break;
@@ -604,7 +604,7 @@ void GameApplication::startScripts()
 
 	const int started = m_scriptContext->startWorldScripts(contentManager(), m_scriptInstances);
 	if (started > 0)
-		Logger::Log(Logger::LogLevel::Info,
+		HE_LOG_INFO(Core, "%s",
 			("GameApplication: started " + std::to_string(started) + " ECS script(s)").c_str());
 }
 
@@ -733,7 +733,7 @@ bool GameApplication::OnEvent(const SDL_Event& event)
 		{
 			m_vsyncOn = !m_vsyncOn;
 			setVSync(m_vsyncOn);
-			Logger::Log(Logger::LogLevel::Info,
+			HE_LOG_INFO(Core, "%s",
 				m_vsyncOn ? "GameApplication: VSync ON" : "GameApplication: VSync OFF");
 			return true;
 		}
@@ -908,5 +908,5 @@ void GameApplication::OnShutdown()
 	// Stop + unload native game logic before the world is torn down.
 	if (m_world && logicLoader().isLoaded())
 		logicLoader().unload(*m_world);
-	Logger::Log(Logger::LogLevel::Info, "GameApplication::OnShutdown");
+	HE_LOG_INFO(Core, "%s", "GameApplication::OnShutdown");
 }

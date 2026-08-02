@@ -69,6 +69,9 @@ namespace HE
         Warning,
         Error,
         Critical,
+        // Filter sentinel only — never the level of an actual record. Setting a
+        // category's verbosity to Off silences it completely (see Diagnostics/Log.h).
+        Off,
     };
 
     // ── Assets ────────────────────────────────────────────────────────────────

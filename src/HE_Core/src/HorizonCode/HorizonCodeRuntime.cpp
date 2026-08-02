@@ -12,8 +12,8 @@ namespace {
 // Error so it surfaces in the game log AND the editor's post-PIE report — the
 // equivalent of Unreal's "Accessed None". Called only while a graph is executing
 // (PIE / the shipped game), never at edit time.
-void hcError(const std::string& msg)   { Logger::Log(Logger::LogLevel::Error,   ("HorizonCode: " + msg).c_str()); }
-void hcWarn (const std::string& msg)   { Logger::Log(Logger::LogLevel::Warning, ("HorizonCode: " + msg).c_str()); }
+void hcError(const std::string& msg)   { HE_LOG_ERROR(HorizonCode, "%s",   ("HorizonCode: " + msg).c_str()); }
+void hcWarn (const std::string& msg)   { HE_LOG_WARN(HorizonCode, "%s", ("HorizonCode: " + msg).c_str()); }
 
 // The compiled counterpart to Graph::findVariable — locals never appear in
 // varInfos, so (unlike the interpreted path) no scope check is needed here.

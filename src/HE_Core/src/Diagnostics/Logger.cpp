@@ -1,46 +1,77 @@
 #include "Diagnostics/Logger.h"
-#include "Diagnostics/GlobalState.h"
-#include <fstream>
-#include <ctime>
+#include "Diagnostics/Log.h"
 #include <atomic>
+#include <mutex>
 
-static const char* levelName(Logger::LogLevel level)
-{
-	switch (level)
-	{
-	case Logger::LogLevel::Trace:    return "TRACE";
-	case Logger::LogLevel::Debug:    return "DEBUG";
-	case Logger::LogLevel::Info:     return "INFO";
-	case Logger::LogLevel::Warning:  return "WARNING";
-	case Logger::LogLevel::Error:    return "ERROR";
-	case Logger::LogLevel::Critical: return "CRITICAL";
-	default:                         return "UNKNOWN";
-	}
-}
-
-// Secondary sink (editor play-session capture). Atomics: setSink is called from
-// the main thread; Log() may run on workers concurrently.
-static std::atomic<Logger::Sink> s_sink{ nullptr };
-static std::atomic<void*>        s_sinkUser{ nullptr };
-
-void Logger::setSink(Sink sink, void* user)
-{
-	s_sinkUser.store(user);
-	s_sink.store(sink);
-}
+// The legacy Logger is now a thin adapter over HE::Log — one log, one file, one
+// ring buffer, one set of sinks.
 
 void Logger::Log(Logger::LogLevel level, const char* message)
 {
-	if (const Sink sink = s_sink.load())
-		sink(level, message, s_sinkUser.load());
+	LogTo(HE::Log::Cat::Core, level, message);
+}
 
-	GlobalState& globalState = GlobalState::getInstance();
-	std::ofstream& logFile = globalState.getLogFileStream();
-	if (!logFile.is_open()) return;
+void Logger::LogTo(HE::Log::Cat category, Logger::LogLevel level, const char* message)
+{
+	// "%s" rather than passing the message as the format: legacy messages are
+	// built by string concatenation and routinely contain '%' (percentages,
+	// URL escapes, printf snippets in error text).
+	HE::Log::write(category, level, nullptr, 0, nullptr, "%s", message ? message : "");
+}
 
-	std::time_t t = std::time(nullptr);
-	char timeBuf[32]{};
-	std::strftime(timeBuf, sizeof(timeBuf), "%H:%M:%S", std::localtime(&t));
-	logFile << "[" << timeBuf << "] [" << levelName(level) << "] " << message << '\n';
-	logFile.flush();
+// ─── Legacy single-sink adapter ──────────────────────────────────────────────
+// Bridges the old (level, message, user) signature onto HE::Log's record sinks.
+
+namespace
+{
+	std::mutex        g_legacySinkMutex;
+	Logger::Sink      g_legacySink     = nullptr;   // guarded by g_legacySinkMutex
+	void*             g_legacySinkUser = nullptr;   // guarded by g_legacySinkMutex
+	int               g_legacyHandle   = 0;         // guarded by g_legacySinkMutex
+
+	void legacyBridge(const HE::Log::Record& rec, void*)
+	{
+		// HE::Log already holds its own mutex here, so the sink list cannot
+		// change under us; the local mutex only guards g_legacySink itself,
+		// which setSink may touch from another thread.
+		Logger::Sink sink = nullptr;
+		void*        user = nullptr;
+		{
+			std::lock_guard<std::mutex> lk(g_legacySinkMutex);
+			sink = g_legacySink;
+			user = g_legacySinkUser;
+		}
+		if (sink) sink(rec.level, rec.message, user);
+	}
+}
+
+void Logger::setSink(Sink sink, void* user)
+{
+	int handleToRemove = 0;
+	int handleToAdd    = 0;
+	{
+		std::lock_guard<std::mutex> lk(g_legacySinkMutex);
+		g_legacySink     = sink;
+		g_legacySinkUser = user;
+		if (!sink && g_legacyHandle)
+		{
+			handleToRemove = g_legacyHandle;
+			g_legacyHandle = 0;
+		}
+		else if (sink && !g_legacyHandle)
+		{
+			handleToAdd = 1;
+		}
+	}
+
+	// addSink/removeSink take the log mutex — call them outside our own lock so
+	// a concurrent log record (which holds the log mutex and wants ours) cannot
+	// deadlock against us.
+	if (handleToRemove) HE::Log::removeSink(handleToRemove);
+	if (handleToAdd)
+	{
+		const int h = HE::Log::addSink(&legacyBridge, nullptr);
+		std::lock_guard<std::mutex> lk(g_legacySinkMutex);
+		g_legacyHandle = h;
+	}
 }

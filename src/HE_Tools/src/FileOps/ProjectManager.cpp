@@ -8,6 +8,7 @@
 #include <fstream>
 #include <limits>
 #include <nlohmann/json.hpp>
+#include <Diagnostics/Log.h>
 
 namespace fs = std::filesystem;
 using json   = nlohmann::json;
@@ -460,6 +461,13 @@ bool ProjectManager::createNewProject(const std::string& projectDir,
 	m_currentProject.exportProfiles      = profiles;
 	m_currentProject.activeExportProfile = profiles.front().name;
 	m_currentProject.scriptLanguage      = scriptLanguage;
+	HE_LOG_INFO(Config, "Created project '%s' at '%s': language %s, preset %d, "
+	                    "%zu export profile(s), startup scene '%s'",
+	            m_currentProject.name.c_str(), m_currentProject.path.c_str(),
+	            HE::tools::toString(m_currentProject.scriptLanguage),
+	            static_cast<int>(preset), m_currentProject.exportProfiles.size(),
+	            m_currentProject.startupScene.c_str());
+
 	if (m_onProjectLoaded)
 		m_onProjectLoaded(m_currentProject.startupScene);
 	return true;
@@ -467,16 +475,29 @@ bool ProjectManager::createNewProject(const std::string& projectDir,
 
 bool ProjectManager::loadProject(const std::string& projectPath)
 {
+	// Opening a project is the first thing a user does; "nothing happened" with no
+	// reason is the worst possible answer, so each rejection says which it was.
 	if (!fs::exists(projectPath))
+	{
+		HE_LOG_ERROR(Config, "Cannot open project: '%s' does not exist", projectPath.c_str());
 		return false;
+	}
 
 	std::ifstream in(projectPath);
 	if (!in.is_open())
+	{
+		HE_LOG_ERROR(Config, "Cannot open project '%s' for reading (permissions?)",
+		             projectPath.c_str());
 		return false;
+	}
 
 	json j = json::parse(in, nullptr, false);
 	if (j.is_discarded())
+	{
+		HE_LOG_ERROR(Config, "Project file '%s' is not valid JSON — it is corrupt or was "
+		                     "written by a different tool", projectPath.c_str());
 		return false;
+	}
 
 	m_currentProject.name = jsonString(j, "name", fs::path(projectPath).stem().string());
 	m_currentProject.path = projectPath;
@@ -488,6 +509,10 @@ bool ProjectManager::loadProject(const std::string& projectPath)
 	{
 		fs::path absScene = projectRoot / relScene;
 		m_currentProject.startupScene = fs::exists(absScene) ? absScene.string() : "";
+		if (m_currentProject.startupScene.empty())
+			HE_LOG_WARN(Config, "Project '%s' names startup scene '%s', which does not "
+			                    "exist — the editor will open with an empty scene",
+			            m_currentProject.name.c_str(), relScene.c_str());
 	}
 	else
 	{
@@ -497,6 +522,14 @@ bool ProjectManager::loadProject(const std::string& projectPath)
 	readProfiles(j, m_currentProject);
 	m_currentProject.scriptLanguage =
 		HE::tools::projectScriptLanguageFromString(jsonString(j, "scriptLanguage"));
+
+	HE_LOG_INFO(Config, "Project '%s' loaded from '%s': language %s, %zu export profile(s), "
+	                    "startup scene '%s'",
+	            m_currentProject.name.c_str(), projectPath.c_str(),
+	            HE::tools::toString(m_currentProject.scriptLanguage),
+	            m_currentProject.exportProfiles.size(),
+	            m_currentProject.startupScene.empty() ? "(none)"
+	                                                  : m_currentProject.startupScene.c_str());
 
 	if (m_onProjectLoaded)
 		m_onProjectLoaded(m_currentProject.startupScene);
@@ -513,9 +546,20 @@ bool ProjectManager::saveProject(const std::string& projectPath)
 		// An existing manifest we cannot read or parse must NOT be clobbered
 		// with a fresh skeleton — it may be hand-recoverable.
 		std::ifstream in(projectPath);
-		if (!in.is_open()) return false;
+		if (!in.is_open())
+		{
+			HE_LOG_ERROR(Config, "Project save aborted: '%s' exists but cannot be read",
+			             projectPath.c_str());
+			return false;
+		}
 		json existing = json::parse(in, nullptr, false);
-		if (existing.is_discarded() || !existing.is_object()) return false;
+		if (existing.is_discarded() || !existing.is_object())
+		{
+			HE_LOG_ERROR(Config, "Project save aborted: '%s' is corrupt and would be "
+			                     "overwritten — fix or remove it first, it may still be "
+			                     "recoverable by hand", projectPath.c_str());
+			return false;
+		}
 		j = std::move(existing);
 	}
 
@@ -535,7 +579,11 @@ bool ProjectManager::saveProject(const std::string& projectPath)
 	const std::string tmpPath = projectPath + ".tmp";
 	{
 		std::ofstream out(tmpPath, std::ios::trunc);
-		if (!out.is_open()) return false;
+		if (!out.is_open())
+		{
+			HE_LOG_ERROR(Config, "Project save failed: cannot create '%s'", tmpPath.c_str());
+			return false;
+		}
 		// "replace" error handler: default dump() throws type_error.316 on invalid
 		// UTF-8 (e.g. a project name), which would abort the app instead of saving.
 		out << j.dump(4, ' ', false, json::error_handler_t::replace);
@@ -545,6 +593,8 @@ bool ProjectManager::saveProject(const std::string& projectPath)
 			out.close();
 			std::error_code ec;
 			fs::remove(tmpPath, ec);
+			HE_LOG_ERROR(Config, "Project save failed while writing '%s' (disk full?) — "
+			                     "the previous file is intact", tmpPath.c_str());
 			return false;
 		}
 	}
@@ -554,13 +604,19 @@ bool ProjectManager::saveProject(const std::string& projectPath)
 	{
 		std::error_code ec2;
 		fs::remove(tmpPath, ec2);
+		HE_LOG_ERROR(Config, "Project save failed: could not replace '%s' (%s) — "
+		                     "the previous file is intact",
+		             projectPath.c_str(), ec.message().c_str());
 		return false;
 	}
+	HE_LOG_INFO(Config, "Project saved to '%s'", projectPath.c_str());
 	return true;
 }
 
 void ProjectManager::closeProject()
 {
+	if (!m_currentProject.name.empty())
+		HE_LOG_INFO(Config, "Project '%s' closed", m_currentProject.name.c_str());
 	m_currentProject = {};
 
 }

@@ -4,6 +4,7 @@
 #include <HorizonScene/Components/SkeletalMeshComponent.h>
 #include <ContentManager/ContentManager.h>
 #include "AnimationEval.h"
+#include <Diagnostics/Log.h>
 
 #include <algorithm>
 #include <cmath>
@@ -19,10 +20,30 @@ void AnimationBlendSystem::update(HorizonWorld& world, ContentManager& cm, float
 
         const AnimationClipAsset* clipA = cm.getAnimationClip(blend.clipAId);
         const AnimationClipAsset* clipB = cm.getAnimationClip(blend.clipBId);
-        if (!clipA && !clipB) continue;
+        if (!clipA && !clipB)
+        {
+            HE_LOG_THROTTLE(Animation, Warning, 5.0,
+                            "Entity %u: blend animator is playing but neither clip A nor "
+                            "clip B could be resolved", static_cast<uint32_t>(e));
+            continue;
+        }
+        // A half-resolved blend still plays, but the missing side contributes an
+        // identity pose — which looks like a broken animation, not a missing asset.
+        if (!clipA || !clipB)
+            HE_LOG_THROTTLE(Animation, Warning, 5.0,
+                            "Entity %u: blend clip %s is missing — that side blends "
+                            "towards the bind pose", static_cast<uint32_t>(e),
+                            clipA ? "B" : "A");
 
         const SkeletalMeshAsset* mesh = cm.getSkeletalMesh(smc.meshAssetId);
-        if (!mesh || mesh->skeleton.empty()) continue;
+        if (!mesh || mesh->skeleton.empty())
+        {
+            HE_LOG_THROTTLE(Animation, Warning, 5.0,
+                            "Entity %u: blend animator has no usable skeletal mesh (%s)",
+                            static_cast<uint32_t>(e),
+                            mesh ? "skeleton is empty" : "mesh not found");
+            continue;
+        }
 
         const size_t jointCount = mesh->skeleton.size();
 

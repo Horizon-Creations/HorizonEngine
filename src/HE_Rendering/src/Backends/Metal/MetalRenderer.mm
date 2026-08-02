@@ -3676,7 +3676,7 @@ MetalRenderer::~MetalRenderer() = default;
 
 void MetalRenderer::Initialize(HE::Window* window)
 {
-	Logger::Log(Logger::LogLevel::Info, "MetalRenderer: initializing");
+	HE_LOG_INFO(RHI, "%s", "MetalRenderer: initializing");
 	m_primarySdlWindow = window->GetNativeWindow();
 
 	id<MTLDevice> device = MTLCreateSystemDefaultDevice();
@@ -3746,13 +3746,13 @@ void MetalRenderer::Initialize(HE::Window* window)
 	if (const char* cl = std::getenv("HE_DEFERRED_CLUSTER"); cl && *cl)
 		m_deferredClustered = std::atoi(cl) != 0;
 
-	Logger::Log(Logger::LogLevel::Info,
+	HE_LOG_INFO(RHI, "%s",
 		(std::string("MetalRenderer: initialized on ") + [[device name] UTF8String]).c_str());
 }
 
 void MetalRenderer::Shutdown()
 {
-	Logger::Log(Logger::LogLevel::Info, "MetalRenderer: shutdown");
+	HE_LOG_INFO(RHI, "%s", "MetalRenderer: shutdown");
 	m_shaderManager.cleanup();
 
 	if (m_timestampCounterSet)
@@ -3946,7 +3946,7 @@ fragment float4 debugLineFrag(DebugVOut in [[stage_in]])
 		id<MTLLibrary> lib = [device newLibraryWithSource:src options:nil error:&error];
 		if (!lib)
 		{
-			Logger::Log(Logger::LogLevel::Error, "MetalRenderer: debug line shader compile failed");
+			HE_LOG_ERROR(RHI, "%s", "MetalRenderer: debug line shader compile failed");
 			return;
 		}
 
@@ -3972,7 +3972,7 @@ fragment float4 debugLineFrag(DebugVOut in [[stage_in]])
 		if (pso)
 			m_debugLinePipeline = (void*)CFBridgingRetain(pso);
 		else
-			Logger::Log(Logger::LogLevel::Error, "MetalRenderer: debug line pipeline creation failed");
+			HE_LOG_ERROR(RHI, "%s", "MetalRenderer: debug line pipeline creation failed");
 	}
 }
 
@@ -4392,14 +4392,14 @@ void MetalRenderer::EnsureShadowResources()
 		NSError* error = nil;
 		id<MTLLibrary> lib = [device newLibraryWithSource:
 			[NSString stringWithUTF8String:injectSkyMSL(kUnlitMSL).c_str()] options:nil error:&error];
-		if (!lib) { Logger::Log(Logger::LogLevel::Error, "MetalRenderer: shadow shader compile failed"); return; }
+		if (!lib) { HE_LOG_ERROR(RHI, "%s", "MetalRenderer: shadow shader compile failed"); return; }
 		MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
 		desc.vertexFunction             = [lib newFunctionWithName:@"vertexShadow"];
 		desc.fragmentFunction           = nil; // depth only
 		desc.depthAttachmentPixelFormat = kDepthFormat;
 		id<MTLRenderPipelineState> pso = [device newRenderPipelineStateWithDescriptor:desc error:&error];
 		if (pso) m_shadowPipeline = (void*)CFBridgingRetain(pso);
-		else     Logger::Log(Logger::LogLevel::Error, "MetalRenderer: shadow pipeline creation failed");
+		else     HE_LOG_ERROR(RHI, "%s", "MetalRenderer: shadow pipeline creation failed");
 	}
 }
 
@@ -4522,11 +4522,11 @@ void MetalRenderer::EnsureRaytracingSupport()
 	if (const char* force = std::getenv("HE_GI_FORCE_SW"); force && *force && *force != '0')
 	{
 		m_giHwRt = false;
-		Logger::Log(Logger::LogLevel::Info, "MetalRenderer: HE_GI_FORCE_SW set — software GI path forced");
+		HE_LOG_INFO(RHI, "%s", "MetalRenderer: HE_GI_FORCE_SW set — software GI path forced");
 	}
 	m_giSupported = true; // compute is base Metal; SW path covers the no-HW-RT case
 
-	Logger::Log(Logger::LogLevel::Info,
+	HE_LOG_INFO(RHI, "%s",
 		(std::string("MetalRenderer: ray-traced GI supported (")
 		 + (m_giHwRt ? "hardware" : "software") + " ray tracing)").c_str());
 }
@@ -4844,7 +4844,7 @@ void MetalRenderer::EnsureGIShadowPipelines()
 			[NSString stringWithUTF8String:kGIShadowRasterMSL] options:nil error:&error];
 		if (!lib)
 		{
-			Logger::Log(Logger::LogLevel::Error,
+			HE_LOG_ERROR(RHI, "%s",
 				(std::string("MetalRenderer: GI shadow shader compile failed: ")
 				 + (error ? [[error localizedDescription] UTF8String] : "unknown")).c_str());
 			return;
@@ -4859,7 +4859,7 @@ void MetalRenderer::EnsureGIShadowPipelines()
 		gDesc.depthAttachmentPixelFormat      = kDepthFormat;
 		id<MTLRenderPipelineState> gPso = [device newRenderPipelineStateWithDescriptor:gDesc error:&error];
 		if (gPso) m_giGBufPipeline = (void*)CFBridgingRetain(gPso);
-		else      Logger::Log(Logger::LogLevel::Error, "MetalRenderer: GI G-buffer pipeline creation failed");
+		else      HE_LOG_ERROR(RHI, "%s", "MetalRenderer: GI G-buffer pipeline creation failed");
 
 		// Ray dispatch kernel — HARDWARE (intersection_query, MSL 2.4 library) or
 		// SOFTWARE (base compute traversal of the CPU BVH, kGISWMSL).
@@ -4874,7 +4874,7 @@ void MetalRenderer::EnsureGIShadowPipelines()
 				if (rayPso) m_giShadowRayPipeline = (void*)CFBridgingRetain(rayPso);
 			}
 			if (!m_giShadowRayPipeline)
-				Logger::Log(Logger::LogLevel::Error, "MetalRenderer: GI HW shadow-ray pipeline creation failed");
+				HE_LOG_ERROR(RHI, "%s", "MetalRenderer: GI HW shadow-ray pipeline creation failed");
 		}
 		else
 		{
@@ -4887,7 +4887,7 @@ void MetalRenderer::EnsureGIShadowPipelines()
 				if (rayPso) m_giShadowRaySwPipeline = (void*)CFBridgingRetain(rayPso);
 			}
 			if (!m_giShadowRaySwPipeline)
-				Logger::Log(Logger::LogLevel::Error, "MetalRenderer: GI SW shadow-ray pipeline creation failed");
+				HE_LOG_ERROR(RHI, "%s", "MetalRenderer: GI SW shadow-ray pipeline creation failed");
 		}
 
 		// Temporal accumulation (fullscreen triangle). RGBA: rgb = world position
@@ -4898,7 +4898,7 @@ void MetalRenderer::EnsureGIShadowPipelines()
 		tDesc.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
 		id<MTLRenderPipelineState> tPso = [device newRenderPipelineStateWithDescriptor:tDesc error:&error];
 		if (tPso) m_giShadowTemporalPipeline = (void*)CFBridgingRetain(tPso);
-		else      Logger::Log(Logger::LogLevel::Error, "MetalRenderer: GI shadow-temporal pipeline creation failed");
+		else      HE_LOG_ERROR(RHI, "%s", "MetalRenderer: GI shadow-temporal pipeline creation failed");
 
 		// Spatial blur (fullscreen triangle, single R-channel output).
 		MTLRenderPipelineDescriptor* bDesc = [[MTLRenderPipelineDescriptor alloc] init];
@@ -4907,7 +4907,7 @@ void MetalRenderer::EnsureGIShadowPipelines()
 		bDesc.colorAttachments[0].pixelFormat = MTLPixelFormatR16Float;
 		id<MTLRenderPipelineState> bPso = [device newRenderPipelineStateWithDescriptor:bDesc error:&error];
 		if (bPso) m_giShadowBlurPipeline = (void*)CFBridgingRetain(bPso);
-		else      Logger::Log(Logger::LogLevel::Error, "MetalRenderer: GI shadow-blur pipeline creation failed");
+		else      HE_LOG_ERROR(RHI, "%s", "MetalRenderer: GI shadow-blur pipeline creation failed");
 	}
 }
 
@@ -5207,7 +5207,7 @@ void MetalRenderer::EnsureGIProbeGrid()
 
 	EnsureGIProbeAtlas();
 
-	Logger::Log(Logger::LogLevel::Info,
+	HE_LOG_INFO(RHI, "%s",
 		("MetalRenderer: GI probe grid built — " + std::to_string(m_giProbeCount) + " probes ("
 		 + std::to_string(counts.x) + "x" + std::to_string(counts.y) + "x" + std::to_string(counts.z)
 		 + "), spacing " + std::to_string(kGIProbeSpacing)).c_str());
@@ -5227,7 +5227,7 @@ void MetalRenderer::EnsureGIProbePipeline()
 			[NSString stringWithUTF8String:src] options:nil error:&error];
 		if (!lib)
 		{
-			Logger::Log(Logger::LogLevel::Error,
+			HE_LOG_ERROR(RHI, "%s",
 				(std::string("MetalRenderer: GI probe shader compile failed: ")
 				 + (error ? [[error localizedDescription] UTF8String] : "unknown")).c_str());
 			return;
@@ -5236,7 +5236,7 @@ void MetalRenderer::EnsureGIProbePipeline()
 		id<MTLComputePipelineState> pso = [device newComputePipelineStateWithFunction:fn error:&error];
 		if (!pso)
 		{
-			Logger::Log(Logger::LogLevel::Error, "MetalRenderer: GI probe-update pipeline creation failed");
+			HE_LOG_ERROR(RHI, "%s", "MetalRenderer: GI probe-update pipeline creation failed");
 			return;
 		}
 		if (m_giHwRt) m_giProbeUpdatePipeline   = (void*)CFBridgingRetain(pso);
@@ -5447,7 +5447,7 @@ const MetalRenderer::GpuMesh* MetalRenderer::ResolveMesh(const HE::UUID& assetId
 		mesh.texture = uploadMetalTexture(device, m_contentManager->resolveTextureRef(texId0, texPath0));
 	}
 
-	Logger::Log(Logger::LogLevel::Info,
+	HE_LOG_INFO(RHI, "%s",
 		("MetalRenderer: uploaded mesh '" + asset->name + "' ("
 		 + std::to_string(vertexCount) + " verts"
 		 + (mesh.texture ? ", textured" : "") + ")").c_str());
@@ -5718,7 +5718,7 @@ void MetalRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 		}
 	}
 	if (built > 0)
-		Logger::Log(Logger::LogLevel::Info,
+		HE_LOG_INFO(RHI, "%s",
 			("MetalRenderer: warmed up " + std::to_string(built) + " material pipeline(s)").c_str());
 }
 
@@ -5902,12 +5902,12 @@ fragment float4 meshPreviewFragment(VOut in [[stage_in]],
 				id<MTLRenderPipelineState> pso = [device newRenderPipelineStateWithDescriptor:desc error:&error];
 				if (pso) m_meshPreviewPipeline = (void*)CFBridgingRetain(pso);
 				else
-					Logger::Log(Logger::LogLevel::Error,
+					HE_LOG_ERROR(RHI, "%s",
 						(std::string("MetalRenderer: mesh-preview pipeline creation failed: ")
 							+ (error ? [[error localizedDescription] UTF8String] : "unknown")).c_str());
 			}
 			else
-				Logger::Log(Logger::LogLevel::Error, "MetalRenderer: mesh-preview shader compile failed");
+				HE_LOG_ERROR(RHI, "%s", "MetalRenderer: mesh-preview shader compile failed");
 		}
 	}
 	if (!m_meshPreviewPipeline) return;
@@ -6439,12 +6439,12 @@ fragment float4 skelPreviewFragment(VOut in [[stage_in]],
 				id<MTLRenderPipelineState> pso = [device newRenderPipelineStateWithDescriptor:desc error:&error];
 				if (pso) m_skelPreviewPipeline = (void*)CFBridgingRetain(pso);
 				else
-					Logger::Log(Logger::LogLevel::Error,
+					HE_LOG_ERROR(RHI, "%s",
 						(std::string("MetalRenderer: skeletal-preview pipeline creation failed: ")
 							+ (error ? [[error localizedDescription] UTF8String] : "unknown")).c_str());
 			}
 			else
-				Logger::Log(Logger::LogLevel::Error, "MetalRenderer: skeletal-preview shader compile failed");
+				HE_LOG_ERROR(RHI, "%s", "MetalRenderer: skeletal-preview shader compile failed");
 		}
 	}
 	if (!m_skelPreviewPipeline) return nullptr;
@@ -6737,12 +6737,12 @@ fragment float4 particlePreviewFragment(VOut in [[stage_in]],
 				id<MTLRenderPipelineState> pso = [device newRenderPipelineStateWithDescriptor:desc error:&error];
 				if (pso) m_particlePreviewPipeline = (void*)CFBridgingRetain(pso);
 				else
-					Logger::Log(Logger::LogLevel::Error,
+					HE_LOG_ERROR(RHI, "%s",
 						(std::string("MetalRenderer: particle-preview pipeline creation failed: ")
 							+ (error ? [[error localizedDescription] UTF8String] : "unknown")).c_str());
 			}
 			else
-				Logger::Log(Logger::LogLevel::Error, "MetalRenderer: particle-preview shader compile failed");
+				HE_LOG_ERROR(RHI, "%s", "MetalRenderer: particle-preview shader compile failed");
 		}
 	}
 	return m_particlePreviewPipeline != nullptr;
@@ -7274,17 +7274,17 @@ bool MetalRenderer::EnsureDeferredPipelines()
 				}
 			}
 			if (!(m_deferredTileMode ? m_deferredResolveTilePipeline : m_deferredResolvePipeline))
-				Logger::Log(Logger::LogLevel::Error,
+				HE_LOG_ERROR(RHI, "%s",
 					(std::string("MetalRenderer: deferred resolve pipeline build failed: ")
 					 + (verr ? verr.localizedDescription.UTF8String : "?")).c_str());
 		}
 		else
-			Logger::Log(Logger::LogLevel::Error,
+			HE_LOG_ERROR(RHI, "%s",
 				(std::string("MetalRenderer: deferred resolve shader compile failed\n")
 				 + v.log + f.log).c_str());
 
 		if (!m_gbufferPipeline)
-			Logger::Log(Logger::LogLevel::Error,
+			HE_LOG_ERROR(RHI, "%s",
 				(std::string("MetalRenderer: G-buffer pipeline build failed: ")
 				 + (err ? err.localizedDescription.UTF8String : "?")).c_str());
 
@@ -7292,10 +7292,10 @@ bool MetalRenderer::EnsureDeferredPipelines()
 			(m_deferredTileMode ? m_deferredResolveTilePipeline != nullptr
 			                    : m_deferredResolvePipeline != nullptr);
 		if (!ok)
-			Logger::Log(Logger::LogLevel::Warning,
+			HE_LOG_WARN(RHI, "%s",
 				"MetalRenderer: deferred render path unavailable — staying on forward");
 		else
-			Logger::Log(Logger::LogLevel::Info, m_deferredTileMode
+			HE_LOG_INFO(RHI, "%s", m_deferredTileMode
 				? "MetalRenderer: deferred path ready (single-pass tile-memory G-buffer)"
 				: "MetalRenderer: deferred path ready (two-pass stored G-buffer)");
 		return ok;
@@ -7662,7 +7662,7 @@ void* MetalRenderer::EnsureMaterialArchive()
 		else enable = (NSProcessInfo.processInfo.operatingSystemVersion.majorVersion < 26);
 		if (!enable)
 		{
-			Logger::Log(Logger::LogLevel::Info,
+			HE_LOG_INFO(RHI, "%s",
 				"MetalRenderer: on-disk material pipeline archive disabled "
 				"(MTLBinaryArchive serialize is unstable on this macOS; in-session cache still active)");
 			return nullptr; // m_matBinaryArchive stays null → GetOrBuildMaterialPipeline skips it
@@ -7695,7 +7695,7 @@ void* MetalRenderer::EnsureMaterialArchive()
 		if (arch)
 		{
 			m_matBinaryArchive = (void*)CFBridgingRetain(arch);
-			Logger::Log(Logger::LogLevel::Info, exists
+			HE_LOG_INFO(RHI, "%s", exists
 				? "MetalRenderer: loaded material pipeline archive from disk"
 				: "MetalRenderer: created a new material pipeline archive");
 		}
@@ -7808,12 +7808,12 @@ void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string&
 			}
 		}
 		if (!result)
-			Logger::Log(Logger::LogLevel::Error,
+			HE_LOG_ERROR(RHI, "%s",
 				(std::string("MetalRenderer: material pipeline build failed: ")
 				 + (err ? err.localizedDescription.UTF8String : "?")).c_str());
 	}
 	else
-		Logger::Log(Logger::LogLevel::Error,
+		HE_LOG_ERROR(RHI, "%s",
 			(std::string("MetalRenderer: material shader compile failed\n") + log).c_str());
 
 	m_materialPipelineCache[key] = result; // cache success AND failure (null)
@@ -7889,7 +7889,7 @@ void* MetalRenderer::GetOrBuildParticlePipeline(uint64_t key, const HE::Particle
 			if (pso) result = (void*)CFBridgingRetain(pso);
 		}
 		if (!result)
-			Logger::Log(Logger::LogLevel::Error,
+			HE_LOG_ERROR(RHI, "%s",
 				(std::string("MetalRenderer: particle pipeline build failed: ")
 				 + (err ? err.localizedDescription.UTF8String : "?")).c_str());
 	}
@@ -8000,12 +8000,12 @@ void* MetalRenderer::GetOrBuildUIMaterialPipeline(const HE::UUID& materialId)
 			if (pso) result = (void*)CFBridgingRetain(pso);
 		}
 		if (!result)
-			Logger::Log(Logger::LogLevel::Error,
+			HE_LOG_ERROR(RHI, "%s",
 				(std::string("MetalRenderer: UI material pipeline build failed: ")
 				 + (err ? err.localizedDescription.UTF8String : "?")).c_str());
 	}
 	else
-		Logger::Log(Logger::LogLevel::Error,
+		HE_LOG_ERROR(RHI, "%s",
 			(std::string("MetalRenderer: UI material shader compile failed\n") + v.log + f.log).c_str());
 
 	m_uiMaterialPipelines[key] = result; // cache success AND failure (null)
@@ -9365,7 +9365,7 @@ bool MetalRenderer::EnsureDecalPipeline()
 		const auto& f = m_matShaderLib.decalFragment(Backend::Metal);
 		if (!(v.ok && f.ok))
 		{
-			Logger::Log(Logger::LogLevel::Error,
+			HE_LOG_ERROR(RHI, "%s",
 				(std::string("MetalRenderer: decal shader compile failed\n") + v.log + f.log).c_str());
 			return false;
 		}
@@ -9399,7 +9399,7 @@ bool MetalRenderer::EnsureDecalPipeline()
 			if (pso) m_decalPipeline = (void*)CFBridgingRetain(pso);
 		}
 		if (!m_decalPipeline)
-			Logger::Log(Logger::LogLevel::Error,
+			HE_LOG_ERROR(RHI, "%s",
 				(std::string("MetalRenderer: decal pipeline build failed: ")
 				 + (err ? err.localizedDescription.UTF8String : "?")).c_str());
 		return m_decalPipeline != nullptr;
@@ -9471,7 +9471,7 @@ bool MetalRenderer::EnsureSSRPipelines()
 		const auto& fb = m_matShaderLib.ssrBlur(Backend::Metal);
 		if (!(v.ok && ft.ok && fc.ok && fb.ok))
 		{
-			Logger::Log(Logger::LogLevel::Error,
+			HE_LOG_ERROR(RHI, "%s",
 				(std::string("MetalRenderer: SSR shader compile failed\n")
 				 + v.log + ft.log + fc.log + fb.log).c_str());
 			return false;
@@ -9517,7 +9517,7 @@ bool MetalRenderer::EnsureSSRPipelines()
 		}
 		const bool ok = m_ssrTracePipeline && m_ssrCompositePipeline && m_ssrBlurPipeline;
 		if (!ok)
-			Logger::Log(Logger::LogLevel::Error,
+			HE_LOG_ERROR(RHI, "%s",
 				(std::string("MetalRenderer: SSR pipeline build failed: ")
 				 + (err ? err.localizedDescription.UTF8String : "?")).c_str());
 		return ok;
@@ -10075,7 +10075,7 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			static bool s_loggedDetailed = false;
 			if (!s_loggedDetailed)
 			{
-				Logger::Log(Logger::LogLevel::Info,
+				HE_LOG_INFO(RHI, "%s",
 					"Metal: detailed GPU capture ENGAGED — one command buffer per pass, "
 					"serialized with waitUntilCompleted (per-pass exclusive GPU time; capture is slow)");
 				s_loggedDetailed = true;
@@ -10240,7 +10240,7 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 				if (mode != s_lastMode)
 				{
 					s_lastMode = mode;
-					Logger::Log(Logger::LogLevel::Info, mode == 2
+					HE_LOG_INFO(RHI, "%s", mode == 2
 						? "MetalRenderer: scene pass mode → deferred (tile single-pass)"
 						: mode == 1 ? "MetalRenderer: scene pass mode → deferred (two-pass)"
 						            : "MetalRenderer: scene pass mode → forward");
@@ -10660,21 +10660,21 @@ void MetalRenderer::EnsureGpuTimer()
 			// Draw-boundary sampling (intra-encoder) is a separate capability; when
 			// present it would let the Scene encoder be split per-element.
 			m_drawBoundary = [dev supportsCounterSampling:MTLCounterSamplingPointAtDrawBoundary];
-			Logger::Log(Logger::LogLevel::Info,
+			HE_LOG_INFO(RHI, "%s",
 				m_drawBoundary
 					? "Metal: GPU timing — whole-frame + detailed-capture; counter sampling stage + draw-boundary"
 					: "Metal: GPU timing — whole-frame + detailed-capture; counter sampling stage-boundary only");
 		}
 		else
 		{
-			Logger::Log(Logger::LogLevel::Info,
+			HE_LOG_INFO(RHI, "%s",
 				"Metal: GPU timing — whole-frame + detailed-capture available; stage-boundary counter sampling unsupported "
 				"(NB: per-encoder counter spans overlap on TBDR anyway — use the detailed-capture toggle for reliable per-pass)");
 		}
 	}
 	else
 	{
-		Logger::Log(Logger::LogLevel::Info,
+		HE_LOG_INFO(RHI, "%s",
 			"Metal: GPU timing — whole-frame + detailed-capture (counter sampling needs macOS 11+)");
 	}
 }
@@ -11047,7 +11047,7 @@ void MetalRenderer::AttachWindow(HE::Window* window)
 	WindowTarget target;
 	CreateTarget(sdlWin, target);
 	m_secondaryTargets[sdlWin] = target;
-	Logger::Log(Logger::LogLevel::Info, "MetalRenderer: secondary window attached");
+	HE_LOG_INFO(RHI, "%s", "MetalRenderer: secondary window attached");
 }
 
 void MetalRenderer::DetachWindow(HE::Window* window)
@@ -11056,7 +11056,7 @@ void MetalRenderer::DetachWindow(HE::Window* window)
 	if (it == m_secondaryTargets.end()) return;
 	DestroyTarget(it->second);
 	m_secondaryTargets.erase(it);
-	Logger::Log(Logger::LogLevel::Info, "MetalRenderer: secondary window detached");
+	HE_LOG_INFO(RHI, "%s", "MetalRenderer: secondary window detached");
 }
 
 void MetalRenderer::RenderWindow(HE::Window* window)
