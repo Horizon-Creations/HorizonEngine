@@ -1,5 +1,6 @@
 #include "OutlinerPanel.h"
 #include "EditorApplication.h"           // AppContext, HorizonWorld, EditorUndo
+#include "EditorWidgets.h"               // pinDialogToEditorWindow
 #include <HorizonScene/HorizonScene.h>
 #include <Diagnostics/Logger.h>
 #include <cstdio>
@@ -230,6 +231,7 @@ void render(AppContext& ctx)
             s_openEntityRename = false;
         }
         ImGui::SetNextWindowSize(ImVec2(320, 0), ImGuiCond_Always);
+        EditorWidgets::pinDialogToEditorWindow();
         if (ImGui::BeginPopupModal("##entity_rename_popup", nullptr,
             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
         {

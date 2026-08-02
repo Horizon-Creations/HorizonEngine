@@ -4,6 +4,9 @@
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <Diagnostics/Logger.h>
+#include <imgui_internal.h>          // OpenPopupStack — which windows are modal
+#include <SDL3/SDL.h>
+#include <algorithm>
 #include <string>
 
 namespace EditorWidgets
@@ -105,6 +108,73 @@ SlotAction assetDropSlot(AppContext& ctx, const char* label, HE::UUID& target,
 		}
 	}
 	return action;
+}
+
+// ── Dialog placement (see the header for why this exists) ────────────────────
+void pinDialogToEditorWindow(ImVec2 minSize, float margin)
+{
+	const ImGuiViewport* vp = ImGui::GetMainViewport();
+
+	// Never let a dialog grow past the editor window: the moment its rectangle
+	// protrudes, ImGui gives it its own OS window and it can be buried behind us.
+	// Constraints are applied after SetNextWindowSize and after auto-resize, so
+	// this caps whatever the caller (or the content) asked for.
+	const ImVec2 maxSize(std::max(240.0f, vp->WorkSize.x - margin * 2.0f),
+	                     std::max(180.0f, vp->WorkSize.y - margin * 2.0f));
+
+	// Min of 0 = "keep whatever you would have picked". The cap wins over the
+	// caller's minimum: a dialog wider than the editor is the bug being fixed.
+	ImGui::SetNextWindowSizeConstraints(
+		ImVec2(std::min(minSize.x, maxSize.x), std::min(minSize.y, maxSize.y)), maxSize);
+	ImGui::SetNextWindowPos(vp->GetWorkCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+}
+
+void clampCurrentWindowToEditorWindow(float margin)
+{
+	const ImGuiViewport* vp   = ImGui::GetMainViewport();
+	const ImVec2         pos  = ImGui::GetWindowPos();
+	const ImVec2         size = ImGui::GetWindowSize();
+
+	// max() guards the case where the panel is larger than the editor window: the
+	// top-left corner then wins, so the title bar (and its close button) stays
+	// reachable instead of the window being pushed off to the left.
+	const float minX = vp->WorkPos.x + margin;
+	const float minY = vp->WorkPos.y + margin;
+	const float maxX = vp->WorkPos.x + std::max(margin, vp->WorkSize.x - size.x - margin);
+	const float maxY = vp->WorkPos.y + std::max(margin, vp->WorkSize.y - size.y - margin);
+
+	const ImVec2 want(std::clamp(pos.x, minX, maxX), std::clamp(pos.y, minY, maxY));
+	if (want.x != pos.x || want.y != pos.y)
+		ImGui::SetWindowPos(want);
+}
+
+void raiseDetachedModals(SDL_Window* mainWindow)
+{
+	if (!mainWindow) return;
+
+	// Only act on the transition into focus. Raising every frame would fight the
+	// user for the focus they may be trying to give another window of ours.
+	static bool s_hadFocus = true;
+	const bool  hasFocus   = (SDL_GetWindowFlags(mainWindow) & SDL_WINDOW_INPUT_FOCUS) != 0;
+	const bool  cameForward = hasFocus && !s_hadFocus;
+	s_hadFocus = hasFocus;
+	if (!cameForward) return;
+
+	ImGuiContext* g = ImGui::GetCurrentContext();
+	if (!g) return;
+	const ImGuiViewport* mainVp = ImGui::GetMainViewport();
+
+	for (const ImGuiPopupData& popup : g->OpenPopupStack)
+	{
+		const ImGuiWindow* w = popup.Window;
+		if (!w || !w->Active || (w->Flags & ImGuiWindowFlags_Modal) == 0) continue;
+		const ImGuiViewport* vp = w->Viewport;
+		if (!vp || vp == mainVp || vp->PlatformHandle == nullptr) continue;
+		const SDL_WindowID id = static_cast<SDL_WindowID>(
+			reinterpret_cast<intptr_t>(vp->PlatformHandle));
+		if (SDL_Window* win = SDL_GetWindowFromID(id))
+			SDL_RaiseWindow(win);
+	}
 }
 
 } // namespace EditorWidgets

@@ -1,5 +1,6 @@
 #include "ProjectHubPanel.h"
 #include "EditorApplication.h"           // AppContext, ProjectManager, EditorConfig
+#include "EditorWidgets.h"               // pinDialogToEditorWindow
 #include "TutorialPanel.h"               // Help ▸ Interactive Tutorial → sandbox offer
 #include "HorizonVersion.h"
 #ifdef __APPLE__
@@ -434,8 +435,7 @@ void render(AppContext& ctx)
             ctx.hubRemoveRequested = false;
             ImGui::OpenPopup("##ConfirmRemove");
         }
-        ImVec2 center = ImGui::GetMainViewport()->GetCenter();
-        ImGui::SetNextWindowPos(center, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+        EditorWidgets::pinDialogToEditorWindow();
         if (ImGui::BeginPopupModal("##ConfirmRemove", nullptr,
             ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar))
         {

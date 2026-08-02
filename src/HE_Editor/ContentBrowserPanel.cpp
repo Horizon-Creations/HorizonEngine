@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cstdint>
 #include "EditorApplication.h"           // AppContext, GlobalState folders, ProjectManager
+#include "EditorWidgets.h"               // pinDialogToEditorWindow
 #include "ScriptEditorPanel.h"
 #include "CppClassEditorPanel.h"
 #include "MaterialEditorPanel.h"
@@ -1216,6 +1217,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 
 		// ── Rename / name-on-create popup ─────────────────────────────────
 		ImGui::SetNextWindowSize(ImVec2(320, 0), ImGuiCond_Always);
+		EditorWidgets::pinDialogToEditorWindow();
 		if (ImGui::BeginPopupModal("##cb_rename_popup", nullptr,
 			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
 		{
@@ -1337,6 +1339,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			s_openCppClassPopup = false;
 		}
 		ImGui::SetNextWindowSize(ImVec2(340, 0), ImGuiCond_Always);
+		EditorWidgets::pinDialogToEditorWindow();
 		if (ImGui::BeginPopupModal("##cb_cpp_class_popup", nullptr,
 			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
 		{

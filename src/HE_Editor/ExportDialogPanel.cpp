@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cstdint>
 #include "EditorApplication.h"           // AppContext, ProjectManager
+#include "EditorWidgets.h"               // pinDialogToEditorWindow
 #include "HcEditorUtil.h"                // asset enumeration for the codegen source set
 #include "HorizonVersion.h"
 #include <Hpak/ProjectExporter.h>
@@ -393,9 +394,8 @@ void render(AppContext& ctx)
             && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel))
             ImGui::OpenPopup("Export Project##build");
 
-        ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(),
-                                ImGuiCond_Always, ImVec2(0.5f, 0.5f));
         ImGui::SetNextWindowSize(ImVec2(560, 0), ImGuiCond_Always);
+        EditorWidgets::pinDialogToEditorWindow();
         if (ImGui::BeginPopupModal("Export Project##build", nullptr,
             ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings))
         {

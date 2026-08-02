@@ -304,6 +304,15 @@ void EditorApplication::OnInit()
 	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 	io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
 	io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
+	// ImGui windows that end up in their own OS window (a dialog that does not fit
+	// inside the editor, a panel dragged out of it) are top-level and unparented
+	// by default, so the window manager orders them independently of the editor:
+	// alt-tabbing away and back, or clicking the editor, buries them behind the
+	// docked layout while they stay open — and an open modal keeps eating input.
+	// Declaring the main viewport as their parent makes the OS keep them in front
+	// of the editor window. EditorWidgets::raiseDetachedModals() covers macOS,
+	// where the SDL3 backend skips parenting (multi-monitor quirk upstream).
+	io.ConfigViewportsNoDefaultParent = false;
 
 	// ── Load editor fonts ─────────────────────────────────────────────────────
 	// Font file is deployed alongside the executable via the CMake post-build step.

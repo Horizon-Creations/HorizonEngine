@@ -28,6 +28,7 @@
 #include "ToolchainDialog.h"             // startup cmake/compiler check
 #include "PlayReportPanel.h"             // post-PIE warning/error report
 #include "EditorAssetTypeCache.h"        // shared path → AssetType sniff (invalidated below)
+#include "EditorWidgets.h"               // dialog placement + detached-modal raise
 #ifdef __APPLE__
 #include "MacMenuBar.h"   // native system menu bar (replaces the ImGui menu row)
 #endif
@@ -317,6 +318,11 @@ void EditorUI::render(AppContext& ctx, float dt)
         ImGui::RenderPlatformWindowsDefault();
         if (backupWin && backupCtx)
             SDL_GL_MakeCurrent(backupWin, backupCtx);
+
+        // A modal that did end up in its own OS window must not be left behind the
+        // editor: invisible there, but still swallowing every click.
+        if (ctx.window)
+            EditorWidgets::raiseDetachedModals(ctx.window->GetNativeWindow());
     }
 #endif // HE_IMGUI_ENABLED
 }
@@ -729,11 +735,11 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         s_openUnsavedModal = false;
     }
     {
-        ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(),
-                                ImGuiCond_Always, ImVec2(0.5f, 0.5f));
         // Auto-height, but a stable minimum width — the asset rows below would
-        // otherwise make the popup jump around as entries are saved away.
-        ImGui::SetNextWindowSizeConstraints(ImVec2(420.0f, 0.0f), ImVec2(FLT_MAX, FLT_MAX));
+        // otherwise make the popup jump around as entries are saved away. The
+        // pin also caps the height: a long asset list must not grow the popup
+        // past the editor window (see EditorWidgets.h).
+        EditorWidgets::pinDialogToEditorWindow(ImVec2(420.0f, 0.0f));
         if (ImGui::BeginPopupModal("Unsaved Changes##scene", nullptr,
             ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings))
         {
@@ -976,8 +982,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 
     if (!ctx.hubOpenError.empty())
     {
-        ImVec2 center = ImGui::GetMainViewport()->GetCenter();
-        ImGui::SetNextWindowPos(center, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+        EditorWidgets::pinDialogToEditorWindow();
         if (ImGui::BeginPopupModal("##EditorOpenError", nullptr,
             ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar))
         {
@@ -1009,9 +1014,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             "Native GameLogic library, built with your own toolchain.",
         };
 
-        ImVec2 center = ImGui::GetMainViewport()->GetCenter();
-        ImGui::SetNextWindowPos(center, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
         ImGui::SetNextWindowSize(ImVec2(480, 0), ImGuiCond_Always);
+        EditorWidgets::pinDialogToEditorWindow();
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16.0f, 16.0f));
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,   ImVec2(8.0f, 8.0f));
         if (ImGui::BeginPopupModal("##NewProjectPopup", nullptr,
