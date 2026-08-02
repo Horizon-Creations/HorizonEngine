@@ -199,6 +199,28 @@ public:
         m_onTransform = std::move(fn);
     }
 
+    // ── Component edits ──
+    // Everything a transform delta does not cover: mesh and material
+    // assignments, lights, cameras, colliders, scripts, names — any component
+    // the scene format knows how to store. Carried as the entity's serialized
+    // component state, so a component added to the scene format replicates
+    // without touching this code at all.
+    //
+    // Sent as a whole blob rather than a field diff because the payload is small
+    // (one entity's components) and a diff would need a shared schema on both
+    // ends; the lock guarantees nobody else is editing it concurrently, so a
+    // wholesale overwrite cannot lose someone's work.
+    struct ComponentUpdate {
+        std::uint64_t             netId = 0;
+        std::vector<std::uint8_t> blob;
+    };
+
+    bool sendComponents(const ComponentUpdate& update);
+
+    void onComponents(std::function<void(ParticipantId, const ComponentUpdate&)> fn) {
+        m_onComponents = std::move(fn);
+    }
+
     // ── Structural changes ──
     // Creating, destroying and reparenting entities. The subject is a *network
     // id*, not a raw ECS handle: peers assign handles independently, so a raw
@@ -331,6 +353,10 @@ private:
     void handleTransformUpdate(ConnectionId conn, BitReader& r);   // host
     void handleTransformRelay(BitReader& r);                       // client
 
+    // Components
+    void handleComponentsUpdate(ConnectionId conn, BitReader& r);  // host
+    void handleComponentsRelay(BitReader& r);                      // client
+
     // Structural
     void handleStructuralUpdate(ConnectionId conn, BitReader& r);  // host
     void handleStructuralRelay(BitReader& r);                      // client
@@ -395,6 +421,7 @@ private:
     };
     std::vector<AssetAssembly> m_assetAssembly;
 
+    std::function<void(ParticipantId, const ComponentUpdate&)>  m_onComponents;
     std::function<void(ParticipantId, const StructuralChange&)> m_onStructural;
     std::function<void(ParticipantId, const AssetUpdate&)>     m_onAsset;
     std::function<void(ParticipantId, const TransformDelta&)> m_onTransform;

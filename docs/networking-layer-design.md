@@ -6,10 +6,9 @@ protocol with chunked late-join snapshots, presence, an authoritative lock table
 and live replication of transforms, authored assets and structural changes — all
 reachable from the editor (View ▸ Collaboration) with per-user undo/redo.
 
-Not done: replication of components other than `TransformComponent` (needs a
-per-component serializer), NAT-PMP as a second port-mapping path, and gameplay
-replication (N4a). Not verified: two real editor instances in one session, which
-needs two GUI processes.
+Not done: NAT-PMP as a second port-mapping path, and gameplay replication (N4a).
+Not verified: two real editor instances in one session, which needs two GUI
+processes.
 
 ## Why one layer serves two very different consumers
 
@@ -152,7 +151,7 @@ any zero-pad in the payload's final byte.
 - **N3** ✅ — session protocol: join/leave, participant list, **chunked late-join snapshot** behind `ISessionStateProvider`.
 - **N4** ✅ — **presence**: camera pose + selection per participant, throttled and relayed by the host.
 - **N5** ✅ — **authoritative lock table** on the host, which removes the polling race window LFS locks have.
-- **N6** ✅ — **live deltas**: transforms, authored assets, and structural changes (create/destroy/reparent) all replicate, with lock-derived authority. Components other than TransformComponent still need a per-component serializer.
+- **N6** ✅ — **live deltas**: transforms, all other components, authored assets, and structural changes (create/destroy/reparent) replicate, with lock-derived authority.
 - **N4a** *(later)* — gameplay replication: `NetworkComponent` on entt, authority model, snapshot + delta, client prediction / server reconciliation, interest management.
 
 ## Discovery (N2.5)
@@ -404,9 +403,27 @@ but destroying and reparenting do — otherwise an entity could be yanked out fr
 under whoever is editing it. Destroying also frees the subject's lock, or the
 table would keep blocking something that no longer exists.
 
-Still not replicated: edits to components other than `TransformComponent`. Those
-need a per-component serializer; today they travel only when someone re-joins and
-receives a fresh snapshot.
+### Component edits
+
+Everything a transform delta does not carry — mesh and material assignments,
+lights, cameras, colliders, scripts, names — replicates as the entity's
+**serialized component state**, via `SceneSerializer::serializeEntityComponents`
+and `applyEntityComponents`. Those reuse the same restore path as scene loading,
+so a component added to the scene format replicates with no extra work here.
+
+Applying updates an *existing* entity rather than creating one: a prefab blob
+would mint a new entity, which is the wrong operation when the peer already has
+it and is merely editing it.
+
+Sent as a whole blob rather than a field diff. The payload is one entity's
+components — small — and a diff would need a shared schema on both ends. The lock
+is what makes a wholesale overwrite safe: nobody else can be editing that entity,
+so nothing of theirs can be lost.
+
+Change detection costs almost nothing because **only the held entity can have
+changed**: you may edit only what you hold, so the editor serializes that one
+entity per frame and hashes the result. An entity that is merely selected rather
+than edited sends nothing.
 
 ## Undo in a shared session — the problem, and a proposal
 

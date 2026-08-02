@@ -334,6 +334,12 @@ void CollabController::wireCallbacks()
 		m_snapshotTotal = total;
 	});
 
+	m_collab->onComponents([this](HE::Net::ParticipantId,
+	                              const HE::Net::CollabSession::ComponentUpdate& u) {
+		const std::uint32_t local = entityForNetId(u.netId);
+		if (local != 0 && m_onRemoteComponents) m_onRemoteComponents(local, u.blob);
+	});
+
 	m_collab->onStructural([this](HE::Net::ParticipantId,
 	                              const HE::Net::CollabSession::StructuralChange& c) {
 		using Kind = HE::Net::CollabSession::StructuralChange::Kind;
@@ -443,6 +449,8 @@ void CollabController::teardown()
 	m_lockNotice.clear();
 	m_netIds.clear();
 	m_netIdCounter  = 0;
+	m_lastComponentHash   = 0;
+	m_lastComponentEntity = 0;
 
 	// Drop any directory work still in flight. Destroying a std::async future
 	// blocks until its thread finishes, which is why the calls carry timeouts.
@@ -628,6 +636,40 @@ void CollabController::publishTransform(std::uint64_t subject,
 		for (int i = 0; i < 9; ++i) m_lastTransform[i] = current[i];
 		m_hasLastTransform    = true;
 		m_lastTransformSendMs = nowMs;
+	}
+}
+
+// ─── Component edits ─────────────────────────────────────────────────────────
+
+void CollabController::publishComponents(std::uint32_t entityHandle,
+                                         const std::vector<std::uint8_t>& blob)
+{
+	if (!m_collab || !inSession() || blob.empty()) return;
+
+	std::uint64_t netId = 0;
+	for (const auto& [net, handle] : m_netIds)
+	{
+		if (handle == entityHandle) { netId = net; break; }
+	}
+	// Not mapped yet means the structural pass has not announced it — sending
+	// components for an entity peers do not know would arrive as an orphan.
+	if (netId == 0) return;
+	if (!m_collab->ownsLock(netId)) return;
+
+	// FNV-1a over the blob: the whole point is to send nothing while the user is
+	// merely looking at an entity rather than editing it.
+	std::uint64_t hash = 1469598103934665603ull;
+	for (const std::uint8_t b : blob) { hash ^= b; hash *= 1099511628211ull; }
+
+	if (entityHandle == m_lastComponentEntity && hash == m_lastComponentHash) return;
+
+	HE::Net::CollabSession::ComponentUpdate u;
+	u.netId = netId;
+	u.blob  = blob;
+	if (m_collab->sendComponents(u))
+	{
+		m_lastComponentEntity = entityHandle;
+		m_lastComponentHash   = hash;
 	}
 }
 

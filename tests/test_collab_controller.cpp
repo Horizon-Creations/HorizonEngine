@@ -3,6 +3,8 @@
 #include "../src/HE_Editor/CollabController.h"
 
 #include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/SceneSerializer.h>
+#include <HorizonScene/HorizonScene.h>
 
 #include <chrono>
 #include <string>
@@ -232,4 +234,71 @@ TEST_CASE("CollabController: hosting without a world refuses joins instead of sh
     // Admitting the peer would leave it believing it shares a scene it never got.
     CHECK(client.status() != CollabController::Status::Joined);
     CHECK(countEntities(clientWorld) == before);   // local scene untouched
+}
+
+// ─── Component replication through the real serializer ───────────────────────
+// The protocol tests use opaque blobs; these check the part a fake can never
+// cover — that arbitrary component state survives serialize → wire → apply on a
+// genuine HorizonWorld.
+
+TEST_CASE("SceneSerializer: entity components round-trip onto an existing entity")
+{
+    HorizonWorld world;
+    const Entity e = world.createEntity("Prop");
+    auto& reg = world.registry();
+
+    auto& tc = reg.emplace_or_replace<TransformComponent>(e);
+    tc.position = glm::vec3(1.0f, 2.0f, 3.0f);
+    tc.scale    = glm::vec3(4.0f, 5.0f, 6.0f);
+
+    SceneSerializer serializer;
+    const auto blob = serializer.serializeEntityComponents(world, e);
+    REQUIRE_FALSE(blob.empty());
+
+    // Change it, then apply the captured state back — the entity must survive,
+    // not be replaced, because peers reference it by handle.
+    tc.position = glm::vec3(99.0f, 99.0f, 99.0f);
+    REQUIRE(serializer.applyEntityComponents(world, e, blob));
+
+    CHECK(reg.valid(e));   // same entity, not a new one
+    auto* after = reg.try_get<TransformComponent>(e);
+    REQUIRE(after != nullptr);
+    CHECK(after->position.x == doctest::Approx(1.0f));
+    CHECK(after->scale.y == doctest::Approx(5.0f));
+}
+
+TEST_CASE("SceneSerializer: a non-transform component replicates too")
+{
+    HorizonWorld world;
+    const Entity e = world.createEntity("Lamp");
+    auto& reg = world.registry();
+
+    // A light is exactly the kind of edit a transform delta cannot carry.
+    auto& lc = reg.emplace_or_replace<LightComponent>(e);
+    lc.intensity = 7.5f;
+
+    SceneSerializer serializer;
+    const auto blob = serializer.serializeEntityComponents(world, e);
+    REQUIRE_FALSE(blob.empty());
+
+    lc.intensity = 0.1f;
+    REQUIRE(serializer.applyEntityComponents(world, e, blob));
+
+    auto* after = reg.try_get<LightComponent>(e);
+    REQUIRE(after != nullptr);
+    CHECK(after->intensity == doctest::Approx(7.5f));
+}
+
+TEST_CASE("SceneSerializer: applying to an invalid entity fails instead of creating one")
+{
+    HorizonWorld world;
+    const Entity e = world.createEntity("Temp");
+    SceneSerializer serializer;
+    const auto blob = serializer.serializeEntityComponents(world, e);
+    world.destroyEntity(e);
+
+    // A peer may reference an entity we already deleted; silently resurrecting
+    // it would diverge the scenes.
+    CHECK_FALSE(serializer.applyEntityComponents(world, e, blob));
+    CHECK_FALSE(serializer.applyEntityComponents(world, e, {}));
 }
