@@ -224,7 +224,7 @@ static std::vector<uint8_t> CompileMaterialShaderVariants(const std::string& fra
 		const auto& frag = lib.fragment(hash, fragGlsl, lb);
 		if (!vert.ok || !frag.ok)
 		{
-			Logger::Log(Logger::LogLevel::Warning,
+			HE_LOG_WARN(Editor, "%s",
 			            ("Export: material shader precompile failed for backend "
 			             + std::to_string(static_cast<int>(v)) + " — "
 			             + vert.log + " " + frag.log).c_str());
@@ -721,7 +721,7 @@ void render(AppContext& ctx)
                 const bool hcCompile = s_exportCompileHC
                     && exportPlatformFromName(s_exportPlatform) == ExportPlatform::Host;
                 if (s_exportCompileHC && !hcCompile)
-                    Logger::Log(Logger::LogLevel::Warning,
+                    HE_LOG_WARN(Editor, "%s",
                         "Export: HorizonCode compile skipped — target platform != host; "
                         "shipping interpreted.");
 
@@ -796,7 +796,7 @@ void render(AppContext& ctx)
                                 extraScenes.emplace_back(rel, std::move(bytes));
                             }
                             else
-                                Logger::Log(Logger::LogLevel::Warning,
+                                HE_LOG_WARN(Editor, "%s",
                                     ("Export: skipping unreadable scene " + sit->path().string()).c_str());
                         }
                         ec2.clear();
@@ -995,7 +995,7 @@ void render(AppContext& ctx)
                             for (const auto& w : gen.warnings)
                             {
                                 buildLogLine(1, "warning: " + w);
-                                Logger::Log(Logger::LogLevel::Warning,
+                                HE_LOG_WARN(Editor, "%s",
                                     ("HorizonCode codegen: " + w).c_str());
                             }
                             for (const auto& fb : gen.fallbacks)
@@ -1003,7 +1003,7 @@ void render(AppContext& ctx)
                                 buildLogLine(1, "INTERPRETED " + fb.key + " — " + fb.reason +
                                                 (fb.node ? " (node " + std::to_string(fb.node) + ")"
                                                          : std::string()));
-                                Logger::Log(Logger::LogLevel::Warning,
+                                HE_LOG_WARN(Editor, "%s",
                                     ("HorizonCode codegen: '" + fb.key +
                                      "' ships interpreted — " + fb.reason).c_str());
                             }
@@ -1082,7 +1082,7 @@ void render(AppContext& ctx)
                                 }
                                 else
                                 {
-                                    Logger::Log(Logger::LogLevel::Warning,
+                                    HE_LOG_WARN(Editor, "%s",
                                         ("HorizonCode codegen: " + built.message).c_str());
                                     hcMsg = " — HorizonCode: compile failed, shipped "
                                             "interpreted (" + built.message + ")";

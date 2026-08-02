@@ -7,6 +7,7 @@
 #include "HorizonScene/Components/ScriptComponent.h"
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
+#include <Diagnostics/Log.h>
 
 #include <string>
 #include <vector>
@@ -583,17 +584,61 @@ IScriptBackend* ScriptContext::backendForName(const std::string& name)
     return &m_engine;
 }
 
+// ─── Script diagnostics ──────────────────────────────────────────────────────
+// ScriptContext is the single funnel every Lua/Python/HorizonCode call passes
+// through, and until now a failing script just returned false: the error text
+// sat in lastError() and nobody read it, so a typo in onUpdate() looked exactly
+// like "the script does nothing". Everything below reports through the log.
+namespace
+{
+	HE::Log::Cat catFor(HE::ScriptLanguage lang)
+	{
+		return lang == HE::ScriptLanguage::Python ? HE::Log::Cat::Python
+		                                          : HE::Log::Cat::Lua;
+	}
+
+	const char* langName(HE::ScriptLanguage lang)
+	{
+		switch (lang)
+		{
+		case HE::ScriptLanguage::Python: return "Python";
+		case HE::ScriptLanguage::Lua:    return "Lua";
+		default:                         return "unknown";
+		}
+	}
+}
+
 bool ScriptContext::loadScript(const std::string& name, const std::string& source,
                                HE::ScriptLanguage lang)
 {
     if (lang == HE::ScriptLanguage::Python)
     {
-        if (!m_py) { m_lastBackend = &m_engine; return false; } // built without Python
+        if (!m_py)
+        {
+            m_lastBackend = &m_engine;
+            HE_LOG_ERROR(Python, "Cannot load script '%s': this build has no Python backend",
+                         name.c_str());
+            return false;
+        }
         m_lastBackend = m_py.get();
-        return m_py->loadScript(name, source);
+        if (!m_py->loadScript(name, source))
+        {
+            HE_LOG_ERROR(Python, "Compile error in script '%s': %s",
+                         name.c_str(), m_py->lastError().c_str());
+            return false;
+        }
+        HE_LOG_DEBUG(Python, "Loaded script '%s' (%zu bytes)", name.c_str(), source.size());
+        return true;
     }
     m_lastBackend = &m_engine;
-    return m_engine.loadScript(name, source);
+    if (!m_engine.loadScript(name, source))
+    {
+        HE_LOG_ERROR(Lua, "Compile error in script '%s': %s",
+                     name.c_str(), m_engine.lastError().c_str());
+        return false;
+    }
+    HE_LOG_DEBUG(Lua, "Loaded script '%s' (%zu bytes)", name.c_str(), source.size());
+    return true;
 }
 
 ScriptEngine::InstanceId ScriptContext::createInstance(const std::string& scriptName,
@@ -612,11 +657,24 @@ ScriptEngine::InstanceId ScriptContext::createInstance(const std::string& script
     IScriptBackend* backend = (lang == HE::ScriptLanguage::Python)
                                   ? static_cast<IScriptBackend*>(m_py.get())
                                   : &m_engine;
-    if (!backend) return IScriptBackend::kInvalidInstance; // Python requested, unavailable
+    if (!backend)
+    {
+        HE_LOG_ERROR(Script, "Cannot instantiate '%s' on entity %u: this build has no "
+                             "Python backend", scriptName.c_str(), static_cast<uint32_t>(entity));
+        return IScriptBackend::kInvalidInstance; // Python requested, unavailable
+    }
     m_lastBackend = backend;
     // The entity binding (self.entityId / self.entity_id) is set by the backend.
     const InstanceId raw = backend->createInstance(scriptName, static_cast<uint32_t>(entity));
-    if (raw == IScriptBackend::kInvalidInstance) return IScriptBackend::kInvalidInstance;
+    if (raw == IScriptBackend::kInvalidInstance)
+    {
+        HE_LOG(Script, Error, "Failed to instantiate %s script '%s' on entity %u: %s",
+               langName(lang), scriptName.c_str(), static_cast<uint32_t>(entity),
+               backend->lastError().c_str());
+        return IScriptBackend::kInvalidInstance;
+    }
+    HE_LOG_TRACE(Script, "Instantiated %s script '%s' on entity %u",
+                 langName(lang), scriptName.c_str(), static_cast<uint32_t>(entity));
     return tagId(raw, lang);
 }
 
@@ -634,10 +692,32 @@ ScriptEngine::InstanceId ScriptContext::startEntityScript(entt::entity entity, C
     if (!reg.valid(entity)) return ScriptEngine::kInvalidInstance;
     auto* sc = reg.try_get<ScriptComponent>(entity);
     if (!sc || !sc->enabled) return ScriptEngine::kInvalidInstance;
+
+    // "My script isn't running" is nearly always one of the two cases below: the
+    // component points at an asset that is gone, or at one that is empty. Both
+    // used to be a silent early return.
     const ScriptAsset* asset = cm.getScript(sc->scriptAssetId);
-    if (!asset || asset->sourceCode.empty()) return ScriptEngine::kInvalidInstance;
+    if (!asset)
+    {
+        HE_LOG_ERROR(Script, "Entity %u: script asset %016llx%016llx referenced by '%s' was "
+                             "not found — no script will run on this entity",
+                     static_cast<uint32_t>(entity),
+                     static_cast<unsigned long long>(sc->scriptAssetId.hi),
+                     static_cast<unsigned long long>(sc->scriptAssetId.lo),
+                     sc->moduleName.c_str());
+        return ScriptEngine::kInvalidInstance;
+    }
+    if (asset->sourceCode.empty())
+    {
+        HE_LOG_WARN(Script, "Entity %u: script '%s' is empty — nothing to run",
+                    static_cast<uint32_t>(entity), asset->name.c_str());
+        return ScriptEngine::kInvalidInstance;
+    }
     if (!isScriptLoaded(sc->moduleName, asset->language))
-        loadScript(sc->moduleName, asset->sourceCode, asset->language);
+    {
+        if (!loadScript(sc->moduleName, asset->sourceCode, asset->language))
+            return ScriptEngine::kInvalidInstance;   // loadScript already logged why
+    }
     const auto instId = createInstance(sc->moduleName, entity, asset->language);
     if (instId == ScriptEngine::kInvalidInstance) return ScriptEngine::kInvalidInstance;
     injectProperties(instId, sc->properties);
@@ -648,14 +728,20 @@ ScriptEngine::InstanceId ScriptContext::startEntityScript(entt::entity entity, C
 int ScriptContext::startWorldScripts(ContentManager& cm, InstanceMap& out)
 {
     if (!m_world) return 0;
-    int started = 0;
+    int started = 0, attempted = 0;
     for (auto [entity, sc] : m_world->registry().view<ScriptComponent>().each())
     {
+        ++attempted;
         const auto instId = startEntityScript(entity, cm);
         if (instId == ScriptEngine::kInvalidInstance) continue;
         out[static_cast<uint32_t>(entity)] = instId;
         ++started;
     }
+    if (started != attempted)
+        HE_LOG_WARN(Script, "Started %d of %d entity script(s) — %d failed to start",
+                    started, attempted, attempted - started);
+    else if (started > 0)
+        HE_LOG_INFO(Script, "Started %d entity script(s)", started);
     return started;
 }
 
@@ -674,40 +760,61 @@ int ScriptContext::startScriptsFor(const std::vector<entt::entity>& entities,
     return started;
 }
 
+// Shared reporting for the per-callback entry points. A runtime error in a
+// script callback is a genuine bug the developer must see, but onUpdate runs
+// every frame for every instance — so the report is throttled per callback kind
+// instead of being dropped or spamming 60 lines a second.
+#define HE_SCRIPT_CALL(cbName, expr)                                            \
+	do {                                                                        \
+		if (expr) return true;                                                  \
+		HE_LOG_THROTTLE(Script, Error, 2.0,                                     \
+		                "%s script instance %llu failed in " cbName "(): %s",   \
+		                langName(langOf(id)),                                   \
+		                static_cast<unsigned long long>(rawId(id)),             \
+		                b->lastError().c_str());                                \
+		return false;                                                           \
+	} while (0)
+
 bool ScriptContext::callOnStart(ScriptEngine::InstanceId id)
 {
     IScriptBackend* b = backendForId(id); m_lastBackend = b;
-    return b->callOnStart(rawId(id));
+    HE_SCRIPT_CALL("onStart", b->callOnStart(rawId(id)));
 }
 
 bool ScriptContext::callOnUpdate(ScriptEngine::InstanceId id, float dt)
 {
     IScriptBackend* b = backendForId(id); m_lastBackend = b;
-    return b->callOnUpdate(rawId(id), dt);
+    HE_SCRIPT_CALL("onUpdate", b->callOnUpdate(rawId(id), dt));
 }
 
 bool ScriptContext::callOnCollisionEnter(ScriptEngine::InstanceId id, uint32_t otherEntityId)
 {
     IScriptBackend* b = backendForId(id); m_lastBackend = b;
-    return b->callOnCollisionEnter(rawId(id), otherEntityId);
+    HE_SCRIPT_CALL("onCollisionEnter", b->callOnCollisionEnter(rawId(id), otherEntityId));
 }
 
 bool ScriptContext::callOnCollisionExit(ScriptEngine::InstanceId id, uint32_t otherEntityId)
 {
     IScriptBackend* b = backendForId(id); m_lastBackend = b;
-    return b->callOnCollisionExit(rawId(id), otherEntityId);
+    HE_SCRIPT_CALL("onCollisionExit", b->callOnCollisionExit(rawId(id), otherEntityId));
 }
 
 bool ScriptContext::callOnUIEvent(ScriptEngine::InstanceId id, UIScriptEvent ev)
 {
     IScriptBackend* b = backendForId(id); m_lastBackend = b;
-    return b->callOnUIEvent(rawId(id), ev);
+    HE_SCRIPT_CALL("onUIEvent", b->callOnUIEvent(rawId(id), ev));
 }
+
+#undef HE_SCRIPT_CALL
 
 bool ScriptContext::hotReloadScript(const std::string& name, const std::string& source)
 {
     IScriptBackend* b = backendForName(name); m_lastBackend = b;
-    return b->hotReloadScript(name, source);
+    const bool ok = b->hotReloadScript(name, source);
+    if (ok) HE_LOG_INFO(Script, "Hot-reloaded script '%s'", name.c_str());
+    else    HE_LOG_ERROR(Script, "Hot reload of '%s' failed (previous version stays live): %s",
+                         name.c_str(), b->lastError().c_str());
+    return ok;
 }
 
 bool ScriptContext::hotReloadScript(const std::string& name, const std::string& source,
@@ -716,9 +823,20 @@ bool ScriptContext::hotReloadScript(const std::string& name, const std::string& 
     IScriptBackend* b = (lang == HE::ScriptLanguage::Python)
                             ? static_cast<IScriptBackend*>(m_py.get())
                             : &m_engine;
-    if (!b) { m_lastBackend = &m_engine; return false; } // Python requested, unavailable
+    if (!b)
+    {
+        m_lastBackend = &m_engine;
+        HE_LOG_ERROR(Python, "Hot reload of '%s' skipped: this build has no Python backend",
+                     name.c_str());
+        return false;
+    }
     m_lastBackend = b;
-    return b->hotReloadScript(name, source);
+    const bool ok = b->hotReloadScript(name, source);
+    if (ok) HE_LOG(Script, Info, "Hot-reloaded %s script '%s'", langName(lang), name.c_str());
+    else    HE_LOG(Script, Error, "Hot reload of %s script '%s' failed "
+                                  "(previous version stays live): %s",
+                   langName(lang), name.c_str(), b->lastError().c_str());
+    return ok;
 }
 
 bool ScriptContext::isScriptLoaded(const std::string& name) const

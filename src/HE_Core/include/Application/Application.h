@@ -119,6 +119,15 @@ namespace HE
 		// stop it restores the previous vsync state and writes a dump.
 		void toggleProfilerCapture();
 
+	protected:
+		// Frames completed by the main loop. Stamped onto every log record (see
+		// HE::Log::setFrameNumber) so a message can be tied to a specific frame.
+		uint64_t                   m_frameIndex = 0;
+		// A frame slower than this is reported as a hitch. The first frames are
+		// exempt: startup legitimately blocks on shader/asset warmup.
+		static constexpr float     kHitchSeconds      = 0.25f;
+		static constexpr uint64_t  kHitchWarmupFrames = 10;
+
 	private:
 		bool                       m_running  = false;
 		bool                       m_vsyncEnabled = true;  // current vsync state

@@ -537,7 +537,7 @@ void renderWelcome(AppContext& ctx)
 				ctx.projectLoaded         = true;
 				s_open                    = true;
 				s_forceWelcome            = false;
-				Logger::Log(Logger::LogLevel::Info,
+				HE_LOG_INFO(Editor, "%s",
 					("Tutorial: created sandbox project at " + projRoot.string()).c_str());
 				ImGui::CloseCurrentPopup();
 			}

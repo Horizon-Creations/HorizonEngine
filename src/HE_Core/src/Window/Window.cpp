@@ -1,6 +1,7 @@
 #include "Window/Window.h"
 #include <cstdint>
 #include <SDL3/SDL.h>
+#include "Diagnostics/Log.h"
 #include <stdexcept>
 
 namespace HE
@@ -17,7 +18,17 @@ namespace HE
         if (m_isPrimary)
         {
             if (!SDL_Init(SDL_INIT_VIDEO))
+            {
+                // These throws travel up to a message box and a hard exit, so the
+                // reason has to reach the log before the process is gone.
+                HE_LOG_CRIT(Window, "SDL_Init(VIDEO) failed: %s", SDL_GetError());
                 throw std::runtime_error("SDL_Init failed: " + std::string(SDL_GetError()));
+            }
+            HE_LOG_INFO(Window, "SDL %d.%d.%d initialised, video driver '%s'",
+                        SDL_VERSIONNUM_MAJOR(SDL_GetVersion()),
+                        SDL_VERSIONNUM_MINOR(SDL_GetVersion()),
+                        SDL_VERSIONNUM_MICRO(SDL_GetVersion()),
+                        SDL_GetCurrentVideoDriver() ? SDL_GetCurrentVideoDriver() : "?");
         }
 
         // Choose SDL window flags and set GL attributes only for OpenGL
@@ -61,7 +72,12 @@ namespace HE
             static_cast<int>(props.height),
             flags);
         if (!m_window)
+        {
+            HE_LOG_CRIT(Window, "SDL_CreateWindow('%s', %ux%u, flags 0x%llx) failed: %s",
+                        props.title.c_str(), props.width, props.height,
+                        static_cast<unsigned long long>(flags), SDL_GetError());
             throw std::runtime_error("SDL_CreateWindow failed: " + std::string(SDL_GetError()));
+        }
 
         // m_width/m_height are the logical (points) size by construction — that is what
         // SDL_CreateWindow was given. The drawable size only equals it when HiDPI is off,
@@ -72,18 +88,46 @@ namespace HE
             m_pixelWidth  = pw > 0 ? static_cast<uint32_t>(pw) : m_width;
             m_pixelHeight = ph > 0 ? static_cast<uint32_t>(ph) : m_height;
         }
+        // The logical-vs-pixel pair is the first thing to check for "everything is
+        // blurry" or "the viewport is half the window" reports.
+        HE_LOG_INFO(Window, "%s window created: %ux%u logical, %ux%u pixels, backend %d, "
+                            "vsync %s, display '%s'",
+                    m_isPrimary ? "Primary" : "Secondary", m_width, m_height,
+                    m_pixelWidth, m_pixelHeight, static_cast<int>(props.api),
+                    props.vsync ? "on" : "off",
+                    SDL_GetDisplayName(SDL_GetDisplayForWindow(m_window))
+                        ? SDL_GetDisplayName(SDL_GetDisplayForWindow(m_window)) : "?");
 
         if (props.api == RendererBackend::OpenGL)
         {
             m_glContext = SDL_GL_CreateContext(m_window);
             if (!m_glContext)
+            {
+                // Usually a driver that cannot give the requested core profile —
+                // the requested version is the essential half of the report.
+                int major = 0, minor = 0;
+                SDL_GL_GetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, &major);
+                SDL_GL_GetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, &minor);
+                HE_LOG_CRIT(Window, "SDL_GL_CreateContext failed (requested GL %d.%d core): %s",
+                            major, minor, SDL_GetError());
                 throw std::runtime_error("SDL_GL_CreateContext failed: " + std::string(SDL_GetError()));
-            SDL_GL_SetSwapInterval(props.vsync ? 1 : 0);
+            }
+            if (!SDL_GL_SetSwapInterval(props.vsync ? 1 : 0))
+                HE_LOG_WARN(Window, "SDL_GL_SetSwapInterval(%d) failed: %s — the driver is "
+                                    "overriding vsync", props.vsync ? 1 : 0, SDL_GetError());
+            {
+                int major = 0, minor = 0;
+                SDL_GL_GetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, &major);
+                SDL_GL_GetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, &minor);
+                HE_LOG_INFO(Window, "OpenGL context created: %d.%d core", major, minor);
+            }
         }
     }
 
     void Window::Shutdown()
     {
+        if (m_window)
+            HE_LOG_INFO(Window, "%s window destroyed", m_isPrimary ? "Primary" : "Secondary");
         if (m_glContext) { SDL_GL_DestroyContext(static_cast<SDL_GLContext>(m_glContext)); m_glContext = nullptr; }
         if (m_window)    { SDL_DestroyWindow(m_window); m_window = nullptr; }
         if (m_isPrimary) SDL_Quit();

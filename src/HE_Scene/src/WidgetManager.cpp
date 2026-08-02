@@ -108,7 +108,7 @@ int WidgetManager::createWidget(ContentManager& content, const std::string& asse
 	const UIWidgetAsset* asset = content.getWidget(assetId);
 	if (!asset)
 	{
-		Logger::Log(Logger::LogLevel::Warning,
+		HE_LOG_WARN(Widget, "%s",
 			("WidgetManager: widget asset not found: " + assetPath).c_str());
 		return 0;
 	}
@@ -116,13 +116,16 @@ int WidgetManager::createWidget(ContentManager& content, const std::string& asse
 	Instance w;
 	if (!HE::uiWidgetTreeFromJson(asset->treeJson, w.tree))
 	{
-		Logger::Log(Logger::LogLevel::Error,
+		HE_LOG_ERROR(Widget, "%s",
 			("WidgetManager: invalid widget tree JSON in " + assetPath).c_str());
 		return 0;
 	}
 	HorizonCode::Graph graph;
-	if (!asset->graphJson.empty())
-		HorizonCode::fromJson(asset->graphJson, graph); // absent/broken → no logic
+	if (!asset->graphJson.empty() && !HorizonCode::fromJson(asset->graphJson, graph))
+		// Widget shows up but is completely inert — the exact symptom of a broken
+		// graph, previously with nothing in the log to say so.
+		HE_LOG_ERROR(Widget, "Widget '%s' has an unparsable HorizonCode graph — it will "
+		                     "render but have no logic", assetPath.c_str());
 
 	// Resolve per-element material references once (paths → UUIDs) and bake each
 	// element's Font asset → a stable atlas key its text emits with (0 = the
@@ -148,6 +151,9 @@ int WidgetManager::createWidget(ContentManager& content, const std::string& asse
 	// Fire Construct AFTER the widget is in m_instances, so host callbacks can
 	// resolve it by scriptId during construction.
 	Instance& stored = m_instances.back();
+	HE_LOG_INFO(Widget, "Created widget '%s' (id %d, %zu element(s), %s logic)",
+	            assetPath.c_str(), stored.id, stored.tree.elements.size(),
+	            graph.nodes.empty() ? "compiled/no" : "interpreted");
 	rt().fireEvent(stored.scriptId, "Construct", 0);
 	return stored.id;
 }
@@ -155,7 +161,15 @@ int WidgetManager::createWidget(ContentManager& content, const std::string& asse
 void WidgetManager::destroyWidget(int id)
 {
 	if (m_focusWidget == id) m_focusWidget = 0;
-	if (Instance* w = find(id)) rt().destroy(w->scriptId); // fire "Destruct", then drop it
+	if (Instance* w = find(id))
+	{
+		HE_LOG_DEBUG(Widget, "Destroying widget id %d", id);
+		rt().destroy(w->scriptId); // fire "Destruct", then drop it
+	}
+	else
+	{
+		HE_LOG_WARN(Widget, "destroyWidget(%d): no such widget (already destroyed?)", id);
+	}
 	m_instances.erase(std::remove_if(m_instances.begin(), m_instances.end(),
 		[&](const Instance& w){ return w.id == id; }), m_instances.end());
 }
@@ -169,6 +183,7 @@ void WidgetManager::clear()
 	std::vector<HorizonCode::InstanceId> ids;
 	ids.reserve(m_instances.size());
 	for (const auto& w : m_instances) ids.push_back(w.scriptId);
+	if (!ids.empty()) HE_LOG_DEBUG(Widget, "Clearing %zu live widget(s)", ids.size());
 	for (const HorizonCode::InstanceId sid : ids) rt().destroy(sid);
 	m_instances.clear();
 	m_focusWidget = 0;
@@ -193,8 +208,20 @@ int WidgetManager::zOrder(int id) const
 bool WidgetManager::callFunction(int id, const std::string& name)
 {
 	Instance* w = find(id);
-	if (!w) return false;
-	return rt().callFunction(w->scriptId, name, /*requirePublic=*/true);
+	if (!w)
+	{
+		HE_LOG_WARN(Widget, "callWidgetFunction('%s') on widget id %d: no such widget",
+		            name.c_str(), id);
+		return false;
+	}
+	if (!rt().callFunction(w->scriptId, name, /*requirePublic=*/true))
+	{
+		// Either the function does not exist or it is not public — both look like
+		// "the button does nothing" from the script side.
+		HE_LOG_WARN(Widget, "Widget id %d has no public function '%s'", id, name.c_str());
+		return false;
+	}
+	return true;
 }
 
 void WidgetManager::tick(float dt)

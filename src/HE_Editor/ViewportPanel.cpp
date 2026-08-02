@@ -498,11 +498,11 @@ void render(AppContext& ctx, float dt)
 							ctx.world->addComponent(e, MeshComponent{ .meshAssetId = id });
 							ctx.world->markHierarchyDirty();
 							ctx.selectedEntity = e; // select the freshly spawned mesh
-							Logger::Log(Logger::LogLevel::Info,
+							HE_LOG_INFO(Editor, "%s",
 								("Editor: spawned '" + mesh->name + "' into the scene via drag-drop").c_str());
 						}
 						else
-							Logger::Log(Logger::LogLevel::Info,
+							HE_LOG_INFO(Editor, "%s",
 								"Editor: dropped asset is not a static mesh — nothing spawned");
 					}
 					s_viewportDropPath.clear();

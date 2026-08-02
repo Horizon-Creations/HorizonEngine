@@ -516,7 +516,7 @@ void renderPanel(AppContext& ctx)
 
             ctx.world->markHierarchyDirty();
             ctx.selectedEntity = e;
-            Logger::Log(Logger::LogLevel::Info, "Editor: created Terrain entity");
+            HE_LOG_INFO(Editor, "%s", "Editor: created Terrain entity");
         }
     }
     else

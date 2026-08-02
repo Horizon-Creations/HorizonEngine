@@ -5,6 +5,7 @@
 #include "HorizonScene/Components/EnvironmentLightComponent.h"
 #include "HorizonScene/Components/LightComponent.h"
 #include "HorizonScene/Components/TransformComponent.h"
+#include <Diagnostics/Log.h>
 #include <algorithm>
 
 HorizonWorld::HorizonWorld()
@@ -237,6 +238,9 @@ void HorizonWorld::destroyEntity(Entity entity)
 
 void HorizonWorld::clear()
 {
+    HE_LOG_INFO(World, "Clearing world (%zu entity/-ies)",
+                static_cast<size_t>(m_registry.storage<entt::entity>().in_use()));
+
     // A running level ends here (PIE stop / scene switch / shutdown all route
     // through clear()). No-op unless it was actually running, so the edit-time
     // clear() at the start of openScene doesn't spuriously fire OnLevelUnloaded.
@@ -305,7 +309,11 @@ bool HorizonWorld::reparentEntity(Entity entity, Entity newParent)
     if (!m_registry.valid(entity) || !m_registry.valid(newParent))
         return false;
     if (isAncestorOf(entity, newParent))
-        return false; // would create a cycle
+    {
+        HE_LOG_WARN(World, "Reparent of entity %u under %u rejected: would create a cycle",
+                    static_cast<uint32_t>(entity), static_cast<uint32_t>(newParent));
+        return false;
+    }
 
     auto* h  = m_registry.try_get<HierarchyComponent>(entity);
     auto* nh = m_registry.try_get<HierarchyComponent>(newParent);
@@ -349,8 +357,14 @@ std::string HorizonWorld::levelScriptJson() const
 void HorizonWorld::setLevelScriptJson(const std::string& json)
 {
     m_levelScript = HorizonCode::Graph{};
-    if (!json.empty())
-        HorizonCode::fromJson(json, m_levelScript); // broken/absent → empty graph
+    if (json.empty()) return;
+    if (!HorizonCode::fromJson(json, m_levelScript))
+        // A level script that fails to parse leaves an empty graph, and the level
+        // then simply does nothing — previously with no explanation anywhere.
+        HE_LOG_ERROR(HorizonCode, "Level script could not be parsed (%zu bytes of JSON) — "
+                                  "the level will run without it", json.size());
+    else
+        HE_LOG_DEBUG(HorizonCode, "Level script loaded: %zu node(s)", m_levelScript.nodes.size());
 }
 
 void HorizonWorld::fireLevelLoaded()
@@ -371,10 +385,14 @@ void HorizonWorld::fireLevelLoaded()
         if (auto compiled = HorizonCode::compiledClasses().create(m_levelScriptKey))
         {
             m_levelInstance = scripts().addCompiled(std::move(compiled));
+            HE_LOG_INFO(HorizonCode, "Level script '%s' running (compiled native class)",
+                        m_levelScriptKey.c_str());
             scripts().fireEvent(m_levelInstance, "OnLevelLoaded", 0);
             return;
         }
     m_levelInstance = scripts().add(m_levelScript, {});
+    HE_LOG_INFO(HorizonCode, "Level script running (interpreted, %zu node(s)) — OnLevelLoaded",
+                m_levelScript.nodes.size());
     scripts().fireEvent(m_levelInstance, "OnLevelLoaded", 0);
 }
 
@@ -385,6 +403,7 @@ void HorizonWorld::fireLevelUnloaded()
 
     // Fire the event but KEEP the instance so its final variable state stays
     // readable after unload; it is dropped on the next load or on clear().
+    HE_LOG_INFO(HorizonCode, "%s", "Level script OnLevelUnloaded");
     scripts().fireEvent(m_levelInstance, "OnLevelUnloaded", 0);
 }
 

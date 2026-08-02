@@ -14,7 +14,7 @@ std::unique_ptr<FontAsset> FontImporter::import(
 	std::ifstream in(sourcePath, std::ios::binary | std::ios::ate);
 	if (!in)
 	{
-		Logger::Log(Logger::LogLevel::Error,
+		HE_LOG_ERROR(Tool, "%s",
 			("FontImporter: cannot open " + sourcePath.string()).c_str());
 		return nullptr;
 	}
@@ -24,7 +24,7 @@ std::unique_ptr<FontAsset> FontImporter::import(
 	if (n > 0) in.read(reinterpret_cast<char*>(bytes.data()), n);
 	if (bytes.empty())
 	{
-		Logger::Log(Logger::LogLevel::Error,
+		HE_LOG_ERROR(Tool, "%s",
 			("FontImporter: empty font file " + sourcePath.string()).c_str());
 		return nullptr;
 	}
@@ -39,7 +39,7 @@ std::unique_ptr<FontAsset> FontImporter::import(
 	if (!Importer::writeAsset(*asset, contentRoot))
 		return nullptr;
 
-	Logger::Log(Logger::LogLevel::Info,
+	HE_LOG_INFO(Tool, "%s",
 		("FontImporter: " + sourcePath.filename().string() + " -> " + asset->path
 		 + " (" + std::to_string(asset->fontData.size()) + " bytes, bake "
 		 + std::to_string(asset->size) + "px)").c_str());

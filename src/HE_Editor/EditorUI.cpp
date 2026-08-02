@@ -966,7 +966,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
                 else if (isFontSrc)    ok = FontImporter::import(srcPath, root)     != nullptr;
 
                 if (!ok)
-                    Logger::Log(Logger::LogLevel::Error,
+                    HE_LOG_ERROR(Editor, "%s",
                         ("Editor: import failed for " + srcPath.string()).c_str());
                 ctx.contentRefreshPending = true;
             }
