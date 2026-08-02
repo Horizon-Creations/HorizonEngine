@@ -4,6 +4,7 @@
 #include <HorizonScene/Components/ParticleSystemComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <ContentManager/ContentManager.h>
+#include <Diagnostics/Log.h>
 #include <ContentManager/Assets.h>
 #include <glm/gtc/constants.hpp>
 #include <glm/geometric.hpp>
@@ -72,7 +73,20 @@ void resolveConfigIfNeeded(ParticleSystemComponent& ps, ContentManager& cm)
         asset && !asset->nodeGraphJson.empty())
     {
         HE::ParticleGraph parsed;
-        if (HE::particleGraphFromJson(asset->nodeGraphJson, parsed)) graph = std::move(parsed);
+        if (HE::particleGraphFromJson(asset->nodeGraphJson, parsed))
+            graph = std::move(parsed);
+        else
+            // Falls back to makeDefault(), so the emitter runs but looks nothing
+            // like what was authored — worth an error rather than a shrug.
+            HE_LOG_ERROR(Particle, "Particle graph asset '%s' has unparsable JSON — "
+                                   "falling back to the default emitter", asset->name.c_str());
+    }
+    else if (ps.particleAssetId != HE::UUID{})
+    {
+        HE_LOG_WARN(Particle, "Particle graph asset %016llx%016llx is missing or empty — "
+                              "using the default emitter",
+                    static_cast<unsigned long long>(ps.particleAssetId.hi),
+                    static_cast<unsigned long long>(ps.particleAssetId.lo));
     }
 
     ps.resolvedConfig      = HE::evaluateParticleGraph(graph, ps.rng);
@@ -189,7 +203,23 @@ void ParticleSystem::update(HorizonWorld& world, ContentManager& cm, float dt,
         if (!ps.playing) continue;
 
         const glm::vec3 emitterPos = glm::vec3(tc.worldMatrix[3]);
+        const size_t before = ps.particles.size();
         const bool finished = stepPool(ps.particles, ps.emitAccumulator, ps.rng, ps.resolvedConfig, emitterPos, dt, physics);
-        if (finished) ps.playing = false;
+        if (finished)
+        {
+            HE_LOG_TRACE(Particle, "Entity %u: one-shot emitter finished",
+                         static_cast<uint32_t>(e));
+            ps.playing = false;
+        }
+        // Hitting maxParticles every frame means the emit rate outruns the pool
+        // and particles die early — visible as a flickering, truncated effect.
+        else if (before >= static_cast<size_t>(ps.resolvedConfig.maxParticles) &&
+                 ps.particles.size() >= static_cast<size_t>(ps.resolvedConfig.maxParticles))
+        {
+            HE_LOG_THROTTLE(Particle, Warning, 10.0,
+                            "Entity %u: particle pool saturated at maxParticles=%d — "
+                            "raise the cap or lower the emit rate",
+                            static_cast<uint32_t>(e), ps.resolvedConfig.maxParticles);
+        }
     }
 }

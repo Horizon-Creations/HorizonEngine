@@ -1,6 +1,7 @@
 // Must come first — Jolt requires this before any other Jolt include.
 #include <Jolt/Jolt.h>
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 
 JPH_SUPPRESS_WARNINGS
@@ -22,6 +23,8 @@ JPH_SUPPRESS_WARNINGS
 #include <Jolt/Physics/Character/CharacterVirtual.h>
 #include <Jolt/Physics/Collision/BroadPhase/BroadPhaseLayer.h>
 #include <Jolt/Physics/Collision/ObjectLayer.h>
+
+#include <Diagnostics/Log.h>
 
 #include "HorizonScene/PhysicsWorld.h"
 #include "HorizonScene/HorizonWorld.h"
@@ -106,6 +109,7 @@ static void joltEnsureInit()
         JPH::RegisterDefaultAllocator();
         JPH::Factory::sInstance = new JPH::Factory();
         JPH::RegisterTypes();
+        HE_LOG_INFO(Physics, "%s", "Jolt physics initialised (process-global types registered)");
     });
 }
 
@@ -225,11 +229,16 @@ struct PhysicsWorld::Impl
 
     bool initialized = false;
 
+    // Hard limits handed to Jolt below. Exceeding them makes CreateAndAddBody
+    // return an invalid id, which used to be swallowed silently — the scene then
+    // simply had objects that never fell. They are logged instead.
+    static constexpr uint32_t kMaxBodies = 1024;
+
     Impl()
     {
         jobSystem.Init(JPH::cMaxPhysicsJobs);
         physicsSystem.Init(
-            1024,   // max bodies
+            kMaxBodies,   // max bodies
             0,      // num body mutexes (0 = auto)
             1024,   // max body pairs
             1024,   // max contact constraints
@@ -299,7 +308,12 @@ void PhysicsWorld::initialize(HorizonWorld& world)
             ).Create();
         }
         if (shapeResult.HasError())
+        {
+            HE_LOG_ERROR(Physics, "Entity %u: rigid-body collider shape could not be built (%s) "
+                                  "— entity has no physics body",
+                         static_cast<uint32_t>(entity), shapeResult.GetError().c_str());
             continue;
+        }
 
         // Euler angles (degrees) → quaternion, matching the engine's convention
         glm::quat gq = glm::quat(glm::radians(transform.rotation));
@@ -343,7 +357,16 @@ void PhysicsWorld::initialize(HorizonWorld& world)
 
         JPH::BodyID bodyId = bodyInterface.CreateAndAddBody(bcs, activation);
         if (!bodyId.IsInvalid())
+        {
             m_impl->entityToBody[static_cast<uint32_t>(entity)] = bodyId;
+        }
+        else
+        {
+            HE_LOG_ERROR(Physics, "Entity %u: body creation failed — the %u-body limit is "
+                                  "most likely exhausted (%zu created so far)",
+                         static_cast<uint32_t>(entity), Impl::kMaxBodies,
+                         m_impl->entityToBody.size());
+        }
     }
 
     // ── CharacterController entities ──────────────────────────────────────────
@@ -372,7 +395,12 @@ void PhysicsWorld::initialize(HorizonWorld& world)
             shapeResult = JPH::CapsuleShapeSettings(0.7f, 0.3f).Create();
         }
         if (shapeResult.HasError())
+        {
+            HE_LOG_ERROR(Physics, "Entity %u: character-controller shape could not be built (%s) "
+                                  "— the character will not move",
+                         static_cast<uint32_t>(entity), shapeResult.GetError().c_str());
             continue;
+        }
 
         JPH::CharacterVirtualSettings cvs;
         cvs.mMass                  = cc.mass;
@@ -396,12 +424,22 @@ void PhysicsWorld::initialize(HorizonWorld& world)
 
     m_impl->physicsSystem.OptimizeBroadPhase();
     m_impl->initialized = true;
+
+    HE_LOG_INFO(Physics, "Physics world initialised: %zu rigid body/-ies, %zu character controller(s)",
+                m_impl->entityToBody.size(), m_impl->entityToCharacter.size());
+    if (m_impl->entityToBody.size() > Impl::kMaxBodies * 9 / 10)
+        HE_LOG_WARN(Physics, "Body count %zu is close to the hard limit of %u",
+                    m_impl->entityToBody.size(), Impl::kMaxBodies);
 }
 
 void PhysicsWorld::step(HorizonWorld& world, float dt)
 {
     if (!m_impl->initialized || dt <= 0.0f)
         return;
+
+    // A physics step that overruns this badly stalls the whole frame; throttled so
+    // a permanently overloaded scene reports once a second, not 60 times.
+    HE_LOG_SLOW_SCOPE(Physics, 8.0, "PhysicsWorld::step");
 
     m_impl->physicsSystem.Update(dt, 1,
         &m_impl->tempAllocator, &m_impl->jobSystem);
@@ -425,6 +463,20 @@ void PhysicsWorld::step(HorizonWorld& world, float dt)
 
         JPH::RVec3 pos = bodyInterface.GetCenterOfMassPosition(bodyId);
         JPH::Quat  rot = bodyInterface.GetRotation(bodyId);
+
+        // A body that goes non-finite (degenerate shape, absurd mass, a huge
+        // impulse from a script) writes NaN into the transform, and from there
+        // into the render matrices — where it shows up as "the mesh vanished"
+        // with nothing in the log. Catch it at the source.
+        if (!std::isfinite(static_cast<float>(pos.GetX())) ||
+            !std::isfinite(static_cast<float>(pos.GetY())) ||
+            !std::isfinite(static_cast<float>(pos.GetZ())))
+        {
+            HE_LOG_THROTTLE(Physics, Error, 5.0,
+                            "Entity %u: physics body position is not finite — "
+                            "transform write-back skipped", entityId);
+            continue;
+        }
 
         transform->position = {
             static_cast<float>(pos.GetX()),
@@ -570,6 +622,10 @@ void PhysicsWorld::clear()
 {
     if (!m_impl)
         return;
+
+    if (!m_impl->entityToBody.empty() || !m_impl->entityToCharacter.empty())
+        HE_LOG_DEBUG(Physics, "Clearing physics world: %zu body/-ies, %zu character(s)",
+                     m_impl->entityToBody.size(), m_impl->entityToCharacter.size());
 
     auto& bodyInterface = m_impl->physicsSystem.GetBodyInterface();
     for (auto& [entityId, bodyId] : m_impl->entityToBody)

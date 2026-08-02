@@ -3359,7 +3359,7 @@ OpenGLRenderer::~OpenGLRenderer() = default;
 
 void OpenGLRenderer::Initialize(HE::Window* window)
 {
-	Logger::Log(Logger::LogLevel::Info, "OpenGLRenderer: initializing");
+	HE_LOG_INFO(RHI, "%s", "OpenGLRenderer: initializing");
 	m_primarySdlWindow = window->GetNativeWindow();
 	m_glContext        = window->GetGLContext();
 	if (!m_glContext)
@@ -3372,7 +3372,7 @@ void OpenGLRenderer::Initialize(HE::Window* window)
 	// in GL 4.3. Windows/Linux drivers give 4.3+; macOS GL is capped at 4.1, so
 	// this stays false there and the Metal backend covers GI on Apple instead.
 	m_giSupported = (GLAD_GL_VERSION_4_3 != 0);
-	Logger::Log(Logger::LogLevel::Info,
+	HE_LOG_INFO(RHI, "%s",
 	            m_giSupported ? "OpenGLRenderer: GL 4.3+ — GI (compute) supported"
 	                          : "OpenGLRenderer: GL < 4.3 — GI unavailable (CSM/AO fallback)");
 
@@ -3418,7 +3418,7 @@ void OpenGLRenderer::Initialize(HE::Window* window)
 	m_gpuTimerSupported = true;
 #endif
 
-	Logger::Log(Logger::LogLevel::Info, "OpenGLRenderer: initialized successfully");
+	HE_LOG_INFO(RHI, "%s", "OpenGLRenderer: initialized successfully");
 }
 
 static constexpr int kSkyEnvFace = 128; // image-based-ambient cubemap face size
@@ -3681,7 +3681,7 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 				setupProgram(cached);
 				program = cached;
 				m_materialPrograms[key] = program;
-				Logger::Log(Logger::LogLevel::Info,
+				HE_LOG_INFO(RHI, "%s",
 					"OpenGLRenderer: loaded a material program from the on-disk binary cache");
 				return program;
 			}
@@ -3700,20 +3700,20 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 			setupProgram(prog);
 			program = prog;
 			if (cacheable) glSaveCachedProgram(cachePath, prog); // persist for next launch
-			Logger::Log(Logger::LogLevel::Info, precompiled
+			HE_LOG_INFO(RHI, "%s", precompiled
 				? "OpenGLRenderer: built a material program from a PRECOMPILED variant (no runtime cross-compile)"
 				: "OpenGLRenderer: built a material program from canonical GLSL via he::shaderc");
 		}
 		else
 		{
 			char log[2048]; glGetProgramInfoLog(prog, sizeof(log), nullptr, log);
-			Logger::Log(Logger::LogLevel::Error,
+			HE_LOG_ERROR(RHI, "%s",
 				(std::string("OpenGLRenderer: material program link failed: ") + log).c_str());
 			glDeleteProgram(prog);
 		}
 	}
 	else
-		Logger::Log(Logger::LogLevel::Error,
+		HE_LOG_ERROR(RHI, "%s",
 			(std::string("OpenGLRenderer: material shader cross-compile failed\n") + log).c_str());
 
 	// Lazily create the shared per-object + lighting UBOs on first material.
@@ -3773,14 +3773,14 @@ unsigned int OpenGLRenderer::GetOrBuildParticleProgram(uint64_t key, const HE::P
 	if (ok)
 	{
 		program = prog;
-		Logger::Log(Logger::LogLevel::Info, precompiled
+		HE_LOG_INFO(RHI, "%s", precompiled
 			? "OpenGLRenderer: built a particle program from a PRECOMPILED variant"
 			: "OpenGLRenderer: built a particle program from a freshly baked template");
 	}
 	else
 	{
 		char log[1024]; glGetProgramInfoLog(prog, sizeof(log), nullptr, log);
-		Logger::Log(Logger::LogLevel::Error,
+		HE_LOG_ERROR(RHI, "%s",
 			(std::string("OpenGLRenderer: particle program link failed: ") + log).c_str());
 		glDeleteProgram(prog);
 	}
@@ -3845,13 +3845,13 @@ unsigned int OpenGLRenderer::GetOrBuildUIMaterialProgram(const HE::UUID& materia
 		else
 		{
 			char log[2048]; glGetProgramInfoLog(prog, sizeof(log), nullptr, log);
-			Logger::Log(Logger::LogLevel::Error,
+			HE_LOG_ERROR(RHI, "%s",
 				(std::string("OpenGLRenderer: UI material program link failed: ") + log).c_str());
 			glDeleteProgram(prog);
 		}
 	}
 	else
-		Logger::Log(Logger::LogLevel::Error,
+		HE_LOG_ERROR(RHI, "%s",
 			(std::string("OpenGLRenderer: UI material shader cross-compile failed\n") + v.log + f.log).c_str());
 
 	// Lazily create the shared per-object + lighting UBOs on first material (a UI
@@ -3893,7 +3893,7 @@ void OpenGLRenderer::CreateSkinnedPipeline()
 	{
 		char log[512];
 		glGetProgramInfoLog(m_skinnedProgram, sizeof(log), nullptr, log);
-		Logger::Log(Logger::LogLevel::Error,
+		HE_LOG_ERROR(RHI, "%s",
 		    (std::string("OpenGLRenderer: skinned link error: ") + log).c_str());
 		return;
 	}
@@ -3950,7 +3950,7 @@ void OpenGLRenderer::CreateInstancedPipeline()
 	{
 		char log[512];
 		glGetProgramInfoLog(m_instancedProgram, sizeof(log), nullptr, log);
-		Logger::Log(Logger::LogLevel::Error,
+		HE_LOG_ERROR(RHI, "%s",
 		    (std::string("OpenGLRenderer: instanced program link error: ") + log).c_str());
 		return;
 	}
@@ -4324,7 +4324,7 @@ void OpenGLRenderer::EnsureBloomTargets(int width, int height)
 		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_bloomColor[i], 0);
 	}
 	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-		Logger::Log(Logger::LogLevel::Error, "OpenGLRenderer: bloom FBO incomplete");
+		HE_LOG_ERROR(RHI, "%s", "OpenGLRenderer: bloom FBO incomplete");
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 	glBindTexture(GL_TEXTURE_2D, 0);
 	m_bloomW = width;
@@ -4357,7 +4357,7 @@ void OpenGLRenderer::EnsureCloudTarget(int width, int height)
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_cloudTex, 0);
 	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-		Logger::Log(Logger::LogLevel::Error, "OpenGLRenderer: cloud FBO incomplete");
+		HE_LOG_ERROR(RHI, "%s", "OpenGLRenderer: cloud FBO incomplete");
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 	glBindTexture(GL_TEXTURE_2D, 0);
 	m_cloudW = width;
@@ -4722,11 +4722,11 @@ void OpenGLRenderer::CreateGIPipelines()
 		const std::string header = "#version 430 core\n";
 		m_giShadowCSProgram = linkCompute(header + kGiTraversalGLSL + kGiShadowCS);
 		m_giProbeCSProgram  = linkCompute(header + kGiTraversalGLSL + kGiProbeCS);
-		Logger::Log(Logger::LogLevel::Info, "OpenGLRenderer: GI pipelines built (compute ray tracing active)");
+		HE_LOG_INFO(RHI, "%s", "OpenGLRenderer: GI pipelines built (compute ray tracing active)");
 	}
 	catch (const std::exception& e)
 	{
-		Logger::Log(Logger::LogLevel::Error,
+		HE_LOG_ERROR(RHI, "%s",
 		            (std::string("OpenGLRenderer: GI pipeline build failed — GI disabled: ") + e.what()).c_str());
 		if (m_giGBufProgram)     { glDeleteProgram(m_giGBufProgram);     m_giGBufProgram = 0; }
 		if (m_giTemporalProgram) { glDeleteProgram(m_giTemporalProgram); m_giTemporalProgram = 0; }
@@ -4844,7 +4844,7 @@ void OpenGLRenderer::EnsureGIProbeGrid()
 	m_giProbesPerRow = std::min(m_giProbeCount, 32);
 	m_giProbeCursor  = 0;
 	m_giProbeGridBuilt = true;
-	Logger::Log(Logger::LogLevel::Info,
+	HE_LOG_INFO(RHI, "%s",
 	            ("OpenGLRenderer: GI probe grid " + std::to_string(m_giGridCounts.x) + "x"
 	             + std::to_string(m_giGridCounts.y) + "x" + std::to_string(m_giGridCounts.z)
 	             + " (" + std::to_string(m_giProbeCount) + " probes)").c_str());
@@ -5108,7 +5108,7 @@ void OpenGLRenderer::EnsureSSAOTargets(int width, int height)
 	makeR8(m_ssaoBlurFBO, m_ssaoBlurTex);
 
 	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-		Logger::Log(Logger::LogLevel::Error, "OpenGLRenderer: SSAO FBO incomplete");
+		HE_LOG_ERROR(RHI, "%s", "OpenGLRenderer: SSAO FBO incomplete");
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 	glBindTexture(GL_TEXTURE_2D, 0);
 }
@@ -5419,7 +5419,7 @@ void OpenGLRenderer::EnsureHDRTarget(int width, int height)
 	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, m_hdrDepth);
 
 	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-		Logger::Log(Logger::LogLevel::Error, "OpenGLRenderer: HDR FBO incomplete");
+		HE_LOG_ERROR(RHI, "%s", "OpenGLRenderer: HDR FBO incomplete");
 
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 	glBindTexture(GL_TEXTURE_2D, 0);
@@ -5479,7 +5479,7 @@ void OpenGLRenderer::EnsureGBufferTargets(int width, int height)
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, m_gbDepthTex, 0);
 
 	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-		Logger::Log(Logger::LogLevel::Error, "OpenGLRenderer: G-buffer FBO incomplete");
+		HE_LOG_ERROR(RHI, "%s", "OpenGLRenderer: G-buffer FBO incomplete");
 
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 	glBindTexture(GL_TEXTURE_2D, 0);
@@ -5518,7 +5518,7 @@ bool OpenGLRenderer::EnsureDeferredPipelines()
 		if (!ok)
 		{
 			char log[2048]; glGetProgramInfoLog(prog, sizeof(log), nullptr, log);
-			Logger::Log(Logger::LogLevel::Error,
+			HE_LOG_ERROR(RHI, "%s",
 				(std::string("OpenGLRenderer: ") + what + " link failed: " + log).c_str());
 			glDeleteProgram(prog);
 			return 0;
@@ -5603,13 +5603,13 @@ bool OpenGLRenderer::EnsureDeferredPipelines()
 			}
 		}
 		else
-			Logger::Log(Logger::LogLevel::Error,
+			HE_LOG_ERROR(RHI, "%s",
 				(std::string("OpenGLRenderer: deferred resolve shader compile failed\n")
 				 + v.log + f.log).c_str());
 	}
 	catch (const std::exception& e)
 	{
-		Logger::Log(Logger::LogLevel::Error,
+		HE_LOG_ERROR(RHI, "%s",
 			(std::string("OpenGLRenderer: deferred pipeline build failed: ") + e.what()).c_str());
 	}
 
@@ -5634,7 +5634,7 @@ bool OpenGLRenderer::EnsureDeferredPipelines()
 
 	const bool ok = m_gbufferProgram && m_gbufferInstancedProgram && m_deferredResolveProgram;
 	if (!ok)
-		Logger::Log(Logger::LogLevel::Warning,
+		HE_LOG_WARN(RHI, "%s",
 			"OpenGLRenderer: deferred render path unavailable — staying on forward");
 	return ok;
 #endif
@@ -5857,7 +5857,7 @@ const OpenGLRenderer::GpuMesh* OpenGLRenderer::ResolveMesh(const HE::UUID& asset
 		mesh.texture = uploadTextureAssetGL(m_contentManager->resolveTextureRef(texId0, texPath0));
 	}
 
-	Logger::Log(Logger::LogLevel::Info,
+	HE_LOG_INFO(RHI, "%s",
 		("OpenGLRenderer: uploaded mesh '" + asset->name + "' ("
 		 + std::to_string(vertexCount) + " verts"
 		 + (mesh.texture ? ", textured" : "") + ")").c_str());
@@ -5970,7 +5970,7 @@ OpenGLRenderer::ResolveSkeletalMesh(const HE::UUID& assetId)
 		mesh.texture = uploadTextureAssetGL(m_contentManager->resolveTextureRef(texId0, texPath0));
 	}
 
-	Logger::Log(Logger::LogLevel::Info,
+	HE_LOG_INFO(RHI, "%s",
 		("OpenGLRenderer: uploaded skeletal mesh '" + asset->name + "' ("
 		 + std::to_string(vertexCount) + " verts, "
 		 + std::to_string(asset->skeleton.size()) + " joints)").c_str());
@@ -6091,7 +6091,7 @@ void OpenGLRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 		}
 	}
 	if (built > 0)
-		Logger::Log(Logger::LogLevel::Info,
+		HE_LOG_INFO(RHI, "%s",
 			("OpenGLRenderer: warmed up " + std::to_string(built) + " material program(s)").c_str());
 }
 
@@ -6973,7 +6973,7 @@ void OpenGLRenderer::DrawDebugLines(const glm::mat4& viewProj)
 
 void OpenGLRenderer::Shutdown()
 {
-	Logger::Log(Logger::LogLevel::Info, "OpenGLRenderer: shutdown");
+	HE_LOG_INFO(RHI, "%s", "OpenGLRenderer: shutdown");
 
 	if (m_primarySdlWindow && m_glContext)
 		SDL_GL_MakeCurrent(m_primarySdlWindow, static_cast<SDL_GLContext>(m_glContext));
@@ -7148,7 +7148,7 @@ void OpenGLRenderer::EnsureViewportTarget()
 	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, m_viewportDepth);
 
 	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-		Logger::Log(Logger::LogLevel::Error, "OpenGLRenderer: viewport FBO incomplete");
+		HE_LOG_ERROR(RHI, "%s", "OpenGLRenderer: viewport FBO incomplete");
 
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 	glBindTexture(GL_TEXTURE_2D, 0);
@@ -8775,7 +8775,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	{
 		s_checkedFirstFrame = true;
 		const GLenum err = glGetError();
-		Logger::Log(err == GL_NO_ERROR ? Logger::LogLevel::Info : Logger::LogLevel::Error,
+		Logger::LogTo(HE::Log::Cat::RHI, err == GL_NO_ERROR ? Logger::LogLevel::Info : Logger::LogLevel::Error,
 			("OpenGLRenderer: first scene frame drew "
 			 + std::to_string(m_renderWorld.objects.size()) + " object(s), glGetError=0x"
 			 + std::to_string(err)).c_str());
@@ -9387,7 +9387,7 @@ void OpenGLRenderer::AttachWindow(HE::Window* window)
 
 	// Restore primary context
 	SDL_GL_MakeCurrent(m_primarySdlWindow, static_cast<SDL_GLContext>(m_glContext));
-	Logger::Log(Logger::LogLevel::Info, "OpenGLRenderer: secondary window attached");
+	HE_LOG_INFO(RHI, "%s", "OpenGLRenderer: secondary window attached");
 }
 
 void OpenGLRenderer::DetachWindow(HE::Window* window)
@@ -9399,7 +9399,7 @@ void OpenGLRenderer::DetachWindow(HE::Window* window)
 	// Restore primary context so the next Render() call works
 	if (m_primarySdlWindow && m_glContext)
 		SDL_GL_MakeCurrent(m_primarySdlWindow, static_cast<SDL_GLContext>(m_glContext));
-	Logger::Log(Logger::LogLevel::Info, "OpenGLRenderer: secondary window detached");
+	HE_LOG_INFO(RHI, "%s", "OpenGLRenderer: secondary window detached");
 }
 
 void OpenGLRenderer::RenderWindow(HE::Window* window)

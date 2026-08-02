@@ -21,13 +21,13 @@ ShaderHandle MetalShaderManager::load(const char* path, HE::ShaderType type)
 {
 	if (!fs::exists(path))
 	{
-		Logger::Log(Logger::LogLevel::Error, (std::string("MetalShaderManager: shader file not found: ") + path).c_str());
+		HE_LOG_ERROR(RHI, "%s", (std::string("MetalShaderManager: shader file not found: ") + path).c_str());
 		return { 0, false };
 	}
 	std::ifstream file(path);
 	if (!file.is_open())
 	{
-		Logger::Log(Logger::LogLevel::Error, (std::string("MetalShaderManager: failed to open shader file: ") + path).c_str());
+		HE_LOG_ERROR(RHI, "%s", (std::string("MetalShaderManager: failed to open shader file: ") + path).c_str());
 		return { 0, false };
 	}
 	std::stringstream buffer;
@@ -55,13 +55,13 @@ bool MetalShaderManager::compile(ShaderHandle& handle)
 {
 	if (!m_device)
 	{
-		Logger::Log(Logger::LogLevel::Error, "MetalShaderManager: no MTLDevice set");
+		HE_LOG_ERROR(RHI, "%s", "MetalShaderManager: no MTLDevice set");
 		return false;
 	}
 	auto srcIt = m_pendingSources.find(handle.id);
 	if (srcIt == m_pendingSources.end())
 	{
-		Logger::Log(Logger::LogLevel::Error, "MetalShaderManager: compile called on unknown handle");
+		HE_LOG_ERROR(RHI, "%s", "MetalShaderManager: compile called on unknown handle");
 		return false;
 	}
 
@@ -73,7 +73,7 @@ bool MetalShaderManager::compile(ShaderHandle& handle)
 		id<MTLLibrary> library = [device newLibraryWithSource:source options:nil error:&error];
 		if (!library)
 		{
-			Logger::Log(Logger::LogLevel::Error,
+			HE_LOG_ERROR(RHI, "%s",
 				(std::string("MetalShaderManager: shader compilation failed: ")
 				 + (error ? [[error localizedDescription] UTF8String] : "unknown error")).c_str());
 			return false;
@@ -91,7 +91,7 @@ bool MetalShaderManager::compile(ShaderHandle& handle)
 		id<MTLFunction> fn = [library newFunctionWithName:[NSString stringWithUTF8String:entry]];
 		if (!fn)
 		{
-			Logger::Log(Logger::LogLevel::Error,
+			HE_LOG_ERROR(RHI, "%s",
 				(std::string("MetalShaderManager: entry point not found: ") + entry).c_str());
 			return false;
 		}
@@ -112,7 +112,7 @@ ShaderProgramHandle MetalShaderManager::createProgram(const std::vector<ShaderHa
 	{
 		if (!shader.ready || !m_functions.count(shader.id))
 		{
-			Logger::Log(Logger::LogLevel::Error, "MetalShaderManager: createProgram called with uncompiled shader");
+			HE_LOG_ERROR(RHI, "%s", "MetalShaderManager: createProgram called with uncompiled shader");
 			return { 0, false };
 		}
 	}

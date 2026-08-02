@@ -15,7 +15,7 @@ namespace
 
 void logError(const std::string& msg)
 {
-	Logger::Log(Logger::LogLevel::Error, ("MeshImporter: " + msg).c_str());
+	HE_LOG_ERROR(Tool, "%s", ("MeshImporter: " + msg).c_str());
 }
 
 // Appends one primitive's geometry to the merged mesh, transformed by `world`.
@@ -136,7 +136,7 @@ std::unique_ptr<StaticMeshAsset> MeshImporter::import(
 	if (!Importer::writeAsset(*mesh, contentRoot))
 		return nullptr;
 
-	Logger::Log(Logger::LogLevel::Info,
+	HE_LOG_INFO(Tool, "%s",
 		("MeshImporter: " + sourcePath.filename().string() + " -> " + mesh->path
 		 + " (" + std::to_string(mesh->vertices.size() / 3) + " verts, "
 		 + std::to_string(mesh->indices.size() / 3) + " tris)").c_str());

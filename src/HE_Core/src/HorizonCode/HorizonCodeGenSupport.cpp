@@ -17,7 +17,7 @@ std::string toStringG(float v)
 
 void warnArrayGet(int idx, size_t size)
 {
-    Logger::Log(Logger::LogLevel::Warning,
+    HE_LOG_WARN(HorizonCode, "%s",
         ("HorizonCode: Array Get index " + std::to_string(idx) + " out of range (size " +
          std::to_string(size) + ")").c_str());
 }
@@ -26,7 +26,7 @@ uint32_t createObject(const Context& c, const char* classPath)
 {
     const uint32_t ref = c.createObject ? c.createObject(classPath) : 0u;
     if (ref == 0u)
-        Logger::Log(Logger::LogLevel::Error,
+        HE_LOG_ERROR(HorizonCode, "%s",
             ("HorizonCode: Create Object failed — class '" + std::string(classPath) +
              "' not found").c_str());
     return ref;
@@ -34,12 +34,12 @@ uint32_t createObject(const Context& c, const char* classPath)
 
 void print(const std::string& s)
 {
-    Logger::Log(Logger::LogLevel::Info, ("[Widget] " + s).c_str());
+    HE_LOG_INFO(HorizonCode, "%s", ("[Widget] " + s).c_str());
 }
 
 void warnStepLimit()
 {
-    Logger::Log(Logger::LogLevel::Warning,
+    HE_LOG_WARN(HorizonCode, "%s",
         "HorizonCode: execution step limit hit — aborting run");
 }
 

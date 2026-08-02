@@ -22,7 +22,7 @@ std::unique_ptr<AudioAsset> AudioImporter::import(
 
 	if (!samples)
 	{
-		Logger::Log(Logger::LogLevel::Error,
+		HE_LOG_ERROR(Tool, "%s",
 			("AudioImporter: failed to decode " + sourcePath.string()).c_str());
 		return nullptr;
 	}
@@ -41,7 +41,7 @@ std::unique_ptr<AudioAsset> AudioImporter::import(
 	if (!Importer::writeAsset(*asset, contentRoot))
 		return nullptr;
 
-	Logger::Log(Logger::LogLevel::Info,
+	HE_LOG_INFO(Tool, "%s",
 		("AudioImporter: " + sourcePath.filename().string() + " -> " + asset->path
 		 + " (" + std::to_string(sampleRate) + " Hz, "
 		 + std::to_string(channels) + " ch)").c_str());

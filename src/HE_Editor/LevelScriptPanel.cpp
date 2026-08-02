@@ -139,7 +139,7 @@ void runCompileCheck(const HC::Graph& graph, const char* title)
 		if (!res.warnings.empty())
 			g.compileMsg += " (" + std::to_string(res.warnings.size()) + " warning(s), see log)";
 		for (const auto& w : res.warnings)
-			Logger::Log(Logger::LogLevel::Warning, ("HorizonCode compile check: " + w).c_str());
+			HE_LOG_WARN(Editor, "%s", ("HorizonCode compile check: " + w).c_str());
 	}
 }
 

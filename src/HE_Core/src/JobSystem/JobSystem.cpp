@@ -1,15 +1,25 @@
 #include "JobSystem/JobSystem.h"
+#include "Diagnostics/Log.h"
 #include "Diagnostics/Profiler.h"
 #include <algorithm>
+#include <cstdio>
+#include <exception>
 
 // ─── ThreadPool ───────────────────────────────────────────────────────────────
 ThreadPool::ThreadPool(size_t threadCount)
 {
+    HE_LOG_INFO(Job, "ThreadPool starting with %zu worker(s)", threadCount);
     m_threads.reserve(threadCount);
     for (size_t i = 0; i < threadCount; ++i)
     {
-        m_threads.emplace_back([this]
+        m_threads.emplace_back([this, i]
         {
+            // Named so every log line a worker produces says which worker it was —
+            // otherwise concurrent asset streaming and export logs are unreadable.
+            char name[16];
+            std::snprintf(name, sizeof(name), "Worker-%zu", i);
+            HE::Log::setThreadName(name);
+
             for (;;)
             {
                 std::function<void()> task;
@@ -21,7 +31,25 @@ ThreadPool::ThreadPool(size_t threadCount)
                     m_queue.pop();
                 }
                 HE_PROFILE_SCOPE_N("Job::Execute");
-                task();
+                // An exception escaping a job used to travel through
+                // std::packaged_task into the caller's future().get() — or, for
+                // fire-and-forget jobs, straight into std::terminate with no clue
+                // where it came from. Log it here, on the thread that actually
+                // failed, before it goes anywhere.
+                try
+                {
+                    task();
+                }
+                catch (const std::exception& e)
+                {
+                    HE_LOG_ERROR(Job, "Job threw std::exception: %s", e.what());
+                    throw;
+                }
+                catch (...)
+                {
+                    HE_LOG_ERROR(Job, "%s", "Job threw a non-std exception");
+                    throw;
+                }
             }
         });
     }
@@ -32,10 +60,14 @@ ThreadPool::~ThreadPool()
     {
         std::unique_lock<std::mutex> lock(m_mutex);
         m_stop = true;
+        if (!m_queue.empty())
+            HE_LOG_WARN(Job, "ThreadPool shutting down with %zu queued task(s) still pending",
+                        m_queue.size());
     }
     m_cv.notify_all();
     for (std::thread& t : m_threads)
         t.join();
+    HE_LOG_INFO(Job, "%s", "ThreadPool stopped");
 }
 
 // ─── globalPool ───────────────────────────────────────────────────────────────

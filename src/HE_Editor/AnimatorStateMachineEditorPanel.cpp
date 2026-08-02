@@ -79,7 +79,7 @@ static bool saveToDisk(State& st, AppContext& ctx)
 	if (ctx.world)
 		for (auto [e, sm] : ctx.world->registry().view<AnimatorStateMachineComponent>().each())
 			if (sm.stateMachineAssetId == st.assetId) AnimationStateMachineSystem::markConfigDirty(sm);
-	Logger::Log(Logger::LogLevel::Info,
+	HE_LOG_INFO(Editor, "%s",
 		("AnimatorStateMachineEditor: saved '" + st.name + "'").c_str());
 	return true;
 }

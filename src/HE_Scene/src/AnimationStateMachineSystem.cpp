@@ -5,6 +5,7 @@
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include "AnimationEval.h"
+#include <Diagnostics/Log.h>
 
 #include <algorithm>
 #include <cmath>
@@ -47,7 +48,26 @@ void resolveConfigIfNeeded(AnimatorStateMachineComponent& sm, ContentManager& cm
         asset && !asset->graphJson.empty())
     {
         HE::AnimatorStateMachineGraph parsed;
-        if (HE::animatorStateMachineFromJson(asset->graphJson, parsed)) graph = std::move(parsed);
+        if (HE::animatorStateMachineFromJson(asset->graphJson, parsed))
+        {
+            HE_LOG_DEBUG(Animation, "Resolved state machine '%s': %zu state(s), %zu transition(s)",
+                         asset->name.c_str(), parsed.states.size(), parsed.transitions.size());
+            graph = std::move(parsed);
+        }
+        else
+        {
+            // The component keeps an empty graph and the character just T-poses;
+            // without this the only clue is the missing animation.
+            HE_LOG_ERROR(Animation, "State machine asset '%s' has unparsable graph JSON — "
+                                    "the animator will have no states", asset->name.c_str());
+        }
+    }
+    else if (sm.stateMachineAssetId != HE::UUID{})
+    {
+        HE_LOG_WARN(Animation, "State machine asset %016llx%016llx is missing or empty — "
+                               "the animator will have no states",
+                    static_cast<unsigned long long>(sm.stateMachineAssetId.hi),
+                    static_cast<unsigned long long>(sm.stateMachineAssetId.lo));
     }
 
     sm.resolvedGraph       = graph;
@@ -103,12 +123,32 @@ void AnimationStateMachineSystem::update(HorizonWorld& world, ContentManager& cm
         resolveConfigIfNeeded(sm, cm);
 
         const HE::AnimationState* curState = findState(sm, sm.currentStateName);
-        if (!curState) continue;
+        if (!curState)
+        {
+            if (!sm.resolvedGraph.states.empty())
+                HE_LOG_THROTTLE(Animation, Warning, 5.0,
+                                "Entity %u: state machine is in unknown state '%s' — "
+                                "the graph has %zu state(s) and none match",
+                                static_cast<uint32_t>(e), sm.currentStateName.c_str(),
+                                sm.resolvedGraph.states.size());
+            continue;
+        }
 
         const SkeletalMeshAsset* mesh = cm.getSkeletalMesh(smc.meshAssetId);
-        if (!mesh || mesh->skeleton.empty()) continue;
+        if (!mesh || mesh->skeleton.empty())
+        {
+            HE_LOG_THROTTLE(Animation, Warning, 5.0,
+                            "Entity %u: animator has no usable skeletal mesh (%s) — not animating",
+                            static_cast<uint32_t>(e), mesh ? "skeleton is empty" : "mesh not found");
+            continue;
+        }
 
         const AnimationClipAsset* curClip = cm.getAnimationClip(curState->clipId);
+        if (!curClip)
+            HE_LOG_THROTTLE(Animation, Warning, 5.0,
+                            "Entity %u: state '%s' references a missing animation clip — "
+                            "the pose will not advance",
+                            static_cast<uint32_t>(e), curState->name.c_str());
 
         // Advance current clip time
         if (curClip && curClip->duration > 0.0f)
@@ -133,6 +173,9 @@ void AnimationStateMachineSystem::update(HorizonWorld& world, ContentManager& cm
                 if (t.fromState != sm.currentStateName) continue;
                 if (!evalTransition(sm, t)) continue;
 
+                HE_LOG_TRACE(Animation, "Entity %u: state '%s' -> '%s' (%s %.3f, over %.2f s)",
+                             static_cast<uint32_t>(e), sm.currentStateName.c_str(),
+                             t.toState.c_str(), t.paramName.c_str(), t.threshold, t.duration);
                 sm.inTransition       = true;
                 sm.transitionTarget   = t.toState;
                 sm.transitionElapsed  = 0.0f;
@@ -159,6 +202,11 @@ void AnimationStateMachineSystem::update(HorizonWorld& world, ContentManager& cm
 
             // Sample incoming clip at transitionElapsed
             const HE::AnimationState* nextState = findState(sm, sm.transitionTarget);
+            if (!nextState)
+                HE_LOG_THROTTLE(Animation, Error, 5.0,
+                                "Entity %u: transition targets state '%s', which does not "
+                                "exist in the graph — the crossfade blends to nothing",
+                                static_cast<uint32_t>(e), sm.transitionTarget.c_str());
             const AnimationClipAsset* nextClip = nextState ? cm.getAnimationClip(nextState->clipId) : nullptr;
 
             std::vector<JointTRS> trsIn(jointCount);

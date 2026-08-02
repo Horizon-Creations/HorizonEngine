@@ -51,6 +51,7 @@ add_executable(he_tests
     test_hpak.cpp
     test_async_streaming.cpp
     test_crash_handler.cpp
+    test_logging.cpp
     test_project_exporter.cpp
     test_export_profiles.cpp
     test_cpp_scaffold.cpp

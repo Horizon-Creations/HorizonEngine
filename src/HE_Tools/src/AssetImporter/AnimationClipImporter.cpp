@@ -15,7 +15,7 @@ namespace
 
 static void logError(const std::string& msg)
 {
-    Logger::Log(Logger::LogLevel::Error, ("AnimationClipImporter: " + msg).c_str());
+    HE_LOG_ERROR(Tool, "%s", ("AnimationClipImporter: " + msg).c_str());
 }
 
 // Build joint-node → skin index lookup (first skin only).
@@ -186,7 +186,7 @@ AnimationClipImporter::WriteResult AnimationClipImporter::importAndWrite(
         if (Importer::writeAsset(*clip, contentRoot))
         {
             ++result.written;
-            Logger::Log(Logger::LogLevel::Info,
+            HE_LOG_INFO(Tool, "%s",
                 ("AnimationClipImporter: " + sourcePath.filename().string() + " -> "
                  + clip->path + " (" + std::to_string(clip->channels.size())
                  + " channels, " + std::to_string(clip->duration) + "s)").c_str());
