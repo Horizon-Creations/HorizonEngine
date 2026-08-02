@@ -142,6 +142,19 @@ public:
 		m_onRemoteTransform = std::move(fn);
 	}
 
+	// ── Component edits ──
+	// Publish the full component state of the entity we hold, when it changed.
+	// Cheap to call every frame: an unchanged entity sends nothing.
+	void publishComponents(std::uint32_t entityHandle,
+	                       const std::vector<std::uint8_t>& blob);
+
+	// A peer edited an entity's components; the editor applies the blob.
+	void onRemoteComponents(
+		std::function<void(std::uint32_t, const std::vector<std::uint8_t>&)> fn)
+	{
+		m_onRemoteComponents = std::move(fn);
+	}
+
 	// ── Structural replication ──
 	// Peers assign ECS handles independently, so a raw handle names different
 	// entities on different machines. Everything network-facing therefore uses a
@@ -307,6 +320,12 @@ private:
 
 	std::function<std::uint32_t(std::uint32_t, const std::vector<std::uint8_t>&)>
 		m_onRemoteCreate;
+	std::function<void(std::uint32_t, const std::vector<std::uint8_t>&)>
+		m_onRemoteComponents;
+	// Hash of the last component blob we published, so an untouched entity costs
+	// nothing per frame.
+	std::uint64_t m_lastComponentHash    = 0;
+	std::uint32_t m_lastComponentEntity  = 0;
 	std::function<void(std::uint32_t)>                m_onRemoteDestroy;
 	std::function<void(std::uint32_t, std::uint32_t)> m_onRemoteReparent;
 	// Set while applying a received asset, so writing it to disk does not bounce

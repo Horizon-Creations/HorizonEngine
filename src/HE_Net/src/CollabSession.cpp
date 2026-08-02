@@ -35,6 +35,8 @@ constexpr MessageId kMsgAssetChunk        = kFirstUserMessage + 18;
 constexpr MessageId kMsgAssetEnd          = kFirstUserMessage + 19;
 constexpr MessageId kMsgStructuralUpdate  = kFirstUserMessage + 20;  // client → host
 constexpr MessageId kMsgStructuralRelay   = kFirstUserMessage + 21;  // host → clients
+constexpr MessageId kMsgComponentsUpdate  = kFirstUserMessage + 22;  // client → host
+constexpr MessageId kMsgComponentsRelay   = kFirstUserMessage + 23;  // host → clients
 
 // Quaternion components are always in [-1, 1], so 16 bits each is ~3e-5 of
 // angular resolution — far finer than a camera gizmo can show, at a quarter the
@@ -83,6 +85,9 @@ void CollabSession::installHandlers() {
         m_net->on(kMsgStructuralUpdate, [this](ConnectionId conn, BitReader& r) {
             handleStructuralUpdate(conn, r);
         });
+        m_net->on(kMsgComponentsUpdate, [this](ConnectionId conn, BitReader& r) {
+            handleComponentsUpdate(conn, r);
+        });
     } else {
         m_net->on(kMsgJoinAccepted, [this](ConnectionId, BitReader& r) { handleJoinAccepted(r); });
         m_net->on(kMsgJoinRejected, [this](ConnectionId, BitReader& r) { handleJoinRejected(r); });
@@ -99,6 +104,9 @@ void CollabSession::installHandlers() {
         m_net->on(kMsgAssetBegin, [this](ConnectionId, BitReader& r) { handleAssetRelay(r); });
         m_net->on(kMsgStructuralRelay, [this](ConnectionId, BitReader& r) {
             handleStructuralRelay(r);
+        });
+        m_net->on(kMsgComponentsRelay, [this](ConnectionId, BitReader& r) {
+            handleComponentsRelay(r);
         });
 
         // Roster updates for peers other than ourselves.
@@ -568,6 +576,79 @@ void CollabSession::handlePresenceRelay(BitReader& r) {
 
     applyPresence(id, state);
     if (m_onPresence) m_onPresence(id, *presenceOf(id));
+}
+
+// ─── Component edits ─────────────────────────────────────────────────────────
+
+namespace {
+void writeComponentBody(BitWriter& w, std::uint64_t netId,
+                        const std::vector<std::uint8_t>& blob) {
+    w.writeUInt64(netId);
+    w.writeUInt32(static_cast<std::uint32_t>(blob.size()));
+    if (!blob.empty()) w.writeBytes(blob.data(), blob.size());
+}
+
+bool readComponentBody(BitReader& r, std::uint64_t& netId,
+                       std::vector<std::uint8_t>& blob, std::uint32_t maxBlob) {
+    std::uint32_t len = 0;
+    if (!r.readUInt64(netId) || !r.readUInt32(len)) return false;
+    if (len == 0 || len > maxBlob) return false;   // never allocate on trust
+    blob.resize(len);
+    return r.readBytes(blob.data(), len);
+}
+} // namespace
+
+bool CollabSession::sendComponents(const ComponentUpdate& update) {
+    if (!m_net || !m_joined) return false;
+    if (update.blob.empty() || update.blob.size() > m_cfg.maxSnapshotBytes) return false;
+    // The lock is what makes a wholesale overwrite safe: nobody else can be
+    // editing this entity, so nothing of theirs can be lost.
+    if (!ownsLock(update.netId)) return false;
+
+    if (m_role == NetRole::Host) {
+        BitWriter w;
+        w.writeUInt32(m_localId);
+        writeComponentBody(w, update.netId, update.blob);
+        m_net->broadcast(kMsgComponentsRelay, w);
+        return true;
+    }
+    if (m_net->connections().empty()) return false;
+
+    BitWriter w;
+    writeComponentBody(w, update.netId, update.blob);   // no id — host stamps it
+    m_net->send(m_net->connections().front(), kMsgComponentsUpdate, w);
+    return true;
+}
+
+void CollabSession::handleComponentsUpdate(ConnectionId conn, BitReader& r) {
+    const ParticipantId sender = participantForConnection(conn);
+    if (sender == kInvalidParticipant) return;
+
+    ComponentUpdate u;
+    if (!readComponentBody(r, u.netId, u.blob, m_cfg.maxSnapshotBytes)) return;
+
+    // Re-check authority on arrival rather than trusting the sender.
+    const LockInfo* lock = lockFor(u.netId);
+    if (!lock || lock->owner != sender) return;
+
+    if (m_onComponents) m_onComponents(sender, u);
+
+    BitWriter w;
+    w.writeUInt32(sender);
+    writeComponentBody(w, u.netId, u.blob);
+    for (const ConnectionId other : m_net->connections()) {
+        if (other != conn) m_net->send(other, kMsgComponentsRelay, w);
+    }
+}
+
+void CollabSession::handleComponentsRelay(BitReader& r) {
+    std::uint32_t sender = 0;
+    if (!r.readUInt32(sender)) return;
+    if (sender == m_localId) return;   // our own edit echoed back
+
+    ComponentUpdate u;
+    if (!readComponentBody(r, u.netId, u.blob, m_cfg.maxSnapshotBytes)) return;
+    if (m_onComponents) m_onComponents(sender, u);
 }
 
 // ─── Structural changes ──────────────────────────────────────────────────────

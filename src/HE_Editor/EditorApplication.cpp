@@ -309,6 +309,19 @@ void EditorApplication::OnInit()
 		return static_cast<std::uint32_t>(entt::to_integral(created));
 	});
 
+	m_collab.onRemoteComponents([this](std::uint32_t handle,
+	                                   const std::vector<std::uint8_t>& blob) {
+		if (!m_editorWorld) return;
+		const auto e = static_cast<Entity>(static_cast<entt::id_type>(handle));
+		if (!m_editorWorld->registry().valid(e)) return;
+		SceneSerializer serializer;
+		serializer.applyEntityComponents(*m_editorWorld, e, blob);
+		// Mark the transform dirty so the renderer rebuilds its matrix; other
+		// components are read fresh each frame.
+		if (auto* tc = m_editorWorld->registry().try_get<TransformComponent>(e))
+			tc->dirty = true;
+	});
+
 	m_collab.onRemoteDestroy([this](std::uint32_t handle) {
 		if (!m_editorWorld) return;
 		const auto e = static_cast<Entity>(static_cast<entt::id_type>(handle));
@@ -1821,6 +1834,22 @@ void EditorApplication::OnRender(float dt)
 					}
 
 					m_collab.publishTransform(subject, p, r, s, nowMs);
+				}
+
+				// Everything the transform delta does not cover — mesh, material,
+				// light, collider, script, name… Serializing one entity is cheap,
+				// and publishComponents hashes the result so an entity that is
+				// merely selected rather than edited sends nothing.
+				{
+					SceneSerializer serializer;
+					const std::vector<std::uint8_t> comps =
+						serializer.serializeEntityComponents(*m_editorWorld, m_selectedEntity);
+					if (!comps.empty())
+					{
+						m_collab.publishComponents(
+							static_cast<std::uint32_t>(entt::to_integral(m_selectedEntity)),
+							comps);
+					}
 				}
 			}
 		}
